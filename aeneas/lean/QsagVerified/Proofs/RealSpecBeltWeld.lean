@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 public import QsagVerified.Proofs.BeltAckProvenance
 public import Qsag.JortsBeltLatchAndQuorumSwitching
 import all Qsag.JortsBeltLatchAndQuorumSwitching

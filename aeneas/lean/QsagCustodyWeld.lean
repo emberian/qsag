@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 import Lean
 public import QsagVerified.Proofs.RealSpecGuardBoundary
 import all QsagVerified.Proofs.RealSpecGuardBoundary
@@ -6,13 +7,16 @@ public import QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld
 import all QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld
 public import QsagVerified.Proofs.RealSpecBeltWeld
 import all QsagVerified.Proofs.RealSpecBeltWeld
+public import QsagVerified.Proofs.CustodyMediation
+import all QsagVerified.Proofs.CustodyMediation
 
 /-!
 # Protocol-level weld library and its axiom census
 
 Root of the `QsagCustodyWeld` library: the welds whose statements mention the protocol
 specifications `Qsag.MirSpecBridge` and `Qsag.JortsBeltLatchAndQuorumSwitching` (RSS cut-session
-forward simulation, the velocity-guard boundary witness, and belt grants as custodian masks).
+forward simulation, the velocity-guard boundary witness, and belt grants as custodian masks),
+and the mediation statements of the two production opening rounds (`CustodyMediation`).
 It builds exactly when those `Qsag` modules and their imports do; the primitive welds in
 `QsagSpecWeld` do not depend on it.
 
@@ -42,6 +46,11 @@ export qsag_verified.proofs (
   extractedRssCut_inherits_spec_trace_safety
   tooth_extractedRssCut_nonzero_residual_rejected
   tooth_velocity_used_nonce_model_is_not_monotone_nonce
+  sigma_release_iff
+  sigma_release_permit
+  plane_open_release_iff
+  tooth_opening_wrong_context_refused
+  tooth_sigma_nonzero_lane_refused
 )
 end QsagMirProofs
 
@@ -54,13 +63,17 @@ run_cmd do
   let requiredModules := [
     "QsagVerified.Proofs.RealSpecBeltWeld",
     "QsagVerified.Proofs.RealSpecGuardBoundary",
-    "QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld"]
+    "QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld",
+    "QsagVerified.Proofs.CustodyMediation"]
   let requiredTheorems : List Name := [
     ``qsag_verified.proofs.belt_grant_refines_qsag_mask,
     ``qsag_verified.proofs.belt_quorum_intersection_refines_qsag,
     ``qsag_verified.proofs.belt_validated_grant_refines_qsag_mask,
     ``qsag_verified.proofs.extractedRssCut_inherits_spec_trace_safety,
-    ``qsag_verified.proofs.tooth_velocity_used_nonce_model_is_not_monotone_nonce]
+    ``qsag_verified.proofs.tooth_velocity_used_nonce_model_is_not_monotone_nonce,
+    ``qsag_verified.proofs.sigma_release_iff,
+    ``qsag_verified.proofs.plane_open_release_iff,
+    ``qsag_verified.proofs.tooth_opening_wrong_context_refused]
   for name in requiredTheorems do
     match env.find? name with
     | some (.thmInfo _) => pure ()
