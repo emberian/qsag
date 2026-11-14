@@ -500,3 +500,615 @@ fn compose(planes: &[Sh]) -> Sh {
 /// `entropy` must be fresh secret randomness. All `n` custodians must run
 /// this with the same `config` over a transport whose party positions follow
 /// the ascending order of `config.party_ids`.
+pub fn threshold_mldsa_dkg_party<T: MpcTransport>(
+    config: &ThresholdMlDsaDkgConfig,
+    party_id: u16,
+    entropy: &[u8; 32],
+    net: &mut T,
+) -> Result<ThresholdMlDsaSignerShare, ThresholdMlDsaError> {
+    let ids = config.validate()?;
+    let me = ids
+        .iter()
+        .position(|&id| id == party_id)
+        .ok_or(ThresholdMlDsaError::DuplicateOrUnknownParty { party_id })?;
+    let params = config.level.params();
+    let structure = Structure::new(ids.len(), config.threshold)?;
+    let context = cshake256_framed_32(
+        b"QSAG.TMLDSA.DKG.CTX.V1",
+        &[
+            &config.session_id,
+            &ids_bytes(&ids),
+            &[config.threshold as u8, params.k as u8, params.ell as u8],
+        ],
+    );
+    let mut engine = Engine::setup(net, structure.clone(), me, &context, entropy)?;
+
+    engine.set_phase(PHASE_DKG_COIN);
+    let coin = engine.rand(16)?;
+    let coin = engine.open(&[&coin])?;
+    let rho = cshake256_framed_32(
+        b"QSAG.TMLDSA.DKG.RHO.V1",
+        &[
+            &context,
+            &coin[0]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        ],
+    );
+
+    engine.set_phase(PHASE_DKG_SAMPLE);
+    let need = (params.ell + params.k) * MLDSA_N;
+    let candidates = need + need / 8 + 96;
+    let bits = engine.rand_bits(4 * candidates)?;
+    let b: Vec<Sh> = (0..4)
+        .map(|i| bits.slice(i * candidates, candidates))
+        .collect();
+    let first = engine.mul(
+        &Sh::concat(&[&b[0], &b[1], &b[2]]),
+        &Sh::concat(&[&b[1], &b[2], &b[3]]),
+    )?;
+    let p01 = first.slice(0, candidates);
+    let p12 = first.slice(candidates, candidates);
+    let p23 = first.slice(2 * candidates, candidates);
+    let or12 = b[1].add(&b[2]).sub(&p12);
+    let or01 = b[0].add(&b[1]).sub(&p01);
+    let second = engine.mul(
+        &Sh::concat(&[&b[3], &b[2], &p01]),
+        &Sh::concat(&[&or12, &or01, &p23]),
+    )?;
+    let at_least_10 = second.slice(0, candidates);
+    let low_part = second.slice(candidates, candidates);
+    let is_15 = second.slice(2 * candidates, candidates);
+    let at_least_5 = b[3].add(&low_part).sub(&engine.mul(&b[3], &low_part)?);
+    // coefficient = 2 - (nibble mod 5)
+    let coefficient = engine
+        .public_const(2, candidates)?
+        .sub(&compose(&b))
+        .add(&at_least_5.add(&at_least_10).scale(5));
+    let flags = engine.open(&[&is_15])?;
+    require_bits(&flags[0])?;
+    let accepted: Vec<usize> = (0..candidates)
+        .filter(|&i| flags[0][i] == 0)
+        .take(need)
+        .collect();
+    if accepted.len() < need {
+        return Err(ThresholdMlDsaError::KeySamplingShortfall);
+    }
+    let secret = coefficient.gather(&accepted);
+
+    let a_hat = expand_a_ntt(&params, &rho);
+    let split = params.ell * MLDSA_N;
+    let mut t_share = engine.zeros(params.k * MLDSA_N)?;
+    let mut subsets = Vec::with_capacity(engine.comps().len());
+    for (i, &subset) in engine.comps().iter().enumerate() {
+        let s1_hat = ntt_all(to_polys(&secret.c[i][..split]));
+        let s2 = to_polys(&secret.c[i][split..]);
+        let product = inv_ntt_all(mat_vec_mul_ntt(&a_hat, &s1_hat));
+        let t: Vec<Poly256> = product.iter().zip(&s2).map(|(p, e)| p.add(e)).collect();
+        t_share.c[i] = flatten(&t);
+        subsets.push(SubsetShare {
+            holders: structure.subsets[subset],
+            s1_hat,
+            s2_hat: ntt_all(s2),
+        });
+    }
+
+    engine.set_phase(PHASE_DKG_PUBLIC_KEY);
+    let t = to_polys(&engine.open(&[&t_share])?[0]);
+    let t1: Vec<Poly256> = t
+        .iter()
+        .map(|poly| {
+            let mut high = Poly256::zero();
+            for (out, &value) in high.coeffs.iter_mut().zip(&poly.coeffs) {
+                *out = power2round(value).0;
+            }
+            high
+        })
+        .collect();
+    let pk_bytes = pk_encode(&params, &rho, &t1);
+    let confirmation = cshake256_framed_32(
+        b"QSAG.TMLDSA.DKG.CONFIRM.V1",
+        &[
+            &context,
+            &pk_bytes,
+            &flatten(&t)
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<u8>>(),
+        ],
+    );
+    engine.confirm(&confirmation)?;
+
+    Ok(ThresholdMlDsaSignerShare {
+        party_id,
+        pack: ThresholdVerificationPack {
+            level: config.level,
+            threshold: config.threshold,
+            party_ids: ids,
+            rho,
+            pk_bytes,
+            t,
+        },
+        subsets,
+        next_epoch: 0,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Signing
+// ---------------------------------------------------------------------------
+
+/// Public parameters of one signing session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThresholdSignSession {
+    pub session_id: [u8; 32],
+    /// At least `2t - 1` distinct custodians. Transport positions follow the
+    /// ascending order of this list.
+    pub quorum: Vec<u16>,
+}
+
+/// A standard signature and the cost of producing it, for one party.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThresholdSignOutput {
+    pub signature: Vec<u8>,
+    pub attempts: u32,
+    pub stats: MpcStats,
+}
+
+/// `HighBits` of the hidden value `opened - r mod q`, where the hidden value
+/// is `w + gamma2 - 1 mod q` and `r < q` is given by its 23 shared bits.
+///
+/// With `x = w + gamma2 - 1 mod q` and `alpha = 2*gamma2 = 2^11 * 93`,
+/// `HighBits(w) = floor(x / alpha)`, except that the single value
+/// `x = q - 1` (quotient 44) maps to 0.
+fn high_bits_circuit<T: MpcTransport>(
+    engine: &mut Engine<'_, T>,
+    opened: &[u32],
+    r: &[Sh],
+) -> Result<Sh, MpcError> {
+    let len = opened.len();
+    let one = engine.public_const(1, len)?;
+
+    // d = opened - r as a 23-bit two's complement number, with final borrow.
+    let mut d: Vec<Sh> = Vec::with_capacity(MASK_BITS);
+    let mut borrow: Option<Sh> = None;
+    for (i, r_bit) in r.iter().enumerate() {
+        let c_bit: Vec<u32> = opened.iter().map(|&c| (c >> i) & 1).collect();
+        let not_c: Vec<u32> = c_bit.iter().map(|&bit| 1 - bit).collect();
+        let (next, diff) = match &borrow {
+            None => {
+                let next = r_bit.mul_pub(&not_c);
+                let diff = engine.public(&c_bit)?.sub(r_bit).add(&next.scale(2));
+                (next, diff)
+            }
+            Some(b) => {
+                let both = engine.mul(r_bit, b)?;
+                let next = both
+                    .mul_pub(&c_bit)
+                    .add(&r_bit.add(b).sub(&both).mul_pub(&not_c));
+                let diff = engine.public(&c_bit)?.sub(r_bit).sub(b).add(&next.scale(2));
+                (next, diff)
+            }
+        };
+        d.push(diff);
+        borrow = Some(next);
+    }
+    let wrap = borrow.expect("23 bits");
+
+    // x = d + q * wrap modulo 2^23, with q = 2^23 - 2^13 + 1. Only bits
+    // 11..23 of x are needed. Bit 0 and the zero bits 1..13 of q ripple a
+    // carry; the ten one-bits act as a decrement by wrap - carry.
+    let mut carries = Vec::with_capacity(13);
+    carries.push(engine.mul(&d[0], &wrap)?);
+    for i in 1..13 {
+        let next = engine.mul(&d[i], &carries[i - 1])?;
+        carries.push(next);
+    }
+    let mut u: Vec<Sh> = Vec::with_capacity(12);
+    u.push(d[11].add(&carries[10]).sub(&carries[11].scale(2)));
+    u.push(d[12].add(&carries[11]).sub(&carries[12].scale(2)));
+    let mut decrement = wrap.sub(&carries[12]);
+    for bit in &d[13..MASK_BITS] {
+        let next = engine.mul(&one.sub(bit), &decrement)?;
+        u.push(bit.sub(&decrement).add(&next.scale(2)));
+        decrement = next;
+    }
+
+    // Restoring division of the 12-bit number u by 93. The quotient is below
+    // 64, so the top six bits enter the remainder without a subtraction.
+    const DIVISOR_BITS: [u32; 8] = [1, 0, 1, 1, 1, 0, 1, 0];
+    let mut remainder: Vec<Sh> = u[6..12].to_vec();
+    remainder.push(engine.zeros(len)?);
+    let mut quotient: Vec<Sh> = Vec::with_capacity(6);
+    for i in (0..6).rev() {
+        let mut a: Vec<Sh> = Vec::with_capacity(8);
+        a.push(u[i].clone());
+        a.append(&mut remainder);
+        let mut borrow: Option<Sh> = None;
+        let mut difference: Vec<Sh> = Vec::with_capacity(8);
+        for (a_bit, &k_bit) in a.iter().zip(&DIVISOR_BITS) {
+            let next = match (&borrow, k_bit) {
+                (None, 0) => None,
+                (None, _) => Some(one.sub(a_bit)),
+                (Some(b), 0) => Some(b.sub(&engine.mul(a_bit, b)?)),
+                (Some(b), _) => Some(one.sub(a_bit).add(&engine.mul(a_bit, b)?)),
+            };
+            let mut bit = a_bit.sub(&engine.public_const(k_bit, len)?);
+            if let Some(b) = &borrow {
+                bit = bit.sub(b);
+            }
+            if let Some(n) = &next {
+                bit = bit.add(&n.scale(2));
+            }
+            difference.push(bit);
+            borrow = next;
+        }
+        let at_least = one.sub(&borrow.expect("divisor has a one bit"));
+        let deltas: Vec<Sh> = difference
+            .iter()
+            .zip(&a)
+            .take(7)
+            .map(|(s, a_bit)| s.sub(a_bit))
+            .collect();
+        let delta_refs: Vec<&Sh> = deltas.iter().collect();
+        let selected = engine.mul(&Sh::concat(&delta_refs), &at_least.repeat(7))?;
+        remainder = (0..7)
+            .map(|j| a[j].add(&selected.slice(j * len, len)))
+            .collect();
+        quotient.push(at_least);
+    }
+    // quotient[0] is bit 5. 44 = 0b101100 is the only reachable value with
+    // bits 5, 3 and 2 set.
+    let top = engine.mul(&quotient[0], &quotient[2])?;
+    let is_44 = engine.mul(&top, &quotient[3])?;
+    let mut value = is_44.scale(MLDSA_Q - 44);
+    for (index, bit) in quotient.iter().enumerate() {
+        value = value.add(&bit.scale(1 << (5 - index)));
+    }
+    Ok(value)
+}
+
+/// The single acceptance bit of an attempt: every coefficient of `z` lies in
+/// `(-z_bound, z_bound)` and every coefficient of `low` lies in
+/// `(-low_bound, low_bound)`, centred modulo `q`. `masks` are uniform shared
+/// values below `q` with bit planes `planes`, one per coefficient (`z`
+/// first). Opens the uniformly masked inputs, then only "all inside or not".
+fn rejection_verdict<T: MpcTransport>(
+    engine: &mut Engine<'_, T>,
+    (z, z_bound): (&Sh, u32),
+    (low, low_bound): (&Sh, u32),
+    masks: &Sh,
+    planes: &[Sh],
+) -> Result<bool, MpcError> {
+    let z_len = z.len();
+    let low_len = low.len();
+    let shifted = Sh::concat(&[
+        &z.add(&engine.public_const(z_bound - 1, z_len)?),
+        &low.add(&engine.public_const(low_bound - 1, low_len)?),
+    ]);
+    let opened = engine.open(&[&shifted.add(masks)])?.remove(0);
+    let mut widths = vec![2 * z_bound - 1; z_len];
+    widths.extend_from_slice(&vec![2 * low_bound - 1; low_len]);
+    let inside = masked_range_test(engine, &opened, &widths, planes)?;
+    let failures = engine.public_const(1, z_len + low_len)?.sub(&inside).sum();
+    let blind = engine.rand(EXT_DEGREE)?;
+    let verdict = engine.mul(&blind, &failures.repeat(EXT_DEGREE))?;
+    let verdict = engine.open(&[&verdict])?;
+    Ok(verdict[0].iter().all(|&v| v == 0))
+}
+
+struct SessionKey {
+    s1_hat: Vec<Vec<Poly256>>,
+    s2_hat: Vec<Vec<Poly256>>,
+}
+
+impl Drop for SessionKey {
+    fn drop(&mut self) {
+        for poly in self.s1_hat.iter_mut().chain(&mut self.s2_hat).flatten() {
+            poly.zeroize();
+        }
+    }
+}
+
+/// Re-expresses the long-term components over the session's subsets. Each
+/// long-term subset is assigned to the first session subset it contains, so
+/// every member of that session subset holds it and no communication is
+/// needed. A component hidden from a coalition stays hidden.
+fn session_key(
+    share: &ThresholdMlDsaSignerShare,
+    quorum: &[u16],
+    structure: &Structure,
+    comps: &[usize],
+    params: &MlDsaParams,
+) -> Result<SessionKey, ThresholdMlDsaError> {
+    let mut key = SessionKey {
+        s1_hat: vec![vec![Poly256::zero(); params.ell]; comps.len()],
+        s2_hat: vec![vec![Poly256::zero(); params.k]; comps.len()],
+    };
+    for subset in &share.subsets {
+        let mut present = 0u32;
+        for (position, id) in quorum.iter().enumerate() {
+            let global = share
+                .pack
+                .party_ids
+                .iter()
+                .position(|p| p == id)
+                .expect("validated quorum");
+            if (subset.holders >> global) & 1 == 1 {
+                present |= 1 << position;
+            }
+        }
+        let target = structure
+            .subsets
+            .iter()
+            .position(|&mask| mask & present == mask)
+            .ok_or(ThresholdMlDsaError::ProtocolInvariantViolated)?;
+        if let Some(i) = comps.iter().position(|&c| c == target) {
+            for (acc, poly) in key.s1_hat[i].iter_mut().zip(&subset.s1_hat) {
+                *acc = acc.add(poly);
+            }
+            for (acc, poly) in key.s2_hat[i].iter_mut().zip(&subset.s2_hat) {
+                *acc = acc.add(poly);
+            }
+        }
+    }
+    Ok(key)
+}
+
+/// Runs one custodian's side of a signing session and returns a standard
+/// FIPS 204 signature.
+///
+/// `entropy` must be fresh secret randomness for this session. The quorum
+/// must contain at least `2t - 1` custodians.
+pub fn threshold_sign_mldsa_party<T: MpcTransport>(
+    share: &mut ThresholdMlDsaSignerShare,
+    session: &ThresholdSignSession,
+    msg: &[u8],
+    ctx: &[u8],
+    entropy: &[u8; 32],
+    burn: &mut dyn NonceBurnPersistence,
+    net: &mut T,
+) -> Result<ThresholdSignOutput, ThresholdMlDsaError> {
+    let level = share.pack.level;
+    let threshold = share.pack.threshold;
+    check_parameters(level, threshold, share.pack.party_ids.len())?;
+    let params = level.params();
+    let quorum = sorted_distinct(&session.quorum)?;
+    if let Some(&unknown) = quorum.iter().find(|id| !share.pack.party_ids.contains(id)) {
+        return Err(ThresholdMlDsaError::DuplicateOrUnknownParty { party_id: unknown });
+    }
+    let me = quorum.iter().position(|&id| id == share.party_id).ok_or(
+        ThresholdMlDsaError::DuplicateOrUnknownParty {
+            party_id: share.party_id,
+        },
+    )?;
+    if quorum.len() < 2 * threshold - 1 {
+        return Err(ThresholdMlDsaError::QuorumTooSmall {
+            have: quorum.len(),
+            need: 2 * threshold - 1,
+        });
+    }
+    let mu = compute_fips204_mu(&share.pack.pk_bytes, msg, ctx)
+        .ok_or(ThresholdMlDsaError::ContextTooLong)?;
+    let structure = Structure::new(quorum.len(), threshold)?;
+    let context = cshake256_framed_32(
+        b"QSAG.TMLDSA.SIGN.CTX.V1",
+        &[
+            &session.session_id,
+            &share.pack.pk_bytes,
+            &mu,
+            &ids_bytes(&quorum),
+            &[threshold as u8],
+        ],
+    );
+    let hedged = cshake256_framed_32(
+        b"QSAG.TMLDSA.SIGN.ENTROPY.V1",
+        &[entropy, &share.custody_digest(), &context],
+    );
+    let mut engine = Engine::setup(net, structure.clone(), me, &context, &hedged)?;
+    let key = session_key(share, &quorum, &structure, engine.comps(), &params)?;
+    let comps = engine.comps().len();
+
+    let a_hat = expand_a_ntt(&params, &share.pack.rho);
+    let mut t0_hat = Vec::with_capacity(params.k);
+    let mut t1_scaled_hat = Vec::with_capacity(params.k);
+    for poly in &share.pack.t {
+        let mut low = Poly256::zero();
+        let mut high = Poly256::zero();
+        for ((lo, hi), &value) in low
+            .coeffs
+            .iter_mut()
+            .zip(&mut high.coeffs)
+            .zip(&poly.coeffs)
+        {
+            let (t1, t0) = power2round(value);
+            *lo = t0;
+            *hi = (t1 << MLDSA_D) % MLDSA_Q;
+        }
+        low.ntt();
+        high.ntt();
+        t0_hat.push(low);
+        t1_scaled_hat.push(high);
+    }
+
+    let gamma1 = params.gamma1;
+    let gamma2 = params.gamma2;
+    let alpha = 2 * gamma2;
+    let y_bits = (gamma1.trailing_zeros() + 1) as usize;
+    let z_len = params.ell * MLDSA_N;
+    let w_len = params.k * MLDSA_N;
+    let masks_needed = 2 * w_len + z_len;
+    let masks = masks_needed + SPARE_MASKS;
+
+    for attempt in 0..DEFAULT_MAX_REJECTION_ATTEMPTS {
+        let epoch = share.next_epoch;
+        share.next_epoch = epoch
+            .checked_add(1)
+            .ok_or(ThresholdMlDsaError::NoncePersistenceFailed)?;
+        if !burn.reserve(share.party_id, epoch, &session.session_id, attempt) {
+            return Err(ThresholdMlDsaError::NoncePersistenceFailed);
+        }
+
+        // Phase 1: the mask y and the conversion masks.
+        engine.set_phase(PHASE_SIGN_MASKS);
+        let bits = engine.rand_bits(y_bits * z_len + MASK_BITS * masks)?;
+        let y_planes: Vec<Sh> = (0..y_bits).map(|i| bits.slice(i * z_len, z_len)).collect();
+        let y = engine.public_const(gamma1, z_len)?.sub(&compose(&y_planes));
+        let planes: Vec<Sh> = (0..MASK_BITS)
+            .map(|i| bits.slice(y_bits * z_len + i * masks, masks))
+            .collect();
+        let in_field = less_than_public(&mut engine, &planes, &vec![MLDSA_Q; masks])?;
+        let flags = engine.open(&[&in_field])?;
+        require_bits(&flags[0])?;
+        let usable: Vec<usize> = (0..masks)
+            .filter(|&i| flags[0][i] == 1)
+            .take(masks_needed)
+            .collect();
+        if usable.len() < masks_needed {
+            continue;
+        }
+        let mask_values = compose(&planes);
+        let (high_idx, rest) = usable.split_at(w_len);
+        let (z_idx, low_idx) = rest.split_at(z_len);
+
+        let mut w = engine.zeros(w_len)?;
+        for i in 0..comps {
+            let y_hat = ntt_all(to_polys(&y.c[i]));
+            w.c[i] = flatten(&inv_ntt_all(mat_vec_mul_ntt(&a_hat, &y_hat)));
+        }
+        let shifted = w.add(&engine.public_const(gamma2 - 1, w_len)?);
+        let opened_w = engine.open(&[&shifted.add(&mask_values.gather(high_idx))])?;
+
+        // Phase 2: HighBits(w).
+        engine.set_phase(PHASE_SIGN_HIGH_BITS);
+        let high_planes: Vec<Sh> = planes.iter().map(|plane| plane.gather(high_idx)).collect();
+        let w1_share = high_bits_circuit(&mut engine, &opened_w[0], &high_planes)?;
+        let w1 = engine.open(&[&w1_share])?.remove(0);
+        if w1.iter().any(|&v| v >= 44) {
+            return Err(ThresholdMlDsaError::ProtocolInvariantViolated);
+        }
+        let w1_polys = to_polys(&w1);
+        let mut c_tilde = vec![0u8; params.c_tilde_bytes];
+        let mut xof = Shake256::new();
+        xof.absorb(&mu);
+        xof.absorb(&w1_encode(&params, &w1_polys));
+        xof.finalize(0x1F);
+        xof.squeeze(&mut c_tilde);
+        let mut c_hat = sample_in_ball(&c_tilde, params.tau);
+        c_hat.ntt();
+        let ct0 = to_polys(&challenge_times(&c_hat, &t0_hat));
+        if ct0.iter().any(|poly| poly.inf_norm() >= gamma2) {
+            continue;
+        }
+
+        // Phase 3: the joint rejection bit.
+        engine.set_phase(PHASE_SIGN_REJECTION);
+        let mut z = engine.zeros(z_len)?;
+        let mut low = engine.zeros(w_len)?;
+        for i in 0..comps {
+            let cs1 = challenge_times(&c_hat, &key.s1_hat[i]);
+            let cs2 = challenge_times(&c_hat, &key.s2_hat[i]);
+            z.c[i] = y.c[i]
+                .iter()
+                .zip(&cs1)
+                .map(|(&a, &b)| fq_add(a, b))
+                .collect();
+            low.c[i] = w.c[i]
+                .iter()
+                .zip(&cs2)
+                .map(|(&a, &b)| fq_sub(a, b))
+                .collect();
+        }
+        let w1_alpha: Vec<u32> = w1.iter().map(|&v| v * alpha).collect();
+        let low = low.sub(&engine.public(&w1_alpha)?);
+        let z_bound = gamma1 - params.beta;
+        let low_bound = gamma2 - params.beta;
+        let test_idx: Vec<usize> = z_idx.iter().chain(low_idx).copied().collect();
+        let test_planes: Vec<Sh> = planes.iter().map(|plane| plane.gather(&test_idx)).collect();
+        let accepted = rejection_verdict(
+            &mut engine,
+            (&z, z_bound),
+            (&low, low_bound),
+            &mask_values.gather(&test_idx),
+            &test_planes,
+        )?;
+        if !accepted {
+            continue;
+        }
+
+        // Phase 4: release z.
+        engine.set_phase(PHASE_SIGN_RELEASE);
+        let z_public = to_polys(&engine.open(&[&z])?[0]);
+        if z_public.iter().any(|poly| poly.inf_norm() >= z_bound) {
+            return Err(ThresholdMlDsaError::ProtocolInvariantViolated);
+        }
+        let az_hat = mat_vec_mul_ntt(&a_hat, &ntt_all(z_public.clone()));
+        let mut hints = vec![[0u8; MLDSA_N]; params.k];
+        let mut weight = 0usize;
+        let mut consistent = true;
+        for (row, hint_row) in hints.iter_mut().enumerate() {
+            let mut approx = az_hat[row].sub(&c_hat.pointwise_mul(&t1_scaled_hat[row]));
+            approx.inv_ntt();
+            for (j, hint) in hint_row.iter_mut().enumerate() {
+                let target = w1_polys[row].coeffs[j];
+                *hint = (high_bits_ct(approx.coeffs[j], gamma2) != target) as u8;
+                weight += *hint as usize;
+                consistent &= use_hint(*hint, approx.coeffs[j], gamma2) == target;
+            }
+        }
+        if !consistent {
+            return Err(ThresholdMlDsaError::ProtocolInvariantViolated);
+        }
+        if weight > params.omega {
+            continue;
+        }
+        let signature = sig_encode(&params, &c_tilde, &z_public, &hints);
+        if !ml_dsa_verify(level, &share.pack.pk_bytes, msg, ctx, &signature) {
+            return Err(ThresholdMlDsaError::SignatureVerificationFailed);
+        }
+        return Ok(ThresholdSignOutput {
+            signature,
+            attempts: attempt + 1,
+            stats: engine.stats(),
+        });
+    }
+    Err(ThresholdMlDsaError::RejectionBudgetExhausted {
+        attempts: DEFAULT_MAX_REJECTION_ATTEMPTS,
+    })
+}
+
+/// A policy release for one signing session.
+pub struct ThresholdPolicyGate<'a> {
+    pub token: AuthorizedSignReleaseToken,
+    pub expected_intent_digest: &'a [u8; 32],
+    pub quorum: &'a [u16],
+}
+
+/// Policy-gated signing: the session identifier, message, context and quorum
+/// must match an [`AuthorizedSignReleaseToken`] minted by the policy layer.
+pub fn threshold_sign_mldsa_party_policy_gated<T: MpcTransport>(
+    share: &mut ThresholdMlDsaSignerShare,
+    gate: ThresholdPolicyGate<'_>,
+    msg: &[u8],
+    ctx: &[u8],
+    entropy: &[u8; 32],
+    burn: &mut dyn NonceBurnPersistence,
+    net: &mut T,
+) -> Result<ThresholdSignOutput, ThresholdMlDsaError> {
+    let key_id = share.pack.policy_signing_key_id();
+    if !gate.token.matches_signing(&key_id, msg, ctx, gate.quorum)
+        || !ct_eq_bytes(gate.token.intent_digest(), gate.expected_intent_digest)
+    {
+        return Err(ThresholdMlDsaError::PolicyTokenDigestMismatch);
+    }
+    let session = ThresholdSignSession {
+        session_id: *gate.token.session_id(),
+        quorum: gate.quorum.to_vec(),
+    };
+    threshold_sign_mldsa_party(share, &session, msg, ctx, entropy, burn, net)
+}
+
+#[cfg(test)]
+#[path = "threshold_mldsa_tests.rs"]
+mod tests;

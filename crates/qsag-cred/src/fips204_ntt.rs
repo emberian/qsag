@@ -626,3 +626,649 @@ fn unpack_z_poly(params: &MlDsaParams, src: &[u8]) -> Poly256 {
 }
 
 /// FIPS 204 `sigEncode(c_tilde, z, hints)` (`Algorithm 26`) -> exact `2420` / `3309` / `4627` bytes!
+pub fn sig_encode(
+    params: &MlDsaParams,
+    c_tilde: &[u8],
+    z: &[Poly256],
+    hints: &[[u8; MLDSA_N]],
+) -> Vec<u8> {
+    assert_eq!(c_tilde.len(), params.c_tilde_bytes);
+    assert_eq!(z.len(), params.ell);
+    assert_eq!(hints.len(), params.k);
+
+    let mut out = vec![0u8; params.sig_bytes];
+    out[0..params.c_tilde_bytes].copy_from_slice(c_tilde);
+    let mut off = params.c_tilde_bytes;
+    for poly in z {
+        pack_z_poly(params, poly, &mut out[off..off + params.z_poly_bytes]);
+        off += params.z_poly_bytes;
+    }
+
+    // `HintBitPack` (`Algorithm 20`):
+    let hint_buf = &mut out[off..];
+    let mut cursor = 0usize;
+    for (row_idx, h_row) in hints.iter().enumerate() {
+        for (j, &bit) in h_row.iter().enumerate() {
+            if bit != 0 {
+                hint_buf[cursor] = j as u8;
+                cursor += 1;
+            }
+        }
+        hint_buf[params.omega + row_idx] = cursor as u8;
+    }
+    out
+}
+
+/// `(c_tilde, z, hints)` of a decoded signature.
+pub type DecodedSignature = (Vec<u8>, Vec<Poly256>, Vec<[u8; MLDSA_N]>);
+
+/// FIPS 204 `sigDecode(sig)` (`Algorithm 27` + strict `HintBitUnpack` `Algorithm 21` validation!).
+pub fn sig_decode(params: &MlDsaParams, sig: &[u8]) -> Option<DecodedSignature> {
+    if sig.len() != params.sig_bytes {
+        return None;
+    }
+    let c_tilde = sig[0..params.c_tilde_bytes].to_vec();
+    let mut off = params.c_tilde_bytes;
+    let mut z = Vec::with_capacity(params.ell);
+    for _ in 0..params.ell {
+        z.push(unpack_z_poly(params, &sig[off..off + params.z_poly_bytes]));
+        off += params.z_poly_bytes;
+    }
+
+    // Strict `HintBitUnpack` (`Algorithm 21`): rejects unsorted indices, `count > omega`, or nonzero padding!
+    let y = &sig[off..];
+    let mut hints = vec![[0u8; MLDSA_N]; params.k];
+    let mut k_idx = 0usize;
+    for (i, h_row) in hints.iter_mut().enumerate() {
+        let end = y[params.omega + i] as usize;
+        if end < k_idx || end > params.omega {
+            return None;
+        }
+        let mut first = k_idx;
+        while first < end {
+            if first > k_idx && y[first] <= y[first - 1] {
+                return None;
+            }
+            h_row[y[first] as usize] = 1;
+            first += 1;
+        }
+        k_idx = end;
+    }
+    for &pad_byte in &y[k_idx..params.omega] {
+        if pad_byte != 0 {
+            return None;
+        }
+    }
+    Some((c_tilde, z, hints))
+}
+
+/// Compute FIPS 204 message representative $\mu = \text{SHAKE256}(\text{tr} \| [0, |\text{ctx}|] \| \text{ctx} \| M, 64)$
+/// where $\text{tr} = \text{SHAKE256}(\text{pk}, 64)$.
+pub fn compute_fips204_mu(pk_bytes: &[u8], msg: &[u8], ctx: &[u8]) -> Option<[u8; 64]> {
+    if ctx.len() > 255 {
+        return None;
+    }
+    let mut tr = [0u8; 64];
+    let mut sp_tr = Shake256::new();
+    sp_tr.absorb(pk_bytes);
+    sp_tr.finalize(0x1F);
+    sp_tr.squeeze(&mut tr);
+
+    let mut sp_mu = Shake256::new();
+    sp_mu.absorb(&tr);
+    sp_mu.absorb(&[0x00, ctx.len() as u8]);
+    sp_mu.absorb(ctx);
+    sp_mu.absorb(msg);
+    sp_mu.finalize(0x1F);
+    let mut mu = [0u8; 64];
+    sp_mu.squeeze(&mut mu);
+    Some(mu)
+}
+
+/// Standalone **100% Standard NIST `FIPS 204` `ML-DSA.Verify`** (`Algorithm 3` + `Algorithm 8`)!
+/// Accepts standard `(pk_bytes, msg, ctx, sig_bytes)` with zero threshold-specific modifications.
+pub fn ml_dsa_verify(
+    level: MlDsaLevel,
+    pk_bytes: &[u8],
+    msg: &[u8],
+    ctx: &[u8],
+    sig_bytes: &[u8],
+) -> bool {
+    let params = level.params();
+    let Some((rho, t1)) = pk_decode(&params, pk_bytes) else {
+        return false;
+    };
+    let Some((c_tilde, z, hints)) = sig_decode(&params, sig_bytes) else {
+        return false;
+    };
+
+    // 1. Check `||z||_inf < gamma1 - beta`
+    let z_bound = params.gamma1 - params.beta;
+    for z_poly in &z {
+        if z_poly.inf_norm() >= z_bound {
+            return false;
+        }
+    }
+
+    let Some(mu) = compute_fips204_mu(pk_bytes, msg, ctx) else {
+        return false;
+    };
+
+    // 2. Expand `A_hat`, `c = SampleInBall(c_tilde)`, `c_hat = NTT(c)`
+    let a_hat = expand_a_ntt(&params, &rho);
+    let mut c_hat = sample_in_ball(&c_tilde, params.tau);
+    c_hat.ntt();
+
+    let mut z_hat = z;
+    for p in &mut z_hat {
+        p.ntt();
+    }
+    let az_hat = mat_vec_mul_ntt(&a_hat, &z_hat);
+
+    // 3. Compute `w'_approx = NTT^{-1}(A_hat * z_hat - c_hat * NTT(t1 * 2^d))` and `w'_1 = UseHint(h, w'_approx)`
+    let mut w1_prime = Vec::with_capacity(params.k);
+    for (row, hint_row) in hints.iter().enumerate() {
+        let mut t1_scaled = Poly256::zero();
+        for (out, &value) in t1_scaled.coeffs.iter_mut().zip(&t1[row].coeffs) {
+            *out = (value << MLDSA_D) % MLDSA_Q;
+        }
+        t1_scaled.ntt();
+        let ct1_hat = c_hat.pointwise_mul(&t1_scaled);
+        let mut w_approx = az_hat[row].sub(&ct1_hat);
+        w_approx.inv_ntt();
+
+        let mut w1_row = Poly256::zero();
+        for ((out, &hint), &value) in w1_row.coeffs.iter_mut().zip(hint_row).zip(&w_approx.coeffs) {
+            *out = use_hint(hint, value, params.gamma2);
+        }
+        w1_prime.push(w1_row);
+    }
+
+    // 4. Recompute `c_tilde' = SHAKE256(mu || w1Encode(w'_1), c_tilde_bytes)` and compare in constant time!
+    let w1_bytes = w1_encode(&params, &w1_prime);
+    let mut sp_c = Shake256::new();
+    sp_c.absorb(&mu);
+    sp_c.absorb(&w1_bytes);
+    sp_c.finalize(0x1F);
+    let mut c_prime = vec![0u8; params.c_tilde_bytes];
+    sp_c.squeeze(&mut c_prime);
+
+    ct_eq_bytes(&c_tilde, &c_prime)
+}
+
+/// Expanded private signing material. Secret polynomials stay in the NTT domain.
+pub struct MlDsaSigningKey {
+    level: MlDsaLevel,
+    rho: [u8; 32],
+    key: SecretBytes<32>,
+    public_key: Vec<u8>,
+    s1: SecretPolys,
+    s2: SecretPolys,
+    t0: SecretPolys,
+}
+
+impl core::fmt::Debug for MlDsaSigningKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MlDsaSigningKey")
+            .field("level", &self.level)
+            .field("secret", &"<REDACTED>")
+            .finish()
+    }
+}
+
+struct SecretBytes<const N: usize>([u8; N]);
+impl<const N: usize> Drop for SecretBytes<N> {
+    fn drop(&mut self) {
+        qsag_accel::ct::ct_zeroize_bytes(&mut self.0);
+    }
+}
+struct SecretPolys(Vec<Poly256>);
+impl Drop for SecretPolys {
+    fn drop(&mut self) {
+        for p in &mut self.0 {
+            p.zeroize();
+        }
+    }
+}
+impl Drop for MlDsaSigningKey {
+    fn drop(&mut self) {
+        qsag_accel::ct::ct_zeroize_bytes(&mut self.key.0);
+        for poly in self
+            .s1
+            .0
+            .iter_mut()
+            .chain(&mut self.s2.0)
+            .chain(&mut self.t0.0)
+        {
+            poly.zeroize();
+        }
+    }
+}
+
+fn expand_secret_poly(seed: &[u8; 64], nonce: u16, eta: u32) -> Poly256 {
+    let mut xof = Shake256::new();
+    xof.absorb(seed);
+    xof.absorb(&nonce.to_le_bytes());
+    xof.finalize(0x1f);
+    let mut poly = Poly256::zero();
+    let mut filled = 0;
+    let mut byte = SecretBytes([0; 1]);
+    while filled < MLDSA_N {
+        xof.squeeze(&mut byte.0);
+        for nibble in [byte.0[0] & 15, byte.0[0] >> 4] {
+            let valid = if eta == 2 { nibble < 15 } else { nibble < 9 };
+            if valid && filled < MLDSA_N {
+                let value = if eta == 2 {
+                    nibble as u32 % 5
+                } else {
+                    nibble as u32
+                };
+                poly.coeffs[filled] = fq_sub(eta, value);
+                filled += 1;
+            }
+        }
+    }
+    poly
+}
+
+/// Deterministic seeded FIPS 204 key generation. The caller supplies an unpredictable seed.
+pub fn ml_dsa_keygen_from_seed(level: MlDsaLevel, seed: &[u8; 32]) -> (Vec<u8>, MlDsaSigningKey) {
+    let params = level.params();
+    let mut expanded = SecretBytes([0; 128]);
+    let mut xof = Shake256::new();
+    xof.absorb(seed);
+    xof.absorb(&[params.k as u8, params.ell as u8]);
+    xof.finalize(0x1f);
+    xof.squeeze(&mut expanded.0);
+    let mut rho = [0; 32];
+    rho.copy_from_slice(&expanded.0[..32]);
+    let mut private_seed = SecretBytes([0; 64]);
+    private_seed.0.copy_from_slice(&expanded.0[32..96]);
+    let mut key = SecretBytes([0; 32]);
+    key.0.copy_from_slice(&expanded.0[96..]);
+    let mut s1 = SecretPolys(
+        (0..params.ell)
+            .map(|index| expand_secret_poly(&private_seed.0, index as u16, params.eta))
+            .collect(),
+    );
+    let mut s2 = SecretPolys(
+        (0..params.k)
+            .map(|index| {
+                expand_secret_poly(&private_seed.0, (params.ell + index) as u16, params.eta)
+            })
+            .collect(),
+    );
+    for poly in s1.0.iter_mut().chain(&mut s2.0) {
+        poly.ntt();
+    }
+    let matrix = expand_a_ntt(&params, &rho);
+    let mut t = SecretPolys(mat_vec_mul_ntt(&matrix, &s1.0));
+    let mut t1 = Vec::with_capacity(params.k);
+    let mut t0 = SecretPolys(Vec::with_capacity(params.k));
+    for (row, error) in t.0.iter_mut().zip(&s2.0) {
+        *row = row.add(error);
+        row.inv_ntt();
+        let mut high = Poly256::zero();
+        let mut low = Poly256::zero();
+        for ((hi, lo), &value) in high.coeffs.iter_mut().zip(&mut low.coeffs).zip(&row.coeffs) {
+            (*hi, *lo) = power2round(value);
+        }
+        low.ntt();
+        t0.0.push(low);
+        t1.push(high);
+    }
+    let public_key = pk_encode(&params, &rho, &t1);
+    (
+        public_key.clone(),
+        MlDsaSigningKey {
+            level,
+            rho,
+            key,
+            public_key,
+            s1,
+            s2,
+            t0,
+        },
+    )
+}
+
+/// Test-only: builds a standard signing key from explicit short secrets
+/// (coefficient form), exactly as key generation does after sampling.
+#[cfg(test)]
+pub(crate) fn signing_key_from_secret_for_test(
+    level: MlDsaLevel,
+    rho: [u8; 32],
+    s1: Vec<Poly256>,
+    s2: Vec<Poly256>,
+) -> (Vec<u8>, MlDsaSigningKey) {
+    let params = level.params();
+    let mut s1 = SecretPolys(s1);
+    let mut s2 = SecretPolys(s2);
+    for poly in s1.0.iter_mut().chain(&mut s2.0) {
+        poly.ntt();
+    }
+    let matrix = expand_a_ntt(&params, &rho);
+    let mut t = mat_vec_mul_ntt(&matrix, &s1.0);
+    let mut t1 = Vec::with_capacity(params.k);
+    let mut t0 = SecretPolys(Vec::with_capacity(params.k));
+    for (row, error) in t.iter_mut().zip(&s2.0) {
+        *row = row.add(error);
+        row.inv_ntt();
+        let mut high = Poly256::zero();
+        let mut low = Poly256::zero();
+        for ((hi, lo), &value) in high.coeffs.iter_mut().zip(&mut low.coeffs).zip(&row.coeffs) {
+            (*hi, *lo) = power2round(value);
+        }
+        low.ntt();
+        t0.0.push(low);
+        t1.push(high);
+    }
+    let public_key = pk_encode(&params, &rho, &t1);
+    (
+        public_key.clone(),
+        MlDsaSigningKey { level, rho, key: SecretBytes([0x5A; 32]), public_key, s1, s2, t0 },
+    )
+}
+
+fn expand_signing_mask(params: &MlDsaParams, seed: &[u8; 64], nonce: u16) -> Poly256 {
+    let mut xof = Shake256::new();
+    xof.absorb(seed);
+    xof.absorb(&nonce.to_le_bytes());
+    xof.finalize(0x1f);
+    let mut bytes = SecretBytes([0; 640]);
+    xof.squeeze(&mut bytes.0[..params.z_poly_bytes]);
+    unpack_z_poly(params, &bytes.0[..params.z_poly_bytes])
+}
+
+/// Deterministic FIPS 204 signing, using the all-zero optional randomness string.
+/// Returns `None` for an oversized context or exhausted 16-bit mask counter.
+pub fn ml_dsa_sign_deterministic(sk: &MlDsaSigningKey, msg: &[u8], ctx: &[u8]) -> Option<Vec<u8>> {
+    let params = sk.level.params();
+    let mu = compute_fips204_mu(&sk.public_key, msg, ctx)?;
+    let mut mask_seed = SecretBytes([0; 64]);
+    let mut xof = Shake256::new();
+    xof.absorb(&sk.key.0);
+    xof.absorb(&[0; 32]);
+    xof.absorb(&mu);
+    xof.finalize(0x1f);
+    xof.squeeze(&mut mask_seed.0);
+    let matrix = expand_a_ntt(&params, &sk.rho);
+    let mut nonce = 0u16;
+    loop {
+        let next = nonce.checked_add(params.ell as u16)?;
+        let y = SecretPolys(
+            (nonce..next)
+                .map(|index| expand_signing_mask(&params, &mask_seed.0, index))
+                .collect(),
+        );
+        nonce = next;
+        let mut y_hat = SecretPolys(y.0.clone());
+        for poly in &mut y_hat.0 {
+            poly.ntt();
+        }
+        let mut w = SecretPolys(mat_vec_mul_ntt(&matrix, &y_hat.0));
+        for poly in &mut w.0 {
+            poly.inv_ntt();
+        }
+        let w1: Vec<Poly256> =
+            w.0.iter()
+                .map(|p| Poly256 {
+                    coeffs: p.coeffs.map(|c| high_bits_ct(c, params.gamma2)),
+                })
+                .collect();
+        let mut challenge = vec![0; params.c_tilde_bytes];
+        let mut h = Shake256::new();
+        h.absorb(&mu);
+        h.absorb(&w1_encode(&params, &w1));
+        h.finalize(0x1f);
+        h.squeeze(&mut challenge);
+        let mut c = sample_in_ball(&challenge, params.tau);
+        c.ntt();
+        let mut z = SecretPolys(Vec::with_capacity(params.ell));
+        let mut reject = false;
+        for (mask, secret) in y.0.iter().zip(&sk.s1.0) {
+            let mut response = c.pointwise_mul(secret);
+            response.inv_ntt();
+            response = response.add(mask);
+            reject |= response.inf_norm() >= params.gamma1 - params.beta;
+            z.0.push(response);
+        }
+        let mut hints = vec![[0; MLDSA_N]; params.k];
+        let mut ones = 0usize;
+        for (((row, secret), low), hint_row) in
+            w.0.iter().zip(&sk.s2.0).zip(&sk.t0.0).zip(&mut hints)
+        {
+            let mut cs2 = c.pointwise_mul(secret);
+            cs2.inv_ntt();
+            let mut ct0 = c.pointwise_mul(low);
+            ct0.inv_ntt();
+            reject |= ct0.inf_norm() >= params.gamma2;
+            for (((&wi, &ei), &ti), hint) in row
+                .coeffs
+                .iter()
+                .zip(&cs2.coeffs)
+                .zip(&ct0.coeffs)
+                .zip(hint_row)
+            {
+                let base = fq_sub(wi, ei);
+                reject |= low_bits_abs_ct(base, params.gamma2) >= params.gamma2 - params.beta;
+                *hint = make_hint_ct(fq_sub(0, ti), fq_add(base, ti), params.gamma2);
+                ones += *hint as usize;
+            }
+            cs2.zeroize();
+            ct0.zeroize();
+        }
+        if !reject && ones <= params.omega {
+            return Some(sig_encode(&params, &challenge, &z.0, &hints));
+        }
+    }
+}
+
+#[cfg(test)]
+mod signing_tests {
+    use super::*;
+    #[test]
+    fn deterministic_signing_all_levels() {
+        for level in [
+            MlDsaLevel::MlDsa44,
+            MlDsaLevel::MlDsa65,
+            MlDsaLevel::MlDsa87,
+        ] {
+            let (pk, sk) = ml_dsa_keygen_from_seed(level, &[0x61; 32]);
+            let sig = ml_dsa_sign_deterministic(&sk, b"message", b"context").unwrap();
+            assert!(ml_dsa_verify(level, &pk, b"message", b"context", &sig));
+            assert!(!ml_dsa_verify(level, &pk, b"changed", b"context", &sig));
+            assert!(!ml_dsa_verify(level, &pk, b"message", b"other", &sig));
+            assert_eq!(
+                Some(sig),
+                ml_dsa_sign_deterministic(&sk, b"message", b"context")
+            );
+            assert!(ml_dsa_sign_deterministic(&sk, b"message", &[0; 256]).is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod nist_key_vectors {
+    use super::*;
+    #[test]
+    fn seeded_public_keys_match_nist_acvp() {
+        {
+            let (pk, _) = ml_dsa_keygen_from_seed(
+                MlDsaLevel::MlDsa44,
+                &[
+                    113, 148, 177, 60, 149, 35, 16, 16, 175, 210, 201, 9, 153, 43, 210, 0, 59, 166,
+                    244, 55, 195, 136, 107, 219, 227, 246, 184, 103, 161, 75, 161, 97,
+                ],
+            );
+            let mut xof = Shake256::new();
+            xof.absorb(&pk);
+            xof.finalize(0x1f);
+            let mut digest = [0; 32];
+            xof.squeeze(&mut digest);
+            assert_eq!(
+                digest,
+                [
+                    13, 179, 34, 53, 148, 161, 252, 232, 219, 72, 200, 241, 121, 54, 17, 161, 127,
+                    204, 0, 6, 255, 234, 38, 207, 112, 148, 216, 50, 80, 55, 40, 143
+                ]
+            );
+        }
+        {
+            let (pk, _) = ml_dsa_keygen_from_seed(
+                MlDsaLevel::MlDsa65,
+                &[
+                    169, 145, 253, 66, 176, 113, 212, 156, 72, 174, 62, 117, 198, 71, 69, 158, 13,
+                    170, 209, 225, 186, 53, 106, 4, 128, 25, 18, 211, 41, 75, 207, 248,
+                ],
+            );
+            let mut xof = Shake256::new();
+            xof.absorb(&pk);
+            xof.finalize(0x1f);
+            let mut digest = [0; 32];
+            xof.squeeze(&mut digest);
+            assert_eq!(
+                digest,
+                [
+                    236, 57, 176, 12, 144, 49, 225, 78, 151, 45, 35, 176, 102, 64, 52, 45, 26, 120,
+                    250, 93, 240, 239, 18, 170, 50, 54, 165, 10, 198, 231, 189, 143
+                ]
+            );
+        }
+        {
+            let (pk, _) = ml_dsa_keygen_from_seed(
+                MlDsaLevel::MlDsa87,
+                &[
+                    161, 111, 91, 7, 150, 112, 62, 45, 26, 1, 64, 163, 92, 191, 54, 239, 171, 231,
+                    14, 117, 43, 165, 155, 106, 154, 14, 156, 75, 5, 48, 47, 115,
+                ],
+            );
+            let mut xof = Shake256::new();
+            xof.absorb(&pk);
+            xof.finalize(0x1f);
+            let mut digest = [0; 32];
+            xof.squeeze(&mut digest);
+            assert_eq!(
+                digest,
+                [
+                    38, 116, 168, 255, 113, 81, 180, 147, 251, 69, 45, 170, 146, 10, 95, 235, 92,
+                    229, 232, 215, 6, 119, 115, 92, 5, 67, 174, 194, 187, 22, 28, 7
+                ]
+            );
+        }
+    }
+}
+
+// NIST ACVP seed-format, deterministic, external pure-message vectors.
+#[cfg(test)]
+mod nist_signature_vectors {
+    use super::*;
+    #[test]
+    fn signatures_match_nist_acvp() {
+        {
+            let (_, sk) = ml_dsa_keygen_from_seed(
+                MlDsaLevel::MlDsa44,
+                &[
+                    152, 160, 174, 46, 10, 243, 60, 250, 7, 47, 174, 128, 172, 188, 228, 176, 253,
+                    125, 39, 199, 131, 192, 140, 66, 191, 145, 120, 72, 12, 109, 75, 175,
+                ],
+            );
+            let signature = ml_dsa_sign_deterministic(
+                &sk,
+                &[180],
+                &[
+                    186, 50, 45, 115, 142, 160, 192, 225, 244, 249, 141, 18, 73, 173, 109, 68, 164,
+                    19, 82, 169, 231, 111, 239, 50, 146, 250, 177, 151, 7, 11, 116, 29, 191, 209,
+                    235, 7, 235, 148, 87, 8, 168, 94, 131, 3, 205, 136, 225, 213, 196, 208, 219,
+                    131, 57, 103, 247, 165, 58, 25, 8,
+                ],
+            )
+            .unwrap();
+            let mut xof = Shake256::new();
+            xof.absorb(&signature);
+            xof.finalize(0x1f);
+            let mut digest = [0; 32];
+            xof.squeeze(&mut digest);
+            assert_eq!(
+                digest,
+                [
+                    217, 11, 108, 209, 48, 20, 215, 31, 234, 88, 23, 51, 172, 22, 14, 55, 215, 203,
+                    207, 190, 238, 48, 52, 33, 220, 213, 187, 220, 190, 78, 51, 254
+                ]
+            );
+        }
+        {
+            let (_, sk) = ml_dsa_keygen_from_seed(
+                MlDsaLevel::MlDsa65,
+                &[
+                    242, 122, 234, 254, 137, 17, 144, 237, 193, 221, 109, 189, 154, 130, 58, 2,
+                    150, 28, 90, 8, 62, 238, 114, 200, 185, 32, 167, 183, 20, 91, 148, 91,
+                ],
+            );
+            let signature = ml_dsa_sign_deterministic(
+                &sk,
+                &[155],
+                &[
+                    70, 126, 37, 117, 60, 101, 236, 70, 192, 84, 236, 3, 183, 145, 106, 33, 219, 3,
+                    139, 211, 34, 175, 231, 242, 237, 185, 27, 73, 39, 190, 229, 188, 59, 235, 90,
+                    52, 218, 182, 70, 226, 66, 3, 153, 80, 122, 133, 165, 51, 82, 76, 182, 154,
+                    225, 31, 221, 161, 179, 255, 43, 130, 72, 47, 73, 90, 165, 103, 137, 93, 196,
+                    188, 109, 145, 157, 109, 243, 0, 80, 154, 242, 24, 60, 100, 121, 113, 24, 139,
+                    35, 196, 72, 31, 241, 71, 71, 227, 80, 54, 3, 234, 235, 108, 158, 225, 152,
+                    204, 189, 206, 37, 5, 228, 38, 192, 164, 71, 114, 101, 153, 102, 77, 68, 144,
+                    211, 39, 63, 93, 136, 43, 96, 194, 115, 215, 38, 17, 62, 58, 139, 161, 253,
+                    223, 190, 93, 27, 247, 235, 136, 124, 122, 114, 167, 165, 195, 14, 42, 252, 42,
+                    166, 41, 131, 149, 172, 124, 44, 65, 252, 207, 174, 61, 30, 186, 26, 11, 93,
+                    116, 119, 64, 187, 122, 80, 194, 242, 53, 167, 140, 3, 112, 167, 213, 79, 93,
+                    245, 165, 173, 90, 84, 54, 158, 214, 113, 60, 74, 111, 175, 26, 51, 169, 52,
+                    182, 255, 75, 135, 155, 207, 49, 240, 0, 178, 202, 24, 110, 12, 249, 173, 205,
+                    213, 77, 181, 145, 42, 118, 140, 66, 22, 32, 243, 227, 53, 89, 86, 27, 222,
+                    180, 206, 252, 43, 202, 243, 98,
+                ],
+            )
+            .unwrap();
+            let mut xof = Shake256::new();
+            xof.absorb(&signature);
+            xof.finalize(0x1f);
+            let mut digest = [0; 32];
+            xof.squeeze(&mut digest);
+            assert_eq!(
+                digest,
+                [
+                    121, 156, 73, 178, 43, 102, 14, 153, 44, 252, 131, 109, 236, 132, 211, 68, 43,
+                    115, 240, 117, 143, 209, 62, 247, 3, 250, 178, 194, 97, 50, 190, 136
+                ]
+            );
+        }
+        {
+            let (_, sk) = ml_dsa_keygen_from_seed(
+                MlDsaLevel::MlDsa87,
+                &[
+                    241, 66, 33, 72, 75, 202, 212, 149, 195, 236, 70, 126, 132, 61, 130, 242, 222,
+                    95, 60, 109, 83, 185, 71, 171, 84, 220, 96, 41, 68, 8, 139, 238,
+                ],
+            );
+            let signature = ml_dsa_sign_deterministic(
+                &sk,
+                &[236],
+                &[
+                    0, 166, 235, 255, 124, 159, 230, 108, 169, 95, 95, 192, 105, 177, 30, 68, 217,
+                    39, 173, 205, 103,
+                ],
+            )
+            .unwrap();
+            let mut xof = Shake256::new();
+            xof.absorb(&signature);
+            xof.finalize(0x1f);
+            let mut digest = [0; 32];
+            xof.squeeze(&mut digest);
+            assert_eq!(
+                digest,
+                [
+                    149, 97, 117, 195, 215, 19, 134, 146, 199, 236, 47, 34, 27, 78, 176, 188, 225,
+                    38, 48, 56, 195, 136, 165, 126, 133, 61, 8, 222, 22, 112, 86, 56
+                ]
+            );
+        }
+    }
+}
