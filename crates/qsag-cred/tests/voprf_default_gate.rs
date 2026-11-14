@@ -20,20 +20,34 @@ fn default_consumer_cannot_access_retired_oracles() {
         "[package]\nname = \"credential-gate-probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nqsag-cred = {{ path = {dependency:?} }}\n"
     )).unwrap();
     fs::create_dir(dir.join("src")).unwrap();
-    fs::write(dir.join("src/main.rs"), r#"
+    fs::write(
+        dir.join("src/main.rs"),
+        r#"
 use qsag_cred::voprf::voprf_server_evaluate;
 use qsag_cred::voprf_dkg;
 use qsag_cred::blind_vc::verify_selective_disclosure;
 use qsag_cred::holder_prepare_blind_issuance;
 fn main() {}
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     let output = Command::new(env!("CARGO"))
         .args(["check", "--offline", "--quiet"])
         .env("CARGO_TARGET_DIR", dir.join("target"))
-        .current_dir(&dir).output().unwrap();
+        .current_dir(&dir)
+        .output()
+        .unwrap();
     assert!(!output.status.success(), "retired APIs must remain absent");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    for symbol in ["voprf", "voprf_dkg", "blind_vc", "holder_prepare_blind_issuance"] {
-        assert!(stderr.contains(&format!("unresolved import `qsag_cred::{symbol}")), "{stderr}");
+    for symbol in [
+        "voprf",
+        "voprf_dkg",
+        "blind_vc",
+        "holder_prepare_blind_issuance",
+    ] {
+        assert!(
+            stderr.contains(&format!("unresolved import `qsag_cred::{symbol}")),
+            "{stderr}"
+        );
     }
 }

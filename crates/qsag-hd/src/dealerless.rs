@@ -186,8 +186,7 @@ pub fn unpack_field_elements(bytes: &[u8], count: usize) -> Result<Vec<u32>, HdE
     let values: Vec<u32> = (0..count)
         .map(|i| (0..23).fold(0, |acc, b| acc | bit(i * 23 + b) << b))
         .collect();
-    if values.iter().any(|&v| v >= MODULE_Q) || (count * 23..bytes.len() * 8).any(|i| bit(i) != 0)
-    {
+    if values.iter().any(|&v| v >= MODULE_Q) || (count * 23..bytes.len() * 8).any(|i| bit(i) != 0) {
         return abort(RekeyFault::MalformedMessage);
     }
     Ok(values)
@@ -383,7 +382,9 @@ impl Drop for Core {
         if !self.complete && self.parent.is_some() {
             self.lineage.poisoned.store(true, Ordering::Release);
             #[cfg(feature = "std")]
-            if let Some(journal) = &self.lineage.poison_journal { let _ = journal.poison(); }
+            if let Some(journal) = &self.lineage.poison_journal {
+                let _ = journal.poison();
+            }
         }
         ct_zeroize_bytes(&mut self.coin_seed);
         ct_zeroize_bytes(&mut self.coin_salt);
@@ -418,9 +419,20 @@ impl Core {
         CHECK_PRODUCTS * if self.parent.is_some() { 2 } else { 1 }
     }
     fn zero_commitment(&self, party_id: u16, values: &[u32], salt: &[u8; 32]) -> [u8; 32] {
-        commit_mpc_broadcast(&self.session, 5, party_id, &pack_field_elements(values), salt)
+        commit_mpc_broadcast(
+            &self.session,
+            5,
+            party_id,
+            &pack_field_elements(values),
+            salt,
+        )
     }
-    fn coin_commitment(request: &[u8; 32], party_id: u16, seed: &[u8; 32], salt: &[u8; 32]) -> [u8; 32] {
+    fn coin_commitment(
+        request: &[u8; 32],
+        party_id: u16,
+        seed: &[u8; 32],
+        salt: &[u8; 32],
+    ) -> [u8; 32] {
         commit_mpc_broadcast(request, 1, party_id, seed, salt)
     }
 }
@@ -508,7 +520,13 @@ impl<'a> RekeyRound1<'a> {
                 );
                 let root_cc = cshake256_framed_32(
                     b"QSAG.HD.DEALERLESS.ROOT_CC.V2",
-                    &[request.root_chain_seed.ok_or(HdError::InvalidThresholdParameters)?, &ceremony, &index_bytes],
+                    &[
+                        request
+                            .root_chain_seed
+                            .ok_or(HdError::InvalidThresholdParameters)?,
+                        &ceremony,
+                        &index_bytes,
+                    ],
                 );
                 (
                     Lineage {
@@ -606,7 +624,9 @@ impl<'a> RekeyRound1<'a> {
 
         let chain_code_key = RedactedSecret::new(match request.parent {
             Some((share, _)) => *share.chain_code_key.expose(),
-            None => *request.root_chain_seed.ok_or(HdError::InvalidThresholdParameters)?,
+            None => *request
+                .root_chain_seed
+                .ok_or(HdError::InvalidThresholdParameters)?,
         });
         let hardened_tweak = request.parent.is_none() || request.hardened;
         let derivation = cshake256_framed_32(
@@ -617,7 +637,10 @@ impl<'a> RekeyRound1<'a> {
                 &[u8::from(request.parent.is_some())],
                 &parent_digest,
                 &lineage.depth_used.to_be_bytes(),
-                &request.parent.map_or(0, |(s, _)| s.derivation_index).to_be_bytes(),
+                &request
+                    .parent
+                    .map_or(0, |(s, _)| s.derivation_index)
+                    .to_be_bytes(),
                 &[u8::from(request.hardened)],
                 &index_bytes,
             ],
@@ -650,7 +673,12 @@ impl<'a> RekeyRound1<'a> {
             } else {
                 let cc = cshake256_framed_32(
                     b"QSAG.HD.HARDENED_CC.V2",
-                    &[chain_code_key.expose(), parent_cc.expose(), &parent_digest, &index_bytes],
+                    &[
+                        chain_code_key.expose(),
+                        parent_cc.expose(),
+                        &parent_digest,
+                        &index_bytes,
+                    ],
                 );
                 (RedactedSecret::new(cc), None)
             }
@@ -705,7 +733,12 @@ impl<'a> RekeyRound1<'a> {
         let hello = RekeyHello {
             party_id,
             nonce: secret(b"QSAG.HD.REKEY.NONCE.V1"),
-            coin_commitment: Core::coin_commitment(&request_digest, party_id, &coin_seed, &coin_salt),
+            coin_commitment: Core::coin_commitment(
+                &request_digest,
+                party_id,
+                &coin_seed,
+                &coin_salt,
+            ),
             public_shares,
         };
         let core = Core {
@@ -777,10 +810,17 @@ impl<'a> RekeyRound1<'a> {
             for (position, hello) in hellos.iter().enumerate() {
                 let expected = config.subsets_of(position);
                 if hello.public_shares.len() != expected.len()
-                    || hello.public_shares.iter().zip(&expected).any(|(entry, &subset)| {
-                        entry.0 != subset
-                            || entry.1.iter().any(|p| p.coeffs.iter().any(|&c| c >= MODULE_Q))
-                    })
+                    || hello
+                        .public_shares
+                        .iter()
+                        .zip(&expected)
+                        .any(|(entry, &subset)| {
+                            entry.0 != subset
+                                || entry
+                                    .1
+                                    .iter()
+                                    .any(|p| p.coeffs.iter().any(|&c| c >= MODULE_Q))
+                        })
                 {
                     return abort(RekeyFault::MalformedMessage);
                 }
@@ -936,7 +976,8 @@ impl RekeyRound3 {
         challenge.absorb(&core.session);
         challenge.absorb(&core.products_digest);
         for (coin, hello) in coins.iter().zip(&core.hellos) {
-            let expected = Core::coin_commitment(&core.request, coin.party_id, &coin.seed, &coin.salt);
+            let expected =
+                Core::coin_commitment(&core.request, coin.party_id, &coin.seed, &coin.salt);
             if !ct_eq_bytes(&expected, &hello.coin_commitment) {
                 return abort(RekeyFault::CommitmentMismatch);
             }
@@ -1040,7 +1081,9 @@ impl RekeyRound5 {
         core.zero_commits = commits.to_vec();
         #[cfg(feature = "std")]
         if let Some(journal) = &core.lineage.poison_journal {
-            journal.begin_disclosure(core.session).map_err(|_| HdError::MacCheckFailed)?;
+            journal
+                .begin_disclosure(core.session)
+                .map_err(|_| HdError::MacCheckFailed)?;
         }
         let opening = RekeyZeroOpening {
             party_id: core.party_id,
@@ -1055,7 +1098,10 @@ impl RekeyRound6 {
     /// Public identity for provisioning the mandatory family journal before completion.
     pub fn family_id(&self) -> Result<[u8; 32], HdError> {
         self.0.lineage.family_id.map(Ok).unwrap_or_else(|| {
-            self.0.child_t.as_ref().map(|t| hash_t_vec(&self.0.lineage.seed_a, t))
+            self.0
+                .child_t
+                .as_ref()
+                .map(|t| hash_t_vec(&self.0.lineage.seed_a, t))
                 .ok_or(HdError::InvalidThresholdParameters)
         })
     }
@@ -1064,15 +1110,25 @@ impl RekeyRound6 {
     /// every zero-test opens to zero on a consistent degree `t - 1` sharing.
     /// Complete provisioning with a durable journal bound to the resulting family.
     #[cfg(feature = "std")]
-    pub fn finish(self, openings: &[RekeyZeroOpening], journal: Arc<dyn crate::poison::HdPoisonJournal>) -> Result<(LinearModuleXPub, LinearModulePartyShare), HdError> {
+    pub fn finish(
+        self,
+        openings: &[RekeyZeroOpening],
+        journal: Arc<dyn crate::poison::HdPoisonJournal>,
+    ) -> Result<(LinearModuleXPub, LinearModulePartyShare), HdError> {
         let (public, mut share) = self.finish_inner(openings)?;
-        if share.poison_journal.is_none() { share.attach_poison_journal(journal)?; }
-        else if journal.family_id() != share.family_id || journal.is_poisoned().unwrap_or(true) { return Err(HdError::MacCheckFailed); }
+        if share.poison_journal.is_none() {
+            share.attach_poison_journal(journal)?;
+        } else if journal.family_id() != share.family_id || journal.is_poisoned().unwrap_or(true) {
+            return Err(HdError::MacCheckFailed);
+        }
         share.require_poison_journal()?;
         Ok((public, share))
     }
     /// Explicit nonpersistent completion for pure protocol tests.
-    pub fn finish_with_in_memory_poison_journal_for_testing(self, openings: &[RekeyZeroOpening]) -> Result<(LinearModuleXPub, LinearModulePartyShare), HdError> {
+    pub fn finish_with_in_memory_poison_journal_for_testing(
+        self,
+        openings: &[RekeyZeroOpening],
+    ) -> Result<(LinearModuleXPub, LinearModulePartyShare), HdError> {
         let (public, share) = self.finish_inner(openings)?;
         Ok((public, share.in_memory_poison_journal_for_testing()))
     }
@@ -1105,7 +1161,12 @@ impl RekeyRound6 {
             }
         }
         #[cfg(feature = "std")]
-        if core.lineage.poison_journal.as_ref().is_some_and(|j| j.is_poisoned().unwrap_or(true)) {
+        if core
+            .lineage
+            .poison_journal
+            .as_ref()
+            .is_some_and(|j| j.is_poisoned().unwrap_or(true))
+        {
             return Err(HdError::MacCheckFailed);
         }
         if core.lineage.poisoned.load(Ordering::Acquire) {
@@ -1163,7 +1224,9 @@ impl RekeyRound6 {
         };
         #[cfg(feature = "std")]
         if let Some(journal) = &core.lineage.poison_journal {
-            journal.complete_disclosure(core.session).map_err(|_| HdError::MacCheckFailed)?;
+            journal
+                .complete_disclosure(core.session)
+                .map_err(|_| HdError::MacCheckFailed)?;
         }
         core.complete = true;
         Ok((public, share))
@@ -1333,7 +1396,10 @@ pub(crate) mod harness {
         tamper(Stage::ZeroCommits(&mut commits));
         let (states, mut openings) = step(states, |s| s.open_zero_test(&commits))?;
         tamper(Stage::ZeroOpenings(&mut openings));
-        let results: Vec<_> = states.into_iter().map(|s| s.finish_with_in_memory_poison_journal_for_testing(&openings)).collect();
+        let results: Vec<_> = states
+            .into_iter()
+            .map(|s| s.finish_with_in_memory_poison_journal_for_testing(&openings))
+            .collect();
         if results.iter().any(Result::is_err) {
             return Err(results.into_iter().map(Result::err).collect());
         }
@@ -1351,7 +1417,10 @@ pub(crate) mod harness {
             .unwrap_or_else(|errors| panic!("honest rekey aborted: {errors:?}"));
         let public = results[0].0.clone();
         assert!(results.iter().all(|(pk, _)| *pk == public));
-        (public, results.into_iter().map(|(_, share)| share).collect())
+        (
+            public,
+            results.into_iter().map(|(_, share)| share).collect(),
+        )
     }
 
     pub(crate) fn committee(t: u16, n: u16) -> crate::seeds::CommitteeConfig {
@@ -1401,18 +1470,27 @@ mod tests {
             // and the public relation; two different quorums agree.
             let quorum = usize::from(t);
             let secret = reconstruct_for_recovery_or_test(&root[..quorum], &root_pk).unwrap();
-            let other = reconstruct_for_recovery_or_test(&root[root.len() - quorum..], &root_pk).unwrap();
+            let other =
+                reconstruct_for_recovery_or_test(&root[root.len() - quorum..], &root_pk).unwrap();
             assert_eq!(secret, other);
             // The root secret is the short sum of one CBD2 term per subset.
-            assert!(secret.iter().all(|p| p.coeffs.iter().all(|&c| centered_abs(c) <= 2 * subsets)));
+            assert!(
+                secret
+                    .iter()
+                    .all(|p| p.coeffs.iter().all(|&c| centered_abs(c) <= 2 * subsets))
+            );
             assert!(secret.iter().any(|p| p.coeffs.iter().any(|&c| c != 0)));
 
             // Non-hardened child: equals the watch-only derivation.
             let (child_pk, child) = honest(&seeds, Some((&root, &root_pk)), 7, false, 2);
             assert_eq!(child_pk, root_pk.derive_child(7).unwrap());
-            let child_secret = reconstruct_for_recovery_or_test(&child[..quorum], &child_pk).unwrap();
-            let (tweak, _) =
-                expand_linear_tweak(&root_pk.chain_code.unwrap(), &hash_t_vec(&root_pk.seed_a, &root_pk.t_vec), 7);
+            let child_secret =
+                reconstruct_for_recovery_or_test(&child[..quorum], &child_pk).unwrap();
+            let (tweak, _) = expand_linear_tweak(
+                &root_pk.chain_code.unwrap(),
+                &hash_t_vec(&root_pk.seed_a, &root_pk.t_vec),
+                7,
+            );
             for ((child, parent), tweak) in child_secret.iter().zip(&secret).zip(&tweak) {
                 assert_eq!(*child, parent.add(tweak));
             }
@@ -1423,19 +1501,26 @@ mod tests {
             // Hardened child: no chain code, deterministic secret, fresh keys on repeat.
             let (hard_pk, hard) = honest(&seeds, Some((&root, &root_pk)), 9, true, 3);
             assert!(hard_pk.chain_code.is_none());
-            assert_eq!(hard_pk.derive_child(1), Err(HdError::HardenedDerivationRequired));
+            assert_eq!(
+                hard_pk.derive_child(1),
+                Err(HdError::HardenedDerivationRequired)
+            );
             let (repeat_pk, repeat) = honest(&seeds, Some((&root, &root_pk)), 9, true, 4);
             assert_eq!(repeat_pk, hard_pk);
             assert_ne!(alpha(&hard, &hard_pk), alpha(&repeat, &repeat_pk));
             let hard_secret = reconstruct_for_recovery_or_test(&hard[..quorum], &hard_pk).unwrap();
             assert_eq!(
                 hard_secret,
-                reconstruct_for_recovery_or_test(&repeat[repeat.len() - quorum..], &repeat_pk).unwrap()
+                reconstruct_for_recovery_or_test(&repeat[repeat.len() - quorum..], &repeat_pk)
+                    .unwrap()
             );
             // The hardened tweak is short, nonzero, and differs from the public tweak
             // of the same index.
-            let (public_tweak, _) =
-                expand_linear_tweak(&root_pk.chain_code.unwrap(), &hash_t_vec(&root_pk.seed_a, &root_pk.t_vec), 9);
+            let (public_tweak, _) = expand_linear_tweak(
+                &root_pk.chain_code.unwrap(),
+                &hash_t_vec(&root_pk.seed_a, &root_pk.t_vec),
+                9,
+            );
             for ((hard, parent), public) in hard_secret.iter().zip(&secret).zip(&public_tweak) {
                 let delta = hard.sub(parent);
                 assert!(delta.coeffs.iter().all(|&c| centered_abs(c) <= 2 * subsets));
@@ -1453,8 +1538,12 @@ mod tests {
             // relabel a hardened share by forging the caller-owned descriptor.
             let mut forged = hard_pk.clone();
             forged.chain_code = Some(*hard[0].chain_code.expose());
-            assert_eq!(hard[0].derive_child_share(&seeds[0], &forged, 1, false, [19; 32], [20; 32]).err(),
-                Some(HdError::HardenedDerivationRequired));
+            assert_eq!(
+                hard[0]
+                    .derive_child_share(&seeds[0], &forged, 1, false, [19; 32], [20; 32])
+                    .err(),
+                Some(HdError::HardenedDerivationRequired)
+            );
             let (grand_pk, grand) = honest(&seeds, Some((&hard, &hard_pk)), 1, true, 5);
             assert_eq!(grand_pk.depth_used, 2);
             reconstruct_for_recovery_or_test(&grand[..quorum], &grand_pk).unwrap();
@@ -1480,7 +1569,9 @@ mod tests {
                 .iter()
                 .map(|&p| dealerless_opening_mask(&seeds[p], &roster, [6; 32], projection).unwrap())
                 .collect();
-            let total = masks.iter().fold(0, |sum, m| mod_q_add(sum, m.test_value()));
+            let total = masks
+                .iter()
+                .fold(0, |sum, m| mod_q_add(sum, m.test_value()));
             assert_eq!(total, 0);
             assert!(masks.iter().all(|m| m.test_value() != 0));
             // A mask derived for one projection is refused for another.
@@ -1512,13 +1603,7 @@ mod tests {
                 .zip(masks)
                 .map(|(share, mask)| {
                     HdThresholdEvalRound1Commit::begin(
-                        share,
-                        &pk,
-                        &roster,
-                        projection,
-                        [6; 32],
-                        mask,
-                        [2; 32],
+                        share, &pk, &roster, projection, [6; 32], mask, [2; 32],
                     )
                     .unwrap()
                 })
@@ -1537,7 +1622,10 @@ mod tests {
                 .into_iter()
                 .map(|s| s.freeze_mac(&commits).unwrap())
                 .collect();
-            let mac_openings: Vec<_> = states.iter_mut().map(|s| s.mac_opening().unwrap()).collect();
+            let mac_openings: Vec<_> = states
+                .iter_mut()
+                .map(|s| s.mac_opening().unwrap())
+                .collect();
             for state in states {
                 assert_eq!(state.verify(&mac_openings), Ok(pk.t_vec[2].coeffs[41]));
             }
@@ -1549,7 +1637,9 @@ mod tests {
         assert_ne!(a.test_value(), b.test_value());
         // A roster below the threshold or outside the committee is refused.
         assert!(dealerless_opening_mask(&seeds[1], &roster[1..2], [6; 32], projection).is_err());
-        assert!(dealerless_opening_mask(&seeds[1], &[(1, 2), (9, 9)], [6; 32], projection).is_err());
+        assert!(
+            dealerless_opening_mask(&seeds[1], &[(1, 2), (9, 9)], [6; 32], projection).is_err()
+        );
     }
 
     #[test]
@@ -1562,8 +1652,8 @@ mod tests {
         // With n = 2t - 1 it passes interpolation and only the sacrifice sees it.
         for index in [0, CHILD_PRODUCTS - 1, 3 * COEFFS + 77] {
             let (root_pk, root) = honest(&seeds, None, 0, false, 1);
-        let parents = Some((root.as_slice(), &root_pk));
-        let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
+            let parents = Some((root.as_slice(), &root_pk));
+            let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
                 if let Stage::Products(messages) = stage {
                     bump(&mut messages[1].values[index]);
                 }
@@ -1682,9 +1772,16 @@ mod tests {
                 );
                 let request = cshake256_framed_32(
                     b"QSAG.HD.REKEY.REQUEST.V1",
-                    &[&derivation, &[2; 32], &[0],
-                      &cshake256_framed_32(b"QSAG.HD.CHAIN_CODE.COMMIT.V1", &[&root_pk.derive_child(5).unwrap().chain_code.unwrap()]),
-                      &4u16.to_be_bytes()],
+                    &[
+                        &derivation,
+                        &[2; 32],
+                        &[0],
+                        &cshake256_framed_32(
+                            b"QSAG.HD.CHAIN_CODE.COMMIT.V1",
+                            &[&root_pk.derive_child(5).unwrap().chain_code.unwrap()],
+                        ),
+                        &4u16.to_be_bytes(),
+                    ],
                 );
                 transcript.absorb(&request);
                 for hello in hellos.iter() {
@@ -1720,9 +1817,18 @@ mod tests {
         });
         // Custodian 1 sees its own hello altered; the others see holders disagree.
         let errors = outcome.err().unwrap();
-        assert_eq!(errors[1], Some(HdError::RekeyAborted(RekeyFault::MalformedMessage)));
-        assert_eq!(errors[0], Some(HdError::RekeyAborted(RekeyFault::PublicShareMismatch)));
-        assert_eq!(errors[2], Some(HdError::RekeyAborted(RekeyFault::PublicShareMismatch)));
+        assert_eq!(
+            errors[1],
+            Some(HdError::RekeyAborted(RekeyFault::MalformedMessage))
+        );
+        assert_eq!(
+            errors[0],
+            Some(HdError::RekeyAborted(RekeyFault::PublicShareMismatch))
+        );
+        assert_eq!(
+            errors[2],
+            Some(HdError::RekeyAborted(RekeyFault::PublicShareMismatch))
+        );
         // Reordered or missing senders.
         let (root_pk, root) = honest(&seeds, None, 0, false, 1);
         let parents = Some((root.as_slice(), &root_pk));
@@ -1848,7 +1954,10 @@ mod tests {
                 .flat_map(|p| p.expose().coeffs)
                 .collect();
             views.push(own);
-            secrets.push((reconstruct_for_recovery_or_test(&shares[1..], &pk).unwrap(), pk));
+            secrets.push((
+                reconstruct_for_recovery_or_test(&shares[1..], &pk).unwrap(),
+                pk,
+            ));
         }
         // Identical coalition share, different secret and public key: the
         // coalition's share and seeds do not determine the secret.
@@ -1886,7 +1995,10 @@ mod tests {
                 for index in 0..CHECK_PRODUCTS {
                     let all: Vec<u32> = captured.iter().map(|o| o.values[index]).collect();
                     // The opened value w(0), public after the round.
-                    let opened = dot(&lagrange_weights(&xs[..usize::from(t)], 0), &all[..usize::from(t)]);
+                    let opened = dot(
+                        &lagrange_weights(&xs[..usize::from(t)], 0),
+                        &all[..usize::from(t)],
+                    );
                     nonzero += usize::from(opened != 0);
                     // Interpolate through (0, w(0)) and the coalition's own points.
                     let mut points = alloc::vec![0u32];
@@ -1928,8 +2040,13 @@ mod tests {
             for (label, hardened) in [("non-hardened child", false), ("hardened child", true)] {
                 let mut bytes = [0usize; REKEY_BROADCAST_ROUNDS];
                 let start = std::time::Instant::now();
-                let outcome = run(&seeds, Some((&root, &root_pk)), 11, hardened, 9, &mut |stage| {
-                    match stage {
+                let outcome = run(
+                    &seeds,
+                    Some((&root, &root_pk)),
+                    11,
+                    hardened,
+                    9,
+                    &mut |stage| match stage {
                         Stage::Hello(m) => bytes[0] = m.iter().map(|x| x.to_bytes().len()).sum(),
                         Stage::Products(m) => bytes[1] = m.iter().map(|x| x.to_bytes().len()).sum(),
                         Stage::Coins(m) => bytes[2] = m.len() * RekeyCoinOpening::WIRE_BYTES,
@@ -1938,8 +2055,8 @@ mod tests {
                         Stage::ZeroOpenings(m) => {
                             bytes[5] = m.iter().map(|x| x.to_bytes().len()).sum();
                         }
-                    }
-                });
+                    },
+                );
                 let elapsed = start.elapsed();
                 assert!(outcome.is_ok());
                 std::println!(

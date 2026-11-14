@@ -965,7 +965,15 @@ pub(crate) fn signing_key_from_secret_for_test(
     let public_key = pk_encode(&params, &rho, &t1);
     (
         public_key.clone(),
-        MlDsaSigningKey { level, rho, key: SecretBytes([0x5A; 32]), public_key, s1, s2, t0 },
+        MlDsaSigningKey {
+            level,
+            rho,
+            key: SecretBytes([0x5A; 32]),
+            public_key,
+            s1,
+            s2,
+            t0,
+        },
     )
 }
 

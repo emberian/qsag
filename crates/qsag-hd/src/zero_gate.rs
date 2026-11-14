@@ -7,8 +7,8 @@
 //! protocol needs: no local residual leaves before the peer transcript is frozen,
 //! the opened transcript is the frozen one, and every lane sums to zero.
 use crate::HdError;
-use alloc::vec::Vec;
 use crate::erase::ct_zeroize_u32s;
+use alloc::vec::Vec;
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_verified::HdCommittedZeroTest;
 
@@ -110,8 +110,7 @@ impl CommittedZeroGates {
 
     /// Accepts only the frozen peer transcript with every lane summing to zero.
     pub(crate) fn verify(&mut self, peers: [u8; 32], peer_sums: &[u32]) -> Result<(), HdError> {
-        if peer_sums.len() != self.gates.len() || peer_sums.iter().any(|&sum| sum >= self.modulus)
-        {
+        if peer_sums.len() != self.gates.len() || peer_sums.iter().any(|&sum| sum >= self.modulus) {
             self.quarantine();
             return Err(HdError::MacCheckFailed);
         }
