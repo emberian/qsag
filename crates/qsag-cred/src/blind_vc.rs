@@ -271,14 +271,14 @@ fn encode_issuance_message(
 // ============================================================================
 
 struct ZkBooProverTape {
-    r: [Vec<u64>; 3],
+    r: [ZeroizingU64Vec; 3],
     out: [Vec<u64>; 3],
     gate_cursor: usize,
 }
 
 impl Drop for ZkBooProverTape {
     fn drop(&mut self) {
-        for row in self.r.iter_mut().chain(self.out.iter_mut()) {
+        for row in self.out.iter_mut() {
             ct_zeroize_u64s(row);
         }
     }
@@ -372,8 +372,8 @@ impl ZkBooProverTape {
 struct ZkBooVerifierTape<'a> {
     e: usize,
     e1: usize,
-    r_e: Vec<u64>,
-    r_e1: Vec<u64>,
+    r_e: ZeroizingU64Vec,
+    r_e1: ZeroizingU64Vec,
     out_e: &'a [u64],
     out_e1: &'a [u64],
     gate_cursor: usize,

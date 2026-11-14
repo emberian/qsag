@@ -1153,7 +1153,7 @@ mod custody_tests {
             "--out".into(),
             path("sig1"),
             "--epoch".into(),
-            "1",
+            "1".into(),
             "--accept-trusted-dealer-demo".into(),
         ])
         .unwrap();
@@ -1174,7 +1174,7 @@ mod custody_tests {
             "--out".into(),
             path("sig2"),
             "--epoch".into(),
-            "2",
+            "2".into(),
             "--accept-trusted-dealer-demo".into(),
         ])
         .unwrap_err();

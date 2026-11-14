@@ -34,12 +34,11 @@ pub const fn fq_sub(a: u32, b: u32) -> u32 {
 }
 
 /// Branchless, division-free Barrett modular multiplication mod $q = 8\_380\_417$:
-/// $\lceil 2^{46} / 8\_380\_417 \rceil = 8\_396\_807$.
-/// Wait: for exact `0`-division over all `a, b < q` (`a*b < 2^{46}`), let
-/// $M_{64} = \lfloor 2^{64} / 8\_380\_417 \rfloor = 2\_201\_154\_512\_929$:
+/// For all $a, b < q$ ($a b < 2^{46}$), with
+/// $M_{64} = \lfloor 2^{64} / 8\_380\_417 \rfloor = 2\_201\_154\_512\_929$,
 /// $q_{\text{est}} = \lfloor (a b \cdot M_{64}) / 2^{64} \rfloor \in \{\lfloor ab/q \rfloor - 1, \lfloor ab/q \rfloor\}$,
-/// so 1 branchless conditional subtraction of $q$ reduces `ab - q_est * q` into `[0, q)` with
-/// **ZERO hardware `div`/`rem` instructions**!
+/// so one branchless conditional subtraction of $q$ reduces `ab - q_est * q` into `[0, q)` with
+/// zero hardware `div`/`rem` instructions.
 #[inline]
 pub const fn fq_mul(a: u32, b: u32) -> u32 {
     const BARRETT_M64: u128 = (1u128 << 64) / (MLDSA_Q as u128);

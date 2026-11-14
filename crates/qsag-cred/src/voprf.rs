@@ -659,6 +659,7 @@ impl Server {
     }
 }
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(Clone))]
 pub struct Evaluation {
     values: Vec<[u8; 32]>,
     pub faulty_servers: Vec<usize>,
@@ -719,14 +720,14 @@ impl Evaluation {
         receipt_key: &IssuanceReceiptKey,
     ) -> Option<[u8; 32]> {
         if !qsag_accel::ct::ct_eq_bytes(&self.key, &key.commitment)
-            || !qsag_accel::ct_eq_bytes(&self.context.key, &key.commitment)
+            || !qsag_accel::ct::ct_eq_bytes(&self.context.key, &key.commitment)
             || self.values.len() != self.input_digests.len()
             || self.receipt_tags.len() != self.input_digests.len()
         {
             return None;
         }
         let digest = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]);
-        let mut found = 0u64;
+        let mut found = false;
         let mut matched_output = [0u8; 32];
         let mut matched_tag = [0u8; 32];
         for ((cand_digest, cand_out), cand_tag) in self
@@ -735,13 +736,12 @@ impl Evaluation {
             .zip(&self.values)
             .zip(&self.receipt_tags)
         {
-            let hit = u64::from(qsag_accel::ct::ct_eq_bytes(cand_digest, &digest))
-                .wrapping_neg();
+            let hit = qsag_accel::ct::ct_eq_bytes(cand_digest, &digest);
             let _ = qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_output, cand_out);
             let _ = qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_tag, cand_tag);
             found |= hit;
         }
-        if found == 0 {
+        if !found {
             return None;
         }
         let expected = receipt_key.tag(&key.commitment, &self.context, &digest, &matched_output);
@@ -784,15 +784,14 @@ impl Evaluation {
             return None;
         }
         let digest = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]);
-        let mut found = 0u64;
+        let mut found = false;
         let mut matched_output = [0u8; 32];
         for (cand_digest, cand_out) in self.input_digests.iter().zip(&self.values) {
-            let hit = u64::from(qsag_accel::ct::ct_eq_bytes(cand_digest, &digest))
-                .wrapping_neg();
+            let hit = qsag_accel::ct::ct_eq_bytes(cand_digest, &digest);
             let _ = qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_output, cand_out);
             found |= hit;
         }
-        (found != 0).then_some(matched_output)
+        found.then_some(matched_output)
     }
 }
 impl Client {
@@ -1201,7 +1200,7 @@ mod tests {
         assert_eq!(
             threshold_issue_blind_vc(&mut acc1, &req_a, &[10], &eval_a, &receipt_key, 42)
                 .unwrap_err(),
-            BlindVcError::DuplicateCredentialReplay
+            BlindVcError::InvalidOprfEvaluation
         );
         assert_eq!(acc1.root(), committed_root);
     }

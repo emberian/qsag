@@ -523,21 +523,14 @@ pub fn extract_base_w_digits_checked(
     if needed_bits > digest_bytes.len().checked_mul(8)? {
         return None;
     }
-    let mask = w - 1;
     let mut out = Vec::with_capacity(ell1);
-    if lg_w == 8 {
-        for &b in digest_bytes.iter().take(ell1) {
-            out.push(b as usize);
+    for idx in 0..ell1 {
+        let mut digit = 0usize;
+        for bit in 0..lg_w {
+            let pos = idx * lg_w + bit;
+            digit = (digit << 1) | usize::from((digest_bytes[pos / 8] >> (7 - (pos % 8))) & 1);
         }
-    } else {
-        let digits_per_byte = 8 / lg_w;
-        for idx in 0..ell1 {
-            let byte_idx = idx / digits_per_byte;
-            let slot_in_byte = idx % digits_per_byte;
-            let shift = (digits_per_byte - 1 - slot_in_byte) * lg_w;
-            let b = digest_bytes[byte_idx] as usize;
-            out.push((b >> shift) & mask);
-        }
+        out.push(digit);
     }
     Some(out)
 }
@@ -2579,5 +2572,37 @@ mod tests {
         let digest = [0xFFu8; 32];
         let limbs = pack_digest32_to_goldilocks5(&digest);
         assert_eq!(unpack_goldilocks5_to_digest32(&limbs), Some(digest));
+    }
+
+    #[test]
+    fn test_extract_base_w_digits_checked_cross_byte_bitstream() {
+        assert_eq!(
+            extract_base_w_digits_checked(8, 2, &[0xe0]),
+            Some(vec![7, 0])
+        );
+        assert_eq!(
+            extract_base_w_digits_checked(8, 5, &[0, 0]),
+            Some(vec![0; 5])
+        );
+        // 0b101_011_11 | 0b0_100_0000 -> digits 5, 3, 6, 4 in base-8 (3 bits MSB-first).
+        assert_eq!(
+            extract_base_w_digits_checked(8, 4, &[0b1010_1111, 0b0100_0000]),
+            Some(vec![5, 3, 6, 4])
+        );
+        // Insufficient bits (3 * 3 = 9 > 8) returns None without panicking.
+        assert_eq!(extract_base_w_digits_checked(8, 3, &[0xff]), None);
+        // Non-dividing widths w = 32 (5 bits), 64 (6 bits), 128 (7 bits) span bytes cleanly.
+        assert_eq!(
+            extract_base_w_digits_checked(32, 3, &[0b10001_010, 0b10_11111_0]),
+            Some(vec![17, 10, 31])
+        );
+        assert_eq!(
+            extract_base_w_digits_checked(64, 2, &[0b100001_11, 0b0011_0000]),
+            Some(vec![33, 51])
+        );
+        assert_eq!(
+            extract_base_w_digits_checked(128, 2, &[0b1000001_0, 0b111111_00]),
+            Some(vec![65, 63])
+        );
     }
 }
