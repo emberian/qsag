@@ -1292,3 +1292,1292 @@ pub fn wots_secret_base<S: TweakableHashSuite>(
     th_secret_prf(suite, &sk.pk_seed, &sk.sk_seed, &adrs)
 }
 
+pub fn compute_wots_pk<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    sk: &PqSecretKey,
+    layer: u32,
+    tree: u64,
+    kp: u32,
+) -> [u8; 32] {
+    let mut endpoints = Vec::with_capacity(params.ell1);
+    for r in 0..params.ell1 {
+        let mut base = wots_secret_base(suite, sk, layer, tree, kp, r as u32);
+        let end = wots_chain_steps(
+            suite,
+            &sk.pk_seed,
+            layer,
+            tree,
+            kp,
+            r as u32,
+            0,
+            params.w - 1,
+            base,
+        );
+        wipe_bytes32(&mut base);
+        endpoints.push(end);
+    }
+    let adrs = HashAdrs {
+        layer,
+        tree,
+        kind: AdrsKind::WotsPk,
+        key_pair: kp,
+        chain_idx: 0,
+        hash_step: 0,
+    };
+    th_tweak_tl(suite, &sk.pk_seed, &adrs, &endpoints)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub fn recover_wots_pk_from_sig<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    pk_seed: &[u8; 32],
+    layer: u32,
+    tree: u64,
+    kp: u32,
+    digits: &[usize],
+    sig_chains: &[[u8; 32]],
+) -> [u8; 32] {
+    let mut endpoints = Vec::with_capacity(params.ell1);
+    for r in 0..params.ell1 {
+        let dr = digits.get(r).copied().unwrap_or(0);
+        let sig_val = sig_chains.get(r).copied().unwrap_or([0u8; 32]);
+        let rem = (params.w - 1).saturating_sub(dr);
+        endpoints.push(wots_chain_steps(
+            suite, pk_seed, layer, tree, kp, r as u32, dr as u32, rem, sig_val,
+        ));
+    }
+    let adrs = HashAdrs {
+        layer,
+        tree,
+        kind: AdrsKind::WotsPk,
+        key_pair: kp,
+        chain_idx: 0,
+        hash_step: 0,
+    };
+    th_tweak_tl(suite, pk_seed, &adrs, &endpoints)
+}
+
+/// Build bottom-up Merkle authentication path from pre-evaluated leaf slice `leaves[0..2^height]`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub fn build_merkle_auth_path_from_leaves<S: TweakableHashSuite>(
+    suite: S,
+    pk_seed: &[u8; 32],
+    layer: u32,
+    tree: u64,
+    node_kind: AdrsKind,
+    key_pair: u32,
+    leaves: &[[u8; 32]],
+    height: usize,
+    base_node_idx: usize,
+    local_idx: usize,
+) -> ([u8; 32], Vec<[u8; 32]>) {
+    debug_assert_eq!(leaves.len(), 1usize << height);
+    let mut cur_level = leaves.to_vec();
+    let mut path = Vec::with_capacity(height);
+    let mut idx_in_sub = local_idx;
+    for h_step in 1..=height {
+        let sib_idx = idx_in_sub ^ 1;
+        path.push(cur_level[sib_idx]);
+        let next_len = cur_level.len() / 2;
+        let level_node_offset = base_node_idx << (height - h_step);
+        let mut next_level = Vec::with_capacity(next_len);
+        for pair_idx in 0..next_len {
+            let adrs = HashAdrs {
+                layer,
+                tree,
+                kind: node_kind,
+                key_pair,
+                chain_idx: h_step as u32,
+                hash_step: (level_node_offset + pair_idx) as u32,
+            };
+            next_level.push(th_node_h(
+                suite,
+                pk_seed,
+                &adrs,
+                &cur_level[2 * pair_idx],
+                &cur_level[2 * pair_idx + 1],
+            ));
+        }
+        cur_level = next_level;
+        idx_in_sub >>= 1;
+    }
+    (cur_level[0], path)
+}
+
+/// Top-down `build_merkle_from_leaves_topdown`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub fn build_merkle_from_leaves_topdown<S: TweakableHashSuite>(
+    suite: S,
+    pk_seed: &[u8; 32],
+    layer: u32,
+    tree: u64,
+    node_kind: AdrsKind,
+    key_pair: u32,
+    leaves: &[[u8; 32]],
+    height: usize,
+    base_node_idx: usize,
+    local_idx: usize,
+) -> ([u8; 32], Vec<[u8; 32]>) {
+    let (root, mut bottom_up_path) = build_merkle_auth_path_from_leaves(
+        suite,
+        pk_seed,
+        layer,
+        tree,
+        node_kind,
+        key_pair,
+        leaves,
+        height,
+        base_node_idx,
+        local_idx,
+    );
+    bottom_up_path.reverse();
+    (root, bottom_up_path)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub fn walk_merkle_auth_path<S: TweakableHashSuite>(
+    suite: S,
+    pk_seed: &[u8; 32],
+    layer: u32,
+    tree: u64,
+    node_kind: AdrsKind,
+    key_pair: u32,
+    height: usize,
+    node_idx: usize,
+    local_idx: usize,
+    leaf_hash: [u8; 32],
+    auth_path: &[[u8; 32]],
+) -> Option<[u8; 32]> {
+    if height == 0 {
+        if auth_path.is_empty() {
+            Some(leaf_hash)
+        } else {
+            None
+        }
+    } else {
+        if auth_path.is_empty() {
+            return None;
+        }
+        let sib = auth_path[0];
+        let rest = &auth_path[1..];
+        let half = 1usize << (height - 1);
+        let adrs = HashAdrs {
+            layer,
+            tree,
+            kind: node_kind,
+            key_pair,
+            chain_idx: height as u32,
+            hash_step: node_idx as u32,
+        };
+        if local_idx < half {
+            let sub = walk_merkle_auth_path(
+                suite,
+                pk_seed,
+                layer,
+                tree,
+                node_kind,
+                key_pair,
+                height - 1,
+                2 * node_idx,
+                local_idx,
+                leaf_hash,
+                rest,
+            )?;
+            Some(th_node_h(suite, pk_seed, &adrs, &sub, &sib))
+        } else {
+            let sub = walk_merkle_auth_path(
+                suite,
+                pk_seed,
+                layer,
+                tree,
+                node_kind,
+                key_pair,
+                height - 1,
+                2 * node_idx + 1,
+                local_idx - half,
+                leaf_hash,
+                rest,
+            )?;
+            Some(th_node_h(suite, pk_seed, &adrs, &sib, &sub))
+        }
+    }
+}
+
+/// FORS secret leaf PRF binding `(fors_tree_idx, leaf_in_tree)` in `(chain_idx, hash_step)`
+/// so `fors_trees * 2^fors_height` can never overflow `u32` (`[P1-04]`).
+#[inline]
+pub fn fors_secret_leaf<S: TweakableHashSuite>(
+    suite: S,
+    sk: &PqSecretKey,
+    tree_idx: u64,
+    kp_idx: u32,
+    fors_tree_idx: u32,
+    leaf_in_tree: u32,
+) -> [u8; 32] {
+    let adrs = HashAdrs {
+        layer: 0,
+        tree: tree_idx,
+        kind: AdrsKind::ForsPrf,
+        key_pair: kp_idx,
+        chain_idx: fors_tree_idx,
+        hash_step: leaf_in_tree,
+    };
+    th_secret_prf(suite, &sk.pk_seed, &sk.sk_seed, &adrs)
+}
+
+#[inline]
+pub fn fors_leaf_hash_from_secret<S: TweakableHashSuite>(
+    suite: S,
+    pk_seed: &[u8; 32],
+    tree_idx: u64,
+    kp_idx: u32,
+    fors_tree_idx: u32,
+    leaf_in_tree: u32,
+    sec_val: &[u8; 32],
+) -> [u8; 32] {
+    let adrs = HashAdrs {
+        layer: 0,
+        tree: tree_idx,
+        kind: AdrsKind::ForsTree,
+        key_pair: kp_idx,
+        chain_idx: fors_tree_idx,
+        hash_step: leaf_in_tree,
+    };
+    th_chain_f(suite, pk_seed, &adrs, sec_val)
+}
+
+/// Extract `width` bits (`0..=64`) starting at bit offset `start_bit` with **zero modulo wrapping**
+/// (`[P0-02]`, `[P0-03]`). Returns `None` if `width > 64` or `start_bit + width > bytes.len() * 8`.
+#[inline]
+pub fn extract_bit_window_checked(bytes: &[u8], start_bit: usize, width: usize) -> Option<u64> {
+    if width > 64 {
+        return None;
+    }
+    if width == 0 {
+        return Some(0);
+    }
+    let end_bit = start_bit.checked_add(width)?;
+    if end_bit > bytes.len().checked_mul(8)? {
+        return None;
+    }
+    let mut acc = 0u64;
+    for b in 0..width {
+        let pos = start_bit + b;
+        let byte_val = bytes[pos / 8];
+        let bit = ((byte_val >> (7 - (pos % 8))) & 1) as u64;
+        acc = (acc << 1) | bit;
+    }
+    Some(acc)
+}
+
+/// Derive `(leaf_global_idx, fors_indices[0..k])` for stateless `Corduroy` / `Baggy` from
+/// strictly disjoint XOF byte windows of `th_xof_msg(suite, r_rand, pk_seed, pk_root, mu)` (`[P0-03]`).
+pub fn derive_stateless_leaf_and_fors_indices<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    r_rand: &[u8; 32],
+    pk_seed: &[u8; 32],
+    pk_root: &[u8; 32],
+    mu: &[u8; 32],
+) -> Option<(usize, Vec<usize>)> {
+    if params.stateful || !params.is_well_formed() {
+        return None;
+    }
+    let fors_bits = params.fors_trees.checked_mul(params.fors_height)?;
+    let fors_bytes = fors_bits.div_ceil(8);
+    let tree_bits = params.total_tree_bits()?;
+    let tree_bytes = tree_bits.div_ceil(8);
+    let total_bytes = fors_bytes.checked_add(tree_bytes)?;
+
+    let xof = th_xof_msg(suite, r_rand, pk_seed, pk_root, mu, total_bytes);
+    let fors_slice = &xof[..fors_bytes];
+    let tree_slice = &xof[fors_bytes..total_bytes];
+
+    let mut idxs = Vec::with_capacity(params.fors_trees);
+    for j in 0..params.fors_trees {
+        let bit_off = j.checked_mul(params.fors_height)?;
+        let idx_u64 = extract_bit_window_checked(fors_slice, bit_off, params.fors_height)?;
+        idxs.push(usize::try_from(idx_u64).ok()?);
+    }
+    let leaf_u64 = extract_bit_window_checked(tree_slice, 0, tree_bits)?;
+    let leaf_global_idx = usize::try_from(leaf_u64).ok()?;
+    Some((leaf_global_idx, idxs))
+}
+
+pub fn compute_xmss_subtree_root<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    sk: &PqSecretKey,
+    layer: u32,
+    tree_idx: u64,
+) -> [u8; 32] {
+    let leaf_count = 1usize << params.subtree_height;
+    let mut leaves = Vec::with_capacity(leaf_count);
+    for kp in 0..leaf_count {
+        leaves.push(compute_wots_pk(
+            suite, params, sk, layer, tree_idx, kp as u32,
+        ));
+    }
+    let (root, _) = build_merkle_from_leaves_topdown(
+        suite,
+        &sk.pk_seed,
+        layer,
+        tree_idx,
+        AdrsKind::Tree,
+        0,
+        &leaves,
+        params.subtree_height,
+        0,
+        0,
+    );
+    root
+}
+
+/// Derive canonical `PqPublicKey` `(pk_seed, pk_root)`.
+pub fn derive_public_key<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    sk: &PqSecretKey,
+) -> PqPublicKey {
+    let top_layer = (params.num_layers.saturating_sub(1)) as u32;
+    let pk_root = compute_xmss_subtree_root(suite, params, sk, top_layer, 0);
+    PqPublicKey {
+        pk_seed: sk.pk_seed,
+        pk_root,
+    }
+}
+
+/// Internal core hypertree + FORS signer shared ONLY after stateless `H_msg` leaf derivation or
+/// stateful `StatefulEpochLatch` reservation has fixed `(leaf_global_idx, r_rand)`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub(crate) fn sign_hypertree_core<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    sk: &PqSecretKey,
+    pk: &PqPublicKey,
+    mu: &[u8; 32],
+    r_rand: [u8; 32],
+    leaf_global_idx: usize,
+    fors_idxs: Option<&[usize]>,
+    max_grind: u32,
+) -> Option<PqHashSig> {
+    let sub_leaves = 1usize << params.subtree_height;
+    let (fors_openings, mut cur_root) = if params.stateful {
+        (Vec::new(), *mu)
+    } else {
+        let idxs = fors_idxs?;
+        let kp0 = (leaf_global_idx % sub_leaves) as u32;
+        let tree0 = (leaf_global_idx / sub_leaves) as u64;
+        let fors_leaf_count = 1usize << params.fors_height;
+        let mut openings = Vec::with_capacity(params.fors_trees);
+        let mut roots = Vec::with_capacity(params.fors_trees);
+        for (j, &idx_j) in idxs.iter().enumerate().take(params.fors_trees) {
+            let mut leaves_j = Vec::with_capacity(fors_leaf_count);
+            let mut revealed_sec = [0u8; 32];
+            for u in 0..fors_leaf_count {
+                let mut sec = fors_secret_leaf(suite, sk, tree0, kp0, j as u32, u as u32);
+                leaves_j.push(fors_leaf_hash_from_secret(
+                    suite,
+                    &sk.pk_seed,
+                    tree0,
+                    kp0,
+                    j as u32,
+                    u as u32,
+                    &sec,
+                ));
+                if u == idx_j {
+                    revealed_sec = sec;
+                }
+                wipe_bytes32(&mut sec);
+            }
+            let (root_j, path_j) = build_merkle_from_leaves_topdown(
+                suite,
+                &sk.pk_seed,
+                0,
+                tree0,
+                AdrsKind::ForsTree,
+                kp0,
+                &leaves_j,
+                params.fors_height,
+                j,
+                idx_j,
+            );
+            roots.push(root_j);
+            openings.push(ForsTreeOpening {
+                secret_val: revealed_sec,
+                auth_path: path_j,
+            });
+        }
+        let fors_pk_adrs = HashAdrs {
+            layer: 0,
+            tree: tree0,
+            kind: AdrsKind::ForsRoots,
+            key_pair: kp0,
+            chain_idx: 0,
+            hash_step: 0,
+        };
+        let fors_pk = th_tweak_tl(suite, &sk.pk_seed, &fors_pk_adrs, &roots);
+        (openings, fors_pk)
+    };
+
+    let mut layer_sigs = Vec::with_capacity(params.num_layers);
+    let mut cur_global = leaf_global_idx;
+    for layer_idx in 0..params.num_layers {
+        let kp_idx = cur_global % sub_leaves;
+        let tree_idx_nat = cur_global / sub_leaves;
+        let tree_idx = tree_idx_nat as u64;
+        let layer_u32 = layer_idx as u32;
+        let kp_u32 = kp_idx as u32;
+
+        // CRITICAL ([P0-02], [P0-03]): ONLY stateful one-time layer 0 hashes `(r_rand, mu)`.
+        // Every upper layer (`layer_idx >= 1`) AND stateless layer 0 (`!stateful`)
+        // signs the deterministic child/FORS root WITHOUT `r_rand`!
+        let (ctr, digits, _) = if params.stateful && layer_idx == 0 {
+            grind_tsw_leaf_counter(
+                suite,
+                params.w,
+                params.ell1,
+                params.target_sum(),
+                &r_rand,
+                &sk.pk_seed,
+                &pk.pk_root,
+                &cur_root,
+                tree_idx,
+                kp_u32,
+                max_grind,
+            )?
+        } else {
+            grind_tsw_internal_counter(
+                suite,
+                params.w,
+                params.ell1,
+                params.target_sum(),
+                &sk.pk_seed,
+                &pk.pk_root,
+                &cur_root,
+                layer_u32,
+                tree_idx,
+                kp_u32,
+                max_grind,
+            )?
+        };
+
+        let mut wots_chains = Vec::with_capacity(params.ell1);
+        for (r, &dr) in digits.iter().enumerate().take(params.ell1) {
+            let mut base = wots_secret_base(suite, sk, layer_u32, tree_idx, kp_u32, r as u32);
+            let ch = wots_chain_steps(
+                suite,
+                &sk.pk_seed,
+                layer_u32,
+                tree_idx,
+                kp_u32,
+                r as u32,
+                0,
+                dr,
+                base,
+            );
+            wipe_bytes32(&mut base);
+            wots_chains.push(ch);
+        }
+        let mut subtree_leaves = Vec::with_capacity(sub_leaves);
+        for kp in 0..sub_leaves {
+            subtree_leaves.push(compute_wots_pk(
+                suite, params, sk, layer_u32, tree_idx, kp as u32,
+            ));
+        }
+        let (next_root, auth_path) = build_merkle_from_leaves_topdown(
+            suite,
+            &sk.pk_seed,
+            layer_u32,
+            tree_idx,
+            AdrsKind::Tree,
+            0,
+            &subtree_leaves,
+            params.subtree_height,
+            0,
+            kp_idx,
+        );
+        layer_sigs.push(LayerXmssSig {
+            tsw_ctr: ctr,
+            wots_chains,
+            auth_path,
+        });
+        cur_root = next_root;
+        cur_global = tree_idx_nat;
+    }
+
+    let sig = PqHashSig {
+        r_rand,
+        msg_tsw_ctr: 0,
+        leaf_global_idx,
+        fors_openings,
+        layer_sigs,
+    };
+    if !verify_pq_hash_sig_prehashed(suite, params, pk, mu, &sig) {
+        return None;
+    }
+    Some(sig)
+}
+
+/// Stateless single-party reference signer (`Corduroy` / `Baggy`).
+/// Rejects `params.stateful == true` and derives `leaf_global_idx` strictly from
+/// `th_xof_msg(r_rand, pk_seed, pk_root, mu)` (`[P0-03]`).
+pub fn eval_single_sign_stateless<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    sk: &PqSecretKey,
+    pk: &PqPublicKey,
+    msg: &[u8],
+    opt_rand: &[u8],
+    max_grind: u32,
+) -> Option<PqHashSig> {
+    if !params.is_well_formed() || params.stateful {
+        return None;
+    }
+    let mu = th_pre_hash(suite, &pk.pk_seed, &pk.pk_root, msg);
+    let r_rand = th_prf_msg(suite, &sk.sk_prf, opt_rand, &mu);
+    let (leaf_global_idx, fors_idxs) = derive_stateless_leaf_and_fors_indices(
+        suite,
+        params,
+        &r_rand,
+        &pk.pk_seed,
+        &pk.pk_root,
+        &mu,
+    )?;
+    sign_hypertree_core(
+        suite,
+        params,
+        sk,
+        pk,
+        &mu,
+        r_rand,
+        leaf_global_idx,
+        Some(&fors_idxs),
+        max_grind,
+    )
+}
+
+/// Stateful single-party reference signer (`JortsPoseidon2`) gated behind a mandatory
+/// [`StatefulEpochLatch`] and 100% deterministic `r_rand` (`[P0-04]`).
+///
+/// The caller holds the whole key, so `latch` is the only latch there is: a committee of one
+/// whose single reservation is the committee-wide one. A key held as shares has one latch per
+/// holder and must not be signed through this function; the threshold signers in
+/// `poseidon2_mpc` additionally require full attendance or a committee latch certificate.
+pub fn eval_single_sign_stateful<S: TweakableHashSuite, L: StatefulEpochLatch>(
+    suite: S,
+    params: &PqHashParams,
+    sk: &PqSecretKey,
+    pk: &PqPublicKey,
+    latch: &mut L,
+    msg: &[u8],
+    max_grind: u32,
+) -> Result<PqHashSig, EpochLatchError> {
+    if !params.is_well_formed() || !params.stateful {
+        return Err(EpochLatchError::InvalidCapacity);
+    }
+    let mu = th_pre_hash(suite, &pk.pk_seed, &pk.pk_root, msg);
+    let ep = latch.reserve_next_epoch(params.max_sigs_log2, &mu)?;
+    let leaf_global_idx = usize::try_from(ep).map_err(|_| EpochLatchError::Exhausted)?;
+    if !params.leaf_idx_in_range(leaf_global_idx) {
+        return Err(EpochLatchError::Exhausted);
+    }
+    let r_rand = derive_stateful_r_rand(suite, &sk.sk_prf, ep, &pk.pk_seed, &mu);
+    sign_hypertree_core(
+        suite,
+        params,
+        sk,
+        pk,
+        &mu,
+        r_rand,
+        leaf_global_idx,
+        None,
+        max_grind,
+    )
+    .ok_or(EpochLatchError::PersistenceFailure)
+}
+
+/// Crash-recovery retry for an in-flight stateful `Jorts` signature: succeeds **if and only if**
+/// `epoch` is the currently latched epoch in `latch` AND `msg` hashes to the exact bound `mu`,
+/// producing a bit-for-bit identical signature (`[P0-04]`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub fn retry_single_sign_stateful<S: TweakableHashSuite, L: StatefulEpochLatch>(
+    suite: S,
+    params: &PqHashParams,
+    sk: &PqSecretKey,
+    pk: &PqPublicKey,
+    latch: &mut L,
+    epoch: u64,
+    msg: &[u8],
+    max_grind: u32,
+) -> Result<PqHashSig, EpochLatchError> {
+    if !params.is_well_formed() || !params.stateful {
+        return Err(EpochLatchError::InvalidCapacity);
+    }
+    let mu = th_pre_hash(suite, &pk.pk_seed, &pk.pk_root, msg);
+    let ep = latch.retry_latched_epoch(epoch, &mu)?;
+    let leaf_global_idx = usize::try_from(ep).map_err(|_| EpochLatchError::Exhausted)?;
+    let r_rand = derive_stateful_r_rand(suite, &sk.sk_prf, ep, &pk.pk_seed, &mu);
+    sign_hypertree_core(
+        suite,
+        params,
+        sk,
+        pk,
+        &mu,
+        r_rand,
+        leaf_global_idx,
+        None,
+        max_grind,
+    )
+    .ok_or(EpochLatchError::PersistenceFailure)
+}
+
+fn verify_pq_hash_sig_prehashed<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    mu: &[u8; 32],
+    sig: &PqHashSig,
+) -> bool {
+    if !params.is_well_formed() || !params.leaf_idx_in_range(sig.leaf_global_idx) {
+        return false;
+    }
+    if sig.layer_sigs.len() != params.num_layers || sig.msg_tsw_ctr != 0 {
+        return false;
+    }
+    let sub_leaves = 1usize << params.subtree_height;
+
+    let mut cur_root = if params.stateful {
+        if !sig.fors_openings.is_empty() {
+            return false;
+        }
+        *mu
+    } else {
+        if sig.fors_openings.len() != params.fors_trees {
+            return false;
+        }
+        let Some((derived_leaf_idx, idxs)) = derive_stateless_leaf_and_fors_indices(
+            suite,
+            params,
+            &sig.r_rand,
+            &pk.pk_seed,
+            &pk.pk_root,
+            mu,
+        ) else {
+            return false;
+        };
+        // CRITICAL ([P0-03]): Reject signatures whose leaf index diverges from XOF `H_msg`!
+        if sig.leaf_global_idx != derived_leaf_idx {
+            return false;
+        }
+        let kp0 = (sig.leaf_global_idx % sub_leaves) as u32;
+        let tree0 = (sig.leaf_global_idx / sub_leaves) as u64;
+        let mut roots = Vec::with_capacity(params.fors_trees);
+        let mut j = 0;
+        while j < params.fors_trees {
+            let idx_j = idxs[j];
+            let op = &sig.fors_openings[j];
+            let leaf_h = fors_leaf_hash_from_secret(
+                suite,
+                &pk.pk_seed,
+                tree0,
+                kp0,
+                j as u32,
+                idx_j as u32,
+                &op.secret_val,
+            );
+            let Some(root_j) = walk_merkle_auth_path(
+                suite,
+                &pk.pk_seed,
+                0,
+                tree0,
+                AdrsKind::ForsTree,
+                kp0,
+                params.fors_height,
+                j,
+                idx_j,
+                leaf_h,
+                &op.auth_path,
+            ) else {
+                return false;
+            };
+            roots.push(root_j);
+            j += 1;
+        }
+        let fors_pk_adrs = HashAdrs {
+            layer: 0,
+            tree: tree0,
+            kind: AdrsKind::ForsRoots,
+            key_pair: kp0,
+            chain_idx: 0,
+            hash_step: 0,
+        };
+        th_tweak_tl(suite, &pk.pk_seed, &fors_pk_adrs, &roots)
+    };
+
+    let mut cur_global = sig.leaf_global_idx;
+    for (layer_idx, lsig) in sig.layer_sigs.iter().enumerate() {
+        let kp_idx = cur_global % sub_leaves;
+        let tree_idx_nat = cur_global / sub_leaves;
+        let tree_idx = tree_idx_nat as u64;
+        let layer_u32 = layer_idx as u32;
+        let kp_u32 = kp_idx as u32;
+
+        let hmsg = if params.stateful && layer_idx == 0 {
+            th_hash_leaf_msg(
+                suite,
+                &sig.r_rand,
+                &pk.pk_seed,
+                &pk.pk_root,
+                &cur_root,
+                tree_idx,
+                kp_u32,
+                lsig.tsw_ctr,
+            )
+        } else {
+            th_hash_internal_node(
+                suite,
+                &pk.pk_seed,
+                &pk.pk_root,
+                &cur_root,
+                layer_u32,
+                tree_idx,
+                kp_u32,
+                lsig.tsw_ctr,
+            )
+        };
+        let Some(digits) = extract_base_w_digits_checked(params.w, params.ell1, &hmsg) else {
+            return false;
+        };
+        if !check_target_sum(params.w, params.ell1, params.target_sum(), &digits) {
+            return false;
+        }
+        if lsig.wots_chains.len() != params.ell1 {
+            return false;
+        }
+        let wots_pk = recover_wots_pk_from_sig(
+            suite,
+            params,
+            &pk.pk_seed,
+            layer_u32,
+            tree_idx,
+            kp_u32,
+            &digits,
+            &lsig.wots_chains,
+        );
+        let Some(next_root) = walk_merkle_auth_path(
+            suite,
+            &pk.pk_seed,
+            layer_u32,
+            tree_idx,
+            AdrsKind::Tree,
+            0,
+            params.subtree_height,
+            0,
+            kp_idx,
+            wots_pk,
+            &lsig.auth_path,
+        ) else {
+            return false;
+        };
+        cur_root = next_root;
+        cur_global = tree_idx_nat;
+    }
+
+    ct_eq_bytes32(&cur_root, &pk.pk_root)
+}
+
+/// Unified verifier for stateless `Corduroy` / `Baggy` and stateful `Jorts`.
+pub fn verify_pq_hash_sig<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    msg: &[u8],
+    sig: &PqHashSig,
+) -> bool {
+    let mu = th_pre_hash(suite, &pk.pk_seed, &pk.pk_root, msg);
+    verify_pq_hash_sig_prehashed(suite, params, pk, &mu, sig)
+}
+
+/// Batch verification relation over `Poseidon2` `Jorts` signatures enforcing non-emptiness AND
+/// strict pairwise distinctness of `(pk, sig.leaf_global_idx)` (`[P0-04]`).
+pub fn valid_jorts_batch(
+    params: &PqHashParams,
+    items: &[(PqPublicKey, &[u8], PqHashSig)],
+) -> bool {
+    if !params.stateful || !params.is_well_formed() || items.is_empty() {
+        return false;
+    }
+    let mut seen_keys_epochs: Vec<([u8; 64], u64)> = Vec::with_capacity(items.len());
+    for (pk, _, sig) in items {
+        seen_keys_epochs.push((pk.to_wire_bytes(), sig.leaf_global_idx as u64));
+    }
+    seen_keys_epochs.sort_unstable();
+    for pair in seen_keys_epochs.windows(2) {
+        if pair[0] == pair[1] {
+            return false;
+        }
+    }
+    items
+        .iter()
+        .all(|(pk, msg, sig)| verify_pq_hash_sig(Poseidon2Suite, params, pk, msg, sig))
+}
+
+/// Enrolled identity digest `idCommit = cSHAKE256("QSAG.PQ.HYBRID.ID/v1", encodeMultiFrame [pk1, pk2])`.
+#[inline]
+pub fn compute_hybrid_id_commit(pk1_bytes: &[u8], pk2_bytes: &[u8]) -> [u8; 32] {
+    let frame = encode_multi_frame(&[pk1_bytes, pk2_bytes]);
+    cshake256_32(HYBRID_ID_CUSTOM, &frame)
+}
+
+/// Domain-separated bound message `encodeMultiFrame([HYBRID_MSG_TAG, id_commit, pk1, pk2, msg])`
+/// signed by BOTH component schemes so neither signature can be stripped or replayed under a
+/// substitute partner key (`[P2-04]`).
+#[inline]
+pub fn build_hybrid_bound_message(
+    id_commit: &[u8; 32],
+    pk1_bytes: &[u8],
+    carried_pk2: &PqPublicKey,
+    msg: &[u8],
+) -> Vec<u8> {
+    let pk2_wire = carried_pk2.to_wire_bytes();
+    encode_multi_frame(&[HYBRID_MSG_TAG, id_commit, pk1_bytes, &pk2_wire, msg])
+}
+
+/// Committed-identity pinning check.
+#[inline]
+pub fn check_hybrid_pinning(
+    id_commit: &[u8; 32],
+    pk1_bytes: &[u8],
+    carried_pk2: &PqPublicKey,
+) -> bool {
+    let pk2_wire = carried_pk2.to_wire_bytes();
+    let cand = compute_hybrid_id_commit(pk1_bytes, &pk2_wire);
+    ct_eq_bytes32(&cand, id_commit)
+}
+
+/// Wire envelope carrying auxiliary signature `sig1`, candidate `carried_pk2`, and PQ signature `sig2`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HybridPinnedSig<Sig1> {
+    pub sig1: Sig1,
+    pub carried_pk2: PqPublicKey,
+    pub sig2: PqHashSig,
+}
+
+/// Construct a committed-identity hybrid signature binding `id_commit || pk1 || pk2 || msg` into
+/// both component signatures.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub fn sign_hybrid_pinned_stateless<S: TweakableHashSuite, Sig1, FSign1>(
+    suite: S,
+    params: &PqHashParams,
+    pk1_bytes: &[u8],
+    sign_s1: FSign1,
+    sk2: &PqSecretKey,
+    pk2: &PqPublicKey,
+    msg: &[u8],
+    opt_rand: &[u8],
+    max_grind: u32,
+) -> Option<([u8; 32], HybridPinnedSig<Sig1>)>
+where
+    FSign1: FnOnce(&[u8]) -> Sig1,
+{
+    let pk2_wire = pk2.to_wire_bytes();
+    let id_commit = compute_hybrid_id_commit(pk1_bytes, &pk2_wire);
+    let bound_msg = build_hybrid_bound_message(&id_commit, pk1_bytes, pk2, msg);
+    let sig1 = sign_s1(&bound_msg);
+    let sig2 =
+        eval_single_sign_stateless(suite, params, sk2, pk2, &bound_msg, opt_rand, max_grind)?;
+    Some((
+        id_commit,
+        HybridPinnedSig {
+            sig1,
+            carried_pk2: *pk2,
+            sig2,
+        },
+    ))
+}
+
+/// Committed-identity hybrid signature verifier (`S_1 && S_2` bound under `id_commit || pk1 || pk2 || msg`).
+pub fn verify_hybrid_pinned_sig<S: TweakableHashSuite, Sig1, F1>(
+    suite: S,
+    params: &PqHashParams,
+    id_commit: &[u8; 32],
+    pk1_bytes: &[u8],
+    verify_s1: F1,
+    msg: &[u8],
+    hsig: &HybridPinnedSig<Sig1>,
+) -> bool
+where
+    F1: FnOnce(&[u8], &[u8], &Sig1) -> bool,
+{
+    if !check_hybrid_pinning(id_commit, pk1_bytes, &hsig.carried_pk2) {
+        return false;
+    }
+    let bound_msg = build_hybrid_bound_message(id_commit, pk1_bytes, &hsig.carried_pk2, msg);
+    verify_s1(pk1_bytes, &bound_msg, &hsig.sig1)
+        && verify_pq_hash_sig(suite, params, &hsig.carried_pk2, &bound_msg, &hsig.sig2)
+}
+
+/// Exact wire-codec failure stage distinguishing malformed syntax from cryptographic rejection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultStage {
+    HeaderMagicOrVersion,
+    PublicKeyLength,
+    SignatureFraming,
+    LayerCountMismatch,
+}
+
+/// Tri-state verification reply (`VerifyReply`): never conflates `WireMalformed` with `Reject`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifyReply {
+    Accept,
+    Reject,
+    WireMalformed(FaultStage),
+}
+
+/// Tri-state wire envelope verifier.
+pub fn verify_pq_wire_envelope<S: TweakableHashSuite>(
+    suite: S,
+    params: &PqHashParams,
+    raw_pk: &[u8],
+    raw_msg: &[u8],
+    magic_prefix: &[u8],
+    r_rand_slice: &[u8],
+    sig: &PqHashSig,
+) -> VerifyReply {
+    if magic_prefix != PQ_WIRE_MAGIC {
+        return VerifyReply::WireMalformed(FaultStage::HeaderMagicOrVersion);
+    }
+    let Ok(pk) = PqPublicKey::from_wire_bytes(raw_pk) else {
+        return VerifyReply::WireMalformed(FaultStage::PublicKeyLength);
+    };
+    if !params.is_well_formed() || !params.leaf_idx_in_range(sig.leaf_global_idx) {
+        return VerifyReply::WireMalformed(FaultStage::SignatureFraming);
+    }
+    if sig.layer_sigs.len() != params.num_layers {
+        return VerifyReply::WireMalformed(FaultStage::LayerCountMismatch);
+    }
+    if r_rand_slice.len() != 32 || r_rand_slice != sig.r_rand.as_slice() || sig.msg_tsw_ctr != 0 {
+        return VerifyReply::WireMalformed(FaultStage::SignatureFraming);
+    }
+    if params.stateful {
+        if !sig.fors_openings.is_empty() {
+            return VerifyReply::WireMalformed(FaultStage::SignatureFraming);
+        }
+    } else if sig.fors_openings.len() != params.fors_trees
+        || sig
+            .fors_openings
+            .iter()
+            .any(|op| op.auth_path.len() != params.fors_height)
+    {
+        return VerifyReply::WireMalformed(FaultStage::SignatureFraming);
+    }
+    if sig.layer_sigs.iter().any(|ls| {
+        ls.wots_chains.len() != params.ell1 || ls.auth_path.len() != params.subtree_height
+    }) {
+        return VerifyReply::WireMalformed(FaultStage::SignatureFraming);
+    }
+    if verify_pq_hash_sig(suite, params, &pk, raw_msg, sig) {
+        VerifyReply::Accept
+    } else {
+        VerifyReply::Reject
+    }
+}
+
+/// Injective canonical 5-limb 56-bit Goldilocks packing for 32-byte digests (`[P1-02]`).
+/// Eliminates the $2^{32}$-collision modulo-$p$ bias of 4-limb 64-bit reduction.
+#[inline]
+pub fn pack_digest32_to_goldilocks5(digest: &[u8; 32]) -> [Goldilocks; 5] {
+    pack_bytes32_to_limbs56_canonical(digest)
+}
+
+/// Inverse canonical check unpacking 5 56-bit Goldilocks limbs (`limbs[0..5] < 2^56`, big-endian
+/// 7-byte chunks with canonical `[0x01, 0x00, 0x00]` suffix in `limbs[4]`) back to an exact 32-byte
+/// digest (`None` if any limb exceeds 56 bits or violates the domain suffix).
+pub fn unpack_goldilocks5_to_digest32(limbs: &[Goldilocks; 5]) -> Option<[u8; 32]> {
+    let mut buf = [0u8; 35];
+    for i in 0..5 {
+        let v = limbs[i].canonical();
+        if (v >> 56) != 0 {
+            return None;
+        }
+        let be = v.to_be_bytes();
+        buf[7 * i..7 * (i + 1)].copy_from_slice(&be[1..8]);
+    }
+    if buf[32] != 0x01 || buf[33] != 0x00 || buf[34] != 0x00 {
+        wipe_slice(&mut buf);
+        return None;
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&buf[0..32]);
+    wipe_slice(&mut buf);
+    Some(out)
+}
+
+impl core::fmt::Display for EpochLatchError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::error::Error for EpochLatchError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn test_stateless_tsw_roundtrip_hmsg_leaf_binding_and_upper_layer_determinism() {
+        let sk = PqSecretKey {
+            sk_seed: [0x11; 32],
+            sk_prf: [0x22; 32],
+            pk_seed: [0x33; 32],
+        };
+        let params = PqHashParams::COMPACT_GOLDEN;
+        assert!(params.is_well_formed());
+        let pk = derive_public_key(Cshake256Suite, &params, &sk);
+        let sig1 = eval_single_sign_stateless(
+            Cshake256Suite,
+            &params,
+            &sk,
+            &pk,
+            b"tsw-msg-1",
+            &[0x44; 32],
+            100_000,
+        )
+        .expect("stateless sign 1");
+        assert!(verify_pq_hash_sig(
+            Cshake256Suite,
+            &params,
+            &pk,
+            b"tsw-msg-1",
+            &sig1
+        ));
+        assert!(!verify_pq_hash_sig(
+            Cshake256Suite,
+            &params,
+            &pk,
+            b"tsw-msg-tampered",
+            &sig1
+        ));
+
+        // Tampering with leaf_global_idx MUST be rejected by H_msg binding ([P0-03]).
+        let mut forged_leaf = sig1.clone();
+        forged_leaf.leaf_global_idx ^= 1;
+        assert!(!verify_pq_hash_sig(
+            Cshake256Suite,
+            &params,
+            &pk,
+            b"tsw-msg-1",
+            &forged_leaf
+        ));
+
+        // Upper-layer determinism ([P0-02]): two distinct messages landing in the same top-layer
+        // kp index MUST produce bit-for-bit identical top-layer WOTS+C chains & tsw_ctr!
+        let mut saw_same_top_kp = false;
+        for nonce in 0..32u8 {
+            let sig_other = eval_single_sign_stateless(
+                Cshake256Suite,
+                &params,
+                &sk,
+                &pk,
+                &[b'M', nonce],
+                &[nonce; 32],
+                100_000,
+            )
+            .expect("stateless sign loop");
+            let top_shift = (params.num_layers - 1) * params.subtree_height;
+            if (sig_other.leaf_global_idx >> top_shift) == (sig1.leaf_global_idx >> top_shift)
+                && sig_other.r_rand != sig1.r_rand
+            {
+                assert_eq!(
+                    sig_other.layer_sigs[params.num_layers - 1],
+                    sig1.layer_sigs[params.num_layers - 1],
+                    "top-layer WOTS+C signature MUST be 100% deterministic and independent of r_rand"
+                );
+                saw_same_top_kp = true;
+                break;
+            }
+        }
+        assert!(
+            saw_same_top_kp,
+            "expected collision in 4-leaf top subtree within 32 trials"
+        );
+
+        let wire = sig1.to_wire_bytes(&params).unwrap();
+        assert_eq!(&wire[0..5], b"QSAG\x01");
+        let decoded = PqHashSig::from_wire_bytes(&params, &wire).unwrap();
+        assert_eq!(decoded, sig1);
+        assert_eq!(
+            verify_pq_wire_envelope(
+                Cshake256Suite,
+                &params,
+                &pk.to_wire_bytes(),
+                b"tsw-msg-1",
+                &PQ_WIRE_MAGIC,
+                &sig1.r_rand,
+                &decoded
+            ),
+            VerifyReply::Accept
+        );
+    }
+
+    #[test]
+    fn test_stateful_jorts_epoch_latch_retry_idempotence_and_batch_uniqueness() {
+        let sk = PqSecretKey {
+            sk_seed: [0x51; 32],
+            sk_prf: [0x62; 32],
+            pk_seed: [0x73; 32],
+        };
+        let params = PqHashParams::COMPACT_JORTS;
+        assert!(params.is_well_formed());
+        let pk = derive_public_key(Poseidon2Suite, &params, &sk);
+        let mut latch = MonotonicEpochLatch::new(0);
+
+        let sig0 = eval_single_sign_stateful(
+            Poseidon2Suite,
+            &params,
+            &sk,
+            &pk,
+            &mut latch,
+            b"block-vote-epoch-0",
+            100_000,
+        )
+        .expect("epoch 0 sign");
+        assert_eq!(sig0.leaf_global_idx, 0);
+        assert!(verify_pq_hash_sig(
+            Poseidon2Suite,
+            &params,
+            &pk,
+            b"block-vote-epoch-0",
+            &sig0
+        ));
+
+        // Crash-retry on SAME (epoch=0, msg) MUST produce bit-identical signature ([P0-04]).
+        let sig0_retry = retry_single_sign_stateful(
+            Poseidon2Suite,
+            &params,
+            &sk,
+            &pk,
+            &mut latch,
+            0,
+            b"block-vote-epoch-0",
+            100_000,
+        )
+        .expect("idempotent retry");
+        assert_eq!(sig0_retry, sig0);
+
+        // Crash-retry on SAME epoch=0 with DIFFERENT msg MUST be refused!
+        let equiv = retry_single_sign_stateful(
+            Poseidon2Suite,
+            &params,
+            &sk,
+            &pk,
+            &mut latch,
+            0,
+            b"equivocating-fork-vote",
+            100_000,
+        );
+        assert_eq!(equiv, Err(EpochLatchError::EquivocationRefused));
+
+        let sig1 = eval_single_sign_stateful(
+            Poseidon2Suite,
+            &params,
+            &sk,
+            &pk,
+            &mut latch,
+            b"block-vote-epoch-1",
+            100_000,
+        )
+        .expect("epoch 1 sign");
+        assert_eq!(sig1.leaf_global_idx, 1);
+
+        // Batch with distinct epochs passes; duplicate (pk, epoch) batch MUST be rejected!
+        let valid_batch = vec![
+            (pk, b"block-vote-epoch-0".as_slice(), sig0.clone()),
+            (pk, b"block-vote-epoch-1".as_slice(), sig1),
+        ];
+        assert!(valid_jorts_batch(&params, &valid_batch));
+
+        let replay_batch = vec![
+            (pk, b"block-vote-epoch-0".as_slice(), sig0.clone()),
+            (pk, b"block-vote-epoch-0".as_slice(), sig0),
+        ];
+        assert!(!valid_jorts_batch(&params, &replay_batch));
+    }
+
+    #[test]
+    fn test_hybrid_pinned_sig_binds_identity_and_5limb_canonical_packing() {
+        let sk2 = PqSecretKey {
+            sk_seed: [0xA1; 32],
+            sk_prf: [0xB2; 32],
+            pk_seed: [0xC3; 32],
+        };
+        let params = PqHashParams::COMPACT_GOLDEN;
+        let pk2 = derive_public_key(Cshake256Suite, &params, &sk2);
+        let pk1 = b"aux-ed25519-mock-pk-bytes-32len!";
+
+        let mock_sign1 = |m: &[u8]| cshake256_32(b"MOCK.S1", m);
+        let mock_verify1 =
+            |_pk1: &[u8], m: &[u8], s1: &[u8; 32]| ct_eq_bytes32(&cshake256_32(b"MOCK.S1", m), s1);
+
+        let (id_commit, hsig) = sign_hybrid_pinned_stateless(
+            Cshake256Suite,
+            &params,
+            pk1,
+            mock_sign1,
+            &sk2,
+            &pk2,
+            b"hybrid-payload",
+            &[0x55; 32],
+            100_000,
+        )
+        .expect("hybrid sign");
+
+        assert!(verify_hybrid_pinned_sig(
+            Cshake256Suite,
+            &params,
+            &id_commit,
+            pk1,
+            mock_verify1,
+            b"hybrid-payload",
+            &hsig
+        ));
+        // Stripped component sig2 MUST NOT verify as a standalone signature on raw msg ([P2-04])!
+        assert!(!verify_pq_hash_sig(
+            Cshake256Suite,
+            &params,
+            &pk2,
+            b"hybrid-payload",
+            &hsig.sig2
+        ));
+
+        let digest = [0xFFu8; 32];
+        let limbs = pack_digest32_to_goldilocks5(&digest);
+        assert_eq!(unpack_goldilocks5_to_digest32(&limbs), Some(digest));
+    }
+}
