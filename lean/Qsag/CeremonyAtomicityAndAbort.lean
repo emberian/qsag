@@ -3163,6 +3163,479 @@ theorem witness_cutTheHash_selective_abort_inhabited :
   omega
 
 
+/-! ### §2b. Random-Oracle Commitments: `q_RO / 2^256` Hiding Against a Rushing Oracle Adversary
+
+`commit(y, mac; blind) = RO(domain ‖ y ‖ mac ‖ blind)` does not inhabit `commitHiding`: it is not
+a bijection of the blind. This subsection proves the statistical bound instead. The random oracle
+is the LAZILY SAMPLED oracle (a log of answered points plus a tape of fresh answers); the
+adversary is an arbitrary deterministic oracle algorithm (`RoTree`) in all three of its moves
+(reaction to the ring opening, reaction to all openings, abort decision), so every query it makes
+before Round 2 counts, including queries made before the commitment exists. -/
+
+/-- A deterministic oracle algorithm: a decision tree whose internal nodes are oracle queries. -/
+inductive RoTree (X T Out : Type) where
+  | done (out : Out) : RoTree X T Out
+  | ask (x : X) (k : T → RoTree X T Out) : RoTree X T Out
+
+/-- `t.DepthLe q`: `t` asks at most `q` oracle queries on every path. -/
+def RoTree.DepthLe {X T Out : Type} : RoTree X T Out → Nat → Prop
+  | .done _, _ => True
+  | .ask _ _, 0 => False
+  | .ask _ k, q + 1 => ∀ a, (k a).DepthLe q
+
+/-- Lookup in the oracle log (most recent binding first). -/
+def roLookup {X T : Type} [DecidableEq X] : List (X × T) → X → Option T
+  | [], _ => none
+  | (k, v) :: rest, x => if x = k then some v else roLookup rest x
+
+/-- Run an oracle algorithm against the lazily sampled oracle: a logged point is answered from
+    the log, a new point consumes the next tape cell and is logged. Returns the output, the final
+    log, and the number of tape cells consumed. -/
+def runRo {X T Out : Type} [DecidableEq X] (tape : Nat → T) :
+    RoTree X T Out → List (X × T) → Nat → Out × List (X × T) × Nat
+  | .done o, log, n => (o, log, n)
+  | .ask x k, log, n =>
+    match roLookup log x with
+    | some a => runRo tape (k a) log n
+    | none => runRo tape (k (tape n)) ((x, tape n) :: log) (n + 1)
+
+/-- The points queried during `runRo`, in order (repeats included). -/
+def askedRo {X T Out : Type} [DecidableEq X] (tape : Nat → T) :
+    RoTree X T Out → List (X × T) → Nat → List X
+  | .done _, _, _ => []
+  | .ask x k, log, n =>
+    match roLookup log x with
+    | some a => x :: askedRo tape (k a) log n
+    | none => x :: askedRo tape (k (tape n)) ((x, tape n) :: log) (n + 1)
+
+theorem askedRo_length_le {X T Out : Type} [DecidableEq X] (tape : Nat → T)
+    (t : RoTree X T Out) :
+    ∀ (q : Nat) (log : List (X × T)) (n : Nat),
+      t.DepthLe q → (askedRo tape t log n).length ≤ q := by
+  induction t with
+  | done o => intro q log n _; exact Nat.zero_le q
+  | ask x k ih =>
+    intro q log n hD
+    cases q with
+    | zero => exact False.elim hD
+    | succ q =>
+      have hD' : ∀ a, (k a).DepthLe q := hD
+      unfold askedRo
+      cases hL : roLookup log x with
+      | some a => exact Nat.succ_le_succ (ih a q log n (hD' a))
+      | none => exact Nat.succ_le_succ (ih (tape n) q _ _ (hD' (tape n)))
+
+/-- A point that is neither logged nor queried stays unlogged. -/
+theorem runRo_lookup_none {X T Out : Type} [DecidableEq X] (tape : Nat → T) (p : X)
+    (t : RoTree X T Out) :
+    ∀ (log : List (X × T)) (n : Nat),
+      roLookup log p = none → p ∉ askedRo tape t log n →
+      roLookup (runRo tape t log n).2.1 p = none := by
+  induction t with
+  | done o => intro log n hNone _; exact hNone
+  | ask x k ih =>
+    intro log n hNone hNot
+    unfold askedRo at hNot
+    unfold runRo
+    cases hL : roLookup log x with
+    | some a =>
+      rw [hL] at hNot
+      exact ih a log n hNone (fun h => hNot (List.mem_cons_of_mem _ h))
+    | none =>
+      rw [hL] at hNot
+      have hpx : p ≠ x := fun h => hNot (h ▸ List.mem_cons_self)
+      have hNone' : roLookup ((x, tape n) :: log) p = none := by
+        simp only [roLookup, hpx, ↓reduceIte]
+        exact hNone
+      exact ih (tape n) _ _ hNone' (fun h => hNot (List.mem_cons_of_mem _ h))
+
+/-- **Identical-until-queried**: two logs that agree away from `p` give the same run as long as
+    the run never asks `p`. -/
+theorem runRo_agree_off {X T Out : Type} [DecidableEq X] (tape : Nat → T) (p : X)
+    (t : RoTree X T Out) :
+    ∀ (log log' : List (X × T)) (n : Nat),
+      (∀ x, x ≠ p → roLookup log' x = roLookup log x) →
+      p ∉ askedRo tape t log n →
+      (runRo tape t log' n).1 = (runRo tape t log n).1 := by
+  induction t with
+  | done o => intro log log' n _ _; rfl
+  | ask x k ih =>
+    intro log log' n hAgree hNot
+    unfold askedRo at hNot
+    have hxp : x ≠ p := by
+      intro h
+      apply hNot
+      cases hL : roLookup log x <;> exact h ▸ List.mem_cons_self
+    have hLk := hAgree x hxp
+    unfold runRo
+    rw [hLk]
+    cases hL : roLookup log x with
+    | some a =>
+      rw [hL] at hNot
+      exact ih a log log' n hAgree (fun h => hNot (List.mem_cons_of_mem _ h))
+    | none =>
+      rw [hL] at hNot
+      have hAgree' : ∀ y, y ≠ p →
+          roLookup ((x, tape n) :: log') y = roLookup ((x, tape n) :: log) y := by
+        intro y hy
+        simp only [roLookup]
+        split
+        · rfl
+        · exact hAgree y hy
+      exact ih (tape n) _ _ (n + 1) hAgree' (fun h => hNot (List.mem_cons_of_mem _ h))
+
+/-- Cut-the-Hash with a random-oracle commitment. `commitPoint y mac blind` is the oracle input
+    `domain ‖ y ‖ mac ‖ blind`; `blindOf` reads the blind back out of an oracle input. -/
+structure CutTheHashRomSpec (SK Msg Rand CorruptIn X : Type) (Q w bw : Nat) where
+  wireRingSecret : SK → Msg → Rand → Fin Q
+  wireXorSecret : SK → Msg → Rand → CorruptIn → BitVec w
+  yShareHonest : SK → Msg → Rand → CorruptIn → BitVec w
+  macShareHonest : SK → Msg → Rand → CorruptIn → BitVec w
+  commitPoint : BitVec w → BitVec w → BitVec bw → X
+  blindOf : X → BitVec bw
+
+/-- The blind is length-framed inside the hashed input, so it can be read back. A commitment
+    whose input drops the blind fails this and is exactly the `#tooth` below. -/
+def CutTheHashRomSpec.BlindFramed {SK Msg Rand CorruptIn X : Type} {Q w bw : Nat}
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) : Prop :=
+  ∀ y mac b, spec.blindOf (spec.commitPoint y mac b) = b
+
+/-- A rushing corrupt party with oracle access in every move. `St1`, `St2` are its private
+    states carried between moves; `Out` is whatever it finally outputs (its abort decision
+    together with any function of its whole view). -/
+structure RushingRoAdversary (CorruptIn X T St1 St2 Out : Type) (Q w : Nat) where
+  reactToRingOpen : Fin Q → RoTree X T (CorruptIn × St1)
+  reactToAllOpens : St1 → BitVec w → RoTree X T (CorruptIn × St2)
+  decideAbort : St2 → T → RoTree X T Out
+
+/-- Per-move oracle query budgets; `q_RO = q1 + q2 + q3`. -/
+def RushingRoAdversary.QueryBound {CorruptIn X T St1 St2 Out : Type} {Q w : Nat}
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (q1 q2 q3 : Nat) : Prop :=
+  (∀ d, (adv.reactToRingOpen d).DepthLe q1) ∧
+  (∀ s x, (adv.reactToAllOpens s x).DepthLe q2) ∧
+  (∀ s t, (adv.decideAbort s t).DepthLe q3)
+
+/-- The first two adversary moves, given the two opened masked differences. -/
+def romPhaseAB {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T)
+    (d1 : Fin Q) (d2 : BitVec w) : (CorruptIn × St2) × List (X × T) × Nat :=
+  runRo tape
+    (adv.reactToAllOpens (runRo tape (adv.reactToRingOpen d1) [] 0).1.2 d2)
+    (runRo tape (adv.reactToRingOpen d1) [] 0).2.1
+    (runRo tape (adv.reactToRingOpen d1) [] 0).2.2
+
+/-- **Secret-free simulation**: the adversary is handed uniform masked differences and a FRESH
+    tag; the oracle is never programmed. No secret key, message or randomizer enters. -/
+def romIdealRun {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T)
+    (d1 : Fin Q) (d2 : BitVec w) (tag : T) : Out :=
+  (runRo tape (adv.decideAbort (romPhaseAB adv tape d1 d2).1.2 tag)
+    (romPhaseAB adv tape d1 d2).2.1 (romPhaseAB adv tape d1 d2).2.2).1
+
+/-- Every oracle point the simulated adversary queries, over all three moves. -/
+def romIdealAsked {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T)
+    (d1 : Fin Q) (d2 : BitVec w) (tag : T) : List X :=
+  askedRo tape (adv.reactToRingOpen d1) [] 0 ++
+    (askedRo tape
+        (adv.reactToAllOpens (runRo tape (adv.reactToRingOpen d1) [] 0).1.2 d2)
+        (runRo tape (adv.reactToRingOpen d1) [] 0).2.1
+        (runRo tape (adv.reactToRingOpen d1) [] 0).2.2 ++
+     askedRo tape (adv.decideAbort (romPhaseAB adv tape d1 d2).1.2 tag)
+        (romPhaseAB adv tape d1 d2).2.1 (romPhaseAB adv tape d1 d2).2.2)
+
+theorem romIdealAsked_length_le {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3) (d1 : Fin Q) (d2 : BitVec w) (tag : T) :
+    (romIdealAsked adv tape d1 d2 tag).length ≤ q1 + q2 + q3 := by
+  unfold romIdealAsked
+  rw [List.length_append, List.length_append]
+  have h1 := askedRo_length_le tape (adv.reactToRingOpen d1) q1 [] 0 (hQry.1 d1)
+  have h2 := askedRo_length_le tape
+    (adv.reactToAllOpens (runRo tape (adv.reactToRingOpen d1) [] 0).1.2 d2) q2
+    (runRo tape (adv.reactToRingOpen d1) [] 0).2.1
+    (runRo tape (adv.reactToRingOpen d1) [] 0).2.2 (hQry.2.1 _ _)
+  have h3 := askedRo_length_le tape (adv.decideAbort (romPhaseAB adv tape d1 d2).1.2 tag) q3
+    (romPhaseAB adv tape d1 d2).2.1 (romPhaseAB adv tape d1 d2).2.2 (hQry.2.2 _ _)
+  omega
+
+/-- The masked ring difference the adversary sees. -/
+def romViewRing {SK Msg Rand CorruptIn X : Type} {Q w bw : Nat}
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (mr : Fin Q) : Fin Q :=
+  subModFinQ Q hQ (spec.wireRingSecret sk msg R) mr
+
+/-- The boolean wire secret, which depends on the adversary's rushing reaction to the ring
+    opening (and through it on the oracle). -/
+def romXorPad {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q) : BitVec w :=
+  spec.wireXorSecret sk msg R
+    (runRo tape (adv.reactToRingOpen (romViewRing spec sk msg R hQ mr)) [] 0).1.1
+
+/-- The masked boolean difference the adversary sees. -/
+def romViewXor {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q)
+    (mx : BitVec w) : BitVec w :=
+  romXorPad spec adv sk msg R hQ tape mr ^^^ mx
+
+/-- The oracle input of the honest commitment in the real execution. -/
+def romCommitPoint {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q)
+    (mx : BitVec w) (b : BitVec bw) : X :=
+  spec.commitPoint
+    (spec.yShareHonest sk msg R
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).1.1)
+    (spec.macShareHonest sk msg R
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).1.1)
+    b
+
+/-- **Real execution** against the lazily sampled oracle. The commitment tag is the oracle's
+    value at `commitPoint`: the logged answer if the adversary already queried that point, the
+    fresh `tagFresh` otherwise; the point is then logged, so later queries return the tag. -/
+def romRealRun {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q)
+    (mx : BitVec w) (b : BitVec bw) (tagFresh : T) : Out :=
+  (runRo tape
+    (adv.decideAbort
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).1.2
+      ((roLookup
+        (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr mx)).2.1
+        (romCommitPoint spec adv sk msg R hQ tape mr mx b)).getD tagFresh))
+    ((romCommitPoint spec adv sk msg R hQ tape mr mx b,
+      (roLookup
+        (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr mx)).2.1
+        (romCommitPoint spec adv sk msg R hQ tape mr mx b)).getD tagFresh) ::
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).2.1)
+    (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+      (romViewXor spec adv sk msg R hQ tape mr mx)).2.2).1
+
+/-- **Real = simulation unless the blind is queried**: if no oracle query of the simulated run
+    carries the blind `b`, the real execution's output equals the secret-free simulation's. -/
+theorem romReal_eq_ideal_of_blind_unqueried
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (mr : Fin Q)
+    (mx : BitVec w) (b : BitVec bw) (tagFresh : T)
+    (hFresh : b ∉ (romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh).map spec.blindOf) :
+    romRealRun spec adv sk msg R hQ tape mr mx b tagFresh =
+      romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh := by
+  have hPt : romCommitPoint spec adv sk msg R hQ tape mr mx b ∉
+      romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh :=
+    fun hMem => hFresh (List.mem_map.mpr ⟨_, hMem, hFramed _ _ _⟩)
+  unfold romIdealAsked at hPt
+  have hPt1 := fun h => hPt (List.mem_append_left _ h)
+  have hPt2 := fun h => hPt (List.mem_append_right _ (List.mem_append_left _ h))
+  have hPt3 := fun h => hPt (List.mem_append_right _ (List.mem_append_right _ h))
+  have hL1 := runRo_lookup_none tape (romCommitPoint spec adv sk msg R hQ tape mr mx b)
+    (adv.reactToRingOpen (romViewRing spec sk msg R hQ mr)) [] 0 rfl hPt1
+  have hL2 : roLookup
+      (romPhaseAB adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx)).2.1
+      (romCommitPoint spec adv sk msg R hQ tape mr mx b) = none :=
+    runRo_lookup_none tape _ _ _ _ hL1 hPt2
+  unfold romRealRun romIdealRun
+  rw [hL2]
+  refine runRo_agree_off tape (romCommitPoint spec adv sk msg R hQ tape mr mx b) _ _ _ _ ?_ hPt3
+  intro x hx
+  simp only [roLookup, hx, ↓reduceIte]
+
+private theorem natAbsDiff_finSum_le_const {n : Nat} (f g : Fin n → Nat) (c : Nat)
+    (h : ∀ i, natAbsDiff (f i) (g i) ≤ c) :
+    natAbsDiff (finSum n f) (finSum n g) ≤ n * c :=
+  Nat.le_trans (natAbsDiff_finSum_le f g)
+    (Nat.le_trans (finSum_le_finSum h) (Nat.le_of_eq (finSum_const n c)))
+
+private theorem natAbsDiff_comm (a b : Nat) : natAbsDiff a b = natAbsDiff b a := by
+  unfold natAbsDiff
+  split <;> split <;> omega
+
+/-- **Blind-guessing bound, one mask assignment**: for fixed Beaver masks, fresh tag and tape,
+    at most `q1 + q2 + q3` of the `2^bw` blinds make the real output differ from the simulation,
+    for every distinguishing predicate `D` on the adversary's output. -/
+theorem romCommit_blind_count_bound
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) (mr : Fin Q) (mx : BitVec w) :
+    natAbsDiff
+      (finSum (2 ^ bw) (fun bi =>
+        if D (romRealRun spec adv sk msg R hQ tape mr mx ((enumBitVec bw).toFun bi) tagFresh)
+        then 1 else 0))
+      (2 ^ bw *
+        (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+            (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh) then 1 else 0)) ≤
+      q1 + q2 + q3 := by
+  have hConst : 2 ^ bw *
+      (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh) then 1 else 0) =
+      finSum (2 ^ bw) (fun _ =>
+        if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh) then 1 else 0) :=
+    (finSum_const _ _).symm
+  rw [hConst]
+  have hDiff := finSum_indicator_diff_le
+    (fun bi : Fin (2 ^ bw) =>
+      D (romRealRun spec adv sk msg R hQ tape mr mx ((enumBitVec bw).toFun bi) tagFresh))
+    (fun _ => D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+      (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh))
+    (fun bi => decide (bi ∈
+      ((romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
+        (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh).map spec.blindOf).map
+        (enumBitVec bw).invFun))
+    (by
+      intro bi hBad
+      have hNot := of_decide_eq_false hBad
+      exact congrArg D (romReal_eq_ideal_of_blind_unqueried spec hFramed adv sk msg R hQ tape
+        mr mx _ tagFresh
+        (fun hMem => hNot (List.mem_map.mpr ⟨_, hMem, (enumBitVec bw).left_inv bi⟩))))
+  refine Nat.le_trans hDiff ?_
+  have hCount := finSum_mem_list_le (2 ^ bw)
+    (((romIdealAsked adv tape (romViewRing spec sk msg R hQ mr)
+      (romViewXor spec adv sk msg R hQ tape mr mx) tagFresh).map spec.blindOf).map
+      (enumBitVec bw).invFun)
+  rw [List.length_map, List.length_map] at hCount
+  refine Nat.le_trans (Nat.le_trans (Nat.le_of_eq (finSum_congr (fun bi => ?_))) hCount)
+    (romIdealAsked_length_le adv tape hQry _ _ _)
+  simp only [decide_eq_true_eq]
+
+/-- Number of honest mask assignments `(ring mask, boolean mask, 2^bw-blind)` on which the real
+    adversary output satisfies `D`. -/
+def romRealCount {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) : Nat :=
+  finSum Q (fun mr => finSum (2 ^ w) (fun xi => finSum (2 ^ bw) (fun bi =>
+    if D (romRealRun spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)
+      ((enumBitVec bw).toFun bi) tagFresh) then 1 else 0)))
+
+/-- Number of uniform view prefixes `(d1, d2)` on which the secret-free simulation satisfies
+    `D`. -/
+def romIdealCount {CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) : Nat :=
+  finSum Q (fun d1 => finSum (2 ^ w) (fun xi =>
+    if D (romIdealRun adv tape d1 ((enumBitVec w).toFun xi) tagFresh) then 1 else 0))
+
+/-- **Random-Oracle Commitment Hiding With Rushing Selective Abort
+    (`cutTheHash_rom_commit_hiding_sd_bound`)**: for every secret, every rushing adversary making
+    at most `q1 + q2 + q3` oracle queries over its three moves, every distinguishing predicate `D`
+    on its output (in particular its abort decision), every fresh tag and every oracle tape,
+
+      `| #real(D) - 2^bw · #sim(D) |  ≤  Q · 2^w · (q1 + q2 + q3)`.
+
+    The real sample space has `Q · 2^w · 2^bw` points and the simulation `Q · 2^w`, so dividing
+    by `Q · 2^w · 2^bw` reads `|Pr_real[D] - Pr_sim[D]| ≤ (q1 + q2 + q3) / 2^bw`: the adversary's
+    pre-`OPEN` view and abort decision are within statistical distance `q_RO / 2^bw` of a
+    simulation that reads no secret. The bound holds pointwise in the tag and tape, hence for the
+    uniform ones. -/
+theorem cutTheHash_rom_commit_hiding_sd_bound
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) :
+    natAbsDiff (romRealCount spec adv sk msg R hQ tape D tagFresh)
+      (2 ^ bw * romIdealCount adv tape D tagFresh) ≤ Q * (2 ^ w * (q1 + q2 + q3)) := by
+  have hStep : natAbsDiff
+      (finSum Q (fun mr => finSum (2 ^ w) (fun xi => finSum (2 ^ bw) (fun bi =>
+        if D (romRealRun spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)
+          ((enumBitVec bw).toFun bi) tagFresh) then 1 else 0))))
+      (finSum Q (fun mr => finSum (2 ^ w) (fun xi => 2 ^ bw *
+        (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)) tagFresh)
+         then 1 else 0)))) ≤ Q * (2 ^ w * (q1 + q2 + q3)) :=
+    natAbsDiff_finSum_le_const _ _ _ (fun mr =>
+      natAbsDiff_finSum_le_const _ _ _ (fun xi =>
+        romCommit_blind_count_bound spec hFramed adv hQry sk msg R hQ tape D tagFresh mr
+          ((enumBitVec w).toFun xi)))
+  have hInner : ∀ mr : Fin Q,
+      finSum (2 ^ w) (fun xi => 2 ^ bw *
+        (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)) tagFresh)
+         then 1 else 0)) =
+      2 ^ bw * finSum (2 ^ w) (fun xi =>
+        if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr) ((enumBitVec w).toFun xi)
+          tagFresh) then 1 else 0) := by
+    intro mr
+    rw [finSum_mul_left]
+    exact congrArg (fun s => 2 ^ bw * s)
+      (finSum_bijection_invariant (enumBitVec w)
+        (maskBijectionBitVec w (romXorPad spec adv sk msg R hQ tape mr))
+        (fun d2 => if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr) d2 tagFresh)
+          then 1 else 0))
+  have hOuter : finSum Q (fun mr => finSum (2 ^ w) (fun xi =>
+        if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr) ((enumBitVec w).toFun xi)
+          tagFresh) then 1 else 0)) = romIdealCount adv tape D tagFresh :=
+    finSum_perm_invariant
+      (fun mr => subModFinQ Q hQ (spec.wireRingSecret sk msg R) mr)
+      (fun d => subModFinQ Q hQ (spec.wireRingSecret sk msg R) d)
+      (fun i => subModFinQ_involutive Q hQ _ i) (fun j => subModFinQ_involutive Q hQ _ j)
+      (fun d1 => finSum (2 ^ w) (fun xi =>
+        if D (romIdealRun adv tape d1 ((enumBitVec w).toFun xi) tagFresh) then 1 else 0))
+  have hMid : finSum Q (fun mr => finSum (2 ^ w) (fun xi => 2 ^ bw *
+        (if D (romIdealRun adv tape (romViewRing spec sk msg R hQ mr)
+          (romViewXor spec adv sk msg R hQ tape mr ((enumBitVec w).toFun xi)) tagFresh)
+         then 1 else 0))) = 2 ^ bw * romIdealCount adv tape D tagFresh := by
+    rw [finSum_congr hInner, finSum_mul_left, hOuter]
+  rw [← hMid]
+  exact hStep
+
+/-- **Secret independence up to `2 · q_RO / 2^bw`**: the real adversary-output counts under any
+    two secrets, messages and randomizers differ by at most twice the hiding bound. -/
+theorem cutTheHash_rom_view_secret_independent
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w bw : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w bw) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3)
+    (sk sk' : SK) (msg msg' : Msg) (R R' : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) :
+    natAbsDiff (romRealCount spec adv sk msg R hQ tape D tagFresh)
+      (romRealCount spec adv sk' msg' R' hQ tape D tagFresh) ≤
+      2 * (Q * (2 ^ w * (q1 + q2 + q3))) := by
+  have h1 := cutTheHash_rom_commit_hiding_sd_bound spec hFramed adv hQry sk msg R hQ tape D
+    tagFresh
+  have h2 := cutTheHash_rom_commit_hiding_sd_bound spec hFramed adv hQry sk' msg' R' hQ tape D
+    tagFresh
+  rw [natAbsDiff_comm] at h2
+  have hTri := natAbsDiff_triangle (romRealCount spec adv sk msg R hQ tape D tagFresh)
+    (2 ^ bw * romIdealCount adv tape D tagFresh)
+    (romRealCount spec adv sk' msg' R' hQ tape D tagFresh)
+  omega
+
+/-- The deployed width: a 256-bit blind gives `q_RO / 2^256`. -/
+theorem cutTheHash_rom_commit_hiding_sd_bound_256
+    {SK Msg Rand CorruptIn X T St1 St2 Out : Type} {Q w : Nat} [DecidableEq X]
+    (spec : CutTheHashRomSpec SK Msg Rand CorruptIn X Q w 256) (hFramed : spec.BlindFramed)
+    (adv : RushingRoAdversary CorruptIn X T St1 St2 Out Q w)
+    {q1 q2 q3 : Nat} (hQry : adv.QueryBound q1 q2 q3)
+    (sk : SK) (msg : Msg) (R : Rand) (hQ : 0 < Q) (tape : Nat → T) (D : Out → Bool)
+    (tagFresh : T) :
+    natAbsDiff (romRealCount spec adv sk msg R hQ tape D tagFresh)
+      (2 ^ 256 * romIdealCount adv tape D tagFresh) ≤ Q * (2 ^ w * (q1 + q2 + q3)) :=
+  cutTheHash_rom_commit_hiding_sd_bound spec hFramed adv hQry sk msg R hQ tape D tagFresh
+
 /-! ## §3. Threshold ML-DSA-44 Rejection Independence: `z` Box, `LowBits` Margin & `HighBits` -/
 
 /-- Deployed FIPS 204 `ML-DSA-44` masking range parameter `γ₁ = 2^17 = 131072`. -/
@@ -4041,6 +4514,989 @@ theorem witness_mldsa44_joint_accept_inhabited :
      fun _ => (by decide : mldsa44LowBitsOk
        (mldsa44LowBits (intDot 1 (fun _ => 1) (fun _ => 5) - 78)))⟩⟩
 
+
+/-! ## §3b. The Cyclotomic Ring `ℤ_q[X]/(X^n + 1)`, Challenge Ball, Rejected Attempts & ROM Reprogramming
+
+§3 takes `c·s₁`, `c·s₂`, `c·t` as given integer vectors. This section derives them: polynomial
+multiplication in `ℤ[X]/(X^n + 1)` (coefficients reduced mod `q = 8380417` only where FIPS 204
+compares them), the bound `‖c·s‖∞ ≤ ‖c‖₁ · ‖s‖∞` (so `τ = 39`, `η = 2` give `β = 78`), the key
+relation `A·(y + c·s₁) - c·t ≡ A·y - c·s₂` from `t ≡ A·s₁ + s₂`, the transcript of a REJECTED
+attempt (which publishes `w₁`), and the random-oracle reprogramming bound for `c = H(μ, w₁)`. -/
+
+theorem intDot_congr {n : Nat} (a : Fin n → Int) {u v : Fin n → Int} (h : ∀ j, u j = v j) :
+    intDot n a u = intDot n a v :=
+  congrArg (intDot n a) (funext h)
+
+theorem intDot_zero : ∀ (n : Nat) (a : Fin n → Int), intDot n a (fun _ => 0) = 0
+  | 0, _ => rfl
+  | n + 1, a => by
+    have ih := intDot_zero n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+    simp only [intDot]
+    rw [ih, Int.mul_zero, Int.add_zero]
+
+theorem intDot_mul_const : ∀ (n : Nat) (a : Fin n → Int) (x : Int) (u : Fin n → Int),
+    intDot n a (fun j => x * u j) = x * intDot n a u
+  | 0, _, _, _ => by simp [intDot]
+  | n + 1, a, x, u => by
+    have ih := intDot_mul_const n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) x
+      (fun j => u ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+    simp only [intDot]
+    rw [ih, Int.mul_add, Int.mul_left_comm]
+
+theorem intDot_neg (n : Nat) (a u : Fin n → Int) :
+    intDot n a (fun j => - u j) = - intDot n a u := by
+  have hc : intDot n a (fun j => - u j) = intDot n a (fun j => -1 * u j) :=
+    intDot_congr a (fun j => (Int.neg_one_mul (u j)).symm)
+  rw [hc, intDot_mul_const, Int.neg_one_mul]
+
+theorem intDot_sub (n : Nat) (a u v : Fin n → Int) :
+    intDot n a (fun j => u j - v j) = intDot n a u - intDot n a v := by
+  have hc : intDot n a (fun j => u j - v j) = intDot n a (fun j => u j + - v j) :=
+    intDot_congr a (fun j => Int.sub_eq_add_neg)
+  rw [hc, intDot_add n a u (fun j => - v j), intDot_neg, ← Int.sub_eq_add_neg]
+
+/-- Exchange of two finite integer sums. -/
+theorem intDot_swap : ∀ (n m : Nat) (a : Fin n → Int) (c : Fin m → Int)
+    (F : Fin m → Fin n → Int),
+    intDot n a (fun j => intDot m c (fun i => F i j)) =
+      intDot m c (fun i => intDot n a (fun j => F i j))
+  | 0, m, _, c, _ => by
+    simp only [intDot]
+    exact (intDot_zero m c).symm
+  | n + 1, m, a, c, F => by
+    have ih := intDot_swap n m (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) c
+      (fun i j => F i ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+    have h1 := intDot_add m c
+      (fun i => a ⟨0, Nat.zero_lt_succ n⟩ * F i ⟨0, Nat.zero_lt_succ n⟩)
+      (fun i => intDot n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => F i ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩))
+    have h2 := intDot_mul_const m c (a ⟨0, Nat.zero_lt_succ n⟩)
+      (fun i => F i ⟨0, Nat.zero_lt_succ n⟩)
+    simp only [intDot]
+    rw [h1, h2, ih]
+
+/-- `‖a‖₁`. -/
+def l1Norm (n : Nat) (a : Fin n → Int) : Nat := finSum n (fun j => (a j).natAbs)
+
+theorem intDot_natAbs_le : ∀ (n : Nat) (a u : Fin n → Int) (B : Nat),
+    (∀ j, (u j).natAbs ≤ B) → (intDot n a u).natAbs ≤ l1Norm n a * B
+  | 0, _, _, _, _ => by simp [intDot]
+  | n + 1, a, u, B, h => by
+    have ih := intDot_natAbs_le n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+      (fun j => u ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) B (fun j => h _)
+    have h0 := h ⟨0, Nat.zero_lt_succ n⟩
+    have hL : l1Norm (n + 1) a = (a ⟨0, Nat.zero_lt_succ n⟩).natAbs +
+        l1Norm n (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) := rfl
+    rw [hL, Nat.add_mul]
+    simp only [intDot]
+    refine Nat.le_trans (Int.natAbs_add_le _ _) (Nat.add_le_add ?_ ih)
+    rw [Int.natAbs_mul]
+    exact Nat.mul_le_mul_left _ h0
+
+theorem intDot_dvd : ∀ (n : Nat) (a u : Fin n → Int) (q : Int),
+    (∀ j, q ∣ u j) → q ∣ intDot n a u
+  | 0, _, _, q, _ => by simp [intDot]
+  | n + 1, a, u, q, h => by
+    simp only [intDot]
+    exact Int.dvd_add (Int.dvd_trans (h _) (Int.dvd_mul_left _ _))
+      (intDot_dvd n _ _ q (fun j => h _))
+
+theorem emod_eq_of_dvd_sub {a b q : Int} (h : q ∣ a - b) : a % q = b % q := by
+  obtain ⟨m, hm⟩ := h
+  have hab : a = b + q * m := by omega
+  rw [hab]
+  exact Int.add_mul_emod_self_left b q m
+
+/-! ### Multiplication in `ℤ[X]/(X^n + 1)` -/
+
+/-- Multiplication by `X` in `ℤ[X]/(X^n + 1)`: the negacyclic shift (`X · X^(n-1) = -1`). -/
+def negShift {n : Nat} (s : Fin n → Int) : Fin n → Int :=
+  fun k =>
+    if k.val = 0 then - s ⟨n - 1, by have := k.isLt; omega⟩
+    else s ⟨k.val - 1, by have := k.isLt; omega⟩
+
+/-- Multiplication by `X^i`. -/
+def shiftPow {n : Nat} : Nat → (Fin n → Int) → Fin n → Int
+  | 0, s => s
+  | i + 1, s => negShift (shiftPow i s)
+
+/-- The product `c · s = Σ_i c_i · (X^i · s)` in `ℤ[X]/(X^n + 1)`. -/
+def polyMul {n : Nat} (c s : Fin n → Int) : Fin n → Int :=
+  fun k => intDot n c (fun i => shiftPow i.val s k)
+
+/-- The constant polynomial `1`. -/
+def polyOne {n : Nat} : Fin n → Int := fun k => if k.val = 0 then 1 else 0
+
+theorem negShift_add {n : Nat} (u v : Fin n → Int) :
+    negShift (fun k => u k + v k) = fun k => negShift u k + negShift v k := by
+  funext k
+  by_cases h : k.val = 0
+  · simp only [negShift, h, ↓reduceIte]; omega
+  · simp only [negShift, h, ↓reduceIte]
+
+theorem negShift_smul {n : Nat} (x : Int) (u : Fin n → Int) :
+    negShift (fun k => x * u k) = fun k => x * negShift u k := by
+  funext k
+  by_cases h : k.val = 0
+  · simp only [negShift, h, ↓reduceIte, Int.mul_neg]
+  · simp only [negShift, h, ↓reduceIte]
+
+theorem negShift_zero {n : Nat} : negShift (fun _ : Fin n => (0 : Int)) = fun _ => 0 := by
+  funext k
+  by_cases h : k.val = 0
+  · simp only [negShift, h, ↓reduceIte, Int.neg_zero]
+  · simp only [negShift, h, ↓reduceIte]
+
+theorem shiftPow_add {n : Nat} (i : Nat) (u v : Fin n → Int) :
+    shiftPow i (fun k => u k + v k) = fun k => shiftPow i u k + shiftPow i v k := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (fun k => u k + v k)) =
+      fun k => negShift (shiftPow i u) k + negShift (shiftPow i v) k
+    rw [ih, negShift_add]
+
+theorem shiftPow_smul {n : Nat} (i : Nat) (x : Int) (u : Fin n → Int) :
+    shiftPow i (fun k => x * u k) = fun k => x * shiftPow i u k := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (fun k => x * u k)) = fun k => x * negShift (shiftPow i u) k
+    rw [ih, negShift_smul]
+
+theorem shiftPow_zero {n : Nat} (i : Nat) :
+    shiftPow i (fun _ : Fin n => (0 : Int)) = fun _ => 0 := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (fun _ : Fin n => (0 : Int))) = fun _ => 0
+    rw [ih, negShift_zero]
+
+theorem shiftPow_negShift {n : Nat} (i : Nat) (s : Fin n → Int) :
+    shiftPow i (negShift s) = negShift (shiftPow i s) := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (negShift s)) = negShift (negShift (shiftPow i s))
+    rw [ih]
+
+theorem shiftPow_comm {n : Nat} (i j : Nat) (s : Fin n → Int) :
+    shiftPow i (shiftPow j s) = shiftPow j (shiftPow i s) := by
+  induction i with
+  | zero => rfl
+  | succ i ih =>
+    show negShift (shiftPow i (shiftPow j s)) = shiftPow j (negShift (shiftPow i s))
+    rw [ih, shiftPow_negShift]
+
+theorem negShift_polyMul {n : Nat} (c s : Fin n → Int) :
+    negShift (polyMul c s) = polyMul c (negShift s) := by
+  funext k
+  have hR : polyMul c (negShift s) k = intDot n c (fun i => negShift (shiftPow i.val s) k) :=
+    intDot_congr c (fun i => congrFun (shiftPow_negShift i.val s) k)
+  rw [hR]
+  by_cases h : k.val = 0
+  · simp only [negShift, h, ↓reduceIte, polyMul]
+    exact (intDot_neg n c _).symm
+  · simp only [negShift, h, ↓reduceIte, polyMul]
+
+theorem shiftPow_polyMul {n : Nat} (j : Nat) (c s : Fin n → Int) :
+    shiftPow j (polyMul c s) = polyMul c (shiftPow j s) := by
+  induction j with
+  | zero => rfl
+  | succ j ih =>
+    show negShift (shiftPow j (polyMul c s)) = polyMul c (negShift (shiftPow j s))
+    rw [ih, negShift_polyMul]
+
+theorem polyMul_add_right {n : Nat} (c u v : Fin n → Int) :
+    polyMul c (fun k => u k + v k) = fun k => polyMul c u k + polyMul c v k := by
+  funext k
+  exact (intDot_congr c (fun i => congrFun (shiftPow_add i.val u v) k)).trans
+    (intDot_add n c _ _)
+
+theorem polyMul_smul_right {n : Nat} (c : Fin n → Int) (x : Int) (u : Fin n → Int) :
+    polyMul c (fun k => x * u k) = fun k => x * polyMul c u k := by
+  funext k
+  exact (intDot_congr c (fun i => congrFun (shiftPow_smul i.val x u) k)).trans
+    (intDot_mul_const n c x _)
+
+theorem polyMul_zero_right {n : Nat} (c : Fin n → Int) :
+    polyMul c (fun _ => 0) = fun _ => 0 := by
+  funext k
+  exact (intDot_congr c (fun i => congrFun (shiftPow_zero i.val) k)).trans (intDot_zero n c)
+
+/-- `c · (Σ_j a_j · F_j) = Σ_j a_j · (c · F_j)`. -/
+theorem polyMul_intDot_right {n : Nat} (c : Fin n → Int) : ∀ (m : Nat) (a : Fin m → Int)
+    (F : Fin m → Fin n → Int),
+    polyMul c (fun k => intDot m a (fun j => F j k)) =
+      fun k => intDot m a (fun j => polyMul c (F j) k)
+  | 0, _, _ => polyMul_zero_right c
+  | m + 1, a, F => by
+    have ih := polyMul_intDot_right c m (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+      (fun j => F ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+    have h1 := polyMul_add_right c
+      (fun k => a ⟨0, Nat.zero_lt_succ m⟩ * F ⟨0, Nat.zero_lt_succ m⟩ k)
+      (fun k => intDot m (fun j => a ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => F ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩ k))
+    have h2 := polyMul_smul_right c (a ⟨0, Nat.zero_lt_succ m⟩) (F ⟨0, Nat.zero_lt_succ m⟩)
+    simp only [intDot]
+    rw [h1, h2, ih]
+
+/-- **Multiplications commute as operators**: `a · (c · s) = c · (a · s)`. -/
+theorem polyMul_comm_action {n : Nat} (a c s : Fin n → Int) :
+    polyMul a (polyMul c s) = polyMul c (polyMul a s) := by
+  funext k
+  have hL : polyMul a (polyMul c s) k =
+      intDot n a (fun j => intDot n c (fun i => shiftPow i.val (shiftPow j.val s) k)) :=
+    intDot_congr a (fun j => congrFun (shiftPow_polyMul j.val c s) k)
+  have hR : polyMul c (polyMul a s) k =
+      intDot n c (fun i => intDot n a (fun j => shiftPow i.val (shiftPow j.val s) k)) :=
+    intDot_congr c (fun i =>
+      (congrFun (shiftPow_polyMul i.val a s) k).trans
+        (intDot_congr a (fun j => congrFun (shiftPow_comm j.val i.val s) k)))
+  rw [hL, hR]
+  exact intDot_swap n n a c (fun i j => shiftPow i.val (shiftPow j.val s) k)
+
+theorem intDot_delta : ∀ (n : Nat) (c : Fin n → Int) (k : Fin n),
+    intDot n c (fun i => if k.val = i.val then 1 else 0) = c k
+  | 0, _, k => Fin.elim0 k
+  | n + 1, c, ⟨0, hk⟩ => by
+    have hz : intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if (0 : Nat) = j.1 + 1 then (1 : Int) else 0) = 0 :=
+      (intDot_congr _ (fun j => ite_eq_right (Nat.succ_ne_zero j.1).symm)).trans (intDot_zero n _)
+    show c ⟨0, Nat.zero_lt_succ n⟩ * (if (0 : Nat) = 0 then 1 else 0) +
+      intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if (0 : Nat) = j.1 + 1 then (1 : Int) else 0) = c ⟨0, hk⟩
+    rw [hz]
+    simp
+  | n + 1, c, ⟨k + 1, hk⟩ => by
+    have ih : intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if k = j.1 then (1 : Int) else 0) = c ⟨k + 1, hk⟩ :=
+      intDot_delta n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩) ⟨k, Nat.lt_of_succ_lt_succ hk⟩
+    have hc : intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if k + 1 = j.1 + 1 then (1 : Int) else 0) =
+        intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if k = j.1 then (1 : Int) else 0) :=
+      intDot_congr _ (fun j => by simp)
+    show c ⟨0, Nat.zero_lt_succ n⟩ * (if k + 1 = 0 then 1 else 0) +
+      intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
+        (fun j => if k + 1 = j.1 + 1 then (1 : Int) else 0) = c ⟨k + 1, hk⟩
+    rw [hc, ih]
+    simp
+
+theorem shiftPow_one_apply {n : Nat} : ∀ (i : Nat), i < n → ∀ k : Fin n,
+    shiftPow i (polyOne : Fin n → Int) k = if k.val = i then 1 else 0
+  | 0, _, _ => rfl
+  | i + 1, hi, k => by
+    have ih := shiftPow_one_apply i (Nat.lt_of_succ_lt hi)
+    show negShift (shiftPow i polyOne) k = _
+    by_cases hk : k.val = 0
+    · simp only [negShift, hk, ↓reduceIte]
+      rw [ih]
+      have h1 : ¬ (n - 1 = i) := by omega
+      simp [h1]
+    · simp only [negShift, hk, ↓reduceIte]
+      rw [ih]
+      by_cases h : k.val = i + 1
+      · have h2 : k.val - 1 = i := by omega
+        simp [h]
+      · have h2 : ¬ (k.val - 1 = i) := by omega
+        simp [h, h2]
+
+/-- `c · 1 = c`. -/
+theorem polyMul_one {n : Nat} (c : Fin n → Int) : polyMul c polyOne = c := by
+  funext k
+  exact (intDot_congr c (fun i => shiftPow_one_apply i.val i.isLt k)).trans (intDot_delta n c k)
+
+/-- The ring is commutative. -/
+theorem polyMul_comm {n : Nat} (a c : Fin n → Int) : polyMul a c = polyMul c a := by
+  have h := polyMul_comm_action a c polyOne
+  rw [polyMul_one, polyMul_one] at h
+  exact h
+
+/-- The ring is associative. -/
+theorem polyMul_assoc {n : Nat} (a b c : Fin n → Int) :
+    polyMul (polyMul a b) c = polyMul a (polyMul b c) := by
+  rw [polyMul_comm (polyMul a b) c, polyMul_comm_action c a b, polyMul_comm c b]
+
+/-- Coefficientwise bound `‖s‖∞ ≤ B`. -/
+def PolyBound {n : Nat} (B : Nat) (s : Fin n → Int) : Prop := ∀ k, (s k).natAbs ≤ B
+
+theorem negShift_bound {n : Nat} {B : Nat} {s : Fin n → Int} (h : PolyBound B s) :
+    PolyBound B (negShift s) := by
+  intro k
+  by_cases hk : k.val = 0
+  · simp only [negShift, hk, ↓reduceIte, Int.natAbs_neg]
+    exact h _
+  · simp only [negShift, hk, ↓reduceIte]
+    exact h _
+
+theorem shiftPow_bound {n : Nat} {B : Nat} {s : Fin n → Int} (h : PolyBound B s) :
+    ∀ i, PolyBound B (shiftPow i s)
+  | 0 => h
+  | i + 1 => negShift_bound (shiftPow_bound h i)
+
+/-- **`‖c · s‖∞ ≤ ‖c‖₁ · ‖s‖∞`** in `ℤ[X]/(X^n + 1)`. -/
+theorem polyMul_bound {n : Nat} {B : Nat} (c : Fin n → Int) {s : Fin n → Int}
+    (h : PolyBound B s) : PolyBound (l1Norm n c * B) (polyMul c s) :=
+  fun k => intDot_natAbs_le n c _ B (fun i => shiftPow_bound h i.val k)
+
+/-- The FIPS 204 challenge set `B_τ`: coefficients in `{-1, 0, 1}`, exactly `τ` of them non-zero
+    (equivalently `‖c‖∞ ≤ 1` and `‖c‖₁ = τ`). This is the range of `SampleInBall`. -/
+def InChallengeBall {n : Nat} (τ : Nat) (c : Fin n → Int) : Prop :=
+  (∀ i, c i = -1 ∨ c i = 0 ∨ c i = 1) ∧ l1Norm n c = τ
+
+/-- **`β = τ · η` is a theorem (`mldsa44_challenge_times_secret_le_beta`)**: for a challenge in
+    `B_39` and a secret polynomial with `‖s‖∞ ≤ η = 2`, every coefficient of `c · s` in
+    `ℤ[X]/(X^256 + 1)` has absolute value at most `78`. -/
+theorem mldsa44_challenge_times_secret_le_beta {c s : Fin 256 → Int}
+    (hc : InChallengeBall 39 c) (hs : PolyBound 2 s) : PolyBound 78 (polyMul c s) := by
+  intro k
+  have h := polyMul_bound c hs k
+  rw [hc.2] at h
+  exact h
+
+theorem negShift_sub_dvd {n : Nat} {q : Int} {u v : Fin n → Int}
+    (h : ∀ k, q ∣ u k - v k) : ∀ k, q ∣ negShift u k - negShift v k := by
+  intro k
+  by_cases hk : k.val = 0
+  · simp only [negShift, hk, ↓reduceIte]
+    have h0 := h ⟨n - 1, by have := k.isLt; omega⟩
+    rw [show - u ⟨n - 1, by have := k.isLt; omega⟩ - - v ⟨n - 1, by have := k.isLt; omega⟩ =
+      -(u ⟨n - 1, by have := k.isLt; omega⟩ - v ⟨n - 1, by have := k.isLt; omega⟩) by omega]
+    exact Int.dvd_neg.mpr h0
+  · simp only [negShift, hk, ↓reduceIte]
+    exact h _
+
+theorem shiftPow_sub_dvd {n : Nat} {q : Int} {u v : Fin n → Int}
+    (h : ∀ k, q ∣ u k - v k) : ∀ i k, q ∣ shiftPow i u k - shiftPow i v k
+  | 0 => h
+  | i + 1 => negShift_sub_dvd (shiftPow_sub_dvd h i)
+
+/-- Multiplication respects coefficientwise congruence mod `q`: `polyMul` descends to
+    `ℤ_q[X]/(X^n + 1)`. -/
+theorem polyMul_sub_dvd {n : Nat} (c u v : Fin n → Int) (q : Int)
+    (h : ∀ k, q ∣ u k - v k) : ∀ k, q ∣ polyMul c u k - polyMul c v k := by
+  intro k
+  have hEq : polyMul c u k - polyMul c v k =
+      intDot n c (fun i => shiftPow i.val u k - shiftPow i.val v k) :=
+    (intDot_sub n c _ _).symm
+  rw [hEq]
+  exact intDot_dvd n c _ q (fun i => shiftPow_sub_dvd h i.val k)
+
+/-- `A · y` for a `k × l` matrix of ring elements. -/
+def ringMatVec {k l n : Nat} (A : Fin k → Fin l → Fin n → Int) (y : Fin l → Fin n → Int) :
+    Fin k → Fin n → Int :=
+  fun r m => intDot l (fun _ => 1) (fun j => polyMul (A r j) (y j) m)
+
+theorem ringMatVec_add {k l n : Nat} (A : Fin k → Fin l → Fin n → Int)
+    (u v : Fin l → Fin n → Int) (r : Fin k) (m : Fin n) :
+    ringMatVec A (fun j i => u j i + v j i) r m = ringMatVec A u r m + ringMatVec A v r m :=
+  (intDot_congr _ (fun j => congrFun (polyMul_add_right (A r j) (u j) (v j)) m)).trans
+    (intDot_add l _ _ _)
+
+/-- `A · (c · s) = c · (A · s)`: the challenge commutes with the public matrix. -/
+theorem ringMatVec_challenge_comm {k l n : Nat} (A : Fin k → Fin l → Fin n → Int)
+    (c : Fin n → Int) (s : Fin l → Fin n → Int) (r : Fin k) :
+    ringMatVec A (fun j => polyMul c (s j)) r = polyMul c (ringMatVec A s r) := by
+  funext m
+  have hR := congrFun (polyMul_intDot_right c l (fun _ => 1)
+    (fun j => polyMul (A r j) (s j))) m
+  have hL : ringMatVec A (fun j => polyMul c (s j)) r m =
+      intDot l (fun _ => 1) (fun j => polyMul c (polyMul (A r j) (s j)) m) :=
+    intDot_congr _ (fun j => congrFun (polyMul_comm_action (A r j) c (s j)) m)
+  exact hL.trans hR.symm
+
+/-! ### Both Rejection Checks Over an Arbitrary `ℤ`-Linear Commitment Map -/
+
+/-- Public data of one signing attempt: a `ℤ`-linear commitment map `W` (for ML-DSA, `y ↦ A·y`
+    in the ring) and `ct = c·t`. `J` indexes mask coefficients, `I` commitment coefficients. -/
+structure LinCommitInstance (J I : Type) where
+  W : (J → Int) → I → Int
+  W_add : ∀ (u v : J → Int) (i : I), W (fun j => u j + v j) i = W u i + W v i
+  ct : I → Int
+
+/-- Secret-dependent shifts `c·s₁`, `c·s₂`. -/
+structure LinSecretShift (J I : Type) where
+  cs1 : J → Int
+  cs2 : I → Int
+
+def LinKeyRelation {J I : Type} (pub : LinCommitInstance J I) (sec : LinSecretShift J I) : Prop :=
+  (∀ j, inMldsaSecretBound mldsa44Beta (sec.cs1 j)) ∧
+  (∀ i, inMldsaSecretBound mldsa44Beta (sec.cs2 i)) ∧
+  (∀ i, pub.ct i % 8380417 = (pub.W sec.cs1 i + sec.cs2 i) % 8380417)
+
+def linRealZ {J I : Type} (sec : LinSecretShift J I) (y : J → Int) : J → Int :=
+  fun j => y j + sec.cs1 j
+
+def linRealW1 {J I : Type} (pub : LinCommitInstance J I) (y : J → Int) : I → Int :=
+  fun i => mldsa44HighBits (pub.W y i)
+
+def linRealAccept {J I : Type} (pub : LinCommitInstance J I) (sec : LinSecretShift J I)
+    (y : J → Int) : Prop :=
+  (∀ j, inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (y j + sec.cs1 j)) ∧
+  (∀ i, mldsa44LowBitsOk (mldsa44LowBits (pub.W y i - sec.cs2 i)))
+
+def linSimW1 {J I : Type} (pub : LinCommitInstance J I) (z : J → Int) : I → Int :=
+  fun i => mldsa44HighBits (pub.W z i - pub.ct i)
+
+def linSimAccept {J I : Type} (pub : LinCommitInstance J I) (z : J → Int) : Prop :=
+  (∀ j, inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (z j)) ∧
+  (∀ i, mldsa44LowBitsOk (mldsa44LowBits (pub.W z i - pub.ct i)))
+
+theorem lin_commit_shift_congr {J I : Type} (pub : LinCommitInstance J I)
+    (sec : LinSecretShift J I) (hKey : LinKeyRelation pub sec) (y : J → Int) (i : I) :
+    (pub.W (linRealZ sec y) i - pub.ct i) % 8380417 = (pub.W y i - sec.cs2 i) % 8380417 := by
+  have hK := hKey.2.2 i
+  unfold linRealZ
+  rw [pub.W_add]
+  omega
+
+/-- Joint `(w₁, z)` simulation over any linear commitment map (the statement of
+    `mldsa44_joint_transcript_simulation`, with `A·y` no longer required to be a flat matrix). -/
+theorem lin_joint_transcript_simulation {J I : Type} (pub : LinCommitInstance J I)
+    (sec : LinSecretShift J I) (hKey : LinKeyRelation pub sec) :
+    (∀ y : J → Int,
+      (linRealAccept pub sec y ↔ linSimAccept pub (linRealZ sec y)) ∧
+      (linRealAccept pub sec y → ∀ i, linRealW1 pub y i = linSimW1 pub (linRealZ sec y) i)) ∧
+    (∀ z : J → Int, linSimAccept pub z →
+      ∀ j, inMldsaMaskInterval mldsa44Gamma1 (z j - sec.cs1 j)) := by
+  have hLowEq : ∀ (y : J → Int) (i : I),
+      mldsa44LowBits (pub.W (linRealZ sec y) i - pub.ct i) =
+        mldsa44LowBits (pub.W y i - sec.cs2 i) :=
+    fun y i => mldsa44LowBits_congr (lin_commit_shift_congr pub sec hKey y i)
+  refine ⟨fun y => ⟨⟨?_, ?_⟩, ?_⟩, ?_⟩
+  · intro hReal
+    refine ⟨hReal.1, fun i => ?_⟩
+    rw [hLowEq y i]
+    exact hReal.2 i
+  · intro hSim
+    refine ⟨hSim.1, fun i => ?_⟩
+    rw [← hLowEq y i]
+    exact hSim.2 i
+  · intro hReal i
+    have hs : -78 ≤ sec.cs2 i ∧ sec.cs2 i ≤ 78 := by
+      have h := hKey.2.1 i
+      unfold inMldsaSecretBound mldsa44Beta at h
+      exact ⟨by omega, by omega⟩
+    have hInv := mldsa44_highBits_shift_invariant (pub.W y i - sec.cs2 i) (sec.cs2 i) hs
+      (hReal.2 i)
+    have hSum : pub.W y i - sec.cs2 i + sec.cs2 i = pub.W y i := by omega
+    rw [hSum] at hInv
+    unfold linRealW1 linSimW1
+    rw [hInv]
+    exact (mldsa44HighBits_congr (lin_commit_shift_congr pub sec hKey y i)).symm
+  · intro z hSim j
+    exact safeBox_sub_secret_in_maskInterval (hKey.1 j) (hSim.1 j)
+
+/-- Two secrets consistent with the same public data: an accepted mask of one maps to an accepted
+    mask of the other with the same `(w₁, z)`. -/
+theorem lin_joint_transcript_secret_independent {J I : Type} (pub : LinCommitInstance J I)
+    (sec sec' : LinSecretShift J I) (hKey : LinKeyRelation pub sec)
+    (hKey' : LinKeyRelation pub sec') (y : J → Int) (hAcc : linRealAccept pub sec y) :
+    (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j + sec.cs1 j - sec'.cs1 j)) ∧
+    linRealAccept pub sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) ∧
+    linRealZ sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) = linRealZ sec y ∧
+    (∀ i, linRealW1 pub (fun j => y j + sec.cs1 j - sec'.cs1 j) i = linRealW1 pub y i) := by
+  obtain ⟨hFwd, _⟩ := lin_joint_transcript_simulation pub sec hKey
+  obtain ⟨hFwd', hBack'⟩ := lin_joint_transcript_simulation pub sec' hKey'
+  have hZ : linRealZ sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) = linRealZ sec y := by
+    funext j
+    simp only [linRealZ]
+    omega
+  have hSim : linSimAccept pub (linRealZ sec y) := (hFwd y).1.mp hAcc
+  have hAcc' : linRealAccept pub sec' (fun j => y j + sec.cs1 j - sec'.cs1 j) :=
+    (hFwd' _).1.mpr (by rw [hZ]; exact hSim)
+  refine ⟨fun j => hBack' (linRealZ sec y) hSim j, hAcc', hZ, fun i => ?_⟩
+  rw [(hFwd' _).2 hAcc' i, hZ, (hFwd y).2 hAcc i]
+
+/-! ### The Ring Instance: `t ≡ A·s₁ + s₂` Gives the Key Relation -/
+
+/-- The ML-DSA instance over `ℤ[X]/(X^n + 1)` for a challenge `c`: `W y = A·y`, `ct = c·t`. -/
+def mldsaRingInstance {k l n : Nat} (A : Fin k → Fin l → Fin n → Int)
+    (t : Fin k → Fin n → Int) (c : Fin n → Int) :
+    LinCommitInstance (Fin l × Fin n) (Fin k × Fin n) where
+  W := fun y i => ringMatVec A (fun j m => y (j, m)) i.1 i.2
+  W_add := fun u v i => ringMatVec_add A (fun j m => u (j, m)) (fun j m => v (j, m)) i.1 i.2
+  ct := fun i => polyMul c (t i.1) i.2
+
+/-- The shifts `c·s₁`, `c·s₂` computed in the ring. -/
+def mldsaRingShift {k l n : Nat} (c : Fin n → Int) (s1 : Fin l → Fin n → Int)
+    (s2 : Fin k → Fin n → Int) : LinSecretShift (Fin l × Fin n) (Fin k × Fin n) where
+  cs1 := fun j => polyMul c (s1 j.1) j.2
+  cs2 := fun i => polyMul c (s2 i.1) i.2
+
+/-- **ML-DSA-44 Key Relation in `ℤ_q[X]/(X^256 + 1)` (`mldsa44_ring_key_relation`)**: for a
+    public key `t ≡ A·s₁ + s₂ (mod q)` with `‖s₁‖∞, ‖s₂‖∞ ≤ η = 2` and a challenge `c ∈ B_39`,
+    the shifts `c·s₁`, `c·s₂` are `β`-bounded and `c·t ≡ A·(c·s₁) + c·s₂ (mod q)`. Nothing about
+    `c·s₁`, `c·s₂`, `c·t` is assumed. -/
+theorem mldsa44_ring_key_relation {k l : Nat} (A : Fin k → Fin l → Fin 256 → Int)
+    (s1 : Fin l → Fin 256 → Int) (s2 t : Fin k → Fin 256 → Int) (c : Fin 256 → Int)
+    (hBall : InChallengeBall 39 c)
+    (hS1 : ∀ j, PolyBound 2 (s1 j)) (hS2 : ∀ r, PolyBound 2 (s2 r))
+    (hT : ∀ r m, (8380417 : Int) ∣ t r m - (ringMatVec A s1 r m + s2 r m)) :
+    LinKeyRelation (mldsaRingInstance A t c) (mldsaRingShift c s1 s2) := by
+  refine ⟨fun j => ?_, fun i => ?_, fun i => ?_⟩
+  · exact (inMldsaSecretBound_iff_natAbs_le mldsa44Beta _).mpr
+      (mldsa44_challenge_times_secret_le_beta hBall (hS1 j.1) j.2)
+  · exact (inMldsaSecretBound_iff_natAbs_le mldsa44Beta _).mpr
+      (mldsa44_challenge_times_secret_le_beta hBall (hS2 i.1) i.2)
+  · obtain ⟨r, m⟩ := i
+    have hW : (mldsaRingInstance A t c).W (mldsaRingShift c s1 s2).cs1 (r, m) =
+        polyMul c (ringMatVec A s1 r) m :=
+      congrFun (ringMatVec_challenge_comm A c s1 r) m
+    have hSum : polyMul c (ringMatVec A s1 r) m + polyMul c (s2 r) m =
+        polyMul c (fun m' => ringMatVec A s1 r m' + s2 r m') m :=
+      (congrFun (polyMul_add_right c (ringMatVec A s1 r) (s2 r)) m).symm
+    have hDvd := polyMul_sub_dvd c (t r) (fun m' => ringMatVec A s1 r m' + s2 r m') 8380417
+      (hT r) m
+    show polyMul c (t r) m % 8380417 =
+      ((mldsaRingInstance A t c).W (mldsaRingShift c s1 s2).cs1 (r, m) +
+        polyMul c (s2 r) m) % 8380417
+    rw [hW, hSum]
+    exact emod_eq_of_dvd_sub hDvd
+
+/-- **Ring-Level Joint Transcript Simulation (`mldsa44_ring_joint_transcript_simulation`)**: the
+    statement of `mldsa44_joint_transcript_simulation` for the actual scheme: masks, secrets and
+    public key are vectors over `ℤ_q[X]/(X^256 + 1)`, the challenge is any element of `B_39`. -/
+theorem mldsa44_ring_joint_transcript_simulation {k l : Nat}
+    (A : Fin k → Fin l → Fin 256 → Int)
+    (s1 : Fin l → Fin 256 → Int) (s2 t : Fin k → Fin 256 → Int) (c : Fin 256 → Int)
+    (hBall : InChallengeBall 39 c)
+    (hS1 : ∀ j, PolyBound 2 (s1 j)) (hS2 : ∀ r, PolyBound 2 (s2 r))
+    (hT : ∀ r m, (8380417 : Int) ∣ t r m - (ringMatVec A s1 r m + s2 r m)) :
+    (∀ y : Fin l × Fin 256 → Int,
+      (linRealAccept (mldsaRingInstance A t c) (mldsaRingShift c s1 s2) y ↔
+        linSimAccept (mldsaRingInstance A t c) (linRealZ (mldsaRingShift c s1 s2) y)) ∧
+      (linRealAccept (mldsaRingInstance A t c) (mldsaRingShift c s1 s2) y →
+        ∀ i, linRealW1 (mldsaRingInstance A t c) y i =
+          linSimW1 (mldsaRingInstance A t c) (linRealZ (mldsaRingShift c s1 s2) y) i)) ∧
+    (∀ z : Fin l × Fin 256 → Int, linSimAccept (mldsaRingInstance A t c) z →
+      ∀ j, inMldsaMaskInterval mldsa44Gamma1 (z j - (mldsaRingShift c s1 s2).cs1 j)) :=
+  lin_joint_transcript_simulation _ _ (mldsa44_ring_key_relation A s1 s2 t c hBall hS1 hS2 hT)
+
+/-! ### Rejected Attempts: the Published `w₁` of an Abort Is Distributed Independently of the Secret -/
+
+/-- Counting through a bijection between two decidable subsets of two enumerated spaces. -/
+theorem finSum_subset_bij {n m : Nat} (P : Fin n → Bool) (Q : Fin m → Bool)
+    (f : Fin n → Fin m) (g : Fin m → Fin n)
+    (hf : ∀ i, P i = true → Q (f i) = true ∧ g (f i) = i)
+    (hg : ∀ j, Q j = true → P (g j) = true ∧ f (g j) = j) :
+    finSum n (fun i => if P i then 1 else 0) = finSum m (fun j => if Q j then 1 else 0) := by
+  have h1 : finSum n (fun i => if P i then 1 else 0) =
+      finSum n (fun i => finSum m (fun j => if j = f i then (if P i then 1 else 0) else 0)) :=
+    finSum_congr (fun i => (finSum_ite_eq (f i) (fun _ => if P i then 1 else 0)).symm)
+  have h2 : ∀ j : Fin m, finSum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
+      (if Q j then 1 else 0) := by
+    intro j
+    cases hQ : Q j with
+    | true =>
+      obtain ⟨hPg, hfg⟩ := hg j hQ
+      have h3 : finSum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
+          finSum n (fun i => if i = g j then 1 else 0) := by
+        apply finSum_congr
+        intro i
+        by_cases hi : i = g j
+        · rw [hi, hfg, hPg]
+          simp
+        · by_cases hj : j = f i
+          · cases hP : P i with
+            | true => exact absurd (by rw [hj]; exact (hf i hP).2.symm) hi
+            | false => simp [hi]
+          · simp [hj, hi]
+      rw [h3, finSum_eq_indicator]
+      simp
+    | false =>
+      have h3 : finSum n (fun i => if j = f i then (if P i then 1 else 0) else 0) =
+          finSum n (fun _ => 0) := by
+        apply finSum_congr
+        intro i
+        by_cases hj : j = f i
+        · cases hP : P i with
+          | true =>
+            have hQf := (hf i hP).1
+            rw [← hj, hQ] at hQf
+            cases hQf
+          | false => simp
+        · simp [hj]
+      rw [h3, finSum_const]
+      simp
+  rw [h1, finSum_comm]
+  exact finSum_congr h2
+
+/-- The mask box `(-γ₁, γ₁)^J`. -/
+abbrev LinMaskBox (J : Type) :=
+  { y : J → Int // ∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j) }
+
+/-- Index of the mask `y_i + c·s₁ - c·s₁'` (the mask that produces, under the second secret, the
+    response the first secret produces from `y_i`), when it lies in the box. -/
+def linReindex {J I : Type} {N : Nat} (enumY : SimpleEquiv (Fin N) (LinMaskBox J))
+    [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
+    (a b : LinSecretShift J I) (i : Fin N) : Fin N :=
+  if h : ∀ j, inMldsaMaskInterval mldsa44Gamma1 ((enumY.toFun i).1 j + a.cs1 j - b.cs1 j) then
+    enumY.invFun ⟨fun j => (enumY.toFun i).1 j + a.cs1 j - b.cs1 j, h⟩
+  else i
+
+theorem linReindex_spec {J I : Type} {N : Nat} (pub : LinCommitInstance J I)
+    (a b : LinSecretShift J I) (hKa : LinKeyRelation pub a) (hKb : LinKeyRelation pub b)
+    (enumY : SimpleEquiv (Fin N) (LinMaskBox J))
+    [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
+    (i : Fin N) (hAcc : linRealAccept pub a (enumY.toFun i).1) :
+    linRealAccept pub b (enumY.toFun (linReindex enumY a b i)).1 ∧
+    linRealW1 pub (enumY.toFun (linReindex enumY a b i)).1 = linRealW1 pub (enumY.toFun i).1 ∧
+    linRealZ b (enumY.toFun (linReindex enumY a b i)).1 = linRealZ a (enumY.toFun i).1 ∧
+    linReindex enumY b a (linReindex enumY a b i) = i := by
+  obtain ⟨hBox, hAcc', hZ, hW⟩ :=
+    lin_joint_transcript_secret_independent pub a b hKa hKb (enumY.toFun i).1 hAcc
+  have hr : linReindex enumY a b i =
+      enumY.invFun ⟨fun j => (enumY.toFun i).1 j + a.cs1 j - b.cs1 j, hBox⟩ := dite_eq_left hBox
+  have hy : (enumY.toFun (linReindex enumY a b i)).1 =
+      fun j => (enumY.toFun i).1 j + a.cs1 j - b.cs1 j := by
+    rw [hr, enumY.right_inv]
+  have hBox2 : ∀ j, inMldsaMaskInterval mldsa44Gamma1
+      ((enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j) := by
+    intro j
+    have h1 := congrFun hy j
+    have h2 := (enumY.toFun i).2 j
+    rw [show (enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j =
+      (enumY.toFun i).1 j by omega]
+    exact h2
+  refine ⟨by rw [hy]; exact hAcc', by rw [hy]; exact funext hW, by rw [hy]; exact hZ, ?_⟩
+  have hBack : linReindex enumY b a (linReindex enumY a b i) =
+      enumY.invFun ⟨fun j => (enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j,
+        hBox2⟩ := dite_eq_left hBox2
+  have hSub : (⟨fun j => (enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j,
+      hBox2⟩ : LinMaskBox J) = enumY.toFun i := by
+    apply Subtype.ext
+    funext j
+    have h1 := congrFun hy j
+    show (enumY.toFun (linReindex enumY a b i)).1 j + b.cs1 j - a.cs1 j = (enumY.toFun i).1 j
+    omega
+  rw [hBack, hSub, enumY.left_inv]
+
+/-- **Accepted attempts**: for every event `D` on `(w₁, z)`, the number of masks that are
+    accepted and whose transcript satisfies `D` is the same under any two secrets consistent with
+    the public data. -/
+theorem lin_accepted_transcript_count_secret_independent {J I : Type} {N : Nat}
+    (pub : LinCommitInstance J I) (sec sec' : LinSecretShift J I)
+    (hKey : LinKeyRelation pub sec) (hKey' : LinKeyRelation pub sec')
+    (enumY : SimpleEquiv (Fin N) (LinMaskBox J))
+    [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
+    [DecidablePred (linRealAccept pub sec)] [DecidablePred (linRealAccept pub sec')]
+    (D : (I → Int) → (J → Int) → Bool) :
+    finSum N (fun i =>
+      if decide (linRealAccept pub sec (enumY.toFun i).1) &&
+          D (linRealW1 pub (enumY.toFun i).1) (linRealZ sec (enumY.toFun i).1) then 1 else 0) =
+    finSum N (fun i =>
+      if decide (linRealAccept pub sec' (enumY.toFun i).1) &&
+          D (linRealW1 pub (enumY.toFun i).1) (linRealZ sec' (enumY.toFun i).1) then 1 else 0) := by
+  refine finSum_subset_bij _ _ (linReindex enumY sec sec') (linReindex enumY sec' sec) ?_ ?_
+  · intro i hP
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+    obtain ⟨hA, hW, hZ, hBack⟩ := linReindex_spec pub sec sec' hKey hKey' enumY i hP.1
+    refine ⟨?_, hBack⟩
+    simp only [Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨hA, by rw [hW, hZ]; exact hP.2⟩
+  · intro i hP
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+    obtain ⟨hA, hW, hZ, hBack⟩ := linReindex_spec pub sec' sec hKey' hKey enumY i hP.1
+    refine ⟨?_, hBack⟩
+    simp only [Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨hA, by rw [hW, hZ]; exact hP.2⟩
+
+private theorem finSum_split_bool {n : Nat} (p q : Fin n → Bool) :
+    finSum n (fun i => if p i then 1 else 0) =
+      finSum n (fun i => if q i && p i then 1 else 0) +
+      finSum n (fun i => if !q i && p i then 1 else 0) := by
+  rw [← finSum_add]
+  apply finSum_congr
+  intro i
+  cases q i <;> cases p i <;> rfl
+
+/-- **Rejected attempts (`lin_rejected_commitment_count_secret_independent`)**: an aborted
+    attempt publishes `w₁ = HighBits(A·y)` and nothing else. For every event `D` on `w₁`, the
+    number of masks that are REJECTED and whose `w₁` satisfies `D` is the same under any two
+    secrets consistent with the public data: it is the number of all masks with `D(w₁)` minus the
+    accepted ones, and both terms are secret-independent. -/
+theorem lin_rejected_commitment_count_secret_independent {J I : Type} {N : Nat}
+    (pub : LinCommitInstance J I) (sec sec' : LinSecretShift J I)
+    (hKey : LinKeyRelation pub sec) (hKey' : LinKeyRelation pub sec')
+    (enumY : SimpleEquiv (Fin N) (LinMaskBox J))
+    [inst : ∀ y : J → Int, Decidable (∀ j, inMldsaMaskInterval mldsa44Gamma1 (y j))]
+    [DecidablePred (linRealAccept pub sec)] [DecidablePred (linRealAccept pub sec')]
+    (D : (I → Int) → Bool) :
+    finSum N (fun i =>
+      if !decide (linRealAccept pub sec (enumY.toFun i).1) &&
+          D (linRealW1 pub (enumY.toFun i).1) then 1 else 0) =
+    finSum N (fun i =>
+      if !decide (linRealAccept pub sec' (enumY.toFun i).1) &&
+          D (linRealW1 pub (enumY.toFun i).1) then 1 else 0) := by
+  have hAcc := lin_accepted_transcript_count_secret_independent pub sec sec' hKey hKey' enumY
+    (fun w _ => D w)
+  have hS := finSum_split_bool (fun i => D (linRealW1 pub (enumY.toFun i).1))
+    (fun i => decide (linRealAccept pub sec (enumY.toFun i).1))
+  have hS' := finSum_split_bool (fun i => D (linRealW1 pub (enumY.toFun i).1))
+    (fun i => decide (linRealAccept pub sec' (enumY.toFun i).1))
+  omega
+
+/-! ### `c = H(μ, w₁)` in the Random-Oracle Model: Reprogramming Bound Per Attempt -/
+
+theorem roLookup_none_of_not_mem {X T : Type} [DecidableEq X] :
+    ∀ (log : List (X × T)) (x : X), x ∉ log.map Prod.fst → roLookup log x = none
+  | [], _, _ => rfl
+  | (k, v) :: rest, x, h => by
+    have hx : x ≠ k := fun e => h (by
+      show x ∈ k :: rest.map Prod.fst
+      rw [e]
+      exact List.mem_cons_self)
+    have hr : x ∉ rest.map Prod.fst := fun e => h (by
+      show x ∈ k :: rest.map Prod.fst
+      exact List.mem_cons_of_mem _ e)
+    simp only [roLookup, hx, ↓reduceIte]
+    exact roLookup_none_of_not_mem rest x hr
+
+/-- Masks whose commitment point lies in a given key set, when every commitment value has at
+    most `M` preimages (commitment min-entropy `log₂(N / M)`). -/
+theorem finSum_fiber_mem_le {N : Nat} {X : Type} [DecidableEq X] (cp : Fin N → X) (M : Nat)
+    (hFib : ∀ x, finSum N (fun i => if cp i = x then 1 else 0) ≤ M) :
+    ∀ keys : List X, finSum N (fun i => if cp i ∈ keys then 1 else 0) ≤ keys.length * M
+  | [] => by
+    have h0 : finSum N (fun i => if cp i ∈ ([] : List X) then 1 else 0) = finSum N (fun _ => 0) :=
+      finSum_congr (fun _ => by simp)
+    rw [h0, finSum_const]
+    simp
+  | a :: keys => by
+    have hPoint : ∀ i : Fin N, (if cp i ∈ a :: keys then 1 else 0) ≤
+        (if cp i = a then 1 else 0) + (if cp i ∈ keys then 1 else 0) := by
+      intro i
+      by_cases hia : cp i = a
+      · simp [hia]
+      · by_cases his : cp i ∈ keys <;> simp [hia, his]
+    have hLe := finSum_le_finSum hPoint
+    rw [finSum_add] at hLe
+    have ih := finSum_fiber_mem_le cp M hFib keys
+    have ha := hFib a
+    simp only [List.length_cons, Nat.succ_mul]
+    omega
+
+/-- One signing attempt with mask index `i` in the REAL lazily sampled oracle: the challenge is
+    the oracle's value at the commitment point `cp i = (μ, w₁)`: the logged value if the point
+    was already queried (by the adversary or an earlier attempt), the fresh `c` otherwise. -/
+def roAttemptReal {N : Nat} {X Ch Out : Type} [DecidableEq X] (cp : Fin N → X)
+    (outcome : Fin N → Ch → Out) (log : List (X × Ch)) (i : Fin N) (c : Ch) :
+    Out × List (X × Ch) :=
+  match roLookup log (cp i) with
+  | some c' => (outcome i c', log)
+  | none => (outcome i c, (cp i, c) :: log)
+
+/-- The same attempt with the oracle REPROGRAMMED: the challenge is always the fresh `c`, and
+    `H(μ, w₁) := c` overrides any earlier value. Here `c` is independent of the mask. -/
+def roAttemptProg {N : Nat} {X Ch Out : Type} (cp : Fin N → X)
+    (outcome : Fin N → Ch → Out) (log : List (X × Ch)) (i : Fin N) (c : Ch) :
+    Out × List (X × Ch) :=
+  (outcome i c, (cp i, c) :: log)
+
+theorem roAttempt_real_eq_prog_of_fresh {N : Nat} {X Ch Out : Type} [DecidableEq X]
+    (cp : Fin N → X) (outcome : Fin N → Ch → Out) (log : List (X × Ch)) (i : Fin N) (c : Ch)
+    (h : roLookup log (cp i) = none) :
+    roAttemptReal cp outcome log i c = roAttemptProg cp outcome log i c := by
+  unfold roAttemptReal roAttemptProg
+  rw [h]
+
+/-- **Reprogramming bound for one attempt (`roAttempt_reprogramming_bound`)**: against ANY prior
+    oracle log (all queries of the adversary and of earlier attempts), for every event `D` on the
+    attempt's output and resulting oracle state,
+
+      `| #real(D) - #programmed(D) |  ≤  |log| · M`
+
+    over the `N` masks, where `M` bounds the number of masks sharing a commitment. Dividing by
+    `N`: statistical distance at most `|log| · 2^(-α)` for commitment min-entropy `α`. -/
+theorem roAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableEq X]
+    (cp : Fin N → X) (outcome : Fin N → Ch → Out) (M : Nat)
+    (hFib : ∀ x, finSum N (fun i => if cp i = x then 1 else 0) ≤ M)
+    (log : List (X × Ch)) (c : Ch) (D : Out × List (X × Ch) → Bool) :
+    natAbsDiff
+      (finSum N (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
+      (finSum N (fun i => if D (roAttemptProg cp outcome log i c) then 1 else 0)) ≤
+      log.length * M := by
+  have hDiff := finSum_indicator_diff_le
+    (fun i : Fin N => D (roAttemptReal cp outcome log i c))
+    (fun i => D (roAttemptProg cp outcome log i c))
+    (fun i => decide (cp i ∈ log.map Prod.fst))
+    (fun i hBad => congrArg D (roAttempt_real_eq_prog_of_fresh cp outcome log i c
+      (roLookup_none_of_not_mem log (cp i) (of_decide_eq_false hBad))))
+  have hCount := finSum_fiber_mem_le cp M hFib (log.map Prod.fst)
+  rw [List.length_map] at hCount
+  refine Nat.le_trans hDiff (Nat.le_trans (Nat.le_of_eq (finSum_congr (fun i => ?_))) hCount)
+  simp only [decide_eq_true_eq]
+
+/-! ### Multi-Attempt Signing: Union Bound Over Attempts and Interleaved Adversary Queries -/
+
+/-- Sum over all `k`-tuples of mask indices. -/
+def tupleSum (N : Nat) : (k : Nat) → (List (Fin N) → Nat) → Nat
+  | 0, F => F []
+  | k + 1, F => finSum N (fun i => tupleSum N k (fun is => F (i :: is)))
+
+theorem tupleSum_indicator_le (N : Nat) : ∀ (k : Nat) (p : List (Fin N) → Bool),
+    tupleSum N k (fun is => if p is then 1 else 0) ≤ N ^ k
+  | 0, p => by
+    show (if p [] then 1 else 0) ≤ 1
+    cases p [] <;> decide
+  | k + 1, p => by
+    have h : ∀ i : Fin N, tupleSum N k (fun is => if p (i :: is) then 1 else 0) ≤ N ^ k :=
+      fun i => tupleSum_indicator_le N k (fun is => p (i :: is))
+    have hLe := finSum_le_finSum h
+    rw [finSum_const] at hLe
+    rw [Nat.pow_succ, Nat.mul_comm]
+    exact hLe
+
+/-- A run of signing attempts. After each attempt the adversary sees every transcript so far and
+    extends the oracle log by its own queries (`advStep`). -/
+def signAttemptLoop {N : Nat} {X Ch Out : Type}
+    (attempt : List (X × Ch) → Fin N → Ch → Out × List (X × Ch))
+    (advStep : List Out → List (X × Ch) → List (X × Ch)) :
+    List (X × Ch) → List Out → List (Fin N) → List Ch → List Out
+  | log, acc, i :: is, c :: cs =>
+    signAttemptLoop attempt advStep
+      (advStep (acc ++ [(attempt log i c).1]) (attempt log i c).2)
+      (acc ++ [(attempt log i c).1]) is cs
+  | _, acc, [], _ => acc
+  | _, acc, _ :: _, [] => acc
+
+/-- Total oracle-log exposure of `k` attempts starting from a log of size `ℓ`, when the adversary
+    adds at most `qH` queries after each attempt: `Σ_{a<k} (ℓ + a·(qH + 1))`. -/
+def reprogCollisionBudget (qH : Nat) : Nat → Nat → Nat
+  | 0, _ => 0
+  | k + 1, ℓ => ℓ + reprogCollisionBudget qH k (ℓ + 1 + qH)
+
+/-- The continuation count after a first attempt with result `r`. -/
+def loopTailCount {N : Nat} {X Ch Out : Type}
+    (attempt : List (X × Ch) → Fin N → Ch → Out × List (X × Ch))
+    (advStep : List Out → List (X × Ch) → List (X × Ch)) (D : List Out → Bool)
+    (k : Nat) (cs : List Ch) (acc : List Out) (r : Out × List (X × Ch)) : Nat :=
+  tupleSum N k (fun is =>
+    if D (signAttemptLoop attempt advStep (advStep (acc ++ [r.1]) r.2) (acc ++ [r.1]) is cs)
+    then 1 else 0)
+
+private theorem natAbsDiff_le_of_le {a b c : Nat} (ha : a ≤ c) (hb : b ≤ c) :
+    natAbsDiff a b ≤ c := by
+  unfold natAbsDiff
+  split <;> omega
+
+private theorem natAbsDiff_self (a : Nat) : natAbsDiff a a = 0 := by
+  unfold natAbsDiff
+  split <;> omega
+
+/-- **Multi-attempt ROM reprogramming bound (`multiAttempt_reprogramming_bound`)**: for `k`
+    signing attempts with independent uniform masks, fresh challenges `cs`, and an adversary that
+    adaptively adds at most `qH` oracle queries after each attempt, every event `D` on the list
+    of transcripts satisfies
+
+      `| #real(D) - #programmed(D) | · N  ≤  M · (Σ_{a<k} (ℓ + a·(qH+1))) · N^k`
+
+    over the `N^k` mask tuples: statistical distance at most
+    `(Σ_a |log_a|) · M / N`, the sum over attempts of the per-attempt collision probability. -/
+theorem multiAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableEq X]
+    (cp : Fin N → X) (outcome : Fin N → Ch → Out) (M : Nat)
+    (hFib : ∀ x, finSum N (fun i => if cp i = x then 1 else 0) ≤ M)
+    (advStep : List Out → List (X × Ch) → List (X × Ch)) (qH : Nat)
+    (hAdv : ∀ ts log, (advStep ts log).length ≤ log.length + qH) (D : List Out → Bool) :
+    ∀ (k : Nat) (cs : List Ch) (log : List (X × Ch)) (acc : List Out) (ℓ : Nat),
+      log.length ≤ ℓ →
+      natAbsDiff
+        (tupleSum N k (fun is =>
+          if D (signAttemptLoop (roAttemptReal cp outcome) advStep log acc is cs) then 1 else 0))
+        (tupleSum N k (fun is =>
+          if D (signAttemptLoop (roAttemptProg cp outcome) advStep log acc is cs) then 1 else 0))
+        * N ≤ M * reprogCollisionBudget qH k ℓ * N ^ k
+  | 0, cs, log, acc, ℓ, _ => by
+    have hEq : ∀ att : List (X × Ch) → Fin N → Ch → Out × List (X × Ch),
+        tupleSum N 0 (fun is =>
+          if D (signAttemptLoop att advStep log acc is cs) then 1 else 0) =
+        (if D acc then 1 else 0) := by
+      intro att
+      show (if D (signAttemptLoop att advStep log acc [] cs) then 1 else 0) = _
+      cases cs <;> rfl
+    rw [hEq, hEq, natAbsDiff_self]
+    simp
+  | k + 1, [], log, acc, ℓ, _ => by
+    have hEq : ∀ att : List (X × Ch) → Fin N → Ch → Out × List (X × Ch),
+        tupleSum N (k + 1) (fun is =>
+          if D (signAttemptLoop att advStep log acc is []) then 1 else 0) =
+        tupleSum N (k + 1) (fun _ => if D acc then 1 else 0) := by
+      intro att
+      show finSum N (fun i => tupleSum N k (fun is =>
+        if D (signAttemptLoop att advStep log acc (i :: is) []) then 1 else 0)) = _
+      rfl
+    rw [hEq, hEq, natAbsDiff_self]
+    simp
+  | k + 1, c :: cs, log, acc, ℓ, hLen => by
+    have hUnf : ∀ att : List (X × Ch) → Fin N → Ch → Out × List (X × Ch),
+        tupleSum N (k + 1) (fun is =>
+          if D (signAttemptLoop att advStep log acc is (c :: cs)) then 1 else 0) =
+        finSum N (fun i => loopTailCount att advStep D k cs acc (att log i c)) :=
+      fun _ => rfl
+    rw [hUnf, hUnf]
+    have hPer : ∀ i : Fin N,
+        natAbsDiff
+          (loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
+            (roAttemptReal cp outcome log i c))
+          (loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
+            (roAttemptProg cp outcome log i c)) * N ≤
+        (if cp i ∈ log.map Prod.fst then 1 else 0) * (N ^ k * N) +
+          M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k := by
+      intro i
+      by_cases hMem : cp i ∈ log.map Prod.fst
+      · rw [ite_eq_left hMem, Nat.one_mul]
+        have ha : loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
+            (roAttemptReal cp outcome log i c) ≤ N ^ k := tupleSum_indicator_le N k _
+        have hb : loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
+            (roAttemptProg cp outcome log i c) ≤ N ^ k := tupleSum_indicator_le N k _
+        exact Nat.le_trans (Nat.mul_le_mul_right N (natAbsDiff_le_of_le ha hb))
+          (Nat.le_add_right _ _)
+      · rw [ite_eq_right hMem, Nat.zero_mul, Nat.zero_add]
+        rw [roAttempt_real_eq_prog_of_fresh cp outcome log i c
+          (roLookup_none_of_not_mem log (cp i) hMem)]
+        exact multiAttempt_reprogramming_bound cp outcome M hFib advStep qH hAdv D k cs
+          (advStep (acc ++ [(roAttemptProg cp outcome log i c).1])
+            (roAttemptProg cp outcome log i c).2)
+          (acc ++ [(roAttemptProg cp outcome log i c).1]) (ℓ + 1 + qH)
+          (Nat.le_trans (hAdv _ _) (by
+            show ((cp i, c) :: log).length + qH ≤ ℓ + 1 + qH
+            simp only [List.length_cons]
+            omega))
+    have h1 : natAbsDiff
+        (finSum N (fun i => loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
+          (roAttemptReal cp outcome log i c)))
+        (finSum N (fun i => loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
+          (roAttemptProg cp outcome log i c))) * N ≤
+        finSum N (fun i => natAbsDiff
+          (loopTailCount (roAttemptReal cp outcome) advStep D k cs acc
+            (roAttemptReal cp outcome log i c))
+          (loopTailCount (roAttemptProg cp outcome) advStep D k cs acc
+            (roAttemptProg cp outcome log i c)) * N) := by
+      rw [finSum_mul_right]
+      exact Nat.mul_le_mul_right _ (natAbsDiff_finSum_le _ _)
+    have h2' : finSum N (fun i =>
+        (if cp i ∈ log.map Prod.fst then 1 else 0) * (N ^ k * N) +
+          M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k) =
+        finSum N (fun i => if cp i ∈ log.map Prod.fst then 1 else 0) * (N ^ k * N) +
+          N * (M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k) := by
+      rw [finSum_add, finSum_mul_right, finSum_const]
+    have h2 := Nat.le_trans (finSum_le_finSum hPer) (Nat.le_of_eq h2')
+    have hS := finSum_fiber_mem_le cp M hFib (log.map Prod.fst)
+    rw [List.length_map] at hS
+    have hS' : finSum N (fun i => if cp i ∈ log.map Prod.fst then 1 else 0) ≤ ℓ * M :=
+      Nat.le_trans hS (Nat.mul_le_mul_right M hLen)
+    have e3 := Nat.mul_le_mul_right (N ^ k * N) hS'
+    have e1 : N * (M * reprogCollisionBudget qH k (ℓ + 1 + qH) * N ^ k) =
+        M * reprogCollisionBudget qH k (ℓ + 1 + qH) * (N ^ k * N) := by ac_rfl
+    have e2 : M * (ℓ + reprogCollisionBudget qH k (ℓ + 1 + qH)) * (N ^ k * N) =
+        ℓ * M * (N ^ k * N) +
+          M * reprogCollisionBudget qH k (ℓ + 1 + qH) * (N ^ k * N) := by
+      rw [Nat.mul_add, Nat.add_mul, Nat.mul_comm M ℓ]
+    show _ ≤ M * (ℓ + reprogCollisionBudget qH k (ℓ + 1 + qH)) * N ^ (k + 1)
+    rw [Nat.pow_succ]
+    omega
 
 /-! ## §4. Mechanical Constructive, `#tooth_pair` & `#verify_inhabited` Gates -/
 
