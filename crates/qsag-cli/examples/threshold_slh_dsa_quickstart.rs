@@ -16,7 +16,7 @@
 //!    unmodified `slh_verify`, and RFC 9814 SPKI DER public-key roundtrip (`50 B`).
 //! 2. **Dishonest-Majority `(3, 4)` Shamir DKG + SPDZ Authenticated `PRF_msg` Oracle:**
 //!    2-round commit-then-open `TowerGf256` DKG (`run_dealerless_dkg_seed32_gf256`), 2-lane
-//!    `Tower128` SPDZ MAC setup, Silent-OT PCG Boolean triple expansion (`600` 64-bit words),
+//!    `Tower128` SPDZ MAC setup, KOS/MASCOT Boolean triple preprocessing (`600` 64-bit words),
 //!    and `SpdzSlhMpcCluster::eval_prf_msg_mpc` (`SlhMpcOracles`).
 //! 3. **Dynamic Quorum Redistribution `(3, 4) -> (4, 6)` (`Π_reshare`):**
 //!    Authorized 3-party quorum reshares `(sk_seed, sk_prf)` directly to a disjoint 6-party
@@ -108,8 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         run_dealerless_dkg_seed32_gf256([0xB2; 32], old_t, &old_pts, &mut old_mesh, &mut old_rngs)?;
 
     // Authenticate DKG shares under a fresh 2-lane Tower128 SPDZ MAC key and request
-    // exactly 600 Boolean triple words for one PRF permutation. The PCG retains
-    // its full statistical security padding and active sacrifice checks.
+    // exactly 600 Boolean triple words for one PRF permutation. The compatibility
+    // entrypoint currently uses KOS/MASCOT with full active sacrifice checks.
     let (alpha_c, alpha_sh) = spdz_setup_alpha_gf256(&[0xB3; 32], old_t, &old_pts, &mut old_rngs)?;
     let auth_keys_old = authenticate_dkg_seed_shares_for_spdz(
         &[0xB4; 32],

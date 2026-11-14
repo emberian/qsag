@@ -7,7 +7,7 @@ use qsag_core::ceremony_journal::{CeremonyReservation, FsCeremonyJournal};
 use qsag_core::fips205::{
     Fips205Params, SlhPublicKey, SlhSecretKey, slh_keygen_from_seed, slh_sign, slh_verify,
 };
-use qsag_core::pcg_dense::{FsSeedBurnTracker, SeedBurnError, SeedBurnTracker};
+use qsag_core::pcg_dense::{FsSeedBurnTracker, SeedBurnTracker};
 use qsag_fts::{
     FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
     FrontierFtsSignature, FrontierFtsSigningKey, FsWalFtsEpochLatch, ParallelSeededError,
@@ -164,11 +164,13 @@ fn burn_stateful_ceremony_with_checkpoint(
         crate::vault::record_ledger_checkpoint(secret_json, seed_burns.checkpoint());
         return Ok(SeedBurn::AlreadySpent);
     }
-    let cursor = seed_burns
-        .checkpoint()
-        .generation
-        .checked_add(1)
-        .ok_or_else(crate::vault::corrupt)?;
+    // Burn first: a crash may waste this slot, but must never leave a ceremony
+    // cursor ahead of the durable burn ledger and block all subsequent slots.
+    seed_burns
+        .burn(&seed_burn_id)
+        .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+    let cursor = seed_burns.checkpoint().generation;
+    custody_crash_point("after_seed_burn")?;
     let permit = ceremony_journal
         .persist_before_release(CeremonyReservation {
             ceremony_id,
@@ -178,21 +180,30 @@ fn burn_stateful_ceremony_with_checkpoint(
             hedge_generation: cursor,
         })
         .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
+    custody_crash_point("after_ceremony")?;
     seed_burns
         .authorize_release(&ceremony_journal, permit)
         .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
     seed_burns
         .begin_expansion(&ceremony_id, &seed_burn_id)
         .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
-    let burned = seed_burns.burn(&seed_burn_id);
-    if matches!(burned, Err(SeedBurnError::Io)) {
-        return Err(CliError::state("CorruptOrRolledBackLedgerCheckpoint"));
-    }
     crate::vault::record_ledger_checkpoint(secret_json, seed_burns.checkpoint());
-    Ok(match burned {
-        Ok(()) => SeedBurn::Fresh,
-        Err(_) => SeedBurn::AlreadySpent,
-    })
+    Ok(SeedBurn::Fresh)
+}
+
+// Thread-local fault injection cannot affect another test or a production process.
+#[cfg(test)]
+std::thread_local! {
+    static CUSTODY_CRASH: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+fn custody_crash_point(_point: &str) -> Result<(), CliError> {
+    #[cfg(test)]
+    if CUSTODY_CRASH.with(|hook| hook.get() == Some(_point)) {
+        CUSTODY_CRASH.with(|hook| hook.set(None));
+        return Err(CliError::state("injected custody crash"));
+    }
+    Ok(())
 }
 
 const KEYGEN_HELP: &str = "\
@@ -706,20 +717,19 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             );
             // Verify retained LedgerCheckpoint against durable_ledger, burn the epoch seed,
             // and seal the ratcheted LedgerCheckpoint into the vault BEFORE threshold signing.
-            if matches!(
-                burn_stateful_ceremony_with_checkpoint(
-                    secret_path,
-                    &mut secret,
-                    setup.pk.pk_seed_bytes,
-                    &seed.0,
-                    ceremony_id,
-                    epoch_seed_id,
-                )?,
-                SeedBurn::AlreadySpent
-            ) {
+            let burned = burn_stateful_ceremony_with_checkpoint(
+                secret_path,
+                &mut secret,
+                setup.pk.pk_seed_bytes,
+                &seed.0,
+                ceremony_id,
+                epoch_seed_id,
+            )?;
+            // Retain the recovered checkpoint even when this epoch cannot sign.
+            vault.reserve(secret_path, &mut secret)?;
+            if matches!(burned, SeedBurn::AlreadySpent) {
                 return Err(CliError::state(format!("epoch {epoch} was already spent")));
             }
-            vault.reserve(secret_path, &mut secret)?;
             let sig = setup
                 .threshold_sign(
                     epoch as u32,
@@ -1157,6 +1167,84 @@ fn require_dealer_acceptance(scheme: Scheme, args: &Args) -> Result<(), CliError
 #[cfg(test)]
 mod custody_tests {
     use super::*;
+    #[test]
+    fn interrupted_burn_and_ceremony_recover_and_ratchet_threshold_vault() {
+        for point in ["after_seed_burn", "after_ceremony"] {
+            let dir = std::env::temp_dir().join(format!(
+                "qsag-custody-crash-{}",
+                crate::codec::to_hex(&os_random_32().unwrap())
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+            std::fs::write(path("msg"), b"crash recovery").unwrap();
+            keygen(&[
+                "--scheme".into(),
+                "fts-threshold".into(),
+                "--accept-trusted-dealer-demo".into(),
+                "--fast-demo".into(),
+                "--secret-out".into(),
+                path("sk"),
+                "--public-out".into(),
+                path("pk"),
+            ])
+            .unwrap();
+            let mut args = vec![
+                "--secret".into(),
+                path("sk"),
+                "--in".into(),
+                path("msg"),
+                "--out".into(),
+                path("sig"),
+                "--epoch".into(),
+                "1".into(),
+                "--accept-trusted-dealer-demo".into(),
+            ];
+            CUSTODY_CRASH.with(|hook| hook.set(Some(point)));
+            assert!(
+                sign(&args)
+                    .unwrap_err()
+                    .message
+                    .contains("injected custody crash")
+            );
+            assert!(!dir.join("sig").exists());
+            assert_eq!(
+                load_json(&path("sk"), SECRET_FORMAT)
+                    .unwrap()
+                    .field_u64("ledger_checkpoint_gen")
+                    .unwrap(),
+                0
+            );
+            // All handles from the interrupted call have closed. Reopening the
+            // old vault must catch up durably even though this epoch is spent.
+            assert!(sign(&args).unwrap_err().message.contains("already spent"));
+            let recovered = load_json(&path("sk"), SECRET_FORMAT).unwrap();
+            assert_eq!(recovered.field_u64("ledger_checkpoint_gen").unwrap(), 1);
+            let mut vault = crate::vault::Vault::acquire(&path("sk"), false).unwrap();
+            vault.authenticate(&recovered).unwrap();
+            drop(vault);
+            assert!(!dir.join("sig").exists());
+            args[7] = "2".into();
+            sign(&args).unwrap();
+            verify(&[
+                "--public".into(),
+                path("pk"),
+                "--in".into(),
+                path("msg"),
+                "--sig".into(),
+                path("sig"),
+            ])
+            .unwrap();
+            assert_eq!(
+                load_json(&path("sk"), SECRET_FORMAT)
+                    .unwrap()
+                    .field_u64("ledger_checkpoint_gen")
+                    .unwrap(),
+                2
+            );
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
     #[test]
     fn sealed_frontier_roundtrip_preserves_ciphertext_on_reservation() {
         let dir = std::env::temp_dir().join(format!(
