@@ -73,6 +73,105 @@ fn flip_hex_digit(path: &str, member: &str) {
     std::fs::write(path, bytes).unwrap();
 }
 
+/// A fresh empty directory for one test to point `TMPDIR` at.
+fn dir_for_tmp(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("qsag-cli-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// The value of the first `"member": ...` line of pretty-printed JSON, without its quotes.
+fn json_member(text: &str, member: &str) -> String {
+    let key = format!("\"{member}\": ");
+    let rest = &text[text
+        .find(&key)
+        .unwrap_or_else(|| panic!("no {member} in {text}"))
+        + key.len()..];
+    let end = rest.find('\n').unwrap_or(rest.len());
+    rest[..end]
+        .trim_end_matches(',')
+        .trim_matches('"')
+        .to_string()
+}
+
+/// A two-approver custody policy over parties 1, 2 and 3 with party 3 as accounting guardian:
+/// 1,000 units per transfer, 1,500 units per window, one allowlisted recipient.
+fn write_policy(dir: &Workdir, suite: &str, recipient: &str) -> String {
+    let path = dir.path("policy.json");
+    std::fs::write(
+        &path,
+        format!(
+            r#"{{
+  "format": "qsag-policy-v1",
+  "chain_id": 1,
+  "suite": "{suite}",
+  "recipient_allowlist": ["{recipient}"],
+  "max_single_tx_amount": 1000,
+  "velocity_window_cap": 1500,
+  "valid_not_before_secs": 0,
+  "valid_not_after_secs": 4102444800,
+  "forbid_initiator_self_approval": true,
+  "hardware_guardian_party": 3,
+  "quorum_tiers": [
+    {{"max_amount_units": 1000, "min_approvers": 2, "require_hardware_guardian": true}}
+  ],
+  "parties": [1, 2, 3]
+}}
+"#
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// Propose a transfer and return its intent identifier; `message_out` receives the bytes to sign.
+#[track_caller]
+fn propose(
+    ledger: &[&str],
+    public: &str,
+    payload: &str,
+    recipient: &str,
+    amount: &str,
+    message_out: &str,
+) -> String {
+    let mut args = vec!["policy", "propose"];
+    args.extend_from_slice(ledger);
+    args.extend_from_slice(&[
+        "--public",
+        public,
+        "--payload",
+        payload,
+        "--recipient",
+        recipient,
+        "--amount",
+        amount,
+        "--initiator",
+        "1",
+        "--approvers",
+        "2,3",
+        "--message-out",
+        message_out,
+        "--json",
+    ]);
+    json_member(&expect(&args, 0), "intent_id")
+}
+
+#[track_caller]
+fn approve(ledger: &[&str], intent: &str, party: &str, expected_code: i32) {
+    let mut args = vec!["policy", "approve"];
+    args.extend_from_slice(ledger);
+    args.extend_from_slice(&["--intent", intent, "--party", party]);
+    expect(&args, expected_code);
+}
+
+#[track_caller]
+fn window_spend(ledger: &[&str]) -> String {
+    let mut args = vec!["policy", "status", "--json"];
+    args.extend_from_slice(ledger);
+    json_member(&expect(&args, 0), "window_spend")
+}
+
 fn keygen(dir: &Workdir, scheme: &str, extra: &[&str]) {
     let (sk, pk, seed) = (dir.path("sk"), dir.path("pk"), dir.path("seed"));
     let mut args = vec![
@@ -99,6 +198,7 @@ fn help_info_and_usage_errors() {
         "sign",
         "verify",
         "addr",
+        "quorum",
         "aggregate",
         "verify-agg",
         "policy-demo",
@@ -656,6 +756,30 @@ fn policy_demo_and_known_answer_tests() {
     }
     expect(&["policy-demo", "--scenario", "no-such-scenario"], 1);
 
+    // `policy` without a subcommand is the same stateless evaluation: it writes nothing,
+    // not even under the temporary directory, and it does not take a ledger directory.
+    let scratch = dir_for_tmp("stateless-policy");
+    for args in [
+        &["policy", "--json"][..],
+        &["policy", "--ephemeral", "--json"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_qsag"))
+            .args(args)
+            .env("TMPDIR", &scratch)
+            .output()
+            .unwrap();
+        assert_eq!(code(&output), 0);
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), demo);
+        assert_eq!(std::fs::read_dir(&scratch).unwrap().count(), 0);
+    }
+    std::fs::remove_dir_all(&scratch).unwrap();
+    expect(&["policy", "--scenario", "expired"], 3);
+    expect(&["policy", "--ledger-dir", "anywhere"], 1);
+    expect(&["policy", "--ephemeral", "--ledger-dir", "anywhere"], 1);
+    for verb in ["init", "propose", "approve", "status"] {
+        assert!(expect(&["policy", verb, "--help"], 0).contains("--ledger-dir"));
+    }
+
     let kat = expect(&["kat", "--json"], 0);
     assert!(kat.contains("\"failed\": 0"));
     for group in ["accel", "core", "fts", "agg", "addr", "policy"] {
@@ -833,4 +957,1218 @@ fn symlinked_vault_lock_is_refused() {
         ],
         4,
     );
+}
+
+#[cfg(unix)]
+fn snapshot_dir_files(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let p = entry.unwrap().path();
+        if p.is_dir() {
+            out.extend(snapshot_dir_files(&p));
+        } else {
+            out.push((p.clone(), std::fs::read(&p).unwrap()));
+        }
+    }
+    out
+}
+
+#[cfg(unix)]
+fn restore_dir_files_in_place(snapshot: &[(PathBuf, Vec<u8>)]) {
+    use std::io::Write;
+    for (p, bytes) in snapshot {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(p)
+            .unwrap();
+        f.write_all(bytes).unwrap();
+        f.sync_all().unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn external_anchor_isolation_and_full_vault_snapshot_rollback_refused() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("external-anchor-e2e");
+    let vault = dir.0.join("vault");
+    let anchor = dir.0.join("anchor");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&vault)
+        .unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&anchor)
+        .unwrap();
+    let vault_s = vault.to_str().unwrap();
+    let anchor_s = anchor.to_str().unwrap();
+    let sk = vault.join("sk");
+    let sk_s = sk.to_str().unwrap();
+    let pk = dir.path("pk");
+
+    // 1. `--anchor-dir` equal to `--vault-dir` is refused even with `--allow-single-disk-anchor`.
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-frontier-770",
+            "--secret-out",
+            sk_s,
+            "--public-out",
+            &pk,
+            "--anchor-dir",
+            vault_s,
+            "--vault-dir",
+            vault_s,
+            "--allow-single-disk-anchor",
+        ],
+        4,
+    );
+
+    // 2. Nested `--anchor-dir` inside `--vault-dir` is refused.
+    let nested = vault.join("nested-anchor");
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-frontier-770",
+            "--secret-out",
+            sk_s,
+            "--public-out",
+            &pk,
+            "--anchor-dir",
+            nested.to_str().unwrap(),
+            "--vault-dir",
+            vault_s,
+            "--allow-single-disk-anchor",
+        ],
+        4,
+    );
+
+    // 3. Same-device `--anchor-dir` without `--allow-single-disk-anchor` is refused.
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-frontier-770",
+            "--secret-out",
+            sk_s,
+            "--public-out",
+            &pk,
+            "--anchor-dir",
+            anchor_s,
+            "--vault-dir",
+            vault_s,
+        ],
+        4,
+    );
+
+    // 4. Proper enrollment with `--allow-single-disk-anchor` succeeds.
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-frontier-770",
+            "--secret-out",
+            sk_s,
+            "--public-out",
+            &pk,
+            "--anchor-dir",
+            anchor_s,
+            "--vault-dir",
+            vault_s,
+            "--allow-single-disk-anchor",
+        ],
+        0,
+    );
+    let genesis_snapshot = snapshot_dir_files(&vault);
+
+    // 5. Omitting `--anchor-dir` on an anchored key fails closed with exit 4.
+    expect(
+        &[
+            "sign",
+            "--secret",
+            sk_s,
+            "--in",
+            &dir.path("msg"),
+            "--out",
+            &dir.path("no-anchor.sig"),
+        ],
+        4,
+    );
+
+    // 6. Anchored signing with CeremonyContext flags (`--policy-id-hex`, `--spend-amount`) succeeds.
+    let policy_hex = "ab".repeat(32);
+    expect(
+        &[
+            "sign",
+            "--secret",
+            sk_s,
+            "--in",
+            &dir.path("msg"),
+            "--out",
+            &dir.path("sig1"),
+            "--anchor-dir",
+            anchor_s,
+            "--vault-dir",
+            vault_s,
+            "--allow-single-disk-anchor",
+            "--policy-id-hex",
+            &policy_hex,
+            "--spend-amount",
+            "125000",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "verify",
+            "--public",
+            &pk,
+            "--in",
+            &dir.path("msg"),
+            "--sig",
+            &dir.path("sig1"),
+        ],
+        0,
+    );
+
+    // 7. Full in-place block/inode-preserving rollback of `--vault-dir` is refused by `--anchor-dir`!
+    restore_dir_files_in_place(&genesis_snapshot);
+    expect(
+        &[
+            "sign",
+            "--secret",
+            sk_s,
+            "--in",
+            &dir.path("other"),
+            "--out",
+            &dir.path("rolled-back.sig"),
+            "--anchor-dir",
+            anchor_s,
+            "--vault-dir",
+            vault_s,
+            "--allow-single-disk-anchor",
+        ],
+        4,
+    );
+    assert!(!dir.0.join("rolled-back.sig").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn quorum_jorts_2of3_ceremony_context_retry_and_snapshot_rollback() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("quorum-jorts-e2e");
+    let vault = dir.0.join("quorum-vault");
+    let anchor = dir.0.join("quorum-anchor");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&vault)
+        .unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&anchor)
+        .unwrap();
+    let vault_s = vault.to_str().unwrap();
+    let anchor_s = anchor.to_str().unwrap();
+    let pk = dir.path("quorum.pk");
+    let msg = dir.path("msg");
+    let other = dir.path("other");
+    let policy_a = "11".repeat(32);
+    let policy_b = "22".repeat(32);
+
+    // Same-inode `--anchor-dir == --vault-dir` refused on `quorum keygen`.
+    expect(
+        &[
+            "quorum",
+            "keygen",
+            "--vault-dir",
+            vault_s,
+            "--public-out",
+            &pk,
+            "--tree-height",
+            "2",
+            "--anchor-dir",
+            vault_s,
+            "--allow-single-disk-anchor",
+        ],
+        4,
+    );
+
+    let keygen_out = expect(
+        &[
+            "quorum",
+            "keygen",
+            "--vault-dir",
+            vault_s,
+            "--public-out",
+            &pk,
+            "--tree-height",
+            "2",
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--json",
+        ],
+        0,
+    );
+    assert!(keygen_out.contains("jorts-2of3-sha3"));
+    let genesis_snapshot = snapshot_dir_files(&vault);
+
+    // Sign epoch 0 with CeremonyContext (`policy_a`, spend `50000`).
+    let sig0 = dir.path("sig0.json");
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault_s,
+            "--epoch",
+            "0",
+            "--in",
+            &msg,
+            "--out",
+            &sig0,
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--policy-id-hex",
+            &policy_a,
+            "--spend-amount",
+            "50000",
+            "--json",
+        ],
+        0,
+    );
+    assert!(
+        expect(
+            &[
+                "quorum", "verify", "--public", &pk, "--in", &msg, "--sig", &sig0, "--json"
+            ],
+            0
+        )
+        .contains("\"valid\": true")
+    );
+    expect(
+        &[
+            "quorum", "verify", "--public", &pk, "--in", &other, "--sig", &sig0,
+        ],
+        2,
+    );
+
+    // Re-signing epoch 0 without `--retry` is refused.
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault_s,
+            "--epoch",
+            "0",
+            "--in",
+            &msg,
+            "--out",
+            &dir.path("dup0.json"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--policy-id-hex",
+            &policy_a,
+            "--spend-amount",
+            "50000",
+        ],
+        4,
+    );
+
+    // `--retry` with altered policy, altered spend, or altered message is refused!
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault_s,
+            "--epoch",
+            "0",
+            "--in",
+            &msg,
+            "--out",
+            &dir.path("bad-policy.json"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--policy-id-hex",
+            &policy_b,
+            "--spend-amount",
+            "50000",
+            "--retry",
+        ],
+        4,
+    );
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault_s,
+            "--epoch",
+            "0",
+            "--in",
+            &other,
+            "--out",
+            &dir.path("bad-msg.json"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--policy-id-hex",
+            &policy_a,
+            "--spend-amount",
+            "50000",
+            "--retry",
+        ],
+        4,
+    );
+
+    // Idempotent `--retry` with the exact persisted `(epoch 0, msg, policy_a, 50000)` succeeds
+    // and replays the identical latched signature!
+    let retry0 = dir.path("retry0.json");
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault_s,
+            "--epoch",
+            "0",
+            "--in",
+            &msg,
+            "--out",
+            &retry0,
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--policy-id-hex",
+            &policy_a,
+            "--spend-amount",
+            "50000",
+            "--retry",
+        ],
+        0,
+    );
+    assert_eq!(dir.read("sig0.json"), dir.read("retry0.json"));
+
+    // Advance to epoch 1: epoch 0 is now permanently consumed even under `--retry`.
+    let sig1 = dir.path("sig1.json");
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault_s,
+            "--epoch",
+            "1",
+            "--in",
+            &other,
+            "--out",
+            &sig1,
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--policy-id-hex",
+            &policy_b,
+            "--spend-amount",
+            "75000",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "quorum", "verify", "--public", &pk, "--in", &other, "--sig", &sig1,
+        ],
+        0,
+    );
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault_s,
+            "--epoch",
+            "0",
+            "--in",
+            &msg,
+            "--out",
+            &dir.path("consumed0.json"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+            "--policy-id-hex",
+            &policy_a,
+            "--spend-amount",
+            "50000",
+            "--retry",
+        ],
+        4,
+    );
+
+    // Full in-place snapshot restore of all 3 party vaults + belt WALs + ceremony journals
+    // back to genesis is caught and refused by `--anchor-dir`!
+    restore_dir_files_in_place(&genesis_snapshot);
+    expect(
+        &[
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault_s,
+            "--epoch",
+            "0",
+            "--in",
+            &other,
+            "--out",
+            &dir.path("forged-rollback.json"),
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        4,
+    );
+    assert!(!dir.0.join("forged-rollback.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn anchored_committee_aggregate_rejects_full_snapshot_rollback() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("anchored-agg-e2e");
+    let vault = dir.0.join("agg-vault");
+    let anchor = dir.0.join("agg-anchor");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&vault)
+        .unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&anchor)
+        .unwrap();
+    let vault_s = vault.to_str().unwrap();
+    let anchor_s = anchor.to_str().unwrap();
+    let wal = vault.join("wals");
+    let wal_s = wal.to_str().unwrap();
+    let sk = vault.join("committee.sk");
+    let sk_s = sk.to_str().unwrap();
+    let pk = dir.path("committee.pk");
+
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "agg-jorts-poseidon2",
+            "--seed-file",
+            &dir.path("seed"),
+            "--secret-out",
+            sk_s,
+            "--public-out",
+            &pk,
+            "--validators",
+            "4",
+            "--wal-dir",
+            wal_s,
+            "--anchor-dir",
+            anchor_s,
+            "--vault-dir",
+            vault_s,
+            "--allow-single-disk-anchor",
+        ],
+        0,
+    );
+    let genesis_snapshot = snapshot_dir_files(&vault);
+
+    let proof1 = dir.path("proof1.json");
+    expect(
+        &[
+            "aggregate",
+            "--secret",
+            sk_s,
+            "--signers",
+            "0,2",
+            "--epoch",
+            "0",
+            "--wal-dir",
+            wal_s,
+            "--in",
+            &dir.path("msg"),
+            "--out",
+            &proof1,
+            "--anchor-dir",
+            anchor_s,
+            "--vault-dir",
+            vault_s,
+            "--allow-single-disk-anchor",
+            "--policy-id-hex",
+            &"cc".repeat(32),
+            "--spend-amount",
+            "42000",
+            "--deterministic",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "verify-agg",
+            "--public",
+            &pk,
+            "--in",
+            &dir.path("msg"),
+            "--proof",
+            &proof1,
+        ],
+        0,
+    );
+
+    // Restore committee secret + ceremony journal + validator WALs in-place and attempt equivocation!
+    restore_dir_files_in_place(&genesis_snapshot);
+    expect(
+        &[
+            "aggregate",
+            "--secret",
+            sk_s,
+            "--signers",
+            "0,2",
+            "--epoch",
+            "0",
+            "--wal-dir",
+            wal_s,
+            "--in",
+            &dir.path("other"),
+            "--out",
+            &dir.path("equivocated.json"),
+            "--anchor-dir",
+            anchor_s,
+            "--vault-dir",
+            vault_s,
+            "--allow-single-disk-anchor",
+            "--deterministic",
+        ],
+        4,
+    );
+    assert!(!dir.0.join("equivocated.json").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn policy_ledger_gates_stateless_signing_across_invocations() {
+    let dir = Workdir::new("policy-ledger-slh");
+    let scheme = "slh-dsa-shake-128f";
+    let (payload, msg) = (dir.path("msg"), dir.path("msg"));
+    // A recipient to allowlist and a stranger, both with addresses of the pinned suite.
+    for name in ["recipient", "stranger"] {
+        expect(
+            &[
+                "keygen",
+                "--scheme",
+                scheme,
+                "--secret-out",
+                &dir.path(&format!("{name}.sk")),
+                "--public-out",
+                &dir.path(&format!("{name}.pk")),
+            ],
+            0,
+        );
+    }
+    let recipient = json_member(&dir.read("recipient.pk"), "address");
+    let stranger = json_member(&dir.read("stranger.pk"), "address");
+    let policy = write_policy(&dir, "SlhDsa128f", &recipient);
+    let ledger_dir = dir.path("ledger");
+    let ledger = ["--ledger-dir", ledger_dir.as_str()];
+
+    // Creating a ledger needs the custody acknowledgement, and never reuses a directory.
+    expect(
+        &[
+            "policy",
+            "init",
+            "--ledger-dir",
+            &ledger_dir,
+            "--policy",
+            &policy,
+        ],
+        1,
+    );
+    assert!(!Path::new(&ledger_dir).exists());
+    let created = expect(
+        &[
+            "policy",
+            "init",
+            "--ledger-dir",
+            &ledger_dir,
+            "--policy",
+            &policy,
+            "--accept-single-host-custody",
+            "--json",
+        ],
+        0,
+    );
+    let ledger_id = json_member(&created, "ledger_id");
+    assert!(created.contains("single-host guard committee"));
+    expect(
+        &[
+            "policy",
+            "init",
+            "--ledger-dir",
+            &ledger_dir,
+            "--policy",
+            &policy,
+            "--accept-single-host-custody",
+        ],
+        4,
+    );
+    assert_eq!(window_spend(&ledger), "0");
+
+    // A key enrolled against the ledger refuses to sign outside its gate.
+    let (sk, pk) = (dir.path("sk"), dir.path("pk"));
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            scheme,
+            "--secret-out",
+            &sk,
+            "--public-out",
+            &pk,
+            "--policy-ledger-dir",
+            &ledger_dir,
+        ],
+        0,
+    );
+    assert_eq!(json_member(&dir.read("sk"), "policy_ledger_id"), ledger_id);
+    let plain = dir.path("plain.sig");
+    expect(&["sign", "--secret", &sk, "--in", &msg, "--out", &plain], 4);
+    expect(
+        &[
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &msg,
+            "--out",
+            &plain,
+            "--policy-ledger-dir",
+            &ledger_dir,
+        ],
+        1,
+    );
+    expect(
+        &[
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &msg,
+            "--out",
+            &plain,
+            "--policy-intent",
+            &"00".repeat(32),
+        ],
+        1,
+    );
+
+    // Proposals the policy refuses are never recorded.
+    let refused = |recipient: &str, amount: &str, initiator: &str, approvers: &str| {
+        expect(
+            &[
+                "policy",
+                "propose",
+                "--ledger-dir",
+                &ledger_dir,
+                "--public",
+                &pk,
+                "--payload",
+                &payload,
+                "--recipient",
+                recipient,
+                "--amount",
+                amount,
+                "--initiator",
+                initiator,
+                "--approvers",
+                approvers,
+                "--message-out",
+                &dir.path("refused.msg"),
+            ],
+            3,
+        );
+        assert!(!Path::new(&dir.path("refused.msg")).exists());
+    };
+    refused(&stranger, "800", "1", "2,3");
+    refused(&recipient, "1001", "1", "2,3");
+    refused(&recipient, "800", "2", "2,3");
+    refused(&recipient, "800", "3", "1,2");
+    assert_eq!(
+        std::fs::read_dir(Path::new(&ledger_dir).join("intents"))
+            .unwrap()
+            .count(),
+        0
+    );
+
+    let intent_msg = dir.path("intent1.msg");
+    let intent = propose(&ledger, &pk, &payload, &recipient, "800", &intent_msg);
+    let gated = |input: &str, out: &str, extra: &[&str], expected: i32| {
+        let mut args = vec![
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            input,
+            "--out",
+            out,
+            "--policy-ledger-dir",
+            &ledger_dir,
+            "--policy-intent",
+            &intent,
+        ];
+        args.extend_from_slice(extra);
+        let stdout = expect(&args, expected);
+        assert_eq!(Path::new(out).exists(), expected == 0, "{out}");
+        stdout
+    };
+    let sig = dir.path("intent1.sig");
+
+    // Unapproved, then half approved: refused in separate invocations, nothing spent.
+    gated(&intent_msg, &sig, &[], 3);
+    approve(&ledger, &intent, "2", 0);
+    gated(&intent_msg, &sig, &[], 3);
+    approve(&ledger, &intent, "1", 3);
+    approve(&ledger, &intent, "3", 0);
+    // Fully approved, but for another message, another context, or with a caller-chosen spend.
+    gated(&msg, &sig, &[], 3);
+    gated(&intent_msg, &sig, &["--ctx-hex", "aa"], 3);
+    assert_eq!(window_spend(&ledger), "0");
+
+    let signed = gated(&intent_msg, &sig, &["--json"], 0);
+    assert_eq!(json_member(&signed, "policy_intent"), intent);
+    assert_eq!(json_member(&signed, "policy_ledger_id"), ledger_id);
+    assert_eq!(json_member(&signed, "spend_amount"), "800");
+    expect(
+        &[
+            "verify",
+            "--public",
+            &pk,
+            "--in",
+            &intent_msg,
+            "--sig",
+            &sig,
+        ],
+        0,
+    );
+    assert_eq!(window_spend(&ledger), "800");
+
+    // Replay in a later invocation is refused; an explicit retry re-signs without spending.
+    let replay = dir.path("replay.sig");
+    gated(&intent_msg, &replay, &[], 3);
+    approve(&ledger, &intent, "2", 3);
+    gated(&msg, &replay, &["--policy-retry"], 3);
+    gated(&intent_msg, &replay, &["--policy-retry"], 0);
+    assert_eq!(window_spend(&ledger), "800");
+
+    // The window cap is cumulative across invocations: 800 + 800 is refused, 800 + 700 fits
+    // exactly, and then not one unit more.
+    refused(&recipient, "800", "1", "2,3");
+    let second_msg = dir.path("intent2.msg");
+    let second = propose(&ledger, &pk, &payload, &recipient, "700", &second_msg);
+    approve(&ledger, &second, "2", 0);
+    approve(&ledger, &second, "3", 0);
+    let checkpoint = Path::new(&ledger_dir).join("guards").join("committee.ckpt");
+    let before_second = std::fs::read(&checkpoint).unwrap();
+    let second_sig = dir.path("intent2.sig");
+    expect(
+        &[
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &second_msg,
+            "--out",
+            &second_sig,
+            "--policy-ledger-dir",
+            &ledger_dir,
+            "--policy-intent",
+            &second,
+        ],
+        0,
+    );
+    assert_eq!(window_spend(&ledger), "1500");
+    refused(&recipient, "1", "1", "2,3");
+
+    // Putting the pre-spend checkpoint back does not reopen the window: the generation fence
+    // has moved, so the ledger is refused outright until its real state returns.
+    let after_second = std::fs::read(&checkpoint).unwrap();
+    std::fs::write(&checkpoint, &before_second).unwrap();
+    expect(&["policy", "status", "--ledger-dir", &ledger_dir], 4);
+    expect(
+        &[
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &second_msg,
+            "--out",
+            &dir.path("rolled.sig"),
+            "--policy-ledger-dir",
+            &ledger_dir,
+            "--policy-intent",
+            &second,
+        ],
+        4,
+    );
+    assert!(!Path::new(&dir.path("rolled.sig")).exists());
+    std::fs::write(&checkpoint, &after_second).unwrap();
+    assert_eq!(window_spend(&ledger), "1500");
+    let status = expect(
+        &["policy", "status", "--ledger-dir", &ledger_dir, "--json"],
+        0,
+    );
+    assert_eq!(status.matches("\"state\": \"released\"").count(), 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn anchored_policy_ledger_gates_stateful_signing_and_refuses_ledger_rollback() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("policy-ledger-frontier");
+    let anchor = dir.0.join("ledger-anchor");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&anchor)
+        .unwrap();
+    let anchor_s = anchor.to_str().unwrap();
+    let ledger_dir = dir.path("ledger");
+    let (sk, pk, payload) = (dir.path("sk"), dir.path("pk"), dir.path("msg"));
+
+    // The ledger must exist before a key can be enrolled against it; the first key is the
+    // allowlisted recipient, the second is the gated signer.
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-frontier-770",
+            "--secret-out",
+            &dir.path("recipient.sk"),
+            "--public-out",
+            &dir.path("recipient.pk"),
+        ],
+        0,
+    );
+    let recipient = json_member(&dir.read("recipient.pk"), "address");
+    let policy = write_policy(&dir, "FrontierSumFts", &recipient);
+    // An anchor inside the ledger directory, or on its device without the acknowledgement,
+    // is refused and leaves nothing behind.
+    let nested = Path::new(&ledger_dir).join("anchor");
+    for (anchor_dir, flags) in [
+        (
+            nested.to_str().unwrap(),
+            &["--allow-single-disk-anchor"][..],
+        ),
+        (anchor_s, &[][..]),
+    ] {
+        let mut args = vec![
+            "policy",
+            "init",
+            "--ledger-dir",
+            &ledger_dir,
+            "--policy",
+            &policy,
+            "--accept-single-host-custody",
+            "--anchor-dir",
+            anchor_dir,
+        ];
+        args.extend_from_slice(flags);
+        expect(&args, 4);
+        let _ = std::fs::remove_dir_all(&ledger_dir);
+    }
+    expect(
+        &[
+            "policy",
+            "init",
+            "--ledger-dir",
+            &ledger_dir,
+            "--policy",
+            &policy,
+            "--accept-single-host-custody",
+            "--anchor-dir",
+            anchor_s,
+            "--allow-single-disk-anchor",
+        ],
+        0,
+    );
+    let ledger = [
+        "--ledger-dir",
+        ledger_dir.as_str(),
+        "--anchor-dir",
+        anchor_s,
+        "--allow-single-disk-anchor",
+    ];
+    let gate = [
+        "--policy-ledger-dir",
+        ledger_dir.as_str(),
+        "--policy-anchor-dir",
+        anchor_s,
+        "--policy-allow-single-disk-anchor",
+    ];
+    // An anchored ledger does not open without its anchor.
+    expect(&["policy", "status", "--ledger-dir", &ledger_dir], 4);
+    assert_eq!(window_spend(&ledger), "0");
+
+    let mut keygen = vec![
+        "keygen",
+        "--scheme",
+        "fts-frontier-770",
+        "--secret-out",
+        &sk,
+        "--public-out",
+        &pk,
+    ];
+    keygen.extend_from_slice(&gate);
+    expect(&keygen, 0);
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-frontier-770",
+            "--secret-out",
+            &dir.path("x.sk"),
+            "--public-out",
+            &dir.path("x.pk"),
+            "--policy-ledger-dir",
+            &ledger_dir,
+        ],
+        4,
+    );
+
+    let intent_msg = dir.path("intent.msg");
+    let intent = propose(&ledger, &pk, &payload, &recipient, "900", &intent_msg);
+    let sign = |out: &str, extra: &[&str], expected: i32| {
+        let mut args = vec!["sign", "--secret", &sk, "--in", &intent_msg, "--out", out];
+        args.extend_from_slice(&gate);
+        args.extend_from_slice(&["--policy-intent", &intent]);
+        args.extend_from_slice(extra);
+        expect(&args, expected)
+    };
+    let sig = dir.path("intent.sig");
+
+    // Refusals leave the few-time key untouched: no use is burned for an unapproved intent.
+    sign(&sig, &[], 3);
+    sign(&sig, &["--spend-amount", "1"], 1);
+    assert!(dir.read("sk").contains("\"uses_completed\": 0"));
+    approve(&ledger, &intent, "2", 0);
+    approve(&ledger, &intent, "3", 0);
+    let ledger_before = snapshot_dir_files(Path::new(&ledger_dir));
+    let key_before = dir.read("sk");
+
+    let signed = sign(&sig, &["--json"], 0);
+    assert_eq!(json_member(&signed, "spend_amount"), "900");
+    assert_eq!(json_member(&signed, "policy_intent"), intent);
+    assert!(dir.read("sk").contains("\"uses_completed\": 1"));
+    expect(
+        &[
+            "verify",
+            "--public",
+            &pk,
+            "--in",
+            &intent_msg,
+            "--sig",
+            &sig,
+        ],
+        0,
+    );
+    assert_eq!(window_spend(&ledger), "900");
+    sign(&dir.path("replay.sig"), &[], 3);
+    assert!(dir.read("sk").contains("\"uses_completed\": 1"));
+
+    // Restore every file of the ledger directory to its approved-but-unspent state, in
+    // place. The external anchor has seen the newer generation: status and signing are
+    // refused, and the key does not move.
+    let ledger_after = snapshot_dir_files(Path::new(&ledger_dir));
+    restore_dir_files_in_place(&ledger_before);
+    let mut status = vec!["policy", "status"];
+    status.extend_from_slice(&ledger);
+    expect(&status, 4);
+    sign(&dir.path("rollback.sig"), &[], 4);
+    assert!(!Path::new(&dir.path("rollback.sig")).exists());
+    assert!(dir.read("sk").contains("\"uses_completed\": 1"));
+    assert_ne!(dir.read("sk"), key_before);
+
+    // With its real state back the ledger opens again and still refuses the replay.
+    restore_dir_files_in_place(&ledger_after);
+    assert_eq!(window_spend(&ledger), "900");
+    sign(&dir.path("replay.sig"), &[], 3);
+    // A second transfer that would pass the window cap is refused at proposal.
+    let mut over = vec!["policy", "propose"];
+    over.extend_from_slice(&ledger);
+    let over_msg = dir.path("over.msg");
+    over.extend_from_slice(&[
+        "--public",
+        &pk,
+        "--payload",
+        &payload,
+        "--recipient",
+        &recipient,
+        "--amount",
+        "601",
+        "--initiator",
+        "1",
+        "--approvers",
+        "2,3",
+        "--message-out",
+        &over_msg,
+    ]);
+    expect(&over, 3);
+}
+
+#[cfg(unix)]
+#[test]
+fn policy_ledger_gates_quorum_signing_before_any_epoch_is_latched() {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = Workdir::new("policy-ledger-quorum");
+    let vault = dir.0.join("quorum-vault");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&vault)
+        .unwrap();
+    let vault_s = vault.to_str().unwrap();
+    let (pk, payload) = (dir.path("quorum.pk"), dir.path("msg"));
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "slh-dsa-shake-128f",
+            "--secret-out",
+            &dir.path("recipient.sk"),
+            "--public-out",
+            &dir.path("recipient.pk"),
+        ],
+        0,
+    );
+    let recipient = json_member(&dir.read("recipient.pk"), "address");
+    let policy = write_policy(&dir, "SlhDsa128f", &recipient);
+    let ledger_dir = dir.path("ledger");
+    let ledger = ["--ledger-dir", ledger_dir.as_str()];
+    expect(
+        &[
+            "policy",
+            "init",
+            "--ledger-dir",
+            &ledger_dir,
+            "--policy",
+            &policy,
+            "--accept-single-host-custody",
+        ],
+        0,
+    );
+    expect(
+        &[
+            "quorum",
+            "keygen",
+            "--vault-dir",
+            vault_s,
+            "--public-out",
+            &pk,
+            "--tree-height",
+            "2",
+            "--policy-ledger-dir",
+            &ledger_dir,
+        ],
+        0,
+    );
+    let intent_msg = dir.path("intent.msg");
+    let intent = propose(&ledger, &pk, &payload, &recipient, "1000", &intent_msg);
+    let sign = |epoch: &str, input: &str, out: &str, extra: &[&str], expected: i32| {
+        let mut args = vec![
+            "quorum",
+            "sign",
+            "--vault-dir",
+            vault_s,
+            "--epoch",
+            epoch,
+            "--in",
+            input,
+            "--out",
+            out,
+        ];
+        args.extend_from_slice(extra);
+        expect(&args, expected)
+    };
+    let gate = [
+        "--policy-ledger-dir",
+        ledger_dir.as_str(),
+        "--policy-intent",
+        intent.as_str(),
+    ];
+    let vault_before = snapshot_dir_files(&vault);
+    let sig = dir.path("quorum.sig");
+
+    // Outside the gate, unapproved, wrong message, caller-chosen context: all refused, and
+    // not one byte of any party's vault, belt or ceremony journal moves.
+    sign("0", &intent_msg, &sig, &[], 4);
+    sign("0", &intent_msg, &sig, &gate, 3);
+    approve(&ledger, &intent, "2", 0);
+    approve(&ledger, &intent, "3", 0);
+    sign("0", &payload, &sig, &gate, 3);
+    sign(
+        "0",
+        &intent_msg,
+        &sig,
+        &[&gate[..], &["--policy-id-hex", &"11".repeat(32)]].concat(),
+        1,
+    );
+    assert!(!Path::new(&sig).exists());
+    assert_eq!(snapshot_dir_files(&vault), vault_before);
+    assert_eq!(window_spend(&ledger), "0");
+
+    let signed = sign("0", &intent_msg, &sig, &gate, 0);
+    assert!(signed.contains("signed quorum epoch 0"));
+    let sig_text = dir.read("quorum.sig");
+    assert_eq!(json_member(&sig_text, "policy_intent"), intent);
+    assert_eq!(json_member(&sig_text, "spend_amount"), "1000");
+    expect(
+        &[
+            "quorum",
+            "verify",
+            "--public",
+            &pk,
+            "--in",
+            &intent_msg,
+            "--sig",
+            &sig,
+        ],
+        0,
+    );
+    assert_eq!(window_spend(&ledger), "1000");
+
+    // The released intent does not unlock another epoch, and the refusal burns none.
+    let vault_after = snapshot_dir_files(&vault);
+    let again = dir.path("again.sig");
+    sign("1", &intent_msg, &again, &gate, 3);
+    assert_eq!(snapshot_dir_files(&vault), vault_after);
+    sign(
+        "1",
+        &intent_msg,
+        &again,
+        &[&gate[..], &["--policy-retry"]].concat(),
+        0,
+    );
+    expect(
+        &[
+            "quorum",
+            "verify",
+            "--public",
+            &pk,
+            "--in",
+            &intent_msg,
+            "--sig",
+            &again,
+        ],
+        0,
+    );
+    assert_eq!(window_spend(&ledger), "1000");
 }

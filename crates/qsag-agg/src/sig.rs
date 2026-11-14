@@ -965,12 +965,17 @@ pub trait EpochWalSink {
 /// Latched signer state recovered from a WAL: `(next_epoch, latched_epoch, latched_mu)`.
 pub type WalEpochState = (u32, u32, [u8; 32]);
 
+#[cfg(feature = "std")]
+pub use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
+
 /// Real `fsync`-backed durable WAL implementation for `std` validator deployments (`[P0-04]`).
 #[cfg(feature = "std")]
 pub struct FsWalEpochSink {
     record: qsag_asm::durable::LockedRecord,
     mac_key: [u8; 32],
     current: [u8; 112],
+    lock_identity: [u8; 24],
+    anchor: Option<alloc::boxed::Box<dyn ExternalMonotoneAnchor>>,
 }
 
 #[cfg(feature = "std")]
@@ -982,20 +987,25 @@ impl Drop for FsWalEpochSink {
 
 #[cfg(feature = "std")]
 impl FsWalEpochSink {
-    const MAGIC: &'static [u8; 8] = b"QSAGWAL3";
+    const MAGIC: &'static [u8; 8] = b"QSAGWAL4";
 
-    fn tag(key: &[u8; 32], body: &[u8]) -> [u8; 32] {
-        cshake256_32(b"QSAG.AGG.WAL.MAC/v3", &encode_multi_frame(&[key, body]))
+    fn tag(key: &[u8; 32], identity: &[u8; 24], body: &[u8]) -> [u8; 32] {
+        cshake256_32(
+            b"QSAG.AGG.WAL.MAC/v4",
+            &encode_multi_frame(&[key, identity, body]),
+        )
     }
 
-    /// A missing WAL may be initialized only with a newly created lock sidecar.
+    /// Recover an existing unanchored WAL; missing or older-format records are rejected.
+    /// Lock identity detects sidecar replacement. Whole-filesystem rollback protection
+    /// requires [`Self::open_anchored`] and an independently durable anchor.
     /// Use a distinct secret MAC key for each enrolled signing key and profile.
     pub fn open_or_recover(
         path: impl Into<std::path::PathBuf>,
         expected_pk_root: &[u8; 32],
         mac_key: [u8; 32],
     ) -> Result<(Self, Option<WalEpochState>), SigError> {
-        Self::open_internal(path.into(), expected_pk_root, mac_key, false)
+        Self::open_internal(path.into(), expected_pk_root, mac_key, false, None)
     }
 
     /// Explicit fresh-key enrollment, never recovery after a missing WAL.
@@ -1004,7 +1014,48 @@ impl FsWalEpochSink {
         expected_pk_root: &[u8; 32],
         mac_key: [u8; 32],
     ) -> Result<(Self, Option<WalEpochState>), SigError> {
-        Self::open_internal(path.into(), expected_pk_root, mac_key, true)
+        Self::open_internal(path.into(), expected_pk_root, mac_key, true, None)
+    }
+
+    /// Enroll a fresh key with an independent durable rollback anchor.
+    pub fn create_anchored(
+        path: impl Into<std::path::PathBuf>,
+        expected_pk_root: &[u8; 32],
+        mac_key: [u8; 32],
+        anchor: alloc::boxed::Box<dyn ExternalMonotoneAnchor>,
+    ) -> Result<(Self, Option<WalEpochState>), SigError> {
+        Self::open_internal(path.into(), expected_pk_root, mac_key, true, Some(anchor))
+    }
+
+    /// Recover only if the authenticated WAL is at least as new as its independent anchor.
+    pub fn open_anchored(
+        path: impl Into<std::path::PathBuf>,
+        expected_pk_root: &[u8; 32],
+        mac_key: [u8; 32],
+        anchor: alloc::boxed::Box<dyn ExternalMonotoneAnchor>,
+    ) -> Result<(Self, Option<WalEpochState>), SigError> {
+        Self::open_internal(path.into(), expected_pk_root, mac_key, false, Some(anchor))
+    }
+
+    fn checkpoint(&self) -> LedgerCheckpoint {
+        LedgerCheckpoint {
+            generation: u32::from_le_bytes(self.current[40..44].try_into().expect("fixed width"))
+                as u64,
+            tag: self.current[80..].try_into().expect("fixed width"),
+        }
+    }
+
+    fn check_identity_and_anchor(&self) -> Result<(), SigError> {
+        self.record
+            .verify_lock_identity(&self.lock_identity)
+            .map_err(|_| SigError::WalPersistenceFailed)?;
+        if let Some(anchor) = &self.anchor {
+            let expected = self.checkpoint();
+            if anchor.load().map_err(|_| SigError::WalPersistenceFailed)? != Some(expected) {
+                return Err(SigError::WalPersistenceFailed);
+            }
+        }
+        Ok(())
     }
 
     fn open_internal(
@@ -1012,11 +1063,27 @@ impl FsWalEpochSink {
         expected_pk_root: &[u8; 32],
         mac_key: [u8; 32],
         create: bool,
+        anchor: Option<alloc::boxed::Box<dyn ExternalMonotoneAnchor>>,
     ) -> Result<(Self, Option<WalEpochState>), SigError> {
         let record = qsag_asm::durable::LockedRecord::acquire(path)
             .map_err(|_| SigError::WalPersistenceFailed)?;
         if create && !record.is_fresh() {
             return Err(SigError::WalPersistenceFailed);
+        }
+        let magic = if anchor.is_some() {
+            b"QSAGWAA4"
+        } else {
+            Self::MAGIC
+        };
+        let lock_identity = record.lock_identity_seal();
+        if let Some(a) = &anchor {
+            let enrolled = a
+                .load()
+                .map_err(|_| SigError::WalPersistenceFailed)?
+                .is_some();
+            if enrolled == create {
+                return Err(SigError::WalPersistenceFailed);
+            }
         }
         let mut current = [0u8; 112];
         match record.read() {
@@ -1026,17 +1093,20 @@ impl FsWalEpochSink {
                     return Err(SigError::WalPersistenceFailed);
                 }
                 current.copy_from_slice(&bytes);
-                if &current[..8] != Self::MAGIC
+                if &current[..8] != magic
                     || &current[8..40] != expected_pk_root
-                    || !qsag_asm::ct_eq_bytes(&Self::tag(&mac_key, &current[..80]), &current[80..])
+                    || !qsag_asm::ct_eq_bytes(
+                        &Self::tag(&mac_key, &lock_identity, &current[..80]),
+                        &current[80..],
+                    )
                 {
                     return Err(SigError::WalPersistenceFailed);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && create && record.is_fresh() => {
-                current[..8].copy_from_slice(Self::MAGIC);
+                current[..8].copy_from_slice(magic);
                 current[8..40].copy_from_slice(expected_pk_root);
-                let tag = Self::tag(&mac_key, &current[..80]);
+                let tag = Self::tag(&mac_key, &lock_identity, &current[..80]);
                 current[80..].copy_from_slice(&tag);
                 record
                     .replace(&current)
@@ -1067,20 +1137,33 @@ impl FsWalEpochSink {
             }
             Some((next, epoch, mu))
         };
-        Ok((
-            Self {
-                record,
-                mac_key,
-                current,
-            },
-            recovered,
-        ))
+        let sink = Self {
+            record,
+            mac_key,
+            current,
+            lock_identity,
+            anchor,
+        };
+        if let Some(anchor) = &sink.anchor {
+            let checkpoint = sink.checkpoint();
+            if let Some(old) = anchor.load().map_err(|_| SigError::WalPersistenceFailed)?
+                && (old.generation > checkpoint.generation
+                    || (old.generation == checkpoint.generation && old.tag != checkpoint.tag))
+            {
+                return Err(SigError::WalPersistenceFailed);
+            }
+            anchor
+                .advance(checkpoint)
+                .map_err(|_| SigError::WalPersistenceFailed)?;
+        }
+        Ok((sink, recovered))
     }
 }
 
 #[cfg(feature = "std")]
 impl EpochWalSink for FsWalEpochSink {
     fn recovered_state(&self, pk_root: &[u8; 32]) -> Result<Option<WalEpochState>, SigError> {
+        self.check_identity_and_anchor()?;
         if &self.current[8..40] != pk_root
             || self
                 .record
@@ -1114,6 +1197,7 @@ impl EpochWalSink for FsWalEpochSink {
         epoch: u32,
         mu: &[u8; 32],
     ) -> Result<(), SigError> {
+        self.check_identity_and_anchor()?;
         let old_next = u32::from_le_bytes(
             self.current[40..44]
                 .try_into()
@@ -1142,12 +1226,17 @@ impl EpochWalSink for FsWalEpochSink {
         staged[40..44].copy_from_slice(&next.to_le_bytes());
         staged[44..48].copy_from_slice(&epoch.to_le_bytes());
         staged[48..80].copy_from_slice(mu);
-        let tag = Self::tag(&self.mac_key, &staged[..80]);
+        let tag = Self::tag(&self.mac_key, &self.lock_identity, &staged[..80]);
         staged[80..].copy_from_slice(&tag);
         self.record
             .replace(&staged)
             .map_err(|_| SigError::WalPersistenceFailed)?;
         self.current = staged;
+        if let Some(anchor) = &self.anchor {
+            anchor
+                .advance(self.checkpoint())
+                .map_err(|_| SigError::WalPersistenceFailed)?;
+        }
         Ok(())
     }
 }

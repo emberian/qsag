@@ -3,7 +3,7 @@
 //! Models a 4-second Ethereum Beam Chain slot with regional attestation subnets:
 //! - **Subnet Validators (`JortsPoseidon2` stateful + `CorduroyPoseidon2` stateless hypertree)**:
 //!   Validators sign the registry-pinned regional attestation statement
-//!   `hierarchical_hem_registry_bound_message`.
+//!   `hierarchical_hem_message`.
 //! - **Layer-1 Subnet Aggregators + Layer-2 Block Proposer (`recursive.rs`)**:
 //!   Aggregates regional subnets concurrently via `std::thread::scope`, binds the collision-free
 //!   `encode_multi_frame` policy registry root and `checked_quorum_sum` quorum weights, round-trips
@@ -15,9 +15,8 @@ use std::time::Instant;
 use qsag_agg::{
     AggSigProfile, EpochWalSink, HemAggConfig, HierarchicalHemAggregate, ShardHemPolicy,
     ShardHemWitness, SigError, SignerBitmap, StatelessBudgetWalSink, ValidatorKeypair,
-    ValidatorSignature, WhirSecurityRegime, compute_policy_registry_root,
-    hierarchical_hem_registry_bound_message, prove_hierarchical_hem_registry_bound,
-    verify_hierarchical_hem_registry_bound,
+    ValidatorSignature, WhirSecurityRegime, compute_policy_registry_root, hierarchical_hem_message,
+    prove_hierarchical_hem, verify_hierarchical_hem,
 };
 
 type EpochReceipt = (u32, u32, [u8; 32]);
@@ -147,7 +146,7 @@ fn run_beam_hierarchy_bench(
                 .map(|(s_idx, mut kps)| {
                     scope.spawn(move || {
                         let policy = &policies_ref[s_idx];
-                        let region_msg = hierarchical_hem_registry_bound_message(
+                        let region_msg = hierarchical_hem_message(
                             &registry_root,
                             policy,
                             epoch_floor,
@@ -196,7 +195,7 @@ fn run_beam_hierarchy_bench(
     cfg.regime = regime;
 
     let t_prove = Instant::now();
-    let agg = prove_hierarchical_hem_registry_bound(
+    let agg = prove_hierarchical_hem(
         &policies,
         &witnesses,
         epoch_floor,
@@ -218,7 +217,7 @@ fn run_beam_hierarchy_bench(
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(9);
-    assert!(verify_hierarchical_hem_registry_bound(
+    assert!(verify_hierarchical_hem(
         &policies,
         epoch_floor,
         beacon_root_msg,
@@ -229,7 +228,7 @@ fn run_beam_hierarchy_bench(
     let mut samples_ms = Vec::with_capacity(verify_iters);
     for _ in 0..verify_iters {
         let t_v = Instant::now();
-        let ok = verify_hierarchical_hem_registry_bound(
+        let ok = verify_hierarchical_hem(
             &policies,
             epoch_floor,
             beacon_root_msg,
@@ -242,6 +241,8 @@ fn run_beam_hierarchy_bench(
     }
     samples_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let median_verify_ms = samples_ms[samples_ms.len() / 2];
+    // The minimum is the least contention-sensitive sample on a shared host.
+    let min_verify_ms = samples_ms[0];
     let total_signers = decoded
         .checked_total_quorums()
         .expect("checked_total_quorums");
@@ -251,7 +252,7 @@ fn run_beam_hierarchy_bench(
         policies.len()
     );
     println!(
-        "      prove_2layer = {prove_ms:.2} ms (4000 ms slot budget) | verify_median = {median_verify_ms:.2} ms (8.00 ms target) | wire = {} B ({:.1} KiB) | keygen+sign = {setup_ms:.1} ms",
+        "      prove_2layer = {prove_ms:.2} ms (4000 ms slot budget) | verify_median = {median_verify_ms:.2} ms, min = {min_verify_ms:.2} ms over {verify_iters} (8.00 ms target) | wire = {} B ({:.1} KiB) | keygen+sign = {setup_ms:.1} ms",
         wire.len(),
         wire.len() as f64 / 1024.0
     );
@@ -284,11 +285,6 @@ fn main() {
         (40, AggSigProfile::JortsPoseidon2, 32, 24),
     ];
     run_beam_hierarchy_bench(
-        "Beam-Jorts-4x32-Classical128",
-        &jorts_subnets,
-        WhirSecurityRegime::Habr24Classical128,
-    );
-    run_beam_hierarchy_bench(
         "Beam-Jorts-4x32-Qrom128",
         &jorts_subnets,
         WhirSecurityRegime::Habr24Qrom128,
@@ -320,7 +316,7 @@ fn main() {
     #[cfg(feature = "vulkan")]
     if let Some((submissions, receipts, fallbacks)) = qsag_agg::vulkan_execution_counts() {
         println!(
-            "Vulkan totals: submissions={submissions} accepted_v4_receipts={receipts} cpu_fallbacks={fallbacks}"
+            "Vulkan totals: submissions={submissions} accepted_v5_receipts={receipts} cpu_fallbacks={fallbacks}"
         );
     }
 }
