@@ -801,11 +801,17 @@ def dealHonestRssVault (cIdx : Fin 3) (seedSh prfSh : RssByteShares) : Nat → O
     else none
 
 /-- Per-session random tape for 3-round interactive RSS `FIPS 205 SLH-DSA`:
-    - `nonceA, nonceB` : 64-bit Round-1 hedged coin-toss nonces of the two honest parties;
+    - `coinB` : 128-bit coin share of the second honest party;
+    - `prgSeeds` : the three pairwise 64-bit PRG seeds of the replicated zero-sharing (the honest
+      pair jointly holds all three), expanded by `expandPairwiseSeedTape`;
+    - `nonceA, nonceB` : 64-bit blinds of the two honest Round-1 coin commitments;
     - `chiMaskA, chiMaskB` : fresh 64-bit Round-2 Keccak `χ`-row masks;
     - `cutMask0, cutMask1` : fresh `8 * p.sigBytes`-bit Round-3 cut-opening share masks;
-    - `gammaBits` : 128-bit active consistency / `BDOZ` batch evaluation challenge in `Tower128`. -/
+    - `gammaBits` : 128-bit coin share of the first honest party. The consistency challenge is
+      `gammaBits ⊕ coinB ⊕ corruptCoin` (`sharedCoinTossBarrier`). -/
 structure RssSlhSessionTape (sigBytes : Nat) where
+  coinB     : BitVec 128
+  prgSeeds  : BitVec 192
   nonceA    : BitVec 64
   nonceB    : BitVec 64
   chiMaskA  : BitVec 64
@@ -817,7 +823,8 @@ structure RssSlhSessionTape (sigBytes : Nat) where
 
 /-- Cardinality of the per-session pad space (excluding the `2^128` challenge `gammaBits`). -/
 def rssPadSessionCard (sigBytes : Nat) : Nat :=
-  (2 ^ 64) * ((2 ^ 64) * ((2 ^ 64) * ((2 ^ 64) * ((2 ^ (8 * sigBytes)) * (2 ^ (8 * sigBytes))))))
+  (2 ^ 128) * ((2 ^ 192) *
+    ((2 ^ 64) * ((2 ^ 64) * ((2 ^ 64) * ((2 ^ 64) * ((2 ^ (8 * sigBytes)) * (2 ^ (8 * sigBytes))))))))
 
 /-- Cardinality of one full session tape (`padSessionCard * 2^128`). -/
 def rssFullSessionCard (sigBytes : Nat) : Nat :=
@@ -830,11 +837,12 @@ def rssMultiSessionCard (sigBytes : Nat) : Nat → Nat
 
 theorem rssPadSessionCard_pos (sigBytes : Nat) : 0 < rssPadSessionCard sigBytes := by
   unfold rssPadSessionCard
-  exact Nat.mul_pos (Nat.two_pow_pos _)
+  exact Nat.mul_pos (Nat.two_pow_pos _) (Nat.mul_pos (Nat.two_pow_pos _)
     (Nat.mul_pos (Nat.two_pow_pos _)
       (Nat.mul_pos (Nat.two_pow_pos _)
         (Nat.mul_pos (Nat.two_pow_pos _)
-          (Nat.mul_pos (Nat.two_pow_pos _) (Nat.two_pow_pos _)))))
+          (Nat.mul_pos (Nat.two_pow_pos _)
+            (Nat.mul_pos (Nat.two_pow_pos _) (Nat.two_pow_pos _)))))))
 
 theorem rssFullSessionCard_pos (sigBytes : Nat) : 0 < rssFullSessionCard sigBytes :=
   Nat.mul_pos (rssPadSessionCard_pos sigBytes) (Nat.two_pow_pos 128)
@@ -850,8 +858,14 @@ def decodeRssSessionTape (L : Nat) (padIdx : Fin (rssPadSessionCard L)) (gIdx : 
   have hB5 : 0 < B5 := Nat.mul_pos (Nat.two_pow_pos _)
     (Nat.mul_pos (Nat.two_pow_pos _) (Nat.mul_pos (Nat.two_pow_pos _)
       (Nat.mul_pos (Nat.two_pow_pos _) (Nat.two_pow_pos _))))
-  let nA := splitFinLeft hB5 padIdx
-  let r5 := splitFinRight hB5 padIdx
+  have hB6 : 0 < (2 ^ 64) * B5 := Nat.mul_pos (Nat.two_pow_pos _) hB5
+  have hB7 : 0 < (2 ^ 192) * ((2 ^ 64) * B5) := Nat.mul_pos (Nat.two_pow_pos _) hB6
+  let kB := splitFinLeft hB7 padIdx
+  let r7 := splitFinRight hB7 padIdx
+  let sd := splitFinLeft hB6 r7
+  let r6 := splitFinRight hB6 r7
+  let nA := splitFinLeft hB5 r6
+  let r5 := splitFinRight hB5 r6
   let B4 := (2 ^ 64) * ((2 ^ (8 * L)) * (2 ^ (8 * L)))
   have hB4 : 0 < B4 := Nat.mul_pos (Nat.two_pow_pos _) (Nat.mul_pos (Nat.two_pow_pos _) (Nat.two_pow_pos _))
   let B4Top := (2 ^ 64) * B4
@@ -866,7 +880,9 @@ def decodeRssSessionTape (L : Nat) (padIdx : Fin (rssPadSessionCard L)) (gIdx : 
   let r2 := splitFinRight hB2 r3
   let m0 := splitFinLeft (Nat.two_pow_pos (8 * L)) r2
   let m1 := splitFinRight (Nat.two_pow_pos (8 * L)) r2
-  { nonceA := BitVec.ofFin nA
+  { coinB := BitVec.ofFin kB
+    prgSeeds := BitVec.ofFin sd
+    nonceA := BitVec.ofFin nA
     nonceB := BitVec.ofFin nB
     chiMaskA := BitVec.ofFin cA
     chiMaskB := BitVec.ofFin cB
@@ -874,18 +890,21 @@ def decodeRssSessionTape (L : Nat) (padIdx : Fin (rssPadSessionCard L)) (gIdx : 
     cutMask1 := BitVec.ofFin m1
     gammaBits := BitVec.ofFin gIdx }
 
-def encodeRssPadIdx (L : Nat)
+def encodeRssPadIdx (L : Nat) (kB : BitVec 128) (sd : BitVec 192)
     (nA nB cA cB : BitVec 64) (m0 m1 : BitVec (8 * L)) : Fin (rssPadSessionCard L) :=
-  pairFin nA.toFin
-    (pairFin nB.toFin
-      (pairFin cA.toFin
-        (pairFin cB.toFin
-          (pairFin m0.toFin m1.toFin))))
+  pairFin kB.toFin
+    (pairFin sd.toFin
+      (pairFin nA.toFin
+        (pairFin nB.toFin
+          (pairFin cA.toFin
+            (pairFin cB.toFin
+              (pairFin m0.toFin m1.toFin))))))
 
-private theorem decodeRssSessionTape_encodeRssPadIdx (L : Nat)
+private theorem decodeRssSessionTape_encodeRssPadIdx (L : Nat) (kB : BitVec 128) (sd : BitVec 192)
     (nA nB cA cB : BitVec 64) (m0 m1 : BitVec (8 * L)) (gIdx : Fin (2 ^ 128)) :
-    decodeRssSessionTape L (encodeRssPadIdx L nA nB cA cB m0 m1) gIdx =
-      { nonceA := nA, nonceB := nB, chiMaskA := cA, chiMaskB := cB,
+    decodeRssSessionTape L (encodeRssPadIdx L kB sd nA nB cA cB m0 m1) gIdx =
+      { coinB := kB, prgSeeds := sd,
+        nonceA := nA, nonceB := nB, chiMaskA := cA, chiMaskB := cB,
         cutMask0 := m0, cutMask1 := m1, gammaBits := BitVec.ofFin gIdx } := by
   unfold decodeRssSessionTape encodeRssPadIdx
   dsimp only
@@ -893,10 +912,13 @@ private theorem decodeRssSessionTape_encodeRssPadIdx (L : Nat)
       splitFinLeft_pairFin, splitFinRight_pairFin,
       splitFinLeft_pairFin, splitFinRight_pairFin,
       splitFinLeft_pairFin, splitFinRight_pairFin,
+      splitFinLeft_pairFin, splitFinRight_pairFin,
+      splitFinLeft_pairFin, splitFinRight_pairFin,
       splitFinLeft_pairFin, splitFinRight_pairFin]
 
 def defaultRssSessionTape (L : Nat) : RssSlhSessionTape L :=
-  { nonceA := 0#64, nonceB := 0#64, chiMaskA := 0#64, chiMaskB := 0#64,
+  { coinB := 0#128, prgSeeds := 0#192,
+    nonceA := 0#64, nonceB := 0#64, chiMaskA := 0#64, chiMaskB := 0#64,
     cutMask0 := 0#(8 * L), cutMask1 := 0#(8 * L), gammaBits := 0#128 }
 
 def decodeMultiSessionTapes (L : Nat) :
@@ -939,18 +961,18 @@ theorem decodeTower128Wire_encodeTower128Wire (x : Tower128) :
   rw [fixedBytesToBv_bvToFixedBytes 16]
   exact unpackTower_packTower 7 x
 
-/-- Parse exactly `deg > 0` field elements after the eight-byte nonce. Reject
-    empty streams, truncated elements, and any trailing bytes. -/
+/-- Parse the 24-byte coin opening (16-byte coin share, 8-byte blind) followed by exactly
+    `deg > 0` field elements. Reject empty streams, truncated elements, and any trailing bytes. -/
 def parseCorruptRound2Wire (deg : Nat) (wire : ByteArray) : Option (List UInt8 × List Tower128) :=
   let raw := unpackWireBytes wire
-  if deg = 0 ∨ raw.length ≠ 8 + 16 * deg then none
-  else some (raw.take 8, (splitByteChunks 16 deg (raw.drop 8)).map decodeTower128Wire)
+  if deg = 0 ∨ raw.length ≠ 24 + 16 * deg then none
+  else some (raw.take 24, (splitByteChunks 16 deg (raw.drop 24)).map decodeTower128Wire)
 
 /-- Successful parsing consumes the entire frame and returns the declared positive gate count. -/
 theorem parseCorruptRound2Wire_canonical (deg : Nat) (wire : ByteArray)
     {nonceC : List UInt8} {sentWires : List Tower128}
     (hParse : parseCorruptRound2Wire deg wire = some (nonceC, sentWires)) :
-    0 < deg ∧ (unpackWireBytes wire).length = 8 + 16 * deg ∧ sentWires.length = deg := by
+    0 < deg ∧ (unpackWireBytes wire).length = 24 + 16 * deg ∧ sentWires.length = deg := by
   unfold parseCorruptRound2Wire at hParse
   dsimp only at hParse
   split at hParse
@@ -959,8 +981,8 @@ theorem parseCorruptRound2Wire_canonical (deg : Nat) (wire : ByteArray)
     injection hParse with hp
     rcases Prod.mk.inj hp with ⟨_, rfl⟩
     have hPos : 0 < deg := Nat.pos_of_ne_zero (fun hz => h (Or.inl hz))
-    have hLen : (unpackWireBytes wire).length = 8 + 16 * deg := by
-      by_cases he : (unpackWireBytes wire).length = 8 + 16 * deg
+    have hLen : (unpackWireBytes wire).length = 24 + 16 * deg := by
+      by_cases he : (unpackWireBytes wire).length = 24 + 16 * deg
       · exact he
       · exact False.elim (h (Or.inr he))
     exact ⟨hPos, hLen, by simp only [List.length_map, splitByteChunks_length]⟩
@@ -976,7 +998,7 @@ def encodeCorruptRound2Wire (nonce : List UInt8) (wires : List Tower128) : ByteA
   packWireBytes (nonce ++ (wires.map encodeTower128Wire).flatten)
 
 theorem parseCorruptRound2Wire_encode (nonce : List UInt8) (wires : List Tower128)
-    (hn : nonce.length = 8) (hw : 0 < wires.length) :
+    (hn : nonce.length = 24) (hw : 0 < wires.length) :
     parseCorruptRound2Wire wires.length (encodeCorruptRound2Wire nonce wires) =
       some (nonce, wires) := by
   have he : ∀ x ∈ wires.map encodeTower128Wire, x.length = 16 := by
@@ -1003,7 +1025,7 @@ theorem parseCorruptRound2Wire_encode (nonce : List UInt8) (wires : List Tower12
 
 /-- The former empty-stream bypass is rejected for every declared gate count. -/
 theorem tooth_round2_empty_stream_rejected (deg : Nat) :
-    parseCorruptRound2Wire deg (packWireBytes (List.replicate 8 0)) = none := by
+    parseCorruptRound2Wire deg (packWireBytes (List.replicate 24 0)) = none := by
   unfold parseCorruptRound2Wire
   rw [unpackWireBytes_packWireBytes]
   simp only [List.length_replicate]

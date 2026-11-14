@@ -2512,7 +2512,7 @@ def verifyCanopyChainToTop (suite : BaggySuite256) (p : BaggyTreeParams)
       else some (sig, expLayerRoot)
     | _, _, _ => none
 
-/-- Durable per-party static WOTS record `(layer, tree, kp) ↦ firstSignedDigits` (`Fable P1-1` fix!). -/
+/-- Abstract per-party static WOTS record `(layer, tree, kp) ↦ firstSignedDigits` (`Fable P1-1` fix!). -/
 abbrev DurableStaticWotsGuard := List (Nat × Nat × Nat × WotsC256Digits)
 
 def lookupDurableDigits (g : DurableStaticWotsGuard) (layer tree kp : Nat) : Option WotsC256Digits :=
@@ -2522,7 +2522,8 @@ def lookupDurableDigits (g : DurableStaticWotsGuard) (layer tree kp : Nat) : Opt
     if l == layer && t == tree && k == kp then some d
     else lookupDurableDigits rest layer tree kp
 
-/-- Enforce durable first-signed digits on every new static (`layer ≥ 1`) WOTS opening before Round-2 release! -/
+/-- Atomic specification of first-signed consistency. Persistence and release
+    are modeled separately by `baggyReleaseStep` below. -/
 def enforceDurableStaticOpenings :
     DurableStaticWotsGuard → List StaticWotsOpeningRecord → Option DurableStaticWotsGuard
   | g, [] => some g
@@ -2552,6 +2553,7 @@ def baggySignLayersVerifiedCacheAux (suite : BaggySuite256) (p : BaggyTreeParams
       | some (restSigs, topRoot, restRecs) =>
         some (cachedLayerSig :: restSigs, topRoot, restRecs)
     | none =>
+      if (cache.cachedSig layer tree kp).isSome then none else
       match baggySignLayerFresh suite p sk layer tree kp node with
       | none => none
       | some (sig, nextRoot, recOpt) =>
@@ -2561,8 +2563,8 @@ def baggySignLayersVerifiedCacheAux (suite : BaggySuite256) (p : BaggyTreeParams
           let allRecs := match recOpt with | some r => r :: restRecs | none => restRecs
           some (sig :: restSigs, topRoot, allRecs)
 
-/-- Hardened single-session `Baggy` signer with `VerifiedWaistbandCache` + `DurableStaticWotsGuard`
-    checked **strictly before** Round-2 secret chain-node release! -/
+/-- Pure single-session signature specification with cache checking and an atomic
+    first-signed guard. This function has no crash or storage semantics. -/
 def baggySignVerifiedWaistband (suite : BaggySuite256) (p : BaggyTreeParams)
     (sk : BaggySecretKey256) (pk : BaggyPublicKey256)
     (cache : VerifiedWaistbandCache) (guard : DurableStaticWotsGuard)
@@ -2581,7 +2583,7 @@ def baggySignVerifiedWaistband (suite : BaggySuite256) (p : BaggyTreeParams)
       | some (layers, topRoot, recs) =>
         if topRoot != pk.pkRoot then none
         else
-          -- Durable first-signed WOTS check runs BEFORE Round-2 secret node opening!
+          -- Pure guard specification; actual durability belongs to baggyReleaseStep.
           match enforceDurableStaticOpenings guard recs with
           | none => none
           | some guard' =>
@@ -2725,47 +2727,49 @@ private theorem baggyLayersVerifiedCacheAux_canonical
         exact ihRem (layer + 1) verifiedRoot (fun _ => by simp [tree, hVerRoot]) hRec r hr
     | none =>
       rw [hCanopy] at hAux
-      cases hFresh : baggySignLayerFresh suite p sk layer tree kp node with
-      | none => rw [hFresh] at hAux; cases hAux
-      | some freshRes =>
-        rcases freshRes with ⟨sig, nextRoot, recOpt⟩
-        rw [hFresh] at hAux
-        dsimp only at hAux
-        obtain ⟨hNextTrue, _, hRecProps⟩ := baggySignLayerFresh_props suite p sk layer tree kp node hFresh
-        cases hRec : baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx (layer + 1) rem nextRoot with
-        | none => rw [hRec] at hAux; cases hAux
-        | some res =>
-          rcases res with ⟨restSigs, topR, restRecs⟩
-          rw [hRec] at hAux
-          injection hAux with hEq
-          rcases Prod.mk.inj hEq with ⟨_, hEq2⟩
-          rcases Prod.mk.inj hEq2 with ⟨_, hRecsEq⟩
-          rw [← hRecsEq] at hr
-          have ih := ihRem (layer + 1) nextRoot (fun _ => by simp [tree, hNextTrue]) hRec
-          cases hOpt : recOpt with
-          | none =>
-            rw [hOpt] at hr
-            exact ih r hr
-          | some rec0 =>
-            rw [hOpt] at hr
-            rcases List.mem_cons.mp hr with rfl | hMemRest
-            · obtain ⟨hGe1, hRLayer, hRTree, hRKp, hSignedEq, hDigEq⟩ := hRecProps r hOpt
-              have hChildTree : (p.pathAt leafIdx (layer - 1)).2 = baggyChildTreeIdx p tree kp := by
-                have hLayerSucc : (layer - 1) + 1 = layer := Nat.sub_add_cancel hGe1
-                have hPath := baggyChildTreeIdx_pathAt p leafIdx (layer - 1)
-                dsimp only at hPath
-                rw [hLayerSucc] at hPath
-                exact hPath.symm
-              have hNodeCanon : node = baggyCanonicalStaticChildRoot suite p sk layer tree kp := by
-                rw [hNodeInv hGe1, hChildTree]
-                rfl
-              rw [hRLayer, hRTree, hRKp]
-              refine ⟨hGe1, hSignedEq.trans hNodeCanon, ?_⟩
-              unfold baggyCanonicalStaticDigits
-              rw [← hNodeCanon]
-              exact hDigEq
-            · exact ih r hMemRest
-
+      split at hAux
+      · cases hAux
+      next hAbsent =>
+       cases hFresh : baggySignLayerFresh suite p sk layer tree kp node with
+        | none => rw [hFresh] at hAux; cases hAux
+        | some freshRes =>
+          rcases freshRes with ⟨sig, nextRoot, recOpt⟩
+          rw [hFresh] at hAux
+          dsimp only at hAux
+          obtain ⟨hNextTrue, _, hRecProps⟩ := baggySignLayerFresh_props suite p sk layer tree kp node hFresh
+          cases hRec : baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx (layer + 1) rem nextRoot with
+          | none => rw [hRec] at hAux; cases hAux
+          | some res =>
+            rcases res with ⟨restSigs, topR, restRecs⟩
+            rw [hRec] at hAux
+            injection hAux with hEq
+            rcases Prod.mk.inj hEq with ⟨_, hEq2⟩
+            rcases Prod.mk.inj hEq2 with ⟨_, hRecsEq⟩
+            rw [← hRecsEq] at hr
+            have ih := ihRem (layer + 1) nextRoot (fun _ => by simp [tree, hNextTrue]) hRec
+            cases hOpt : recOpt with
+            | none =>
+              rw [hOpt] at hr
+              exact ih r hr
+            | some rec0 =>
+              rw [hOpt] at hr
+              rcases List.mem_cons.mp hr with rfl | hMemRest
+              · obtain ⟨hGe1, hRLayer, hRTree, hRKp, hSignedEq, hDigEq⟩ := hRecProps r hOpt
+                have hChildTree : (p.pathAt leafIdx (layer - 1)).2 = baggyChildTreeIdx p tree kp := by
+                  have hLayerSucc : (layer - 1) + 1 = layer := Nat.sub_add_cancel hGe1
+                  have hPath := baggyChildTreeIdx_pathAt p leafIdx (layer - 1)
+                  dsimp only at hPath
+                  rw [hLayerSucc] at hPath
+                  exact hPath.symm
+                have hNodeCanon : node = baggyCanonicalStaticChildRoot suite p sk layer tree kp := by
+                  rw [hNodeInv hGe1, hChildTree]
+                  rfl
+                rw [hRLayer, hRTree, hRKp]
+                refine ⟨hGe1, hSignedEq.trans hNodeCanon, ?_⟩
+                unfold baggyCanonicalStaticDigits
+                rw [← hNodeCanon]
+                exact hDigEq
+              · exact ih r hMemRest
 private theorem lookupDurableDigits_preserved :
     ∀ {g g' : DurableStaticWotsGuard} {recs : List StaticWotsOpeningRecord}
       {layer tree kp : Nat} {d0 : WotsC256Digits},
@@ -3983,7 +3987,7 @@ private theorem inhabited_layers (node : BitVec 256) :
       inhabitedCache 0 0 3 node =
       some ([inhabitedLayerSig, inhabitedLayerSig, inhabitedLayerSig], 0#256, [inhabitedRecord]) := by
   simp only [baggySignLayersVerifiedCacheAux, Nat.reduceAdd, inhabited_path, inhabited_cache0,
-    inhabited_cache1, inhabited_cache2, inhabitedBaggy_fresh]
+    inhabited_cache1, inhabited_cache2, inhabitedBaggy_fresh, inhabitedCache]
   rfl
 
 private theorem inhabited_verify (msg : BitVec 256) :
@@ -4206,6 +4210,372 @@ run_cmd do
     unless forbidden.isEmpty do
       throwError "Forbidden axioms in {name}: {forbidden}"
   logInfo m!"Baggy/RSS constructive audit: {names.size} declarations passed"
+
+/-! ## Recorded RSS checks and degree-two product rounds
+
+These are algebraic transcript machines. Uniform challenges must be sampled after
+`permuteInline` freezes the gates. A Rust refinement still needs the polynomial-
+basis/tower-field isomorphism, the tensor schedule and the coin-commitment game;
+the earlier two-point polynomial lemma is not a proof of that whole protocol.
+-/
+
+/-- Two 128-bit blocks per plane. Packing preserves all bits (unlike treating
+individual erroneous bits as independent product-proof coefficients). -/
+def rss256PackedGateErrors (gates : List Rss256RecordedGate) : List Tower128 :=
+  gates.flatMap (fun g => let p := unpackTower128Pair g.error; [p.1, p.2])
+
+/-- The final masked-product check has three coefficients and degree at most two. -/
+def rss256ProductResidual (a0 a1 b0 b1 c0 c1 c2 : Tower128) : List Tower128 :=
+  [towerAdd 7 (towerMul 7 a0 b0) c0,
+   towerAdd 7 (towerAdd 7 (towerMul 7 a0 b1) (towerMul 7 a1 b0)) c1,
+   towerAdd 7 (towerMul 7 a1 b1) c2]
+
+/-- Root count for the actual quadratic product-minus-claim coefficients, rather
+than a degree parameter attached to a list of bit errors. The polynomial is fixed
+before the challenge; the candidate domain contains more than two distinct points. -/
+theorem rss256_product_degree_two_roots
+    (a0 a1 b0 b1 c0 c1 c2 : Tower128) (domain : List Tower128)
+    (hNodup : domain.Nodup) (hDomain : 2 < domain.length)
+    (hFalse : ∃ c ∈ rss256ProductResidual a0 a1 b0 b1 c0 c1 c2, c ≠ towerZero 7) :
+    (domain.filter (fun tau => decide
+      (RoundPoly.evalCoeffs (rss256ProductResidual a0 a1 b0 b1 c0 c1 c2) tau = towerZero 7))).length ≤ 2 := by
+  have hLen : (rss256ProductResidual a0 a1 b0 b1 c0 c1 c2).length ≤ 2 + 1 := by
+    simp [rss256ProductResidual]
+  exact RoundPoly.roots_nodup_length_le 2 _ domain hNodup hLen
+    (exists_eval_nonzero_of_coeff_nonzero 2 _ domain hNodup hLen hDomain hFalse)
+
+/-- Binding between the coefficient list and the final masked-product equation. -/
+theorem rss256_product_residual_evaluation
+    (a0 a1 b0 b1 c0 c1 c2 tau : Tower128) :
+    RoundPoly.evalCoeffs (rss256ProductResidual a0 a1 b0 b1 c0 c1 c2) tau =
+      towerAdd 7
+        (towerMul 7 (towerAdd 7 a0 (towerMul 7 tau a1))
+          (towerAdd 7 b0 (towerMul 7 tau b1)))
+        (RoundPoly.evalCoeffs [c0, c1, c2] tau) := by
+  simp only [rss256ProductResidual, RoundPoly.evalCoeffs]
+  change towerAdd 7 (towerAdd 7 (towerMul 7 a0 b0) c0)
+    (towerMul 7 tau (towerAdd 7
+      (towerAdd 7 (towerAdd 7 (towerMul 7 a0 b1) (towerMul 7 a1 b0)) c1)
+      (towerMul 7 tau (towerAdd 7 (towerAdd 7 (towerMul 7 a1 b1) c2)
+        (towerMul 7 tau (towerZero 7)))))) = _
+  simp only [towerMul_zero, towerAdd_zero, towerMul_add_distrib, towerAdd_mul_distrib]
+  simp only [towerMul_assoc, towerMul_comm, towerMul_left_comm_of_assoc 7 (towerMul_assoc 7),
+    towerAdd_assoc, towerAdd_comm, towerAdd_left_comm]
+
+/-- Check each recorded gate's left operand is the preceding gate's output.
+The output is read from those same recorded shares, never a separate output plane. -/
+def rss256GateLinks : Plane256 → List Rss256RecordedGate → Bool
+  | _, [] => true
+  | input, g :: gs => (g.x.reconstruct == input) && rss256GateLinks g.z.reconstruct gs
+
+def rss256GateOutput : Plane256 → List Rss256RecordedGate → Plane256
+  | input, [] => input
+  | _, g :: gs => rss256GateOutput g.z.reconstruct gs
+
+def rss256GateIdeal : Plane256 → List Rss256RecordedGate → Plane256
+  | input, [] => input
+  | input, g :: gs => rss256GateIdeal (input &&& g.y.reconstruct) gs
+
+structure Rss256InlineWave where
+  input : Plane256
+  gates : List Rss256RecordedGate
+
+/-- Bank-mode holder copies are compared by Horner at two fresh challenges. -/
+structure Rss256BankWave where
+  firstHolder : List Tower128
+  secondHolder : List Tower128
+
+inductive Rss256Wave where
+  | inlineWave (wave : Rss256InlineWave)
+  | bankWave (wave : Rss256BankWave)
+
+def Rss256Wave.check (w : Rss256Wave) (chi1 chi2 : Tower128) : Bool :=
+  match w with
+  | .inlineWave w =>
+    rss256GateLinks w.input w.gates &&
+      (batchDeviationPoly (rss256PackedGateErrors w.gates) chi1 == towerZero 7) &&
+      (batchDeviationPoly (rss256PackedGateErrors w.gates) chi2 == towerZero 7)
+  | .bankWave w =>
+    decide (w.firstHolder.length = w.secondHolder.length) &&
+      (ghashPoly chi1 w.firstHolder == ghashPoly chi1 w.secondHolder) &&
+      (ghashPoly chi2 w.firstHolder == ghashPoly chi2 w.secondHolder)
+
+/-- Semantic fault is independent of verifier acceptance. In particular zero
+challenges do not turn a false gate into a semantically clean gate. -/
+def Rss256Wave.Fault : Rss256Wave → Prop
+  | .inlineWave w => rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates
+  | .bankWave w => w.firstHolder ≠ w.secondHolder
+
+def Rss256Wave.BadChallenge (w : Rss256Wave) (chi1 chi2 : Tower128) : Prop :=
+  w.Fault ∧ w.check chi1 chi2 = true
+
+structure Rss256EngineState where
+  pending : List Rss256Wave
+  accepted : List (Rss256Wave × Tower128 × Tower128)
+  poisoned : Bool
+
+def Rss256EngineState.init : Rss256EngineState := ⟨[], [], false⟩
+
+inductive Rss256EngineOp where
+  | permuteInline (wave : Rss256InlineWave)
+  | permuteBank (wave : Rss256BankWave)
+  | check (chi1 chi2 : Tower128)
+  | openPlanes
+
+/-- Recorded-transcript barrier. Checks compute Horner equations internally;
+there is no validity flag and no independent caller-selected output plane. -/
+def rss256StepHardened (st : Rss256EngineState) (op : Rss256EngineOp) :
+    StepOutcome Rss256EngineState (List Plane256) Rss256EngineErr :=
+  if st.poisoned then .err st .enginePoisoned
+  else match op with
+  | .permuteInline w => .ok { st with pending := st.pending ++ [.inlineWave w] } []
+  | .permuteBank w => .ok { st with pending := st.pending ++ [.bankWave w] } []
+  | .check a b =>
+    if st.pending.all (fun w => w.check a b) then
+      .ok { st with pending := [], accepted := st.accepted ++ st.pending.map (fun w => (w,a,b)) } []
+    else .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed
+  | .openPlanes =>
+    if st.pending.isEmpty then
+      .ok st (st.accepted.filterMap (fun entry => match entry.1 with
+        | .inlineWave w => some (rss256GateOutput w.input w.gates)
+        | .bankWave _ => none))
+    else .err st .openBeforeCheck
+
+/-- API misuse is recoverable; a cryptographic barrier failure is not. -/
+theorem rss256_premature_open_preserves_state (st : Rss256EngineState)
+    (hp : st.poisoned = false) (hu : st.pending.isEmpty = false) :
+    rss256StepHardened st .openPlanes = .err st .openBeforeCheck := by
+  simp [rss256StepHardened, hp, hu]
+
+theorem rss256_failed_horner_poisons (st : Rss256EngineState) (a b : Tower128)
+    (hp : st.poisoned = false) (hf : st.pending.all (fun w => w.check a b) = false) :
+    rss256StepHardened st (.check a b) =
+      .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed := by
+  simp [rss256StepHardened, hp, hf]
+
+/-- Output integrity is explicitly conditional on absence of the checker bad
+ event, rather than on a syntactic taint bit. -/
+theorem rss256_checked_inline_integrity (w : Rss256InlineWave) (a b : Tower128)
+    (ha : (Rss256Wave.inlineWave w).check a b = true)
+    (hn : ¬ (Rss256Wave.inlineWave w).BadChallenge a b) :
+    rss256GateOutput w.input w.gates = rss256GateIdeal w.input w.gates := by
+  by_cases he : rss256GateOutput w.input w.gates = rss256GateIdeal w.input w.gates
+  · exact he
+  · exact False.elim (hn ⟨he, ha⟩)
+
+/-- The packed-block batching bound is conditional on a fixed nonzero error
+polynomial. It does not claim a tensor/folding transcript refinement. -/
+theorem rss256_packed_batch_roots (gates : List Rss256RecordedGate)
+    (hn : ∃ e ∈ rss256PackedGateErrors gates, e ≠ towerZero 7) :
+    ratLe (finSum (2^128) (fun r =>
+      if batchDeviationPoly (rss256PackedGateErrors gates)
+        (unpackTower 7 (BitVec.ofFin r)) == towerZero 7 then 1 else 0), 2^128)
+      ((rss256PackedGateErrors gates).length, 2^128) :=
+  rss256_polynomial_gate_weight_soundness _ _ (Nat.le_refl _) hn
+
+/-! ## Crash-visible reservation and release
+
+The pure signature functions above are specifications. This state machine makes
+reservation write, durable sync, opening and recovery different transitions. Its
+durable storage contract is an acknowledged atomic record-batch sync; it does not
+assert a POSIX implementation theorem. Failures never roll back acknowledged
+records. The identity indexes the whole ledger, including recovery.
+-/
+structure BaggyLedgerIdentity where
+  pkSeed : BitVec 256
+  pkRoot : BitVec 256
+  paramsDigest : BitVec 256
+  deriving DecidableEq
+
+inductive BaggyRootProvenance where
+  | computed
+  | cachedSignature
+  | cachedLeaves
+  deriving DecidableEq
+
+structure BaggyPlannedOpening where
+  record : StaticWotsOpeningRecord
+  provenance : BaggyRootProvenance
+
+/-- Cached roots may only use an already durably anchored codeword. -/
+def admitBaggyPlannedOpening (guard : DurableStaticWotsGuard)
+    (plan : BaggyPlannedOpening) : Bool :=
+  let r := plan.record
+  match lookupDurableDigits guard r.layer r.tree r.kp with
+  | some d => d == r.digits
+  | none => match plan.provenance with
+    | .computed => true
+    | .cachedSignature | .cachedLeaves => false
+
+inductive BaggyReleasePhase where
+  | idle | planned | written | synced | opened | aborted
+  deriving DecidableEq
+
+structure BaggyReleaseState (identity : BaggyLedgerIdentity) where
+  durable : DurableStaticWotsGuard
+  staged : DurableStaticWotsGuard
+  plan : List BaggyPlannedOpening
+  phase : BaggyReleasePhase
+  /-- Public ghost history of releases; crash does not erase prior observations. -/
+  released : List StaticWotsOpeningRecord
+
+def BaggyReleaseState.init (identity : BaggyLedgerIdentity) : BaggyReleaseState identity :=
+  ⟨[], [], [], .idle, []⟩
+
+inductive BaggyReleaseOp where
+  | plan (openings : List BaggyPlannedOpening)
+  | write
+  | syncAck
+  | release
+  | storageFailure
+  | verificationFailure
+  | crash
+
+/-- `syncAck` is the storage contract's durable-commit event. No earlier state
+can emit an opening, and no failure event removes a committed reservation. -/
+def baggyReleaseStep {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) (op : BaggyReleaseOp) : BaggyReleaseState identity :=
+  match op with
+  | .crash => { st with staged := [], plan := [], phase := .idle }
+  | .storageFailure | .verificationFailure =>
+    { st with staged := [], plan := [], phase := .aborted }
+  | .plan ps =>
+    if st.phase == .idle && ps.all (admitBaggyPlannedOpening st.durable) then
+      { st with plan := ps, phase := .planned }
+    else { st with phase := .aborted }
+  | .write =>
+    if st.phase == .planned then
+      match enforceDurableStaticOpenings st.durable (st.plan.map (·.record)) with
+      | some staged => { st with staged := staged, phase := .written }
+      | none => { st with phase := .aborted }
+    else { st with phase := .aborted }
+  | .syncAck =>
+    if st.phase == .written then { st with durable := st.staged, phase := .synced }
+    else { st with phase := .aborted }
+  | .release =>
+    if st.phase == .synced && st.plan.all (fun p =>
+        lookupDurableDigits st.durable p.record.layer p.record.tree p.record.kp == some p.record.digits) then
+      { st with released := st.released ++ st.plan.map (·.record), phase := .opened }
+    else { st with phase := .aborted }
+
+def baggyReleaseTrace {identity : BaggyLedgerIdentity} :
+    BaggyReleaseState identity → List BaggyReleaseOp → BaggyReleaseState identity
+  | st, [] => st
+  | st, op :: ops => baggyReleaseTrace (baggyReleaseStep st op) ops
+
+theorem baggy_crash_preserves_reservations {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) :
+    (baggyReleaseStep st .crash).durable = st.durable ∧
+    (baggyReleaseStep st .crash).released = st.released := ⟨rfl, rfl⟩
+
+theorem baggy_failed_verification_preserves_reservations {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) :
+    (baggyReleaseStep st .verificationFailure).durable = st.durable := rfl
+
+theorem baggy_release_requires_sync {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) (h : st.phase ≠ .synced) :
+    (baggyReleaseStep st .release).released = st.released := by
+  simp [baggyReleaseStep, h]
+
+/-- Every newly emitted opening is checked against an acknowledged durable entry.
+The theorem concerns the released record, not a discarded tentative reservation. -/
+theorem baggy_release_has_durable_codeword {identity : BaggyLedgerIdentity}
+    (st : BaggyReleaseState identity) (r : StaticWotsOpeningRecord)
+    (hNew : r ∈ (baggyReleaseStep st .release).released) (hOld : r ∉ st.released) :
+    lookupDurableDigits st.durable r.layer r.tree r.kp = some r.digits := by
+  unfold baggyReleaseStep at hNew
+  split at hNew
+  next hGuard =>
+    have hAll := (Bool.and_eq_true_iff.mp hGuard).2
+    rcases List.mem_append.mp hNew with ho | hn
+    · exact False.elim (hOld ho)
+    · obtain ⟨p, hp, he⟩ := List.mem_map.mp hn
+      have hv := List.all_eq_true.mp hAll p hp
+      subst r
+      exact eq_of_beq hv
+  next => exact False.elim (hOld hNew)
+
+/-- `#tooth`: a crash between write and sync loses the tentative record and
+cannot release; a crash after sync retains the codeword but still requires replanning. -/
+theorem tooth_baggy_crash_between_write_and_sync (identity : BaggyLedgerIdentity)
+    (g : DurableStaticWotsGuard) (ps : List BaggyPlannedOpening) :
+    let st : BaggyReleaseState identity := ⟨[], g, ps, .written, []⟩
+    (baggyReleaseTrace st [.crash, .release]).released = [] ∧
+    (baggyReleaseTrace st [.syncAck, .crash]).durable = g := by
+  exact ⟨rfl, rfl⟩
+
+/-- Secret chain generation consumes a durable reservation. The record's digits
+must also match the actual hash grind, preventing an arbitrary signedNode from
+borrowing a reservation for another codeword. -/
+def baggyOpenReservedChains (suite : BaggySuite256) (sk : BaggySecretKey256)
+    (identity : BaggyLedgerIdentity) (st : BaggyReleaseState identity)
+    (r : StaticWotsOpeningRecord) : Option (Fin 128 → BitVec 256) :=
+  let adrs := baggyLeafAdrs r.layer r.tree r.kp
+  let ctr := suite.grindCounter sk.pkSeed adrs r.signedNode
+  if decide (identity.pkSeed = sk.pkSeed) &&
+      (st.phase == .synced) &&
+      (lookupDurableDigits st.durable r.layer r.tree r.kp == some r.digits) &&
+      (wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs r.signedNode ctr) == some r.digits) then
+    wotsC256Sign suite.wots sk.pkSeed sk.skSeed adrs r.signedNode ctr
+  else none
+
+/-! ## Cache modes and authenticated cache records -/
+inductive BaggyLayerCachePlan (p : BaggyTreeParams) where
+  | fresh
+  | signature (childRoot layerRoot : BitVec 256) (sig : BaggyLayerSig256)
+  | leaves (root : BitVec 256) (values : Fin (2 ^ p.subtreeHeight) → BitVec 256)
+
+/-- Invalid cache material rejects. A miss is represented only by `fresh`.
+Cached leaf sets are committed by the same Merkle root computation as fresh sets. -/
+def authenticateBaggyLayerPlan (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pkSeed : BitVec 256) (layer tree kp : Nat) (plan : BaggyLayerCachePlan p) :
+    Option (Option (BitVec 256) × BaggyRootProvenance) :=
+  match plan with
+  | .fresh => some (none, .computed)
+  | .signature child root sig =>
+    if baggyLayerRecoverRoot suite p pkSeed layer tree kp child sig == some root then
+      some (some root, .cachedSignature)
+    else none
+  | .leaves root values =>
+    if baggyMerkleRoot suite pkSeed layer tree p.subtreeHeight 0 values == root then
+      some (some root, .cachedLeaves)
+    else none
+
+/-- Cache authority signs the full identity/address/root tuple. This structured
+message is deliberately not an ambiguous concatenation of variable-width fields. -/
+structure BaggyCacheMessage where
+  identity : BaggyLedgerIdentity
+  layer : Nat
+  tree : Nat
+  root : BitVec 256
+  deriving DecidableEq
+
+structure BaggyAuthenticatedCacheEntry where
+  message : BaggyCacheMessage
+  tag : BitVec 256
+
+/-- The key is captured by the enrolled MAC function, never supplied by a cache entry. -/
+def verifyBaggyCacheMac (mac : BaggyCacheMessage → BitVec 256)
+    (identity : BaggyLedgerIdentity) (e : BaggyAuthenticatedCacheEntry) : Bool :=
+  decide (e.message.identity = identity) && (e.tag == mac e.message)
+
+def BaggyCacheMacForgery (mac : BaggyCacheMessage → BitVec 256)
+    (history : List BaggyCacheMessage) (e : BaggyAuthenticatedCacheEntry) : Prop :=
+  e.tag = mac e.message ∧ e.message ∉ history
+
+/-- Successful entry verification yields an enrolled genuine root or the actual
+accepted, unsigned cache entry as a MAC-game forgery. The authenticity premise is
+on the authority's signing history, not on adversarial cache contents. -/
+theorem baggy_cache_authentic_or_forgery
+    (mac : BaggyCacheMessage → BitVec 256) (identity : BaggyLedgerIdentity)
+    (history : List BaggyCacheMessage) (genuine : Nat → Nat → BitVec 256)
+    (hHistory : ∀ m ∈ history, m.identity = identity → m.root = genuine m.layer m.tree)
+    (e : BaggyAuthenticatedCacheEntry) (h : verifyBaggyCacheMac mac identity e = true) :
+    e.message.root = genuine e.message.layer e.message.tree ∨ BaggyCacheMacForgery mac history e := by
+  obtain ⟨hi, ht⟩ := Bool.and_eq_true_iff.mp h
+  by_cases hm : e.message ∈ history
+  · exact .inl (hHistory e.message hm (of_decide_eq_true hi))
+  · exact .inr ⟨eq_of_beq ht, hm⟩
 
 end Qsag
 end
