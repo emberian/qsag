@@ -1,58 +1,23 @@
 module
 /-
-# Qsag.ThresholdMlDsaAndToprf — FIPS 204 Threshold ML-DSA-44, 2-of-5 Poseidon2 TOPRF & BlindVC
+# Threshold ML-DSA arithmetic, checked signing, TOPRF execution, and credential relations
 
-Complete zero-Mathlib, constructive (`0 Classical.choice`) formalization of the `qsag-cred`
-post-quantum threshold signature, oblivious PRF, and selective-disclosure credential suite:
+The 256-point negacyclic NTT and inverse, field arithmetic, and rounding identities are
+constructive proofs. `mldsaVerify` is the parameterized algebraic core retained for the
+MIR bridge; `mldsaVerifyBytes204` fixes the byte-level algorithms and fails closed on
+rejection-sampler budget exhaustion. The checked signing transition consumes verified
+multiplication outputs. `rssDurableSign204` composes it with a persistent epoch/nonce
+journal and exposes only a final signature.
 
-1. **§1. Exact NIST FIPS 204 (`ML-DSA-44`) Field, 256-Point Negacyclic NTT & Rounding Laws:**
-   - Constructive primality of $q = 8380417 = 2^{23} - 2^{13} + 1$ (`mldsaQ_isPrime`), canonical
-     prime field `Fq204` (`LawfulCommRing`, `NoZeroDivisors`, constructive Bézout inverse
-     `Fq204.mul_inv_cancel`), and 64-bit Barrett multiplication equivalence (`fqMulBarrett_sound`).
-   - Exact 256-point negacyclic polynomial ring $R_q = \mathbb{Z}_q[X]/(X^{256} + 1)$ (`Poly256`),
-     8-stage Cooley–Tukey / Gentleman–Sande NTT bijection (`fips204InvNtt_ntt`, `fips204Ntt_invNtt`),
-     convolution homomorphism (`fips204Ntt_negacyclicMul`, `fips204InvNtt_pointwiseMul`),
-     and transported `LawfulCommRing Poly256` structure on $(R_q, +, \text{negacyclicMul})$.
-   - Exact FIPS 204 `power2Round` ($d = 13$), `decompose` / constant-time `decomposeCtSpec`
-     ($\alpha = 2\gamma_2 = 190464$), `highBits`, `lowBits`, `makeHint`, `useHint`,
-     `power2Round_reconstruct`, `decompose_reconstruct`, centered-difference acceptance equivalence
-     (`centered_diff_lt_iff_lowBits_and_highBits`), and the **Exact `HighBits` Shift Lemma**
-     (`highBits_az_sub_ct_eq_w1`), paired with `#tooth` boundary-violation counterexamples.
+`toprfActiveClient204_correct` derives final outputs through full-value holder voting at
+every multiplication of all 30 rounds. The optimized digest transport, PRSS-to-uniform
+hybrid, and distributed ML-DSA sacrifice/MAC refinement are separate obligations.
+`toprfJointTranscriptEquiv` proves adaptive sequential masking for independent uniform
+coins, not a security theorem for deterministic seed expansion.
 
-2. **§2. `(t, m)` RSS `F_q[X]/(X^6 - 7)` Threshold ML-DSA-44 DKG & Leakage-Parameterized Signing:**
-   - Constructive honest-holder coverage (`subset_honest_holder_exists`, $n \ge 2t - 1$) + `#tooth`
-     at $(t=2, n=2)$, pairwise subset intersection for replicated multiplication, and exact 4-bit
-     nibble rejection circuit (`dkg_nibble_rejection_circuit_exact`) yielding uniform $[-2, 2]$ shares.
-   - Exact `qsag-accel` `cshake256_framed_xof` (`encodeFramesU64Le` + `customizationPrefix`),
-     degree-6 extension `Ext6Fq204` ($F_q[X]/(X^6 - 7)$) batch inner-product sacrifice soundness,
-     and `"QSAG.TMLDSA.DKG.CONFIRM.V1"` confirmation binding (`dkg_confirm_transcript_binding_and_rss_consistency`)
-     + `#tooth` (`tooth_uncommitted_dkg_rogue_key_forgery`).
-   - `#tooth` (`premature_z_release_leaks_s2_boundary`) and explicit leakage-parameterized RSS signing
-     (`threshold_mldsa_rss_abort_leakage_and_completeness`): rejected attempts emit the exact public abort
-     transcript `(openedMaskedW, openedW1, openedMaskedZAndLow, rejectBit := true)` without opening unmasked
-     `z`, fresh `< q` RSS masks induce constructive `SimpleEquiv` bijections conditioned on `(w1, rejectBit)`,
-     durable `(epoch, sessionId, attempt)` burns advance monotonically across multi-turn traces, and
-     accepted attempts satisfy standalone FIPS 204 `mldsaVerify = true`.
-
-3. **§3. Dealerless 2-of-5 Replicated Poseidon2 Threshold OPRF (`voprf.rs` / `toprf_engine.rs`):**
-   - Combinatorial $\binom{5}{3} = 10$ subset intersection + exact 5-component `ToprfWire` engine,
-     3-holder cross-term resharing over exact `"QSAG.TOPRF.RESHARE.DIGEST.V2"` `cshake256_framed_xof`,
-     and 3-of-4 client finalize majority (`toprf_2of5_corrects_one_malicious_server`) + `#tooth` for 2 corrupt servers.
-   - Constructive `SimpleEquiv` 1-curious-server input & gate-view privacy (`toprf_one_curious_server_hiding`),
-     and `"QSAG.TOPRF.INPUT.COMMIT.V1"` / `"QSAG.TOPRF.INPUT.BIND.V1"` binding including `context.base_digest()`
-     (`"QSAG.TOPRF.EVAL.V1"`) (`toprf_input_root_blocks_relabeling_and_equivocation`) + `#tooth`
-     (`tooth_omitting_base_digest_allows_cross_session_replay`).
-
-4. **§4. `BlindVC` Rate-6/Capacity-6 6-Limb `absorbRate6Sponge3` Commitment & ZKBoo Selective Disclosure:**
-   - Explicit-arity (`1 ≤ arity ≤ 6`) 3-permutation `absorbRate6Sponge3` outputting 6-limb `Lane6` (`> 383`-bit)
-     commitments (`computeVcPoseidon2Commit`), cross-arity & same-arity binding reduction to
-     `Poseidon2Perm12Sponge6Collision`, and `#tooth` (`tooth_unframed_trailing_zero_collision`).
-   - Strict ascending `disclosedAttrs` enforcement inside `verifyBlindVcPresentation`, Round-1
-     `"QSAG.VC.VIEW_COM.V1"` + `"QSAG.COMMIT.V1"` party-view commitments, `"QSAG.VC.ZKBOO_R.V1"` PRG `tapeSeed`
-     replay, `"QSAG.FS.INIT/ABSORB/SQUEEZE.V1"` Fiat-Shamir challenge derivation, 3-challenge witness extraction,
-     `ZkSoundnessProfile` (`Quantum128 = 438` `< 2^{-256}` = 128-bit QROM Grover challenge-grinding vs
-     `Classical128 = 219` `< 2^{-128}` classical ROM / `< 65`-bit QROM), and full `OpenedBlindVcRep`
-     (`PartyVcRepView` pair + `unopenedCommit` + `finalOuts`) `SimpleEquiv` simulation (`zkMultiRepViewEquiv`).
+The extension-modulus numeric certificate below is not yet a proof of irreducibility.
+The credential theorems concern the Lean relation and fixed-challenge hybrid; they do
+not establish production transcript equivalence, issuer authentication, or QROM security.
 -/
 
 public import Qsag.Constructive
@@ -2834,7 +2799,7 @@ private theorem exists_eval_nonzero_fq204 :
       · exact hx₀NeZero h1
       · exact hEvalTailNe h2
 
-/-- **Irreducibility & Batch-Sacrifice Soundness of $\mathbb{F}_q[X]/(X^6 - 7)$ (`rss_mpc.rs:53-56, 1066-1206`)**:
+/-- **Numeric Modulus Certificate & Base-Scalar Batch Bound for $\mathbb{F}_q[X]/(X^6 - 7)$ (`rss_mpc.rs:53-56, 1066-1206`)**:
     1. Serret–Kummer binomial irreducibility certificate for $X^6 - 7$ over $\mathbb{F}_{8380417}$:
        $6 \mid (q - 1)$, $7^{(q-1)/2} \equiv q - 1 \not\equiv 1 \pmod q$ ($7$ is a quadratic non-residue),
        $7^{(q-1)/3} \not\equiv 1 \pmod q$ ($7$ is a cubic non-residue), and $2^{137} < q^6$.
@@ -2975,7 +2940,7 @@ theorem dkg_confirm_transcript_binding_and_rss_consistency
     (H : List UInt8 → List UInt8) :
     (∀ (t m : Nat) (subset corrupt : List Nat),
       1 ≤ t → 2 * t - 1 ≤ m →
-      corrupt.Nodup → corrupt.length ≤ t - 1 →
+      corrupt.length ≤ t - 1 →
       subset.Nodup → subset.length = m - t + 1 →
       ∃ h ∈ subset, h ∉ corrupt) ∧
     (∀ (A : PolyMat4) (s1Subs s2Subs : List PolyVec4),
@@ -2991,7 +2956,7 @@ theorem dkg_confirm_transcript_binding_and_rss_consistency
         (dkgConfirmPreimage sid₁ mSeed₁ pk₁ ≠ dkgConfirmPreimage sid₂ mSeed₂ pk₂ ∧
          H (dkgConfirmPreimage sid₁ mSeed₁ pk₁) = H (dkgConfirmPreimage sid₂ mSeed₂ pk₂))) := by
   refine ⟨?_, ?_, ?_⟩
-  · intro t m subset corrupt ht hm hCNd hCLen hSNd hSLen
+  · intro t m subset corrupt ht hm hCLen hSNd hSLen
     obtain ⟨h, _, hIn, hNotIn⟩ :=
       (subset_honest_holder_exists ht hm hCLen hSNd hSLen idMat4 0
         ⟨rssZeroVec4, rssZeroVec4, rssZeroVec4⟩).1
@@ -3213,7 +3178,7 @@ theorem centeredDiffNormVec4_lt_iff (r w : PolyVec4) {B : Nat} (hB : B ≤ 95232
     have c3 := ih3.mpr ⟨by omega, e3⟩
     omega
 
-/-- **Standalone NIST FIPS 204 `ML-DSA-44` Verifier (`mldsaVerify`, `Algorithm 8`)**:
+/-- Parameterized ML-DSA-44 algebraic verification core (legacy MIR bridge API):
     Checks `‖z‖_∞ < γ₁ - β`, `weight(h) ≤ ω`, and `c_tilde = H(μ, UseHint(h, A*z - c*t1*2^d))`. -/
 @[expose] def mldsaVerify
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -3228,7 +3193,7 @@ theorem centeredDiffNormVec4_lt_iff (r w : PolyVec4) {B : Nat} (hB : B ≤ 95232
 
 /-- Persistent custodian state for `(t, m)` RSS `threshold_sign_mldsa_party` (`threshold_mldsa.rs:772-1055`):
     holds current signing `epoch`, monotonic `nextAttempt` burn counter, matrix `A`, and RSS subset
-    key vectors `(s1Subsets, s2Subsets)` (never reconstructing `s1` or `s2` in the clear). -/
+    key vectors `(s1Subsets, s2Subsets)` for the aggregate reference computation. -/
 structure RssMlDsaSignerState where
   epoch : Nat
   nextAttempt : Nat
@@ -3258,7 +3223,7 @@ def rssComputeProducts
 
 /-- Single RSS signing-attempt input (`threshold_mldsa.rs:795-975`):
     binds `(epoch, sessionId, attempt)`, message representative `mu`, RSS nonce shares `ySubsets`,
-    fresh `< q` RSS masks `(maskW, maskZ, maskLow)`, and the `Ext6Fq204` multiplication-sacrifice bit. -/
+    caller-provided masks `(maskW, maskZ, maskLow)`, and raw multiplication outputs. -/
 structure RssMlDsaAttemptInput where
   epoch : Nat
   sessionId : List UInt8
@@ -3391,8 +3356,8 @@ def rssMaskTripleEquiv (w z u : PolyVec4) :
 
 /-- Explicit leakage-parameterized abort simulator (`threshold_mldsa.rs:940-1015`):
     given **only** the public ideal abort leakage `(leakedW1, rejectBit := true, usedAttempt)` and uniform
-    simulator masks `simMasks` (zero secret shares `s1Subsets, s2Subsets, ySubsets`!), produces the exact
-    `RssSignPublicAbortView` distribution of a rejected RSS signing attempt. -/
+    simulator masks `simMasks` (zero secret shares `s1Subsets, s2Subsets, ySubsets`!), constructs the corresponding
+    `RssSignPublicAbortView`. Equality of distributions additionally requires independent uniform masks. -/
 def rssAbortSimulator
     (leakedW1 : Fin 4 → NatTree 8) (usedAttempt : Nat)
     (simMasks : PolyVec4 × PolyVec4 × PolyVec4) : RssSignPublicAbortView :=
@@ -3488,10 +3453,10 @@ private theorem mkRssSignAttemptOutcome_false
 /-- Per-attempt RSS transition of `threshold_sign_mldsa_party` (`threshold_mldsa.rs:795-1055`):
     - Enforces `(inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt)` and immediately burns
       `nextAttempt := st.nextAttempt + 1` BEFORE Phase 1;
-    - Requires `rssProductsValid chalHash sampleInBall st inp = true` (`Ext6Fq204` `verify_all_pending` + view-digest unanimity);
+    - Requires `rssProductsValid chalHash sampleInBall st inp = true` (exact aggregate product validation);
     - Evaluates `w1 = HighBits(w)`, `c = SampleInBall(H(μ, w1))`, and the RSS rejection predicate
       `accept`;
-    - On rejection (`accept = false`), emits `(publicView, none)` (`rejectBit = true`, unmasked `z` NEVER opened!);
+    - On rejection (`accept = false`), emits `(publicView, none)` (`rejectBit = true`, no separate unmasked `z` field);
     - On acceptance (`accept = true`), emits `(publicView, some sig)` (`rejectBit = false`). -/
 def rssThresholdSignStep
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -3663,13 +3628,13 @@ private theorem rssThresholdSignMachine_attempt_mono
     refine ⟨by omega, fun p hp => ?_, hPairTail⟩
     have h1 := hGeTail p hp; omega
 
-/-- **Flagship §2.4 Theorem — `(t, m)` RSS Rejection-Sampling Leakage Simulator, Durable Nonce-Burn &
-    Standalone FIPS 204 Completeness (`threshold_mldsa_rss_abort_leakage_and_completeness`, fixing `C0-1`)**:
+/-- **Flagship §2.4 Theorem — `(t, m)` Aggregate Rejection-Sampling Mask Bijection, RAM Attempt Counter &
+    Parameterized Verification Completeness (`threshold_mldsa_rss_abort_leakage_and_completeness`, fixing `C0-1`)**:
     1. **Honest Abort Transcript & Unmasked-`z` Suppression (`rejectBit = true`)**: Whenever a valid
        attempt (`inp.epoch = st.epoch`, `inp.attempt = st.nextAttempt`, `rssProductsValid chalHash sampleInBall st inp = true`)
        violates `‖z‖_∞ < γ₁ - β`, `‖LowBits(w - c*s2)‖_∞ < γ₂ - β`, or `HighBits(w - c*s2) = HighBits(w)`,
        `rssThresholdSignStep` emits `(pubView, none)` (`pubView.rejectBit = true`, `pubView.openedW1 = HighBits(w)`,
-       unmasked `(z, h)` NEVER opened!) and burns `st'.nextAttempt = st.nextAttempt + 1`.
+       no separate unmasked `(z, h)` field) and burns `st'.nextAttempt = st.nextAttempt + 1`.
     2. **Explicit Leakage-Parameterized Abort Simulation (`rssAbortSimulator` + `rssMaskTripleEquiv`)**:
        Conditioned on the exact ideal abort leakage `(HighBits(w), rejectBit := true, inp.attempt)`,
        the `< q` RSS masks `(maskW, maskZ, maskLow)` map onto `(openedMaskedW, openedMaskedZ, openedMaskedLow)`
@@ -3678,7 +3643,7 @@ private theorem rssThresholdSignMachine_attempt_mono
     3. **Multi-Turn Attempt-Burn Uniqueness (`PartyMachine.ValidTrace`)**: Across ANY multi-turn trace of
        interleaved rejected and accepted attempts, `nextAttempt` is monotonically non-decreasing and every
        emitted transcript uses a strictly distinct `usedAttempt` index.
-    4. **100% Standalone FIPS 204 `mldsaVerify` Completeness**: Every accepted signature `some sig` satisfies
+    4. **Parameterized algebraic `mldsaVerify` completeness**: Every accepted signature `some sig` satisfies
        `pubView.rejectBit = false` and `mldsaVerify = true` under the RSS aggregate public key! -/
 theorem threshold_mldsa_rss_abort_leakage_and_completeness
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -4512,8 +4477,8 @@ private theorem fin5_four_others_three_honest (c bad : Fin 5) :
     2. **Large-Layer 2-Vector + 1-Digest (`gates > 4`, `decodeGroupLarge`):** For any 3 distinct holders
        `(hv0, hv1, hd)`, EITHER `decodeGroupLarge` recovers `some honestVec`, OR `bad = hv0` forged a
        distinct `forgedVec ≠ honestVec` exhibiting a length-framed `QSAG.TOPRF.RESHARE.DIGEST.V2` hash collision!
-    3. **Client 3-of-4 Finalize (`clientFinalizeLane4`):** Across all 5 replicated components and all 30
-       `Poseidon2` rounds, `clientFinalizeLane4` **unconditionally** recovers `some (toprfPlaintext key input)`! -/
+    3. **Client 3-of-4 Finalize (`clientFinalizeLane4`):** Conditional on correct honest engine outputs.
+       `toprfActiveClient204_correct` below derives these outputs for the full-value transport. -/
 theorem toprf_2of5_corrects_one_malicious_server
     (H : List UInt8 → List UInt8)
     (ctx : List UInt8) (layer : UInt64) (i j : Fin 5)
@@ -4544,7 +4509,7 @@ theorem toprf_2of5_corrects_one_malicious_server
             toprfGroupDigestPreimage ctx layer i j honestVec ∧
           H (toprfGroupDigestPreimage ctx layer i j forgedVec) =
             H (toprfGroupDigestPreimage ctx layer i j honestVec)) ∧
-    -- (3) Client 3-of-4 finalization unconditionally recovers `toprfPlaintext`:
+    -- (3) Client finalization conditional on honest engine outputs:
     (∀ (masks : ToprfPerm12Masks) (keyShares inputShares : Fin 5 → Lane4)
        (serverOut : Fin 5 → Option (Fin 5 → Lane4)),
       (∀ p : Fin 5, p ≠ bad →
@@ -6202,7 +6167,7 @@ def vcZkBooPrgTag : List UInt8 :=
 /-- Counter-mode Goldilocks PRG word stream under `"QSAG.VC.ZKBOO_R.V1"` (`blind_vc.rs:336-350`). -/
 def vcPrgStreamAt (repIdx : Nat) (partyIdx : Fin 3) (tapeSeed : Vec UInt8 32) (wordIdx : Nat) : Goldilocks :=
   let blk := cshake256FramedBytes vcZkBooPrgTag
-    [tapeSeed.toList, encodeNatLeBytes 8 repIdx, [UInt8.ofNat partyIdx.val], encodeNatLeBytes 8 wordIdx]
+    [tapeSeed.toList, leb128 repIdx, [UInt8.ofNat partyIdx.val], leb128 wordIdx]
   Goldilocks.ofNat (decodeNatLeBytes (blk.take 8))
 
 private def sampleSboxCoins (st : Nat → Goldilocks) (pos : Nat) : SboxCoins × Nat :=
@@ -8610,7 +8575,7 @@ def deriveBlindVcTranscriptDigest (H : List UInt8 → List UInt8)
     ([vcSdZkDomainTag, profileTag,
       encodeNatLeBytes 8 expectedSchema.schemaId.toNat,
       encodeNatLeBytes 8 expectedSchema.arity,
-      encodeNatLeBytes 8 treeDepth,
+      leb128 treeDepth,
       encodeNatLeBytes 8 profile.repetitions,
       presNonce.toList,
       encodeNatLeBytes 8 issuerEpoch.toNat,
@@ -8624,7 +8589,7 @@ def deriveBlindVcTranscriptDigest (H : List UInt8 → List UInt8)
 
 def deriveBlindVcChallengeAt (H : List UInt8 → List UInt8)
     (trDigest : List UInt8) (repIdx : Nat) : Fin 3 :=
-  let sq := H (cshake256FramedPreimage vcFsSqueezeTag [trDigest, encodeNatLeBytes 8 repIdx])
+  let sq := H (cshake256FramedPreimage vcFsSqueezeTag [trDigest, leb128 repIdx])
   ⟨decodeNatLeBytes (sq.take 8) % 3, Nat.mod_lt _ (by decide)⟩
 
 /-- Check all boolean-gate output wire shares: each `(z_0, z_1, z_2)` sums to `0` and matches `(z_e, z_{e+1})`. -/
@@ -8892,7 +8857,6 @@ theorem verifyOpenedBlindVcRep_extract3_from_rewound
     {presNonce : Vec UInt8 32} {schema : VcSchema} {issuerEpoch : UInt64} {treeDepth : Nat}
     {accRoot presCommit scopeTag : Lane6} {verifierScopeLimbs : Lane4}
     {disclosed : List (Nat × Goldilocks)} {repIdx : Nat}
-    (hRepLt : repIdx < 256 ^ 8)
     {o0 o1 o2 : OpenedBlindVcRep}
     (hR1_01 : reconstructRepRound1 H presNonce repIdx o0 = reconstructRepRound1 H presNonce repIdx o1)
     (hR1_12 : reconstructRepRound1 H presNonce repIdx o1 = reconstructRepRound1 H presNonce repIdx o2)
@@ -11450,7 +11414,6 @@ theorem blind_vc_zkboo_selective_disclosure_sound_and_hiding
     (∀ (presNonce : Vec UInt8 32) (schema : VcSchema) (issuerEpoch : UInt64) (treeDepth : Nat)
        (accRoot presCommit scopeTag : Lane6) (verifierScopeLimbs : Lane4)
        (disclosed : List (Nat × Goldilocks)) (repIdx : Nat),
-      repIdx < 256 ^ 8 →
       ∀ (o0 o1 o2 : OpenedBlindVcRep),
         reconstructRepRound1 H presNonce repIdx o0 = reconstructRepRound1 H presNonce repIdx o1 →
         reconstructRepRound1 H presNonce repIdx o1 = reconstructRepRound1 H presNonce repIdx o2 →
@@ -11497,8 +11460,8 @@ theorem blind_vc_zkboo_selective_disclosure_sound_and_hiding
   · intro profile stmt issuerRootTag verifierChallenge wit hValid proverCoins
     exact (proveBlindVcPresentation_verifies H prgExpand profile stmt issuerRootTag verifierChallenge wit hValid proverCoins).2
   · intro presNonce schema issuerEpoch treeDepth accRoot presCommit scopeTag verifierScopeLimbs disclosed repIdx
-      hRepLt o0 o1 o2 hR1_01 hR1_12 hV0 hV1 hV2
-    exact verifyOpenedBlindVcRep_extract3_from_rewound hHLen hRepLt hR1_01 hR1_12 hV0 hV1 hV2
+      o0 o1 o2 hR1_01 hR1_12 hV0 hV1 hV2
+    exact verifyOpenedBlindVcRep_extract3_from_rewound hHLen hR1_01 hR1_12 hV0 hV1 hV2
   · refine ⟨?_, zkSoundnessProfile_rom_vs_qrom_bounds.1, zkSoundnessProfile_rom_vs_qrom_bounds.2.1,
       zkSoundnessProfile_rom_vs_qrom_bounds.2.2.2.1, zkSoundnessProfile_rom_vs_qrom_bounds.2.2.2.2.1,
       zkSoundnessProfile_rom_vs_qrom_bounds.2.2.2.2.2⟩
@@ -11678,9 +11641,9 @@ theorem cosetLde204_ntt (d : CosetDomain204) (p : Poly256)
         evalPoly204 (PolyTree.toList p) (Fq204.mul d.shift (Fq204.pow d.root i)))) := by
   simp only [cosetLde204, h, ↓reduceIte, fips204InvNtt_ntt]
 
-theorem tooth_cosetLde204_zero_shift (n : Nat) (r : Fq204) (p : Poly256) :
-    cosetLde204 ⟨n, Fq204.zero, r⟩ p = none := by
-  simp [cosetLde204, cosetDomain204Valid]
+theorem tooth_cosetLde204_zero_shift (d : CosetDomain204) (p : Poly256)
+    (h : d.shift = Fq204.zero) : cosetLde204 d p = none := by
+  simp [cosetLde204, cosetDomain204Valid, h]
 
 /-- Raw-input boundary: unlike a saturating natural subtraction, this rejects every `v ≥ q`. -/
 def canonicalNorm204 (bound : Nat) (coeffs : List Nat) : Bool :=
@@ -11693,6 +11656,11 @@ theorem canonicalNorm204_sound {b : Nat} {xs : List Nat}
 
 theorem tooth_canonicalNorm204_rejects_q : canonicalNorm204 1 [mldsaQ] = false := by
   decide
+
+theorem tooth_canonicalNorm204_noncanonical (v b : Nat) (h : mldsaQ ≤ v) :
+    canonicalNorm204 b [v] = false := by
+  have hn : ¬ v < mldsaQ := by omega
+  simp [canonicalNorm204, hn]
 
 /-- Bounded byte strings are mandatory at the four-byte framing boundary. -/
 structure Frame204 where
@@ -11713,10 +11681,9 @@ theorem merkleLeafPreimage204_injective {a b : Frame204}
 theorem merkleNodePreimage204_injective {a b c d : Frame204}
     (h : merkleNodePreimage204 a b = merkleNodePreimage204 c d) :
     a.bytes = c.bytes ∧ b.bytes = d.bytes := by
-  have hp : frameBytes a.bytes ++ frameBytes b.bytes =
-      frameBytes c.bytes ++ frameBytes d.bytes := by
-    simpa only [merkleNodePreimage204, List.append_assoc, List.cons_append,
-      List.nil_append, List.cons.injEq, true_and] using h
+  have hp := congrArg List.tail h
+  change frameBytes a.bytes ++ frameBytes b.bytes =
+    frameBytes c.bytes ++ frameBytes d.bytes at hp
   obtain ⟨hl, hr⟩ := (FramedBytesCodec.prefix_free_injective a.bounded c.bounded).mp hp
   exact ⟨hl, FramedBytesCodec.frameBytes_injective b.bounded d.bounded hr⟩
 
@@ -11868,5 +11835,571 @@ theorem tooth_mldsaVerifyBytes204_bad_key_length (fuel : Nat) (pk msg ctx sig : 
 theorem tooth_decodeSignature204_bad_length (sig : List UInt8) (h : sig.length ≠ 2420) :
     decodeSignature204 sig = none := by
   simp [decodeSignature204, h]
+
+
+/-! ## Durable reservation composed with checked signing
+
+The durable record below contains both the existing epoch journal and exact nonce material.
+Keeping the material (rather than just an attempt identifier or its hash) makes non-reuse
+independent of a hash-collision assumption. A real store must persist both fields atomically.
+The disk outcome is an environment event, not a protocol-validation input.
+-/
+
+structure RssDurableDisk204 where
+  journal : DurableNonceBurnStore
+  burnedNonces : List (List UInt8)
+
+structure RssDurableSigner204 where
+  key : RssMlDsaSignerState
+  disk : RssDurableDisk204
+
+inductive RssDiskOutcome204 where
+  | committed
+  | failed
+  deriving DecidableEq
+
+def rssNonceMaterial204 (inp : RssMlDsaAttemptInput) : List UInt8 :=
+  encodePolyVec4Bytes (rssSumVec4List inp.ySubsets)
+
+/-- Reserve before running any check or releasing any signing output. The nonce ledger is
+    global to this key, so changing the session, epoch, attempt, or share decomposition does
+    not permit reuse of the aggregate nonce. -/
+def rssDurableReserve204 (party : UInt16) (diskResult : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) : Bool × RssDurableSigner204 :=
+  if inp.epoch ≠ st.key.epoch ∨ inp.attempt ≠ st.key.nextAttempt ∨
+      2 ^ 64 ≤ inp.epoch ∨ 2 ^ 32 ≤ inp.attempt ∨ rssNonceMaterial204 inp ∈ st.disk.burnedNonces then
+    (false, st)
+  else
+    let reservation := durableBurnReserve st.disk.journal party (UInt64.ofNat inp.epoch)
+      inp.sessionId (UInt32.ofNat inp.attempt) (decide (diskResult = .committed))
+    if reservation.1 then
+      (true, { key := { st.key with epoch := st.key.epoch + 1, nextAttempt := st.key.nextAttempt + 1 },
+        disk := { journal := reservation.2,
+          burnedNonces := rssNonceMaterial204 inp :: st.disk.burnedNonces } })
+    else (false, { st with disk := { st.disk with journal := reservation.2 } })
+
+/-- Only a final signature escapes the durable boundary. Rejected attempts expose neither
+    individual norms nor the caller-selected masked vectors of the aggregate reference model. -/
+def rssDurableSign204
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (party : UInt16) (diskResult : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
+    RssDurableSigner204 × Option ThresholdSignSig :=
+  let reservation := rssDurableReserve204 party diskResult st inp
+  if reservation.1 then
+    match rssThresholdSignStep chalHash sampleInBall st.key inp with
+    | .err _ _ => (reservation.2, none)
+    | .ok _ (_, sig) => (reservation.2, sig)
+  else (reservation.2, none)
+
+/-- Crash recovery preserves *all* durable nonce material and reconstructs the epoch from disk. -/
+def rssDurableRecover204 (party : UInt16) (st : RssDurableSigner204) : RssDurableSigner204 :=
+  { st with key := { st.key with
+      epoch := persistedNextEpochNat st.disk.journal.keyId party st.disk.journal.burns } }
+
+theorem rssDurableReserve204_burns {party : UInt16} {result : RssDiskOutcome204}
+    {st : RssDurableSigner204} {inp : RssMlDsaAttemptInput}
+    (h : (rssDurableReserve204 party result st inp).1 = true) :
+    (rssDurableReserve204 party result st inp).2.disk.burnedNonces =
+      rssNonceMaterial204 inp :: st.disk.burnedNonces := by
+  unfold rssDurableReserve204 at *
+  split at *
+  · cases h
+  · split at *
+    · rfl
+    · cases h
+
+theorem rssDurableReserve204_monotone (party : UInt16) (result : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
+    ∀ material ∈ st.disk.burnedNonces,
+      material ∈ (rssDurableReserve204 party result st inp).2.disk.burnedNonces := by
+  intro material hm
+  unfold rssDurableReserve204
+  split
+  · exact hm
+  · split
+    · exact .tail _ hm
+    · exact hm
+
+theorem tooth_rssDurableReserve204_nonce_replay (party : UInt16) (result : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput)
+    (h : rssNonceMaterial204 inp ∈ st.disk.burnedNonces) :
+    (rssDurableReserve204 party result st inp).1 = false := by
+  simp [rssDurableReserve204, h]
+
+theorem rssDurableSign204_release_burned
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (party : UInt16) (result : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) (sig : ThresholdSignSig)
+    (h : (rssDurableSign204 chalHash sampleInBall party result st inp).2 = some sig) :
+    rssNonceMaterial204 inp ∈
+      (rssDurableSign204 chalHash sampleInBall party result st inp).1.disk.burnedNonces := by
+  unfold rssDurableSign204 at *
+  split at *
+  · rename_i hres
+    have hb := rssDurableReserve204_burns hres
+    cases rssThresholdSignStep chalHash sampleInBall st.key inp with
+    | err _ _ => cases h
+    | ok next out =>
+      rcases out with ⟨view, msig⟩
+      dsimp only
+      rw [hb]
+      simp
+  · cases h
+
+theorem rssDurableRecover204_preserves_burns (party : UInt16) (st : RssDurableSigner204) :
+    (rssDurableRecover204 party st).disk = st.disk := rfl
+
+theorem tooth_rssDurableSign204_failed_write
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (party : UInt16) (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
+    (rssDurableSign204 chalHash sampleInBall party .failed st inp).2 = none := by
+  have h : (rssDurableReserve204 party .failed st inp).1 = false := by
+    unfold rssDurableReserve204
+    split
+    · rfl
+    · by_cases ha : durableBurnAvailable st.disk.journal party (UInt64.ofNat inp.epoch)
+          inp.sessionId (UInt32.ofNat inp.attempt) = true
+      · simp [durableBurnReserve, ha]
+      · simp [durableBurnReserve, ha]
+  simp [rssDurableSign204, h]
+
+theorem tooth_rssProductsValid_corrupted_output
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
+    (h : inp.products.cs1 ≠ (rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets).cs1) :
+    rssProductsValid chalHash sampleInBall st inp = false := by
+  cases hv : rssProductsValid chalHash sampleInBall st inp with
+  | false => rfl
+  | true =>
+    exact False.elim (h (congrArg RssSignProducts.cs1
+      ((rssProductsValid_eq_true_iff chalHash sampleInBall st inp).mp hv)))
+
+/-! ## Commit / freeze / reveal DKG
+
+Commitments bind the complete canonical share record and salt. The phase boundary is
+explicit: every participant commits before any reveal is accepted, and no commitment
+can be replaced after freezing. Hash binding remains a cryptographic assumption.
+-/
+
+structure DkgCommitState204 where
+  participants : Nat
+  session : Frame204
+  commitments : List (List UInt8)
+  frozen : Bool
+  revealed : List SubsetShareRecord
+
+def dkgSharePreimage204 (session salt : Frame204) (sh : SubsetShareRecord) : List UInt8 :=
+  cshake256FramedPreimage dkgConfirmDomainTag
+    [session.bytes, salt.bytes, encodePolyVec4Bytes sh.s1, encodePolyVec4Bytes sh.s2, encodePolyVec4Bytes sh.publicT]
+
+def dkgCommit204 (st : DkgCommitState204) (digest : List UInt8) : Option DkgCommitState204 :=
+  if st.frozen || decide (st.participants ≤ st.commitments.length) then none
+  else some { st with commitments := st.commitments ++ [digest] }
+
+def dkgFreeze204 (st : DkgCommitState204) : Option DkgCommitState204 :=
+  if st.frozen || decide (st.participants = 0 ∨ st.commitments.length ≠ st.participants) then none
+  else some { st with frozen := true }
+
+def dkgReveal204 (H : List UInt8 → List UInt8) (A : PolyMat4) (eta : Nat)
+    (st : DkgCommitState204) (salt : Frame204) (sh : SubsetShareRecord) : Option DkgCommitState204 :=
+  if st.frozen && decide (st.commitments.length = st.participants) &&
+      decide (st.revealed.length < st.participants) &&
+      decide (H (dkgSharePreimage204 st.session salt sh) = st.commitments.getD st.revealed.length []) &&
+      validSubsetShare A eta sh then
+    some { st with revealed := st.revealed ++ [sh] }
+  else none
+
+theorem tooth_dkgReveal204_before_freeze (H : List UInt8 → List UInt8) (A : PolyMat4)
+    (eta : Nat) (st : DkgCommitState204) (salt : Frame204) (sh : SubsetShareRecord)
+    (h : st.frozen = false) : dkgReveal204 H A eta st salt sh = none := by
+  simp [dkgReveal204, h]
+
+theorem tooth_dkgCommit204_after_freeze (st : DkgCommitState204) (digest : List UInt8)
+    (h : st.frozen = true) : dkgCommit204 st digest = none := by
+  simp [dkgCommit204, h]
+
+theorem dkgReveal204_valid_share {H : List UInt8 → List UInt8} {A : PolyMat4} {eta : Nat}
+    {st next : DkgCommitState204} {salt : Frame204} {sh : SubsetShareRecord}
+    (h : dkgReveal204 H A eta st salt sh = some next) :
+    st.frozen = true ∧ st.commitments.length = st.participants ∧
+      sh.publicT = addVec4 (matVecMul4 A sh.s1) sh.s2 ∧
+      infNormVec4 sh.s1 ≤ eta ∧ infNormVec4 sh.s2 ≤ eta := by
+  unfold dkgReveal204 at h
+  split at h
+  · rename_i hg
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hg
+    exact ⟨hg.1.1.1.1, hg.1.1.1.2, (validSubsetShare_eq_true_iff A eta sh).mp hg.2⟩
+  · cases h
+
+/-! ## Sequential fresh-mask transcript bijection
+
+Unlike a product of marginal claims, this experiment allows each gate's terms to depend
+on the complete preceding transcript. Each list position consumes a distinct independent
+quadruple. This proves the uniform-tape experiment; a PRSS implementation still requires
+its own joint PRG hybrid, and must never reuse a tape position.
+-/
+
+private theorem serverGateMaskedView_involutive (terms masks : GoldQuad) :
+    serverGateMaskedView terms (serverGateMaskedView terms masks) = masks := by
+  rcases terms with ⟨a, b, c, d⟩
+  rcases masks with ⟨w, x, y, z⟩
+  simp only [serverGateMaskedView, gold_sub_sub_self]
+
+def toprfJointMaskedView (terms : Nat → List GoldQuad → GoldQuad) :
+    Nat → List GoldQuad → List GoldQuad → List GoldQuad
+  | _, _, [] => []
+  | i, history, mask :: masks =>
+    let msg := serverGateMaskedView (terms i history) mask
+    msg :: toprfJointMaskedView terms (i + 1) (history ++ [msg]) masks
+
+def toprfJointMaskRecovery (terms : Nat → List GoldQuad → GoldQuad) :
+    Nat → List GoldQuad → List GoldQuad → List GoldQuad
+  | _, _, [] => []
+  | i, history, msg :: msgs =>
+    serverGateMaskedView (terms i history) msg ::
+      toprfJointMaskRecovery terms (i + 1) (history ++ [msg]) msgs
+
+private theorem toprfJointMaskRecovery_left (terms : Nat → List GoldQuad → GoldQuad) :
+    ∀ (coins : List GoldQuad) (i : Nat) (history : List GoldQuad),
+    toprfJointMaskRecovery terms i history (toprfJointMaskedView terms i history coins) = coins
+  | [], _, _ => rfl
+  | _ :: coins, i, history => by
+    simp only [toprfJointMaskedView, toprfJointMaskRecovery,
+      serverGateMaskedView_involutive, toprfJointMaskRecovery_left terms coins]
+
+private theorem toprfJointMaskRecovery_right (terms : Nat → List GoldQuad → GoldQuad) :
+    ∀ (msgs : List GoldQuad) (i : Nat) (history : List GoldQuad),
+    toprfJointMaskedView terms i history (toprfJointMaskRecovery terms i history msgs) = msgs
+  | [], _, _ => rfl
+  | _ :: msgs, i, history => by
+    simp only [toprfJointMaskedView, toprfJointMaskRecovery,
+      serverGateMaskedView_involutive, toprfJointMaskRecovery_right terms msgs]
+
+def toprfJointTranscriptEquiv (terms : Nat → List GoldQuad → GoldQuad) :
+    SimpleEquiv (List GoldQuad) (List GoldQuad) where
+  toFun := toprfJointMaskedView terms 0 []
+  invFun := toprfJointMaskRecovery terms 0 []
+  left_inv coins := toprfJointMaskRecovery_left terms coins 0 []
+  right_inv msgs := toprfJointMaskRecovery_right terms msgs 0 []
+
+theorem toprfJointTranscript_two_secrets
+    (termsA termsB : Nat → List GoldQuad → GoldQuad) (coins : List GoldQuad) :
+    toprfJointMaskedView termsB 0 []
+      (toprfJointMaskRecovery termsB 0 [] (toprfJointMaskedView termsA 0 [] coins)) =
+        toprfJointMaskedView termsA 0 [] coins :=
+  toprfJointMaskRecovery_right termsB _ 0 []
+
+/-- Uniform tapes have a fixed length; the simulator preserves that support exactly. -/
+theorem toprfJointMaskRecovery_length (terms : Nat → List GoldQuad → GoldQuad) :
+    ∀ (msgs : List GoldQuad) (i : Nat) (history : List GoldQuad),
+      (toprfJointMaskRecovery terms i history msgs).length = msgs.length
+  | [], _, _ => rfl
+  | _ :: msgs, i, history => by
+    simp only [toprfJointMaskRecovery, List.length_cons, toprfJointMaskRecovery_length terms msgs]
+
+
+/-! ## Active reshare execution through all Poseidon2 rounds
+
+This execution uses three full-value holder messages per multiplication term, including
+self-products. One fixed Byzantine party may erase or replace every message arbitrarily.
+This is the full-value transport, not the optimized two-value/one-digest transport. The
+Poseidon2 protocol is an RSS arithmetic protocol: a Schnorr/DLEQ statement is not a proof
+of a Poseidon2 gate, and no discrete-log group is silently substituted here.
+-/
+
+abbrev ToprfFault204 := List Nat → Fin 5 → Fin 5 → Goldilocks → Option Goldilocks
+
+private theorem toprfThreeHoldersDistinct204 (i j : Fin 5) :
+    (toprfHolders i j).getD 0 0 ≠ (toprfHolders i j).getD 1 0 ∧
+    (toprfHolders i j).getD 0 0 ≠ (toprfHolders i j).getD 2 0 ∧
+    (toprfHolders i j).getD 1 0 ≠ (toprfHolders i j).getD 2 0 := by
+  revert i j
+  decide
+
+def toprfActiveCross204 (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat)
+    (i j : Fin 5) (term : Goldilocks) : Option Goldilocks :=
+  let holders := toprfHolders i j
+  let msg (p : Fin 5) := if p = bad then fault gate i j term else some term
+  majority2Of3 (msg (holders.getD 0 0)) (msg (holders.getD 1 0)) (msg (holders.getD 2 0))
+
+theorem toprfActiveCross204_correct (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat)
+    (i j : Fin 5) (term : Goldilocks) :
+    toprfActiveCross204 bad fault gate i j term = some term := by
+  obtain ⟨h01, h02, h12⟩ := toprfThreeHoldersDistinct204 i j
+  unfold toprfActiveCross204
+  apply majority2Of3_of_two_honest
+  by_cases h0 : (toprfHolders i j).getD 0 0 = bad
+  · have h1 : (toprfHolders i j).getD 1 0 ≠ bad := fun h => h01 (h0.trans h.symm)
+    have h2 : (toprfHolders i j).getD 2 0 ≠ bad := fun h => h02 (h0.trans h.symm)
+    exact Or.inr (Or.inr ⟨by simp [h1], by simp [h2]⟩)
+  · by_cases h1 : (toprfHolders i j).getD 1 0 = bad
+    · have h2 : (toprfHolders i j).getD 2 0 ≠ bad := fun h => h12 (h1.trans h.symm)
+      exact Or.inr (Or.inl ⟨by simp [h0], by simp [h2]⟩)
+    · exact Or.inl ⟨by simp [h0], by simp [h1]⟩
+
+/-- `getD` is unreachable on a failed decoder under the one-fault model, as proved above.
+    The decoded values themselves feed every multiplication output. -/
+def toprfActiveMul204 (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat)
+    (x y : ToprfWire) (mask : Fin 5 → Fin 5 → Goldilocks) : ToprfWire :=
+  fun c =>
+    let diag := (toprfActiveCross204 bad fault gate c c (Goldilocks.mul (x c) (y c))).getD Goldilocks.zero
+    let outgoing := sumGoldList ((fin5Others c).map (fun j => mask c j))
+    let incoming := sumGoldList ((fin5Others c).map (fun i =>
+      (toprfActiveCross204 bad fault gate i c
+        (Goldilocks.sub (Goldilocks.mul (x i) (y c)) (mask i c))).getD Goldilocks.zero))
+    Goldilocks.add (Goldilocks.add diag outgoing) incoming
+
+theorem toprfActiveMul204_eq (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat)
+    (x y : ToprfWire) (mask : Fin 5 → Fin 5 → Goldilocks) :
+    toprfActiveMul204 bad fault gate x y mask = toprfMulWire x y mask := by
+  funext c
+  simp only [toprfActiveMul204, toprfMulWire, toprfActiveCross204_correct, Option.getD_some]
+
+def toprfActiveSbox204 (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat)
+    (w : ToprfWire) (m1 m2 m3 m4 : Fin 5 → Fin 5 → Goldilocks) : ToprfWire :=
+  let x2 := toprfActiveMul204 bad fault (gate ++ [0]) w w m1
+  let x3 := toprfActiveMul204 bad fault (gate ++ [1]) x2 w m2
+  let x4 := toprfActiveMul204 bad fault (gate ++ [2]) x2 x2 m3
+  toprfActiveMul204 bad fault (gate ++ [3]) x3 x4 m4
+
+theorem toprfActiveSbox204_eq (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat)
+    (w : ToprfWire) (m1 m2 m3 m4 : Fin 5 → Fin 5 → Goldilocks) :
+    toprfActiveSbox204 bad fault gate w m1 m2 m3 m4 = toprfSboxWire w m1 m2 m3 m4 := by
+  simp only [toprfActiveSbox204, toprfSboxWire, toprfActiveMul204_eq]
+
+def toprfActiveExtRound204 (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat) (masks : Fin 12 → SboxMask4) (rc : Poseidon2State12) (st : ToprfState12) : ToprfState12 :=
+  let s := toprfAddPublicState12 rc st
+  let sb (idx : Fin 12) (f : Poseidon2State12 → Goldilocks) : ToprfWire :=
+    let m := masks idx
+    toprfActiveSbox204 bad fault (gate ++ [idx.val]) (fun c => f (s c)) m.m1 m.m2 m.m3 m.m4
+  let y0 := sb ⟨0, by decide⟩ (fun q => q.b0.x0)
+  let y1 := sb ⟨1, by decide⟩ (fun q => q.b0.x1)
+  let y2 := sb ⟨2, by decide⟩ (fun q => q.b0.x2)
+  let y3 := sb ⟨3, by decide⟩ (fun q => q.b0.x3)
+  let y4 := sb ⟨4, by decide⟩ (fun q => q.b1.x0)
+  let y5 := sb ⟨5, by decide⟩ (fun q => q.b1.x1)
+  let y6 := sb ⟨6, by decide⟩ (fun q => q.b1.x2)
+  let y7 := sb ⟨7, by decide⟩ (fun q => q.b1.x3)
+  let y8 := sb ⟨8, by decide⟩ (fun q => q.b2.x0)
+  let y9 := sb ⟨9, by decide⟩ (fun q => q.b2.x1)
+  let y10 := sb ⟨10, by decide⟩ (fun q => q.b2.x2)
+  let y11 := sb ⟨11, by decide⟩ (fun q => q.b2.x3)
+  fun c => applyME ⟨⟨y0 c, y1 c, y2 c, y3 c⟩, ⟨y4 c, y5 c, y6 c, y7 c⟩, ⟨y8 c, y9 c, y10 c, y11 c⟩⟩
+
+def toprfActiveIntRound204 (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat) (m : SboxMask4) (rc : Goldilocks) (st : ToprfState12) : ToprfState12 :=
+  let w0 : ToprfWire := fun c => if c = 0 then Goldilocks.add (st 0).b0.x0 rc else (st c).b0.x0
+  let y0 := toprfActiveSbox204 bad fault (gate ++ [0]) w0 m.m1 m.m2 m.m3 m.m4
+  fun c => applyMI ⟨⟨y0 c, (st c).b0.x1, (st c).b0.x2, (st c).b0.x3⟩, (st c).b1, (st c).b2⟩
+
+theorem toprfActiveExtRound204_eq (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat)
+    (m : Fin 12 → SboxMask4) (rc : Poseidon2State12) (st : ToprfState12) :
+    toprfActiveExtRound204 bad fault gate m rc st = toprfExtRound m rc st := by
+  simp only [toprfActiveExtRound204, toprfExtRound, toprfActiveSbox204_eq]
+
+theorem toprfActiveIntRound204_eq (bad : Fin 5) (fault : ToprfFault204) (gate : List Nat)
+    (m : SboxMask4) (rc : Goldilocks) (st : ToprfState12) :
+    toprfActiveIntRound204 bad fault gate m rc st = toprfIntRound m rc st := by
+  simp only [toprfActiveIntRound204, toprfIntRound, toprfActiveSbox204_eq]
+
+def toprfActivePerm204 (bad : Fin 5) (fault : ToprfFault204)
+    (masks : ToprfPerm12Masks) (init : ToprfState12) : ToprfState12 :=
+  let s0 : ToprfState12 := fun c => applyME (init c)
+  let s1 := runToprfRoundsIdx
+    (fun r rc s => toprfActiveExtRound204 bad fault [0, r] (masks.initExt r) rc s)
+    0 poseidon2InitialExtConsts s0
+  let s2 := runToprfRoundsIdx
+    (fun r rc s => toprfActiveIntRound204 bad fault [1, r] (masks.internal r) rc s)
+    0 poseidon2InternalConsts s1
+  runToprfRoundsIdx
+    (fun r rc s => toprfActiveExtRound204 bad fault [2, r] (masks.termExt r) rc s)
+    0 poseidon2TerminalExtConsts s2
+
+/-- Honest engine outputs are derived through checked messages at every multiplication,
+    rather than assumed as a final-output premise. -/
+theorem toprfActivePerm204_eq (bad : Fin 5) (fault : ToprfFault204)
+    (masks : ToprfPerm12Masks) (init : ToprfState12) :
+    toprfActivePerm204 bad fault masks init = toprfEvalPerm12 masks init := by
+  simp only [toprfActivePerm204, toprfEvalPerm12,
+    toprfActiveExtRound204_eq, toprfActiveIntRound204_eq]
+
+def toprfActiveClient204 (bad : Fin 5) (fault : ToprfFault204)
+    (masks : ToprfPerm12Masks) (keys inputs : Fin 5 → Lane4)
+    (forgedFinal : Option (Fin 5 → Lane4)) : Option Lane4 :=
+  let final := toprfActivePerm204 bad fault masks (toprfInitPrfState keys inputs)
+  clientFinalizeLane4 (fun p => if p = bad then forgedFinal else some (fun c => (final c).b0))
+
+theorem toprfActiveClient204_correct (bad : Fin 5) (fault : ToprfFault204)
+    (masks : ToprfPerm12Masks) (keys inputs : Fin 5 → Lane4)
+    (forgedFinal : Option (Fin 5 → Lane4)) :
+    toprfActiveClient204 bad fault masks keys inputs forgedFinal =
+      some (toprfPlaintext (sumLane4Shares5 keys) (sumLane4Shares5 inputs)) := by
+  unfold toprfActiveClient204
+  rw [toprfActivePerm204_eq]
+  apply (toprf_2of5_corrects_one_malicious_server id [] 0 0 1 (by decide) bad).2.2
+  intro p hp
+  simp only [hp, ↓reduceIte]
+
+/-- Removing the holder vote admits a forged multiplication message immediately. -/
+theorem tooth_toprf_unchecked_cross_message :
+    (some (Goldilocks.ofNat 1) : Option Goldilocks) ≠ some (Goldilocks.mul Goldilocks.zero Goldilocks.zero) := by
+  decide
+
+
+/-- Generic context indices are injective even beyond the u64 range. -/
+theorem contextIndex204_injective {a b : Nat} (h : leb128 a = leb128 b) : a = b :=
+  (leb128_prefix_inj (r₁ := []) (r₂ := []) (by simpa using h)).1
+
+theorem tooth_contextIndex204_no_u64_wrap : leb128 0 ≠ leb128 (2 ^ 64) := by
+  intro h
+  have he := contextIndex204_injective h
+  omega
+
+def RssProductsChecked204
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput) : Prop :=
+  rssProductsValid chalHash sampleInBall st inp = true
+
+theorem rssProductsChecked204_sound
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
+    (h : RssProductsChecked204 chalHash sampleInBall st inp) :
+    inp.products = rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets :=
+  (rssProductsValid_eq_true_iff chalHash sampleInBall st inp).mp h
+
+theorem rssProductsChecked204_inhabited
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput) :
+    ∃ checked : RssMlDsaAttemptInput, RssProductsChecked204 chalHash sampleInBall st checked := by
+  refine ⟨{ inp with products := rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets }, ?_⟩
+  exact (rssProductsValid_eq_true_iff chalHash sampleInBall st _).mpr rfl
+
+theorem tooth_toprfActiveCross204_forgery :
+    toprfActiveCross204 0 (fun _ _ _ _ => some Goldilocks.one) [] 0 1 Goldilocks.zero ≠
+      some Goldilocks.one := by
+  rw [toprfActiveCross204_correct]
+  decide
+
+
+/-- The durable state returned by signing is exactly the state committed by reservation. -/
+theorem rssDurableSign204_state
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) (party : UInt16) (result : RssDiskOutcome204)
+    (st : RssDurableSigner204) (inp : RssMlDsaAttemptInput) :
+    (rssDurableSign204 chalHash sampleInBall party result st inp).1 =
+      (rssDurableReserve204 party result st inp).2 := by
+  unfold rssDurableSign204
+  split
+  · cases rssThresholdSignStep chalHash sampleInBall st.key inp with
+    | err _ _ => rfl
+    | ok _ out => cases out; rfl
+  · rfl
+
+inductive RssDurableTransition204
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) (party : UInt16) :
+    RssDurableSigner204 → RssDurableSigner204 → Prop where
+  | sign (st : RssDurableSigner204) (result : RssDiskOutcome204) (inp : RssMlDsaAttemptInput) :
+      RssDurableTransition204 chalHash sampleInBall party st
+        (rssDurableSign204 chalHash sampleInBall party result st inp).1
+  | crash (st : RssDurableSigner204) :
+      RssDurableTransition204 chalHash sampleInBall party st (rssDurableRecover204 party st)
+
+inductive RssDurableTrace204
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) (party : UInt16) :
+    RssDurableSigner204 → RssDurableSigner204 → Prop where
+  | nil (st : RssDurableSigner204) : RssDurableTrace204 chalHash sampleInBall party st st
+  | cons {a b c : RssDurableSigner204} :
+      RssDurableTransition204 chalHash sampleInBall party a b →
+      RssDurableTrace204 chalHash sampleInBall party b c →
+      RssDurableTrace204 chalHash sampleInBall party a c
+
+theorem rssDurableTrace204_monotone
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
+    {sampleInBall : List UInt8 → Poly256} {party : UInt16} {a b : RssDurableSigner204}
+    (h : RssDurableTrace204 chalHash sampleInBall party a b) :
+    ∀ material ∈ a.disk.burnedNonces, material ∈ b.disk.burnedNonces := by
+  induction h with
+  | nil => exact fun _ hm => hm
+  | cons step tail ih =>
+    intro material hm
+    apply ih material
+    cases step with
+    | sign st result inp =>
+      rw [rssDurableSign204_state]
+      exact rssDurableReserve204_monotone party result st inp material hm
+    | crash st => exact hm
+
+/-- Replay remains rejected after any number of intervening signs, failures, and crashes. -/
+theorem tooth_rssDurableTrace204_replay
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
+    {sampleInBall : List UInt8 → Poly256} {party : UInt16} {a b : RssDurableSigner204}
+    (h : RssDurableTrace204 chalHash sampleInBall party a b)
+    (inp : RssMlDsaAttemptInput) (result : RssDiskOutcome204)
+    (hb : rssNonceMaterial204 inp ∈ a.disk.burnedNonces) :
+    (rssDurableReserve204 party result b inp).1 = false :=
+  tooth_rssDurableReserve204_nonce_replay party result b inp (rssDurableTrace204_monotone h _ hb)
+
+
+/-- A corrupt *consumed* response product is rejected by the signing state machine itself,
+    while its attempt is burned. This tests the checker/consumer connection. -/
+theorem tooth_rssThresholdSignStep_corrupt_product
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput)
+    (hep : inp.epoch = st.epoch) (hatt : inp.attempt = st.nextAttempt)
+    (hbad : inp.products.cs1 ≠ (rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets).cs1) :
+    rssThresholdSignStep chalHash sampleInBall st inp =
+      .err { st with nextAttempt := st.nextAttempt + 1 } .mpcSacrificeFailed := by
+  unfold rssThresholdSignStep
+  rw [decide_eq_true ⟨hep, hatt⟩,
+    tooth_rssProductsValid_corrupted_output chalHash sampleInBall st inp hbad]
+
+/-- Acceptance of the byte verifier enforces the same response and hint bounds as the
+    algebraic core, on the *decoded wire signature*. -/
+theorem mldsaVerifyBytes204_bounds (budget : Nat) (pk msg ctx sig : List UInt8)
+    (h : mldsaVerifyBytes204 budget pk msg ctx sig = true) :
+    ∃ decoded : DecodedSignature204,
+      decodeSignature204 sig = some decoded ∧
+      infNormVec4 decoded.z < mldsa44Gamma1 - mldsa44Beta ∧
+      hintWeightVec4 decoded.hints ≤ mldsa44Omega := by
+  unfold mldsaVerifyBytes204 at h
+  split at h
+  · cases h
+  · cases ha : expandA204 budget (pk.take 32) with
+    | none => simp only [ha] at h; cases h
+    | some A =>
+      cases hd : decodeSignature204 sig with
+      | none => simp only [ha, hd] at h; cases h
+      | some decoded =>
+        rw [ha, hd] at h
+        cases hc : sampleInBall204 budget decoded.challenge with
+        | none => rw [hc] at h; cases h
+        | some c =>
+          rw [hc] at h
+          simp only [mldsaVerify, Bool.and_eq_true, decide_eq_true_eq] at h
+          exact ⟨decoded, hd, h.1.1, h.1.2⟩
+
+-- Structural registrations. These are not claims that source mutants have been executed.
+#tooth_pair mldsaVerifyBytes204_bounds vs tooth_mldsaVerifyBytes204_bad_key_length
+#tooth_pair cosetLde204_size vs tooth_cosetLde204_zero_shift
+#tooth_pair canonicalNorm204_sound vs tooth_canonicalNorm204_noncanonical
+#tooth_pair merkleNodePreimage204_injective vs tooth_merkle204_leaf_node_disjoint
+#tooth_pair rssProductsValid_eq_true_iff vs tooth_rssProductsValid_corrupted_output
+#tooth_pair rssDurableReserve204_burns vs tooth_rssDurableReserve204_nonce_replay
+#tooth_pair rssDurableSign204_release_burned vs tooth_rssDurableSign204_failed_write
+#tooth_pair dkgReveal204_valid_share vs tooth_dkgReveal204_before_freeze
+#tooth_pair toprfActiveCross204_correct vs tooth_toprfActiveCross204_forgery
+#tooth_pair contextIndex204_injective vs tooth_contextIndex204_no_u64_wrap
+#tooth_pair rssDurableTrace204_monotone vs tooth_rssDurableTrace204_replay
+#verify_inhabited rssProductsChecked204_sound rssProductsChecked204_inhabited
 
 end Qsag
