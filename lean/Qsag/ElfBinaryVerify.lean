@@ -513,30 +513,74 @@ def decodeX86InstrAt (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Inst
     | .reg src => pure ⟨pc, hdrLen + 1 + mLen, .aluRegReg .xorOp rexW dst src⟩
     | .mem addr =>
       if rexW then pure ⟨pc, hdrLen + 1 + mLen, .aluLoad64 .xorOp dst addr⟩ else none
+  else if op == 0x35 then
+    let imm32 ← readU32LE? (rest.drop 1)
+    let imm := if rexW then signExt32To64 imm32 else UInt64.ofNat imm32.toNat
+    pure ⟨pc, hdrLen + 5, .aluImm .xorOp rexW 0 imm⟩
+  else if op == 0x39 then
+    let (src, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
+    match opnd with
+    | .reg dst => pure ⟨pc, hdrLen + 1 + mLen, .cmpRegReg rexW dst src⟩
+    | .mem _ => none
+  else if op == 0x3B then
+    let (dst, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
+    match opnd with
+    | .reg src => pure ⟨pc, hdrLen + 1 + mLen, .cmpRegReg rexW dst src⟩
+    | .mem _ => none
+  else if op == 0x85 then
+    let (r2, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
+    match opnd with
+    | .reg r1 => pure ⟨pc, hdrLen + 1 + mLen, .testRegReg rexW r1 r2⟩
+    | .mem _ => none
+  else if op == 0x8D then
+    let (dst, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
+    match opnd with
+    | .mem addr => pure ⟨pc, hdrLen + 1 + mLen, .lea rexW dst addr⟩
+    | .reg _ => none
   else if op == 0x81 then
     let (regF, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
-    let aop ← decodeAluDigit? (regF &&& 7)
     let imm32 ← readU32LE? (rest.drop (1 + mLen))
+    let imm := if rexW then signExt32To64 imm32 else UInt64.ofNat imm32.toNat
     match opnd with
     | .reg dst =>
-      let imm := if rexW then signExt32To64 imm32 else UInt64.ofNat imm32.toNat
-      pure ⟨pc, hdrLen + 1 + mLen + 4, .aluImm aop rexW dst imm⟩
+      if (regF &&& 7) == 7 then
+        pure ⟨pc, hdrLen + 1 + mLen + 4, .cmpImm rexW dst imm⟩
+      else do
+        let aop ← decodeAluDigit? (regF &&& 7)
+        pure ⟨pc, hdrLen + 1 + mLen + 4, .aluImm aop rexW dst imm⟩
     | .mem _ => none
   else if op == 0x83 then
     let (regF, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
-    let aop ← decodeAluDigit? (regF &&& 7)
     let imm8 ← rest[1 + mLen]?
+    let imm := signExt8To64 imm8
     match opnd with
     | .reg dst =>
-      let imm := signExt8To64 imm8
-      pure ⟨pc, hdrLen + 1 + mLen + 1, .aluImm aop rexW dst imm⟩
+      if (regF &&& 7) == 7 then
+        pure ⟨pc, hdrLen + 1 + mLen + 1, .cmpImm rexW dst imm⟩
+      else do
+        let aop ← decodeAluDigit? (regF &&& 7)
+        pure ⟨pc, hdrLen + 1 + mLen + 1, .aluImm aop rexW dst imm⟩
     | .mem _ => none
+  else if op == 0xC6 then
+    let (regF, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
+    if (regF &&& 7) != 0 then none
+    else
+      let imm8 ← rest[1 + mLen]?
+      match opnd with
+      | .mem addr => pure ⟨pc, hdrLen + 1 + mLen + 1, .storeImm8 addr imm8⟩
+      | .reg _ => none
   else if op == 0xC1 then
     let (regF, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
     let sk ← decodeShiftDigit? (regF &&& 7)
     let imm8 ← rest[1 + mLen]?
     match opnd with
     | .reg dst => pure ⟨pc, hdrLen + 1 + mLen + 1, .shiftImm sk rexW dst imm8.toNat⟩
+    | .mem _ => none
+  else if op == 0xD1 then
+    let (regF, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
+    let sk ← decodeShiftDigit? (regF &&& 7)
+    match opnd with
+    | .reg dst => pure ⟨pc, hdrLen + 1 + mLen, .shiftImm sk rexW dst 1⟩
     | .mem _ => none
   else if op == 0xD3 then
     let (regF, opnd, mLen) ← decodeX86ModRM (rest.drop 1) rexR rexX rexB
@@ -551,7 +595,8 @@ def decodeX86InstrAt (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Inst
     else
       match opnd with
       | .reg r =>
-        if digit == 3 then pure ⟨pc, hdrLen + 1 + mLen, .negReg rexW r⟩
+        if digit == 2 then pure ⟨pc, hdrLen + 1 + mLen, .notReg rexW r⟩
+        else if digit == 3 then pure ⟨pc, hdrLen + 1 + mLen, .negReg rexW r⟩
         else if digit == 4 || digit == 5 then pure ⟨pc, hdrLen + 1 + mLen, .mulOneOp (digit == 5) rexW r⟩
         else none
       | .mem _ => none
@@ -611,6 +656,36 @@ def decodeX86InstrAt (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Inst
       let rel32 ← readU32LE? (rest.drop 2)
       let nextPc := Int.ofNat (pc + hdrLen + 6)
       pure ⟨pc, hdrLen + 6, .jcc (op2.toNat - 0x80) (nextPc + signExt32ToInt rel32)⟩
+    else if 0x90 ≤ op2 && op2 ≤ 0x9F then
+      if op2 < 0x92 || 0x95 < op2 || (p66 && !rexW) then return ← none
+      let (_, opnd, mLen) ← decodeX86ModRM (rest.drop 2) rexR rexX rexB
+      match opnd with
+      | .reg dst =>
+        if rexLen == 0 && dst ≥ 4 then none
+        else pure ⟨pc, hdrLen + 2 + mLen, .setcc (op2.toNat - 0x90) dst⟩
+      | .mem _ => none
+    else if 0xC8 ≤ op2 && op2 ≤ 0xCF && !p66 && !pf3 then
+      pure ⟨pc, hdrLen + 2, .bswap rexW ((op2.toNat - 0xC8) + rexB * 8)⟩
+    else if op2 == 0x6F && pf3 && !p66 then
+      let (dst, opnd, mLen) ← decodeX86ModRM (rest.drop 2) rexR rexX rexB
+      match opnd with
+      | .mem addr => pure ⟨pc, hdrLen + 2 + mLen, .sseMovdquLoad dst addr⟩
+      | .reg _ => none
+    else if op2 == 0x74 && p66 && !pf3 then
+      let (dst, opnd, mLen) ← decodeX86ModRM (rest.drop 2) rexR rexX rexB
+      match opnd with
+      | .reg src => pure ⟨pc, hdrLen + 2 + mLen, .ssePcmpeqb dst src⟩
+      | .mem _ => none
+    else if op2 == 0xDB && p66 && !pf3 then
+      let (dst, opnd, mLen) ← decodeX86ModRM (rest.drop 2) rexR rexX rexB
+      match opnd with
+      | .reg src => pure ⟨pc, hdrLen + 2 + mLen, .ssePand dst src⟩
+      | .mem _ => none
+    else if op2 == 0xD7 && p66 && !pf3 then
+      let (dst, opnd, mLen) ← decodeX86ModRM (rest.drop 2) rexR rexX rexB
+      match opnd with
+      | .reg src => pure ⟨pc, hdrLen + 2 + mLen, .ssePmovmskb dst src⟩
+      | .mem _ => none
     else if op2 == 0x38 then
       let op3 ← rest[2]?
       if op3 == 0xF6 && rexW then
@@ -803,12 +878,63 @@ def evalX86Cond (cc : Nat) (s : X86State) : Bool :=
 def signedOfBound (bound n : Nat) : Int :=
   if 2 * n < bound then (n : Int) else (n : Int) - (bound : Int)
 
+/-- Signed two's-complement range check `v ∉ [-bound / 2, bound / 2)` for `bound = 2 ^ w`. -/
+def signedOutOfBounds (bound : Nat) (v : Int) : Bool :=
+  decide (2 * v < -(bound : Int)) || decide ((bound : Int) ≤ 2 * v)
+
 /-- `CF = OF` after a signed multiply of two `w`-bit patterns (`bound = 2 ^ w`): set exactly when
     the signed product lies outside `[-bound / 2, bound / 2)`, that is, when sign-extending the
     truncated result does not give back the product. -/
 def imulSignedOverflow (bound an bn : Nat) : Bool :=
-  let p := signedOfBound bound an * signedOfBound bound bn
-  decide (2 * p < -(bound : Int)) || decide ((bound : Int) ≤ 2 * p)
+  signedOutOfBounds bound (signedOfBound bound an * signedOfBound bound bn)
+
+/-- Architectural Intel SDM signed-overflow flag (`OF`) for scalar `ALU` operations at width `w ∈ {32, 64}`. -/
+def evalX86AluOf (op : X86AluOp) (is64 : Bool) (a b : UInt64) (cfIn : Bool) : Bool :=
+  let bound : Nat := if is64 then 0x10000000000000000 else 0x100000000
+  let an := (maskGprWidth is64 a).toNat
+  let bn := (maskGprWidth is64 b).toNat
+  let sa := signedOfBound bound an
+  let sb := signedOfBound bound bn
+  let cin : Int := if cfIn then 1 else 0
+  match op with
+  | .add => signedOutOfBounds bound (sa + sb)
+  | .adc => signedOutOfBounds bound (sa + sb + cin)
+  | .sub => signedOutOfBounds bound (sa - sb)
+  | .sbb => signedOutOfBounds bound (sa - sb - cin)
+  | .andOp | .orOp | .xorOp => false
+  | .imul2 => imulSignedOverflow bound an bn
+
+/-- Architectural signed-overflow flag (`OF`) for `INC` / `DEC` at width `w ∈ {32, 64}`. -/
+def evalX86IncDecOf (isInc is64 : Bool) (v : UInt64) : Bool :=
+  let cur := maskGprWidth is64 v
+  if isInc then cur == (if is64 then 0x7FFFFFFFFFFFFFFF else 0x7FFFFFFF)
+  else cur == (if is64 then 0x8000000000000000 else 0x80000000)
+
+/-- Byte-swap helper for 32-bit and 64-bit `BSWAP`. -/
+def evalX86Bswap (is64 : Bool) (v : UInt64) : UInt64 :=
+  if is64 then
+    ((v &&& 0x00000000000000FF) <<< 56) |||
+    ((v &&& 0x000000000000FF00) <<< 40) |||
+    ((v &&& 0x0000000000FF0000) <<< 24) |||
+    ((v &&& 0x00000000FF000000) <<< 8)  |||
+    ((v >>> 8)  &&& 0x00000000FF000000) |||
+    ((v >>> 24) &&& 0x0000000000FF0000) |||
+    ((v >>> 40) &&& 0x000000000000FF00) |||
+    ((v >>> 56) &&& 0x00000000000000FF)
+  else
+    ((v &&& 0x000000FF) <<< 24) |||
+    ((v &&& 0x0000FF00) <<< 8)  |||
+    ((v >>> 8)  &&& 0x0000FF00) |||
+    ((v >>> 24) &&& 0x000000FF)
+
+/-- 16-bit byte-MSB mask extracted by `PMOVMSKB r32, xmm`. -/
+def evalPmovmskb128 (v : Vec256) : UInt64 :=
+  let bitFrom (w : UInt64) (byteIdx outBit : Nat) : UInt64 :=
+    (((w >>> UInt64.ofNat (byteIdx * 8 + 7)) &&& 1) <<< UInt64.ofNat outBit)
+  bitFrom v.w0 0 0 ||| bitFrom v.w0 1 1 ||| bitFrom v.w0 2 2 ||| bitFrom v.w0 3 3 |||
+  bitFrom v.w0 4 4 ||| bitFrom v.w0 5 5 ||| bitFrom v.w0 6 6 ||| bitFrom v.w0 7 7 |||
+  bitFrom v.w1 0 8 ||| bitFrom v.w1 1 9 ||| bitFrom v.w1 2 10 ||| bitFrom v.w1 3 11 |||
+  bitFrom v.w1 4 12 ||| bitFrom v.w1 5 13 ||| bitFrom v.w1 6 14 ||| bitFrom v.w1 7 15
 
 def evalX86Alu (op : X86AluOp) (is64 : Bool) (a b : UInt64) (cfIn : Bool) : (UInt64 × Bool × Bool) :=
   let bound : Nat := if is64 then 0x10000000000000000 else 0x100000000
@@ -937,6 +1063,41 @@ def x86ShiftPreservesZf (sk : X86ShiftKind) (is64 : Bool) (cnt : Nat) : Bool :=
     | .rol | .ror => true
     | _ => false
 
+/-- Architectural result + `(CF, OF, ZF)` for immediate shifts and rotates (`c == 0` preserves flags;
+    `c > 0` sets architectural `CF` and `c == 1` `OF`; for `c > 1`, `OF` is architecturally undefined
+    on hardware and given a deterministic pure formula here while `transferX86Instr` forgets `ofPub`). -/
+def evalX86Shift (sk : X86ShiftKind) (is64 : Bool) (v : UInt64) (cnt : Nat)
+    (cfIn ofIn zfIn : Bool) : (UInt64 × Bool × Bool × Bool) :=
+  let w := if is64 then 64 else 32
+  let c := cnt % w
+  let cur := maskGprWidth is64 v
+  if c == 0 then
+    (cur, cfIn, ofIn, zfIn)
+  else
+    let msbMask : UInt64 := if is64 then 0x8000000000000000 else 0x80000000
+    let nextMsbMask : UInt64 := if is64 then 0x4000000000000000 else 0x40000000
+    match sk with
+    | .shl =>
+      let res := maskGprWidth is64 (cur <<< UInt64.ofNat c)
+      let cf' := ((cur >>> UInt64.ofNat (w - c)) &&& 1) != 0
+      let of' := ((res &&& msbMask) != 0) != cf'
+      (res, cf', of', res == 0)
+    | .shr =>
+      let res := maskGprWidth is64 (cur >>> UInt64.ofNat c)
+      let cf' := ((cur >>> UInt64.ofNat (c - 1)) &&& 1) != 0
+      let of' := (cur &&& msbMask) != 0
+      (res, cf', of', res == 0)
+    | .rol =>
+      let res := maskGprWidth is64 ((cur <<< UInt64.ofNat c) ||| (cur >>> UInt64.ofNat (w - c)))
+      let cf' := (res &&& 1) != 0
+      let of' := ((res &&& msbMask) != 0) != cf'
+      (res, cf', of', zfIn)
+    | .ror =>
+      let res := maskGprWidth is64 ((cur >>> UInt64.ofNat c) ||| (cur <<< UInt64.ofNat (w - c)))
+      let cf' := (res &&& msbMask) != 0
+      let of' := cf' != ((res &&& nextMsbMask) != 0)
+      (res, cf', of', zfIn)
+
 /-- Small-step `x86_64` operational semantics emitting `StepObs` (`pc`, `(addr, bytes)`, `isDoitSafe`). -/
 def stepX86 (d : DecodedInstr X86Instr) (s : X86State) : (X86State × StepObs) :=
   let nextPc := d.offset + d.byteLen
@@ -971,30 +1132,34 @@ def stepX86 (d : DecodedInstr X86Instr) (s : X86State) : (X86State × StepObs) :
                 else writeMem64 s.mem ea (s.gpr.get src)
     ({ s with pc := nextPc, mem := mem' }, ⟨d.offset, [(ea, wBytes)], true⟩)
   | .aluRegReg op is64 dst src =>
-    let (res, cf', zf') := evalX86Alu op is64 (s.gpr.get dst) (s.gpr.get src) s.cf
-    let of' := if op == .andOp || op == .orOp || op == .xorOp then false
-               else if op == .imul2 then cf' else s.ofFlag
+    let a := s.gpr.get dst
+    let b := s.gpr.get src
+    let (res, cf', zf') := evalX86Alu op is64 a b s.cf
+    let of' := evalX86AluOf op is64 a b s.cf
     ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cf', ofFlag := of', zf := zf' }, ⟨d.offset, [], true⟩)
   | .aluLoad64 op dst addr =>
     let ea := evalX86Addr s nextPc addr
+    let a := s.gpr.get dst
     let mval := readMem64 s.mem ea
-    let (res, cf', zf') := evalX86Alu op true (s.gpr.get dst) mval s.cf
-    let of' := if op == .andOp || op == .orOp || op == .xorOp then false
-               else if op == .imul2 then cf' else s.ofFlag
+    let (res, cf', zf') := evalX86Alu op true a mval s.cf
+    let of' := evalX86AluOf op true a mval s.cf
     ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cf', ofFlag := of', zf := zf' }, ⟨d.offset, [(ea, 8)], true⟩)
   | .aluImm op is64 dst imm =>
-    let (res, cf', zf') := evalX86Alu op is64 (s.gpr.get dst) imm s.cf
-    let of' := if op == .andOp || op == .orOp || op == .xorOp then false
-               else if op == .imul2 then cf' else s.ofFlag
+    let a := s.gpr.get dst
+    let (res, cf', zf') := evalX86Alu op is64 a imm s.cf
+    let of' := evalX86AluOf op is64 a imm s.cf
     ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cf', ofFlag := of', zf := zf' }, ⟨d.offset, [], true⟩)
   | .incDec isInc is64 dst =>
+    let cur := s.gpr.get dst
     let delta : UInt64 := if isInc then 1 else 0 - 1
-    let res := maskGprWidth is64 (maskGprWidth is64 (s.gpr.get dst) + delta)
-    ({ s with pc := nextPc, gpr := s.gpr.set dst res, zf := res == 0 }, ⟨d.offset, [], true⟩)
+    let res := maskGprWidth is64 (maskGprWidth is64 cur + delta)
+    let of' := evalX86IncDecOf isInc is64 cur
+    ({ s with pc := nextPc, gpr := s.gpr.set dst res, ofFlag := of', zf := res == 0 }, ⟨d.offset, [], true⟩)
   | .negReg is64 dst =>
     let cur := maskGprWidth is64 (s.gpr.get dst)
     let res := maskGprWidth is64 (0 - cur)
-    ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cur != 0, zf := res == 0 }, ⟨d.offset, [], true⟩)
+    let of' := cur == (if is64 then 0x8000000000000000 else 0x80000000)
+    ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cur != 0, ofFlag := of', zf := res == 0 }, ⟨d.offset, [], true⟩)
   | .mulOneOp isSigned is64 src =>
     -- `MUL` / `IMUL` with one operand: `rDX:rAX := rAX * src` at the operand width `w`. `raw` is
     -- the `2w`-bit product pattern (two's complement when signed). `CF = OF` is set when the
@@ -1013,31 +1178,70 @@ def stepX86 (d : DecodedInstr X86Instr) (s : X86State) : (X86State × StepObs) :
     ({ s with pc := nextPc, gpr := (s.gpr.set 0 lo).set 2 hi, cf := ovf, ofFlag := ovf },
       ⟨d.offset, [], true⟩)
   | .shiftImm sk is64 dst cnt =>
-    let w := if is64 then 64 else 32
-    let c := cnt % w
-    let cur := maskGprWidth is64 (s.gpr.get dst)
-    let res :=
-      match sk with
-      | .shl => maskGprWidth is64 (cur <<< UInt64.ofNat c)
-      | .shr => maskGprWidth is64 (cur >>> UInt64.ofNat c)
-      | .rol =>
-        if c == 0 then cur
-        else maskGprWidth is64 ((cur <<< UInt64.ofNat c) ||| (cur >>> UInt64.ofNat (w - c)))
-      | .ror =>
-        if c == 0 then cur
-        else maskGprWidth is64 ((cur >>> UInt64.ofNat c) ||| (cur <<< UInt64.ofNat (w - c)))
-    -- CF/OF are abstracted by retaining their incoming values here. The checker forgets
-    -- both flags after every shift, so a carry/overflow consumer cannot rely on their
-    -- publicity. This is not an architectural CF/OF specification; McRefine's shift
-    -- equations use this abstraction. ZF is modelled, including count zero and rotates.
-    ({ s with pc := nextPc, gpr := s.gpr.set dst res, zf := if x86ShiftPreservesZf sk is64 cnt then s.zf else res == 0 }, ⟨d.offset, [], true⟩)
+    let (res, cf', of', zf') := evalX86Shift sk is64 (s.gpr.get dst) cnt s.cf s.ofFlag s.zf
+    ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cf', ofFlag := of', zf := zf' }, ⟨d.offset, [], true⟩)
   | .cmovcc cc is64 dst src =>
     -- `X86State` has no `DOITM` bit, so the observation cannot depend on the mode: `true` here
     -- means "data-operand-independent when `DOITM` is set". The mode assumption is carried by
     -- `FuncContract.doitEnabled`, and `transferX86Instr` rejects `cmovcc` without it.
+    -- Per Intel SDM, 32-bit `CMOVcc` in 64-bit mode zero-extends `dst[31:0]` into `dst[63:0]`
+    -- even when the condition is false (`!taken`).
     let taken := evalX86Cond cc s
-    let gpr' := if taken then s.gpr.set dst (maskGprWidth is64 (s.gpr.get src)) else s.gpr
+    let chosen := if taken then s.gpr.get src else s.gpr.get dst
+    let gpr' := s.gpr.set dst (maskGprWidth is64 chosen)
     ({ s with pc := nextPc, gpr := gpr' }, ⟨d.offset, [], true⟩)
+  | .testRegReg is64 r1 r2 =>
+    let res := maskGprWidth is64 ((s.gpr.get r1) &&& (s.gpr.get r2))
+    ({ s with pc := nextPc, cf := false, ofFlag := false, zf := res == 0 }, ⟨d.offset, [], true⟩)
+  | .cmpRegReg is64 dst src =>
+    let a := s.gpr.get dst
+    let b := s.gpr.get src
+    let (_, cf', zf') := evalX86Alu .sub is64 a b false
+    let of' := evalX86AluOf .sub is64 a b false
+    ({ s with pc := nextPc, cf := cf', ofFlag := of', zf := zf' }, ⟨d.offset, [], true⟩)
+  | .cmpImm is64 dst imm =>
+    let a := s.gpr.get dst
+    let (_, cf', zf') := evalX86Alu .sub is64 a imm false
+    let of' := evalX86AluOf .sub is64 a imm false
+    ({ s with pc := nextPc, cf := cf', ofFlag := of', zf := zf' }, ⟨d.offset, [], true⟩)
+  | .lea is64 dst addr =>
+    let v := maskGprWidth is64 (evalX86Addr s nextPc addr)
+    ({ s with pc := nextPc, gpr := s.gpr.set dst v }, ⟨d.offset, [], true⟩)
+  | .storeImm8 addr imm =>
+    let ea := evalX86Addr s nextPc addr
+    ({ s with pc := nextPc, mem := writeMem8 s.mem ea imm }, ⟨d.offset, [(ea, 1)], true⟩)
+  | .notReg is64 dst =>
+    let res := maskGprWidth is64 (~~~(s.gpr.get dst))
+    ({ s with pc := nextPc, gpr := s.gpr.set dst res }, ⟨d.offset, [], true⟩)
+  | .setcc cc dst =>
+    let taken := evalX86Cond cc s
+    let cur := s.gpr.get dst
+    let v := (cur &&& 0xFFFFFFFFFFFFFF00) ||| (if taken then 1 else 0)
+    ({ s with pc := nextPc, gpr := s.gpr.set dst v }, ⟨d.offset, [], true⟩)
+  | .bswap is64 dst =>
+    let res := evalX86Bswap is64 (s.gpr.get dst)
+    ({ s with pc := nextPc, gpr := s.gpr.set dst res }, ⟨d.offset, [], true⟩)
+  | .sseMovdquLoad dst addr =>
+    let ea := evalX86Addr s nextPc addr
+    let q := readMem128 s.mem ea
+    let old := s.ymm.get dst
+    ({ s with pc := nextPc, ymm := s.ymm.set dst ⟨q.w0, q.w1, old.w2, old.w3⟩ },
+     ⟨d.offset, [(ea, 16)], true⟩)
+  | .ssePcmpeqb dst src =>
+    let vd := s.ymm.get dst
+    let vs := s.ymm.get src
+    let eqWord (w1 w2 : UInt64) : UInt64 :=
+      mapBytes64 (fun i => if getByte64 w1 i == getByte64 w2 i then 0xFF else 0x00)
+    ({ s with pc := nextPc, ymm := s.ymm.set dst ⟨eqWord vd.w0 vs.w0, eqWord vd.w1 vs.w1, vd.w2, vd.w3⟩ },
+     ⟨d.offset, [], true⟩)
+  | .ssePand dst src =>
+    let vd := s.ymm.get dst
+    let vs := s.ymm.get src
+    ({ s with pc := nextPc, ymm := s.ymm.set dst ⟨vd.w0 &&& vs.w0, vd.w1 &&& vs.w1, vd.w2, vd.w3⟩ },
+     ⟨d.offset, [], true⟩)
+  | .ssePmovmskb dst src =>
+    let mask := evalPmovmskb128 (s.ymm.get src)
+    ({ s with pc := nextPc, gpr := s.gpr.set dst mask }, ⟨d.offset, [], true⟩)
   | .mulx hiDst loDst src =>
     let prod := (s.gpr.get 2).toNat * (s.gpr.get src).toNat
     let lo := UInt64.ofNat (prod % 0x10000000000000000)
@@ -1743,7 +1947,8 @@ def x86AddrIsPublic (st : X86AbsState) : X86MemAddr → Bool
   | .baseDisp base _ => (st.gpr.get base).isPublic
   | .absDisp _ => true
   | .ripDisp _ => true
-  | .indexedSib _ _ _ _ => false
+  | .indexedSib baseOpt idx _ _ =>
+    (st.gpr.get idx).isPublic && match baseOpt with | none => true | some b => (st.gpr.get b).isPublic
 
 def isInPubMemRegion (c : FuncContract) (st : X86AbsState) (addr : X86MemAddr) (widthBytes : Nat) : Bool :=
   if !st.memUnmodified then false
@@ -1794,15 +1999,18 @@ def x86AddrRegsValid : X86MemAddr → Bool
 
 def x86InstrRegsValid : X86Instr → Bool
   | .nop | .mfence | .ret | .vzeroupper | .vzeroall | .jcc _ _ | .jmpRel _ | .indirectBr _ | .divRem _ => true
-  | .pushReg r | .popReg r | .movImm _ r _ | .aluImm _ _ r _ | .incDec _ _ r
-  | .negReg _ r | .mulOneOp _ _ r | .shiftImm _ _ r _ | .varShiftCl _ r => r < 16
-  | .movRegReg _ d s | .aluRegReg _ _ d s | .cmovcc _ _ d s | .adcx d s | .adox d s
+  | .pushReg r | .popReg r | .movImm _ r _ | .aluImm _ _ r _ | .cmpImm _ r _ | .incDec _ _ r
+  | .negReg _ r | .notReg _ r | .setcc _ r | .bswap _ r | .mulOneOp _ _ r | .shiftImm _ _ r _ | .varShiftCl _ r => r < 16
+  | .movRegReg _ d s | .aluRegReg _ _ d s | .testRegReg _ d s | .cmpRegReg _ d s | .cmovcc _ _ d s | .adcx d s | .adox d s
+  | .ssePcmpeqb d s | .ssePand d s | .ssePmovmskb d s
   | .vmovGprToXmm _ d s | .vpbroadcast _ d s | .vshiftImm _ _ d s _ => d < 16 && s < 16
   | .mulx h l s | .vbinOp _ _ h l s | .vpclmulqdq _ h l s _
   | .vgf2p8affineqb _ h l s _ | .vperm2i128 h l s _ => h < 16 && l < 16 && s < 16
   | .loadGpr w _ r a | .storeGpr w r a => (w == 1 || w == 8) && r < 16 && x86AddrRegsValid a
+  | .lea _ r a | .sseMovdquLoad r a
   | .aluLoad64 _ r a
   | .vload _ r a | .vstore _ r a | .vpbroadcastLoad64 r a => r < 16 && x86AddrRegsValid a
+  | .storeImm8 a _ => x86AddrRegsValid a
   | .vpxorLoad128 d s a | .vpxorLoad256 d s a => d < 16 && s < 16 && x86AddrRegsValid a
   | .vpgather _ a => x86AddrRegsValid a
 
@@ -1922,18 +2130,20 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
     if !isInc && !is64 && dst == 1 && st.stackZeroLoop == 2 then
       some [(nextPc, { st with
         gpr := st.gpr.set 1 .pubVal
+        ofPub := true
         zfPub := true
         stackZeroLoop := 3 })]
     else
       let p := (st.gpr.get dst).isPublic
       some [(nextPc, { stNoLoop with
         gpr := st.gpr.set dst (if p then .pubVal else .secretVal)
+        ofPub := p
         zfPub := p })]
   | .negReg _is64 dst =>
     let p := (st.gpr.get dst).isPublic
     some [(nextPc, { stNoLoop with
       gpr := st.gpr.set dst (if p then .pubVal else .secretVal)
-      cfPub := p, ofPub := false, zfPub := p })]
+      cfPub := p, ofPub := p, zfPub := p })]
   | .mulOneOp _isSigned _is64 src =>
     let p := (st.gpr.get 0).isPublic && (st.gpr.get src).isPublic
     let o : RegOrigin := if p then .pubVal else .secretVal
@@ -1954,6 +2164,45 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       let cPub := x86CondIsPublic cc st
       let p := cPub && (st.gpr.get dst).isPublic && (st.gpr.get src).isPublic
       some [(nextPc, { stNoLoop with gpr := st.gpr.set dst (if p then .pubVal else .secretVal) })]
+  | .testRegReg _is64 r1 r2 =>
+    let p := (st.gpr.get r1).isPublic && (st.gpr.get r2).isPublic
+    some [(nextPc, { stNoLoop with cfPub := true, ofPub := true, zfPub := p })]
+  | .cmpRegReg _is64 dst src =>
+    let p := (st.gpr.get dst).isPublic && (st.gpr.get src).isPublic
+    some [(nextPc, { stNoLoop with cfPub := p, ofPub := p, zfPub := p })]
+  | .cmpImm _is64 dst _imm =>
+    let p := (st.gpr.get dst).isPublic
+    some [(nextPc, { stNoLoop with cfPub := p, ofPub := p, zfPub := p })]
+  | .lea _is64 dst addr =>
+    let p := x86AddrIsPublic st addr
+    some [(nextPc, { stNoLoop with gpr := st.gpr.set dst (if p then .pubVal else .secretVal) })]
+  | .storeImm8 addr _imm =>
+    if !x86AddrIsPublic st addr then none
+    else
+      let rbpOk := if st.rbpSaved then storePreservesSavedRbp c st addr 1 else false
+      some [(nextPc, { stNoLoop with memUnmodified := false, rbpSaved := rbpOk })]
+  | .notReg _is64 dst =>
+    let p := (st.gpr.get dst).isPublic
+    some [(nextPc, { stNoLoop with gpr := st.gpr.set dst (if p then .pubVal else .secretVal) })]
+  | .setcc cc dst =>
+    if !x86CondSupported cc then none
+    else
+      let p := x86CondIsPublic cc st && (st.gpr.get dst).isPublic
+      some [(nextPc, { stNoLoop with gpr := st.gpr.set dst (if p then .pubVal else .secretVal) })]
+  | .bswap _is64 dst =>
+    let p := (st.gpr.get dst).isPublic
+    some [(nextPc, { stNoLoop with gpr := st.gpr.set dst (if p then .pubVal else .secretVal) })]
+  | .sseMovdquLoad dst addr =>
+    if !x86AddrIsPublic st addr then none
+    else
+      some [(nextPc, { stNoLoop with ymm := st.ymm.set dst .secretVal })]
+  | .ssePcmpeqb dst _src =>
+    some [(nextPc, { stNoLoop with ymm := st.ymm.set dst .secretVal })]
+  | .ssePand dst _src =>
+    some [(nextPc, { stNoLoop with ymm := st.ymm.set dst .secretVal })]
+  | .ssePmovmskb dst src =>
+    let p := (st.ymm.get src).isPublic
+    some [(nextPc, { stNoLoop with gpr := st.gpr.set dst (if p then .pubVal else .secretVal) })]
   | .mulx hiDst loDst src =>
     let p := (st.gpr.get 2).isPublic && (st.gpr.get src).isPublic
     let o : RegOrigin := if p then .pubVal else .secretVal
@@ -2092,11 +2341,12 @@ def buildProgMap {Instr : Type} : List (DecodedInstr Instr) → PcMap (DecodedIn
   | [] => PcMap.empty
   | d :: ds => (buildProgMap ds).set d.offset d
 
-def inferX86Invariant (prog : List (DecodedInstr X86Instr)) (c : FuncContract) : Option (PcMap X86AbsState) :=
+def inferX86Invariant (prog : List (DecodedInstr X86Instr)) (c : FuncContract) : Option (PcMap X86AbsState) := do
   let inv0 := PcMap.empty.set 0 (initX86AbsState c)
-  match propagateX86Pass c prog inv0 with
-  | none => none
-  | some inv1 => propagateX86Pass c prog inv1
+  let inv1 ← propagateX86Pass c prog inv0
+  let inv2 ← propagateX86Pass c prog inv1
+  let inv3 ← propagateX86Pass c prog inv2
+  propagateX86Pass c prog inv3
 
 def verifyX86Invariant (prog : List (DecodedInstr X86Instr)) (c : FuncContract) (inv : PcMap X86AbsState) : Bool :=
   let progMap := buildProgMap prog
