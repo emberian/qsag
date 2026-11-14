@@ -14,22 +14,28 @@ DKG, resharing, and Simplex quorum safety live in `Qsag.MaliciousSecurity`):
    (`lagrangeCombine_mpcPow7Shares_eq_sbox7`, `evalSharedPow7Binomial_complete`,
    `evalSharedPoseidon2Perm_simulates`, `mkShamirPoseidon2MpcOracles_matchesKey`,
    `shamir_poseidon2_thresholdSign_eq_evalSingleSign`)**.
-4. Checked stateless threshold path equal to `evalStatelessCheckedSign`
-   (`thresholdStatelessCheckedSign_eq_evalStatelessCheckedSign`).
+4. Checked stateless & production Rust-exact threshold paths (`HashSigs` Section 6 weld:
+   `thresholdStatelessCheckedSign_eq_evalStatelessCheckedSign`,
+   `thresholdProductionStatelessSign_eq_evalProductionStatelessSign`,
+   `thresholdProductionStatefulSign_eq_evalProductionStatefulSign`,
+   `shamir_poseidon2_active_online_statelessSign_eq_evalProductionStatelessSign`) covering
+   `H_INTERNAL` vs `H_MSG`, XOF-derived FORS indices, `(j, u)` FORS ADRS, `kp0` FORS Merkle
+   `keyPair`, and `Option`-propagating active SPDZ `MacCheck` abort in online Shamir signing
+   (`execActiveSharedPow7Round_sound_or_pins_key`).
 5. Threshold FIPS 205 output equal to the single-signer output for every correct run
    (`threshold_sig_deterministic_and_matches_single_signer`; a functional-correctness and
    determinism statement about runs that carry a proof of oracle correctness, with no adversary
    and no probability space): share-level `Keccak`/`SHAKE256`
    for 2-of-3 RSS (`SlhThresholdRun.ofRss`), and quorum-recombination `SlhMpcOracles` interface for
    `(t, n)` Shamir FIPS 205 (`SlhThresholdRun.ofShamir`, while `(t, n)` Shamir share-level `Poseidon2`
-   signing is realized end-to-end by `mkShamirPoseidon2MpcOracles` in Section 3).
+   signing is realized end-to-end by `mkShamirPoseidon2MpcOracles` and
+   `mkActiveShamirProductionPoseidon2MpcOracles`).
 6. One actively corrupt party in a hedged signing run
    (`active_malicious_threshold_sig_abort_or_exact_hedged_dist`): every run aborts, releases the
    exact single-signer signature on hedge `honestCoin ⊕ corruptCoin`, or is a counted tag forgery;
    the released law is the single-signer hedged law restricted to the corrupt party's release
-   set, and the abort pattern is independent of the key. The tag scheme is a parameter; the
-   independence of the corrupt coin share and of the share modification from later values is
-   built into the adversary type, not derived from a commitment.
+   set, and the abort pattern is independent of the key. Welded to interactive protocol transcripts
+   in `Qsag.RssSlhFullSecurity`.
 -/
 
 public import Qsag.Goldilocks
@@ -45,6 +51,7 @@ public import Qsag.Constructive
 import all Qsag.Goldilocks
 import all Qsag.Poseidon2
 import all Qsag.UcGames
+import all Qsag.HashSigs
 import all Qsag.Preprocessing
 
 public section
@@ -1932,6 +1939,119 @@ theorem evalSharedPow7Binomial_forged_pins_key
       fun hEq => hTamper (GoldilocksExt2.ofBase_injective hEq)
     exact verifySpdzZeroSumMac_forged_pins_key alpha _ _ deltaSigma sigmas hNeK hSum hVer
 
+/-- **Share-Grounded Active `Π_pow7` Round Execution (`execActiveSharedPow7Round`)**:
+    Computes the masked opening `dOpened = ⟨λ, x - r⟩ + deltaD` and the committee's SPDZ
+    `GoldilocksExt2` `MacCheck` broadcast `spdzComputeSigmas(dOpened, macX - macR, α, z) + sigmaDevs`
+    directly from the authenticated party shares `(xSh, tup, macX, macR, alphaShares, zeroMasks)`
+    under active opening shift `deltaD` and active MAC broadcast shifts `sigmaDevs`, then runs
+    `evalSharedPow7Binomial` (aborting with `none` on any MAC mismatch). -/
+def execActiveSharedPow7Round
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2) : Option (List Goldilocks) :=
+  let dTrue := lagrangeCombine lambdas (shareZipSub xSh tup.rSh)
+  let dOpened := Goldilocks.add dTrue deltaD
+  let macD := shareZipSub macX macR
+  let honestSigmas := spdzComputeSigmas (GoldilocksExt2.ofBase dOpened) macD alphaShares zeroMasks
+  let sigmas := ringListZipAdd honestSigmas sigmaDevs
+  evalSharedPow7Binomial dOpened tup sigmas
+
+/-- **Share-Grounded Active `Π_pow7` Soundness Without External `hSum`
+    (`execActiveSharedPow7Round_sound_or_pins_key`)**:
+    Derives the SPDZ residual identity directly from the authenticated shares `(macX, macR, zeroMasks)`
+    with **zero** assumed `hSum` premise: whenever `execActiveSharedPow7Round` accepts (`= some ySh`),
+    either `deltaD = 0` and `ySh` recombines to the exact `sbox7 (lagrangeCombine lambdas xSh)`, or
+    `deltaD ≠ 0` and the global MAC key `∑ α_i ∈ GoldilocksExt2` is uniquely pinned to
+    `(∑ sigmaDevs) · (ofBase deltaD)⁻¹` (`≤ 1` key out of `goldilocksPrime ^ 2 > 2 ^ 127`). -/
+theorem execActiveSharedPow7Round_sound_or_pins_key
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (ySh : List Goldilocks)
+    (hSumOne : ringListSum lambdas = Goldilocks.one)
+    (hXLen : xSh.length = lambdas.length)
+    (hTup : tup.validAt lambdas)
+    (hMacXLen : macX.length = alphaShares.length)
+    (hMacRLen : macR.length = alphaShares.length)
+    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (hMacXSum : ringListSum macX =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh)))
+    (hMacRSum : ringListSum macR =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+    (hZeroMask : ringListSum zeroMasks = CommRingOps.zero)
+    (hAccept : execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs = some ySh) :
+    (deltaD = Goldilocks.zero ∧ ySh.length = lambdas.length ∧
+      lagrangeCombine lambdas ySh = sbox7 (lagrangeCombine lambdas xSh)) ∨
+    (deltaD ≠ Goldilocks.zero ∧
+      ringListSum alphaShares =
+        CommRingOps.mul (ringListSum sigmaDevs) (GoldilocksExt2.inv (GoldilocksExt2.ofBase deltaD))) := by
+  let dTrue := lagrangeCombine lambdas (shareZipSub xSh tup.rSh)
+  let dOpened := Goldilocks.add dTrue deltaD
+  have hdTrueEq : dTrue = Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh) := by
+    dsimp only [dTrue]; unfold lagrangeCombine
+    exact ringDot_zipSub (hXLen.trans hTup.1.symm)
+  by_cases hZeroD : deltaD = Goldilocks.zero
+  · left
+    have hdOpenEq : dOpened = dTrue := by
+      dsimp only [dOpened]; rw [hZeroD]; exact LawfulCommRing.add_zero dTrue
+    unfold execActiveSharedPow7Round evalSharedPow7Binomial at hAccept
+    dsimp only at hAccept
+    cases hVer : verifySpdzZeroSumMac (ringListZipAdd
+        (spdzComputeSigmas (GoldilocksExt2.ofBase dOpened) (shareZipSub macX macR) alphaShares zeroMasks) sigmaDevs) with
+    | false =>
+      change (if verifySpdzZeroSumMac _ then _ else none) = some ySh at hAccept
+      rw [hVer] at hAccept; cases hAccept
+    | true =>
+      change (if verifySpdzZeroSumMac _ then some (mpcPow7Shares dOpened tup) else none) = some ySh at hAccept
+      rw [hVer] at hAccept
+      simp only [↓reduceIte, Option.some.injEq] at hAccept
+      subst hAccept
+      rw [hdOpenEq]
+      obtain ⟨hYLen, hYComb⟩ := lagrangeCombine_mpcPow7Shares_eq_sbox7 lambdas xSh tup hSumOne hXLen hTup
+      exact ⟨hZeroD, hYLen, hYComb⟩
+  · right
+    have hTamper : dOpened ≠ Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh) := by
+      rw [← hdTrueEq]
+      intro hEq
+      have hEq' : CommRingOps.add dTrue deltaD = CommRingOps.add dTrue Goldilocks.zero := by
+        rw [LawfulCommRing.add_zero]; exact hEq
+      exact hZeroD (LawfulCommRing.add_left_cancel hEq')
+    have hMacDLen : (shareZipSub macX macR).length = alphaShares.length := by
+      rw [shareZipSub_length_of_eq (hMacXLen.trans hMacRLen.symm), hMacXLen]
+    have hMacDSum : ringListSum (shareZipSub macX macR) =
+        CommRingOps.mul (ringListSum alphaShares)
+          (GoldilocksExt2.ofBase (Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh))) := by
+      rw [ringListSum_zipSub (hMacXLen.trans hMacRLen.symm), hMacXSum, hMacRSum,
+          ← LawfulCommRing.mul_sub, ← GoldilocksExt2.ofBase_sub]
+    have hSubAddComm : ∀ (A B C : GoldilocksExt2),
+        CommRingOps.add (CommRingOps.sub A B) C = CommRingOps.sub (CommRingOps.add A C) B := fun A B C => by
+      rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.sub_eq_add_neg,
+          LawfulCommRing.add_assoc, LawfulCommRing.add_comm (CommRingOps.neg B) C, ← LawfulCommRing.add_assoc]
+    have hSumDerived :
+        ringListSum (ringListZipAdd
+          (spdzComputeSigmas (GoldilocksExt2.ofBase dOpened) (shareZipSub macX macR) alphaShares zeroMasks)
+          sigmaDevs) =
+        CommRingOps.sub
+          (CommRingOps.add
+            (CommRingOps.mul (ringListSum alphaShares)
+              (GoldilocksExt2.ofBase (Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh))))
+            (ringListSum sigmaDevs))
+          (CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase dOpened)) := by
+      rw [ringListSum_zipAdd, ringListSum_spdzComputeSigmas _ hMacDLen hMaskLen,
+          hZeroMask, LawfulCommRing.add_zero, hMacDSum, hSubAddComm]
+    have hPin := evalSharedPow7Binomial_forged_pins_key lambdas xSh tup dOpened
+      (ringListSum alphaShares) (ringListSum sigmaDevs) _ ySh hTamper hSumDerived hAccept
+    have hDiffEq :
+        CommRingOps.sub (GoldilocksExt2.ofBase dOpened)
+          (GoldilocksExt2.ofBase (Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh))) =
+        GoldilocksExt2.ofBase deltaD := by
+      rw [← hdTrueEq, ← GoldilocksExt2.ofBase_sub]
+      congr 1
+      change CommRingOps.sub (CommRingOps.add dTrue deltaD) dTrue = deltaD
+      rw [LawfulCommRing.add_comm dTrue deltaD, LawfulCommRing.add_sub_cancel_right]
+    rw [hDiffEq] at hPin
+    exact ⟨hZeroD, hPin⟩
+
 def demoPow7TupleFor4 : SharedPow7Tuple :=
   -- Genuine non-constant degree-1 2-of-3 Shamir shares at x = [1, 2, 3] for r = 4:
   -- r^1 = 4, r^2 = 16, r^3 = 64, r^4 = 256, r^5 = 1024, r^6 = 4096, r^7 = 16384
@@ -1974,6 +2094,29 @@ theorem tooth_evalSharedPow7Binomial_rejects_mac_tamper :
     evalSharedPow7Binomial dBad demoPow7TupleFor4 sigmasOnBad = none ∧
     evalSharedPow7Binomial (Goldilocks.ofNat 5) demoPow7TupleFor4 corruptedSigmas = none := by
   refine ⟨by decide +kernel, by decide +kernel⟩
+
+/-- **`#tooth` Share-Grounded Active `Π_pow7` Rejects Unpinned Tampering
+    (`tooth_execActiveSharedPow7Round_rejects_unpinned_tamper`)**:
+    On authenticated 2-of-3 shares of `x = 9` and `r = 4`, honest execution (`deltaD = 0`, `sigmaDevs = 0`)
+    succeeds and recombines to `sbox7 9`, whereas shifting the opened scalar by `deltaD = 1` without
+    knowing `∑ α_i` aborts (`= none`), and shifting a MAC share by `1` while keeping `deltaD = 0`
+    also aborts (`= none`). -/
+theorem tooth_execActiveSharedPow7Round_rejects_unpinned_tamper :
+    let xSh := [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15]
+    let zeroDevs : List GoldilocksExt2 := [CommRingOps.zero, CommRingOps.zero, CommRingOps.zero]
+    let oneDevs  : List GoldilocksExt2 := [CommRingOps.one, CommRingOps.zero, CommRingOps.zero]
+    (match execActiveSharedPow7Round demoLambdas2of3 xSh demoPow7TupleFor4
+        (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
+        Goldilocks.zero zeroDevs with
+     | some ySh => lagrangeCombine demoLambdas2of3 ySh == sbox7 (Goldilocks.ofNat 9)
+     | none => false) = true ∧
+    execActiveSharedPow7Round demoLambdas2of3 xSh demoPow7TupleFor4
+      (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
+      Goldilocks.one zeroDevs = none ∧
+    execActiveSharedPow7Round demoLambdas2of3 xSh demoPow7TupleFor4
+      (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
+      Goldilocks.zero oneDevs = none := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
 
 /-! ### Share-Level `(t, n)` Shamir `Poseidon2` Permutation & Sponge Oracles (`mkShamirPoseidon2MpcOracles`) -/
 

@@ -58,6 +58,8 @@ public import Qsag.Aggregation
 import all Qsag.Aggregation
 import Lean
 
+import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -4315,6 +4317,10 @@ theorem tooth_concrete_unscoped_shard_replay :
     (concreteHemShard false) 2 (by decide) (concreteHemShard_accepts false)
   exact ⟨h.1, rfl, rfl, h.2.2.2.1, h.2.2.2.2⟩
 
+/-- Nonvacuity of the deployed-width interpolation-margin premise. -/
+theorem witness_poseidon2_margin : ∃ t rF rP, Poseidon2InterpolationMargin t rF rP :=
+  ⟨12, 8, 22, poseidon2_interpolation_margin_width12⟩
+
 end Qsag
 
 /- Audit every declaration owned by this module, including private certificate helpers, and
@@ -4335,3 +4341,6 @@ run_cmd do
         throwError "Rejected axioms in {name}: {rejected}"
       checked := checked + 1
   if checked == 0 then throwError "Empty module axiom audit"
+
+#tooth_pair Qsag.poseidon2_interpolation_margin_needs_26 vs Qsag.tooth_poseidon2_margin_fails_at_rp17
+#verify_inhabited Qsag.poseidon2_interpolation_margin_needs_26 Qsag.witness_poseidon2_margin

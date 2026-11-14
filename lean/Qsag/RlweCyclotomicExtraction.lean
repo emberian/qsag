@@ -4236,16 +4236,14 @@ theorem tooth_short_extractor_refuses_identical_challenges {nu q : Nat} [NeZero 
     (tr tr' : RlweOrSigmaTranscript 13 nu q)
     (w : ShortMonomialRelaxedRlweWitness 13 nu q stmt) :
     tryExtractShortMonomialOr13Witness stmt c c tr tr' ≠ PSum.inl w := by
-  have hcEq : cycAllFin 13 (fun i => decide (c i = c i)) = true := by
-    rw [cycAllFin_eq_true_iff]; intro i; exact decide_eq_true rfl
+  have hcEq : cycAllFin 13 (fun _ => true) = true := by decide
   unfold tryExtractShortMonomialOr13Witness
+  simp only [decide_true, hcEq, ↓reduceDIte]
   split
   · split
     · split
       · split
-        · split
-          · intro h; cases h
-          · rename_i hNot; exact False.elim (hNot hcEq)
+        · intro h; cases h
         · intro h; cases h
       · intro h; cases h
     · intro h; cases h
@@ -4258,8 +4256,8 @@ theorem witness_short_rlwe_key_relation_inhabited :
       ShortRlweKeyRelation stmt.A (stmt.branchU w.branch) 1 sTrue eTrue := by
   let stmt : RlweOrSigmaStatement 0 12289 :=
     { A := cycZqOne
-      u0 := ModZq.ofInt 12289 ∘ (fun _ => 2)
-      u1 := ModZq.ofInt 12289 ∘ (fun _ => 2)
+      u0 := fun _ => ModZq.ofInt 12289 2
+      u1 := fun _ => ModZq.ofInt 12289 2
       Bz := 3070 }
   let c0 : SignedMonomialChal 0 := ⟨false, ⟨0, by decide⟩⟩
   let c1 : SignedMonomialChal 0 := ⟨true, ⟨0, by decide⟩⟩
@@ -4267,12 +4265,18 @@ theorem witness_short_rlwe_key_relation_inhabited :
   let dze : CycPolyInt 0 := fun _ => 2
   have hDiff : cycZqAdd (cycZqMul stmt.A (cycIntToZq 12289 dzs)) (cycIntToZq 12289 dze) =
       cycZqMul (cycIntToZq 12289 (cycIntSub c0.toIntPoly c1.toIntPoly)) (stmt.branchU false) := by
-    funext k; fin_cases k; decide +kernel
+    funext ⟨k, hk⟩
+    match k with
+    | 0 => apply ModZq.ext; rfl
+    | _ + 1 => omega
   let w : ShortMonomialRelaxedRlweWitness 1 0 12289 stmt :=
     ShortMonomialRelaxedRlweWitness.ofForkDifference stmt ⟨0, by decide⟩ false c0 c1
-      (by decide) dzs dze (by decide +kernel) (by decide +kernel) hDiff
-  refine ⟨stmt, w, (fun _ => 1), (fun _ => 1), by decide +kernel, by decide +kernel, ?_⟩
-  funext k; fin_cases k; decide +kernel
+      (by decide) dzs dze (by decide) (by decide) hDiff
+  refine ⟨stmt, w, (fun _ => 1), (fun _ => 1), by decide, by decide, ?_⟩
+  funext ⟨k, hk⟩
+  match k with
+  | 0 => apply ModZq.ext; rfl
+  | _ + 1 => omega
 
 theorem witness_valid_rlwe_or_sigma_fork_inhabited :
     ∃ (stmt : RlweOrSigmaStatement 10 12289)

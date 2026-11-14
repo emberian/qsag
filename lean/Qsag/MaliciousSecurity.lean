@@ -2703,7 +2703,7 @@ private theorem stepTwoPhaseJortsNode_preserves_wellFormed {PartyId ShareVal : T
   obtain ⟨hStage, hBound, hNoEq⟩ := hWf
   cases ev with
   | powerLossCrashAndReboot =>
-    refine ⟨fun _ _ h => by cases h, hBound, hNoEq⟩
+    refine ⟨fun _ _ h => (by cases h), hBound, hNoEq⟩
   | reserveWal slot msg =>
     unfold stepTwoPhaseJortsNode
     cases hHw : st.durableHighWater with
@@ -2727,12 +2727,13 @@ private theorem stepTwoPhaseJortsNode_preserves_wellFormed {PartyId ShareVal : T
         · intro sl m hSome
           injection hSome with hPair
           injection hPair with h1 h2
-          rw [hHw, ← h1, ← h2, hSlEq, hMsgEq]
+          dsimp only
+          rw [← h1, ← h2, hSlEq, hMsgEq]
         · intro v hv
           obtain ⟨hV, hSh, hTag, hwS', hwM', hSome, hOrd⟩ := hBound v hv
           rw [hHw] at hSome; injection hSome with hPair; injection hPair with e1 e2
           subst e1; subst e2
-          exact ⟨hV, hSh, hTag, hwSlot, hwMsg, hHw, hOrd⟩
+          exact ⟨hV, hSh, hTag, hwSlot, hwMsg, rfl, hOrd⟩
       | false =>
         simp only [Bool.false_eq_true, ↓reduceIte]
         generalize hAdv : decide (hwSlot < slot) = advB
@@ -2748,12 +2749,12 @@ private theorem stepTwoPhaseJortsNode_preserves_wellFormed {PartyId ShareVal : T
           rcases hOrd with h1 | ⟨h1, _⟩ <;> omega
         | false =>
           simp only [Bool.false_eq_true, ↓reduceIte]
-          refine ⟨fun _ _ h => by cases h, ?_, hNoEq⟩
+          refine ⟨fun _ _ h => (by cases h), ?_, hNoEq⟩
           intro v hv
           obtain ⟨hV, hSh, hTag, hwS', hwM', hSome, hOrd⟩ := hBound v hv
           rw [hHw] at hSome; injection hSome with hPair; injection hPair with e1 e2
           subst e1; subst e2
-          exact ⟨hV, hSh, hTag, hwSlot, hwMsg, hHw, hOrd⟩
+          exact ⟨hV, hSh, hTag, hwSlot, hwMsg, rfl, hOrd⟩
   | emitPartial =>
     unfold stepTwoPhaseJortsNode
     cases hStg : st.stagedSlotMsg with
@@ -2769,12 +2770,12 @@ private theorem stepTwoPhaseJortsNode_preserves_wellFormed {PartyId ShareVal : T
         cases agreeB with
         | false =>
           simp only [Bool.false_eq_true, ↓reduceIte]
-          refine ⟨fun _ _ h => by cases h, ?_, hNoEq⟩
+          refine ⟨fun _ _ h => (by cases h), ?_, hNoEq⟩
           intro v hv
           obtain ⟨hV, hSh, hTag, hwS', hwM', hSome, hOrd⟩ := hBound v hv
           rw [hHw] at hSome; injection hSome with hPair; injection hPair with e1 e2
           subst e1; subst e2
-          exact ⟨hV, hSh, hTag, hwSlot, hwMsg, hHw, hOrd⟩
+          exact ⟨hV, hSh, hTag, hwSlot, hwMsg, rfl, hOrd⟩
         | true =>
           simp only [↓reduceIte]
           rcases Bool.and_eq_true_iff.mp hAgree with ⟨hSlB, hMsgB⟩
@@ -2794,20 +2795,21 @@ private theorem stepTwoPhaseJortsNode_preserves_wellFormed {PartyId ShareVal : T
             dsimp only at huV huS huM huSh huTag
             subst huV huS huM huSh huTag
             rfl
-          refine ⟨fun _ _ h => by cases h, ?_, ?_⟩
+          refine ⟨fun _ _ h => (by cases h), ?_, ?_⟩
           · intro v hv
             rcases List.mem_cons.mp hv with rfl | hOld
-            · exact ⟨rfl, rfl, rfl, hwSlot, hwMsg, hHw, Or.inr ⟨hSlEq, hMsgEq⟩⟩
+            · exact ⟨rfl, rfl, rfl, hwSlot, hwMsg, rfl, Or.inr ⟨hSlEq, hMsgEq⟩⟩
             · obtain ⟨hV, hSh, hTag, hwS', hwM', hSome, hOrd⟩ := hBound v hOld
               rw [hHw] at hSome; injection hSome with hPair; injection hPair with e1 e2
               subst e1; subst e2
-              exact ⟨hV, hSh, hTag, hwSlot, hwMsg, hHw, hOrd⟩
+              exact ⟨hV, hSh, hTag, hwSlot, hwMsg, rfl, hOrd⟩
           · intro v₁ hv1 v₂ hv2 hSameSlot
             rcases List.mem_cons.mp hv1 with rfl | hOld1
             · rcases List.mem_cons.mp hv2 with rfl | hOld2
               · exact ⟨rfl, rfl⟩
               · obtain ⟨hV2, hSh2, hTag2, hwS', hwM', hSome, hOrd⟩ := hBound v₂ hOld2
                 rw [hHw] at hSome; injection hSome with hPair; injection hPair with e1 e2
+                dsimp only [newVote] at hSameSlot
                 rcases hOrd with hLt | ⟨hEqS, hEqM⟩
                 · omega
                 · have hM2 : v₂.msg = msg := by rw [hEqM, ← e2, hMsgEq]
@@ -2817,6 +2819,7 @@ private theorem stepTwoPhaseJortsNode_preserves_wellFormed {PartyId ShareVal : T
             · rcases List.mem_cons.mp hv2 with rfl | hOld2
               · obtain ⟨hV1, hSh1, hTag1, hwS', hwM', hSome, hOrd⟩ := hBound v₁ hOld1
                 rw [hHw] at hSome; injection hSome with hPair; injection hPair with e1 e2
+                dsimp only [newVote] at hSameSlot
                 rcases hOrd with hLt | ⟨hEqS, hEqM⟩
                 · omega
                 · have hM1 : v₁.msg = msg := by rw [hEqM, ← e2, hMsgEq]
@@ -2851,8 +2854,11 @@ theorem twoPhaseJorts_trace_no_equivocation_across_crashes {PartyId ShareVal : T
       intro st hWf
       exact ih _ (stepTwoPhaseJortsNode_preserves_wellFormed me slotShareAt authMac st e hWf)
   have hInit : (initTwoPhaseJortsWalState : TwoPhaseJortsWalState PartyId ShareVal).WellFormed
-      me slotShareAt authMac :=
-    ⟨fun _ _ h => by cases h, fun _ h => by cases h, fun _ h => by cases h⟩
+      me slotShareAt authMac := by
+    refine ⟨?_, ?_, ?_⟩
+    · intro _ _ h; dsimp only [initTwoPhaseJortsWalState] at h; cases h
+    · intro _ h; dsimp only [initTwoPhaseJortsWalState] at h; cases h
+    · intro _ h; dsimp only [initTwoPhaseJortsWalState] at h; cases h
   obtain ⟨_, hB, hU⟩ := hPres evs initTwoPhaseJortsWalState hInit
   exact ⟨fun v hv => ⟨(hB v hv).1, (hB v hv).2.1, (hB v hv).2.2.1⟩, hU⟩
 
