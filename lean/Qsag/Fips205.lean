@@ -20,6 +20,7 @@ Self-contained Lean 4.35 specification and soundness proofs for all 6 NIST FIPS 
 -/
 
 public import Qsag.Keccak
+public import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -166,7 +167,7 @@ def slhDsaShake256s : Fips205Params :=
 
 /-- Compact structural test profile (`n = 16, d = 2, hp = 2, h = 4, a = 2, k = 4, m = 4`). -/
 def slhDsaShakeCompactTest : Fips205Params :=
-  { n := 16, h := 4, d := 2, hp := 2, a := 2, k := 4, m := 4 }
+  { n := 16, h := 4, d := 2, hp := 2, a := 2, k := 4, m := 3 }
 
 theorem slhDsaShake128f_sigBytes : slhDsaShake128f.sigBytes = 17088 := by decide
 theorem slhDsaShake128s_sigBytes : slhDsaShake128s.sigBytes = 7856 := by decide
@@ -1203,6 +1204,9 @@ def slhVerifyPure (p : Fips205Params) (msg : List UInt8) (sig : SlhSignature)
 /-- NIST FIPS 205 §9.3 / §10.2 approved Pre-Hash identifiers for `HashSLH-DSA`. -/
 inductive FipsPreHashAlg where
   | sha256       -- DER OID `2.16.840.1.101.3.4.2.1` (32B digest, Category 1 = 16B)
+  | sha3_256
+  | sha3_384
+  | sha3_512
   | sha512       -- DER OID `2.16.840.1.101.3.4.2.3` (64B digest, Category 5 = 32B)
   | shake128_256 -- DER OID `2.16.840.1.101.3.4.2.11` (32B XOF, Category 1 = 16B)
   | shake256_512 -- DER OID `2.16.840.1.101.3.4.2.12` (64B XOF, Category 5 = 32B)
@@ -1210,18 +1214,27 @@ inductive FipsPreHashAlg where
 
 def FipsPreHashAlg.oidBytes : FipsPreHashAlg → List UInt8
   | .sha256       => [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]
+  | .sha3_256     => [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x08]
+  | .sha3_384     => [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x09]
+  | .sha3_512     => [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0A]
   | .sha512       => [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03]
   | .shake128_256 => [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0B]
   | .shake256_512 => [0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x0C]
 
 def FipsPreHashAlg.digestBytes : FipsPreHashAlg → Nat
   | .sha256       => 32
+  | .sha3_256     => 32
+  | .sha3_384     => 48
+  | .sha3_512     => 64
   | .sha512       => 64
   | .shake128_256 => 32
   | .shake256_512 => 64
 
 def FipsPreHashAlg.securityBytes : FipsPreHashAlg → Nat
   | .sha256       => 16
+  | .sha3_256     => 16
+  | .sha3_384     => 24
+  | .sha3_512     => 32
   | .sha512       => 32
   | .shake128_256 => 16
   | .shake256_512 => 32
@@ -1891,6 +1904,29 @@ theorem thresholdSlhSign_eq_slhSignInternal (p : Fips205Params) (hWf : p.wellFor
   · dsimp only [slhKeygenInternal] at hSig ⊢
     rw [hSig]
     exact slhVerifyInternal_slhSignInternal p hWf skSeed skPrf pkSeed msgPrime optRand
+
+/-- Accepted prehash encodings enforce the advertised security category. -/
+theorem accepted_preHash_category (p : Fips205Params) (alg : FipsPreHashAlg)
+    (ctx digest encoded : List UInt8)
+    (h : encodePreHashMsgPrime p alg ctx digest = some encoded) :
+    preHashCompatible p alg = true := by
+  unfold encodePreHashMsgPrime at h
+  split at h
+  · cases h
+  · rename_i hn
+    cases hc : preHashCompatible p alg <;> simp_all
+
+theorem tooth_sha3_256_category5_rejected (ctx digest : List UInt8) :
+    encodePreHashMsgPrime slhDsaShake256f .sha3_256 ctx digest = none := by
+  simp [encodePreHashMsgPrime, preHashCompatible, slhDsaShake256f, FipsPreHashAlg.securityBytes]
+
+theorem witness_sha3_384_category3 :
+    ∃ p alg ctx digest encoded,
+      encodePreHashMsgPrime p alg ctx digest = some encoded := by
+  refine ⟨slhDsaShake192f, .sha3_384, [], List.replicate 48 0, _, rfl⟩
+
+#tooth_pair Qsag.accepted_preHash_category vs Qsag.tooth_sha3_256_category5_rejected
+#verify_inhabited Qsag.accepted_preHash_category Qsag.witness_sha3_384_category3
 
 end Qsag
 end

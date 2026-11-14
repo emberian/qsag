@@ -3919,6 +3919,44 @@ theorem tooth_short_model_is_not_production : ¬ ProductionParameterProfile comp
   rw [hf] at h
   cases h
 
+/-! Production checked boundaries. The legacy checked API above has equality and completeness
+contracts for a different signer; it cannot be silently redefined without migrating its users. -/
+
+def verifyProductionStatelessChecked (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig) : Bool :=
+  !params.statefulJorts && verifyProductionPqHashSig suite params pk msg sig
+
+theorem verifyProductionStatelessChecked_sound (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig)
+    (h : verifyProductionStatelessChecked suite params pk msg sig = true) :
+    params.statefulJorts = false ∧ verifyProductionPqHashSig suite params pk msg sig = true := by
+  cases hs : params.statefulJorts <;> simp_all [verifyProductionStatelessChecked]
+
+/-- V3 batch validation checks the production domain tags and layer digest rules. -/
+def ValidProductionJortsBatch (params : PqHashParams) (items : List JortsBatchItem) : Bool :=
+  decide (params.statefulJorts = true) &&
+  decide (items ≠ []) &&
+  decide (items.map (fun item => (item.validatorPk, item.signature.leafGlobalIdx))).Nodup &&
+  items.all (fun item => verifyProductionPqHashSig poseidon2Suite params
+    item.validatorPk item.message item.signature)
+
+theorem validProductionJortsBatch_sound {params : PqHashParams} {items : List JortsBatchItem}
+    (h : ValidProductionJortsBatch params items = true) :
+    params.statefulJorts = true ∧ items ≠ [] ∧
+    (items.map (fun item => (item.validatorPk, item.signature.leafGlobalIdx))).Nodup ∧
+    ∀ item ∈ items, verifyProductionPqHashSig poseidon2Suite params
+      item.validatorPk item.message item.signature = true := by
+  simp only [ValidProductionJortsBatch, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at h
+  exact ⟨h.1.1.1, h.1.1.2, h.1.2, h.2⟩
+
+theorem tooth_production_stateless_rejects_stateful (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig)
+    (h : params.statefulJorts = true) :
+    verifyProductionStatelessChecked suite params pk msg sig = false := by
+  simp [verifyProductionStatelessChecked, h]
+
+#tooth_pair Qsag.verifyProductionStatelessChecked_sound vs Qsag.tooth_production_stateless_rejects_stateful
+
 end Qsag
 end
 

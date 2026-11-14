@@ -1,5 +1,10 @@
 module
 /-
+Compatibility scope: the extraction and EUF-CMA reductions in this module still use
+`verifyPqHashSig`. Production domain tags, FORS indices, and layer-digest selection are
+specified by `verifyProductionPqHashSig`; no equivalence between these verifiers is claimed.
+Migrating the reduction requires new production walk/extraction proofs.
+
 # Qsag.HypertreeEufCma — Checked Stateful `Jorts` `EpochLatch` & Multi-Layer Hypertree + FORS EUF-CMA Reduction
 
 Formalization of checked stateful and stateless hypertree signing and constructive EUF-CMA witness extraction
