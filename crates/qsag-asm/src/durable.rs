@@ -23,6 +23,7 @@ pub struct LockedRecord {
     _lock: File,
     fresh: bool,
     seal: [u8; 8],
+    inode: [u8; 16],
     poisoned: AtomicBool,
     operations: Mutex<()>,
 }
@@ -82,6 +83,23 @@ fn identity(meta: &fs::Metadata) -> [u8; 16] {
     id
 }
 
+// Compare fstat(fd) with lstat(path), never just two pathname observations.
+fn verify_path(file: &File, path: &Path) -> io::Result<fs::Metadata> {
+    let held = file.metadata()?;
+    let named = regular_metadata(path)?.ok_or_else(invalid)?;
+    if !held.is_file() || identity(&held) != identity(&named) {
+        return Err(invalid());
+    }
+    Ok(held)
+}
+
+// Failed reads must wipe partially loaded payloads. Allocate once at the observed
+// file length so Vec growth cannot abandon an unwiped secret allocation.
+struct ReadBuffer(std::vec::Vec<u8>);
+impl Drop for ReadBuffer {
+    fn drop(&mut self) { crate::ct_memzero(&mut self.0); }
+}
+
 fn sync_parent(path: &Path) -> io::Result<()> {
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     File::open(parent)?.sync_all()
@@ -114,6 +132,9 @@ impl LockedRecord {
             }
         }
         let present = regular_metadata(&path)?.is_some();
+        if sidecar == Sidecar::MustExist && !present {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "provisioned record is missing"));
+        }
         let name = side_path(&path, ".lock");
         regular_metadata(&name)?;
         let open_present = || options()?.read(true).write(true).open(&name);
@@ -137,7 +158,7 @@ impl LockedRecord {
             if unsafe { flock(lock.as_raw_fd(), 2 | 4) } != 0 { return Err(io::Error::last_os_error()); }
         }
         let mut header = [0u8; 32];
-        let id = identity(&lock.metadata()?);
+        let id = identity(&verify_path(&lock, &name)?);
         if fresh {
             header[..8].copy_from_slice(LOCK_MAGIC);
             File::open("/dev/urandom")?.read_exact(&mut header[8..16])?;
@@ -159,7 +180,7 @@ impl LockedRecord {
         }
         let record = Self {
             path, _lock: lock, fresh, seal: header[8..16].try_into().expect("eight-byte seal"),
-            poisoned: AtomicBool::new(false), operations: Mutex::new(()),
+            inode: id, poisoned: AtomicBool::new(false), operations: Mutex::new(()),
         };
         record.check_lock()?;
         Ok(record)
@@ -168,23 +189,57 @@ impl LockedRecord {
     /// False after the first creation, even if the record itself was deleted.
     pub fn is_fresh(&self) -> bool { self.fresh }
 
-    /// Persistent creation seal, suitable for binding a higher-level WAL to this sidecar.
+    /// Legacy creation nonce. Retained byte-for-byte for existing WAL formats.
+    /// This alone does not bind device/inode identity; new authenticated formats
+    /// must use [`Self::lock_identity_seal`] instead.
     pub fn lock_seal(&self) -> [u8; 8] { self.seal }
+
+    /// Canonical `dev_le64 || ino_le64 || nonce8` identity for a caller's MAC/KDF.
+    ///
+    /// This is public associated data, NOT a MAC. Authenticate all 24 bytes with
+    /// the record's version, domain and payload, then verify on recovery before
+    /// releasing authority. A copied sidecar with a rewritten inode retains the
+    /// legacy nonce but cannot retain this identity. This does not prevent disk
+    /// rollback or inode reuse; independent monotonic custody is still required.
+    pub fn lock_identity_seal(&self) -> [u8; 24] {
+        let mut seal = [0; 24];
+        seal[..16].copy_from_slice(&self.inode);
+        seal[16..].copy_from_slice(&self.seal);
+        seal
+    }
+
+    /// Verify a previously authenticated identity and the currently held lock.
+    /// An identity mismatch permanently invalidates this handle. The expected
+    /// value must come from authenticated custody, not an unauthenticated header.
+    pub fn verify_lock_identity(&self, expected: &[u8; 24]) -> io::Result<()> {
+        let _operation = self.operations.lock().map_err(|_| io::Error::other("record mutex poisoned"))?;
+        let result = self.check_lock().and_then(|()| {
+            if crate::ct_eq_bytes(&self.lock_identity_seal(), expected) { Ok(()) }
+            else { Err(invalid()) }
+        });
+        if result.is_err() { self.poisoned.store(true, Ordering::SeqCst); }
+        result
+    }
 
     fn check_lock(&self) -> io::Result<()> {
         if self.poisoned.load(Ordering::SeqCst) {
             return Err(io::Error::other("durable record handle is poisoned"));
         }
-        let meta = regular_metadata(&side_path(&self.path, ".lock"))?.ok_or_else(invalid)?;
-        if identity(&meta) != identity(&self._lock.metadata()?) { return Err(invalid()); }
-        // Revalidate the persistent seal as well as inode identity on every operation.
-        // A same-inode header overwrite must not silently change the lock's identity.
+        let name = side_path(&self.path, ".lock");
+        if identity(&verify_path(&self._lock, &name)?) != self.inode { return Err(invalid()); }
+        // Read from the locked descriptor itself: reopening the pathname can
+        // select a different inode between lstat and open. Positional I/O also
+        // leaves the descriptor offset unchanged across successive operations.
         let mut header = [0u8; 32];
-        let mut lock = options()?.read(true).open(side_path(&self.path, ".lock"))?;
-        lock.read_exact(&mut header)?;
-        if lock.metadata()?.len() != 32 || &header[..8] != LOCK_MAGIC
-            || header[8..16] != self.lock_seal()
-            || header[16..] != identity(&self._lock.metadata()?) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt;
+            self._lock.read_exact_at(&mut header, 0)?;
+        }
+        #[cfg(not(unix))]
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "positional lock reads unavailable"));
+        if verify_path(&self._lock, &name)?.len() != 32 || &header[..8] != LOCK_MAGIC
+            || header[8..16] != self.seal || header[16..] != self.inode {
             return Err(invalid());
         }
         Ok(())
@@ -192,17 +247,26 @@ impl LockedRecord {
 
     pub fn read(&self) -> io::Result<std::vec::Vec<u8>> {
         let _operation = self.operations.lock().map_err(|_| io::Error::other("record mutex poisoned"))?;
-        self.check_lock()?;
-        regular_metadata(&self.path)?;
-        let mut file = options()?.read(true).open(&self.path)?;
-        if !file.metadata()?.is_file() { return Err(invalid()); }
-        let mut bytes = std::vec::Vec::new();
-        file.read_to_end(&mut bytes)?;
-        if bytes.len() < 16 || &bytes[..8] != RECORD_MAGIC || bytes[8..16] != self.lock_seal() {
-            return Err(invalid());
-        }
-        bytes.drain(..16);
-        Ok(bytes)
+        let result = (|| {
+            self.check_lock()?;
+            regular_metadata(&self.path)?;
+            let mut file = options()?.read(true).open(&self.path)?;
+            let meta = verify_path(&file, &self.path)?;
+            let len = usize::try_from(meta.len().checked_sub(16).ok_or_else(invalid)?)
+                .map_err(|_| invalid())?;
+            let mut header = [0u8; 16];
+            file.read_exact(&mut header)?;
+            if &header[..8] != RECORD_MAGIC || header[8..] != self.seal { return Err(invalid()); }
+            let mut bytes = ReadBuffer(std::vec::Vec::new());
+            bytes.0.try_reserve_exact(len).map_err(io::Error::other)?;
+            bytes.0.resize(len, 0);
+            file.read_exact(&mut bytes.0)?;
+            if verify_path(&file, &self.path)?.len() != meta.len() { return Err(invalid()); }
+            self.check_lock()?;
+            Ok(core::mem::take(&mut bytes.0))
+        })();
+        if result.is_err() { self.poisoned.store(true, Ordering::SeqCst); }
+        result
     }
 
     /// Atomically replace and sync the record. Any failure permanently poisons this handle;
@@ -219,10 +283,13 @@ impl LockedRecord {
             file.write_all(&self.lock_seal())?;
             file.write_all(bytes)?;
             file.sync_all()?;
+            verify_path(&file, &name)?;
             self.check_lock()?;
             regular_metadata(&self.path)?;
             fs::rename(&name, &self.path)?;
-            sync_parent(&self.path)
+            verify_path(&file, &self.path)?;
+            sync_parent(&self.path)?;
+            self.check_lock()
         })();
         if result.is_err() { self.poisoned.store(true, Ordering::SeqCst); }
         result
@@ -247,6 +314,78 @@ mod tests {
     }
     impl Drop for Temp {
         fn drop(&mut self) { fs::remove_dir_all(&self.0).unwrap(); }
+    }
+
+    #[test]
+    fn recovery_probes_do_not_provision_sidecars() {
+        let temp = Temp::new();
+        let path = temp.record();
+        for _ in 0..2 {
+            assert_eq!(LockedRecord::open_existing(&path).err().unwrap().kind(), io::ErrorKind::NotFound);
+            assert!(!side_path(&path, ".lock").exists());
+        }
+        let record = LockedRecord::create_new(&path).unwrap();
+        record.replace(b"fresh").unwrap();
+        let expected = record.lock_identity_seal();
+        drop(record);
+        let record = LockedRecord::open_existing(&path).unwrap();
+        record.verify_lock_identity(&expected).unwrap();
+        assert_eq!(record.read().unwrap(), b"fresh");
+    }
+
+    #[test]
+    fn rewritten_sidecar_inode_changes_authenticated_identity() {
+        let temp = Temp::new();
+        let path = temp.record();
+        let old = LockedRecord::create_new(&path).unwrap();
+        old.replace(b"payload").unwrap();
+        let expected = old.lock_identity_seal();
+        let name = side_path(&path, ".lock");
+        fs::rename(&name, side_path(&path, ".old-lock")).unwrap();
+        fs::copy(side_path(&path, ".old-lock"), &name).unwrap();
+        // Model an attacker rewriting the unauthenticated inode fields while
+        // keeping the nonce. Only the full authenticated identity distinguishes it.
+        let mut header = fs::read(&name).unwrap();
+        header[16..].copy_from_slice(&identity(&fs::metadata(&name).unwrap()));
+        fs::write(&name, header).unwrap();
+        let new = LockedRecord::open_existing(&path).unwrap();
+        assert_eq!(old.lock_seal(), new.lock_seal());
+        assert_ne!(expected, new.lock_identity_seal());
+        assert!(new.verify_lock_identity(&expected).is_err());
+        assert!(new.read().is_err());
+        assert!(old.read().is_err());
+    }
+
+    #[test]
+    fn descriptor_identity_rejects_identical_path_replacement() {
+        let temp = Temp::new();
+        let path = temp.record();
+        fs::write(&path, b"identical").unwrap();
+        let held = File::open(&path).unwrap();
+        verify_path(&held, &path).unwrap();
+        fs::rename(&path, side_path(&path, ".old")).unwrap();
+        fs::write(&path, b"identical").unwrap();
+        assert!(verify_path(&held, &path).is_err());
+    }
+
+    #[test]
+    fn empty_and_large_payloads_preserve_legacy_format() {
+        let temp = Temp::new();
+        let path = temp.record();
+        let record = LockedRecord::create_new(&path).unwrap();
+        for bytes in [std::vec![], std::vec![0x5a; 65537]] {
+            record.replace(&bytes).unwrap();
+            assert_eq!(record.read().unwrap(), bytes);
+            let raw = fs::read(&path).unwrap();
+            assert_eq!(&raw[..8], RECORD_MAGIC);
+            assert_eq!(&raw[8..16], &record.lock_seal());
+            assert_eq!(&raw[16..], &bytes);
+        }
+        let expected = record.lock_identity_seal();
+        let mut wrong = expected;
+        wrong[23] ^= 1;
+        assert!(record.verify_lock_identity(&wrong).is_err());
+        assert!(record.verify_lock_identity(&expected).is_err());
     }
 
     #[test]

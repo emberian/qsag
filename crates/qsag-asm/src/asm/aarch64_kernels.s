@@ -372,6 +372,7 @@ qsag_asm_goldilocks_mul_ct_aarch64:
     sub x7, xzr, x7
     and x7, x7, x6
     add x0, x2, x7
+    mov x1, #0
     mov x2, #0
     mov x3, #0
     mov x4, #0

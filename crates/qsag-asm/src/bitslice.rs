@@ -116,19 +116,20 @@ pub fn pack_256x200_bitslice_with_backend(
 ) {
     #[cfg(target_arch = "aarch64")]
     let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
+    let mut bytes = [0u8; 8];
     for (word, rows) in planes.chunks_exact_mut(64).enumerate() {
         let Ok(rows): Result<&mut [BitPlane256; 64], _> = rows.try_into() else {
             unreachable!("chunks_exact_mut always produces 64 planes");
         };
         for (r, row) in rows.iter_mut().enumerate() {
             for (q, slot) in row.iter_mut().enumerate() {
-                let mut bytes = [0u8; 8];
                 bytes.copy_from_slice(&states[64 * q + r][8 * word..8 * word + 8]);
                 *slot = u64::from_le_bytes(bytes);
             }
         }
         transpose64x256_with_backend(rows, backend);
     }
+    crate::ct_memzero(&mut bytes);
 }
 
 /// Inverse of [`pack_256x200_bitslice`].
@@ -149,15 +150,18 @@ pub fn unpack_256x200_bitslice_with_backend(
     #[cfg(target_arch = "aarch64")]
     let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     let mut rows = [[0u64; 4]; 64];
+    let mut bytes = [0u8; 8];
     for (word, src) in planes.chunks_exact(64).enumerate() {
         rows.copy_from_slice(src);
         transpose64x256_with_backend(&mut rows, backend);
         for (r, row) in rows.iter().enumerate() {
             for (q, value) in row.iter().enumerate() {
-                states[64 * q + r][8 * word..8 * word + 8].copy_from_slice(&value.to_le_bytes());
+                bytes = value.to_le_bytes();
+                states[64 * q + r][8 * word..8 * word + 8].copy_from_slice(&bytes);
             }
         }
     }
+    crate::ct_memzero(&mut bytes);
     crate::volatile_fill(&mut rows, [0u64; 4]);
 }
 
@@ -174,7 +178,11 @@ pub fn gf2_128_mul_portable(a: [u64; 2], b: [u64; 2]) -> [u64; 2] {
         let carry = 0u128.wrapping_sub(x >> 127);
         x = (x << 1) ^ (carry & 0x87);
     }
-    [r as u64, (r >> 64) as u64]
+    let out = [r as u64, (r >> 64) as u64];
+    crate::volatile_fill(core::slice::from_mut(&mut x), 0);
+    crate::volatile_fill(core::slice::from_mut(&mut y), 0);
+    crate::volatile_fill(core::slice::from_mut(&mut r), 0);
+    out
 }
 
 // This kernel uses legacy PCLMUL for its odd tail as well as VPCLMUL for pairs.
@@ -208,9 +216,10 @@ fn vpclmul_without_legacy_pclmul_rejects_batch_kernel() {
 pub fn gf2_128_mul_acc_batch_portable(acc: &mut [u64; 2], a: &[[u64; 2]], b: &[[u64; 2]]) {
     assert_eq!(a.len(), b.len());
     for (x, y) in a.iter().zip(b) {
-        let p = gf2_128_mul_portable(*x, *y);
+        let mut p = gf2_128_mul_portable(*x, *y);
         acc[0] ^= p[0];
         acc[1] ^= p[1];
+        crate::volatile_fill(&mut p, 0);
     }
 }
 

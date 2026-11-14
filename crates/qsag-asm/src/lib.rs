@@ -912,6 +912,47 @@ mod tests {
     }
 
     #[test]
+    fn gf256_every_simd_tail_matches_portable_and_preserves_sentinels() {
+        let mut rng = KeccakTestStream::new(0x7115);
+        let a: [u8; 65] = core::array::from_fn(|_| rng.next_u64() as u8);
+        let b: [u8; 65] = core::array::from_fn(|_| rng.next_u64() as u8);
+        for len in 0..=65 {
+            let mut expected = [0xa5; 67];
+            portable::gf256_shamir_mul_portable(&mut expected[1..1 + len], &a[..len], &b[..len]);
+            for backend in [SimdBackend::Portable, SimdBackend::X86Avx2Pclmul,
+                SimdBackend::X86Avx2GfniVpclmul, SimdBackend::Aarch64NeonSha3Pmull] {
+                let mut actual = [0xa5; 67];
+                gf256_shamir_mul_with_backend(&mut actual[1..1 + len], &a[..len], &b[..len], backend);
+                assert_eq!(actual, expected, "len={len} backend={backend:?}");
+                for scalar in [0, 1, 0x80, 0xff] {
+                    let mut expected = [0xa5; 67];
+                    let mut actual = expected;
+                    portable::gf256_shamir_mac_portable(&mut expected[1..1 + len], &a[..len], scalar);
+                    gf256_shamir_mac_with_backend(&mut actual[1..1 + len], &a[..len], scalar, backend);
+                    assert_eq!(actual, expected, "len={len} scalar={scalar} backend={backend:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn keccak_batch_tails_match_independent_portable_states() {
+        for len in 0..=9 {
+            let mut states = [[0u64; 25]; 9];
+            let mut expected = states;
+            for i in 0..len {
+                let input = core::array::from_fn(|j| (25 * i + j) as u64);
+                states[i] = input;
+                let mut single = KeccakState4x(core::array::from_fn(|j| [input[j]; 4]));
+                portable::keccak_f1600_4x_portable(&mut single);
+                expected[i] = core::array::from_fn(|j| single.0[j][0]);
+            }
+            keccak_f1600_batch(&mut states[..len]);
+            assert_eq!(states, expected);
+        }
+    }
+
+    #[test]
     fn tower128_bdoz_2lane_mac_vpclmul_pclmul_wiedemann_parity() {
         let mut rng = KeccakTestStream::new(0xCAFE_BABE_DEAD_BEEF);
         let mut lhs = [[0u128; 2]; 37];
