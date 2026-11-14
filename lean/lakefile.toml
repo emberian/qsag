@@ -1,0 +1,28 @@
+name = "qsag"
+version = "0.1.0"
+defaultTargets = ["Qsag", "QsagChallenge"]
+
+[[lean_lib]]
+name = "Qsag"
+globs = ["Qsag", "Qsag.+"]
+
+[[lean_exe]]
+name = "qsag-kat"
+root = "KatGen"
+
+[[lean_exe]]
+name = "isa-cosim"
+root = "IsaCosim"
+
+[[lean_exe]]
+name = "spec-oracle"
+root = "SpecOracle"
+
+[[lean_lib]]
+name = "QsagChallenge"
+
+[[lean_lib]]
+name = "AuditAxioms"
+
+[[lean_lib]]
+name = "TraceAxiom"
