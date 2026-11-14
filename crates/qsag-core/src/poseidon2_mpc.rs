@@ -3787,6 +3787,127 @@ mod tests {
         assert!(!verify_pq_hash_sig(Poseidon2Suite, &params, &pk, b"different", &sig));
     }
 
+    /// Slippage U5: sign -> policy circuit -> verify for a multi-layer `Corduroy` key.
+    ///
+    /// The policy barrier of `qsag-policy` releases an [`AuthorizedSignReleaseToken`] for one
+    /// canonical intent envelope; the threshold signer signs exactly those bytes and the stock
+    /// verifier accepts exactly those bytes. A refused intent yields no token, and a token does
+    /// not cover any other payload, key, context or quorum.
+    #[test]
+    fn multilayer_corduroy_policy_gated_sign_and_verify_end_to_end() {
+        use crate::corduroy::Corduroy;
+        use crate::sponge::keccak::cshake256_32;
+        use qsag_accel::CpuReferenceBackend;
+        use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
+        use qsag_policy::{
+            AuthorizedSignReleaseToken, PolicyViolation, QuorumTierRule, SigningPayloadBinding,
+            TransactionIntent, TransactionPolicy, evaluate_policy_committed_barrier_authenticated,
+            trusted_dealer_setup_for_testing,
+        };
+
+        // Two-layer stateless hypertree, 2-of-2 signing committee (guard ids 1 and 2).
+        let params = PqHashParams { w: 4, ell1: 128, max_sigs_log2: 2, num_layers: 2,
+            subtree_height: 1, fors_trees: 1, fors_height: 1, stateful: false };
+        assert!(params.is_well_formed() && params.num_layers > 1);
+        let kg = required_poseidon2_keygen_preprocessing_budget(&params);
+        let sg = required_poseidon2_sign_preprocessing_budget(&params);
+        let (mut keys, mut vaults, mut rngs, sk) = setup_poseidon2_committee_material(2, 2,
+            (kg.0 + sg.0, kg.1 + sg.1, kg.2 + sg.2), true);
+        let (ka, kb) = keys.split_at_mut(1);
+        let (va, vb) = vaults.split_at_mut(1);
+        let mut keys = [&mut ka[0], &mut kb[0]];
+        let mut vaults = [&mut va[0], &mut vb[0]];
+        let pk = build_distributed_poseidon2_key([0xb1; 32], &params, 2, &mut keys, &mut vaults, &mut rngs).unwrap();
+        assert_eq!(pk, derive_public_key(Poseidon2Suite, &params, &sk));
+        let key_id = cshake256_32(b"QSAG.TEST.CORDUROY.KEY_ID", &[pk.pk_seed, pk.pk_root].concat());
+
+        // Policy: one allowlisted recipient, a single-transaction cap, two approvers including
+        // the hardware guardian (guard 2, whose presence in every quorum carries the velocity
+        // window), and an initiator (guard 3) who may not approve their own request.
+        let accel = CpuReferenceBackend::new();
+        let recipient = QsagAddress::from_pubkey_cshake256("qsp", WitnessSuiteTag::SlhDsa128f,
+            KeyIdentityKind::SingleOrThreshold, b"corduroy-cold-vault").unwrap();
+        let policy = TransactionPolicy {
+            chain_id: 7,
+            pinned_suite: WitnessSuiteTag::SlhDsa128f,
+            recipient_allowlist: vec![recipient.commitment_256],
+            max_single_tx_amount: 1_000,
+            velocity_window_cap: 5_000,
+            valid_not_before_secs: 100,
+            valid_not_after_secs: 10_000,
+            forbid_initiator_self_approval: true,
+            hardware_guardian_party: Some(2),
+            quorum_tiers: vec![QuorumTierRule {
+                max_amount_units: 1_000, min_approvers: 2, require_hardware_guardian: true,
+            }],
+        };
+        let policy_digest = policy.canonical_digest();
+        let authority_pk = [0x5a; 32];
+        let quorum = [1u16, 2];
+        let ctx = b"corduroy:treasury:v1";
+        let mut guards: Vec<_> = trusted_dealer_setup_for_testing([0x91; 32], &[1, 2, 3])
+            .into_iter()
+            .map(|g| g.with_window_authority([0x42; 32], [0x43; 32]).unwrap())
+            .collect();
+        let initiator = guards.pop().unwrap();
+
+        let request = |amount: u128, session: u8| -> Result<(TransactionIntent, Vec<u8>), PolicyViolation> {
+            let (mut intent, _) = TransactionIntent::builder(7, WitnessSuiteTag::SlhDsa128f, recipient.clone(), amount)
+                .timestamp_secs(500)
+                .initiator_and_approvers(3, &quorum)
+                .bind_signing_payload(&SigningPayloadBinding {
+                    key_id,
+                    payload: b"transfer to cold vault",
+                    ctx,
+                    session_id: [session; 32],
+                    policy_revision: 1,
+                    quorum: &quorum,
+                    authority_pk,
+                }, &policy)?;
+            let bytes = initiator.authenticate_initiated_intent(&policy, &mut intent)?;
+            Ok((intent, bytes))
+        };
+        let covers = |token: &AuthorizedSignReleaseToken, key: &[u8; 32], msg: &[u8], ctx: &[u8], quorum: &[u16]| {
+            token.matches_signing_for_policy(key, msg, ctx, quorum, &policy_digest, &authority_pk)
+        };
+
+        // A request over the cap is refused before any guard is asked: nothing to sign.
+        assert!(request(1_001, 0xc0).is_err());
+
+        // The approved request: both guards run the committed barrier and release a token.
+        let (intent, approved) = request(250, 0xc1).unwrap();
+        let token = evaluate_policy_committed_barrier_authenticated(
+            &policy, &intent, intent.session_id, intent.timestamp_secs, &mut guards, &accel,
+        ).unwrap();
+        assert!(covers(&token, &key_id, &approved, ctx, &quorum));
+
+        // The token covers neither a different amount, key, context nor quorum.
+        let mut inflated = intent.clone();
+        inflated.amount_units = 251;
+        let inflated_bytes = inflated.to_canonical_signing_bytes(&policy_digest);
+        assert!(!covers(&token, &key_id, &inflated_bytes, ctx, &quorum));
+        assert!(!covers(&token, &[0; 32], &approved, ctx, &quorum));
+        assert!(!covers(&token, &key_id, &approved, b"other", &quorum));
+        assert!(!covers(&token, &key_id, &approved, ctx, &[1, 3]));
+
+        // An intent edited after the initiator authenticated it gets no token, and the same
+        // approved intent cannot be replayed through the barrier for a second token.
+        assert!(evaluate_policy_committed_barrier_authenticated(
+            &policy, &inflated, inflated.session_id, inflated.timestamp_secs, &mut guards, &accel,
+        ).is_err());
+        assert!(evaluate_policy_committed_barrier_authenticated(
+            &policy, &intent, intent.session_id, intent.timestamp_secs, &mut guards, &accel,
+        ).is_err());
+
+        // Sign exactly the released bytes under MPC; the stock verifier accepts only them.
+        assert!(covers(&token, &key_id, &approved, ctx, &quorum));
+        let sig = sign_stateless_tsw_poseidon2_mpc(*token.session_id(), &params, &pk, 2, &approved,
+            100_000, &mut keys, &mut vaults, &mut rngs).unwrap();
+        assert!(Corduroy::verify(&params, &pk, &approved, &sig));
+        assert!(!Corduroy::verify(&params, &pk, &inflated_bytes, &sig));
+        assert!(!Corduroy::verify(&params, &pk, b"transfer to cold vault", &sig));
+    }
+
     #[test]
     fn test_uncached_signing_and_keygen_reject_unenrolled_or_forged_pk_and_params() {
         let stateful_params = PqHashParams {
