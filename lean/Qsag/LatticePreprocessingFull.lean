@@ -4780,7 +4780,7 @@ theorem kos_combiner_128x384_lhl_security :
     evalGf2Combiner128x384_two_universal
 
 
-/-! ## 4. Full GGM Punctured-Tree + Dense Dual-LPN PCG Correctness, SPCOT Check & Uniformity (`[P0-02]` Closure) -/
+/-! ## 4. Legacy Single-Tree GGM / SPCOT Model (V3 Forest Specification Below) -/
 
 /-! ### 4.1 Binary GGM Tree Expansion (`depth d`) & Punctured Co-Path Evaluation -/
 
@@ -5564,8 +5564,8 @@ theorem senderAlphaLsb_soundness
     simp only [Nat.zero_add] at h1 h2
     exact h1.symm.trans h2
 
-/-- Per-peer SPCOT & sender-MAC-LSB verification record carried inside `ValidatedPcgSeedHeader`
-    (`DensePcgPeerSeed` in `pcg_dense.rs:1170-1195, 1547-1581`). -/
+/-- Legacy single-tree SPCOT record. This is not the V3 `DensePcgPeerSeed` wire schema:
+    V3 has 64 trees, 256-bit nodes, and no sender-MAC-LSB transcript fields. -/
 structure PcgPeerSpcotRecord where
   peerId : Nat
   puncturedIdx : Nat
@@ -6371,6 +6371,207 @@ theorem tooth_legacy_challenge_pair_has_no_inverse (inv : PolyRq1024) :
 theorem witness_joint_or_fork : ∃ stmt, HasJointOrFork stmt := by
   rcases inhabited_jointOrSigma_and_extractor.2 with ⟨ro, ro', tr, tr', w⟩
   exact ⟨sampleRlweOrStatement, ro, ro', tr, tr', ⟨w⟩⟩
+
+/-! ## V3 forest geometry (`QSAGDPC3`)
+The earlier single-tree 128-bit API remains a legacy mathematical model for callers.
+This namespace specifies the V3 node width and 64 independent regular-noise trees.
+PRG instantiation, wire decoding, and the forest SPCOT tag bridge are separate obligations.
+The legacy sender-alpha-LSB transcript is not a V3 wire field.
+-/
+namespace DensePcgV3
+
+def wireMagic : List UInt8 := [0x51, 0x53, 0x41, 0x47, 0x44, 0x50, 0x43, 0x33]
+def numTrees : Nat := 64
+def tapsPerTree : Nat := 3
+
+/-- Level-domain-separated length-doubling 256-bit PRG `lvl → BitVec 256 → (BitVec 256 × BitVec 256)`. -/
+abbrev GgmPrg := Nat → BitVec 256 → BitVec 256 × BitVec 256
+
+/-- Full depth-`d` binary GGM tree expansion mapping leaf index `idx : BitVec d` to its 256-bit leaf seed. -/
+def ggmExpandFull (prg : GgmPrg) : (d : Nat) → Nat → BitVec 256 → BitVec d → BitVec 256
+  | 0, _, seed, _ => seed
+  | d + 1, lvl, seed, idx =>
+    let (sL, sR) := prg lvl seed
+    if idx.getLsbD d then
+      ggmExpandFull prg d (lvl + 1) sR (idx.setWidth d)
+    else
+      ggmExpandFull prg d (lvl + 1) sL (idx.setWidth d)
+
+/-- `d`-element sibling co-path for a punctured GGM tree of depth `d`. -/
+@[expose] def GgmCopath : Nat → Type
+  | 0 => Unit
+  | d + 1 => BitVec 256 × GgmCopath d
+
+/-- Construct the `d`-sibling co-path puncturing leaf `pStar : BitVec d` from root `seed`. -/
+def ggmMakeCopath (prg : GgmPrg) : (d : Nat) → Nat → BitVec 256 → BitVec d → GgmCopath d
+  | 0, _, _, _ => ()
+  | d + 1, lvl, seed, pStar =>
+    let (sL, sR) := prg lvl seed
+    if pStar.getLsbD d then
+      (sL, ggmMakeCopath prg d (lvl + 1) sR (pStar.setWidth d))
+    else
+      (sR, ggmMakeCopath prg d (lvl + 1) sL (pStar.setWidth d))
+
+/-- Receiver's punctured GGM tree evaluator: evaluates all `u ≠ pStar` from `copath` and outputs `0#256` at `pStar`. -/
+def ggmExpandPunctured (prg : GgmPrg) :
+    (d : Nat) → Nat → BitVec d → GgmCopath d → BitVec d → BitVec 256
+  | 0, _, _, _, _ => 0#256
+  | d + 1, lvl, pStar, (sibSeed, rest), idx =>
+    if idx.getLsbD d = pStar.getLsbD d then
+      ggmExpandPunctured prg d (lvl + 1) (pStar.setWidth d) rest (idx.setWidth d)
+    else
+      ggmExpandFull prg d (lvl + 1) sibSeed (idx.setWidth d)
+
+/-- **Exact Punctured GGM Tree Recovery (`ggmExpandPunctured_exact`)**:
+    For every depth $d$ (including deployed $d \in \{14, 15\}$), root `seed`, and puncture `pStar : BitVec d`:
+    1. At `u = pStar`, `ggmExpandPunctured` evaluates to `0#256`.
+    2. At every `u ≠ pStar`, `ggmExpandPunctured` recovers the **exact** sender leaf `ggmExpandFull prg d lvl seed u`! -/
+theorem ggmExpandPunctured_exact (prg : GgmPrg) :
+    ∀ (d lvl : Nat) (seed : BitVec 256) (pStar : BitVec d),
+      let copath := ggmMakeCopath prg d lvl seed pStar
+      ggmExpandPunctured prg d lvl pStar copath pStar = 0#256 ∧
+      (∀ u : BitVec d, u ≠ pStar →
+        ggmExpandPunctured prg d lvl pStar copath u = ggmExpandFull prg d lvl seed u)
+  | 0, _, _, pStar => by
+    dsimp only
+    refine ⟨rfl, ?_⟩
+    intro u hNe
+    exact False.elim (hNe ((BitVec.eq_nil u).trans (BitVec.eq_nil pStar).symm))
+  | d + 1, lvl, seed, pStar => by
+    dsimp only
+    cases hPrg : prg lvl seed with
+    | mk sL sR =>
+      cases hp : pStar.getLsbD d
+      · have hCp : ggmMakeCopath prg (d + 1) lvl seed pStar =
+            (sR, ggmMakeCopath prg d (lvl + 1) sL (pStar.setWidth d)) := by
+          simp only [ggmMakeCopath, hPrg, hp, Bool.false_eq_true, ↓reduceIte]; rfl
+        rw [hCp]
+        have ih := ggmExpandPunctured_exact prg d (lvl + 1) sL (pStar.setWidth d)
+        dsimp only at ih
+        refine ⟨?_, ?_⟩
+        · simp only [ggmExpandPunctured, ↓reduceIte, ih.1]
+        · intro u huNe
+          have hFull : ggmExpandFull prg (d + 1) lvl seed u =
+              if u.getLsbD d then ggmExpandFull prg d (lvl + 1) sR (u.setWidth d)
+              else ggmExpandFull prg d (lvl + 1) sL (u.setWidth d) := by
+            simp only [ggmExpandFull, hPrg]
+          rw [hFull]
+          dsimp only [ggmExpandPunctured]
+          rw [hp]
+          cases hu : u.getLsbD d
+          · have huLoNe : u.setWidth d ≠ pStar.setWidth d := by
+              intro hEqLo
+              apply huNe
+              have hSu : BitVec.cons (u.getLsbD d) (u.setWidth d) = u := bvCons_split u
+              have hSp : BitVec.cons (pStar.getLsbD d) (pStar.setWidth d) = pStar := bvCons_split pStar
+              rw [← hSu, ← hSp, hu, hp, hEqLo]
+            simp only [Bool.false_eq_true, ↓reduceIte]
+            exact ih.2 (u.setWidth d) huLoNe
+          · simp only [Bool.true_eq_false, ↓reduceIte]
+      · have hCp : ggmMakeCopath prg (d + 1) lvl seed pStar =
+            (sL, ggmMakeCopath prg d (lvl + 1) sR (pStar.setWidth d)) := by
+          simp only [ggmMakeCopath, hPrg, hp, ↓reduceIte]; rfl
+        rw [hCp]
+        have ih := ggmExpandPunctured_exact prg d (lvl + 1) sR (pStar.setWidth d)
+        dsimp only at ih
+        refine ⟨?_, ?_⟩
+        · simp only [ggmExpandPunctured, ↓reduceIte, ih.1]
+        · intro u huNe
+          have hFull : ggmExpandFull prg (d + 1) lvl seed u =
+              if u.getLsbD d then ggmExpandFull prg d (lvl + 1) sR (u.setWidth d)
+              else ggmExpandFull prg d (lvl + 1) sL (u.setWidth d) := by
+            simp only [ggmExpandFull, hPrg]
+          rw [hFull]
+          dsimp only [ggmExpandPunctured]
+          rw [hp]
+          cases hu : u.getLsbD d
+          · simp only [Bool.false_eq_true, ↓reduceIte]
+          · have huLoNe : u.setWidth d ≠ pStar.setWidth d := by
+              intro hEqLo
+              apply huNe
+              have hSu : BitVec.cons (u.getLsbD d) (u.setWidth d) = u := bvCons_split u
+              have hSp : BitVec.cons (pStar.getLsbD d) (pStar.setWidth d) = pStar := bvCons_split pStar
+              rw [← hSu, ← hSp, hu, hp, hEqLo]
+            simp only [↓reduceIte]
+            exact ih.2 (u.setWidth d) huLoNe
+
+
+/-- A structurally decoded peer: exactly 64 punctures, copaths, and corrections;
+    no fictitious sender-alpha parity proof fields. -/
+structure PeerRecord (depth : Nat) where
+  peerId : Nat
+  senderMasterSeed : BitVec 256
+  puncturedIndices : Fin 64 → BitVec depth
+  copaths : Fin 64 → GgmCopath depth
+  corrOffsets : Fin 64 → Tower128
+  spcotChalCoin : BitVec 256
+  spcotMaskMacs : Tower128 × Tower128
+  spcotExpectedTag : BitVec 256
+
+/-- V3 structural header after decoding fixed-size byte arrays and tree copaths. -/
+structure SeedHeader where
+  sessionId : BitVec 256
+  numParties : Nat
+  myPartyId : Nat
+  treeDepth : Nat
+  macAlpha : Tower128
+  peers : List (PeerRecord treeDepth)
+
+/-- Structural invariants only; authentication additionally requires the recomputed SPCOT tag. -/
+def checkHeaderGeometry (hdr : SeedHeader) : Bool :=
+  decide (2 ≤ hdr.numParties ∧ hdr.myPartyId < hdr.numParties ∧
+    (hdr.treeDepth = 14 ∨ hdr.treeDepth = 15) ∧
+    hdr.peers.length + 1 = hdr.numParties ∧
+    (hdr.peers.map (·.peerId)).Nodup) && towerLsb hdr.macAlpha &&
+  hdr.peers.all (fun peer => decide (peer.peerId < hdr.numParties ∧ peer.peerId ≠ hdr.myPartyId))
+
+theorem checkHeaderGeometry_sound (hdr : SeedHeader) (h : checkHeaderGeometry hdr = true) :
+    (hdr.treeDepth = 14 ∨ hdr.treeDepth = 15) ∧ towerLsb hdr.macAlpha = true ∧
+    ∀ peer ∈ hdr.peers, peer.peerId < hdr.numParties ∧ peer.peerId ≠ hdr.myPartyId := by
+  simp only [checkHeaderGeometry, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at h
+  exact ⟨h.1.1.2.2.1, h.1.2, h.2⟩
+
+/-- Each tree has its own domain-separated PRG instance. -/
+abbrev ForestPrg := Fin 64 → GgmPrg
+
+def ForestRecovery (prg : ForestPrg) (depth : Nat)
+    (roots : Fin 64 → BitVec 256) (punctures : Fin 64 → BitVec depth) : Prop :=
+  ∀ tree : Fin 64, ∀ leaf : BitVec depth, leaf ≠ punctures tree →
+    ggmExpandPunctured (prg tree) depth 0 (punctures tree)
+      (ggmMakeCopath (prg tree) depth 0 (roots tree) (punctures tree)) leaf =
+      ggmExpandFull (prg tree) depth 0 (roots tree) leaf
+
+theorem forest_recovery (prg : ForestPrg) (depth : Nat)
+    (roots : Fin 64 → BitVec 256) (punctures : Fin 64 → BitVec depth) :
+    ForestRecovery prg depth roots punctures := by
+  intro tree leaf h
+  exact (ggmExpandPunctured_exact (prg tree) depth 0 (roots tree) (punctures tree)).2 leaf h
+
+theorem forest_recovery_at (prg : ForestPrg) (depth : Nat)
+    (roots : Fin 64 → BitVec 256) (punctures : Fin 64 → BitVec depth)
+    (h : ForestRecovery prg depth roots punctures) (tree : Fin 64) (leaf : BitVec depth)
+    (hne : leaf ≠ punctures tree) :
+    ggmExpandPunctured (prg tree) depth 0 (punctures tree)
+      (ggmMakeCopath (prg tree) depth 0 (roots tree) (punctures tree)) leaf =
+      ggmExpandFull (prg tree) depth 0 (roots tree) leaf := h tree leaf hne
+
+theorem witness_forest_recovery :
+    ∃ (prg : ForestPrg) (roots : Fin 64 → BitVec 256) (punctures : Fin 64 → BitVec 15)
+      (tree : Fin 64) (leaf : BitVec 15),
+      ForestRecovery prg 15 roots punctures ∧ leaf ≠ punctures tree :=
+  ⟨fun _ _ seed => (seed, seed + 1), fun _ => 1, fun _ => 0, 0, 1,
+    forest_recovery _ _ _ _, by decide⟩
+
+/-- Including the punctured point in a recovery claim is false. -/
+theorem tooth_punctured_leaf_not_recovered (seed : BitVec 256) (h : seed ≠ 0) :
+    ggmExpandPunctured (fun _ s => (s, s)) 0 0 (0#0) () (0#0) ≠
+      ggmExpandFull (fun _ s => (s, s)) 0 0 seed (0#0) := by
+  exact Ne.symm h
+
+#tooth_pair Qsag.DensePcgV3.forest_recovery_at vs Qsag.DensePcgV3.tooth_punctured_leaf_not_recovered
+#verify_inhabited Qsag.DensePcgV3.forest_recovery_at Qsag.DensePcgV3.witness_forest_recovery
+
+end DensePcgV3
 
 end Qsag
 end

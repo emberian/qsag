@@ -2408,6 +2408,242 @@ theorem ggm_punctured_tree_hiding {TagDom Cod : Type}
     diff ≤ Q ∧ ratLe (diff, cardSeeds) (2 * Q, cardSeeds) :=
   hidingAdv_le cardSeeds Q hPos baseGgm secretLeafFn A hQb
 
+/-! ## Seed expansion: statistical versus computational claims -/
+
+set_option exponentiation.threshold 512 in
+/-- A deterministic 256-bit seed expansion cannot have the exactly uniform law
+on even 384 independent output bits. This applies to every concrete GGM splitter,
+without an assumption on SHAKE. A vault pseudorandomness theorem must retain a
+computational hybrid; perfect uniformity is available only in the ideal game. -/
+theorem dense_seed_expansion_not_perfectly_uniform
+    (expand : Fin (2 ^ 256) → Fin (2 ^ 384)) (output : Fin (2 ^ 384)) :
+    (finSum (2 ^ 256) (fun seed => if expand seed = output then 1 else 0)) * 2 ^ 384 ≠
+      2 ^ 256 := by
+  intro he
+  let count := finSum (2 ^ 256) (fun seed => if expand seed = output then 1 else 0)
+  have hs : 2 ^ 256 < 2 ^ 384 := by decide +kernel
+  have hp : 0 < 2 ^ 256 := Nat.two_pow_pos 256
+  change count * 2 ^ 384 = 2 ^ 256 at he
+  by_cases hz : count = 0
+  · rw [hz, Nat.zero_mul] at he
+    omega
+  · have hn : 1 ≤ count := by omega
+    have hm := Nat.mul_le_mul_right (2 ^ 384) hn
+    omega
+
+#verify_constructive Qsag.dense_seed_expansion_not_perfectly_uniform
+
+/-! ## Two-lane vault sacrifice
+
+The production `PI_TRIPLE_F2_CHAL` takes two halves of the coin and forces each
+low bit to one. Each lane therefore has 127 random bits, not 128. The theorem
+below counts roots on arbitrary duplicate-free challenge sets; using all odd
+field encodings yields the denominator `2^254`. MAC forgery and coin/PCG
+pseudorandomness are separate bad events, not silently included in this bound.
+-/
+
+structure VaultSacrificeRow where
+  a : Tower128
+  b : Tower128
+  c : Tower128
+  companionA : Tower128
+  companionB : Tower128
+  companionC : Tower128
+  deriving DecidableEq
+
+def VaultSacrificeRow.accepts (row : VaultSacrificeRow) (rho : Tower128) : Bool :=
+  decide (spdzSacrificeResidual rho row.a row.b row.c
+    row.companionA row.companionB row.companionC = CommRingOps.zero)
+
+def vaultSacrificeLane (rows : List VaultSacrificeRow) (rho : Tower128) : Bool :=
+  rows.all (fun row => row.accepts rho)
+
+/-- Every accepted batch accepts each row. No independence between rows is needed. -/
+theorem vaultSacrificeLane_row {rows : List VaultSacrificeRow} {row : VaultSacrificeRow}
+    (hm : row ∈ rows) {rho : Tower128} (ha : vaultSacrificeLane rows rho = true) :
+    row.accepts rho = true :=
+  List.all_eq_true.mp ha row hm
+
+private theorem vault_filter_mono {A : Type} (xs : List A) (f g : A → Bool)
+    (h : ∀ x, f x = true → g x = true) :
+    (xs.filter f).length ≤ (xs.filter g).length := by
+  induction xs with
+  | nil => exact Nat.le_refl 0
+  | cons x xs ih =>
+    cases hf : f x with
+    | false =>
+      cases hg : g x <;> simp only [List.filter_cons, hf, hg, Bool.false_eq_true,
+        ↓reduceIte, List.length_cons]
+      · exact ih
+      · exact Nat.le_trans ih (Nat.le_succ _)
+    | true =>
+      have hg := h x hf
+      simp only [List.filter_cons, hf, hg, ↓reduceIte, List.length_cons]
+      exact Nat.succ_le_succ ih
+
+/-- A fixed corrupt row bounds the entire batch's accepting challenges. -/
+theorem vaultSacrificeLane_bad_count (rows : List VaultSacrificeRow)
+    (row : VaultSacrificeRow) (hm : row ∈ rows)
+    (hbad : row.c ≠ CommRingOps.mul row.a row.b)
+    (S : List Tower128) (hn : S.Nodup) :
+    (S.filter (vaultSacrificeLane rows)).length ≤ 1 := by
+  exact Nat.le_trans
+    (vault_filter_mono S (vaultSacrificeLane rows) row.accepts
+      (fun _ h => vaultSacrificeLane_row hm h))
+    (spdz_triple_sacrifice_sound row.a row.b row.c
+      row.companionA row.companionB row.companionC S hn hbad)
+
+/-- Actual Cartesian-product count, rather than a product merely named a probability. -/
+def vaultSacrificeAcceptingPairs (rows₀ rows₁ : List VaultSacrificeRow)
+    (S₀ S₁ : List Tower128) : List (Tower128 × Tower128) :=
+  (S₀.filter (vaultSacrificeLane rows₀)).flatMap fun r₀ =>
+    (S₁.filter (vaultSacrificeLane rows₁)).map fun r₁ => (r₀, r₁)
+
+private theorem vault_pairs_length {A B : Type} (xs : List A) (ys : List B) :
+    (xs.flatMap fun x => ys.map fun y => (x, y)).length = xs.length * ys.length := by
+  induction xs with
+  | nil => simp
+  | cons x xs ih => simp [ih, Nat.add_mul, Nat.add_comm]
+
+/-- A corrupt candidate is sacrificed against independent companions in both lanes.
+The same rho may be reused across the whole batch within a lane. -/
+theorem vault_two_lane_sacrifice_sound (rows₀ rows₁ : List VaultSacrificeRow)
+    (bad₀ bad₁ : VaultSacrificeRow) (hm₀ : bad₀ ∈ rows₀) (hm₁ : bad₁ ∈ rows₁)
+    (hb₀ : bad₀.c ≠ CommRingOps.mul bad₀.a bad₀.b)
+    (hb₁ : bad₁.c ≠ CommRingOps.mul bad₁.a bad₁.b)
+    (S₀ S₁ : List Tower128) (hn₀ : S₀.Nodup) (hn₁ : S₁.Nodup) :
+    (vaultSacrificeAcceptingPairs rows₀ rows₁ S₀ S₁).length ≤ 1 := by
+  rw [vaultSacrificeAcceptingPairs, vault_pairs_length]
+  exact Nat.le_trans (Nat.mul_le_mul
+    (vaultSacrificeLane_bad_count rows₀ bad₀ hm₀ hb₀ S₀ hn₀)
+    (vaultSacrificeLane_bad_count rows₁ bad₁ hm₁ hb₁ S₁ hn₁)) (Nat.le_refl 1)
+
+/-- Cross-multiplied strict probability bound for the production odd-challenge support.
+The support sizes are explicit: the theorem does not normalize arbitrary short lists
+by the full-field size. -/
+theorem vault_two_lane_odd_support_lt_128 (rows₀ rows₁ : List VaultSacrificeRow)
+    (bad₀ bad₁ : VaultSacrificeRow) (hm₀ : bad₀ ∈ rows₀) (hm₁ : bad₁ ∈ rows₁)
+    (hb₀ : bad₀.c ≠ CommRingOps.mul bad₀.a bad₀.b)
+    (hb₁ : bad₁.c ≠ CommRingOps.mul bad₁.a bad₁.b)
+    (S₀ S₁ : List Tower128) (hn₀ : S₀.Nodup) (hn₁ : S₁.Nodup)
+    (hs₀ : S₀.length = 2 ^ 127) (hs₁ : S₁.length = 2 ^ 127) :
+    (vaultSacrificeAcceptingPairs rows₀ rows₁ S₀ S₁).length * 2 ^ 128 <
+      S₀.length * S₁.length := by
+  have hb := vault_two_lane_sacrifice_sound rows₀ rows₁ bad₀ bad₁ hm₀ hm₁ hb₀ hb₁ S₀ S₁ hn₀ hn₁
+  rw [hs₀, hs₁]
+  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2 ^ 128) hb) (by decide +kernel)
+
+/-- Enumerate precisely the 128-bit field encodings whose low bit is one.
+Appending the fixed low bit models the support after production's `| 1`. -/
+def oddVaultChallenge (hi : Fin (2 ^ 127)) : Tower128 :=
+  unpackTower 7 ((BitVec.ofFin hi) ++ 1#1)
+
+def oddVaultChallengeSupport : List Tower128 :=
+  (List.finRange (2 ^ 127)).map oddVaultChallenge
+
+theorem oddVaultChallenge_injective (a b : Fin (2 ^ 127))
+    (h : oddVaultChallenge a = oddVaultChallenge b) : a = b := by
+  have he := congrArg (packTower 7) h
+  simp only [oddVaultChallenge, packTower_unpackTower] at he
+  have hb := (BitVec.append_left_inj (1#1)).mp he
+  exact Fin.ext (congrArg BitVec.toNat hb)
+
+theorem oddVaultChallengeSupport_card : oddVaultChallengeSupport.length = 2 ^ 127 := by
+  simp only [oddVaultChallengeSupport, List.length_map, List.length_finRange]
+
+theorem oddVaultChallengeSupport_nodup : oddVaultChallengeSupport.Nodup := by
+  apply List.pairwise_map.mpr
+  exact (List.nodup_finRange (2 ^ 127)).imp
+    (fun hne heq => hne (oddVaultChallenge_injective _ _ heq))
+
+/-- Instantiation on the exact odd-bit challenge support, with no supplied
+cardinality or duplicate-freedom assumptions. This is conditional on uniform
+independent high halves and authentic openings. -/
+theorem vault_production_support_sacrifice_lt_128 (rows₀ rows₁ : List VaultSacrificeRow)
+    (bad₀ bad₁ : VaultSacrificeRow) (hm₀ : bad₀ ∈ rows₀) (hm₁ : bad₁ ∈ rows₁)
+    (hb₀ : bad₀.c ≠ CommRingOps.mul bad₀.a bad₀.b)
+    (hb₁ : bad₁.c ≠ CommRingOps.mul bad₁.a bad₁.b) :
+    (vaultSacrificeAcceptingPairs rows₀ rows₁ oddVaultChallengeSupport oddVaultChallengeSupport).length *
+      2 ^ 128 < 2 ^ 254 := by
+  have h := vault_two_lane_odd_support_lt_128 rows₀ rows₁ bad₀ bad₁ hm₀ hm₁ hb₀ hb₁
+    oddVaultChallengeSupport oddVaultChallengeSupport oddVaultChallengeSupport_nodup
+    oddVaultChallengeSupport_nodup oddVaultChallengeSupport_card oddVaultChallengeSupport_card
+  simpa only [oddVaultChallengeSupport_card, show (2 : Nat) ^ 127 * 2 ^ 127 = 2 ^ 254 by decide +kernel] using h
+
+/-- Caller releases its vault only after both lanes accept. This is a pure
+acceptance gate; authenticating the row openings is a separate prerequisite. -/
+def releaseSacrificedVault {V : Type} (vault : V)
+    (rows₀ rows₁ : List VaultSacrificeRow) (rho₀ rho₁ : Tower128) : Option V :=
+  if vaultSacrificeLane rows₀ rho₀ && vaultSacrificeLane rows₁ rho₁ then some vault else none
+
+theorem releaseSacrificedVault_iff {V : Type} (vault : V)
+    (rows₀ rows₁ : List VaultSacrificeRow) (rho₀ rho₁ : Tower128) :
+    releaseSacrificedVault vault rows₀ rows₁ rho₀ rho₁ = some vault ↔
+      vaultSacrificeLane rows₀ rho₀ = true ∧ vaultSacrificeLane rows₁ rho₁ = true := by
+  unfold releaseSacrificedVault
+  cases vaultSacrificeLane rows₀ rho₀ <;> cases vaultSacrificeLane rows₁ rho₁
+  · exact ⟨(fun h => by cases h), (fun h => by cases h.1)⟩
+  · exact ⟨(fun h => by cases h), (fun h => by cases h.1)⟩
+  · exact ⟨(fun h => by cases h), (fun h => by cases h.2)⟩
+  · exact ⟨fun _ => ⟨rfl, rfl⟩, fun _ => rfl⟩
+
+/-- The two lanes share the same candidate by construction; only companions differ.
+These are reconstructed audit values, not an implementation that opens the triple. -/
+structure TwoLaneVaultRow where
+  a : Tower128
+  b : Tower128
+  c : Tower128
+  companion₀ : Tower128 × Tower128 × Tower128
+  companion₁ : Tower128 × Tower128 × Tower128
+
+def TwoLaneVaultRow.lane (row : TwoLaneVaultRow) (second : Bool) : VaultSacrificeRow :=
+  let companion := if second then row.companion₁ else row.companion₀
+  ⟨row.a, row.b, row.c, companion.1, companion.2.1, companion.2.2⟩
+
+/-- Returned triples are exactly the candidates whose two companions were checked. -/
+def releaseTwoLaneCandidates (rows : List TwoLaneVaultRow) (rho₀ rho₁ : Tower128) :
+    Option (List (Tower128 × Tower128 × Tower128)) :=
+  releaseSacrificedVault (rows.map fun row => (row.a, row.b, row.c))
+    (rows.map fun row => row.lane false) (rows.map fun row => row.lane true) rho₀ rho₁
+
+theorem releaseTwoLaneCandidates_refines (rows : List TwoLaneVaultRow) (rho₀ rho₁ : Tower128) :
+    releaseTwoLaneCandidates rows rho₀ rho₁ = some (rows.map fun row => (row.a, row.b, row.c)) ↔
+      vaultSacrificeLane (rows.map fun row => row.lane false) rho₀ = true ∧
+      vaultSacrificeLane (rows.map fun row => row.lane true) rho₁ = true :=
+  releaseSacrificedVault_iff _ _ _ _ _
+
+/-- The release check's exact accepting-pair count for any corrupt candidate in
+the returned vault. The checked row and the released candidate cannot diverge. -/
+theorem twoLaneCandidates_bad_release_lt_128 (rows : List TwoLaneVaultRow)
+    (bad : TwoLaneVaultRow) (hm : bad ∈ rows)
+    (hb : bad.c ≠ CommRingOps.mul bad.a bad.b) :
+    (vaultSacrificeAcceptingPairs (rows.map fun row => row.lane false)
+      (rows.map fun row => row.lane true) oddVaultChallengeSupport oddVaultChallengeSupport).length *
+        2 ^ 128 < 2 ^ 254 :=
+  vault_production_support_sacrifice_lt_128 _ _ (bad.lane false) (bad.lane true)
+    (List.mem_map.mpr ⟨bad, hm, rfl⟩) (List.mem_map.mpr ⟨bad, hm, rfl⟩) hb hb
+
+def zeroVaultSacrificeRow : VaultSacrificeRow :=
+  ⟨towerZero 7, towerZero 7, towerZero 7, towerZero 7, towerZero 7, towerZero 7⟩
+
+theorem witness_vault_sacrifice_inhabited :
+    ∃ row : VaultSacrificeRow, releaseSacrificedVault [row] [row] [row]
+      (towerOne 7) (towerOne 7) = some [row] := by
+  exact ⟨zeroVaultSacrificeRow, by decide +kernel⟩
+
+def corruptVaultSacrificeRow : VaultSacrificeRow :=
+  { zeroVaultSacrificeRow with c := towerOne 7 }
+
+theorem tooth_vault_sacrifice_corrupt_row :
+    releaseSacrificedVault [corruptVaultSacrificeRow] [corruptVaultSacrificeRow]
+      [corruptVaultSacrificeRow] (towerOne 7) (towerOne 7) ≠ some [corruptVaultSacrificeRow] := by
+  decide +kernel
+
+set_option maxRecDepth 8192 in
+#tooth_pair Qsag.vault_two_lane_sacrifice_sound vs Qsag.tooth_vault_sacrifice_corrupt_row
+#verify_inhabited Qsag.releaseSacrificedVault_iff Qsag.witness_vault_sacrifice_inhabited
+#verify_constructive Qsag.vault_two_lane_odd_support_lt_128
+
 /-! ## 7. Mechanical Assurance Gates (`#tooth_pair`, `#verify_inhabited`, `#verify_constructive`) -/
 
 section AssuranceGates

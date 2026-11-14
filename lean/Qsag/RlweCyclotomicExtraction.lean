@@ -4278,6 +4278,39 @@ theorem witness_short_rlwe_key_relation_inhabited :
   | 0 => apply ModZq.ext; rfl
   | _ + 1 => omega
 
+/-- Nonzero secret and error in a degree-two cyclotomic ring (nu = 1). -/
+theorem witness_short_rlwe_key_relation_positive_dimension :
+    ∃ (stmt : RlweOrSigmaStatement 1 12289)
+      (w : ShortMonomialRelaxedRlweWitness 1 1 12289 stmt)
+      (sTrue eTrue : CycPolyInt 1),
+      ShortRlweKeyRelation stmt.A (stmt.branchU w.branch) 1 sTrue eTrue ∧
+      cycIntInfNorm sTrue = 1 ∧ cycIntInfNorm eTrue = 1 := by
+  let stmt : RlweOrSigmaStatement 1 12289 :=
+    { A := cycZqOne
+      u0 := fun _ => ModZq.ofInt 12289 2
+      u1 := fun _ => ModZq.ofInt 12289 2
+      Bz := 3070 }
+  let c0 : SignedMonomialChal 1 := ⟨false, ⟨0, by decide⟩⟩
+  let c1 : SignedMonomialChal 1 := ⟨true, ⟨0, by decide⟩⟩
+  let dzs : CycPolyInt 1 := fun _ => 2
+  let dze : CycPolyInt 1 := fun _ => 2
+  have hDiff : cycZqAdd (cycZqMul stmt.A (cycIntToZq 12289 dzs)) (cycIntToZq 12289 dze) =
+      cycZqMul (cycIntToZq 12289 (cycIntSub c0.toIntPoly c1.toIntPoly)) (stmt.branchU false) := by
+    funext ⟨k, hk⟩
+    match k with
+    | 0 => apply ModZq.ext; rfl
+    | 1 => apply ModZq.ext; rfl
+    | _ + 2 => omega
+  let w : ShortMonomialRelaxedRlweWitness 1 1 12289 stmt :=
+    ShortMonomialRelaxedRlweWitness.ofForkDifference stmt ⟨0, by decide⟩ false c0 c1
+      (by decide) dzs dze (by decide) (by decide) hDiff
+  refine ⟨stmt, w, (fun _ => 1), (fun _ => 1), ⟨by decide, by decide, ?_⟩, by decide, by decide⟩
+  funext ⟨k, hk⟩
+  match k with
+  | 0 => apply ModZq.ext; rfl
+  | 1 => apply ModZq.ext; rfl
+  | _ + 2 => omega
+
 theorem witness_valid_rlwe_or_sigma_fork_inhabited :
     ∃ (stmt : RlweOrSigmaStatement 10 12289)
       (c c' : Fin 13 → SignedMonomialChal 10)
@@ -4293,7 +4326,7 @@ theorem witness_valid_rlwe_or_sigma_fork_inhabited :
 #tooth_pair Qsag.short_monomial_witness_recovers_secret_or_breaks_short_sis vs Qsag.tooth_cofactor_relation_admits_zero_secret_at_12289
 #tooth_pair Qsag.tryExtractShortMonomialOr13Witness_complete vs Qsag.tooth_short_extractor_refuses_identical_challenges
 
-#verify_inhabited Qsag.short_monomial_witness_recovers_secret_or_breaks_short_sis Qsag.witness_short_rlwe_key_relation_inhabited
+#verify_inhabited Qsag.short_monomial_witness_recovers_secret_or_breaks_short_sis Qsag.witness_short_rlwe_key_relation_positive_dimension
 #verify_inhabited Qsag.extract_rlwe_or_sigma_13_short_witness_1024_sound Qsag.witness_valid_rlwe_or_sigma_fork_inhabited
 #verify_inhabited Qsag.tryExtractShortMonomialOr13Witness_complete Qsag.witness_valid_rlwe_or_sigma_fork_inhabited
 
