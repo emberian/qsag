@@ -171,10 +171,12 @@ pub(crate) fn sha256(c: &Builder, input: &[Wire]) -> Vec<Wire> {
         let [mut a, mut b, mut cc, mut d, mut e, mut f, mut g, mut h] = state;
         for (&k, &ww) in SHA256_K.iter().zip(&w) {
             let s1 = xor(c, xor(c, rotr(e, 6), rotr(e, 11)), rotr(e, 25));
-            let ch = xor(c, and(c, e, f), and(c, not(c, e), g));
+            // Ch(e, f, g) = (e & f) ^ (~e & g) = g ^ (e & (f ^ g))  (1 word AND instead of 2)
+            let ch = xor(c, g, and(c, e, xor(c, f, g)));
             let t1 = sum(c, &[h, s1, ch, word(c, k), ww]);
             let s0 = xor(c, xor(c, rotr(a, 2), rotr(a, 13)), rotr(a, 22));
-            let maj = xor(c, xor(c, and(c, a, b), and(c, a, cc)), and(c, b, cc));
+            // Maj(a, b, cc) = a ^ ((a ^ b) & (a ^ cc))  (1 word AND instead of 3)
+            let maj = xor(c, a, and(c, xor(c, a, b), xor(c, a, cc)));
             let t2 = add(c, s0, maj);
             h = g;
             g = f;
@@ -194,9 +196,9 @@ pub(crate) fn sha256(c: &Builder, input: &[Wire]) -> Vec<Wire> {
 fn rmd_f(c: &Builder, round: usize, x: Word, y: Word, z: Word) -> Word {
     match round / 16 {
         0 => xor(c, xor(c, x, y), z),
-        1 => xor(c, and(c, x, y), and(c, not(c, x), z)),
+        1 => xor(c, z, and(c, x, xor(c, y, z))),
         2 => xor(c, or(c, x, not(c, y)), z),
-        3 => xor(c, and(c, x, z), and(c, y, not(c, z))),
+        3 => xor(c, y, and(c, z, xor(c, x, y))),
         _ => xor(c, x, or(c, y, not(c, z))),
     }
 }

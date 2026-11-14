@@ -437,6 +437,7 @@ struct SharedView {
     outputs: Word,
 }
 impl SharedView {
+    #[cfg(test)]
     fn bytes(&self) -> Word {
         let mut out = Vec::with_capacity(
             self.seed.len() + self.inputs.len() + self.products.len() + self.outputs.len(),
@@ -457,6 +458,17 @@ impl Drop for SharedView {
             &mut self.outputs,
         ] {
             for b in v {
+                ct_zeroize_u64s(&mut b.0);
+            }
+        }
+    }
+}
+
+struct ZeroizeWordVec(Vec<Word>);
+impl Drop for ZeroizeWordVec {
+    fn drop(&mut self) {
+        for word in &mut self.0 {
+            for b in word {
                 ct_zeroize_u64s(&mut b.0);
             }
         }
@@ -699,7 +711,7 @@ fn evaluate_inner<T: Transport>(
         let s2 = &mut rest2[0];
         e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
     }
-    let squeezed = outer_mpc::squeeze_sponges_lockstep(
+    let squeezed = ZeroizeWordVec(outer_mpc::squeeze_sponges_lockstep(
         e,
         &mut tape_sponges,
         &[
@@ -707,26 +719,28 @@ fn evaluate_inner<T: Transport>(
             cursors[1].sponge_bits,
             cursors[2].sponge_bits,
         ],
-    )?;
+    )?);
 
     // 3. Batch-check `< modulus` across all field draws per domain and open `valid` upfront.
     let mut valid_groups: [Vec<Bit>; 3] = core::array::from_fn(|_| Vec::new());
-    let mut raw_draw_words: Vec<Word> = field_draws
-        .iter()
-        .map(|fd| squeezed[fd.head][fd.start..fd.start + fd.domain.width()].to_vec())
-        .collect();
+    let mut raw_draw_words = ZeroizeWordVec(
+        field_draws
+            .iter()
+            .map(|fd| squeezed.0[fd.head][fd.start..fd.start + fd.domain.width()].to_vec())
+            .collect(),
+    );
 
     for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
-        let mut dom_words = Vec::new();
+        let mut dom_words = ZeroizeWordVec(Vec::new());
         let mut dom_heads = Vec::new();
         for (idx, fd) in field_draws.iter().enumerate() {
             if fd.domain == dom {
-                dom_words.push(raw_draw_words[idx].clone());
+                dom_words.0.push(raw_draw_words.0[idx].clone());
                 dom_heads.push(fd.head);
             }
         }
-        if !dom_words.is_empty() {
-            let lt_bits = e.less_than_modulus_many(&dom_words, dom)?;
+        if !dom_words.0.is_empty() {
+            let lt_bits = e.less_than_modulus_many(&dom_words.0, dom)?;
             for (h, lt) in dom_heads.into_iter().zip(lt_bits) {
                 valid_groups[h].push(lt);
             }
@@ -734,27 +748,36 @@ fn evaluate_inner<T: Transport>(
     }
     let valid = fold_valid_bits(e, valid_groups)?;
     if e.open(&valid)?.iter().any(|&v| v != u64::MAX) {
-        for rw in &mut raw_draw_words {
-            for b in rw {
-                ct_zeroize_u64s(&mut b.0);
-            }
-        }
         return Err(Error::InvalidTape);
+    }
+
+    // Only `NodeTape::InputField` draws are read again in Step 7; move all `MulField`
+    // draws directly into `bits_to_field_many` so their `Vec<Bit>` buffers free early.
+    let mut keep_raw_draw = vec![false; field_draws.len()];
+    for nt in &node_tapes {
+        if let NodeTape::InputField { draws, .. } = *nt {
+            keep_raw_draw[draws[0]] = true;
+            keep_raw_draw[draws[1]] = true;
+        }
     }
 
     // 4. Batch-convert all validated field tape draws (`bits_to_field_many` per domain).
     let mut draw_fields: Vec<Option<FieldWord>> = (0..field_draws.len()).map(|_| None).collect();
     for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
         let mut idxs = Vec::new();
-        let mut dom_words = Vec::new();
+        let mut dom_words = ZeroizeWordVec(Vec::new());
         for (idx, fd) in field_draws.iter().enumerate() {
             if fd.domain == dom {
                 idxs.push(idx);
-                dom_words.push(raw_draw_words[idx].clone());
+                if keep_raw_draw[idx] {
+                    dom_words.0.push(raw_draw_words.0[idx].clone());
+                } else {
+                    dom_words.0.push(core::mem::take(&mut raw_draw_words.0[idx]));
+                }
             }
         }
-        if !dom_words.is_empty() {
-            let converted = e.bits_to_field_many(&dom_words, dom)?;
+        if !dom_words.0.is_empty() {
+            let converted = e.bits_to_field_many(&dom_words.0, dom)?;
             for (idx, fw) in idxs.into_iter().zip(converted) {
                 draw_fields[idx] = Some(fw);
             }
@@ -923,9 +946,9 @@ fn evaluate_inner<T: Transport>(
                         unreachable!()
                     };
                     let m = [
-                        squeezed[0][pos[0]],
-                        squeezed[1][pos[1]],
-                        squeezed[2][pos[2]],
+                        squeezed.0[0][pos[0]],
+                        squeezed.0[1][pos[1]],
+                        squeezed.0[2][pos[2]],
                     ];
                     let parts = core::array::from_fn(|head| {
                         SharedValue::Bit(
@@ -1005,8 +1028,8 @@ fn evaluate_inner<T: Transport>(
                     let NodeTape::InputBit { witness_idx, pos } = node_tapes[idx] else {
                         unreachable!()
                     };
-                    let a = squeezed[0][pos[0]];
-                    let b = squeezed[1][pos[1]];
+                    let a = squeezed.0[0][pos[0]];
+                    let b = squeezed.0[1][pos[1]];
                     let secret = witness[witness_idx];
                     [
                         SharedValue::Bit(a),
@@ -1049,6 +1072,8 @@ fn evaluate_inner<T: Transport>(
             wires[dead] = None;
         }
     }
+    drop(squeezed);
+    drop(draw_fields);
 
     // 5g. Mandatory in-MPC output-residual zero check (`P0-1`): verify that every
     // Boolean and prime-field output residual reconstructs to `0` across all 3 ZKBoo
@@ -1092,11 +1117,6 @@ fn evaluate_inner<T: Transport>(
         e.verify_all_pending()?;
         let opened_ok = e.open(&[all_outputs_zero])?;
         if opened_ok[0] != u64::MAX {
-            for rw in &mut raw_draw_words {
-                for b in rw {
-                    ct_zeroize_u64s(&mut b.0);
-                }
-            }
             return Err(Error::InvalidProof);
         }
     }
@@ -1144,6 +1164,11 @@ fn evaluate_inner<T: Transport>(
             }
         }
     }
+    for (idx, node) in c.nodes.iter().enumerate() {
+        if node.domain != Domain::Bit {
+            wires[idx] = None;
+        }
+    }
 
     // 7. Assemble `SharedView`s in exact `c.nodes` / `c.outputs` topological order.
     let mut views: Vec<SharedView> = seeds
@@ -1169,8 +1194,8 @@ fn evaluate_inner<T: Transport>(
                     let NodeTape::InputField { draws, .. } = node_tapes[idx] else {
                         unreachable!()
                     };
-                    outer_mpc::encode(&mut views[0].inputs, &raw_draw_words[draws[0]]);
-                    outer_mpc::encode(&mut views[1].inputs, &raw_draw_words[draws[1]]);
+                    outer_mpc::encode(&mut views[0].inputs, &raw_draw_words.0[draws[0]]);
+                    outer_mpc::encode(&mut views[1].inputs, &raw_draw_words.0[draws[1]]);
                     outer_mpc::encode(
                         &mut views[2].inputs,
                         encodings[idx][2].as_ref().unwrap(),
@@ -1213,18 +1238,13 @@ fn evaluate_inner<T: Transport>(
         }
     }
 
-    for rw in &mut raw_draw_words {
-        for b in rw {
-            ct_zeroize_u64s(&mut b.0);
-        }
-    }
-
     Ok(views)
 }
 
 /// Compute the 256-bit `cSHAKE256("QSAG.MIGRATE.VIEW.V3")` view commitment shares
 /// for all 3 virtual heads in lockstep (`3x` fewer network rounds than sequential
-/// sponges, `0` rounds for the public customization block, and `0` wire openings).
+/// sponges, `0` rounds for the public customization block, `0` intermediate stream
+/// allocations, and `0` wire openings).
 fn compute_view_commit_bits<T: Transport>(
     e: &mut Engine<T>,
     batch: usize,
@@ -1238,53 +1258,60 @@ fn compute_view_commit_bits<T: Transport>(
         })
         .collect();
     let count6 = outer_mpc::public_bytes(e, &6u64.to_le_bytes());
+    let head_bits: [Word; 3] = core::array::from_fn(|head| outer_mpc::public_bytes(e, &[head as u8]));
+    let len_words = |bit_len: usize| outer_mpc::public_bytes(e, &((bit_len / 8) as u64).to_le_bytes());
+    let len_rep = len_words(rep.len());
+    let len_head = len_words(head_bits[0].len());
+    let len_seed = len_words(views[0].seed.len());
+    let len_in = len_words(views[0].inputs.len());
+    let len_prod = len_words(views[0].products.len());
+    let len_out = len_words(views[0].outputs.len());
 
     let mut sponges: [Sponge; 3] =
         core::array::from_fn(|_| Sponge::cshake_public(e, b"QSAG.MIGRATE.VIEW.V3"));
-    let streams: [Word; 3] = core::array::from_fn(|head| {
-        let head_bits = outer_mpc::public_bytes(e, &[head as u8]);
-        let frames: [&[Bit]; 6] = [
-            &rep,
-            &head_bits,
-            &views[head].seed,
-            &views[head].inputs,
-            &views[head].products,
-            &views[head].outputs,
-        ];
-        let total_bits = count6.len() + frames.iter().map(|f| 64 + f.len()).sum::<usize>();
-        let mut s = Vec::with_capacity(total_bits);
-        s.extend_from_slice(&count6);
-        for frame in frames {
-            let len_bits = outer_mpc::public_bytes(e, &((frame.len() / 8) as u64).to_le_bytes());
-            s.extend_from_slice(&len_bits);
-            s.extend_from_slice(frame);
-        }
-        s
-    });
 
-    debug_assert_eq!(streams[0].len(), streams[1].len());
-    debug_assert_eq!(streams[0].len(), streams[2].len());
+    let segments: [[&[Bit]; 3]; 13] = [
+        [&count6, &count6, &count6],
+        [&len_rep, &len_rep, &len_rep],
+        [&rep, &rep, &rep],
+        [&len_head, &len_head, &len_head],
+        [&head_bits[0], &head_bits[1], &head_bits[2]],
+        [&len_seed, &len_seed, &len_seed],
+        [&views[0].seed, &views[1].seed, &views[2].seed],
+        [&len_in, &len_in, &len_in],
+        [&views[0].inputs, &views[1].inputs, &views[2].inputs],
+        [&len_prod, &len_prod, &len_prod],
+        [&views[0].products, &views[1].products, &views[2].products],
+        [&len_out, &len_out, &len_out],
+        [&views[0].outputs, &views[1].outputs, &views[2].outputs],
+    ];
 
-    let total_len = streams[0].len();
-    let mut offset = 0usize;
-    while offset < total_len {
-        let pos = sponges[0].pos;
-        let take = (1088 - pos).min(total_len - offset);
-        for h in 0..3 {
-            for i in 0..take {
-                sponges[h].state[pos + i] = sponges[h].state[pos + i] ^ streams[h][offset + i];
+    for segs in segments {
+        debug_assert_eq!(segs[0].len(), segs[1].len());
+        debug_assert_eq!(segs[0].len(), segs[2].len());
+        let seg_len = segs[0].len();
+        let mut offset = 0usize;
+        while offset < seg_len {
+            let pos = sponges[0].pos;
+            let take = (1088 - pos).min(seg_len - offset);
+            for h in 0..3 {
+                let dst = &mut sponges[h].state[pos..pos + take];
+                let src = &segs[h][offset..offset + take];
+                for (d, &s) in dst.iter_mut().zip(src) {
+                    *d = *d ^ s;
+                }
+                sponges[h].pos = pos + take;
             }
-            sponges[h].pos = pos + take;
-        }
-        offset += take;
-        if sponges[0].pos == 1088 {
-            for sp in &mut sponges {
-                sp.pos = 0;
+            offset += take;
+            if sponges[0].pos == 1088 {
+                for sp in &mut sponges {
+                    sp.pos = 0;
+                }
+                let (s0, rest) = sponges.split_first_mut().unwrap();
+                let (s1, rest2) = rest.split_first_mut().unwrap();
+                let s2 = &mut rest2[0];
+                e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
             }
-            let (s0, rest) = sponges.split_first_mut().unwrap();
-            let (s1, rest2) = rest.split_first_mut().unwrap();
-            let s2 = &mut rest2[0];
-            e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
         }
     }
 
@@ -1568,6 +1595,8 @@ mod tests {
         });
     }
 
+    static HEAVY_CEREMONY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn complete_distributed_bitcoin_proof_verifies() {
         complete_proof(false);
@@ -1580,6 +1609,9 @@ mod tests {
 
     fn complete_proof(ed: bool) {
         use std::io::Read;
+        let _ceremony_guard = HEAVY_CEREMONY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut completed = false;
         for _attempt in 0..4 {
             let mut master = [0u8; 32];
@@ -1780,6 +1812,9 @@ mod tests {
     }
 
     fn assert_zkboo_fault_aborts_cleanly(ed: bool, fault: FaultInjection, session_tag: u8) {
+        let _ceremony_guard = HEAVY_CEREMONY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x31 + seed_try; 32]);
             let kind = if ed {
@@ -1902,6 +1937,9 @@ mod tests {
     }
 
     fn assert_input_substitution_aborts(ed: bool, delta_64bit: bool, session_tag: u8) {
+        let _ceremony_guard = HEAVY_CEREMONY_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let mut verified = false;
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x41 + seed_try; 32]);
