@@ -1247,11 +1247,16 @@ def cross_aarch64_bitslice(objdump):
         return audit(output, objdump, False, True)
 
 
-def check_fixtures(fixture, x86_rlib, aarch64_rlib):
+def check_fixtures(fixture, x86_rlib, aarch64_rlib, binding="object"):
     """Bind the literal certified archive, its SHA-256, and a fresh source build.
 
-    Exact object identity intentionally fails on source or toolchain drift. Updating
-    a digest alone cannot bless stale bytes: the embedded archive is also checked.
+    Two bindings are available. `object` (the default) requires the fresh ELF member to be
+    byte-identical to the certified one; it fails on any source, toolchain, flag or build-path
+    drift, including drift in compiled Rust code that no certificate covers. `kernel-bytes`
+    requires the same set of `qsag_asm_*` function symbols with identical code bytes, which is
+    exactly what the Lean certificates quantify over and does not depend on the build path.
+    Under either binding the embedded literal must hash to its recorded digest, so editing a
+    digest alone cannot bless stale bytes, and every differing symbol is reported by name.
     """
     import hashlib
     import extract_rlib_elf as elf
@@ -1275,12 +1280,38 @@ def check_fixtures(fixture, x86_rlib, aarch64_rlib):
         _, _, fresh = elf.extract_qsag_elf_from_rlib(Path(path))
         if pinned.machine != machine or fresh.machine != machine:
             raise ValueError(f"{prefix}: incorrect ELF architecture")
-        if fresh.sha256 != digest:
-            print(f"{prefix}: FAIL: stale certified fixture: pinned={digest}, fresh={fresh.sha256}; "
-                  "regenerate fixtures and their certificates with the CI toolchain", file=sys.stderr)
-            success = False
+        old = {symbol.name: symbol.code for symbol in pinned.qsag_symbols}
+        new = {symbol.name: symbol.code for symbol in fresh.qsag_symbols}
+        if len(old) != len(pinned.qsag_symbols) or len(new) != len(fresh.qsag_symbols):
+            raise ValueError(f"{prefix}: duplicate kernel symbol")
+        changed = [name for name in old if name in new and old[name] != new[name]]
+        removed = [name for name in old if name not in new]
+        added = [name for name in new if name not in old]
+        same = len(old) - len(changed) - len(removed)
+        for name in changed:
+            print(f"{prefix}: kernel bytes differ: {name}: certified {len(old[name])} B, "
+                  f"fresh {len(new[name])} B", file=sys.stderr)
+        for name in removed:
+            print(f"{prefix}: certified kernel absent from fresh build: {name}", file=sys.stderr)
+        for name in added:
+            print(f"{prefix}: fresh kernel without a certificate: {name} ({len(new[name])} B)",
+                  file=sys.stderr)
+        kernels_match = not (changed or removed or added)
+        object_match = fresh.sha256 == digest
+        print(f"{prefix}: kernels identical {same}/{len(old)}, changed {len(changed)}, "
+              f"removed {len(removed)}, uncertified new {len(added)}; "
+              f"object digest certified={digest} fresh={fresh.sha256}")
+        if binding == "object":
+            passed = object_match and kernels_match
         else:
-            print(f"{prefix}: fixture literal, SHA-256 and fresh source artifact match: {digest}")
+            passed = kernels_match
+        if passed:
+            print(f"{prefix}: PASS ({binding} binding)")
+        else:
+            print(f"{prefix}: FAIL: stale certified fixture ({binding} binding): pinned={digest}, "
+                  f"fresh={fresh.sha256}; regenerate fixtures and their certificates with the CI "
+                  "toolchain", file=sys.stderr)
+            success = False
     return success
 
 
@@ -1296,6 +1327,9 @@ def main():
     parser.add_argument('--check-fixtures', type=Path)
     parser.add_argument('--fixture-x86-rlib', type=Path)
     parser.add_argument('--fixture-aarch64-rlib', type=Path)
+    parser.add_argument('--fixture-binding', choices=('object', 'kernel-bytes'), default='object',
+                        help='object: fresh ELF member byte-identical to the certified one; '
+                             'kernel-bytes: identical qsag_asm_* symbol set and code bytes')
     parser.add_argument('--cross-aarch64-bitslice', action='store_true', help='cross-assemble and audit both AArch64 bitslice kernels')
     if any(arg in sys.argv for arg in ('--x86-asm-rs', '--aarch64-asm', '--extra-x86-obj',
                                       '--extra-rlib', '--aarch64-apple-rs', '--llvm-mc')):
@@ -1310,7 +1344,8 @@ def main():
         if not args.fixture_x86_rlib or not args.fixture_aarch64_rlib:
             parser.error('--check-fixtures requires both fixture rlib paths')
         try:
-            success = check_fixtures(args.check_fixtures, args.fixture_x86_rlib, args.fixture_aarch64_rlib)
+            success = check_fixtures(args.check_fixtures, args.fixture_x86_rlib, args.fixture_aarch64_rlib,
+                                     args.fixture_binding)
         except (ValueError, OSError, OverflowError) as error:
             print(f'fixture provenance: FAIL: {error}', file=sys.stderr)
             success = False

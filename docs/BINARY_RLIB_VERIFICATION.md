@@ -2,32 +2,62 @@
 
 ## Artifact scope and active integration
 
-Validation on 2026-11-14 distinguishes the passing component checks from the
-unfinished end-to-end gate:
+Validation on 2026-11-14 (host `bb2`, Lean 4.35.0, rustc/cargo 1.99.1, z3 5.4.1):
 
-- The seven buildable modules (`ElfBinaryVerify`, `ElfFixtureVerify`, `McRefine`,
-  `ConstantTimeIsa`, `IsaCosim`, `SimdBinaryEquiv`, `SpirvSimtGpuEquiv`) pass an
-  `import all` / `setExporting false` audit of 8,626 declarations, with axioms
-  restricted to `propext` and `Quot.sound`. This does not include the two
-  unfinished modules.
-- The native scalar/SIMD instruction comparison covered 7,184 vectors with zero
-  discrepancies. The SIMD release-byte tests passed 512 batches for each multiply
-  kernel and 512 transpose matrices. AArch64 extraction is mandatory; these runs
-  do not claim native AArch64 execution.
-- The positive-count SyDTV Python analysis runs, but the Lean SyDTV module still
-  fails elaboration after the shared instruction-semantics changes. Its generated
-  proof template also needs migration to the current certificate API.
-- The recovered functional-equivalence draft is not yet a verified module. The
-  larger SIMD functional-refinement draft also has unresolved proof errors.
-- Exact object freshness fails for both certificate archives. The fresh object
-  hashes are `85d7429a69d32eeaf3ba41602e48975fd8cc10b438f5dfcca5ae3e21ba63e115`
-  (x86_64) and `9cf028bfc3026a4ab25df434b4e4b6cc6a7ecc518652a205431f13807e9f1ba5`
-  (AArch64). The table below identifies the embedded certificates, not these
-  fresh objects. Regeneration requires coordinated changes to
-  `CompiledRlibFixtures.lean`, `ElfFixtureSlices.lean` and `ElfInvCerts.lean`.
+- **Lean build and axioms.** `lake build --wfail` passes for `ElfBinaryVerify`, `ElfFixtureVerify`,
+  `McRefine`, `ConstantTimeIsa`, `SydTvTranslationValidation`, `IsaCosim`, `SimdBinaryEquiv`,
+  `SpirvSimtGpuEquiv` and the `IsaCosim` executable root. An `import all` / `setExporting false`
+  crawl of those eight modules covers 9,576 declarations (2,888 + 85 + 412 + 2,257 + 950 + 85 +
+  620 + 2,279); every one depends on no axiom other than `propext` and `Quot.sound`.
+  `ElfFunctionalEquiv` is reported separately below (EFE_STATUS).
+- **SyDTV.** `SydTvTranslationValidation` was migrated to the corrected `stepX86` flag semantics
+  (architectural `OF` for `SUB`/`ADD`/`INC`/`DEC`, `CF`/`OF` for `SHR`). For each of the five loop
+  kernels it now has a `*_sydtv_refines_pos` theorem stated on `runX86One` / `runArm64One` over
+  the symbol bytes for a nonzero count. The `*_sydtv_refines_all_n` theorems are about the
+  guarded runners, whose zero-count branch is a hand-written model of the Rust wrappers' early
+  return and is not decoded machine code. The VPCLMUL byte list is bound to archive slice 6.
+  `python3 scripts/sydtv_driver.py --self-test --require-z3 --check-lean` passes: z3 returns
+  `unsat` for both induction cuts and `sat` for the same cuts with the trip-count bound removed,
+  and both emitted certificate proposals elaborate against the current certificate API. The
+  driver covers the two memzero kernels only; no solver answer is used by a Lean proof.
+- **Native comparison (earlier run the same day, not repeated here).** 7,184 scalar/SIMD
+  instruction vectors with zero discrepancies; 512 batches per multiply kernel and 512 transpose
+  matrices. AArch64 bytes are extracted, not executed.
+- **Fixture freshness: FAIL, measured per kernel.** The archives embedded in
+  `CompiledRlibFixtures.lean` do not correspond to the current assembly source, and for x86_64
+  they correspond to no committed revision:
+
+  | Source built with the CI command | x86_64 kernels identical to the fixture | AArch64 kernels identical to the fixture | Kernels with no certificate |
+  | :--- | ---: | ---: | :--- |
+  | working tree (2026-11-14) | 0 of 16 | 6 of 7 (`qsag_asm_goldilocks_mul_ct_aarch64` differs, 116 B → 120 B) | `transpose64x256_avx2`, `gf2_128_mul_acc_pclmul`, `gf2_128_mul_acc_vpclmul`, `transpose64x256_neon`, `gf2_128_mul_acc_pmull` |
+  | `git archive b1cd91a` | 0 of 16 | 7 of 7 | the same five |
+
+  Every current x86_64 kernel is 20–25 bytes longer than its certified counterpart (for example
+  `qsag_asm_ct_memzero_x86_64`: 19 B certified, 41 B current), so every theorem pinned to x86_64
+  fixture bytes describes historical machine code. Object digests (`.rcgu.o`, SHA-256):
+
+  | | x86_64 | AArch64 |
+  | :--- | :--- | :--- |
+  | certified fixture | `fbe87faf1486cb90698fba4dfd7497b66f50032a70d69abb7cddeaf1ee332702` | `8ca2b4c1c28ee5d653803c2b4aa57681481179243f4addcc15eba797e3be8c7e` |
+  | working tree | `2761fb2d78e9222cee880ae63b8d384eccd035f5ab7fcc10f527b05a9b665e1d` | `9cf028bfc3026a4ab25df434b4e4b6cc6a7ecc518652a205431f13807e9f1ba5` |
+  | `b1cd91a` | `fea50f3ea24b7a390886cafbd9baca4bca727b661fe35f8d26df5bf1a02260dc` | `94dd899358232e5b02889d864987ffb28354ac0555bb8b1b08f555efaf7b9dfb` |
+
+  The object digest also depends on the cargo invocation: the same working tree built with an
+  explicit `--target x86_64-unknown-linux-gnu` gives `85d7429a…`, because the object contains
+  compiled Rust code besides the assembly kernels. `scripts/audit_elf_ct.py --check-fixtures`
+  therefore prints a per-kernel verdict and accepts `--fixture-binding kernel-bytes` (identical
+  `qsag_asm_*` symbol set and code bytes, which is what the certificates quantify over); the
+  default `object` binding is unchanged. Both bindings fail today.
+
+  Refreshing the fixtures is one coordinated change across `CompiledRlibFixtures.lean`,
+  `ElfFixtureSlices.lean`, `ElfInvCerts.lean`, the slice-equality proofs in `ElfParse.lean`, the
+  contracts in `ElfFixtureVerify.lean` (five new kernels need contracts, and the two transpose
+  kernels need decoder coverage), the mutation offsets in `ElfBinaryVerify.lean`, and every
+  byte-pinned x86_64 proof in `McRefine.lean`, `SydTvTranslationValidation.lean` and
+  `ElfFunctionalEquiv.lean`. It was not started here: a partial refresh would turn the passing
+  modules red.
 - `Qsag.IsaCosim` contains the pure executor adapter and regression vectors;
-  `lean/IsaCosim.lean` imports it for JSON transport. The central axiom-audit
-  manifest must register the new proof module before its inventory gate can pass.
+  `lean/IsaCosim.lean` imports it for JSON transport.
 
 The SPIR-V module proves codec, scheduling, race-freedom and leakage-model
 properties. Runtime shader functional equivalence remains unproved; its former
@@ -74,7 +104,7 @@ Specifically, the verification pipeline:
 
 ## 2. Cryptographic Provenance of Verified `.rlib` Binaries
 
-Both `.rlib` archives were compiled with `cargo build -p qsag-asm --release` (`release profile with LTO disabled`) on remote Linux hardware (`x86 Linux build host` for `x86_64`, `ARM Linux build host` for `aarch64`) and embedded as compact 32-word little-endian `UInt64` chunks in `lean/Qsag/CompiledRlibFixtures.lean` via `scripts/extract_rlib_elf.py`:
+The table describes the embedded archives, which are historical (see the freshness result above); it is not a description of a current build. Both `.rlib` archives were compiled with `cargo build -p qsag-asm --release` (`release profile with LTO disabled`) on remote Linux hardware (`x86 Linux build host` for `x86_64`, `ARM Linux build host` for `aarch64`) and embedded as compact 32-word little-endian `UInt64` chunks in `lean/Qsag/CompiledRlibFixtures.lean` via `scripts/extract_rlib_elf.py`:
 
 | Target Triple | Build Host | Artifact | Byte Size | SHA-256 Digest | Symbols / Instrs |
 | :--- | :--- | :--- | ---: | :--- | ---: |
@@ -165,4 +195,16 @@ python3 scripts/extract_rlib_elf.py \
 
 # 2. From lean/ in an isolated Linux checkout with the matching toolchain
 SWARM_MEM_MAX=12G timeout --kill-after=10s 600s swarm-build lake build Qsag.ElfBinaryVerify
+
+# 3. Fixture freshness against a non-LTO build of the current source (prints a per-kernel verdict)
+CARGO_PROFILE_RELEASE_LTO=false cargo build -p qsag-asm --release --target-dir target/ct-audit
+CARGO_PROFILE_RELEASE_LTO=false cargo build -p qsag-asm --release \
+  --target aarch64-unknown-linux-gnu --target-dir target/ct-audit
+python3 scripts/audit_elf_ct.py --check-fixtures lean/Qsag/CompiledRlibFixtures.lean \
+  --fixture-x86-rlib target/ct-audit/release/libqsag_asm.rlib \
+  --fixture-aarch64-rlib target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib \
+  --fixture-binding kernel-bytes
+
+# 4. SyDTV cut discovery with z3 and Lean elaboration of the emitted proposals
+python3 scripts/sydtv_driver.py --self-test --require-z3 --check-lean
 ```

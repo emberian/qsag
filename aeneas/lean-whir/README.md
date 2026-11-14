@@ -34,4 +34,4 @@ These theorems prove exact MIR-to-specification refinement of the extracted veri
 
 All production scoped workers in `qsag-agg`, including nested arithmetic kernels, share one
 nonblocking permit budget. Saturated budgets and OS thread-creation failures execute the job
-on the caller; chunk results retain input order and worker panics retain their original payload.
+on the caller, and chunk results retain input order.
