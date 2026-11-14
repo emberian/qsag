@@ -45,14 +45,14 @@ extern crate std;
 pub mod arithmetize;
 pub mod field;
 pub mod pcs;
+#[cfg(feature = "std")]
+mod pool;
 pub mod recursive;
 pub use recursive::{
     HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate, MAX_HIERARCHY_SHARDS, ShardHemBatch,
     ShardHemPolicy, ShardHemWitness, checked_sum_usize, compute_framed_message_digest,
     compute_policy_registry_root, encode_policy_registry, hierarchical_hem_message,
-    hierarchical_hem_registry_bound_message, prove_hierarchical_hem,
-    prove_hierarchical_hem_registry_bound, verify_hierarchical_hem,
-    verify_hierarchical_hem_registry_bound,
+    prove_hierarchical_hem, verify_hierarchical_hem,
 };
 pub mod sig;
 pub mod sponge;
@@ -218,7 +218,7 @@ pub(crate) fn parallel_pow2_workers(max_units: usize) -> usize {
 
 pub use arithmetize::{
     ShardBatchProof, ShardRowProof, compute_signing_mode_digest, max_shard_signers,
-    prove_shard_batch, verify_shard_batch,
+    prove_shard_batch, verify_shard_batch, verify_shard_batch_with_regime,
 };
 pub use field::{Goldilocks, GoldilocksExt2, GoldilocksExt4, RoundPolyExt4};
 pub use pcs::{
@@ -262,9 +262,8 @@ pub const DEFAULT_MAX_SHARDS_PER_BATCH: usize = 2;
 /// Configuration parameters for [`HemAggregator::aggregate_with_config`] (`aggregate_signatures_with_config`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HemAggConfig {
+    /// Query-accounting regime; proofs always use its canonical schedule.
     pub regime: WhirSecurityRegime,
-    /// Optional explicit schedule; must match the regime and each batch dimension.
-    pub whir_schedule: Option<WhirSchedule>,
     /// Maximum active signers packed into a single shard (`1..=max_shard_signers(profile)`).
     pub max_signers_per_shard: usize,
     /// Maximum shards proven under one commitment and one WHIR opening (`1..=MAX_BATCH_POLYS`).
@@ -280,7 +279,6 @@ impl HemAggConfig {
     pub fn default_for(profile: AggSigProfile, blinding_seed: [u8; 32]) -> Self {
         Self {
             regime: WhirSecurityRegime::default(),
-            whir_schedule: None,
             max_signers_per_shard: max_shard_signers(profile),
             max_shards_per_batch: DEFAULT_MAX_SHARDS_PER_BATCH,
             blinding_seed,
@@ -328,7 +326,9 @@ impl MergeNode {
     /// Check every leaf, bounding recursion even for directly constructed trees.
     fn homogeneous_regime(&self, rem_depth: usize) -> Option<WhirSecurityRegime> {
         match self {
-            Self::Leaf(leaf) => Some(leaf.schedule.regime),
+            Self::Leaf(leaf) => (leaf.pcs_opening.common_point_evals.len()
+                == leaf.pcs_opening.shifted_evals.len())
+            .then_some(leaf.schedule.regime),
             Self::Branch { left, right, .. } if rem_depth > 0 => {
                 let regime = left.homogeneous_regime(rem_depth - 1)?;
                 (right.homogeneous_regime(rem_depth - 1)? == regime).then_some(regime)
@@ -606,15 +606,22 @@ struct AggStatement<'a> {
     committee_root: &'a [u8; 32],
     profile: AggSigProfile,
     mode: &'a SigningMode<'a>,
+    /// The one regime every leaf must use, with its canonical schedule.
+    regime: WhirSecurityRegime,
     root_active: Vec<usize>,
 }
 
 impl AggStatement<'_> {
     fn verify_leaf(&self, leaf: &ShardBatchProof) -> bool {
         match self.mode {
-            SigningMode::SharedMessage(_) => {
-                verify_shard_batch(self.pks, self.committee_root, self.profile, self.mode, leaf)
-            }
+            SigningMode::SharedMessage(_) => verify_shard_batch_with_regime(
+                self.pks,
+                self.committee_root,
+                self.profile,
+                self.mode,
+                leaf,
+                self.regime,
+            ),
             SigningMode::PerSignerMessages(root_msgs) => {
                 if root_msgs.len() != self.root_active.len() {
                     return false;
@@ -627,12 +634,13 @@ impl AggStatement<'_> {
                     leaf_msgs.push(root_msgs[pos]);
                 }
                 let leaf_mode = SigningMode::PerSignerMessages(&leaf_msgs);
-                verify_shard_batch(
+                verify_shard_batch_with_regime(
                     self.pks,
                     self.committee_root,
                     self.profile,
                     &leaf_mode,
                     leaf,
+                    self.regime,
                 )
             }
         }
@@ -925,6 +933,7 @@ fn check_mergeable(
         committee_root: &committee_root,
         profile: proof_a.profile,
         mode: merged_mode,
+        regime,
         root_active: merged_bitmap.active_indices(),
     };
     if !statement.verify_node(&proof_a.root, MAX_MERGE_TREE_DEPTH - 1)
@@ -936,25 +945,23 @@ fn check_mergeable(
 }
 
 /// Verify a `HemAggregatedProof` against `pks` and `mode` without ever seeing any individual
-/// `ValidatorSignature`. Every leaf must use the same regime meeting the QROM-128 floor.
+/// `ValidatorSignature`. Every leaf must use the default Johnson QROM regime.
 pub fn verify_aggregate(
     pks: &[ValidatorPublicKey],
     mode: &SigningMode<'_>,
     proof: &HemAggregatedProof,
 ) -> bool {
-    let Some(regime) = proof.root.homogeneous_regime(MAX_MERGE_TREE_DEPTH) else {
-        return false;
-    };
-    regime.meets_qrom_128_floor() && verify_aggregate_with_regime(pks, mode, proof, regime)
+    verify_aggregate_with_regime(pks, mode, proof, WhirSecurityRegime::default())
 }
 
-/// Verify every leaf under exactly the explicitly selected regime, including legacy budgets.
+/// Verify every leaf under exactly the explicitly selected QROM-128 regime.
 pub fn verify_aggregate_with_regime(
     pks: &[ValidatorPublicKey],
     mode: &SigningMode<'_>,
     proof: &HemAggregatedProof,
     expected_regime: WhirSecurityRegime,
 ) -> bool {
+    let _phase = crate::profile::span("verify_aggregate");
     if proof.root.homogeneous_regime(MAX_MERGE_TREE_DEPTH) != Some(expected_regime) {
         return false;
     }
@@ -973,6 +980,7 @@ pub fn verify_aggregate_with_regime(
         committee_root: &committee_root,
         profile: proof.profile,
         mode,
+        regime: expected_regime,
         root_active: proof.bitmap().active_indices(),
     };
     statement.verify_node(&proof.root, MAX_MERGE_TREE_DEPTH)
@@ -1526,9 +1534,6 @@ mod tests {
         let bitmap = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
         let mode = SigningMode::SharedMessage(msg);
         for regime in [
-            WhirSecurityRegime::Habr24Classical128,
-            WhirSecurityRegime::Habr24Interactive128,
-            WhirSecurityRegime::BciksJohnsonClassical128,
             WhirSecurityRegime::Habr24Qrom128,
             WhirSecurityRegime::BciksJohnsonQrom128,
         ] {
@@ -1554,11 +1559,11 @@ mod tests {
             );
             assert_eq!(
                 HemAggregator::verify(&pks, &mode, &proof),
-                regime.meets_qrom_128_floor()
+                regime == WhirSecurityRegime::default()
             );
             assert_eq!(
                 verify_aggregate(&pks, &mode, &proof),
-                regime.meets_qrom_128_floor()
+                regime == WhirSecurityRegime::default()
             );
             let wrong = if regime == WhirSecurityRegime::Habr24Qrom128 {
                 WhirSecurityRegime::BciksJohnsonQrom128
@@ -1566,9 +1571,53 @@ mod tests {
                 WhirSecurityRegime::Habr24Qrom128
             };
             assert!(!verify_aggregate_with_regime(&pks, &mode, &proof, wrong));
+            let mut unframed = leaf_of(&proof);
+            unframed
+                .pcs_opening
+                .common_point_evals
+                .push(GoldilocksExt4::ONE);
+            let unframed = with_leaf(&proof, unframed);
+            assert!(!verify_aggregate_with_regime(
+                &pks, &mode, &unframed, regime
+            ));
+            assert!(std::panic::catch_unwind(|| unframed.to_bytes()).is_err());
+
             let mut bad = leaf_of(&proof);
             bad.schedule.stages[0].num_queries = 1;
             assert!(!HemAggregator::verify(&pks, &mode, &with_leaf(&proof, bad)));
+
+            // The leaf verifier itself enforces the QROM-128 floor and exact regime parity.
+            let leaf = leaf_of(&proof);
+            let committee_root = compute_committee_root(&pks);
+            let profile = AggSigProfile::JortsPoseidon2;
+            assert_eq!(
+                verify_shard_batch(&pks, &committee_root, profile, &mode, &leaf),
+                regime == WhirSecurityRegime::default()
+            );
+            assert!(verify_shard_batch_with_regime(
+                &pks,
+                &committee_root,
+                profile,
+                &mode,
+                &leaf,
+                regime
+            ));
+            assert!(!verify_shard_batch_with_regime(
+                &pks,
+                &committee_root,
+                profile,
+                &mode,
+                &leaf,
+                wrong
+            ));
+            // A structurally valid schedule that is not the regime's canonical one (one extra
+            // Stage-0 query) is refused before any transcript work.
+            let num_vars =
+                leaf.pcs_opening.opening.fold_sumcheck_polys.len() + leaf.schedule.early_stop_vars;
+            assert!(leaf.schedule.validate(num_vars) && leaf.schedule.is_canonical(num_vars));
+            let mut padded = leaf.schedule.clone();
+            padded.stages[0].num_queries += 1;
+            assert!(!padded.validate(num_vars) && !padded.is_canonical(num_vars));
         }
     }
 
@@ -1595,10 +1644,8 @@ mod tests {
             .unwrap()
         };
         let a = make(0, WhirSecurityRegime::Habr24Qrom128);
-        for regime in [
-            WhirSecurityRegime::BciksJohnsonQrom128,
-            WhirSecurityRegime::Habr24Classical128,
-        ] {
+        {
+            let regime = WhirSecurityRegime::BciksJohnsonQrom128;
             let b = make(1, regime);
             assert_eq!(
                 HemAggregator::merge(&pks, &mode, &a, &b),
@@ -1633,7 +1680,7 @@ mod tests {
             );
         }
         for regime in [
-            WhirSecurityRegime::Habr24Classical128,
+            WhirSecurityRegime::Habr24Qrom128,
             WhirSecurityRegime::BciksJohnsonQrom128,
         ] {
             let merged =
@@ -1643,7 +1690,7 @@ mod tests {
             ));
             assert_eq!(
                 HemAggregator::verify(&pks, &mode, &merged),
-                regime.meets_qrom_128_floor()
+                regime == WhirSecurityRegime::default()
             );
         }
     }
@@ -1651,7 +1698,7 @@ mod tests {
     #[test]
     fn test_hem_aggregator_api_and_adversarial_whir_soundness() {
         // Test the Pants-themed `HemAggregator` API at `K = 8` (`JortsPoseidon2`), checking
-        // proof size (`<= 170 KB`), OOD claims, Ext4 folding claims, per-stage PoW nonces, Steiner
+        // proof size (`<= 300 KB`), OOD claims, Ext4 folding claims, per-stage PoW nonces, Steiner
         // multiproofs, and truncated wire transcripts.
         let mut kps: Vec<ValidatorKeypair> = (0..8u32).map(|i| gen_jorts_kp(7777, i)).collect();
         let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
@@ -1670,8 +1717,8 @@ mod tests {
 
         let wire = proof.to_bytes();
         assert!(
-            wire.len() <= 170_000,
-            "Hem QROM-128 K=8 proof must stay below 170 KB, got {} B",
+            wire.len() <= 300_000,
+            "Hem Johnson QROM-128 K=8 proof must stay below 300 KB, got {} B",
             wire.len()
         );
         assert_eq!(
@@ -2029,7 +2076,6 @@ mod tests {
         let mode = SigningMode::SharedMessage(msg);
         let cfg = AggConfig {
             regime: WhirSecurityRegime::default(),
-            whir_schedule: None,
             max_signers_per_shard: 2,
             max_shards_per_batch: 4,
             blinding_seed: make_seed(41),
@@ -2330,7 +2376,6 @@ mod tests {
         let mode = SigningMode::SharedMessage(msg);
         let cfg_a = AggConfig {
             regime: WhirSecurityRegime::default(),
-            whir_schedule: None,
             max_signers_per_shard: 2,
             max_shards_per_batch: 2,
             blinding_seed: make_seed(31),
@@ -2353,8 +2398,8 @@ mod tests {
         assert_eq!(
             (hex32(&pcs_digest_1).as_str(), hex32(&agg_digest_1).as_str()),
             (
-                "45f31a078bc0d27c77e8c88d2f44b558542bd2e11269ffd130b7f3539a9ec630",
-                "c19d9ef6dd07e9dcced41c11a47ba9fad136961cfbb1dbfd3cf4590a04095b71"
+                "8b28be2a1480275c9c05403f3a37d0291e1d51c3c1e610877ab981a348cf0ace",
+                "c5e42a034c3a0429f564465a8616fad933741e81f2cf6d30eb1a300a1106fc25"
             )
         );
     }

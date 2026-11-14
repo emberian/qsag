@@ -64,7 +64,7 @@ fn device() -> Option<&'static Device> {
         .as_ref()
 }
 
-/// Physical submissions, accepted V4 receipts, and operation fallbacks for this process.
+/// Physical submissions, accepted V5 receipts, and operation fallbacks for this process.
 /// `None` means the optional device is disabled or failed initialization.
 pub fn vulkan_execution_counts() -> Option<(u64, u64, u64)> {
     let d = device()?;
@@ -102,7 +102,7 @@ pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
             .goldilocks_ntt_inplace(&mut words, &twiddles, false)
     };
     let receipt = result.and_then(|()| {
-        ExecutionReceipt::compute_keyed(
+        ExecutionReceipt::compute_audited(
             &device.key,
             &device.backend.kernel_pin(KernelSlot::GoldilocksNtt),
             BatchJobDescriptor::GoldilocksNtt {
@@ -112,6 +112,7 @@ pub(crate) fn ntt(values: &mut [Goldilocks]) -> bool {
             device.backend.inner().device_info().audit_evidence_digest(),
             input_digest,
             digest_words(&words),
+            device.backend.hardware_audit_digest(),
         )
     });
     let valid = receipt
