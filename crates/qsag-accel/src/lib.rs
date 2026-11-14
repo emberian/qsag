@@ -30,7 +30,9 @@ pub mod vulkan;
 #[allow(unsafe_code)]
 mod vulkan_ffi;
 
-pub use vulkan::{VulkanDeviceInfo, VulkanError, VulkanRdna2Backend, VulkanSpirvBackend};
+pub use vulkan::{
+    PipelineTelemetry, VulkanDeviceInfo, VulkanError, VulkanRdna2Backend, VulkanSpirvBackend,
+};
 
 use ct::{RedactedSecret, ct_eq_bytes_mask, ct_eq_mask_u64};
 use gf2_128::bdoz_gf2_128_batch_dot_cpu;
@@ -433,6 +435,8 @@ pub trait AcceleratorBackend: Send + Sync {
 
     /// In-place radix-2 Goldilocks NTT (`inverse == false`) and inverse NTT (`inverse == true`).
     ///
+    /// Public `twiddles` must be successive powers of a primitive root, as produced by
+    /// [`goldilocks::precompute_goldilocks_twiddles`].
     /// `buf.len()` must be a power of two and `twiddles.len() == buf.len() / 2`; otherwise an
     /// [`AccelError`] is returned and `buf` is left untouched.
     fn goldilocks_ntt_inplace(

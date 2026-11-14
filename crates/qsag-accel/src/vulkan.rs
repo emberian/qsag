@@ -36,6 +36,12 @@ pub enum VulkanError {
     UnsupportedDeviceLimits,
     /// Driver executable telemetry rejected the compiled pipeline.
     PipelineAuditFailed(&'static str),
+    /// Executable properties disagree with the required subgroup size.
+    UnexpectedSubgroupSize {
+        slot: KernelSlot,
+        required: u32,
+        reported: u32,
+    },
     /// `dlopen("libvulkan.so.1")` failed (no Vulkan loader installed or accessible).
     LibraryLoadFailed,
     /// A required core Vulkan entry point was not exported by the loader or ICD.
@@ -61,7 +67,17 @@ pub enum VulkanError {
 impl core::fmt::Display for VulkanError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {
-            Self::UnsupportedDeviceLimits => f.write_str("device limits cannot support the embedded shaders"),
+            Self::UnsupportedDeviceLimits => {
+                f.write_str("device limits cannot support the embedded shaders")
+            }
+            Self::UnexpectedSubgroupSize {
+                slot,
+                required,
+                reported,
+            } => write!(
+                f,
+                "{slot:?}: required subgroup {required}, driver reported {reported}"
+            ),
             Self::PipelineAuditFailed(reason) => write!(f, "pipeline audit failed: {reason}"),
             Self::UnsupportedPlatform => {
                 f.write_str("Vulkan SPIR-V backend requires 64-bit Linux with feature `std`")
@@ -255,6 +271,19 @@ impl VulkanSpirvBackend {
         {
             Err(VulkanError::UnsupportedPlatform)
         }
+    }
+
+    /// Require driver-confirmed Wave32 and zero scratch for every executable.
+    /// Unlike `try_new`, unavailable telemetry is an error. This checks compiler
+    /// reports, not a formal constant-time or physical side-channel proof.
+    pub fn try_new_audited() -> Result<Self, VulkanError> {
+        let backend = Self::try_new()?;
+        let info = backend.device_info();
+        if !info.wave32_required || info.pipelines.iter().any(|stats|
+            stats.subgroup_size != Some(32) || stats.scratch_bytes != Some(0)) {
+            return Err(VulkanError::PipelineAuditFailed("Wave32/zero-scratch evidence unavailable"));
+        }
+        Ok(backend)
     }
 
     /// Canonical `KernelTargetArch::SpirV16` pin for `slot` computed from its embedded SPIR-V binary.
@@ -492,10 +521,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         }
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
-            let mut guard = self
-                .engine
-                .lock()
-                .map_err(|_| AccelError::LengthOverflow)?;
+            let mut guard = self.engine.lock().map_err(|_| AccelError::LengthOverflow)?;
             guard
                 .exec_goldilocks_ntt(buf, twiddles, inverse)
                 .map_err(|e| match e {
@@ -538,10 +564,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         }
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
-            let mut guard = self
-                .engine
-                .lock()
-                .map_err(|_| AccelError::LengthOverflow)?;
+            let mut guard = self.engine.lock().map_err(|_| AccelError::LengthOverflow)?;
             guard
                 .exec_coset_lde_ext2(evals, blowup, shift, out)
                 .map_err(|e| match e {
@@ -592,10 +615,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
             if out_parents.is_empty() {
                 return Ok(());
             }
-            let mut guard = self
-                .engine
-                .lock()
-                .map_err(|_| AccelError::LengthOverflow)?;
+            let mut guard = self.engine.lock().map_err(|_| AccelError::LengthOverflow)?;
             guard
                 .exec_merkle_layer(children, pk_seed, layer, start_parent_idx, out_parents)
                 .map_err(|e| match e {
@@ -629,10 +649,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
             if shares.is_empty() {
                 return Ok((0, 0));
             }
-            let mut guard = self
-                .engine
-                .lock()
-                .map_err(|_| AccelError::LengthOverflow)?;
+            let mut guard = self.engine.lock().map_err(|_| AccelError::LengthOverflow)?;
             let res = guard
                 .exec_bdoz_gf2_128_dot(shares, weights)
                 .map_err(|e| match e {
@@ -965,9 +982,8 @@ mod tests {
             u64::MAX,
         ] {
             assert_eq!(
-                CpuReferenceBackend.try_merkle_layer_poseidon2_at(
-                    &children, &seed, 0, bad_idx, &mut out
-                ),
+                CpuReferenceBackend
+                    .try_merkle_layer_poseidon2_at(&children, &seed, 0, bad_idx, &mut out),
                 Err(AccelError::LengthOverflow)
             );
         }

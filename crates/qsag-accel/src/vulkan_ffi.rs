@@ -555,51 +555,101 @@ type PfnVkCreateDevice = unsafe extern "C" fn(
 ) -> i32;
 type PfnVkGetDeviceProcAddr = unsafe extern "C" fn(VkDevice, *const c_char) -> PfnVoid;
 
-
 // Extension ABI mirrors vulkan_core.h. All output buffers are initialized, bounded,
 // and remain alive through their synchronous Vulkan calls.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct ExtensionProperties { name: [u8; 256], version: u32 }
-#[repr(C)]
-struct FeatureChain { s_type: u32, p_next: *mut c_void, enabled: u32, extra: u32 }
-#[repr(C)]
-struct Features2 { s_type: u32, p_next: *mut c_void, features: VkPhysicalDeviceFeatures }
-#[repr(C)]
-struct Properties2 { s_type: u32, p_next: *mut c_void, properties: VkPhysicalDevicePropertiesRaw }
-#[repr(C)]
-struct SubgroupProperties {
-    s_type: u32, p_next: *mut c_void, min: u32, max: u32,
-    max_compute_subgroups: u32, required_stages: u32,
+struct ExtensionProperties {
+    name: [u8; 256],
+    version: u32,
 }
 #[repr(C)]
-struct RequiredSubgroup { s_type: u32, p_next: *const c_void, size: u32 }
+struct FeatureChain {
+    s_type: u32,
+    p_next: *mut c_void,
+    enabled: u32,
+    extra: u32,
+}
 #[repr(C)]
-struct PipelineInfo { s_type: u32, p_next: *const c_void, pipeline: VkPipeline }
+struct Features2 {
+    s_type: u32,
+    p_next: *mut c_void,
+    features: VkPhysicalDeviceFeatures,
+}
 #[repr(C)]
-struct ExecutableInfo { s_type: u32, p_next: *const c_void, pipeline: VkPipeline, index: u32 }
+struct Properties2 {
+    s_type: u32,
+    p_next: *mut c_void,
+    properties: VkPhysicalDevicePropertiesRaw,
+}
+#[repr(C)]
+struct SubgroupProperties {
+    s_type: u32,
+    p_next: *mut c_void,
+    min: u32,
+    max: u32,
+    max_compute_subgroups: u32,
+    required_stages: u32,
+}
+#[repr(C)]
+struct RequiredSubgroup {
+    s_type: u32,
+    p_next: *const c_void,
+    size: u32,
+}
+#[repr(C)]
+struct PipelineInfo {
+    s_type: u32,
+    p_next: *const c_void,
+    pipeline: VkPipeline,
+}
+#[repr(C)]
+struct ExecutableInfo {
+    s_type: u32,
+    p_next: *const c_void,
+    pipeline: VkPipeline,
+    index: u32,
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ExecutableProperties {
-    s_type: u32, p_next: *mut c_void, stages: u32,
-    name: [u8; 256], description: [u8; 256], subgroup_size: u32,
+    s_type: u32,
+    p_next: *mut c_void,
+    stages: u32,
+    name: [u8; 256],
+    description: [u8; 256],
+    subgroup_size: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct ExecutableStatistic {
-    s_type: u32, p_next: *mut c_void, name: [u8; 256], description: [u8; 256],
-    format: u32, value: u64,
+    s_type: u32,
+    p_next: *mut c_void,
+    name: [u8; 256],
+    description: [u8; 256],
+    format: u32,
+    value: u64,
 }
 const _: () = assert!(size_of::<ExecutableProperties>() == 536);
 const _: () = assert!(size_of::<ExecutableStatistic>() == 544);
-type GetExecutables = unsafe extern "C" fn(VkDevice, *const PipelineInfo, *mut u32, *mut ExecutableProperties) -> i32;
-type GetStatistics = unsafe extern "C" fn(VkDevice, *const ExecutableInfo, *mut u32, *mut ExecutableStatistic) -> i32;
+type GetExecutables =
+    unsafe extern "C" fn(VkDevice, *const PipelineInfo, *mut u32, *mut ExecutableProperties) -> i32;
+type GetStatistics = unsafe extern "C" fn(
+    VkDevice,
+    *const ExecutableInfo,
+    *mut u32,
+    *mut ExecutableStatistic,
+) -> i32;
 
 struct DeviceFns {
     destroy_device: unsafe extern "C" fn(VkDevice, *const c_void),
     get_device_queue: unsafe extern "C" fn(VkDevice, u32, u32, *mut VkQueue),
-    create_buffer:
-        unsafe extern "C" fn(VkDevice, *const VkBufferCreateInfo, *const c_void, *mut VkBuffer) -> i32,
+    create_buffer: unsafe extern "C" fn(
+        VkDevice,
+        *const VkBufferCreateInfo,
+        *const c_void,
+        *mut VkBuffer,
+    ) -> i32,
     destroy_buffer: unsafe extern "C" fn(VkDevice, VkBuffer, *const c_void),
     get_buffer_memory_requirements:
         unsafe extern "C" fn(VkDevice, VkBuffer, *mut VkMemoryRequirements),
@@ -638,7 +688,7 @@ struct DeviceFns {
     destroy_pipeline_layout: unsafe extern "C" fn(VkDevice, VkPipelineLayout, *const c_void),
     create_compute_pipelines: unsafe extern "C" fn(
         VkDevice,
-         u64,
+        u64,
         u32,
         *const VkComputePipelineCreateInfo,
         *const c_void,
@@ -703,8 +753,12 @@ struct DeviceFns {
         u32,
         *const c_void,
     ),
-    create_fence:
-        unsafe extern "C" fn(VkDevice, *const VkFenceCreateInfo, *const c_void, *mut VkFence) -> i32,
+    create_fence: unsafe extern "C" fn(
+        VkDevice,
+        *const VkFenceCreateInfo,
+        *const c_void,
+        *mut VkFence,
+    ) -> i32,
     destroy_fence: unsafe extern "C" fn(VkDevice, VkFence, *const c_void),
     reset_fences: unsafe extern "C" fn(VkDevice, u32, *const VkFence) -> i32,
     wait_for_fences: unsafe extern "C" fn(VkDevice, u32, *const VkFence, u32, u64) -> i32,
@@ -863,14 +917,15 @@ fn find_memory_type(
 
 impl RawVulkanEngine {
     pub(crate) fn try_new() -> Result<(Self, VulkanDeviceInfo), VulkanError> {
-        let lib_handle =
-            unsafe { dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
+        if cfg!(target_endian = "big") {
+            return Err(VulkanError::UnsupportedPlatform);
+        }
+        let lib_handle = unsafe { dlopen(c"libvulkan.so.1".as_ptr(), RTLD_NOW | RTLD_LOCAL) };
         if lib_handle.is_null() {
             return Err(VulkanError::LibraryLoadFailed);
         }
 
-        let gipa_raw =
-            unsafe { dlsym(lib_handle, c"vkGetInstanceProcAddr".as_ptr()) };
+        let gipa_raw = unsafe { dlsym(lib_handle, c"vkGetInstanceProcAddr".as_ptr()) };
         if gipa_raw.is_null() {
             unsafe {
                 let _ = dlclose(lib_handle);
@@ -1044,8 +1099,7 @@ impl RawVulkanEngine {
             }
             phys_devs.clear();
             phys_devs.resize(dev_count as usize, null_mut());
-            let list_rc =
-                unsafe { enum_devs(instance, &mut dev_count, phys_devs.as_mut_ptr()) };
+            let list_rc = unsafe { enum_devs(instance, &mut dev_count, phys_devs.as_mut_ptr()) };
             if list_rc == VK_INCOMPLETE {
                 continue;
             }
@@ -1059,15 +1113,20 @@ impl RawVulkanEngine {
         }
 
         // Select discrete GPU (`VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU`), preferring AMD (`0x1002`).
-        let mut chosen: Option<(VkPhysicalDevice, VkPhysicalDevicePropertiesRaw, VkPhysicalDeviceFeatures)> =
-            None;
+        let mut chosen: Option<(
+            VkPhysicalDevice,
+            VkPhysicalDevicePropertiesRaw,
+            VkPhysicalDeviceFeatures,
+        )> = None;
         let mut saw_discrete_without_int64 = false;
         for &pd in &phys_devs {
             if pd.is_null() {
                 continue;
             }
-            let mut props = unsafe { MaybeUninit::<VkPhysicalDevicePropertiesRaw>::zeroed().assume_init() };
-            let mut feats = unsafe { MaybeUninit::<VkPhysicalDeviceFeatures>::zeroed().assume_init() };
+            let mut props =
+                unsafe { MaybeUninit::<VkPhysicalDevicePropertiesRaw>::zeroed().assume_init() };
+            let mut feats =
+                unsafe { MaybeUninit::<VkPhysicalDeviceFeatures>::zeroed().assume_init() };
             unsafe {
                 get_props(pd, &mut props);
                 get_feats(pd, &mut feats);
@@ -1080,7 +1139,10 @@ impl RawVulkanEngine {
                 let replace = match &chosen {
                     None => true,
                     Some((_, prev_props, _)) => {
-                        prev_props.vendor_id != 0x1002 && props.vendor_id == 0x1002
+                        (prev_props.vendor_id != 0x1002 && props.vendor_id == 0x1002)
+                            || (prev_props.vendor_id == props.vendor_id
+                                && props.read_limits_u32(512 - 296)
+                                    > prev_props.read_limits_u32(512 - 296))
                     }
                 };
                 if replace {
@@ -1106,34 +1168,103 @@ impl RawVulkanEngine {
         {
             return Err(VulkanError::UnsupportedDeviceLimits);
         }
-        let enumerate_extensions: unsafe extern "C" fn(VkPhysicalDevice, *const c_char, *mut u32, *mut ExtensionProperties) -> i32 =
-            unsafe { load_inst_fn(gipa, instance, c"vkEnumerateDeviceExtensionProperties", "vkEnumerateDeviceExtensionProperties")? };
+        let enumerate_extensions: unsafe extern "C" fn(
+            VkPhysicalDevice,
+            *const c_char,
+            *mut u32,
+            *mut ExtensionProperties,
+        ) -> i32 = unsafe {
+            load_inst_fn(
+                gipa,
+                instance,
+                c"vkEnumerateDeviceExtensionProperties",
+                "vkEnumerateDeviceExtensionProperties",
+            )?
+        };
         let mut count = 0;
-        check_vk("vkEnumerateDeviceExtensionProperties", unsafe { enumerate_extensions(phys_dev, null(), &mut count, null_mut()) })?;
-        let mut extensions = std::vec![ExtensionProperties { name: [0; 256], version: 0 }; count as usize];
-        check_vk("vkEnumerateDeviceExtensionProperties", unsafe { enumerate_extensions(phys_dev, null(), &mut count, extensions.as_mut_ptr()) })?;
+        check_vk("vkEnumerateDeviceExtensionProperties", unsafe {
+            enumerate_extensions(phys_dev, null(), &mut count, null_mut())
+        })?;
+        let mut extensions =
+            std::vec![ExtensionProperties { name: [0; 256], version: 0 }; count as usize];
+        check_vk("vkEnumerateDeviceExtensionProperties", unsafe {
+            enumerate_extensions(phys_dev, null(), &mut count, extensions.as_mut_ptr())
+        })?;
         extensions.truncate(count as usize);
-        let has = |name: &core::ffi::CStr| extensions.iter().any(|e| e.name.starts_with(name.to_bytes_with_nul()));
+        let has = |name: &core::ffi::CStr| {
+            extensions
+                .iter()
+                .any(|e| e.name.starts_with(name.to_bytes_with_nul()))
+        };
         let has_exec = has(c"VK_KHR_pipeline_executable_properties");
         let has_subgroup = has(c"VK_EXT_subgroup_size_control");
-        let mut executable = FeatureChain { s_type: 1000269000, p_next: null_mut(), enabled: 0, extra: 0 };
-        let mut subgroup = FeatureChain { s_type: 1000225002, p_next: null_mut(), enabled: 0, extra: 0 };
-        let mut features2 = Features2 { s_type: 1000059000, p_next: null_mut(), features: VkPhysicalDeviceFeatures { flags: [0; 55] } };
-        if has_exec { features2.p_next = (&mut executable as *mut FeatureChain).cast(); }
+        let mut executable = FeatureChain {
+            s_type: 1000269000,
+            p_next: null_mut(),
+            enabled: 0,
+            extra: 0,
+        };
+        let mut subgroup = FeatureChain {
+            s_type: 1000225002,
+            p_next: null_mut(),
+            enabled: 0,
+            extra: 0,
+        };
+        let mut features2 = Features2 {
+            s_type: 1000059000,
+            p_next: null_mut(),
+            features: VkPhysicalDeviceFeatures { flags: [0; 55] },
+        };
+        if has_exec {
+            features2.p_next = (&mut executable as *mut FeatureChain).cast();
+        }
         if has_subgroup {
             subgroup.p_next = features2.p_next;
             features2.p_next = (&mut subgroup as *mut FeatureChain).cast();
         }
-        let get_features2: unsafe extern "C" fn(VkPhysicalDevice, *mut Features2) = unsafe { load_inst_fn(gipa, instance, c"vkGetPhysicalDeviceFeatures2", "vkGetPhysicalDeviceFeatures2")? };
-        unsafe { get_features2(phys_dev, &mut features2); }
-        let mut sg_props = SubgroupProperties { s_type: 1000225000, p_next: null_mut(), min: 0, max: 0, max_compute_subgroups: 0, required_stages: 0 };
-        if has_subgroup {
-            let get_properties2: unsafe extern "C" fn(VkPhysicalDevice, *mut Properties2) = unsafe { load_inst_fn(gipa, instance, c"vkGetPhysicalDeviceProperties2", "vkGetPhysicalDeviceProperties2")? };
-            let mut p2 = Properties2 { s_type: 1000059001, p_next: (&mut sg_props as *mut SubgroupProperties).cast(), properties: unsafe { core::mem::zeroed() } };
-            unsafe { get_properties2(phys_dev, &mut p2); }
+        let get_features2: unsafe extern "C" fn(VkPhysicalDevice, *mut Features2) = unsafe {
+            load_inst_fn(
+                gipa,
+                instance,
+                c"vkGetPhysicalDeviceFeatures2",
+                "vkGetPhysicalDeviceFeatures2",
+            )?
+        };
+        unsafe {
+            get_features2(phys_dev, &mut features2);
         }
-        let wave32 = has_subgroup && subgroup.enabled != 0 && sg_props.min <= 32 && sg_props.max >= 32
-            && sg_props.required_stages & VK_SHADER_STAGE_COMPUTE_BIT != 0 && sg_props.max_compute_subgroups >= 8;
+        let mut sg_props = SubgroupProperties {
+            s_type: 1000225000,
+            p_next: null_mut(),
+            min: 0,
+            max: 0,
+            max_compute_subgroups: 0,
+            required_stages: 0,
+        };
+        if has_subgroup {
+            let get_properties2: unsafe extern "C" fn(VkPhysicalDevice, *mut Properties2) = unsafe {
+                load_inst_fn(
+                    gipa,
+                    instance,
+                    c"vkGetPhysicalDeviceProperties2",
+                    "vkGetPhysicalDeviceProperties2",
+                )?
+            };
+            let mut p2 = Properties2 {
+                s_type: 1000059001,
+                p_next: (&mut sg_props as *mut SubgroupProperties).cast(),
+                properties: unsafe { core::mem::zeroed() },
+            };
+            unsafe {
+                get_properties2(phys_dev, &mut p2);
+            }
+        }
+        let wave32 = has_subgroup
+            && subgroup.enabled != 0
+            && sg_props.min <= 32
+            && sg_props.max >= 32
+            && sg_props.required_stages & VK_SHADER_STAGE_COMPUTE_BIT != 0
+            && sg_props.max_compute_subgroups >= 8;
         let capture = has_exec && executable.enabled != 0;
         // Enable only queried features we actually use, preserving the pNext lifetimes.
         subgroup.enabled = u32::from(wave32);
@@ -1176,6 +1307,8 @@ impl RawVulkanEngine {
         unsafe {
             get_q_props(phys_dev, &mut qf_count, qf_props.as_mut_ptr());
         }
+
+        qf_props.truncate(qf_count as usize);
 
         // Prefer dedicated async compute + transfer queue family (`!GRAPHICS`), fallback to any compute queue.
         let mut queue_family_index: Option<u32> = None;
@@ -1316,8 +1449,18 @@ impl RawVulkanEngine {
         unsafe {
             if capture {
                 engine.executable_fns = Some((
-                    load_dev_fn(gdpa, device, c"vkGetPipelineExecutablePropertiesKHR", "vkGetPipelineExecutablePropertiesKHR")?,
-                    load_dev_fn(gdpa, device, c"vkGetPipelineExecutableStatisticsKHR", "vkGetPipelineExecutableStatisticsKHR")?,
+                    load_dev_fn(
+                        gdpa,
+                        device,
+                        c"vkGetPipelineExecutablePropertiesKHR",
+                        "vkGetPipelineExecutablePropertiesKHR",
+                    )?,
+                    load_dev_fn(
+                        gdpa,
+                        device,
+                        c"vkGetPipelineExecutableStatisticsKHR",
+                        "vkGetPipelineExecutableStatisticsKHR",
+                    )?,
                 ));
             }
             engine.build_pipelines_and_pools(qf_idx)?;
@@ -1471,12 +1614,7 @@ impl RawVulkanEngine {
                     c"vkEndCommandBuffer",
                     "vkEndCommandBuffer",
                 )?,
-                cmd_copy_buffer: load_dev_fn(
-                    gdpa,
-                    device,
-                    c"vkCmdCopyBuffer",
-                    "vkCmdCopyBuffer",
-                )?,
+                cmd_copy_buffer: load_dev_fn(gdpa, device, c"vkCmdCopyBuffer", "vkCmdCopyBuffer")?,
                 cmd_bind_pipeline: load_dev_fn(
                     gdpa,
                     device,
@@ -1505,12 +1643,7 @@ impl RawVulkanEngine {
                 create_fence: load_dev_fn(gdpa, device, c"vkCreateFence", "vkCreateFence")?,
                 destroy_fence: load_dev_fn(gdpa, device, c"vkDestroyFence", "vkDestroyFence")?,
                 reset_fences: load_dev_fn(gdpa, device, c"vkResetFences", "vkResetFences")?,
-                wait_for_fences: load_dev_fn(
-                    gdpa,
-                    device,
-                    c"vkWaitForFences",
-                    "vkWaitForFences",
-                )?,
+                wait_for_fences: load_dev_fn(gdpa, device, c"vkWaitForFences", "vkWaitForFences")?,
                 queue_submit: load_dev_fn(gdpa, device, c"vkQueueSubmit", "vkQueueSubmit")?,
                 device_wait_idle: load_dev_fn(
                     gdpa,
@@ -1522,24 +1655,57 @@ impl RawVulkanEngine {
         }
     }
 
-    unsafe fn collect_telemetry(&mut self, slot: KernelSlot, pipeline: VkPipeline) -> Result<(), VulkanError> {
-        let Some((get_properties, get_statistics)) = self.executable_fns else { return Ok(()); };
-        let info = PipelineInfo { s_type: 1000269001, p_next: null(), pipeline };
+    unsafe fn collect_telemetry(
+        &mut self,
+        slot: KernelSlot,
+        pipeline: VkPipeline,
+    ) -> Result<(), VulkanError> {
+        let Some((get_properties, get_statistics)) = self.executable_fns else {
+            return Ok(());
+        };
+        let info = PipelineInfo {
+            s_type: 1000269001,
+            p_next: null(),
+            pipeline,
+        };
         let mut count = 0;
-        check_vk("vkGetPipelineExecutablePropertiesKHR(count)", unsafe { get_properties(self.device, &info, &mut count, null_mut()) })?;
+        check_vk("vkGetPipelineExecutablePropertiesKHR(count)", unsafe {
+            get_properties(self.device, &info, &mut count, null_mut())
+        })?;
         let mut properties = std::vec![ExecutableProperties { s_type: 1000269002, p_next: null_mut(), stages: 0, name: [0; 256], description: [0; 256], subgroup_size: 0 }; count as usize];
-        check_vk("vkGetPipelineExecutablePropertiesKHR", unsafe { get_properties(self.device, &info, &mut count, properties.as_mut_ptr()) })?;
+        check_vk("vkGetPipelineExecutablePropertiesKHR", unsafe {
+            get_properties(self.device, &info, &mut count, properties.as_mut_ptr())
+        })?;
         properties.truncate(count as usize);
         // These are single-stage compute pipelines. Refuse ambiguous telemetry rather
         // than silently reporting one executable's statistics as the whole pipeline.
-        if properties.len() != 1 { return Err(VulkanError::PipelineAuditFailed("expected one compute executable")); }
+        if properties.len() != 1 {
+            return Err(VulkanError::PipelineAuditFailed(
+                "expected one compute executable",
+            ));
+        }
         let subgroup_size = properties[0].subgroup_size;
-        if self.wave32 && subgroup_size != 32 { return Err(VulkanError::PipelineAuditFailed("required Wave32 was not reported")); }
-        let info = ExecutableInfo { s_type: 1000269003, p_next: null(), pipeline, index: 0 };
+        if self.wave32 && subgroup_size != 32 {
+            return Err(VulkanError::UnexpectedSubgroupSize {
+                slot,
+                required: 32,
+                reported: subgroup_size,
+            });
+        }
+        let info = ExecutableInfo {
+            s_type: 1000269003,
+            p_next: null(),
+            pipeline,
+            index: 0,
+        };
         let mut count = 0;
-        check_vk("vkGetPipelineExecutableStatisticsKHR(count)", unsafe { get_statistics(self.device, &info, &mut count, null_mut()) })?;
+        check_vk("vkGetPipelineExecutableStatisticsKHR(count)", unsafe {
+            get_statistics(self.device, &info, &mut count, null_mut())
+        })?;
         let mut stats = std::vec![ExecutableStatistic { s_type: 1000269004, p_next: null_mut(), name: [0; 256], description: [0; 256], format: 0, value: 0 }; count as usize];
-        check_vk("vkGetPipelineExecutableStatisticsKHR", unsafe { get_statistics(self.device, &info, &mut count, stats.as_mut_ptr()) })?;
+        check_vk("vkGetPipelineExecutableStatisticsKHR", unsafe {
+            get_statistics(self.device, &info, &mut count, stats.as_mut_ptr())
+        })?;
         stats.truncate(count as usize);
         let mut scratch = None;
         let mut vgprs = None;
@@ -1549,20 +1715,28 @@ impl RawVulkanEngine {
             let end = stat.name.iter().position(|b| *b == 0).unwrap_or(256);
             let name = core::str::from_utf8(&stat.name[..end]).unwrap_or("");
             // UINT64 is the only accepted representation; absence is never zero.
-            if stat.format != 2 { continue; }
+            if stat.format != 2 {
+                continue;
+            }
             match name {
                 "Scratch size" | "scratch_memory" => scratch = Some(stat.value),
                 "VGPRs" | "num_vgprs" => vgprs = Some(stat.value),
                 "SGPRs" | "num_sgprs" => sgprs = Some(stat.value),
                 "LDS size" | "lds_size" => lds = Some(stat.value),
-                _ => {},
+                _ => {}
             }
         }
         self.telemetry[slot as usize] = crate::vulkan::PipelineTelemetry {
-            subgroup_size: Some(subgroup_size), scratch_bytes: scratch, vgprs, sgprs, lds_bytes: lds,
+            subgroup_size: Some(subgroup_size),
+            scratch_bytes: scratch,
+            vgprs,
+            sgprs,
+            lds_bytes: lds,
         };
         if scratch.is_some_and(|bytes| bytes != 0) {
-            return Err(VulkanError::PipelineAuditFailed("nonzero private scratch memory"));
+            return Err(VulkanError::PipelineAuditFailed(
+                "nonzero private scratch memory",
+            ));
         }
         Ok(())
     }
@@ -1665,14 +1839,26 @@ impl RawVulkanEngine {
             })?;
             self.pipelines[slot as usize].pipeline_layout = pl;
 
-            let required = RequiredSubgroup { s_type: 1000225001, p_next: null(), size: 32 };
+            let required = RequiredSubgroup {
+                s_type: 1000225001,
+                p_next: null(),
+                size: 32,
+            };
             let cp_info = VkComputePipelineCreateInfo {
                 s_type: VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
                 p_next: null(),
-                flags: if self.executable_fns.is_some() { 0x40 } else { 0 },
+                flags: if self.executable_fns.is_some() {
+                    0x40
+                } else {
+                    0
+                },
                 stage: VkPipelineShaderStageCreateInfo {
                     s_type: VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    p_next: if self.wave32 { (&required as *const RequiredSubgroup).cast() } else { null() },
+                    p_next: if self.wave32 {
+                        (&required as *const RequiredSubgroup).cast()
+                    } else {
+                        null()
+                    },
                     flags: 0,
                     stage: VK_SHADER_STAGE_COMPUTE_BIT,
                     module: sm,
@@ -1684,11 +1870,15 @@ impl RawVulkanEngine {
                 base_pipeline_index: -1,
             };
             let mut pipe: VkPipeline = 0;
-            check_vk("vkCreateComputePipelines", unsafe {
+            let rc = unsafe {
                 (self.fns.create_compute_pipelines)(self.device, 0, 1, &cp_info, null(), &mut pipe)
-            })?;
+            };
+            // Retain any returned handle even on failure so RAII owns its cleanup.
             self.pipelines[slot as usize].pipeline = pipe;
-            unsafe { self.collect_telemetry(slot, pipe)?; }
+            check_vk("vkCreateComputePipelines", rc)?;
+            unsafe {
+                self.collect_telemetry(slot, pipe)?;
+            }
         }
 
         // Descriptor pool: 4 sets (1 + 2 + 2 + 3 = 8 storage buffer descriptors).
@@ -1789,7 +1979,11 @@ impl RawVulkanEngine {
         buf.capacity = 0;
     }
 
-    unsafe fn alloc_gpu_buffer(&self, byte_size: u64, host_staging: bool) -> Result<GpuBuffer, VulkanError> {
+    unsafe fn alloc_gpu_buffer(
+        &self,
+        byte_size: u64,
+        host_staging: bool,
+    ) -> Result<GpuBuffer, VulkanError> {
         #[cfg(test)]
         if let Some(rem) = self.fail_alloc_countdown.get() {
             if rem == 0 {
@@ -1802,6 +1996,12 @@ impl RawVulkanEngine {
             self.fail_alloc_countdown.set(Some(rem - 1));
         }
         let cap = byte_size.max(MIN_BUFFER_ALLOC_BYTES);
+        if cap > isize::MAX as u64 || (!host_staging && cap > self.max_storage_range) {
+            return Err(VulkanError::BufferExceedsMaxStorageRange {
+                requested: cap,
+                limit: self.max_storage_range.min(isize::MAX as u64),
+            });
+        }
         let usage = if host_staging {
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
         } else {
@@ -2073,20 +2273,21 @@ impl RawVulkanEngine {
             offset: 0,
             range: VK_WHOLE_SIZE,
         };
-        let mk_write = |dst_set: VkDescriptorSet, binding: u32, info: *const VkDescriptorBufferInfo| {
-            VkWriteDescriptorSet {
-                s_type: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                p_next: null(),
-                dst_set,
-                dst_binding: binding,
-                dst_array_element: 0,
-                descriptor_count: 1,
-                descriptor_type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                p_image_info: null(),
-                p_buffer_info: info,
-                p_texel_buffer_view: null(),
-            }
-        };
+        let mk_write =
+            |dst_set: VkDescriptorSet, binding: u32, info: *const VkDescriptorBufferInfo| {
+                VkWriteDescriptorSet {
+                    s_type: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    p_next: null(),
+                    dst_set,
+                    dst_binding: binding,
+                    dst_array_element: 0,
+                    descriptor_count: 1,
+                    descriptor_type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    p_image_info: null(),
+                    p_buffer_info: info,
+                    p_texel_buffer_view: null(),
+                }
+            };
         let writes = [
             mk_write(self.ds_1buf_a, 0, &info_a),
             mk_write(self.ds_2buf_ab, 0, &info_a),
@@ -2178,9 +2379,8 @@ impl RawVulkanEngine {
                 code: submit_rc,
             });
         }
-        let wait_rc = unsafe {
-            (self.fns.wait_for_fences)(self.device, 1, &self.fence, VK_TRUE, u64::MAX)
-        };
+        let wait_rc =
+            unsafe { (self.fns.wait_for_fences)(self.device, 1, &self.fence, VK_TRUE, u64::MAX) };
         if wait_rc != VK_SUCCESS {
             if wait_rc == VK_ERROR_DEVICE_LOST {
                 self.exec_state = EngineExecState::DeviceLostQuarantined;
@@ -2195,6 +2395,8 @@ impl RawVulkanEngine {
     }
 
     unsafe fn write_staging_u64s(&mut self, offset_bytes: usize, src: &[u64]) {
+        assert!(offset_bytes <= self.staging.capacity as usize);
+        assert!(core::mem::size_of_val(src) <= self.staging.capacity as usize - offset_bytes);
         let dst = unsafe { self.staging.mapped.add(offset_bytes) };
         // Little-endian x86_64/aarch64 Linux: `u64` native representation is IEEE/SPIR-V little-endian.
         unsafe {
@@ -2203,10 +2405,27 @@ impl RawVulkanEngine {
     }
 
     unsafe fn read_staging_u64s(&self, offset_bytes: usize, dst: &mut [u64]) {
+        assert!(offset_bytes <= self.staging.capacity as usize);
+        assert!(core::mem::size_of_val(dst) <= self.staging.capacity as usize - offset_bytes);
         let src = unsafe { self.staging.mapped.add(offset_bytes) };
         unsafe {
             core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr().cast::<u8>(), dst.len() * 8);
         }
+    }
+
+    // maxStorageBufferRange is u32 bytes. Enforcing it BEFORE staging allocation
+    // bounds every shader's u32 element/word index, ceil division, and grid stride.
+    fn check_storage_bytes(&self, count: usize, element_bytes: usize) -> Result<(), VulkanError> {
+        let bytes = count
+            .checked_mul(element_bytes)
+            .ok_or(crate::AccelError::LengthOverflow)?;
+        if bytes as u64 > self.max_storage_range {
+            return Err(VulkanError::BufferExceedsMaxStorageRange {
+                requested: bytes as u64,
+                limit: self.max_storage_range,
+            });
+        }
+        Ok(())
     }
 
     unsafe fn exec_inplace_states<const LANES: usize>(
@@ -2218,21 +2437,23 @@ impl RawVulkanEngine {
             self.ensure_ready()?;
         }
         let num_states = states.len();
+        self.check_storage_bytes(num_states, LANES * 8)?;
         if num_states == 0 {
             return Ok(());
         }
-        let total_words = num_states
-            .checked_mul(LANES)
-            .ok_or(VulkanError::BufferExceedsMaxStorageRange {
+        let total_words =
+            num_states
+                .checked_mul(LANES)
+                .ok_or(VulkanError::BufferExceedsMaxStorageRange {
+                    requested: u64::MAX,
+                    limit: self.max_storage_range,
+                })?;
+        let byte_len = (total_words as u64).checked_mul(8).ok_or(
+            VulkanError::BufferExceedsMaxStorageRange {
                 requested: u64::MAX,
                 limit: self.max_storage_range,
-            })?;
-        let byte_len = (total_words as u64)
-            .checked_mul(8)
-            .ok_or(VulkanError::BufferExceedsMaxStorageRange {
-                requested: u64::MAX,
-                limit: self.max_storage_range,
-            })?;
+            },
+        )?;
 
         unsafe {
             self.ensure_staging(byte_len)?;
@@ -2247,7 +2468,13 @@ impl RawVulkanEngine {
                 dst_offset: 0,
                 size: byte_len,
             };
-            (self.fns.cmd_copy_buffer)(self.cmd_buf, self.staging.buffer, self.vram_a.buffer, 1, &copy);
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy,
+            );
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -2296,7 +2523,13 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_WRITE_BIT,
                 VK_ACCESS_TRANSFER_READ_BIT,
             );
-            (self.fns.cmd_copy_buffer)(self.cmd_buf, self.vram_a.buffer, self.staging.buffer, 1, &copy);
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.vram_a.buffer,
+                self.staging.buffer,
+                1,
+                &copy,
+            );
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -2326,12 +2559,7 @@ impl RawVulkanEngine {
         unsafe { self.exec_inplace_states(KernelSlot::BatchPoseidon2Perm12, states) }
     }
 
-    unsafe fn dispatch_ntt_mode(
-        &self,
-        pl: VkPipelineLayout,
-        total_wg: u32,
-        mut pc: NttPushConsts,
-    ) {
+    unsafe fn dispatch_ntt_mode(&self, pl: VkPipelineLayout, total_wg: u32, mut pc: NttPushConsts) {
         let mut wg_done = 0u32;
         while wg_done < total_wg {
             let chunk = (total_wg - wg_done).min(self.max_wg_x);
@@ -2361,6 +2589,10 @@ impl RawVulkanEngine {
             self.ensure_ready()?;
         }
         let n = buf.len();
+        if !n.is_power_of_two() || (n > 1 && twiddles.len() != n / 2) {
+            return Err(VulkanError::Accel(crate::AccelError::LengthOverflow));
+        }
+        self.check_storage_bytes(n, 8)?;
         let log2_n = n.trailing_zeros();
         let byte_len = (n as u64) * 8;
 
@@ -2375,7 +2607,13 @@ impl RawVulkanEngine {
                 dst_offset: 0,
                 size: byte_len,
             };
-            (self.fns.cmd_copy_buffer)(self.cmd_buf, self.staging.buffer, self.vram_a.buffer, 1, &copy);
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy,
+            );
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -2513,7 +2751,13 @@ impl RawVulkanEngine {
                 VK_ACCESS_SHADER_WRITE_BIT,
                 VK_ACCESS_TRANSFER_READ_BIT,
             );
-            (self.fns.cmd_copy_buffer)(self.cmd_buf, self.vram_a.buffer, self.staging.buffer, 1, &copy);
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.vram_a.buffer,
+                self.staging.buffer,
+                1,
+                &copy,
+            );
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -2650,7 +2894,13 @@ impl RawVulkanEngine {
             self.ensure_ready()?;
         }
         let n = evals.len();
-        let m = n * blowup;
+        let m = n
+            .checked_mul(blowup)
+            .ok_or(crate::AccelError::LengthOverflow)?;
+        if !n.is_power_of_two() || !blowup.is_power_of_two() || out.len() != m {
+            return Err(VulkanError::Accel(crate::AccelError::LengthOverflow));
+        }
+        self.check_storage_bytes(m, 16)?;
         let in_bytes = (n as u64) * 16;
         let out_bytes = (m as u64) * 16;
 
@@ -2825,6 +3075,10 @@ impl RawVulkanEngine {
             self.ensure_ready()?;
         }
         let num_parents = out_parents.len();
+        if num_parents.checked_mul(2) != Some(children.len()) {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        self.check_storage_bytes(children.len(), 32)?;
         let max_parent_idx = if num_parents == 0 {
             start_parent_idx
         } else {
@@ -2906,8 +3160,10 @@ impl RawVulkanEngine {
             );
             self.submit_and_wait()?;
 
-            let flat_out =
-                core::slice::from_raw_parts_mut(out_parents.as_mut_ptr().cast::<u64>(), num_parents * 4);
+            let flat_out = core::slice::from_raw_parts_mut(
+                out_parents.as_mut_ptr().cast::<u64>(),
+                num_parents * 4,
+            );
             self.read_staging_u64s(0, flat_out);
         }
         Ok(())
@@ -2923,6 +3179,10 @@ impl RawVulkanEngine {
             self.ensure_ready()?;
         }
         let num_leaves = leaves.len();
+        if !num_leaves.is_power_of_two() {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        self.check_storage_bytes(num_leaves, 32)?;
         if num_leaves == 1 {
             return Ok([
                 gl_reduce_u64(leaves[0][0]),
@@ -3031,22 +3291,28 @@ impl RawVulkanEngine {
             self.ensure_ready()?;
         }
         let n = shares.len();
+        if weights.len() != n {
+            return Err(crate::AccelError::LengthOverflow.into());
+        }
+        self.check_storage_bytes(n, 32)?;
         if n == 0 {
             return Ok((0, 0));
         }
-        let vec_bytes = (n as u64)
-            .checked_mul(32)
-            .ok_or(VulkanError::BufferExceedsMaxStorageRange {
-                requested: u64::MAX,
-                limit: self.max_storage_range,
-            })?;
-        let staging_bytes = vec_bytes
-            .checked_mul(2)
-            .ok_or(VulkanError::BufferExceedsMaxStorageRange {
-                requested: u64::MAX,
-                limit: self.max_storage_range,
-            })?;
-        let num_groups = n.div_ceil(256).min(1024) as u32;
+        let vec_bytes =
+            (n as u64)
+                .checked_mul(32)
+                .ok_or(VulkanError::BufferExceedsMaxStorageRange {
+                    requested: u64::MAX,
+                    limit: self.max_storage_range,
+                })?;
+        let staging_bytes =
+            vec_bytes
+                .checked_mul(2)
+                .ok_or(VulkanError::BufferExceedsMaxStorageRange {
+                    requested: u64::MAX,
+                    limit: self.max_storage_range,
+                })?;
+        let num_groups = n.div_ceil(256).min(1024).min(self.max_wg_x as usize) as u32;
         let partials_bytes = (num_groups as u64) * 32;
 
         unsafe {
@@ -3054,22 +3320,23 @@ impl RawVulkanEngine {
             self.ensure_vram_buffers(vec_bytes, vec_bytes, partials_bytes)?;
 
             // Pack `(s0, s1)` and `(w0, w1)` deterministically as `[lo64, hi64, lo64, hi64]`.
-            let dst_u64 =
-                core::slice::from_raw_parts_mut(self.staging.mapped.cast::<u64>(), n * 8);
+            // Mapped allocation need not be initialized: raw writes avoid constructing
+            // references to indeterminate u64 values before every input word is stored.
+            let dst_u64 = self.staging.mapped.cast::<u64>();
             for (i, &(s0, s1)) in shares.iter().enumerate() {
                 let b = i * 4;
-                dst_u64[b] = s0 as u64;
-                dst_u64[b + 1] = (s0 >> 64) as u64;
-                dst_u64[b + 2] = s1 as u64;
-                dst_u64[b + 3] = (s1 >> 64) as u64;
+                dst_u64.add(b).write(s0 as u64);
+                dst_u64.add(b + 1).write((s0 >> 64) as u64);
+                dst_u64.add(b + 2).write(s1 as u64);
+                dst_u64.add(b + 3).write((s1 >> 64) as u64);
             }
             let w_off = n * 4;
             for (i, &(w0, w1)) in weights.iter().enumerate() {
                 let b = w_off + i * 4;
-                dst_u64[b] = w0 as u64;
-                dst_u64[b + 1] = (w0 >> 64) as u64;
-                dst_u64[b + 2] = w1 as u64;
-                dst_u64[b + 3] = (w1 >> 64) as u64;
+                dst_u64.add(b).write(w0 as u64);
+                dst_u64.add(b + 1).write((w0 >> 64) as u64);
+                dst_u64.add(b + 2).write(w1 as u64);
+                dst_u64.add(b + 3).write((w1 >> 64) as u64);
             }
 
             self.begin_cmd()?;
@@ -3276,9 +3543,7 @@ mod tests {
     fn transactional_vram_growth_and_quarantine_state_machine() {
         let (mut engine, _info) = match RawVulkanEngine::try_new() {
             Ok(v) => v,
-            Err(
-                VulkanError::LibraryLoadFailed | VulkanError::NoDiscreteGpuFound,
-            ) => return,
+            Err(VulkanError::LibraryLoadFailed | VulkanError::NoDiscreteGpuFound) => return,
             Err(other) => panic!("unexpected engine init error: {other}"),
         };
 
@@ -3306,13 +3571,17 @@ mod tests {
 
         let mut gpu_states = [[0x1234_5678_9ABC_DEF0u64; 25]; 4];
         let mut cpu_states = gpu_states;
-        engine.exec_batch_keccak(&mut gpu_states).expect("keccak after rollback");
+        engine
+            .exec_batch_keccak(&mut gpu_states)
+            .expect("keccak after rollback");
         CpuReferenceBackend.batch_keccak_f1600(&mut cpu_states);
         assert_eq!(gpu_states, cpu_states);
 
         // 2. `InFlightQuarantined` recovers cleanly once `vkDeviceWaitIdle` returns `VK_SUCCESS`.
         engine.exec_state = EngineExecState::InFlightQuarantined;
-        engine.exec_batch_keccak(&mut gpu_states).expect("keccak after idle drain");
+        engine
+            .exec_batch_keccak(&mut gpu_states)
+            .expect("keccak after idle drain");
         CpuReferenceBackend.batch_keccak_f1600(&mut cpu_states);
         assert_eq!(gpu_states, cpu_states);
         assert_eq!(engine.exec_state, EngineExecState::Ready);
