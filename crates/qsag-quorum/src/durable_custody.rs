@@ -96,7 +96,11 @@ impl FsLedgerCheckpointAnchor {
         let path = path.into();
         let record = LockedRecord::create_new(&path)?;
         let lock_id = anchor_lock_inode(&path)?;
-        let derived = mac32(&key, ANCHOR_MAC_DOMAIN, &[&lock_id, &record.lock_seal(), domain]);
+        let derived = mac32(
+            &key,
+            ANCHOR_MAC_DOMAIN,
+            &[&lock_id, &record.lock_seal(), domain],
+        );
         wipe_bytes32(&mut key);
         let anchor = Self {
             path,
@@ -120,7 +124,11 @@ impl FsLedgerCheckpointAnchor {
         let path = path.into();
         let record = LockedRecord::open_existing(&path)?;
         let lock_id = anchor_lock_inode(&path)?;
-        let derived = mac32(&key, ANCHOR_MAC_DOMAIN, &[&lock_id, &record.lock_seal(), domain]);
+        let derived = mac32(
+            &key,
+            ANCHOR_MAC_DOMAIN,
+            &[&lock_id, &record.lock_seal(), domain],
+        );
         wipe_bytes32(&mut key);
         let mut anchor = Self {
             path,
@@ -159,7 +167,9 @@ impl FsLedgerCheckpointAnchor {
         let meta = std::fs::symlink_metadata(&self.path)?;
         if meta.file_type().is_symlink() || !meta.is_file() {
             self.poisoned = true;
-            return Err(invalid_anchor("checkpoint anchor path is not a regular file"));
+            return Err(invalid_anchor(
+                "checkpoint anchor path is not a regular file",
+            ));
         }
         let live_raw = match self.record.read() {
             Ok(bytes) => bytes,
@@ -179,17 +189,23 @@ impl FsLedgerCheckpointAnchor {
             || !ct_eq_bytes32(&on_disk.tag, &self.current.tag)
         {
             self.poisoned = true;
-            return Err(invalid_anchor("on-disk checkpoint anchor diverged from handle"));
+            return Err(invalid_anchor(
+                "on-disk checkpoint anchor diverged from handle",
+            ));
         }
         if next.generation < self.current.generation {
             self.poisoned = true;
-            return Err(invalid_anchor("ledger checkpoint generation rollback refused"));
+            return Err(invalid_anchor(
+                "ledger checkpoint generation rollback refused",
+            ));
         }
         if next.generation == self.current.generation
             && !ct_eq_bytes32(&next.tag, &self.current.tag)
         {
             self.poisoned = true;
-            return Err(invalid_anchor("ledger checkpoint tag mismatch at equal generation"));
+            return Err(invalid_anchor(
+                "ledger checkpoint tag mismatch at equal generation",
+            ));
         }
         if next.generation == self.current.generation {
             return Ok(());
@@ -333,7 +349,9 @@ impl AnchoredSeedBurnTracker {
         let retained = anchor.checkpoint();
         let journal = FsCeremonyJournal::open_existing(journal_path.as_ref(), key_id, journal_key)?;
         let burns = FsSeedBurnTracker::open_existing(ledger_path.as_ref(), ledger_key, retained)
-            .map_err(|_| invalid_anchor("seed burn ledger failed retained checkpoint verification"))?;
+            .map_err(|_| {
+                invalid_anchor("seed burn ledger failed retained checkpoint verification")
+            })?;
         let recovered = burns.checkpoint();
         // If a prior crash happened after `burns.burn` committed a successor slot and before
         // `anchor.ratchet_to` completed, ratchet the anchor forward before resuming work.
@@ -496,9 +514,8 @@ impl AnchoredFirstSignedCustody {
         wipe_bytes32(&mut master_key);
 
         let journal = FsCeremonyJournal::create_new(journal_path.as_ref(), key_id, journal_key)?;
-        let first_signed =
-            FsFirstSignedLedger::provision_genesis(ledger_path.as_ref(), ledger_key)
-                .map_err(|_| io::Error::other("failed to provision FsFirstSignedLedger"))?;
+        let first_signed = FsFirstSignedLedger::provision_genesis(ledger_path.as_ref(), ledger_key)
+            .map_err(|_| io::Error::other("failed to provision FsFirstSignedLedger"))?;
         let initial = first_signed.checkpoint();
         let anchor = FsLedgerCheckpointAnchor::provision_genesis(
             anchor_path.as_ref(),
