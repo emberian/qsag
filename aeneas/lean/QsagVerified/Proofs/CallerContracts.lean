@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 public import QsagVerified.Proofs.CredAndHdGuards
 public import QsagVerified.Proofs.FtsSpnGuard
 public import QsagVerified.Proofs.RssCutSession
