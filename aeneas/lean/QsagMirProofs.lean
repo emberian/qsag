@@ -3,6 +3,7 @@ module
 public import QsagVerified.Proofs
 public import QsagSpecWeld
 public import QsagVerified.Proofs.SpongeConformance
+public import QsagVerified.Proofs.SpongeFraming
 
 public section
 
