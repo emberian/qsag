@@ -4340,6 +4340,19 @@ private theorem rss256_zero_errors_integrity (input : Plane256) (gates : List Rs
     simp only [rss256GateOutput, rss256GateIdeal]
     rw [tail, hg, eq_of_beq hx]
 
+private theorem rss256_nonzero_of_all_false (xs : List Tower128)
+    (h : xs.all (fun e => e == towerZero 7) = false) :
+    ∃ e ∈ xs, e ≠ towerZero 7 := by
+  induction xs with
+  | nil => cases h
+  | cons x xs ih =>
+    if hx : x = towerZero 7 then
+      have ht : xs.all (fun e => e == towerZero 7) = false := by
+        simpa only [List.all_cons, hx, beq_self_eq_true, Bool.true_and] using h
+      obtain ⟨e, he, hn⟩ := ih ht
+      exact ⟨e, List.mem_cons_of_mem x he, hn⟩
+    else exact ⟨x, List.mem_cons_self, hx⟩
+
 theorem rss256_fault_has_nonzero_errors (w : Rss256InlineWave)
     (hl : rss256GateLinks w.input w.gates = true)
     (hf : rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates) :
@@ -4349,8 +4362,7 @@ theorem rss256_fault_has_nonzero_errors (w : Rss256InlineWave)
     exact False.elim (hf (rss256_zero_errors_integrity w.input w.gates hl
       (fun e he => eq_of_beq (List.all_eq_true.mp ha e he))))
   | false =>
-    obtain ⟨e, he, hn⟩ := List.all_eq_false.mp ha
-    exact ⟨e, he, by simpa using hn⟩
+    exact rss256_nonzero_of_all_false _ ha
 
 /-- Semantic output corruption forces a nonzero polynomial; for two independent
 uniform points in any listed coin set, accepting pairs are bounded by degree². -/
@@ -4426,7 +4438,8 @@ def rss256StepHardened (st : Rss256EngineState) (op : Rss256EngineOp) :
   | .check a b =>
     let x := rss256DerivedCoin st.pending a b 0
     let y := rss256DerivedCoin st.pending a b 1
-    if st.coinCommits == some (rss256CoinCommit (rss256Transcript st.pending) a,
+    if a != towerZero 7 && b != towerZero 7 &&
+        st.coinCommits == some (rss256CoinCommit (rss256Transcript st.pending) a,
         rss256CoinCommit (rss256Transcript st.pending) b) &&
         st.pending.all (fun w => w.check x y) then
       .ok { st with pending := [], coinCommits := none, accepted := st.accepted ++ st.pending.map (fun w => (w,x,y)) } []
@@ -4437,6 +4450,15 @@ def rss256StepHardened (st : Rss256EngineState) (op : Rss256EngineOp) :
         | .inlineWave w => some (rss256GateOutput w.input w.gates)
         | .bankWave _ => none))
     else .err st .openBeforeCheck
+
+/-- The operational step itself rejects a zero reveal, including when no wave is pending. -/
+theorem rss256_step_zero_coin_rejected (st : Rss256EngineState) (a : Tower128)
+    (hp : st.poisoned = false) :
+    rss256StepHardened st (.check (towerZero 7) a) =
+      .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed ∧
+    rss256StepHardened st (.check a (towerZero 7)) =
+      .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed := by
+  simp [rss256StepHardened, hp]
 
 /-- API misuse is recoverable; a cryptographic barrier failure is not. -/
 theorem rss256_premature_open_preserves_state (st : Rss256EngineState)

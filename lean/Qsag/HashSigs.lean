@@ -3919,8 +3919,11 @@ theorem tooth_short_model_is_not_production : ¬ ProductionParameterProfile comp
   rw [hf] at h
   cases h
 
-/-! Production checked boundaries. The legacy checked API above has equality and completeness
-contracts for a different signer; it cannot be silently redefined without migrating its users. -/
+/-! Production checked boundaries. `verifyStatelessChecked` above is the compatibility shim over
+`verifyPqHashSig`, kept because `QsagChallenge.lean` freezes its contracts. The production boundary is
+`verifyProductionStatelessChecked` / `ValidProductionJortsBatch`; their forgery reductions are
+`Qsag.production_checked_stateless_euf_cma_break` and
+`Qsag.validProductionJortsBatch_item_forgery_break` in `Qsag.HypertreeEufCma` §7. -/
 
 def verifyProductionStatelessChecked (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig) : Bool :=
