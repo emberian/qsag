@@ -3975,5 +3975,307 @@ theorem tooth_selective_abort_biases_committed_joint_coin :
     finSum 2 (fun i => if honest i then 1 else 0) = 1 := by
   decide +kernel
 
+/-! ### Active-malicious hedged signing: abort, exact single-signer output, or counted tag forgery
+
+One corrupt party, one hedged signing run. The order of play is the order of the fields below:
+the corrupt coin share is fixed before the honest coin share is opened (that is what a hiding
+commitment buys, and the binding side is that the opened value is the committed one); the
+corrupt party then sees the honest coin and chooses its share modification; the consistency
+challenge is sampled after the modification is fixed; finally the corrupt party may refuse to
+finish. The statements below hold for every tag scheme. The number of accepted non-zero
+deviations is left as an explicit term; `Qsag.RssSlhFullSecurity` bounds it by `deg / 2^128`
+for the `GF(2^128)` Horner tag. -/
+
+/-- A consistency-tag check as the honest parties see it: which deviations are the zero
+    deviation, and which `(deviation, challenge)` pairs are accepted. Completeness is the only
+    law: an unmodified execution is never rejected. Soundness is not a field; the theorems below
+    count the accepted non-zero deviations instead of assuming there are none. -/
+structure ConsistencyTagScheme (Dev : Type) (nChal : Nat) where
+  isHonest : Dev → Bool
+  accepts : Dev → Fin nChal → Bool
+  complete : ∀ d c, isHonest d = true → accepts d c = true
+
+/-- Strategy of the corrupt party in one hedged signing run.
+    * `corruptCoin` is committed before the honest coin share is visible.
+    * `deviation` is the share modification, chosen knowing the honest coin share and before the
+      consistency challenge.
+    * `tamperedOutput` is what the honest parties would release if the modification passed the
+      tag check.
+    * `aborts` is the decision to stop the run, taken with the honest coin share and the
+      challenge in view. -/
+structure ActiveSlhAdversary (width nChal : Nat) (Dev : Type) where
+  corruptCoin : BitVec width
+  deviation : BitVec width → Dev
+  tamperedOutput : BitVec width → Fin nChal → List UInt8
+  aborts : BitVec width → Fin nChal → Bool
+
+/-- Output of the honest parties in one run against `adv`: `none` on abort (the corrupt party
+    stopped, or the tag check rejected), otherwise the released signature bytes. The hedging
+    value is `encode (honestCoin ⊕ corruptCoin)`. -/
+def activeMaliciousThresholdSign {p : Fips205Params} {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msgPrime : List UInt8)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) : Option (List UInt8) :=
+  if adv.aborts (BitVec.ofFin honestCoin) chal then none
+  else if !(tags.accepts (adv.deviation (BitVec.ofFin honestCoin)) chal) then none
+  else if tags.isHonest (adv.deviation (BitVec.ofFin honestCoin)) then
+    some (run.signBytes msgPrime (encode (BitVec.ofFin honestCoin ^^^ adv.corruptCoin)))
+  else some (adv.tamperedOutput (BitVec.ofFin honestCoin) chal)
+
+/-- The failure event: a non-zero deviation that the tag check accepts in a run the corrupt
+    party lets finish. -/
+def activeTagForgery {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) : Bool :=
+  !(adv.aborts (BitVec.ofFin honestCoin) chal) &&
+    tags.accepts (adv.deviation (BitVec.ofFin honestCoin)) chal &&
+    !(tags.isHonest (adv.deviation (BitVec.ofFin honestCoin)))
+
+/-- The runs in which the ideal functionality with abort releases a signature: the corrupt party
+    does not stop and did not modify its shares. -/
+def activeReleased {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) : Bool :=
+  !(adv.aborts (BitVec.ofFin honestCoin) chal) &&
+    tags.isHonest (adv.deviation (BitVec.ofFin honestCoin))
+
+private theorem finSum_natAbsDiff_le : ∀ (n : Nat) (f g b : Fin n → Nat),
+    (∀ i, natAbsDiff (f i) (g i) ≤ b i) →
+    natAbsDiff (finSum n f) (finSum n g) ≤ finSum n b
+  | 0, _, _, _, _ => by simp [finSum, natAbsDiff]
+  | n + 1, f, g, b, h => by
+    simp only [finSum]
+    have ih := finSum_natAbsDiff_le n
+      (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+      (fun i => g ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+      (fun i => b ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+      (fun i => h ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+    exact Nat.le_trans (natAbsDiff_add_le _ _ _ _)
+      (Nat.add_le_add (h ⟨0, Nat.zero_lt_succ n⟩) ih)
+
+/-- In every run, the honest parties abort, or release exactly the single-signer signature on
+    the hedge `encode (honestCoin ⊕ corruptCoin)`, or the run is a tag forgery. -/
+theorem activeMaliciousThresholdSign_cases
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msgPrime : List UInt8)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) :
+    (activeTagForgery tags adv honestCoin chal = false →
+      activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal =
+        if activeReleased tags adv honestCoin chal then
+          some (encodeSlhSig (slhSignInternal p msgPrime
+            (slhKeygenInternal p skSeed skPrf pkSeed).1
+            (encode (BitVec.ofFin honestCoin ^^^ adv.corruptCoin))))
+        else none) ∧
+    (activeTagForgery tags adv honestCoin chal = true →
+      activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal =
+        some (adv.tamperedOutput (BitVec.ofFin honestCoin) chal)) := by
+  have hSig := (threshold_sig_deterministic_and_matches_single_signer p hWf run run msgPrime
+    (encode (BitVec.ofFin honestCoin ^^^ adv.corruptCoin))).1
+  unfold activeMaliciousThresholdSign activeTagForgery activeReleased
+  cases hA : adv.aborts (BitVec.ofFin honestCoin) chal
+  · cases hH : tags.isHonest (adv.deviation (BitVec.ofFin honestCoin))
+    · cases hT : tags.accepts (adv.deviation (BitVec.ofFin honestCoin)) chal
+      · exact ⟨fun _ => rfl, fun h => Bool.noConfusion h⟩
+      · exact ⟨fun h => Bool.noConfusion h, fun _ => rfl⟩
+    · have hT := tags.complete (adv.deviation (BitVec.ofFin honestCoin)) chal hH
+      rw [hT]
+      exact ⟨fun _ => congrArg some hSig, fun h => Bool.noConfusion h⟩
+  · exact ⟨fun _ => rfl, fun h => Bool.noConfusion h⟩
+
+/-- **Active-malicious hedged threshold signing
+    (`active_malicious_threshold_sig_abort_or_exact_hedged_dist`).** For one corrupt party with
+    an arbitrary strategy `adv`, any tag scheme, a uniform honest coin share and a uniform
+    consistency challenge:
+
+    1. Every run aborts, or releases exactly `slh_sign_internal` under the shared key with
+       hedge `encode (honestCoin ⊕ corruptCoin)`, or is a tag forgery
+       (`activeTagForgery`: a modified share accepted by the check).
+    2. For every test `D` on signature bytes, the number of runs whose released bytes pass `D`
+       differs from the number of runs in which the ideal functionality with abort releases a
+       single-signer signature passing `D` by at most the number of tag forgeries. The ideal
+       count uses the same release set `activeReleased`, which the corrupt party controls:
+       this is security with abort, and the released law is the single-signer hedged law
+       restricted to that set, not the unconditioned one
+       (`tooth_selective_abort_biases_committed_joint_coin`).
+    3. The abort pattern does not depend on the key: for a run of any other key, with the same
+       strategy, exactly the same `(honestCoin, challenge)` pairs abort.
+
+    The statement makes no claim that tag forgeries are rare; that is a property of the tag
+    scheme and is proved for the `GF(2^128)` Horner tag in `Qsag.RssSlhFullSecurity`
+    (`rss_active_tag_forgery_count_le`). The independence of `corruptCoin` and of `deviation`
+    from later values is built into `ActiveSlhAdversary`; deriving it from a concrete commitment
+    needs a hiding assumption that is not discharged here. -/
+theorem active_malicious_threshold_sig_abort_or_exact_hedged_dist
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msgPrime : List UInt8) :
+    (∀ (honestCoin : Fin (2 ^ width)) (chal : Fin nChal),
+      activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal = none ∨
+      activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal =
+        some (encodeSlhSig (slhSignInternal p msgPrime
+          (slhKeygenInternal p skSeed skPrf pkSeed).1
+          (encode (BitVec.ofFin honestCoin ^^^ adv.corruptCoin)))) ∨
+      activeTagForgery tags adv honestCoin chal = true) ∧
+    (∀ D : List UInt8 → Bool,
+      natAbsDiff
+        (finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+          if (match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
+              | some s => D s
+              | none => false) then 1 else 0)))
+        (finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+          if (activeReleased tags adv h c &&
+              D (encodeSlhSig (slhSignInternal p msgPrime
+                (slhKeygenInternal p skSeed skPrf pkSeed).1
+                (encode (BitVec.ofFin h ^^^ adv.corruptCoin))))) then 1 else 0))) ≤
+      finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+        if activeTagForgery tags adv h c then 1 else 0))) ∧
+    (∀ {skSeed' skPrf' pkSeed' : List UInt8} (run' : SlhThresholdRun p skSeed' skPrf' pkSeed')
+       (msgPrime' : List UInt8) (honestCoin : Fin (2 ^ width)) (chal : Fin nChal),
+      (activeMaliciousThresholdSign run tags adv encode msgPrime honestCoin chal).isSome =
+      (activeMaliciousThresholdSign run' tags adv encode msgPrime' honestCoin chal).isSome) := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro honestCoin chal
+    have hC := activeMaliciousThresholdSign_cases p hWf run tags adv encode msgPrime honestCoin chal
+    cases hF : activeTagForgery tags adv honestCoin chal
+    · have h := hC.1 hF
+      cases hR : activeReleased tags adv honestCoin chal
+      · rw [hR] at h; exact Or.inl h
+      · rw [hR] at h; exact Or.inr (Or.inl h)
+    · exact Or.inr (Or.inr rfl)
+  · intro D
+    apply finSum_natAbsDiff_le
+    intro h
+    apply finSum_indicator_diff_le
+      (fun c => match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
+                | some s => D s
+                | none => false)
+      (fun c => activeReleased tags adv h c &&
+                D (encodeSlhSig (slhSignInternal p msgPrime
+                  (slhKeygenInternal p skSeed skPrf pkSeed).1
+                  (encode (BitVec.ofFin h ^^^ adv.corruptCoin)))))
+      (fun c => activeTagForgery tags adv h c)
+    intro c hF
+    have hEq := (activeMaliciousThresholdSign_cases p hWf run tags adv encode msgPrime h c).1 hF
+    rw [hEq]
+    cases activeReleased tags adv h c <;> rfl
+  · intro skSeed' skPrf' pkSeed' run' msgPrime' honestCoin chal
+    unfold activeMaliciousThresholdSign
+    cases adv.aborts (BitVec.ofFin honestCoin) chal
+    · cases tags.accepts (adv.deviation (BitVec.ofFin honestCoin)) chal
+      · rfl
+      · cases tags.isHonest (adv.deviation (BitVec.ofFin honestCoin)) <;> rfl
+    · rfl
+
+/-- **Exact hedged law without abort.** If the corrupt party neither modifies its shares nor
+    stops, then for every test `D` the count of accepted released signatures over the uniform
+    honest coin share and challenge equals `nChal` times the count of accepted single-signer
+    signatures over a uniform hedge: the released law is the single-signer hedged law, whatever
+    coin share the corrupt party committed to. -/
+theorem active_threshold_sig_no_abort_exact_single_signer_law
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) {width nChal : Nat} {Dev : Type}
+    (tags : ConsistencyTagScheme Dev nChal) (adv : ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msgPrime : List UInt8)
+    (hNoAbort : ∀ h c, adv.aborts h c = false)
+    (hNoDeviation : ∀ h, tags.isHonest (adv.deviation h) = true)
+    (D : List UInt8 → Bool) :
+    finSum (2 ^ width) (fun h => finSum nChal (fun c =>
+      if (match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
+          | some s => D s
+          | none => false) then 1 else 0)) =
+    nChal * finSum (2 ^ width) (fun u =>
+      if D (encodeSlhSig (slhSignInternal p msgPrime
+        (slhKeygenInternal p skSeed skPrf pkSeed).1 (encode (BitVec.ofFin u)))) then 1 else 0) := by
+  rw [← threshold_joint_coin_output_law p (slhKeygenInternal p skSeed skPrf pkSeed).1 msgPrime
+        width encode adv.corruptCoin D,
+      ← finSum_mul_left]
+  apply finSum_congr
+  intro h
+  have hInner : ∀ c : Fin nChal,
+      (if (match activeMaliciousThresholdSign run tags adv encode msgPrime h c with
+           | some s => D s
+           | none => false) then 1 else 0) =
+      (if D (encodeSlhSig (slhSignInternal p msgPrime
+        (slhKeygenInternal p skSeed skPrf pkSeed).1
+        (encode (BitVec.ofFin h ^^^ adv.corruptCoin)))) then 1 else 0) := by
+    intro c
+    have hF : activeTagForgery tags adv h c = false := by
+      unfold activeTagForgery
+      rw [hNoDeviation]
+      exact Bool.and_false _
+    have hR : activeReleased tags adv h c = true := by
+      unfold activeReleased
+      rw [hNoAbort, hNoDeviation]
+      rfl
+    rw [(activeMaliciousThresholdSign_cases p hWf run tags adv encode msgPrime h c).1 hF, hR]
+    rfl
+  rw [finSum_congr hInner, finSum_const]
+
+/-- The forgery term of `active_malicious_threshold_sig_abort_or_exact_hedged_dist` cannot be
+    dropped: with a tag check that accepts one modified execution, the honest parties release
+    the corrupt party's bytes in that run, for any key and any bytes. -/
+theorem tooth_active_tag_forgery_releases_tampered_output
+    {p : Fips205Params} {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) (encode : BitVec 1 → List UInt8)
+    (msgPrime bogus : List UInt8) :
+    let tags : ConsistencyTagScheme Bool 2 :=
+      { isHonest := fun d => !d
+        accepts := fun d c => !d || c.val == 0
+        complete := fun d c h => by cases d <;> simp_all }
+    let adv : ActiveSlhAdversary 1 2 Bool :=
+      { corruptCoin := 0#1
+        deviation := fun _ => true
+        tamperedOutput := fun _ _ => bogus
+        aborts := fun _ _ => false }
+    activeMaliciousThresholdSign run tags adv encode msgPrime
+      ⟨0, by decide⟩ ⟨0, by decide⟩ = some bogus ∧
+    activeMaliciousThresholdSign run tags adv encode msgPrime
+      ⟨0, by decide⟩ ⟨1, by decide⟩ = none ∧
+    finSum (2 ^ 1) (fun h => finSum 2 (fun c =>
+      if activeTagForgery tags adv h c then 1 else 0)) = 2 := by
+  exact ⟨rfl, rfl, rfl⟩
+
+/-- The share view of the party outside quorum `q` (the corrupt party when `q` is honest). -/
+def RssQuorum.outsiderView (q : RssQuorum) (sh : RssByteShares) : List UInt8 × List UInt8 :=
+  match q with
+  | .p01 => (sh.b2, sh.b0)
+  | .p12 => (sh.b0, sh.b1)
+  | .p20 => (sh.b1, sh.b2)
+
+/-- **Abort leaks nothing beyond the corrupt party's own share view (2-of-3 RSS).** Let the
+    corrupt strategy be any function of the corrupt party's views of the two key sharings.
+    For two sharings, of possibly different keys, that give the corrupt party the same views,
+    the honest quorum aborts on exactly the same `(honestCoin, challenge)` pairs. Sharings of
+    different secrets with a common single-party view exist
+    (`rss_single_view_does_not_determine_secret`). -/
+theorem rss_active_abort_pattern_depends_only_on_corrupt_view
+    (p : Fips205Params) (q : RssQuorum)
+    {seed₁ prf₁ seed₂ prf₂ : RssByteShares}
+    (hS₁ : seed₁.WellFormed) (hP₁ : prf₁.WellFormed) (hS₂ : seed₂.WellFormed) (hP₂ : prf₂.WellFormed)
+    (hSeedView : q.outsiderView seed₁ = q.outsiderView seed₂)
+    (hPrfView : q.outsiderView prf₁ = q.outsiderView prf₂)
+    (pkSeed₁ pkSeed₂ : List UInt8) (tape₁ tape₂ : Nat → Nat → Nat → Nat → RssPrfZeroSeeds)
+    {width nChal : Nat} {Dev : Type} (tags : ConsistencyTagScheme Dev nChal)
+    (strategy : List UInt8 × List UInt8 → List UInt8 × List UInt8 → ActiveSlhAdversary width nChal Dev)
+    (encode : BitVec width → List UInt8) (msg₁ msg₂ : List UInt8)
+    (honestCoin : Fin (2 ^ width)) (chal : Fin nChal) :
+    (activeMaliciousThresholdSign (SlhThresholdRun.ofRss p q hS₁ hP₁ pkSeed₁ tape₁) tags
+      (strategy (q.outsiderView seed₁) (q.outsiderView prf₁)) encode msg₁ honestCoin chal).isSome =
+    (activeMaliciousThresholdSign (SlhThresholdRun.ofRss p q hS₂ hP₂ pkSeed₂ tape₂) tags
+      (strategy (q.outsiderView seed₂) (q.outsiderView prf₂)) encode msg₂ honestCoin chal).isSome := by
+  rw [hSeedView, hPrfView]
+  unfold activeMaliciousThresholdSign
+  cases (strategy (q.outsiderView seed₂) (q.outsiderView prf₂)).aborts (BitVec.ofFin honestCoin) chal
+  · cases tags.accepts
+      ((strategy (q.outsiderView seed₂) (q.outsiderView prf₂)).deviation (BitVec.ofFin honestCoin)) chal
+    · rfl
+    · cases tags.isHonest
+        ((strategy (q.outsiderView seed₂) (q.outsiderView prf₂)).deviation (BitVec.ofFin honestCoin)) <;> rfl
+  · rfl
+
 end Qsag
 end
