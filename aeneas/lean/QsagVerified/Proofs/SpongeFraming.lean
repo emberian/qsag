@@ -1,5 +1,6 @@
 module
 import all QsagVerified.Funs
+import all QsagVerified.Proofs.Adrs
 public import QsagVerified.Proofs.SpongeConformance
 import all Qsag.Keccak
 import all QsagVerified.Proofs.RealSpecKeccakWeld
@@ -884,7 +885,7 @@ private theorem spongeRateByte_nat (a : Array Std.U64 25#usize) (j : Nat) :
   simp only [spongeRateByte, UScalar.cast, UScalar.bv_and, BitVec.setWidth_and]
   change (UInt8.ofBitVec (((a.val.getD (j / 8) 0#u64).bv >>> (8 * (j % 8))).setWidth 8
     &&& BitVec.allOnes 8)).toNat = _
-  rw [BitVec.and_allOnes]
+  rw [byte_and_allOnes]
   simp [UInt8.toNat_ofBitVec, BitVec.toNat_setWidth, BitVec.toNat_ushiftRight,
     Nat.shiftRight_eq_div_pow, UScalar.val]
 
@@ -959,6 +960,12 @@ theorem shake256_32_refines (input : Slice Std.U8) :
   · simp only [Array.from_slice, hd, dite_true]
     rw [hbytes, hstate, hsfx1, hsfx0, List.nil_append]
     rfl
+
+/-- Empty customization selects SHAKE in both the extracted constructor and the spec. -/
+theorem cshake256_32_empty_refines (input : Slice Std.U8) :
+    ∃ out, keccak.cshake256_32 ⟨[], by decide⟩ input = .ok out ∧
+      u8Bytes out.val = Qsag.cshake256Xof 32 [] (u8Bytes input.val) :=
+  shake256_32_refines input
 
 /-- cSHAKE's byte-output weld, conditional only on the constructor establishing the
 SP 800-185 prefix. The constructor's encoding and bytepad proof remains separate. -/

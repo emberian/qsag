@@ -23,6 +23,7 @@ export qsag_verified.proofs (
   sponge_squeeze_prefix
   sponge_squeeze32_refines
   shake256_32_refines
+  cshake256_32_empty_refines
   cshake256_32_refines_of_prefix
   GoldilocksP
   bdoz_authenticate_open_total

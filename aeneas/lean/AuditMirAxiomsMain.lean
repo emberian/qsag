@@ -1,5 +1,6 @@
 module
 import Lean
+import all Aeneas.Elab.Attrs
 import all Lean.Util.CollectAxioms
 
 open Lean
@@ -22,6 +23,10 @@ public def main : IO UInt32 := do
     for (name, _) in env.constants.toList do
       if let some idx := env.getModuleIdxFor? name then
         let owner := env.header.moduleNames[idx.toNat]!.toString
+        -- Elaboration programs are not logical axioms. Their emitted declarations and
+        -- every transitive dependency of a checked proof remain in the census.
+        if owner.startsWith "Aeneas.Elab." &&
+          (isDeclMeta env name || isDeclMeta env name.getPrefix) then continue
         if owner == "Aeneas" || owner.startsWith "Aeneas." || owner == "QsagCustodyWeld" || owner == "QsagSpecWeld" || owner == "QsagMirProofs" || owner == "QsagVerified" ||
             owner.startsWith "QsagVerified." then
           checked := checked + 1
