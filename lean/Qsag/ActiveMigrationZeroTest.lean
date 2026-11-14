@@ -1159,10 +1159,16 @@ theorem post_ceremony_nullifier_domain_binding_and_replay_sound
   | isFalse hDiffIn =>
     exact Or.inr ⟨hDiffIn, hNullEq⟩
 
-#tooth_pair
-  Qsag.post_ceremony_nullifier_domain_binding_and_replay_sound
-  vs
-  Qsag.tooth_shor_crqc_breaks_legacy_pk_pre_migration
+/-- A constant hash destroys nullifier binding; the collision alternative is necessary. -/
+theorem tooth_constant_hash_nullifier_collision :
+    ∃ (hash : UInt64 → (Fin 11 → Goldilocks) → (Fin 4 → Goldilocks))
+      (g : ScalarGroup) (s d d' : BitVec 256),
+      d ≠ d' ∧ computeMigrationNullifier hash g s d = computeMigrationNullifier hash g s d' := by
+  refine ⟨fun _ _ _ => Goldilocks.zero, .Secp256k1, 0, 0, 1, ?_, rfl⟩
+  decide
+
+#tooth_pair Qsag.post_ceremony_nullifier_domain_binding_and_replay_sound vs
+  Qsag.tooth_constant_hash_nullifier_collision
 
 /-! ## 3. 3-Party 64-Lane Replicated Secret Sharing (`RssBit64`) & `shareUniformLanesCheck` -/
 

@@ -70,9 +70,9 @@ def latchTrace (events : String) : Except String String := do
     else
       let fields ← (event.splitOn ":").mapM nat
       if fields.length != 4 then throw "latch event arity"
-      let rec : BeltLatchRecord := ⟨UInt64.ofNat fields[0]!,
+      let record : BeltLatchRecord := ⟨UInt64.ofNat fields[0]!,
         BitVec.ofNat 256 fields[1]!, BitVec.ofNat 256 fields[2]!, [UInt8.ofNat fields[3]!]⟩
-      match beltLatchBindStep st rec with
+      match beltLatchBindStep st record with
       | .accepted next _ => st := next; out := out ++ ["true"]
       | .rejected next _ => st := next; out := out ++ ["false"]
   return String.intercalate "," out ++ ";" ++ toString st.nextEpoch ++ ";" ++ bool st.walPoisoned

@@ -11,6 +11,10 @@ Reusable Lean 4.35 tactic and command-elaboration infrastructure for QSAG (`LAW-
    Compile-time structural pairing auditor verifying that a security theorem is paired with a
    structurally related counterexample/refusal theorem and that both satisfy
    `#verify_constructive` without vacuous `False` hypotheses.
+   Shared primitive carriers do not establish a pair; a domain operation or predicate must overlap.
+   This is a structural diagnostic, not a proof that the tooth is a mutation of the theorem.
+   `#verify_inhabited` constructs one joint assignment for all theorem binders, including
+   propositions and dependent values; witness parameters must themselves be constructible.
 3. **`by bv_xor_cancel`**:
    Constructive (`0 Classical.choice`, `0 ofReduceBool`) XOR one-time-pad normalizer and
    unbounded reflected AC normalization over `BitVec w`; a Boolean fallback handles
@@ -244,7 +248,7 @@ theorem ring_sub_add_cancel_right {R : Type} [LawfulCommRing R] (a b : R) :
 
 /-! ## 2. Constructive `SimpleEquiv` Pad-Bijection Combinators (`0 Classical.choice`) -/
 
-@[expose] def SimpleEquiv.refl (α : Type) : SimpleEquiv α α where
+abbrev SimpleEquiv.refl (α : Type) : SimpleEquiv α α where
   toFun := id
   invFun := id
   left_inv _ := rfl
@@ -278,14 +282,14 @@ theorem ring_sub_add_cancel_right {R : Type} [LawfulCommRing R] (a b : R) :
   right_inv y := bv_xor_cancel_right y mask
 
 /-- Constructive involutive one-time-pad bijection `x ↦ x ^^^ mask` on `UInt64`. -/
-@[expose] def u64XorEquiv (mask : UInt64) : SimpleEquiv UInt64 UInt64 where
+abbrev u64XorEquiv (mask : UInt64) : SimpleEquiv UInt64 UInt64 where
   toFun x := x ^^^ mask
   invFun y := y ^^^ mask
   left_inv x := u64_xor_cancel_right x mask
   right_inv y := u64_xor_cancel_right y mask
 
 /-- Constructive involutive one-time-pad bijection `x ↦ x != mask` on `Bool`. -/
-@[expose] def boolXorEquiv (mask : Bool) : SimpleEquiv Bool Bool where
+abbrev boolXorEquiv (mask : Bool) : SimpleEquiv Bool Bool where
   toFun x := x != mask
   invFun y := y != mask
   left_inv x := bool_bne_cancel_right x mask
@@ -511,6 +515,17 @@ namespace Qsag.Tactic.AssuranceKit
 
 open Lean Meta Elab Command Tactic
 
+/-- Share a checked proof without abstracting away the values of local `let`s.
+    The kernel still checks the auxiliary theorem and its application. -/
+elab "qsag_aux_lemma" " => " body:tacticSeq : tactic => withMainContext do
+  let goal ← getMainGoal
+  let remaining ← Tactic.run goal (evalTactic body)
+  unless remaining.isEmpty do
+    throwError "qsag_aux_lemma requires all goals to be closed"
+  let proof ← instantiateMVars (mkMVar goal)
+  let shared ← mkAuxTheorem (← goal.getType) proof (zetaDelta := true)
+  goal.assign shared
+
 /-- Strip outer `Expr.mdata` wrappers. -/
 private meta partial def stripMData (e : Expr) : Expr :=
   match e with
@@ -605,6 +620,9 @@ meta def verifyConstructiveDecl (id : Ident) : CommandElabM (Name × ConstantInf
     unless ax == ``propext || ax == ``Quot.sound do
       throwErrorAt id "constructive audit: forbidden axiom {ax}"
   liftTermElabM <| auditPremises ci
+  liftTermElabM <| forallTelescope ci.type fun _ conclusion => do
+    if (← whnf conclusion).isConstOf ``True then
+      throwError "constructive audit: trivial True conclusion"
   if (stripBinders (ci.value! (allowOpaque := true))).getAppFn.isConstOf ``True.intro then
     throwErrorAt id "constructive audit: trivial True conclusion"
   return (n, ci)
@@ -614,13 +632,31 @@ elab_rules : command
   | `(command| #verify_constructive $[$ids:ident]*) => do
     for id in ids do discard <| verifyConstructiveDecl id
 
-private meta def domainConstants (e : Expr) : Array Name :=
-  e.getUsedConstants.filter fun n =>
-    (`Qsag).isPrefixOf n || [``BitVec, ``ByteArray, ``UInt8, ``UInt64].contains n
+/-- Only domain operations/predicates count; carrier types and constructors do not.
+Inspect one definition layer so a named protocol wrapper can expose its checker. -/
+private meta def domainConstants (e : Expr) : MetaM (Array Name) := do
+  let env ← getEnv
+  let direct := e.getUsedConstants
+  let mut names := direct
+  for n in direct do
+    if (`Qsag).isPrefixOf n then
+      if let some ci := env.find? n then
+        if let .defnInfo d := ci then
+          names := names ++ d.value.getUsedConstants
+  names.filterM fun n => do
+    unless (`Qsag).isPrefixOf n do return false
+    let some ci := env.find? n | return false
+    match ci with
+    | .defnInfo _ => forallTelescope ci.type fun _ result =>
+        return !result.isSort || result == mkSort Level.zero
+    | .inductInfo _ => forallTelescope ci.type fun _ result =>
+        return result == mkSort Level.zero
+    | _ => return false
 
 private meta def requireOverlap (a b : Expr) : MetaM Unit := do
-  let common := (domainConstants a).filter (domainConstants b).contains
-  if common.isEmpty then
+  let da ← domainConstants a
+  let db ← domainConstants b
+  if (da.filter db.contains).isEmpty then
     throwError "pair audit: no shared protocol/domain constants"
 
 private meta partial def meaningfulWitness (e : Expr) : MetaM Bool := do
@@ -664,59 +700,196 @@ private meta def checkToothPair (secId toothId : Ident) : CommandElabM Unit := d
     unless ← refutationShape t.type do
       throwError "pair audit: tooth has no counterexample/refutation conclusion"
 
-syntax "#tooth_pair " ident " vs " ident : command
+syntax "#tooth_pair " ident &"vs" ident : command
 syntax "#tooth_pair " ident ident : command
 elab_rules : command
   | `(command| #tooth_pair $s:ident vs $t:ident) => checkToothPair s t
   | `(command| #tooth_pair $s:ident $t:ident) => checkToothPair s t
 
-private meta partial def witnessContains (premise e : Expr) : MetaM Bool := do
+/-- Reveal constructor witnesses without normalizing their cryptographic data. -/
+private meta def witnessHead (e : Expr) (fuel : Nat := 64) : MetaM Expr := do
+  let e ← whnf e
+  match fuel with
+  | 0 => return e
+  | fuel + 1 =>
+    if let .const n ls := e.getAppFn then
+      if let some ci := (← getEnv).find? n then
+        if let some value := ci.value? (allowOpaque := true) then
+          return ← witnessHead (mkAppN (value.instantiateLevelParams ci.levelParams ls) e.getAppArgs) fuel
+    return e
+
+/-- Preserve one common witness assignment across all premises. -/
+private meta partial def withWitnessFacts (e proof : Expr) (facts : Array Expr)
+    (k : Array Expr → MetaM Unit) : MetaM Unit := do
   if e.getAppFn.isConstOf ``Exists then
     let args := e.getAppArgs
-    withLocalDeclD `_ args[0]! fun v => witnessContains premise ((mkApp args[1]! v).headBeta)
+    let p ← witnessHead proof
+    if p.getAppFn.isConstOf ``Exists.intro then
+      let pa := p.getAppArgs
+      let v := pa[pa.size - 2]!
+      withWitnessFacts ((mkApp args[1]! v).headBeta) pa.back! (facts.push v) k
+    else
+      withLocalDeclD `_ args[0]! fun v =>
+        let ty := (mkApp args[1]! v).headBeta
+        withLocalDeclD `_ ty fun h => withWitnessFacts ty h (facts.push v) k
   else if e.getAppFn.isConstOf ``Nonempty then
     let carrier ← whnf e.getAppArgs[0]!
-    unless carrier.getAppFn.isConstOf ``Subtype do return false
-    let args := carrier.getAppArgs
-    withLocalDeclD `_ args[0]! fun v => witnessContains premise ((mkApp args[1]! v).headBeta)
+    let useValue (v : Expr) : MetaM Unit := do
+      if carrier.getAppFn.isConstOf ``Subtype then
+        let val ← mkAppM ``Subtype.val #[v]
+        let prop ← mkAppM ``Subtype.property #[v]
+        k (facts ++ #[v, val, prop])
+      else k (facts.push v)
+    let p ← witnessHead proof
+    if p.getAppFn.isConstOf ``Nonempty.intro then useValue p.getAppArgs.back!
+    else withLocalDeclD `_ carrier useValue
   else if e.getAppFn.isConstOf ``And then
-    return (← witnessContains premise e.getAppArgs[0]!) ||
-      (← witnessContains premise e.getAppArgs[1]!)
-  else
-    let (_, _, body) ← forallMetaTelescope premise
-    withoutModifyingState (isDefEq body e)
+    withWitnessFacts e.getAppArgs[0]! (← mkAppM ``And.left #[proof]) facts fun facts => do
+      withWitnessFacts e.getAppArgs[1]! (← mkAppM ``And.right #[proof]) facts k
+  else k (facts.push (mkApp2 (mkConst ``id [Level.zero]) e proof))
 
-/-- An inhabitedness witness must supply an existential containing an instance of an
-actual security premise. Merely mentioning the same carrier is insufficient.
-All witness Prop assumptions are rejected: a conditional witness does not establish
-that the security precondition is reachable. Parameters of data types are allowed. -/
+/-- Failed candidate unification must not constrain later witness candidates. -/
+private meta def matchWitnessType (a b : Expr) : MetaM Bool := do
+  -- Match the stated predicate before unfolding. Unfolding a different predicate
+  -- can both trigger enormous computations and assign unrelated index variables.
+  let a ← instantiateMVars a
+  let b ← instantiateMVars b
+  let ah := a.getAppFn
+  let bh := b.getAppFn
+  if ah.isConst && bh.isConst && ah.constName! != bh.constName! then return false
+  let saved ← saveState
+  if ← isDefEq a b then return true
+  saved.restore
+  return false
+
+/-- Construct data without choice, including ordinary records lacking an Inhabited instance.
+Fuel bounds constructor search; every successful term is subsequently type-checked and audited. -/
+private meta def constructWitnessValue (ty : Expr) (fuel : Nat := 16) : MetaM Expr := do
+  try return ← mkDefault ty catch _ => pure ()
+  if ← isProp ty then
+    let dec ← mkDecide ty
+    unless ← isDefEq dec (mkConst ``Bool.true) do throwError "unproved constructor field"
+    return ← mkDecideProof ty
+  match fuel with
+  | 0 => throwError "inhabitedness audit: constructor search exhausted"
+  | fuel + 1 =>
+    let ty ← whnf ty
+    if ty.isForall then
+      return ← forallTelescope ty fun xs result => do
+        mkLambdaFVars xs (← constructWitnessValue result fuel)
+    let .const name _ := ty.getAppFn | throwError "inhabitedness audit: no data constructor"
+    let .inductInfo info ← getConstInfo name | throwError "inhabitedness audit: no inductive carrier"
+    for ctor in info.ctors do
+      let saved ← saveState
+      try
+        let c ← mkConstWithFreshMVarLevels ctor
+        let (args, _, result) ← forallMetaTelescope (← inferType c)
+        unless ← isDefEq result ty do throwError "constructor result mismatch"
+        for arg in args do
+          let arg ← instantiateMVars arg
+          if arg.isMVar then
+            let value ← constructWitnessValue (← instantiateMVars (← inferType arg)) fuel
+            unless ← isDefEq arg value do throwError "constructor field mismatch"
+        return ← instantiateMVars (mkAppN c args)
+      catch _ => saved.restore
+    throwError "inhabitedness audit: cannot construct {ty}"
+
 private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
   requireOverlap s.type w.type
-  forallTelescope s.type fun sx _ => do
-    forallTelescope w.type fun wx conclusion => do
-      for x in wx do
-        if ← isProp (← inferType x) then
-          throwError "inhabitedness audit: witness has undischarged Prop assumptions"
-      unless conclusion.getAppFn.isConstOf ``Exists || conclusion.getAppFn.isConstOf ``Nonempty do
-        throwError "inhabitedness audit: expected an existential reachable-state witness"
-      let mut matched := false
-      for x in sx do
-        let premise ← inferType x
-        if ← isProp premise then
-          let pred := premise.getAppFn
-          if pred.isConst && ((`Qsag).isPrefixOf pred.constName!) then
-            -- Match predicate applications under existential binders, not names alone.
-            let generalized ← mkForallFVars sx premise
-            if ← witnessContains generalized conclusion then matched := true
-      unless matched do
-        throwError "inhabitedness audit: existential does not discharge a protocol premise"
+  -- A parameterized witness is callable only when every argument can be constructed.
+  let (wx, _, conclusion) ← forallMetaTelescope w.type
+  for x in wx do
+    let ty ← instantiateMVars (← inferType x)
+    if ← isProp ty then
+      throwError "inhabitedness audit: witness has undischarged Prop assumptions"
+    let value ← constructWitnessValue ty
+    unless ← isDefEq x value do
+      throwError "inhabitedness audit: cannot instantiate witness parameter"
+  for x in wx do
+    let value ← instantiateMVars x
+    if value.hasExprMVar then throwError "inhabitedness audit: unresolved witness parameter"
+    check value
+    auditDag (← getEnv) value.getUsedConstants.toList
+  let conclusion ← instantiateMVars conclusion
+  unless conclusion.getAppFn.isConstOf ``Exists || conclusion.getAppFn.isConstOf ``Nonempty do
+    throwError "inhabitedness audit: expected an existential reachable-state witness"
+  let proof ← instantiateMVars (mkAppN (w.value! (allowOpaque := true)) wx)
+  withWitnessFacts conclusion proof #[] fun facts => do
+    let (sx, _, _) ← forallMetaTelescope s.type
+    for x in sx do
+      let ty ← instantiateMVars (← inferType x)
+      if ← isProp ty then
+        let mut found := false
+        for fact in facts do
+          if ← matchWitnessType ty (← inferType fact) then
+            unless ← isDefEq x fact do
+              throwError "inhabitedness audit: inconsistent proof assignment"
+            found := true
+            break
+        if !found then pure ()
+    for x in sx do
+      let x ← instantiateMVars x
+      if x.isMVar && !(← isProp (← inferType x)) then
+        let ty ← instantiateMVars (← inferType x)
+        if let .some inst ← (try trySynthInstance ty catch _ => pure .none) then
+          if ← isDefEq x inst then continue
+        let mut found := false
+        for fact in facts do
+          if ← matchWitnessType ty (← inferType fact) then
+            -- Preserve a witnessed list dimension when filling unconstrained data.
+            -- Every resulting premise is still proved below; this is only a search heuristic.
+            let candidate ← try
+              if ty.getAppFn.isConstOf ``List then
+                let d ← mkDefault ty.getAppArgs[0]!
+                mkAppM ``List.replicate #[← mkAppM ``List.length #[fact], d]
+              else pure fact
+            catch _ => pure fact
+            if ← isDefEq x candidate then
+              found := true
+              break
+        if !found then pure ()
+    -- Infer dimensions from structured witness values before defaulting free data.
+    for x in sx do
+      let x ← instantiateMVars x
+      if x.isMVar && !(← isProp (← inferType x)) then
+        let value ← constructWitnessValue (← instantiateMVars (← inferType x))
+        unless ← isDefEq x value do
+          throwError "inhabitedness audit: cannot construct value binder"
+    for x in sx do
+      let x ← instantiateMVars x
+      if x.isMVar then
+        let ty ← instantiateMVars (← inferType x)
+        let proof ← try
+          let .some inst ← trySynthInstance ty | throwError "not an instance"
+          pure inst
+        catch _ =>
+          try
+            let (target, dec) ← try
+              pure (ty, ← mkDecide ty)
+            catch _ => do
+              let target ← withTransparency .all (whnf ty)
+              pure (target, ← mkDecide target)
+            unless ← isDefEq dec (mkConst ``Bool.true) do
+              throwError "decision is not true"
+            mkDecideProof target
+          catch err => throwError "inhabitedness audit: joint witness does not discharge {ty}\n{err.toMessageData}"
+        unless ← isDefEq x proof do
+          throwError "inhabitedness audit: inconsistent joint proof"
+    for x in sx do
+      let value ← instantiateMVars x
+      if value.hasExprMVar then
+        throwError "inhabitedness audit: incomplete joint witness"
+      check value
+      auditDag (← getEnv) value.getUsedConstants.toList
 
 syntax "#verify_inhabited " ident ident : command
 elab_rules : command
   | `(command| #verify_inhabited $s:ident $w:ident) => do
     let (_, sec) ← verifyConstructiveDecl s
     let (_, wit) ← verifyConstructiveDecl w
-    liftTermElabM <| checkInhabited sec wit
+    -- Keep witness search bounded even in modules that disable proof heartbeat limits.
+    liftTermElabM <| withOptions (fun o => maxRecDepth.set (maxHeartbeats.set o 200000) (max 4096 (maxRecDepth.get o))) <|
+      checkInhabited sec wit
 
 /-! ### `by bv_xor_cancel` — Constructive XOR / Bitwise Canceller (`0 Classical.choice`) -/
 
@@ -1376,6 +1549,12 @@ end Qsag.Tactic.AssuranceKit
 
 namespace Qsag
 
+theorem aux_lemma_preserves_local_value (x : Nat) :
+    let y := x + 1
+    y = x + 1 := by
+  intro y
+  qsag_aux_lemma => rfl
+
 /-- Smoke test: `bv_xor_cancel` cancels permuted 4-party shares on polymorphic width `w : Nat`. -/
 theorem bv_three_share_fault_shift {w : Nat} (s0 s1 s2 delta : BitVec w) :
     ((s0 ^^^ delta) ^^^ s1) ^^^ s2 = (((s0 ^^^ s1) ^^^ s2) ^^^ delta) := by
@@ -1459,13 +1638,22 @@ theorem sameZero (n : Nat) (h : n = 0) (h' : n = Nat.zero) : n = 0 ∧ n = Nat.z
 
 theorem selfNe (n : Nat) (h : n ≠ n) : False := h rfl
 theorem conditionalWitness (s : State) (h : reachable s) : ∃ t, reachable t := ⟨s, h⟩
-theorem detachedWitness : ∃ s : State, step s = step s := ⟨⟨0⟩, rfl⟩
+theorem detachedWitness : ∃ s : State, step s = step s := ⟨⟨1⟩, rfl⟩
 
 #verify_constructive security witness tooth
 #verify_inhabited security witness
 #verify_inhabited security inhabitedWitness
 #tooth_pair security vs tooth
 #tooth_pair security tooth
+def BelowOne (n : Nat) : Prop := n < 1
+theorem contradictory (n : Nat) (h : BelowOne n) (hn : ¬ BelowOne n) : n = 42 :=
+  False.elim (hn h)
+theorem belowWitness : ∃ n, BelowOne n := ⟨0, Nat.zero_lt_succ 0⟩
+theorem emptySubtypeWitness (s : {_n : Nat // False}) : ∃ n, BelowOne n :=
+  False.elim s.property
+theorem wrappedTruth : True := trivialTooth
+theorem scalarSecurity (x : UInt64) : x = x := rfl
+theorem scalarTooth : ∃ x : UInt64, x = 0 ∧ x ≠ 1 := ⟨0, rfl, by decide⟩
 end AssuranceRegression
 
 #verify_constructive xorEval_norm_eq XorTree.norm_sound xor_rss16 xor_rss32 frameList_append_inj
@@ -1479,6 +1667,16 @@ private meta def expectRejection (label : String) (action : CommandElabM Unit) :
   unless rejected do throwError "negative assurance self-test accepted {label}"
 
 run_cmd do
+  expectRejection "wrapped truth" do
+    discard <| verifyConstructiveDecl (← `(ident| Qsag.AssuranceRegression.wrappedTruth))
+  expectRejection "primitive carrier overlap" do
+    checkToothPair (← `(ident| Qsag.AssuranceRegression.scalarSecurity))
+      (← `(ident| Qsag.AssuranceRegression.scalarTooth))
+  let (_, impossible) ← verifyConstructiveDecl (← `(ident| Qsag.AssuranceRegression.contradictory))
+  let (_, reachable) ← verifyConstructiveDecl (← `(ident| Qsag.AssuranceRegression.belowWitness))
+  expectRejection "contradictory joint premises" (liftTermElabM <| checkInhabited impossible reachable)
+  let (_, emptyWitness) ← verifyConstructiveDecl (← `(ident| Qsag.AssuranceRegression.emptySubtypeWitness))
+  expectRejection "empty subtype parameter" (liftTermElabM <| checkInhabited impossible emptyWitness)
   let sec ← `(ident| Qsag.AssuranceRegression.security)
   for t in #[← `(ident| Qsag.AssuranceRegression.trivialTooth),
       ← `(ident| Qsag.AssuranceRegression.unrelated),

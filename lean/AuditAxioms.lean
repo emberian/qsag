@@ -1,5 +1,7 @@
 module
 import Qsag
+import all Qsag.ElfFunctionalEquiv
+import all Qsag.CorduroyAndHemAirCompleteness
 import all Qsag.ActiveMigrationZeroTest
 import all Qsag.AdvancedMpcAndCreds
 import all Qsag.AffineProximityGaps
@@ -12,6 +14,8 @@ import all Qsag.CompiledRlibFixtures
 import all Qsag.ConcreteSecurityBudget
 import all Qsag.ConstantTimeIsa
 import all Qsag.Constructive
+import all Qsag.Digest256
+import all Qsag.MlDsa44Parameters
 import all Qsag.CustodySuiteFull
 import all Qsag.ElfBinaryVerify
 import all Qsag.ElfFixtureSlices
@@ -33,6 +37,8 @@ import all Qsag.LatticePreprocessingFull
 import all Qsag.MaliciousSecurity
 import all Qsag.McRefine
 import all Qsag.MirSpecBridge
+import all Qsag.MirSpecBridgeCore
+import all Qsag.MirSpecBridgeWitnesses
 import all Qsag.MultiRoundFsQrom
 import all Qsag.Poseidon2
 import all Qsag.Poseidon2AlgebraicAndRecursiveHem
@@ -50,8 +56,9 @@ import all Qsag.ThresholdApproval
 import all Qsag.ThresholdMlDsaAndToprf
 import all Qsag.ThresholdMpc
 import all Qsag.UcGames
-import Qsag.Tactic.AssuranceKit
+import all Qsag.Tactic.AssuranceKit
 import Lean
+public meta import AxiomAuditSupport
 
 /-!
 # Constructive Kernel Axiom Gate (`AuditAxioms`)
@@ -83,6 +90,8 @@ run_cmd do
     `Qsag.Tactic.AssuranceKit
   ]
   let auditedProofModules : Array Name := #[
+    `Qsag.ElfFunctionalEquiv,
+    `Qsag.CorduroyAndHemAirCompleteness,
     `Qsag.ActiveMigrationZeroTest,
     `Qsag.AdvancedMpcAndCreds,
     `Qsag.AffineProximityGaps,
@@ -95,6 +104,10 @@ run_cmd do
     `Qsag.ConcreteSecurityBudget,
     `Qsag.ConstantTimeIsa,
     `Qsag.Constructive,
+    `Qsag.Digest256,
+    `Qsag.MlDsa44Parameters,
+    `Qsag.MirSpecBridgeCore,
+    `Qsag.MirSpecBridgeWitnesses,
     `Qsag.CustodySuiteFull,
     `Qsag.ElfBinaryVerify,
     `Qsag.ElfFixtureSlices,
@@ -157,13 +170,18 @@ run_cmd do
     else System.FilePath.mk "lean/Qsag"
   unless ← qsagDir.pathExists do
     throwError "Cannot locate Qsag source directory for inventory check"
-  if ← qsagDir.pathExists then
-    for entry in (← qsagDir.readDir) do
-      if entry.path.extension == some "lean" then
+  let mut pending := [(qsagDir, `Qsag)]
+  while !pending.isEmpty do
+    let (dir, modulePrefix) := pending.head!
+    pending := pending.tail!
+    for entry in (← dir.readDir) do
+      if ← entry.path.isDir then
+        pending := (entry.path, modulePrefix.str entry.fileName) :: pending
+      else if entry.path.extension == some "lean" then
         if let some stem := entry.path.fileStem then
-          let diskMod := (`Qsag).str stem
-          unless auditedProofModules.contains diskMod do
-            throwError "Unregistered Qsag/*.lean module on disk missing from AuditAxioms: {diskMod}"
+          let diskMod := modulePrefix.str stem
+          unless auditedProofModules.contains diskMod || infrastructureModules.contains diskMod do
+            throwError "Unregistered Qsag source module missing from AuditAxioms: {diskMod}"
 
   let mut perModuleCounts : Array Nat := Array.replicate auditedProofModules.size 0
   let mut checked : Nat := 0
@@ -183,6 +201,25 @@ run_cmd do
           rejected := rejected + 1
           examples := examples.push name
           logInfo m!"REJECT {name} ({owner}): {forbidden}"
+
+  -- Tactic implementation executes at compile time; its pure definitions and proofs
+  -- remain subject to the same axiom policy as the library.
+  let mut infrastructureChecked : Nat := 0
+  let mut metaSkipped : Nat := 0
+  for (name, _) in privEnv.constants.toList do
+    if let some idx := privEnv.getModuleIdxFor? name then
+      if infrastructureModules.contains importedNames[idx.toNat]! then
+        if QsagAudit.isCompileTimeAssurance privEnv name then
+          metaSkipped := metaSkipped + 1
+        else
+          infrastructureChecked := infrastructureChecked + 1
+          let axioms ← withEnv privEnv <| Lean.collectAxioms name
+          let forbidden := axioms.filter (!allow ·)
+          if !forbidden.isEmpty then
+            rejected := rejected + 1
+            examples := examples.push name
+            logInfo m!"REJECT {name}: {forbidden}"
+  logInfo m!"Assurance infrastructure: {infrastructureChecked} pure declarations audited; {metaSkipped} compile-time declarations"
 
   if checked == 0 then
     throwError "No project declarations found; audit coverage is empty"

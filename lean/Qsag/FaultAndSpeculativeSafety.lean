@@ -2827,11 +2827,14 @@ theorem verifyHypertreeBeforeRelease_validCoords (suite : TweakableHashSuite)
   · cases h
   · next hGateNeg =>
     have hGate : AdrsGateValid params turn.globalIdx = true := by
-      cases hx : AdrsGateValid params turn.globalIdx <;> simp_all
+      cases hx : AdrsGateValid params turn.globalIdx
+      · exact False.elim (hGateNeg (by simp only [hx, Bool.not_false]))
+      · rfl
     split at h
     · cases h
     · next hn =>
-      have hlen := Decidable.not_not.mp hn
+      have hlen : turn.sigs.length = params.numLayers := Decidable.of_not_not hn
+      clear hn
       split at h
       · cases h
       · simp only [Option.bind_eq_bind, Option.bind_eq_some_iff] at h
@@ -3172,11 +3175,14 @@ theorem verifyHypertreeBeforeRelease_openingBound (suite : TweakableHashSuite)
   · split at h
     · cases h
     · next hn =>
-      have hlen := Decidable.not_not.mp hn
+      have hlen : turn.sigs.length = params.numLayers := Decidable.of_not_not hn
+      clear hn
       split at h
       · cases h
       · next hv =>
-        have ht := Decidable.not_not.mp hv
+        have ht : verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot turn.rand 0
+            turn.globalIdx turn.root turn.sigs = some pk.pkRoot :=
+          Decidable.of_not_not hv
         cases hsig : turn.sigs with
         | nil =>
           simp [hsig, verifiedLayerMessages] at h
@@ -3292,7 +3298,7 @@ theorem verifyProductionHypertreeLayers_upper_rand_irrel (suite : TweakableHashS
         (UInt64.ofNat (g / 2 ^ params.subtreeHeight)) (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) l.tswCtr =
         productionLayerDigest suite params [] pkSeed pkRoot cur layer
         (UInt64.ofNat (g / 2 ^ params.subtreeHeight)) (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) l.tswCtr := by
-      simp only [productionLayerDigest_eq, hNe0, Bool.and_false]
+      simp only [productionLayerDigest_eq, hNe0, Bool.and_false, Bool.false_eq_true, ↓reduceIte]
     rw [verifyProductionHypertreeLayers_cons, verifyProductionHypertreeLayers_cons]
     dsimp only
     rw [hDig]
@@ -3410,7 +3416,7 @@ theorem verifyProductionPqHashSig_layers (suite : TweakableHashSuite) (params : 
       simp only [hWf, hRange, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at h
       by_cases hLen : sig.layerSigs.length = params.numLayers
       · by_cases hCtr0 : sig.msgTswCtr = 0
-        · simp only [hLen, hCtr0, ne_eq, not_true_eq_false, Bool.or_self, ↓reduceIte] at h
+        · simp only [hLen, hCtr0, ne_eq, not_true_eq_false, decide_false, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at h
           refine ⟨hGate, hLen, ?_⟩
           unfold productionHypertreeStart
           dsimp only at h ⊢
@@ -3420,14 +3426,14 @@ theorem verifyProductionPqHashSig_layers (suite : TweakableHashSuite) (params : 
             split at h
             · cases h
             · next hEmpty =>
-              simp only [hEmpty, ↓reduceIte]
+              simp only [hEmpty]
               split at h
               · next top hVer =>
                 exact ⟨sig.rRand, thPreHash suite pk.pkSeed pk.pkRoot msg, rfl,
                   by rw [hVer, of_decide_eq_true h]⟩
               · cases h
           · next hSt =>
-            simp only [hSt, ↓reduceIte]
+            simp only [hSt]
             split at h
             · cases h
             · next hFLen =>
@@ -3650,7 +3656,10 @@ theorem verifyProductionBeforeReleaseAll_props (suite : TweakableHashSuite) (par
       · next hc =>
         cases h
         simp only [List.append_nil] at hc
-        exact ⟨by simpa using hc, fun _ hm => by cases hm, fun _ hm => by cases hm⟩
+        refine ⟨?_, ?_, ?_⟩
+        · simpa using hc
+        · intro e he; cases he
+        · intro e he; cases he
       · cases h
     | cons sig rest =>
       rw [hsig] at ht hlen h
@@ -3658,7 +3667,7 @@ theorem verifyProductionBeforeReleaseAll_props (suite : TweakableHashSuite) (par
         rand 0 turn.candidate.leafGlobalIdx root sig rest pk.pkRoot).mp ht
       rw [verifyProductionHypertreeLayers_upper_rand_irrel suite params pk.pkSeed pk.pkRoot rand rest
         1 (turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight) mid (by decide)] at hu
-      simp only [verifiedProductionLayerMessages, hm, Option.bind_some, Option.bind_eq_some_iff,
+      simp only [verifiedProductionLayerMessages, hm, Option.bind_eq_bind, Option.bind_some, Option.bind_eq_some_iff,
         Option.pure_def, Option.some.injEq] at h
       obtain ⟨all, ⟨tail, he, rfl⟩, h⟩ := h
       simp only [List.drop_succ_cons, List.drop_zero] at h
@@ -3705,7 +3714,8 @@ theorem production_bound_cached_openings_unique_or_collision (suite : TweakableH
     pk.pkSeed pk.pkRoot [] a.key.layer (openingGlobalIdx params a.key) a.signed.root a.opening topa hva
   obtain ⟨digitsB, hDigB, hlb, hwb⟩ := verifyProductionHypertreeLayers_single suite params
     pk.pkSeed pk.pkRoot [] b.key.layer (openingGlobalIdx params b.key) b.signed.root b.opening topb hvb
-  rw [← hk, ← hm, ← hctr, ← ht] at hDigB hwb
+  rw [← hk, ← hm, ← hctr] at hDigB
+  rw [← hk, ← ht] at hwb
   have hDigEq : digitsA = digitsB := Option.some.inj (hDigA.symm.trans hDigB)
   rw [← hDigEq] at hwb
   rcases wots_openings_unique_or_collision suite params pk.pkSeed _ _ _ _ _ _ _ _ _
@@ -3782,11 +3792,12 @@ theorem stepRecoverableProductionGate_preserves_inv (suite : TweakableHashSuite)
   obtain ⟨hVol, hEmit, hCons, hVal, hBound⟩ := hInv
   cases ev with
   | signAndPersistOk turn =>
-    unfold stepRecoverableProductionGate
+    simp only [stepRecoverableProductionGate]
     cases hVer : verifyProductionBeforeReleaseAll suite params pk st.volatileCache turn with
-    | none => exact ⟨hVol, hEmit, hCons, hVal, hBound⟩
+    | none => simpa only [hVer] using (show DurableJournalInv suite params pk st from ⟨hVol, hEmit, hCons, hVal, hBound⟩)
     | some es =>
       dsimp only
+      change DurableJournalInv suite params pk { diskJournal := st.diskJournal ++ es, volatileCache := st.diskJournal ++ es, emittedEntries := st.emittedEntries ++ es }
       rw [hVol] at hVer
       obtain ⟨hCons', hValEs, hBoundEs⟩ :=
         verifyProductionBeforeReleaseAll_props suite params pk st.diskJournal es turn hVer
@@ -3858,9 +3869,9 @@ theorem production_verify_before_release_adrs_unique_or_collision
         stepRecoverableProductionGate, hVol]
       cases verifyProductionBeforeReleaseAll suite params pk st.diskJournal t with
       | none => exact ih st hVol
-      | some es => exact ih _ rfl
+      | some es => exact ih { diskJournal := st.diskJournal ++ es, volatileCache := st.diskJournal ++ es, emittedEntries := st.emittedEntries ++ es } rfl
   have hInit := hEquiv turns .init rfl
-  simp only [DurableUpperJournalState.init] at hInit
+  change guardedProductionSignTraceAll suite params pk [] turns = _ at hInit
   rw [hInit] at ha hb
   have hInv := runRecoverableProductionSchedule_preserves_inv suite params pk
     (turns.map RecoverableGateEvent.signAndPersistOk) .init

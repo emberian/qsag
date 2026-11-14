@@ -5928,7 +5928,7 @@ private def buildChainListWitnessPoly {DW V CW : Type}
     List DW → List V → Nat → List CW
   | [], _, _ => []
   | _, [], _ => []
-  | d :: ds, v :: vs, c => mkChain c d v :: buildChainListWitnessPoly mkChain ds vs (c + 1)
+  | d :: ds, v :: values, c => mkChain c d v :: buildChainListWitnessPoly mkChain ds values (c + 1)
 
 private def chainListResidualsPoly {DW CW RES : Type}
     (cRes : Nat → DW → CW → List RES) (badRes : List RES) :
@@ -6037,27 +6037,27 @@ theorem wotsChainsResiduals_allZero_iff (pkSeed : Digest4) (layer treeIdx kpIdx 
 private theorem map_sigOf_buildChainListWitnessPoly {DW V CW : Type}
     (mkChain : Nat → DW → V → CW) (sigOf : CW → V)
     (hSig : ∀ c d v, sigOf (mkChain c d v) = v) :
-    ∀ (ds : List DW) (vs : List V) (c : Nat),
-      ds.length = vs.length →
-      (buildChainListWitnessPoly mkChain ds vs c).map sigOf = vs
+    ∀ (ds : List DW) (values : List V) (c : Nat),
+      ds.length = values.length →
+      (buildChainListWitnessPoly mkChain ds values c).map sigOf = values
   | [], [], _, _ => rfl
   | [], _ :: _, _, h => absurd h (Nat.succ_ne_zero _).symm
   | _ :: _, [], _, h => absurd h (Nat.succ_ne_zero _)
-  | d :: ds, v :: vs, c, h => by
+  | d :: ds, v :: values, c, h => by
     dsimp only [buildChainListWitnessPoly]
-    rw [List.map_cons, hSig, map_sigOf_buildChainListWitnessPoly mkChain sigOf hSig ds vs (c + 1) (Nat.succ.inj h)]
+    rw [List.map_cons, hSig, map_sigOf_buildChainListWitnessPoly mkChain sigOf hSig ds values (c + 1) (Nat.succ.inj h)]
 
 private theorem length_buildChainListWitnessPoly {DW V CW : Type}
     (mkChain : Nat → DW → V → CW) :
-    ∀ (ds : List DW) (vs : List V) (c : Nat),
-      ds.length = vs.length →
-      (buildChainListWitnessPoly mkChain ds vs c).length = vs.length
+    ∀ (ds : List DW) (values : List V) (c : Nat),
+      ds.length = values.length →
+      (buildChainListWitnessPoly mkChain ds values c).length = values.length
   | [], [], _, _ => rfl
   | [], _ :: _, _, h => absurd h (Nat.succ_ne_zero _).symm
   | _ :: _, [], _, h => absurd h (Nat.succ_ne_zero _)
-  | _ :: ds, _ :: vs, c, h => by
+  | _ :: ds, _ :: values, c, h => by
     dsimp only [buildChainListWitnessPoly]
-    rw [List.length_cons, length_buildChainListWitnessPoly mkChain ds vs (c + 1) (Nat.succ.inj h)]
+    rw [List.length_cons, length_buildChainListWitnessPoly mkChain ds values (c + 1) (Nat.succ.inj h)]
     rfl
 
 private theorem map_sibOf_buildMerklePathWitnessPoly {D LW : Type}

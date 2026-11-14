@@ -6103,6 +6103,20 @@ theorem witness_occupied_epoch_latch : ∃ st : EpochLatchState, st.WellFormed :
   change ep < 1
   omega
 
+/-- The invariant and an actual successful replay share one assignment. -/
+theorem witness_occupied_epoch_latch_step :
+    ∃ (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+      (st : EpochLatchState) (sig : PqHashSig),
+      st.WellFormed ∧ epochLatchSign suite params sk [] 0 st 0 [] = some (st, sig) := by
+  refine ⟨crumbToySuite, inhabitedStatefulParams, ⟨[], [], []⟩,
+    ⟨1, some (0, [], ⟨[], 0, 0, [], []⟩)⟩, ⟨[], 0, 0, [], []⟩, ?_, ?_⟩
+  · intro ep msg sig h
+    have he := congrArg (fun x => x.1) (Option.some.inj h)
+    change 0 = ep at he
+    change ep < 1
+    omega
+  · exact stateful_jorts_crash_retry_idempotent _ _ _ _ _ _ _ _
+
 /-- Equivocation rejection with the occupied latch explicit in the theorem statement. -/
 theorem tooth_occupied_latch_rejects_equivocation
     (suite : TweakableHashSuite) (params : PqHashParams)
@@ -6116,4 +6130,4 @@ end Qsag
 end
 
 #tooth_pair Qsag.stateful_jorts_crash_retry_idempotent vs Qsag.tooth_occupied_latch_rejects_equivocation
-#verify_inhabited Qsag.epochLatchSign_preserves_wellFormed Qsag.witness_occupied_epoch_latch
+#verify_inhabited Qsag.epochLatchSign_preserves_wellFormed Qsag.witness_occupied_epoch_latch_step
