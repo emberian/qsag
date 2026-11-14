@@ -1235,6 +1235,18 @@ private theorem released_canonical_cut_origin (vk : BdozVerifierKeys) (turns : L
         next => exact .inl hStep
     · exact .inr ⟨u, .tail _ hu, heq, hcb, hmac⟩
 
+private theorem uint8_beq_self (x : UInt8) : (x == x) = true := by
+  change decide (x.toBitVec = x.toBitVec) = true
+  exact decide_eq_true rfl
+
+private theorem listUInt8_beq_self : ∀ (xs : List UInt8), (xs == xs) = true
+  | [] => rfl
+  | x :: xs => by
+    change ((x == x) && List.beq xs xs) = true
+    have ih : List.beq xs xs = true := listUInt8_beq_self xs
+    rw [uint8_beq_self x, ih]
+    rfl
+
 /-- **Wire-Enforced Canonical MAC-Before-Open Multi-Turn Safety
     (`canonical_mac_before_open_blocks_faulted_cut_leakage`)**:
     Even against arbitrary untrusted wire `CutCandidateOpening`s (with zero `CanonicallyBound` or
@@ -1265,7 +1277,7 @@ theorem canonical_mac_before_open_blocks_faulted_cut_leakage
         intro hSame
         have hEq : t.candidateBytes = encodeCutShareBytes (honestOpening t).shareX :=
           hcb.trans (congrArg encodeCutShareBytes hSame.symm)
-        rw [hEq, beq_self_eq_true] at hEqB
+        rw [hEq, listUInt8_beq_self] at hEqB
         cases hEqB
       exact .inr (bdoz_pair_key_recovery vk (honestOpening t) t.opening
         (hParty t ht) hShareNe (hHonest t ht) hMac)
@@ -1293,7 +1305,7 @@ private theorem stepCanonical_accepts_canonical (vk : BdozVerifierKeys)
       ⟨ep + 1, [(ep, encodeCutShareBytes op.shareX)], 0, false⟩ := by
   unfold stepCanonicalMacBeforeOpenSignTurn mkCanonicalCutCandidateOpening
   dsimp only
-  rw [beq_self_eq_true ep, beq_self_eq_true (encodeCutShareBytes op.shareX), hMac]
+  rw [beq_self_eq_true ep, listUInt8_beq_self (encodeCutShareBytes op.shareX), hMac]
   rfl
 
 /-- **`#tooth` Mismatched `candidateBytes` Rejected Even Under Valid BDOZ MAC
