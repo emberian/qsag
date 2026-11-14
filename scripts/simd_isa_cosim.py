@@ -85,11 +85,10 @@ def extract(target: str) -> dict:
             if short not in NAMES + ('gf2_128_mul_acc_pmull',):
                 continue
             for sh in sections:
-                if sh[1] in (4, 9) and sh[7] == symbol.shndx:
-                    for pos in range(sh[4], sh[4]+sh[5], sh[9]):
-                        offset = struct.unpack_from('<Q', member.payload, pos)[0]
-                        if symbol.value <= offset < symbol.value + symbol.size:
-                            raise RuntimeError(f'{short}: relocation in machine code')
+                if sh[1] in (4, 9) and sh[7] == symbol.shndx and sh[5]:
+                    # A write starting before the symbol can overlap its bytes.
+                    # Reject the entire relocated section until widths are modeled.
+                    raise RuntimeError(f'{short}: relocation in executable section')
             if short in result:
                 raise RuntimeError(f'duplicate symbol {short}')
             result[short] = dict(code=symbol.code, sha256=hashlib.sha256(symbol.code).hexdigest(),
@@ -164,7 +163,7 @@ def pin_or_check(fixtures: dict, pin: bool) -> None:
     if not match or match[1] != hashlib.sha256((ROOT/'crates/qsag-asm/src/bitslice.rs').read_bytes()).hexdigest():
         raise RuntimeError('pinned source provenance differs')
     for name, f in fixtures.items():
-        for suffix, value in [('hex', f['code'].hex()), ('sha256', f['sha256'])]:
+        for suffix, value in [('hex', f['code'].hex()), ('sha256', f['sha256']), ('object_sha256', f['object_sha256'])]:
             match = re.search(r'def '+name+'_'+suffix+r' : String := "([0-9a-f]+)"', source)
             if not match or match[1] != value:
                 raise RuntimeError(f'{name}: pinned {suffix} differs from release ELF')
@@ -174,6 +173,9 @@ def pin_or_check(fixtures: dict, pin: bool) -> None:
         match = re.search(r'def '+name+r'_code : ByteCode := ⟨(\d+), (#\[.*?\])⟩', source)
         if not match or int(match[1]) != len(f['code']) or bytes(map(int, re.findall(r'\d+', match[2]))) != f['code']:
             raise RuntimeError(f'{name}: chunked Lean bytes differ from release ELF')
+        match = re.search(r'def '+name+r'_text_offset : Nat := (\d+)', source)
+        if not match or int(match[1]) != f['offset']:
+            raise RuntimeError(f'{name}: pinned object offset differs')
         print(f'{name}: {len(f["code"])} bytes sha256={f["sha256"]}', flush=True)
 
 
@@ -276,8 +278,9 @@ def main():
         parser.error('at least 512 cases are required')
     fixtures = extract('x86_64-unknown-linux-gnu')
     installed = subprocess.check_output(['rustup', 'target', 'list', '--installed'], text=True)
-    if 'aarch64-unknown-linux-gnu' in installed:
-        fixtures.update(extract('aarch64-unknown-linux-gnu'))
+    if 'aarch64-unknown-linux-gnu' not in installed:
+        parser.error('required AArch64 target is not installed')
+    fixtures.update(extract('aarch64-unknown-linux-gnu'))
     pin_or_check(fixtures, args.pin)
     for name in NAMES[:2]:
         isolated(name, lambda name=name: test_multiply(name, fixtures[name]['code'], args.cases))
