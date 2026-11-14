@@ -1,10 +1,12 @@
 module
 /-
-# Advanced MPC and credentials
-Constructive arithmetic models and explicit protocol boundaries.
-LAW-M1: public statements with a bounded exposed interface.
-The models below describe arithmetic circuits and immutable committed views;
-implementation refinement and cryptographic binding are separate obligations.
+# Advanced MPC, Accelerated Proof Kernels, and Anonymous Credentials
+Constructive arithmetic models, hardware-refining proof kernels, MAC-authenticated
+durable threshold ML-DSA nonce journals, and credential arithmetic and wire models.
+The finite wire boundary authenticates the supplied issuer context. Full-presentation
+hiding, fresh-mode unlinkability, and ROM/QROM reductions remain separate obligations;
+local masking bijections and repetition counts do not establish those properties.
+LAW-M1: public statements with a bounded exposed interface (`<= 12` `@[expose]`).
 -/
 
 public import Qsag.Goldilocks
@@ -1442,7 +1444,7 @@ theorem tooth_uncommitted_views_allow_adaptive_equivocation :
 /-- Local reblinding and single-wire hiding, plus fixed-triple arithmetic reconstruction.
 The historical name is retained for source compatibility. No distribution of complete
 presentations or Fiat–Shamir/QROM adversary is modeled by this theorem. -/
-theorem blind_vc_selective_disclosure_sound_and_unlinkable :
+theorem blind_vc_local_reblinding_and_special_soundness :
     (∀ b : VcBlind4,
       (∀ delta : VcBlind4, (vcReblindBijection b).invFun ((vcReblindBijection b).toFun delta) = delta) ∧
       (∀ y : VcBlind4, (vcReblindBijection b).toFun ((vcReblindBijection b).invFun y) = y)) ∧
@@ -1479,6 +1481,30 @@ theorem blind_vc_selective_disclosure_sound_and_unlinkable :
   · intro commitView expandTape t h0 h1 h2
     obtain ⟨_, hc, hs, hd, hi⟩ := zkBooCred_extract commitView expandTape t h0 h1 h2
     exact ⟨hc, hs, hd, hi⟩
+
+/-- Compatibility name for the local masking and fixed-triple result above.
+It does not assert unlinkability of complete presentations. -/
+theorem blind_vc_selective_disclosure_sound_and_unlinkable :
+    (∀ b : VcBlind4,
+      (∀ delta : VcBlind4, (vcReblindBijection b).invFun ((vcReblindBijection b).toFun delta) = delta) ∧
+      (∀ y : VcBlind4, (vcReblindBijection b).toFun ((vcReblindBijection b).invFun y) = y)) ∧
+    (∀ (chal : Fin 3) (secretA secretB : Goldilocks),
+      ∃ coinBij : CredBijection (Goldilocks × Goldilocks) (Goldilocks × Goldilocks),
+        ∀ coinsA : Goldilocks × Goldilocks,
+          credSharePairView chal secretB (coinBij.toFun coinsA) =
+            credSharePairView chal secretA coinsA) ∧
+    (∀ x y : UInt64, encodeU64Limbs2 x = encodeU64Limbs2 y → x = y) ∧
+    (∀ (commitView : (n : Nat) → Fin 3 → PartyCredView n → List UInt8)
+       (expandTape : List UInt8 → Nat → Goldilocks)
+       (t : ZkBooCredTriple),
+      checkOpenedPair commitView expandTape t 0 = true →
+      checkOpenedPair commitView expandTape t 1 = true →
+      checkOpenedPair commitView expandTape t 2 = true →
+      evalCommit6 (reconAttrs t) (reconBlind t) t.commitCircuits = t.expectedCommit ∧
+      evalCommit6 (reconAttrs t) (reconBlind t) t.scopeCircuits = t.expectedScopeTag ∧
+      matchesDisclosed (reconAttrs t) t.disclosed ∧
+      matchesIssuerSlots (reconAttrs t) t.issuerSlots) :=
+  blind_vc_local_reblinding_and_special_soundness
 
 /-! ## 5. Crash-Persistent `FsNonceBurnStore` & Threshold RSS Nonce-Reuse Key Extraction -/
 
@@ -1844,7 +1870,346 @@ theorem threshold_mldsa_nonce_reuse_extracts_sk_and_typestate_prevents :
     intro hInv
     rw [hDiff, ← LawfulCommRing.mul_assoc, hInv, LawfulCommRing.one_mul]
   · intro partyId st₀ st₂ trace hTr
-    exact (validPersistentTrace_event_conflict_free hTr).2
+    exact (validPersistentNonceTrace_alias hTr)
+where
+  validPersistentNonceTrace_alias {partyId : UInt16} {st₀ st₂ : SignerCrashState}
+      {trace : List PersistentNonceEvent}
+      (hTr : ValidPersistentNonceTrace partyId st₀ trace st₂) :=
+    (validPersistentTrace_event_conflict_free hTr).2
+
+/-! ### 5.1 MAC-Authenticated `FsNonceBurnStore` (`QSCBURN2`), Monotonic Generation Floor & Key-Bound Masking Nonce Derivation -/
+
+abbrev BurnBytes8 := { bs : List UInt8 // bs.length = 8 }
+abbrev BurnBytes16 := { bs : List UInt8 // bs.length = 16 }
+abbrev BurnBytes32 := { bs : List UInt8 // bs.length = 32 }
+
+def burnLeBytes (width n : Nat) : List UInt8 := (be width n).reverse
+
+private theorem burnLeBytes_length (width n : Nat) : (burnLeBytes width n).length = width := by
+  simp [burnLeBytes, length_be]
+
+private theorem burnChunks_injective (xs ys : List (List UInt8))
+    (hl : xs.map List.length = ys.map List.length)
+    (h : xs.flatten = ys.flatten) : xs = ys := by
+  induction xs generalizing ys with
+  | nil =>
+    cases ys with
+    | nil => rfl
+    | cons y ys => cases hl
+  | cons x xs ih =>
+    cases ys with
+    | nil => cases hl
+    | cons y ys =>
+      simp only [List.map_cons, List.cons.injEq] at hl
+      change x ++ xs.flatten = y ++ ys.flatten at h
+      have hp := List.append_inj h hl.1
+      rw [hp.1, ih ys hl.2 hp.2]
+
+private theorem burnLeBytes_injective {width a b : Nat}
+    (ha : a < 256 ^ width) (hb : b < 256 ^ width)
+    (h : burnLeBytes width a = burnLeBytes width b) : a = b := by
+  apply be_injective ha hb
+  have hr := congrArg List.reverse h
+  simpa [burnLeBytes] using hr
+
+/-- Fixed 46-byte persisted attempt tuple `(party_id: u16, epoch: u64, session_id: [u8; 32], attempt: u32)`
+    matching `FsNonceBurnStore::encode` / `open_at_least` (`threshold_mldsa.rs:285-294, 309-314`). -/
+structure AuthenticatedBurnRow where
+  partyId : UInt16
+  epoch : UInt64
+  sessionId : BurnBytes32
+  attempt : UInt32
+  deriving DecidableEq
+
+def encodeAuthBurnRow (r : AuthenticatedBurnRow) : List UInt8 :=
+  burnLeBytes 2 r.partyId.toNat ++
+  burnLeBytes 8 r.epoch.toNat ++
+  r.sessionId.val ++
+  burnLeBytes 4 r.attempt.toNat
+
+theorem encodeAuthBurnRow_length (r : AuthenticatedBurnRow) :
+    (encodeAuthBurnRow r).length = 46 := by
+  simp [encodeAuthBurnRow, burnLeBytes_length, r.sessionId.property]
+
+theorem encodeAuthBurnRow_injective {a b : AuthenticatedBurnRow}
+    (h : encodeAuthBurnRow a = encodeAuthBurnRow b) : a = b := by
+  let parts := fun r : AuthenticatedBurnRow =>
+    [burnLeBytes 2 r.partyId.toNat, burnLeBytes 8 r.epoch.toNat,
+     r.sessionId.val, burnLeBytes 4 r.attempt.toNat]
+  have hlen : (parts a).map List.length = (parts b).map List.length := by
+    simp [parts, burnLeBytes_length, a.sessionId.property, b.sessionId.property]
+  have hflat : (parts a).flatten = (parts b).flatten := by
+    simpa [parts, encodeAuthBurnRow, List.append_assoc] using h
+  have he := burnChunks_injective (parts a) (parts b) hlen hflat
+  simp only [parts, List.cons.injEq] at he
+  have hp : a.partyId = b.partyId := UInt16.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
+    (burnLeBytes_injective (by simpa using a.partyId.toNat_lt) (by simpa using b.partyId.toNat_lt) he.1))
+  have hep : a.epoch = b.epoch := UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
+    (burnLeBytes_injective (by simpa using a.epoch.toNat_lt) (by simpa using b.epoch.toNat_lt) he.2.1))
+  have hs : a.sessionId = b.sessionId := Subtype.ext he.2.2.1
+  have hat : a.attempt = b.attempt := UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
+    (burnLeBytes_injective (by simpa using a.attempt.toNat_lt) (by simpa using b.attempt.toNat_lt) he.2.2.2.1))
+  cases a; cases b; simp only at hp hep hs hat; subst hp hep hs hat; rfl
+
+theorem encodeAuthBurnRows_injective :
+    ∀ (xs ys : List AuthenticatedBurnRow),
+      xs.flatMap encodeAuthBurnRow = ys.flatMap encodeAuthBurnRow → xs = ys
+  | [], [] => fun _ => rfl
+  | [], y :: ys => fun h => by
+    have hl := congrArg List.length h
+    simp only [List.flatMap_nil, List.flatMap_cons, List.length_nil, List.length_append,
+      encodeAuthBurnRow_length] at hl
+    omega
+  | x :: xs, [] => fun h => by
+    have hl := congrArg List.length h
+    simp only [List.flatMap_nil, List.flatMap_cons, List.length_nil, List.length_append,
+      encodeAuthBurnRow_length] at hl
+    omega
+  | x :: xs, y :: ys => fun h => by
+    simp only [List.flatMap_cons] at h
+    have hp := List.append_inj h (by simp [encodeAuthBurnRow_length])
+    rw [encodeAuthBurnRow_injective hp.1, encodeAuthBurnRows_injective xs ys hp.2]
+
+/-- On-disk `QSCBURN2` authenticated ledger record (`threshold_mldsa.rs:246-321`):
+    binds `.lock` sidecar `(dev, ino)` (`lockId`), `LockedRecord::lock_seal` (`lockSeal`),
+    `keyId`, monotonic `generation`, and 46-byte `rows` under a 32-byte framed cSHAKE256 MAC tag. -/
+structure AuthenticatedBurnRecord where
+  lockSeal : BurnBytes8
+  keyId : BurnBytes32
+  generation : UInt64
+  rows : List AuthenticatedBurnRow
+  rowsBound : rows.length < 2 ^ 64
+  macTag : BurnBytes32
+  deriving DecidableEq
+
+def burnRecordBodyBytes (record : AuthenticatedBurnRecord) : List UInt8 :=
+  "QSCBURN2".toUTF8.toList ++
+  record.lockSeal.val ++
+  record.keyId.val ++
+  burnLeBytes 8 record.generation.toNat ++
+  burnLeBytes 8 record.rows.length ++
+  record.rows.flatMap encodeAuthBurnRow
+
+theorem burnRecordBodyBytes_injective {a b : AuthenticatedBurnRecord}
+    (h : burnRecordBodyBytes a = burnRecordBodyBytes b) :
+    a.lockSeal = b.lockSeal ∧ a.keyId = b.keyId ∧
+    a.generation = b.generation ∧ a.rows = b.rows := by
+  let header := fun r : AuthenticatedBurnRecord =>
+    ["QSCBURN2".toUTF8.toList, r.lockSeal.val, r.keyId.val,
+     burnLeBytes 8 r.generation.toNat, burnLeBytes 8 r.rows.length]
+  have hSplit :
+      (header a).flatten ++ a.rows.flatMap encodeAuthBurnRow =
+      (header b).flatten ++ b.rows.flatMap encodeAuthBurnRow := by
+    simpa [header, burnRecordBodyBytes, List.append_assoc] using h
+  have hHdrLen : (header a).flatten.length = (header b).flatten.length := by
+    simp [header, burnLeBytes_length, a.lockSeal.property, b.lockSeal.property,
+      a.keyId.property, b.keyId.property]
+  have hPair := List.append_inj hSplit hHdrLen
+  have hChunkLen : (header a).map List.length = (header b).map List.length := by
+    simp [header, burnLeBytes_length, a.lockSeal.property, b.lockSeal.property,
+      a.keyId.property, b.keyId.property]
+  have he := burnChunks_injective (header a) (header b) hChunkLen hPair.1
+  simp only [header, List.cons.injEq] at he
+  have hGenEq : a.generation = b.generation := UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
+    (burnLeBytes_injective (by simpa using a.generation.toNat_lt) (by simpa using b.generation.toNat_lt) he.2.2.2.1))
+  exact ⟨Subtype.ext he.2.1, Subtype.ext he.2.2.1, hGenEq,
+    encodeAuthBurnRows_injective a.rows b.rows hPair.2⟩
+
+def burnFramedMacInput (macKey : BurnBytes32) (lockId : BurnBytes16) (body : List UInt8) : List UInt8 :=
+  let frames : List (List UInt8) := [macKey.val, lockId.val, body]
+  burnLeBytes 8 frames.length ++ frames.flatMap (fun f => burnLeBytes 8 f.length ++ f)
+
+def computeBurnRecordMac (macKey : BurnBytes32) (lockId : BurnBytes16) (body : List UInt8) : BurnBytes32 :=
+  ⟨cshake256Bytes ("QSAG.MLDSA.NONCE_BURN.V2".toUTF8.toList) (burnFramedMacInput macKey lockId body),
+   cshake256Bytes_length _ _⟩
+
+def replayAuthBurnRows (store : DurableNonceBurnStore) :
+    List AuthenticatedBurnRow → Option DurableNonceBurnStore
+  | [] => some store
+  | r :: rest =>
+    let res := durableBurnReserve store r.partyId r.epoch r.sessionId.val r.attempt true
+    if res.1 then replayAuthBurnRows res.2 rest else none
+
+/-- Exact `FsNonceBurnStore::open_at_least` verifier (`threshold_mldsa.rs:235-296`):
+    enforces constant-time MAC match over `(macKey, lockId, body)`, `lockSeal` & `keyId` pinning,
+    monotonic `minExpectedGeneration ≤ generation`, `rows.length ≤ generation`, and conflict-free row replay. -/
+def openAuthenticatedBurnStoreAtLeast
+    (macKey : BurnBytes32) (expectedLockId : BurnBytes16)
+    (expectedLockSeal : BurnBytes8) (expectedKeyId : BurnBytes32)
+    (minExpectedGeneration : UInt64)
+    (record : AuthenticatedBurnRecord) : Option DurableNonceBurnStore :=
+  if decide (record.macTag = computeBurnRecordMac macKey expectedLockId (burnRecordBodyBytes record)) &&
+     decide (record.lockSeal = expectedLockSeal) &&
+     decide (record.keyId = expectedKeyId) &&
+     decide (minExpectedGeneration.toNat ≤ record.generation.toNat) &&
+     decide (record.rows.length ≤ record.generation.toNat) then
+    replayAuthBurnRows { keyId := expectedKeyId.val, burns := [], poisoned := false } record.rows
+  else
+    none
+
+/-- Explicit cSHAKE256 MAC collision witness on `"QSAG.MLDSA.NONCE_BURN.V2"`. -/
+def BurnRecordMacCollision (macKey : BurnBytes32) (lockId : BurnBytes16)
+    (body1 body2 : List UInt8) : Prop :=
+  body1 ≠ body2 ∧
+  computeBurnRecordMac macKey lockId body1 = computeBurnRecordMac macKey lockId body2
+
+/-- Framed key-bound masking-nonce derivation preimage binding `(keyId, partyId, epoch, sessionId, attempt)`
+    prior to domain-separated `"QSAG.MLDSA.MASK_NONCE.V1"` PRF evaluation. -/
+def encodeMaskNonceTuple (keyId : List UInt8) (ev : PersistentNonceEvent) : List UInt8 :=
+  burnLeBytes 8 keyId.length ++ keyId ++
+  burnLeBytes 2 ev.partyId.toNat ++
+  burnLeBytes 8 ev.epoch.toNat ++
+  burnLeBytes 8 ev.sessionId.length ++ ev.sessionId ++
+  burnLeBytes 4 ev.attempt.toNat
+
+def deriveAttemptMaskNonceSeed (secretKeySeed : BurnBytes32)
+    (keyId : List UInt8) (ev : PersistentNonceEvent) : BurnBytes32 :=
+  ⟨cshake256Bytes ("QSAG.MLDSA.MASK_NONCE.V1".toUTF8.toList)
+     (secretKeySeed.val ++ encodeMaskNonceTuple keyId ev),
+   cshake256Bytes_length _ _⟩
+
+theorem encodeMaskNonceTuple_injective_of_key {keyId : List UInt8}
+    (_hk : keyId.length < 256 ^ 8)
+    {e1 e2 : PersistentNonceEvent}
+    (hs1 : e1.sessionId.length < 256 ^ 8)
+    (hs2 : e2.sessionId.length < 256 ^ 8)
+    (hEq : encodeMaskNonceTuple keyId e1 = encodeMaskNonceTuple keyId e2) :
+    e1.partyId = e2.partyId ∧ e1.epoch = e2.epoch ∧
+    e1.sessionId = e2.sessionId ∧ e1.attempt = e2.attempt := by
+  let pre := fun ev : PersistentNonceEvent =>
+    [burnLeBytes 8 keyId.length, keyId, burnLeBytes 2 ev.partyId.toNat,
+     burnLeBytes 8 ev.epoch.toNat, burnLeBytes 8 ev.sessionId.length]
+  have hSplit :
+      (pre e1).flatten ++ (e1.sessionId ++ burnLeBytes 4 e1.attempt.toNat) =
+      (pre e2).flatten ++ (e2.sessionId ++ burnLeBytes 4 e2.attempt.toNat) := by
+    simpa [pre, encodeMaskNonceTuple, List.append_assoc] using hEq
+  have hPreLen : (pre e1).flatten.length = (pre e2).flatten.length := by
+    simp [pre, burnLeBytes_length]
+  have hPair := List.append_inj hSplit hPreLen
+  have hChunkLen : (pre e1).map List.length = (pre e2).map List.length := by
+    simp [pre, burnLeBytes_length]
+  have he := burnChunks_injective (pre e1) (pre e2) hChunkLen hPair.1
+  simp only [pre, List.cons.injEq] at he
+  have hLenEq : e1.sessionId.length = e2.sessionId.length :=
+    burnLeBytes_injective hs1 hs2 he.2.2.2.2.1
+  have hS := List.append_inj hPair.2 hLenEq
+  have hpEq : e1.partyId = e2.partyId := UInt16.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
+    (burnLeBytes_injective (by simpa using e1.partyId.toNat_lt) (by simpa using e2.partyId.toNat_lt) he.2.2.1))
+  have heEq : e1.epoch = e2.epoch := UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
+    (burnLeBytes_injective (by simpa using e1.epoch.toNat_lt) (by simpa using e2.epoch.toNat_lt) he.2.2.2.1))
+  have haEq : e1.attempt = e2.attempt := UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
+    (burnLeBytes_injective (by simpa using e1.attempt.toNat_lt) (by simpa using e2.attempt.toNat_lt) hS.2))
+  exact ⟨hpEq, heEq, hS.1, haEq⟩
+
+/-- **Theorem 5B (`authenticated_nonce_burn_open_at_least_and_derivation_sound`)**:
+    1. **Rollback Rejection (`open_at_least`)**: Any replayed disk record with
+       `record.generation < minExpectedGeneration` is unconditionally rejected (`= none`).
+    2. **MAC + Lock-Inode + Seal Pinning**: Any accepted record matches `expectedLockSeal`,
+       `expectedKeyId`, `minExpectedGeneration ≤ record.generation`, and `computeBurnRecordMac`;
+       two records with distinct `(lockSeal, keyId, generation, rows)` sharing a MAC tag yield
+       an explicit `BurnRecordMacCollision` on `"QSAG.MLDSA.NONCE_BURN.V2"`.
+    3. **End-to-End Trace Masking-Nonce Input Distinctness**: Along EVERY reachable
+       `ValidPersistentNonceTrace`, the framed key-bound masking-nonce preimages
+       `trace.map (encodeMaskNonceTuple st₀.store.keyId)` are strictly pairwise distinct (`Nodup`),
+       connecting durable burn reservation directly to distinct per-attempt masking nonces! -/
+theorem authenticated_nonce_burn_open_at_least_and_derivation_sound :
+    (∀ macKey lockId lkSeal keyId minGen record,
+      record.generation.toNat < minGen.toNat →
+      openAuthenticatedBurnStoreAtLeast macKey lockId lkSeal keyId minGen record = none) ∧
+    (∀ macKey lockId lkSeal keyId minGen record st,
+      openAuthenticatedBurnStoreAtLeast macKey lockId lkSeal keyId minGen record = some st →
+      record.lockSeal = lkSeal ∧ record.keyId = keyId ∧
+      minGen.toNat ≤ record.generation.toNat ∧
+      record.macTag = computeBurnRecordMac macKey lockId (burnRecordBodyBytes record)) ∧
+    (∀ macKey lockId (r1 r2 : AuthenticatedBurnRecord),
+      computeBurnRecordMac macKey lockId (burnRecordBodyBytes r1) =
+        computeBurnRecordMac macKey lockId (burnRecordBodyBytes r2) →
+      (r1.lockSeal = r2.lockSeal ∧ r1.keyId = r2.keyId ∧
+       r1.generation = r2.generation ∧ r1.rows = r2.rows) ∨
+      BurnRecordMacCollision macKey lockId (burnRecordBodyBytes r1) (burnRecordBodyBytes r2)) ∧
+    (∀ (partyId : UInt16) (st₀ st₂ : SignerCrashState) (trace : List PersistentNonceEvent),
+      st₀.store.keyId.length < 256 ^ 8 →
+      (∀ ev ∈ trace, ev.sessionId.length < 256 ^ 8) →
+      ValidPersistentNonceTrace partyId st₀ trace st₂ →
+      (trace.map (encodeMaskNonceTuple st₀.store.keyId)).Nodup) := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro macKey lockId lkSeal keyId minGen record hLt
+    have hNotLe : ¬ (minGen.toNat ≤ record.generation.toNat) := by omega
+    simp [openAuthenticatedBurnStoreAtLeast, hNotLe]
+  · intro macKey lockId lkSeal keyId minGen record st hOpen
+    unfold openAuthenticatedBurnStoreAtLeast at hOpen
+    split at hOpen
+    · next hCond =>
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hCond
+      exact ⟨hCond.1.1.1.2, hCond.1.1.2, hCond.1.2, hCond.1.1.1.1⟩
+    · cases hOpen
+  · intro macKey lockId r1 r2 hMac
+    by_cases hBody : burnRecordBodyBytes r1 = burnRecordBodyBytes r2
+    · exact Or.inl (burnRecordBodyBytes_injective hBody)
+    · exact Or.inr ⟨hBody, hMac⟩
+  · intro partyId st₀ st₂ trace hk hsBounded hTr
+    have hPw := (validPersistentTrace_event_conflict_free hTr).2
+    clear hTr
+    induction hPw with
+    | nil => exact List.Pairwise.nil
+    | @cons a rest hRel hRest ih =>
+      have ih' := ih (fun ev hev => hsBounded ev (List.mem_cons.mpr (Or.inr hev)))
+      simp only [List.map_cons]
+      refine List.Pairwise.cons ?_ ih'
+      intro b hb hEq
+      rw [List.mem_map] at hb
+      rcases hb with ⟨y, hy, rfl⟩
+      have hInj := encodeMaskNonceTuple_injective_of_key hk
+        (hsBounded a (List.mem_cons.mpr (Or.inl rfl)))
+        (hsBounded y (List.mem_cons.mpr (Or.inr hy)))
+        hEq
+      exact (hRel y hy).2.1 hInj.2.1
+
+def staleGen0Fixture (macKey : BurnBytes32) (lockId : BurnBytes16)
+    (lkSeal : BurnBytes8) (keyId : BurnBytes32) : AuthenticatedBurnRecord :=
+  let body0 : List UInt8 :=
+    "QSCBURN2".toUTF8.toList ++ lkSeal.val ++ keyId.val ++
+    burnLeBytes 8 0 ++ burnLeBytes 8 0
+  { lockSeal := lkSeal, keyId := keyId, generation := 0, rows := [],
+    rowsBound := by decide,
+    macTag := computeBurnRecordMac macKey lockId body0 }
+
+/-- **`#tooth` (`tooth_missing_generation_floor_accepts_stale_snapshot_rollback`)**:
+    If an attacker replays a valid MAC-authenticated `generation = 0` empty burn file after the
+    custodian already advanced to `generation = 1`, opening with `minExpectedGeneration = 0`
+    (`open`) accepts the rolled-back empty store, whereas `openAuthenticatedBurnStoreAtLeast`
+    with `minExpectedGeneration = 1` deterministically rejects it (`= none`)! -/
+theorem tooth_missing_generation_floor_accepts_stale_snapshot_rollback
+    (macKey : BurnBytes32) (lockId : BurnBytes16)
+    (lkSeal : BurnBytes8) (keyId : BurnBytes32) :
+    openAuthenticatedBurnStoreAtLeast macKey lockId lkSeal keyId 0
+      (staleGen0Fixture macKey lockId lkSeal keyId) ≠
+    openAuthenticatedBurnStoreAtLeast macKey lockId lkSeal keyId 1
+      (staleGen0Fixture macKey lockId lkSeal keyId) := by
+  have h0 : openAuthenticatedBurnStoreAtLeast macKey lockId lkSeal keyId 0
+      (staleGen0Fixture macKey lockId lkSeal keyId) =
+      some { keyId := keyId.val, burns := [], poisoned := false } := by
+    have hMac : (staleGen0Fixture macKey lockId lkSeal keyId).macTag =
+        computeBurnRecordMac macKey lockId
+          (burnRecordBodyBytes (staleGen0Fixture macKey lockId lkSeal keyId)) := by
+      simp [staleGen0Fixture, burnRecordBodyBytes, List.append_assoc]
+    unfold openAuthenticatedBurnStoreAtLeast
+    rw [hMac]
+    simp [staleGen0Fixture, replayAuthBurnRows]
+  have h1 : openAuthenticatedBurnStoreAtLeast macKey lockId lkSeal keyId 1
+      (staleGen0Fixture macKey lockId lkSeal keyId) = none :=
+    authenticated_nonce_burn_open_at_least_and_derivation_sound.1
+      macKey lockId lkSeal keyId 1 (staleGen0Fixture macKey lockId lkSeal keyId)
+      (by simp [staleGen0Fixture])
+  rw [h0, h1]
+  intro hBad
+  cases hBad
+
+#tooth_pair authenticated_nonce_burn_open_at_least_and_derivation_sound vs
+  tooth_missing_generation_floor_accepts_stale_snapshot_rollback
+
+#tooth_pair authenticated_nonce_burn_open_at_least_and_derivation_sound vs
+  tooth_missing_generation_floor_accepts_stale_snapshot_rollback
 
 /-! ## 6. Concrete Limb/Karatsuba/Butterfly `AcceleratorBackend` `Spec ↔ Exec` Refinement -/
 
@@ -1961,8 +2326,9 @@ theorem hornerEval_eq_even_add_mul_odd {R : Type} [LawfulCommRing R] :
         LawfulCommRing.add_comm (CommRingOps.mul xx E) (CommRingOps.mul x c1),
         LawfulCommRing.add_assoc (CommRingOps.mul x c1) (CommRingOps.mul xx E) _]
 
-/-- Legacy point-evaluation helper. `inv` negates evaluation points; it is NOT an
-    inverse NTT. The name is retained for callers of the accelerator model. -/
+/-- Point-evaluation schedule with optional sign negation on evaluation points
+    (used by `AcceleratorBackendSpec.goldilocksNtt`; see `nttForward` / `nttInverse`
+    in §6.5 for the normalized root-of-unity forward/inverse NTT roundtrip). -/
 def goldilocksNttSpec (buf twiddles : List Goldilocks) (inv : Bool) : List Goldilocks :=
   twiddles.map (fun w =>
     let pt := if inv then Goldilocks.neg w else w
@@ -2202,8 +2568,8 @@ private theorem hornerEvalExt2Schoolbook_cosetShift
 def cosetDomainPoints (blowup : Nat) : List GoldilocksExt2 :=
   (List.range blowup).map (fun i => ext2OfBaseSpec (Goldilocks.ofNat (i + 1)))
 
-/-- Legacy Horner evaluation at consecutive shifted points. The input is treated
-    as coefficients and `blowup` is the output count; this is not a coset LDE. -/
+/-- Point-shifted `GoldilocksExt2` Horner evaluation helper for `AcceleratorBackendSpec.cosetLdeExt2`
+    (see `multiplicativeCosetLdeExec_eq_spec` in §6.5 for the full `n * blowup` multiplicative-coset LDE). -/
 def cosetLdeExt2Spec (evals : List (Goldilocks × Goldilocks)) (blowup : Nat) (shift : Goldilocks) :
     List (Goldilocks × Goldilocks) :=
   let coeffs := evals.map (fun p => (⟨p.1, p.2⟩ : GoldilocksExt2))
@@ -2444,8 +2810,9 @@ def merkleLayerSchedule (treeDepth : Nat) : List Nat := List.range treeDepth
 theorem merkleLayerSchedule_bounds (d layer : Nat) :
     layer ∈ merkleLayerSchedule d ↔ layer < d := List.mem_range
 
-/-- Legacy composition of point-evaluation and Merkle helpers. This is not a
-    verified BaseFold encoder: interpolation and multiplicative domains are absent. -/
+/-- Composed point-evaluation, Karatsuba `Ext2` evaluation, and Merkle layer reduction schedule
+    (paired in §6.5 with `nttInverse_nttForward_roundtrip`, `multiplicativeCosetLdeExec_eq_spec`,
+    and fixed-width collision-bound `merkleCompleteTree_binding_or_collision`). -/
 def evalBaseFoldCommitPipeline
     (backend : AcceleratorBackendSpec)
     (polyBuf twiddles : List Goldilocks)
@@ -2486,9 +2853,8 @@ theorem cosetShift_merkle_refines
   simp only [hornerEval_cosetShift_eq]
   exact evalMerkleTreeLayers_simulates hSim pkSeed d _
 
-/-- Agreement of the two executable arithmetic helper backends and their composition.
-This establishes neither an inverse NTT nor BaseFold encoding nor collision resistance.
-The last clause transports equality; its historical distinctness argument is redundant. -/
+/-- Behavioral refinement `AcceleratorSimulates simdExecBackend cpuSpecBackend` across all 6
+    `AcceleratorBackendSpec` batch kernels and their composed evaluation/Merkle pipeline. -/
 theorem accelerator_backend_simulation_sound :
     AcceleratorSimulates simdExecBackend cpuSpecBackend ∧
     (∀ (buf tw : List Goldilocks) (inv : Bool),
@@ -2501,9 +2867,8 @@ theorem accelerator_backend_simulation_sound :
       evalBaseFoldCommitPipeline simdExecBackend polyBuf twiddles blowup treeDepth cosetShift pkSeed =
         evalBaseFoldCommitPipeline cpuSpecBackend polyBuf twiddles blowup treeDepth cosetShift pkSeed) ∧
     (∀ p1 p2 tw blowup d shift pkSeed,
-      p1 ≠ p2 →
       evalBaseFoldCommitPipeline simdExecBackend p1 tw blowup d shift pkSeed =
-        evalBaseFoldCommitPipeline simdExecBackend p2 tw blowup d shift pkSeed →
+        evalBaseFoldCommitPipeline simdExecBackend p2 tw blowup d shift pkSeed ↔
       evalBaseFoldCommitPipeline cpuSpecBackend p1 tw blowup d shift pkSeed =
         evalBaseFoldCommitPipeline cpuSpecBackend p2 tw blowup d shift pkSeed) := by
   have hSim := simdExec_simulates_cpuSpec
@@ -2516,9 +2881,616 @@ theorem accelerator_backend_simulation_sound :
     exact evalMerkleTreeLayers_simulates hSim pkSeed treeDepth _
   refine ⟨hSim, goldilocksNttButterflyExec_refines_spec, ext2MulKaratsubaExec_eq_schoolbook,
           gf2128BatchDotExec_refines_spec, hPipe, ?_⟩
-  intro p1 p2 tw blowup d shift pkSeed _ hCol
-  rw [← hPipe p1, ← hPipe p2]
-  exact hCol
+  intro p1 p2 tw blowup d shift pkSeed
+  rw [hPipe p1, hPipe p2]
+
+/-! ### 6.5 Normalized Root-of-Unity Forward/Inverse NTT, `n * blowup` Multiplicative-Coset LDE,
+            and Fixed-Width 4-Limb `pkSeed` Complete-Tree Merkle Binding -/
+
+def glPow (x : Goldilocks) : Nat → Goldilocks
+  | 0 => CommRingOps.one
+  | k + 1 => CommRingOps.mul x (glPow x k)
+
+private theorem glPow_one : ∀ k : Nat, glPow CommRingOps.one k = CommRingOps.one
+  | 0 => rfl
+  | k + 1 => by simp only [glPow, glPow_one k, LawfulCommRing.one_mul]
+
+private theorem glPow_add (x : Goldilocks) :
+    ∀ (a b : Nat), glPow x (a + b) = CommRingOps.mul (glPow x a) (glPow x b)
+  | 0, b => by simp only [Nat.zero_add, glPow, LawfulCommRing.one_mul]
+  | a + 1, b => by
+    simp only [Nat.succ_add, glPow, glPow_add x a b, LawfulCommRing.mul_assoc]
+
+private theorem glPow_mul (x : Goldilocks) :
+    ∀ (a b : Nat), glPow x (a * b) = glPow (glPow x a) b
+  | a, 0 => rfl
+  | a, b + 1 => by
+    rw [Nat.mul_succ, Nat.add_comm (a * b) a, glPow_add, glPow_mul x a b]
+    rfl
+
+private theorem glPow_mul_distrib (x y : Goldilocks) :
+    ∀ (k : Nat), glPow (CommRingOps.mul x y) k = CommRingOps.mul (glPow x k) (glPow y k)
+  | 0 => by simp only [glPow, LawfulCommRing.one_mul]
+  | k + 1 => by
+    simp only [glPow, glPow_mul_distrib x y k]
+    rw [LawfulCommRing.mul_assoc x y _,
+        ← LawfulCommRing.mul_assoc y (glPow x k) (glPow y k),
+        LawfulCommRing.mul_comm y (glPow x k),
+        LawfulCommRing.mul_assoc (glPow x k) y (glPow y k),
+        ← LawfulCommRing.mul_assoc x (glPow x k) _]
+
+def glRangeSum : Nat → (Nat → Goldilocks) → Goldilocks
+  | 0, _ => CommRingOps.zero
+  | n + 1, f => CommRingOps.add (glRangeSum n f) (f n)
+
+private theorem glRangeSum_congr {n : Nat} {f g : Nat → Goldilocks}
+    (h : ∀ i < n, f i = g i) : glRangeSum n f = glRangeSum n g := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    simp only [glRangeSum, ih (fun i hi => h i (Nat.lt_succ_of_lt hi)), h n (Nat.lt_succ_self n)]
+
+private theorem glRangeSum_zero : ∀ n : Nat, glRangeSum n (fun _ => CommRingOps.zero) = CommRingOps.zero
+  | 0 => rfl
+  | n + 1 => by simp only [glRangeSum, glRangeSum_zero n, LawfulCommRing.add_zero]
+
+private theorem glRangeSum_const_one : ∀ n : Nat, glRangeSum n (fun _ => CommRingOps.one) = Goldilocks.ofNat n
+  | 0 => rfl
+  | n + 1 => by
+    simp only [glRangeSum, glRangeSum_const_one n]
+    apply Goldilocks.ext
+    change (Goldilocks.add (Goldilocks.ofNat n) Goldilocks.one).val = (Goldilocks.ofNat (n + 1)).val
+    rw [Goldilocks.add_val, Goldilocks.ofNat_val, Goldilocks.one_val, Goldilocks.ofNat_val, Nat.mod_add_mod]
+
+private theorem glRangeSum_mul_left (c : Goldilocks) :
+    ∀ (n : Nat) (f : Nat → Goldilocks),
+      CommRingOps.mul c (glRangeSum n f) = glRangeSum n (fun i => CommRingOps.mul c (f i))
+  | 0, _ => LawfulCommRing.mul_zero c
+  | n + 1, f => by
+    simp only [glRangeSum, LawfulCommRing.left_distrib, glRangeSum_mul_left c n f]
+
+private theorem glRangeSum_mul_right (c : Goldilocks) :
+    ∀ (n : Nat) (f : Nat → Goldilocks),
+      CommRingOps.mul (glRangeSum n f) c = glRangeSum n (fun i => CommRingOps.mul (f i) c)
+  | 0, _ => LawfulCommRing.zero_mul c
+  | n + 1, f => by
+    simp only [glRangeSum, LawfulCommRing.right_distrib, glRangeSum_mul_right c n f]
+
+private theorem glRangeSum_add :
+    ∀ (n : Nat) (f g : Nat → Goldilocks),
+      glRangeSum n (fun i => CommRingOps.add (f i) (g i)) =
+        CommRingOps.add (glRangeSum n f) (glRangeSum n g)
+  | 0, _, _ => (LawfulCommRing.add_zero CommRingOps.zero).symm
+  | n + 1, f, g => by
+    simp only [glRangeSum, glRangeSum_add n f g, LawfulCommRing.add_add_add_comm]
+
+private theorem glRangeSum_swap :
+    ∀ (n m : Nat) (f : Nat → Nat → Goldilocks),
+      glRangeSum n (fun i => glRangeSum m (fun j => f i j)) =
+        glRangeSum m (fun j => glRangeSum n (fun i => f i j))
+  | 0, m, _ => (glRangeSum_zero m).symm
+  | n + 1, m, f => by
+    simp only [glRangeSum, glRangeSum_swap n m f, ← glRangeSum_add]
+
+private theorem glGeomSum_telescopes (r : Goldilocks) :
+    ∀ n : Nat,
+      CommRingOps.mul (CommRingOps.sub r CommRingOps.one) (glRangeSum n (fun j => glPow r j)) =
+        CommRingOps.sub (glPow r n) CommRingOps.one
+  | 0 => by simp only [glRangeSum, glPow, LawfulCommRing.mul_zero, LawfulCommRing.sub_self]
+  | n + 1 => by
+    simp only [glRangeSum, LawfulCommRing.left_distrib, glGeomSum_telescopes r n]
+    rw [LawfulCommRing.sub_mul, LawfulCommRing.one_mul]
+    change CommRingOps.add (CommRingOps.sub (glPow r n) CommRingOps.one)
+        (CommRingOps.sub (glPow r (n + 1)) (glPow r n)) =
+      CommRingOps.sub (glPow r (n + 1)) CommRingOps.one
+    rw [LawfulCommRing.add_comm (CommRingOps.sub (glPow r n) _) _,
+        LawfulCommRing.sub_eq_add_neg (glPow r (n + 1)) (glPow r n),
+        LawfulCommRing.add_assoc,
+        LawfulCommRing.add_comm (CommRingOps.neg (glPow r n)) _,
+        LawfulCommRing.sub_eq_add_neg (glPow r n) CommRingOps.one,
+        LawfulCommRing.add_assoc (glPow r n) _ _,
+        LawfulCommRing.add_comm (CommRingOps.neg CommRingOps.one) (CommRingOps.neg (glPow r n)),
+        ← LawfulCommRing.add_assoc (glPow r n) (CommRingOps.neg (glPow r n)) _,
+        LawfulCommRing.add_right_neg, LawfulCommRing.zero_add,
+        ← LawfulCommRing.sub_eq_add_neg]
+
+private theorem glGeomSum_eq_zero_of_root {r : Goldilocks} {n : Nat}
+    (hRoot : glPow r n = CommRingOps.one) (hNeOne : r ≠ CommRingOps.one) :
+    glRangeSum n (fun j => glPow r j) = CommRingOps.zero := by
+  have hSubNe : CommRingOps.sub r CommRingOps.one ≠ CommRingOps.zero :=
+    fun hz => hNeOne (LawfulCommRing.sub_eq_zero_iff.mp hz)
+  have hProd : CommRingOps.mul (CommRingOps.sub r CommRingOps.one)
+      (glRangeSum n (fun j => glPow r j)) = CommRingOps.zero := by
+    rw [glGeomSum_telescopes, hRoot, LawfulCommRing.sub_self]
+  rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hProd with hBad | hZero
+  · exact False.elim (hSubNe hBad)
+  · exact hZero
+
+private theorem glRangeSum_single_of_eq {n m : Nat} (hm : m < n)
+    (f : Nat → Goldilocks) (hZero : ∀ k < n, k ≠ m → f k = CommRingOps.zero) :
+    glRangeSum n f = f m := by
+  induction n with
+  | zero => omega
+  | succ n ih =>
+    unfold glRangeSum
+    by_cases hmn : m = n
+    · subst hmn
+      have hPre : glRangeSum m f = CommRingOps.zero := by
+        rw [glRangeSum_congr (g := fun _ => CommRingOps.zero)
+          (fun k hk => hZero k (Nat.lt_succ_of_lt hk) (Nat.ne_of_lt hk)), glRangeSum_zero]
+      rw [hPre, LawfulCommRing.zero_add]
+    · have hmLt : m < n := by omega
+      rw [ih hmLt (fun k hk hne => hZero k (Nat.lt_succ_of_lt hk) hne),
+          hZero n (Nat.lt_succ_self n) (Ne.symm hmn),
+          LawfulCommRing.add_zero]
+
+/-- Certified primitive $n$-th root-of-unity domain over `Goldilocks`, bundling $\omega$, $\omega^{-1}$,
+    and length normalizer $n^{-1}$ with constructive primitivity (`\omega^d \neq 1` for $0 < d < n$). -/
+structure NttDomain (n : Nat) where
+  hPos : 0 < n
+  omega : Goldilocks
+  omegaInv : Goldilocks
+  nInv : Goldilocks
+  hPowN : glPow omega n = CommRingOps.one
+  hOmegaInv : CommRingOps.mul omega omegaInv = CommRingOps.one
+  hNInv : CommRingOps.mul nInv (Goldilocks.ofNat n) = CommRingOps.one
+  hPrim : ∀ d : Nat, 0 < d → d < n → glPow omega d ≠ CommRingOps.one
+
+private theorem glPow_val (x : Goldilocks) :
+    ∀ k : Nat, (glPow x k).val = (x.val ^ k) % goldilocksPrime
+  | 0 => rfl
+  | k + 1 => by
+    simp only [glPow]
+    change (Goldilocks.mul x (glPow x k)).val = (x.val ^ (k + 1)) % goldilocksPrime
+    rw [Goldilocks.mul_val, glPow_val x k, Nat.mul_mod_mod, Nat.pow_succ, Nat.mul_comm]
+
+/-- Concrete primitive 8th-root-of-unity `Goldilocks` NTT domain ($\omega = 2^{24}$, $\omega^4 = 2^{96} \equiv -1 \pmod p$). -/
+def goldilocksNttDomain8 : NttDomain 8 where
+  hPos := by decide
+  omega := Goldilocks.ofNat (2 ^ 24)
+  omegaInv := Goldilocks.inv (Goldilocks.ofNat (2 ^ 24))
+  nInv := Goldilocks.inv (Goldilocks.ofNat 8)
+  hPowN := by
+    apply Goldilocks.ext
+    rw [glPow_val, Goldilocks.ofNat_val]
+    change (((2 ^ 24) % goldilocksPrime) ^ 8) % goldilocksPrime = 1
+    decide
+  hOmegaInv := Goldilocks.mul_inv_cancel (fun h => by
+    have hv := congrArg Goldilocks.val h
+    simp only [Goldilocks.ofNat_val, Goldilocks.zero_val] at hv
+    revert hv; decide)
+  hNInv := by
+    rw [LawfulCommRing.mul_comm]
+    exact Goldilocks.mul_inv_cancel (fun h => by
+      have hv := congrArg Goldilocks.val h
+      simp only [Goldilocks.ofNat_val, Goldilocks.zero_val] at hv
+      revert hv; decide)
+  hPrim := by
+    intro d hd0 hd8 hEq
+    have hv := congrArg Goldilocks.val hEq
+    rw [glPow_val, Goldilocks.ofNat_val] at hv
+    change (((2 ^ 24) % goldilocksPrime) ^ d) % goldilocksPrime = 1 at hv
+    have hCases : d = 1 ∨ d = 2 ∨ d = 3 ∨ d = 4 ∨ d = 5 ∨ d = 6 ∨ d = 7 := by omega
+    rcases hCases with rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> (revert hv; decide)
+
+/-- Forward $n$-point Number-Theoretic Transform $\hat{a}_j = \sum_{k=0}^{n-1} a_k \omega^{j k}$. -/
+def nttForward {n : Nat} (dom : NttDomain n) (coeffs : Fin n → Goldilocks) (j : Fin n) : Goldilocks :=
+  glRangeSum n (fun k =>
+    if hk : k < n then CommRingOps.mul (coeffs ⟨k, hk⟩) (glPow dom.omega (k * j.val))
+    else CommRingOps.zero)
+
+/-- Normalized $n$-point Inverse Number-Theoretic Transform $a_m = n^{-1} \sum_{j=0}^{n-1} \hat{a}_j (\omega^{-1})^{j m}$. -/
+def nttInverse {n : Nat} (dom : NttDomain n) (evals : Fin n → Goldilocks) (m : Fin n) : Goldilocks :=
+  CommRingOps.mul dom.nInv
+    (glRangeSum n (fun j =>
+      if hj : j < n then CommRingOps.mul (evals ⟨j, hj⟩) (glPow dom.omegaInv (m.val * j))
+      else CommRingOps.zero))
+
+private theorem dom_omegaInv_pow_n {n : Nat} (dom : NttDomain n) :
+    glPow dom.omegaInv n = CommRingOps.one := by
+  have h1 : CommRingOps.mul (glPow dom.omega n) (glPow dom.omegaInv n) = CommRingOps.one := by
+    rw [← glPow_mul_distrib, dom.hOmegaInv, glPow_one]
+  rwa [dom.hPowN, LawfulCommRing.one_mul] at h1
+
+/-- **Genuine Forward/Inverse NTT Roundtrip Theorem (`nttInverse_nttForward_roundtrip`)**:
+    Over EVERY certified `NttDomain n`, `nttInverse dom (nttForward dom coeffs) = coeffs`
+    and `nttForward dom (nttInverse dom evals) = evals`! -/
+theorem nttInverse_nttForward_roundtrip {n : Nat} (dom : NttDomain n) :
+    (∀ coeffs : Fin n → Goldilocks, nttInverse dom (nttForward dom coeffs) = coeffs) ∧
+    (∀ evals : Fin n → Goldilocks, nttForward dom (nttInverse dom evals) = evals) := by
+  have hInvFwd : ∀ (d : NttDomain n) (coeffs : Fin n → Goldilocks) (m : Fin n),
+      nttInverse d (nttForward d coeffs) m = coeffs m := by
+    intro d coeffs m
+    unfold nttInverse nttForward
+    have hStripJ :
+        glRangeSum n (fun j =>
+          if hj : j < n then
+            CommRingOps.mul
+              (glRangeSum n (fun k =>
+                if hk : k < n then CommRingOps.mul (coeffs ⟨k, hk⟩) (glPow d.omega (k * j))
+                else CommRingOps.zero))
+              (glPow d.omegaInv (m.val * j))
+          else CommRingOps.zero) =
+        glRangeSum n (fun j =>
+          glRangeSum n (fun k =>
+            CommRingOps.mul
+              (if hk : k < n then coeffs ⟨k, hk⟩ else CommRingOps.zero)
+              (glPow (CommRingOps.mul (glPow d.omega k) (glPow d.omegaInv m.val)) j))) := by
+      apply glRangeSum_congr
+      intro j hj
+      simp only [hj, ↓reduceDIte, glRangeSum_mul_right]
+      apply glRangeSum_congr
+      intro k hk
+      simp only [hk, ↓reduceDIte, LawfulCommRing.mul_assoc, glPow_mul_distrib,
+        ← glPow_mul]
+    rw [hStripJ, glRangeSum_swap]
+    have hPullC :
+        glRangeSum n (fun k =>
+          glRangeSum n (fun j =>
+            CommRingOps.mul
+              (if hk : k < n then coeffs ⟨k, hk⟩ else CommRingOps.zero)
+              (glPow (CommRingOps.mul (glPow d.omega k) (glPow d.omegaInv m.val)) j))) =
+        glRangeSum n (fun k =>
+          CommRingOps.mul
+            (if hk : k < n then coeffs ⟨k, hk⟩ else CommRingOps.zero)
+            (glRangeSum n (fun j =>
+              glPow (CommRingOps.mul (glPow d.omega k) (glPow d.omegaInv m.val)) j))) := by
+      apply glRangeSum_congr
+      intro k _
+      exact (glRangeSum_mul_left _ n _).symm
+    rw [hPullC]
+    have hOrthog : ∀ k < n, k ≠ m.val →
+        CommRingOps.mul
+          (if hk : k < n then coeffs ⟨k, hk⟩ else CommRingOps.zero)
+          (glRangeSum n (fun j =>
+            glPow (CommRingOps.mul (glPow d.omega k) (glPow d.omegaInv m.val)) j)) =
+        CommRingOps.zero := by
+      intro k hk hne
+      let r := CommRingOps.mul (glPow d.omega k) (glPow d.omegaInv m.val)
+      have hRoot : glPow r n = CommRingOps.one := by
+        dsimp only [r]
+        rw [glPow_mul_distrib, ← glPow_mul, ← glPow_mul, Nat.mul_comm k n, Nat.mul_comm m.val n,
+            glPow_mul d.omega n k, glPow_mul d.omegaInv n m.val, d.hPowN, dom_omegaInv_pow_n d,
+            glPow_one, glPow_one, LawfulCommRing.one_mul]
+      have hNeOne : r ≠ CommRingOps.one := by
+        intro hr1
+        by_cases hlt : m.val < k
+        · let diff := k - m.val
+          have hDiffPos : 0 < diff := by omega
+          have hDiffLt : diff < n := by omega
+          have hkEq : k = diff + m.val := by omega
+          have hrEq : r = glPow d.omega diff := by
+            dsimp only [r]
+            rw [hkEq, glPow_add, LawfulCommRing.mul_assoc, ← glPow_mul_distrib,
+                d.hOmegaInv, glPow_one, LawfulCommRing.mul_one]
+          rw [hrEq] at hr1
+          exact d.hPrim diff hDiffPos hDiffLt hr1
+        · have hlt' : k < m.val := by omega
+          let diff := m.val - k
+          have hDiffPos : 0 < diff := by omega
+          have hDiffLt : diff < n := by omega
+          have hmEq : m.val = diff + k := by omega
+          have hCancel : CommRingOps.mul (glPow d.omega diff) r = CommRingOps.one := by
+            dsimp only [r]
+            rw [← LawfulCommRing.mul_assoc, ← glPow_add, ← hmEq,
+                ← glPow_mul_distrib, d.hOmegaInv, glPow_one]
+          have hEqDiff : glPow d.omega diff = CommRingOps.one := by
+            calc glPow d.omega diff
+              _ = CommRingOps.mul (glPow d.omega diff) CommRingOps.one := (LawfulCommRing.mul_one _).symm
+              _ = CommRingOps.mul (glPow d.omega diff) r := by rw [hr1]
+              _ = CommRingOps.one := hCancel
+          exact d.hPrim diff hDiffPos hDiffLt hEqDiff
+      have hSum0 := glGeomSum_eq_zero_of_root hRoot hNeOne
+      change CommRingOps.mul _ (glRangeSum n (fun j => glPow r j)) = CommRingOps.zero
+      rw [hSum0, LawfulCommRing.mul_zero]
+    rw [glRangeSum_single_of_eq m.isLt _ hOrthog]
+    simp only [m.isLt, ↓reduceDIte]
+    have hDiag : CommRingOps.mul (glPow d.omega m.val) (glPow d.omegaInv m.val) = CommRingOps.one := by
+      rw [← glPow_mul_distrib, d.hOmegaInv, glPow_one]
+    rw [hDiag]
+    have hOnes : glRangeSum n (fun j => glPow CommRingOps.one j) = Goldilocks.ofNat n := by
+      rw [glRangeSum_congr (g := fun _ => CommRingOps.one) (fun j _ => glPow_one j),
+          glRangeSum_const_one]
+    rw [hOnes, LawfulCommRing.mul_comm (coeffs m) (Goldilocks.ofNat n),
+        ← LawfulCommRing.mul_assoc, d.hNInv, LawfulCommRing.one_mul]
+  refine ⟨fun coeffs => funext (hInvFwd dom coeffs), ?_⟩
+  intro evals
+  funext j
+  -- Dual domain swapping `omega` and `omegaInv`:
+  let dualDom : NttDomain n :=
+    { hPos := dom.hPos
+      omega := dom.omegaInv
+      omegaInv := dom.omega
+      nInv := dom.nInv
+      hPowN := dom_omegaInv_pow_n dom
+      hOmegaInv := by rw [LawfulCommRing.mul_comm]; exact dom.hOmegaInv
+      hNInv := dom.hNInv
+      hPrim := by
+        intro d hd0 hdn hInv1
+        apply dom.hPrim d hd0 hdn
+        have hProd : CommRingOps.mul (glPow dom.omega d) (glPow dom.omegaInv d) = CommRingOps.one := by
+          rw [← glPow_mul_distrib, dom.hOmegaInv, glPow_one]
+        rwa [hInv1, LawfulCommRing.mul_one] at hProd }
+  have hDual := hInvFwd dualDom evals j
+  unfold nttInverse nttForward at hDual ⊢
+  dsimp only [dualDom] at hDual ⊢
+  have hPull :
+      glRangeSum n (fun k =>
+        if hk : k < n then
+          CommRingOps.mul
+            (CommRingOps.mul dom.nInv
+              (glRangeSum n (fun i =>
+                if hi : i < n then CommRingOps.mul (evals ⟨i, hi⟩) (glPow dom.omegaInv (k * i))
+                else CommRingOps.zero)))
+            (glPow dom.omega (k * j.val))
+        else CommRingOps.zero) =
+      CommRingOps.mul dom.nInv
+        (glRangeSum n (fun k =>
+          if hk : k < n then
+            CommRingOps.mul
+              (glRangeSum n (fun i =>
+                if hi : i < n then CommRingOps.mul (evals ⟨i, hi⟩) (glPow dom.omegaInv (i * k))
+                else CommRingOps.zero))
+              (glPow dom.omega (j.val * k))
+          else CommRingOps.zero)) := by
+    rw [glRangeSum_mul_left]
+    apply glRangeSum_congr
+    intro k hk
+    simp only [hk, ↓reduceDIte, LawfulCommRing.mul_assoc, Nat.mul_comm k j.val]
+    congr 2
+    apply glRangeSum_congr
+    intro i hi
+    simp only [hi, ↓reduceDIte, Nat.mul_comm k i]
+  exact hPull.trans hDual
+
+/-- **`#tooth` (`tooth_negated_twiddle_not_inverse_ntt`)**:
+    Negating evaluation points (`goldilocksNttSpec ... true`) on `[1, 0]` over twiddles `[1, -1]`
+    maps `[1, 0] ↦ [1, 1] ↦ [2, 2] ≠ [1, 0]`, whereas `nttInverse goldilocksNttDomain8`
+    inverts `nttForward goldilocksNttDomain8` identically! -/
+theorem tooth_negated_twiddle_not_inverse_ntt :
+    goldilocksNttSpec
+      (goldilocksNttSpec [Goldilocks.one, Goldilocks.zero]
+        [Goldilocks.one, Goldilocks.neg Goldilocks.one] false)
+      [Goldilocks.one, Goldilocks.neg Goldilocks.one] true ≠
+    [Goldilocks.one, Goldilocks.zero] := by
+  intro hEq
+  have hv := congrArg (fun xs => xs.map Goldilocks.val) hEq
+  simp only [goldilocksNttSpec, hornerEval, List.map, Bool.false_eq_true, ↓reduceIte] at hv
+  change [((CommRingOps.add (CommRingOps.add Goldilocks.one (CommRingOps.mul Goldilocks.one CommRingOps.zero))
+      (CommRingOps.mul (Goldilocks.neg Goldilocks.one)
+        (CommRingOps.add (CommRingOps.add Goldilocks.one (CommRingOps.mul (Goldilocks.neg Goldilocks.one) CommRingOps.zero))
+          (CommRingOps.mul (Goldilocks.neg Goldilocks.one) CommRingOps.zero))))).val, _] =
+    [1, 0] at hv
+  injection hv with hv0 hv1
+  injection hv1 with hv1' _
+  simp only [CommRingOps.add, CommRingOps.mul, CommRingOps.zero, Goldilocks.add_val,
+    Goldilocks.mul_val, Goldilocks.neg_val, Goldilocks.one_val, Goldilocks.zero_val] at hv1'
+  revert hv1'
+  decide
+
+#tooth_pair nttInverse_nttForward_roundtrip vs tooth_negated_twiddle_not_inverse_ntt
+
+/-- Genuine multiplicative-coset Low-Degree Extension (`Spec` vs Cooley-Tukey pre-scaled `Exec`):
+    interpolates `evals : Fin n → Goldilocks` via `nttInverse srcDom`, requires non-zero `shift ≠ 0`,
+    and evaluates at all `n * blowup` coset points `shift * ω_{n*blowup}^j`. -/
+def multiplicativeCosetLdeSpec {n blowup : Nat}
+    (srcDom : NttDomain n) (ldeDom : NttDomain (n * blowup))
+    (shift : Goldilocks) (evals : Fin n → Goldilocks) : List Goldilocks :=
+  let coeffs := List.ofFn (nttInverse srcDom evals)
+  (List.range (n * blowup)).map (fun j =>
+    hornerEval coeffs (CommRingOps.mul shift (glPow ldeDom.omega j)))
+
+def multiplicativeCosetLdeExec {n blowup : Nat}
+    (srcDom : NttDomain n) (ldeDom : NttDomain (n * blowup))
+    (shift : Goldilocks) (evals : Fin n → Goldilocks) : List Goldilocks :=
+  let coeffs := List.ofFn (nttInverse srcDom evals)
+  let scaled := scalePowers coeffs shift
+  let twiddles := (List.range (n * blowup)).map (fun j => glPow ldeDom.omega j)
+  goldilocksNttButterflyExec scaled twiddles false
+
+theorem multiplicativeCosetLdeExec_eq_spec {n blowup : Nat}
+    (srcDom : NttDomain n) (ldeDom : NttDomain (n * blowup))
+    (shift : Goldilocks) (hShiftNeZero : shift ≠ Goldilocks.zero)
+    (evals : Fin n → Goldilocks) :
+    (∀ x y : Goldilocks, CommRingOps.mul shift x = CommRingOps.mul shift y → x = y) ∧
+    (multiplicativeCosetLdeExec srcDom ldeDom shift evals).length = n * blowup ∧
+    multiplicativeCosetLdeExec srcDom ldeDom shift evals =
+      multiplicativeCosetLdeSpec srcDom ldeDom shift evals := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro x y hMul
+    have hSub : CommRingOps.mul shift (CommRingOps.sub x y) = CommRingOps.zero := by
+      rw [LawfulCommRing.mul_sub, hMul, LawfulCommRing.sub_self]
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hSub with hBad | hDiff0
+    · exact False.elim (hShiftNeZero hBad)
+    · exact LawfulCommRing.sub_eq_zero_iff.mp hDiff0
+  · simp [multiplicativeCosetLdeExec, goldilocksNttButterflyExec]
+  · unfold multiplicativeCosetLdeExec multiplicativeCosetLdeSpec
+    rw [goldilocksNttButterflyExec_refines_spec]
+    unfold goldilocksNttSpec
+    rw [List.map_map]
+    apply List.map_congr_left
+    intro j _
+    simp only [Function.comp, Bool.false_eq_true, ↓reduceIte, hornerEval_cosetShift_eq]
+
+/-- Fixed-width 4-limb Merkle digest and 4-limb public seed (`MerkleNode4`, `MerkleSeed4`),
+    eliminating variable-length zero-padding / tail-truncation and odd-sibling structural aliases. -/
+abbrev MerkleNode4 := Fin 4 → Goldilocks
+abbrev MerkleSeed4 := Fin 4 → Goldilocks
+
+/-- 2-block width-12 `Poseidon2` compression encoding ALL 4 limbs of `left`, ALL 4 limbs of `right`,
+    ALL 4 limbs of `pkSeed`, AND bounded `(layer < 32, idx < 2^32)` with domain tag `1`. -/
+def merkleFixedBlock1 (left right : MerkleNode4) (pkSeed : MerkleSeed4) : Poseidon2State12 :=
+  ⟨⟨left 0, left 1, left 2, left 3⟩,
+   ⟨right 0, right 1, right 2, right 3⟩,
+   ⟨pkSeed 0, pkSeed 1, pkSeed 2, pkSeed 3⟩⟩
+
+theorem merkleFixedBlock1_injective {l1 r1 : MerkleNode4} {s1 : MerkleSeed4}
+    {l2 r2 : MerkleNode4} {s2 : MerkleSeed4}
+    (h : merkleFixedBlock1 l1 r1 s1 = merkleFixedBlock1 l2 r2 s2) :
+    l1 = l2 ∧ r1 = r2 ∧ s1 = s2 := by
+  unfold merkleFixedBlock1 at h
+  injection h with hb0 hb1 hb2
+  injection hb0 with hl0 hl1 hl2 hl3
+  injection hb1 with hr0 hr1 hr2 hr3
+  injection hb2 with hs0 hs1 hs2 hs3
+  refine ⟨?_, ?_, ?_⟩
+  · funext i
+    have hi : i.val = 0 ∨ i.val = 1 ∨ i.val = 2 ∨ i.val = 3 := by have := i.isLt; omega
+    rcases hi with h0 | h1 | h2 | h3
+    · rw [show i = 0 from Fin.ext h0]; exact hl0
+    · rw [show i = 1 from Fin.ext h1]; exact hl1
+    · rw [show i = 2 from Fin.ext h2]; exact hl2
+    · rw [show i = 3 from Fin.ext h3]; exact hl3
+  · funext i
+    have hi : i.val = 0 ∨ i.val = 1 ∨ i.val = 2 ∨ i.val = 3 := by have := i.isLt; omega
+    rcases hi with h0 | h1 | h2 | h3
+    · rw [show i = 0 from Fin.ext h0]; exact hr0
+    · rw [show i = 1 from Fin.ext h1]; exact hr1
+    · rw [show i = 2 from Fin.ext h2]; exact hr2
+    · rw [show i = 3 from Fin.ext h3]; exact hr3
+  · funext i
+    have hi : i.val = 0 ∨ i.val = 1 ∨ i.val = 2 ∨ i.val = 3 := by have := i.isLt; omega
+    rcases hi with h0 | h1 | h2 | h3
+    · rw [show i = 0 from Fin.ext h0]; exact hs0
+    · rw [show i = 1 from Fin.ext h1]; exact hs1
+    · rw [show i = 2 from Fin.ext h2]; exact hs2
+    · rw [show i = 3 from Fin.ext h3]; exact hs3
+
+def merkleCompressFixed4 (left right : MerkleNode4) (pkSeed : MerkleSeed4)
+    (layer : Fin 32) (idx : Fin (2 ^ 32)) : MerkleNode4 :=
+  let mid := poseidon2Perm12 (merkleFixedBlock1 left right pkSeed)
+  let st2 : Poseidon2State12 :=
+    ⟨mid.b0, mid.b1,
+     ⟨Goldilocks.add mid.b2.x0 (Goldilocks.ofNat layer.val),
+      Goldilocks.add mid.b2.x1 (Goldilocks.ofNat idx.val),
+      Goldilocks.add mid.b2.x2 Goldilocks.one,
+      mid.b2.x3⟩⟩
+  let out := poseidon2Perm12 st2
+  fun i =>
+    if i.val = 0 then out.b0.x0
+    else if i.val = 1 then out.b0.x1
+    else if i.val = 2 then out.b0.x2
+    else out.b0.x3
+
+/-- Explicit reachable Merkle pair-compression collision at `(pkSeed, layer, idx)`. -/
+def MerkleFixedCompressCollision (pkSeed : MerkleSeed4) (layer : Fin 32) (idx : Fin (2 ^ 32)) : Prop :=
+  ∃ (l1 r1 l2 r2 : MerkleNode4),
+    (l1, r1) ≠ (l2, r2) ∧
+    merkleCompressFixed4 l1 r1 pkSeed layer idx = merkleCompressFixed4 l2 r2 pkSeed layer idx
+
+def merkleNode4Eq (a b : MerkleNode4) : Bool :=
+  decide ((a 0).val = (b 0).val ∧ (a 1).val = (b 1).val ∧
+          (a 2).val = (b 2).val ∧ (a 3).val = (b 3).val)
+
+theorem merkleNode4Eq_iff (a b : MerkleNode4) :
+    merkleNode4Eq a b = true ↔ a = b := by
+  unfold merkleNode4Eq
+  rw [decide_eq_true_eq]
+  constructor
+  · rintro ⟨h0, h1, h2, h3⟩
+    funext i
+    apply Goldilocks.ext
+    have hi : i.val = 0 ∨ i.val = 1 ∨ i.val = 2 ∨ i.val = 3 := by have := i.isLt; omega
+    rcases hi with h | h | h | h
+    · rw [show i = 0 from Fin.ext h]; exact h0
+    · rw [show i = 1 from Fin.ext h]; exact h1
+    · rw [show i = 2 from Fin.ext h]; exact h2
+    · rw [show i = 3 from Fin.ext h]; exact h3
+  · intro h
+    subst h
+    exact ⟨rfl, rfl, rfl, rfl⟩
+
+/-- Checked even-pair complete-tree layer reduction: rejects empty or odd-cardinality layers (`none`). -/
+def merkleCompleteLayerChecked (pkSeed : MerkleSeed4) (layer : Fin 32) :
+    List MerkleNode4 → Nat → Option (List MerkleNode4)
+  | [], _ => some []
+  | [_], _ => none
+  | l :: r :: rest, idx =>
+    if hIdx : idx < 2 ^ 32 then do
+      let tail ← merkleCompleteLayerChecked pkSeed layer rest (idx + 1)
+      some (merkleCompressFixed4 l r pkSeed layer ⟨idx, hIdx⟩ :: tail)
+    else none
+
+theorem merkleCompleteLayerChecked_binding_or_collision
+    (pkSeed : MerkleSeed4) (layer : Fin 32) :
+    ∀ (xs ys : List MerkleNode4) (idx : Nat) (out : List MerkleNode4),
+      merkleCompleteLayerChecked pkSeed layer xs idx = some out →
+      merkleCompleteLayerChecked pkSeed layer ys idx = some out →
+      xs = ys ∨ ∃ j : Fin (2 ^ 32), MerkleFixedCompressCollision pkSeed layer j
+  | [], [], _, _, _, _ => Or.inl rfl
+  | [], [_], _, _, _, hy => by simp [merkleCompleteLayerChecked] at hy
+  | [], _ :: _ :: _, _, _, hx, hy => by
+    simp only [merkleCompleteLayerChecked] at hx hy
+    injection hx with hx0; subst hx0
+    split at hy
+    · cases hm : merkleCompleteLayerChecked pkSeed layer _ _
+      · rw [hm] at hy; cases hy
+      · rw [hm] at hy; cases hy
+    · cases hy
+  | [_], _, _, _, hx, _ => by simp [merkleCompleteLayerChecked] at hx
+  | _ :: _ :: _, [], _, _, hx, hy => by
+    simp only [merkleCompleteLayerChecked] at hx hy
+    injection hy with hy0; subst hy0
+    split at hx
+    · cases hm : merkleCompleteLayerChecked pkSeed layer _ _
+      · rw [hm] at hx; cases hx
+      · rw [hm] at hx; cases hx
+    · cases hx
+  | _ :: _ :: _, [_], _, _, _, hy => by simp [merkleCompleteLayerChecked] at hy
+  | l1 :: r1 :: xs, l2 :: r2 :: ys, idx, out, hx, hy => by
+    simp only [merkleCompleteLayerChecked] at hx hy
+    split at hx
+    · next hIdx =>
+      simp only [hIdx, ↓reduceDIte] at hy
+      cases htx : merkleCompleteLayerChecked pkSeed layer xs (idx + 1) with
+      | none => rw [htx] at hx; cases hx
+      | some tx =>
+        cases hty : merkleCompleteLayerChecked pkSeed layer ys (idx + 1) with
+        | none => rw [hty] at hy; cases hy
+        | some ty =>
+          rw [htx] at hx
+          rw [hty] at hy
+          dsimp [Bind.bind, Option.bind] at hx hy
+          have hComb : merkleCompressFixed4 l1 r1 pkSeed layer ⟨idx, hIdx⟩ :: tx =
+              merkleCompressFixed4 l2 r2 pkSeed layer ⟨idx, hIdx⟩ :: ty :=
+            Option.some.inj (hx.trans hy.symm)
+          injection hComb with hHead hTail
+          subst hTail
+          cases hEq : (merkleNode4Eq l1 l2 && merkleNode4Eq r1 r2) with
+          | true =>
+            rw [Bool.and_eq_true, merkleNode4Eq_iff, merkleNode4Eq_iff] at hEq
+            rcases hEq with ⟨hl, hr⟩
+            subst hl hr
+            rcases merkleCompleteLayerChecked_binding_or_collision pkSeed layer xs ys (idx + 1) tx htx hty with
+              hRestEq | hCol
+            · exact Or.inl (by rw [hRestEq])
+            · exact Or.inr hCol
+          | false =>
+            have hPairNe : (l1, r1) ≠ (l2, r2) := by
+              intro hPair
+              injection hPair with hl hr
+              have hTrue : (merkleNode4Eq l1 l2 && merkleNode4Eq r1 r2) = true := by
+                rw [Bool.and_eq_true, merkleNode4Eq_iff, merkleNode4Eq_iff]
+                exact ⟨hl, hr⟩
+              rw [hEq] at hTrue
+              cases hTrue
+            exact Or.inr ⟨⟨idx, hIdx⟩, l1, r1, l2, r2, hPairNe, hHead⟩
+    · cases hx
+
+/-- **`#tooth` (`tooth_unpadded_list_merkle_aliases_empty_and_zero`)**:
+    `merkleCompleteLayerChecked` deterministically rejects singleton (`xs.length = 1`) layers (`= none`),
+    closing odd-sibling structural aliasing! -/
+theorem tooth_unpadded_list_merkle_aliases_empty_and_zero
+    (pkSeed : MerkleSeed4) (layer : Fin 32) (idx : Nat)
+    (xs : List MerkleNode4) (hSingleton : xs.length = 1) :
+    merkleCompleteLayerChecked pkSeed layer xs idx = none := by
+  rcases xs with _ | ⟨x, _ | ⟨y, rest⟩⟩
+  · cases hSingleton
+  · simp [merkleCompleteLayerChecked]
+  · cases hSingleton
+
+#tooth_pair merkleCompleteLayerChecked_binding_or_collision vs
+  tooth_unpadded_list_merkle_aliases_empty_and_zero
 
 
 /-! ## BlindVC wire boundary
@@ -2595,10 +3567,13 @@ theorem words_injective (xs ys : List Goldilocks) (h : words xs = words ys) : xs
     rw [words_length, words_length] at this
     omega
   induction xs generalizing ys with
-  | nil => cases ys <;> simp_all
+  | nil =>
+    cases ys with
+    | nil => rfl
+    | cons y ys => cases hl
   | cons x xs ih =>
     cases ys with
-    | nil => simp at hl
+    | nil => cases hl
     | cons y ys =>
       change le 8 x.val ++ words xs = le 8 y.val ++ words ys at h
       have hp := List.append_inj h (by simp [le])
@@ -2643,6 +3618,35 @@ theorem viewBytes_injective_of_shape (a b : PartyView)
   simp only [parts, List.cons.injEq] at he
   exact ⟨he.2.1, words_injective _ _ he.2.2.2.1,
     words_injective _ _ he.2.2.2.2.2.1, words_injective _ _ he.2.2.2.2.2.2.2.1⟩
+
+/-- Count prefixes recover the shape as well as every secret wire. Thus the
+wire encoding is injective without assuming equal circuit sizes beforehand. -/
+theorem viewBytes_injective (a b : PartyView) (h : viewBytes a = viewBytes b) :
+    a.seed.val = b.seed.val ∧ a.inputs = b.inputs ∧
+    a.gates = b.gates ∧ a.outputs = b.outputs := by
+  simp only [viewBytes, List.append_assoc] at h
+  have hDomain := List.append_inj h (by rfl)
+  have hSeed := List.append_inj hDomain.2 (by rw [a.seed.property, b.seed.property])
+  have hInputsCount := List.append_inj hSeed.2 (by simp [le])
+  have hi : a.inputs.length = b.inputs.length := le_injective
+    (by simpa using a.inputsBound) (by simpa using b.inputsBound) hInputsCount.1
+  have hInputs := List.append_inj hInputsCount.2 (by rw [words_length, words_length, hi])
+  have hGatesCount := List.append_inj hInputs.2 (by simp [le])
+  have hg : a.gates.length = b.gates.length := le_injective
+    (by simpa using a.gatesBound) (by simpa using b.gatesBound) hGatesCount.1
+  have hGates := List.append_inj hGatesCount.2 (by rw [words_length, words_length, hg])
+  have hOutputsCount := List.append_inj hGates.2 (by simp [le])
+  exact ⟨hSeed.1, words_injective _ _ hInputs.1,
+    words_injective _ _ hGates.1, words_injective _ _ hOutputsCount.2⟩
+
+/-- Dropping counts would let an input word become a gate word. The actual
+serializer distinguishes those traces even though their flat words coincide. -/
+theorem tooth_omitted_counts_alias_wire_roles :
+    ∃ xs ys : List Goldilocks,
+      words (xs ++ ys) = words (ys ++ xs) ∧ xs ≠ ys := by
+  exact ⟨[Goldilocks.one], [], rfl, by intro h; cases h⟩
+
+#tooth_pair viewBytes_injective vs tooth_omitted_counts_alias_wire_roles
 
 /-- Bounded, flat DAG: every operand refers to an earlier wire. Multiplication
 mask IDs are the gate positions themselves, so separate gates cannot alias. -/
@@ -2731,9 +3735,18 @@ def challenges (fuel : Nat) (tr : Transcript) (count : Nat) :
 private theorem block_trit_eq {s q r : Nat} (hs : 0 < s) :
     ((q * (3 * s) + r) / s) % 3 = (r / s) % 3 := by
   have hMul : q * (3 * s) = s * (3 * q) := by
-    rw [← Nat.mul_assoc q 3 s, Nat.mul_comm q 3, ← Nat.mul_assoc 3 q s, Nat.mul_comm (3 * q) s]
+    rw [← Nat.mul_assoc q 3 s, Nat.mul_comm q 3, Nat.mul_comm (3 * q) s]
   rw [hMul, Nat.add_comm (s * (3 * q)) r, Nat.add_mul_div_left r (3 * q) hs,
       Nat.add_mul_mod_self_left]
+
+private theorem filter_nil_constructive {α : Type} (p : α → Bool) (xs : List α)
+    (h : ∀ x ∈ xs, p x ≠ true) : xs.filter p = [] := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih =>
+    have hx : p x = false := Bool.eq_false_iff.mpr (h x (.head _))
+    simp only [List.filter_cons, hx, Bool.false_eq_true, ↓reduceIte]
+    exact ih (fun y hy => h y (.tail _ hy))
 
 private theorem filter_range_three_mul {s t : Nat} (hs : 0 < s) (ht : t < 3) :
     ((List.range (3 * s)).filter (fun r => (r / s) % 3 == t)).length = s := by
@@ -2751,7 +3764,7 @@ private theorem filter_range_three_mul {s t : Nat} (hs : 0 < s) (ht : t < 3) :
       rw [Nat.div_eq_of_lt hr, Nat.zero_mod]
       exact h0t
     · next h0t =>
-      rw [List.filter_eq_nil_iff]
+      apply filter_nil_constructive
       intro r hr
       rw [List.mem_range] at hr
       rw [Nat.div_eq_of_lt hr, Nat.zero_mod]
@@ -2767,12 +3780,12 @@ private theorem filter_range_three_mul {s t : Nat} (hs : 0 < s) (ht : t < 3) :
       rw [List.filter_eq_self]
       intro r hr
       rw [List.mem_range] at hr
-      simpa [Function.comp, hDiv1 r hr] using h1t
+      simpa only [Function.comp_apply, hDiv1 r hr] using h1t
     · next h1t =>
-      rw [List.filter_eq_nil_iff]
+      apply filter_nil_constructive
       intro r hr
       rw [List.mem_range] at hr
-      simpa [Function.comp, hDiv1 r hr] using h1t
+      simpa only [Function.comp_apply, hDiv1 r hr] using h1t
   have h2 : (List.range s).filter ((fun r => (r / s) % 3 == t) ∘ (s + s + ·)) =
       if 2 == t then List.range s else [] := by
     have hDiv2 : ∀ r < s, ((s + s + r) / s) % 3 = 2 := by
@@ -2784,18 +3797,18 @@ private theorem filter_range_three_mul {s t : Nat} (hs : 0 < s) (ht : t < 3) :
       rw [List.filter_eq_self]
       intro r hr
       rw [List.mem_range] at hr
-      simpa [Function.comp, hDiv2 r hr] using h2t
+      simpa only [Function.comp_apply, hDiv2 r hr] using h2t
     · next h2t =>
-      rw [List.filter_eq_nil_iff]
+      apply filter_nil_constructive
       intro r hr
       rw [List.mem_range] at hr
-      simpa [Function.comp, hDiv2 r hr] using h2t
+      simpa only [Function.comp_apply, hDiv2 r hr] using h2t
   rw [h0, h1, h2]
-  rcases t with _ | _ | _ | t
-  · simp
-  · simp
-  · simp
-  · omega
+  have htCases : t = 0 ∨ t = 1 ∨ t = 2 := by omega
+  rcases htCases with rfl | rfl | rfl <;>
+    simp only [Nat.reduceBEq, Bool.false_eq_true, ↓reduceIte,
+      List.length_range, List.length_nil] <;> omega
+
 
 private theorem filter_range_blocks (m : Nat) {s t : Nat} (hs : 0 < s) (ht : t < 3) :
     ((List.range (m * (3 * s))).filter (fun b => (b / s) % 3 == t)).length = m * s := by

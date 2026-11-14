@@ -2982,17 +2982,73 @@ def rustGf128OfLimbs (lo hi : UInt64) : RustGf128 :=
   BitVec.ofNat 128 (lo.toNat + 2^64 * hi.toNat)
 
 set_option maxRecDepth 4096 in
- theorem rust_gf128_basis_kats :
+theorem rust_gf128_basis_kats :
     rustGf128Mul 2#128 2#128 = 4#128 ∧
     rustGf128Mul (BitVec.ofNat 128 (2^127)) 2#128 = 0x87#128 ∧
     rustGf128OfLimbs 0 1 = BitVec.ofNat 128 (2^64) := by
   decide
 
-/-- Regression against treating tower packing as the Rust basis. -/
-set_option maxRecDepth 4096 in
- theorem tooth_identity_basis_conversion_wrong :
-    rustGf128Mul 2#128 2#128 ≠ mulExec 7 2#128 2#128 := by
-  decide
+/-- Transparent Wiedemann coordinate bit-packing (`TowerElem k ≃ BitVec (2^k)`) free of `BitVec.cast`. -/
+def wiedemannToNat : (k : Nat) → TowerElem k → Nat
+  | 0, a => match a with | true => 1 | false => 0
+  | k + 1, a => wiedemannToNat k a.1 + ((wiedemannToNat k a.2) <<< (2 ^ k))
+
+def wiedemannOfNat : (k : Nat) → Nat → TowerElem k
+  | 0, n => n.testBit 0
+  | k + 1, n => (wiedemannOfNat k (n % (2 ^ (2 ^ k))), wiedemannOfNat k (n >>> (2 ^ k)))
+
+def wiedemannPack128 (a : Tower128) : BitVec 128 :=
+  BitVec.ofNat 128 (wiedemannToNat 7 a)
+
+def wiedemannUnpack128 (v : BitVec 128) : Tower128 :=
+  wiedemannOfNat 7 v.toNat
+
+/-- Fast 3-way Karatsuba evaluator for `TowerElem k`, proved equal to `towerMul k`. -/
+def wiedemannKaratsuba : (k : Nat) → TowerElem k → TowerElem k → TowerElem k
+  | 0, a, b => a && b
+  | k + 1, a, b =>
+    let p := wiedemannKaratsuba k a.1 b.1
+    let q := wiedemannKaratsuba k a.2 b.2
+    let r := wiedemannKaratsuba k (towerAdd k a.1 a.2) (towerAdd k b.1 b.2)
+    (towerAdd k p q, towerAdd k (towerAdd k r (towerAdd k p q)) (towerScaleX k q))
+
+theorem wiedemannKaratsuba_eq_towerMul (k : Nat) (a b : TowerElem k) :
+    wiedemannKaratsuba k a b = towerMul k a b := by
+  induction k with
+  | zero => rfl
+  | succ k ih =>
+    simp only [wiedemannKaratsuba, ih, towerMul, towerMul_add_distrib,
+      towerAdd_mul_distrib, towerScaleX_eq_mul]
+    congr 1
+    simp only [towerAdd_assoc, towerAdd_comm, towerAdd_left_comm,
+      towerAdd_self_zero, towerAdd_zero, towerAdd_cancel]
+
+/-- Regression against treating Wiedemann coordinate bit-packing as the Rust polynomial basis:
+    under naive coordinate bit-packing, bit `1` (`x_0 ∈ Tower128`) squares to `x_0 + 1` (`3#128`),
+    whereas in `RustGf128` bit `1` (`x`) squares to `x^2` (`4#128`). -/
+theorem tooth_identity_basis_conversion_wrong :
+    ∃ x : RustGf128,
+      rustGf128Mul x x ≠
+        wiedemannPack128 (towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x)) ∧
+      wiedemannUnpack128 (rustGf128Mul x x) ≠
+        towerMul 7 (wiedemannUnpack128 x) (wiedemannUnpack128 x) := by
+  refine ⟨2#128, ?_⟩
+  have hK : towerMul 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) =
+      wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128) :=
+    (wiedemannKaratsuba_eq_towerMul 7 _ _).symm
+  have hW : wiedemannPack128 (wiedemannKaratsuba 7 (wiedemannUnpack128 2#128) (wiedemannUnpack128 2#128)) = 3#128 := by
+    decide
+  have hR : rustGf128Mul 2#128 2#128 = 4#128 := rust_gf128_basis_kats.1
+  rw [hK]
+  refine ⟨?_, ?_⟩
+  · rw [hR, hW]; decide
+  · intro hEq
+    have hp := congrArg wiedemannPack128 hEq
+    rw [hW] at hp
+    have h4 : wiedemannPack128 (wiedemannUnpack128 (rustGf128Mul 2#128 2#128)) = 4#128 := by
+      rw [hR]; decide
+    rw [h4] at hp
+    revert hp; decide
 
 #tooth_pair Qsag.MigrationExecution.rust_gf128_basis_kats vs
   Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
@@ -3288,12 +3344,18 @@ theorem settle_accept_inserts {Authorization : Type}
     (settle verifyAuthorization compile ledger submission).1.spent =
       submission.statement.nullifier :: ledger.spent := by
   unfold settle at h ⊢
-  split
-  · cases h
-  · split
-    · cases hr : run submission.witness (compile submission.statement) <;>
+  cases (inferInstance : Decidable (submission.statement.nullifier ∈ ledger.spent)) with
+  | isTrue hMem =>
+    rw [cIte_pos hMem] at h
+    cases h
+  | isFalse hMem =>
+    rw [cIte_neg hMem] at h ⊢
+    cases hAuth : verifyAuthorization submission.statement submission.authorization
+    · simp only [hAuth, Bool.false_eq_true, ↓reduceIte] at h
+      cases h
+    · simp only [hAuth, ↓reduceIte] at h ⊢
+      cases hr : run submission.witness (compile submission.statement) <;>
         simp only [hr] at h ⊢ <;> first | rfl | cases h
-    · cases h
 
 theorem settle_spent_monotone {Authorization : Type}
     (verifyAuthorization : Statement → Authorization → Bool)
@@ -3369,11 +3431,44 @@ def honestSubmission : Submission Unit where
 def honestCircuit (_ : Statement) : List Gate :=
   [.and 0 0 ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩]
 
-set_option maxRecDepth 4096 in
- theorem settlement_acceptance_witness :
+private theorem honestSubmission_lanes_ok :
+    shareUniformLanesCheck honestSubmission.witness = true := by
+  unfold shareUniformLanesCheck honestSubmission
+  apply (finAll_eq_true_iff 256 _).mpr
+  intro _
+  change (isUniformLaneWord 0xFFFFFFFFFFFFFFFF && isUniformLaneWord 0 && isUniformLaneWord 0) = true
+  decide
+
+private theorem honestSubmission_wires_zero :
+    (witnessWires honestSubmission.witness)[0]? =
+      some ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩ := by
+  unfold witnessWires honestSubmission
+  rw [List.getElem?_ofFn]
+  simp only [Nat.zero_lt_succ, ↓reduceDIte]
+
+private theorem honestSubmission_settle_eq :
+    settle (fun (_ : Statement) (_ : Unit) => true) honestCircuit ⟨[]⟩ honestSubmission =
+      (⟨[7#256]⟩, .accepted) := by
+  let allOnes : RssWord64Shares3 := ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩
+  have hNotMem : honestSubmission.statement.nullifier ∉ ([] : List (BitVec 256)) := by simp
+  unfold settle
+  rw [cIte_neg hNotMem]
+  simp only [↓reduceIte]
+  unfold run honestCircuit
+  rw [honestSubmission_lanes_ok]
+  simp only [↓reduceIte, evalGates, evalGate, honestSubmission_wires_zero]
+  dsimp only [Bind.bind, Pure.pure, Option.bind]
+  have hFin : finish ⟨allOnes :: witnessWires honestSubmission.witness,
+      [⟨allOnes, allOnes, allOnes⟩]⟩ = .accepted := by
+    unfold finish PendingAnd.check RssWord64Shares3.reconstruct
+    decide
+  rw [hFin]
+  rfl
+
+theorem settlement_acceptance_witness :
     (settle (fun (_ : Statement) (_ : Unit) => true) honestCircuit ⟨[]⟩ honestSubmission).2 =
       .accepted := by
-  decide
+  rw [honestSubmission_settle_eq]
 
 /-- Named reachability premise for structural nonvacuity registration. -/
 def AcceptedSettlement {Authorization : Type}
@@ -3402,15 +3497,19 @@ theorem inhabited_accepted_settlement :
   Qsag.MigrationExecution.inhabited_accepted_settlement
 
 /-- The same request is accepted twice only in the replay-guard mutant. -/
-set_option maxRecDepth 4096 in
- theorem tooth_replay_guard_removal :
-    ∃ afterFirst : Ledger,
-      afterFirst = (settle (fun _ _ => true) honestCircuit ⟨[]⟩ honestSubmission).1 ∧
-      settle (fun _ _ => true) honestCircuit afterFirst honestSubmission = (afterFirst, .replay) ∧
-      (settleWithoutReplayGuard (fun _ _ => true) honestCircuit afterFirst honestSubmission).2 =
-        .accepted ∧
-      SettlementResult.replay ≠ SettlementResult.accepted := by
-  refine ⟨⟨[7#256]⟩, ?_⟩
+theorem tooth_replay_guard_removal :
+    ∃ s : Submission Unit,
+      let afterFirst := (settle (fun _ _ => true) honestCircuit ⟨[]⟩ s).1
+      (settle (fun _ _ => true) honestCircuit afterFirst s).2 ≠
+        (settleWithoutReplayGuard (fun _ _ => true) honestCircuit afterFirst s).2 := by
+  refine ⟨honestSubmission, ?_⟩
+  dsimp only
+  have h1 : (settle (fun _ _ => true) honestCircuit ⟨[]⟩ honestSubmission).1 = ⟨[7#256]⟩ := by
+    rw [honestSubmission_settle_eq]
+  rw [h1,
+      settle_replay_rejected (fun _ _ => true) honestCircuit ⟨[7#256]⟩ honestSubmission (.head _)]
+  unfold settleWithoutReplayGuard
+  rw [honestSubmission_settle_eq]
   decide
 
 #tooth_pair Qsag.MigrationExecution.settle_replay_rejected vs
