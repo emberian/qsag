@@ -428,20 +428,32 @@ theorem belt_three_custodian_round_exists
       (beltAfterAck (beltAfterAck (beltAfterAck
         (beltAfterPropose st e msg) 0#u8) 1#u8) 2#u8).inner = false :=
     belt_not_corrupt_set_ack_count _ hc2
+  have hbit1 : (beltAfterAck (beltAfterPropose st e msg) 0#u8).ack_bitmap.bv.getLsbD
+      (1#u8 : Std.U8).val = false := by
+    show ((0#u64 : Std.U64).bv ||| (beltCustodianBit 0#u8).bv).getLsbD (1#u8 : Std.U8).val = false
+    rw [BitVec.getLsbD_or, belt_zero_getLsbD, beltCustodianBit_getLsbD 0#u8 (by decide)]
+    decide
+  have hbit2 : (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) 0#u8) 1#u8).ack_bitmap.bv.getLsbD
+      (2#u8 : Std.U8).val = false := by
+    show (((0#u64 : Std.U64).bv ||| (beltCustodianBit 0#u8).bv) |||
+      (beltCustodianBit 1#u8).bv).getLsbD (2#u8 : Std.U8).val = false
+    rw [BitVec.getLsbD_or, BitVec.getLsbD_or, belt_zero_getLsbD,
+      beltCustodianBit_getLsbD 0#u8 (by decide), beltCustodianBit_getLsbD 1#u8 (by decide)]
+    decide
   refine ⟨[.ProposeOrRetryEpoch e msg msg rt, .RecordCustodianAck e msg 0#u8 t0,
     .RecordCustodianAck e msg 1#u8 t1, .RecordCustodianAck e msg 2#u8 t2,
     .AuthorizeShares e msg], rfl, ?_⟩
   refine .bound (belt_step_propose_fresh st e msg msg rt hwal hc hnr hge hwin hmax) ?_
   refine .acked (belt_step_ack_fresh (beltAfterPropose st e msg) e msg 0#u8 t0 k0
     (by change 0 < st.inner.n.val; omega) (by decide) hk0 ht0 hc0 rfl rfl rfl
-    (by decide) (by change 0 < st.inner.n.val; omega)) ?_
+    (belt_zero_getLsbD _) (by change 0 < st.inner.n.val; omega)) ?_
   refine .acked (belt_step_ack_fresh (beltAfterAck (beltAfterPropose st e msg) 0#u8)
     e msg 1#u8 t1 k1 (by change 1 < st.inner.n.val; omega) (by decide)
-    hk1 ht1 hc1 rfl rfl rfl (by decide) (by change 1 < st.inner.n.val; omega)) ?_
+    hk1 ht1 hc1 rfl rfl rfl hbit1 (by change 1 < st.inner.n.val; omega)) ?_
   refine .acked (belt_step_ack_fresh
     (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) 0#u8) 1#u8)
     e msg 2#u8 t2 k2 (by change 2 < st.inner.n.val; omega) (by decide)
-    hk2 ht2 hc2 rfl rfl rfl (by decide) (by change 2 < st.inner.n.val; omega)) ?_
+    hk2 ht2 hc2 rfl rfl rfl hbit2 (by change 2 < st.inner.n.val; omega)) ?_
   refine .certified (belt_step_authorize_granted
     (beltAfterAck (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) 0#u8) 1#u8) 2#u8)
     hc3 rfl hq) (.nil _)
