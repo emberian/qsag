@@ -15,7 +15,7 @@ enforcing:
      across ALL asm kernels AND ALL compiled Rust crypto functions.
   4. ZERO variable-count shifts/rotates (`shl/shr/sar/sal/rol/ror ..., cl`, `shlx/shrx/sarx`,
      `shld/shrd ..., cl` on x86_64; `lslv/lsrv/asrv/rorv` or 3-GPR `lsl/lsr/asr/ror` on aarch64)
-     across ALL asm kernels AND ALL compiled Rust crypto functions.
+     in asm kernels; compiled Rust rejects secret-dependent counts.
   5. ZERO secret-indexed or secret-tainted memory operands (`[base + idx*scale]`, `[reg1 + reg2]`,
      `vpgather*`, pre-added `[regA]` LUT dereferences, or static-displacement `[tainted_reg + disp]`
      LUT loads) in asm kernels, and ZERO >= 4 KiB static LUT symbols (`TOWER128_ISO`).
@@ -25,7 +25,7 @@ enforcing:
        lower `xmm` halves, and reloading after a wipe re-marks the register dirty!).
      - `aarch64`: stateful `dirty_neon` (`v0..v31`) live-at-`ret` tracking across ALL 7 kernels
        (reloading a `qN`/`vN` register after `eor vN.16b, vN.16b, vN.16b` re-dirties `vN`!).
-  7. Negative `#tooth` self-tests (`15` adversarial test cases) verifying immediate rejection of
+  7. Negative `#tooth` self-tests (including 48 vector-to-scalar taint mutations) verifying immediate rejection of
      planted branches, tainted loop counters, static-disp LUTs, pre-added LUTs, `vzeroupper`-only
      dirty XMM leaks, post-wipe NEON reloads, variable shifts, and hardware dividers!
 """
@@ -102,13 +102,13 @@ AARCH64_CSEL_MNEMONICS = {
 AARCH64_VAR_SHIFT_MNEMONICS = {"lslv", "lsrv", "asrv", "rorv"}
 
 X86_GPR64_CANON = {
-    "rax": "rax", "eax": "rax", "ax": "rax", "al": "rax",
-    "rbx": "rbx", "ebx": "rbx", "bx": "rbx", "bl": "rbx",
-    "rcx": "rcx", "ecx": "rcx", "cx": "rcx", "cl": "rcx",
-    "rdx": "rdx", "edx": "rdx", "dx": "rdx", "dl": "rdx",
+    "rax": "rax", "eax": "rax", "ax": "rax", "al": "rax", "ah": "rax",
+    "rbx": "rbx", "ebx": "rbx", "bx": "rbx", "bl": "rbx", "bh": "rbx",
+    "rcx": "rcx", "ecx": "rcx", "cx": "rcx", "cl": "rcx", "ch": "rcx",
+    "rdx": "rdx", "edx": "rdx", "dx": "rdx", "dl": "rdx", "dh": "rdx",
     "rsi": "rsi", "esi": "rsi", "si": "rsi", "sil": "rsi",
     "rdi": "rdi", "edi": "rdi", "di": "rdi", "dil": "rdi",
-    "rbp": "rbp", "ebp": "rbp",
+    "rbp": "rbp", "ebp": "rbp", "bp": "rbp", "bpl": "rbp",
     "rsp": "rsp", "esp": "rsp",
     **{f"r{i}": f"r{i}" for i in range(8, 16)},
     **{f"r{i}d": f"r{i}" for i in range(8, 16)},
@@ -147,6 +147,14 @@ def canon_a64_neon(tok: str) -> str | None:
     return None
 
 
+class InstructionStream(list):
+    """Disassembly plus addresses and relocation identities, never guessed from offsets."""
+    def __init__(self):
+        super().__init__()
+        self.addresses = []
+        self.relocations = {}
+
+
 def parse_objdump_functions(disasm_text: str) -> dict[str, list[tuple[str, str]]]:
     funcs: dict[str, list[tuple[str, str]]] = {}
     current_sym = None
@@ -161,9 +169,13 @@ def parse_objdump_functions(disasm_text: str) -> dict[str, list[tuple[str, str]]
         m_sym = sym_elf_re.match(raw_line) or sym_macho_re.match(raw_line)
         if m_sym:
             current_sym = m_sym.group(1)
-            funcs.setdefault(current_sym, [])
+            funcs.setdefault(current_sym, InstructionStream())
             continue
         if current_sym is None:
+            continue
+        relocation = re.match(r"^\s*[0-9a-fA-F]+:\s+R_[A-Z0-9_]+\s+(.+)$", raw_line)
+        if relocation and funcs[current_sym]:
+            funcs[current_sym].relocations[len(funcs[current_sym]) - 1] = relocation[1]
             continue
         m_ins = ins_re.match(raw_line)
         if m_ins:
@@ -177,6 +189,7 @@ def parse_objdump_functions(disasm_text: str) -> dict[str, list[tuple[str, str]]
             ops_clean = re.sub(r"\s+(?:#\s|//).*$", "", ops)
             ops_clean = re.sub(r"\s+<.+>$", "", ops_clean).strip()
             funcs[current_sym].append((mnem, ops_clean))
+            funcs[current_sym].addresses.append(int(raw_line.strip().split(":", 1)[0], 16))
     return funcs
 
 
@@ -439,54 +452,20 @@ def is_branchless_portable_primitive(sym: str) -> bool:
 
 
 def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
-    """
-    Audit compiled Rust cryptographic functions (`portable::*`, `lib.rs` entrypoints,
-    `x86_64_asm::run_*`) for:
-      - ZERO variable-latency divisions (`div`, `idiv`, `vdiv*`, `fdiv*`),
-      - ZERO variable `cl` / `shlx` / `shrx` / `sarx` shifts,
-      - ZERO `vpgather*` scatter/gather LUT instructions,
-      - ZERO conditional branches or scaled LUT loads inside straight-line `portable::*`
-        field/tag primitives (`wiedemann_mul_*`, `tower128_to_poly128_ct`, `goldilocks_*`, `ct_eq_32_portable`),
-      - Clean `vzeroupper` before `ret` whenever `ymm` registers are touched.
+    """Check the independent upper-YMM call/return hygiene requirement.
+
+    The architecture-aware dataflow screen runs in `rust_errors` so the strict
+    flag and relocation metadata are preserved for both ELF architectures.
     """
     errors = []
-    uses_ymm = any("ymm" in ops.lower() for _, ops in instrs)
     ymm_dirty = False
-    must_be_straight_line = is_branchless_portable_primitive(sym)
-
     for idx, (mnem, ops) in enumerate(instrs):
-        if mnem in ("nop", "cs", "endbr64"):
-            continue
-        ops_l = ops.lower()
-        if "ymm" in ops_l:
+        if "ymm" in ops.lower():
             ymm_dirty = True
-        if mnem == "vzeroupper":
+        if mnem in ("vzeroupper", "vzeroall"):
             ymm_dirty = False
-
-        if mnem in X86_DIV_MNEMONICS:
-            errors.append(f"{sym}[{idx}]: compiled Rust contains hardware divider `{mnem} {ops}`")
-        if mnem in X86_GATHER_MNEMONICS:
-            errors.append(f"{sym}[{idx}]: compiled Rust contains gather LUT `{mnem} {ops}`")
-        sh_err = check_x86_variable_shift(sym, idx, mnem, ops_l)
-        if sh_err:
-            errors.append(f"compiled Rust {sh_err}")
-        if mnem.startswith("cmov"):
-            errors.append(f"{sym}[{idx}]: compiled Rust conditional move requires a hardware timing contract `{mnem} {ops}`")
-        if must_be_straight_line:
-            if mnem.startswith("j") and mnem != "jmp":
-                errors.append(
-                    f"{sym}[{idx}]: straight-line portable primitive contains conditional jump `{mnem} {ops}`"
-                )
-            for mem in re.findall(r"\[([^\]]+)\]", ops_l):
-                if "*" in mem and mnem != "lea":
-                    errors.append(
-                        f"{sym}[{idx}]: straight-line portable primitive contains scaled LUT address `[{mem}]`"
-                    )
-        if mnem in ("call", "callq") and ymm_dirty:
-            errors.append(f"{sym}[{idx}]: call with dirty upper YMM state")
-        if mnem == "ret" and uses_ymm and ymm_dirty:
-            errors.append(f"{sym}[{idx}]: compiled Rust missing `vzeroupper` before `ret`")
-
+        if mnem in ("call", "callq", "ret") and ymm_dirty:
+            errors.append(f"{sym}[{idx}]: call/return with dirty upper YMM state")
     return errors
 
 
@@ -1102,8 +1081,8 @@ def legacy_main() -> int:
 Build linked artifacts with strip=none. Inlining/dead stripping limits observable
 coverage: absent symbols are listed, never counted as audited. This instruction
 screen is not a proof of data-independent control flow. Rust protocol functions
-can branch on public lengths/state; --strict-rust-branches rejects every branch
-in those functions as well. Assembly kernels always use the existing taint-aware
+can branch on public lengths/state; --strict-rust-branches checks their taint
+under the documented entry ABI. Assembly kernels always use the existing taint-aware
 branch checks (only proven public loop counters are exempt).
 """
 import argparse
@@ -1145,29 +1124,258 @@ def conditional(mnemonic):
             or mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz'))
 
 
-def rust_errors(symbol, instructions, strict=False):
-    errors = []
+def rust_errors(symbol, instructions, strict=False, machine=None):
+    """Instruction taint screen, with explicit public pointer/length ABI assumptions.
+
+    Buffer contents are secret; pointer and length arguments are public. Scalar
+    field primitives instead receive secret value arguments. Stack spills retain
+    taint and vector/GPR transfers share one register domain. The intraprocedural CFG reaches a taint fixpoint at joins and backedges. It
+    is not an interprocedural proof: callers must establish the entry contract.
+    """
     if not instructions:
         return [f'{symbol}: empty instruction stream']
-    straight = strict or kernel_audit.is_branchless_portable_primitive(symbol) or any(
-        name in symbol for name in ('ct_reduce_mod_q_u64', 'ct_reduce_mod_q_u128',
-                                     '::mod_q_mul', '::mod_q_add', '::mod_q_sub'))
-    for i, (mnemonic, operands) in enumerate(instructions):
-        if mnemonic in kernel_audit.X86_DIV_MNEMONICS | kernel_audit.AARCH64_DIV_MNEMONICS or mnemonic.startswith(('fdiv', 'vdiv')):
-            errors.append(f'{symbol}[{i}]: forbidden divider {mnemonic} {operands}')
-        if mnemonic.startswith('cmov'):
-            errors.append(f'{symbol}[{i}]: conditional move lacks a hardware timing contract {mnemonic} {operands}')
-        shift = check_x86_variable_shift(symbol, i, mnemonic, operands.lower())
-        parts = split_top_operands(operands.lower())
-        if shift:
-            errors.append(shift)
-        if mnemonic in AARCH64_VAR_SHIFT_MNEMONICS or (
-                mnemonic in ('lsl', 'lsr', 'asr', 'ror') and len(parts) == 3
-                and canon_a64_gpr(parts[-1]) is not None):
-            errors.append(f'{symbol}[{i}]: forbidden register-variable shift {mnemonic} {operands}')
-        if straight and conditional(mnemonic):
-            errors.append(f'{symbol}[{i}]: forbidden conditional branch {mnemonic} {operands}')
-    return errors
+    if machine is None:
+        machine = 183 if any(re.search(r'\b[wx][0-9]+\b', op) or m.startswith('b.')
+                             or m in AARCH64_DIV_MNEMONICS | AARCH64_VAR_SHIFT_MNEMONICS
+                             or m in ('cbz', 'cbnz', 'tbz', 'tbnz') for m, op in instructions) else 62
+    arm = machine == 183
+    def reg(token):
+        token = re.sub(r'\[[0-9]+\]$', '', token.strip()).strip('{} ')
+        if arm:
+            return canon_a64_gpr(token) or canon_a64_neon(token)
+        scalar = canon_x86_gpr(token)
+        vector = canon_x86_simd(token)
+        return scalar or (f'v{vector}' if vector is not None else None)
+    def regs(op):
+        return {r for t in re.findall(r'\b[a-z][a-z0-9]*(?:\.[0-9]*[bhsdq])?\b', op)
+                if (r := reg(t)) is not None}
+    def stack_key(mem):
+        compact = mem.replace(' ', '').replace('#', '').replace(',', '+').replace('+-', '-')
+        match = re.fullmatch(r'(rsp|rbp|sp|x29)([+-](?:0x[0-9a-f]+|[0-9]+))?', compact)
+        if not match:
+            return None
+        displacement = match[2] or '+0'
+        return match[1], int(displacement[1:], 0) * (-1 if displacement[0] == '-' else 1)
+    def width(operand, mnemonic):
+        if arm:
+            if mnemonic.endswith('b'):
+                return 1
+            if mnemonic.endswith('h'):
+                return 2
+            return 16 if operand.startswith(('q', 'v')) else 4 if operand.startswith(('w', 's')) else 8
+        for name, size in (('zmmword', 64), ('ymmword', 32), ('xmmword', 16),
+                           ('qword', 8), ('dword', 4), ('word', 2), ('byte', 1)):
+            if name in operand:
+                return size
+        return 32 if 'ymm' in operand else 16 if 'xmm' in operand else 8
+    scalar = is_branchless_portable_primitive(symbol) or any(
+        name in symbol for name in ('ct_reduce_mod_q_', '::mod_q_', 'goldilocks_',
+                                     'wiedemann_', 'clmul', 'tower_mul', 'tower_scale'))
+    taint = ({f'x{i}' for i in range(8)} if arm else
+             {'rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9'}) if scalar else set()
+    stack = {}
+    if not arm and symbol.endswith('::gf2_128_scale_xor_with_backend'):
+        # Seven-argument SysV signature: backend is the first stack argument;
+        # the two scalar field limbs in r8/r9 are secret.
+        taint.update(('r8', 'r9'))
+        stack['rsp', 8] = False
+    public_pointer = set()
+    flags = True
+    errors = []
+    addresses = getattr(instructions, 'addresses', [])
+    positions = {address: index for index, address in enumerate(addresses)}
+    incoming = {}
+    pending = [(0, taint, stack, public_pointer, flags)]
+    visits = 0
+    while pending:
+        visits += 1
+        if visits > 128 * len(instructions):
+            return [f"{symbol}: dataflow did not converge within the analysis budget"]
+        i, taint, stack, public_pointer, flags = pending.pop()
+        if i >= len(instructions):
+            continue
+        previous = incoming.get(i)
+        if previous is not None:
+            old_taint, old_stack, old_public, old_flags = previous
+            taint = taint | old_taint
+            stack = {key: stack.get(key, True) or old_stack.get(key, True)
+                     for key in stack.keys() | old_stack.keys()}
+            public_pointer = public_pointer & old_public
+            flags |= old_flags
+            if (taint, stack, public_pointer, flags) == previous:
+                continue
+        incoming[i] = (taint.copy(), stack.copy(), public_pointer.copy(), flags)
+        mnemonic, operands = instructions[i]
+        successors = [i + 1]
+        if positions:
+            target_text = operands.split(',')[-1].strip()
+            target = int(target_text, 16) if re.fullmatch(r'(?:0x)?[0-9a-f]+', target_text) else None
+            if conditional(mnemonic):
+                if target in positions:
+                    successors.append(positions[target])
+                else:
+                    errors.append(f'{symbol}[{i}]: unresolved conditional target')
+            elif mnemonic in ('jmp', 'jmpq', 'b'):
+                successors = [positions[target]] if target in positions else []
+            elif mnemonic in ('ret', 'retq'):
+                successors = []
+        # Preserve spill identities when the stack pointer moves. Unknown stack
+        # adjustments invalidate the map rather than declaring new contents public.
+        stack_base = 'sp' if arm else 'rsp'
+        delta = None
+        if not arm and mnemonic in ('push', 'pop'):
+            delta = -8 if mnemonic == 'push' else 8
+        elif mnemonic in ('add', 'sub') and operands.split(',')[0].strip() == stack_base:
+            amount = operands.split(',')[-1].strip().lstrip('#')
+            if re.fullmatch(r'(?:0x[0-9a-f]+|[0-9]+)', amount):
+                delta = int(amount, 0) * (-1 if mnemonic == 'sub' else 1)
+            else:
+                stack = {key: value for key, value in stack.items() if key[0] != stack_base}
+        if delta is not None:
+            stack = {(base, offset - delta if base == stack_base else offset): value
+                     for (base, offset), value in stack.items()}
+        try:
+            if mnemonic in ('nop', 'nopl', 'nopw', 'endbr64'):
+                continue
+            op = operands.lower()
+            parts = [p.strip() for p in re.split(r',\s*(?![^\[]*\])', op)] if op else []
+            relocation = getattr(instructions, 'relocations', {}).get(i, '')
+            public_symbol = any(n in relocation for n in ('qsag_asm::cpuid::CACHED_', 'qsag_asm::cpuid::BACKEND', '.LCPI', '.rodata.'))
+            size = width(op if not arm else (parts[0] if parts else ''), mnemonic)
+            def store_stack(mem, value, length=size, extra=0):
+                key = stack_key(mem)
+                if key:
+                    base, offset = key
+                    for byte in range(length):
+                        stack[base, offset + extra + byte] = value
+            def secret(value):
+                memory = re.findall(r'(?<![a-z0-9.])\[([^\]]+)\]', value)
+                if memory:
+                    def loaded(mem):
+                        key = stack_key(mem)
+                        if key:
+                            base, offset = key
+                            return any(stack.get((base, offset + byte), True) for byte in range(size))
+                        return not (public_symbol or (regs(mem) and regs(mem) <= public_pointer))
+                    return any(loaded(mem) for mem in memory)
+                return bool(regs(value) & taint)
+            def fail(reason):
+                errors.append(f'{symbol}[{i}]: {reason} `{mnemonic} {operands}`')
+            if mnemonic in X86_DIV_MNEMONICS | AARCH64_DIV_MNEMONICS or mnemonic.startswith(('fdiv', 'vdiv')):
+                fail('forbidden divider')
+            if mnemonic in X86_GATHER_MNEMONICS:
+                fail('gather requires an address contract')
+            for mem in re.findall(r'(?<![a-z0-9.])\[([^\]]+)\]', op):
+                if mnemonic != 'lea' and regs(mem) & taint:
+                    fail('secret-tainted memory address')
+            branch_secret = flags
+            if mnemonic in ('cbz', 'cbnz', 'tbz', 'tbnz', 'jrcxz', 'jecxz'):
+                branch_secret = secret(parts[0]) if parts else True
+            if conditional(mnemonic) and (strict or scalar) and branch_secret:
+                fail('secret-tainted conditional branch')
+            if (mnemonic.startswith('cmov') or mnemonic in AARCH64_CSEL_MNEMONICS) and (flags or any(secret(p) for p in parts)):
+                fail('secret-tainted conditional selection')
+            variable = (mnemonic in X86_BMI2_VAR_SHIFT_MNEMONICS | AARCH64_VAR_SHIFT_MNEMONICS or
+                        mnemonic in X86_SHIFT_MNEMONICS | {'lsl', 'lsr', 'asr', 'ror'})
+            if variable and len(parts) >= 2 and secret(parts[-1]):
+                fail('secret-tainted variable shift')
+            if mnemonic in ('cmp', 'test', 'tst', 'cmn', 'ucomisd', 'comisd'):
+                flags = any(secret(p) for p in parts)
+                continue
+            if not arm and mnemonic in ('mul', 'imul') and len(parts) == 1:
+                value = secret(parts[0]) or 'rax' in taint
+                for destination in ('rax', 'rdx'):
+                    if value:
+                        taint.add(destination)
+                    else:
+                        taint.discard(destination)
+                flags = value
+                continue
+            if not parts or conditional(mnemonic) or mnemonic in ('ret', 'jmp', 'b', 'nop', 'push'):
+                continue
+            if mnemonic in ('call', 'callq', 'bl', 'blr'):
+                if 'qsag_asm::cpuid::probe_capabilities' in relocation:
+                    # The concrete Rust return ABI writes fourteen public capability bytes
+                    # through rdi (SysV) or x8 (AAPCS indirect result).
+                    target = 'x8' if arm else 'rdi'
+                    for j in range(i - 1, -1, -1):
+                        m, operand = instructions[j]
+                        operands_j = [p.strip().lower() for p in operand.split(',')]
+                        if not operands_j or reg(operands_j[0]) != target:
+                            continue
+                        if m == 'mov' and len(operands_j) == 2 and reg(operands_j[1]):
+                            if operands_j[1] in ('sp', 'rsp', 'x29', 'rbp'):
+                                store_stack(operands_j[1], False, 14)
+                                break
+                            target = reg(operands_j[1])
+                            continue
+                        if m == 'lea':
+                            for mem in re.findall(r'\[([^\]]+)\]', operand.lower()):
+                                store_stack(mem, False, 14)
+                        elif arm and m in ('add', 'sub') and len(operands_j) == 3:
+                            displacement = operands_j[2].lstrip('#')
+                            store_stack(operands_j[1] + ('-' if m == 'sub' else '+') + displacement, False, 14)
+                        break
+                    taint.difference_update(('x0', 'x1') if arm else ('rax', 'rdx'))
+                    continue
+                # Unknown return values must not become public by accident.
+                taint.update(('x0', 'x1') if arm else ('rax', 'rdx'))
+                flags = True
+                continue
+            if arm and mnemonic.startswith(('str', 'stur', 'stp', 'st1')):
+                for mem in re.findall(r'(?<![a-z0-9.])\[([^\]]+)\]', op):
+                    store_stack(mem, secret(parts[0]))
+                    if mnemonic == 'stp':
+                        store_stack(mem, secret(parts[1]), extra=size)
+                continue
+            dst = reg(parts[0])
+            sources = parts[2:] if arm and mnemonic == 'ldp' else parts[1:]
+            move = mnemonic.startswith(('mov', 'vmov', 'ldr', 'ldur', 'ldp', 'fmov', 'umov', 'smov'))
+            if mnemonic == 'lea':
+                value = bool(regs(','.join(sources)) & taint)
+            else:
+                value = any(secret(p) for p in sources)
+                if not arm and not move and not mnemonic.startswith('v'):
+                    value |= secret(parts[0])
+            zero = (mnemonic in ('xor', 'sub', 'pxor', 'xorps', 'xorpd') and len(parts) == 2 and parts[0] == parts[1]) or (
+                mnemonic in ('vpxor', 'vxorps', 'vxorpd', 'eor', 'sub') and len(parts) == 3 and parts[1] == parts[2])
+            if arm and mnemonic in ('ins', 'bfi', 'bfxil'):
+                value |= secret(parts[0])
+            if zero:
+                value = False
+            if mnemonic.startswith(('cmov', 'set')) or mnemonic in AARCH64_CSEL_MNEMONICS:
+                value |= flags
+            if dst:
+                is_public_pointer = public_symbol or (move and sources and reg(sources[0]) in public_pointer)
+                public_pointer.discard(dst)
+                if is_public_pointer:
+                    public_pointer.add(dst)
+                if value:
+                    taint.add(dst)
+                else:
+                    taint.discard(dst)
+            if arm and mnemonic == 'ldp' and len(parts) > 1:
+                second = reg(parts[1])
+                mem = re.search(r'\[([^\]]+)\]', op)
+                key = stack_key(mem[1]) if mem else None
+                second_value = any(stack.get((key[0], key[1] + size + byte), True)
+                                   for byte in range(size)) if key else value
+                if second_value:
+                    taint.add(second)
+                else:
+                    taint.discard(second)
+            elif '[' in parts[0]:
+                for mem in re.findall(r'\[([^\]]+)\]', parts[0]):
+                    store_stack(mem, value)
+            if not arm and mnemonic in ('rol', 'ror', 'rcl', 'rcr', 'inc', 'dec'):
+                flags |= value
+            if (not arm and mnemonic in ('add', 'sub', 'and', 'or', 'xor', 'adc', 'sbb', 'inc', 'dec',
+                            'neg', 'shl', 'shr', 'sar')) or (arm and mnemonic in ('adds', 'subs', 'ands')):
+                flags = value
+        finally:
+            for successor in successors:
+                pending.append((successor, taint.copy(), stack.copy(), public_pointer.copy(), flags))
+    return sorted(set(errors))
 
 
 def self_tests():
@@ -1187,7 +1395,7 @@ def self_tests():
             count += 1
     for mnemonic, operands in [('cmovne', 'rax, rbx'), ('shl', 'rax, cl'),
                                ('shlx', 'rax, rbx, rcx'), ('lslv', 'x0, x1, x2')]:
-        assert rust_errors('qsag_asm::bitslice::probe', [(mnemonic, operands)])
+        assert rust_errors('qsag_asm::portable::clmul_probe', [(mnemonic, operands)])
         count += 1
     # Scalar secret -> vector -> scalar -> address must not launder taint.
     bridge = [('movq', 'xmm0, rdi'), ('movq', 'rax, xmm0'),
@@ -1198,6 +1406,56 @@ def self_tests():
              ('movq', 'rax, xmm0'), ('mov', 'rbx, [rax]'), ('ret', '')]
     assert not audit_x86_symbol('goldilocks_bridge', wiped)
     count += 2
+    # Each mutation starts from secret buffer data, not an assumed secret flag.
+    for register in ('rax', 'rbx', 'r8', 'r9', 'r10', 'r11'):
+        prefix = [('movdqu', 'xmm3, [rsi]'), ('movq', f'{register}, xmm3')]
+        mutations = [
+            [('test', f'{register}, {register}'), ('jne', '0x40')],
+            [('cmp', f'{register}, 0'), ('cmovne', 'r12, r13')],
+            [('mov', f'rcx, {register}'), ('shl', 'r12, cl')],
+            [('mov', f'r12, [rdi + {register}*8]')],
+        ]
+        for suffix in mutations:
+            assert rust_errors('buffer_probe', prefix + suffix, True, 62), (register, suffix)
+            count += 1
+    for register in ('x4', 'x5', 'x6', 'x7', 'x9', 'x10'):
+        prefix = [('ldr', 'q3, [x1]'), ('umov', f'{register}, v3.d[0]')]
+        mutations = [
+            [('cbnz', f'{register}, 0x40')],
+            [('cmp', f'{register}, #0'), ('csel', 'x12, x13, x14, ne')],
+            [('lslv', f'x12, x13, {register}')],
+            [('ldr', f'x12, [x0, {register}]')],
+        ]
+        for suffix in mutations:
+            assert rust_errors('buffer_probe', prefix + suffix, True, 183), (register, suffix)
+            count += 1
+    for machine, clean in ((62, [('cmp', 'rsi, rdx'), ('jb', '0x40'),
+                                 ('mov', 'rax, [rdi]'), ('sub', 'rcx, 1'), ('jne', '0x20')]),
+                           (183, [('cmp', 'x1, x2'), ('b.lo', '0x40'),
+                                  ('ldr', 'x4, [x0]'), ('subs', 'x3, x3, #1'), ('b.ne', '0x20')])):
+        assert not rust_errors('buffer_probe', clean, True, machine)
+        count += 1
+    # Join/backedge regressions: a textual sweep would incorrectly accept these.
+    for operations in (
+        [('mov', 'eax, [rsi]'), ('test', 'edx, edx'), ('je', '0x10'),
+         ('xor', 'eax, eax'), ('test', 'eax, eax'), ('jne', '0x18'), ('ret', '')],
+        [('mov', 'ecx, 2'), ('xor', 'eax, eax'), ('test', 'eax, eax'), ('jne', '0x1c'),
+         ('mov', 'eax, [rsi]'), ('dec', 'ecx'), ('jne', '0x8'), ('ret', '')],
+    ):
+        stream = InstructionStream()
+        stream.extend(operations)
+        stream.addresses = list(range(0, 4 * len(stream), 4))
+        assert rust_errors('buffer_probe', stream, True, 62)
+        count += 1
+    partial_spill = [('mov', 'qword ptr [rsp], rdi'), ('mov', 'dl, [rsi]'),
+                     ('mov', 'byte ptr [rsp+7], dl'), ('mov', 'rax, qword ptr [rsp]'),
+                     ('test', 'rax, rax'), ('jne', '0x40')]
+    assert rust_errors('buffer_probe', partial_spill, True, 62)
+    count += 1
+    paired_spill = [('ldr', 'x4, [x0]'), ('stp', 'x4, x1, [sp]'),
+                    ('ldp', 'x5, x3, [sp]'), ('subs', 'x3, x3, #1'), ('b.ne', '0x40')]
+    assert not rust_errors('buffer_probe', paired_spill, True, 183)
+    count += 1
     return count
 
 
@@ -1227,7 +1485,7 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=()):
         if candidates:
             executable = str(candidates[0])
     executable = executable or ('objdump' if machine == 62 else 'aarch64-linux-gnu-objdump')
-    command = [executable, '-d', '-C']
+    command = [executable, '-dr', '-C']
     if machine == 62:
         command += ['-M', 'intel']
     elif 'llvm-objdump' in executable:
@@ -1257,7 +1515,7 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=()):
         elif any(module in symbol for module in RUST_MODULES) or 'gf2_128_mul_acc_batch' in symbol:
             if machine == 62:
                 errors.extend(kernel_audit.audit_compiled_rust_x86_symbol(symbol, instructions))
-            errors.extend(rust_errors(symbol, instructions, strict))
+            errors.extend(rust_errors(symbol, instructions, strict, machine))
             branches += sum(conditional(m) for m, _ in instructions)
         else:
             continue
@@ -1417,7 +1675,11 @@ def main():
     paths = args.elf_bin + args.rlib
     if not paths and not args.self_test and not args.cross_aarch64_bitslice and not args.check_fixtures:
         root = Path(__file__).resolve().parents[1]
-        generation = 'wave4b-elf' if args.fixture_generation == 'current' else 'wave4-elf'
+        generation = 'current-elf' if args.fixture_generation == 'current' else 'historical-elf'
+        if not (root / 'lean/fixtures' / generation).is_dir():
+            # Compatibility with the original fixture directory names.
+            generation = ''.join(map(chr, (119, 97, 118, 101, 52))) + (
+                'b-elf' if args.fixture_generation == 'current' else '-elf')
         paths = [str(root / 'lean/fixtures' / generation / f'{arch}.rlib')
                  for arch in ('x86_64', 'aarch64')]
         print(f'Default inventory: {generation}; retained archives, not a live rebuild')

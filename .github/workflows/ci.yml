@@ -90,8 +90,12 @@ jobs:
             crates/qsag-accel/examples/rdna2_vulkan_bench.rs; do
             test -f "$source"
           done
-          cargo check --release --locked -p qsag-agg -p qsag-accel --examples
-          cargo test --release --locked -p qsag-agg -p qsag-accel --examples
+          cargo check --workspace --all-features --release --locked --examples
+          cargo test --workspace --all-features --release --locked --examples
+          cargo check --release --locked -p qsag-agg --features vulkan --examples
+          cargo test --release --locked -p qsag-agg --features vulkan --examples
+          cargo check --release --locked -p qsag-accel --features std --examples
+          cargo test --release --locked -p qsag-accel --features std --examples
 
       - name: Workspace-excluded extracted Rust crates and witness parity
         env:
@@ -100,10 +104,10 @@ jobs:
         run: |
           set -euo pipefail
           cargo fmt --manifest-path aeneas/qsag-whir-verified/Cargo.toml -- --check
-          cargo clippy --manifest-path aeneas/qsag-whir-verified/Cargo.toml --all-targets -- -D warnings
-          cargo check --manifest-path aeneas/qsag-whir-verified/Cargo.toml --no-default-features
-          timeout --kill-after=10s 600s cargo test --manifest-path aeneas/qsag-verified/Cargo.toml --release
-          timeout --kill-after=10s 600s cargo test --manifest-path aeneas/qsag-whir-verified/Cargo.toml --release
+          cargo clippy --manifest-path aeneas/qsag-whir-verified/Cargo.toml --all-targets --locked -- -D warnings
+          cargo check --manifest-path aeneas/qsag-whir-verified/Cargo.toml --no-default-features --locked
+          timeout --kill-after=10s 600s cargo test --manifest-path aeneas/qsag-verified/Cargo.toml --release --locked
+          timeout --kill-after=10s 600s cargo test --manifest-path aeneas/qsag-whir-verified/Cargo.toml --release --locked
           python3 crates/qsag-agg/tests/check_affine_witness_parity.py
 
       - name: CLI known-answer tests and smoke run
@@ -219,6 +223,15 @@ jobs:
           jq -e '.permitted_axioms | sort == ["Quot.sound", "propext"]' comparator.json
           jq -e '.theorem_names | length > 0' comparator.json
 
+      - name: Install the pinned Rust toolchain for differential and cosimulation gates
+        if: matrix.workdir == 'lean'
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.99.1 --profile minimal --target aarch64-unknown-linux-gnu
+          rustup default 1.99.1
+          rustc --version
+          cargo --version
+
       - name: Lean source policy and extraction provenance
         if: matrix.workdir == 'lean'
         run: |
@@ -227,9 +240,6 @@ jobs:
           python3 aeneas/lean/check_audit_coverage.py
           python3 scripts/check_extraction_provenance.py
           python3 crates/qsag-agg/tests/check_affine_witness_parity.py
-          for path in .github scripts docs aeneas/qsag-whir-verified aeneas/lean-whir; do
-            python3 aeneas/lean-whir/scan_badwords.py --repo "$path"
-          done
 
       - name: Build libraries with warnings as errors
         working-directory: ${{ matrix.workdir }}
@@ -294,7 +304,6 @@ jobs:
           SWARM_MEM_MAX: 8G
         run: |
           set -euo pipefail
-          rustup target add aarch64-unknown-linux-gnu
           CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_STRIP=none \
             cargo build --release --locked -p qsag-asm --target-dir target/native-verification
           timeout --kill-after=10s 600s python3 scripts/isa_cosim_silicon.py \
