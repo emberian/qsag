@@ -14,6 +14,7 @@ qsag-asm = { path = "../qsag-asm", default-features = false }
 [features]
 default = []
 std = ["qsag-core/std", "qsag-asm/std"]
+testing-ephemeral = []
 
 [[example]]
 name = "quorum_threaded_bench"

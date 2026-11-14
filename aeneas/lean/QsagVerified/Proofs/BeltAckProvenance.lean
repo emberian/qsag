@@ -386,4 +386,104 @@ theorem belt_new_validated_provenance_init
     rw [hb, belt_zero_getLsbD] at hi
     cases hi
 
+
+/-- Three distinct enrolled custodians, after a fresh proposal. The tags are computed
+by the extracted authentication functions; liveness presumes all three peers supply
+these acknowledgments. This is about `VerifiedBeltQuorumGuard`, not production IO. -/
+theorem belt_three_custodian_round_exists
+    (st : authenticated_belt.VerifiedBeltQuorumGuard) (e : Std.U64)
+    (msg : Array Std.U8 32#usize)
+    (hc : beltGuardCorrupt st.inner = false)
+    (hn : 3 ≤ st.inner.n.val) (hq : st.inner.q.val ≤ 3)
+    (hnr : ¬ (st.inner.has_bound_epoch = true ∧ e = st.inner.bound_epoch))
+    (hge : st.inner.next_epoch.val ≤ e.val)
+    (hwin : e.val - st.inner.next_epoch.val ≤ st.inner.max_jump_window.val)
+    (hmax : e ≠ core.num.U64.MAX) :
+    ∃ acts : List BeltAction, acts.length = 5 ∧
+      BeltTraceReachable st acts
+        [⟨{ authorized_epoch := e, msg_tag := msg, certified_acks := 3#u32 },
+          ((0#u64 ||| beltCustodianBit 0#u8) ||| beltCustodianBit 1#u8) |||
+            beltCustodianBit 2#u8⟩]
+        (beltAfterGrant (beltAfterAck (beltAfterAck
+          (beltAfterAck (beltAfterPropose st e msg) 0#u8) 1#u8) 2#u8)) := by
+  obtain ⟨rt, hwal⟩ := belt_wal_receipt_tag_total st.wal_key st.guard_key_commit e msg msg
+  obtain ⟨k0, hk0⟩ := array_index_total st.custodian_keys
+    (UScalar.cast .Usize (0#u8)) (by decide)
+  obtain ⟨k1, hk1⟩ := array_index_total st.custodian_keys
+    (UScalar.cast .Usize (1#u8)) (by decide)
+  obtain ⟨k2, hk2⟩ := array_index_total st.custodian_keys
+    (UScalar.cast .Usize (2#u8)) (by decide)
+  obtain ⟨t0, ht0⟩ := belt_custodian_ack_tag_total k0 st.guard_key_commit e msg 0#u8
+  obtain ⟨t1, ht1⟩ := belt_custodian_ack_tag_total k1 st.guard_key_commit e msg 1#u8
+  obtain ⟨t2, ht2⟩ := belt_custodian_ack_tag_total k2 st.guard_key_commit e msg 2#u8
+  have hc0 : beltGuardCorrupt (beltAfterPropose st e msg).inner = false :=
+    belt_not_corrupt_fresh msg hc (u64_val_succ_lt_of_ne_max hmax)
+  have hc1 : beltGuardCorrupt
+      (beltAfterAck (beltAfterPropose st e msg) 0#u8).inner = false :=
+    belt_not_corrupt_set_ack_count _ hc0
+  have hc2 : beltGuardCorrupt
+      (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) 0#u8) 1#u8).inner = false :=
+    belt_not_corrupt_set_ack_count _ hc1
+  have hc3 : beltGuardCorrupt
+      (beltAfterAck (beltAfterAck (beltAfterAck
+        (beltAfterPropose st e msg) 0#u8) 1#u8) 2#u8).inner = false :=
+    belt_not_corrupt_set_ack_count _ hc2
+  refine ⟨_, rfl, .bound
+    (belt_step_propose_fresh st e msg msg rt hwal hc hnr hge hwin hmax) ?_⟩
+  refine .acked (belt_step_ack_fresh (beltAfterPropose st e msg) e msg 0#u8 t0 k0
+    (by change 0 < st.inner.n.val; omega) (by decide) hk0 ht0 hc0 rfl rfl rfl
+    (by decide) (by change 0 < st.inner.n.val; omega)) ?_
+  refine .acked (belt_step_ack_fresh (beltAfterAck (beltAfterPropose st e msg) 0#u8)
+    e msg 1#u8 t1 k1 (by change 1 < st.inner.n.val; omega) (by decide)
+    hk1 ht1 hc1 rfl rfl rfl (by decide) (by change 1 < st.inner.n.val; omega)) ?_
+  refine .acked (belt_step_ack_fresh
+    (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) 0#u8) 1#u8)
+    e msg 2#u8 t2 k2 (by change 2 < st.inner.n.val; omega) (by decide)
+    hk2 ht2 hc2 rfl rfl rfl (by decide) (by change 2 < st.inner.n.val; omega)) ?_
+  refine .certified (belt_step_authorize_granted
+    (beltAfterAck (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) 0#u8) 1#u8) 2#u8)
+    hc3 rfl hq) (.nil _)
+
+abbrev beltThreeRoundEnd (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (e : Std.U64) (msg : Array Std.U8 32#usize) :=
+  beltAfterGrant (beltAfterAck (beltAfterAck
+    (beltAfterAck (beltAfterPropose st e msg) 0#u8) 1#u8) 2#u8)
+
+/-- The one-fault configuration needs all three acknowledgments. The witness keys are
+computable test data, not a claim of key secrecy or Byzantine availability. -/
+abbrev beltOneFaultState : authenticated_belt.VerifiedBeltQuorumGuard :=
+  { beltWitnessState0 with inner := { beltWitnessState0.inner with f := 1#u32, q := 3#u32 } }
+
+/-- A validated `n=3,t=2,f=1,q=3` guard certifies two successive epochs. The real-call
+history is retained so `belt_run_bitmap_provenance` applies without a wrapper premise. -/
+theorem inhabited_belt_one_fault_multi_epoch :
+    ∃ (stF : authenticated_belt.VerifiedBeltQuorumGuard) (acts : List BeltAction)
+      (certs : List BeltCert) (calls : List BeltCall),
+      authenticated_belt.VerifiedBeltQuorumGuard.new_validated
+        3#u32 2#u32 1#u32 3#u32 false 10#u64 4#u64
+        beltWitnessBytes beltWitnessKeys beltWitnessBytes = .ok (.Ok beltOneFaultState) ∧
+      BeltTraceReachable beltOneFaultState acts certs stF ∧
+      BeltRun beltOneFaultState calls stF ∧ calls.map BeltCall.input = acts ∧
+      acts.length = 10 ∧
+      certs.map (fun c => c.grant.authorized_epoch.val) = [10, 11] ∧
+      certs.map (fun c => beltPopcount c.signers) = [3, 3] := by
+  have hnew : authenticated_belt.VerifiedBeltQuorumGuard.new_validated
+      3#u32 2#u32 1#u32 3#u32 false 10#u64 4#u64
+      beltWitnessBytes beltWitnessKeys beltWitnessBytes = .ok (.Ok beltOneFaultState) := by
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.new_validated
+      pants_and_quorum_guards.BeltQuorumCore.new_validated
+    rw [validate_belt_quorum_config_eq]
+    rfl
+  obtain ⟨acts1, hl1, h1⟩ := belt_three_custodian_round_exists beltOneFaultState 10#u64
+    beltWitnessBytes (by decide) (by decide) (by decide) (by decide)
+    (by decide) (by decide) (by decide)
+  obtain ⟨acts2, hl2, h2⟩ := belt_three_custodian_round_exists
+    (beltThreeRoundEnd beltOneFaultState 10#u64 beltWitnessBytes) 11#u64
+    beltWitnessBytes (by decide) (by decide) (by decide) (by decide)
+    (by decide) (by decide) (by decide)
+  have ht := h1.append h2
+  obtain ⟨calls, hr, hm⟩ := belt_trace_to_run ht
+  exact ⟨_, _, _, calls, hnew, ht, hr, hm,
+    by simp only [List.length_append, hl1, hl2], by decide, by decide⟩
+
 end qsag_verified.proofs

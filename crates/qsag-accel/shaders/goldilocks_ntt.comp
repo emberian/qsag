@@ -1,0 +1,199 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V compute kernel for `KernelSlot::GoldilocksNtt`.
+// VRAM-resident multi-stage radix-2 Cooley-Tukey NTT over canonical Goldilocks field elements
+// (`p = 2^64 - 2^32 + 1`):
+//   mode == 0: In-place canonical reduction + bit-reversal permutation (`0 .. n`).
+//   mode == 1: Fused 9-stage in-LDS butterfly (`stages 1..=9`, `512` elements per workgroup).
+//   mode == 2: Single-stage VRAM radix-2 butterfly (`stage = s`, `w_step` via push constants).
+//   mode == 3: In-place modular scalar multiplication (`inv_n` for inverse NTT).
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer DataBuf {
+    uint64_t words[];
+} buf;
+
+layout(push_constant) uniform PushConsts {
+    uint64_t w_step;
+    uint     n;
+    uint     log2_n;
+    uint     stage;
+    uint     mode;
+    uint     base_wg;
+    uint     _pad;
+} pc;
+
+const uint64_t GL_P   = 0xFFFFFFFF00000001ul;
+const uint64_t GL_EPS = 0xFFFFFFFFul;
+
+shared uint64_t s_lds[512];
+
+uint64_t fp_reduce_u64(uint64_t x) {
+    return (x >= GL_P) ? (x - GL_P) : x;
+}
+
+uint64_t fp_add(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t rem_p = GL_P - b_c;
+    return (a_c < rem_p) ? (a_c + b_c) : (a_c - rem_p);
+}
+
+uint64_t fp_sub(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t diff = a_c - b_c;
+    return (a_c < b_c) ? (diff + GL_P) : diff;
+}
+
+uint64_t fp_reduce128(uint64_t lo, uint64_t hi) {
+    uint64_t hi_lo = hi & GL_EPS;
+    uint64_t hi_hi = hi >> 32;
+    uint64_t mid = (hi_lo << 32) - hi_lo;
+    uint64_t lo_c = fp_reduce_u64(lo);
+    return fp_sub(fp_add(lo_c, mid), hi_hi);
+}
+
+uint64_t fp_mul(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t a_lo = a_c & 0xFFFFFFFFul;
+    uint64_t a_hi = a_c >> 32;
+    uint64_t b_lo = b_c & 0xFFFFFFFFul;
+    uint64_t b_hi = b_c >> 32;
+    uint64_t p0 = a_lo * b_lo;
+    uint64_t p1 = a_lo * b_hi;
+    uint64_t p2 = a_hi * b_lo;
+    uint64_t p3 = a_hi * b_hi;
+    uint64_t mid = (p0 >> 32) + (p1 & 0xFFFFFFFFul) + (p2 & 0xFFFFFFFFul);
+    uint64_t lo = (p0 & 0xFFFFFFFFul) | (mid << 32);
+    uint64_t hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+    return fp_reduce128(lo, hi);
+}
+
+uint64_t fp_sq(uint64_t a) {
+    return fp_mul(a, a);
+}
+
+uint64_t fp_pow_u32(uint64_t base, uint exp) {
+    uint64_t acc = 1ul;
+    uint64_t cur = fp_reduce_u64(base);
+    uint e = exp;
+    while (e != 0u) {
+        if ((e & 1u) != 0u) {
+            acc = fp_mul(acc, cur);
+        }
+        e >>= 1u;
+        if (e != 0u) {
+            cur = fp_sq(cur);
+        }
+    }
+    return acc;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg  = pc.base_wg + gl_WorkGroupID.x;
+    uint gid = wg * 256u + lid;
+
+    if (pc.mode == 0u) {
+        // In-place canonical reduction + bit-reversal permutation.
+        if (gid >= pc.n) {
+            return;
+        }
+        uint rev = (pc.log2_n == 0u) ? 0u : (bitfieldReverse(gid) >> (32u - pc.log2_n));
+        if (gid < rev) {
+            uint64_t a = fp_reduce_u64(buf.words[gid]);
+            uint64_t b = fp_reduce_u64(buf.words[rev]);
+            buf.words[gid] = b;
+            buf.words[rev] = a;
+        } else if (gid == rev) {
+            buf.words[gid] = fp_reduce_u64(buf.words[gid]);
+        }
+        return;
+    }
+
+    if (pc.mode == 1u) {
+        // Fused stages 1..=9 in workgroup LDS (`pc.n >= 512`, `pc.w_step` = stage-9 root).
+        if (wg >= (pc.n >> 9u)) {
+            return;
+        }
+        uint base = wg * 512u;
+        s_lds[lid]        = buf.words[base + lid];
+        s_lds[lid + 256u] = buf.words[base + lid + 256u];
+        barrier();
+
+        uint64_t w_roots[10];
+        w_roots[9] = pc.w_step;
+        for (int s = 8; s >= 1; --s) {
+            w_roots[s] = fp_sq(w_roots[s + 1]);
+        }
+
+        for (uint s = 1u; s <= 9u; ++s) {
+            uint half_len = 1u << (s - 1u);
+            uint j    = lid & (half_len - 1u);
+            uint idx0 = ((lid >> (s - 1u)) << s) + j;
+            uint idx1 = idx0 + half_len;
+            uint64_t w = fp_pow_u32(w_roots[s], j);
+            uint64_t u = s_lds[idx0];
+            uint64_t v = fp_mul(s_lds[idx1], w);
+            s_lds[idx0] = fp_add(u, v);
+            s_lds[idx1] = fp_sub(u, v);
+            barrier();
+        }
+
+        buf.words[base + lid]        = s_lds[lid];
+        buf.words[base + lid + 256u] = s_lds[lid + 256u];
+        return;
+    }
+
+    if (pc.mode == 2u) {
+        // Single-stage Cooley-Tukey radix-2 butterfly (`1 <= pc.stage <= pc.log2_n`).
+        uint half_n   = pc.n >> 1u;
+        uint s        = pc.stage;
+        uint half_len = 1u << (s - 1u);
+
+        if (half_len >= 256u) {
+            if (lid == 0u) {
+                uint j_base = (wg * 256u) & (half_len - 1u);
+                s_lds[0] = fp_pow_u32(pc.w_step, j_base);
+            }
+            barrier();
+            if (gid < half_n) {
+                uint block = gid >> (s - 1u);
+                uint j     = gid & (half_len - 1u);
+                uint idx0  = (block << s) + j;
+                uint idx1  = idx0 + half_len;
+                uint64_t w = fp_mul(s_lds[0], fp_pow_u32(pc.w_step, lid));
+                uint64_t u = buf.words[idx0];
+                uint64_t v = fp_mul(buf.words[idx1], w);
+                buf.words[idx0] = fp_add(u, v);
+                buf.words[idx1] = fp_sub(u, v);
+            }
+        } else {
+            if (gid < half_n) {
+                uint block = gid >> (s - 1u);
+                uint j     = gid & (half_len - 1u);
+                uint idx0  = (block << s) + j;
+                uint idx1  = idx0 + half_len;
+                // Note: for s == 1 (`j == 0`), `pc.w_step` carries `w_eff(j=0)` so even custom
+                // non-unit `twiddles[0]` in edge tests is honored identically.
+                uint64_t w = (s == 1u) ? fp_reduce_u64(pc.w_step) : fp_pow_u32(pc.w_step, j);
+                uint64_t u = buf.words[idx0];
+                uint64_t v = fp_mul(buf.words[idx1], w);
+                buf.words[idx0] = fp_add(u, v);
+                buf.words[idx1] = fp_sub(u, v);
+            }
+        }
+        return;
+    }
+
+    if (pc.mode == 3u) {
+        // In-place modular scalar multiplication by `pc.w_step` (`N^{-1} mod p`).
+        if (gid < pc.n) {
+            buf.words[gid] = fp_mul(buf.words[gid], pc.w_step);
+        }
+    }
+}

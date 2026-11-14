@@ -1,0 +1,246 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V compute kernel for `KernelSlot::MerkleLayerPoseidon2`.
+// Evaluates position-tweaked Width-12 Goldilocks Poseidon2 Merkle compression binding all 4
+// limbs of `pk_seed`, `layer`, and global parent index `start_parent_idx + parent_idx` with
+// Hirose/Davies-Meyer feed-forward across `left`, `right`, and `pk_seed[0..4]`.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer ChildrenBuf {
+    uint64_t words[];
+} children_buf;
+
+layout(std430, set = 0, binding = 1) writeonly buffer ParentsBuf {
+    uint64_t words[];
+} parents_buf;
+
+layout(push_constant) uniform PushConsts {
+    uint64_t s0;
+    uint64_t s1;
+    uint64_t s2;
+    uint64_t s3;
+    uint64_t start_parent_idx;
+    uint64_t num_parents;
+    uint64_t in_offset_u64;
+    uint64_t out_offset_u64;
+    uint     layer;
+    uint     base_parent;
+} pc;
+
+const uint64_t GL_P             = 0xFFFFFFFF00000001ul;
+const uint64_t GL_EPS           = 0xFFFFFFFFul;
+const uint64_t POS2_CONST_IV    = 0x504F53325F474C31ul;
+const uint64_t MERKLE_DOMAIN_IV = 0x4D524B4C5F503231ul;
+const uint64_t NODE_DOMAIN_IV   = 0x4C525F4E4F444531ul;
+
+const uint64_t RC_EXT_INIT[48] = uint64_t[48](
+    0xFDA3872AFF6CE05Dul, 0xED0FC745B9C6495Bul, 0x9D4A1D75CA56751Ful, 0x21478BBCDAD17885ul,
+    0xAB50796FBF5FE8E4ul, 0x5162A1B8704BEA74ul, 0xA580070372A07498ul, 0x1EED28365F7E78DEul,
+    0x8E3B30EC8A038FF1ul, 0x304981CCA391AAEAul, 0xAC92EC4A1B06E950ul, 0xF71A7A990ECFCB5Dul,
+    0xEF0CA3A081E3B2CDul, 0x12831554DC6B2FA0ul, 0x55430D5E3FA8777Ful, 0xC13FA1980F8B3B3Eul,
+    0xF0FCF63D66B6F91Bul, 0x027799AD325D72D4ul, 0x52D5E98EBFFCAF99ul, 0x1B1F313E73474D0Cul,
+    0x2281D230035AD8B1ul, 0x10E2A54EACF5A642ul, 0x25EA832EEDD17175ul, 0xC7E9E09CCCCCA51Dul,
+    0x80409B59EA5A74D4ul, 0x1A7AB33C5331C21Cul, 0x7603BA7D318F36C7ul, 0x17048E4CD8752C18ul,
+    0x1E87AAAE642CAA37ul, 0xE50ADB5D20EA41E7ul, 0x6DBB327EE8D91842ul, 0xC8DCE552B55B7C92ul,
+    0x59057FBA3D66EFA5ul, 0x4EABDD085645BBD8ul, 0x51AD3DD41EF12666ul, 0xB689B16D245DD00Ful,
+    0x1BD072659A8FF2C9ul, 0xD1C8D36A42924DC1ul, 0xE4C329CD958F137Dul, 0x7F17B925BC78BE59ul,
+    0x8391AAC6F90B7908ul, 0x4B28370115DB8D54ul, 0x3A2C0C2D2D286512ul, 0x882608EBDEAD786Dul,
+    0x37C7DF185CC152DDul, 0xDC1F27243FACB794ul, 0x7747FF82D3E3CAD7ul, 0xD8F199768234A623ul
+);
+
+const uint64_t RC_INT[22] = uint64_t[22](
+    0xF731924A2CAB81C3ul, 0x255089C3FAB8168Dul, 0x3A3D76511C74EBA8ul, 0x48EADF244FC82AD4ul,
+    0xE30F632AC44C7191ul, 0x5FDC66FDC64EC0CDul, 0x6803C41A69874702ul, 0xC5C38296FA52132Ful,
+    0xBAD3E9CF2FDDCD81ul, 0x3AF68FF700854AA8ul, 0x4D8D3C348A3EE863ul, 0xA5BDA13ACAD01E85ul,
+    0x28182BBAFEBD907Eul, 0x13BCC0B1EEEEBEE8ul, 0x265109DE178C26A2ul, 0x3B225DF36DE85CE1ul,
+    0x3ACF9E9164C55E09ul, 0x90B166953084A6CAul, 0x8AB96AAE41B50F8Eul, 0xF7C88906BE121CF6ul,
+    0xF3CB9E9367497B0Bul, 0x0B8BCB26CD19E5FAul
+);
+
+const uint64_t RC_EXT_TERM[48] = uint64_t[48](
+    0xB70495E46A559CECul, 0xCB6713D4200E5452ul, 0x177C074EE0CC5FCEul, 0x6CCE1772A93FC829ul,
+    0x553810B2DE6A7215ul, 0xF7EC2DA54B00B0D6ul, 0x31B03974AF5BA20Aul, 0xE84A6FA369462250ul,
+    0xE3CA05DD13AA415Aul, 0x1FBE6A7B16CB5A5Aul, 0xF4293F809DC78676ul, 0x631246D895542634ul,
+    0xB76AB8647401EE88ul, 0xF873C49F77E7721Aul, 0xDF2C27C73649ECF8ul, 0x09BCC7B4B0181300ul,
+    0x39E821566741B4A4ul, 0xFC5F6B1A8CCFE5E0ul, 0x2CDF4BC6B240EB9Bul, 0x9C3DA97122A82287ul,
+    0x234AEEBCAAAA8BC3ul, 0x98A2067776D1B323ul, 0xF46592330118C9F8ul, 0x8BDF12E530D0A748ul,
+    0x0A57706D0A935206ul, 0xBBBEB66FDDEB378Bul, 0x7A566184C747CD1Eul, 0x0C7E07A6681F782Ful,
+    0x480703C5F50F18B3ul, 0xE88F37D72A053DC9ul, 0xD576672AEE7D43EAul, 0x49B9067B47E1C79Aul,
+    0x6FC27EB618A7A546ul, 0xE24F6CB7E1E1CDDFul, 0x49C0707C765CAEEBul, 0xA8C29664619D5FD6ul,
+    0xFAE6F26D3EB5538Bul, 0x4721CE08A39255B0ul, 0xA2B9A1FC2877F03Ful, 0x201069A2F920FF25ul,
+    0xD88DBAC1FEA4410Dul, 0x2ED4EAC1C05A2FADul, 0xA2E965EC082BD11Eul, 0x31D92A0350814968ul,
+    0xD3FF6275F9809F74ul, 0x9AD521BC0C7F82B1ul, 0x317619AB4F0393DCul, 0x675ED63C2A5DE772ul
+);
+
+uint64_t fp_reduce_u64(uint64_t x) {
+    return (x >= GL_P) ? (x - GL_P) : x;
+}
+
+uint64_t fp_add(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t rem_p = GL_P - b_c;
+    return (a_c < rem_p) ? (a_c + b_c) : (a_c - rem_p);
+}
+
+uint64_t fp_sub(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t diff = a_c - b_c;
+    return (a_c < b_c) ? (diff + GL_P) : diff;
+}
+
+uint64_t fp_neg(uint64_t a) {
+    return fp_sub(0ul, a);
+}
+
+uint64_t fp_reduce128(uint64_t lo, uint64_t hi) {
+    uint64_t hi_lo = hi & GL_EPS;
+    uint64_t hi_hi = hi >> 32;
+    uint64_t mid = (hi_lo << 32) - hi_lo;
+    uint64_t lo_c = fp_reduce_u64(lo);
+    return fp_sub(fp_add(lo_c, mid), hi_hi);
+}
+
+uint64_t fp_mul(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t a_lo = a_c & 0xFFFFFFFFul;
+    uint64_t a_hi = a_c >> 32;
+    uint64_t b_lo = b_c & 0xFFFFFFFFul;
+    uint64_t b_hi = b_c >> 32;
+    uint64_t p0 = a_lo * b_lo;
+    uint64_t p1 = a_lo * b_hi;
+    uint64_t p2 = a_hi * b_lo;
+    uint64_t p3 = a_hi * b_hi;
+    uint64_t mid = (p0 >> 32) + (p1 & 0xFFFFFFFFul) + (p2 & 0xFFFFFFFFul);
+    uint64_t lo = (p0 & 0xFFFFFFFFul) | (mid << 32);
+    uint64_t hi = p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+    return fp_reduce128(lo, hi);
+}
+
+uint64_t fp_sq(uint64_t a) {
+    return fp_mul(a, a);
+}
+
+uint64_t fp_shl_canonical(uint64_t x, uint k) {
+    return fp_reduce128(x << k, x >> (64u - k));
+}
+
+uint64_t poseidon2_sbox7(uint64_t x) {
+    uint64_t x2 = fp_sq(x);
+    uint64_t x3 = fp_mul(x2, x);
+    uint64_t x4 = fp_sq(x2);
+    return fp_mul(x3, x4);
+}
+
+void poseidon2_apply_m4(inout uint64_t b0, inout uint64_t b1, inout uint64_t b2, inout uint64_t b3) {
+    uint64_t s = fp_add(fp_add(b0, b1), fp_add(b2, b3));
+    uint64_t r0 = fp_add(s, fp_add(b0, fp_add(b1, b1)));
+    uint64_t r1 = fp_add(s, fp_add(b1, fp_add(b2, b2)));
+    uint64_t r2 = fp_add(s, fp_add(b2, fp_add(b3, b3)));
+    uint64_t r3 = fp_add(s, fp_add(b3, fp_add(b0, b0)));
+    b0 = r0;
+    b1 = r1;
+    b2 = r2;
+    b3 = r3;
+}
+
+void poseidon2_apply_me(inout uint64_t st[12]) {
+    for (uint i = 0u; i < 12u; ++i) {
+        st[i] = fp_reduce_u64(st[i]);
+    }
+    poseidon2_apply_m4(st[0], st[1], st[2], st[3]);
+    poseidon2_apply_m4(st[4], st[5], st[6], st[7]);
+    poseidon2_apply_m4(st[8], st[9], st[10], st[11]);
+    for (uint i = 0u; i < 4u; ++i) {
+        uint64_t s = fp_add(fp_add(st[i], st[4u + i]), st[8u + i]);
+        st[i]      = fp_add(st[i], s);
+        st[4u + i] = fp_add(st[4u + i], s);
+        st[8u + i] = fp_add(st[8u + i], s);
+    }
+}
+
+void poseidon2_apply_mi(inout uint64_t st[12]) {
+    uint64_t s = 0ul;
+    for (uint i = 0u; i < 12u; ++i) {
+        s = fp_add(s, st[i]);
+    }
+    st[0] = fp_add(fp_neg(fp_add(st[0], st[0])), s);
+    st[1] = fp_add(st[1], s);
+    for (uint i = 2u; i < 12u; ++i) {
+        st[i] = fp_add(fp_shl_canonical(st[i], i - 1u), s);
+    }
+}
+
+void poseidon2_perm12(inout uint64_t st[12]) {
+    poseidon2_apply_me(st);
+    for (uint r = 0u; r < 4u; ++r) {
+        uint rc_base = r * 12u;
+        for (uint lane = 0u; lane < 12u; ++lane) {
+            st[lane] = poseidon2_sbox7(fp_add(st[lane], RC_EXT_INIT[rc_base + lane]));
+        }
+        poseidon2_apply_me(st);
+    }
+    for (uint r = 0u; r < 22u; ++r) {
+        st[0] = poseidon2_sbox7(fp_add(st[0], RC_INT[r]));
+        poseidon2_apply_mi(st);
+    }
+    for (uint r = 0u; r < 4u; ++r) {
+        uint rc_base = r * 12u;
+        for (uint lane = 0u; lane < 12u; ++lane) {
+            st[lane] = poseidon2_sbox7(fp_add(st[lane], RC_EXT_TERM[rc_base + lane]));
+        }
+        poseidon2_apply_me(st);
+    }
+}
+
+void main() {
+    uint p_rel = pc.base_parent + gl_GlobalInvocationID.x;
+    uint64_t parent_idx = uint64_t(p_rel);
+    if (parent_idx >= pc.num_parents) {
+        return;
+    }
+
+    uint64_t s0 = fp_reduce_u64(pc.s0);
+    uint64_t s1 = fp_reduce_u64(pc.s1);
+    uint64_t s2 = fp_reduce_u64(pc.s2);
+    uint64_t s3 = fp_reduce_u64(pc.s3);
+
+    uint c_base = uint(pc.in_offset_u64) + p_rel * 8u;
+    uint64_t l0 = fp_reduce_u64(children_buf.words[c_base + 0u]);
+    uint64_t l1 = fp_reduce_u64(children_buf.words[c_base + 1u]);
+    uint64_t l2 = fp_reduce_u64(children_buf.words[c_base + 2u]);
+    uint64_t l3 = fp_reduce_u64(children_buf.words[c_base + 3u]);
+    uint64_t r0 = fp_reduce_u64(children_buf.words[c_base + 4u]);
+    uint64_t r1 = fp_reduce_u64(children_buf.words[c_base + 5u]);
+    uint64_t r2 = fp_reduce_u64(children_buf.words[c_base + 6u]);
+    uint64_t r3 = fp_reduce_u64(children_buf.words[c_base + 7u]);
+
+    uint64_t tweak = fp_reduce_u64(MERKLE_DOMAIN_IV + (uint64_t(pc.layer) << 32));
+    uint64_t node_tweak = fp_reduce_u64(NODE_DOMAIN_IV + (pc.start_parent_idx + parent_idx));
+
+    uint64_t st[12];
+    st[0]  = l0;
+    st[1]  = l1;
+    st[2]  = l2;
+    st[3]  = l3;
+    st[4]  = r0;
+    st[5]  = r1;
+    st[6]  = r2;
+    st[7]  = r3;
+    st[8]  = fp_add(s0, tweak);
+    st[9]  = fp_add(s1, uint64_t(pc.layer));
+    st[10] = fp_add(s2, node_tweak);
+    st[11] = fp_add(s3, POS2_CONST_IV);
+
+    poseidon2_perm12(st);
+
+    uint p_base = uint(pc.out_offset_u64) + p_rel * 4u;
+    parents_buf.words[p_base + 0u] = fp_add(st[0], fp_add(l0, fp_add(r0, s0)));
+    parents_buf.words[p_base + 1u] = fp_add(st[1], fp_add(l1, fp_add(r1, s1)));
+    parents_buf.words[p_base + 2u] = fp_add(st[2], fp_add(l2, fp_add(r2, s2)));
+    parents_buf.words[p_base + 3u] = fp_add(st[3], fp_add(l3, fp_add(r3, s3)));
+}

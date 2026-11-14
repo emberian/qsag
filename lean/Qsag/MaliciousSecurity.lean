@@ -16,12 +16,12 @@ Self-contained Lean 4.35 active-security formalization closing `[P0-05..10]`
    Beaver triple, or recover the secret MAC key $\alpha$.
 2. **Pre-Opening Pairwise-PRF Zero-Mask & `SPDZ`/`BDOZ` Batch MAC Soundness (`[P0-08]`,
    `pairwiseZeroMasks_sum_eq_zero`, `spdz_batch_mac_soundness`, `bdoz_2lane_mac_soundness`,
-   `extractBdozCheaterOrValid`, `honest_party_never_slashed`)**:
+   `extractBdozCheaterOrValid`, `honest_bdoz_opening_verifies`)**:
    Verifies linear MAC combinations over pre-existing shares masked by pairwise-PRF zero-sum masks
    (zero cleartext wire broadcast prior to MAC verification), proves from coefficient non-vanishing
    (`poly_coeffs_zero_of_vanish_nodup`) that any non-zero wire deviation batch has $\le L$ challenge
    roots over `GoldilocksExt2` and 2-lane `Tower128`, and constructively (`PSum`, `0 Classical.choice`)
-   pinpoints a `SlashingReceipt` on deviating parties while guaranteeing honest parties are never slashed.
+   pinpoints a `LocalMacRejection` on deviating parties while guaranteeing honest parties are never slashed.
 3. **Active 3-Party `FLNW17` Replicated View Cross-Check (`rss_flnw_active_open_sound`,
    `#tooth` `rss_passive_open_vulnerable_to_additive_fault`)**:
    Exploits 2-of-3 share replication so every share $s_k$ is cross-checked between the two parties
@@ -30,7 +30,7 @@ Self-contained Lean 4.35 active-security formalization closing `[P0-05..10]`
 4. **Multi-Turn MAC-Before-Open Anti-DFA Trace Invariant & Canonical Share-Byte Binding
    (`mac_before_open_blocks_faulted_cut_leakage`, `encodeCutShareBytes_injective`,
    `mac_before_open_canonical_bytes_sound`, `canonical_mac_before_open_blocks_faulted_cut_leakage`,
-   `#tooth` `open_before_mac_leaks_faulted_cut`, `#tooth` `tooth_canonical_cut_rejects_mismatched_bytes`)**:
+   `#tooth` `corrupted_cut_mac_rejection_witness`, `#tooth` `tooth_canonical_cut_rejects_mismatched_bytes`)**:
    Proves across arbitrary-length signing traces that gating cut-boundary openings strictly behind
    batch MAC verification and injective 16-byte `Tower128` encoding prevents any faulted WOTS+ /
    `TSW` / `PRF_msg` value from ever reaching the adversary.
@@ -293,7 +293,7 @@ theorem verifySharedDkgFrobenius_complete (k d : Nat)
   rfl
 
 /-- **Distributed Frobenius Booleanity Soundness (`verifySharedDkgFrobenius_sound`)**:
-    Without assuming external `hZeroOpen` or `hMac` hypotheses, any transcript accepted by
+    Conditional on the explicit `hMacSum` authentication relation, any transcript accepted by
     `evalSharedDkgFrobenius` constructively (`PSum`, `0 Classical.choice`) yields EITHER:
     1. Honest booleanity `ringDot lambdas xSh ∈ {0, 1}`, OR
     2. A corrupted Beaver squaring triple `c ≠ a · b` (caught by `Preprocessing` sacrifice), OR
@@ -683,14 +683,15 @@ structure BdozVerifierKeys where
   (op.mac0 == towerAdd 7 k0 (towerMul 7 vk.alpha0 op.shareX)) &&
   (op.mac1 == towerAdd 7 k1 (towerMul 7 vk.alpha1 op.shareX))
 
-/-- Slashing receipt pinpointing the exact deviating `PartyId` during BDOZ identifiable abort. -/
-structure SlashingReceipt (vk : BdozVerifierKeys) where
+/-- Local private-key MAC rejection. The caller-supplied identity is not evidence
+    of authorship and this object does not authorize slashing. -/
+structure LocalMacRejection (vk : BdozVerifierKeys) where
   cheater : BdozPairOpening
   invalid : verifyBdozPairMac vk cheater = false
 
 /-- Constructive `0 Classical.choice` BDOZ cheater extractor (`extractBdozCheaterOrValid`):
-    walks submitted `BdozPairOpening`s and returns EITHER a `SlashingReceipt` on an invalid
-    party OR a proof that every party's 2-lane BDOZ MAC verified cleanly! -/
+    walks submitted `BdozPairOpening`s and returns EITHER a `LocalMacRejection` on an invalid
+    submitted opening OR a proof that every party's 2-lane BDOZ MAC verified cleanly! -/
 def extractBdozCheaterOrValid (vk : BdozVerifierKeys) :
     (ops : List BdozPairOpening) →
     PSum (PSigma (fun op => op ∈ ops ∧ verifyBdozPairMac vk op = false))
@@ -707,10 +708,10 @@ def extractBdozCheaterOrValid (vk : BdozVerifierKeys) :
           · exact hVer
           · exact hAll y hTl)
 
-/-- **Anti-Framing Guarantee (`honest_party_never_slashed`)**:
+/-- **Honest MAC completeness (`honest_bdoz_opening_verifies`)**:
     Any honest party $j$ computing $m_{j,i}^{(\ell)} = k_{i,j}^{(\ell)} \oplus \alpha_i^{(\ell)} \cdot x_j$
-    passes `verifyBdozPairMac` unconditionally and can NEVER be accused by `extractBdozCheaterOrValid`! -/
-theorem honest_party_never_slashed (vk : BdozVerifierKeys) (j : Nat) (xj : Tower128) :
+    passes `verifyBdozPairMac`. This does not authenticate the sender of an invalid submission. -/
+theorem honest_bdoz_opening_verifies (vk : BdozVerifierKeys) (j : Nat) (xj : Tower128) :
     let (k0, k1) := vk.localK j
     let honestOp : BdozPairOpening :=
       { partyId := j
@@ -1177,7 +1178,7 @@ theorem mac_before_open_blocks_faulted_cut_leakage
       (hParty t ht) (hBind t ht hEq) (hHonest t ht) hMac)
 
 /-- A concrete corrupted opening fails verification and releases nothing. -/
-theorem open_before_mac_leaks_faulted_cut :
+theorem corrupted_cut_mac_rejection_witness :
     let vk : BdozVerifierKeys := ⟨towerOne 7, towerOne 7, fun _ => (towerZero 7, towerZero 7)⟩
     let t : CutCandidateOpening := ⟨0, [0], [1], ⟨0, towerZero 7, towerOne 7, towerZero 7⟩⟩
     verifyBdozPairMac vk t.opening = false ∧
@@ -1244,10 +1245,10 @@ theorem mac_before_open_canonical_bytes_sound
   obtain ⟨hCand, hTrue⟩ := hCanon t ht
   exact hBytesNe (hCand.trans ((congrArg encodeCutShareBytes hShareEq.symm).trans hTrue.symm))
 
-/-- Wire-enforced canonical MAC-before-open transition: explicitly checks BOTH
+/-- Legacy context-unbound counterexample model; not the operational entry point. Checks BOTH
     `turn.candidateBytes == encodeCutShareBytes turn.opening.shareX` AND `verifyBdozPairMac`
     before releasing `turn.candidateBytes`, poisoning the session on any byte/share mismatch! -/
-def stepCanonicalMacBeforeOpenSignTurn (vk : BdozVerifierKeys)
+def stepUnboundCanonicalMacBeforeOpenSignTurn (vk : BdozVerifierKeys)
     (st : MaliciousSignerState) (turn : CutCandidateOpening) : MaliciousSignerState :=
   if st.poisoned then
     { st with abortedCount := st.abortedCount + 1 }
@@ -1259,14 +1260,14 @@ def stepCanonicalMacBeforeOpenSignTurn (vk : BdozVerifierKeys)
   else
     { st with poisoned := true, abortedCount := st.abortedCount + 1 }
 
-def runCanonicalMacBeforeOpenTrace (vk : BdozVerifierKeys) :
+def runUnboundCanonicalMacBeforeOpenTrace (vk : BdozVerifierKeys) :
     MaliciousSignerState → List CutCandidateOpening → MaliciousSignerState
   | st, [] => st
-  | st, t :: ts => runCanonicalMacBeforeOpenTrace vk (stepCanonicalMacBeforeOpenSignTurn vk st t) ts
+  | st, t :: ts => runUnboundCanonicalMacBeforeOpenTrace vk (stepUnboundCanonicalMacBeforeOpenSignTurn vk st t) ts
 
 private theorem released_canonical_cut_origin (vk : BdozVerifierKeys) (turns : List CutCandidateOpening)
     (st : MaliciousSignerState) :
-    ∀ pair ∈ (runCanonicalMacBeforeOpenTrace vk st turns).releasedHistory,
+    ∀ pair ∈ (runUnboundCanonicalMacBeforeOpenTrace vk st turns).releasedHistory,
       pair ∈ st.releasedHistory ∨ ∃ t ∈ turns,
         pair = (t.epoch, t.candidateBytes) ∧
         t.candidateBytes = encodeCutShareBytes t.opening.shareX ∧
@@ -1275,8 +1276,8 @@ private theorem released_canonical_cut_origin (vk : BdozVerifierKeys) (turns : L
   | nil => intro pair h; exact .inl h
   | cons t ts ih =>
     intro pair h
-    rcases ih (stepCanonicalMacBeforeOpenSignTurn vk st t) pair h with hStep | ⟨u, hu, heq, hcb, hmac⟩
-    · unfold stepCanonicalMacBeforeOpenSignTurn at hStep
+    rcases ih (stepUnboundCanonicalMacBeforeOpenSignTurn vk st t) pair h with hStep | ⟨u, hu, heq, hcb, hmac⟩
+    · unfold stepUnboundCanonicalMacBeforeOpenSignTurn at hStep
       split at hStep
       · exact .inl hStep
       · split at hStep
@@ -1304,7 +1305,7 @@ private theorem listUInt8_beq_self : ∀ (xs : List UInt8), (xs == xs) = true
 /-- **Wire-Enforced Canonical MAC-Before-Open Multi-Turn Safety
     (`canonical_mac_before_open_blocks_faulted_cut_leakage`)**:
     Even against arbitrary untrusted wire `CutCandidateOpening`s (with zero `CanonicallyBound` or
-    `hBind` assumption on `t.candidateBytes`!), `runCanonicalMacBeforeOpenTrace` guarantees every
+    `hBind` assumption on `t.candidateBytes`!), `runUnboundCanonicalMacBeforeOpenTrace` guarantees every
     released `(epoch, bytes)` equals `encodeCutShareBytes (honestOpening t).shareX` or pins both
     128-bit BDOZ keys `(vk.alpha0, vk.alpha1)`. -/
 theorem canonical_mac_before_open_blocks_faulted_cut_leakage
@@ -1312,7 +1313,7 @@ theorem canonical_mac_before_open_blocks_faulted_cut_leakage
     (honestOpening : CutCandidateOpening → BdozPairOpening)
     (hHonest : ∀ t ∈ turns, verifyBdozPairMac vk (honestOpening t) = true)
     (hParty : ∀ t ∈ turns, (honestOpening t).partyId = t.opening.partyId) :
-    ∀ pair ∈ (runCanonicalMacBeforeOpenTrace vk ⟨initialEpoch, [], 0, false⟩ turns).releasedHistory,
+    ∀ pair ∈ (runUnboundCanonicalMacBeforeOpenTrace vk ⟨initialEpoch, [], 0, false⟩ turns).releasedHistory,
       ∃ t ∈ turns, pair = (t.epoch, t.candidateBytes) ∧
         t.candidateBytes = encodeCutShareBytes t.opening.shareX ∧
         verifyBdozPairMac vk t.opening = true ∧
@@ -1343,10 +1344,10 @@ private theorem bdozHonestOpening_verifies (vk : BdozVerifierKeys) (j : Nat) (x 
 private theorem stepCanonical_rejects_mismatched (vk : BdozVerifierKeys)
     (ep : Nat) (trueB candB : List UInt8) (op : BdozPairOpening)
     (hMismatch : candB ≠ encodeCutShareBytes op.shareX) :
-    stepCanonicalMacBeforeOpenSignTurn vk ⟨ep, [], 0, false⟩ ⟨ep, trueB, candB, op⟩ =
+    stepUnboundCanonicalMacBeforeOpenSignTurn vk ⟨ep, [], 0, false⟩ ⟨ep, trueB, candB, op⟩ =
       ⟨ep, [], 1, true⟩ := by
   have hBeqF : (candB == encodeCutShareBytes op.shareX) = false := beq_false_of_ne hMismatch
-  unfold stepCanonicalMacBeforeOpenSignTurn
+  unfold stepUnboundCanonicalMacBeforeOpenSignTurn
   dsimp only
   rw [beq_self_eq_true ep, hBeqF]
   rfl
@@ -1354,10 +1355,10 @@ private theorem stepCanonical_rejects_mismatched (vk : BdozVerifierKeys)
 private theorem stepCanonical_accepts_canonical (vk : BdozVerifierKeys)
     (ep : Nat) (honX : Tower128) (op : BdozPairOpening)
     (hMac : verifyBdozPairMac vk op = true) :
-    stepCanonicalMacBeforeOpenSignTurn vk ⟨ep, [], 0, false⟩
+    stepUnboundCanonicalMacBeforeOpenSignTurn vk ⟨ep, [], 0, false⟩
         (mkCanonicalCutCandidateOpening ep honX op) =
       ⟨ep + 1, [(ep, encodeCutShareBytes op.shareX)], 0, false⟩ := by
-  unfold stepCanonicalMacBeforeOpenSignTurn mkCanonicalCutCandidateOpening
+  unfold stepUnboundCanonicalMacBeforeOpenSignTurn mkCanonicalCutCandidateOpening
   dsimp only
   rw [beq_self_eq_true ep, listUInt8_beq_self (encodeCutShareBytes op.shareX), hMac]
   rfl
@@ -1365,7 +1366,7 @@ private theorem stepCanonical_accepts_canonical (vk : BdozVerifierKeys)
 /-- **`#tooth` Mismatched `candidateBytes` Rejected Even Under Valid BDOZ MAC
     (`tooth_canonical_cut_rejects_mismatched_bytes`)**:
     If an adversary submits a valid `BdozPairOpening` (`verifyBdozPairMac = true`) while substituting
-    mismatched `candidateBytes ≠ encodeCutShareBytes opening.shareX`, `stepCanonicalMacBeforeOpenSignTurn`
+    mismatched `candidateBytes ≠ encodeCutShareBytes opening.shareX`, `stepUnboundCanonicalMacBeforeOpenSignTurn`
     releases nothing and irreversibly poisons the session, whereas honest canonical bytes are released! -/
 theorem tooth_canonical_cut_rejects_mismatched_bytes :
     let vk : BdozVerifierKeys := ⟨towerOne 7, towerOne 7, fun _ => (towerZero 7, towerZero 7)⟩
@@ -1374,9 +1375,9 @@ theorem tooth_canonical_cut_rejects_mismatched_bytes :
       ⟨0, encodeCutShareBytes (towerOne 7), encodeCutShareBytes (towerZero 7), honOp⟩
     let goodTurn := mkCanonicalCutCandidateOpening 0 (towerOne 7) honOp
     verifyBdozPairMac vk badTurn.opening = true ∧
-    (stepCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩ badTurn).releasedHistory = [] ∧
-    (stepCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩ badTurn).poisoned = true ∧
-    (stepCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩ goodTurn).releasedHistory =
+    (stepUnboundCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩ badTurn).releasedHistory = [] ∧
+    (stepUnboundCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩ badTurn).poisoned = true ∧
+    (stepUnboundCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩ goodTurn).releasedHistory =
       [(0, encodeCutShareBytes (towerOne 7))] := by
   intro vk honOp badTurn goodTurn
   have hMac : verifyBdozPairMac vk honOp = true := bdozHonestOpening_verifies vk 0 (towerOne 7)
@@ -2063,6 +2064,188 @@ theorem tooth_wal_latch_blocks_equivocation_after_crash :
     (1, [0xBB], sh) ∉ finalSt.emittedVotes ∧
     finalSt.emittedVotes = [(2, [0xCC], sh), (1, [0xAA], sh)] := by
   refine ⟨rfl, rfl, by decide +kernel, rfl⟩
+
+/-! ## Context-bound operational openings
+
+The earlier unbound transitions are retained as counterexample models. A context
+is part of the MAC-key address, not merely a separately checked epoch label.
+The key provider models enrolled, one-use BDOZ pads; its pseudorandom generation
+and erasure are separate implementation obligations.
+-/
+structure CutMacContext where
+  sessionNonce : BitVec 256
+  epoch : Nat
+  cutIndex : Nat
+  transcriptDigest : BitVec 256
+  deriving DecidableEq
+
+structure ContextBdozKeys where
+  atContext : CutMacContext → BdozVerifierKeys
+
+structure ContextCutOpening where
+  context : CutMacContext
+  opening : BdozPairOpening
+
+/-- Verification selects the pad by the entire expected context and the sender. -/
+def verifyContextCut (keys : ContextBdozKeys) (expected : CutMacContext)
+    (t : ContextCutOpening) : Bool :=
+  decide (t.context = expected) && verifyBdozPairMac (keys.atContext expected) t.opening
+
+/-- Canonical operational entry point: bytes are derived from the authenticated
+share. There is no independent candidate-byte input. -/
+def stepCanonicalMacBeforeOpenSignTurn (keys : ContextBdozKeys)
+    (sessionNonce transcriptDigest : BitVec 256) (cutIndex : Nat)
+    (st : MaliciousSignerState) (turn : ContextCutOpening) : MaliciousSignerState :=
+  if st.poisoned then { st with abortedCount := st.abortedCount + 1 }
+  else if verifyContextCut keys ⟨sessionNonce, st.nextEpoch, cutIndex, transcriptDigest⟩ turn then
+    { st with nextEpoch := st.nextEpoch + 1
+              releasedHistory := (st.nextEpoch, encodeCutShareBytes turn.opening.shareX) :: st.releasedHistory }
+  else { st with poisoned := true, abortedCount := st.abortedCount + 1 }
+
+theorem context_cut_acceptance (keys : ContextBdozKeys) (ctx : CutMacContext)
+    (t : ContextCutOpening) (h : verifyContextCut keys ctx t = true) :
+    t.context = ctx ∧ verifyBdozPairMac (keys.atContext ctx) t.opening = true := by
+  obtain ⟨hc, hm⟩ := Bool.and_eq_true_iff.mp h
+  exact ⟨of_decide_eq_true hc, hm⟩
+
+theorem context_cut_replay_rejected (keys : ContextBdozKeys) (ctx : CutMacContext)
+    (t : ContextCutOpening) (h : t.context.epoch ≠ ctx.epoch) :
+    verifyContextCut keys ctx t = false := by
+  have hn : t.context ≠ ctx := fun he => h (congrArg CutMacContext.epoch he)
+  simp [verifyContextCut, hn]
+
+/-- Relabeling is a new MAC attempt under another context's pads, rather than
+reuse of an old authentication claim. A changed accepted share recovers the two
+keys exactly as in the concrete BDOZ game. -/
+theorem context_cut_fault_extract (keys : ContextBdozKeys) (ctx : CutMacContext)
+    (t : ContextCutOpening) (hon : BdozPairOpening)
+    (hp : hon.partyId = t.opening.partyId) (hn : hon.shareX ≠ t.opening.shareX)
+    (hh : verifyBdozPairMac (keys.atContext ctx) hon = true)
+    (ha : verifyContextCut keys ctx t = true) :
+    let dxInv := towerInv 7 (towerAdd 7 t.opening.shareX hon.shareX)
+    towerMul 7 (towerAdd 7 t.opening.mac0 hon.mac0) dxInv = (keys.atContext ctx).alpha0 ∧
+    towerMul 7 (towerAdd 7 t.opening.mac1 hon.mac1) dxInv = (keys.atContext ctx).alpha1 :=
+  bdoz_pair_key_recovery _ hon t.opening hp hn hh (context_cut_acceptance keys ctx t ha).2
+
+/-- `#tooth`: an unchanged authenticated opening from epoch zero cannot be replayed
+at epoch one, even when its old share MAC is valid. -/
+theorem tooth_context_cut_epoch_replay (keys : ContextBdozKeys)
+    (nonce digest : BitVec 256) (op : BdozPairOpening) :
+    verifyContextCut keys ⟨nonce, 1, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op⟩ = false := by
+  apply context_cut_replay_rejected
+  decide
+
+/-! ## Transferable attribution versus private rejection
+A private MAC failure is only an abort. Transferable slashing below uses two
+verified signatures on conflicting commitments at the same context. Signature
+security is expressed using the actual submitted record and signing history.
+-/
+structure SignedCutCommitment where
+  sender : Nat
+  context : CutMacContext
+  commitment : BitVec 256
+  signature : List UInt8
+  deriving DecidableEq
+
+structure CutSignatureScheme where
+  verify : Nat → CutMacContext → BitVec 256 → List UInt8 → Bool
+
+def SignedCutCommitment.verifies (scheme : CutSignatureScheme) (s : SignedCutCommitment) : Bool :=
+  scheme.verify s.sender s.context s.commitment s.signature
+
+structure SignedEquivocationReceipt (scheme : CutSignatureScheme) where
+  first : SignedCutCommitment
+  second : SignedCutCommitment
+  firstVerified : first.verifies scheme = true
+  secondVerified : second.verifies scheme = true
+  sameSender : first.sender = second.sender
+  sameContext : first.context = second.context
+  conflicting : first.commitment ≠ second.commitment
+
+/-- A signature forgery is an actual accepted submission whose message was never
+signed. Different encodings of a signature on an approved message are not forgeries. -/
+def CutSignatureForgery (scheme : CutSignatureScheme)
+    (history : List (Nat × CutMacContext × BitVec 256)) (s : SignedCutCommitment) : Prop :=
+  s.verifies scheme = true ∧ (s.sender, s.context, s.commitment) ∉ history
+
+/-- An honest signer that commits once per context cannot be framed by a receipt
+unless one of its two concrete signed messages is a signature-game forgery. -/
+theorem signed_slashing_attribution (scheme : CutSignatureScheme)
+    (history : List (Nat × CutMacContext × BitVec 256))
+    (r : SignedEquivocationReceipt scheme)
+    (hOnce : ∀ sender ctx a b, (sender, ctx, a) ∈ history →
+      (sender, ctx, b) ∈ history → a = b) :
+    CutSignatureForgery scheme history r.first ∨ CutSignatureForgery scheme history r.second := by
+  by_cases hf : (r.first.sender, r.first.context, r.first.commitment) ∈ history
+  · right
+    refine ⟨r.secondVerified, ?_⟩
+    intro hs
+    have hs' : (r.first.sender, r.first.context, r.second.commitment) ∈ history := by
+      simpa only [r.sameSender, r.sameContext] using hs
+    exact r.conflicting (hOnce _ _ _ _ hf hs')
+  · exact .inl ⟨r.firstVerified, hf⟩
+
+/-! ## Generated SPDZ residuals
+The dealer's unmasked tag shares are alpha_i * yTrue; additive zero masks can
+be supplied by preprocessing separately. Corrupt modifications are explicit
+per-party deltas. The verifier receives residuals generated from these tags,
+not an unrelated sigma list. This is the authenticated-generation model, not a
+claim that an online verifier knows the global MAC key.
+-/
+def generatedFrobeniusSigmas (m : Nat) (yTrue yOpened : TowerElem m)
+    (alphaShares deltas : List (TowerElem m)) : List (TowerElem m) :=
+  shareZipSub (ringListZipAdd (shareScale yTrue alphaShares) deltas)
+    (shareScale yOpened alphaShares)
+
+theorem generatedFrobeniusSigmas_sum (m : Nat) (yTrue yOpened : TowerElem m)
+    (alphaShares deltas : List (TowerElem m))
+    (hLen : deltas.length = alphaShares.length) :
+    ringListSum (generatedFrobeniusSigmas m yTrue yOpened alphaShares deltas) =
+      towerAdd m (towerAdd m (towerMul m (ringListSum alphaShares) yTrue)
+        (ringListSum deltas)) (towerMul m (ringListSum alphaShares) yOpened) := by
+  have hl : (ringListZipAdd (shareScale yTrue alphaShares) deltas).length =
+      (shareScale yOpened alphaShares).length := by
+    rw [ringListZipAdd_length_of_eq (by rw [shareScale_length, hLen]),
+      shareScale_length, shareScale_length]
+  unfold generatedFrobeniusSigmas
+  rw [ringListSum_zipSub hl, ringListSum_zipAdd, ringListSum_scale, ringListSum_scale]
+  change towerAdd m (towerAdd m (towerMul m yTrue (ringListSum alphaShares))
+    (ringListSum deltas)) (towerMul m yOpened (ringListSum alphaShares)) = _
+  rw [towerMul_comm m yTrue, towerMul_comm m yOpened]
+
+/-- Roster-checked authenticated-generation entry point. Empty rosters and any
+truncated Beaver/MAC vectors reject before the legacy algebraic verifier runs. -/
+def evalGeneratedDkgFrobenius (k d : Nat)
+    (lambdas xSh : List (TowerElem k)) (tr : SharedBeaverTriple (TowerElem k))
+    (yOpened : TowerElem k) (alphaShares deltas : List (TowerElem (k + d))) :
+    Option (List (TowerElem k)) :=
+  if decide (0 < lambdas.length ∧ xSh.length = lambdas.length ∧
+      tr.aShares.length = lambdas.length ∧ tr.bShares.length = lambdas.length ∧
+      tr.cShares.length = lambdas.length ∧ alphaShares.length = lambdas.length ∧
+      deltas.length = alphaShares.length) then
+    let frobSh := shareZipSub (evalSharedBeaverMul lambdas xSh xSh tr).1 xSh
+    evalSharedDkgFrobenius k d lambdas xSh tr yOpened
+      (generatedFrobeniusSigmas (k+d) (embedTowerChain k d (ringDot lambdas frobSh))
+        (embedTowerChain k d yOpened) alphaShares deltas)
+  else none
+
+/-- The substantive authentication equation is derived from generated tags and
+corrupt deltas. No `hMacSum` is supplied by the caller of this extractor. -/
+def generatedFrobenius_sound (k d : Nat)
+    (lambdas xSh : List (TowerElem k)) (tr : SharedBeaverTriple (TowerElem k))
+    (yOpened : TowerElem k) (alphaShares deltas : List (TowerElem (k+d)))
+    (hSumOne : ringListSum lambdas = towerOne k)
+    (hX : xSh.length = lambdas.length)
+    (hA : tr.aShares.length = lambdas.length) (hB : tr.bShares.length = lambdas.length)
+    (hC : tr.cShares.length = lambdas.length) (hD : deltas.length = alphaShares.length)
+    (hAccept : evalSharedDkgFrobenius k d lambdas xSh tr yOpened
+      (generatedFrobeniusSigmas (k+d)
+        (embedTowerChain k d (ringDot lambdas (shareZipSub (evalSharedBeaverMul lambdas xSh xSh tr).1 xSh)))
+        (embedTowerChain k d yOpened) alphaShares deltas) =
+      some (shareZipSub (evalSharedBeaverMul lambdas xSh xSh tr).1 xSh)) :=
+  verifySharedDkgFrobenius_sound k d lambdas xSh tr yOpened
+    (ringListSum alphaShares) (ringListSum deltas) _ _ hSumOne hX hA hB hC
+    (generatedFrobeniusSigmas_sum _ _ _ alphaShares deltas hD) hAccept
 
 end Qsag
 end

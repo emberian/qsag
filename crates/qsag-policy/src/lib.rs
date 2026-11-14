@@ -11,6 +11,8 @@ extern crate std;
 
 pub mod durable;
 pub use durable::PolicyGuardError;
+#[cfg(feature = "std")]
+pub use durable::{FsPolicyDurableLedger, FsPolicyGenerationFence};
 
 use alloc::vec::Vec;
 use core::cell::Cell;

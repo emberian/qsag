@@ -302,6 +302,15 @@ impl WhirSchedule {
             if stage.num_queries < min_q {
                 return false;
             }
+            let Some(domain) = 1usize
+                .checked_shl(remaining as u32)
+                .and_then(|n| n.checked_mul(stage.blowup))
+            else {
+                return false;
+            };
+            if domain.trailing_zeros() > 32 {
+                return false;
+            }
             remaining -= stage.step_vars;
         }
         remaining == self.early_stop_vars
@@ -582,85 +591,88 @@ impl MerkleCanopyTree {
         };
 
         #[cfg(feature = "std")]
-        if s16 >= 64 {
-            const THREADS: usize = 16;
-            let m_chunk = s16 / THREADS;
-            {
-                let quarter_slice = &mut nodes[q..2 * q];
-                let fold_ref = &fold_16_leaves;
-                std::thread::scope(|scope| {
-                    for (t_idx, sub) in quarter_slice.chunks_mut(4 * m_chunk).enumerate() {
-                        let base_m = t_idx * m_chunk;
-                        scope.spawn(move || {
-                            for (off, dst4) in sub.chunks_exact_mut(4).enumerate() {
-                                dst4.copy_from_slice(&fold_ref(base_m + off));
-                            }
-                        });
-                    }
-                });
-            }
-            for depth in (2..=(log_leaves - 3)).rev() {
-                let half = 1usize << depth;
-                if half >= 1024 {
-                    let (upper, children) = nodes[..4 * half].split_at_mut(2 * half);
-                    let parents = &mut upper[half..2 * half];
-                    let p_chunk = half / THREADS;
+        if s16 >= 4 {
+            let workers = crate::parallel_pow2_workers(s16);
+            if workers > 1 {
+                let m_chunk = s16 / workers;
+                {
+                    let quarter_slice = &mut nodes[q..2 * q];
+                    let fold_ref = &fold_16_leaves;
                     std::thread::scope(|scope| {
-                        for (t_idx, (p_sub, c_sub)) in parents
-                            .chunks_mut(p_chunk)
-                            .zip(children.chunks(2 * p_chunk))
-                            .enumerate()
-                        {
-                            let base_node = half + t_idx * p_chunk;
+                        for (t_idx, sub) in quarter_slice.chunks_mut(4 * m_chunk).enumerate() {
+                            let base_m = t_idx * m_chunk;
                             scope.spawn(move || {
-                                for (g, dst4) in p_sub.chunks_exact_mut(4).enumerate() {
-                                    let c = 8 * g;
-                                    let out4 = hash_merkle_internal_x4(
-                                        (base_node + 4 * g) as u32,
-                                        [&c_sub[c], &c_sub[c + 2], &c_sub[c + 4], &c_sub[c + 6]],
-                                        [
-                                            &c_sub[c + 1],
-                                            &c_sub[c + 3],
-                                            &c_sub[c + 5],
-                                            &c_sub[c + 7],
-                                        ],
-                                    );
-                                    dst4.copy_from_slice(&out4);
+                                for (off, dst4) in sub.chunks_exact_mut(4).enumerate() {
+                                    dst4.copy_from_slice(&fold_ref(base_m + off));
                                 }
                             });
                         }
                     });
-                } else {
-                    for idx in (half..2 * half).step_by(4) {
-                        let out4 = hash_merkle_internal_x4(
-                            idx as u32,
-                            [
-                                &nodes[2 * idx],
-                                &nodes[2 * idx + 2],
-                                &nodes[2 * idx + 4],
-                                &nodes[2 * idx + 6],
-                            ],
-                            [
-                                &nodes[2 * idx + 1],
-                                &nodes[2 * idx + 3],
-                                &nodes[2 * idx + 5],
-                                &nodes[2 * idx + 7],
-                            ],
-                        );
-                        nodes[idx..idx + 4].copy_from_slice(&out4);
+                }
+                for depth in (2..=(log_leaves - 3)).rev() {
+                    let half = 1usize << depth;
+                    if half >= 256 {
+                        let p_workers = crate::parallel_pow2_workers(half / 4);
+                        let (upper, children) = nodes[..4 * half].split_at_mut(2 * half);
+                        let parents = &mut upper[half..2 * half];
+                        let p_chunk = half / p_workers;
+                        std::thread::scope(|scope| {
+                            for (t_idx, (p_sub, c_sub)) in parents
+                                .chunks_mut(p_chunk)
+                                .zip(children.chunks(2 * p_chunk))
+                                .enumerate()
+                            {
+                                let base_node = half + t_idx * p_chunk;
+                                scope.spawn(move || {
+                                    for (g, dst4) in p_sub.chunks_exact_mut(4).enumerate() {
+                                        let c = 8 * g;
+                                        let out4 = hash_merkle_internal_x4(
+                                            (base_node + 4 * g) as u32,
+                                            [&c_sub[c], &c_sub[c + 2], &c_sub[c + 4], &c_sub[c + 6]],
+                                            [
+                                                &c_sub[c + 1],
+                                                &c_sub[c + 3],
+                                                &c_sub[c + 5],
+                                                &c_sub[c + 7],
+                                            ],
+                                        );
+                                        dst4.copy_from_slice(&out4);
+                                    }
+                                });
+                            }
+                        });
+                    } else {
+                        for idx in (half..2 * half).step_by(4) {
+                            let out4 = hash_merkle_internal_x4(
+                                idx as u32,
+                                [
+                                    &nodes[2 * idx],
+                                    &nodes[2 * idx + 2],
+                                    &nodes[2 * idx + 4],
+                                    &nodes[2 * idx + 6],
+                                ],
+                                [
+                                    &nodes[2 * idx + 1],
+                                    &nodes[2 * idx + 3],
+                                    &nodes[2 * idx + 5],
+                                    &nodes[2 * idx + 7],
+                                ],
+                            );
+                            nodes[idx..idx + 4].copy_from_slice(&out4);
+                        }
                     }
                 }
+                for idx in [3usize, 2, 1] {
+                    nodes[idx] = hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+                }
+                let root = hash_tree_root(log_leaves as u8, &nodes[1]);
+                return Self {
+                    log_leaves,
+                    is_compact: true,
+                    nodes,
+                    root,
+                };
             }
-            for idx in [3usize, 2, 1] {
-                nodes[idx] = hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
-            }
-            let root = hash_tree_root(log_leaves as u8, &nodes[1]);
-            return Self {
-                log_leaves,
-                is_compact: true,
-                nodes,
-                root,
-            };
         }
 
         for m in 0..s16 {
@@ -1761,19 +1773,26 @@ fn fold_base_first_var_ext4(table: &[Goldilocks], r: GoldilocksExt4) -> Vec<Gold
     out
 }
 
-/// Fold first variable of `table` at `r`, parallelizing across hardware workers when `table` is large.
-fn fold_first_var_ext4_fast(table: &mut Vec<GoldilocksExt4>, r: GoldilocksExt4) {
+/// Fold first variable of `table` at `r` using reusable `scratch` storage when parallelizing.
+fn fold_first_var_ext4_into(
+    table: &mut Vec<GoldilocksExt4>,
+    scratch: &mut Vec<GoldilocksExt4>,
+    r: GoldilocksExt4,
+) {
     #[cfg(feature = "std")]
     if table.len() >= 16_384 {
+        let half = table.len() / 2;
+        scratch.resize(half, GoldilocksExt4::ZERO);
         let src = table.as_slice();
-        let mut next = vec![GoldilocksExt4::ZERO; src.len() / 2];
-        fill_indexed(&mut next, |k| {
+        fill_indexed(&mut scratch[..half], |k| {
             let a = src[2 * k];
             a + r * (src[2 * k + 1] - a)
         });
-        *table = next;
+        core::mem::swap(table, scratch);
         return;
     }
+    #[cfg(not(feature = "std"))]
+    let _ = scratch;
     fold_first_var_in_place_ext4(table, r);
 }
 
@@ -1853,6 +1872,7 @@ fn dot_ext4_fast(a: &[GoldilocksExt4], b: &[GoldilocksExt4]) -> GoldilocksExt4 {
     acc
 }
 
+#[cfg(test)]
 fn axpy_ext4_fast(dst: &mut [GoldilocksExt4], scale: GoldilocksExt4, src: &[GoldilocksExt4]) {
     debug_assert_eq!(dst.len(), src.len());
     #[cfg(feature = "std")]
@@ -1978,6 +1998,31 @@ pub fn whir_commit_batch_owned_with_schedule(
     let st0 = schedule.stages[0];
     let group_arity_0 = 1usize << st0.step_vars;
 
+    #[cfg(feature = "std")]
+    let codewords_0: Vec<Vec<Goldilocks>> = if polys.len() > 1 && crate::parallel_workers() > 1 {
+        let blowup = st0.blowup;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = polys
+                .iter()
+                .map(|evals| {
+                    scope.spawn(move || {
+                        let coeffs = hypercube_to_monomial_coeffs(evals);
+                        encode_rs_coset_goldilocks(&coeffs, blowup)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(crate::join_worker).collect()
+        })
+    } else {
+        polys
+            .iter()
+            .map(|evals| {
+                let coeffs = hypercube_to_monomial_coeffs(evals);
+                encode_rs_coset_goldilocks(&coeffs, st0.blowup)
+            })
+            .collect()
+    };
+    #[cfg(not(feature = "std"))]
     let codewords_0: Vec<Vec<Goldilocks>> = polys
         .iter()
         .map(|evals| {
@@ -2026,6 +2071,7 @@ pub fn whir_open(
     let kernel_table = monomial_table(point);
     whir_open_core(
         state,
+        None,
         &[[GoldilocksExt4::ONE, GoldilocksExt4::ZERO]],
         kernel_table,
         claimed_eval,
@@ -2071,6 +2117,7 @@ pub fn whir_open_batch(
         let kernel = monomial_table(points[0]);
         let opening = whir_open_core(
             state,
+            None,
             &[[GoldilocksExt4::ONE, GoldilocksExt4::ZERO]],
             kernel,
             evals[0],
@@ -2094,6 +2141,7 @@ pub fn whir_open_batch(
     let mut kernels: Vec<Vec<GoldilocksExt4>> =
         points.iter().map(|p| build_eq_table_ext4_fast(p)).collect();
     let mut tables: Vec<Vec<GoldilocksExt4>> = Vec::new();
+    let mut fold_scratch: Vec<GoldilocksExt4> = Vec::new();
     let mut point_sumcheck_polys = Vec::with_capacity(num_vars);
     let mut rho = Vec::with_capacity(num_vars);
 
@@ -2127,14 +2175,15 @@ pub fn whir_open_batch(
                 .collect();
         } else {
             for table in &mut tables {
-                fold_first_var_ext4_fast(table, r);
+                fold_first_var_ext4_into(table, &mut fold_scratch, r);
             }
         }
         for kernel in &mut kernels {
-            fold_first_var_ext4_fast(kernel, r);
+            fold_first_var_ext4_into(kernel, &mut fold_scratch, r);
         }
         rho.push(r);
     }
+    drop(fold_scratch);
     drop(kernels);
     let common_point_evals: Vec<GoldilocksExt4> = tables.iter().map(|t| t[0]).collect();
     drop(tables);
@@ -2143,20 +2192,47 @@ pub fn whir_open_batch(
     }
 
     let kernel = monomial_table(&rho);
-    let shifted_evals: Vec<_> = state
+    #[cfg(feature = "std")]
+    let monomial_polys: Vec<Vec<Goldilocks>> =
+        if state.hypercube_evals.len() > 1 && crate::parallel_workers() > 1 {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = state
+                    .hypercube_evals
+                    .iter()
+                    .map(|w| scope.spawn(move || hypercube_to_monomial_coeffs(w)))
+                    .collect();
+                handles.into_iter().map(crate::join_worker).collect()
+            })
+        } else {
+            state
+                .hypercube_evals
+                .iter()
+                .map(|w| hypercube_to_monomial_coeffs(w))
+                .collect()
+        };
+    #[cfg(not(feature = "std"))]
+    let monomial_polys: Vec<Vec<Goldilocks>> = state
         .hypercube_evals
         .iter()
-        .map(|w| {
-            let c = hypercube_to_monomial_coeffs(w);
-            dot_base_ext4_fast(&c, &kernel[1..1 + c.len()])
-        })
+        .map(|w| hypercube_to_monomial_coeffs(w))
+        .collect();
+    let shifted_evals: Vec<_> = monomial_polys
+        .iter()
+        .map(|c| dot_base_ext4_fast(c, &kernel[1..1 + c.len()]))
         .collect();
     for &e in &shifted_evals {
         transcript.absorb_ext4(b"PCS_BATCH_SHIFT", e);
     }
     let weights = cascade_weights(num_polys, transcript);
     let combined_claim = combine_claims(&weights, &common_point_evals, &shifted_evals);
-    let opening = whir_open_core(state, &weights, kernel, combined_claim, transcript);
+    let opening = whir_open_core(
+        state,
+        Some(&monomial_polys),
+        &weights,
+        kernel,
+        combined_claim,
+        transcript,
+    );
     HemWhirBatchOpeningProof {
         point_sumcheck_polys,
         common_point_evals,
@@ -2222,6 +2298,7 @@ where
 /// Core multi-stage `Hem` WHIR rate-escalated opening over `GoldilocksExt4`.
 fn whir_open_core(
     state: &HemWhirProverState,
+    precomputed_monomial_polys: Option<&[Vec<Goldilocks>]>,
     weights: &[[GoldilocksExt4; 2]],
     mut cur_k: Vec<GoldilocksExt4>,
     mut cur_sum_claim: GoldilocksExt4,
@@ -2237,14 +2314,21 @@ fn whir_open_core(
     absorb_whir_schedule(transcript, sched);
     let core_len = 1usize << state.num_vars;
     let mut cur_coeffs = vec![GoldilocksExt4::ZERO; core_len + 2];
-    for (w, table) in weights.iter().zip(&state.hypercube_evals) {
-        let c = hypercube_to_monomial_coeffs(table);
+    for (poly_idx, (w, table)) in weights.iter().zip(&state.hypercube_evals).enumerate() {
+        let owned_c;
+        let c: &[Goldilocks] = match precomputed_monomial_polys {
+            Some(pre) => &pre[poly_idx],
+            None => {
+                owned_c = hypercube_to_monomial_coeffs(table);
+                &owned_c
+            }
+        };
         cur_coeffs[0] += w[0].mul_base(c[0]);
         #[cfg(feature = "std")]
         if core_len >= 16_384 {
             let workers = crate::parallel_workers();
             let chunk = (core_len - 1).div_ceil(workers);
-            let c_ref = c.as_slice();
+            let c_ref = c;
             let w0 = w[0];
             let w1 = w[1];
             std::thread::scope(|scope| {
@@ -2276,7 +2360,7 @@ fn whir_open_core(
     }
     for (z, e) in z_ood_0.into_iter().zip(stage0_ood_evals) {
         let xi = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
-        axpy_ext4_fast(&mut cur_k, xi, &geometric(z, cur_coeffs.len()));
+        add_geometric_scaled_in_place(&mut cur_k, xi, z);
         cur_sum_claim += xi * e;
     }
 
@@ -2292,6 +2376,8 @@ fn whir_open_core(
     let mut round0_multiproof = CanopyMultiProof {
         auth_siblings: Vec::new(),
     };
+    let mut c_scratch = Vec::with_capacity(cur_coeffs.len() / 2 + 2);
+    let mut k_scratch = Vec::with_capacity(cur_k.len() / 2 + 2);
 
     // Staged `Ext4` oracle currently active for `stage_idx >= 1`: `(cw, tree, ood_eval)`.
     let mut active_stage_oracle: Option<(
@@ -2306,8 +2392,14 @@ fn whir_open_core(
 
         let mut stage_chals = [[GoldilocksExt4::ZERO; 3]; MAX_FOLD_STEP_VARS];
         for slot in stage_chals.iter_mut().take(st.step_vars) {
-            let (wire, chals) =
-                prove_fold(&mut cur_coeffs, &mut cur_k, &mut cur_sum_claim, transcript);
+            let (wire, chals) = prove_fold_in_place(
+                &mut cur_coeffs,
+                &mut cur_k,
+                &mut c_scratch,
+                &mut k_scratch,
+                &mut cur_sum_claim,
+                transcript,
+            );
             fold_sumcheck_polys.push(wire);
             *slot = chals;
         }
@@ -2444,7 +2536,7 @@ fn whir_open_core(
             // Squeeze OOD & shift batching challenges and fold all new claims into `(cur_k, cur_sum_claim)`.
             for (z, e) in z_ood_next.into_iter().zip(ood_eval_next) {
                 let xi = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
-                axpy_ext4_fast(&mut cur_k, xi, &geometric(z, cur_coeffs.len()));
+                add_geometric_scaled_in_place(&mut cur_k, xi, z);
                 cur_sum_claim += xi * e;
             }
             let gamma_shift = transcript.squeeze_ext4(b"WHIR_SHIFT_GAMMA");
@@ -2603,15 +2695,45 @@ fn accumulate_shift_claims_into_kernel(
     shift_claims: &[(Goldilocks, GoldilocksExt4)],
 ) {
     debug_assert_eq!(cur_k.len(), (1usize << rem_vars) + 2);
+    if shift_claims.is_empty() {
+        return;
+    }
+    let mut weighted: Vec<(Goldilocks, GoldilocksExt4)> = Vec::with_capacity(shift_claims.len());
     let mut w = gamma_shift;
     for &(z, e) in shift_claims {
         *cur_sum_claim += w * e;
+        weighted.push((z, w));
+        w *= gamma_shift;
+    }
+
+    #[cfg(feature = "std")]
+    if cur_k.len() >= 4_096 {
+        let workers = crate::parallel_workers().min(cur_k.len());
+        let chunk = cur_k.len().div_ceil(workers);
+        let weighted_ref = weighted.as_slice();
+        std::thread::scope(|scope| {
+            for (t_idx, sub) in cur_k.chunks_mut(chunk).enumerate() {
+                let start = (t_idx * chunk) as u64;
+                scope.spawn(move || {
+                    for &(z, weight) in weighted_ref {
+                        let mut power = z.pow(start);
+                        for slot in sub.iter_mut() {
+                            *slot += weight.mul_base(power);
+                            power *= z;
+                        }
+                    }
+                });
+            }
+        });
+        return;
+    }
+
+    for &(z, weight) in &weighted {
         let mut power = Goldilocks::ONE;
-        for k in cur_k.iter_mut() {
-            *k += w.mul_base(power);
+        for slot in cur_k.iter_mut() {
+            *slot += weight.mul_base(power);
             power *= z;
         }
-        w *= gamma_shift;
     }
 }
 

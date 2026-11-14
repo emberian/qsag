@@ -3,6 +3,13 @@ public import QsagVerified.Proofs.Sponge
 public import Qsag.Keccak
 import all Qsag.Keccak
 
+/-!
+The universal theorem here covers the extracted 24-round permutation. The phase laws
+below cover actual streaming entry points, but do not yet identify emitted bytes with
+`Qsag.shake256Xof`: rate-block XOR, padding, and arbitrary squeeze-loop invariants remain
+necessary. In particular absorption after squeezing is a no-op in the generated API.
+-/
+
 public section
 namespace qsag_verified.proofs
 open Aeneas Aeneas.Std Result
@@ -795,5 +802,31 @@ theorem keccak_f1600_array_refines_qsag (a : Array Std.U64 25#usize) :
   have h := keccak_f1600_refines_qsag (keccakStateOfArray a)
   rw [keccakArrayOfState_roundtrip] at h
   exact h
+
+/-- The inverse representation round trip, complementary to the arbitrary-array law. -/
+theorem keccakStateOfArray_roundtrip (s : Qsag.KState) :
+    keccakStateOfArray (keccakArrayOfState s) = s := by
+  cases s
+  rfl
+
+/-- Observation of the actual permutation result is exactly the canonical state. -/
+theorem keccak_f1600_result_iff (a b : Array Std.U64 25#usize) :
+    keccak.keccak_f1600 a = .ok b ↔
+      b = keccakArrayOfState (Qsag.keccakF1600 (keccakStateOfArray a)) := by
+  rw [keccak_f1600_array_refines_qsag, Result.ok.injEq]
+  exact eq_comm
+
+/-- The streaming API ignores additional absorption once squeezing has started.
+A transcript-level specification must preserve this phase boundary. -/
+theorem shake256_absorb_after_squeezing (s : keccak.Shake256Sponge)
+    (data : Slice Std.U8) (hs : s.squeezing = true) :
+    keccak.Shake256Sponge.absorb s data = .ok s := by
+  simp [keccak.Shake256Sponge.absorb, hs]
+
+/-- Finalization is idempotent on the squeezing phase, including its offset and buffer. -/
+theorem shake256_finalize_after_squeezing (s : keccak.Shake256Sponge)
+    (hs : s.squeezing = true) :
+    keccak.Shake256Sponge.finalize s = .ok s := by
+  simp [keccak.Shake256Sponge.finalize, hs]
 
 end qsag_verified.proofs

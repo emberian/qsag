@@ -1,0 +1,108 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V compute kernel for `KernelSlot::BdozGf2128BatchDot`.
+// Computes 2-lane BDOZ inner product over `GF(2)[x] / (x^128 + x^7 + x^2 + x + 1)`
+// (`0x87` reduction pentanomial) using 100% branchless, LUT-free 64-bit shift-XOR arithmetic:
+//   mode == 0: Grid-stride carryless dot product + workgroup XOR tree reduction -> `out_buf[wg]`.
+//   mode == 1: Single-workgroup final XOR reduction across `num_groups` partials -> `out_buf[0]`.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer SharesBuf {
+    uint64_t words[];
+} shares_buf;
+
+layout(std430, set = 0, binding = 1) readonly buffer WeightsBuf {
+    uint64_t words[];
+} weights_buf;
+
+layout(std430, set = 0, binding = 2) buffer OutBuf {
+    uint64_t words[];
+} out_buf;
+
+layout(push_constant) uniform PushConsts {
+    uint num_elements;
+    uint num_groups;
+    uint mode;
+    uint _pad;
+} pc;
+
+shared u64vec4 s_red[256];
+
+u64vec2 gf2_128_mul(u64vec2 a, u64vec2 b) {
+    u64vec2 acc = u64vec2(0ul, 0ul);
+    uint64_t bw = b.x;
+    for (uint step = 0u; step < 64u; ++step) {
+        uint64_t mask = uint64_t(0ul) - (bw & 1ul);
+        acc.x ^= a.x & mask;
+        acc.y ^= a.y & mask;
+        uint64_t red = uint64_t(0ul) - (a.y >> 63);
+        a.y = (a.y << 1) | (a.x >> 63);
+        a.x = (a.x << 1) ^ (red & 0x87ul);
+        bw >>= 1;
+    }
+    bw = b.y;
+    for (uint step = 0u; step < 64u; ++step) {
+        uint64_t mask = uint64_t(0ul) - (bw & 1ul);
+        acc.x ^= a.x & mask;
+        acc.y ^= a.y & mask;
+        uint64_t red = uint64_t(0ul) - (a.y >> 63);
+        a.y = (a.y << 1) | (a.x >> 63);
+        a.x = (a.x << 1) ^ (red & 0x87ul);
+        bw >>= 1;
+    }
+    return acc;
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+    uint wg  = gl_WorkGroupID.x;
+
+    u64vec4 acc = u64vec4(0ul, 0ul, 0ul, 0ul);
+
+    if (pc.mode == 0u) {
+        uint gid    = wg * 256u + lid;
+        uint stride = pc.num_groups * 256u;
+        for (uint i = gid; i < pc.num_elements; i += stride) {
+            uint base = i * 4u;
+            u64vec2 s0 = u64vec2(shares_buf.words[base + 0u], shares_buf.words[base + 1u]);
+            u64vec2 s1 = u64vec2(shares_buf.words[base + 2u], shares_buf.words[base + 3u]);
+            u64vec2 w0 = u64vec2(weights_buf.words[base + 0u], weights_buf.words[base + 1u]);
+            u64vec2 w1 = u64vec2(weights_buf.words[base + 2u], weights_buf.words[base + 3u]);
+            u64vec2 p0 = gf2_128_mul(s0, w0);
+            u64vec2 p1 = gf2_128_mul(s1, w1);
+            acc.x ^= p0.x;
+            acc.y ^= p0.y;
+            acc.z ^= p1.x;
+            acc.w ^= p1.y;
+        }
+    } else {
+        for (uint g = lid; g < pc.num_groups; g += 256u) {
+            uint base = g * 4u;
+            acc.x ^= out_buf.words[base + 0u];
+            acc.y ^= out_buf.words[base + 1u];
+            acc.z ^= out_buf.words[base + 2u];
+            acc.w ^= out_buf.words[base + 3u];
+        }
+    }
+
+    s_red[lid] = acc;
+    barrier();
+
+    for (uint half_sz = 128u; half_sz > 0u; half_sz >>= 1u) {
+        if (lid < half_sz) {
+            s_red[lid] ^= s_red[lid + half_sz];
+        }
+        barrier();
+    }
+
+    if (lid == 0u) {
+        uint out_idx = (pc.mode == 0u) ? (wg * 4u) : 0u;
+        u64vec4 res = s_red[0];
+        out_buf.words[out_idx + 0u] = res.x;
+        out_buf.words[out_idx + 1u] = res.y;
+        out_buf.words[out_idx + 2u] = res.z;
+        out_buf.words[out_idx + 3u] = res.w;
+    }
+}

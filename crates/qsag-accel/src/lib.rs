@@ -1,12 +1,22 @@
 #![no_std]
 //! Zero-dependency `#![no_std]` certified hardware & GPU accelerator trait (`AcceleratorBackend`),
-//! constant-time CPU reference backend (`CpuReferenceBackend`), transcript-bound reports,
+//! constant-time CPU reference backend (`CpuReferenceBackend`), certified RDNA2 / SPIR-V Vulkan
+//! discrete GPU backend (`VulkanSpirvBackend` / `VulkanRdna2Backend`), transcript-bound reports,
 //! and verified kernel digest registry (`VerifiedKernelDigestRegistry`).
 
-#![forbid(unsafe_code)]
+#![cfg_attr(
+    not(all(feature = "std", target_os = "linux", target_pointer_width = "64")),
+    forbid(unsafe_code)
+)]
+#![cfg_attr(
+    all(feature = "std", target_os = "linux", target_pointer_width = "64"),
+    deny(unsafe_code)
+)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
+#[cfg(any(feature = "std", test))]
+extern crate std;
 
 pub mod ct;
 pub mod gf2_128;
@@ -14,6 +24,13 @@ pub mod goldilocks;
 pub mod keccak;
 pub mod poseidon2;
 pub mod sha2;
+pub mod spirv_kernels;
+pub mod vulkan;
+#[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+#[allow(unsafe_code)]
+mod vulkan_ffi;
+
+pub use vulkan::{VulkanDeviceInfo, VulkanError, VulkanRdna2Backend, VulkanSpirvBackend};
 
 use ct::{RedactedSecret, ct_eq_bytes_mask, ct_eq_mask_u64};
 use gf2_128::bdoz_gf2_128_batch_dot_cpu;
@@ -649,9 +666,21 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
         reg
     }
 
-    /// Compatibility constructor. No GPU artifacts are bundled or implicitly trusted.
+    /// Compatibility constructor. No GPU artifacts are implicitly trusted unless registered via
+    /// [`Self::with_cpu_and_spirv_pins`] or [`Self::register_measured_profile`].
     pub fn with_cpu_and_canonical_gpu_pins() -> Self {
         Self::with_cpu_reference_pins()
+    }
+
+    /// Registry pre-populated with both the portable CPU reference profile and the deterministic
+    /// embedded `KernelTargetArch::SpirV16` compute shader pins (`MAX_PROFILES >= 2`).
+    pub fn with_cpu_and_spirv_pins() -> Self {
+        let mut reg = Self::with_cpu_reference_pins();
+        let _ = reg.register_arch_pins(
+            KernelTargetArch::SpirV16,
+            spirv_kernels::canonical_spirv_pins(),
+        );
+        reg
     }
 
     /// Register trusted measurements supplied by the caller's artifact approval process.
@@ -935,8 +964,6 @@ pub fn spot_check_merkle_layer(
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
-
     use super::*;
     use crate::gf2_128::{gf2_128_inv_or_zero, gf2_128_mul};
     use crate::goldilocks::{

@@ -868,7 +868,6 @@ fn rss_bind_group(
 /// `nu[g] * prod_{l in bits(u)} mu[l]`, with `nu[g] = prod_{l in bits(g)} nu_bits[l]`.
 struct RssDzkWeights {
     mu: [RssProofField; RSS_DZK_TENSOR_BITS],
-    nu_bits: Vec<RssProofField>,
     nu: Vec<RssProofField>,
 }
 
@@ -937,15 +936,14 @@ impl Drop for RssDzkTables {
 }
 
 /// One halving round of the weighted inner-product argument over tables of blocks of `unit`
-/// elements; `hi_groups` blocks exist in the upper half, which starts at block `half`. With
-/// public block weights `w` on the lower half (the upper half carries the extra factor `mu`)
-/// the invariant `claim = sum_g w_g <x_g, y_g>` is preserved by
-/// `x' = x_lo + gamma * mu * x_hi`, `y' = y_lo + gamma^-1 * y_hi`,
-/// `claim' = claim + gamma^-1 * L + gamma * R`, where `L = sum_g w_g <x_lo, y_hi>` and
-/// `R = mu * sum_g w_g <x_hi, y_lo>` are sent as masked additive shares before `gamma` is drawn.
+/// elements (`x` already carries the per-group public weights `w_g`); `hi_groups` blocks exist
+/// in the upper half, which starts at block `half`. The invariant `claim = sum_g <x_g, y_g>` is
+/// preserved by `x' = x_lo + gamma * x_hi`, `y' = y_lo + gamma^-1 * y_hi`,
+/// `claim' = claim + gamma^-1 * L + gamma * R`, where `L = sum_g <x_lo, y_hi>` and
+/// `R = sum_g <x_hi, y_lo>` are sent as masked additive shares before `gamma` is drawn.
 #[expect(
     clippy::too_many_arguments,
-    reason = "One protocol round: tables, weights, claim, randomness and challenge context"
+    reason = "One protocol round: tables, dimensions, claim, randomness and challenge context"
 )]
 fn rss_dzk_fold_round(
     ctx: &RssDzkCtx<'_>,
@@ -955,8 +953,6 @@ fn rss_dzk_fold_round(
     unit: usize,
     hi_groups: usize,
     half: usize,
-    weights: Option<&[RssProofField]>,
-    mu: RssProofField,
     claim: &mut [RssProofField; 3],
     streams: &mut RssProofStreams,
     party_rngs: &mut [PartyPrivateRng; 3],
@@ -964,16 +960,13 @@ fn rss_dzk_fold_round(
     let mut l_msg = SecretBuffer(streams.zero_share());
     let mut r_msg = SecretBuffer(streams.zero_share());
     let RssDzkTables { x, y, lhs, rhs } = tables;
-    let call_groups = if weights.is_some() { 1 } else { hi_groups };
-    let need = 2 * unit * call_groups;
+    let need = 2 * unit * hi_groups;
     if lhs.len() < need {
         lhs.resize(need, [0; 2]);
         rhs.resize(need, [0; 2]);
     }
     for p in 0..3 {
         let q = (p + 1) % 3;
-        let mut l_acc = RssProofField::ZERO;
-        let mut r_acc = RssProofField::ZERO;
         let mut filled = 0usize;
         for g in 0..hi_groups {
             for j in 0..unit {
@@ -988,28 +981,17 @@ fn rss_dzk_fold_round(
                 );
                 filled += 2;
             }
-            if let Some(w) = weights {
-                let out = rss_poly_dot(&lhs[..filled], &rhs[..filled]);
-                l_acc = l_acc.add(w[g].mul(RssProofField(out[0])));
-                r_acc = r_acc.add(w[g].mul(RssProofField(out[1])));
-                filled = 0;
-            }
         }
-        if weights.is_none() {
-            let out = rss_poly_dot(&lhs[..filled], &rhs[..filled]);
-            l_acc = RssProofField(out[0]);
-            r_acc = RssProofField(out[1]);
-        }
-        l_msg[p] = l_msg[p].add(l_acc);
-        r_msg[p] = r_msg[p].add(mu.mul(r_acc));
+        let out = rss_poly_dot(&lhs[..filled], &rhs[..filled]);
+        l_msg[p] = l_msg[p].add(RssProofField(out[0]));
+        r_msg[p] = r_msg[p].add(RssProofField(out[1]));
     }
 
     let gamma = ctx
         .coin(b"RSS_DZK_POLY_FOLD_COIN/v3", pass, step, party_rngs)?
         .nonzero();
     let gamma_inv = gamma.inv_public();
-    let gamma_mu = gamma.mul(mu);
-    let scale_x = RssFieldMultiplier::new(gamma_mu);
+    let scale_x = RssFieldMultiplier::new(gamma);
     let scale_y = RssFieldMultiplier::new(gamma_inv);
     for s in 0..3 {
         claim[s] = claim[s]
@@ -1028,6 +1010,7 @@ fn rss_dzk_fold_round(
 // Chunking bounds scratch space and amortizes dispatch over 256 products.
 fn rss_poly_dot(lhs: &[[u128; 2]], rhs: &[[u128; 2]]) -> [u128; 2] {
     assert_eq!(lhs.len(), rhs.len());
+    let used = lhs.len().min(256);
     let mut a = [[0u64; 2]; 256];
     let mut b = [[0u64; 2]; 256];
     let mut out = [0u128; 2];
@@ -1043,8 +1026,8 @@ fn rss_poly_dot(lhs: &[[u128; 2]], rhs: &[[u128; 2]]) -> [u128; 2] {
         *value = u128::from(acc[0]) | (u128::from(acc[1]) << 64);
         wipe_u64s(&mut acc);
     }
-    qsag_asm::volatile_fill(&mut a, [0; 2]);
-    qsag_asm::volatile_fill(&mut b, [0; 2]);
+    qsag_asm::volatile_fill(&mut a[..used], [0; 2]);
+    qsag_asm::volatile_fill(&mut b[..used], [0; 2]);
     out
 }
 
@@ -1063,7 +1046,7 @@ fn rss_dzk_tensor_tables(
 ) -> [Vec<[u128; 2]>; 3] {
     #[cfg(feature = "std")]
     if groups >= 128 {
-        let workers = std::thread::available_parallelism().map_or(1, usize::from).min(8);
+        let workers = std::thread::available_parallelism().map_or(1, usize::from).min(16);
         let chunk = groups.div_ceil(workers);
         return std::thread::scope(|scope| {
             let handles: Vec<_> = nu_pairs.chunks(chunk).enumerate().map(|(i, weights)| {
@@ -1267,6 +1250,8 @@ fn rss_dzk_pass(
             }
         }
     }
+    let block_weights: Vec<RssProofField> =
+        weights.nu.iter().map(|v| bound_weight.mul(*v)).collect();
     let total = groups * RSS_DZK_LANES;
     let mut tables = RssDzkTables {
         x: [vec![0u128; total], vec![0u128; total], vec![0u128; total]],
@@ -1275,7 +1260,8 @@ fn rss_dzk_pass(
         rhs: Vec::new(),
     };
     // Groups are independent linear maps under public coefficients. Partition only
-    // this arithmetic; challenges, proof messages and verification stay in order.
+    // this arithmetic and absorb `block_weights[g]` directly into `x`; challenges,
+    // proof messages and verification stay in exact sequential order.
     for s in 0..3 {
         let bind = |start: usize, x: &mut [u128], y: &mut [u128]| {
             let mut planes = [[0u64; 64]; 2];
@@ -1283,9 +1269,10 @@ fn rss_dzk_pass(
                 .zip(y.chunks_mut(RSS_DZK_LANES)).enumerate()
             {
                 let offset = (start + g) * RSS_DZK_GROUP_WORDS;
+                let w_mul = RssFieldMultiplier::new(block_weights[start + g]);
                 rss_bind_group(&pending.a[s][offset..], &pattern, &mut planes, x);
                 for (lane, value) in x.iter_mut().enumerate() {
-                    *value = RssProofField(*value).mul_t_pow(lane as u32).0;
+                    *value = w_mul.mul(RssProofField(*value).mul_t_pow(lane as u32)).0;
                 }
                 rss_bind_group(&pending.b[s][offset..], &pattern, &mut planes, y);
             }
@@ -1294,7 +1281,7 @@ fn rss_dzk_pass(
         #[cfg(feature = "std")]
         {
             let workers = std::thread::available_parallelism().map_or(1, usize::from)
-                .min(8).min(groups.div_ceil(64)).max(1);
+                .min(16).min(groups.div_ceil(64)).max(1);
             let chunk_groups = groups.div_ceil(workers);
             std::thread::scope(|scope| {
                 for (chunk, (x, y)) in tables.x[s].chunks_mut(chunk_groups * RSS_DZK_LANES)
@@ -1309,16 +1296,13 @@ fn rss_dzk_pass(
         bind(0, &mut tables.x[s], &mut tables.y[s]);
     }
 
-    // Halve the group index under the public weights `bound_weight * nu[g]`.
-    let block_weights: Vec<RssProofField> =
-        weights.nu.iter().map(|v| bound_weight.mul(*v)).collect();
+    // Halve the group index, then halve the 64 lanes (`block_weights` already absorbed in `x`).
     let mut step = 0usize;
     let mut size = groups.next_power_of_two();
     let mut cur = groups;
     while size > 1 {
         let half = size / 2;
         let hi_groups = cur.saturating_sub(half);
-        let mu = weights.nu_bits[half.trailing_zeros() as usize];
         rss_dzk_fold_round(
             ctx,
             pass,
@@ -1327,8 +1311,6 @@ fn rss_dzk_pass(
             RSS_DZK_LANES,
             hi_groups,
             half,
-            Some(&block_weights),
-            mu,
             &mut claim,
             streams,
             party_rngs,
@@ -1336,12 +1318,6 @@ fn rss_dzk_pass(
         cur = cur.min(half);
         size = half;
         step += 1;
-    }
-    // One group remains; absorb its public weight and halve the 64 lanes.
-    for row in &mut tables.x {
-        for word in row.iter_mut().take(RSS_DZK_LANES) {
-            *word = block_weights[0].mul(RssProofField(*word)).0;
-        }
     }
     let mut half = RSS_DZK_LANES / 2;
     while half >= 1 {
@@ -1353,8 +1329,6 @@ fn rss_dzk_pass(
             1,
             half,
             half,
-            None,
-            RssProofField::ONE,
             &mut claim,
             streams,
             party_rngs,
@@ -1551,7 +1525,7 @@ fn rss_dzk_verify_padded(
         for g in 1..groups {
             nu[g] = nu[g & (g - 1)].mul(nu_bits[g.trailing_zeros() as usize]);
         }
-        RssDzkWeights { mu, nu_bits, nu }
+        RssDzkWeights { mu, nu }
     });
     let nu_pairs: Vec<[u128; 2]> = (0..groups)
         .map(|g| [weights[0].nu[g].0, weights[1].nu[g].0])
@@ -1984,6 +1958,54 @@ impl RssSlhMpcCluster {
         )
     }
 
+    /// Record one 64-way replicated permutation into `self.pending_dzk`, flushing a batched
+    /// 2-pass BBCGGI19 DZK verification barrier every `16` permutations (`614,400` relation
+    /// words) and strictly before any cut opening in [`Self::flush_verify_and_open_cut`].
+    fn permute_batch64_deferred(
+        &mut self,
+        batch_len: usize,
+        states_prim: &mut [[u64; 1600]; 3],
+        states_sec: &mut [[u64; 1600]; 3],
+    ) -> Result<(), KeccakMpcError> {
+        let result = self.permute_batch64_deferred_inner(batch_len, states_prim, states_sec);
+        if result.is_err() {
+            self.poison();
+            wipe_rss_states(states_prim, states_sec);
+        }
+        result
+    }
+
+    fn permute_batch64_deferred_inner(
+        &mut self,
+        batch_len: usize,
+        states_prim: &mut [[u64; 1600]; 3],
+        states_sec: &mut [[u64; 1600]; 3],
+    ) -> Result<(), KeccakMpcError> {
+        const DEFERRED_DZK_FLUSH_WORDS: usize = 16 * 24 * 1600;
+        self.ensure_live()?;
+        let ctr = self.next_ctr();
+        eval_rss_keccak_f1600_batch64_record(
+            &self.session_id,
+            ctr,
+            batch_len,
+            states_prim,
+            states_sec,
+            &self.mask_session,
+            &mut self.pending_dzk,
+        )?;
+        if self.pending_dzk.len_words() >= DEFERRED_DZK_FLUSH_WORDS {
+            let dzk_ctr = self.next_ctr();
+            verify_rss_boolean_triples_bbcggi19(
+                &self.session_id,
+                dzk_ctr,
+                &mut self.pending_dzk,
+                &self.mask_session,
+                &mut self.party_rngs,
+            )?;
+        }
+        Ok(())
+    }
+
     /// `Keccak-f[1600]` lane-permutations this cluster has evaluated under MPC.
     pub fn lane_permutations(&self) -> u64 {
         self.pending_dzk.lane_perms
@@ -2028,10 +2050,28 @@ impl RssSlhMpcCluster {
     }
 
     /// Evaluate up to `64` single-block `PRF(PK.seed, SK.seed, adrs_batch[b])` instances in parallel!
+    #[cfg(test)]
     fn eval_prf_batch64_secret(
         &mut self,
         pk_seed: &[u8],
         adrs_batch: &[Fips205Adrs],
+    ) -> Result<RssCutShares, KeccakMpcError> {
+        self.eval_prf_batch64_secret_impl(pk_seed, adrs_batch, false)
+    }
+
+    fn eval_prf_batch64_secret_deferred(
+        &mut self,
+        pk_seed: &[u8],
+        adrs_batch: &[Fips205Adrs],
+    ) -> Result<RssCutShares, KeccakMpcError> {
+        self.eval_prf_batch64_secret_impl(pk_seed, adrs_batch, true)
+    }
+
+    fn eval_prf_batch64_secret_impl(
+        &mut self,
+        pk_seed: &[u8],
+        adrs_batch: &[Fips205Adrs],
+        defer_dzk: bool,
     ) -> Result<RssCutShares, KeccakMpcError> {
         self.ensure_live()?;
         let batch_len = adrs_batch.len();
@@ -2095,7 +2135,11 @@ impl RssSlhMpcCluster {
             }
         }
 
-        self.permute_batch64(batch_len, &mut st_p, &mut st_s)?;
+        if defer_dzk {
+            self.permute_batch64_deferred(batch_len, &mut st_p, &mut st_s)?;
+        } else {
+            self.permute_batch64(batch_len, &mut st_p, &mut st_s)?;
+        }
 
         let n_bits = 8 * n;
         let mut out_p = [[0u64; 256]; 3];
@@ -2178,7 +2222,7 @@ impl RssSlhMpcCluster {
             }
         }
 
-        if let Err(e) = self.permute_batch64(batch_len, &mut st_p, &mut st_s) {
+        if let Err(e) = self.permute_batch64_deferred(batch_len, &mut st_p, &mut st_s) {
             wipe_rss_states(cur_p, cur_s);
             return Err(e);
         }
@@ -2364,7 +2408,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
             i += 1;
         }
         let (mut rev_p, mut rev_s) = self
-            .eval_prf_batch64_secret(pk_seed, &rev_prf_adrs)
+            .eval_prf_batch64_secret_deferred(pk_seed, &rev_prf_adrs)
             .map_err(rss_oracle_abort)?;
         for p in 0..3 {
             cut.prim[p].extend_from_slice(&rev_p[p][..8 * n]);
@@ -2393,7 +2437,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
                 leaf_batch.push(leaf_a);
             }
             let (cur_p, cur_s) = self
-                .eval_prf_batch64_secret(pk_seed, &prf_batch)
+                .eval_prf_batch64_secret_deferred(pk_seed, &prf_batch)
                 .map_err(rss_oracle_abort)?;
             let mut cur_p = SecretBuffer(cur_p);
             let mut cur_s = SecretBuffer(cur_s);
@@ -2494,7 +2538,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
                 prf_batch.push(a);
             }
             let (cur_p, cur_s) = self
-                .eval_prf_batch64_secret(pk_seed, &prf_batch)
+                .eval_prf_batch64_secret_deferred(pk_seed, &prf_batch)
                 .map_err(rss_oracle_abort)?;
             let mut cur_p = SecretBuffer(cur_p);
             let mut cur_s = SecretBuffer(cur_s);
@@ -2615,7 +2659,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
                 c += 1;
             }
             let (cur_p, cur_s) = self
-                .eval_prf_batch64_secret(pk_seed, &prf_batch)
+                .eval_prf_batch64_secret_deferred(pk_seed, &prf_batch)
                 .map_err(rss_oracle_abort)?;
             let mut cur_p = SecretBuffer(cur_p);
             let mut cur_s = SecretBuffer(cur_s);
@@ -4522,7 +4566,7 @@ fn eval_tsw_wots_subtree_rss(
                 }
             }
         }
-        cluster.permute_batch64(chunk_len, &mut st_p, &mut st_s)?;
+        cluster.permute_batch64_deferred(chunk_len, &mut st_p, &mut st_s)?;
 
         let mut cur_p = SecretBuffer([[0u64; 256]; 3]);
         let mut cur_s = SecretBuffer([[0u64; 256]; 3]);
@@ -4581,7 +4625,7 @@ fn eval_tsw_wots_subtree_rss(
                     ss[p][8 * TSW_F_SECRET_OFFSET + bit_idx] ^= cur_s[p][bit_idx];
                 }
             }
-            if let Err(e) = cluster.permute_batch64(chunk_len, &mut sp, &mut ss) {
+            if let Err(e) = cluster.permute_batch64_deferred(chunk_len, &mut sp, &mut ss) {
                 wipe_rss_states(&mut cur_p, &mut cur_s);
                 return Err(e);
             }
@@ -4749,7 +4793,7 @@ pub fn sign_stateless_tsw_rss_mpc(
                 }
             }
         }
-        cluster.permute_batch64(params.fors_trees, &mut st_p, &mut st_s)?;
+        cluster.permute_batch64_deferred(params.fors_trees, &mut st_p, &mut st_s)?;
         for p in 0..3 {
             cut.prim[p].extend_from_slice(&st_p[p][..256]);
             cut.sec[p].extend_from_slice(&st_s[p][..256]);
@@ -4801,7 +4845,7 @@ pub fn sign_stateless_tsw_rss_mpc(
                 }
             }
         }
-        cluster.permute_batch64(c_len, &mut st_p, &mut st_s)?;
+        cluster.permute_batch64_deferred(c_len, &mut st_p, &mut st_s)?;
 
         // Hash `secret_val` -> `leaf_hash` via `cSHAKE256("QSAG.TH.TWEAK/v1", [3, 32, pk_seed, 32, leaf_adrs, 32, secret_val])`
         let mut sp = SecretBuffer([[0u64; 1600]; 3]);
@@ -4839,7 +4883,7 @@ pub fn sign_stateless_tsw_rss_mpc(
             wipe_u64s(&mut st_p[p]);
             wipe_u64s(&mut st_s[p]);
         }
-        cluster.permute_batch64(c_len, &mut sp, &mut ss)?;
+        cluster.permute_batch64_deferred(c_len, &mut sp, &mut ss)?;
         for p in 0..3 {
             cut.prim[p].extend_from_slice(&sp[p][..256]);
             cut.sec[p].extend_from_slice(&ss[p][..256]);

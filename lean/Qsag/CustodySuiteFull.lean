@@ -6,7 +6,7 @@ Self-contained Lean 4.35 formalization of the five custody and migration subsyst
 (`Init` + `Qsag` constructive foundations, `0` proof gaps, `0` custom axioms, `0 Classical.choice`):
 
 1. **Few-Time Signatures (`qsag-fts`)**:
-   - Constant-sum Winternitz (`WOTS+CS`, `L = 68, base = 32, S = 136` and `w = 5`) strict
+   - Constant-sum Winternitz (`WOTS+CS`, `L = 68, base = 5, S = 136` and `w = 5`) strict
      codeword incomparability (`wotsCs_single_use_incomparable`) and constructive 1-CMA
      hash-chain preimage / claw extraction (`wotsCs_euf_1cma_extract_chain_preimage`).
    - `#tooth` 2-signature forward-only forgery witness (`tooth_wotsCs_two_signatures_enable_forward_only_forgery`).
@@ -234,7 +234,7 @@ def extractWotsCsDecrease {L base S : Nat} (dStar d : List Nat)
 
 /-- **1-Time `WOTS+CS` Strict Incomparability (`wotsCs_single_use_incomparable`)**:
     For arbitrary chain count `L`, digit base `base`, and target sum `S` (including deployed
-    `(L = 68, base = 32, S = 136)` and `(L = 68, base = 5, S = 136)`), any two distinct valid
+    `(L = 68, base = 5, S = 136)` and `(L = 68, base = 5, S = 136)`), any two distinct valid
     codewords `dStar ≠ d` satisfy `∃ i : Fin L, dStar[i] < d[i]`. -/
 theorem wotsCs_single_use_incomparable (L base S : Nat) (dStar d : List Nat)
     (hStar : validWotsCsCodeword L base S dStar)
@@ -492,7 +492,7 @@ theorem witness_wotsCs_1cma_inhabited :
   towerMul 7 x4 x3
 
 /-- Full 48-round $x^7$ key-alternating SPN evaluation over `Tower128`. -/
-def evalSpn48Rounds (roundKeys : Fin 49 → Tower128) (input : Tower128) : Tower128 :=
+def evalScalarSpn48Evidence (roundKeys : Fin 49 → Tower128) (input : Tower128) : Tower128 :=
   let rec loop (r : Nat) (st : Tower128) : Tower128 :=
     match r with
     | 0 => st
@@ -663,8 +663,8 @@ inductive FtsSpnInput where
   | submitValueOpen (salt : List UInt8)
   deriving DecidableEq
 
-/-- Outbound network events emitted by `ftsSpnStep`. -/
-inductive FtsSpnEvent where
+/-- Outbound network events emitted by `ftsSpnEvidenceStep`. -/
+inductive FtsSpnPrivateEvidence where
   | epochStarted (epoch : Nat)
   | phaseAdvanced (epoch : Nat) (nextPhase : FtsSpnPhase)
   | releasedRound48Signature (epoch : Nat) (round48Share : Tower128)
@@ -672,7 +672,7 @@ inductive FtsSpnEvent where
       (recordedFaultDelta recordedDeltaGamma recordedAlpha : Tower128)
   deriving DecidableEq
 
-/-- Error codes returned by `ftsSpnStep` (including poisoning transitions). -/
+/-- Error codes returned by `ftsSpnEvidenceStep` (including poisoning transitions). -/
 inductive FtsSpnErr where
   | macContextQuarantined
   | epochAlreadyBurned
@@ -687,9 +687,9 @@ def encodeTower128CommitPayload (domainByte : UInt8) (val : Tower128) (salt : Li
 
 /-- Authoritative step transition of `ParallelSeededSignSession` (`PowerOpen -> IntermediateMacCommit ->
     IntermediateMacOpen -> ValueCommit -> ValueOpen` + durable 1-use burn + MAC quarantine),
-    evaluating `evalSpn48Rounds` directly inside the state machine rather than trusting caller outputs. -/
-@[expose] def ftsSpnStep (H : Hash) (st : FtsEpochGuardState) (inp : FtsSpnInput) :
-    CustodyStepOutcome FtsEpochGuardState FtsSpnEvent FtsSpnErr :=
+    evaluating `evalScalarSpn48Evidence` directly inside the state machine rather than trusting caller outputs. -/
+def ftsSpnEvidenceStep (H : Hash) (st : FtsEpochGuardState) (inp : FtsSpnInput) :
+    CustodyStepOutcome FtsEpochGuardState FtsSpnPrivateEvidence FtsSpnErr :=
   if st.macContextPoisoned then
     .rejected st .macContextQuarantined
   else
@@ -698,7 +698,7 @@ def encodeTower128CommitPayload (domainByte : UInt8) (val : Tower128) (salt : Li
       if ep ∈ st.burnedEpochs then
         .rejected st .epochAlreadyBurned
       else
-        let honest48 := evalSpn48Rounds ks.keyAt xIn
+        let honest48 := evalScalarSpn48Evidence ks.keyAt xIn
         let sess : FtsActiveSession :=
           { epoch := ep
             phase := .powerOpen
@@ -714,7 +714,7 @@ def encodeTower128CommitPayload (domainByte : UInt8) (val : Tower128) (salt : Li
                   (.epochStarted ep)
     | .submitPowerOpen deltaX, some sess =>
       if sess.phase == .powerOpen then
-        let evaluated48 := evalSpn48Rounds sess.keySchedule.keyAt (towerAdd 7 sess.spnInput deltaX)
+        let evaluated48 := evalScalarSpn48Evidence sess.keySchedule.keyAt (towerAdd 7 sess.spnInput deltaX)
         let sess' :=
           { sess with
             phase := .intermediateMacCommit
@@ -761,20 +761,20 @@ def encodeTower128CommitPayload (domainByte : UInt8) (val : Tower128) (salt : Li
     | _, _ => .rejected st .sessionBusyOrWrongPhase
 
 /-- Extract all epochs that emitted an unmasked Round-48 signature along an FTS event list. -/
-def ftsReleasedEpochs : List FtsSpnEvent → List Nat
+def ftsReleasedEpochs : List FtsSpnPrivateEvidence → List Nat
   | [] => []
   | .releasedRound48Signature ep _ _ _ _ _ _ :: rest => ep :: ftsReleasedEpochs rest
   | _ :: rest => ftsReleasedEpochs rest
 
 /-- Well-formedness invariant of `FtsEpochGuardState` across multi-session traces, including
-    exact binding of `unmaskedRound48Share` to `evalSpn48Rounds`. -/
+    exact binding of `unmaskedRound48Share` to `evalScalarSpn48Evidence`. -/
 def FtsStateInv (st : FtsEpochGuardState) : Prop :=
   match st.active with
   | none => True
   | some sess =>
     sess.epoch ∈ st.burnedEpochs ∧
     sess.unmaskedRound48Share =
-      evalSpn48Rounds sess.keySchedule.keyAt (towerAdd 7 sess.spnInput sess.powerFaultDelta) ∧
+      evalScalarSpn48Evidence sess.keySchedule.keyAt (towerAdd 7 sess.spnInput sess.powerFaultDelta) ∧
     (sess.phase = .valueCommit ∨ sess.phase = .valueOpen →
       verifyLinearMacEquation sess.alpha (towerZero 7)
         sess.powerFaultDelta sess.openedIntermDeltaGamma = true)
@@ -782,19 +782,19 @@ def FtsStateInv (st : FtsEpochGuardState) : Prop :=
 private theorem fts_step_preserves_inv_and_sound {H : Hash}
     {st st' : FtsEpochGuardState} {inp : FtsSpnInput}
     (hInv : FtsStateInv st) :
-    (∀ ev, ftsSpnStep H st inp = .accepted st' ev →
+    (∀ ev, ftsSpnEvidenceStep H st inp = .accepted st' ev →
       FtsStateInv st' ∧
       (∀ ep out48 ks xIn dX dG alpha,
         ev = .releasedRound48Signature ep out48 ks xIn dX dG alpha →
           ep ∈ st.burnedEpochs ∧
           st'.active = none ∧
           st'.burnedEpochs = st.burnedEpochs ∧
-          ((dX = towerZero 7 ∧ out48 = evalSpn48Rounds ks.keyAt xIn) ∨
+          ((dX = towerZero 7 ∧ out48 = evalScalarSpn48Evidence ks.keyAt xIn) ∨
             MacKeyRecoveryWitness 7 alpha dX dG))) ∧
-    (∀ err, ftsSpnStep H st inp = .rejected st' err → FtsStateInv st') := by
+    (∀ err, ftsSpnEvidenceStep H st inp = .rejected st' err → FtsStateInv st') := by
   refine ⟨?_, ?_⟩
   · intro ev hAcc
-    unfold ftsSpnStep at hAcc
+    unfold ftsSpnEvidenceStep at hAcc
     if hPois : st.macContextPoisoned = true then
       simp [hPois] at hAcc
     else
@@ -911,7 +911,7 @@ private theorem fts_step_preserves_inv_and_sound {H : Hash}
           else
             simp [hPh] at hAcc
   · intro err hRej
-    unfold ftsSpnStep at hRej
+    unfold ftsSpnEvidenceStep at hRej
     if hPois : st.macContextPoisoned = true then
       simp only [hPois, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hRej
       rcases hRej with ⟨rfl, _⟩; exact hInv
@@ -957,8 +957,8 @@ private theorem fts_step_preserves_inv_and_sound {H : Hash}
 
 private theorem fts_no_release_if_burned_inactive {H : Hash}
     {st stFinal : FtsEpochGuardState}
-    {trace : List (FtsSpnInput × Option FtsSpnEvent)}
-    (hTr : ValidCustodyTrace (ftsSpnStep H) st trace stFinal) :
+    {trace : List (FtsSpnInput × Option FtsSpnPrivateEvidence)}
+    (hTr : ValidCustodyTrace (ftsSpnEvidenceStep H) st trace stFinal) :
     ∀ ep : Nat,
       ep ∈ st.burnedEpochs →
       (∀ sess, st.active = some sess → sess.epoch ≠ ep) →
@@ -968,7 +968,7 @@ private theorem fts_no_release_if_burned_inactive {H : Hash}
     intro _ _ _ hMem; cases hMem
   | @consAccepted s s' _ inp out rest hStep _ ih =>
     intro ep hBurn hInact
-    unfold ftsSpnStep at hStep
+    unfold ftsSpnEvidenceStep at hStep
     if hPois : s.macContextPoisoned = true then
       simp [hPois] at hStep
     else
@@ -1049,7 +1049,7 @@ private theorem fts_no_release_if_burned_inactive {H : Hash}
   | @consRejected s s' _ inp err rest hStep _ ih =>
     intro ep hBurn hInact
     simp only [traceApprovedOutputs_cons_none]
-    unfold ftsSpnStep at hStep
+    unfold ftsSpnEvidenceStep at hStep
     if hPois : s.macContextPoisoned = true then
       simp only [hPois, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
       rcases hStep with ⟨rfl, _⟩
@@ -1100,7 +1100,7 @@ private theorem fts_no_release_if_burned_inactive {H : Hash}
        no epoch ever emits `> 1` signature regardless of aborts or replay attempts.
     2. **Deferred-MAC 48-Round SPN Integrity**: Every `.releasedRound48Signature ep out48 ks xIn dX dG alpha`
        emitted on the outbound transcript satisfies EITHER
-       `dX = 0 ∧ out48 = evalSpn48Rounds ks.keyAt xIn` (exact honest 48-round $x^7$ SPN evaluation
+       `dX = 0 ∧ out48 = evalScalarSpn48Evidence ks.keyAt xIn` (exact honest 48-round $x^7$ SPN evaluation
        with zero intermediate power/Beaver fault) OR `MacKeyRecoveryWitness 7 alpha dX dG`
        (global `GF(2^128)` MAC key algebraically forged).
     3. **Permanent Quarantine Latch**: Once `macContextPoisoned = true` (triggered immediately on
@@ -1108,23 +1108,23 @@ private theorem fts_no_release_if_burned_inactive {H : Hash}
        are ever emitted again. -/
 theorem fts_spn_deferred_mac_blocks_dfa_across_epochs
     (H : Hash) {st₀ stFinal : FtsEpochGuardState}
-    {trace : List (FtsSpnInput × Option FtsSpnEvent)}
+    {trace : List (FtsSpnInput × Option FtsSpnPrivateEvidence)}
     (hInv₀ : FtsStateInv st₀)
-    (hTrace : ValidCustodyTrace (ftsSpnStep H) st₀ trace stFinal) :
+    (hTrace : ValidCustodyTrace (ftsSpnEvidenceStep H) st₀ trace stFinal) :
     (ftsReleasedEpochs (traceApprovedOutputs trace)).Nodup ∧
     (∀ ep out48 ks xIn dX dG alpha,
-      FtsSpnEvent.releasedRound48Signature ep out48 ks xIn dX dG alpha ∈ traceApprovedOutputs trace →
-        (dX = towerZero 7 ∧ out48 = evalSpn48Rounds ks.keyAt xIn) ∨
+      FtsSpnPrivateEvidence.releasedRound48Signature ep out48 ks xIn dX dG alpha ∈ traceApprovedOutputs trace →
+        (dX = towerZero 7 ∧ out48 = evalScalarSpn48Evidence ks.keyAt xIn) ∨
         MacKeyRecoveryWitness 7 alpha dX dG) ∧
     (st₀.macContextPoisoned = true →
       stFinal.macContextPoisoned = true ∧ traceApprovedOutputs trace = []) := by
-  suffices ∀ {s sf : FtsEpochGuardState} {tr : List (FtsSpnInput × Option FtsSpnEvent)},
-      ValidCustodyTrace (ftsSpnStep H) s tr sf →
+  suffices ∀ {s sf : FtsEpochGuardState} {tr : List (FtsSpnInput × Option FtsSpnPrivateEvidence)},
+      ValidCustodyTrace (ftsSpnEvidenceStep H) s tr sf →
       FtsStateInv s →
       (ftsReleasedEpochs (traceApprovedOutputs tr)).Nodup ∧
       (∀ ep out48 ks xIn dX dG alpha,
-        FtsSpnEvent.releasedRound48Signature ep out48 ks xIn dX dG alpha ∈ traceApprovedOutputs tr →
-          (dX = towerZero 7 ∧ out48 = evalSpn48Rounds ks.keyAt xIn) ∨
+        FtsSpnPrivateEvidence.releasedRound48Signature ep out48 ks xIn dX dG alpha ∈ traceApprovedOutputs tr →
+          (dX = towerZero 7 ∧ out48 = evalScalarSpn48Evidence ks.keyAt xIn) ∨
           MacKeyRecoveryWitness 7 alpha dX dG) ∧
       (s.macContextPoisoned = true →
         sf.macContextPoisoned = true ∧ traceApprovedOutputs tr = []) by
@@ -1158,7 +1158,7 @@ theorem fts_spn_deferred_mac_blocks_dfa_across_epochs
       · exact (hRelProp ep out48 ks xIn dX dG alpha hHead.symm).2.2.2
       · exact hSoundRest ep out48 ks xIn dX dG alpha hTail
     · intro hPois
-      unfold ftsSpnStep at hStep
+      unfold ftsSpnEvidenceStep at hStep
       simp [hPois] at hStep
   | @consRejected s s' _ inp err rest hStep _ ih =>
     intro hInvS
@@ -1167,14 +1167,14 @@ theorem fts_spn_deferred_mac_blocks_dfa_across_epochs
     obtain ⟨hNdRest, hSoundRest, hPoisRest⟩ := ih hInv'
     simp only [traceApprovedOutputs_cons_none]
     refine ⟨hNdRest, hSoundRest, fun hPois => ?_⟩
-    unfold ftsSpnStep at hStep
+    unfold ftsSpnEvidenceStep at hStep
     simp only [hPois, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
     rcases hStep with ⟨rfl, _⟩
     exact hPoisRest hPois
 
 /-- **`#tooth` Deferred-MAC Quarantine Witness (`tooth_fts_spn_dfa_fault_quarantined_before_value_open`)**:
     When a non-zero DFA fault `dX ≠ 0` is injected into the 48-round $x^7$ SPN session without
-    knowing `alpha * dX`, `ftsSpnStep` aborts at `.intermediateMacOpen`, permanently sets
+    knowing `alpha * dX`, `ftsSpnEvidenceStep` aborts at `.intermediateMacOpen`, permanently sets
     `macContextPoisoned = true`, clears `active = none`, and never reaches `ValueOpen`. -/
 theorem tooth_fts_spn_dfa_fault_quarantined_before_value_open
     (H : Hash) (ep : Nat) (alpha dX dGamma : Tower128)
@@ -1194,11 +1194,11 @@ theorem tooth_fts_spn_dfa_fault_quarantined_before_value_open
             intermMacCommitHash := cHash
             openedIntermDeltaGamma := towerZero 7
             valueCommitHash := []
-            unmaskedRound48Share := evalSpn48Rounds ks.keyAt (towerAdd 7 xIn dX) } }
-    ftsSpnStep H st (.submitIntermMacOpen dGamma salt) =
+            unmaskedRound48Share := evalScalarSpn48Evidence ks.keyAt (towerAdd 7 xIn dX) } }
+    ftsSpnEvidenceStep H st (.submitIntermMacOpen dGamma salt) =
       .rejected { st with macContextPoisoned := true, active := none } .intermediateMacOrCommitFailed := by
   intro cHash st
-  unfold ftsSpnStep
+  unfold ftsSpnEvidenceStep
   dsimp only [st]
   simp only [Bool.false_eq_true, ↓reduceIte, BEq.rfl, hBadMac, Bool.and_false]
 
@@ -1212,7 +1212,7 @@ private theorem uint8List_beq_self : ∀ xs : List UInt8, (xs == xs) = true
 
 /-- Inhabitedness witness for `fts_spn_deferred_mac_blocks_dfa_across_epochs` instantiated with
     authentic 256-bit `shake256Xof 32` (`(H [0x00]).length = 32 ∧ H [0x00] ≠ [0x00]`) and a concrete
-    49-key SPN schedule executing `evalSpn48Rounds` end-to-end across all 6 session phases. -/
+    49-key SPN schedule executing `evalScalarSpn48Evidence` end-to-end across all 6 session phases. -/
 theorem witness_fts_spn_session_inhabited :
     let H : Hash := shake256Xof 32
     let ks : SpnKeySchedule48 := { keys := List.replicate 49 (towerOne 7) }
@@ -1222,9 +1222,9 @@ theorem witness_fts_spn_session_inhabited :
     H [0x00] ≠ [0x00] ∧
     ∃ trace stFinal,
       FtsStateInv st₀ ∧
-      ValidCustodyTrace (ftsSpnStep H) st₀ trace stFinal ∧
+      ValidCustodyTrace (ftsSpnEvidenceStep H) st₀ trace stFinal ∧
       ftsReleasedEpochs (traceApprovedOutputs trace) = [0] ∧
-      FtsSpnEvent.releasedRound48Signature 0 (evalSpn48Rounds ks.keyAt xIn) ks xIn
+      FtsSpnPrivateEvidence.releasedRound48Signature 0 (evalScalarSpn48Evidence ks.keyAt xIn) ks xIn
         (towerZero 7) (towerZero 7) (towerOne 7) ∈ traceApprovedOutputs trace := by
   intro H ks xIn st₀
   have hLen32 : (H [0x00]).length = 32 := shake256Xof_length 32 [0x00]
@@ -1235,7 +1235,7 @@ theorem witness_fts_spn_session_inhabited :
     cases hL
   refine ⟨hLen32, hNotId, ?_⟩
   let alpha := towerOne 7
-  let out48 := evalSpn48Rounds ks.keyAt xIn
+  let out48 := evalScalarSpn48Evidence ks.keyAt xIn
   let salt : List UInt8 := [0x01, 0x02]
   let cMac := H (encodeTower128CommitPayload 0x41 (towerZero 7) salt)
   let cVal := H (encodeTower128CommitPayload 0x42 out48 salt)
@@ -1270,21 +1270,21 @@ theorem witness_fts_spn_session_inhabited :
                                openedIntermDeltaGamma := towerZero 7, valueCommitHash := cVal,
                                unmaskedRound48Share := out48 } }
   let s6 : FtsEpochGuardState := { burnedEpochs := [0], macContextPoisoned := false, active := none }
-  have hs1 : ftsSpnStep H st₀ (.beginEpoch 0 alpha ks xIn) = .accepted s1 (.epochStarted 0) := by
-    unfold ftsSpnStep
+  have hs1 : ftsSpnEvidenceStep H st₀ (.beginEpoch 0 alpha ks xIn) = .accepted s1 (.epochStarted 0) := by
+    unfold ftsSpnEvidenceStep
     dsimp only [st₀, s1, out48]
     simp only [Bool.false_eq_true, ↓reduceIte, List.not_mem_nil]
-  have hs2 : ftsSpnStep H s1 (.submitPowerOpen (towerZero 7)) =
+  have hs2 : ftsSpnEvidenceStep H s1 (.submitPowerOpen (towerZero 7)) =
       .accepted s2 (.phaseAdvanced 0 .intermediateMacCommit) := by
-    unfold ftsSpnStep
+    unfold ftsSpnEvidenceStep
     dsimp only [s1, s2, out48]
     simp only [Bool.false_eq_true, ↓reduceIte, BEq.rfl, towerAdd_zero]
-  have hs3 : ftsSpnStep H s2 (.submitIntermMacCommit cMac) =
+  have hs3 : ftsSpnEvidenceStep H s2 (.submitIntermMacCommit cMac) =
       .accepted s3 (.phaseAdvanced 0 .intermediateMacOpen) := by
-    unfold ftsSpnStep
+    unfold ftsSpnEvidenceStep
     dsimp only [s1, s2, s3]
     simp only [Bool.false_eq_true, ↓reduceIte, BEq.rfl]
-  have hs4 : ftsSpnStep H s3 (.submitIntermMacOpen (towerZero 7) salt) =
+  have hs4 : ftsSpnEvidenceStep H s3 (.submitIntermMacOpen (towerZero 7) salt) =
       .accepted s4 (.phaseAdvanced 0 .valueCommit) := by
     have hBeqMac : (H (encodeTower128CommitPayload 0x41 (towerZero 7) salt) == cMac) = true :=
       uint8List_beq_self cMac
@@ -1293,19 +1293,19 @@ theorem witness_fts_spn_session_inhabited :
       apply decide_eq_true_eq.mpr
       dsimp only [CommRingOps.sub, CommRingOps.mul, towerCommRingOps]
       rw [towerAdd_self_zero, towerMul_zero]
-    unfold ftsSpnStep
+    unfold ftsSpnEvidenceStep
     dsimp only [s1, s3, s4]
     simp only [Bool.false_eq_true, ↓reduceIte, BEq.rfl, hBeqMac, hMac, Bool.and_self]
-  have hs5 : ftsSpnStep H s4 (.submitValueCommit cVal) =
+  have hs5 : ftsSpnEvidenceStep H s4 (.submitValueCommit cVal) =
       .accepted s5 (.phaseAdvanced 0 .valueOpen) := by
-    unfold ftsSpnStep
+    unfold ftsSpnEvidenceStep
     dsimp only [s1, s4, s5]
     simp only [Bool.false_eq_true, ↓reduceIte, BEq.rfl]
-  have hs6 : ftsSpnStep H s5 (.submitValueOpen salt) =
+  have hs6 : ftsSpnEvidenceStep H s5 (.submitValueOpen salt) =
       .accepted s6 (.releasedRound48Signature 0 out48 ks xIn (towerZero 7) (towerZero 7) alpha) := by
     have hBeqVal : (H (encodeTower128CommitPayload 0x42 out48 salt) == cVal) = true :=
       uint8List_beq_self cVal
-    unfold ftsSpnStep
+    unfold ftsSpnEvidenceStep
     dsimp only [s1, s5, s6]
     simp only [Bool.false_eq_true, ↓reduceIte, BEq.rfl, hBeqVal]
   refine ⟨[(.beginEpoch 0 alpha ks xIn, some (.epochStarted 0)),
@@ -1958,7 +1958,7 @@ inductive HdZeroTestInput (n dim : Nat) where
       (commits : Fin n → List UInt8)
   | openMacResiduals (residuals : Fin n → HdFq204) (salts : Fin n → List UInt8)
 
-/-- Errors produced by `hdZeroTestStep`. -/
+/-- Errors produced by `hdZeroTestEvidenceStep`. -/
 inductive HdErr where
   | familyQuarantined
   | hardenedLineageDowngradeBlocked
@@ -2012,8 +2012,8 @@ theorem verifyAllHdCommits_true_iff (H : Hash) (sessionTag : List UInt8) (harden
       exact ⟨hAll ⟨m, Nat.lt_of_succ_le hk⟩ (Nat.lt_succ_self m),
              fun i hi => hAll i (Nat.lt_succ_of_lt hi)⟩
 
-/-- Outbound events of `hdZeroTestStep`. -/
-inductive HdZeroTestEvent where
+/-- Outbound events of `hdZeroTestEvidenceStep`. -/
+inductive HdZeroTestPrivateEvidence where
   | commitsFrozen (maskId : Nat) (hardened : Bool)
   | scalarReleased (maskId : Nat) (hardened : Bool) (yOpened yTrue alphaChild deltaGamma : HdFq204)
   deriving DecidableEq, Repr
@@ -2022,9 +2022,9 @@ inductive HdZeroTestEvent where
     (`q = 8380417`) with hardened-lineage non-downgrade enforcement, internal `evalLinearForm`
     evaluation against `enrolledShares`, single-use `OpeningMask`, bounded `DurableQueryBudget`,
     and immediate family quarantine on mismatch. -/
-@[expose] def hdZeroTestStep (H : Hash) (n dim : Nat)
+def hdZeroTestEvidenceStep (H : Hash) (n dim : Nat)
     (st : HdFamilyState n dim) (inp : HdZeroTestInput n dim) :
-    CustodyStepOutcome (HdFamilyState n dim) HdZeroTestEvent HdErr :=
+    CustodyStepOutcome (HdFamilyState n dim) HdZeroTestPrivateEvidence HdErr :=
   if st.familyQuarantined then
     .rejected st .familyQuarantined
   else
@@ -2074,17 +2074,17 @@ theorem tooth_hd_hardened_parent_blocks_public_chaincode_downgrade
     (tag : List UInt8) (maskId : Nat) (wForm : Fin dim → HdFq204)
     (yCand aChild dG : HdFq204) (commits : Fin n → List UInt8) :
     (st.parentHardened = true →
-      hdZeroTestStep H n dim st
+      hdZeroTestEvidenceStep H n dim st
         (.freezeMacCommits tag maskId false false wForm yCand aChild dG commits) =
       .rejected st .hardenedLineageDowngradeBlocked) ∧
-    hdZeroTestStep H n dim st
+    hdZeroTestEvidenceStep H n dim st
       (.freezeMacCommits tag maskId true true wForm yCand aChild dG commits) =
       .rejected st .hardenedLineageDowngradeBlocked := by
   constructor
   · intro hPar
-    unfold hdZeroTestStep
+    unfold hdZeroTestEvidenceStep
     simp [hClean, hIdle, hPar]
-  · unfold hdZeroTestStep
+  · unfold hdZeroTestEvidenceStep
     simp [hClean, hIdle]
 
 /-- Constructive anti-rushing commitment binding extractor (`0 Classical.choice`): any party `c`
@@ -2135,7 +2135,7 @@ def hdChildMacRotationIndependenceEquiv (disclosedAlphaChild : HdFq204) :
 /-- **`qsag-hd` Committed Per-Party MAC Zero-Test, Hardened Binding & Quarantine (`hd_committed_zero_test_sound`)**:
     1. **Anti-Rushing & Hardened-Flag Binding**: Adapting any residual `zAdapt ≠ zOrig` or flipping
        `hardened` on either residual or share commitments constructively yields `Collision H`.
-    2. **Fault Soundness & Quarantine-Before-Release over `HdFq204`**: On any step of `hdZeroTestStep`,
+    2. **Fault Soundness & Quarantine-Before-Release over `HdFq204`**: On any step of `hdZeroTestEvidenceStep`,
        no scalar with `yOpened ≠ yTrue` is ever released unless `dGamma * (yOpened - yTrue)⁻¹ = alphaChild`
        in $\mathbb{Z}_{8380417}$, and any failed zero-test sets `familyQuarantined = true`.
     3. **Dealerless Rotation Independence**: Any non-zero child rotation pad satisfies `alphaChild ≠ alphaParent`. -/
@@ -2151,14 +2151,14 @@ theorem hd_committed_zero_test_sound (H : Hash) (n dim : Nat) :
       Collision H) ∧
     (∀ (st st' : HdFamilyState n dim) (inp : HdZeroTestInput n dim)
        (maskId : Nat) (hardened : Bool) (yOpened yTrue alphaChild dGamma : HdFq204),
-      hdZeroTestStep H n dim st inp =
+      hdZeroTestEvidenceStep H n dim st inp =
         .accepted st' (.scalarReleased maskId hardened yOpened yTrue alphaChild dGamma) →
       yOpened = yTrue ∨
         HdFq204.mul dGamma (HdFq204.inv (HdFq204.sub yOpened yTrue)) = alphaChild) ∧
     (∀ (st stFinal : HdFamilyState n dim)
-       (trace : List (HdZeroTestInput n dim × Option HdZeroTestEvent)),
+       (trace : List (HdZeroTestInput n dim × Option HdZeroTestPrivateEvidence)),
       st.familyQuarantined = true →
-      ValidCustodyTrace (hdZeroTestStep H n dim) st trace stFinal →
+      ValidCustodyTrace (hdZeroTestEvidenceStep H n dim) st trace stFinal →
       stFinal.familyQuarantined = true ∧ traceApprovedOutputs trace = []) ∧
     (∀ (alphaParent childPad : HdFq204),
       childPad ≠ HdFq204.zero →
@@ -2173,7 +2173,7 @@ theorem hd_committed_zero_test_sound (H : Hash) (n dim : Nat) :
       (fun hPre => hNe (encodeHdShareCommit_injective hPre).2.2.1)
       hEq).toCollision
   · intro st st' inp maskId hardened yOpened yTrue alphaChild dGamma hStep
-    unfold hdZeroTestStep at hStep
+    unfold hdZeroTestEvidenceStep at hStep
     if hQ : st.familyQuarantined = true then
       simp [hQ] at hStep
     else
@@ -2196,7 +2196,7 @@ theorem hd_committed_zero_test_sound (H : Hash) (n dim : Nat) :
           · rename_i hChecks
             simp only [Bool.and_eq_true, decide_eq_true_eq] at hChecks
             rcases hChecks with ⟨⟨_, hSum0⟩, hMacEq⟩
-            simp only [CustodyStepOutcome.accepted.injEq, HdZeroTestEvent.scalarReleased.injEq] at hStep
+            simp only [CustodyStepOutcome.accepted.injEq, HdZeroTestPrivateEvidence.scalarReleased.injEq] at hStep
             rcases hStep with ⟨_, _, _, hYO, hYT, hAC, hDG⟩
             subst hYO hYT hAC hDG
             if hEqY : frz.yCandidate = frz.yTrue then
@@ -2217,10 +2217,10 @@ theorem hd_committed_zero_test_sound (H : Hash) (n dim : Nat) :
     induction hTr with
     | nil => exact ⟨hQuar, rfl⟩
     | consAccepted hStep _ _ =>
-      unfold hdZeroTestStep at hStep
+      unfold hdZeroTestEvidenceStep at hStep
       simp [hQuar] at hStep
     | consRejected hStep _ ih =>
-      unfold hdZeroTestStep at hStep
+      unfold hdZeroTestEvidenceStep at hStep
       simp only [hQuar, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
       rcases hStep with ⟨rfl, _⟩
       simpa using ih hQuar
@@ -2398,21 +2398,21 @@ def hdBudgetSubspaceEntropyEquiv (eta dim used : Nat) (hLt : used ≤ dim)
       simp [hj, hIdx]
 
 /-- Extract all single-use `OpeningMask` IDs frozen along an HD event trace. -/
-def hdFrozenMaskIds : List HdZeroTestEvent → List Nat
+def hdFrozenMaskIds : List HdZeroTestPrivateEvidence → List Nat
   | [] => []
   | .commitsFrozen mid _ :: rest => mid :: hdFrozenMaskIds rest
   | .scalarReleased _ _ _ _ _ _ :: rest => hdFrozenMaskIds rest
 
 private theorem hd_no_freeze_if_consumed {H : Hash} {n dim : Nat}
     {st stFinal : HdFamilyState n dim}
-    {trace : List (HdZeroTestInput n dim × Option HdZeroTestEvent)}
-    (hTr : ValidCustodyTrace (hdZeroTestStep H n dim) st trace stFinal) :
+    {trace : List (HdZeroTestInput n dim × Option HdZeroTestPrivateEvidence)}
+    (hTr : ValidCustodyTrace (hdZeroTestEvidenceStep H n dim) st trace stFinal) :
     ∀ m ∈ st.consumedMasks, m ∉ hdFrozenMaskIds (traceApprovedOutputs trace) := by
   induction hTr with
   | nil => intro _ _ hm; cases hm
   | @consAccepted s s' _ inp out rest hStep _ ih =>
     intro m hm
-    unfold hdZeroTestStep at hStep
+    unfold hdZeroTestEvidenceStep at hStep
     if hQ : s.familyQuarantined = true then
       simp [hQ] at hStep
     else
@@ -2450,7 +2450,7 @@ private theorem hd_no_freeze_if_consumed {H : Hash} {n dim : Nat}
   | @consRejected s s' _ inp err rest hStep _ ih =>
     intro m hm
     simp only [traceApprovedOutputs_cons_none]
-    unfold hdZeroTestStep at hStep
+    unfold hdZeroTestEvidenceStep at hStep
     if hQ : s.familyQuarantined = true then
       simp only [hQ, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
       rcases hStep with ⟨rfl, _⟩; exact ih m hm
@@ -2482,7 +2482,7 @@ private theorem hd_no_freeze_if_consumed {H : Hash} {n dim : Nat}
 
 /-- **Authorized HD Projection, Short-Secret MLWE & Bounded Budget Security
     (`hd_authorized_budget_blocks_full_rank_reconstruction`)**:
-    1. Across any multi-turn `hdZeroTestStep` trace over `HdFq204` (`q = 8380417`) from `st₀`
+    1. Across any multi-turn `hdZeroTestEvidenceStep` trace over `HdFq204` (`q = 8380417`) from `st₀`
        (`st₀.usedQueries ≤ st₀.budgetCap`), `stFinal.usedQueries ≤ st₀.budgetCap` and all consumed
        `OpeningMask` IDs are duplicate-free (`Nodup`).
     2. For ANY two distinct short MLWE witnesses `wA ≠ wB : ShortMlweWitness hdCbdEta d1 d2 A tPub`
@@ -2495,9 +2495,9 @@ private theorem hd_no_freeze_if_consumed {H : Hash} {n dim : Nat}
 theorem hd_authorized_budget_blocks_full_rank_reconstruction
     (H : Hash) (n dim : Nat) :
     (∀ {st₀ stFinal : HdFamilyState n dim}
-       {trace : List (HdZeroTestInput n dim × Option HdZeroTestEvent)},
+       {trace : List (HdZeroTestInput n dim × Option HdZeroTestPrivateEvidence)},
       st₀.usedQueries ≤ st₀.budgetCap →
-      ValidCustodyTrace (hdZeroTestStep H n dim) st₀ trace stFinal →
+      ValidCustodyTrace (hdZeroTestEvidenceStep H n dim) st₀ trace stFinal →
       stFinal.usedQueries ≤ st₀.budgetCap ∧
       (hdFrozenMaskIds (traceApprovedOutputs trace)).Nodup) ∧
     (∀ (d1 d2 Q : Nat) (A : Fin d2 → Fin d1 → HdFq204) (tPub : Fin d2 → HdFq204)
@@ -2523,8 +2523,8 @@ theorem hd_authorized_budget_blocks_full_rank_reconstruction
   refine ⟨?_, ?_, ?_⟩
   · intro st₀ stFinal trace hCap₀ hTr
     suffices ∀ {s sf : HdFamilyState n dim}
-        {tr : List (HdZeroTestInput n dim × Option HdZeroTestEvent)},
-        ValidCustodyTrace (hdZeroTestStep H n dim) s tr sf →
+        {tr : List (HdZeroTestInput n dim × Option HdZeroTestPrivateEvidence)},
+        ValidCustodyTrace (hdZeroTestEvidenceStep H n dim) s tr sf →
         s.usedQueries ≤ s.budgetCap →
         sf.usedQueries ≤ s.budgetCap ∧
         (hdFrozenMaskIds (traceApprovedOutputs tr)).Nodup by
@@ -2534,7 +2534,7 @@ theorem hd_authorized_budget_blocks_full_rank_reconstruction
     | nil => intro hLe; exact ⟨hLe, .nil⟩
     | @consAccepted st st' _ inp out rest hStep hRest ih =>
       intro hLe
-      unfold hdZeroTestStep at hStep
+      unfold hdZeroTestEvidenceStep at hStep
       if hQ : st.familyQuarantined = true then
         simp [hQ] at hStep
       else
@@ -2575,7 +2575,7 @@ theorem hd_authorized_budget_blocks_full_rank_reconstruction
     | @consRejected st st' _ inp err rest hStep _ ih =>
       intro hLe
       simp only [traceApprovedOutputs_cons_none]
-      unfold hdZeroTestStep at hStep
+      unfold hdZeroTestEvidenceStep at hStep
       if hQ : st.familyQuarantined = true then
         simp only [hQ, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
         rcases hStep with ⟨rfl, _⟩; exact ih hLe
@@ -2643,7 +2643,7 @@ theorem witness_hd_zero_test_inhabited :
     (H [0x00]).length = 32 ∧
     H [0x00] ≠ [0x00] ∧
     ∃ trace stFinal,
-      ValidCustodyTrace (hdZeroTestStep H 1 1) st₀ trace stFinal ∧
+      ValidCustodyTrace (hdZeroTestEvidenceStep H 1 1) st₀ trace stFinal ∧
       hdFrozenMaskIds (traceApprovedOutputs trace) = [7] ∧
       stFinal.usedQueries = 1 ∧
       stFinal.familyQuarantined = false := by
@@ -2666,15 +2666,15 @@ theorem witness_hd_zero_test_inhabited :
     { st₀ with usedQueries := 1, consumedMasks := [7], frozen := some frz }
   let s2 : HdFamilyState 1 1 :=
     { st₀ with usedQueries := 1, consumedMasks := [7], frozen := none }
-  have hs1 : hdZeroTestStep H 1 1 st₀
+  have hs1 : hdZeroTestEvidenceStep H 1 1 st₀
       (.freezeMacCommits [0x01] 7 true false wForm HdFq204.one HdFq204.one HdFq204.zero (fun _ => c0)) =
       .accepted s1 (.commitsFrozen 7 true) := by
     have hBudget : 0 < 4 := by decide
-    unfold hdZeroTestStep
+    unfold hdZeroTestEvidenceStep
     dsimp only [st₀, s1, frz, yTrueVal]
     simp only [Bool.false_eq_true, ↓reduceIte, Bool.not_true, Bool.and_false, Bool.or_self,
       List.not_mem_nil, hBudget, not_true_eq_false, Nat.zero_add]
-  have hs2 : hdZeroTestStep H 1 1 s1
+  have hs2 : hdZeroTestEvidenceStep H 1 1 s1
       (.openMacResiduals (fun _ => HdFq204.zero) (fun _ => [0xAA])) =
       .accepted s2 (.scalarReleased 7 true HdFq204.one yTrueVal HdFq204.one HdFq204.zero) := by
     have hVer : verifyAllHdCommits H [0x01] true 1 (fun _ => c0) (fun _ => HdFq204.zero) (fun _ => [0xAA]) = true := by
@@ -2690,7 +2690,7 @@ theorem witness_hd_zero_test_inhabited :
     have hSub : HdFq204.sub HdFq204.zero
         (HdFq204.mul HdFq204.one (HdFq204.sub HdFq204.one yTrueVal)) = HdFq204.zero := by
       rw [hYTrueEq]; decide
-    unfold hdZeroTestStep
+    unfold hdZeroTestEvidenceStep
     dsimp only [s1, s2, st₀, frz]
     simp only [Bool.false_eq_true, ↓reduceIte, hVer, hSum, hSub, decide_true, Bool.and_self]
   refine ⟨[(.freezeMacCommits [0x01] 7 true false wForm HdFq204.one HdFq204.one HdFq204.zero (fun _ => c0),
@@ -3311,13 +3311,13 @@ structure StatefulPolicyGuard where
   per_tx_cap : Nat
   deriving DecidableEq, Repr
 
-/-- Approved signing envelope emitted by `policyGuardStep`. -/
+/-- Approved signing envelope emitted by `policyCodecEvidenceStep`. -/
 structure ApprovedIntentEnvelope where
   intent : TransactionIntent
   canonicalBytes : List UInt8
   deriving DecidableEq, Repr
 
-/-- Rejection reasons of `policyGuardStep`. -/
+/-- Rejection reasons of `policyCodecEvidenceStep`. -/
 inductive PolicyRejectReason where
   | windowMismatch
   | policyDigestMismatch
@@ -3329,7 +3329,7 @@ inductive PolicyRejectReason where
   deriving DecidableEq, Repr
 
 /-- Authoritative stateful velocity, allowlist, digest-pinning, and nonce-replay guard transition. -/
-@[expose] def policyGuardStep (g : StatefulPolicyGuard) (tx : TransactionIntent) :
+def policyCodecEvidenceStep (g : StatefulPolicyGuard) (tx : TransactionIntent) :
     CustodyStepOutcome StatefulPolicyGuard ApprovedIntentEnvelope PolicyRejectReason :=
   if tx.window_id != g.window_id then
     .rejected g .windowMismatch
@@ -3354,14 +3354,14 @@ inductive PolicyRejectReason where
 private theorem policy_no_nonce_if_burned
     {g gFinal : StatefulPolicyGuard}
     {trace : List (TransactionIntent × Option ApprovedIntentEnvelope)}
-    (hTr : ValidCustodyTrace policyGuardStep g trace gFinal) :
+    (hTr : ValidCustodyTrace policyCodecEvidenceStep g trace gFinal) :
     ∀ nonce ∈ g.burned_intent_nonces,
       nonce ∉ (traceApprovedOutputs trace).map (fun e => e.intent.nonce) := by
   induction hTr with
   | nil => intro _ _ hm; cases hm
   | @consAccepted s s' _ tx env rest hStep _ ih =>
     intro nonce hBurn
-    unfold policyGuardStep at hStep
+    unfold policyCodecEvidenceStep at hStep
     if h1 : (tx.window_id != s.window_id) = true then simp [h1] at hStep
     else if h2 : (tx.policy_digest != s.pinned_policy_digest) = true then simp [h1, h2] at hStep
     else if h3 : (tx.authority_digest != s.pinned_authority_digest) = true then simp [h1, h2, h3] at hStep
@@ -3381,7 +3381,7 @@ private theorem policy_no_nonce_if_burned
   | @consRejected s s' _ tx err rest hStep _ ih =>
     intro nonce hBurn
     simp only [traceApprovedOutputs_cons_none]
-    unfold policyGuardStep at hStep
+    unfold policyCodecEvidenceStep at hStep
     split at hStep
     · cases hStep; exact ih nonce hBurn
     · split at hStep
@@ -3411,7 +3411,7 @@ theorem policy_multiturn_velocity_and_intent_binding
     {g₀ gFinal : StatefulPolicyGuard}
     {trace : List (TransactionIntent × Option ApprovedIntentEnvelope)}
     (hInitLe : g₀.accumulated_spend ≤ g₀.velocity_window_cap)
-    (hTrace : ValidCustodyTrace policyGuardStep g₀ trace gFinal) :
+    (hTrace : ValidCustodyTrace policyCodecEvidenceStep g₀ trace gFinal) :
     let approved := traceApprovedOutputs trace
     let approvedSum := (approved.map (fun e => e.intent.amount_units)).foldr (· + ·) 0
     g₀.accumulated_spend + approvedSum = gFinal.accumulated_spend ∧
@@ -3430,7 +3430,7 @@ theorem policy_multiturn_velocity_and_intent_binding
     (∀ tx₁ tx₂ : TransactionIntent, encodeTransactionIntent tx₁ = encodeTransactionIntent tx₂ → tx₁ = tx₂) := by
   have hCore : ∀ {s sf : StatefulPolicyGuard}
       {tr : List (TransactionIntent × Option ApprovedIntentEnvelope)},
-      ValidCustodyTrace policyGuardStep s tr sf →
+      ValidCustodyTrace policyCodecEvidenceStep s tr sf →
       s.accumulated_spend ≤ s.velocity_window_cap →
       let app := traceApprovedOutputs tr
       let appSum := (app.map (fun e => e.intent.amount_units)).foldr (· + ·) 0
@@ -3452,7 +3452,7 @@ theorem policy_multiturn_velocity_and_intent_binding
       exact ⟨by simp, hLe, .nil, fun _ hm => by cases hm⟩
     | @consAccepted st st' _ tx env rest hStep hRest ih =>
       intro hLe
-      unfold policyGuardStep at hStep
+      unfold policyCodecEvidenceStep at hStep
       if h1 : (tx.window_id != st.window_id) = true then simp [h1] at hStep
       else if h2 : (tx.policy_digest != st.pinned_policy_digest) = true then simp [h1, h2] at hStep
       else if h3 : (tx.authority_digest != st.pinned_authority_digest) = true then simp [h1, h2, h3] at hStep
@@ -3500,7 +3500,7 @@ theorem policy_multiturn_velocity_and_intent_binding
     | @consRejected st st' _ tx err rest hStep _ ih =>
       intro hLe
       simp only [traceApprovedOutputs_cons_none]
-      unfold policyGuardStep at hStep
+      unfold policyCodecEvidenceStep at hStep
       split at hStep
       · cases hStep; exact ih hLe
       · split at hStep
@@ -3590,19 +3590,19 @@ structure PolicyWatermarkGuard where
   requireAuthenticatedInitiator : Bool := true
   deriving DecidableEq, Repr
 
-/-- Candidate inputs to `policyWatermarkGuardStep` (signing intent evaluation or clock-anchored window advance). -/
+/-- Candidate inputs to `policyBitmapEvidenceStep` (signing intent evaluation or clock-anchored window advance). -/
 inductive PolicyWatermarkInput where
   | evaluateIntent (tx : TransactionIntent)
   | advanceEpoch (nowSecs : Nat)
   deriving DecidableEq, Repr
 
-/-- Observable events of `policyWatermarkGuardStep`. -/
+/-- Observable events of `policyBitmapEvidenceStep`. -/
 inductive PolicyWatermarkEvent where
   | intentApproved (intent : TransactionIntent) (canonicalSigningBytes : List UInt8)
   | epochAdvanced (newWindowId : Nat) (newEpochStartSecs : Nat)
   deriving DecidableEq, Repr
 
-/-- Rejection reasons of `policyWatermarkGuardStep`. -/
+/-- Rejection reasons of `policyBitmapEvidenceStep`. -/
 inductive PolicyWatermarkReject where
   | invalidWindowWidth
   | chainOrSuiteMismatch
@@ -3620,7 +3620,7 @@ inductive PolicyWatermarkReject where
 /-- Authoritative `PolicyWatermarkGuard` transition enforcing monotonic `minNonceWatermark` + sliding-window
     anti-replay, default-on initiator MAC authentication, and clock-anchored velocity window rotation
     that preserves `(minNonceWatermark, slidingBitmap)` across epochs. -/
-def policyWatermarkGuardStep (g : PolicyWatermarkGuard) (inp : PolicyWatermarkInput) :
+def policyBitmapEvidenceStep (g : PolicyWatermarkGuard) (inp : PolicyWatermarkInput) :
     CustodyStepOutcome PolicyWatermarkGuard PolicyWatermarkEvent PolicyWatermarkReject :=
   if g.slidingWindowWidth == 0 || g.slidingBitmap.length != g.slidingWindowWidth then
     .rejected g .invalidWindowWidth
@@ -3686,11 +3686,11 @@ def watermarkApprovedIntents : List PolicyWatermarkEvent → List (TransactionIn
   | .intentApproved tx sigBytes :: rest => (tx, sigBytes) :: watermarkApprovedIntents rest
   | .epochAdvanced _ _ :: rest => watermarkApprovedIntents rest
 
-private theorem policyWatermarkGuardStep_rejected_eq
+private theorem policyBitmapEvidenceStep_rejected_eq
     {g g' : PolicyWatermarkGuard} {inp : PolicyWatermarkInput} {err : PolicyWatermarkReject}
-    (hStep : policyWatermarkGuardStep g inp = .rejected g' err) :
+    (hStep : policyBitmapEvidenceStep g inp = .rejected g' err) :
     g' = g := by
-  unfold policyWatermarkGuardStep at hStep
+  unfold policyBitmapEvidenceStep at hStep
   if hBad : (g.slidingWindowWidth == 0 || g.slidingBitmap.length != g.slidingWindowWidth) = true then
     simp only [hBad, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
     exact hStep.1.symm
@@ -3736,7 +3736,7 @@ private theorem policyWatermarkGuardStep_rejected_eq
 
 private theorem watermark_consumed_preserved_and_marks
     {g g' : PolicyWatermarkGuard} {inp : PolicyWatermarkInput} {ev : PolicyWatermarkEvent}
-    (hStep : policyWatermarkGuardStep g inp = .accepted g' ev) :
+    (hStep : policyBitmapEvidenceStep g inp = .accepted g' ev) :
     0 < g'.slidingWindowWidth ∧
     g'.slidingBitmap.length = g'.slidingWindowWidth ∧
     g.minNonceWatermark ≤ g'.minNonceWatermark ∧
@@ -3747,7 +3747,7 @@ private theorem watermark_consumed_preserved_and_marks
       nonceConsumedByWatermark g' tx.nonce ∧
       sb = toCanonicalSigningBytes tx ∧
       (g.requireAuthenticatedInitiator = true → tx.init_mac_bytes ≠ [])) := by
-  unfold policyWatermarkGuardStep at hStep
+  unfold policyBitmapEvidenceStep at hStep
   if hBadW : (g.slidingWindowWidth == 0 || g.slidingBitmap.length != g.slidingWindowWidth) = true then
     simp only [hBadW, ↓reduceIte] at hStep; nomatch hStep
   else
@@ -3875,7 +3875,7 @@ private theorem watermark_consumed_preserved_and_marks
 private theorem watermark_no_approved_if_consumed
     {g gFinal : PolicyWatermarkGuard}
     {trace : List (PolicyWatermarkInput × Option PolicyWatermarkEvent)}
-    (hTr : ValidCustodyTrace policyWatermarkGuardStep g trace gFinal) :
+    (hTr : ValidCustodyTrace policyBitmapEvidenceStep g trace gFinal) :
     ∀ n, nonceConsumedByWatermark g n →
       n ∉ (watermarkApprovedIntents (traceApprovedOutputs trace)).map (fun p => p.1.nonce) := by
   induction hTr with
@@ -3893,7 +3893,7 @@ private theorem watermark_no_approved_if_consumed
         List.mem_cons, not_or]
       exact ⟨hNe, ih n (hMono n hn)⟩
   | @consRejected s s' _ inp err rest hStep _ ih =>
-    have hSame : s' = s := policyWatermarkGuardStep_rejected_eq hStep
+    have hSame : s' = s := policyBitmapEvidenceStep_rejected_eq hStep
     subst hSame
     simpa [traceApprovedOutputs_cons_none] using ih
 
@@ -3910,7 +3910,7 @@ private theorem watermark_no_approved_if_consumed
 theorem policy_watermark_sliding_window_multiturn_sound
     {g₀ gFinal : PolicyWatermarkGuard}
     {trace : List (PolicyWatermarkInput × Option PolicyWatermarkEvent)}
-    (hTrace : ValidCustodyTrace policyWatermarkGuardStep g₀ trace gFinal) :
+    (hTrace : ValidCustodyTrace policyBitmapEvidenceStep g₀ trace gFinal) :
     let approved := watermarkApprovedIntents (traceApprovedOutputs trace)
     g₀.minNonceWatermark ≤ gFinal.minNonceWatermark ∧
     (approved.map (fun p => p.1.nonce)).Nodup ∧
@@ -3949,7 +3949,7 @@ theorem policy_watermark_sliding_window_multiturn_sound
         exact ⟨Nat.le_trans hWmStep hGe', fun hc => hNotCons' (hMono _ hc),
                hBytes', fun hReq => hMac' (hReqEq.trans hReq)⟩
   | @consRejected s s' _ inp err rest hStep _ ih =>
-    have hSame : s' = s := policyWatermarkGuardStep_rejected_eq hStep
+    have hSame : s' = s := policyBitmapEvidenceStep_rejected_eq hStep
     subst hSame
     simpa [traceApprovedOutputs_cons_none] using ih
 
@@ -3997,7 +3997,7 @@ private theorem foldl_take_cap_eq_reverse_take (cap : Nat) :
 /-- **`#tooth` 256-Slot FIFO Burn-Ring Eviction Replay (`tooth_fifo_ring_256_eviction_allows_replay_at_257`)**:
     In a 256-slot FIFO burn ring (`MAX_BURNED_INTENT_NONCES = 256`), submitting 257 distinct nonces
     `0, 1, ..., 256` (`seqFrom 0 257`) evicts nonce `0` at transaction `#257`, allowing nonce `0` to be
-    replayed and accepted a SECOND time, whereas `policyWatermarkGuardStep` advances `minNonceWatermark`
+    replayed and accepted a SECOND time, whereas `policyBitmapEvidenceStep` advances `minNonceWatermark`
     above `0` and deterministically rejects the replay of `0` with `.nonceBelowWatermark`! -/
 theorem tooth_fifo_ring_256_eviction_allows_replay_at_257 :
     let nonces257 := seqFrom 0 257
@@ -4018,7 +4018,7 @@ theorem tooth_fifo_ring_256_eviction_allows_replay_at_257 :
        { recipient := [0x01], amount_units := 1, window_id := 1,
          policy_digest := [0xAA], authority_digest := [0xBB], nonce := 0,
          init_mac_bytes := [0x01] }
-     policyWatermarkGuardStep g₀ (.evaluateIntent replay0) =
+     policyBitmapEvidenceStep g₀ (.evaluateIntent replay0) =
        .rejected g₀ .nonceBelowWatermark) := by
   intro nonces257 ringAfter257
   have hFold : ringAfter257 = (seqFrom 1 256).reverse := by
@@ -4059,11 +4059,11 @@ theorem tooth_stateless_velocity_caller_spent_bypass :
      let tx2 : TransactionIntent :=
        { recipient := [0x01], amount_units := 60, window_id := 1,
          policy_digest := [0xAA], authority_digest := [0xBB], nonce := 11 }
-     match policyGuardStep g₀ tx1 with
+     match policyCodecEvidenceStep g₀ tx1 with
      | .accepted g₁ _ =>
-       policyGuardStep g₁ tx2 = .rejected g₁ .velocityWindowExceeded
+       policyCodecEvidenceStep g₁ tx2 = .rejected g₁ .velocityWindowExceeded
      | .rejected _ _ => False) := by
-  simp [statelessCallerVelocityCheck, policyGuardStep]
+  simp [statelessCallerVelocityCheck, policyCodecEvidenceStep]
 
 /-- Inhabitedness witness for `policy_multiturn_velocity_and_intent_binding` approving two distinct
     transactions (`40 + 55 = 95 ≤ 100`) and rejecting a third overflow request (`95 + 20 > 100`). -/
@@ -4073,7 +4073,7 @@ theorem witness_policy_multiturn_inhabited :
          burned_intent_nonces := [], pinned_policy_digest := [0xAA],
          pinned_authority_digest := [0xBB], allowed_recipients := [[0x01]], per_tx_cap := 60 }
     ∃ trace gFinal,
-      ValidCustodyTrace policyGuardStep g₀ trace gFinal ∧
+      ValidCustodyTrace policyCodecEvidenceStep g₀ trace gFinal ∧
       (traceApprovedOutputs trace).length = 2 ∧
       gFinal.accumulated_spend = 95 := by
   intro g₀
@@ -4088,14 +4088,14 @@ theorem witness_policy_multiturn_inhabited :
       policy_digest := [0xAA], authority_digest := [0xBB], nonce := 3 }
   let g₁ := { g₀ with accumulated_spend := 40, burned_intent_nonces := [1] }
   let g₂ := { g₀ with accumulated_spend := 95, burned_intent_nonces := [2, 1] }
-  have hs1 : policyGuardStep g₀ tx1 =
+  have hs1 : policyCodecEvidenceStep g₀ tx1 =
       .accepted g₁ { intent := tx1, canonicalBytes := encodeTransactionIntent tx1 } := by
-    simp [policyGuardStep, g₀, g₁, tx1]
-  have hs2 : policyGuardStep g₁ tx2 =
+    simp [policyCodecEvidenceStep, g₀, g₁, tx1]
+  have hs2 : policyCodecEvidenceStep g₁ tx2 =
       .accepted g₂ { intent := tx2, canonicalBytes := encodeTransactionIntent tx2 } := by
-    simp [policyGuardStep, g₀, g₁, g₂, tx2]
-  have hs3 : policyGuardStep g₂ tx3 = .rejected g₂ .velocityWindowExceeded := by
-    simp [policyGuardStep, g₀, g₂, tx3]
+    simp [policyCodecEvidenceStep, g₀, g₁, g₂, tx2]
+  have hs3 : policyCodecEvidenceStep g₂ tx3 = .rejected g₂ .velocityWindowExceeded := by
+    simp [policyCodecEvidenceStep, g₀, g₂, tx3]
   refine ⟨[(tx1, some { intent := tx1, canonicalBytes := encodeTransactionIntent tx1 }),
            (tx2, some { intent := tx2, canonicalBytes := encodeTransactionIntent tx2 }),
            (tx3, none)],
@@ -5435,7 +5435,7 @@ inductive CoZkCeremonyEvent where
   | challengedHeadsReleased (ceremonyRoot : List UInt8) (openedHeadsDigest : List UInt8)
   deriving DecidableEq, Repr
 
-/-- Rejection and quarantine reasons of `cozkPreOpenCeremonyStep`. -/
+/-- Rejection and quarantine reasons of `cozkOrderingEvidenceStep`. -/
 inductive CoZkCeremonyReject where
   | ceremonyAlreadyAborted
   | preOpenSacrificeFailed
@@ -5452,7 +5452,7 @@ def migrateRootDomain : List UInt8 :=
     1. Freezing the 219-repetition ceremony commitment root (`QSAG.MIGRATE.ROOT.V3` + `encodeFramedU64Le`),
     2. 2-of-3 replicated holder cross-check (`verifyRssActiveOpen rssMsg == some 0`), and
     3. Vanishing of two independent `Tower128` batch multiplication/conversion sacrifice polynomials. -/
-@[expose] def cozkPreOpenCeremonyStep (H : Hash)
+def cozkOrderingEvidenceStep (H : Hash)
     (st : CoZkCeremonyState) (inp : CoZkCeremonyInput) :
     CustodyStepOutcome CoZkCeremonyState CoZkCeremonyEvent CoZkCeremonyReject :=
   if st.aborted then
@@ -5490,15 +5490,15 @@ private theorem cozk_aborted_releases_nothing {H : Hash}
     {st stFinal : CoZkCeremonyState}
     {trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)}
     (hAb : st.aborted = true)
-    (hTr : ValidCustodyTrace (cozkPreOpenCeremonyStep H) st trace stFinal) :
+    (hTr : ValidCustodyTrace (cozkOrderingEvidenceStep H) st trace stFinal) :
     stFinal.aborted = true ∧ traceApprovedOutputs trace = [] := by
   induction hTr with
   | nil => exact ⟨hAb, rfl⟩
   | consAccepted hStep _ _ =>
-    unfold cozkPreOpenCeremonyStep at hStep
+    unfold cozkOrderingEvidenceStep at hStep
     simp [hAb] at hStep
   | consRejected hStep _ ih =>
-    unfold cozkPreOpenCeremonyStep at hStep
+    unfold cozkOrderingEvidenceStep at hStep
     simp only [hAb, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
     rcases hStep with ⟨rfl, _⟩
     simpa using ih rfl
@@ -5507,12 +5507,12 @@ private theorem cozk_headsReleased_emits_nothing {H : Hash}
     {st stFinal : CoZkCeremonyState} {r : List UInt8}
     {trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)}
     (hPh : st.phase = .headsReleased r)
-    (hTr : ValidCustodyTrace (cozkPreOpenCeremonyStep H) st trace stFinal) :
+    (hTr : ValidCustodyTrace (cozkOrderingEvidenceStep H) st trace stFinal) :
     traceApprovedOutputs trace = [] := by
   cases hTr with
   | nil => rfl
   | @consAccepted _ _ _ inp _ _ hStep _ =>
-    unfold cozkPreOpenCeremonyStep at hStep
+    unfold cozkOrderingEvidenceStep at hStep
     if hAb : st.aborted = true then
       simp [hAb] at hStep
     else
@@ -5520,7 +5520,7 @@ private theorem cozk_headsReleased_emits_nothing {H : Hash}
       cases inp <;> cases hStep
   | @consRejected _ s' _ inp _ rest hStep hRest =>
     simp only [traceApprovedOutputs_cons_none]
-    unfold cozkPreOpenCeremonyStep at hStep
+    unfold cozkOrderingEvidenceStep at hStep
     if hAb : st.aborted = true then
       simp only [hAb, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
       rcases hStep with ⟨rfl, _⟩
@@ -5534,7 +5534,7 @@ private theorem cozk_headsReleased_emits_nothing {H : Hash}
 private theorem cozk_trace_ordering_and_single_release {H : Hash}
     {st stFinal : CoZkCeremonyState}
     {trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)}
-    (hTr : ValidCustodyTrace (cozkPreOpenCeremonyStep H) st trace stFinal) :
+    (hTr : ValidCustodyTrace (cozkOrderingEvidenceStep H) st trace stFinal) :
     cozkCountHeadReleases (traceApprovedOutputs trace) ≤ 1 ∧
     (∀ rOut dig,
       .challengedHeadsReleased rOut dig ∈ traceApprovedOutputs trace →
@@ -5544,7 +5544,7 @@ private theorem cozk_trace_ordering_and_single_release {H : Hash}
   | nil =>
     exact ⟨by simp [cozkCountHeadReleases], fun _ _ hm => by cases hm⟩
   | @consAccepted s s' _ inp out rest hStep hRest ih =>
-    unfold cozkPreOpenCeremonyStep at hStep
+    unfold cozkOrderingEvidenceStep at hStep
     if hAb : s.aborted = true then
       simp [hAb] at hStep
     else
@@ -5592,7 +5592,7 @@ private theorem cozk_trace_ordering_and_single_release {H : Hash}
       all_goals cases hStep
   | @consRejected s s' _ inp err rest hStep hRest _ =>
     simp only [traceApprovedOutputs_cons_none]
-    unfold cozkPreOpenCeremonyStep at hStep
+    unfold cozkOrderingEvidenceStep at hStep
     if hAb : s.aborted = true then
       simp only [hAb, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
       rcases hStep with ⟨rfl, _⟩
@@ -5643,7 +5643,7 @@ theorem cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release (H : Hash) :
     (∀ (tag : List UInt8) (stFinal : CoZkCeremonyState)
        (trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)),
       let st₀ : CoZkCeremonyState := { sessionTag := tag, phase := .awaitingRootFreeze, aborted := false }
-      ValidCustodyTrace (cozkPreOpenCeremonyStep H) st₀ trace stFinal →
+      ValidCustodyTrace (cozkOrderingEvidenceStep H) st₀ trace stFinal →
       cozkCountHeadReleases (traceApprovedOutputs trace) ≤ 1 ∧
       (∀ rOut dig,
         .challengedHeadsReleased rOut dig ∈ traceApprovedOutputs trace →
@@ -5654,7 +5654,7 @@ theorem cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release (H : Hash) :
       (corruptIdx ≠ 0 → rssMsg.p0_x0 = trueCheckShares.x0 ∧ rssMsg.p0_x1 = trueCheckShares.x1) →
       (corruptIdx ≠ 1 → rssMsg.p1_x1 = trueCheckShares.x1 ∧ rssMsg.p1_x2 = trueCheckShares.x2) →
       (corruptIdx ≠ 2 → rssMsg.p2_x2 = trueCheckShares.x2 ∧ rssMsg.p2_x0 = trueCheckShares.x0) →
-      cozkPreOpenCeremonyStep H st (.verifyPreOpenSacrifice rssMsg gateDeltas) = .accepted st' ev →
+      cozkOrderingEvidenceStep H st (.verifyPreOpenSacrifice rssMsg gateDeltas) = .accepted st' ev →
       reconstructRssWord trueCheckShares = 0 ∧
       ∃ root coin1 coin2,
         st.phase = .rootFrozen root coin1 coin2 ∧
@@ -5677,7 +5677,7 @@ theorem cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release (H : Hash) :
     · cases hBad
     · exact hOk
   · intro st st' rssMsg gateDeltas ev trueShares corruptIdx hH0 hH1 hH2 hStep
-    unfold cozkPreOpenCeremonyStep at hStep
+    unfold cozkOrderingEvidenceStep at hStep
     if hAb : st.aborted = true then
       simp [hAb] at hStep
     else
@@ -5731,7 +5731,7 @@ private theorem evalCoeffs_replicate_zero_tower128 :
 
 /-- **`#tooth` Non-Zero Multiplication Gate Deviation Aborts Ceremony (`tooth_cozk_nonzero_gate_delta_aborts_ceremony`)**:
     When a faulted outer-MPC multiplication gate produces a non-zero residual
-    `gateDeltas = [towerOne 7, towerZero 7, towerZero 7]`, `cozkPreOpenCeremonyStep`
+    `gateDeltas = [towerOne 7, towerZero 7, towerZero 7]`, `cozkOrderingEvidenceStep`
     evaluates `batchDeviationPoly` at non-zero sacrifice coin `coin1 = towerOne 7`, detects
     `towerOne 7 ≠ towerZero 7`, rejects with `.preOpenSacrificeFailed`, and irreversibly sets `aborted = true`! -/
 theorem tooth_cozk_nonzero_gate_delta_aborts_ceremony (H : Hash) :
@@ -5745,7 +5745,7 @@ theorem tooth_cozk_nonzero_gate_delta_aborts_ceremony (H : Hash) :
     let st : CoZkCeremonyState :=
       { sessionTag := [0x09], phase := .rootFrozen [0xAA] coin1 coin2, aborted := false }
     let faultedGates : List Tower128 := [towerOne 7, towerZero 7, towerZero 7]
-    cozkPreOpenCeremonyStep H st (.verifyPreOpenSacrifice rss faultedGates) =
+    cozkOrderingEvidenceStep H st (.verifyPreOpenSacrifice rss faultedGates) =
       .rejected { st with phase := .aborted, aborted := true } .preOpenSacrificeFailed := by
   intro s0 s1 s2 rss coin1 coin2 st faultedGates
   have hRssB : (verifyRssActiveOpen rss == some 0) = true := by decide
@@ -5760,12 +5760,12 @@ theorem tooth_cozk_nonzero_gate_delta_aborts_ceremony (H : Hash) :
   have hNe10 : (towerOne 7 == towerZero 7) = false := by decide
   have hDevB : (batchDeviationPoly faultedGates coin1 == towerZero 7) = false := by
     rw [hDevFault]; exact hNe10
-  unfold cozkPreOpenCeremonyStep
+  unfold cozkOrderingEvidenceStep
   dsimp only [st]
   rw [hRssB, hDevB]
   rfl
 
-/-- Non-trivial inhabitedness witness for `cozkPreOpenCeremonyStep` and
+/-- Non-trivial inhabitedness witness for `cozkOrderingEvidenceStep` and
     `cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release` over concrete 256-bit `shake256Xof 32`,
     non-zero 2-of-3 RSS shares summing to `0`, distinct non-zero `Tower128` sacrifice coins `coin1 ≠ coin2`,
     and a non-empty 3-gate multiplication batch (`checkedGateCount = 3`). -/
@@ -5781,7 +5781,7 @@ theorem witness_cozk_pre_open_ceremony_inhabited :
     coin2 ≠ towerZero 7 ∧
     coin1 ≠ coin2 ∧
     ∃ trace stFinal root,
-      ValidCustodyTrace (cozkPreOpenCeremonyStep H) st₀ trace stFinal ∧
+      ValidCustodyTrace (cozkOrderingEvidenceStep H) st₀ trace stFinal ∧
       traceApprovedOutputs trace =
         [.ceremonyRootFrozen root,
          .preOpenSacrificePassed root 3,
@@ -5812,9 +5812,9 @@ theorem witness_cozk_pre_open_ceremony_inhabited :
   let s1 : CoZkCeremonyState := { sessionTag := [0x09], phase := .rootFrozen root coin1 coin2, aborted := false }
   let s2 : CoZkCeremonyState := { sessionTag := [0x09], phase := .sacrificeVerified root, aborted := false }
   let s3 : CoZkCeremonyState := { sessionTag := [0x09], phase := .headsReleased root, aborted := false }
-  have hStep1 : cozkPreOpenCeremonyStep H st₀ (.freezeCeremonyRoot [0x01] [[0x02]] coin1 coin2) =
+  have hStep1 : cozkOrderingEvidenceStep H st₀ (.freezeCeremonyRoot [0x01] [[0x02]] coin1 coin2) =
       .accepted s1 (.ceremonyRootFrozen root) := rfl
-  have hStep2 : cozkPreOpenCeremonyStep H s1 (.verifyPreOpenSacrifice honestRss honestGates) =
+  have hStep2 : cozkOrderingEvidenceStep H s1 (.verifyPreOpenSacrifice honestRss honestGates) =
       .accepted s2 (.preOpenSacrificePassed root 3) := by
     have hRssB : (verifyRssActiveOpen honestRss == some 0) = true := by decide
     have hDev1 : batchDeviationPoly honestGates coin1 = towerZero 7 :=
@@ -5825,14 +5825,14 @@ theorem witness_cozk_pre_open_ceremony_inhabited :
       beq_iff_eq.mpr hDev1
     have hDevB2 : (batchDeviationPoly honestGates coin2 == towerZero 7) = true :=
       beq_iff_eq.mpr hDev2
-    unfold cozkPreOpenCeremonyStep
+    unfold cozkOrderingEvidenceStep
     dsimp only [s1, s2]
     rw [hRssB, hDevB1, hDevB2]
     rfl
-  have hStep3 : cozkPreOpenCeremonyStep H s2 (.releaseChallengedHeads root [0x77]) =
+  have hStep3 : cozkOrderingEvidenceStep H s2 (.releaseChallengedHeads root [0x77]) =
       .accepted s3 (.challengedHeadsReleased root [0x77]) := by
     have hRootB : (root == root) = true := uint8List_beq_self root
-    unfold cozkPreOpenCeremonyStep
+    unfold cozkOrderingEvidenceStep
     dsimp only [s2, s3]
     rw [hRootB]
     rfl
@@ -5842,31 +5842,253 @@ theorem witness_cozk_pre_open_ceremony_inhabited :
           s3, root, .consAccepted hStep1 (.consAccepted hStep2 (.consAccepted hStep3 (.nil s3))),
           by rfl, by rfl, by rfl⟩
 
-/-! ### Compositional `SimulationSpine` `PartyMachine` Exports -/
+/-! ## Operational custody boundary (Wave 2)
 
-/-- `SimulationSpine` `PartyMachine` packaging `ftsSpnStep` (`qsag-fts`). -/
-def ftsSpnPartyMachine (H : Hash) : PartyMachine FtsEpochGuardState FtsSpnInput FtsSpnEvent :=
-  PartyMachine.ofCustodyStep (ftsSpnStep H)
+The preceding `*EvidenceStep` machines are private-state mathematical models, retained
+for source compatibility of their algebraic theorems and negative examples. Their
+trace pairs contain secret inputs and are NOT network transcripts. In particular the
+old scalar SPN, bitmap policy, and caller-selected sacrifice coins are not Rust
+refinements. Only the operational machines below are packaged as party machines.
 
-/-- `SimulationSpine` `PartyMachine` packaging `hdZeroTestStep` (`qsag-hd`). -/
-def hdZeroTestPartyMachine (H : Hash) (n dim : Nat) :
-    PartyMachine (HdFamilyState n dim) (HdZeroTestInput n dim) HdZeroTestEvent :=
-  PartyMachine.ofCustodyStep (hdZeroTestStep H n dim)
+Secrecy here means no additional disclosure beyond explicitly declassified signatures,
+commitments and masked openings. Unconditional independence of signatures from signing
+keys would be false. Hash/MAC security and independent private randomness are separate
+cryptographic assumptions, never inferred from byte length or a query counter.
+-/
 
-/-- `SimulationSpine` `PartyMachine` packaging `policyGuardStep` (`qsag-policy`). -/
-def policyGuardPartyMachine :
-    PartyMachine StatefulPolicyGuard TransactionIntent ApprovedIntentEnvelope :=
-  PartyMachine.ofCustodyStep policyGuardStep
+/-- Sparse sorted set with an inclusive permanent eviction floor (Rust's two burn sets). -/
+structure PolicyBurnSet where
+  floor : Option Nat := none
+  values : List Nat := []
+  deriving DecidableEq, Repr
 
-/-- `SimulationSpine` `PartyMachine` packaging `policyWatermarkGuardStep` (`qsag-policy` watermark + sliding window). -/
-def policyWatermarkGuardPartyMachine :
-    PartyMachine PolicyWatermarkGuard PolicyWatermarkInput PolicyWatermarkEvent :=
-  PartyMachine.ofCustodyStep policyWatermarkGuardStep
+def policyBurned (s : PolicyBurnSet) (v : Nat) : Prop :=
+  (∃ f, s.floor = some f ∧ v ≤ f) ∨ v ∈ s.values
 
-/-- `SimulationSpine` `PartyMachine` packaging `cozkPreOpenCeremonyStep` (`qsag-migrate`). -/
-def cozkCeremonyPartyMachine (H : Hash) :
-    PartyMachine CoZkCeremonyState CoZkCeremonyInput CoZkCeremonyEvent :=
-  PartyMachine.ofCustodyStep (cozkPreOpenCeremonyStep H)
+instance (s : PolicyBurnSet) (v : Nat) : Decidable (policyBurned s v) := by
+  unfold policyBurned
+  cases s.floor <;> simp <;> infer_instance
 
-end Qsag
-end
+def policyInsertSorted (v : Nat) : List Nat → List Nat
+  | [] => [v]
+  | x :: xs => if v < x then v :: x :: xs else if v = x then x :: xs
+              else x :: policyInsertSorted v xs
+
+def policyBurn (cap : Nat) (s : PolicyBurnSet) (v : Nat) : PolicyBurnSet :=
+  let xs := policyInsertSorted v s.values
+  if xs.length ≤ cap then { s with values := xs }
+  else match xs with
+    | [] => s
+    | x :: rest => { floor := some (max (s.floor.getD 0) x), values := rest }
+
+private theorem policyInsertSorted_mem (v x : Nat) (xs : List Nat) :
+    x ∈ policyInsertSorted v xs ↔ x = v ∨ x ∈ xs := by
+  induction xs with
+  | nil => simp [policyInsertSorted]
+  | cons y ys ih =>
+    simp only [policyInsertSorted]
+    split
+    · simp [List.mem_cons, or_assoc]
+    · split
+      · rename_i h
+        subst v
+        simp [List.mem_cons, or_assoc, or_self]
+      · simp [List.mem_cons, ih, or_left_comm, or_assoc]
+
+/-- Eviction cannot resurrect an old nonce or session, even if the caller supplied
+    an already burned value. This lemma does not assume a sorted input state. -/
+theorem policyBurn_persistent (cap : Nat) (s : PolicyBurnSet) (v x : Nat)
+    (h : policyBurned s x) : policyBurned (policyBurn cap s v) x := by
+  unfold policyBurn
+  split
+  · rcases h with h | h
+    · exact Or.inl h
+    · exact Or.inr ((policyInsertSorted_mem v x s.values).2 (Or.inr h))
+  · cases he : policyInsertSorted v s.values with
+    | nil => exact h
+    | cons y ys =>
+      rcases h with ⟨f, hf, hx⟩ | hx
+      · apply Or.inl
+        refine ⟨max (s.floor.getD 0) y, rfl, ?_⟩
+        rw [hf]
+        exact Nat.le_trans hx (Nat.le_max_left f y)
+      · have hm := (policyInsertSorted_mem v x s.values).2 (Or.inr hx)
+        rw [he] at hm
+        rcases List.mem_cons.mp hm with hxy | htail
+        · exact Or.inl ⟨_, rfl, hxy ▸ Nat.le_max_right _ _⟩
+        · exact Or.inr htail
+
+structure InitiatorPeerTag where
+  approver : Nat
+  tag : List UInt8
+  deriving DecidableEq, Repr
+
+structure PolicyWindowAuthorization where
+  newWindow : Nat
+  mac : List UInt8
+  deriving DecidableEq, Repr
+
+/-- Enrolled keys are state, not values provided by an unauthenticated request. -/
+structure AuthenticatedPolicyState where
+  rules : StatefulPolicyGuard
+  party : Nat
+  chain : Nat
+  suite : Nat
+  pairwiseKeys : List (Nat × List UInt8)
+  windowKey : List UInt8
+  policyId : List UInt8
+  forbidSelfApproval : Bool := true
+  externalSpendFloor : Nat := 0
+  nonceBurns : PolicyBurnSet := {}
+  sessionBurns : PolicyBurnSet := {}
+  burnCapacity : Nat := 256
+  deriving DecidableEq, Repr
+
+def custodyDomain (s : String) : List UInt8 := s.toUTF8.toList
+
+def policyInitiatorAuthDigest (tx : TransactionIntent) : List UInt8 :=
+  cshake256Bytes (custodyDomain "QSAG.POLICY.INITIATOR_AUTH_PREIMAGE.V1")
+    (encodeFramedU64Le
+      [tx.policy_digest, be 8 tx.chain_id, be 2 tx.suite_tag, tx.recipient_hrp,
+       be 1 tx.recipient_version, be 2 tx.recipient_suite_tag, be 1 tx.recipient_kind,
+       tx.recipient, be 16 tx.amount_units, be 16 tx.rolling_window_spent,
+       be 8 tx.window_id, be 32 tx.nonce, be 8 tx.timestamp_secs,
+       be 2 tx.initiator_party, tx.approver_bytes, tx.payload_digest,
+       tx.authority_digest, tx.rolling_window_accumulator, tx.signing_key_id,
+       be 8 tx.policy_revision, tx.signing_context_digest, tx.session_id, tx.quorum_bytes])
+
+def policyInitiatorTag (key : List UInt8) (approver : Nat) (tx : TransactionIntent) : List UInt8 :=
+  cshake256Bytes (custodyDomain "QSAG.POLICY.INITIATOR_AUTH_MAC.V1")
+    (encodeFramedU64Le [key, be 2 tx.initiator_party, be 2 approver, policyInitiatorAuthDigest tx])
+
+def policyWindowTag (g : AuthenticatedPolicyState) (next : Nat) : List UInt8 :=
+  cshake256Bytes (custodyDomain "QSAG.POLICY.WINDOW_ADVANCE/v1")
+    (encodeFramedU64Le [g.windowKey, g.policyId, be 8 g.rules.window_id, be 8 next])
+
+def encodeInitiatorTags (tags : List InitiatorPeerTag) : List UInt8 :=
+  tags.flatMap (fun t => be 2 t.approver ++ t.tag)
+
+/-- One tag for THIS approver; duplicate entries fail even when one tag is correct. -/
+def policyAuthenticatedInitiator (g : AuthenticatedPolicyState) (tx : TransactionIntent)
+    (tags : List InitiatorPeerTag) : Bool :=
+  if tx.initiator_party == g.party then !g.forbidSelfApproval
+  else match g.pairwiseKeys.find? (fun p => p.1 == tx.initiator_party) with
+    | none => false
+    | some (_, key) =>
+      match tags.filter (fun t => t.approver == g.party) with
+      | [t] => t.tag == policyInitiatorTag key g.party tx
+      | _ => false
+
+/-- Fixed digest sizes and bounded scalars are enforced at the signing boundary. -/
+def policyWireDomain (tx : TransactionIntent) : Prop :=
+  txFitsWireWidths { tx with message_digest := List.replicate 32 0 } = true ∧
+  tx.policy_digest.length = 32 ∧ tx.authority_digest.length = 32 ∧
+  tx.recipient.length = 32 ∧ tx.payload_digest.length = 32 ∧
+  tx.rolling_window_accumulator.length = 32 ∧ tx.signing_key_id.length = 32 ∧
+  tx.message_digest.length = 32 ∧ tx.signing_context_digest.length = 32 ∧
+  tx.session_id.length = 32
+
+instance (tx : TransactionIntent) : Decidable (policyWireDomain tx) :=
+  inferInstanceAs (Decidable (_ ∧ _ ∧ _ ∧ _ ∧ _ ∧ _ ∧ _ ∧ _ ∧ _ ∧ _))
+
+def policyProjectedSpend (g : AuthenticatedPolicyState) (tx : TransactionIntent) : Nat :=
+  max (max g.rules.accumulated_spend tx.rolling_window_spent) g.externalSpendFloor + tx.amount_units
+
+def PolicyAdmission (g : AuthenticatedPolicyState) (tx : TransactionIntent)
+    (tags : List InitiatorPeerTag) : Prop :=
+  policyWireDomain tx ∧
+  tx.chain_id = g.chain ∧ tx.suite_tag = g.suite ∧ tx.recipient_suite_tag = g.suite ∧
+  tx.window_id = g.rules.window_id ∧ tx.policy_digest = g.rules.pinned_policy_digest ∧
+  tx.authority_digest = g.rules.pinned_authority_digest ∧
+  tx.recipient ∈ g.rules.allowed_recipients ∧ tx.amount_units ≤ g.rules.per_tx_cap ∧
+  policyProjectedSpend g tx ≤ g.rules.velocity_window_cap ∧
+  policyProjectedSpend g tx < 256 ^ 16 ∧
+  ¬ policyBurned g.nonceBurns tx.nonce ∧
+  ¬ policyBurned g.sessionBurns (ofLE tx.session_id.reverse) ∧
+  encodeInitiatorTags tags = tx.init_mac_bytes ∧
+  policyAuthenticatedInitiator g tx tags = true
+
+instance (g : AuthenticatedPolicyState) (tx : TransactionIntent) (tags : List InitiatorPeerTag) :
+    Decidable (PolicyAdmission g tx tags) := by unfold PolicyAdmission; infer_instance
+
+inductive AuthenticatedPolicyInput where
+  | evaluate (tx : TransactionIntent) (tags : List InitiatorPeerTag)
+  | advance (authorization : PolicyWindowAuthorization)
+  deriving DecidableEq, Repr
+
+/-- Both exported policy entry points use the same authenticated production-byte path. -/
+def policyGuardStep (g : AuthenticatedPolicyState) (tx : TransactionIntent)
+    (tags : List InitiatorPeerTag) :
+    CustodyStepOutcome AuthenticatedPolicyState PolicyWatermarkEvent PolicyWatermarkReject :=
+  if PolicyAdmission g tx tags then
+    .accepted { g with
+      rules := { g.rules with accumulated_spend := policyProjectedSpend g tx }
+      nonceBurns := policyBurn g.burnCapacity g.nonceBurns tx.nonce
+      sessionBurns := policyBurn g.burnCapacity g.sessionBurns (ofLE tx.session_id.reverse) }
+      (.intentApproved tx (toCanonicalSigningBytes tx))
+  else .rejected g .unauthenticatedInitiator
+
+def policyWatermarkGuardStep (g : AuthenticatedPolicyState) (inp : AuthenticatedPolicyInput) :
+    CustodyStepOutcome AuthenticatedPolicyState PolicyWatermarkEvent PolicyWatermarkReject :=
+  match inp with
+  | .evaluate tx tags => policyGuardStep g tx tags
+  | .advance auth =>
+    if g.rules.window_id < auth.newWindow ∧ auth.newWindow < 256 ^ 8 ∧
+       auth.mac = policyWindowTag g auth.newWindow then
+      .accepted { g with rules := { g.rules with window_id := auth.newWindow, accumulated_spend := 0 }
+                          externalSpendFloor := 0 }
+        (.epochAdvanced auth.newWindow 0)
+    else .rejected g .epochAdvanceTooEarly
+
+theorem policy_approval_requires_authentication (g g' : AuthenticatedPolicyState)
+    (tx : TransactionIntent) (tags : List InitiatorPeerTag) (ev : PolicyWatermarkEvent)
+    (h : policyGuardStep g tx tags = .accepted g' ev) :
+    PolicyAdmission g tx tags ∧ ev = .intentApproved tx (toCanonicalSigningBytes tx) := by
+  unfold policyGuardStep at h
+  split at h
+  · rename_i ha
+    cases h
+    exact ⟨ha, rfl⟩
+  · cases h
+
+/-- The byte-binding theorem's domain now follows from actual acceptance. -/
+def policy_accepted_bytes_binding (g₁ g₂ s₁ s₂ : AuthenticatedPolicyState)
+    (tx₁ tx₂ : TransactionIntent) (tags₁ tags₂ : List InitiatorPeerTag)
+    (ev₁ ev₂ : PolicyWatermarkEvent)
+    (h₁ : policyGuardStep g₁ tx₁ tags₁ = .accepted s₁ ev₁)
+    (h₂ : policyGuardStep g₂ tx₂ tags₂ = .accepted s₂ ev₂)
+    (heq : toCanonicalSigningBytes tx₁ = toCanonicalSigningBytes tx₂) :
+    PSum (HashCollisionWitness (cshake256Bytes txIntentDomainTag))
+      (tx₁.policy_digest = tx₂.policy_digest ∧
+       { tx₁ with message_digest := List.replicate 32 0 } =
+       { tx₂ with message_digest := List.replicate 32 0 }) :=
+  let a := (policy_approval_requires_authentication _ _ _ _ _ h₁).1.1
+  let b := (policy_approval_requires_authentication _ _ _ _ _ h₂).1.1
+  toCanonicalSigningBytes_binding_or_collision tx₁ tx₂ a.2.1 b.2.1 a.1 b.1 heq
+
+theorem policy_authorized_rotation_preserves_replay (g g' : AuthenticatedPolicyState)
+    (a : PolicyWindowAuthorization) (ev : PolicyWatermarkEvent)
+    (h : policyWatermarkGuardStep g (.advance a) = .accepted g' ev) :
+    g.rules.window_id < g'.rules.window_id ∧ a.mac = policyWindowTag g a.newWindow ∧
+    g'.nonceBurns = g.nonceBurns ∧ g'.sessionBurns = g.sessionBurns := by
+  unfold policyWatermarkGuardStep at h
+  split at h
+  · rename_i ha
+    cases h
+    exact ⟨ha.1, ha.2.2, rfl, rfl⟩
+  · cases h
+
+/-- #tooth: an authenticated old-window authorization cannot be replayed in its new window. -/
+theorem tooth_policy_rotation_not_timestamp (g : AuthenticatedPolicyState)
+    (a : PolicyWindowAuthorization) (h : a.newWindow ≤ g.rules.window_id) :
+    policyWatermarkGuardStep g (.advance a) = .rejected g .epochAdvanceTooEarly := by
+  simp [policyWatermarkGuardStep, Nat.not_lt.mpr h]
+
+/-- #tooth: duplicate matching approver tags are rejected, even if valid. -/
+theorem tooth_policy_duplicate_initiator_tags (g : AuthenticatedPolicyState)
+    (tx : TransactionIntent) (key : List UInt8) (hparty : tx.initiator_party ≠ g.party)
+    (hkey : g.pairwiseKeys.find? (fun p => p.1 == tx.initiator_party) = some (tx.initiator_party, key)) :
+    policyAuthenticatedInitiator g tx
+      [⟨g.party, policyInitiatorTag key g.party tx⟩,
+       ⟨g.party, policyInitiatorTag key g.party tx⟩] = false := by
+  simp [policyAuthenticatedInitiator, hparty, hkey]

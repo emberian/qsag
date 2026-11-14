@@ -50,7 +50,8 @@ Constructive Lean 4.35 development for the multi-round QROM Fiat–Shamir reduct
    step `qrom_unitary_measure_reprogram_rbr_step_projected` (output register ≠ query point), its
    oracle-dependent form `qrom_adaptive_oracle_dependent_rbr_step`, and the `k`-round union
    `qrom_multiRound_measure_reprogram_union` (`(2 Q + 1)^2 ∑_r badCard_r / 2^w`, for a FIXED
-   background oracle; averaging over the oracle is not formalized). The concrete budget
+   background oracle), with uniform-oracle resampling and the averaged round bound
+   `qrom_uniform_oracle_round_bound`. The concrete budget
    `multiRoundFsQrom_soundness_bound` instantiates round bounds DERIVED from the deployed
    `whirAffineStageWitnesses 24 true` rows (`hemV6FiveRoundRbrBounds_eq_deployed`).
 
@@ -2712,6 +2713,96 @@ theorem qrom_uniform_oracle_flip_mass {cardX w cardAnc Q : Nat}
   exact uniformOracleSum_resample w cardX x (fun H =>
     if (doomed H x && live H x) = true then
       QVec.queryMassOn (fun z => decide (x = proj z)) (runQuantumAdv A H) else 0)
+
+/-- Averaged QROM round bound with a uniformly random oracle. The denominator is exactly
+    the number of oracles times the adversary's oracle-independent squared norm. -/
+theorem qrom_uniform_oracle_round_bound {cardX w cardAnc Q : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (round : (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin cardX → Fin cardX)
+    (doomed live : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (bad : Nat)
+    (hp : ∀ H, (round H).proj = proj)
+    (hd : ∀ H, (round H).isDoomedAt = doomed)
+    (hl : ∀ H, (round H).isLiveAfter = live)
+    (hb : ∀ H, (round H).badCard = bad) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => qromOrdinaryFlipMass A H proj doomed live),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * bad, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have hpoint : ∀ H, qromRoundFlipMass A H (round H) ≤
+      (2 * Q + 1) ^ 2 * bad *
+        (prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init) := by
+    intro H
+    have h := qrom_multiRound_measure_reprogram_union A H [round H]
+    change qromRoundFlipMass A H (round H) * 2 ^ w ≤
+      (2 * Q + 1) ^ 2 * (round H).badCard *
+        (2 ^ w * QVec.stateNormSq (runQuantumAdv A H)) at h
+    rw [hb, runQuantumAdv_normSq] at h
+    apply Nat.le_of_mul_le_mul_right (c := 2 ^ w) _ (Nat.two_pow_pos w)
+    simpa only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm] using h
+  have havg := uniformOracleSum_le w cardX _ _ hpoint
+  rw [qrom_uniform_oracle_flip_mass A round proj doomed live hp hd hl,
+    uniformOracleSum_const] at havg
+  dsimp only [RatBound.le]
+  simpa only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm] using havg
+
+/-- Uniform-oracle multi-round union bound. Each round may depend on the entire oracle;
+    only its projection and predicate definitions are fixed across background-oracle choices.
+    The adversary remains fully adaptive, and the reduction pays the quadratic loss once. -/
+theorem qrom_uniform_oracle_multiRound_union {cardX w cardAnc Q k : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (round : Fin k → (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin k → Fin cardX → Fin cardX)
+    (doomed live : Fin k → (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (bad : Fin k → Nat)
+    (hp : ∀ r H, (round r H).proj = proj r)
+    (hd : ∀ r H, (round r H).isDoomedAt = doomed r)
+    (hl : ∀ r H, (round r H).isLiveAfter = live r)
+    (hb : ∀ r H, (round r H).badCard = bad r) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => qsum k (fun r =>
+          qromOrdinaryFlipMass A H (proj r) (doomed r) (live r))),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * qsum k bad, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qsum_le_qsum (fun r => qrom_uniform_oracle_round_bound A (round r)
+    (proj r) (doomed r) (live r) (bad r) (hp r) (hd r) (hl r) (hb r))
+  dsimp only [RatBound.le] at h ⊢
+  rw [uniformOracleSum_qsum]
+  simpa only [qsum_mul_right, qsum_mul_left] using h
+
+/-- Expected adversary success over a uniformly random oracle. A protocol supplies the
+    ordinary round-flip covering property; averaging and measure-and-reprogram then give the
+    same single quadratic loss as the per-oracle union theorem. -/
+theorem qrom_uniform_oracle_success_bound {cardX w cardAnc Q k : Nat}
+    (A : QuantumAdv cardX w cardAnc Q)
+    (accept : (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (round : Fin k → (H : Fin cardX → BitVec w) → QromRbrRound cardX w H)
+    (proj : Fin k → Fin cardX → Fin cardX)
+    (doomed live : Fin k → (Fin cardX → BitVec w) → Fin cardX → Bool)
+    (bad : Fin k → Nat)
+    (hp : ∀ r H, (round r H).proj = proj r)
+    (hd : ∀ r H, (round r H).isDoomedAt = doomed r)
+    (hl : ∀ r H, (round r H).isLiveAfter = live r)
+    (hb : ∀ r H, (round r H).badCard = bad r)
+    (hCover : ∀ H, QVec.queryMassOn (accept H) (runQuantumAdv A H) ≤
+      qsum k (fun r => qromOrdinaryFlipMass A H (proj r) (doomed r) (live r))) :
+    let norm := prefixScale A Q (Nat.le_refl Q) * QVec.stateNormSq A.init
+    RatBound.le
+      ⟨uniformOracleSum w cardX (fun H => QVec.queryMassOn (accept H) (runQuantumAdv A H)),
+        (2 ^ w) ^ cardX * norm,
+        Nat.mul_pos (Nat.pow_pos (Nat.two_pow_pos w))
+          (Nat.mul_pos (prefixScale_pos A Q (Nat.le_refl Q)) A.h_init_pos)⟩
+      ⟨(2 * Q + 1) ^ 2 * qsum k bad, 2 ^ w, Nat.two_pow_pos w⟩ := by
+  have h := qrom_uniform_oracle_multiRound_union A round proj doomed live bad hp hd hl hb
+  exact Nat.le_trans (Nat.mul_le_mul_right (2 ^ w)
+    (uniformOracleSum_le w cardX _ _ hCover)) h
 
 /-! ### §3.2 `k`-Round RBR Induction, Online Merkle Extraction & Concrete `Hem` v6 (`k = 5`) -/
 

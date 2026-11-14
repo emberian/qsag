@@ -2,6 +2,12 @@ module
 public import QsagVerified.Proofs.PantsAndQuorumGuards
 public import Qsag.HashSigs
 
+/-!
+This file welds the WOTS+C digit predicate, including both acceptance and rejection.
+It does not identify a SHAKE digest, a hash-chain signature, or a streaming sponge output.
+Those require byte-level absorb/finalize/squeeze refinement in addition to the permutation.
+-/
+
 public section
 namespace qsag_verified.proofs
 open Aeneas Aeneas.Std Result
@@ -43,4 +49,19 @@ theorem tooth_wotsc256_zero_digest_rejected_by_qsag :
     simp only [Qsag.checkTargetSum, qsag_sumDigits_eq_sum]
     decide
   exact ⟨(wotsc256_verify_refines_qsag _).trans (congrArg Result.ok h), h⟩
+/-- Exact acceptance boundary, exposing all canonical checker conditions. -/
+theorem wotsc256_accept_iff_qsag (digest : Array Std.U8 32#usize) :
+    pants_and_quorum_guards.verified_wotsc256_verify_sum digest = .ok true ↔
+      (pureWotsC256Digits digest).length = 128 ∧
+      (∀ d ∈ pureWotsC256Digits digest, d < 4) ∧
+      Qsag.sumDigits (pureWotsC256Digits digest) = 192 := by
+  rw [wotsc256_verify_refines_qsag, Result.ok.injEq, Qsag.checkTargetSum_iff]
+
+/-- Rejection agrees as well as acceptance; no failure or divergence is hidden by
+an implication that only considers successful calls. -/
+theorem wotsc256_reject_iff_qsag (digest : Array Std.U8 32#usize) :
+    pants_and_quorum_guards.verified_wotsc256_verify_sum digest = .ok false ↔
+      Qsag.checkTargetSum 4 128 192 (pureWotsC256Digits digest) = false := by
+  rw [wotsc256_verify_refines_qsag, Result.ok.injEq]
+
 end qsag_verified.proofs

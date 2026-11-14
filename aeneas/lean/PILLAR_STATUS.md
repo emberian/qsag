@@ -29,6 +29,10 @@ remaining work, rather than treating the entire pillar as complete.
   bind equalities; it is not an assumed replacement for the generated function.
 - `RealSpecBeltWeld.lean`: extracted grants refine the canonical Jorts `CustodiansMask`
   cardinality and intersection algebra, with the authenticated history attached to members.
+- `RealSpecGuardBoundary.lean`: a concrete cross-package witness shows the monotone-nonce
+  MIR guard rejecting nonce 1 from last nonce 2 while the canonical used-nonce-list model
+  with burned list `[2]` accepts it. The simple field-for-field mapping cannot support
+  matching rejection behavior.
 - `CallerContracts.lean`: separate ML-DSA norm/commitment obligations, FTS round-count and
   residual obligations, and RSS residual obligations appear in multi-turn release theorems.
 - Existing Goldilocks welds remain in the default weld. `QsagMirProofs` exports the new
@@ -37,34 +41,30 @@ remaining work, rather than treating the entire pillar as complete.
 
 ## Build and axiom gates
 
-All Lean compilation was performed on `bb2`, in the isolated `qsag-pillar-mir` checkout, with
+All Lean compilation was performed on the designated Linux build host in an isolated checkout, with
 `SWARM_MEM_MAX=12G timeout --kill-after=10s 600s swarm-build lake build --wfail`.
 The wrapper enforces the memory cap. No RAM-backed scratch directory was used.
 
 The default build includes `QsagSpecWeld`. On the verified snapshot:
 
-- Default build: 76 jobs, successful.
-- `AuditMirAxioms`: 4,825 declarations, zero rejected.
-- `QsagSpecWeld`: 81 declarations, zero rejected.
+- Default build: 86 jobs, successful.
+- `AuditMirAxioms`: 4,892 declarations, zero rejected.
+- `QsagSpecWeld`: 151 declarations, zero rejected.
 - Axiom allowlist: `propext`, `Quot.sound` only; negative controls remain active.
-- Import coverage: 39 proof source modules, zero missing gates.
+- Import coverage: 40 proof source modules, zero missing gates.
 
 The census found and removed two imported nonconstructive dependencies during development:
 `BitVec.setWidth_setWidth` in the GF(256) simplification and `List.nodup_range` in the
 64-slot signer proof. The former is excluded from that simplification; the latter is
 replaced with a direct kernel-checked finite proof. The axiom policy itself was not relaxed.
 
-## Separate RSS gate
+## Full RSS integration
 
-`AuthenticatedBeltAndRealSpecWeld.lean` still imports `Qsag.MirSpecBridge`, which imports
-`Qsag.ThresholdMlDsaAndToprf`. It has its own `QsagRssSpecWeld` target and census under the
-same axiom policy. It is not imported by the default targets while that upstream import
-cone fails. This is a build-dependency separation, not a successful final RSS audit.
-
-The earlier remote snapshot failed at `ThresholdMlDsaAndToprf.lean:10794:53`.
-Sibling-owned spec files were not modified to bypass this failure. When the upstream
-module is repaired, build `lake build --wfail QsagRssSpecWeld`, then integrate that root
-into the default gate if its dependency cone is to be mandatory.
+The earlier snapshot failed in the sibling-owned `ThresholdMlDsaAndToprf` module.
+The final upstream snapshot compiles that module and `MirSpecBridge`. The existing
+RSS `ForwardSim` weld is therefore back in `QsagSpecWeld`, `QsagMirProofs`, and the
+mandatory import-all `AuditMirAxioms` census. The temporary separate gate was removed;
+no proof module is relegated to an optional audit target.
 
 ## Remaining proof work
 
@@ -73,15 +73,14 @@ into the default gate if its dependency cone is to be mandatory.
 2. Weld the streaming `Shake256Sponge` absorb/squeeze/padding state to the canonical sponge.
    The full permutation weld does not establish the streaming sponge refinement.
 3. Construct canonical guard simulations for `EpochLatch` and `StatefulVelocityGuard`.
-   Existing model designs differ; the new work does not assert their equivalence.
+   The velocity rejection mismatch is now a proved counterexample; an environment contract
+   or a canonical specification change is needed for that particular mapping.
 4. Relate the local authenticated quorum guard to the full Jorts network state machine
    through an appropriate environment/composition relation. The certificate-mask weld is
    not a whole-machine `ForwardSim` to the different `BeltLatch` transition system.
 5. Extend semantic caller contracts to HD residual derivation, the legacy poison latch's
    `check_ok`, and the unauthenticated core's WAL flag. Policy pins require trusted
    provisioning; BDOZ operands must be connected to the external wire transcript.
-6. Complete the separate RSS dependency build and its census before claiming one green
-   default audit over every proof module, including the old RSS/MirSpecBridge weld.
 
 None of these results establishes linkage to a production binary or fresh extraction
 parity. Generated `Funs.lean`/`Types.lean`, challenge files, and sibling crate/spec sources

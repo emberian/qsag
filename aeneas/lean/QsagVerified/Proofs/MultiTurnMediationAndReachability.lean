@@ -1307,7 +1307,6 @@ def beltObsOfAuthorize :
   | .Ok g => .granted g
   | .Err _ => .rejected
 
-@[expose]
 def authProposeBitmap (st : authenticated_belt.VerifiedBeltQuorumGuard) (ep : Std.U64)
     (inner : pants_and_quorum_guards.BeltQuorumCore)
     (cr : core.result.Result Unit pants_and_quorum_guards.PantsGuardError) : Std.U64 :=
@@ -1318,7 +1317,6 @@ def authProposeBitmap (st : authenticated_belt.VerifiedBeltQuorumGuard) (ep : St
     | .Ok _ => 0#u64
     | .Err _ => st.ack_bitmap
 
-@[expose]
 def authProposeResult (valid : Bool)
     (cr : core.result.Result Unit pants_and_quorum_guards.PantsGuardError) :
     core.result.Result Unit authenticated_belt.BeltAuthError :=
@@ -3201,5 +3199,34 @@ theorem inhabited_bdoz_burn_trace (s : tower.BdozVerifierSession2Lane)
     { alpha_lanes := Array.make 2#usize [0#u128, 0#u128], burned := true }
     batch ⟨[], by decide⟩).1 rfl
   exact ⟨_, .call h1 (.call h2 (.nil _)), rfl⟩
+
+
+/-- The extracted verifier has no successful-opening consumption transition: every
+accepted opening can be replayed any number of times, with exactly the same state.
+This is a counterexample to imposing a no-replay interpretation on `BdozBurnTrace`. -/
+theorem bdoz_accepted_opening_replays
+    {s s' : tower.BdozVerifierSession2Lane}
+    {batch : tower.BdozCommittedBatchOpening2Lane}
+    {openings : Slice tower.BdozWireOpening2Lane}
+    (h : tower.verify_mac_2lane_with_burn s batch openings = .ok (s', true))
+    (k : Nat) :
+    BdozBurnTrace s (List.replicate k (batch, openings)) (List.replicate k true) s := by
+  have hs := (bdoz_burn_step_inv h).1 rfl
+  rw [hs.2] at h
+  induction k with
+  | zero => exact .nil s
+  | succ k ih =>
+    simpa only [List.replicate_succ] using BdozBurnTrace.call h ih
+
+/-- The generated constructor has no old-state argument or session tombstone. Even
+for a poisoned session ID it returns a clean round-one session. Cross-session no-reset
+therefore needs an extracted registry, not a stronger theorem about this constructor. -/
+theorem rss_constructor_reinitializes_poisoned_id
+    (old : rss_cut_session.RssCutGateSession) (mask : Array Std.U8 32#usize)
+    (_hpoisoned : old.poisoned = true) :
+    ∃ fresh, rss_cut_session.RssCutGateSession.new_round1_committed old.session_id mask =
+      .ok fresh ∧ fresh.session_id = old.session_id ∧ fresh.poisoned = false ∧
+      fresh.phase = .Round1MaskCommitted := by
+  exact ⟨_, rfl, rfl, rfl, rfl⟩
 
 end qsag_verified.proofs

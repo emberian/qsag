@@ -17,3 +17,14 @@ qsag-asm = { path = "../qsag-asm", default-features = false }
 [dev-dependencies]
 # Reference implementation whose internal matrix is analysed by its own unit tests.
 qsag-accel = { path = "../qsag-accel" }
+qsag-core = { path = "../qsag-core", features = ["std"] }
+qsag-fts = { path = "../qsag-fts", features = ["std"] }
+qsag-quorum = { path = "../qsag-quorum", features = ["std"] }
+
+[[example]]
+name = "mock_solana_alpenglow"
+required-features = ["std"]
+
+[[example]]
+name = "mock_ethereum_beam"
+required-features = ["std"]

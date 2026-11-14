@@ -4036,15 +4036,15 @@ def whirAffineEqualDegreeCommitFoldBound (w : WhirAffineWitness) : RatBound :=
     (before per-stage PoW): the probability `(A + s_i)_{q_i} / (n)_{q_i}` that `q_i` DISTINCT
     uniformly sampled fibers all land in a set of `A + s_i` out of `n` fibers. -/
 def whirAffinePureQueryBound (w : WhirAffineWitness) (hq : w.queries ≤ w.n) : RatBound :=
-  ⟨fallingFactorial (w.A + w.sFolds) w.queries, fallingFactorial w.n w.queries,
-   fallingFactorial_pos w.n w.queries hq⟩
+  ⟨affineFallingFactorial (w.A + w.sFolds) w.queries, affineFallingFactorial w.n w.queries,
+   affineFallingFactorial_pos w.n w.queries hq⟩
 
 /-- Composed `[CWYZ26]` affine WHIR stage query-plus-PoW bound
     `(A + s_i)_{q_i} / ((n)_{q_i} * 2 ^ powBits)`. -/
 def whirAffineStageBound (w : WhirAffineWitness) (hq : w.queries ≤ w.n) (powBits : Nat) : RatBound :=
-  ⟨fallingFactorial (w.A + w.sFolds) w.queries,
-   fallingFactorial w.n w.queries * 2 ^ powBits,
-   Nat.mul_pos (fallingFactorial_pos w.n w.queries hq) (Nat.two_pow_pos powBits)⟩
+  ⟨affineFallingFactorial (w.A + w.sFolds) w.queries,
+   affineFallingFactorial w.n w.queries * 2 ^ powBits,
+   Nat.mul_pos (affineFallingFactorial_pos w.n w.queries hq) (Nat.two_pow_pos powBits)⟩
 
 /-- A pure query bound strictly beyond `queryTargetBits` gives the PoW-ground stage bound
     `queryTargetBits + powBits` bits. -/

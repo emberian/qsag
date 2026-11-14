@@ -1,0 +1,100 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V compute kernel for `KernelSlot::BatchKeccakF1600`.
+// Executes 24-round FIPS 202 `Keccak-f[1600]` in-place across `num_states` 25-lane states.
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer StatesBuf {
+    uint64_t words[];
+} states_buf;
+
+layout(push_constant) uniform PushConsts {
+    uint num_states;
+    uint base_state;
+    uint _pad0;
+    uint _pad1;
+} pc;
+
+const uint64_t KECCAK_RC[24] = uint64_t[24](
+    0x0000000000000001ul, 0x0000000000008082ul, 0x800000000000808aul, 0x8000000080008000ul,
+    0x000000000000808bul, 0x0000000080000001ul, 0x8000000080008081ul, 0x8000000000008009ul,
+    0x000000000000008aul, 0x0000000000000088ul, 0x0000000080008009ul, 0x000000008000000aul,
+    0x000000008000808bul, 0x800000000000008bul, 0x8000000000008089ul, 0x8000000000008003ul,
+    0x8000000000008002ul, 0x8000000000000080ul, 0x000000000000800aul, 0x800000008000000aul,
+    0x8000000080008081ul, 0x8000000000008080ul, 0x0000000080000001ul, 0x8000000080008008ul
+);
+
+const uint KECCAK_RHO[24] = uint[24](
+    1u, 3u, 6u, 10u, 15u, 21u, 28u, 36u, 45u, 55u, 2u, 14u,
+    27u, 41u, 56u, 8u, 25u, 43u, 62u, 18u, 39u, 61u, 20u, 44u
+);
+
+const uint KECCAK_PI[24] = uint[24](
+    10u, 7u, 11u, 17u, 18u, 3u, 5u, 16u, 8u, 21u, 24u, 4u,
+    15u, 23u, 19u, 13u, 12u, 2u, 20u, 14u, 22u, 9u, 6u, 1u
+);
+
+uint64_t rotl64(uint64_t x, uint r) {
+    return (x << r) | (x >> (64u - r));
+}
+
+void main() {
+    uint idx = pc.base_state + gl_GlobalInvocationID.x;
+    if (idx >= pc.num_states) {
+        return;
+    }
+
+    uint base = idx * 25u;
+    uint64_t st[25];
+    for (uint i = 0u; i < 25u; ++i) {
+        st[i] = states_buf.words[base + i];
+    }
+
+    uint64_t bc[5];
+    for (uint rnd = 0u; rnd < 24u; ++rnd) {
+        // Theta
+        for (uint i = 0u; i < 5u; ++i) {
+            bc[i] = st[i] ^ st[i + 5u] ^ st[i + 10u] ^ st[i + 15u] ^ st[i + 20u];
+        }
+        for (uint i = 0u; i < 5u; ++i) {
+            uint64_t t = bc[(i + 4u) % 5u] ^ rotl64(bc[(i + 1u) % 5u], 1u);
+            st[i]       ^= t;
+            st[i + 5u]  ^= t;
+            st[i + 10u] ^= t;
+            st[i + 15u] ^= t;
+            st[i + 20u] ^= t;
+        }
+
+        // Rho + Pi
+        uint64_t t = st[1];
+        for (uint k = 0u; k < 24u; ++k) {
+            uint j = KECCAK_PI[k];
+            uint64_t next = st[j];
+            st[j] = rotl64(t, KECCAK_RHO[k]);
+            t = next;
+        }
+
+        // Chi
+        for (uint row = 0u; row < 25u; row += 5u) {
+            bc[0] = st[row + 0u];
+            bc[1] = st[row + 1u];
+            bc[2] = st[row + 2u];
+            bc[3] = st[row + 3u];
+            bc[4] = st[row + 4u];
+            st[row + 0u] = bc[0] ^ ((~bc[1]) & bc[2]);
+            st[row + 1u] = bc[1] ^ ((~bc[2]) & bc[3]);
+            st[row + 2u] = bc[2] ^ ((~bc[3]) & bc[4]);
+            st[row + 3u] = bc[3] ^ ((~bc[4]) & bc[0]);
+            st[row + 4u] = bc[4] ^ ((~bc[0]) & bc[1]);
+        }
+
+        // Iota
+        st[0] ^= KECCAK_RC[rnd];
+    }
+
+    for (uint i = 0u; i < 25u; ++i) {
+        states_buf.words[base + i] = st[i];
+    }
+}

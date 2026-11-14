@@ -197,6 +197,23 @@ pub fn set(json: &mut Json, name: &str, value: Json) {
     }
 }
 
+pub fn record_ledger_checkpoint(secret: &mut Json, ckpt: qsag_core::LedgerCheckpoint) {
+    set(secret, "ledger_checkpoint_gen", Json::num(ckpt.generation));
+    set(secret, "ledger_checkpoint_tag", Json::hex(&ckpt.tag));
+}
+
+pub fn read_ledger_checkpoint(secret: &Json) -> Result<qsag_core::LedgerCheckpoint, CliError> {
+    let generation = secret
+        .field_u64("ledger_checkpoint_gen")
+        .map_err(|_| corrupt())?;
+    let tag_str = secret
+        .field_str("ledger_checkpoint_tag")
+        .map_err(|_| corrupt())?;
+    let tag: [u8; 32] =
+        crate::codec::from_hex_exact(tag_str, "ledger_checkpoint_tag").map_err(|_| corrupt())?;
+    Ok(qsag_core::LedgerCheckpoint { generation, tag })
+}
+
 fn tag(secret: &Json, key_material: Option<&[u8]>) -> Result<[u8; 32], CliError> {
     let material = secret
         .get("seed")

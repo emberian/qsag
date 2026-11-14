@@ -49,24 +49,64 @@ pub(super) fn monomial_table(point: &[E]) -> Vec<E> {
     out
 }
 
+#[cfg(test)]
 pub(super) fn geometric(z: E, len: usize) -> Vec<E> {
     powers_of_ext4(z, len)
 }
 
-/// The dual fold has one extra zero slot; overflow never wraps into the core.
-pub(super) fn fold_kernel(k: &[E], phi: E) -> Vec<E> {
+/// Zero-allocation streaming accumulation `dst[i] += xi * z^i` for `i in 0..dst.len()`.
+pub(super) fn add_geometric_scaled_in_place(dst: &mut [E], xi: E, z: E) {
+    if dst.is_empty() {
+        return;
+    }
+    #[cfg(feature = "std")]
+    if dst.len() >= 8_192 {
+        let workers = crate::parallel_workers().min(dst.len());
+        let chunk = dst.len().div_ceil(workers);
+        std::thread::scope(|scope| {
+            for (t_idx, sub) in dst.chunks_mut(chunk).enumerate() {
+                let mut cur = xi * z.pow((t_idx * chunk) as u64);
+                scope.spawn(move || {
+                    for slot in sub.iter_mut() {
+                        *slot += cur;
+                        cur *= z;
+                    }
+                });
+            }
+        });
+        return;
+    }
+    let mut cur = xi;
+    for slot in dst.iter_mut() {
+        *slot += cur;
+        cur *= z;
+    }
+}
+
+/// Reusable-buffer dual fold (`pairs + 1` slots; trailing slot is zero so overflow never wraps).
+pub(super) fn fold_kernel_into(k: &[E], phi: E, out: &mut Vec<E>) {
     let pairs = k.len() / 2;
-    let mut out = vec![E::ZERO; pairs + 1];
+    out.resize(pairs + 1, E::ZERO);
     fill_indexed(&mut out[..pairs], |i| k[2 * i] + phi * k[2 * i + 1]);
+    out[pairs] = E::ZERO;
+}
+
+#[cfg(test)]
+pub(super) fn fold_kernel(k: &[E], phi: E) -> Vec<E> {
+    let mut out = Vec::with_capacity(k.len() / 2 + 1);
+    fold_kernel_into(k, phi, &mut out);
     out
 }
 
-pub(super) fn fold_coeffs(c: &[E], [theta, alpha, beta]: [E; 3]) -> Vec<E> {
+/// Reusable-buffer primal monomial affine fold (`c.len() / 2 + 1` slots, zero per-round alloc).
+pub(super) fn fold_coeffs_into(c: &[E], [theta, alpha, beta]: [E; 3], out: &mut Vec<E>) {
     let m = c.len() / 2;
     if m == 0 {
-        return vec![E::ZERO];
+        out.clear();
+        out.push(E::ZERO);
+        return;
     }
-    let mut out = vec![E::ZERO; m + 1];
+    out.resize(m + 1, E::ZERO);
     let mix0 = c[0] + theta * c[1];
     out[0] = c[1] + alpha * mix0;
     if m > 1 {
@@ -79,6 +119,12 @@ pub(super) fn fold_coeffs(c: &[E], [theta, alpha, beta]: [E; 3]) -> Vec<E> {
     }
     let last_mix = c[2 * (m - 1)] + theta * c[2 * (m - 1) + 1];
     out[m] = beta * last_mix;
+}
+
+#[cfg(test)]
+pub(super) fn fold_coeffs(c: &[E], chals: [E; 3]) -> Vec<E> {
+    let mut out = Vec::with_capacity(c.len() / 2 + 1);
+    fold_coeffs_into(c, chals, &mut out);
     out
 }
 
@@ -116,9 +162,11 @@ pub(super) fn bridge_finish(
     (next, [theta, alpha, beta])
 }
 
-pub(super) fn prove_fold(
+pub(super) fn prove_fold_in_place(
     c: &mut Vec<E>,
     k: &mut Vec<E>,
+    c_scratch: &mut Vec<E>,
+    k_scratch: &mut Vec<E>,
     claim: &mut E,
     tr: &mut FiatShamirTranscript<InstanceBound>,
 ) -> ([E; 5], [E; 3]) {
@@ -176,7 +224,8 @@ pub(super) fn prove_fold(
     }
 
     let phi = bridge_prefix(&wire, tr);
-    *k = fold_kernel(k, phi);
+    fold_kernel_into(k, phi, k_scratch);
+    core::mem::swap(k, k_scratch);
 
     let pairs_c = c.len() / 2;
     let shift_range = |c_ref: &[E], k_ref: &[E], i0: usize, i1: usize| -> [E; 2] {
@@ -225,9 +274,22 @@ pub(super) fn prove_fold(
 
     let (next, chals) = bridge_finish(&wire, *claim, phi, tr);
     *claim = next;
-    *c = fold_coeffs(c, chals);
+    fold_coeffs_into(c, chals, c_scratch);
+    core::mem::swap(c, c_scratch);
     debug_assert_eq!(dot_ext4_fast(c, k), next);
     (wire, chals)
+}
+
+#[cfg(test)]
+pub(super) fn prove_fold(
+    c: &mut Vec<E>,
+    k: &mut Vec<E>,
+    claim: &mut E,
+    tr: &mut FiatShamirTranscript<InstanceBound>,
+) -> ([E; 5], [E; 3]) {
+    let mut c_scratch = Vec::new();
+    let mut k_scratch = Vec::new();
+    prove_fold_in_place(c, k, &mut c_scratch, &mut k_scratch, claim, tr)
 }
 
 /// Encode the power-of-two core using the existing fast NTT, then add the

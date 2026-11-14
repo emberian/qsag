@@ -556,27 +556,28 @@ theorem execRealSession_opening_records_approval
     (hOpen : (execRealSession proto A cl advSt tape).2.2.honestRound3 ≠ []) :
     (execRealSession proto A cl advSt tape).2.2.request.msg ∈
       (execRealSession proto A cl advSt tape).1.tsig.approvedMsgs := by
-  unfold execRealSession at hOpen ⊢
-  dsimp only at hOpen ⊢
+  revert hOpen
+  unfold execRealSession
+  dsimp only
   cases validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
-  · exact False.elim (hOpen rfl)
-  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hOpen ⊢
+  · intro hOpen; exact False.elim (hOpen rfl)
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
     cases walPreSignStep cl.honestWal _ _ _ with
-    | err _ _ => exact False.elim (hOpen rfl)
+    | err _ _ => intro hOpen; exact False.elim (hOpen rfl)
     | ok _ auth =>
       cases auth with
-      | replayCached _ => exact False.elim (hOpen rfl)
+      | replayCached _ => intro hOpen; exact False.elim (hOpen rfl)
       | authorizedFresh _ =>
-        dsimp only at hOpen ⊢
+        dsimp only
         cases proto.verifyRound1 _ _ _ _ _ with
-        | inl _ => exact False.elim (hOpen rfl)
+        | inl _ => intro hOpen; exact False.elim (hOpen rfl)
         | inr _ =>
-          dsimp only at hOpen ⊢
+          dsimp only
           cases proto.preCutBarrier _ _ _ _ _ with
-          | inl _ => exact False.elim (hOpen rfl)
+          | inl _ => intro hOpen; exact False.elim (hOpen rfl)
           | inr _ =>
-            dsimp only at hOpen ⊢
-            cases proto.finalizeCutOpen _ _ _ _ _ <;> exact List.mem_cons_self
+            dsimp only
+            cases proto.finalizeCutOpen _ _ _ _ _ <;> intro _ <;> exact List.mem_cons_self
 
 /-- Run `Q_s` adaptively scheduled interactive rushing sessions of `RealProtocolExec`. -/
 def RealProtocolExec {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
@@ -712,6 +713,40 @@ def execIdealSession {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
             let out := SessionOutcome.signOk outSigBytes
             let advStF := A.observeOutcome advSt4 out
             (iclOk, advStF, ⟨req, honR1, corrR1, honR2, corrR2, honR3, corrR3, out⟩)
+
+/-- Any session exposing honest Round-3 bytes records the approved message, even if
+    the corrupt party makes finalization abort after receiving those bytes. -/
+theorem execIdealSession_opening_records_approval
+    {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (cl : IdealClusterState PK)
+    (advSt : AdvState) (tape : SimTape)
+    (hOpen : (execIdealSession idealSignOracle sim A cl advSt tape).2.2.honestRound3 ≠ []) :
+    (execIdealSession idealSignOracle sim A cl advSt tape).2.2.request.msg ∈
+      (execIdealSession idealSignOracle sim A cl advSt tape).1.tsig.approvedMsgs := by
+  revert hOpen
+  unfold execIdealSession
+  dsimp only
+  cases validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · intro hOpen; exact False.elim (hOpen rfl)
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases walPreSignStep cl.honestWal _ _ _ with
+    | err _ _ => intro hOpen; exact False.elim (hOpen rfl)
+    | ok _ auth =>
+      cases auth with
+      | replayCached _ => intro hOpen; exact False.elim (hOpen rfl)
+      | authorizedFresh _ =>
+        dsimp only
+        cases sim.simVerifyRound1 _ _ _ _ _ with
+        | inl _ => intro hOpen; exact False.elim (hOpen rfl)
+        | inr _ =>
+          dsimp only
+          cases sim.simPreCutBarrier _ _ _ _ _ with
+          | inl _ => intro hOpen; exact False.elim (hOpen rfl)
+          | inr _ =>
+            dsimp only
+            cases sim.simFinalizeCut _ _ _ _ _ _ <;> intro _ <;> exact List.mem_cons_self
 
 /-- Run `Q_s` adaptively scheduled interactive rushing sessions of `IdealFunctionalityExec`. -/
 def IdealFunctionalityExec {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}

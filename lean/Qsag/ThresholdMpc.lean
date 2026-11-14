@@ -3935,5 +3935,45 @@ theorem shamir_poseidon2_threshold_sig_witness
     (fun _ _ => demoCallPrep23) hPrep₂
   exact ⟨by decide +kernel, by decide +kernel, hRun₁.1, hRun₂.1, hRun₁.2.1.trans hRun₂.2.1.symm, hRun₁.2.1⟩
 
+/-- XOR with a corrupt coin fixed before the independent uniform honest coin preserves the
+    single-signer hedged output law, for every encoding and every signature distinguisher.
+    This is a counting statement about the joint coin before selective abort. Applying it to
+    a commitment protocol additionally requires a hiding/independence argument; a deterministic
+    commitment hash alone does not supply that premise. -/
+theorem threshold_joint_coin_output_law
+    (p : Fips205Params) (sk : SlhSecretKey) (msg : List UInt8)
+    (width : Nat) (encode : BitVec width → List UInt8) (corruptCoin : BitVec width)
+    (D : List UInt8 → Bool) :
+    finSum (2 ^ width) (fun i => if D (encodeSlhSig
+      (slhSignInternal p msg sk (encode (BitVec.ofFin i ^^^ corruptCoin)))) then 1 else 0) =
+    finSum (2 ^ width) (fun i => if D (encodeSlhSig
+      (slhSignInternal p msg sk (encode (BitVec.ofFin i)))) then 1 else 0) := by
+  let flip : Fin (2 ^ width) → Fin (2 ^ width) :=
+    fun i => (BitVec.ofFin i ^^^ corruptCoin).toFin
+  have hInv : ∀ i, flip (flip i) = i := by
+    intro i
+    apply Fin.ext
+    have h : (BitVec.ofFin i ^^^ corruptCoin) ^^^ corruptCoin = BitVec.ofFin i := by
+      rw [BitVec.xor_assoc, BitVec.xor_self, BitVec.xor_zero]
+    exact congrArg BitVec.toNat h
+  exact finSum_perm_invariant flip flip hInv hInv
+    (fun i => if D (encodeSlhSig (slhSignInternal p msg sk (encode (BitVec.ofFin i)))) then 1 else 0)
+
+/-- A corrupt party can commit to zero, observe the honest coin, and open only when the
+    joint coin is one. Even an ideal hiding commitment cannot stop this selective abort.
+    Of two equally likely honest coins there is one accepted execution, and its coin is
+    always one; the unconditioned uniform coin is one on only one of two executions.
+    Thus output laws conditioned on success cannot in general use the original uniform
+    hedge law. Security with abort must give the ideal adversary the same abort capability. -/
+theorem tooth_selective_abort_biases_committed_joint_coin :
+    let honest : Fin 2 → Bool := fun i => i.val == 1
+    let accepted : Fin 2 → Option Bool := fun i =>
+      if honest i ^^ false then some (honest i ^^ false) else none
+    finSum 2 (fun i => if (accepted i).isSome then 1 else 0) = 1 ∧
+    finSum 2 (fun i => if accepted i == some true then 1 else 0) = 1 ∧
+    (∀ i, accepted i ≠ some false) ∧
+    finSum 2 (fun i => if honest i then 1 else 0) = 1 := by
+  decide +kernel
+
 end Qsag
 end

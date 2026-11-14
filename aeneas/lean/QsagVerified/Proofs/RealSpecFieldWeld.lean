@@ -4,6 +4,7 @@ public import QsagVerified.Proofs.Goldilocks
 public import QsagVerified.Proofs.MirRefinementKit
 public import Qsag.SimulationSpine
 public import Qsag.Goldilocks
+import all Qsag.Goldilocks
 
 /-!
 # Field-kernel weld between the Aeneas extraction and `Qsag.Goldilocks`
@@ -15,6 +16,10 @@ the `qsag` Lake package (`aeneas/lean/lakefile.toml`); nothing in `qsag` imports
 Contents: `extractedPartyMachine`, which views an extracted step function as a
 `Qsag.PartyMachine` with no intermediate model, and refinement theorems from the extracted
 `goldilocks_add`, `goldilocks_sub` and `goldilocks_mul` to `Qsag.Goldilocks.add`, `.sub`, `.mul`.
+These statements concern the extracted verified-crate functions. Production's distinct
+wrapping/overflowing arithmetic is not extracted here; a Cargo dependency alone does not
+transfer these theorems to that implementation. KoalaBear has no declaration in the current
+`QsagVerified.Funs` extraction. Inversion below additionally uses the canonical prime-field law.
 This module depends on none of the large protocol modules, so it builds whenever
 `Qsag.Goldilocks` does. The guard welds are in `AuthenticatedBeltAndRealSpecWeld.lean`.
 -/
@@ -115,5 +120,80 @@ theorem tooth_goldilocks_mul_weld_is_not_add :
     decide
   · rw [Qsag.Goldilocks.add_val]
     decide
+
+
+/-- The extracted Fermat chain denotes the canonical inverse, including zero. -/
+theorem goldilocks_inv_or_zero_refines_qsag (a : goldilocks.Goldilocks) :
+    ∃ y, goldilocks.goldilocks_inv_or_zero a = .ok y ∧
+      goldilocksAbs y = Qsag.Goldilocks.inv (goldilocksAbs a) ∧
+      y.val < Qsag.goldilocksPrime := by
+  obtain ⟨y, hy, hv, hlt, hz⟩ := goldilocks_inv_or_zero_spec a
+  refine ⟨y, hy, ?_, hlt⟩
+  apply Qsag.Goldilocks.ext
+  by_cases ha : a.val % GoldilocksP = 0
+  · have hy0 := hz ha
+    subst y
+    simp [goldilocksAbs, Qsag.Goldilocks.inv, Qsag.Goldilocks.ofNat,
+      Qsag.Goldilocks.zero, ← goldilocksP_eq, ha]
+  · change y.val % Qsag.goldilocksPrime = _
+    rw [Nat.mod_eq_of_lt hlt]
+    unfold Qsag.Goldilocks.inv
+    have hane : (goldilocksAbs a).val ≠ 0 := ha
+    rw [if_neg hane, Qsag.Goldilocks.ofNat_val,
+      Qsag.modPowFuel_eq_pow_mod 64 _ _ _ (by decide), Nat.mod_mod]
+    exact hv
+
+/-- Every nonzero residue has an extracted inverse whose *extracted* product is exactly
+one. This discharges the mathematical inverse law, rather than only identifying an exponent. -/
+theorem goldilocks_inverse_mul_eq_one (a : goldilocks.Goldilocks)
+    (ha : a.val % GoldilocksP ≠ 0) :
+    ∃ y, goldilocks.goldilocks_inv_or_zero a = .ok y ∧
+      goldilocks.goldilocks_mul a y = .ok 1#u64 ∧ y ≠ 0#u64 := by
+  obtain ⟨y, hy, habs, _⟩ := goldilocks_inv_or_zero_refines_qsag a
+  have hane : goldilocksAbs a ≠ Qsag.Goldilocks.zero := by
+    intro h
+    exact ha (congrArg Qsag.Goldilocks.val h)
+  have hcancel : Qsag.Goldilocks.mul (goldilocksAbs a) (goldilocksAbs y) =
+      Qsag.Goldilocks.one := by
+    rw [habs]
+    exact Qsag.Goldilocks.mul_inv_cancel hane
+  obtain ⟨z, hz, hzabs, hzlt⟩ := goldilocks_mul_refines_qsag a y
+  have hzval := congrArg Qsag.Goldilocks.val (hzabs.trans hcancel)
+  change z.val % Qsag.goldilocksPrime = 1 at hzval
+  rw [Nat.mod_eq_of_lt hzlt] at hzval
+  have hz1 : z = 1#u64 := UScalar.eq_of_val_eq hzval
+  refine ⟨y, hy, hz1 ▸ hz, ?_⟩
+  intro hy0
+  have hc := congrArg Qsag.Goldilocks.val hcancel
+  rw [Qsag.Goldilocks.mul_val, hy0] at hc
+  change ((goldilocksAbs a).val * (0 % Qsag.goldilocksPrime)) %
+    Qsag.goldilocksPrime = 1 at hc
+  simp at hc
+
+/-- Exact option behavior: `none` occurs precisely for the zero residue, with no
+unresolved alternative allowing a nonzero input's inverse to vanish. -/
+theorem goldilocks_inv_none_iff_zero (a : goldilocks.Goldilocks) :
+    goldilocks.goldilocks_inv a = .ok none ↔ a.val % GoldilocksP = 0 := by
+  obtain ⟨y, hy, hnone, _⟩ := goldilocks_inv_spec a
+  rw [hnone]
+  constructor
+  · intro h
+    rcases h with hz | hy0
+    · exact hz
+    · by_cases hn : a.val % GoldilocksP = 0
+      · exact hn
+      · obtain ⟨z, hz, _, hzne⟩ := goldilocks_inverse_mul_eq_one a hn
+        have heq : y = z := Result.ok.inj (hy.symm.trans hz)
+        exact False.elim (hzne (heq ▸ hy0))
+  · exact Or.inl
+
+/-- Nonzero inputs return `some` and satisfy the canonical inverse law in MIR. -/
+theorem goldilocks_inv_some_mul_eq_one (a : goldilocks.Goldilocks)
+    (ha : a.val % GoldilocksP ≠ 0) :
+    ∃ y, goldilocks.goldilocks_inv a = .ok (some y) ∧
+      goldilocks.goldilocks_mul a y = .ok 1#u64 := by
+  obtain ⟨y, hy, hmul, hne⟩ := goldilocks_inverse_mul_eq_one a ha
+  refine ⟨y, ?_, hmul⟩
+  simp [goldilocks.goldilocks_inv, hy, hne]
 
 end qsag_verified.proofs

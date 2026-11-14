@@ -1,5 +1,6 @@
 module
 import Lean
+import all QsagVerified.Proofs.RealSpecGuardBoundary
 import all QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld
 import all QsagMirProofs
 import all QsagVerified.Funs
@@ -46,12 +47,46 @@ import all QsagVerified.Proofs.RealSpecKeccakWeld
 import all QsagVerified.Proofs.RealSpecTowerWeld
 import all QsagSpecWeld
 
+/-!
+This gate audits dependency closures of definitions AND theorems. Auditing an extracted
+function is not a correctness proof for that function. The theorem anchors below prevent
+core delivered weld boundaries from silently disappearing or becoming mere definitions.
+The complete per-module census still includes every declaration, including future proofs.
+See `QsagSpecWeld` for the explicit outstanding production and streaming boundaries.
+-/
+
 open Lean Elab Command in
 run_cmd do
   let negative ← Lean.collectAxioms ``Classical.choice
   if (negative.filter fun ax => ax != ``propext && ax != ``Quot.sound).isEmpty then
     throwError "MIR axiom audit negative control unexpectedly passed"
   let env ← getEnv
+  let requiredTheorems : List Name := [
+    ``qsag_verified.proofs.goldilocks_add_refines_qsag,
+    ``qsag_verified.proofs.goldilocks_sub_refines_qsag,
+    ``qsag_verified.proofs.goldilocks_mul_refines_qsag,
+    ``qsag_verified.proofs.goldilocks_inv_or_zero_refines_qsag,
+    ``qsag_verified.proofs.goldilocks_inverse_mul_eq_one,
+    ``qsag_verified.proofs.goldilocks_inv_none_iff_zero,
+    ``qsag_verified.proofs.goldilocks_inv_some_mul_eq_one,
+    ``qsag_verified.proofs.gf256_mul_refines_qsag,
+    ``qsag_verified.proofs.gf256_add_refines_qsag,
+    ``qsag_verified.proofs.tower128_add_refines_qsag,
+    ``qsag_verified.proofs.tower256_add_refines_qsag,
+    ``qsag_verified.proofs.wotsc256_verify_refines_qsag,
+    ``qsag_verified.proofs.wotsc256_accept_iff_qsag,
+    ``qsag_verified.proofs.wotsc256_reject_iff_qsag,
+    ``qsag_verified.proofs.keccak_f1600_array_refines_qsag,
+    ``qsag_verified.proofs.keccak_f1600_result_iff,
+    ``qsag_verified.proofs.shake256_absorb_after_squeezing,
+    ``qsag_verified.proofs.shake256_finalize_after_squeezing,
+    ``qsag_verified.proofs.belt_grant_refines_qsag_mask,
+    ``qsag_verified.proofs.belt_quorum_intersection_refines_qsag,
+    ``qsag_verified.proofs.belt_validated_grant_refines_qsag_mask]
+  for name in requiredTheorems do
+    match env.find? name with
+    | some (.thmInfo _) => pure ()
+    | _ => throwError "MIR axiom audit missing theorem target: {name}"
   let mut checked : Nat := 0
   let mut rejected : Nat := 0
   for (name, _) in env.constants.toList do

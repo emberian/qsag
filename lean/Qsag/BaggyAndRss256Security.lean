@@ -30,7 +30,7 @@ Self-contained Lean 4.35 constructive security proofs and mechanized `#tooth` cr
      committing `u` injects a nonzero fault pair `(e1, e2) = (χ, 1) ∈ ker(χ)` passing verification
      with probability `1` (and `[χ1*χ2, χ1⊕χ2, 1]` passes two pre-wave challenges with probability `1`).
    - Sticky `poisoned = true` terminal absorption (`rss256_sticky_poison_terminal_absorption`,
-     `rss256_hardened_never_opens_faulted_wave`) across arbitrary multi-step `Rss256EngineOp` traces.
+     `rss256_hardened_never_opens_faulted_wave`) across arbitrary multi-step `Rss256BarrierOp` traces.
    - `#tooth` `tooth_non_sticky_check_clear_unlocks_unverified_open`: clearing
      `pending` / `opened` before returning `Err` without latching `poisoned = true` lets a second
      `check()` clear `unverified` and `open_planes()` release unverified faulted shares.
@@ -40,8 +40,8 @@ Self-contained Lean 4.35 constructive security proofs and mechanized `#tooth` cr
      `childRoot -> layerRoot -> pkRoot` canopy Merkle chaining (`verifyWaistbandCanopy`) and durable
      first-signed digits per static `(layer, tree, kp)` (`DurableStaticWotsGuard`).
    - Multi-session single-codeword equivalence (`waistband_verified_multi_session_single_codeword`)
-     and constructive multi-session `Baggy` hypertree EUF-CMA reduction
-     (`baggy_verified_waistband_euf_cma_extract`, `baggy_verified_waistband_preserves_hypertree_euf_cma`).
+     and constructive upper-hypertree reduction (with an explicit bottom-layer obligation)
+     (`baggy_verified_waistband_upper_extract`, `baggy_verified_waistband_upper_reduction`).
    - `#tooth` `tooth_corrupted_intermediate_waistband_opens_second_ancestor_codeword`: a corrupted
      auth-path sibling in a cached intermediate layer `l` under an uncached parent `l + 1` passes
      final `pkRoot` and `baggyVerify` checks while opening TWO distinct codewords on parent
@@ -1776,8 +1776,9 @@ theorem tooth_pre_wave_challenge_kernel_bypass :
       rfl
     rw [hAll2, finSum_const, Nat.mul_one]
 
-/-- Verification-barrier & plane-opening state of `Rss256Engine`. -/
-structure Rss256EngineState where
+/-- Boolean barrier abstraction used only for the historical sticky-poison counterexample.
+    Operational inputs are defined by `Rss256EngineOp` below. -/
+structure Rss256BarrierState where
   unverified : Bool
   poisoned : Bool
   pendingInlineValid : List Bool
@@ -1786,7 +1787,7 @@ structure Rss256EngineState where
   taintedSinceLastCleanCheck : Bool
   deriving DecidableEq, Repr
 
-def Rss256EngineState.init : Rss256EngineState :=
+def Rss256BarrierState.init : Rss256BarrierState :=
   { unverified := false
     poisoned := false
     pendingInlineValid := []
@@ -1794,7 +1795,7 @@ def Rss256EngineState.init : Rss256EngineState :=
     sharedPlane := 0
     taintedSinceLastCleanCheck := false }
 
-inductive Rss256EngineOp where
+inductive Rss256BarrierOp where
   | permuteInline (relationValid : Bool) (outPlane : Plane256)
   | permuteBank (openingConsistent : Bool) (outPlane : Plane256)
   | check
@@ -1808,15 +1809,15 @@ inductive Rss256EngineErr where
   | openBeforeCheck
   deriving DecidableEq, Repr
 
-/-- **Hardened `Rss256Engine` Transition (`rss256StepHardened`)**:
-    Every barrier failure or premature open irreversibly latches `poisoned = true` and wipes state;
+/-- **Hardened `Rss256Engine` Transition (`rss256BarrierStep`)**:
+    Every cryptographic barrier failure irreversibly latches `poisoned = true` and wipes state;
     every operation rejects a poisoned engine. -/
-@[expose] def rss256StepHardened (st : Rss256EngineState) (op : Rss256EngineOp) :
-    StepOutcome Rss256EngineState (Option Plane256) Rss256EngineErr :=
+@[expose] def rss256BarrierStep (st : Rss256BarrierState) (op : Rss256BarrierOp) :
+    StepOutcome Rss256BarrierState (Option Plane256) Rss256EngineErr :=
   if st.poisoned then
     .err st .enginePoisoned
   else
-    let poisonNow : Rss256EngineState :=
+    let poisonNow : Rss256BarrierState :=
       { st with
         poisoned := true
         pendingInlineValid := []
@@ -1850,19 +1851,19 @@ inductive Rss256EngineErr where
               taintedSinceLastCleanCheck := false } none
     | .openPlanes =>
       if st.unverified then
-        .err poisonNow .openBeforeCheck
+        .err st .openBeforeCheck
       else
         .ok st (some st.sharedPlane)
 
 /-- `PartyMachine` (`SimulationSpine`) instantiation of hardened `Rss256Engine`. -/
-def rss256HardenedMachine : PartyMachine Rss256EngineState Rss256EngineOp (Option Plane256) :=
-  PartyMachine.ofOutcome rss256StepHardened
+def rss256BarrierMachine : PartyMachine Rss256BarrierState Rss256BarrierOp (Option Plane256) :=
+  PartyMachine.ofOutcome rss256BarrierStep
 
 /-- Buggy pre-fix `Rss256Engine` transition:
     clears `pendingInlineValid` / `pendingOpenedValid` on `check()` BEFORE returning `Err`,
     without latching `poisoned = true`! -/
-def rss256StepBuggy (st : Rss256EngineState) (op : Rss256EngineOp) :
-    StepOutcome Rss256EngineState (Option Plane256) Rss256EngineErr :=
+def rss256StepBuggy (st : Rss256BarrierState) (op : Rss256BarrierOp) :
+    StepOutcome Rss256BarrierState (Option Plane256) Rss256EngineErr :=
   match op with
   | .permuteInline relOk outPlane =>
     .ok { st with
@@ -1900,22 +1901,22 @@ def rss256StepBuggy (st : Rss256EngineState) (op : Rss256EngineOp) :
       .ok st (some st.sharedPlane)
 
 /-- Run a multi-step call sequence and record `(finalState, releasedPlanes, stepOutcomes)`. -/
-def rss256RunTrace (stepFn : Rss256EngineState → Rss256EngineOp →
-      StepOutcome Rss256EngineState (Option Plane256) Rss256EngineErr) :
-    Rss256EngineState → List Rss256EngineOp → Rss256EngineState × List Plane256
+def rss256BarrierTrace (stepFn : Rss256BarrierState → Rss256BarrierOp →
+      StepOutcome Rss256BarrierState (Option Plane256) Rss256EngineErr) :
+    Rss256BarrierState → List Rss256BarrierOp → Rss256BarrierState × List Plane256
   | st, [] => (st, [])
   | st, op :: rest =>
     match stepFn st op with
     | .ok st' (some p) =>
-      let (stFinal, ps) := rss256RunTrace stepFn st' rest
+      let (stFinal, ps) := rss256BarrierTrace stepFn st' rest
       (stFinal, p :: ps)
-    | .ok st' none => rss256RunTrace stepFn st' rest
-    | .err st' _ => rss256RunTrace stepFn st' rest
+    | .ok st' none => rss256BarrierTrace stepFn st' rest
+    | .err st' _ => rss256BarrierTrace stepFn st' rest
 
 /-- Data-bearing entry point: the pending result is computed from every recorded
     share relation under the two pass-specific coin streams. -/
 def rss256RecordedWaveOp (gates : List Rss256RecordedGate)
-    (coins : Rss256ChallengeFamily) (round : Nat) : Rss256EngineOp :=
+    (coins : Rss256ChallengeFamily) (round : Nat) : Rss256BarrierOp :=
   .permuteInline (rss256Pass1At gates coins ⟨0, by decide⟩ round &&
     rss256Pass1At gates coins ⟨1, by decide⟩ round)
     (gates.foldl (fun _ g => g.z.reconstruct) 0#256)
@@ -1923,29 +1924,29 @@ def rss256RecordedWaveOp (gates : List Rss256RecordedGate)
 theorem rss256_recorded_wave_rejection_poison (gates : List Rss256RecordedGate)
     (coins : Rss256ChallengeFamily) (round : Nat)
     (hReject : rss256Pass1At gates coins ⟨0, by decide⟩ round = false) :
-    let result := rss256RunTrace rss256StepHardened Rss256EngineState.init
+    let result := rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init
       [rss256RecordedWaveOp gates coins round, .check, .check, .openPlanes]
     result.1.poisoned = true ∧ result.2 = [] := by
   simp only [rss256RecordedWaveOp, hReject, Bool.false_and]
   exact ⟨rfl, rfl⟩
 
-/-- Multi-turn invariant of `rss256StepHardened`:
+/-- Multi-turn invariant of `rss256BarrierStep`:
     if `taintedSinceLastCleanCheck = true` and `poisoned = false`, then `unverified = true` and at
     least one pending queue contains `false` (`any (!·) = true`). -/
-def Rss256SafeInvariant (st : Rss256EngineState) : Prop :=
+def Rss256SafeInvariant (st : Rss256BarrierState) : Prop :=
   st.poisoned = true ∨
   (st.taintedSinceLastCleanCheck = false) ∨
   (st.unverified = true ∧
     (st.pendingInlineValid.any (fun b => !b) = true ∨
      st.pendingOpenedValid.any (fun b => !b) = true))
 
-private theorem rss256StepHardened_preserves_inv (st : Rss256EngineState) (op : Rss256EngineOp)
+private theorem rss256BarrierStep_preserves_inv (st : Rss256BarrierState) (op : Rss256BarrierOp)
     (hInv : Rss256SafeInvariant st) :
-    match rss256StepHardened st op with
+    match rss256BarrierStep st op with
     | .ok st' (some _) => Rss256SafeInvariant st' ∧ st.taintedSinceLastCleanCheck = false ∧ st.poisoned = false
     | .ok st' none => Rss256SafeInvariant st'
-    | .err st' _ => Rss256SafeInvariant st' ∧ st'.poisoned = true := by
-  unfold rss256StepHardened
+    | .err st' _ => Rss256SafeInvariant st' ∧ (st'.poisoned = true ∨ st' = st) := by
+  unfold rss256BarrierStep
   cases hp : st.poisoned
   · simp only [Bool.false_eq_true, ↓reduceIte]
     have hInvClean : st.taintedSinceLastCleanCheck = false ∨
@@ -1991,9 +1992,9 @@ private theorem rss256StepHardened_preserves_inv (st : Rss256EngineState) (op : 
           · simp only [Bool.false_eq_true, ↓reduceIte]
             exact Or.inr (Or.inl rfl)
           · simp only [↓reduceIte]
-            exact ⟨Or.inl rfl, trivial⟩
+            exact ⟨Or.inl rfl, Or.inl rfl⟩
         · simp only [↓reduceIte]
-          exact ⟨Or.inl rfl, trivial⟩
+          exact ⟨Or.inl rfl, Or.inl rfl⟩
     | openPlanes =>
       cases hUnv : st.unverified
       · simp only [Bool.false_eq_true, ↓reduceIte]
@@ -2001,52 +2002,55 @@ private theorem rss256StepHardened_preserves_inv (st : Rss256EngineState) (op : 
         · exact ⟨hInv, hTaint0, trivial⟩
         · rw [hUnv] at hUnvTrue; cases hUnvTrue
       · simp only [↓reduceIte]
-        exact ⟨Or.inl rfl, trivial⟩
+        exact ⟨hInv, Or.inr rfl⟩
   · simp only [↓reduceIte]
-    exact ⟨Or.inl hp, hp⟩
+    exact ⟨Or.inl hp, Or.inl hp⟩
 
 /-- **Sticky `poisoned = true` Terminal Absorption & Multi-Turn Anti-Fault Opening Safety
     (`rss256_sticky_poison_terminal_absorption`)**:
     1. **Terminal Absorption**: From ANY state with `st.poisoned = true`, across ANY call sequence
-       `ops : List Rss256EngineOp`, `poisoned` stays `true`, `rss256HardenedMachine.step` returns
-       `none` on every step, and `rss256RunTrace` releases `[]` (`0` planes)!
-    2. **Unverified/Faulted Wave Quarantine**: From `Rss256EngineState.init`, across ANY sequence
+       `ops : List Rss256BarrierOp`, `poisoned` stays `true`, `rss256BarrierMachine.step` returns
+       `none` on every step, and `rss256BarrierTrace` releases `[]` (`0` planes)!
+    2. **Unverified/Faulted Wave Quarantine**: From `Rss256BarrierState.init`, across ANY sequence
        `ops` containing a faulted inline gate (`.permuteInline false _`) or inconsistent Mode-1A
        opening (`.permuteBank false _`), NO plane is ever released after that fault! -/
 theorem rss256_sticky_poison_terminal_absorption :
-    (∀ (st : Rss256EngineState) (ops : List Rss256EngineOp),
+    (∀ (st : Rss256BarrierState) (ops : List Rss256BarrierOp),
       st.poisoned = true →
-      (∀ op : Rss256EngineOp, rss256HardenedMachine.step st op = none) ∧
-      (rss256RunTrace rss256StepHardened st ops).1.poisoned = true ∧
-      (rss256RunTrace rss256StepHardened st ops).2 = []) ∧
-    (∀ (st : Rss256EngineState) (ops : List Rss256EngineOp),
+      (∀ op : Rss256BarrierOp, rss256BarrierMachine.step st op = none) ∧
+      (rss256BarrierTrace rss256BarrierStep st ops).1.poisoned = true ∧
+      (rss256BarrierTrace rss256BarrierStep st ops).2 = []) ∧
+    (∀ (st : Rss256BarrierState) (ops : List Rss256BarrierOp),
       Rss256SafeInvariant st →
       st.taintedSinceLastCleanCheck = true →
-      (rss256RunTrace rss256StepHardened st ops).2 = []) := by
-  have hAbsorb : ∀ (st : Rss256EngineState) (ops : List Rss256EngineOp),
+      (rss256BarrierTrace rss256BarrierStep st ops).2 = []) := by
+  have hAbsorb : ∀ (st : Rss256BarrierState) (ops : List Rss256BarrierOp),
       st.poisoned = true →
-      (rss256RunTrace rss256StepHardened st ops).1.poisoned = true ∧
-      (rss256RunTrace rss256StepHardened st ops).2 = [] := by
+      (rss256BarrierTrace rss256BarrierStep st ops).1.poisoned = true ∧
+      (rss256BarrierTrace rss256BarrierStep st ops).2 = [] := by
     intro st ops hp
     induction ops generalizing st with
     | nil => exact ⟨hp, rfl⟩
     | cons op rest ih =>
-      simp only [rss256RunTrace, rss256StepHardened, hp, ↓reduceIte]
+      simp only [rss256BarrierTrace, rss256BarrierStep, hp, ↓reduceIte]
       exact ih st hp
   refine ⟨?_, ?_⟩
   · intro st ops hp
-    refine ⟨fun op => by simp [rss256HardenedMachine, PartyMachine.ofOutcome, rss256StepHardened, hp],
+    refine ⟨fun op => by simp [rss256BarrierMachine, PartyMachine.ofOutcome, rss256BarrierStep, hp],
             (hAbsorb st ops hp).1, (hAbsorb st ops hp).2⟩
   · intro st ops hInv hTaint
     induction ops generalizing st with
     | nil => rfl
     | cons op rest ih =>
-      have hStep := rss256StepHardened_preserves_inv st op hInv
-      cases hOut : rss256StepHardened st op with
+      have hStep := rss256BarrierStep_preserves_inv st op hInv
+      cases hOut : rss256BarrierStep st op with
       | err st' errVal =>
         rw [hOut] at hStep
-        simp only [rss256RunTrace, hOut]
-        exact (hAbsorb st' rest hStep.2).2
+        simp only [rss256BarrierTrace, hOut]
+        rcases hStep.2 with hPoison | hSame
+        · exact (hAbsorb st' rest hPoison).2
+        · subst st'
+          exact ih st hStep.1 hTaint
       | ok st' mbPlane =>
         rw [hOut] at hStep
         cases mbPlane with
@@ -2055,10 +2059,10 @@ theorem rss256_sticky_poison_terminal_absorption :
           rw [hTaint] at hStep
           exact Bool.noConfusion hStep.2.1
         | none =>
-          simp only [rss256RunTrace, hOut]
+          simp only [rss256BarrierTrace, hOut]
           -- Show `st'.taintedSinceLastCleanCheck = true` (since `op` was `.ok st' none` and `st` was tainted!).
           have hStillTainted : st'.taintedSinceLastCleanCheck = true := by
-            unfold rss256StepHardened at hOut
+            unfold rss256BarrierStep at hOut
             cases hp : st.poisoned
             · rw [hp] at hOut; simp only [Bool.false_eq_true, ↓reduceIte] at hOut
               cases op with
@@ -2087,19 +2091,19 @@ theorem rss256_sticky_poison_terminal_absorption :
     an inconsistent Mode-1A wave (`.permuteBank false faultedPlane`):
     - First `check()` returns `.err` after clearing `pending` / `opened`;
     - Second `check()` sees empty queues, sets `unverified = false`, and returns `.ok`;
-    - `openPlanes()` then **succeeds and releases `[faultedPlane]`**, whereas `rss256StepHardened`
+    - `openPlanes()` then **succeeds and releases `[faultedPlane]`**, whereas `rss256BarrierStep`
       latches `poisoned = true` on the first `check()` and releases `[]`! -/
 theorem tooth_non_sticky_check_clear_unlocks_unverified_open (faultedPlane : Plane256) :
-    let inlineAttack : List Rss256EngineOp :=
+    let inlineAttack : List Rss256BarrierOp :=
       [.permuteInline false faultedPlane, .check, .check, .openPlanes]
-    let bankAttack : List Rss256EngineOp :=
+    let bankAttack : List Rss256BarrierOp :=
       [.permuteBank false faultedPlane, .check, .check, .openPlanes]
-    (rss256RunTrace rss256StepBuggy Rss256EngineState.init inlineAttack).2 = [faultedPlane] ∧
-    (rss256RunTrace rss256StepBuggy Rss256EngineState.init bankAttack).2 = [faultedPlane] ∧
-    (rss256RunTrace rss256StepHardened Rss256EngineState.init inlineAttack).2 = [] ∧
-    (rss256RunTrace rss256StepHardened Rss256EngineState.init bankAttack).2 = [] ∧
-    (rss256RunTrace rss256StepHardened Rss256EngineState.init inlineAttack).1.poisoned = true ∧
-    (rss256RunTrace rss256StepHardened Rss256EngineState.init bankAttack).1.poisoned = true := by
+    (rss256BarrierTrace rss256StepBuggy Rss256BarrierState.init inlineAttack).2 = [faultedPlane] ∧
+    (rss256BarrierTrace rss256StepBuggy Rss256BarrierState.init bankAttack).2 = [faultedPlane] ∧
+    (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init inlineAttack).2 = [] ∧
+    (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init bankAttack).2 = [] ∧
+    (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init inlineAttack).1.poisoned = true ∧
+    (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init bankAttack).1.poisoned = true := by
   exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 /-! ## 3. `Waistband` Canopy Top-`L` Static Child-Root Cache Soundness & `#tooth` Witnesses -/
@@ -3011,9 +3015,10 @@ theorem waistband_verified_multi_session_single_codeword
     injection hLook1 with hEq
     exact hEq.symm
 
-/-- Constructive `Type`-valued security break extracted from any multi-session `Baggy` forgery
-    under `VerifiedWaistbandCache` (`0 Classical.choice`). -/
-inductive BaggyHypertreeBreakWitness (suite : BaggySuite256) (p : BaggyTreeParams)
+/-- Upper-hypertree reduction result. The bottom constructor is an intermediate
+    obligation, NOT a hash-game break. The generic FORS interface supplies only
+    correctness, so this type must not be advertised as a completed EUF-CMA reduction. -/
+inductive BaggyUpperReductionResult (suite : BaggySuite256) (p : BaggyTreeParams)
     (sk : BaggySecretKey256) (approvedMsgs : List (BitVec 256)) (msgStar : BitVec 256) : Type where
   | bottomLayerReachedGenuineRoot
       (leafIdx : Nat) (forsSigStar : BitVec 256) (sig0 : BaggyLayerSig256)
@@ -3044,7 +3049,7 @@ def extractStaticLayerBreakFromTransition
       baggyLayerRecoverRoot suite p sk.pkSeed layer
         (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1 nodeStar sigStar =
       some (baggyTrueSubtreeRoot suite p sk layer (p.pathAt leafIdx layer).2)) :
-    BaggyHypertreeBreakWitness suite p sk approvedMsgs msgStar :=
+    BaggyUpperReductionResult suite p sk approvedMsgs msgStar :=
   let kp := (p.pathAt leafIdx layer).1
   let tree := (p.pathAt leafIdx layer).2
   let adrs := baggyLeafAdrs layer tree kp
@@ -3123,7 +3128,7 @@ def walkUpperLayersBoundedExtract
       nodeStar ≠ baggyTrueSubtreeRoot suite p sk (layer - 1) (p.pathAt leafIdx (layer - 1)).2 →
       baggyWalkLayersVerify suite p sk.pkSeed leafIdx layer nodeStar sigs = some finalRoot →
       finalRoot = baggyTrueSubtreeRoot suite p sk (p.numLayers - 1) 0 →
-      BaggyHypertreeBreakWitness suite p sk approvedMsgs msgStar
+      BaggyUpperReductionResult suite p sk approvedMsgs msgStar
   | _, [], _, _, _, hNeEmpty, _, _, _, _ => False.elim (Nat.not_succ_le_zero 0 hNeEmpty)
   | layer, [topSig], nodeStar, finalRoot, hGe1, _, hSum, hNodeNe, hWalk, hFinalEq =>
     have hTopLayer : layer = p.numLayers - 1 := by simp at hSum; omega
@@ -3187,12 +3192,12 @@ def walkUpperLayersBoundedExtract
           (by omega) (by simp) (by simp at hSum ⊢; omega)
           (by simpa [Nat.add_sub_cancel] using hHitTrue) hWalkRest hFinalEq
 
-/-- **Crown-Jewel `Waistband` Theorem 2 (`baggy_verified_waistband_euf_cma_extract`, `0 Classical.choice`)**:
+/-- **Crown-Jewel `Waistband` Theorem 2 (`baggy_verified_waistband_upper_extract`, `0 Classical.choice`)**:
     Multi-session `Baggy` signing with `VerifiedWaistbandCache` preserves the full constructive
     hypertree EUF-CMA reduction: EVERY static (`layer ≥ 1`) WOTS address opened across `sessions`
     reveals at most its single canonical codeword `baggyCanonicalStaticDigits`, and any valid forgery
-    `(msgStar, sigStar)` outside the signed message list constructively yields a `BaggyHypertreeBreakWitness`! -/
-def baggy_verified_waistband_euf_cma_extract
+    `(msgStar, sigStar)` outside the signed message list constructively yields a `BaggyUpperReductionResult`! -/
+def baggy_verified_waistband_upper_extract
     (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
     (hWf : p.WellFormed) (hGrind : BaggySuite256.WellGrinded suite)
     (hLeafDomain : ∀ pk r msg ctr leafIdx,
@@ -3202,7 +3207,7 @@ def baggy_verified_waistband_euf_cma_extract
     (msgStar : BitVec 256) (sigStar : BaggySig256)
     (hNotSigned : msgStar ∉ sessions.map (fun s => s.2.1))
     (hVerifyStar : baggyVerify suite p (baggyKeygen256 suite p sk) msgStar sigStar = true) :
-    BaggyHypertreeBreakWitness suite p sk (sessions.map (fun s => s.2.1)) msgStar :=
+    BaggyUpperReductionResult suite p sk (sessions.map (fun s => s.2.1)) msgStar :=
   let pk := baggyKeygen256 suite p sk
   have hLenEq : sigStar.layers.length = p.numLayers := by
     unfold baggyVerify at hVerifyStar
@@ -3284,7 +3289,7 @@ def baggy_verified_waistband_euf_cma_extract
             (Nat.le_refl 1) (by simp) (by rw [hLayers] at hLenEq; simp at hLenEq ⊢; omega)
             hMatch0 hWalkUpper rfl
 
-theorem baggy_verified_waistband_preserves_hypertree_euf_cma
+theorem baggy_verified_waistband_upper_reduction
     (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
     (hWf : p.WellFormed) (hGrind : BaggySuite256.WellGrinded suite)
     (hLeafDomain : ∀ pk r msg ctr leafIdx,
@@ -3297,10 +3302,10 @@ theorem baggy_verified_waistband_preserves_hypertree_euf_cma
     (hVerifyStar : baggyVerify suite p (baggyKeygen256 suite p sk) msgStar sigStar = true) :
     (∀ r ∈ (baggyRunMultiSessionVerified suite p sk (baggyKeygen256 suite p sk) [] sessions).2.2,
       baggyCanonicalStaticDigits suite p sk r.layer r.tree r.kp = some r.digits) ∧
-    Nonempty (BaggyHypertreeBreakWitness suite p sk (sessions.map (fun s => s.2.1)) msgStar) :=
+    Nonempty (BaggyUpperReductionResult suite p sk (sessions.map (fun s => s.2.1)) msgStar) :=
   ⟨fun r hr => ((waistband_verified_multi_session_single_codeword suite p sk
       (baggyKeygen256 suite p sk)).1 sessions [] hCanopyMatch r hr).2.2,
-   ⟨baggy_verified_waistband_euf_cma_extract suite p sk hWf hGrind hLeafDomain
+   ⟨baggy_verified_waistband_upper_extract suite p sk hWf hGrind hLeafDomain
       sessions msgStar sigStar hNotSigned hVerifyStar⟩⟩
 
 /-! ### `#tooth` cache-mutation: Corrupted Intermediate `Waistband` Opens 2nd Ancestor Codeword -/
@@ -3845,7 +3850,7 @@ theorem inhabited_wotsC256_incomparability_and_signing :
 /-- Non-vacuity witness for Section 2 (`Rss256Engine` 1-corrupt privacy + 2-challenge `BGIN19` soundness + sticky poison). -/
 theorem inhabited_rss256_privacy_soundness_and_poison :
     ∃ (x y : RssPlane256Share) (w : Bgin19Deg2Witness) (waveCoeffs : List Tower128)
-      (ops : List Rss256EngineOp),
+      (ops : List Rss256BarrierOp),
       x.reconstruct ≠ 0#256 ∧
       y.reconstruct ≠ 0#256 ∧
       w.Valid ∧
@@ -3854,8 +3859,8 @@ theorem inhabited_rss256_privacy_soundness_and_poison :
       ratLe (finSum ((2 ^ 128) * (2 ^ 128))
         (fun ω => if postWaveTwoChallengeAccepts waveCoeffs ω then 1 else 0), (2 ^ 128) ^ 2)
         ((2 * 2) ^ 2, (2 ^ 128) ^ 2) ∧
-      (rss256RunTrace rss256StepHardened Rss256EngineState.init ops).2 = [0xABCD#256] ∧
-      (rss256RunTrace rss256StepHardened Rss256EngineState.init ops).1.poisoned = true := by
+      (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init ops).2 = [0xABCD#256] ∧
+      (rss256BarrierTrace rss256BarrierStep Rss256BarrierState.init ops).1.poisoned = true := by
   let x : RssPlane256Share := { s0 := 1#256, s1 := 2#256, s2 := 4#256 }
   let y : RssPlane256Share := { s0 := 3#256, s1 := 5#256, s2 := 0#256 }
   let oneSh : RssTower128Share := { s0 := towerOne 7, s1 := towerZero 7, s2 := towerZero 7 }
@@ -3867,7 +3872,7 @@ theorem inhabited_rss256_privacy_soundness_and_poison :
   let waveCoeffs : List Tower128 := [towerOne 7, towerX 7]
   have hDeg : waveCoeffs.length ≤ 2 * 2 := by decide
   have hNz : ∃ c ∈ waveCoeffs, c ≠ towerZero 7 := ⟨towerOne 7, .head _, towerOne_ne_zero 7⟩
-  let ops : List Rss256EngineOp :=
+  let ops : List Rss256BarrierOp :=
     [.permuteInline true 0xABCD#256, .check, .openPlanes,
      .permuteInline false 0xFFFF#256, .check, .check, .openPlanes]
   exact ⟨x, y, w, waveCoeffs, ops, by decide, by decide, hValid, hDeg, hNz,
@@ -4131,11 +4136,11 @@ run_cmd do
     `Qsag.preWaveKernelFaultPair,
     `Qsag.preWaveTwoChallengeKernelFault,
     `Qsag.tooth_pre_wave_challenge_kernel_bypass,
-    `Qsag.Rss256EngineState.init,
-    `Qsag.rss256StepHardened,
-    `Qsag.rss256HardenedMachine,
+    `Qsag.Rss256BarrierState.init,
+    `Qsag.rss256BarrierStep,
+    `Qsag.rss256BarrierMachine,
     `Qsag.rss256StepBuggy,
-    `Qsag.rss256RunTrace,
+    `Qsag.rss256BarrierTrace,
     `Qsag.rss256RecordedWaveOp,
     `Qsag.rss256_recorded_wave_rejection_poison,
     `Qsag.Rss256SafeInvariant,
@@ -4174,8 +4179,8 @@ run_cmd do
     `Qsag.waistband_verified_multi_session_single_codeword,
     `Qsag.extractStaticLayerBreakFromTransition,
     `Qsag.walkUpperLayersBoundedExtract,
-    `Qsag.baggy_verified_waistband_euf_cma_extract,
-    `Qsag.baggy_verified_waistband_preserves_hypertree_euf_cma,
+    `Qsag.baggy_verified_waistband_upper_extract,
+    `Qsag.baggy_verified_waistband_upper_reduction,
     `Qsag.baggySignLayersUnhardenedAux,
     `Qsag.baggySignUnhardened,
     `Qsag.dToothBadFn,

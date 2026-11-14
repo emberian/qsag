@@ -4464,18 +4464,21 @@ def qsAPartitionedSign {n : Nat}
   match committeeIndexOf t selectedCommittee with
   | none => none
   | some cIdx =>
-    let gLeaf := UInt64.ofNat (committeeGlobalLeaf (2 ^ subtreeHeight) cIdx localEpoch)
-    let pkSeed := quorumStagePkSeed H masterSeed
-    let nodes := (List.finRange digits.length).map (fun idx =>
-      let d := digits[idx.1]'(idx.2)
-      let sk₀ := quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat idx.1)
-      let reconSk₀ := xorFin256 t (dealAdditiveShares t sk₀ (shareTape idx))
-      wotsChainIter (quorumChainStep H pkSeed gLeaf) idx.1 0 d.val reconSk₀)
-    some
-      { leaf := gLeaf
-        counter := counter
-        nodes := nodes
-        authPath := authPath }
+    if 0 < t ∧ localEpoch < 2 ^ subtreeHeight ∧
+        committeeGlobalLeaf (2 ^ subtreeHeight) cIdx localEpoch < 2 ^ 64 then
+      let gLeaf := UInt64.ofNat (committeeGlobalLeaf (2 ^ subtreeHeight) cIdx localEpoch)
+      let pkSeed := quorumStagePkSeed H masterSeed
+      let nodes := (List.finRange digits.length).map (fun idx =>
+        let d := digits[idx.1]'(idx.2)
+        let sk₀ := quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat idx.1)
+        let reconSk₀ := xorFin256 t (dealAdditiveShares t sk₀ (shareTape idx))
+        wotsChainIter (quorumChainStep H pkSeed gLeaf) idx.1 0 d.val reconSk₀)
+      some
+        { leaf := gLeaf
+          counter := counter
+          nodes := nodes
+          authPath := authPath }
+    else none
 
 /-- **Mode `QS-B` (*Global-Tree Quorum-Independent Leaf Allocation*) Signer**:
     Allocates `gLeaf` from a single global cursor independent of the responding `t`-subset, and
@@ -4524,7 +4527,7 @@ def qsBGlobalSign {d : Nat}
        `(pts₂, lambdas₂)` with valid Vandermonde-at-zero Lagrange weights over `TowerElem 7` (`GF(2^128)`)
        emit the **bit-for-bit identical `QuorumJortsSig`** (`qsBGlobalSign ... pts₁ lambdas₁ = qsBGlobalSign ... pts₂ lambdas₂`)! -/
 theorem qs_a_leaf_index_identifies_committee
-    {n t subtreeHeight : Nat}
+    {n t subtreeHeight : Nat} (hTPos : 0 < t)
     (H : List UInt8 → Digest256) (masterSeed : Digest256) :
     -- (1) Exact committee recovery from sig.leaf in QS-A:
     (∀ (selectedCommittee : CustodiansMask n) (cIdx localEpoch : Nat)
@@ -4597,6 +4600,7 @@ theorem qs_a_leaf_index_identifies_committee
     have hMaskAt : committeeMaskAtIdx n t cIdx = some Q := committeeMaskAtIdx_of_committeeIndexOf hIdx
     unfold qsAPartitionedSign
     rw [hIdx]
+    simp only [hTPos, hEpLt, hFit, and_self, ↓reduceIte]
     dsimp only
     refine ⟨_, rfl, ?_, ?_, ?_⟩
     · exact uint64_toNat_ofNat_of_lt hFit
@@ -4716,6 +4720,8 @@ theorem qs_a_single_signer_equiv_given_same_leaf_schedule
     (H : List UInt8 → Digest256) (masterSeed : Digest256)
     (selectedCommittee : CustodiansMask n) (cIdx localEpoch : Nat)
     (hIdx : committeeIndexOf t selectedCommittee = some cIdx)
+    (hEpoch : localEpoch < 2 ^ subtreeHeight)
+    (hFit : committeeGlobalLeaf (2 ^ subtreeHeight) cIdx localEpoch < 2 ^ 64)
     (counter : UInt32) (digits : List (Fin 4)) (authPath : List Digest256) :
     let gLeaf := UInt64.ofNat (committeeGlobalLeaf (2 ^ subtreeHeight) cIdx localEpoch)
     let refSig := quorumJortsReferenceSign H masterSeed gLeaf counter digits authPath
@@ -4735,6 +4741,7 @@ theorem qs_a_single_signer_equiv_given_same_leaf_schedule
     intro shareTape
     unfold qsAPartitionedSign
     rw [hIdx]
+    simp only [hTPos, hEpoch, hFit, and_self, ↓reduceIte]
     dsimp only
     congr 1
     unfold refSig quorumJortsReferenceSign
@@ -4763,9 +4770,9 @@ def quorumWotsChains : Nat := 128
 /-- Balanced 256-bit `WOTS+C` target digit sum `S = 128 * 3 / 2 = 192` of `quorum_jorts.rs:71`. -/
 def quorumWotsTargetSum : Nat := 192
 
-/-- Bit offset of chain digit `i` inside the digest: byte `i / 4` (byte zero occupies the low
+/-- Bit offset of chain digit `i` inside the digest: byte `i / 4` (byte zero occupies the high
     eight bits), and within that byte the shifts `6, 4, 2, 0` in that order. -/
-def quorumDibitShift (i : Nat) : Nat := 8 * (i / 4) + (6 - 2 * (i % 4))
+def quorumDibitShift (i : Nat) : Nat := 8 * (31 - i / 4) + (6 - 2 * (i % 4))
 
 /-- Chain digit `i` of a 256-bit grinding digest, most-significant dibit first within each byte:
     `(digest[i / 4] >> (6 - 2 * (i % 4))) & 3`, as in `digits_at` of `quorum_jorts.rs`. -/
@@ -4781,12 +4788,12 @@ def quorumDigitsFromDigest (dig : Digest256) : List (Fin 4) :=
     `digest[i / 4]` and the shift is `6 - 2 * (i % 4)`. -/
 theorem quorumDigitAt_eq_byte_shift (dig : Digest256) (i : Nat) :
     (quorumDigitAt dig i).val =
-      (((dig >>> (8 * (i / 4))).toNat % 256) >>> (6 - 2 * (i % 4))) % 4 := by
+      (((dig >>> (8 * (31 - i / 4))).toNat % 256) >>> (6 - 2 * (i % 4))) % 4 := by
   have h : i % 4 < 4 := Nat.mod_lt _ (by decide)
-  show (dig >>> (8 * (i / 4) + (6 - 2 * (i % 4)))).toNat % 4 = _
+  show (dig >>> (8 * (31 - i / 4) + (6 - 2 * (i % 4)))).toNat % 4 = _
   rw [BitVec.toNat_ushiftRight, BitVec.toNat_ushiftRight, Nat.shiftRight_add]
   simp only [Nat.shiftRight_eq_div_pow]
-  generalize dig.toNat / 2 ^ (8 * (i / 4)) = m
+  generalize dig.toNat / 2 ^ (8 * (31 - i / 4)) = m
   generalize i % 4 = r at h
   have hr : r = 0 ∨ r = 1 ∨ r = 2 ∨ r = 3 := by omega
   rcases hr with rfl | rfl | rfl | rfl <;>
@@ -4797,14 +4804,14 @@ theorem quorumDigitAt_eq_byte_shift (dig : Digest256) (i : Nat) :
     `wotsCDibits128`, so the two extractors read the same dibit for every chain index. -/
 theorem quorumDigitAt_eq_extractLsb' (dig : Digest256) (i : Nat) :
     (quorumDigitAt dig i).val =
-      (dig.extractLsb' (8 * (i / 4) + (6 - 2 * (i % 4))) 2).toNat := by
+      (dig.extractLsb' (8 * (31 - i / 4) + (6 - 2 * (i % 4))) 2).toNat := by
   show (dig >>> quorumDibitShift i).toNat % 4 = (dig.toNat >>> quorumDibitShift i) % 2 ^ 2
   rfl
 
 /-- Sanity vector: the first byte `0xE4 = 0b11_10_01_00` decodes as `[3, 2, 1, 0]`, as in the
     signer. -/
 theorem quorumDigitsFromDigest_msb_sanity :
-    ((quorumDigitsFromDigest 0xE4#256).take 4).map Fin.val = [3, 2, 1, 0] := by
+    ((quorumDigitsFromDigest (0xE4#256 <<< 248)).take 4).map Fin.val = [3, 2, 1, 0] := by
   decide +kernel
 
 /-- `#tooth` Dibit Order (`tooth_quorumDigits_not_lsb_first`): reading the dibits of `0xE4` from
@@ -4812,7 +4819,7 @@ theorem quorumDigitsFromDigest_msb_sanity :
     returns. -/
 theorem tooth_quorumDigits_not_lsb_first :
     (List.range 4).map (fun i => ((0xE4#256 : Digest256) >>> (2 * i)).toNat % 4) = [0, 1, 2, 3] ∧
-    ((quorumDigitsFromDigest 0xE4#256).take 4).map Fin.val ≠ [0, 1, 2, 3] := by
+    ((quorumDigitsFromDigest (0xE4#256 <<< 248)).take 4).map Fin.val ≠ [0, 1, 2, 3] := by
   decide +kernel
 
 theorem quorumDigitsFromDigest_length (dig : Digest256) :
@@ -4820,17 +4827,26 @@ theorem quorumDigitsFromDigest_length (dig : Digest256) :
   simp [quorumDigitsFromDigest, quorumWotsChains]
 
 
+/-- Adapt big-endian byte positions to Baggy's low-byte-first digest representation. -/
+def quorumWotsIndex (i : Fin 128) : Fin 128 :=
+  ⟨4 * (31 - i.val / 4) + i.val % 4, by have := i.isLt; omega⟩
+
 /-- The quorum schedule is exactly the WOTS+C production schedule, at every chain. -/
 theorem quorumDigitAt_eq_wotsCDibits128 (dig : Digest256) (i : Fin 128) :
-    quorumDigitAt dig i.val = wotsCDibits128 dig i := by
+    quorumDigitAt dig i.val = wotsCDibits128 dig (quorumWotsIndex i) := by
   apply Fin.ext
   rw [quorumDigitAt_eq_extractLsb', wotsCDibits128_byte_shift]
-  rfl
+  have hi := i.isLt
+  have hdiv : (quorumWotsIndex i).val / 4 = 31 - i.val / 4 := by
+    dsimp [quorumWotsIndex]; omega
+  have hmod : (quorumWotsIndex i).val % 4 = i.val % 4 := by
+    dsimp [quorumWotsIndex]; omega
+  rw [hdiv, hmod]
 
 /-- The list passed to the quorum signer uses the WOTS+C chain order. -/
 theorem quorumDigitsFromDigest_get (dig : Digest256) (i : Fin 128) :
     (quorumDigitsFromDigest dig)[i.val]'(by rw [quorumDigitsFromDigest_length]; exact i.isLt) =
-      wotsCDibits128 dig i := by
+      wotsCDibits128 dig (quorumWotsIndex i) := by
   simp only [quorumDigitsFromDigest, List.getElem_map, List.getElem_range]
   exact quorumDigitAt_eq_wotsCDibits128 dig i
 
@@ -4856,7 +4872,7 @@ theorem quorumJortsSignMessage_schedule (H : List UInt8 → Digest256) (masterSe
         (quorumDigitsFromDigest (quorumCounterDigest H (quorumMessageHash H pk leaf msg) counter))
         authPath) ∧
     ∀ i : Fin 128, quorumDigitAt
-      (quorumCounterDigest H (quorumMessageHash H pk leaf msg) counter) i.val = d.digits i := by
+      (quorumCounterDigest H (quorumMessageHash H pk leaf msg) counter) i.val = d.digits (quorumWotsIndex i) := by
   refine ⟨by simp only [quorumJortsSignMessage, h], ?_⟩
   intro i
   rw [wotsC256DecodeValidDigest_some_digits h]

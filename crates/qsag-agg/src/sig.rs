@@ -363,7 +363,10 @@ pub fn compute_message_mu(pk: &ValidatorPublicKey, msg: &[u8]) -> ([u8; 32], Dig
 /// in its own dedicated limb and lossless 64-bit `(tree_lo32, tree_hi32)` in limbs `2..4` (`[P1-04]`).
 #[inline]
 pub fn pack_wots_addr_limb(layer: u32, kp_idx: u32, chain_idx: u32, step_idx: u32) -> Goldilocks {
-    debug_assert!(layer < 64 && kp_idx < (1 << 20) && chain_idx < 256 && step_idx < 16);
+    assert!(
+        layer < 64 && kp_idx < (1 << 20) && chain_idx < 256 && step_idx < 16,
+        "WOTS+C address coordinate out of injective Goldilocks packing bounds"
+    );
     let packed = ((layer as u64) << 44)
         | ((kp_idx as u64) << 16)
         | ((chain_idx as u64) << 4)
@@ -458,6 +461,10 @@ pub fn merkle_node_hash(
         level,
         node_idx,
     } = addr;
+    assert!(
+        layer <= 0xFFFE && level <= 0xFFFF,
+        "MerkleNodeAddr (layer, level) out of canonical Goldilocks framing range"
+    );
     let meta0 = ((layer as u64) << 48) | ((level as u64) << 32) | (node_idx as u64);
     let mut st = [
         pk_seed[0],

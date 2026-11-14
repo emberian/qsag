@@ -169,9 +169,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut new_mesh = OtMesh::try_establish([0xD0; 32], &mut new_rngs)?;
     eprintln!("New committee bootstrap: {:?}", started.elapsed());
 
-    // Enroll both seed commitments before redistribution. Each is an actual
-    // FIPS 205 root computed with MPC, not a constant root-check callback.
-    // The PRF seed has an auxiliary tree solely for custody continuity checking.
+    // Enroll both 256-bit seed commitments before redistribution. Each commitment
+    // evaluates a secret-keyed 32-byte SPDZ MPC PRF under full dishonest-majority
+    // MAC authentication without reconstructing either seed.
     let seed_root = custody_root(&sk_seed_old, old_t, &old_pts, shared_pk_seed32, 0xE0, &mut old_mesh)?;
     let prf_root = custody_root(&sk_prf_old, old_t, &old_pts, shared_pk_seed32, 0xE1, &mut old_mesh)?;
     // Reuse one dedicated root-check mesh for both post-reshare commitments;
@@ -264,9 +264,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Recompute a public custody commitment without reconstructing a seed.
-/// Independent sessions and fresh OS entropy isolate these check ceremonies.
-/// Existing OT channels advance their batch counters; base OTs are never repeated.
+/// Recompute a 256-bit public custody commitment over all 32 bytes of `shares` without
+/// reconstructing the seed. Independent sessions and fresh OS entropy isolate these check
+/// ceremonies; existing OT channels advance their batch counters so base OTs never repeat.
 fn custody_root(
     shares: &[ShamirSeedShare256],
     threshold: usize,
@@ -275,18 +275,17 @@ fn custody_root(
     label: u8,
     mesh: &mut OtMesh,
 ) -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    let params = Fips205Params::SLH_DSA_SHAKE_128F;
     let mut rngs = (0..points.len())
         .map(|_| PartyPrivateRng::from_os_rng(b"example.custody.root"))
         .collect::<Result<Vec<_>, _>>()?;
     let (alpha, alpha_shares) = spdz_setup_alpha_gf256(&[label; 32], threshold, points, &mut rngs)?;
-    // Root keygen never uses SK.prf; supplying this seed in both slots avoids
-    // introducing unrelated secret material into the root check.
+    // Bind all 32 bytes (`256` bits) of `shares` under 2-lane `Tower128` SPDZ MACs and evaluate
+    // `SHAKE256(seed_32 || pk_seed_32 || "QSAG.SLH.CUSTODY.ROOT/v1")[..32]` inside MPC.
     let keys = authenticate_dkg_seed_shares_for_spdz(
         &[label; 32],
         threshold,
         points,
-        params.n,
+        32,
         pk_seed,
         shares,
         shares,
@@ -295,15 +294,13 @@ fn custody_root(
         mesh,
         &mut rngs,
     )?;
-    // One PRF plus 15 chain steps per batch of 64 WOTS chains,
-    // each permutation consumes 600 Boolean triple words.
-    let batches = ((1usize << params.hp) * params.ell()).div_ceil(64);
+    // One `Keccak-f[1600]` permutation consumes `600` 64-way Boolean triple words.
     let mut vaults = run_dealerless_pcg_keccak_vaults_with_alpha(
         [label; 32],
         threshold,
         points,
         PCG_DEFAULT_TREE_DEPTH,
-        batches * 16 * 600,
+        600,
         &alpha,
         &alpha_shares,
         mesh,
@@ -316,8 +313,8 @@ fn custody_root(
         &mut vaults[..threshold],
         &mut rngs[..threshold],
     )?;
-    let pk = slh_keygen_mpc(&params, &mut cluster, &pk_seed[..params.n])?;
-    let mut root = [0; 32];
-    root[..params.n].copy_from_slice(pk.pk_root_slice());
+    let (blk, _mac_tok) = cluster.eval_prf_msg_mpc(32, &pk_seed, b"QSAG.SLH.CUSTODY.ROOT/v1")?;
+    let mut root = [0u8; 32];
+    root.copy_from_slice(blk.as_slice());
     Ok(root)
 }

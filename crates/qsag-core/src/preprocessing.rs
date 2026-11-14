@@ -1196,8 +1196,8 @@ impl RlweReceiverZkPok {
                     log_ratio += 2 * i64::from(ye[i]) * dei + dei * dei;
                     ys[i] += ds[i];
                     ye[i] += de[i];
-                    in_bounds &= ((i32::from(ys[i]) + 3070) as u32 < 6140) as u32;
-                    in_bounds &= ((i32::from(ye[i]) + 3070) as u32 < 6140) as u32;
+                    in_bounds &= (((i32::from(ys[i]) + 3070) as u32) < 6140) as u32;
+                    in_bounds &= (((i32::from(ye[i]) + 3070) as u32) < 6140) as u32;
                 }
             }
             let accept = gaussian_accept(log_ratio, rng);
@@ -2056,7 +2056,6 @@ impl Drop for BaseProofWorkers {
 }
 
 impl BaseOtExtSenderRound1 {
-    #[expect(clippy::too_many_arguments, reason = "Explicit block statement, role and randomness bindings")]
     fn build_packed_block(
         crs_coin: &[u8; 32],
         session_id: &[u8; 32],
@@ -5146,8 +5145,9 @@ pub fn spdz_authenticate_bs_gf256_words(
         }
     }
 
-    let mut raw_macs = vec![vec![vec![[Tower128::ZERO; 2]; m_raw]; t]; n];
-    let mut raw_keys = vec![vec![vec![[Tower128::ZERO; 2]; m_raw]; t]; n];
+    // Accumulate additive OT correlation shares directly into `sum_raw[party][slot]` (`O(n * m_raw)`
+    // instead of `O(n * t * m_raw)` 4D matrices) before universal-hash `[I | H]` compression.
+    let mut sum_raw = vec![vec![[Tower128::ZERO; 2]; m_raw]; n];
 
     for i in 0..n {
         if i < t {
@@ -5155,8 +5155,8 @@ pub fn spdz_authenticate_bs_gf256_words(
                 let ri_emb = TowerGf256(r_bytes[i][s]);
                 for lane in 0..2 {
                     let local_mask = party_rngs[i].next_tower128();
-                    raw_keys[i][i][s][lane] = local_mask;
-                    raw_macs[i][i][s][lane] = local_mask.add(alpha_contribs[i][lane].mul_gf256(ri_emb));
+                    let local_mac = local_mask.add(alpha_contribs[i][lane].mul_gf256(ri_emb));
+                    sum_raw[i][s][lane] = sum_raw[i][s][lane].add(local_mask).add(local_mac);
                 }
             }
         }
@@ -5196,8 +5196,8 @@ pub fn spdz_authenticate_bs_gf256_words(
                         let ct_sel = Tower128(ct0.0 ^ (c_mask & (ct0.0 ^ ct1.0)));
                         mac_sum = mac_sum.add(ct_sel.add(pad_c));
                     }
-                    raw_keys[i][j][s][lane] = key_sum;
-                    raw_macs[i][j][s][lane] = mac_sum;
+                    sum_raw[i][s][lane] = sum_raw[i][s][lane].add(key_sum);
+                    sum_raw[j][s][lane] = sum_raw[j][s][lane].add(mac_sum);
                 }
             }
         }
@@ -5230,36 +5230,6 @@ pub fn spdz_authenticate_bs_gf256_words(
         }
         wipe_bytes(&mut r_bytes[j]);
         wipe_u64s(&mut choice_words[j]);
-    }
-
-    // Pre-sum additive OT correlation shares per party `p` across `j in 0..t` and `i in 0..n`
-    // BEFORE multiplying by `h_rows[idx][tl]`, and evaluate subfield multiplies via SWAR `mul_gf256`!
-    let mut sum_raw = vec![vec![[Tower128::ZERO; 2]; m_raw]; n];
-    for p in 0..n {
-        for s in 0..m_raw {
-            let mut s0 = Tower128::ZERO;
-            let mut s1 = Tower128::ZERO;
-            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
-            for j in 0..t {
-                s0 = s0.add(raw_keys[p][j][s][0]);
-                s1 = s1.add(raw_keys[p][j][s][1]);
-            }
-            if p < t {
-                for raw_macs_i_item in raw_macs[..n].iter() {
-                    s0 = s0.add((*raw_macs_i_item)[p][s][0]);
-                    s1 = s1.add((*raw_macs_i_item)[p][s][1]);
-                }
-            }
-            sum_raw[p][s] = [s0, s1];
-        }
-    }
-    for i in 0..n {
-        for j in 0..t {
-            for s in 0..m_raw {
-                wipe_tower128(&mut raw_macs[i][j][s]);
-                wipe_tower128(&mut raw_keys[i][j][s]);
-            }
-        }
     }
 
     // Sum additive shares `tau_p[idx][lane]` at each party `p in 0..n` and Shamir-share at degree `< t`
@@ -6408,7 +6378,15 @@ where
         }
     }
 
+    for p in 0..n {
+        wipe_u64s(&mut u_share_buf[p]);
+        wipe_tower128(&mut mac_buf[p][0]);
+        wipe_tower128(&mut mac_buf[p][1]);
+    }
+
     // Step 4: `3 -> 1` SPDZ-authenticated Beaver privacy amplification (`[P1-05]`) on both `a` and `b`!
+    // Batch all `num_triples` bucket openings for `d = b0 ^ b1` and `e = a0 ^ a1 ^ a2` into 2
+    // committed SPDZ `MacCheck` ceremonies (`2` round-trips instead of `2 * num_triples`).
     let mut final_a = vec![vec![[0u64; 8]; num_triples]; n];
     let mut final_b = vec![vec![[0u64; 8]; num_triples]; n];
     let mut final_c = vec![vec![[0u64; 8]; num_triples]; n];
@@ -6416,94 +6394,106 @@ where
     let mut final_b_mac = vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n];
     let mut final_c_mac = vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n];
 
+    let mut d_sh_batch = vec![vec![[0u64; 8]; num_triples]; n];
+    let mut d_mac_batch = vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n];
     for k in 0..num_triples {
-        // Raw triples of bucket `k`, taken from the coin-derived permutation.
+        let k0 = bucket_perm[k] as usize;
+        let k1 = bucket_perm[num_triples + k] as usize;
+        for p in 0..n {
+            d_sh_batch[p][k] = bs_gf256_xor(&b_sh[p][k0], &b_sh[p][k1]);
+            for lane in 0..2 {
+                for bit in 0..64 {
+                    d_mac_batch[p][k][lane][bit] =
+                        b_mac[p][k0][lane][bit].add(b_mac[p][k1][lane][bit]);
+                }
+            }
+        }
+    }
+    let d_open_res = commit_and_open_spdz_bs_gf256_batch_quorum(
+        &session_id,
+        "pi_triple_f2_comb_d",
+        t,
+        eval_points,
+        &d_sh_batch,
+        &d_mac_batch,
+        alpha_shamir,
+        party_rngs,
+    );
+    for p in 0..n {
+        for k in 0..num_triples {
+            wipe_u64s(&mut d_sh_batch[p][k]);
+            wipe_tower128(&mut d_mac_batch[p][k][0]);
+            wipe_tower128(&mut d_mac_batch[p][k][1]);
+        }
+    }
+    let d_opened = d_open_res?;
+
+    let mut e_sh_batch = vec![vec![[0u64; 8]; num_triples]; n];
+    let mut e_mac_batch = vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n];
+    for k in 0..num_triples {
         let k0 = bucket_perm[k] as usize;
         let k1 = bucket_perm[num_triples + k] as usize;
         let k2 = bucket_perm[2 * num_triples + k] as usize;
-
-        // Combine `(k0, k1)` to amplify `a`: open `d = b0 ^ b1` via committed SPDZ `MacCheck`
         for p in 0..n {
-            u_share_buf[p] = bs_gf256_xor(&b_sh[p][k0], &b_sh[p][k1]);
+            let a_mid_p = bs_gf256_xor(&a_sh[p][k0], &a_sh[p][k1]);
+            final_a[p][k] = a_mid_p;
+            e_sh_batch[p][k] = bs_gf256_xor(&a_mid_p, &a_sh[p][k2]);
             for lane in 0..2 {
                 for bit in 0..64 {
-                    mac_buf[p][lane][bit] = b_mac[p][k0][lane][bit].add(b_mac[p][k1][lane][bit]);
+                    let a_mid_m = a_mac[p][k0][lane][bit].add(a_mac[p][k1][lane][bit]);
+                    final_a_mac[p][k][lane][bit] = a_mid_m;
+                    e_mac_batch[p][k][lane][bit] = a_mid_m.add(a_mac[p][k2][lane][bit]);
                 }
             }
         }
-        let d_open = commit_and_open_spdz_bs_gf256_quorum(
-            &session_id,
-            "pi_triple_f2_comb_d",
-            t,
-            eval_points,
-            &u_share_buf,
-            &mac_buf,
-            alpha_shamir,
-            party_rngs,
-        )?;
-
-        let mut a_mid = vec![[0u64; 8]; n];
-        let mut a_mid_mac = vec![[[Tower128::ZERO; 64]; 2]; n];
-        let mut c_mid = vec![[0u64; 8]; n];
-        let mut c_mid_mac = vec![[[Tower128::ZERO; 64]; 2]; n];
-        for p in 0..n {
-            a_mid[p] = bs_gf256_xor(&a_sh[p][k0], &a_sh[p][k1]);
-            let da1 = bs_gf256_mul_planes_ct(&d_open, &a_sh[p][k1]);
-            c_mid[p] = bs_gf256_xor(&bs_gf256_xor(&c_sh[p][k0], &c_sh[p][k1]), &da1);
-            for bit in 0..64 {
-                let d_gf = bs_gf256_extract_lane(&d_open, bit);
-                for lane in 0..2 {
-                    a_mid_mac[p][lane][bit] =
-                        a_mac[p][k0][lane][bit].add(a_mac[p][k1][lane][bit]);
-                    c_mid_mac[p][lane][bit] = c_mac[p][k0][lane][bit]
-                        .add(c_mac[p][k1][lane][bit])
-                        .add(a_mac[p][k1][lane][bit].mul_gf256(d_gf));
-                }
-            }
+    }
+    let e_open_res = commit_and_open_spdz_bs_gf256_batch_quorum(
+        &session_id,
+        "pi_triple_f2_comb_e",
+        t,
+        eval_points,
+        &e_sh_batch,
+        &e_mac_batch,
+        alpha_shamir,
+        party_rngs,
+    );
+    for p in 0..n {
+        for k in 0..num_triples {
+            wipe_u64s(&mut e_sh_batch[p][k]);
+            wipe_tower128(&mut e_mac_batch[p][k][0]);
+            wipe_tower128(&mut e_mac_batch[p][k][1]);
         }
+    }
+    let e_opened = e_open_res?;
 
-        // Combine `(mid, k2)` to amplify `b`: open `e = a_mid ^ a2` via committed SPDZ `MacCheck`
-        for p in 0..n {
-            u_share_buf[p] = bs_gf256_xor(&a_mid[p], &a_sh[p][k2]);
-            for lane in 0..2 {
-                for bit in 0..64 {
-                    mac_buf[p][lane][bit] = a_mid_mac[p][lane][bit].add(a_mac[p][k2][lane][bit]);
-                }
-            }
-        }
-        let e_open = commit_and_open_spdz_bs_gf256_quorum(
-            &session_id,
-            "pi_triple_f2_comb_e",
-            t,
-            eval_points,
-            &u_share_buf,
-            &mac_buf,
-            alpha_shamir,
-            party_rngs,
-        )?;
+    for k in 0..num_triples {
+        let k0 = bucket_perm[k] as usize;
+        let k1 = bucket_perm[num_triples + k] as usize;
+        let k2 = bucket_perm[2 * num_triples + k] as usize;
+        let d_open = &d_opened[k];
+        let e_open = &e_opened[k];
 
         for p in 0..n {
-            final_a[p][k] = a_mid[p];
-            final_a_mac[p][k] = a_mid_mac[p];
+            let da1 = bs_gf256_mul_planes_ct(d_open, &a_sh[p][k1]);
+            let mut c_mid = bs_gf256_xor(&bs_gf256_xor(&c_sh[p][k0], &c_sh[p][k1]), &da1);
             final_b[p][k] = bs_gf256_xor(&b_sh[p][k0], &b_sh[p][k2]);
-            let eb2 = bs_gf256_mul_planes_ct(&e_open, &b_sh[p][k2]);
-            final_c[p][k] = bs_gf256_xor(&bs_gf256_xor(&c_mid[p], &c_sh[p][k2]), &eb2);
+            let eb2 = bs_gf256_mul_planes_ct(e_open, &b_sh[p][k2]);
+            final_c[p][k] = bs_gf256_xor(&bs_gf256_xor(&c_mid, &c_sh[p][k2]), &eb2);
+            wipe_u64s(&mut c_mid);
+
             for bit in 0..64 {
-                let e_gf = bs_gf256_extract_lane(&e_open, bit);
+                let d_gf = bs_gf256_extract_lane(d_open, bit);
+                let e_gf = bs_gf256_extract_lane(e_open, bit);
                 for lane in 0..2 {
                     final_b_mac[p][k][lane][bit] =
                         b_mac[p][k0][lane][bit].add(b_mac[p][k2][lane][bit]);
-                    final_c_mac[p][k][lane][bit] = c_mid_mac[p][lane][bit]
+                    final_c_mac[p][k][lane][bit] = c_mac[p][k0][lane][bit]
+                        .add(c_mac[p][k1][lane][bit])
+                        .add(a_mac[p][k1][lane][bit].mul_gf256(d_gf))
                         .add(c_mac[p][k2][lane][bit])
                         .add(b_mac[p][k2][lane][bit].mul_gf256(e_gf));
                 }
             }
-            wipe_u64s(&mut a_mid[p]);
-            wipe_u64s(&mut c_mid[p]);
-            wipe_tower128(&mut a_mid_mac[p][0]);
-            wipe_tower128(&mut a_mid_mac[p][1]);
-            wipe_tower128(&mut c_mid_mac[p][0]);
-            wipe_tower128(&mut c_mid_mac[p][1]);
         }
     }
 
@@ -11801,11 +11791,27 @@ mod hardening_regressions {
 
     #[test]
     fn joint_proof_ot_roundtrip_both_choices() {
+        let mut rng_diff = PartyPrivateRng::from_seed([0x44; 32], b"chal11-diff");
+        let mut signed_a = [0i16; RLWE_N];
+        for coeff in &mut signed_a {
+            *coeff = ((rng_diff.next_u64() % 2001) as i16) - 1000;
+        }
+        let poly_a = signed_box_to_rlwe_poly(&signed_a);
+        for u in [0u32, 1, 511, 1023, 1024, 1025, 1536, 2047] {
+            let expected = poly_from_chal11(u).mul_negacyclic(&poly_a);
+            assert_eq!(mul_chal11_public(&poly_a, u), expected);
+            assert_eq!(signed_box_to_rlwe_poly(&mul_chal11_signed_ct(&signed_a, u)), expected);
+        }
+
         let sid = [0xaa;32];
         let mut receiver = PartyPrivateRng::from_seed([0x22;32], b"joint-proof");
         let mut sender = PartyPrivateRng::from_seed([0x11;32], b"joint-proof");
         for index in 0..2 {
             let (secret, request) = rlwe_ot_choose(&sid, 0, 1, index, index == 1, &mut receiver);
+            let mut malformed = request.clone();
+            malformed.pok.chal0[0] |= 1 << RLWE_ZKPOK_CHAL_BITS;
+            assert!(try_rlwe_ot_transfer(&sid, 0, 1, index, &malformed,
+                &[0x31;32], &[0x72;32], &mut sender).is_err());
             let mut malformed = request.clone();
             malformed.pok.chal0[0] |= 1 << 20;
             assert!(try_rlwe_ot_transfer(&sid, 0, 1, index, &malformed,
