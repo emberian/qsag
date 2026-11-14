@@ -3471,6 +3471,100 @@ pub fn eval_spdz_keccak_f1600_batch64(
     Ok(())
 }
 
+fn slh_profile_digest_u64x4(params: &Fips205Params) -> [u64; 4] {
+    let n_b = (params.n as u64).to_le_bytes();
+    let h_b = (params.h as u64).to_le_bytes();
+    let d_b = (params.d as u64).to_le_bytes();
+    let hp_b = (params.hp as u64).to_le_bytes();
+    let a_b = (params.a as u64).to_le_bytes();
+    let k_b = (params.k as u64).to_le_bytes();
+    let lg_w_b = (params.lg_w as u64).to_le_bytes();
+    let m_b = (params.m as u64).to_le_bytes();
+    let digest = cshake256_32_multi_frame(
+        b"QSAG.FIPS205.PROFILE.V1",
+        &[
+            params.name.as_bytes(),
+            &n_b,
+            &h_b,
+            &d_b,
+            &hp_b,
+            &a_b,
+            &k_b,
+            &lg_w_b,
+            &m_b,
+        ],
+    );
+    core::array::from_fn(|i| {
+        u64::from_le_bytes(core::array::from_fn(|b| digest[8 * i + b]))
+    })
+}
+
+#[inline]
+fn ct_eq_u64_x4(a: &[u64; 4], b: &[u64; 4]) -> bool {
+    let mut ok = 1u8;
+    for i in 0..4 {
+        ok &= ct_eq_u64(a[i], b[i]) as u8;
+    }
+    ok == 1
+}
+
+/// Lock-free write-once commitment to an enrolled [`Fips205Params`] profile on a share.
+struct SlhProfileLatch {
+    state: AtomicU8,
+    digest: [AtomicU64; 4],
+}
+
+impl SlhProfileLatch {
+    const UNBOUND: u8 = 0;
+    const BINDING: u8 = 1;
+    const BOUND: u8 = 2;
+
+    const fn new() -> Self {
+        Self {
+            state: AtomicU8::new(Self::UNBOUND),
+            digest: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
+        }
+    }
+
+    fn enrolled(&self) -> Result<Option<[u64; 4]>, ()> {
+        match self.state.load(Ordering::Acquire) {
+            Self::UNBOUND => Ok(None),
+            Self::BOUND => Ok(Some([
+                self.digest[0].load(Ordering::Acquire),
+                self.digest[1].load(Ordering::Acquire),
+                self.digest[2].load(Ordering::Acquire),
+                self.digest[3].load(Ordering::Acquire),
+            ])),
+            _ => Err(()),
+        }
+    }
+
+    fn bind(&self, want: [u64; 4]) -> Result<(), ()> {
+        if self
+            .state
+            .compare_exchange(Self::UNBOUND, Self::BINDING, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            for (slot, &val) in self.digest.iter().zip(&want) {
+                slot.store(val, Ordering::Release);
+            }
+            self.state.store(Self::BOUND, Ordering::Release);
+            return Ok(());
+        }
+        if let Ok(Some(cur)) = self.enrolled()
+            && ct_eq_u64_x4(&cur, &want)
+        {
+            return Ok(());
+        }
+        Err(())
+    }
+}
+
 /// Authenticated SPDZ Shamir representation of `(SK.seed, SK.prf)` packed into four 64-bit words
 /// (`[BitslicedGf256x64; 4]` = 32 bytes each) paired with 2-lane `Tower128` SPDZ MAC shares!
 pub struct SpdzAuthenticatedKeyShare {
@@ -3482,6 +3576,7 @@ pub struct SpdzAuthenticatedKeyShare {
     pub sk_seed_macs: [[[Tower128; 64]; 2]; 4],
     pub sk_prf_words: [BitslicedGf256x64; 4],
     pub sk_prf_macs: [[[Tower128; 64]; 2]; 4],
+    slh_profile: SlhProfileLatch,
 }
 
 impl fmt::Debug for SpdzAuthenticatedKeyShare {
@@ -3567,7 +3662,7 @@ pub fn authenticate_dkg_seed_shares_for_spdz(
         }
     }
 
-    let all_macs = spdz_authenticate_bs_gf256_words(
+    let all_macs = SecretBuffer(spdz_authenticate_bs_gf256_words(
         session_id,
         t,
         eval_points,
@@ -3576,7 +3671,7 @@ pub fn authenticate_dkg_seed_shares_for_spdz(
         alpha_shamir,
         &packed_words,
         party_rngs,
-    )?;
+    )?);
 
     let mut out = Vec::with_capacity(n);
     for p in 0..n {
@@ -3598,6 +3693,7 @@ pub fn authenticate_dkg_seed_shares_for_spdz(
             sk_seed_macs,
             sk_prf_words,
             sk_prf_macs,
+            slh_profile: SlhProfileLatch::new(),
         });
     }
     Ok(out)
@@ -3638,8 +3734,25 @@ impl<'a> SpdzSlhMpcCluster<'a> {
         }
         let quorum_pts: Vec<TowerGf256> = keys.iter().map(|k| k.eval_point).collect();
         validate_all_eval_points_gf256(&quorum_pts)?;
+        let enrolled0 = keys[0]
+            .slh_profile
+            .enrolled()
+            .map_err(|()| KeccakMpcError::InvalidParameters)?;
         for p in 0..m {
-            if vaults[p].eval_point != quorum_pts[p] || keys[p].key_len != keys[0].key_len {
+            let enrolled_p = keys[p]
+                .slh_profile
+                .enrolled()
+                .map_err(|()| KeccakMpcError::InvalidParameters)?;
+            let same_profile = match (&enrolled0, &enrolled_p) {
+                (None, None) => true,
+                (Some(a), Some(b)) => ct_eq_u64_x4(a, b),
+                _ => false,
+            };
+            if vaults[p].eval_point != quorum_pts[p]
+                || keys[p].key_len != keys[0].key_len
+                || keys[p].pk_seed != keys[0].pk_seed
+                || !same_profile
+            {
                 return Err(KeccakMpcError::InvalidParameters);
             }
         }
@@ -3736,7 +3849,11 @@ impl<'a> SpdzSlhMpcCluster<'a> {
             self.poison_all();
             return Err(Fips205Error::MpcActiveTamperDetected);
         }
-        let alpha_sh: Vec<[Tower128; 2]> = (0..m).map(|p| self.vaults[p].mac_alpha_lanes).collect();
+        let alpha_sh = SecretBuffer(
+            (0..m)
+                .map(|p| self.vaults[p].mac_alpha_lanes)
+                .collect::<Vec<[Tower128; 2]>>(),
+        );
         if verify_pending_spdz_mac_batch(
             &self.session_id,
             "spdz_batch64_chi",
@@ -3876,7 +3993,11 @@ impl<'a> SpdzSlhMpcCluster<'a> {
         let m = self.quorum_pts.len();
         let n = self.keys[0].key_len;
         let n_bits = 8 * n;
-        let alpha_sh: Vec<[Tower128; 2]> = (0..m).map(|p| self.vaults[p].mac_alpha_lanes).collect();
+        let alpha_sh = SecretBuffer(
+            (0..m)
+                .map(|p| self.vaults[p].mac_alpha_lanes)
+                .collect::<Vec<[Tower128; 2]>>(),
+        );
         let opened_words = match commit_and_open_spdz_bs_gf256_batch_quorum(
             &self.session_id,
             phase,
@@ -3935,7 +4056,11 @@ impl<'a> SpdzSlhMpcCluster<'a> {
         let m = self.quorum_pts.len();
         let n = self.keys[0].key_len;
         let words_per_block = n / 8;
-        let alpha_sh: Vec<[Tower128; 2]> = (0..m).map(|p| self.vaults[p].mac_alpha_lanes).collect();
+        let alpha_sh = SecretBuffer(
+            (0..m)
+                .map(|p| self.vaults[p].mac_alpha_lanes)
+                .collect::<Vec<[Tower128; 2]>>(),
+        );
 
         if verify_pending_spdz_mac_batch(
             &self.session_id,
@@ -3996,9 +4121,27 @@ impl<'a> sealed_mpc_oracles::Sealed for SpdzSlhMpcCluster<'a> {}
 impl<'a> SlhMpcOracles for SpdzSlhMpcCluster<'a> {
     fn bind_key_params(&mut self, params: &Fips205Params, pk_seed: &[u8]) -> Result<(), Fips205Error> {
         self.ensure_live()?;
-        if !params.is_valid() || self.keys.iter().any(|key|
-            key.key_len != params.n || key.pk_seed[..key.key_len] != *pk_seed) {
+        if !params.is_valid()
+            || pk_seed.len() != params.n
+            || self
+                .keys
+                .iter()
+                .any(|key| key.key_len != params.n || key.pk_seed[..key.key_len] != *pk_seed)
+        {
             return Err(Fips205Error::InvalidParameterSet);
+        }
+        let want = slh_profile_digest_u64x4(params);
+        for key in self.keys {
+            match key.slh_profile.enrolled() {
+                Ok(None) => {}
+                Ok(Some(cur)) if ct_eq_u64_x4(&cur, &want) => {}
+                _ => return Err(Fips205Error::InvalidParameterSet),
+            }
+        }
+        for key in self.keys {
+            key.slh_profile
+                .bind(want)
+                .map_err(|()| Fips205Error::InvalidParameterSet)?;
         }
         Ok(())
     }
@@ -4085,8 +4228,8 @@ impl<'a> SlhMpcOracles for SpdzSlhMpcCluster<'a> {
         let mut cut_mac = SecretBuffer(vec![Vec::with_capacity(out_words); m]);
         for p in 0..m {
             for w in 0..out_words {
-                cut_sh[p].push(st_sh[p][w]);
-                cut_mac[p].push(st_mac[p][w]);
+                secret_vec_push(&mut cut_sh[p], st_sh[p][w]);
+                secret_vec_push(&mut cut_mac[p], st_mac[p][w]);
             }
             let mut lane = 0;
             while lane < 25 {
@@ -4112,14 +4255,10 @@ impl<'a> SlhMpcOracles for SpdzSlhMpcCluster<'a> {
         base_adrs: Fips205Adrs,
         fors_indices: &[u32],
     ) -> Result<(Vec<SlhBlock>, Vec<Vec<SlhBlock>>, CutBoundaryMacToken), Fips205Error> {
-        self.ensure_live()?;
+        self.bind_key_params(params, pk_seed)?;
         let m = self.quorum_pts.len();
         let n = params.n;
-        if n != self.keys[0].key_len
-            || pk_seed.len() != n
-            || fors_indices.len() != params.k
-            || params.k > 64
-        {
+        if fors_indices.len() != params.k {
             return Err(Fips205Error::InvalidParameterSet);
         }
         let t_leaves = 1usize << params.a;
@@ -4129,24 +4268,32 @@ impl<'a> SlhMpcOracles for SpdzSlhMpcCluster<'a> {
         let mut cut_mac = SecretBuffer(vec![Vec::new(); m]);
         let mut chunk_sizes = Vec::new();
 
-        // The `k` revealed FORS secret values: one 64-instance batch.
-        let mut rev_prf_adrs = Vec::with_capacity(params.k);
-        for (i, &idx) in fors_indices.iter().enumerate() {
-            let idx_i = idx as usize;
-            if idx_i >= t_leaves {
-                return Err(Fips205Error::MpcActiveTamperDetected);
+        // The `k` revealed FORS secret values chunked in 64-instance batches (`<= 64` per batch).
+        let mut rev_cursor = 0usize;
+        while rev_cursor < params.k {
+            let rev_len = (params.k - rev_cursor).min(64);
+            let mut rev_prf_adrs = Vec::with_capacity(rev_len);
+            for off in 0..rev_len {
+                let i = rev_cursor + off;
+                let idx_i = fors_indices[i] as usize;
+                if idx_i >= t_leaves {
+                    return Err(Fips205Error::MpcActiveTamperDetected);
+                }
+                let mut prf_adrs = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
+                prf_adrs.key_pair = base_adrs.key_pair;
+                prf_adrs.f6 = (i * t_leaves + idx_i) as u32;
+                rev_prf_adrs.push(prf_adrs);
             }
-            let mut prf_adrs = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
-            prf_adrs.key_pair = base_adrs.key_pair;
-            prf_adrs.f6 = (i * t_leaves + idx_i) as u32;
-            rev_prf_adrs.push(prf_adrs);
+            let (rev_sh, rev_mac) = self.eval_prf_batch64_spdz(pk_seed, &rev_prf_adrs)?;
+            let rev_sh = SecretBuffer(rev_sh);
+            let rev_mac = SecretBuffer(rev_mac);
+            for p in 0..m {
+                secret_vec_extend_from_slice(&mut cut_sh[p], &rev_sh[p]);
+                secret_vec_extend_from_slice(&mut cut_mac[p], &rev_mac[p]);
+            }
+            chunk_sizes.push(rev_len);
+            rev_cursor += rev_len;
         }
-        let (rev_sh, rev_mac) = self.eval_prf_batch64_spdz(pk_seed, &rev_prf_adrs)?;
-        for p in 0..m {
-            cut_sh[p].extend_from_slice(&rev_sh[p]);
-            cut_mac[p].extend_from_slice(&rev_mac[p]);
-        }
-        chunk_sizes.push(params.k);
 
         // All `k * 2^a` leaves `F(PRF(..))`, 64 instances per permutation; unrevealed secret
         // values never leave their shares.
@@ -4178,8 +4325,8 @@ impl<'a> SlhMpcOracles for SpdzSlhMpcCluster<'a> {
                 &mut cur_mac,
             )?;
             for p in 0..m {
-                cut_sh[p].extend_from_slice(&cur_sh[p]);
-                cut_mac[p].extend_from_slice(&cur_mac[p]);
+                secret_vec_extend_from_slice(&mut cut_sh[p], &cur_sh[p]);
+                secret_vec_extend_from_slice(&mut cut_mac[p], &cur_mac[p]);
             }
             chunk_sizes.push(chunk_len);
             leaf_cursor += chunk_len;
@@ -4203,10 +4350,7 @@ impl<'a> SlhMpcOracles for SpdzSlhMpcCluster<'a> {
         layer: u32,
         tree: u128,
     ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error> {
-        let n = params.n;
-        if n != self.keys[0].key_len || pk_seed.len() != n {
-            return Err(Fips205Error::InvalidParameterSet);
-        }
+        self.bind_key_params(params, pk_seed)?;
         let n_leaves = 1usize << params.hp;
         self.eval_wots_chains_batch64_spdz(
             "spdz_cut_wots_pkgen",
@@ -4229,13 +4373,10 @@ impl<'a> SlhMpcOracles for SpdzSlhMpcCluster<'a> {
         active_kp: u32,
         msg_to_sign: &SlhBlock,
     ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error> {
+        self.bind_key_params(params, pk_seed)?;
         let n = params.n;
         let n_leaves = 1usize << params.hp;
-        if n != self.keys[0].key_len
-            || pk_seed.len() != n
-            || msg_to_sign.len() != n
-            || (active_kp as usize) >= n_leaves
-        {
+        if msg_to_sign.len() != n || (active_kp as usize) >= n_leaves {
             return Err(Fips205Error::InvalidParameterSet);
         }
         let (digits, ell_check) = try_wots_base16_digits_and_csum(msg_to_sign.as_slice())?;
@@ -4330,8 +4471,8 @@ impl SpdzSlhMpcCluster<'_> {
                 )?;
             }
             for p in 0..m {
-                cut_sh[p].extend_from_slice(&cur_sh[p]);
-                cut_mac[p].extend_from_slice(&cur_mac[p]);
+                secret_vec_extend_from_slice(&mut cut_sh[p], &cur_sh[p]);
+                secret_vec_extend_from_slice(&mut cut_mac[p], &cur_mac[p]);
             }
             chunk_sizes.push(chunk_len);
             cursor += chunk_len;
@@ -6146,6 +6287,7 @@ mod tests {
                     sk_seed_macs: seed_macs[p],
                     sk_prf_words: prf_words[p],
                     sk_prf_macs: prf_macs[p],
+                    slh_profile: SlhProfileLatch::new(),
                 })
                 .collect()
         }
@@ -6420,5 +6562,40 @@ mod tests {
             SpdzSlhMpcCluster::new([0x6e; 32], t, &keys, &mut vaults, &mut rngs),
             Err(KeccakMpcError::Poisoned)
         ));
+    }
+
+    #[test]
+    fn test_spdz_key_share_profile_binding_persists_across_clusters() {
+        let t = 2usize;
+        let n = 3usize;
+        let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
+        let mut rngs = spdz_test_rngs(n, 0x91);
+        let mut dealer = SpdzTestDealer::new(b"spdz-bind", t, &pts);
+        let sk_seed = [0x42; 32];
+        let sk_prf = [0x24; 32];
+        let pk_seed = [0x11; 32];
+        let keys = dealer.auth_key_shares(16, pk_seed, &sk_seed, &sk_prf);
+        let mut vaults = dealer.vaults(4);
+
+        let p_128s = Fips205Params::SLH_DSA_SHAKE_128S;
+        let p_128f = Fips205Params::SLH_DSA_SHAKE_128F;
+        {
+            let mut cluster =
+                SpdzSlhMpcCluster::new([0x01; 32], t, &keys, &mut vaults, &mut rngs).unwrap();
+            cluster.bind_key_params(&p_128s, &pk_seed[..16]).unwrap();
+            cluster.bind_key_params(&p_128s, &pk_seed[..16]).unwrap();
+            assert_eq!(
+                cluster.bind_key_params(&p_128f, &pk_seed[..16]),
+                Err(Fips205Error::InvalidParameterSet)
+            );
+        }
+        // Constructing a fresh cluster over the same key shares must still enforce `p_128s`.
+        let mut cluster2 =
+            SpdzSlhMpcCluster::new([0x02; 32], t, &keys, &mut vaults, &mut rngs).unwrap();
+        assert_eq!(
+            cluster2.bind_key_params(&p_128f, &pk_seed[..16]),
+            Err(Fips205Error::InvalidParameterSet)
+        );
+        cluster2.bind_key_params(&p_128s, &pk_seed[..16]).unwrap();
     }
 }

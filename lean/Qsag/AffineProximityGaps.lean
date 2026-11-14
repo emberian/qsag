@@ -37,10 +37,17 @@ Chiesa–Weissenberg–Yogev–Zheng, IACR ePrint `2026/2863`):
    - `guruswami_sudan_polynomial_list_bound`: at most D distinct formal polynomial roots of
      a nonzero Y-degree-at-most-D polynomial; `sudan_factor_and_list_bound` supplies the
      weighted-degree/agreement factor argument for multiplicity one.
+   - `guruswami_sudan_factor` / `guruswami_sudan_factor_and_list_bound` /
+     `guruswami_sudan_agreement_list_bound`: the factor theorem and list bound at ARBITRARY
+     multiplicity `m`, for an interpolant in the ideal power `(X - x, Y - y)^m` at each point
+     (`GsMultiplicity`, stated through the synthetic-division Taylor shift `gsTaylor`).
    - `hem_gs_constructive_interpolation` applies interpolation to all 46 deployed rows.
-     The multiplicity-greater-than-one substitution argument and the trivariate affine
-     explainer theorem are separate obligations; the interpolation and polynomial-root
-     list bound alone do not establish the deployed affine-proximity gap.
+     OPEN: the interpolation output is a coefficient vector whose binomial Hasse evaluations
+     (`gsHasseEval`) vanish; that this vector, assembled into `List (GsUniPoly F)`, satisfies
+     `GsMultiplicity` (binomial Hasse derivative = Taylor coefficient, plus the flat-to-nested
+     coefficient bookkeeping) is not proved here, so the `≤ D` list bound is established for
+     every interpolant of that shape rather than unconditionally per row. The trivariate
+     affine explainer theorem (`[CWYZ26]` Theorem 4.8) is a further separate obligation.
 
 5. **§5. Finite `Theorem 4.8 + Theorem 5.1` Witness Verifier Bound to the Deployed `Hem` WHIR Schedule**:
    - `hemStageGeometry` / `hemJohnsonMinQueries` mirror `pcs.rs::stage_geometry` and
@@ -3912,6 +3919,359 @@ theorem guruswami_sudan_interpolation {F : Type} [LawfulField F] [DecidableEq F]
   apply List.mem_flatMap.mpr
   refine ⟨p, hp, ?_⟩
   exact List.mem_map.mpr ⟨(r, s), (gsHasseOrders_mem m (r, s)).mpr hrs, rfl⟩
+
+/-! ## Guruswami–Sudan factor theorem at arbitrary multiplicity -/
+
+/-- Taylor coefficients of `cs` at `b` by repeated synthetic division:
+    `cs(Y) = ∑ₛ (gsTaylor n cs b)[s] · (Y - b)^s` whenever `cs.length ≤ n`. Entry `s` is the
+    `s`-th Hasse derivative of `cs` at `b`. No binomial or factorial division occurs, so the
+    expansion holds over every commutative ring and in every characteristic. -/
+def gsTaylor {R : Type} [CommRingOps R] : Nat → List R → R → List R
+  | 0, _, _ => []
+  | n + 1, cs, b => evalCoeffs cs b :: gsTaylor n (quotLinear cs b) b
+
+/-- Taylor re-expansion preserves evaluation at every point of the ring. Over `R = F[X]` this
+    quantifies over all substituted polynomials, so it is a formal identity in `Y`. -/
+theorem gsTaylor_eval {R : Type} [LawfulCommRing R] (b y : R) :
+    ∀ (n : Nat) (cs : List R), cs.length ≤ n →
+      evalCoeffs cs y = evalCoeffs (gsTaylor n cs b) (CommRingOps.sub y b)
+  | 0, cs, h => by
+    have hcs : cs = [] := List.eq_nil_of_length_eq_zero (Nat.eq_zero_of_le_zero h)
+    subst hcs
+    rfl
+  | n + 1, cs, h => by
+    have ih := gsTaylor_eval b y n (quotLinear cs b) (by rw [quotLinear_length]; omega)
+    show evalCoeffs cs y = CommRingOps.add (evalCoeffs cs b)
+      (CommRingOps.mul (CommRingOps.sub y b)
+        (evalCoeffs (gsTaylor n (quotLinear cs b) b) (CommRingOps.sub y b)))
+    rw [← ih]
+    exact (evalCoeffs_eq_mul_quotLinear_add cs b y).trans (LawfulCommRing.add_comm _ _)
+
+private theorem gsPow_zero_mul {R : Type} [LawfulCommRing R] (t w : R) :
+    CommRingOps.mul (gsPow t 0) w = w :=
+  LawfulCommRing.one_mul w
+
+private theorem gsPow_succ_mul {R : Type} [LawfulCommRing R] (t : R) (k : Nat) (w : R) :
+    CommRingOps.mul (gsPow t (k + 1)) w = CommRingOps.mul t (CommRingOps.mul (gsPow t k) w) :=
+  LawfulCommRing.mul_assoc t (gsPow t k) w
+
+private theorem gs_mul_mul_mul_comm {R : Type} [LawfulCommRing R] (a b c d : R) :
+    CommRingOps.mul (CommRingOps.mul a b) (CommRingOps.mul c d) =
+      CommRingOps.mul (CommRingOps.mul a c) (CommRingOps.mul b d) := by
+  rw [LawfulCommRing.mul_assoc a b, ← LawfulCommRing.mul_assoc b c d,
+    LawfulCommRing.mul_comm b c, LawfulCommRing.mul_assoc c b d, ← LawfulCommRing.mul_assoc a c]
+
+/-- If the coefficient of `Y^s` is divisible by `t^(m - s)` for every `s < m`, then substituting
+    `Y := t * u` gives a value divisible by `t^m`. -/
+private theorem gs_low_order_divisible {R : Type} [LawfulCommRing R] (t u : R) :
+    ∀ (cs : List R) (m : Nat),
+      (∀ s : Nat, s < m → ∃ h : R, coeffAt cs s = CommRingOps.mul (gsPow t (m - s)) h) →
+      ∃ k : R, evalCoeffs cs (CommRingOps.mul t u) = CommRingOps.mul (gsPow t m) k
+  | [], _, _ => ⟨CommRingOps.zero, (LawfulCommRing.mul_zero _).symm⟩
+  | c :: cs, 0, _ =>
+    ⟨evalCoeffs (c :: cs) (CommRingOps.mul t u), (LawfulCommRing.one_mul _).symm⟩
+  | c :: cs, m + 1, h => by
+    obtain ⟨h0, hh0⟩ := h 0 (Nat.succ_pos m)
+    rw [coeffAt_cons_zero, Nat.sub_zero] at hh0
+    have htail : ∀ s : Nat, s < m →
+        ∃ h' : R, coeffAt cs s = CommRingOps.mul (gsPow t (m - s)) h' := by
+      intro s hs
+      obtain ⟨h', hh'⟩ := h (s + 1) (Nat.succ_lt_succ hs)
+      rw [coeffAt_cons_succ, Nat.add_sub_add_right] at hh'
+      exact ⟨h', hh'⟩
+    obtain ⟨k, hk⟩ := gs_low_order_divisible t u cs m htail
+    refine ⟨CommRingOps.add h0 (CommRingOps.mul u k), ?_⟩
+    show CommRingOps.add c
+        (CommRingOps.mul (CommRingOps.mul t u) (evalCoeffs cs (CommRingOps.mul t u))) =
+      CommRingOps.mul (gsPow t (m + 1)) (CommRingOps.add h0 (CommRingOps.mul u k))
+    rw [hk, hh0, LawfulCommRing.left_distrib]
+    exact congrArg (CommRingOps.add (CommRingOps.mul (gsPow t (m + 1)) h0))
+      (gs_mul_mul_mul_comm t u (gsPow t m) k)
+
+private theorem gsLinear_trimmed {F : Type} [LawfulField F] [DecidableEq F] (a : F) :
+    trimPoly [CommRingOps.neg a, CommRingOps.one] = [CommRingOps.neg a, CommRingOps.one] := by
+  simp [trimPoly, LawfulField.one_ne_zero]
+
+/-- The monic linear polynomial `X - a` as a canonical element of `F[X]`. -/
+def gsLinear {F : Type} [LawfulField F] [DecidableEq F] (a : F) : GsUniPoly F :=
+  ⟨[CommRingOps.neg a, CommRingOps.one], gsLinear_trimmed a⟩
+
+/-- The constant polynomial `b` as a canonical element of `F[X]`. -/
+def gsConst {F : Type} [LawfulField F] [DecidableEq F] (b : F) : GsUniPoly F :=
+  GsUniPoly.ofCoeffs [b]
+
+/-- `Q ∈ (X - a, Y - b)^m`. After the Taylor shift `Y ↦ Y - b` (coefficients
+    `gsTaylor Q.length Q (gsConst b)`, the Hasse derivatives of `Q` in `Y` at `b`), the
+    coefficient of `(Y - b)^s` is divisible by `(X - a)^(m - s)` for every `s < m`; equivalently
+    every mixed Hasse derivative of total order below `m` vanishes at `(a, b)`. The condition
+    mentions no candidate polynomial. -/
+def GsMultiplicity {F : Type} [LawfulField F] [DecidableEq F]
+    (Q : List (GsUniPoly F)) (m : Nat) (a b : F) : Prop :=
+  ∀ s : Nat, s < m → ∃ h : GsUniPoly F,
+    coeffAt (gsTaylor Q.length Q (gsConst b)) s =
+      CommRingOps.mul (gsPow (gsLinear a) (m - s)) h
+
+/-- `GsMultiplicity` is inhabited at every multiplicity by the nonzero polynomial `(X - a)^m`. -/
+theorem gsMultiplicity_linear_power {F : Type} [LawfulField F] [DecidableEq F]
+    (m : Nat) (a b : F) : GsMultiplicity [gsPow (gsLinear a) m] m a b := by
+  unfold GsMultiplicity
+  intro s _
+  have hT : gsTaylor [gsPow (gsLinear a) m].length [gsPow (gsLinear a) m] (gsConst b) =
+      [evalCoeffs [gsPow (gsLinear a) m] (gsConst b)] := rfl
+  rw [hT]
+  cases s with
+  | zero =>
+    refine ⟨CommRingOps.one, ?_⟩
+    rw [coeffAt_cons_zero, Nat.sub_zero, LawfulCommRing.mul_one]
+    simp only [evalCoeffs_cons, evalCoeffs_nil, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  | succ _ =>
+    refine ⟨CommRingOps.zero, ?_⟩
+    rw [coeffAt_cons_succ, coeffAt_nil, LawfulCommRing.mul_zero]
+
+private theorem gsLinear_eval {F : Type} [LawfulField F] [DecidableEq F] (a c : F) :
+    evalCoeffs (gsLinear a).val c = CommRingOps.sub c a := by
+  show evalCoeffs [CommRingOps.neg a, CommRingOps.one] c = CommRingOps.sub c a
+  rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_comm c (CommRingOps.neg a)]
+  simp only [evalCoeffs_cons, evalCoeffs_nil, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+    LawfulCommRing.mul_one]
+
+/-- Formal factor theorem in `F[X]`: a polynomial vanishing at `a` is `(X - a)` times a
+    polynomial, with the quotient produced by `polyDivMod`. -/
+private theorem gsLinear_factor {F : Type} [LawfulField F] [DecidableEq F] (a : F)
+    (c : GsUniPoly F) (hroot : evalCoeffs c.val a = CommRingOps.zero) :
+    ∃ u : GsUniPoly F, c = CommRingOps.mul (gsLinear a) u := by
+  have hLne : trimPoly [CommRingOps.neg a, CommRingOps.one] ≠ [] := by
+    rw [gsLinear_trimmed]
+    exact List.cons_ne_nil _ _
+  have hspec := polyDivMod_spec c.val [CommRingOps.neg a, CommRingOps.one] hLne
+  dsimp only at hspec
+  rcases hspec with ⟨hqTrim, hrTrim, hDecomp, hrLt⟩
+  rw [gsLinear_trimmed] at hrLt
+  have hLeval : evalCoeffs [CommRingOps.neg a, CommRingOps.one] a = CommRingOps.zero :=
+    (gsLinear_eval a a).trans (LawfulCommRing.sub_self a)
+  have hEv : evalCoeffs (polyDivMod c.val [CommRingOps.neg a, CommRingOps.one]).2 a =
+      CommRingOps.zero := by
+    have h1 : evalCoeffs (trimPoly c.val) a = evalCoeffs _ a :=
+      congrArg (fun p => evalCoeffs p a) hDecomp
+    rw [evalCoeffs_trimPoly, hroot, evalCoeffs_pAdd, evalCoeffs_pMul, hLeval,
+      LawfulCommRing.mul_zero, LawfulCommRing.zero_add] at h1
+    exact h1.symm
+  have hrNil : (polyDivMod c.val [CommRingOps.neg a, CommRingOps.one]).2 = [] := by
+    cases hr : (polyDivMod c.val [CommRingOps.neg a, CommRingOps.one]).2 with
+    | nil => rfl
+    | cons r0 rs =>
+      rw [hr] at hrLt hrTrim hEv
+      cases rs with
+      | cons r1 rs' =>
+        have h2 : 2 ≤ (r0 :: r1 :: rs').length :=
+          Nat.succ_le_succ (Nat.succ_le_succ (Nat.zero_le _))
+        have h3 : ([CommRingOps.neg a, CommRingOps.one] : List F).length = 2 := rfl
+        exfalso
+        omega
+      | nil =>
+        have hr0 : r0 = CommRingOps.zero := by
+          simpa only [evalCoeffs_cons, evalCoeffs_nil, LawfulCommRing.mul_zero,
+            LawfulCommRing.add_zero] using hEv
+        have hz : trimPoly [(CommRingOps.zero : F)] = [] := by simp [trimPoly]
+        rw [hr0] at hrTrim
+        exact absurd (hz.symm.trans hrTrim) (List.cons_ne_nil _ _).symm
+  rw [hrNil, pAdd_nil_right] at hDecomp
+  exact ⟨⟨(polyDivMod c.val [CommRingOps.neg a, CommRingOps.one]).1, hqTrim⟩,
+    Subtype.ext (c.property.symm.trans (hDecomp.trans
+      ((trimPoly_idem (rawMul (polyDivMod c.val [CommRingOps.neg a, CommRingOps.one]).1
+          [CommRingOps.neg a, CommRingOps.one])).trans
+        (pMul_comm (polyDivMod c.val [CommRingOps.neg a, CommRingOps.one]).1
+          [CommRingOps.neg a, CommRingOps.one]))))⟩
+
+private theorem gsLinear_mul_cancel {F : Type} [LawfulField F] [DecidableEq F] (c : F)
+    (x y : GsUniPoly F)
+    (h : CommRingOps.mul (gsLinear c) x = CommRingOps.mul (gsLinear c) y) : x = y := by
+  have hz : CommRingOps.mul (gsLinear c) (CommRingOps.sub x y) = CommRingOps.zero := by
+    rw [LawfulCommRing.mul_sub, h, LawfulCommRing.sub_self]
+  cases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hz with
+  | inl hT =>
+    exact absurd (show ([CommRingOps.neg c, CommRingOps.one] : List F) = [] from
+      congrArg Subtype.val hT) (List.cons_ne_nil _ _)
+  | inr hs => exact LawfulCommRing.sub_eq_zero_iff.mp hs
+
+/-- Distinct linear factors are coprime: `(X - c)^k ∣ (X - a) · v` with `c ≠ a` forces
+    `(X - c)^k ∣ v`. Evaluation at `c` and the formal factor theorem replace Bézout. -/
+private theorem gsLinear_coprime_cancel_one {F : Type} [LawfulField F] [DecidableEq F]
+    (c a : F) (hne : c ≠ a) :
+    ∀ (k : Nat) (w v : GsUniPoly F),
+      CommRingOps.mul (gsPow (gsLinear c) k) w = CommRingOps.mul (gsLinear a) v →
+      ∃ w' : GsUniPoly F, v = CommRingOps.mul (gsPow (gsLinear c) k) w'
+  | 0, _, v, _ => ⟨v, (gsPow_zero_mul (gsLinear c) v).symm⟩
+  | k + 1, w, v, h => by
+    letI : NoZeroDivisors F := LawfulField.toNoZeroDivisors F
+    have hstep := gsPow_succ_mul (gsLinear c) k w
+    have hL : evalCoeffs (CommRingOps.mul (gsPow (gsLinear c) (k + 1)) w).val c =
+        CommRingOps.zero := by
+      rw [hstep]
+      show evalCoeffs (pMul (gsLinear c).val
+        (CommRingOps.mul (gsPow (gsLinear c) k) w).val) c = CommRingOps.zero
+      rw [evalCoeffs_pMul, gsLinear_eval, LawfulCommRing.sub_self, LawfulCommRing.zero_mul]
+    have hR : evalCoeffs (CommRingOps.mul (gsLinear a) v).val c =
+        CommRingOps.mul (CommRingOps.sub c a) (evalCoeffs v.val c) := by
+      show evalCoeffs (pMul (gsLinear a).val v.val) c =
+        CommRingOps.mul (CommRingOps.sub c a) (evalCoeffs v.val c)
+      rw [evalCoeffs_pMul, gsLinear_eval]
+    have hev : evalCoeffs (CommRingOps.mul (gsPow (gsLinear c) (k + 1)) w).val c =
+        evalCoeffs (CommRingOps.mul (gsLinear a) v).val c := by rw [h]
+    have hv0 : evalCoeffs v.val c = CommRingOps.zero := by
+      cases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero
+          (hR.symm.trans (hev.symm.trans hL)) with
+      | inl hs => exact absurd (LawfulCommRing.sub_eq_zero_iff.mp hs) hne
+      | inr hv => exact hv
+    obtain ⟨v1, hv1⟩ := gsLinear_factor c v hv0
+    have h2 : CommRingOps.mul (gsLinear c) (CommRingOps.mul (gsPow (gsLinear c) k) w) =
+        CommRingOps.mul (gsLinear c) (CommRingOps.mul (gsLinear a) v1) := by
+      rw [← hstep, h, hv1, ← LawfulCommRing.mul_assoc, ← LawfulCommRing.mul_assoc,
+        LawfulCommRing.mul_comm (gsLinear a) (gsLinear c)]
+    obtain ⟨w1, hw1⟩ :=
+      gsLinear_coprime_cancel_one c a hne k w v1 (gsLinear_mul_cancel c _ _ h2)
+    exact ⟨w1, by rw [hv1, hw1]; exact (gsPow_succ_mul (gsLinear c) k w1).symm⟩
+
+private theorem gsLinear_pow_coprime_cancel {F : Type} [LawfulField F] [DecidableEq F]
+    (c a : F) (hne : c ≠ a) (k : Nat) :
+    ∀ (e : Nat) (w v : GsUniPoly F),
+      CommRingOps.mul (gsPow (gsLinear c) k) w = CommRingOps.mul (gsPow (gsLinear a) e) v →
+      ∃ w' : GsUniPoly F, v = CommRingOps.mul (gsPow (gsLinear c) k) w'
+  | 0, w, v, h => ⟨w, (gsPow_zero_mul (gsLinear a) v).symm.trans h.symm⟩
+  | e + 1, w, v, h => by
+    obtain ⟨w1, hw1⟩ := gsLinear_coprime_cancel_one c a hne k w
+      (CommRingOps.mul (gsPow (gsLinear a) e) v) (h.trans (gsPow_succ_mul (gsLinear a) e v))
+    exact gsLinear_pow_coprime_cancel c a hne k e w1 v hw1.symm
+
+private theorem gsLinear_mul_length {F : Type} [LawfulField F] [DecidableEq F] (x : F)
+    (h : GsUniPoly F) (hh : h.val ≠ []) :
+    (CommRingOps.mul (gsLinear x) h).val.length = h.val.length + 1 ∧
+      (CommRingOps.mul (gsLinear x) h).val ≠ [] := by
+  have hl := pMul_length_of_trimmed_ne_nil (a := [CommRingOps.neg x, CommRingOps.one])
+    (b := h.val) (gsLinear_trimmed x) h.property (List.cons_ne_nil _ _) hh
+  have h2 : ([CommRingOps.neg x, CommRingOps.one] : List F).length = 2 := rfl
+  rw [h2] at hl
+  refine ⟨?_, hl.2⟩
+  have h1 := hl.1
+  show (pMul [CommRingOps.neg x, CommRingOps.one] h.val).length = h.val.length + 1
+  omega
+
+private theorem gsLinear_pow_mul_length {F : Type} [LawfulField F] [DecidableEq F] (x : F) :
+    ∀ (m : Nat) (h : GsUniPoly F), h.val ≠ [] →
+      (CommRingOps.mul (gsPow (gsLinear x) m) h).val.length = m + h.val.length ∧
+        (CommRingOps.mul (gsPow (gsLinear x) m) h).val ≠ []
+  | 0, h, hh => by
+    rw [gsPow_zero_mul]
+    exact ⟨(Nat.zero_add _).symm, hh⟩
+  | m + 1, h, hh => by
+    have ih := gsLinear_pow_mul_length x m h hh
+    have hl := gsLinear_mul_length x _ ih.2
+    rw [gsPow_succ_mul]
+    exact ⟨by rw [hl.1, ih.1]; omega, hl.2⟩
+
+/-- A nonzero polynomial divisible by `(X - x)^m` at each of `A` distinct points has more than
+    `m * A` coefficients. -/
+private theorem gs_multiplicity_length {F : Type} [LawfulField F] [DecidableEq F] (m : Nat) :
+    ∀ (xs : List F) (g : GsUniPoly F), xs.Nodup → g.val ≠ [] →
+      (∀ x ∈ xs, ∃ k : GsUniPoly F, g = CommRingOps.mul (gsPow (gsLinear x) m) k) →
+      m * xs.length + 1 ≤ g.val.length
+  | [], g, _, hg, _ => by
+    cases hv : g.val with
+    | nil => exact absurd hv hg
+    | cons _ _ => simp
+  | x :: xs, g, hnd, hg, hdiv => by
+    obtain ⟨h, hh⟩ := hdiv x (.head _)
+    have hhne : h.val ≠ [] := by
+      intro h0
+      have hzero : h = CommRingOps.zero := Subtype.ext h0
+      have hg0 : g = CommRingOps.zero := by
+        rw [hh, hzero]
+        exact LawfulCommRing.mul_zero _
+      exact hg (congrArg Subtype.val hg0)
+    have hrest : ∀ y ∈ xs, ∃ k : GsUniPoly F,
+        h = CommRingOps.mul (gsPow (gsLinear y) m) k := by
+      intro y hy
+      obtain ⟨k, hk⟩ := hdiv y (.tail _ hy)
+      have hne : y ≠ x := fun e => (List.pairwise_cons.mp hnd).1 y hy e.symm
+      exact gsLinear_pow_coprime_cancel y x hne m m k h (hk.symm.trans hh)
+    have ih := gs_multiplicity_length m xs h (List.pairwise_cons.mp hnd).2 hhne hrest
+    have hl := (gsLinear_pow_mul_length x m h hhne).1
+    have e : m * (x :: xs).length = m * xs.length + m := Nat.mul_succ m xs.length
+    rw [hh, hl, e]
+    omega
+
+/-- **Guruswami–Sudan factor theorem at arbitrary multiplicity.** Let `Q(X, Y)` have
+    `(1, d)`-weighted degree below `B` and lie in `(X - x, Y - ys x)^m` at each of `A` distinct
+    points `x`, with `B ≤ m * A`. Every polynomial `P` of degree at most `d` passing through
+    those points satisfies `Q(X, P(X)) = 0` formally. The substitution `Y - ys x = (X - x) · u`
+    turns the ideal-power hypothesis into `(X - x)^m ∣ Q(X, P(X))`; distinct linear factors are
+    coprime, so the nonzero case would need more than `m * A ≥ B` coefficients. Multiplicity
+    one is `sudan_factor`. -/
+theorem guruswami_sudan_factor {F : Type} [LawfulField F] [DecidableEq F]
+    (Q : List (GsUniPoly F)) (P : GsUniPoly F) (d B m : Nat)
+    (hP : P.val.length ≤ d + 1) (hW : GsWeightedDegree Q d B)
+    (xs : List F) (ys : F → F) (hDistinct : xs.Nodup) (hCount : B ≤ m * xs.length)
+    (hAgree : ∀ x ∈ xs, evalCoeffs P.val x = ys x)
+    (hMult : ∀ x ∈ xs, GsMultiplicity Q m x (ys x)) :
+    evalCoeffs Q P = CommRingOps.zero := by
+  have hlen := gs_substitution_length P d hP Q B hW
+  have hdiv : ∀ x ∈ xs, ∃ k : GsUniPoly F,
+      evalCoeffs Q P = CommRingOps.mul (gsPow (gsLinear x) m) k := by
+    intro x hx
+    have hc : evalCoeffs [ys x] x = ys x := by
+      simp only [evalCoeffs_cons, evalCoeffs_nil, LawfulCommRing.mul_zero,
+        LawfulCommRing.add_zero]
+    have hroot : evalCoeffs (CommRingOps.sub P (gsConst (ys x))).val x = CommRingOps.zero := by
+      show evalCoeffs (pSub P.val (trimPoly [ys x])) x = CommRingOps.zero
+      rw [evalCoeffs_pSub, evalCoeffs_trimPoly, hAgree x hx, hc, LawfulCommRing.sub_self]
+    obtain ⟨u, hu⟩ := gsLinear_factor x _ hroot
+    rw [gsTaylor_eval (gsConst (ys x)) P Q.length Q (Nat.le_refl _), hu]
+    exact gs_low_order_divisible (gsLinear x) u _ m (hMult x hx)
+  if hz : (evalCoeffs Q P).val = [] then
+    exact Subtype.ext hz
+  else
+    have hcl := gs_multiplicity_length m xs (evalCoeffs Q P) hDistinct hz hdiv
+    exfalso
+    omega
+
+/-- Factor theorem and list bound at arbitrary multiplicity, for any list of distinct candidate
+    polynomials. Candidate-specific agreement sets are existential, not transcript data. -/
+theorem guruswami_sudan_factor_and_list_bound {F : Type} [LawfulField F] [DecidableEq F]
+    (Q : List (GsUniPoly F)) (polys : List (GsUniPoly F)) (d B D m : Nat)
+    (hQ : Q.length ≤ D + 1) (hnz : ∃ c ∈ Q, c ≠ CommRingOps.zero)
+    (hW : GsWeightedDegree Q d B) (hDistinct : polys.Nodup)
+    (ys : F → F)
+    (hCandidates : ∀ P ∈ polys, P.val.length ≤ d + 1 ∧
+      ∃ xs : List F, xs.Nodup ∧ B ≤ m * xs.length ∧
+        (∀ x ∈ xs, evalCoeffs P.val x = ys x) ∧
+        (∀ x ∈ xs, GsMultiplicity Q m x (ys x))) :
+    (∀ P ∈ polys, evalCoeffs Q P = CommRingOps.zero) ∧ polys.length ≤ D := by
+  have hf : ∀ P ∈ polys, evalCoeffs Q P = CommRingOps.zero := by
+    intro P hP
+    obtain ⟨hdeg, xs, hxs, hcount, hagree, hmult⟩ := hCandidates P hP
+    exact guruswami_sudan_factor Q P d B m hdeg hW xs ys hxs hcount hagree hmult
+  exact ⟨hf, guruswami_sudan_polynomial_list_bound D Q polys hQ hnz hDistinct hf⟩
+
+/-- List-decoding form used by every deployed row (`B = m * A`, `D = gsDeployedYDegree`): a
+    nonzero interpolant of `(1, d)`-weighted degree below `m * A` and multiplicity `m` at every
+    point of the received word bounds, by its `Y`-degree, the number of distinct polynomials of
+    degree at most `d` agreeing with the word on at least `A` domain points. -/
+theorem guruswami_sudan_agreement_list_bound {F : Type} [LawfulField F] [DecidableEq F]
+    (domain : List F) (word : F → F) (d A D m : Nat)
+    (Q : List (GsUniPoly F)) (hQ : Q.length ≤ D + 1) (hnz : ∃ c ∈ Q, c ≠ CommRingOps.zero)
+    (hW : GsWeightedDegree Q d (m * A))
+    (hMult : ∀ x ∈ domain, GsMultiplicity Q m x (word x))
+    (polys : List (GsUniPoly F)) (hDistinct : polys.Nodup)
+    (hClose : ∀ P ∈ polys, P.val.length ≤ d + 1 ∧
+      ∃ xs : List F, xs.Nodup ∧ A ≤ xs.length ∧
+        ∀ x ∈ xs, x ∈ domain ∧ evalCoeffs P.val x = word x) :
+    polys.length ≤ D := by
+  refine (guruswami_sudan_factor_and_list_bound Q polys d (m * A) D m hQ hnz hW hDistinct
+    word ?_).2
+  intro P hP
+  obtain ⟨hdeg, xs, hxs, hcount, hx⟩ := hClose P hP
+  exact ⟨hdeg, xs, hxs, Nat.mul_le_mul_left m hcount, fun x h => (hx x h).2,
+    fun x h => hMult x (hx x h).1⟩
 
 /-! ## §5. Finite `Theorem 4.8 + Theorem 5.1` Witness Verifier Bound to the Deployed `Hem` WHIR Schedule -/
 

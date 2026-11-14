@@ -117,19 +117,32 @@ theorem rss_concrete_three_step_mir (sid comm cut : Array Std.U8 32#usize) :
     { session_id := sid, phase := .Round1MaskCommitted, mask_commitment := comm,
       candidate_cut_bytes := Array.repeat 32#usize 0#u8,
       consistency_verified := false, poisoned := false }
-  let s1 := { s with phase := rss_cut_session.RssCutPhase.Round2ChiEvaluated,
-    candidate_cut_bytes := cut, consistency_verified := false }
-  let s2 := { s1 with phase := rss_cut_session.RssCutPhase.Round3ConsistencyVerified,
-    consistency_verified := true }
-  let s3 := { s2 with phase := rss_cut_session.RssCutPhase.CutOpened,
-    candidate_cut_bytes := Array.repeat 32#usize 0#u8 }
-  have h1 := rss_step_round2_accepts s cut rfl rfl
-  have h2 := rss_step_round3_accepts s1 rfl rfl
-  have h3 := rss_step_open_accepts s2 rfl rfl rfl
-  refine ⟨s, s3, rfl, ?_, rfl, rfl, rfl⟩
-  exact MirTrace.accept (by simpa only [adaptStateResult, h1, result_bind_ok])
-    (MirTrace.accept (by simpa only [adaptStateResult, h2, result_bind_ok])
-    (MirTrace.accept (by simpa only [adaptStateResult, h3, result_bind_ok]) (.nil s3)))
+  let s1 : rss_cut_session.RssCutGateSession :=
+    { s with
+      phase := .Round2ChiEvaluated, candidate_cut_bytes := cut, consistency_verified := false }
+  let s2 : rss_cut_session.RssCutGateSession :=
+    { s1 with phase := .Round3ConsistencyVerified, consistency_verified := true }
+  let s3 : rss_cut_session.RssCutGateSession :=
+    { s2 with phase := .CutOpened, candidate_cut_bytes := Array.repeat 32#usize 0#u8 }
+  have h1 : rss_cut_session.RssCutGateSession.step s (.AdvanceRound2Chi sid comm cut) =
+      .ok (s1, .Ok .Round2Ready) := rss_step_round2_accepts s cut rfl rfl
+  have h2 : rss_cut_session.RssCutGateSession.step s1
+      (.AdvanceRound3VerifyConsistency sid 0#u128 0#u128 0#u64) =
+      .ok (s2, .Ok .Round3Verified) := rss_step_round3_accepts s1 rfl rfl
+  have h3 : rss_cut_session.RssCutGateSession.step s2 (.OpenVerifiedCut sid) =
+      .ok (s3, .Ok (.CutReleased cut)) := rss_step_open_accepts s2 rfl rfl rfl
+  have e1 : adaptStateResult rss_cut_session.RssCutGateSession.step s
+      (.AdvanceRound2Chi sid comm cut) = .ok (.accepted s1 .Round2Ready) := by
+    simp only [adaptStateResult, h1, result_bind_ok]
+  have e2 : adaptStateResult rss_cut_session.RssCutGateSession.step s1
+      (.AdvanceRound3VerifyConsistency sid 0#u128 0#u128 0#u64) =
+      .ok (.accepted s2 .Round3Verified) := by
+    simp only [adaptStateResult, h2, result_bind_ok]
+  have e3 : adaptStateResult rss_cut_session.RssCutGateSession.step s2
+      (.OpenVerifiedCut sid) = .ok (.accepted s3 (.CutReleased cut)) := by
+    simp only [adaptStateResult, h3, result_bind_ok]
+  exact ⟨s, s3, rfl, MirTrace.accept e1 (MirTrace.accept e2 (MirTrace.accept e3 (.nil s3))),
+    rfl, rfl, rfl⟩
 
 /-- A concrete caller contract that the available MIR really can discharge: the
 successful residual-check input names the same session as the candidate transcript.

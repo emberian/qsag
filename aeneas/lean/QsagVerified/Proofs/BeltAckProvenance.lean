@@ -428,8 +428,10 @@ theorem belt_three_custodian_round_exists
       (beltAfterAck (beltAfterAck (beltAfterAck
         (beltAfterPropose st e msg) 0#u8) 1#u8) 2#u8).inner = false :=
     belt_not_corrupt_set_ack_count _ hc2
-  refine ⟨_, rfl, .bound
-    (belt_step_propose_fresh st e msg msg rt hwal hc hnr hge hwin hmax) ?_⟩
+  refine ⟨[.ProposeOrRetryEpoch e msg msg rt, .RecordCustodianAck e msg 0#u8 t0,
+    .RecordCustodianAck e msg 1#u8 t1, .RecordCustodianAck e msg 2#u8 t2,
+    .AuthorizeShares e msg], rfl, ?_⟩
+  refine .bound (belt_step_propose_fresh st e msg msg rt hwal hc hnr hge hwin hmax) ?_
   refine .acked (belt_step_ack_fresh (beltAfterPropose st e msg) e msg 0#u8 t0 k0
     (by change 0 < st.inner.n.val; omega) (by decide) hk0 ht0 hc0 rfl rfl rfl
     (by decide) (by change 0 < st.inner.n.val; omega)) ?_

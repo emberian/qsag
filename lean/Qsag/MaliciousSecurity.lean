@@ -2132,7 +2132,7 @@ theorem tooth_context_cut_epoch_replay (keys : ContextBdozKeys)
     (nonce digest : BitVec 256) (op : BdozPairOpening) :
     verifyContextCut keys ⟨nonce, 1, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op⟩ = false := by
   apply context_cut_replay_rejected
-  decide
+  intro h; cases h
 
 /-! ## Transferable attribution versus private rejection
 A private MAC failure is only an abort. Transferable slashing below uses two

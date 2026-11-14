@@ -195,6 +195,13 @@ def thHashMsg (suite : TweakableHashSuite) (rRand pkSeed pkRoot mu : List UInt8)
   let b1 := thCall suite tagHMsg pkSeed ⟨layerIdx, treeIdx, .wotsHash, kpIdx, 1, UInt32.ofNat ctr⟩ [rRand, pkRoot, mu, be 4 ctr]
   b0 ++ b1
 
+/-- Production stateful leaf-message digest: single 32-byte `H_MSG` call at `layer = 0, chainIdx = 0`
+    matching `crates/qsag-core/src/tsw_baggy.rs::th_hash_leaf_msg`. -/
+def thHashLeafMsg (suite : TweakableHashSuite) (rRand pkSeed pkRoot mu : List UInt8)
+    (treeIdx : UInt64) (kpIdx : UInt32) (ctr : Nat) : List UInt8 :=
+  thCall suite tagHMsg pkSeed
+    ⟨0, treeIdx, .wotsHash, kpIdx, 0, UInt32.ofNat ctr⟩ [rRand, pkRoot, mu, be 4 ctr]
+
 /-- Production internal-node digest: no message randomness and one 32-byte HINT call. -/
 def thHashInternalNode (suite : TweakableHashSuite) (pkSeed pkRoot nodeRoot : List UInt8)
     (layer : UInt32) (tree : UInt64) (kp : UInt32) (ctr : Nat) : List UInt8 :=
@@ -229,10 +236,27 @@ theorem thXofMsg_length (suite : TweakableHashSuite) (rRand pkSeed pkRoot mu : L
   apply Nat.min_eq_left
   omega
 
+theorem thHashLeafMsg_length (suite : TweakableHashSuite) (rRand pkSeed pkRoot mu : List UInt8)
+    (treeIdx : UInt64) (kpIdx : UInt32) (ctr : Nat) :
+    (thHashLeafMsg suite rRand pkSeed pkRoot mu treeIdx kpIdx ctr).length = 32 :=
+  thCall_length _ _ _ _ _
+
+theorem thHashLeafMsg_eq (suite : TweakableHashSuite) (rRand pkSeed pkRoot mu : List UInt8)
+    (treeIdx : UInt64) (kpIdx : UInt32) (ctr : Nat) :
+    thHashLeafMsg suite rRand pkSeed pkRoot mu treeIdx kpIdx ctr =
+      thCall suite tagHMsg pkSeed
+        ⟨0, treeIdx, .wotsHash, kpIdx, 0, UInt32.ofNat ctr⟩ [rRand, pkRoot, mu, be 4 ctr] := by rfl
+
 theorem thHashInternalNode_length (suite : TweakableHashSuite) (pkSeed pkRoot nodeRoot : List UInt8)
     (layer : UInt32) (tree : UInt64) (kp : UInt32) (ctr : Nat) :
     (thHashInternalNode suite pkSeed pkRoot nodeRoot layer tree kp ctr).length = 32 :=
   thCall_length _ _ _ _ _
+
+theorem thHashInternalNode_eq (suite : TweakableHashSuite) (pkSeed pkRoot nodeRoot : List UInt8)
+    (layer : UInt32) (tree : UInt64) (kp : UInt32) (ctr : Nat) :
+    thHashInternalNode suite pkSeed pkRoot nodeRoot layer tree kp ctr =
+      thCall suite tagHInternal pkSeed
+        ⟨layer, tree, .wotsHash, kp, 0, UInt32.ofNat ctr⟩ [pkRoot, nodeRoot, be 4 ctr] := by rfl
 
 /-- HINT cannot be mistaken for the legacy HMSG preimage before hashing. -/
 theorem internal_message_domain_separated (pkSeed : List UInt8) (a b : HashAdrs)
@@ -465,6 +489,9 @@ structure PqHashParams where
 
 def PqHashParams.targetSum (p : PqHashParams) : Nat := canonicalTargetSum p.w p.ell1
 
+/-- Permissive model validity predicate supporting both full-width 256-bit presets and
+    small-`ell1` fast algebraic test profiles (`compactTestParams`, `sbox7Params`, `zeroToyParams`).
+    Production signers and verifiers enforce `PqHashParams.productionWellFormed`. -/
 def PqHashParams.wellFormed (p : PqHashParams) : Bool :=
   decide (0 < p.numLayers) && decide (2 ≤ p.w) && decide (p.w ≤ 256) &&
   decide (0 < p.ell1) && decide (p.ell1 ≤ 256) &&
@@ -473,11 +500,48 @@ def PqHashParams.wellFormed (p : PqHashParams) : Bool :=
   decide (p.numLayers * p.subtreeHeight ≤ 62) &&
   (p.statefulJorts || (decide (0 < p.forsTrees) && decide (88 + p.forsTrees * p.forsHeight ≤ 512)))
 
-def corduroyCustody128Params : PqHashParams := ⟨4, 128, 4, 7, 33, 6, 20, false⟩
-def baggy128fParams  : PqHashParams := ⟨4, 128, 2, 16, 33, 6, 20, false⟩
-def jortsPoseidon2Params : PqHashParams := ⟨4, 128, 16, 1, 0, 0, 16, true⟩
-def compactTestParams      : PqHashParams := ⟨4, 8, 2, 2, 4, 2, 4, false⟩
-def compactJortsParams   : PqHashParams := ⟨4, 8, 2, 1, 0, 0, 2, true⟩
+/-- Exact production parameter validity predicate matching `PqHashParams::is_well_formed`
+    in `crates/qsag-core/src/tsw_baggy.rs`: requires power-of-two `w ∈ [2, 256]`, exact 256-bit
+    WOTS+C digest coverage (`ell1 * log2 w = 256`), `0 < subtreeHeight ≤ 30`, `forsHeight ≤ 30`,
+    `0 < numLayers * subtreeHeight ≤ 62`, `0 < maxSigsLog2 ≤ numLayers * subtreeHeight`, and
+    mode-exact FORS presence (`forsTrees = 0 ∧ forsHeight = 0` iff `statefulJorts`). -/
+def PqHashParams.productionWellFormed (p : PqHashParams) : Bool :=
+  decide (0 < p.numLayers) &&
+  decide (2 ≤ p.w) && decide (p.w ≤ 256) && decide (2 ^ Nat.log2 p.w = p.w) &&
+  decide (p.ell1 * Nat.log2 p.w = 256) &&
+  decide (0 < p.subtreeHeight) && decide (p.subtreeHeight ≤ 30) &&
+  decide (p.forsHeight ≤ 30) &&
+  decide (0 < p.numLayers * p.subtreeHeight) &&
+  decide (p.numLayers * p.subtreeHeight ≤ 62) &&
+  decide (0 < p.maxSigsLog2) &&
+  decide (p.maxSigsLog2 ≤ p.numLayers * p.subtreeHeight) &&
+  (if p.statefulJorts then decide (p.forsTrees = 0) && decide (p.forsHeight = 0)
+   else decide (0 < p.forsTrees) && decide (0 < p.forsHeight))
+
+/-- Exact leaf/epoch range check matching `PqHashParams::leaf_idx_in_range` in `tsw_baggy.rs`:
+    enforces `numLayers * subtreeHeight` in stateless mode and `min(maxSigsLog2, totalBits)` in stateful mode. -/
+def PqHashParams.productionLeafIdxInRange (p : PqHashParams) (leafGlobalIdx : Nat) : Bool :=
+  let totalBits := p.numLayers * p.subtreeHeight
+  let capBits := if p.statefulJorts && decide (p.maxSigsLog2 < totalBits) then p.maxSigsLog2 else totalBits
+  decide (leafGlobalIdx < 2 ^ capBits)
+
+/-- Exact canonical wire byte length of a `PqHashSig` (`PQ_WIRE_MAGIC` + body), matching
+    `PqHashParams::wire_sig_bytes` in `tsw_baggy.rs`. -/
+def PqHashParams.wireSigBytes (p : PqHashParams) : Nat :=
+  let forsBytes := if p.statefulJorts then 0 else p.forsTrees * (32 + p.forsHeight * 32)
+  49 + forsBytes + p.numLayers * (4 + p.ell1 * 32 + p.subtreeHeight * 32)
+
+/-- Production presets matching `crates/qsag-core/src/tsw_baggy.rs` field-for-field. -/
+def corduroyCustody128Params : PqHashParams := ⟨4, 128, 4, 7, 33, 6, 12, false⟩
+def baggy128fParams          : PqHashParams := ⟨4, 128, 2, 16, 33, 6, 16, false⟩
+def jortsPoseidon2Params     : PqHashParams := ⟨4, 128, 16, 1, 0, 0, 16, true⟩
+def jortsBenchCachedParams   : PqHashParams := ⟨4, 128, 8, 1, 0, 0, 8, true⟩
+def compactGoldenParams      : PqHashParams := ⟨16, 64, 2, 10, 24, 4, 4, false⟩
+def compactJortsProdParams   : PqHashParams := ⟨16, 64, 2, 1, 0, 0, 2, true⟩
+
+/-- Permissive small-`ell1` fast model test profiles (rejected by `productionWellFormed`). -/
+def compactTestParams        : PqHashParams := ⟨4, 8, 2, 2, 4, 2, 4, false⟩
+def compactJortsParams       : PqHashParams := ⟨4, 8, 2, 1, 0, 0, 2, true⟩
 
 /-- Secret key `(skSeed, skPrf, pkSeed)`. -/
 structure PqSecretKey where
