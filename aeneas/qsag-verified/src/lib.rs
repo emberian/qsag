@@ -31,6 +31,7 @@ pub mod fips205;
 pub mod fts_spn_guard;
 pub mod goldilocks;
 pub mod keccak;
+pub mod opening_guard;
 pub mod pants_and_quorum_guards;
 pub mod policy_and_addr;
 pub mod rss_cut_session;
@@ -64,6 +65,7 @@ pub use keccak::{
     KECCAK_ROUND_CONSTANTS, SHAKE256_RATE_BYTES, SHAKE256_RATE_LANES, Shake256Sponge, cshake256_32,
     keccak_f1600, keccak_f1600_round, shake256_32,
 };
+pub use opening_guard::{ConsumingOpeningGuard2Lane, OpeningReleasePermit};
 pub use pants_and_quorum_guards::{
     BeltAuthorizationGrant, BeltQuorumPhase, PantsGuardError, RssLatchStepInput,
     RssLatchStepOutput, RssOpenPermit, VerifiedRssPoisonLatch, VerifiedWaistbandRootGuard,
