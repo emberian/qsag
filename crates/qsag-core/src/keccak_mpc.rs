@@ -1776,3 +1776,1436 @@ fn eval_rss_keccak_f1600_batch64_record(
 /// arrays are zeroed before the error is returned, so no unverified output share is left
 /// for the caller to open. Argument and replica-equality errors are detected before the
 /// states are touched and leave them unchanged.
+pub fn eval_rss_keccak_f1600_batch64(
+    session_id: &[u8; 32],
+    batch_ctr: u64,
+    batch_len: usize,
+    states_prim: &mut [[u64; 1600]; 3],
+    states_sec: &mut [[u64; 1600]; 3],
+    keys: &[RssKeyShare256; 3],
+    party_rngs: &mut [PartyPrivateRng; 3],
+) -> Result<(), KeccakMpcError> {
+    if batch_len == 0 || batch_len > 64 {
+        return Err(KeccakMpcError::InvalidBatchSize(batch_len));
+    }
+    let mask = RssMaskSession::derive(session_id, keys, party_rngs)?;
+    let mut pending = RssPendingDzkTriples::new();
+    eval_rss_keccak_f1600_batch64_record(
+        session_id,
+        batch_ctr,
+        batch_len,
+        states_prim,
+        states_sec,
+        &mask,
+        &mut pending,
+    )?;
+    let verified =
+        verify_rss_boolean_triples_bbcggi19(session_id, batch_ctr, &mut pending, &mask, party_rngs);
+    if verified.is_err() {
+        wipe_rss_states(states_prim, states_sec);
+    }
+    verified
+}
+
+fn wipe_rss_states<const N: usize>(prim: &mut [[u64; N]; 3], sec: &mut [[u64; N]; 3]) {
+    for p in 0..3 {
+        wipe_u64s(&mut prim[p]);
+        wipe_u64s(&mut sec[p]);
+    }
+}
+
+/// Cut-boundary share words of the three parties, collected across batches until the cut
+/// is verified and opened. Wiped on `Drop`, so an error return clears them as well.
+struct RssCutBuffer {
+    prim: [Vec<u64>; 3],
+    sec: [Vec<u64>; 3],
+}
+
+impl RssCutBuffer {
+    fn new() -> Self {
+        Self {
+            prim: [Vec::new(), Vec::new(), Vec::new()],
+            sec: [Vec::new(), Vec::new(), Vec::new()],
+        }
+    }
+}
+
+impl Drop for RssCutBuffer {
+    fn drop(&mut self) {
+        for p in 0..3 {
+            wipe_u64s(&mut self.prim[p]);
+            wipe_u64s(&mut self.sec[p]);
+        }
+    }
+}
+
+/// Active 2-of-3 RSS distributed `SLH-DSA` cluster implementing sealed [`SlhMpcOracles`].
+pub struct RssSlhMpcCluster {
+    pub session_id: [u8; 32],
+    pub keys: [RssKeyShare256; 3],
+    pub party_rngs: [PartyPrivateRng; 3],
+    batch_ctr: u64,
+    pending_dzk: RssPendingDzkTriples,
+    pub(crate) mask_session: RssMaskSession,
+    /// Set by the first failed verification, coin flip, opening commitment or replica check
+    /// of this cluster. Nothing resets it; see [`RssSlhMpcCluster::is_poisoned`].
+    poisoned: RssPoisonLatch,
+}
+
+impl fmt::Debug for RssSlhMpcCluster {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "RssSlhMpcCluster(n={}, ctr={}, [REDACTED])",
+            self.keys[0].key_len, self.batch_ctr
+        )
+    }
+}
+
+impl RssSlhMpcCluster {
+    /// Builds the cluster and derives its hedged mask session: every party contributes fresh
+    /// private entropy to a joint coin, so mask and proof streams never repeat across clusters
+    /// even when `session_id` and the batch counters do.
+    pub fn new(
+        session_id: [u8; 32],
+        keys: [RssKeyShare256; 3],
+        mut party_rngs: [PartyPrivateRng; 3],
+    ) -> Result<Self, KeccakMpcError> {
+        let n = keys[0].key_len;
+        if (n != 16 && n != 24 && n != 32)
+            || keys[0].party_id != 0
+            || keys[1].party_id != 1
+            || keys[2].party_id != 2
+            || keys[1].key_len != n
+            || keys[2].key_len != n
+            || keys.iter().any(|k| k.pk_seed != keys[0].pk_seed
+                || k.scheme_identity != keys[0].scheme_identity
+                || k.tsw_binding != keys[0].tsw_binding
+                || k.slh_params != keys[0].slh_params)
+        {
+            return Err(KeccakMpcError::InvalidParameters);
+        }
+        let mask_session = RssMaskSession::derive(&session_id, &keys, &mut party_rngs)?;
+        Ok(Self {
+            session_id,
+            keys,
+            party_rngs,
+            batch_ctr: 0,
+            pending_dzk: RssPendingDzkTriples::new(),
+            mask_session,
+            poisoned: RssPoisonLatch::new(),
+        })
+    }
+
+    /// Bind the complete SLH profile once, and reject a different public seed or suite.
+    fn bind_slh_params(&mut self, params: &Fips205Params, pk_seed: &[u8]) -> Result<(), Fips205Error> {
+        if !params.is_valid() || self.keys.iter().any(|key|
+            key.key_len != params.n || key.pk_seed[..key.key_len] != *pk_seed
+            || key.tsw_binding.is_some() || key.scheme_identity.is_some()
+            || key.slh_params.is_some_and(|bound| bound != *params)) {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        for key in &mut self.keys { key.slh_params = Some(*params); }
+        Ok(())
+    }
+
+    /// True once any check of this cluster has failed. A poisoned cluster evaluates,
+    /// verifies and opens nothing more: every such method returns
+    /// [`KeccakMpcError::Poisoned`] (the sealed [`SlhMpcOracles`] methods, whose error type
+    /// is fixed, return [`Fips205Error::MpcActiveTamperDetected`]). The session is over; the
+    /// key shares can only be used again in a new cluster.
+    pub(crate) fn is_poisoned(&self) -> bool {
+        self.poisoned.is_set() || self.pending_dzk.is_poisoned()
+    }
+
+    /// Permanently poisons the cluster. For engines built on its public parts that detect
+    /// a failure of their own.
+    pub(crate) fn poison(&mut self) {
+        self.poisoned.set();
+    }
+
+    fn ensure_live(&self) -> Result<(), KeccakMpcError> {
+        if self.is_poisoned() {
+            Err(KeccakMpcError::Poisoned)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The stateless hash-signature binding shared by all three key shares, `None` when no
+    /// share is bound. Shares that disagree are refused.
+    fn tsw_binding(&self) -> Result<Option<TswKeyBinding>, KeccakMpcError> {
+        if self.keys.iter().any(|k| k.slh_params.is_some()) { return Err(KeccakMpcError::KeyBindingMismatch); }
+        let binding = self.keys[0].tsw_binding;
+        if self.keys[1].tsw_binding != binding || self.keys[2].tsw_binding != binding {
+            return Err(KeccakMpcError::KeyBindingMismatch);
+        }
+        Ok(binding)
+    }
+
+    /// One 64-way replicated permutation followed by the proof of its AND relations, under
+    /// this cluster's next batch counter. Outputs remain shared. On any error the cluster
+    /// is poisoned and both state arrays are zeroed.
+    fn permute_batch64(
+        &mut self,
+        batch_len: usize,
+        states_prim: &mut [[u64; 1600]; 3],
+        states_sec: &mut [[u64; 1600]; 3],
+    ) -> Result<(), KeccakMpcError> {
+        let result = self.permute_batch64_inner(batch_len, states_prim, states_sec);
+        if result.is_err() {
+            self.poison();
+            wipe_rss_states(states_prim, states_sec);
+        }
+        result
+    }
+
+    fn permute_batch64_inner(
+        &mut self,
+        batch_len: usize,
+        states_prim: &mut [[u64; 1600]; 3],
+        states_sec: &mut [[u64; 1600]; 3],
+    ) -> Result<(), KeccakMpcError> {
+        self.ensure_live()?;
+        let ctr = self.next_ctr();
+        eval_rss_keccak_f1600_batch64_record(
+            &self.session_id,
+            ctr,
+            batch_len,
+            states_prim,
+            states_sec,
+            &self.mask_session,
+            &mut self.pending_dzk,
+        )?;
+        verify_rss_boolean_triples_bbcggi19(
+            &self.session_id,
+            ctr,
+            &mut self.pending_dzk,
+            &self.mask_session,
+            &mut self.party_rngs,
+        )
+    }
+
+    /// `Keccak-f[1600]` lane-permutations this cluster has evaluated under MPC.
+    pub fn lane_permutations(&self) -> u64 {
+        self.pending_dzk.lane_perms
+    }
+
+    pub(crate) fn next_ctr(&mut self) -> u64 {
+        let c = self.batch_ctr;
+        self.batch_ctr = self.batch_ctr.wrapping_add(1);
+        c
+    }
+
+    /// Verify ALL accumulated Boolean-product relations via 2-pass BBCGGI19 DZK (`< 2^{-244}` soundness)
+    /// **strictly BEFORE** committing-and-opening any cut-boundary shares, then mint
+    /// [`CutBoundaryMacToken::mint_verified`].
+    ///
+    /// A poisoned cluster opens nothing. A failed verification or opening poisons it.
+    fn flush_verify_and_open_cut(
+        &mut self,
+        phase: &'static str,
+        cut: &RssCutBuffer,
+    ) -> Result<(Vec<u64>, CutBoundaryMacToken), KeccakMpcError> {
+        self.ensure_live()?;
+        let dzk_ctr = self.next_ctr();
+        if let Err(e) = verify_rss_boolean_triples_bbcggi19(
+            &self.session_id,
+            dzk_ctr,
+            &mut self.pending_dzk,
+            &self.mask_session,
+            &mut self.party_rngs,
+        ) {
+            return self.poisoned.fail(e);
+        }
+        let opened = rss_commit_and_open_u64_batch(
+            &self.session_id,
+            phase,
+            &cut.prim,
+            &cut.sec,
+            &mut self.party_rngs,
+            &self.poisoned,
+        )?;
+        Ok((opened, CutBoundaryMacToken::mint_verified()))
+    }
+
+    /// Evaluate up to `64` single-block `PRF(PK.seed, SK.seed, adrs_batch[b])` instances in parallel!
+    fn eval_prf_batch64_secret(
+        &mut self,
+        pk_seed: &[u8],
+        adrs_batch: &[Fips205Adrs],
+    ) -> Result<RssCutShares, KeccakMpcError> {
+        self.ensure_live()?;
+        let batch_len = adrs_batch.len();
+        let n = self.keys[0].key_len;
+        let active_mask = batch_active_mask(batch_len);
+        let mut st_p = SecretBuffer([[0u64; 1600]; 3]);
+        let mut st_s = SecretBuffer([[0u64; 1600]; 3]);
+
+        // Frame: `PK.seed (n B) || ADRS (32 B) || SK.seed (n B) || 0x1f ... 0x80` (`2*n + 32 <= 96 < 136`!)
+        let mut b = 0;
+        while b < batch_len {
+            let bit_b = 1u64 << b;
+            let adrs_bytes = adrs_batch[b].to_bytes();
+            // Public `PK.seed` at `0..n` -> slot 0 (`party 0` primary, `party 2` secondary)
+            let mut byte_idx = 0;
+            while byte_idx < n {
+                let v = pk_seed[byte_idx];
+                for bit in 0..8 {
+                    if ((v >> bit) & 1) == 1 {
+                        let pos = 8 * byte_idx + bit;
+                        st_p[0][pos] |= bit_b;
+                        st_s[2][pos] |= bit_b;
+                    }
+                }
+                byte_idx += 1;
+            }
+            // Public `ADRS` at `n..n+32`
+            let mut byte_idx = 0;
+            while byte_idx < 32 {
+                let v = adrs_bytes[byte_idx];
+                for bit in 0..8 {
+                    if ((v >> bit) & 1) == 1 {
+                        let pos = 8 * (n + byte_idx) + bit;
+                        st_p[0][pos] |= bit_b;
+                        st_s[2][pos] |= bit_b;
+                    }
+                }
+                byte_idx += 1;
+            }
+            // Padding `0x1f` at `2*n + 32` and `0x80` at `135`
+            let pad_off = 8 * (2 * n + 32);
+            for bit in 0..5 {
+                st_p[0][pad_off + bit] |= bit_b;
+                st_s[2][pad_off + bit] |= bit_b;
+            }
+            st_p[0][8 * 135 + 7] |= bit_b;
+            st_s[2][8 * 135 + 7] |= bit_b;
+            b += 1;
+        }
+        // Secret `SK.seed` at `n+32 .. 2*n+32` replicated across all active instances `active_mask`
+        let sk_bit_off = 8 * (n + 32);
+        for p in 0..3 {
+            let (sk_p, sk_s) = self.keys[p].sk_seed_shares();
+            for byte_idx in 0..n {
+                for bit in 0..8 {
+                    let mp = 0u64.wrapping_sub(((sk_p[byte_idx] >> bit) & 1) as u64);
+                    let ms = 0u64.wrapping_sub(((sk_s[byte_idx] >> bit) & 1) as u64);
+                    st_p[p][sk_bit_off + 8 * byte_idx + bit] = mp & active_mask;
+                    st_s[p][sk_bit_off + 8 * byte_idx + bit] = ms & active_mask;
+                }
+            }
+        }
+
+        self.permute_batch64(batch_len, &mut st_p, &mut st_s)?;
+
+        let n_bits = 8 * n;
+        let mut out_p = [[0u64; 256]; 3];
+        let mut out_s = [[0u64; 256]; 3];
+        for p in 0..3 {
+            out_p[p][..n_bits].copy_from_slice(&st_p[p][..n_bits]);
+            out_s[p][..n_bits].copy_from_slice(&st_s[p][..n_bits]);
+            wipe_u64s(&mut st_p[p]);
+            wipe_u64s(&mut st_s[p]);
+        }
+        Ok((out_p, out_s))
+    }
+
+    /// Evaluate up to `64` single-block `F(PK.seed, adrs_batch[b], secret_in)` instances in parallel
+    /// (masked by `exec_mask`, keeping lanes with bit `0` in `exec_mask` unchanged for unequal WOTS+ step depths!).
+    /// On error the chain shares in `cur_p` / `cur_s` are zeroed.
+    fn eval_f_step_masked_batch64(
+        &mut self,
+        pk_seed: &[u8],
+        adrs_batch: &[Fips205Adrs],
+        exec_mask: u64,
+        cur_p: &mut [[u64; 256]; 3],
+        cur_s: &mut [[u64; 256]; 3],
+    ) -> Result<(), KeccakMpcError> {
+        if let Err(e) = self.ensure_live() {
+            wipe_rss_states(cur_p, cur_s);
+            return Err(e);
+        }
+        let batch_len = adrs_batch.len();
+        if exec_mask == 0 {
+            return Ok(());
+        }
+        let n = self.keys[0].key_len;
+        let n_bits = 8 * n;
+        let mut st_p = SecretBuffer([[0u64; 1600]; 3]);
+        let mut st_s = SecretBuffer([[0u64; 1600]; 3]);
+
+        let mut b = 0;
+        while b < batch_len {
+            let bit_b = 1u64 << b;
+            let adrs_bytes = adrs_batch[b].to_bytes();
+            let mut byte_idx = 0;
+            while byte_idx < n {
+                let v = pk_seed[byte_idx];
+                for bit in 0..8 {
+                    if ((v >> bit) & 1) == 1 {
+                        let pos = 8 * byte_idx + bit;
+                        st_p[0][pos] |= bit_b;
+                        st_s[2][pos] |= bit_b;
+                    }
+                }
+                byte_idx += 1;
+            }
+            let mut byte_idx = 0;
+            while byte_idx < 32 {
+                let v = adrs_bytes[byte_idx];
+                for bit in 0..8 {
+                    if ((v >> bit) & 1) == 1 {
+                        let pos = 8 * (n + byte_idx) + bit;
+                        st_p[0][pos] |= bit_b;
+                        st_s[2][pos] |= bit_b;
+                    }
+                }
+                byte_idx += 1;
+            }
+            let pad_off = 8 * (2 * n + 32);
+            for bit in 0..5 {
+                st_p[0][pad_off + bit] |= bit_b;
+                st_s[2][pad_off + bit] |= bit_b;
+            }
+            st_p[0][8 * 135 + 7] |= bit_b;
+            st_s[2][8 * 135 + 7] |= bit_b;
+            b += 1;
+        }
+        let m1_off = 8 * (n + 32);
+        for p in 0..3 {
+            for bit_idx in 0..n_bits {
+                st_p[p][m1_off + bit_idx] = cur_p[p][bit_idx];
+                st_s[p][m1_off + bit_idx] = cur_s[p][bit_idx];
+            }
+        }
+
+        if let Err(e) = self.permute_batch64(batch_len, &mut st_p, &mut st_s) {
+            wipe_rss_states(cur_p, cur_s);
+            return Err(e);
+        }
+
+        let keep_mask = !exec_mask;
+        for p in 0..3 {
+            for bit_idx in 0..n_bits {
+                cur_p[p][bit_idx] =
+                    (cur_p[p][bit_idx] & keep_mask) | (st_p[p][bit_idx] & exec_mask);
+                cur_s[p][bit_idx] =
+                    (cur_s[p][bit_idx] & keep_mask) | (st_s[p][bit_idx] & exec_mask);
+            }
+            wipe_u64s(&mut st_p[p]);
+            wipe_u64s(&mut st_s[p]);
+        }
+        Ok(())
+    }
+
+    /// Commit-before-open + replicated share-equality check strictly BEFORE declassifying `batch_len`
+    /// `SlhBlock`s (`n` bytes each), minting [`CutBoundaryMacToken::mint_verified`].
+    fn verify_and_open_cut_blocks(
+        &mut self,
+        phase: &'static str,
+        batch_len: usize,
+        blocks_p: &[[u64; 256]; 3],
+        blocks_s: &[[u64; 256]; 3],
+    ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), KeccakMpcError> {
+        self.ensure_live()?;
+        let n = self.keys[0].key_len;
+        let n_bits = 8 * n;
+        let mut cut = RssCutBuffer::new();
+        for p in 0..3 {
+            cut.prim[p].extend_from_slice(&blocks_p[p][..n_bits]);
+            cut.sec[p].extend_from_slice(&blocks_s[p][..n_bits]);
+        }
+        let (opened_bits, tok) = self.flush_verify_and_open_cut(phase, &cut)?;
+        let mut out = Vec::with_capacity(batch_len);
+        for b in 0..batch_len {
+            let mut blk = SlhBlock::zero(n);
+            for byte_idx in 0..n {
+                let mut v = 0u8;
+                for bit in 0..8 {
+                    let bit_val = ((opened_bits[8 * byte_idx + bit] >> b) & 1) as u8;
+                    v |= bit_val << bit;
+                }
+                blk.bytes[byte_idx] = v;
+            }
+            out.push(blk);
+        }
+        Ok((out, tok))
+    }
+
+    /// `PRF_msg(SK.prf, opt_rand, m_prime) = SHAKE256(SK.prf || opt_rand || m_prime)[..n]`
+    /// evaluated on the shared `SK.prf`, verified, then opened. The value depends only on
+    /// the key and the two public inputs, never on the session or on party randomness.
+    /// The caller checks `n == key_len` and `opt_rand.len() == n`.
+    fn prf_msg_shared(
+        &mut self,
+        n: usize,
+        opt_rand: &[u8],
+        m_prime: &[u8],
+    ) -> Result<(SlhBlock, CutBoundaryMacToken), KeccakMpcError> {
+        self.ensure_live()?;
+        // Stream `SHAKE256(SK.prf || opt_rand || M')` over 136-byte blocks in 2-of-3 RSS (`batch_len = 1`)
+        let total_len = 2 * n + m_prime.len();
+        let num_blocks = (total_len / SHAKE256_RATE_BYTES) + 1;
+        let mut padded_pub = vec![0u8; num_blocks * SHAKE256_RATE_BYTES];
+        padded_pub[n..2 * n].copy_from_slice(opt_rand);
+        padded_pub[2 * n..2 * n + m_prime.len()].copy_from_slice(m_prime);
+        padded_pub[total_len] ^= 0x1f;
+        let last_idx = num_blocks * SHAKE256_RATE_BYTES - 1;
+        padded_pub[last_idx] ^= 0x80;
+
+        let mut st_p = SecretBuffer([[0u64; 1600]; 3]);
+        let mut st_s = SecretBuffer([[0u64; 1600]; 3]);
+        for blk_idx in 0..num_blocks {
+            let blk =
+                &padded_pub[blk_idx * SHAKE256_RATE_BYTES..(blk_idx + 1) * SHAKE256_RATE_BYTES];
+            if blk_idx == 0 {
+                for p in 0..3 {
+                    let (prf_p, prf_s) = self.keys[p].sk_prf_shares();
+                    for byte_idx in 0..n {
+                        for bit in 0..8 {
+                            st_p[p][8 * byte_idx + bit] ^= ((prf_p[byte_idx] >> bit) & 1) as u64;
+                            st_s[p][8 * byte_idx + bit] ^= ((prf_s[byte_idx] >> bit) & 1) as u64;
+                        }
+                    }
+                }
+            }
+            let start_b = if blk_idx == 0 { n } else { 0 };
+            for byte_idx in start_b..SHAKE256_RATE_BYTES {
+                let v = blk[byte_idx];
+                for bit in 0..8 {
+                    if ((v >> bit) & 1) == 1 {
+                        st_p[0][8 * byte_idx + bit] ^= 1;
+                        st_s[2][8 * byte_idx + bit] ^= 1;
+                    }
+                }
+            }
+            self.permute_batch64(1, &mut st_p, &mut st_s)?;
+        }
+
+        let mut out_p = [[0u64; 256]; 3];
+        let mut out_s = [[0u64; 256]; 3];
+        for p in 0..3 {
+            out_p[p][..8 * n].copy_from_slice(&st_p[p][..8 * n]);
+            out_s[p][..8 * n].copy_from_slice(&st_s[p][..8 * n]);
+            wipe_u64s(&mut st_p[p]);
+            wipe_u64s(&mut st_s[p]);
+        }
+        let opened = self.verify_and_open_cut_blocks("rss_cut_prf_msg", 1, &out_p, &out_s);
+        wipe_rss_states(&mut out_p, &mut out_s);
+        let (mut blks, tok) = opened?;
+        Ok((blks.remove(0), tok))
+    }
+}
+
+/// The sealed oracle interface has a fixed error type: every engine failure, including a
+/// poisoned cluster, is reported as an active-tamper abort.
+fn rss_oracle_abort(_: KeccakMpcError) -> Fips205Error {
+    Fips205Error::MpcActiveTamperDetected
+}
+
+impl sealed_mpc_oracles::Sealed for RssSlhMpcCluster {}
+
+impl SlhMpcOracles for RssSlhMpcCluster {
+    fn bind_key_params(&mut self, params: &Fips205Params, pk_seed: &[u8]) -> Result<(), Fips205Error> {
+        if self.is_poisoned() { return Err(Fips205Error::MpcActiveTamperDetected); }
+        self.bind_slh_params(params, pk_seed)
+    }
+
+    fn eval_prf_msg_mpc(
+        &mut self,
+        n: usize,
+        opt_rand: &[u8],
+        m_prime: &[u8],
+    ) -> Result<(SlhBlock, CutBoundaryMacToken), Fips205Error> {
+        if self.is_poisoned() {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+        if n != self.keys[0].key_len || opt_rand.len() != n
+            || self.keys.iter().any(|k| k.tsw_binding.is_some() || k.scheme_identity.is_some()) {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        self.prf_msg_shared(n, opt_rand, m_prime)
+            .map_err(rss_oracle_abort)
+    }
+
+    fn eval_fors_trees_mpc(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        base_adrs: Fips205Adrs,
+        fors_indices: &[u32],
+    ) -> Result<(Vec<SlhBlock>, Vec<Vec<SlhBlock>>, CutBoundaryMacToken), Fips205Error> {
+        if self.is_poisoned() {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+        self.bind_slh_params(params, pk_seed)?;
+        let n = params.n;
+        if n != self.keys[0].key_len || pk_seed.len() != n || fors_indices.len() != params.k {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let t_leaves = 1usize << params.a;
+        let total_leaves = params.k * t_leaves;
+
+        // Collect all cut-boundary shares across chunks and verify/open in 1 atomic barrier!
+        let mut cut = RssCutBuffer::new();
+        let mut chunk_sizes = Vec::new();
+
+        // First evaluate the `k` revealed FORS `sk` values (`1` batch of `<= 64` since `k <= 35`!)
+        let mut rev_prf_adrs = Vec::with_capacity(params.k);
+        let mut i = 0;
+        while i < params.k {
+            let idx_i = fors_indices[i] as usize;
+            if idx_i >= t_leaves {
+                return Err(Fips205Error::MpcActiveTamperDetected);
+            }
+            let mut prf_adrs = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
+            prf_adrs.key_pair = base_adrs.key_pair;
+            prf_adrs.f6 = (i * t_leaves + idx_i) as u32;
+            rev_prf_adrs.push(prf_adrs);
+            i += 1;
+        }
+        let (mut rev_p, mut rev_s) = self
+            .eval_prf_batch64_secret(pk_seed, &rev_prf_adrs)
+            .map_err(rss_oracle_abort)?;
+        for p in 0..3 {
+            cut.prim[p].extend_from_slice(&rev_p[p][..8 * n]);
+            cut.sec[p].extend_from_slice(&rev_s[p][..8 * n]);
+        }
+        wipe_rss_states(&mut rev_p, &mut rev_s);
+
+        // Now evaluate all `total_leaves = k * 2^a` leaf hashes `F(PK.seed, leaf_adrs, PRF(PK.seed, SK.seed, prf_adrs))`
+        // in 64-wide bitsliced batches (unrevealed `sk` values NEVER leave secret shares!)
+        let mut leaf_cursor = 0usize;
+        while leaf_cursor < total_leaves {
+            let chunk_len = (total_leaves - leaf_cursor).min(64);
+            let mut prf_batch = Vec::with_capacity(chunk_len);
+            let mut leaf_batch = Vec::with_capacity(chunk_len);
+            for c in 0..chunk_len {
+                let flat = leaf_cursor + c;
+                let mut prf_a = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
+                prf_a.key_pair = base_adrs.key_pair;
+                prf_a.f6 = flat as u32;
+                prf_batch.push(prf_a);
+
+                let mut leaf_a = base_adrs;
+                leaf_a.adrs_type = Fips205AdrsType::ForsTree;
+                leaf_a.f5 = 0;
+                leaf_a.f6 = flat as u32;
+                leaf_batch.push(leaf_a);
+            }
+            let (cur_p, cur_s) = self
+                .eval_prf_batch64_secret(pk_seed, &prf_batch)
+                .map_err(rss_oracle_abort)?;
+            let mut cur_p = SecretBuffer(cur_p);
+            let mut cur_s = SecretBuffer(cur_s);
+            let mask = batch_active_mask(chunk_len);
+            self.eval_f_step_masked_batch64(pk_seed, &leaf_batch, mask, &mut cur_p, &mut cur_s)
+                .map_err(rss_oracle_abort)?;
+            for p in 0..3 {
+                cut.prim[p].extend_from_slice(&cur_p[p][..8 * n]);
+                cut.sec[p].extend_from_slice(&cur_s[p][..8 * n]);
+                wipe_u64s(&mut cur_p[p]);
+                wipe_u64s(&mut cur_s[p]);
+            }
+            chunk_sizes.push(chunk_len);
+            leaf_cursor += chunk_len;
+        }
+
+        let (opened_words, tok) = self
+            .flush_verify_and_open_cut("rss_cut_fors_trees", &cut)
+            .map_err(rss_oracle_abort)?;
+
+        let n_bits = 8 * n;
+        let mut revealed_sks = Vec::with_capacity(params.k);
+        for b in 0..params.k {
+            let mut blk = SlhBlock::zero(n);
+            for byte_idx in 0..n {
+                let mut v = 0u8;
+                for bit in 0..8 {
+                    v |= (((opened_words[8 * byte_idx + bit] >> b) & 1) as u8) << bit;
+                }
+                blk.bytes[byte_idx] = v;
+            }
+            revealed_sks.push(blk);
+        }
+
+        let mut flat_leaves = Vec::with_capacity(total_leaves);
+        let mut word_off = n_bits;
+        for &c_len in &chunk_sizes {
+            let slice = &opened_words[word_off..word_off + n_bits];
+            for b in 0..c_len {
+                let mut blk = SlhBlock::zero(n);
+                for byte_idx in 0..n {
+                    let mut v = 0u8;
+                    for bit in 0..8 {
+                        v |= (((slice[8 * byte_idx + bit] >> b) & 1) as u8) << bit;
+                    }
+                    blk.bytes[byte_idx] = v;
+                }
+                flat_leaves.push(blk);
+            }
+            word_off += n_bits;
+        }
+
+        let mut fors_all_leaves = Vec::with_capacity(params.k);
+        for i in 0..params.k {
+            fors_all_leaves.push(flat_leaves[i * t_leaves..(i + 1) * t_leaves].to_vec());
+        }
+        Ok((revealed_sks, fors_all_leaves, tok))
+    }
+
+    fn eval_wots_pkgen_subtree_mpc(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        layer: u32,
+        tree: u128,
+    ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error> {
+        if self.is_poisoned() {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+        self.bind_slh_params(params, pk_seed)?;
+        let n = params.n;
+        if n != self.keys[0].key_len || pk_seed.len() != n {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let n_leaves = 1usize << params.hp;
+        let ell = params.ell();
+        let total_chains = n_leaves * ell;
+        let n_bits = 8 * n;
+
+        let mut cut = RssCutBuffer::new();
+        let mut chunk_sizes = Vec::new();
+
+        let mut cursor = 0usize;
+        while cursor < total_chains {
+            let chunk_len = (total_chains - cursor).min(64);
+            let mask = batch_active_mask(chunk_len);
+            let mut prf_batch = Vec::with_capacity(chunk_len);
+            for c in 0..chunk_len {
+                let flat = cursor + c;
+                let kp = (flat / ell) as u32;
+                let ch = (flat % ell) as u32;
+                let mut a = Fips205Adrs::ZERO;
+                a.layer = layer;
+                a.set_tree_address(tree);
+                a.adrs_type = Fips205AdrsType::WotsPrf;
+                a.key_pair = kp;
+                a.f5 = ch;
+                prf_batch.push(a);
+            }
+            let (cur_p, cur_s) = self
+                .eval_prf_batch64_secret(pk_seed, &prf_batch)
+                .map_err(rss_oracle_abort)?;
+            let mut cur_p = SecretBuffer(cur_p);
+            let mut cur_s = SecretBuffer(cur_s);
+            for step in 0..15u32 {
+                let mut step_batch = Vec::with_capacity(chunk_len);
+                for c in 0..chunk_len {
+                    let flat = cursor + c;
+                    let kp = (flat / ell) as u32;
+                    let ch = (flat % ell) as u32;
+                    let mut a = Fips205Adrs::ZERO;
+                    a.layer = layer;
+                    a.set_tree_address(tree);
+                    a.adrs_type = Fips205AdrsType::WotsHash;
+                    a.key_pair = kp;
+                    a.f5 = ch;
+                    a.f6 = step;
+                    step_batch.push(a);
+                }
+                self.eval_f_step_masked_batch64(
+                    pk_seed,
+                    &step_batch,
+                    mask,
+                    &mut cur_p,
+                    &mut cur_s,
+                )
+                .map_err(rss_oracle_abort)?;
+            }
+            for p in 0..3 {
+                cut.prim[p].extend_from_slice(&cur_p[p][..n_bits]);
+                cut.sec[p].extend_from_slice(&cur_s[p][..n_bits]);
+                wipe_u64s(&mut cur_p[p]);
+                wipe_u64s(&mut cur_s[p]);
+            }
+            chunk_sizes.push(chunk_len);
+            cursor += chunk_len;
+        }
+
+        let (opened_words, tok) = self
+            .flush_verify_and_open_cut("rss_cut_wots_pkgen", &cut)
+            .map_err(rss_oracle_abort)?;
+
+        let mut endpoints = Vec::with_capacity(total_chains);
+        let mut word_off = 0usize;
+        for &c_len in &chunk_sizes {
+            let slice = &opened_words[word_off..word_off + n_bits];
+            for b in 0..c_len {
+                let mut blk = SlhBlock::zero(n);
+                for byte_idx in 0..n {
+                    let mut v = 0u8;
+                    for bit in 0..8 {
+                        v |= (((slice[8 * byte_idx + bit] >> b) & 1) as u8) << bit;
+                    }
+                    blk.bytes[byte_idx] = v;
+                }
+                endpoints.push(blk);
+            }
+            word_off += n_bits;
+        }
+        Ok((endpoints, tok))
+    }
+
+    fn eval_wots_layer_sign_and_siblings_mpc(
+        &mut self,
+        _authorization: crate::fips205::OracleCallToken,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+        layer: u32,
+        tree: u128,
+        active_kp: u32,
+        msg_to_sign: &SlhBlock,
+    ) -> Result<(Vec<SlhBlock>, CutBoundaryMacToken), Fips205Error> {
+        if self.is_poisoned() {
+            return Err(Fips205Error::MpcActiveTamperDetected);
+        }
+        self.bind_slh_params(params, pk_seed)?;
+        let n = params.n;
+        let n_leaves = 1usize << params.hp;
+        if n != self.keys[0].key_len
+            || pk_seed.len() != n
+            || msg_to_sign.len() != n
+            || (active_kp as usize) >= n_leaves
+        {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let (digits, ell_check) = try_wots_base16_digits_and_csum(msg_to_sign.as_slice())?;
+        let ell = params.ell();
+        if ell_check != ell {
+            return Err(Fips205Error::InvalidParameterSet);
+        }
+        let total_chains = n_leaves * ell;
+        let n_bits = 8 * n;
+
+        let mut cut = RssCutBuffer::new();
+        let mut chunk_sizes = Vec::new();
+
+        let mut cursor = 0usize;
+        while cursor < total_chains {
+            let chunk_len = (total_chains - cursor).min(64);
+            let mut prf_batch = Vec::with_capacity(chunk_len);
+            let mut target_steps = [0u32; 64];
+            let mut c = 0;
+            while c < chunk_len {
+                let flat = cursor + c;
+                let kp = (flat / ell) as u32;
+                let ch = flat % ell;
+                target_steps[c] = if kp == active_kp {
+                    digits[ch] as u32
+                } else {
+                    15
+                };
+                let mut a = Fips205Adrs::ZERO;
+                a.layer = layer;
+                a.set_tree_address(tree);
+                a.adrs_type = Fips205AdrsType::WotsPrf;
+                a.key_pair = kp;
+                a.f5 = ch as u32;
+                prf_batch.push(a);
+                c += 1;
+            }
+            let (cur_p, cur_s) = self
+                .eval_prf_batch64_secret(pk_seed, &prf_batch)
+                .map_err(rss_oracle_abort)?;
+            let mut cur_p = SecretBuffer(cur_p);
+            let mut cur_s = SecretBuffer(cur_s);
+
+            for step in 0..15u32 {
+                let mut exec_mask = 0u64;
+                let mut step_batch = Vec::with_capacity(chunk_len);
+                let mut c = 0;
+                while c < chunk_len {
+                    if step < target_steps[c] {
+                        exec_mask |= 1u64 << c;
+                    }
+                    let flat = cursor + c;
+                    let kp = (flat / ell) as u32;
+                    let ch = (flat % ell) as u32;
+                    let mut a = Fips205Adrs::ZERO;
+                    a.layer = layer;
+                    a.set_tree_address(tree);
+                    a.adrs_type = Fips205AdrsType::WotsHash;
+                    a.key_pair = kp;
+                    a.f5 = ch;
+                    a.f6 = step;
+                    step_batch.push(a);
+                    c += 1;
+                }
+                self.eval_f_step_masked_batch64(
+                    pk_seed,
+                    &step_batch,
+                    exec_mask,
+                    &mut cur_p,
+                    &mut cur_s,
+                )
+                .map_err(rss_oracle_abort)?;
+            }
+
+            for p in 0..3 {
+                cut.prim[p].extend_from_slice(&cur_p[p][..n_bits]);
+                cut.sec[p].extend_from_slice(&cur_s[p][..n_bits]);
+                wipe_u64s(&mut cur_p[p]);
+                wipe_u64s(&mut cur_s[p]);
+            }
+            chunk_sizes.push(chunk_len);
+            cursor += chunk_len;
+        }
+
+        let (opened_words, tok) = self
+            .flush_verify_and_open_cut("rss_cut_wots_layer", &cut)
+            .map_err(rss_oracle_abort)?;
+
+        let mut opened_nodes = Vec::with_capacity(total_chains);
+        let mut word_off = 0usize;
+        for &c_len in &chunk_sizes {
+            let slice = &opened_words[word_off..word_off + n_bits];
+            for b in 0..c_len {
+                let mut blk = SlhBlock::zero(n);
+                for byte_idx in 0..n {
+                    let mut v = 0u8;
+                    for bit in 0..8 {
+                        v |= (((slice[8 * byte_idx + bit] >> b) & 1) as u8) << bit;
+                    }
+                    blk.bytes[byte_idx] = v;
+                }
+                opened_nodes.push(blk);
+            }
+            word_off += n_bits;
+        }
+        Ok((opened_nodes, tok))
+    }
+}
+
+// ============================================================================
+// 2. Dishonest-Majority $t$-of-$n$ SPDZ Shamir `Keccak-f[1600]` & `SlhMpcOracles`
+// ============================================================================
+
+#[inline]
+fn rotate_bs_gf256_lanes_left(w: &BitslicedGf256x64, r: u32) -> BitslicedGf256x64 {
+    core::array::from_fn(|pl| w[pl].rotate_left(r))
+}
+
+#[inline]
+fn rotate_spdz_macs_left(m: &[[Tower128; 64]; 2], r: u32) -> [[Tower128; 64]; 2] {
+    let shift = (r as usize) & 63;
+    if shift == 0 {
+        return *m;
+    }
+    let mut out = [[Tower128::ZERO; 64]; 2];
+    for lane in 0..2 {
+        for src in 0..64 {
+            out[lane][(src + shift) & 63] = m[lane][src];
+        }
+    }
+    out
+}
+
+#[inline]
+fn xor_spdz_macs_assign(dst: &mut [[Tower128; 64]; 2], rhs: &[[Tower128; 64]; 2]) {
+    for lane in 0..2 {
+        for bit in 0..64 {
+            dst[lane][bit].0 ^= rhs[lane][bit].0;
+        }
+    }
+}
+
+#[inline]
+fn add_public_u64_to_spdz_word(
+    pub_word: u64,
+    sh: &mut BitslicedGf256x64,
+    mac: &mut [[Tower128; 64]; 2],
+    alpha_share: &[Tower128; 2],
+) {
+    // In Shamir over `TowerGf256`, constant polynomial `f(X) = c` evaluates to `c` at every point!
+    sh[0] ^= pub_word;
+    let mut bit = 0;
+    while bit < 64 {
+        let mask = 0u128.wrapping_sub(((pub_word >> bit) & 1) as u128);
+        mac[0][bit].0 ^= mask & alpha_share[0].0;
+        mac[1][bit].0 ^= mask & alpha_share[1].0;
+        bit += 1;
+    }
+}
+
+/// Commit-before-open + full `0..m` Shamir degree-`< t` opening for Beaver masked `(d, e)` words,
+/// appending `(opened_word, mac_shares)` to `pending_mac_words` and `pending_mac_tags` for the
+/// pre-cut 2-lane `Tower128` SPDZ `MacCheck` barrier (`[P0-08]`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+fn commit_and_open_beaver_de_batch(
+    session_id: &[u8; 32],
+    round_idx: usize,
+    t: usize,
+    quorum_pts: &[TowerGf256],
+    de_shares: &[Vec<BitslicedGf256x64>],
+    de_macs: &[Vec<[[Tower128; 64]; 2]>],
+    pending_opened: &mut Vec<BitslicedGf256x64>,
+    pending_macs: &mut [Vec<[[Tower128; 64]; 2]>],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<BitslicedGf256x64>, PreprocessError> {
+    let m = quorum_pts.len();
+    let batch_len = de_shares[0].len();
+
+    let mut salts = Vec::with_capacity(m);
+    let mut coms = Vec::with_capacity(m);
+    for p in 0..m {
+        let salt = party_rngs[p].next_bytes32();
+        let mut xof = Cshake256Xof::new(b"QSAG.SPDZ.KECCAK.DE.COM/v1");
+        xof.absorb(session_id);
+        xof.absorb(&(round_idx as u64).to_be_bytes());
+        xof.absorb(&(p as u64).to_be_bytes());
+        xof.absorb(&salt);
+        let mut w = 0;
+        while w < batch_len {
+            let mut pl = 0;
+            while pl < 8 {
+                xof.absorb(&de_shares[p][w][pl].to_le_bytes());
+                pl += 1;
+            }
+            w += 1;
+        }
+        let mut com = [0u8; 32];
+        xof.squeeze(&mut com);
+        salts.push(salt);
+        coms.push(com);
+    }
+
+    for p in 0..m {
+        let mut xof = Cshake256Xof::new(b"QSAG.SPDZ.KECCAK.DE.COM/v1");
+        xof.absorb(session_id);
+        xof.absorb(&(round_idx as u64).to_be_bytes());
+        xof.absorb(&(p as u64).to_be_bytes());
+        xof.absorb(&salts[p]);
+        let mut w = 0;
+        while w < batch_len {
+            let mut pl = 0;
+            while pl < 8 {
+                xof.absorb(&de_shares[p][w][pl].to_le_bytes());
+                pl += 1;
+            }
+            w += 1;
+        }
+        wipe_bytes32(&mut salts[p]);
+        let mut exp = [0u8; 32];
+        xof.squeeze(&mut exp);
+        if !ct_eq_bytes32(&exp, &coms[p]) {
+            return Err(PreprocessError::ShareCommitMismatch {
+                phase: "spdz_keccak_chi_de",
+                party_id: p,
+            });
+        }
+    }
+
+    let mut opened = Vec::with_capacity(batch_len);
+    let mut single_sh = SecretBuffer(vec![[0u64; 8]; m]);
+    let opening_tables = crate::preprocessing::Gf256OpeningTables::new(t, quorum_pts)?;
+    for w in 0..batch_len {
+        for p in 0..m {
+            single_sh[p] = de_shares[p][w];
+            pending_macs[p].push(de_macs[p][w]);
+        }
+        let val = opening_tables.open_bitsliced(&single_sh, "spdz_keccak_chi_de")?;
+        pending_opened.push(val);
+        opened.push(val);
+    }
+    for s in single_sh.iter_mut() {
+        wipe_u64s(s);
+    }
+    Ok(opened)
+}
+
+/// Folded 2-lane `Tower128` SPDZ `MacCheck` (`2^{-256}` soundness) verifying all accumulated Beaver
+/// openings `pending_opened` **strictly before** any party reveals its cut-boundary output share!
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+fn verify_pending_spdz_mac_batch(
+    session_id: &[u8; 32],
+    phase: &'static str,
+    t: usize,
+    quorum_pts: &[TowerGf256],
+    pending_opened: &[BitslicedGf256x64],
+    pending_macs: &[Vec<[[Tower128; 64]; 2]>],
+    alpha_shares: &[[Tower128; 2]],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), PreprocessError> {
+    if pending_opened.is_empty() {
+        return Ok(());
+    }
+    let lambdas_0 = lagrange_weights_zero_gf256(&quorum_pts[..t])
+        .ok_or(PreprocessError::DuplicateOrZeroEvalPoint)?;
+
+    let mut dig_xof = Cshake256Xof::new(b"QSAG.SPDZ.KECCAK.PEND.DIG/v1");
+    for w in pending_opened {
+        let mut pl = 0;
+        while pl < 8 {
+            dig_xof.absorb(&w[pl].to_le_bytes());
+            pl += 1;
+        }
+    }
+    let mut open_digest = [0u8; 32];
+    dig_xof.squeeze(&mut open_digest);
+
+    let fold_coin =
+        run_commit_and_open_coin(session_id, phase.as_bytes(), &open_digest, party_rngs)?;
+    let mut chi_xof = Cshake256Xof::new(b"QSAG.SPDZ.KECCAK.PEND.CHIS/v1");
+    chi_xof.absorb(&fold_coin);
+
+    let total_words = pending_opened.len();
+    let mut x_folded = [Tower128::ZERO; 2];
+    let mut m_folded = SecretBuffer(vec![[Tower128::ZERO; 2]; t]);
+    let mut chi_buf = [0u8; 64 * 32];
+
+    for w in 0..total_words {
+        chi_xof.squeeze(&mut chi_buf);
+        let chis: [[u128; 2]; 64] = core::array::from_fn(|bit| core::array::from_fn(|lane| {
+            let off = (2 * bit + lane) * 16;
+            let value = u128::from_le_bytes(core::array::from_fn(|i| chi_buf[off + i]));
+            if value == 0 { 1 } else { value }
+        }));
+        for (bit, pair) in chis.iter().enumerate() {
+            let value = bs_gf256_extract_lane(&pending_opened[w], bit);
+            for lane in 0..2 {
+                x_folded[lane] = x_folded[lane].add(Tower128(pair[lane]).mul_gf256(value));
+            }
+        }
+        for q in 0..t {
+            let mut macs: [[u128; 2]; 64] = core::array::from_fn(|bit| [pending_macs[q][w][0][bit].0, pending_macs[q][w][1][bit].0]);
+            let mut folded = qsag_asm::tower128_bdoz_2lane_mac(&chis, &macs);
+            for lane in 0..2 { m_folded[q][lane] = m_folded[q][lane].add(Tower128(folded[lane])); }
+            crate::wipe::wipe_u128s(macs.as_flattened_mut());
+            crate::wipe::wipe_u128s(&mut folded);
+        }
+    }
+    wipe_bytes(&mut chi_buf);
+
+    let mut z_masks = SecretBuffer(vec![[Tower128::ZERO; 2]; t]);
+    if t > 1 {
+        let mut r = 0;
+        while r < t {
+            let mut s0 = Tower128::ZERO;
+            let mut s1 = Tower128::ZERO;
+            let mut q = 0;
+            while q < (t - 1) {
+                let u0 = party_rngs[r].next_tower128();
+                let u1 = party_rngs[r].next_tower128();
+                z_masks[q][0] = z_masks[q][0].add(u0);
+                z_masks[q][1] = z_masks[q][1].add(u1);
+                s0 = s0.add(u0);
+                s1 = s1.add(u1);
+                q += 1;
+            }
+            z_masks[t - 1][0] = z_masks[t - 1][0].add(s0);
+            z_masks[t - 1][1] = z_masks[t - 1][1].add(s1);
+            r += 1;
+        }
+    }
+
+    let mut sigmas = SecretBuffer(Vec::with_capacity(t));
+    let mut sig_salts = SecretBuffer(Vec::with_capacity(t));
+    let mut sig_coms = Vec::with_capacity(t);
+    for q in 0..t {
+        let d0 = m_folded[q][0].add(alpha_shares[q][0].mul(x_folded[0]));
+        let d1 = m_folded[q][1].add(alpha_shares[q][1].mul(x_folded[1]));
+        let sig_q = [
+            d0.mul_gf256(lambdas_0[q]).add(z_masks[q][0]),
+            d1.mul_gf256(lambdas_0[q]).add(z_masks[q][1]),
+        ];
+        let salt = party_rngs[q].next_bytes32();
+        let q_be = (q as u64).to_be_bytes();
+        let s0_b = sig_q[0].0.to_le_bytes();
+        let s1_b = sig_q[1].0.to_le_bytes();
+        let com = cshake256_32(
+            b"QSAG.SPDZ.KECCAK.PEND.MAC.COM/v1",
+            &encode_multi_frame(&[session_id, phase.as_bytes(), &q_be, &s0_b, &s1_b, &salt]),
+        );
+        sigmas.push(sig_q);
+        sig_salts.push(salt);
+        sig_coms.push(com);
+    }
+    for z in z_masks.iter_mut() {
+        wipe_tower128(z);
+    }
+    for m in m_folded.iter_mut() {
+        wipe_tower128(m);
+    }
+
+    let mut sum0 = Tower128::ZERO;
+    let mut sum1 = Tower128::ZERO;
+    for q in 0..t {
+        let q_be = (q as u64).to_be_bytes();
+        let s0_b = sigmas[q][0].0.to_le_bytes();
+        let s1_b = sigmas[q][1].0.to_le_bytes();
+        let exp = cshake256_32(
+            b"QSAG.SPDZ.KECCAK.PEND.MAC.COM/v1",
+            &encode_multi_frame(&[
+                session_id,
+                phase.as_bytes(),
+                &q_be,
+                &s0_b,
+                &s1_b,
+                &sig_salts[q],
+            ]),
+        );
+        wipe_bytes32(&mut sig_salts[q]);
+        if !ct_eq_bytes32(&exp, &sig_coms[q]) {
+            return Err(PreprocessError::ShareCommitMismatch { phase, party_id: q });
+        }
+        sum0 = sum0.add(sigmas[q][0]);
+        sum1 = sum1.add(sigmas[q][1]);
+        wipe_tower128(&mut sigmas[q]);
+    }
+    if !(sum0.ct_eq(Tower128::ZERO) && sum1.ct_eq(Tower128::ZERO)) {
+        return Err(PreprocessError::MacCheckFailed {
+            phase,
+            accused_party: None,
+        });
+    }
+    Ok(())
+}
+
+/// A vault poisoned by an earlier abort has a zeroed MAC key share, so no MAC relation
+/// checked against it means anything. If any vault of the quorum is poisoned, the rest are
+/// poisoned too and the call is refused before anything is evaluated or opened.
+fn spdz_refuse_poisoned_vaults(
+    vaults: &mut [PreprocessedKeccakPartyVault],
+) -> Result<(), KeccakMpcError> {
+    if vaults.iter().any(|v| v.poisoned) {
+        for v in vaults.iter_mut() {
+            v.poison_and_wipe();
+        }
+        return Err(KeccakMpcError::Poisoned);
+    }
+    Ok(())
+}
+
+/// Evaluate one 24-round `Keccak-f[1600]` permutation in dishonest-majority $t$-of-$n$ SPDZ Shamir
+/// over `25` intra-sponge 64-bit `BitslicedGf256x64` lanes (`600` `KeccakBitTripleShare64` words!),
+/// propagating exact 2-lane `Tower128` SPDZ MAC shares across $\theta, \rho, \pi, \chi, \iota$.
+///
+/// On ANY commitment/degree failure, poisons and wipes ALL vaults immediately (`[P0-07]`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the existing explicit protocol interface for callers"
+)]
+pub fn eval_spdz_keccak_f1600_single(
+    session_id: &[u8; 32],
+    perm_ctr: usize,
+    t: usize,
+    quorum_pts: &[TowerGf256],
+    states_sh: &mut [[BitslicedGf256x64; 25]],
+    states_mac: &mut [[[[Tower128; 64]; 2]; 25]],
+    vaults: &mut [PreprocessedKeccakPartyVault],
+    pending_opened: &mut Vec<BitslicedGf256x64>,
+    pending_macs: &mut [Vec<[[Tower128; 64]; 2]>],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), KeccakMpcError> {
+    let m = quorum_pts.len();
+    if t == 0
+        || m < t
+        || states_sh.len() != m
+        || states_mac.len() != m
+        || vaults.len() != m
+        || pending_macs.len() != m
+        || party_rngs.len() != m
+    {
+        return Err(KeccakMpcError::InvalidParameters);
+    }
+    validate_all_eval_points_gf256(quorum_pts)?;
+    spdz_refuse_poisoned_vaults(vaults)?;
+
+    for (rnd, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
+        // 1. Theta + Rho + Pi on shares AND 2-lane `Tower128` SPDZ MACs
+        let mut b_sh = SecretBuffer(vec![[[0u64; 8]; 25]; m]);
+        let mut b_mac = SecretBuffer(vec![[[[Tower128::ZERO; 64]; 2]; 25]; m]);
+
+        for p in 0..m {
+            let mut c_sh = [[0u64; 8]; 5];
+            let mut c_mac = [[[Tower128::ZERO; 64]; 2]; 5];
+            for x in 0..5 {
+                for y in 0..5 {
+                    bs_gf256_xor_assign(&mut c_sh[x], &states_sh[p][x + 5 * y]);
+                    xor_spdz_macs_assign(&mut c_mac[x], &states_mac[p][x + 5 * y]);
+                }
+            }
+            for x in 0..5 {
+                let d_sh = bs_gf256_xor(
+                    &c_sh[(x + 4) % 5],
+                    &rotate_bs_gf256_lanes_left(&c_sh[(x + 1) % 5], 1),
+                );
+                let mut d_mac = c_mac[(x + 4) % 5];
+                let rot_m = rotate_spdz_macs_left(&c_mac[(x + 1) % 5], 1);
+                xor_spdz_macs_assign(&mut d_mac, &rot_m);
+
+                for y in 0..5 {
+                    bs_gf256_xor_assign(&mut states_sh[p][x + 5 * y], &d_sh);
+                    xor_spdz_macs_assign(&mut states_mac[p][x + 5 * y], &d_mac);
+                }
+            }
+            for source in 0..25 {
+                let x = source % 5;
+                let y = source / 5;
+                let target = y + 5 * ((2 * x + 3 * y) % 5);
+                let rot = KECCAK_ROTATION_OFFSETS[source];
+                b_sh[p][target] = rotate_bs_gf256_lanes_left(&states_sh[p][source], rot);
+                b_mac[p][target] = rotate_spdz_macs_left(&states_mac[p][source], rot);
+            }
+        }
+
+        // 2. Chi: 25 parallel Beaver AND words (`50` masked words opened in 1 round!)
+        let mut de_sh = SecretBuffer(vec![Vec::with_capacity(50); m]);
+        let mut de_mac = SecretBuffer(vec![Vec::with_capacity(50); m]);
+        let mut round_triples_a = SecretBuffer(vec![[[0u64; 8]; 25]; m]);
+        let mut round_triples_b = SecretBuffer(vec![[[0u64; 8]; 25]; m]);
+        let mut round_triples_c = SecretBuffer(vec![[[0u64; 8]; 25]; m]);
+        let mut round_mac_a = SecretBuffer(vec![[[[Tower128::ZERO; 64]; 2]; 25]; m]);
+        let mut round_mac_b = SecretBuffer(vec![[[[Tower128::ZERO; 64]; 2]; 25]; m]);
+        let mut round_mac_c = SecretBuffer(vec![[[[Tower128::ZERO; 64]; 2]; 25]; m]);
+
+        for lane in 0..25 {
+            let x = lane % 5;
+            let y = lane / 5;
+            let u_lane = 5 * y + ((x + 1) % 5);
+            let v_lane = 5 * y + ((x + 2) % 5);
+
+            for p in 0..m {
+                let alpha_p = vaults[p].mac_alpha_lanes;
+                let tr = match vaults[p].pop_triple() {
+                    Ok(t_ref) => t_ref,
+                    Err(e) => {
+                        for v in vaults.iter_mut() {
+                            v.poison_and_wipe();
+                        }
+                        return Err(KeccakMpcError::Preprocess(e));
+                    }
+                };
+                round_triples_a[p][lane] = tr.a;
+                round_triples_b[p][lane] = tr.b;
+                round_triples_c[p][lane] = tr.c;
+                round_mac_a[p][lane] = tr.a_mac;
+                round_mac_b[p][lane] = tr.b_mac;
+                round_mac_c[p][lane] = tr.c_mac;
+
+                let mut not_u_sh = b_sh[p][u_lane];
+                let mut not_u_mac = b_mac[p][u_lane];
+                add_public_u64_to_spdz_word(u64::MAX, &mut not_u_sh, &mut not_u_mac, &alpha_p);
+
+                let d_w = bs_gf256_xor(&not_u_sh, &round_triples_a[p][lane]);
+                let mut d_m = not_u_mac;
+                xor_spdz_macs_assign(&mut d_m, &round_mac_a[p][lane]);
+
+                let e_w = bs_gf256_xor(&b_sh[p][v_lane], &round_triples_b[p][lane]);
+                let mut e_m = b_mac[p][v_lane];
+                xor_spdz_macs_assign(&mut e_m, &round_mac_b[p][lane]);
+
+                de_sh[p].push(d_w);
+                de_sh[p].push(e_w);
+                de_mac[p].push(d_m);
+                de_mac[p].push(e_m);
+            }
+        }
+
+        let de_opened = match commit_and_open_beaver_de_batch(
+            session_id,
+            perm_ctr * 24 + rnd,
+            t,
+            quorum_pts,
+            &de_sh,
+            &de_mac,
+            pending_opened,
+            pending_macs,
+            party_rngs,
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                for v in vaults.iter_mut() {
+                    v.poison_and_wipe();
+                }
+                return Err(KeccakMpcError::Preprocess(e));
+            }
+        };
+
+        for lane in 0..25 {
+            let d_pub = &de_opened[2 * lane];
+            let e_pub = &de_opened[2 * lane + 1];
+            let de_pub = bs_gf256_mul_planes_ct(d_pub, e_pub);
+
+            for p in 0..m {
+                let db = bs_gf256_mul_planes_ct(d_pub, &round_triples_b[p][lane]);
+                let ea = bs_gf256_mul_planes_ct(e_pub, &round_triples_a[p][lane]);
+                // Note: `de_pub` is a public `BitslicedGf256x64` constant (plane 0..7), added identically
+                // to every party's Shamir share (`f(X) = de_pub` has degree 0)!
+                let mut prod_sh = bs_gf256_xor(&round_triples_c[p][lane], &db);
+                bs_gf256_xor_assign(&mut prod_sh, &ea);
+                bs_gf256_xor_assign(&mut prod_sh, &de_pub);
+
+                let alpha_p = vaults[p].mac_alpha_lanes;
+                let mut prod_mac = round_mac_c[p][lane];
+                for ml in 0..2 {
+                    for bit in 0..64 {
+                        let term = round_mac_b[p][lane][ml][bit]
+                            .mul_gf256(bs_gf256_extract_lane(d_pub, bit))
+                            .add(
+                                round_mac_a[p][lane][ml][bit]
+                                    .mul_gf256(bs_gf256_extract_lane(e_pub, bit)),
+                            )
+                            .add(alpha_p[ml].mul_gf256(bs_gf256_extract_lane(&de_pub, bit)));
+                        prod_mac[ml][bit] = prod_mac[ml][bit].add(term);
+                    }
+                }
+
+                states_sh[p][lane] = bs_gf256_xor(&b_sh[p][lane], &prod_sh);
+                states_mac[p][lane] = b_mac[p][lane];
+                xor_spdz_macs_assign(&mut states_mac[p][lane], &prod_mac);
+
+                wipe_u64s(&mut round_triples_a[p][lane]);
+                wipe_u64s(&mut round_triples_b[p][lane]);
+                wipe_u64s(&mut round_triples_c[p][lane]);
+            }
+        }
+
+        // 3. Iota: XOR public round constant `rc` into lane `0`
+        for p in 0..m {
+            let alpha_p = vaults[p].mac_alpha_lanes;
+            add_public_u64_to_spdz_word(rc, &mut states_sh[p][0], &mut states_mac[p][0], &alpha_p);
+        }
+    }
+    Ok(())
+}
+
+/// Bit positions of one `Keccak-f[1600]` state in the instance-bitsliced layout.
+const SPDZ_BATCH_POSITIONS: usize = 1600;
+
+/// Evaluate 64 independent 24-round `Keccak-f[1600]` permutations in dishonest-majority
+/// $t$-of-$n$ SPDZ Shamir, bitsliced across sponge instances.
+///
+/// `states_sh[p][lane * 64 + z]` holds party `p`'s `TowerGf256` Shamir shares of state bit
+/// `(lane, z)` for all 64 instances (bit `i` of plane `k` is bit `k` of instance `i`'s share), and
+/// `states_mac[p][lane * 64 + z][l][i]` the matching lane-`l` MAC share of instance `i`.
+/// - Theta, rho and pi are word XORs and index moves on shares and MAC shares alike.
+/// - Chi consumes `1600` 64-way Beaver triple words per round, so one bit of every triple word
+///   serves one instance, and opens all `3200` masked words of the round in one
+///   commit-then-open step shared by the 64 instances.
+/// - Every opened word and its MAC shares are appended to `pending_opened` / `pending_macs`;
+///   the caller must pass the batched `MacCheck` before any output share is revealed.
+///
+/// On ANY commitment/degree failure, poisons and wipes ALL vaults immediately (`[P0-07]`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Same explicit protocol interface as the single-instance evaluator"
+)]
