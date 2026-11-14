@@ -116,6 +116,7 @@ pub enum PolicyViolation {
     TimestampOutsideWindow,
     WindowIdMismatch,
     DuplicateIntentNonce,
+    ReplayWindowExhausted,
     UnauthenticatedInitiator,
     RecipientNotAllowlisted,
     SingleTxCapExceeded,
@@ -577,6 +578,7 @@ impl PolicySignerGuardShare {
         self.poisoned
     }
 
+    #[cfg(test)]
     pub fn set_require_authenticated_initiator(&mut self, required: bool) {
         self.require_authenticated_initiator = required;
     }
@@ -602,7 +604,8 @@ impl PolicySignerGuardShare {
     }
 
     /// Roll the guard into a strictly newer velocity window (`next_window_id > current_window_id`),
-    /// resetting spend while permanently retaining nonce and session replay protection.
+    /// resetting spend and replay sets. Every intent binds its window ID; old-window
+    /// intents remain invalid after rotation. Each window admits at most 256 intents.
     pub fn advance_velocity_window(
         &mut self,
         authorization: &WindowAdvanceAuthorization,
@@ -641,6 +644,10 @@ impl PolicySignerGuardShare {
             }
         }
         self.current_window_id = next_window_id;
+        self.burned_intent_nonces.clear();
+        self.burned_sessions.clear();
+        self.min_nonce_watermark = None;
+        self.min_session_watermark = None;
         self.accumulated_window_spend = 0;
         Ok(())
     }
@@ -755,6 +762,10 @@ impl PolicySignerGuardShare {
         if self.is_nonce_burned(&intent.nonce) || self.is_session_burned(session_id) {
             return Err(PolicyViolation::DuplicateIntentNonce);
         }
+        if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
+            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES {
+            return Err(PolicyViolation::ReplayWindowExhausted);
+        }
         let effective_prior = self
             .accumulated_window_spend
             .max(intent.rolling_window_spent)
@@ -807,6 +818,13 @@ impl PolicySignerGuardShare {
         nonce: [u8; 32],
         session_id: [u8; 32],
     ) -> Result<(), PolicyViolation> {
+        if self.is_nonce_burned(&nonce) || self.is_session_burned(&session_id) {
+            return Err(PolicyViolation::DuplicateIntentNonce);
+        }
+        if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
+            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES {
+            return Err(PolicyViolation::ReplayWindowExhausted);
+        }
         let amount = projected_spend
             .checked_sub(self.accumulated_window_spend)
             .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
@@ -832,8 +850,7 @@ impl PolicySignerGuardShare {
         }
         self.velocity_generation = generation;
         self.accumulated_window_spend = projected_spend;
-        // Keep a bounded sparse window above a permanent lexicographic floor.
-        // Evicted values remain burned forever, including across velocity windows.
+        // Retain every nonce in this authenticated window, without ordering random values.
         for (values, floor, value) in [
             (
                 &mut self.burned_intent_nonces,
@@ -849,9 +866,7 @@ impl PolicySignerGuardShare {
             values.push(value);
             values.sort_unstable();
             values.dedup();
-            if values.len() > MAX_BURNED_INTENT_NONCES {
-                *floor = Some(values.remove(0));
-            }
+            *floor = None;
         }
         Ok(())
     }
@@ -1403,6 +1418,10 @@ impl SharedWindowSpendLedger {
             return Err(PolicyViolation::LedgerPersistenceFailed);
         }
         self.current_window_id = next_window_id;
+        self.burned_intent_nonces.clear();
+        self.burned_sessions.clear();
+        self.min_nonce_watermark = None;
+        self.min_session_watermark = None;
         self.accumulated_window_spend = 0;
         Ok(())
     }
@@ -1424,6 +1443,10 @@ impl SharedWindowSpendLedger {
         }
         if self.is_nonce_burned(&intent.nonce) || self.is_session_burned(session_id) {
             return Err(PolicyViolation::DuplicateIntentNonce);
+        }
+        if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
+            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES {
+            return Err(PolicyViolation::ReplayWindowExhausted);
         }
         let effective_prior = self
             .accumulated_window_spend
@@ -1450,6 +1473,13 @@ impl SharedWindowSpendLedger {
         nonce: [u8; 32],
         session_id: [u8; 32],
     ) -> Result<(), PolicyViolation> {
+        if self.is_nonce_burned(&nonce) || self.is_session_burned(&session_id) {
+            return Err(PolicyViolation::DuplicateIntentNonce);
+        }
+        if self.burned_intent_nonces.len() >= MAX_BURNED_INTENT_NONCES
+            || self.burned_sessions.len() >= MAX_BURNED_INTENT_NONCES {
+            return Err(PolicyViolation::ReplayWindowExhausted);
+        }
         let generation = self
             .generation
             .checked_add(1)
@@ -1490,9 +1520,7 @@ impl SharedWindowSpendLedger {
             values.push(value);
             values.sort_unstable();
             values.dedup();
-            if values.len() > MAX_BURNED_INTENT_NONCES {
-                *floor = Some(values.remove(0));
-            }
+            *floor = None;
         }
         Ok(())
     }
@@ -3013,8 +3041,8 @@ mod tests {
         let guard = restored.verified_velocity.as_ref().unwrap();
         assert_eq!(guard.spent_units(), 9);
         assert_eq!(guard.last_nonce(), 5);
-        assert!(restored.is_nonce_burned(&[1; 32]));
-        assert!(restored.is_session_burned(&[2; 32]));
+        assert!(!restored.is_nonce_burned(&[1; 32]));
+        assert!(!restored.is_session_burned(&[2; 32]));
     }
 
     fn raw_test_guards(entropy: [u8; 32], ids: &[u16]) -> Vec<PolicySignerGuardShare> {
@@ -3068,6 +3096,57 @@ mod tests {
     }
 
     #[test]
+    fn signer_verified_guard_survives_approvals_rotation_and_checkpoint() {
+        use PolicyViolation::VelocityCapOverflowOrExceeded as OverCap;
+        let mut guards = raw_test_guards([9; 32], &[1, 2]);
+        let guard = &mut guards[0];
+        assert!(guard.verified_velocity.is_none());
+        guard.record_approved_intent(50, 7, [1; 32], [2; 32]).unwrap();
+        guard.record_approved_intent(50, 30, [3; 32], [4; 32]).unwrap();
+        let v = guard.verified_velocity.as_ref().unwrap();
+        assert_eq!((v.cap_units(), v.spent_units(), v.last_nonce()), (50, 30, 2));
+        // Over the pinned cap: refused, nothing recorded or burned.
+        assert_eq!(
+            guard.record_approved_intent(50, 51, [5; 32], [6; 32]),
+            Err(OverCap)
+        );
+        assert_eq!(guard.accumulated_window_spend(), 30);
+        assert!(!guard.is_nonce_burned(&[5; 32]));
+        // A cap below what is already spent cannot be pinned; the old guard stays.
+        assert_eq!(
+            guard.record_approved_intent(20, 30, [5; 32], [6; 32]),
+            Err(OverCap)
+        );
+        assert_eq!(guard.verified_velocity.as_ref().unwrap().cap_units(), 50);
+        // Rotation keeps the guard and its request nonce and resets the spend.
+        guard
+            .advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1))
+            .unwrap();
+        let v = guard.verified_velocity.as_ref().unwrap();
+        assert_eq!((v.window_id(), v.spent_units(), v.last_nonce()), (1, 0, 2));
+        guard.record_approved_intent(50, 9, [7; 32], [8; 32]).unwrap();
+        // A freshly provisioned guard recovers the verified state from the checkpoint.
+        let bytes = guard.export_durable_checkpoint(&[7; 32], 5);
+        let mut fresh = raw_test_guards([9; 32], &[1, 2]);
+        fresh[0]
+            .restore_from_durable_checkpoint(&bytes, &[7; 32], 5)
+            .unwrap();
+        let v = fresh[0].verified_velocity.as_ref().unwrap();
+        assert_eq!(
+            (v.window_id(), v.cap_units(), v.spent_units(), v.last_nonce()),
+            (1, 50, 9, 3)
+        );
+        assert_eq!(
+            fresh[0].record_approved_intent(50, 51, [9; 32], [10; 32]),
+            Err(OverCap)
+        );
+        fresh[0]
+            .record_approved_intent(50, 50, [9; 32], [10; 32])
+            .unwrap();
+        assert_eq!(fresh[0].verified_velocity.as_ref().unwrap().last_nonce(), 4);
+    }
+
+    #[test]
     fn initiator_authentication_is_default() {
         assert!(
             super::trusted_dealer_setup_for_testing([8; 32], &[1, 2])
@@ -3076,41 +3155,23 @@ mod tests {
         );
     }
     #[test]
-    fn bounded_replay_window_never_reaccepts_evicted_nonces() {
+    fn bounded_replay_window_retains_random_nonces_until_authenticated_rotation() {
         let mut guards = raw_test_guards([9; 32], &[1, 2]);
         let guard = &mut guards[0];
-        for i in 0u32..600 {
-            let mut nonce = [0; 32];
-            nonce[28..].copy_from_slice(&i.to_be_bytes());
-            guard
-                .record_approved_intent(u128::MAX, i as u128, nonce, nonce)
-                .unwrap();
+        let nonces: Vec<_> = (0u32..256).map(|i|
+            cshake256_framed_32(b"nonce test", &[&i.to_be_bytes()])).collect();
+        for (i, nonce) in nonces.iter().enumerate() {
+            assert!(!guard.is_nonce_burned(nonce));
+            guard.record_approved_intent(u128::MAX, i as u128, *nonce, *nonce).unwrap();
         }
-        for i in 0u32..600 {
-            let mut nonce = [0; 32];
-            nonce[28..].copy_from_slice(&i.to_be_bytes());
-            assert!(guard.is_nonce_burned(&nonce));
-            assert!(guard.is_session_burned(&nonce));
-        }
-        let checkpoint = guard.export_durable_checkpoint(&[7; 32], 600);
-        guard
-            .restore_from_durable_checkpoint(&checkpoint, &[7; 32], 600)
-            .unwrap();
-        let mut older = raw_test_guards([9; 32], &[1, 2]);
-        for i in 0u32..100 {
-            let mut nonce = [0; 32];
-            nonce[28..].copy_from_slice(&i.to_be_bytes());
-            older[0]
-                .record_approved_intent(u128::MAX, i as u128, nonce, nonce)
-                .unwrap();
-        }
-        older[0]
-            .restore_from_durable_checkpoint(&checkpoint, &[7; 32], 600)
-            .unwrap();
-        guard
-            .advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1))
-            .unwrap();
-        assert!(guard.is_nonce_burned(&[0; 32]));
+        for nonce in &nonces { assert!(guard.is_nonce_burned(nonce)); }
+        assert_eq!(guard.record_approved_intent(u128::MAX, 256, [0; 32], [0; 32]),
+            Err(PolicyViolation::ReplayWindowExhausted));
+        let checkpoint = guard.export_durable_checkpoint(&[7; 32], 256);
+        guard.restore_from_durable_checkpoint(&checkpoint, &[7; 32], 256).unwrap();
+        guard.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1)).unwrap();
+        assert!(!guard.is_nonce_burned(&[0; 32]));
+        guard.record_approved_intent(u128::MAX, 1, [0; 32], [0; 32]).unwrap();
     }
 
     use alloc::format;
