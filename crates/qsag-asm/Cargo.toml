@@ -1,0 +1,15 @@
+[package]
+name = "qsag-asm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Zero-dependency SIMD assembly kernels with scoped Lean ISA proofs, binary audits, and empirical timing tests"
+
+[features]
+default = ["std"]
+std = []
+
+[[example]]
+name = "ct_dudect"
+required-features = ["std"]
