@@ -2,8 +2,12 @@
 //! (`#![no_std]`, `#![forbid(unsafe_code)]`, 0 external deps).
 
 use qsag_verified::{
-    bdoz_commit_masked_tag, bdoz_fold_masked_value, cshake256_32, ct_eq_bytes32,
-    decode_fips205_adrs, derive_jorts_det_r_rand, dkg_beaver_frobenius_eval_gf256,
+    BdozCommittedBatchOpening2Lane, BdozVerifierSession2Lane, BdozWireOpening2Lane, EpochLatch,
+    EpochLatchError, EpochRequest, EpochSignRequest, Fips205Adrs, Fips205AdrsType,
+    GOLDILOCKS_PRIME, Gf16, Gf256, Goldilocks, GoldilocksExt2, LastBoundEpoch, RssShare64,
+    RssZeroSeeds64, Shake256Sponge, Tower128, Tower256, bdoz_commit_masked_tag,
+    bdoz_fold_masked_value, cshake256_32, ct_eq_bytes32, decode_fips205_adrs,
+    derive_jorts_det_r_rand, dkg_beaver_frobenius_eval_gf256,
     dkg_beaver_frobenius_share_shamir_gf256, dkg_verify_key_shares_boolean_bdoz_gf256,
     dkg_verify_shamir_2of3_key_bit_gf256, embed_gf256_to_tower128, encode_fips205_adrs,
     epoch_latch_advance, fips205_f, fips205_wots_chain, fips205_wots_checksum, gf16_add, gf16_mul,
@@ -13,14 +17,10 @@ use qsag_verified::{
     goldilocks_mul, goldilocks_pow7, goldilocks_sub, keccak_f1600, rss_and_gate,
     rss_keccak_chi_lane, rss_not, rss_reconstruct, rss_xor, shake256_32,
     shamir_degree_reduce_2of3_gf256, shamir_eval_poly_gf256, shamir_eval_poly_goldilocks,
-    shamir_lagrange_at_zero_gf256, shamir_lagrange_at_zero_goldilocks, shamir_validate_points_gf256,
-    tower128_add, tower128_mul, tower256_add, tower256_mul, tsw_canonical_target_sum,
-    tsw_check_target_sum, verify_mac_2lane, verify_mac_2lane_with_burn, wots_checksum_base16,
-    wots_extract_base16_digits, BdozCommittedBatchOpening2Lane, BdozVerifierSession2Lane,
-    BdozWireOpening2Lane, EpochLatch, EpochLatchError, EpochRequest,
-    EpochSignRequest, Fips205Adrs, Fips205AdrsType, Gf16, Gf256, Goldilocks, GoldilocksExt2,
-    LastBoundEpoch, RssShare64, RssZeroSeeds64, Shake256Sponge, Tower128, Tower256,
-    GOLDILOCKS_PRIME,
+    shamir_lagrange_at_zero_gf256, shamir_lagrange_at_zero_goldilocks,
+    shamir_validate_points_gf256, tower128_add, tower128_mul, tower256_add, tower256_mul,
+    tsw_canonical_target_sum, tsw_check_target_sum, verify_mac_2lane, verify_mac_2lane_with_burn,
+    wots_checksum_base16, wots_extract_base16_digits,
 };
 
 fn make_honest_bdoz_batch(
@@ -67,10 +67,9 @@ fn test_cshake256_nist_sp800_185_kat() {
     // First 32 bytes of the official 512-bit output (cSHAKE output is prefix-consistent).
     // https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Standards-and-Guidelines/documents/examples/cSHAKE_samples.pdf
     let expected = [
-        0xd0, 0x08, 0x82, 0x8e, 0x2b, 0x80, 0xac, 0x9d,
-        0x22, 0x18, 0xff, 0xee, 0x1d, 0x07, 0x0c, 0x48,
-        0xb8, 0xe4, 0xc8, 0x7b, 0xff, 0x32, 0xc9, 0x69,
-        0x9d, 0x5b, 0x68, 0x96, 0xee, 0xe0, 0xed, 0xd1,
+        0xd0, 0x08, 0x82, 0x8e, 0x2b, 0x80, 0xac, 0x9d, 0x22, 0x18, 0xff, 0xee, 0x1d, 0x07, 0x0c,
+        0x48, 0xb8, 0xe4, 0xc8, 0x7b, 0xff, 0x32, 0xc9, 0x69, 0x9d, 0x5b, 0x68, 0x96, 0xee, 0xe0,
+        0xed, 0xd1,
     ];
     assert_eq!(cshake256_32(b"Email Signature", &[0, 1, 2, 3]), expected);
 }
@@ -123,7 +122,10 @@ fn test_goldilocks_branchless_and_ext2_field_laws() {
     assert!(goldilocks_from_canonical(GOLDILOCKS_PRIME).is_err());
     assert!(goldilocks_from_canonical(u64::MAX).is_err());
     assert_eq!(goldilocks_canon(0), Goldilocks(0));
-    assert_eq!(goldilocks_canon(GOLDILOCKS_PRIME - 1), Goldilocks(GOLDILOCKS_PRIME - 1));
+    assert_eq!(
+        goldilocks_canon(GOLDILOCKS_PRIME - 1),
+        Goldilocks(GOLDILOCKS_PRIME - 1)
+    );
     assert_eq!(goldilocks_canon(GOLDILOCKS_PRIME), Goldilocks(0));
     assert_eq!(goldilocks_canon(GOLDILOCKS_PRIME + 1), Goldilocks(1));
     assert_eq!(
@@ -131,7 +133,10 @@ fn test_goldilocks_branchless_and_ext2_field_laws() {
         Goldilocks(u64::MAX - GOLDILOCKS_PRIME)
     );
     assert_eq!(goldilocks_inv_or_zero(Goldilocks(0)), Goldilocks(0));
-    assert_eq!(goldilocks_inv_or_zero(Goldilocks(GOLDILOCKS_PRIME)), Goldilocks(0));
+    assert_eq!(
+        goldilocks_inv_or_zero(Goldilocks(GOLDILOCKS_PRIME)),
+        Goldilocks(0)
+    );
 
     let samples = [
         0u64,
@@ -358,10 +363,23 @@ fn test_fips205_adrs_wots_and_tsw() {
 #[test]
 fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     // Full-set 0..n Shamir point validation
-    assert!(shamir_validate_points_gf256(&[Gf256(1), Gf256(2), Gf256(3), Gf256(4)]));
+    assert!(shamir_validate_points_gf256(&[
+        Gf256(1),
+        Gf256(2),
+        Gf256(3),
+        Gf256(4)
+    ]));
     assert!(!shamir_validate_points_gf256(&[]));
-    assert!(!shamir_validate_points_gf256(&[Gf256(1), Gf256(2), Gf256(0)]));
-    assert!(!shamir_validate_points_gf256(&[Gf256(1), Gf256(2), Gf256(2)]));
+    assert!(!shamir_validate_points_gf256(&[
+        Gf256(1),
+        Gf256(2),
+        Gf256(0)
+    ]));
+    assert!(!shamir_validate_points_gf256(&[
+        Gf256(1),
+        Gf256(2),
+        Gf256(2)
+    ]));
 
     // Exhaustive 2-of-3 Shamir DKG Frobenius Booleanity check over ALL 256 secrets!
     let pts3 = [Gf256(1), Gf256(2), Gf256(3)];
@@ -469,7 +487,10 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
         shamir_eval_poly_gf256(&poly_gf, pts_gf[1]),
         shamir_eval_poly_gf256(&poly_gf, pts_gf[2]),
     ];
-    assert_eq!(shamir_lagrange_at_zero_gf256(&pts_gf, &sh_gf), Some(poly_gf[0]));
+    assert_eq!(
+        shamir_lagrange_at_zero_gf256(&pts_gf, &sh_gf),
+        Some(poly_gf[0])
+    );
 
     let poly_a = [Gf256(0x13), Gf256(0x77)];
     let poly_b = [Gf256(0x29), Gf256(0xB4)];
@@ -596,24 +617,28 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     let mut drifted_r = r0;
     drifted_r[0] ^= 1;
     assert_eq!(
-        bound_epoch0().acquire_or_retry(EpochSignRequest {
-            requested_epoch: 0,
-            key_epoch_id: key_id,
-            msg_digest: msg_a,
-            deterministic_r_rand: drifted_r,
-        }).err(),
+        bound_epoch0()
+            .acquire_or_retry(EpochSignRequest {
+                requested_epoch: 0,
+                key_epoch_id: key_id,
+                msg_digest: msg_a,
+                deterministic_r_rand: drifted_r,
+            })
+            .err(),
         Some(EpochLatchError::RetryRandomizerMismatch { epoch: 0 })
     );
 
     // 4. Equivocation attempt on epoch 0 with msg_b MUST fail!
     let r0_b = derive_jorts_det_r_rand(&sk_prf, &key_id, 0, &msg_b);
     assert_eq!(
-        bound_epoch0().acquire_or_retry(EpochSignRequest {
-            requested_epoch: 0,
-            key_epoch_id: key_id,
-            msg_digest: msg_b,
-            deterministic_r_rand: r0_b,
-        }).err(),
+        bound_epoch0()
+            .acquire_or_retry(EpochSignRequest {
+                requested_epoch: 0,
+                key_epoch_id: key_id,
+                msg_digest: msg_b,
+                deterministic_r_rand: r0_b,
+            })
+            .err(),
         Some(EpochLatchError::EpochEquivocationAttempt { epoch: 0 })
     );
 
@@ -631,12 +656,17 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     assert!(!g1.is_idempotent_retry);
     assert_eq!(st2.next_epoch(), 2);
 
-    let bound_epoch1 = || bound_epoch0().acquire_or_retry(EpochSignRequest {
-        requested_epoch: 1,
-        key_epoch_id: key_id,
-        msg_digest: msg_b,
-        deterministic_r_rand: r1,
-    }).unwrap().0;
+    let bound_epoch1 = || {
+        bound_epoch0()
+            .acquire_or_retry(EpochSignRequest {
+                requested_epoch: 1,
+                key_epoch_id: key_id,
+                msg_digest: msg_b,
+                deterministic_r_rand: r1,
+            })
+            .unwrap()
+            .0
+    };
 
     // 6. Replay of sealed epoch 0 MUST fail once epoch 1 is active!
     assert_eq!(
@@ -650,12 +680,14 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
     // 7. Tree exhaustion at epoch 2 (max_epoch = 2)
     let r2 = derive_jorts_det_r_rand(&sk_prf, &key_id, 2, &msg_a);
     assert_eq!(
-        bound_epoch1().acquire_or_retry(EpochSignRequest {
-            requested_epoch: 2,
-            key_epoch_id: key_id,
-            msg_digest: msg_a,
-            deterministic_r_rand: r2,
-        }).err(),
+        bound_epoch1()
+            .acquire_or_retry(EpochSignRequest {
+                requested_epoch: 2,
+                key_epoch_id: key_id,
+                msg_digest: msg_a,
+                deterministic_r_rand: r2,
+            })
+            .err(),
         Some(EpochLatchError::TreeExhausted { max_epoch: 2 })
     );
 
@@ -702,36 +734,52 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
             if bound {
                 bound_epoch0()
             } else {
-                epoch_latch_advance(EpochLatch::new(2, key_id), EpochRequest {
-                    requested_epoch: 0, key_epoch_id: key_id,
-                }).unwrap().0
+                epoch_latch_advance(
+                    EpochLatch::new(2, key_id),
+                    EpochRequest {
+                        requested_epoch: 0,
+                        key_epoch_id: key_id,
+                    },
+                )
+                .unwrap()
+                .0
             }
         };
         assert_eq!(
-            epoch_latch_advance(fixture(), EpochRequest {
-                requested_epoch: 1, key_epoch_id: bad_key,
-            }).err(),
+            epoch_latch_advance(
+                fixture(),
+                EpochRequest {
+                    requested_epoch: 1,
+                    key_epoch_id: bad_key,
+                }
+            )
+            .err(),
             Some(EpochLatchError::KeyBindingMismatch)
         );
         for requested_epoch in [0, 2] {
             assert_eq!(
-                epoch_latch_advance(fixture(), EpochRequest {
-                    requested_epoch, key_epoch_id: key_id,
-                }).err(),
-                Some(EpochLatchError::NonSequentialEpoch { expected: 1, requested: requested_epoch })
+                epoch_latch_advance(
+                    fixture(),
+                    EpochRequest {
+                        requested_epoch,
+                        key_epoch_id: key_id,
+                    }
+                )
+                .err(),
+                Some(EpochLatchError::NonSequentialEpoch {
+                    expected: 1,
+                    requested: requested_epoch
+                })
             );
         }
     }
-
-
 }
-
 
 #[test]
 fn test_rss_cut_session_anti_dfa_phase_barrier() {
     use qsag_verified::{
-        compute_rss_mask_commitment, RssCutError, RssCutGateSession, RssCutPhase, RssCutStepInput,
-        RssCutStepOutput,
+        RssCutError, RssCutGateSession, RssCutPhase, RssCutStepInput, RssCutStepOutput,
+        compute_rss_mask_commitment,
     };
 
     let sid = [0x41u8; 32];
@@ -804,8 +852,8 @@ fn test_rss_cut_session_anti_dfa_phase_barrier() {
 #[test]
 fn test_fts_spn_deferred_mac_and_single_use_wots_cs_guard() {
     use qsag_verified::{
-        wots_cs_verify_68_array, wots_cs_verify_68_w5_sum136, FtsDeferredMacSession, FtsEpochGuard,
-        FtsGuardError, FTS_SPN_REQUIRED_ROUNDS,
+        FTS_SPN_REQUIRED_ROUNDS, FtsDeferredMacSession, FtsEpochGuard, FtsGuardError,
+        wots_cs_verify_68_array, wots_cs_verify_68_w5_sum136,
     };
 
     let key_id = [0x11u8; 32];
@@ -845,13 +893,15 @@ fn test_fts_spn_deferred_mac_and_single_use_wots_cs_guard() {
     let out_hi = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10u128;
 
     // Attempting release BEFORE intermediate MAC check MUST quarantine and fail!
-    let unv0 = FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
+    let unv0 =
+        FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
     let (unv1, rel_unv) = unv0.release_spn_output(sid, &balanced);
     assert_eq!(rel_unv, Err(FtsGuardError::IntermediateMacNotVerified));
     assert!(unv1.is_quarantined());
 
     // Non-zero intermediate MAC residual MUST quarantine and block release!
-    let bad0 = FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
+    let bad0 =
+        FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
     let (bad1, mac_err) = bad0.verify_intermediate_mac(sid, 0, 1);
     assert_eq!(mac_err, Err(FtsGuardError::IntermediateMacQuarantined));
     assert!(bad1.is_quarantined());
@@ -859,7 +909,8 @@ fn test_fts_spn_deferred_mac_and_single_use_wots_cs_guard() {
     assert_eq!(rel_after_quarantine, Err(FtsGuardError::SessionQuarantined));
 
     // Honest 48-round + zero MAC residual + valid 68-digit sum=136 releases once!
-    let ok0 = FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
+    let ok0 =
+        FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
     let (ok1, mac_ok) = ok0.verify_intermediate_mac(sid, 0, 0);
     assert_eq!(mac_ok, Ok(()));
     let (ok2, released) = ok1.release_spn_output(sid, &balanced);
@@ -872,10 +923,10 @@ fn test_fts_spn_deferred_mac_and_single_use_wots_cs_guard() {
 #[test]
 fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
     use qsag_verified::{
-        check_hybrid_domain_framing, decode_intent_128, derive_hybrid_transcript_digest,
-        encode_intent_128, CanonicalIntent128, HybridRoleTag, IntentAddressVersion,
-        IntentIdentityKind, IntentSuiteTag, PolicyAddrError, StatefulVelocityGuard,
-        VelocitySpendRequest, SUITE_HYBRID_ED25519_MLDSA65,
+        CanonicalIntent128, HybridRoleTag, IntentAddressVersion, IntentIdentityKind,
+        IntentSuiteTag, PolicyAddrError, SUITE_HYBRID_ED25519_MLDSA65, StatefulVelocityGuard,
+        VelocitySpendRequest, check_hybrid_domain_framing, decode_intent_128,
+        derive_hybrid_transcript_digest, encode_intent_128,
     };
 
     let pol_pin = [0xAAu8; 32];
@@ -1014,22 +1065,30 @@ fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
         &id_c,
         &id_c,
     ));
-    let d_cls =
-        derive_hybrid_transcript_digest(HybridRoleTag::Classical, SUITE_HYBRID_ED25519_MLDSA65, &id_c, &msg_d)
-            .unwrap();
-    let d_pq =
-        derive_hybrid_transcript_digest(HybridRoleTag::PostQuantum, SUITE_HYBRID_ED25519_MLDSA65, &id_c, &msg_d)
-            .unwrap();
+    let d_cls = derive_hybrid_transcript_digest(
+        HybridRoleTag::Classical,
+        SUITE_HYBRID_ED25519_MLDSA65,
+        &id_c,
+        &msg_d,
+    )
+    .unwrap();
+    let d_pq = derive_hybrid_transcript_digest(
+        HybridRoleTag::PostQuantum,
+        SUITE_HYBRID_ED25519_MLDSA65,
+        &id_c,
+        &msg_d,
+    )
+    .unwrap();
     assert_ne!(d_cls, d_pq);
 }
 
 #[test]
 fn test_mldsa_release_gate_toprf_majority_and_hd_zero_test() {
     use qsag_verified::{
-        check_mldsa44_norm_bounds, check_mldsa65_norm_bounds, mldsa44_sample_eta2_nibble_mod_q,
-        toprf_majority_of_3_goldilocks, CredHdGuardError, HdCommittedZeroTest, HdZeroTestPhase,
-        MlDsaBarrierChecks, MlDsaReleaseGate, MLDSA44_R0_NORM_BOUND, MLDSA44_Z_NORM_BOUND,
-        MLDSA65_R0_NORM_BOUND, MLDSA65_Z_NORM_BOUND, MLDSA_Q,
+        CredHdGuardError, HdCommittedZeroTest, HdZeroTestPhase, MLDSA_Q, MLDSA44_R0_NORM_BOUND,
+        MLDSA44_Z_NORM_BOUND, MLDSA65_R0_NORM_BOUND, MLDSA65_Z_NORM_BOUND, MlDsaBarrierChecks,
+        MlDsaReleaseGate, check_mldsa44_norm_bounds, check_mldsa65_norm_bounds,
+        mldsa44_sample_eta2_nibble_mod_q, toprf_majority_of_3_goldilocks,
     };
 
     // 0. FIPS 204 ML-DSA-44 eta=2 uniform nibble rejection (b < 15 -> 2 - (b mod 5) mod q)
@@ -1082,7 +1141,10 @@ fn test_mldsa_release_gate_toprf_majority_and_hd_zero_test() {
         w1_match: true,
         u_com_bound: true,
     });
-    assert_eq!(res_rej, Err(CredHdGuardError::RejectionSamplingBarrierFailed));
+    assert_eq!(
+        res_rej,
+        Err(CredHdGuardError::RejectionSamplingBarrierFailed)
+    );
     assert!(gate_rej1.aborted());
     let (_gate_rej2, res_after_abort) = gate_rej1.try_release_z_share(MlDsaBarrierChecks {
         req_session_id: sid,
@@ -1092,7 +1154,10 @@ fn test_mldsa_release_gate_toprf_majority_and_hd_zero_test() {
         w1_match: true,
         u_com_bound: true,
     });
-    assert_eq!(res_after_abort, Err(CredHdGuardError::GateAbortedOrReleased));
+    assert_eq!(
+        res_after_abort,
+        Err(CredHdGuardError::GateAbortedOrReleased)
+    );
 
     // All 4 barrier predicates true -> releases once, then blocks replay!
     let gate_ok = MlDsaReleaseGate::new_sealed(sid, 4, secret_z);
@@ -1111,7 +1176,10 @@ fn test_mldsa_release_gate_toprf_majority_and_hd_zero_test() {
     let v = GOLDILOCKS_PRIME - 7;
     assert_eq!(toprf_majority_of_3_goldilocks(v, v, v), Some((v, None)));
     assert_eq!(toprf_majority_of_3_goldilocks(99, v, v), Some((v, Some(0))));
-    assert_eq!(toprf_majority_of_3_goldilocks(v, u64::MAX, v), Some((v, Some(1))));
+    assert_eq!(
+        toprf_majority_of_3_goldilocks(v, u64::MAX, v),
+        Some((v, Some(1)))
+    );
     assert_eq!(
         toprf_majority_of_3_goldilocks(v, v, GOLDILOCKS_PRIME),
         Some((v, Some(2)))
@@ -1143,7 +1211,10 @@ fn test_mldsa_release_gate_toprf_majority_and_hd_zero_test() {
     let (hd_bad3, zerr) = hd_bad2.verify_peer_opening(sid, peer_com, peer_res - 1);
     assert_eq!(zerr, Err(CredHdGuardError::HdZeroTestMismatchQuarantined));
     assert!(hd_bad3.family_quarantined());
-    assert!(matches!(hd_bad3.phase(), HdZeroTestPhase::FamilyQuarantined));
+    assert!(matches!(
+        hd_bad3.phase(),
+        HdZeroTestPhase::FamilyQuarantined
+    ));
 
     // Honest freeze -> open -> verify_peer_opening succeeds when (local + peer) % q == 0!
     let hd_ok0 = HdCommittedZeroTest::new_awaiting_peer_commit(sid, local_res, q);
@@ -1160,12 +1231,10 @@ fn test_mldsa_release_gate_toprf_majority_and_hd_zero_test() {
 #[test]
 fn test_pants_and_quorum_guards_kat_and_adversarial() {
     use qsag_verified::{
-        verified_wotsc256_extract_digits,
-        verified_wotsc256_verify_sum, wotsc256_extract_digit,
-        PantsGuardError, RssLatchStepInput, RssLatchStepOutput,
-        RssOpenPermit, VerifiedRssPoisonLatch, VerifiedWaistbandRootGuard,
-        VerifiedWotsC256Guard, WaistbandDerivationRequest, WOTSC256_BASE_W, WOTSC256_CHAINS,
-        WOTSC256_TARGET_SUM,
+        PantsGuardError, RssLatchStepInput, RssLatchStepOutput, RssOpenPermit,
+        VerifiedRssPoisonLatch, VerifiedWaistbandRootGuard, VerifiedWotsC256Guard, WOTSC256_BASE_W,
+        WOTSC256_CHAINS, WOTSC256_TARGET_SUM, WaistbandDerivationRequest,
+        verified_wotsc256_extract_digits, verified_wotsc256_verify_sum, wotsc256_extract_digit,
     };
 
     // =========================================================================
@@ -1246,7 +1315,12 @@ fn test_pants_and_quorum_guards_kat_and_adversarial() {
     let (h2, hchk) = h1.record_check_result(true);
     assert_eq!(hchk, Ok(()));
     let (h3, hopen) = h2.authorize_open();
-    assert_eq!(hopen, Ok(RssOpenPermit { verified_clean: true }));
+    assert_eq!(
+        hopen,
+        Ok(RssOpenPermit {
+            verified_clean: true
+        })
+    );
     let (_h4, hstep_open) = h3.step(RssLatchStepInput::AuthorizeOpen);
     assert_eq!(
         hstep_open,
@@ -1282,30 +1356,21 @@ fn test_pants_and_quorum_guards_kat_and_adversarial() {
     // Corrupted intermediate child root fails closed and poisons!
     let mut bad_root_req = honest_req;
     bad_root_req.recomputed_child_root[0] ^= 0xFF;
-    let (wb_bad, bad_res) = VerifiedWaistbandRootGuard::new_enrolled(
-        pk_tag,
-        params_tag,
-        3,
-        77,
-        5,
-        child_root,
-    )
-    .authorize_ancestor_derivation(bad_root_req);
-    assert_eq!(bad_res.err(), Some(PantsGuardError::WaistbandChildRootMismatch));
+    let (wb_bad, bad_res) =
+        VerifiedWaistbandRootGuard::new_enrolled(pk_tag, params_tag, 3, 77, 5, child_root)
+            .authorize_ancestor_derivation(bad_root_req);
+    assert_eq!(
+        bad_res.err(),
+        Some(PantsGuardError::WaistbandChildRootMismatch)
+    );
     assert!(wb_bad.is_poisoned());
 
     // Mismatched cache params tag fails closed and poisons!
     let mut bad_params_req = honest_req;
     bad_params_req.cache_params_tag[31] ^= 1;
-    let (wb_bad_p, bad_p_res) = VerifiedWaistbandRootGuard::new_enrolled(
-        pk_tag,
-        params_tag,
-        3,
-        77,
-        5,
-        child_root,
-    )
-    .authorize_ancestor_derivation(bad_params_req);
+    let (wb_bad_p, bad_p_res) =
+        VerifiedWaistbandRootGuard::new_enrolled(pk_tag, params_tag, 3, 77, 5, child_root)
+            .authorize_ancestor_derivation(bad_params_req);
     assert_eq!(
         bad_p_res.err(),
         Some(PantsGuardError::WaistbandCacheParamsMismatch)

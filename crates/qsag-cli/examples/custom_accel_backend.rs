@@ -4,7 +4,7 @@
 //! cargo run --release -p qsag-cli --example custom_accel_backend
 //! ```
 //!
-//! 1. Implements `AcceleratorBackend` for a stand-in SPIR-V backend (`KernelTargetArch::SpirV16`).
+//! 1. Implements `AcceleratorBackend` for a stand-in SPIR-V backend (`KernelTargetArch::SpirV15`).
 //! 2. Pins each kernel artifact (`CertifiedKernelPin`) and registers the approved profile.
 //! 3. Shows that an unmeasured backend and a tampered artifact are both rejected, while
 //!    loader-measured pins that match the registry are accepted.
@@ -18,7 +18,7 @@ use qsag_accel::{
     VerifiedKernelDigestRegistry, merkle_layer_output_digest, spot_check_merkle_layer,
 };
 
-/// Example custom SPIR-V 1.6 compute backend delegating arithmetic to `CpuReferenceBackend`
+/// Example custom SPIR-V 1.5 compute backend delegating arithmetic to `CpuReferenceBackend`
 /// while pinning distinct shader binary artifacts per `KernelSlot`.
 struct SimulatedSpirvBackend {
     pins: [CertifiedKernelPin; KernelSlot::COUNT],
@@ -30,7 +30,7 @@ impl SimulatedSpirvBackend {
         let pins = core::array::from_fn(|idx| {
             CertifiedKernelPin::from_kernel_artifact(
                 KernelSlot::ALL[idx],
-                KernelTargetArch::SpirV16,
+                KernelTargetArch::SpirV15,
                 blobs[idx],
             )
         });
@@ -43,7 +43,7 @@ impl SimulatedSpirvBackend {
 
 impl AcceleratorBackend for SimulatedSpirvBackend {
     fn target_arch(&self) -> KernelTargetArch {
-        KernelTargetArch::SpirV16
+        KernelTargetArch::SpirV15
     }
 
     fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
@@ -118,14 +118,14 @@ fn main() {
     let approved_pins: [CertifiedKernelPin; KernelSlot::COUNT] = core::array::from_fn(|i| {
         CertifiedKernelPin::from_kernel_artifact(
             KernelSlot::ALL[i],
-            KernelTargetArch::SpirV16,
+            KernelTargetArch::SpirV15,
             approved_shaders[i],
         )
     });
     let mut registry = VerifiedKernelDigestRegistry::<4>::with_cpu_reference_pins();
     registry
-        .register_measured_profile(KernelTargetArch::SpirV16, approved_pins)
-        .expect("registering approved SPIR-V 1.6 kernel profile must succeed");
+        .register_measured_profile(KernelTargetArch::SpirV15, approved_pins)
+        .expect("registering approved SPIR-V 1.5 kernel profile must succeed");
 
     // 2. Negative checks: non-CPU backends require independent loader measurements, and tampered
     //    shader binaries fail with `PinMismatch` on the exact corrupted `KernelSlot`.
@@ -142,7 +142,7 @@ fn main() {
     tampered_loader_pins[KernelSlot::MerkleLayerPoseidon2 as usize] =
         CertifiedKernelPin::from_kernel_artifact(
             KernelSlot::MerkleLayerPoseidon2,
-            KernelTargetArch::SpirV16,
+            KernelTargetArch::SpirV15,
             b"SPIRV16::TAMPERED_MERKLE_SHADER.spv",
         );
     let rogue = CertifiedBackend::try_new_measured(

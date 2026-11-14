@@ -66,6 +66,10 @@ pub enum AccelError {
         pin: KernelSlot,
         descriptor: KernelSlot,
     },
+    /// The backend refused a secret-bearing kernel slot because it holds no driver evidence
+    /// (required subgroup size, zero scratch, zero spills) for its compiled pipelines. Nothing
+    /// was sent to the device.
+    SecretSlotUnaudited { slot: KernelSlot },
 }
 
 impl core::fmt::Display for AccelError {
@@ -94,6 +98,10 @@ impl core::fmt::Display for AccelError {
                 f,
                 "kernel pin is for slot {pin:?} but the job descriptor is for slot {descriptor:?}"
             ),
+            Self::SecretSlotUnaudited { slot } => write!(
+                f,
+                "backend has no pipeline audit evidence and refuses secret-bearing slot {slot:?}"
+            ),
         }
     }
 }
@@ -108,10 +116,23 @@ pub enum KernelTargetArch {
     CpuReference = 0x01,
     /// Certified RDNA2 / RDNA3 Wave32 ISA compute kernel.
     Rdna2Wave32 = 0x02,
-    /// Certified Vulkan / WebGPU SPIR-V 1.6 compute shader module.
-    SpirV16 = 0x03,
+    // 0x03 is retired. It was issued as `SpirV16` for modules whose header says SPIR-V 1.5;
+    // pins and receipts carrying it must not verify against anything current.
     /// Certified FPGA / ASIC fixed-function datapath.
     CustomHardware = 0x04,
+    /// Certified Vulkan SPIR-V 1.5 compute shader module (header version word `0x0001_0500`).
+    SpirV15 = 0x05,
+}
+
+impl KernelTargetArch {
+    /// The SPIR-V header version word (module word 1) this label asserts, if it is a SPIR-V
+    /// label at all.
+    pub const fn spirv_version_word(self) -> Option<u32> {
+        match self {
+            Self::SpirV15 => Some(0x0001_0500),
+            Self::CpuReference | Self::Rdna2Wave32 | Self::CustomHardware => None,
+        }
+    }
 }
 
 /// Enumerates the 6 certified batch compute kernels in [`AcceleratorBackend`].
@@ -343,7 +364,7 @@ impl ExecutionReceipt {
             chunk.copy_from_slice(&limb.to_le_bytes());
         }
         cshake256_framed_32(
-            b"QSAG.ACCEL.KEYED_RECEIPT.V3",
+            b"QSAG.ACCEL.KEYED_RECEIPT.V4",
             &[
                 key.key.expose(),
                 &self.backend_id,
@@ -413,6 +434,14 @@ pub trait AcceleratorBackend: Send + Sync {
 
     /// Certified kernel pin for `slot`.
     fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin;
+
+    /// Number of infallible batch calls ([`Self::batch_keccak_f1600`],
+    /// [`Self::batch_poseidon2_perm12`]) that this backend answered with the CPU reference
+    /// because its own kernel failed. A caller that times or reports hardware execution through
+    /// the infallible methods reads this before and after; the `_pinned` variants never fall back.
+    fn cpu_fallback_count(&self) -> u64 {
+        0
+    }
 
     /// Parallel 24-round `Keccak-f[1600]` across `states` (accelerating WOTS+/FORS/FTS chains & OT).
     fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]);
@@ -658,7 +687,7 @@ impl AcceleratorBackend for CpuReferenceBackend {
 }
 
 /// Fixed-capacity `#![no_std]` registry pinning SHA-256 & Poseidon2 digests of certified
-/// CPU, RDNA2 Wave32, and SPIR-V 1.6 GPU compute kernels (`MAX_PROFILES` architectures).
+/// CPU, RDNA2 Wave32, and SPIR-V 1.5 GPU compute kernels (`MAX_PROFILES` architectures).
 #[derive(Clone, Debug)]
 pub struct VerifiedKernelDigestRegistry<const MAX_PROFILES: usize = 4> {
     profiles: [Option<(KernelTargetArch, [CertifiedKernelPin; KernelSlot::COUNT])>; MAX_PROFILES],
@@ -708,11 +737,11 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
     }
 
     /// Registry pre-populated with both the portable CPU reference profile and the deterministic
-    /// embedded `KernelTargetArch::SpirV16` compute shader pins (`MAX_PROFILES >= 2`).
+    /// embedded `KernelTargetArch::SpirV15` compute shader pins (`MAX_PROFILES >= 2`).
     pub fn with_cpu_and_spirv_pins() -> Self {
         let mut reg = Self::with_cpu_reference_pins();
         let _ = reg.register_arch_pins(
-            KernelTargetArch::SpirV16,
+            KernelTargetArch::SpirV15,
             spirv_kernels::canonical_spirv_pins(),
         );
         reg
@@ -871,6 +900,9 @@ impl<B: AcceleratorBackend> AcceleratorBackend for CertifiedBackend<B> {
     }
     fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
         self.inner.kernel_pin(slot)
+    }
+    fn cpu_fallback_count(&self) -> u64 {
+        self.inner.cpu_fallback_count()
     }
     fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]) {
         self.inner.batch_keccak_f1600(states);
@@ -1362,13 +1394,140 @@ mod tests {
             );
         }
         let mut wrong_arch = good;
-        wrong_arch.arch = KernelTargetArch::SpirV16;
+        wrong_arch.arch = KernelTargetArch::SpirV15;
         assert_eq!(
             reg.verify_keyed_receipt(&wrong_arch, &key),
             Err(KernelRegistryError::UnsupportedTargetArch(
-                KernelTargetArch::SpirV16
+                KernelTargetArch::SpirV15
             ))
         );
+    }
+
+    #[test]
+    fn spirv_label_names_the_embedded_header_version_and_retires_the_old_byte() {
+        assert_eq!(KernelTargetArch::SpirV15 as u8, 0x05);
+        for arch in [
+            KernelTargetArch::CpuReference,
+            KernelTargetArch::Rdna2Wave32,
+            KernelTargetArch::CustomHardware,
+            KernelTargetArch::SpirV15,
+        ] {
+            assert_ne!(
+                arch as u8, 0x03,
+                "{arch:?} reuses the retired SPIR-V 1.6 byte"
+            );
+        }
+        for slot in KernelSlot::ALL {
+            let bytes = spirv_kernels::spirv_kernel_bytes(slot);
+            let version = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+            let pin = spirv_kernels::canonical_spirv_pin(slot);
+            assert_eq!(pin.target_arch, KernelTargetArch::SpirV15);
+            assert_eq!(
+                pin.target_arch.spirv_version_word(),
+                Some(version),
+                "{slot:?}: pin label disagrees with the module header"
+            );
+        }
+        assert_eq!(KernelTargetArch::CpuReference.spirv_version_word(), None);
+    }
+
+    #[test]
+    fn receipt_issued_under_the_previous_domain_no_longer_verifies() {
+        let reg = VerifiedKernelDigestRegistry::<4>::default();
+        let key = BackendAttestationKey::derive(&[29; 32], b"backend-a");
+        let good = sample_receipt(&key);
+        assert_eq!(reg.verify_keyed_receipt(&good, &key), Ok(()));
+
+        let mut p2_bytes = [0u8; 32];
+        for (chunk, limb) in p2_bytes.chunks_exact_mut(8).zip(&good.kernel_poseidon2) {
+            chunk.copy_from_slice(&limb.to_le_bytes());
+        }
+        let mac_under = |domain: &[u8]| {
+            cshake256_framed_32(
+                domain,
+                &[
+                    key.key.expose(),
+                    &good.backend_id,
+                    good.descriptor.slot().algorithm_domain(),
+                    &[good.arch as u8],
+                    &good.descriptor.to_canonical_bytes(),
+                    &good.kernel_sha256,
+                    &p2_bytes,
+                    &good.transcript_anchor,
+                    &good.input_digest,
+                    &good.output_digest,
+                ],
+            )
+        };
+        // The field layout below is the live one, so only the domain differs from a V3 receipt.
+        assert_eq!(mac_under(b"QSAG.ACCEL.KEYED_RECEIPT.V4"), good.mac);
+        let mut old = good;
+        old.mac = mac_under(b"QSAG.ACCEL.KEYED_RECEIPT.V3");
+        assert_eq!(
+            reg.verify_keyed_receipt(&old, &key),
+            Err(KernelRegistryError::ReceiptAuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn cpu_fallback_count_defaults_to_zero_and_survives_certification() {
+        struct Counting(u64);
+        impl AcceleratorBackend for Counting {
+            fn target_arch(&self) -> KernelTargetArch {
+                KernelTargetArch::CpuReference
+            }
+            fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
+                CpuReferenceBackend::canonical_pin(slot)
+            }
+            fn cpu_fallback_count(&self) -> u64 {
+                self.0
+            }
+            fn batch_keccak_f1600(&self, s: &mut [[u64; 25]]) {
+                CpuReferenceBackend.batch_keccak_f1600(s);
+            }
+            fn batch_poseidon2_perm12(&self, s: &mut [[u64; 12]]) {
+                CpuReferenceBackend.batch_poseidon2_perm12(s);
+            }
+            fn goldilocks_ntt_inplace(
+                &self,
+                b: &mut [u64],
+                t: &[u64],
+                i: bool,
+            ) -> Result<(), AccelError> {
+                CpuReferenceBackend.goldilocks_ntt_inplace(b, t, i)
+            }
+            fn coset_lde_ext2(
+                &self,
+                e: &[[u64; 2]],
+                b: usize,
+                s: u64,
+                o: &mut [[u64; 2]],
+            ) -> Result<(), AccelError> {
+                CpuReferenceBackend.coset_lde_ext2(e, b, s, o)
+            }
+            fn try_merkle_layer_poseidon2_at(
+                &self,
+                c: &[[u64; 4]],
+                k: &[u64; 4],
+                l: u32,
+                i: u64,
+                o: &mut [[u64; 4]],
+            ) -> Result<(), AccelError> {
+                CpuReferenceBackend.try_merkle_layer_poseidon2_at(c, k, l, i, o)
+            }
+            fn bdoz_gf2_128_batch_dot(
+                &self,
+                s: &[(u128, u128)],
+                w: &[(u128, u128)],
+            ) -> Result<(u128, u128), AccelError> {
+                CpuReferenceBackend.bdoz_gf2_128_batch_dot(s, w)
+            }
+        }
+
+        assert_eq!(CpuReferenceBackend.cpu_fallback_count(), 0);
+        let reg = VerifiedKernelDigestRegistry::<4>::default();
+        let certified = CertifiedBackend::try_new(Counting(7), &reg).expect("cpu-pinned mock");
+        assert_eq!(certified.cpu_fallback_count(), 7);
     }
 
     #[test]

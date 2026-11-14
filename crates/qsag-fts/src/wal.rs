@@ -38,7 +38,13 @@ fn private_file(path: &Path) -> io::Result<OpenOptions> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
         #[cfg(target_os = "linux")]
-        opts.custom_flags(if cfg!(any(target_arch = "aarch64", target_arch = "arm")) { 0x8000 } else { 0x20000 } | 0x800); // O_NOFOLLOW | O_NONBLOCK
+        opts.custom_flags(
+            if cfg!(any(target_arch = "aarch64", target_arch = "arm")) {
+                0x8000
+            } else {
+                0x20000
+            } | 0x800,
+        ); // O_NOFOLLOW | O_NONBLOCK
         #[cfg(target_os = "macos")]
         opts.custom_flags(0x0100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
     }
@@ -46,7 +52,9 @@ fn private_file(path: &Path) -> io::Result<OpenOptions> {
 }
 fn file_identity(file: &File) -> io::Result<[u8; 16]> {
     let metadata = file.metadata()?;
-    if !metadata.is_file() { return Err(invalid()); }
+    if !metadata.is_file() {
+        return Err(invalid());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -246,14 +254,22 @@ impl super::frontier::FtsEpochWal for FsWalFtsEpochLatch {
         }
         let mut used = 0u8;
         for &(party, epoch) in &self.0.entries {
-            if party != 0 || epoch != u64::from(used) { return Err(super::FrontierFtsError::PersistenceFailed); }
-            used = used.checked_add(1).ok_or(super::FrontierFtsError::PersistenceFailed)?;
+            if party != 0 || epoch != u64::from(used) {
+                return Err(super::FrontierFtsError::PersistenceFailed);
+            }
+            used = used
+                .checked_add(1)
+                .ok_or(super::FrontierFtsError::PersistenceFailed)?;
         }
         Ok(used)
     }
     fn reserve_use(&mut self, key: &[u8; 32], next: u8) -> Result<(), super::FrontierFtsError> {
-        if next == 0 || self.uses_completed(key)? != next - 1 { return Err(super::FrontierFtsError::PersistenceFailed); }
-        self.0.reserve(key, 0, u64::from(next - 1)).map_err(|_| super::FrontierFtsError::PersistenceFailed)
+        if next == 0 || self.uses_completed(key)? != next - 1 {
+            return Err(super::FrontierFtsError::PersistenceFailed);
+        }
+        self.0
+            .reserve(key, 0, u64::from(next - 1))
+            .map_err(|_| super::FrontierFtsError::PersistenceFailed)
     }
 }
 
@@ -262,8 +278,14 @@ mod tests {
     use super::*;
     #[test]
     fn copied_journal_cannot_create_second_authority() {
-        let path = std::env::temp_dir().join(std::format!("burn-copy-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let path = std::env::temp_dir().join(std::format!(
+            "burn-copy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let copy = path.with_extension("copy");
         let mut original = DurableBurnJournal::create(&path, [1; 32], [2; 32]).unwrap();
         original.reserve(&[1; 32], 1, 0).unwrap();
@@ -277,8 +299,24 @@ mod tests {
 
     #[test]
     fn frontier_use_is_burned_across_regeneration() {
-        let path = std::env::temp_dir().join(std::format!("frontier-restart-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let make = || crate::FrontierFtsSigningKey::keygen(crate::FrontierFtsProfile::Fast256Test, [1; 32], [2; 32], [3; 32], true, &qsag_accel::CpuReferenceBackend);
+        let path = std::env::temp_dir().join(std::format!(
+            "frontier-restart-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let make = || {
+            crate::FrontierFtsSigningKey::keygen(
+                crate::FrontierFtsProfile::Fast256Test,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                true,
+                &qsag_accel::CpuReferenceBackend,
+            )
+        };
         let key = make();
         let id = key.wal_key();
         let wal = FsWalFtsEpochLatch::create(&path, id, [8; 32]).unwrap();
@@ -289,20 +327,43 @@ mod tests {
         drop(key);
         let wal = FsWalFtsEpochLatch::open(&path, id, [8; 32]).unwrap();
         let mut key = make().attach_wal(alloc::boxed::Box::new(wal)).unwrap();
-        assert_eq!(key.sign(&dp, b"second", &[0; 32]), Err(crate::FrontierFtsError::UseBudgetExhausted));
+        assert_eq!(
+            key.sign(&dp, b"second", &[0; 32]),
+            Err(crate::FrontierFtsError::UseBudgetExhausted)
+        );
         drop(key);
         fs::remove_file(path).unwrap();
     }
 
     #[test]
     fn frontier_recovers_vault_reservation_before_wal_append() {
-        let path = std::env::temp_dir().join(std::format!("frontier-gap-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let make = || crate::FrontierFtsSigningKey::keygen(crate::FrontierFtsProfile::Compact770, [1; 32], [2; 32], [3; 32], true, &qsag_accel::CpuReferenceBackend);
+        let path = std::env::temp_dir().join(std::format!(
+            "frontier-gap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let make = || {
+            crate::FrontierFtsSigningKey::keygen(
+                crate::FrontierFtsProfile::Compact770,
+                [1; 32],
+                [2; 32],
+                [3; 32],
+                true,
+                &qsag_accel::CpuReferenceBackend,
+            )
+        };
         let id = make().wal_key();
         drop(FsWalFtsEpochLatch::create(&path, id, [8; 32]).unwrap());
         // Simulate a crash after the vault committed use 1, before the WAL did.
         let wal = FsWalFtsEpochLatch::open(&path, id, [8; 32]).unwrap();
-        let key = make().resume_at(1).unwrap().attach_wal(alloc::boxed::Box::new(wal)).unwrap();
+        let key = make()
+            .resume_at(1)
+            .unwrap()
+            .attach_wal(alloc::boxed::Box::new(wal))
+            .unwrap();
         assert_eq!(key.uses_completed(), 1);
         drop(key);
         let wal = FsWalFtsEpochLatch::open(&path, id, [8; 32]).unwrap();
@@ -312,7 +373,10 @@ mod tests {
         let signature = key.sign(&dp, b"after recovery", &[0; 32]).unwrap();
         crate::verify_frontier_fts(&key.pk, &dp, b"after recovery", &signature).unwrap();
         assert_eq!(key.uses_completed(), 2);
-        assert_eq!(key.sign(&dp, b"exhausted", &[0; 32]), Err(crate::FrontierFtsError::UseBudgetExhausted));
+        assert_eq!(
+            key.sign(&dp, b"exhausted", &[0; 32]),
+            Err(crate::FrontierFtsError::UseBudgetExhausted)
+        );
         drop(key);
         fs::remove_file(path).unwrap();
     }

@@ -1,5 +1,7 @@
 # qsag engineering status
 
+The integrated main-library axiom audit checks **59,257 declarations, including 28,744 kernel theorem declarations, across 57 modules**, with **0 rejected axioms**. This includes private and compiler-generated declarations and 277 pure assurance-infrastructure declarations; 131 compile-time tactic declarations are excluded. Counts describe the checked definitions and premises, not complete production refinement. The combined extracted-MIR and custody audit checks **5,318 declarations / 2,093 theorems / 44 contributing modules**; the WHIR audit checks **1,558 / 718 / 7**. Both report **0 rejected axioms**. Sandboxed six-kernel challenge replay passes 107 main theorems and 65 MIR theorems plus 17 definitions.
+
 **qsag — Quorum-Switching AGgregation / Quantum Succinct AGgregation**
 
 This ledger distinguishes implemented mechanisms from integrated assurance. The project has 14 Rust packages with zero external crates.io dependencies: 12 root workspace packages plus `aeneas/qsag-verified` and `aeneas/qsag-whir-verified` extraction workspaces. Libraries support `no_std`; the CLI and host adapters require `std`. See the [README crate map](README.md#workspace-crate-map) for paths and public entrypoints.
@@ -21,11 +23,10 @@ This ledger distinguishes implemented mechanisms from integrated assurance. The 
 | `qsag-addr` | Bech32m QsagAddress and canonical HybridPinnedEnvelope | Bind suite, identity role, HRP and pinned key; address parsing alone is not ownership proof. |
 | `qsag-policy` | Authenticated rolling-window BDOZ custody guard, nonce/spend state and durable checkpoints | Real-time caps require a trusted clock/epoch authority and durable reservation before release. |
 | `qsag-cred` | Threshold ML-DSA-44, 2-of-5 Poseidon2 TOPRF, six-limb BlindVC with 438-repetition Quantum128 default | ML-DSA active quorum is 2t-1; rejection transcript privacy remains heuristic. Quantum128 is a profile, not an unconditional end-to-end security theorem. |
-| `qsag-migrate` | Three-custodian co-ZK ownership migration for secp256k1/Taproot/Ed25519; mandatory active pre-open Boolean and prime-field multiplication checks | Live ZKBoo default is 438 repetitions. Large-prime / cubic-Goldilocks active checks have bounds <2^-249 / <2^-186 respectively; full FS/QROM extraction and production privacy refinement remain open. |
+| `qsag-migrate` | Three-custodian co-ZK ownership migration for secp256k1/Taproot/Ed25519; mandatory active pre-open Boolean and prime-field multiplication checks | Live ZKBoo default is 438 repetitions. Large-prime / cubic-Goldilocks active checks have per-flush bounds <2^-249 / <2^-186 respectively; full FS/QROM extraction and production privacy refinement remain open. |
 | `qsag-accel` | AcceleratorBackend, CPU reference and six Linux/std Vulkan kernels, keyed cSHAKE256 receipts | A keyed receipt authenticates a computation report; it is not hardware remote attestation. |
 | `qsag-cli` | File-based keygen/sign/verify, addresses, aggregation, policy demo, KATs and seven examples | Local demos are not distributed deployment; README commands are checked separately from formal assurance. |
 | `qsag-verified` | Charon/Aeneas MIR extraction and QsagMirProofs over arithmetic, sponges and custody guards | Separate workspace; live core/policy/quorum dependency. Fresh extraction and complete release mediation remain obligations. |
-
 | `qsag-whir-verified` | Extracted WHIR arithmetic called by aggregation | Fresh extraction and protocol-level composition remain release checks. |
 
 ## Assurance architecture and remaining integration
@@ -49,7 +50,7 @@ The constructive proof discipline is **0 sorry / 0 Classical.choice**, permitted
 | Transport and policy | Authenticated confidential channels, consistent broadcast, reconnect replay protection and authoritative policy epoch advancement. RAM/loopback timings do not establish these. |
 | Artifact linkage | Fresh extraction, both proof-workspace audits, complete theorem/import coverage, linked binary and dispatch closure, native hardware checks and required CI dependencies. |
 
-[ASSURANCE.md](ASSURANCE.md) states the threat models and TCB; [security proof guide](docs/SECURITY_AND_CT_PROOFS.md) maps the claims to source modules. No formal suite was rerun merely to update this ledger.
+[ASSURANCE.md](ASSURANCE.md) states the threat models and TCB; [security proof guide](docs/SECURITY_AND_CT_PROOFS.md) maps the claims to source modules. Integrated checks and remaining failures are tracked below and in the convergence record.
 
 ## Documentation quickstart validation
 
@@ -73,23 +74,27 @@ build output was removed after validation.
 
 Documentation owner: Astra. Reconciled 2026-11-14 against the live source and the claims blueprint. Parameter truth is centralized in [the security proof guide](docs/SECURITY_AND_CT_PROOFS.md#current-parameter-and-theorem-map). Production Cargo linkage is present for both extraction crates. Named advances include signed-monomial extraction, GS interpolation/factor/list algebra, adaptive unitary query bounds, multi-ledger crash/interleaving safety, multi-turn guard reachability, real-spec field/Keccak bridges, arbitrary BDOZ batches, five SydTV looping kernels and decoded SIMD fixtures. Fresh proof closure and exact release artifacts remain integration checks.
 
-The inspected RX 6750 XT / RADV NAVI22 raw run uses Vulkan 1.3.289, RADV 24.2.8, PCI 1002:73df, one warmed sample per workload and `CpuReferenceBackend`. Timed GPU calls include submission and host transfers. All six output comparisons passed; the receipt verified; 13 submissions were recorded. All six pipelines reported Wave32 and zero scratch. Raw-log SHA-256: `c33c8856ef15dea3b8667e75fdcafee5e173721911e87b29cb13ab8594e5e777`. This identifies the inspected audit artifact, not the current source revision.
+The integrated 2026-11-14 RX 6750 XT / RADV NAVI22 run uses Vulkan 1.3.289, RADV 24.2.8, one warmed sample per workload and `CpuReferenceBackend`. Timed GPU calls include submission and host transfers. All six outputs were bit-exact; the keyed receipt verified; 13 submissions were recorded. All pipelines reported Wave32, zero scratch, and zero VGPR/SGPR spills. Raw-log SHA-256: `9b128cfaa2e5904e5121732d8a79ecd1f99ce01f369b732aa39104e08a6d4fe8`.
 
-| Workload | Raw audit GPU ms | Raw audit CPU ms | Recorded ratio | Later hardening report GPU / CPU ms |
-| --- | ---: | ---: | ---: | ---: |
-| Poseidon2-12, 262,144 permutations | 22.11 | 3027.45 | 136.9× | 21.35 / 1822 |
-| Keccak-f[1600], 262,144 permutations | 21.49 | 76.14 | 3.5× | 20.04 / 67 |
-| Goldilocks NTT, 2^20 | 10.02 | 183.41 | 18.3× | 12.29 / 161 |
-| CosetLdeExt2, 2^18 → 2^20 | 11.97 | 581.34 | 48.6× | 10.95 / 476 |
-| Poseidon2 Merkle, 2^20 leaves | 39.45 | 14184.10 | 359.5× | 35.38 / 7185 |
-| BDOZ GF(2^128) dot, 262,144 pairs | 8.65 | 746.83 | 86.3× | 6.30 / 71 |
+| Workload | GPU ms | CPU reference ms | Paired ratio |
+| --- | ---: | ---: | ---: |
+| Poseidon2-12, 262,144 permutations | 27.38 | 2138.08 | 78.1× |
+| Keccak-f[1600], 262,144 permutations | 29.67 | 104.30 | 3.5× |
+| Goldilocks NTT, 2^20 | 21.40 | 246.24 | 11.5× |
+| CosetLdeExt2, 2^18 → 2^20 | 15.96 | 819.54 | 51.4× |
+| Poseidon2 Merkle, 2^20 leaves | 38.77 | 7930.78 | 204.6× |
+| BDOZ GF(2^128) dot, 262,144 pairs | 6.25 | 68.90 | 11.0× |
 
-The later 2026-11-14 GPU deputy report includes twiddle validation, staging/VRAM scrubbing and spill telemetry, and reports 29 unit + 3 integration tests passing on RADV. Its single shared-host timing sample is a separate run. No timing ratio here establishes full Hem GPU acceleration. The default AMDVLK loader reported Wave64 and was rejected; the tested audited path selects RADV.
-
-The requested earlier figures—Merkle 19.03 ms / 432.1×; Poseidon2 12.50 ms / 173.0×; Ext2 LDE 8.32 ms / 65.9×; NTT 6.94 ms / 26.6×; BDOZ 4.34 ms / 17.5×; Keccak 19.27 ms / 4.1×—have no original raw record in the inspected evidence. Preserve them as reported historical figures pending recovery of source revision, comparator, timing boundaries and driver record; do not substitute them for the raw run above.
+These are single shared-host samples, not distributions or whole-prover measurements. Historical reports, including Merkle 19.03 ms / 432.1× and Poseidon2 12.50 ms / 173.0×, do not describe this run. The tested path explicitly selects RADV; unaudited Wave64 is rejected by the audited constructor and every BDOZ call.
 
 `quorum_threaded_bench.rs` implements `ConfidentialWireChannel<TcpEndpoint>` Encrypt-then-MAC AEAD with real filesystem WAL/poison/seed-ledger fsync paths. The requested ext4 figures (QS-A 2-of-3 **4.37 ms**, QS-B 3-of-7 **5.21 ms**) are reported measurements whose raw execution record was not recovered here. Existing ~1.0 ms Jorts / ~0.56 ms QS-A RAM/loopback measurements remain separately scoped; offline staging, WAN latency and durable operations cannot be inferred from them.
+
+The integrated mock runs exited 0. Alpenglow's 64-signer Habr24Qrom128 checkpoint took 4097.03 ms to prove and 8.36 ms to verify (227,470 bytes). Beam's 4×32 classical workload took 5699.04 / 45.14 ms (445,436 bytes). Its 4×32 Jorts Habr24Qrom128 workload took 5859.42 ms to prove and a 75.42 ms median to verify (864,124 bytes); the mixed 72-validator workload took 5049.91 / 76.56 ms (886,856 bytes). Beam's 8 ms verification target was missed in every regime, and proving missed 4 seconds in every regime. Successful execution does not mean those timing targets passed.
 
 The [consensus scaling analysis](docs/QUORUM_AND_CONSENSUS_SCALING.md) distinguishes the Alpenglow and Beam mock workloads from live integrations. Hierarchical Hem retains child evidence and binds registry, epoch, quorum and disjointness. The mocks establish neither 150 ms finality nor a measured <8 ms Beam verifier or million-validator recursive proof.
 
 Remaining C-06 publication inputs: recover the historical GPU and durable-quorum raw records; bind source-changing proof claims to the final integrated build/axiom/import/replay artifacts; remeasure end-to-end Hem on GPU. These are evidence tasks, not permission barriers. The requested bimodal M≈1.08 claim is superseded by the inspected live Gaussian rejection parameter M≈24; the two migration active-field errors must remain separate from generic Grover accounting.
+
+The post-convergence run explicitly enabled and passed the production base-OT roundtrip/replay test. Dense-PCG depth-14/15 checks also passed; the full-height FIPS 205 threshold/KAT/distributed-TSW soak passed in 42.99 seconds. The three-party MASCOT soak did not finish within its 900-second bound (exit 124); it is not a passing result. These test results do not close the unvalidated dense-code security assumption.
+
+Final post-convergence workspace acceptance: 608 tests passed, zero failed and 12 ignored across 33 suites; formatting, no-default-feature checking and clippy with warnings denied pass. The ignored three-party MASCOT soak was separately attempted and timed out; ignored tests are not silently counted as successes.

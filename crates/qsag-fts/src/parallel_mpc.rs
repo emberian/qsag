@@ -251,10 +251,17 @@ impl ParallelSeededPartyShare {
     }
     fn poison(&mut self) {
         self.poisoned = true;
+        self.clear_pending_openings();
+    }
+    fn clear_pending_openings(&mut self) {
+        // The authenticated wire wipes itself when dropped.
+        for (opened, _) in &mut self.pending_openings {
+            ct_zeroize_u128s(core::slice::from_mut(opened));
+        }
         self.pending_openings.clear();
     }
     fn erase(&mut self) {
-        self.pending_openings.clear();
+        self.clear_pending_openings();
         ct_zeroize_u128s(&mut self.sk_seed_lanes);
         for m in &mut self.sk_seed_macs {
             ct_zeroize_u128s(m);
@@ -758,6 +765,25 @@ fn mpc_algebraic_step(
         *y = auth_xor(y, v);
     }
     Ok((state0, state1))
+}
+
+/// Clears every party's pending masked openings when an opening attempt ends,
+/// whether it returned a value, returned an error or unwound.
+struct PendingOpeningsGuard<'a>(&'a mut [ParallelSeededPartyShare]);
+impl Drop for PendingOpeningsGuard<'_> {
+    fn drop(&mut self) {
+        for sh in self.0.iter_mut() {
+            sh.clear_pending_openings();
+        }
+    }
+}
+
+/// One party's MAC shares for a batch of wires, wiped when dropped.
+struct MacSharePairs(Vec<(u128, u128)>);
+impl Drop for MacSharePairs {
+    fn drop(&mut self) {
+        crate::release_gate::wipe_pairs(&mut self.0);
+    }
 }
 
 /// Complete public tree cache + threshold shares for `ParallelSeededFts`.
@@ -1288,19 +1314,51 @@ impl ParallelSeededThresholdSetup {
         injected_fault: Option<(usize, usize, u128)>,
         accel: &B,
     ) -> Result<Vec<u128>, ParallelSeededError> {
+        let params = self.pk.params;
+        Self::open_and_verify_shares(
+            &mut self.shares,
+            &params,
+            session_id,
+            round_tag,
+            wires,
+            signature_codeword,
+            injected_fault,
+            accel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_and_verify_shares<B: AcceleratorBackend>(
+        shares: &mut [ParallelSeededPartyShare],
+        params: &ParallelSeededParams,
+        session_id: &[u8; 32],
+        round_tag: u32,
+        wires: &[Vec<AuthWire128>],
+        signature_codeword: Option<&[u8]>,
+        injected_fault: Option<(usize, usize, u128)>,
+        accel: &B,
+    ) -> Result<Vec<u128>, ParallelSeededError> {
+        // Declared first, so it is dropped last: every exit below clears the
+        // pending openings after the MAC rounds have released their shares.
+        let pending_guard = PendingOpeningsGuard(shares);
+        let shares = &mut *pending_guard.0;
+
         let mut combined = Vec::new();
-        let pending_count = self.shares[0].pending_openings.len();
-        if self
-            .shares
+        let pending_count = shares
+            .first()
+            .ok_or(ParallelSeededError::BdozMacCheckFailed)?
+            .pending_openings
+            .len();
+        if shares
             .iter()
             .any(|s| s.pending_openings.len() != pending_count)
         {
             return Err(ParallelSeededError::BdozMacCheckFailed);
         }
         for index in 0..pending_count {
-            let opened = self.shares[0].pending_openings[index].0;
+            let opened = shares[0].pending_openings[index].0;
             combined.push(
-                self.shares
+                shares
                     .iter()
                     .enumerate()
                     .map(|(party, sh)| {
@@ -1313,10 +1371,12 @@ impl ParallelSeededThresholdSetup {
         }
         if pending_count != 0 {
             // Verify masked intermediate openings before accessing output shares.
-            for sh in &mut self.shares {
-                sh.pending_openings.clear();
+            for sh in shares.iter_mut() {
+                sh.clear_pending_openings();
             }
-            self.open_and_verify_bdoz_wires(
+            Self::open_and_verify_shares(
+                shares,
+                params,
                 session_id,
                 round_tag ^ 0x8000_0000,
                 &combined,
@@ -1326,12 +1386,13 @@ impl ParallelSeededThresholdSetup {
             )?;
         }
         let num_wires = wires.len();
-        let n = self.shares.len();
+        let n = shares.len();
         let rt_be = round_tag.to_be_bytes();
 
         // Candidate wire opening (`\tilde{w}_k = \bigoplus_{p=0..n} candidate_val[p][k]`).
-        let mut tilde_vals = vec![0u128; num_wires];
-        let mut tilde_digest_input = Vec::with_capacity(num_wires * 16);
+        // The buffer owns every encoding of the candidates and wipes them on any exit;
+        // the release gate below takes it by move.
+        let mut candidates = crate::release_gate::OpenedCandidates::with_capacity(num_wires);
         for (w_idx, w_parties) in wires.iter().enumerate() {
             let mut acc = 0u128;
             for (p_idx, aw) in w_parties.iter().enumerate() {
@@ -1344,18 +1405,16 @@ impl ParallelSeededThresholdSetup {
                 }
                 acc ^= v;
             }
-            tilde_vals[w_idx] = acc;
-            tilde_digest_input.extend_from_slice(&acc.to_le_bytes());
+            candidates.push(acc);
         }
         let tilde_digest = cshake256_framed_32(
             b"QSAG.PSFTS.TILDE_DIGEST.V2",
-            &[session_id, &rt_be, &tilde_digest_input],
+            &[session_id, &rt_be, candidates.digest_input()],
         );
 
         // Public Fiat-Shamir random linear combination weights bound to `(session_id, round_tag, tilde_digest)`!
         let mut weights = Vec::with_capacity(num_wires);
-        let mut tilde_pairs = Vec::with_capacity(num_wires);
-        for (w_idx, &tv) in tilde_vals.iter().enumerate() {
+        for w_idx in 0..num_wires {
             let idx_be = (w_idx as u32).to_be_bytes();
             let wr = cshake256_framed_32(
                 b"QSAG.PSFTS.MAC_W.V2",
@@ -1364,23 +1423,26 @@ impl ParallelSeededThresholdSetup {
             let w0 = u128::from_le_bytes(core::array::from_fn(|i| wr[i]));
             let w1 = u128::from_le_bytes(core::array::from_fn(|i| wr[16 + i]));
             weights.push((w0, w1));
-            tilde_pairs.push((tv, tv));
         }
         let tilde_x = accel
-            .bdoz_gf2_128_batch_dot(&tilde_pairs, &weights)
+            .bdoz_gf2_128_batch_dot(candidates.pairs(), &weights)
             .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+        candidates.shed_encodings();
 
         // Phase 1 (Commit ONLY): Every party computes `sigma_i` strictly from its own private struct!
-        let quorum: Vec<_> = self.shares.iter().map(|sh| sh.party_id).collect();
+        let quorum: Vec<_> = shares.iter().map(|sh| sh.party_id).collect();
         let mut barriers = Vec::with_capacity(n);
-        for (p_idx, sh) in self.shares.iter_mut().enumerate() {
-            let party_gammas: Vec<(u128, u128)> = wires
-                .iter()
-                .map(|w_parties| (w_parties[p_idx].mac[0], w_parties[p_idx].mac[1]))
-                .collect();
+        for (p_idx, sh) in shares.iter_mut().enumerate() {
+            let party_gammas = MacSharePairs(
+                wires
+                    .iter()
+                    .map(|w_parties| (w_parties[p_idx].mac[0], w_parties[p_idx].mac[1]))
+                    .collect(),
+            );
             let folded_gamma = accel
-                .bdoz_gf2_128_batch_dot(&party_gammas, &weights)
+                .bdoz_gf2_128_batch_dot(&party_gammas.0, &weights)
                 .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+            drop(party_gammas);
 
             // Private pairwise PRG zero-share `z_i = \bigoplus_{j != i} F(k_{min(i,j), max(i,j)}, sid || rt || tilde_digest)`!
             let mut z0 = 0u128;
@@ -1419,26 +1481,24 @@ impl ParallelSeededThresholdSetup {
             ready.push(barrier.freeze(&commitments)?);
         }
         let openings: Vec<_> = ready.iter().map(MacOpenRound::opening).collect();
-        // Each party holds the candidates in its own gate and releases them only on
-        // the residual it computed from the frozen transcript.
-        let mut released = None;
+        // Every party computes its residual from the frozen transcript before any
+        // gate exists. An error here drops `candidates`, which wipes them.
+        let mut residuals = Vec::with_capacity(n);
         for state in ready {
-            let residual = state.residual(&openings)?;
-            let mut gate = crate::release_gate::OutputGate::hold(
-                &self.pk.params,
-                signature_codeword.is_some(),
-                *session_id,
-                SPN_ROUNDS,
-                tilde_vals.clone(),
-            );
-            gate.verify_mac(residual)?;
-            released = Some(gate.release(signature_codeword.unwrap_or(&[]))?);
+            residuals.push(state.residual(&openings)?);
         }
-        ct_zeroize_u128s(&mut tilde_vals);
-        for sh in &mut self.shares {
-            sh.pending_openings.clear();
-        }
-        released.ok_or(ParallelSeededError::BdozMacCheckFailed)
+        // Each party holds the candidates in its own gate. All gates check their
+        // residual before the first one releases; one refusal destroys every copy.
+        let mut gate = crate::release_gate::QuorumGate::hold(
+            params,
+            signature_codeword.is_some(),
+            *session_id,
+            SPN_ROUNDS,
+            n,
+            candidates,
+        );
+        gate.verify_all(&residuals)?;
+        gate.release(signature_codeword.unwrap_or(&[]))
     }
 }
 
@@ -1630,6 +1690,242 @@ mod power_auth_tests {
             .open_and_verify_bdoz_wires(&[5; 32], 1, &[power], None, None, &accel)
             .unwrap();
         assert_eq!(opened[0], pow7_plain(plain));
+    }
+}
+
+#[cfg(test)]
+mod candidate_custody_tests {
+    use super::*;
+    use crate::release_gate::probe;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use qsag_accel::{
+        AccelError, CertifiedKernelPin, CpuReferenceBackend, KernelSlot, KernelTargetArch,
+    };
+
+    /// CPU reference backend whose BDOZ fold fails on one chosen call.
+    struct FailingFold {
+        fail_on_call: usize,
+        calls: AtomicUsize,
+    }
+    impl FailingFold {
+        fn new(fail_on_call: usize) -> Self {
+            Self {
+                fail_on_call,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+    impl AcceleratorBackend for FailingFold {
+        fn target_arch(&self) -> KernelTargetArch {
+            CpuReferenceBackend.target_arch()
+        }
+        fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
+            CpuReferenceBackend.kernel_pin(slot)
+        }
+        fn batch_keccak_f1600(&self, s: &mut [[u64; 25]]) {
+            CpuReferenceBackend.batch_keccak_f1600(s);
+        }
+        fn batch_poseidon2_perm12(&self, s: &mut [[u64; 12]]) {
+            CpuReferenceBackend.batch_poseidon2_perm12(s);
+        }
+        fn goldilocks_ntt_inplace(
+            &self,
+            b: &mut [u64],
+            t: &[u64],
+            i: bool,
+        ) -> Result<(), AccelError> {
+            CpuReferenceBackend.goldilocks_ntt_inplace(b, t, i)
+        }
+        fn coset_lde_ext2(
+            &self,
+            e: &[[u64; 2]],
+            b: usize,
+            s: u64,
+            o: &mut [[u64; 2]],
+        ) -> Result<(), AccelError> {
+            CpuReferenceBackend.coset_lde_ext2(e, b, s, o)
+        }
+        fn try_merkle_layer_poseidon2_at(
+            &self,
+            c: &[[u64; 4]],
+            p: &[u64; 4],
+            l: u32,
+            s: u64,
+            o: &mut [[u64; 4]],
+        ) -> Result<(), AccelError> {
+            CpuReferenceBackend.try_merkle_layer_poseidon2_at(c, p, l, s, o)
+        }
+        fn bdoz_gf2_128_batch_dot(
+            &self,
+            s: &[(u128, u128)],
+            w: &[(u128, u128)],
+        ) -> Result<(u128, u128), AccelError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == self.fail_on_call {
+                return Err(AccelError::LengthOverflow);
+            }
+            CpuReferenceBackend.bdoz_gf2_128_batch_dot(s, w)
+        }
+    }
+
+    fn setup(parties: usize) -> ParallelSeededThresholdSetup {
+        ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+            ParallelSeededParams {
+                tree_height: 1,
+                winternitz_w: 2,
+                num_chains: 2,
+                target_sum: 1,
+            },
+            parties,
+            [51; 32],
+            [52; 32],
+            &CpuReferenceBackend,
+        )
+        .unwrap()
+    }
+    /// The shared seed lane as one authenticated wire: an opening with no
+    /// masked intermediate openings behind it.
+    fn seed_wire(setup: &ParallelSeededThresholdSetup) -> Vec<AuthWire128> {
+        setup
+            .shares
+            .iter()
+            .map(|s| AuthWire128 {
+                val_sh: s.sk_seed_lanes[0],
+                mac: s.sk_seed_macs[0],
+            })
+            .collect()
+    }
+    fn no_pending(setup: &ParallelSeededThresholdSetup) -> bool {
+        setup.shares.iter().all(|s| s.pending_openings.is_empty())
+    }
+
+    #[test]
+    fn accepted_opening_releases_once_and_wipes_its_working_copies() {
+        let mut setup = setup(3);
+        let wire = seed_wire(&setup);
+        let plain = wire.iter().fold(0, |acc, w| acc ^ w.val_sh);
+        probe::reset();
+        let opened = setup
+            .open_and_verify_bdoz_wires(&[5; 32], 1, &[wire], None, None, &CpuReferenceBackend)
+            .unwrap();
+        assert_eq!(opened, [plain]);
+        let counts = probe::counts();
+        assert_eq!((counts.created, counts.wiped, counts.released), (1, 1, 1));
+        assert!(setup.shares.iter().all(|s| !s.is_poisoned()));
+    }
+
+    #[test]
+    fn faulted_candidate_is_wiped_and_never_released() {
+        for (parties, faulty_party) in [(2, 0), (2, 1), (3, 0), (3, 2)] {
+            let mut setup = setup(parties);
+            let wire = seed_wire(&setup);
+            probe::reset();
+            assert_eq!(
+                setup.open_and_verify_bdoz_wires(
+                    &[5; 32],
+                    1,
+                    &[wire],
+                    None,
+                    Some((faulty_party, 0, 1)),
+                    &CpuReferenceBackend,
+                ),
+                Err(ParallelSeededError::BdozMacCheckFailed)
+            );
+            // The one candidate buffer was wiped and no party's gate released.
+            let counts = probe::counts();
+            assert_eq!((counts.created, counts.wiped, counts.released), (1, 1, 0));
+            assert!(setup.shares.iter().all(|s| s.is_poisoned()));
+            assert!(no_pending(&setup));
+        }
+    }
+
+    #[test]
+    fn accelerator_failure_wipes_candidates_and_clears_pending_openings() {
+        // Call 0 folds the candidates; calls 1 and 2 fold each party's MAC shares.
+        for fail_on_call in 0..3 {
+            let mut setup = setup(2);
+            let x = seed_wire(&setup);
+            // Leaves one verified-later masked opening pending per party.
+            let power = mpc_pow7(&mut setup.shares, &x).unwrap();
+            assert!(setup.shares.iter().all(|s| s.pending_openings.len() == 1));
+            // The first three folds belong to the pending-opening check; let them pass.
+            let accel = FailingFold::new(3 + fail_on_call);
+            probe::reset();
+            assert_eq!(
+                setup.open_and_verify_bdoz_wires(&[5; 32], 1, &[power], None, None, &accel),
+                Err(ParallelSeededError::BdozMacCheckFailed)
+            );
+            assert_eq!(accel.calls.load(Ordering::SeqCst), 4 + fail_on_call);
+            // Two buffers: the pending-opening check (released) and the failed output.
+            let counts = probe::counts();
+            assert_eq!((counts.created, counts.wiped, counts.released), (2, 2, 1));
+            assert!(no_pending(&setup));
+        }
+        // The pending-opening check itself fails: nothing is released at all.
+        for fail_on_call in 0..3 {
+            let mut setup = setup(2);
+            let x = seed_wire(&setup);
+            let power = mpc_pow7(&mut setup.shares, &x).unwrap();
+            let accel = FailingFold::new(fail_on_call);
+            probe::reset();
+            assert_eq!(
+                setup.open_and_verify_bdoz_wires(&[5; 32], 1, &[power], None, None, &accel),
+                Err(ParallelSeededError::BdozMacCheckFailed)
+            );
+            let counts = probe::counts();
+            assert_eq!((counts.created, counts.wiped, counts.released), (1, 1, 0));
+            assert!(no_pending(&setup));
+        }
+    }
+
+    #[test]
+    fn mismatched_pending_openings_are_cleared_on_refusal() {
+        let mut setup = setup(2);
+        let x = seed_wire(&setup);
+        let power = mpc_pow7(&mut setup.shares, &x).unwrap();
+        // One party recorded an opening its peer did not.
+        let extra = setup.shares[1].pending_openings[0].1.clone();
+        setup.shares[1].pending_openings.push((9, extra));
+        probe::reset();
+        assert_eq!(
+            setup.open_and_verify_bdoz_wires(
+                &[5; 32],
+                1,
+                &[power],
+                None,
+                None,
+                &CpuReferenceBackend,
+            ),
+            Err(ParallelSeededError::BdozMacCheckFailed)
+        );
+        assert!(no_pending(&setup));
+        // Refused before any candidate was reconstructed.
+        let counts = probe::counts();
+        assert_eq!((counts.created, counts.wiped, counts.released), (0, 0, 0));
+    }
+
+    #[test]
+    fn corrupted_masked_opening_releases_nothing() {
+        let mut setup = setup(2);
+        let x = seed_wire(&setup);
+        setup.shares[0].power_fault = true;
+        let power = mpc_pow7(&mut setup.shares, &x).unwrap();
+        probe::reset();
+        assert_eq!(
+            setup.open_and_verify_bdoz_wires(
+                &[5; 32],
+                1,
+                &[power],
+                None,
+                None,
+                &CpuReferenceBackend,
+            ),
+            Err(ParallelSeededError::BdozMacCheckFailed)
+        );
+        // Only the pending-opening check ran; the output wire was never opened.
+        let counts = probe::counts();
+        assert_eq!((counts.created, counts.wiped, counts.released), (1, 1, 0));
+        assert!(setup.shares.iter().all(|s| s.is_poisoned()));
+        assert!(no_pending(&setup));
     }
 }
 

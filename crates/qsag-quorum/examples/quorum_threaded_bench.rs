@@ -1,5 +1,5 @@
 //! Wall-clock latency and wire bytes of the isolated party nodes, one OS thread per party,
-//! measuring BOTH pure in-memory/loopback compute AND full production custody
+//! measuring BOTH pure in-memory/loopback compute AND file-backed custody fixtures (without an external monotone anchor)
 //! (`ConfidentialWireChannel<TcpEndpoint>` Encrypt-then-MAC AEAD framing + real filesystem
 //! `FsBeltWal`, `FsDurablePoisonAndSessionJournal`, and `AnchoredSeedBurnTracker` `fsync`
 //! durability).
@@ -22,8 +22,8 @@ use qsag_quorum::ConfidentialWireChannel;
 use qsag_quorum::durable_custody::AnchoredSeedBurnTracker;
 use qsag_quorum::hash::{SeedRng, mac32};
 use qsag_quorum::party_node::{
-    IsolatedJortsParty, IsolatedQuorumParty, IsolatedRss256Party, MemoryPoisonJournal, PoisonJournal,
-    ROUND_GATE, ROUND_OPEN, deal_keccak_shares, deal_rss256_keys,
+    IsolatedJortsParty, IsolatedQuorumParty, IsolatedRss256Party, MemoryPoisonJournal,
+    PoisonJournal, ROUND_GATE, ROUND_OPEN, deal_keccak_shares, deal_rss256_keys,
 };
 use qsag_quorum::poison_journal::{FsDurablePoisonAndSessionJournal, JournalOpenMode};
 use qsag_quorum::quorum_jorts::{
@@ -250,8 +250,8 @@ fn shamir_bench_with_wal<T: WireTransport + Send, W: DurableWal + Send>(
         .filter(|(_, material)| online.contains(&material.party))
         .map(|(endpoint, material)| {
             let wal = make_wal(material.party);
-            let custodian = ShamirCustodian::new(cfg, staged.tree.clone(), material, wal)
-                .expect("custodian");
+            let custodian =
+                ShamirCustodian::new(cfg, staged.tree.clone(), material, wal).expect("custodian");
             IsolatedQuorumParty::new(custodian, endpoint).expect("node")
         })
         .collect();
@@ -544,22 +544,16 @@ fn production_custody_e2e_suite(durable_root: &Path) {
     let rss_dir = durable_root.join("rss-poison");
     std::fs::create_dir_all(&rss_dir).expect("rss-poison dir");
     let (endpoints, stats) = confidential_tcp_mesh(3, SESSION);
-    rss_bench_with_journal(
-        "ConfTCP + FsPoisonJournal",
-        1,
-        endpoints,
-        &stats,
-        |party| {
-            let path = rss_dir.join(format!("party-{party}.poison"));
-            let jkey = mac32(
-                &SEED,
-                b"QSAG.BENCH.RSS.POISON.V1",
-                &[&(party as u64).to_le_bytes()],
-            );
-            FsDurablePoisonAndSessionJournal::open(path, jkey, SESSION, JournalOpenMode::CreateNew)
-                .expect("provision FsDurablePoisonAndSessionJournal")
-        },
-    );
+    rss_bench_with_journal("ConfTCP + FsPoisonJournal", 1, endpoints, &stats, |party| {
+        let path = rss_dir.join(format!("party-{party}.poison"));
+        let jkey = mac32(
+            &SEED,
+            b"QSAG.BENCH.RSS.POISON.V1",
+            &[&(party as u64).to_le_bytes()],
+        );
+        FsDurablePoisonAndSessionJournal::open(path, jkey, SESSION, JournalOpenMode::CreateNew)
+            .expect("provision FsDurablePoisonAndSessionJournal")
+    });
 
     // 6. Retained LedgerCheckpoint commit + anchor fsync latency.
     anchored_ledger_checkpoint_bench(durable_root);
@@ -574,7 +568,9 @@ fn main() {
 
     primitives();
 
-    println!("\nMode QS-A, pure compute / loopback baseline ({SIGNATURES} signatures each, MemoryWal):");
+    println!(
+        "\nMode QS-A, pure compute / loopback baseline ({SIGNATURES} signatures each, MemoryWal):"
+    );
     let (endpoints, stats) = InMemoryWireMesh::connect(3, SESSION);
     committee_bench("2-of-3, channel mesh", 2, 3, 7, &[0, 2], endpoints, &stats);
     let (endpoints, stats) = InMemoryWireMesh::connect(5, SESSION);
@@ -608,7 +604,9 @@ fn main() {
         &stats,
     );
 
-    println!("\nMode QS-B, pure compute / loopback baseline ({SIGNATURES} signatures each, MemoryWal):");
+    println!(
+        "\nMode QS-B, pure compute / loopback baseline ({SIGNATURES} signatures each, MemoryWal):"
+    );
     let cfg = QuorumConfig::new(2, 4, 1).expect("config");
     let (endpoints, stats) = InMemoryWireMesh::connect(4, SESSION);
     shamir_bench(

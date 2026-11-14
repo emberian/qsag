@@ -173,7 +173,13 @@ impl Json {
         let pad_len = |depth: usize| 1 + depth * 2;
         match self {
             Json::Null => 4,
-            Json::Bool(b) => if *b { 4 } else { 5 },
+            Json::Bool(b) => {
+                if *b {
+                    4
+                } else {
+                    5
+                }
+            }
             Json::Number(n) => n.len(),
             Json::Str(s) => escaped_string_len(s),
             Json::Array(items) if items.is_empty() => 2,

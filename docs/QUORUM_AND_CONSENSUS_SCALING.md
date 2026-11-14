@@ -13,8 +13,8 @@ The implementation does **not yet establish the requested 150 ms end-to-end cons
 Run from any working directory:
 
 ```sh
-python3 /Users/ember/dev/qsag/scripts/quorum_and_consensus_scaling.py --self-test
-python3 /Users/ember/dev/qsag/scripts/quorum_and_consensus_scaling.py --self-test -o ./-o
+python3 scripts/quorum_and_consensus_scaling.py --self-test
+python3 scripts/quorum_and_consensus_scaling.py --self-test -o ./scaling-report.json
 ```
 
 The second command writes the requested summary and numerical tables to the literal filename `-o`. The model uses only the Python standard library; self-test performs bounded arithmetic and small source/document reads, with no build, network, GPU initialization, or prover execution. `--write-tables` regenerates the marked block below. Self-test checks exact equality of every generated table, independent arithmetic identities, invalid-input boundaries, and selected source drift guards. It does not certify prose, cryptography, or the accuracy of historical benchmark measurements.
@@ -143,9 +143,9 @@ Hem is neither threshold-only nor a universal signature SNARK. [Its profile enum
 
 Current Jorts aggregation keys have a height-six tree and thus a short finite leaf lifetime; deployment at consensus cadence needs authenticated key rotation or a different geometry and new measurements. Corduroy trades stateful one-time-leaf discipline for much larger signatures/traces and its own enforced usage budget. A privacy-oriented application must also account for signer bitmaps and message/registry commitments: aggregation by itself does not provide anonymity or hide participation.
 
-## Head-to-head: Hem versus Plonky3 / LeanSig XMSS aggregation
+## Comparing signature aggregation systems
 
-[LeanSig](https://github.com/leanEthereum/leanSig) is a signature implementation; [leanMultisig, now redirecting to leanVM](https://github.com/leanEthereum/leanVM), is the aggregation/VM layer; [Plonky3](https://github.com/Plonky3/Plonky3) provides proof-system components. They are different layers, so a bare “QSAG versus Plonky3” throughput ratio is underspecified. The Ethereum research workshop describes a Poseidon2/XMSS, WHIR/SuperSpartan aggregation direction with recursive capabilities as work to develop, not evidence that all deployments share one parameter set. ([Primary workshop notes](https://github.com/leanEthereum/pm/blob/main/workshops-and-interops/2025/lean-week-cambridge/pq1-01.md))
+A signature implementation, an aggregation virtual machine, and proof-system components occupy different layers. Throughput comparisons must specify the complete task and parameter set. A research direction or recursive capability is not evidence of measured deployment performance.
 
 | Comparison axis | QSAG Hem / custody | Fair comparison requirement |
 | --- | --- | --- |

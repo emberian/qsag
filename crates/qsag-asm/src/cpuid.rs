@@ -142,8 +142,16 @@ fn encode_caps(c: CpuCapabilities) -> u32 {
         | if c.gfni { CAP_GFNI } else { 0 }
         | if c.vpclmulqdq { CAP_VPCLMULQDQ } else { 0 }
         | if c.vaes { CAP_VAES } else { 0 }
-        | if c.x86_arch_capabilities_msr { CAP_X86_ARCH_CAP_MSR } else { 0 }
-        | if c.x86_doit_enumerated { CAP_X86_DOIT } else { 0 }
+        | if c.x86_arch_capabilities_msr {
+            CAP_X86_ARCH_CAP_MSR
+        } else {
+            0
+        }
+        | if c.x86_doit_enumerated {
+            CAP_X86_DOIT
+        } else {
+            0
+        }
         | if c.aarch64_neon { CAP_A64_NEON } else { 0 }
         | if c.aarch64_sha3 { CAP_A64_SHA3 } else { 0 }
         | if c.aarch64_pmull { CAP_A64_PMULL } else { 0 }
@@ -402,15 +410,20 @@ impl Drop for DitGuard {
     fn drop(&mut self) {
         if let Some(saved) = self.0 {
             // SAFETY: this guard was created only after checking FEAT_DIT.
-            unsafe { core::arch::asm!("msr S3_3_C4_C2_5, {saved}", "isb",
-                saved = in(reg) saved, options(nostack)); }
+            unsafe {
+                core::arch::asm!("msr S3_3_C4_C2_5, {saved}", "isb",
+                saved = in(reg) saved, options(nostack));
+            }
         }
     }
 }
 
 /// Whether a caller permits execution without a hardware timing guarantee.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DitRequirement { RequireHardwareDit, BestEffort }
+pub enum DitRequirement {
+    RequireHardwareDit,
+    BestEffort,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HardwareDitUnavailable;
@@ -438,10 +451,15 @@ impl DitRequirement {
             if self == Self::RequireHardwareDit && !probe_capabilities().aarch64_dit {
                 return Err(HardwareDitUnavailable);
             }
-            Ok(HardwareDitGuard { _guard: ensure_aarch64_dit_enabled(), _thread: core::marker::PhantomData })
+            Ok(HardwareDitGuard {
+                _guard: ensure_aarch64_dit_enabled(),
+                _thread: core::marker::PhantomData,
+            })
         }
         #[cfg(not(target_arch = "aarch64"))]
-        Ok(HardwareDitGuard { _thread: core::marker::PhantomData })
+        Ok(HardwareDitGuard {
+            _thread: core::marker::PhantomData,
+        })
     }
 }
 
@@ -482,14 +500,23 @@ mod dit_tests {
     #[test]
     fn timing_status_distinguishes_support_from_msr_existence() {
         let mut caps = empty_caps();
-        assert_eq!(caps.hardware_dit_status(), Some(HardwareDitStatus::UnsupportedOnCpu));
+        assert_eq!(
+            caps.hardware_dit_status(),
+            Some(HardwareDitStatus::UnsupportedOnCpu)
+        );
         caps.x86_arch_capabilities_msr = true;
         assert_eq!(caps.hardware_dit_status(), None);
         caps.x86_doit_enumerated = true;
-        assert_eq!(caps.hardware_dit_status(), Some(HardwareDitStatus::SupportedKernelControlled));
+        assert_eq!(
+            caps.hardware_dit_status(),
+            Some(HardwareDitStatus::SupportedKernelControlled)
+        );
         caps = empty_caps();
         caps.aarch64_dit = true;
-        assert_eq!(caps.hardware_dit_status(), Some(HardwareDitStatus::EnabledByGuard));
+        assert_eq!(
+            caps.hardware_dit_status(),
+            Some(HardwareDitStatus::EnabledByGuard)
+        );
         assert_eq!(decode_caps(encode_caps(caps)), caps);
     }
 
@@ -498,24 +525,33 @@ mod dit_tests {
     fn userspace_probe_does_not_claim_doitm() {
         let caps = probe_capabilities();
         assert!(!caps.x86_doit_enumerated);
-        assert_ne!(caps.hardware_dit_status(), Some(HardwareDitStatus::SupportedKernelControlled));
+        assert_ne!(
+            caps.hardware_dit_status(),
+            Some(HardwareDitStatus::SupportedKernelControlled)
+        );
     }
 
     #[test]
     #[cfg(target_arch = "aarch64")]
     fn nested_guards_restore_dit() {
-        if !probe_capabilities().aarch64_dit { return; }
+        if !probe_capabilities().aarch64_dit {
+            return;
+        }
         fn dit() -> u64 {
             let value;
             // SAFETY: the test first checks FEAT_DIT.
-            unsafe { core::arch::asm!("mrs {value}, S3_3_C4_C2_5", value = out(reg) value, options(nostack)); }
+            unsafe {
+                core::arch::asm!("mrs {value}, S3_3_C4_C2_5", value = out(reg) value, options(nostack));
+            }
             value
         }
         let before = dit();
         {
             let _outer = ensure_aarch64_dit_enabled();
             assert_ne!(dit() & (1 << 24), 0);
-            { let _inner = ensure_aarch64_dit_enabled(); }
+            {
+                let _inner = ensure_aarch64_dit_enabled();
+            }
             assert_ne!(dit() & (1 << 24), 0);
         }
         assert_eq!(dit(), before);

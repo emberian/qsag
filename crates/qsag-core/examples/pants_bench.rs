@@ -68,7 +68,14 @@ fn row(name: &str, wall_s: f64, hops: u64, bytes: u64, lane_perms: u64, note: &s
 }
 
 fn engine_row(name: &str, wall_s: f64, d: WireStats, note: &str) {
-    row(name, wall_s, d.online_hops(), d.online_bytes(), d.lane_perms, note);
+    row(
+        name,
+        wall_s,
+        d.online_hops(),
+        d.online_bytes(),
+        d.lane_perms,
+        note,
+    );
 }
 
 fn main() {
@@ -107,11 +114,15 @@ fn main() {
         let t = Instant::now();
         let mut ledger = MemoryFirstSigned::new();
         let (pk, binding) = baggy_keygen_mpc(&mut e, &params, &mut none).unwrap();
-        println!("BaggySha3 keygen (top subtree): {:.1} ms one-process", t.elapsed().as_secs_f64() * 1e3);
+        println!(
+            "BaggySha3 keygen (top subtree): {:.1} ms one-process",
+            t.elapsed().as_secs_f64() * 1e3
+        );
 
         let before = e.stats();
         let t = Instant::now();
-        let sig = baggy_sign_mpc(&mut e, &params, &pk, &binding, &mut none, &mut ledger, msg).unwrap();
+        let sig =
+            baggy_sign_mpc(&mut e, &params, &pk, &binding, &mut none, &mut ledger, msg).unwrap();
         let wall = t.elapsed().as_secs_f64();
         assert!(baggy_verify(&params, &pk, msg, &sig));
         engine_row(
@@ -125,7 +136,9 @@ fn main() {
             let mut cache = WaistbandCache::new(top, 1 << 16);
             let before = e.stats();
             let t = Instant::now();
-            cache.precompute(&mut e, &params, &pk, &binding, &mut ledger).unwrap();
+            cache
+                .precompute(&mut e, &params, &pk, &binding, &mut ledger)
+                .unwrap();
             let pre = t.elapsed().as_secs_f64();
             let pre_stats = delta(e.stats(), before);
             println!(
@@ -137,26 +150,36 @@ fn main() {
             );
             let before = e.stats();
             let t = Instant::now();
-            let cached = baggy_sign_mpc(&mut e, &params, &pk, &binding, &mut cache, &mut ledger, msg).unwrap();
+            let cached =
+                baggy_sign_mpc(&mut e, &params, &pk, &binding, &mut cache, &mut ledger, msg)
+                    .unwrap();
             let wall = t.elapsed().as_secs_f64();
             assert_eq!(cached, sig);
             engine_row(
                 &format!("BaggySha3 128f, Waistband L={top} (1B)"),
                 wall,
                 delta(e.stats(), before),
-                &format!("{} of {} layers online", params.num_layers - top, params.num_layers),
+                &format!(
+                    "{} of {} layers online",
+                    params.num_layers - top,
+                    params.num_layers
+                ),
             );
         }
 
         // Mode 1A with the largest cache: stage a single-use bank, then sign.
         let mut cache = WaistbandCache::new(3, 1 << 16);
-        cache.precompute(&mut e, &params, &pk, &binding, &mut ledger).unwrap();
+        cache
+            .precompute(&mut e, &params, &pk, &binding, &mut ledger)
+            .unwrap();
         // 2 randomiser waves, then the chain lanes of the 13 uncached layers and the FORS
         // lanes over the PRF level and the first F level, and the chain lanes over two more
         // levels.
-        let chain_lanes = (params.num_layers - 3) * (1usize << params.subtree_height) * params.wots.chains;
+        let chain_lanes =
+            (params.num_layers - 3) * (1usize << params.subtree_height) * params.wots.chains;
         let fors_lanes = params.signed_fors_trees() << params.fors_height;
-        let waves = 2 + 2 * (chain_lanes + fors_lanes).div_ceil(256) + 2 * chain_lanes.div_ceil(256);
+        let waves =
+            2 + 2 * (chain_lanes + fors_lanes).div_ceil(256) + 2 * chain_lanes.div_ceil(256);
         let before = e.stats();
         let t = Instant::now();
         e.stage_beaver_bank(waves).unwrap();
@@ -172,7 +195,8 @@ fn main() {
         e.set_mode(AndMode::BeaverBank).unwrap();
         let before = e.stats();
         let t = Instant::now();
-        let banked = baggy_sign_mpc(&mut e, &params, &pk, &binding, &mut cache, &mut ledger, msg).unwrap();
+        let banked =
+            baggy_sign_mpc(&mut e, &params, &pk, &binding, &mut cache, &mut ledger, msg).unwrap();
         let wall = t.elapsed().as_secs_f64();
         assert_eq!(banked, sig);
         engine_row(
@@ -229,7 +253,10 @@ fn main() {
             "JortsSha3 Mode 3A (leaf sweep)",
             wall,
             d,
-            &format!("mean of {runs}; sig {} B at h=20", JortsParams::SHA3_H20.sig_bytes()),
+            &format!(
+                "mean of {runs}; sig {} B at h=20",
+                JortsParams::SHA3_H20.sig_bytes()
+            ),
         );
 
         // Mode 3A over a pre-staged triple bank (Mode 1A gates): four waves per signature.
@@ -286,7 +313,12 @@ fn main() {
         }
         let wall = t.elapsed().as_secs_f64() / window as f64;
         let mut d = delta(e.stats(), before);
-        for v in [&mut d.check_hops, &mut d.check_bytes, &mut d.open_rounds, &mut d.open_bytes] {
+        for v in [
+            &mut d.check_hops,
+            &mut d.check_bytes,
+            &mut d.open_rounds,
+            &mut d.open_bytes,
+        ] {
             *v /= window as u64;
         }
         engine_row(
@@ -312,9 +344,13 @@ fn main() {
             let _ = fixture_rng.next_bytes32();
             let mut contribution = [0u8; 16];
             fixture_rng.fill_bytes(&mut contribution);
-            for (dst, src) in seed.iter_mut().zip(contribution) { *dst ^= src; }
+            for (dst, src) in seed.iter_mut().zip(contribution) {
+                *dst ^= src;
+            }
             fixture_rng.fill_bytes(&mut contribution);
-            for (dst, src) in prf.iter_mut().zip(contribution) { *dst ^= src; }
+            for (dst, src) in prf.iter_mut().zip(contribution) {
+                *dst ^= src;
+            }
         }
         let (ref_sk, ref_pk) = slh_keygen_internal(&p, &seed, &prf, &pk_seed).unwrap();
         let mut cluster = RssSlhMpcCluster::new(sid, keys, r).unwrap();

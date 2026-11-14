@@ -8,13 +8,13 @@
 //!    and `derive_jorts_det_r_rand`) reject epoch equivocation and `r_rand` drift after state restoration.
 
 use crate::goldilocks::{
-    goldilocks_add, goldilocks_canon, goldilocks_inv, goldilocks_mul, goldilocks_sub, Goldilocks,
+    Goldilocks, goldilocks_add, goldilocks_canon, goldilocks_inv, goldilocks_mul, goldilocks_sub,
 };
 use crate::keccak::Shake256Sponge;
 pub use crate::tower::ct_eq_bytes32;
 use crate::tower::{
-    gf256_add, gf256_frobenius_residual, gf256_inv, gf256_is_boolean_frobenius, gf256_mul,
-    verify_mac_2lane, BdozCommittedBatchOpening2Lane, BdozWireOpening2Lane, Gf256, Tower128,
+    BdozCommittedBatchOpening2Lane, BdozWireOpening2Lane, Gf256, Tower128, gf256_add,
+    gf256_frobenius_residual, gf256_inv, gf256_is_boolean_frobenius, gf256_mul, verify_mac_2lane,
 };
 
 // ============================================================================
@@ -126,11 +126,7 @@ pub fn shamir_lagrange_at_zero_gf256(points: &[Gf256], shares: &[Gf256]) -> Opti
         }
         i += 1;
     }
-    if valid {
-        Some(secret)
-    } else {
-        None
-    }
+    if valid { Some(secret) } else { None }
 }
 
 /// Compute the `i`-th Lagrange basis weight `lambda_i(0) = prod_{j != i} x_j / (x_j - x_i)` over `Goldilocks`.
@@ -197,11 +193,7 @@ pub fn shamir_lagrange_at_zero_goldilocks(
         }
         i += 1;
     }
-    if valid {
-        Some(secret)
-    } else {
-        None
-    }
+    if valid { Some(secret) } else { None }
 }
 
 /// Degree reduction step for 2-of-3 Shamir multiplication over `Gf256`:
@@ -257,12 +249,7 @@ pub fn shamir_degree_reduce_2of3_gf256(
 /// where `eps = s ⊕ a` and `delta = s ⊕ b`.
 /// When `c == a * b`, this algebraically equals `s^2 ⊕ s` without exposing `s` during `(eps, delta)` opening!
 #[inline]
-pub const fn dkg_beaver_frobenius_eval_gf256(
-    a: Gf256,
-    b: Gf256,
-    c: Gf256,
-    s: Gf256,
-) -> Gf256 {
+pub const fn dkg_beaver_frobenius_eval_gf256(a: Gf256, b: Gf256, c: Gf256, s: Gf256) -> Gf256 {
     let eps = gf256_add(s, a);
     let delta = gf256_add(s, b);
     let s_sq = gf256_add(
@@ -285,7 +272,10 @@ pub const fn dkg_beaver_frobenius_share_shamir_gf256(
 ) -> Gf256 {
     let s_sq_share = gf256_add(
         gf256_add(c_share, gf256_mul(eps_open, b_share)),
-        gf256_add(gf256_mul(delta_open, a_share), gf256_mul(eps_open, delta_open)),
+        gf256_add(
+            gf256_mul(delta_open, a_share),
+            gf256_mul(eps_open, delta_open),
+        ),
     );
     gf256_add(s_sq_share, s_share)
 }
@@ -317,10 +307,7 @@ pub fn dkg_verify_key_shares_boolean_bdoz_gf256(
 /// polynomial interpolation `Q(X) = f(X)^2 ⊕ f(X)` (`Q(0) = f(0)^2 ⊕ f(0) == 0`).
 /// Operates on three opened/reconstructed shares, checking degree-1 Shamir consistency
 /// and Frobenius Booleanity; this is not a privacy-preserving share-opening protocol.
-pub fn dkg_verify_shamir_2of3_key_bit_gf256(
-    points: [Gf256; 3],
-    shares: [Gf256; 3],
-) -> bool {
+pub fn dkg_verify_shamir_2of3_key_bit_gf256(points: [Gf256; 3], shares: [Gf256; 3]) -> bool {
     if !shamir_validate_points_gf256(&points) {
         return false;
     }
@@ -377,7 +364,11 @@ pub struct RssZeroSeeds64 {
 /// Share a secret word using two caller-supplied masks.
 #[inline]
 pub const fn rss_share_u64(secret: u64, m0: u64, m1: u64) -> RssShare64 {
-    RssShare64 { x0: m0, x1: m1, x2: secret ^ m0 ^ m1 }
+    RssShare64 {
+        x0: m0,
+        x1: m1,
+        x2: secret ^ m0 ^ m1,
+    }
 }
 
 /// Reconstruct the 64-bit secret word `x0 ^ x1 ^ x2` from a 2-of-3 `RssShare64`.
@@ -564,10 +555,18 @@ pub fn derive_jorts_det_r_rand(
 }
 
 impl EpochLatch {
-    pub const fn next_epoch(&self) -> u64 { self.next_epoch }
-    pub const fn max_epoch(&self) -> u64 { self.max_epoch }
-    pub const fn key_epoch_id(&self) -> [u8; 32] { self.key_epoch_id }
-    pub const fn last_bound(&self) -> LastBoundEpoch { self.last_bound }
+    pub const fn next_epoch(&self) -> u64 {
+        self.next_epoch
+    }
+    pub const fn max_epoch(&self) -> u64 {
+        self.max_epoch
+    }
+    pub const fn key_epoch_id(&self) -> [u8; 32] {
+        self.key_epoch_id
+    }
+    pub const fn last_bound(&self) -> LastBoundEpoch {
+        self.last_bound
+    }
 
     /// Construct a fresh `EpochLatch` at `next_epoch = 0` with `last_bound = LastBoundEpoch::Unset`.
     #[inline]
@@ -707,67 +706,83 @@ mod private_state_tests {
         let msg_b = [3u8; 32];
         let r0 = [4u8; 32];
         let r1 = [5u8; 32];
-    // 8. Corrupted WAL state (bound.epoch >= next_epoch) MUST fail!
-    let corrupted = EpochLatch {
-        next_epoch: 1,
-        max_epoch: 4,
-        key_epoch_id: key_id,
-        last_bound: LastBoundEpoch::Bound(BoundEpochRecord {
-            epoch: 1,
-            msg_digest: msg_a,
-            r_rand: r0,
-        }),
-    };
-    assert_eq!(
-        corrupted.acquire_or_retry(EpochSignRequest {
-            requested_epoch: 1,
-            key_epoch_id: key_id,
-            msg_digest: msg_a,
-            deterministic_r_rand: r0,
-        }).err(),
-        Some(EpochLatchError::CorruptedWalState)
-    );
-
-    // Reject bound records at or beyond the next epoch.
-    for bound_epoch in [1, 2] {
-        let invalid = EpochLatch {
+        // 8. Corrupted WAL state (bound.epoch >= next_epoch) MUST fail!
+        let corrupted = EpochLatch {
             next_epoch: 1,
             max_epoch: 4,
             key_epoch_id: key_id,
             last_bound: LastBoundEpoch::Bound(BoundEpochRecord {
-                epoch: bound_epoch, msg_digest: msg_a, r_rand: r0,
+                epoch: 1,
+                msg_digest: msg_a,
+                r_rand: r0,
             }),
         };
         assert_eq!(
-            epoch_latch_advance(invalid, EpochRequest {
-                requested_epoch: 1, key_epoch_id: key_id,
-            }).err(),
+            corrupted
+                .acquire_or_retry(EpochSignRequest {
+                    requested_epoch: 1,
+                    key_epoch_id: key_id,
+                    msg_digest: msg_a,
+                    deterministic_r_rand: r0,
+                })
+                .err(),
             Some(EpochLatchError::CorruptedWalState)
         );
-    }
 
-    // Exhaustion applies at and beyond the limit with either retry-slot state.
-    for bound in [false, true] {
-        for next_epoch in [2, 3] {
-            let st = EpochLatch {
-                next_epoch,
-                max_epoch: 2,
+        // Reject bound records at or beyond the next epoch.
+        for bound_epoch in [1, 2] {
+            let invalid = EpochLatch {
+                next_epoch: 1,
+                max_epoch: 4,
                 key_epoch_id: key_id,
-                last_bound: if bound {
-                    LastBoundEpoch::Bound(BoundEpochRecord {
-                        epoch: 1, msg_digest: msg_b, r_rand: r1,
-                    })
-                } else {
-                    LastBoundEpoch::Unset
-                },
+                last_bound: LastBoundEpoch::Bound(BoundEpochRecord {
+                    epoch: bound_epoch,
+                    msg_digest: msg_a,
+                    r_rand: r0,
+                }),
             };
             assert_eq!(
-                epoch_latch_advance(st, EpochRequest {
-                    requested_epoch: next_epoch, key_epoch_id: key_id,
-                }).err(),
-                Some(EpochLatchError::TreeExhausted { max_epoch: 2 })
+                epoch_latch_advance(
+                    invalid,
+                    EpochRequest {
+                        requested_epoch: 1,
+                        key_epoch_id: key_id,
+                    }
+                )
+                .err(),
+                Some(EpochLatchError::CorruptedWalState)
             );
         }
-    }
+
+        // Exhaustion applies at and beyond the limit with either retry-slot state.
+        for bound in [false, true] {
+            for next_epoch in [2, 3] {
+                let st = EpochLatch {
+                    next_epoch,
+                    max_epoch: 2,
+                    key_epoch_id: key_id,
+                    last_bound: if bound {
+                        LastBoundEpoch::Bound(BoundEpochRecord {
+                            epoch: 1,
+                            msg_digest: msg_b,
+                            r_rand: r1,
+                        })
+                    } else {
+                        LastBoundEpoch::Unset
+                    },
+                };
+                assert_eq!(
+                    epoch_latch_advance(
+                        st,
+                        EpochRequest {
+                            requested_epoch: next_epoch,
+                            key_epoch_id: key_id,
+                        }
+                    )
+                    .err(),
+                    Some(EpochLatchError::TreeExhausted { max_epoch: 2 })
+                );
+            }
+        }
     }
 }

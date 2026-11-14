@@ -369,7 +369,12 @@ fn dudect_constant_time_statistical_gate() {
             }
         },
         |(a, b, dst), i| {
-            gf256_shamir_mul_with_backend(black_box(*dst), black_box(&a[i]), black_box(&b[i]), active);
+            gf256_shamir_mul_with_backend(
+                black_box(*dst),
+                black_box(&a[i]),
+                black_box(&b[i]),
+                active,
+            );
             dst[0] as u64
         },
     ));
@@ -388,7 +393,12 @@ fn dudect_constant_time_statistical_gate() {
             }
         },
         |(a, sc, dst), i| {
-            gf256_shamir_mac_with_backend(black_box(*dst), black_box(&a[i]), black_box(sc[i]), active);
+            gf256_shamir_mac_with_backend(
+                black_box(*dst),
+                black_box(&a[i]),
+                black_box(sc[i]),
+                active,
+            );
             dst[0] as u64
         },
     ));
@@ -410,8 +420,11 @@ fn dudect_constant_time_statistical_gate() {
             }
         },
         |(l, r), i| {
-            let out =
-                tower128_bdoz_2lane_poly_mac_with_backend(black_box(&l[i]), black_box(&r[i]), active);
+            let out = tower128_bdoz_2lane_poly_mac_with_backend(
+                black_box(&l[i]),
+                black_box(&r[i]),
+                active,
+            );
             (out[0] ^ out[1]) as u64
         },
     ));
@@ -471,8 +484,7 @@ fn dudect_constant_time_statistical_gate() {
             for i in 0..CHUNK {
                 let m = 0u64.wrapping_sub(classes[i] as u64);
                 x[i] = (rng.next_u64() % GOLDILOCKS_PRIME) & m;
-                y[i] = ((rng.next_u64() % GOLDILOCKS_PRIME) & m)
-                    | ((!m) & (GOLDILOCKS_PRIME - 1));
+                y[i] = ((rng.next_u64() % GOLDILOCKS_PRIME) & m) | ((!m) & (GOLDILOCKS_PRIME - 1));
             }
         },
         |(x, y), i| {
@@ -530,42 +542,91 @@ fn dudect_bitslice_exported_kernels() {
     let mut stats = Vec::new();
     if std::is_x86_feature_detected!("avx2") {
         let mut rows = vec![[[0u64; 4]; 64]; CHUNK];
-        stats.push(measure_dudect("transpose64x256_avx2", samples, &mut rows,
+        stats.push(measure_dudect(
+            "transpose64x256_avx2",
+            samples,
+            &mut rows,
             |rows, rng, classes| {
                 for (row, class) in rows.iter_mut().zip(classes) {
                     let mask = 0u64.wrapping_sub(*class as u64);
-                    for word in row.iter_mut().flatten() { *word = rng.next_u64() & mask; }
+                    for word in row.iter_mut().flatten() {
+                        *word = rng.next_u64() & mask;
+                    }
                 }
             },
             |rows, i| {
                 // SAFETY: AVX2 checked above; exactly 64 contiguous 256-bit rows.
-                unsafe { qsag_asm_transpose64x256_avx2(black_box(rows[i].as_mut_ptr().cast())); }
+                unsafe {
+                    qsag_asm_transpose64x256_avx2(black_box(rows[i].as_mut_ptr().cast()));
+                }
                 black_box(rows[i][0][0])
-            }));
+            },
+        ));
     }
     for vector in [false, true] {
-        if !std::is_x86_feature_detected!("pclmulqdq") ||
-            (vector && !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("vpclmulqdq"))) { continue; }
+        if !std::is_x86_feature_detected!("pclmulqdq")
+            || (vector
+                && !(std::is_x86_feature_detected!("avx2")
+                    && std::is_x86_feature_detected!("vpclmulqdq")))
+        {
+            continue;
+        }
         let mut operands = vec![([[0u64; 2]; 16], [[0u64; 2]; 16], [0u64; 2]); CHUNK];
-        stats.push(measure_dudect(if vector { "gf2_128_mul_acc_vpclmul" } else { "gf2_128_mul_acc_pclmul" }, samples, &mut operands,
+        stats.push(measure_dudect(
+            if vector {
+                "gf2_128_mul_acc_vpclmul"
+            } else {
+                "gf2_128_mul_acc_pclmul"
+            },
+            samples,
+            &mut operands,
             |ops, rng, classes| {
                 for ((a, b, acc), class) in ops.iter_mut().zip(classes) {
                     let mask = 0u64.wrapping_sub(*class as u64);
-                    for word in a.iter_mut().chain(b.iter_mut()).flatten().chain(acc.iter_mut()) { *word = rng.next_u64() & mask; }
+                    for word in a
+                        .iter_mut()
+                        .chain(b.iter_mut())
+                        .flatten()
+                        .chain(acc.iter_mut())
+                    {
+                        *word = rng.next_u64() & mask;
+                    }
                 }
             },
             |ops, i| {
                 let (a, b, acc) = &mut ops[i];
                 // SAFETY: CPU features checked; buffers hold sixteen 128-bit operands.
                 unsafe {
-                    if vector { qsag_asm_gf2_128_mul_acc_vpclmul(black_box(acc.as_mut_ptr().cast()), black_box(a.as_ptr().cast()), black_box(b.as_ptr().cast()), 8); }
-                    else { qsag_asm_gf2_128_mul_acc_pclmul(black_box(acc.as_mut_ptr().cast()), black_box(a.as_ptr().cast()), black_box(b.as_ptr().cast()), 16); }
+                    if vector {
+                        qsag_asm_gf2_128_mul_acc_vpclmul(
+                            black_box(acc.as_mut_ptr().cast()),
+                            black_box(a.as_ptr().cast()),
+                            black_box(b.as_ptr().cast()),
+                            8,
+                        );
+                    } else {
+                        qsag_asm_gf2_128_mul_acc_pclmul(
+                            black_box(acc.as_mut_ptr().cast()),
+                            black_box(a.as_ptr().cast()),
+                            black_box(b.as_ptr().cast()),
+                            16,
+                        );
+                    }
                 }
                 black_box(acc[0])
-            }));
+            },
+        ));
     }
     for stat in stats {
-        eprintln!("{}: raw t={:+.3}, cropped max |t|={:.3}", stat.name, stat.t_raw, stat.t_cropped_max);
-        assert!(stat.max_abs_t < 4.5, "{}: max |t|={} >= 4.5", stat.name, stat.max_abs_t);
+        eprintln!(
+            "{}: raw t={:+.3}, cropped max |t|={:.3}",
+            stat.name, stat.t_raw, stat.t_cropped_max
+        );
+        assert!(
+            stat.max_abs_t < 4.5,
+            "{}: max |t|={} >= 4.5",
+            stat.name,
+            stat.max_abs_t
+        );
     }
 }

@@ -179,7 +179,9 @@ pub enum WalError {
 /// Abstract durable storage for the latch state.
 pub trait DurableWal {
     /// Authorize one release of the bound record after its durable journal transaction.
-    fn authorize_open(&self, _record: &BeltLatchRecord) -> Result<(), WalError> { Err(WalError::Io) }
+    fn authorize_open(&self, _record: &BeltLatchRecord) -> Result<(), WalError> {
+        Err(WalError::Io)
+    }
 
     /// Store `state` and return only once it would survive a power loss. On error nothing may
     /// be assumed about what was written; the latch then refuses to proceed.
@@ -196,6 +198,7 @@ pub trait DurableWal {
 /// Only a fresh, unpersisted `MemoryWal` may be cloned (e.g. `vec![MemoryWal::new(); n]`);
 /// attempting to clone an active `MemoryWal` panics so tests and callers cannot accidentally
 /// fork a live epoch-latch authority into two rollback views.
+#[cfg(any(test, feature = "testing-ephemeral"))]
 #[derive(Debug, Default)]
 pub struct MemoryWal {
     stored: Option<Vec<u8>>,
@@ -203,6 +206,7 @@ pub struct MemoryWal {
     fail_next: bool,
 }
 
+#[cfg(any(test, feature = "testing-ephemeral"))]
 impl Clone for MemoryWal {
     fn clone(&self) -> Self {
         assert!(
@@ -213,6 +217,7 @@ impl Clone for MemoryWal {
     }
 }
 
+#[cfg(any(test, feature = "testing-ephemeral"))]
 impl MemoryWal {
     pub fn new() -> Self {
         Self::default()
@@ -229,8 +234,11 @@ impl MemoryWal {
     }
 }
 
+#[cfg(any(test, feature = "testing-ephemeral"))]
 impl DurableWal for MemoryWal {
-    fn authorize_open(&self, _record: &BeltLatchRecord) -> Result<(), WalError> { Ok(()) }
+    fn authorize_open(&self, _record: &BeltLatchRecord) -> Result<(), WalError> {
+        Ok(())
+    }
     fn sync_persist(&mut self, state: &BeltLatchState) -> Result<(), WalError> {
         if self.fail_next {
             self.fail_next = false;
@@ -300,18 +308,28 @@ impl FsBeltWal {
 
     /// Open under an independently durable anchor, catching up a committed successor
     /// before returning. An unenrolled anchor is not accepted for recovery.
-    pub fn open_existing_anchored(path: impl Into<std::path::PathBuf>, wal_key: [u8; 32],
-        anchor: alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>) -> std::io::Result<Self> {
-        let minimum = anchor.load()?.ok_or_else(|| std::io::Error::other("missing belt anchor"))?;
+    pub fn open_existing_anchored(
+        path: impl Into<std::path::PathBuf>,
+        wal_key: [u8; 32],
+        anchor: alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>,
+    ) -> std::io::Result<Self> {
+        let minimum = anchor
+            .load()?
+            .ok_or_else(|| std::io::Error::other("missing belt anchor"))?;
         let mut wal = Self::open_existing_at_least(path, wal_key, minimum)?;
         crate::durable_ledger::advance_anchor(&*anchor, wal.checkpoint)?;
         wal.anchor = Some(anchor);
         Ok(wal)
     }
 
-    pub fn provision_genesis_anchored(path: impl Into<std::path::PathBuf>, wal_key: [u8; 32],
-        anchor: alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>) -> std::io::Result<Self> {
-        if anchor.load()?.is_some() { return Err(std::io::Error::other("belt anchor already enrolled")); }
+    pub fn provision_genesis_anchored(
+        path: impl Into<std::path::PathBuf>,
+        wal_key: [u8; 32],
+        anchor: alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>,
+    ) -> std::io::Result<Self> {
+        if anchor.load()?.is_some() {
+            return Err(std::io::Error::other("belt anchor already enrolled"));
+        }
         let mut wal = Self::provision_genesis(path, wal_key)?;
         crate::durable_ledger::advance_anchor(&*anchor, wal.checkpoint)?;
         wal.anchor = Some(anchor);
@@ -331,7 +349,12 @@ impl FsBeltWal {
         Ok(())
     }
 
-    fn tag(wal_key: &[u8; 32], lock_seal: &[u8; 8], generation: u64, state_bytes: &[u8]) -> [u8; 32] {
+    fn tag(
+        wal_key: &[u8; 32],
+        lock_seal: &[u8; 8],
+        generation: u64,
+        state_bytes: &[u8],
+    ) -> [u8; 32] {
         cshake256_32_multi_frame(
             TAG_WAL_MAC,
             &[wal_key, lock_seal, &generation.to_be_bytes(), state_bytes],
@@ -473,7 +496,8 @@ impl FsBeltWal {
 impl DurableWal for FsBeltWal {
     fn authorize_open(&self, record: &BeltLatchRecord) -> Result<(), WalError> {
         if let Some(anchor) = &self.anchor {
-            crate::durable_ledger::advance_anchor(&**anchor, self.checkpoint).map_err(|_| WalError::Io)?;
+            crate::durable_ledger::advance_anchor(&**anchor, self.checkpoint)
+                .map_err(|_| WalError::Io)?;
         }
         let (reservation, bound_epoch) = self.release.borrow_mut().take().ok_or(WalError::Io)?;
         if bound_epoch != record.epoch
@@ -501,7 +525,8 @@ impl DurableWal for FsBeltWal {
         self.record.replace(&encoded).map_err(|_| WalError::Io)?;
         self.checkpoint = next_ckpt;
         if let Some(anchor) = &self.anchor {
-            crate::durable_ledger::advance_anchor(&**anchor, next_ckpt).map_err(|_| WalError::Io)?;
+            crate::durable_ledger::advance_anchor(&**anchor, next_ckpt)
+                .map_err(|_| WalError::Io)?;
         }
         Ok(())
     }
@@ -600,7 +625,10 @@ impl fmt::Display for BeltLatchError {
                 f.write_str("a persist failed earlier; recover a new latch from the log")
             }
             Self::SplitView { party } => {
-                write!(f, "split view: echo of party {party} differs from the local record")
+                write!(
+                    f,
+                    "split view: echo of party {party} differs from the local record"
+                )
             }
             Self::PermitMismatch => f.write_str("open permit does not match the record"),
             Self::Wal(e) => write!(f, "write-ahead log failure: {e:?}"),
@@ -638,12 +666,7 @@ pub struct BeltEcho {
 /// Derive the echo-MAC key of the pair `{a, b}` from secret material that exactly those two
 /// parties hold. `context` is public and separates deployments (for example the public key).
 /// The result is the same whichever of the two calls it, and is used only for echo tags.
-pub fn derive_echo_mac_key(
-    context: &[u8],
-    a: usize,
-    b: usize,
-    pair_secrets: &[&[u8]],
-) -> [u8; 32] {
+pub fn derive_echo_mac_key(context: &[u8], a: usize, b: usize, pair_secrets: &[&[u8]]) -> [u8; 32] {
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     let mut xof = Cshake256Xof::new(TAG_ECHO_KEY);
     let mut field = |bytes: &[u8]| {
@@ -792,7 +815,10 @@ impl<W: DurableWal> fmt::Debug for BeltLatch<W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BeltLatch")
             .field("next_epoch", &self.state.next_epoch)
-            .field("in_flight_epoch", &self.state.in_flight.as_ref().map(|r| r.epoch))
+            .field(
+                "in_flight_epoch",
+                &self.state.in_flight.as_ref().map(|r| r.epoch),
+            )
             .field("party", &self.echo_keys.as_ref().map(EchoMacKeys::party))
             .field("wal_poisoned", &self.wal_poisoned)
             .finish()
@@ -909,7 +935,11 @@ impl<W: DurableWal> BeltLatch<W> {
         target_sum_digits: &[u8],
     ) -> Result<BindOutcome, BeltLatchError> {
         if let Some(salt) = self.latched_salt(epoch, msg_digest)? {
-            let rec = self.state.in_flight.as_ref().ok_or(BeltLatchError::NothingBound)?;
+            let rec = self
+                .state
+                .in_flight
+                .as_ref()
+                .ok_or(BeltLatchError::NothingBound)?;
             if !ct_eq_bytes32(&salt, retry_salt) {
                 return Err(BeltLatchError::RetrySaltMismatch);
             }
@@ -1115,7 +1145,10 @@ mod tests {
             l.bind(1, &[2; 32], &[8; 32], &DIGITS_B),
             Err(BeltLatchError::WalPoisoned)
         );
-        assert_eq!(l.latched_salt(0, &[1; 32]), Err(BeltLatchError::WalPoisoned));
+        assert_eq!(
+            l.latched_salt(0, &[1; 32]),
+            Err(BeltLatchError::WalPoisoned)
+        );
         assert_eq!(l.echo_for(1), Err(BeltLatchError::WalPoisoned));
         assert_eq!(l.verify_peer_echoes(&[]), Err(BeltLatchError::WalPoisoned));
         assert_eq!(l.wal_mut().persist_count(), 0);
@@ -1125,7 +1158,10 @@ mod tests {
         assert!(!l.is_wal_poisoned());
         assert_eq!(l.in_flight(), None);
         assert_eq!(l.next_epoch(), 0);
-        assert_eq!(l.bind(0, &[1; 32], &[9; 32], &DIGITS_A), Ok(BindOutcome::Fresh));
+        assert_eq!(
+            l.bind(0, &[1; 32], &[9; 32], &DIGITS_A),
+            Ok(BindOutcome::Fresh)
+        );
         assert_eq!(l.wal_mut().persist_count(), 1);
         assert!(l.echo_for(1).is_ok());
     }
@@ -1202,7 +1238,10 @@ mod tests {
     #[test]
     fn crash_replay_is_idempotent_and_never_re_rolls_the_salt() {
         let mut l = latch();
-        assert_eq!(l.bind(5, &[1; 32], &[9; 32], &DIGITS_A), Ok(BindOutcome::Fresh));
+        assert_eq!(
+            l.bind(5, &[1; 32], &[9; 32], &DIGITS_A),
+            Ok(BindOutcome::Fresh)
+        );
         assert_eq!(l.next_epoch(), 6);
 
         // Crash: only the log survives.
@@ -1213,7 +1252,10 @@ mod tests {
 
         // Same request: replay, with no further write.
         let before = l.wal_mut().persist_count();
-        assert_eq!(l.bind(5, &[1; 32], &[9; 32], &DIGITS_A), Ok(BindOutcome::Replay));
+        assert_eq!(
+            l.bind(5, &[1; 32], &[9; 32], &DIGITS_A),
+            Ok(BindOutcome::Replay)
+        );
         assert_eq!(l.wal_mut().persist_count(), before);
 
         // Any change on the latched epoch is refused.
@@ -1221,7 +1263,10 @@ mod tests {
             l.bind(5, &[2; 32], &[9; 32], &DIGITS_A),
             Err(BeltLatchError::EpochAlreadyBound)
         );
-        assert_eq!(l.latched_salt(5, &[2; 32]), Err(BeltLatchError::EpochAlreadyBound));
+        assert_eq!(
+            l.latched_salt(5, &[2; 32]),
+            Err(BeltLatchError::EpochAlreadyBound)
+        );
         assert_eq!(
             l.bind(5, &[1; 32], &[8; 32], &DIGITS_A),
             Err(BeltLatchError::RetrySaltMismatch)
@@ -1240,13 +1285,19 @@ mod tests {
             );
         }
         // Moving on consumes epoch 5 as well, across another crash.
-        assert_eq!(l.bind(6, &[3; 32], &[7; 32], &DIGITS_B), Ok(BindOutcome::Fresh));
+        assert_eq!(
+            l.bind(6, &[3; 32], &[7; 32], &DIGITS_B),
+            Ok(BindOutcome::Fresh)
+        );
         let mut l = BeltLatch::recover(l.into_wal(), 20).unwrap();
         assert_eq!(
             l.bind(5, &[1; 32], &[9; 32], &DIGITS_A),
             Err(BeltLatchError::EpochConsumed)
         );
-        assert_eq!(l.bind(6, &[3; 32], &[7; 32], &DIGITS_B), Ok(BindOutcome::Replay));
+        assert_eq!(
+            l.bind(6, &[3; 32], &[7; 32], &DIGITS_B),
+            Ok(BindOutcome::Replay)
+        );
     }
 
     #[test]
@@ -1256,8 +1307,14 @@ mod tests {
             BeltLatchError::InvalidCapacity
         );
         let mut l = BeltLatch::recover(MemoryWal::new(), 2).unwrap();
-        assert_eq!(l.bind(3, &[1; 32], &[9; 32], &DIGITS_A), Ok(BindOutcome::Fresh));
-        assert_eq!(l.bind(4, &[1; 32], &[9; 32], &DIGITS_A), Err(BeltLatchError::Exhausted));
+        assert_eq!(
+            l.bind(3, &[1; 32], &[9; 32], &DIGITS_A),
+            Ok(BindOutcome::Fresh)
+        );
+        assert_eq!(
+            l.bind(4, &[1; 32], &[9; 32], &DIGITS_A),
+            Err(BeltLatchError::Exhausted)
+        );
     }
 
     #[test]
@@ -1273,7 +1330,10 @@ mod tests {
         assert_eq!(permits_authorise(&permits, &record), Ok(()));
         let mut other = record.clone();
         other.target_sum_digits = DIGITS_B.to_vec();
-        assert_eq!(permits_authorise(&permits, &other), Err(BeltLatchError::PermitMismatch));
+        assert_eq!(
+            permits_authorise(&permits, &other),
+            Err(BeltLatchError::PermitMismatch)
+        );
 
         // One echo is not enough, and neither is the same peer twice.
         let to_0_from_1 = latches[1].echo_for(0).unwrap();
@@ -1316,7 +1376,10 @@ mod tests {
         assert_eq!(k01, derive_echo_mac_key(b"ctx", 1, 0, secret));
         assert_ne!(k01, derive_echo_mac_key(b"ctx", 0, 2, secret));
         assert_ne!(k01, derive_echo_mac_key(b"other", 0, 1, secret));
-        assert_ne!(k01, derive_echo_mac_key(b"ctx", 0, 1, &[&[7u8; 16], &[9u8; 16]]));
+        assert_ne!(
+            k01,
+            derive_echo_mac_key(b"ctx", 0, 1, &[&[7u8; 16], &[9u8; 16]])
+        );
         // Field boundaries are part of the input.
         assert_ne!(
             derive_echo_mac_key(b"ctx", 0, 1, &[&[1, 2], &[3]]),
@@ -1394,7 +1457,10 @@ mod tests {
         // was tagged, fails authentication as well.
         let mut q1 = latch_of(1);
         q1.bind(4, &md_a, &salt, &DIGITS_A).unwrap();
-        let redirected = BeltEcho { receiver: 0, ..q1.echo_for(2).unwrap() };
+        let redirected = BeltEcho {
+            receiver: 0,
+            ..q1.echo_for(2).unwrap()
+        };
         assert_eq!(
             p0.verify_peer_echoes(&[redirected, from_2]),
             Err(BeltLatchError::EchoMacInvalid { party: 1 })
@@ -1505,10 +1571,8 @@ mod fs_tests {
 
     impl Scratch {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(std::format!(
-                "qsag-belt-wal-{}-{name}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir()
+                .join(std::format!("qsag-belt-wal-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
@@ -1527,7 +1591,9 @@ mod fs_tests {
 
     fn bind_one(wal: FsBeltWal, epoch: u64) -> FsBeltWal {
         let mut latch = BeltLatch::recover(wal, 10).unwrap();
-        latch.bind(epoch, &[7; 32], &[9; 32], &[3, 0, 2, 1]).unwrap();
+        latch
+            .bind(epoch, &[7; 32], &[9; 32], &[3, 0, 2, 1])
+            .unwrap();
         latch.into_wal()
     }
 
@@ -1550,7 +1616,9 @@ mod fs_tests {
         drop(bind_one(wal, 5));
 
         assert_eq!(
-            FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap_err().kind(),
+            FsBeltWal::provision_genesis(dir.wal(), KEY)
+                .unwrap_err()
+                .kind(),
             std::io::ErrorKind::AlreadyExists
         );
         let wal = FsBeltWal::open_existing(dir.wal(), KEY).unwrap();
@@ -1562,7 +1630,10 @@ mod fs_tests {
     #[test]
     fn a_deleted_log_is_rejected_instead_of_restarting_at_epoch_zero() {
         let dir = Scratch::new("deleted");
-        drop(bind_one(FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap(), 5));
+        drop(bind_one(
+            FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap(),
+            5,
+        ));
         std::fs::remove_file(dir.wal()).unwrap();
 
         assert_eq!(
@@ -1571,7 +1642,9 @@ mod fs_tests {
         );
         // The lock sidecar outlives the log, so genesis cannot be replayed over it either.
         assert_eq!(
-            FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap_err().kind(),
+            FsBeltWal::provision_genesis(dir.wal(), KEY)
+                .unwrap_err()
+                .kind(),
             std::io::ErrorKind::AlreadyExists
         );
     }
@@ -1591,11 +1664,16 @@ mod fs_tests {
     #[test]
     fn the_record_is_bound_to_the_wal_key() {
         let dir = Scratch::new("keyed");
-        drop(bind_one(FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap(), 5));
+        drop(bind_one(
+            FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap(),
+            5,
+        ));
 
         // Wrong key.
         assert_eq!(
-            FsBeltWal::open_existing(dir.wal(), [0x5b; 32]).unwrap_err().kind(),
+            FsBeltWal::open_existing(dir.wal(), [0x5b; 32])
+                .unwrap_err()
+                .kind(),
             std::io::ErrorKind::InvalidData
         );
         // A well-formed epoch-0 state with a valid public digest but no MAC under the key:

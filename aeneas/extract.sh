@@ -107,4 +107,6 @@ echo "[4/4] Verifying Aeneas prelude, extracted MIR functions, and 0-sorry refin
   test -s lake-manifest.json
 )
 
+python3 "${SCRIPT_DIR}/../scripts/check_extraction_provenance.py" --record --crate qsag-verified
+
 echo "SUCCESS: Charon + Aeneas extraction and Lean 4 machine-checked proofs verified cleanly."

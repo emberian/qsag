@@ -1,5 +1,7 @@
 # Migration proof version 3
 
+The integrated main-library axiom audit checks **59,257 declarations, including 28,744 kernel theorem declarations, across 57 modules**, with **0 rejected axioms**. This includes private and compiler-generated declarations and 277 pure assurance-infrastructure declarations; 131 compile-time tactic declarations are excluded. Counts describe the checked definitions and premises, not complete production refinement. The combined extracted-MIR and custody audit checks **5,318 declarations / 2,093 theorems / 44 contributing modules**; the WHIR audit checks **1,558 / 718 / 7**. Both report **0 rejected axioms**. Sandboxed six-kernel challenge replay passes 107 main theorems and 65 MIR theorems plus 17 definitions.
+
 ## Relation and encoding
 
 The witness is a nonzero canonical **spending scalar**, not a derivation seed.
@@ -188,7 +190,7 @@ is transmitted:
 1. **Two-round transcript-bound coin-flipping (`Engine::coin_flip`):** Every
    verification challenge commits (`QSAG.OUTER.COIN.COMMIT.V1`) to fresh hedged
    randomness (`QSAG.OUTER.COIN.HEDGE.V1`) and both incident pairwise
-   `TranscriptSponge` digests, echoes peer commitments, verifies three-edge
+   domain-separated transcript digests, echoes peer commitments, verifies three-edge
    transcript agreement and commitment openings in constant time, and derives
    public coins via `QSAG.OUTER.COIN.DERIVE.V1`. No single rushing custodian can
    bias challenges after sending multiplication shares.
@@ -298,6 +300,14 @@ prior to reconstruction. Each custodian runs the unchanged public verifier
 (`QSAG.OUTER.COMPLETE.V1`).
 
 ### Validation scope
+
+The integrated 2026-11-14 validation run passed all 39 migration unit tests in
+892.97 seconds, including both complete 438-repetition Bitcoin and Ed25519
+ceremonies and both witness-substitution regressions. Its compile-fail doctest
+also passed. This closes the earlier timed-out Bitcoin execution check; it does
+not establish the open production privacy or FS/QROM refinements. The unified
+proof census and remaining boundaries are tracked in
+[the convergence record](../../docs/CONVERGENCE_STATUS.md).
 
 Unit and adversarial integration tests verify:
 

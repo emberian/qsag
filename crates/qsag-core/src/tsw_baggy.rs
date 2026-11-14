@@ -1946,7 +1946,9 @@ pub fn retry_single_sign_stateful<S: TweakableHashSuite, L: StatefulEpochLatch>(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FaultCacheError { Rejected }
+pub enum FaultCacheError {
+    Rejected,
+}
 
 /// A verified OTS input, indexed by its canonical WOTS public-key address.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1958,7 +1960,11 @@ pub struct FaultCacheRecord {
 
 /// Transactional fault cache. Failure must prevent release of the candidate signature.
 pub trait FaultCacheJournal {
-    fn commit_verified(&mut self, key_id: [u8; 32], entries: &[FaultCacheRecord]) -> Result<(), FaultCacheError>;
+    fn commit_verified(
+        &mut self,
+        key_id: [u8; 32],
+        entries: &[FaultCacheRecord],
+    ) -> Result<(), FaultCacheError>;
 }
 
 /// Authenticated persistent upper-layer cache, matching `verifyBeforeReleaseAll`.
@@ -1968,21 +1974,35 @@ pub struct FsFaultCacheJournal(crate::durable_ledger::Ledger);
 
 #[cfg(feature = "std")]
 impl FsFaultCacheJournal {
-    pub fn create_new(path: impl Into<std::path::PathBuf>, mac_key: [u8; 32]) -> Result<Self, FaultCacheError> {
+    pub fn create_new(
+        path: impl Into<std::path::PathBuf>,
+        mac_key: [u8; 32],
+    ) -> Result<Self, FaultCacheError> {
         crate::durable_ledger::Ledger::create(path, mac_key, b"QSAG.TSW.FAULT.CACHE/v1")
-            .map(Self).map_err(|_| FaultCacheError::Rejected)
+            .map(Self)
+            .map_err(|_| FaultCacheError::Rejected)
     }
-    pub fn open_existing_at_least(path: impl Into<std::path::PathBuf>, mac_key: [u8; 32],
-        minimum: crate::durable_ledger::LedgerCheckpoint) -> Result<Self, FaultCacheError> {
+    pub fn open_existing_at_least(
+        path: impl Into<std::path::PathBuf>,
+        mac_key: [u8; 32],
+        minimum: crate::durable_ledger::LedgerCheckpoint,
+    ) -> Result<Self, FaultCacheError> {
         crate::durable_ledger::Ledger::open(path, mac_key, b"QSAG.TSW.FAULT.CACHE/v1", minimum)
-            .map(Self).map_err(|_| FaultCacheError::Rejected)
+            .map(Self)
+            .map_err(|_| FaultCacheError::Rejected)
     }
-    pub fn checkpoint(&self) -> crate::durable_ledger::LedgerCheckpoint { self.0.checkpoint() }
+    pub fn checkpoint(&self) -> crate::durable_ledger::LedgerCheckpoint {
+        self.0.checkpoint()
+    }
 }
 
 #[cfg(feature = "std")]
 impl FaultCacheJournal for FsFaultCacheJournal {
-    fn commit_verified(&mut self, key_id: [u8; 32], entries: &[FaultCacheRecord]) -> Result<(), FaultCacheError> {
+    fn commit_verified(
+        &mut self,
+        key_id: [u8; 32],
+        entries: &[FaultCacheRecord],
+    ) -> Result<(), FaultCacheError> {
         let mut records = self.0.read().map_err(|_| FaultCacheError::Rejected)?;
         for entry in entries {
             let mut key = key_id.to_vec();
@@ -1994,14 +2014,20 @@ impl FaultCacheJournal for FsFaultCacheJournal {
             }
             records.insert(key, value);
         }
-        self.0.commit(&records).map_err(|_| FaultCacheError::Rejected)
+        self.0
+            .commit(&records)
+            .map_err(|_| FaultCacheError::Rejected)
     }
 }
 
 /// Verify every layer, then atomically commit the verified upper-layer `(root, tsw_ctr)`
 /// inputs before the caller releases the signature. Invalid candidates never alter the cache.
 pub fn verify_before_release_with_journal<S: TweakableHashSuite>(
-    suite: S, params: &PqHashParams, pk: &PqPublicKey, msg: &[u8], sig: &PqHashSig,
+    suite: S,
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    msg: &[u8],
+    sig: &PqHashSig,
     journal: &mut impl FaultCacheJournal,
 ) -> Result<(), FaultCacheError> {
     let mu = th_pre_hash(suite, &pk.pk_seed, &pk.pk_root, msg);
@@ -2014,10 +2040,19 @@ pub fn verify_before_release_with_journal<S: TweakableHashSuite>(
 }
 
 /// Opt-in persistent reference signing; legacy stateless entry points remain unchanged.
-#[expect(clippy::too_many_arguments, reason = "Reference signer plus caller-owned durable fault journal")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Reference signer plus caller-owned durable fault journal"
+)]
 pub fn eval_single_sign_stateless_with_journal<S: TweakableHashSuite>(
-    suite: S, params: &PqHashParams, sk: &PqSecretKey, pk: &PqPublicKey, msg: &[u8],
-    opt_rand: &[u8], max_grind: u32, journal: &mut impl FaultCacheJournal,
+    suite: S,
+    params: &PqHashParams,
+    sk: &PqSecretKey,
+    pk: &PqPublicKey,
+    msg: &[u8],
+    opt_rand: &[u8],
+    max_grind: u32,
+    journal: &mut impl FaultCacheJournal,
 ) -> Option<PqHashSig> {
     let sig = eval_single_sign_stateless(suite, params, sk, pk, msg, opt_rand, max_grind)?;
     verify_before_release_with_journal(suite, params, pk, msg, &sig, journal).ok()?;
@@ -2025,7 +2060,11 @@ pub fn eval_single_sign_stateless_with_journal<S: TweakableHashSuite>(
 }
 
 fn verify_pq_hash_sig_prehashed<S: TweakableHashSuite>(
-    suite: S, params: &PqHashParams, pk: &PqPublicKey, mu: &[u8; 32], sig: &PqHashSig,
+    suite: S,
+    params: &PqHashParams,
+    pk: &PqPublicKey,
+    mu: &[u8; 32],
+    sig: &PqHashSig,
 ) -> bool {
     verify_pq_hash_sig_collect(suite, params, pk, mu, sig, &mut Vec::new())
 }
@@ -2181,9 +2220,17 @@ fn verify_pq_hash_sig_collect<S: TweakableHashSuite>(
         };
         if layer_idx > 0 {
             entries.push(FaultCacheRecord {
-                address: HashAdrs { layer: layer_u32, tree: tree_idx, kind: AdrsKind::WotsPk,
-                    key_pair: kp_u32, chain_idx: 0, hash_step: 0 }.to_bytes(),
-                root: cur_root, tsw_ctr: lsig.tsw_ctr,
+                address: HashAdrs {
+                    layer: layer_u32,
+                    tree: tree_idx,
+                    kind: AdrsKind::WotsPk,
+                    key_pair: kp_u32,
+                    chain_idx: 0,
+                    hash_step: 0,
+                }
+                .to_bytes(),
+                root: cur_root,
+                tsw_ctr: lsig.tsw_ctr,
             });
         }
         cur_root = next_root;
@@ -2207,10 +2254,7 @@ pub fn verify_pq_hash_sig<S: TweakableHashSuite>(
 
 /// Batch verification relation over `Poseidon2` `Jorts` signatures enforcing non-emptiness AND
 /// strict pairwise distinctness of `(pk, sig.leaf_global_idx)` (`[P0-04]`).
-pub fn valid_jorts_batch(
-    params: &PqHashParams,
-    items: &[(PqPublicKey, &[u8], PqHashSig)],
-) -> bool {
+pub fn valid_jorts_batch(params: &PqHashParams, items: &[(PqPublicKey, &[u8], PqHashSig)]) -> bool {
     if !params.stateful || !params.is_well_formed() || items.is_empty() {
         return false;
     }
@@ -2439,25 +2483,70 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn persistent_fault_cache_verifies_all_layers_and_commits_atomically() {
-        let dir = std::env::temp_dir().join(std::format!("qsag-fault-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(std::format!(
+            "qsag-fault-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&dir).unwrap();
         let path = dir.join("cache");
         let params = PqHashParams::COMPACT_GOLDEN;
-        let sk = PqSecretKey { sk_seed: [1; 32], sk_prf: [2; 32], pk_seed: [3; 32] };
+        let sk = PqSecretKey {
+            sk_seed: [1; 32],
+            sk_prf: [2; 32],
+            pk_seed: [3; 32],
+        };
         let pk = derive_public_key(Cshake256Suite, &params, &sk);
         let mut journal = FsFaultCacheJournal::create_new(&path, [4; 32]).unwrap();
-        let sig = eval_single_sign_stateless_with_journal(Cshake256Suite, &params, &sk, &pk,
-            b"journal", &[0; 32], 100_000, &mut journal).unwrap();
+        let sig = eval_single_sign_stateless_with_journal(
+            Cshake256Suite,
+            &params,
+            &sk,
+            &pk,
+            b"journal",
+            &[0; 32],
+            100_000,
+            &mut journal,
+        )
+        .unwrap();
         let checkpoint = journal.checkpoint();
-        assert!(verify_before_release_with_journal(Cshake256Suite, &params, &pk, b"tampered", &sig, &mut journal).is_err());
+        assert!(
+            verify_before_release_with_journal(
+                Cshake256Suite,
+                &params,
+                &pk,
+                b"tampered",
+                &sig,
+                &mut journal
+            )
+            .is_err()
+        );
         assert_eq!(journal.checkpoint(), checkpoint);
         drop(journal);
-        let mut journal = FsFaultCacheJournal::open_existing_at_least(&path, [4; 32], checkpoint).unwrap();
-        verify_before_release_with_journal(Cshake256Suite, &params, &pk, b"journal", &sig, &mut journal).unwrap();
+        let mut journal =
+            FsFaultCacheJournal::open_existing_at_least(&path, [4; 32], checkpoint).unwrap();
+        verify_before_release_with_journal(
+            Cshake256Suite,
+            &params,
+            &pk,
+            b"journal",
+            &sig,
+            &mut journal,
+        )
+        .unwrap();
         let mu = th_pre_hash(Cshake256Suite, &pk.pk_seed, &pk.pk_root, b"journal");
         let mut entries = Vec::new();
-        assert!(verify_pq_hash_sig_collect(Cshake256Suite, &params, &pk, &mu, &sig, &mut entries));
+        assert!(verify_pq_hash_sig_collect(
+            Cshake256Suite,
+            &params,
+            &pk,
+            &mu,
+            &sig,
+            &mut entries
+        ));
         assert_eq!(entries.len(), params.num_layers - 1);
         let key = cshake256_32(b"QSAG.TSW.FAULT.KEY/v1", &pk.to_wire_bytes());
         let checkpoint = journal.checkpoint();
@@ -2468,8 +2557,13 @@ mod tests {
         entries[0].tsw_ctr ^= 1;
         assert!(journal.commit_verified(key, &entries).is_err());
         // Conflicting duplicates in a new batch cannot partially commit.
-        let mut duplicate = entries[0].clone(); duplicate.root[0] ^= 1;
-        assert!(journal.commit_verified([9; 32], &[entries[0].clone(), duplicate]).is_err());
+        let mut duplicate = entries[0].clone();
+        duplicate.root[0] ^= 1;
+        assert!(
+            journal
+                .commit_verified([9; 32], &[entries[0].clone(), duplicate])
+                .is_err()
+        );
         assert_eq!(journal.checkpoint(), checkpoint);
         drop(journal);
         std::fs::remove_dir_all(dir).unwrap();

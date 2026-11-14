@@ -18,7 +18,7 @@ It builds exactly when those `Qsag` modules and their imports do; the primitive 
 
 Building this root runs the same axiom policy (`propext` and `Quot.sound` only) over every
 declaration these modules own, with a negative control, and checks that the belt and RSS weld
-theorems are present as theorems.
+theorems are present as theorems and the RSS simulation is a typed `ForwardSim` value.
 -/
 
 namespace QsagMirProofs
@@ -50,7 +50,7 @@ run_cmd do
   let negative ← Lean.collectAxioms ``Classical.choice
   if (negative.filter fun ax => ax != ``propext && ax != ``Quot.sound).isEmpty then
     throwError "custody weld axiom audit negative control unexpectedly passed"
-  let env ← getEnv
+  let env := (← getEnv).setExporting false
   let requiredModules := [
     "QsagVerified.Proofs.RealSpecBeltWeld",
     "QsagVerified.Proofs.RealSpecGuardBoundary",
@@ -59,12 +59,18 @@ run_cmd do
     ``qsag_verified.proofs.belt_grant_refines_qsag_mask,
     ``qsag_verified.proofs.belt_quorum_intersection_refines_qsag,
     ``qsag_verified.proofs.belt_validated_grant_refines_qsag_mask,
-    ``qsag_verified.proofs.extractedRssCut_forwardSim_mirRssCut,
+    ``qsag_verified.proofs.extractedRssCut_inherits_spec_trace_safety,
     ``qsag_verified.proofs.tooth_velocity_used_nonce_model_is_not_monotone_nonce]
   for name in requiredTheorems do
     match env.find? name with
     | some (.thmInfo _) => pure ()
     | _ => throwError "custody weld axiom audit missing theorem target: {name}"
+  let simulationName := ``qsag_verified.proofs.extractedRssCut_forwardSim_mirRssCut
+  match env.find? simulationName with
+  | some (.defnInfo info) =>
+    unless info.type.getAppFn.constName? == some ``Qsag.ForwardSim do
+      throwError "custody weld target is not a ForwardSim value: {simulationName}"
+  | _ => throwError "custody weld axiom audit missing simulation definition: {simulationName}"
   let mut coveredModules : List String := []
   let mut checked : Nat := 0
   let mut rejected : Nat := 0
@@ -75,7 +81,7 @@ run_cmd do
         if !coveredModules.contains owner then
           coveredModules := owner :: coveredModules
         checked := checked + 1
-        let axioms ← Lean.collectAxioms name
+        let axioms ← withEnv env <| Lean.collectAxioms name
         let forbidden := axioms.filter fun ax => ax != ``propext && ax != ``Quot.sound
         if !forbidden.isEmpty then
           rejected := rejected + 1

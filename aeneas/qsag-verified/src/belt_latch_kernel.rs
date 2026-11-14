@@ -213,7 +213,10 @@ impl BeltLatchKernel {
     pub const fn bind(
         self,
         req: BeltLatchBindRequest,
-    ) -> (BeltLatchKernel, Result<BeltLatchBindOutcome, BeltLatchKernelError>) {
+    ) -> (
+        BeltLatchKernel,
+        Result<BeltLatchBindOutcome, BeltLatchKernelError>,
+    ) {
         if self.wal_poisoned {
             return (self, Err(BeltLatchKernelError::WalPoisoned));
         }

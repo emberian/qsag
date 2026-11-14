@@ -359,7 +359,12 @@ fn threshold_few_time_signature_burns_each_epoch_once() {
     keygen(
         &dir,
         "fts-threshold",
-        &["--parties", "3", "--fast-demo", "--accept-trusted-dealer-demo"],
+        &[
+            "--parties",
+            "3",
+            "--fast-demo",
+            "--accept-trusted-dealer-demo",
+        ],
     );
     let (msg, other, sig) = (dir.path("msg"), dir.path("other"), dir.path("sig"));
     expect(&["sign", "--secret", &sk, "--in", &msg, "--out", &sig], 1);

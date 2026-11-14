@@ -1150,7 +1150,7 @@ def self_tests():
     return count
 
 
-def audit(path, objdump, strict, require_bitslice):
+def audit(path, objdump, strict, require_bitslice, require_namespaces=()):
     data = path.read_bytes()
     native_members = []
     if data.startswith(b'!<arch>\n'):
@@ -1207,6 +1207,11 @@ def audit(path, objdump, strict, require_bitslice):
     missing = [s for s in expected if not functions.get(s)]
     if require_bitslice:
         errors.extend(f'missing required bitslice kernel: {s}' for s in BITSLICE[machine] if s in missing)
+    if kind in (2, 3):
+        errors.extend(f'missing required linked assembly kernel: {symbol}' for symbol in missing)
+    for module in require_namespaces:
+        if not any(module in symbol for symbol in audited):
+            errors.append(f'missing required Rust namespace: {module}')
     if not audited:
         errors.append('no matching native symbols; use strip=none and retain the kernel call sites')
     print(f'{path}: ELF type={kind}, machine={machine}; audited {len(audited)} symbols')
@@ -1219,7 +1224,8 @@ def audit(path, objdump, strict, require_bitslice):
     print(f'  Rust conditional instructions inspected: {branches}; protocol control flow requires dataflow review')
     for error in errors:
         print(f'  FAIL: {error}', file=sys.stderr)
-    print(f'  instruction screen: {"FAIL" if errors else "PASS"}')
+    present = sum(any(module in symbol for symbol in audited) for module in RUST_MODULES)
+    print(f'  instruction screen: {"FAIL" if errors else "PASS"} ({present}/{len(RUST_MODULES)} Rust namespaces present)')
     return not errors
 
 
@@ -1322,6 +1328,8 @@ def main():
     parser.add_argument('--llvm-objdump')
     parser.add_argument('--require-bitslice', action=argparse.BooleanOptionalAction, default=True,
                         help='require every bitslice assembly kernel for the input architecture (default: enabled)')
+    parser.add_argument('--require-namespace', action='append', default=[], choices=RUST_MODULES,
+                        help='require this compiled Rust namespace; repeat for each required surface')
     parser.add_argument('--strict-rust-branches', action='store_true')
     parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--check-fixtures', type=Path)
@@ -1355,7 +1363,7 @@ def main():
         try:
             if name in args.elf_bin and elf_header(Path(name).read_bytes())[0] not in (2, 3):
                 raise ValueError('--elf-bin requires a linked ET_EXEC or ET_DYN image')
-            success = audit(Path(name).resolve(), args.llvm_objdump, args.strict_rust_branches, args.require_bitslice) and success
+            success = audit(Path(name).resolve(), args.llvm_objdump, args.strict_rust_branches, args.require_bitslice, args.require_namespace) and success
         except (ValueError, OSError, subprocess.CalledProcessError) as error:
             print(f'{name}: FAIL: {error}', file=sys.stderr)
             success = False

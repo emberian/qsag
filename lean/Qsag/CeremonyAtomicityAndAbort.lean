@@ -80,6 +80,8 @@ Constructive (`0 Classical.choice`) Lean 4.35 formalization closing:
      adversary, paired with `tooth_rom_commit_without_framed_blind_exceeds_bound`.
 -/
 
+public import Qsag.MlDsa44Parameters
+public import Qsag.Digest256
 public import Qsag.Constructive
 public import Qsag.SimulationSpine
 public import Qsag.Goldilocks
@@ -100,9 +102,6 @@ namespace Qsag
 set_option autoImplicit false
 
 /-! ## §1. Five-Ledger Crash/Interleaving Ceremony Atomicity (Zero Cross-File 2PC) -/
-
-/-- Full-width 256-bit cryptographic digest carrier (`SHAKE256` / ledger MAC / message digest). -/
-abbrev Digest256 := BitVec 256
 
 /-- Persistent on-disk slot of an alternating two-slot write-ahead log (`slot_a` / `slot_b`). -/
 structure WalSlot (S : Type) where
@@ -2685,7 +2684,11 @@ theorem witness_posix_slot_write_crash_inhabited :
       PosixRefinesWal L fs wal ∧ wal.volatileStage = some (1, ()) ∧
       assocLookup fs.nand.fileBlocks L.oddIno = some [] ∧
       assocLookup fs.kernel.pageCache.dirtyFiles L.oddIno = some [0x01] ∧
-      L.slotView [0x01] = some (1, ()) ∧ CrashStep fs crashed :=
+      L.slotView [0x01] = some (1, ()) ∧
+      ((1 % 2 = 0 ∧ L.oddIno = L.evenIno ∧ L.evenIno = L.oddIno) ∨
+       (¬ 1 % 2 = 0 ∧ L.oddIno = L.oddIno ∧ L.evenIno = L.evenIno)) ∧
+      assocLookup fs.kernel.pageCache.dirtyFiles L.evenIno = none ∧
+      assocLookup fs.driveCache.cachedFiles L.evenIno = none ∧ CrashStep fs crashed :=
   ⟨{ evenIno := 1, oddIno := 2, slotView := fun bs => if bs = [0x01] then some (1, ()) else none },
    { kernel := { pageCache := { dirtyFiles := [(2, [0x01])] } }
      nand := { fileBlocks := [(1, []), (2, [])], nextInode := 3 } },
@@ -2693,6 +2696,7 @@ theorem witness_posix_slot_write_crash_inhabited :
    { slotEven := none, slotOdd := none, anchorGen := 0, genesisPayload := (),
      volatileStage := some (1, ()) },
    ⟨fun _ _ => rfl, fun _ _ => rfl⟩, rfl, rfl, rfl, rfl,
+   Or.inr ⟨by decide, rfl, rfl⟩, rfl, rfl,
    CrashStep.powerLoss .revertToNand (fun _ => SectorTearMask.dropAllVolatile) _⟩
 
 /-! ## §2. Cut-the-Hash 2-Phase Transcript & Selective-Abort Statistical Independence -/
@@ -4060,12 +4064,6 @@ theorem cutTheHash_rom_commit_hiding_sd_bound_256
 
 /-! ## §3. Threshold ML-DSA-44 Rejection Independence: `z` Box, `LowBits` Margin & `HighBits` -/
 
-/-- Deployed FIPS 204 `ML-DSA-44` masking range parameter `γ₁ = 2^17 = 131072`. -/
-def mldsa44Gamma1 : Nat := 131072
-
-/-- Deployed FIPS 204 `ML-DSA-44` secret-shift bound `β = τ · η = 39 · 2 = 78`. -/
-def mldsa44Beta : Nat := 78
-
 /-- Cardinality `2 * gamma1 - 1` of the integer mask interval `[-gamma1 + 1, gamma1 - 1]`. -/
 def mldsaMaskIntervalCard (gamma1 : Nat) : Nat := 2 * gamma1 - 1
 
@@ -4558,8 +4556,8 @@ theorem tooth_mldsa_unclipped_z_leaks_secret_shift :
 theorem witness_mldsa44_secret_bound_inhabited :
     ∃ (c_s1 : Int),
       inMldsaSecretBound mldsa44Beta c_s1 ∧
-      inMldsaSafeBox mldsa44Gamma1 mldsa44Beta 0 :=
-  ⟨-78, by decide, by decide⟩
+      inMldsaSafeBox mldsa44Gamma1 mldsa44Beta 0 ∧ mldsa44Beta < mldsa44Gamma1 :=
+  ⟨-78, by decide, by decide, by decide⟩
 
 
 /-! ### FIPS 204 Joint `(z, r₀)` Rejection: `HighBits` Invariance & `(w₁, z)` Transcript Simulation
@@ -6172,16 +6170,76 @@ theorem mldsa_attempt_rom_reprogramming_bound {Ch J I X : Type} {N : Nat} [Decid
 #tooth_pair mldsa44_joint_transcript_simulation vs tooth_mldsa44_low_bits_margin_omitted_leaks_s2
 #tooth_pair mldsa44_joint_transcript_secret_independent vs tooth_mldsa44_low_bits_margin_omitted_leaks_s2
 
+/-- A nonempty ring instance supplies all secret bounds and the public-key equation. -/
+theorem witness_mldsa44_ring_premises :
+    ∃ (A : Fin 1 → Fin 1 → Fin 256 → Int)
+      (s1 s2 t : Fin 1 → Fin 256 → Int) (c : Fin 256 → Int),
+      InChallengeBall 39 c ∧ (∀ j, PolyBound 2 (s1 j)) ∧
+      (∀ r, PolyBound 2 (s2 r)) ∧
+      (∀ r m, (8380417 : Int) ∣ t r m - (ringMatVec A s1 r m + s2 r m)) := by
+  refine ⟨fun _ _ _ => 0, fun _ _ => 0, fun _ _ => 0, fun _ _ => 0,
+    (fun i => if i.val < 39 then 1 else 0),
+    ⟨(fun i => by by_cases h : i.val < 39 <;> simp [h]),
+      l1Norm_prefix_ones 256 39 (by decide)⟩,
+    fun _ _ => Nat.zero_le 2, fun _ _ => Nat.zero_le 2, ?_⟩
+  intro r m
+  simp only [ringMatVec, polyMul_zero_right, intDot_zero, Int.add_zero, Int.sub_zero]
+  exact ⟨0, rfl⟩
+
+/-- Enumeration of the full one-coordinate mask interval. -/
+def unitLinMaskEnum : SimpleEquiv (Fin (mldsaMaskIntervalCard mldsa44Gamma1)) (LinMaskBox Unit) where
+  toFun i := ⟨fun _ => decodeMldsaMask mldsa44Gamma1 i,
+    fun _ => (encode_decodeMldsaMask (by decide) i).1⟩
+  invFun y := encodeMldsaMask (by decide) (y.1 ()) (y.2 ())
+  left_inv i := (encode_decodeMldsaMask (by decide) i).2
+  right_inv y := by
+    apply Subtype.ext
+    funext u
+    cases u
+    exact decode_encodeMldsaMask (by decide) _ _
+
+theorem witness_lin_enumerated_key_relation :
+    ∃ (pub : LinCommitInstance Unit Unit) (sec : LinSecretShift Unit Unit)
+      (_enumY : SimpleEquiv (Fin (mldsaMaskIntervalCard mldsa44Gamma1)) (LinMaskBox Unit)),
+      LinKeyRelation pub sec := by
+  obtain ⟨pub, sec, h⟩ := witness_lin_key_relation_inhabited
+  exact ⟨pub, sec, unitLinMaskEnum, h⟩
+
+/-- A dead host has a valid continuation starting from that same dead state. -/
+theorem witness_failed_closed_continuation :
+    ∃ s : MultiLedgerHostState, HostFailedClosed s ∧ ValidMultiLedgerTrace s [] s := by
+  obtain ⟨_, s, _, hd, _, _⟩ := witness_torn_checkpointed_leaf_fails_closed
+  exact ⟨s, hd, .nil s⟩
+
+/-- Joint witness includes the adaptive query-budget condition. -/
+theorem witness_multi_attempt_budget :
+    ∃ (cp : Fin 2 → Fin 2) (adv : List Unit → List (Fin 2 × Unit) → List (Fin 2 × Unit)),
+      CommitFiberBound cp 1 ∧ ∀ ts log, (adv ts log).length ≤ log.length + 0 := by
+  obtain ⟨cp, hcp⟩ := witness_commit_fiber_bound_inhabited
+  exact ⟨cp, fun _ log => log, hcp, fun _ _ => Nat.le_refl _⟩
+
+local instance unitForallDecidable (p : Unit → Prop) [DecidablePred p] : Decidable (∀ u, p u) :=
+  if h : p () then .isTrue (fun u => by cases u; exact h)
+  else .isFalse (fun hall => h (hall ()))
+
+local instance unitLinAcceptDecidable (pub : LinCommitInstance Unit Unit)
+    (sec : LinSecretShift Unit Unit) : DecidablePred (linRealAccept pub sec) := by
+  intro y
+  exact inferInstanceAs (Decidable
+    ((∀ j : Unit, inMldsaSafeBox mldsa44Gamma1 mldsa44Beta (y j + sec.cs1 j)) ∧
+     (∀ i : Unit, mldsa44LowBitsOk (mldsa44LowBits (pub.W y i - sec.cs2 i)))))
+
 #verify_inhabited ceremony_multi_ledger_crash_interleaving_safe witness_multi_ledger_crash_trace_inhabited
 #verify_inhabited posix_crash_during_slot_write_refines witness_posix_slot_write_crash_inhabited
 #verify_inhabited cutTheHash_rom_commit_hiding_sd_bound witness_rom_commit_hiding_inhabited
-#verify_inhabited mldsa44_ring_key_relation witness_mldsa44_challenge_ball_inhabited
-#verify_inhabited mldsa44_ring_joint_transcript_simulation witness_mldsa44_challenge_ball_inhabited
+#verify_inhabited mldsa44_ring_key_relation witness_mldsa44_ring_premises
+#verify_inhabited mldsa44_ring_joint_transcript_simulation witness_mldsa44_ring_premises
 #verify_inhabited lin_joint_transcript_simulation witness_lin_key_relation_inhabited
-#verify_inhabited lin_rejected_commitment_count_secret_independent witness_lin_key_relation_inhabited
+#verify_inhabited lin_rejected_commitment_count_secret_independent witness_lin_enumerated_key_relation
 #verify_inhabited roAttempt_reprogramming_bound witness_commit_fiber_bound_inhabited
-#verify_inhabited multiAttempt_reprogramming_bound witness_commit_fiber_bound_inhabited
-#verify_inhabited failed_closed_host_stays_closed witness_torn_checkpointed_leaf_fails_closed
+#verify_inhabited multiAttempt_reprogramming_bound witness_multi_attempt_budget
+#verify_inhabited failed_closed_host_stays_closed witness_failed_closed_continuation
+set_option maxRecDepth 65536 in
 #verify_inhabited cutTheHash_abort_conditioned_sd_zero witness_cutTheHash_selective_abort_inhabited
 #verify_inhabited mldsa_rejection_valid_output_uniform_in_box witness_mldsa44_secret_bound_inhabited
 #verify_inhabited mldsa44_rejection_valid_output_uniform_in_box witness_mldsa44_secret_bound_inhabited

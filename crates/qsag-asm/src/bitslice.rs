@@ -204,9 +204,7 @@ fn vpclmul_without_legacy_pclmul_rejects_batch_kernel() {
     let mut expected = [13, 14];
     gf2_128_mul_acc_batch_portable(&mut expected, &a, &b);
     let mut actual = [13, 14];
-    gf2_128_mul_acc_batch_with_caps(
-        &mut actual, &a, &b, SimdBackend::X86Avx2GfniVpclmul, caps,
-    );
+    gf2_128_mul_acc_batch_with_caps(&mut actual, &a, &b, SimdBackend::X86Avx2GfniVpclmul, caps);
     assert_eq!(actual, expected);
     caps.pclmulqdq = true;
     assert!(vpclmul_batch_supported(caps));
@@ -292,8 +290,7 @@ fn gf2_128_mul_acc_batch_with_caps(
     }
     #[cfg(target_arch = "aarch64")]
     {
-        if backend == SimdBackend::Aarch64NeonSha3Pmull && caps.aarch64_neon && caps.aarch64_pmull
-        {
+        if backend == SimdBackend::Aarch64NeonSha3Pmull && caps.aarch64_neon && caps.aarch64_pmull {
             let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
             // SAFETY: both inputs hold `a.len() >= 1` 16-byte elements, `acc` is 16 writable
             // bytes, and the CPU supports NEON with PMULL.

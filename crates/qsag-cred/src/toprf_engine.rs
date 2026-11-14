@@ -183,8 +183,10 @@ pub(crate) fn decode_group(
     if digest_sender.is_none() {
         let mut out = Vec::with_capacity(gates);
         for gate in 0..gates {
-            let candidates: Vec<(usize, u64)> =
-                vectors.iter().map(|(sender, v)| (*sender, v[gate])).collect();
+            let candidates: Vec<(usize, u64)> = vectors
+                .iter()
+                .map(|(sender, v)| (*sender, v[gate]))
+                .collect();
             out.push(majority(&candidates, 2)?);
         }
         for (_, v) in &mut vectors {
@@ -384,9 +386,15 @@ mod tests {
                         let digest = digest_holder(recipient, j, gates).unwrap();
                         let dropped = holders.into_iter().find(|&h| h != digest).unwrap();
                         one_vector[dropped].clear();
-                        assert!(decode_group(&context, 3, recipient, j, gates, &one_vector).is_ok());
-                        assert!(decode_group(&context, 4, recipient, j, gates, &one_vector).is_err());
-                        assert!(decode_group(&[8; 32], 3, recipient, j, gates, &one_vector).is_err());
+                        assert!(
+                            decode_group(&context, 3, recipient, j, gates, &one_vector).is_ok()
+                        );
+                        assert!(
+                            decode_group(&context, 4, recipient, j, gates, &one_vector).is_err()
+                        );
+                        assert!(
+                            decode_group(&[8; 32], 3, recipient, j, gates, &one_vector).is_err()
+                        );
                     }
                 }
                 for bad in (0..SERVERS).filter(|&s| s != recipient) {
@@ -448,7 +456,13 @@ mod tests {
         let seeds: [[u8; 32]; 25] = core::array::from_fn(|i| [i as u8 + 1; 32]);
         let mut seen = Vec::new();
         for layer in 0..3 {
-            let engine = Engine { party: 4, seeds: &seeds, context: [9; 32], layer, transport: &mut Never };
+            let engine = Engine {
+                party: 4,
+                seeds: &seeds,
+                context: [9; 32],
+                layer,
+                transport: &mut Never,
+            };
             for i in 0..4 {
                 for j in (0..SERVERS).filter(|&j| j != i) {
                     seen.push(engine.masks(i, j, 2));
@@ -456,7 +470,11 @@ mod tests {
             }
         }
         for (a, x) in seen.iter().enumerate() {
-            assert!(seen[..a].iter().all(|y| x[0] != y[0] && x[1] != y[1] && x[0] != y[1]));
+            assert!(
+                seen[..a]
+                    .iter()
+                    .all(|y| x[0] != y[0] && x[1] != y[1] && x[0] != y[1])
+            );
         }
         let mut digests = [0usize; SERVERS];
         for i in 0..SERVERS {

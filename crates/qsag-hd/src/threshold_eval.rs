@@ -406,7 +406,11 @@ impl<'a> HdThresholdEvalRound2OpenShareAndCommitMac<'a> {
             &tags_bytes(&tags),
             &self.0.mac_salt,
         );
-        self.0.zero_test = Some(CommittedZeroGates::hold(self.0.session, MODULE_Q, &mut tags));
+        self.0.zero_test = Some(CommittedZeroGates::hold(
+            self.0.session,
+            MODULE_Q,
+            &mut tags,
+        ));
         self.0.opened_value = Some(value);
         Ok(self.mac_commitment())
     }
@@ -454,7 +458,9 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
         if !self.0.disclosure_started.get() {
             #[cfg(feature = "std")]
             if let Some(journal) = &self.0.share.poison_journal {
-                journal.begin_disclosure(self.0.session).map_err(|_| HdError::MacCheckFailed)?;
+                journal
+                    .begin_disclosure(self.0.session)
+                    .map_err(|_| HdError::MacCheckFailed)?;
             }
             self.0.disclosure_started.set(true);
         }
@@ -515,8 +521,12 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
         accepted?;
         let value = self.0.opened_value.ok_or(HdError::MacCheckFailed)?;
         #[cfg(feature = "std")]
-        if self.0.disclosure_started.get() && let Some(journal) = &self.0.share.poison_journal {
-            journal.complete_disclosure(self.0.session).map_err(|_| HdError::MacCheckFailed)?;
+        if self.0.disclosure_started.get()
+            && let Some(journal) = &self.0.share.poison_journal
+        {
+            journal
+                .complete_disclosure(self.0.session)
+                .map_err(|_| HdError::MacCheckFailed)?;
         }
         self.0.complete = true;
         Ok(value)
@@ -690,27 +700,46 @@ mod tests {
     fn production_share_requires_poison_journal() {
         let (_, mut shares) = setup_shamir_linear_module([4; 32], 2, &[1, 2, 3], 4).unwrap();
         shares[0].testing_poison_journal = false;
-        assert_eq!(shares[0].require_poison_journal(), Err(HdError::MacCheckFailed));
+        assert_eq!(
+            shares[0].require_poison_journal(),
+            Err(HdError::MacCheckFailed)
+        );
     }
     #[cfg(feature = "std")]
     #[test]
     fn mac_disclosing_abort_quarantines_recovered_family() {
         use crate::poison::{FsHdPoisonJournal, HdPoisonJournal};
-        let dir = std::env::temp_dir().join(alloc::format!("hd-eval-journal-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "hd-eval-journal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&dir).unwrap();
         let (pk, mut shares) = setup_shamir_linear_module([4; 32], 2, &[1, 2, 3], 4).unwrap();
         let family = shares[0].family_id();
         for (i, share) in shares.iter_mut().enumerate() {
             share.testing_poison_journal = false;
-            share.attach_poison_journal(Arc::new(FsHdPoisonJournal::create_new(dir.join(alloc::format!("{i}")), family, [9; 32]).unwrap())).unwrap();
+            share
+                .attach_poison_journal(Arc::new(
+                    FsHdPoisonJournal::create_new(dir.join(alloc::format!("{i}")), family, [9; 32])
+                        .unwrap(),
+                ))
+                .unwrap();
         }
         assert!(verify_all(states(&mut shares, &pk, false)).is_ok());
         let mut rounds = states(&mut shares, &pk, false);
-        for round in &mut rounds { round.mac_opening().unwrap(); }
+        for round in &mut rounds {
+            round.mac_opening().unwrap();
+        }
         drop(rounds);
         drop(shares);
         for i in 0..3 {
-            let journal = FsHdPoisonJournal::open_existing(dir.join(alloc::format!("{i}")), family, [9; 32]).unwrap();
+            let journal =
+                FsHdPoisonJournal::open_existing(dir.join(alloc::format!("{i}")), family, [9; 32])
+                    .unwrap();
             assert!(journal.is_poisoned().unwrap());
         }
         std::fs::remove_dir_all(dir).unwrap();
@@ -722,7 +751,9 @@ mod tests {
     }
     // Test harness routes public messages only; verification consumes one local
     // custodian state at a time, just as separate network endpoints would.
-    fn verify_all(mut states: Vec<HdThresholdEvalRound3VerifyMac<'_>>) -> Result<Vec<u32>, HdError> {
+    fn verify_all(
+        mut states: Vec<HdThresholdEvalRound3VerifyMac<'_>>,
+    ) -> Result<Vec<u32>, HdError> {
         let openings: Vec<_> = states
             .iter_mut()
             .map(|s| s.mac_opening())
@@ -807,7 +838,10 @@ mod tests {
             .collect()
     }
     fn residual_sums(states: &mut [HdThresholdEvalRound3VerifyMac<'_>]) -> [u32; 7] {
-        let openings: Vec<_> = states.iter_mut().map(|s| s.mac_opening().unwrap()).collect();
+        let openings: Vec<_> = states
+            .iter_mut()
+            .map(|s| s.mac_opening().unwrap())
+            .collect();
         core::array::from_fn(|lane| {
             openings
                 .iter()
@@ -832,7 +866,10 @@ mod tests {
             share.poisoned = Arc::new(AtomicBool::new(false));
         }
         let mut rounds = states(&mut shares, &pk, true);
-        let openings: Vec<_> = rounds.iter_mut().map(|s| s.mac_opening().unwrap()).collect();
+        let openings: Vec<_> = rounds
+            .iter_mut()
+            .map(|s| s.mac_opening().unwrap())
+            .collect();
         let leaked: [u32; 7] = core::array::from_fn(|lane| {
             mod_q_sub(
                 0,
@@ -879,7 +916,10 @@ mod tests {
                 share.poisoned = Arc::new(AtomicBool::new(false));
             }
             let mut rounds = states(&mut shares, &pk, false);
-            let mut openings: Vec<_> = rounds.iter_mut().map(|s| s.mac_opening().unwrap()).collect();
+            let mut openings: Vec<_> = rounds
+                .iter_mut()
+                .map(|s| s.mac_opening().unwrap())
+                .collect();
             if missing {
                 openings.pop();
             } else {
@@ -936,7 +976,10 @@ mod tests {
             assert_eq!(leaked, a1);
             // Corrupt party tries to repair the +1 using alpha extracted from c1.
             let (mut forged, key) = if victim_is_parent {
-                (states_with_repair(&mut parents, &pk, true, Some(leaked)), a0)
+                (
+                    states_with_repair(&mut parents, &pk, true, Some(leaked)),
+                    a0,
+                )
             } else {
                 (states_with_repair(&mut c2, &pk2, true, Some(leaked)), a2)
             };
@@ -1091,7 +1134,10 @@ mod tests {
 
         // Every custodian MUST abort inside `commit_mac` BEFORE computing or releasing the 7 MAC tags!
         for state in &mut round2 {
-            assert_eq!(state.commit_mac(&share_openings), Err(HdError::MacCheckFailed));
+            assert_eq!(
+                state.commit_mac(&share_openings),
+                Err(HdError::MacCheckFailed)
+            );
             assert!(state.0.zero_test.is_none());
             assert_eq!(state.0.opened_value, None);
             assert!(state.0.share.is_poisoned());

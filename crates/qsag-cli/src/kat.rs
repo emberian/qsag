@@ -227,8 +227,7 @@ fn accel_checks(report: &mut Report, kat: &Json) -> Result<(), CliError> {
 fn agg_checks(report: &mut Report, kat: &Json) -> Result<(), CliError> {
     use qsag_agg::sponge::poseidon2_hash32;
     use qsag_agg::{
-        SignerBitmap, SigningMode, ValidatorKeypair, aggregate_signatures,
-        verify_aggregate,
+        SignerBitmap, SigningMode, ValidatorKeypair, aggregate_signatures, verify_aggregate,
     };
 
     let poseidon = kat
@@ -281,16 +280,25 @@ fn agg_checks(report: &mut Report, kat: &Json) -> Result<(), CliError> {
     // Two validators sign one message; the aggregate must verify for that message only.
     let seed = [0x4B; 32];
     let message = b"qsag kat aggregate";
-    let mut keys: Vec<ValidatorKeypair> = (0..2)
-        .map(|i| crate::agg::validator(&seed, i))
-        .collect();
+    let mut keys: Vec<ValidatorKeypair> = (0..2).map(|i| crate::agg::validator(&seed, i)).collect();
     let committee: Vec<_> = keys.iter().map(|k| k.pk).collect();
-    let kat_dir = std::env::temp_dir().join(format!("qsag-agg-kat-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let kat_dir = std::env::temp_dir().join(format!(
+        "qsag-agg-kat-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir(&kat_dir).map_err(|e| CliError::io("creating KAT directory", e))?;
     let mut signatures = Vec::new();
     for (i, key) in keys.iter_mut().enumerate() {
-        let (mut wal, _) = qsag_agg::FsWalEpochSink::create_new_for_fresh_key(kat_dir.join(format!("{i}.wal")), &qsag_agg::sig::digest4_to_bytes(&key.pk.pk_root), [0x91; 32])
-            .map_err(|e| CliError::state(format!("KAT journal: {e:?}")))?;
+        let (mut wal, _) = qsag_agg::FsWalEpochSink::create_new_for_fresh_key(
+            kat_dir.join(format!("{i}.wal")),
+            &qsag_agg::sig::digest4_to_bytes(&key.pk.pk_root),
+            [0x91; 32],
+        )
+        .map_err(|e| CliError::state(format!("KAT journal: {e:?}")))?;
         signatures.push(key.sign_stateful(message, 0, &mut wal));
     }
     let signatures: Result<Vec<_>, _> = signatures.into_iter().collect();
@@ -427,8 +435,16 @@ fn fts_checks(report: &mut Report) {
         true,
         &CpuReferenceBackend,
     );
-    let journal_path = std::env::temp_dir().join(format!("qsag-frontier-check-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-    let wal = qsag_fts::FsWalFtsEpochLatch::create(&journal_path, key.wal_key(), [0x91; 32]).expect("create fresh test journal");
+    let journal_path = std::env::temp_dir().join(format!(
+        "qsag-frontier-check-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let wal = qsag_fts::FsWalFtsEpochLatch::create(&journal_path, key.wal_key(), [0x91; 32])
+        .expect("create fresh test journal");
     key = key.attach_wal(Box::new(wal)).expect("attach test journal");
     let dp = FrontierDpTable::build(profile);
     let message = b"qsag kat few-time signature";

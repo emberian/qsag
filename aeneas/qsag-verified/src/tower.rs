@@ -59,7 +59,10 @@ pub struct BdozVerifierSession2Lane {
 impl BdozVerifierSession2Lane {
     /// Create a fresh verifier session. The caller must provision fresh session keys.
     pub const fn new(alpha_lanes: [Tower128; 2]) -> Self {
-        Self { alpha_lanes, burned: false }
+        Self {
+            alpha_lanes,
+            burned: false,
+        }
     }
 
     pub const fn is_burned(&self) -> bool {
@@ -269,11 +272,7 @@ pub const fn gf256_inv_or_zero(a: Gf256) -> Gf256 {
 #[inline]
 pub const fn gf256_inv(a: Gf256) -> Option<Gf256> {
     let inv = gf256_inv_or_zero(a);
-    if inv.0 == 0 {
-        None
-    } else {
-        Some(inv)
-    }
+    if inv.0 == 0 { None } else { Some(inv) }
 }
 
 /// Branchless Frobenius Booleanity residual `x^2 ⊕ x` over `Gf256 = T_3`.
@@ -406,10 +405,7 @@ pub fn bdoz_commit_masked_tag(
 
 /// Fold a batch of wire openings against `mask_value` to obtain the public masked linear combination
 /// `mask_value ⊕ ∑_i chal_weight_i * embed(opened_value_i)`.
-pub fn bdoz_fold_masked_value(
-    mask_value: Tower128,
-    openings: &[BdozWireOpening2Lane],
-) -> Tower128 {
+pub fn bdoz_fold_masked_value(mask_value: Tower128, openings: &[BdozWireOpening2Lane]) -> Tower128 {
     let mut acc = mask_value;
     let mut i: usize = 0;
     while i < openings.len() {
@@ -509,10 +505,17 @@ pub struct BdozOpeningGuard2Lane {
 
 impl BdozOpeningGuard2Lane {
     pub const fn new(alpha_lanes: [Tower128; 2], session_id: [u8; 32], round_id: u64) -> Self {
-        Self { alpha_lanes, session_id, round_id, consumed: false }
+        Self {
+            alpha_lanes,
+            session_id,
+            round_id,
+            consumed: false,
+        }
     }
 
-    pub const fn is_consumed(&self) -> bool { self.consumed }
+    pub const fn is_consumed(&self) -> bool {
+        self.consumed
+    }
 
     /// Binds the opening to its provisioned context, checks the actual folded
     /// MAC and commitment, and clears keys before returning the decision.
@@ -527,7 +530,9 @@ impl BdozOpeningGuard2Lane {
             round_id: self.round_id,
             consumed: true,
         };
-        if self.consumed { return (spent, false); }
+        if self.consumed {
+            return (spent, false);
+        }
         if !ct_eq_bytes32(&self.session_id, &batch.session_id) || self.round_id != batch.round_id {
             return (spent, false);
         }

@@ -47,9 +47,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use qsag_core::belt_latch::{BeltLatch, BeltLatchError, BeltLatchRecord, DurableWal};
 #[cfg(any(test, feature = "testing-ephemeral"))]
 use qsag_core::belt_latch::MemoryWal;
+use qsag_core::belt_latch::{BeltLatch, BeltLatchError, BeltLatchRecord, DurableWal};
 use qsag_core::field::tower::{TowerGf256, lagrange_weights_zero_gf256};
 
 use crate::hash::{SeedRng, h32, mac32, mac32_verify};
@@ -648,9 +648,13 @@ pub const MAX_QUORUM_PARTIES: usize = 255;
 pub const MAX_COMMITTEES: usize = 1024;
 const MAX_STAGED_SHARE_BYTES: usize = 256 * 1024 * 1024;
 fn check_staging_budget(height: u8, copies: usize) -> Result<(), QuorumError> {
-    if height == 0 || height > 10 || (1usize << height).checked_mul(copies)
-        .and_then(|n| n.checked_mul(LEAF_SHARE_NODES * 32))
-        .is_none_or(|bytes| bytes > MAX_STAGED_SHARE_BYTES) {
+    if height == 0
+        || height > 10
+        || (1usize << height)
+            .checked_mul(copies)
+            .and_then(|n| n.checked_mul(LEAF_SHARE_NODES * 32))
+            .is_none_or(|bytes| bytes > MAX_STAGED_SHARE_BYTES)
+    {
         return Err(QuorumError::InvalidConfig("staging memory budget exceeded"));
     }
     Ok(())
@@ -842,21 +846,29 @@ pub struct CommitteePermit {
 struct SecretLeaves(Vec<Vec<Node>>);
 impl core::ops::Deref for SecretLeaves {
     type Target = [Vec<Node>];
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl Drop for SecretLeaves {
     fn drop(&mut self) {
-        for leaf in &mut self.0 { wipe_nodes(leaf); }
+        for leaf in &mut self.0 {
+            wipe_nodes(leaf);
+        }
     }
 }
 
 struct SecretMacKeys(Vec<Node>);
 impl core::ops::Deref for SecretMacKeys {
     type Target = [Node];
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl Drop for SecretMacKeys {
-    fn drop(&mut self) { wipe_nodes(&mut self.0); }
+    fn drop(&mut self) {
+        wipe_nodes(&mut self.0);
+    }
 }
 
 struct CommitteeSlot<W: DurableWal> {
@@ -954,10 +966,7 @@ impl<W: DurableWal> CommitteeCustodian<W> {
 
     /// The custodian's high-water mark for `committee`.
     pub fn next_epoch(&self, committee: usize) -> Result<u64, QuorumError> {
-        Ok(self
-            .slot(committee)?
-            .latch
-            .next_epoch())
+        Ok(self.slot(committee)?.latch.next_epoch())
     }
 
     /// The record currently bound for `committee`, if any.
@@ -986,25 +995,13 @@ impl<W: DurableWal> CommitteeCustodian<W> {
         if epoch >= self.layout.leaves_per_committee {
             return Err(QuorumError::Exhausted);
         }
-        let replay = slot
-            .latch
-            .in_flight()
-            .is_some_and(|r| r.epoch == epoch);
-        window_check(
-            epoch,
-            slot.latch.next_epoch(),
-            replay,
-            self.max_window,
-        )?;
+        let replay = slot.latch.in_flight().is_some_and(|r| r.epoch == epoch);
+        window_check(epoch, slot.latch.next_epoch(), replay, self.max_window)?;
         let leaf = self.layout.leaf_of(committee, epoch);
         let record = LeafRecord::derive(self.tree.public_key(), leaf, msg)
             .ok_or(QuorumError::GrindFailed)?;
-        slot.latch.bind(
-            epoch,
-            &record.msg_hash,
-            &record.salt(),
-            &record.digits,
-        )?;
+        slot.latch
+            .bind(epoch, &record.msg_hash, &record.salt(), &record.digits)?;
         Ok(record)
     }
 
@@ -1282,11 +1279,14 @@ impl QuorumConfig {
             return Err(QuorumError::InvalidConfig("need 1 <= t and 1 <= n <= 255"));
         }
         // Production uses global BFT liveness, not the safety-only committee mode.
-        if !qsag_verified::validate_belt_quorum_config(n as u32, t as u32, f as u32, q as u32, true) {
+        if !qsag_verified::validate_belt_quorum_config(n as u32, t as u32, f as u32, q as u32, true)
+        {
             if 2 * q <= n + f {
                 return Err(QuorumError::QuorumTooSmall { q, n, f });
             }
-            return Err(QuorumError::InvalidConfig("invalid global BFT quorum configuration"));
+            return Err(QuorumError::InvalidConfig(
+                "invalid global BFT quorum configuration",
+            ));
         }
         Ok(Self { t, n, f, q })
     }
@@ -1713,9 +1713,13 @@ pub fn combine_shamir_robust(
     let mut last_error = QuorumError::BadOpeningSet;
     let mut count = 1usize;
     for k in 1..=cfg.t.min(distinct.len() - cfg.t) {
-        count = count.checked_mul(distinct.len() - k + 1).and_then(|n| n.checked_div(k))
+        count = count
+            .checked_mul(distinct.len() - k + 1)
+            .and_then(|n| n.checked_div(k))
             .filter(|&n| n <= MAX_COMMITTEES)
-            .ok_or(QuorumError::InvalidConfig("robust reconstruction subset budget exceeded"))?;
+            .ok_or(QuorumError::InvalidConfig(
+                "robust reconstruction subset budget exceeded",
+            ))?;
     }
     for subset in combinations(distinct.len(), cfg.t) {
         let chosen: Vec<&ShareOpening> = subset.iter().map(|&i| distinct[i]).collect();
@@ -2141,18 +2145,17 @@ mod tests {
         let mut staged = stage_committee_partitioned(2, 3, 4, &SEED).unwrap();
         let material = staged.parties.remove(0);
         let wals = vec![MemoryWal::new(); material.stores.len()];
-        let mut custodian = CommitteeCustodian::new(
-            staged.layout.clone(),
-            staged.tree.clone(),
-            material,
-            wals,
-        )
-        .unwrap();
+        let mut custodian =
+            CommitteeCustodian::new(staged.layout.clone(), staged.tree.clone(), material, wals)
+                .unwrap();
         let c = staged.layout.committee_index(&[0, 2]).unwrap();
         let record = custodian.bind(c, 1, b"before the crash").unwrap();
         let wals = custodian.into_wals();
         // Simulate loading the original sealed material from trusted provisioning.
-        let material = stage_committee_partitioned(2, 3, 4, &SEED).unwrap().parties.remove(0);
+        let material = stage_committee_partitioned(2, 3, 4, &SEED)
+            .unwrap()
+            .parties
+            .remove(0);
         let mut restarted =
             CommitteeCustodian::new(staged.layout.clone(), staged.tree.clone(), material, wals)
                 .unwrap();
@@ -2798,14 +2801,20 @@ mod verified_config_parity {
             for t in 0..=17 {
                 for f in 0..=17 {
                     for q in 0..=17 {
-                        assert_eq!(QuorumConfig::with_quorum(t, n, f, q).is_ok(),
-                            qsag_verified::validate_belt_quorum_config(n as u32, t as u32, f as u32, q as u32, true));
+                        assert_eq!(
+                            QuorumConfig::with_quorum(t, n, f, q).is_ok(),
+                            qsag_verified::validate_belt_quorum_config(
+                                n as u32, t as u32, f as u32, q as u32, true
+                            )
+                        );
                     }
                 }
             }
         }
         // The extracted safety-only mode permits a unanimous committee without global liveness.
-        assert!(qsag_verified::validate_belt_quorum_config(3, 2, 1, 3, false));
+        assert!(qsag_verified::validate_belt_quorum_config(
+            3, 2, 1, 3, false
+        ));
         assert!(QuorumConfig::with_quorum(2, 3, 1, 3).is_err());
         assert!(QuorumConfig::with_quorum(4, 7, 0, 4).is_ok());
         assert!(QuorumConfig::with_quorum(5, 7, 0, 4).is_err());

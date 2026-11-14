@@ -286,25 +286,28 @@ impl BeltQuorumCore {
         wal_sync_ok: bool,
     ) -> (BeltQuorumCore, Result<(), PantsGuardError>) {
         if self.poisoned || matches!(self.phase, BeltQuorumPhase::Poisoned) {
-            return (poison_belt_guard(self), Err(PantsGuardError::BeltGuardPoisoned));
+            return (
+                poison_belt_guard(self),
+                Err(PantsGuardError::BeltGuardPoisoned),
+            );
         }
-        if !validate_belt_quorum_config(
-            self.n,
-            self.t,
-            self.f,
-            self.q,
-            self.global_liveness_mode,
-        ) {
+        if !validate_belt_quorum_config(self.n, self.t, self.f, self.q, self.global_liveness_mode) {
             return (
                 poison_belt_guard(self),
                 Err(PantsGuardError::InvalidBeltQuorumConfig),
             );
         }
         if self.has_bound_epoch && self.bound_epoch >= self.next_epoch {
-            return (poison_belt_guard(self), Err(PantsGuardError::BeltGuardPoisoned));
+            return (
+                poison_belt_guard(self),
+                Err(PantsGuardError::BeltGuardPoisoned),
+            );
         }
         if !wal_sync_ok {
-            return (poison_belt_guard(self), Err(PantsGuardError::BeltWalSyncFailed));
+            return (
+                poison_belt_guard(self),
+                Err(PantsGuardError::BeltWalSyncFailed),
+            );
         }
         if self.has_bound_epoch && proposed_epoch == self.bound_epoch {
             if !ct_eq_bytes32(&self.bound_msg_tag, &msg_tag) {
@@ -353,22 +356,22 @@ impl BeltQuorumCore {
         ack_msg_tag: [u8; 32],
     ) -> (BeltQuorumCore, Result<u32, PantsGuardError>) {
         if self.poisoned || matches!(self.phase, BeltQuorumPhase::Poisoned) {
-            return (poison_belt_guard(self), Err(PantsGuardError::BeltGuardPoisoned));
+            return (
+                poison_belt_guard(self),
+                Err(PantsGuardError::BeltGuardPoisoned),
+            );
         }
-        if !validate_belt_quorum_config(
-            self.n,
-            self.t,
-            self.f,
-            self.q,
-            self.global_liveness_mode,
-        ) {
+        if !validate_belt_quorum_config(self.n, self.t, self.f, self.q, self.global_liveness_mode) {
             return (
                 poison_belt_guard(self),
                 Err(PantsGuardError::InvalidBeltQuorumConfig),
             );
         }
         if self.has_bound_epoch && self.bound_epoch >= self.next_epoch {
-            return (poison_belt_guard(self), Err(PantsGuardError::BeltGuardPoisoned));
+            return (
+                poison_belt_guard(self),
+                Err(PantsGuardError::BeltGuardPoisoned),
+            );
         }
         if !self.has_bound_epoch {
             return (self, Err(PantsGuardError::NoEpochBound));
@@ -410,24 +413,27 @@ impl BeltQuorumCore {
         self,
         req_epoch: u64,
         req_msg_tag: [u8; 32],
-    ) -> (BeltQuorumCore, Result<BeltAuthorizationGrant, PantsGuardError>) {
+    ) -> (
+        BeltQuorumCore,
+        Result<BeltAuthorizationGrant, PantsGuardError>,
+    ) {
         if self.poisoned || matches!(self.phase, BeltQuorumPhase::Poisoned) {
-            return (poison_belt_guard(self), Err(PantsGuardError::BeltGuardPoisoned));
+            return (
+                poison_belt_guard(self),
+                Err(PantsGuardError::BeltGuardPoisoned),
+            );
         }
-        if !validate_belt_quorum_config(
-            self.n,
-            self.t,
-            self.f,
-            self.q,
-            self.global_liveness_mode,
-        ) {
+        if !validate_belt_quorum_config(self.n, self.t, self.f, self.q, self.global_liveness_mode) {
             return (
                 poison_belt_guard(self),
                 Err(PantsGuardError::InvalidBeltQuorumConfig),
             );
         }
         if self.has_bound_epoch && self.bound_epoch >= self.next_epoch {
-            return (poison_belt_guard(self), Err(PantsGuardError::BeltGuardPoisoned));
+            return (
+                poison_belt_guard(self),
+                Err(PantsGuardError::BeltGuardPoisoned),
+            );
         }
         if !self.has_bound_epoch {
             return (self, Err(PantsGuardError::NoEpochBound));
@@ -471,15 +477,17 @@ impl BeltQuorumCore {
     pub fn step(
         self,
         input: BeltQuorumCoreInput,
-    ) -> (BeltQuorumCore, Result<BeltQuorumCoreOutput, PantsGuardError>) {
+    ) -> (
+        BeltQuorumCore,
+        Result<BeltQuorumCoreOutput, PantsGuardError>,
+    ) {
         match input {
             BeltQuorumCoreInput::ProposeOrRetryEpoch {
                 proposed_epoch,
                 msg_tag,
                 wal_sync_ok,
             } => {
-                let (next, res) =
-                    self.propose_or_retry_epoch(proposed_epoch, msg_tag, wal_sync_ok);
+                let (next, res) = self.propose_or_retry_epoch(proposed_epoch, msg_tag, wal_sync_ok);
                 match res {
                     Ok(()) => (next, Ok(BeltQuorumCoreOutput::EpochBound)),
                     Err(e) => (next, Err(e)),
@@ -723,21 +731,34 @@ impl VerifiedRssPoisonLatch {
     }
 
     /// Authorize plane opening strictly when `!poisoned && !unverified && pending_relations == 0`.
-    pub fn authorize_open(self) -> (VerifiedRssPoisonLatch, Result<RssOpenPermit, PantsGuardError>) {
+    pub fn authorize_open(
+        self,
+    ) -> (
+        VerifiedRssPoisonLatch,
+        Result<RssOpenPermit, PantsGuardError>,
+    ) {
         if self.poisoned {
             return (poison_rss_latch(), Err(PantsGuardError::RssEnginePoisoned));
         }
         if self.unverified || self.pending_relations != 0 {
             return (self, Err(PantsGuardError::RssOpenBeforeCheck));
         }
-        (self, Ok(RssOpenPermit { verified_clean: true }))
+        (
+            self,
+            Ok(RssOpenPermit {
+                verified_clean: true,
+            }),
+        )
     }
 
     /// Unified multi-turn transition dispatching any safe-Rust `RssLatchStepInput`.
     pub fn step(
         self,
         input: RssLatchStepInput,
-    ) -> (VerifiedRssPoisonLatch, Result<RssLatchStepOutput, PantsGuardError>) {
+    ) -> (
+        VerifiedRssPoisonLatch,
+        Result<RssLatchStepOutput, PantsGuardError>,
+    ) {
         match input {
             RssLatchStepInput::StageRelations { count } => {
                 let (next, res) = self.stage_relations(count);
@@ -971,109 +992,107 @@ mod core_tests {
     use super::*;
     #[test]
     fn belt_core_transitions() {
-    // Under-threshold q = t = 2 for (n=5, t=3, f=2): 2*q = 4 <= n + f = 7 -> REJECT
-    assert!(!validate_belt_quorum_config(5, 3, 2, 2, false));
-    // (n=5, t=3, f=2, q=4): 2*q = 8 > 7, safety-only mode -> ACCEPT; global liveness q <= n-f=3 -> REJECT
-    assert!(validate_belt_quorum_config(5, 3, 2, 4, false));
-    assert!(!validate_belt_quorum_config(5, 3, 2, 4, true));
-    // BFT global-liveness sweet spot (n=7, t=3, f=2, q=5): 2*q = 10 > 9 AND q = 5 <= 7 - 2 = 5 -> ACCEPT
-    assert!(validate_belt_quorum_config(7, 3, 2, 5, true));
-    // Unanimous 2-of-3 safety mode (n=3, t=2, f=1, q=3): 2*q = 6 > 4 -> ACCEPT
-    assert!(validate_belt_quorum_config(3, 2, 1, 3, false));
+        // Under-threshold q = t = 2 for (n=5, t=3, f=2): 2*q = 4 <= n + f = 7 -> REJECT
+        assert!(!validate_belt_quorum_config(5, 3, 2, 2, false));
+        // (n=5, t=3, f=2, q=4): 2*q = 8 > 7, safety-only mode -> ACCEPT; global liveness q <= n-f=3 -> REJECT
+        assert!(validate_belt_quorum_config(5, 3, 2, 4, false));
+        assert!(!validate_belt_quorum_config(5, 3, 2, 4, true));
+        // BFT global-liveness sweet spot (n=7, t=3, f=2, q=5): 2*q = 10 > 9 AND q = 5 <= 7 - 2 = 5 -> ACCEPT
+        assert!(validate_belt_quorum_config(7, 3, 2, 5, true));
+        // Unanimous 2-of-3 safety mode (n=3, t=2, f=1, q=3): 2*q = 6 > 4 -> ACCEPT
+        assert!(validate_belt_quorum_config(3, 2, 1, 3, false));
 
-    match BeltQuorumCore::new_validated(5, 3, 2, 3, false, 10, 4) {
-        Ok(_) => panic!("2*q = 6 <= n+f = 7 must be rejected"),
-        Err(e) => assert_eq!(e, PantsGuardError::InvalidBeltQuorumConfig),
-    }
-
-    let g0 = match BeltQuorumCore::new_validated(7, 3, 2, 5, true, 10, 4) {
-        Ok(g) => g,
-        Err(e) => panic!("valid BFT config rejected: {e:?}"),
-    };
-    assert_eq!(g0.n(), 7);
-    assert_eq!(g0.t(), 3);
-    assert_eq!(g0.f(), 2);
-    assert_eq!(g0.q(), 5);
-    assert!(g0.global_liveness_mode());
-    assert_eq!(g0.next_epoch(), 10);
-    assert_eq!(g0.max_jump_window(), 4);
-    assert_eq!(g0.phase(), BeltQuorumPhase::Idle);
-    assert!(!g0.has_bound_epoch());
-    assert!(!g0.is_poisoned());
-
-    // Jump window exceeded (15 > 10 + 4) refuses cleanly without poisoning
-    let msg_a = [0x41u8; 32];
-    let msg_b = [0x42u8; 32];
-    let (g1, jump_err) = g0.propose_or_retry_epoch(15, msg_a, true);
-    assert_eq!(jump_err, Err(PantsGuardError::EpochJumpWindowExceeded));
-    assert!(!g1.is_poisoned());
-
-    // Bounded jump to epoch 12 (10 <= 12 <= 14) binds epoch 12 and advances next_epoch = 13
-    let (g2, bind_ok) = g1.propose_or_retry_epoch(12, msg_a, true);
-    assert_eq!(bind_ok, Ok(()));
-    assert_eq!(g2.phase(), BeltQuorumPhase::EpochBoundPendingQuorum);
-    assert!(g2.has_bound_epoch());
-    assert_eq!(g2.bound_epoch(), 12);
-    assert_eq!(g2.bound_msg_tag(), msg_a);
-    assert_eq!(g2.next_epoch(), 13);
-
-    // Idempotent retry on (12, msg_a) succeeds without resetting acks
-    let (mut g_cur, ack1) = g2.record_custodian_ack(12, msg_a);
-    assert_eq!(ack1, Ok(1));
-    let (g_retry, retry_ok) = g_cur.propose_or_retry_epoch(12, msg_a, true);
-    assert_eq!(retry_ok, Ok(()));
-    assert_eq!(g_retry.ack_count(), 1);
-    g_cur = g_retry;
-
-    // Insufficient acks (< q = 5) refuses authorization!
-    for expected in 2..=4 {
-        let (gn, r) = g_cur.record_custodian_ack(12, msg_a);
-        assert_eq!(r, Ok(expected));
-        g_cur = gn;
-    }
-    let (g_under, under_err) = g_cur.authorize_shares(12, msg_a);
-    assert_eq!(
-        under_err.err(),
-        Some(PantsGuardError::InsufficientQuorumAcks)
-    );
-    assert_eq!(g_under.phase(), BeltQuorumPhase::EpochBoundPendingQuorum);
-
-    // 5th ack reaches q = 5 -> SharesAuthorized!
-    let (g5, ack5) = g_under.record_custodian_ack(12, msg_a);
-    assert_eq!(ack5, Ok(5));
-    let (g_auth, auth_res) = g5.step(BeltQuorumCoreInput::AuthorizeShares {
-        req_epoch: 12,
-        req_msg_tag: msg_a,
-    });
-    match auth_res {
-        Ok(BeltQuorumCoreOutput::SharesAuthorized(grant)) => {
-            assert_eq!(grant.authorized_epoch, 12);
-            assert_eq!(grant.msg_tag, msg_a);
-            assert_eq!(grant.certified_acks, 5);
+        match BeltQuorumCore::new_validated(5, 3, 2, 3, false, 10, 4) {
+            Ok(_) => panic!("2*q = 6 <= n+f = 7 must be rejected"),
+            Err(e) => assert_eq!(e, PantsGuardError::InvalidBeltQuorumConfig),
         }
-        other => panic!("expected SharesAuthorized grant, got {:?}", other.err()),
-    }
-    assert_eq!(g_auth.phase(), BeltQuorumPhase::SharesAuthorized);
 
-    // Conflicting msg_tag on bound epoch 12 permanently poisons the guard!
-    let (g_eqv, eqv_err) = g_auth.propose_or_retry_epoch(12, msg_b, true);
-    assert_eq!(eqv_err, Err(PantsGuardError::ConflictingEpochMsgTag));
-    assert!(g_eqv.is_poisoned());
-    assert_eq!(g_eqv.phase(), BeltQuorumPhase::Poisoned);
-    let (_g_dead, after_poison) = g_eqv.authorize_shares(12, msg_a);
-    assert_eq!(after_poison.err(), Some(PantsGuardError::BeltGuardPoisoned));
+        let g0 = match BeltQuorumCore::new_validated(7, 3, 2, 5, true, 10, 4) {
+            Ok(g) => g,
+            Err(e) => panic!("valid BFT config rejected: {e:?}"),
+        };
+        assert_eq!(g0.n(), 7);
+        assert_eq!(g0.t(), 3);
+        assert_eq!(g0.f(), 2);
+        assert_eq!(g0.q(), 5);
+        assert!(g0.global_liveness_mode());
+        assert_eq!(g0.next_epoch(), 10);
+        assert_eq!(g0.max_jump_window(), 4);
+        assert_eq!(g0.phase(), BeltQuorumPhase::Idle);
+        assert!(!g0.has_bound_epoch());
+        assert!(!g0.is_poisoned());
 
-    // WAL sync failure also permanently poisons the guard!
-    let gw0 = match BeltQuorumCore::new_validated(3, 2, 1, 3, false, 0, 2) {
-        Ok(g) => g,
-        Err(_) => unreachable!(),
-    };
-    let (gw1, wal_err) = gw0.propose_or_retry_epoch(0, msg_a, false);
-    assert_eq!(wal_err, Err(PantsGuardError::BeltWalSyncFailed));
-    assert!(gw1.is_poisoned());
-    let (_gw2, retry_after_wal) = gw1.propose_or_retry_epoch(0, msg_a, true);
-    assert_eq!(retry_after_wal, Err(PantsGuardError::BeltGuardPoisoned));
+        // Jump window exceeded (15 > 10 + 4) refuses cleanly without poisoning
+        let msg_a = [0x41u8; 32];
+        let msg_b = [0x42u8; 32];
+        let (g1, jump_err) = g0.propose_or_retry_epoch(15, msg_a, true);
+        assert_eq!(jump_err, Err(PantsGuardError::EpochJumpWindowExceeded));
+        assert!(!g1.is_poisoned());
 
+        // Bounded jump to epoch 12 (10 <= 12 <= 14) binds epoch 12 and advances next_epoch = 13
+        let (g2, bind_ok) = g1.propose_or_retry_epoch(12, msg_a, true);
+        assert_eq!(bind_ok, Ok(()));
+        assert_eq!(g2.phase(), BeltQuorumPhase::EpochBoundPendingQuorum);
+        assert!(g2.has_bound_epoch());
+        assert_eq!(g2.bound_epoch(), 12);
+        assert_eq!(g2.bound_msg_tag(), msg_a);
+        assert_eq!(g2.next_epoch(), 13);
 
+        // Idempotent retry on (12, msg_a) succeeds without resetting acks
+        let (mut g_cur, ack1) = g2.record_custodian_ack(12, msg_a);
+        assert_eq!(ack1, Ok(1));
+        let (g_retry, retry_ok) = g_cur.propose_or_retry_epoch(12, msg_a, true);
+        assert_eq!(retry_ok, Ok(()));
+        assert_eq!(g_retry.ack_count(), 1);
+        g_cur = g_retry;
+
+        // Insufficient acks (< q = 5) refuses authorization!
+        for expected in 2..=4 {
+            let (gn, r) = g_cur.record_custodian_ack(12, msg_a);
+            assert_eq!(r, Ok(expected));
+            g_cur = gn;
+        }
+        let (g_under, under_err) = g_cur.authorize_shares(12, msg_a);
+        assert_eq!(
+            under_err.err(),
+            Some(PantsGuardError::InsufficientQuorumAcks)
+        );
+        assert_eq!(g_under.phase(), BeltQuorumPhase::EpochBoundPendingQuorum);
+
+        // 5th ack reaches q = 5 -> SharesAuthorized!
+        let (g5, ack5) = g_under.record_custodian_ack(12, msg_a);
+        assert_eq!(ack5, Ok(5));
+        let (g_auth, auth_res) = g5.step(BeltQuorumCoreInput::AuthorizeShares {
+            req_epoch: 12,
+            req_msg_tag: msg_a,
+        });
+        match auth_res {
+            Ok(BeltQuorumCoreOutput::SharesAuthorized(grant)) => {
+                assert_eq!(grant.authorized_epoch, 12);
+                assert_eq!(grant.msg_tag, msg_a);
+                assert_eq!(grant.certified_acks, 5);
+            }
+            other => panic!("expected SharesAuthorized grant, got {:?}", other.err()),
+        }
+        assert_eq!(g_auth.phase(), BeltQuorumPhase::SharesAuthorized);
+
+        // Conflicting msg_tag on bound epoch 12 permanently poisons the guard!
+        let (g_eqv, eqv_err) = g_auth.propose_or_retry_epoch(12, msg_b, true);
+        assert_eq!(eqv_err, Err(PantsGuardError::ConflictingEpochMsgTag));
+        assert!(g_eqv.is_poisoned());
+        assert_eq!(g_eqv.phase(), BeltQuorumPhase::Poisoned);
+        let (_g_dead, after_poison) = g_eqv.authorize_shares(12, msg_a);
+        assert_eq!(after_poison.err(), Some(PantsGuardError::BeltGuardPoisoned));
+
+        // WAL sync failure also permanently poisons the guard!
+        let gw0 = match BeltQuorumCore::new_validated(3, 2, 1, 3, false, 0, 2) {
+            Ok(g) => g,
+            Err(_) => unreachable!(),
+        };
+        let (gw1, wal_err) = gw0.propose_or_retry_epoch(0, msg_a, false);
+        assert_eq!(wal_err, Err(PantsGuardError::BeltWalSyncFailed));
+        assert!(gw1.is_poisoned());
+        let (_gw2, retry_after_wal) = gw1.propose_or_retry_epoch(0, msg_a, true);
+        assert_eq!(retry_after_wal, Err(PantsGuardError::BeltGuardPoisoned));
     }
 }

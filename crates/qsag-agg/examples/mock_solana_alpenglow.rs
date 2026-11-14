@@ -189,8 +189,10 @@ fn bench_alpenglow_sub_mtu_rotor_votes(num_validators: usize, workers: usize) {
         wal_dir.join("warm-validator.wal"),
         warm_sk.wal_key(),
         seed32(0xE5, 9_999),
-    ).expect("create warm validator use journal");
-    let mut warm_sk = warm_sk.attach_wal(Box::new(warm_wal))
+    )
+    .expect("create warm validator use journal");
+    let mut warm_sk = warm_sk
+        .attach_wal(Box::new(warm_wal))
         .expect("attach warm validator use journal");
     let t_sign = Instant::now();
     let warm_sig = warm_sk

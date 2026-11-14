@@ -15,6 +15,12 @@ name = "QsagVerified"
 name = "QsagMirProofs"
 
 [[lean_lib]]
+name = "QsagVerifiedChallengeDefs1"
+
+[[lean_lib]]
+name = "QsagVerifiedChallengeDefs2"
+
+[[lean_lib]]
 name = "QsagVerifiedChallenge"
 
 [[lean_lib]]

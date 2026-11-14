@@ -57,14 +57,13 @@ pub use bitslice::{
     unpack_256x200_bitslice, unpack_256x200_bitslice_with_backend,
 };
 pub use cpuid::{
-    CpuCapabilities, DitRequirement, HardwareDitGuard, HardwareDitUnavailable, HardwareDitStatus, SimdBackend, detect_backend, enable_hardware_dit,
-    probe_capabilities,
+    CpuCapabilities, DitRequirement, HardwareDitGuard, HardwareDitStatus, HardwareDitUnavailable,
+    SimdBackend, detect_backend, enable_hardware_dit, probe_capabilities,
 };
 pub use portable::{
     GFNI_MAT_POLY_TO_T3, GFNI_MAT_T3_TO_POLY, GOLDILOCKS_EPSILON, GOLDILOCKS_PRIME,
-    KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS, KeccakRow256, KeccakState4x,
-    POLY_TO_T7_BASIS, T7_TO_POLY_BASIS, TOWER128_POLY_GENERATORS, poly128_to_tower128_ct,
-    tower128_to_poly128_ct,
+    KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS, KeccakRow256, KeccakState4x, POLY_TO_T7_BASIS,
+    T7_TO_POLY_BASIS, TOWER128_POLY_GENERATORS, poly128_to_tower128_ct, tower128_to_poly128_ct,
 };
 
 // ============================================================================
@@ -96,7 +95,11 @@ pub fn keccak_f1600_x4_with_backend(state: &mut KeccakState4x, backend: SimdBack
     #[cfg(target_arch = "aarch64")]
     {
         let caps = cpuid::probe_capabilities();
-        if backend == SimdBackend::Aarch64NeonSha3Pmull && caps.aarch64_neon && caps.aarch64_sha3 && caps.aarch64_dit {
+        if backend == SimdBackend::Aarch64NeonSha3Pmull
+            && caps.aarch64_neon
+            && caps.aarch64_sha3
+            && caps.aarch64_dit
+        {
             let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
             // SAFETY: `probe_capabilities()` verified runtime `NEON` + `FEAT_SHA3` (`eor3`, `rax1`,
             // `xar`, `bcax`) before invoking `run_keccak_f1600_sha3_neon_4x`.
@@ -527,8 +530,14 @@ pub fn tower128_bdoz_2lane_mac_with_backend(
     for (lc, rc) in lhs_pairs.chunks(16).zip(rhs_pairs.chunks(16)) {
         let n = lc.len();
         for i in 0..n {
-            conv_l[i] = [tower128_to_poly128_ct(lc[i][0]), tower128_to_poly128_ct(lc[i][1])];
-            conv_r[i] = [tower128_to_poly128_ct(rc[i][0]), tower128_to_poly128_ct(rc[i][1])];
+            conv_l[i] = [
+                tower128_to_poly128_ct(lc[i][0]),
+                tower128_to_poly128_ct(lc[i][1]),
+            ];
+            conv_r[i] = [
+                tower128_to_poly128_ct(rc[i][0]),
+                tower128_to_poly128_ct(rc[i][1]),
+            ];
         }
         let mut chunk_poly =
             tower128_bdoz_2lane_poly_mac_with_backend(&conv_l[..n], &conv_r[..n], backend);
@@ -685,9 +694,7 @@ pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     }
     #[cfg(target_arch = "x86_64")]
     {
-        unsafe {
-            x86_64_asm::qsag_asm_ct_eq_bytes_x86_64(a.as_ptr(), b.as_ptr(), a.len()) == 1
-        }
+        unsafe { x86_64_asm::qsag_asm_ct_eq_bytes_x86_64(a.as_ptr(), b.as_ptr(), a.len()) == 1 }
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -741,7 +748,12 @@ mod tests {
     impl KeccakTestStream {
         fn new(seed: u64) -> Self {
             let mut state = KeccakState4x::default();
-            state.0[0] = [seed, seed ^ 0xA5A5_5A5A_F0F0_0F0F, seed.wrapping_add(1), 0x1F];
+            state.0[0] = [
+                seed,
+                seed ^ 0xA5A5_5A5A_F0F0_0F0F,
+                seed.wrapping_add(1),
+                0x1F,
+            ];
             state.0[16] = [0x8000_0000_0000_0000; 4];
             portable::keccak_f1600_4x_portable(&mut state);
             Self { state, idx: 0 }
@@ -923,17 +935,38 @@ mod tests {
         for len in 0..=65 {
             let mut expected = [0xa5; 67];
             portable::gf256_shamir_mul_portable(&mut expected[1..1 + len], &a[..len], &b[..len]);
-            for backend in [SimdBackend::Portable, SimdBackend::X86Avx2Pclmul,
-                SimdBackend::X86Avx2GfniVpclmul, SimdBackend::Aarch64NeonSha3Pmull] {
+            for backend in [
+                SimdBackend::Portable,
+                SimdBackend::X86Avx2Pclmul,
+                SimdBackend::X86Avx2GfniVpclmul,
+                SimdBackend::Aarch64NeonSha3Pmull,
+            ] {
                 let mut actual = [0xa5; 67];
-                gf256_shamir_mul_with_backend(&mut actual[1..1 + len], &a[..len], &b[..len], backend);
+                gf256_shamir_mul_with_backend(
+                    &mut actual[1..1 + len],
+                    &a[..len],
+                    &b[..len],
+                    backend,
+                );
                 assert_eq!(actual, expected, "len={len} backend={backend:?}");
                 for scalar in [0, 1, 0x80, 0xff] {
                     let mut expected = [0xa5; 67];
                     let mut actual = expected;
-                    portable::gf256_shamir_mac_portable(&mut expected[1..1 + len], &a[..len], scalar);
-                    gf256_shamir_mac_with_backend(&mut actual[1..1 + len], &a[..len], scalar, backend);
-                    assert_eq!(actual, expected, "len={len} scalar={scalar} backend={backend:?}");
+                    portable::gf256_shamir_mac_portable(
+                        &mut expected[1..1 + len],
+                        &a[..len],
+                        scalar,
+                    );
+                    gf256_shamir_mac_with_backend(
+                        &mut actual[1..1 + len],
+                        &a[..len],
+                        scalar,
+                        backend,
+                    );
+                    assert_eq!(
+                        actual, expected,
+                        "len={len} scalar={scalar} backend={backend:?}"
+                    );
                 }
             }
         }
@@ -1010,10 +1043,9 @@ mod tests {
             let p7 = goldilocks_pow7_ct(a);
             assert!(p7 < GOLDILOCKS_PRIME);
             let a_m = (a as u128) % p;
-            let exp_p7 = (((((((a_m * a_m) % p) * a_m) % p) * ((((a_m * a_m) % p) * a_m) % p))
-                % p)
-                * a_m)
-                % p;
+            let exp_p7 =
+                (((((((a_m * a_m) % p) * a_m) % p) * ((((a_m * a_m) % p) * a_m) % p)) % p) * a_m)
+                    % p;
             assert_eq!(p7 as u128, exp_p7);
 
             for &b in &edges {
@@ -1067,7 +1099,9 @@ pub fn volatile_fill<T: Copy>(buf: &mut [T], value: T) {
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     for slot in buf.iter_mut() {
         // SAFETY: the exclusive reference is aligned and valid for a T write.
-        unsafe { core::ptr::write_volatile(slot, value); }
+        unsafe {
+            core::ptr::write_volatile(slot, value);
+        }
     }
     core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     core::hint::black_box(buf);
@@ -1082,11 +1116,15 @@ pub fn keccak_f1600_batch(states: &mut [[u64; 25]]) {
     for block in states.chunks_mut(4) {
         let mut packed = KeccakState4x::default();
         for (i, state) in block.iter().enumerate() {
-            for (lane, value) in state.iter().enumerate() { packed.0[lane][i] = *value; }
+            for (lane, value) in state.iter().enumerate() {
+                packed.0[lane][i] = *value;
+            }
         }
         keccak_f1600_x4_with_backend(&mut packed, backend);
         for (i, state) in block.iter_mut().enumerate() {
-            for (lane, value) in state.iter_mut().enumerate() { *value = packed.0[lane][i]; }
+            for (lane, value) in state.iter_mut().enumerate() {
+                *value = packed.0[lane][i];
+            }
         }
         volatile_fill(&mut packed.0, [0; 4]);
     }

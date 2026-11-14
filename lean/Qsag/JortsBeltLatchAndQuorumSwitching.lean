@@ -41,6 +41,7 @@ Shamir `WOTS+C` evaluation tables over `TowerElem 7` ($\mathbb{F}_{2^{128}}$) an
      unopened prefixes, and MAC-free `SHAKE256` endpoint self-verification.
 -/
 
+public import Qsag.Digest256
 public import Qsag.Constructive
 public import Qsag.SimulationSpine
 public import Qsag.Goldilocks
@@ -328,9 +329,6 @@ def extractBeltHonestQuorumWitness {n q f : Nat}
     exact ⟨hp.1.1, hp.1.2, hp.2⟩⟩
 
 /-! ## §1. Open-World Multi-Turn `(t, n, f)` `BeltLatch` & `Jorts` Modes 3A/3B Network -/
-
-/-- Full-width 256-bit digest / salt / MAC tag carrier (`BitVec 256`). -/
-abbrev Digest256 := BitVec 256
 
 /-- Collision witness on a 256-bit hash function `H : List UInt8 → Digest256`. -/
 structure HashCollision256 (H : List UInt8 → Digest256) where

@@ -130,17 +130,24 @@ const fn abort_mldsa_gate(session_id: [u8; 32], attempt: u32) -> MlDsaReleaseGat
 
 impl MlDsaReleaseGate {
     /// Read-only state observation.
-    pub const fn session_id(&self) -> [u8; 32] { self.session_id }
+    pub const fn session_id(&self) -> [u8; 32] {
+        self.session_id
+    }
 
     /// Read-only state observation.
-    pub const fn attempt(&self) -> u32 { self.attempt }
+    pub const fn attempt(&self) -> u32 {
+        self.attempt
+    }
 
     /// Read-only state observation.
-    pub const fn released(&self) -> bool { self.released }
+    pub const fn released(&self) -> bool {
+        self.released
+    }
 
     /// Read-only state observation.
-    pub const fn aborted(&self) -> bool { self.aborted }
-
+    pub const fn aborted(&self) -> bool {
+        self.aborted
+    }
 
     /// Seal a masked partial response `z_share_masked` inside a fresh single-attempt release gate.
     #[inline]
@@ -284,20 +291,29 @@ const fn quarantine_hd_family(
 
 impl HdCommittedZeroTest {
     /// Read-only state observation.
-    pub const fn session_id(&self) -> [u8; 32] { self.session_id }
+    pub const fn session_id(&self) -> [u8; 32] {
+        self.session_id
+    }
 
     /// Read-only state observation.
-    pub const fn phase(&self) -> HdZeroTestPhase { self.phase }
+    pub const fn phase(&self) -> HdZeroTestPhase {
+        self.phase
+    }
 
     /// Read-only state observation.
-    pub const fn frozen_peer_commitment(&self) -> [u8; 32] { self.frozen_peer_commitment }
+    pub const fn frozen_peer_commitment(&self) -> [u8; 32] {
+        self.frozen_peer_commitment
+    }
 
     /// Read-only state observation.
-    pub const fn modulus_q(&self) -> u32 { self.modulus_q }
+    pub const fn modulus_q(&self) -> u32 {
+        self.modulus_q
+    }
 
     /// Read-only state observation.
-    pub const fn family_quarantined(&self) -> bool { self.family_quarantined }
-
+    pub const fn family_quarantined(&self) -> bool {
+        self.family_quarantined
+    }
 
     /// Initialize a committed zero-test gate holding `local_residual` mod `modulus_q` privately.
     /// Immediately quarantines if `modulus_q == 0` or `local_residual >= modulus_q`.
@@ -445,7 +461,10 @@ impl HdCommittedZeroTest {
                 Err(CredHdGuardError::PeerCommitmentMismatchQuarantined),
             );
         }
-        if self.modulus_q == 0 || self.local_residual >= self.modulus_q || peer_residual >= self.modulus_q {
+        if self.modulus_q == 0
+            || self.local_residual >= self.modulus_q
+            || peer_residual >= self.modulus_q
+        {
             return (
                 quarantine_hd_family(self.session_id, self.frozen_peer_commitment, self.modulus_q),
                 Err(CredHdGuardError::InvalidModulusOrResidualQuarantined),

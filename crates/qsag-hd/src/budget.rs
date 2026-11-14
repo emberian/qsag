@@ -333,7 +333,10 @@ impl DurableQueryBudget {
         self.failed = true;
         self.verify_live_journal_integrity()?;
 
-        let next_count = self.used.checked_add(1).ok_or(HdError::BudgetStorageFailed)?;
+        let next_count = self
+            .used
+            .checked_add(1)
+            .ok_or(HdError::BudgetStorageFailed)?;
         let lock_seal = self.record.lock_seal();
         let (next_rec, next_mac) = compute_record_bytes(
             self.key.expose(),

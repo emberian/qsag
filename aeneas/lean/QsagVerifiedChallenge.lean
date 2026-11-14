@@ -5,6 +5,7 @@ public import QsagVerified.Types
 public import QsagVerified.Funs
 public import Qsag.Keccak
 public import Qsag.BinaryTower
+public import QsagVerifiedChallengeDefs2
 
 public section
 
@@ -21,7 +22,8 @@ over identical definitions, using no axiom other than `propext` and
 
 It imports the generated model and canonical Keccak and binary-tower specifications,
 but never a proofs module. Every specification definition
-a statement mentions is declared again here, verbatim, so the comparison also
+a statement mentions is declared again here or in the independent ChallengeDefs modules,
+verbatim, so the comparison also
 pins those definitions.
 
 Every theorem body below is `sorry`. That is the comparator convention for a
@@ -48,9 +50,8 @@ set_option maxRecDepth 4096
 
 /-! ## Goldilocks field (p = 2^64 - 2^32 + 1) and its quadratic extension -/
 
-/-- Canonical Goldilocks prime $p = 2^{64} - 2^{32} + 1$. -/
-@[expose]
-def GoldilocksP : Nat := 18446744069414584321
+
+
 
 theorem goldilocks_canon_spec (x : Std.U64) :
     ∃ y : goldilocks.Goldilocks,
@@ -114,66 +115,17 @@ theorem goldilocks_ext2_mul_spec (a b : goldilocks.GoldilocksExt2) :
 
 /-! ## Binary tower: GF(2^8) against a pure specification, field laws, Tower128 -/
 
-@[expose]
-def pureMulT1 (a b : Std.U8) : Std.U8 :=
-  let a_lo := a &&& 1#u8
-  let a_hi := ⟨a.bv >>> 1⟩ &&& 1#u8
-  let b_lo := b &&& 1#u8
-  let b_hi := ⟨b.bv >>> 1⟩ &&& 1#u8
-  let p := a_lo &&& b_lo
-  let q := a_hi &&& b_hi
-  let r := (a_lo ^^^ a_hi) &&& (b_lo ^^^ b_hi)
-  (p ^^^ q) ||| ⟨(r ^^^ p).bv <<< 1⟩
 
-@[expose]
-def pureScaleXT1 (a : Std.U8) : Std.U8 :=
-  let lo := a &&& 1#u8
-  let hi := ⟨a.bv >>> 1⟩ &&& 1#u8
-  hi ||| ⟨(lo ^^^ hi).bv <<< 1⟩
 
-@[expose]
-def pureMulT2 (a b : Std.U8) : Std.U8 :=
-  let a_lo := a &&& 3#u8
-  let a_hi := ⟨a.bv >>> 2⟩ &&& 3#u8
-  let b_lo := b &&& 3#u8
-  let b_hi := ⟨b.bv >>> 2⟩ &&& 3#u8
-  let p := pureMulT1 a_lo b_lo
-  let q := pureMulT1 a_hi b_hi
-  let r := pureMulT1 (a_lo ^^^ a_hi) (b_lo ^^^ b_hi)
-  let hi := ((r ^^^ p) ^^^ q) ^^^ pureScaleXT1 q
-  (p ^^^ q) ||| ⟨hi.bv <<< 2⟩
 
-@[expose]
-def pureScaleXT2 (a : Std.U8) : Std.U8 :=
-  let lo := a &&& 3#u8
-  let hi := ⟨a.bv >>> 2⟩ &&& 3#u8
-  hi ||| ⟨(lo ^^^ pureScaleXT1 hi).bv <<< 2⟩
 
-@[expose]
-def pureGf256Mul (a b : Std.U8) : Std.U8 :=
-  let a_lo := a &&& 15#u8
-  let a_hi := ⟨a.bv >>> 4⟩ &&& 15#u8
-  let b_lo := b &&& 15#u8
-  let b_hi := ⟨b.bv >>> 4⟩ &&& 15#u8
-  let p := pureMulT2 a_lo b_lo
-  let q := pureMulT2 a_hi b_hi
-  let r := pureMulT2 (a_lo ^^^ a_hi) (b_lo ^^^ b_hi)
-  let hi := ((r ^^^ p) ^^^ q) ^^^ pureScaleXT2 q
-  (p ^^^ q) ||| ⟨hi.bv <<< 4⟩
 
-@[expose]
-def pureGf256Inv (a : Std.U8) : Std.U8 :=
-  let a2 := pureGf256Mul a a
-  let a4 := pureGf256Mul a2 a2
-  let a6 := pureGf256Mul a4 a2
-  let a8 := pureGf256Mul a4 a4
-  let a14 := pureGf256Mul a8 a6
-  let a16 := pureGf256Mul a8 a8
-  let a32 := pureGf256Mul a16 a16
-  let a64 := pureGf256Mul a32 a32
-  let a128 := pureGf256Mul a64 a64
-  pureGf256Mul (pureGf256Mul (pureGf256Mul a128 a64)
-    (pureGf256Mul a32 a16)) a14
+
+
+
+
+
+
 
 theorem gf256_mul_eq_pure (a b : tower.Gf256) :
     tower.gf256_mul a b = .ok (pureGf256Mul a b) := sorry
@@ -208,14 +160,9 @@ theorem keccak_f1600_total (state : Array Std.U64 25#usize) :
 
 /-! ## FIPS 205: ADRS codec, WOTS+ checksum and chain -/
 
-@[expose]
-def natPrefixSum (f : Nat → Nat) : Nat → Nat
-  | 0 => 0
-  | n + 1 => natPrefixSum f n + f n
 
-@[expose]
-def wotsChecksumNat (digits : Std.Array Std.U8 32#usize) : Nat :=
-  natPrefixSum (fun k => 15 - (digits.val.getD k 0#u8).val % 16) 32
+
+
 
 theorem fips205_adrs_roundtrip_spec (adrs : fips205.Fips205Adrs) :
     ∃ bytes, fips205.encode_fips205_adrs adrs = .ok bytes ∧
@@ -263,84 +210,27 @@ theorem fips205_wots_chain_oob_none
 
 /-! ## BDOZ two-lane MAC: authenticated opening, one-time burn, tamper rejection -/
 
-@[expose] def pureScaleXT3 (a : Std.U8) : Std.U8 :=
-  let lo := a &&& 15#u8
-  let hi := (⟨a.bv >>> 4⟩ : Std.U8) &&& 15#u8
-  hi ||| ⟨(lo ^^^ pureScaleXT2 hi).bv <<< 4⟩
 
-@[expose] def pureMulT4 (a b : Std.U16) : Std.U16 :=
-  let alo : Std.U8 := UScalar.cast .U8 (a &&& 255#u16)
-  let ahi : Std.U8 := UScalar.cast .U8 ((⟨a.bv >>> 8⟩ : Std.U16) &&& 255#u16)
-  let blo : Std.U8 := UScalar.cast .U8 (b &&& 255#u16)
-  let bhi : Std.U8 := UScalar.cast .U8 ((⟨b.bv >>> 8⟩ : Std.U16) &&& 255#u16)
-  let p := pureGf256Mul alo blo
-  let q := pureGf256Mul ahi bhi
-  let r := pureGf256Mul (alo ^^^ ahi) (blo ^^^ bhi)
-  let sx := pureScaleXT3 q
-  ⟨(UScalar.cast .U16 (p ^^^ q)).bv ||| ((UScalar.cast .U16 (r ^^^ p ^^^ q ^^^ sx)).bv <<< 8)⟩
 
-@[expose] def pureScaleXT4 (a : Std.U16) : Std.U16 :=
-  let hi : Std.U8 := UScalar.cast .U8 ((⟨a.bv >>> 8⟩ : Std.U16) &&& 255#u16)
-  let sx := pureScaleXT3 hi
-  ⟨(UScalar.cast .U16 hi).bv ||| ((UScalar.cast .U16 ((UScalar.cast .U8 (a &&& 255#u16)) ^^^ sx)).bv <<< 8)⟩
 
-@[expose] def pureMulT5 (a b : Std.U32) : Std.U32 :=
-  let alo : Std.U16 := UScalar.cast .U16 (a &&& 65535#u32)
-  let ahi : Std.U16 := UScalar.cast .U16 ((⟨a.bv >>> 16⟩ : Std.U32) &&& 65535#u32)
-  let blo : Std.U16 := UScalar.cast .U16 (b &&& 65535#u32)
-  let bhi : Std.U16 := UScalar.cast .U16 ((⟨b.bv >>> 16⟩ : Std.U32) &&& 65535#u32)
-  let p := pureMulT4 alo blo
-  let q := pureMulT4 ahi bhi
-  let r := pureMulT4 (alo ^^^ ahi) (blo ^^^ bhi)
-  let sx := pureScaleXT4 q
-  ⟨(UScalar.cast .U32 (p ^^^ q)).bv ||| ((UScalar.cast .U32 (r ^^^ p ^^^ q ^^^ sx)).bv <<< 16)⟩
 
-@[expose] def pureScaleXT5 (a : Std.U32) : Std.U32 :=
-  let hi : Std.U16 := UScalar.cast .U16 ((⟨a.bv >>> 16⟩ : Std.U32) &&& 65535#u32)
-  let sx := pureScaleXT4 hi
-  ⟨(UScalar.cast .U32 hi).bv ||| ((UScalar.cast .U32 ((UScalar.cast .U16 (a &&& 65535#u32)) ^^^ sx)).bv <<< 16)⟩
 
-@[expose] def pureMulT6 (a b : Std.U64) : Std.U64 :=
-  let alo : Std.U32 := UScalar.cast .U32 (a &&& 4294967295#u64)
-  let ahi : Std.U32 := UScalar.cast .U32 ((⟨a.bv >>> 32⟩ : Std.U64) &&& 4294967295#u64)
-  let blo : Std.U32 := UScalar.cast .U32 (b &&& 4294967295#u64)
-  let bhi : Std.U32 := UScalar.cast .U32 ((⟨b.bv >>> 32⟩ : Std.U64) &&& 4294967295#u64)
-  let p := pureMulT5 alo blo
-  let q := pureMulT5 ahi bhi
-  let r := pureMulT5 (alo ^^^ ahi) (blo ^^^ bhi)
-  let sx := pureScaleXT5 q
-  ⟨(UScalar.cast .U64 (p ^^^ q)).bv ||| ((UScalar.cast .U64 (r ^^^ p ^^^ q ^^^ sx)).bv <<< 32)⟩
 
-@[expose] def pureScaleXT6 (a : Std.U64) : Std.U64 :=
-  let hi : Std.U32 := UScalar.cast .U32 ((⟨a.bv >>> 32⟩ : Std.U64) &&& 4294967295#u64)
-  let sx := pureScaleXT5 hi
-  ⟨(UScalar.cast .U64 hi).bv ||| ((UScalar.cast .U64 ((UScalar.cast .U32 (a &&& 4294967295#u64)) ^^^ sx)).bv <<< 32)⟩
 
-@[expose] def pureTower128Mul (a b : Std.U128) : Std.U128 :=
-  let alo : Std.U64 := UScalar.cast .U64 (a &&& 18446744073709551615#u128)
-  let ahi : Std.U64 := UScalar.cast .U64 ((⟨a.bv >>> 64⟩ : Std.U128) &&& 18446744073709551615#u128)
-  let blo : Std.U64 := UScalar.cast .U64 (b &&& 18446744073709551615#u128)
-  let bhi : Std.U64 := UScalar.cast .U64 ((⟨b.bv >>> 64⟩ : Std.U128) &&& 18446744073709551615#u128)
-  let p := pureMulT6 alo blo
-  let q := pureMulT6 ahi bhi
-  let r := pureMulT6 (alo ^^^ ahi) (blo ^^^ bhi)
-  let sx := pureScaleXT6 q
-  ⟨(UScalar.cast .U128 (p ^^^ q)).bv ||| ((UScalar.cast .U128 (r ^^^ p ^^^ q ^^^ sx)).bv <<< 64)⟩
 
-@[expose]
-def bdozMaskedSum (batch : tower.BdozCommittedBatchOpening2Lane) (item : tower.BdozWireOpening2Lane) : tower.Tower128 :=
-  batch.mask_value ^^^ pureTower128Mul item.chal_weight (UScalar.cast .U128 item.opened_value)
 
-@[expose]
-def bdozFoldedKey (batch : tower.BdozCommittedBatchOpening2Lane) (item : tower.BdozWireOpening2Lane) (lane : Nat) : tower.Tower128 :=
-  batch.mask_key_lanes.val.getD lane 0#u128 ^^^ pureTower128Mul item.chal_weight (item.key_lanes.val.getD lane 0#u128)
 
-@[expose]
-def bdozExpectedMacLanes (session : tower.BdozVerifierSession2Lane)
-    (batch : tower.BdozCommittedBatchOpening2Lane) (item : tower.BdozWireOpening2Lane) : Std.Array tower.Tower128 2#usize :=
-  Std.Array.make 2#usize [
-    bdozFoldedKey batch item 0 ^^^ pureTower128Mul (session.alpha_lanes.val.getD 0 0#u128) (bdozMaskedSum batch item),
-    bdozFoldedKey batch item 1 ^^^ pureTower128Mul (session.alpha_lanes.val.getD 1 0#u128) (bdozMaskedSum batch item)]
+
+
+
+
+
+
+
+
+
+
+
 
 abbrev bdozOpening1 (item : tower.BdozWireOpening2Lane) : Slice tower.BdozWireOpening2Lane :=
   Std.Array.to_slice (Std.Array.make 1#usize [item])
@@ -371,28 +261,13 @@ theorem bdoz_tampered_mac_rejected (session : tower.BdozVerifierSession2Lane)
 /-! ## Shamir sharing: Horner evaluation, point validation, Lagrange reconstruction -/
 
 /-- Horner recurrence on the first `n` coefficients, consuming highest degree first. -/
-@[expose]
-def pureHornerGf256Prefix (coeffs : List tower.Gf256) (x : tower.Gf256) :
-    Nat → tower.Gf256 → tower.Gf256
-  | 0, acc => acc
-  | n + 1, acc => pureHornerGf256Prefix coeffs x n
-      (pureGf256Mul acc x ^^^ coeffs.getD n 0#u8)
 
-@[expose]
-def pureHornerGf256 (coeffs : List tower.Gf256) (x : tower.Gf256) : tower.Gf256 :=
-  pureHornerGf256Prefix coeffs x coeffs.length 0#u8
 
-@[expose]
-def pureHornerGoldilocksPrefix (coeffs : List goldilocks.Goldilocks) (x : Nat) :
-    Nat → Nat → Nat
-  | 0, acc => acc
-  | n + 1, acc => pureHornerGoldilocksPrefix coeffs x n
-      ((acc % GoldilocksP * (x % GoldilocksP) +
-        (coeffs.getD n 0#u64).val % GoldilocksP) % GoldilocksP)
 
-@[expose]
-def pureHornerGoldilocks (coeffs : List goldilocks.Goldilocks) (x : Nat) : Nat :=
-  pureHornerGoldilocksPrefix coeffs x coeffs.length 0
+
+
+
+
 
 abbrev gfSlice2 (a b : Std.U8) : Slice Std.U8 :=
   Std.Array.to_slice (Std.Array.make 2#usize [a, b])

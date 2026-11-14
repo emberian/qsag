@@ -61,7 +61,7 @@ run_cmd do
   let negative ← Lean.collectAxioms ``Classical.choice
   if (negative.filter fun ax => ax != ``propext && ax != ``Quot.sound).isEmpty then
     throwError "MIR axiom audit negative control unexpectedly passed"
-  let env ← getEnv
+  let env := (← getEnv).setExporting false
   let requiredTheorems : List Name := [
     ``qsag_verified.proofs.goldilocks_add_refines_qsag,
     ``qsag_verified.proofs.goldilocks_sub_refines_qsag,
@@ -103,7 +103,7 @@ run_cmd do
       if owner == "QsagSpecWeld" || owner == "QsagMirProofs" || owner == "QsagVerified" ||
           owner.startsWith "QsagVerified." then
         checked := checked + 1
-        let axioms ← Lean.collectAxioms name
+        let axioms ← withEnv env <| Lean.collectAxioms name
         let forbidden := axioms.filter fun ax => ax != ``propext && ax != ``Quot.sound
         if !forbidden.isEmpty then
           rejected := rejected + 1

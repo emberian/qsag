@@ -176,11 +176,7 @@ pub const fn goldilocks_inv_or_zero(a: Goldilocks) -> Goldilocks {
 #[inline]
 pub const fn goldilocks_inv(a: Goldilocks) -> Option<Goldilocks> {
     let inv = goldilocks_inv_or_zero(a);
-    if inv.0 == 0 {
-        None
-    } else {
-        Some(inv)
-    }
+    if inv.0 == 0 { None } else { Some(inv) }
 }
 
 /// Branchless addition in `GoldilocksExt2 = F_p[u] / (u^2 - 7)`.

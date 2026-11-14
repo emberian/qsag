@@ -22,7 +22,6 @@ global_asm!(
     "msr dit, #1",
     "isb",
     "ret",
-
     ".globl _qsag_asm_keccak_sha3_neon",
     ".p2align 2",
     "_qsag_asm_keccak_sha3_neon:",
@@ -65,7 +64,6 @@ global_asm!(
     "eor v19.16b, v19.16b, v19.16b",
     "eor v20.16b, v20.16b, v20.16b",
     "ret",
-
     ".globl _qsag_asm_keccak_theta_rho_sha3_neon",
     ".p2align 2",
     "_qsag_asm_keccak_theta_rho_sha3_neon:",
@@ -197,7 +195,6 @@ global_asm!(
     "eor v19.16b, v19.16b, v19.16b",
     "eor v20.16b, v20.16b, v20.16b",
     "ret",
-
     ".globl _qsag_asm_tower128_bdoz_mac_pmull",
     ".p2align 2",
     "_qsag_asm_tower128_bdoz_mac_pmull:",
@@ -276,7 +273,6 @@ global_asm!(
     "eor v21.16b, v21.16b, v21.16b",
     "mov x4, #0",
     "ret",
-
     ".globl _qsag_asm_goldilocks_mul_ct_aarch64",
     ".p2align 2",
     "_qsag_asm_goldilocks_mul_ct_aarch64:",
@@ -310,7 +306,6 @@ global_asm!(
     "mov x7, #0",
     "mov x8, #0",
     "ret",
-
     ".globl _qsag_asm_ct_eq_32_aarch64",
     ".p2align 2",
     "_qsag_asm_ct_eq_32_aarch64:",
@@ -336,7 +331,6 @@ global_asm!(
     "mov x6, #0",
     "mov x7, #0",
     "ret",
-
     ".globl _qsag_asm_ct_memzero_aarch64",
     ".p2align 2",
     "_qsag_asm_ct_memzero_aarch64:",
@@ -374,10 +368,14 @@ pub(crate) unsafe fn enable_dit_aarch64() {
 struct AlignedBytes<const N: usize>([u8; N]);
 impl<const N: usize> core::ops::Deref for AlignedBytes<N> {
     type Target = [u8; N];
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl<const N: usize> core::ops::DerefMut for AlignedBytes<N> {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 /// Execute 24-round `Keccak-f[1600]` across all 4 sponges in `state` using two 2-way 128-bit

@@ -194,13 +194,21 @@ impl core::error::Error for NodeError {}
 
 #[derive(PartialEq, Eq)]
 struct SecretBytes(Vec<u8>);
-impl SecretBytes { fn as_slice(&self) -> &[u8] { &self.0 } }
+impl SecretBytes {
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
 impl core::ops::Deref for SecretBytes {
     type Target = [u8];
-    fn deref(&self) -> &[u8] { &self.0 }
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
 }
 impl Drop for SecretBytes {
-    fn drop(&mut self) { qsag_asm::volatile_fill(&mut self.0, 0); }
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(&mut self.0, 0);
+    }
 }
 
 fn recv_from<T: WireTransport>(
@@ -362,12 +370,7 @@ impl<T: WireTransport, W: DurableWal> IsolatedJortsParty<T, W> {
                 })?,
             );
         }
-        let sig = combine_additive(
-            self.custodian.tree(),
-            &record,
-            members,
-            &openings,
-        )?;
+        let sig = combine_additive(self.custodian.tree(), &record, members, &openings)?;
         if !quorum_jorts_verify(self.custodian.tree().public_key(), msg, &sig) {
             return Err(NodeError::Quorum(QuorumError::SignatureVerifyFailed));
         }
@@ -2032,25 +2035,39 @@ mod tests {
         let staged = stage_committee_partitioned(2, 2, 2, &SEED).unwrap();
         let pk = *staged.tree.public_key();
         let (endpoints, _) = TcpWireMesh::loopback(2, SESSION).unwrap();
-        let nodes: Vec<_> = endpoints.into_iter().zip(staged.parties)
+        let nodes: Vec<_> = endpoints
+            .into_iter()
+            .zip(staged.parties)
             .map(|(endpoint, material)| {
                 let wals = vec![MemoryWal::new(); material.stores.len()];
                 let custodian = CommitteeCustodian::new(
-                    staged.layout.clone(), staged.tree.clone(), material, wals,
-                ).unwrap();
-                let wire = ConfidentialWireChannel::new(
-                    endpoint, SESSION, vec![[0xA7; 32]; 2],
-                ).unwrap();
+                    staged.layout.clone(),
+                    staged.tree.clone(),
+                    material,
+                    wals,
+                )
+                .unwrap();
+                let wire =
+                    ConfidentialWireChannel::new(endpoint, SESSION, vec![[0xA7; 32]; 2]).unwrap();
                 IsolatedJortsParty::new(custodian, wire).unwrap()
-            }).collect();
+            })
+            .collect();
         let signatures = std::thread::scope(|scope| {
-            let handles: Vec<_> = nodes.into_iter().map(|mut node| {
-                scope.spawn(move || node.sign(0, 0, b"encrypted custody"))
-            }).collect();
-            handles.into_iter().map(|h| h.join().unwrap().unwrap()).collect::<Vec<_>>()
+            let handles: Vec<_> = nodes
+                .into_iter()
+                .map(|mut node| scope.spawn(move || node.sign(0, 0, b"encrypted custody")))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap().unwrap())
+                .collect::<Vec<_>>()
         });
         assert_eq!(signatures[0], signatures[1]);
-        assert!(quorum_jorts_verify(&pk, b"encrypted custody", &signatures[0]));
+        assert!(quorum_jorts_verify(
+            &pk,
+            b"encrypted custody",
+            &signatures[0]
+        ));
     }
 
     /// Split view: corrupted thread 2 has thread 0 sign `M1` and thread 1 sign `M2` at the

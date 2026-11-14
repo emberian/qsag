@@ -44,14 +44,20 @@ fn main() {
     // Reproduce public benchmark RNG inputs; custody shares expose no raw getters.
     let mut seed = [0u8; 16];
     let mut prf = [0u8; 16];
-    for mut fixture_rng in core::array::from_fn::<_, 3, _>(|p| PartyPrivateRng::from_seed([0x20 + p as u8; 32], b"rss-profile")) {
+    for mut fixture_rng in core::array::from_fn::<_, 3, _>(|p| {
+        PartyPrivateRng::from_seed([0x20 + p as u8; 32], b"rss-profile")
+    }) {
         let _ = fixture_rng.next_bytes32();
         let _ = fixture_rng.next_bytes32();
         let mut contribution = [0u8; 16];
         fixture_rng.fill_bytes(&mut contribution);
-        for (dst, src) in seed.iter_mut().zip(contribution) { *dst ^= src; }
+        for (dst, src) in seed.iter_mut().zip(contribution) {
+            *dst ^= src;
+        }
         fixture_rng.fill_bytes(&mut contribution);
-        for (dst, src) in prf.iter_mut().zip(contribution) { *dst ^= src; }
+        for (dst, src) in prf.iter_mut().zip(contribution) {
+            *dst ^= src;
+        }
     }
     let start = Instant::now();
     let (reference_sk, reference_pk) = slh_keygen_internal(&params, &seed, &prf, &pk_seed).unwrap();

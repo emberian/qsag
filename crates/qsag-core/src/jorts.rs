@@ -314,8 +314,9 @@ pub fn jorts_keygen_mpc(
     let sweep = Sweep::evaluate(engine, &pk_seed, lanes, WOTS_STEPS as u8)?;
     engine.check()?;
     engine.mark_open_round();
-    let picks: Vec<(usize, u8)> =
-        (0..sweep.lane_count()).map(|l| (l, WOTS_STEPS as u8)).collect();
+    let picks: Vec<(usize, u8)> = (0..sweep.lane_count())
+        .map(|l| (l, WOTS_STEPS as u8))
+        .collect();
     let endpoints = sweep.open_positions(engine, &picks)?;
     let leaves: Vec<[u8; 32]> = endpoints
         .chunks_exact(chains)
@@ -457,7 +458,11 @@ impl<W: DurableWal> JortsSigner<W> {
 
     /// Smallest epoch no signer has bound yet.
     pub fn next_free_epoch(&self) -> u64 {
-        self.latches.iter().map(|l| l.next_epoch()).max().unwrap_or(0)
+        self.latches
+            .iter()
+            .map(|l| l.next_epoch())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Dismantle into the three logs (a simulated restart in tests).
@@ -876,7 +881,8 @@ mod tests {
         let key = jorts_keygen_mpc(&mut engine, &params).unwrap();
         assert_eq!(key, jorts_reference_keygen(&params, &sk));
         let pk = key.pk;
-        let mut signer = JortsSigner::new(params, key.clone(), fresh_wals(), engine.keys()).unwrap();
+        let mut signer =
+            JortsSigner::new(params, key.clone(), fresh_wals(), engine.keys()).unwrap();
 
         // Mode 3A.
         let sig = signer.sign_mode3a(&mut engine, 0, b"first").unwrap();
@@ -886,7 +892,10 @@ mod tests {
             jorts_reference_sign(&params, &sk, &key, 0, &sig.retry_salt, b"first")
         );
         assert_eq!(sig.chains.len(), params.wots.chains);
-        assert_eq!(8 + 32 + 4 + 32 * (sig.chains.len() + sig.auth.len()), params.sig_bytes());
+        assert_eq!(
+            8 + 32 + 4 + 32 * (sig.chains.len() + sig.auth.len()),
+            params.sig_bytes()
+        );
 
         // Mode 3B over a staged window of three epochs.
         signer.stage_window(&mut engine, 1, 3).unwrap();
@@ -909,7 +918,10 @@ mod tests {
             signer.sign_mode3b(&mut engine, 2, b"second"),
             Err(JortsError::NotStaged)
         );
-        assert_eq!(signer.sign_mode3b(&mut engine, 7, b"x"), Err(JortsError::NotStaged));
+        assert_eq!(
+            signer.sign_mode3b(&mut engine, 7, b"x"),
+            Err(JortsError::NotStaged)
+        );
 
         // Tampered signatures and wrong messages are rejected.
         assert!(!jorts_verify(&params, &pk, b"other", &sig));
@@ -932,7 +944,8 @@ mod tests {
         let params = JortsParams::with_height(2);
         let (mut engine, _sk) = test_engine(0xB2);
         let key = jorts_keygen_mpc(&mut engine, &params).unwrap();
-        let mut signer = JortsSigner::new(params, key.clone(), fresh_wals(), engine.keys()).unwrap();
+        let mut signer =
+            JortsSigner::new(params, key.clone(), fresh_wals(), engine.keys()).unwrap();
         let sig = signer.sign_mode3a(&mut engine, 1, b"pay 5").unwrap();
 
         // Crash: memory is lost, the three logs survive.
@@ -964,7 +977,8 @@ mod tests {
         // One signer lost its log entirely: the others hold a salt it cannot confirm, so
         // the epoch must be burned instead of adopting a claimed salt.
         let [w0, w1, _lost] = signer.into_wals();
-        let mut signer = JortsSigner::new(params, key, [w0, w1, MemoryWal::new()], engine.keys()).unwrap();
+        let mut signer =
+            JortsSigner::new(params, key, [w0, w1, MemoryWal::new()], engine.keys()).unwrap();
         assert_eq!(
             signer.sign_mode3a(&mut engine, 1, b"pay 5"),
             Err(JortsError::Latch(BeltLatchError::RetrySaltUnavailable))
@@ -991,7 +1005,10 @@ mod tests {
         let err = signer
             .sign_mode3a_views(&mut engine, 0, b"pay alice", &[md_a, md_b, md_a])
             .unwrap_err();
-        assert_eq!(err, JortsError::Latch(BeltLatchError::SplitView { party: 1 }));
+        assert_eq!(
+            err,
+            JortsError::Latch(BeltLatchError::SplitView { party: 1 })
+        );
         let after = engine.stats();
         assert_eq!(after.lane_perms, before.lane_perms);
         assert_eq!(after.open_bytes - before.open_bytes, ECHO_WIRE_BYTES);
@@ -1039,7 +1056,9 @@ mod tests {
             assert_eq!(latch.in_flight(), None);
         }
         // The largest jump inside the window signs.
-        let sig = signer.sign_mode3a(&mut engine, MAX_EPOCH_JUMP, b"ok").unwrap();
+        let sig = signer
+            .sign_mode3a(&mut engine, MAX_EPOCH_JUMP, b"ok")
+            .unwrap();
         assert!(jorts_verify(&params, &pk, b"ok", &sig));
         assert_eq!(signer.next_free_epoch(), MAX_EPOCH_JUMP + 1);
     }
@@ -1146,7 +1165,9 @@ mod tests {
         let mut signer = JortsSigner::new(params, key.clone(), wals, engine.keys()).unwrap();
 
         // 1. Fresh Mode 3A signing via prepare -> install_ceremony_permits -> complete.
-        let prepared0 = signer.prepare_sign_mode3a(&mut engine, 0, b"tx-epoch-0").unwrap();
+        let prepared0 = signer
+            .prepare_sign_mode3a(&mut engine, 0, b"tx-epoch-0")
+            .unwrap();
         let permits0: [_; 3] = core::array::from_fn(|p| {
             journals[p]
                 .persist_epoch_before_release(
@@ -1162,7 +1183,11 @@ mod tests {
                 .unwrap()
         });
         signer
-            .install_ceremony_permits(&prepared0, [&journals[0], &journals[1], &journals[2]], permits0)
+            .install_ceremony_permits(
+                &prepared0,
+                [&journals[0], &journals[1], &journals[2]],
+                permits0,
+            )
             .unwrap();
         let sig0 = signer
             .complete_sign_mode3a(&mut engine, prepared0, b"tx-epoch-0")
@@ -1172,7 +1197,9 @@ mod tests {
         // 2. Crash after prepare + journal reservation on epoch 1 BEFORE completing opening:
         //    recovery clears in-memory WAL release permits, and commit_epoch_retry_attempt
         //    mints a fresh attempt permit for the identical persisted binding!
-        let prepared1 = signer.prepare_sign_mode3a(&mut engine, 1, b"tx-epoch-1").unwrap();
+        let prepared1 = signer
+            .prepare_sign_mode3a(&mut engine, 1, b"tx-epoch-1")
+            .unwrap();
         let _lost_permits: [_; 3] = core::array::from_fn(|p| {
             journals[p]
                 .persist_epoch_before_release(

@@ -24,7 +24,10 @@ pub enum HdError {
     AddressCodecError(AddrError),
     InvalidThresholdParameters,
     DuplicateOrZeroEvalPoint,
-    DerivationBudgetExceeded { current: u16, max: u16 },
+    DerivationBudgetExceeded {
+        current: u16,
+        max: u16,
+    },
     NormBoundExceeded,
     MacCheckFailed,
     EvaluationBudgetExceeded,
@@ -408,7 +411,10 @@ impl WatchOnlyInventoryTable {
 
 impl InventoryPartyShareVault {
     /// Local lookup of this custodian's `(subset, component)` list for one child.
-    pub fn child_components(&self, child_idx: u32) -> Result<&[(u16, RedactedSecret<32>)], HdError> {
+    pub fn child_components(
+        &self,
+        child_idx: u32,
+    ) -> Result<&[(u16, RedactedSecret<32>)], HdError> {
         self.children
             .get(child_idx as usize)
             .map(Vec::as_slice)
@@ -536,7 +542,11 @@ mod signature_tests {
         );
         let all_vaults: Vec<&InventoryPartyShareVault> = vaults.iter().collect();
         let pubkeys: Vec<[u8; 32]> = (0..2)
-            .map(|idx| enroll_child_signing_seed_quorum(&config, &all_vaults, idx).unwrap().1)
+            .map(|idx| {
+                enroll_child_signing_seed_quorum(&config, &all_vaults, idx)
+                    .unwrap()
+                    .1
+            })
             .collect();
         let table = commit_inventory_public_keys([2; 32], pubkeys, &accel).unwrap();
         // A different quorum recovers the same seed and it matches the enrolled key.
@@ -628,10 +638,25 @@ mod signature_tests {
                 .collect()
         };
         let (a, b) = (world(false), world(true));
-        let va: Vec<_> = a.iter().map(|s| derive_inventory_vault(s, [5; 32], 2).unwrap()).collect();
-        let vb: Vec<_> = b.iter().map(|s| derive_inventory_vault(s, [5; 32], 2).unwrap()).collect();
-        assert_eq!(va[0].child_components(1).unwrap(), vb[0].child_components(1).unwrap());
-        assert!(va[0].child_components(1).unwrap().iter().all(|entry| entry.0 != 0b110));
+        let va: Vec<_> = a
+            .iter()
+            .map(|s| derive_inventory_vault(s, [5; 32], 2).unwrap())
+            .collect();
+        let vb: Vec<_> = b
+            .iter()
+            .map(|s| derive_inventory_vault(s, [5; 32], 2).unwrap())
+            .collect();
+        assert_eq!(
+            va[0].child_components(1).unwrap(),
+            vb[0].child_components(1).unwrap()
+        );
+        assert!(
+            va[0]
+                .child_components(1)
+                .unwrap()
+                .iter()
+                .all(|entry| entry.0 != 0b110)
+        );
         let seed_a = recover_child_signing_seed_unchecked(&config, &[&va[1], &va[2]], 1).unwrap();
         let seed_b = recover_child_signing_seed_unchecked(&config, &[&vb[1], &vb[2]], 1).unwrap();
         assert_ne!(seed_a, seed_b);

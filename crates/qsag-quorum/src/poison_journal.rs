@@ -12,9 +12,41 @@
 //! - Before every mutation and query, both pathnames are re-verified via `symlink_metadata`
 //!   against the held descriptors so live pathname replacement or sidecar swapping invalidates
 //!   the active handle immediately.
+//!
+//! # Prefix rollback
+//!
+//! Every prefix of an authenticated chain is itself an authenticated chain, so nothing inside
+//! the journal directory can tell a truncated history from a complete one. Dropping the final
+//! `CONSUMED` record would return the session to `ALLOCATED` and let a restarted party derive
+//! the same pads and coins again; dropping a `POISONED` record would clear the poison.
+//! [`FsDurablePoisonAndSessionJournal::open_anchored`] therefore binds the head
+//! `(record count, head tag)` to an [`ExternalMonotoneAnchor`] as a [`LedgerCheckpoint`]:
+//!
+//! - **Append**: the anchor must equal the handle's head; the record is written and `fsync`ed;
+//!   the anchor is advanced; only then does the call return and the new state take effect. Any
+//!   failure in between permanently disables the handle.
+//! - **Crash between `fsync` and the anchor advance**: the file is exactly one record ahead.
+//!   That record's effect was never released (the append never returned), so recovery accepts
+//!   it and ratchets the anchor before returning. More than one unanchored record cannot be
+//!   produced by this type and is refused.
+//! - **Recovery**: refused when the anchor is unenrolled, when the file holds fewer records
+//!   than the anchor's generation, or when the record at the anchored position does not carry
+//!   the anchored tag (a different lineage or a rewritten history).
+//! - **Torn append** (length not a multiple of the record size): refused, as before. The tail
+//!   is never discarded automatically.
+//! - **Creation**: refused if the anchor is already enrolled. A crash after the genesis record
+//!   and before enrollment leaves a lineage that neither mode will open; nothing was released
+//!   under it, and the operator provisions a new path.
+//!
+//! The protection is exactly as strong as the anchor's independence from this directory's
+//! rollback domain (a TPM NV index, a remote monotonic service). A file beside the journal is
+//! not an anchor. The unanchored constructor is compiled only for tests and
+//! `testing-ephemeral`.
 
 use crate::hash::{mac32, mac32_verify};
 use crate::party_node::{NodeError, PoisonJournal};
+use qsag_core::wipe::ct_eq_bytes32;
+use qsag_core::{ExternalMonotoneAnchor, LedgerCheckpoint};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -120,7 +152,12 @@ fn check_regular_if_present(path: &Path) -> Result<Option<(u64, u64)>, NodeError
     }
 }
 
-fn fill_lock_nonce(key: &[u8; 32], session: &[u8; 32], dev: u64, ino: u64) -> Result<[u8; 24], NodeError> {
+fn fill_lock_nonce(
+    key: &[u8; 32],
+    session: &[u8; 32],
+    dev: u64,
+    ino: u64,
+) -> Result<[u8; 24], NodeError> {
     let mut raw = [0u8; 24];
     File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut raw))
@@ -155,6 +192,7 @@ pub struct FsDurablePoisonAndSessionJournal {
     tag: [u8; 32],
     failed: bool,
     records: u64,
+    anchor: Option<Box<dyn ExternalMonotoneAnchor>>,
 }
 
 impl core::fmt::Debug for FsDurablePoisonAndSessionJournal {
@@ -171,13 +209,58 @@ impl Drop for FsDurablePoisonAndSessionJournal {
 }
 
 impl FsDurablePoisonAndSessionJournal {
+    /// Open under an anchor outside this directory's rollback domain. See the module
+    /// documentation for the append, crash and recovery rules.
+    pub fn open_anchored(
+        path: impl AsRef<Path>,
+        key: [u8; 32],
+        session: [u8; 32],
+        mode: JournalOpenMode,
+        anchor: Box<dyn ExternalMonotoneAnchor>,
+    ) -> Result<Self, NodeError> {
+        Self::open_inner(path.as_ref(), key, session, mode, Some(anchor))
+    }
+
+    /// Unanchored journal: a truncated prefix of the file is accepted on recovery, so this
+    /// is restricted to tests and `testing-ephemeral`.
+    #[cfg(any(test, feature = "testing-ephemeral"))]
     pub fn open(
         path: impl AsRef<Path>,
         key: [u8; 32],
         session: [u8; 32],
         mode: JournalOpenMode,
     ) -> Result<Self, NodeError> {
-        let path = path.as_ref().to_path_buf();
+        Self::open_inner(path.as_ref(), key, session, mode, None)
+    }
+
+    fn open_inner(
+        path: &Path,
+        key: [u8; 32],
+        session: [u8; 32],
+        mode: JournalOpenMode,
+        anchor: Option<Box<dyn ExternalMonotoneAnchor>>,
+    ) -> Result<Self, NodeError> {
+        // Consult the anchor before touching the directory.
+        let retained = match (&anchor, mode) {
+            (None, _) => None,
+            (Some(anchor), JournalOpenMode::CreateNew) => {
+                if anchor.load().map_err(|_| NodeError::Journal)?.is_some() {
+                    return Err(NodeError::Journal);
+                }
+                None
+            }
+            (Some(anchor), JournalOpenMode::RecoverExisting) => {
+                let retained = anchor
+                    .load()
+                    .map_err(|_| NodeError::Journal)?
+                    .ok_or(NodeError::Journal)?;
+                if retained.generation == 0 {
+                    return Err(NodeError::Journal);
+                }
+                Some(retained)
+            }
+        };
+        let path = path.to_path_buf();
         let lock_path = lock_path_for(&path);
         let parent_path = path
             .parent()
@@ -269,6 +352,7 @@ impl FsDurablePoisonAndSessionJournal {
             tag: [0; 32],
             failed: false,
             records: 0,
+            anchor,
         };
         if mode == JournalOpenMode::CreateNew {
             journal.verify_live_files()?;
@@ -330,12 +414,26 @@ impl FsDurablePoisonAndSessionJournal {
                     if !valid {
                         return Err(NodeError::Journal);
                     }
+                    if let Some(retained) = retained
+                        && index + 1 == retained.generation
+                        && !ct_eq_bytes32(&tag, &retained.tag)
+                    {
+                        return Err(NodeError::Journal);
+                    }
                     journal.generation = generation;
                     journal.session = id;
                     journal.state = state;
                     journal.tag = tag;
                 }
                 journal.records = length / RECORD_BYTES as u64;
+                // The anchored record was compared in the loop only if the file reaches it.
+                // At most the single in-flight append may be unanchored.
+                if let Some(retained) = retained
+                    && (journal.records < retained.generation
+                        || journal.records - retained.generation > 1)
+                {
+                    return Err(NodeError::Journal);
+                }
                 if journal.session != session {
                     return Err(NodeError::Journal);
                 }
@@ -344,7 +442,56 @@ impl FsDurablePoisonAndSessionJournal {
         journal.verify_live_files()?;
         journal.file.sync_all().map_err(|_| NodeError::Journal)?;
         journal.parent.sync_all().map_err(|_| NodeError::Journal)?;
+        if mode == JournalOpenMode::RecoverExisting {
+            journal.commit_anchor()?;
+        }
         Ok(journal)
+    }
+
+    /// Authenticated head `(record count, head tag)`, the value retained by the anchor.
+    pub fn checkpoint(&self) -> LedgerCheckpoint {
+        LedgerCheckpoint {
+            generation: self.records,
+            tag: self.tag,
+        }
+    }
+
+    /// Before an append: the anchor holds exactly this handle's head (nothing, before the
+    /// genesis record). An anchor ahead of the handle means the handle is the stale one.
+    fn anchor_matches_head(&self) -> Result<(), NodeError> {
+        let Some(anchor) = &self.anchor else {
+            return Ok(());
+        };
+        let in_sync = match anchor.load().map_err(|_| NodeError::Journal)? {
+            None => self.records == 0,
+            Some(retained) => {
+                retained.generation == self.records && ct_eq_bytes32(&retained.tag, &self.tag)
+            }
+        };
+        if in_sync {
+            Ok(())
+        } else {
+            Err(NodeError::Journal)
+        }
+    }
+
+    /// Ratchet the anchor to the durable head. Never moves it backwards or sideways.
+    fn commit_anchor(&self) -> Result<(), NodeError> {
+        let Some(anchor) = &self.anchor else {
+            return Ok(());
+        };
+        let head = self.checkpoint();
+        match anchor.load().map_err(|_| NodeError::Journal)? {
+            Some(retained) if retained.generation > head.generation => Err(NodeError::Journal),
+            Some(retained) if retained.generation == head.generation => {
+                if ct_eq_bytes32(&retained.tag, &head.tag) {
+                    Ok(())
+                } else {
+                    Err(NodeError::Journal)
+                }
+            }
+            _ => anchor.advance(head).map_err(|_| NodeError::Journal),
+        }
     }
 
     pub fn session_generation(&self) -> u64 {
@@ -365,7 +512,11 @@ impl FsDurablePoisonAndSessionJournal {
         if regular_dev_ino(&live_data)? != self.data_id
             || regular_dev_ino(&held_data)? != self.data_id
             || live_data.len() != held_data.len()
-            || held_data.len() != self.records.checked_mul(RECORD_BYTES as u64).ok_or(NodeError::Journal)?
+            || held_data.len()
+                != self
+                    .records
+                    .checked_mul(RECORD_BYTES as u64)
+                    .ok_or(NodeError::Journal)?
         {
             return Err(NodeError::Journal);
         }
@@ -377,14 +528,19 @@ impl FsDurablePoisonAndSessionJournal {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::FileExt;
-                self.file.read_exact_at(&mut record, index * RECORD_BYTES as u64)
+                self.file
+                    .read_exact_at(&mut record, index * RECORD_BYTES as u64)
                     .map_err(|_| NodeError::Journal)?;
             }
             #[cfg(not(unix))]
             return Err(NodeError::Journal);
             let tag = core::array::from_fn(|i| record[41 + i]);
-            if !mac32_verify(&self.key, DOMAIN,
-                &[&self.lock_seal, &self.data_seal, &previous, &record[..41]], &tag) {
+            if !mac32_verify(
+                &self.key,
+                DOMAIN,
+                &[&self.lock_seal, &self.data_seal, &previous, &record[..41]],
+                &tag,
+            ) {
                 return Err(NodeError::Journal);
             }
             previous = tag;
@@ -455,18 +611,14 @@ impl FsDurablePoisonAndSessionJournal {
         self.persist(generation, session, STATE_ALLOCATED)
     }
 
-    fn persist(
-        &mut self,
-        generation: u64,
-        session: [u8; 32],
-        state: u8,
-    ) -> Result<(), NodeError> {
+    fn persist(&mut self, generation: u64, session: [u8; 32], state: u8) -> Result<(), NodeError> {
         if self.failed {
             return Err(NodeError::Journal);
         }
         // Any failed, partial, or inode-swapped append permanently disables this handle.
         self.failed = true;
         self.verify_live_files()?;
+        self.anchor_matches_head()?;
         let mut record = [0u8; RECORD_BYTES];
         record[..8].copy_from_slice(&generation.to_be_bytes());
         record[8..40].copy_from_slice(&session);
@@ -474,12 +626,7 @@ impl FsDurablePoisonAndSessionJournal {
         let tag = mac32(
             &self.key,
             DOMAIN,
-            &[
-                &self.lock_seal,
-                &self.data_seal,
-                &self.tag,
-                &record[..41],
-            ],
+            &[&self.lock_seal, &self.data_seal, &self.tag, &record[..41]],
         );
         record[41..].copy_from_slice(&tag);
         self.file
@@ -493,6 +640,8 @@ impl FsDurablePoisonAndSessionJournal {
         self.records = self.records.checked_add(1).ok_or(NodeError::Journal)?;
         self.tag = tag;
         self.verify_live_files()?;
+        // The record is durable; its effect is released only once the anchor holds it.
+        self.commit_anchor()?;
         self.generation = generation;
         self.session = session;
         self.state = state;
@@ -550,6 +699,218 @@ mod tests {
         dir
     }
 
+    /// Stands in for a device outside the journal directory: its state survives every file
+    /// manipulation below. The flag makes `advance` fail, modelling a crash or outage after
+    /// the record is durable and before the anchor moves.
+    #[derive(Clone, Default)]
+    struct DeviceAnchor(std::sync::Arc<std::sync::Mutex<(Option<LedgerCheckpoint>, bool)>>);
+
+    impl DeviceAnchor {
+        fn retained(&self) -> Option<LedgerCheckpoint> {
+            self.0.lock().unwrap().0
+        }
+        fn set_unreachable(&self, unreachable: bool) {
+            self.0.lock().unwrap().1 = unreachable;
+        }
+        fn boxed(&self) -> Box<dyn ExternalMonotoneAnchor> {
+            Box::new(self.clone())
+        }
+    }
+
+    impl ExternalMonotoneAnchor for DeviceAnchor {
+        fn load(&self) -> std::io::Result<Option<LedgerCheckpoint>> {
+            Ok(self.0.lock().unwrap().0)
+        }
+        fn advance(&self, next: LedgerCheckpoint) -> std::io::Result<()> {
+            let mut state = self.0.lock().unwrap();
+            if state.1
+                || state.0.is_some_and(|old| {
+                    old.generation > next.generation
+                        || (old.generation == next.generation && old.tag != next.tag)
+                })
+            {
+                return Err(std::io::Error::other("anchor refused"));
+            }
+            state.0 = Some(next);
+            Ok(())
+        }
+    }
+
+    fn create_anchored(
+        path: &Path,
+        key: [u8; 32],
+        session: [u8; 32],
+        anchor: &DeviceAnchor,
+    ) -> Result<FsDurablePoisonAndSessionJournal, NodeError> {
+        FsDurablePoisonAndSessionJournal::open_anchored(
+            path,
+            key,
+            session,
+            JournalOpenMode::CreateNew,
+            anchor.boxed(),
+        )
+    }
+
+    fn recover_anchored(
+        path: &Path,
+        key: [u8; 32],
+        session: [u8; 32],
+        anchor: &DeviceAnchor,
+    ) -> Result<FsDurablePoisonAndSessionJournal, NodeError> {
+        FsDurablePoisonAndSessionJournal::open_anchored(
+            path,
+            key,
+            session,
+            JournalOpenMode::RecoverExisting,
+            anchor.boxed(),
+        )
+    }
+
+    #[test]
+    fn anchored_recovery_refuses_a_truncated_prefix() {
+        // Second case: the dropped record is POISONED instead of CONSUMED.
+        for poison in [false, true] {
+            let dir = unique_dir("prefix-rollback");
+            let path = dir.join("party0.journal");
+            let key = [0x31; 32];
+            let session = [0xA7; 32];
+            let anchor = DeviceAnchor::default();
+
+            let mut journal = create_anchored(&path, key, session, &anchor).unwrap();
+            journal.reserve_session(&session).unwrap();
+            if poison {
+                journal.mark_poisoned(&session).unwrap();
+            }
+            let head = journal.checkpoint();
+            let records = if poison { 3 } else { 2 };
+            assert_eq!(head.generation, records);
+            assert_eq!(anchor.retained(), Some(head));
+            drop(journal);
+
+            // Offline, with no key: drop the final record from the same inode.
+            let full = fs::read(&path).unwrap();
+            let kept = full.len() - RECORD_BYTES;
+            let file = OpenOptions::new().write(true).open(&path).unwrap();
+            file.set_len(kept as u64).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+
+            // Control: the prefix is a valid chain, and without the anchor it is accepted
+            // in the rolled-back state.
+            let rolled_back = FsDurablePoisonAndSessionJournal::open(
+                &path,
+                key,
+                session,
+                JournalOpenMode::RecoverExisting,
+            )
+            .unwrap();
+            assert!(!rolled_back.is_poisoned(&session));
+            assert_eq!(rolled_back.is_session_consumed(&session), poison);
+            drop(rolled_back);
+
+            assert!(matches!(
+                recover_anchored(&path, key, session, &anchor),
+                Err(NodeError::Journal)
+            ));
+            assert_eq!(anchor.retained(), Some(head));
+
+            // Restoring the dropped bytes restores recovery, so the refusal was the truncation.
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+            file.write_all(&full[kept..]).unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            let recovered = recover_anchored(&path, key, session, &anchor).unwrap();
+            assert!(recovered.is_session_consumed(&session));
+            assert_eq!(recovered.is_poisoned(&session), poison);
+            assert_eq!(recovered.checkpoint(), head);
+            drop(recovered);
+            fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn crash_before_anchor_advance_recovers_forward_and_then_pins_the_record() {
+        let dir = unique_dir("anchor-crash");
+        let path = dir.join("party0.journal");
+        let key = [0x32; 32];
+        let session = [0xA8; 32];
+        let anchor = DeviceAnchor::default();
+
+        let mut journal = create_anchored(&path, key, session, &anchor).unwrap();
+        let genesis = journal.checkpoint();
+        assert_eq!(genesis.generation, 1);
+
+        // The CONSUMED record reaches the disk; the anchor does not move. The reservation
+        // is not granted and the handle is dead.
+        anchor.set_unreachable(true);
+        assert_eq!(journal.reserve_session(&session), Err(NodeError::Journal));
+        assert!(journal.is_poisoned(&session));
+        assert_eq!(journal.mark_poisoned(&session), Err(NodeError::Journal));
+        assert_eq!(anchor.retained(), Some(genesis));
+        assert_eq!(fs::metadata(&path).unwrap().len(), 2 * RECORD_BYTES as u64);
+        drop(journal);
+
+        // Recovery cannot complete while the anchor cannot be ratcheted.
+        assert!(recover_anchored(&path, key, session, &anchor).is_err());
+        assert_eq!(anchor.retained(), Some(genesis));
+
+        // Once reachable, recovery keeps the durable record (never the older state) and
+        // ratchets the anchor to it before returning.
+        anchor.set_unreachable(false);
+        let recovered = recover_anchored(&path, key, session, &anchor).unwrap();
+        assert!(recovered.is_session_consumed(&session));
+        assert!(!recovered.is_poisoned(&session));
+        let head = recovered.checkpoint();
+        assert_eq!(head.generation, 2);
+        assert_eq!(anchor.retained(), Some(head));
+        drop(recovered);
+
+        // From here the record is pinned: truncating it away is refused.
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(RECORD_BYTES as u64).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        assert!(recover_anchored(&path, key, session, &anchor).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn anchor_enrollment_lineage_and_gap_rules_fail_closed() {
+        let dir = unique_dir("anchor-rules");
+        let key = [0x33; 32];
+        let session = [0xA9; 32];
+
+        // An enrolled anchor cannot back a new lineage; an unenrolled one cannot recover.
+        let path = dir.join("party0.journal");
+        let anchor = DeviceAnchor::default();
+        drop(create_anchored(&path, key, session, &anchor).unwrap());
+        let other_path = dir.join("party1.journal");
+        assert!(create_anchored(&other_path, key, session, &anchor).is_err());
+        assert!(fs::symlink_metadata(&other_path).is_err());
+        assert!(recover_anchored(&path, key, session, &DeviceAnchor::default()).is_err());
+
+        // An anchor enrolled for another lineage carries a tag this file never produced.
+        let other_anchor = DeviceAnchor::default();
+        drop(create_anchored(&other_path, key, session, &other_anchor).unwrap());
+        assert!(recover_anchored(&path, key, session, &other_anchor).is_err());
+
+        // Two records the anchor never saw: more than one in-flight append is not a crash
+        // this type can produce.
+        let mut unanchored = FsDurablePoisonAndSessionJournal::open(
+            &path,
+            key,
+            session,
+            JournalOpenMode::RecoverExisting,
+        )
+        .unwrap();
+        unanchored.reserve_session(&session).unwrap();
+        unanchored.mark_poisoned(&session).unwrap();
+        drop(unanchored);
+        assert!(recover_anchored(&path, key, session, &anchor).is_err());
+        assert_eq!(anchor.retained().unwrap().generation, 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn live_in_place_history_changes_fail_closed() {
         for truncate in [false, true] {
@@ -557,7 +918,12 @@ mod tests {
             let path = dir.join("journal");
             let session = [23; 32];
             let mut journal = FsDurablePoisonAndSessionJournal::open(
-                &path, [17; 32], session, JournalOpenMode::CreateNew).unwrap();
+                &path,
+                [17; 32],
+                session,
+                JournalOpenMode::CreateNew,
+            )
+            .unwrap();
             journal.reserve_session(&session).unwrap();
             let mut attacker = OpenOptions::new().write(true).open(&path).unwrap();
             if truncate {
@@ -677,13 +1043,9 @@ mod tests {
                 JournalOpenMode::CreateNew,
             )
             .unwrap();
-            let _party = IsolatedRss256Party::new(
-                session_a,
-                keys[0].clone(),
-                endpoints.remove(0),
-                journal,
-            )
-            .unwrap();
+            let _party =
+                IsolatedRss256Party::new(session_a, keys[0].clone(), endpoints.remove(0), journal)
+                    .unwrap();
         }
 
         // Process 2 recovers the clean journal after crash and attempts to construct a party
@@ -718,13 +1080,9 @@ mod tests {
         .unwrap();
         recovered.advance_session(session_b).unwrap();
         let (mut endpoints, _) = InMemoryWireMesh::connect(3, session_b);
-        let party_b = IsolatedRss256Party::new(
-            session_b,
-            keys[0].clone(),
-            endpoints.remove(0),
-            recovered,
-        )
-        .unwrap();
+        let party_b =
+            IsolatedRss256Party::new(session_b, keys[0].clone(), endpoints.remove(0), recovered)
+                .unwrap();
         assert!(!party_b.is_poisoned());
         drop(party_b);
         fs::remove_dir_all(dir).unwrap();
@@ -791,7 +1149,8 @@ mod tests {
         let orig_lock = fs::read(&lock_path2).unwrap();
         let fake_lock_tmp = dir.join("party1.journal.lock.fake");
         fs::write(&fake_lock_tmp, &orig_lock).unwrap();
-        let (new_dev, new_ino) = regular_dev_ino(&fs::symlink_metadata(&fake_lock_tmp).unwrap()).unwrap();
+        let (new_dev, new_ino) =
+            regular_dev_ino(&fs::symlink_metadata(&fake_lock_tmp).unwrap()).unwrap();
         let mut forged_lock = orig_lock;
         forged_lock[8..16].copy_from_slice(&new_dev.to_be_bytes());
         forged_lock[16..24].copy_from_slice(&new_ino.to_be_bytes());

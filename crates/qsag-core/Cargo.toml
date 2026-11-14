@@ -7,6 +7,7 @@ description = "Zero-dependency no_std post-quantum threshold hash-based signatur
 
 [features]
 default = []
+testing-ephemeral = []
 std = ["qsag-asm/std"]
 
 [dependencies]
@@ -19,3 +20,7 @@ qsag-asm = { path = "../qsag-asm", default-features = false }
 qsag-policy = { path = "../qsag-policy", features = ["test-dealer"] }
 qsag-accel = { path = "../qsag-accel" }
 qsag-addr = { path = "../qsag-addr" }
+
+[[example]]
+name = "pants_bench"
+required-features = ["testing-ephemeral"]

@@ -203,8 +203,11 @@ impl TransactionPolicy {
             return Err(PolicyViolation::SingleTxCapExceeded);
         }
         qsag_verified::policy_and_addr::checked_velocity_spend(
-            intent.rolling_window_spent, intent.amount_units, self.velocity_window_cap,
-        ).ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
+            intent.rolling_window_spent,
+            intent.amount_units,
+            self.velocity_window_cap,
+        )
+        .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
 
         // Validate distinctness of approvers + anti-self-approval rule!
         for (i, &p_i) in intent.approver_parties.iter().enumerate() {
@@ -406,13 +409,23 @@ pub struct WindowAdvanceAuthorization {
 }
 
 impl WindowAdvanceAuthorization {
-    pub fn new(authority_key: &[u8; 32], policy_id: &[u8; 32],
-        prev_epoch: u64, new_window_epoch: u64) -> Self
-    {
+    pub fn new(
+        authority_key: &[u8; 32],
+        policy_id: &[u8; 32],
+        prev_epoch: u64,
+        new_window_epoch: u64,
+    ) -> Self {
         Self {
             new_window_epoch,
-            mac: cshake256_framed_32(b"QSAG.POLICY.WINDOW_ADVANCE/v1",
-                &[authority_key, policy_id, &prev_epoch.to_be_bytes(), &new_window_epoch.to_be_bytes()]),
+            mac: cshake256_framed_32(
+                b"QSAG.POLICY.WINDOW_ADVANCE/v1",
+                &[
+                    authority_key,
+                    policy_id,
+                    &prev_epoch.to_be_bytes(),
+                    &new_window_epoch.to_be_bytes(),
+                ],
+            ),
         }
     }
 }
@@ -422,7 +435,9 @@ struct WindowAuthority {
     key: [u8; 32],
 }
 impl Drop for WindowAuthority {
-    fn drop(&mut self) { ct_zeroize_bytes(&mut self.key); }
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.key);
+    }
 }
 
 /// Per-signer Eurocrypt-2011 pairwise BDOZ GF($2^{128}$) policy guard secret share:
@@ -486,10 +501,7 @@ fn derive_peer_slot_alpha(alpha_root: &[u128; 2], peer_id: u16, peer_slot: usize
         ],
     );
     ct_zeroize_bytes(&mut root_bytes);
-    [
-        policy_pair(raw)[0],
-        policy_pair(raw)[1],
-    ]
+    [policy_pair(raw)[0], policy_pair(raw)[1]]
 }
 
 impl PolicySignerGuardShare {
@@ -497,19 +509,26 @@ impl PolicySignerGuardShare {
     /// and its authority key. The ID must uniquely identify the policy/ledger.
     /// Cannot replace an authority or enable resets after spending has started.
     /// Provision identically before restoring a durable checkpoint.
-    pub fn with_window_authority(mut self, policy_id: [u8; 32], mut key: [u8; 32])
-        -> Result<Self, PolicyViolation>
-    {
-        if self.window_authority.is_some() || self.next_slot.get() != 0
-            || self.current_window_id != 0 || self.accumulated_window_spend != 0
-            || self.active_phase.is_some() || self.poisoned
+    pub fn with_window_authority(
+        mut self,
+        policy_id: [u8; 32],
+        mut key: [u8; 32],
+    ) -> Result<Self, PolicyViolation> {
+        if self.window_authority.is_some()
+            || self.next_slot.get() != 0
+            || self.current_window_id != 0
+            || self.accumulated_window_spend != 0
+            || self.active_phase.is_some()
+            || self.poisoned
         {
             ct_zeroize_bytes(&mut key);
             return Err(PolicyViolation::IntentBindingMismatch);
         }
         // Durable snapshots cannot be restored under different authority provisioning.
-        self.durable_key_id = cshake256_framed_32(b"QSAG.POLICY.WINDOW_KEY/v1",
-            &[&self.durable_key_id, &policy_id, &key]);
+        self.durable_key_id = cshake256_framed_32(
+            b"QSAG.POLICY.WINDOW_KEY/v1",
+            &[&self.durable_key_id, &policy_id, &key],
+        );
         self.window_authority = Some(WindowAuthority { policy_id, key });
         ct_zeroize_bytes(&mut key);
         Ok(self)
@@ -532,7 +551,9 @@ impl PolicySignerGuardShare {
     }
 
     pub fn is_nonce_burned(&self, nonce: &[u8; 32]) -> bool {
-        let mut hit = self.min_nonce_watermark.is_some_and(|floor| *nonce <= floor);
+        let mut hit = self
+            .min_nonce_watermark
+            .is_some_and(|floor| *nonce <= floor);
         for b in &self.burned_intent_nonces {
             hit |= ct_eq_bytes(b, nonce);
         }
@@ -540,7 +561,9 @@ impl PolicySignerGuardShare {
     }
 
     pub fn is_session_burned(&self, session_id: &[u8; 32]) -> bool {
-        let mut hit = self.min_session_watermark.is_some_and(|floor| *session_id <= floor);
+        let mut hit = self
+            .min_session_watermark
+            .is_some_and(|floor| *session_id <= floor);
         for b in &self.burned_sessions {
             hit |= ct_eq_bytes(b, session_id);
         }
@@ -549,7 +572,10 @@ impl PolicySignerGuardShare {
 
     /// Roll the guard into a strictly newer velocity window (`next_window_id > current_window_id`),
     /// resetting spend while permanently retaining nonce and session replay protection.
-    pub fn advance_velocity_window(&mut self, authorization: &WindowAdvanceAuthorization) -> Result<(), PolicyViolation> {
+    pub fn advance_velocity_window(
+        &mut self,
+        authorization: &WindowAdvanceAuthorization,
+    ) -> Result<(), PolicyViolation> {
         let next_window_id = authorization.new_window_epoch;
         if self.poisoned {
             return Err(PolicyViolation::GuardPoisoned);
@@ -561,9 +587,16 @@ impl PolicySignerGuardShare {
         if next_window_id <= self.current_window_id {
             return Err(PolicyViolation::WindowIdMismatch);
         }
-        let authority = self.window_authority.as_ref().ok_or(PolicyViolation::IntentBindingMismatch)?;
-        let expected = WindowAdvanceAuthorization::new(&authority.key, &authority.policy_id,
-            self.current_window_id, next_window_id);
+        let authority = self
+            .window_authority
+            .as_ref()
+            .ok_or(PolicyViolation::IntentBindingMismatch)?;
+        let expected = WindowAdvanceAuthorization::new(
+            &authority.key,
+            &authority.policy_id,
+            self.current_window_id,
+            next_window_id,
+        );
         if !ct_eq_bytes(&expected.mac, &authorization.mac) {
             return Err(PolicyViolation::IntentBindingMismatch);
         }
@@ -725,8 +758,16 @@ impl PolicySignerGuardShare {
         // Keep a bounded sparse window above a permanent lexicographic floor.
         // Evicted values remain burned forever, including across velocity windows.
         for (values, floor, value) in [
-            (&mut self.burned_intent_nonces, &mut self.min_nonce_watermark, nonce),
-            (&mut self.burned_sessions, &mut self.min_session_watermark, session_id),
+            (
+                &mut self.burned_intent_nonces,
+                &mut self.min_nonce_watermark,
+                nonce,
+            ),
+            (
+                &mut self.burned_sessions,
+                &mut self.min_session_watermark,
+                session_id,
+            ),
         ] {
             values.push(value);
             values.sort_unstable();
@@ -884,19 +925,13 @@ pub fn trusted_dealer_setup_for_testing(
     for &pid in party_ids {
         let p_be = pid.to_be_bytes();
         let raw = cshake256_framed_32(b"QSAG.POLICY.ALPHA_SH.V2", &[&ent, &p_be]);
-        alphas.push([
-            policy_pair(raw)[0],
-            policy_pair(raw)[1],
-        ]);
+        alphas.push([policy_pair(raw)[0], policy_pair(raw)[1]]);
 
         let mut r_slots = Vec::with_capacity(BDOZ_PREPROC_SLOTS);
         for s in 0..BDOZ_PREPROC_SLOTS {
             let s_be = (s as u32).to_be_bytes();
             let r_raw = cshake256_framed_32(b"QSAG.POLICY.PREPROC_R.V2", &[&ent, &p_be, &s_be]);
-            r_slots.push([
-                policy_pair(r_raw)[0],
-                policy_pair(r_raw)[1],
-            ]);
+            r_slots.push([policy_pair(r_raw)[0], policy_pair(r_raw)[1]]);
         }
         all_r.push(r_slots);
     }
@@ -1031,10 +1066,7 @@ fn compute_folded_policy_wire<B: AcceleratorBackend>(
             policy_pair(*intent_digest)[0],
             policy_pair(*intent_digest)[1],
         ),
-        (
-            policy_pair(meta)[0],
-            policy_pair(meta)[1],
-        ),
+        (policy_pair(meta)[0], policy_pair(meta)[1]),
         (1u128, 1u128),
     ];
     let w_raw = cshake256_framed_32(
@@ -1185,7 +1217,9 @@ impl SharedWindowSpendLedger {
     }
 
     pub fn is_nonce_burned(&self, nonce: &[u8; 32]) -> bool {
-        let mut hit = self.min_nonce_watermark.is_some_and(|floor| *nonce <= floor);
+        let mut hit = self
+            .min_nonce_watermark
+            .is_some_and(|floor| *nonce <= floor);
         for b in &self.burned_intent_nonces {
             hit |= ct_eq_bytes(b, nonce);
         }
@@ -1226,7 +1260,9 @@ impl SharedWindowSpendLedger {
         if !ct_eq_bytes(&expected.mac, &authorization.mac) {
             return Err(PolicyViolation::IntentBindingMismatch);
         }
-        self.generation = self.generation.checked_add(1)
+        self.generation = self
+            .generation
+            .checked_add(1)
             .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
         self.current_window_id = next_window_id;
         self.accumulated_window_spend = 0;
@@ -1660,7 +1696,10 @@ pub fn evaluate_policy_committed_barrier_with_ledger<B: AcceleratorBackend>(
     current_timestamp: u64,
     quorum_guards: &mut [PolicySignerGuardShare],
     shared_ledger: &mut SharedWindowSpendLedger,
-    persist: impl FnOnce(&SharedWindowSpendLedger, &[PolicySignerGuardShare]) -> Result<(), PolicyViolation>,
+    persist: impl FnOnce(
+        &SharedWindowSpendLedger,
+        &[PolicySignerGuardShare],
+    ) -> Result<(), PolicyViolation>,
     accel: &B,
 ) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
     if quorum_guards.len() < 2 {
@@ -1736,16 +1775,29 @@ pub trait PolicyAuthenticatedOt {
 
 /// Production adapter using the interactive KOS check and committed Ring-LWE base OT.
 /// The ID ordering avoids crossed blocking sends on synchronous transports.
-impl<W: qsag_fts::ot::AuthenticatedOtWire> PolicyAuthenticatedOt for qsag_fts::ot::CommittedCorrelatedOt<W> {
-    fn exchange(&mut self, local_party: u16, peer: u16, domain: [u8; 32], alternatives: &[[u128; 2]], choices: &[bool]) -> Result<Vec<u128>, PolicyViolation> {
-        if local_party != self.party_id() || alternatives.len() != choices.len() { return Err(PolicyViolation::IntentBindingMismatch); }
+impl<W: qsag_fts::ot::AuthenticatedOtWire> PolicyAuthenticatedOt
+    for qsag_fts::ot::CommittedCorrelatedOt<W>
+{
+    fn exchange(
+        &mut self,
+        local_party: u16,
+        peer: u16,
+        domain: [u8; 32],
+        alternatives: &[[u128; 2]],
+        choices: &[bool],
+    ) -> Result<Vec<u128>, PolicyViolation> {
+        if local_party != self.party_id() || alternatives.len() != choices.len() {
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
         let failed = |_| PolicyViolation::BarrierBdozMacFailed;
         if local_party < peer {
-            self.send_values(peer, domain, alternatives).map_err(failed)?;
+            self.send_values(peer, domain, alternatives)
+                .map_err(failed)?;
             self.receive_values(peer, domain, choices).map_err(failed)
         } else {
             let values = self.receive_values(peer, domain, choices).map_err(failed)?;
-            self.send_values(peer, domain, alternatives).map_err(failed)?;
+            self.send_values(peer, domain, alternatives)
+                .map_err(failed)?;
             Ok(values)
         }
     }
@@ -2749,9 +2801,13 @@ impl AuthorizedSignReleaseToken {
 #[cfg(test)]
 mod tests {
     fn raw_test_guards(entropy: [u8; 32], ids: &[u16]) -> Vec<PolicySignerGuardShare> {
-        let mut guards: Vec<_> = super::trusted_dealer_setup_for_testing(entropy, ids).into_iter()
-            .map(|g| g.with_window_authority([42; 32], [43; 32]).unwrap()).collect();
-        for guard in &mut guards { guard.set_require_authenticated_initiator(false); }
+        let mut guards: Vec<_> = super::trusted_dealer_setup_for_testing(entropy, ids)
+            .into_iter()
+            .map(|g| g.with_window_authority([42; 32], [43; 32]).unwrap())
+            .collect();
+        for guard in &mut guards {
+            guard.set_require_authenticated_initiator(false);
+        }
         guards
     }
     #[test]
@@ -2761,9 +2817,15 @@ mod tests {
         assert!(bare.advance_velocity_window(&auth).is_err());
         let guard = bare.with_window_authority([42; 32], [43; 32]).unwrap();
         let snapshot = guard.export_durable_checkpoint(&[7; 32], 1);
-        let mut other = super::trusted_dealer_setup_for_testing([9; 32], &[1, 2]).remove(0)
-            .with_window_authority([41; 32], [43; 32]).unwrap();
-        assert!(other.restore_from_durable_checkpoint(&snapshot, &[7; 32], 1).is_err());
+        let mut other = super::trusted_dealer_setup_for_testing([9; 32], &[1, 2])
+            .remove(0)
+            .with_window_authority([41; 32], [43; 32])
+            .unwrap();
+        assert!(
+            other
+                .restore_from_durable_checkpoint(&snapshot, &[7; 32], 1)
+                .is_err()
+        );
         assert!(guard.with_window_authority([41; 32], [43; 32]).is_err());
     }
 
@@ -2790,7 +2852,11 @@ mod tests {
 
     #[test]
     fn initiator_authentication_is_default() {
-        assert!(super::trusted_dealer_setup_for_testing([8; 32], &[1, 2]).iter().all(|g| g.require_authenticated_initiator));
+        assert!(
+            super::trusted_dealer_setup_for_testing([8; 32], &[1, 2])
+                .iter()
+                .all(|g| g.require_authenticated_initiator)
+        );
     }
     #[test]
     fn bounded_replay_window_never_reaccepts_evicted_nonces() {
@@ -2808,15 +2874,21 @@ mod tests {
             assert!(guard.is_session_burned(&nonce));
         }
         let checkpoint = guard.export_durable_checkpoint(&[7; 32], 600);
-        guard.restore_from_durable_checkpoint(&checkpoint, &[7; 32], 600).unwrap();
+        guard
+            .restore_from_durable_checkpoint(&checkpoint, &[7; 32], 600)
+            .unwrap();
         let mut older = raw_test_guards([9; 32], &[1, 2]);
         for i in 0u32..100 {
             let mut nonce = [0; 32];
             nonce[28..].copy_from_slice(&i.to_be_bytes());
             older[0].record_approved_intent(i as u128, nonce, nonce);
         }
-        older[0].restore_from_durable_checkpoint(&checkpoint, &[7; 32], 600).unwrap();
-        guard.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1)).unwrap();
+        older[0]
+            .restore_from_durable_checkpoint(&checkpoint, &[7; 32], 600)
+            .unwrap();
+        guard
+            .advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1))
+            .unwrap();
         assert!(guard.is_nonce_burned(&[0; 32]));
     }
 
@@ -3803,14 +3875,21 @@ mod tests {
         );
         for g in &mut guards {
             assert_eq!(
-                g.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 0)).err(),
+                g.advance_velocity_window(&WindowAdvanceAuthorization::new(
+                    &[43; 32], &[42; 32], 0, 0
+                ))
+                .err(),
                 Some(PolicyViolation::WindowIdMismatch)
             );
-            g.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1)).unwrap();
+            g.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1))
+                .unwrap();
             assert_eq!(g.current_window_id(), 1);
             assert_eq!(g.accumulated_window_spend(), 0);
             assert_eq!(
-                g.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1)).err(),
+                g.advance_velocity_window(&WindowAdvanceAuthorization::new(
+                    &[43; 32], &[42; 32], 0, 1
+                ))
+                .err(),
                 Some(PolicyViolation::WindowIdMismatch)
             );
         }
@@ -4060,16 +4139,24 @@ mod tests {
         assert_eq!(shared_ledger.accumulated_window_spend(), 60);
 
         let generation = shared_ledger.generation();
-        assert_eq!(shared_ledger.restore_from_durable_checkpoint(&old_checkpoint, &[77; 32], 0),
-            Err(PolicyGuardError::Rollback));
+        assert_eq!(
+            shared_ledger.restore_from_durable_checkpoint(&old_checkpoint, &[77; 32], 0),
+            Err(PolicyGuardError::Rollback)
+        );
         let mut recovered = SharedWindowSpendLedger::new(&policy, 0);
-        assert_eq!(recovered.restore_from_durable_checkpoint(&old_checkpoint, &[77; 32], generation),
-            Err(PolicyGuardError::Rollback));
+        assert_eq!(
+            recovered.restore_from_durable_checkpoint(&old_checkpoint, &[77; 32], generation),
+            Err(PolicyGuardError::Rollback)
+        );
         let mut tampered = saved.clone();
         tampered[40] ^= 1;
-        assert_eq!(recovered.restore_from_durable_checkpoint(&tampered, &[77; 32], generation),
-            Err(PolicyGuardError::AuthenticationFailed));
-        recovered.restore_from_durable_checkpoint(&saved, &[77; 32], generation).unwrap();
+        assert_eq!(
+            recovered.restore_from_durable_checkpoint(&tampered, &[77; 32], generation),
+            Err(PolicyGuardError::AuthenticationFailed)
+        );
+        recovered
+            .restore_from_durable_checkpoint(&saved, &[77; 32], generation)
+            .unwrap();
         assert_eq!(recovered.accumulated_window_spend(), 60);
         assert!(recovered.is_nonce_burned(&q1_intent.nonce));
         shared_ledger = recovered;
@@ -4098,18 +4185,37 @@ mod tests {
 
         // A failed persistence callback withholds release and disables all later approvals.
         q2_intent.amount_units = 10;
-        assert_eq!(evaluate_policy_committed_barrier_with_ledger(
-            &policy, &q2_intent, q2_intent.session_id, q2_intent.timestamp_secs,
-            &mut committee[2..4], &mut shared_ledger,
-            |_, _| Err(PolicyViolation::LedgerPersistenceFailed), &accel).unwrap_err(),
-            PolicyViolation::LedgerPersistenceFailed);
+        assert_eq!(
+            evaluate_policy_committed_barrier_with_ledger(
+                &policy,
+                &q2_intent,
+                q2_intent.session_id,
+                q2_intent.timestamp_secs,
+                &mut committee[2..4],
+                &mut shared_ledger,
+                |_, _| Err(PolicyViolation::LedgerPersistenceFailed),
+                &accel
+            )
+            .unwrap_err(),
+            PolicyViolation::LedgerPersistenceFailed
+        );
         assert!(shared_ledger.failed);
         q2_intent.nonce = [0xE5; 32];
         q2_intent.session_id = [0xF5; 32];
-        assert_eq!(evaluate_policy_committed_barrier_with_ledger(
-            &policy, &q2_intent, q2_intent.session_id, q2_intent.timestamp_secs,
-            &mut committee[2..4], &mut shared_ledger, |_, _| Ok(()), &accel).unwrap_err(),
-            PolicyViolation::LedgerPersistenceFailed);
+        assert_eq!(
+            evaluate_policy_committed_barrier_with_ledger(
+                &policy,
+                &q2_intent,
+                q2_intent.session_id,
+                q2_intent.timestamp_secs,
+                &mut committee[2..4],
+                &mut shared_ledger,
+                |_, _| Ok(()),
+                &accel
+            )
+            .unwrap_err(),
+            PolicyViolation::LedgerPersistenceFailed
+        );
 
         // 3. With a fixed accounting guardian `Some(4)`, switching `{1, 4}` (`60`) then `{2, 4}` (`60`)
         //    intersects at party `4` and rejects the second `60` even with dishonest `rolling_window_spent = 0`!
@@ -4178,7 +4284,11 @@ mod tests {
                 .unwrap_err(),
                 PolicyViolation::TimestampOutsideWindow
             );
-            assert!(guards.iter().all(|g| g.next_slot.get() == 0 && !g.is_poisoned()));
+            assert!(
+                guards
+                    .iter()
+                    .all(|g| g.next_slot.get() == 0 && !g.is_poisoned())
+            );
         }
 
         // Exact authoritative clock (`50 == intent.timestamp_secs`) succeeds cleanly!

@@ -114,4 +114,6 @@ echo "[5/5] Checking production linkage, hierarchical composition, and lint poli
   cargo check -p qsag-agg --no-default-features
 )
 
+python3 "${SCRIPT_DIR}/../scripts/check_extraction_provenance.py" --record --crate qsag-whir-verified
+
 echo "SUCCESS: Charon + Aeneas extraction and Lean 4 machine-checked proofs verified cleanly."

@@ -397,13 +397,20 @@ impl LinearModulePartyShare {
         self
     }
     fn require_poison_journal(&self) -> Result<(), HdError> {
-        if self.testing_poison_journal { return Ok(()); }
+        if self.testing_poison_journal {
+            return Ok(());
+        }
         #[cfg(feature = "std")]
-        if self.poison_journal.is_some() && !self.is_poisoned() { return Ok(()); }
+        if self.poison_journal.is_some() && !self.is_poisoned() {
+            return Ok(());
+        }
         Err(HdError::MacCheckFailed)
     }
     #[cfg(feature = "std")]
-    pub fn attach_poison_journal(&mut self, journal: Arc<dyn crate::poison::HdPoisonJournal>) -> Result<(), HdError> {
+    pub fn attach_poison_journal(
+        &mut self,
+        journal: Arc<dyn crate::poison::HdPoisonJournal>,
+    ) -> Result<(), HdError> {
         if journal.family_id() != self.family_id || journal.is_poisoned().unwrap_or(true) {
             self.poison();
             return Err(HdError::MacCheckFailed);
@@ -416,7 +423,11 @@ impl LinearModulePartyShare {
     }
     pub fn is_poisoned(&self) -> bool {
         #[cfg(feature = "std")]
-        if self.poison_journal.as_ref().is_some_and(|j| j.is_poisoned().unwrap_or(true)) {
+        if self
+            .poison_journal
+            .as_ref()
+            .is_some_and(|j| j.is_poisoned().unwrap_or(true))
+        {
             self.poisoned.store(true, Ordering::Release);
             return true;
         }
@@ -425,7 +436,9 @@ impl LinearModulePartyShare {
     fn poison(&mut self) {
         self.poisoned.store(true, Ordering::Release);
         #[cfg(feature = "std")]
-        if let Some(journal) = &self.poison_journal { let _ = journal.poison(); }
+        if let Some(journal) = &self.poison_journal {
+            let _ = journal.poison();
+        }
         self.erase();
     }
     fn erase(&mut self) {
@@ -486,7 +499,9 @@ impl LinearModuleXPub {
     /// Derive non-hardened watch-only child `XPub` in **`0` online MPC rounds**:
     /// $\mathbf{t}^{(i)} = \mathbf{t} + \mathbf{A}\Delta s_1 + \Delta s_2 \bmod q$, enforcing $d + 1 \le D_{\max}$.
     pub fn derive_child(&self, child_index: u32) -> Result<Self, HdError> {
-        if child_index & (1 << 31) != 0 { return Err(HdError::HardenedDerivationRequired); }
+        if child_index & (1 << 31) != 0 {
+            return Err(HdError::HardenedDerivationRequired);
+        }
         if self.seed_a != self.matrix.seed {
             return Err(HdError::InvalidThresholdParameters);
         }
@@ -699,45 +714,55 @@ pub(crate) fn setup_shamir_linear_module(
     let shares = eval_points
         .iter()
         .enumerate()
-        .map(|(p, &x)| LinearModulePartyShare {
-            party_id: p as u16,
-            scheme: ShareScheme::Shamir {
-                threshold,
-                eval_point: x,
-            },
-            seed_a,
-            t_vec: t_vec.clone(),
-            chain_code: RedactedSecret::new(chain_code),
-            chain_code_key: RedactedSecret::new(cshake256_framed_32(b"QSAG.HD.CC.KEY.V1", &[&ent])),
-            hardened: false,
-            derivation_index: 0,
-            s_shares: core::array::from_fn(|j| SecretRingPoly::new(eval_poly(&poly_coeffs[j], x))),
-            spdz_macs: core::array::from_fn(|lane| {
-                core::array::from_fn(|j| SecretRingPoly::new(eval_poly(&mac_coeffs[lane][j], x)))
-            }),
-            spdz_alpha_shares: core::array::from_fn(|lane| {
-                alpha_coeffs[lane]
+        .map(|(p, &x)| {
+            LinearModulePartyShare {
+                party_id: p as u16,
+                scheme: ShareScheme::Shamir {
+                    threshold,
+                    eval_point: x,
+                },
+                seed_a,
+                t_vec: t_vec.clone(),
+                chain_code: RedactedSecret::new(chain_code),
+                chain_code_key: RedactedSecret::new(cshake256_framed_32(
+                    b"QSAG.HD.CC.KEY.V1",
+                    &[&ent],
+                )),
+                hardened: false,
+                derivation_index: 0,
+                s_shares: core::array::from_fn(|j| {
+                    SecretRingPoly::new(eval_poly(&poly_coeffs[j], x))
+                }),
+                spdz_macs: core::array::from_fn(|lane| {
+                    core::array::from_fn(|j| {
+                        SecretRingPoly::new(eval_poly(&mac_coeffs[lane][j], x))
+                    })
+                }),
+                spdz_alpha_shares: core::array::from_fn(|lane| {
+                    alpha_coeffs[lane]
+                        .iter()
+                        .rev()
+                        .fold(0, |acc, &c| mod_q_add(mod_q_mul(acc, x), c))
+                }),
+                matrix: Arc::clone(&matrix),
+                family_id,
+                #[cfg(feature = "std")]
+                budget: None,
+                committee: eval_points
                     .iter()
-                    .rev()
-                    .fold(0, |acc, &c| mod_q_add(mod_q_mul(acc, x), c))
-            }),
-            matrix: Arc::clone(&matrix),
-            family_id,
-            #[cfg(feature = "std")]
-            budget: None,
-            committee: eval_points
-                .iter()
-                .enumerate()
-                .map(|(i, &x)| (i as u16, x))
-                .collect(),
-            #[cfg(feature = "std")]
-            poison_journal: None,
-            testing_poison_journal: false,
-            poisoned: Arc::new(AtomicBool::new(false)),
-            evaluation_queries: Arc::new(AtomicUsize::new(0)),
-            depth_used: 0,
-            max_depth,
-        }.in_memory_poison_journal_for_testing())
+                    .enumerate()
+                    .map(|(i, &x)| (i as u16, x))
+                    .collect(),
+                #[cfg(feature = "std")]
+                poison_journal: None,
+                testing_poison_journal: false,
+                poisoned: Arc::new(AtomicBool::new(false)),
+                evaluation_queries: Arc::new(AtomicUsize::new(0)),
+                depth_used: 0,
+                max_depth,
+            }
+            .in_memory_poison_journal_for_testing()
+        })
         .collect();
     for coeffs in &mut alpha_coeffs {
         ct_zeroize_u32s(coeffs);
@@ -1066,9 +1091,12 @@ pub(crate) fn setup_hardened_shamir_linear_module(
     eval_points: &[u32],
     max_depth: u16,
 ) -> Result<(LinearModuleXPub, Vec<LinearModulePartyShare>), HdError> {
-    let (mut pk, mut shares) = setup_shamir_linear_module(entropy, threshold, eval_points, max_depth)?;
+    let (mut pk, mut shares) =
+        setup_shamir_linear_module(entropy, threshold, eval_points, max_depth)?;
     pk.chain_code = None;
-    for share in &mut shares { share.hardened = true; }
+    for share in &mut shares {
+        share.hardened = true;
+    }
     Ok((pk, shares))
 }
 

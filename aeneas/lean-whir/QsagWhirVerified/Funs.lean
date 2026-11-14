@@ -432,7 +432,7 @@ def step_merkle_pair_order
         { tag := TAG_CANOPY_MERKLE_INTERNAL, left := sibling, right := node })
 
 /-- [qsag_whir_verified::checked_quorum_sum]: loop body 0:
-    Source: 'src/lib.rs', lines 1:0-447:1
+    Source: 'src/lib.rs', lines 1:0-443:1
     Visibility: public -/
 @[rust_loop_body]
 def checked_quorum_sum_loop.body
@@ -470,7 +470,7 @@ def checked_quorum_sum_loop.body
     else ok (done (some total))
 
 /-- [qsag_whir_verified::checked_quorum_sum]: loop 0:
-    Source: 'src/lib.rs', lines 1:0-447:1
+    Source: 'src/lib.rs', lines 1:0-443:1
     Visibility: public -/
 @[rust_loop]
 def checked_quorum_sum_loop
@@ -485,7 +485,7 @@ def checked_quorum_sum_loop
     (total, min_total, i)
 
 /-- [qsag_whir_verified::checked_quorum_sum]:
-    Source: 'src/lib.rs', lines 415:0-447:1
+    Source: 'src/lib.rs', lines 415:0-443:1
     Visibility: public -/
 def checked_quorum_sum
   (counts : Slice Std.U64) (minimums : Slice Std.U64)

@@ -65,20 +65,29 @@ pub struct FtsEpochGuard {
 
 impl FtsEpochGuard {
     /// Read-only state observation.
-    pub const fn key_id(&self) -> [u8; 32] { self.key_id }
+    pub const fn key_id(&self) -> [u8; 32] {
+        self.key_id
+    }
 
     /// Read-only state observation.
-    pub const fn epoch(&self) -> u32 { self.epoch }
+    pub const fn epoch(&self) -> u32 {
+        self.epoch
+    }
 
     /// Read-only state observation.
-    pub const fn max_epochs(&self) -> u32 { self.max_epochs }
+    pub const fn max_epochs(&self) -> u32 {
+        self.max_epochs
+    }
 
     /// Read-only state observation.
-    pub const fn used(&self) -> u8 { self.used }
+    pub const fn used(&self) -> u8 {
+        self.used
+    }
 
     /// Read-only state observation.
-    pub const fn poisoned(&self) -> bool { self.poisoned }
-
+    pub const fn poisoned(&self) -> bool {
+        self.poisoned
+    }
 
     /// Construct an unused single-epoch leaf guard (`used = 0`).
     /// Immediately marks `poisoned = true` if `epoch >= max_epochs`.
@@ -213,20 +222,29 @@ const fn quarantine_fts_session(
 
 impl FtsDeferredMacSession {
     /// Read-only state observation.
-    pub const fn session_id(&self) -> [u8; 32] { self.session_id }
+    pub const fn session_id(&self) -> [u8; 32] {
+        self.session_id
+    }
 
     /// Read-only state observation.
-    pub const fn spn_rounds_completed(&self) -> u8 { self.spn_rounds_completed }
+    pub const fn spn_rounds_completed(&self) -> u8 {
+        self.spn_rounds_completed
+    }
 
     /// Read-only state observation.
-    pub const fn intermediate_mac_verified(&self) -> bool { self.intermediate_mac_verified }
+    pub const fn intermediate_mac_verified(&self) -> bool {
+        self.intermediate_mac_verified
+    }
 
     /// Read-only state observation.
-    pub const fn output_released(&self) -> bool { self.output_released }
+    pub const fn output_released(&self) -> bool {
+        self.output_released
+    }
 
     /// Read-only state observation.
-    pub const fn quarantined(&self) -> bool { self.quarantined }
-
+    pub const fn quarantined(&self) -> bool {
+        self.quarantined
+    }
 
     /// Construct a deferred-MAC session holding candidate 256-bit SPN output wires `(lo, hi)`.
     /// Immediately quarantines and zeroes the candidate wires if `spn_rounds_completed != 48`.

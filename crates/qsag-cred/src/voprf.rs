@@ -1179,15 +1179,8 @@ mod tests {
             None
         );
         assert_eq!(
-            threshold_issue_blind_vc(
-                &mut acc2,
-                &req_pk2,
-                &[10],
-                &transplanted,
-                &receipt_key,
-                42,
-            )
-            .unwrap_err(),
+            threshold_issue_blind_vc(&mut acc2, &req_pk2, &[10], &transplanted, &receipt_key, 42,)
+                .unwrap_err(),
             BlindVcError::InvalidOprfEvaluation
         );
 
@@ -1229,7 +1222,9 @@ mod tests {
             let (_, requests) = blind(&key, &[b"item"], [9; 32], counter, [10; 32]).unwrap();
             let req = requests.into_iter().next().unwrap();
             let mut store = FixedWaterStore(water);
-            server.evaluate(req, &mut store, &mut AbortTransport).unwrap_err()
+            server
+                .evaluate(req, &mut store, &mut AbortTransport)
+                .unwrap_err()
         };
 
         // `high_water == None` vs `high_water == Some(0)` MUST be strictly distinguished:

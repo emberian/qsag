@@ -1,0 +1,192 @@
+{
+  "date": "2026-11-14",
+  "release_ready": false,
+  "rust_source_sha256": "3b104d9e2183809a6bafcb5383c135badbc2eff656e97bb63d7883fbf0b83562",
+  "source_inventory_file": "CONVERGENCE_SOURCE.json",
+  "source_files": 350,
+  "source_inventory_sha256": "88a549fff899dc481c07bcbc91c114d8b3b529b1df9744efe8d3a1ca15868612",
+  "rust_toolchain": "1.99.1",
+  "lean_toolchain": "4.35.0",
+  "runtime_censuses": {
+    "main": [
+      59257,
+      28744,
+      57,
+      0
+    ],
+    "mir_custody": [
+      5318,
+      2093,
+      44,
+      0
+    ],
+    "whir": [
+      1558,
+      718,
+      7,
+      0
+    ]
+  },
+  "census_columns": [
+    "declarations",
+    "theorems",
+    "modules",
+    "rejected_axioms"
+  ],
+  "rust_workspace": {
+    "passed": 608,
+    "failed": 0,
+    "ignored": 12,
+    "suites": 33
+  },
+  "gates": {
+    "main-lean": {
+      "log": "linux-primary/postrake-main3.log",
+      "sha256": "cedc5d372a24fedbcadb5a12f6ca615acd4c395c147c3d9532ba4594dfca0c81",
+      "exit_code": 0
+    },
+    "main-comparator": {
+      "log": "linux-primary/postrake-main-comparator.log",
+      "sha256": "29e1a542426770aeb9589fee5681090e8534095867ac89a70b7d473db3e7646b",
+      "exit_code": 0
+    },
+    "mir-comparator-and-census": {
+      "log": "linux-primary/postrake-mir-comparator.log",
+      "sha256": "d9772fa85a456c1ba093ab2eeb19ab20159d0cb4d63b467c86cdb0605457c464",
+      "exit_code": 0
+    },
+    "mir-fresh-extraction": {
+      "log": "linux-gpu/postrake-extract.log",
+      "sha256": "58f8770b253da3c289a68598cc4a3be3d0055d8d044195c7f54c83c360f56662",
+      "exit_code": 0
+    },
+    "whir-fresh-extraction-and-audit": {
+      "log": "linux-gpu/postrake-extract-whir2.log",
+      "sha256": "26f6e7c03831edfc00a99ca19e74e57bb9e1714a0fd34eb8ffba8ad2fc5b83b0",
+      "exit_code": 0
+    },
+    "rust-workspace": {
+      "log": "linux-primary/postrake-rust-final.log",
+      "sha256": "5b5dbda2a8f0da5d3ab03eef06395881b8cd5e699411cc74ca7be9e443aaed34",
+      "exit_code": 0
+    },
+    "cross-kat": {
+      "log": "linux-primary/postrake-cross-kat.log",
+      "sha256": "56d3a156434dbebb2c268c94c46c479dfc967def2991b08dcf9ed82ceef4a190",
+      "exit_code": 0
+    },
+    "differential": {
+      "log": "linux-primary/postrake-differential2.log",
+      "sha256": "86d869fe2515c48cc7ee69d283a9abfcce50e695e2e9cf4d0ab10e673166dbf7",
+      "exit_code": 0
+    },
+    "gpu-tests-and-benchmark": {
+      "log": "linux-gpu/postrake-gpu-radv.log",
+      "sha256": "a73b436a88a36f03e4e1892e0e044da6055718bb90f968054db14607cff90855",
+      "exit_code": 0
+    },
+    "gpu-final-measurement": {
+      "log": "linux-gpu/postrake-gpu-measured.log",
+      "sha256": "9b128cfaa2e5904e5121732d8a79ecd1f99ce01f369b732aa39104e08a6d4fe8",
+      "exit_code": 0
+    },
+    "gpu-wave64-refusal": {
+      "log": "linux-gpu/postrake-gpu.log",
+      "sha256": "262693e6be37ec8a4b89980402d8570a50c8816f9e8ba77b8ded7622cb47d373",
+      "exit_code": 101
+    },
+    "shader-regeneration": {
+      "log": "linux-gpu/postrake-shaders.log",
+      "sha256": "a885135d1bfb24607a6c21eda924959acc26aae7e75fde214a0efaaee4a7df8c",
+      "exit_code": 0
+    },
+    "production-base-ot": {
+      "log": "linux-primary/postrake-production-ot3.log",
+      "sha256": "f478b6bd129457b972ec0316731306184492ee0031f61c2291dcbfded77b5665",
+      "exit_code": 0
+    },
+    "production-fips-soak": {
+      "log": "linux-gpu/postrake-fips-soak.log",
+      "sha256": "8e8ade4b8da0a16f267781917d7cb0080c038c81b09aacb7dd86d6367fb98ca4",
+      "exit_code": 0
+    },
+    "dense-pcg-soaks": {
+      "log": "linux-primary/postrake-dense-soaks.log",
+      "sha256": "e7c1cd176ace477b0348824f67287fadbb675a0eafc396173a1dad88507d0240",
+      "exit_code": 124
+    },
+    "warm-main-primary": {
+      "log": "linux-primary/warm-main-census.log",
+      "sha256": "8f4c3991da38c057d3b1bc620272f660d0d51890e61d52dbfeb848593cbea0b5",
+      "exit_code": 0
+    },
+    "warm-main-gpu-host": {
+      "log": "linux-gpu/warm-main-census.log",
+      "sha256": "8f4c3991da38c057d3b1bc620272f660d0d51890e61d52dbfeb848593cbea0b5",
+      "exit_code": 0
+    },
+    "quickstart-25s": {
+      "log": "linux-primary/postrake-quickstart.log",
+      "sha256": "4858bac2087f944bb3730d91c260472b43eea01319e16d52fc02036c28597b86",
+      "exit_code": 124
+    },
+    "elf-instruction-screen": {
+      "log": "linux-primary/postrake-elf.log",
+      "sha256": "00d6e0367c97c2101a85ee6a7c899a1b1829d3533b126d4edec8d0a8bf05cf79",
+      "exit_code": 0
+    },
+    "elf-fixture-freshness": {
+      "log": "linux-primary/postrake-elf-freshness.log",
+      "sha256": "bfeabf3329ccd30f61dcd998ced8fee6afb7a98dd9239332ad66a8158d79a7ef",
+      "exit_code": 1
+    },
+    "mock-alpenglow": {
+      "log": "linux-primary/postrake-alpenglow2.log",
+      "sha256": "af8f2c2e08b31523487217989ce26d0f3c6502b4797ceb7e4101f21157eb2467",
+      "exit_code": 0
+    },
+    "mock-beam": {
+      "log": "linux-primary/postrake-beam.log",
+      "sha256": "18fca22005f4dfceaa8739028e348fd7a92b30f448199e2cbf6726e3f0761224",
+      "exit_code": 0
+    },
+    "isa-cosim": {
+      "log": "linux-primary/isa.log",
+      "sha256": "a986f49d3d507183d51f8ebe7cde4f0a09054c54b64898b194238b9eba17e774",
+      "exit_code": 0
+    },
+    "simd-cosim": {
+      "log": "linux-primary/simd.log",
+      "sha256": "193263a8660dddc368857991327eb273cc841e6d836dbf8e5d4df49e16841096",
+      "exit_code": 0
+    },
+    "sydtv": {
+      "log": "linux-primary/sydtv.log",
+      "sha256": "34d6ce7ba0dbe8f2e716d64dd9c2b03caea0c86f7f5281809e53a2c03036b3d0",
+      "exit_code": 0
+    }
+  },
+  "limits": [
+    "Hosted CI was not run or pushed.",
+    "ISA/SIMD/SydTV evidence predates the rake; their implementation sources were unchanged.",
+    "Wave64 refusal is an expected negative hardware result.",
+    "Quickstart latency and ELF freshness remain failing release gates.",
+    "Proof counts and sampled tests do not establish the open whole-system security/refinement obligations."
+  ],
+  "publication_artifacts": [
+    {
+      "name": "paper",
+      "pages": 13,
+      "sha256": "96e9f9a03ce815012f1f4cd5a6466875e8985e8c37c1d4856e05dd117a587230",
+      "typst_warnings": 0,
+      "typst_errors": 0
+    },
+    {
+      "name": "poster",
+      "pages": 4,
+      "sha256": "a6edec192e9086a8d35649ee2b87453a9e6e7b6ba831d2926722043f7aa33c7c",
+      "typst_warnings": 0,
+      "typst_errors": 0
+    }
+  ]
+}

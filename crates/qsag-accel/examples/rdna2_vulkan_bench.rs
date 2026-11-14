@@ -85,7 +85,7 @@ fn main() {
     let measured_pins = VulkanSpirvBackend::measure_embedded_spirv_pins();
     let mut registry = VerifiedKernelDigestRegistry::<4>::with_cpu_reference_pins();
     registry
-        .register_measured_profile(KernelTargetArch::SpirV16, measured_pins)
+        .register_measured_profile(KernelTargetArch::SpirV15, measured_pins)
         .expect("register measured SPIR-V pins");
 
     for slot in KernelSlot::ALL {
@@ -320,6 +320,12 @@ fn main() {
         (bdoz_n as f64 / 1e6) / dt_bdoz_cpu,
         dt_bdoz_cpu / dt_bdoz_gpu
     );
+
+    // Rows 1 and 2 time the infallible trait methods, which answer from the CPU reference
+    // when the device fails. A GPU figure is only a GPU figure if that never happened.
+    let cpu_fallbacks = gpu.cpu_fallback_count();
+    println!("  CPU fallbacks on the infallible GPU path: {cpu_fallbacks}");
+    assert_eq!(cpu_fallbacks, 0, "a timed GPU row was answered by the CPU");
 
     println!("--------------------------------------------------------------------------");
     println!(

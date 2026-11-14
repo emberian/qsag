@@ -52,16 +52,12 @@ pub const KECCAK_ROTATION_OFFSETS: [u32; 25] = [
 #[derive(Default)]
 pub struct KeccakState4x(pub [[u64; 4]; 25]);
 
-
-
 /// 32-byte aligned 5-lane row of 256-bit registers (`5 × 256 = 1,280` parallel bits) for MPC $\chi$.
 /// Intentionally omits `#[derive(PartialEq, Eq)]` so no early-exit comparison symbol is emitted.
 #[derive(Clone, Copy, Debug)]
 #[repr(C, align(32))]
 #[derive(Default)]
 pub struct KeccakRow256(pub [[u64; 4]; 5]);
-
-
 
 /// Intel `VGF2P8AFFINEQB` 64-bit matrix mapping Wiedemann $\mathcal{T}_3$ (`TowerGf256`)
 /// $\to \mathbb{F}_2[z]/(z^8 + z^4 + z^3 + z + 1)$ (`0x11B`), sending generator $z \leftrightarrow \text{0x30} \in \mathcal{T}_3$.
@@ -123,9 +119,33 @@ const fn tower_mul_t0(a: u8, b: u8) -> u8 {
     (a & 1) & (b & 1)
 }
 
-def_tower_level!(tower_mul_t1, tower_scale_t1, tower_mul_t0, tower_scale_t0, u8, 1, 0x01);
-def_tower_level!(tower_mul_t2, tower_scale_t2, tower_mul_t1, tower_scale_t1, u8, 2, 0x03);
-def_tower_level!(wiedemann_mul_t3_u8, tower_scale_t3, tower_mul_t2, tower_scale_t2, u8, 4, 0x0F);
+def_tower_level!(
+    tower_mul_t1,
+    tower_scale_t1,
+    tower_mul_t0,
+    tower_scale_t0,
+    u8,
+    1,
+    0x01
+);
+def_tower_level!(
+    tower_mul_t2,
+    tower_scale_t2,
+    tower_mul_t1,
+    tower_scale_t1,
+    u8,
+    2,
+    0x03
+);
+def_tower_level!(
+    wiedemann_mul_t3_u8,
+    tower_scale_t3,
+    tower_mul_t2,
+    tower_scale_t2,
+    u8,
+    4,
+    0x0F
+);
 
 #[inline]
 const fn tower_scale_t3_u16(a: u16) -> u16 {
@@ -137,7 +157,15 @@ const fn tower_mul_t3_u16(a: u16, b: u16) -> u16 {
     wiedemann_mul_t3_u8(a as u8, b as u8) as u16
 }
 
-def_tower_level!(tower_mul_t4, tower_scale_t4, tower_mul_t3_u16, tower_scale_t3_u16, u16, 8, 0x00FF);
+def_tower_level!(
+    tower_mul_t4,
+    tower_scale_t4,
+    tower_mul_t3_u16,
+    tower_scale_t3_u16,
+    u16,
+    8,
+    0x00FF
+);
 
 #[inline]
 const fn tower_scale_t4_u32(a: u32) -> u32 {
@@ -149,7 +177,15 @@ const fn tower_mul_t4_u32(a: u32, b: u32) -> u32 {
     tower_mul_t4(a as u16, b as u16) as u32
 }
 
-def_tower_level!(tower_mul_t5, tower_scale_t5, tower_mul_t4_u32, tower_scale_t4_u32, u32, 16, 0x0000_FFFF);
+def_tower_level!(
+    tower_mul_t5,
+    tower_scale_t5,
+    tower_mul_t4_u32,
+    tower_scale_t4_u32,
+    u32,
+    16,
+    0x0000_FFFF
+);
 
 #[inline]
 const fn tower_scale_t5_u64(a: u64) -> u64 {
@@ -161,7 +197,15 @@ const fn tower_mul_t5_u64(a: u64, b: u64) -> u64 {
     tower_mul_t5(a as u32, b as u32) as u64
 }
 
-def_tower_level!(tower_mul_t6, tower_scale_t6, tower_mul_t5_u64, tower_scale_t5_u64, u64, 32, 0x0000_0000_FFFF_FFFF);
+def_tower_level!(
+    tower_mul_t6,
+    tower_scale_t6,
+    tower_mul_t5_u64,
+    tower_scale_t5_u64,
+    u64,
+    32,
+    0x0000_0000_FFFF_FFFF
+);
 
 #[inline]
 const fn tower_scale_t6_u128(a: u128) -> u128 {
@@ -232,10 +276,18 @@ pub const fn poly128_mul_const(mut a: u128, mut b: u128) -> u128 {
 
 macro_rules! unroll_64 {
     ($m:ident, $a:expr, $b:expr, $acc:expr) => {{
-        $m!($a, $b, $acc, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        $m!($a, $b, $acc, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
-        $m!($a, $b, $acc, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47);
-        $m!($a, $b, $acc, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63);
+        $m!(
+            $a, $b, $acc, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+        );
+        $m!(
+            $a, $b, $acc, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31
+        );
+        $m!(
+            $a, $b, $acc, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47
+        );
+        $m!(
+            $a, $b, $acc, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63
+        );
     }};
 }
 
@@ -301,7 +353,10 @@ const fn build_tower128_basis_pair() -> ([u128; 128], [u128; 128]) {
         };
         let gk = TOWER128_POLY_GENERATORS[k];
         let lhs = poly128_mul_const(gk, gk) ^ poly128_mul_const(xk, gk);
-        assert!(lhs == 1, "TOWER128_POLY_GENERATORS failed Artin-Schreier equation");
+        assert!(
+            lhs == 1,
+            "TOWER128_POLY_GENERATORS failed Artin-Schreier equation"
+        );
         k += 1;
     }
 
@@ -345,7 +400,10 @@ const fn build_tower128_basis_pair() -> ([u128; 128], [u128; 128]) {
         while piv < 128 && ((rows_lhs[piv] >> col) & 1) == 0 {
             piv += 1;
         }
-        assert!(piv < 128, "T_7 -> Poly128 basis matrix must be non-singular");
+        assert!(
+            piv < 128,
+            "T_7 -> Poly128 basis matrix must be non-singular"
+        );
         if piv != col {
             let tmp_l = rows_lhs[col];
             rows_lhs[col] = rows_lhs[piv];
@@ -419,14 +477,182 @@ pub fn tower128_to_poly128_ct(x: u128) -> u128 {
     let lo = x as u64;
     let hi = (x >> 64) as u64;
     let mut acc = 0u128;
-    linear128_step!(lo, T7_TO_POLY_BASIS, 0, acc, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    linear128_step!(lo, T7_TO_POLY_BASIS, 0, acc, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
-    linear128_step!(lo, T7_TO_POLY_BASIS, 0, acc, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47);
-    linear128_step!(lo, T7_TO_POLY_BASIS, 0, acc, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63);
-    linear128_step!(hi, T7_TO_POLY_BASIS, 64, acc, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    linear128_step!(hi, T7_TO_POLY_BASIS, 64, acc, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
-    linear128_step!(hi, T7_TO_POLY_BASIS, 64, acc, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47);
-    linear128_step!(hi, T7_TO_POLY_BASIS, 64, acc, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63);
+    linear128_step!(
+        lo,
+        T7_TO_POLY_BASIS,
+        0,
+        acc,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+    );
+    linear128_step!(
+        lo,
+        T7_TO_POLY_BASIS,
+        0,
+        acc,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+    );
+    linear128_step!(
+        lo,
+        T7_TO_POLY_BASIS,
+        0,
+        acc,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47
+    );
+    linear128_step!(
+        lo,
+        T7_TO_POLY_BASIS,
+        0,
+        acc,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63
+    );
+    linear128_step!(
+        hi,
+        T7_TO_POLY_BASIS,
+        64,
+        acc,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+    );
+    linear128_step!(
+        hi,
+        T7_TO_POLY_BASIS,
+        64,
+        acc,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+    );
+    linear128_step!(
+        hi,
+        T7_TO_POLY_BASIS,
+        64,
+        acc,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47
+    );
+    linear128_step!(
+        hi,
+        T7_TO_POLY_BASIS,
+        64,
+        acc,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63
+    );
     acc
 }
 
@@ -438,14 +664,182 @@ pub fn poly128_to_tower128_ct(y: u128) -> u128 {
     let lo = y as u64;
     let hi = (y >> 64) as u64;
     let mut acc = 0u128;
-    linear128_step!(lo, POLY_TO_T7_BASIS, 0, acc, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    linear128_step!(lo, POLY_TO_T7_BASIS, 0, acc, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
-    linear128_step!(lo, POLY_TO_T7_BASIS, 0, acc, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47);
-    linear128_step!(lo, POLY_TO_T7_BASIS, 0, acc, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63);
-    linear128_step!(hi, POLY_TO_T7_BASIS, 64, acc, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    linear128_step!(hi, POLY_TO_T7_BASIS, 64, acc, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31);
-    linear128_step!(hi, POLY_TO_T7_BASIS, 64, acc, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47);
-    linear128_step!(hi, POLY_TO_T7_BASIS, 64, acc, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63);
+    linear128_step!(
+        lo,
+        POLY_TO_T7_BASIS,
+        0,
+        acc,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+    );
+    linear128_step!(
+        lo,
+        POLY_TO_T7_BASIS,
+        0,
+        acc,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+    );
+    linear128_step!(
+        lo,
+        POLY_TO_T7_BASIS,
+        0,
+        acc,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47
+    );
+    linear128_step!(
+        lo,
+        POLY_TO_T7_BASIS,
+        0,
+        acc,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63
+    );
+    linear128_step!(
+        hi,
+        POLY_TO_T7_BASIS,
+        64,
+        acc,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+    );
+    linear128_step!(
+        hi,
+        POLY_TO_T7_BASIS,
+        64,
+        acc,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31
+    );
+    linear128_step!(
+        hi,
+        POLY_TO_T7_BASIS,
+        64,
+        acc,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47
+    );
+    linear128_step!(
+        hi,
+        POLY_TO_T7_BASIS,
+        64,
+        acc,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63
+    );
     acc
 }
 
@@ -474,8 +868,11 @@ pub fn keccak_f1600_4x_portable(state: &mut KeccakState4x) {
     for &rc in &KECCAK_ROUND_CONSTANTS {
         for x in 0..5 {
             for lane in 0..4 {
-                c[x][lane] =
-                    s[x][lane] ^ s[x + 5][lane] ^ s[x + 10][lane] ^ s[x + 15][lane] ^ s[x + 20][lane];
+                c[x][lane] = s[x][lane]
+                    ^ s[x + 5][lane]
+                    ^ s[x + 10][lane]
+                    ^ s[x + 15][lane]
+                    ^ s[x + 20][lane];
             }
         }
         for lane in 0..4 {
@@ -493,12 +890,33 @@ pub fn keccak_f1600_4x_portable(state: &mut KeccakState4x) {
             }
         }
         keccak_rho_pi_lanes!(
-            s, b,
-            (0, 0, 0),    (1, 10, 1),   (2, 20, 62),  (3, 5, 28),   (4, 15, 27),
-            (5, 16, 36),  (6, 1, 44),   (7, 11, 6),   (8, 21, 55),  (9, 6, 20),
-            (10, 7, 3),   (11, 17, 10), (12, 2, 43),  (13, 12, 25), (14, 22, 39),
-            (15, 23, 41), (16, 8, 45),  (17, 18, 15), (18, 3, 21),  (19, 13, 8),
-            (20, 14, 18), (21, 24, 2),  (22, 9, 61),  (23, 19, 56), (24, 4, 14),
+            s,
+            b,
+            (0, 0, 0),
+            (1, 10, 1),
+            (2, 20, 62),
+            (3, 5, 28),
+            (4, 15, 27),
+            (5, 16, 36),
+            (6, 1, 44),
+            (7, 11, 6),
+            (8, 21, 55),
+            (9, 6, 20),
+            (10, 7, 3),
+            (11, 17, 10),
+            (12, 2, 43),
+            (13, 12, 25),
+            (14, 22, 39),
+            (15, 23, 41),
+            (16, 8, 45),
+            (17, 18, 15),
+            (18, 3, 21),
+            (19, 13, 8),
+            (20, 14, 18),
+            (21, 24, 2),
+            (22, 9, 61),
+            (23, 19, 56),
+            (24, 4, 14),
         );
         for y in 0..5 {
             let row = 5 * y;
@@ -602,7 +1020,10 @@ pub fn tower128_bdoz_2lane_poly_mac_portable(
         lo1 ^= p_lo1;
         hi1 ^= p_hi1;
     }
-    let out = [clmul256_reduce_0x87(lo0, hi0), clmul256_reduce_0x87(lo1, hi1)];
+    let out = [
+        clmul256_reduce_0x87(lo0, hi0),
+        clmul256_reduce_0x87(lo1, hi1),
+    ];
     unsafe {
         core::ptr::write_volatile(&mut lo0, 0);
         core::ptr::write_volatile(&mut hi0, 0);
@@ -703,10 +1124,24 @@ pub fn ct_eq_32_portable(a: &[u8; 32], b: &[u8; 32]) -> bool {
     for chunk in 0..4 {
         let o = 8 * chunk;
         let wa = u64::from_le_bytes([
-            a[o], a[o + 1], a[o + 2], a[o + 3], a[o + 4], a[o + 5], a[o + 6], a[o + 7],
+            a[o],
+            a[o + 1],
+            a[o + 2],
+            a[o + 3],
+            a[o + 4],
+            a[o + 5],
+            a[o + 6],
+            a[o + 7],
         ]);
         let wb = u64::from_le_bytes([
-            b[o], b[o + 1], b[o + 2], b[o + 3], b[o + 4], b[o + 5], b[o + 6], b[o + 7],
+            b[o],
+            b[o + 1],
+            b[o + 2],
+            b[o + 3],
+            b[o + 4],
+            b[o + 5],
+            b[o + 6],
+            b[o + 7],
         ]);
         diff |= black_box(wa ^ wb);
     }

@@ -85,7 +85,8 @@ fn main() {
             let entry = entry.expect("read assembly entry");
             if entry.file_type().expect("assembly file type").is_file() {
                 println!("cargo:rerun-if-changed={}", entry.path().display());
-                fs::copy(entry.path(), asm_dst.join(entry.file_name())).expect("mirror assembly source");
+                fs::copy(entry.path(), asm_dst.join(entry.file_name()))
+                    .expect("mirror assembly source");
             }
         }
         modules.push_str(&format!(
@@ -109,7 +110,11 @@ fn main() {
     ] {
         let src_file = core_src.join(relative_path);
         println!("cargo:rerun-if-changed={}", src_file.display());
-        assert!(src_file.is_file(), "missing parity source: {}", src_file.display());
+        assert!(
+            src_file.is_file(),
+            "missing parity source: {}",
+            src_file.display()
+        );
         {
             let dst_file = mirror_root.join(relative_path);
             if let Some(parent) = dst_file.parent() {
@@ -136,7 +141,10 @@ fn main() {
         ("belt_latch", "belt_latch.rs"),
     ] {
         let path = mirror_root.join(relative_path);
-        modules.push_str(&format!("#[allow(clippy::all)]\n#[path = {:?}]\nmod {};\n", path, name));
+        modules.push_str(&format!(
+            "#[allow(clippy::all)]\n#[path = {:?}]\nmod {};\n",
+            path, name
+        ));
     }
     fs::write(out_dir.join("qsag_core_mods.rs"), modules).expect("write core module declarations");
 }

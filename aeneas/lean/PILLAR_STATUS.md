@@ -73,48 +73,15 @@ Run on the Linux build host with `CARGO_BUILD_JOBS=4 SWARM_MEM_MAX=8G timeout --
 
     lake build --wfail QsagVerified QsagSpecWeld AuditMirAxioms QsagMirProofs
 
-Result on 2026-11-14 against a fresh Charon/Aeneas extraction of the current Rust source:
-successful; `AuditMirAxioms` 5,244 declarations and `QsagSpecWeld` 129 declarations, none
-rejected. `cargo test` in `qsag-verified`: all suites pass, parity 5/5.
-`QsagVerifiedChallenge` builds with only its intentional statement placeholders.
-`check_audit_coverage.py` covers all 43 proof modules. The runtime census is available as
-`lake build audit-mir-axioms` followed by `.lake/build/bin/audit-mir-axioms`; the runtime
-census also checked 5,244 declarations with zero rejected axioms.
-`lake comparator --paranoid --inadvisably-no-sandbox` passed all 65 theorem obligations
-and 17 pinned definitions, including Lean's default and paranoid kernels and all four
-external checkers. The sandboxed invocation could not start because the verification host
-disallows user-namespace mapping; the completed comparison used the isolated checkout.
+Integrated result on 2026-11-14: warning-free QsagVerified, QsagSpecWeld,
+QsagCustodyWeld, AuditMirAxioms and QsagMirProofs build. Runtime census:
+5,318 declarations, 2,093 theorems, 44 contributing modules, zero rejected.
+The primitive compile-time census is 5,244 declarations. Both extraction crates'
+Rust tests pass (24 tests). Both extraction pipelines were rerun successfully after the rake. Exact source,
+prelude and generated-output digests plus extractor binary hashes are recorded in
+the extraction-provenance manifests; CI checks them without rebuilding.
 
-`QsagCustodyWeld` was not rebuilt on that date: `Qsag.MaliciousSecurity` and
-`Qsag.AdvancedMpcAndCreds`, which its `Qsag` imports depend on, did not compile in the
-working tree. `BeltAckProvenance`, which `RealSpecBeltWeld` imports, changed since those three
-modules last compiled (one proof repaired, statements unchanged).
-
-Constructive proof conventions:
-- `by_cases` on a proposition with no `Decidable` instance silently uses `Classical.choice`;
-  generated enums have no `DecidableEq`, so case on the constructor instead.
-- `omega` uses `Classical.choice` when an implication is among the hypotheses; `clear` it.
-- `Nat.and_two_pow_sub_one_eq_mod` and `Nat.testBit_two_pow_sub_one` depend on
-  `Classical.choice`; `RealSpecTowerWeld` carries a constructive replacement.
-- In a `module` file, `simp only [bind_eq_result_bind, result_bind_ok]` on
-  `checked_velocity_spend` exhausted 12 GB; `bind_ok_step` with `change` does not.
-
-## Open
-
-1. Streaming `Shake256Sponge`: absorb/pad/squeeze byte equivalence with the canonical sponge,
-   across rate boundaries, and cSHAKE framing. The permutation weld does not give this.
-2. Production arithmetic: `crates/qsag-core/src/field` implements Goldilocks and the towers
-   separately from the verified crate. The parity tests compare them on samples; no theorem
-   covers the production code until it calls the verified functions.
-3. `BeltLatch` beyond `bind`: echo construction and verification (`verify_peer_echoes`), the
-   log's own MAC and checkpoint, and the relation between the local quorum guard and the
-   three-party network. Production `BeltLatch` does not yet call the kernel.
-4. RSS session registry and caller adoption of the BDOZ opening handle:
-   `RssCutGateSession::new_round1_committed` takes no prior state. The legacy BDOZ burn-on-abort
-   API permits successful-opening replay; both counterexamples remain valid for those APIs.
-   `BdozOpeningGuard2Lane` now consumes every attempt, binds the session and round, and clears
-   both key lanes. Its constructor still requires caller-provisioned fresh keys and masks;
-   it is not a persistent session registry and production callers must explicitly adopt it.
-5. `EpochLatch` and `StatefulVelocityGuard` have no canonical simulation; the velocity mismatch
-   is a proved counterexample (`RealSpecGuardBoundary`).
-6. KoalaBear is not in the verified crate.
+The challenge builds with intentional statement placeholders. On the Linux primary host,
+`python3 ../../scripts/run_mir_comparator.py` passed all 65 theorem obligations
+and 17 definitions in the default sandbox with all six kernels. The runner
+bundles the local Lean dependency inside a disposable package snapshot.

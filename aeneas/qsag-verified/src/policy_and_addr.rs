@@ -66,23 +66,34 @@ pub struct StatefulVelocityGuard {
 
 impl StatefulVelocityGuard {
     /// Read-only state observation.
-    pub const fn window_id(&self) -> u64 { self.window_id }
+    pub const fn window_id(&self) -> u64 {
+        self.window_id
+    }
 
     /// Read-only state observation.
-    pub const fn spent_units(&self) -> u128 { self.spent_units }
+    pub const fn spent_units(&self) -> u128 {
+        self.spent_units
+    }
 
     /// Read-only state observation.
-    pub const fn cap_units(&self) -> u128 { self.cap_units }
+    pub const fn cap_units(&self) -> u128 {
+        self.cap_units
+    }
 
     /// Read-only state observation.
-    pub const fn policy_pin(&self) -> [u8; 32] { self.policy_pin }
+    pub const fn policy_pin(&self) -> [u8; 32] {
+        self.policy_pin
+    }
 
     /// Read-only state observation.
-    pub const fn authority_pin(&self) -> [u8; 32] { self.authority_pin }
+    pub const fn authority_pin(&self) -> [u8; 32] {
+        self.authority_pin
+    }
 
     /// Read-only state observation.
-    pub const fn last_nonce(&self) -> u64 { self.last_nonce }
-
+    pub const fn last_nonce(&self) -> u64 {
+        self.last_nonce
+    }
 
     /// Initialize a fresh rolling window at `spent_units = 0` and `last_nonce = 0`.
     #[inline]
@@ -521,13 +532,13 @@ pub(crate) const fn pack_4x32(
         b0[23], b0[24], b0[25], b0[26], b0[27], b0[28], b0[29], b0[30], b0[31], b1[0], b1[1],
         b1[2], b1[3], b1[4], b1[5], b1[6], b1[7], b1[8], b1[9], b1[10], b1[11], b1[12], b1[13],
         b1[14], b1[15], b1[16], b1[17], b1[18], b1[19], b1[20], b1[21], b1[22], b1[23], b1[24],
-        b1[25], b1[26], b1[27], b1[28], b1[29], b1[30], b1[31], b2[0], b2[1], b2[2], b2[3],
-        b2[4], b2[5], b2[6], b2[7], b2[8], b2[9], b2[10], b2[11], b2[12], b2[13], b2[14], b2[15],
-        b2[16], b2[17], b2[18], b2[19], b2[20], b2[21], b2[22], b2[23], b2[24], b2[25], b2[26],
-        b2[27], b2[28], b2[29], b2[30], b2[31], b3[0], b3[1], b3[2], b3[3], b3[4], b3[5], b3[6],
-        b3[7], b3[8], b3[9], b3[10], b3[11], b3[12], b3[13], b3[14], b3[15], b3[16], b3[17],
-        b3[18], b3[19], b3[20], b3[21], b3[22], b3[23], b3[24], b3[25], b3[26], b3[27], b3[28],
-        b3[29], b3[30], b3[31],
+        b1[25], b1[26], b1[27], b1[28], b1[29], b1[30], b1[31], b2[0], b2[1], b2[2], b2[3], b2[4],
+        b2[5], b2[6], b2[7], b2[8], b2[9], b2[10], b2[11], b2[12], b2[13], b2[14], b2[15], b2[16],
+        b2[17], b2[18], b2[19], b2[20], b2[21], b2[22], b2[23], b2[24], b2[25], b2[26], b2[27],
+        b2[28], b2[29], b2[30], b2[31], b3[0], b3[1], b3[2], b3[3], b3[4], b3[5], b3[6], b3[7],
+        b3[8], b3[9], b3[10], b3[11], b3[12], b3[13], b3[14], b3[15], b3[16], b3[17], b3[18],
+        b3[19], b3[20], b3[21], b3[22], b3[23], b3[24], b3[25], b3[26], b3[27], b3[28], b3[29],
+        b3[30], b3[31],
     ]
 }
 
@@ -659,7 +670,9 @@ pub fn derive_hybrid_transcript_digest(
 
 /// Checked cumulative velocity shared by production admission and durable guards.
 pub const fn checked_velocity_spend(prior: u128, amount: u128, cap: u128) -> Option<u128> {
-    if amount > u128::MAX - prior { return None; }
+    if amount > u128::MAX - prior {
+        return None;
+    }
     let total = prior + amount;
     if total > cap { None } else { Some(total) }
 }

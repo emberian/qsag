@@ -69,8 +69,9 @@ impl Vault {
         loop {
             match file.try_lock() {
                 Ok(()) => break,
-                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline =>
-                    std::thread::sleep(std::time::Duration::from_millis(10)),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10))
+                }
                 Err(_) => return Err(CliError::state("vault lock unavailable")),
             }
         }
@@ -111,8 +112,11 @@ impl Vault {
     }
 
     pub fn set_key_material(&mut self, opened: &Json) -> Result<(), CliError> {
-        let material = opened.get("seed").or_else(|| opened.get("secret_key"))
-            .and_then(Json::as_str).ok_or_else(corrupt)?;
+        let material = opened
+            .get("seed")
+            .or_else(|| opened.get("secret_key"))
+            .and_then(Json::as_str)
+            .ok_or_else(corrupt)?;
         self.key_material = Some(ZeroizingBuf(material.as_bytes().to_vec()));
         Ok(())
     }
@@ -159,7 +163,11 @@ impl Vault {
 
     pub fn prepare(&self, secret: &mut Json) -> Result<(), CliError> {
         self.check_path()?;
-        set(secret, "state_mac", Json::hex(&tag(secret, self.key_material.as_deref())?));
+        set(
+            secret,
+            "state_mac",
+            Json::hex(&tag(secret, self.key_material.as_deref())?),
+        );
         Ok(())
     }
 

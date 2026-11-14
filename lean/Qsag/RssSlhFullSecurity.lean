@@ -3627,10 +3627,15 @@ def extractSlhHashGameBreak {AdvState : Type}
   have hTopVerify :
       fipsHtVerifyAux p sk.pkSeed 0 idxTreeStar idxLeafStar pkForsStar sigStar.htSig =
         fipsXmssNode p sk.skSeed sk.pkSeed (p.d - 1) 0 p.hp 0 := by
+    have hShapes := slhVerifyInternal_shapes p mStar sigStar
+      (slhKeygenInternal p skSeed skPrf pkSeed).2 hVerify
+    have hForsShape := hShapes.2.2.2.1
+    have hHtShape := hShapes.2.2.2.2
     have hV := hVerify
     unfold slhVerifyInternal slhKeygenInternal at hV
     dsimp only at hV
-    simp only [hRLen, hFLen, hHtLen, ne_eq, not_true_eq_false, decide_false, Bool.false_or,
+    simp only [hRLen, hFLen, hHtLen, hForsShape, hHtShape, ne_eq,
+               not_true_eq_false, decide_false, Bool.not_true, Bool.false_or,
                Bool.false_eq_true, ↓reduceIte, decide_eq_true_eq] at hV
     exact hV
   if hForsEq : pkForsStar = honPkFors then

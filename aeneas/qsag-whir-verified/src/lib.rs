@@ -412,11 +412,7 @@ pub fn step_merkle_pair_order(
 /// verifies `counts.len() == minimums.len() > 0`, `minimum_global > 0`,
 /// `0 < minimums[i] <= counts[i]` for every shard, neither `sum(counts)` nor `sum(minimums)`
 /// overflows `u64`, and `sum(counts) >= minimum_global`.
-pub fn checked_quorum_sum(
-    counts: &[u64],
-    minimums: &[u64],
-    minimum_global: u64,
-) -> Option<u64> {
+pub fn checked_quorum_sum(counts: &[u64], minimums: &[u64], minimum_global: u64) -> Option<u64> {
     if counts.is_empty() || counts.len() != minimums.len() || minimum_global == 0 {
         return None;
     }
@@ -472,10 +468,7 @@ mod tests {
         assert_eq!(add(GOLDILOCKS_P - 1, 1), 0);
         assert_eq!(mul(GOLDILOCKS_P - 1, GOLDILOCKS_P - 1), 1);
         assert_eq!(sub(0, 1), GOLDILOCKS_P - 1);
-        assert!(ext_eq(
-            ext_mul(e(0, 0, 0, 1), e(0, 1, 0, 0)),
-            e(7, 0, 0, 0)
-        ));
+        assert!(ext_eq(ext_mul(e(0, 0, 0, 1), e(0, 1, 0, 0)), e(7, 0, 0, 0)));
 
         for bits in 0..=32 {
             assert!(verify_stage_pow_mask(0, bits));
@@ -503,15 +496,29 @@ mod tests {
     #[test]
     fn bridge_horner_and_quorum_sum_gates() {
         // Quadratic wire: g(0) + g(1) == sum_claim
-        let g0 = eval_quadratic_sumcheck_wire(e(3, 4, 5, 6), e(9, 1, 2, 3), e(20, 30, 40, 50), e(0, 0, 0, 0));
-        let g1 = eval_quadratic_sumcheck_wire(e(3, 4, 5, 6), e(9, 1, 2, 3), e(20, 30, 40, 50), e(1, 0, 0, 0));
+        let g0 = eval_quadratic_sumcheck_wire(
+            e(3, 4, 5, 6),
+            e(9, 1, 2, 3),
+            e(20, 30, 40, 50),
+            e(0, 0, 0, 0),
+        );
+        let g1 = eval_quadratic_sumcheck_wire(
+            e(3, 4, 5, 6),
+            e(9, 1, 2, 3),
+            e(20, 30, 40, 50),
+            e(1, 0, 0, 0),
+        );
         assert!(ext_eq(ext_add(g0, g1), e(20, 30, 40, 50)));
 
         // Horner base evaluation: c0 + c1*z + c2*z^2 at z = 3
         let coeffs = [e(2, 1, 0, 0), e(4, 0, 1, 0), e(5, 0, 0, 1)];
         let expected = e(2 + 4 * 3 + 5 * 9, 1, 3, 9);
         assert!(verify_ext4_univariate_at_base_pin(&coeffs, 3, expected));
-        assert!(!verify_ext4_univariate_at_base_pin(&coeffs, 3, e(0, 0, 0, 0)));
+        assert!(!verify_ext4_univariate_at_base_pin(
+            &coeffs,
+            3,
+            e(0, 0, 0, 0)
+        ));
 
         // Bridge claim step acceptance and perturbation rejection
         let next = cwyz_bridge_claim_step(
@@ -568,7 +575,10 @@ mod tests {
         assert_eq!(checked_quorum_sum(&[4, 4, 4], &[3, 4, 2], 13), None);
         assert_eq!(checked_quorum_sum(&[3, 4], &[4, 4], 7), None);
         assert_eq!(checked_quorum_sum(&[u64::MAX, 1], &[1, 1], 2), None);
-        assert_eq!(checked_quorum_sum(&[u64::MAX, u64::MAX], &[u64::MAX, 1], 2), None);
+        assert_eq!(
+            checked_quorum_sum(&[u64::MAX, u64::MAX], &[u64::MAX, 1], 2),
+            None
+        );
         assert_eq!(checked_quorum_sum(&[], &[], 1), None);
         assert_eq!(checked_quorum_sum(&[4], &[4], 0), None);
     }

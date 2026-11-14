@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live Lean/Rust KATs; Linux only. No checked-in golden answers or crate edits.
 
-Usage on hbox: SWARM_MEM_MAX=8G python3 scripts/cross_kat_runner.py --build
+Usage on Linux: SWARM_MEM_MAX=8G python3 scripts/cross_kat_runner.py --build
 Builds the canonical qsag-kat Lake target and executes its --cross-kat mode
 twice, comparing all 277 records against linked production Rust.
 
@@ -142,7 +142,7 @@ def main():
                         help='compile unmodified agg primitive modules under a minimal no_std facade')
     args = parser.parse_args()
     if platform.system() != 'Linux':
-        parser.error('run on hbox/Linux; Lean and Cargo builds are forbidden on macOS')
+        parser.error('run on Linux; Lean and Cargo builds are forbidden on macOS')
     root = args.root.resolve()
     if args.build:
         build_lean(root)

@@ -22,7 +22,14 @@ root = "SpecOracle"
 name = "QsagChallenge"
 
 [[lean_lib]]
+name = "AxiomAuditSupport"
+
+[[lean_lib]]
 name = "AuditAxioms"
 
 [[lean_lib]]
 name = "TraceAxiom"
+
+[[lean_exe]]
+name = "audit-axioms"
+root = "AuditAxiomsMain"

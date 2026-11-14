@@ -66,7 +66,7 @@ fn test_spirv_shaders_reproducible_from_comp_sources() {
             "embedded SPIR-V bytes drifted from shaders/{comp_name}"
         );
         assert_eq!(
-            CertifiedKernelPin::from_kernel_artifact(slot, KernelTargetArch::SpirV16, &compiled),
+            CertifiedKernelPin::from_kernel_artifact(slot, KernelTargetArch::SpirV15, &compiled),
             VulkanSpirvBackend::canonical_pin(slot),
             "canonical CertifiedKernelPin mismatch for {slot:?}"
         );
@@ -102,7 +102,7 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
     );
     assert!(gpu.vendor_id() != 0);
     assert!(gpu.driver_version() != 0);
-    assert_eq!(gpu.target_arch(), KernelTargetArch::SpirV16);
+    assert_eq!(gpu.target_arch(), KernelTargetArch::SpirV15);
     println!(
         "Bound discrete Vulkan GPU: {} (vendor=0x{:04x}, device=0x{:04x}, driver=0x{:08x})",
         gpu.device_name(),
@@ -126,13 +126,17 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
             assert_eq!(stats.scratch_bytes, Some(0));
         }
     }
+    assert_eq!(gpu.secret_slots_audited(), info.secret_slot_audit().is_ok());
+    if std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_some() {
+        assert_eq!(info.secret_slot_audit(), Ok(()));
+    }
 
     // 2. Registry pinning & negative loader-measurement checks.
     let mut registry = VerifiedKernelDigestRegistry::<4>::with_cpu_reference_pins();
     let measured_pins = VulkanSpirvBackend::measure_embedded_spirv_pins();
     registry
-        .register_measured_profile(KernelTargetArch::SpirV16, measured_pins)
-        .expect("register SpirV16 profile");
+        .register_measured_profile(KernelTargetArch::SpirV15, measured_pins)
+        .expect("register SpirV15 profile");
     assert_eq!(
         VerifiedKernelDigestRegistry::<4>::with_cpu_and_spirv_pins().verify_backend(&gpu),
         Ok(())
@@ -141,11 +145,11 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
     let mut bad_pins = measured_pins;
     bad_pins[KernelSlot::GoldilocksNtt as usize] = CertifiedKernelPin::from_kernel_artifact(
         KernelSlot::GoldilocksNtt,
-        KernelTargetArch::SpirV16,
+        KernelTargetArch::SpirV15,
         b"CORRUPTED_SPIRV_BINARY",
     );
     assert_eq!(
-        registry.verify_loaded_profile(KernelTargetArch::SpirV16, &bad_pins),
+        registry.verify_loaded_profile(KernelTargetArch::SpirV15, &bad_pins),
         Err(KernelRegistryError::PinMismatch {
             slot: KernelSlot::GoldilocksNtt
         })
@@ -488,14 +492,25 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
             })
             .collect();
 
-        let (gpu_dot, r_bdoz_gpu) = bdoz_gf2_128_batch_dot_with_receipt(
+        let gpu_bdoz = bdoz_gf2_128_batch_dot_with_receipt(
             &certified_gpu,
             &gpu_key,
             &shares,
             &weights,
             anchor,
-        )
-        .unwrap();
+        );
+        if !certified_gpu.inner().secret_slots_audited() {
+            // `try_new` accepted a driver without Wave32 / zero-scratch evidence. That backend
+            // must refuse the share-bearing slot without submitting anything.
+            assert_eq!(
+                gpu_bdoz.map(|_| ()),
+                Err(AccelError::SecretSlotUnaudited {
+                    slot: KernelSlot::BdozGf2128BatchDot
+                })
+            );
+            continue;
+        }
+        let (gpu_dot, r_bdoz_gpu) = gpu_bdoz.unwrap();
         let (cpu_dot, r_bdoz_cpu) =
             bdoz_gf2_128_batch_dot_with_receipt(&cpu, &cpu_key, &shares, &weights, anchor).unwrap();
         assert_eq!(

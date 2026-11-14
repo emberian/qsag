@@ -124,57 +124,47 @@ global_asm!(
     "vpxor ymm0, ymm0, ymmword ptr [rdi + 320]",
     "vpxor ymm0, ymm0, ymmword ptr [rdi + 480]",
     "vpxor ymm0, ymm0, ymmword ptr [rdi + 640]",
-
     "vmovdqu ymm1, ymmword ptr [rdi + 32]",
     "vpxor ymm1, ymm1, ymmword ptr [rdi + 192]",
     "vpxor ymm1, ymm1, ymmword ptr [rdi + 352]",
     "vpxor ymm1, ymm1, ymmword ptr [rdi + 512]",
     "vpxor ymm1, ymm1, ymmword ptr [rdi + 672]",
-
     "vmovdqu ymm2, ymmword ptr [rdi + 64]",
     "vpxor ymm2, ymm2, ymmword ptr [rdi + 224]",
     "vpxor ymm2, ymm2, ymmword ptr [rdi + 384]",
     "vpxor ymm2, ymm2, ymmword ptr [rdi + 544]",
     "vpxor ymm2, ymm2, ymmword ptr [rdi + 704]",
-
     "vmovdqu ymm3, ymmword ptr [rdi + 96]",
     "vpxor ymm3, ymm3, ymmword ptr [rdi + 256]",
     "vpxor ymm3, ymm3, ymmword ptr [rdi + 416]",
     "vpxor ymm3, ymm3, ymmword ptr [rdi + 576]",
     "vpxor ymm3, ymm3, ymmword ptr [rdi + 736]",
-
     "vmovdqu ymm4, ymmword ptr [rdi + 128]",
     "vpxor ymm4, ymm4, ymmword ptr [rdi + 288]",
     "vpxor ymm4, ymm4, ymmword ptr [rdi + 448]",
     "vpxor ymm4, ymm4, ymmword ptr [rdi + 608]",
     "vpxor ymm4, ymm4, ymmword ptr [rdi + 768]",
-
     // Theta D[0..4] -> ymm5..ymm9
     "vpsllq ymm10, ymm1, 1",
     "vpsrlq ymm11, ymm1, 63",
     "vpor ymm10, ymm10, ymm11",
     "vpxor ymm5, ymm4, ymm10",
-
     "vpsllq ymm10, ymm2, 1",
     "vpsrlq ymm11, ymm2, 63",
     "vpor ymm10, ymm10, ymm11",
     "vpxor ymm6, ymm0, ymm10",
-
     "vpsllq ymm10, ymm3, 1",
     "vpsrlq ymm11, ymm3, 63",
     "vpor ymm10, ymm10, ymm11",
     "vpxor ymm7, ymm1, ymm10",
-
     "vpsllq ymm10, ymm4, 1",
     "vpsrlq ymm11, ymm4, 63",
     "vpor ymm10, ymm10, ymm11",
     "vpxor ymm8, ymm2, ymm10",
-
     "vpsllq ymm10, ymm0, 1",
     "vpsrlq ymm11, ymm0, 63",
     "vpor ymm10, ymm10, ymm11",
     "vpxor ymm9, ymm3, ymm10",
-
     // Theta XOR + Rho + Pi -> [rsp + 32*target]
     // src=0 (x=0 -> dst=0, rot=0)
     "vpxor ymm0, ymm5, ymmword ptr [rdi + 0]",
@@ -323,7 +313,6 @@ global_asm!(
     "vpsrlq ymm2, ymm0, 50",
     "vpor ymm0, ymm1, ymm2",
     "vmovdqa ymmword ptr [rsp + 128], ymm0",
-
     // Chi + Iota row 0 (offsets 0..128)
     "vmovdqa ymm0, ymmword ptr [rsp + 0]",
     "vmovdqa ymm1, ymmword ptr [rsp + 32]",
@@ -347,7 +336,6 @@ global_asm!(
     "vpandn ymm9, ymm0, ymm1",
     "vpxor ymm9, ymm4, ymm9",
     "vmovdqu ymmword ptr [rdi + 128], ymm9",
-
     // Chi row 1 (offsets 160..288)
     "vmovdqa ymm0, ymmword ptr [rsp + 160]",
     "vmovdqa ymm1, ymmword ptr [rsp + 192]",
@@ -369,7 +357,6 @@ global_asm!(
     "vpandn ymm9, ymm0, ymm1",
     "vpxor ymm9, ymm4, ymm9",
     "vmovdqu ymmword ptr [rdi + 288], ymm9",
-
     // Chi row 2 (offsets 320..448)
     "vmovdqa ymm0, ymmword ptr [rsp + 320]",
     "vmovdqa ymm1, ymmword ptr [rsp + 352]",
@@ -391,7 +378,6 @@ global_asm!(
     "vpandn ymm9, ymm0, ymm1",
     "vpxor ymm9, ymm4, ymm9",
     "vmovdqu ymmword ptr [rdi + 448], ymm9",
-
     // Chi row 3 (offsets 480..608)
     "vmovdqa ymm0, ymmword ptr [rsp + 480]",
     "vmovdqa ymm1, ymmword ptr [rsp + 512]",
@@ -413,7 +399,6 @@ global_asm!(
     "vpandn ymm9, ymm0, ymm1",
     "vpxor ymm9, ymm4, ymm9",
     "vmovdqu ymmword ptr [rdi + 608], ymm9",
-
     // Chi row 4 (offsets 640..768)
     "vmovdqa ymm0, ymmword ptr [rsp + 640]",
     "vmovdqa ymm1, ymmword ptr [rsp + 672]",
@@ -435,11 +420,9 @@ global_asm!(
     "vpandn ymm9, ymm0, ymm1",
     "vpxor ymm9, ymm4, ymm9",
     "vmovdqu ymmword ptr [rdi + 768], ymm9",
-
     "add rsi, 8",
     "dec ecx",
     "jnz 2b",
-
     // Zeroize 800-byte stack scratch frame & all YMM registers before exit!
     "vpxor ymm0, ymm0, ymm0",
     "mov ecx, 25",
@@ -475,7 +458,6 @@ global_asm!(
     "xor eax, eax",
     "ret",
     sym_footer!("qsag_asm_keccak_f1600_avx2_4x"),
-
     // =========================================================================
     // 2. qsag_asm_keccak_chi_mpc_avx2(out, s0, s1, r_mask)
     //    Straight-line 256-way bitsliced 3-party RSS MPC Chi row (ZERO branches!)
@@ -491,7 +473,6 @@ global_asm!(
     "vmovdqu ymm7, ymmword ptr [rdx + 64]",
     "vmovdqu ymm8, ymmword ptr [rdx + 96]",
     "vmovdqu ymm9, ymmword ptr [rdx + 128]",
-
     // Lane x = 0 (x1 = 1, x2 = 2)
     "vpxor ymm10, ymm2, ymm7",
     "vpand ymm10, ymm1, ymm10",
@@ -501,7 +482,6 @@ global_asm!(
     "vpxor ymm10, ymm10, ymm11",
     "vpxor ymm10, ymm10, ymmword ptr [rcx + 0]",
     "vmovdqu ymmword ptr [rdi + 0], ymm10",
-
     // Lane x = 1 (x1 = 2, x2 = 3)
     "vpxor ymm10, ymm3, ymm8",
     "vpand ymm10, ymm2, ymm10",
@@ -511,7 +491,6 @@ global_asm!(
     "vpxor ymm10, ymm10, ymm11",
     "vpxor ymm10, ymm10, ymmword ptr [rcx + 32]",
     "vmovdqu ymmword ptr [rdi + 32], ymm10",
-
     // Lane x = 2 (x1 = 3, x2 = 4)
     "vpxor ymm10, ymm4, ymm9",
     "vpand ymm10, ymm3, ymm10",
@@ -521,7 +500,6 @@ global_asm!(
     "vpxor ymm10, ymm10, ymm11",
     "vpxor ymm10, ymm10, ymmword ptr [rcx + 64]",
     "vmovdqu ymmword ptr [rdi + 64], ymm10",
-
     // Lane x = 3 (x1 = 4, x2 = 0)
     "vpxor ymm10, ymm0, ymm5",
     "vpand ymm10, ymm4, ymm10",
@@ -531,7 +509,6 @@ global_asm!(
     "vpxor ymm10, ymm10, ymm11",
     "vpxor ymm10, ymm10, ymmword ptr [rcx + 96]",
     "vmovdqu ymmword ptr [rdi + 96], ymm10",
-
     // Lane x = 4 (x1 = 0, x2 = 1)
     "vpxor ymm10, ymm1, ymm6",
     "vpand ymm10, ymm0, ymm10",
@@ -541,7 +518,6 @@ global_asm!(
     "vpxor ymm10, ymm10, ymm11",
     "vpxor ymm10, ymm10, ymmword ptr [rcx + 128]",
     "vmovdqu ymmword ptr [rdi + 128], ymm10",
-
     // Wipe secret share registers & upper YMM state
     "vpxor ymm0, ymm0, ymm0",
     "vpxor ymm1, ymm1, ymm1",
@@ -568,7 +544,6 @@ global_asm!(
     "xor eax, eax",
     "ret",
     sym_footer!("qsag_asm_keccak_chi_mpc_avx2"),
-
     // =========================================================================
     // 3. qsag_asm_gf256_shamir_mul_gfni(dst: *mut u8, a: *const u8, b: *const u8, blocks32: usize)
     //    32-way GFNI Shamir Wiedemann T_3 multiplication via vgf2p8affineqb + vgf2p8mulb
@@ -612,7 +587,6 @@ global_asm!(
     "xor eax, eax",
     "ret",
     sym_footer!("qsag_asm_gf256_shamir_mul_gfni"),
-
     // =========================================================================
     // 4. qsag_asm_gf256_shamir_mac_gfni(acc: *mut u8, shares: *const u8, scalar: u8, blocks32: usize)
     //    32-way GFNI Shamir Wiedemann T_3 multiply-accumulate `acc[i] ^= scalar * shares[i]`
@@ -661,7 +635,6 @@ global_asm!(
     "xor eax, eax",
     "ret",
     sym_footer!("qsag_asm_gf256_shamir_mac_gfni"),
-
     // =========================================================================
     // 5. qsag_asm_gf256_shamir_mul_avx2(dst, a, b, blocks32, luts_ptr /* r8 */)
     //    32-way pure-AVX2 fallback (for AMD EPYC-Milan (Zen 3) without GFNI!)
@@ -696,7 +669,6 @@ global_asm!(
     "vpshufb ymm3, ymm12, ymm3",
     "vpshufb ymm4, ymm13, ymm4",
     "vpxor ymm1, ymm3, ymm4",
-
     // Step k = 7 (MSB of b): acc = a & (b_bit7 ? 0xFF : 0x00)
     "vpcmpgtb ymm2, ymm9, ymm1",
     "vpand ymm2, ymm0, ymm2",
@@ -763,7 +735,6 @@ global_asm!(
     "vpcmpgtb ymm6, ymm9, ymm1",
     "vpand ymm6, ymm0, ymm6",
     "vpxor ymm2, ymm2, ymm6",
-
     // Map acc (ymm2): Poly(0x11B) -> T_3
     "vpand ymm3, ymm2, ymm10",
     "vpsrlw ymm4, ymm2, 4",
@@ -772,7 +743,6 @@ global_asm!(
     "vpshufb ymm4, ymm15, ymm4",
     "vpxor ymm2, ymm3, ymm4",
     "vmovdqu ymmword ptr [rdi], ymm2",
-
     "add rsi, 32",
     "add rdx, 32",
     "add rdi, 32",
@@ -805,7 +775,6 @@ global_asm!(
     "xor eax, eax",
     "ret",
     sym_footer!("qsag_asm_gf256_shamir_mul_avx2"),
-
     // =========================================================================
     // 5b. qsag_asm_gf256_shamir_mac_avx2(acc, shares, scalar, blocks32, luts_ptr /* r8 */)
     //     Constant-time register-synthesized nibble LUT Shamir MAC on AVX2!
@@ -822,7 +791,6 @@ global_asm!(
     "vmovd xmm11, eax",
     "vpbroadcastb ymm11, xmm11",
     "vpxor ymm9, ymm9, ymm9",
-
     // Synthesize [scalar *_{T_3} (0..15), scalar *_{T_3} (0,16..240)] in registers (0 memory LUTs!)
     "vmovd xmm0, edx",
     "vpbroadcastb ymm0, xmm0",
@@ -908,7 +876,6 @@ global_asm!(
     "vpxor ymm2, ymm3, ymm4",
     "vperm2i128 ymm7, ymm2, ymm2, 0x00",
     "vperm2i128 ymm8, ymm2, ymm2, 0x11",
-
     // Hot inner loop: 10 AVX2 instructions per 32 Shamir multiplies!
     "2:",
     "vmovdqu ymm0, ymmword ptr [rsi]",
@@ -925,7 +892,6 @@ global_asm!(
     "add rdi, 32",
     "dec rcx",
     "jnz 2b",
-
     "vpxor ymm0, ymm0, ymm0",
     "vpxor ymm1, ymm1, ymm1",
     "vpxor ymm2, ymm2, ymm2",
@@ -956,7 +922,6 @@ global_asm!(
     "xor eax, eax",
     "ret",
     sym_footer!("qsag_asm_gf256_shamir_mac_avx2"),
-
     // =========================================================================
     // 6. qsag_asm_tower128_bdoz_mac_vpclmul(out32: *mut u8, lhs32: *const u8, rhs32: *const u8, count: usize)
     //    2-lane simultaneous 128-bit BDOZ MAC inner product via 256-bit VPCLMULQDQ + 0x87 reduction!
@@ -983,7 +948,6 @@ global_asm!(
     "add rdx, 32",
     "dec rcx",
     "jnz 2b",
-
     // Final 2-step reduction modulo z^128 + z^7 + z^2 + z + 1 (0x87) in BOTH 128-bit lanes!
     "mov eax, 0x87",
     "vmovq xmm8, rax",
@@ -996,7 +960,6 @@ global_asm!(
     "vpclmulqdq ymm4, ymm1, ymm8, 0x00", // U = C2' * 0x87
     "vpxor ymm0, ymm0, ymm4",            // canonical 128-bit remainder in both lanes!
     "vmovdqu ymmword ptr [rdi], ymm0",
-
     "vpxor ymm0, ymm0, ymm0",
     "vpxor ymm1, ymm1, ymm1",
     "vpxor ymm2, ymm2, ymm2",
@@ -1020,7 +983,6 @@ global_asm!(
     "xor eax, eax",
     "ret",
     sym_footer!("qsag_asm_tower128_bdoz_mac_vpclmul"),
-
     // =========================================================================
     // 7. qsag_asm_tower128_bdoz_mac_pclmul(out32: *mut u8, lhs32: *const u8, rhs32: *const u8, count: usize)
     //    128-bit PCLMULQDQ fallback (for AMD EPYC-Milan (Zen 3) without VPCLMULQDQ!)
@@ -1060,12 +1022,10 @@ global_asm!(
     "vpxor xmm7, xmm7, xmm8",
     "vpxor xmm2, xmm2, xmm6",
     "vpxor xmm3, xmm3, xmm7",
-
     "add rsi, 32",
     "add rdx, 32",
     "dec rcx",
     "jnz 2b",
-
     "mov eax, 0x87",
     "vmovq xmm10, rax",
     // Reduce Lane 0
@@ -1086,7 +1046,6 @@ global_asm!(
     "vpclmulqdq xmm6, xmm3, xmm10, 0x00",
     "vpxor xmm2, xmm2, xmm6",
     "vmovdqu xmmword ptr [rdi + 16], xmm2",
-
     "vpxor xmm0, xmm0, xmm0",
     "vpxor xmm1, xmm1, xmm1",
     "vpxor xmm2, xmm2, xmm2",
@@ -1112,7 +1071,6 @@ global_asm!(
     "xor eax, eax",
     "ret",
     sym_footer!("qsag_asm_tower128_bdoz_mac_pclmul"),
-
     // =========================================================================
     // 8. qsag_asm_goldilocks_mul_ct_x86_64(a: u64, b: u64) -> u64
     //    Zero-branch BMI2 `mulx` + `sbb` canonical Goldilocks multiplication
@@ -1153,7 +1111,6 @@ global_asm!(
     "xor r11d, r11d",
     "ret",
     sym_footer!("qsag_asm_goldilocks_mul_ct_x86_64"),
-
     // =========================================================================
     // 9. qsag_asm_goldilocks_add_ct_x86_64(a: u64, b: u64) -> u64
     //    Zero-branch Goldilocks addition exact over ALL (a, b) in [0, 2^64 - 1]^2!
@@ -1185,7 +1142,6 @@ global_asm!(
     "xor r11d, r11d",
     "ret",
     sym_footer!("qsag_asm_goldilocks_add_ct_x86_64"),
-
     // =========================================================================
     // 10. qsag_asm_goldilocks_sub_ct_x86_64(a: u64, b: u64) -> u64
     //     Zero-branch Goldilocks subtraction exact over ALL (a, b) in [0, 2^64 - 1]^2!
@@ -1226,7 +1182,6 @@ global_asm!(
     "xor r11d, r11d",
     "ret",
     sym_footer!("qsag_asm_goldilocks_sub_ct_x86_64"),
-
     // =========================================================================
     // 11. qsag_asm_goldilocks_pow7_ct_x86_64(x: u64) -> u64
     //     Zero-branch Poseidon2 x^7 mod p S-box (x -> x^2 -> x^3 -> x^6 -> x^7)
@@ -1330,27 +1285,26 @@ global_asm!(
     "xor r11d, r11d",
     "ret",
     sym_footer!("qsag_asm_goldilocks_pow7_ct_x86_64"),
-
     // =========================================================================
     // 12. qsag_asm_goldilocks_dot2_adx_x86_64(a0, b0, a1, b1) -> u64
     //     BMI2 + ADX (`mulx` + `adcx` + `adox`) dual-carry Goldilocks inner product
     //     `(a0 * b0 + a1 * b1) mod p` with zero branches!
     // =========================================================================
     sym_header!("qsag_asm_goldilocks_dot2_adx_x86_64"),
-    "mov r10, rdx",            // save a1 before rdx is overwritten
-    "xor eax, eax",            // clears both CF = 0 and OF = 0 for adcx / adox!
+    "mov r10, rdx", // save a1 before rdx is overwritten
+    "xor eax, eax", // clears both CF = 0 and OF = 0 for adcx / adox!
     "mov rdx, rdi",
-    "mulx r9, r8, rsi",        // r9:r8 = a0 * b0
+    "mulx r9, r8, rsi", // r9:r8 = a0 * b0
     "mov rdx, r10",
-    "mulx r11, r10, rcx",      // r11:r10 = a1 * b1
-    "adcx r8, r10",            // CF chain: lo = lo0 + lo1
-    "adcx r9, r11",            // CF chain: hi = hi0 + hi1 + CF0, CF = carry128
-    "adox rax, rax",           // OF chain stays 0 (demonstrating independent CF/OF pipelines)
-    "adcx rax, rax",           // rax = carry128 in {0, 1}
+    "mulx r11, r10, rcx", // r11:r10 = a1 * b1
+    "adcx r8, r10",       // CF chain: lo = lo0 + lo1
+    "adcx r9, r11",       // CF chain: hi = hi0 + hi1 + CF0, CF = carry128
+    "adox rax, rax",      // OF chain stays 0 (demonstrating independent CF/OF pipelines)
+    "adcx rax, rax",      // rax = carry128 in {0, 1}
     // Fold carry128 * (2^128 mod p): 2^128 == (2^32 - 1)^2 = p - 2^32 = 0xfffffffe00000001 (mod p)!
-    "neg rax",                 // rax = carry128 ? -1 : 0
+    "neg rax", // rax = carry128 ? -1 : 0
     "mov r11, 0xfffffffe00000001",
-    "and r11, rax",            // r11 = carry128 ? (2^128 mod p) : 0
+    "and r11, rax", // r11 = carry128 ? (2^128 mod p) : 0
     // Reduce r9:r8 (128-bit) -> rax
     "mov rax, r8",
     "mov rdx, r9",
@@ -1394,7 +1348,6 @@ global_asm!(
     "xor r11d, r11d",
     "ret",
     sym_footer!("qsag_asm_goldilocks_dot2_adx_x86_64"),
-
     // =========================================================================
     // 13. qsag_asm_ct_eq_32_x86_64(a: *const u8, b: *const u8) -> u64
     //     Straight-line 32-byte tag equality (returns 1 iff equal, 0 otherwise; 0 jumps!)
@@ -1429,7 +1382,6 @@ global_asm!(
     "xor r11d, r11d",
     "ret",
     sym_footer!("qsag_asm_ct_eq_32_x86_64"),
-
     // =========================================================================
     // 14. qsag_asm_ct_eq_bytes_x86_64(a: *const u8, b: *const u8, len: usize) -> u64
     //     Constant-time byte-slice tag comparison (`len >= 1`).
@@ -1460,7 +1412,6 @@ global_asm!(
     "xor r11d, r11d",
     "ret",
     sym_footer!("qsag_asm_ct_eq_bytes_x86_64"),
-
     // =========================================================================
     // 15. qsag_asm_ct_memzero_x86_64(ptr: *mut u8, len: usize)
     //     Byte-granular memory wipe followed by mfence (`len >= 1`), immune to LLVM DSE!

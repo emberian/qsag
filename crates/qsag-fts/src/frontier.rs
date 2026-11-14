@@ -207,8 +207,14 @@ impl FrontierDpTable {
                 for i in i_min..=i_max {
                     let left = sub_counts[(t - 1) * l_stride + i];
                     let right = sub_counts[(t - 1) * l_stride + (ell - i)];
-                    let prod = match left.checked_mul(right) { Some(value) => value, None => panic!("FrontierDpTable subtree product fits in U384") };
-                    acc = match acc.checked_add(prod) { Some(value) => value, None => panic!("FrontierDpTable subtree sum fits in U384") };
+                    let prod = match left.checked_mul(right) {
+                        Some(value) => value,
+                        None => panic!("FrontierDpTable subtree product fits in U384"),
+                    };
+                    acc = match acc.checked_add(prod) {
+                        Some(value) => value,
+                        None => panic!("FrontierDpTable subtree sum fits in U384"),
+                    };
                 }
                 sub_counts[t * l_stride + ell] = acc;
             }
@@ -233,7 +239,10 @@ impl FrontierDpTable {
 
         let frontier_cardinality = sub_counts[h * l_stride + l];
         let decoration_cardinality = dec_counts[l * s_stride + s];
-        let total_cardinality = match frontier_cardinality.checked_mul(decoration_cardinality) { Some(value) => value, None => panic!("FrontierDpTable total cardinality fits in U384") };
+        let total_cardinality = match frontier_cardinality.checked_mul(decoration_cardinality) {
+            Some(value) => value,
+            None => panic!("FrontierDpTable total cardinality fits in U384"),
+        };
 
         Self {
             params,
@@ -802,11 +811,19 @@ impl FrontierFtsSigningKey {
 
     /// Identity binds the profile and complete public key to the use journal.
     pub fn wal_key(&self) -> [u8; 32] {
-        qsag_accel::keccak::cshake256_framed_32(b"QSAG.FRONTIER.WAL.V1", &[&self.profile.pid_bytes(), &self.pk.pk_seed, &self.pk.root])
+        qsag_accel::keccak::cshake256_framed_32(
+            b"QSAG.FRONTIER.WAL.V1",
+            &[&self.profile.pid_bytes(), &self.pk.pk_seed, &self.pk.root],
+        )
     }
-    pub fn attach_wal(mut self, mut wal: alloc::boxed::Box<dyn FtsEpochWal>) -> Result<Self, FrontierFtsError> {
+    pub fn attach_wal(
+        mut self,
+        mut wal: alloc::boxed::Box<dyn FtsEpochWal>,
+    ) -> Result<Self, FrontierFtsError> {
         let used = wal.uses_completed(&self.wal_key())?;
-        if used > self.max_uses { return Err(FrontierFtsError::PersistenceFailed); }
+        if used > self.max_uses {
+            return Err(FrontierFtsError::PersistenceFailed);
+        }
         // A reservation may have reached the vault before the WAL. Burn the gap;
         // never roll either monotonic counter backward after recovery.
         for next in used..self.uses_completed {

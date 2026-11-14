@@ -151,19 +151,31 @@ impl PolicySignerGuardShare {
         let authenticated = r.flag()?;
         let (nonces, nonce_cursor) = r.ring()?;
         let (sessions, session_cursor) = r.ring()?;
-        let nonce_floor = if r.flag()? { Some(r.take::<32>()?) } else {
-            if r.take::<32>()? != [0; 32] { return Err(PolicyGuardError::InvalidCheckpoint); }
+        let nonce_floor = if r.flag()? {
+            Some(r.take::<32>()?)
+        } else {
+            if r.take::<32>()? != [0; 32] {
+                return Err(PolicyGuardError::InvalidCheckpoint);
+            }
             None
         };
-        let session_floor = if r.flag()? { Some(r.take::<32>()?) } else {
-            if r.take::<32>()? != [0; 32] { return Err(PolicyGuardError::InvalidCheckpoint); }
+        let session_floor = if r.flag()? {
+            Some(r.take::<32>()?)
+        } else {
+            if r.take::<32>()? != [0; 32] {
+                return Err(PolicyGuardError::InvalidCheckpoint);
+            }
             None
         };
-        if nonce_cursor != 0 || session_cursor != 0
+        if nonce_cursor != 0
+            || session_cursor != 0
             || nonces.windows(2).any(|w| w[0] >= w[1])
             || sessions.windows(2).any(|w| w[0] >= w[1])
             || nonces.iter().any(|n| nonce_floor.is_some_and(|f| *n <= f))
-            || sessions.iter().any(|n| session_floor.is_some_and(|f| *n <= f)) {
+            || sessions
+                .iter()
+                .any(|n| session_floor.is_some_and(|f| *n <= f))
+        {
             return Err(PolicyGuardError::InvalidCheckpoint);
         }
         let count = r.short()?;
@@ -187,11 +199,16 @@ impl PolicySignerGuardShare {
         if generation < min_expected_generation.max(self.durable_generation.get())
             || window < self.current_window_id
             || (window == self.current_window_id && spend < self.accumulated_window_spend)
-            || self.burned_intent_nonces.iter()
+            || self
+                .burned_intent_nonces
+                .iter()
                 .any(|n| !nonces.contains(n) && !nonce_floor.is_some_and(|f| *n <= f))
             || nonce_floor < self.min_nonce_watermark
             || session_floor < self.min_session_watermark
-            || self.burned_sessions.iter().any(|s| !sessions.contains(s) && !session_floor.is_some_and(|f| *s <= f))
+            || self
+                .burned_sessions
+                .iter()
+                .any(|s| !sessions.contains(s) && !session_floor.is_some_and(|f| *s <= f))
             || next < self.next_slot.get()
             || (self.poisoned && !poisoned)
             || (self.require_authenticated_initiator && !authenticated)
@@ -237,7 +254,9 @@ fn policy_lock_inode(path: &std::path::Path) -> std::io::Result<[u8; 16]> {
     os.push(".lock");
     let meta = std::fs::symlink_metadata(std::path::PathBuf::from(os))?;
     if !meta.is_file() || meta.file_type().is_symlink() {
-        return Err(std::io::Error::other("policy lock sidecar is not a regular file"));
+        return Err(std::io::Error::other(
+            "policy lock sidecar is not a regular file",
+        ));
     }
     let mut id = [0u8; 16];
     #[cfg(unix)]
@@ -413,7 +432,9 @@ impl FsPolicyGenerationFence {
         }
         let meta = std::fs::symlink_metadata(&self.path)?;
         if !meta.is_file() {
-            return Err(std::io::Error::other("policy fence path is not a regular file"));
+            return Err(std::io::Error::other(
+                "policy fence path is not a regular file",
+            ));
         }
         let disk_gen = Self::decode(
             self.key.expose(),
@@ -435,7 +456,12 @@ impl FsPolicyGenerationFence {
         let gen_be = generation.to_be_bytes();
         let tag = cshake256_framed_32(
             Self::DOMAIN,
-            &[self.key.expose(), &self.lock_id, &self.record.lock_seal(), &gen_be],
+            &[
+                self.key.expose(),
+                &self.lock_id,
+                &self.record.lock_seal(),
+                &gen_be,
+            ],
         );
         let mut out = Vec::with_capacity(40);
         out.extend_from_slice(&gen_be);
@@ -452,8 +478,7 @@ impl FsPolicyGenerationFence {
         if raw.len() != 40 {
             return Err(std::io::Error::other("invalid policy fence length"));
         }
-        let expected =
-            cshake256_framed_32(Self::DOMAIN, &[key, lock_id, lock_seal, &raw[..8]]);
+        let expected = cshake256_framed_32(Self::DOMAIN, &[key, lock_id, lock_seal, &raw[..8]]);
         if !ct_eq_bytes(&expected, &raw[8..40]) {
             return Err(std::io::Error::other("invalid policy fence MAC"));
         }
@@ -486,7 +511,9 @@ impl SharedWindowSpendLedger {
             (&self.burned_sessions, self.min_session_watermark),
         ] {
             out.extend_from_slice(&(values.len() as u16).to_be_bytes());
-            for value in values { out.extend_from_slice(value); }
+            for value in values {
+                out.extend_from_slice(value);
+            }
             out.push(u8::from(floor.is_some()));
             out.extend_from_slice(&floor.unwrap_or([0; 32]));
         }
@@ -511,9 +538,15 @@ impl SharedWindowSpendLedger {
         storage_mac_key: &[u8; 32],
         min_expected_generation: u64,
     ) -> Result<u64, PolicyGuardError> {
-        let split = bytes.len().checked_sub(32).ok_or(PolicyGuardError::InvalidCheckpoint)?;
+        let split = bytes
+            .len()
+            .checked_sub(32)
+            .ok_or(PolicyGuardError::InvalidCheckpoint)?;
         let (body, tag) = bytes.split_at(split);
-        if !ct_eq_bytes(&cshake256_framed_32(SHARED_DOMAIN, &[storage_mac_key, body]), tag) {
+        if !ct_eq_bytes(
+            &cshake256_framed_32(SHARED_DOMAIN, &[storage_mac_key, body]),
+            tag,
+        ) {
             return Err(PolicyGuardError::AuthenticationFailed);
         }
         let mut r = Reader(body);
@@ -521,7 +554,8 @@ impl SharedWindowSpendLedger {
             return Err(PolicyGuardError::InvalidCheckpoint);
         }
         if !ct_eq_bytes(&r.take::<32>()?, &self.policy_digest)
-            || !ct_eq_bytes(&r.take::<32>()?, &self.authority_binding()) {
+            || !ct_eq_bytes(&r.take::<32>()?, &self.authority_binding())
+        {
             return Err(PolicyGuardError::WrongGuard);
         }
         let generation = u64::from_be_bytes(r.take()?);
@@ -530,30 +564,48 @@ impl SharedWindowSpendLedger {
         let mut sets = Vec::with_capacity(2);
         for _ in 0..2 {
             let count = r.short()?;
-            if count > MAX_BURNED_INTENT_NONCES { return Err(PolicyGuardError::InvalidCheckpoint); }
+            if count > MAX_BURNED_INTENT_NONCES {
+                return Err(PolicyGuardError::InvalidCheckpoint);
+            }
             let mut values = Vec::with_capacity(count);
-            for _ in 0..count { values.push(r.take::<32>()?); }
+            for _ in 0..count {
+                values.push(r.take::<32>()?);
+            }
             let present = r.flag()?;
             let raw = r.take::<32>()?;
-            if !present && raw != [0; 32] { return Err(PolicyGuardError::InvalidCheckpoint); }
+            if !present && raw != [0; 32] {
+                return Err(PolicyGuardError::InvalidCheckpoint);
+            }
             let floor = present.then_some(raw);
             if values.windows(2).any(|w| w[0] >= w[1])
-                || values.iter().any(|v| floor.is_some_and(|f| *v <= f)) {
+                || values.iter().any(|v| floor.is_some_and(|f| *v <= f))
+            {
                 return Err(PolicyGuardError::InvalidCheckpoint);
             }
             sets.push((values, floor));
         }
-        if !r.0.is_empty() { return Err(PolicyGuardError::InvalidCheckpoint); }
-        if self.failed || generation < min_expected_generation.max(self.generation)
+        if !r.0.is_empty() {
+            return Err(PolicyGuardError::InvalidCheckpoint);
+        }
+        if self.failed
+            || generation < min_expected_generation.max(self.generation)
             || window < self.current_window_id
-            || (window == self.current_window_id && spend < self.accumulated_window_spend) {
+            || (window == self.current_window_id && spend < self.accumulated_window_spend)
+        {
             return Err(PolicyGuardError::Rollback);
         }
         for ((old, old_floor), (new, floor)) in [
             (&self.burned_intent_nonces, self.min_nonce_watermark),
             (&self.burned_sessions, self.min_session_watermark),
-        ].into_iter().zip(&sets) {
-            if *floor < old_floor || old.iter().any(|v| !new.contains(v) && !floor.is_some_and(|f| *v <= f)) {
+        ]
+        .into_iter()
+        .zip(&sets)
+        {
+            if *floor < old_floor
+                || old
+                    .iter()
+                    .any(|v| !new.contains(v) && !floor.is_some_and(|f| *v <= f))
+            {
                 return Err(PolicyGuardError::Rollback);
             }
         }
@@ -577,7 +629,14 @@ mod tests {
     #[cfg(feature = "std")]
     #[test]
     fn disk_checkpoint_recovers_burns_and_seal_binding() {
-        let path = std::env::temp_dir().join(std::format!("policy-ledger-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let path = std::env::temp_dir().join(std::format!(
+            "policy-ledger-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let mut guards = trusted_dealer_setup_for_testing([3; 32], &[1, 2]);
         let mut disk = FsPolicyDurableLedger::create_new(&path, [8; 32], &guards[0]).unwrap();
         guards[0].record_approved_intent(4, [5; 32], [6; 32]);
@@ -585,7 +644,9 @@ mod tests {
         let generation = disk.generation();
         drop(disk);
         let mut restarted = trusted_dealer_setup_for_testing([3; 32], &[1, 2]);
-        let disk = FsPolicyDurableLedger::open_existing(&path, [8; 32], &mut restarted[0], generation).unwrap();
+        let disk =
+            FsPolicyDurableLedger::open_existing(&path, [8; 32], &mut restarted[0], generation)
+                .unwrap();
         assert!(restarted[0].is_nonce_burned(&[5; 32]));
         assert!(restarted[0].is_session_burned(&[6; 32]));
         drop(disk);

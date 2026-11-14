@@ -159,9 +159,14 @@ fn main() {
     let quorum = [20u16, 30, 50];
     let (mut intent, _) = request(&quorum).expect("the policy approves this transfer");
     let all_guards = trusted_dealer_setup_for_testing([0x99; 32], &[10, 20, 30, 40, 50]);
-    let signing_bytes = all_guards.iter().find(|g| g.party_id == 10).unwrap()
-        .authenticate_initiated_intent(&policy, &mut intent).expect("initiator authenticates intent");
-    let mut guards: Vec<_> = all_guards.into_iter()
+    let signing_bytes = all_guards
+        .iter()
+        .find(|g| g.party_id == 10)
+        .unwrap()
+        .authenticate_initiated_intent(&policy, &mut intent)
+        .expect("initiator authenticates intent");
+    let mut guards: Vec<_> = all_guards
+        .into_iter()
         .filter(|g| quorum.contains(&g.party_id))
         .collect();
     let (mut states, mut commits) = (Vec::new(), Vec::new());

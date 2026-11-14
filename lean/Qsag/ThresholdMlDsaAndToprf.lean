@@ -37,6 +37,7 @@ a verifier-supplied issuer context; how that context is itself authenticated, pr
 transcript equivalence, and QROM security are outside this module.
 -/
 
+public import Qsag.MlDsa44Parameters
 public import Qsag.Constructive
 public import Qsag.SimulationSpine
 public import Qsag.Goldilocks
@@ -68,13 +69,11 @@ def mldsaD : Nat := 13
 def mldsaZetaNat : Nat := 1753
 
 /-- `ML-DSA-44` (`FIPS 204` Category 2) parameter constants. -/
-def mldsa44Gamma1 : Nat := 131072       -- 2^17
 def mldsa44Gamma2 : Nat := 95232        -- (q - 1) / 88
 def mldsa44Alpha : Nat := 190464        -- 2 * gamma2 = (q - 1) / 44
 def mldsa44HighMod : Nat := 44          -- (q - 1) / alpha
 def mldsa44Tau : Nat := 39
 def mldsa44Eta : Nat := 2
-def mldsa44Beta : Nat := 78             -- tau * eta
 def mldsa44Omega : Nat := 80
 def mldsa44K : Nat := 4
 def mldsa44L : Nat := 4

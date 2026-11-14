@@ -2,15 +2,38 @@
 //! and RAII compute engine targeting discrete RDNA2/SPIR-V GPUs with `shaderInt64`.
 //!
 //! All `unsafe` FFI calls in `qsag-accel` are strictly isolated inside this single module.
+//!
+//! # Job data residue and the host wipe
+//!
+//! Every job writes its inputs to the host-mapped staging buffer, and its command buffer copies
+//! them to VRAM, computes, copies the result back to staging and zero-fills the VRAM it used.
+//! Inputs and outputs may be secret. Each `exec_*` entry point runs under `RawVulkanEngine::run_job`,
+//! which settles the staging buffer on every exit (success, `?` return, or unwind):
+//!
+//! * The host wipes staging only while the engine is `Ready`, meaning every submission it ever
+//!   made has been proven complete by its fence or by a `vkDeviceWaitIdle` that returned
+//!   `VK_SUCCESS`. The device reads and writes staging by DMA while a submission is live, so a
+//!   wipe issued earlier could run before the job's copy-back and leave the output behind.
+//! * A job that fails before `vkQueueSubmit` never reached the device and is wiped at once.
+//! * A job whose submit or fence wait fails without device loss leaves the engine
+//!   `InFlightQuarantined`. One `vkDeviceWaitIdle` is attempted on the way out; if it succeeds the
+//!   residue is wiped, otherwise the byte count is kept and the wipe happens at the next
+//!   successful idle (the next job's `ensure_ready`, or teardown). No job runs in between.
+//!
+//! Limit: after `VK_ERROR_DEVICE_LOST` nothing in Vulkan proves that the device has stopped
+//! touching the buffers, and the VRAM zero-fill is part of the lost command buffer. The engine
+//! then refuses every later job and does not wipe while it is live. Teardown wipes and frees only
+//! if `vkDeviceWaitIdle` returns `VK_SUCCESS`; otherwise it detaches every handle, and the
+//! staging mapping and the VRAM allocations keep the failed job's data until the process exits
+//! and the driver reclaims them. A host that sends secrets to this backend must treat a
+//! device-lost error as a reason to end the process.
 
 use core::ffi::{c_char, c_void};
 use core::mem::{MaybeUninit, size_of};
 use core::ptr::{null, null_mut};
 
 use crate::KernelSlot;
-use crate::goldilocks::{
-    gl_inv_or_zero, gl_neg, gl_reduce_u64, goldilocks_primitive_root,
-};
+use crate::goldilocks::{gl_inv_or_zero, gl_neg, gl_reduce_u64, goldilocks_primitive_root};
 use crate::spirv_kernels::spirv_kernel_words;
 use crate::vulkan::{VulkanDeviceInfo, VulkanError};
 
@@ -792,6 +815,19 @@ impl Default for GpuBuffer {
     }
 }
 
+/// Driver calls whose result code a test can replace (see `RawVulkanEngine::injected_rc`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FaultPoint {
+    /// `begin_cmd` fails before any command is recorded.
+    BeginCmd = 0,
+    /// `vkQueueSubmit` is not called; the injected code is reported instead.
+    QueueSubmit = 1,
+    /// The submission is real; the injected code is reported instead of waiting on its fence.
+    FenceWait = 2,
+    /// `vkDeviceWaitIdle` is not called; the injected code is reported instead.
+    DeviceWaitIdle = 3,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EngineExecState {
     Ready,
@@ -816,8 +852,13 @@ pub(crate) struct RawVulkanEngine {
     max_wg_x: u32,
     max_storage_range: u64,
     exec_state: EngineExecState,
+    /// Leading bytes of the staging mapping that may hold job data and have not been wiped.
+    /// Nonzero while a job runs, and afterwards only while idle could not be established.
+    staging_residue_bytes: u64,
     #[cfg(test)]
     fail_alloc_countdown: core::cell::Cell<Option<u32>>,
+    #[cfg(test)]
+    injected_rcs: core::cell::Cell<[Option<i32>; 4]>,
     dsl_1buf: VkDescriptorSetLayout,
     dsl_2buf: VkDescriptorSetLayout,
     dsl_3buf: VkDescriptorSetLayout,
@@ -1423,8 +1464,11 @@ impl RawVulkanEngine {
             max_wg_x: props.max_compute_work_group_count_x(),
             max_storage_range: props.max_storage_buffer_range() as u64,
             exec_state: EngineExecState::Ready,
+            staging_residue_bytes: 0,
             #[cfg(test)]
             fail_alloc_countdown: core::cell::Cell::new(None),
+            #[cfg(test)]
+            injected_rcs: core::cell::Cell::new([None; 4]),
             dsl_1buf: 0,
             dsl_2buf: 0,
             dsl_3buf: 0,
@@ -2131,16 +2175,20 @@ impl RawVulkanEngine {
     /// Verify that no prior submission remains potentially in flight before mutating staging
     /// memory, reallocating buffers, updating descriptors, or resetting the command pool.
     /// If a previous fence wait failed transiently, recovery is permitted ONLY after
-    /// `vkDeviceWaitIdle` succeeds (`VK_SUCCESS`).
+    /// `vkDeviceWaitIdle` succeeds (`VK_SUCCESS`); the failed job's staging residue is wiped
+    /// at that point, before anything else can use the buffer.
     unsafe fn ensure_ready(&mut self) -> Result<(), VulkanError> {
         const VK_ERROR_DEVICE_LOST: i32 = -4;
         match self.exec_state {
             EngineExecState::Ready => Ok(()),
             EngineExecState::DeviceLostQuarantined => Err(VulkanError::WorkspacePoisoned),
             EngineExecState::InFlightQuarantined => {
-                let rc = unsafe { (self.fns.device_wait_idle)(self.device) };
+                let rc = unsafe { self.device_wait_idle_rc() };
                 if rc == VK_SUCCESS {
                     self.exec_state = EngineExecState::Ready;
+                    unsafe {
+                        self.wipe_staging_residue();
+                    }
                     Ok(())
                 } else {
                     if rc == VK_ERROR_DEVICE_LOST {
@@ -2152,23 +2200,104 @@ impl RawVulkanEngine {
         }
     }
 
+    /// Test-only replacement of one driver result code; always `None` in a normal build.
+    #[inline]
+    fn injected_rc(&self, point: FaultPoint) -> Option<i32> {
+        #[cfg(test)]
+        {
+            let mut rcs = self.injected_rcs.get();
+            let rc = rcs[point as usize].take();
+            self.injected_rcs.set(rcs);
+            rc
+        }
+        #[cfg(not(test))]
+        {
+            let _ = point;
+            None
+        }
+    }
+
+    unsafe fn device_wait_idle_rc(&self) -> i32 {
+        match self.injected_rc(FaultPoint::DeviceWaitIdle) {
+            Some(rc) => rc,
+            None => unsafe { (self.fns.device_wait_idle)(self.device) },
+        }
+    }
+
     unsafe fn ensure_staging(&mut self, required: u64) -> Result<(), VulkanError> {
         unsafe {
             self.ensure_ready()?;
         }
-        if self.staging.capacity >= required && self.staging.buffer != 0 {
-            return Ok(());
-        }
-        let target = required
-            .checked_next_power_of_two()
-            .unwrap_or(required)
-            .max(MIN_BUFFER_ALLOC_BYTES);
-        let new_buf = unsafe { self.alloc_gpu_buffer(target, true)? };
-        let mut old = core::mem::replace(&mut self.staging, new_buf);
-        unsafe {
-            self.destroy_gpu_buffer(&mut old);
+        if self.staging.capacity < required || self.staging.buffer == 0 {
+            let target = required
+                .checked_next_power_of_two()
+                .unwrap_or(required)
+                .max(MIN_BUFFER_ALLOC_BYTES);
+            let new_buf = unsafe { self.alloc_gpu_buffer(target, true)? };
+            // `ensure_ready` returned `Ready`, so the displaced mapping holds no residue.
+            let mut old = core::mem::replace(&mut self.staging, new_buf);
+            unsafe {
+                self.destroy_gpu_buffer(&mut old);
+            }
         }
         Ok(())
+    }
+
+    /// Reserve the first `required` bytes of staging for the job being started and record them
+    /// as residue. `required` is the job's whole staging extent (inputs and read-back).
+    unsafe fn reserve_job_staging(&mut self, required: u64) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_staging(required)?;
+        }
+        self.staging_residue_bytes = self.staging_residue_bytes.max(required);
+        Ok(())
+    }
+
+    /// Zero the recorded staging residue. The caller has established `Ready`.
+    unsafe fn wipe_staging_residue(&mut self) {
+        let bytes = core::mem::take(&mut self.staging_residue_bytes);
+        if bytes != 0 {
+            unsafe {
+                self.scrub_staging(bytes);
+            }
+        }
+    }
+
+    /// Wipe what the finished or failed job left in staging, if and only if no submission can
+    /// still be live (module docs, "Job data residue and the host wipe").
+    unsafe fn settle_staging(&mut self) {
+        if self.staging_residue_bytes == 0 {
+            return;
+        }
+        if unsafe { self.ensure_ready() }.is_ok() {
+            unsafe {
+                self.wipe_staging_residue();
+            }
+        }
+    }
+
+    /// Run one job and settle staging on every way out of it, including an unwind.
+    fn run_job<T>(
+        &mut self,
+        job: impl FnOnce(&mut Self) -> Result<T, VulkanError>,
+    ) -> Result<T, VulkanError> {
+        struct SettleOnExit<'a>(&'a mut RawVulkanEngine);
+        impl SettleOnExit<'_> {
+            fn engine(&mut self) -> &mut RawVulkanEngine {
+                self.0
+            }
+        }
+        impl Drop for SettleOnExit<'_> {
+            fn drop(&mut self) {
+                unsafe {
+                    self.0.settle_staging();
+                }
+            }
+        }
+        let mut guard = SettleOnExit(self);
+        let res = job(guard.engine());
+        drop(guard);
+        res
     }
 
     fn plan_vram_growth(&self, cur: &GpuBuffer, required: u64) -> Result<Option<u64>, VulkanError> {
@@ -2321,6 +2450,12 @@ impl RawVulkanEngine {
     }
 
     unsafe fn begin_cmd(&self) -> Result<(), VulkanError> {
+        if let Some(code) = self.injected_rc(FaultPoint::BeginCmd) {
+            return Err(VulkanError::VkResult {
+                op: "vkResetCommandPool",
+                code,
+            });
+        }
         check_vk("vkResetCommandPool", unsafe {
             (self.fns.reset_command_pool)(self.device, self.cmd_pool, 0)
         })?;
@@ -2360,14 +2495,18 @@ impl RawVulkanEngine {
 
     /// Record zero fills over the VRAM ranges a job used, after its result was copied to
     /// staging. Inputs, intermediates, and outputs may be secret (shares, witness columns,
-    /// hash-chain states); none of them stays resident in device memory past the job.
+    /// hash-chain states); none of them stays resident in device memory past a job that ran.
+    /// The fills are commands of the job itself: a submission the device lost never reaches
+    /// them, and the host has no other way to clear `DEVICE_LOCAL` memory.
     /// Every `bytes` is a multiple of 8 and at most the buffer's capacity.
     unsafe fn cmd_scrub_vram(&self, ranges: &[(VkBuffer, u64)]) {
         unsafe {
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_SHADER_READ_BIT
+                    | VK_ACCESS_SHADER_WRITE_BIT
+                    | VK_ACCESS_TRANSFER_READ_BIT,
                 VK_ACCESS_TRANSFER_WRITE_BIT,
             );
             for &(buffer, bytes) in ranges {
@@ -2378,8 +2517,8 @@ impl RawVulkanEngine {
         }
     }
 
-    /// Zero the first `bytes` of the host-mapped staging buffer once a job's result has been
-    /// read back (or before the mapping is released).
+    /// Zero the first `bytes` of the host-mapped staging buffer. Callers reach this only through
+    /// `wipe_staging_residue` or teardown, both after device idle was established.
     unsafe fn scrub_staging(&mut self, bytes: u64) {
         if self.staging.mapped.is_null() {
             return;
@@ -2413,7 +2552,10 @@ impl RawVulkanEngine {
         // Mark submission in flight BEFORE calling `vkQueueSubmit`; restore `Ready` ONLY after
         // both `vkQueueSubmit` and `vkWaitForFences` return `VK_SUCCESS`.
         self.exec_state = EngineExecState::InFlightQuarantined;
-        let submit_rc = unsafe { (self.fns.queue_submit)(self.queue, 1, &submit, self.fence) };
+        let submit_rc = match self.injected_rc(FaultPoint::QueueSubmit) {
+            Some(rc) => rc,
+            None => unsafe { (self.fns.queue_submit)(self.queue, 1, &submit, self.fence) },
+        };
         if submit_rc != VK_SUCCESS {
             if submit_rc == VK_ERROR_DEVICE_LOST {
                 self.exec_state = EngineExecState::DeviceLostQuarantined;
@@ -2423,8 +2565,12 @@ impl RawVulkanEngine {
                 code: submit_rc,
             });
         }
-        let wait_rc =
-            unsafe { (self.fns.wait_for_fences)(self.device, 1, &self.fence, VK_TRUE, u64::MAX) };
+        let wait_rc = match self.injected_rc(FaultPoint::FenceWait) {
+            Some(rc) => rc,
+            None => unsafe {
+                (self.fns.wait_for_fences)(self.device, 1, &self.fence, VK_TRUE, u64::MAX)
+            },
+        };
         if wait_rc != VK_SUCCESS {
             if wait_rc == VK_ERROR_DEVICE_LOST {
                 self.exec_state = EngineExecState::DeviceLostQuarantined;
@@ -2500,7 +2646,7 @@ impl RawVulkanEngine {
         )?;
 
         unsafe {
-            self.ensure_staging(byte_len)?;
+            self.reserve_job_staging(byte_len)?;
             self.ensure_vram_buffers(byte_len, 0, 0)?;
 
             let flat_in = core::slice::from_raw_parts(states.as_ptr().cast::<u64>(), total_words);
@@ -2586,7 +2732,6 @@ impl RawVulkanEngine {
             let flat_out =
                 core::slice::from_raw_parts_mut(states.as_mut_ptr().cast::<u64>(), total_words);
             self.read_staging_u64s(0, flat_out);
-            self.scrub_staging(byte_len);
         }
         Ok(())
     }
@@ -2595,14 +2740,18 @@ impl RawVulkanEngine {
         &mut self,
         states: &mut [[u64; 25]],
     ) -> Result<(), VulkanError> {
-        unsafe { self.exec_inplace_states(KernelSlot::BatchKeccakF1600, states) }
+        self.run_job(|engine| unsafe {
+            engine.exec_inplace_states(KernelSlot::BatchKeccakF1600, states)
+        })
     }
 
     pub(crate) fn exec_batch_poseidon2(
         &mut self,
         states: &mut [[u64; 12]],
     ) -> Result<(), VulkanError> {
-        unsafe { self.exec_inplace_states(KernelSlot::BatchPoseidon2Perm12, states) }
+        self.run_job(|engine| unsafe {
+            engine.exec_inplace_states(KernelSlot::BatchPoseidon2Perm12, states)
+        })
     }
 
     unsafe fn dispatch_ntt_mode(&self, pl: VkPipelineLayout, total_wg: u32, mut pc: NttPushConsts) {
@@ -2631,6 +2780,15 @@ impl RawVulkanEngine {
         twiddles: &[u64],
         inverse: bool,
     ) -> Result<(), VulkanError> {
+        self.run_job(|engine| engine.job_goldilocks_ntt(buf, twiddles, inverse))
+    }
+
+    fn job_goldilocks_ntt(
+        &mut self,
+        buf: &mut [u64],
+        twiddles: &[u64],
+        inverse: bool,
+    ) -> Result<(), VulkanError> {
         unsafe {
             self.ensure_ready()?;
         }
@@ -2643,7 +2801,7 @@ impl RawVulkanEngine {
         let byte_len = (n as u64) * 8;
 
         unsafe {
-            self.ensure_staging(byte_len)?;
+            self.reserve_job_staging(byte_len)?;
             self.ensure_vram_buffers(byte_len, 0, 0)?;
             self.write_staging_u64s(0, buf);
 
@@ -2810,7 +2968,6 @@ impl RawVulkanEngine {
             );
             self.submit_and_wait()?;
             self.read_staging_u64s(0, buf);
-            self.scrub_staging(byte_len);
         }
         Ok(())
     }
@@ -2935,6 +3092,16 @@ impl RawVulkanEngine {
         shift: u64,
         out: &mut [[u64; 2]],
     ) -> Result<(), VulkanError> {
+        self.run_job(|engine| engine.job_coset_lde_ext2(evals, blowup, shift, out))
+    }
+
+    fn job_coset_lde_ext2(
+        &mut self,
+        evals: &[[u64; 2]],
+        blowup: usize,
+        shift: u64,
+        out: &mut [[u64; 2]],
+    ) -> Result<(), VulkanError> {
         unsafe {
             self.ensure_ready()?;
         }
@@ -2950,7 +3117,7 @@ impl RawVulkanEngine {
         let out_bytes = (m as u64) * 16;
 
         unsafe {
-            self.ensure_staging(out_bytes)?;
+            self.reserve_job_staging(out_bytes)?;
             self.ensure_vram_buffers(out_bytes, 0, 0)?;
 
             let flat_in = core::slice::from_raw_parts(evals.as_ptr().cast::<u64>(), n * 2);
@@ -3053,7 +3220,6 @@ impl RawVulkanEngine {
 
             let flat_out = core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u64>(), m * 2);
             self.read_staging_u64s(0, flat_out);
-            self.scrub_staging(out_bytes);
         }
         Ok(())
     }
@@ -3118,6 +3284,19 @@ impl RawVulkanEngine {
         start_parent_idx: u64,
         out_parents: &mut [[u64; 4]],
     ) -> Result<(), VulkanError> {
+        self.run_job(|engine| {
+            engine.job_merkle_layer(children, pk_seed, layer, start_parent_idx, out_parents)
+        })
+    }
+
+    fn job_merkle_layer(
+        &mut self,
+        children: &[[u64; 4]],
+        pk_seed: &[u64; 4],
+        layer: u32,
+        start_parent_idx: u64,
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
         unsafe {
             self.ensure_ready()?;
         }
@@ -3143,7 +3322,7 @@ impl RawVulkanEngine {
         let out_bytes = (num_parents as u64) * 32;
 
         unsafe {
-            self.ensure_staging(in_bytes)?;
+            self.reserve_job_staging(in_bytes)?;
             self.ensure_vram_buffers(in_bytes, out_bytes, 0)?;
 
             let flat_in =
@@ -3199,7 +3378,10 @@ impl RawVulkanEngine {
                 1,
                 &copy_out,
             );
-            self.cmd_scrub_vram(&[(self.vram_a.buffer, in_bytes), (self.vram_b.buffer, out_bytes)]);
+            self.cmd_scrub_vram(&[
+                (self.vram_a.buffer, in_bytes),
+                (self.vram_b.buffer, out_bytes),
+            ]);
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -3213,12 +3395,20 @@ impl RawVulkanEngine {
                 num_parents * 4,
             );
             self.read_staging_u64s(0, flat_out);
-            self.scrub_staging(in_bytes);
         }
         Ok(())
     }
 
     pub(crate) fn exec_merkle_full_tree(
+        &mut self,
+        leaves: &[[u64; 4]],
+        pk_seed: &[u64; 4],
+        base_layer: u32,
+    ) -> Result<[u64; 4], VulkanError> {
+        self.run_job(|engine| engine.job_merkle_full_tree(leaves, pk_seed, base_layer))
+    }
+
+    fn job_merkle_full_tree(
         &mut self,
         leaves: &[[u64; 4]],
         pk_seed: &[u64; 4],
@@ -3245,7 +3435,7 @@ impl RawVulkanEngine {
         let half_bytes = leaf_bytes / 2;
 
         unsafe {
-            self.ensure_staging(leaf_bytes)?;
+            self.reserve_job_staging(leaf_bytes)?;
             self.ensure_vram_buffers(leaf_bytes, half_bytes, 0)?;
 
             let flat_in =
@@ -3317,7 +3507,10 @@ impl RawVulkanEngine {
                 VK_ACCESS_TRANSFER_READ_BIT,
             );
             (self.fns.cmd_copy_buffer)(self.cmd_buf, root_buf, self.staging.buffer, 1, &copy_root);
-            self.cmd_scrub_vram(&[(self.vram_a.buffer, leaf_bytes), (self.vram_b.buffer, half_bytes)]);
+            self.cmd_scrub_vram(&[
+                (self.vram_a.buffer, leaf_bytes),
+                (self.vram_b.buffer, half_bytes),
+            ]);
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -3328,12 +3521,19 @@ impl RawVulkanEngine {
 
             let mut root = [0u64; 4];
             self.read_staging_u64s(0, &mut root);
-            self.scrub_staging(leaf_bytes);
             Ok(root)
         }
     }
 
     pub(crate) fn exec_bdoz_gf2_128_dot(
+        &mut self,
+        shares: &[(u128, u128)],
+        weights: &[(u128, u128)],
+    ) -> Result<(u128, u128), VulkanError> {
+        self.run_job(|engine| engine.job_bdoz_gf2_128_dot(shares, weights))
+    }
+
+    fn job_bdoz_gf2_128_dot(
         &mut self,
         shares: &[(u128, u128)],
         weights: &[(u128, u128)],
@@ -3367,7 +3567,7 @@ impl RawVulkanEngine {
         let partials_bytes = (num_groups as u64) * 32;
 
         unsafe {
-            self.ensure_staging(staging_bytes)?;
+            self.reserve_job_staging(staging_bytes)?;
             self.ensure_vram_buffers(vec_bytes, vec_bytes, partials_bytes)?;
 
             // Pack `(s0, s1)` and `(w0, w1)` deterministically as `[lo64, hi64, lo64, hi64]`.
@@ -3508,7 +3708,6 @@ impl RawVulkanEngine {
 
             let mut res = [0u64; 4];
             self.read_staging_u64s(0, &mut res);
-            self.scrub_staging(staging_bytes);
             let lane0 = (res[0] as u128) | ((res[1] as u128) << 64);
             let lane1 = (res[2] as u128) | ((res[3] as u128) << 64);
             Ok((lane0, lane1))
@@ -3518,17 +3717,21 @@ impl RawVulkanEngine {
     unsafe fn teardown_device_only(&mut self) {
         if !self.device.is_null() {
             unsafe {
-                let idle_rc = (self.fns.device_wait_idle)(self.device);
+                let idle_rc = self.device_wait_idle_rc();
                 if idle_rc != VK_SUCCESS {
                     // `vkDeviceWaitIdle` failed to establish device idle; detach handles rather
                     // than freeing buffers/command pools that may still be accessed by GPU work.
+                    // For the same reason staging is not wiped: the device may still be reading
+                    // or writing it. Its contents stay mapped until the process exits (module
+                    // docs, "Limit").
                     self.device = null_mut();
                     self.instance = null_mut();
                     self.lib_handle = null_mut();
                     return;
                 }
-                // A job that failed before readback leaves its input in the mapping.
+                // Idle is established. Clear the whole mapping, not just recorded residue.
                 self.scrub_staging(self.staging.capacity);
+                self.staging_residue_bytes = 0;
                 let mut st = core::mem::take(&mut self.staging);
                 let mut va = core::mem::take(&mut self.vram_a);
                 let mut vb = core::mem::take(&mut self.vram_b);
@@ -3709,6 +3912,183 @@ mod tests {
         assert_eq!(engine.vram_a.capacity, cap_before);
 
         // Restore `Ready` so test teardown frees the live test device cleanly.
+        engine.exec_state = EngineExecState::Ready;
+    }
+
+    fn live_engine() -> Option<RawVulkanEngine> {
+        match RawVulkanEngine::try_new() {
+            Ok((engine, _info)) => Some(engine),
+            Err(VulkanError::LibraryLoadFailed | VulkanError::NoDiscreteGpuFound) => None,
+            Err(other) => panic!("unexpected engine init error: {other}"),
+        }
+    }
+
+    fn staging_words(engine: &RawVulkanEngine, words: usize) -> std::vec::Vec<u64> {
+        let mut seen = std::vec![u64::MAX; words];
+        unsafe {
+            engine.read_staging_u64s(0, &mut seen);
+        }
+        seen
+    }
+
+    fn inject(engine: &RawVulkanEngine, point: FaultPoint, rc: i32) {
+        let mut rcs = engine.injected_rcs.get();
+        rcs[point as usize] = Some(rc);
+        engine.injected_rcs.set(rcs);
+    }
+
+    const SECRET_WORD: u64 = 0x5EC2_E75E_C2E7_5EC2;
+    const VK_ERROR_OUT_OF_HOST_MEMORY: i32 = -1;
+    const VK_ERROR_DEVICE_LOST: i32 = -4;
+
+    #[test]
+    fn failed_job_wipes_staging_once_no_submission_is_live() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        let words = 70 * 25;
+
+        // Not submitted at all, submit refused, and a real submission whose fence wait is
+        // reported as failed while the job is still running on the device.
+        for point in [
+            FaultPoint::BeginCmd,
+            FaultPoint::QueueSubmit,
+            FaultPoint::FenceWait,
+        ] {
+            let input = [[SECRET_WORD; 25]; 70];
+            let mut states = input;
+            inject(&engine, point, VK_ERROR_OUT_OF_HOST_MEMORY);
+            let err = engine.exec_batch_keccak(&mut states);
+            assert!(
+                matches!(
+                    err,
+                    Err(VulkanError::VkResult {
+                        code: VK_ERROR_OUT_OF_HOST_MEMORY,
+                        ..
+                    })
+                ),
+                "{point:?}: {err:?}"
+            );
+            assert_eq!(states, input, "{point:?}: failed job wrote caller memory");
+            assert_eq!(engine.exec_state, EngineExecState::Ready, "{point:?}");
+            assert_eq!(engine.staging_residue_bytes, 0, "{point:?}");
+            // For `FenceWait` the job's copy-back lands in staging after the call returned
+            // from the (skipped) wait; a wipe that did not wait for idle would lose to it.
+            assert!(
+                staging_words(&engine, words).iter().all(|&w| w == 0),
+                "{point:?}: staging keeps the failed job's data"
+            );
+
+            let mut gpu = [[0x1234_5678_9ABC_DEF0u64; 25]; 4];
+            let mut cpu = gpu;
+            engine
+                .exec_batch_keccak(&mut gpu)
+                .expect("job after failure");
+            CpuReferenceBackend.batch_keccak_f1600(&mut cpu);
+            assert_eq!(gpu, cpu, "{point:?}");
+        }
+
+        // The secret-bearing BDOZ slot packs staging by hand; same guarantee.
+        let shares = [(SECRET_WORD as u128, !(SECRET_WORD as u128)); 300];
+        let weights = [(3u128, 5u128); 300];
+        inject(
+            &engine,
+            FaultPoint::QueueSubmit,
+            VK_ERROR_OUT_OF_HOST_MEMORY,
+        );
+        assert!(engine.exec_bdoz_gf2_128_dot(&shares, &weights).is_err());
+        assert_eq!(engine.staging_residue_bytes, 0);
+        assert!(
+            staging_words(&engine, 300 * 8).iter().all(|&w| w == 0),
+            "staging keeps BDOZ shares after a failed job"
+        );
+        assert_eq!(
+            engine
+                .exec_bdoz_gf2_128_dot(&shares, &weights)
+                .expect("bdoz"),
+            CpuReferenceBackend
+                .bdoz_gf2_128_batch_dot(&shares, &weights)
+                .expect("cpu bdoz")
+        );
+    }
+
+    #[test]
+    fn wipe_is_deferred_while_idle_is_unproven_and_the_engine_fails_closed() {
+        let Some(mut engine) = live_engine() else {
+            return;
+        };
+        let words = 70 * 25;
+        let byte_len = (words * 8) as u64;
+        let input = [[SECRET_WORD; 25]; 70];
+        let flat_input = std::vec![SECRET_WORD; words];
+
+        // 1. Submit fails and `vkDeviceWaitIdle` fails too: nothing proves the device is done,
+        //    so the host must not touch staging yet.
+        let mut states = input;
+        inject(
+            &engine,
+            FaultPoint::QueueSubmit,
+            VK_ERROR_OUT_OF_HOST_MEMORY,
+        );
+        inject(
+            &engine,
+            FaultPoint::DeviceWaitIdle,
+            VK_ERROR_OUT_OF_HOST_MEMORY,
+        );
+        assert!(engine.exec_batch_keccak(&mut states).is_err());
+        assert_eq!(engine.exec_state, EngineExecState::InFlightQuarantined);
+        assert_eq!(engine.staging_residue_bytes, byte_len);
+        assert_eq!(staging_words(&engine, words), flat_input);
+
+        //    The next job first establishes idle, wipes the whole old extent, then runs in a
+        //    prefix of it.
+        let mut gpu = [[0x0F0F_F0F0_1234_4321u64; 25]; 4];
+        let mut cpu = gpu;
+        engine.exec_batch_keccak(&mut gpu).expect("job after idle");
+        CpuReferenceBackend.batch_keccak_f1600(&mut cpu);
+        assert_eq!(gpu, cpu);
+        assert_eq!(engine.staging_residue_bytes, 0);
+        assert!(staging_words(&engine, words).iter().all(|&w| w == 0));
+
+        // 2. Device lost: no wipe, and every later job is refused before it writes anything.
+        let mut states = input;
+        inject(&engine, FaultPoint::QueueSubmit, VK_ERROR_DEVICE_LOST);
+        assert!(matches!(
+            engine.exec_batch_keccak(&mut states),
+            Err(VulkanError::VkResult {
+                op: "vkQueueSubmit",
+                code: VK_ERROR_DEVICE_LOST
+            })
+        ));
+        assert_eq!(engine.exec_state, EngineExecState::DeviceLostQuarantined);
+        assert_eq!(engine.staging_residue_bytes, byte_len);
+        assert_eq!(staging_words(&engine, words), flat_input);
+        let mut other = [[7u64; 25]; 2];
+        assert!(matches!(
+            engine.exec_batch_keccak(&mut other),
+            Err(VulkanError::WorkspacePoisoned)
+        ));
+        assert!(matches!(
+            engine.exec_bdoz_gf2_128_dot(&[(1, 2)], &[(3, 4)]),
+            Err(VulkanError::WorkspacePoisoned)
+        ));
+        assert_eq!(other, [[7u64; 25]; 2]);
+        assert_eq!(staging_words(&engine, words), flat_input);
+
+        // 3. Teardown that cannot establish idle detaches without wiping or freeing.
+        let (device, instance, lib_handle) = (engine.device, engine.instance, engine.lib_handle);
+        inject(&engine, FaultPoint::DeviceWaitIdle, VK_ERROR_DEVICE_LOST);
+        unsafe {
+            engine.teardown_device_only();
+        }
+        assert!(engine.device.is_null());
+        assert_ne!(engine.staging.buffer, 0);
+        assert_eq!(staging_words(&engine, words), flat_input);
+
+        // Hand the (really idle) device back so dropping the engine wipes and frees it.
+        engine.device = device;
+        engine.instance = instance;
+        engine.lib_handle = lib_handle;
         engine.exec_state = EngineExecState::Ready;
     }
 }

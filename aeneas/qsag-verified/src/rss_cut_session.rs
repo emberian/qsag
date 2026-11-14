@@ -120,11 +120,14 @@ const fn poison_rss_cut_session(
 
 impl RssCutGateSession {
     /// Read-only state observation.
-    pub const fn session_id(&self) -> [u8; 32] { self.session_id }
+    pub const fn session_id(&self) -> [u8; 32] {
+        self.session_id
+    }
 
     /// Read-only state observation.
-    pub const fn mask_commitment(&self) -> [u8; 32] { self.mask_commitment }
-
+    pub const fn mask_commitment(&self) -> [u8; 32] {
+        self.mask_commitment
+    }
 
     /// Initialize a fresh Round-1 session bound to `session_id` and `mask_commitment`.
     #[inline]

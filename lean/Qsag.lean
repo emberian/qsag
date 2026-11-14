@@ -21,6 +21,8 @@ public import Qsag.CompiledRlibFixtures
 public import Qsag.ConcreteSecurityBudget
 public import Qsag.ConstantTimeIsa
 public import Qsag.Constructive
+public import Qsag.Digest256
+public import Qsag.MlDsa44Parameters
 public import Qsag.CustodySuiteFull
 public import Qsag.ElfBinaryVerify
 public import Qsag.ElfFixtureSlices
@@ -42,6 +44,8 @@ public import Qsag.LatticePreprocessingFull
 public import Qsag.MaliciousSecurity
 public import Qsag.McRefine
 public import Qsag.MirSpecBridge
+public import Qsag.MirSpecBridgeCore
+public import Qsag.MirSpecBridgeWitnesses
 public import Qsag.MultiRoundFsQrom
 public import Qsag.Poseidon2
 public import Qsag.Poseidon2AlgebraicAndRecursiveHem
@@ -59,3 +63,9 @@ public import Qsag.ThresholdApproval
 public import Qsag.ThresholdMlDsaAndToprf
 public import Qsag.ThresholdMpc
 public import Qsag.UcGames
+
+public import Qsag.CorduroyAndHemAirCompleteness
+
+public import Qsag.ElfFunctionalEquiv
+
+public import Qsag.Tactic.AssuranceKit
