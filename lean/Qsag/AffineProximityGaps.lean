@@ -808,3 +808,805 @@ private theorem indexOf?_of_getElem? {α : Type} [DecidableEq α] :
     simp [indexOf?, hne, indexOf?_of_getElem? hnd h]
 
 /-- Adversarial received-word pair `(f, g)` for `[CWYZ26]` Proposition 6.1 (`prop:scfloor`). -/
+def scalarFloorWords
+    {F : Type} [LawfulField F] [DecidableEq F]
+    (D gammas : List F) (A s : Nat) : (F → F) × (F → F) :=
+  let cLen := A - s - 1
+  let C := D.take cLen
+  let gFn := fun z => RoundPoly.evalCoeffs (vanishingPoly C) z
+  let fFn := fun z =>
+    match indexOf? z D with
+    | none => CommRingOps.zero
+    | some idx =>
+      if idx < cLen then CommRingOps.zero
+      else
+        let blk := (idx - cLen) / (s + 1)
+        if blk < gammas.length ∧ cLen + (blk + 1) * (s + 1) ≤ D.length then
+          CommRingOps.neg (CommRingOps.mul (gammas.getD blk CommRingOps.zero) (gFn z))
+        else
+          CommRingOps.zero
+  (fFn, gFn)
+
+/-- **`#tooth` Proposition 6.1 (`tooth_scalar_combiner_linear_n_over_q_floor`)**:
+    For ANY degree `d`, loss `s`, threshold `A` (`d + s + 1 < A`, `A ≤ D.length`), and ANY list
+    `gammas` of `1 + (D.length - A) / (s + 1)` distinct non-zero challenges in `S`:
+    every `γ ∈ gammas` makes `f + γ g` vanish on **at least `A` points of `D`** (`P = 0`), yet
+    **NO polynomial `G_poly` of degree `≤ d`** agrees with `g` on `≥ A - s` of those points —
+    proving scalar combiners incur `≥ (1 + ⌊(n - A)/(s + 1)⌋) / |S| = Ω(n/q)` error even for `s ≥ 1`! -/
+theorem tooth_scalar_combiner_linear_n_over_q_floor
+    {F : Type} [LawfulField F] [DecidableEq F]
+    (D gammas : List F) (d s A : Nat)
+    (hD : D.Nodup)
+    (hGammas : gammas.Nodup)
+    (hGammasNz : ∀ γ ∈ gammas, γ ≠ CommRingOps.zero)
+    (hA_lo : d + s + 1 < A)
+    (hA_hi : A ≤ D.length)
+    (hGammasLen : gammas.length = 1 + (D.length - A) / (s + 1)) :
+    let (f, g) := scalarFloorWords D gammas A s
+    ∀ r : Fin gammas.length,
+      let γ := gammas[r]
+      let S_γ := D.filter (fun z =>
+        decide (CommRingOps.add (f z) (CommRingOps.mul γ (g z)) = CommRingOps.zero))
+      A ≤ S_γ.length ∧
+      ∀ G_poly : List F, G_poly.length ≤ d + 1 →
+        (S_γ.filter (fun z => decide (RoundPoly.evalCoeffs G_poly z = g z))).length < A - s := by
+  dsimp only
+  intro r
+  let cLen := A - s - 1
+  let C := D.take cLen
+  let blkStart := cLen + r.1 * (s + 1)
+  let T := (D.drop blkStart).take (s + 1)
+  let fg := scalarFloorWords D gammas A s
+  have hBlockFit : cLen + (r.1 + 1) * (s + 1) ≤ D.length := by
+    have hrLt : r.1 < 1 + (D.length - A) / (s + 1) := by omega
+    have hrLe : r.1 ≤ (D.length - A) / (s + 1) := by omega
+    have hmul := Nat.mul_le_mul_right (s + 1) hrLe
+    have hdiv := Nat.div_mul_le_self (D.length - A) (s + 1)
+    omega
+  have hSubCT : ∀ z ∈ C ++ T, z ∈ D.filter (fun z =>
+      decide (CommRingOps.add (fg.1 z) (CommRingOps.mul gammas[r] (fg.2 z)) =
+              CommRingOps.zero)) := by
+    intro z hz
+    rw [List.mem_append] at hz
+    rcases hz with hzC | hzT
+    · have hzD : z ∈ D := List.mem_of_mem_take hzC
+      rw [List.mem_filter]
+      refine ⟨hzD, decide_eq_true ?_⟩
+      -- On `C`, `g z = 0` and `idx < cLen` so `f z = 0`:
+      rcases List.getElem?_of_mem hzC with ⟨i, hi⟩
+      have hiLt : i < cLen := by
+        have hlt := List.lt_length_of_getElem? hi
+        rw [List.length_take] at hlt
+        omega
+      have hiD : D[i]? = some z := by
+        rw [List.getElem?_take_of_lt hiLt] at hi
+        exact hi
+      have hidx := indexOf?_of_getElem? hD hiD
+      have hg0 : fg.2 z = CommRingOps.zero := eval_vanishingPoly_eq_zero_of_mem hzC
+      have hf0 : fg.1 z = CommRingOps.zero := by
+        dsimp [fg, scalarFloorWords]
+        rw [hidx]
+        simp [cLen, hiLt]
+      rw [hf0, hg0, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    · -- On `T`, `idx = blkStart + j` so `blk = r.1` and `f z = -gammas[r] * g z`:
+      rcases List.getElem?_of_mem hzT with ⟨j, hj⟩
+      have hjLt : j < s + 1 := by
+        have hlt := List.lt_length_of_getElem? hj
+        rw [List.length_take] at hlt
+        omega
+      rw [List.getElem?_take_of_lt hjLt, List.getElem?_drop] at hj
+      have hzD : z ∈ D := List.mem_of_getElem? hj
+      have hidx := indexOf?_of_getElem? hD hj
+      have hgeC : ¬ (blkStart + j < cLen) := by dsimp [blkStart]; omega
+      have hblkEq : (blkStart + j - cLen) / (s + 1) = r.1 := by
+        have h1 : blkStart + j - cLen = j + r.1 * (s + 1) := by dsimp [blkStart]; omega
+        rw [h1, Nat.add_mul_div_right _ _ (by omega), Nat.div_eq_of_lt hjLt, Nat.zero_add]
+      have hgetGamma : gammas.getD r.1 CommRingOps.zero = gammas[r] := by
+        simp [List.getD, r.2]
+      have hfVal : fg.1 z = CommRingOps.neg (CommRingOps.mul gammas[r] (fg.2 z)) := by
+        dsimp [fg, scalarFloorWords]
+        rw [hidx]
+        simp only [cLen, hgeC, ↓reduceIte, hblkEq, r.2, hBlockFit, and_self, hgetGamma]
+      rw [List.mem_filter]
+      refine ⟨hzD, decide_eq_true ?_⟩
+      rw [hfVal, LawfulCommRing.add_left_neg]
+  have hndCT : (C ++ T).Nodup := by
+    -- `C ++ T` is a sublist of `D` since `C = D.take cLen` and `T` is a slice of `D.drop cLen`:
+    have hSubD : List.Sublist (C ++ T) (D.take cLen ++ D.drop cLen) := by
+      apply List.Sublist.append List.Sublist.refl
+      have h1 : T = ((D.drop cLen).drop (r.1 * (s + 1))).take (s + 1) := by
+        dsimp [T, blkStart]
+        rw [List.drop_drop, Nat.add_comm cLen]
+      rw [h1]
+      exact List.Sublist.trans (List.take_sublist _ _) (List.drop_sublist _ _)
+    rw [List.take_append_drop] at hSubD
+    exact hSubD.nodup hD
+  have hLenCT : (C ++ T).length = A := by
+    rw [List.length_append, List.length_take, List.length_take, List.length_drop]
+    dsimp [cLen, blkStart]
+    omega
+  constructor
+  · have hle := nodup_length_le_of_subset hndCT hSubCT
+    omega
+  · intro G_poly hGLen
+    let S_γ := D.filter (fun z =>
+      decide (CommRingOps.add (fg.1 z) (CommRingOps.mul gammas[r] (fg.2 z)) = CommRingOps.zero))
+    let diff := RoundPoly.subCoeffs (vanishingPoly C) G_poly
+    have hpLen : (vanishingPoly C).length = cLen + 1 := by
+      rw [vanishingPoly_length, List.length_take]
+      dsimp [cLen]; omega
+    have hGLtP : G_poly.length < (vanishingPoly C).length := by rw [hpLen]; dsimp [cLen]; omega
+    have hDiffLen : diff.length = cLen + 1 := by
+      dsimp [diff]
+      rw [RoundPoly.subCoeffs_length, hpLen]
+      omega
+    have hVanLast : (vanishingPoly C).getD cLen CommRingOps.zero = CommRingOps.one := by
+      clear hSubCT hndCT hLenCT hGLtP hDiffLen diff S_γ fg T blkStart
+      induction C generalizing cLen with
+      | nil => simp at hpLen; subst hpLen; rfl
+      | cons c cs ih =>
+        have hcsLen : (vanishingPoly cs).length = cs.length + 1 := vanishingPoly_length cs
+        have h1 := ih cs.length hcsLen
+        have hcEq : cLen = cs.length + 1 := by simp [vanishingPoly_length] at hpLen; omega
+        subst hcEq
+        have hmapLt : ((vanishingPoly cs).map (CommRingOps.mul c)).length <
+            (CommRingOps.zero :: vanishingPoly cs).length := by simp [hcsLen]
+        have h0Last : (CommRingOps.zero :: vanishingPoly cs).getD (cs.length + 1) CommRingOps.zero =
+            CommRingOps.one := by simpa using h1
+        simpa [vanishingPoly, hcsLen] using
+          last_subCoeffs_vanishingPoly (CommRingOps.zero :: vanishingPoly cs)
+            ((vanishingPoly cs).map (CommRingOps.mul c)) (by simp) h0Last hmapLt
+    have hDiffLast : diff.getD cLen CommRingOps.zero = CommRingOps.one := by
+      have h := last_subCoeffs_vanishingPoly (vanishingPoly C) G_poly
+        (by rw [hpLen]; omega) (by rwa [hpLen, Nat.add_sub_cancel]) hGLtP
+      rwa [hpLen, Nat.add_sub_cancel] at h
+    rcases exists_nonroot_of_monic_len cLen diff D hDiffLen hDiffLast hD (by dsimp [cLen]; omega)
+      with ⟨x₀, _, hx₀Ne⟩
+    have hndS : S_γ.Nodup := List.Pairwise.filter _ hD
+    have hRoots := @RoundPoly.roots_nodup_length_le F _ _ (LawfulField.toNoZeroDivisors F)
+      cLen diff S_γ hndS (by omega) ⟨x₀, hx₀Ne⟩
+    have hSubAgree := filter_sub_length_le
+      (fun z => decide (RoundPoly.evalCoeffs G_poly z = fg.2 z))
+      (fun z => decide (RoundPoly.evalCoeffs diff z = CommRingOps.zero))
+      (fun z hz => by
+        have hEq : RoundPoly.evalCoeffs G_poly z = fg.2 z := of_decide_eq_true hz
+        dsimp [diff, fg, scalarFloorWords] at hEq ⊢
+        rw [RoundPoly.evalCoeffs_sub, hEq, LawfulCommRing.sub_self]
+        exact decide_eq_true rfl)
+      S_γ
+    have hLeC : (S_γ.filter (fun z => decide (RoundPoly.evalCoeffs G_poly z = fg.2 z))).length ≤ cLen :=
+      Nat.le_trans hSubAgree hRoots
+    dsimp [cLen] at hLeC
+    omega
+
+/-- Adversarial received-word pair `(f = 0, g = 1_{D \ C})` for `[CWYZ26]` Proposition 6.2 (`s = 0`). -/
+def zeroLossAffineWords
+    {F : Type} [CommRingOps F] [DecidableEq F]
+    (D : List F) (A : Nat) : (F → F) × (F → F) :=
+  let C := D.take (A - 1)
+  (fun _ => CommRingOps.zero, fun z => if z ∈ C then CommRingOps.zero else CommRingOps.one)
+
+/-- **`#tooth` Proposition 6.2 (`tooth_affine_combiner_zero_loss_linear_floor`)**:
+    When **zero** agreement loss ($s = 0$) is demanded, affine combiners revert to $\Omega(n / q)$:
+    for ANY `d + 1 < A ≤ D.length` and ANY list `S_nz` of distinct non-zero challenges `β`:
+    1. All `(D.length - A + 1) * S_nz.length` challenge pairs `(α, β) = (-β z₀, β)` (`z₀ ∈ D.drop (A - 1)`,
+       `β ∈ S_nz`) are **pairwise distinct** (`Nodup`),
+    2. Every such pair makes `f(z) + (α + β z) g(z)` vanish on **at least `A` points** of `D` (`P = 0`),
+    3. **NO polynomial `G_poly` of degree `≤ d - 1`** agrees with `g` on all `A` points (`s = 0` FAILS!),
+    4. Yet `(F = 0, G = 0)` agrees on `A - 1` points (**`s = 1` SUCCEEDS**), proving $s = 1$ is necessary! -/
+theorem tooth_affine_combiner_zero_loss_linear_floor
+    {F : Type} [LawfulField F] [DecidableEq F]
+    (D S_nz : List F) (d A : Nat)
+    (hD : D.Nodup)
+    (hSnz : S_nz.Nodup)
+    (hSnzNe : ∀ β ∈ S_nz, β ≠ CommRingOps.zero)
+    (hA_lo : d + 1 < A)
+    (hA_hi : A ≤ D.length) :
+    let (f, g) := zeroLossAffineWords D A
+    let restD := D.drop (A - 1)
+    let badPairs := restD.flatMap (fun z₀ => S_nz.map (fun β => (CommRingOps.neg (CommRingOps.mul β z₀), β)))
+    badPairs.length = (D.length - A + 1) * S_nz.length ∧
+    badPairs.Nodup ∧
+    ∀ p ∈ badPairs,
+      let S_p := D.filter (fun z =>
+        decide (CommRingOps.add (f z)
+          (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (g z)) = CommRingOps.zero))
+      A ≤ S_p.length ∧
+      (∀ G_poly : List F, G_poly.length ≤ d →
+        ∃ z ∈ S_p, RoundPoly.evalCoeffs G_poly z ≠ g z) ∧
+      (S_p.filter (fun z => !(decide (CommRingOps.zero = f z) && decide (CommRingOps.zero = g z)))).length ≤ 1 := by
+  dsimp only
+  let C := D.take (A - 1)
+  let restD := D.drop (A - 1)
+  let fg := zeroLossAffineWords D A
+  let badPairs := restD.flatMap (fun z₀ => S_nz.map (fun β => (CommRingOps.neg (CommRingOps.mul β z₀), β)))
+  have hLenRest : restD.length = D.length - A + 1 := by
+    dsimp [restD]; rw [List.length_drop]; omega
+  have hBadLen : badPairs.length = (D.length - A + 1) * S_nz.length := by
+    have aux : ∀ (zs : List F),
+        (zs.flatMap (fun z₀ => S_nz.map (fun β => (CommRingOps.neg (CommRingOps.mul β z₀), β)))).length =
+        zs.length * S_nz.length := by
+      intro zs
+      induction zs with
+      | nil => simp
+      | cons _ tl ih =>
+        simp only [List.flatMap_cons, List.length_append, List.length_map, List.length_cons, ih]
+        rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
+    rw [aux restD, hLenRest]
+  have hndRest : restD.Nodup := (List.drop_sublist (A - 1) D).nodup hD
+  have hBadNodup : badPairs.Nodup := by
+    have aux : ∀ {zs : List F}, zs.Nodup →
+        (zs.flatMap (fun z₀ => S_nz.map (fun β => (CommRingOps.neg (CommRingOps.mul β z₀), β)))).Nodup
+      | [], _ => .nil
+      | z₀ :: zs, .cons hnot hnd => by
+        simp only [List.flatMap_cons]
+        rw [List.nodup_append]
+        refine ⟨?_, aux hnd, ?_⟩
+        · have mnd : ∀ {bs : List F}, bs.Nodup →
+              (bs.map (fun β => (CommRingOps.neg (CommRingOps.mul β z₀), β))).Nodup
+            | [], _ => .nil
+            | b :: bs, .cons hnb hndb => by
+              simp only [List.map]
+              refine .cons ?_ (mnd hndb)
+              intro q hq heq
+              rw [List.mem_map] at hq
+              rcases hq with ⟨b', hb', rfl⟩
+              cases heq
+              exact hnb b' hb' rfl
+          exact mnd hSnz
+        · intro p₁ hp₁ p₂ hp₂ heq
+          subst heq
+          rw [List.mem_map] at hp₁
+          rw [List.mem_flatMap] at hp₂
+          rcases hp₁ with ⟨β₁, hβ₁Mem, rfl⟩
+          rcases hp₂ with ⟨z₁, hz₁Mem, hp₂'⟩
+          rw [List.mem_map] at hp₂'
+          rcases hp₂' with ⟨β₂, _, heq'⟩
+          cases heq'
+          have hβNe := hSnzNe β₁ hβ₁Mem
+          have hmulEq : CommRingOps.mul β₁ z₁ = CommRingOps.mul β₁ z₀ := by
+            have hn := congrArg CommRingOps.neg (Prod.mk.inj heq').1
+            simpa [LawfulCommRing.neg_neg] using hn
+          have hzEq : z₁ = z₀ := by
+            have hm := congrArg (CommRingOps.mul (LawfulField.inv β₁)) hmulEq
+            simpa [← LawfulCommRing.mul_assoc, LawfulField.inv_mul_cancel hβNe,
+                   LawfulCommRing.one_mul] using hm
+          exact hnot z₁ hz₁Mem hzEq.symm
+    exact aux hndRest
+  refine ⟨hBadLen, hBadNodup, ?_⟩
+  intro p hp
+  rw [List.mem_flatMap] at hp
+  rcases hp with ⟨z₀, hz₀Rest, hpMap⟩
+  rw [List.mem_map] at hpMap
+  rcases hpMap with ⟨β, hβMem, rfl⟩
+  have hβNe := hSnzNe β hβMem
+  -- Show `S_p = C ++ [z₀]`!
+  have hDisjCRest : ∀ x ∈ C, x ∉ restD := by
+    have hApp : C ++ restD = D := List.take_append_drop (A - 1) D
+    have hndApp : (C ++ restD).Nodup := hApp ▸ hD
+    rw [List.nodup_append] at hndApp
+    intro x hxC hxR
+    exact hndApp.2.2 x hxC x hxR rfl
+  have hz₀NotC : z₀ ∉ C := fun hC => hDisjCRest z₀ hC hz₀Rest
+  let predP := fun z =>
+    decide (CommRingOps.add (fg.1 z)
+      (CommRingOps.mul
+        (CommRingOps.add (CommRingOps.neg (CommRingOps.mul β z₀)) (CommRingOps.mul β z))
+        (fg.2 z)) = CommRingOps.zero)
+  have hFiltC : C.filter predP = C := by
+    have hall : ∀ z ∈ C, predP z = true := by
+      intro z hzC
+      dsimp [predP, fg, zeroLossAffineWords]
+      simp [C, hzC, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    induction C with
+    | nil => rfl
+    | cons c cs ih =>
+      have hc := hall c (.head _)
+      simp only [List.filter, hc, ↓reduceIte]
+      exact congrArg (c :: ·) (ih (fun y hy => hall y (.tail _ hy))
+        (fun x hx => hDisjCRest x (.tail _ hx)) (fun h => hz₀NotC (.tail _ h)))
+  have hFiltRest : restD.filter predP = [z₀] := by
+    have hiff : ∀ z ∈ restD, predP z = true ↔ z = z₀ := by
+      intro z hzR
+      have hzNotC : z ∉ C := fun hC => hDisjCRest z hC hzR
+      dsimp [predP, fg, zeroLossAffineWords]
+      simp only [C, hzNotC, ↓reduceIte, LawfulCommRing.zero_add, LawfulCommRing.mul_one,
+                 decide_eq_true_eq]
+      rw [LawfulCommRing.add_comm, ← LawfulCommRing.sub_eq_add_neg, ← LawfulCommRing.mul_sub]
+      constructor
+      · intro h0
+        rcases LawfulField.mul_eq_zero h0 with hb0 | hz0
+        · exact False.elim (hβNe hb0)
+        · exact LawfulCommRing.sub_eq_zero_iff.mp hz0
+      · intro heq; subst heq
+        rw [LawfulCommRing.sub_self, LawfulCommRing.mul_zero]
+    clear hBadLen hBadNodup hLenRest hFiltC
+    induction restD with
+    | nil => cases hz₀Rest
+    | cons r rs ih =>
+      cases hndRest with
+      | cons hnotR hndRs =>
+        simp only [List.filter]
+        if hrz : r = z₀ then
+          subst hrz
+          have hrTrue : predP r = true := (hiff r (.head _)).mpr rfl
+          rw [hrTrue]
+          have hrsEmpty : rs.filter predP = [] := by
+            have hallFalse : ∀ y ∈ rs, predP y = false := by
+              intro y hy
+              cases hpy : predP y
+              · rfl
+              · have hyz : y = r := (hiff y (.tail _ hy)).mp hpy
+                exact False.elim (hnotR y hy hyz.symm)
+            clear ih hiff hz₀Rest hDisjCRest hnotR hndRs hrTrue
+            induction rs with
+            | nil => rfl
+            | cons y ys ihy =>
+              simp [List.filter, hallFalse y (.head _), ihy (fun w hw => hallFalse w (.tail _ hw))]
+          rw [hrsEmpty]
+        else
+          have hrFalse : predP r = false := by
+            cases hpr : predP r
+            · rfl
+            · exact False.elim (hrz ((hiff r (.head _)).mp hpr))
+          rw [hrFalse]
+          cases hz₀Rest with
+          | head => exact False.elim (hrz rfl)
+          | tail _ hz₀InRs =>
+            exact ih hndRs hz₀InRs (fun x hx => hDisjCRest x) (fun z hz => hiff z (.tail _ hz))
+  have hSpEq : D.filter predP = C ++ [z₀] := by
+    have hApp : D = C ++ restD := (List.take_append_drop (A - 1) D).symm
+    conv => lhs; rw [hApp]
+    rw [List.filter_append, hFiltC, hFiltRest]
+  have hLenC : C.length = A - 1 := by
+    dsimp [C]; rw [List.length_take]; omega
+  refine ⟨?_, ?_, ?_⟩
+  · change A ≤ (D.filter predP).length
+    rw [hSpEq, List.length_append, hLenC, List.length_singleton]
+    omega
+  · intro G_poly hGLen
+    change ∃ z ∈ D.filter predP, RoundPoly.evalCoeffs G_poly z ≠ fg.2 z
+    -- Constructively check via `List.find?` whether `G_poly` is non-zero on some `c ∈ C`;
+    -- otherwise every `c ∈ C` (`|C| = A - 1 > d`) is a root of `G_poly`, forcing `G_poly(z₀) = 0 ≠ 1 = g(z₀)`.
+    match hFind : C.find? (fun c => !(decide (RoundPoly.evalCoeffs G_poly c = CommRingOps.zero))) with
+    | some c =>
+      have hcMem : c ∈ C := List.mem_of_find?_eq_some hFind
+      have hcPred : (!(decide (RoundPoly.evalCoeffs G_poly c = CommRingOps.zero))) = true :=
+        List.find?_some hFind
+      have hcNe : RoundPoly.evalCoeffs G_poly c ≠ CommRingOps.zero := by
+        intro h0
+        simp [h0] at hcPred
+      have hgc : fg.2 c = CommRingOps.zero := by
+        dsimp [fg, zeroLossAffineWords]; simp [C, hcMem]
+      refine ⟨c, by rw [hSpEq, List.mem_append]; exact .inl hcMem, ?_⟩
+      rwa [hgc]
+    | none =>
+      refine ⟨z₀, by rw [hSpEq, List.mem_append]; exact .inr (.head _), ?_⟩
+      have hgz₀ : fg.2 z₀ = CommRingOps.one := by
+        dsimp [fg, zeroLossAffineWords]; simp [C, hz₀NotC]
+      rw [hgz₀]
+      if hz0Eq : RoundPoly.evalCoeffs G_poly z₀ = CommRingOps.zero then
+        rw [hz0Eq]
+        exact LawfulField.zero_ne_one
+      else
+        have hAllRoots : ∀ c ∈ C, RoundPoly.evalCoeffs G_poly c = CommRingOps.zero := by
+          intro c hc
+          if hc0 : RoundPoly.evalCoeffs G_poly c = CommRingOps.zero then
+            exact hc0
+          else
+            have hFalse := List.find?_eq_none.mp hFind c hc
+            simp [hc0] at hFalse
+        have hFiltAll :
+            C.filter (fun c => decide (RoundPoly.evalCoeffs G_poly c = CommRingOps.zero)) = C := by
+          clear hFiltC hFiltRest hSpEq hLenC hFind
+          induction C with
+          | nil => rfl
+          | cons c cs ih =>
+            simp [List.filter, hAllRoots c (.head _),
+                  ih (fun x hx => hDisjCRest x (.tail _ hx))
+                     (fun h => hz₀NotC (.tail _ h))
+                     (fun y hy => hAllRoots y (.tail _ hy))]
+        have hndC : C.Nodup := (List.take_sublist (A - 1) D).nodup hD
+        cases d with
+        | zero =>
+          have hNil : G_poly = [] := by
+            cases G_poly with
+            | nil => rfl
+            | cons _ _ => simp at hGLen
+          subst hNil
+          exact False.elim (hz0Eq rfl)
+        | succ d' =>
+          have hRoots := @RoundPoly.roots_nodup_length_le F _ _ (LawfulField.toNoZeroDivisors F)
+            d' G_poly C hndC hGLen ⟨z₀, hz0Eq⟩
+          rw [hFiltAll, hLenC] at hRoots
+          omega
+  · -- At `s = 1`, `(0, 0)` agrees on `C` and fails only at `z₀`:
+    change ((D.filter predP).filter
+      (fun z => !(decide (CommRingOps.zero = fg.1 z) && decide (CommRingOps.zero = fg.2 z)))).length ≤ 1
+    rw [hSpEq, List.filter_append]
+    have hCZero : C.filter
+        (fun z => !(decide (CommRingOps.zero = fg.1 z) && decide (CommRingOps.zero = fg.2 z))) = [] := by
+      have hall : ∀ z ∈ C,
+          (decide (CommRingOps.zero = fg.1 z) && decide (CommRingOps.zero = fg.2 z)) = true := by
+        intro z hzC
+        dsimp [fg, zeroLossAffineWords]
+        simp [C, hzC]
+      clear hFiltC hFiltRest hSpEq hLenC
+      induction C with
+      | nil => rfl
+      | cons c cs ih =>
+        simp [List.filter, hall c (.head _),
+              ih (fun x hx => hDisjCRest x (.tail _ hx))
+                 (fun h => hz₀NotC (.tail _ h))
+                 (fun y hy => hall y (.tail _ hy))]
+    rw [hCZero, List.nil_append]
+    cases decide (CommRingOps.zero = fg.1 z₀) && decide (CommRingOps.zero = fg.2 z₀) <;> simp
+
+
+/-! ## §3. Constructive Homogeneous Linear Solver (`gauss_nullspace_witness`) -/
+
+/-- Dot product of two `List F` vectors over `CommRingOps F`. -/
+def dotVec {F : Type} [CommRingOps F] : List F → List F → F
+  | [], _ => CommRingOps.zero
+  | _, [] => CommRingOps.zero
+  | a :: as, b :: bs => CommRingOps.add (CommRingOps.mul a b) (dotVec as bs)
+
+/-- Scalar multiple `c · v` of a vector `v : List F`. -/
+def scaleVec {F : Type} [CommRingOps F] (c : F) (v : List F) : List F :=
+  v.map (CommRingOps.mul c)
+
+/-- Componentwise difference `a - b` of two vectors of equal length. -/
+def subVec {F : Type} [CommRingOps F] : List F → List F → List F
+  | [], _ => []
+  | _, [] => []
+  | a :: as, b :: bs => CommRingOps.sub a b :: subVec as bs
+
+/-- Remove element at index `p` from a list. -/
+def dropIdx {α : Type} : Nat → List α → List α
+  | _, [] => []
+  | 0, _ :: xs => xs
+  | p + 1, x :: xs => x :: dropIdx p xs
+
+/-- Insert `val` at index `p` in a list. -/
+def insertIdxVal {α : Type} : Nat → α → List α → List α
+  | 0, val, xs => val :: xs
+  | _ + 1, val, [] => [val]
+  | p + 1, val, x :: xs => x :: insertIdxVal p val xs
+
+/-- Constructive search for the first non-zero coordinate index in `r : List F`. -/
+def findNonzeroIdx {F : Type} [CommRingOps F] [DecidableEq F] : List F → Option Nat
+  | [] => none
+  | x :: xs =>
+    if x = CommRingOps.zero then
+      (findNonzeroIdx xs).map (· + 1)
+    else
+      some 0
+
+/-- Primitive-recursive homogeneous Gaussian pivot solver over `[LawfulField F] [DecidableEq F]`
+    (`0` `WellFounded.fix`, `0` classical choice). Given `N` variables and `rows.length < N` equations
+    of length `N`, returns a non-zero vector `v` of length `N` orthogonal to every row in `rows`. -/
+def solveHomogeneous {F : Type} [LawfulField F] [DecidableEq F] :
+    Nat → List (List F) → List F
+  | 0, _ => []
+  | n + 1, [] => CommRingOps.one :: List.replicate n CommRingOps.zero
+  | n + 1, r :: rs =>
+    match findNonzeroIdx r with
+    | none =>
+      CommRingOps.zero :: solveHomogeneous n (rs.map List.tail)
+    | some p =>
+      let rp := r.getD p CommRingOps.zero
+      let invRp := LawfulField.inv rp
+      let rDrop := dropIdx p r
+      let rs' := rs.map (fun row =>
+        let coef := CommRingOps.mul (row.getD p CommRingOps.zero) invRp
+        subVec (dropIdx p row) (scaleVec coef rDrop))
+      let v' := solveHomogeneous n rs'
+      let vp := CommRingOps.neg (CommRingOps.mul invRp (dotVec rDrop v'))
+      insertIdxVal p vp v'
+
+private theorem dropIdx_length {α : Type} :
+    ∀ (p : Nat) (xs : List α), p < xs.length → (dropIdx p xs).length + 1 = xs.length
+  | _, [], h => by simp at h
+  | 0, _ :: xs, _ => by simp [dropIdx]
+  | p + 1, _ :: xs, h => by
+    simp only [List.length_cons] at h ⊢
+    have ih := dropIdx_length p xs (by omega)
+    simp only [dropIdx, List.length_cons]
+    omega
+
+private theorem subVec_length {F : Type} [CommRingOps F] :
+    ∀ (a b : List F), a.length = b.length → (subVec a b).length = a.length
+  | [], [], _ => rfl
+  | _ :: as, _ :: bs, h => by
+    simp only [List.length_cons] at h
+    simp [subVec, subVec_length as bs (by omega)]
+  | [], _ :: _, h => by simp at h
+  | _ :: _, [], h => by simp at h
+
+private theorem insertIdxVal_length {α : Type} :
+    ∀ (p : Nat) (val : α) (xs : List α), p ≤ xs.length →
+      (insertIdxVal p val xs).length = xs.length + 1
+  | 0, _, xs, _ => by simp [insertIdxVal]
+  | p + 1, val, [], h => by simp at h
+  | p + 1, val, x :: xs, h => by
+    simp only [List.length_cons] at h
+    simp [insertIdxVal, insertIdxVal_length p val xs (by omega)]
+
+private theorem mem_insertIdxVal_of_mem {α : Type} :
+    ∀ (p : Nat) (val : α) {z : α} {xs : List α}, z ∈ xs → z ∈ insertIdxVal p val xs
+  | 0, _, _, _, hz => .tail _ hz
+  | _ + 1, _, _, [], hz => by cases hz
+  | p + 1, val, _, _ :: xs, hz => by
+    simp only [insertIdxVal]
+    cases hz with
+    | head => exact .head _
+    | tail _ hm => exact .tail _ (mem_insertIdxVal_of_mem p val hm)
+
+private theorem findNonzeroIdx_none {F : Type} [CommRingOps F] [DecidableEq F] :
+    ∀ {r : List F}, findNonzeroIdx r = none → ∀ x ∈ r, x = CommRingOps.zero
+  | [], _, _, hx => by cases hx
+  | x :: xs, h, y, hy => by
+    simp only [findNonzeroIdx] at h
+    if hx0 : x = CommRingOps.zero then
+      rw [if_pos hx0, Option.map_eq_none_iff] at h
+      cases hy with
+      | head => exact hx0
+      | tail _ hm => exact findNonzeroIdx_none h y hm
+    else
+      rw [if_neg hx0] at h
+      cases h
+
+private theorem findNonzeroIdx_some {F : Type} [CommRingOps F] [DecidableEq F] :
+    ∀ {r : List F} {p : Nat}, findNonzeroIdx r = some p →
+      p < r.length ∧ r.getD p CommRingOps.zero ≠ CommRingOps.zero
+  | [], _, h => by cases h
+  | x :: xs, p, h => by
+    simp only [findNonzeroIdx] at h
+    if hx0 : x = CommRingOps.zero then
+      rw [if_pos hx0, Option.map_eq_some_iff] at h
+      rcases h with ⟨q, hq, rfl⟩
+      rcases findNonzeroIdx_some hq with ⟨hqLt, hqNe⟩
+      refine ⟨by simp; omega, ?_⟩
+      simpa [List.getD] using hqNe
+    else
+      rw [if_neg hx0] at h
+      cases h
+      exact ⟨by simp, by simpa [List.getD] using hx0⟩
+
+private theorem dotVec_all_zero {F : Type} [LawfulCommRing F] :
+    ∀ (r v : List F), (∀ x ∈ r, x = CommRingOps.zero) → dotVec r v = CommRingOps.zero
+  | [], _, _ => rfl
+  | _, [], _ => by cases ‹List F› <;> rfl
+  | x :: xs, y :: ys, hall => by
+    simp only [dotVec, hall x (.head _), LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+    exact dotVec_all_zero xs ys (fun z hz => hall z (.tail _ hz))
+
+private theorem dotVec_scaleVec {F : Type} [LawfulCommRing F] (c : F) :
+    ∀ (a v : List F), dotVec (scaleVec c a) v = CommRingOps.mul c (dotVec a v)
+  | [], _ => by simp [scaleVec, dotVec, LawfulCommRing.mul_zero]
+  | _ :: _, [] => by simp [scaleVec, dotVec, LawfulCommRing.mul_zero]
+  | a :: as, b :: bs => by
+    simp only [scaleVec, List.map, dotVec]
+    rw [dotVec_scaleVec c as bs, LawfulCommRing.mul_assoc, ← LawfulCommRing.left_distrib]
+
+private theorem dotVec_subVec {F : Type} [LawfulCommRing F] :
+    ∀ (a b v : List F), a.length = b.length →
+      dotVec (subVec a b) v = CommRingOps.sub (dotVec a v) (dotVec b v)
+  | [], [], _ => by simp [subVec, dotVec, LawfulCommRing.sub_self]
+  | _ :: _, _ :: _, [] => by simp [subVec, dotVec, LawfulCommRing.sub_self]
+  | a :: as, b :: bs, x :: xs => fun hlen => by
+    simp only [List.length_cons] at hlen
+    simp only [subVec, dotVec, dotVec_subVec as bs xs (by omega), LawfulCommRing.sub_mul]
+    -- `(a*x - b*x) + (dotA - dotB) = (a*x + dotA) - (b*x + dotB)`
+    apply LawfulCommRing.add_left_cancel
+      (a := CommRingOps.add (CommRingOps.mul b x) (dotVec bs xs))
+    rw [LawfulCommRing.add_sub_cancel_left,
+        ← LawfulCommRing.add_assoc,
+        LawfulCommRing.add_assoc (CommRingOps.mul b x) (dotVec bs xs) _,
+        LawfulCommRing.add_comm (dotVec bs xs) (CommRingOps.sub _ _),
+        ← LawfulCommRing.add_assoc (CommRingOps.mul b x),
+        LawfulCommRing.add_sub_cancel_left,
+        LawfulCommRing.add_assoc,
+        LawfulCommRing.add_comm (dotVec bs xs) _,
+        LawfulCommRing.add_sub_cancel_left]
+  | [], _ :: _, _ => fun h => by simp at h
+  | _ :: _, [], _ => fun h => by simp at h
+
+private theorem dotVec_insertIdxVal {F : Type} [LawfulCommRing F] :
+    ∀ (p : Nat) (row v : List F) (vp : F),
+      row.length = v.length + 1 →
+      p < row.length →
+      dotVec row (insertIdxVal p vp v) =
+        CommRingOps.add (CommRingOps.mul (row.getD p CommRingOps.zero) vp)
+          (dotVec (dropIdx p row) v)
+  | 0, [], _, _, _, hp => by simp at hp
+  | 0, r0 :: rs, v, vp, _, _ => by
+    simp [insertIdxVal, dropIdx, dotVec, List.getD]
+  | p + 1, [], _, _, _, hp => by simp at hp
+  | p + 1, _ :: _, [], _, hlen, hp => by simp at hlen hp; omega
+  | p + 1, r0 :: rs, w0 :: ws, vp, hlen, hp => by
+    simp only [List.length_cons] at hlen hp
+    have ih := dotVec_insertIdxVal p rs ws vp (by omega) (by omega)
+    simp only [insertIdxVal, dropIdx, dotVec, ih]
+    have hget : (r0 :: rs).getD (p + 1) CommRingOps.zero = rs.getD p CommRingOps.zero := by
+      simp [List.getD]
+    rw [hget, ← LawfulCommRing.add_assoc,
+        LawfulCommRing.add_comm (CommRingOps.mul r0 w0) _,
+        LawfulCommRing.add_assoc]
+
+private theorem any_true_of_mem {α : Type} {pred : α → Bool} :
+    ∀ {xs : List α} {z : α}, z ∈ xs → pred z = true → xs.any pred = true
+  | [], _, hz, _ => by cases hz
+  | x :: xs, z, hz, hp => by
+    simp only [List.any_cons, Bool.or_eq_true]
+    cases hz with
+    | head => exact .inl hp
+    | tail _ hm => exact .inr (any_true_of_mem hm hp)
+
+private theorem mem_of_any_true {α : Type} {pred : α → Bool} :
+    ∀ {xs : List α}, xs.any pred = true → ∃ z ∈ xs, pred z = true
+  | [], h => by simp at h
+  | x :: xs, h => by
+    simp only [List.any_cons, Bool.or_eq_true] at h
+    rcases h with hx | hxs
+    · exact ⟨x, .head _, hx⟩
+    · rcases mem_of_any_true hxs with ⟨z, hz, hp⟩
+      exact ⟨z, .tail _ hz, hp⟩
+
+/-- **Constructive Homogeneous Underdetermined Linear Solver (`gauss_nullspace_witness`)**:
+    Over ANY `[LawfulField F] [DecidableEq F]`, for any `N` unknowns and `rows.length < N`
+    homogeneous linear equations of length `N`, `solveHomogeneous N rows` produces a vector `v`
+    of length `N` that has a strictly non-zero entry (`any ≠ 0`) and annihilates every row (`0` choice). -/
+theorem gauss_nullspace_witness
+    {F : Type} [LawfulField F] [DecidableEq F] :
+    ∀ (N : Nat) (rows : List (List F)),
+      rows.length < N →
+      (∀ row ∈ rows, row.length = N) →
+      let v := solveHomogeneous N rows
+      v.length = N ∧
+      (v.any (fun x => !(decide (x = CommRingOps.zero)))) = true ∧
+      ∀ row ∈ rows, dotVec row v = CommRingOps.zero
+  | 0, _, hlt, _ => by omega
+  | n + 1, [], _, _ => by
+    dsimp [solveHomogeneous]
+    refine ⟨by simp, ?_, by intro _ h; cases h⟩
+    simp [LawfulField.one_ne_zero]
+  | n + 1, r :: rs, hlt, hlen => by
+    simp only [List.length_cons] at hlt
+    have hrLen : r.length = n + 1 := hlen r (.head _)
+    have hrsLen : ∀ row ∈ rs, row.length = n + 1 := fun row h => hlen row (.tail _ h)
+    dsimp only [solveHomogeneous]
+    cases hFind : findNonzeroIdx r with
+    | none =>
+      dsimp only
+      let rsTail := rs.map List.tail
+      have hTailLt : rsTail.length < n := by simp [rsTail]; omega
+      have hTailLen : ∀ row' ∈ rsTail, row'.length = n := by
+        intro row' hmem
+        rw [List.mem_map] at hmem
+        rcases hmem with ⟨row, hrow, rfl⟩
+        have hl := hrsLen row hrow
+        cases row with
+        | nil => simp at hl
+        | cons _ tl => simp at hl ⊢; exact hl
+      rcases gauss_nullspace_witness n rsTail hTailLt hTailLen with ⟨hvLen, hvAny, hvZero⟩
+      refine ⟨by simp [hvLen], ?_, ?_⟩
+      · simp only [List.any_cons, hvAny, Bool.or_true]
+      · intro row hrow
+        cases hrow with
+        | head =>
+          exact dotVec_all_zero r _ (findNonzeroIdx_none hFind)
+        | tail _ hm =>
+          have hl := hrsLen row hm
+          cases row with
+          | nil => simp at hl
+          | cons c cs =>
+            simp only [dotVec, LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
+            exact hvZero cs (List.mem_map.mpr ⟨c :: cs, hm, rfl⟩)
+    | some p =>
+      dsimp only
+      rcases findNonzeroIdx_some hFind with ⟨hpLt, hrpNe⟩
+      let rp := r.getD p CommRingOps.zero
+      let invRp := LawfulField.inv rp
+      let rDrop := dropIdx p r
+      have hrDropLen : rDrop.length = n := by
+        have h := dropIdx_length p r hpLt
+        omega
+      let elimRow := fun (row : List F) =>
+        subVec (dropIdx p row) (scaleVec (CommRingOps.mul (row.getD p CommRingOps.zero) invRp) rDrop)
+      let rs' := rs.map elimRow
+      have hrs'Lt : rs'.length < n := by simp [rs']; omega
+      have hrs'Len : ∀ row' ∈ rs', row'.length = n := by
+        intro row' hmem
+        rw [List.mem_map] at hmem
+        rcases hmem with ⟨row, hrow, rfl⟩
+        have hl := hrsLen row hrow
+        have hd : (dropIdx p row).length = n := by
+          have h := dropIdx_length p row (by omega)
+          omega
+        dsimp [elimRow]
+        rw [subVec_length]
+        · exact hd
+        · simp [scaleVec, hd, hrDropLen]
+      rcases gauss_nullspace_witness n rs' hrs'Lt hrs'Len with ⟨hvLen, hvAny, hvZero⟩
+      let v' := solveHomogeneous n rs'
+      let vp := CommRingOps.neg (CommRingOps.mul invRp (dotVec rDrop v'))
+      have hpLe : p ≤ v'.length := by rw [hvLen]; omega
+      refine ⟨?_, ?_, ?_⟩
+      · rw [insertIdxVal_length p vp v' hpLe, hvLen]
+      · rcases mem_of_any_true hvAny with ⟨z, hzMem, hzPred⟩
+        exact any_true_of_mem (mem_insertIdxVal_of_mem p vp hzMem) hzPred
+      · intro row hrow
+        have hrowLen : row.length = n + 1 := hlen row hrow
+        rw [dotVec_insertIdxVal p row v' vp (by omega) (by omega)]
+        cases hrow with
+        | head =>
+          -- Pivot row `r`: `rp * (-invRp * dot(rDrop, v')) + dot(rDrop, v') = 0`
+          change CommRingOps.add (CommRingOps.mul rp vp) (dotVec rDrop v') = CommRingOps.zero
+          dsimp [vp]
+          rw [LawfulCommRing.mul_neg, ← LawfulCommRing.mul_assoc,
+              LawfulField.mul_inv_cancel hrpNe, LawfulCommRing.one_mul,
+              LawfulCommRing.add_left_neg]
+        | tail _ hm =>
+          -- Eliminated row `row ∈ rs`:
+          have hElimZero : dotVec (elimRow row) v' = CommRingOps.zero :=
+            hvZero (elimRow row) (List.mem_map.mpr ⟨row, hm, rfl⟩)
+          have hdLen : (dropIdx p row).length = n := by
+            have h := dropIdx_length p row (by omega)
+            omega
+          dsimp [elimRow] at hElimZero
+          rw [dotVec_subVec _ _ v' (by simp [scaleVec, hdLen, hrDropLen]),
+              dotVec_scaleVec] at hElimZero
+          have hEqDrop : dotVec (dropIdx p row) v' =
+              CommRingOps.mul (CommRingOps.mul (row.getD p CommRingOps.zero) invRp)
+                (dotVec rDrop v') :=
+            LawfulCommRing.sub_eq_zero_iff.mp hElimZero
+          rw [hEqDrop]
+          dsimp [vp]
+          rw [LawfulCommRing.mul_neg, LawfulCommRing.mul_assoc,
+              LawfulCommRing.add_left_neg]
+
+/-- Geometric power vector `[1, z, z^2, ..., z^(m-1)]` connecting `dotVec` directly to `evalCoeffs`. -/
+def geomVec {F : Type} [CommRingOps F] (z : F) : Nat → List F
+  | 0 => []
+  | k + 1 => CommRingOps.one :: (geomVec z k).map (CommRingOps.mul z)
+
+theorem geomVec_length {F : Type} [CommRingOps F] (z : F) :
+    ∀ (m : Nat), (geomVec z m).length = m
+  | 0 => rfl
+  | k + 1 => by simp [geomVec, geomVec_length z k]
+
+theorem dotVec_geomVec_eq_evalCoeffs {F : Type} [LawfulCommRing F] (z : F) :
+    ∀ (m : Nat) (coeffs : List F),
+      coeffs.length = m →
+      dotVec (geomVec z m) coeffs = RoundPoly.evalCoeffs coeffs z
+  | 0, [], _ => rfl
+  | 0, _ :: _, h => by simp at h
+  | _ + 1, [], h => by simp at h
+  | k + 1, c :: cs, h => by
+    simp only [List.length_cons] at h
+    have hcs : cs.length = k := by omega
+    have hscale : dotVec ((geomVec z k).map (CommRingOps.mul z)) cs =
+        CommRingOps.mul z (dotVec (geomVec z k) cs) :=
+      dotVec_scaleVec z (geomVec z k) cs
+    simp only [geomVec, dotVec, LawfulCommRing.one_mul, hscale,
+               dotVec_geomVec_eq_evalCoeffs z k cs hcs, RoundPoly.evalCoeffs]
+
+theorem dotVec_append_eq {F : Type} [LawfulCommRing F] :
+    ∀ (a b x y : List F), a.length = x.length →
+      dotVec (a ++ b) (x ++ y) = CommRingOps.add (dotVec a x) (dotVec b y)
+  | [], b, [], y, _ => by simp [dotVec, LawfulCommRing.zero_add]
+  | a0 :: as, b, x0 :: xs, y, h => by
+    simp only [List.length_cons] at h
+    simp only [List.cons_append, dotVec, dotVec_append_eq as b xs y (by omega),
+               LawfulCommRing.add_assoc]
+  | [], _, _ :: _, _, h => by simp at h
+  | _ :: _, _, [], _, h => by simp at h
+
+theorem dotVec_replicate_zero {F : Type} [LawfulCommRing F] :
+    ∀ (m : Nat) (v : List F), dotVec (List.replicate m CommRingOps.zero) v = CommRingOps.zero
+  | 0, _ => rfl
+  | m + 1, [] => rfl
+  | m + 1, _ :: vs => by
+    simp [List.replicate, dotVec, LawfulCommRing.zero_mul, LawfulCommRing.zero_add,
+          dotVec_replicate_zero m vs]
