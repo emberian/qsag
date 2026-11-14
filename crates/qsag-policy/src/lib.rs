@@ -1825,3 +1825,532 @@ pub struct PartyPolicyRound3State {
 }
 /// Only this state can verify sigma openings and mint the per-party capability.
 #[must_use]
+pub struct PartyPolicyFinalizeState {
+    context: PartyPolicyContext,
+    commits: Vec<PartyPolicySigmaCommitMsg>,
+}
+
+fn policy_ids_bytes(ids: &[u16]) -> Vec<u8> {
+    ids.iter().flat_map(|id| id.to_be_bytes()).collect()
+}
+
+fn policy_pair_bytes(pair: &[u128; 2]) -> [u8; 32] {
+    let mut bytes = [0; 32];
+    bytes[..16].copy_from_slice(&pair[0].to_le_bytes());
+    bytes[16..].copy_from_slice(&pair[1].to_le_bytes());
+    bytes
+}
+
+fn policy_pair(bytes: [u8; 32]) -> [u128; 2] {
+    [
+        u128::from_le_bytes(core::array::from_fn(|i| bytes[i])),
+        u128::from_le_bytes(core::array::from_fn(|i| bytes[16 + i])),
+    ]
+}
+
+fn delta_commitment(c: &PartyPolicyDeltaCommitMsg, salt: &[u8; 32], delta: &[u128; 2]) -> [u8; 32] {
+    cshake256_framed_32(
+        b"DELTA_COMMIT.V2",
+        &[
+            &c.session_id,
+            &c.party_id.to_be_bytes(),
+            &c.initiator_party.to_be_bytes(),
+            &c.window_id.to_be_bytes(),
+            &policy_ids_bytes(&c.quorum_ids),
+            &c.intent_digest,
+            salt,
+            &policy_pair_bytes(delta),
+            &c.policy_digest,
+            &(c.slot as u64).to_be_bytes(),
+        ],
+    )
+}
+
+fn sigma_commitment(c: &PartyPolicySigmaCommitMsg, salt: &[u8; 32], sigma: &[u128; 2]) -> [u8; 32] {
+    cshake256_framed_32(
+        b"SIGMA_COMMIT",
+        &[
+            &c.transcript_digest,
+            &c.party_id.to_be_bytes(),
+            salt,
+            &policy_pair_bytes(sigma),
+        ],
+    )
+}
+
+impl PolicySignerGuardShare {
+    fn phase_binding(&self, slot: usize) -> [u8; 32] {
+        cshake256_framed_32(
+            b"QSAG.POLICY.GUARD_BINDING.V1",
+            &[
+                &self.local_salt_seed,
+                &self.enrolled_party_id.to_be_bytes(),
+                &(slot as u64).to_be_bytes(),
+            ],
+        )
+    }
+
+    fn check_phase(&mut self, c: &PartyPolicyContext, phase: u8) -> Result<(), PolicyViolation> {
+        if self.poisoned {
+            return Err(PolicyViolation::GuardPoisoned);
+        }
+        if self.party_id != self.enrolled_party_id
+            || self.party_id != c.own.party_id
+            || self.active_phase != Some((c.own.slot, phase))
+            || !ct_eq_bytes(&self.phase_binding(c.own.slot), &c.guard_binding)
+        {
+            self.poison();
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        Ok(())
+    }
+
+    fn round1_commit_intent_inner(
+        &mut self,
+        policy: &TransactionPolicy,
+        intent: &TransactionIntent,
+        session_id: [u8; 32],
+        current_timestamp: u64,
+        cumulative_epoch_spent: u128,
+        force_authenticated_initiator: bool,
+    ) -> Result<(PartyPolicyRound1State, PartyPolicyDeltaCommitMsg), PolicyViolation> {
+        if self.poisoned {
+            return Err(PolicyViolation::GuardPoisoned);
+        }
+        if self.active_phase.is_some() || self.party_id != self.enrolled_party_id {
+            self.poison();
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        policy.evaluate(intent)?;
+        if current_timestamp != intent.timestamp_secs {
+            return Err(PolicyViolation::TimestampOutsideWindow);
+        }
+        if cumulative_epoch_spent != intent.rolling_window_spent {
+            return Err(PolicyViolation::VelocityCapOverflowOrExceeded);
+        }
+        self.verify_initiator_authentication(policy, intent, force_authenticated_initiator)?;
+        self.check_window_nonce_and_projected_spend(
+            policy.velocity_window_cap,
+            intent,
+            &session_id,
+            cumulative_epoch_spent,
+        )?;
+        let mut ids = intent.approver_parties.clone();
+        ids.sort_unstable();
+        if ids.len() < 2
+            || ids != intent.quorum_ids
+            || !ids.contains(&self.party_id)
+            || session_id != intent.session_id
+        {
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        let slot = self.next_slot.get();
+        let r = *self
+            .preproc_r
+            .get(slot)
+            .ok_or(PolicyViolation::BarrierPreprocExhausted)?;
+        for &peer in &ids {
+            if peer != self.party_id {
+                self.outgoing_mac(peer, slot)?;
+                if !self.pairwise_zero_seeds.iter().any(|(id, _)| *id == peer) {
+                    return Err(PolicyViolation::BarrierBdozMacFailed);
+                }
+            }
+        }
+        self.next_slot.set(slot + 1);
+        self.active_phase = Some((slot, 1));
+        let mut own = PartyPolicyDeltaCommitMsg {
+            party_id: self.party_id,
+            slot,
+            session_id,
+            initiator_party: intent.initiator_party,
+            window_id: intent.window_id,
+            quorum_ids: ids,
+            policy_digest: policy.canonical_digest(),
+            intent_digest: intent.canonical_digest(),
+            commitment: [0; 32],
+        };
+        let x = match compute_folded_policy_wire(
+            &own.policy_digest,
+            &own.intent_digest,
+            &session_id,
+            intent.initiator_party,
+            intent.window_id,
+            &intent.nonce,
+            &qsag_accel::CpuReferenceBackend::new(),
+        ) {
+            Ok(v) => v,
+            Err(err) => {
+                self.abort_session_slot(slot, &[]);
+                return Err(err);
+            }
+        };
+        let delta = [r[0] ^ x.0, r[1] ^ x.1];
+        let salt = cshake256_framed_32(
+            b"QSAG.POLICY.DELTA_SALT.V1",
+            &[
+                &self.local_salt_seed,
+                &session_id,
+                &(slot as u64).to_be_bytes(),
+            ],
+        );
+        own.commitment = delta_commitment(&own, &salt, &delta);
+        let context = PartyPolicyContext {
+            intent: intent.clone(),
+            velocity_window_cap: policy.velocity_window_cap,
+            cumulative_epoch_spent,
+            own: own.clone(),
+            peer_slots: Vec::new(),
+            guard_binding: self.phase_binding(slot),
+            salt,
+            delta,
+            folded: [x.0, x.1],
+            sigma: [0; 2],
+            sigma_salt: [0; 32],
+        };
+        Ok((PartyPolicyRound1State { context }, own))
+    }
+
+    /// Clock and epoch spend must come from local authoritative state, never from the requester.
+    pub fn round1_commit_intent(
+        &mut self,
+        policy: &TransactionPolicy,
+        intent: &TransactionIntent,
+        session_id: [u8; 32],
+        current_timestamp: u64,
+        cumulative_epoch_spent: u128,
+    ) -> Result<(PartyPolicyRound1State, PartyPolicyDeltaCommitMsg), PolicyViolation> {
+        self.round1_commit_intent_inner(
+            policy,
+            intent,
+            session_id,
+            current_timestamp,
+            cumulative_epoch_spent,
+            false,
+        )
+    }
+
+    /// Commit to `intent` while mandating cryptographic authentication of `intent.initiator_party`.
+    pub fn round1_commit_intent_authenticated(
+        &mut self,
+        policy: &TransactionPolicy,
+        intent: &TransactionIntent,
+        session_id: [u8; 32],
+        current_timestamp: u64,
+        cumulative_epoch_spent: u128,
+    ) -> Result<(PartyPolicyRound1State, PartyPolicyDeltaCommitMsg), PolicyViolation> {
+        self.round1_commit_intent_inner(
+            policy,
+            intent,
+            session_id,
+            current_timestamp,
+            cumulative_epoch_spent,
+            true,
+        )
+    }
+}
+
+/// Abort ONLY the active session slot (and any opened peer slots) on peer/network protocol errors,
+/// preserving the honest party's persistent guard key material and durable spend/nonce ledger.
+fn policy_phase_result<T>(
+    guard: &mut PolicySignerGuardShare,
+    slot: usize,
+    peer_slots: &[(u16, usize)],
+    result: Result<T, PolicyViolation>,
+) -> Result<T, PolicyViolation> {
+    if result.is_err() {
+        guard.abort_session_slot(slot, peer_slots);
+    }
+    result
+}
+
+impl PartyPolicyRound1State {
+    /// Freeze the entire delta commitment vector before releasing this party's opening.
+    pub fn round2_open_delta_and_commit_sigma(
+        self,
+        guard: &mut PolicySignerGuardShare,
+        all_r1_commits: &[PartyPolicyDeltaCommitMsg],
+    ) -> Result<
+        (
+            PartyPolicyRound2State,
+            PartyPolicyDeltaOpenAndSigmaCommitMsg,
+        ),
+        PolicyViolation,
+    > {
+        self.round2_open_delta(guard, all_r1_commits)
+    }
+
+    pub fn round2_open_delta(
+        mut self,
+        guard: &mut PolicySignerGuardShare,
+        all_r1_commits: &[PartyPolicyDeltaCommitMsg],
+    ) -> Result<(PartyPolicyRound2State, PartyPolicyDeltaOpenMsg), PolicyViolation> {
+        guard.check_phase(&self.context, 1)?;
+        let own_slot = self.context.own.slot;
+        let result = (|| {
+            let own = &self.context.own;
+            let mut commits = all_r1_commits.to_vec();
+            commits.sort_by_key(|c| c.party_id);
+            if commits.len() != own.quorum_ids.len() {
+                return Err(PolicyViolation::IntentBindingMismatch);
+            }
+            let mut peer_slots = Vec::with_capacity(commits.len().saturating_sub(1));
+            for (c, id) in commits.iter().zip(&own.quorum_ids) {
+                if c.party_id != *id
+                    || c.session_id != own.session_id
+                    || c.initiator_party != own.initiator_party
+                    || c.window_id != own.window_id
+                    || c.quorum_ids != own.quorum_ids
+                    || c.policy_digest != own.policy_digest
+                    || c.intent_digest != own.intent_digest
+                    || (c.party_id == own.party_id && c != own)
+                {
+                    return Err(PolicyViolation::IntentBindingMismatch);
+                }
+                if c.party_id != own.party_id {
+                    guard.incoming_key(c.party_id, c.slot)?;
+                    peer_slots.push((c.party_id, c.slot));
+                }
+            }
+            let msg = PartyPolicyDeltaOpenMsg {
+                party_id: own.party_id,
+                salt_i: self.context.salt,
+                delta_i: self.context.delta,
+            };
+            self.context.peer_slots = peer_slots;
+            guard.active_phase = Some((own.slot, 2));
+            Ok((
+                PartyPolicyRound2State {
+                    context: self.context,
+                    commits,
+                },
+                msg,
+            ))
+        })();
+        policy_phase_result(guard, own_slot, &[], result)
+    }
+}
+
+impl PartyPolicyRound2State {
+    pub fn round3_commit_sigma(
+        mut self,
+        guard: &mut PolicySignerGuardShare,
+        openings: &[PartyPolicyDeltaOpenMsg],
+    ) -> Result<(PartyPolicyRound3State, PartyPolicySigmaCommitMsg), PolicyViolation> {
+        guard.check_phase(&self.context, 2)?;
+        let own_slot = self.context.own.slot;
+        let result = (|| {
+            let mut opens = openings.to_vec();
+            opens.sort_by_key(|o| o.party_id);
+            if opens.len() != self.commits.len() {
+                return Err(PolicyViolation::IntentBindingMismatch);
+            }
+            let mut transcript = Vec::new();
+            for (c, o) in self.commits.iter().zip(&opens) {
+                if c.party_id != o.party_id
+                    || !ct_eq_bytes(&c.commitment, &delta_commitment(c, &o.salt_i, &o.delta_i))
+                {
+                    return Err(PolicyViolation::BarrierCommitmentMismatch {
+                        party_id: c.party_id,
+                    });
+                }
+                transcript.extend_from_slice(&c.party_id.to_be_bytes());
+                transcript.extend_from_slice(&(c.slot as u64).to_be_bytes());
+                transcript.extend_from_slice(&c.commitment);
+                transcript.extend_from_slice(&o.salt_i);
+                transcript.extend_from_slice(&policy_pair_bytes(&o.delta_i));
+            }
+            let own = &self.context.own;
+            let q_digest = cshake256_framed_32(
+                b"QSAG.POLICY.QUORUM_SET.V2",
+                &[&policy_ids_bytes(&own.quorum_ids)],
+            );
+            let digest = cshake256_framed_32(
+                b"QSAG.POLICY.VERIFIED_DELTAS.V2",
+                &[
+                    &own.session_id,
+                    &own.initiator_party.to_be_bytes(),
+                    &own.window_id.to_be_bytes(),
+                    &own.policy_digest,
+                    &own.intent_digest,
+                    &q_digest,
+                    &transcript,
+                ],
+            );
+            let z = guard.pairwise_zero_share(&own.quorum_ids, &own.session_id, &q_digest);
+            let mut sigma = [z.0, z.1];
+            for (c, o) in self.commits.iter().zip(&opens) {
+                if c.party_id == own.party_id {
+                    continue;
+                }
+                let m = guard.outgoing_mac(c.party_id, own.slot)?;
+                let k = guard.incoming_key(c.party_id, c.slot)?;
+                let mut peer_alpha = guard.incoming_slot_alpha(c.party_id, c.slot);
+                let chi = policy_pair(cshake256_framed_32(
+                    b"QSAG.POLICY.PAIR_WEIGHT.V3",
+                    &[
+                        &digest,
+                        &own.party_id.min(c.party_id).to_be_bytes(),
+                        &own.party_id.max(c.party_id).to_be_bytes(),
+                    ],
+                ));
+                for lane in 0..2 {
+                    sigma[lane] ^= gf2_128_mul(
+                        chi[lane],
+                        m[lane]
+                            ^ k[lane]
+                            ^ gf2_128_mul(
+                                peer_alpha[lane],
+                                self.context.folded[lane] ^ o.delta_i[lane],
+                            ),
+                    );
+                }
+                ct_zeroize_u128s(&mut peer_alpha);
+            }
+            let salt = cshake256_framed_32(
+                b"QSAG.POLICY.SIGMA_SALT.V1",
+                &[
+                    &guard.local_salt_seed,
+                    &digest,
+                    &(own.slot as u64).to_be_bytes(),
+                ],
+            );
+            let mut msg = PartyPolicySigmaCommitMsg {
+                party_id: own.party_id,
+                transcript_digest: digest,
+                commitment: [0; 32],
+            };
+            msg.commitment = sigma_commitment(&msg, &salt, &sigma);
+            guard.active_phase = Some((own.slot, 3));
+            self.context.sigma = sigma;
+            self.context.sigma_salt = salt;
+            Ok((
+                PartyPolicyRound3State {
+                    context: self.context,
+                    own_sigma: msg.clone(),
+                },
+                msg,
+            ))
+        })();
+        policy_phase_result(guard, own_slot, &[], result)
+    }
+}
+
+impl PartyPolicyRound3State {
+    pub fn round4_open_sigma(
+        self,
+        guard: &mut PolicySignerGuardShare,
+        commitments: &[PartyPolicySigmaCommitMsg],
+    ) -> Result<(PartyPolicyFinalizeState, PartyPolicySigmaOpenMsg), PolicyViolation> {
+        guard.check_phase(&self.context, 3)?;
+        let own_slot = self.context.own.slot;
+        let peer_slots = self.context.peer_slots.clone();
+        let result = (|| {
+            let mut commits = commitments.to_vec();
+            commits.sort_by_key(|c| c.party_id);
+            if commits.len() != self.context.own.quorum_ids.len() {
+                return Err(PolicyViolation::IntentBindingMismatch);
+            }
+            for (c, id) in commits.iter().zip(&self.context.own.quorum_ids) {
+                if c.party_id != *id
+                    || c.transcript_digest != self.own_sigma.transcript_digest
+                    || (c.party_id == self.own_sigma.party_id && c != &self.own_sigma)
+                {
+                    return Err(PolicyViolation::IntentBindingMismatch);
+                }
+            }
+            let msg = PartyPolicySigmaOpenMsg {
+                party_id: self.own_sigma.party_id,
+                sigma_salt_i: self.context.sigma_salt,
+                sigma_i: self.context.sigma,
+            };
+            guard.active_phase = Some((self.context.own.slot, 4));
+            Ok((
+                PartyPolicyFinalizeState {
+                    context: self.context,
+                    commits,
+                },
+                msg,
+            ))
+        })();
+        policy_phase_result(guard, own_slot, &peer_slots, result)
+    }
+}
+
+impl PartyPolicyFinalizeState {
+    pub fn finalize(
+        self,
+        guard: &mut PolicySignerGuardShare,
+        openings: &[PartyPolicySigmaOpenMsg],
+    ) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
+        guard.check_phase(&self.context, 4)?;
+        let own_slot = self.context.own.slot;
+        let peer_slots = self.context.peer_slots.clone();
+        let result = (|| {
+            let mut opens = openings.to_vec();
+            opens.sort_by_key(|o| o.party_id);
+            if opens.len() != self.commits.len() {
+                return Err(PolicyViolation::IntentBindingMismatch);
+            }
+            let mut sum = [0u128; 2];
+            for (c, o) in self.commits.iter().zip(&opens) {
+                if c.party_id != o.party_id
+                    || !ct_eq_bytes(
+                        &c.commitment,
+                        &sigma_commitment(c, &o.sigma_salt_i, &o.sigma_i),
+                    )
+                {
+                    return Err(PolicyViolation::BarrierCommitmentMismatch {
+                        party_id: c.party_id,
+                    });
+                }
+                sum[0] ^= o.sigma_i[0];
+                sum[1] ^= o.sigma_i[1];
+            }
+            if !ct_eq_u128(sum[0], 0) || !ct_eq_u128(sum[1], 0) {
+                return Err(PolicyViolation::BarrierBdozMacFailed);
+            }
+            let projected_spend = guard.check_window_nonce_and_projected_spend(
+                self.context.velocity_window_cap,
+                &self.context.intent,
+                &self.context.own.session_id,
+                self.context.cumulative_epoch_spent,
+            )?;
+            guard.record_approved_intent(
+                projected_spend,
+                self.context.intent.nonce,
+                self.context.own.session_id,
+            );
+            guard.abort_session_slot(own_slot, &peer_slots);
+            Ok(AuthorizedSignReleaseToken {
+                session_id: self.context.own.session_id,
+                policy_digest: self.context.own.policy_digest,
+                intent_digest: self.context.own.intent_digest,
+                intent: self.context.intent.clone(),
+            })
+        })();
+        policy_phase_result(guard, own_slot, &peer_slots, result)
+    }
+}
+
+impl core::fmt::Display for PolicyViolation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl core::error::Error for PolicyViolation {}
+
+/// What a signing request binds an intent to: the key, the payload and context, the session,
+/// the policy revision, the approving quorum, and the enrolled guard authority.
+#[derive(Clone, Copy, Debug)]
+pub struct SigningPayloadBinding<'b> {
+    pub key_id: [u8; 32],
+    pub payload: &'b [u8],
+    pub ctx: &'b [u8],
+    pub session_id: [u8; 32],
+    pub policy_revision: u64,
+    pub quorum: &'b [u16],
+    pub authority_pk: [u8; 32],
+}
+
+/// Builds a canonical signed intent and returns the exact bytes to sign.
