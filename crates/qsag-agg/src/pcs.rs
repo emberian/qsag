@@ -3535,11 +3535,11 @@ fn verify_and_fold_stage0_fibers(
     let salts = proof.round0_salts.clone();
     let batches = q_indices.len().div_ceil(4);
     // Each pool item hashes four leaves with SIMD and folds their public values.
-    let results = map_query_indices(batches, 1, move |batch| {
+    let results = map_query_indices(batches, 4, move |batch| {
         let start = batch * 4;
         let end = (start + 4).min(q_indices.len());
         let indices = &q_indices[start..end];
-        let mut leaves = Vec::with_capacity(indices.len());
+        let mut leaves = [(0usize, [0u8; 32]); 4];
         if indices.len() == 4 {
             let hashes = queried_round0_hash_x4(
                 indices,
@@ -3548,11 +3548,13 @@ fn verify_and_fold_stage0_fibers(
                 &hash_vals[start * per_query..],
                 per_query,
             );
-            leaves.extend(indices.iter().copied().zip(hashes));
+            for (slot, (&index, hash)) in leaves.iter_mut().zip(indices.iter().zip(hashes)) {
+                *slot = (index, hash);
+            }
         } else {
             for (lane, &g) in indices.iter().enumerate() {
                 let i = start + lane;
-                leaves.push((
+                leaves[lane] = (
                     g,
                     hash_round0_leaf(
                         g as u32,
@@ -3560,17 +3562,20 @@ fn verify_and_fold_stage0_fibers(
                         num_polys,
                         &hash_vals[i * per_query..(i + 1) * per_query],
                     ),
-                ));
+                );
             }
         }
-        let folded: Vec<_> = (start..end).map(&fold).collect();
-        (leaves, folded)
+        let mut folded = [(Goldilocks::ZERO, GoldilocksExt4::ZERO, false); 4];
+        for (slot, i) in folded.iter_mut().zip(start..end) {
+            *slot = fold(i);
+        }
+        (leaves, folded, end - start)
     });
     let mut sorted_leaves = Vec::new();
     let mut folded = Vec::new();
-    for (leaves, values) in results {
-        sorted_leaves.extend(leaves);
-        folded.extend(values);
+    for (leaves, values, len) in results {
+        sorted_leaves.extend_from_slice(&leaves[..len]);
+        folded.extend_from_slice(&values[..len]);
     }
     if !verify_canopy_multiproof(comm_0, &sorted_leaves, &proof.round0_multiproof) {
         return None;
@@ -3634,32 +3639,37 @@ fn verify_and_fold_ext4_stage_fibers(
     let hash_vals = layer.opened_vals.clone();
     let batches = q_indices.len().div_ceil(4);
     // Each pool item hashes four leaves with SIMD and folds their public values.
-    let results = map_query_indices(batches, 1, move |batch| {
+    let results = map_query_indices(batches, 4, move |batch| {
         let start = batch * 4;
         let end = (start + 4).min(q_indices.len());
         let indices = &q_indices[start..end];
-        let mut leaves = Vec::with_capacity(indices.len());
+        let mut leaves = [(0usize, [0u8; 32]); 4];
         if indices.len() == 4 {
             let hashes =
                 queried_ext4_hash_x4(stage_u8, indices, &hash_vals[start * arity..], arity);
-            leaves.extend(indices.iter().copied().zip(hashes));
+            for (slot, (&index, hash)) in leaves.iter_mut().zip(indices.iter().zip(hashes)) {
+                *slot = (index, hash);
+            }
         } else {
             for (lane, &g) in indices.iter().enumerate() {
                 let i = start + lane;
-                leaves.push((
+                leaves[lane] = (
                     g,
                     hash_ext4_group(stage_u8, g as u32, &hash_vals[i * arity..(i + 1) * arity]),
-                ));
+                );
             }
         }
-        let folded: Vec<_> = (start..end).map(&fold).collect();
-        (leaves, folded)
+        let mut folded = [(Goldilocks::ZERO, GoldilocksExt4::ZERO, false); 4];
+        for (slot, i) in folded.iter_mut().zip(start..end) {
+            *slot = fold(i);
+        }
+        (leaves, folded, end - start)
     });
     let mut sorted_leaves = Vec::new();
     let mut folded = Vec::new();
-    for (leaves, values) in results {
-        sorted_leaves.extend(leaves);
-        folded.extend(values);
+    for (leaves, values, len) in results {
+        sorted_leaves.extend_from_slice(&leaves[..len]);
+        folded.extend_from_slice(&values[..len]);
     }
     if !verify_canopy_multiproof(&layer.commitment, &sorted_leaves, &layer.multiproof) {
         return None;

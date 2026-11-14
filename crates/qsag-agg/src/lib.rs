@@ -124,16 +124,21 @@ fn join_worker<T>(handle: ScopedWorker<'_, T>) -> T {
     }
 }
 
-/// Cached logical hardware worker count (`1..=64`) for `std::thread::scope` kernels.
+/// Cached worker budget (`1..=64`), optionally restricted with `QSAG_WORKERS`.
 #[cfg(feature = "std")]
 #[inline]
 pub(crate) fn parallel_workers() -> usize {
     static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *WORKERS.get_or_init(|| {
-        std::thread::available_parallelism()
+        let available = std::thread::available_parallelism()
             .map(usize::from)
             .unwrap_or(1)
-            .clamp(1, 64)
+            .clamp(1, 64);
+        std::env::var("QSAG_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&workers| workers > 0)
+            .map_or(available, |workers| workers.min(available))
     })
 }
 
