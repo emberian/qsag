@@ -1,57 +1,25 @@
 module
 /-
-# Qsag.ActiveMigrationZeroTest — Canonical Curve Semantics, 3-Party 64-Lane RSS, `GF(2^128)` BBCGGI19 Sacrifice & `all_outputs_zero` / `InvalidTape` Privacy Barriers
+# Migration algebra, executable check boundaries, and settlement
 
-Constructive (`0` choice axioms, `0` compiler-trust axioms) formalization, security
-proofs, and explicit `#tooth` attack witnesses for the 3-custodian post-quantum migration ceremony
-(`crates/qsag-migrate/src/{scalar.rs,secp256k1_ct.rs,legacy.rs,ownership.rs,co_zk_mpc.rs,outer_mpc.rs}`):
+The historical scalar-residue and tower-field models below are algebraic test
+models. Their public keys reveal their scalars; their packed field words are NOT
+Rust's polynomial basis. Their ideal machines and masking lemmas do not establish
+production curve refinement, active-MPC security, or full-execution privacy.
+Existing declaration names are retained for source compatibility.
 
-1. **Exact `SECP256K1_ORDER_N` & `ED25519_ORDER_L` Curve Subgroup Semantics + Pre-Migration Shor Boundary**:
-   - Exact 256-bit subgroup orders (`SECP256K1_ORDER_N`, `ED25519_ORDER_L`), `ScalarGroup`, and
-     circuit canonical range guard `requireCanonicalScalar` (`0 < s < group.orderNat`).
-   - Non-injective Bitcoin Taproot `x`-only negation (`taprootXOnlySameX`, pairing `s` and
-     `SECP_N - s` with `s ≠ SECP_N - s`), `#tooth` `tooth_taproot_xonly_not_injective_without_y_parity`
-     refuting naive `Function.Injective pkOf`, and `taproot_even_y_parity_restores_canonical_injectivity`
-     proving `y[0] == 0` (`ownership.rs:282`) restores canonical injectivity.
-   - SLIP-0010 / RFC 8032 Ed25519 clamping (`clampEd25519Bytes32`) + `mod ED_ORDER` reduction
-     (`normalizeSlip0010Ed25519Scalar`), proving every clamped digest reduces to a nonzero canonical
-     scalar while wrapping non-injectively modulo `ED_ORDER` (`tooth_ed25519_clamped_wraps_mod_order_non_injective`).
-   - Explicit Shor CRQC pre-migration boundary (`ShorVulnerablePreMigration` /
-     `tooth_shor_crqc_breaks_legacy_pk_pre_migration`) paired with post-ceremony Poseidon2
-     `NULLIFIER_DOMAIN` (`0x4d49_475f_4e55_4c31`) 11-limb binding & campaign replay resistance
-     (`post_ceremony_nullifier_domain_binding_and_replay_sound`).
+`MigrationExecution` below separates the Rust polynomial-basis arithmetic from
+that tower model, consumes multiplication results in a linked circuit trace,
+checks the actual witness lane words, and carries a spent-nullifier ledger across
+turns. Its exact gate checker is a reference checker, not Rust's recursive
+BBCGGI19 protocol. No statistical or computational security claim follows from
+its deterministic checks alone.
 
-2. **Canonical `< group.orderNat` Premature-Open Key-Recovery `#tooth` (`canonicalSubgroupHom`)**:
-   - Eliminates toy `Fin (2^w + 1)` groups in favor of `canonicalSubgroupHom (group : ScalarGroup)`
-     over `Fin group.orderNat` (`Secp256k1` and `Ed25519`), proving both `non_two_torsion` across all
-     256 bit generators (`odd_not_dvd_two_pow`) and strict injectivity on canonical scalars.
-   - Proves `tooth_premature_residual_open_recovers_spending_key` (and its canonical instantiation
-     `tooth_premature_residual_open_recovers_canonical_spending_key`): opening the public-key residual
-     before `all_outputs_zero` lets 256 aborted 1-bit-fault queries recover 100% of `ks.secret`.
-
-3. **3-Party 64-Lane Replicated Secret Sharing (`RssBit64`) & `shareUniformLanesCheck`**:
-   - Models 3-custodian 64-lane RSS (`party i` holds `(w_i, w_{i+1})`) and `shareUniformLanesCheck`
-     enforcing `0` or `0xFFFFFFFFFFFFFFFF` per witness bit word (`co_zk_mpc.rs:126-131`), paired
-     with `tooth_non_uniform_lanes_split_witness_across_reps`.
-
-4. **Algebraic `GF(2^128)` (`Tower128`) BBCGGI19 Sacrifice & Coin-Permuted Triple Bucketing**:
-   - Models `verifyAllPendingGf2128` over `Tower128 := TowerElem 7` and proves via
-     `RoundPoly.roots_nodup_length_le` + `towerNoZeroDivisors 7` that any nonzero multiplication
-     fault passes on at most `m` challenges out of any `Nodup` challenge set `S : List Tower128`
-     (`≤ m / 2^128`), paired with `tooth_unverified_mul_forges_all_outputs_zero`.
-   - Replaces Boolean sacrifice flags with authentic `Tower128` OT correlation checks
-     (`otSacrificeCheckGf2128`) for `coin_permuted_bucketing_hides_wire_and_bounds_double_fault`
-     vs. `tooth_fixed_bucket_selective_abort_leaks_wire_bit`.
-
-5. **`verify_all_pending` -> `all_outputs_zero` -> `PRECOMMIT` -> `FREEZE` Barrier, `InvalidTape` Conditional-Privacy Analysis & Multi-Turn `compose_forward_sim` Spine**:
-   - Proves via `mask_bijection_hop` that corrupt custodian `0`'s joint abort view (RSS replica
-     `(s0', s1')` missing `s2'` + upfront `validTape` + masked `Tower128` BBCGGI19 base-case
-     openings `(alpha, beta, gamma)` + `openedAllOutputsZero = false`) leaks `0` bits of `ks.secret`.
-   - Formalizes the upfront `Error::InvalidTape` (`co_zk_mpc.rs:743-750`) conditional-privacy
-     boundary (`upfront_invalid_tape_independent_of_spending_key`) vs. `#tooth`
-     `tooth_premature_witness_range_in_invalid_tape_leaks_secret_bit`.
-   - Lifts the 3-party RSS + `InvalidTape` + BBCGGI19 + `allOutputsZero` custodian state machine
-     across unbounded multi-turn traces via `compose_forward_sim` (`multi_turn_hardened_ceremony_trace_safe`).
+Outstanding production refinements: secp256k1/Ed25519 group laws and scalar
+multiplication, concrete address hashes and nullifier sponge, irreducibility and
+field laws for the Rust polynomial basis, the two-lane recursive sacrifice and
+its fresh-coin experiment, and simulation of the entire adversarial execution.
+These are proof obligations, not assumptions silently discharged by test models.
 -/
 
 public import Qsag.Constructive
@@ -240,7 +208,8 @@ structure TaprootCurveProjection (XCoord : Type) where
     requireCanonicalScalar .Secp256k1 s = true →
     yParity (secpNegScalar s) = !(yParity s)
 
-/-- Constructive model of `TaprootCurveProjection` on `BitVec 256` witnessing inhabitedness. -/
+/-- Synthetic scalar consistency witness for the projection interface. Its x and
+    parity functions are not secp256k1 coordinates. No curve refinement is proved. -/
 def canonicalTaprootProjection : TaprootCurveProjection (BitVec 256) where
   xOf s :=
     if requireCanonicalScalar .Secp256k1 s then
@@ -724,7 +693,7 @@ private theorem modAddVal_eq_mod {M a b : Nat} (ha : a < M) (hb : b < M) :
 private theorem modAddVal_comm (M a b : Nat) : modAddVal M a b = modAddVal M b a := by
   unfold modAddVal; rw [Nat.add_comm a b]
 
-private theorem modAddVal_assoc {M a b c : Nat} (ha : a < M) (_hb : b < M) (hc : c < M) :
+private theorem modAddVal_assoc {M a b c : Nat} (ha : a < M) (hc : c < M) :
     modAddVal M (modAddVal M a b) c = modAddVal M a (modAddVal M b c) := by
   unfold modAddVal
   cases (inferInstance : Decidable (a + b < M)) with
@@ -755,7 +724,7 @@ private theorem modAddVal_zero_left {M a : Nat} (ha : a < M) : modAddVal M 0 a =
   unfold modAddVal
   rw [cIte_pos (by omega : 0 + a < M)]; omega
 
-private theorem modSub_modAdd_cancel {M a b : Nat} (ha : a < M) (_hb : b < M) :
+private theorem modSub_modAdd_cancel {M a b : Nat} (ha : a < M) :
     modSubVal M (modAddVal M a b) b = a := by
   unfold modSubVal modAddVal
   cases (inferInstance : Decidable (a + b < M)) with
@@ -770,7 +739,7 @@ private theorem modAdd_modSub_cancel {M a b : Nat} (ha : a < M) (hb : b < M) :
   | isFalse h1 => rw [cIte_neg h1, cIte_neg (by omega : ¬ (a + M - b + b < M))]; omega
 
 private theorem modAdd_ne_modSub_of_odd {M p g : Nat}
-    (hOdd : M % 2 = 1) (_hp : p < M) (hgLt : g < M) (hgPos : 0 < g) :
+    (hOdd : M % 2 = 1) (hgLt : g < M) (hgPos : 0 < g) :
     modAddVal M p g ≠ modSubVal M p g := by
   unfold modAddVal modSubVal
   cases (inferInstance : Decidable (p + g < M)) with
@@ -883,8 +852,8 @@ theorem scalarMulKey_xor_oneBit {w pWidth : Nat} {PubKey : Type} [DecidableEq Pu
       else G.ptAdd (scalarMulKey G s) (G.genBit i) :=
   scalarMulPrefix_xor_oneBit_gt G s hi w hi (Nat.le_refl w)
 
-/-- Authentic cyclic subgroup homomorphism `Fin group.orderNat` for `Secp256k1` (`SECP_N`) and
-    `Ed25519` (`ED_ORDER`), modeling parity-pinned / compressed curve points `[s mod order]G`. -/
+/-- Transparent scalar-residue test group. The encoding reveals the discrete log.
+    This is not a curve public-key implementation or a one-way function. -/
 def canonicalSubgroupHom (group : ScalarGroup) :
     ScalarPointHom 256 256 (Fin group.orderNat) where
   ptZero := ⟨0, by have := (scalarGroup_order_props group).1; omega⟩
@@ -895,9 +864,9 @@ def canonicalSubgroupHom (group : ScalarGroup) :
   encodePk p := BitVec.ofNatLT p.val (Nat.lt_trans p.isLt (scalarGroup_order_props group).2.1)
   decodePk bv := if h : bv.toNat < group.orderNat then some ⟨bv.toNat, h⟩ else none
   add_comm a b := Fin.ext (modAddVal_comm _ a.val b.val)
-  add_assoc a b c := Fin.ext (modAddVal_assoc a.isLt b.isLt c.isLt)
+  add_assoc a b c := Fin.ext (modAddVal_assoc a.isLt c.isLt)
   zero_add a := Fin.ext (modAddVal_zero_left a.isLt)
-  add_sub_cancel a b := Fin.ext (modSub_modAdd_cancel a.isLt b.isLt)
+  add_sub_cancel a b := Fin.ext (modSub_modAdd_cancel a.isLt)
   sub_add_cancel a b := Fin.ext (modAdd_modSub_cancel a.isLt b.isLt)
   non_two_torsion i _hi p := by
     intro hEq
@@ -906,7 +875,7 @@ def canonicalSubgroupHom (group : ScalarGroup) :
     obtain ⟨hGt1, _, hOdd⟩ := scalarGroup_order_props group
     have hgNe0 : (2 ^ i) % group.orderNat ≠ 0 := odd_not_dvd_two_pow hOdd hGt1 i
     have hgLt : (2 ^ i) % group.orderNat < group.orderNat := Nat.mod_lt _ (by omega)
-    exact modAdd_ne_modSub_of_odd hOdd p.isLt hgLt (Nat.pos_of_ne_zero hgNe0) hValEq
+    exact modAdd_ne_modSub_of_odd hOdd hgLt (Nat.pos_of_ne_zero hgNe0) hValEq
   decode_encode p := by
     change (if h : p.val < group.orderNat then some ⟨p.val, h⟩ else none) = some p
     rw [cDIte_pos p.isLt]
@@ -1021,21 +990,16 @@ theorem canonicalSubgroupHom_injective_on_canonical (group : ScalarGroup) :
           hsOrdVal, Nat.mod_self]
       simp
 
-/-- **Shor Pre-Migration Vulnerability Predicate (`ShorVulnerablePreMigration`)**:
-    Legacy `Secp256k1` and `Ed25519` public keys hide `s` **only** against classical discrete-log
-    adversaries; a Shor CRQC discrete-log oracle recovers canonical `s` directly from `pk` before
-    any migration ceremony runs. -/
+/-- Historical compatibility predicate: invertibility of the transparent scalar
+    test group. It models neither a quantum algorithm nor curve discrete-log hardness. -/
 def ShorVulnerablePreMigration (group : ScalarGroup) : Prop :=
   ∃ shorDlog : Fin group.orderNat → BitVec 256,
     ∀ s : BitVec 256,
       requireCanonicalScalar group s = true →
       shorDlog (scalarMulKey (canonicalSubgroupHom group) s) = s
 
-/-- **`#tooth` Shor CRQC Recovers Pre-Migration Legacy Key Directly From `pk` (`tooth_shor_crqc_breaks_legacy_pk_pre_migration`)**:
-    Prior to post-quantum migration finality, a quantum period-finding (Shor CRQC) adversary
-    inverts `scalarMulKey (canonicalSubgroupHom group)` on **every** canonical scalar in `[1, order - 1]`
-    with `0` custodian MPC queries — proving why migration security after settlement relies on the
-    PQ destination key + Poseidon2 `NULLIFIER_DOMAIN` binding rather than legacy curve hiding. -/
+/-- Scalar-disclosure witness for the transparent test group. The inverse is
+    classical and immediate; this theorem is not an implementation of Shor. -/
 theorem tooth_shor_crqc_breaks_legacy_pk_pre_migration (group : ScalarGroup) :
     ∃ shorDlog : Fin group.orderNat → BitVec 256,
       ShorVulnerablePreMigration group ∧
@@ -1103,13 +1067,9 @@ def computeMigrationNullifier
     (group : ScalarGroup) (s migrationDomain : BitVec 256) : Fin 4 → Goldilocks :=
   poseidon2Hash NULLIFIER_DOMAIN (migrationNullifierInput group s migrationDomain)
 
-/-- **Post-Ceremony `NULLIFIER_DOMAIN` Binding & Campaign Replay Resistance (`post_ceremony_nullifier_domain_binding_and_replay_sound`)**:
-    1. `migrationNullifierInput` injectively binds `(group, s, migrationDomain)` across 11 canonical
-       Goldilocks limbs under `NULLIFIER_DOMAIN = 0x4d49_475f_4e55_4c31`, so any collision on
-       `computeMigrationNullifier` directly yields a Poseidon2 sponge collision on `NULLIFIER_DOMAIN`.
-    2. Changing the PQ destination public key `pqDest1 ≠ pqDest2` within a campaign (`migrationDomain`
-       fixed) leaves `computeMigrationNullifier` invariant (`scalar.rs:78-84`), blocking post-finality
-       double-migration even if a Shor CRQC later extracts the retired legacy key `s`! -/
+/-- Nullifier preimage binding or hash collision, and destination independence.
+    This compatibility theorem has no ledger and does not prove replay rejection.
+    See MigrationExecution.settle_replay_rejected for the stateful property. -/
 theorem post_ceremony_nullifier_domain_binding_and_replay_sound
     (poseidon2Hash : UInt64 → (Fin 11 → Goldilocks) → (Fin 4 → Goldilocks)) :
     NULLIFIER_DOMAIN = 0x4d49475f4e554c31 ∧
@@ -2198,14 +2158,15 @@ theorem coin_permuted_bucketing_hides_wire_and_bounds_double_fault
 
 /-! ## 6. `verify_all_pending` -> `all_outputs_zero` -> `PRECOMMIT` -> `FREEZE` Barrier, `InvalidTape` Conditional-Privacy & Multi-Turn `compose_forward_sim` -/
 
-/-- Encoded subgroup public-key residual evaluated inside 3-party RSS (`co_zk_mpc.rs:1068-1094`). -/
+/-- Encoded residual in the transparent scalar test model; not a Rust curve or
+    hashed-address ownership residual. -/
 def circuitPkResidual (group : ScalarGroup) (pk : Fin group.orderNat) (s' : MigrationKey256) :
     MigrationKey256 :=
   (canonicalSubgroupHom group).encodePk (scalarMulKey (canonicalSubgroupHom group) s') ^^^
     (canonicalSubgroupHom group).encodePk pk
 
-/-- Complete inside-MPC `all_outputs_zero` predicate (`co_zk_mpc.rs:1064-1102`, `ownership.rs:261-303`):
-    combines `requireCanonicalScalar group s'` (`0 < s' < order`) with zero curve residual! -/
+/-- Canonical-range and equality check for the transparent scalar test model.
+    Hashed legacy addresses require the separate collision-aware relation below. -/
 def circuitAllOutputsZero (group : ScalarGroup) (pk : Fin group.orderNat) (s' : MigrationKey256) : Bool :=
   requireCanonicalScalar group s' && (circuitPkResidual group pk s' == 0#256)
 
@@ -2264,13 +2225,9 @@ def tower128BaseSacrificeEquiv (target rb : Tower128) (hRb : rb ≠ towerZero 7)
         towerAdd_cancel,
         packTower_unpackTower]
 
-/-- Corrupt custodian `0`'s complete observable view in the hardened 3-party RSS + BBCGGI19 +
-    `all_outputs_zero` -> `PRECOMMIT` -> `FREEZE` ceremony (`co_zk_mpc.rs:126-296, 720-750, 1064-1110`):
-    - `rssWitnessMine` & `rssWitnessNext`: custodian `0`'s 2-of-3 RSS shares `(s0', s1')` (missing `s2'`).
-    - `openedValidTape`: upfront `InvalidTape` bit (`co_zk_mpc.rs:744`).
-    - `bbcggiAlpha`, `bbcggiBeta`, `bbcggiGamma`: base-case `GF(2^128)` sacrifice openings (`outer_mpc.rs:2359`).
-    - `openedAllOutputsZero`: single 1-bit zero-test output (`None` if aborted earlier at `InvalidTape`).
-    - `postPrecommitFreezePayload`: view commitments & ZKBoo views (`none` whenever `InvalidTape` or `!allOutputsZero`). -/
+/-- Observable tuple for a standalone masking experiment. It is not the full
+    corrupt-party view of Rust execution: public inputs, initial knowledge, and
+    failed multiplication-check transcripts are absent. -/
 structure HardenedRssCeremonyView (ZkView : Type) where
   rssWitnessMine             : MigrationKey256
   rssWitnessNext             : MigrationKey256
@@ -2282,9 +2239,9 @@ structure HardenedRssCeremonyView (ZkView : Type) where
   postPrecommitFreezePayload : Option (MigrationKey256 × ZkView)
   deriving Repr, DecidableEq
 
-/-- Real ceremony view observed by corrupt custodian `0` under honest RSS pad `rRss : BitVec 256`
-    (refreshing `(s1 ^^^ rRss, s2 ^^^ rRss)` while preserving `ks.secret`) and honest PRSS
-    `Tower128` BBCGGI19 base masks `(uBits, vBits) : BitVec 128 × BitVec 128`. -/
+/-- Synthetic masking experiment using ideal scalar evaluation and tower
+    multiplication. Despite the historical name, this does not execute the
+    active protocol or either of its verification routines. -/
 def realHardenedRssCeremonyView {ZkView : Type}
     (group : ScalarGroup)
     (drawValidPred : MigrationKey256 → Bool)
@@ -2347,13 +2304,9 @@ def realHardenedRssCeremonyView {ZkView : Type}
       openedAllOutputsZero := some false
       postPrecommitFreezePayload := none }
 
-/-- **Hardened 3-Party RSS + BBCGGI19 + `all_outputs_zero` -> `PRECOMMIT` -> `FREEZE` Privacy (`hardened_co_zk_mpc_zero_test_hides_secret_on_input_fault`)**:
-    For **any** canonical `Secp256k1` or `Ed25519` spending scalar (`requireCanonicalScalar group ks.secret = true`),
-    **any** nonzero BBCGGI19 challenge `rb ≠ towerZero 7`, and **any** nonzero witness fault `delta ≠ 0#256`:
-    when `shareUniformLanesCheck` and `verifyAllPendingGf2128` run before opening the 1-bit
-    `all_outputs_zero`, corrupt custodian `0`'s complete joint view (RSS replica `(s0', s1')` +
-    `validTape` + masked `GF(2^128)` sacrifice messages + `all_outputs_zero`) equals the `ks.secret`-free
-    simulator `simHardenedAbortView` (`0` statistical distance, proved via `mask_bijection_hop`)! -/
+/-- Single-experiment masking equality for the synthetic tower/scalar view.
+    The explicit uniform-pad enumeration is essential. This is not a simulation
+    of the actual multi-round migration protocol or its initial adversary view. -/
 theorem hardened_co_zk_mpc_zero_test_hides_secret_on_input_fault
     {C : Nat} {ZkView : Type}
     (group : ScalarGroup)
@@ -2659,7 +2612,9 @@ structure AbstractCustodianState where
   aborted   : Nat
   deriving Repr, DecidableEq
 
-/-- Layer 1: Concrete 3-party RSS + `InvalidTape` + BBCGGI19 + `all_outputs_zero` `PartyMachine`. -/
+/-- Historical ideal arithmetic machine with independent preconditions.
+    Despite the compatibility name, it does not execute malicious shared gates.
+    MigrationExecution.run evaluates a linked gate trace instead. -/
 def concreteCustodianMachine {ZkView : Type}
     (drawValidPred : MigrationKey256 → Bool)
     (zkCommit : MigrationKey256 → ZkView) :
@@ -2869,14 +2824,9 @@ private theorem idealZeroFault_trace_inv {ZkView : Type}
     intro p hp
     exact ih p hp
 
-/-- **Multi-Turn 3-Party RSS + BBCGGI19 + `all_outputs_zero` Trace Safety & Completeness (`multi_turn_hardened_ceremony_trace_safe`)**:
-    1. **Multi-Turn Trace Safety**: Across ANY unbounded `ValidTrace` of `concreteCustodianMachine`
-       interleaving valid ceremonies with mixed-lane attacks, `InvalidTape` aborts, `GF(2^128)`
-       multiplication faults, and witness `deltaScalar` faults, **every** accepted ceremony turn
-       `(inp, zkv) ∈ trace` passed `isUniformLaneWord`, `evalUpfrontTapeValidity`,
-       `verifyAllPendingGf2128`, had `inp.deltaScalar = 0#256`, and emitted `zkCommit ks.secret`.
-    2. **Non-Narrowing Honest Completeness**: Any honest zero-fault turn (`deltaScalar = 0#256`,
-       `laneMask = 0`, valid tape seeds, and zero-error `Tower128` triples) is accepted cleanly! -/
+/-- Trace invariant and completeness for the ideal scalar-residue machine.
+    The separately supplied triples do not affect that ideal computation; this
+    theorem must not be used as active gate-execution safety. -/
 theorem multi_turn_hardened_ceremony_trace_safe
     {ZkView : Type}
     (group : ScalarGroup)

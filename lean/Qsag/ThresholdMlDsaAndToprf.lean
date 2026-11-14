@@ -2250,7 +2250,7 @@ theorem validSubsetShare_eq_true_iff (A : PolyMat4) (etaSub : Nat) (sh : SubsetS
        `sh.publicT = A * sh.s1 + sh.s2` and the short-secret bounds `‖sh.s1‖_∞ ≤ etaSub ∧ ‖sh.s2‖_∞ ≤ etaSub`. -/
 theorem subset_honest_holder_exists
     {t n : Nat} (ht : 1 ≤ t) (hn : 2 * t - 1 ≤ n)
-    {C T : List Nat} (_hCNodup : C.Nodup) (hCLen : C.length ≤ t - 1)
+    {C T : List Nat} (hCLen : C.length ≤ t - 1)
     (hTNodup : T.Nodup) (hTLen : T.length = n - t + 1)
     (A : PolyMat4) (etaSub : Nat) (sh : SubsetShareRecord) :
     (∃ h : Nat, findHonestHolder C T = some h ∧ h ∈ T ∧ h ∉ C) ∧
@@ -2993,7 +2993,7 @@ theorem dkg_confirm_transcript_binding_and_rss_consistency
   refine ⟨?_, ?_, ?_⟩
   · intro t m subset corrupt ht hm hCNd hCLen hSNd hSLen
     obtain ⟨h, _, hIn, hNotIn⟩ :=
-      (subset_honest_holder_exists ht hm hCNd hCLen hSNd hSLen idMat4 0
+      (subset_honest_holder_exists ht hm hCLen hSNd hSLen idMat4 0
         ⟨rssZeroVec4, rssZeroVec4, rssZeroVec4⟩).1
     exact ⟨h, hIn, hNotIn⟩
   · intro A s1Subs s2Subs hLen
@@ -3089,28 +3089,39 @@ theorem premature_z_release_leaks_s2_boundary
     exact hL.trans hR.symm
   exact ⟨hRecover, hRecover.symm ▸ hBoundaryAbort⟩
 
-/-- Non-vacuity witness for `premature_z_release_leaks_s2_boundary` with nonzero `(A, s1, s2, y, c)`. -/
+/-- A boundary abort with genuinely nonzero secret vectors, tied to the leakage experiment. -/
 theorem premature_z_release_leaks_s2_boundary_inhabited :
-    ∃ (A : PolyMat4) (_s1 s2 y : PolyVec4) (c : Poly256),
+    ∃ (A : PolyMat4) (s1 s2 y : PolyVec4) (c : Poly256),
+      s1 ≠ (fun _ => PolyTree.zero 8) ∧
+      s2 ≠ (fun _ => PolyTree.zero 8) ∧
       c ≠ PolyTree.zero 8 ∧
-      mldsa44Gamma2 - mldsa44Beta ≤ lowBitsNormVec4 (subVec4 (matVecMul4 A y) (mulPolyVec4 c s2)) := by
-  let yHi : PolyVec4 := fun _ => polyTreeConstLeaf 8 ⟨95200, by decide⟩
-  let z0 : PolyVec4 := fun _ => PolyTree.zero 8
-  refine ⟨idMat4, z0, z0, yHi, PolyTree.constUnit 8, by decide, ?_⟩
-  have hMv : matVecMul4 idMat4 yHi = yHi := matVecMul4_idMat4 yHi
-  have hMul0 : mulPolyVec4 (PolyTree.constUnit 8) z0 = z0 := by
-    funext i; exact negacyclicMul_one_left (z0 i)
-  rw [hMv, hMul0]
-  have hSub0 : subVec4 yHi z0 = yHi := by
-    funext i; dsimp only [subVec4, z0]
-    rw [polyTree_sub_eq_add_neg, ← polyTreeConstLeaf_zero_eq 8, polyTreeConstLeaf_neg]
-    have hNeg0 : Fq204.neg Fq204.zero = Fq204.zero := by decide
-    rw [hNeg0, polyTreeConstLeaf_zero_eq 8, polyTree_add_zero]
-  rw [hSub0]
-  unfold lowBitsNormVec4
-  dsimp only [yHi]
-  simp only [polyTreeConstLeaf_lowBitsNorm, Nat.max_self]
-  decide
+      mldsa44Gamma2 - mldsa44Beta ≤ lowBitsNormVec4 (subVec4 (matVecMul4 A y) (mulPolyVec4 c s2)) ∧
+      subVec4 (matVecMul4 A (addVec4 y (mulPolyVec4 c s1)))
+        (mulPolyVec4 c (addVec4 (matVecMul4 A s1) s2)) =
+        subVec4 (matVecMul4 A y) (mulPolyVec4 c s2) := by
+  let v1 : PolyVec4 := fun _ => polyTreeConstLeaf 8 Fq204.one
+  let yHi : PolyVec4 := fun _ => polyTreeConstLeaf 8 ⟨95201, by decide⟩
+  have hn : v1 ≠ (fun _ => PolyTree.zero 8) := by
+    intro h
+    have he := congrFun h (0 : Fin 4)
+    have hv := congrArg PolyTree.infNorm he
+    simp only [v1, polyTreeConstLeaf_infNorm] at hv
+    change 1 = 0 at hv
+    omega
+  have hb : mldsa44Gamma2 - mldsa44Beta ≤
+      lowBitsNormVec4 (subVec4 (matVecMul4 idMat4 yHi)
+        (mulPolyVec4 (PolyTree.constUnit 8) v1)) := by
+    rw [matVecMul4_idMat4]
+    have hm : mulPolyVec4 (PolyTree.constUnit 8) v1 = v1 := by
+      funext i; exact negacyclicMul_one_left (v1 i)
+    rw [hm]
+    unfold lowBitsNormVec4 subVec4
+    dsimp only [yHi, v1]
+    simp only [polyTree_sub_eq_add_neg, polyTreeConstLeaf_neg,
+      polyTreeConstLeaf_add, polyTreeConstLeaf_lowBitsNorm, Nat.max_self]
+    decide
+  exact ⟨idMat4, v1, v1, yHi, PolyTree.constUnit 8, hn, hn, by decide, hb,
+    (premature_z_release_leaks_s2_boundary idMat4 v1 v1 yHi (PolyTree.constUnit 8) hb).1⟩
 
 /-- Tree-lifted centered residual norm `‖(r - w1 * 2γ₂) mod± q‖_∞` (`threshold_mldsa.rs:789-799`). -/
 def centeredDiffNormTree : {d : Nat} → PolyTree d → NatTree d → Nat
@@ -3225,6 +3236,26 @@ structure RssMlDsaSignerState where
   s1Subsets : List PolyVec4
   s2Subsets : List PolyVec4
 
+/-- Supplied multiplication outputs consumed by the signing transition. These are checked
+    against the operands, rather than accepting a caller's success flag. This is an exact
+    aggregate checker; a private distributed sacrifice implementation needs a separate refinement. -/
+structure RssSignProducts where
+  w : PolyVec4
+  cs1 : PolyVec4
+  cs2 : PolyVec4
+  ct0 : PolyVec4
+
+def rssComputeProducts
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (mu : List UInt8) (ySubsets : List PolyVec4) : RssSignProducts :=
+  let s1 := rssSumVec4List st.s1Subsets
+  let s2 := rssSumVec4List st.s2Subsets
+  let w := matVecMul4 st.A (rssSumVec4List ySubsets)
+  let c := sampleInBall (chalHash mu (highBitsVec4 w))
+  { w := w, cs1 := mulPolyVec4 c s1, cs2 := mulPolyVec4 c s2,
+    ct0 := mulPolyVec4 c (power2RoundLowVec4 (addVec4 (matVecMul4 st.A s1) s2)) }
+
 /-- Single RSS signing-attempt input (`threshold_mldsa.rs:795-975`):
     binds `(epoch, sessionId, attempt)`, message representative `mu`, RSS nonce shares `ySubsets`,
     fresh `< q` RSS masks `(maskW, maskZ, maskLow)`, and the `Ext6Fq204` multiplication-sacrifice bit. -/
@@ -3237,7 +3268,33 @@ structure RssMlDsaAttemptInput where
   maskW : PolyVec4
   maskZ : PolyVec4
   maskLow : PolyVec4
-  mpcSacrificeOk : Bool
+  products : RssSignProducts
+
+def rssProductsValid
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput) : Bool :=
+  let expected := rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets
+  polyVec4EqBool inp.products.w expected.w &&
+  polyVec4EqBool inp.products.cs1 expected.cs1 &&
+  polyVec4EqBool inp.products.cs2 expected.cs2 &&
+  polyVec4EqBool inp.products.ct0 expected.ct0
+
+theorem rssProductsValid_eq_true_iff
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput) :
+    rssProductsValid chalHash sampleInBall st inp = true ↔
+      inp.products = rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets := by
+  simp only [rssProductsValid, Bool.and_eq_true, polyVec4EqBool_eq_true_iff]
+  constructor
+  · rintro ⟨⟨⟨hw, hs1⟩, hs2⟩, ht⟩
+    cases inp.products
+    cases rssComputeProducts chalHash sampleInBall st inp.mu inp.ySubsets
+    simp_all
+  · intro h
+    rw [h]
+    exact ⟨⟨⟨rfl, rfl⟩, rfl⟩, rfl⟩
 
 /-- Emitted standalone FIPS 204 signature + burned attempt counter. -/
 structure ThresholdSignSig where
@@ -3431,7 +3488,7 @@ private theorem mkRssSignAttemptOutcome_false
 /-- Per-attempt RSS transition of `threshold_sign_mldsa_party` (`threshold_mldsa.rs:795-1055`):
     - Enforces `(inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt)` and immediately burns
       `nextAttempt := st.nextAttempt + 1` BEFORE Phase 1;
-    - Requires `inp.mpcSacrificeOk = true` (`Ext6Fq204` `verify_all_pending` + view-digest unanimity);
+    - Requires `rssProductsValid chalHash sampleInBall st inp = true` (`Ext6Fq204` `verify_all_pending` + view-digest unanimity);
     - Evaluates `w1 = HighBits(w)`, `c = SampleInBall(H(μ, w1))`, and the RSS rejection predicate
       `accept`;
     - On rejection (`accept = false`), emits `(publicView, none)` (`rejectBit = true`, unmasked `z` NEVER opened!);
@@ -3447,21 +3504,16 @@ def rssThresholdSignStep
   | false => .err st .attemptReplay
   | true =>
     let stBurned : RssMlDsaSignerState := { st with nextAttempt := st.nextAttempt + 1 }
-    match inp.mpcSacrificeOk with
+    match rssProductsValid chalHash sampleInBall st inp with
     | false => .err stBurned .mpcSacrificeFailed
     | true =>
-      let s1 := rssSumVec4List st.s1Subsets
-      let s2 := rssSumVec4List st.s2Subsets
       let y := rssSumVec4List inp.ySubsets
-      let t := addVec4 (matVecMul4 st.A s1) s2
-      let t0 := power2RoundLowVec4 t
-      let w := matVecMul4 st.A y
+      let w := inp.products.w
       let w1 := highBitsVec4 w
       let cTilde := chalHash inp.mu w1
-      let c := sampleInBall cTilde
-      let ct0 := mulPolyVec4 c t0
-      let z := addVec4 y (mulPolyVec4 c s1)
-      let u := subVec4 w (mulPolyVec4 c s2)
+      let ct0 := inp.products.ct0
+      let z := addVec4 y inp.products.cs1
+      let u := subVec4 w inp.products.cs2
       let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
       let accept : Bool :=
         decide (infNormVec4 ct0 < mldsa44Gamma2) &&
@@ -3502,10 +3554,12 @@ private theorem rssThresholdSignStep_ok_meta
   | true =>
     rw [hGate] at hOk
     obtain ⟨hEp, hAtt⟩ := of_decide_eq_true hGate
-    cases hSac : inp.mpcSacrificeOk with
+    cases hSac : rssProductsValid chalHash sampleInBall st inp with
     | false => rw [hSac] at hOk; cases hOk
     | true =>
       rw [hSac] at hOk
+      rw [(rssProductsValid_eq_true_iff chalHash sampleInBall st inp).mp hSac] at hOk
+      dsimp only [rssComputeProducts] at hOk
       obtain ⟨hSt, hPub, hBranch⟩ := mkRssSignAttemptOutcome_eq_ok hOk
       subst hSt hPub
       refine ⟨hEp, hAtt, rfl, rfl, hAtt, ?_⟩
@@ -3561,7 +3615,7 @@ private theorem rssThresholdSignStep_err_attempt
       exact ⟨Nat.le_refl _, fun hg => by rw [decide_eq_true hg] at hGate; cases hGate⟩
     | true =>
       rw [hGate] at hOut
-      cases hSac : inp.mpcSacrificeOk with
+      cases hSac : rssProductsValid chalHash sampleInBall st inp with
       | false =>
         rw [hSac] at hOut
         injection hOut with hSt _
@@ -3612,7 +3666,7 @@ private theorem rssThresholdSignMachine_attempt_mono
 /-- **Flagship §2.4 Theorem — `(t, m)` RSS Rejection-Sampling Leakage Simulator, Durable Nonce-Burn &
     Standalone FIPS 204 Completeness (`threshold_mldsa_rss_abort_leakage_and_completeness`, fixing `C0-1`)**:
     1. **Honest Abort Transcript & Unmasked-`z` Suppression (`rejectBit = true`)**: Whenever a valid
-       attempt (`inp.epoch = st.epoch`, `inp.attempt = st.nextAttempt`, `inp.mpcSacrificeOk = true`)
+       attempt (`inp.epoch = st.epoch`, `inp.attempt = st.nextAttempt`, `rssProductsValid chalHash sampleInBall st inp = true`)
        violates `‖z‖_∞ < γ₁ - β`, `‖LowBits(w - c*s2)‖_∞ < γ₂ - β`, or `HighBits(w - c*s2) = HighBits(w)`,
        `rssThresholdSignStep` emits `(pubView, none)` (`pubView.rejectBit = true`, `pubView.openedW1 = HighBits(w)`,
        unmasked `(z, h)` NEVER opened!) and burns `st'.nextAttempt = st.nextAttempt + 1`.
@@ -3633,7 +3687,7 @@ theorem threshold_mldsa_rss_abort_leakage_and_completeness
     (∀ (st : RssMlDsaSignerState) (inp : RssMlDsaAttemptInput),
       inp.epoch = st.epoch →
       inp.attempt = st.nextAttempt →
-      inp.mpcSacrificeOk = true →
+      rssProductsValid chalHash sampleInBall st inp = true →
       let s1 := rssSumVec4List st.s1Subsets
       let s2 := rssSumVec4List st.s2Subsets
       let y := rssSumVec4List inp.ySubsets
@@ -3705,6 +3759,8 @@ theorem threshold_mldsa_rss_abort_leakage_and_completeness
     have hStepFalse : rssThresholdSignStep chalHash sampleInBall st inp = .ok stBurned (pubView, none) := by
       unfold rssThresholdSignStep
       rw [decide_eq_true ⟨hEp, hAtt⟩, hSac]
+      rw [(rssProductsValid_eq_true_iff chalHash sampleInBall st inp).mp hSac]
+      dsimp only [rssComputeProducts]
       exact mkRssSignAttemptOutcome_false stBurned inp.attempt (chalHash inp.mu w1)
         w z u inp.maskW inp.maskZ inp.maskLow w1 _ hAccFalse
     rw [hStepFalse]
@@ -3750,11 +3806,11 @@ theorem threshold_mldsa_rss_inhabited :
   let inpAcc : RssMlDsaAttemptInput :=
     { epoch := 0, sessionId := [0x01], attempt := 0, mu := [0x42],
       ySubsets := [v1], maskW := rssZeroVec4, maskZ := rssZeroVec4, maskLow := rssZeroVec4,
-      mpcSacrificeOk := true }
+      products := rssComputeProducts chalHash sampleInBall st [0x42] [v1] }
   let inpRej : RssMlDsaAttemptInput :=
     { epoch := 0, sessionId := [0x01], attempt := 0, mu := [0x42],
       ySubsets := [yBad], maskW := v1, maskZ := v1, maskLow := v1,
-      mpcSacrificeOk := true }
+      products := rssComputeProducts chalHash sampleInBall st [0x42] [yBad] }
   have hSum1 : rssSumVec4List [v1] = v1 := by
     dsimp only [rssSumVec4List]; exact addVec4_rssZero_right v1
   have hSumBad : rssSumVec4List [yBad] = yBad := by
@@ -3822,7 +3878,8 @@ theorem threshold_mldsa_rss_inhabited :
     simp only [polyTreeConstLeaf_infNorm, Nat.max_self]
     decide
   obtain ⟨stRej, pubRej, hStepRej, _, hRejBit, _, _⟩ :=
-    (threshold_mldsa_rss_abort_leakage_and_completeness chalHash sampleInBall).1 st inpRej rfl rfl rfl (Or.inl hZBad)
+    (threshold_mldsa_rss_abort_leakage_and_completeness chalHash sampleInBall).1 st inpRej rfl rfl
+      ((rssProductsValid_eq_true_iff chalHash sampleInBall st inpRej).mpr rfl) (Or.inl hZBad)
   have hAccFull :
       (decide (infNormVec4 (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
         (power2RoundLowVec4 (addVec4 (matVecMul4 st.A (rssSumVec4List st.s1Subsets)) (rssSumVec4List st.s2Subsets)))) < mldsa44Gamma2) &&
@@ -3882,6 +3939,8 @@ theorem threshold_mldsa_rss_inhabited :
            some { cTilde := cTildeAcc, z := zAcc, h := hintAcc, usedAttempt := inpAcc.attempt }) := by
       unfold rssThresholdSignStep
       rw [decide_eq_true (⟨rfl, rfl⟩ : inpAcc.epoch = st.epoch ∧ inpAcc.attempt = st.nextAttempt)]
+      rw [(rssProductsValid_eq_true_iff chalHash sampleInBall st inpAcc).mpr rfl]
+      dsimp only [inpAcc, rssComputeProducts]
       exact mkRssSignAttemptOutcome_true
         { st with nextAttempt := st.nextAttempt + 1 } inpAcc.attempt
         cTildeAcc wAcc zAcc uAcc inpAcc.maskW inpAcc.maskZ inpAcc.maskLow w1Acc hintAcc hAccFull
@@ -8435,7 +8494,6 @@ theorem vcCommitPartyView_binding
     (hHLen : ∀ m, (H m).length < 256 ^ 8)
     {presNonce : Vec UInt8 32} {repIdx : Nat} {partyIdx : Fin 3}
     {v₁ v₂ : PartyVcRepView} {fo₁ fo₂ : VcPartyFinalOut}
-    (_hRepLt : repIdx < 256 ^ 8)
     (hNe : (v₁, fo₁) ≠ (v₂, fo₂))
     (hComEq : vcCommitPartyView H presNonce repIdx partyIdx v₁ fo₁ =
               vcCommitPartyView H presNonce repIdx partyIdx v₂ fo₂) :
@@ -8897,14 +8955,14 @@ theorem verifyOpenedBlindVcRep_extract3_from_rewound
     unfold reconstructRepCommits at hc1
     rw [he0, he1, hFo01, Triple3.get_ofFn, Triple3.get_ofFn] at hc1
     dsimp only [vcNextParty3, mkParty3At] at hc1
-    exact vcCommitPartyView_binding hHLen hRepLt (fun h => hv1 (congrArg Prod.fst h)) hc1
+    exact vcCommitPartyView_binding hHLen (fun h => hv1 (congrArg Prod.fst h)) hc1
   else if hv2 : o1.viewE1 ≠ o2.viewE then
     left
     have hc2 := congrArg (fun t => t.get 2) hCom12
     unfold reconstructRepCommits at hc2
     rw [he1, he2, hFo12, Triple3.get_ofFn, Triple3.get_ofFn] at hc2
     dsimp only [vcNextParty3, mkParty3At] at hc2
-    exact vcCommitPartyView_binding hHLen hRepLt (fun h => hv2 (congrArg Prod.fst h)) hc2
+    exact vcCommitPartyView_binding hHLen (fun h => hv2 (congrArg Prod.fst h)) hc2
   else if hv0 : o2.viewE1 ≠ o0.viewE then
     left
     have hFo20 : o2.finalOuts = o0.finalOuts := (hFo01.trans hFo12).symm
@@ -8912,7 +8970,7 @@ theorem verifyOpenedBlindVcRep_extract3_from_rewound
     unfold reconstructRepCommits at hc0
     rw [he2, he0, hFo20, Triple3.get_ofFn, Triple3.get_ofFn] at hc0
     dsimp only [vcNextParty3, mkParty3At] at hc0
-    exact vcCommitPartyView_binding hHLen hRepLt (fun h => hv0 (congrArg Prod.fst h)) hc0
+    exact vcCommitPartyView_binding hHLen (fun h => hv0 (congrArg Prod.fst h)) hc0
   else
     right
     have hv1Eq : o0.viewE1 = o1.viewE := Decidable.of_not_not hv1
@@ -11576,5 +11634,239 @@ theorem blind_vc_presentation_inhabited :
   obtain ⟨hLen, hVer⟩ := proveBlindVcPresentation_verifies vcKeccakSponge32 vcExpandPartyCoins .quantum128
     stmt (Vec.replicate 32 0x22) [0xA5, 0x5A] wit hValid zeroCoins
   exact ⟨schema, pres, rfl, hLen, rfl, hVer⟩
+
+
+/-! ## Checked transform and serialization boundaries
+
+The generic helpers imported from `AdvancedMpcAndCreds` are not used below. In particular,
+interpolation uses the proved inverse NTT, and LDE length is the source length times blowup.
+-/
+
+structure CosetDomain204 where
+  blowup : Nat
+  shift : Fq204
+  root : Fq204
+
+def cosetDomain204Valid (d : CosetDomain204) : Bool :=
+  decide (0 < d.blowup) && decide (d.shift ≠ Fq204.zero) &&
+  decide (Fq204.pow d.root (256 * d.blowup) = Fq204.one) &&
+  decide (((List.range (256 * d.blowup)).map (Fq204.pow d.root)).Nodup)
+
+/-- Interpolate the source NTT evaluations, then evaluate on the validated multiplicative coset.
+    Duplicate domain points, zero shift, and zero blowup are rejected. -/
+def cosetLde204 (d : CosetDomain204) (evals : Poly256) : Option (List Fq204) :=
+  if cosetDomain204Valid d then
+    some ((List.range (256 * d.blowup)).map (fun i =>
+      evalPoly204 (PolyTree.toList (fips204InvNtt evals))
+        (Fq204.mul d.shift (Fq204.pow d.root i))))
+  else none
+
+theorem cosetLde204_size {d : CosetDomain204} {evals : Poly256} {out : List Fq204}
+    (h : cosetLde204 d evals = some out) :
+    out.length = (PolyTree.toList evals).length * d.blowup := by
+  unfold cosetLde204 at h
+  split at h
+  · cases h
+    simp only [List.length_map, List.length_range, PolyTree.length_toList]
+    rfl
+  · cases h
+
+theorem cosetLde204_ntt (d : CosetDomain204) (p : Poly256)
+    (h : cosetDomain204Valid d = true) :
+    cosetLde204 d (fips204Ntt p) = some
+      ((List.range (256 * d.blowup)).map (fun i =>
+        evalPoly204 (PolyTree.toList p) (Fq204.mul d.shift (Fq204.pow d.root i)))) := by
+  simp only [cosetLde204, h, ↓reduceIte, fips204InvNtt_ntt]
+
+theorem tooth_cosetLde204_zero_shift (n : Nat) (r : Fq204) (p : Poly256) :
+    cosetLde204 ⟨n, Fq204.zero, r⟩ p = none := by
+  simp [cosetLde204, cosetDomain204Valid]
+
+/-- Raw-input boundary: unlike a saturating natural subtraction, this rejects every `v ≥ q`. -/
+def canonicalNorm204 (bound : Nat) (coeffs : List Nat) : Bool :=
+  coeffs.all (fun v => decide (v < mldsaQ ∧ min v (mldsaQ - v) < bound))
+
+theorem canonicalNorm204_sound {b : Nat} {xs : List Nat}
+    (h : canonicalNorm204 b xs = true) :
+    ∀ v ∈ xs, v < mldsaQ ∧ min v (mldsaQ - v) < b := by
+  simpa only [canonicalNorm204, List.all_eq_true, decide_eq_true_eq] using h
+
+theorem tooth_canonicalNorm204_rejects_q : canonicalNorm204 1 [mldsaQ] = false := by
+  decide
+
+/-- Bounded byte strings are mandatory at the four-byte framing boundary. -/
+structure Frame204 where
+  bytes : List UInt8
+  bounded : bytes.length < 2 ^ 32
+
+def merkleLeafPreimage204 (leaf : Frame204) : List UInt8 :=
+  [0] ++ frameBytes leaf.bytes
+
+def merkleNodePreimage204 (left right : Frame204) : List UInt8 :=
+  [1] ++ frameBytes left.bytes ++ frameBytes right.bytes
+
+theorem merkleLeafPreimage204_injective {a b : Frame204}
+    (h : merkleLeafPreimage204 a = merkleLeafPreimage204 b) : a.bytes = b.bytes := by
+  apply FramedBytesCodec.frameBytes_injective a.bounded b.bounded
+  exact List.append_cancel_left h
+
+theorem merkleNodePreimage204_injective {a b c d : Frame204}
+    (h : merkleNodePreimage204 a b = merkleNodePreimage204 c d) :
+    a.bytes = c.bytes ∧ b.bytes = d.bytes := by
+  have hp : frameBytes a.bytes ++ frameBytes b.bytes =
+      frameBytes c.bytes ++ frameBytes d.bytes := by
+    simpa only [merkleNodePreimage204, List.append_assoc, List.cons_append,
+      List.nil_append, List.cons.injEq, true_and] using h
+  obtain ⟨hl, hr⟩ := (FramedBytesCodec.prefix_free_injective a.bounded c.bounded).mp hp
+  exact ⟨hl, FramedBytesCodec.frameBytes_injective b.bounded d.bounded hr⟩
+
+theorem tooth_merkle204_leaf_node_disjoint (a b c : Frame204) :
+    merkleLeafPreimage204 a ≠ merkleNodePreimage204 b c := by
+  intro h
+  have ht := congrArg List.head? h
+  change some (0 : UInt8) = some 1 at ht
+  cases ht
+
+/-! ## Concrete FIPS 204 byte verifier
+
+The legacy `mldsaVerify` signature is retained for `MirSpecBridge`. The entry point below
+fixes SHAKE, matrix expansion, challenge sampling, packing, and strict signature decoding.
+Rejection samplers have an explicit byte budget and return failure on exhaustion; no
+modulo fallback or padded challenge is accepted. Proving a sufficient budget for every
+SHAKE stream is deliberately not assumed.
+-/
+
+private def xorRate168204 (s : KState) (block : List UInt8) : KState :=
+  let t := xorRate136 s block
+  { t with a17 := t.a17 ^^^ loadLe64 block 17,
+           a18 := t.a18 ^^^ loadLe64 block 18,
+           a19 := t.a19 ^^^ loadLe64 block 19,
+           a20 := t.a20 ^^^ loadLe64 block 20 }
+
+private def pad168204 (bytes : List UInt8) : List UInt8 :=
+  let count := 168 - bytes.length % 168
+  if count = 1 then bytes ++ [0x9f]
+  else bytes ++ [0x1f] ++ List.replicate (count - 2) 0 ++ [0x80]
+
+private def absorb168204 : Nat → KState → List UInt8 → KState
+  | 0, s, _ => s
+  | n + 1, s, bs => absorb168204 n (keccakF1600 (xorRate168204 s (bs.take 168))) (bs.drop 168)
+
+private def rate168Bytes204 (s : KState) : List UInt8 :=
+  rateBlockBytes s ++ encodeNatLeBytes 8 s.a17.toNat ++ encodeNatLeBytes 8 s.a18.toNat ++
+    encodeNatLeBytes 8 s.a19.toNat ++ encodeNatLeBytes 8 s.a20.toNat
+
+private def squeeze168204 : Nat → Nat → KState → List UInt8
+  | 0, _, _ => []
+  | n + 1, count, s =>
+    if count ≤ 168 then (rate168Bytes204 s).take count
+    else rate168Bytes204 s ++ squeeze168204 n (count - 168) (keccakF1600 s)
+
+def shake128Xof204 (count : Nat) (msg : List UInt8) : List UInt8 :=
+  let padded := pad168204 msg
+  squeeze168204 (count / 168 + 1) count
+    (absorb168204 (padded.length / 168) zeroKState padded)
+
+private def readBits204 (bs : List UInt8) (offset width : Nat) : Nat :=
+  ((List.range width).map (fun j =>
+    (((bs.getD ((offset + j) / 8) 0).toNat / 2 ^ ((offset + j) % 8)) % 2) * 2 ^ j)).sum
+
+private def natTreeList204 : {d : Nat} → NatTree d → List Nat
+  | 0, .leaf n => [n]
+  | _ + 1, .branch l r => natTreeList204 l ++ natTreeList204 r
+
+private def packSix204 : List Nat → List UInt8
+  | a :: b :: c :: d :: rest =>
+    UInt8.ofNat (a + 64 * b) :: UInt8.ofNat (b / 4 + 16 * c) ::
+      UInt8.ofNat (c / 16 + 4 * d) :: packSix204 rest
+  | _ => []
+
+def mldsa44ChallengeHash (mu : List UInt8) (w1 : Fin 4 → NatTree 8) : List UInt8 :=
+  shake256Xof 32 (mu ++ ((List.finRange 4).flatMap (fun i => packSix204 (natTreeList204 (w1 i)))))
+
+private def sampleBall204Aux (signs : Nat) (i : Nat) (cs : List Fq204) :
+    List UInt8 → Option Poly256
+  | [] => if i = 256 then some (PolyTree.ofList 8 cs) else none
+  | b :: bs =>
+    if i = 256 then some (PolyTree.ofList 8 cs)
+    else if b.toNat ≤ i then
+      let next := (cs.set i (cs.getD b.toNat Fq204.zero)).set b.toNat
+        (if signs % 2 = 0 then Fq204.one else Fq204.neg Fq204.one)
+      sampleBall204Aux (signs / 2) (i + 1) next bs
+    else sampleBall204Aux signs i cs bs
+
+def sampleInBall204 (byteBudget : Nat) (seed : List UInt8) : Option Poly256 :=
+  let stream := shake256Xof (8 + byteBudget) seed
+  sampleBall204Aux (readBits204 stream 0 64) 217 (List.replicate 256 Fq204.zero) (stream.drop 8)
+
+private def rejNtt204Aux : Nat → Nat → List UInt8 → List Fq204 → Option Poly256
+  | 0, _, _, _ => none
+  | fuel + 1, count, bs, acc =>
+    if count = 256 then some (PolyTree.ofList 8 acc.reverse)
+    else match bs with
+    | b0 :: b1 :: b2 :: rest =>
+      let v := b0.toNat + 256 * b1.toNat + 65536 * (b2.toNat % 128)
+      if hv : v < mldsaQ then rejNtt204Aux fuel (count + 1) rest (⟨v, hv⟩ :: acc)
+      else rejNtt204Aux fuel count rest acc
+    | _ => none
+
+def expandA204 (byteBudget : Nat) (rho : List UInt8) : Option PolyMat4 := do
+  if rho.length ≠ 32 then none else do
+    let entries ← (List.range 16).mapM (fun ij =>
+      rejNtt204Aux (byteBudget + 1) 0
+        (shake128Xof204 byteBudget (rho ++ [UInt8.ofNat (ij % 4), UInt8.ofNat (ij / 4)])) [])
+    pure (fun i j => fips204InvNtt (entries.getD (4 * i.val + j.val) (PolyTree.zero 8)))
+
+private def hintTree204 : (d : Nat) → List Bool → HintTree d
+  | 0, bs => .leaf (bs.headD false)
+  | d + 1, bs => .branch (hintTree204 d (bs.take (2 ^ d))) (hintTree204 d (bs.drop (2 ^ d)))
+
+private def decodeHintRows204 (bytes : List UInt8) : Nat → Nat → Nat → Option (List (HintTree 8))
+  | 0, _, start =>
+    if (bytes.drop start |>.take (80 - start)).all (fun b => b == 0) then some [] else none
+  | n + 1, row, start => do
+    let stop := (bytes.getD (80 + row) 0).toNat
+    if stop < start ∨ 80 < stop then none else do
+      let indices := (bytes.drop start |>.take (stop - start)).map UInt8.toNat
+      if ¬ indices.Pairwise (· < ·) then none else do
+        let rest ← decodeHintRows204 bytes n (row + 1) stop
+        pure (hintTree204 8 ((List.range 256).map (fun j => decide (j ∈ indices))) :: rest)
+
+structure DecodedSignature204 where
+  challenge : List UInt8
+  z : PolyVec4
+  hints : Fin 4 → HintTree 8
+
+def decodeSignature204 (sig : List UInt8) : Option DecodedSignature204 := do
+  if sig.length ≠ 2420 then none else do
+    let hs ← decodeHintRows204 (sig.drop 2336) 4 0 0
+    pure { challenge := sig.take 32,
+      z := fun i => PolyTree.ofList 8 ((List.range 256).map (fun j =>
+        Fq204.ofInt (131072 - (readBits204 sig (256 + i.val * 4608 + 18 * j) 18 : Int)))),
+      hints := fun i => hs.getD i.val (hintTree204 8 []) }
+
+/-- Standalone, pure ML-DSA-44 verifier on wire bytes. Budget exhaustion fails closed.
+    `t1` is decoded as ten-bit unsigned coefficients and scaled by `2^13` exactly once. -/
+def mldsaVerifyBytes204 (byteBudget : Nat) (pk msg ctx sig : List UInt8) : Bool :=
+  if pk.length ≠ 1312 ∨ 255 < ctx.length then false else
+  match expandA204 byteBudget (pk.take 32), decodeSignature204 sig with
+  | some A, some decoded =>
+    match sampleInBall204 byteBudget decoded.challenge with
+    | none => false
+    | some c =>
+      let t1Scaled : PolyVec4 := fun i => PolyTree.ofList 8 ((List.range 256).map (fun j =>
+        Fq204.ofNat (8192 * readBits204 pk (256 + i.val * 2560 + 10 * j) 10)))
+      let mu := shake256Xof 64 (shake256Xof 64 pk ++ [0, UInt8.ofNat ctx.length] ++ ctx ++ msg)
+      mldsaVerify mldsa44ChallengeHash (fun _ => c) A t1Scaled mu
+        decoded.challenge decoded.z decoded.hints
+  | _, _ => false
+
+theorem tooth_mldsaVerifyBytes204_bad_key_length (fuel : Nat) (pk msg ctx sig : List UInt8)
+    (h : pk.length ≠ 1312) : mldsaVerifyBytes204 fuel pk msg ctx sig = false := by
+  simp [mldsaVerifyBytes204, h]
+
+theorem tooth_decodeSignature204_bad_length (sig : List UInt8) (h : sig.length ≠ 2420) :
+    decodeSignature204 sig = none := by
+  simp [decodeSignature204, h]
 
 end Qsag
