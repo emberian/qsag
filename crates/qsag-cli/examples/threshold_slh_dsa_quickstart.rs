@@ -16,7 +16,7 @@
 //!    unmodified `slh_verify`, and RFC 9814 SPKI DER public-key roundtrip (`50 B`).
 //! 2. **Dishonest-Majority `(3, 4)` Shamir DKG + SPDZ Authenticated `PRF_msg` Oracle:**
 //!    2-round commit-then-open `TowerGf256` DKG (`run_dealerless_dkg_seed32_gf256`), 2-lane
-//!    `Tower128` SPDZ MAC setup, Silent-OT PCG Boolean triple expansion (`1,015` 64-bit words),
+//!    `Tower128` SPDZ MAC setup, Silent-OT PCG Boolean triple expansion (`600` 64-bit words),
 //!    and `SpdzSlhMpcCluster::eval_prf_msg_mpc` (`SlhMpcOracles`).
 //! 3. **Dynamic Quorum Redistribution `(3, 4) -> (4, 6)` (`Π_reshare`):**
 //!    Authorized 3-party quorum reshares `(sk_seed, sk_prf)` directly to a disjoint 6-party
@@ -43,6 +43,7 @@ use qsag_core::preprocessing::{
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let started = std::time::Instant::now();
     println!("=== Stage 1: Full NIST SLH-DSA-SHAKE-128f (2-of-3 RSS MPC) ===");
     let params = Fips205Params::SLH_DSA_SHAKE_128F;
     let msg = b"Transfer 250,000 QSAG from treasury vault #7";
@@ -63,7 +64,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
     let mut rss_cluster = RssSlhMpcCluster::new([0xA1; 32], rss_keys, rss_sign_rngs)?;
 
+    eprintln!("RSS DKG: {:?}", started.elapsed());
     let pk = slh_keygen_mpc(&params, &mut rss_cluster, &pk_seed_full[..params.n])?;
+    eprintln!("RSS root: {:?}", started.elapsed());
     let sig = slh_sign_mpc(&params, &mut rss_cluster, msg, ctx, &pk, None)?;
 
     assert_eq!(sig.len(), params.sig_bytes()); // 17,088 bytes
@@ -87,6 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sig.len(),
     );
 
+    eprintln!("Stage 1 elapsed: {:?}", started.elapsed());
+    let stage2_started = std::time::Instant::now();
     println!("\n=== Stage 2: Dishonest-Majority (3, 4) Shamir DKG + SPDZ MPC ===");
     let (old_t, old_n) = (3usize, 4usize);
     let old_pts: Vec<TowerGf256> = (1..=old_n as u8).map(TowerGf256).collect();
@@ -94,6 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|i| PartyPrivateRng::from_seed([0x70 + i as u8; 32], b"example.spdz.old"))
         .collect();
     let mut old_mesh = OtMesh::try_establish([0xB0; 32], &mut old_rngs)?;
+    eprintln!("Old committee bootstrap: {:?}", started.elapsed());
 
     // 2-round dealerless Shamir DKG over GF(2^8) with SPDZ Booleanity check for (sk_seed, sk_prf).
     let (mut sk_seed_old, shared_pk_seed32) =
@@ -101,8 +107,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut sk_prf_old, _) =
         run_dealerless_dkg_seed32_gf256([0xB2; 32], old_t, &old_pts, &mut old_mesh, &mut old_rngs)?;
 
-    // Authenticate DKG shares under a fresh 2-lane Tower128 SPDZ MAC key and expand 1 PCG chunk
-    // (1,015 64-bit Boolean triple words; eval_prf_msg_mpc consumes 600 words = 1 permutation).
+    // Authenticate DKG shares under a fresh 2-lane Tower128 SPDZ MAC key and request
+    // exactly 600 Boolean triple words for one PRF permutation. The PCG retains
+    // its full statistical security padding and active sacrifice checks.
     let (alpha_c, alpha_sh) = spdz_setup_alpha_gf256(&[0xB3; 32], old_t, &old_pts, &mut old_rngs)?;
     let auth_keys_old = authenticate_dkg_seed_shares_for_spdz(
         &[0xB4; 32],
@@ -122,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         old_t,
         &old_pts,
         PCG_DEFAULT_TREE_DEPTH,
-        1_015,
+        600,
         &alpha_c,
         &alpha_sh,
         &mut old_mesh,
@@ -148,6 +155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &r_before.as_slice()[..8]
     );
 
+    eprintln!("Stage 2 elapsed: {:?}", stage2_started.elapsed());
     println!("\n=== Stage 3: Dynamic Reshare (3, 4) -> (4, 6) & Old-Share Wipe ===");
     let (new_t, new_n) = (4usize, 6usize);
     let new_pts: Vec<TowerGf256> = (11..11 + new_n as u8).map(TowerGf256).collect();
@@ -159,12 +167,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|i| PartyPrivateRng::from_seed([0xC0 + i as u8; 32], b"example.reshare.new"))
         .collect();
     let mut new_mesh = OtMesh::try_establish([0xD0; 32], &mut new_rngs)?;
+    eprintln!("New committee bootstrap: {:?}", started.elapsed());
 
     // Enroll both seed commitments before redistribution. Each is an actual
     // FIPS 205 root computed with MPC, not a constant root-check callback.
     // The PRF seed has an auxiliary tree solely for custody continuity checking.
-    let seed_root = custody_root(&sk_seed_old, old_t, &old_pts, shared_pk_seed32, 0xE0)?;
-    let prf_root = custody_root(&sk_prf_old, old_t, &old_pts, shared_pk_seed32, 0xE1)?;
+    let seed_root = custody_root(&sk_seed_old, old_t, &old_pts, shared_pk_seed32, 0xE0, &mut old_mesh)?;
+    let prf_root = custody_root(&sk_prf_old, old_t, &old_pts, shared_pk_seed32, 0xE1, &mut old_mesh)?;
+    // Reuse one dedicated root-check mesh for both post-reshare commitments;
+    // callbacks run inside a ceremony that already borrows new_mesh.
+    let mut root_mesh = OtMesh::try_establish([0xE4; 32], &mut new_rngs)?;
     let sk_seed_new = run_dealerless_reshare_seed32_gf256(
         [0xD1; 32],
         old_t,
@@ -177,7 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut new_rngs,
         &seed_root,
         |shares| {
-            custody_root(shares, new_t, &new_pts, shared_pk_seed32, 0xE2)
+            custody_root(shares, new_t, &new_pts, shared_pk_seed32, 0xE2, &mut root_mesh)
                 .map_err(|_| DkgError::PublicRootMismatch)
         },
     )?;
@@ -193,7 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut new_rngs,
         &prf_root,
         |shares| {
-            custody_root(shares, new_t, &new_pts, shared_pk_seed32, 0xE3)
+            custody_root(shares, new_t, &new_pts, shared_pk_seed32, 0xE3, &mut root_mesh)
                 .map_err(|_| DkgError::PublicRootMismatch)
         },
     )?;
@@ -224,7 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         new_t,
         &new_pts,
         PCG_DEFAULT_TREE_DEPTH,
-        1_015,
+        600,
         &alpha_c2,
         &alpha_sh2,
         &mut new_mesh,
@@ -248,23 +260,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "reshared (4, 6) quorum must preserve exact secret key without reconstruction"
     );
     println!("  [ok] (3, 4) -> (4, 6) reshare wiped all 4 old shares and matched R bit-for-bit!");
+    eprintln!("Total: {:?}", started.elapsed());
     Ok(())
 }
 
 /// Recompute a public custody commitment without reconstructing a seed.
 /// Independent sessions and fresh OS entropy isolate these check ceremonies.
+/// Existing OT channels advance their batch counters; base OTs are never repeated.
 fn custody_root(
     shares: &[ShamirSeedShare256],
     threshold: usize,
     points: &[TowerGf256],
     pk_seed: [u8; 32],
     label: u8,
+    mesh: &mut OtMesh,
 ) -> Result<[u8; 32], Box<dyn std::error::Error>> {
     let params = Fips205Params::SLH_DSA_SHAKE_128F;
     let mut rngs = (0..points.len())
         .map(|_| PartyPrivateRng::from_os_rng(b"example.custody.root"))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut mesh = OtMesh::try_establish([label; 32], &mut rngs)?;
     let (alpha, alpha_shares) = spdz_setup_alpha_gf256(&[label; 32], threshold, points, &mut rngs)?;
     // Root keygen never uses SK.prf; supplying this seed in both slots avoids
     // introducing unrelated secret material into the root check.
@@ -278,7 +292,7 @@ fn custody_root(
         shares,
         &alpha,
         &alpha_shares,
-        &mut mesh,
+        mesh,
         &mut rngs,
     )?;
     // One PRF plus 15 chain steps per batch of 64 WOTS chains,
@@ -292,7 +306,7 @@ fn custody_root(
         batches * 16 * 600,
         &alpha,
         &alpha_shares,
-        &mut mesh,
+        mesh,
         &mut rngs,
     )?;
     let mut cluster = SpdzSlhMpcCluster::new(
