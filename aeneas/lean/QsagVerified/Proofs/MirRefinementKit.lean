@@ -455,3 +455,454 @@ inductive InputsMatchTurns {I_s I_m O_m E : Type} (RelIn : I_s → I_m → Prop)
       InputsMatchTurns RelIn (i_s :: is_rest) (t_m :: ts_rest)
 
 /-- Constructive pointwise I/O relation between accepted spec pairs and accepted MIR pairs. -/
+inductive AcceptedPairsRel {I_s I_m O_s O_m : Type}
+    (RelIn : I_s → I_m → Prop) (RelOut : O_s → O_m → Prop) :
+    List (I_s × O_s) → List (I_m × O_m) → Prop where
+  | nil : AcceptedPairsRel RelIn RelOut [] []
+  | cons {i_s : I_s} {i_m : I_m} {o_s : O_s} {o_m : O_m}
+      {rest_s : List (I_s × O_s)} {rest_m : List (I_m × O_m)} :
+      RelIn i_s i_m →
+      RelOut o_s o_m →
+      AcceptedPairsRel RelIn RelOut rest_s rest_m →
+      AcceptedPairsRel RelIn RelOut ((i_s, o_s) :: rest_s) ((i_m, o_m) :: rest_m)
+
+/-- Master constructive multi-turn simulation theorem: replays `spec.runInputs s₀ inputs_s`
+    in lockstep with any `N`-turn `MirTrace`, establishing `ValidTrace`, `AcceptedPairsRel`,
+    and final `RelSt` with **zero `Classical.choice`**. -/
+theorem MirStepSim.lift_runInputs {S M I_s I_m O_s O_m E : Type}
+    {spec : MealySpec S I_s O_s}
+    {mirStep : M → I_m → Result (MirOutcome M O_m E)}
+    {RelSt : S → M → Prop} {RelIn : I_s → I_m → Prop} {RelOut : O_s → O_m → Prop}
+    (sim : MirStepSim spec mirStep RelSt RelIn RelOut) :
+    ∀ {s₀ : S} {m₀ m_final : M} {inputs_s : List I_s} {turns_m : List (MirTurn I_m O_m E)},
+      RelSt s₀ m₀ →
+      MirTrace mirStep m₀ turns_m m_final →
+      InputsMatchTurns RelIn inputs_s turns_m →
+      let out := spec.runInputs s₀ inputs_s
+      spec.ValidTrace s₀ out.1 out.2 ∧
+      RelSt out.2 m_final ∧
+      AcceptedPairsRel RelIn RelOut out.1 (mirAcceptedPairs turns_m)
+  | s₀, _, _, _, _, hRel, .nil _, .nil =>
+    ⟨.nil s₀, hRel, .nil⟩
+  | s₀, _, _, i_s :: is_rest, _, hRel, .accept hStepM hTailM, .cons hIn hTailIn => by
+    dsimp only [MirTurn.input] at hIn
+    have hSim := sim.ok_sim hRel hIn hStepM
+    dsimp only [MealySpec.runInputs]
+    cases hStepS : spec.step s₀ i_s with
+    | none =>
+      rw [hStepS] at hSim
+      exact False.elim hSim
+    | some pair =>
+      rw [hStepS] at hSim
+      rcases pair with ⟨s₁, o_s⟩
+      obtain ⟨hRel₁, hOut⟩ := hSim
+      obtain ⟨hValTail, hRelFinal, hPairsTail⟩ :=
+        sim.lift_runInputs hRel₁ hTailM hTailIn
+      exact ⟨.accept hStepS hValTail, hRelFinal, .cons hIn hOut hPairsTail⟩
+  | s₀, _, _, i_s :: is_rest, _, hRel, .reject hStepM hTailM, .cons hIn hTailIn => by
+    dsimp only [MirTurn.input] at hIn
+    obtain ⟨hNone, hRel₁⟩ := sim.err_preserves hRel hIn hStepM
+    dsimp only [MealySpec.runInputs, mirAcceptedPairs]
+    rw [hNone]
+    obtain ⟨hValTail, hRelFinal, hPairsTail⟩ :=
+      sim.lift_runInputs hRel₁ hTailM hTailIn
+    exact ⟨.reject i_s hNone hValTail, hRelFinal, hPairsTail⟩
+
+/-- **Turnkey Multi-Turn State-Invariant Lifter (`MirStepSim.lift_state_invariant`)**:
+    Any inductive state invariant `P : S → Prop` preserved by `spec.step` and `spec.errStep`
+    automatically holds on the corresponding spec witness of every reachable `m_final`
+    across arbitrary `N`-turn `MirTrace`s (`0 Classical.choice`). -/
+theorem MirStepSim.lift_state_invariant {S M I_s I_m O_s O_m E : Type}
+    {spec : MealySpec S I_s O_s}
+    {mirStep : M → I_m → Result (MirOutcome M O_m E)}
+    {RelSt : S → M → Prop} {RelIn : I_s → I_m → Prop} {RelOut : O_s → O_m → Prop}
+    (sim : MirStepSim spec mirStep RelSt RelIn RelOut)
+    {P : S → Prop}
+    (hOk : ∀ {s s' : S} {i : I_s} {o : O_s}, P s → spec.step s i = some (s', o) → P s')
+    (hErr : ∀ {s : S} {i : I_s}, P s → spec.step s i = none → P (spec.errStep s i))
+    {s₀ : S} {m₀ m_final : M} {inputs_s : List I_s} {turns_m : List (MirTurn I_m O_m E)}
+    (hInitP : P s₀) (hInitRel : RelSt s₀ m₀)
+    (hMir : MirTrace mirStep m₀ turns_m m_final)
+    (hInputs : InputsMatchTurns RelIn inputs_s turns_m) :
+    let s_final := (spec.runInputs s₀ inputs_s).2
+    P s_final ∧ RelSt s_final m_final := by
+  obtain ⟨hVal, hRelFinal, _⟩ := sim.lift_runInputs hInitRel hMir hInputs
+  exact ⟨hVal.preserve_invariant hOk hErr hInitP, hRelFinal⟩
+
+/-- **Turnkey Multi-Turn Trace-Safety Lifter (`MirStepSim.lift_trace_safety`)**:
+    Any trace safety property `Safe : List (I_s × O_s) → Prop` (monotonicity, `atMostOnePerEpoch`,
+    `sumApproved ≤ cap`, `releasedImpliesVerified`) proved on `spec.ValidTrace` automatically
+    transfers to arbitrary-length multi-turn executions of `mirStep`! -/
+theorem MirStepSim.lift_trace_safety {S M I_s I_m O_s O_m E : Type}
+    {spec : MealySpec S I_s O_s}
+    {mirStep : M → I_m → Result (MirOutcome M O_m E)}
+    {RelSt : S → M → Prop} {RelIn : I_s → I_m → Prop} {RelOut : O_s → O_m → Prop}
+    (sim : MirStepSim spec mirStep RelSt RelIn RelOut)
+    {Safe : List (I_s × O_s) → Prop}
+    {s₀ : S} {m₀ m_final : M} {inputs_s : List I_s} {turns_m : List (MirTurn I_m O_m E)}
+    (hSpecSafe : ∀ {trace_s : List (I_s × O_s)} {s_f : S},
+      spec.ValidTrace s₀ trace_s s_f → Safe trace_s)
+    (hInitRel : RelSt s₀ m₀)
+    (hMir : MirTrace mirStep m₀ turns_m m_final)
+    (hInputs : InputsMatchTurns RelIn inputs_s turns_m) :
+    let out := spec.runInputs s₀ inputs_s
+    Safe out.1 ∧ AcceptedPairsRel RelIn RelOut out.1 (mirAcceptedPairs turns_m) ∧
+      RelSt out.2 m_final := by
+  obtain ⟨hVal, hRelFinal, hPairs⟩ := sim.lift_runInputs hInitRel hMir hInputs
+  exact ⟨hSpecSafe hVal, hPairs, hRelFinal⟩
+
+private theorem inputsMatch_of_absIn {I_s I_m O_m E : Type} (absIn : I_m → I_s) :
+    ∀ (turns_m : List (MirTurn I_m O_m E)),
+      InputsMatchTurns (fun i_s i_m => i_s = absIn i_m)
+        (turns_m.map (fun t => absIn t.input)) turns_m
+  | [] => .nil
+  | _ :: rest => .cons rfl (inputsMatch_of_absIn absIn rest)
+
+private theorem acceptedPairs_eq_map_of_abs {I_s I_m O_s O_m : Type}
+    (absIn : I_m → I_s) (absOut : O_m → O_s) :
+    ∀ {pairs_s : List (I_s × O_s)} {pairs_m : List (I_m × O_m)},
+      AcceptedPairsRel (fun i_s i_m => i_s = absIn i_m) (fun o_s o_m => o_s = absOut o_m)
+        pairs_s pairs_m →
+      pairs_s = pairs_m.map (fun p => (absIn p.1, absOut p.2))
+  | [], [], .nil => rfl
+  | _, _, .cons hIn hOut hTail => by
+    subst hIn; subst hOut
+    exact congrArg ((_, _) :: ·) (acceptedPairs_eq_map_of_abs absIn absOut hTail)
+
+/-- **Zero-Boilerplate Functional Abstraction Trace Lifter (`MirStepSim.lift_trace_safety_abs`)**:
+    When `RelIn` and `RelOut` are given by abstraction functions `absIn : I_m → I_s` and
+    `absOut : O_m → O_s`, `Safe` holds **directly** on `(mirAcceptedPairs turns_m).map ...`
+    with zero auxiliary input witnesses required! -/
+theorem MirStepSim.lift_trace_safety_abs {S M I_s I_m O_s O_m E : Type}
+    {spec : MealySpec S I_s O_s}
+    {mirStep : M → I_m → Result (MirOutcome M O_m E)}
+    {RelSt : S → M → Prop} {absIn : I_m → I_s} {absOut : O_m → O_s}
+    (sim : MirStepSim spec mirStep RelSt (fun i_s i_m => i_s = absIn i_m) (fun o_s o_m => o_s = absOut o_m))
+    {Safe : List (I_s × O_s) → Prop}
+    {s₀ : S} {m₀ m_final : M} {turns_m : List (MirTurn I_m O_m E)}
+    (hSpecSafe : ∀ {trace_s : List (I_s × O_s)} {s_f : S},
+      spec.ValidTrace s₀ trace_s s_f → Safe trace_s)
+    (hInitRel : RelSt s₀ m₀)
+    (hMir : MirTrace mirStep m₀ turns_m m_final) :
+    Safe ((mirAcceptedPairs turns_m).map (fun p => (absIn p.1, absOut p.2))) ∧
+      ∃ s_final, RelSt s_final m_final := by
+  have hInputs := inputsMatch_of_absIn absIn turns_m
+  obtain ⟨hSafe, hPairs, hRelFinal⟩ :=
+    sim.lift_trace_safety hSpecSafe hInitRel hMir hInputs
+  have hEq := acceptedPairs_eq_map_of_abs absIn absOut hPairs
+  rw [hEq] at hSafe
+  exact ⟨hSafe, ⟨_, hRelFinal⟩⟩
+
+/-! ## 5. Horizontal / Phased Typestate Composition (`MirPhaseSim`, `MirStepSim.compose`) -/
+
+/-- Single-phase cross-state refinement (`PhaseA → PhaseB` affine typestate transitions,
+    such as `Round1MaskCommitted → Round2ChiEvaluated → Round3ConsistencyVerified → CutOpened`). -/
+structure MirPhaseSim {S₁ S₂ M₁ M₂ I_s I_m O_s O_m E : Type}
+    (specPhase : S₁ → I_s → Option (S₂ × O_s))
+    (mirPhase : M₁ → I_m → Result (core.result.Result (M₂ × O_m) E))
+    (Rel₁ : S₁ → M₁ → Prop)
+    (Rel₂ : S₂ → M₂ → Prop)
+    (RelIn : I_s → I_m → Prop)
+    (RelOut : O_s → O_m → Prop) : Prop where
+  ok_phase : ∀ {s₁ : S₁} {m₁ : M₁} {m₂ : M₂} {i_s : I_s} {i_m : I_m} {o_m : O_m},
+    Rel₁ s₁ m₁ →
+    RelIn i_s i_m →
+    mirPhase m₁ i_m = .ok (.Ok (m₂, o_m)) →
+    match specPhase s₁ i_s with
+    | none => False
+    | some (s₂, o_s) => Rel₂ s₂ m₂ ∧ RelOut o_s o_m
+  err_phase : ∀ {s₁ : S₁} {m₁ : M₁} {i_s : I_s} {i_m : I_m} {e : E},
+    Rel₁ s₁ m₁ →
+    RelIn i_s i_m →
+    mirPhase m₁ i_m = .ok (.Err e) →
+    specPhase s₁ i_s = none
+
+/-- Composed pure 2-phase spec step `(S₁ → S₂ → S₃)`. -/
+def seqSpecPhases {S₁ S₂ S₃ I₁ I₂ O₁ O₂ : Type}
+    (p1 : S₁ → I₁ → Option (S₂ × O₁))
+    (p2 : S₂ → I₂ → Option (S₃ × O₂))
+    (s₁ : S₁) (inp : I₁ × I₂) : Option (S₃ × (O₁ × O₂)) :=
+  match p1 s₁ inp.1 with
+  | none => none
+  | some (s₂, o₁) =>
+    match p2 s₂ inp.2 with
+    | none => none
+    | some (s₃, o₂) => some (s₃, (o₁, o₂))
+
+/-- Composed MIR 2-phase transition `(M₁ → M₂ → M₃)`. -/
+def seqMirPhases {M₁ M₂ M₃ I₁ I₂ O₁ O₂ E : Type}
+    (f1 : M₁ → I₁ → Result (core.result.Result (M₂ × O₁) E))
+    (f2 : M₂ → I₂ → Result (core.result.Result (M₃ × O₂) E))
+    (m₁ : M₁) (inp : I₁ × I₂) : Result (core.result.Result (M₃ × (O₁ × O₂)) E) :=
+  Result.bind (f1 m₁ inp.1) fun r1 =>
+    match r1 with
+    | .Err e => .ok (.Err e)
+    | .Ok (m₂, o₁) =>
+      Result.bind (f2 m₂ inp.2) fun r2 =>
+        match r2 with
+        | .Err e => .ok (.Err e)
+        | .Ok (m₃, o₂) => .ok (.Ok (m₃, (o₁, o₂)))
+
+/-- **Horizontal / Phased Composition (`MirStepSim.compose`)**:
+    Composes `Phase1 → Phase2` and `Phase2 → Phase3` affine typestate simulations into a
+    single verified `Phase1 → Phase3` simulation (`0 Classical.choice`). -/
+theorem MirStepSim.compose {S₁ S₂ S₃ M₁ M₂ M₃ I_s1 I_m1 I_s2 I_m2 O_s1 O_m1 O_s2 O_m2 E : Type}
+    {p1 : S₁ → I_s1 → Option (S₂ × O_s1)}
+    {p2 : S₂ → I_s2 → Option (S₃ × O_s2)}
+    {f1 : M₁ → I_m1 → Result (core.result.Result (M₂ × O_m1) E)}
+    {f2 : M₂ → I_m2 → Result (core.result.Result (M₃ × O_m2) E)}
+    {Rel₁ : S₁ → M₁ → Prop} {Rel₂ : S₂ → M₂ → Prop} {Rel₃ : S₃ → M₃ → Prop}
+    {RelIn₁ : I_s1 → I_m1 → Prop} {RelIn₂ : I_s2 → I_m2 → Prop}
+    {RelOut₁ : O_s1 → O_m1 → Prop} {RelOut₂ : O_s2 → O_m2 → Prop}
+    (sim12 : MirPhaseSim p1 f1 Rel₁ Rel₂ RelIn₁ RelOut₁)
+    (sim23 : MirPhaseSim p2 f2 Rel₂ Rel₃ RelIn₂ RelOut₂) :
+    MirPhaseSim
+      (seqSpecPhases p1 p2)
+      (seqMirPhases f1 f2)
+      Rel₁ Rel₃
+      (fun a b => RelIn₁ a.1 b.1 ∧ RelIn₂ a.2 b.2)
+      (fun a b => RelOut₁ a.1 b.1 ∧ RelOut₂ a.2 b.2) where
+  ok_phase {s₁ m₁ m₃ i_s i_m o_m} hRel₁ hIn hStep := by
+    dsimp only [seqMirPhases] at hStep
+    cases hf1 : f1 m₁ i_m.1 with
+    | fail err => simp [hf1, Result.bind] at hStep
+    | div => simp [hf1, Result.bind] at hStep
+    | ok r1 =>
+      simp only [hf1, Result.bind] at hStep
+      cases r1 with
+      | Err e => cases hStep
+      | Ok pair1 =>
+        rcases pair1 with ⟨m₂, o_m1⟩
+        have h1 := sim12.ok_phase hRel₁ hIn.1 hf1
+        dsimp only [seqSpecPhases]
+        cases hp1 : p1 s₁ i_s.1 with
+        | none => rw [hp1] at h1; exact False.elim h1
+        | some sp1 =>
+          rw [hp1] at h1
+          rcases sp1 with ⟨s₂, o_s1⟩
+          obtain ⟨hRel₂, hOut₁⟩ := h1
+          dsimp only
+          cases hf2 : f2 m₂ i_m.2 with
+          | fail err => simp [hf2] at hStep
+          | div => simp [hf2] at hStep
+          | ok r2 =>
+            simp only [hf2] at hStep
+            cases r2 with
+            | Err e => cases hStep
+            | Ok pair2 =>
+              rcases pair2 with ⟨m₃', o_m2⟩
+              injection hStep with hOkEq
+              injection hOkEq with hProdEq
+              injection hProdEq with hmEq hoEq
+              subst hmEq; subst hoEq
+              have h2 := sim23.ok_phase hRel₂ hIn.2 hf2
+              cases hp2 : p2 s₂ i_s.2 with
+              | none => rw [hp2] at h2; exact False.elim h2
+              | some sp2 =>
+                rw [hp2] at h2
+                rcases sp2 with ⟨s₃, o_s2⟩
+                dsimp only
+                exact ⟨h2.1, hOut₁, h2.2⟩
+  err_phase {s₁ m₁ i_s i_m e} hRel₁ hIn hStep := by
+    dsimp only [seqMirPhases] at hStep
+    cases hf1 : f1 m₁ i_m.1 with
+    | fail err => simp [hf1, Result.bind] at hStep
+    | div => simp [hf1, Result.bind] at hStep
+    | ok r1 =>
+      simp only [hf1, Result.bind] at hStep
+      cases r1 with
+      | Err e1 =>
+        injection hStep with hErrEq
+        cases hErrEq
+        have hNone1 := sim12.err_phase hRel₁ hIn.1 hf1
+        simp [seqSpecPhases, hNone1]
+      | Ok pair1 =>
+        rcases pair1 with ⟨m₂, o_m1⟩
+        have h1 := sim12.ok_phase hRel₁ hIn.1 hf1
+        dsimp only [seqSpecPhases]
+        cases hp1 : p1 s₁ i_s.1 with
+        | none => rfl
+        | some sp1 =>
+          rw [hp1] at h1
+          rcases sp1 with ⟨s₂, o_s1⟩
+          dsimp only
+          cases hf2 : f2 m₂ i_m.2 with
+          | fail err => simp [hf2] at hStep
+          | div => simp [hf2] at hStep
+          | ok r2 =>
+            simp only [hf2] at hStep
+            cases r2 with
+            | Ok _ => cases hStep
+            | Err e2 =>
+              injection hStep with hErrEq
+              cases hErrEq
+              rw [sim23.err_phase h1.1 hIn.2 hf2]
+
+/-- Convert any homogeneous `MirPhaseSim` (`S → S`, `M → M`) directly into a multi-turn `MirStepSim`. -/
+theorem MirPhaseSim.toMirStepSim {S M I_s I_m O_s O_m E : Type}
+    {step : S → I_s → Option (S × O_s)}
+    {f : M → I_m → Result (core.result.Result (M × O_m) E)}
+    {RelSt : S → M → Prop} {RelIn : I_s → I_m → Prop} {RelOut : O_s → O_m → Prop}
+    (phase : MirPhaseSim step f RelSt RelSt RelIn RelOut) :
+    MirStepSim (MealySpec.ofPure step) (adaptResultPair f) RelSt RelIn RelOut :=
+  MirStepSim.ofResultPair step f RelSt RelIn RelOut phase.ok_phase phase.err_phase
+
+/-! ## 6. Constructive Aeneas Data-Refinement Helpers (`0 Classical.choice`) -/
+
+/-- Exact `iff` characterization of Aeneas checked `Std.U64` addition. -/
+theorem u64_val_add_checked (a b c : Std.U64) :
+    (a + b : Result Std.U64) = .ok c ↔ a.val + b.val < 2 ^ 64 ∧ c.val = a.val + b.val := by
+  rw [hAdd_uscalar_eq]
+  by_cases hlt : a.val + b.val < 2 ^ 64
+  · simp only [hlt, ↓reduceIte, true_and]
+    constructor
+    · intro hEq
+      injection hEq with hc
+      subst hc
+      change (a.bv + b.bv).toNat = a.bv.toNat + b.bv.toNat
+      rw [BitVec.toNat_add, Nat.mod_eq_of_lt hlt]
+    · intro hc
+      apply congrArg Result.ok
+      apply UScalar.eq_of_val_eq
+      change (a.bv + b.bv).toNat = c.val
+      rw [BitVec.toNat_add, Nat.mod_eq_of_lt hlt, hc]
+  · simp only [hlt, ↓reduceIte, false_and]
+    constructor
+    · intro hEq; cases hEq
+    · intro hFalse; exact False.elim hFalse
+
+/-- Exact `iff` characterization of Aeneas checked `Std.U64` subtraction. -/
+theorem u64_val_sub_checked (a b c : Std.U64) :
+    (a - b : Result Std.U64) = .ok c ↔ b.val ≤ a.val ∧ c.val = a.val - b.val := by
+  rw [hSub_uscalar_eq]
+  by_cases hle : b.val ≤ a.val
+  · simp only [hle, ↓reduceIte, true_and]
+    constructor
+    · intro hEq
+      injection hEq with hc
+      subst hc
+      change (a.bv - b.bv).toNat = a.bv.toNat - b.bv.toNat
+      exact BitVec.toNat_sub_of_le (BitVec.le_def.mpr hle)
+    · intro hc
+      apply congrArg Result.ok
+      apply UScalar.eq_of_val_eq
+      change (a.bv - b.bv).toNat = c.val
+      rw [BitVec.toNat_sub_of_le (BitVec.le_def.mpr hle), hc]
+  · simp only [hle, ↓reduceIte, false_and]
+    constructor
+    · intro hEq; cases hEq
+    · intro hFalse; exact False.elim hFalse
+
+/-- Exact `iff` characterization of Aeneas checked `Std.U32` addition. -/
+theorem u32_val_add_checked (a b c : Std.U32) :
+    (a + b : Result Std.U32) = .ok c ↔ a.val + b.val < 2 ^ 32 ∧ c.val = a.val + b.val := by
+  rw [hAdd_uscalar_eq]
+  by_cases hlt : a.val + b.val < 2 ^ 32
+  · simp only [hlt, ↓reduceIte, true_and]
+    constructor
+    · intro hEq
+      injection hEq with hc
+      subst hc
+      change (a.bv + b.bv).toNat = a.bv.toNat + b.bv.toNat
+      rw [BitVec.toNat_add, Nat.mod_eq_of_lt hlt]
+    · intro hc
+      apply congrArg Result.ok
+      apply UScalar.eq_of_val_eq
+      change (a.bv + b.bv).toNat = c.val
+      rw [BitVec.toNat_add, Nat.mod_eq_of_lt hlt, hc]
+  · simp only [hlt, ↓reduceIte, false_and]
+    constructor
+    · intro hEq; cases hEq
+    · intro hFalse; exact False.elim hFalse
+
+/-- Generic `UScalar` equality iff underlying `Nat` value equality. -/
+theorem uscalar_eq_iff {ty : UScalarTy} (a b : UScalar ty) : a = b ↔ a.val = b.val :=
+  ⟨congrArg UScalar.val, UScalar.eq_of_val_eq⟩
+
+/-- `Std.U8` equality iff `.val` equality. -/
+theorem u8_eq_iff (a b : Std.U8) : a = b ↔ a.val = b.val :=
+  uscalar_eq_iff a b
+
+/-- `Std.U64` equality iff `.val` equality. -/
+theorem u64_eq_iff (a b : Std.U64) : a = b ↔ a.val = b.val :=
+  uscalar_eq_iff a b
+
+/-- Constructive `Result` monadic bind `.ok` decomposition (`0 Classical.choice`). -/
+theorem result_bind_ok_split {α β : Type} (r : Result α) (f : α → Result β) (y : β) :
+    (r >>= f) = .ok y ↔ ∃ x, r = .ok x ∧ f x = .ok y := by
+  cases r with
+  | ok x =>
+    constructor
+    · intro h; exact ⟨x, rfl, h⟩
+    · rintro ⟨x', hx', hfx'⟩
+      injection hx' with hEq
+      subst hEq
+      exact hfx'
+  | fail _ =>
+    constructor
+    · intro h; cases h
+    · rintro ⟨_, hx, _⟩; cases hx
+  | div =>
+    constructor
+    · intro h; cases h
+    · rintro ⟨_, hx, _⟩; cases hx
+
+/-- Fixed-length `[u8; 32]` Aeneas array `.val` projection is strictly injective. -/
+theorem array32_to_list_injective {a b : Std.Array Std.U8 32#usize} (h : a.val = b.val) : a = b :=
+  Std.Array.ext h
+
+/-- Convert any fixed-length Aeneas `Std.Array Std.U8 n` into standard Lean `List UInt8`
+    for direct bridging against `Qsag` pure byte specifications. -/
+@[expose]
+def arrayU8ToBytes {n : Std.Usize} (a : Std.Array Std.U8 n) : List UInt8 :=
+  a.val.map (fun b => UInt8.ofBitVec b.bv)
+
+theorem arrayU8ToBytes_length {n : Std.Usize} (a : Std.Array Std.U8 n) :
+    (arrayU8ToBytes a).length = n.val := by
+  simp [arrayU8ToBytes, a.property]
+
+private theorem u8_list_eq_of_map_uint8 :
+    ∀ {xs ys : List Std.U8},
+      xs.map (fun b => UInt8.ofBitVec b.bv) = ys.map (fun b => UInt8.ofBitVec b.bv) →
+      xs = ys
+  | [], [], _ => rfl
+  | [], _ :: _, h => by cases h
+  | _ :: _, [], h => by cases h
+  | x :: xs, y :: ys, h => by
+    injection h with hHead hTail
+    have hBv : x.bv = y.bv := congrArg UInt8.toBitVec hHead
+    have hHeadEq : x = y := UScalar.ext hBv
+    subst hHeadEq
+    exact congrArg (x :: ·) (u8_list_eq_of_map_uint8 hTail)
+
+/-- Bridging Aeneas `Std.Array Std.U8 n` to `List UInt8` is strictly injective (`0 Classical.choice`). -/
+theorem arrayU8ToBytes_injective {n : Std.Usize} {a b : Std.Array Std.U8 n}
+    (h : arrayU8ToBytes a = arrayU8ToBytes b) : a = b :=
+  Std.Array.ext (u8_list_eq_of_map_uint8 h)
+
+/-! ## 7. `#tooth` Mutation-Sensitivity & Refusal Witnesses -/
+
+/-- `#tooth`: Checked `u64` addition refuses overflow (`u64::MAX + 1 ≠ .ok c` for all `c`). -/
+theorem tooth_u64_val_add_checked_overflow_refused (c : Std.U64) :
+    (18446744073709551615#u64 + 1#u64 : Result Std.U64) ≠ .ok c := by
+  intro h
+  obtain ⟨hlt, _⟩ := (u64_val_add_checked _ _ c).mp h
+  have hv : (18446744073709551615#u64).val = 2 ^ 64 - 1 := rfl
+  have hv1 : (1#u64).val = 1 := rfl
+  rw [hv, hv1] at hlt
+  exact absurd hlt (by decide)
+
+/-- `#tooth`: A quarantine `MealySpec` that sets `poisoned = true` on `errStep` permanently
+    refuses all subsequent inputs even when the input itself would have been valid! -/
+theorem tooth_quarantine_errStep_blocks_subsequent_accept :
+    let spec : MealySpec Bool Bool Unit := {
+      step := fun poisoned okInput =>
+        if !poisoned && okInput then some (false, ()) else none
+      errStep := fun _ _ => true
+    }
+    (spec.runInputs false [false, true]).1 = [] ∧
+      (spec.runInputs false [false, true]).2 = true ∧
+      (spec.runInputs false [true]).1 = [(true, ())] := by
+  decide
+
+end qsag_verified.proofs
