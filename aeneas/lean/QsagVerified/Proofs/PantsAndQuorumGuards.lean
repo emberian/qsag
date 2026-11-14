@@ -1031,3 +1031,1061 @@ private theorem belt_validTrace_non_equivocation
     3. Every accepted `ProposeOrRetryEpoch` had `wal_sync_ok = true`;
     4. **Global Non-Equivocation:** no two `SharesAuthorized` grants anywhere in the multi-turn
        trace ever authorize distinct `msg_tag`s at the same `authorized_epoch`. -/
+theorem belt_quorum_guard_multiturn_sound
+    (n t f q : Std.U32) (require_global_liveness : Bool)
+    (initial_next_epoch max_jump_window : Std.U64)
+    (st0 st_final : pants_and_quorum_guards.BeltQuorumCore)
+    (turns : List (MirTurn pants_and_quorum_guards.BeltQuorumCoreInput
+      pants_and_quorum_guards.BeltQuorumCoreOutput
+      pants_and_quorum_guards.PantsGuardError))
+    (hNew : pants_and_quorum_guards.BeltQuorumCore.new_validated
+      n t f q require_global_liveness initial_next_epoch max_jump_window = .ok (.Ok st0))
+    (hTrace : MirTrace (adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step)
+      st0 turns st_final) :
+    ValidBeltQuorumConfigProp n t f q require_global_liveness ∧
+    (∀ p ∈ mirAcceptedPairs turns, ∀ ep tag walOk,
+      p.1 = .ProposeOrRetryEpoch ep tag walOk → walOk = true) ∧
+    (∀ p ∈ mirAcceptedPairs turns, ∀ g,
+      p.2 = .SharesAuthorized g →
+        q.val ≤ g.certified_acks.val ∧
+        g.certified_acks.val ≤ n.val ∧
+        initial_next_epoch.val ≤ g.authorized_epoch.val) ∧
+    (∀ p1 ∈ mirAcceptedPairs turns, ∀ p2 ∈ mirAcceptedPairs turns, ∀ g1 g2,
+      p1.2 = .SharesAuthorized g1 →
+      p2.2 = .SharesAuthorized g2 →
+      g1.authorized_epoch = g2.authorized_epoch →
+      g1.msg_tag = g2.msg_tag) := by
+  unfold pants_and_quorum_guards.BeltQuorumCore.new_validated at hNew
+  rw [validate_belt_quorum_config_eq] at hNew
+  simp only [bind_eq_result_bind, result_bind_ok] at hNew
+  cases hcfg : validBeltQuorumConfigBool n t f q require_global_liveness
+  · rw [hcfg] at hNew; simp at hNew
+  · rw [hcfg] at hNew
+    simp only [↓reduceIte, Result.ok.injEq, core.result.Result.Ok.injEq] at hNew
+    have hProp : ValidBeltQuorumConfigProp n t f q require_global_liveness :=
+      (validBeltQuorumConfigBool_iff n t f q require_global_liveness).mp hcfg
+    have hInitInv : BeltStateInv n t f q require_global_liveness initial_next_epoch.val st0 := by
+      rw [← hNew]
+      exact ⟨rfl, rfl, rfl, rfl, rfl, hcfg, Nat.le_refl _,
+        show 0 ≤ n.val from Nat.zero_le _,
+        fun h => Bool.noConfusion h, fun _ => rfl⟩
+    obtain ⟨hSafe, _⟩ :=
+      belt_quorum_step_sim.lift_trace_safety_abs
+        (Safe := fun pairs =>
+          (∀ p ∈ pairs, ∀ ep tag walOk,
+            p.1 = .ProposeOrRetryEpoch ep tag walOk → walOk = true) ∧
+          (∀ p ∈ pairs, ∀ g,
+            p.2 = .SharesAuthorized g →
+              q.val ≤ g.certified_acks.val ∧
+              g.certified_acks.val ≤ n.val ∧
+              initial_next_epoch.val ≤ g.authorized_epoch.val) ∧
+          (∀ p1 ∈ pairs, ∀ p2 ∈ pairs, ∀ g1 g2,
+            p1.2 = .SharesAuthorized g1 →
+            p2.2 = .SharesAuthorized g2 →
+            g1.authorized_epoch = g2.authorized_epoch →
+            g1.msg_tag = g2.msg_tag))
+        (fun hVal =>
+          let hNeqv := belt_validTrace_non_equivocation hInitInv hVal
+          ⟨hNeqv.1, belt_grants_above_floor hInitInv hVal, hNeqv.2⟩)
+        rfl
+        hTrace
+    rw [map_id_pair_pants] at hSafe
+    exact ⟨hProp, hSafe.1, hSafe.2.1, hSafe.2.2⟩
+
+/-- Direct single-step bounded epoch-jump theorem on extracted MIR `propose_or_retry_epoch`:
+    every accepted proposal either idempotently retries `(bound_epoch, bound_msg_tag)` or
+    satisfies `next_epoch ≤ proposed_epoch ≤ next_epoch + max_jump_window`. -/
+theorem belt_propose_bounded_jump_spec
+    (st st' : pants_and_quorum_guards.BeltQuorumCore)
+    (ep : Std.U64) (tag : Array Std.U8 32#usize) (walOk : Bool)
+    (hOk : pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+      st ep tag walOk = .ok (st', .Ok ())) :
+    walOk = true ∧
+    ValidBeltQuorumConfigProp st.n st.t st.f st.q st.global_liveness_mode ∧
+    st.poisoned = false ∧
+    ((st.has_bound_epoch = true ∧ ep = st.bound_epoch ∧ tag = st.bound_msg_tag ∧ st' = st) ∨
+     (st.next_epoch.val ≤ ep.val ∧
+      ep.val ≤ st.next_epoch.val + st.max_jump_window.val ∧
+      st'.bound_epoch = ep ∧
+      st'.bound_msg_tag = tag ∧
+      st'.next_epoch.val = ep.val + 1)) := by
+  have hSim := (belt_propose_step_sim st ep tag walOk).1 st' () hOk
+  simp only [beltQuorumMealy, beltGuardCorrupt] at hSim
+  cases hp : st.poisoned
+  · cases hph : isBeltPhasePoisoned st.phase
+    · cases hcfg : validBeltQuorumConfigBool st.n st.t st.f st.q st.global_liveness_mode
+      · rw [hp, hph, hcfg] at hSim; simp at hSim
+      · have hProp :=
+          (validBeltQuorumConfigBool_iff st.n st.t st.f st.q st.global_liveness_mode).mp hcfg
+        cases hcor : (st.has_bound_epoch && decide (st.next_epoch.val ≤ st.bound_epoch.val))
+        · rw [hp, hph, hcfg, hcor] at hSim
+          simp only [Bool.false_or, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hSim
+          cases hwal : walOk
+          · rw [hwal] at hSim; simp at hSim
+          · rw [hwal] at hSim
+            simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hSim
+            by_cases hretry : (st.has_bound_epoch && decide (ep = st.bound_epoch)) = true
+            · rw [hretry] at hSim
+              simp only [↓reduceIte] at hSim
+              simp only [Bool.and_eq_true, decide_eq_true_eq] at hretry
+              by_cases htag : st.bound_msg_tag = tag
+              · simp only [htag, decide_true, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hSim
+                exact ⟨rfl, hProp, rfl, Or.inl ⟨hretry.1, hretry.2, htag.symm, hSim.1.symm⟩⟩
+              · simp [htag] at hSim
+            · simp only [Bool.not_eq_true] at hretry
+              rw [hretry] at hSim
+              simp only [Bool.false_eq_true, ↓reduceIte] at hSim
+              by_cases hlt : ep.val < st.next_epoch.val
+              · simp [hlt] at hSim
+              · have hge_next : st.next_epoch.val ≤ ep.val := Nat.le_of_not_gt hlt
+                simp only [hlt, decide_false, Bool.false_eq_true, ↓reduceIte] at hSim
+                by_cases hjmp : st.max_jump_window.val < ep.val - st.next_epoch.val
+                · simp [hjmp] at hSim
+                · have hle_jmp : ep.val - st.next_epoch.val ≤ st.max_jump_window.val :=
+                    Nat.le_of_not_gt hjmp
+                  have hep_le_win : ep.val ≤ st.next_epoch.val + st.max_jump_window.val := by
+                    have h1 := Nat.add_le_add_left hle_jmp st.next_epoch.val
+                    rwa [Nat.add_comm st.next_epoch.val, Nat.sub_add_cancel hge_next] at h1
+                  simp only [hjmp, decide_false, Bool.false_eq_true, ↓reduceIte] at hSim
+                  by_cases hmax : ep = core.num.U64.MAX
+                  · simp [hmax] at hSim
+                  · simp only [hmax, decide_false, Bool.false_eq_true, ↓reduceIte,
+                      Option.some.injEq, Prod.mk.injEq] at hSim
+                    rcases hSim with ⟨hst', _⟩
+                    subst hst'
+                    have hb64 : ep.val + 1 < 2 ^ 64 := u64_add_one_lt64_of_ne_max hmax
+                    have hv_next : (⟨ep.bv + (1#u64).bv⟩ : Std.U64).val = ep.val + 1 := by
+                      change (ep.bv + (1#u64).bv).toNat = ep.val + 1
+                      rw [BitVec.toNat_add]
+                      exact Nat.mod_eq_of_lt hb64
+                    exact ⟨rfl, hProp, rfl, Or.inr ⟨hge_next, hep_le_win, rfl, rfl, hv_next⟩⟩
+        · rw [hp, hph, hcfg, hcor] at hSim; simp at hSim
+    · rw [hp, hph] at hSim; simp at hSim
+  · rw [hp] at hSim; simp at hSim
+
+/-! ## 2. `VerifiedWotsC256Guard` (256-Bit `WOTS+C` `w = 4, chains = 128, target_sum = 192`) -/
+
+/-- Pure mathematical base-4 digit `chainIdx ∈ 0..128` (`0..=3`) extracted from big-endian
+    2-bit pairs of `digest[chainIdx / 4]`. -/
+@[expose]
+def pureWotsC256Digit (digest : Array Std.U8 32#usize) (chainIdx : Nat) : Nat :=
+  let b := (digest.val.getD (chainIdx / 4) 0#u8).val
+  (b / (2 ^ (6 - 2 * (chainIdx % 4)))) % 4
+
+/-- All 128 base-4 digits (`0..=3`) of a 32-byte `WOTS+C` digest. -/
+@[expose]
+def pureWotsC256Digits (digest : Array Std.U8 32#usize) : List Nat :=
+  (List.range 128).map (pureWotsC256Digit digest)
+
+private theorem u8_and_3_val (x : Std.U8) : (x &&& 3#u8).val = x.val % 4 := by
+  change (x.bv &&& (3#u8).bv).toNat = x.bv.toNat % 4
+  rw [BitVec.toNat_and]
+  exact and_mask_eq_mod _ 2
+
+private theorem u8_shr_and_3_val (b : Std.U8) (s : Std.I32) (k : Nat)
+    (hs : (b >>> s : Result Std.U8) = .ok ⟨b.bv >>> k⟩) :
+    ∃ d, (do let i2 ← b >>> s; ok (i2 &&& 3#u8)) = Result.ok d ∧
+      d.val = (b.val / (2 ^ k)) % 4 ∧ d.val < 4 := by
+  refine ⟨⟨b.bv >>> k⟩ &&& 3#u8, ?_, ?_, ?_⟩
+  · simp [hs, bind_eq_result_bind, result_bind_ok]
+  · rw [u8_and_3_val]
+    change (b.bv >>> k).toNat % 4 = _
+    rw [BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]
+  · rw [u8_and_3_val]
+    exact Nat.mod_lt _ (by decide)
+
+/-- Functional specification of `wotsc256_extract_digit` for every chain `chain_idx < 128`. -/
+theorem wotsc256_extract_digit_spec
+    (digest : Array Std.U8 32#usize) (chain_idx : Std.Usize)
+    (hlt : chain_idx.val < 128) :
+    ∃ d, pants_and_quorum_guards.wotsc256_extract_digit digest chain_idx = .ok d ∧
+      d.val = pureWotsC256Digit digest chain_idx.val ∧
+      d.val < 4 := by
+  unfold pants_and_quorum_guards.wotsc256_extract_digit
+  let qIdx : Std.Usize := ⟨chain_idx.bv / (4#usize).bv⟩
+  have hdiv : (chain_idx / 4#usize : Result Std.Usize) = .ok qIdx := rfl
+  have hv_q : qIdx.val = chain_idx.val / 4 := BitVec.toNat_udiv
+  have hq_lt : qIdx.val < 32 := by
+    rw [hv_q]
+    exact (Nat.div_lt_iff_lt_mul (by decide)).mpr hlt
+  have hget : Array.index_usize digest qIdx = .ok (digest.val.getD (chain_idx.val / 4) 0#u8) := by
+    have h1 := array_index_getD digest qIdx 0#u8 hq_lt
+    rwa [hv_q] at h1
+  let rIdx : Std.Usize := ⟨chain_idx.bv % (4#usize).bv⟩
+  have hmod : (chain_idx % 4#usize : Result Std.Usize) = .ok rIdx := rfl
+  have hv_r : rIdx.val = chain_idx.val % 4 := BitVec.toNat_umod
+  simp only [hdiv, hget, hmod, bind_eq_result_bind, result_bind_ok]
+  let b := digest.val.getD (chain_idx.val / 4) 0#u8
+  have hrem_lt : chain_idx.val % 4 < 4 := Nat.mod_lt _ (by decide)
+  rw [hv_r]
+  dsimp only [pureWotsC256Digit]
+  match hrem : chain_idx.val % 4, hrem_lt with
+  | 0, _ =>
+    exact u8_shr_and_3_val b 6#i32 6 rfl
+  | 1, _ =>
+    exact u8_shr_and_3_val b 4#i32 4 rfl
+  | 2, _ =>
+    exact u8_shr_and_3_val b 2#i32 2 rfl
+  | 3, _ =>
+    refine ⟨b &&& 3#u8, rfl, ?_, ?_⟩
+    · rw [u8_and_3_val, show 6 - 2 * 3 = 0 from rfl, Nat.pow_zero, Nat.div_one]
+    · rw [u8_and_3_val]; exact Nat.mod_lt _ (by decide)
+  | k + 4, hk =>
+    exact False.elim (Nat.not_lt_of_ge (Nat.le_add_left 4 k) hk)
+
+private theorem list_range_map_sum_eq_natPrefixSum (f : Nat → Nat) :
+    ∀ n : Nat, ((List.range n).map f).sum = natPrefixSum f n
+  | 0 => rfl
+  | n + 1 => by
+    rw [List.range_succ, List.map_append, List.sum_append]
+    simp [natPrefixSum, list_range_map_sum_eq_natPrefixSum f n]
+
+theorem pureWotsC256Digits_sum_eq_prefix (digest : Array Std.U8 32#usize) :
+    (pureWotsC256Digits digest).sum = natPrefixSum (pureWotsC256Digit digest) 128 :=
+  list_range_map_sum_eq_natPrefixSum (pureWotsC256Digit digest) 128
+
+private def wotsVerifyInv (digest : Array Std.U8 32#usize) (rem : Nat)
+    (st : Std.U32 × Std.Usize) : Prop :=
+  st.2.val + rem = 128 ∧
+  st.1.val = natPrefixSum (pureWotsC256Digit digest) st.2.val ∧
+  st.1.val ≤ 3 * st.2.val
+
+private theorem wotsc256_verify_sum_fuel (digest : Array Std.U8 32#usize) :
+    ∃ b, loopFuel 129
+      (fun (sum1, i1) =>
+        pants_and_quorum_guards.verified_wotsc256_verify_sum_loop.body digest sum1 i1)
+      (0#u32, 0#usize) = .ok b ∧
+      b = decide (natPrefixSum (pureWotsC256Digit digest) 128 = 192) := by
+  apply loopFuel_total_rank
+    (body := fun (sum1, i1) =>
+      pants_and_quorum_guards.verified_wotsc256_verify_sum_loop.body digest sum1 i1)
+    (P := wotsVerifyInv digest)
+    (Q := fun b => b = decide (natPrefixSum (pureWotsC256Digit digest) 128 = 192))
+    (n := 128) (x := (0#u32, 0#usize))
+  · rintro ⟨sum, idx⟩ ⟨hidx0, hsum_eq, _⟩
+    have hidx128 : idx.val = 128 := by simpa using hidx0
+    have hnlt : ¬ (idx < pants_and_quorum_guards.WOTSC256_CHAINS) := by
+      unfold pants_and_quorum_guards.WOTSC256_CHAINS
+      intro h
+      have hv := (UScalar.lt_iff_val _ _).mp h
+      rw [hidx128] at hv
+      exact Nat.lt_irrefl 128 hv
+    refine ⟨decide (sum = pants_and_quorum_guards.WOTSC256_TARGET_SUM), ?_, ?_⟩
+    · unfold pants_and_quorum_guards.verified_wotsc256_verify_sum_loop.body
+      simp only [hnlt, ite_false]
+    · unfold pants_and_quorum_guards.WOTSC256_TARGET_SUM
+      apply decide_eq_decide.mpr
+      rw [hidx128] at hsum_eq
+      exact ⟨fun h => hsum_eq.symm.trans (congrArg UScalar.val h),
+        fun h => UScalar.eq_of_val_eq (hsum_eq.trans h)⟩
+  · intro rem ⟨sum, idx⟩ ⟨hrem, hsum_eq, hsum_bound⟩
+    dsimp only at hrem hsum_eq hsum_bound
+    have hlt_val : idx.val < 128 := by
+      have h1 : idx.val < idx.val + (rem + 1) := Nat.lt_add_of_pos_right (Nat.succ_pos rem)
+      rwa [hrem] at h1
+    have hlt_u : idx < pants_and_quorum_guards.WOTSC256_CHAINS := by
+      unfold pants_and_quorum_guards.WOTSC256_CHAINS
+      exact (UScalar.lt_iff_val _ _).mpr hlt_val
+    obtain ⟨d8, hd8, hv_d8, hlt_d8⟩ := wotsc256_extract_digit_spec digest idx hlt_val
+    have hle_d8 : d8.val ≤ 3 := Nat.le_of_lt_succ hlt_d8
+    let d32 := UScalar.cast .U32 d8
+    have hv_d32 : d32.val = d8.val := u8_cast_u32_val d8
+    have hd_le_max : d32.val ≤ (4294967295#u32).val := by
+      rw [hv_d32]; exact Nat.le_trans hle_d8 (by decide)
+    let cap : Std.U32 := ⟨(4294967295#u32).bv - d32.bv⟩
+    have hsub : (4294967295#u32 - d32 : Result Std.U32) = .ok cap := by
+      simp only [hSub_uscalar_eq, hd_le_max, ite_true]; rfl
+    have hv_cap : cap.val = 4294967295 - d8.val := by
+      change ((4294967295#u32).bv - d32.bv).toNat = _
+      rw [BitVec.toNat_sub_of_le (BitVec.le_def.mpr hd_le_max)]
+      change 4294967295 - d32.val = _
+      rw [hv_d32]
+    have hsum_le_381 : sum.val ≤ 381 :=
+      Nat.le_trans hsum_bound (Nat.mul_le_mul_left 3 (Nat.le_of_lt_succ hlt_val))
+    have hcap_ge : 381 ≤ cap.val := by
+      rw [hv_cap]
+      have : 4294967295 - 3 ≤ 4294967295 - d8.val := Nat.sub_le_sub_left hle_d8 4294967295
+      exact Nat.le_trans (by decide) this
+    have hnot_gt : ¬ (sum > cap) := fun hgt =>
+      Nat.not_lt_of_ge (Nat.le_trans hsum_le_381 hcap_ge) ((UScalar.lt_iff_val _ _).mp hgt)
+    have hsum_lt32 : sum.val + d32.val < 2 ^ 32 := by
+      rw [hv_d32]
+      exact Nat.lt_of_le_of_lt (Nat.add_le_add hsum_le_381 hle_d8) (by decide)
+    let sum' : Std.U32 := ⟨sum.bv + d32.bv⟩
+    have hadd_s : (sum + d32 : Result Std.U32) = .ok sum' := by
+      simp only [hAdd_uscalar_eq, hsum_lt32, ite_true]; rfl
+    have hv_sum' : sum'.val = sum.val + d8.val := by
+      change (sum.bv + d32.bv).toNat = _
+      rw [BitVec.toNat_add, Nat.mod_eq_of_lt hsum_lt32, hv_d32]
+    have hidx_lt64 : idx.val + (1#usize).val < 2 ^ 64 :=
+      Nat.lt_trans (Nat.succ_lt_succ hlt_val) (by decide)
+    let idx' : Std.Usize := ⟨idx.bv + (1#usize).bv⟩
+    have hadd_i : (idx + 1#usize : Result Std.Usize) = .ok idx' := by
+      simp only [hAdd_uscalar_eq, hidx_lt64, ite_true]; rfl
+    have hv_idx' : idx'.val = idx.val + 1 := by
+      change (idx.bv + (1#usize).bv).toNat = _
+      rw [BitVec.toNat_add]; exact Nat.mod_eq_of_lt hidx_lt64
+    refine ⟨(sum', idx'), ?_, ?_⟩
+    · unfold pants_and_quorum_guards.verified_wotsc256_verify_sum_loop.body
+      simp only [hlt_u, ite_true, hd8, lift_eq_ok, bind_eq_result_bind, result_bind_ok]
+      rw [hsub, result_bind_ok]
+      simp only [hnot_gt, ite_false]
+      rw [show UScalar.cast .U32 d8 = d32 from rfl, hadd_s, result_bind_ok, hadd_i, result_bind_ok]
+    · refine ⟨?_, ?_, ?_⟩
+      · rw [hv_idx', Nat.add_right_comm]; exact hrem
+      · rw [hv_sum', hv_idx', hsum_eq, hv_d8]; rfl
+      · rw [hv_sum', hv_idx', Nat.mul_add, Nat.mul_one]
+        exact Nat.add_le_add hsum_bound hle_d8
+  · exact ⟨rfl, rfl, Nat.zero_le 0⟩
+
+/-- **Exact Functional Equivalence for `verified_wotsc256_verify_sum`:**
+    The extracted Rust MIR loop always terminates without arithmetic failure and returns `true`
+    iff the 128 base-4 digits of `digest` sum to `192`. -/
+theorem verified_wotsc256_verify_sum_eq (digest : Array Std.U8 32#usize) :
+    pants_and_quorum_guards.verified_wotsc256_verify_sum digest =
+      .ok (decide (natPrefixSum (pureWotsC256Digit digest) 128 = 192)) := by
+  unfold pants_and_quorum_guards.verified_wotsc256_verify_sum
+  unfold pants_and_quorum_guards.verified_wotsc256_verify_sum_loop
+  obtain ⟨b, hb, hbeq⟩ := wotsc256_verify_sum_fuel digest
+  rw [hbeq] at hb
+  exact loop_ok_of_loopFuel (fuel := 129) (usize_lt_loopMaxFuel 128#usize) hb
+
+theorem verified_wotsc256_verify_sum_spec (digest : Array Std.U8 32#usize) :
+    ∃ b, pants_and_quorum_guards.verified_wotsc256_verify_sum digest = .ok b ∧
+      (b = true ↔ (pureWotsC256Digits digest).sum = 192) := by
+  refine ⟨decide (natPrefixSum (pureWotsC256Digit digest) 128 = 192),
+    verified_wotsc256_verify_sum_eq digest, ?_⟩
+  rw [pureWotsC256Digits_sum_eq_prefix]
+  exact decide_eq_true_iff
+
+private def wotsExtractInv (digest : Array Std.U8 32#usize) (rem : Nat)
+    (st : Array Std.U8 128#usize × Std.Usize) : Prop :=
+  st.2.val + rem = 128 ∧
+  ∀ k < st.2.val, (st.1.val.getD k 0#u8).val = pureWotsC256Digit digest k
+
+private theorem list_getD_set_eq {α : Type} :
+    ∀ (xs : List α) (i : Nat) (v d : α), i < xs.length → (xs.set i v).getD i d = v
+  | [], _, _, _, hi => False.elim (Nat.not_lt_zero _ hi)
+  | _ :: _, 0, _, _, _ => rfl
+  | _ :: tl, i + 1, v, d, hi => list_getD_set_eq tl i v d (Nat.lt_of_succ_lt_succ hi)
+
+private theorem list_getD_set_ne {α : Type} :
+    ∀ (xs : List α) (i k : Nat) (v d : α), k < xs.length → i ≠ k →
+      (xs.set i v).getD k d = xs.getD k d
+  | [], _, _, _, _, hk, _ => False.elim (Nat.not_lt_zero _ hk)
+  | _ :: _, 0, 0, _, _, _, hne => False.elim (hne rfl)
+  | _ :: _, 0, _ + 1, _, _, _, _ => rfl
+  | _ :: _, _ + 1, 0, _, _, _, _ => rfl
+  | _ :: tl, i + 1, k + 1, v, d, hk, hne =>
+    list_getD_set_ne tl i k v d (Nat.lt_of_succ_lt_succ hk)
+      (fun h => hne (congrArg Nat.succ h))
+
+private theorem wotsc256_extract_digits_fuel (digest : Array Std.U8 32#usize) :
+    ∃ arr, loopFuel 129
+      (fun (digits1, i1) =>
+        pants_and_quorum_guards.verified_wotsc256_extract_digits_loop.body digest digits1 i1)
+      (Array.repeat 128#usize 0#u8, 0#usize) = .ok arr ∧
+      (∀ k < 128, (arr.val.getD k 0#u8).val = pureWotsC256Digit digest k) := by
+  apply loopFuel_total_rank
+    (body := fun (digits1, i1) =>
+      pants_and_quorum_guards.verified_wotsc256_extract_digits_loop.body digest digits1 i1)
+    (P := wotsExtractInv digest)
+    (Q := fun arr => ∀ k < 128, (arr.val.getD k 0#u8).val = pureWotsC256Digit digest k)
+    (n := 128) (x := (Array.repeat 128#usize 0#u8, 0#usize))
+  · rintro ⟨arr, idx⟩ ⟨hidx0, hpre⟩
+    have hidx128 : idx.val = 128 := by simpa using hidx0
+    have hnlt : ¬ (idx < pants_and_quorum_guards.WOTSC256_CHAINS) := by
+      unfold pants_and_quorum_guards.WOTSC256_CHAINS
+      intro h
+      have hv := (UScalar.lt_iff_val _ _).mp h
+      rw [hidx128] at hv
+      exact Nat.lt_irrefl 128 hv
+    refine ⟨arr, ?_, ?_⟩
+    · unfold pants_and_quorum_guards.verified_wotsc256_extract_digits_loop.body
+      simp [hnlt]
+    · rw [hidx128] at hpre; exact hpre
+  · intro rem ⟨arr, idx⟩ ⟨hrem, hpre⟩
+    dsimp only at hrem hpre
+    have hlt_val : idx.val < 128 := by
+      have h1 : idx.val < idx.val + (rem + 1) := Nat.lt_add_of_pos_right (Nat.succ_pos rem)
+      rwa [hrem] at h1
+    have hlt_u : idx < pants_and_quorum_guards.WOTSC256_CHAINS := by
+      unfold pants_and_quorum_guards.WOTSC256_CHAINS
+      exact (UScalar.lt_iff_val _ _).mpr hlt_val
+    obtain ⟨d8, hd8, hv_d8, _⟩ := wotsc256_extract_digit_spec digest idx hlt_val
+    have harr_len : idx.val < arr.val.length := by rw [arr.property]; exact hlt_val
+    let arr' : Array Std.U8 128#usize :=
+      ⟨arr.val.set idx.val d8, by rw [List.length_set]; exact arr.property⟩
+    have hupd : Array.update arr idx d8 = .ok arr' := by
+      unfold Array.update
+      exact dite_eq_left_of_eq_true (eq_true harr_len)
+    have hidx_lt64 : idx.val + (1#usize).val < 2 ^ 64 :=
+      Nat.lt_trans (Nat.succ_lt_succ hlt_val) (by decide)
+    let idx' : Std.Usize := ⟨idx.bv + (1#usize).bv⟩
+    have hadd_i : (idx + 1#usize : Result Std.Usize) = .ok idx' := by
+      simp only [hAdd_uscalar_eq, hidx_lt64, ite_true]; rfl
+    have hv_idx' : idx'.val = idx.val + 1 := by
+      change (idx.bv + (1#usize).bv).toNat = _
+      rw [BitVec.toNat_add]; exact Nat.mod_eq_of_lt hidx_lt64
+    refine ⟨(arr', idx'), ?_, ?_⟩
+    · unfold pants_and_quorum_guards.verified_wotsc256_extract_digits_loop.body
+      simp only [hlt_u, ite_true, hd8, hupd, hadd_i, bind_eq_result_bind, result_bind_ok]
+    · refine ⟨by rw [hv_idx', Nat.add_right_comm]; exact hrem, ?_⟩
+      intro k hk
+      rw [hv_idx'] at hk
+      by_cases hkeq : idx.val = k
+      · subst hkeq
+        change ((arr.val.set idx.val d8).getD idx.val 0#u8).val = _
+        rw [list_getD_set_eq arr.val idx.val d8 0#u8 harr_len]
+        exact hv_d8
+      · have hk_lt : k < idx.val :=
+          Nat.lt_of_le_of_ne (Nat.le_of_lt_succ hk) (Ne.symm hkeq)
+        have hk_len : k < arr.val.length := Nat.lt_trans hk_lt harr_len
+        change ((arr.val.set idx.val d8).getD k 0#u8).val = _
+        rw [list_getD_set_ne arr.val idx.val k d8 0#u8 hk_len hkeq]
+        exact hpre k hk_lt
+  · exact ⟨rfl, fun _ hk => False.elim (Nat.not_lt_zero _ hk)⟩
+
+theorem verified_wotsc256_extract_digits_spec (digest : Array Std.U8 32#usize) :
+    ∃ arr, pants_and_quorum_guards.verified_wotsc256_extract_digits digest = .ok arr ∧
+      (∀ k < 128,
+        (arr.val.getD k 0#u8).val = pureWotsC256Digit digest k ∧
+        (arr.val.getD k 0#u8).val < 4) := by
+  unfold pants_and_quorum_guards.verified_wotsc256_extract_digits
+  unfold pants_and_quorum_guards.verified_wotsc256_extract_digits_loop
+  obtain ⟨arr, harr, hval⟩ := wotsc256_extract_digits_fuel digest
+  refine ⟨arr, loop_ok_of_loopFuel (fuel := 129) (usize_lt_loopMaxFuel 128#usize) harr, ?_⟩
+  intro k hk
+  refine ⟨hval k hk, ?_⟩
+  rw [hval k hk]
+  dsimp only [pureWotsC256Digit]
+  exact Nat.mod_lt _ (by decide)
+
+private theorem u8DigitsNatSum_take_eq_prefix (xs : List Std.U8) (f : Nat → Nat)
+    (hlen : 128 ≤ xs.length)
+    (hget : ∀ k < 128, (xs.getD k 0#u8).val = f k) :
+    ∀ n ≤ 128, u8DigitsNatSum (xs.take n) = natPrefixSum f n
+  | 0, _ => rfl
+  | n + 1, hn => by
+    have hn_lt_len : n < xs.length := Nat.lt_of_lt_of_le hn hlen
+    rw [List.take_add_one, List.getElem?_eq_getElem hn_lt_len]
+    dsimp only [Option.toList]
+    have hsum_app : ∀ (ys : List Std.U8) (x : Std.U8),
+        u8DigitsNatSum (ys ++ [x]) = u8DigitsNatSum ys + x.val := by
+      intro ys x
+      induction ys with
+      | nil => simp [u8DigitsNatSum]
+      | cons y rest ih => simp [u8DigitsNatSum, ih, Nat.add_assoc]
+    rw [hsum_app, u8DigitsNatSum_take_eq_prefix xs f hlen hget n (Nat.le_of_lt hn),
+      List.getElem_eq_getD 0#u8, hget n hn]
+    rfl
+
+/-- Specification of `VerifiedWotsC256Guard::from_digest_verified`: succeeds iff the 128
+    base-4 digits of `digest` sum to `192`, sealing `digits` with `u8DigitsNatSum = 192`. -/
+theorem wotsc256_guard_from_digest_spec (digest : Array Std.U8 32#usize) :
+    (natPrefixSum (pureWotsC256Digit digest) 128 = 192 →
+      ∃ g, pants_and_quorum_guards.VerifiedWotsC256Guard.from_digest_verified digest =
+        .ok (.Ok g) ∧
+        g.validated_digest = digest ∧
+        g.verified_sum = 192#u32 ∧
+        u8DigitsNatSum g.digits.val = 192 ∧
+        (∀ k < 128,
+          (g.digits.val.getD k 0#u8).val = pureWotsC256Digit digest k ∧
+          (g.digits.val.getD k 0#u8).val < 4)) ∧
+    (natPrefixSum (pureWotsC256Digit digest) 128 ≠ 192 →
+      pants_and_quorum_guards.VerifiedWotsC256Guard.from_digest_verified digest =
+        .ok (.Err .InvalidWotsC256TargetSum)) := by
+  unfold pants_and_quorum_guards.VerifiedWotsC256Guard.from_digest_verified
+  unfold pants_and_quorum_guards.WOTSC256_TARGET_SUM
+  rw [verified_wotsc256_verify_sum_eq]
+  simp only [bind_eq_result_bind, result_bind_ok]
+  constructor
+  · intro hsum
+    simp only [hsum, decide_true, ↓reduceIte]
+    obtain ⟨arr, harr, hdigits⟩ := verified_wotsc256_extract_digits_spec digest
+    rw [harr, result_bind_ok]
+    refine ⟨_, rfl, rfl, rfl, ?_, hdigits⟩
+    have hlen128 : arr.val.length = 128 := arr.property
+    have htake : arr.val.take 128 = arr.val := List.take_of_length_le (Nat.le_of_eq hlen128)
+    rw [← htake]
+    rw [u8DigitsNatSum_take_eq_prefix arr.val (pureWotsC256Digit digest)
+      (Nat.le_of_eq hlen128.symm) (fun k hk => (hdigits k hk).1) 128 (Nat.le_refl 128)]
+    exact hsum
+  · intro hne
+    simp [hne]
+
+private def findStrictGt128 : List Std.U8 → List Std.U8 → Option Nat
+  | [], _ => none
+  | _, [] => none
+  | x :: xs, y :: ys =>
+    if y.val < x.val then some 0
+    else (findStrictGt128 xs ys).map Nat.succ
+
+private theorem findStrictGt128_some :
+    ∀ {xs ys : List Std.U8} {idx : Nat},
+      findStrictGt128 xs ys = some idx →
+      ys.length = xs.length →
+      idx < xs.length ∧ (ys.getD idx 0#u8).val < (xs.getD idx 0#u8).val
+  | [], _, _, h, _ => by cases h
+  | _ :: _, [], _, h, _ => by cases h
+  | x :: xs, y :: ys, idx, h, hlen => by
+    dsimp only [findStrictGt128] at h
+    by_cases hlt : y.val < x.val
+    · simp only [hlt, ↓reduceIte] at h
+      injection h with h0; subst h0
+      exact ⟨Nat.zero_lt_succ _, by simpa [List.getD] using hlt⟩
+    · simp only [hlt, ↓reduceIte] at h
+      cases hrec : findStrictGt128 xs ys with
+      | none => rw [hrec] at h; cases h
+      | some k =>
+        rw [hrec] at h
+        simp only [Option.map, Option.some.injEq] at h
+        subst h
+        obtain ⟨hk, hval⟩ := findStrictGt128_some hrec (Nat.succ.inj hlen)
+        exact ⟨Nat.succ_lt_succ hk, by simpa [List.getD] using hval⟩
+
+private theorem findStrictGt128_none :
+    ∀ {xs ys : List Std.U8},
+      findStrictGt128 xs ys = none →
+      ys.length = xs.length →
+      u8DigitsNatSum xs ≤ u8DigitsNatSum ys ∧
+      (u8DigitsNatSum xs = u8DigitsNatSum ys → xs = ys)
+  | [], [], _, _ => ⟨Nat.le_refl 0, fun _ => rfl⟩
+  | [], _ :: _, _, hlen => by cases hlen
+  | _ :: _, [], _, hlen => by cases hlen
+  | x :: xs, y :: ys, hnone, hlen => by
+    dsimp only [findStrictGt128] at hnone
+    by_cases hlt : y.val < x.val
+    · simp only [hlt, ↓reduceIte] at hnone; cases hnone
+    · simp only [hlt, ↓reduceIte] at hnone
+      have hxy : x.val ≤ y.val := Nat.le_of_not_gt hlt
+      cases hrec : findStrictGt128 xs ys with
+      | some _ => rw [hrec] at hnone; cases hnone
+      | none =>
+        obtain ⟨hle_tail, heq_tail⟩ := findStrictGt128_none hrec (Nat.succ.inj hlen)
+        dsimp only [u8DigitsNatSum]
+        refine ⟨Nat.add_le_add hxy hle_tail, ?_⟩
+        intro hsum_eq
+        have hx_eq_y : x.val = y.val := by
+          by_cases hne : x.val = y.val
+          · exact hne
+          · have hstrict : x.val < y.val := Nat.lt_of_le_of_ne hxy hne
+            have hstrict_sum : x.val + u8DigitsNatSum xs < y.val + u8DigitsNatSum ys :=
+              Nat.add_lt_add_of_lt_of_le hstrict hle_tail
+            exact False.elim (Nat.ne_of_lt hstrict_sum hsum_eq)
+        have htail_eq : u8DigitsNatSum xs = u8DigitsNatSum ys := by
+          rw [hx_eq_y] at hsum_eq; exact Nat.add_left_cancel hsum_eq
+        rw [UScalar.eq_of_val_eq hx_eq_y, heq_tail htail_eq]
+
+/-- Constructive (`0 Classical.choice`) constant-sum incomparability for two distinct
+    `VerifiedWotsC256Guard` codewords: neither 128-digit vector componentwise dominates the other. -/
+theorem wotsc256_128_sum192_incomparable_mir
+    (d1 d2 : Array Std.U8 32#usize)
+    (g1 g2 : pants_and_quorum_guards.VerifiedWotsC256Guard)
+    (hg1 : pants_and_quorum_guards.VerifiedWotsC256Guard.from_digest_verified d1 = .ok (.Ok g1))
+    (hg2 : pants_and_quorum_guards.VerifiedWotsC256Guard.from_digest_verified d2 = .ok (.Ok g2))
+    (hne : g1.digits ≠ g2.digits) :
+    (∃ i < 128, (g2.digits.val.getD i 0#u8).val < (g1.digits.val.getD i 0#u8).val) ∧
+    (∃ j < 128, (g1.digits.val.getD j 0#u8).val < (g2.digits.val.getD j 0#u8).val) := by
+  have hs1 : natPrefixSum (pureWotsC256Digit d1) 128 = 192 := by
+    by_cases h : natPrefixSum (pureWotsC256Digit d1) 128 = 192
+    · exact h
+    · have herr := (wotsc256_guard_from_digest_spec d1).2 h
+      rw [herr] at hg1; cases hg1
+  have hs2 : natPrefixSum (pureWotsC256Digit d2) 128 = 192 := by
+    by_cases h : natPrefixSum (pureWotsC256Digit d2) 128 = 192
+    · exact h
+    · have herr := (wotsc256_guard_from_digest_spec d2).2 h
+      rw [herr] at hg2; cases hg2
+  obtain ⟨g1', hg1', _, _, hsum1, _⟩ := (wotsc256_guard_from_digest_spec d1).1 hs1
+  obtain ⟨g2', hg2', _, _, hsum2, _⟩ := (wotsc256_guard_from_digest_spec d2).1 hs2
+  rw [hg1'] at hg1; injection hg1 with h1; injection h1 with h1'; subst h1'
+  rw [hg2'] at hg2; injection hg2 with h2; injection h2 with h2'; subst h2'
+  have hlen1 : g1'.digits.val.length = 128 := g1'.digits.property
+  have hlen2 : g2'.digits.val.length = 128 := g2'.digits.property
+  constructor
+  · cases hgt12 : findStrictGt128 g1'.digits.val g2'.digits.val with
+    | none =>
+      obtain ⟨_, heq⟩ := findStrictGt128_none hgt12 (hlen2.trans hlen1.symm)
+      exact False.elim (hne (Std.Array.ext (heq (hsum1.trans hsum2.symm))))
+    | some i =>
+      obtain ⟨hi, hlt⟩ := findStrictGt128_some hgt12 (hlen2.trans hlen1.symm)
+      rw [hlen1] at hi; exact ⟨i, hi, hlt⟩
+  · cases hgt21 : findStrictGt128 g2'.digits.val g1'.digits.val with
+    | none =>
+      obtain ⟨_, heq⟩ := findStrictGt128_none hgt21 (hlen1.trans hlen2.symm)
+      exact False.elim (hne (Std.Array.ext (heq (hsum2.trans hsum1.symm)).symm))
+    | some j =>
+      obtain ⟨hj, hlt⟩ := findStrictGt128_some hgt21 (hlen1.trans hlen2.symm)
+      rw [hlen2] at hj; exact ⟨j, hj, hlt⟩
+
+/-! ## 3. `VerifiedRssPoisonLatch` (Sticky Terminal Verification-Failure Latch) -/
+
+abbrev purePoisonRss : pants_and_quorum_guards.VerifiedRssPoisonLatch :=
+  { pending_relations := 0#u64, unverified := true, poisoned := true }
+
+/-- Pure Mealy specification of `VerifiedRssPoisonLatch::step`:
+    any failed check (`RecordCheckResult false`) or relation-counter overflow irreversibly
+    sets `poisoned = true` BEFORE clearing `pending_relations = 0`. -/
+@[expose]
+def rssPoisonMealy :
+    MealySpec
+      pants_and_quorum_guards.VerifiedRssPoisonLatch
+      pants_and_quorum_guards.RssLatchStepInput
+      pants_and_quorum_guards.RssLatchStepOutput where
+  step st inp :=
+    if st.poisoned then none
+    else
+      match inp with
+      | .StageRelations count =>
+        if decide (count = 0#u64) then none
+        else if decide (st.pending_relations.val + count.val ≤ core.num.U64.MAX.val) then
+          let nextP : Std.U64 := ⟨st.pending_relations.bv + count.bv⟩
+          some ({ pending_relations := nextP, unverified := true, poisoned := false },
+            .RelationsStaged nextP)
+        else none
+      | .RecordCheckResult checkOk =>
+        if checkOk then
+          some ({ pending_relations := 0#u64, unverified := false, poisoned := false },
+            .CheckVerified)
+        else none
+      | .AuthorizeOpen =>
+        if !st.unverified && decide (st.pending_relations = 0#u64) then
+          some (st, .OpenAuthorized { verified_clean := true })
+        else none
+  errStep st inp :=
+    if st.poisoned then purePoisonRss
+    else
+      match inp with
+      | .StageRelations count =>
+        if decide (count = 0#u64) then st else purePoisonRss
+      | .RecordCheckResult _ => purePoisonRss
+      | .AuthorizeOpen => st
+
+/-- Constructive single-step `MirStepSim` simulation from extracted Rust MIR
+    `VerifiedRssPoisonLatch::step` to `rssPoisonMealy` (`0 Classical.choice`). -/
+theorem rss_poison_latch_step_sim :
+    MirStepSim rssPoisonMealy
+      (adaptStateResult pants_and_quorum_guards.VerifiedRssPoisonLatch.step)
+      Eq (fun a b => a = id b) (fun a b => a = id b) where
+  ok_sim {s m m' i_s i_m o_m} hSt hIn hStep := by
+    subst m; dsimp only [id] at hIn; subst i_s
+    rcases s with ⟨pend, unv, pois⟩
+    dsimp only [adaptStateResult] at hStep
+    unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.step at hStep
+    dsimp only [rssPoisonMealy, purePoisonRss]
+    cases pois
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      cases i_m with
+      | StageRelations count =>
+        dsimp only at hStep ⊢
+        unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations at hStep
+        unfold pants_and_quorum_guards.poison_rss_latch at hStep
+        simp only [Bool.false_eq_true, ↓reduceIte] at hStep
+        by_cases hc0 : count = 0#u64
+        · simp only [hc0, ↓reduceIte, bind_eq_result_bind, result_bind_ok] at hStep
+          cases hStep
+        · simp only [hc0, decide_false, Bool.false_eq_true, ↓reduceIte,
+            bind_eq_result_bind] at hStep ⊢
+          have hp_le_max : pend.val ≤ core.num.U64.MAX.val := u64_val_le_max pend
+          let cap : Std.U64 := ⟨core.num.U64.MAX.bv - pend.bv⟩
+          have hsub : (core.num.U64.MAX - pend : Result Std.U64) = .ok cap := by
+            simp only [hSub_uscalar_eq, hp_le_max, ite_true]; rfl
+          have hv_cap : cap.val = core.num.U64.MAX.val - pend.val := by
+            change (core.num.U64.MAX.bv - pend.bv).toNat = _
+            exact BitVec.toNat_sub_of_le (BitVec.le_def.mpr hp_le_max)
+          rw [hsub, result_bind_ok] at hStep
+          by_cases hov : count > cap
+          · simp only [hov, ↓reduceIte, result_bind_ok] at hStep
+            cases hStep
+          · have hle_cap : count.val ≤ cap.val :=
+              Nat.le_of_not_gt fun h => hov ((UScalar.lt_iff_val _ _).mpr h)
+            have hsum_le : pend.val + count.val ≤ core.num.U64.MAX.val := by
+              rw [hv_cap] at hle_cap
+              have h1 := Nat.add_le_add_left hle_cap pend.val
+              rwa [Nat.add_sub_of_le hp_le_max] at h1
+            have hsum_lt64 : pend.val + count.val < 2 ^ 64 :=
+              Nat.lt_of_le_of_lt hsum_le core.num.U64.MAX.bv.isLt
+            have hadd_ok : (pend + count : Result Std.U64) = .ok ⟨pend.bv + count.bv⟩ := by
+              simp only [hAdd_uscalar_eq, hsum_lt64, ite_true]
+            simp only [hov, ↓reduceIte] at hStep
+            rw [hadd_ok, result_bind_ok, result_bind_ok, result_bind_ok] at hStep
+            dsimp only at hStep
+            injection hStep with hAcc
+            injection hAcc with hm' ho
+            rw [decide_eq_true hsum_le]
+            simp only [↓reduceIte]
+            exact ⟨hm', ho⟩
+      | RecordCheckResult checkOk =>
+        dsimp only at hStep ⊢
+        unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result at hStep
+        unfold pants_and_quorum_guards.poison_rss_latch at hStep
+        cases checkOk
+        · simp only [Bool.false_eq_true, ↓reduceIte,
+            bind_eq_result_bind, result_bind_ok] at hStep
+          cases hStep
+        · simp only [Bool.false_eq_true, ↓reduceIte,
+            bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          injection hStep with hAcc
+          injection hAcc with hm' ho
+          exact ⟨hm', ho⟩
+      | AuthorizeOpen =>
+        dsimp only at hStep ⊢
+        unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open at hStep
+        unfold pants_and_quorum_guards.poison_rss_latch at hStep
+        cases unv
+        · by_cases hp0 : pend = 0#u64
+          · simp only [hp0, bne_self_eq_false, Bool.false_eq_true,
+              Bool.not_false, decide_true, Bool.and_self, ↓reduceIte,
+              bind_eq_result_bind, result_bind_ok] at hStep ⊢
+            injection hStep with hAcc
+            injection hAcc with hm' ho
+            exact ⟨hm', ho⟩
+          · have hne : (pend != 0#u64) = true := bne_iff_ne.mpr hp0
+            simp only [hne, ↓reduceIte,
+              bind_eq_result_bind, result_bind_ok] at hStep
+            cases hStep
+        · simp only [Bool.false_eq_true, ↓reduceIte,
+            bind_eq_result_bind, result_bind_ok] at hStep
+          cases hStep
+    · cases i_m
+      · dsimp only [pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations,
+          pants_and_quorum_guards.poison_rss_latch] at hStep
+        simp only [↓reduceIte, bind_eq_result_bind, result_bind_ok] at hStep
+        cases hStep
+      · dsimp only [pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result,
+          pants_and_quorum_guards.poison_rss_latch] at hStep
+        simp only [↓reduceIte, bind_eq_result_bind, result_bind_ok] at hStep
+        cases hStep
+      · dsimp only [pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open,
+          pants_and_quorum_guards.poison_rss_latch] at hStep
+        simp only [↓reduceIte, bind_eq_result_bind, result_bind_ok] at hStep
+        cases hStep
+  err_preserves {s m m' i_s i_m e} hSt hIn hStep := by
+    subst m; dsimp only [id] at hIn; subst i_s
+    rcases s with ⟨pend, unv, pois⟩
+    dsimp only [adaptStateResult] at hStep
+    unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.step at hStep
+    dsimp only [rssPoisonMealy, purePoisonRss]
+    cases pois
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      cases i_m with
+      | StageRelations count =>
+        dsimp only at hStep ⊢
+        unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations at hStep
+        unfold pants_and_quorum_guards.poison_rss_latch at hStep
+        simp only [Bool.false_eq_true, ↓reduceIte] at hStep
+        by_cases hc0 : count = 0#u64
+        · simp only [hc0, decide_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          injection hStep with hRej
+          injection hRej with hm' _
+          exact ⟨trivial, hm'⟩
+        · simp only [hc0, decide_false, Bool.false_eq_true, ↓reduceIte,
+            bind_eq_result_bind] at hStep ⊢
+          have hp_le_max : pend.val ≤ core.num.U64.MAX.val := u64_val_le_max pend
+          let cap : Std.U64 := ⟨core.num.U64.MAX.bv - pend.bv⟩
+          have hsub : (core.num.U64.MAX - pend : Result Std.U64) = .ok cap := by
+            simp only [hSub_uscalar_eq, hp_le_max, ite_true]; rfl
+          have hv_cap : cap.val = core.num.U64.MAX.val - pend.val := by
+            change (core.num.U64.MAX.bv - pend.bv).toNat = _
+            exact BitVec.toNat_sub_of_le (BitVec.le_def.mpr hp_le_max)
+          rw [hsub, result_bind_ok] at hStep
+          by_cases hov : count > cap
+          · have hgt : cap.val < count.val := (UScalar.lt_iff_val _ _).mp hov
+            have hnle_sum : ¬ (pend.val + count.val ≤ core.num.U64.MAX.val) := by
+              intro hle_sum
+              have hle_c : count.val ≤ core.num.U64.MAX.val - pend.val :=
+                Nat.le_sub_of_add_le (by rwa [Nat.add_comm] at hle_sum)
+              rw [← hv_cap] at hle_c
+              exact Nat.not_lt_of_ge hle_c hgt
+            simp only [hov, ↓reduceIte, result_bind_ok] at hStep
+            injection hStep with hRej
+            injection hRej with hm' _
+            rw [decide_eq_false hnle_sum]
+            simp only [Bool.false_eq_true, ↓reduceIte]
+            exact ⟨trivial, hm'⟩
+          · have hle_cap : count.val ≤ cap.val :=
+              Nat.le_of_not_gt fun h => hov ((UScalar.lt_iff_val _ _).mpr h)
+            have hsum_le : pend.val + count.val ≤ core.num.U64.MAX.val := by
+              rw [hv_cap] at hle_cap
+              have h1 := Nat.add_le_add_left hle_cap pend.val
+              rwa [Nat.add_sub_of_le hp_le_max] at h1
+            have hsum_lt64 : pend.val + count.val < 2 ^ 64 :=
+              Nat.lt_of_le_of_lt hsum_le core.num.U64.MAX.bv.isLt
+            have hadd_ok : (pend + count : Result Std.U64) = .ok ⟨pend.bv + count.bv⟩ := by
+              simp only [hAdd_uscalar_eq, hsum_lt64, ite_true]
+            simp only [hov, ↓reduceIte] at hStep
+            rw [hadd_ok, result_bind_ok, result_bind_ok, result_bind_ok] at hStep
+            cases hStep
+      | RecordCheckResult checkOk =>
+        dsimp only at hStep ⊢
+        unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result at hStep
+        unfold pants_and_quorum_guards.poison_rss_latch at hStep
+        cases checkOk
+        · simp only [Bool.false_eq_true, ↓reduceIte,
+            bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          injection hStep with hRej
+          injection hRej with hm' _
+          exact ⟨trivial, hm'⟩
+        · simp only [Bool.false_eq_true, ↓reduceIte,
+            bind_eq_result_bind, result_bind_ok] at hStep
+          cases hStep
+      | AuthorizeOpen =>
+        dsimp only at hStep ⊢
+        unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open at hStep
+        unfold pants_and_quorum_guards.poison_rss_latch at hStep
+        cases unv
+        · by_cases hp0 : pend = 0#u64
+          · simp only [hp0, bne_self_eq_false, Bool.false_eq_true, ↓reduceIte,
+              bind_eq_result_bind, result_bind_ok] at hStep
+            cases hStep
+          · have hne : (pend != 0#u64) = true := bne_iff_ne.mpr hp0
+            simp only [hne, Bool.false_eq_true, Bool.not_false,
+              decide_eq_false hp0, Bool.and_false, ↓reduceIte,
+              bind_eq_result_bind, result_bind_ok] at hStep ⊢
+            injection hStep with hRej
+            injection hRej with hm' _
+            exact ⟨trivial, hm'⟩
+        · simp only [Bool.false_eq_true, Bool.not_true, Bool.false_and,
+            ↓reduceIte, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          injection hStep with hRej
+          injection hRej with hm' _
+          exact ⟨trivial, hm'⟩
+    · simp only [↓reduceIte]
+      cases i_m
+      · dsimp only [pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations,
+          pants_and_quorum_guards.poison_rss_latch] at hStep
+        simp only [↓reduceIte, bind_eq_result_bind, result_bind_ok] at hStep
+        injection hStep with hRej
+        injection hRej with hm' _
+        exact ⟨trivial, hm'⟩
+      · dsimp only [pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result,
+          pants_and_quorum_guards.poison_rss_latch] at hStep
+        simp only [↓reduceIte, bind_eq_result_bind, result_bind_ok] at hStep
+        injection hStep with hRej
+        injection hRej with hm' _
+        exact ⟨trivial, hm'⟩
+      · dsimp only [pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open,
+          pants_and_quorum_guards.poison_rss_latch] at hStep
+        simp only [↓reduceIte, bind_eq_result_bind, result_bind_ok] at hStep
+        injection hStep with hRej
+        injection hRej with hm' _
+        exact ⟨trivial, hm'⟩
+
+private theorem rss_poisoned_trace_nil_and_sticky
+    {st s_f : pants_and_quorum_guards.VerifiedRssPoisonLatch}
+    {pairs : List (pants_and_quorum_guards.RssLatchStepInput ×
+      pants_and_quorum_guards.RssLatchStepOutput)}
+    (hPois : st.poisoned = true)
+    (hTr : rssPoisonMealy.ValidTrace st pairs s_f) :
+    pairs = [] ∧ s_f.poisoned = true := by
+  induction hTr with
+  | nil _ => exact ⟨rfl, hPois⟩
+  | @accept sa _ _ _ _ _ hStep _ _ =>
+    dsimp only [rssPoisonMealy] at hStep
+    rw [hPois] at hStep; cases hStep
+  | @reject sa _ _ _ _ _ ih =>
+    dsimp only [rssPoisonMealy, purePoisonRss] at ih
+    rw [hPois] at ih
+    simp only [↓reduceIte] at ih
+    exact ih trivial
+
+/-- **Sticky Terminal Verification-Failure Theorem (`rss_poison_latch_failed_check_permanently_blocks_open_mir`):**
+    Once `VerifiedRssPoisonLatch::record_check_result(st0, false)` runs, `poisoned` is latched
+    `true` BEFORE clearing `pending_relations = 0`, and **NO subsequent call sequence**
+    (including calling `RecordCheckResult true` on `pending_relations == 0`!) can EVER emit
+    any accepted transition or return `Ok` from `authorize_open()`. -/
+theorem rss_poison_latch_failed_check_permanently_blocks_open_mir
+    (st0 st1 st_final : pants_and_quorum_guards.VerifiedRssPoisonLatch)
+    (res1 : core.result.Result Unit pants_and_quorum_guards.PantsGuardError)
+    (turns : List (MirTurn pants_and_quorum_guards.RssLatchStepInput
+      pants_and_quorum_guards.RssLatchStepOutput
+      pants_and_quorum_guards.PantsGuardError))
+    (hFail : pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result st0 false =
+      .ok (st1, res1))
+    (hTrace : MirTrace (adaptStateResult pants_and_quorum_guards.VerifiedRssPoisonLatch.step)
+      st1 turns st_final) :
+    st1.poisoned = true ∧
+    st1.pending_relations = 0#u64 ∧
+    st_final.poisoned = true ∧
+    mirAcceptedPairs turns = [] ∧
+    pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open st_final =
+      .ok ({ pending_relations := 0#u64, unverified := true, poisoned := true },
+        .Err .RssEnginePoisoned) := by
+  have hSt1 : st1 = { pending_relations := 0#u64, unverified := true, poisoned := true } := by
+    unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result at hFail
+    unfold pants_and_quorum_guards.poison_rss_latch at hFail
+    cases hp0 : st0.poisoned <;>
+    simp [hp0, bind_eq_result_bind, result_bind_ok] at hFail <;>
+    exact hFail.1.symm
+  have hPois1 : st1.poisoned = true := by rw [hSt1]
+  have hPend1 : st1.pending_relations = 0#u64 := by rw [hSt1]
+  have hInputs :=
+    (show InputsMatchTurns (fun a b => a = id b) (turns.map (fun t => id t.input)) turns from by
+      clear hTrace
+      induction turns with
+      | nil => exact .nil
+      | cons _ rest ih => exact .cons rfl ih)
+  obtain ⟨hVal, hRelF, hPairs⟩ := rss_poison_latch_step_sim.lift_runInputs rfl hTrace hInputs
+  obtain ⟨hNil, hPoisF⟩ := rss_poisoned_trace_nil_and_sticky hPois1 hVal
+  subst hRelF
+  rw [hNil] at hPairs
+  refine ⟨hPois1, hPend1, hPoisF, acceptedPairsRel_nil_eq hPairs, ?_⟩
+  unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open
+  unfold pants_and_quorum_guards.poison_rss_latch
+  rw [hPoisF]
+  simp only [↓reduceIte, bind_eq_result_bind, result_bind_ok]
+
+private theorem rss_clean_validTrace_sound
+    {st s_f : pants_and_quorum_guards.VerifiedRssPoisonLatch}
+    {pairs : List (pants_and_quorum_guards.RssLatchStepInput ×
+      pants_and_quorum_guards.RssLatchStepOutput)}
+    (hTr : rssPoisonMealy.ValidTrace st pairs s_f) :
+    (∀ p ∈ pairs, ∀ perm, p.2 = .OpenAuthorized perm → perm.verified_clean = true) ∧
+    (∀ pre suf perm,
+      pairs = pre ++ (.AuthorizeOpen, .OpenAuthorized perm) :: suf →
+      (st.unverified = false ∧ st.pending_relations = 0#u64 ∧
+        ∀ q ∈ pre, ∀ c n, q ≠ (.StageRelations c, .RelationsStaged n)) ∨
+      ∃ pre1 pre2, pre = pre1 ++ (.RecordCheckResult true, .CheckVerified) :: pre2 ∧
+        ∀ q ∈ pre2, ∀ c n, q ≠ (.StageRelations c, .RelationsStaged n)) := by
+  induction hTr with
+  | nil _ =>
+    refine ⟨fun _ hm => False.elim (List.not_mem_nil hm), ?_⟩
+    intro pre _ _ heq
+    cases pre <;> cases heq
+  | @accept sa sb _ inp out rest hStep _ ih =>
+    dsimp only [rssPoisonMealy] at hStep
+    cases hp : sa.poisoned
+    · rw [hp] at hStep
+      simp only [Bool.false_eq_true, ↓reduceIte] at hStep
+      cases inp with
+      | StageRelations count =>
+        dsimp only at hStep
+        by_cases hc0 : count = 0#u64
+        · simp only [hc0, decide_true, ↓reduceIte] at hStep; cases hStep
+        · simp only [hc0, decide_false, Bool.false_eq_true, ↓reduceIte] at hStep
+          by_cases hle : sa.pending_relations.val + count.val ≤ core.num.U64.MAX.val
+          · simp only [hle, decide_true, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+            rcases hStep with ⟨hsb, hout⟩
+            subst hsb; subst hout
+            obtain ⟨hPermTail, hBarrierTail⟩ := ih
+            refine ⟨?_, ?_⟩
+            · intro p hmem perm hperm
+              simp only [List.mem_cons] at hmem
+              rcases hmem with rfl | hm
+              · cases hperm
+              · exact hPermTail p hm perm hperm
+            · intro pre suf perm heq
+              cases pre with
+              | nil => cases heq
+              | cons hd tl =>
+                injection heq with hhd htl
+                rcases hBarrierTail tl suf perm htl with ⟨hu_f, _, _⟩ | ⟨p1, p2, hp_eq, hno_stg⟩
+                · cases hu_f
+                · exact Or.inr ⟨hd :: p1, p2, by rw [hp_eq]; rfl, hno_stg⟩
+          · rw [decide_eq_false hle] at hStep
+            simp only [Bool.false_eq_true, ↓reduceIte] at hStep; cases hStep
+      | RecordCheckResult checkOk =>
+        dsimp only at hStep
+        cases checkOk with
+        | false => simp only [Bool.false_eq_true, ↓reduceIte] at hStep; cases hStep
+        | true =>
+          simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+          rcases hStep with ⟨hsb, hout⟩
+          subst hsb; subst hout
+          obtain ⟨hPermTail, hBarrierTail⟩ := ih
+          refine ⟨?_, ?_⟩
+          · intro p hmem perm hperm
+            simp only [List.mem_cons] at hmem
+            rcases hmem with rfl | hm
+            · cases hperm
+            · exact hPermTail p hm perm hperm
+          · intro pre suf perm heq
+            cases pre with
+            | nil => cases heq
+            | cons hd tl =>
+              injection heq with hhd htl
+              subst hhd
+              rcases hBarrierTail tl suf perm htl with ⟨_, _, hno_stg0⟩ | ⟨p1, p2, hp_eq, hno_stg⟩
+              · exact Or.inr ⟨[], tl, rfl, hno_stg0⟩
+              · exact Or.inr ⟨(.RecordCheckResult true, .CheckVerified) :: p1, p2,
+                  by rw [hp_eq]; rfl, hno_stg⟩
+      | AuthorizeOpen =>
+        dsimp only at hStep
+        cases hu : sa.unverified
+        · by_cases hp0 : sa.pending_relations = 0#u64
+          · simp only [hu, Bool.not_false, hp0, decide_true, Bool.and_self, ↓reduceIte,
+              Option.some.injEq, Prod.mk.injEq] at hStep
+            rcases hStep with ⟨hsb, hout⟩
+            subst hsb; subst hout
+            obtain ⟨hPermTail, hBarrierTail⟩ := ih
+            refine ⟨?_, ?_⟩
+            · intro p hmem perm hperm
+              simp only [List.mem_cons] at hmem
+              rcases hmem with rfl | hm
+              · injection hperm with hp_eq; subst hp_eq; rfl
+              · exact hPermTail p hm perm hperm
+            · intro pre suf perm heq
+              cases pre with
+              | nil =>
+                exact Or.inl ⟨rfl, hp0, fun _ hm => False.elim (List.not_mem_nil hm)⟩
+              | cons hd tl =>
+                injection heq with hhd htl
+                subst hhd
+                rcases hBarrierTail tl suf perm htl with ⟨_, _, hno_stg0⟩ | ⟨p1, p2, hp_eq, hno_stg⟩
+                · refine Or.inl ⟨rfl, hp0, ?_⟩
+                  intro q hq c n
+                  simp only [List.mem_cons] at hq
+                  rcases hq with rfl | hq_tl
+                  · intro hbad; cases hbad
+                  · exact hno_stg0 q hq_tl c n
+                · exact Or.inr ⟨(.AuthorizeOpen, .OpenAuthorized { verified_clean := true }) :: p1,
+                    p2, by rw [hp_eq]; rfl, hno_stg⟩
+          · simp only [hu, Bool.not_false, decide_eq_false hp0, Bool.and_false,
+              Bool.false_eq_true, ↓reduceIte] at hStep
+            cases hStep
+        · simp only [hu, Bool.not_true, Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hStep
+          cases hStep
+    · rw [hp] at hStep; cases hStep
+  | @reject sa _ inp _ _ hTail ih =>
+    dsimp only [rssPoisonMealy, purePoisonRss] at hTail
+    cases hp : sa.poisoned
+    · rw [hp] at hTail
+      simp only [Bool.false_eq_true, ↓reduceIte] at hTail
+      cases inp with
+      | StageRelations count =>
+        dsimp only at hTail
+        by_cases hc0 : count = 0#u64
+        · have hErr : rssPoisonMealy.errStep sa (.StageRelations count) = sa := by
+            dsimp only [rssPoisonMealy]; simp only [hp, Bool.false_eq_true, hc0, decide_true, ↓reduceIte]
+          rw [hErr] at ih
+          exact ih
+        · simp only [hc0, decide_false, Bool.false_eq_true, ↓reduceIte] at hTail
+          obtain ⟨hNil, _⟩ := rss_poisoned_trace_nil_and_sticky rfl hTail
+          subst hNil
+          exact ⟨fun _ hm => False.elim (List.not_mem_nil hm),
+            fun pre _ _ heq => by cases pre <;> cases heq⟩
+      | RecordCheckResult _ =>
+        dsimp only at hTail
+        obtain ⟨hNil, _⟩ := rss_poisoned_trace_nil_and_sticky rfl hTail
+        subst hNil
+        exact ⟨fun _ hm => False.elim (List.not_mem_nil hm),
+          fun pre _ _ heq => by cases pre <;> cases heq⟩
+      | AuthorizeOpen =>
+        have hErr : rssPoisonMealy.errStep sa .AuthorizeOpen = sa := by
+          dsimp only [rssPoisonMealy]; simp only [hp, Bool.false_eq_true, ↓reduceIte]
+        rw [hErr] at ih
+        exact ih
+    · rw [hp] at hTail
+      simp only [↓reduceIte] at hTail
+      obtain ⟨hNil, _⟩ := rss_poisoned_trace_nil_and_sticky rfl hTail
+      subst hNil
+      exact ⟨fun _ hm => False.elim (List.not_mem_nil hm),
+        fun pre _ _ heq => by cases pre <;> cases heq⟩
+
+/-- **Multi-Turn Verification-Barrier Soundness for `VerifiedRssPoisonLatch`:**
+    Starting from `new_clean`, across ANY multi-turn `MirTrace`:
+    1. Every `OpenAuthorized` permit has `verified_clean = true`;
+    2. Whenever `AuthorizeOpen` succeeds after any `StageRelations` batch, a `RecordCheckResult true`
+       barrier MUST have succeeded after the most recent `StageRelations` batch (and zero failed
+       checks occurred anywhere earlier in the trace). -/

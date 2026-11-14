@@ -1351,3 +1351,393 @@ private theorem decode_intent_128_converse
             decode_intent_amounts32_converse _ amt spent hamt]
         exact pack4x32_sliceBlocks_eq bytes
 
+theorem intent_codec_roundtrip_injective_mir :
+    (∀ intent : policy_and_addr.CanonicalIntent128,
+      ∃ bytes : Array Std.U8 128#usize,
+        policy_and_addr.encode_intent_128 intent = .ok bytes ∧
+        policy_and_addr.decode_intent_128 bytes = .ok (some intent)) ∧
+    (∀ (bytes : Array Std.U8 128#usize) (intent : policy_and_addr.CanonicalIntent128),
+      policy_and_addr.decode_intent_128 bytes = .ok (some intent) →
+      policy_and_addr.encode_intent_128 intent = .ok bytes) ∧
+    (∀ (i1 i2 : policy_and_addr.CanonicalIntent128) (bytes : Array Std.U8 128#usize),
+      policy_and_addr.encode_intent_128 i1 = .ok bytes →
+      policy_and_addr.encode_intent_128 i2 = .ok bytes →
+      i1 = i2) := by
+  refine ⟨encode_intent_128_roundtrip, decode_intent_128_converse, ?_⟩
+  intro i1 i2 bytes he1 he2
+  obtain ⟨b1, hb1, hd1⟩ := encode_intent_128_roundtrip i1
+  obtain ⟨b2, hb2, hd2⟩ := encode_intent_128_roundtrip i2
+  rw [he1] at hb1; injection hb1 with hb1_eq; subst hb1_eq
+  rw [he2] at hb2; injection hb2 with hb2_eq; subst hb2_eq
+  rw [hd1] at hd2
+  injection hd2 with hs
+  injection hs
+
+/-! ## 3. Hybrid Domain Framing & SHAKE256 Transcript Derivation -/
+
+@[expose]
+def hybridDomainMagic14 : Array Std.U8 14#usize :=
+  Array.make 14#usize [
+    81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 72#u8, 89#u8, 66#u8,
+    82#u8, 73#u8, 68#u8, 46#u8, 86#u8, 50#u8]
+
+@[expose]
+def hybridRoleByte : policy_and_addr.HybridRoleTag → Std.U8
+  | .Classical => 1#u8
+  | .PostQuantum => 2#u8
+
+private theorem hybridRole_to_u8_eq (r : policy_and_addr.HybridRoleTag) :
+    policy_and_addr.HybridRoleTag.to_u8 r = .ok (hybridRoleByte r) := by
+  cases r <;> rfl
+
+private theorem u8_or_eq_zero_iff (a b : Std.U8) :
+    a ||| b = 0#u8 ↔ a = 0#u8 ∧ b = 0#u8 := by
+  constructor
+  · intro h
+    obtain ⟨ha, hb⟩ := BitVec.or_eq_zero_iff.mp (congrArg UScalar.bv h)
+    exact ⟨UScalar.ext ha, UScalar.ext hb⟩
+  · rintro ⟨rfl, rfl⟩; rfl
+
+theorem check_hybrid_domain_framing_spec
+    (magic14 : Array Std.U8 14#usize) (wire_role_byte : Std.U8)
+    (expected_role : policy_and_addr.HybridRoleTag) (suite_code : Std.U16)
+    (expected_id_commit wire_id_commit : Array Std.U8 32#usize) :
+    policy_and_addr.check_hybrid_domain_framing
+      magic14 wire_role_byte expected_role suite_code expected_id_commit wire_id_commit =
+    .ok (decide (magic14 = hybridDomainMagic14 ∧
+      (suite_code = 1281#u16 ∨ suite_code = 1282#u16) ∧
+      wire_role_byte = hybridRoleByte expected_role ∧
+      expected_id_commit = wire_id_commit)) := by
+  have index (i : Std.Usize) (hi : i.val < 14) :
+      Std.Array.index_usize magic14 i = .ok (magic14.val.getD i.val 0#u8) :=
+    array_index_getD magic14 i 0#u8 hi
+  unfold policy_and_addr.check_hybrid_domain_framing
+    policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
+    policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
+  apply bind_ok_step (index 0#usize (by decide)); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 1#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 2#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 3#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 4#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 5#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 6#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 7#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 8#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 9#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 10#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 11#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 12#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  apply bind_ok_step (index 13#usize (by decide)); apply bind_ok_step (lift_eq_ok _); apply bind_ok_step (lift_eq_ok _)
+  simp only [UScalar.val, UScalarTy.numBits, BitVec.toNat_ofNat, Nat.reducePow, Nat.reduceMod]
+  let diff : Std.U8 :=
+    (((((((((((((magic14.val.getD 0 0#u8 ^^^ 81#u8) ||| (magic14.val.getD 1 0#u8 ^^^ 83#u8)) |||
+      (magic14.val.getD 2 0#u8 ^^^ 65#u8)) ||| (magic14.val.getD 3 0#u8 ^^^ 71#u8)) |||
+      (magic14.val.getD 4 0#u8 ^^^ 46#u8)) ||| (magic14.val.getD 5 0#u8 ^^^ 72#u8)) |||
+      (magic14.val.getD 6 0#u8 ^^^ 89#u8)) ||| (magic14.val.getD 7 0#u8 ^^^ 66#u8)) |||
+      (magic14.val.getD 8 0#u8 ^^^ 82#u8)) ||| (magic14.val.getD 9 0#u8 ^^^ 73#u8)) |||
+      (magic14.val.getD 10 0#u8 ^^^ 68#u8)) ||| (magic14.val.getD 11 0#u8 ^^^ 46#u8)) |||
+      (magic14.val.getD 12 0#u8 ^^^ 86#u8)) ||| (magic14.val.getD 13 0#u8 ^^^ 50#u8)
+  have hdiff_iff : diff = 0#u8 ↔ magic14 = hybridDomainMagic14 := by
+    dsimp only [diff]
+    repeat rw [u8_or_eq_zero_iff]
+    repeat rw [u8_xor_zero_iff]
+    constructor
+    · intro h
+      apply Std.Array.ext
+      apply List.ext_getElem (by rw [magic14.property, hybridDomainMagic14.property])
+      intro i ha _
+      rw [List.getElem_eq_getD 0#u8, List.getElem_eq_getD 0#u8]
+      have hi : i < 14 := by rw [magic14.property] at ha; exact ha
+      rcases h with ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨h0, h1⟩, h2⟩, h3⟩, h4⟩, h5⟩, h6⟩, h7⟩, h8⟩, h9⟩, h10⟩, h11⟩, h12⟩, h13⟩
+      dsimp only [hybridDomainMagic14, Std.Array.make]
+      match i, hi with
+      | 0, _ => exact h0 | 1, _ => exact h1 | 2, _ => exact h2 | 3, _ => exact h3
+      | 4, _ => exact h4 | 5, _ => exact h5 | 6, _ => exact h6 | 7, _ => exact h7
+      | 8, _ => exact h8 | 9, _ => exact h9 | 10, _ => exact h10 | 11, _ => exact h11
+      | 12, _ => exact h12 | 13, _ => exact h13
+      | i + 14, hi => exact False.elim (Nat.not_lt_of_ge (Nat.le_add_left 14 i) hi)
+    · rintro rfl
+      exact ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨rfl, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩, rfl⟩
+  by_cases hd : diff = 0#u8
+  · have hmag : magic14 = hybridDomainMagic14 := hdiff_iff.mp hd
+    change (if diff != 0#u8 then _ else _) = _
+    rw [hd, bne_self_eq_false]
+    simp only [Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind]
+    rw [hybridRole_to_u8_eq, ct_eq_bytes32_spec]
+    by_cases hs1 : suite_code = 1281#u16
+    · subst hs1
+      by_cases hr : wire_role_byte = hybridRoleByte expected_role
+      · simp [hmag, hr, result_bind_ok]
+      · simp [hmag, hr, result_bind_ok]
+    · by_cases hs2 : suite_code = 1282#u16
+      · subst hs2
+        by_cases hr : wire_role_byte = hybridRoleByte expected_role
+        · simp [hs1, hmag, hr, result_bind_ok]
+        · simp [hs1, hmag, hr, result_bind_ok]
+      · simp [hs1, hs2, hmag, result_bind_ok]
+  · have hnmag : magic14 ≠ hybridDomainMagic14 := fun hm => hd (hdiff_iff.mpr hm)
+    change (if diff != 0#u8 then _ else _) = _
+    have hne : (diff != 0#u8) = true := bne_iff_ne.mpr hd
+    rw [hne]
+    simp [hnmag]
+
+theorem hybrid_domain_framing_role_disjoint_mir
+    (magic14 : Array Std.U8 14#usize) (wire_role_byte : Std.U8)
+    (suite_code : Std.U16) (expected_id_commit wire_id_commit : Array Std.U8 32#usize)
+    (hClassical :
+      policy_and_addr.check_hybrid_domain_framing
+        magic14 wire_role_byte .Classical suite_code expected_id_commit wire_id_commit =
+      .ok true) :
+    policy_and_addr.check_hybrid_domain_framing
+      magic14 wire_role_byte .PostQuantum suite_code expected_id_commit wire_id_commit =
+    .ok false := by
+  rw [check_hybrid_domain_framing_spec] at hClassical ⊢
+  injection hClassical with hdec
+  obtain ⟨_, _, hrole, _⟩ := of_decide_eq_true hdec
+  apply congrArg Result.ok
+  apply decide_eq_false
+  intro ⟨_, _, hrole_pq, _⟩
+  rw [hrole] at hrole_pq
+  cases hrole_pq
+
+theorem derive_hybrid_transcript_digest_total
+    (role : policy_and_addr.HybridRoleTag) (suite_code : Std.U16)
+    (id_commit message_digest : Array Std.U8 32#usize) :
+    (suite_code = 1281#u16 ∨ suite_code = 1282#u16 →
+      ∃ digest, policy_and_addr.derive_hybrid_transcript_digest
+        role suite_code id_commit message_digest = .ok (some digest)) ∧
+    (suite_code ≠ 1281#u16 ∧ suite_code ≠ 1282#u16 →
+      policy_and_addr.derive_hybrid_transcript_digest
+        role suite_code id_commit message_digest = .ok none) := by
+  have hSpongeBranch :
+      ∃ digest : Array Std.U8 32#usize,
+        (do
+          let rb ← policy_and_addr.HybridRoleTag.to_u8 role
+          let i1 ← suite_code >>> 8#i32
+          let i2 ← lift (i1 &&& 255#u16)
+          let i3 ← lift (UScalar.cast .U8 i2)
+          let i4 ← lift (suite_code &&& 255#u16)
+          let i5 ← lift (UScalar.cast .U8 i4)
+          let sp ← keccak.Shake256Sponge.new_shake256
+          let s ← lift (Array.to_slice (Array.make 14#usize [
+            81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 72#u8, 89#u8, 66#u8,
+            82#u8, 73#u8, 68#u8, 46#u8, 86#u8, 50#u8]))
+          let sp1 ← keccak.Shake256Sponge.absorb sp s
+          let s1 ← lift (Array.to_slice (Array.make 3#usize [rb, i3, i5]))
+          let sp2 ← keccak.Shake256Sponge.absorb sp1 s1
+          let s2 ← lift (Array.to_slice id_commit)
+          let sp3 ← keccak.Shake256Sponge.absorb sp2 s2
+          let s3 ← lift (Array.to_slice message_digest)
+          let sp4 ← keccak.Shake256Sponge.absorb sp3 s3
+          let out := Array.repeat 32#usize 0#u8
+          let (s4, to_slice_mut_back) ← lift (Array.to_slice_mut out)
+          let (_, s5) ← keccak.Shake256Sponge.squeeze sp4 s4
+          ok (some (to_slice_mut_back s5))) = .ok (some digest) := by
+    let sp0 : keccak.Shake256Sponge :=
+      ⟨Std.Array.repeat 25#usize 0#u64, Std.Array.repeat 136#usize 0#u8,
+        0#usize, 31#u8, false, 0#usize⟩
+    have hnew : keccak.Shake256Sponge.new_shake256 = .ok sp0 := rfl
+    have hshr : (suite_code >>> 8#i32 : Result Std.U16) = .ok ⟨suite_code.bv >>> 8⟩ := rfl
+    let dom14 : Std.Array Std.U8 14#usize := Array.make 14#usize [
+      81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 72#u8, 89#u8, 66#u8,
+      82#u8, 73#u8, 68#u8, 46#u8, 86#u8, 50#u8]
+    let hdr3 : Std.Array Std.U8 3#usize := Array.make 3#usize [
+      hybridRoleByte role,
+      UScalar.cast .U8 ((⟨suite_code.bv >>> 8⟩ : Std.U16) &&& 255#u16),
+      UScalar.cast .U8 (suite_code &&& 255#u16)]
+    have hd : (Std.Array.to_slice dom14).val.length = 14 := dom14.property
+    have hh : (Std.Array.to_slice hdr3).val.length = 3 := hdr3.property
+    have hi_len : (Std.Array.to_slice id_commit).val.length = 32 := id_commit.property
+    have hm_len : (Std.Array.to_slice message_digest).val.length = 32 := message_digest.property
+    obtain ⟨sp1, hsp1, hn1, hv1⟩ := sponge_absorb_short sp0 (Std.Array.to_slice dom14) rfl
+      (by change 0 + _ < 136; rw [hd]; decide)
+    have hv1' : sp1.buf_len.val = 14 := by
+      simpa only [hd, show sp0.buf_len.val = 0 from rfl, Nat.zero_add] using hv1
+    obtain ⟨sp2, hsp2, hn2, hv2⟩ := sponge_absorb_short sp1 (Std.Array.to_slice hdr3) hn1
+      (by rw [hv1', hh]; decide)
+    have hv2' : sp2.buf_len.val = 17 := by simpa only [hv1', hh] using hv2
+    obtain ⟨sp3, hsp3, hn3, hv3⟩ := sponge_absorb_short sp2 (Std.Array.to_slice id_commit) hn2
+      (by rw [hv2', hi_len]; decide)
+    have hv3' : sp3.buf_len.val = 49 := by simpa only [hv2', hi_len] using hv3
+    obtain ⟨sp4, hsp4, hn4, hv4⟩ := sponge_absorb_short sp3 (Std.Array.to_slice message_digest) hn3
+      (by rw [hv3', hm_len]; decide)
+    have hv4' : sp4.buf_len.val = 81 := by simpa only [hv3', hm_len] using hv4
+    let out : Std.Array Std.U8 32#usize := Std.Array.repeat 32#usize 0#u8
+    obtain ⟨res_s, hres_s⟩ := sponge_squeeze_short sp4 (Std.Array.to_slice_mut out).1 32
+      (by decide) hn4 (by rw [hv4']; decide) rfl
+    rw [hybridRole_to_u8_eq]
+    simp only [hshr, hnew, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
+    rw [hsp1, result_bind_ok, hsp2, result_bind_ok, hsp3, result_bind_ok,
+        hsp4, result_bind_ok, hres_s, result_bind_ok]
+    exact ⟨_, rfl⟩
+  unfold policy_and_addr.derive_hybrid_transcript_digest
+    policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
+    policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
+  constructor
+  · intro hValid
+    by_cases hs1 : suite_code = 1281#u16
+    · rw [hs1] at hSpongeBranch ⊢
+      simpa only [bne_self_eq_false, Bool.false_eq_true, ↓reduceIte] using hSpongeBranch
+    · rcases hValid with h1 | h2
+      · exact False.elim (hs1 h1)
+      · have hne1 : (suite_code != 1281#u16) = true := bne_iff_ne.mpr hs1
+        rw [hne1]
+        dsimp only [↓reduceIte]
+        rw [h2] at hSpongeBranch ⊢
+        simpa only [bne_self_eq_false, Bool.false_eq_true, ↓reduceIte] using hSpongeBranch
+  · rintro ⟨hne1, hne2⟩
+    have hb1 : (suite_code != 1281#u16) = true := bne_iff_ne.mpr hne1
+    have hb2 : (suite_code != 1282#u16) = true := bne_iff_ne.mpr hne2
+    simp [hb1, hb2]
+
+/-! ## 4. Concrete `#tooth` Refusal Witnesses -/
+
+theorem tooth_policy_cap_exceeded_rejected :
+    let pin := Array.repeat 32#usize 0x55#u8
+    let req1 : policy_and_addr.VelocitySpendRequest :=
+      { window_id := 7#u64, nonce := 1#u64, amount_units := 60#u128,
+        policy_pin := pin, authority_pin := pin }
+    let req2 : policy_and_addr.VelocitySpendRequest :=
+      { window_id := 7#u64, nonce := 2#u64, amount_units := 50#u128,
+        policy_pin := pin, authority_pin := pin }
+    (policy_and_addr.StatefulVelocityGuard.new_window 7#u64 100#u128 pin pin >>= fun g0 =>
+      policy_and_addr.StatefulVelocityGuard.authorize_spend g0 req1 >>= fun (g1, _) =>
+        policy_and_addr.StatefulVelocityGuard.authorize_spend g1 req2) =
+    .ok ({ window_id := 7#u64, spent_units := 60#u128, cap_units := 100#u128,
+           policy_pin := pin, authority_pin := pin, last_nonce := 1#u64 },
+         .Err .VelocityCapExceeded) := by
+  dsimp only
+  have hpin : tower.ct_eq_bytes32 (Array.repeat 32#usize 0x55#u8)
+      (Array.repeat 32#usize 0x55#u8) = .ok true := by
+    rw [ct_eq_bytes32_spec]; rfl
+  obtain ⟨rem0, hrem0, hrem0_val⟩ := max_velocity_sub_spec 0#u128
+  obtain ⟨rem60, hrem60, hrem60_val⟩ := max_velocity_sub_spec 60#u128
+  have hnle1 : ¬ (1#u64 <= 0#u64) := by decide
+  have hnle2 : ¬ (2#u64 <= 1#u64) := by decide
+  have hov1 : ¬ (60#u128 > rem0) := by
+    intro h
+    have hv := (UScalar.lt_iff_val _ _).mp h
+    rw [hrem0_val] at hv
+    exact absurd hv (by decide)
+  have hov2 : ¬ (50#u128 > rem60) := by
+    intro h
+    have hv := (UScalar.lt_iff_val _ _).mp h
+    rw [hrem60_val] at hv
+    exact absurd hv (by decide)
+  have hadd1 : (0#u128 + 60#u128 : Result Std.U128) = .ok 60#u128 := by
+    simp [hAdd_uscalar_eq]
+  have hadd2 : (60#u128 + 50#u128 : Result Std.U128) = .ok 110#u128 := by
+    simp [hAdd_uscalar_eq]
+  have hcap1 : ¬ (60#u128 > 100#u128) := by decide
+  have hcap2 : (110#u128 > 100#u128) := by decide
+  unfold policy_and_addr.StatefulVelocityGuard.new_window
+    policy_and_addr.StatefulVelocityGuard.authorize_spend
+  simp only [hpin, bne_self_eq_false, Bool.false_eq_true, hnle1, ↓reduceIte,
+    bind_eq_result_bind, result_bind_ok]
+  rw [hrem0, result_bind_ok]
+  simp only [hov1, ↓reduceIte]
+  rw [hadd1, result_bind_ok]
+  simp only [hcap1, ↓reduceIte, result_bind_ok, hpin, bne_self_eq_false, Bool.false_eq_true, hnle2]
+  rw [hrem60, result_bind_ok]
+  simp only [hov2, ↓reduceIte]
+  rw [hadd2, result_bind_ok]
+  simp only [hcap2, ↓reduceIte]
+
+theorem tooth_policy_u128_overflow_rejected :
+    let pin := Array.repeat 32#usize 0x66#u8
+    let max_u128 := 340282366920938463463374607431768211455#u128
+    let req1 : policy_and_addr.VelocitySpendRequest :=
+      { window_id := 9#u64, nonce := 1#u64, amount_units := max_u128,
+        policy_pin := pin, authority_pin := pin }
+    let req2 : policy_and_addr.VelocitySpendRequest :=
+      { window_id := 9#u64, nonce := 2#u64, amount_units := 1#u128,
+        policy_pin := pin, authority_pin := pin }
+    (policy_and_addr.StatefulVelocityGuard.new_window 9#u64 max_u128 pin pin >>= fun g0 =>
+      policy_and_addr.StatefulVelocityGuard.authorize_spend g0 req1 >>= fun (g1, _) =>
+        policy_and_addr.StatefulVelocityGuard.authorize_spend g1 req2) =
+    .ok ({ window_id := 9#u64, spent_units := max_u128, cap_units := max_u128,
+           policy_pin := pin, authority_pin := pin, last_nonce := 1#u64 },
+         .Err .VelocityArithmeticOverflow) := by
+  dsimp only
+  have hpin : tower.ct_eq_bytes32 (Array.repeat 32#usize 0x66#u8)
+      (Array.repeat 32#usize 0x66#u8) = .ok true := by
+    rw [ct_eq_bytes32_spec]; rfl
+  obtain ⟨rem0, hrem0, hrem0_val⟩ := max_velocity_sub_spec 0#u128
+  obtain ⟨rem_max, hrem_max, hrem_max_val⟩ :=
+    max_velocity_sub_spec 340282366920938463463374607431768211455#u128
+  have hnle1 : ¬ (1#u64 <= 0#u64) := by decide
+  have hnle2 : ¬ (2#u64 <= 1#u64) := by decide
+  have hov1 : ¬ (340282366920938463463374607431768211455#u128 > rem0) := by
+    intro h
+    have hv := (UScalar.lt_iff_val _ _).mp h
+    rw [hrem0_val] at hv
+    exact absurd hv (by decide)
+  have hadd1 :
+      (0#u128 + 340282366920938463463374607431768211455#u128 : Result Std.U128) =
+        .ok 340282366920938463463374607431768211455#u128 := by
+    simp [hAdd_uscalar_eq]
+  have hcap1 :
+      ¬ (340282366920938463463374607431768211455#u128 >
+          340282366920938463463374607431768211455#u128) := by decide
+  have hov2 : (1#u128 > rem_max) := by
+    apply (UScalar.lt_iff_val _ _).mpr
+    rw [hrem_max_val]
+    decide
+  unfold policy_and_addr.StatefulVelocityGuard.new_window
+    policy_and_addr.StatefulVelocityGuard.authorize_spend
+  simp only [hpin, bne_self_eq_false, Bool.false_eq_true, hnle1, ↓reduceIte,
+    bind_eq_result_bind, result_bind_ok]
+  rw [hrem0, result_bind_ok]
+  simp only [hov1, ↓reduceIte]
+  rw [hadd1, result_bind_ok]
+  simp only [hcap1, ↓reduceIte, result_bind_ok, hpin, bne_self_eq_false, Bool.false_eq_true, hnle2]
+  rw [hrem_max, result_bind_ok]
+  simp only [hov2, ↓reduceIte]
+
+theorem tooth_intent_bad_magic_rejected :
+    policy_and_addr.decode_intent_128 (Array.repeat 128#usize 0#u8) = .ok none := by
+  let z := Array.repeat 128#usize 0#u8
+  unfold policy_and_addr.decode_intent_128
+  simp only [bind_eq_result_bind]
+  rw [unpack_block32_eq z 0#usize (by decide), result_bind_ok,
+      unpack_block32_eq z 32#usize (by decide), result_bind_ok,
+      unpack_block32_eq z 64#usize (by decide), result_bind_ok,
+      unpack_block32_eq z 96#usize (by decide), result_bind_ok]
+  have hhdr : policy_and_addr.decode_intent_header32 (sliceBlock32 z (0#usize).val) = .ok none := by
+    have index (i : Std.Usize) (hi : i.val < 32) :
+        Std.Array.index_usize (sliceBlock32 z (0#usize).val) i =
+          .ok ((sliceBlock32 z (0#usize).val).val.getD i.val 0#u8) :=
+      array_index_getD (sliceBlock32 z (0#usize).val) i 0#u8 hi
+    unfold policy_and_addr.decode_intent_header32 policy_and_addr.INTENT_V1_MAGIC
+    simp (disch := decide) only [index, bind_eq_result_bind, result_bind_ok,
+      read16_eq, read32p_eq, read64p_eq]
+    have hb0 : (sliceBlock32 z (0#usize).val).val.getD (0#usize).val 0#u8 = 0#u8 := rfl
+    have hb1 : (sliceBlock32 z (0#usize).val).val.getD (1#usize).val 0#u8 = 0#u8 := rfl
+    have hb2 : (sliceBlock32 z (0#usize).val).val.getD (2#usize).val 0#u8 = 0#u8 := rfl
+    have hb3 : (sliceBlock32 z (0#usize).val).val.getD (3#usize).val 0#u8 = 0#u8 := rfl
+    rw [hb0, hb1, hb2, hb3]
+    have hr0 : read32p 0#u8 0#u8 0#u8 0#u8 = 0#u32 := by
+      apply UScalar.ext
+      simp [read32p, UScalar.cast]
+    have h0ne : (0#u32 : Std.U32) ≠ 1364412721#u32 := by
+      intro h
+      have hv : (0#u32 : Std.U32).val = (1364412721#u32 : Std.U32).val := congrArg UScalar.val h
+      exact absurd hv (by decide)
+    have hne : (0#u32 != 1364412721#u32) = true := bne_iff_ne.mpr h0ne
+    rw [hr0, hne]
+    rfl
+  rw [hhdr, result_bind_ok]
+
+theorem tooth_hybrid_role_confusion_rejected :
+    let idc := Array.repeat 32#usize 0x77#u8
+    policy_and_addr.check_hybrid_domain_framing
+      hybridDomainMagic14 1#u8 .PostQuantum 1281#u16 idc idc = .ok false := by
+  dsimp only
+  rw [check_hybrid_domain_framing_spec]
+  apply congrArg Result.ok
+  apply decide_eq_false
+  intro ⟨_, _, hrole, _⟩
+  cases hrole
+
+end qsag_verified.proofs
+
