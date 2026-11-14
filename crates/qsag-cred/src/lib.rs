@@ -10,6 +10,7 @@ pub mod blind_vc;
 pub mod fips204_ntt;
 pub mod rss_mpc;
 pub mod threshold_mldsa;
+mod secret_buffer;
 mod toprf_engine;
 pub mod transport;
 pub mod voprf;

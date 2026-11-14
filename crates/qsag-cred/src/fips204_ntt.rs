@@ -188,6 +188,10 @@ pub struct Poly256 {
     pub coeffs: [u32; MLDSA_N],
 }
 
+impl Drop for Poly256 {
+    fn drop(&mut self) { self.zeroize(); }
+}
+
 impl Default for Poly256 {
     fn default() -> Self {
         Self::zero()

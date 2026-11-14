@@ -42,6 +42,7 @@
 use crate::fips204_ntt::{MLDSA_Q, fq_add, fq_inv_or_zero, fq_mul, fq_sub};
 use alloc::vec;
 use alloc::vec::Vec;
+use crate::secret_buffer::SecretBuffer;
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u32s};
 use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256};
 
@@ -80,10 +81,23 @@ pub struct RoundInfo {
 }
 
 /// Messages received in one round, indexed by sender position.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct RoundInbox {
     pub private: Vec<Vec<u8>>,
     pub broadcast: Vec<Vec<u8>>,
+}
+
+impl Drop for RoundInbox {
+    fn drop(&mut self) {
+        for bytes in self.private.iter_mut().chain(&mut self.broadcast) {
+            ct_zeroize_bytes(bytes);
+        }
+    }
+}
+impl core::fmt::Debug for RoundInbox {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("RoundInbox(<REDACTED>)")
+    }
 }
 
 /// The transport failed or a peer stopped.
@@ -173,10 +187,27 @@ impl Structure {
 }
 
 /// One party's components of a vector of shared field elements. `c[i]` is the
-/// component of the party's `i`-th subset.
-#[derive(Clone, Debug)]
+/// component of the party's `i`-th subset. The components are read only inside the
+/// crate (the [`Engine`] and the threshold ML-DSA local linear steps); values leave a
+/// share only through [`Engine::open`], after every multiplication they depend on is
+/// verified.
+/// ```compile_fail
+/// fn leak(share: &qsag_cred::rss_mpc::Sh) -> Vec<u32> { share.c[0].clone() }
+/// ```
+/// ```
+/// let share = qsag_cred::rss_mpc::Sh::zeros(2, 3);
+/// assert_eq!(share.len(), 3);
+/// assert_eq!(format!("{share:?}"), "Sh(<REDACTED>)");
+/// ```
+#[derive(Clone)]
 pub struct Sh {
-    pub c: Vec<Vec<u32>>,
+    pub(crate) c: Vec<Vec<u32>>,
+}
+
+impl core::fmt::Debug for Sh {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Sh(<REDACTED>)")
+    }
 }
 
 impl Drop for Sh {
@@ -668,6 +699,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
         private: Vec<Vec<u8>>,
         broadcast: Vec<u8>,
     ) -> Result<RoundInbox, MpcError> {
+        let private = SecretBuffer(private);
+        let broadcast = SecretBuffer(broadcast);
         if self.poisoned {
             return Err(MpcError::Poisoned);
         }
@@ -688,7 +721,7 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             self.stats.rounds += 1;
             let inbox = self
                 .net
-                .exchange(info, private, broadcast)
+                .exchange(info, private.into_inner(), broadcast.into_inner())
                 .map_err(|_| MpcError::Transport)?;
             if inbox.private.len() != parties || inbox.broadcast.len() != parties {
                 return Err(MpcError::Transport);
@@ -802,7 +835,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
 
     /// Reshares the vector `value`, which only this party knows, and returns
     /// the sharing of the sum of all parties' vectors.
-    fn reshare(&mut self, mut value: Vec<u32>, kind: RoundKind) -> Result<Sh, MpcError> {
+    fn reshare(&mut self, value: Vec<u32>, kind: RoundKind) -> Result<Sh, MpcError> {
+        let mut value = SecretBuffer(value);
         if self.poisoned {
             return Err(MpcError::Poisoned);
         }
@@ -815,7 +849,7 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                     if !self.st.holds(s, party) || self.correction_subset[party] == s {
                         continue;
                     }
-                    let mask = self.streams[i].elements(len);
+                    let mask = SecretBuffer(self.streams[i].elements(len));
                     for k in 0..len {
                         out.c[i][k] = fq_add(out.c[i][k], mask[k]);
                         if party == self.me {
@@ -825,7 +859,7 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                 }
             }
             let target = self.correction_subset[self.me];
-            let mut message = Vec::new();
+            let mut message = SecretBuffer(Vec::with_capacity(len * 3));
             pack(&value, &mut message);
             let mut private = vec![Vec::new(); parties];
             for (j, slot) in private.iter_mut().enumerate() {
@@ -848,11 +882,12 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                             unpack(bytes, len).ok_or(MpcError::MalformedMessage { from: party })?,
                         )
                     };
+                    let values = SecretBuffer(values);
                     self.views[i] = cshake256_framed_32(
                         b"QSAG.RSS.VIEW.V1",
                         &[&self.views[i], &(party as u32).to_le_bytes(), bytes],
                     );
-                    for (slot, value) in out.c[i].iter_mut().zip(&values) {
+                    for (slot, value) in out.c[i].iter_mut().zip(values.iter()) {
                         *slot = fq_add(*slot, *value);
                     }
                 }

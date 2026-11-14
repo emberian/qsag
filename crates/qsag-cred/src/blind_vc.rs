@@ -653,7 +653,7 @@ pub struct BlindIssuanceRequest {
 }
 
 /// OPRF-issued credential enrolled in the issuer accumulator.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BlindVerifiableCredential {
     pub issuer_epoch: u64,
     pub schema_id: u64,
@@ -661,6 +661,18 @@ pub struct BlindVerifiableCredential {
     /// OPRF token; accumulator membership supplies public authorization.
     pub issuance_token: [u8; 32],
     pub accumulator_leaf_index: usize,
+}
+
+impl core::fmt::Debug for BlindVerifiableCredential {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BlindVerifiableCredential")
+            .field("issuer_epoch", &self.issuer_epoch)
+            .field("schema_id", &self.schema_id)
+            .field("attr_commit", &self.attr_commit)
+            .field("issuance_token", &"<REDACTED>")
+            .field("accumulator_leaf_index", &self.accumulator_leaf_index)
+            .finish()
+    }
 }
 
 /// Prepare a blind issuance request + holder secret from canonical Goldilocks attributes (`<= 6`).
