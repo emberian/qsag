@@ -16,3 +16,14 @@ missing = sorted(modules - covered)
 if missing:
     raise SystemExit("Proof modules missing an axiom gate: " + ", ".join(missing))
 print(f"Axiom import coverage: {len(modules)} proof modules; zero missing")
+
+whir = root.parent / "lean-whir"
+whir_covered = set(re.findall(r"^import all (\S+)$", (whir / "AuditWhirMirAxioms.lean").read_text(), re.M))
+whir_modules = {"QsagWhirVerified"} | {
+    ".".join(p.relative_to(whir).with_suffix("").parts)
+    for p in (whir / "QsagWhirVerified").rglob("*.lean")
+}
+missing = sorted(whir_modules - whir_covered)
+if missing:
+    raise SystemExit("WHIR modules missing an axiom gate: " + ", ".join(missing))
+print(f"WHIR import coverage: {len(whir_modules)} modules; zero missing")

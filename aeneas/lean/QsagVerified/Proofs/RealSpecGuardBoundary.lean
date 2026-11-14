@@ -1,7 +1,7 @@
 module
 public import QsagVerified.Proofs.PolicyAndAddr
 public import Qsag.MirSpecBridge
-import all Qsag.MirSpecBridge
+import all Qsag.MirSpecBridgeCore
 
 public section
 namespace qsag_verified.proofs
