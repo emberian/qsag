@@ -3192,3 +3192,1015 @@ def walkUpperLayersBoundedExtract
     hypertree EUF-CMA reduction: EVERY static (`layer ≥ 1`) WOTS address opened across `sessions`
     reveals at most its single canonical codeword `baggyCanonicalStaticDigits`, and any valid forgery
     `(msgStar, sigStar)` outside the signed message list constructively yields a `BaggyHypertreeBreakWitness`! -/
+def baggy_verified_waistband_euf_cma_extract
+    (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
+    (hWf : p.WellFormed) (hGrind : BaggySuite256.WellGrinded suite)
+    (hLeafDomain : ∀ pk r msg ctr leafIdx,
+      suite.hmsgLeaf p pk r msg ctr = some leafIdx →
+      leafIdx < 2 ^ (p.subtreeHeight * p.numLayers))
+    (sessions : List (VerifiedWaistbandCache × BitVec 256 × UInt32))
+    (msgStar : BitVec 256) (sigStar : BaggySig256)
+    (hNotSigned : msgStar ∉ sessions.map (fun s => s.2.1))
+    (hVerifyStar : baggyVerify suite p (baggyKeygen256 suite p sk) msgStar sigStar = true) :
+    BaggyHypertreeBreakWitness suite p sk (sessions.map (fun s => s.2.1)) msgStar :=
+  let pk := baggyKeygen256 suite p sk
+  have hLenEq : sigStar.layers.length = p.numLayers := by
+    unfold baggyVerify at hVerifyStar
+    if hNe : sigStar.layers.length != p.numLayers then
+      simp [hNe] at hVerifyStar
+    else
+      cases hB : (sigStar.layers.length == p.numLayers)
+      · rw [bne, hB] at hNe; simp at hNe
+      · exact eq_of_beq hB
+  match hLeaf : suite.hmsgLeaf p pk sigStar.r msgStar sigStar.msgCtr with
+  | none =>
+    False.elim <| by
+      unfold baggyVerify at hVerifyStar
+      have hNotBne : (sigStar.layers.length != p.numLayers) = false := by
+        rw [bne, beq_iff_eq.mpr hLenEq]; rfl
+      rw [ite_neg (by rw [hNotBne]; decide)] at hVerifyStar
+      dsimp only [pk] at hLeaf
+      rw [hLeaf] at hVerifyStar
+      cases hVerifyStar
+  | some leafIdx =>
+    have hLeafBd := hLeafDomain pk sigStar.r msgStar sigStar.msgCtr leafIdx hLeaf
+    match hLayers : sigStar.layers with
+    | [] =>
+      False.elim <| by
+        rw [hLayers, List.length_nil] at hLenEq
+        have := hWf.1
+        omega
+    | [only0] =>
+      False.elim <| by
+        rw [hLayers, List.length_singleton] at hLenEq
+        have := hWf.1
+        omega
+    | sig0 :: sig1 :: rest =>
+      let forsPkStar := suite.forsRecoverPk sk.pkSeed (p.pathAt leafIdx 0).2 (p.pathAt leafIdx 0).1 msgStar sigStar.forsSig
+      have hWalk0 : ∃ finalRoot,
+          baggyWalkLayersVerify suite p sk.pkSeed leafIdx 0 forsPkStar (sig0 :: sig1 :: rest) = some finalRoot ∧
+          finalRoot = baggyTrueSubtreeRoot suite p sk (p.numLayers - 1) 0 := by
+        unfold baggyVerify at hVerifyStar
+        have hNotBne : (sigStar.layers.length != p.numLayers) = false := by
+          rw [bne, beq_iff_eq.mpr hLenEq]; rfl
+        rw [ite_neg (by rw [hNotBne]; decide)] at hVerifyStar
+        dsimp only [pk] at hLeaf
+        rw [hLeaf] at hVerifyStar
+        dsimp only [baggyKeygen256] at hVerifyStar
+        rw [hLayers] at hVerifyStar
+        cases hW : baggyWalkLayersVerify suite p sk.pkSeed leafIdx 0 forsPkStar (sig0 :: sig1 :: rest) with
+        | none =>
+          dsimp only [forsPkStar] at hW
+          rw [hW] at hVerifyStar
+          cases hVerifyStar
+        | some fr =>
+          dsimp only [forsPkStar] at hW
+          rw [hW] at hVerifyStar
+          exact ⟨fr, rfl, eq_of_beq hVerifyStar⟩
+      match hRec0 : baggyLayerRecoverRoot suite p sk.pkSeed 0 (p.pathAt leafIdx 0).2 (p.pathAt leafIdx 0).1 forsPkStar sig0 with
+      | none =>
+        False.elim <| by
+          obtain ⟨fr, hW, _⟩ := hWalk0
+          unfold baggyWalkLayersVerify at hW
+          dsimp only at hW
+          rw [hRec0] at hW
+          cases hW
+      | some root0Star =>
+        if hMatch0 : root0Star = baggyTrueSubtreeRoot suite p sk 0 (p.pathAt leafIdx 0).2 then
+          .bottomLayerReachedGenuineRoot leafIdx sigStar.forsSig sig0 hNotSigned
+            (hRec0.trans (congrArg some hMatch0))
+        else
+          have hWalkUpper :
+              baggyWalkLayersVerify suite p sk.pkSeed leafIdx 1 root0Star (sig1 :: rest) =
+                some (baggyTrueSubtreeRoot suite p sk (p.numLayers - 1) 0) := by
+            obtain ⟨fr, hW, hFrEq⟩ := hWalk0
+            unfold baggyWalkLayersVerify at hW
+            dsimp only at hW
+            rw [hRec0] at hW
+            rw [← hFrEq]
+            exact hW
+          walkUpperLayersBoundedExtract suite p sk hWf hGrind (sessions.map (fun s => s.2.1)) msgStar
+            leafIdx hLeafBd 1 (sig1 :: rest) root0Star (baggyTrueSubtreeRoot suite p sk (p.numLayers - 1) 0)
+            (Nat.le_refl 1) (by simp) (by rw [hLayers] at hLenEq; simp at hLenEq ⊢; omega)
+            hMatch0 hWalkUpper rfl
+
+theorem baggy_verified_waistband_preserves_hypertree_euf_cma
+    (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
+    (hWf : p.WellFormed) (hGrind : BaggySuite256.WellGrinded suite)
+    (hLeafDomain : ∀ pk r msg ctr leafIdx,
+      suite.hmsgLeaf p pk r msg ctr = some leafIdx →
+      leafIdx < 2 ^ (p.subtreeHeight * p.numLayers))
+    (sessions : List (VerifiedWaistbandCache × BitVec 256 × UInt32))
+    (hCanopyMatch : ∀ s ∈ sessions, WaistbandMatchesKey suite p sk s.1)
+    (msgStar : BitVec 256) (sigStar : BaggySig256)
+    (hNotSigned : msgStar ∉ sessions.map (fun s => s.2.1))
+    (hVerifyStar : baggyVerify suite p (baggyKeygen256 suite p sk) msgStar sigStar = true) :
+    (∀ r ∈ (baggyRunMultiSessionVerified suite p sk (baggyKeygen256 suite p sk) [] sessions).2.2,
+      baggyCanonicalStaticDigits suite p sk r.layer r.tree r.kp = some r.digits) ∧
+    Nonempty (BaggyHypertreeBreakWitness suite p sk (sessions.map (fun s => s.2.1)) msgStar) :=
+  ⟨fun r hr => ((waistband_verified_multi_session_single_codeword suite p sk
+      (baggyKeygen256 suite p sk)).1 sessions [] hCanopyMatch r hr).2.2,
+   ⟨baggy_verified_waistband_euf_cma_extract suite p sk hWf hGrind hLeafDomain
+      sessions msgStar sigStar hNotSigned hVerifyStar⟩⟩
+
+/-! ### `#tooth` cache-mutation: Corrupted Intermediate `Waistband` Opens 2nd Ancestor Codeword -/
+
+/-- Unhardened `Waistband` cache (`baggy.rs:494` prior to cache-mutation fixes):
+    indexed by `(layer, tree, kp)` alone without `expectedSubtreeRoot` chaining or durable `firstSigned`. -/
+abbrev UnhardenedWaistbandCache := Nat → Nat → Nat → Option BaggyLayerSig256
+
+def baggySignLayersUnhardenedAux (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (cache : UnhardenedWaistbandCache) (leafIdx : Nat) :
+    Nat → Nat → BitVec 256 → Option (List BaggyLayerSig256 × BitVec 256 × List StaticWotsOpeningRecord)
+  | _, 0, node => some ([], node, [])
+  | layer, rem + 1, node =>
+    let (kp, tree) := p.pathAt leafIdx layer
+    match (if p.coversLayer layer then cache layer tree kp else none) with
+    | some cachedSig =>
+      -- `baggy.rs:832-835`: `node` becomes `layer_root(..., node, &cachedSig)` with NO expected-root check!
+      match baggyLayerRecoverRoot suite p sk.pkSeed layer tree kp node cachedSig with
+      | none => none
+      | some nextNode =>
+        match baggySignLayersUnhardenedAux suite p sk cache leafIdx (layer + 1) rem nextNode with
+        | none => none
+        | some (restSigs, topRoot, restRecs) =>
+          some (cachedSig :: restSigs, topRoot, restRecs)
+    | none =>
+      -- `baggy.rs:839-858`: uncached parent derives digits from `node`, then resets `node = levels[hp][0]`!
+      match baggySignLayerFresh suite p sk layer tree kp node with
+      | none => none
+      | some (sig, nextRoot, recOpt) =>
+        match baggySignLayersUnhardenedAux suite p sk cache leafIdx (layer + 1) rem nextRoot with
+        | none => none
+        | some (restSigs, topRoot, restRecs) =>
+          let allRecs := match recOpt with | some r => r :: restRecs | none => restRecs
+          some (sig :: restSigs, topRoot, allRecs)
+
+/-- Unhardened `baggy_sign_mpc` (`baggy.rs:829-894`): checks `topRoot == pk.pkRoot` BEFORE Round-2
+    node opening AND runs `baggyVerify` before returning! -/
+def baggySignUnhardened (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256)
+    (cache : UnhardenedWaistbandCache)
+    (msg : BitVec 256) (msgCtr : UInt32) : Option (BaggySig256 × List StaticWotsOpeningRecord) :=
+  if pk.pkSeed != sk.pkSeed then none
+  else
+    let r := suite.prfRand sk.skPrf msg
+    match suite.hmsgLeaf p pk r msg msgCtr with
+    | none => none
+    | some leafIdx =>
+      let (kp0, tree0) := p.pathAt leafIdx 0
+      let (forsSig, forsPk) := suite.forsSign sk.pkSeed sk.skSeed tree0 kp0 msg
+      match baggySignLayersUnhardenedAux suite p sk cache leafIdx 0 p.numLayers forsPk with
+      | none => none
+      | some (layers, topRoot, recs) =>
+        if topRoot != pk.pkRoot then none
+        else
+          let sig : BaggySig256 := { r := r, msgCtr := msgCtr, forsSig := forsSig, layers := layers }
+          if baggyVerify suite p pk msg sig then some (sig, recs) else none
+
+/-- Concrete constant-sum (`S = 192`) codewords for the 2-codeword top-layer exploit witness:
+    - `dBad` (`(0, 3, 1, 2)` + alternating `(1, 2)`)
+    - `dGood` (`(3, 0, 2, 1)` + alternating `(1, 2)`)
+    - `dRogue` (`(2, 2, 1, 1)` + alternating `(1, 2)`) — dominated by `min(dBad, dGood)` on ALL 128 chains! -/
+def dToothBadFn (i : Fin 128) : Fin 4 :=
+  if i.val == 0 then ⟨0, by decide⟩
+  else if i.val == 1 then ⟨3, by decide⟩
+  else if i.val == 2 then ⟨1, by decide⟩
+  else if i.val == 3 then ⟨2, by decide⟩
+  else if i.val % 2 == 0 then ⟨1, by decide⟩
+  else ⟨2, by decide⟩
+
+def dToothGoodFn (i : Fin 128) : Fin 4 :=
+  if i.val == 0 then ⟨3, by decide⟩
+  else if i.val == 1 then ⟨0, by decide⟩
+  else if i.val == 2 then ⟨2, by decide⟩
+  else if i.val == 3 then ⟨1, by decide⟩
+  else if i.val % 2 == 0 then ⟨1, by decide⟩
+  else ⟨2, by decide⟩
+
+def dToothRogueFn (i : Fin 128) : Fin 4 :=
+  if i.val == 0 then ⟨2, by decide⟩
+  else if i.val == 1 then ⟨2, by decide⟩
+  else if i.val == 2 then ⟨1, by decide⟩
+  else if i.val == 3 then ⟨1, by decide⟩
+  else if i.val % 2 == 0 then ⟨1, by decide⟩
+  else ⟨2, by decide⟩
+
+def dToothBad : WotsC256Digits := ⟨dToothBadFn, rfl⟩
+def dToothGood : WotsC256Digits := ⟨dToothGoodFn, rfl⟩
+def dToothRogue : WotsC256Digits := ⟨dToothRogueFn, rfl⟩
+
+/-- Concrete `BaggySuite256` & 3-layer (`d = 3, h' = 1, L = 2`) instance for cache-mutation. -/
+def toothBaggyParams : BaggyTreeParams :=
+  { numLayers := 3, subtreeHeight := 1, topLayers := 2 }
+
+def toothRogueRoot : BitVec 256 := 0xDEADBEEF#256
+
+def toothBaggySuite (badRoot1 : BitVec 256) : BaggySuite256 where
+  wots :=
+    { prf := fun pkSeed skSeed adrs chain =>
+        pkSeed ^^^ skSeed ^^^ BitVec.ofNat 256 (adrs.layer.toNat * 1024 + chain.val + 1)
+      thF := fun pkSeed _ chain step node =>
+        node ^^^ pkSeed ^^^ BitVec.ofNat 256 (256 * (step.val + 1) + chain.val + 7)
+      thTl := fun pkSeed adrs ends =>
+        pkSeed ^^^ ends ⟨0, by decide⟩ ^^^ ends ⟨1, by decide⟩ ^^^ BitVec.ofNat 256 adrs.keyPair.toNat
+      thDigest := fun _ adrs msg _ =>
+        if adrs.layer == 2 && msg == badRoot1 then
+          packDigits256 dToothBadFn
+        else if adrs.layer == 2 && msg == toothRogueRoot then
+          packDigits256 dToothRogueFn
+        else
+          packDigits256 dToothGoodFn }
+  thNodeH := fun pkSeed layer _ height _ left right =>
+    pkSeed ^^^ (left <<< 1) ^^^ right ^^^ BitVec.ofNat 256 (16 * layer + height + 3)
+  paramsDigest := fun p => BitVec.ofNat 256 (p.numLayers * 64 + p.subtreeHeight * 8 + p.topLayers)
+  prfRand := fun skPrf msg => skPrf ^^^ msg
+  hmsgLeaf := fun _ _ _ _ _ => some 0
+  forsSign := fun pkSeed skSeed _ _ msg => (skSeed ^^^ msg, pkSeed ^^^ msg)
+  forsRecoverPk := fun pkSeed _ _ msg _ => pkSeed ^^^ msg
+  grindCounter := fun _ _ _ => 0
+
+/-- Public 2-codeword top-layer rogue-root forgery routine (`0` access to `skSeed`!):
+    combines Session 1 (`chainsBad` for `dToothBad`) and Session 2 (`chainsGood` for `dToothGood`)
+    to forge a valid `S = 192` signature on `toothRogueRoot` (`dToothRogue`)! -/
+def forgeRogueRootFromTwoTopOpenings (suite : WotsC256HashSuite) (pkSeed : BitVec 256)
+    (topAdrs : WotsLeafAdrs)
+    (chainsBad chainsGood : Fin 128 → BitVec 256) : Fin 128 → BitVec 256 :=
+  fun c =>
+    if c.val == 0 then
+      -- `dBad 0 = 0`, `dRogue 0 = 2`: step `chainsBad 0` forward through steps `0` and `1`!
+      wotsC256AdvanceTo suite pkSeed topAdrs c ⟨0, by decide⟩ (chainsBad c) 2
+    else if c.val == 1 then
+      -- `dGood 1 = 0`, `dRogue 1 = 2`: step `chainsGood 1` forward through steps `0` and `1`!
+      wotsC256AdvanceTo suite pkSeed topAdrs c ⟨0, by decide⟩ (chainsGood c) 2
+    else if c.val == 2 then
+      -- `dBad 2 = 1 = dRogue 2`!
+      chainsBad c
+    else if c.val == 3 then
+      -- `dGood 3 = 1 = dRogue 3`!
+      chainsGood c
+    else
+      -- For `c ≥ 4`, `dBad c = dGood c = dRogue c`!
+      chainsGood c
+
+/-- **`#tooth` Corrupted Intermediate `Waistband` Opens 2nd Ancestor Codeword & Enables Top-Layer Forgery
+    (`tooth_corrupted_intermediate_waistband_opens_second_ancestor_codeword`, cache-mutation)**:
+    On a 3-layer (`d = 3, h' = 1, L = 2`) `Baggy` hypertree where intermediate layer `1` is cached
+    with a single mutated auth-path sibling while top layer `2` is uncached:
+    1. **Session 1 (Corrupted Intermediate Cache)**: `baggySignUnhardened` **passes** `pkRoot` self-check,
+       **passes** `baggyVerify = true`, and opens codeword **`dToothBad`** at top-layer key `(2, 0, 0)`!
+    2. **Session 2 (Clean Cache)**: `baggySignUnhardened` **passes** `pkRoot` self-check, **passes**
+       `baggyVerify = true`, and opens a **SECOND distinct codeword `dToothGood ≠ dToothBad`** at the
+       **exact same top-layer key `(2, 0, 0)`**!
+    3. **Explicit Top-Layer Rogue-Subtree Forgery (`0` `skSeed` access)**: `forgeRogueRootFromTwoTopOpenings`
+       uses ONLY the two public top-layer signatures to forge a valid 256-bit `WOTS+C` (`sum = 192`)
+       signature (`wotsC256Verify = true`) on a **3rd unseen rogue root `toothRogueRoot`**!
+    4. **Hardened `VerifiedWaistbandCache` Blocks the Attack**: `verifyWaistbandCanopy` rejects the
+       corrupted intermediate entry (`none`) so `baggySignVerifiedWaistband` NEVER opens `dToothBad`! -/
+theorem tooth_corrupted_intermediate_waistband_opens_second_ancestor_codeword :
+    let sk : BaggySecretKey256 := { pkSeed := 0x11#256, skSeed := 0x22#256, skPrf := 0x33#256 }
+    -- Note: subtree roots of layer 0 and layer 1 do not depend on layer-2 `thDigest`, so we compute
+    -- `badRoot1` first using `toothBaggySuite 0#256` where layer 1's leaf is hashed with mutated sibling `0xFF#256`!
+    let baseSuite := toothBaggySuite 0#256
+    let honestSib1 := baggyMerkleRoot baseSuite sk.pkSeed 1 0 0 1
+      (fun _ => (baggySubtreeLeaves baseSuite toothBaggyParams sk 1 0) ⟨1, by decide⟩)
+    let mutatedSib1 : BitVec 256 := honestSib1 ^^^ 0xFF#256
+    let leaf1_0 := (baggySubtreeLeaves baseSuite toothBaggyParams sk 1 0) ⟨0, by decide⟩
+    let badRoot1 := baseSuite.thNodeH sk.pkSeed 1 0 1 0 leaf1_0 mutatedSib1
+    let suite := toothBaggySuite badRoot1
+    let pk := baggyKeygen256 suite toothBaggyParams sk
+    let node0 := baggyTrueSubtreeRoot suite toothBaggyParams sk 0 0
+    -- Genuine layer-1 signature on `node0`, vs corrupted `badCachedSig1` with `[mutatedSib1]`!
+    let chains1 : Fin 128 → BitVec 256 := fun c =>
+      wotsC256PosFrom0 suite.wots sk.pkSeed (baggyLeafAdrs 1 0 0) c
+        (suite.wots.prf sk.pkSeed sk.skSeed (baggyLeafAdrs 1 0 0) c) (dToothGoodFn c).val
+    let badCachedSig1 : BaggyLayerSig256 := { ctr := 0, chains := chains1, auth := [mutatedSib1] }
+    let corruptCache : UnhardenedWaistbandCache := fun l t k =>
+      if l == 1 && t == 0 && k == 0 then some badCachedSig1 else none
+    let cleanCache : UnhardenedWaistbandCache := fun _ _ _ => none
+    let msg1 : BitVec 256 := 0xAA#256
+    let msg2 : BitVec 256 := 0xBB#256
+    dToothBad ≠ dToothGood ∧
+    dToothRogue ≠ dToothBad ∧
+    dToothRogue ≠ dToothGood ∧
+    badRoot1 ≠ baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0 ∧
+    toothRogueRoot ≠ badRoot1 ∧
+    toothRogueRoot ≠ baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0 ∧
+    (match baggySignUnhardened suite toothBaggyParams sk pk corruptCache msg1 0,
+           baggySignUnhardened suite toothBaggyParams sk pk cleanCache msg2 0 with
+     | some (sig1, recs1), some (sig2, recs2) =>
+       baggyVerify suite toothBaggyParams pk msg1 sig1 = true ∧
+       baggyVerify suite toothBaggyParams pk msg2 sig2 = true ∧
+       (∃ rBad ∈ recs1, rBad.layer = 2 ∧ rBad.tree = 0 ∧ rBad.kp = 0 ∧ rBad.digits = dToothBad) ∧
+       (∃ rGood ∈ recs2, rGood.layer = 2 ∧ rGood.tree = 0 ∧ rGood.kp = 0 ∧ rGood.digits = dToothGood) ∧
+       (match sig1.layers, sig2.layers with
+        | [_, _, topSig1], [_, _, topSig2] =>
+          let forgedTopChains := forgeRogueRootFromTwoTopOpenings suite.wots sk.pkSeed
+            (baggyLeafAdrs 2 0 0) topSig1.chains topSig2.chains
+          wotsC256Verify suite.wots sk.pkSeed (baggyLeafAdrs 2 0 0)
+            (wotsC256PkLeaf suite.wots sk.pkSeed sk.skSeed (baggyLeafAdrs 2 0 0))
+            toothRogueRoot 0 forgedTopChains = true
+        | _, _ => False)
+     | _, _ => False) ∧
+    (let hardenedCorruptCache : VerifiedWaistbandCache :=
+       { pinnedPkSeed := pk.pkSeed
+         pinnedPkRoot := pk.pkRoot
+         pinnedParamsDigest := suite.paramsDigest toothBaggyParams
+         expectedSubtreeRoot := fun l t =>
+           if t == 0 then some (baggyTrueSubtreeRoot suite toothBaggyParams sk l 0) else none
+         cachedSig := fun l t k => if l == 1 && t == 0 && k == 0 then some badCachedSig1 else none }
+     verifyWaistbandCanopy suite toothBaggyParams pk hardenedCorruptCache 1 0 0 node0 = none) := by
+  intro sk baseSuite honestSib1 mutatedSib1 leaf1_0 badRoot1 suite pk node0 chains1 badCachedSig1
+        corruptCache cleanCache msg1 msg2
+  have hBadNeGood : dToothBad ≠ dToothGood := fun h => by
+    have h0 := congrArg (fun x => (x.digits ⟨0, by decide⟩).val) h
+    nomatch h0
+  have hRogueNeBad : dToothRogue ≠ dToothBad := fun h => by
+    have h0 := congrArg (fun x => (x.digits ⟨0, by decide⟩).val) h
+    nomatch h0
+  have hRogueNeGood : dToothRogue ≠ dToothGood := fun h => by
+    have h0 := congrArg (fun x => (x.digits ⟨0, by decide⟩).val) h
+    nomatch h0
+  have hGoodRoot1Eq : baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0 =
+      baseSuite.thNodeH sk.pkSeed 1 0 1 0 leaf1_0 honestSib1 := rfl
+  have hBadNeTrue1 : badRoot1 ≠ baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0 := by
+    rw [hGoodRoot1Eq]
+    decide
+  have hRogueNeBadRoot : toothRogueRoot ≠ badRoot1 := by decide
+  have hRogueNeGoodRoot : toothRogueRoot ≠ baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0 := by
+    rw [hGoodRoot1Eq]
+    decide
+  -- Helper decoding lemmas for `packDigits256` on our 3 constant-sum digit maps (`0` 256-bit enumeration!).
+  have hDecGood : wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) = some dToothGood :=
+    wotsC256DecodeValidDigest_pack dToothGood
+  have hDecBad : wotsC256DecodeValidDigest (packDigits256 dToothBadFn) = some dToothBad :=
+    wotsC256DecodeValidDigest_pack dToothBad
+  have hDecRogue : wotsC256DecodeValidDigest (packDigits256 dToothRogueFn) = some dToothRogue :=
+    wotsC256DecodeValidDigest_pack dToothRogue
+  have hLayer1RecoversBad :
+      baggyLayerRecoverRoot suite toothBaggyParams sk.pkSeed 1 0 0 node0 badCachedSig1 = some badRoot1 := by
+    unfold baggyLayerRecoverRoot
+    dsimp only [badCachedSig1]
+    have hDig1 : suite.wots.thDigest sk.pkSeed (baggyLeafAdrs 1 0 0) node0 0 = packDigits256 dToothGoodFn := rfl
+    rw [hDig1, hDecGood]
+    dsimp only
+    have hEnds1 :
+        (fun c => wotsC256CompleteTo3 suite.wots sk.pkSeed (baggyLeafAdrs 1 0 0) c (dToothGood.digits c) (chains1 c)) =
+        (fun c => wotsC256PosFrom0 suite.wots sk.pkSeed (baggyLeafAdrs 1 0 0) c
+          (suite.wots.prf sk.pkSeed sk.skSeed (baggyLeafAdrs 1 0 0) c) 3) := by
+      funext c
+      exact wotsC256CompleteTo3_honest_eq suite.wots sk.pkSeed (baggyLeafAdrs 1 0 0) c _ (dToothGood.digits c)
+    rw [hEnds1]
+    rfl
+  have hDig0 : ∀ m : BitVec 256,
+      suite.wots.thDigest sk.pkSeed (baggyLeafAdrs 0 0 0) m 0 = packDigits256 dToothGoodFn := fun _ => rfl
+  have hDig1Good : suite.wots.thDigest sk.pkSeed (baggyLeafAdrs 1 0 0) node0 0 = packDigits256 dToothGoodFn := rfl
+  have hDig2Bad : suite.wots.thDigest sk.pkSeed (baggyLeafAdrs 2 0 0) badRoot1 0 = packDigits256 dToothBadFn := by
+    dsimp [suite, toothBaggySuite, baggyLeafAdrs]
+    simp
+  have hDig2Good : suite.wots.thDigest sk.pkSeed (baggyLeafAdrs 2 0 0)
+      (baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0) 0 = packDigits256 dToothGoodFn := by
+    change (if ((baggyLeafAdrs 2 0 0).layer == 2 &&
+                baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0 == badRoot1) then
+              packDigits256 dToothBadFn
+            else if ((baggyLeafAdrs 2 0 0).layer == 2 &&
+                     baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0 == toothRogueRoot) then
+              packDigits256 dToothRogueFn
+            else packDigits256 dToothGoodFn) = packDigits256 dToothGoodFn
+    have hL2 : ((baggyLeafAdrs 2 0 0).layer == 2) = true := rfl
+    have h1 : (baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0 == badRoot1) = false :=
+      beq_false_of_ne hBadNeTrue1.symm
+    have h2 : (baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0 == toothRogueRoot) = false :=
+      beq_false_of_ne hRogueNeGoodRoot.symm
+    rw [hL2, h1, h2]
+    rfl
+  have hDig2Rogue : suite.wots.thDigest sk.pkSeed (baggyLeafAdrs 2 0 0) toothRogueRoot 0 = packDigits256 dToothRogueFn := by
+    dsimp [suite, toothBaggySuite, baggyLeafAdrs]
+    have h1 : (toothRogueRoot == badRoot1) = false := beq_false_of_ne hRogueNeBadRoot
+    simp [h1]
+  -- Evaluate `baggySignLayerFresh` on layers 0, 1, and 2 (on both `badRoot1` and `goodRoot1`) symbolically!
+  have hFreshEval : ∀ (layer : Nat) (child : BitVec 256) (d : WotsC256Digits)
+      (hD : wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed (baggyLeafAdrs layer 0 0) child 0) = some d),
+      ∃ (sig : BaggyLayerSig256),
+        sig.chains = (fun c => wotsC256PosFrom0 suite.wots sk.pkSeed (baggyLeafAdrs layer 0 0) c
+          (suite.wots.prf sk.pkSeed sk.skSeed (baggyLeafAdrs layer 0 0) c) (d.digits c).val) ∧
+        baggyLayerRecoverRoot suite toothBaggyParams sk.pkSeed layer 0 0 child sig =
+          some (baggyTrueSubtreeRoot suite toothBaggyParams sk layer 0) ∧
+        baggySignLayerFresh suite toothBaggyParams sk layer 0 0 child =
+          some (sig, baggyTrueSubtreeRoot suite toothBaggyParams sk layer 0,
+            if 1 ≤ layer then some { layer := layer, tree := 0, kp := 0, signedNode := child, digits := d } else none) := by
+    intro layer child d hD
+    have hKp : 0 < 2 ^ toothBaggyParams.subtreeHeight := by decide
+    have hSign : wotsC256Sign suite.wots sk.pkSeed sk.skSeed (baggyLeafAdrs layer 0 0) child 0 =
+        some (fun c => wotsC256PosFrom0 suite.wots sk.pkSeed (baggyLeafAdrs layer 0 0) c
+          (suite.wots.prf sk.pkSeed sk.skSeed (baggyLeafAdrs layer 0 0) c) (d.digits c).val) := by
+      unfold wotsC256Sign
+      rw [hD]
+    let sigOut : BaggyLayerSig256 :=
+      { ctr := 0
+        chains := fun c => wotsC256PosFrom0 suite.wots sk.pkSeed (baggyLeafAdrs layer 0 0) c
+          (suite.wots.prf sk.pkSeed sk.skSeed (baggyLeafAdrs layer 0 0) c) (d.digits c).val
+        auth := baggyMerkleAuthPath suite sk.pkSeed layer 0 toothBaggyParams.subtreeHeight 0
+          (baggySubtreeLeaves suite toothBaggyParams sk layer 0) 0 }
+    have hFreshEq : baggySignLayerFresh suite toothBaggyParams sk layer 0 0 child =
+        some (sigOut, baggyTrueSubtreeRoot suite toothBaggyParams sk layer 0,
+          if 1 ≤ layer then some { layer := layer, tree := 0, kp := 0, signedNode := child, digits := d } else none) := by
+      unfold baggySignLayerFresh
+      rw [dite_pos hKp]
+      dsimp only
+      have hCtr0 : suite.grindCounter sk.pkSeed (baggyLeafAdrs layer 0 0) child = 0 := rfl
+      rw [hCtr0, hD, hSign]
+      rfl
+    obtain ⟨_, hRecOk, _⟩ := baggySignLayerFresh_props suite toothBaggyParams sk layer 0 0 child hFreshEq
+    exact ⟨sigOut, rfl, hRecOk, hFreshEq⟩
+  obtain ⟨sig0_1, _, hRec0_1, hFresh0_1⟩ := hFreshEval 0 (sk.pkSeed ^^^ msg1) dToothGood (by rw [hDig0]; exact hDecGood)
+  obtain ⟨sig0_2, _, hRec0_2, hFresh0_2⟩ := hFreshEval 0 (sk.pkSeed ^^^ msg2) dToothGood (by rw [hDig0]; exact hDecGood)
+  obtain ⟨sig1_clean, _, hRec1_clean, hFresh1_clean⟩ := hFreshEval 1 node0 dToothGood (by rw [hDig1Good]; exact hDecGood)
+  obtain ⟨topSigBad, hTopChainsBad, hRec2_bad, hFresh2_bad⟩ := hFreshEval 2 badRoot1 dToothBad (by rw [hDig2Bad]; exact hDecBad)
+  obtain ⟨topSigGood, hTopChainsGood, hRec2_good, hFresh2_good⟩ := hFreshEval 2
+    (baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0) dToothGood (by rw [hDig2Good]; exact hDecGood)
+  have hNotLe10 : ¬ ((1 : Nat) ≤ 0) := by decide
+  have hLe11 : (1 : Nat) ≤ 1 := by decide
+  have hLe12 : (1 : Nat) ≤ 2 := by decide
+  rw [ite_neg hNotLe10] at hFresh0_1 hFresh0_2
+  rw [ite_pos hLe11] at hFresh1_clean
+  rw [ite_pos hLe12] at hFresh2_bad hFresh2_good
+  have hRec1_bad' :
+      baggyLayerRecoverRoot suite toothBaggyParams sk.pkSeed 1 0 0
+        (baggyTrueSubtreeRoot suite toothBaggyParams sk 0 0) badCachedSig1 = some badRoot1 :=
+    hLayer1RecoversBad
+  have hRec1_clean' :
+      baggyLayerRecoverRoot suite toothBaggyParams sk.pkSeed 1 0 0
+        (baggyTrueSubtreeRoot suite toothBaggyParams sk 0 0) sig1_clean =
+        some (baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0) :=
+    hRec1_clean
+  have hFresh1_clean' :
+      baggySignLayerFresh suite toothBaggyParams sk 1 0 0 (baggyTrueSubtreeRoot suite toothBaggyParams sk 0 0) =
+        some (sig1_clean, baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0,
+          some { layer := 1, tree := 0, kp := 0, signedNode := node0, digits := dToothGood }) :=
+    hFresh1_clean
+  refine ⟨hBadNeGood, hRogueNeBad, hRogueNeGood, hBadNeTrue1, hRogueNeBadRoot, hRogueNeGoodRoot, ?_, ?_⟩
+  · have hPath0 : ∀ l, toothBaggyParams.pathAt 0 l = (0, 0) := fun _ => by simp [BaggyTreeParams.pathAt]
+    have hCov0 : toothBaggyParams.coversLayer 0 = false := by decide
+    have hCov1 : toothBaggyParams.coversLayer 1 = true := by decide
+    have hCov2 : toothBaggyParams.coversLayer 2 = true := by decide
+    have hNum : toothBaggyParams.numLayers = 3 := rfl
+    have hVer1 : baggyVerify suite toothBaggyParams pk msg1
+        { r := suite.prfRand sk.skPrf msg1, msgCtr := 0, forsSig := sk.skSeed ^^^ msg1,
+          layers := [sig0_1, badCachedSig1, topSigBad] } = true := by
+      unfold baggyVerify
+      have hL : ([sig0_1, badCachedSig1, topSigBad].length != toothBaggyParams.numLayers) = false := rfl
+      have hH : suite.hmsgLeaf toothBaggyParams pk (suite.prfRand sk.skPrf msg1) msg1 0 = some 0 := rfl
+      have hPkS : pk.pkSeed = sk.pkSeed := rfl
+      have hPkR : pk.pkRoot = baggyTrueSubtreeRoot suite toothBaggyParams sk 2 0 := rfl
+      rw [ite_neg (by rw [hL]; decide), hH]
+      dsimp only
+      rw [hPath0 0, hPkS]
+      dsimp only
+      have hFRec : suite.forsRecoverPk sk.pkSeed 0 0 msg1 (sk.skSeed ^^^ msg1) = sk.pkSeed ^^^ msg1 := rfl
+      rw [hFRec]
+      dsimp only [baggyWalkLayersVerify]
+      simp only [hPath0 0, hPath0 1, hPath0 2,
+        hRec0_1, hRec1_bad', hRec2_bad, hPkR, beq_self_eq_true]
+    have hVer2 : baggyVerify suite toothBaggyParams pk msg2
+        { r := suite.prfRand sk.skPrf msg2, msgCtr := 0, forsSig := sk.skSeed ^^^ msg2,
+          layers := [sig0_2, sig1_clean, topSigGood] } = true := by
+      unfold baggyVerify
+      have hL : ([sig0_2, sig1_clean, topSigGood].length != toothBaggyParams.numLayers) = false := rfl
+      have hH : suite.hmsgLeaf toothBaggyParams pk (suite.prfRand sk.skPrf msg2) msg2 0 = some 0 := rfl
+      have hPkS : pk.pkSeed = sk.pkSeed := rfl
+      have hPkR : pk.pkRoot = baggyTrueSubtreeRoot suite toothBaggyParams sk 2 0 := rfl
+      rw [ite_neg (by rw [hL]; decide), hH]
+      dsimp only
+      rw [hPath0 0, hPkS]
+      dsimp only
+      have hFRec : suite.forsRecoverPk sk.pkSeed 0 0 msg2 (sk.skSeed ^^^ msg2) = sk.pkSeed ^^^ msg2 := rfl
+      rw [hFRec]
+      dsimp only [baggyWalkLayersVerify]
+      simp only [hPath0 0, hPath0 1, hPath0 2,
+        hRec0_2, hRec1_clean', hRec2_good, hPkR, beq_self_eq_true]
+    have hUnhard1 : baggySignUnhardened suite toothBaggyParams sk pk corruptCache msg1 0 =
+        some ({ r := suite.prfRand sk.skPrf msg1, msgCtr := 0, forsSig := sk.skSeed ^^^ msg1,
+                layers := [sig0_1, badCachedSig1, topSigBad] },
+              [{ layer := 2, tree := 0, kp := 0, signedNode := badRoot1, digits := dToothBad }]) := by
+      unfold baggySignUnhardened
+      have hPkS : pk.pkSeed = sk.pkSeed := rfl
+      have hSeedBne : (pk.pkSeed != sk.pkSeed) = false := by
+        rw [hPkS]; exact bne_self_eq_false _
+      rw [ite_neg (by rw [hSeedBne]; decide)]
+      have hHm1 : suite.hmsgLeaf toothBaggyParams pk (suite.prfRand sk.skPrf msg1) msg1 0 = some 0 := rfl
+      dsimp only
+      rw [hHm1]
+      dsimp only
+      rw [hPath0 0]
+      dsimp only
+      have hForsFst : (suite.forsSign sk.pkSeed sk.skSeed 0 0 msg1).1 = sk.skSeed ^^^ msg1 := rfl
+      have hForsSnd : (suite.forsSign sk.pkSeed sk.skSeed 0 0 msg1).2 = sk.pkSeed ^^^ msg1 := rfl
+      rw [hForsFst, hForsSnd, hNum]
+      have hLayers1 :
+          baggySignLayersUnhardenedAux suite toothBaggyParams sk corruptCache 0 0 3 (sk.pkSeed ^^^ msg1) =
+            some ([sig0_1, badCachedSig1, topSigBad], baggyTrueSubtreeRoot suite toothBaggyParams sk 2 0,
+              [{ layer := 2, tree := 0, kp := 0, signedNode := badRoot1, digits := dToothBad }]) := by
+        dsimp only [baggySignLayersUnhardenedAux]
+        have hC1 : corruptCache 1 0 0 = some badCachedSig1 := rfl
+        have hC2 : corruptCache 2 0 0 = none := rfl
+        simp only [hPath0 0, hPath0 1, hPath0 2, hCov0, hCov1, hCov2,
+          Bool.false_eq_true, ite_false, ite_true, hFresh0_1, hC1, hRec1_bad', hC2, hFresh2_bad]
+      rw [hLayers1]
+      dsimp only
+      have hPkR : pk.pkRoot = baggyTrueSubtreeRoot suite toothBaggyParams sk 2 0 := rfl
+      have hTopBne : (baggyTrueSubtreeRoot suite toothBaggyParams sk 2 0 != pk.pkRoot) = false := by
+        rw [hPkR]; exact bne_self_eq_false _
+      rw [ite_neg (by rw [hTopBne]; decide), ite_pos hVer1]
+    have hUnhard2 : baggySignUnhardened suite toothBaggyParams sk pk cleanCache msg2 0 =
+        some ({ r := suite.prfRand sk.skPrf msg2, msgCtr := 0, forsSig := sk.skSeed ^^^ msg2,
+                layers := [sig0_2, sig1_clean, topSigGood] },
+              [{ layer := 1, tree := 0, kp := 0, signedNode := node0, digits := dToothGood },
+               { layer := 2, tree := 0, kp := 0, signedNode := baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0, digits := dToothGood }]) := by
+      unfold baggySignUnhardened
+      have hPkS : pk.pkSeed = sk.pkSeed := rfl
+      have hSeedBne : (pk.pkSeed != sk.pkSeed) = false := by
+        rw [hPkS]; exact bne_self_eq_false _
+      rw [ite_neg (by rw [hSeedBne]; decide)]
+      have hHm2 : suite.hmsgLeaf toothBaggyParams pk (suite.prfRand sk.skPrf msg2) msg2 0 = some 0 := rfl
+      dsimp only
+      rw [hHm2]
+      dsimp only
+      rw [hPath0 0]
+      dsimp only
+      have hForsFst : (suite.forsSign sk.pkSeed sk.skSeed 0 0 msg2).1 = sk.skSeed ^^^ msg2 := rfl
+      have hForsSnd : (suite.forsSign sk.pkSeed sk.skSeed 0 0 msg2).2 = sk.pkSeed ^^^ msg2 := rfl
+      rw [hForsFst, hForsSnd, hNum]
+      have hLayers2 :
+          baggySignLayersUnhardenedAux suite toothBaggyParams sk cleanCache 0 0 3 (sk.pkSeed ^^^ msg2) =
+            some ([sig0_2, sig1_clean, topSigGood], baggyTrueSubtreeRoot suite toothBaggyParams sk 2 0,
+              [{ layer := 1, tree := 0, kp := 0, signedNode := node0, digits := dToothGood },
+               { layer := 2, tree := 0, kp := 0, signedNode := baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0, digits := dToothGood }]) := by
+        dsimp only [baggySignLayersUnhardenedAux]
+        have hC1 : cleanCache 1 0 0 = none := rfl
+        have hC2 : cleanCache 2 0 0 = none := rfl
+        simp only [hPath0 0, hPath0 1, hPath0 2, hCov0, hCov1, hCov2,
+          Bool.false_eq_true, ite_false, ite_true, hFresh0_2, hC1, hFresh1_clean', hC2, hFresh2_good]
+      rw [hLayers2]
+      dsimp only
+      have hPkR : pk.pkRoot = baggyTrueSubtreeRoot suite toothBaggyParams sk 2 0 := rfl
+      have hTopBne : (baggyTrueSubtreeRoot suite toothBaggyParams sk 2 0 != pk.pkRoot) = false := by
+        rw [hPkR]; exact bne_self_eq_false _
+      rw [ite_neg (by rw [hTopBne]; decide), ite_pos hVer2]
+    rw [hUnhard1, hUnhard2]
+    refine ⟨hVer1, hVer2,
+      ⟨_, .head _, rfl, rfl, rfl, rfl⟩,
+      ⟨_, .tail _ (.head _), rfl, rfl, rfl, rfl⟩, ?_⟩
+    -- Prove the forged 3rd top-layer signature on `toothRogueRoot` verifies (`wotsC256Verify = true`)!
+    unfold wotsC256Verify wotsC256PkLeaf
+    rw [hDig2Rogue, hDecRogue]
+    dsimp only
+    have hForgedEnds :
+        (fun c => wotsC256CompleteTo3 suite.wots sk.pkSeed (baggyLeafAdrs 2 0 0) c (dToothRogue.digits c)
+          (forgeRogueRootFromTwoTopOpenings suite.wots sk.pkSeed (baggyLeafAdrs 2 0 0)
+            topSigBad.chains topSigGood.chains c)) =
+        (fun c => wotsC256PosFrom0 suite.wots sk.pkSeed (baggyLeafAdrs 2 0 0) c
+          (suite.wots.prf sk.pkSeed sk.skSeed (baggyLeafAdrs 2 0 0) c) 3) := by
+      funext c
+      rw [hTopChainsBad, hTopChainsGood]
+      unfold forgeRogueRootFromTwoTopOpenings dToothRogue dToothBad dToothGood
+      dsimp only
+      if hc0 : c.val == 0 then
+        have hVal0 : c = ⟨0, by decide⟩ := Fin.ext (eq_of_beq hc0)
+        subst hVal0
+        rfl
+      else if hc1 : c.val == 1 then
+        have hVal1 : c = ⟨1, by decide⟩ := Fin.ext (eq_of_beq hc1)
+        subst hVal1
+        rfl
+      else if hc2 : c.val == 2 then
+        have hVal2 : c = ⟨2, by decide⟩ := Fin.ext (eq_of_beq hc2)
+        subst hVal2
+        rfl
+      else if hc3 : c.val == 3 then
+        have hVal3 : c = ⟨3, by decide⟩ := Fin.ext (eq_of_beq hc3)
+        subst hVal3
+        rfl
+      else
+        simp only [hc0, hc1, hc2, hc3, Bool.false_eq_true, ↓reduceIte, dToothRogueFn, dToothGoodFn]
+        exact wotsC256CompleteTo3_honest_eq suite.wots sk.pkSeed (baggyLeafAdrs 2 0 0) c _ _
+    rw [hForgedEnds, beq_self_eq_true]
+  · -- Prove `verifyWaistbandCanopy` rejects `badCachedSig1` because `some badRoot1 != some goodRoot1`!
+    intro hardenedCorruptCache
+    unfold verifyWaistbandCanopy
+    have hGuardOk : ((hardenedCorruptCache.pinnedPkSeed != pk.pkSeed ||
+        hardenedCorruptCache.pinnedPkRoot != pk.pkRoot ||
+        hardenedCorruptCache.pinnedParamsDigest != suite.paramsDigest toothBaggyParams ||
+        !toothBaggyParams.coversLayer 1)) = false := by
+      dsimp only [hardenedCorruptCache]
+      simp only [bne_self_eq_false, Bool.false_or]
+      decide
+    rw [ite_neg (by rw [hGuardOk]; decide)]
+    have hExp0 : hardenedCorruptCache.expectedSubtreeRoot (1 - 1) (baggyChildTreeIdx toothBaggyParams 0 0) =
+        some node0 := rfl
+    have hExp1 : hardenedCorruptCache.expectedSubtreeRoot 1 0 =
+        some (baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0) := rfl
+    have hCSig1 : hardenedCorruptCache.cachedSig 1 0 0 = some badCachedSig1 := rfl
+    rw [hExp0, hExp1, hCSig1]
+    dsimp only
+    have hChildEq : (node0 != node0) = false := bne_self_eq_false _
+    rw [ite_neg (by rw [hChildEq]; decide)]
+    have hPkSeedEq : pk.pkSeed = sk.pkSeed := rfl
+    rw [hPkSeedEq, hLayer1RecoversBad]
+    have hRootBne : (some badRoot1 != some (baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0)) = true := by
+      rw [bne]
+      have hNeOpt : some badRoot1 ≠ some (baggyTrueSubtreeRoot suite toothBaggyParams sk 1 0) :=
+        fun h => hBadNeTrue1 (Option.some.inj h)
+      rw [beq_false_of_ne hNeOpt]
+      rfl
+    rw [ite_pos hRootBne]
+
+/-! ## 4. Non-Vacuity Witnesses (`inhabited_*`) -/
+
+/-- Non-vacuity witness for Section 1 (`WotsC256Digits`, `extractStrictDropIdx`, `wotsC256Sign`, `wotsC256Verify`). -/
+theorem inhabited_wotsC256_incomparability_and_signing :
+    ∃ (d1 d2 : WotsC256Digits) (hNe : d1 ≠ d2) (suite : WotsC256HashSuite)
+      (pkSeed skSeed msg : BitVec 256) (adrs : WotsLeafAdrs) (sig : Fin 128 → BitVec 256),
+      (d2.digits (extractStrictDropIdx d1 d2 hNe).1).val <
+        (d1.digits (extractStrictDropIdx d1 d2 hNe).1).val ∧
+      wotsC256Sign suite pkSeed skSeed adrs msg 0 = some sig ∧
+      wotsC256Verify suite pkSeed adrs (wotsC256PkLeaf suite pkSeed skSeed adrs) msg 0 sig = true := by
+  have hNe : dToothGood ≠ dToothBad := fun h => by
+    have h0 := congrArg (fun x => (x.digits ⟨0, by decide⟩).val) h
+    nomatch h0
+  let suite := (toothBaggySuite 0#256).wots
+  let adrs : WotsLeafAdrs := { layer := 0, tree := 0, keyPair := 0 }
+  have hDec : wotsC256DecodeValidDigest (suite.thDigest 0x11#256 adrs 0x44#256 0) = some dToothGood := by
+    have hd : suite.thDigest 0x11#256 adrs 0x44#256 0 = packDigits256 dToothGoodFn := rfl
+    rw [hd]
+    exact wotsC256DecodeValidDigest_pack dToothGood
+  let sig : Fin 128 → BitVec 256 := fun c =>
+    wotsC256PosFrom0 suite 0x11#256 adrs c (suite.prf 0x11#256 0x22#256 adrs c) (dToothGood.digits c).val
+  have hSign : wotsC256Sign suite 0x11#256 0x22#256 adrs 0x44#256 0 = some sig := by
+    unfold wotsC256Sign; rw [hDec]
+  exact ⟨dToothGood, dToothBad, hNe, suite, 0x11#256, 0x22#256, 0x44#256, adrs, sig,
+    (extractStrictDropIdx dToothGood dToothBad hNe).2, hSign,
+    wotsC256_sign_verify_complete suite 0x11#256 0x22#256 adrs 0x44#256 0 sig hSign⟩
+
+/-- Non-vacuity witness for Section 2 (`Rss256Engine` 1-corrupt privacy + 2-challenge `BGIN19` soundness + sticky poison). -/
+theorem inhabited_rss256_privacy_soundness_and_poison :
+    ∃ (x y : RssPlane256Share) (w : Bgin19Deg2Witness) (waveCoeffs : List Tower128)
+      (ops : List Rss256EngineOp),
+      x.reconstruct ≠ 0#256 ∧
+      y.reconstruct ≠ 0#256 ∧
+      w.Valid ∧
+      waveCoeffs.length ≤ 2 * 2 ∧
+      (∃ c ∈ waveCoeffs, c ≠ towerZero 7) ∧
+      ratLe (finSum ((2 ^ 128) * (2 ^ 128))
+        (fun ω => if postWaveTwoChallengeAccepts waveCoeffs ω then 1 else 0), (2 ^ 128) ^ 2)
+        ((2 * 2) ^ 2, (2 ^ 128) ^ 2) ∧
+      (rss256RunTrace rss256StepHardened Rss256EngineState.init ops).2 = [0xABCD#256] ∧
+      (rss256RunTrace rss256StepHardened Rss256EngineState.init ops).1.poisoned = true := by
+  let x : RssPlane256Share := { s0 := 1#256, s1 := 2#256, s2 := 4#256 }
+  let y : RssPlane256Share := { s0 := 3#256, s1 := 5#256, s2 := 0#256 }
+  let oneSh : RssTower128Share := { s0 := towerOne 7, s1 := towerZero 7, s2 := towerZero 7 }
+  let zeroSh : RssTower128Share := { s0 := towerZero 7, s1 := towerZero 7, s2 := towerZero 7 }
+  let w : Bgin19Deg2Witness :=
+    { x0 := oneSh, y0 := oneSh, dx := oneSh, dy := oneSh, c1 := zeroSh, c2 := oneSh }
+  have hValid : w.Valid := by
+    constructor <;> simp [w, oneSh, zeroSh, RssTower128Share.reconstruct]
+  let waveCoeffs : List Tower128 := [towerOne 7, towerX 7]
+  have hDeg : waveCoeffs.length ≤ 2 * 2 := by decide
+  have hNz : ∃ c ∈ waveCoeffs, c ≠ towerZero 7 := ⟨towerOne 7, .head _, towerOne_ne_zero 7⟩
+  let ops : List Rss256EngineOp :=
+    [.permuteInline true 0xABCD#256, .check, .openPlanes,
+     .permuteInline false 0xFFFF#256, .check, .check, .openPlanes]
+  exact ⟨x, y, w, waveCoeffs, ops, by decide, by decide, hValid, hDeg, hNz,
+    (rss256_post_wave_two_challenge_bgin19_soundness 2 waveCoeffs hDeg hNz).2, rfl, rfl⟩
+
+/-- Minimal hash oracle for the existence witness. The security statements remain
+    parameterized by the hash suite; inhabitedness must not evaluate a hash implementation. -/
+def inhabitedBaggySuite : BaggySuite256 :=
+  { toothBaggySuite 0#256 with
+    wots :=
+      { prf := fun _ _ _ _ => 0#256
+        thF := fun _ _ _ _ node => node
+        thTl := fun _ _ _ => 0#256
+        thDigest := fun _ _ _ _ => packDigits256 dToothGoodFn }
+    thNodeH := fun _ _ _ _ _ _ _ => 0#256 }
+
+/- Keep witness evaluation behind small equations. In particular, never ask `dsimp`
+   to normalize signing while its valid-digest match is still unreduced. -/
+private theorem inhabitedBaggy_pos (seed : BitVec 256) (adrs : WotsLeafAdrs)
+    (c : Fin 128) (n : Nat) :
+    wotsC256PosFrom0 inhabitedBaggySuite.wots seed adrs c 0#256 n = 0#256 := by
+  cases n with
+  | zero => rfl
+  | succ n => cases n with
+    | zero => rfl
+    | succ n => cases n <;> rfl
+
+private def inhabitedLayerSig : BaggyLayerSig256 :=
+  { ctr := 0, chains := fun _ => 0#256, auth := [0#256] }
+
+private theorem inhabitedBaggy_sign (seed secret msg : BitVec 256) (adrs : WotsLeafAdrs) :
+    wotsC256Sign inhabitedBaggySuite.wots seed secret adrs msg 0 =
+      some (fun _ : Fin 128 => 0#256) := by
+  unfold wotsC256Sign
+  change (match wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) with
+    | none => none
+    | some d => some (fun c => wotsC256PosFrom0 inhabitedBaggySuite.wots seed adrs c
+        0#256 (d.digits c).val)) = some (fun _ : Fin 128 => 0#256)
+  have hDec : wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) = some dToothGood :=
+    wotsC256DecodeValidDigest_pack dToothGood
+  rw [hDec]
+  simp only [inhabitedBaggy_pos]
+
+private theorem inhabitedBaggy_recover (seed node : BitVec 256) (layer : Nat) :
+    baggyLayerRecoverRoot inhabitedBaggySuite toothBaggyParams seed layer 0 0 node
+      inhabitedLayerSig = some (0#256) := by
+  change (match wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) with
+    | none => none | some _ => some (0#256)) = some (0#256)
+  have hDec : wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) = some dToothGood :=
+    wotsC256DecodeValidDigest_pack dToothGood
+  rw [hDec]
+
+private theorem inhabitedBaggy_fresh (sk : BaggySecretKey256) (layer : Nat) (node : BitVec 256) :
+    baggySignLayerFresh inhabitedBaggySuite toothBaggyParams sk layer 0 0 node =
+      some (inhabitedLayerSig, 0#256,
+        if 1 ≤ layer then some { layer := layer, tree := 0, kp := 0, signedNode := node, digits := dToothGood } else none) := by
+  change ((match wotsC256DecodeValidDigest (packDigits256 dToothGoodFn),
+      wotsC256Sign inhabitedBaggySuite.wots sk.pkSeed sk.skSeed (baggyLeafAdrs layer 0 0) node 0 with
+    | some d, some chains => some ({ ctr := 0, chains := chains, auth := [0#256] }, 0#256,
+        if 1 ≤ layer then some { layer := layer, tree := 0, kp := 0, signedNode := node, digits := d } else none)
+    | _, _ => none) : Option (BaggyLayerSig256 × BitVec 256 × Option StaticWotsOpeningRecord)) = _
+  have hDec : wotsC256DecodeValidDigest (packDigits256 dToothGoodFn) = some dToothGood :=
+    wotsC256DecodeValidDigest_pack dToothGood
+  rw [hDec, inhabitedBaggy_sign]
+  rfl
+
+private def inhabitedKey : BaggySecretKey256 :=
+  { pkSeed := 0#256, skSeed := 0#256, skPrf := 0#256 }
+
+private def inhabitedPk : BaggyPublicKey256 :=
+  baggyKeygen256 inhabitedBaggySuite toothBaggyParams inhabitedKey
+
+private def inhabitedCache : VerifiedWaistbandCache :=
+  { pinnedPkSeed := inhabitedPk.pkSeed
+    pinnedPkRoot := inhabitedPk.pkRoot
+    pinnedParamsDigest := inhabitedBaggySuite.paramsDigest toothBaggyParams
+    expectedSubtreeRoot := fun _ t => if t == 0 then some 0#256 else none
+    cachedSig := fun l t k => if l == 2 && t == 0 && k == 0 then some inhabitedLayerSig else none }
+
+private def inhabitedRecord : StaticWotsOpeningRecord :=
+  { layer := 1, tree := 0, kp := 0, signedNode := 0#256, digits := dToothGood }
+
+private def inhabitedGuard : DurableStaticWotsGuard := [(1, 0, 0, dToothGood)]
+
+private def inhabitedSignature (msg : BitVec 256) : BaggySig256 :=
+  { r := 0#256 ^^^ msg, msgCtr := 0, forsSig := 0#256 ^^^ msg
+    layers := [inhabitedLayerSig, inhabitedLayerSig, inhabitedLayerSig] }
+
+private theorem inhabited_path (l : Nat) : toothBaggyParams.pathAt 0 l = (0, 0) := by
+  simp [BaggyTreeParams.pathAt]
+
+private theorem inhabited_cache0 (node : BitVec 256) :
+    verifyWaistbandCanopy inhabitedBaggySuite toothBaggyParams inhabitedPk inhabitedCache 0 0 0 node = none := rfl
+
+private theorem inhabited_cache1 (node : BitVec 256) :
+    verifyWaistbandCanopy inhabitedBaggySuite toothBaggyParams inhabitedPk inhabitedCache 1 0 0 node = none := rfl
+
+private theorem inhabited_cache2 :
+    verifyWaistbandCanopy inhabitedBaggySuite toothBaggyParams inhabitedPk inhabitedCache 2 0 0 0#256 =
+      some (inhabitedLayerSig, 0#256) := by
+  change (if baggyLayerRecoverRoot inhabitedBaggySuite toothBaggyParams 0#256 2 0 0 0#256
+      inhabitedLayerSig != some 0#256 then none else some (inhabitedLayerSig, 0#256)) = _
+  rw [inhabitedBaggy_recover]
+  rfl
+
+private theorem inhabited_layers (node : BitVec 256) :
+    baggySignLayersVerifiedCacheAux inhabitedBaggySuite toothBaggyParams inhabitedKey inhabitedPk
+      inhabitedCache 0 0 3 node =
+      some ([inhabitedLayerSig, inhabitedLayerSig, inhabitedLayerSig], 0#256, [inhabitedRecord]) := by
+  simp only [baggySignLayersVerifiedCacheAux, Nat.reduceAdd, inhabited_path, inhabited_cache0,
+    inhabited_cache1, inhabited_cache2, inhabitedBaggy_fresh]
+  rfl
+
+private theorem inhabited_verify (msg : BitVec 256) :
+    baggyVerify inhabitedBaggySuite toothBaggyParams inhabitedPk msg (inhabitedSignature msg) = true := by
+  change (match baggyWalkLayersVerify inhabitedBaggySuite toothBaggyParams 0#256 0 0
+      (0#256 ^^^ msg) [inhabitedLayerSig, inhabitedLayerSig, inhabitedLayerSig] with
+    | none => false | some root => root == 0#256) = true
+  simp only [baggyWalkLayersVerify, inhabited_path, inhabitedBaggy_recover]
+  rfl
+
+private theorem inhabited_enforce_again :
+    enforceDurableStaticOpenings inhabitedGuard [inhabitedRecord] = some inhabitedGuard := by
+  change (if dToothGood == dToothGood then some inhabitedGuard else none) = some inhabitedGuard
+  have h : (dToothGood == dToothGood) = true := decide_eq_true rfl
+  rw [ite_pos h]
+
+private theorem inhabited_sign_session (g g' : DurableStaticWotsGuard) (msg : BitVec 256)
+    (hGuard : enforceDurableStaticOpenings g [inhabitedRecord] = some g') :
+    baggySignVerifiedWaistband inhabitedBaggySuite toothBaggyParams inhabitedKey inhabitedPk
+      inhabitedCache g msg 0 = some (inhabitedSignature msg, g', [inhabitedRecord]) := by
+  change (match baggySignLayersVerifiedCacheAux inhabitedBaggySuite toothBaggyParams
+      inhabitedKey inhabitedPk inhabitedCache 0 0 3 (0#256 ^^^ msg) with
+    | none => none
+    | some (layers, root, recs) =>
+      if root != 0#256 then none else
+      match enforceDurableStaticOpenings g recs with
+      | none => none
+      | some guard =>
+        let sig : BaggySig256 := { r := 0#256 ^^^ msg, msgCtr := 0, forsSig := 0#256 ^^^ msg, layers := layers }
+        if baggyVerify inhabitedBaggySuite toothBaggyParams inhabitedPk msg sig then
+          some (sig, guard, recs) else none) = _
+  rw [inhabited_layers]
+  change (match enforceDurableStaticOpenings g [inhabitedRecord] with
+    | none => none
+    | some guard => if baggyVerify inhabitedBaggySuite toothBaggyParams inhabitedPk msg
+        (inhabitedSignature msg) then some (inhabitedSignature msg, guard, [inhabitedRecord]) else none) = _
+  rw [hGuard]
+  simp only [inhabited_verify, ↓reduceIte]
+
+/-- Non-vacuity witness for Section 3 (`VerifiedWaistbandCache` passing `verifyWaistbandCanopy` + multi-session signing). -/
+theorem inhabited_waistband_verified_multi_session :
+    ∃ (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
+      (cache : VerifiedWaistbandCache) (msg1 msg2 : BitVec 256),
+      p.WellFormed ∧
+      WaistbandMatchesKey suite p sk cache ∧
+      (verifyWaistbandCanopy suite p (baggyKeygen256 suite p sk) cache 2 0 0
+        (baggyTrueSubtreeRoot suite p sk 1 0)).isSome = true ∧
+      ((baggyRunMultiSessionVerified suite p sk (baggyKeygen256 suite p sk) []
+        [(cache, msg1, 0), (cache, msg2, 0)]).2.1.length = 2) := by
+  refine ⟨inhabitedBaggySuite, toothBaggyParams, inhabitedKey, inhabitedCache, 1#256, 2#256,
+    ⟨by decide, by decide, by decide⟩, ?_, ?_, ?_⟩
+  · intro l t v h
+    change (if t == 0 then some 0#256 else none) = some v at h
+    split at h
+    · have hv := Option.some.inj h
+      exact hv.symm
+    · cases h
+  · change (verifyWaistbandCanopy inhabitedBaggySuite toothBaggyParams inhabitedPk
+      inhabitedCache 2 0 0 0#256).isSome = true
+    rw [inhabited_cache2]
+    rfl
+  · have hFirst := inhabited_sign_session [] inhabitedGuard 1#256 rfl
+    have hSecond := inhabited_sign_session inhabitedGuard inhabitedGuard 2#256 inhabited_enforce_again
+    change (baggyRunMultiSessionVerified inhabitedBaggySuite toothBaggyParams inhabitedKey inhabitedPk []
+      [(inhabitedCache, 1#256, 0), (inhabitedCache, 2#256, 0)]).2.1.length = 2
+    simp only [baggyRunMultiSessionVerified, hFirst, hSecond]
+    rfl
+
+/- Build-time audit: every public theorem and executable reduction in this module must
+    exist and depend only on kernel extensionality/quotient axioms. -/
+open Lean Elab Command in
+run_cmd do
+  let env ← getEnv
+  let names : Array Name := #[
+    `Qsag.wotsC256W,
+    `Qsag.wotsC256Steps,
+    `Qsag.wotsC256Chains,
+    `Qsag.wotsC256ZeroDigits,
+    `Qsag.wotsC256TargetSum,
+    `Qsag.wotsCDibitIndex,
+    `Qsag.wotsCDibitIndex_involutive,
+    `Qsag.wotsC256DigitOfDigest,
+    `Qsag.packDigitsAux,
+    `Qsag.packDigits256,
+    `Qsag.packDigits256_extract,
+    `Qsag.wotsC256DigitOfDigest_injective,
+    `Qsag.wotsCDibits128,
+    `Qsag.wotsCDibits128_injective,
+    `Qsag.wotsCDibits128_byte_shift,
+    `Qsag.wotsCDibits128_msb_sanity,
+    `Qsag.WotsC256Digits.ext,
+    `Qsag.finFuncEqAux,
+    `Qsag.wotsC256DigitSum,
+    `Qsag.wotsC256DigitSum_eq,
+    `Qsag.wotsC256DecodeValidDigest,
+    `Qsag.wotsC256DecodeValidDigest_some_digits,
+    `Qsag.wotsC256DecodeValidDigest_of_sum_ne,
+    `Qsag.wotsC256DecodeValidDigest_pack,
+    `Qsag.findStrictDropAux,
+    `Qsag.extractStrictDropIdx,
+    `Qsag.wotsC256_strict_incomparability,
+    `Qsag.wotsC256PosFrom0,
+    `Qsag.wotsC256AdvanceTo,
+    `Qsag.wotsC256CompleteTo3,
+    `Qsag.wotsC256PkLeaf,
+    `Qsag.wotsC256Sign,
+    `Qsag.wotsC256Verify,
+    `Qsag.wotsC256_sign_verify_complete,
+    `Qsag.wotsC256_one_use_euf_cma_extract,
+    `Qsag.wotsC256_one_use_euf_cma_sound,
+    `Qsag.wotsC256VerifyUnconstrained,
+    `Qsag.forgeStepOneChain,
+    `Qsag.tooth_wotsc_without_target_sum_forges,
+    `Qsag.RssPlane256Share.reconstruct,
+    `Qsag.rss256CrossTerms,
+    `Qsag.rss256AndWireCorrected,
+    `Qsag.rss256AndWireNaiveOffByOne,
+    `Qsag.rss256_and_gate_reconstructs,
+    `Qsag.RssTower128Share.reconstruct,
+    `Qsag.bgin19CrossProdShare,
+    `Qsag.Bgin19Deg2Witness.Valid,
+    `Qsag.bgin19UnmaskedCoeffShares,
+    `Qsag.packTower128Pair,
+    `Qsag.unpackTower128Pair,
+    `Qsag.rss256RealCorruptView,
+    `Qsag.rss256SimDummyInputs,
+    `Qsag.rss256SimCorruptView,
+    `Qsag.rss256_and_bgin19_privacy_equiv,
+    `Qsag.rss256_one_corrupt_perfect_view_privacy,
+    `Qsag.p0CancelNaivePads,
+    `Qsag.tooth_off_by_one_prg_map_leaks_and_wire,
+    `Qsag.Rss256RecordedGate.error,
+    `Qsag.RssPlane256Share.partyViews,
+    `Qsag.rss256_replicated_share_binding,
+    `Qsag.rss256_honest_recorded_gate_error,
+    `Qsag.rss256WeightedErrors,
+    `Qsag.rss256PivotCheck,
+    `Qsag.rss256PivotCheck_eq,
+    `Qsag.rss256_independent_gate_weight_soundness,
+    `Qsag.rss256GateErrors,
+    `Qsag.rss256Pass1Check,
+    `Qsag.rss256_polynomial_gate_weight_soundness,
+    `Qsag.rss256_recorded_fault_nonzero,
+    `Qsag.rss256_recorded_gate_polynomial_soundness,
+    `Qsag.rss256Pass1At,
+    `Qsag.rss256_folding_round_soundness,
+    `Qsag.tooth_rss256_reused_gate_weights,
+    `Qsag.postWaveTwoChallengeAccepts,
+    `Qsag.rss256_post_wave_two_challenge_bgin19_soundness,
+    `Qsag.preWaveKernelFaultPair,
+    `Qsag.preWaveTwoChallengeKernelFault,
+    `Qsag.tooth_pre_wave_challenge_kernel_bypass,
+    `Qsag.Rss256EngineState.init,
+    `Qsag.rss256StepHardened,
+    `Qsag.rss256HardenedMachine,
+    `Qsag.rss256StepBuggy,
+    `Qsag.rss256RunTrace,
+    `Qsag.rss256RecordedWaveOp,
+    `Qsag.rss256_recorded_wave_rejection_poison,
+    `Qsag.Rss256SafeInvariant,
+    `Qsag.rss256_sticky_poison_terminal_absorption,
+    `Qsag.tooth_non_sticky_check_clear_unlocks_unverified_open,
+    `Qsag.BaggyTreeParams.WellFormed,
+    `Qsag.BaggyTreeParams.coversLayer,
+    `Qsag.BaggyTreeParams.pathAt,
+    `Qsag.baggyChildTreeIdx,
+    `Qsag.baggyChildTreeIdx_pathAt,
+    `Qsag.BaggySuite256.WellGrinded,
+    `Qsag.baggyMerkleRoot,
+    `Qsag.baggyMerkleAuthPath,
+    `Qsag.baggyWalkMerkleRootFirst,
+    `Qsag.extractBaggyMerkleCollision,
+    `Qsag.baggyLeafAdrs,
+    `Qsag.baggySubtreeLeaves,
+    `Qsag.baggyTrueSubtreeRoot,
+    `Qsag.baggyKeygen256,
+    `Qsag.baggyLayerRecoverRoot,
+    `Qsag.baggyWalkLayersVerify,
+    `Qsag.baggyVerify,
+    `Qsag.baggyCanonicalStaticChildRoot,
+    `Qsag.baggyCanonicalStaticDigits,
+    `Qsag.baggySignLayerFresh,
+    `Qsag.baggySignLayersUncachedAux,
+    `Qsag.baggySignUncached,
+    `Qsag.verifyCanopyChainToTop,
+    `Qsag.verifyWaistbandCanopy,
+    `Qsag.lookupDurableDigits,
+    `Qsag.enforceDurableStaticOpenings,
+    `Qsag.baggySignLayersVerifiedCacheAux,
+    `Qsag.baggySignVerifiedWaistband,
+    `Qsag.baggyRunMultiSessionVerified,
+    `Qsag.WaistbandMatchesKey,
+    `Qsag.waistband_verified_multi_session_single_codeword,
+    `Qsag.extractStaticLayerBreakFromTransition,
+    `Qsag.walkUpperLayersBoundedExtract,
+    `Qsag.baggy_verified_waistband_euf_cma_extract,
+    `Qsag.baggy_verified_waistband_preserves_hypertree_euf_cma,
+    `Qsag.baggySignLayersUnhardenedAux,
+    `Qsag.baggySignUnhardened,
+    `Qsag.dToothBadFn,
+    `Qsag.dToothGoodFn,
+    `Qsag.dToothRogueFn,
+    `Qsag.dToothBad,
+    `Qsag.dToothGood,
+    `Qsag.dToothRogue,
+    `Qsag.toothBaggyParams,
+    `Qsag.toothRogueRoot,
+    `Qsag.toothBaggySuite,
+    `Qsag.forgeRogueRootFromTwoTopOpenings,
+    `Qsag.tooth_corrupted_intermediate_waistband_opens_second_ancestor_codeword,
+    `Qsag.inhabited_wotsC256_incomparability_and_signing,
+    `Qsag.inhabited_rss256_privacy_soundness_and_poison,
+    `Qsag.inhabitedBaggySuite,
+    `Qsag.inhabited_waistband_verified_multi_session]
+  for name in names do
+    if (env.find? name).isNone then
+      throwError "Missing audited declaration {name}"
+    let dependencies ← Lean.collectAxioms name
+    let forbidden := dependencies.filter fun ax => ax != ``propext && ax != ``Quot.sound
+    unless forbidden.isEmpty do
+      throwError "Forbidden axioms in {name}: {forbidden}"
+  logInfo m!"Baggy/RSS constructive audit: {names.size} declarations passed"
+
+end Qsag
+end

@@ -2104,3 +2104,1055 @@ def finalValueOk (finalWord : List GoldilocksExt2) (idx : Nat)
 
 /-- One query trajectory: Merkle-authenticated duet per layer, fold check between layers
     (`pcs.rs:1717-1744`), final-word check (`pcs.rs:1764-1768`). `groups` halves per layer. -/
+def verifyTrajectory (dom : FoldDomain) (finalWord : List GoldilocksExt2) :
+    Nat → Nat → Nat → Option GoldilocksExt2 → List (List UInt8) → List GoldilocksExt2 →
+      List FoldLayerOpening → Bool
+  | _, _, idx, expected, [], [], [] => finalValueOk finalWord idx expected
+  | layer, groups, idx, expected, root :: roots, α :: αs, op :: ops =>
+    decide (0 < groups) &&
+    expectedSlotOk expected (idx / groups) op.v0 op.v1 &&
+    decide (op.path.length = merkleDepth groups) &&
+    decide (merklePathRoot pcsMerkleHash
+      (pcsMerkleHash (duetLeafFrame layer (idx % groups) op.v0 op.v1)) (idx % groups) op.path = root) &&
+    verifyTrajectory dom finalWord (layer + 1) (groups / 2) (idx % groups)
+      (some (foldDuetExt2 op.v0 op.v1 (dom.invTwoY0 layer (idx % groups)) dom.invTwo α))
+      roots αs ops
+  | _, _, _, _, _, _, _ => false
+
+/-- Public data of the row arithmetization. `terminal` is what the verifier computes from the
+    final word; the other fields describe the honest prover and the witness decoding and are used
+    only by the extractor. -/
+structure RowArithmetization where
+  decodeSigs : List GoldilocksExt2 → List PqHashSig
+  honestClaim : List GoldilocksExt2 → GoldilocksExt2
+  honestRound : List GoldilocksExt2 → List GoldilocksExt2 → List GoldilocksExt2
+  terminal : List GoldilocksExt2 → List GoldilocksExt2 → GoldilocksExt2
+  isRound0Codeword : List GoldilocksExt2 → Bool
+  isFinalCodeword : List GoldilocksExt2 → Bool
+
+/-- Succinct verifier. It never sees a signature.
+
+    Deviations from `basefold_verify_with_kernel_fn` (`pcs.rs:1529`) and `verify_leaf_shard`
+    (`arithmetize.rs:1092`): one interleaved degree-8 sumcheck instead of a 16-round row sumcheck
+    followed by a 17-round degree-2 PCS sumcheck linked through claimed column evaluations;
+    arity-2 folding with one committed layer per variable instead of arity-16 groups; the final
+    word is supplied and checked by `arith.isFinalCodeword` instead of being Reed–Solomon encoded
+    from early-stop evaluations; the batching challenges, the proof-of-work nonce, leaf salts,
+    canopy caps and Merkle multiproof deduplication are not modelled. -/
+def verifySuccinctAggregate (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fsTranscript : List UInt8) : Bool :=
+  decide (fsTranscript = aggregateInstanceFrame inst proof.agg) &&
+  decide ((succinctRoots proof).length = proof.agg.roundPolys.length) &&
+  decide (proof.agg.challenges =
+    deriveInterleavedChallenges fsTranscript (succinctRoots proof) proof.agg.roundPolys) &&
+  verifyAggregateAlgebra inst.committee proof.agg &&
+  decide (proof.agg.terminalEval = arith.terminal proof.finalWord proof.agg.challenges) &&
+  arith.isFinalCodeword proof.finalWord &&
+  decide (proof.queries.map (fun q => q.index) =
+    deriveQueryIndices dom (succinctQuerySeed fsTranscript proof)) &&
+  strictlyIncreasing (proof.queries.map (fun q => q.index)) &&
+  decide (proof.queries.length = min dom.numQueries dom.groups0) &&
+  proof.queries.all (fun q => decide (q.index < dom.groups0) &&
+    verifyTrajectory dom proof.finalWord 0 dom.groups0 q.index none (succinctRoots proof)
+      proof.agg.challenges q.layers)
+
+theorem succinct_acceptance_facts (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (h : verifySuccinctAggregate arith dom inst proof fs = true) :
+    fs = aggregateInstanceFrame inst proof.agg ∧
+    proof.agg.challenges =
+      deriveInterleavedChallenges fs (succinctRoots proof) proof.agg.roundPolys ∧
+    verifyAggregateAlgebra inst.committee proof.agg = true ∧
+    proof.agg.terminalEval = arith.terminal proof.finalWord proof.agg.challenges ∧
+    arith.isFinalCodeword proof.finalWord = true ∧
+    proof.queries.map (fun q => q.index) =
+      deriveQueryIndices dom (succinctQuerySeed fs proof) ∧
+    strictlyIncreasing (proof.queries.map (fun q => q.index)) = true ∧
+    proof.queries.length = min dom.numQueries dom.groups0 ∧
+    proof.queries.all (fun q => decide (q.index < dom.groups0) &&
+      verifyTrajectory dom proof.finalWord 0 dom.groups0 q.index none (succinctRoots proof)
+        proof.agg.challenges q.layers) = true := by
+  unfold verifySuccinctAggregate at h
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, h10⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, h9⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, h8⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, h7⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, h6⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, h5⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, h4⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, h3⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h1, _⟩
+  exact ⟨of_decide_eq_true h1, of_decide_eq_true h3, h4, of_decide_eq_true h5, h6,
+    of_decide_eq_true h7, h8, of_decide_eq_true h9, h10⟩
+
+theorem verifyAggregateAlgebra_facts (committee : List PqPublicKey) (agg : AggregatedSignature)
+    (h : verifyAggregateAlgebra committee agg = true) :
+    agg.bitmap.length = committee.length ∧ agg.claimedSum = GoldilocksExt2.zero ∧
+    verifySumcheckChain agg.claimedSum agg.roundPolys agg.challenges agg.terminalEval = true := by
+  unfold verifyAggregateAlgebra at h
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, hChain⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, hZero⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨hLen, _⟩
+  exact ⟨eq_of_beq hLen, eq_of_beq hZero, hChain⟩
+
+/-- Accepted query positions are pairwise distinct and in range. -/
+theorem succinct_accepted_queries_distinct (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (h : verifySuccinctAggregate arith dom inst proof fs = true) :
+    (proof.queries.map (fun q => q.index)).Nodup ∧
+    (proof.queries.map (fun q => q.index)).length = min dom.numQueries dom.groups0 := by
+  have hF := succinct_acceptance_facts arith dom inst proof fs h
+  refine ⟨strictlyIncreasing_nodup _ hF.2.2.2.2.2.2.1, ?_⟩
+  rw [List.length_map]
+  exact hF.2.2.2.2.2.2.2.1
+
+/-! ### Committed tables and the deterministic query-phase reduction -/
+
+/-- The trajectory of round-0 group `idx` read from committed layer tables instead of openings. -/
+def tableTrajectoryOk (dom : FoldDomain) (finalWord : List GoldilocksExt2) :
+    Nat → Nat → Nat → Option GoldilocksExt2 → List (List GoldilocksExt2) →
+      List GoldilocksExt2 → Bool
+  | _, _, idx, expected, [], [] => finalValueOk finalWord idx expected
+  | layer, groups, idx, expected, w :: ws, α :: αs =>
+    decide (0 < groups) &&
+    expectedSlotOk expected (idx / groups)
+      (w.getD (idx % groups) CommRingOps.zero) (w.getD (idx % groups + groups) CommRingOps.zero) &&
+    tableTrajectoryOk dom finalWord (layer + 1) (groups / 2) (idx % groups)
+      (some (foldDuetExt2 (w.getD (idx % groups) CommRingOps.zero)
+        (w.getD (idx % groups + groups) CommRingOps.zero)
+        (dom.invTwoY0 layer (idx % groups)) dom.invTwo α)) ws αs
+  | _, _, _, _, _, _ => false
+
+/-- The layer tables are what the Merkle roots commit to: every leaf of every layer has an
+    authentication path to the corresponding root. These are equations between hash values. -/
+def LayersBound (authPath : Nat → Nat → List (List UInt8)) :
+    Nat → Nat → List (List GoldilocksExt2) → List (List UInt8) → Prop
+  | _, _, [], [] => True
+  | layer, groups, w :: ws, root :: roots =>
+    (∀ g, g < groups →
+      merklePathRoot pcsMerkleHash
+        (pcsMerkleHash (duetLeafFrame layer g (w.getD g CommRingOps.zero)
+          (w.getD (g + groups) CommRingOps.zero))) g (authPath layer g) = root ∧
+      (authPath layer g).length = merkleDepth groups) ∧
+    LayersBound authPath (layer + 1) (groups / 2) ws roots
+  | _, _, _, _ => False
+
+/-- An accepted trajectory either reads exactly the committed tables or exhibits a collision. -/
+def trajectorySound (dom : FoldDomain) (finalWord : List GoldilocksExt2)
+    (authPath : Nat → Nat → List (List UInt8)) :
+    ∀ (roots : List (List UInt8)) (αs : List GoldilocksExt2) (ops : List FoldLayerOpening)
+      (tables : List (List GoldilocksExt2)) (layer groups idx : Nat)
+      (expected : Option GoldilocksExt2),
+      verifyTrajectory dom finalWord layer groups idx expected roots αs ops = true →
+      LayersBound authPath layer groups tables roots →
+      PSum (HashCollisionWitness pcsMerkleHash)
+        (PLift (tableTrajectoryOk dom finalWord layer groups idx expected tables αs = true))
+  | [], [], [], [], _, _, _, _, hV, _ => .inr ⟨hV⟩
+  | [], [], [], _ :: _, _, _, _, _, _, hB => False.elim hB
+  | _ :: _, _ :: _, _ :: _, [], _, _, _, _, _, hB => False.elim hB
+  | [], [], _ :: _, _, _, _, _, _, hV, _ => False.elim (by simp [verifyTrajectory] at hV)
+  | [], _ :: _, ops, _, _, _, _, _, hV, _ =>
+    False.elim (by cases ops <;> simp [verifyTrajectory] at hV)
+  | _ :: _, [], ops, _, _, _, _, _, hV, _ =>
+    False.elim (by cases ops <;> simp [verifyTrajectory] at hV)
+  | _ :: _, _ :: _, [], _, _, _, _, _, hV, _ => False.elim (by simp [verifyTrajectory] at hV)
+  | root :: roots, α :: αs, op :: ops, w :: ws, layer, groups, idx, expected, hV, hB =>
+    have hU : 0 < groups ∧ expectedSlotOk expected (idx / groups) op.v0 op.v1 = true ∧
+        op.path.length = merkleDepth groups ∧
+        merklePathRoot pcsMerkleHash
+          (pcsMerkleHash (duetLeafFrame layer (idx % groups) op.v0 op.v1))
+          (idx % groups) op.path = root ∧
+        verifyTrajectory dom finalWord (layer + 1) (groups / 2) (idx % groups)
+          (some (foldDuetExt2 op.v0 op.v1 (dom.invTwoY0 layer (idx % groups)) dom.invTwo α))
+          roots αs ops = true := by
+      have h : (decide (0 < groups) &&
+          expectedSlotOk expected (idx / groups) op.v0 op.v1 &&
+          decide (op.path.length = merkleDepth groups) &&
+          decide (merklePathRoot pcsMerkleHash
+            (pcsMerkleHash (duetLeafFrame layer (idx % groups) op.v0 op.v1))
+            (idx % groups) op.path = root) &&
+          verifyTrajectory dom finalWord (layer + 1) (groups / 2) (idx % groups)
+            (some (foldDuetExt2 op.v0 op.v1 (dom.invTwoY0 layer (idx % groups)) dom.invTwo α))
+            roots αs ops) = true := hV
+      rcases Bool.and_eq_true_iff.mp h with ⟨h, h5⟩
+      rcases Bool.and_eq_true_iff.mp h with ⟨h, h4⟩
+      rcases Bool.and_eq_true_iff.mp h with ⟨h, h3⟩
+      rcases Bool.and_eq_true_iff.mp h with ⟨h1, h2⟩
+      exact ⟨of_decide_eq_true h1, h2, of_decide_eq_true h3, of_decide_eq_true h4, h5⟩
+    have hBg := hB.1 (idx % groups) (Nat.mod_lt _ hU.1)
+    if hEq : op.v0 = w.getD (idx % groups) CommRingOps.zero ∧
+        op.v1 = w.getD (idx % groups + groups) CommRingOps.zero then
+      match trajectorySound dom finalWord authPath roots αs ops ws (layer + 1) (groups / 2)
+          (idx % groups) _ hU.2.2.2.2 hB.2 with
+      | .inl c => .inl c
+      | .inr ⟨hT⟩ => .inr ⟨by
+          show (decide (0 < groups) &&
+            expectedSlotOk expected (idx / groups)
+              (w.getD (idx % groups) CommRingOps.zero)
+              (w.getD (idx % groups + groups) CommRingOps.zero) &&
+            tableTrajectoryOk dom finalWord (layer + 1) (groups / 2) (idx % groups)
+              (some (foldDuetExt2 (w.getD (idx % groups) CommRingOps.zero)
+                (w.getD (idx % groups + groups) CommRingOps.zero)
+                (dom.invTwoY0 layer (idx % groups)) dom.invTwo α)) ws αs) = true
+          rw [← hEq.1, ← hEq.2]
+          exact Bool.and_eq_true_iff.mpr
+            ⟨Bool.and_eq_true_iff.mpr ⟨decide_eq_true hU.1, hU.2.1⟩, hT⟩⟩
+    else
+      .inl (duetOpeningCollision layer (idx % groups) op.v0 op.v1 _ _ op.path
+        (authPath layer (idx % groups)) root hEq (hU.2.2.1.trans hBg.2.symm) hU.2.2.2.1 hBg.1)
+
+/-- All accepted queries read the committed tables, or a collision is exhibited. -/
+def queriesSound (dom : FoldDomain) (finalWord : List GoldilocksExt2)
+    (authPath : Nat → Nat → List (List UInt8)) (roots : List (List UInt8))
+    (αs : List GoldilocksExt2) (tables : List (List GoldilocksExt2)) :
+    ∀ (qs : List QueryOpening),
+      qs.all (fun q => decide (q.index < dom.groups0) &&
+        verifyTrajectory dom finalWord 0 dom.groups0 q.index none roots αs q.layers) = true →
+      LayersBound authPath 0 dom.groups0 tables roots →
+      PSum (HashCollisionWitness pcsMerkleHash)
+        (PLift (∀ q ∈ qs, q.index < dom.groups0 ∧
+          tableTrajectoryOk dom finalWord 0 dom.groups0 q.index none tables αs = true))
+  | [], _, _ => .inr ⟨fun _ hq => by cases hq⟩
+  | q :: qs, hAll, hB =>
+    have hSplit : (decide (q.index < dom.groups0) &&
+          verifyTrajectory dom finalWord 0 dom.groups0 q.index none roots αs q.layers) = true ∧
+        qs.all (fun q => decide (q.index < dom.groups0) &&
+          verifyTrajectory dom finalWord 0 dom.groups0 q.index none roots αs q.layers) = true :=
+      Bool.and_eq_true_iff.mp hAll
+    have hq := Bool.and_eq_true_iff.mp hSplit.1
+    match trajectorySound dom finalWord authPath roots αs q.layers tables 0 dom.groups0
+        q.index none hq.2 hB with
+    | .inl c => .inl c
+    | .inr ⟨h1⟩ =>
+      match queriesSound dom finalWord authPath roots αs tables qs hSplit.2 hB with
+      | .inl c => .inl c
+      | .inr ⟨h2⟩ => .inr ⟨fun q' hq' => by
+          rcases List.mem_cons.mp hq' with e | e
+          · rw [e]
+            exact ⟨of_decide_eq_true hq.1, h1⟩
+          · exact h2 q' e⟩
+
+/-- Constructive bounded search for the first index below `n` on which `ok` fails. -/
+def firstFailBelow (ok : Nat → Bool) :
+    (n : Nat) → PSum { i : Nat // i < n ∧ ok i = false } (PLift (∀ i, i < n → ok i = true))
+  | 0 => .inr ⟨fun i h => absurd h (Nat.not_lt_zero i)⟩
+  | n + 1 =>
+    match firstFailBelow ok n with
+    | .inl ⟨i, hi, hb⟩ => .inl ⟨i, Nat.lt_succ_of_lt hi, hb⟩
+    | .inr ⟨hall⟩ =>
+      if h : ok n = true then
+        .inr ⟨fun i hi => by
+          rcases Nat.lt_or_ge i n with hlt | hge
+          · exact hall i hlt
+          · have hEq : i = n := Nat.le_antisymm (Nat.le_of_lt_succ hi) hge
+            rw [hEq]
+            exact h⟩
+      else .inl ⟨n, Nat.lt_succ_self n, Bool.eq_false_iff.mpr h⟩
+
+/-! ### Break witnesses of the query phase -/
+
+/-- The committed tables are inconsistent along the trajectory of an identified round-0 group,
+    yet every Fiat–Shamir-sampled (pairwise distinct) query position has a consistent trajectory.
+    `basefold_query_miss_bound` counts the query tuples for which this can happen, as a function
+    of how many round-0 groups are inconsistent.
+
+    On its own this is not a rare event: corrupting a single unqueried position produces it. It
+    is rare only when the inconsistent set is dense; the unique-decoding argument that a sparse
+    inconsistent set leaves the extracted witness unchanged is not carried out in this file. -/
+structure BaseFoldQueryMiss (dom : FoldDomain) (finalWord : List GoldilocksExt2)
+    (tables : List (List GoldilocksExt2)) (challenges : List GoldilocksExt2)
+    (queryIndices : List Nat) where
+  badIndex : Nat
+  badIndex_lt : badIndex < dom.groups0
+  bad : tableTrajectoryOk dom finalWord 0 dom.groups0 badIndex none tables challenges = false
+  queries_distinct : queryIndices.Nodup
+  queries_count : queryIndices.length = min dom.numQueries dom.groups0
+  queries_good : ∀ i ∈ queryIndices, i < dom.groups0 ∧
+    tableTrajectoryOk dom finalWord 0 dom.groups0 i none tables challenges = true
+
+/-- The committed round-0 table is not a codeword, yet under the Fiat–Shamir folding challenges
+    every trajectory of the committed tables folds consistently into a final codeword. This is the
+    proximity-gap failure event; its probability is NOT bounded in this file. -/
+structure FoldProximityHit (arith : RowArithmetization) (dom : FoldDomain)
+    (finalWord : List GoldilocksExt2) (tables : List (List GoldilocksExt2))
+    (challenges : List GoldilocksExt2) where
+  round0_not_codeword : arith.isRound0Codeword (tables.headD []) = false
+  final_in_code : arith.isFinalCodeword finalWord = true
+  all_consistent : ∀ i, i < dom.groups0 →
+    tableTrajectoryOk dom finalWord 0 dom.groups0 i none tables challenges = true
+
+/-- Obligations on a row arithmetization. `complete`: for a round-0 codeword whose committed
+    layers fold consistently everywhere, the honest sumcheck chain verifies against the terminal
+    value computed from the final word. `sound`: a decoded witness that fails signature
+    verification for an active signer has a nonzero constraint sum.
+
+    No instance for the production AIR (`trace.rs`) is constructed here, and `sound` as stated
+    has no batching-failure alternative, which a production instance would need. -/
+structure RowArithmetization.Lawful (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) : Prop where
+  complete : ∀ (tables : List (List GoldilocksExt2)) (challenges finalWord : List GoldilocksExt2),
+    arith.isRound0Codeword (tables.headD []) = true →
+    (∀ i, i < dom.groups0 →
+      tableTrajectoryOk dom finalWord 0 dom.groups0 i none tables challenges = true) →
+    verifySumcheckChain (arith.honestClaim (tables.headD []))
+      (adaptivePolys (arith.honestRound (tables.headD [])) challenges) challenges
+      (arith.terminal finalWord challenges) = true
+  sound : ∀ (table0 : List GoldilocksExt2) (bitmap : SignerBitmapSpec),
+    bitmap.length = inst.committee.length →
+    checkAllActiveSigners inst.suite inst.params inst.message inst.committee bitmap
+      (arith.decodeSigs table0) = false →
+    arith.honestClaim table0 ≠ GoldilocksExt2.zero
+
+/-- What the extractor reads from the prover's hash queries: the committed layer tables and an
+    authentication path for every leaf. -/
+structure SuccinctExtractionView where
+  tables : List (List GoldilocksExt2)
+  authPath : Nat → Nat → List (List UInt8)
+
+/-- Result of extraction: valid signatures for all active signers, or one of four
+    transcript-indexed break witnesses. -/
+@[expose] def SuccinctOutcome (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof)
+    (view : SuccinctExtractionView) : Type :=
+  PSum { _u : Unit // checkAllActiveSigners inst.suite inst.params inst.message inst.committee
+      proof.agg.bitmap (arith.decodeSigs (view.tables.headD [])) = true }
+    (PSum (SumcheckSchwartzZippelHit proof.agg.roundPolys
+        (adaptivePolys (arith.honestRound (view.tables.headD [])) proof.agg.challenges)
+        proof.agg.challenges)
+      (PSum (HashCollisionWitness pcsMerkleHash)
+        (PSum (BaseFoldQueryMiss dom proof.finalWord view.tables proof.agg.challenges
+            (proof.queries.map (fun q => q.index)))
+          (FoldProximityHit arith dom proof.finalWord view.tables proof.agg.challenges))))
+
+/-- **Knowledge soundness of the succinct aggregate verifier, relative to a lawful row
+    arithmetization.** From an accepting certificate (challenges and query positions derived by
+    Fiat–Shamir) and the committed tables behind its Merkle roots, the extractor returns valid
+    signatures for every active signer, or a Schwartz–Zippel hit at an identified sumcheck
+    round, or a Merkle hash collision, or an identified inconsistent trajectory missed by all
+    sampled queries, or a proximity-gap hit of the folding challenges. -/
+def succinct_aggregation_knowledge_soundness (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : LayersBound view.authPath 0 dom.groups0 view.tables (succinctRoots proof)) :
+    SuccinctOutcome arith dom inst proof view :=
+  have hF := succinct_acceptance_facts arith dom inst proof fs hAccept
+  match queriesSound dom proof.finalWord view.authPath (succinctRoots proof) proof.agg.challenges
+      view.tables proof.queries hF.2.2.2.2.2.2.2.2 hBound with
+  | .inl c => .inr (.inr (.inl c))
+  | .inr ⟨hQ⟩ =>
+    match firstFailBelow (fun i => tableTrajectoryOk dom proof.finalWord 0 dom.groups0 i none
+        view.tables proof.agg.challenges) dom.groups0 with
+    | .inl ⟨i, hi, hbad⟩ =>
+      .inr (.inr (.inr (.inl
+        { badIndex := i
+          badIndex_lt := hi
+          bad := hbad
+          queries_distinct := strictlyIncreasing_nodup _ hF.2.2.2.2.2.2.1
+          queries_count := by
+            rw [List.length_map]
+            exact hF.2.2.2.2.2.2.2.1
+          queries_good := fun j hj => by
+            obtain ⟨q, hq, hEq⟩ := List.mem_map.mp hj
+            rw [← hEq]
+            exact hQ q hq })))
+    | .inr ⟨hAll⟩ =>
+      if hCode : arith.isRound0Codeword (view.tables.headD []) = true then
+        if hSigs : checkAllActiveSigners inst.suite inst.params inst.message inst.committee
+            proof.agg.bitmap (arith.decodeSigs (view.tables.headD [])) = true then
+          .inl ⟨(), hSigs⟩
+        else
+          have hAlg := verifyAggregateAlgebra_facts inst.committee proof.agg hF.2.2.1
+          have hHon := law.complete view.tables proof.agg.challenges proof.finalWord hCode hAll
+          have hNz := law.sound (view.tables.headD []) proof.agg.bitmap hAlg.1
+            (Bool.eq_false_iff.mpr hSigs)
+          .inr (.inl (extractSumcheckHitFromChain proof.agg.roundPolys proof.agg.claimedSum
+            (arith.honestClaim (view.tables.headD []))
+            (adaptivePolys (arith.honestRound (view.tables.headD [])) proof.agg.challenges)
+            proof.agg.challenges proof.agg.terminalEval
+            (by rw [hAlg.2.1]; exact fun h => hNz h.symm) hAlg.2.2
+            (by rw [hF.2.2.2.1]; exact hHon)))
+      else
+        .inr (.inr (.inr (.inr
+          { round0_not_codeword := Bool.eq_false_iff.mpr hCode
+            final_in_code := hF.2.2.2.2.1
+            all_consistent := hAll })))
+
+/-- Per-signer form: a verifying signature of active signer `i`, or a break witness. -/
+def succinct_aggregation_signer_extraction (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : LayersBound view.authPath 0 dom.groups0 view.tables (succinctRoots proof))
+    (i : Nat) (hi : i < inst.committee.length) (hb : i < proof.agg.bitmap.length)
+    (active : proof.agg.bitmap[i]'hb = true) :
+    PSum { sig : PqHashSig //
+        verifyPqHashSig inst.suite inst.params (inst.committee[i]'hi) inst.message sig = true }
+      (PSum (SumcheckSchwartzZippelHit proof.agg.roundPolys
+          (adaptivePolys (arith.honestRound (view.tables.headD [])) proof.agg.challenges)
+          proof.agg.challenges)
+        (PSum (HashCollisionWitness pcsMerkleHash)
+          (PSum (BaseFoldQueryMiss dom proof.finalWord view.tables proof.agg.challenges
+              (proof.queries.map (fun q => q.index)))
+            (FoldProximityHit arith dom proof.finalWord view.tables proof.agg.challenges)))) :=
+  match succinct_aggregation_knowledge_soundness arith dom inst law proof fs view hAccept hBound with
+  | .inl ⟨_, hAll⟩ =>
+    .inl (extractActiveSignerSig inst.suite inst.params inst.message inst.committee
+      proof.agg.bitmap _ i hi hb hAll active)
+  | .inr brk => .inr brk
+
+/-! ## 11. Recursive merge trees -/
+
+/-- Property of an accepted reference merge tree: at every node the opened signatures verify for
+    every active signer, and every branch is a disjoint union of its children. -/
+def mergeTreeAllSound (inst : AggPublicInstance) : MergeNode → Prop
+  | .leaf agg sigs _ =>
+    checkAllActiveSigners inst.suite inst.params inst.message inst.committee agg.bitmap sigs = true
+  | .branch agg sigs _ left right =>
+    checkAllActiveSigners inst.suite inst.params inst.message inst.committee agg.bitmap sigs = true ∧
+    bitmapDisjointSpec left.certificate.bitmap right.certificate.bitmap = true ∧
+    agg.bitmap = bitmapUnionSpec left.certificate.bitmap right.certificate.bitmap ∧
+    mergeTreeAllSound inst left ∧ mergeTreeAllSound inst right
+
+/-- Induction over the reference merge tree accepted by `verifyMergeTree`. Unconditional: the
+    reference verifier opens every signature at every node. -/
+theorem merge_tree_all_nodes_sound (inst : AggPublicInstance) :
+    ∀ (budget : Nat) (tree : MergeNode),
+      verifyMergeTree inst budget tree = true → mergeTreeAllSound inst tree
+  | 0, _, h => False.elim (Bool.false_ne_true h)
+  | _ + 1, .leaf agg sigs fs, h =>
+    aggregate_opened_signatures_sound inst agg sigs fs (Bool.and_eq_true_iff.mp h).2
+  | budget + 1, .branch agg sigs fs left right, h => by
+    have h' : (decide (agg.childrenCommitment =
+          some (left.certificate.traceCommitment, right.certificate.traceCommitment)) &&
+        verifyMergeTree inst budget left && verifyMergeTree inst budget right &&
+        bitmapDisjointSpec left.certificate.bitmap right.certificate.bitmap &&
+        decide (agg.bitmap = bitmapUnionSpec left.certificate.bitmap right.certificate.bitmap) &&
+        verifyAggregatedSignature inst agg sigs fs) = true := h
+    rcases Bool.and_eq_true_iff.mp h' with ⟨h', hNode⟩
+    rcases Bool.and_eq_true_iff.mp h' with ⟨h', hUnion⟩
+    rcases Bool.and_eq_true_iff.mp h' with ⟨h', hDisj⟩
+    rcases Bool.and_eq_true_iff.mp h' with ⟨h', hRight⟩
+    rcases Bool.and_eq_true_iff.mp h' with ⟨_, hLeft⟩
+    exact ⟨aggregate_opened_signatures_sound inst agg sigs fs hNode, hDisj,
+      of_decide_eq_true hUnion, merge_tree_all_nodes_sound inst budget left hLeft,
+      merge_tree_all_nodes_sound inst budget right hRight⟩
+
+/-- Merge tree of succinct certificates (same shape as `MergeNode`, without opened signatures). -/
+inductive SuccinctMergeNode where
+  | leaf (proof : SuccinctAggregateProof) (transcript : List UInt8)
+  | branch (proof : SuccinctAggregateProof) (transcript : List UInt8)
+      (left right : SuccinctMergeNode)
+
+def SuccinctMergeNode.proof : SuccinctMergeNode → SuccinctAggregateProof
+  | .leaf p _ => p
+  | .branch p _ _ _ => p
+
+/-- `verifyMergeTree` with every node checked by `verifySuccinctAggregate`. -/
+def verifySuccinctMergeTree (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) : Nat → SuccinctMergeNode → Bool
+  | 0, _ => false
+  | _ + 1, .leaf p fs =>
+    p.agg.childrenCommitment.isNone && verifySuccinctAggregate arith dom inst p fs
+  | budget + 1, .branch p fs left right =>
+    decide (p.agg.childrenCommitment =
+      some (left.proof.agg.traceCommitment, right.proof.agg.traceCommitment)) &&
+    verifySuccinctMergeTree arith dom inst budget left &&
+    verifySuccinctMergeTree arith dom inst budget right &&
+    bitmapDisjointSpec left.proof.agg.bitmap right.proof.agg.bitmap &&
+    decide (p.agg.bitmap = bitmapUnionSpec left.proof.agg.bitmap right.proof.agg.bitmap) &&
+    verifySuccinctAggregate arith dom inst p fs
+
+/-- One extraction view per node of the merge tree. -/
+inductive SuccinctViewTree where
+  | leaf (view : SuccinctExtractionView)
+  | branch (view : SuccinctExtractionView) (left right : SuccinctViewTree)
+
+def ViewTreeBound (dom : FoldDomain) : SuccinctMergeNode → SuccinctViewTree → Prop
+  | .leaf p _, .leaf v => LayersBound v.authPath 0 dom.groups0 v.tables (succinctRoots p)
+  | .branch p _ left right, .branch v vl vr =>
+    LayersBound v.authPath 0 dom.groups0 v.tables (succinctRoots p) ∧
+    ViewTreeBound dom left vl ∧ ViewTreeBound dom right vr
+  | _, _ => False
+
+/-- An outcome at every node of the tree. -/
+@[expose] def SuccinctTreeOutcome (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) : SuccinctMergeNode → SuccinctViewTree → Type
+  | .leaf p _, .leaf v => SuccinctOutcome arith dom inst p v
+  | .branch p _ left right, .branch v vl vr =>
+    SuccinctOutcome arith dom inst p v × SuccinctTreeOutcome arith dom inst left vl ×
+      SuccinctTreeOutcome arith dom inst right vr
+  | _, _ => PUnit
+
+theorem succinct_merge_tree_children_sound (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (budget : Nat) (p : SuccinctAggregateProof) (fs : List UInt8)
+    (left right : SuccinctMergeNode)
+    (h : verifySuccinctMergeTree arith dom inst (budget + 1) (.branch p fs left right) = true) :
+    verifySuccinctMergeTree arith dom inst budget left = true ∧
+    verifySuccinctMergeTree arith dom inst budget right = true ∧
+    p.agg.childrenCommitment =
+      some (left.proof.agg.traceCommitment, right.proof.agg.traceCommitment) ∧
+    bitmapDisjointSpec left.proof.agg.bitmap right.proof.agg.bitmap = true ∧
+    p.agg.bitmap = bitmapUnionSpec left.proof.agg.bitmap right.proof.agg.bitmap ∧
+    verifySuccinctAggregate arith dom inst p fs = true := by
+  have h' : (decide (p.agg.childrenCommitment =
+        some (left.proof.agg.traceCommitment, right.proof.agg.traceCommitment)) &&
+      verifySuccinctMergeTree arith dom inst budget left &&
+      verifySuccinctMergeTree arith dom inst budget right &&
+      bitmapDisjointSpec left.proof.agg.bitmap right.proof.agg.bitmap &&
+      decide (p.agg.bitmap = bitmapUnionSpec left.proof.agg.bitmap right.proof.agg.bitmap) &&
+      verifySuccinctAggregate arith dom inst p fs) = true := h
+  rcases Bool.and_eq_true_iff.mp h' with ⟨h', hNode⟩
+  rcases Bool.and_eq_true_iff.mp h' with ⟨h', hUnion⟩
+  rcases Bool.and_eq_true_iff.mp h' with ⟨h', hDisj⟩
+  rcases Bool.and_eq_true_iff.mp h' with ⟨h', hRight⟩
+  rcases Bool.and_eq_true_iff.mp h' with ⟨hComm, hLeft⟩
+  exact ⟨hLeft, hRight, of_decide_eq_true hComm, hDisj, of_decide_eq_true hUnion, hNode⟩
+
+/-- **Knowledge soundness of the recursive succinct merge verifier**, by induction over the tree:
+    every node of an accepted tree yields valid signatures for all of its active signers or one
+    of the transcript-indexed break witnesses of that node. -/
+def succinct_merge_tree_knowledge_soundness (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst) :
+    ∀ (budget : Nat) (node : SuccinctMergeNode) (views : SuccinctViewTree),
+      verifySuccinctMergeTree arith dom inst budget node = true →
+      ViewTreeBound dom node views → SuccinctTreeOutcome arith dom inst node views
+  | 0, _, _, h, _ => False.elim (Bool.false_ne_true h)
+  | _ + 1, .leaf p fs, .leaf v, h, hB =>
+    succinct_aggregation_knowledge_soundness arith dom inst law p fs v
+      (Bool.and_eq_true_iff.mp h).2 hB
+  | _ + 1, .leaf _ _, .branch _ _ _, _, hB => False.elim hB
+  | _ + 1, .branch _ _ _ _, .leaf _, _, hB => False.elim hB
+  | budget + 1, .branch p fs left right, .branch v vl vr, h, hB =>
+    have hU := succinct_merge_tree_children_sound arith dom inst budget p fs left right h
+    (succinct_aggregation_knowledge_soundness arith dom inst law p fs v hU.2.2.2.2.2 hB.1,
+      succinct_merge_tree_knowledge_soundness arith dom inst law budget left vl hU.1 hB.2.1,
+      succinct_merge_tree_knowledge_soundness arith dom inst law budget right vr hU.2.1 hB.2.2)
+
+/-! ## 12. Total counted soundness error -/
+
+private theorem length_flatMap_scaled_le {α β : Type} (b : α → Bool) (K U V : Nat)
+    (f : α → List β) :
+    ∀ (l : List α), (∀ c ∈ l, (f c).length * K ≤ if b c = true then U else V) →
+      (l.flatMap f).length * K ≤ (l.filter b).length * U + l.length * V
+  | [], _ => by
+    show 0 * K ≤ _
+    rw [Nat.zero_mul]
+    exact Nat.zero_le _
+  | c :: l, h => by
+    have ih := length_flatMap_scaled_le b K U V f l (fun x hx => h x (List.mem_cons_of_mem _ hx))
+    have hc := h c (List.mem_cons_self ..)
+    rw [List.flatMap_cons, List.length_append, Nat.add_mul, List.length_cons,
+      Nat.add_mul l.length 1 V, Nat.one_mul]
+    cases hb : b c
+    · rw [hb] at hc
+      have hc' : (f c).length * K ≤ V := hc
+      simp only [List.filter, hb]
+      omega
+    · rw [hb] at hc
+      have hc' : (f c).length * K ≤ U := hc
+      simp only [List.filter, hb, List.length_cons]
+      rw [Nat.add_mul, Nat.one_mul]
+      omega
+
+/-- Pairs (challenge vector, tuple of distinct query positions) on which a round event occurs
+    or every query misses the bad set determined by the challenge vector. -/
+def badTranscriptPairs {α β : Type} (S : List α) (n : Nat) (E : List α → α → Bool)
+    (dom : List β) (q : Nat) (bad : List α → β → Bool) : List (List α × List β) :=
+  (challengeVectors S n).flatMap (fun cs =>
+    ((distinctTuples q dom).filter
+      (fun t => anyRoundEvent E cs || t.all (fun x => !bad cs x))).map (fun t => (cs, t)))
+
+/-- **Joint count.** Round events bounded per round by `d`, and a bad set of relative size at
+    least `dn / dd` whenever no round event occurs: the bad (challenge vector, query tuple)
+    pairs are at most the sum of the challenge term and the query term. -/
+theorem transcript_bad_pairs_le {α β : Type} (S : List α) (n : Nat)
+    (E : List α → α → Bool) (d : Nat → Nat)
+    (hE : ∀ pre, (S.filter (E pre)).length ≤ d pre.length)
+    (dom : List β) (q dn dd : Nat) (bad : List α → β → Bool)
+    (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
+      dn * dom.length ≤ dd * countGood (bad cs) dom) :
+    (badTranscriptPairs S n E dom q bad).length * dd ^ q ≤
+      (roundBoundSum d n * S.length ^ (n - 1) * dd ^ q + S.length ^ n * (dd - dn) ^ q) *
+        (distinctTuples q dom).length := by
+  have hEach : ∀ cs ∈ challengeVectors S n,
+      (((distinctTuples q dom).filter
+        (fun t => anyRoundEvent E cs || t.all (fun x => !bad cs x))).map
+          (fun t => (cs, t))).length * dd ^ q ≤
+        if anyRoundEvent E cs = true then (distinctTuples q dom).length * dd ^ q
+        else (dd - dn) ^ q * (distinctTuples q dom).length := by
+    intro cs hcs
+    rw [List.length_map]
+    cases hEv : anyRoundEvent E cs
+    · show ((distinctTuples q dom).filter
+        (fun t => t.all (fun x => !bad cs x))).length * dd ^ q ≤
+          (dd - dn) ^ q * (distinctTuples q dom).length
+      exact basefold_query_miss_bound (bad cs) dom q dn dd (hfar cs hcs hEv)
+    · exact Nat.mul_le_mul_right _ (filter_length_le_self _ _)
+  have hSplit := length_flatMap_scaled_le (anyRoundEvent E) (dd ^ q)
+    ((distinctTuples q dom).length * dd ^ q) ((dd - dn) ^ q * (distinctTuples q dom).length)
+    (fun cs => ((distinctTuples q dom).filter
+      (fun t => anyRoundEvent E cs || t.all (fun x => !bad cs x))).map (fun t => (cs, t)))
+    (challengeVectors S n) hEach
+  have hCnt := anyRoundEvent_count_le S n E d hE
+  rw [challengeVectors_length] at hSplit
+  refine Nat.le_trans hSplit ?_
+  rw [Nat.add_mul]
+  apply Nat.add_le_add
+  · have h1 := Nat.mul_le_mul_right ((distinctTuples q dom).length * dd ^ q) hCnt
+    have e : roundBoundSum d n * S.length ^ (n - 1) * ((distinctTuples q dom).length * dd ^ q) =
+        roundBoundSum d n * S.length ^ (n - 1) * dd ^ q * (distinctTuples q dom).length := by
+      simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+    rw [e] at h1
+    exact h1
+  · exact Nat.le_of_eq (Nat.mul_assoc _ _ _).symm
+
+private theorem error_arith (X D A s M K T c : Nat)
+    (h1 : X * K ≤ (D * A * K + s * A * M) * T)
+    (hD : 2 * (D * c) ≤ s) (hM : 2 * (M * c) < K)
+    (hA : 0 < A) (hT : 0 < T) (hs : 0 < s) : X * c < s * A * T := by
+  rcases Nat.lt_or_ge (X * c) (s * A * T) with hlt | hge
+  · exact hlt
+  · exfalso
+    have hP : 0 < s * A * T := Nat.mul_pos (Nat.mul_pos hs hA) hT
+    have e1 : 2 * c * ((D * A * K + s * A * M) * T) =
+        2 * (D * c) * (A * K * T) + 2 * (M * c) * (s * A * T) := by
+      rw [Nat.add_mul, Nat.mul_add]
+      simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+    have h1' : 2 * c * (X * K) ≤ 2 * (D * c) * (A * K * T) + 2 * (M * c) * (s * A * T) := by
+      rw [← e1]
+      exact Nat.mul_le_mul_left _ h1
+    have h2 : 2 * (D * c) * (A * K * T) ≤ K * (s * A * T) := by
+      have h := Nat.mul_le_mul_right (A * K * T) hD
+      have e : s * (A * K * T) = K * (s * A * T) := by
+        simp only [Nat.mul_comm, Nat.mul_left_comm]
+      rw [e] at h
+      exact h
+    have h3 : 2 * (M * c) * (s * A * T) < K * (s * A * T) := Nat.mul_lt_mul_of_pos_right hM hP
+    have h4 : 2 * (K * (s * A * T)) ≤ 2 * c * (X * K) := by
+      have h := Nat.mul_le_mul_left (2 * K) hge
+      have e : 2 * K * (X * c) = 2 * c * (X * K) := by
+        simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+      rw [e, Nat.mul_assoc] at h
+      exact h
+    have h5 := Nat.lt_of_le_of_lt (Nat.le_trans h4 h1') (Nat.add_lt_add_of_le_of_lt h2 h3)
+    rw [Nat.two_mul] at h5
+    exact Nat.lt_irrefl _ h5
+
+/-- Budget of per-round challenge events for the production schedule: 16 row-sumcheck rounds of
+    degree 8, then 17 folding rounds each carrying a degree-2 sumcheck polynomial and one tracked
+    fold event per position of the largest evaluation domain (`2^28`). -/
+def productionRoundEventBudget : Nat :=
+  productionAggParams.maxRowRounds * productionAggParams.rowSumcheckDegree +
+  productionAggParams.maxFoldRounds *
+    (productionAggParams.pcsSumcheckDegree + productionAggParams.maxDomain)
+
+theorem productionRoundEventBudget_eq : productionRoundEventBudget = 16 * 8 + 17 * (2 + 2 ^ 28) := by
+  decide
+
+/-- Sumcheck-only budget: 16 row-sumcheck rounds of degree 8 and 17 PCS-sumcheck rounds of
+    degree 2, with no tracked fold event. -/
+def productionSumcheckEventBudget : Nat :=
+  productionAggParams.maxRowRounds * productionAggParams.rowSumcheckDegree +
+  productionAggParams.maxFoldRounds * productionAggParams.pcsSumcheckDegree
+
+private theorem error_bound_general {α β : Type} (S : List α) (n : Nat)
+    (hn : 0 < n) (E : List α → α → Bool) (d : Nat → Nat)
+    (hE : ∀ pre, (S.filter (E pre)).length ≤ d pre.length)
+    (budget c : Nat) (hBudget : roundBoundSum d n ≤ budget)
+    (hC : 2 * (budget * c) ≤ goldilocksPrime ^ 2)
+    (hM : 2 * ((2 * productionAggParams.rsBlowup - (productionAggParams.rsBlowup - 1)) ^
+      productionAggParams.numQueries * c) <
+      (2 * productionAggParams.rsBlowup) ^ productionAggParams.numQueries)
+    (hField : productionAggParams.fieldSize ≤ S.length)
+    (dom : List β) (hdom : productionAggParams.numQueries ≤ dom.length)
+    (bad : List α → β → Bool)
+    (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
+      (productionAggParams.rsBlowup - 1) * dom.length ≤
+        2 * productionAggParams.rsBlowup * countGood (bad cs) dom) :
+    (badTranscriptPairs S n E dom productionAggParams.numQueries bad).length * c <
+      S.length ^ n * (distinctTuples productionAggParams.numQueries dom).length := by
+  have hJoint := transcript_bad_pairs_le S n E d hE dom productionAggParams.numQueries
+    (productionAggParams.rsBlowup - 1) (2 * productionAggParams.rsBlowup) bad hfar
+  have hT : 0 < (distinctTuples productionAggParams.numQueries dom).length := by
+    rw [distinctTuples_length]
+    exact fallingFactorial_pos _ _ hdom
+  have hField' : goldilocksPrime ^ 2 ≤ S.length := hField
+  have hs : 0 < S.length := Nat.lt_of_lt_of_le (by decide : 0 < goldilocksPrime ^ 2) hField'
+  have hD : 2 * (roundBoundSum d n * c) ≤ S.length :=
+    Nat.le_trans (Nat.mul_le_mul_left 2 (Nat.mul_le_mul_right c hBudget))
+      (Nat.le_trans hC hField')
+  cases n with
+  | zero => exact absurd hn (Nat.lt_irrefl 0)
+  | succ k =>
+    have hpow : S.length ^ (k + 1) = S.length * S.length ^ k := by
+      rw [Nat.pow_succ, Nat.mul_comm]
+    rw [Nat.add_sub_cancel, hpow] at hJoint
+    rw [hpow]
+    exact error_arith _ _ _ _ _ _ _ _ hJoint hD hM (Nat.pow_pos hs) hT hs
+
+/-- **Total counted soundness error with the production parameters.** Over a challenge set at
+    least as large as `GoldilocksExt2`, with per-round challenge events within
+    `productionRoundEventBudget`, 160 distinct queries, and a bad query set of relative size at
+    least `15/32` whenever no challenge event occurs, fewer than a `2^-93` fraction of all
+    (challenge vector, query tuple) pairs are bad: the challenge term is below `2^-94` and the
+    query term below `2^-145`.
+
+    This counts the sumcheck hits, the tracked fold hits and the query misses. The density
+    hypothesis `hfar` (distance preservation of folding) is an assumption here, and the
+    `FoldProximityHit` branch of the extractor is not covered by this count. -/
+theorem succinct_aggregation_soundness_error_bound {α β : Type} (S : List α) (n : Nat)
+    (hn : 0 < n) (E : List α → α → Bool) (d : Nat → Nat)
+    (hE : ∀ pre, (S.filter (E pre)).length ≤ d pre.length)
+    (hBudget : roundBoundSum d n ≤ productionRoundEventBudget)
+    (hField : productionAggParams.fieldSize ≤ S.length)
+    (dom : List β) (hdom : productionAggParams.numQueries ≤ dom.length)
+    (bad : List α → β → Bool)
+    (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
+      (productionAggParams.rsBlowup - 1) * dom.length ≤
+        2 * productionAggParams.rsBlowup * countGood (bad cs) dom) :
+    (badTranscriptPairs S n E dom productionAggParams.numQueries bad).length * 2 ^ 93 <
+      S.length ^ n * (distinctTuples productionAggParams.numQueries dom).length :=
+  error_bound_general S n hn E d hE productionRoundEventBudget (2 ^ 93) hBudget (by decide)
+    (by decide) hField dom hdom bad hfar
+
+/-- The same count with sumcheck hits only (`productionSumcheckEventBudget`, no tracked fold
+    event): the bad fraction is below `2^-119`. -/
+theorem succinct_aggregation_sumcheck_query_error_bound {α β : Type} (S : List α) (n : Nat)
+    (hn : 0 < n) (E : List α → α → Bool) (d : Nat → Nat)
+    (hE : ∀ pre, (S.filter (E pre)).length ≤ d pre.length)
+    (hBudget : roundBoundSum d n ≤ productionSumcheckEventBudget)
+    (hField : productionAggParams.fieldSize ≤ S.length)
+    (dom : List β) (hdom : productionAggParams.numQueries ≤ dom.length)
+    (bad : List α → β → Bool)
+    (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
+      (productionAggParams.rsBlowup - 1) * dom.length ≤
+        2 * productionAggParams.rsBlowup * countGood (bad cs) dom) :
+    (badTranscriptPairs S n E dom productionAggParams.numQueries bad).length * 2 ^ 119 <
+      S.length ^ n * (distinctTuples productionAggParams.numQueries dom).length :=
+  error_bound_general S n hn E d hE productionSumcheckEventBudget (2 ^ 119) hBudget (by decide)
+    (by decide) hField dom hdom bad hfar
+
+/-! ## 13. Inhabitedness witnesses and negative regressions -/
+
+/-- The query-bound hypotheses are satisfiable, tightly: 160 positions of which exactly 75 are
+    bad is relative distance exactly `15/32`. -/
+theorem basefold_query_hypotheses_satisfiable :
+    ∃ (dom : List Nat) (bad : Nat → Bool),
+      productionAggParams.numQueries ≤ dom.length ∧
+      (productionAggParams.rsBlowup - 1) * dom.length ≤
+        2 * productionAggParams.rsBlowup * countGood bad dom ∧
+      countGood bad dom < dom.length :=
+  ⟨List.range 160, fun i => decide (i < 75), by decide +kernel, by decide +kernel,
+    by decide +kernel⟩
+
+/-- The hypotheses of the total error bound are jointly satisfiable. -/
+theorem succinct_error_bound_hypotheses_satisfiable :
+    ∃ (S : List Unit) (n : Nat) (E : List Unit → Unit → Bool) (d : Nat → Nat)
+      (dom : List Nat) (bad : List Unit → Nat → Bool),
+      0 < n ∧ (∀ pre, (S.filter (E pre)).length ≤ d pre.length) ∧
+      roundBoundSum d n ≤ productionRoundEventBudget ∧
+      productionAggParams.fieldSize ≤ S.length ∧
+      productionAggParams.numQueries ≤ dom.length ∧
+      (∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
+        (productionAggParams.rsBlowup - 1) * dom.length ≤
+          2 * productionAggParams.rsBlowup * countGood (bad cs) dom) := by
+  refine ⟨List.replicate (goldilocksPrime ^ 2) (), 1, fun _ _ => false, fun _ => 0,
+    List.range 160, fun _ i => decide (i < 75), Nat.one_pos, ?_, by decide, ?_, by decide +kernel,
+    fun _ _ _ => (by decide +kernel :
+      (productionAggParams.rsBlowup - 1) * (List.range 160).length ≤
+        2 * productionAggParams.rsBlowup *
+          countGood (fun i => decide (i < 75)) (List.range 160))⟩
+  · intro pre
+    rw [filter_const_false]
+    exact Nat.le_refl 0
+  · rw [List.length_replicate]
+    exact Nat.le_refl _
+
+theorem foldDuetExt2_zero_zero (invTwoY0 invTwo : Goldilocks) (r : GoldilocksExt2) :
+    foldDuetExt2 CommRingOps.zero CommRingOps.zero invTwoY0 invTwo r = CommRingOps.zero := by
+  unfold foldDuetExt2
+  simp only [LawfulCommRing.add_zero, LawfulCommRing.sub_self, LawfulCommRing.zero_mul,
+    LawfulCommRing.mul_zero]
+
+private def toyDomain (invTwo twY : Goldilocks) : FoldDomain :=
+  { groups0 := 1, numQueries := 160, invTwo := invTwo, invTwoY0 := fun _ _ => twY, sampleFuel := 1 }
+
+private def toyPoly (invTwo twY : Goldilocks) (t : List GoldilocksExt2) : List GoldilocksExt2 :=
+  [CommRingOps.mul (CommRingOps.add (t.getD 0 CommRingOps.zero) (t.getD 1 CommRingOps.zero))
+      (GoldilocksExt2.ofBase invTwo),
+   CommRingOps.mul (CommRingOps.sub (t.getD 0 CommRingOps.zero) (t.getD 1 CommRingOps.zero))
+      (GoldilocksExt2.ofBase twY)]
+
+private def toyClaim (invTwo twY : Goldilocks) (t : List GoldilocksExt2) : GoldilocksExt2 :=
+  CommRingOps.add (RoundPoly.evalCoeffs (toyPoly invTwo twY t) GoldilocksExt2.zero)
+    (RoundPoly.evalCoeffs (toyPoly invTwo twY t) GoldilocksExt2.one)
+
+/-- Toy arithmetization over a two-point domain (one coset duet, one fold): the committed word
+    encodes the affine polynomial `W`; the constraint is `W(0) + W(1) = 0`, and the committed
+    word decodes to `sigA` exactly when the constraint holds. -/
+private def toyArith (invTwo twY : Goldilocks) (sigA sigB : PqHashSig) : RowArithmetization :=
+  { decodeSigs := fun t => [if toyClaim invTwo twY t = GoldilocksExt2.zero then sigA else sigB]
+    honestClaim := toyClaim invTwo twY
+    honestRound := fun t _ => toyPoly invTwo twY t
+    terminal := fun fw _ => fw.getD 0 CommRingOps.zero
+    isRound0Codeword := fun _ => true
+    isFinalCodeword := fun _ => true }
+
+private def toyInst (suite : TweakableHashSuite) (params : PqHashParams) (msg : List UInt8)
+    (pk : PqPublicKey) : AggPublicInstance :=
+  { suite := suite, params := params, message := msg, committee := [pk], signingModeDigest := [] }
+
+private theorem toyArith_lawful (invTwo twY : Goldilocks) (suite : TweakableHashSuite)
+    (params : PqHashParams) (msg : List UInt8) (pk : PqPublicKey) (sigA sigB : PqHashSig)
+    (hA : verifyPqHashSig suite params pk msg sigA = true) :
+    (toyArith invTwo twY sigA sigB).Lawful (toyDomain invTwo twY) (toyInst suite params msg pk) where
+  complete := by
+    intro tables challenges finalWord _ hAll
+    have h0 : tableTrajectoryOk (toyDomain invTwo twY) finalWord 0 1 0 none tables challenges =
+        true := hAll 0 Nat.one_pos
+    cases tables with
+    | nil => cases challenges <;> exact absurd h0 Bool.false_ne_true
+    | cons w ws =>
+      cases challenges with
+      | nil => exact absurd h0 Bool.false_ne_true
+      | cons α αs =>
+        cases ws with
+        | cons w2 ws2 => cases αs <;> exact absurd h0 Bool.false_ne_true
+        | nil =>
+          cases αs with
+          | cons α2 αs2 => exact absurd h0 Bool.false_ne_true
+          | nil =>
+            have h0' : (decide (0 < 1) &&
+                expectedSlotOk none (0 / 1) (w.getD 0 CommRingOps.zero) (w.getD 1 CommRingOps.zero) &&
+                finalValueOk finalWord 0 (some (foldDuetExt2 (w.getD 0 CommRingOps.zero)
+                  (w.getD 1 CommRingOps.zero) twY invTwo α))) = true := h0
+            have hfw : finalWord[0]? = some (foldDuetExt2 (w.getD 0 CommRingOps.zero)
+                (w.getD 1 CommRingOps.zero) twY invTwo α) :=
+              of_decide_eq_true (Bool.and_eq_true_iff.mp h0').2
+            have h3 : RoundPoly.evalCoeffs (toyPoly invTwo twY w) α =
+                finalWord.getD 0 CommRingOps.zero := by
+              rw [List.getD_eq_getElem?_getD, hfw, Option.getD_some]
+              unfold toyPoly
+              rw [evalCoeffs_pair]
+              rfl
+            show (decide ((toyPoly invTwo twY w).length ≤ 9) &&
+              (CommRingOps.add (RoundPoly.evalCoeffs (toyPoly invTwo twY w) GoldilocksExt2.zero)
+                (RoundPoly.evalCoeffs (toyPoly invTwo twY w) GoldilocksExt2.one) ==
+                toyClaim invTwo twY w) &&
+              (RoundPoly.evalCoeffs (toyPoly invTwo twY w) α ==
+                finalWord.getD 0 CommRingOps.zero)) = true
+            exact Bool.and_eq_true_iff.mpr ⟨Bool.and_eq_true_iff.mpr ⟨rfl, beq_iff_eq.mpr rfl⟩,
+              beq_iff_eq.mpr h3⟩
+  sound := by
+    intro table0 bitmap hlen hfalse hz
+    have hz' : toyClaim invTwo twY table0 = GoldilocksExt2.zero := hz
+    have hdec : (toyArith invTwo twY sigA sigB).decodeSigs table0 = [sigA] := by
+      show [if toyClaim invTwo twY table0 = GoldilocksExt2.zero then sigA else sigB] = [sigA]
+      simp only [hz', ↓reduceIte]
+    rw [hdec] at hfalse
+    have hlen' : bitmap.length = 1 := hlen
+    cases bitmap with
+    | nil => exact absurd hlen' Nat.zero_ne_one
+    | cons b bs =>
+      cases bs with
+      | cons b2 bs2 => exact Nat.succ_ne_zero _ (Nat.succ.inj hlen')
+      | nil =>
+        have hfalse' : ((if b = true then verifyPqHashSig suite params pk msg sigA else true) &&
+            true) = false := hfalse
+        rw [hA] at hfalse'
+        cases b <;> cases hfalse'
+
+private def toyRoot0 : List UInt8 :=
+  pcsMerkleHash (duetLeafFrame 0 0 CommRingOps.zero CommRingOps.zero)
+
+private def toyAggPre (suite : TweakableHashSuite) (params : PqHashParams) : AggregatedSignature :=
+  { suite := suite, params := params, bitmap := [true], signerCount := 1,
+    traceCommitment := toyRoot0, claimedSum := GoldilocksExt2.zero,
+    roundPolys := [[GoldilocksExt2.zero]], challenges := [], terminalEval := CommRingOps.zero }
+
+private def toyFs (inst : AggPublicInstance) : List UInt8 :=
+  aggregateInstanceFrame inst (toyAggPre inst.suite inst.params)
+
+private def toyOpening : FoldLayerOpening :=
+  { v0 := CommRingOps.zero, v1 := CommRingOps.zero, path := [] }
+
+private def toyQuery : QueryOpening := { index := 0, layers := [toyOpening] }
+
+private def toyAgg (inst : AggPublicInstance) : AggregatedSignature :=
+  { suite := inst.suite, params := inst.params, bitmap := [true], signerCount := 1,
+    traceCommitment := toyRoot0, claimedSum := GoldilocksExt2.zero,
+    roundPolys := [[GoldilocksExt2.zero]],
+    challenges := deriveInterleavedChallenges (toyFs inst) [toyRoot0] [[GoldilocksExt2.zero]],
+    terminalEval := CommRingOps.zero }
+
+private def toyProof (inst : AggPublicInstance) : SuccinctAggregateProof :=
+  { agg := toyAgg inst, layerRoots := [], finalWord := [CommRingOps.zero], queries := [toyQuery] }
+
+private def toyView : SuccinctExtractionView :=
+  { tables := [[CommRingOps.zero, CommRingOps.zero]], authPath := fun _ _ => [] }
+
+private theorem toyProof_accepts (invTwo twY : Goldilocks) (suite : TweakableHashSuite)
+    (params : PqHashParams) (msg : List UInt8) (pk : PqPublicKey) (sigA sigB : PqHashSig) :
+    verifySuccinctAggregate (toyArith invTwo twY sigA sigB) (toyDomain invTwo twY)
+      (toyInst suite params msg pk) (toyProof (toyInst suite params msg pk))
+      (toyFs (toyInst suite params msg pk)) = true := by
+  obtain ⟨r, hr⟩ : ∃ r, deriveInterleavedChallenges (toyFs (toyInst suite params msg pk))
+      [toyRoot0] [[GoldilocksExt2.zero]] = [r] := ⟨_, rfl⟩
+  have hChain : verifySumcheckChain GoldilocksExt2.zero [[GoldilocksExt2.zero]] [r]
+      GoldilocksExt2.zero = true := verifySumcheckChain_zeroPolys [r]
+  have c4 : verifyAggregateAlgebra [pk] (toyProof (toyInst suite params msg pk)).agg = true := by
+    show verifySumcheckChain GoldilocksExt2.zero [[GoldilocksExt2.zero]]
+      (deriveInterleavedChallenges (toyFs (toyInst suite params msg pk)) [toyRoot0]
+        [[GoldilocksExt2.zero]]) GoldilocksExt2.zero = true
+    rw [hr]
+    exact hChain
+  have c7 : [0] = deriveQueryIndices (toyDomain invTwo twY)
+      (succinctQuerySeed (toyFs (toyInst suite params msg pk))
+        (toyProof (toyInst suite params msg pk))) := by
+    show [0] = [squeezeQueryIndex _ 1 0]
+    unfold squeezeQueryIndex
+    rw [Nat.mod_one]
+  have hFinal : finalValueOk [CommRingOps.zero] 0
+      (some (foldDuetExt2 CommRingOps.zero CommRingOps.zero twY invTwo r)) = true := by
+    rw [foldDuetExt2_zero_zero]
+    exact decide_eq_true rfl
+  have hTraj : verifyTrajectory (toyDomain invTwo twY) [CommRingOps.zero] 0 1 0 none
+      [toyRoot0] [r]
+      [toyOpening] = true := by
+    show (decide (0 < 1) &&
+      expectedSlotOk none (0 / 1) CommRingOps.zero CommRingOps.zero &&
+      decide (([] : List (List UInt8)).length = merkleDepth 1) &&
+      decide (merklePathRoot pcsMerkleHash
+        (pcsMerkleHash (duetLeafFrame 0 0 CommRingOps.zero CommRingOps.zero)) 0 [] = toyRoot0) &&
+      finalValueOk [CommRingOps.zero] 0
+        (some (foldDuetExt2 CommRingOps.zero CommRingOps.zero twY invTwo r))) = true
+    exact Bool.and_eq_true_iff.mpr ⟨Bool.and_eq_true_iff.mpr ⟨Bool.and_eq_true_iff.mpr
+      ⟨Bool.and_eq_true_iff.mpr ⟨decide_eq_true Nat.one_pos, rfl⟩, decide_eq_true rfl⟩,
+      decide_eq_true rfl⟩, hFinal⟩
+  have c10 : (toyProof (toyInst suite params msg pk)).queries.all (fun q =>
+      decide (q.index < (toyDomain invTwo twY).groups0) &&
+      verifyTrajectory (toyDomain invTwo twY) (toyProof (toyInst suite params msg pk)).finalWord 0
+        (toyDomain invTwo twY).groups0 q.index none
+        (succinctRoots (toyProof (toyInst suite params msg pk)))
+        (toyProof (toyInst suite params msg pk)).agg.challenges q.layers) = true := by
+    show (decide (0 < 1) &&
+      verifyTrajectory (toyDomain invTwo twY) [CommRingOps.zero] 0 1 0 none [toyRoot0]
+        (deriveInterleavedChallenges (toyFs (toyInst suite params msg pk)) [toyRoot0]
+          [[GoldilocksExt2.zero]])
+        [toyOpening] && true) = true
+    rw [hr, hTraj]
+    rfl
+  have mk : ∀ {a b : Bool}, a = true → b = true → (a && b) = true :=
+    fun ha hb => Bool.and_eq_true_iff.mpr ⟨ha, hb⟩
+  exact mk (mk (mk (mk (mk (mk (mk (mk (mk (decide_eq_true rfl) (decide_eq_true rfl))
+    (decide_eq_true rfl)) c4) (decide_eq_true rfl)) rfl) (decide_eq_true c7)) rfl)
+    (decide_eq_true rfl)) c10
+
+private theorem toyView_bound (inst : AggPublicInstance) (invTwo twY : Goldilocks) :
+    LayersBound toyView.authPath 0 (toyDomain invTwo twY).groups0 toyView.tables
+      (succinctRoots (toyProof inst)) := by
+  refine ⟨fun g hg => ?_, trivial⟩
+  have hg' : g < 1 := hg
+  cases g with
+  | zero => exact ⟨rfl, rfl⟩
+  | succ k => exact absurd (Nat.lt_of_succ_lt_succ hg') (Nat.not_lt_zero k)
+
+/-- Inhabitedness of the knowledge-soundness hypotheses: given one verifying signature there are a
+    lawful arithmetization, an accepting succinct certificate and a bound extraction view. -/
+theorem succinct_knowledge_soundness_hypotheses_satisfiable (suite : TweakableHashSuite)
+    (params : PqHashParams) (msg : List UInt8) (pk : PqPublicKey) (sigA : PqHashSig)
+    (hA : verifyPqHashSig suite params pk msg sigA = true) :
+    ∃ (arith : RowArithmetization) (dom : FoldDomain) (inst : AggPublicInstance)
+      (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView),
+      arith.Lawful dom inst ∧
+      verifySuccinctAggregate arith dom inst proof fs = true ∧
+      LayersBound view.authPath 0 dom.groups0 view.tables (succinctRoots proof) ∧
+      verifySuccinctMergeTree arith dom inst 1 (.leaf proof fs) = true ∧
+      ViewTreeBound dom (.leaf proof fs) (.leaf view) :=
+  ⟨toyArith (Goldilocks.ofNat 3) (Goldilocks.ofNat 5) sigA sigA,
+    toyDomain (Goldilocks.ofNat 3) (Goldilocks.ofNat 5), toyInst suite params msg pk,
+    toyProof (toyInst suite params msg pk), toyFs (toyInst suite params msg pk), toyView,
+    toyArith_lawful _ _ suite params msg pk sigA sigA hA,
+    toyProof_accepts _ _ suite params msg pk sigA sigA,
+    toyView_bound _ _ _,
+    Bool.and_eq_true_iff.mpr ⟨rfl, toyProof_accepts _ _ suite params msg pk sigA sigA⟩,
+    toyView_bound _ _ _⟩
+
+/-- Regression: a round polynomial with ten or more coefficients (degree nine) is rejected by the
+    succinct verifier. -/
+theorem succinct_degree9_round_rejected (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (p : List GoldilocksExt2) (ps : List (List GoldilocksExt2))
+    (hPolys : proof.agg.roundPolys = p :: ps) (hDeg : 9 < p.length) :
+    verifySuccinctAggregate arith dom inst proof fs = false := by
+  apply Bool.eq_false_iff.mpr
+  intro h
+  have hAlg := verifyAggregateAlgebra_facts inst.committee proof.agg
+    (succinct_acceptance_facts arith dom inst proof fs h).2.2.1
+  have hChain := hAlg.2.2
+  rw [hPolys] at hChain
+  cases hc : proof.agg.challenges with
+  | nil =>
+    rw [hc] at hChain
+    exact Bool.false_ne_true hChain
+  | cons r rs =>
+    rw [hc, sumcheck_degree9_rejected _ _ p ps r rs hDeg] at hChain
+    exact Bool.false_ne_true hChain
+
+/-- Regression: a wrong folded value against the final word is rejected. -/
+theorem trajectory_wrong_final_fold_rejected (dom : FoldDomain) (finalWord : List GoldilocksExt2)
+    (layer groups idx : Nat) (expected : Option GoldilocksExt2) (root : List UInt8)
+    (α : GoldilocksExt2) (op : FoldLayerOpening)
+    (hWrong : finalWord[idx % groups]? ≠
+      some (foldDuetExt2 op.v0 op.v1 (dom.invTwoY0 layer (idx % groups)) dom.invTwo α)) :
+    verifyTrajectory dom finalWord layer groups idx expected [root] [α] [op] = false := by
+  show (decide (0 < groups) && expectedSlotOk expected (idx / groups) op.v0 op.v1 &&
+    decide (op.path.length = merkleDepth groups) &&
+    decide (merklePathRoot pcsMerkleHash
+      (pcsMerkleHash (duetLeafFrame layer (idx % groups) op.v0 op.v1)) (idx % groups) op.path =
+        root) &&
+    decide (finalWord[idx % groups]? =
+      some (foldDuetExt2 op.v0 op.v1 (dom.invTwoY0 layer (idx % groups)) dom.invTwo α))) = false
+  rw [decide_eq_false hWrong]
+  exact Bool.and_false _
+
+/-- Regression: an opened duet whose slot does not carry the value folded from the previous
+    layer is rejected. -/
+theorem trajectory_wrong_intermediate_fold_rejected (dom : FoldDomain)
+    (finalWord : List GoldilocksExt2) (layer groups idx : Nat) (e : GoldilocksExt2)
+    (root : List UInt8) (roots : List (List UInt8)) (α : GoldilocksExt2)
+    (αs : List GoldilocksExt2) (op : FoldLayerOpening) (ops : List FoldLayerOpening)
+    (hWrong : (if idx / groups = 0 then op.v0 else op.v1) ≠ e) :
+    verifyTrajectory dom finalWord layer groups idx (some e) (root :: roots) (α :: αs)
+      (op :: ops) = false := by
+  show (decide (0 < groups) &&
+    decide ((if idx / groups = 0 then op.v0 else op.v1) = e) &&
+    decide (op.path.length = merkleDepth groups) &&
+    decide (merklePathRoot pcsMerkleHash
+      (pcsMerkleHash (duetLeafFrame layer (idx % groups) op.v0 op.v1)) (idx % groups) op.path =
+        root) &&
+    verifyTrajectory dom finalWord (layer + 1) (groups / 2) (idx % groups)
+      (some (foldDuetExt2 op.v0 op.v1 (dom.invTwoY0 layer (idx % groups)) dom.invTwo α))
+      roots αs ops) = false
+  rw [decide_eq_false hWrong, Bool.and_false, Bool.false_and, Bool.false_and, Bool.false_and]
+
+/-- Regression: a certificate that repeats a query position is rejected. -/
+theorem succinct_duplicate_query_rejected (arith : RowArithmetization) (dom : FoldDomain)
+    (inst : AggPublicInstance) (proof : SuccinctAggregateProof) (fs : List UInt8)
+    (hDup : ¬ (proof.queries.map (fun q => q.index)).Nodup) :
+    verifySuccinctAggregate arith dom inst proof fs = false :=
+  Bool.eq_false_iff.mpr
+    (fun h => hDup (succinct_accepted_queries_distinct arith dom inst proof fs h).1)
+
+/-- Regression: a concrete repeated position fails the distinctness check. -/
+theorem strictlyIncreasing_rejects_repeat (i : Nat) (rest : List Nat) :
+    strictlyIncreasing (i :: i :: rest) = false := by
+  show (decide (i < i) && strictlyIncreasing (i :: rest)) = false
+  rw [decide_eq_false (Nat.lt_irrefl i)]
+  rfl
+
+end Qsag
+end
