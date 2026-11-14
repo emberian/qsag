@@ -6,64 +6,87 @@ Self-contained Lean 4.35 end-to-end active threshold security proof for NIST `FI
 over the multi-round rushing-adversary execution engine `Qsag.InteractiveUcEngine`
 (`0` proof gaps, `0` custom axioms, `0 Classical.choice`, `0` cheat hypotheses):
 
-1. **Three-Round Opening-Layer Protocol (`rssSlhInteractiveProtocol`) & `sk`-Free UC Simulator (`Sim_RssSlh`)**:
-   - **Round 1**: Honest parties consume monotonic `maskSessionCursor` and broadcast `SHAKE256`
-     hedged-nonce commitments over injectively length-framed `encodeMultiFrame`/`leb128` preimages
-     (`round1NonceCommit_binding_or_collision`, `slhPkDigest_binding_or_collision`,
+1. **Three-Round Protocol (`rssSlhInteractiveProtocol`) & `sk`-Free UC Simulator (`Sim_RssSlh`)**:
+   - **Round 1 (coin commitments)**: every party commits with `SHAKE256` to a 128-bit coin share
+     under a 64-bit blind, over an injectively length-framed preimage binding the public key, the
+     request (session id, epoch, message, hedge), the monotonic `maskSessionCursor` and the party
+     id (`round1NonceCommit_binding_or_collision`, `slhPkDigest_binding_or_collision`,
      `slhReqDigest_injective_on_epoch_optRand_msg`; `0` `UInt8.ofNat` truncation).
-   - **Round 2**: Honest parties open Round-1 nonces and broadcast 64-way bitsliced Keccak `χ`-row
-     shares (`mpcChiParty0/1/2` / `rssChiLane0/1/2`) masked by fresh session pads `(chiMaskA, chiMaskB)`
-     (plus `t`-of-`n` SPDZ Shamir masked openings via `shamir_rebalanceEquiv`); rushing adversary `A`
-     sees all honest Round-2 `ByteArray`s before transmitting raw `GF(2^128)` (`Tower128`) gate wires.
-   - **Mandatory Pre-Cut Consistency Barrier (`preCutBarrier`)**: Verifies Round-1 commitment openings
-     and the algebraic `BBCGGI19` / `BDOZ` inner-product equation
-     `bbcggiWireAccumulator sentWires gamma == bbcggiWireAccumulator expectedWires gamma` strictly
-     before Round 3; any mismatch aborts with `.activeConsistencyFailed` and irreversibly poisons
-     `WalLatchState` + erases secret key shares.
-   - **Round 3 (`honestRound3` & `finalizeCutOpen`)**: Honest parties evaluate the replicated `FLNW17`
-     gate cross-byte (`evalReplicatedGateCrossByte`), broadcast cut-opening shares
-     (`verifyRssActiveOpenBytes`), assemble and verify the NIST `FIPS 205` signature
-     (`decodeSlhSig` / `slhVerifyInternal`), and atomically commit `WalLatchState` before `SignOk(sigBytes)`.
-   - **Black-Box UC Simulator (`Sim_RssSlh`)**: Receives **only** `pk : SlhPublicKey` and, upon
-     `t`-quorum approval in `IdealTsig`, raw `idealSigBytes : ByteArray` from `IdealTsig` (`0` access
-     to `sk` or secret shares), simulating honest Round-1/2/3 messages from uniform pads and enforcing
-     the identical `preCutBarrier` and `FLNW17` cross-checks.
-2. **4 Crown-Jewel Whole-Protocol Theorems**:
-   - `rss_slh_real_ideal_view_indistinguishable`: Whole-transcript multi-round, multi-session UC
-     indistinguishability (including wire `ByteArray`s and `Abort(reason)` behavior) with concrete
-     rational bound `ratAdd (Q_cuts * deg, 2 ^ 128) advPrf`.
-   - `rss_slh_interactive_euf_cma_reduction`: Constructive `0 Classical.choice` black-box reduction
+   - **Round 2**: honest parties broadcast one 64-way bitsliced Keccak `χ`-row share each
+     (`rssChiLane0/1/2`), masked by fresh session pads `(chiMaskA, chiMaskB)`, and no coin share.
+     The rushing adversary sees these before sending one frame holding its coin opening and its
+     `deg` raw `GF(2^128)` (`Tower128`) gate wires.
+   - **Coin toss and Pre-Cut Consistency Barrier (`sharedCoinTossBarrier`)**: the corrupt opening
+     is checked against its Round-1 commitment, and the `BBCGGI19` / `BDOZ` Horner equation
+     `bbcggiWireAccumulator sentWires gamma == bbcggiWireAccumulator expectedWires gamma` is checked
+     at `gamma = coinA ⊕ coinB ⊕ corruptCoin` strictly before Round 3; any mismatch aborts with
+     `.round1CommitMismatch` / `.activeConsistencyFailed`, poisons `WalLatchState` and erases the
+     secret key shares.
+   - **Round 3 (`honestRound3` & `finalizeCutOpen`)**: honest parties evaluate the signature
+     under the zero-sharing tape expanded from the three pairwise PRG seeds
+     (`expandPairwiseSeedTape`), broadcast cut-opening shares (`verifyRssActiveOpenBytes`) and
+     their coin openings (`honest_coin_openings_open_round1_commitments`), assemble and verify
+     the NIST `FIPS 205` signature (`decodeSlhSig` / `slhVerifyInternal`), and atomically commit
+     `WalLatchState` before `SignOk(sigBytes)`.
+   - **Black-Box UC Simulator (`Sim_RssSlh`)**: receives **only** `pk : SlhPublicKey` and, upon
+     `t`-quorum approval in `IdealTsig`, raw `idealSigBytes : ByteArray` (`0` access to `sk` or
+     secret shares). It runs the coin toss as the honest parties do and simulates the masked
+     messages from uniform pads.
+2. **Whole-Protocol Theorems**:
+   - `rss_slh_real_ideal_view_indistinguishable`: whole-transcript multi-round, multi-session
+     distance (wire `ByteArray`s and `Abort(reason)` included) at most the root-hit probability
+     of the joint coin; that probability is at most `Q_cuts * deg / 2^128` in the game where the
+     honest commitments carry the zero coin, and the theorem carries the difference between the
+     two games as the explicit term `advCoinHide`, next to the tape-generator term `advPrf`.
+   - `rss_slh_interactive_euf_cma_reduction`: constructive `0 Classical.choice` black-box reduction
      turning any rushing threshold adversary forging `(mStar, sigStar)` outside `IdealTsig.approvedMsgs`
      into an explicit witness of `ActiveConsistencySoundnessBreak` OR standalone NIST `FIPS 205` hash
      breaks (`Fips205ForsItsrBreak ∨ WotsChainSmTcrBreak ∨ XmssMerkleTcrBreak ∨ PrfMsgBreak`).
-   - `threshold_slh_output_perfect_quorum_privacy`: Exact statistical distance `0` between any valid
-     2-of-3 RSS or `t`-of-`n` Shamir quorum/sharing and standalone single-signer `slhSignInternal`.
-   - `#tooth` Mutation Refusals: `tooth_skipping_pre_cut_barrier_leaks_key_bit`,
-     `tooth_reusing_session_mask_tape_breaks_simulation`, and
-     `tooth_wal_rollback_enables_stateful_double_sign`.
+   - `threshold_slh_output_perfect_quorum_privacy`: the output of any valid 2-of-3 RSS or
+     `t`-of-`n` Shamir quorum/sharing equals standalone single-signer `slhSignInternal`.
+   - `#tooth` mutation refusals: `tooth_skipping_pre_cut_barrier_leaks_key_bit`,
+     `tooth_reusing_session_mask_tape_breaks_simulation`,
+     `tooth_wal_rollback_enables_stateful_double_sign`,
+     `tooth_corrupt_coin_opening_must_match_commitment`,
+     `tooth_known_challenge_admits_nonzero_deviation`.
 3. **End-to-End Weld (`rss_slh_uc_forgery_to_hash_game`, `rss_slh_fresh_enrollment_euf_cma_bound`)**:
-   composes the two theorems above without an abstract unforgeability premise. On every uniform
-   multi-session tape on which a forger wins against `RealProtocolExec`, either the tape is a counted
-   `GF(2^128)` batch-consistency root hit (`multiSessionBadHit`, at most `Q_s * deg / 2^128` of all
-   tapes) or the real transcript equals the ideal transcript and yields a concrete
-   `Fips205HashGameBreak`. The ideal transcript is shown to depend on the signing key only through
-   the oracle answers of sessions that reached Round 3 (`IdealFunctionalityExec_oracle_congr`).
+   composes the theorems above without an abstract unforgeability premise. On every uniform
+   multi-session tape on which a forger wins against `RealProtocolExec`, either the tape is a
+   root hit of the joint coin (`multiSessionBadHit true`) or the real transcript equals the ideal
+   transcript and yields a concrete `Fips205HashGameBreak`. The forgery bound is
+   `Pr[ideal forgery] + Q_s * deg / 2^128 + advCoinHide`. The ideal transcript depends on the
+   signing key only through the oracle answers of sessions that reached Round 3
+   (`IdealFunctionalityExec_oracle_congr`).
+4. **Horner tag as a tag scheme (`hornerTagScheme`, `rss_active_tag_forgery_count_le`,
+   `rss_active_malicious_threshold_sig_hedged_bound`)**: bounds by `deg / 2^128` the forgery term
+   of `Qsag.ThresholdMpc.active_malicious_threshold_sig_abort_or_exact_hedged_dist`.
 
 Model boundary.
 * The protocol proved here is a three-round shell around the honest pair. In a 2-of-3 replicated
   sharing the two honest parties jointly hold all three shares; `honestRound3` computes the whole
   signature from their views (`rssQuorumSlhSignBytes`) and re-shares it at the cut. The corrupt
   party contributes no share-dependent message to the output.
-* The Round-2 `χ` word is one 64-bit lane computed from the first eight bytes of each share and
-  masked by a pad that is never used again; no later step consumes it.
-* `deriveExpectedGateWires` is a public hash of `(pk, request, cursor, party, nonce, index)`. The
-  pre-cut barrier therefore checks that the corrupt party's wires equal publicly derivable values
-  under a challenge `gammaBits` that stays on the honest tape; it is not the gate-level product
-  proof with a commit-then-open challenge that the production bitsliced engine runs.
-  Parsing requires exactly `deg > 0` field elements and consumes the complete frame.
-* The Round-1 nonce commitment is binding up to a `SHAKE256` collision
-  (`round1NonceCommit_binding_or_collision`), but no security theorem in this file depends on that
-  binding: the challenge is never revealed before Round 2.
+* The gate evaluation inside `rssQuorumSlhSignBytes` runs under an arbitrary zero-sharing tape
+  expanded from the session's pairwise PRG seeds, but its gate messages are not on the modelled
+  wire. The Round-2 honest message is still one 64-bit `χ` lane computed from the first eight
+  bytes of each share and masked by a pad that is never used again; no later step consumes it.
+  A multi-wave `M`-gate stream on the wire is not modelled.
+* `deriveExpectedGateWires` is a public hash of `(pk, request, cursor, party, opening, index)`,
+  not the corrupt party's gate messages recomputed from its share view. The barrier therefore
+  checks that the corrupt party's wires equal publicly derivable values; it is not the gate-level
+  product proof that the production bitsliced engine runs.
+* Coin toss. The challenge is `coinA ⊕ coinB ⊕ corruptCoin` read directly as a `GF(2^128)` point.
+  The production engine commits with `cSHAKE256` to 32-byte shares bound to the wave transcript
+  digest, hashes the XOR of the opened shares, and expands evaluation points from that hash;
+  those hashing steps are random-oracle steps and are not modelled. The corrupt party opens its
+  share in the same Round-2 frame as its wires, before the honest shares are opened in Round 3.
+  The honest Round-1 commitments are deterministic `SHAKE256` values of the honest coin shares;
+  nothing in this file proves that they hide those shares. The counted `deg / 2^128` bound is
+  proved in the game where they carry the zero coin, and the hop to the protocol is the explicit
+  term `advCoinHide` (an adversary that ignores honest Round-1 messages has `advCoinHide = 0`, as
+  used in `tooth_skipping_pre_cut_barrier_leaks_key_bit`).
+* Parsing requires a 24-byte opening and exactly `deg > 0` field elements, and consumes the
+  complete frame.
 * Both execution engines record approval before releasing Round-3 openings, including when
   `finalizeCutOpen` subsequently fails. `slhForgeryWins` retains its transcript-based freshness
   predicate over sessions that reached Round 3.
@@ -1087,7 +1110,8 @@ def rssGateWireDomainTag : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2E, 0x52, 0x53, 0x53, 0x2E, 0x47, 0x41, 0x54,
    0x45, 0x2E, 0x57, 0x49, 0x52, 0x45, 0x2F, 0x76, 0x31]
 
-/-- Canonical injective multi-frame preimage for Round-1 hedged-nonce commitments (`0` `UInt8.ofNat` truncation). -/
+/-- Canonical injective multi-frame preimage for Round-1 coin commitments (`0` `UInt8.ofNat`
+    truncation). `nonceBytes` is the 24-byte opening `coinOpeningBytes coin blind`. -/
 def encodeRound1NoncePreimage (pk : SlhPublicKey) (req : SessionScheduleReq) (cursor : Nat)
     (partyId : Nat) (nonceBytes : List UInt8) : List UInt8 :=
   encodeMultiFrame
@@ -1113,7 +1137,8 @@ theorem encodeRound1NoncePreimage_injective
          leb128_inj hF.2.2.2.2.1, leb128_inj hF.2.1,
          hF.2.2.2.2.2.2.2.2.2.1⟩
 
-/-- Domain-separated Round-1 `SHAKE256` hedged-nonce commitment (`32` bytes) over injective `encodeMultiFrame`. -/
+/-- Domain-separated Round-1 `SHAKE256` coin commitment (`32` bytes) over injective `encodeMultiFrame`:
+    `commit(pk ‖ session id ‖ epoch ‖ cursor ‖ party ‖ message ‖ hedge ‖ coin ‖ blind)`. -/
 def round1NonceCommit (pk : SlhPublicKey) (req : SessionScheduleReq) (cursor : Nat)
     (partyId : Nat) (nonceBytes : List UInt8) : ByteArray :=
   packWireBytes (shake256Xof 32 (encodeRound1NoncePreimage pk req cursor partyId nonceBytes))
@@ -1410,7 +1435,10 @@ structure RssRound1State where
   nonceB : BitVec 64
   deriving DecidableEq, Repr
 
-/-- Intermediate Round-2 state carried into `preCutBarrier`. -/
+/-- Intermediate Round-2 state carried into the barrier. After `honestRound2`, `gammaBits` is the
+    honest pair's joint coin share `coinA ⊕ coinB`; `sharedCoinTossBarrier` XORs in the corrupt
+    opening, so the value `sharedPreCutBarrier` evaluates at is the joint coin of all three
+    parties. `nonceA`, `nonceB` are the honest commitment blinds. -/
 structure RssRound2State where
   cursor       : Nat
   corrR1Commit : ByteArray
@@ -6001,6 +6029,174 @@ theorem tooth_wal_rollback_enables_stateful_double_sign
         (reconstructRssBytes prfSh) pkSeed msg₂ []
   · refine ⟨rec0, (execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4) A cl1 1 (tapes 1)).2.2,
             raw₁, rfl, hOut0, hHon1.1, hHon1.2⟩
+
+/-! ## 7. Commit-Then-Open Coin Toss: Honest Openings, Teeth, and the Horner Tag as a Tag Scheme -/
+
+/-- The honest Round-3 coin openings open the honest Round-1 commitments of
+    `rssSlhInteractiveProtocol`, and the opened coin shares are the two tape shares whose XOR
+    enters the challenge. -/
+theorem honest_coin_openings_open_round1_commitments (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
+    (pk : SlhPublicKey) (corr : List Nat) (req : SessionScheduleReq) (cursor : Nat)
+    (shares : Nat → Option RssPartyKeyShare) (tape : RssSlhSessionTape p.sigBytes) :
+    ((rssSlhInteractiveProtocol p cIdx deg).honestRound1 pk corr req cursor shares tape).1 =
+      (honestCoinOpeningMsgs cIdx tape.gammaBits tape.nonceA tape.coinB tape.nonceB).map
+        (fun m => (m.1, round1NonceCommit pk req cursor m.1 (unpackWireBytes m.2))) ∧
+    (honestCoinOpeningMsgs cIdx tape.gammaBits tape.nonceA tape.coinB tape.nonceB).map
+        (fun m => openingCoin (unpackWireBytes m.2)) = [tape.gammaBits, tape.coinB] := by
+  refine ⟨rfl, ?_⟩
+  unfold honestCoinOpeningMsgs
+  simp only [List.map, unpackWireBytes_packWireBytes, openingCoin_coinOpeningBytes]
+
+/-- **`#tooth`: the corrupt opening is checked against the Round-1 commitment.** A Round-2 frame
+    whose opening does not hash to the commitment the corrupt party sent in Round 1 is rejected
+    by `sharedCoinTossBarrier`, whatever its wires are. Two different openings accepted against
+    one commitment are a `SHAKE256` collision (`round1NonceCommit_binding_or_collision`). -/
+theorem tooth_corrupt_coin_opening_must_match_commitment (cIdx : Fin 3) (deg : Nat)
+    (pk : SlhPublicKey) (req : SessionScheduleReq) (r2St : RssRound2State)
+    (cWire2 : ByteArray) (opening : List UInt8) (wires : List Tower128)
+    (hParse : parseCorruptRound2Wire deg cWire2 = some (opening, wires))
+    (hMismatch : round1NonceCommit pk req r2St.cursor cIdx.val opening ≠ r2St.corrR1Commit) :
+    sharedCoinTossBarrier cIdx deg pk req r2St [(cIdx.val, cWire2)] =
+      .inl (.round1CommitMismatch cIdx.val) := by
+  have hNe : (round1NonceCommit pk req r2St.cursor cIdx.val opening != r2St.corrR1Commit) = true := by
+    unfold bne
+    change (!((round1NonceCommit pk req r2St.cursor cIdx.val opening).data ==
+      r2St.corrR1Commit.data)) = true
+    rw [beq_false_of_ne (fun h => hMismatch (unpackWire_injective (congrArg Array.toList h)))]
+    rfl
+  unfold sharedCoinTossBarrier sharedPreCutBarrier
+  simp only [List.find?, beq_self_eq_true]
+  rw [hParse]
+  dsimp only
+  rw [hNe]
+  rfl
+
+/-- **`#tooth`: a challenge known before the wires are fixed protects nothing.** For every
+    challenge `gamma` the non-zero two-wire deviation `[gamma, 1]` is a root of the batch
+    deviation polynomial (`gamma * (gamma + gamma) = 0` in characteristic 2). The barrier is
+    therefore only as strong as the unpredictability of `coinA ⊕ coinB ⊕ corruptCoin` at the
+    moment the corrupt party sends its Round-2 frame. -/
+theorem tooth_known_challenge_admits_nonzero_deviation (gamma : Tower128) :
+    (∃ d ∈ [gamma, towerOne 7], d ≠ towerZero 7) ∧
+    batchDeviationPoly [gamma, towerOne 7] gamma = towerZero 7 := by
+  refine ⟨⟨towerOne 7, List.mem_cons_of_mem _ (List.mem_singleton.mpr rfl), by decide⟩, ?_⟩
+  unfold batchDeviationPoly
+  change towerAdd 7 (towerZero 7) (towerMul 7 gamma
+    (towerAdd 7 gamma (towerMul 7 gamma
+      (towerAdd 7 (towerOne 7) (towerMul 7 gamma (towerZero 7)))))) = towerZero 7
+  have hMulZero : towerMul 7 gamma (towerZero 7) = towerZero 7 := LawfulCommRing.mul_zero gamma
+  have hMulOne : towerMul 7 gamma (towerOne 7) = gamma := LawfulCommRing.mul_one gamma
+  rw [hMulZero, towerAdd_zero, hMulOne, towerAdd_self_zero, hMulZero, towerAdd_self_zero]
+
+private theorem evalCoeffs_all_zero (x : Tower128) : ∀ (ds : List Tower128),
+    ds.any (fun d => decide (d ≠ towerZero 7)) = false →
+    RoundPoly.evalCoeffs ds x = towerZero 7
+  | [], _ => rfl
+  | d :: ds, h => by
+    simp only [List.any_cons, Bool.or_eq_false_iff] at h
+    have hd : d = towerZero 7 := by
+      by_cases hEq : d = towerZero 7
+      · exact hEq
+      · exact False.elim (Bool.noConfusion ((decide_eq_true hEq).symm.trans h.1))
+    have hMulZero : towerMul 7 x (towerZero 7) = towerZero 7 := LawfulCommRing.mul_zero x
+    change towerAdd 7 d (towerMul 7 x (RoundPoly.evalCoeffs ds x)) = towerZero 7
+    rw [evalCoeffs_all_zero x ds h.2, hd, hMulZero, towerAdd_self_zero]
+
+/-- The `GF(2^128)` Horner check of the barrier as a `ConsistencyTagScheme`: a deviation is the
+    list of wire differences, it is honest when every difference is zero, and it is accepted
+    at challenge `c` when `c` is a root of its batch deviation polynomial. -/
+def hornerTagScheme : ConsistencyTagScheme (List Tower128) (2 ^ 128) where
+  isHonest := fun ds => !(ds.any (fun d => decide (d ≠ towerZero 7)))
+  accepts := fun ds c => batchDeviationPoly ds (unpackTower 7 (BitVec.ofFin c)) == towerZero 7
+  complete := by
+    intro ds c hH
+    have hAny : ds.any (fun d => decide (d ≠ towerZero 7)) = false := by
+      cases hA : ds.any (fun d => decide (d ≠ towerZero 7))
+      · rfl
+      · rw [hA] at hH; cases hH
+    have hMulZero : towerMul 7 (unpackTower 7 (BitVec.ofFin c)) (towerZero 7) = towerZero 7 :=
+      LawfulCommRing.mul_zero _
+    have hZero : batchDeviationPoly ds (unpackTower 7 (BitVec.ofFin c)) = towerZero 7 := by
+      unfold batchDeviationPoly
+      change towerAdd 7 (towerZero 7) (towerMul 7 (unpackTower 7 (BitVec.ofFin c))
+        (RoundPoly.evalCoeffs ds (unpackTower 7 (BitVec.ofFin c)))) = towerZero 7
+      rw [evalCoeffs_all_zero _ ds hAny, hMulZero, towerAdd_self_zero]
+    rw [hZero]
+    exact beq_self_eq_true _
+
+/-- **Counted tag-forgery term for the Horner tag (`rss_active_tag_forgery_count_le`).** For a
+    corrupt strategy whose share modification has at most `deg` wire differences and is fixed
+    before the challenge, at most `2^width * deg` of the `2^width * 2^128` pairs
+    (honest coin share, challenge) are tag forgeries: probability at most `deg / 2^128`. -/
+theorem rss_active_tag_forgery_count_le {width : Nat} (deg : Nat)
+    (adv : ActiveSlhAdversary width (2 ^ 128) (List Tower128))
+    (hDeg : ∀ h, (adv.deviation h).length ≤ deg) :
+    finSum (2 ^ width) (fun h => finSum (2 ^ 128) (fun c =>
+      if activeTagForgery hornerTagScheme adv h c then 1 else 0)) ≤ 2 ^ width * deg := by
+  rw [← finSum_const (2 ^ width) deg]
+  apply finSum_le_finSum
+  intro h
+  cases hA : (adv.deviation (BitVec.ofFin h)).any (fun d => decide (d ≠ towerZero 7))
+  · have hZ : ∀ c : Fin (2 ^ 128),
+        (if activeTagForgery hornerTagScheme adv h c then 1 else 0) = 0 := by
+      intro c
+      have hF : activeTagForgery hornerTagScheme adv h c = false := by
+        unfold activeTagForgery
+        change (!(adv.aborts (BitVec.ofFin h) c) &&
+          hornerTagScheme.accepts (adv.deviation (BitVec.ofFin h)) c &&
+          !(!((adv.deviation (BitVec.ofFin h)).any (fun d => decide (d ≠ towerZero 7))))) = false
+        rw [hA]
+        exact Bool.and_false _
+      rw [hF]
+      rfl
+    rw [finSum_congr hZ, finSum_const, Nat.mul_zero]
+    exact Nat.zero_le deg
+  · obtain ⟨d, hdMem, hdDec⟩ := List.any_eq_true.mp hA
+    refine Nat.le_trans (finSum_le_finSum (fun c => ?_))
+      (tower128_roots_finSum_le deg (adv.deviation (BitVec.ofFin h)) (hDeg _)
+        ⟨d, hdMem, of_decide_eq_true hdDec⟩)
+    unfold activeTagForgery
+    change (if (!(adv.aborts (BitVec.ofFin h) c) &&
+        (batchDeviationPoly (adv.deviation (BitVec.ofFin h)) (unpackTower 7 (BitVec.ofFin c)) ==
+          towerZero 7) &&
+        !(hornerTagScheme.isHonest (adv.deviation (BitVec.ofFin h)))) = true then 1 else 0) ≤
+      (if (batchDeviationPoly (adv.deviation (BitVec.ofFin h)) (unpackTower 7 (BitVec.ofFin c)) ==
+          towerZero 7) = true then 1 else 0)
+    cases adv.aborts (BitVec.ofFin h) c <;>
+      cases (batchDeviationPoly (adv.deviation (BitVec.ofFin h)) (unpackTower 7 (BitVec.ofFin c)) ==
+        towerZero 7) <;>
+      cases hornerTagScheme.isHonest (adv.deviation (BitVec.ofFin h)) <;> decide
+
+/-- **Active-malicious hedged threshold signing under the Horner tag
+    (`rss_active_malicious_threshold_sig_hedged_bound`).** Composition of
+    `active_malicious_threshold_sig_abort_or_exact_hedged_dist` with
+    `rss_active_tag_forgery_count_le`: over a uniform honest coin share and a uniform
+    `GF(2^128)` challenge, for every test `D` the number of runs whose released bytes pass `D`
+    is within `2^width * deg` of the number of runs in which the single-signer signature on
+    hedge `honestCoin ⊕ corruptCoin` passes `D` and the run is in the corrupt party's release
+    set. As a probability the distance from the ideal functionality with abort is at most
+    `deg / 2^128`. -/
+theorem rss_active_malicious_threshold_sig_hedged_bound
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (run : SlhThresholdRun p skSeed skPrf pkSeed) {width : Nat} (deg : Nat)
+    (adv : ActiveSlhAdversary width (2 ^ 128) (List Tower128))
+    (hDeg : ∀ h, (adv.deviation h).length ≤ deg)
+    (encode : BitVec width → List UInt8) (msgPrime : List UInt8) (D : List UInt8 → Bool) :
+    natAbsDiff
+      (finSum (2 ^ width) (fun h => finSum (2 ^ 128) (fun c =>
+        if (match activeMaliciousThresholdSign run hornerTagScheme adv encode msgPrime h c with
+            | some s => D s
+            | none => false) then 1 else 0)))
+      (finSum (2 ^ width) (fun h => finSum (2 ^ 128) (fun c =>
+        if (activeReleased hornerTagScheme adv h c &&
+            D (encodeSlhSig (slhSignInternal p msgPrime
+              (slhKeygenInternal p skSeed skPrf pkSeed).1
+              (encode (BitVec.ofFin h ^^^ adv.corruptCoin))))) then 1 else 0))) ≤
+    2 ^ width * deg :=
+  Nat.le_trans
+    ((active_malicious_threshold_sig_abort_or_exact_hedged_dist p hWf run hornerTagScheme adv
+      encode msgPrime).2.1 D)
+    (rss_active_tag_forgery_count_le deg adv hDeg)
 
 end Qsag
 end
