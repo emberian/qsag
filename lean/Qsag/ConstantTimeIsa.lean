@@ -418,6 +418,9 @@ inductive X86Instr where
   | xorMem64 (dst base : X86Gpr) (disp : BitVec 64)
   | shrImm64 (dst : X86Gpr) (sh : Nat)
   | shlImm64 (dst : X86Gpr) (sh : Nat)
+  | rorImm64 (dst : X86Gpr) (sh : Nat)
+  | mul64 (src : X86Gpr)
+  | imul64 (dst src : X86Gpr)
   | neg64 (dst : X86Gpr)
   | add64 (dst src : X86Gpr)
   | addImm64 (dst : X86Gpr) (imm : BitVec 64)
@@ -493,18 +496,42 @@ def execX86Instr (ins : X86Instr) (pc : Nat) (st : X86State) : X86State × Leaka
       LeakageEvent.clean pc [addr])
   | .shrImm64 dst sh =>
     let x := st.gpr dst
-    let v := x >>> sh
-    let cf := if sh <= 64 then x.getLsbD (sh - 1) else false
-    let flags := if sh == 0 then st.flags else
-      { cf := cf, of := if sh == 1 then x.getLsbD 63 else false, zf := (v == 0#64) }
+    let c := sh % 64
+    let v := x >>> c
+    let cf := if c == 0 then st.flags.cf else x.getLsbD (c - 1)
+    let flags := if c == 0 then st.flags else
+      { cf := cf, of := if c == 1 then x.getLsbD 63 else false, zf := (v == 0#64) }
     ({ (st.setGpr dst v) with flags := flags }, LeakageEvent.clean pc)
   | .shlImm64 dst sh =>
     let x := st.gpr dst
-    let v := x <<< sh
-    let cf := if sh <= 64 then x.getLsbD (64 - sh) else false
-    let flags := if sh == 0 then st.flags else
-      { cf := cf, of := if sh == 1 then (v.getLsbD 63 != cf) else false, zf := (v == 0#64) }
+    let c := sh % 64
+    let v := x <<< c
+    let cf := if c == 0 then st.flags.cf else x.getLsbD (64 - c)
+    let flags := if c == 0 then st.flags else
+      { cf := cf, of := if c == 1 then (v.getLsbD 63 != cf) else false, zf := (v == 0#64) }
     ({ (st.setGpr dst v) with flags := flags }, LeakageEvent.clean pc)
+  | .rorImm64 dst sh =>
+    let x := st.gpr dst
+    let c := sh % 64
+    let v := if c == 0 then x else (x >>> c) ||| (x <<< (64 - c))
+    let flags := if c == 0 then st.flags else
+      { cf := v.getLsbD 63, of := if c == 1 then (v.getLsbD 63 != v.getLsbD 62) else false, zf := st.flags.zf }
+    ({ (st.setGpr dst v) with flags := flags }, LeakageEvent.clean pc)
+  | .mul64 src =>
+    let prod := (st.gpr .rax).toNat * (st.gpr src).toNat
+    let loVal := BitVec.ofNat 64 prod
+    let hiVal := BitVec.ofNat 64 (prod / (2 ^ 64))
+    let ovf := hiVal != 0#64
+    ({ ((st.setGpr .rax loVal).setGpr .rdx hiVal) with
+       flags := { cf := ovf, of := ovf, zf := false } },
+     LeakageEvent.clean pc)
+  | .imul64 dst src =>
+    let a := st.gpr dst
+    let b := st.gpr src
+    let v := a * b
+    let ovf := decide (a.toInt * b.toInt != v.toInt)
+    ({ (st.setGpr dst v) with flags := { cf := ovf, of := ovf, zf := false } },
+     LeakageEvent.clean pc)
   | .neg64 dst =>
     let x := st.gpr dst
     let v := 0#64 - x
@@ -534,11 +561,11 @@ def execX86Instr (ins : X86Instr) (pc : Nat) (st : X86State) : X86State × Leaka
      LeakageEvent.clean pc)
   | .sbbSelf64 dst =>
     let mask := if st.flags.cf then 0xFFFFFFFFFFFFFFFF#64 else 0#64
-    ({ (st.setGpr dst mask) with flags := { st.flags with zf := !st.flags.cf } },
+    ({ (st.setGpr dst mask) with flags := { cf := st.flags.cf, of := false, zf := !st.flags.cf } },
      LeakageEvent.clean pc)
   | .sbbSelf32Zext dst =>
     let mask := if st.flags.cf then 0x00000000FFFFFFFF#64 else 0#64
-    ({ (st.setGpr dst mask) with flags := { st.flags with zf := !st.flags.cf } },
+    ({ (st.setGpr dst mask) with flags := { cf := st.flags.cf, of := false, zf := !st.flags.cf } },
      LeakageEvent.clean pc)
   | .adcx64 dst src =>
     let cIn := if st.flags.cf then 1 else 0
@@ -767,12 +794,25 @@ def checkX86Instr (secHeap : Bool) (τ : X86TaintState) (ins : X86Instr) :
     else none
   | .shrImm64 dst sh =>
     let l := τ.gpr dst
-    if sh == 0 then some (τ.setGpr dst l)
-    else some { (τ.setGpr dst l) with cf := l, of := l, zf := l }
+    let c := sh % 64
+    if c == 0 then some (τ.setGpr dst l)
+    else some { (τ.setGpr dst l) with cf := l, of := if c == 1 then l else .sec, zf := l }
   | .shlImm64 dst sh =>
     let l := τ.gpr dst
-    if sh == 0 then some (τ.setGpr dst l)
-    else some { (τ.setGpr dst l) with cf := l, of := l, zf := l }
+    let c := sh % 64
+    if c == 0 then some (τ.setGpr dst l)
+    else some { (τ.setGpr dst l) with cf := l, of := if c == 1 then l else .sec, zf := l }
+  | .rorImm64 dst sh =>
+    let l := τ.gpr dst
+    let c := sh % 64
+    if c == 0 then some (τ.setGpr dst l)
+    else some { (τ.setGpr dst l) with cf := l, of := if c == 1 then l else .sec }
+  | .mul64 src =>
+    let l := (τ.gpr .rax).join (τ.gpr src)
+    some { ((τ.setGpr .rax l).setGpr .rdx l) with cf := l, of := l, zf := .sec }
+  | .imul64 dst src =>
+    let l := (τ.gpr dst).join (τ.gpr src)
+    some { (τ.setGpr dst l) with cf := l, of := l, zf := .sec }
   | .neg64 dst =>
     let l := τ.gpr dst
     some { (τ.setGpr dst l) with cf := l, of := l, zf := l }
@@ -787,10 +827,10 @@ def checkX86Instr (secHeap : Bool) (τ : X86TaintState) (ins : X86Instr) :
     some { (τ.setGpr dst l) with cf := l, of := l, zf := l }
   | .sbbSelf64 dst =>
     let l := τ.cf
-    some { (τ.setGpr dst l) with zf := l }
+    some { (τ.setGpr dst l) with of := .pub, zf := l }
   | .sbbSelf32Zext dst =>
     let l := τ.cf
-    some { (τ.setGpr dst l) with zf := l }
+    some { (τ.setGpr dst l) with of := .pub, zf := l }
   | .adcx64 dst src =>
     let l := ((τ.gpr dst).join (τ.gpr src)).join τ.cf
     some { (τ.setGpr dst l) with cf := l }
@@ -1028,39 +1068,101 @@ theorem checkX86Instr_sound
     rcases hs with ⟨hg, hy, _, _, _, hm, hd, hdr, he, hc⟩
     exact ⟨hg, hy, fun _ => rfl, fun _ => rfl, (by intro h; cases h), hm, hd, hdr, he, hc⟩
   | shrImm64 dst sh =>
-    by_cases hz : (sh == 0) = true
+    by_cases hz : (sh % 64 == 0) = true
     · simp [checkX86Instr, hz] at hCheck; subst hCheck
       refine ⟨by simp [execX86Instr, hz], ?_⟩
       simpa [execX86Instr, hz, X86State.setGpr] using
         (x86_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr dst)
-          (s₁.gpr dst >>> sh) (s₂.gpr dst >>> sh) hLowOrig
+          (s₁.gpr dst >>> (sh % 64)) (s₂.gpr dst >>> (sh % 64)) hLowOrig
           (fun hl => by rw [hgpr dst hl]))
     · simp [checkX86Instr, hz] at hCheck; subst hCheck
       have hSet := x86_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr dst)
-        (s₁.gpr dst >>> sh) (s₂.gpr dst >>> sh) hLowOrig
+        (s₁.gpr dst >>> (sh % 64)) (s₂.gpr dst >>> (sh % 64)) hLowOrig
         (fun hl => by rw [hgpr dst hl])
       rcases hSet with ⟨hg, hy, _, _, _, hm, hd, hdr, he, hc⟩
       simp only [execX86Instr, hz, Bool.false_eq_true, ↓reduceIte]
       exact ⟨True.intro, hg, hy, (fun hl => by rw [hgpr dst hl]),
-        (fun hl => by rw [hgpr dst hl]), (fun hl => by rw [hgpr dst hl]),
+        (fun hl => by
+          by_cases h1 : (sh % 64 == 1) = true
+          · simp [h1] at hl ⊢; rw [hgpr dst hl]
+          · simp [h1] at hl),
+        (fun hl => by rw [hgpr dst hl]),
         hm, hd, hdr, he, hc⟩
   | shlImm64 dst sh =>
-    by_cases hz : (sh == 0) = true
+    by_cases hz : (sh % 64 == 0) = true
     · simp [checkX86Instr, hz] at hCheck; subst hCheck
       refine ⟨by simp [execX86Instr, hz], ?_⟩
       simpa [execX86Instr, hz, X86State.setGpr] using
         (x86_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr dst)
-          (s₁.gpr dst <<< sh) (s₂.gpr dst <<< sh) hLowOrig
+          (s₁.gpr dst <<< (sh % 64)) (s₂.gpr dst <<< (sh % 64)) hLowOrig
           (fun hl => by rw [hgpr dst hl]))
     · simp [checkX86Instr, hz] at hCheck; subst hCheck
       have hSet := x86_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr dst)
-        (s₁.gpr dst <<< sh) (s₂.gpr dst <<< sh) hLowOrig
+        (s₁.gpr dst <<< (sh % 64)) (s₂.gpr dst <<< (sh % 64)) hLowOrig
         (fun hl => by rw [hgpr dst hl])
       rcases hSet with ⟨hg, hy, _, _, _, hm, hd, hdr, he, hc⟩
       simp only [execX86Instr, hz, Bool.false_eq_true, ↓reduceIte]
       exact ⟨True.intro, hg, hy, (fun hl => by rw [hgpr dst hl]),
-        (fun hl => by rw [hgpr dst hl]), (fun hl => by rw [hgpr dst hl]),
+        (fun hl => by
+          by_cases h1 : (sh % 64 == 1) = true
+          · simp [h1] at hl ⊢; rw [hgpr dst hl]
+          · simp [h1] at hl),
+        (fun hl => by rw [hgpr dst hl]),
         hm, hd, hdr, he, hc⟩
+  | rorImm64 dst sh =>
+    by_cases hz : (sh % 64 == 0) = true
+    · simp [checkX86Instr, hz] at hCheck; subst hCheck
+      refine ⟨by simp [execX86Instr, hz], ?_⟩
+      simpa [execX86Instr, hz, X86State.setGpr] using
+        (x86_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr dst)
+          (s₁.gpr dst) (s₂.gpr dst) hLowOrig
+          (fun hl => by rw [hgpr dst hl]))
+    · simp [checkX86Instr, hz] at hCheck; subst hCheck
+      have hSet := x86_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr dst)
+        ((s₁.gpr dst >>> (sh % 64)) ||| (s₁.gpr dst <<< (64 - sh % 64)))
+        ((s₂.gpr dst >>> (sh % 64)) ||| (s₂.gpr dst <<< (64 - sh % 64))) hLowOrig
+        (fun hl => by rw [hgpr dst hl])
+      rcases hSet with ⟨hg, hy, _, _, hzOld, hm, hd, hdr, he, hc⟩
+      simp only [execX86Instr, hz, Bool.false_eq_true, ↓reduceIte]
+      exact ⟨True.intro, hg, hy, (fun hl => by rw [hgpr dst hl]),
+        (fun hl => by
+          by_cases h1 : (sh % 64 == 1) = true
+          · simp [h1] at hl ⊢; rw [hgpr dst hl]
+          · simp [h1] at hl),
+        hzOld, hm, hd, hdr, he, hc⟩
+  | mul64 src =>
+    simp [checkX86Instr, execX86Instr] at hCheck ⊢; subst hCheck
+    let l := (τ.gpr .rax).join (τ.gpr src)
+    have hOps : l = .pub → s₁.gpr .rax = s₂.gpr .rax ∧ s₁.gpr src = s₂.gpr src := by
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+      exact ⟨hgpr .rax h1, hgpr src h2⟩
+    have hSet1 := x86_setGpr_lowEq memPol τ s₁ s₂ .rax l
+      (BitVec.ofNat 64 ((s₁.gpr .rax).toNat * (s₁.gpr src).toNat))
+      (BitVec.ofNat 64 ((s₂.gpr .rax).toNat * (s₂.gpr src).toNat))
+      hLowOrig (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2])
+    have hSet2 := x86_setGpr_lowEq memPol _ _ _ .rdx l
+      (BitVec.ofNat 64 (((s₁.gpr .rax).toNat * (s₁.gpr src).toNat) / (2 ^ 64)))
+      (BitVec.ofNat 64 (((s₂.gpr .rax).toNat * (s₂.gpr src).toNat) / (2 ^ 64)))
+      hSet1 (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2])
+    rcases hSet2 with ⟨hg2, hy2, _, _, _, hm2, hd2, hdr2, hyEq2, hyCl2⟩
+    exact ⟨hg2, hy2,
+      (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2]),
+      (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2]),
+      (by intro h; cases h), hm2, hd2, hdr2, hyEq2, hyCl2⟩
+  | imul64 dst src =>
+    simp [checkX86Instr, execX86Instr] at hCheck ⊢; subst hCheck
+    let l := (τ.gpr dst).join (τ.gpr src)
+    have hOps : l = .pub → s₁.gpr dst = s₂.gpr dst ∧ s₁.gpr src = s₂.gpr src := by
+      intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
+      exact ⟨hgpr dst h1, hgpr src h2⟩
+    have hSet := x86_setGpr_lowEq memPol τ s₁ s₂ dst l
+      (s₁.gpr dst * s₁.gpr src) (s₂.gpr dst * s₂.gpr src)
+      hLowOrig (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2])
+    rcases hSet with ⟨hg1, hy1, _, _, _, hm1, hd1, hdr1, hyEq1, hyCl1⟩
+    exact ⟨hg1, hy1,
+      (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2]),
+      (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2]),
+      (by intro h; cases h), hm1, hd1, hdr1, hyEq1, hyCl1⟩
   | neg64 dst =>
     simp [checkX86Instr, execX86Instr] at hCheck ⊢; subst hCheck
     have hSet := x86_setGpr_lowEq memPol τ s₁ s₂ dst (τ.gpr dst)
@@ -1108,16 +1210,16 @@ theorem checkX86Instr_sound
       (if s₁.flags.cf then 0xFFFFFFFFFFFFFFFF#64 else 0#64)
       (if s₂.flags.cf then 0xFFFFFFFFFFFFFFFF#64 else 0#64)
       hLowOrig (fun hl => by rw [hcf hl])
-    rcases hSet with ⟨hg1, hy1, hc1, ho1, _, hm1, hd1, hdr1, hyEq1, hyCl1⟩
-    exact ⟨hg1, hy1, hc1, ho1, fun hl => by rw [hcf hl], hm1, hd1, hdr1, hyEq1, hyCl1⟩
+    rcases hSet with ⟨hg1, hy1, hc1, _, _, hm1, hd1, hdr1, hyEq1, hyCl1⟩
+    exact ⟨hg1, hy1, hc1, fun _ => rfl, fun hl => by rw [hcf hl], hm1, hd1, hdr1, hyEq1, hyCl1⟩
   | sbbSelf32Zext dst =>
     simp [checkX86Instr, execX86Instr] at hCheck ⊢; subst hCheck
     have hSet := x86_setGpr_lowEq memPol τ s₁ s₂ dst τ.cf
       (if s₁.flags.cf then 0x00000000FFFFFFFF#64 else 0#64)
       (if s₂.flags.cf then 0x00000000FFFFFFFF#64 else 0#64)
       hLowOrig (fun hl => by rw [hcf hl])
-    rcases hSet with ⟨hg1, hy1, hc1, ho1, _, hm1, hd1, hdr1, hyEq1, hyCl1⟩
-    exact ⟨hg1, hy1, hc1, ho1, fun hl => by rw [hcf hl], hm1, hd1, hdr1, hyEq1, hyCl1⟩
+    rcases hSet with ⟨hg1, hy1, hc1, _, _, hm1, hd1, hdr1, hyEq1, hyCl1⟩
+    exact ⟨hg1, hy1, hc1, fun _ => rfl, fun hl => by rw [hcf hl], hm1, hd1, hdr1, hyEq1, hyCl1⟩
   | adcx64 dst src =>
     simp [checkX86Instr, execX86Instr] at hCheck ⊢; subst hCheck
     let l := ((τ.gpr dst).join (τ.gpr src)).join τ.cf
@@ -4062,6 +4164,82 @@ theorem keccakChiMpcAvx2_exec_lane0_correct (st : X86State) :
   rw [hr]
   simp only [v0, keccakChiMpcAvx2Prog, List.take, execX86Prog, execX86Instr,
     X86State.setYmm, beq_iff_eq, reduceCtorEq, ↓reduceIte, BitVec.add_zero]
+  rfl
+
+/-! ### 8. Architectural Scalar `RFLAGS` Parity (`MUL`/`IMUL`/`SHL`/`SHR`/`ROR`/`SBB`) -/
+
+private def mkRflagsTestState (rax rcx : BitVec 64) (cf of zf : Bool) : X86State :=
+  { gpr := fun r => if r == .rax then rax else if r == .rcx then rcx else 0#64
+    ymm := fun _ => Vec256.zero
+    flags := { cf := cf, of := of, zf := zf }
+    mem := fun _ => 0#64
+    doitEnabled := false
+    ymmUpperDirty := false }
+
+/-- 6-bit shift-count masking (`COUNT & 63`): `SHR r64, 64` is a hardware no-op preserving both
+    destination GPR and all `RFLAGS` (`CF`, `OF`, `ZF`). -/
+theorem shrImm64_cnt64_noop (st : X86State) (dst : X86Gpr) (pc : Nat) :
+    (execX86Instr (.shrImm64 dst 64) pc st).1.gpr dst = st.gpr dst ∧
+    (execX86Instr (.shrImm64 dst 64) pc st).1.flags = st.flags := by
+  simp [execX86Instr, X86State.setGpr]
+
+/-- 6-bit shift-count masking (`COUNT & 63`): `SHL r64, 64` is a hardware no-op preserving both
+    destination GPR and all `RFLAGS` (`CF`, `OF`, `ZF`). -/
+theorem shlImm64_cnt64_noop (st : X86State) (dst : X86Gpr) (pc : Nat) :
+    (execX86Instr (.shlImm64 dst 64) pc st).1.gpr dst = st.gpr dst ∧
+    (execX86Instr (.shlImm64 dst 64) pc st).1.flags = st.flags := by
+  simp [execX86Instr, X86State.setGpr]
+
+/-- `SBB r, r` (`r - (r + CF) = -CF`) never signed-overflows on x86-64 and always clears `OF = false`. -/
+theorem sbbSelf_clears_of (st : X86State) (dst : X86Gpr) (pc : Nat) :
+    (execX86Instr (.sbbSelf64 dst) pc st).1.flags.of = false ∧
+    (execX86Instr (.sbbSelf32Zext dst) pc st).1.flags.of = false := by
+  exact ⟨rfl, rfl⟩
+
+/-- All 8 `seed=0x51a` `MUL`/`SHL`/`SHR`/`ROR` `RFLAGS` edge cases plus signed `IMUL` `-1 * -1`,
+    `MIN_INT * -1`, and `count = 65` 6-bit shift-count masking match physical x86-64 silicon. -/
+theorem constantTimeIsa_rflags_regressions_verified :
+    let c37 := (execX86Instr (.mul64 .rcx) 0 (mkRflagsTestState 0xffffffffffffffff#64 0x8000000000000000#64 true false false)).1
+    let c38 := (execX86Instr (.shlImm64 .rax 1) 0 (mkRflagsTestState 0x8000000000000000#64 0xffffffff00000000#64 false true true)).1
+    let c39 := (execX86Instr (.shrImm64 .rax 1) 0 (mkRflagsTestState 0xffffffff00000000#64 0xffffffff00000001#64 false false false)).1
+    let c40 := (execX86Instr (.rorImm64 .rax 1) 0 (mkRflagsTestState 0xffffffff00000001#64 1#64 false true false)).1
+    let c78 := (execX86Instr (.mul64 .rcx) 0 (mkRflagsTestState 0#64 0xffffffffffffffff#64 false true true)).1
+    let c79 := (execX86Instr (.shlImm64 .rax 1) 0 (mkRflagsTestState 0xffffffffffffffff#64 0x8000000000000000#64 false false true)).1
+    let c80 := (execX86Instr (.shrImm64 .rax 1) 0 (mkRflagsTestState 0x8000000000000000#64 0xffffffff00000000#64 true false true)).1
+    let c81 := (execX86Instr (.rorImm64 .rax 1) 0 (mkRflagsTestState 0xffffffff00000000#64 0xffffffff00000001#64 true false true)).1
+    let imulNoOvf := (execX86Instr (.imul64 .rax .rcx) 0 (mkRflagsTestState 0xffffffffffffffff#64 0xffffffffffffffff#64 true true true)).1
+    let imulOvf := (execX86Instr (.imul64 .rax .rcx) 0 (mkRflagsTestState 0x8000000000000000#64 0xffffffffffffffff#64 false false false)).1
+    let shl65 := (execX86Instr (.shlImm64 .rax 65) 0 (mkRflagsTestState 0x4000000000000000#64 0#64 false false false)).1
+    c37.gpr .rax = 0x8000000000000000#64 ∧ c37.gpr .rdx = 0x7fffffffffffffff#64 ∧ c37.flags.cf = true ∧ c37.flags.of = true ∧
+    c38.gpr .rax = 0#64 ∧ c38.flags = { cf := true, of := true, zf := true } ∧
+    c39.gpr .rax = 0x7fffffff80000000#64 ∧ c39.flags = { cf := false, of := true, zf := false } ∧
+    c40.gpr .rax = 0xffffffff80000000#64 ∧ c40.flags = { cf := true, of := false, zf := false } ∧
+    c78.gpr .rax = 0#64 ∧ c78.gpr .rdx = 0#64 ∧ c78.flags.cf = false ∧ c78.flags.of = false ∧
+    c79.gpr .rax = 0xfffffffffffffffe#64 ∧ c79.flags = { cf := true, of := false, zf := false } ∧
+    c80.gpr .rax = 0x4000000000000000#64 ∧ c80.flags = { cf := false, of := true, zf := false } ∧
+    c81.gpr .rax = 0x7fffffff80000000#64 ∧ c81.flags = { cf := false, of := true, zf := true } ∧
+    imulNoOvf.gpr .rax = 1#64 ∧ imulNoOvf.flags.cf = false ∧ imulNoOvf.flags.of = false ∧
+    imulOvf.gpr .rax = 0x8000000000000000#64 ∧ imulOvf.flags.cf = true ∧ imulOvf.flags.of = true ∧
+    shl65.gpr .rax = 0x8000000000000000#64 ∧ shl65.flags = { cf := false, of := true, zf := false } := by
+  decide +kernel
+
+/-- **Tooth (`ROR` preserves secret `ZF` taint)**: Rotating a public register cannot launder a
+    previously secret `ZF` into `.pub` for a subsequent `cmovnz64`. -/
+theorem tooth_rorImm64_cannot_launder_secret_zf :
+    let τSecretZf : X86TaintState :=
+      { gpr := fun _ => .pub, ymm := fun _ => .pub,
+        cf := .pub, of := .pub, zf := .sec, doitAssumed := false, upperYmmClean := true }
+    checkX86Block true τSecretZf [.rorImm64 .rax 1, .cmovnz64 .rcx .rdx] = none := by
+  rfl
+
+/-- **Tooth (Multi-bit shift `OF` architecturally undefined)**: `SHR` with masked count `> 1`
+    marks `OF` taint `.sec` even on a `.pub` register, preventing `adox64` from treating
+    architecturally undefined `OF` as public! -/
+theorem tooth_shrImm64_cnt2_undef_of_tainted_sec :
+    let τAllPub : X86TaintState :=
+      { gpr := fun _ => .pub, ymm := fun _ => .pub,
+        cf := .pub, of := .pub, zf := .pub, doitAssumed := false, upperYmmClean := true }
+    (checkX86Instr true τAllPub (.shrImm64 .rax 2)).map X86TaintState.of = some .sec := by
   rfl
 
 end Qsag.ConstantTimeIsa
