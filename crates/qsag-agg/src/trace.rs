@@ -1152,7 +1152,7 @@ pub fn populate_active_signer_rows(
                     let tree_hi = state[ST_TREE_HI].to_canonical_u64();
                     let next_kp = tree_lo & 0xF;
                     let lo_shifted = tree_lo >> 4;
-                    let hi_low4 = tree_hi & 0xF;
+                    let hi_low_nibble = tree_hi & 0xF;
                     let next_tree_hi = tree_hi >> 4;
 
                     for i in 0..4 {
@@ -1164,7 +1164,7 @@ pub fn populate_active_signer_rows(
                     }
                     for i in 0..2 {
                         row[COL_AUX + 18 + i] =
-                            Goldilocks::from_u64_reduced((hi_low4 >> (2 * i)) & 3);
+                            Goldilocks::from_u64_reduced((hi_low_nibble >> (2 * i)) & 3);
                     }
                     for i in 0..14 {
                         row[COL_AUX + 20 + i] =
@@ -1173,7 +1173,8 @@ pub fn populate_active_signer_rows(
 
                     next[ST_CUR_ROOT..ST_CUR_ROOT + 4].copy_from_slice(&perm_out[0..4]);
                     next[ST_KP_IDX] = Goldilocks::from_u64_reduced(next_kp);
-                    next[ST_TREE_LO] = Goldilocks::from_u64_reduced(lo_shifted | (hi_low4 << 28));
+                    next[ST_TREE_LO] =
+                        Goldilocks::from_u64_reduced(lo_shifted | (hi_low_nibble << 28));
                     next[ST_TREE_HI] = Goldilocks::from_u64_reduced(next_tree_hi);
                 }
             }
@@ -1590,9 +1591,9 @@ fn eval_single_op_constraints_generic<F: TraceField, E: FnMut(F)>(
                 }
                 expected_next[ST_TREE_LO] = hi28;
             } else if l == 6 {
-                let low4 = aux[0] + aux[1].mul_base_f(Goldilocks::from_u64_reduced(4));
-                expected_next[ST_TREE_LO] =
-                    prev[ST_TREE_LO] + low4.mul_base_f(Goldilocks::from_u64_reduced(1u64 << 28));
+                let low_nibble = aux[0] + aux[1].mul_base_f(Goldilocks::from_u64_reduced(4));
+                expected_next[ST_TREE_LO] = prev[ST_TREE_LO]
+                    + low_nibble.mul_base_f(Goldilocks::from_u64_reduced(1u64 << 28));
                 let mut hi28 = F::ZERO;
                 for (i, &aux_i) in aux.iter().enumerate().take(16).skip(2) {
                     hi28 += aux_i.mul_base_f(Goldilocks::from_u64_reduced(1u64 << (2 * (i - 2))));
@@ -2048,10 +2049,10 @@ fn eval_single_op_constraints_generic<F: TraceField, E: FnMut(F)>(
                     lo_shifted +=
                         aux[4 + i].mul_base_f(Goldilocks::from_u64_reduced(1u64 << (2 * i)));
                 }
-                let mut hi_low4 = F::ZERO;
+                let mut hi_low_nibble = F::ZERO;
                 for i in 0..2 {
                     emit_op(quartic_base4_generic(aux[18 + i]));
-                    hi_low4 +=
+                    hi_low_nibble +=
                         aux[18 + i].mul_base_f(Goldilocks::from_u64_reduced(1u64 << (2 * i)));
                 }
                 let mut next_tree_hi = F::ZERO;
@@ -2067,7 +2068,8 @@ fn eval_single_op_constraints_generic<F: TraceField, E: FnMut(F)>(
                 );
                 emit_op(
                     prev[ST_TREE_HI]
-                        - (hi_low4 + next_tree_hi.mul_base_f(Goldilocks::from_u64_reduced(16))),
+                        - (hi_low_nibble
+                            + next_tree_hi.mul_base_f(Goldilocks::from_u64_reduced(16))),
                 );
                 for i in 0..4 {
                     emit_op(next[ST_CUR_ROOT + i] - perm_out[i]);
@@ -2076,7 +2078,7 @@ fn eval_single_op_constraints_generic<F: TraceField, E: FnMut(F)>(
                 emit_op(
                     next[ST_TREE_LO]
                         - (lo_shifted
-                            + hi_low4.mul_base_f(Goldilocks::from_u64_reduced(1u64 << 28))),
+                            + hi_low_nibble.mul_base_f(Goldilocks::from_u64_reduced(1u64 << 28))),
                 );
                 emit_op(next[ST_TREE_HI] - next_tree_hi);
 

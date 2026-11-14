@@ -10,7 +10,8 @@
 //!    re-encodes the folded monomial witness at an **escalating Reed–Solomon blowup**
 //!    (e.g. $B = (4, 16, 64)$, i.e. $\rho_0 = 1/4 \to \rho_1 = 1/16 \to \rho_2 = 1/64$ at
 //!    $\ell = 20$), keeping intermediate evaluation domains bounded ($D_1 = 2^{19}, D_2 = 2^{18} \le 2^{20}$)
-//!    with default conjectural QROM query counts $q = (128, 64, 43)$,
+//!    with default Johnson-radius QROM query counts $q = (258, 130, 88)$ (the conjectural
+//!    HABR24 budget $q = (128, 64, 43)$ is opt-in),
 //! 3. **Out-of-Domain (OOD) List-Pinning & Shift-Query Accumulation:** every committed oracle
 //!    $f^{(k)}$ is pinned at two independent $\mathbb{F}_{p^4}$ Kronecker point $\text{pow2}(z_{\text{ood},k})$
 //!    before affine fold challenges are squeezed, and stage-$k$ fiber openings fold into shift claims
@@ -43,6 +44,7 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+#[cfg(test)]
 use crate::field::eval_univariate_ext4_at_base;
 use crate::field::{
     Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
@@ -121,8 +123,9 @@ pub enum WhirSecurityRegime {
     Habr24Classical128 = 0,
     Habr24Interactive128 = 1,
     BciksJohnsonClassical128 = 2,
-    #[default]
     Habr24Qrom128 = 3,
+    /// Default: the Johnson-radius QROM budget needs no proximity-gap conjecture.
+    #[default]
     BciksJohnsonQrom128 = 4,
 }
 
@@ -176,11 +179,11 @@ impl WhirSecurityRegime {
     }
 }
 
-/// Default HABR24 QROM schedule: ceil(256/log2(B)) queries plus 16-bit PoW.
-/// This budgets 272 classical or 136 Grover round-search bits, leaving eight
-/// quantum bits for multi-round union slack. HABR24 agreement is conjectural.
-/// Johnson QROM uses ceil(512/log2(B)) + 2 queries for unconditional Johnson
-/// proximity below 2^-256, with positive proximity slack, without HABR24.
+/// Default schedule: Johnson QROM (`BciksJohnsonQrom128`), ceil(512/log2(B)) + 2 queries plus
+/// 16-bit PoW, i.e. `(258, 130, 88, 66)` at blowups `(4, 16, 64, 256)`. That is unconditional
+/// Johnson proximity below 2^-256 with positive proximity slack, without the HABR24
+/// conjecture. The HABR24 QROM regime (ceil(256/log2(B)) queries, 272 classical or 136 Grover
+/// round-search bits) stays selectable but its agreement bound is conjectural.
 /// Neither per-round budget alone proves total PCS/QROM security.
 pub fn whir_stage_schedule(num_vars: usize) -> WhirSchedule {
     WhirSecurityRegime::default().schedule(num_vars)
@@ -320,6 +323,14 @@ impl WhirSchedule {
             remaining -= stage.step_vars;
         }
         remaining == self.early_stop_vars
+            && self.regime.meets_qrom_128_floor()
+            && self.is_canonical(num_vars)
+    }
+
+    /// Is this exactly the canonical schedule of its own regime for `num_vars`? Only canonical
+    /// schedules are covered by the finite Johnson witnesses of `pcs/affine_schedule.rs`.
+    pub fn is_canonical(&self, num_vars: usize) -> bool {
+        (2..=MAX_PCS_NUM_VARS).contains(&num_vars) && *self == self.regime.schedule(num_vars)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -1521,6 +1532,11 @@ pub struct HemWhirBatchOpeningProof {
 
 impl HemWhirBatchOpeningProof {
     pub fn push_bytes(&self, out: &mut Vec<u8>) {
+        assert_eq!(
+            self.common_point_evals.len(),
+            self.shifted_evals.len(),
+            "batch evaluation lengths differ"
+        );
         push_sumcheck_wire_polys(&self.point_sumcheck_polys, out);
         out.extend_from_slice(&(self.common_point_evals.len() as u32).to_le_bytes());
         for v in &self.common_point_evals {
@@ -1754,58 +1770,110 @@ fn from_verified_ext4(x: qsag_whir_verified::Ext4) -> GoldilocksExt4 {
     GoldilocksExt4::from_limbs([x.a, x.c, x.b, x.d].map(Goldilocks::from_u64_reduced))
 }
 
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn fold_duet_affine_ext4(
+/// A coset fiber folded through every challenge but the last: the remaining duet
+/// `(v0, v1)` at `±x`, with the base-field scalars the last extracted fold step consumes.
+struct FiberLastDuet {
     v0: GoldilocksExt4,
     v1: GoldilocksExt4,
-    inv_two_xk: Goldilocks,
-    inv_two: Goldilocks,
-    xk_sq: Goldilocks,
-    theta: GoldilocksExt4,
-    alpha: GoldilocksExt4,
-    beta: GoldilocksExt4,
-) -> GoldilocksExt4 {
-    // Same polynomial as the extracted reference, evaluated with canonical Goldilocks
-    // reductions rather than general u128 remainder in every field operation.
-    let even = (v0 + v1).mul_base(inv_two);
-    let odd = (v0 - v1).mul_base(inv_two_xk);
-    odd + (alpha + beta.mul_base(xk_sq)) * (even + theta * odd)
+    inv_two_x: Goldilocks,
+    x_sq: Goldilocks,
+    chal: [GoldilocksExt4; 3],
+}
+
+impl FiberLastDuet {
+    /// Last fold step, computed by the extracted `cwyz_duet_fold`.
+    #[inline]
+    fn fold(&self, inv_two: Goldilocks) -> GoldilocksExt4 {
+        let [theta, alpha, beta] = self.chal;
+        from_verified_ext4(qsag_whir_verified::cwyz_duet_fold(
+            to_verified_ext4(self.v0),
+            to_verified_ext4(self.v1),
+            self.inv_two_x.to_canonical_u64(),
+            inv_two.to_canonical_u64(),
+            self.x_sq.to_canonical_u64(),
+            to_verified_ext4(theta),
+            to_verified_ext4(alpha),
+            to_verified_ext4(beta),
+        ))
+    }
+
+    /// Extracted acceptance gate: the last fold step lands exactly on `claimed`.
+    #[inline]
+    fn accepts(&self, inv_two: Goldilocks, claimed: qsag_whir_verified::Ext4) -> bool {
+        let [theta, alpha, beta] = self.chal;
+        let odd = (self.v0 - self.v1).mul_base(self.inv_two_x);
+        let gamma = alpha + beta.mul_base(self.x_sq);
+        let affine_claim = from_verified_ext4(qsag_whir_verified::Ext4 {
+            a: claimed.a,
+            b: claimed.b,
+            c: claimed.c,
+            d: claimed.d,
+        }) - gamma * theta * odd;
+        qsag_whir_verified::verify_affine_duet_fold_step(
+            to_verified_ext4(self.v0),
+            to_verified_ext4(self.v1),
+            self.inv_two_x.to_canonical_u64(),
+            inv_two.to_canonical_u64(),
+            to_verified_ext4(gamma),
+            to_verified_ext4(affine_claim),
+        ) && qsag_whir_verified::verify_cwyz_duet_fold_step(
+            to_verified_ext4(self.v0),
+            to_verified_ext4(self.v1),
+            self.inv_two_x.to_canonical_u64(),
+            inv_two.to_canonical_u64(),
+            self.x_sq.to_canonical_u64(),
+            to_verified_ext4(theta),
+            to_verified_ext4(alpha),
+            to_verified_ext4(beta),
+            claimed,
+        )
+    }
 }
 
 /// Fold a coset fiber `vals` of size $A = 2^s \in \{2, 4, 8, 16, 32, 64\}$ at points
-/// $x_k = y_0 \cdot \zeta_A^k$ across `chals[0..s]`, returning $W^{(s)}(\text{pow2}(y_0^{2^s}))$.
+/// $x_k = y_0 \cdot \zeta_A^k$ across all but the last of `chals[0..s]`. Every duet is folded
+/// by the extracted `qsag_whir_verified::cwyz_duet_fold`.
 #[inline]
-fn fold_coset_group_ext4(
+fn fold_coset_group_to_last_duet(
     vals: &[GoldilocksExt4],
+    mut y0: Goldilocks,
     mut inv_y0: Goldilocks,
     inv_two: Goldilocks,
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
     chals: &[[GoldilocksExt4; 3]],
-) -> GoldilocksExt4 {
+) -> FiberLastDuet {
     let step = chals.len();
-    debug_assert!((1..=MAX_FOLD_STEP_VARS).contains(&step) && vals.len() == (1usize << step));
+    assert!((1..=MAX_FOLD_STEP_VARS).contains(&step) && vals.len() == (1usize << step));
     let mut buf = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
     buf[..vals.len()].copy_from_slice(vals);
     let mut cur_len = vals.len();
     let mut inv_zeta = inv_zetas[step];
-    let mut y0 = inv_y0.inv();
-    let mut zeta = inv_zeta.inv();
-    for &[theta, alpha, beta] in chals {
+    const ZETAS: [Goldilocks; MAX_FOLD_STEP_VARS + 1] = [
+        Goldilocks::ONE,
+        Goldilocks::two_adic_generator(1),
+        Goldilocks::two_adic_generator(2),
+        Goldilocks::two_adic_generator(3),
+        Goldilocks::two_adic_generator(4),
+        Goldilocks::two_adic_generator(5),
+        Goldilocks::two_adic_generator(6),
+    ];
+    let mut zeta = ZETAS[step];
+    let inv_two_u64 = inv_two.to_canonical_u64();
+    for &[theta, alpha, beta] in &chals[..step - 1] {
         let half = cur_len / 2;
         let mut inv_two_xk = inv_two * inv_y0;
         let mut xk = y0;
         for k in 0..half {
-            buf[k] = fold_duet_affine_ext4(
-                buf[k],
-                buf[k + half],
-                inv_two_xk,
-                inv_two,
-                xk.square(),
-                theta,
-                alpha,
-                beta,
-            );
+            buf[k] = from_verified_ext4(qsag_whir_verified::cwyz_duet_fold(
+                to_verified_ext4(buf[k]),
+                to_verified_ext4(buf[k + half]),
+                inv_two_xk.to_canonical_u64(),
+                inv_two_u64,
+                xk.square().to_canonical_u64(),
+                to_verified_ext4(theta),
+                to_verified_ext4(alpha),
+                to_verified_ext4(beta),
+            ));
             xk *= zeta;
             inv_two_xk *= inv_zeta;
         }
@@ -1815,7 +1883,49 @@ fn fold_coset_group_ext4(
         y0 = y0.square();
         zeta = zeta.square();
     }
-    buf[0]
+    FiberLastDuet {
+        v0: buf[0],
+        v1: buf[1],
+        inv_two_x: inv_two * inv_y0,
+        x_sq: y0.square(),
+        chal: chals[step - 1],
+    }
+}
+
+/// Fold a whole coset fiber, returning $W^{(s)}(\text{pow2}(y_0^{2^s}))$.
+#[inline]
+fn fold_coset_group_ext4(
+    vals: &[GoldilocksExt4],
+    inv_y0: Goldilocks,
+    inv_two: Goldilocks,
+    inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
+    chals: &[[GoldilocksExt4; 3]],
+) -> GoldilocksExt4 {
+    fold_coset_group_to_last_duet(vals, inv_y0.inv(), inv_y0, inv_two, inv_zetas, chals)
+        .fold(inv_two)
+}
+
+/// Does the fiber at `y0` fold exactly onto `final_coeffs(y0^{2^s})`? The last fold step is
+/// checked by the extracted `verify_cwyz_duet_fold_step` against the extracted Horner value.
+fn final_fiber_matches_terminal_poly(
+    fiber: &[GoldilocksExt4],
+    y0: Goldilocks,
+    inv_y0: Goldilocks,
+    inv_two: Goldilocks,
+    inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
+    chals: &[[GoldilocksExt4; 3]],
+    final_coeffs: &[qsag_whir_verified::Ext4],
+) -> bool {
+    let z_u = pow2_iter_base(y0, chals.len());
+    fold_coset_group_to_last_duet(fiber, y0, inv_y0, inv_two, inv_zetas, chals).accepts(
+        inv_two,
+        qsag_whir_verified::eval_ext4_univariate_at_base(final_coeffs, z_u.to_canonical_u64()),
+    )
+}
+
+/// Final-polynomial coefficients in the extracted core's representation.
+fn to_verified_coeffs(coeffs: &[GoldilocksExt4]) -> Vec<qsag_whir_verified::Ext4> {
+    coeffs.iter().copied().map(to_verified_ext4).collect()
 }
 
 #[inline]
@@ -2669,8 +2779,9 @@ fn whir_open_core(
             let pow_nonce = grind_pcs_pow(transcript);
             transcript.absorb(b"WHIR_FINAL_POW", &pow_nonce.to_le_bytes());
 
-            #[cfg(debug_assertions)]
-            let final_coeffs_dbg = &cur_coeffs;
+            // The prover refuses to emit a final polynomial that disagrees with a fiber it
+            // opens; the comparison runs through the extracted fold-step gate and Horner rule.
+            let final_coeffs_v = to_verified_coeffs(&cur_coeffs);
 
             if stage_idx == 0 {
                 stage_pow_nonce_0 = pow_nonce;
@@ -2703,25 +2814,18 @@ fn whir_open_core(
                             }
                         }
                     }
-                    #[cfg(debug_assertions)]
-                    {
-                        let y0 = Goldilocks::NON_RESIDUE * omega_0.pow(g as u64);
-                        let inv_y0 = inv_shift * inv_omega_0.pow(g as u64);
-                        let v_shift = fold_coset_group_ext4(
+                    assert!(
+                        final_fiber_matches_terminal_poly(
                             &fiber[..arity],
-                            inv_y0,
+                            Goldilocks::NON_RESIDUE * omega_0.pow(g as u64),
+                            inv_shift * inv_omega_0.pow(g as u64),
                             inv_two,
                             &inv_zetas,
                             chals_slice,
-                        );
-                        let z_u = pow2_iter_base(y0, st.step_vars);
-                        debug_assert_eq!(
-                            v_shift,
-                            eval_univariate_ext4_at_base(final_coeffs_dbg, z_u)
-                        );
-                    }
-                    #[cfg(not(debug_assertions))]
-                    let _ = (omega_0, inv_omega_0);
+                            &final_coeffs_v,
+                        ),
+                        "final polynomial disagrees with an opened Round-0 fiber"
+                    );
                 }
                 round0_multiproof = state.tree_0.open_multi_with_leaf_fn(&q_indices, |g| {
                     round0_leaf_hash(&state.codewords_0, &state.salt_seed, g, num_groups_0, arity)
@@ -2742,25 +2846,18 @@ fn whir_open_core(
                 for &g in &q_indices {
                     let fiber = collect_coset_group_ext4(&prev_cw, g, num_groups_cur, arity);
                     opened_vals.extend_from_slice(&fiber[..arity]);
-                    #[cfg(debug_assertions)]
-                    {
-                        let y0 = Goldilocks::NON_RESIDUE * omega.pow(g as u64);
-                        let inv_y0 = inv_shift * inv_omega.pow(g as u64);
-                        let v_shift = fold_coset_group_ext4(
+                    assert!(
+                        final_fiber_matches_terminal_poly(
                             &fiber[..arity],
-                            inv_y0,
+                            Goldilocks::NON_RESIDUE * omega.pow(g as u64),
+                            inv_shift * inv_omega.pow(g as u64),
                             inv_two,
                             &inv_zetas,
                             chals_slice,
-                        );
-                        let z_u = pow2_iter_base(y0, st.step_vars);
-                        debug_assert_eq!(
-                            v_shift,
-                            eval_univariate_ext4_at_base(final_coeffs_dbg, z_u)
-                        );
-                    }
-                    #[cfg(not(debug_assertions))]
-                    let _ = (omega, inv_omega);
+                            &final_coeffs_v,
+                        ),
+                        "final polynomial disagrees with an opened stage fiber"
+                    );
                 }
                 let stage_u8 = stage_idx as u8;
                 let multiproof = prev_tree.open_multi_with_leaf_fn(&q_indices, |g| {
@@ -2929,6 +3026,7 @@ pub fn whir_verify_batch_with_schedule(
     transcript: &mut FiatShamirTranscript<InstanceBound>,
     schedule: &WhirSchedule,
 ) -> bool {
+    let _phase = crate::profile::span("whir_verify_batch");
     absorb_whir_schedule(transcript, schedule);
     let num_polys = points.len();
     if !pcs_num_vars_supported(num_vars)
@@ -3015,6 +3113,15 @@ pub fn whir_verify_batch_with_schedule(
     )
 }
 
+/// One dual linear-functional bridge round as the verifier saw it: the prover's wire, the
+/// incoming claim, and the challenges squeezed for it.
+struct BridgeRound {
+    wire: [GoldilocksExt4; 5],
+    claim: GoldilocksExt4,
+    phi: GoldilocksExt4,
+    chals: [GoldilocksExt4; 3],
+}
+
 /// Verify the multi-stage `Hem` WHIR opening of $\sum_i \text{weights}[i] \cdot W_i$ at `init_point`
 /// against `comm_0`.
 fn whir_verify_core(
@@ -3088,6 +3195,8 @@ fn whir_verify_core(
     let mut sc_cursor = 0usize;
     let mut var_off = 0usize;
     let mut rem_vars = num_vars;
+    // Inputs of the most recent bridge round; the terminal gate re-checks the last one.
+    let mut last_bridge: Option<BridgeRound> = None;
 
     for (stage_idx, st) in sched.stages.iter().enumerate() {
         let arity = 1usize << st.step_vars;
@@ -3098,6 +3207,12 @@ fn whir_verify_core(
             sc_cursor += 1;
             let phi = bridge_prefix(&wire, transcript);
             let (next, chals) = bridge_finish(&wire, cur_sum_claim, phi, transcript);
+            last_bridge = Some(BridgeRound {
+                wire,
+                claim: cur_sum_claim,
+                phi,
+                chals,
+            });
             cur_sum_claim = next;
             phis.push(phi);
             alphas.push(chals);
@@ -3149,6 +3264,7 @@ fn whir_verify_core(
                     inv_two,
                     &inv_zetas,
                     proof,
+                    None,
                     transcript,
                 )
             } else {
@@ -3164,6 +3280,7 @@ fn whir_verify_core(
                     inv_shift,
                     inv_two,
                     &inv_zetas,
+                    None,
                     transcript,
                 )
             };
@@ -3206,17 +3323,31 @@ fn whir_verify_core(
             }
             transcript.absorb(b"WHIR_FINAL_POLY", &final_bytes);
 
-            // Mandatory terminal sumcheck check across all accumulated evaluation, OOD, and shift claims!
+            // Mandatory terminal sumcheck check across all accumulated evaluation, OOD, and shift
+            // claims: the last bridge round must land exactly on the terminal contraction. The
+            // acceptance is the extracted `verify_cwyz_bridge_claim_step` gate.
             let expected_terminal =
                 terminal_sum(&phis, early_stop, &kernel_claims, &proof.final_coeffs);
-            if !qsag_whir_verified::verify_ood_pin_eq(
-                &expected_terminal
-                    .to_limbs()
-                    .map(Goldilocks::to_canonical_u64),
-                &cur_sum_claim.to_limbs().map(Goldilocks::to_canonical_u64),
+            let Some(last) = last_bridge.as_ref() else {
+                return false;
+            };
+            let [theta, alpha, beta] = last.chals;
+            if !qsag_whir_verified::verify_cwyz_bridge_claim_step(
+                to_verified_ext4(last.wire[0]),
+                to_verified_ext4(last.wire[1]),
+                to_verified_ext4(last.wire[2]),
+                to_verified_ext4(last.wire[3]),
+                to_verified_ext4(last.wire[4]),
+                to_verified_ext4(last.claim),
+                to_verified_ext4(last.phi),
+                to_verified_ext4(theta),
+                to_verified_ext4(alpha),
+                to_verified_ext4(beta),
+                to_verified_ext4(expected_terminal),
             ) {
                 return false;
             }
+            let terminal_coeffs = alloc::sync::Arc::new(to_verified_coeffs(&proof.final_coeffs));
 
             let final_pow_nonce = if stage_idx == 0 {
                 proof.pow_nonce
@@ -3241,6 +3372,7 @@ fn whir_verify_core(
                     inv_two,
                     &inv_zetas,
                     proof,
+                    Some(&terminal_coeffs),
                     transcript,
                 )
             } else {
@@ -3256,17 +3388,14 @@ fn whir_verify_core(
                     inv_shift,
                     inv_two,
                     &inv_zetas,
+                    Some(&terminal_coeffs),
                     transcript,
                 )
             };
-            let Some(final_claims) = final_claims else {
+            // Every final-stage fiber was pinned to `final_coeffs` by the extracted
+            // `verify_ext4_univariate_at_base_pin` inside the fold.
+            if final_claims.is_none() {
                 return false;
-            };
-
-            for &(z_u, v_shift) in &final_claims {
-                if eval_univariate_ext4_at_base(&proof.final_coeffs, z_u) != v_shift {
-                    return false;
-                }
             }
         }
     }
@@ -3274,27 +3403,65 @@ fn whir_verify_core(
     true
 }
 
-/// Independent public queries share the global bounded worker budget; output order is stable.
-fn map_query_indices<T: Send, F: Fn(usize) -> T + Sync>(count: usize, f: F) -> Vec<T> {
+/// Map independent public query indices in stable order, `chunk` per work item, on the
+/// persistent verification pool (inline without `std`).
+fn map_query_indices<T, F>(count: usize, chunk: usize, f: F) -> Vec<T>
+where
+    T: Send + 'static,
+    F: Fn(usize) -> T + Send + Sync + 'static,
+{
     #[cfg(feature = "std")]
-    if count >= 128 {
-        let ranges: Vec<_> = (0..count)
-            .step_by(count.div_ceil(4))
-            .map(|start| start..(start + count.div_ceil(4)).min(count))
-            .collect();
-        return crate::map_chunks_bounded(&ranges, |ranges| {
-            ranges
-                .iter()
-                .flat_map(|range| range.clone().map(&f))
-                .collect::<Vec<_>>()
-        })
-        .into_iter()
-        .flatten()
-        .collect();
+    {
+        crate::pool::map_indices(count, chunk, f)
     }
-    (0..count).map(f).collect()
+    #[cfg(not(feature = "std"))]
+    {
+        let _ = chunk;
+        (0..count).map(f).collect()
+    }
 }
 
+/// One folded fiber: the shift point `z_u`, the folded value, and (final stage only) whether
+/// the extracted terminal pin accepted `final_coeffs(z_u) == folded value`.
+type FoldedFiber = (Goldilocks, GoldilocksExt4, bool);
+
+/// Fold one opened fiber with the extracted duet fold and, in the final stage, pin it to the
+/// terminal polynomial with the extracted Horner gate.
+#[inline]
+fn fold_and_pin_fiber(
+    fiber: &[GoldilocksExt4],
+    y0: Goldilocks,
+    inv_y0: Goldilocks,
+    inv_two: Goldilocks,
+    inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
+    stage_chals: &[[GoldilocksExt4; 3]],
+    terminal: Option<&[qsag_whir_verified::Ext4]>,
+) -> FoldedFiber {
+    let duet = fold_coset_group_to_last_duet(fiber, y0, inv_y0, inv_two, inv_zetas, stage_chals);
+    let v_shift = duet.fold(inv_two);
+    let z_u = pow2_iter_base(y0, stage_chals.len());
+    let pinned = terminal.is_none_or(|coeffs| {
+        duet.accepts(
+            inv_two,
+            qsag_whir_verified::eval_ext4_univariate_at_base(coeffs, z_u.to_canonical_u64()),
+        ) && qsag_whir_verified::verify_ext4_univariate_at_base_pin(
+            coeffs,
+            z_u.to_canonical_u64(),
+            to_verified_ext4(v_shift),
+        )
+    });
+    (z_u, v_shift, pinned)
+}
+
+fn accepted_fiber_claims(folded: Vec<FoldedFiber>) -> Option<Vec<(Goldilocks, GoldilocksExt4)>> {
+    folded
+        .into_iter()
+        .map(|(z_u, v_shift, pinned)| pinned.then_some((z_u, v_shift)))
+        .collect()
+}
+
+/// Authenticate and fold the Round-0 fibers. With `terminal` set (final stage) every folded
+/// value must also equal the terminal polynomial at its shift point.
 #[allow(clippy::too_many_arguments)]
 fn verify_and_fold_stage0_fibers(
     comm_0: &CanopyCommitment,
@@ -3308,6 +3475,7 @@ fn verify_and_fold_stage0_fibers(
     inv_two: Goldilocks,
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
     proof: &HemWhirOpeningProof,
+    terminal: Option<&alloc::sync::Arc<Vec<qsag_whir_verified::Ext4>>>,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> Option<Vec<(Goldilocks, GoldilocksExt4)>> {
     let _phase = crate::profile::span("verify_and_fold_stage0_fibers");
@@ -3323,72 +3491,95 @@ fn verify_and_fold_stage0_fibers(
     let log_d0 = domain_0.trailing_zeros() as usize;
     let omega_0 = Goldilocks::two_adic_generator(log_d0);
     let inv_omega_0 = omega_0.inv();
-    let step_vars = stage_chals.len();
+    // Fiber points are `x_k = y_0 * zeta^k` with `zeta = omega_0^{num_groups_0}`.
+    let zeta_0 = omega_0.pow(num_groups_0 as u64);
 
-    let mut sorted_leaves = Vec::with_capacity(q_indices.len());
+    let fold = {
+        let q_indices: alloc::sync::Arc<[usize]> = q_indices.as_slice().into();
+        let vals: alloc::sync::Arc<[Goldilocks]> = proof.round0_vals.as_slice().into();
+        let weights = weights.to_vec();
+        let stage_chals = stage_chals.to_vec();
+        let inv_zetas = *inv_zetas;
+        let terminal = terminal.cloned();
+        move |i: usize| {
+            let g = q_indices[i];
+            let vals = &vals[i * per_query..(i + 1) * per_query];
+            let y0 = Goldilocks::NON_RESIDUE * omega_0.pow(g as u64);
+            let mut ext_vals = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
+            if num_polys == 1 {
+                for (slot, &v) in ext_vals.iter_mut().zip(vals) {
+                    *slot = GoldilocksExt4::from_base(v);
+                }
+            } else {
+                for (w, poly_vals) in weights.iter().zip(vals.chunks_exact(arity_0)) {
+                    let mut x = y0;
+                    for (slot, &v) in ext_vals.iter_mut().zip(poly_vals) {
+                        *slot += (w[0] + w[1].mul_base(x)).mul_base(v);
+                        x *= zeta_0;
+                    }
+                }
+            }
+            fold_and_pin_fiber(
+                &ext_vals[..arity_0],
+                y0,
+                inv_shift * inv_omega_0.pow(g as u64),
+                inv_two,
+                &inv_zetas,
+                &stage_chals,
+                terminal.as_ref().map(|coeffs| coeffs.as_slice()),
+            )
+        }
+    };
 
-    for (batch, indices) in q_indices.chunks(4).enumerate() {
+    let hash_vals = proof.round0_vals.clone();
+    let salts = proof.round0_salts.clone();
+    let batches = q_indices.len().div_ceil(4);
+    // Each pool item hashes four leaves with SIMD and folds their public values.
+    let results = map_query_indices(batches, 1, move |batch| {
         let start = batch * 4;
+        let end = (start + 4).min(q_indices.len());
+        let indices = &q_indices[start..end];
+        let mut leaves = Vec::with_capacity(indices.len());
         if indices.len() == 4 {
             let hashes = queried_round0_hash_x4(
                 indices,
-                &proof.round0_salts[start..],
+                &salts[start..],
                 num_polys,
-                &proof.round0_vals[start * per_query..],
+                &hash_vals[start * per_query..],
                 per_query,
             );
-            sorted_leaves.extend(indices.iter().copied().zip(hashes));
+            leaves.extend(indices.iter().copied().zip(hashes));
         } else {
             for (lane, &g) in indices.iter().enumerate() {
                 let i = start + lane;
-                sorted_leaves.push((
+                leaves.push((
                     g,
                     hash_round0_leaf(
                         g as u32,
-                        &proof.round0_salts[i],
+                        &salts[i],
                         num_polys,
-                        &proof.round0_vals[i * per_query..(i + 1) * per_query],
+                        &hash_vals[i * per_query..(i + 1) * per_query],
                     ),
                 ));
             }
         }
-    }
-    let claims = map_query_indices(q_indices.len(), |i| {
-        let g = q_indices[i];
-        let vals = &proof.round0_vals[i * per_query..(i + 1) * per_query];
-        let mut ext_vals = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
-        if num_polys == 1 {
-            for (slot, &v) in ext_vals.iter_mut().zip(vals) {
-                *slot = GoldilocksExt4::from_base(v);
-            }
-        } else {
-            for (w, poly_vals) in weights.iter().zip(vals.chunks_exact(arity_0)) {
-                for (k, (slot, &v)) in ext_vals.iter_mut().zip(poly_vals).enumerate() {
-                    let x = Goldilocks::NON_RESIDUE * omega_0.pow((g + k * num_groups_0) as u64);
-                    *slot += (w[0] + w[1].mul_base(x)).mul_base(v);
-                }
-            }
-        }
-
-        let y0 = Goldilocks::NON_RESIDUE * omega_0.pow(g as u64);
-        let inv_y0 = inv_shift * inv_omega_0.pow(g as u64);
-        let v_shift = fold_coset_group_ext4(
-            &ext_vals[..arity_0],
-            inv_y0,
-            inv_two,
-            inv_zetas,
-            stage_chals,
-        );
-        let z_u = pow2_iter_base(y0, step_vars);
-        (z_u, v_shift)
+        let folded: Vec<_> = (start..end).map(&fold).collect();
+        (leaves, folded)
     });
-
+    let mut sorted_leaves = Vec::new();
+    let mut folded = Vec::new();
+    for (leaves, values) in results {
+        sorted_leaves.extend(leaves);
+        folded.extend(values);
+    }
     if !verify_canopy_multiproof(comm_0, &sorted_leaves, &proof.round0_multiproof) {
         return None;
     }
-    Some(claims)
+    accepted_fiber_claims(folded)
 }
 
+/// Authenticate and fold the fibers of a committed `Ext4` stage oracle. With `terminal` set
+/// (final stage) every folded value must also equal the terminal polynomial at its shift point.
 #[allow(clippy::too_many_arguments)]
 fn verify_and_fold_ext4_stage_fibers(
     stage_idx: usize,
@@ -3400,6 +3591,7 @@ fn verify_and_fold_ext4_stage_fibers(
     inv_shift: Goldilocks,
     inv_two: Goldilocks,
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
+    terminal: Option<&alloc::sync::Arc<Vec<qsag_whir_verified::Ext4>>>,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> Option<Vec<(Goldilocks, GoldilocksExt4)>> {
     let _phase = crate::profile::span("verify_and_fold_ext4_stage_fibers");
@@ -3417,49 +3609,62 @@ fn verify_and_fold_ext4_stage_fibers(
     let log_d = domain_cur.trailing_zeros() as usize;
     let omega = Goldilocks::two_adic_generator(log_d);
     let inv_omega = omega.inv();
-    let step_vars = stage_chals.len();
     let stage_u8 = stage_idx as u8;
 
-    let mut sorted_leaves = Vec::with_capacity(q_indices.len());
+    let fold = {
+        let q_indices: alloc::sync::Arc<[usize]> = q_indices.as_slice().into();
+        let vals: alloc::sync::Arc<[GoldilocksExt4]> = layer.opened_vals.as_slice().into();
+        let stage_chals = stage_chals.to_vec();
+        let inv_zetas = *inv_zetas;
+        let terminal = terminal.cloned();
+        move |i: usize| {
+            let g = q_indices[i];
+            fold_and_pin_fiber(
+                &vals[i * arity..(i + 1) * arity],
+                Goldilocks::NON_RESIDUE * omega.pow(g as u64),
+                inv_shift * inv_omega.pow(g as u64),
+                inv_two,
+                &inv_zetas,
+                &stage_chals,
+                terminal.as_ref().map(|coeffs| coeffs.as_slice()),
+            )
+        }
+    };
 
-    for (batch, indices) in q_indices.chunks(4).enumerate() {
+    let hash_vals = layer.opened_vals.clone();
+    let batches = q_indices.len().div_ceil(4);
+    // Each pool item hashes four leaves with SIMD and folds their public values.
+    let results = map_query_indices(batches, 1, move |batch| {
         let start = batch * 4;
+        let end = (start + 4).min(q_indices.len());
+        let indices = &q_indices[start..end];
+        let mut leaves = Vec::with_capacity(indices.len());
         if indices.len() == 4 {
-            let hashes = queried_ext4_hash_x4(
-                stage_u8,
-                indices,
-                &layer.opened_vals[start * arity..],
-                arity,
-            );
-            sorted_leaves.extend(indices.iter().copied().zip(hashes));
+            let hashes =
+                queried_ext4_hash_x4(stage_u8, indices, &hash_vals[start * arity..], arity);
+            leaves.extend(indices.iter().copied().zip(hashes));
         } else {
             for (lane, &g) in indices.iter().enumerate() {
                 let i = start + lane;
-                sorted_leaves.push((
+                leaves.push((
                     g,
-                    hash_ext4_group(
-                        stage_u8,
-                        g as u32,
-                        &layer.opened_vals[i * arity..(i + 1) * arity],
-                    ),
+                    hash_ext4_group(stage_u8, g as u32, &hash_vals[i * arity..(i + 1) * arity]),
                 ));
             }
         }
-    }
-    let claims = map_query_indices(q_indices.len(), |i| {
-        let g = q_indices[i];
-        let vals = &layer.opened_vals[i * arity..(i + 1) * arity];
-        let y0 = Goldilocks::NON_RESIDUE * omega.pow(g as u64);
-        let inv_y0 = inv_shift * inv_omega.pow(g as u64);
-        let v_shift = fold_coset_group_ext4(vals, inv_y0, inv_two, inv_zetas, stage_chals);
-        let z_u = pow2_iter_base(y0, step_vars);
-        (z_u, v_shift)
+        let folded: Vec<_> = (start..end).map(&fold).collect();
+        (leaves, folded)
     });
-
+    let mut sorted_leaves = Vec::new();
+    let mut folded = Vec::new();
+    for (leaves, values) in results {
+        sorted_leaves.extend(leaves);
+        folded.extend(values);
+    }
     if !verify_canopy_multiproof(&layer.commitment, &sorted_leaves, &layer.multiproof) {
         return None;
     }
-    Some(claims)
+    accepted_fiber_claims(folded)
 }
 
 // ============================================================================
@@ -3571,10 +3776,16 @@ mod pcs_unit_tests {
             let even = (v0 + v1).mul_base(it);
             let odd = (v0 - v1).mul_base(iy);
             let expected = odd + (alpha + beta.mul_base(yy)) * (even + theta * odd);
-            assert_eq!(
-                fold_duet_affine_ext4(v0, v1, iy, it, yy, theta, alpha, beta),
-                expected
-            );
+            let last = FiberLastDuet {
+                v0,
+                v1,
+                inv_two_x: iy,
+                x_sq: yy,
+                chal: [theta, alpha, beta],
+            };
+            assert_eq!(last.fold(it), expected);
+            assert!(last.accepts(it, to_verified_ext4(expected)));
+            assert!(!last.accepts(it, to_verified_ext4(expected + GoldilocksExt4::V)));
             assert!(qsag_whir_verified::verify_cwyz_duet_fold_step(
                 to_verified_ext4(v0),
                 to_verified_ext4(v1),
@@ -3601,18 +3812,18 @@ mod pcs_unit_tests {
             let w1 = v1;
             let w2 = theta;
             let w3 = alpha;
-            let w4 = beta;
+            let fourth_power = beta;
             let claim = GoldilocksExt4::from_limbs(core::array::from_fn(|_| next()));
             let phi = GoldilocksExt4::from_limbs(core::array::from_fn(|_| next()));
             let f = w0 + phi * w1;
             let g = w2 + phi * (claim - w0);
-            let bridge_expected = g + alpha * (f + theta * g) + beta * (w3 + theta * w4);
+            let bridge_expected = g + alpha * (f + theta * g) + beta * (w3 + theta * fourth_power);
             assert!(qsag_whir_verified::verify_cwyz_bridge_claim_step(
                 to_verified_ext4(w0),
                 to_verified_ext4(w1),
                 to_verified_ext4(w2),
                 to_verified_ext4(w3),
-                to_verified_ext4(w4),
+                to_verified_ext4(fourth_power),
                 to_verified_ext4(claim),
                 to_verified_ext4(phi),
                 to_verified_ext4(theta),
@@ -3661,7 +3872,7 @@ mod pcs_unit_tests {
     fn exact_regime_ladder() {
         assert_eq!(
             WhirSecurityRegime::default(),
-            WhirSecurityRegime::Habr24Qrom128
+            WhirSecurityRegime::BciksJohnsonQrom128
         );
         for (tag, counts, bits) in [
             (0, [56, 28, 19, 14], 128),
@@ -3705,6 +3916,11 @@ mod pcs_unit_tests {
         ] {
             for nv in 2..=MAX_PCS_NUM_VARS {
                 let schedule = regime.schedule(nv);
+                if !regime.meets_qrom_128_floor() {
+                    assert!(!schedule.validate(nv));
+                    assert!(WhirSchedule::from_bytes_canonical(&schedule.to_bytes(), nv).is_none());
+                    continue;
+                }
                 assert!(schedule.validate(nv));
                 let wire = schedule.to_bytes();
                 assert_eq!(
@@ -3737,13 +3953,8 @@ mod pcs_unit_tests {
                 assert!(WhirSchedule::from_bytes_canonical(&wire[..wire.len() - 1], nv).is_none());
                 let mut custom = schedule.clone();
                 custom.stages[0].num_queries += 1;
-                assert!(custom.validate(nv));
-                assert_eq!(
-                    WhirSchedule::from_bytes_canonical(&custom.to_bytes(), nv)
-                        .unwrap()
-                        .0,
-                    custom
-                );
+                assert!(!custom.validate(nv));
+                assert!(WhirSchedule::from_bytes_canonical(&custom.to_bytes(), nv).is_none());
                 let mut bad = schedule;
                 bad.stages[0].num_queries = 1;
                 assert!(!bad.validate(nv));
@@ -3758,8 +3969,6 @@ mod pcs_unit_tests {
         let point = vec![GoldilocksExt4::from_base(Goldilocks::TWO); nv];
         let value = crate::field::mle_eval_base_at_ext4(&values, &point);
         for regime in [
-            WhirSecurityRegime::Habr24Interactive128,
-            WhirSecurityRegime::BciksJohnsonClassical128,
             WhirSecurityRegime::Habr24Qrom128,
             WhirSecurityRegime::BciksJohnsonQrom128,
         ] {
