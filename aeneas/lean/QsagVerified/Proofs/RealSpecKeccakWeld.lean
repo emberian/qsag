@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 public import QsagVerified.Proofs.Sponge
 public import Qsag.Keccak
 import all Qsag.Keccak
