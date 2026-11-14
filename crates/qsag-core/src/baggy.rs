@@ -391,7 +391,14 @@ pub enum FirstSignedError {
 pub trait FirstSignedLedger {
     /// Gate the first secret-derived output of a ceremony. Durable implementations
     /// require a journal permit even when every first-signed entry is already cached.
-    fn begin_release(&mut self, _key: &[u8; 32], _ceremony: &[u8; 32], _codeword: &[u8; 32]) -> Result<(), FirstSignedError> { Err(FirstSignedError::Io) }
+    fn begin_release(
+        &mut self,
+        _key: &[u8; 32],
+        _ceremony: &[u8; 32],
+        _codeword: &[u8; 32],
+    ) -> Result<(), FirstSignedError> {
+        Err(FirstSignedError::Io)
+    }
 
     /// The record of `key`; `Ok(None)` only if none was ever stored.
     fn first_signed(&self, key: &StaticKeyId) -> Result<Option<Vec<u8>>, FirstSignedError>;
@@ -438,7 +445,14 @@ impl MemoryFirstSigned {
 }
 
 impl FirstSignedLedger for MemoryFirstSigned {
-    fn begin_release(&mut self, _key: &[u8; 32], _ceremony: &[u8; 32], _codeword: &[u8; 32]) -> Result<(), FirstSignedError> { Ok(()) }
+    fn begin_release(
+        &mut self,
+        _key: &[u8; 32],
+        _ceremony: &[u8; 32],
+        _codeword: &[u8; 32],
+    ) -> Result<(), FirstSignedError> {
+        Ok(())
+    }
     fn first_signed(&self, key: &StaticKeyId) -> Result<Option<Vec<u8>>, FirstSignedError> {
         Ok(self.records.get(key).cloned())
     }
@@ -467,26 +481,49 @@ impl FirstSignedLedger for MemoryFirstSigned {
 /// Authenticated durable first-signed records. Retain `checkpoint()` independently
 /// before opening signing material; supply it on recovery to reject rollback.
 #[cfg(feature = "std")]
-pub struct FsFirstSignedLedger(crate::durable_ledger::Ledger, Option<crate::ceremony_journal::CeremonyReservation>);
+pub struct FsFirstSignedLedger(
+    crate::durable_ledger::Ledger,
+    Option<crate::ceremony_journal::CeremonyReservation>,
+);
 #[cfg(feature = "std")]
 impl FsFirstSignedLedger {
     /// Consume a committed journal permit for the next signing or precomputation attempt.
     /// Bind key_id to BaggyKeyBinding::identity(), ceremony_id to the engine session,
     /// and epoch_or_codeword to baggy_msg_digest (or precompute_release_binding).
-    pub fn authorize_release(&mut self, journal: &crate::ceremony_journal::FsCeremonyJournal,
-        permit: crate::ceremony_journal::CeremonyReleasePermit) -> Result<(), FirstSignedError> {
+    pub fn authorize_release(
+        &mut self,
+        journal: &crate::ceremony_journal::FsCeremonyJournal,
+        permit: crate::ceremony_journal::CeremonyReleasePermit,
+    ) -> Result<(), FirstSignedError> {
         self.1 = None;
-        self.1 = Some(journal.consume_release(permit).map_err(|_| FirstSignedError::Io)?);
+        self.1 = Some(
+            journal
+                .consume_release(permit)
+                .map_err(|_| FirstSignedError::Io)?,
+        );
         Ok(())
     }
 
-    pub fn provision_genesis(path: impl Into<std::path::PathBuf>, key: [u8; 32]) -> Result<Self, FirstSignedError> {
-        crate::durable_ledger::Ledger::create(path, key, b"QSAG.FIRST_SIGNED.V1").map(|ledger| Self(ledger, None)).map_err(|_| FirstSignedError::Io)
+    pub fn provision_genesis(
+        path: impl Into<std::path::PathBuf>,
+        key: [u8; 32],
+    ) -> Result<Self, FirstSignedError> {
+        crate::durable_ledger::Ledger::create(path, key, b"QSAG.FIRST_SIGNED.V1")
+            .map(|ledger| Self(ledger, None))
+            .map_err(|_| FirstSignedError::Io)
     }
-    pub fn open_existing(path: impl Into<std::path::PathBuf>, key: [u8; 32], checkpoint: crate::LedgerCheckpoint) -> Result<Self, FirstSignedError> {
-        crate::durable_ledger::Ledger::open(path, key, b"QSAG.FIRST_SIGNED.V1", checkpoint).map(|ledger| Self(ledger, None)).map_err(|_| FirstSignedError::Corrupt)
+    pub fn open_existing(
+        path: impl Into<std::path::PathBuf>,
+        key: [u8; 32],
+        checkpoint: crate::LedgerCheckpoint,
+    ) -> Result<Self, FirstSignedError> {
+        crate::durable_ledger::Ledger::open(path, key, b"QSAG.FIRST_SIGNED.V1", checkpoint)
+            .map(|ledger| Self(ledger, None))
+            .map_err(|_| FirstSignedError::Corrupt)
     }
-    pub fn checkpoint(&self) -> crate::LedgerCheckpoint { self.0.checkpoint() }
+    pub fn checkpoint(&self) -> crate::LedgerCheckpoint {
+        self.0.checkpoint()
+    }
     fn key(key: &StaticKeyId) -> Vec<u8> {
         let mut out = key.identity.to_vec();
         out.extend_from_slice(&key.layer.to_le_bytes());
@@ -497,20 +534,34 @@ impl FsFirstSignedLedger {
 }
 #[cfg(feature = "std")]
 impl FirstSignedLedger for FsFirstSignedLedger {
-    fn begin_release(&mut self, key: &[u8; 32], ceremony: &[u8; 32], codeword: &[u8; 32]) -> Result<(), FirstSignedError> {
+    fn begin_release(
+        &mut self,
+        key: &[u8; 32],
+        ceremony: &[u8; 32],
+        codeword: &[u8; 32],
+    ) -> Result<(), FirstSignedError> {
         let r = self.1.take().ok_or(FirstSignedError::Io)?;
-        if r.key_id != *key || r.ceremony_id != *ceremony || r.epoch_or_codeword != *codeword { return Err(FirstSignedError::Conflict); }
+        if r.key_id != *key || r.ceremony_id != *ceremony || r.epoch_or_codeword != *codeword {
+            return Err(FirstSignedError::Conflict);
+        }
         Ok(())
     }
 
     fn first_signed(&self, key: &StaticKeyId) -> Result<Option<Vec<u8>>, FirstSignedError> {
-        Ok(self.0.read().map_err(|_| FirstSignedError::Corrupt)?.get(&Self::key(key)).cloned())
+        Ok(self
+            .0
+            .read()
+            .map_err(|_| FirstSignedError::Corrupt)?
+            .get(&Self::key(key))
+            .cloned())
     }
     fn sync_record(&mut self, records: &[FirstSignedRecord]) -> Result<(), FirstSignedError> {
         let mut stored = self.0.read().map_err(|_| FirstSignedError::Corrupt)?;
         for r in records {
             let key = Self::key(&r.key);
-            if stored.get(&key).is_some_and(|d| *d != r.digits) { return Err(FirstSignedError::Conflict); }
+            if stored.get(&key).is_some_and(|d| *d != r.digits) {
+                return Err(FirstSignedError::Conflict);
+            }
             stored.insert(key, r.digits.clone());
         }
         self.0.commit(&stored).map_err(|_| FirstSignedError::Io)
@@ -599,9 +650,7 @@ impl fmt::Display for BaggyError {
             Self::CacheIdentityMismatch => {
                 f.write_str("Waistband cache is bound to another key or parameter set")
             }
-            Self::CacheEntryUnauthenticated => {
-                f.write_str("Waistband entry failed authentication")
-            }
+            Self::CacheEntryUnauthenticated => f.write_str("Waistband entry failed authentication"),
             Self::CacheUnanchored => {
                 f.write_str("cached root has no first-signed record for the layer above")
             }
@@ -801,7 +850,15 @@ fn verified_path(
     nodes.push(fors_pk(&pk.pk_seed, tree0, kp0, &roots));
     for (layer, layer_sig) in sig.layers.iter().enumerate() {
         let (kp, tree) = params.path_at(leaf_idx, layer);
-        let root = layer_root(params, &pk.pk_seed, layer, tree, kp, &nodes[layer], layer_sig)?;
+        let root = layer_root(
+            params,
+            &pk.pk_seed,
+            layer,
+            tree,
+            kp,
+            &nodes[layer],
+            layer_sig,
+        )?;
         nodes.push(root);
     }
     (nodes[params.num_layers] == pk.pk_root).then_some(nodes)
@@ -886,9 +943,17 @@ pub fn baggy_reference_sign(
         let leaves: Vec<[u8; 32]> = (0..params.subtree_leaves() as u32)
             .map(|l| wots_c_reference_leaf(&params.wots, sk, layer as u32, tree, l))
             .collect();
-        let levels = merkle_levels(&pk.pk_seed, layer as u32, tree, AdrsKind::Tree, 0, &leaves, 0);
-        let (ctr, digits) =
-            layer_grinder(&pk.pk_seed, layer, tree, kp, &node).grind(&params.wots, params.max_grind)?;
+        let levels = merkle_levels(
+            &pk.pk_seed,
+            layer as u32,
+            tree,
+            AdrsKind::Tree,
+            0,
+            &leaves,
+            0,
+        );
+        let (ctr, digits) = layer_grinder(&pk.pk_seed, layer, tree, kp, &node)
+            .grind(&params.wots, params.max_grind)?;
         layers.push(BaggyLayerSig {
             ctr,
             chains: wots_c_reference_nodes(&params.wots, sk, layer as u32, tree, kp, &digits),
@@ -1011,8 +1076,10 @@ impl WaistbandCache {
 
     /// Journal codeword binding for this cache precomputation.
     pub fn precompute_release_binding(&self, binding: &BaggyKeyBinding) -> [u8; 32] {
-        cshake256_32(b"QSAG.BAGGY.PRECOMPUTE.RELEASE/v1", &encode_multi_frame(&[
-            &binding.identity(), &(self.top_layers as u64).to_le_bytes()]))
+        cshake256_32(
+            b"QSAG.BAGGY.PRECOMPUTE.RELEASE/v1",
+            &encode_multi_frame(&[&binding.identity(), &(self.top_layers as u64).to_le_bytes()]),
+        )
     }
 
     /// Fill every signature of the top `top_layers` layers eagerly (distributed-key-ceremony
@@ -1041,7 +1108,11 @@ impl WaistbandCache {
         if hp * self.top_layers > 16 {
             return Err(BaggyError::InvalidParameters);
         }
-        ledger.begin_release(&binding.identity(), engine.session_id(), &self.precompute_release_binding(binding))?;
+        ledger.begin_release(
+            &binding.identity(),
+            engine.session_id(),
+            &self.precompute_release_binding(binding),
+        )?;
         // Every subtree of the covered layers, plus the layer below for their child roots.
         let mut subtrees: Vec<(usize, u64)> = Vec::new();
         for layer in (lowest..d).rev() {
@@ -1061,8 +1132,9 @@ impl WaistbandCache {
         let sweep = Sweep::evaluate(engine, &pk.pk_seed, lanes, WOTS_STEPS as u8)?;
         engine.check()?;
         engine.mark_open_round();
-        let picks: Vec<(usize, u8)> =
-            (0..sweep.lane_count()).map(|l| (l, WOTS_STEPS as u8)).collect();
+        let picks: Vec<(usize, u8)> = (0..sweep.lane_count())
+            .map(|l| (l, WOTS_STEPS as u8))
+            .collect();
         let endpoints = sweep.open_positions(engine, &picks)?;
         let mut levels: BTreeMap<(usize, u64), Vec<Vec<[u8; 32]>>> = BTreeMap::new();
         for (i, &(layer, tree)) in subtrees.iter().enumerate() {
@@ -1073,7 +1145,15 @@ impl WaistbandCache {
                 .collect();
             levels.insert(
                 (layer, tree),
-                merkle_levels(&pk.pk_seed, layer as u32, tree, AdrsKind::Tree, 0, &leaves, 0),
+                merkle_levels(
+                    &pk.pk_seed,
+                    layer as u32,
+                    tree,
+                    AdrsKind::Tree,
+                    0,
+                    &leaves,
+                    0,
+                ),
             );
         }
         if levels[&(d - 1, 0)][hp][0] != pk.pk_root {
@@ -1217,8 +1297,15 @@ fn authenticate_cached_path(
         let (kp, tree) = params.path_at(leaf_idx, layer);
         below = match plan {
             LayerPlan::Cached(entry) => {
-                let root =
-                    layer_root(params, &pk.pk_seed, layer, tree, kp, &entry.child_root, &entry.sig);
+                let root = layer_root(
+                    params,
+                    &pk.pk_seed,
+                    layer,
+                    tree,
+                    kp,
+                    &entry.child_root,
+                    &entry.sig,
+                );
                 if root != Some(entry.layer_root) || below.is_some_and(|r| r != entry.child_root) {
                     return Err(BaggyError::CacheEntryUnauthenticated);
                 }
@@ -1228,8 +1315,15 @@ fn authenticate_cached_path(
                 if set.leaves.len() != params.subtree_leaves() {
                     return Err(BaggyError::CacheEntryUnauthenticated);
                 }
-                let levels =
-                    merkle_levels(&pk.pk_seed, layer as u32, tree, AdrsKind::Tree, 0, &set.leaves, 0);
+                let levels = merkle_levels(
+                    &pk.pk_seed,
+                    layer as u32,
+                    tree,
+                    AdrsKind::Tree,
+                    0,
+                    &set.leaves,
+                    0,
+                );
                 if levels[params.subtree_height][0] != set.root {
                     return Err(BaggyError::CacheEntryUnauthenticated);
                 }
@@ -1277,8 +1371,9 @@ pub fn baggy_keygen_mpc(
     let sweep = Sweep::evaluate(engine, &pk_seed, lanes, WOTS_STEPS as u8)?;
     engine.check()?;
     engine.mark_open_round();
-    let picks: Vec<(usize, u8)> =
-        (0..sweep.lane_count()).map(|l| (l, WOTS_STEPS as u8)).collect();
+    let picks: Vec<(usize, u8)> = (0..sweep.lane_count())
+        .map(|l| (l, WOTS_STEPS as u8))
+        .collect();
     let endpoints = sweep.open_positions(engine, &picks)?;
     let leaves: Vec<[u8; 32]> = endpoints
         .chunks_exact(chains)
@@ -1319,10 +1414,7 @@ enum LayerPlan {
 }
 
 /// Phase 1: the deterministic randomiser `R`, evaluated and verified under MPC.
-fn baggy_randomiser_mpc(
-    engine: &mut Rss256Engine,
-    mu: &[u8; 32],
-) -> Result<[u8; 32], BaggyError> {
+fn baggy_randomiser_mpc(engine: &mut Rss256Engine, mu: &[u8; 32]) -> Result<[u8; 32], BaggyError> {
     let one = active_lane_mask(1);
     let (frame, off) = keyed_mu_frame(TAG_BAGGY_OPT_RAND, mu);
     let mut st = SharedState256::from_public_frames(&TSW_SUITE_MIDSTATE, &[frame])?;
@@ -1501,7 +1593,15 @@ pub fn baggy_sign_mpc<L: FirstSignedLedger + ?Sized>(
                 (leaves, lane0 + kp as usize * chains, false)
             }
         };
-        let levels = merkle_levels(&pk.pk_seed, layer as u32, tree, AdrsKind::Tree, 0, &leaves, 0);
+        let levels = merkle_levels(
+            &pk.pk_seed,
+            layer as u32,
+            tree,
+            AdrsKind::Tree,
+            0,
+            &leaves,
+            0,
+        );
         let (ctr, digits) = layer_grinder(&pk.pk_seed, layer, tree, kp, &node)
             .grind(&params.wots, params.max_grind)
             .ok_or(BaggyError::GrindExhausted)?;
@@ -1535,7 +1635,9 @@ pub fn baggy_sign_mpc<L: FirstSignedLedger + ?Sized>(
     );
     let revealed = sweep.open_positions(engine, &node_picks)?;
     let (nodes, fors_secrets) = revealed.split_at(chain_node_count);
-    for (opening, secret) in fors.iter_mut().zip(fors_secrets) { opening.secret = *secret; }
+    for (opening, secret) in fors.iter_mut().zip(fors_secrets) {
+        opening.secret = *secret;
+    }
     let mut opened_layers = Vec::with_capacity(pending.len());
     for ((layer, ctr, auth), chain_nodes) in pending.into_iter().zip(nodes.chunks_exact(chains)) {
         layers[layer] = Some(BaggyLayerSig {
@@ -1634,7 +1736,9 @@ mod tests {
     /// Hypertree leaf index a valid signature on `msg` selects.
     fn leaf_of(params: &BaggyParams, pk: &BaggyPublicKey, msg: &[u8], sig: &BaggySig) -> u64 {
         let mu = baggy_msg_digest(pk, msg);
-        parse_hmsg(params, &hmsg(pk, &sig.r, &mu, sig.msg_ctr)).unwrap().1
+        parse_hmsg(params, &hmsg(pk, &sig.r, &mu, sig.msg_ctr))
+            .unwrap()
+            .1
     }
 
     /// Key id and reference digit vector of the path's leaf at `layer`.
@@ -1680,11 +1784,21 @@ mod tests {
 
         let msg = b"baggy threshold signature";
         let before = engine.stats();
-        let sig =
-            baggy_sign_mpc(&mut engine, &params, &pk, &binding, &mut cache, &mut ledger, msg)
-                .unwrap();
+        let sig = baggy_sign_mpc(
+            &mut engine,
+            &params,
+            &pk,
+            &binding,
+            &mut cache,
+            &mut ledger,
+            msg,
+        )
+        .unwrap();
         let after = engine.stats();
-        assert_eq!(Some(sig.clone()), baggy_reference_sign(&params, &sk, &pk, msg));
+        assert_eq!(
+            Some(sig.clone()),
+            baggy_reference_sign(&params, &sk, &pk, msg)
+        );
         // Every layer's key opened its first codeword, recorded in one write before the round.
         assert_eq!((ledger.len(), ledger.sync_count()), (params.num_layers, 1));
         for layer in 0..params.num_layers {
@@ -1738,8 +1852,16 @@ mod tests {
             let mut cache = WaistbandCache::disabled();
             let mut ledger = MemoryFirstSigned::new();
             sigs.push(
-                baggy_sign_mpc(&mut engine, &params, &pk, &binding, &mut cache, &mut ledger, msg)
-                    .unwrap(),
+                baggy_sign_mpc(
+                    &mut engine,
+                    &params,
+                    &pk,
+                    &binding,
+                    &mut cache,
+                    &mut ledger,
+                    msg,
+                )
+                .unwrap(),
             );
         }
         assert_eq!(sigs[0], sigs[1]);
@@ -1771,7 +1893,9 @@ mod tests {
 
         // Eager: top two of three layers. 1 + 4 covered subtrees, 5 * 4 signatures.
         let mut eager = WaistbandCache::new(2, 4096);
-        eager.precompute(&mut engine, &params, &pk, &binding, &mut ledger).unwrap();
+        eager
+            .precompute(&mut engine, &params, &pk, &binding, &mut ledger)
+            .unwrap();
         assert_eq!(eager.sig_entries(), 20);
         assert_eq!(eager.leaf_entries(), 5);
         assert_eq!(eager.binding(), Some(&binding));
@@ -1785,15 +1909,8 @@ mod tests {
 
             let s0 = engine.stats();
             let mut sign = |cache: &mut WaistbandCache| {
-                let sig = baggy_sign_mpc(
-                    &mut engine,
-                    &params,
-                    &pk,
-                    &binding,
-                    cache,
-                    &mut ledger,
-                    msg,
-                );
+                let sig =
+                    baggy_sign_mpc(&mut engine, &params, &pk, &binding, cache, &mut ledger, msg);
                 (sig.unwrap(), engine.stats())
             };
             let (cold, s1) = sign(&mut none);
@@ -1825,13 +1942,27 @@ mod tests {
         // Unbound shares are refused outright.
         let mut other_ledger = MemoryFirstSigned::new();
         assert_eq!(
-            wrong.precompute(&mut other_engine, &params, &bogus, &bogus_binding, &mut other_ledger),
+            wrong.precompute(
+                &mut other_engine,
+                &params,
+                &bogus,
+                &bogus_binding,
+                &mut other_ledger
+            ),
             Err(BaggyError::KeyBindingMismatch)
         );
         // Shares bound to the wrong root get as far as the root check and no further.
-        other_engine.bind_key_identity(&bogus_binding.identity()).unwrap();
+        other_engine
+            .bind_key_identity(&bogus_binding.identity())
+            .unwrap();
         assert_eq!(
-            wrong.precompute(&mut other_engine, &params, &bogus, &bogus_binding, &mut other_ledger),
+            wrong.precompute(
+                &mut other_engine,
+                &params,
+                &bogus,
+                &bogus_binding,
+                &mut other_ledger
+            ),
             Err(BaggyError::CacheInconsistent)
         );
         // Nothing stored, nothing recorded, and the cache did not bind to the wrong root.
@@ -1848,7 +1979,9 @@ mod tests {
         let (pk, binding) = keyed(&mut engine, &params, &sk);
         let mut ledger = MemoryFirstSigned::new();
         let mut clean = WaistbandCache::new(1, 64);
-        clean.precompute(&mut engine, &params, &pk, &binding, &mut ledger).unwrap();
+        clean
+            .precompute(&mut engine, &params, &pk, &binding, &mut ledger)
+            .unwrap();
         let top = params.num_layers - 1;
 
         let mut bad_chain = clean.clone();
@@ -1860,9 +1993,16 @@ mod tests {
         let mut rewritten = clean.clone();
         for (&(_, tree, kp), entry) in rewritten.sigs.iter_mut() {
             entry.sig.auth[0][0] ^= 1;
-            entry.layer_root =
-                layer_root(&params, &pk.pk_seed, top, tree, kp, &entry.child_root, &entry.sig)
-                    .unwrap();
+            entry.layer_root = layer_root(
+                &params,
+                &pk.pk_seed,
+                top,
+                tree,
+                kp,
+                &entry.child_root,
+                &entry.sig,
+            )
+            .unwrap();
             assert_ne!(entry.layer_root, pk.pk_root);
         }
         // A damaged cached leaf set (served when the signature itself is not cached).
@@ -1875,7 +2015,15 @@ mod tests {
         for (i, cache) in [bad_chain, rewritten, bad_leaves].iter_mut().enumerate() {
             let before = engine.stats();
             assert_eq!(
-                baggy_sign_mpc(&mut engine, &params, &pk, &binding, cache, &mut ledger, b"m"),
+                baggy_sign_mpc(
+                    &mut engine,
+                    &params,
+                    &pk,
+                    &binding,
+                    cache,
+                    &mut ledger,
+                    b"m"
+                ),
                 Err(BaggyError::CacheEntryUnauthenticated),
                 "case {i}"
             );
@@ -1885,8 +2033,16 @@ mod tests {
             assert_eq!(after.lane_perms - before.lane_perms, 2, "case {i}");
         }
         assert_eq!(ledger.len(), records);
-        let sig = baggy_sign_mpc(&mut engine, &params, &pk, &binding, &mut clean, &mut ledger, b"m")
-            .unwrap();
+        let sig = baggy_sign_mpc(
+            &mut engine,
+            &params,
+            &pk,
+            &binding,
+            &mut clean,
+            &mut ledger,
+            b"m",
+        )
+        .unwrap();
         assert_eq!(Some(sig), baggy_reference_sign(&params, &sk, &pk, b"m"));
     }
 
@@ -1925,21 +2081,44 @@ mod tests {
             )
         };
         assert_eq!(sign(&mut original, &mut witness).0, Ok(want.clone()));
-        assert!(original.sigs.remove(&(top as u32, top_key.tree, top_key.key_pair)).is_some());
-        assert!(original.leaves.remove(&(top as u32, top_key.tree)).is_some());
+        assert!(
+            original
+                .sigs
+                .remove(&(top as u32, top_key.tree, top_key.key_pair))
+                .is_some()
+        );
+        assert!(
+            original
+                .leaves
+                .remove(&(top as u32, top_key.tree))
+                .is_some()
+        );
         assert!(original.sigs.contains_key(&mid_slot));
 
         let mut corrupted = original.clone();
         corrupted.sigs.get_mut(&mid_slot).unwrap().sig.auth[0][0] ^= 1;
         let entry = &corrupted.sigs[&mid_slot];
-        let wrong_root =
-            layer_root(&params, &pk.pk_seed, mid, mid_tree, mid_kp, &entry.child_root, &entry.sig)
-                .expect("the corrupted signature still passes its own digest check");
+        let wrong_root = layer_root(
+            &params,
+            &pk.pk_seed,
+            mid,
+            mid_tree,
+            mid_kp,
+            &entry.child_root,
+            &entry.sig,
+        )
+        .expect("the corrupted signature still passes its own digest check");
         assert_ne!(wrong_root, nodes[top]);
-        let wrong_digits = layer_grinder(&pk.pk_seed, top, top_key.tree, top_key.key_pair, &wrong_root)
-            .grind(&params.wots, params.max_grind)
-            .unwrap()
-            .1;
+        let wrong_digits = layer_grinder(
+            &pk.pk_seed,
+            top,
+            top_key.tree,
+            top_key.key_pair,
+            &wrong_root,
+        )
+        .grind(&params.wots, params.max_grind)
+        .unwrap()
+        .1;
         assert_ne!(wrong_digits, legit);
 
         // Only `R` is open: no sweep, no endpoint round, no node round, nothing recorded.
@@ -2016,7 +2195,9 @@ mod tests {
         assert_eq!((pk, binding), keyed(&mut engine, &params, &sk));
         assert_eq!((cache.binding(), cache.leaf_entries()), (Some(&binding), 1));
         let mut ledger = MemoryFirstSigned::new();
-        cache.precompute(&mut engine, &params, &pk, &binding, &mut ledger).unwrap();
+        cache
+            .precompute(&mut engine, &params, &pk, &binding, &mut ledger)
+            .unwrap();
         let recorded = ledger.len();
 
         // Same key, target sum off by one.
@@ -2038,8 +2219,18 @@ mod tests {
         let cases = [
             (&off, &pk, &binding, BaggyError::KeyBindingMismatch),
             (&off, &pk, &off_binding, BaggyError::KeyBindingMismatch),
-            (&params, &other_root, &binding, BaggyError::KeyBindingMismatch),
-            (&params, &other_root, &other_root_binding, BaggyError::KeyBindingMismatch),
+            (
+                &params,
+                &other_root,
+                &binding,
+                BaggyError::KeyBindingMismatch,
+            ),
+            (
+                &params,
+                &other_root,
+                &other_root_binding,
+                BaggyError::KeyBindingMismatch,
+            ),
         ];
         for (i, (p, k, b, want)) in cases.into_iter().enumerate() {
             assert_eq!(
@@ -2077,12 +2268,26 @@ mod tests {
             Err(BaggyError::CacheIdentityMismatch)
         );
         assert_eq!(
-            cache.precompute(&mut other_engine, &params, &other_pk, &other_binding, &mut ledger),
+            cache.precompute(
+                &mut other_engine,
+                &params,
+                &other_pk,
+                &other_binding,
+                &mut ledger
+            ),
             Err(BaggyError::CacheIdentityMismatch)
         );
         // This key's public key and binding on the other key's engine.
         assert_eq!(
-            baggy_sign_mpc(&mut other_engine, &params, &pk, &binding, &mut cache, &mut ledger, b"m"),
+            baggy_sign_mpc(
+                &mut other_engine,
+                &params,
+                &pk,
+                &binding,
+                &mut cache,
+                &mut ledger,
+                b"m"
+            ),
             Err(BaggyError::KeyBindingMismatch)
         );
         assert_eq!(
@@ -2093,8 +2298,16 @@ mod tests {
 
         // The cache is unchanged and still serves its own key.
         assert_eq!((cache.binding(), ledger.len()), (Some(&binding), recorded));
-        let sig = baggy_sign_mpc(&mut engine, &params, &pk, &binding, &mut cache, &mut ledger, b"m")
-            .unwrap();
+        let sig = baggy_sign_mpc(
+            &mut engine,
+            &params,
+            &pk,
+            &binding,
+            &mut cache,
+            &mut ledger,
+            b"m",
+        )
+        .unwrap();
         assert_eq!(Some(sig), baggy_reference_sign(&params, &sk, &pk, b"m"));
         assert!(cache.hits() >= 1);
     }
@@ -2126,7 +2339,10 @@ mod tests {
         ledger.sync_record(&[record(&other)]).unwrap();
         // The store keeps the first vector: an equal record is a no-op, another is refused.
         assert_eq!(ledger.sync_record(&[record(&other)]), Ok(()));
-        assert_eq!(ledger.sync_record(&[record(&legit)]), Err(FirstSignedError::Conflict));
+        assert_eq!(
+            ledger.sync_record(&[record(&legit)]),
+            Err(FirstSignedError::Conflict)
+        );
         assert_eq!(ledger.first_signed(&key), Ok(Some(other.clone())));
 
         // Signing would open `legit` on a key recorded with `other`: refused after the
@@ -2134,7 +2350,15 @@ mod tests {
         let mut none = WaistbandCache::disabled();
         let before = engine.stats();
         assert_eq!(
-            baggy_sign_mpc(&mut engine, &params, &pk, &binding, &mut none, &mut ledger, msg),
+            baggy_sign_mpc(
+                &mut engine,
+                &params,
+                &pk,
+                &binding,
+                &mut none,
+                &mut ledger,
+                msg
+            ),
             Err(conflict.clone())
         );
         assert_eq!(engine.stats().open_rounds - before.open_rounds, 2);
@@ -2155,7 +2379,15 @@ mod tests {
         ledger.fail_next_sync();
         let before = engine.stats();
         assert_eq!(
-            baggy_sign_mpc(&mut engine, &params, &pk, &binding, &mut none, &mut ledger, msg),
+            baggy_sign_mpc(
+                &mut engine,
+                &params,
+                &pk,
+                &binding,
+                &mut none,
+                &mut ledger,
+                msg
+            ),
             Err(BaggyError::FirstSigned(FirstSignedError::Io))
         );
         assert_eq!(engine.stats().open_rounds - before.open_rounds, 2);
@@ -2163,7 +2395,15 @@ mod tests {
         // The retry records all layers once; a repeat finds them and writes nothing.
         for _ in 0..2 {
             assert_eq!(
-                baggy_sign_mpc(&mut engine, &params, &pk, &binding, &mut none, &mut ledger, msg),
+                baggy_sign_mpc(
+                    &mut engine,
+                    &params,
+                    &pk,
+                    &binding,
+                    &mut none,
+                    &mut ledger,
+                    msg
+                ),
                 Ok(want.clone())
             );
             assert_eq!((ledger.len(), ledger.sync_count()), (d, 1));
@@ -2186,8 +2426,16 @@ mod tests {
         let before = engine.stats();
         let mut ledger = MemoryFirstSigned::new();
         let mut none = WaistbandCache::disabled();
-        let sig = baggy_sign_mpc(&mut engine, &params, &pk, &binding, &mut none, &mut ledger, msg)
-            .unwrap();
+        let sig = baggy_sign_mpc(
+            &mut engine,
+            &params,
+            &pk,
+            &binding,
+            &mut none,
+            &mut ledger,
+            msg,
+        )
+        .unwrap();
         let after = engine.stats();
         assert_eq!(Some(sig), baggy_reference_sign(&params, &sk, &pk, msg));
         assert_eq!(engine.bank().remaining_planes(), 0);
@@ -2196,7 +2444,15 @@ mod tests {
         assert_eq!(after.and_bytes - before.and_bytes, 2 * 4800 * lane_perms);
         // The bank is spent: another signature must not fall back to reused triples.
         assert_eq!(
-            baggy_sign_mpc(&mut engine, &params, &pk, &binding, &mut none, &mut ledger, msg),
+            baggy_sign_mpc(
+                &mut engine,
+                &params,
+                &pk,
+                &binding,
+                &mut none,
+                &mut ledger,
+                msg
+            ),
             Err(BaggyError::Engine(Rss256Error::BeaverBankExhausted))
         );
     }
@@ -2242,7 +2498,11 @@ mod tests {
                 "case {i}"
             );
             assert!(ledger.is_empty(), "case {i}");
-            assert_eq!(engine.stats().open_bytes - before.open_bytes, allowed, "case {i}");
+            assert_eq!(
+                engine.stats().open_bytes - before.open_bytes,
+                allowed,
+                "case {i}"
+            );
             assert!(engine.has_unverified_gates(), "case {i}");
         }
         // A bad coin opening at the cut barrier is caught the same way.
@@ -2259,7 +2519,9 @@ mod tests {
                 &mut MemoryFirstSigned::new(),
                 b"m"
             ),
-            Err(BaggyError::Engine(Rss256Error::CoinOpeningRejected { party: 2 }))
+            Err(BaggyError::Engine(Rss256Error::CoinOpeningRejected {
+                party: 2
+            }))
         );
     }
 
