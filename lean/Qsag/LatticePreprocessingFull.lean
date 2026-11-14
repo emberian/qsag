@@ -6375,7 +6375,9 @@ theorem witness_joint_or_fork : ∃ stmt, HasJointOrFork stmt := by
 /-! ## V3 forest geometry (`QSAGDPC3`)
 The earlier single-tree 128-bit API remains a legacy mathematical model for callers.
 This namespace specifies the V3 node width and 64 independent regular-noise trees.
-PRG instantiation, wire decoding, and the forest SPCOT tag bridge are separate obligations.
+The salted API below models production node inputs, level-XOR wire recovery,
+64-tree correlation, and two-repetition tag recomputation. Wire encoding is specified
+for typed records; parsing arbitrary byte strings is outside this API.
 The legacy sender-alpha-LSB transcript is not a V3 wire field.
 -/
 namespace DensePcgV3
@@ -6570,6 +6572,645 @@ theorem tooth_punctured_leaf_not_recovered (seed : BitVec 256) (h : seed ≠ 0) 
 
 #tooth_pair Qsag.DensePcgV3.forest_recovery_at vs Qsag.DensePcgV3.tooth_punctured_leaf_not_recovered
 #verify_inhabited Qsag.DensePcgV3.forest_recovery_at Qsag.DensePcgV3.witness_forest_recovery
+
+namespace Salted
+
+/-- Exact production domain: session, directed party pair, tree, level, and node. -/
+structure Domain where
+  sessionId : BitVec 256
+  senderId : BitVec 16
+  receiverId : BitVec 16
+  tree : Fin 64
+
+def nodeInput (dom : Domain) (level node : Nat) (seed : BitVec 256) : List UInt8 :=
+  "QSAG.DPCG.GGM.N2".toUTF8.toList ++ encodeNatLeBytes 32 dom.sessionId.toNat ++
+    encodeNatLeBytes 2 dom.senderId.toNat ++ encodeNatLeBytes 2 dom.receiverId.toNat ++
+    encodeNatLeBytes 1 dom.tree.val ++ encodeNatLeBytes 1 level ++
+    encodeNatLeBytes 4 node ++ encodeNatLeBytes 32 seed.toNat
+
+abbrev GgmPrg := Nat → Nat → BitVec 256 → BitVec 256 × BitVec 256
+
+/-- SHAKE256's first 64 output bytes are the two child seeds. -/
+def nodePrg (dom : Domain) : GgmPrg := fun level node seed =>
+  let out := shake256Xof 64 (nodeInput dom level node seed)
+  (BitVec.ofNat 256 (decodeNatLeBytes (out.take 32)),
+   BitVec.ofNat 256 (decodeNatLeBytes (out.drop 32)))
+
+/-- Full depth-`d` binary GGM tree expansion mapping leaf index `idx : BitVec d` to its 256-bit leaf seed. -/
+def ggmExpandFull (prg : GgmPrg) : (d : Nat) → Nat → Nat → BitVec 256 → BitVec d → BitVec 256
+  | 0, _, _, seed, _ => seed
+  | d + 1, lvl, node, seed, idx =>
+    let (sL, sR) := prg lvl node seed
+    if idx.getLsbD d then
+      ggmExpandFull prg d (lvl + 1) (2 * node + 1) sR (idx.setWidth d)
+    else
+      ggmExpandFull prg d (lvl + 1) (2 * node) sL (idx.setWidth d)
+
+/-- Construct the `d`-sibling co-path puncturing leaf `pStar : BitVec d` from root `seed`. -/
+def ggmMakeCopath (prg : GgmPrg) : (d : Nat) → Nat → Nat → BitVec 256 → BitVec d → GgmCopath d
+  | 0, _, _, _, _ => ()
+  | d + 1, lvl, node, seed, pStar =>
+    let (sL, sR) := prg lvl node seed
+    if pStar.getLsbD d then
+      (sL, ggmMakeCopath prg d (lvl + 1) (2 * node + 1) sR (pStar.setWidth d))
+    else
+      (sR, ggmMakeCopath prg d (lvl + 1) (2 * node) sL (pStar.setWidth d))
+
+/-- Receiver's punctured GGM tree evaluator: evaluates all `u ≠ pStar` from `copath` and outputs `0#256` at `pStar`. -/
+def ggmExpandPunctured (prg : GgmPrg) :
+    (d : Nat) → Nat → Nat → BitVec d → GgmCopath d → BitVec d → BitVec 256
+  | 0, _, _, _, _, _ => 0#256
+  | d + 1, lvl, node, pStar, (sibSeed, rest), idx =>
+    if idx.getLsbD d = pStar.getLsbD d then
+      ggmExpandPunctured prg d (lvl + 1) (2 * node + if pStar.getLsbD d then 1 else 0) (pStar.setWidth d) rest (idx.setWidth d)
+    else
+      ggmExpandFull prg d (lvl + 1) (2 * node + if idx.getLsbD d then 1 else 0) sibSeed (idx.setWidth d)
+
+/-- **Exact Punctured GGM Tree Recovery (`ggmExpandPunctured_exact`)**:
+    For every depth $d$ (including deployed $d \in \{14, 15\}$), root `seed`, and puncture `pStar : BitVec d`:
+    1. At `u = pStar`, `ggmExpandPunctured` evaluates to `0#256`.
+    2. At every `u ≠ pStar`, `ggmExpandPunctured` recovers the **exact** sender leaf `ggmExpandFull prg d lvl node seed u`! -/
+theorem ggmExpandPunctured_exact (prg : GgmPrg) :
+    ∀ (d lvl node : Nat) (seed : BitVec 256) (pStar : BitVec d),
+      let copath := ggmMakeCopath prg d lvl node seed pStar
+      ggmExpandPunctured prg d lvl node pStar copath pStar = 0#256 ∧
+      (∀ u : BitVec d, u ≠ pStar →
+        ggmExpandPunctured prg d lvl node pStar copath u = ggmExpandFull prg d lvl node seed u)
+  | 0, _, _, _, pStar => by
+    dsimp only
+    refine ⟨rfl, ?_⟩
+    intro u hNe
+    exact False.elim (hNe ((BitVec.eq_nil u).trans (BitVec.eq_nil pStar).symm))
+  | d + 1, lvl, node, seed, pStar => by
+    dsimp only
+    cases hPrg : prg lvl node seed with
+    | mk sL sR =>
+      cases hp : pStar.getLsbD d
+      · have hCp : ggmMakeCopath prg (d + 1) lvl node seed pStar =
+            (sR, ggmMakeCopath prg d (lvl + 1) (2 * node) sL (pStar.setWidth d)) := by
+          simp only [ ggmMakeCopath, hPrg, hp, Bool.false_eq_true, ↓reduceIte]; rfl
+        rw [hCp]
+        have ih := ggmExpandPunctured_exact prg d (lvl + 1) (2 * node) sL (pStar.setWidth d)
+        dsimp only at ih
+        refine ⟨?_, ?_⟩
+        · simp only [ ggmExpandPunctured, hp, Bool.false_eq_true, ↓reduceIte, Nat.add_zero, ih.1]
+        · intro u huNe
+          have hFull : ggmExpandFull prg (d + 1) lvl node seed u =
+              if u.getLsbD d then ggmExpandFull prg d (lvl + 1) (2 * node + 1) sR (u.setWidth d)
+              else ggmExpandFull prg d (lvl + 1) (2 * node) sL (u.setWidth d) := by
+            simp only [ ggmExpandFull, hPrg]
+          rw [hFull]
+          dsimp only [ ggmExpandPunctured]
+          rw [hp]
+          cases hu : u.getLsbD d
+          · have huLoNe : u.setWidth d ≠ pStar.setWidth d := by
+              intro hEqLo
+              apply huNe
+              have hSu : BitVec.cons (u.getLsbD d) (u.setWidth d) = u := bvCons_split u
+              have hSp : BitVec.cons (pStar.getLsbD d) (pStar.setWidth d) = pStar := bvCons_split pStar
+              rw [← hSu, ← hSp, hu, hp, hEqLo]
+            simp only [Bool.false_eq_true, ↓reduceIte, Nat.add_zero]
+            exact ih.2 (u.setWidth d) huLoNe
+          · simp only [ Bool.true_eq_false, ↓reduceIte]
+      · have hCp : ggmMakeCopath prg (d + 1) lvl node seed pStar =
+            (sL, ggmMakeCopath prg d (lvl + 1) (2 * node + 1) sR (pStar.setWidth d)) := by
+          simp only [ ggmMakeCopath, hPrg, hp, ↓reduceIte]; rfl
+        rw [hCp]
+        have ih := ggmExpandPunctured_exact prg d (lvl + 1) (2 * node + 1) sR (pStar.setWidth d)
+        dsimp only at ih
+        refine ⟨?_, ?_⟩
+        · simp only [ggmExpandPunctured, hp, ↓reduceIte, ih.1]
+        · intro u huNe
+          have hFull : ggmExpandFull prg (d + 1) lvl node seed u =
+              if u.getLsbD d then ggmExpandFull prg d (lvl + 1) (2 * node + 1) sR (u.setWidth d)
+              else ggmExpandFull prg d (lvl + 1) (2 * node) sL (u.setWidth d) := by
+            simp only [ ggmExpandFull, hPrg]
+          rw [hFull]
+          dsimp only [ ggmExpandPunctured]
+          rw [hp]
+          cases hu : u.getLsbD d
+          · simp only [Bool.false_eq_true, ↓reduceIte, Nat.add_zero]
+          · have huLoNe : u.setWidth d ≠ pStar.setWidth d := by
+              intro hEqLo
+              apply huNe
+              have hSu : BitVec.cons (u.getLsbD d) (u.setWidth d) = u := bvCons_split u
+              have hSp : BitVec.cons (pStar.getLsbD d) (pStar.setWidth d) = pStar := bvCons_split pStar
+              rw [← hSu, ← hSp, hu, hp, hEqLo]
+            simp only [ ↓reduceIte]
+            exact ih.2 (u.setWidth d) huLoNe
+
+
+def bvXorSum256 : (d : Nat) → (BitVec d → BitVec 256) → BitVec 256
+  | 0, f => f 0#0
+  | d + 1, f =>
+    bvXorSum256 d (fun u => f (BitVec.cons false u)) ^^^
+    bvXorSum256 d (fun u => f (BitVec.cons true u))
+
+private theorem bvXorSum256_congr {d : Nat} {f g : BitVec d → BitVec 256} (h : ∀ u, f u = g u) :
+    bvXorSum256 d f = bvXorSum256 d g := by
+  induction d with
+  | zero => exact h 0#0
+  | succ d ih =>
+    simp only [bvXorSum256, ih (fun u => h (BitVec.cons false u)),
+      ih (fun u => h (BitVec.cons true u))]
+
+private theorem bvXorSum256_zero (d : Nat) : bvXorSum256 d (fun _ => 0#256) = 0#256 := by
+  induction d with
+  | zero => rfl
+  | succ d ih => simp only [bvXorSum256, ih, BitVec.xor_zero]
+
+private theorem bvXor256_four_rearr (a b c e : BitVec 256) :
+    (a ^^^ b) ^^^ (c ^^^ e) = (a ^^^ c) ^^^ (b ^^^ e) := by
+  apply BitVec.eq_of_getLsbD_eq; intro i _
+  simp only [BitVec.getLsbD_xor]
+  cases a.getLsbD i <;> cases b.getLsbD i <;> cases c.getLsbD i <;> cases e.getLsbD i <;> rfl
+
+private theorem bvXorSum256_xor {d : Nat} (f g : BitVec d → BitVec 256) :
+    bvXorSum256 d (fun u => f u ^^^ g u) = bvXorSum256 d f ^^^ bvXorSum256 d g := by
+  induction d with
+  | zero => rfl
+  | succ d ih =>
+    simp only [bvXorSum256, ih]
+    exact bvXor256_four_rearr _ _ _ _
+
+private theorem bvXorSum256_single : ∀ (d : Nat) (pStar : BitVec d) (val : BitVec 256),
+    bvXorSum256 d (fun u => if u = pStar then val else 0#256) = val
+  | 0, pStar, val => by
+    have hp : pStar = 0#0 := BitVec.eq_nil pStar
+    subst hp; rfl
+  | d + 1, pStar, val => by
+    have hSp : BitVec.cons (pStar.getLsbD d) (pStar.setWidth d) = pStar := bvCons_split pStar
+    rw [← hSp]
+    simp only [bvXorSum256]
+    cases pStar.getLsbD d
+    · have hL : bvXorSum256 d (fun u => if BitVec.cons false u = BitVec.cons false (pStar.setWidth d) then val else 0#256) =
+          bvXorSum256 d (fun u => if u = pStar.setWidth d then val else 0#256) := by
+        apply bvXorSum256_congr; intro u; simp only [bvCons_inj, true_and]
+      have hR : bvXorSum256 d (fun u => if BitVec.cons true u = BitVec.cons false (pStar.setWidth d) then val else 0#256) =
+          bvXorSum256 d (fun _ => 0#256) := by
+        apply bvXorSum256_congr; intro u; simp only [bvCons_inj, Bool.true_eq_false, false_and, ↓reduceIte]
+      rw [hL, hR, bvXorSum256_single d, bvXorSum256_zero, BitVec.xor_zero]
+    · have hL : bvXorSum256 d (fun u => if BitVec.cons false u = BitVec.cons true (pStar.setWidth d) then val else 0#256) =
+          bvXorSum256 d (fun _ => 0#256) := by
+        apply bvXorSum256_congr; intro u; simp only [bvCons_inj, Bool.false_eq_true, false_and, ↓reduceIte]
+      have hR : bvXorSum256 d (fun u => if BitVec.cons true u = BitVec.cons true (pStar.setWidth d) then val else 0#256) =
+          bvXorSum256 d (fun u => if u = pStar.setWidth d then val else 0#256) := by
+        apply bvXorSum256_congr; intro u; simp only [bvCons_inj, true_and]
+      rw [hL, hR, bvXorSum256_single d, bvXorSum256_zero, BitVec.zero_xor]
+
+/-- A serialized opposite-branch level XOR recovers the missing sibling exactly.
+    This is the masked `sibling_msg XOR known_xor` operation in Rust. -/
+theorem level_wire_recovery (level : Nat) (full known : BitVec level → BitVec 256)
+    (missing : BitVec level) (hz : known missing = 0#256)
+    (he : ∀ i, i ≠ missing → known i = full i) :
+    bvXorSum256 level full ^^^ bvXorSum256 level known = full missing := by
+  have hp : ∀ i, full i ^^^ known i = if i = missing then full missing else 0#256 := by
+    intro i
+    by_cases h : i = missing
+    · subst i; simp only [hz, BitVec.xor_zero, ↓reduceIte]
+    · simp only [he i h, h, BitVec.xor_self, ↓reduceIte]
+  rw [← bvXorSum256_xor, bvXorSum256_congr hp, bvXorSum256_single]
+
+/-- Only leaves are projected to 128 bits; internal and wire seeds keep all 256 bits. -/
+def leaf128 (seed : BitVec 256) : BitVec 128 := seed.setWidth 128
+
+theorem projected_recovery (prg : GgmPrg) (d : Nat)
+    (seed : BitVec 256) (p : BitVec d) :
+    let full := fun i => leaf128 (ggmExpandFull prg d 0 0 seed i)
+    let recv := fun i => leaf128 (ggmExpandPunctured prg d 0 0 p
+      (ggmMakeCopath prg d 0 0 seed p) i)
+    recv p = 0 ∧ ∀ i, i ≠ p → recv i = full i := by
+  obtain ⟨hz, he⟩ := ggmExpandPunctured_exact prg d 0 0 seed p
+  refine ⟨?_, ?_⟩
+  · dsimp only; rw [hz]; rfl
+  · intro i hi; dsimp only; rw [he i hi]
+
+end Salted
+
+/-- Tree contribution after restoring the puncture with the correlated correction. -/
+def correctedTreeTerm (d : Nat) (gamma chi : Tower128)
+    (recv : BitVec d → BitVec 128) (p : BitVec d) (corr : Tower128) : Tower128 :=
+  evalPuncturedTreeSpcotCombo d gamma chi recv p
+    (towerAdd 7 (unpackTower 7 (bvXorSum128 d recv)) corr)
+
+def fullTreeTerm (d : Nat) (gamma chi : Tower128)
+    (full : BitVec d → BitVec 128) : Tower128 :=
+  towerMul 7 gamma (bvTowerSum128 d
+    (fun i => towerMul 7 (spcotLeafWeight chi i) (unpackTower 7 (full i))))
+
+theorem correctedTreeTerm_eq (d : Nat)
+    (fullLeaves puncLeaves : BitVec d → BitVec 128)
+    (alphaSender gamma chi : Tower128) (pStar : BitVec d)
+    (hPuncZero : puncLeaves pStar = 0)
+    (hPuncEq : ∀ i, i ≠ pStar → puncLeaves i = fullLeaves i) :
+    correctedTreeTerm d gamma chi puncLeaves pStar
+      (towerAdd 7 (unpackTower 7 (bvXorSum128 d fullLeaves)) alphaSender) =
+    towerAdd 7 (fullTreeTerm d gamma chi fullLeaves)
+      (towerMul 7 (towerMul 7 gamma (spcotLeafWeight chi pStar)) alphaSender) := by
+  let corrOffset := towerAdd 7 (unpackTower 7 (bvXorSum128 d fullLeaves)) alphaSender
+  let deltaCorr := towerAdd 7 (unpackTower 7 (bvXorSum128 d puncLeaves)) corrOffset
+  let senderCombo := fullTreeTerm d gamma chi fullLeaves
+  have hXorId := (spcot_consistency_soundness fullLeaves puncLeaves pStar (packTower 7 alphaSender)
+    hPuncZero hPuncEq).1
+  have hDeltaEq : deltaCorr = towerAdd 7 (unpackTower 7 (fullLeaves pStar)) alphaSender := by
+    apply packTower_injective 7
+    dsimp only [deltaCorr, corrOffset]
+    rw [packTower_add, packTower_add, packTower_add, packTower_unpackTower,
+        packTower_unpackTower, packTower_unpackTower]
+    exact hXorId
+  have hTermSplit : evalPuncturedTreeSpcotCombo d gamma chi puncLeaves pStar deltaCorr =
+      towerAdd 7 senderCombo
+        (towerMul 7 (towerMul 7 gamma (spcotLeafWeight chi pStar)) alphaSender) := by
+    unfold evalPuncturedTreeSpcotCombo
+    have hPoint : ∀ u : BitVec d,
+        towerMul 7 (spcotLeafWeight chi u)
+          (if u = pStar then deltaCorr else unpackTower 7 (puncLeaves u)) =
+        towerAdd 7
+          (towerMul 7 (spcotLeafWeight chi u) (unpackTower 7 (fullLeaves u)))
+          (if u = pStar then towerMul 7 (spcotLeafWeight chi pStar) alphaSender else towerZero 7) := by
+      intro u
+      if hu : u = pStar then
+        subst hu
+        simp only [↓reduceIte, hDeltaEq, towerMul_add_distrib]
+      else
+        simp only [hu, ↓reduceIte, towerAdd_zero]
+        rw [hPuncEq u hu]
+    rw [bvTowerSum128_congr hPoint, bvTowerSum128_add, bvTowerSum128_single,
+        towerMul_add_distrib, towerMul_assoc]
+    rfl
+  exact hTermSplit
+
+private theorem sum_mul_right (d : Nat) (f : BitVec d → Tower128) (a : Tower128) :
+    bvTowerSum128 d (fun i => towerMul 7 (f i) a) = towerMul 7 (bvTowerSum128 d f) a := by
+  induction d with
+  | zero => rfl
+  | succ d ih => simp only [bvTowerSum128, ih, towerAdd_mul_distrib]
+
+/-- One production repetition aggregates all 64 trees with one VOLE mask.
+    Its premise is the checked mask correlation, not an assumption of tag equality. -/
+theorem forest_spcot_correlation (d : Nat)
+    (full recv : BitVec 6 → BitVec d → BitVec 128)
+    (p : BitVec 6 → BitVec d) (gamma : BitVec 6 → Tower128)
+    (chi alpha mac key x : Tower128)
+    (hz : ∀ j, recv j (p j) = 0)
+    (he : ∀ j i, i ≠ p j → recv j i = full j i)
+    (hVole : towerAdd 7 mac key = towerMul 7 x alpha) :
+    towerAdd 7 mac (bvTowerSum128 6 (fun j => correctedTreeTerm d (gamma j) chi
+      (recv j) (p j) (towerAdd 7 (unpackTower 7 (bvXorSum128 d (full j))) alpha))) =
+    towerAdd 7 (towerAdd 7 key
+      (towerMul 7 (towerAdd 7 x (bvTowerSum128 6
+        (fun j => towerMul 7 (gamma j) (spcotLeafWeight chi (p j))))) alpha))
+      (bvTowerSum128 6 (fun j => fullTreeTerm d (gamma j) chi (full j))) := by
+  rw [bvTowerSum128_congr (fun j => correctedTreeTerm_eq d (full j) (recv j)
+    alpha (gamma j) chi (p j) (hz j) (he j)), bvTowerSum128_add, sum_mul_right]
+  rw [towerAdd_mul_distrib, ← hVole]
+  simp only [towerAdd_assoc, towerAdd_left_comm, towerAdd_cancel]
+  rw [towerAdd_comm 7 (bvTowerSum128 6 (fun j => fullTreeTerm d (gamma j) chi (full j)))]
+
+/-- Wire copaths hold opposite-branch level XORs. Reconstruct the known frontier
+    exactly as the production masked traversal, retaining the missing prefix. -/
+def expandWireLevels (prg : Salted.GgmPrg) :
+    (remaining : Nat) → Nat → Nat → Nat → (Nat → BitVec 256) →
+      GgmCopath remaining → (Nat → BitVec 256)
+  | 0, _, _, missing, known, _ => fun i => if i = missing then 0#256 else known i
+  | d + 1, level, puncture, missing, known, (msg, rest) =>
+    let bit := puncture / 2 ^ d % 2
+    let children := fun i =>
+      if i / 2 = missing then 0#256
+      else if i % 2 = 0 then (prg level (i / 2) (known (i / 2))).1
+      else (prg level (i / 2) (known (i / 2))).2
+    let knownXor := Salted.bvXorSum256 level
+      (fun i => children (2 * i.toNat + (1 - bit)))
+    let sibling := 2 * missing + (1 - bit)
+    let next := fun i => if i = sibling then msg ^^^ knownXor else children i
+    expandWireLevels prg d (level + 1) puncture (2 * missing + bit) next rest
+
+def wireLeaves (dom : Salted.Domain) (depth : Nat) (p : BitVec depth)
+    (cp : GgmCopath depth) : BitVec depth → BitVec 128 := fun i =>
+  Salted.leaf128 (expandWireLevels (Salted.nodePrg dom) depth 0 p.toNat 0
+    (fun _ => 0#256) cp i.toNat)
+
+/-- Bounded observation of the production rejection-sampling stream. Fuel counts
+    squeezed 16-byte candidates; exhaustion is explicit, never a substitute weight. -/
+def challengeCandidates (fuel : Nat) (sid : BitVec 256)
+    (sender receiver depth rep : Nat) (coin : BitVec 256) : List Tower128 :=
+  let input := encodeNatLeBytes 32 sid.toNat ++ encodeNatLeBytes 8 sender ++
+    encodeNatLeBytes 8 receiver ++ encodeNatLeBytes 4 depth ++
+    encodeNatLeBytes 4 rep ++ encodeNatLeBytes 32 coin.toNat
+  let bytes := cshake256Fixed (16 * fuel) spcotChalDomain input
+  ((List.range fuel).map (fun i => BitVec.ofNat 128
+    (decodeNatLeBytes ((bytes.drop (16 * i)).take 16)))).filterMap
+      (fun raw => if raw.toNat > 1 then some (unpackTower 7 raw) else none)
+
+structure Weights where
+  gamma : BitVec 6 → Tower128
+  chi : Tower128
+
+def deriveWeights (fuel : Nat) (sid : BitVec 256)
+    (sender receiver depth rep : Nat) (coin : BitVec 256) : Option Weights :=
+  let candidates := challengeCandidates fuel sid sender receiver depth rep coin
+  if 65 ≤ candidates.length then
+    some ⟨fun j => candidates.getD j.toNat (towerZero 7),
+      candidates.getD 64 (towerZero 7)⟩
+  else none
+
+def receiverCheckValue (sid : BitVec 256) (receiver : Nat) (depth : Nat)
+    (peer : PeerRecord depth) (weights : Weights) (mask : Tower128) : Tower128 :=
+  towerAdd 7 mask (bvTowerSum128 6 (fun j =>
+    let tree : Fin 64 := ⟨j.toNat, j.isLt⟩
+    let dom : Salted.Domain := ⟨sid, BitVec.ofNat 16 peer.peerId,
+      BitVec.ofNat 16 receiver, tree⟩
+    correctedTreeTerm depth (weights.gamma j) weights.chi
+      (wireLeaves dom depth (peer.puncturedIndices tree) (peer.copaths tree))
+      (peer.puncturedIndices tree) (peer.corrOffsets tree)))
+
+/-- Both repetition values are recomputed from the 64 wire trees. -/
+def receiverCheckValues (fuel : Nat) (hdr : SeedHeader)
+    (peer : PeerRecord hdr.treeDepth) : Option (Tower128 × Tower128) := do
+  let w0 ← deriveWeights fuel hdr.sessionId peer.peerId hdr.myPartyId hdr.treeDepth 0 peer.spcotChalCoin
+  let w1 ← deriveWeights fuel hdr.sessionId peer.peerId hdr.myPartyId hdr.treeDepth 1 peer.spcotChalCoin
+  return (receiverCheckValue hdr.sessionId hdr.myPartyId hdr.treeDepth peer w0 peer.spcotMaskMacs.1,
+    receiverCheckValue hdr.sessionId hdr.myPartyId hdr.treeDepth peer w1 peer.spcotMaskMacs.2)
+
+def checkWirePeer (fuel : Nat) (hdr : SeedHeader) (peer : PeerRecord hdr.treeDepth) : Bool :=
+  match receiverCheckValues fuel hdr peer with
+  | none => false
+  | some vals => computeSpcotCheckTag (encodeNatLeBytes 32 hdr.sessionId.toNat)
+      peer.peerId hdr.myPartyId (encodeNatLeBytes 32 peer.spcotChalCoin.toNat) vals ==
+      encodeNatLeBytes 32 peer.spcotExpectedTag.toNat
+
+def checkWireHeader (fuel : Nat) (hdr : SeedHeader) : Bool :=
+  checkHeaderGeometry hdr && hdr.peers.all (checkWirePeer fuel hdr)
+
+theorem checkWireHeader_sound (fuel : Nat) (hdr : SeedHeader)
+    (h : checkWireHeader fuel hdr = true) :
+    checkHeaderGeometry hdr = true ∧ ∀ peer ∈ hdr.peers, checkWirePeer fuel hdr peer = true := by
+  simpa only [checkWireHeader, Bool.and_eq_true, List.all_eq_true] using h
+
+theorem checkWirePeer_sound (fuel : Nat) (hdr : SeedHeader) (peer : PeerRecord hdr.treeDepth)
+    (h : checkWirePeer fuel hdr peer = true) :
+    ∃ vals, receiverCheckValues fuel hdr peer = some vals ∧
+      computeSpcotCheckTag (encodeNatLeBytes 32 hdr.sessionId.toNat) peer.peerId hdr.myPartyId
+        (encodeNatLeBytes 32 peer.spcotChalCoin.toNat) vals =
+          encodeNatLeBytes 32 peer.spcotExpectedTag.toNat := by
+  unfold checkWirePeer at h
+  cases he : receiverCheckValues fuel hdr peer with
+  | none => simp only [he, Bool.false_eq_true] at h
+  | some vals => exact ⟨vals, rfl, by simpa only [he, beq_iff_eq] using h⟩
+
+/-- Checking a tag establishes value agreement or returns an explicit hash collision;
+    no injectivity of a fixed-size hash is assumed. -/
+def checkedValuesBinding (sid coin : List UInt8) (sender receiver : Nat)
+    (hs : sender < 2 ^ 64) (hr : receiver < 2 ^ 64)
+    (sent received : Tower128 × Tower128)
+    (h : computeSpcotCheckTag sid sender receiver coin sent =
+      computeSpcotCheckTag sid sender receiver coin received) :
+    PSum (sent = received) (HashCollisionWitness (cshake256Fixed 32 spcotTagDomain)) :=
+  match computeSpcotCheckTag_binding hs hs hr hr h with
+  | .inl eqs => .inl eqs.2.2.2.2
+  | .inr collision => .inr collision
+
+/-- Tree-major wire order: punctures, level-XOR copaths, corrections, then two masks. -/
+def encodeCopath : {depth : Nat} → GgmCopath depth → List UInt8
+  | 0, _ => []
+  | _ + 1, (node, rest) => encodeNatLeBytes 32 node.toNat ++ encodeCopath rest
+
+def encodePeer {depth : Nat} (peer : PeerRecord depth) : List UInt8 :=
+  let trees := List.finRange 64
+  encodeNatLeBytes 2 peer.peerId ++ encodeNatLeBytes 32 peer.senderMasterSeed.toNat ++
+    (trees.flatMap (fun j => encodeNatLeBytes 2 (peer.puncturedIndices j).toNat)) ++
+    (trees.flatMap (fun j => encodeCopath (peer.copaths j))) ++
+    (trees.flatMap (fun j => encodeTower128Le (peer.corrOffsets j))) ++
+    encodeNatLeBytes 32 peer.spcotChalCoin.toNat ++
+    encodeTower128Le peer.spcotMaskMacs.1 ++ encodeTower128Le peer.spcotMaskMacs.2 ++
+    encodeNatLeBytes 32 peer.spcotExpectedTag.toNat
+
+def encodeHeader (hdr : SeedHeader) (multiPartyFix : List (BitVec 64)) : List UInt8 :=
+  wireMagic ++ encodeNatLeBytes 32 hdr.sessionId.toNat ++
+    encodeNatLeBytes 2 hdr.myPartyId ++ encodeNatLeBytes 2 hdr.numParties ++
+    encodeNatLeBytes 1 hdr.treeDepth ++ encodeTower128Le hdr.macAlpha ++
+    encodeNatLeBytes 2 hdr.peers.length ++ hdr.peers.flatMap encodePeer ++
+    (if multiPartyFix.isEmpty then [0] else
+      1 :: multiPartyFix.flatMap (fun word => encodeNatLeBytes 8 word.toNat))
+
+theorem encodeCopath_length : ∀ {depth : Nat} (cp : GgmCopath depth),
+    (encodeCopath cp).length = 32 * depth
+  | 0, _ => rfl
+  | d + 1, (_, rest) => by
+    simp only [encodeCopath, List.length_append, encodeNatLeBytes_length, encodeCopath_length]
+    omega
+
+theorem encodeHeader_magic (hdr : SeedHeader) (fix : List (BitVec 64)) :
+    (encodeHeader hdr fix).take 8 = wireMagic := by
+  simp [encodeHeader, wireMagic]
+
+
+def nextNodes (prg : Salted.GgmPrg) (level : Nat) (full : Nat → BitVec 256)
+    (i : Nat) : BitVec 256 :=
+  if i % 2 = 0 then (prg level (i / 2) (full (i / 2))).1
+  else (prg level (i / 2) (full (i / 2))).2
+
+def recoverLevel (prg : Salted.GgmPrg) (level missing bit : Nat)
+    (known : Nat → BitVec 256) (msg : BitVec 256) : Nat → BitVec 256 :=
+  let children := fun i => if i / 2 = missing then 0#256 else nextNodes prg level known i
+  let knownXor := Salted.bvXorSum256 level (fun i => children (2 * i.toNat + (1 - bit)))
+  fun i => if i = 2 * missing + (1 - bit) then msg ^^^ knownXor else children i
+
+theorem recoverLevel_exact (prg : Salted.GgmPrg) (level missing bit : Nat)
+    (full known : Nat → BitVec 256) (hm : missing < 2 ^ level) (hb : bit < 2)
+    (he : ∀ i, i ≠ missing → known i = full i) :
+    let msg := Salted.bvXorSum256 level (fun j => nextNodes prg level full (2 * j.toNat + (1 - bit)))
+    let next := recoverLevel prg level missing bit known msg
+    next (2 * missing + bit) = 0#256 ∧
+      ∀ i, i ≠ 2 * missing + bit → next i = nextNodes prg level full i := by
+  intro msg next
+  let children := fun i => if i / 2 = missing then 0#256 else nextNodes prg level known i
+  let p := BitVec.ofNat level missing
+  have hp : p.toNat = missing := by simp only [p, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hm]
+  have hchildren : ∀ i, i / 2 ≠ missing → children i = nextNodes prg level full i := by
+    intro i hi
+    simp only [children, hi, ↓reduceIte, nextNodes, he (i / 2) hi]
+  have hrec := Salted.level_wire_recovery level
+    (fun j => nextNodes prg level full (2 * j.toNat + (1 - bit)))
+    (fun j => children (2 * j.toNat + (1 - bit))) p
+    (by dsimp only [children]; rw [hp, ite_eq_left (by omega)])
+    (by
+      intro j hj
+      apply hchildren
+      have hjn : j.toNat ≠ missing := by
+        intro h; apply hj; apply BitVec.eq_of_toNat_eq; exact h.trans hp.symm
+      omega)
+  rw [hp] at hrec
+  refine ⟨?_, ?_⟩
+  · change (if 2 * missing + bit = 2 * missing + (1 - bit) then _ else _) = _
+    rw [ite_eq_right (by omega)]
+    change (if (2 * missing + bit) / 2 = missing then 0#256 else _) = _
+    rw [ite_eq_left (by omega)]
+  · intro i hi
+    change (if i = 2 * missing + (1 - bit) then _ else _) = _
+    by_cases hs : i = 2 * missing + (1 - bit)
+    · rw [ite_eq_left hs, hs]; exact hrec
+    · rw [ite_eq_right hs]
+      apply hchildren
+      omega
+
+
+
+def fullLevels (prg : Salted.GgmPrg) : Nat → Nat → (Nat → BitVec 256) → Nat → BitVec 256
+  | 0, _, full => full
+  | d + 1, level, full => fullLevels prg d (level + 1) (nextNodes prg level full)
+
+def missingAfter : Nat → Nat → Nat → Nat
+  | 0, _, missing => missing
+  | d + 1, puncture, missing => missingAfter d puncture (2 * missing + puncture / 2 ^ d % 2)
+
+def wireMessages (prg : Salted.GgmPrg) :
+    (d : Nat) → Nat → Nat → (Nat → BitVec 256) → GgmCopath d
+  | 0, _, _, _ => ()
+  | d + 1, level, puncture, full =>
+    (Salted.bvXorSum256 level (fun j => nextNodes prg level full
+      (2 * j.toNat + (1 - puncture / 2 ^ d % 2))),
+     wireMessages prg d (level + 1) puncture (nextNodes prg level full))
+
+theorem wireLevels_exact (prg : Salted.GgmPrg) :
+    ∀ (d level puncture missing : Nat) (full known : Nat → BitVec 256),
+      missing < 2 ^ level →
+      (∀ i, i ≠ missing → known i = full i) →
+      let recv := expandWireLevels prg d level puncture missing known
+        (wireMessages prg d level puncture full)
+      recv (missingAfter d puncture missing) = 0#256 ∧
+        ∀ i, i ≠ missingAfter d puncture missing → recv i = fullLevels prg d level full i
+  | 0, level, puncture, missing, full, known, hm, he => by
+    dsimp only [expandWireLevels, wireMessages, missingAfter, fullLevels]
+    exact ⟨ite_eq_left rfl, fun i hi => (ite_eq_right hi).trans (he i hi)⟩
+  | d + 1, level, puncture, missing, full, known, hm, he => by
+    have hb : puncture / 2 ^ d % 2 < 2 := Nat.mod_lt _ (by decide)
+    have step := recoverLevel_exact prg level missing (puncture / 2 ^ d % 2) full known hm hb he
+    have hmNext : 2 * missing + puncture / 2 ^ d % 2 < 2 ^ (level + 1) := by
+      rw [Nat.pow_succ]; omega
+    exact wireLevels_exact prg d (level + 1) puncture
+      (2 * missing + puncture / 2 ^ d % 2) (nextNodes prg level full)
+      (recoverLevel prg level missing (puncture / 2 ^ d % 2) known
+        (Salted.bvXorSum256 level (fun j => nextNodes prg level full
+          (2 * j.toNat + (1 - puncture / 2 ^ d % 2))))) hmNext step.2
+
+
+
+theorem mod_mul_two_constructive (p n : Nat) (hn : 0 < n) :
+    p % (n * 2) = p % n + n * (p / n % 2) := by
+  have hlt : p % (n * 2) / n < 2 := by
+    have hr := Nat.mod_lt p (Nat.mul_pos hn (by decide : 0 < 2))
+    have hd := Nat.div_add_mod (p % (n * 2)) n
+    by_cases h : p % (n * 2) / n < 2
+    · exact h
+    · have hh : 2 ≤ p % (n * 2) / n := by omega
+      have hm := Nat.mul_le_mul_left n hh
+      omega
+  have hd : p % (n * 2) / n = p / n % 2 := by
+    conv => rhs; rw [← Nat.mod_add_div p (n * 2)]
+    rw [Nat.mul_assoc, Nat.add_mul_div_left _ _ hn, Nat.add_mul_mod_self_left,
+      Nat.mod_eq_of_lt hlt]
+  rw [Nat.add_comm, ← Nat.div_add_mod (p % (n * 2)) n,
+    Nat.mod_mul_right_mod, hd]
+
+theorem missingAfter_eq (d puncture missing : Nat) :
+    missingAfter d puncture missing = 2 ^ d * missing + puncture % 2 ^ d := by
+  induction d generalizing missing with
+  | zero => simp [missingAfter, Nat.mod_one]
+  | succ d ih =>
+    simp only [missingAfter, ih, Nat.pow_succ, mod_mul_two_constructive puncture (2 ^ d) (Nat.two_pow_pos d), Nat.mul_add, Nat.mul_assoc]
+    omega
+
+def rootFrontier (seed : BitVec 256) : Nat → BitVec 256 :=
+  fun i => if i = 0 then seed else 0#256
+
+theorem wire_root_recovery (dom : Salted.Domain) (d : Nat)
+    (seed : BitVec 256) (p : BitVec d) :
+    let full := fun i : BitVec d => Salted.leaf128
+      (fullLevels (Salted.nodePrg dom) d 0 (rootFrontier seed) i.toNat)
+    let recv := wireLeaves dom d p
+      (wireMessages (Salted.nodePrg dom) d 0 p.toNat (rootFrontier seed))
+    recv p = 0#128 ∧ ∀ i, i ≠ p → recv i = full i := by
+  have h := wireLevels_exact (Salted.nodePrg dom) d 0 p.toNat 0
+    (rootFrontier seed) (fun _ => 0#256) (by decide)
+    (fun i hi => by simp only [rootFrontier, hi, ↓reduceIte])
+  rw [missingAfter_eq, Nat.mul_zero, Nat.zero_add, Nat.mod_eq_of_lt p.isLt] at h
+  refine ⟨?_, ?_⟩
+  · dsimp only [wireLeaves]; rw [h.1]; rfl
+  · intro i hi
+    have hn : i.toNat ≠ p.toNat := fun he => hi (BitVec.eq_of_toNat_eq he)
+    dsimp only [wireLeaves]; rw [h.2 i.toNat hn]
+
+
+/-- Production root derivation consumes 2048 consecutive cSHAKE bytes. -/
+def deriveRoots (sid : BitVec 256) (sender receiver : Nat) (master : BitVec 256) :
+    Fin 64 → BitVec 256 :=
+  let bytes := cshake256Fixed 2048 "QSAG.DPCG.ROOTS/v2".toUTF8.toList
+    (encodeNatLeBytes 32 sid.toNat ++ encodeNatLeBytes 8 sender ++
+      encodeNatLeBytes 8 receiver ++ encodeNatLeBytes 32 master.toNat)
+  fun j => BitVec.ofNat 256 (decodeNatLeBytes ((bytes.drop (32 * j.val)).take 32))
+
+def fullWireTree (dom : Salted.Domain) (d : Nat) (root : BitVec 256) : BitVec d → BitVec 128 :=
+  fun i => Salted.leaf128 (fullLevels (Salted.nodePrg dom) d 0 (rootFrontier root) i.toNat)
+
+/-- The actual level-XOR wire reconstruction supplies all recovery premises of
+    the 64-tree SPCOT correlation theorem. The only cryptographic premise here
+    is the one-time VOLE mask equation. -/
+theorem wire_forest_spcot_correlation (d : Nat)
+    (dom : BitVec 6 → Salted.Domain) (roots : BitVec 6 → BitVec 256)
+    (p : BitVec 6 → BitVec d) (gamma : BitVec 6 → Tower128)
+    (chi alpha mac key x : Tower128)
+    (hVole : towerAdd 7 mac key = towerMul 7 x alpha) :
+    let full := fun j => fullWireTree (dom j) d (roots j)
+    let recv := fun j => wireLeaves (dom j) d (p j)
+      (wireMessages (Salted.nodePrg (dom j)) d 0 (p j).toNat (rootFrontier (roots j)))
+    towerAdd 7 mac (bvTowerSum128 6 (fun j => correctedTreeTerm d (gamma j) chi
+      (recv j) (p j) (towerAdd 7 (unpackTower 7 (bvXorSum128 d (full j))) alpha))) =
+    towerAdd 7 (towerAdd 7 key
+      (towerMul 7 (towerAdd 7 x (bvTowerSum128 6
+        (fun j => towerMul 7 (gamma j) (spcotLeafWeight chi (p j))))) alpha))
+      (bvTowerSum128 6 (fun j => fullTreeTerm d (gamma j) chi (full j))) := by
+  apply forest_spcot_correlation
+  · intro j; exact (wire_root_recovery (dom j) d (roots j) (p j)).1
+  · intro j; exact (wire_root_recovery (dom j) d (roots j) (p j)).2
+  · exact hVole
+
+/-- Nontrivial deployed-depth recovery: a distinct, nonpunctured leaf exists. -/
+theorem witness_wire_recovery :
+    ∃ (dom : Salted.Domain) (root : BitVec 256) (p i : BitVec 15),
+      i ≠ p ∧ wireLeaves dom 15 p
+        (wireMessages (Salted.nodePrg dom) 15 0 p.toNat (rootFrontier root)) i =
+          fullWireTree dom 15 root i := by
+  let dom : Salted.Domain := ⟨1, 0, 1, 0⟩
+  refine ⟨dom, 1, 0, 1, by decide, ?_⟩
+  exact (wire_root_recovery dom 15 1 0).2 1 (by decide)
+
+/-- An honest decoded wire peer's recomputed value is precisely the sender value.
+    This connects the wire traversal and correlation theorem to the checker API. -/
+theorem receiverCheckValue_honest (sid : BitVec 256) (receiver d : Nat)
+    (peer : PeerRecord d) (roots : Fin 64 → BitVec 256) (weights : Weights)
+    (alpha mac key x : Tower128)
+    (hVole : towerAdd 7 mac key = towerMul 7 x alpha)
+    (hcp : ∀ j, peer.copaths j = wireMessages
+      (Salted.nodePrg ⟨sid, BitVec.ofNat 16 peer.peerId, BitVec.ofNat 16 receiver, j⟩)
+      d 0 (peer.puncturedIndices j).toNat (rootFrontier (roots j)))
+    (hcorr : ∀ j, peer.corrOffsets j = towerAdd 7
+      (unpackTower 7 (bvXorSum128 d (fullWireTree
+        ⟨sid, BitVec.ofNat 16 peer.peerId, BitVec.ofNat 16 receiver, j⟩ d (roots j)))) alpha) :
+    let dom := fun j : BitVec 6 =>
+      (⟨sid, BitVec.ofNat 16 peer.peerId, BitVec.ofNat 16 receiver, ⟨j.toNat, j.isLt⟩⟩ : Salted.Domain)
+    let full := fun j : BitVec 6 => fullWireTree (dom j) d (roots ⟨j.toNat, j.isLt⟩)
+    receiverCheckValue sid receiver d peer weights mac =
+      towerAdd 7 (towerAdd 7 key (towerMul 7
+        (towerAdd 7 x (bvTowerSum128 6 (fun j => towerMul 7 (weights.gamma j)
+          (spcotLeafWeight weights.chi (peer.puncturedIndices ⟨j.toNat, j.isLt⟩))))) alpha))
+        (bvTowerSum128 6 (fun j => fullTreeTerm d (weights.gamma j) weights.chi (full j))) := by
+  dsimp only
+  simpa only [receiverCheckValue, hcp, hcorr] using
+    wire_forest_spcot_correlation d
+      (fun j => ⟨sid, BitVec.ofNat 16 peer.peerId, BitVec.ofNat 16 receiver, ⟨j.toNat, j.isLt⟩⟩)
+      (fun j => roots ⟨j.toNat, j.isLt⟩) (fun j => peer.puncturedIndices ⟨j.toNat, j.isLt⟩)
+      weights.gamma weights.chi alpha mac key x hVole
 
 end DensePcgV3
 

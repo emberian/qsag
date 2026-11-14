@@ -2538,7 +2538,7 @@ Appending the fixed low bit models the support after production's `| 1`. -/
 def oddVaultChallenge (hi : Fin (2 ^ 127)) : Tower128 :=
   unpackTower 7 ((BitVec.ofFin hi) ++ 1#1)
 
-def oddVaultChallengeSupport : List Tower128 :=
+noncomputable def oddVaultChallengeSupport : List Tower128 :=
   (List.finRange (2 ^ 127)).map oddVaultChallenge
 
 theorem oddVaultChallenge_injective (a b : Fin (2 ^ 127))
@@ -2626,10 +2626,59 @@ theorem twoLaneCandidates_bad_release_lt_128 (rows : List TwoLaneVaultRow)
 def zeroVaultSacrificeRow : VaultSacrificeRow :=
   ⟨towerZero 7, towerZero 7, towerZero 7, towerZero 7, towerZero 7, towerZero 7⟩
 
+def nonzeroVaultSacrificeRow : VaultSacrificeRow :=
+  ⟨towerOne 7, towerOne 7, towerOne 7, towerOne 7, towerOne 7, towerOne 7⟩
+
+theorem nonzeroVaultSacrificeRow_valid :
+    nonzeroVaultSacrificeRow.a ≠ towerZero 7 ∧
+    nonzeroVaultSacrificeRow.b ≠ towerZero 7 ∧
+    nonzeroVaultSacrificeRow.c = CommRingOps.mul nonzeroVaultSacrificeRow.a nonzeroVaultSacrificeRow.b := by
+  exact ⟨by decide +kernel, by decide +kernel, (LawfulCommRing.one_mul _).symm⟩
+
+theorem nonzeroVaultSacrificeRow_release :
+    releaseSacrificedVault [nonzeroVaultSacrificeRow] [nonzeroVaultSacrificeRow]
+      [nonzeroVaultSacrificeRow] (towerOne 7) (towerOne 7) = some [nonzeroVaultSacrificeRow] := by
+  have ha : nonzeroVaultSacrificeRow.accepts (towerOne 7) = true := by
+    unfold VaultSacrificeRow.accepts
+    rw [decide_eq_true_iff]
+    exact spdz_sacrifice_completeness _ _ _ _ _ _ _
+      nonzeroVaultSacrificeRow_valid.2.2 nonzeroVaultSacrificeRow_valid.2.2
+  apply (releaseSacrificedVault_iff _ _ _ _ _).mpr
+  constructor <;> simpa only [vaultSacrificeLane, List.all_cons, List.all_nil, Bool.and_true] using ha
+
 theorem witness_vault_sacrifice_inhabited :
     ∃ row : VaultSacrificeRow, releaseSacrificedVault [row] [row] [row]
       (towerOne 7) (towerOne 7) = some [row] := by
-  exact ⟨zeroVaultSacrificeRow, by decide +kernel⟩
+  exact ⟨nonzeroVaultSacrificeRow, nonzeroVaultSacrificeRow_release⟩
+
+/-- Reconstructed authentication equations for each of the two independent MAC lanes.
+These audit values do not expose keys or tags in the online executor. -/
+def VaultSacrificeRow.ValidMacs (row : VaultSacrificeRow)
+    (alpha macA macB macC : Bool → Tower128) : Prop :=
+  ∀ lane, macA lane = CommRingOps.mul (alpha lane) row.a ∧
+    macB lane = CommRingOps.mul (alpha lane) row.b ∧
+    macC lane = CommRingOps.mul (alpha lane) row.c
+
+/-- A nonzero released multiplication triple with nonzero keys and valid nonzero
+MACs in both lanes. The lanes are separately indexed even in this unit-value witness. -/
+theorem witness_nonzero_authenticated_vault_sacrifice :
+    ∃ (row : VaultSacrificeRow) (alpha macA macB macC : Bool → Tower128),
+      row.a ≠ towerZero 7 ∧ row.b ≠ towerZero 7 ∧
+      row.c = CommRingOps.mul row.a row.b ∧ row.ValidMacs alpha macA macB macC ∧
+      (∀ lane, alpha lane ≠ towerZero 7 ∧ macA lane ≠ towerZero 7 ∧
+        macB lane ≠ towerZero 7 ∧ macC lane ≠ towerZero 7) ∧
+      releaseSacrificedVault [row] [row] [row] (towerOne 7) (towerOne 7) = some [row] := by
+  refine ⟨nonzeroVaultSacrificeRow, (fun _ => towerOne 7), (fun _ => towerOne 7),
+    (fun _ => towerOne 7), (fun _ => towerOne 7),
+    nonzeroVaultSacrificeRow_valid.1, nonzeroVaultSacrificeRow_valid.2.1,
+    nonzeroVaultSacrificeRow_valid.2.2, ?_, ?_, ?_⟩
+  · intro lane
+    exact ⟨(LawfulCommRing.one_mul _).symm, (LawfulCommRing.one_mul _).symm,
+      (LawfulCommRing.one_mul _).symm⟩
+  · intro lane
+    have h : towerOne 7 ≠ towerZero 7 := by decide +kernel
+    exact ⟨h, h, h, h⟩
+  · exact nonzeroVaultSacrificeRow_release
 
 def corruptVaultSacrificeRow : VaultSacrificeRow :=
   { zeroVaultSacrificeRow with c := towerOne 7 }
@@ -2641,7 +2690,13 @@ theorem tooth_vault_sacrifice_corrupt_row :
 
 set_option maxRecDepth 8192 in
 #tooth_pair Qsag.vault_two_lane_sacrifice_sound vs Qsag.tooth_vault_sacrifice_corrupt_row
-#verify_inhabited Qsag.releaseSacrificedVault_iff Qsag.witness_vault_sacrifice_inhabited
+theorem releasedVaultSacrificeRow_lanes (row : VaultSacrificeRow)
+    (h : releaseSacrificedVault [row] [row] [row] (towerOne 7) (towerOne 7) = some [row]) :
+    vaultSacrificeLane [row] (towerOne 7) = true ∧
+      vaultSacrificeLane [row] (towerOne 7) = true :=
+  (releaseSacrificedVault_iff _ _ _ _ _).mp h
+
+#verify_inhabited Qsag.releasedVaultSacrificeRow_lanes Qsag.witness_nonzero_authenticated_vault_sacrifice
 #verify_constructive Qsag.vault_two_lane_odd_support_lt_128
 
 /-! ## 7. Mechanical Assurance Gates (`#tooth_pair`, `#verify_inhabited`, `#verify_constructive`) -/

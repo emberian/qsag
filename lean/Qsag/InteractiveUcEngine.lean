@@ -32,6 +32,8 @@ Self-contained Lean 4.35 interactive Universal Composability execution engine (`
    forgery event transfers real forgeries to ideal ones, and every ideal forgery yields a
    `HypertreeForgeryBreak` through `checked_stateless_hypertree_euf_cma_extract`. The `eps` bound is
    a premise: no concrete threshold protocol for that signer is proved in this module.
+   `uc_production_threshold_forgery_transfer` additionally uses `verifyProductionPqHashSig`
+   and the `ThresholdMpc` production signing oracle, with an explicit emulation premise.
 -/
 
 public import Qsag.Constructive
@@ -42,6 +44,8 @@ public import Qsag.UcGames
 public import Qsag.ThresholdApproval
 public import Qsag.IdealTsig
 import all Qsag.UcGames
+
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -1594,6 +1598,116 @@ theorem RealProtocolExec_openings_have_barrier_witnesses
     · subst rec
       exact execRealSession_opening_has_barrier_witness proto A cl advSt (tapes 0)
     · exact ih _ _ _ rec hr
+
+
+/-- A nonempty enrolled custody vault can consume a real mask slot. -/
+theorem witness_custody_mask_consumption :
+    ∃ (v v' : HonestCustodyVault Nat) (out : Nat),
+      consumeVaultMaskSlot v (fun cursor share => cursor + share) = some (out, v') := by
+  exact ⟨enrollHonestVault 1 [1] 7,
+    { enrollHonestVault 1 [1] 7 with maskSessionCursor := 1 }, 7, rfl⟩
+
+theorem tooth_quarantined_mask_consumption (v v' : HonestCustodyVault Nat) (out : Nat) :
+    consumeVaultMaskSlot (walPoisonVault v) (fun cursor share => cursor + share) ≠ some (out, v') := by
+  simp [consumeVaultMaskSlot, walPoisonVault, walQuarantine]
+
+#tooth_pair Qsag.consumeVaultMaskSlot_strictly_advances vs Qsag.tooth_quarantined_mask_consumption
+#verify_inhabited Qsag.consumeVaultMaskSlot_strictly_advances Qsag.witness_custody_mask_consumption
+
+/-- Production threshold signing oracle, using the Rust-exact MPC signer. -/
+def productionThresholdSignOracle (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (grindLimit : Nat)
+    (ser : Option PqHashSig → ByteArray) : SessionScheduleReq → ByteArray :=
+  fun req => ser (mpcEvalProductionStatelessSign suite params o pkSeed req.msg req.optRand grindLimit)
+
+theorem productionThresholdSignOracle_eq (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray) :
+    productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser =
+      fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit) := by
+  funext req
+  exact congrArg ser (thresholdProductionStatelessSign_eq_evalProductionStatelessSign
+    suite params o sk hm req.msg req.optRand grindLimit)
+
+/-- The production reduction reads its query log from actual Round-3 requests. -/
+def productionTranscriptQueries {AdvState : Type} (grindLimit : Nat)
+    (tr : ExecTranscript AdvState) : List ProdSigningQuery :=
+  (tr.sessions.filter (fun rec => !rec.honestRound3.isEmpty)).map
+    (fun rec => ⟨rec.request.msg, rec.request.optRand, rec.request.reqEpoch, grindLimit⟩)
+
+def productionForgeryWins {AdvState : Type} (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (tr : ExecTranscript AdvState) : Bool :=
+  verifyProductionPqHashSig suite params pk (forgeOut tr).1 (forgeOut tr).2 &&
+  tr.sessions.all (fun rec => rec.honestRound3.isEmpty || decide (rec.request.msg ≠ (forgeOut tr).1))
+
+def ProductionTranscriptBreak {AdvState : Type} (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (grindLimit : Nat)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (tr : ExecTranscript AdvState) : Prop :=
+  let log := productionSigningLog suite params sk (productionTranscriptQueries grindLimit tr)
+  ProdForsItsrBreak suite params (derivePublicKey suite params sk) log (forgeOut tr).1 (forgeOut tr).2 ∨
+    ProdSmTcrBreak suite params sk log ∨
+    ProdPreimageBreak suite params sk log (forgeOut tr).1 (forgeOut tr).2
+
+theorem productionForgeryBreak_of_wins {AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) (grindLimit : Nat)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) (tr : ExecTranscript AdvState)
+    (hWin : productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut tr = true) :
+    ProductionTranscriptBreak suite params sk grindLimit forgeOut tr := by
+  have hwins := Bool.and_eq_true_iff.mp hWin
+  apply production_stateless_forgery_break suite params sk
+    (productionTranscriptQueries grindLimit tr) (forgeOut tr).1 (forgeOut tr).2 hw hStateless
+  · intro e he
+    obtain ⟨q, hq, heq, _⟩ := productionSigningLog_generated suite params sk _ e he
+    obtain ⟨rec, hrec, hqeq⟩ := List.mem_map.mp hq
+    obtain ⟨hm, hr3⟩ := List.mem_filter.mp hrec
+    have hf := List.all_eq_true.mp hwins.2 rec hm
+    have hn : rec.honestRound3.isEmpty = false := by
+      cases hh : rec.honestRound3.isEmpty
+      · rfl
+      · rw [hh] at hr3; cases hr3
+    rw [hn, Bool.false_or] at hf
+    rw [heq, ← hqeq]
+    exact of_decide_eq_true hf
+  · exact hwins.1
+
+/-- UC transfer for the production verifier and the threshold production signing oracle.
+The emulation bound remains an explicit premise; the oracle equality is discharged by
+`ThresholdMpc`, and hash-game extraction uses the production verifier directly. -/
+theorem uc_production_threshold_forgery_transfer
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (o : ProductionPqHashMpcOracles) (hm : o.MatchesKey suite sk)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (hw : params.w = 4 ∨ params.w = 16) (hStateless : params.statefulJorts = false)
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (Q_s card : Nat)
+    (realTapes : Fin card → Nat → SessionTape) (simTapes : Fin card → Nat → SimTape)
+    (cl : RealClusterState PK ShareT) (icl : IdealClusterState PK) (advSt : AdvState)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig) (eps : Nat × Nat)
+    (hUc : ratLe (rationalAcceptDiff card
+      (fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2) card
+      (fun ω => (IdealFunctionalityExec
+        (productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser)
+        sim A Q_s (simTapes ω) icl advSt).2)
+      (productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut)) eps) :
+    let oracle := productionThresholdSignOracle suite params o sk.pkSeed grindLimit ser
+    let win := productionForgeryWins suite params (derivePublicKey suite params sk) forgeOut
+    let realView := fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2
+    let idealView := fun ω => (IdealFunctionalityExec oracle sim A Q_s (simTapes ω) icl advSt).2
+    (oracle = fun req => ser (evalProductionStatelessSign suite params sk req.msg req.optRand grindLimit)) ∧
+    distAcceptCount card realView win * eps.2 ≤
+      distAcceptCount card idealView win * eps.2 + eps.1 * card ∧
+    (∀ ω : Fin card, win (idealView ω) = true →
+      ProductionTranscriptBreak suite params sk grindLimit forgeOut (idealView ω)) := by
+  intro oracle win realView idealView
+  exact ⟨productionThresholdSignOracle_eq suite params o sk hm grindLimit ser,
+    forgery_count_transfer card realView idealView win eps hUc,
+    fun ω h => productionForgeryBreak_of_wins suite params sk grindLimit hw hStateless
+      forgeOut (idealView ω) h⟩
 
 end Qsag
 end
