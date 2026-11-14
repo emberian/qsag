@@ -679,3 +679,2324 @@ theorem compiled_pclmul_decodes : accepted gf2_128_mul_acc_pclmul_code gf2_128_m
 
 set_option maxRecDepth 60000 in
 set_option maxHeartbeats 4000000 in
+theorem compiled_vpclmul_decodes : accepted gf2_128_mul_acc_vpclmul_code gf2_128_mul_acc_vpclmul_offsets = true := by
+  unfold accepted
+  apply Bool.and_eq_true_iff.mpr
+  constructor
+  · decide
+  · repeat
+      rw [checkBoundaries]
+      apply Bool.and_eq_true_iff.mpr
+      constructor
+      · decide
+    decide
+
+-- BEGIN TRANSPOSE CERTIFICATES
+-- Generated instruction coverage certificates; each proof checks at most 24 instructions.
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_672 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 672) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  decide
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_648 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 648) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_672
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_624 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 624) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_648
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_600 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 600) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_624
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_576 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 576) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_600
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_552 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 552) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_576
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_528 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 528) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_552
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_504 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 504) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_528
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_480 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 480) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_504
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_456 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 456) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_480
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_432 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 432) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_456
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_408 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 408) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_432
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_384 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 384) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_408
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_360 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 360) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_384
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_336 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 336) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_360
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_312 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 312) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_336
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_288 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 288) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_312
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_264 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 264) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_288
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_240 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 240) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_264
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_216 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 216) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_240
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_192 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 192) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [1085, 1093, 1101, 1109, 1117, 1122, 1126, 1130, 1134, 1139, 1143, 1151, 1159, 1167, 1175, 1180, 1184, 1188, 1192, 1197, 1201, 1209, 1217, 1225, 1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_216
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_168 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 168) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [952, 956, 960, 965, 969, 977, 985, 993, 1001, 1006, 1010, 1014, 1018, 1023, 1027, 1035, 1043, 1051, 1059, 1064, 1068, 1072, 1076, 1081, 1085, 1093, 1101, 1109, 1117, 1122, 1126, 1130, 1134, 1139, 1143, 1151, 1159, 1167, 1175, 1180, 1184, 1188, 1192, 1197, 1201, 1209, 1217, 1225, 1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_192
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_144 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 144) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [811, 819, 827, 832, 836, 840, 844, 849, 853, 861, 869, 877, 885, 890, 894, 898, 902, 907, 911, 919, 927, 935, 943, 948, 952, 956, 960, 965, 969, 977, 985, 993, 1001, 1006, 1010, 1014, 1018, 1023, 1027, 1035, 1043, 1051, 1059, 1064, 1068, 1072, 1076, 1081, 1085, 1093, 1101, 1109, 1117, 1122, 1126, 1130, 1134, 1139, 1143, 1151, 1159, 1167, 1175, 1180, 1184, 1188, 1192, 1197, 1201, 1209, 1217, 1225, 1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_168
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_120 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 120) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [670, 675, 679, 687, 695, 703, 711, 716, 720, 724, 728, 733, 737, 745, 753, 761, 769, 774, 778, 782, 786, 791, 795, 803, 811, 819, 827, 832, 836, 840, 844, 849, 853, 861, 869, 877, 885, 890, 894, 898, 902, 907, 911, 919, 927, 935, 943, 948, 952, 956, 960, 965, 969, 977, 985, 993, 1001, 1006, 1010, 1014, 1018, 1023, 1027, 1035, 1043, 1051, 1059, 1064, 1068, 1072, 1076, 1081, 1085, 1093, 1101, 1109, 1117, 1122, 1126, 1130, 1134, 1139, 1143, 1151, 1159, 1167, 1175, 1180, 1184, 1188, 1192, 1197, 1201, 1209, 1217, 1225, 1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_144
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_96 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 96) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [537, 542, 546, 550, 554, 559, 563, 571, 579, 587, 595, 600, 604, 608, 612, 617, 621, 629, 637, 645, 653, 658, 662, 666, 670, 675, 679, 687, 695, 703, 711, 716, 720, 724, 728, 733, 737, 745, 753, 761, 769, 774, 778, 782, 786, 791, 795, 803, 811, 819, 827, 832, 836, 840, 844, 849, 853, 861, 869, 877, 885, 890, 894, 898, 902, 907, 911, 919, 927, 935, 943, 948, 952, 956, 960, 965, 969, 977, 985, 993, 1001, 1006, 1010, 1014, 1018, 1023, 1027, 1035, 1043, 1051, 1059, 1064, 1068, 1072, 1076, 1081, 1085, 1093, 1101, 1109, 1117, 1122, 1126, 1130, 1134, 1139, 1143, 1151, 1159, 1167, 1175, 1180, 1184, 1188, 1192, 1197, 1201, 1209, 1217, 1225, 1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_120
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_72 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 72) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [389, 397, 405, 413, 421, 426, 430, 434, 438, 443, 447, 455, 463, 471, 479, 484, 488, 492, 496, 501, 505, 513, 521, 529, 537, 542, 546, 550, 554, 559, 563, 571, 579, 587, 595, 600, 604, 608, 612, 617, 621, 629, 637, 645, 653, 658, 662, 666, 670, 675, 679, 687, 695, 703, 711, 716, 720, 724, 728, 733, 737, 745, 753, 761, 769, 774, 778, 782, 786, 791, 795, 803, 811, 819, 827, 832, 836, 840, 844, 849, 853, 861, 869, 877, 885, 890, 894, 898, 902, 907, 911, 919, 927, 935, 943, 948, 952, 956, 960, 965, 969, 977, 985, 993, 1001, 1006, 1010, 1014, 1018, 1023, 1027, 1035, 1043, 1051, 1059, 1064, 1068, 1072, 1076, 1081, 1085, 1093, 1101, 1109, 1117, 1122, 1126, 1130, 1134, 1139, 1143, 1151, 1159, 1167, 1175, 1180, 1184, 1188, 1192, 1197, 1201, 1209, 1217, 1225, 1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_96
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_48 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 48) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [256, 260, 264, 269, 273, 281, 289, 297, 305, 310, 314, 318, 322, 327, 331, 339, 347, 355, 363, 368, 372, 376, 380, 385, 389, 397, 405, 413, 421, 426, 430, 434, 438, 443, 447, 455, 463, 471, 479, 484, 488, 492, 496, 501, 505, 513, 521, 529, 537, 542, 546, 550, 554, 559, 563, 571, 579, 587, 595, 600, 604, 608, 612, 617, 621, 629, 637, 645, 653, 658, 662, 666, 670, 675, 679, 687, 695, 703, 711, 716, 720, 724, 728, 733, 737, 745, 753, 761, 769, 774, 778, 782, 786, 791, 795, 803, 811, 819, 827, 832, 836, 840, 844, 849, 853, 861, 869, 877, 885, 890, 894, 898, 902, 907, 911, 919, 927, 935, 943, 948, 952, 956, 960, 965, 969, 977, 985, 993, 1001, 1006, 1010, 1014, 1018, 1023, 1027, 1035, 1043, 1051, 1059, 1064, 1068, 1072, 1076, 1081, 1085, 1093, 1101, 1109, 1117, 1122, 1126, 1130, 1134, 1139, 1143, 1151, 1159, 1167, 1175, 1180, 1184, 1188, 1192, 1197, 1201, 1209, 1217, 1225, 1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_72
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_24 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 24) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [127, 132, 140, 145, 149, 153, 157, 162, 166, 171, 179, 184, 192, 197, 201, 205, 209, 214, 218, 223, 231, 239, 247, 252, 256, 260, 264, 269, 273, 281, 289, 297, 305, 310, 314, 318, 322, 327, 331, 339, 347, 355, 363, 368, 372, 376, 380, 385, 389, 397, 405, 413, 421, 426, 430, 434, 438, 443, 447, 455, 463, 471, 479, 484, 488, 492, 496, 501, 505, 513, 521, 529, 537, 542, 546, 550, 554, 559, 563, 571, 579, 587, 595, 600, 604, 608, 612, 617, 621, 629, 637, 645, 653, 658, 662, 666, 670, 675, 679, 687, 695, 703, 711, 716, 720, 724, 728, 733, 737, 745, 753, 761, 769, 774, 778, 782, 786, 791, 795, 803, 811, 819, 827, 832, 836, 840, 844, 849, 853, 861, 869, 877, 885, 890, 894, 898, 902, 907, 911, 919, 927, 935, 943, 948, 952, 956, 960, 965, 969, 977, 985, 993, 1001, 1006, 1010, 1014, 1018, 1023, 1027, 1035, 1043, 1051, 1059, 1064, 1068, 1072, 1076, 1081, 1085, 1093, 1101, 1109, 1117, 1122, 1126, 1130, 1134, 1139, 1143, 1151, 1159, 1167, 1175, 1180, 1184, 1188, 1192, 1197, 1201, 1209, 1217, 1225, 1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_48
+
+set_option maxRecDepth 60000 in
+set_option maxHeartbeats 4000000 in
+private theorem transpose_suffix_0 :
+    checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets (transpose64x256_avx2_offsets.drop 0) = true := by
+  change checkBoundaries transpose64x256_avx2_code transpose64x256_avx2_offsets [0, 10, 15, 20, 25, 29, 37, 42, 46, 50, 54, 59, 63, 67, 75, 80, 88, 93, 97, 101, 105, 110, 114, 119, 127, 132, 140, 145, 149, 153, 157, 162, 166, 171, 179, 184, 192, 197, 201, 205, 209, 214, 218, 223, 231, 239, 247, 252, 256, 260, 264, 269, 273, 281, 289, 297, 305, 310, 314, 318, 322, 327, 331, 339, 347, 355, 363, 368, 372, 376, 380, 385, 389, 397, 405, 413, 421, 426, 430, 434, 438, 443, 447, 455, 463, 471, 479, 484, 488, 492, 496, 501, 505, 513, 521, 529, 537, 542, 546, 550, 554, 559, 563, 571, 579, 587, 595, 600, 604, 608, 612, 617, 621, 629, 637, 645, 653, 658, 662, 666, 670, 675, 679, 687, 695, 703, 711, 716, 720, 724, 728, 733, 737, 745, 753, 761, 769, 774, 778, 782, 786, 791, 795, 803, 811, 819, 827, 832, 836, 840, 844, 849, 853, 861, 869, 877, 885, 890, 894, 898, 902, 907, 911, 919, 927, 935, 943, 948, 952, 956, 960, 965, 969, 977, 985, 993, 1001, 1006, 1010, 1014, 1018, 1023, 1027, 1035, 1043, 1051, 1059, 1064, 1068, 1072, 1076, 1081, 1085, 1093, 1101, 1109, 1117, 1122, 1126, 1130, 1134, 1139, 1143, 1151, 1159, 1167, 1175, 1180, 1184, 1188, 1192, 1197, 1201, 1209, 1217, 1225, 1233, 1238, 1242, 1246, 1250, 1255, 1259, 1267, 1275, 1283, 1291, 1296, 1300, 1304, 1308, 1313, 1317, 1325, 1333, 1341, 1349, 1354, 1358, 1362, 1366, 1371, 1375, 1383, 1391, 1399, 1407, 1412, 1416, 1420, 1424, 1429, 1433, 1441, 1449, 1457, 1465, 1470, 1474, 1478, 1482, 1487, 1491, 1499, 1507, 1515, 1523, 1528, 1532, 1536, 1540, 1545, 1549, 1557, 1565, 1573, 1581, 1586, 1590, 1594, 1598, 1603, 1607, 1615, 1623, 1631, 1639, 1644, 1648, 1652, 1656, 1661, 1665, 1673, 1681, 1689, 1697, 1702, 1706, 1710, 1714, 1719, 1723, 1731, 1739, 1747, 1755, 1760, 1764, 1768, 1772, 1777, 1781, 1789, 1797, 1805, 1813, 1818, 1822, 1826, 1830, 1835, 1839, 1847, 1855, 1862, 1865, 1871, 1878, 1888, 1893, 1898, 1903, 1907, 1915, 1920, 1924, 1928, 1932, 1937, 1941, 1945, 1953, 1958, 1966, 1971, 1975, 1979, 1983, 1988, 1992, 1997, 2005, 2010, 2018, 2023, 2027, 2031, 2035, 2040, 2044, 2049, 2057, 2062, 2070, 2075, 2079, 2083, 2087, 2092, 2096, 2101, 2109, 2117, 2125, 2130, 2134, 2138, 2142, 2147, 2151, 2159, 2167, 2175, 2183, 2188, 2192, 2196, 2200, 2205, 2209, 2217, 2225, 2233, 2241, 2246, 2250, 2254, 2258, 2263, 2267, 2275, 2283, 2291, 2299, 2304, 2308, 2312, 2316, 2321, 2325, 2333, 2341, 2349, 2357, 2362, 2366, 2370, 2374, 2379, 2383, 2391, 2399, 2407, 2415, 2420, 2424, 2428, 2432, 2437, 2441, 2449, 2457, 2465, 2473, 2478, 2482, 2486, 2490, 2495, 2499, 2507, 2515, 2523, 2531, 2536, 2540, 2544, 2548, 2553, 2557, 2565, 2573, 2581, 2589, 2594, 2598, 2602, 2606, 2611, 2615, 2623, 2631, 2639, 2647, 2652, 2656, 2660, 2664, 2669, 2673, 2681, 2689, 2697, 2705, 2710, 2714, 2718, 2722, 2727, 2731, 2739, 2747, 2755, 2763, 2768, 2772, 2776, 2780, 2785, 2789, 2797, 2805, 2812, 2815, 2821, 2828, 2838, 2843, 2848, 2853, 2857, 2865, 2870, 2874, 2878, 2882, 2887, 2891, 2895, 2903, 2908, 2916, 2921, 2925, 2929, 2933, 2938, 2942, 2947, 2955, 2960, 2968, 2973, 2977, 2981, 2985, 2990, 2994, 2999, 3007, 3012, 3020, 3025, 3029, 3033, 3037, 3042, 3046, 3051, 3059, 3067, 3075, 3080, 3084, 3088, 3092, 3097, 3101, 3109, 3117, 3125, 3133, 3138, 3142, 3146, 3150, 3155, 3159, 3167, 3175, 3183, 3191, 3196, 3200, 3204, 3208, 3213, 3217, 3225, 3233, 3241, 3249, 3254, 3258, 3262, 3266, 3271, 3275, 3283, 3291, 3298, 3301, 3307, 3314, 3324, 3329, 3334, 3339, 3343, 3351, 3356, 3360, 3364, 3368, 3373, 3377, 3381, 3389, 3394, 3402, 3407, 3411, 3415, 3419, 3424, 3428, 3433, 3441, 3446, 3454, 3459, 3463, 3467, 3471, 3476, 3480, 3485, 3493, 3498, 3506, 3511, 3515, 3519, 3523, 3528, 3532, 3537, 3545, 3552, 3555, 3561, 3568, 3578, 3583, 3588, 3593, 3597, 3602, 3607, 3611, 3615, 3619, 3624, 3628, 3632, 3637, 3642, 3647, 3652, 3656, 3660, 3664, 3669, 3673, 3678, 3683, 3690, 3693, 3695, 3702, 3712, 3717, 3722, 3727, 3731, 3736, 3741, 3745, 3749, 3753, 3758, 3762, 3766, 3771, 3775, 3778, 3780, 3787, 3791, 3795, 3799, 3803, 3805, 3808, 3809] = true
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  rw [checkBoundaries]
+  apply Bool.and_eq_true_iff.mpr
+  refine ⟨by decide, ?_⟩
+  exact transpose_suffix_24
+
+theorem compiled_transpose_decodes :
+    accepted transpose64x256_avx2_code transpose64x256_avx2_offsets = true := by
+  unfold accepted
+  exact Bool.and_eq_true_iff.mpr ⟨by decide, transpose_suffix_0⟩
+
+-- END TRANSPOSE CERTIFICATES
+
+/-- Taint is transferred to scalar masks, never silently declassified. This
+straight-line checker diagnoses the mask/test/branch counterexample; the kernel
+CT subset above excludes vector-to-scalar transfers entirely. -/
+structure Taint where
+  scalar : Nat → Bool
+  vector : Nat → Bool
+  flags : Bool
+
+def taintStep (t : Taint) : Instr → Option Taint
+  | .vector v =>
+    if v.op == .mask then
+      some {t with scalar := fun r => if r == v.dst then t.vector v.rhs else t.scalar r}
+    else some {t with vector := fun r => if r == v.dst then true else t.vector r}
+  | .test a b => some {t with flags := t.scalar a || t.scalar b}
+  | .jumpZero _ | .branch _ => if t.flags then none else some t
+  | .immediate r _ | .clear r =>
+    some {t with scalar := fun i => if i == r then false else t.scalar i}
+  | .add r _ | .decrement r => some {t with flags := t.scalar r}
+  | .ret => some t
+
+def taintCheck (b : ByteCode) : Nat → Nat → Taint → Bool
+  | 0, _, _ => true
+  | n+1, pc, t => match decode b pc with
+    | none => false
+    | some d => match taintStep t d.instr with
+      | none => false
+      | some t' => taintCheck b n (pc+d.size) t'
+
+def secretVectors : Taint := ⟨fun _ => false, fun _ => true, false⟩
+
+/-- #tooth: VPMOVMSKB EAX,YMM0; TEST EAX,EAX; JZ +0.
+The first two decoded steps succeed, propagating secrecy; the branch fails. -/
+theorem tooth_secret_vpmovmskb_branch_leaks_lane_sign_bits :
+    let bytes : ByteCode := ⟨8, #[#[0xc5, 0xfd, 0xd7, 0xc0, 0x85, 0xc0, 0x74, 0]]⟩
+    taintCheck bytes 2 0 secretVectors = true ∧
+    taintCheck bytes 3 0 secretVectors = false := by decide
+
+/-- A single secret lane sign bit changes the scalar zero-test outcome. -/
+theorem mask_sign_bit_changes_zero_test :
+    pmovmskb 0#256 true = 0#32 ∧ pmovmskb (1#256 <<< 7) true = 1#32 := by decide
+
+end Qsag.SimdBinaryEquiv

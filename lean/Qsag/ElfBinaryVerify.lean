@@ -15,7 +15,9 @@ Pure Lean 4.35 binary verification engine (`0 sorry`, `0` custom axioms, `0 nati
    `checkElfFuncThreeWayNI_sound` (`PC-NI`, `Mem-NI`, `DOIT-NI`, callee-saved preservation, `vzeroupper`,
    and scratch vector register zeroization before `ret`), discharged via kernel `decide` across all 16
    `x86_64` and all 7 `aarch64` symbols (`23` symbols, `1,298` machine instructions), one kernel
-   certificate per symbol.
+   certificate per historical symbol. New source archives additionally pin all five bitslice
+   exports; their provenance alone is not a CT or functional-refinement certificate.
+   Frame refinements specialize the 0x340-byte Keccak frame and its 0x320-byte wipe loop.
 4. **Mutation tests:** Negative checker tests accompany the structural and noninterference
    proofs. Input-output refinement of selected decoded kernels is in `Qsag.McRefine`.
 -/
@@ -767,12 +769,34 @@ theorem clmul64_one_one : clmul64 1 1 = ⟨1, 0⟩ := by decide +kernel
 
 theorem clmul64_one_two : clmul64 1 2 = ⟨2, 0⟩ := by decide +kernel
 
+/-- Condition codes with modelled semantics: `2` (`B`, `CF`), `3` (`AE`, `!CF`), `4` (`E`, `ZF`)
+    and `5` (`NE`, `!ZF`). Every other code reads `SF`, `PF`, or a combination of flags that the
+    state does not carry. `decodeX86InstrAt` produces only these four codes for `jcc` and
+    `cmovcc`, and `transferX86Instr` rejects any instruction whose code is outside this set. -/
+def x86CondSupported (cc : Nat) : Bool :=
+  cc == 2 || cc == 3 || cc == 4 || cc == 5
+
+/-- Concrete condition evaluation for the supported codes `{2, 3, 4, 5}`. An unsupported code
+    evaluates to `false` (not taken); such an instruction is never accepted by the checker
+    (`x86CondIsPublic_supported`, `tooth_x86_jcc_unsupported_cc_rejected`,
+    `tooth_x86_cmovcc_unsupported_cc_rejected`). -/
 def evalX86Cond (cc : Nat) (s : X86State) : Bool :=
   if cc == 2 then s.cf
   else if cc == 3 then !s.cf
   else if cc == 4 then s.zf
   else if cc == 5 then !s.zf
-  else s.cf
+  else false
+
+/-- Two's-complement value of the `w`-bit pattern `n < bound`, where `bound = 2 ^ w`. -/
+def signedOfBound (bound n : Nat) : Int :=
+  if 2 * n < bound then (n : Int) else (n : Int) - (bound : Int)
+
+/-- `CF = OF` after a signed multiply of two `w`-bit patterns (`bound = 2 ^ w`): set exactly when
+    the signed product lies outside `[-bound / 2, bound / 2)`, that is, when sign-extending the
+    truncated result does not give back the product. -/
+def imulSignedOverflow (bound an bn : Nat) : Bool :=
+  let p := signedOfBound bound an * signedOfBound bound bn
+  decide (2 * p < -(bound : Int)) || decide ((bound : Int) ≤ 2 * p)
 
 def evalX86Alu (op : X86AluOp) (is64 : Bool) (a b : UInt64) (cfIn : Bool) : (UInt64 × Bool × Bool) :=
   let bound : Nat := if is64 then 0x10000000000000000 else 0x100000000
@@ -808,9 +832,12 @@ def evalX86Alu (op : X86AluOp) (is64 : Bool) (a b : UInt64) (cfIn : Bool) : (UIn
     let res := maskGprWidth is64 (a ^^^ b)
     (res, false, res == 0)
   | .imul2 =>
+    -- The low `w` bits of the product do not depend on signedness; `CF` (and `OF`, which
+    -- `stepX86` sets equal to it) report signed overflow. `ZF` is architecturally undefined
+    -- after `IMUL`; the value here is a function of the operands only.
     let prod := (an * bn) % bound
     let res := maskGprWidth is64 (UInt64.ofNat prod)
-    (res, an * bn ≥ bound, res == 0)
+    (res, imulSignedOverflow bound an bn, res == 0)
 
 def evalVecBin256 (op : X86VecBinOp) (v1 v2 : Vec256) : Vec256 :=
   match op with
@@ -933,17 +960,20 @@ def stepX86 (d : DecodedInstr X86Instr) (s : X86State) : (X86State × StepObs) :
     ({ s with pc := nextPc, mem := mem' }, ⟨d.offset, [(ea, wBytes)], true⟩)
   | .aluRegReg op is64 dst src =>
     let (res, cf', zf') := evalX86Alu op is64 (s.gpr.get dst) (s.gpr.get src) s.cf
-    let of' := if op == .andOp || op == .orOp || op == .xorOp then false else s.ofFlag
+    let of' := if op == .andOp || op == .orOp || op == .xorOp then false
+               else if op == .imul2 then cf' else s.ofFlag
     ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cf', ofFlag := of', zf := zf' }, ⟨d.offset, [], true⟩)
   | .aluLoad64 op dst addr =>
     let ea := evalX86Addr s nextPc addr
     let mval := readMem64 s.mem ea
     let (res, cf', zf') := evalX86Alu op true (s.gpr.get dst) mval s.cf
-    let of' := if op == .andOp || op == .orOp || op == .xorOp then false else s.ofFlag
+    let of' := if op == .andOp || op == .orOp || op == .xorOp then false
+               else if op == .imul2 then cf' else s.ofFlag
     ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cf', ofFlag := of', zf := zf' }, ⟨d.offset, [(ea, 8)], true⟩)
   | .aluImm op is64 dst imm =>
     let (res, cf', zf') := evalX86Alu op is64 (s.gpr.get dst) imm s.cf
-    let of' := if op == .andOp || op == .orOp || op == .xorOp then false else s.ofFlag
+    let of' := if op == .andOp || op == .orOp || op == .xorOp then false
+               else if op == .imul2 then cf' else s.ofFlag
     ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cf', ofFlag := of', zf := zf' }, ⟨d.offset, [], true⟩)
   | .incDec isInc is64 dst =>
     let delta : UInt64 := if isInc then 1 else 0 - 1
@@ -953,13 +983,23 @@ def stepX86 (d : DecodedInstr X86Instr) (s : X86State) : (X86State × StepObs) :
     let cur := maskGprWidth is64 (s.gpr.get dst)
     let res := maskGprWidth is64 (0 - cur)
     ({ s with pc := nextPc, gpr := s.gpr.set dst res, cf := cur != 0, zf := res == 0 }, ⟨d.offset, [], true⟩)
-  | .mulOneOp _isSigned is64 src =>
+  | .mulOneOp isSigned is64 src =>
+    -- `MUL` / `IMUL` with one operand: `rDX:rAX := rAX * src` at the operand width `w`. `raw` is
+    -- the `2w`-bit product pattern (two's complement when signed). `CF = OF` is set when the
+    -- upper half is significant: nonzero for `MUL`, not the sign extension of the lower half for
+    -- `IMUL`.
+    let bound : Nat := if is64 then 0x10000000000000000 else 0x100000000
     let a := (maskGprWidth is64 (s.gpr.get 0)).toNat
     let b := (maskGprWidth is64 (s.gpr.get src)).toNat
-    let prod := a * b
-    let lo := maskGprWidth is64 (UInt64.ofNat (prod % 0x10000000000000000))
-    let hi := maskGprWidth is64 (UInt64.ofNat (prod / 0x10000000000000000))
-    ({ s with pc := nextPc, gpr := (s.gpr.set 0 lo).set 2 hi }, ⟨d.offset, [], true⟩)
+    let raw : Nat :=
+      if isSigned then
+        ((signedOfBound bound a * signedOfBound bound b) % ((bound * bound : Nat) : Int)).toNat
+      else a * b
+    let lo := maskGprWidth is64 (UInt64.ofNat (raw % bound))
+    let hi := maskGprWidth is64 (UInt64.ofNat (raw / bound))
+    let ovf := if isSigned then imulSignedOverflow bound a b else decide (raw / bound ≠ 0)
+    ({ s with pc := nextPc, gpr := (s.gpr.set 0 lo).set 2 hi, cf := ovf, ofFlag := ovf },
+      ⟨d.offset, [], true⟩)
   | .shiftImm sk is64 dst cnt =>
     let w := if is64 then 64 else 32
     let c := cnt % w
@@ -974,8 +1014,15 @@ def stepX86 (d : DecodedInstr X86Instr) (s : X86State) : (X86State × StepObs) :
       | .ror =>
         if c == 0 then cur
         else maskGprWidth is64 ((cur >>> UInt64.ofNat c) ||| (cur <<< UInt64.ofNat (w - c)))
+    -- CF/OF are abstracted by retaining their incoming values here. The checker forgets
+    -- both flags after every shift, so a carry/overflow consumer cannot rely on their
+    -- publicity. This is not an architectural CF/OF specification; McRefine's shift
+    -- equations use this abstraction. ZF is modelled, including count zero and rotates.
     ({ s with pc := nextPc, gpr := s.gpr.set dst res, zf := if x86ShiftPreservesZf sk is64 cnt then s.zf else res == 0 }, ⟨d.offset, [], true⟩)
   | .cmovcc cc is64 dst src =>
+    -- `X86State` has no `DOITM` bit, so the observation cannot depend on the mode: `true` here
+    -- means "data-operand-independent when `DOITM` is set". The mode assumption is carried by
+    -- `FuncContract.doitEnabled`, and `transferX86Instr` rejects `cmovcc` without it.
     let taken := evalX86Cond cc s
     let gpr' := if taken then s.gpr.set dst (maskGprWidth is64 (s.gpr.get src)) else s.gpr
     ({ s with pc := nextPc, gpr := gpr' }, ⟨d.offset, [], true⟩)
@@ -1565,7 +1612,13 @@ def PcMap.all {α : Type} (pred : Nat → α → Bool) (m : PcMap α) : Bool :=
             | none => true
             | some v => pred (i2 * 256 + i1 * 16 + i0) v) p0) p1) m.root
 
-/-- Function-level constant-time & ABI hygiene contract $\Gamma$. -/
+/-- Function-level constant-time & ABI hygiene contract $\Gamma$.
+
+    `doitEnabled` records whether the contract assumes the processor runs the function in
+    data-operand-independent-timing mode (`IA32_UARCH_MISC_CTL[DOITM] = 1` on `x86_64`). User-mode
+    code cannot change that bit, so it is an assumption about the execution environment and not
+    part of `X86State`. The `x86_64` checker consults it: `transferX86Instr` rejects `cmovcc`
+    when it is `false`. `AArch64` tracks `PSTATE.DIT` in its machine state instead. -/
 structure FuncContract where
   symName : String
   pubGprs : List Nat
@@ -1574,6 +1627,7 @@ structure FuncContract where
   usesRbpFrame : Bool
   outPtrReg : Nat
   outBytes : Nat
+  doitEnabled : Bool := true
   deriving DecidableEq, Repr
 
 /-- Abstract origin lattice for `x86_64` GPRs tracking relational publicity + callee-saved/frame origins. -/
@@ -1703,10 +1757,21 @@ def storePreservesSavedRbp (c : FuncContract) (st : X86AbsState) (addr : X86MemA
     else false
   | _ => false
 
+/-- Publicity of a condition code, fail-closed: codes `2, 3` read `CF`, codes `4, 5` read `ZF`,
+    and every other code is treated as secret-dependent because it reads flags the abstract
+    state does not track (`SF`, `PF`, or `CF` and `ZF` together). -/
 def x86CondIsPublic (cc : Nat) (st : X86AbsState) : Bool :=
   if cc == 2 || cc == 3 then st.cfPub
   else if cc == 4 || cc == 5 then st.zfPub
-  else st.cfPub
+  else false
+
+/-- A condition code can be classified public only if its semantics are modelled. -/
+theorem x86CondIsPublic_supported {cc : Nat} {st : X86AbsState}
+    (h : x86CondIsPublic cc st = true) : x86CondSupported cc = true := by
+  unfold x86CondIsPublic at h
+  unfold x86CondSupported
+  by_cases c2 : cc == 2 <;> by_cases c3 : cc == 3 <;> by_cases c4 : cc == 4 <;>
+    by_cases c5 : cc == 5 <;> simp_all
 
 def x86AddrRegsValid : X86MemAddr → Bool
   | .baseDisp base _ => base < 16
@@ -1870,9 +1935,13 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       cfPub := false, ofPub := false,
       zfPub := if x86ShiftPreservesZf sk is64 cnt then st.zfPub else p })]
   | .cmovcc cc _is64 dst src =>
-    let cPub := x86CondIsPublic cc st
-    let p := cPub && (st.gpr.get dst).isPublic && (st.gpr.get src).isPublic
-    some [(nextPc, { stNoLoop with gpr := st.gpr.set dst (if p then .pubVal else .secretVal) })]
+    -- Rejected unless the condition code is modelled and the contract assumes `DOITM`:
+    -- `CMOVcc` is data-operand-independent only in that mode.
+    if !x86CondSupported cc || !c.doitEnabled then none
+    else
+      let cPub := x86CondIsPublic cc st
+      let p := cPub && (st.gpr.get dst).isPublic && (st.gpr.get src).isPublic
+      some [(nextPc, { stNoLoop with gpr := st.gpr.set dst (if p then .pubVal else .secretVal) })]
   | .mulx hiDst loDst src =>
     let p := (st.gpr.get 2).isPublic && (st.gpr.get src).isPublic
     let o : RegOrigin := if p then .pubVal else .secretVal
@@ -2297,8 +2366,9 @@ def checkElfFuncThreeWayNI (elfBytes : Bytes) (symName : String) (c : FuncContra
 
 def mkContract (name : String) (pubGprs : List Nat)
     (pubMem : List (Nat × Nat) := []) (wipedGprs : List Nat := [])
-    (usesRbp : Bool := false) (outPtr : Nat := 0) (outBytes : Nat := 0) : FuncContract :=
-  ⟨name, pubGprs, pubMem, wipedGprs, usesRbp, outPtr, outBytes⟩
+    (usesRbp : Bool := false) (outPtr : Nat := 0) (outBytes : Nat := 0)
+    (doitEnabled : Bool := true) : FuncContract :=
+  ⟨name, pubGprs, pubMem, wipedGprs, usesRbp, outPtr, outBytes, doitEnabled⟩
 
 def x86SymbolContracts : List FuncContract := [
   mkContract "qsag_asm_keccak_f1600_avx2_4x"        [4, 7, 6]       []           []        true 7 0x320,
@@ -3571,7 +3641,7 @@ private theorem evalX86Cond_public_eq {st : X86AbsState} {s₁ s₂ : X86State} 
       · simp [c2, c3, c4] at hPub ⊢; exact rZf hPub
       · by_cases c5 : cc == 5
         · simp [c2, c3, c4, c5] at hPub ⊢; exact rZf hPub
-        · simp [c2, c3, c4, c5] at hPub ⊢; exact rCf hPub
+        · simp [c2, c3, c4, c5] at hPub
 
 private theorem evalX86Alu_xor_self (is64 : Bool) (v : UInt64) (cf : Bool) :
     evalX86Alu .xorOp is64 v v cf = (0, false, true) := by
@@ -4153,6 +4223,9 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
       · simp [hp, RelX86Gpr]
     case cmovcc cc is64 dst src =>
       rcases hValid with ⟨hd16, hs16⟩
+      have hGate : ¬ ((!x86CondSupported cc || !c.doitEnabled) = true) := by
+        intro hG; simp [hG] at hTr
+      simp only [hGate] at hTr
       injection hTr with hS; subst hS
       simp only [stepX86, hIns, true_and]
       refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf, rZf, rDirty, rMem, rRbp,
@@ -4658,7 +4731,11 @@ private theorem runX86_invariant_sound {c : FuncContract}
     satisfying `X86ContractInit c s₁ s₂` (with arbitrary secret memory & secret registers) and
     ANY execution fuel `fuel`:
     1. **`PC-NI` & `Mem-NI`:** `tr₁ = tr₂` (every executed PC and `(addr, width)` memory access matches),
-    2. **`DOIT-NI`:** Every executed instruction has `obs.isDoitSafe = true`,
+    2. **`DOIT-NI`:** Every executed instruction has `obs.isDoitSafe = true`. For `cmovcc` this
+       flag means "data-operand-independent when `DOITM` is set": `X86State` carries no `DOITM`
+       bit, and the checker accepts `cmovcc` only under a contract with `c.doitEnabled = true`
+       (`tooth_x86_cmovcc_rejected_without_doit`). The guarantee for such a stream is therefore
+       conditional on the processor running it in that mode,
     3. **`ABI & Epilogue Zeroization`:** If execution halts (`ret`), both states halt together and
        satisfy `X86ExitHygiene c s₁ s₂ s₁f s₂f` (`rsp` & `rbx, rbp, r12..r15` preserved,
        `ymmDirty = false` via `vzeroupper`, scratch `ymm` secrets wiped, scratch GPRs wiped). -/
@@ -5655,5 +5732,114 @@ theorem tooth_msr_dit_clears (s : Arm64State) :
 
 theorem tooth_dit_disabled_rejected (c : FuncContract) (st : Arm64AbsState) :
     transferArm64Instr c ⟨0, 4, .mulOp false 2 0 1⟩ { st with dit := false } = none := by rfl
+
+/-- `#tooth`: without the `DOITM` assumption in the contract, `cmovcc` (here `cmove rax, rcx`) is
+    rejected in every abstract state, whatever the publicity of its condition and operands. -/
+theorem tooth_x86_cmovcc_rejected_without_doit (c : FuncContract) (st : X86AbsState) :
+    transferX86Instr { c with doitEnabled := false } ⟨0, 4, .cmovcc 4 true 0 1⟩ st = none := by rfl
+
+/-- With the `DOITM` assumption the same instruction is accepted. -/
+theorem x86_cmovcc_accepted_with_doit (c : FuncContract) (st : X86AbsState) :
+    (transferX86Instr { c with doitEnabled := true } ⟨0, 4, .cmovcc 4 true 0 1⟩ st).isSome =
+      true := by rfl
+
+/-- `#tooth`: a `cmovcc` whose condition code is outside `{2, 3, 4, 5}` (here `cmovo`, code `0`)
+    is rejected under every contract and abstract state. -/
+theorem tooth_x86_cmovcc_unsupported_cc_rejected (c : FuncContract) (st : X86AbsState) :
+    transferX86Instr c ⟨0, 4, .cmovcc 0 true 0 1⟩ st = none := by rfl
+
+/-- `#tooth`: a `jcc` whose condition code is outside `{2, 3, 4, 5}` (here `jo`, code `0`; also
+    `js`, code `8`) is rejected under every contract and abstract state, including states in which
+    every tracked flag is public. -/
+theorem tooth_x86_jcc_unsupported_cc_rejected (c : FuncContract) (st : X86AbsState) :
+    transferX86Instr c ⟨0, 2, .jcc 0 0⟩ st = none ∧
+    transferX86Instr c ⟨0, 2, .jcc 8 0⟩ { st with cfPub := true, zfPub := true, ofPub := true } =
+      none := ⟨by rfl, by rfl⟩
+
+/-- Signed-multiply flags. `(-1) * 2 = -2` fits in 64 bits, so `CF` is clear although the unsigned
+    product exceeds `2^64`; `2^62 * 2 = 2^63` does not fit in a signed 64-bit word, so `CF` is set
+    although the unsigned product is below `2^64`. -/
+theorem evalX86Alu_imul2_signed_overflow :
+    evalX86Alu .imul2 true 0xFFFFFFFFFFFFFFFF 2 false = (0xFFFFFFFFFFFFFFFE, false, false) ∧
+    evalX86Alu .imul2 true 0x4000000000000000 2 false = (0x8000000000000000, true, false) := by
+  decide +kernel
+
+/-- `#tooth`: the unsigned-overflow reading (`an * bn ≥ 2^64`) disagrees with the signed flag on
+    both vectors of `evalX86Alu_imul2_signed_overflow`. -/
+theorem tooth_imul2_flag_is_not_unsigned_overflow :
+    imulSignedOverflow (2 ^ 64) 0xFFFFFFFFFFFFFFFF 2 ≠
+      decide (0xFFFFFFFFFFFFFFFF * 2 ≥ 2 ^ 64) ∧
+    imulSignedOverflow (2 ^ 64) 0x4000000000000000 2 ≠
+      decide (0x4000000000000000 * 2 ≥ 2 ^ 64) := by
+  decide +kernel
+
+/-- Two-operand `imul` writes the same value to `CF` and `OF`. -/
+theorem stepX86_imul2_cf_eq_of (is64 : Bool) (dst src : Nat) (s : X86State) :
+    (stepX86 ⟨0, 4, .aluRegReg .imul2 is64 dst src⟩ s).1.cf =
+      (stepX86 ⟨0, 4, .aluRegReg .imul2 is64 dst src⟩ s).1.ofFlag := by rfl
+
+/-- One-operand `mul` / `imul` writes the same value to `CF` and `OF`. -/
+theorem stepX86_mulOneOp_cf_eq_of (isSigned is64 : Bool) (src : Nat) (s : X86State) :
+    (stepX86 ⟨0, 3, .mulOneOp isSigned is64 src⟩ s).1.cf =
+      (stepX86 ⟨0, 3, .mulOneOp isSigned is64 src⟩ s).1.ofFlag := by rfl
+
+/-- One-operand multiply vectors on the helper level: unsigned `0xFFFFFFFF * 2` at 32 bits has a
+    nonzero upper half (`EDX = 1`), while the signed reading `(-1) * 2 = -2` does not overflow. -/
+theorem mulOneOp_32bit_flag_vectors :
+    (0xFFFFFFFF * 2) / 0x100000000 = 1 ∧
+    imulSignedOverflow 0x100000000 0xFFFFFFFF 2 = false ∧
+    imulSignedOverflow 0x100000000 0x40000000 2 = true := by
+  decide +kernel
+
+/-- Immediate arithmetic right shift is outside the decoder's supported subset. -/
+theorem tooth_x86_sar_rejected :
+    decodeX86Stream [0x48, 0xc1, 0xf8, 0x01, 0xc3] = none := by decide +kernel
+
+/-- Every shift/rotate forgets CF/OF publicity, including zero counts. This conservative
+    transfer prevents subsequent carry/overflow consumers from treating secret flags as public. -/
+theorem x86_shift_flag_taint (c : FuncContract) (st : X86AbsState)
+    (sk : X86ShiftKind) (is64 : Bool) (dst cnt : Nat) (hdst : dst < 16) :
+    (transferX86Instr c ⟨0, 4, .shiftImm sk is64 dst cnt⟩ st).map
+      (fun xs => xs.map (fun x => (x.2.cfPub, x.2.ofPub))) = some [(false, false)] := by
+  simp [transferX86Instr, x86InstrRegsValid, hdst]
+
+/-- Effective count zero preserves all tracked flags. -/
+theorem x86_shift_zero_flags (s : X86State) (sk : X86ShiftKind) (is64 : Bool) (dst : Nat) :
+    let t := (stepX86 ⟨0, 4, .shiftImm sk is64 dst 0⟩ s).1
+    t.cf = s.cf ∧ t.ofFlag = s.ofFlag ∧ t.zf = s.zf := by
+  cases is64 <;> cases sk <;> simp [stepX86, x86ShiftPreservesZf]
+
+/-- Executed one-operand multiply: the unsigned high half and signed sign extension differ. -/
+theorem x86_mulOneOp_executed_vectors :
+    let s : X86State := ⟨0, ((Bank16.const 0).set 0 0xffffffff).set 1 2,
+      Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩
+    let u := (stepX86 ⟨0, 3, .mulOneOp false false 1⟩ s).1
+    let i := (stepX86 ⟨0, 3, .mulOneOp true false 1⟩ s).1
+    u.gpr.get 0 = 0xfffffffe ∧ u.gpr.get 2 = 1 ∧ u.cf = true ∧ u.ofFlag = true ∧
+    i.gpr.get 0 = 0xfffffffe ∧ i.gpr.get 2 = 0xffffffff ∧ i.cf = false ∧ i.ofFlag = false := by
+  decide +kernel
+
+/-- A carry branch after a multiply or shift of secret input is rejected. -/
+theorem tooth_x86_secret_arithmetic_flags_rejected :
+    checkX86ThreeWayNI [0x48, 0x0f, 0xaf, 0xc1, 0x72, 0x00, 0xc3]
+      (mkContract "imul_flags" [4]) = false ∧
+    checkX86ThreeWayNI [0x48, 0xf7, 0xe1, 0x72, 0x00, 0xc3]
+      (mkContract "mul_flags" [4]) = false ∧
+    checkX86ThreeWayNI [0x48, 0xc1, 0xe0, 0x01, 0x72, 0x00, 0xc3]
+      (mkContract "shift_flags" [4]) = false := by
+  decide +kernel
+
+/-- Rotations preserve ZF taint even when their register operand is public. -/
+theorem x86_rotate_preserves_zf_taint (c : FuncContract) (st : X86AbsState)
+    (is64 : Bool) (dst cnt : Nat) (hdst : dst < 16) :
+    (transferX86Instr c ⟨0, 4, .shiftImm .ror is64 dst cnt⟩ st).map
+      (fun xs => xs.map (fun x => x.2.zfPub)) = some [st.zfPub] := by
+  simp [transferX86Instr, x86InstrRegsValid, hdst, x86ShiftPreservesZf]
+
+/-- A public rotate does not erase secret ZF from an earlier operation. -/
+theorem tooth_x86_rotate_cannot_launder_secret_zf :
+    checkX86ThreeWayNI
+      [0x48, 0x83, 0xc0, 0x01, 0x48, 0xc1, 0xc9, 0x01, 0x74, 0x00, 0xc3]
+      (mkContract "rotate_zf" [4, 1]) = false := by decide +kernel
 
 end Qsag
