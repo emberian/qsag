@@ -85,3 +85,45 @@ The challenge builds with intentional statement placeholders. On the Linux prima
 `python3 ../../scripts/run_mir_comparator.py` passed all 65 theorem obligations
 and 17 definitions in the default sandbox with all six kernels. The runner
 bundles the local Lean dependency inside a disposable package snapshot.
+
+
+## Wave-4 custody work, 2026-11-14 — partial, not convergence closure
+
+Implemented on hbox in `/home/hbox/qsag-w4-mir`:
+
+- Quorum isolated RSS traffic MAC keys are derived from provisioning keys and the
+  reserved session ID. The regression checks peer agreement and cross-session MAC
+  replay refusal. This does not establish the separate private M-gate Round-2 stream.
+- `SharedWindowSpendLedger` retains the extracted `StatefulVelocityGuard` across
+  approvals and rotations. Its generation supplies monotone request nonces; the
+  authenticated, policy-bound, rollback-checked recovery boundary reconstructs the
+  guard with the retained cap and spent amount. Release requires its acceptance.
+  Rotation, recovery, cumulative spend and direct over-cap refusal regressions pass.
+  Signer-local guards still reconstruct temporary verified guards and remain open.
+- `sponge_absorb_byte` proves the exact input-byte write and full-rate transition to
+  the canonical Keccak permutation. Arbitrary multi-block SHAKE/cSHAKE framing
+  equivalence remains open; the existing totality theorem is not that equivalence.
+
+Validation: the requested six-package no-default-feature check and clippy command
+exit successfully; the release suite has 241 passed, zero failed or ignored.
+The parity-test mirror emits four pre-existing `testing-ephemeral` cfg warnings.
+The warning-free MIR targets and runtime census pass: 5,320 declarations, 2,095
+ theorem declarations, 44 modules, zero rejected axioms. Extraction provenance
+still passes for all 22 bound files; no extracted Rust source or generated MIR
+changed. The 65 theorem / 17 definition comparator roster is unchanged.
+
+Sandboxed replay was attempted but blocked before kernel execution:
+`bwrap: setting up uid map: Permission denied`. hbox has
+`kernel.apparmor_restrict_unprivileged_userns = 1`; no host security setting was
+changed and no unsandboxed fallback was used. `scan_badwords.py` is absent on both
+hosts; the repository CI scanner `scripts/check_lean_policy.py` passes 136 files
+with exposure limit 12. Commands/logs and fingerprints are in `wave4-evidence/`.
+
+Still outstanding: production consuming-BDOZ adoption; persistent signer-local
+verified state; complete raw-secret/output mediation across the five crates;
+concurrent-scheduler refinement; and full multi-block sponge/framing equivalence.
+The verified BDOZ handle uses Wiedemann tower multiplication and per-wire masked
+commitments; policy uses polynomial-basis GF(2^128) and aggregate sigma commitments.
+Adoption requires a proved representation/protocol bridge or an extracted handle
+matching that production protocol, not casting the existing u128 values into Tower128.
+No C-02d, C-04a, or Fable disposition is marked closed by this work.
