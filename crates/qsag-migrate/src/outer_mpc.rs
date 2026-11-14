@@ -1,6 +1,7 @@
 //! Replicated mixed-domain evaluation with active 1-of-3 malicious multiplication
 //! verification over authenticated confidential pairwise channels.
 use crate::circuit::{Domain, Value};
+use crate::secret::{Secret, SecretVec, Wipe};
 use alloc::{boxed::Box, vec, vec::Vec};
 use qsag_accel::{
     ct::{ct_eq_bytes_mask, ct_zeroize_bytes, ct_zeroize_u64s},
@@ -53,7 +54,12 @@ impl core::ops::BitXor for Bit {
         Self([self.0[0] ^ rhs.0[0], self.0[1] ^ rhs.0[1]])
     }
 }
-pub(crate) type Word = Vec<Bit>;
+impl Wipe for Bit {
+    fn wipe(&mut self) {
+        ct_zeroize_u64s(&mut self.0);
+    }
+}
+pub(crate) type Word = SecretVec<Bit>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -676,15 +682,6 @@ impl Drop for ZeroizeRepGf128LanesVec {
     }
 }
 
-struct ZeroizeBitVec(Vec<Bit>);
-impl Drop for ZeroizeBitVec {
-    fn drop(&mut self) {
-        for b in &mut self.0 {
-            ct_zeroize_u64s(&mut b.0);
-        }
-    }
-}
-
 struct BitCheckScratch {
     planes: Box<[Bs128; STEP0_PLANES]>,
     tr_rows: Box<[BitPlane256; 64]>,
@@ -904,7 +901,7 @@ fn squeeze_fp_challenge(xof: &mut WordSponge136, d: Domain) -> Value {
 // ============================================================================
 
 /// Replicated additive field shares, with one entry per repetition lane.
-pub(crate) type FieldWord = Vec<[Value; 2]>;
+pub(crate) type FieldWord = SecretVec<[Value; 2]>;
 type PendingFieldTriple = (FieldWord, FieldWord, FieldWord);
 
 #[cfg(test)]
@@ -1007,20 +1004,6 @@ impl<T> Drop for Engine<T> {
         ct_zeroize_u64s(&mut self.scratch_r);
         ct_zeroize_u64s(&mut self.scratch_s);
         ct_zeroize_u64s(&mut self.pending_bits_raw);
-        for list in [
-            &mut self.pending_secp,
-            &mut self.pending_ed,
-            &mut self.pending_gold,
-        ] {
-            for (a, b, c) in list {
-                for fw in [a, b, c] {
-                    for pair in fw {
-                        ct_zeroize_u64s(&mut pair[0]);
-                        ct_zeroize_u64s(&mut pair[1]);
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -1143,7 +1126,7 @@ impl<T: Transport> Engine<T> {
         out
     }
 
-    fn raw_exchange(&mut self, mut payloads: [Vec<u64>; 2]) -> Result<[Vec<u64>; 2], Error> {
+    fn raw_exchange(&mut self, mut payloads: [Vec<u64>; 2]) -> Result<[SecretVec<u64>; 2], Error> {
         if self.poisoned {
             for payload in &mut payloads {
                 ct_zeroize_u64s(payload);
@@ -1203,12 +1186,17 @@ impl<T: Transport> Engine<T> {
         self.edge_sponges[1].absorb_bytes32(&incoming[1].tag);
 
         self.sequence = seq.checked_add(1).ok_or(Error::InvalidConfiguration)?;
-        Ok(incoming.each_mut().map(|m| core::mem::take(&mut m.payload)))
+        Ok(incoming
+            .each_mut()
+            .map(|m| SecretVec::from(core::mem::take(&mut m.payload))))
     }
 
-    fn raw_share_owned(&mut self, own: Vec<u64>) -> Result<(Vec<u64>, Vec<u64>), Error> {
+    fn raw_share_owned(
+        &mut self,
+        own: Vec<u64>,
+    ) -> Result<(SecretVec<u64>, SecretVec<u64>), Error> {
         let len = own.len();
-        let mut own_copy = Vec::with_capacity(len);
+        let mut own_copy = SecretVec::with_capacity(len);
         own_copy.extend_from_slice(&own);
         let incoming = match self.raw_exchange([own, Vec::new()]) {
             Ok(incoming) => incoming,
@@ -2052,7 +2040,7 @@ impl<T: Transport> Engine<T> {
             gf128_mul_hw(rb[1], rb[1], backend),
         ];
 
-        let mut to_open = ZeroizeBitVec(Vec::with_capacity(6 * 128));
+        let mut to_open = Word::with_capacity(6 * 128);
         for t in 0..2 {
             let pows2 = [rb[t], rb_sq[t]];
             for lane in 0..64 {
@@ -2074,8 +2062,8 @@ impl<T: Transport> Engine<T> {
                     gamma_sh[side] = g_val;
                 }
                 for item in [&alpha_sh, &beta_sh, &gamma_sh] {
-                    to_open.0.push(Bit([item[0][0], item[1][0]]));
-                    to_open.0.push(Bit([item[0][1], item[1][1]]));
+                    to_open.push(Bit([item[0][0], item[1][0]]));
+                    to_open.push(Bit([item[0][1], item[1][1]]));
                 }
                 zeroize_gf128_slice(&mut alpha_sh);
                 zeroize_gf128_slice(&mut beta_sh);
@@ -2084,7 +2072,7 @@ impl<T: Transport> Engine<T> {
         }
         drop(d_sh);
 
-        let mut opened = self.open_raw_bits(&to_open.0).map_err(|err| match err {
+        let mut opened = self.open_raw_bits(&to_open).map_err(|err| match err {
             Error::Disagreement(_) => Error::MultiplicationCheck,
             other => other,
         })?;
@@ -2133,9 +2121,9 @@ impl<T: Transport> Engine<T> {
         &mut self,
         locals: &[Value],
         d: Domain,
-    ) -> Result<Vec<[Value; 2]>, Error> {
+    ) -> Result<SecretVec<[Value; 2]>, Error> {
         let mut own = Vec::with_capacity(locals.len() * 4);
-        let mut mine_vals = Vec::with_capacity(locals.len());
+        let mut mine_vals = SecretVec::with_capacity(locals.len());
         for &lv in locals {
             let r0 = Self::field_pad(&mut self.pads[0], d);
             let r1 = Self::field_pad(&mut self.pads[1], d);
@@ -2144,7 +2132,7 @@ impl<T: Transport> Engine<T> {
             own.extend_from_slice(&masked);
         }
         let (_, next_raw) = self.raw_share_owned(own)?;
-        let mut out = Vec::with_capacity(locals.len());
+        let mut out = SecretVec::with_capacity(locals.len());
         for (mv, chunk) in mine_vals.into_iter().zip(next_raw.chunks_exact(4)) {
             let nv: Value = [chunk[0], chunk[1], chunk[2], chunk[3]];
             if !d.canonical(nv) {
@@ -2416,9 +2404,9 @@ impl<T: Transport> Engine<T> {
         [sample(&mut self.pads[0]), sample(&mut self.pads[1])]
     }
 
-    fn reshare_g3_many(&mut self, locals: &[GoldExt3]) -> Result<Vec<RepGoldExt3>, Error> {
+    fn reshare_g3_many(&mut self, locals: &[GoldExt3]) -> Result<SecretVec<RepGoldExt3>, Error> {
         let mut own = Vec::with_capacity(locals.len() * 3);
-        let mut mine_vals = Vec::with_capacity(locals.len());
+        let mut mine_vals = SecretVec::with_capacity(locals.len());
         for &lv in locals {
             let r = self.prss_g3();
             let masked = g3_add(lv, g3_sub(r[0], r[1]));
@@ -2426,7 +2414,7 @@ impl<T: Transport> Engine<T> {
             own.extend_from_slice(&masked);
         }
         let (_, next_raw) = self.raw_share_owned(own)?;
-        let mut out = Vec::with_capacity(locals.len());
+        let mut out = SecretVec::with_capacity(locals.len());
         for (mv, chunk) in mine_vals.into_iter().zip(next_raw.chunks_exact(3)) {
             let nv: GoldExt3 = [chunk[0], chunk[1], chunk[2]];
             if !g3_canonical(nv) {
@@ -2675,7 +2663,7 @@ impl<T: Transport> Engine<T> {
     }
 
     fn flush_pending_domain(&mut self, d: Domain) -> Result<(), Error> {
-        let mut batch = match d {
+        let batch = match d {
             Domain::Secp => core::mem::take(&mut self.pending_secp),
             Domain::Ed => core::mem::take(&mut self.pending_ed),
             Domain::Gold => core::mem::take(&mut self.pending_gold),
@@ -2684,28 +2672,14 @@ impl<T: Transport> Engine<T> {
         if batch.is_empty() {
             return Ok(());
         }
-        let wipe = |items: &mut [PendingFieldTriple]| {
-            for (a, b, c) in items {
-                for fw in [a, b, c] {
-                    for pair in fw {
-                        ct_zeroize_u64s(&mut pair[0]);
-                        ct_zeroize_u64s(&mut pair[1]);
-                    }
-                }
-            }
-        };
         for chunk in batch.chunks(MAX_PENDING_FIELD_WORDS) {
             let res = if d == Domain::Gold {
                 self.verify_pending_gold_slice(chunk)
             } else {
                 self.verify_pending_large_prime_slice(chunk, d)
             };
-            if let Err(err) = res {
-                wipe(&mut batch);
-                return Err(err);
-            }
+            res?;
         }
-        wipe(&mut batch);
         Ok(())
     }
 
@@ -2724,11 +2698,18 @@ impl<T: Transport> Engine<T> {
     }
 
     pub fn and(&mut self, pairs: &[(Bit, Bit)]) -> Result<Word, Error> {
+        let mut out = Word::with_capacity(pairs.len());
+        self.and_into(pairs, &mut out)?;
+        Ok(out)
+    }
+
+    fn and_into(&mut self, pairs: &[(Bit, Bit)], out: &mut Word) -> Result<(), Error> {
+        out.clear();
         if self.poisoned {
             return Err(Error::MultiplicationCheck);
         }
         if pairs.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         resize_wiped(&mut self.scratch_r, pairs.len());
         resize_wiped(&mut self.scratch_s, pairs.len());
@@ -2754,18 +2735,18 @@ impl<T: Transport> Engine<T> {
             }
         }
         let (mut mine, mut next) = self.raw_share_owned(own)?;
-        let out: Word = mine.iter().zip(&next).map(|(&a, &b)| Bit([a, b])).collect();
+        out.extend(mine.iter().zip(&next).map(|(&a, &b)| Bit([a, b])));
         ct_zeroize_u64s(&mut mine);
         ct_zeroize_u64s(&mut next);
         reserve_wiped(&mut self.pending_bits_raw, pairs.len() * 6);
-        for (&(a, b), &z) in pairs.iter().zip(&out) {
+        for (&(a, b), &z) in pairs.iter().zip(out.iter()) {
             self.pending_bits_raw
                 .extend_from_slice(&[a.0[0], a.0[1], b.0[0], b.0[1], z.0[0], z.0[1]]);
         }
         if self.pending_bits_raw.len() >= MAX_PENDING_BITS * 6 {
             self.flush_pending_bits()?;
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Reconstruct only explicitly public data after verifying all pending
@@ -2784,7 +2765,7 @@ impl<T: Transport> Engine<T> {
             .collect();
         let received = self.raw_exchange([words.clone(), words.clone()])?;
         for (i, r) in received.iter().enumerate() {
-            if r != &words {
+            if &r[..] != words.as_slice() {
                 self.poisoned = true;
                 return Err(Error::Disagreement(
                     (self.party + if i == 0 { 2 } else { 1 }) % 3,
@@ -2812,7 +2793,7 @@ impl<T: Transport> Engine<T> {
 
     #[cfg(test)]
     pub fn select(&mut self, c: Bit, a: &[Bit], b: &[Bit]) -> Result<Word, Error> {
-        let pairs: Vec<_> = a.iter().zip(b).map(|(&a, &b)| (c, a ^ b)).collect();
+        let pairs: SecretVec<_> = a.iter().zip(b).map(|(&a, &b)| (c, a ^ b)).collect();
         Ok(self
             .and(&pairs)?
             .iter()
@@ -2831,7 +2812,7 @@ impl<T: Transport> Engine<T> {
             return Ok(Vec::new());
         }
         let width = a_words[0].len();
-        let mut pairs = Vec::with_capacity(a_words.len() * width);
+        let mut pairs = SecretVec::with_capacity(a_words.len() * width);
         for ((&c, a), b) in conds.iter().zip(a_words).zip(b_words) {
             for (&ai, &bi) in a.iter().zip(b) {
                 pairs.push((c, ai ^ bi));
@@ -2851,7 +2832,12 @@ impl<T: Transport> Engine<T> {
         let n = a.len();
         let p = self.xor(a, b);
         let mut pp = p.clone();
-        let mut g = self.and(&a.iter().copied().zip(b.iter().copied()).collect::<Vec<_>>())?;
+        let mut g = self.and(
+            &a.iter()
+                .copied()
+                .zip(b.iter().copied())
+                .collect::<SecretVec<_>>(),
+        )?;
         let mut step = 1;
         while step < n {
             let indices: Vec<_> = (2 * step - 1..n).step_by(2 * step).collect();
@@ -2864,7 +2850,7 @@ impl<T: Transport> Engine<T> {
             self.prefix_layer(&indices, step, &mut pp, &mut g)?;
             step /= 2;
         }
-        let cs = self.and(&pp.into_iter().map(|p| (p, carry)).collect::<Vec<_>>())?;
+        let cs = self.and(&pp.into_iter().map(|p| (p, carry)).collect::<SecretVec<_>>())?;
         for (gi, &csi) in g.iter_mut().zip(&cs) {
             *gi = *gi ^ csi;
         }
@@ -2887,7 +2873,7 @@ impl<T: Transport> Engine<T> {
         if indices.is_empty() {
             return Ok(());
         }
-        let pairs: Vec<_> = indices
+        let pairs: SecretVec<_> = indices
             .iter()
             .flat_map(|&i| [(p[i], g[i - step]), (p[i], p[i - step])])
             .collect();
@@ -2905,15 +2891,16 @@ impl<T: Transport> Engine<T> {
         a_words: &[Word],
         b_words: &[Word],
         carry_mask: u64,
-    ) -> Result<(Vec<Word>, Vec<Bit>), Error> {
+    ) -> Result<(Vec<Word>, Word), Error> {
         if a_words.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Word::new()));
         }
         let k = a_words.len();
         let n = a_words[0].len();
-        let mut sums: Vec<Word> = (0..k).map(|_| Vec::with_capacity(n)).collect();
-        let mut carries = vec![self.constant(carry_mask); k];
-        let mut pairs = Vec::with_capacity(k);
+        let mut sums: Vec<Word> = (0..k).map(|_| Word::with_capacity(n)).collect();
+        let mut carries: Word = vec![self.constant(carry_mask); k].into();
+        let mut pairs = SecretVec::with_capacity(k);
+        let mut prods = Word::with_capacity(k);
         for bit in 0..n {
             pairs.clear();
             for ((a, b), (&c, sum_w)) in a_words
@@ -2926,7 +2913,7 @@ impl<T: Transport> Engine<T> {
                 sum_w.push(ai ^ bi ^ c);
                 pairs.push((ai ^ c, bi ^ c));
             }
-            let prods = self.and(&pairs)?;
+            self.and_into(&pairs, &mut prods)?;
             for (c, &p) in carries.iter_mut().zip(&prods) {
                 *c = *c ^ p;
             }
@@ -2941,15 +2928,16 @@ impl<T: Transport> Engine<T> {
         k_val: Value,
         carry_mask: u64,
         width: usize,
-    ) -> Result<(Vec<Word>, Vec<Bit>), Error> {
+    ) -> Result<(Vec<Word>, Word), Error> {
         if a_words.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), Word::new()));
         }
         let k = a_words.len();
         let k_bits = self.number(k_val, width);
-        let mut sums: Vec<Word> = (0..k).map(|_| Vec::with_capacity(width)).collect();
-        let mut carries = vec![self.constant(carry_mask); k];
-        let mut pairs = Vec::with_capacity(k);
+        let mut sums: Vec<Word> = (0..k).map(|_| Word::with_capacity(width)).collect();
+        let mut carries: Word = vec![self.constant(carry_mask); k].into();
+        let mut pairs = SecretVec::with_capacity(k);
+        let mut prods = Word::with_capacity(k);
         for (bit, &kb) in k_bits.iter().enumerate() {
             pairs.clear();
             for (a, (&c, sum_w)) in a_words.iter().zip(carries.iter().zip(&mut sums)) {
@@ -2957,7 +2945,7 @@ impl<T: Transport> Engine<T> {
                 sum_w.push(ai ^ kb ^ c);
                 pairs.push((ai ^ c, kb ^ c));
             }
-            let prods = self.and(&pairs)?;
+            self.and_into(&pairs, &mut prods)?;
             for (c, &p) in carries.iter_mut().zip(&prods) {
                 *c = *c ^ p;
             }
@@ -2976,13 +2964,9 @@ impl<T: Transport> Engine<T> {
 
     /// Check `v < d.modulus()` across `v_words` (`width == d.width()`).
     /// Since `p = 2^n - c`, `v < p <==> v + c < 2^n <==> carry_out_n(v + c) == 0`.
-    pub fn less_than_modulus_many(
-        &mut self,
-        v_words: &[Word],
-        d: Domain,
-    ) -> Result<Vec<Bit>, Error> {
+    pub fn less_than_modulus_many(&mut self, v_words: &[Word], d: Domain) -> Result<Word, Error> {
         if v_words.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Word::new());
         }
         let (_, carries) = self.add_public_many(v_words, Self::domain_c_const(d), 0, d.width())?;
         let ones = self.constant(u64::MAX);
@@ -2992,12 +2976,15 @@ impl<T: Transport> Engine<T> {
     #[cfg(test)]
     pub fn reduce_once(&mut self, a: &[Bit], d: Domain) -> Result<Word, Error> {
         let modulus = self.number(d.modulus(), a.len());
-        let not_m: Vec<_> = modulus
+        let not_m: Word = modulus
             .iter()
             .map(|&x| x ^ self.constant(u64::MAX))
             .collect();
         let (difference, ge) = self.add(a, &not_m, self.constant(u64::MAX))?;
-        Ok(self.select(ge, &difference, a)?[..d.width()].to_vec())
+        Ok(self.select(ge, &difference, a)?[..d.width()]
+            .iter()
+            .copied()
+            .collect())
     }
 
     #[cfg(test)]
@@ -3030,7 +3017,7 @@ impl<T: Transport> Engine<T> {
         let (sums, overflow) = self.add_many(a_words, b_words, 0)?;
         // `0 <= a + b < 2p = 2^(n+1) - 2c`, so `overflow` and `carry_c` are mutually exclusive.
         let (diffs, carry_c) = self.add_public_many(&sums, Self::domain_c_const(d), 0, n)?;
-        let ge: Vec<Bit> = overflow
+        let ge: Word = overflow
             .into_iter()
             .zip(carry_c)
             .map(|(ov, cc)| ov ^ cc)
@@ -3043,7 +3030,7 @@ impl<T: Transport> Engine<T> {
         if d == Domain::Bit {
             return Ok(self.xor(a, b));
         }
-        let not_b: Vec<_> = b.iter().map(|&x| x ^ self.constant(u64::MAX)).collect();
+        let not_b: Word = b.iter().map(|&x| x ^ self.constant(u64::MAX)).collect();
         let (difference, no_borrow) = self.add(a, &not_b, self.constant(u64::MAX))?;
         let modulus = self.number(d.modulus(), a.len());
         let (corrected, _) = self.add(&difference, &modulus, self.constant(0))?;
@@ -3084,7 +3071,7 @@ impl<T: Transport> Engine<T> {
         }
         while rows.len() > 2 {
             let count = rows.len() / 3;
-            let pairs: Vec<_> = rows
+            let pairs: SecretVec<_> = rows
                 .chunks_exact(3)
                 .flat_map(|r| (0..width).map(move |i| (r[0][i] ^ r[1][i], r[0][i] ^ r[2][i])))
                 .collect();
@@ -3092,7 +3079,7 @@ impl<T: Transport> Engine<T> {
             let mut next = Vec::with_capacity(count * 2 + 2);
             for (k, r) in rows.chunks_exact(3).enumerate() {
                 next.push((0..width).map(|i| r[0][i] ^ r[1][i] ^ r[2][i]).collect());
-                let mut carry = vec![self.constant(0)];
+                let mut carry: Word = vec![self.constant(0)].into();
                 carry.extend((0..width - 1).map(|i| r[0][i] ^ products[k * width + i]));
                 next.push(carry);
             }
@@ -3111,13 +3098,13 @@ impl<T: Transport> Engine<T> {
             return self.and(&[(a[0], b[0])]);
         }
         let n = d.width();
-        let pairs: Vec<_> = (0..n)
+        let pairs: SecretVec<_> = (0..n)
             .flat_map(|i| (0..n).map(move |j| (a[i], b[j])))
             .collect();
         let products = self.and(&pairs)?;
         let rows: Vec<_> = (0..n)
             .map(|i| {
-                let mut row = vec![self.constant(0); i];
+                let mut row: Word = vec![self.constant(0); i].into();
                 row.extend_from_slice(&products[i * n..(i + 1) * n]);
                 row
             })
@@ -3129,9 +3116,9 @@ impl<T: Transport> Engine<T> {
     pub fn field_scale(&mut self, a: &[Bit], value: Value, d: Domain) -> Result<Word, Error> {
         if d == Domain::Bit {
             return Ok(if value[0] == 0 {
-                vec![self.constant(0)]
+                vec![self.constant(0)].into()
             } else {
-                a.to_vec()
+                a.iter().copied().collect()
             });
         }
         let mut coefficient = [value[0], value[1], value[2], value[3], 0];
@@ -3159,14 +3146,14 @@ impl<T: Transport> Engine<T> {
             shift += 1;
         }
         if digits.is_empty() {
-            return Ok(vec![self.constant(0); d.width()]);
+            return Ok(vec![self.constant(0); d.width()].into());
         }
         let width = d.width() + digits.last().unwrap().0 + 1;
         let mut correction = 0;
         let mut rows: Vec<_> = digits
             .into_iter()
             .map(|(shift, negative)| {
-                let mut row = vec![self.constant(0); shift];
+                let mut row: Word = vec![self.constant(0); shift].into();
                 row.extend_from_slice(a);
                 row.resize(width, self.constant(0));
                 if negative {
@@ -3195,12 +3182,12 @@ impl<T: Transport> Engine<T> {
         };
         let cbits = 64 - c.leading_zeros() as usize;
         while wide.len() > n + 1 {
-            let high = wide[n..].to_vec();
+            let high: Word = wide[n..].iter().copied().collect();
             let width = core::cmp::max(n, high.len() + cbits) + 1;
-            let mut rows = vec![wide[..n].to_vec()];
+            let mut rows: Vec<Word> = vec![wide[..n].iter().copied().collect()];
             for shift in 0..cbits {
                 if (c >> shift) & 1 != 0 {
-                    let mut r = vec![self.constant(0); shift];
+                    let mut r: Word = vec![self.constant(0); shift].into();
                     r.extend_from_slice(&high);
                     rows.push(r);
                 }
@@ -3224,10 +3211,10 @@ impl<T: Transport> Engine<T> {
         ];
         let ones = self.constant(u64::MAX);
         let zero = self.constant(0);
-        let mut pairs = Vec::with_capacity(states.len() * 1600);
-        let mut c_buf = [zero; 320];
-        let mut t_buf = [zero; 64];
-        let mut next_buf = [zero; 64];
+        let mut pairs = SecretVec::with_capacity(states.len() * 1600);
+        let mut c_buf = Secret([zero; 320]);
+        let mut t_buf = Secret([zero; 64]);
+        let mut next_buf = Secret([zero; 64]);
 
         for rc in KECCAK_RC {
             pairs.clear();
@@ -3256,7 +3243,7 @@ impl<T: Transport> Engine<T> {
                     for z in 0..64 {
                         state[j * 64 + z] = t_buf[(z + 64 - r) % 64];
                     }
-                    t_buf = next_buf;
+                    t_buf.copy_from_slice(&next_buf[..]);
                 }
                 for i in 0..1600 {
                     let row = (i / 320) * 320;
@@ -3292,17 +3279,10 @@ pub(crate) struct Sponge {
     pub(crate) state: Word,
     pub(crate) pos: usize,
 }
-impl Drop for Sponge {
-    fn drop(&mut self) {
-        for b in &mut self.state {
-            ct_zeroize_u64s(&mut b.0);
-        }
-    }
-}
 impl Sponge {
     pub fn new<T: Transport>(e: &Engine<T>) -> Self {
         Self {
-            state: vec![e.constant(0); 1600],
+            state: vec![e.constant(0); 1600].into(),
             pos: 0,
         }
     }
@@ -3342,7 +3322,7 @@ impl Sponge {
         e: &mut Engine<T>,
         count: usize,
     ) -> Result<Word, Error> {
-        let mut out = Vec::with_capacity(count);
+        let mut out = Word::with_capacity(count);
         for _ in 0..count {
             if self.pos == 1088 {
                 e.permutation(&mut self.state)?;
@@ -3406,7 +3386,7 @@ pub(crate) fn squeeze_sponges_lockstep<T: Transport>(
     sponges: &mut [Sponge],
     counts: &[usize],
 ) -> Result<Vec<Word>, Error> {
-    let mut outs: Vec<Word> = counts.iter().map(|&c| Vec::with_capacity(c)).collect();
+    let mut outs: Vec<Word> = counts.iter().map(|&c| Word::with_capacity(c)).collect();
     loop {
         let mut need_perm = Vec::new();
         for (idx, (sp, &target)) in sponges.iter_mut().zip(counts).enumerate() {
@@ -3478,6 +3458,7 @@ impl<T: Transport> Engine<T> {
             ];
             64
         ]
+        .into()
     }
     pub fn fadd(&self, a: &FieldWord, b: &FieldWord, d: Domain) -> FieldWord {
         a.iter()
@@ -3498,20 +3479,20 @@ impl<T: Transport> Engine<T> {
     fn field_pad(s: &mut WordSponge136, d: Domain) -> Value {
         if d == Domain::Gold {
             loop {
-                let w = s.squeeze_u64();
-                if w < GOLDILOCKS_P {
-                    return [w, 0, 0, 0];
+                let w = Secret(s.squeeze_u64());
+                if *w < GOLDILOCKS_P {
+                    return [*w, 0, 0, 0];
                 }
             }
         }
         loop {
-            let mut words = [0u64; 4];
-            s.squeeze_u64s(&mut words);
+            let mut words = Secret([0u64; 4]);
+            s.squeeze_u64s(&mut words[..]);
             if d == Domain::Ed {
                 words[3] &= 0x7fff_ffff_ffff_ffff;
             }
-            if d.canonical(words) {
-                return words;
+            if d.canonical(*words) {
+                return *words;
             }
         }
     }
@@ -3540,10 +3521,7 @@ impl<T: Transport> Engine<T> {
         }
         let k = pairs.len();
         let mut own_flat = Vec::with_capacity(k * 256);
-        let mut own_words: Vec<Vec<Value>> = Vec::with_capacity(k);
         for (pair_idx, &(a, b)) in pairs.iter().enumerate() {
-            let masks = self.frandom(d);
-            let mut word_own = Vec::with_capacity(64);
             #[cfg(test)]
             let inject_lane = match self.fault {
                 Some(FaultInjection::FieldMul {
@@ -3564,37 +3542,38 @@ impl<T: Transport> Engine<T> {
             };
             #[cfg(not(test))]
             let _ = pair_idx;
-            for (lane_idx, ((al, bl), r)) in a.iter().zip(b).zip(masks).enumerate() {
+            for (lane_idx, (al, bl)) in a.iter().zip(b).enumerate() {
+                // Only one lane's masks are live: no per-word mask allocation.
+                let r = Secret([
+                    Self::field_pad(&mut self.pads[0], d),
+                    Self::field_pad(&mut self.pads[1], d),
+                ]);
                 #[cfg(not(test))]
                 let _ = lane_idx;
-                let base_prod = d.add(
+                let prod = Secret(d.add(
                     d.add(d.mul(al[0], d.add(bl[0], bl[1])), d.mul(al[1], bl[0])),
                     d.sub(r[0], r[1]),
-                );
+                ));
                 #[cfg(test)]
-                let prod = if inject_lane == Some(lane_idx) {
-                    d.add(base_prod, [1, 0, 0, 0])
+                let prod = Secret(if inject_lane == Some(lane_idx) {
+                    d.add(*prod, [1, 0, 0, 0])
                 } else {
-                    base_prod
-                };
-                #[cfg(not(test))]
-                let prod = base_prod;
-                own_flat.extend_from_slice(&prod);
-                word_own.push(prod);
+                    *prod
+                });
+                own_flat.extend_from_slice(&prod[..]);
             }
-            own_words.push(word_own);
         }
-        let (_, next_raw) = self.raw_share_owned(own_flat)?;
+        let (own_raw, next_raw) = self.raw_share_owned(own_flat)?;
         let mut results = Vec::with_capacity(k);
-        for (word_own, word_next) in own_words.into_iter().zip(next_raw.chunks_exact(256)) {
-            let mut fw = Vec::with_capacity(64);
-            for (av, b_slice) in word_own.into_iter().zip(word_next.chunks_exact(4)) {
+        for (word_own, word_next) in own_raw.chunks_exact(256).zip(next_raw.chunks_exact(256)) {
+            let mut fw = FieldWord::with_capacity(64);
+            for (av, b_slice) in word_own.chunks_exact(4).zip(word_next.chunks_exact(4)) {
                 let bv: Value = [b_slice[0], b_slice[1], b_slice[2], b_slice[3]];
                 if !d.canonical(bv) {
                     self.poisoned = true;
                     return Err(Error::MultiplicationCheck);
                 }
-                fw.push([av, bv]);
+                fw.push([[av[0], av[1], av[2], av[3]], bv]);
             }
             results.push(fw);
         }
@@ -3710,7 +3689,7 @@ impl<T: Transport> Engine<T> {
             let mut r_list: Vec<FieldWord> = (0..chunk.len()).map(|_| self.frandom(d)).collect();
             let rb_list = self.component_bits_many(&r_list, d)?;
             let deltas = self.field_sub_many(chunk, &rb_list, d)?;
-            let mut flat = Vec::with_capacity(chunk.len() * width);
+            let mut flat = Word::with_capacity(chunk.len() * width);
             for dw in &deltas {
                 flat.extend_from_slice(dw);
             }
@@ -3735,7 +3714,10 @@ impl<T: Transport> Engine<T> {
 
     #[cfg(test)]
     pub fn bits_to_field(&mut self, v: &[Bit], d: Domain) -> Result<FieldWord, Error> {
-        Ok(self.bits_to_field_many(&[v.to_vec()], d)?.pop().unwrap())
+        Ok(self
+            .bits_to_field_many(&[v.iter().copied().collect()], d)?
+            .pop()
+            .unwrap())
     }
 
     /// Convert additive to binary sharing by opening only fresh masked differences

@@ -100,11 +100,9 @@ pub(crate) struct Circuit {
     pub(crate) nodes: Vec<Node>,
     pub(crate) outputs: Vec<Wire>,
 }
-impl Drop for Circuit {
+impl Drop for Node {
     fn drop(&mut self) {
-        for n in &mut self.nodes {
-            ct_zeroize_u64s(&mut n.value);
-        }
+        ct_zeroize_u64s(&mut self.value);
     }
 }
 #[derive(Default)]
@@ -116,6 +114,16 @@ impl Builder {
     fn push(&self, domain: Domain, op: Op, value: Value) -> Wire {
         let mut ns = self.nodes.borrow_mut();
         let w = ns.len();
+        if ns.len() == ns.capacity() {
+            // Vec growth would free copies of witness-dependent node values.
+            let mut grown = Vec::with_capacity(ns.capacity().saturating_mul(2).max(4));
+            grown.extend(ns.iter().map(|n| Node {
+                domain: n.domain,
+                op: n.op,
+                value: n.value,
+            }));
+            *ns = grown; // Node::drop wipes the old allocation, including on builder abort.
+        }
         ns.push(Node { domain, op, value });
         w
     }
