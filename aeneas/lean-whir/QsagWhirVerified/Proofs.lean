@@ -9,8 +9,10 @@ import all Aeneas.Std.Containers
 public section
 open Aeneas Aeneas.Std
 namespace qsag_whir_verified.proofs
-attribute [local simp] UScalar.val UScalarTy.numBits
 set_option linter.unusedSimpArgs false
+set_option maxRecDepth 4096
+
+@[simp] private theorem u64_zero_val : (0#u64).val = 0 := rfl
 
 /-! ## 1. Canonical Goldilocks & `Ext4` Wire Decoding -/
 
@@ -36,8 +38,8 @@ theorem decode_canonical_u64_none_iff (x : U64) :
     decode_canonical_u64 x = .ok none ↔ goldilocksMod ≤ x.val := by
   rw [decode_canonical_u64_spec]
   by_cases h : x.val < goldilocksMod
-  · simp [h]; omega
-  · simp [h]; omega
+  · simp [h, Nat.not_le.mpr h]
+  · simp [h, Nat.not_lt.mp h]
 
 theorem decode_canonical_u64_rejects_noncanonical (x : U64)
     (h : GOLDILOCKS_P.val ≤ x.val) : decode_canonical_u64 x = .ok none := by
@@ -188,7 +190,8 @@ private theorem list_take_succ_eq {α : Type} (xs : List α) (k : Nat) (hk : k <
     | zero => rfl
     | succ k' =>
       have hk' : k' < rest.length := Nat.lt_of_succ_lt_succ hk
-      simp [List.take, ih k' hk']
+      show x :: rest.take (k' + 1) = x :: rest.take k' ++ [rest[k']'hk']
+      rw [ih k' hk', List.cons_append]
 
 private theorem eval_ext4_univariate_loop_fuel
     (coeffs : Slice Ext4) (z : U64) (k : Nat)
@@ -200,26 +203,40 @@ private theorem eval_ext4_univariate_loop_fuel
   | zero =>
     have hgt : ¬ (rem > 0#usize) := by
       simp [GT.gt, UScalar.lt_iff_val, hrem]
-    simp [loopFuel_succ, eval_ext4_univariate_at_base_loop.body, hgt, hornerSpec]
+    have hbody : eval_ext4_univariate_at_base_loop.body coeffs z acc rem = .ok (.done acc) := by
+      unfold eval_ext4_univariate_at_base_loop.body
+      simp only [hgt, ↓reduceIte, pure_eq_ok]
+    rw [loopFuel_succ]
+    dsimp only
+    rw [hbody]
+    rfl
   | succ k' ih =>
     have hk' : k' < coeffs.val.length := hk
     have hgt : rem > 0#usize := by
-      simp [GT.gt, UScalar.lt_iff_val, hrem]
+      change 0 < rem.val
+      omega
     have hsub_le : (1#usize).val ≤ rem.val := by
-      change 1 ≤ rem.val
+      have h1 : (1#usize).val = 1 := rfl
       omega
     let rem1 : Usize := ⟨rem.bv - (1#usize).bv⟩
     have hsub : (rem - 1#usize : Result Usize) = .ok rem1 := by
-      simp [hSub_uscalar_eq, hsub_le, rem1]
+      simp only [hSub_uscalar_eq, hsub_le, ↓reduceIte]
+      rfl
     have hrem1 : rem1.val = k' := by
       have hv : rem1.val = rem.val - 1 := BitVec.toNat_sub_of_le (BitVec.le_def.mpr hsub_le)
+      have h1 : (1#usize).val = 1 := rfl
       omega
     have hidx : Slice.index_usize coeffs rem1 = .ok (coeffs.val[k']'hk') := by
-      unfold Slice.index_usize
-      have hlt : rem1.val < coeffs.val.length := by omega
-      simp [hlt, hrem1]
-    simp only [loopFuel_succ, eval_ext4_univariate_at_base_loop.body, hgt, ↓reduceIte,
-      hsub, bind_eq_result_bind, result_bind_ok, hidx, ext_scale_refines, ext_add_refines]
+      simp only [Slice.index_usize, hrem1, dite_eq_left hk']
+    have hbody : eval_ext4_univariate_at_base_loop.body coeffs z acc rem =
+        .ok (.cont (extAdd (extScale acc z) (coeffs.val[k']'hk'), rem1)) := by
+      unfold eval_ext4_univariate_at_base_loop.body
+      simp only [hgt, ↓reduceIte, hsub, bind_eq_result_bind, result_bind_ok,
+        hidx, ext_scale_refines, ext_add_refines, pure_eq_ok]
+    rw [loopFuel_succ]
+    dsimp only
+    rw [hbody, result_bind_ok]
+    dsimp only
     rw [ih (Nat.le_of_lt hk') (extAdd (extScale acc z) (coeffs.val[k']'hk')) rem1 hrem1]
     congr 1
     unfold hornerSpec
@@ -271,12 +288,13 @@ theorem verify_stage_pow_mask_spec (word : U64) (bits : U32) :
   by_cases hb : bits.val ≤ 32
   · have hng : ¬ (bits > 32#u32) := by
       simp only [GT.gt, UScalar.lt_iff_val]
-      change ¬ (32 < bits.val)
+      have h32 : (32#u32).val = 32 := rfl
       omega
     have hlt64 : bits.val < 64 := by omega
     let shifted : U64 := ⟨(1#u64).bv <<< bits.val⟩
     have hshl : (1#u64 <<< bits : Result U64) = .ok shifted := by
-      simp [hShlU_uscalar_eq, hlt64, shifted]
+      simp only [hShlU_uscalar_eq, UScalarTy.numBits_u64, hlt64, ↓reduceIte]
+      rfl
     have hpow_le : 2 ^ bits.val ≤ 2 ^ 32 := Nat.pow_le_pow_right (by decide) hb
     have hpow_lt : 2 ^ bits.val < 2 ^ 64 := Nat.lt_of_le_of_lt hpow_le (by decide)
     have hsh_val : shifted.val = 2 ^ bits.val := by
@@ -286,16 +304,19 @@ theorem verify_stage_pow_mask_spec (word : U64) (bits : U32) :
       rw [Nat.one_shiftLeft, Nat.mod_eq_of_lt hpow_lt]
     have hge1 : (1#u64).val ≤ shifted.val := by
       rw [hsh_val]
+      have h1 : (1#u64).val = 1 := rfl
+      rw [h1]
       exact Nat.one_le_two_pow
     let mask : U64 := ⟨shifted.bv - (1#u64).bv⟩
     have hsub : (shifted - 1#u64 : Result U64) = .ok mask := by
-      simp [hSub_uscalar_eq, hge1, mask]
+      simp only [hSub_uscalar_eq, hge1, ↓reduceIte]
+      rfl
     have hmask_bv : mask.bv = BitVec.ofNat 64 (2 ^ bits.val - 1) := by
       apply BitVec.eq_of_toNat_eq
       have hm : mask.bv.toNat = shifted.val - 1 := BitVec.toNat_sub_of_le (BitVec.le_def.mpr hge1)
       rw [hm, hsh_val, BitVec.toNat_ofNat, Nat.mod_eq_of_lt (by omega)]
     simp only [verify_stage_pow_mask, hng, ↓reduceIte, hshl, bind_eq_result_bind,
-      result_bind_ok, hsub, lift_eq_ok]
+      result_bind_ok, hsub, lift_eq_ok, pure_eq_ok]
     congr 1
     by_cases hw : word.bv &&& BitVec.ofNat 64 (2 ^ bits.val - 1) = 0
     · have heq : (word &&& mask) = 0#u64 := by
@@ -305,10 +326,11 @@ theorem verify_stage_pow_mask_spec (word : U64) (bits : U32) :
     · have hne : (word &&& mask) ≠ 0#u64 := by
         rw [Ne, scalar_eq_bv, UScalar.bv_and, hmask_bv]
         exact hw
-      simp [hb, hw, hne]
+      simp only [hb, hne, decide_false, true_and]
+      exact (decide_eq_false hw).symm
   · have hg : bits > 32#u32 := by
       simp only [GT.gt, UScalar.lt_iff_val]
-      change 32 < bits.val
+      have h32 : (32#u32).val = 32 := rfl
       omega
     simp [verify_stage_pow_mask, hg, hb]
 
@@ -317,6 +339,37 @@ theorem verify_stage_pow_mask_sound (word : U64) (bits : U32) :
       bits.val ≤ 32 ∧ word.bv &&& BitVec.ofNat 64 (2 ^ bits.val - 1) = 0 := by
   rw [verify_stage_pow_mask_spec]
   simp
+
+/-- Constructive low-bit mask law; avoids the library's choice-dependent
+    subtraction/test-bit proof. -/
+private theorem testBit_low_mask (n i : Nat) :
+    Nat.testBit (2 ^ n - 1) i = decide (i < n) := by
+  induction n generalizing i with
+  | zero =>
+    change Nat.testBit 0 i = false
+    exact Nat.zero_testBit i
+  | succ n ih =>
+    have hp := Nat.two_pow_pos n
+    have hshape : 2 ^ (n + 1) - 1 = 2 * (2 ^ n - 1) + 1 := by
+      rw [Nat.pow_succ]
+      omega
+    cases i with
+    | zero =>
+      rw [hshape, Nat.testBit_zero]
+      have hm : (2 * (2 ^ n - 1) + 1) % 2 = 1 := by omega
+      simp only [hm, Nat.zero_lt_succ, decide_true]
+    | succ i =>
+      rw [hshape, Nat.testBit_succ]
+      have hd : (2 * (2 ^ n - 1) + 1) / 2 = 2 ^ n - 1 := by omega
+      rw [hd, ih]
+      simp only [Nat.succ_lt_succ_iff]
+
+private theorem and_low_mask_eq_mod (x n : Nat) :
+    x &&& (2 ^ n - 1) = x % 2 ^ n := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_and, testBit_low_mask, Nat.testBit_mod_two_pow]
+  exact Bool.and_comm _ _
 
 theorem verify_stage_pow_mask_mod_sound (word : U64) (bits : U32) :
     verify_stage_pow_mask word bits = .ok true ↔
@@ -330,7 +383,7 @@ theorem verify_stage_pow_mask_mod_sound (word : U64) (bits : U32) :
     have hnat : (word.bv &&& BitVec.ofNat 64 (2 ^ bits.val - 1)).toNat = 0 :=
       congrArg BitVec.toNat hbv
     rw [BitVec.toNat_and, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hlt,
-      Nat.and_two_pow_sub_one_eq_mod] at hnat
+      and_low_mask_eq_mod] at hnat
     exact hnat
   · rintro ⟨hb, hmod⟩
     refine ⟨hb, ?_⟩
@@ -338,7 +391,7 @@ theorem verify_stage_pow_mask_mod_sound (word : U64) (bits : U32) :
     have hpow_le : 2 ^ bits.val ≤ 2 ^ 32 := Nat.pow_le_pow_right (by decide) hb
     have hlt : 2 ^ bits.val - 1 < 2 ^ 64 := by omega
     rw [BitVec.toNat_and, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hlt,
-      Nat.and_two_pow_sub_one_eq_mod]
+      and_low_mask_eq_mod]
     exact hmod
 
 /-! ## 5. Arbitrary-Slice OOD / Terminal Claim Equality (`verify_ood_pin_eq`) -/
@@ -370,68 +423,92 @@ private theorem verify_ood_pin_eq_loop_fuel
       rw [hi_eq, List.drop_length]
     have hd2 : supplied.val.drop i.val = [] := by
       rw [hi_eq, hlen, List.drop_length]
-    simp [loopFuel_succ, verify_ood_pin_eq_loop.body, hlt, hd1, hd2]
+    have hbody : verify_ood_pin_eq_loop.body expected supplied i = .ok (.done true) := by
+      unfold verify_ood_pin_eq_loop.body
+      simp only [hlt, ↓reduceIte]
+    rw [loopFuel_succ]
+    try dsimp only
+    rw [hbody, result_bind_ok, hd1, hd2]
+    rfl
   | succ rem' ih =>
     have hilt : i.val < expected.val.length := by omega
     have hslt : i.val < supplied.val.length := by omega
     have hlt_u : i < Slice.len expected := by
       simp [UScalar.lt_iff_val, Slice.len_val, hilt]
     have hidx_e : Slice.index_usize expected i = .ok (expected.val[i.val]'hilt) := by
-      unfold Slice.index_usize; simp [hilt]
+      simp only [Slice.index_usize, dite_eq_left hilt]
     have hidx_s : Slice.index_usize supplied i = .ok (supplied.val[i.val]'hslt) := by
-      unfold Slice.index_usize; simp [hslt]
+      simp only [Slice.index_usize, dite_eq_left hslt]
     have hdrop_e := list_drop_eq_cons expected.val i.val hilt
     have hdrop_s := list_drop_eq_cons supplied.val i.val hslt
-    simp only [loopFuel_succ, verify_ood_pin_eq_loop.body, hlt_u, ↓reduceIte,
-      hidx_e, hidx_s, bind_eq_result_bind, result_bind_ok]
     by_cases hne : (expected.val[i.val]'hilt) != (supplied.val[i.val]'hslt)
     · have hval_ne : (expected.val[i.val]'hilt) ≠ (supplied.val[i.val]'hslt) := by
         simpa [bne_iff_ne] using hne
-      simp [hne, hdrop_e, hdrop_s, hval_ne]
+      have hbody : verify_ood_pin_eq_loop.body expected supplied i = .ok (.done false) := by
+        unfold verify_ood_pin_eq_loop.body
+        simp only [hlt_u, ↓reduceIte, hidx_e, hidx_s, bind_eq_result_bind, result_bind_ok, hne]
+      rw [loopFuel_succ]
+      try dsimp only
+      rw [hbody, result_bind_ok, hdrop_e, hdrop_s]
+      simp only [List.cons.injEq, hval_ne, false_and, decide_false]
     · have hval_eq : (expected.val[i.val]'hilt) = (supplied.val[i.val]'hslt) := by
         by_cases he : (expected.val[i.val]'hilt) = (supplied.val[i.val]'hslt)
         · exact he
         · exact False.elim (hne (bne_iff_ne.mpr he))
       have hadd_lt : i.val + (1#usize).val < 2 ^ 64 := by
         have hm := expected.property
-        change i.val + 1 < 2 ^ 64
+        have h1 : (1#usize).val = 1 := rfl
         unfold Usize.max at hm
         omega
       let i1 : Usize := ⟨i.bv + (1#usize).bv⟩
       have hadd : (i + 1#usize : Result Usize) = .ok i1 := by
-        simp [hAdd_uscalar_eq, hadd_lt, i1]
+        simp only [hAdd_uscalar_eq, UScalarTy.numBits_usize, hadd_lt, ↓reduceIte]
+        rfl
       have hi1 : i1.val = i.val + 1 := by
         change (i.bv + (1#usize).bv).toNat = i.val + 1
         rw [BitVec.toNat_add, Nat.mod_eq_of_lt hadd_lt]
         rfl
-      simp only [hne, ↓reduceIte, hadd, result_bind_ok]
+      have hbody : verify_ood_pin_eq_loop.body expected supplied i = .ok (.cont i1) := by
+        unfold verify_ood_pin_eq_loop.body
+        simp only [hlt_u, ↓reduceIte, hidx_e, hidx_s, bind_eq_result_bind, result_bind_ok,
+          hne, Bool.false_eq_true, hadd]
+      rw [loopFuel_succ]
+      try dsimp only
+      rw [hbody, result_bind_ok]
+      try dsimp only
       rw [ih i1 (by omega), hi1, hdrop_e, hdrop_s, hval_eq]
-      simp
+      simp only [List.cons.injEq, true_and, and_self]
 
 theorem verify_ood_pin_eq_spec (expected supplied : Slice U64) :
     verify_ood_pin_eq expected supplied = .ok (decide (expected.val = supplied.val)) := by
-  unfold verify_ood_pin_eq
-  by_cases hne : Slice.len expected != Slice.len supplied
-  · have hlen_ne : expected.val.length ≠ supplied.val.length := by
-      intro heq
-      have hu : Slice.len expected = Slice.len supplied :=
-        UScalar.eq_of_val_eq (by simp [Slice.len_val, heq])
-      exact (bne_iff_ne.mp hne) hu
-    have hlist_ne : expected.val ≠ supplied.val := fun h => hlen_ne (congrArg List.length h)
-    simp [hne, hlist_ne]
-  · have hlen_eq : expected.val.length = supplied.val.length := by
-      by_cases he : Slice.len expected = Slice.len supplied
-      · simpa [Slice.len_val] using congrArg UScalar.val he
-      · exact False.elim (hne (bne_iff_ne.mpr he))
-    simp only [hne, ↓reduceIte]
-    unfold verify_ood_pin_eq_loop
+  have hrun (hlen : expected.val.length = supplied.val.length) :
+      verify_ood_pin_eq_loop expected supplied 0#usize =
+        .ok (decide (expected.val = supplied.val)) := by
     have hfuel : expected.val.length + 1 ≤ loopMaxFuel := by
       rw [← Slice.len_val expected]
       exact usize_lt_loopMaxFuel (Slice.len expected)
-    have hloop := verify_ood_pin_eq_loop_fuel expected supplied hlen_eq
-      expected.val.length 0#usize (by simp)
-    simp only [List.drop] at hloop
+    have h0 : (0#usize).val = 0 := rfl
+    have hloop := verify_ood_pin_eq_loop_fuel expected supplied hlen
+      expected.val.length 0#usize (by omega)
+    rw [h0, List.drop_zero, List.drop_zero] at hloop
     exact loop_ok_of_loopFuel hfuel hloop
+  unfold verify_ood_pin_eq
+  dsimp only
+  split
+  · rename_i hne
+    have hlist_ne : expected.val ≠ supplied.val := by
+      intro heq
+      have hu : Slice.len expected = Slice.len supplied :=
+        UScalar.eq_of_val_eq (by rw [Slice.len_val, Slice.len_val, heq])
+      exact (bne_iff_ne.mp hne) hu
+    exact congrArg Result.ok (decide_eq_false hlist_ne).symm
+  · rename_i hne
+    have he : Slice.len expected = Slice.len supplied := by
+      by_cases he : Slice.len expected = Slice.len supplied
+      · exact he
+      · exact False.elim (hne (bne_iff_ne.mpr he))
+    apply hrun
+    simpa only [Slice.len_val] using congrArg UScalar.val he
 
 theorem verify_ood_pin_eq_sound (expected supplied : Slice U64) :
     verify_ood_pin_eq expected supplied = .ok true ↔ expected.val = supplied.val := by
@@ -451,10 +528,10 @@ theorem canonical_query_group_idx_spec (raw groups : U64) :
   unfold canonical_query_group_idx
   by_cases hg : groups = 0#u64
   · subst hg
-    simp
+    rfl
   · have hnz : groups.val ≠ 0 := by
       intro hz
-      exact hg (UScalar.eq_of_val_eq (by simpa using hz))
+      exact hg (UScalar.eq_of_val_eq (by change _ = 0; exact hz))
     have hmod : (raw % groups : Result U64) = .ok (UScalar.ofNat .U64 (raw.val % groups.val)) := by
       simp only [hMod_uscalar_eq, hnz, ↓reduceIte, Result.ok.injEq]
       apply UScalar.eq_of_val_eq
@@ -486,7 +563,7 @@ theorem canonical_query_group_idx_none_iff (raw groups : U64) :
     canonical_query_group_idx raw groups = .ok none ↔ groups = 0#u64 := by
   rw [canonical_query_group_idx_spec]
   by_cases hz : groups.val = 0
-  · refine ⟨fun _ => UScalar.eq_of_val_eq (by simpa using hz), fun _ => by simp [hz]⟩
+  · refine ⟨fun _ => UScalar.eq_of_val_eq (by change _ = 0; exact hz), fun _ => by simp [hz]⟩
   · simp [hz]
     intro h
     subst h
@@ -506,23 +583,24 @@ theorem step_merkle_pair_order_spec
                 then some { tag := 0#u8, left := node, right := sibling }
                 else some { tag := 0#u8, left := sibling, right := node }) := by
   unfold step_merkle_pair_order
+  have h64 : (64#u32).val = 64 := rfl
   by_cases hge : level >= 64#u32
   · have hge' : 64 ≤ level.val := by
-      simpa only [ge_iff_le, UScalar.le_iff_val] using hge
+      simpa only [ge_iff_le, UScalar.le_iff_val, h64] using hge
     simp [hge, hge']
   · have hlt : level.val < 64 := by
-      simp only [ge_iff_le, UScalar.le_iff_val] at hge
-      change ¬ (64 ≤ level.val) at hge
+      simp only [ge_iff_le, UScalar.le_iff_val, h64] at hge
       omega
     have hge' : ¬ (64 ≤ level.val) := by omega
     let shifted : U64 := ⟨idx.bv >>> level.val⟩
     have hshr : (idx >>> level : Result U64) = .ok shifted := by
-      simp [hShrU_uscalar_eq, hlt, shifted]
+      simp only [hShrU_uscalar_eq, UScalarTy.numBits_u64, hlt, ↓reduceIte]
+      rfl
     have hbit_val : (shifted &&& 1#u64).val = (idx.val >>> level.val) % 2 := by
       change ((idx.bv >>> level.val) &&& (1#u64).bv).toNat = (idx.val >>> level.val) % 2
       rw [BitVec.toNat_and, BitVec.toNat_ushiftRight]
       change (idx.val >>> level.val) &&& (2 ^ 1 - 1) = (idx.val >>> level.val) % 2
-      exact Nat.and_two_pow_sub_one_eq_mod (idx.val >>> level.val) 1
+      exact and_low_mask_eq_mod (idx.val >>> level.val) 1
     simp only [hge, ↓reduceIte, hshr, bind_eq_result_bind, result_bind_ok, lift_eq_ok,
       tag_canopy_merkle_internal_eq, hge']
     by_cases hb : (shifted &&& 1#u64) = 0#u64
@@ -533,7 +611,8 @@ theorem step_merkle_pair_order_spec
         intro hz
         apply hb
         apply UScalar.eq_of_val_eq
-        simpa [hbit_val] using hz
+        change (shifted &&& 1#u64).val = 0
+        exact hbit_val.trans hz
       simp [hb, hmnz]
 
 theorem step_merkle_pair_order_some_iff
@@ -567,10 +646,10 @@ theorem step_merkle_pair_order_none_iff
 
 /-! ## 7. Overflow-Free Quorum Weight Summation (`checked_quorum_sum`) -/
 
-@[expose] def natSumU64 (xs : List U64) : Nat :=
+def natSumU64 (xs : List U64) : Nat :=
   xs.foldl (fun acc x => acc + x.val) 0
 
-@[expose] def QuorumSumSpec
+def QuorumSumSpec
     (counts minimums : List U64) (minimum_global : U64) (sum : Nat) : Prop :=
   counts ≠ [] ∧
   counts.length = minimums.length ∧
@@ -593,6 +672,7 @@ private def quorumSuffixPure
     else if minTotal + m.val > 18446744073709551615 then none
     else quorumSuffixPure cs' ms' minG (total + c.val) (minTotal + m.val)
   | _, _ => none
+termination_by structural cs
 
 private theorem checked_quorum_sum_loop_fuel
     (counts minimums : Slice U64) (minG : U64)
@@ -611,16 +691,26 @@ private theorem checked_quorum_sum_loop_fuel
       simp [UScalar.lt_iff_val, Slice.len_val, hi_eq]
     have hdc : counts.val.drop i.val = [] := by rw [hi_eq, List.drop_length]
     have hdm : minimums.val.drop i.val = [] := by rw [hi_eq, hlen, List.drop_length]
-    simp only [loopFuel_succ, checked_quorum_sum_loop.body, hlt, ↓reduceIte,
-      hdc, hdm, quorumSuffixPure]
+    rw [loopFuel_succ, hdc, hdm]
+    dsimp only [quorumSuffixPure]
     by_cases hmin : total < minG
-    · have hmin' : total.val < minG.val := by simpa [UScalar.lt_iff_val] using hmin
-      simp [hmin, hmin']
-    · have hmin' : ¬ (total.val < minG.val) := by simpa [UScalar.lt_iff_val] using hmin
+    · have hmin' : total.val < minG.val := by simpa only [UScalar.lt_iff_val] using hmin
+      have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
+          .ok (.done none) := by
+        unfold checked_quorum_sum_loop.body
+        simp only [hlt, ↓reduceIte, hmin]
+      rw [hbody, result_bind_ok]
+      simp [hmin']
+    · have hmin' : ¬ (total.val < minG.val) := by simpa only [UScalar.lt_iff_val] using hmin
       have htot : UScalar.ofNat .U64 total.val = total := by
         apply UScalar.eq_of_val_eq
-        rw [UScalar.val_ofNat, Nat.mod_eq_of_lt total.bv.isLt]
-      simp [hmin, hmin', htot]
+        rw [UScalar.val_ofNat, UScalarTy.numBits_u64, Nat.mod_eq_of_lt total.bv.isLt]
+      have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
+          .ok (.done (some total)) := by
+        unfold checked_quorum_sum_loop.body
+        simp only [hlt, ↓reduceIte, hmin]
+      rw [hbody, result_bind_ok]
+      simp [hmin', htot]
   | succ rem' ih =>
     have hilt_c : i.val < counts.val.length := by omega
     have hilt_m : i.val < minimums.val.length := by omega
@@ -629,45 +719,70 @@ private theorem checked_quorum_sum_loop_fuel
     let c := counts.val[i.val]'hilt_c
     let m := minimums.val[i.val]'hilt_m
     have hidx_c : Slice.index_usize counts i = .ok c := by
-      unfold Slice.index_usize; simp [hilt_c, c]
+      simp only [Slice.index_usize, dite_eq_left hilt_c, c]
     have hidx_m : Slice.index_usize minimums i = .ok m := by
-      unfold Slice.index_usize; simp [hilt_m, m]
-    have hdc := list_drop_eq_cons counts.val i.val hilt_c
-    have hdm := list_drop_eq_cons minimums.val i.val hilt_m
-    rw [hdc, hdm]
-    simp only [loopFuel_succ, checked_quorum_sum_loop.body, hlt_u, ↓reduceIte,
-      hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok, quorumSuffixPure]
+      simp only [Slice.index_usize, dite_eq_left hilt_m, m]
+    have hdc : counts.val.drop i.val = c :: counts.val.drop (i.val + 1) :=
+      list_drop_eq_cons counts.val i.val hilt_c
+    have hdm : minimums.val.drop i.val = m :: minimums.val.drop (i.val + 1) :=
+      list_drop_eq_cons minimums.val i.val hilt_m
+    rw [loopFuel_succ, hdc, hdm]
+    dsimp only [quorumSuffixPure]
     by_cases hm0 : m = 0#u64
     · have hm0' : m.val = 0 := by rw [hm0]; rfl
-      simp [hm0, hm0']
-    · have hm0' : m.val ≠ 0 := fun hz => hm0 (UScalar.eq_of_val_eq (by simpa using hz))
+      have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
+          .ok (.done none) := by
+        unfold checked_quorum_sum_loop.body
+        simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok, hm0]
+      rw [hbody, result_bind_ok]
+      simp [hm0']
+    · have hm0' : m.val ≠ 0 := fun hz => hm0 (UScalar.eq_of_val_eq (by change _ = 0; exact hz))
       by_cases hcm : c < m
-      · have hcm' : c.val < m.val := by simpa [UScalar.lt_iff_val] using hcm
-        simp [hm0, hm0', hcm, hcm']
-      · have hcm' : ¬ (c.val < m.val) := by simpa [UScalar.lt_iff_val] using hcm
+      · have hcm' : c.val < m.val := by simpa only [UScalar.lt_iff_val] using hcm
+        have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
+             .ok (.done none) := by
+          unfold checked_quorum_sum_loop.body
+          simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok,
+            hm0, hcm]
+        rw [hbody, result_bind_ok]
+        simp [hm0', hcm']
+      · have hcm' : ¬ (c.val < m.val) := by simpa only [UScalar.lt_iff_val] using hcm
         have hc_le_max : c.val ≤ MAX_U64_WORD.val := by
           rw [max_u64_word_val]
           have hc64 : c.val < 2 ^ 64 := c.bv.isLt
           omega
-        let cap_c : U64 := ⟨MAX_U64_WORD.bv - c.bv⟩
+        have hc_bound : c.val ≤ 18446744073709551615 := by
+          simpa only [max_u64_word_val] using hc_le_max
+        obtain ⟨cap_c, hcap_c⟩ : ∃ cap_c : U64, cap_c.bv = MAX_U64_WORD.bv - c.bv :=
+          ⟨⟨MAX_U64_WORD.bv - c.bv⟩, rfl⟩
         have hsub_c : (MAX_U64_WORD - c : Result U64) = .ok cap_c := by
-          simp [hSub_uscalar_eq, hc_le_max, cap_c]
+          simp only [hSub_uscalar_eq, hc_le_max, ↓reduceIte]
+          exact congrArg Result.ok (UScalar.ext hcap_c.symm)
         have hcap_c_val : cap_c.val = 18446744073709551615 - c.val := by
-          have hv := BitVec.toNat_sub_of_le (BitVec.le_def.mpr hc_le_max)
-          simpa [cap_c, max_u64_word_val] using hv
-        simp only [hm0, hm0', hcm, hcm', ↓reduceIte, hsub_c, result_bind_ok]
+          calc
+            cap_c.val = MAX_U64_WORD.val - c.val :=
+              (congrArg BitVec.toNat hcap_c).trans
+                (BitVec.toNat_sub_of_le (BitVec.le_def.mpr hc_le_max))
+            _ = 18446744073709551615 - c.val := by rw [max_u64_word_val]
         by_cases htc : total > cap_c
         · have htc' : total.val + c.val > 18446744073709551615 := by
-            have hv : cap_c.val < total.val := by simpa [GT.gt, UScalar.lt_iff_val] using htc
+            have hv : cap_c.val < total.val := by simpa only [GT.gt, UScalar.lt_iff_val] using htc
             omega
-          simp [htc, htc']
+          have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
+              .ok (.done none) := by
+            unfold checked_quorum_sum_loop.body
+            simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok,
+              hm0, Bool.false_eq_true, hcm, hsub_c, htc]
+          rw [hbody, result_bind_ok]
+          simp [hm0', hcm', htc']
         · have htc' : ¬ (total.val + c.val > 18446744073709551615) := by
-            have hv : ¬ (cap_c.val < total.val) := by simpa [GT.gt, UScalar.lt_iff_val] using htc
+            have hv : ¬ (cap_c.val < total.val) := by simpa only [GT.gt, UScalar.lt_iff_val] using htc
             omega
           have htc_lt : total.val + c.val < 2 ^ 64 := by omega
           let total1 : U64 := ⟨total.bv + c.bv⟩
           have hadd_t : (total + c : Result U64) = .ok total1 := by
-            simp [hAdd_uscalar_eq, htc_lt, total1]
+            simp only [hAdd_uscalar_eq, UScalarTy.numBits_u64, htc_lt, ↓reduceIte]
+            rfl
           have htot1_val : total1.val = total.val + c.val := by
             change (total.bv + c.bv).toNat = total.val + c.val
             rw [BitVec.toNat_add, Nat.mod_eq_of_lt htc_lt]
@@ -675,42 +790,64 @@ private theorem checked_quorum_sum_loop_fuel
             rw [max_u64_word_val]
             have hm64 : m.val < 2 ^ 64 := m.bv.isLt
             omega
-          let cap_m : U64 := ⟨MAX_U64_WORD.bv - m.bv⟩
+          have hm_bound : m.val ≤ 18446744073709551615 := by
+            simpa only [max_u64_word_val] using hm_le_max
+          obtain ⟨cap_m, hcap_m⟩ : ∃ cap_m : U64, cap_m.bv = MAX_U64_WORD.bv - m.bv :=
+            ⟨⟨MAX_U64_WORD.bv - m.bv⟩, rfl⟩
           have hsub_m : (MAX_U64_WORD - m : Result U64) = .ok cap_m := by
-            simp [hSub_uscalar_eq, hm_le_max, cap_m]
+            simp only [hSub_uscalar_eq, hm_le_max, ↓reduceIte]
+            exact congrArg Result.ok (UScalar.ext hcap_m.symm)
           have hcap_m_val : cap_m.val = 18446744073709551615 - m.val := by
-            have hv := BitVec.toNat_sub_of_le (BitVec.le_def.mpr hm_le_max)
-            simpa [cap_m, max_u64_word_val] using hv
-          simp only [htc, htc', ↓reduceIte, hadd_t, result_bind_ok, hsub_m]
+            calc
+              cap_m.val = MAX_U64_WORD.val - m.val :=
+                (congrArg BitVec.toNat hcap_m).trans
+                  (BitVec.toNat_sub_of_le (BitVec.le_def.mpr hm_le_max))
+              _ = 18446744073709551615 - m.val := by rw [max_u64_word_val]
           by_cases htm : min_total > cap_m
           · have htm' : min_total.val + m.val > 18446744073709551615 := by
-              have hv : cap_m.val < min_total.val := by simpa [GT.gt, UScalar.lt_iff_val] using htm
+              have hv : cap_m.val < min_total.val := by simpa only [GT.gt, UScalar.lt_iff_val] using htm
               omega
-            simp [htm, htm']
+            have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
+                .ok (.done none) := by
+              unfold checked_quorum_sum_loop.body
+              simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok,
+                hm0, Bool.false_eq_true, hcm, hsub_c, htc, hadd_t, hsub_m, htm]
+            rw [hbody, result_bind_ok]
+            simp [hm0', hcm', htc', htm']
           · have htm' : ¬ (min_total.val + m.val > 18446744073709551615) := by
-              have hv : ¬ (cap_m.val < min_total.val) := by simpa [GT.gt, UScalar.lt_iff_val] using htm
+              have hv : ¬ (cap_m.val < min_total.val) := by simpa only [GT.gt, UScalar.lt_iff_val] using htm
               omega
             have htm_lt : min_total.val + m.val < 2 ^ 64 := by omega
             let min_total1 : U64 := ⟨min_total.bv + m.bv⟩
             have hadd_m : (min_total + m : Result U64) = .ok min_total1 := by
-              simp [hAdd_uscalar_eq, htm_lt, min_total1]
+              simp only [hAdd_uscalar_eq, UScalarTy.numBits_u64, htm_lt, ↓reduceIte]
+              rfl
             have hmt1_val : min_total1.val = min_total.val + m.val := by
               change (min_total.bv + m.bv).toNat = min_total.val + m.val
               rw [BitVec.toNat_add, Nat.mod_eq_of_lt htm_lt]
             have hi_lt : i.val + (1#usize).val < 2 ^ 64 := by
               have hm_c := counts.property
-              change i.val + 1 < 2 ^ 64
+              have h1 : (1#usize).val = 1 := rfl
               unfold Usize.max at hm_c
               omega
             let i1 : Usize := ⟨i.bv + (1#usize).bv⟩
             have hadd_i : (i + 1#usize : Result Usize) = .ok i1 := by
-              simp [hAdd_uscalar_eq, hi_lt, i1]
+              simp only [hAdd_uscalar_eq, UScalarTy.numBits_usize, hi_lt, ↓reduceIte]
+              rfl
             have hi1_val : i1.val = i.val + 1 := by
               change (i.bv + (1#usize).bv).toNat = i.val + 1
               rw [BitVec.toNat_add, Nat.mod_eq_of_lt hi_lt]
               rfl
-            simp only [htm, htm', ↓reduceIte, hadd_m, hadd_i, result_bind_ok]
+            have hbody : checked_quorum_sum_loop.body counts minimums minG total min_total i =
+                .ok (.cont (total1, min_total1, i1)) := by
+              unfold checked_quorum_sum_loop.body
+              simp only [hlt_u, ↓reduceIte, hidx_c, hidx_m, bind_eq_result_bind, result_bind_ok,
+                hm0, Bool.false_eq_true, hcm, hsub_c, htc, hadd_t, hsub_m, htm, hadd_m, hadd_i]
+            rw [hbody, result_bind_ok]
+            dsimp only
+            simp only [hm0', hcm', htc', htm', ↓reduceIte]
             rw [ih total1 min_total1 i1 (by omega), hi1_val, htot1_val, hmt1_val]
+
 
 private theorem foldl_u64_ge (xs : List U64) (acc : Nat) :
     acc ≤ xs.foldl (fun a x => a + x.val) acc := by
@@ -723,7 +860,8 @@ private theorem foldl_u64_shift (xs : List U64) (acc : Nat) :
   induction xs generalizing acc with
   | nil => simp [natSumU64]
   | cons x rest ih =>
-    simp only [List.foldl, natSumU64]
+    unfold natSumU64
+    simp only [List.foldl, Nat.zero_add]
     rw [ih (acc + x.val), ih x.val]
     omega
 
@@ -750,22 +888,24 @@ private theorem quorumSuffixPure_some_iff
         · simp [hlt] at h
         · simp [hlt] at h
           have hout : out.val = total := by
-            rw [← h, UScalar.val_ofNat, Nat.mod_eq_of_lt (by omega)]
+            rw [← h, UScalar.val_ofNat, UScalarTy.numBits_u64, Nat.mod_eq_of_lt (by omega)]
           exact ⟨fun j hc => False.elim (Nat.not_lt_zero j hc), hout, htot_max, by omega⟩
       · rintro ⟨_, hout, _, hmin⟩
         have hlt : ¬ (total < minG.val) := by omega
         simp only [hlt, ↓reduceIte, Option.some.injEq]
         apply UScalar.eq_of_val_eq
-        rw [UScalar.val_ofNat, Nat.mod_eq_of_lt (by omega), hout]
+        rw [UScalar.val_ofNat, UScalarTy.numBits_u64, Nat.mod_eq_of_lt (by omega), hout]
   | cons c cs' ih =>
     cases ms with
     | nil => cases hlen
     | cons m ms' =>
       have hlen' : cs'.length = ms'.length := Nat.succ.inj hlen
+      have hc_sum : natSumU64 (c :: cs') = c.val + natSumU64 cs' := by
+        unfold natSumU64
+        simp only [List.foldl, Nat.zero_add]
+        exact foldl_u64_shift cs' c.val
       have hsum_cons : total + natSumU64 (c :: cs') = (total + c.val) + natSumU64 cs' := by
-        simp only [natSumU64, List.foldl, Nat.zero_add]
-        rw [foldl_u64_shift cs' c.val]
-        omega
+        rw [hc_sum]; omega
       simp only [quorumSuffixPure]
       constructor
       · intro h
@@ -783,17 +923,20 @@ private theorem quorumSuffixPure_some_iff
                 refine ⟨?_, ?_, ?_, ?_⟩
                 · intro j hc hm
                   cases j with
-                  | zero => exact ⟨Nat.pos_of_ne_zero hm0, by omega⟩
+                  | zero =>
+                    simp only [List.getElem_cons_zero]
+                    exact ⟨Nat.pos_of_ne_zero hm0, by omega⟩
                   | succ j' =>
-                    exact hrec_all j' (Nat.lt_of_succ_lt_succ hc) (Nat.lt_of_succ_lt_succ hm)
+                    simpa only [List.getElem_cons_succ] using
+                      hrec_all j' (Nat.lt_of_succ_lt_succ hc) (Nat.lt_of_succ_lt_succ hm)
                 · rw [hsum_cons]; exact hout
                 · rw [hsum_cons]; exact hmax
                 · rw [hsum_cons]; exact hmin
       · rintro ⟨hall, hout, hmax, hmin⟩
-        have h0 := hall 0 (Nat.zero_lt_succ _) (Nat.zero_lt_succ _)
+        have h0 : 0 < m.val ∧ m.val ≤ c.val := by
+          simpa only [List.getElem_cons_zero] using hall 0 (Nat.zero_lt_succ _) (Nat.zero_lt_succ _)
         have hm0 : m.val ≠ 0 := by omega
         have hcm : ¬ (c.val < m.val) := by omega
-        have hcs_nonneg : 0 ≤ natSumU64 cs' := Nat.zero_le _
         have htc_le : total + c.val ≤ 18446744073709551615 := by omega
         have htc : ¬ (total + c.val > 18446744073709551615) := by omega
         have htm : ¬ (minTotal + m.val > 18446744073709551615) := by omega
@@ -801,7 +944,8 @@ private theorem quorumSuffixPure_some_iff
         apply (ih ms' (total + c.val) (minTotal + m.val) hlen' (by omega) htc_le).mpr
         refine ⟨?_, ?_, ?_, ?_⟩
         · intro j' hc' hm'
-          exact hall (j' + 1) (Nat.succ_lt_succ hc') (Nat.succ_lt_succ hm')
+          simpa only [List.getElem_cons_succ] using
+            hall (j' + 1) (Nat.succ_lt_succ hc') (Nat.succ_lt_succ hm')
         · rw [← hsum_cons]; exact hout
         · rw [← hsum_cons]; exact hmax
         · rw [← hsum_cons]; exact hmin
@@ -829,8 +973,9 @@ theorem checked_quorum_sum_total
         have hfuel : counts.val.length + 1 ≤ loopMaxFuel := by
           rw [← Slice.len_val counts]
           exact usize_lt_loopMaxFuel (Slice.len counts)
+        have h0u : (0#usize).val = 0 := rfl
         have hloop := checked_quorum_sum_loop_fuel counts minimums minimum_global hlen
-          counts.val.length 0#u64 0#u64 0#usize (by simp)
+          counts.val.length 0#u64 0#u64 0#usize (by omega)
         exact ⟨_, loop_ok_of_loopFuel hfuel hloop⟩
 
 /-- Exact bidirectional soundness & completeness of `checked_quorum_sum`. -/
@@ -859,25 +1004,36 @@ theorem checked_quorum_sum_sound
       simp only [hne, Bool.false_eq_true, ↓reduceIte]
       by_cases hg0 : minimum_global = 0#u64
       · have hg0_val : minimum_global.val = 0 := by rw [hg0]; rfl
-        simp [hg0, QuorumSumSpec, hg0_val]
+        simp only [hg0, ↓reduceIte, Result.ok.injEq, reduceCtorEq, false_iff]
+        intro hs
+        have hpos := hs.2.2.1
+        change 0 < 0 at hpos
+        exact Nat.not_lt_zero _ hpos
       · have hg_pos : 0 < minimum_global.val := by
           have hnz : minimum_global.val ≠ 0 := fun hz =>
-            hg0 (UScalar.eq_of_val_eq (by simpa using hz))
+            hg0 (UScalar.eq_of_val_eq (by change _ = 0; exact hz))
           exact Nat.pos_of_ne_zero hnz
         simp only [hg0, ↓reduceIte]
         unfold checked_quorum_sum_loop
         have hfuel : counts.val.length + 1 ≤ loopMaxFuel := by
           rw [← Slice.len_val counts]
           exact usize_lt_loopMaxFuel (Slice.len counts)
+        have h0u : (0#usize).val = 0 := rfl
+        have h064 : (0#u64).val = 0 := rfl
         have hloop := checked_quorum_sum_loop_fuel counts minimums minimum_global hlen
-          counts.val.length 0#u64 0#u64 0#usize (by simp)
+          counts.val.length 0#u64 0#u64 0#usize (by omega)
         have hrun := loop_ok_of_loopFuel hfuel hloop
-        simp only [List.drop] at hrun
+        simp only [h0u, h064, List.drop_zero] at hrun
         rw [hrun]
         simp only [Result.ok.injEq]
         rw [quorumSuffixPure_some_iff counts.val minimums.val minimum_global 0 0 total
           hlen (Nat.le_refl 0) (by decide)]
         simp only [Nat.zero_add, QuorumSumSpec, hne_nil, hlen, hg_pos, true_and]
+        constructor
+        · rintro ⟨hp, hs, hm, hg⟩
+          exact ⟨hne_nil, hp, hs, hs.symm ▸ hm, hs.symm ▸ hg⟩
+        · rintro ⟨_, hp, hs, hm, hg⟩
+          exact ⟨hp, hs, hs ▸ hm, hs ▸ hg⟩
 
 theorem checked_quorum_sum_none_iff
     (counts minimums : Slice U64) (minimum_global : U64) :
@@ -893,7 +1049,7 @@ theorem checked_quorum_sum_none_iff
       omega
     let u : U64 := UScalar.ofNat .U64 s
     have hu : u.val = s := by
-      rw [UScalar.val_ofNat, Nat.mod_eq_of_lt hlt64]
+      rw [UScalar.val_ofNat, UScalarTy.numBits_u64, Nat.mod_eq_of_lt hlt64]
     have hspec : QuorumSumSpec counts.val minimums.val minimum_global u.val := by
       simpa only [hu] using hs
     have hsome := (checked_quorum_sum_sound counts minimums minimum_global u).mpr hspec
@@ -943,10 +1099,9 @@ theorem tooth_merkle_pair_swaps_on_direction_bit_and_rejects_shift64 :
     step_merkle_pair_order 0#u64 0#u32 z w = .ok (some ⟨0#u8, z, w⟩) ∧
     step_merkle_pair_order 1#u64 0#u32 z w = .ok (some ⟨0#u8, w, z⟩) ∧
     step_merkle_pair_order 0#u64 64#u32 z w = .ok none := by
+  dsimp only
   refine ⟨?_, ?_, ?_, ?_⟩
-  · intro h
-    have hv := congrArg Array.val h
-    simp [Array.repeat] at hv
+  · decide +kernel
   · rw [step_merkle_pair_order_spec]; rfl
   · rw [step_merkle_pair_order_spec]; rfl
   · rw [step_merkle_pair_order_spec]; rfl
@@ -960,18 +1115,20 @@ theorem tooth_checked_quorum_sum_rejects_u64_wraparound_forgery :
     let honest_mins : Slice U64 := ⟨[8#u64, 12#u64], by decide⟩
     checked_quorum_sum overflow_counts overflow_mins 4#u64 = .ok none ∧
     checked_quorum_sum honest_counts honest_mins 20#u64 = .ok (some 25#u64) := by
+  dsimp only
   constructor
   · rw [checked_quorum_sum_none_iff]
     rintro ⟨s, _, _, _, _, hsum, hmax, _⟩
-    simp [natSumU64, max_u64_word_val] at hsum
+    simp only [natSumU64, List.foldl, Nat.zero_add, max_u64_word_val] at hsum
+    change s = 18446744073709551620 at hsum
     omega
   · rw [checked_quorum_sum_sound]
     refine ⟨by decide, rfl, by decide, ?_, by rfl, by decide, by decide⟩
     intro j hc hm
     match j with
-    | 0 => decide
-    | 1 => decide
-    | n + 2 => exfalso; revert hc; decide
+    | 0 => change 0 < 8 ∧ 8 ≤ 10; decide
+    | 1 => change 0 < 12 ∧ 12 ≤ 15; decide
+    | n + 2 => change n + 2 < 2 at hc; omega
 
 /-- `#tooth`: `verify_ood_pin_eq` rejects single-limb perturbations and length mismatches while accepting
     exact slice matches. -/
@@ -982,6 +1139,7 @@ theorem tooth_ood_pin_rejects_perturbation_and_length_mismatch :
     verify_ood_pin_eq s1 s2 = .ok false ∧
     verify_ood_pin_eq s1 s3 = .ok false ∧
     verify_ood_pin_eq s1 s1 = .ok true := by
+  dsimp only
   simp only [verify_ood_pin_eq_spec]
   decide
 

@@ -18,6 +18,20 @@ Run `AENEAS_TOOLS_DIR=<tool-directory> ./aeneas/extract_whir.sh` from the reposi
 - **`Proofs.lean`:** Proves totality and exact bidirectional `Result.ok ... ↔ spec` theorems for all extracted verifier gates — including arbitrary-slice `loopFuel` invariants for `eval_ext4_univariate_at_base`, `verify_ext4_univariate_at_base_pin`, `verify_ood_pin_eq`, and `checked_quorum_sum`, general BitVec/modulo characterization for `verify_stage_pow_mask`, and tag+ordering characterization (`tag = 0#u8`) for `step_merkle_pair_order` — paired with `#tooth` mutation-sensitivity witnesses.
 - **`AuditWhirMirAxioms.lean`:** Default build target (`lake build --wfail`) with a `Classical.choice` negative control that walks every constant in `QsagWhirVerified*` and `Aeneas*`, permitting only `{propext, Quot.sound}` (`0 sorry`, `0 Classical.choice`, `0 Lean.ofReduceBool`).
 
+The package retains 12 `@[expose]` definitions. The mask-to-modulo proof uses a constructive
+bit induction, so the audit also rejects indirect dependencies on choice in imported arithmetic
+lemmas. The compatibility elaborator contains only the options and marker attributes used by
+this extraction.
+
+From the repository root, run `python3 crates/qsag-agg/tests/check_affine_witness_parity.py` to
+check all 46 deployed Rust witness rows against `AffineProximityGaps` and pin both folding
+thresholds to `< 2000`. This read-only check complements the Rust finite-witness test and the
+Lean certificate.
+
 ## Scope & Protocol Assumptions
 
 These theorems prove exact MIR-to-specification refinement of the extracted verifier kernels and loop invariants, not the end-to-end cryptographic security reduction of WHIR. Hash collision resistance, Fiat–Shamir random-oracle unpredictability, and out-of-band authentication of the ordered disjoint `ShardHemPolicy` registry remain protocol-level assumptions. Two-layer hierarchical aggregation (`crates/qsag-agg/src/recursive.rs`) verifies every regional `JortsPoseidon2` or `CorduroyPoseidon2` `Hem` proof in parallel and binds the length-framed (`encode_multi_frame`) policy registry root, message digest, epoch floor, and `checked_quorum_sum` quorum weights without compressing child verifiers into a recursive SNARK circuit.
+
+All production scoped workers in `qsag-agg`, including nested arithmetic kernels, share one
+nonblocking permit budget. Saturated budgets and OS thread-creation failures execute the job
+on the caller; chunk results retain input order and worker panics retain their original payload.
