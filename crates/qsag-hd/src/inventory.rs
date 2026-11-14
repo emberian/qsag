@@ -423,11 +423,24 @@ pub fn verify_inventory_child_proof<B: AcceleratorBackend>(
     expected_addr: &QsagAddress,
     accel: &B,
 ) -> Result<(), HdError> {
+    const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
     if !master_pk.batch_size.is_power_of_two() {
         return Err(HdError::InvalidBatchSize);
     }
     if proof.child_idx >= master_pk.batch_size {
         return Err(HdError::ChildIndexOutOfBounds);
+    }
+    if master_pk.pk_seed_limbs.iter().any(|&x| x >= GOLDILOCKS_P)
+        || master_pk
+            .poseidon2_root_limbs
+            .iter()
+            .any(|&x| x >= GOLDILOCKS_P)
+        || proof
+            .poseidon2_siblings
+            .iter()
+            .any(|sib| sib.iter().any(|&x| x >= GOLDILOCKS_P))
+    {
+        return Err(HdError::InvalidInventoryProof);
     }
     let expected_root32 = compute_master_root_pk32(
         master_pk.batch_size,
@@ -561,6 +574,18 @@ mod signature_tests {
         );
         assert_ne!(table.child_pubkeys[0], placeholder);
         let (addr, mut proof) = table.derive_watch_only_child(0, "qsp").unwrap();
+        let mut noncanon_master = table.master_pk.clone();
+        noncanon_master.merkle_root_limbs[0] = 0xFFFF_FFFF_0000_0001;
+        assert_eq!(
+            verify_inventory_child_proof(&noncanon_master, &proof, &addr, &accel).err(),
+            Some(HdError::InvalidInventoryProof)
+        );
+        let mut noncanon_proof = proof.clone();
+        noncanon_proof.merkle_siblings[0][0] = 0xFFFF_FFFF_0000_0001;
+        assert_eq!(
+            verify_inventory_child_proof(&table.master_pk, &noncanon_proof, &addr, &accel).err(),
+            Some(HdError::InvalidInventoryProof)
+        );
         proof.child_pk = placeholder;
         assert!(verify_inventory_child_proof(&table.master_pk, &proof, &addr, &accel).is_err());
     }

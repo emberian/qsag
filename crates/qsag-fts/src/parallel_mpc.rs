@@ -1456,8 +1456,18 @@ pub fn verify_parallel_seeded_fts<B: AcceleratorBackend>(
     sig: &ParallelSeededSignature,
     accel: &B,
 ) -> Result<(), ParallelSeededError> {
+    const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
     let params = &pk.params;
     params.validate()?;
+    if pk.pk_seed_limbs.iter().any(|&x| x >= GOLDILOCKS_P)
+        || pk.merkle_root.iter().any(|&x| x >= GOLDILOCKS_P)
+        || sig
+            .merkle_siblings
+            .iter()
+            .any(|sib| sib.iter().any(|&x| x >= GOLDILOCKS_P))
+    {
+        return Err(ParallelSeededError::InvalidAuthenticationPath);
+    }
     if pk.pk_seed_limbs
         != poseidon2_hash_limbs(
             0x5345_4544_3536_5633,
@@ -1680,5 +1690,50 @@ mod boundary_tests {
                 Err(ParallelSeededError::InvalidThresholdParameters)
             );
         }
+    }
+
+    #[test]
+    fn noncanonical_goldilocks_limbs_are_rejected_at_verify_entry() {
+        const GOLDILOCKS_P: u64 = 0xFFFF_FFFF_0000_0001;
+        let accel = CpuReferenceBackend::new();
+        let mut setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+            ParallelSeededParams {
+                tree_height: 1,
+                winternitz_w: 2,
+                num_chains: 2,
+                target_sum: 1,
+            },
+            2,
+            [21; 32],
+            [22; 32],
+            &accel,
+        )
+        .unwrap();
+        let mut log = InMemoryBurnLog::default();
+        let sig = setup
+            .threshold_sign(0, b"canonical-check", [23; 32], &mut log, &accel)
+            .unwrap();
+        verify_parallel_seeded_fts(&setup.pk, b"canonical-check", &sig, &accel).unwrap();
+
+        let mut bad_pk_seed = setup.pk.clone();
+        bad_pk_seed.pk_seed_limbs[0] = GOLDILOCKS_P;
+        assert_eq!(
+            verify_parallel_seeded_fts(&bad_pk_seed, b"canonical-check", &sig, &accel),
+            Err(ParallelSeededError::InvalidAuthenticationPath)
+        );
+
+        let mut bad_pk_root = setup.pk.clone();
+        bad_pk_root.merkle_root[0] = GOLDILOCKS_P;
+        assert_eq!(
+            verify_parallel_seeded_fts(&bad_pk_root, b"canonical-check", &sig, &accel),
+            Err(ParallelSeededError::InvalidAuthenticationPath)
+        );
+
+        let mut bad_sig = sig;
+        bad_sig.merkle_siblings[0][0] = GOLDILOCKS_P;
+        assert_eq!(
+            verify_parallel_seeded_fts(&setup.pk, b"canonical-check", &bad_sig, &accel),
+            Err(ParallelSeededError::InvalidAuthenticationPath)
+        );
     }
 }

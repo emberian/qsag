@@ -85,24 +85,44 @@ pub enum BlindVcError {
     SelectiveDisclosureProofInvalid,
 }
 
+struct ZeroizingU64Vec(Vec<u64>);
+
+impl core::ops::Deref for ZeroizingU64Vec {
+    type Target = [u64];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for ZeroizingU64Vec {
+    fn drop(&mut self) {
+        ct_zeroize_u64s(&mut self.0);
+    }
+}
+
 /// Sample `count` unbiased canonical Goldilocks field elements (`< GOLDILOCKS_PRIME`) from `Shake256`.
-fn sample_canonical_gl_vec(domain: &[u8], seed: &[u8; 32], extra: &[u8], count: usize) -> Vec<u64> {
+fn sample_canonical_gl_vec(
+    domain: &[u8],
+    seed: &[u8; 32],
+    extra: &[u8],
+    count: usize,
+) -> ZeroizingU64Vec {
     let mut sp = Shake256::new();
     sp.absorb(domain);
     sp.absorb(seed);
     sp.absorb(extra);
     sp.finalize(0x1F);
 
-    let mut out = Vec::with_capacity(count);
+    let mut out = ZeroizingU64Vec(Vec::with_capacity(count));
     let mut buf = [0u8; 136];
-    while out.len() < count {
+    while out.0.len() < count {
         sp.squeeze(&mut buf);
         let mut pos = 0usize;
-        while pos + 8 <= buf.len() && out.len() < count {
+        while pos + 8 <= buf.len() && out.0.len() < count {
             let cand = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
             pos += 8;
             if cand < GOLDILOCKS_PRIME {
-                out.push(cand);
+                out.0.push(cand);
             }
         }
     }
@@ -687,7 +707,7 @@ pub fn holder_prepare_blind_issuance_with_profile(
         attrs[i] = v;
     }
 
-    let mut ent = holder_entropy;
+    let ent = qsag_accel::ct::RedactedSecret::new(holder_entropy);
     let mut blind_ctx = Vec::with_capacity(60 + issuer_attested_attrs.len() * 8);
     blind_ctx.extend_from_slice(&session_id);
     blind_ctx.extend_from_slice(&schema_id.to_le_bytes());
@@ -697,12 +717,24 @@ pub fn holder_prepare_blind_issuance_with_profile(
     for value in issuer_attested_attrs {
         blind_ctx.extend_from_slice(&value.to_le_bytes());
     }
-    let blind_vec = sample_canonical_gl_vec(b"QSAG.VC.HOLDER_BLIND.V1", &ent, &blind_ctx, 4);
-    let holder_blind = [blind_vec[0], blind_vec[1], blind_vec[2], blind_vec[3]];
+    let blind_vec = sample_canonical_gl_vec(b"QSAG.VC.HOLDER_BLIND.V1", ent.expose(), &blind_ctx, 4);
+    let mut holder_blind = ZeroizingU64Vec(vec![
+        blind_vec[0],
+        blind_vec[1],
+        blind_vec[2],
+        blind_vec[3],
+    ]);
+    drop(blind_vec);
+    let holder_blind_arr = [
+        holder_blind[0],
+        holder_blind[1],
+        holder_blind[2],
+        holder_blind[3],
+    ];
     let attr_commit = compute_vc_poseidon2_commit(
         schema_id,
         issuer_attested_attrs,
-        &holder_blind,
+        &holder_blind_arr,
         VC_ATTR_COMMIT_TAG,
     )?;
 
@@ -723,16 +755,16 @@ pub fn holder_prepare_blind_issuance_with_profile(
         inst_bytes.extend_from_slice(b"QSAG.VC.PROFILE.Quantum128:438");
     }
     let statement_digest = cshake256_framed_32(b"QSAG.VC.ISS_STMT_DIGEST.V1", &[&inst_bytes]);
-    let mut hedged_zk_seed = cshake256_framed_32(
+    let hedged_zk_seed = qsag_accel::ct::RedactedSecret::new(cshake256_framed_32(
         b"QSAG.VC.ISS_ZK_SEED.V1",
-        &[&statement_digest, &ent, &session_id],
-    );
+        &[&statement_digest, ent.expose(), &session_id],
+    ));
     let mut tr = InterleavedTranscript::new(b"QSAG.BLIND_VC.ISSUE_ZK.V1", &inst_bytes);
     if profile == ZkSoundnessProfile::Quantum128 {
         tr.absorb(b"VC_SOUNDNESS_PROFILE", b"Quantum128:438");
     }
 
-    let secret_wires: [u64; 10] = [
+    let secret_wires = ZeroizingU64Vec(vec![
         attrs[0],
         attrs[1],
         attrs[2],
@@ -743,7 +775,7 @@ pub fn holder_prepare_blind_issuance_with_profile(
         holder_blind[1],
         holder_blind[2],
         holder_blind[3],
-    ];
+    ]);
 
     struct RepData {
         commits: [[u8; 32]; 3],
@@ -781,8 +813,12 @@ pub fn holder_prepare_blind_issuance_with_profile(
         let mut share_ctx = [0u8; 36];
         share_ctx[..32].copy_from_slice(&statement_digest);
         share_ctx[32..].copy_from_slice(&rep_be);
-        let in_rand =
-            sample_canonical_gl_vec(b"QSAG.VC.ISS_IN_SH.V1", &hedged_zk_seed, &share_ctx, 20);
+        let in_rand = sample_canonical_gl_vec(
+            b"QSAG.VC.ISS_IN_SH.V1",
+            hedged_zk_seed.expose(),
+            &share_ctx,
+            20,
+        );
         let mut in0 = Vec::with_capacity(10);
         let mut in1 = Vec::with_capacity(10);
         let mut in2 = Vec::with_capacity(10);
@@ -804,7 +840,7 @@ pub fn holder_prepare_blind_issuance_with_profile(
                 b"QSAG.VC.ISS_TAPE.V1",
                 &[
                     &statement_digest,
-                    &hedged_zk_seed,
+                    hedged_zk_seed.expose(),
                     &session_id,
                     &rep_be,
                     &[m as u8],
@@ -816,7 +852,7 @@ pub fn holder_prepare_blind_issuance_with_profile(
                 b"QSAG.VC.ISS_SALT.V1",
                 &[
                     &statement_digest,
-                    &hedged_zk_seed,
+                    hedged_zk_seed.expose(),
                     &session_id,
                     &rep_be,
                     &[m as u8],
@@ -878,8 +914,9 @@ pub fn holder_prepare_blind_issuance_with_profile(
     // Absorb ALL Round-1 view commitments & output shares BEFORE ZKBoo challenges!
     tr.absorb(b"VC_ISS_R1_COMMITS", &round1_bundle);
     let open_trits = squeeze_ternary_challenges(&mut tr, profile.repetitions());
-    ct_zeroize_bytes(&mut hedged_zk_seed);
-    ct_zeroize_bytes(&mut ent);
+    drop(hedged_zk_seed);
+    drop(ent);
+    drop(secret_wires);
 
     let mut opened_reps = Vec::with_capacity(profile.repetitions());
     for (rep_d, e) in reps.into_iter().zip(open_trits) {
@@ -901,6 +938,13 @@ pub fn holder_prepare_blind_issuance_with_profile(
         });
     }
 
+    let final_holder_blind = [
+        holder_blind[0],
+        holder_blind[1],
+        holder_blind[2],
+        holder_blind[3],
+    ];
+    let _ = &mut holder_blind;
     Ok((
         BlindIssuanceRequest {
             issuer_pk_digest,
@@ -915,7 +959,7 @@ pub fn holder_prepare_blind_issuance_with_profile(
             schema_id,
             arity: issuer_attested_attrs.len(),
             attrs,
-            holder_blind,
+            holder_blind: final_holder_blind,
             seen_challenges: core::cell::RefCell::new(Vec::new()),
         },
     ))
@@ -1729,19 +1773,27 @@ pub fn prove_selective_disclosure_with_profile(
     );
     let pres_blind_vec =
         sample_canonical_gl_vec(b"QSAG.VC.PRES_BLIND.V1", &ent, &presentation_nonce, 4);
-    let pres_blind = [
+    let mut pres_blind = [
         pres_blind_vec[0],
         pres_blind_vec[1],
         pres_blind_vec[2],
         pres_blind_vec[3],
     ];
+    drop(pres_blind_vec);
 
-    let pres_commit = compute_vc_poseidon2_commit(
+    let pres_commit = match compute_vc_poseidon2_commit(
         cred.schema_id,
         &holder_secret.attrs[..holder_secret.arity],
         &pres_blind,
         VC_PRES_COMMIT_TAG,
-    )?;
+    ) {
+        Ok(commit) => commit,
+        Err(err) => {
+            ct_zeroize_u64s(&mut pres_blind);
+            ct_zeroize_bytes(&mut ent);
+            return Err(err);
+        }
+    };
     let scope_tag = compute_vc_scope_tag(
         cred.schema_id,
         &holder_secret.holder_blind,
@@ -1759,22 +1811,26 @@ pub fn prove_selective_disclosure_with_profile(
     // - `pres_blind[0..4]` (`4`)
     // - One Boolean leaf-index bit per Merkle level.
     // - Six sibling limbs per Merkle level.
-    let mut secret_vals = Vec::with_capacity(MAX_VC_ATTRS + 8 + 7 * VC_ACCUMULATOR_DEPTH);
+    let mut secret_vals =
+        ZeroizingU64Vec(Vec::with_capacity(MAX_VC_ATTRS + 8 + 7 * VC_ACCUMULATOR_DEPTH));
     for (attr_i, &attr_val) in holder_secret.attrs[..holder_secret.arity]
         .iter()
         .enumerate()
     {
         if !sorted_idx.contains(&attr_i) {
-            secret_vals.push(attr_val);
+            secret_vals.0.push(attr_val);
         }
     }
-    secret_vals.extend_from_slice(&holder_secret.holder_blind);
-    secret_vals.extend_from_slice(&pres_blind);
+    secret_vals.0.extend_from_slice(&holder_secret.holder_blind);
+    secret_vals.0.extend_from_slice(&pres_blind);
+    ct_zeroize_u64s(&mut pres_blind);
     for lvl in 0..VC_ACCUMULATOR_DEPTH {
-        secret_vals.push(((cred.accumulator_leaf_index >> lvl) & 1) as u64);
+        secret_vals
+            .0
+            .push(((cred.accumulator_leaf_index >> lvl) & 1) as u64);
     }
     for sib in &siblings {
-        secret_vals.extend_from_slice(sib);
+        secret_vals.0.extend_from_slice(sib);
     }
     let num_secret_wires = secret_vals.len();
 
@@ -2068,7 +2124,7 @@ pub fn prove_selective_disclosure_with_profile(
     let open_trits = squeeze_ternary_challenges(&mut tr, profile.repetitions());
     ct_zeroize_bytes(&mut hedged_zk_seed);
     ct_zeroize_bytes(&mut ent);
-    ct_zeroize_u64s(&mut secret_vals);
+    drop(secret_vals);
 
     let mut opened_reps = Vec::with_capacity(profile.repetitions());
     for (rep_d, e) in reps.into_iter().zip(open_trits) {
