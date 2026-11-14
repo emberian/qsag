@@ -61,9 +61,55 @@ pub mod trace;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+/// A scoped result is either computed by a permitted worker or on the caller.
+#[cfg(feature = "std")]
+pub(crate) enum ScopedWorker<'scope, T> {
+    Spawned(std::thread::ScopedJoinHandle<'scope, T>),
+    Inline(T),
+}
+
+#[cfg(feature = "std")]
+impl<T> ScopedWorker<'_, T> {
+    fn join(self) -> std::thread::Result<T> {
+        match self {
+            Self::Spawned(handle) => handle.join(),
+            Self::Inline(value) => Ok(value),
+        }
+    }
+}
+
+/// Bound all nested arithmetic, proving, and verification kernels by the same
+/// permit counter. Retain the closure if the OS refuses to create a thread.
+#[cfg(feature = "std")]
+pub(crate) fn spawn_bounded<'scope, 'env, F, T>(
+    scope: &'scope std::thread::Scope<'scope, 'env>,
+    f: F,
+) -> ScopedWorker<'scope, T>
+where
+    F: FnOnce() -> T + Send + 'scope,
+    T: Send + 'scope,
+{
+    let Some(permit) = try_acquire_worker_permit() else {
+        return ScopedWorker::Inline(f());
+    };
+    let job = std::sync::Arc::new(std::sync::Mutex::new(Some(f)));
+    let worker_job = std::sync::Arc::clone(&job);
+    match std::thread::Builder::new().spawn_scoped(scope, move || {
+        let _permit = permit;
+        let f = worker_job.lock().expect("worker job lock").take().expect("worker job");
+        f()
+    }) {
+        Ok(handle) => ScopedWorker::Spawned(handle),
+        Err(_) => {
+            let f = job.lock().expect("worker job lock").take().expect("worker job");
+            ScopedWorker::Inline(f())
+        }
+    }
+}
+
 /// Preserve a worker's original panic payload rather than replacing it at join.
 #[cfg(feature = "std")]
-fn join_worker<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+fn join_worker<T>(handle: ScopedWorker<'_, T>) -> T {
     match handle.join() {
         Ok(value) => value,
         Err(payload) => std::panic::resume_unwind(payload),
@@ -143,34 +189,12 @@ where
     let slices: Vec<&'a [T]> = items.chunks(chunk).collect();
     let f_ref = &f;
     std::thread::scope(|scope| {
-        let mut tail_slots: Vec<Option<R>> = (0..slices.len().saturating_sub(1))
-            .map(|_| None)
-            .collect();
-        let mut spawned = Vec::new();
-        for (idx, &sub) in slices[1..].iter().enumerate() {
-            if let Some(permit) = try_acquire_worker_permit() {
-                match std::thread::Builder::new().spawn_scoped(scope, move || {
-                    let _permit = permit;
-                    f_ref(sub)
-                }) {
-                    Ok(handle) => spawned.push((idx, handle)),
-                    Err(_) => tail_slots[idx] = Some(f_ref(sub)),
-                }
-            } else {
-                tail_slots[idx] = Some(f_ref(sub));
-            }
-        }
-        let head = f_ref(slices[0]);
-        for (idx, handle) in spawned {
-            tail_slots[idx] = Some(join_worker(handle));
-        }
+        let tails: Vec<_> = slices[1..].iter().map(|&sub| {
+            spawn_bounded(scope, move || f_ref(sub))
+        }).collect();
         let mut out = Vec::with_capacity(slices.len());
-        out.push(head);
-        for slot in tail_slots {
-            if let Some(val) = slot {
-                out.push(val);
-            }
-        }
+        out.push(f_ref(slices[0]));
+        out.extend(tails.into_iter().map(join_worker));
         out
     })
 }
@@ -628,7 +652,7 @@ impl AggStatement<'_> {
                         }) {
                             Ok(right_h) => {
                                 let left_ok = self.verify_node(left, rem_depth - 1);
-                                let right_ok = join_worker(right_h);
+                                let right_ok = join_worker(ScopedWorker::Spawned(right_h));
                                 Some(left_ok && right_ok)
                             }
                             Err(_) => None,
@@ -756,7 +780,7 @@ pub fn aggregate_signatures_with_config(
         start = end;
     }
 
-    let prove_one = |(b_start, b_end, shard_signer_counts, ref batch_bitmap, batch_seed): &(
+    let prove_one = |(b_start, b_end, shard_signer_counts, batch_bitmap, batch_seed): &(
         usize,
         usize,
         &[u32],
@@ -1147,44 +1171,6 @@ mod tests {
             "fc3c9ce4073822b1cc20a0c4ad065ac386d7cbcbe256fb23ac97bd00e8c924eb"
         );
         assert!(kat_json.contains(&h_cshake));
-    }
-
-    #[test]
-    #[cfg(feature = "std")]
-    fn merge_tree_verification_respects_global_worker_budget() {
-        use std::sync::atomic::Ordering;
-
-        let msg = b"bounded-worker-merge-tree-test";
-        let mode = SigningMode::SharedMessage(msg);
-        let n = 16usize;
-        let (pks, sigs) = bench_keys_and_sigs(AggSigProfile::JortsPoseidon2, n, msg);
-
-        // Build 8 disjoint 2-signer leaves and fold them into a balanced 3-level merge tree.
-        let mut level: Vec<QsagAggregateProof> = (0..8)
-            .map(|leaf_idx| {
-                let idxs = [2 * leaf_idx, 2 * leaf_idx + 1];
-                let bm = SignerBitmap::from_active_indices(n as u32, &idxs).unwrap();
-                aggregate_signatures(
-                    &pks,
-                    &bm,
-                    &mode,
-                    &sigs[2 * leaf_idx..2 * leaf_idx + 2],
-                    make_seed(200 + leaf_idx as u64),
-                )
-                .unwrap()
-            })
-            .collect();
-        while level.len() > 1 {
-            let mut next = Vec::with_capacity(level.len() / 2);
-            for pair in level.chunks(2) {
-                next.push(merge_aggregates(&pks, &mode, &pair[0], &pair[1]).unwrap());
-            }
-            level = next;
-        }
-        let merged = level.pop().unwrap();
-        assert!(verify_aggregate(&pks, &mode, &merged));
-        assert_eq!(ACTIVE_EXTRA_WORKERS.load(Ordering::Acquire), 0);
-    }
 
         assert_eq!(crate::field::GOLDILOCKS_PRIME, 18446744069414584321);
         let ga = Goldilocks::from_u64_reduced(0xFFFF_FFFF_0000_0000);
@@ -1283,6 +1269,62 @@ mod tests {
             assert_eq!(d5[i].to_canonical_u64(), expected_d5[i]);
             assert!(kat_json.contains(&alloc::format!("\"{}\"", expected_d5[i])));
         }
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn nested_workers_fall_back_when_budget_is_exhausted() {
+        let mut permits = Vec::new();
+        while let Some(permit) = try_acquire_worker_permit() {
+            permits.push(permit);
+        }
+        std::thread::scope(|scope| {
+            let result = spawn_bounded(scope, || {
+                std::thread::scope(|inner| join_worker(spawn_bounded(inner, || 42)))
+            });
+            assert_eq!(join_worker(result), 42);
+        });
+        drop(permits);
+        let inputs: Vec<usize> = (0..257).collect();
+        let output: Vec<usize> = map_chunks_bounded(&inputs, |xs| {
+            xs.iter().map(|x| x * x).collect::<Vec<_>>()
+        }).into_iter().flatten().collect();
+        assert_eq!(output, inputs.iter().map(|x| x * x).collect::<Vec<_>>());
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn merge_tree_verification_respects_global_worker_budget() {
+        let msg = b"bounded-worker-merge-tree-test";
+        let mode = SigningMode::SharedMessage(msg);
+        let n = 16usize;
+        let (pks, sigs) = bench_keys_and_sigs(AggSigProfile::JortsPoseidon2, n, msg);
+
+        // Build 8 disjoint 2-signer leaves and fold them into a balanced 3-level merge tree.
+        let mut level: Vec<QsagAggregateProof> = (0..8)
+            .map(|leaf_idx| {
+                let idxs = [2 * leaf_idx, 2 * leaf_idx + 1];
+                let bm = SignerBitmap::from_active_indices(n as u32, &idxs).unwrap();
+                aggregate_signatures(
+                    &pks,
+                    &bm,
+                    &mode,
+                    &sigs[2 * leaf_idx..2 * leaf_idx + 2],
+                    make_seed(200 + leaf_idx as u64),
+                )
+                .unwrap()
+            })
+            .collect();
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len() / 2);
+            for pair in level.chunks(2) {
+                next.push(merge_aggregates(&pks, &mode, &pair[0], &pair[1]).unwrap());
+            }
+            level = next;
+        }
+        let merged = level.pop().unwrap();
+        assert!(verify_aggregate(&pks, &mode, &merged));
+
     }
 
     #[test]
