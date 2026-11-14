@@ -2354,3 +2354,1298 @@ pub struct SigningPayloadBinding<'b> {
 }
 
 /// Builds a canonical signed intent and returns the exact bytes to sign.
+pub struct TransactionIntentBuilder(TransactionIntent);
+impl TransactionIntentBuilder {
+    pub fn rolling_window(mut self, spent: u128, accumulator: [u8; 32]) -> Self {
+        self.0.rolling_window_spent = spent;
+        self.0.rolling_window_accumulator = accumulator;
+        self
+    }
+    pub fn window_id(mut self, window_id: u64) -> Self {
+        self.0.window_id = window_id;
+        self
+    }
+    pub fn nonce(mut self, nonce: [u8; 32]) -> Self {
+        self.0.nonce = nonce;
+        self
+    }
+    pub fn initiator_macs(mut self, macs: Vec<InitiatorPeerMac>) -> Self {
+        self.0.initiator_macs = macs;
+        self
+    }
+    pub fn timestamp_secs(mut self, timestamp: u64) -> Self {
+        self.0.timestamp_secs = timestamp;
+        self
+    }
+    pub fn initiator_and_approvers(mut self, initiator: u16, approvers: &[u16]) -> Self {
+        self.0.initiator_party = initiator;
+        self.0.approver_parties = approvers.to_vec();
+        self
+    }
+    /// Bind the signing request, evaluate `policy` on the completed intent, and return the
+    /// intent together with the exact bytes its approvers authorize for signing.
+    pub fn bind_signing_payload(
+        mut self,
+        binding: &SigningPayloadBinding<'_>,
+        policy: &TransactionPolicy,
+    ) -> Result<(TransactionIntent, Vec<u8>), PolicyViolation> {
+        let SigningPayloadBinding {
+            key_id,
+            payload,
+            ctx,
+            session_id,
+            policy_revision,
+            quorum,
+            authority_pk,
+        } = *binding;
+        self.0.signing_key_id = key_id;
+        self.0.payload_digest = cshake256_framed_32(b"QSAG.POLICY.PAYLOAD.V2", &[payload]);
+        self.0.signing_context_digest = cshake256_framed_32(b"QSAG.POLICY.CTX.V1", &[ctx]);
+        self.0.session_id = session_id;
+        self.0.policy_revision = policy_revision;
+        self.0.guard_authority_pk = authority_pk;
+        self.0.quorum_ids = quorum.to_vec();
+        self.0.quorum_ids.sort_unstable();
+        self.0.quorum_ids.dedup();
+        self.0.approver_parties.sort_unstable();
+        self.0.approver_parties.dedup();
+        if self.0.nonce == [0; 32] {
+            self.0.nonce = cshake256_framed_32(
+                b"QSAG.POLICY.AUTO_NONCE.V1",
+                &[
+                    &session_id,
+                    &self.0.payload_digest,
+                    &key_id,
+                    &self.0.window_id.to_be_bytes(),
+                ],
+            );
+        }
+        policy.evaluate(&self.0)?;
+        let bytes = self
+            .0
+            .to_canonical_signing_bytes(&policy.canonical_digest());
+        self.0.message_digest = cshake256_framed_32(b"QSAG.POLICY.MSG.V1", &[&bytes]);
+        Ok((self.0, bytes))
+    }
+}
+impl AuthorizedSignReleaseToken {
+    pub fn matches_signing_for_policy(
+        &self,
+        key_id: &[u8; 32],
+        msg: &[u8],
+        ctx: &[u8],
+        quorum: &[u16],
+        expected_policy: &[u8; 32],
+        expected_authority: &[u8; 32],
+    ) -> bool {
+        ct_eq_bytes(expected_policy, &self.policy_digest)
+            && ct_eq_bytes(expected_authority, &self.intent.guard_authority_pk)
+            && self.matches_signing(key_id, msg, ctx, quorum)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    fn raw_test_guards(entropy: [u8; 32], ids: &[u16]) -> Vec<PolicySignerGuardShare> {
+        let mut guards: Vec<_> = super::trusted_dealer_setup_for_testing(entropy, ids).into_iter()
+            .map(|g| g.with_window_authority([42; 32], [43; 32]).unwrap()).collect();
+        for guard in &mut guards { guard.set_require_authenticated_initiator(false); }
+        guards
+    }
+    #[test]
+    fn window_authority_is_required_and_bound_to_checkpoint() {
+        let mut bare = super::trusted_dealer_setup_for_testing([9; 32], &[1, 2]).remove(0);
+        let auth = WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1);
+        assert!(bare.advance_velocity_window(&auth).is_err());
+        let guard = bare.with_window_authority([42; 32], [43; 32]).unwrap();
+        let snapshot = guard.export_durable_checkpoint(&[7; 32], 1);
+        let mut other = super::trusted_dealer_setup_for_testing([9; 32], &[1, 2]).remove(0)
+            .with_window_authority([41; 32], [43; 32]).unwrap();
+        assert!(other.restore_from_durable_checkpoint(&snapshot, &[7; 32], 1).is_err());
+        assert!(guard.with_window_authority([41; 32], [43; 32]).is_err());
+    }
+
+    #[test]
+    fn window_authorization_rejects_forgery_replay_and_wrong_policy() {
+        let mut guards = raw_test_guards([9; 32], &[1, 2]);
+        let guard = &mut guards[0];
+        guard.accumulated_window_spend = 99;
+        for auth in [
+            WindowAdvanceAuthorization::new(&[44; 32], &[42; 32], 0, 1),
+            WindowAdvanceAuthorization::new(&[43; 32], &[41; 32], 0, 1),
+            WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 1, 2),
+            WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 0),
+        ] {
+            assert!(guard.advance_velocity_window(&auth).is_err());
+            assert_eq!(guard.current_window_id(), 0);
+            assert_eq!(guard.accumulated_window_spend(), 99);
+        }
+        let valid = WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1);
+        guard.advance_velocity_window(&valid).unwrap();
+        assert_eq!(guard.accumulated_window_spend(), 0);
+        assert!(guard.advance_velocity_window(&valid).is_err());
+    }
+
+    #[test]
+    fn initiator_authentication_is_default() {
+        assert!(super::trusted_dealer_setup_for_testing([8; 32], &[1, 2]).iter().all(|g| g.require_authenticated_initiator));
+    }
+    #[test]
+    fn bounded_replay_window_never_reaccepts_evicted_nonces() {
+        let mut guards = raw_test_guards([9; 32], &[1, 2]);
+        let guard = &mut guards[0];
+        for i in 0u32..600 {
+            let mut nonce = [0; 32];
+            nonce[28..].copy_from_slice(&i.to_be_bytes());
+            guard.record_approved_intent(i as u128, nonce, nonce);
+        }
+        for i in 0u32..600 {
+            let mut nonce = [0; 32];
+            nonce[28..].copy_from_slice(&i.to_be_bytes());
+            assert!(guard.is_nonce_burned(&nonce));
+            assert!(guard.is_session_burned(&nonce));
+        }
+        let checkpoint = guard.export_durable_checkpoint(&[7; 32], 600);
+        guard.restore_from_durable_checkpoint(&checkpoint, &[7; 32], 600).unwrap();
+        let mut older = raw_test_guards([9; 32], &[1, 2]);
+        for i in 0u32..100 {
+            let mut nonce = [0; 32];
+            nonce[28..].copy_from_slice(&i.to_be_bytes());
+            older[0].record_approved_intent(i as u128, nonce, nonce);
+        }
+        older[0].restore_from_durable_checkpoint(&checkpoint, &[7; 32], 600).unwrap();
+        guard.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1)).unwrap();
+        assert!(guard.is_nonce_burned(&[0; 32]));
+    }
+
+    use alloc::format;
+    use alloc::vec;
+    use qsag_accel::CpuReferenceBackend;
+    use qsag_addr::KeyIdentityKind;
+
+    use super::*;
+
+    fn phase_fixture(ids: &[u16]) -> (TransactionPolicy, TransactionIntent) {
+        let recipient = QsagAddress::from_pubkey_cshake256(
+            "qsp",
+            WitnessSuiteTag::MlDsa65,
+            KeyIdentityKind::SingleOrThreshold,
+            b"phase-recipient",
+        )
+        .unwrap();
+        let policy = TransactionPolicy {
+            chain_id: 1,
+            pinned_suite: WitnessSuiteTag::MlDsa65,
+            recipient_allowlist: vec![recipient.commitment_256],
+            max_single_tx_amount: 100,
+            velocity_window_cap: 200,
+            valid_not_before_secs: 1,
+            valid_not_after_secs: 100,
+            forbid_initiator_self_approval: true,
+            hardware_guardian_party: Some(*ids.last().unwrap()),
+            quorum_tiers: vec![QuorumTierRule {
+                max_amount_units: 100,
+                min_approvers: 2,
+                require_hardware_guardian: true,
+            }],
+        };
+        let intent = TransactionIntent {
+            chain_id: 1,
+            suite: WitnessSuiteTag::MlDsa65,
+            recipient,
+            amount_units: 10,
+            rolling_window_spent: 20,
+            window_id: 0,
+            nonce: [7; 32],
+            timestamp_secs: 50,
+            initiator_party: 0,
+            initiator_macs: Vec::new(),
+            approver_parties: ids.to_vec(),
+            payload_digest: [1; 32],
+            guard_authority_pk: [0; 32],
+            rolling_window_accumulator: [0; 32],
+            signing_key_id: [2; 32],
+            policy_revision: 1,
+            message_digest: cshake256_framed_32(b"QSAG.POLICY.MSG.V1", &[b"message"]),
+            signing_context_digest: cshake256_framed_32(b"QSAG.POLICY.CTX.V1", &[b"context"]),
+            session_id: [3; 32],
+            quorum_ids: ids.to_vec(),
+        };
+        (policy, intent)
+    }
+
+    fn start_phases(
+        guards: &mut [PolicySignerGuardShare],
+        policy: &TransactionPolicy,
+        intent: &TransactionIntent,
+    ) -> (Vec<PartyPolicyRound1State>, Vec<PartyPolicyDeltaCommitMsg>) {
+        guards
+            .iter_mut()
+            .map(|g| {
+                g.round1_commit_intent(
+                    policy,
+                    intent,
+                    intent.session_id,
+                    intent.timestamp_secs,
+                    intent.rolling_window_spent,
+                )
+                .unwrap()
+            })
+            .unzip()
+    }
+
+    fn delta_phases(
+        guards: &mut [PolicySignerGuardShare],
+        policy: &TransactionPolicy,
+        intent: &TransactionIntent,
+    ) -> (Vec<PartyPolicyRound2State>, Vec<PartyPolicyDeltaOpenMsg>) {
+        let (states, commits) = start_phases(guards, policy, intent);
+        states
+            .into_iter()
+            .zip(guards)
+            .map(|(s, g)| s.round2_open_delta_and_commit_sigma(g, &commits).unwrap())
+            .unzip()
+    }
+
+    fn sigma_phases(
+        guards: &mut [PolicySignerGuardShare],
+        policy: &TransactionPolicy,
+        intent: &TransactionIntent,
+    ) -> (Vec<PartyPolicyRound3State>, Vec<PartyPolicySigmaCommitMsg>) {
+        let (states, opens) = delta_phases(guards, policy, intent);
+        states
+            .into_iter()
+            .zip(guards)
+            .map(|(s, g)| s.round3_commit_sigma(g, &opens).unwrap())
+            .unzip()
+    }
+
+    fn assert_erased(g: &PolicySignerGuardShare) {
+        assert!(g.poisoned);
+        assert_eq!(g.bdoz_alpha_share, [0; 2]);
+        assert_eq!(g.local_salt_seed, [0; 32]);
+        assert!(g.preproc_r.iter().all(|r| *r == [0; 2]));
+        assert!(g.pairwise_zero_seeds.iter().all(|(_, s)| *s == [0; 32]));
+        assert!(
+            g.preproc_outgoing_macs
+                .iter()
+                .chain(&g.preproc_incoming_keys)
+                .all(|(_, values)| values.iter().all(|v| *v == [0; 2]))
+        );
+    }
+
+    fn assert_slot_aborted_not_bricked(g: &PolicySignerGuardShare, slot: usize) {
+        assert!(!g.poisoned);
+        assert_eq!(g.active_phase, None);
+        assert_ne!(g.bdoz_alpha_share, [0; 2]);
+        assert_ne!(g.local_salt_seed, [0; 32]);
+        assert_eq!(g.preproc_r[slot], [0; 2]);
+        assert!(
+            g.preproc_outgoing_macs
+                .iter()
+                .all(|(_, values)| values[slot] == [0; 2])
+        );
+        if slot + 1 < BDOZ_PREPROC_SLOTS {
+            assert_ne!(g.preproc_r[slot + 1], [0; 2]);
+        }
+    }
+
+    fn run_phases(
+        guards: &mut [PolicySignerGuardShare],
+        policy: &TransactionPolicy,
+        intent: &TransactionIntent,
+    ) {
+        let (states, mut commits) = sigma_phases(guards, policy, intent);
+        // Arrival ordering has no effect on canonical transcript ordering.
+        commits.reverse();
+        let (states, mut opens): (Vec<_>, Vec<_>) = states
+            .into_iter()
+            .zip(guards.iter_mut())
+            .map(|(s, g)| s.round4_open_sigma(g, &commits).unwrap())
+            .unzip();
+        opens.reverse();
+        for (s, g) in states.into_iter().zip(guards) {
+            let token = s.finalize(g, &opens).unwrap();
+            assert_eq!(token.intent_digest(), &intent.canonical_digest());
+            assert!(token.matches_signing(
+                &intent.signing_key_id,
+                &intent.to_canonical_signing_bytes(&policy.canonical_digest()),
+                b"context",
+                &intent.quorum_ids
+            ));
+            assert_eq!(g.active_phase, None);
+        }
+    }
+
+    #[test]
+    fn party_phases_release_once_and_advance_slots() {
+        let (policy, intent) = phase_fixture(&[1, 2, 4]);
+        let mut guards = raw_test_guards([11; 32], &[1, 2, 4]);
+        run_phases(&mut guards, &policy, &intent);
+        assert!(guards.iter().all(|g| g.accumulated_window_spend() == 30));
+        let mut next = intent.clone();
+        next.session_id = [4; 32];
+        next.nonce = [8; 32];
+        next.rolling_window_spent = 30;
+        run_phases(&mut guards, &policy, &next);
+        assert!(guards.iter().all(|g| g.next_slot.get() == 2));
+        assert!(guards.iter().all(|g| g.accumulated_window_spend() == 40));
+    }
+
+    #[test]
+    fn party_phases_reject_clock_spend_and_guardian_spoofing() {
+        let (policy, intent) = phase_fixture(&[1, 4]);
+        let mut guards = raw_test_guards([12; 32], &[1, 4]);
+        assert!(matches!(
+            guards[0].round1_commit_intent(&policy, &intent, intent.session_id, 51, 20),
+            Err(PolicyViolation::TimestampOutsideWindow)
+        ));
+        assert!(matches!(
+            guards[0].round1_commit_intent(&policy, &intent, intent.session_id, 50, 19),
+            Err(PolicyViolation::VelocityCapOverflowOrExceeded)
+        ));
+        assert_eq!(guards[0].next_slot.get(), 0);
+        guards[0].party_id = 4;
+        assert!(
+            guards[0]
+                .round1_commit_intent(&policy, &intent, intent.session_id, 50, 20)
+                .is_err()
+        );
+        assert_erased(&guards[0]);
+        let mut guards = raw_test_guards([12; 32], &[1, 4]);
+        let (mut states, mut commits) = start_phases(&mut guards, &policy, &intent);
+        let honest_commits = commits.clone();
+        commits[1] = commits[0].clone();
+        commits[1].party_id = 4;
+        let (state, _) = states
+            .remove(0)
+            .round2_open_delta(&mut guards[0], &commits)
+            .unwrap();
+        let (_, guardian_open) = states
+            .remove(0)
+            .round2_open_delta(&mut guards[1], &honest_commits)
+            .unwrap();
+        let own_open = PartyPolicyDeltaOpenMsg {
+            party_id: 1,
+            salt_i: state.context.salt,
+            delta_i: state.context.delta,
+        };
+        assert!(
+            state
+                .round3_commit_sigma(&mut guards[0], &[own_open, guardian_open])
+                .is_err()
+        );
+        assert_slot_aborted_not_bricked(&guards[0], 0);
+    }
+
+    #[test]
+    fn party_phases_reject_even_quorum_conflicting_intents() {
+        let (policy, intent) = phase_fixture(&[1, 2, 3, 4]);
+        let mut guards = raw_test_guards([13; 32], &[1, 2, 3, 4]);
+        let mut states = Vec::new();
+        let mut commits = Vec::new();
+        for (i, g) in guards.iter_mut().enumerate() {
+            let mut local = intent.clone();
+            if i % 2 == 1 {
+                local.amount_units += 1;
+            }
+            let (s, c) = g
+                .round1_commit_intent(&policy, &local, local.session_id, 50, 20)
+                .unwrap();
+            states.push(s);
+            commits.push(c);
+        }
+        for (s, g) in states.into_iter().zip(&mut guards) {
+            assert!(s.round2_open_delta(g, &commits).is_err());
+            assert_slot_aborted_not_bricked(g, 0);
+        }
+    }
+
+    #[test]
+    fn party_phases_reject_overlap_wrong_guard_and_equivocation() {
+        let (policy, intent) = phase_fixture(&[1, 4]);
+        let mut guards = raw_test_guards([14; 32], &[1, 4]);
+        let (mut states, commits) = start_phases(&mut guards, &policy, &intent);
+        assert!(
+            states
+                .remove(0)
+                .round2_open_delta(&mut guards[1], &commits)
+                .is_err()
+        );
+        assert_erased(&guards[1]);
+        assert!(
+            guards[0]
+                .round1_commit_intent(&policy, &intent, intent.session_id, 50, 20)
+                .is_err()
+        );
+        assert_erased(&guards[0]);
+        let mut guards = raw_test_guards([14; 32], &[1, 4]);
+        let (mut states, mut commits) = start_phases(&mut guards, &policy, &intent);
+        commits[0].commitment[0] ^= 1;
+        assert!(
+            states
+                .remove(0)
+                .round2_open_delta(&mut guards[0], &commits)
+                .is_err()
+        );
+        assert_slot_aborted_not_bricked(&guards[0], 0);
+        let mut guards = raw_test_guards([14; 32], &[1, 4]);
+        let (mut states, mut opens) = delta_phases(&mut guards, &policy, &intent);
+        opens[1].delta_i[0] ^= 1;
+        assert!(
+            states
+                .remove(0)
+                .round3_commit_sigma(&mut guards[0], &opens)
+                .is_err()
+        );
+        assert_slot_aborted_not_bricked(&guards[0], 0);
+        let mut guards = raw_test_guards([14; 32], &[1, 4]);
+        let (mut states, mut commits) = start_phases(&mut guards, &policy, &intent);
+        commits.pop();
+        assert!(
+            states
+                .remove(0)
+                .round2_open_delta(&mut guards[0], &commits)
+                .is_err()
+        );
+        assert_slot_aborted_not_bricked(&guards[0], 0);
+    }
+
+    #[test]
+    fn party_phases_reject_stale_openings_and_sigma_commit_equivocation() {
+        let (policy, intent) = phase_fixture(&[1, 4]);
+        let mut previous = raw_test_guards([19; 32], &[1, 4]);
+        let (_, stale_opens) = delta_phases(&mut previous, &policy, &intent);
+        let mut next_intent = intent.clone();
+        next_intent.session_id = [22; 32];
+        next_intent.nonce = [23; 32];
+        let mut guards = raw_test_guards([19; 32], &[1, 4]);
+        let (mut states, _) = delta_phases(&mut guards, &policy, &next_intent);
+        assert!(
+            states
+                .remove(0)
+                .round3_commit_sigma(&mut guards[0], &stale_opens)
+                .is_err()
+        );
+        assert_slot_aborted_not_bricked(&guards[0], 0);
+        for mode in 0..3 {
+            let mut guards = raw_test_guards([19; 32], &[1, 4]);
+            let (mut states, mut commits) = sigma_phases(&mut guards, &policy, &intent);
+            match mode {
+                0 => {
+                    commits.pop();
+                }
+                1 => {
+                    commits[0].commitment[0] ^= 1;
+                }
+                _ => {
+                    commits[1].transcript_digest[0] ^= 1;
+                }
+            }
+            assert!(
+                states
+                    .remove(0)
+                    .round4_open_sigma(&mut guards[0], &commits)
+                    .is_err()
+            );
+            assert_slot_aborted_not_bricked(&guards[0], 0);
+        }
+        let mut guards = raw_test_guards([19; 32], &[1, 4]);
+        let (mut states, commits) = start_phases(&mut guards, &policy, &intent);
+        // A corrupted local phase latch must fail closed, even with an otherwise valid transcript.
+        guards[0].active_phase = Some((0, 3));
+        assert!(
+            states
+                .remove(0)
+                .round2_open_delta(&mut guards[0], &commits)
+                .is_err()
+        );
+        assert_erased(&guards[0]);
+    }
+
+    #[test]
+    fn party_phases_reject_sigma_opening_and_nonzero_sum() {
+        let (policy, intent) = phase_fixture(&[1, 4]);
+        for coherent in [false, true] {
+            let mut guards = raw_test_guards([15; 32], &[1, 4]);
+            let (mut states, mut commits) = sigma_phases(&mut guards, &policy, &intent);
+            if coherent {
+                states[1].context.sigma[0] ^= 1;
+                commits[1].commitment = sigma_commitment(
+                    &commits[1],
+                    &states[1].context.sigma_salt,
+                    &states[1].context.sigma,
+                );
+                states[1].own_sigma = commits[1].clone();
+            }
+            let (mut finals, mut opens): (Vec<_>, Vec<_>) = states
+                .into_iter()
+                .zip(&mut guards)
+                .map(|(s, g)| s.round4_open_sigma(g, &commits).unwrap())
+                .unzip();
+            if !coherent {
+                opens[1].sigma_i[0] ^= 1;
+            }
+            let result = finals.remove(0).finalize(&mut guards[0], &opens);
+            if coherent {
+                assert!(matches!(result, Err(PolicyViolation::BarrierBdozMacFailed)));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(PolicyViolation::BarrierCommitmentMismatch { .. })
+                ));
+            }
+            assert_slot_aborted_not_bricked(&guards[0], 0);
+        }
+    }
+
+    // Ideal OT functionality for algebra tests only; production uses a secure OT provider.
+    struct IdealPolicyOt {
+        peers: Vec<(u16, [u128; 2], [u8; 32])>,
+    }
+    impl Drop for IdealPolicyOt {
+        fn drop(&mut self) {
+            for (_, alpha, seed) in &mut self.peers {
+                ct_zeroize_u128s(alpha);
+                ct_zeroize_bytes(seed);
+            }
+        }
+    }
+    impl PolicyAuthenticatedOt for IdealPolicyOt {
+        fn exchange(
+            &mut self,
+            local_party: u16,
+            peer: u16,
+            domain: [u8; 32],
+            alternatives: &[[u128; 2]],
+            choices: &[bool],
+        ) -> Result<Vec<u128>, PolicyViolation> {
+            assert_eq!(alternatives.len(), BDOZ_PREPROC_SLOTS * 256);
+            assert_eq!(choices.len(), alternatives.len());
+            let (_, local_alpha, _) = self
+                .peers
+                .iter()
+                .find(|(id, _, _)| *id == local_party)
+                .unwrap();
+            let (_, alpha, seed) = self.peers.iter().find(|(id, _, _)| *id == peer).unwrap();
+            let mut selected = Vec::new();
+            for (i, choice) in choices.iter().enumerate() {
+                let slot = i / 256;
+                let lane = i % 256 / 128;
+                let bit = i % 128;
+                let local_slot_alpha = derive_peer_slot_alpha(local_alpha, peer, slot);
+                let peer_slot_alpha = derive_peer_slot_alpha(alpha, local_party, slot);
+                assert_eq!(
+                    alternatives[i][0] ^ alternatives[i][1],
+                    gf2_128_mul(local_slot_alpha[lane], 1u128 << bit)
+                );
+                let raw = cshake256_framed_32(
+                    b"QSAG.POLICY.DKG.OT_PAD.V1",
+                    &[
+                        seed,
+                        &domain,
+                        &(slot as u64).to_be_bytes(),
+                        &[lane as u8, bit as u8],
+                    ],
+                );
+                let pad = policy_pair(raw)[0];
+                selected.push(
+                    pad ^ if *choice {
+                        gf2_128_mul(peer_slot_alpha[lane], 1u128 << bit)
+                    } else {
+                        0
+                    },
+                );
+            }
+            Ok(selected)
+        }
+    }
+
+    #[test]
+    fn distributed_setup_and_all_party_phases() {
+        let all_ids = [0, 1, 2, 4];
+        let mut first = Vec::new();
+        let mut commits = Vec::new();
+        let mut ot = IdealPolicyOt { peers: Vec::new() };
+        for id in all_ids {
+            let (state, messages) =
+                PolicyGuardDkgRound1::new(id, &all_ids, [20; 32], [id as u8; 32]).unwrap();
+            ot.peers.push((
+                id,
+                state.guard.bdoz_alpha_share,
+                state.guard.local_salt_seed,
+            ));
+            first.push(state);
+            commits.extend(messages);
+        }
+        let mut second = Vec::new();
+        let mut opens = Vec::new();
+        for (state, id) in first.into_iter().zip(all_ids) {
+            let incoming: Vec<_> = commits
+                .iter()
+                .filter(|c| c.recipient == id)
+                .cloned()
+                .collect();
+            let (state, messages) = state.round2_open_seeds(&incoming).unwrap();
+            second.push(state);
+            opens.extend(messages);
+        }
+        let mut guards = Vec::new();
+        for (state, id) in second.into_iter().zip(all_ids) {
+            let incoming: Vec<_> = opens
+                .iter()
+                .filter(|o| o.recipient == id)
+                .cloned()
+                .collect();
+            guards.push(finalize_distributed_policy_guard(state, &incoming, &mut ot).unwrap());
+        }
+        for g in &guards {
+            for peer in &guards {
+                if g.party_id == peer.party_id {
+                    continue;
+                }
+                for slot in 0..BDOZ_PREPROC_SLOTS {
+                    let m = g.outgoing_mac(peer.party_id, slot).unwrap();
+                    let k = peer.incoming_key(g.party_id, slot).unwrap();
+                    let peer_alpha = peer.incoming_slot_alpha(g.party_id, slot);
+                    for lane in 0..2 {
+                        assert_eq!(
+                            m[lane],
+                            k[lane] ^ gf2_128_mul(peer_alpha[lane], g.preproc_r[slot][lane])
+                        );
+                    }
+                }
+            }
+        }
+        let (policy, mut intent) = phase_fixture(&[1, 2, 4]);
+        // Production DKG guards mandate cryptographic initiator authentication!
+        assert!(matches!(
+            guards[1].round1_commit_intent(
+                &policy,
+                &intent,
+                intent.session_id,
+                intent.timestamp_secs,
+                intent.rolling_window_spent,
+            ),
+            Err(PolicyViolation::UnauthenticatedInitiator)
+        ));
+        guards[0]
+            .authenticate_initiated_intent(&policy, &mut intent)
+            .unwrap();
+        run_phases(&mut guards[1..], &policy, &intent);
+    }
+
+    #[test]
+    fn distributed_setup_rejects_seed_equivocation_and_sender_spoofing() {
+        for spoof in [false, true] {
+            let (a, ca) = PolicyGuardDkgRound1::new(1, &[1, 4], [21; 32], [1; 32]).unwrap();
+            let (b, mut cb) = PolicyGuardDkgRound1::new(4, &[1, 4], [21; 32], [4; 32]).unwrap();
+            if spoof {
+                cb[0].sender = 1;
+                assert!(a.round2_open_seeds(&cb).is_err());
+            } else {
+                let (a, _) = a.round2_open_seeds(&cb).unwrap();
+                let (_, mut ob) = b.round2_open_seeds(&ca).unwrap();
+                ob[0].seed[0] ^= 1;
+                let mut ot = IdealPolicyOt { peers: Vec::new() };
+                assert!(matches!(
+                    finalize_distributed_policy_guard(a, &ob, &mut ot),
+                    Err(PolicyViolation::BarrierCommitmentMismatch { party_id: 4 })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn test_policy_allowlist_velocity_quorum_tiers_anti_self_approval_and_bdoz_soundness() {
+        let accel = CpuReferenceBackend::new();
+        let allowed_dest = QsagAddress::from_pubkey_cshake256(
+            "qsp",
+            WitnessSuiteTag::MlDsa65,
+            KeyIdentityKind::SingleOrThreshold,
+            b"TREASURY_COLD_PK_1",
+        )
+        .unwrap();
+        let unallowed_dest = QsagAddress::from_pubkey_cshake256(
+            "qsp",
+            WitnessSuiteTag::MlDsa65,
+            KeyIdentityKind::SingleOrThreshold,
+            b"ATTACKER_DRAIN_PK",
+        )
+        .unwrap();
+
+        let policy = TransactionPolicy {
+            chain_id: 1,
+            pinned_suite: WitnessSuiteTag::MlDsa65,
+            recipient_allowlist: vec![allowed_dest.commitment_256],
+            max_single_tx_amount: 500_000,
+            velocity_window_cap: 1_000_000,
+            valid_not_before_secs: 1_700_000_000,
+            valid_not_after_secs: 1_800_000_000,
+            forbid_initiator_self_approval: true,
+            hardware_guardian_party: Some(4),
+            quorum_tiers: vec![
+                QuorumTierRule {
+                    max_amount_units: 10_000,
+                    min_approvers: 2,
+                    require_hardware_guardian: false,
+                },
+                QuorumTierRule {
+                    max_amount_units: 500_000,
+                    min_approvers: 3,
+                    require_hardware_guardian: true,
+                },
+            ],
+        };
+
+        // Provision a 4-party committee `[1, 2, 3, 4]` and test subset quorum `[1, 2, 4]`!
+        let all_guards = raw_test_guards([0x77u8; 32], &[1, 2, 3, 4]);
+        assert!(format!("{:?}", all_guards[0]).contains("<REDACTED>"));
+        let mut guards = raw_test_guards([0x77u8; 32], &[1, 2, 4]);
+
+        let good_intent = TransactionIntent {
+            chain_id: 1,
+            suite: WitnessSuiteTag::MlDsa65,
+            recipient: allowed_dest,
+            amount_units: 250_000,
+            rolling_window_spent: 600_000,
+            window_id: 0,
+            nonce: [0x55; 32],
+            timestamp_secs: 1_750_000_000,
+            initiator_party: 0,
+            initiator_macs: Vec::new(),
+            approver_parties: vec![1, 2, 4],
+            payload_digest: [0xAB; 32],
+            guard_authority_pk: [0; 32],
+            rolling_window_accumulator: [0; 32],
+            signing_key_id: [0; 32],
+            policy_revision: 1,
+            message_digest: cshake256_framed_32(b"QSAG.POLICY.MSG.V1", &[b"approved"]),
+            signing_context_digest: cshake256_framed_32(b"QSAG.POLICY.CTX.V1", &[b"context"]),
+            session_id: [0x12; 32],
+            quorum_ids: vec![1, 2, 4],
+        };
+
+        let token = evaluate_policy_committed_barrier(
+            &policy,
+            &good_intent,
+            [0x12; 32],
+            &mut guards,
+            &accel,
+        )
+        .unwrap();
+        assert!(
+            guards
+                .iter()
+                .all(|g| g.accumulated_window_spend() == 850_000)
+        );
+        assert_eq!(token.intent_digest(), &good_intent.canonical_digest());
+        assert!(!token.matches_signing(&[0; 32], b"approved", b"context", &[4, 1, 2]));
+        assert!(token.matches_signing(
+            &[0; 32],
+            &good_intent.to_canonical_signing_bytes(&policy.canonical_digest()),
+            b"context",
+            &[4, 1, 2]
+        ));
+        for index in 0..4 {
+            let mut changed = good_intent.clone();
+            match index {
+                0 => changed.amount_units += 1,
+                1 => changed.recipient.commitment_256[0] ^= 1,
+                2 => changed.guard_authority_pk[0] ^= 1,
+                _ => changed.rolling_window_accumulator[0] ^= 1,
+            }
+            assert!(!token.matches_signing(
+                &[0; 32],
+                &changed.to_canonical_signing_bytes(&policy.canonical_digest()),
+                b"context",
+                &[1, 2, 4]
+            ));
+        }
+        assert!(!token.matches_signing_for_policy(
+            &[0; 32],
+            &good_intent.to_canonical_signing_bytes(&policy.canonical_digest()),
+            b"context",
+            &[1, 2, 4],
+            &[99; 32],
+            &[0; 32]
+        ));
+        assert!(!token.matches_signing(&[0; 32], b"other", b"context", &[1, 2, 4]));
+        assert!(!token.matches_signing(&[0; 32], b"approved", b"other", &[1, 2, 4]));
+        assert!(!token.matches_signing(&[0; 32], b"approved", b"context", &[1, 2, 3]));
+        let mut colluding = raw_test_guards([0x44; 32], &[1, 2]);
+        assert_eq!(
+            evaluate_policy_committed_barrier(
+                &policy,
+                &good_intent,
+                [0x12; 32],
+                &mut colluding,
+                &accel
+            )
+            .unwrap_err(),
+            PolicyViolation::IntentBindingMismatch
+        );
+        let mut even = raw_test_guards([0x45; 32], &[1, 2, 3, 4]);
+        let mut even_intent = good_intent.clone();
+        even_intent.approver_parties = vec![1, 2, 3, 4];
+        even_intent.quorum_ids = vec![1, 2, 3, 4];
+        let mut conflicting = vec![even_intent; 4];
+        conflicting[1].amount_units -= 1;
+        assert_eq!(
+            evaluate_per_party_intents_barrier(
+                &policy,
+                &conflicting,
+                [0x12; 32],
+                &mut even,
+                None,
+                &accel
+            )
+            .unwrap_err(),
+            PolicyViolation::BarrierBdozMacFailed
+        );
+        for g in &even {
+            assert_slot_aborted_not_bricked(g, 0);
+        }
+
+        // Negative BDOZ Soundness Test A: 1-bit wire fault (`delta_0 ^= 1`) MUST be caught (`1 - 2^-128`)!
+        let mut fault_guards = raw_test_guards([0x77; 32], &[1, 2, 4]);
+        let intents3 = vec![
+            good_intent.clone(),
+            good_intent.clone(),
+            good_intent.clone(),
+        ];
+        assert_eq!(
+            evaluate_per_party_intents_barrier(
+                &policy,
+                &intents3,
+                [0x12; 32],
+                &mut fault_guards,
+                Some((0, (1u128, 0u128))),
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::BarrierBdozMacFailed
+        );
+        for g in &fault_guards {
+            assert_slot_aborted_not_bricked(g, 0);
+        }
+
+        let mut guards = raw_test_guards([0x77; 32], &[1, 2, 4]);
+        // Negative BDOZ Soundness Test B: Insider signer 2 approves a DIFFERENT valid amount (`200_000`
+        // vs `250_000`) -> pairwise BDOZ catches intent equivocation (`1 - 2^-256`)!
+        let mut equiv_intents = vec![
+            good_intent.clone(),
+            good_intent.clone(),
+            good_intent.clone(),
+        ];
+        equiv_intents[2].amount_units = 200_000;
+        assert_eq!(
+            evaluate_per_party_intents_barrier(
+                &policy,
+                &equiv_intents,
+                [0x12; 32],
+                &mut guards,
+                None,
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::BarrierBdozMacFailed
+        );
+
+        let mut guards = raw_test_guards([0x77; 32], &[1, 2, 4]);
+        // 1. Unallowlisted recipient -> refused!
+        let mut bad_dest = good_intent.clone();
+        bad_dest.recipient = unallowed_dest;
+        bad_dest.session_id = [0x13; 32];
+        assert_eq!(
+            evaluate_policy_committed_barrier(&policy, &bad_dest, [0x13; 32], &mut guards, &accel)
+                .unwrap_err(),
+            PolicyViolation::RecipientNotAllowlisted
+        );
+
+        // 2. Velocity cap exceeded (`600_000 + 450_000 > 1_000_000`) -> refused!
+        let mut bad_vel = good_intent.clone();
+        bad_vel.amount_units = 450_000;
+        bad_vel.session_id = [0x14; 32];
+        assert_eq!(
+            evaluate_policy_committed_barrier(&policy, &bad_vel, [0x14; 32], &mut guards, &accel)
+                .unwrap_err(),
+            PolicyViolation::VelocityCapOverflowOrExceeded
+        );
+
+        // 3. Initiator self-approval (`initiator == 1` inside `[1, 2, 4]`) -> refused!
+        let mut self_app = good_intent.clone();
+        self_app.initiator_party = 1;
+        self_app.session_id = [0x15; 32];
+        assert_eq!(
+            evaluate_policy_committed_barrier(&policy, &self_app, [0x15; 32], &mut guards, &accel)
+                .unwrap_err(),
+            PolicyViolation::InitiatorSelfApprovalForbidden
+        );
+
+        // 4. Tier 2 missing hardware guardian (`party 4`) -> refused!
+        let mut no_hw = good_intent;
+        no_hw.approver_parties = vec![1, 2, 3];
+        no_hw.session_id = [0x16; 32];
+        assert_eq!(
+            evaluate_policy_committed_barrier(&policy, &no_hw, [0x16; 32], &mut guards, &accel)
+                .unwrap_err(),
+            PolicyViolation::MissingHardwareGuardian
+        );
+    }
+
+    #[test]
+    fn durable_checkpoint_restart_tamper_and_rollback() {
+        let (mut policy, mut intent) = phase_fixture(&[1, 2, 4]);
+        policy.max_single_tx_amount = 100;
+        policy.velocity_window_cap = 100;
+        intent.amount_units = 60;
+        intent.rolling_window_spent = 0;
+        let key = [0x91; 32];
+        let mut guards = raw_test_guards([0x61; 32], &[1, 2, 4]);
+        let old = guards[0].export_durable_checkpoint(&key, 1);
+        run_phases(&mut guards, &policy, &intent);
+        let snapshots: Vec<_> = guards
+            .iter()
+            .map(|g| g.export_durable_checkpoint(&key, 2))
+            .collect();
+        let mut restarted = raw_test_guards([0x61; 32], &[1, 2, 4]);
+        for (g, bytes) in restarted.iter_mut().zip(&snapshots) {
+            assert_eq!(g.restore_from_durable_checkpoint(bytes, &key, 2), Ok(2));
+            assert_eq!(g.export_durable_checkpoint(&key, 2), *bytes);
+            assert_eq!(g.accumulated_window_spend(), 60);
+            assert!(g.is_nonce_burned(&intent.nonce));
+            assert!(g.is_session_burned(&intent.session_id));
+        }
+        intent.nonce = [0xA2; 32];
+        intent.session_id = [0xB2; 32];
+        for g in &mut restarted {
+            assert_eq!(
+                g.round1_commit_intent(
+                    &policy,
+                    &intent,
+                    intent.session_id,
+                    intent.timestamp_secs,
+                    0
+                )
+                .err(),
+                Some(PolicyViolation::VelocityCapOverflowOrExceeded)
+            );
+        }
+        let g = &mut restarted[0];
+        assert_eq!(
+            g.restore_from_durable_checkpoint(&old, &key, 0),
+            Err(PolicyGuardError::Rollback)
+        );
+        assert_eq!(
+            g.restore_from_durable_checkpoint(&snapshots[0], &key, 3),
+            Err(PolicyGuardError::Rollback)
+        );
+        assert_eq!(
+            g.restore_from_durable_checkpoint(&snapshots[1], &key, 0),
+            Err(PolicyGuardError::WrongGuard)
+        );
+        for i in 0..snapshots[0].len() {
+            let mut corrupt = snapshots[0].clone();
+            corrupt[i] ^= 1;
+            assert_eq!(
+                g.restore_from_durable_checkpoint(&corrupt, &key, 0),
+                Err(PolicyGuardError::AuthenticationFailed)
+            );
+        }
+        assert_eq!(g.export_durable_checkpoint(&key, 2), snapshots[0]);
+        let mut fresh = raw_test_guards([0x61; 32], &[1, 2, 4]);
+        assert_eq!(
+            fresh[0].restore_from_durable_checkpoint(&old, &key, 2),
+            Err(PolicyGuardError::Rollback)
+        );
+        // A freshly authenticated higher generation still cannot erase live spend.
+        let regressing = fresh[0].export_durable_checkpoint(&key, 5);
+        assert_eq!(
+            g.restore_from_durable_checkpoint(&regressing, &key, 0),
+            Err(PolicyGuardError::Rollback)
+        );
+    }
+
+    #[test]
+    fn stateful_guard_enforces_accumulated_spend_cap_and_nonce_replay_even_when_caller_lies() {
+        let accel = CpuReferenceBackend::new();
+        let (mut policy, base_intent) = phase_fixture(&[1, 2, 4]);
+        policy.max_single_tx_amount = 100;
+        policy.velocity_window_cap = 100;
+
+        // Path A: 4-round per-party phase state machine (`cap = 100`, two `60` intents).
+        let mut guards = raw_test_guards([0x61; 32], &[1, 2, 4]);
+        let mut tx1 = base_intent.clone();
+        tx1.amount_units = 60;
+        tx1.rolling_window_spent = 0;
+        tx1.nonce = [0xA1; 32];
+        tx1.session_id = [0xB1; 32];
+        run_phases(&mut guards, &policy, &tx1);
+        assert!(guards.iter().all(|g| g.accumulated_window_spend() == 60));
+        assert!(guards.iter().all(|g| g.is_nonce_burned(&[0xA1; 32])));
+
+        // Second `60` intent where caller dishonestly passes `rolling_window_spent = 0` and
+        // `cumulative_epoch_spent = 0`: MUST be rejected by internal `accumulated_window_spend`!
+        let mut tx2_over_cap = tx1.clone();
+        tx2_over_cap.nonce = [0xA2; 32];
+        tx2_over_cap.session_id = [0xB2; 32];
+        tx2_over_cap.rolling_window_spent = 0;
+        for g in &mut guards {
+            assert_eq!(
+                g.round1_commit_intent(
+                    &policy,
+                    &tx2_over_cap,
+                    tx2_over_cap.session_id,
+                    tx2_over_cap.timestamp_secs,
+                    0,
+                )
+                .err(),
+                Some(PolicyViolation::VelocityCapOverflowOrExceeded)
+            );
+        }
+
+        // Replaying burned `nonce` (`[0xA1; 32]`) with small `amount_units = 10` and fresh session ID: MUST fail!
+        let mut tx_replay_nonce = tx1.clone();
+        tx_replay_nonce.amount_units = 10;
+        tx_replay_nonce.session_id = [0xB3; 32];
+        for g in &mut guards {
+            assert_eq!(
+                g.round1_commit_intent(
+                    &policy,
+                    &tx_replay_nonce,
+                    tx_replay_nonce.session_id,
+                    tx_replay_nonce.timestamp_secs,
+                    0,
+                )
+                .err(),
+                Some(PolicyViolation::DuplicateIntentNonce)
+            );
+        }
+
+        // Replaying burned `session_id` (`[0xB1; 32]`) with fresh `nonce`: MUST fail!
+        let mut tx_replay_session = tx1.clone();
+        tx_replay_session.amount_units = 10;
+        tx_replay_session.nonce = [0xA4; 32];
+        for g in &mut guards {
+            assert_eq!(
+                g.round1_commit_intent(
+                    &policy,
+                    &tx_replay_session,
+                    tx_replay_session.session_id,
+                    tx_replay_session.timestamp_secs,
+                    0,
+                )
+                .err(),
+                Some(PolicyViolation::DuplicateIntentNonce)
+            );
+        }
+
+        // Honest `40` intent (`60 + 40 == 100 <= 100`) succeeds, even if caller passes `rolling_window_spent = 0`!
+        let mut tx3_fits = tx1.clone();
+        tx3_fits.amount_units = 40;
+        tx3_fits.nonce = [0xA5; 32];
+        tx3_fits.session_id = [0xB5; 32];
+        run_phases(&mut guards, &policy, &tx3_fits);
+        assert!(guards.iter().all(|g| g.accumulated_window_spend() == 100));
+
+        // Window mismatch rejected; advancing strictly to `window_id = 1` resets window spend while rejecting rollback!
+        let mut tx_wrong_win = tx3_fits.clone();
+        tx_wrong_win.window_id = 1;
+        tx_wrong_win.nonce = [0xA6; 32];
+        tx_wrong_win.session_id = [0xB6; 32];
+        assert_eq!(
+            guards[0]
+                .round1_commit_intent(
+                    &policy,
+                    &tx_wrong_win,
+                    tx_wrong_win.session_id,
+                    tx_wrong_win.timestamp_secs,
+                    0,
+                )
+                .err(),
+            Some(PolicyViolation::WindowIdMismatch)
+        );
+        for g in &mut guards {
+            assert_eq!(
+                g.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 0)).err(),
+                Some(PolicyViolation::WindowIdMismatch)
+            );
+            g.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1)).unwrap();
+            assert_eq!(g.current_window_id(), 1);
+            assert_eq!(g.accumulated_window_spend(), 0);
+            assert_eq!(
+                g.advance_velocity_window(&WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1)).err(),
+                Some(PolicyViolation::WindowIdMismatch)
+            );
+        }
+        run_phases(&mut guards, &policy, &tx_wrong_win);
+        assert!(guards.iter().all(|g| g.accumulated_window_spend() == 40));
+
+        // Path B: Direct `evaluate_policy_committed_barrier` (`cap = 100`, two `60` intents).
+        let mut barrier_guards = raw_test_guards([0x62; 32], &[1, 2, 4]);
+        evaluate_policy_committed_barrier(
+            &policy,
+            &tx1,
+            tx1.session_id,
+            &mut barrier_guards,
+            &accel,
+        )
+        .unwrap();
+        assert_eq!(
+            evaluate_policy_committed_barrier(
+                &policy,
+                &tx2_over_cap,
+                tx2_over_cap.session_id,
+                &mut barrier_guards,
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::VelocityCapOverflowOrExceeded
+        );
+    }
+
+    #[test]
+    fn peer_fault_aborts_only_session_slot_without_bricking_honest_guard_or_ledger() {
+        let (policy, base_intent) = phase_fixture(&[1, 2, 4]);
+        let mut guards = raw_test_guards([0x63; 32], &[1, 2, 4]);
+
+        // 1. Complete an initial honest session (`accumulated_window_spend == 30`, slot 0 retired).
+        run_phases(&mut guards, &policy, &base_intent);
+        assert!(guards.iter().all(|g| g.accumulated_window_spend() == 30));
+        assert!(guards.iter().all(|g| g.next_slot.get() == 1));
+
+        // 2. Malicious peer `2` corrupts its Round-2 delta opening in session 2 (slot 1):
+        //    Honest guards `1` and `4` MUST abort ONLY slot 1 without poisoning their keys or wiping `30` spend!
+        let mut grief_intent = base_intent.clone();
+        grief_intent.nonce = [0xC1; 32];
+        grief_intent.session_id = [0xD1; 32];
+        grief_intent.rolling_window_spent = 30;
+        let (states, mut opens) = delta_phases(&mut guards, &policy, &grief_intent);
+        opens[1].delta_i[0] ^= 0xDEAD_BEEF;
+        for (st, g) in states.into_iter().zip(&mut guards) {
+            assert!(matches!(
+                st.round3_commit_sigma(g, &opens),
+                Err(PolicyViolation::BarrierCommitmentMismatch { party_id: 2 })
+            ));
+            assert_slot_aborted_not_bricked(g, 1);
+            assert_eq!(g.accumulated_window_spend(), 30);
+        }
+
+        // 3. Malicious peer `2` next corrupts its Round-4 sigma opening in session 3 (slot 2):
+        let mut grief_sigma = grief_intent.clone();
+        grief_sigma.nonce = [0xC2; 32];
+        grief_sigma.session_id = [0xD2; 32];
+        let (states, commits) = sigma_phases(&mut guards, &policy, &grief_sigma);
+        let (finals, mut sig_opens): (Vec<_>, Vec<_>) = states
+            .into_iter()
+            .zip(&mut guards)
+            .map(|(s, g)| s.round4_open_sigma(g, &commits).unwrap())
+            .unzip();
+        sig_opens[1].sigma_i[1] ^= 1;
+        for (fin, g) in finals.into_iter().zip(&mut guards) {
+            assert!(matches!(
+                fin.finalize(g, &sig_opens),
+                Err(PolicyViolation::BarrierCommitmentMismatch { party_id: 2 })
+            ));
+            assert_slot_aborted_not_bricked(g, 2);
+            assert_eq!(g.accumulated_window_spend(), 30);
+        }
+
+        // 4. Subsequent honest session on slot 3 succeeds cleanly and advances durable spend to `40`!
+        let mut recovery_intent = grief_sigma;
+        recovery_intent.nonce = [0xC3; 32];
+        recovery_intent.session_id = [0xD3; 32];
+        run_phases(&mut guards, &policy, &recovery_intent);
+        assert!(guards.iter().all(|g| !g.is_poisoned()));
+        assert!(guards.iter().all(|g| g.next_slot.get() == 4));
+        assert!(guards.iter().all(|g| g.accumulated_window_spend() == 40));
+    }
+
+    #[test]
+    fn authenticated_initiator_prevents_self_approval_spoofing_and_transcript_equivocation() {
+        let accel = CpuReferenceBackend::new();
+        let all_ids = [10u16, 20, 30, 50];
+        let approvers = [20u16, 30, 50];
+        let (policy, mut intent) = phase_fixture(&approvers);
+        intent.initiator_party = 10;
+
+        let mut all_guards = raw_test_guards([0x88; 32], &all_ids);
+        let guard_10 = all_guards.remove(0);
+        // Remaining guards in `all_guards` are `[20, 30, 50]`.
+        for g in &mut all_guards {
+            g.set_require_authenticated_initiator(true);
+        }
+
+        // 1. Unauthenticated intent claiming `initiator_party = 10` is rejected!
+        assert_eq!(
+            evaluate_policy_committed_barrier_authenticated(
+                &policy,
+                &intent,
+                intent.session_id,
+                &mut all_guards,
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::UnauthenticatedInitiator
+        );
+
+        // 2. Insider approver `20` initiates a self-dealing request, tries to sign with `20`'s guard
+        //    then rewrite `initiator_party = 10` to bypass `forbid_initiator_self_approval`: REJECTED!
+        let mut forged = intent.clone();
+        forged.initiator_party = 20;
+        all_guards[0]
+            .authenticate_initiated_intent(&policy, &mut forged)
+            .unwrap();
+        forged.initiator_party = 10;
+        let forged_bytes = forged.to_canonical_signing_bytes(&policy.canonical_digest());
+        forged.message_digest = cshake256_framed_32(b"QSAG.POLICY.MSG.V1", &[&forged_bytes]);
+        assert_eq!(
+            all_guards[1]
+                .round1_commit_intent_authenticated(
+                    &policy,
+                    &forged,
+                    forged.session_id,
+                    forged.timestamp_secs,
+                    forged.rolling_window_spent,
+                )
+                .err(),
+            Some(PolicyViolation::UnauthenticatedInitiator)
+        );
+
+        // 3. Genuine authentication by `guard_10` succeeds across all approvers `[20, 30, 50]`!
+        let signed_bytes = guard_10
+            .authenticate_initiated_intent(&policy, &mut intent)
+            .unwrap();
+        // Tampering with `amount_units` after `guard_10` authenticated invalidates the MAC!
+        let mut tampered = intent.clone();
+        tampered.amount_units += 1;
+        assert_eq!(
+            all_guards[0]
+                .round1_commit_intent_authenticated(
+                    &policy,
+                    &tampered,
+                    tampered.session_id,
+                    tampered.timestamp_secs,
+                    tampered.rolling_window_spent,
+                )
+                .err(),
+            Some(PolicyViolation::UnauthenticatedInitiator)
+        );
+
+        let token = evaluate_policy_committed_barrier_authenticated(
+            &policy,
+            &intent,
+            intent.session_id,
+            &mut all_guards,
+            &accel,
+        )
+        .unwrap();
+        assert!(token.matches_signing(
+            &intent.signing_key_id,
+            &signed_bytes,
+            b"context",
+            &approvers,
+        ));
+    }
+}
