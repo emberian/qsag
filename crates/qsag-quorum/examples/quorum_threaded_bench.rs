@@ -1,26 +1,38 @@
-//! Wall-clock latency and wire bytes of the isolated party nodes, one OS thread per party.
+//! Wall-clock latency and wire bytes of the isolated party nodes, one OS thread per party,
+//! measuring BOTH pure in-memory/loopback compute AND full production custody
+//! (`ConfidentialWireChannel<TcpEndpoint>` Encrypt-then-MAC AEAD framing + real filesystem
+//! `FsBeltWal`, `FsDurablePoisonAndSessionJournal`, and `AnchoredSeedBurnTracker` `fsync`
+//! durability).
 //!
 //! Every party is its own value on its own thread and reaches its peers only through a
-//! [`WireTransport`]: an in-process channel mesh or a loopback TCP mesh. A measured latency
-//! is the time from a common start barrier until the slowest party has finished; the byte
-//! counts are the frames the parties put on the wire, headers included.
+//! [`WireTransport`]: an in-process channel mesh, a raw loopback TCP mesh, or an encrypted
+//! [`ConfidentialWireChannel`] over loopback TCP. A measured latency is the time from a
+//! common start barrier until the slowest party has finished; the byte counts are the frames
+//! the parties put on the wire, headers and AEAD MAC tags included.
 //!
-//! Run with `cargo run -p qsag-quorum --release --features std --example quorum_threaded_bench`.
+//! Run with:
+//! `cargo run -p qsag-quorum --release --features std --example quorum_threaded_bench [--durable-dir <path>]`
 
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use qsag_core::belt_latch::MemoryWal;
-use qsag_quorum::hash::SeedRng;
+use qsag_core::belt_latch::{DurableWal, FsBeltWal, MemoryWal};
+use qsag_quorum::ConfidentialWireChannel;
+use qsag_quorum::durable_custody::AnchoredSeedBurnTracker;
+use qsag_quorum::hash::{SeedRng, mac32};
 use qsag_quorum::party_node::{
-    IsolatedJortsParty, IsolatedQuorumParty, IsolatedRss256Party, MemoryPoisonJournal, ROUND_GATE,
-    ROUND_OPEN, deal_keccak_shares, deal_rss256_keys,
+    IsolatedJortsParty, IsolatedQuorumParty, IsolatedRss256Party, MemoryPoisonJournal, PoisonJournal,
+    ROUND_GATE, ROUND_OPEN, deal_keccak_shares, deal_rss256_keys,
 };
+use qsag_quorum::poison_journal::{FsDurablePoisonAndSessionJournal, JournalOpenMode};
 use qsag_quorum::quorum_jorts::{
     CommitteeCustodian, CommitteePartitionedJorts, LeafRecord, QuorumConfig, ShamirCustodian,
     quorum_jorts_verify, stage_bft_shamir, stage_committee_partitioned,
 };
-use qsag_quorum::wire_channel::{InMemoryWireMesh, MeshStats, TcpWireMesh, WireTransport};
+use qsag_quorum::wire_channel::{
+    InMemoryWireMesh, MeshStats, TcpEndpoint, TcpWireMesh, WireTransport,
+};
 
 const SEED: [u8; 32] = [0x42; 32];
 const SESSION: [u8; 32] = [0x17; 32];
@@ -33,6 +45,91 @@ fn median(mut samples: Vec<Duration>) -> Duration {
 
 fn micros(d: Duration) -> f64 {
     d.as_secs_f64() * 1e6
+}
+
+fn pairwise_link_keys(parties: usize, domain: &[u8]) -> Vec<Vec<[u8; 32]>> {
+    (0..parties)
+        .map(|me| {
+            (0..parties)
+                .map(|peer| {
+                    if me == peer {
+                        [0u8; 32]
+                    } else {
+                        let (lo, hi) = if me < peer { (me, peer) } else { (peer, me) };
+                        mac32(
+                            &SEED,
+                            domain,
+                            &[&(lo as u64).to_le_bytes(), &(hi as u64).to_le_bytes()],
+                        )
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn confidential_tcp_mesh(
+    parties: usize,
+    session: [u8; 32],
+) -> (Vec<ConfidentialWireChannel<TcpEndpoint>>, Arc<MeshStats>) {
+    let (tcp_endpoints, stats) = TcpWireMesh::loopback(parties, session).expect("loopback TCP");
+    let link_keys = pairwise_link_keys(parties, b"QSAG.BENCH.CONFIDENTIAL.LINK.V1");
+    let confidential = tcp_endpoints
+        .into_iter()
+        .zip(link_keys)
+        .map(|(ep, keys)| ConfidentialWireChannel::new(ep, session, keys).expect("confidential"))
+        .collect();
+    (confidential, stats)
+}
+
+/// Prefer a scratch directory inside `<cwd>/target/` (real NVMe on Linux build servers where
+/// `/tmp` may be `tmpfs`) unless overridden via `--durable-dir <path>`.
+struct DurableBenchDir {
+    root: PathBuf,
+}
+
+impl DurableBenchDir {
+    fn create_from_args() -> Self {
+        let mut args = std::env::args().skip(1);
+        let mut explicit = None;
+        while let Some(arg) = args.next() {
+            if arg == "--durable-dir" {
+                explicit = Some(PathBuf::from(
+                    args.next().expect("--durable-dir requires a path"),
+                ));
+            }
+        }
+        let base = explicit.unwrap_or_else(|| {
+            let cwd_target = std::env::current_dir()
+                .map(|d| d.join("target"))
+                .unwrap_or_else(|_| std::env::temp_dir());
+            if std::fs::create_dir_all(&cwd_target).is_ok() {
+                cwd_target
+            } else {
+                std::env::temp_dir()
+            }
+        });
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = base.join(format!(
+            "qsag-custody-e2e-bench-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create durable benchmark directory");
+        Self { root }
+    }
+
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for DurableBenchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
 }
 
 /// Run `rounds` synchronised rounds of `step` on one thread per party. Returns, per round,
@@ -70,7 +167,7 @@ fn timed_rounds<P: Send>(
         .collect()
 }
 
-fn committee_bench<T: WireTransport + Send>(
+fn committee_bench_with_wals<T: WireTransport + Send, W: DurableWal + Send>(
     label: &str,
     t: usize,
     n: usize,
@@ -78,6 +175,7 @@ fn committee_bench<T: WireTransport + Send>(
     members: &[usize],
     endpoints: Vec<T>,
     stats: &Arc<MeshStats>,
+    mut make_wals: impl FnMut(usize, usize) -> Vec<W>,
 ) {
     let staged = stage_committee_partitioned(t, n, height, &SEED).expect("staging");
     let pk = *staged.tree.public_key();
@@ -87,7 +185,7 @@ fn committee_bench<T: WireTransport + Send>(
         .zip(staged.parties)
         .filter(|(_, material)| members.contains(&material.party))
         .map(|(endpoint, material)| {
-            let wals = vec![MemoryWal::new(); material.stores.len()];
+            let wals = make_wals(material.party, material.stores.len());
             let custodian =
                 CommitteeCustodian::new(staged.layout.clone(), staged.tree.clone(), material, wals)
                     .expect("custodian");
@@ -102,8 +200,73 @@ fn committee_bench<T: WireTransport + Send>(
         assert!(quorum_jorts_verify(&pk, &msg, &sig));
     });
     println!(
-        "  {label:<34} {:>2} threads  median {:>9.1} us  min {:>9.1} us  wire {:>7} B/sig  {:>4} frames/sig  store {:>8} B/custodian",
+        "  {label:<40} {:>2} threads  median {:>9.1} us  min {:>9.1} us  wire {:>7} B/sig  {:>4} frames/sig  store {:>8} B/custodian",
         members.len(),
+        micros(median(times.clone())),
+        micros(*times.iter().min().expect("samples")),
+        stats.total_bytes() / SIGNATURES as u64,
+        stats.total_frames() / SIGNATURES,
+        share_bytes,
+    );
+}
+
+fn committee_bench<T: WireTransport + Send>(
+    label: &str,
+    t: usize,
+    n: usize,
+    height: u8,
+    members: &[usize],
+    endpoints: Vec<T>,
+    stats: &Arc<MeshStats>,
+) {
+    committee_bench_with_wals(
+        label,
+        t,
+        n,
+        height,
+        members,
+        endpoints,
+        stats,
+        |_party, count| vec![MemoryWal::new(); count],
+    );
+}
+
+fn shamir_bench_with_wal<T: WireTransport + Send, W: DurableWal + Send>(
+    label: &str,
+    cfg: QuorumConfig,
+    online: &[usize],
+    endpoints: Vec<T>,
+    stats: &Arc<MeshStats>,
+    mut make_wal: impl FnMut(usize) -> W,
+) {
+    let staged = stage_bft_shamir(cfg, 5, &SEED).expect("staging");
+    let pk = *staged.tree.public_key();
+    let mut openers = online.to_vec();
+    openers.truncate(cfg.threshold());
+    let nodes: Vec<_> = endpoints
+        .into_iter()
+        .zip(staged.parties)
+        .filter(|(_, material)| online.contains(&material.party))
+        .map(|(endpoint, material)| {
+            let wal = make_wal(material.party);
+            let custodian = ShamirCustodian::new(cfg, staged.tree.clone(), material, wal)
+                .expect("custodian");
+            IsolatedQuorumParty::new(custodian, endpoint).expect("node")
+        })
+        .collect();
+    let share_bytes = nodes[0].custodian().share_bytes();
+    stats.reset();
+    let times = timed_rounds(nodes, SIGNATURES, |node, round| {
+        let msg = [round as u8; 8];
+        let outcome = node
+            .sign(online, &openers, round as u64, &msg)
+            .expect("signature");
+        assert!(quorum_jorts_verify(&pk, &msg, &outcome.signature));
+        assert!(outcome.blamed.is_empty());
+    });
+    println!(
+        "  {label:<40} {:>2} threads  median {:>9.1} us  min {:>9.1} us  wire {:>7} B/sig  {:>4} frames/sig  store {:>8} B/custodian",
+        online.len(),
         micros(median(times.clone())),
         micros(*times.iter().min().expect("samples")),
         stats.total_bytes() / SIGNATURES as u64,
@@ -119,47 +282,17 @@ fn shamir_bench<T: WireTransport + Send>(
     endpoints: Vec<T>,
     stats: &Arc<MeshStats>,
 ) {
-    let staged = stage_bft_shamir(cfg, 5, &SEED).expect("staging");
-    let pk = *staged.tree.public_key();
-    let mut openers = online.to_vec();
-    openers.truncate(cfg.threshold());
-    let nodes: Vec<_> = endpoints
-        .into_iter()
-        .zip(staged.parties)
-        .filter(|(_, material)| online.contains(&material.party))
-        .map(|(endpoint, material)| {
-            let custodian =
-                ShamirCustodian::new(cfg, staged.tree.clone(), material, MemoryWal::new())
-                    .expect("custodian");
-            IsolatedQuorumParty::new(custodian, endpoint).expect("node")
-        })
-        .collect();
-    let share_bytes = nodes[0].custodian().share_bytes();
-    stats.reset();
-    let times = timed_rounds(nodes, SIGNATURES, |node, round| {
-        let msg = [round as u8; 8];
-        let outcome = node
-            .sign(online, &openers, round as u64, &msg)
-            .expect("signature");
-        assert!(quorum_jorts_verify(&pk, &msg, &outcome.signature));
-        assert!(outcome.blamed.is_empty());
+    shamir_bench_with_wal(label, cfg, online, endpoints, stats, |_party| {
+        MemoryWal::new()
     });
-    println!(
-        "  {label:<34} {:>2} threads  median {:>9.1} us  min {:>9.1} us  wire {:>7} B/sig  {:>4} frames/sig  store {:>8} B/custodian",
-        online.len(),
-        micros(median(times.clone())),
-        micros(*times.iter().min().expect("samples")),
-        stats.total_bytes() / SIGNATURES as u64,
-        stats.total_frames() / SIGNATURES,
-        share_bytes,
-    );
 }
 
-fn rss_bench<T: WireTransport + Send>(
+fn rss_bench_with_journal<T: WireTransport + Send, J: PoisonJournal + Send>(
     label: &str,
     states: usize,
     endpoints: Vec<T>,
     stats: &Arc<MeshStats>,
+    mut make_journal: impl FnMut(usize) -> J,
 ) {
     let keys = deal_rss256_keys(&SEED);
     let mut rng = SeedRng::new(&SEED, b"bench shares");
@@ -178,8 +311,7 @@ fn rss_bench<T: WireTransport + Send>(
         .map(|(endpoint, keys)| {
             let p = keys.party;
             let mut party =
-                IsolatedRss256Party::new(SESSION, keys, endpoint, MemoryPoisonJournal::new())
-                    .expect("party");
+                IsolatedRss256Party::new(SESSION, keys, endpoint, make_journal(p)).expect("party");
             for share in &shares {
                 party.load_shares(share[p].clone());
             }
@@ -210,9 +342,9 @@ fn rss_bench<T: WireTransport + Send>(
     };
     let gate = class(&|tag| tag & 0xFF00_0000 == ROUND_GATE);
     let open = class(&|tag| tag == ROUND_OPEN);
-    let barrier = stats.total_bytes() - gate - open;
+    let barrier = stats.total_bytes().saturating_sub(gate + open);
     println!(
-        "  {label:<26} {states} state(s), {:>6} AND gates: wave {:>9.1} us ({:>7} B)  barrier {:>10.1} us ({:>7} B)  open {:>7.1} us ({:>5} B)  frames {}",
+        "  {label:<32} {states} state(s), {:>6} AND gates: wave {:>9.1} us ({:>7} B)  barrier {:>10.1} us ({:>7} B)  open {:>7.1} us ({:>5} B)  frames {}",
         states * 24 * 1600,
         micros(times[0]),
         gate,
@@ -221,6 +353,50 @@ fn rss_bench<T: WireTransport + Send>(
         micros(times[2]),
         open,
         frames.len(),
+    );
+}
+
+fn rss_bench<T: WireTransport + Send>(
+    label: &str,
+    states: usize,
+    endpoints: Vec<T>,
+    stats: &Arc<MeshStats>,
+) {
+    rss_bench_with_journal(label, states, endpoints, stats, |_| {
+        MemoryPoisonJournal::new()
+    });
+}
+
+fn anchored_ledger_checkpoint_bench(durable_root: &Path) {
+    let dir = durable_root.join("anchored-ledger");
+    std::fs::create_dir_all(dir.join("ledger")).expect("ledger dir");
+    std::fs::create_dir_all(dir.join("anchor")).expect("anchor dir");
+    let mut tracker = AnchoredSeedBurnTracker::provision_genesis(
+        dir.join("ledger").join("seedburn"),
+        dir.join("ledger").join("seedburn.journal"),
+        dir.join("anchor").join("seedburn.anchor"),
+        [0x51; 32],
+        [0x88; 32],
+    )
+    .expect("provision anchored seed burn tracker");
+
+    let mut samples = Vec::with_capacity(SIGNATURES);
+    for i in 0..SIGNATURES {
+        let mut session_id = [0xA0; 32];
+        session_id[0] = i as u8;
+        let mut seed_id = [0xB0; 32];
+        seed_id[0] = i as u8;
+        let begin = Instant::now();
+        let ckpt = tracker
+            .burn_seed_anchored(session_id, seed_id, (i + 1) as u64)
+            .expect("anchored seed burn");
+        samples.push(begin.elapsed());
+        assert_eq!(ckpt.generation, (i + 1) as u64);
+    }
+    println!(
+        "  AnchoredSeedBurnTracker (journal + 2-slot ledger + FsLedgerCheckpointAnchor fsync): median {:>9.1} us  min {:>9.1} us ({SIGNATURES} commits)",
+        micros(median(samples.clone())),
+        micros(*samples.iter().min().expect("samples")),
     );
 }
 
@@ -256,7 +432,137 @@ fn primitives() {
     );
 }
 
+fn production_custody_e2e_suite(durable_root: &Path) {
+    println!(
+        "\nEnd-to-End Production Custody (ConfidentialWireChannel<TcpEndpoint> AEAD + real disk FsBeltWal fsync in `{}`):",
+        durable_root.display()
+    );
+
+    // 1. Mode QS-A 2-of-3: ConfidentialWireChannel over TCP + FsBeltWal fsync per party/slot.
+    let qsa_2of3_dir = durable_root.join("qsa-2of3");
+    std::fs::create_dir_all(&qsa_2of3_dir).expect("qsa-2of3 dir");
+    let (endpoints, stats) = confidential_tcp_mesh(3, SESSION);
+    committee_bench_with_wals(
+        "QS-A 2-of-3, Confidential TCP + FsBeltWal",
+        2,
+        3,
+        7,
+        &[0, 2],
+        endpoints,
+        &stats,
+        |party, count| {
+            (0..count)
+                .map(|slot| {
+                    let wal_path = qsa_2of3_dir.join(format!("p{party}-s{slot}.wal"));
+                    let wal_key = mac32(
+                        &SEED,
+                        b"QSAG.BENCH.QSA.WAL.V1",
+                        &[&(party as u64).to_le_bytes(), &(slot as u64).to_le_bytes()],
+                    );
+                    FsBeltWal::provision_genesis(wal_path, wal_key).expect("provision FsBeltWal")
+                })
+                .collect()
+        },
+    );
+
+    // 2. Mode QS-A 3-of-5: ConfidentialWireChannel over TCP + FsBeltWal fsync per party/slot.
+    let qsa_3of5_dir = durable_root.join("qsa-3of5");
+    std::fs::create_dir_all(&qsa_3of5_dir).expect("qsa-3of5 dir");
+    let (endpoints, stats) = confidential_tcp_mesh(5, SESSION);
+    committee_bench_with_wals(
+        "QS-A 3-of-5, Confidential TCP + FsBeltWal",
+        3,
+        5,
+        8,
+        &[0, 2, 4],
+        endpoints,
+        &stats,
+        |party, count| {
+            (0..count)
+                .map(|slot| {
+                    let wal_path = qsa_3of5_dir.join(format!("p{party}-s{slot}.wal"));
+                    let wal_key = mac32(
+                        &SEED,
+                        b"QSAG.BENCH.QSA35.WAL.V1",
+                        &[&(party as u64).to_le_bytes(), &(slot as u64).to_le_bytes()],
+                    );
+                    FsBeltWal::provision_genesis(wal_path, wal_key).expect("provision FsBeltWal")
+                })
+                .collect()
+        },
+    );
+
+    // 3. Mode QS-B (2,4,f=1): ConfidentialWireChannel over TCP + FsBeltWal fsync per custodian.
+    let qsb_24_dir = durable_root.join("qsb-2of4");
+    std::fs::create_dir_all(&qsb_24_dir).expect("qsb-2of4 dir");
+    let cfg_24 = QuorumConfig::new(2, 4, 1).expect("config");
+    let (endpoints, stats) = confidential_tcp_mesh(4, SESSION);
+    shamir_bench_with_wal(
+        "QS-B (2,4,f=1), Confidential TCP + FsBeltWal",
+        cfg_24,
+        &[0, 1, 3],
+        endpoints,
+        &stats,
+        |party| {
+            let wal_path = qsb_24_dir.join(format!("custodian-{party}.wal"));
+            let wal_key = mac32(
+                &SEED,
+                b"QSAG.BENCH.QSB24.WAL.V1",
+                &[&(party as u64).to_le_bytes()],
+            );
+            FsBeltWal::provision_genesis(wal_path, wal_key).expect("provision FsBeltWal")
+        },
+    );
+
+    // 4. Mode QS-B (3,7,f=2): ConfidentialWireChannel over TCP + FsBeltWal fsync per custodian.
+    let qsb_37_dir = durable_root.join("qsb-3of7");
+    std::fs::create_dir_all(&qsb_37_dir).expect("qsb-3of7 dir");
+    let cfg_37 = QuorumConfig::new(3, 7, 2).expect("config");
+    let (endpoints, stats) = confidential_tcp_mesh(7, SESSION);
+    shamir_bench_with_wal(
+        "QS-B (3,7,f=2) 5-online, ConfTCP + FsBeltWal",
+        cfg_37,
+        &[0, 1, 3, 4, 6],
+        endpoints,
+        &stats,
+        |party| {
+            let wal_path = qsb_37_dir.join(format!("custodian-{party}.wal"));
+            let wal_key = mac32(
+                &SEED,
+                b"QSAG.BENCH.QSB37.WAL.V1",
+                &[&(party as u64).to_le_bytes()],
+            );
+            FsBeltWal::provision_genesis(wal_path, wal_key).expect("provision FsBeltWal")
+        },
+    );
+
+    // 5. 3-party RSS Keccak-f[1600]: ConfidentialWireChannel over TCP + FsDurablePoisonAndSessionJournal.
+    let rss_dir = durable_root.join("rss-poison");
+    std::fs::create_dir_all(&rss_dir).expect("rss-poison dir");
+    let (endpoints, stats) = confidential_tcp_mesh(3, SESSION);
+    rss_bench_with_journal(
+        "ConfTCP + FsPoisonJournal",
+        1,
+        endpoints,
+        &stats,
+        |party| {
+            let path = rss_dir.join(format!("party-{party}.poison"));
+            let jkey = mac32(
+                &SEED,
+                b"QSAG.BENCH.RSS.POISON.V1",
+                &[&(party as u64).to_le_bytes()],
+            );
+            FsDurablePoisonAndSessionJournal::open(path, jkey, SESSION, JournalOpenMode::CreateNew)
+                .expect("provision FsDurablePoisonAndSessionJournal")
+        },
+    );
+
+    // 6. Retained LedgerCheckpoint commit + anchor fsync latency.
+    anchored_ledger_checkpoint_bench(durable_root);
+}
+
 fn main() {
+    let durable = DurableBenchDir::create_from_args();
     println!(
         "quorum_threaded_bench: one OS thread per party, {} hardware threads available",
         std::thread::available_parallelism().map_or(0, usize::from)
@@ -264,7 +570,7 @@ fn main() {
 
     primitives();
 
-    println!("\nMode QS-A, committee-partitioned t-of-t ({SIGNATURES} signatures each):");
+    println!("\nMode QS-A, pure compute / loopback baseline ({SIGNATURES} signatures each, MemoryWal):");
     let (endpoints, stats) = InMemoryWireMesh::connect(3, SESSION);
     committee_bench("2-of-3, channel mesh", 2, 3, 7, &[0, 2], endpoints, &stats);
     let (endpoints, stats) = InMemoryWireMesh::connect(5, SESSION);
@@ -298,7 +604,7 @@ fn main() {
         &stats,
     );
 
-    println!("\nMode QS-B, certified (t, n) Shamir ({SIGNATURES} signatures each):");
+    println!("\nMode QS-B, pure compute / loopback baseline ({SIGNATURES} signatures each, MemoryWal):");
     let cfg = QuorumConfig::new(2, 4, 1).expect("config");
     let (endpoints, stats) = InMemoryWireMesh::connect(4, SESSION);
     shamir_bench(
@@ -350,4 +656,6 @@ fn main() {
     }
     let (endpoints, stats) = TcpWireMesh::loopback(3, SESSION).expect("loopback mesh");
     rss_bench("loopback TCP", 1, endpoints, &stats);
+
+    production_custody_e2e_suite(durable.path());
 }

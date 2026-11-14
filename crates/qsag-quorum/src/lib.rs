@@ -23,6 +23,13 @@ pub mod quorum_jorts;
 pub mod wire_channel;
 
 #[cfg(feature = "std")]
+pub mod durable_custody;
+#[cfg(feature = "std")]
 pub mod poison_journal;
 
+#[cfg(feature = "std")]
+pub use durable_custody::{
+    AnchoredFirstSignedCustody, AnchoredFirstSignedError, AnchoredSeedBurnError,
+    AnchoredSeedBurnTracker, FsLedgerCheckpointAnchor,
+};
 pub use wire_channel::{ConfidentialWireChannel, MacSealedWireChannel};
