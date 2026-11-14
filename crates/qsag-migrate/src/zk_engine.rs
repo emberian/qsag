@@ -13,8 +13,9 @@ use qsag_accel::{
 };
 use qsag_addr::QsagAddress;
 pub const MIT_PARTIES: usize = 3;
-/// Classical error `(2/3)^438 = 2^-256.2135753159 < 2^-256`;
-/// QROM Grover error `sqrt((2/3)^438) = (2/3)^219 = 2^-128.1067876579 < 2^-128`. See `SECURITY.md`.
+/// Classical soundness error `(2/3)^438 = 2^-256.2135753159 < 2^-256`. Generic Grover
+/// search for an accepting challenge string therefore needs about
+/// `(3/2)^219 = 2^128.1067876579 > 2^128` oracle iterations. See `SECURITY.md`.
 pub const MIT_REPETITIONS: usize = 438;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrateError {
@@ -697,14 +698,64 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn mit_repetitions_achieves_256bit_classical_and_128bit_qrom_grover_soundness() {
+    fn mit_repetitions_give_256bit_classical_error_and_128bit_grover_search_cost() {
         assert_eq!(MIT_REPETITIONS, 438);
         // Exact integer witness: `8 * 3^73 > 13 * 2^115` and `13^3 = 2197 > 2048 = 4 * 8^3`,
-        // implying `3^219 > 2^219 * 2^128` (QROM Grover `< 2^-128`) and `3^438 > 2^438 * 2^256`.
+        // implying `3^219 > 2^219 * 2^128` (Grover search cost `> 2^128`) and `3^438 > 2^438 * 2^256`.
         let lhs = 8u128 * 3u128.pow(73);
         let rhs = 13u128 * (1u128 << 115);
         assert!(lhs > rhs);
         assert!(13u128.pow(3) > 4 * 8u128.pow(3));
+    }
+
+    #[test]
+    fn malformed_openings_return_errors() {
+        let c = Builder::default();
+        let a = c.input(1);
+        for d in [Domain::Gold, Domain::Secp, Domain::Ed] {
+            let aa = c.lift(a, d);
+            let bits = c.bits(c.mul(aa, aa));
+            c.equal(c.pack(&bits, d), aa);
+        }
+        let circuit = c.finish();
+        let views = simulate(&circuit, [[5; 32], [6; 32], [7; 32]]);
+        type Field = fn(&mut OpenedRepetitionView) -> &mut Vec<u8>;
+        let fields: [Field; 7] = [
+            |v| &mut v.pair[0].inputs,
+            |v| &mut v.pair[1].inputs,
+            |v| &mut v.pair[0].products,
+            |v| &mut v.pair[1].products,
+            |v| &mut v.pair[0].outputs,
+            |v| &mut v.pair[1].outputs,
+            |v| &mut v.hidden_outputs,
+        ];
+        for e in 0..3 {
+            let opening = OpenedRepetitionView {
+                opened_e: e as u8,
+                pair: [views[e].clone(), views[(e + 1) % 3].clone()],
+                hidden_party_commit: [0; 32],
+                hidden_outputs: views[(e + 2) % 3].outputs.clone(),
+            };
+            assert_eq!(replay(&circuit, 0, &opening), Ok(()));
+            for field in fields {
+                let len = field(&mut opening.clone()).len();
+                assert!(len > 0);
+                for keep in [0, 1, len / 2, len - 1].into_iter().filter(|&k| k < len) {
+                    let mut short = opening.clone();
+                    field(&mut short).truncate(keep);
+                    assert!(replay(&circuit, 0, &short).is_err());
+                }
+                let mut long = opening.clone();
+                field(&mut long).push(0);
+                assert_eq!(
+                    replay(&circuit, 0, &long),
+                    Err(MigrateError::MalformedProofStructure)
+                );
+                let mut noncanonical = opening.clone();
+                field(&mut noncanonical).fill(0xff);
+                assert!(replay(&circuit, 0, &noncanonical).is_err());
+            }
+        }
     }
 
     #[test]
@@ -850,6 +901,20 @@ pub(crate) mod tests {
                 .is_err()
             );
             proof.repetitions[0].hidden_outputs[0] ^= 1;
+            let opened_e = proof.repetitions[0].opened_e;
+            for out_of_range in [3, 255] {
+                proof.repetitions[0].opened_e = out_of_range;
+                assert_eq!(
+                    verify_migration_proof(
+                        &statement,
+                        &proof,
+                        &statement.migration_domain,
+                        statement.epoch_anchor
+                    ),
+                    Err(MigrateError::MalformedProofStructure)
+                );
+            }
+            proof.repetitions[0].opened_e = opened_e;
             let other = LegacyOwnershipWitness::from_raw_secret([3; 32]);
             assert!(
                 prove_migration_in_domain(

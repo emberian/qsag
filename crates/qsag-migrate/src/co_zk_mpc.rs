@@ -5,12 +5,13 @@
 //! honest majority), assuming confidential authenticated pairwise channels and
 //! independently sampled private custodian entropy. Every Boolean `AND` gate and
 //! prime-field multiplication is batch-verified with coin-flipped challenges
-//! (`< 2^-126` Boolean soundness over `GF(2^128)`, `< 2^-128` prime-field
-//! soundness over `GF(p)` / `GF(p^3)`) before any wire opening, masked A2B/B2A
-//! conversion difference, view commitment, public output, or challenged ZKBoo
-//! party view is reconstructed. Two colluding custodians can reconstruct
-//! replicated secrets, and abort remains non-identifiable / unfair (`1` corrupt
-//! custodian can force an abort). See `SECURITY.md` for exact scope.
+//! (per flush: `< 2^-127.99` Boolean soundness over `GF(2^128)`, `< 2^-249`
+//! over the curve fields `GF(p)` and `< 2^-186` over Goldilocks `GF(p^3)`)
+//! before any wire opening, masked A2B/B2A conversion difference, view
+//! commitment, public output, or challenged ZKBoo party view is reconstructed.
+//! Two colluding custodians can reconstruct replicated secrets, and abort
+//! remains non-identifiable / unfair (`1` corrupt custodian can force an
+//! abort). See `SECURITY.md` for exact scope.
 pub use crate::outer_mpc::{Envelope, Error, Transport};
 use crate::{
     circuit::{Circuit, Domain, Op},
@@ -123,20 +124,25 @@ impl CoZkCustodianShare {
             &[&statement_bytes, &(children.len() as u64).to_le_bytes()],
         ))?;
 
-        let own: Vec<_> = self
+        let mut own: Vec<_> = self
             .witness
             .iter()
             .flat_map(|b| (0..8).map(move |i| if (b >> i) & 1 != 0 { u64::MAX } else { 0 }))
             .collect();
-        let witness = e.share_uniform_lanes(&own)?;
+        let shared = e.share_uniform_lanes(&own);
+        ct_zeroize_u64s(&mut own);
+        // Both replicated witness components this custodian holds are wiped on
+        // every exit path, as are its shares of all virtual-head tape seeds.
+        let witness = ZeroizeWordVec(vec![shared?]);
+        let witness: &[Bit] = &witness.0[0];
         let circuit = crate::ownership::build(statement, &[0; 32]);
 
         let num_batches = MIT_REPETITIONS.div_ceil(64);
         let mut seeds = Vec::with_capacity(num_batches);
         for batch in 0..num_batches {
-            let mut heads = Vec::with_capacity(3);
+            let mut heads = ZeroizeWordVec(Vec::with_capacity(3));
             for head in 0..3 {
-                let lane_seeds: Vec<_> = (0..64)
+                let mut lane_seeds: Vec<_> = (0..64)
                     .map(|lane| {
                         cshake256_framed_32(
                             b"QSAG.OUTER.SEED.V1",
@@ -150,14 +156,19 @@ impl CoZkCustodianShare {
                         )
                     })
                     .collect();
-                let own_seed: Vec<_> = (0..256)
+                let mut own_seed: Vec<_> = (0..256)
                     .map(|i| {
                         lane_seeds.iter().enumerate().fold(0, |v, (lane, s)| {
                             v | (((s[i / 8] >> (i % 8)) & 1) as u64) << lane
                         })
                     })
                     .collect();
-                heads.push(e.share(&own_seed)?);
+                for seed in &mut lane_seeds {
+                    ct_zeroize_bytes(seed);
+                }
+                let shared = e.share(&own_seed);
+                ct_zeroize_u64s(&mut own_seed);
+                heads.0.push(shared?);
             }
             seeds.push(heads);
         }
@@ -168,7 +179,7 @@ impl CoZkCustodianShare {
         let mut computed_batches = compute_batches(
             &mut e,
             &circuit,
-            &witness,
+            witness,
             &seeds,
             children,
             BatchContext {
@@ -288,7 +299,7 @@ impl CoZkCustodianShare {
         .map_err(|_| Error::InvalidProof)?;
         e.agree(cshake256_framed_32(b"QSAG.OUTER.COMPLETE.V1", &[&root]))?;
         #[cfg(test)]
-        tests::audit_old_attack(&self, &e, &witness, &audit_inputs, &proof);
+        tests::audit_old_attack(&self, &e, witness, &audit_inputs, &proof);
         Ok(proof)
     }
 }
@@ -372,7 +383,7 @@ fn compute_batches<T: Transport>(
     e: &mut Engine<T>,
     c: &Circuit,
     witness: &[Bit],
-    seeds: &[Vec<Word>],
+    seeds: &[ZeroizeWordVec],
     children: Vec<T>,
     ctx: BatchContext,
 ) -> Result<Vec<BatchComputed<T>>, Error> {
@@ -382,34 +393,56 @@ fn compute_batches<T: Transport>(
         let session = ctx.session;
         let entropy = ctx.entropy;
         let keys = ctx.keys;
+        let cancelled = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
         return std::thread::scope(|scope| {
             let handles: Vec<_> = children
                 .into_iter()
                 .enumerate()
                 .map(|(batch, transport)| {
+                    let cancelled = cancelled.clone();
                     scope.spawn(move || {
-                        let batch_session = cshake256_framed_32(
-                            b"QSAG.OUTER.BATCH.V1",
-                            &[&session, &(batch as u64).to_le_bytes()],
-                        );
-                        let mut batch_entropy = cshake256_framed_32(
-                            b"QSAG.OUTER.BATCH.ENTROPY.V1",
-                            &[&entropy, &session, &(batch as u64).to_le_bytes()],
-                        );
-                        let mut engine = Engine::new(party, batch_session, keys, transport)?;
-                        engine.mix_entropy(&batch_entropy);
-                        ct_zeroize_bytes(&mut batch_entropy);
-                        let mut result =
-                            compute_batch(&mut engine, c, witness, &seeds[batch], batch)?;
-                        result.engine = Some(engine);
-                        Ok(result)
+                        let result = (|| {
+                            let batch_session = cshake256_framed_32(
+                                b"QSAG.OUTER.BATCH.V1",
+                                &[&session, &(batch as u64).to_le_bytes()],
+                            );
+                            let mut batch_entropy = cshake256_framed_32(
+                                b"QSAG.OUTER.BATCH.ENTROPY.V1",
+                                &[&entropy, &session, &(batch as u64).to_le_bytes()],
+                            );
+                            let mut engine = Engine::new(party, batch_session, keys, transport)?;
+                            engine.batch_cancelled = Some(cancelled.clone());
+                            engine.mix_entropy(&batch_entropy);
+                            ct_zeroize_bytes(&mut batch_entropy);
+                            let mut result =
+                                compute_batch(&mut engine, c, witness, &seeds[batch].0, batch)?;
+                            engine.batch_cancelled = None;
+                            result.engine = Some(engine);
+                            Ok(result)
+                        })();
+                        if result.is_err() {
+                            // Cancellation can only abort. Every successful batch still
+                            // passes its multiplication checks and the global barrier.
+                            cancelled.store(true, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        result
                     })
                 })
                 .collect();
-            handles
+            let results: Vec<Result<_, Error>> = handles
                 .into_iter()
-                .map(|h| h.join().map_err(|_| Error::Transport)?)
-                .collect()
+                .map(|h| h.join().unwrap_or(Err(Error::Transport)))
+                .collect();
+            // A sibling cancelled at an exchange reports Transport. Preserve the
+            // actual rejection (especially InvalidTape, which callers may retry).
+            if let Some(error) = results
+                .iter()
+                .filter_map(|r| r.as_ref().err())
+                .find(|&&error| error != Error::Transport)
+            {
+                return Err(*error);
+            }
+            results.into_iter().collect()
         });
     }
     #[cfg(not(any(feature = "std", test)))]
@@ -417,7 +450,7 @@ fn compute_batches<T: Transport>(
     seeds
         .iter()
         .enumerate()
-        .map(|(batch, seed)| compute_batch(e, c, witness, seed, batch))
+        .map(|(batch, seed)| compute_batch(e, c, witness, &seed.0, batch))
         .collect()
 }
 
