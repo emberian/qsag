@@ -722,3 +722,1535 @@ pub(crate) enum Cheat {
 }
 
 /// One party of the replicated engine (see the module documentation).
+pub struct IsolatedRss256Party<T: WireTransport, J: PoisonJournal> {
+    party: usize,
+    session_id: [u8; 32],
+    slot_keys: [[u8; 32]; 2],
+    mac_keys: [[u8; 32]; 2],
+    rng: SeedRng,
+    transport: T,
+    journal: J,
+    states: Vec<SharePair>,
+    wave: u64,
+    barrier: u64,
+    record: GateRecord,
+    unverified: bool,
+    poisoned: bool,
+    journal_failed: bool,
+    #[cfg(test)]
+    cheat: Option<Cheat>,
+}
+
+impl<T: WireTransport, J: PoisonJournal> Drop for IsolatedRss256Party<T, J> {
+    fn drop(&mut self) {
+        self.record.wipe();
+        for state in &mut self.states {
+            state.mine.fill(0);
+            state.next.fill(0);
+            core::hint::black_box(&mut state.mine);
+            core::hint::black_box(&mut state.next);
+        }
+        for key in self.slot_keys.iter_mut().chain(&mut self.mac_keys) {
+            key.fill(0);
+            core::hint::black_box(key);
+        }
+    }
+}
+
+impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
+    /// A party of session `session_id`. If the journal already lists the session as
+    /// poisoned, the party starts poisoned.
+    pub fn new(
+        session_id: [u8; 32],
+        keys: Rss256PartyKeys,
+        transport: T,
+        journal: J,
+    ) -> Result<Self, NodeError> {
+        if keys.party >= 3 || transport.party() != keys.party || transport.parties() != 3 {
+            return Err(NodeError::InvalidParameters);
+        }
+        let poisoned = journal.is_poisoned(&session_id);
+        Ok(Self {
+            party: keys.party,
+            session_id,
+            slot_keys: keys.slot_keys,
+            mac_keys: keys.mac_keys,
+            rng: SeedRng::new(&keys.rng_seed, &session_id),
+            transport,
+            journal,
+            states: Vec::new(),
+            wave: 0,
+            barrier: 0,
+            record: GateRecord::default(),
+            unverified: false,
+            poisoned,
+            journal_failed: false,
+            #[cfg(test)]
+            cheat: None,
+        })
+    }
+
+    pub fn party(&self) -> usize {
+        self.party
+    }
+
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
+    /// True while gates exist that no barrier has accepted.
+    pub fn has_unverified_gates(&self) -> bool {
+        self.unverified
+    }
+
+    pub fn state_count(&self) -> usize {
+        self.states.len()
+    }
+
+    /// Barriers passed so far.
+    pub fn barriers(&self) -> u64 {
+        self.barrier
+    }
+
+    /// Add this party's share pair of a state; returns the state's index. All three parties
+    /// must load their pairs of the same states in the same order.
+    pub fn load_shares(&mut self, pair: SharePair) -> usize {
+        self.states.push(pair);
+        self.states.len() - 1
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_cheat(&mut self, cheat: Cheat) {
+        self.cheat = Some(cheat);
+    }
+
+    const fn succ(&self) -> usize {
+        (self.party + 1) % 3
+    }
+
+    const fn pred(&self) -> usize {
+        (self.party + 2) % 3
+    }
+
+    /// MAC key shared with `peer`.
+    fn pair_key(&self, peer: usize) -> &[u8; 32] {
+        if peer == self.succ() {
+            &self.mac_keys[0]
+        } else {
+            &self.mac_keys[1]
+        }
+    }
+
+    fn poison(&mut self) -> Result<(), NodeError> {
+        self.poisoned = true;
+        let persisted = self.journal.mark_poisoned(&self.session_id);
+        self.journal_failed |= persisted.is_err();
+        let peers = [self.succ(), self.pred()];
+        send_abort(&mut self.transport, &peers);
+        persisted
+    }
+
+    fn guarded<R>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<R, NodeError>,
+    ) -> Result<R, NodeError> {
+        if self.journal_failed {
+            return Err(NodeError::Journal);
+        }
+        if self.poisoned {
+            return Err(NodeError::Poisoned);
+        }
+        let result = body(self);
+        if result.is_err() {
+            self.poison()?;
+        }
+        result
+    }
+
+    /// One wave: `Keccak-f[1600]` on every loaded state. The gates stay unverified until
+    /// [`Self::check`].
+    pub fn permute(&mut self) -> Result<(), NodeError> {
+        self.guarded(Self::permute_inner)
+    }
+
+    fn permute_inner(&mut self) -> Result<(), NodeError> {
+        if self.wave > MAX_WAVE {
+            return Err(NodeError::WaveCounterOverflow);
+        }
+        let domain = (PURPOSE_CHI_PAD << 56) | self.wave;
+        self.wave += 1;
+        let mut pad_mine = Shake256Prg256::new(&self.slot_keys[0], &self.session_id, domain);
+        let mut pad_next = Shake256Prg256::new(&self.slot_keys[1], &self.session_id, domain);
+        let n = self.states.len();
+        let (succ, pred) = (self.succ(), self.pred());
+        self.unverified = true;
+        let mut lin_mine = vec![[0u64; 25]; n];
+        let mut lin_next = vec![[0u64; 25]; n];
+        let mut pads_mine = vec![0u64; 25 * n];
+        let mut pads_next = vec![0u64; 25 * n];
+        let mut message = vec![0u64; 25 * n];
+        for (round, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
+            pad_mine.fill_words(&mut pads_mine);
+            pad_next.fill_words(&mut pads_next);
+            for (s, state) in self.states.iter().enumerate() {
+                lin_mine[s] = keccak_linear(&state.mine);
+                lin_next[s] = keccak_linear(&state.next);
+                for lane in 0..25 {
+                    let (l1, l2) = chi_operands(lane);
+                    let (am, an) = (lin_mine[s][l1], lin_next[s][l1]);
+                    let (bm, bn) = (lin_mine[s][l2], lin_next[s][l2]);
+                    let (pm, pn) = (pads_mine[25 * s + lane], pads_next[25 * s + lane]);
+                    message[25 * s + lane] = (am & (bm ^ bn)) ^ (an & bm) ^ pm ^ pn;
+                    self.record.a_mine.push(am);
+                    self.record.b_mine.push(bm);
+                    self.record.a_next.push(an);
+                    self.record.b_next.push(bn);
+                    self.record.pad_mine.push(pm);
+                    self.record.pad_next.push(pn);
+                }
+            }
+            #[cfg(test)]
+            if let Some(Cheat::FlipGate {
+                round: r,
+                lane,
+                bit,
+                ..
+            }) = self.cheat
+                && r == round
+            {
+                // The cheater keeps the wrong product share itself, so the sharing stays
+                // consistent and exactly this one gate is wrong.
+                message[lane] ^= 1 << bit;
+            }
+            self.transport.send_frame(
+                pred,
+                ROUND_GATE | round as u32,
+                &words_to_bytes(&message),
+            )?;
+            let raw = recv_from(&mut self.transport, succ, ROUND_GATE | round as u32)?;
+            let received = bytes_to_words(&raw, 25 * n).ok_or(NodeError::MalformedMessage {
+                from: succ,
+                round: ROUND_GATE | round as u32,
+            })?;
+            for (s, state) in self.states.iter_mut().enumerate() {
+                for lane in 0..25 {
+                    let (_, l2) = chi_operands(lane);
+                    state.mine[lane] = lin_mine[s][lane] ^ lin_mine[s][l2] ^ message[25 * s + lane];
+                    state.next[lane] =
+                        lin_next[s][lane] ^ lin_next[s][l2] ^ received[25 * s + lane];
+                }
+                // Iota is a public constant: it goes into share slot 0 only.
+                match self.party {
+                    0 => state.mine[0] ^= rc,
+                    2 => state.next[0] ^= rc,
+                    _ => {}
+                }
+            }
+            self.record.received.extend_from_slice(&received);
+        }
+        for buf in [&mut pads_mine, &mut pads_next, &mut message] {
+            buf.fill(0);
+            core::hint::black_box(buf.as_mut_slice());
+        }
+        lin_mine.fill([0; 25]);
+        lin_next.fill([0; 25]);
+        Ok(())
+    }
+
+    fn prg_elements(&self, key: &[u8; 32], purpose: u8, prover: usize, count: usize) -> Vec<Gf128> {
+        expand_elements(
+            TAG_DZK_PRG,
+            &[
+                key,
+                &self.session_id,
+                &[purpose, prover as u8],
+                &self.barrier.to_be_bytes(),
+            ],
+            count,
+        )
+    }
+
+    /// The verification barrier (see the module documentation). On any error the party is
+    /// poisoned for the rest of the session.
+    pub fn check(&mut self) -> Result<(), NodeError> {
+        self.guarded(Self::check_inner)
+    }
+
+    fn check_inner(&mut self) -> Result<(), NodeError> {
+        if !self.unverified {
+            return Ok(());
+        }
+        let me = self.party;
+        let (succ, pred) = (self.succ(), self.pred());
+        let peers = [succ, pred];
+        let barrier = self.barrier;
+        let sid = self.session_id;
+        let shape = DzkShape::for_gates(64 * self.record.a_mine.len());
+        let m = shape.m;
+
+        // Round 1: commitments to both coin shares.
+        let coins = [self.rng.bytes32(), self.rng.bytes32()];
+        let mut commits = [[[0u8; 32]; 2]; 3];
+        commits[me] = [
+            coin_commitment(&sid, barrier, me, 0, &coins[0]),
+            coin_commitment(&sid, barrier, me, 1, &coins[1]),
+        ];
+        let wire = commits[me].concat();
+        for peer in peers {
+            self.transport.send_frame(peer, ROUND_COIN_COMMIT, &wire)?;
+        }
+        for peer in peers {
+            let raw = recv_from(&mut self.transport, peer, ROUND_COIN_COMMIT)?;
+            if raw.len() != 64 {
+                return Err(NodeError::MalformedMessage {
+                    from: peer,
+                    round: ROUND_COIN_COMMIT,
+                });
+            }
+            commits[peer][0].copy_from_slice(&raw[..32]);
+            commits[peer][1].copy_from_slice(&raw[32..]);
+        }
+
+        // Round 2: open the weights coin and echo the commitments seen.
+        let echo = h32(
+            TAG_COIN_ECHO,
+            &[
+                &sid,
+                &barrier.to_be_bytes(),
+                commits.as_flattened().as_flattened(),
+            ],
+        );
+        for peer in peers {
+            let mac = mac32(
+                self.pair_key(peer),
+                TAG_COIN_ECHO_MAC,
+                &[&sid, &barrier.to_be_bytes(), &[me as u8, peer as u8], &echo],
+            );
+            let wire = [coins[0], echo, mac].concat();
+            self.transport
+                .send_frame(peer, ROUND_COIN_REVEAL_A, &wire)?;
+        }
+        let mut coin_a = [[0u8; 32]; 3];
+        coin_a[me] = coins[0];
+        for peer in peers {
+            let raw = recv_from(&mut self.transport, peer, ROUND_COIN_REVEAL_A)?;
+            if raw.len() != 96 {
+                return Err(NodeError::MalformedMessage {
+                    from: peer,
+                    round: ROUND_COIN_REVEAL_A,
+                });
+            }
+            coin_a[peer].copy_from_slice(&raw[..32]);
+            if coin_commitment(&sid, barrier, peer, 0, &coin_a[peer]) != commits[peer][0] {
+                return Err(NodeError::CoinOpeningRejected { party: peer });
+            }
+            let mac: [u8; 32] = core::array::from_fn(|i| raw[64 + i]);
+            if !mac32_verify(
+                self.pair_key(peer),
+                TAG_COIN_ECHO_MAC,
+                &[
+                    &sid,
+                    &barrier.to_be_bytes(),
+                    &[peer as u8, me as u8],
+                    &raw[32..64],
+                ],
+                &mac,
+            ) {
+                return Err(NodeError::MacInvalid { party: peer });
+            }
+            if raw[32..64] != echo {
+                return Err(NodeError::CoinEchoMismatch { party: peer });
+            }
+        }
+        let seed_a = h32(
+            TAG_SEED_A,
+            &[&sid, &barrier.to_be_bytes(), coin_a.as_flattened()],
+        );
+
+        // Round 3: as prover, send the successor its share of the proof polynomial.
+        let row_basis = NodeBasis::new(shape.row_nodes());
+        let h_basis = NodeBasis::new(shape.h_nodes());
+        let my_weights = derive_weights(&seed_a, me, &shape);
+        let masks_f = self.prg_elements(&self.slot_keys[0], PRG_MASK_F, me, 2 * m);
+        let masks_g = self.prg_elements(&self.slot_keys[1], PRG_MASK_G, me, 2 * m);
+        #[allow(unused_mut)]
+        let mut h = prove(
+            &shape,
+            &my_weights,
+            &row_basis,
+            &self.record.a_mine,
+            &self.record.b_mine,
+            &self.record.b_next,
+            &self.record.a_next,
+            &masks_f,
+            &masks_g,
+        );
+        #[cfg(test)]
+        if let Some(Cheat::FlipGate {
+            round,
+            lane,
+            bit,
+            patch_proof: true,
+        }) = self.cheat
+        {
+            let gate = 64 * (25 * self.states.len() * round + lane) + bit as usize;
+            let beta =
+                my_weights.gamma[gate / shape.half()].mul(my_weights.delta[gate % shape.half()]);
+            h[1] = h[1].add(beta);
+        }
+        let h_pad = self.prg_elements(&self.slot_keys[0], PRG_H_SHARE, me, shape.h_nodes());
+        let h_out: Vec<Gf128> = h.iter().zip(&h_pad).map(|(a, b)| a.add(*b)).collect();
+        self.transport
+            .send_frame(succ, ROUND_PROOF_SHARE, &encode_elements(&h_out))?;
+        let raw = recv_from(&mut self.transport, pred, ROUND_PROOF_SHARE)?;
+        let h_in = decode_elements(&raw, shape.h_nodes()).ok_or(NodeError::MalformedMessage {
+            from: pred,
+            round: ROUND_PROOF_SHARE,
+        })?;
+
+        // Round 4: open the points coin. Both proof shares this party verifies with are
+        // fixed by now: one arrived above, the other is derived from a pad key.
+        for peer in peers {
+            self.transport
+                .send_frame(peer, ROUND_COIN_REVEAL_B, &coins[1])?;
+        }
+        let mut coin_b = [[0u8; 32]; 3];
+        coin_b[me] = coins[1];
+        for peer in peers {
+            let raw = recv_from(&mut self.transport, peer, ROUND_COIN_REVEAL_B)?;
+            if raw.len() != 32 {
+                return Err(NodeError::MalformedMessage {
+                    from: peer,
+                    round: ROUND_COIN_REVEAL_B,
+                });
+            }
+            coin_b[peer].copy_from_slice(&raw);
+            if coin_commitment(&sid, barrier, peer, 1, &coin_b[peer]) != commits[peer][1] {
+                return Err(NodeError::CoinOpeningRejected { party: peer });
+            }
+        }
+        let seed_b = h32(
+            TAG_SEED_B,
+            &[&sid, &barrier.to_be_bytes(), &seed_a, coin_b.as_flattened()],
+        );
+
+        // Round 5a: verifier of the successor's gates on the x side. This party's `next`
+        // share slot is the successor's `mine` slot, and it received the gate messages.
+        let w_succ = derive_weights(&seed_a, succ, &shape);
+        let pts_succ = challenge_points(&seed_b, succ, &shape).ok_or(NodeError::BadChallenge)?;
+        let claim_words: Vec<u64> = (0..self.record.received.len())
+            .map(|i| {
+                self.record.received[i]
+                    ^ (self.record.a_next[i] & self.record.b_next[i])
+                    ^ self.record.pad_next[i]
+            })
+            .collect();
+        let masks_f_succ = self.prg_elements(&self.slot_keys[1], PRG_MASK_F, succ, 2 * m);
+        let h_x = self.prg_elements(&self.slot_keys[1], PRG_H_SHARE, succ, shape.h_nodes());
+        let sigma_x = data_node_sum(&shape, &h_x).add(weighted_sum(&shape, &w_succ, &claim_words));
+        let mut out_x = vec![sigma_x];
+        let mut f_at = Vec::with_capacity(2);
+        let mut h_x_at = Vec::with_capacity(2);
+        for r in pts_succ {
+            h_x_at.push(dot(&h_basis.coeffs_at(r), &h_x));
+            f_at.push(x_evals(
+                &shape,
+                &w_succ,
+                &self.record.a_next,
+                &self.record.b_next,
+                &masks_f_succ,
+                &row_basis.coeffs_at(r),
+            ));
+        }
+        out_x.extend_from_slice(&h_x_at);
+        out_x.extend(f_at.iter().flatten());
+
+        // Round 5b: verifier of the predecessor's gates on the y side. This party's `mine`
+        // share slot is the predecessor's `next` slot.
+        let w_pred = derive_weights(&seed_a, pred, &shape);
+        let pts_pred = challenge_points(&seed_b, pred, &shape).ok_or(NodeError::BadChallenge)?;
+        let masks_g_pred = self.prg_elements(&self.slot_keys[0], PRG_MASK_G, pred, 2 * m);
+        let sigma_y =
+            data_node_sum(&shape, &h_in).add(weighted_sum(&shape, &w_pred, &self.record.pad_mine));
+        let mut out_y = vec![sigma_y];
+        let mut g_at = Vec::with_capacity(2);
+        let mut h_y_at = Vec::with_capacity(2);
+        for r in pts_pred {
+            h_y_at.push(dot(&h_basis.coeffs_at(r), &h_in));
+            g_at.push(y_evals(
+                &shape,
+                &self.record.b_mine,
+                &self.record.a_mine,
+                &masks_g_pred,
+                &row_basis.coeffs_at(r),
+            ));
+        }
+        out_y.extend_from_slice(&h_y_at);
+        out_y.extend(g_at.iter().flatten());
+
+        // The other verifier of the successor's gates is the predecessor, and vice versa.
+        self.transport
+            .send_frame(pred, ROUND_VERIFIER, &encode_elements(&out_x))?;
+        self.transport
+            .send_frame(succ, ROUND_VERIFIER, &encode_elements(&out_y))?;
+        let width = 3 + 2 * m;
+        let raw = recv_from(&mut self.transport, pred, ROUND_VERIFIER)?;
+        let in_y = decode_elements(&raw, width).ok_or(NodeError::MalformedMessage {
+            from: pred,
+            round: ROUND_VERIFIER,
+        })?;
+        let raw = recv_from(&mut self.transport, succ, ROUND_VERIFIER)?;
+        let in_x = decode_elements(&raw, width).ok_or(NodeError::MalformedMessage {
+            from: succ,
+            round: ROUND_VERIFIER,
+        })?;
+
+        // Successor's proof: own x side, predecessor's y side.
+        if sigma_x.add(in_y[0]) != Gf128::ZERO {
+            return Err(NodeError::MultiplicationCheckFailed {
+                prover: succ,
+                stage: DzkStage::SumCheck,
+            });
+        }
+        for k in 0..2 {
+            let g = &in_y[3 + k * m..3 + (k + 1) * m];
+            if row_product_sum(&w_succ, &f_at[k], g) != h_x_at[k].add(in_y[1 + k]) {
+                return Err(NodeError::MultiplicationCheckFailed {
+                    prover: succ,
+                    stage: DzkStage::PointCheck,
+                });
+            }
+        }
+        // Predecessor's proof: successor's x side, own y side.
+        if sigma_y.add(in_x[0]) != Gf128::ZERO {
+            return Err(NodeError::MultiplicationCheckFailed {
+                prover: pred,
+                stage: DzkStage::SumCheck,
+            });
+        }
+        for k in 0..2 {
+            let f = &in_x[3 + k * m..3 + (k + 1) * m];
+            if row_product_sum(&w_pred, f, &g_at[k]) != h_y_at[k].add(in_x[1 + k]) {
+                return Err(NodeError::MultiplicationCheckFailed {
+                    prover: pred,
+                    stage: DzkStage::PointCheck,
+                });
+            }
+        }
+
+        // Round 6: verdicts.
+        for peer in peers {
+            let verdict = mac32(
+                self.pair_key(peer),
+                TAG_VERDICT,
+                &[
+                    &sid,
+                    &barrier.to_be_bytes(),
+                    &seed_a,
+                    &seed_b,
+                    &[me as u8, peer as u8],
+                ],
+            );
+            self.transport.send_frame(peer, ROUND_VERDICT, &verdict)?;
+        }
+        for peer in peers {
+            let raw = recv_from(&mut self.transport, peer, ROUND_VERDICT)?;
+            let tag: [u8; 32] =
+                raw.as_slice()
+                    .try_into()
+                    .map_err(|_| NodeError::MalformedMessage {
+                        from: peer,
+                        round: ROUND_VERDICT,
+                    })?;
+            if !mac32_verify(
+                self.pair_key(peer),
+                TAG_VERDICT,
+                &[
+                    &sid,
+                    &barrier.to_be_bytes(),
+                    &seed_a,
+                    &seed_b,
+                    &[peer as u8, me as u8],
+                ],
+                &tag,
+            ) {
+                return Err(NodeError::MacInvalid { party: peer });
+            }
+        }
+
+        self.record.wipe();
+        self.barrier += 1;
+        self.unverified = false;
+        Ok(())
+    }
+
+    /// Open the first `words` lanes of every state (4 lanes are a 32-byte digest). Refused
+    /// while the party is poisoned or unverified gates exist. The missing share slot
+    /// arrives from both of its holders and the two copies must agree.
+    pub fn open_prefix(&mut self, words: usize) -> Result<Vec<Vec<u64>>, NodeError> {
+        if self.journal_failed {
+            return Err(NodeError::Journal);
+        }
+        if self.poisoned {
+            return Err(NodeError::Poisoned);
+        }
+        if self.unverified {
+            return Err(NodeError::OpenBeforeCheck);
+        }
+        if words == 0 || words > 25 {
+            return Err(NodeError::InvalidParameters);
+        }
+        self.guarded(|party| party.open_inner(words))
+    }
+
+    fn open_inner(&mut self, words: usize) -> Result<Vec<Vec<u64>>, NodeError> {
+        let (succ, pred) = (self.succ(), self.pred());
+        let mine: Vec<u64> = self
+            .states
+            .iter()
+            .flat_map(|s| s.mine[..words].to_vec())
+            .collect();
+        let next: Vec<u64> = self
+            .states
+            .iter()
+            .flat_map(|s| s.next[..words].to_vec())
+            .collect();
+        // The successor lacks this party's `mine` slot; the predecessor lacks its `next`.
+        self.transport
+            .send_frame(succ, ROUND_OPEN, &words_to_bytes(&mine))?;
+        self.transport
+            .send_frame(pred, ROUND_OPEN, &words_to_bytes(&next))?;
+        let count = words * self.states.len();
+        let from_pred = recv_from(&mut self.transport, pred, ROUND_OPEN)?;
+        let from_succ = recv_from(&mut self.transport, succ, ROUND_OPEN)?;
+        let third = bytes_to_words(&from_pred, count).ok_or(NodeError::MalformedMessage {
+            from: pred,
+            round: ROUND_OPEN,
+        })?;
+        if from_pred != from_succ {
+            return Err(NodeError::OpenShareMismatch);
+        }
+        Ok((0..self.states.len())
+            .map(|s| {
+                (0..words)
+                    .map(|w| mine[s * words + w] ^ next[s * words + w] ^ third[s * words + w])
+                    .collect()
+            })
+            .collect())
+    }
+}
+
+impl Drop for GateRecord {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+impl core::fmt::Debug for SharePair {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("SharePair([REDACTED])")
+    }
+}
+impl Drop for SharePair {
+    fn drop(&mut self) {
+        self.mine.fill(0);
+        self.next.fill(0);
+        core::hint::black_box(&mut self.mine);
+        core::hint::black_box(&mut self.next);
+    }
+}
+impl core::fmt::Debug for Rss256PartyKeys {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Rss256PartyKeys([REDACTED])")
+    }
+}
+impl Drop for Rss256PartyKeys {
+    fn drop(&mut self) {
+        for key in self
+            .slot_keys
+            .iter_mut()
+            .chain(&mut self.mac_keys)
+            .chain(core::iter::once(&mut self.rng_seed))
+        {
+            key.fill(0);
+            core::hint::black_box(key);
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+pub use crate::poison_journal::{FsDurablePoisonAndSessionJournal, JournalOpenMode};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quorum_jorts::{
+        BftShamirJorts, QuorumConfig, StagedShamirKeys, quorum_jorts_verify, stage_bft_shamir,
+        stage_committee_partitioned,
+    };
+    use crate::wire_channel::{FRAME_HEADER_BYTES, InMemoryEndpoint, InMemoryWireMesh, MeshStats};
+    use qsag_core::belt_latch::{BeltLatchError, MemoryWal};
+    use std::sync::Arc;
+
+    const SEED: [u8; 32] = [0x21; 32];
+    const SESSION: [u8; 32] = [0x99; 32];
+
+    /// What a party thread hands back to be dropped only after every thread has been
+    /// joined: its node or endpoint. A thread that returned early would otherwise close its
+    /// links, and a peer's next send to it would fail before that peer reaches the check
+    /// under test.
+    type Keep<'a> = Box<dyn Send + 'a>;
+    type PartyFn<'a, R> = Box<dyn FnOnce() -> (R, Keep<'a>) + Send + 'a>;
+
+    /// Run one closure per party on its own OS thread and collect the results in order.
+    fn run_parties<'a, R: Send>(parties: Vec<PartyFn<'a, R>>) -> Vec<R> {
+        let finished: Vec<(R, Keep<'a>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = parties.into_iter().map(|f| scope.spawn(f)).collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("party thread"))
+                .collect()
+        });
+        finished.into_iter().map(|(result, _keep)| result).collect()
+    }
+
+    type Tamper = Box<dyn FnMut(usize, u32, &mut Vec<u8>) + Send>;
+
+    /// A transport whose owner rewrites its own outgoing payloads: the wire as a corrupted
+    /// party controls it.
+    struct TamperTransport {
+        inner: InMemoryEndpoint,
+        tamper: Tamper,
+    }
+
+    impl WireTransport for TamperTransport {
+        fn party(&self) -> usize {
+            self.inner.party()
+        }
+
+        fn parties(&self) -> usize {
+            self.inner.parties()
+        }
+
+        fn send_frame(
+            &mut self,
+            to: usize,
+            tag: u32,
+            payload: &[u8],
+        ) -> Result<(), TransportError> {
+            let mut payload = payload.to_vec();
+            (self.tamper)(to, tag, &mut payload);
+            self.inner.send_frame(to, tag, &payload)
+        }
+
+        fn recv_frame(&mut self, from: usize, tag: u32) -> Result<Vec<u8>, TransportError> {
+            self.inner.recv_frame(from, tag)
+        }
+    }
+
+    fn honest(endpoint: InMemoryEndpoint) -> TamperTransport {
+        TamperTransport {
+            inner: endpoint,
+            tamper: Box::new(|_, _, _| {}),
+        }
+    }
+
+    fn reference_permutation(state: &[u64; 25]) -> [u64; 25] {
+        let mut batch = [*state];
+        qsag_asm::keccak_f1600_batch(&mut batch);
+        batch[0]
+    }
+
+    #[test]
+    fn linear_layer_and_chi_compose_to_keccak_f1600() {
+        let mut state: [u64; 25] =
+            core::array::from_fn(|i| 0x0123_4567_89AB_CDEF ^ ((i as u64) << 7));
+        let want = reference_permutation(&state);
+        for rc in KECCAK_ROUND_CONSTANTS {
+            let b = keccak_linear(&state);
+            for lane in 0..25 {
+                let (l1, l2) = chi_operands(lane);
+                state[lane] = b[lane] ^ b[l2] ^ (b[l1] & b[l2]);
+            }
+            state[0] ^= rc;
+        }
+        assert_eq!(state, want);
+    }
+
+    #[test]
+    fn dealt_material_is_split_as_documented() {
+        let keys = deal_rss256_keys(&SEED);
+        for p in 0..3 {
+            let q = (p + 1) % 3;
+            // Slot key p + 1 is held by parties p and p + 1, and by nobody else.
+            assert_eq!(keys[p].slot_keys[1], keys[q].slot_keys[0]);
+            assert_ne!(keys[p].slot_keys[0], keys[q].slot_keys[1]);
+            // The MAC key of the pair {p, p + 1}.
+            assert_eq!(keys[p].mac_keys[0], keys[q].mac_keys[1]);
+            assert_ne!(keys[p].rng_seed, keys[q].rng_seed);
+        }
+        let secret: [u64; 25] = core::array::from_fn(|i| i as u64 * 0x9E37_79B9_7F4A_7C15);
+        let mut rng = SeedRng::new(&SEED, b"deal");
+        let shares = deal_keccak_shares(&secret, &mut rng);
+        for p in 0..3 {
+            assert_eq!(shares[p].next, shares[(p + 1) % 3].mine);
+            // Two parties' pairs cover all three slots; one pair does not determine the state.
+            let rebuilt: [u64; 25] = core::array::from_fn(|i| {
+                shares[p].mine[i] ^ shares[p].next[i] ^ shares[(p + 2) % 3].mine[i]
+            });
+            assert_eq!(rebuilt, secret);
+            assert_ne!(
+                core::array::from_fn::<u64, 25, _>(|i| shares[p].mine[i] ^ shares[p].next[i]),
+                secret
+            );
+        }
+    }
+
+    type RssParty = IsolatedRss256Party<TamperTransport, MemoryPoisonJournal>;
+    /// Opened lanes of every state.
+    type Opened = Vec<Vec<u64>>;
+
+    /// Three parties of one session, each with its own keys, shares of `secrets`, journal
+    /// and endpoint. `tamper` wraps the endpoint of party 2.
+    fn rss_parties(secrets: &[[u64; 25]], tamper: Tamper) -> (Vec<RssParty>, Arc<MeshStats>) {
+        let (endpoints, stats) = InMemoryWireMesh::connect(3, SESSION);
+        let keys = deal_rss256_keys(&SEED);
+        let mut rng = SeedRng::new(&SEED, b"shares");
+        let shares: Vec<[SharePair; 3]> = secrets
+            .iter()
+            .map(|s| deal_keccak_shares(s, &mut rng))
+            .collect();
+        let mut tamper = Some(tamper);
+        let parties = endpoints
+            .into_iter()
+            .zip(keys)
+            .map(|(endpoint, keys)| {
+                let p = keys.party;
+                let transport = if p == 2 {
+                    TamperTransport {
+                        inner: endpoint,
+                        tamper: tamper.take().expect("one tamper"),
+                    }
+                } else {
+                    honest(endpoint)
+                };
+                let mut party =
+                    IsolatedRss256Party::new(SESSION, keys, transport, MemoryPoisonJournal::new())
+                        .unwrap();
+                for share in &shares {
+                    party.load_shares(share[p].clone());
+                }
+                party
+            })
+            .collect();
+        (parties, stats)
+    }
+
+    fn secrets(n: usize) -> Vec<[u64; 25]> {
+        (0..n)
+            .map(|s| core::array::from_fn(|i| ((s as u64 + 1) << 40) ^ (i as u64 * 0x1F3D_5B79)))
+            .collect()
+    }
+
+    /// What one party thread reports after a run.
+    struct RssOutcome {
+        permute: Result<(), NodeError>,
+        check: Result<(), NodeError>,
+        recheck: Result<(), NodeError>,
+        open: Result<Vec<Vec<u64>>, NodeError>,
+        poisoned: bool,
+    }
+
+    /// The standard party program: one wave, the barrier, a second call of the barrier, and
+    /// an opening of the whole state.
+    fn rss_program(party: &mut RssParty) -> RssOutcome {
+        let permute = party.permute();
+        let check = party.check();
+        let recheck = party.check();
+        let open = party.open_prefix(25);
+        RssOutcome {
+            permute,
+            check,
+            recheck,
+            open,
+            poisoned: party.is_poisoned(),
+        }
+    }
+
+    fn run_rss(parties: Vec<RssParty>) -> Vec<RssOutcome> {
+        run_parties(
+            parties
+                .into_iter()
+                .map(|mut party| {
+                    Box::new(move || {
+                        let outcome = rss_program(&mut party);
+                        (outcome, Box::new(party) as Keep)
+                    }) as PartyFn<RssOutcome>
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn three_threads_evaluate_keccak_and_open_the_reference_output() {
+        let secrets = secrets(2);
+        let (parties, stats) = rss_parties(&secrets, Box::new(|_, _, _| {}));
+        let outcomes: Vec<(Opened, Opened)> = run_parties(
+            parties
+                .into_iter()
+                .map(|mut party| {
+                    Box::new(move || {
+                        party.permute().unwrap();
+                        assert!(party.has_unverified_gates());
+                        // Not poisoned, but nothing opens before the barrier.
+                        assert_eq!(party.open_prefix(4), Err(NodeError::OpenBeforeCheck));
+                        assert!(!party.is_poisoned());
+                        party.check().unwrap();
+                        assert_eq!(party.barriers(), 1);
+                        let first = party.open_prefix(25).unwrap();
+                        // A second wave on the same states and a second barrier.
+                        party.permute().unwrap();
+                        party.check().unwrap();
+                        assert_eq!(party.barriers(), 2);
+                        let second = party.open_prefix(4).unwrap();
+                        ((first, second), Box::new(party) as Keep)
+                    }) as PartyFn<(Opened, Opened)>
+                })
+                .collect(),
+        );
+        let once: Vec<[u64; 25]> = secrets.iter().map(reference_permutation).collect();
+        let twice: Vec<[u64; 25]> = once.iter().map(reference_permutation).collect();
+        for (first, second) in &outcomes {
+            let want_first: Vec<Vec<u64>> = once.iter().map(|s| s.to_vec()).collect();
+            let want_second: Vec<Vec<u64>> = twice.iter().map(|s| s[..4].to_vec()).collect();
+            assert_eq!(first, &want_first);
+            assert_eq!(second, &want_second);
+        }
+        // Gate traffic: 24 rounds, 200 bytes per state, per party and wave.
+        let gate_frames = stats.frames_sent_by(0, |tag| tag & 0xFF00_0000 == ROUND_GATE);
+        assert_eq!(gate_frames, 48);
+        let gate_bytes: usize = stats
+            .frames()
+            .iter()
+            .filter(|f| f.from == 0 && f.round_tag & 0xFF00_0000 == ROUND_GATE)
+            .map(|f| f.wire_bytes - FRAME_HEADER_BYTES)
+            .sum();
+        assert_eq!(gate_bytes, 2 * 24 * 2 * 200);
+    }
+
+    /// Thread 2 flips one byte of a gate message on the wire. Both honest threads reject
+    /// its gates at the barrier, stay poisoned, and refuse to open, also after calling the
+    /// barrier again.
+    #[test]
+    fn corrupted_gate_byte_poisons_both_honest_threads() {
+        let secrets = secrets(1);
+        let tamper: Tamper = Box::new(|_, tag, payload| {
+            if tag == ROUND_GATE | 11 {
+                payload[77] ^= 0x04;
+            }
+        });
+        let (parties, stats) = rss_parties(&secrets, tamper);
+        let outcomes = run_rss(parties);
+        // Thread 1 received the flipped byte and is a verifier of thread 2's gates.
+        assert_eq!(
+            outcomes[1].check,
+            Err(NodeError::MultiplicationCheckFailed {
+                prover: 2,
+                stage: DzkStage::SumCheck
+            })
+        );
+        // Thread 0 checks thread 1's proof first. Thread 1 is honest and its node sum
+        // matches, but the other verifier of that proof is thread 2, whose copy of the
+        // share diverged from thread 1's at the flipped byte: the evaluations disagree.
+        // The rejection names the proof that failed, not the party that deviated.
+        assert_eq!(
+            outcomes[0].check,
+            Err(NodeError::MultiplicationCheckFailed {
+                prover: 1,
+                stage: DzkStage::PointCheck
+            })
+        );
+        for (p, outcome) in outcomes.iter().enumerate().take(2) {
+            assert_eq!(outcome.permute, Ok(()), "party {p}");
+            assert!(outcome.poisoned);
+            assert_eq!(outcome.recheck, Err(NodeError::Poisoned));
+            assert_eq!(outcome.open, Err(NodeError::Poisoned));
+            assert_eq!(stats.frames_sent_by(p, |tag| tag == ROUND_OPEN), 0);
+        }
+        // The corrupted thread learns nothing either: nobody opened to it.
+        assert!(outcomes[2].open.is_err());
+    }
+
+    /// Thread 2 flips a gate bit and, once the weights are public, patches its proof so
+    /// that the node sum matches. The evaluation points catch it.
+    #[test]
+    fn patched_proof_is_caught_at_the_evaluation_points() {
+        let secrets = secrets(1);
+        let (mut parties, stats) = rss_parties(&secrets, Box::new(|_, _, _| {}));
+        parties[2].set_cheat(Cheat::FlipGate {
+            round: 3,
+            lane: 13,
+            bit: 41,
+            patch_proof: true,
+        });
+        let outcomes = run_rss(parties);
+        for (p, outcome) in outcomes.iter().enumerate().take(2) {
+            assert_eq!(
+                outcome.check,
+                Err(NodeError::MultiplicationCheckFailed {
+                    prover: 2,
+                    stage: DzkStage::PointCheck
+                }),
+                "party {p}"
+            );
+            assert!(outcome.poisoned);
+            assert_eq!(outcome.recheck, Err(NodeError::Poisoned));
+            assert_eq!(outcome.open, Err(NodeError::Poisoned));
+            assert_eq!(stats.frames_sent_by(p, |tag| tag == ROUND_OPEN), 0);
+        }
+    }
+
+    /// The same flipped bit without the patch fails the node sum (control for the test
+    /// above: the patch is what moved the failure to the points).
+    #[test]
+    fn unpatched_gate_flip_fails_the_node_sum() {
+        let secrets = secrets(1);
+        let (mut parties, _) = rss_parties(&secrets, Box::new(|_, _, _| {}));
+        parties[2].set_cheat(Cheat::FlipGate {
+            round: 3,
+            lane: 13,
+            bit: 41,
+            patch_proof: false,
+        });
+        let outcomes = run_rss(parties);
+        for outcome in &outcomes[..2] {
+            assert_eq!(
+                outcome.check,
+                Err(NodeError::MultiplicationCheckFailed {
+                    prover: 2,
+                    stage: DzkStage::SumCheck
+                })
+            );
+        }
+    }
+
+    /// Thread 2 opens a coin share that is not the one it committed to.
+    #[test]
+    fn bad_coin_reveal_poisons_before_any_opening() {
+        for round in [ROUND_COIN_REVEAL_A, ROUND_COIN_REVEAL_B] {
+            let secrets = secrets(1);
+            let tamper: Tamper = Box::new(move |_, tag, payload| {
+                if tag == round {
+                    payload[0] ^= 1;
+                }
+            });
+            let (parties, stats) = rss_parties(&secrets, tamper);
+            let outcomes = run_rss(parties);
+            for (p, outcome) in outcomes.iter().enumerate().take(2) {
+                assert_eq!(
+                    outcome.check,
+                    Err(NodeError::CoinOpeningRejected { party: 2 }),
+                    "party {p}, round {round:#x}"
+                );
+                assert!(outcome.poisoned);
+                assert_eq!(outcome.recheck, Err(NodeError::Poisoned));
+                assert_eq!(outcome.open, Err(NodeError::Poisoned));
+                assert_eq!(stats.frames_sent_by(p, |tag| tag == ROUND_OPEN), 0);
+            }
+        }
+    }
+
+    /// Thread 2 equivocates on the coin: it commits to one share towards thread 0 and to
+    /// another towards thread 1, and opens each consistently. Every opening matches its
+    /// commitment; the echo of the commitments is what differs between the honest threads.
+    #[test]
+    fn coin_equivocation_is_caught_by_the_commitment_echo() {
+        let secrets = secrets(1);
+        let other_coin = [0xC0u8; 32];
+        let tamper: Tamper = Box::new(move |to, tag, payload| {
+            if to != 0 {
+                return;
+            }
+            if tag == ROUND_COIN_COMMIT {
+                let forged = coin_commitment(&SESSION, 0, 2, 0, &other_coin);
+                payload[..32].copy_from_slice(&forged);
+            } else if tag == ROUND_COIN_REVEAL_A {
+                payload[..32].copy_from_slice(&other_coin);
+            }
+        });
+        let (parties, stats) = rss_parties(&secrets, tamper);
+        let outcomes = run_rss(parties);
+        assert_eq!(
+            outcomes[0].check,
+            Err(NodeError::CoinEchoMismatch { party: 1 })
+        );
+        assert_eq!(
+            outcomes[1].check,
+            Err(NodeError::CoinEchoMismatch { party: 0 })
+        );
+        for (p, outcome) in outcomes.iter().enumerate().take(2) {
+            assert!(outcome.poisoned);
+            assert_eq!(outcome.open, Err(NodeError::Poisoned));
+            assert_eq!(stats.frames_sent_by(p, |tag| tag == ROUND_OPEN), 0);
+            // Neither honest thread got as far as sending its proof share.
+            assert_eq!(stats.frames_sent_by(p, |tag| tag == ROUND_PROOF_SHARE), 0);
+        }
+    }
+
+    /// Thread 2 passes the barrier honestly and then sends thread 0 a wrong copy of the
+    /// share slot it opens. Thread 0 compares it with thread 1's copy and refuses.
+    #[test]
+    fn mismatching_opened_share_is_refused() {
+        let secrets = secrets(1);
+        let tamper: Tamper = Box::new(|to, tag, payload| {
+            if tag == ROUND_OPEN && to == 0 {
+                payload[3] ^= 0x80;
+            }
+        });
+        let (parties, _) = rss_parties(&secrets, tamper);
+        let outcomes = run_rss(parties);
+        assert_eq!(outcomes[0].check, Ok(()));
+        assert_eq!(outcomes[0].open, Err(NodeError::OpenShareMismatch));
+        assert!(outcomes[0].poisoned);
+        // Thread 1 received honest copies and opens the right value.
+        let want = reference_permutation(&secrets[0]);
+        assert_eq!(outcomes[1].open, Ok(vec![want.to_vec()]));
+    }
+
+    #[test]
+    fn failed_poison_write_is_sticky_and_reported() {
+        let (mut endpoints, _) = InMemoryWireMesh::connect(3, SESSION);
+        let mut journal = MemoryPoisonJournal::new();
+        journal.fail_next_write();
+        let mut party = IsolatedRss256Party::new(
+            SESSION,
+            deal_rss256_keys(&SEED)[0].clone(),
+            endpoints.remove(0),
+            journal,
+        )
+        .unwrap();
+        let result: Result<(), NodeError> = party.guarded(|_| Err(NodeError::BadChallenge));
+        assert_eq!(result, Err(NodeError::Journal));
+        assert!(party.is_poisoned());
+        assert_eq!(party.check(), Err(NodeError::Journal));
+        assert_eq!(party.open_prefix(4), Err(NodeError::Journal));
+    }
+
+    #[test]
+    fn share_debug_and_gate_wipe() {
+        let share = SharePair {
+            mine: [123; 25],
+            next: [456; 25],
+        };
+        assert_eq!(std::format!("{share:?}"), "SharePair([REDACTED])");
+        let mut record = GateRecord::default();
+        record.a_mine.resize(4, u64::MAX);
+        record.wipe();
+        assert!(record.a_mine.is_empty());
+    }
+
+    #[test]
+    fn poison_survives_a_restart_with_the_same_journal() {
+        let (mut endpoints, _) = InMemoryWireMesh::connect(3, SESSION);
+        let keys = deal_rss256_keys(&SEED);
+        let mut journal = MemoryPoisonJournal::new();
+        journal.mark_poisoned(&SESSION).unwrap();
+        let mut party =
+            IsolatedRss256Party::new(SESSION, keys[0].clone(), endpoints.remove(0), journal)
+                .unwrap();
+        assert!(party.is_poisoned());
+        assert_eq!(party.permute(), Err(NodeError::Poisoned));
+        assert_eq!(party.check(), Err(NodeError::Poisoned));
+        assert_eq!(party.open_prefix(4), Err(NodeError::Poisoned));
+        // Another session with the same journal is clean; wrong wiring is refused.
+        let (mut endpoints, _) = InMemoryWireMesh::connect(3, [1; 32]);
+        let mut journal = MemoryPoisonJournal::new();
+        journal.mark_poisoned(&SESSION).unwrap();
+        let party =
+            IsolatedRss256Party::new([1; 32], keys[1].clone(), endpoints.remove(1), journal)
+                .unwrap();
+        assert!(!party.is_poisoned());
+        assert!(
+            IsolatedRss256Party::new(
+                [1; 32],
+                keys[2].clone(),
+                endpoints.remove(0),
+                MemoryPoisonJournal::new()
+            )
+            .is_err()
+        );
+    }
+
+    // ---- Mode QS-A over threads ------------------------------------------------------------
+
+    type JortsNode = IsolatedJortsParty<InMemoryEndpoint, MemoryWal>;
+
+    /// Nodes for the members of committee `members` of a staged `(3, 5)` key, on a
+    /// five-party mesh.
+    fn jorts_nodes(members: &[usize]) -> (Vec<JortsNode>, usize, Arc<MeshStats>) {
+        let staged = stage_committee_partitioned(3, 5, 6, &SEED).unwrap();
+        let committee = staged.layout.committee_index(members).unwrap();
+        let (endpoints, stats) = InMemoryWireMesh::connect(5, SESSION);
+        let mut nodes = Vec::new();
+        for (endpoint, material) in endpoints.into_iter().zip(staged.parties) {
+            if !members.contains(&material.party) {
+                continue;
+            }
+            let wals = vec![MemoryWal::new(); material.stores.len()];
+            let custodian =
+                CommitteeCustodian::new(staged.layout.clone(), staged.tree.clone(), material, wals)
+                    .unwrap();
+            nodes.push(IsolatedJortsParty::new(custodian, endpoint).unwrap());
+        }
+        (nodes, committee, stats)
+    }
+
+    #[test]
+    fn three_threads_sign_as_a_committee() {
+        let members = [0usize, 2, 4];
+        let (nodes, committee, stats) = jorts_nodes(&members);
+        let pk = *nodes[0].custodian().tree().public_key();
+        let results = run_parties(
+            nodes
+                .into_iter()
+                .map(|mut node| {
+                    Box::new(move || {
+                        let result = node.sign(committee, 0, b"threaded");
+                        (result, Box::new(node) as Keep)
+                    }) as PartyFn<Result<QuorumJortsSig, NodeError>>
+                })
+                .collect(),
+        );
+        let sig = results[0].clone().unwrap();
+        assert!(quorum_jorts_verify(&pk, b"threaded", &sig));
+        assert!(results.iter().all(|r| r.as_ref() == Ok(&sig)));
+        // One echo and one opening per ordered pair of members.
+        assert_eq!(stats.total_frames(), 12);
+        assert_eq!(
+            stats.total_bytes() as usize,
+            6 * (FRAME_HEADER_BYTES + ECHO_WIRE_BYTES)
+                + 6 * (FRAME_HEADER_BYTES + SHARE_OPENING_WIRE_BYTES)
+        );
+    }
+
+    #[test]
+    fn committee_signing_composes_with_encrypted_tcp() {
+        use crate::wire_channel::{MacSealedWireChannel, TcpWireMesh};
+        let staged = stage_committee_partitioned(2, 2, 2, &SEED).unwrap();
+        let pk = *staged.tree.public_key();
+        let (endpoints, _) = TcpWireMesh::loopback(2, SESSION).unwrap();
+        let nodes: Vec<_> = endpoints.into_iter().zip(staged.parties)
+            .map(|(endpoint, material)| {
+                let wals = vec![MemoryWal::new(); material.stores.len()];
+                let custodian = CommitteeCustodian::new(
+                    staged.layout.clone(), staged.tree.clone(), material, wals,
+                ).unwrap();
+                let wire = MacSealedWireChannel::new_encrypted(
+                    endpoint, SESSION, vec![[0xA7; 32]; 2],
+                ).unwrap();
+                IsolatedJortsParty::new(custodian, wire).unwrap()
+            }).collect();
+        let signatures = std::thread::scope(|scope| {
+            let handles: Vec<_> = nodes.into_iter().map(|mut node| {
+                scope.spawn(move || node.sign(0, 0, b"encrypted custody"))
+            }).collect();
+            handles.into_iter().map(|h| h.join().unwrap().unwrap()).collect::<Vec<_>>()
+        });
+        assert_eq!(signatures[0], signatures[1]);
+        assert!(quorum_jorts_verify(&pk, b"encrypted custody", &signatures[0]));
+    }
+
+    /// Split view: corrupted thread 2 has thread 0 sign `M1` and thread 1 sign `M2` at the
+    /// same epoch, and sends each of them a correctly authenticated echo of what that
+    /// thread expects. The honest threads compare echoes with each other and stop before
+    /// any share is sent.
+    #[test]
+    fn split_view_echoes_are_caught_before_any_share_leaves() {
+        let members = [0usize, 1, 2];
+        let (mut nodes, committee, stats) = jorts_nodes(&members);
+        let corrupt = nodes.pop().unwrap();
+        let (_, mut wire) = corrupt.into_parts();
+        // The corrupted custodian's material, twice: nothing stops it from binding both.
+        let rogue = |msg: &[u8]| {
+            let mut staged = stage_committee_partitioned(3, 5, 6, &SEED).unwrap();
+            let material = staged.parties.remove(2);
+            let wals = vec![MemoryWal::new(); material.stores.len()];
+            let mut custodian =
+                CommitteeCustodian::new(staged.layout.clone(), staged.tree.clone(), material, wals)
+                    .unwrap();
+            custodian.bind(committee, 0, msg).unwrap();
+            custodian
+        };
+        let (rogue1, rogue2) = (rogue(b"M1"), rogue(b"M2"));
+        let mut node1 = nodes.pop().unwrap();
+        let mut node0 = nodes.pop().unwrap();
+        let results = run_parties(vec![
+            Box::new(move || {
+                let result = node0.sign(committee, 0, b"M1").map(|_| Vec::new());
+                (result, Box::new(node0) as Keep)
+            }) as PartyFn<Result<Vec<u8>, NodeError>>,
+            Box::new(move || {
+                let result = node1.sign(committee, 0, b"M2").map(|_| Vec::new());
+                (result, Box::new(node1) as Keep)
+            }),
+            Box::new(move || {
+                let echo0 = rogue1.echo_for(committee, 0).unwrap();
+                let echo1 = rogue2.echo_for(committee, 1).unwrap();
+                wire.send_frame(0, ROUND_ECHO, &encode_echo(&echo0))
+                    .unwrap();
+                wire.send_frame(1, ROUND_ECHO, &encode_echo(&echo1))
+                    .unwrap();
+                // Collect whatever the honest threads send after their echoes.
+                let mut harvested = Vec::new();
+                for peer in [0usize, 1] {
+                    wire.recv_frame(peer, ROUND_ECHO).unwrap();
+                    if let Ok(share) = wire.recv_frame(peer, ROUND_SHARE) {
+                        harvested.extend(share);
+                    }
+                }
+                (Ok(harvested), Box::new(wire) as Keep)
+            }),
+        ]);
+        assert_eq!(
+            results[0],
+            Err(NodeError::Quorum(QuorumError::SplitView { party: 1 }))
+        );
+        assert_eq!(
+            results[1],
+            Err(NodeError::Quorum(QuorumError::SplitView { party: 0 }))
+        );
+        assert_eq!(results[2], Ok(Vec::new()), "no share reached thread 2");
+        for p in [0usize, 1] {
+            assert_eq!(stats.frames_sent_by(p, |tag| tag == ROUND_SHARE), 0);
+            assert_eq!(stats.frames_sent_by(p, |tag| tag == ROUND_ECHO), 2);
+        }
+    }
+
+    /// A spoofed echo: thread 2 tells thread 0 that it bound thread 0's record, without a
+    /// valid MAC (it replays the tag it made for thread 1).
+    #[test]
+    fn echo_with_a_wrong_mac_is_rejected_before_any_share_leaves() {
+        let members = [0usize, 1, 2];
+        let (mut nodes, committee, stats) = jorts_nodes(&members);
+        let (mut rogue, mut wire) = nodes.pop().unwrap().into_parts();
+        rogue.bind(committee, 0, b"M").unwrap();
+        let mut node1 = nodes.pop().unwrap();
+        let mut node0 = nodes.pop().unwrap();
+        let results = run_parties(vec![
+            Box::new(move || {
+                let result = node0.sign(committee, 0, b"M").map(|_| ());
+                (result, Box::new(node0) as Keep)
+            }) as PartyFn<Result<(), NodeError>>,
+            Box::new(move || {
+                let result = node1.sign(committee, 0, b"M").map(|_| ());
+                (result, Box::new(node1) as Keep)
+            }),
+            Box::new(move || {
+                let for_1 = rogue.echo_for(committee, 1).unwrap();
+                wire.send_frame(0, ROUND_ECHO, &encode_echo(&for_1))
+                    .unwrap();
+                wire.send_frame(1, ROUND_ECHO, &encode_echo(&for_1))
+                    .unwrap();
+                (Ok(()), Box::new(wire) as Keep)
+            }),
+        ]);
+        assert_eq!(
+            results[0],
+            Err(NodeError::Quorum(QuorumError::EchoMacInvalid { party: 2 }))
+        );
+        assert_eq!(stats.frames_sent_by(0, |tag| tag == ROUND_SHARE), 0);
+        // Thread 1 got a valid echo from everyone and opened its share; thread 0's abort
+        // then stops it. One additive share of three reveals nothing.
+        assert_eq!(results[1], Err(NodeError::PeerAborted { party: 0 }));
+        assert_eq!(stats.frames_sent_by(1, |tag| tag == ROUND_SHARE), 2);
+    }
+
+    // ---- Mode QS-B over threads ------------------------------------------------------------
+
+    type QuorumNode = IsolatedQuorumParty<TamperTransport, MemoryWal>;
+
+    fn staged_3_of_7() -> StagedShamirKeys {
+        stage_bft_shamir(QuorumConfig::new(3, 7, 2).unwrap(), 3, &SEED).unwrap()
+    }
+
+    /// Nodes for `online` custodians of a `(3, 7, f = 2)` key on a fresh seven-party mesh.
+    /// `custodians` supplies the custodian of each party (so latch state can carry over);
+    /// `tamper_of` may wrap a party's endpoint.
+    fn quorum_nodes(
+        session: [u8; 32],
+        custodians: Vec<ShamirCustodian<MemoryWal>>,
+        mut tamper_of: impl FnMut(usize) -> Option<Tamper>,
+    ) -> (Vec<QuorumNode>, Arc<MeshStats>) {
+        let (endpoints, stats) = InMemoryWireMesh::connect(7, session);
+        let mut endpoints: Vec<Option<InMemoryEndpoint>> =
+            endpoints.into_iter().map(Some).collect();
+        let nodes = custodians
+            .into_iter()
+            .map(|custodian| {
+                let p = custodian.party();
+                let inner = endpoints[p].take().expect("one custodian per party");
+                let transport = match tamper_of(p) {
+                    Some(tamper) => TamperTransport { inner, tamper },
+                    None => honest(inner),
+                };
+                IsolatedQuorumParty::new(custodian, transport).unwrap()
+            })
+            .collect();
+        (nodes, stats)
+    }
+
+    fn custodians_of(
+        staged: &StagedShamirKeys,
+        parties: &[usize],
+    ) -> Vec<ShamirCustodian<MemoryWal>> {
+        parties
+            .iter()
+            .map(|&p| {
+                ShamirCustodian::new(
+                    staged.cfg,
+                    staged.tree.clone(),
+                    staged.parties[p].clone(),
+                    MemoryWal::new(),
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn run_quorum(
+        nodes: Vec<QuorumNode>,
+        online: &[usize],
+        openers: &[usize],
+        leaf: u64,
+        msg: &[u8],
+    ) -> Vec<(
+        Result<QuorumSignOutcome, NodeError>,
+        ShamirCustodian<MemoryWal>,
+    )> {
+        run_parties(
+            nodes
+                .into_iter()
+                .map(|mut node| {
+                    Box::new(move || {
+                        let result = node.sign(online, openers, leaf, msg);
+                        let (custodian, transport) = node.into_parts();
+                        ((result, custodian), Box::new(transport) as Keep)
+                    }) as PartyFn<(Result<QuorumSignOutcome, NodeError>, _)>
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn five_threads_certify_and_three_open() {
+        let staged = staged_3_of_7();
+        let pk = *staged.tree.public_key();
+        let online = [0usize, 1, 3, 4, 6];
+        let (nodes, stats) = quorum_nodes(SESSION, custodians_of(&staged, &online), |_| None);
+        let results = run_quorum(nodes, &online, &[1, 4, 6], 0, b"five threads");
+        for (result, _) in &results {
+            let outcome = result.as_ref().unwrap();
+            assert!(quorum_jorts_verify(
+                &pk,
+                b"five threads",
+                &outcome.signature
+            ));
+            assert_eq!(outcome.certified_by, 5);
+            assert!(outcome.blamed.is_empty());
+        }
+        // 5 * 4 acknowledgements (8 + 32 + 7 * 32 bytes) and 3 * 4 openings.
+        assert_eq!(stats.total_frames(), 32);
+        assert_eq!(
+            stats.total_bytes() as usize,
+            20 * (FRAME_HEADER_BYTES + 264) + 12 * (FRAME_HEADER_BYTES + SHARE_OPENING_WIRE_BYTES)
+        );
+    }
+
+    /// Thread 4 flips bytes of its Shamir opening on the wire. With three openers the
+    /// chain check fails at every honest thread; with a fourth opener the honest threads
+    /// still sign and name thread 4.
+    #[test]
+    fn flipped_shamir_share_on_the_wire_is_caught_and_attributed() {
+        let staged = staged_3_of_7();
+        let pk = *staged.tree.public_key();
+        let online = [0usize, 1, 2, 3, 4];
+        let flip = |p: usize| -> Option<Tamper> {
+            (p == 4).then(|| {
+                Box::new(|_: usize, tag: u32, payload: &mut Vec<u8>| {
+                    if tag == ROUND_SHAMIR_SHARE {
+                        for byte in &mut payload[8..] {
+                            *byte ^= 0x5A;
+                        }
+                    }
+                }) as Tamper
+            })
+        };
+        let (nodes, _) = quorum_nodes(SESSION, custodians_of(&staged, &online), flip);
+        let results = run_quorum(nodes, &online, &[1, 2, 4], 0, b"msg");
+        for (result, custodian) in &results {
+            if custodian.party() == 4 {
+                continue;
+            }
+            assert!(
+                matches!(
+                    result,
+                    Err(NodeError::Quorum(QuorumError::ChainVerifyFailed { .. }))
+                ),
+                "party {}: {result:?}",
+                custodian.party()
+            );
+        }
+        // Retry of the same record with one more opener: the latches replay.
+        let custodians: Vec<_> = results.into_iter().map(|(_, c)| c).collect();
+        let (nodes, _) = quorum_nodes([0x9A; 32], custodians, flip);
+        let results = run_quorum(nodes, &online, &[1, 2, 3, 4], 0, b"msg");
+        for (result, custodian) in &results {
+            if custodian.party() == 4 {
+                continue;
+            }
+            let outcome = result.as_ref().unwrap();
+            assert!(quorum_jorts_verify(&pk, b"msg", &outcome.signature));
+            assert_eq!(outcome.blamed, vec![4]);
+        }
+    }
+
+    /// Quorum switching over the wire, `(3, 7, f = 2)`: custodians 5 and 6 are corrupted.
+    /// After `M1` is signed at leaf 0 with {0, 1, 2, 5, 6}, they run a second session for
+    /// `M2` at leaf 0 with the custodians that were not asked, {3, 4}, using fresh state of
+    /// their own. Four acknowledgements arrive; the honest threads do not open.
+    #[test]
+    fn quorum_switch_over_the_wire_yields_no_second_signature() {
+        let staged = staged_3_of_7();
+        let pk = *staged.tree.public_key();
+        let first = [0usize, 1, 2, 5, 6];
+        let (nodes, _) = quorum_nodes(SESSION, custodians_of(&staged, &first), |_| None);
+        let results = run_quorum(nodes, &first, &[0, 1, 2], 0, b"M1");
+        let sig1 = results[0].0.as_ref().unwrap().signature.clone();
+        assert!(quorum_jorts_verify(&pk, b"M1", &sig1));
+
+        // Session two. Custodians 5 and 6 come back with empty logs.
+        let second = [3usize, 4, 5, 6];
+        let (nodes, stats) = quorum_nodes([0x9B; 32], custodians_of(&staged, &second), |_| None);
+        let results = run_quorum(nodes, &second, &[3, 5, 6], 0, b"M2");
+        for (result, custodian) in &results {
+            assert_eq!(
+                result.as_ref().unwrap_err(),
+                &NodeError::Quorum(QuorumError::CertificateTooSmall {
+                    valid: 4,
+                    required: 5
+                }),
+                "party {}",
+                custodian.party()
+            );
+        }
+        for p in [3usize, 4] {
+            assert_eq!(stats.frames_sent_by(p, |tag| tag == ROUND_SHAMIR_SHARE), 0);
+        }
+        // The custodians of the first session refuse to join the second one.
+        let mut reference = BftShamirJorts::stage(staged.cfg, 3, &SEED).unwrap();
+        reference.sign_at(&first, &[0, 1, 2], 0, b"M1").unwrap();
+        assert_eq!(
+            reference.custodians[0].ack(0, b"M2").unwrap_err(),
+            QuorumError::Latch(BeltLatchError::EpochAlreadyBound)
+        );
+    }
+}
