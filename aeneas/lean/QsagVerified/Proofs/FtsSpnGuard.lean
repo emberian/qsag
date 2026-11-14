@@ -494,3 +494,528 @@ private theorem findStrictGt_none :
           exact Nat.add_left_cancel hsum_eq
         rw [UScalar.eq_of_val_eq hx_eq_y, heq_tail htail_eq]
 
+theorem wots_cs_68_sum136_incomparable_mir
+    (d1 d2 : Array Std.U8 68#usize)
+    (hne : d1 ≠ d2)
+    (hv1 : fts_spn_guard.wots_cs_verify_68_array d1 = .ok true)
+    (hv2 : fts_spn_guard.wots_cs_verify_68_array d2 = .ok true) :
+    (∃ i < 68, (d2.val.getD i 0#u8).val < (d1.val.getD i 0#u8).val) ∧
+    (∃ j < 68, (d1.val.getD j 0#u8).val < (d2.val.getD j 0#u8).val) := by
+  obtain ⟨b1, hb1, hiff1⟩ := wots_cs_verify_68_array_spec d1
+  obtain ⟨b2, hb2, hiff2⟩ := wots_cs_verify_68_array_spec d2
+  rw [hv1] at hb1; injection hb1 with hb1_eq
+  rw [hv2] at hb2; injection hb2 with hb2_eq
+  obtain ⟨_, hsum1⟩ := hiff1.mp hb1_eq.symm
+  obtain ⟨_, hsum2⟩ := hiff2.mp hb2_eq.symm
+  have hlen1 : d1.val.length = 68 := d1.property
+  have hlen2 : d2.val.length = 68 := d2.property
+  constructor
+  · cases hgt12 : findStrictGt d1.val d2.val with
+    | none =>
+      obtain ⟨_, heq⟩ := findStrictGt_none hgt12 (hlen2.trans hlen1.symm)
+      exact False.elim (hne (Std.Array.ext (heq (hsum1.trans hsum2.symm))))
+    | some i =>
+      obtain ⟨hi, hlt⟩ := findStrictGt_some hgt12 (hlen2.trans hlen1.symm)
+      rw [hlen1] at hi
+      exact ⟨i, hi, hlt⟩
+  · cases hgt21 : findStrictGt d2.val d1.val with
+    | none =>
+      obtain ⟨_, heq⟩ := findStrictGt_none hgt21 (hlen1.trans hlen2.symm)
+      exact False.elim (hne (Std.Array.ext (heq (hsum2.trans hsum1.symm)).symm))
+    | some j =>
+      obtain ⟨hj, hlt⟩ := findStrictGt_some hgt21 (hlen1.trans hlen2.symm)
+      rw [hlen2] at hj
+      exact ⟨j, hj, hlt⟩
+
+/-! ## 3. 48-Round SPN Deferred-MAC Session (`fts_spn_output_implies_intermediate_mac_ok`) -/
+
+inductive FtsMacStepInput where
+  | verifyMac (req_session_id : Array Std.U8 32#usize)
+      (mac_residual_lane0 mac_residual_lane1 : Std.U128)
+  | releaseOutput (req_session_id : Array Std.U8 32#usize) (wots_digits : Slice Std.U8)
+
+inductive FtsMacStepOutput where
+  | macVerified
+  | outputReleased (lo hi : Std.U128)
+  deriving DecidableEq
+
+@[expose]
+def wotsCsValidBool (digits : Slice Std.U8) : Bool :=
+  decide (digits.val.length = 68 ∧
+    (∀ d ∈ digits.val, d.val < 5) ∧ u8DigitsNatSum digits.val = 136)
+
+@[expose]
+def mirFtsMacStep (st : fts_spn_guard.FtsDeferredMacSession) (inp : FtsMacStepInput) :
+    Result (fts_spn_guard.FtsDeferredMacSession ×
+      core.result.Result FtsMacStepOutput fts_spn_guard.FtsGuardError) :=
+  match inp with
+  | .verifyMac req_sid lane0 lane1 =>
+    Result.bind (fts_spn_guard.FtsDeferredMacSession.verify_intermediate_mac st req_sid lane0 lane1)
+      fun (st', res) =>
+        match res with
+        | .Ok () => .ok (st', .Ok .macVerified)
+        | .Err e => .ok (st', .Err e)
+  | .releaseOutput req_sid wots_digits =>
+    Result.bind (fts_spn_guard.FtsDeferredMacSession.release_spn_output st req_sid wots_digits)
+      fun (st', res) =>
+        match res with
+        | .Ok (lo, hi) => .ok (st', .Ok (.outputReleased lo hi))
+        | .Err e => .ok (st', .Err e)
+
+@[expose]
+def ftsMacMealy :
+    MealySpec fts_spn_guard.FtsDeferredMacSession FtsMacStepInput FtsMacStepOutput where
+  step st inp :=
+    if st.quarantined then none
+    else
+      match inp with
+      | .verifyMac req_sid lane0 lane1 =>
+        if decide (st.session_id = req_sid) &&
+           decide (st.spn_rounds_completed = 48#u8) &&
+           (!st.output_released) &&
+           (!st.intermediate_mac_verified) &&
+           decide (lane0 = 0#u128) &&
+           decide (lane1 = 0#u128) then
+          some ({ st with intermediate_mac_verified := true }, .macVerified)
+        else none
+      | .releaseOutput req_sid wots_digits =>
+        if decide (st.session_id = req_sid) &&
+           (!st.output_released) &&
+           decide (st.spn_rounds_completed = 48#u8) &&
+           st.intermediate_mac_verified &&
+           wotsCsValidBool wots_digits then
+          some ({ st with
+                  output_released := true
+                  candidate_output_lo := 0#u128
+                  candidate_output_hi := 0#u128 },
+                .outputReleased st.candidate_output_lo st.candidate_output_hi)
+        else none
+  errStep st _ :=
+    { session_id := st.session_id
+      spn_rounds_completed := st.spn_rounds_completed
+      intermediate_mac_verified := false
+      output_released := false
+      quarantined := true
+      candidate_output_lo := 0#u128
+      candidate_output_hi := 0#u128 }
+
+theorem fts_mac_step_sim :
+    MirStepSim ftsMacMealy (adaptStateResult mirFtsMacStep)
+      Eq (fun a b => a = id b) (fun a b => a = id b) where
+  ok_sim {s m m' i_s i_m o_m} hSt hIn hStep := by
+    subst m; dsimp only [id] at hIn; subst i_s
+    dsimp only [adaptStateResult, mirFtsMacStep] at hStep ⊢
+    cases hq : s.quarantined
+    · cases i_m with
+      | verifyMac req_sid lane0 lane1 =>
+        dsimp only at hStep ⊢
+        unfold fts_spn_guard.FtsDeferredMacSession.verify_intermediate_mac
+          fts_spn_guard.quarantine_fts_session
+          fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [ftsMacMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · by_cases hrnd : s.spn_rounds_completed = 48#u8
+          · cases hrel : s.output_released <;> cases hmac : s.intermediate_mac_verified
+            · by_cases hl0 : lane0 = 0#u128
+              · by_cases hl1 : lane1 = 0#u128
+                · simp [hsid, hrnd, hrel, hmac, hl0, hl1,
+                    bind_eq_result_bind, result_bind_ok] at hStep ⊢
+                  rcases hStep with ⟨rfl, rfl⟩
+                  exact ⟨rfl, rfl⟩
+                · have hne : (lane1 != 0#u128) = true := by simp [hl1]
+                  simp [hsid, hrnd, hrel, hmac, hl0, hne,
+                    bind_eq_result_bind, result_bind_ok] at hStep
+              · have hne : (lane0 != 0#u128) = true := by simp [hl0]
+                simp [hsid, hrnd, hrel, hmac, hne,
+                  bind_eq_result_bind, result_bind_ok] at hStep
+            · simp [hsid, hrnd, hrel, hmac, bind_eq_result_bind, result_bind_ok] at hStep
+            · simp [hsid, hrnd, hrel, bind_eq_result_bind, result_bind_ok] at hStep
+            · simp [hsid, hrnd, hrel, bind_eq_result_bind, result_bind_ok] at hStep
+          · have hne : (s.spn_rounds_completed != 48#u8) = true := by simp [hrnd]
+            simp [hsid, hne, bind_eq_result_bind, result_bind_ok] at hStep
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep
+      | releaseOutput req_sid wots_digits =>
+        dsimp only at hStep ⊢
+        unfold fts_spn_guard.FtsDeferredMacSession.release_spn_output
+          fts_spn_guard.quarantine_fts_session
+          fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [ftsMacMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · cases hrel : s.output_released
+          · by_cases hrnd : s.spn_rounds_completed = 48#u8
+            · cases hmac : s.intermediate_mac_verified
+              · simp [hsid, hrel, hrnd, hmac, bind_eq_result_bind, result_bind_ok] at hStep
+              · obtain ⟨b1, hb1, hiff1⟩ := wots_cs_verify_68_w5_sum136_spec wots_digits
+                simp only [Bool.false_eq_true, hsid, hrel, hrnd, hmac, bne_self_eq_false,
+                  decide_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok, hb1] at hStep
+                cases b1
+                · simp [Result.bind] at hStep
+                · simp [Result.bind] at hStep
+                  rcases hStep with ⟨rfl, rfl⟩
+                  have hw : wotsCsValidBool wots_digits = true := by
+                    unfold wotsCsValidBool
+                    exact decide_eq_true (hiff1.mp rfl)
+                  simp [hsid, hrnd, hw]
+            · have hne : (s.spn_rounds_completed != 48#u8) = true := by simp [hrnd]
+              simp [hsid, hrel, hne, bind_eq_result_bind, result_bind_ok] at hStep
+          · simp [hsid, hrel, bind_eq_result_bind, result_bind_ok] at hStep
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep
+    · cases i_m <;>
+        simp [fts_spn_guard.FtsDeferredMacSession.verify_intermediate_mac,
+          fts_spn_guard.FtsDeferredMacSession.release_spn_output,
+          fts_spn_guard.quarantine_fts_session, hq,
+          bind_eq_result_bind, result_bind_ok] at hStep
+  err_preserves {s m m' i_s i_m e} hSt hIn hStep := by
+    subst m; dsimp only [id] at hIn; subst i_s
+    dsimp only [adaptStateResult, mirFtsMacStep] at hStep ⊢
+    cases hq : s.quarantined
+    · cases i_m with
+      | verifyMac req_sid lane0 lane1 =>
+        dsimp only at hStep ⊢
+        unfold fts_spn_guard.FtsDeferredMacSession.verify_intermediate_mac
+          fts_spn_guard.quarantine_fts_session
+          fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [ftsMacMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · by_cases hrnd : s.spn_rounds_completed = 48#u8
+          · cases hrel : s.output_released <;> cases hmac : s.intermediate_mac_verified
+            · by_cases hl0 : lane0 = 0#u128
+              · by_cases hl1 : lane1 = 0#u128
+                · simp [hsid, hrnd, hrel, hmac, hl0, hl1,
+                    bind_eq_result_bind, result_bind_ok] at hStep
+                · have hne : (lane1 != 0#u128) = true := by simp [hl1]
+                  simp [hsid, hrnd, hrel, hmac, hl0, hl1, hne,
+                    bind_eq_result_bind, result_bind_ok] at hStep ⊢
+                  exact hStep.1
+              · have hne : (lane0 != 0#u128) = true := by simp [hl0]
+                simp [hsid, hrnd, hrel, hmac, hl0, hne,
+                  bind_eq_result_bind, result_bind_ok] at hStep ⊢
+                exact hStep.1
+            · simp [hsid, hrnd, hrel, hmac, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+              exact hStep.1
+            · simp [hsid, hrnd, hrel, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+              exact hStep.1
+            · simp [hsid, hrnd, hrel, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+              exact hStep.1
+          · have hne : (s.spn_rounds_completed != 48#u8) = true := by simp [hrnd]
+            simp [hsid, hrnd, hne, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+            exact hStep.1
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          exact hStep.1
+      | releaseOutput req_sid wots_digits =>
+        dsimp only at hStep ⊢
+        unfold fts_spn_guard.FtsDeferredMacSession.release_spn_output
+          fts_spn_guard.quarantine_fts_session
+          fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [ftsMacMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · cases hrel : s.output_released
+          · by_cases hrnd : s.spn_rounds_completed = 48#u8
+            · cases hmac : s.intermediate_mac_verified
+              · simp [hsid, hrel, hrnd, hmac, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+                exact hStep.1
+              · obtain ⟨b1, hb1, hiff1⟩ := wots_cs_verify_68_w5_sum136_spec wots_digits
+                simp only [Bool.false_eq_true, hsid, hrel, hrnd, hmac, bne_self_eq_false,
+                  decide_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok, hb1] at hStep
+                cases b1
+                · simp [Result.bind] at hStep
+                  have hnw : wotsCsValidBool wots_digits = false := by
+                    unfold wotsCsValidBool
+                    exact decide_eq_false fun h => Bool.noConfusion (hiff1.mpr h)
+                  simp [hsid, hrnd, hnw]
+                  exact hStep.1
+                · simp [Result.bind] at hStep
+            · have hne : (s.spn_rounds_completed != 48#u8) = true := by simp [hrnd]
+              simp [hsid, hrel, hrnd, hne, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+              exact hStep.1
+          · simp [hsid, hrel, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+            exact hStep.1
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          exact hStep.1
+    · cases i_m <;>
+        simp [fts_spn_guard.FtsDeferredMacSession.verify_intermediate_mac,
+          fts_spn_guard.FtsDeferredMacSession.release_spn_output,
+          fts_spn_guard.quarantine_fts_session, hq, ftsMacMealy,
+          bind_eq_result_bind, result_bind_ok] at hStep ⊢ <;>
+        exact hStep.1
+
+@[expose]
+def ftsMacTraceSafe (sid : Array Std.U8 32#usize) (rounds : Std.U8)
+    (cand_lo cand_hi : Std.U128)
+    (pairs : List (FtsMacStepInput × FtsMacStepOutput)) : Prop :=
+  pairs = [] ∨
+  (rounds = 48#u8 ∧ pairs = [(.verifyMac sid 0#u128 0#u128, .macVerified)]) ∨
+  (∃ digits : Slice Std.U8,
+    rounds = 48#u8 ∧
+    digits.val.length = 68 ∧
+    (∀ d ∈ digits.val, d.val < 5) ∧
+    u8DigitsNatSum digits.val = 136 ∧
+    pairs = [(.verifyMac sid 0#u128 0#u128, .macVerified),
+             (.releaseOutput sid digits, .outputReleased cand_lo cand_hi)])
+
+private theorem fts_mac_quarantined_nil
+    {st s_f : fts_spn_guard.FtsDeferredMacSession}
+    {pairs : List (FtsMacStepInput × FtsMacStepOutput)}
+    (hq : st.quarantined = true)
+    (hTr : ftsMacMealy.ValidTrace st pairs s_f) :
+    pairs = [] := by
+  induction hTr with
+  | nil _ => rfl
+  | @accept sa _ _ _ _ _ hStep _ _ =>
+    dsimp only [ftsMacMealy] at hStep
+    rw [hq] at hStep; cases hStep
+  | reject _ _ _ ih =>
+    exact ih rfl
+
+private theorem fts_mac_released_nil
+    {st s_f : fts_spn_guard.FtsDeferredMacSession}
+    {pairs : List (FtsMacStepInput × FtsMacStepOutput)}
+    (hrel : st.output_released = true)
+    (hTr : ftsMacMealy.ValidTrace st pairs s_f) :
+    pairs = [] := by
+  induction hTr with
+  | nil _ => rfl
+  | @accept sa _ _ inp _ _ hStep _ _ =>
+    dsimp only [ftsMacMealy] at hStep
+    cases hq : sa.quarantined
+    · rw [hq] at hStep
+      cases inp <;> simp [hrel] at hStep
+    · rw [hq] at hStep; cases hStep
+  | reject _ _ hTail _ =>
+    exact fts_mac_quarantined_nil rfl hTail
+
+private theorem fts_mac_verified_trace_shape
+    (sid : Array Std.U8 32#usize) (cand_lo cand_hi : Std.U128)
+    {pairs : List (FtsMacStepInput × FtsMacStepOutput)}
+    {s_f : fts_spn_guard.FtsDeferredMacSession}
+    (hTr : ftsMacMealy.ValidTrace
+      { session_id := sid, spn_rounds_completed := 48#u8,
+        intermediate_mac_verified := true, output_released := false,
+        quarantined := false, candidate_output_lo := cand_lo,
+        candidate_output_hi := cand_hi }
+      pairs s_f) :
+    pairs = [] ∨
+    ∃ digits : Slice Std.U8,
+      digits.val.length = 68 ∧
+      (∀ d ∈ digits.val, d.val < 5) ∧
+      u8DigitsNatSum digits.val = 136 ∧
+      pairs = [(.releaseOutput sid digits, .outputReleased cand_lo cand_hi)] := by
+  generalize hs1 :
+    ({ session_id := sid, spn_rounds_completed := 48#u8,
+       intermediate_mac_verified := true, output_released := false,
+       quarantined := false, candidate_output_lo := cand_lo,
+       candidate_output_hi := cand_hi } : fts_spn_guard.FtsDeferredMacSession) = s1 at hTr
+  induction hTr with
+  | nil _ => exact Or.inl rfl
+  | @accept sa sb _ inp out rest hStep hTail _ =>
+    subst hs1
+    dsimp only [ftsMacMealy] at hStep
+    cases inp with
+    | verifyMac _ _ _ => simp at hStep
+    | releaseOutput req_sid digits =>
+      by_cases hsid : sid = req_sid
+      · subst hsid
+        cases hw : wotsCsValidBool digits
+        · simp [hw] at hStep
+        · simp only [Bool.false_eq_true, decide_true, Bool.not_false, Bool.true_and,
+            hw, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+          rcases hStep with ⟨hsb, hout⟩
+          subst hsb; subst hout
+          have hRest : rest = [] := fts_mac_released_nil rfl hTail
+          subst hRest
+          unfold wotsCsValidBool at hw
+          obtain ⟨hlen, hall, hsum⟩ := of_decide_eq_true hw
+          exact Or.inr ⟨digits, hlen, hall, hsum, rfl⟩
+      · simp [hsid] at hStep
+  | reject _ _ hTail _ =>
+    subst hs1
+    exact Or.inl (fts_mac_quarantined_nil rfl hTail)
+
+private theorem fts_mac_init_spec_safe
+    (sid : Array Std.U8 32#usize) (rounds : Std.U8) (cand_lo cand_hi : Std.U128)
+    (st0 s_f : fts_spn_guard.FtsDeferredMacSession)
+    (hnew : fts_spn_guard.FtsDeferredMacSession.new_spn48_evaluated
+      sid rounds cand_lo cand_hi = .ok st0)
+    {pairs : List (FtsMacStepInput × FtsMacStepOutput)}
+    (hTr : ftsMacMealy.ValidTrace st0 pairs s_f) :
+    ftsMacTraceSafe sid rounds cand_lo cand_hi pairs := by
+  unfold fts_spn_guard.FtsDeferredMacSession.new_spn48_evaluated
+    fts_spn_guard.quarantine_fts_session
+    fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS at hnew
+  by_cases hrnd : rounds = 48#u8
+  · subst hrnd
+    simp only [bne_self_eq_false, Bool.false_eq_true, ↓reduceIte, Result.ok.injEq] at hnew
+    generalize hs0 : st0 = s_init at hTr
+    rw [← hnew] at hs0
+    induction hTr with
+    | nil _ => exact Or.inl rfl
+    | @accept sa sb _ inp out rest hStep hTail _ =>
+      subst hs0
+      dsimp only [ftsMacMealy] at hStep
+      cases inp with
+      | releaseOutput _ _ => simp at hStep
+      | verifyMac req_sid lane0 lane1 =>
+        by_cases hsid : sid = req_sid
+        · subst hsid
+          cases hz : (decide (lane0 = 0#u128) && decide (lane1 = 0#u128))
+          · simp [hz] at hStep
+          · simp only [Bool.false_eq_true, decide_true, Bool.not_false, Bool.true_and,
+              hz, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+            rcases hStep with ⟨hsb, hout⟩
+            subst hsb; subst hout
+            simp only [Bool.and_eq_true, decide_eq_true_eq] at hz
+            rcases hz with ⟨rfl, rfl⟩
+            rcases fts_mac_verified_trace_shape sid cand_lo cand_hi hTail with
+              hNil | ⟨digits, hlen, hall, hsum, hRel⟩
+            · subst hNil; exact Or.inr (Or.inl ⟨rfl, rfl⟩)
+            · subst hRel
+              exact Or.inr (Or.inr ⟨digits, rfl, hlen, hall, hsum, rfl⟩)
+        · simp [hsid] at hStep
+    | reject _ _ hTail _ =>
+      subst hs0
+      exact Or.inl (fts_mac_quarantined_nil rfl hTail)
+  · have hne : (rounds != 48#u8) = true := bne_iff_ne.mpr hrnd
+    simp only [hne, ↓reduceIte, Result.ok.injEq] at hnew
+    subst hnew
+    exact Or.inl (fts_mac_quarantined_nil rfl hTr)
+
+private theorem fts_mir_quarantine_irreversible
+    {st st_f : fts_spn_guard.FtsDeferredMacSession}
+    {turns : List (MirTurn FtsMacStepInput FtsMacStepOutput fts_spn_guard.FtsGuardError)}
+    (hq : st.quarantined = true ∧ st.intermediate_mac_verified = false ∧
+          st.candidate_output_lo = 0#u128 ∧ st.candidate_output_hi = 0#u128)
+    (hTr : MirTrace (adaptStateResult mirFtsMacStep) st turns st_f) :
+    st_f.quarantined = true ∧ st_f.intermediate_mac_verified = false ∧
+      st_f.candidate_output_lo = 0#u128 ∧ st_f.candidate_output_hi = 0#u128 := by
+  induction hTr with
+  | nil _ => exact hq
+  | @accept m _ _ _ _ _ hStep _ _ =>
+    have hSim := fts_mac_step_sim.ok_sim (s := m) rfl rfl hStep
+    dsimp only [ftsMacMealy] at hSim
+    rw [hq.1] at hSim
+    exact False.elim hSim
+  | @reject m _ _ _ _ _ hStep _ ih =>
+    obtain ⟨_, hRel⟩ := fts_mac_step_sim.err_preserves (s := m) rfl rfl hStep
+    subst hRel
+    exact ih ⟨rfl, rfl, rfl, rfl⟩
+
+private theorem fts_mir_any_rejection_quarantines
+    {st st_f : fts_spn_guard.FtsDeferredMacSession}
+    {turns : List (MirTurn FtsMacStepInput FtsMacStepOutput fts_spn_guard.FtsGuardError)}
+    (hTr : MirTrace (adaptStateResult mirFtsMacStep) st turns st_f)
+    (hHasRej : ∃ inp err, MirTurn.rejected inp err ∈ turns) :
+    st_f.quarantined = true ∧ st_f.intermediate_mac_verified = false ∧
+      st_f.candidate_output_lo = 0#u128 ∧ st_f.candidate_output_hi = 0#u128 := by
+  induction hTr with
+  | nil _ =>
+    rcases hHasRej with ⟨_, _, hm⟩
+    exact False.elim (List.not_mem_nil hm)
+  | accept _ _ ih =>
+    rcases hHasRej with ⟨inp, err, hm⟩
+    simp only [List.mem_cons, reduceCtorEq, false_or] at hm
+    exact ih ⟨inp, err, hm⟩
+  | @reject m _ _ _ _ _ hStep hTail _ =>
+    obtain ⟨_, hRel⟩ := fts_mac_step_sim.err_preserves (s := m) rfl rfl hStep
+    subst hRel
+    exact fts_mir_quarantine_irreversible ⟨rfl, rfl, rfl, rfl⟩ hTail
+
+theorem fts_spn_output_implies_intermediate_mac_ok
+    (sid : Array Std.U8 32#usize) (rounds : Std.U8) (cand_lo cand_hi : Std.U128)
+    (st0 st_final : fts_spn_guard.FtsDeferredMacSession)
+    (turns : List (MirTurn FtsMacStepInput FtsMacStepOutput fts_spn_guard.FtsGuardError))
+    (hnew : fts_spn_guard.FtsDeferredMacSession.new_spn48_evaluated
+      sid rounds cand_lo cand_hi = .ok st0)
+    (htrace : MirTrace (adaptStateResult mirFtsMacStep) st0 turns st_final) :
+    ftsMacTraceSafe sid rounds cand_lo cand_hi (mirAcceptedPairs turns) ∧
+    (∀ inp lo hi, (inp, .outputReleased lo hi) ∈ mirAcceptedPairs turns →
+      rounds = 48#u8 ∧ lo = cand_lo ∧ hi = cand_hi ∧
+      (.verifyMac sid 0#u128 0#u128, .macVerified) ∈ mirAcceptedPairs turns ∧
+      ∃ digits : Slice Std.U8,
+        inp = .releaseOutput sid digits ∧
+        digits.val.length = 68 ∧
+        (∀ d ∈ digits.val, d.val < 5) ∧
+        u8DigitsNatSum digits.val = 136) ∧
+    ((∃ inp err, MirTurn.rejected inp err ∈ turns) →
+      st_final.quarantined = true ∧
+      st_final.intermediate_mac_verified = false ∧
+      st_final.candidate_output_lo = 0#u128 ∧
+      st_final.candidate_output_hi = 0#u128) := by
+  obtain ⟨hSafeRaw, _⟩ :=
+    fts_mac_step_sim.lift_trace_safety_abs
+      (Safe := ftsMacTraceSafe sid rounds cand_lo cand_hi)
+      (fun hVal => fts_mac_init_spec_safe sid rounds cand_lo cand_hi st0 _ hnew hVal)
+      rfl
+      htrace
+  have hSafe : ftsMacTraceSafe sid rounds cand_lo cand_hi (mirAcceptedPairs turns) := by
+    rw [map_id_pair] at hSafeRaw
+    exact hSafeRaw
+  refine ⟨hSafe, ?_, fts_mir_any_rejection_quarantines htrace⟩
+  intro inp lo hi hMem
+  rcases hSafe with hNil | ⟨_, hMac⟩ | ⟨digits, hrnd, hlen, hall, hsum, hRel⟩
+  · rw [hNil] at hMem; exact False.elim (List.not_mem_nil hMem)
+  · rw [hMac] at hMem; simp at hMem
+  · rw [hRel] at hMem ⊢
+    simp only [List.mem_cons, List.not_mem_nil, or_false, false_or, Prod.mk.injEq,
+      FtsMacStepOutput.outputReleased.injEq, reduceCtorEq, and_false] at hMem
+    rcases hMem with ⟨rfl, rfl, rfl⟩
+    exact ⟨hrnd, rfl, rfl, by simp, ⟨digits, rfl, hlen, hall, hsum⟩⟩
+
+/-! ## 4. Concrete `#tooth` Refusal Witnesses -/
+
+theorem tooth_fts_second_epoch_burn_rejected :
+    let key_id := Array.repeat 32#usize 0x11#u8
+    let msg1 := Array.repeat 32#usize 0xAA#u8
+    let msg2 := Array.repeat 32#usize 0xBB#u8
+    (fts_spn_guard.FtsEpochGuard.new_unused key_id 3#u32 8#u32 >>= fun g0 =>
+      fts_spn_guard.FtsEpochGuard.consume_epoch_once g0 key_id 3#u32 msg1 >>= fun (g1, _) =>
+        fts_spn_guard.FtsEpochGuard.consume_epoch_once g1 key_id 3#u32 msg2) =
+      .ok ({ key_id := key_id, epoch := 3#u32, max_epochs := 8#u32,
+             used := 1#u8, poisoned := true },
+           .Err .EpochAlreadyUsed) := by
+  have hkid : tower.ct_eq_bytes32 (Array.repeat 32#usize 0x11#u8)
+      (Array.repeat 32#usize 0x11#u8) = .ok true := by
+    rw [ct_eq_bytes32_spec]; rfl
+  have hge : ¬ (3#u32 >= 8#u32) := by decide
+  simp [fts_spn_guard.FtsEpochGuard.new_unused,
+    fts_spn_guard.FtsEpochGuard.consume_epoch_once,
+    hkid, hge, bind_eq_result_bind, result_bind_ok]
+
+theorem tooth_fts_unverified_mac_release_quarantined :
+    let sid := Array.repeat 32#usize 0x22#u8
+    let digits := Array.repeat 68#usize 2#u8
+    (fts_spn_guard.FtsDeferredMacSession.new_spn48_evaluated sid 48#u8 99#u128 88#u128 >>= fun s0 =>
+      fts_spn_guard.FtsDeferredMacSession.release_spn_output s0 sid (Array.to_slice digits)) =
+      .ok ({ session_id := sid, spn_rounds_completed := 48#u8,
+             intermediate_mac_verified := false, output_released := false,
+             quarantined := true, candidate_output_lo := 0#u128,
+             candidate_output_hi := 0#u128 },
+           .Err .IntermediateMacNotVerified) := by
+  have hsid : tower.ct_eq_bytes32 (Array.repeat 32#usize 0x22#u8)
+      (Array.repeat 32#usize 0x22#u8) = .ok true := by
+    rw [ct_eq_bytes32_spec]; rfl
+  simp [fts_spn_guard.FtsDeferredMacSession.new_spn48_evaluated,
+    fts_spn_guard.FtsDeferredMacSession.release_spn_output,
+    fts_spn_guard.quarantine_fts_session,
+    fts_spn_guard.FTS_SPN_REQUIRED_ROUNDS,
+    hsid, bind_eq_result_bind, result_bind_ok]
+
+theorem tooth_wots_cs_68_wrong_sum_rejected :
+    fts_spn_guard.wots_cs_verify_68_array (Array.repeat 68#usize 0#u8) = .ok false := by
+  obtain ⟨b, hb, hiff⟩ := wots_cs_verify_68_array_spec (Array.repeat 68#usize 0#u8)
+  cases b
+  · exact hb
+  · exfalso
+    obtain ⟨_, hsum⟩ := hiff.mp rfl
+    have hzero : u8DigitsNatSum (Array.repeat 68#usize 0#u8).val = 0 := by decide
+    rw [hzero] at hsum
+    cases hsum
+
+end qsag_verified.proofs

@@ -505,3 +505,516 @@ private theorem hd_verify_peer_arith_step
     have hr_ne : rem ≠ 0#u64 := fun h => hne (vrem.symm.trans (congrArg UScalar.val h))
     simp [hr_ne]
 
+theorem hd_zero_step_sim :
+    MirStepSim hdZeroMealy (adaptStateResult mirHdZeroStep)
+      Eq (fun a b => a = id b) (fun a b => a = id b) where
+  ok_sim {s m m' i_s i_m o_m} hSt hIn hStep := by
+    subst m; dsimp only [id] at hIn; subst i_s
+    dsimp only [adaptStateResult, mirHdZeroStep] at hStep ⊢
+    cases hq : s.family_quarantined
+    · cases i_m with
+      | freezePeer req_sid peer_comm =>
+        dsimp only at hStep ⊢
+        unfold cred_and_hd_guards.HdCommittedZeroTest.freeze_peer_commitment
+          cred_and_hd_guards.quarantine_hd_family at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [hdZeroMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · cases hp : s.phase <;>
+            simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          rcases hStep with ⟨rfl, rfl⟩
+          exact ⟨rfl, rfl⟩
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep
+      | openLocal req_sid =>
+        dsimp only at hStep ⊢
+        unfold cred_and_hd_guards.HdCommittedZeroTest.open_local_residual
+          cred_and_hd_guards.quarantine_hd_family at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [hdZeroMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · cases hp : s.phase <;>
+            simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          rcases hStep with ⟨rfl, rfl⟩
+          exact ⟨rfl, rfl⟩
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep
+      | verifyPeer req_sid recomputed_comm peer_res =>
+        dsimp only at hStep ⊢
+        unfold cred_and_hd_guards.HdCommittedZeroTest.verify_peer_opening
+          cred_and_hd_guards.quarantine_hd_family at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [hdZeroMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · cases hp : s.phase
+          · simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep
+          · simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep
+          · rw [ct_eq_bytes32_spec] at hStep
+            by_cases hcomm : s.frozen_peer_commitment = recomputed_comm
+            · by_cases hq0 : s.modulus_q = 0#u32
+              · simp [hsid, hp, hcomm, hq0, bind_eq_result_bind, result_bind_ok] at hStep
+              · by_cases hlge : s.local_residual >= s.modulus_q
+                · simp [hsid, hp, hcomm, hq0, hlge, bind_eq_result_bind, result_bind_ok] at hStep
+                · by_cases hpge : peer_res >= s.modulus_q
+                  · simp [hsid, hp, hcomm, hq0, hlge, hpge, bind_eq_result_bind, result_bind_ok] at hStep
+                  · have hllt : s.local_residual < s.modulus_q := by
+                      apply (UScalar.lt_iff_val _ _).mpr
+                      exact Nat.lt_of_not_ge fun h => hlge ((UScalar.le_iff_val _ _).mpr h)
+                    have hplt : peer_res < s.modulus_q := by
+                      apply (UScalar.lt_iff_val _ _).mpr
+                      exact Nat.lt_of_not_ge fun h => hpge ((UScalar.le_iff_val _ _).mpr h)
+                    obtain ⟨sum, rem, hsum, hmod, hrem_iff⟩ :=
+                      hd_verify_peer_arith_step s.local_residual peer_res s.modulus_q hq0 hllt hplt
+                    simp only [Bool.false_eq_true, hsid, hp, hcomm, hq0, hlge, hpge, decide_true,
+                      ↓reduceIte, bind_eq_result_bind, result_bind_ok, lift_eq_ok, hsum, hmod] at hStep
+                    cases hrem : (rem != 0#u64)
+                    · rw [hrem] at hStep
+                      simp [Result.bind] at hStep
+                      rcases hStep with ⟨rfl, rfl⟩
+                      have hz : (s.local_residual.val + peer_res.val) % s.modulus_q.val = 0 := by
+                        by_cases hzv : (s.local_residual.val + peer_res.val) % s.modulus_q.val = 0
+                        · exact hzv
+                        · have htrue := hrem_iff.mpr hzv
+                          rw [hrem] at htrue; cases htrue
+                      simp [hsid, hcomm, hq0, hllt, hplt, hz]
+                    · rw [hrem] at hStep
+                      simp [Result.bind] at hStep
+            · simp [hsid, hp, hcomm, bind_eq_result_bind, result_bind_ok] at hStep
+          · simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep
+          · simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep
+    · cases i_m <;>
+        simp [cred_and_hd_guards.HdCommittedZeroTest.freeze_peer_commitment,
+          cred_and_hd_guards.HdCommittedZeroTest.open_local_residual,
+          cred_and_hd_guards.HdCommittedZeroTest.verify_peer_opening,
+          cred_and_hd_guards.quarantine_hd_family, hq,
+          bind_eq_result_bind, result_bind_ok] at hStep
+  err_preserves {s m m' i_s i_m e} hSt hIn hStep := by
+    subst m; dsimp only [id] at hIn; subst i_s
+    dsimp only [adaptStateResult, mirHdZeroStep] at hStep ⊢
+    cases hq : s.family_quarantined
+    · cases i_m with
+      | freezePeer req_sid peer_comm =>
+        dsimp only at hStep ⊢
+        unfold cred_and_hd_guards.HdCommittedZeroTest.freeze_peer_commitment
+          cred_and_hd_guards.quarantine_hd_family at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [hdZeroMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · cases hp : s.phase <;>
+            simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep ⊢ <;>
+            exact hStep.1
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          exact hStep.1
+      | openLocal req_sid =>
+        dsimp only at hStep ⊢
+        unfold cred_and_hd_guards.HdCommittedZeroTest.open_local_residual
+          cred_and_hd_guards.quarantine_hd_family at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [hdZeroMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · cases hp : s.phase <;>
+            simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep ⊢ <;>
+            exact hStep.1
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          exact hStep.1
+      | verifyPeer req_sid recomputed_comm peer_res =>
+        dsimp only at hStep ⊢
+        unfold cred_and_hd_guards.HdCommittedZeroTest.verify_peer_opening
+          cred_and_hd_guards.quarantine_hd_family at hStep
+        rw [hq, ct_eq_bytes32_spec] at hStep
+        dsimp only [hdZeroMealy]
+        rw [hq]
+        by_cases hsid : s.session_id = req_sid
+        · cases hp : s.phase
+          · simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+            exact hStep.1
+          · simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+            exact hStep.1
+          · rw [ct_eq_bytes32_spec] at hStep
+            by_cases hcomm : s.frozen_peer_commitment = recomputed_comm
+            · by_cases hq0 : s.modulus_q = 0#u32
+              · simp [hsid, hp, hcomm, hq0, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+                exact hStep.1
+              · by_cases hlge : s.local_residual >= s.modulus_q
+                · have hnlt : ¬ s.local_residual < s.modulus_q := by
+                    intro hlt
+                    exact Nat.not_lt_of_ge ((UScalar.le_iff_val _ _).mp hlge)
+                      ((UScalar.lt_iff_val _ _).mp hlt)
+                  simp [hsid, hp, hcomm, hq0, hlge, hnlt, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+                  exact hStep.1
+                · by_cases hpge : peer_res >= s.modulus_q
+                  · have hnlt : ¬ peer_res < s.modulus_q := by
+                      intro hlt
+                      exact Nat.not_lt_of_ge ((UScalar.le_iff_val _ _).mp hpge)
+                        ((UScalar.lt_iff_val _ _).mp hlt)
+                    simp [hsid, hp, hcomm, hq0, hlge, hpge, hnlt, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+                    exact hStep.1
+                  · have hllt : s.local_residual < s.modulus_q := by
+                      apply (UScalar.lt_iff_val _ _).mpr
+                      exact Nat.lt_of_not_ge fun h => hlge ((UScalar.le_iff_val _ _).mpr h)
+                    have hplt : peer_res < s.modulus_q := by
+                      apply (UScalar.lt_iff_val _ _).mpr
+                      exact Nat.lt_of_not_ge fun h => hpge ((UScalar.le_iff_val _ _).mpr h)
+                    obtain ⟨sum, rem, hsum, hmod, hrem_iff⟩ :=
+                      hd_verify_peer_arith_step s.local_residual peer_res s.modulus_q hq0 hllt hplt
+                    simp only [Bool.false_eq_true, hsid, hp, hcomm, hq0, hlge, hpge, decide_true,
+                      ↓reduceIte, bind_eq_result_bind, result_bind_ok, lift_eq_ok, hsum, hmod] at hStep
+                    cases hrem : (rem != 0#u64)
+                    · rw [hrem] at hStep
+                      simp [Result.bind] at hStep
+                    · rw [hrem] at hStep
+                      simp [Result.bind] at hStep
+                      have hnz : (s.local_residual.val + peer_res.val) % s.modulus_q.val ≠ 0 :=
+                        hrem_iff.mp hrem
+                      simp [hsid, hcomm, hq0, hllt, hplt, hnz]
+                      exact hStep.1
+            · simp [hsid, hp, hcomm, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+              exact hStep.1
+          · simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+            exact hStep.1
+          · simp [hsid, hp, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+            exact hStep.1
+        · simp [hsid, bind_eq_result_bind, result_bind_ok] at hStep ⊢
+          exact hStep.1
+    · cases i_m <;>
+        simp [cred_and_hd_guards.HdCommittedZeroTest.freeze_peer_commitment,
+          cred_and_hd_guards.HdCommittedZeroTest.open_local_residual,
+          cred_and_hd_guards.HdCommittedZeroTest.verify_peer_opening,
+          cred_and_hd_guards.quarantine_hd_family, hq, hdZeroMealy,
+          bind_eq_result_bind, result_bind_ok] at hStep ⊢ <;>
+        exact hStep.1
+
+@[expose]
+def hdTraceSafe (sid : Array Std.U8 32#usize) (local_res q : Std.U32)
+    (pairs : List (HdZeroStepInput × HdZeroStepOutput)) : Prop :=
+  pairs = [] ∨
+  (∃ comm, pairs = [(.freezePeer sid comm, .peerFrozen)]) ∨
+  (∃ comm, pairs = [(.freezePeer sid comm, .peerFrozen),
+                    (.openLocal sid, .localOpened local_res)]) ∨
+  (∃ comm peer_res,
+    0 < q.val ∧ local_res.val < q.val ∧ peer_res.val < q.val ∧
+    (local_res.val + peer_res.val) % q.val = 0 ∧
+    pairs = [(.freezePeer sid comm, .peerFrozen),
+             (.openLocal sid, .localOpened local_res),
+             (.verifyPeer sid comm peer_res, .zeroVerified)])
+
+private theorem hd_quarantined_full_trace_nil
+    {st s_f : cred_and_hd_guards.HdCommittedZeroTest}
+    {pairs : List (HdZeroStepInput × HdZeroStepOutput)}
+    (hq : st.family_quarantined = true)
+    (hp : st.phase = .FamilyQuarantined)
+    (hr : st.local_residual = 0#u32)
+    (hTr : hdZeroMealy.ValidTrace st pairs s_f) :
+    pairs = [] ∧ s_f.family_quarantined = true ∧
+      s_f.phase = .FamilyQuarantined ∧ s_f.local_residual = 0#u32 := by
+  induction hTr with
+  | nil _ => exact ⟨rfl, hq, hp, hr⟩
+  | @accept sa _ _ _ _ _ hStepA _ _ =>
+    dsimp only [hdZeroMealy] at hStepA
+    rw [hq] at hStepA; cases hStepA
+  | reject _ _ _ ih =>
+    exact ih rfl rfl rfl
+
+private theorem hd_verified_zero_trace_nil
+    {st s_f : cred_and_hd_guards.HdCommittedZeroTest}
+    {pairs : List (HdZeroStepInput × HdZeroStepOutput)}
+    (hp : st.phase = .VerifiedZero)
+    (hTr : hdZeroMealy.ValidTrace st pairs s_f) :
+    pairs = [] := by
+  induction hTr with
+  | nil _ => rfl
+  | @accept sa _ _ inp _ _ hStep _ _ =>
+    dsimp only [hdZeroMealy] at hStep
+    cases hq : sa.family_quarantined
+    · rw [hq] at hStep
+      cases inp <;> simp [hp] at hStep
+    · rw [hq] at hStep; cases hStep
+  | reject _ _ hTail _ =>
+    exact (hd_quarantined_full_trace_nil rfl rfl rfl hTail).1
+
+private theorem hd_phase2_trace_shape
+    (sid comm : Array Std.U8 32#usize) (local_res q : Std.U32)
+    (_hq0 : 0 < q.val) (_hloc : local_res.val < q.val)
+    {pairs : List (HdZeroStepInput × HdZeroStepOutput)}
+    {s_f : cred_and_hd_guards.HdCommittedZeroTest}
+    (hTr : hdZeroMealy.ValidTrace
+      { session_id := sid, phase := .LocalResidualOpened,
+        frozen_peer_commitment := comm, local_residual := local_res,
+        modulus_q := q, family_quarantined := false }
+      pairs s_f) :
+    pairs = [] ∨
+    ∃ peer_res, peer_res.val < q.val ∧ (local_res.val + peer_res.val) % q.val = 0 ∧
+      pairs = [(.verifyPeer sid comm peer_res, .zeroVerified)] := by
+  generalize hs2 :
+    ({ session_id := sid, phase := .LocalResidualOpened,
+       frozen_peer_commitment := comm, local_residual := local_res,
+       modulus_q := q, family_quarantined := false } : cred_and_hd_guards.HdCommittedZeroTest) = s2 at hTr
+  induction hTr with
+  | nil _ => exact Or.inl rfl
+  | @accept sa sb _ inp out rest hStep hTail _ =>
+    subst hs2
+    dsimp only [hdZeroMealy] at hStep
+    cases inp with
+    | freezePeer req_sid peer_comm =>
+      simp at hStep
+    | openLocal req_sid =>
+      simp at hStep
+    | verifyPeer req_sid recomputed_comm peer_res =>
+      by_cases hsid : sid = req_sid
+      · subst hsid
+        simp only [Bool.false_eq_true, decide_true, ↓reduceIte] at hStep
+        cases hcond :
+          (decide (comm = recomputed_comm) && decide (q ≠ 0#u32) &&
+           decide (local_res < q) && decide (peer_res < q) &&
+           decide ((local_res.val + peer_res.val) % q.val = 0))
+        · rw [hcond] at hStep; cases hStep
+        · rw [hcond] at hStep
+          simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+          rcases hStep with ⟨hsb, hout⟩
+          subst hsb; subst hout
+          have hRest : rest = [] := hd_verified_zero_trace_nil rfl hTail
+          subst hRest
+          simp only [Bool.and_eq_true, decide_eq_true_eq] at hcond
+          rcases hcond with ⟨⟨⟨⟨hcomm, _⟩, _⟩, hp_lt⟩, hsum⟩
+          subst hcomm
+          exact Or.inr ⟨peer_res, (UScalar.lt_iff_val _ _).mp hp_lt, hsum, rfl⟩
+      · simp [hsid] at hStep
+  | reject _ _ hTail _ =>
+    subst hs2
+    exact Or.inl (hd_quarantined_full_trace_nil rfl rfl rfl hTail).1
+
+private theorem hd_phase1_trace_shape
+    (sid comm : Array Std.U8 32#usize) (local_res q : Std.U32)
+    (hq0 : 0 < q.val) (hloc : local_res.val < q.val)
+    {pairs : List (HdZeroStepInput × HdZeroStepOutput)}
+    {s_f : cred_and_hd_guards.HdCommittedZeroTest}
+    (hTr : hdZeroMealy.ValidTrace
+      { session_id := sid, phase := .PeerCommitmentFrozen,
+        frozen_peer_commitment := comm, local_residual := local_res,
+        modulus_q := q, family_quarantined := false }
+      pairs s_f) :
+    pairs = [] ∨
+    pairs = [(.openLocal sid, .localOpened local_res)] ∨
+    ∃ peer_res, peer_res.val < q.val ∧ (local_res.val + peer_res.val) % q.val = 0 ∧
+      pairs = [(.openLocal sid, .localOpened local_res),
+               (.verifyPeer sid comm peer_res, .zeroVerified)] := by
+  generalize hs1 :
+    ({ session_id := sid, phase := .PeerCommitmentFrozen,
+       frozen_peer_commitment := comm, local_residual := local_res,
+       modulus_q := q, family_quarantined := false } : cred_and_hd_guards.HdCommittedZeroTest) = s1 at hTr
+  induction hTr with
+  | nil _ => exact Or.inl rfl
+  | @accept sa sb _ inp out rest hStep hTail _ =>
+    subst hs1
+    dsimp only [hdZeroMealy] at hStep
+    cases inp with
+    | freezePeer _ _ => simp at hStep
+    | verifyPeer _ _ _ => simp at hStep
+    | openLocal req_sid =>
+      by_cases hsid : sid = req_sid
+      · subst hsid
+        simp only [Bool.false_eq_true, decide_true, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+        rcases hStep with ⟨hsb, hout⟩
+        subst hsb; subst hout
+        rcases hd_phase2_trace_shape sid comm local_res q hq0 hloc hTail with hNil | ⟨pr, hpr, hsum, hRest⟩
+        · subst hNil; exact Or.inr (Or.inl rfl)
+        · subst hRest; exact Or.inr (Or.inr ⟨pr, hpr, hsum, rfl⟩)
+      · simp [hsid] at hStep
+  | reject _ _ hTail _ =>
+    subst hs1
+    exact Or.inl (hd_quarantined_full_trace_nil rfl rfl rfl hTail).1
+
+private theorem hd_init_spec_trace_safe
+    (sid : Array Std.U8 32#usize) (local_res q : Std.U32)
+    (st0 s_f : cred_and_hd_guards.HdCommittedZeroTest)
+    (hnew : cred_and_hd_guards.HdCommittedZeroTest.new_awaiting_peer_commit sid local_res q = .ok st0)
+    {pairs : List (HdZeroStepInput × HdZeroStepOutput)}
+    (hTr : hdZeroMealy.ValidTrace st0 pairs s_f) :
+    hdTraceSafe sid local_res q pairs := by
+  unfold cred_and_hd_guards.HdCommittedZeroTest.new_awaiting_peer_commit
+    cred_and_hd_guards.quarantine_hd_family at hnew
+  by_cases hq0 : q = 0#u32
+  · simp only [hq0, ↓reduceIte, Result.ok.injEq] at hnew
+    subst hnew
+    exact Or.inl (hd_quarantined_full_trace_nil rfl rfl rfl hTr).1
+  · by_cases hlge : local_res >= q
+    · simp only [hq0, hlge, ↓reduceIte, Result.ok.injEq] at hnew
+      subst hnew
+      exact Or.inl (hd_quarantined_full_trace_nil rfl rfl rfl hTr).1
+    · simp only [hq0, hlge, ↓reduceIte, Result.ok.injEq] at hnew
+      have hq_pos : 0 < q.val := by
+        cases hv : q.val with
+        | zero => exact False.elim (hq0 (UScalar.eq_of_val_eq hv))
+        | succ k => exact Nat.zero_lt_succ k
+      have hloc_lt : local_res.val < q.val :=
+        Nat.lt_of_not_ge fun h => hlge ((UScalar.le_iff_val _ _).mpr h)
+      generalize hs0 : st0 = s_init at hTr
+      rw [← hnew] at hs0
+      induction hTr with
+      | nil _ => exact Or.inl rfl
+      | @accept sa sb _ inp out rest hStep hTail _ =>
+        subst hs0
+        dsimp only [hdZeroMealy] at hStep
+        cases inp with
+        | openLocal _ => simp at hStep
+        | verifyPeer _ _ _ => simp at hStep
+        | freezePeer req_sid comm =>
+          by_cases hsid : sid = req_sid
+          · subst hsid
+            simp only [Bool.false_eq_true, decide_true, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+            rcases hStep with ⟨hsb, hout⟩
+            subst hsb; subst hout
+            rcases hd_phase1_trace_shape sid comm local_res q hq_pos hloc_lt hTail with
+              hNil | hOpen | ⟨pr, hpr, hsum, hVer⟩
+            · subst hNil; exact Or.inr (Or.inl ⟨comm, rfl⟩)
+            · subst hOpen; exact Or.inr (Or.inr (Or.inl ⟨comm, rfl⟩))
+            · subst hVer
+              exact Or.inr (Or.inr (Or.inr ⟨comm, pr, hq_pos, hloc_lt, hpr, hsum, rfl⟩))
+          · simp [hsid] at hStep
+      | reject _ _ hTail _ =>
+        subst hs0
+        exact Or.inl (hd_quarantined_full_trace_nil rfl rfl rfl hTail).1
+
+private theorem hd_mir_quarantine_irreversible
+    {st st_f : cred_and_hd_guards.HdCommittedZeroTest}
+    {turns : List (MirTurn HdZeroStepInput HdZeroStepOutput cred_and_hd_guards.CredHdGuardError)}
+    (hq : st.family_quarantined = true ∧ st.phase = .FamilyQuarantined ∧ st.local_residual = 0#u32)
+    (hTr : MirTrace (adaptStateResult mirHdZeroStep) st turns st_f) :
+    st_f.family_quarantined = true ∧ st_f.phase = .FamilyQuarantined ∧
+      st_f.local_residual = 0#u32 ∧ mirAcceptedPairs turns = [] := by
+  induction hTr with
+  | nil _ => exact ⟨hq.1, hq.2.1, hq.2.2, rfl⟩
+  | @accept m m' _ inp out _ hStep _ _ =>
+    have hSim := hd_zero_step_sim.ok_sim (s := m) rfl rfl hStep
+    dsimp only [hdZeroMealy] at hSim
+    rw [hq.1] at hSim
+    exact False.elim hSim
+  | @reject m m' _ inp err _ hStep _ ih =>
+    obtain ⟨_, hRel⟩ := hd_zero_step_sim.err_preserves (s := m) rfl rfl hStep
+    subst hRel
+    exact ih ⟨rfl, rfl, rfl⟩
+
+private theorem hd_mir_any_rejection_quarantines
+    {st st_f : cred_and_hd_guards.HdCommittedZeroTest}
+    {turns : List (MirTurn HdZeroStepInput HdZeroStepOutput cred_and_hd_guards.CredHdGuardError)}
+    (hTr : MirTrace (adaptStateResult mirHdZeroStep) st turns st_f)
+    (hHasRej : ∃ inp err, MirTurn.rejected inp err ∈ turns) :
+    st_f.family_quarantined = true ∧ st_f.phase = .FamilyQuarantined ∧
+      st_f.local_residual = 0#u32 := by
+  induction hTr with
+  | nil _ =>
+    rcases hHasRej with ⟨_, _, hm⟩
+    exact False.elim (List.not_mem_nil hm)
+  | accept _ _ ih =>
+    rcases hHasRej with ⟨inp, err, hm⟩
+    simp only [List.mem_cons, reduceCtorEq, false_or] at hm
+    exact ih ⟨inp, err, hm⟩
+  | @reject m m' _ _ _ _ hStep hTail _ =>
+    obtain ⟨_, hRel⟩ := hd_zero_step_sim.err_preserves (s := m) rfl rfl hStep
+    subst hRel
+    obtain ⟨h1, h2, h3, _⟩ := hd_mir_quarantine_irreversible ⟨rfl, rfl, rfl⟩ hTail
+    exact ⟨h1, h2, h3⟩
+
+theorem hd_zero_test_quarantine_mir
+    (sid : Array Std.U8 32#usize) (local_res q : Std.U32)
+    (st0 st_final : cred_and_hd_guards.HdCommittedZeroTest)
+    (turns : List (MirTurn HdZeroStepInput HdZeroStepOutput cred_and_hd_guards.CredHdGuardError))
+    (hnew : cred_and_hd_guards.HdCommittedZeroTest.new_awaiting_peer_commit sid local_res q = .ok st0)
+    (htrace : MirTrace (adaptStateResult mirHdZeroStep) st0 turns st_final) :
+    hdTraceSafe sid local_res q (mirAcceptedPairs turns) ∧
+    ((∃ inp err, MirTurn.rejected inp err ∈ turns) →
+      st_final.family_quarantined = true ∧
+      st_final.phase = .FamilyQuarantined ∧
+      st_final.local_residual = 0#u32) := by
+  constructor
+  · obtain ⟨hSafe, _⟩ :=
+      hd_zero_step_sim.lift_trace_safety_abs
+        (Safe := hdTraceSafe sid local_res q)
+        (fun hVal => hd_init_spec_trace_safe sid local_res q st0 _ hnew hVal)
+        rfl
+        htrace
+    rw [map_id_pair] at hSafe
+    exact hSafe
+  · exact hd_mir_any_rejection_quarantines htrace
+
+/-! ## 5. Concrete `#tooth` Refusal Witnesses -/
+
+theorem tooth_mldsa_r0_norm_fail_blocks_z :
+    let sid := Array.repeat 32#usize 0x11#u8
+    let secret := Array.repeat 32#usize 0x77#u8
+    let checks : cred_and_hd_guards.MlDsaBarrierChecks :=
+      { req_session_id := sid, req_attempt := 0#u32,
+        z_norm_ok := true, r0_norm_ok := false, w1_match := true, u_com_bound := true }
+    (cred_and_hd_guards.MlDsaReleaseGate.new_sealed sid 0#u32 secret >>= fun g =>
+      cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share g checks) =
+      .ok ({ session_id := sid, attempt := 0#u32,
+             z_share_masked := Array.repeat 32#usize 0#u8,
+             released := false, aborted := true },
+           .Err .RejectionSamplingBarrierFailed) := by
+  have hsid : tower.ct_eq_bytes32 (Array.repeat 32#usize 0x11#u8)
+      (Array.repeat 32#usize 0x11#u8) = .ok true := by
+    rw [ct_eq_bytes32_spec]; rfl
+  simp [cred_and_hd_guards.MlDsaReleaseGate.new_sealed,
+    cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share,
+    cred_and_hd_guards.abort_mldsa_gate, hsid,
+    bind_eq_result_bind, result_bind_ok]
+
+theorem tooth_toprf_noncanonical_unanimous_rejected :
+    cred_and_hd_guards.toprf_majority_of_3_goldilocks
+      18446744069414584321#u64 18446744069414584321#u64 18446744069414584321#u64 =
+      .ok none := by
+  unfold cred_and_hd_guards.toprf_majority_of_3_goldilocks goldilocks.GOLDILOCKS_PRIME
+  decide
+
+theorem tooth_hd_premature_open_quarantined :
+    let sid := Array.repeat 32#usize 0x22#u8
+    (cred_and_hd_guards.HdCommittedZeroTest.new_awaiting_peer_commit sid 5#u32 17#u32 >>= fun st =>
+      cred_and_hd_guards.HdCommittedZeroTest.open_local_residual st sid) =
+      .ok ({ session_id := sid, phase := .FamilyQuarantined,
+             frozen_peer_commitment := Array.repeat 32#usize 0#u8,
+             local_residual := 0#u32, modulus_q := 17#u32, family_quarantined := true },
+           .Err .InvalidHdPhaseTransition) := by
+  have hsid : tower.ct_eq_bytes32 (Array.repeat 32#usize 0x22#u8)
+      (Array.repeat 32#usize 0x22#u8) = .ok true := by
+    rw [ct_eq_bytes32_spec]; rfl
+  have hq : ¬ (17#u32 = 0#u32) := by decide
+  have hl : ¬ (5#u32 >= 17#u32) := by decide
+  simp [cred_and_hd_guards.HdCommittedZeroTest.new_awaiting_peer_commit,
+    cred_and_hd_guards.HdCommittedZeroTest.open_local_residual,
+    cred_and_hd_guards.quarantine_hd_family, hsid, hq, hl,
+    bind_eq_result_bind, result_bind_ok]
+
+theorem tooth_hd_nonzero_sum_quarantined :
+    let sid := Array.repeat 32#usize 0x33#u8
+    let comm := Array.repeat 32#usize 0xAA#u8
+    let st2 : cred_and_hd_guards.HdCommittedZeroTest :=
+      { session_id := sid, phase := .LocalResidualOpened,
+        frozen_peer_commitment := comm, local_residual := 5#u32,
+        modulus_q := 17#u32, family_quarantined := false }
+    cred_and_hd_guards.HdCommittedZeroTest.verify_peer_opening st2 sid comm 6#u32 =
+      .ok ({ session_id := sid, phase := .FamilyQuarantined,
+             frozen_peer_commitment := comm,
+             local_residual := 0#u32, modulus_q := 17#u32, family_quarantined := true },
+           .Err .HdZeroTestMismatchQuarantined) := by
+  have hsid : tower.ct_eq_bytes32 (Array.repeat 32#usize 0x33#u8)
+      (Array.repeat 32#usize 0x33#u8) = .ok true := by
+    rw [ct_eq_bytes32_spec]; rfl
+  have hcomm : tower.ct_eq_bytes32 (Array.repeat 32#usize 0xAA#u8)
+      (Array.repeat 32#usize 0xAA#u8) = .ok true := by
+    rw [ct_eq_bytes32_spec]; rfl
+  have hq : ¬ (17#u32 = 0#u32) := by decide
+  have hl : ¬ (5#u32 >= 17#u32) := by decide
+  have hp : ¬ (6#u32 >= 17#u32) := by decide
+  obtain ⟨sum, rem, hsum, hmod, hrem_iff⟩ :=
+    hd_verify_peer_arith_step 5#u32 6#u32 17#u32 hq (by decide) (by decide)
+  have hrem : (rem != 0#u64) = true := hrem_iff.mpr (by decide)
+  unfold cred_and_hd_guards.HdCommittedZeroTest.verify_peer_opening
+    cred_and_hd_guards.quarantine_hd_family
+  simp only [Bool.false_eq_true, hsid, hcomm, hq, hl, hp, ↓reduceIte,
+    bind_eq_result_bind, result_bind_ok, lift_eq_ok, hsum, hmod, hrem]
+
+end qsag_verified.proofs

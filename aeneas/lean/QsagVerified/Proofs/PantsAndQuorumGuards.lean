@@ -2089,3 +2089,988 @@ private theorem rss_clean_validTrace_sound
     2. Whenever `AuthorizeOpen` succeeds after any `StageRelations` batch, a `RecordCheckResult true`
        barrier MUST have succeeded after the most recent `StageRelations` batch (and zero failed
        checks occurred anywhere earlier in the trace). -/
+theorem rss_poison_latch_multiturn_sound
+    (st0 st_final : pants_and_quorum_guards.VerifiedRssPoisonLatch)
+    (turns : List (MirTurn pants_and_quorum_guards.RssLatchStepInput
+      pants_and_quorum_guards.RssLatchStepOutput
+      pants_and_quorum_guards.PantsGuardError))
+    (hNew : pants_and_quorum_guards.VerifiedRssPoisonLatch.new_clean = .ok st0)
+    (hTrace : MirTrace (adaptStateResult pants_and_quorum_guards.VerifiedRssPoisonLatch.step)
+      st0 turns st_final) :
+    st0.poisoned = false ∧
+    (∀ p ∈ mirAcceptedPairs turns, ∀ perm,
+      p.2 = .OpenAuthorized perm → perm.verified_clean = true) ∧
+    (∀ pre suf perm,
+      mirAcceptedPairs turns = pre ++ (.AuthorizeOpen, .OpenAuthorized perm) :: suf →
+      (∀ q ∈ pre, ∀ c n, q ≠ (.StageRelations c, .RelationsStaged n)) ∨
+      ∃ pre1 pre2, pre = pre1 ++ (.RecordCheckResult true, .CheckVerified) :: pre2 ∧
+        ∀ q ∈ pre2, ∀ c n, q ≠ (.StageRelations c, .RelationsStaged n)) := by
+  unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.new_clean at hNew
+  simp only [Result.ok.injEq] at hNew
+  have hPois0 : st0.poisoned = false := by rw [← hNew]
+  obtain ⟨hSafe, _⟩ :=
+    rss_poison_latch_step_sim.lift_trace_safety_abs
+      (Safe := fun pairs =>
+        (∀ p ∈ pairs, ∀ perm, p.2 = .OpenAuthorized perm → perm.verified_clean = true) ∧
+        (∀ pre suf perm,
+          pairs = pre ++ (.AuthorizeOpen, .OpenAuthorized perm) :: suf →
+          (∀ q ∈ pre, ∀ c n, q ≠ (.StageRelations c, .RelationsStaged n)) ∨
+          ∃ pre1 pre2, pre = pre1 ++ (.RecordCheckResult true, .CheckVerified) :: pre2 ∧
+            ∀ q ∈ pre2, ∀ c n, q ≠ (.StageRelations c, .RelationsStaged n)))
+      (fun hVal => by
+        obtain ⟨h1, h2⟩ := rss_clean_validTrace_sound hVal
+        refine ⟨h1, ?_⟩
+        intro pre suf perm heq
+        rcases h2 pre suf perm heq with ⟨_, _, hno⟩ | hok
+        · exact Or.inl hno
+        · exact Or.inr hok)
+      rfl
+      hTrace
+  rw [map_id_pair_pants] at hSafe
+  exact ⟨hPois0, hSafe⟩
+
+/-! ## 4. `VerifiedWaistbandRootGuard` (Static Ancestor Child-Root & First-Signed Guard) -/
+
+/-- Pure Mealy specification of `VerifiedWaistbandRootGuard::authorize_ancestor_derivation`:
+    requires exact coordinate `(layer, tree, kp)`, `(cache_pk_tag == key_pk_tag)`,
+    `(cache_params_tag == key_params_tag)`, `(recomputed_child_root == expected_static_child_root)`,
+    and durable first-signed `locked_ancestor_codeword_tag` consistency; any mismatch fails closed
+    and permanently sets `poisoned = true`. -/
+@[expose]
+def waistbandRootMealy :
+    MealySpec
+      pants_and_quorum_guards.VerifiedWaistbandRootGuard
+      pants_and_quorum_guards.WaistbandDerivationRequest
+      pants_and_quorum_guards.WaistbandAncestorPermit where
+  step st req :=
+    if st.poisoned then none
+    else if decide (req.req_layer = st.ancestor_layer) &&
+        decide (req.req_tree = st.ancestor_tree) &&
+        decide (req.req_kp = st.ancestor_kp) &&
+        decide (req.cache_pk_tag = st.key_pk_tag) &&
+        decide (req.cache_params_tag = st.key_params_tag) &&
+        decide (req.recomputed_child_root = st.expected_static_child_root) &&
+        (!st.has_locked_codeword ||
+          decide (req.candidate_ancestor_codeword_tag = st.locked_ancestor_codeword_tag)) then
+      some ({ st with
+        has_locked_codeword := true
+        locked_ancestor_codeword_tag := req.candidate_ancestor_codeword_tag },
+        { layer := st.ancestor_layer
+          tree := st.ancestor_tree
+          kp := st.ancestor_kp
+          verified_child_root := st.expected_static_child_root
+          authorized_codeword_tag := req.candidate_ancestor_codeword_tag })
+    else none
+  errStep st _ := { st with poisoned := true }
+
+private abbrev waistbandInnerPassBool
+    (st : pants_and_quorum_guards.VerifiedWaistbandRootGuard)
+    (req : pants_and_quorum_guards.WaistbandDerivationRequest) : Bool :=
+  decide (req.req_layer = st.ancestor_layer) &&
+  decide (req.req_tree = st.ancestor_tree) &&
+  decide (req.req_kp = st.ancestor_kp) &&
+  decide (req.cache_pk_tag = st.key_pk_tag) &&
+  decide (req.cache_params_tag = st.key_params_tag) &&
+  decide (req.recomputed_child_root = st.expected_static_child_root) &&
+  (!st.has_locked_codeword ||
+    decide (req.candidate_ancestor_codeword_tag = st.locked_ancestor_codeword_tag))
+
+private theorem waistband_authorize_exact
+    (st : pants_and_quorum_guards.VerifiedWaistbandRootGuard)
+    (req : pants_and_quorum_guards.WaistbandDerivationRequest) :
+    (st.poisoned = false ∧ waistbandInnerPassBool st req = true →
+      pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation st req =
+        .ok ({ st with
+          has_locked_codeword := true
+          locked_ancestor_codeword_tag := req.candidate_ancestor_codeword_tag },
+          .Ok {
+            layer := st.ancestor_layer
+            tree := st.ancestor_tree
+            kp := st.ancestor_kp
+            verified_child_root := st.expected_static_child_root
+            authorized_codeword_tag := req.candidate_ancestor_codeword_tag })) ∧
+    (st.poisoned = true ∨ waistbandInnerPassBool st req = false →
+      ∃ e,
+        pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation st req =
+          .ok ({ st with poisoned := true }, .Err e)) := by
+  rcases st with ⟨key_pk, key_par, anc_lay, anc_tr, anc_kp, exp_root, has_lk, lk_cw, poisoned⟩
+  unfold pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation
+  unfold pants_and_quorum_guards.poison_waistband_guard
+  dsimp only [waistbandInnerPassBool]
+  cases poisoned
+  · simp only [Bool.false_eq_true, ↓reduceIte, false_or, true_and]
+    by_cases hlay : req.req_layer = anc_lay
+    · simp only [hlay, bne_self_eq_false, Bool.false_eq_true, decide_true, Bool.true_and, ↓reduceIte]
+      by_cases htr : req.req_tree = anc_tr
+      · simp only [htr, bne_self_eq_false, Bool.false_eq_true, decide_true, Bool.true_and, ↓reduceIte]
+        by_cases hkp : req.req_kp = anc_kp
+        · simp only [hkp, bne_self_eq_false, Bool.false_eq_true, decide_true, Bool.true_and, ↓reduceIte]
+          rw [bind_eq_result_bind, ct_eq_bytes32_spec, result_bind_ok]
+          by_cases hpk : req.cache_pk_tag = key_pk
+          · have hpk_d : decide (req.cache_pk_tag = key_pk) = true := decide_eq_true hpk
+            rw [hpk_d]
+            simp only [Bool.true_and, ↓reduceIte]
+            rw [bind_eq_result_bind, ct_eq_bytes32_spec, result_bind_ok]
+            by_cases hpar : req.cache_params_tag = key_par
+            · have hpar_d : decide (req.cache_params_tag = key_par) = true := decide_eq_true hpar
+              rw [hpar_d]
+              simp only [Bool.true_and, ↓reduceIte]
+              rw [bind_eq_result_bind, ct_eq_bytes32_spec, result_bind_ok]
+              by_cases hrt : req.recomputed_child_root = exp_root
+              · have hrt_d : decide (req.recomputed_child_root = exp_root) = true := decide_eq_true hrt
+                rw [hrt_d]
+                simp only [Bool.true_and, ↓reduceIte]
+                cases has_lk
+                · simp only [Bool.not_false, Bool.true_or, Bool.false_eq_true, ↓reduceIte]
+                  exact ⟨fun _ => trivial, Bool.noConfusion⟩
+                · simp only [Bool.not_true, Bool.false_or, ↓reduceIte]
+                  rw [bind_eq_result_bind, ct_eq_bytes32_spec, result_bind_ok]
+                  by_cases hcw : req.candidate_ancestor_codeword_tag = lk_cw
+                  · have hcw_d : decide (req.candidate_ancestor_codeword_tag = lk_cw) = true :=
+                      decide_eq_true hcw
+                    rw [hcw_d]
+                    simp only [↓reduceIte]
+                    exact ⟨fun _ => trivial, Bool.noConfusion⟩
+                  · have hcw_d : decide (req.candidate_ancestor_codeword_tag = lk_cw) = false :=
+                      decide_eq_false hcw
+                    rw [hcw_d]
+                    simp only [Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok]
+                    exact ⟨False.elim, fun _ => ⟨_, rfl⟩⟩
+              · have hrt_d : decide (req.recomputed_child_root = exp_root) = false :=
+                  decide_eq_false hrt
+                rw [hrt_d]
+                simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind,
+                  result_bind_ok]
+                exact ⟨False.elim, fun _ => ⟨_, rfl⟩⟩
+            · have hpar_d : decide (req.cache_params_tag = key_par) = false := decide_eq_false hpar
+              rw [hpar_d]
+              simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind,
+                result_bind_ok]
+              exact ⟨False.elim, fun _ => ⟨_, rfl⟩⟩
+          · have hpk_d : decide (req.cache_pk_tag = key_pk) = false := decide_eq_false hpk
+            rw [hpk_d]
+            simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind,
+              result_bind_ok]
+            exact ⟨False.elim, fun _ => ⟨_, rfl⟩⟩
+        · have hne : (req.req_kp != anc_kp) = true := bne_iff_ne.mpr hkp
+          have hd : decide (req.req_kp = anc_kp) = false := decide_eq_false hkp
+          rw [hne, hd]
+          simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok]
+          exact ⟨False.elim, fun _ => ⟨_, rfl⟩⟩
+      · have hne : (req.req_tree != anc_tr) = true := bne_iff_ne.mpr htr
+        have hd : decide (req.req_tree = anc_tr) = false := decide_eq_false htr
+        rw [hne, hd]
+        simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok]
+        exact ⟨False.elim, fun _ => ⟨_, rfl⟩⟩
+    · have hne : (req.req_layer != anc_lay) = true := bne_iff_ne.mpr hlay
+      have hd : decide (req.req_layer = anc_lay) = false := decide_eq_false hlay
+      rw [hne, hd]
+      simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok]
+      exact ⟨False.elim, fun _ => ⟨_, rfl⟩⟩
+  · simp only [↓reduceIte, Bool.true_eq_false, false_and, true_or, bind_eq_result_bind, result_bind_ok]
+    exact ⟨False.elim, fun _ => ⟨_, rfl⟩⟩
+
+/-- Constructive single-step `MirStepSim` simulation from extracted Rust MIR
+    `VerifiedWaistbandRootGuard::authorize_ancestor_derivation` to `waistbandRootMealy`. -/
+theorem waistband_root_guard_step_sim :
+    MirStepSim waistbandRootMealy
+      (adaptStateResult pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation)
+      Eq (fun a b => a = id b) (fun a b => a = id b) where
+  ok_sim {s m m' i_s i_m o_m} hSt hIn hStep := by
+    subst m; dsimp only [id] at hIn; subst i_s
+    dsimp only [adaptStateResult] at hStep
+    obtain ⟨hPass, hFail⟩ := waistband_authorize_exact s i_m
+    dsimp only [waistbandRootMealy]
+    rcases (by cases s.poisoned <;> simp : s.poisoned = false ∨ s.poisoned = true) with hp | hp
+    · by_cases hb : waistbandInnerPassBool s i_m = true
+      · have hok := hPass ⟨hp, hb⟩
+        rw [hok, result_bind_ok] at hStep
+        injection hStep with hAcc
+        cases hAcc
+        dsimp only [waistbandInnerPassBool] at hb
+        rw [hp, hb]
+        simp only [Bool.false_eq_true, ↓reduceIte]
+        exact ⟨trivial, rfl⟩
+      · simp only [Bool.not_eq_true] at hb
+        obtain ⟨err, herr⟩ := hFail (Or.inr hb)
+        rw [herr, result_bind_ok] at hStep
+        cases hStep
+    · obtain ⟨err, herr⟩ := hFail (Or.inl hp)
+      rw [herr, result_bind_ok] at hStep
+      cases hStep
+  err_preserves {s m m' i_s i_m e} hSt hIn hStep := by
+    subst m; dsimp only [id] at hIn; subst i_s
+    dsimp only [adaptStateResult] at hStep
+    obtain ⟨hPass, hFail⟩ := waistband_authorize_exact s i_m
+    dsimp only [waistbandRootMealy]
+    rcases (by cases s.poisoned <;> simp : s.poisoned = false ∨ s.poisoned = true) with hp | hp
+    · by_cases hb : waistbandInnerPassBool s i_m = true
+      · have hok := hPass ⟨hp, hb⟩
+        rw [hok, result_bind_ok] at hStep
+        cases hStep
+      · simp only [Bool.not_eq_true] at hb
+        obtain ⟨err, herr⟩ := hFail (Or.inr hb)
+        rw [herr, result_bind_ok] at hStep
+        injection hStep with hRej
+        injection hRej with hm' _
+        dsimp only [waistbandInnerPassBool] at hb
+        rw [hp, hb]
+        simp only [Bool.false_eq_true, ↓reduceIte]
+        exact ⟨trivial, hm'⟩
+    · obtain ⟨err, herr⟩ := hFail (Or.inl hp)
+      rw [herr, result_bind_ok] at hStep
+      injection hStep with hRej
+      injection hRej with hm' _
+      rw [hp]
+      simp only [↓reduceIte]
+      exact ⟨trivial, hm'⟩
+
+private theorem waistband_poisoned_nil
+    {st s_f : pants_and_quorum_guards.VerifiedWaistbandRootGuard}
+    {pairs : List (pants_and_quorum_guards.WaistbandDerivationRequest ×
+      pants_and_quorum_guards.WaistbandAncestorPermit)}
+    (hPois : st.poisoned = true)
+    (hTr : waistbandRootMealy.ValidTrace st pairs s_f) :
+    pairs = [] ∧ s_f.poisoned = true := by
+  induction hTr with
+  | nil _ => exact ⟨rfl, hPois⟩
+  | @accept sa _ _ _ _ _ hStep _ _ =>
+    dsimp only [waistbandRootMealy] at hStep
+    rw [hPois] at hStep; cases hStep
+  | @reject sa _ _ _ _ _ ih =>
+    dsimp only [waistbandRootMealy] at ih
+    exact ih rfl
+
+private theorem waistband_locked_trace_sound
+    {pkTag paramsTag childRoot lockedCw : Array Std.U8 32#usize}
+    {layer : Std.U32} {tree : Std.U64} {kp : Std.U32}
+    {st s_f : pants_and_quorum_guards.VerifiedWaistbandRootGuard}
+    {pairs : List (pants_and_quorum_guards.WaistbandDerivationRequest ×
+      pants_and_quorum_guards.WaistbandAncestorPermit)}
+    (hSt : st.key_pk_tag = pkTag ∧ st.key_params_tag = paramsTag ∧
+      st.ancestor_layer = layer ∧ st.ancestor_tree = tree ∧ st.ancestor_kp = kp ∧
+      st.expected_static_child_root = childRoot ∧
+      st.has_locked_codeword = true ∧ st.locked_ancestor_codeword_tag = lockedCw)
+    (hTr : waistbandRootMealy.ValidTrace st pairs s_f) :
+    ∀ p ∈ pairs,
+      p.1.req_layer = layer ∧
+      p.1.req_tree = tree ∧
+      p.1.req_kp = kp ∧
+      p.1.cache_pk_tag = pkTag ∧
+      p.1.cache_params_tag = paramsTag ∧
+      p.1.recomputed_child_root = childRoot ∧
+      p.1.candidate_ancestor_codeword_tag = lockedCw ∧
+      p.2 = {
+        layer := layer
+        tree := tree
+        kp := kp
+        verified_child_root := childRoot
+        authorized_codeword_tag := lockedCw } := by
+  induction hTr with
+  | nil _ =>
+    intro _ hm; exact False.elim (List.not_mem_nil hm)
+  | @accept sa sb _ req out rest hStep _ ih =>
+    rcases hSt with ⟨hpk, hpar, hlay, htr, hkp, hrt, hlk, hcw⟩
+    dsimp only [waistbandRootMealy] at hStep
+    cases hp : sa.poisoned
+    · rw [hp, hpk, hpar, hlay, htr, hkp, hrt, hlk, hcw] at hStep
+      simp only [Bool.false_eq_true, Bool.not_true, Bool.false_or, ↓reduceIte] at hStep
+      by_cases hcond :
+          (decide (req.req_layer = layer) &&
+           decide (req.req_tree = tree) &&
+           decide (req.req_kp = kp) &&
+           decide (req.cache_pk_tag = pkTag) &&
+           decide (req.cache_params_tag = paramsTag) &&
+           decide (req.recomputed_child_root = childRoot) &&
+           decide (req.candidate_ancestor_codeword_tag = lockedCw)) = true
+      · rw [hcond] at hStep
+        simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+        rcases hStep with ⟨hsb, hout⟩
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hcond
+        rcases hcond with ⟨⟨⟨⟨⟨⟨rlay, rtr⟩, rkp⟩, rpk⟩, rpar⟩, rrt⟩, rcw⟩
+        subst hsb; subst hout
+        intro p hmem
+        simp only [List.mem_cons] at hmem
+        rcases hmem with rfl | hm
+        · exact ⟨rlay, rtr, rkp, rpk, rpar, rrt, rcw,
+            by rw [rcw]⟩
+        · exact ih ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rcw⟩ p hm
+      · simp only [Bool.not_eq_true] at hcond
+        rw [hcond] at hStep; cases hStep
+    · rw [hp] at hStep; cases hStep
+  | @reject sa _ _ _ _ hTail _ =>
+    obtain ⟨hNil, _⟩ := waistband_poisoned_nil rfl hTail
+    subst hNil
+    intro _ hm; exact False.elim (List.not_mem_nil hm)
+
+/-- **Master Multi-Turn Soundness Theorem for `VerifiedWaistbandRootGuard`:**
+    Starting from `new_enrolled`, across ANY multi-turn `MirTrace`:
+    1. Mismatched `cache_pk_tag`, mismatched `cache_params_tag`, mismatched coordinate
+       `(layer, tree, kp)`, or corrupted intermediate `recomputed_child_root` NEVER yields
+       an `Ok` permit (every accepted request matches all enrolled tags and `expected_static_child_root`);
+    2. **First-Signed Codeword Uniqueness:** all accepted permits across the entire trace
+       authorize the exact same `authorized_codeword_tag` (equivocating on a second ancestor
+       codeword fails closed and poisons the guard). -/
+theorem waistband_root_guard_multiturn_sound
+    (pkTag paramsTag expectedChildRoot : Array Std.U8 32#usize)
+    (layer : Std.U32) (tree : Std.U64) (kp : Std.U32)
+    (st0 st_final : pants_and_quorum_guards.VerifiedWaistbandRootGuard)
+    (turns : List (MirTurn pants_and_quorum_guards.WaistbandDerivationRequest
+      pants_and_quorum_guards.WaistbandAncestorPermit
+      pants_and_quorum_guards.PantsGuardError))
+    (hNew : pants_and_quorum_guards.VerifiedWaistbandRootGuard.new_enrolled
+      pkTag paramsTag layer tree kp expectedChildRoot = .ok st0)
+    (hTrace : MirTrace
+      (adaptStateResult pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation)
+      st0 turns st_final) :
+    (∀ p ∈ mirAcceptedPairs turns,
+      p.1.req_layer = layer ∧
+      p.1.req_tree = tree ∧
+      p.1.req_kp = kp ∧
+      p.1.cache_pk_tag = pkTag ∧
+      p.1.cache_params_tag = paramsTag ∧
+      p.1.recomputed_child_root = expectedChildRoot ∧
+      p.2.verified_child_root = expectedChildRoot ∧
+      p.2.authorized_codeword_tag = p.1.candidate_ancestor_codeword_tag) ∧
+    (∀ p1 ∈ mirAcceptedPairs turns, ∀ p2 ∈ mirAcceptedPairs turns,
+      p1.2.authorized_codeword_tag = p2.2.authorized_codeword_tag) := by
+  unfold pants_and_quorum_guards.VerifiedWaistbandRootGuard.new_enrolled at hNew
+  simp only [Result.ok.injEq] at hNew
+  obtain ⟨hSafe, _⟩ :=
+    waistband_root_guard_step_sim.lift_trace_safety_abs
+      (Safe := fun pairs =>
+        (∀ p ∈ pairs,
+          p.1.req_layer = layer ∧
+          p.1.req_tree = tree ∧
+          p.1.req_kp = kp ∧
+          p.1.cache_pk_tag = pkTag ∧
+          p.1.cache_params_tag = paramsTag ∧
+          p.1.recomputed_child_root = expectedChildRoot ∧
+          p.2.verified_child_root = expectedChildRoot ∧
+          p.2.authorized_codeword_tag = p.1.candidate_ancestor_codeword_tag) ∧
+        (∀ p1 ∈ pairs, ∀ p2 ∈ pairs,
+          p1.2.authorized_codeword_tag = p2.2.authorized_codeword_tag))
+      (fun {pairs s_f} hVal => by
+        generalize hs0 : st0 = s_init at hVal
+        rw [← hNew] at hs0
+        cases hVal with
+        | nil _ =>
+          exact ⟨fun _ hm => False.elim (List.not_mem_nil hm),
+            fun _ hm => False.elim (List.not_mem_nil hm)⟩
+        | @accept sa sb _ req out rest hStep hTail =>
+          subst hs0
+          dsimp only [waistbandRootMealy] at hStep
+          simp only [Bool.false_eq_true, Bool.not_false, Bool.true_or, Bool.and_true,
+            ↓reduceIte] at hStep
+          by_cases hcond :
+              (decide (req.req_layer = layer) &&
+               decide (req.req_tree = tree) &&
+               decide (req.req_kp = kp) &&
+               decide (req.cache_pk_tag = pkTag) &&
+               decide (req.cache_params_tag = paramsTag) &&
+               decide (req.recomputed_child_root = expectedChildRoot)) = true
+          · rw [hcond] at hStep
+            simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+            rcases hStep with ⟨hsb, hout⟩
+            simp only [Bool.and_eq_true, decide_eq_true_eq] at hcond
+            rcases hcond with ⟨⟨⟨⟨⟨rlay, rtr⟩, rkp⟩, rpk⟩, rpar⟩, rrt⟩
+            subst hsb; subst hout
+            have hTailProps := waistband_locked_trace_sound
+              ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩ hTail
+            have hAllCw : ∀ p ∈ (req, {
+                layer := layer, tree := tree, kp := kp,
+                verified_child_root := expectedChildRoot,
+                authorized_codeword_tag := req.candidate_ancestor_codeword_tag
+              }) :: rest,
+                p.2.authorized_codeword_tag = req.candidate_ancestor_codeword_tag := by
+              intro p hp
+              simp only [List.mem_cons] at hp
+              rcases hp with rfl | hm
+              · rfl
+              · rw [(hTailProps p hm).2.2.2.2.2.2.2]
+            refine ⟨?_, ?_⟩
+            · intro p hp
+              simp only [List.mem_cons] at hp
+              rcases hp with rfl | hm
+              · exact ⟨rlay, rtr, rkp, rpk, rpar, rrt, rfl, rfl⟩
+              · obtain ⟨t1, t2, t3, t4, t5, t6, t7, t8⟩ := hTailProps p hm
+                rw [t8]
+                exact ⟨t1, t2, t3, t4, t5, t6, rfl, t7.symm⟩
+            · intro p1 hp1 p2 hp2
+              rw [hAllCw p1 hp1, hAllCw p2 hp2]
+          · simp only [Bool.not_eq_true] at hcond
+            rw [hcond] at hStep; cases hStep
+        | @reject sa _ _ _ _ hTail =>
+          subst hs0
+          obtain ⟨hNil, _⟩ := waistband_poisoned_nil rfl hTail
+          subst hNil
+          exact ⟨fun _ hm => False.elim (List.not_mem_nil hm),
+            fun _ hm => False.elim (List.not_mem_nil hm)⟩)
+      rfl
+      hTrace
+  rw [map_id_pair_pants] at hSafe
+  exact hSafe
+
+/-- Direct fail-closed refusal theorem for `VerifiedWaistbandRootGuard`: any mismatch in
+    `cache_pk_tag`, `cache_params_tag`, `recomputed_child_root`, or coordinate `(layer, tree, kp)`
+    immediately refuses derivation and latches `poisoned = true`. -/
+theorem waistband_mismatch_fails_closed_mir
+    (st : pants_and_quorum_guards.VerifiedWaistbandRootGuard)
+    (req : pants_and_quorum_guards.WaistbandDerivationRequest)
+    (hMismatch :
+      req.cache_pk_tag ≠ st.key_pk_tag ∨
+      req.cache_params_tag ≠ st.key_params_tag ∨
+      req.recomputed_child_root ≠ st.expected_static_child_root ∨
+      req.req_layer ≠ st.ancestor_layer ∨
+      req.req_tree ≠ st.ancestor_tree ∨
+      req.req_kp ≠ st.ancestor_kp) :
+    ∃ e, pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation st req =
+      .ok ({ st with poisoned := true }, .Err e) := by
+  apply (waistband_authorize_exact st req).2
+  right
+  dsimp only [waistbandInnerPassBool]
+  rcases hMismatch with h | h | h | h | h | h
+  · rw [decide_eq_false h]; simp only [Bool.and_false, Bool.false_and]
+  · rw [decide_eq_false h]; simp only [Bool.and_false, Bool.false_and]
+  · rw [decide_eq_false h]; simp only [Bool.and_false, Bool.false_and]
+  · rw [decide_eq_false h]; simp only [Bool.false_and]
+  · rw [decide_eq_false h]; simp only [Bool.and_false, Bool.false_and]
+  · rw [decide_eq_false h]; simp only [Bool.and_false, Bool.false_and]
+
+/-! ## 5. `#tooth` Mutation-Sensitivity & Non-Vacuity Witnesses (`0 Classical.choice`) -/
+
+/-- `#tooth` witness 1: Under-threshold `q = 2` for `(n=5, t=3, f=2)` (`2*q = 4 ≤ 7`) and
+    global-liveness-violating `q = 4 > n - f = 3` are BOTH rejected, while BFT-safe
+    `(n=7, t=3, f=2, q=5, global_liveness=true)` (`2*q = 10 > 9` and `q = 5 ≤ 7 - 2`) is accepted. -/
+theorem tooth_belt_under_threshold_quorum_rejected :
+    pants_and_quorum_guards.validate_belt_quorum_config 5#u32 3#u32 2#u32 2#u32 false = .ok false ∧
+    pants_and_quorum_guards.validate_belt_quorum_config 5#u32 3#u32 2#u32 4#u32 true = .ok false ∧
+    pants_and_quorum_guards.validate_belt_quorum_config 7#u32 3#u32 2#u32 5#u32 true = .ok true := by
+  simp only [validate_belt_quorum_config_eq]
+  refine ⟨congrArg Result.ok (by decide), congrArg Result.ok (by decide),
+    congrArg Result.ok (by decide)⟩
+
+/-- `#tooth` witness 2: WAL sync failure (`wal_sync_ok = false`) and conflicting `(epoch, msg_tag)`
+    equivocation permanently latch `poisoned = true` and reject subsequent valid calls. -/
+private theorem array_repeat32_val (c : Std.U8) :
+    (Array.repeat 32#usize c).val = List.replicate 32 c := rfl
+
+private theorem array_repeat32_ne {x y : Std.U8} (hne : x ≠ y) :
+    Array.repeat 32#usize x ≠ Array.repeat 32#usize y := by
+  intro h
+  have hval : List.replicate 32 x = List.replicate 32 y := by
+    rw [← array_repeat32_val x, ← array_repeat32_val y, h]
+  exact hne (congrArg (fun l => l.getD 0 0#u8) hval)
+
+private theorem list_getD_replicate_u8 (c d : Std.U8) :
+    ∀ (n i : Nat), i < n → (List.replicate n c).getD i d = c
+  | 0, _, hi => False.elim (Nat.not_lt_zero _ hi)
+  | _ + 1, 0, _ => rfl
+  | n + 1, i + 1, hi => list_getD_replicate_u8 c d n i (Nat.lt_of_succ_lt_succ hi)
+
+private theorem pureWotsC256Digit_repeat32 (c : Std.U8) (k : Nat) (hk : k < 128) :
+    pureWotsC256Digit (Array.repeat 32#usize c) k =
+      (c.val / (2 ^ (6 - 2 * (k % 4)))) % 4 := by
+  have hq : k / 4 < 32 := (Nat.div_lt_iff_lt_mul (by decide)).mpr hk
+  unfold pureWotsC256Digit
+  rw [array_repeat32_val, list_getD_replicate_u8 c 0#u8 32 (k / 4) hq]
+
+private theorem natPrefixSum_repeat32_quads (c : Std.U8) :
+    ∀ m, m ≤ 32 →
+      natPrefixSum (pureWotsC256Digit (Array.repeat 32#usize c)) (4 * m) =
+        m * ((c.val / 64) % 4 + (c.val / 16) % 4 + (c.val / 4) % 4 + c.val % 4)
+  | 0, _ => (Nat.zero_mul _).symm
+  | m + 1, hm => by
+    have h4le : 4 * m + 4 ≤ 128 := by
+      rw [← Nat.mul_succ]
+      exact Nat.mul_le_mul_left 4 hm
+    have hk0 : 4 * m < 128 :=
+      Nat.lt_of_lt_of_le (Nat.lt_add_of_pos_right (by decide : 0 < 4)) h4le
+    have hk1 : 4 * m + 1 < 128 :=
+      Nat.lt_of_lt_of_le (Nat.add_lt_add_left (by decide : 1 < 4) (4 * m)) h4le
+    have hk2 : 4 * m + 2 < 128 :=
+      Nat.lt_of_lt_of_le (Nat.add_lt_add_left (by decide : 2 < 4) (4 * m)) h4le
+    have hk3 : 4 * m + 3 < 128 :=
+      Nat.lt_of_lt_of_le (Nat.add_lt_add_left (by decide : 3 < 4) (4 * m)) h4le
+    have hr0 : (4 * m) % 4 = 0 := Nat.mul_mod_right 4 m
+    have hr1 : (4 * m + 1) % 4 = 1 := by rw [Nat.add_comm, Nat.add_mul_mod_self_left]
+    have hr2 : (4 * m + 2) % 4 = 2 := by rw [Nat.add_comm, Nat.add_mul_mod_self_left]
+    have hr3 : (4 * m + 3) % 4 = 3 := by rw [Nat.add_comm, Nat.add_mul_mod_self_left]
+    rw [Nat.mul_succ 4 m]
+    dsimp only [natPrefixSum]
+    rw [natPrefixSum_repeat32_quads c m (Nat.le_of_lt hm),
+      pureWotsC256Digit_repeat32 c (4 * m) hk0,
+      pureWotsC256Digit_repeat32 c (4 * m + 1) hk1,
+      pureWotsC256Digit_repeat32 c (4 * m + 2) hk2,
+      pureWotsC256Digit_repeat32 c (4 * m + 3) hk3,
+      hr0, hr1, hr2, hr3]
+    change m * ((c.val / 64) % 4 + (c.val / 16) % 4 + (c.val / 4) % 4 + c.val % 4) +
+        (c.val / 64) % 4 + (c.val / 16) % 4 + (c.val / 4) % 4 + (c.val / 1) % 4 =
+      (m + 1) * ((c.val / 64) % 4 + (c.val / 16) % 4 + (c.val / 4) % 4 + c.val % 4)
+    rw [Nat.div_one, Nat.succ_mul]
+    simp only [Nat.add_assoc]
+
+theorem tooth_belt_wal_and_conflict_poison :
+    let tagA := Array.repeat 32#usize 0x41#u8
+    let tagB := Array.repeat 32#usize 0x42#u8
+    (∃ st0 st1 st2,
+      pants_and_quorum_guards.BeltQuorumCore.new_validated
+        3#u32 2#u32 1#u32 3#u32 false 10#u64 4#u64 = .ok (.Ok st0) ∧
+      pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+        st0 10#u64 tagA false = .ok (st1, .Err .BeltWalSyncFailed) ∧
+      st1.poisoned = true ∧
+      pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+        st1 10#u64 tagA true = .ok (st2, .Err .BeltGuardPoisoned)) ∧
+    (∃ st0 st1 st2,
+      pants_and_quorum_guards.BeltQuorumCore.new_validated
+        3#u32 2#u32 1#u32 3#u32 false 10#u64 4#u64 = .ok (.Ok st0) ∧
+      pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+        st0 10#u64 tagA true = .ok (st1, .Ok ()) ∧
+      pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+        st1 10#u64 tagB true = .ok (st2, .Err .ConflictingEpochMsgTag) ∧
+      st2.poisoned = true) := by
+  dsimp only
+  let zero32 := Array.repeat 32#usize 0#u8
+  let tagA := Array.repeat 32#usize 0x41#u8
+  let tagB := Array.repeat 32#usize 0x42#u8
+  let st0 : pants_and_quorum_guards.BeltQuorumCore := {
+    n := 3#u32, t := 2#u32, f := 1#u32, q := 3#u32,
+    global_liveness_mode := false, next_epoch := 10#u64, max_jump_window := 4#u64,
+    phase := .Idle, has_bound_epoch := false, bound_epoch := 0#u64,
+    bound_msg_tag := zero32, ack_count := 0#u32, poisoned := false
+  }
+  let stPois0 : pants_and_quorum_guards.BeltQuorumCore :=
+    { st0 with phase := .Poisoned, ack_count := 0#u32, poisoned := true }
+  let stBound : pants_and_quorum_guards.BeltQuorumCore := {
+    n := 3#u32, t := 2#u32, f := 1#u32, q := 3#u32,
+    global_liveness_mode := false, next_epoch := 11#u64, max_jump_window := 4#u64,
+    phase := .EpochBoundPendingQuorum, has_bound_epoch := true, bound_epoch := 10#u64,
+    bound_msg_tag := tagA, ack_count := 0#u32, poisoned := false
+  }
+  let stPoisB : pants_and_quorum_guards.BeltQuorumCore :=
+    { stBound with phase := .Poisoned, ack_count := 0#u32, poisoned := true }
+  have hNew : pants_and_quorum_guards.BeltQuorumCore.new_validated
+      3#u32 2#u32 1#u32 3#u32 false 10#u64 4#u64 = .ok (.Ok st0) := by
+    unfold pants_and_quorum_guards.BeltQuorumCore.new_validated
+    rw [validate_belt_quorum_config_eq]; rfl
+  constructor
+  · refine ⟨st0, stPois0, stPois0, hNew, ?_, rfl, ?_⟩
+    · unfold pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+      unfold pants_and_quorum_guards.poison_belt_guard
+      dsimp only [st0, stPois0]
+      rw [validate_belt_quorum_config_eq]; rfl
+    · unfold pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+      unfold pants_and_quorum_guards.poison_belt_guard
+      rfl
+  · refine ⟨st0, stBound, stPoisB, hNew, ?_, ?_, rfl⟩
+    · unfold pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+      dsimp only [st0, stBound]
+      rw [validate_belt_quorum_config_eq]
+      have hne10 : ¬ (10#u64 = core.num.U64.MAX) := by
+        intro h; have hv : (10#u64).val = 2 ^ 64 - 1 := by rw [h, u64_max_val]
+        exact absurd hv (by decide)
+      simp only [Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok,
+        (by decide : ¬ (10#u64 < 10#u64)), hSub_uscalar_eq, Nat.le_refl,
+        (by decide : ¬ ((⟨(10#u64).bv - (10#u64).bv⟩ : Std.U64) > 4#u64)),
+        hne10, hAdd_uscalar_eq, (by decide : (10#u64).val + (1#u64).val < 2 ^ 64)]
+      rfl
+    · unfold pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+      unfold pants_and_quorum_guards.poison_belt_guard
+      dsimp only [stBound, stPoisB, tagA, tagB]
+      rw [validate_belt_quorum_config_eq]
+      simp only [Bool.false_eq_true, (by decide : ¬ (10#u64 ≥ 11#u64)), ↓reduceIte,
+        bind_eq_result_bind, result_bind_ok]
+      rw [ct_eq_bytes32_spec, result_bind_ok, decide_eq_false (array_repeat32_ne (by decide))]
+      rfl
+
+/-- Inhabitedness witness for `belt_quorum_guard_multiturn_sound`: a complete 5-turn `MirTrace`
+    binding epoch `12` via bounded jump `10 → 12`, recording 3 custodian acks, and reaching
+    `SharesAuthorized`. -/
+theorem inhabited_belt_quorum_trace :
+    ∃ st0 stF turns grant,
+      pants_and_quorum_guards.BeltQuorumCore.new_validated
+        3#u32 2#u32 1#u32 3#u32 false 10#u64 4#u64 = .ok (.Ok st0) ∧
+      MirTrace (adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step)
+        st0 turns stF ∧
+      (.AuthorizeShares 12#u64 (Array.repeat 32#usize 0x41#u8), .SharesAuthorized grant) ∈
+        mirAcceptedPairs turns ∧
+      grant.authorized_epoch = 12#u64 ∧
+      grant.certified_acks = 3#u32 := by
+  let tag := Array.repeat 32#usize 0x41#u8
+  let st0 : pants_and_quorum_guards.BeltQuorumCore := {
+    n := 3#u32, t := 2#u32, f := 1#u32, q := 3#u32,
+    global_liveness_mode := false, next_epoch := 10#u64, max_jump_window := 4#u64,
+    phase := .Idle, has_bound_epoch := false, bound_epoch := 0#u64,
+    bound_msg_tag := Array.repeat 32#usize 0#u8, ack_count := 0#u32, poisoned := false
+  }
+  let st1 : pants_and_quorum_guards.BeltQuorumCore := {
+    n := 3#u32, t := 2#u32, f := 1#u32, q := 3#u32,
+    global_liveness_mode := false, next_epoch := 13#u64, max_jump_window := 4#u64,
+    phase := .EpochBoundPendingQuorum, has_bound_epoch := true, bound_epoch := 12#u64,
+    bound_msg_tag := tag, ack_count := 0#u32, poisoned := false
+  }
+  let st2 := { st1 with ack_count := 1#u32 }
+  let st3 := { st1 with ack_count := 2#u32 }
+  let st4 := { st1 with ack_count := 3#u32 }
+  let st5 := { st4 with phase := .SharesAuthorized }
+  let grant : pants_and_quorum_guards.BeltAuthorizationGrant :=
+    { authorized_epoch := 12#u64, msg_tag := tag, certified_acks := 3#u32 }
+  have hNew : pants_and_quorum_guards.BeltQuorumCore.new_validated
+      3#u32 2#u32 1#u32 3#u32 false 10#u64 4#u64 = .ok (.Ok st0) := by
+    unfold pants_and_quorum_guards.BeltQuorumCore.new_validated
+    rw [validate_belt_quorum_config_eq]; rfl
+  have htag_eq : tower.ct_eq_bytes32 tag tag = .ok true := by
+    rw [ct_eq_bytes32_spec, decide_eq_true rfl]
+  have hs1 : adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      st0 (.ProposeOrRetryEpoch 12#u64 tag true) = .ok (.accepted st1 .EpochBound) := by
+    have hne12 : ¬ (12#u64 = core.num.U64.MAX) := by
+      intro h; have hv : (12#u64).val = 2 ^ 64 - 1 := by rw [h, u64_max_val]
+      exact absurd hv (by decide)
+    unfold adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+    dsimp only [st0, st1]
+    rw [validate_belt_quorum_config_eq]
+    simp only [Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok,
+      (by decide : ¬ (12#u64 < 10#u64)), hSub_uscalar_eq,
+      (by decide : (10#u64).val ≤ (12#u64).val),
+      (by decide : ¬ ((⟨(12#u64).bv - (10#u64).bv⟩ : Std.U64) > 4#u64)),
+      hne12, hAdd_uscalar_eq, (by decide : (12#u64).val + (1#u64).val < 2 ^ 64)]
+    rfl
+  have hs2 : adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      st1 (.RecordCustodianAck 12#u64 tag) = .ok (.accepted st2 (.AckRecorded 1#u32)) := by
+    unfold adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
+    dsimp only [st1, st2]
+    rw [validate_belt_quorum_config_eq]
+    simp only [Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok,
+      (by decide : ¬ (12#u64 ≥ 13#u64)), bne_self_eq_false, htag_eq,
+      (by decide : ¬ (0#u32 ≥ 3#u32)), hAdd_uscalar_eq,
+      (by decide : (0#u32).val + (1#u32).val < 2 ^ 32)]
+    rfl
+  have hs3 : adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      st2 (.RecordCustodianAck 12#u64 tag) = .ok (.accepted st3 (.AckRecorded 2#u32)) := by
+    unfold adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
+    dsimp only [st1, st2, st3]
+    rw [validate_belt_quorum_config_eq]
+    simp only [Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok,
+      (by decide : ¬ (12#u64 ≥ 13#u64)), bne_self_eq_false, htag_eq,
+      (by decide : ¬ (1#u32 ≥ 3#u32)), hAdd_uscalar_eq,
+      (by decide : (1#u32).val + (1#u32).val < 2 ^ 32)]
+    rfl
+  have hs4 : adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      st3 (.RecordCustodianAck 12#u64 tag) = .ok (.accepted st4 (.AckRecorded 3#u32)) := by
+    unfold adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
+    dsimp only [st1, st3, st4]
+    rw [validate_belt_quorum_config_eq]
+    simp only [Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok,
+      (by decide : ¬ (12#u64 ≥ 13#u64)), bne_self_eq_false, htag_eq,
+      (by decide : ¬ (2#u32 ≥ 3#u32)), hAdd_uscalar_eq,
+      (by decide : (2#u32).val + (1#u32).val < 2 ^ 32)]
+    rfl
+  have hs5 : adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      st4 (.AuthorizeShares 12#u64 tag) = .ok (.accepted st5 (.SharesAuthorized grant)) := by
+    unfold adaptStateResult pants_and_quorum_guards.BeltQuorumCore.step
+      pants_and_quorum_guards.BeltQuorumCore.authorize_shares
+    dsimp only [st1, st4, st5, grant]
+    rw [validate_belt_quorum_config_eq]
+    simp only [Bool.false_eq_true, ↓reduceIte, bind_eq_result_bind, result_bind_ok,
+      (by decide : ¬ (12#u64 ≥ 13#u64)), bne_self_eq_false, htag_eq,
+      (by decide : ¬ (3#u32 < 3#u32))]
+    rfl
+  refine ⟨st0, st5, _, grant, hNew,
+    .accept hs1 (.accept hs2 (.accept hs3 (.accept hs4 (.accept hs5 (.nil st5))))),
+    List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_cons_of_mem _
+      (List.mem_cons_of_mem _ (List.mem_cons_self)))), rfl, rfl⟩
+
+/-- `#tooth` & non-vacuity witness 3 (`WOTS+C` 256-bit `w=4, v=128, S=192`):
+    `[0x99; 32]` (`[2,1,2,1]` per byte → `6 * 32 = 192`) is accepted by extracted MIR
+    `verified_wotsc256_verify_sum`, while `[0x00; 32]` (`S = 0`) and `[0xFF; 32]` (`S = 384`)
+    are both rejected. -/
+theorem tooth_wotsc256_wrong_sum_rejected_and_inhabited :
+    pants_and_quorum_guards.verified_wotsc256_verify_sum (Array.repeat 32#usize 0x99#u8) =
+      .ok true ∧
+    pants_and_quorum_guards.verified_wotsc256_verify_sum (Array.repeat 32#usize 0x00#u8) =
+      .ok false ∧
+    pants_and_quorum_guards.verified_wotsc256_verify_sum (Array.repeat 32#usize 0xFF#u8) =
+      .ok false := by
+  rw [verified_wotsc256_verify_sum_eq, verified_wotsc256_verify_sum_eq,
+    verified_wotsc256_verify_sum_eq]
+  have h128 : ∀ c : Std.U8,
+      natPrefixSum (pureWotsC256Digit (Array.repeat 32#usize c)) 128 =
+        32 * ((c.val / 64) % 4 + (c.val / 16) % 4 + (c.val / 4) % 4 + c.val % 4) :=
+    fun c => natPrefixSum_repeat32_quads c 32 (Nat.le_refl 32)
+  refine ⟨congrArg Result.ok ?_, congrArg Result.ok ?_, congrArg Result.ok ?_⟩ <;>
+    (rw [h128]; decide)
+
+/-- `#tooth` witness 4 (`VerifiedRssPoisonLatch`): after `stage_relations(64)` and a failed
+    check `record_check_result(false)` (which clears `pending_relations = 0` AFTER setting
+    `poisoned = true`), BOTH a subsequent `record_check_result(true)` AND `authorize_open()`
+    are rejected with `RssEnginePoisoned`. -/
+theorem tooth_rss_failed_check_then_true_check_blocks_open :
+    ∃ st0 st1 st2 st3 st4,
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.new_clean = .ok st0 ∧
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations st0 64#u64 =
+        .ok (st1, .Ok 64#u64) ∧
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result st1 false =
+        .ok (st2, .Err .RssVerificationCheckFailed) ∧
+      st2.pending_relations = 0#u64 ∧
+      st2.poisoned = true ∧
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result st2 true =
+        .ok (st3, .Err .RssEnginePoisoned) ∧
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open st3 =
+        .ok (st4, .Err .RssEnginePoisoned) := by
+  let st0 : pants_and_quorum_guards.VerifiedRssPoisonLatch :=
+    { pending_relations := 0#u64, unverified := false, poisoned := false }
+  let st1 : pants_and_quorum_guards.VerifiedRssPoisonLatch :=
+    { pending_relations := 64#u64, unverified := true, poisoned := false }
+  let stPois : pants_and_quorum_guards.VerifiedRssPoisonLatch :=
+    { pending_relations := 0#u64, unverified := true, poisoned := true }
+  have hStage : pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations st0 64#u64 =
+      .ok (st1, .Ok 64#u64) := by
+    have hsub0 : (core.num.U64.MAX - 0#u64 : Result Std.U64) = .ok core.num.U64.MAX := by
+      have hle0 : (0#u64).val ≤ core.num.U64.MAX.val := Nat.zero_le _
+      simp only [hSub_uscalar_eq, hle0, ite_true]
+      apply congrArg Result.ok
+      exact UScalar.eq_of_val_eq (by
+        change (core.num.U64.MAX.bv - (0#u64).bv).toNat = _
+        rw [BitVec.toNat_sub_of_le (BitVec.le_def.mpr hle0)]
+        exact Nat.sub_zero _)
+    have hgt64 : ¬ (64#u64 > core.num.U64.MAX) :=
+      fun h => Nat.not_lt_of_ge (u64_val_le_max 64#u64) ((UScalar.lt_iff_val _ _).mp h)
+    unfold pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations
+    dsimp only [st0, st1]
+    simp only [Bool.false_eq_true, (by decide : ¬ (64#u64 = 0#u64)), ↓reduceIte, bind_eq_result_bind]
+    rw [hsub0, result_bind_ok]
+    simp only [hgt64, ↓reduceIte, hAdd_uscalar_eq,
+      (by decide : (0#u64).val + (64#u64).val < 2 ^ 64), result_bind_ok]
+    rfl
+  exact ⟨st0, st1, stPois, stPois, stPois, rfl, hStage, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- Inhabitedness witness for `VerifiedRssPoisonLatch`: clean `stage_relations(32) →
+    record_check_result(true) → authorize_open()` multi-turn `MirTrace` succeeds. -/
+theorem inhabited_rss_poison_latch_trace :
+    ∃ st0 stF turns,
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.new_clean = .ok st0 ∧
+      MirTrace (adaptStateResult pants_and_quorum_guards.VerifiedRssPoisonLatch.step)
+        st0 turns stF ∧
+      (.AuthorizeOpen, .OpenAuthorized { verified_clean := true }) ∈ mirAcceptedPairs turns := by
+  let st0 : pants_and_quorum_guards.VerifiedRssPoisonLatch :=
+    { pending_relations := 0#u64, unverified := false, poisoned := false }
+  let st1 : pants_and_quorum_guards.VerifiedRssPoisonLatch :=
+    { pending_relations := 32#u64, unverified := true, poisoned := false }
+  have hs1 : adaptStateResult pants_and_quorum_guards.VerifiedRssPoisonLatch.step
+      st0 (.StageRelations 32#u64) = .ok (.accepted st1 (.RelationsStaged 32#u64)) := by
+    have hsub0 : (core.num.U64.MAX - 0#u64 : Result Std.U64) = .ok core.num.U64.MAX := by
+      have hle0 : (0#u64).val ≤ core.num.U64.MAX.val := Nat.zero_le _
+      simp only [hSub_uscalar_eq, hle0, ite_true]
+      apply congrArg Result.ok
+      exact UScalar.eq_of_val_eq (by
+        change (core.num.U64.MAX.bv - (0#u64).bv).toNat = _
+        rw [BitVec.toNat_sub_of_le (BitVec.le_def.mpr hle0)]
+        exact Nat.sub_zero _)
+    have hgt32 : ¬ (32#u64 > core.num.U64.MAX) :=
+      fun h => Nat.not_lt_of_ge (u64_val_le_max 32#u64) ((UScalar.lt_iff_val _ _).mp h)
+    unfold adaptStateResult pants_and_quorum_guards.VerifiedRssPoisonLatch.step
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations
+    dsimp only [st0, st1]
+    simp only [Bool.false_eq_true, (by decide : ¬ (32#u64 = 0#u64)), ↓reduceIte, bind_eq_result_bind]
+    rw [hsub0, result_bind_ok]
+    simp only [hgt32, ↓reduceIte, hAdd_uscalar_eq,
+      (by decide : (0#u64).val + (32#u64).val < 2 ^ 64), result_bind_ok]
+    rfl
+  have hs2 : adaptStateResult pants_and_quorum_guards.VerifiedRssPoisonLatch.step
+      st1 (.RecordCheckResult true) = .ok (.accepted st0 .CheckVerified) := by
+    rfl
+  have hs3 : adaptStateResult pants_and_quorum_guards.VerifiedRssPoisonLatch.step
+      st0 .AuthorizeOpen = .ok (.accepted st0 (.OpenAuthorized { verified_clean := true })) := by
+    unfold adaptStateResult pants_and_quorum_guards.VerifiedRssPoisonLatch.step
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open
+    dsimp only [st0]
+    simp only [Bool.false_eq_true, bne_self_eq_false, ↓reduceIte, bind_eq_result_bind, result_bind_ok]
+  exact ⟨st0, st0, _, rfl, .accept hs1 (.accept hs2 (.accept hs3 (.nil st0))),
+    List.mem_cons_of_mem _ (List.mem_cons_of_mem _ (List.mem_cons_self))⟩
+
+/-- `#tooth` & non-vacuity witness 5 (`VerifiedWaistbandRootGuard`):
+    (a) corrupted intermediate `recomputed_child_root` fails closed with `WaistbandChildRootMismatch`,
+    (b) honest ancestor derivation succeeds and locks the first codeword, and
+    (c) attempting a second distinct ancestor codeword fails closed with `WaistbandCodewordEquivocation`. -/
+theorem tooth_waistband_corrupted_root_and_second_codeword_fail_closed :
+    let pk := Array.repeat 32#usize 0x11#u8
+    let params := Array.repeat 32#usize 0x22#u8
+    let goodRoot := Array.repeat 32#usize 0x33#u8
+    let badRoot := Array.repeat 32#usize 0xFF#u8
+    let cw1 := Array.repeat 32#usize 0x44#u8
+    let cw2 := Array.repeat 32#usize 0x55#u8
+    (∃ st0 stBad,
+      pants_and_quorum_guards.VerifiedWaistbandRootGuard.new_enrolled
+        pk params 3#u32 77#u64 5#u32 goodRoot = .ok st0 ∧
+      pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation st0
+        { req_layer := 3#u32, req_tree := 77#u64, req_kp := 5#u32,
+          cache_pk_tag := pk, cache_params_tag := params,
+          recomputed_child_root := badRoot, candidate_ancestor_codeword_tag := cw1 } =
+        .ok (stBad, .Err .WaistbandChildRootMismatch) ∧
+      stBad.poisoned = true) ∧
+    (∃ st0 st1 st2 permit,
+      pants_and_quorum_guards.VerifiedWaistbandRootGuard.new_enrolled
+        pk params 3#u32 77#u64 5#u32 goodRoot = .ok st0 ∧
+      pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation st0
+        { req_layer := 3#u32, req_tree := 77#u64, req_kp := 5#u32,
+          cache_pk_tag := pk, cache_params_tag := params,
+          recomputed_child_root := goodRoot, candidate_ancestor_codeword_tag := cw1 } =
+        .ok (st1, .Ok permit) ∧
+      permit.verified_child_root = goodRoot ∧
+      pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation st1
+        { req_layer := 3#u32, req_tree := 77#u64, req_kp := 5#u32,
+          cache_pk_tag := pk, cache_params_tag := params,
+          recomputed_child_root := goodRoot, candidate_ancestor_codeword_tag := cw2 } =
+        .ok (st2, .Err .WaistbandCodewordEquivocation) ∧
+      st2.poisoned = true) := by
+  dsimp only
+  let pk := Array.repeat 32#usize 0x11#u8
+  let params := Array.repeat 32#usize 0x22#u8
+  let goodRoot := Array.repeat 32#usize 0x33#u8
+  let badRoot := Array.repeat 32#usize 0xFF#u8
+  let cw1 := Array.repeat 32#usize 0x44#u8
+  let cw2 := Array.repeat 32#usize 0x55#u8
+  let st0 : pants_and_quorum_guards.VerifiedWaistbandRootGuard := {
+    key_pk_tag := pk, key_params_tag := params,
+    ancestor_layer := 3#u32, ancestor_tree := 77#u64, ancestor_kp := 5#u32,
+    expected_static_child_root := goodRoot,
+    has_locked_codeword := false,
+    locked_ancestor_codeword_tag := Array.repeat 32#usize 0#u8,
+    poisoned := false
+  }
+  let stBad := { st0 with poisoned := true }
+  let st1 := { st0 with has_locked_codeword := true, locked_ancestor_codeword_tag := cw1 }
+  let st2 := { st1 with poisoned := true }
+  let permit : pants_and_quorum_guards.WaistbandAncestorPermit := {
+    layer := 3#u32, tree := 77#u64, kp := 5#u32,
+    verified_child_root := goodRoot, authorized_codeword_tag := cw1
+  }
+  have hpk_eq : ∀ c, tower.ct_eq_bytes32 (Array.repeat 32#usize c) (Array.repeat 32#usize c) = .ok true :=
+    fun _ => by rw [ct_eq_bytes32_spec, decide_eq_true rfl]
+  have hbad_ne : tower.ct_eq_bytes32 (Array.repeat 32#usize 0xFF#u8) (Array.repeat 32#usize 0x33#u8) = .ok false := by
+    rw [ct_eq_bytes32_spec, decide_eq_false (array_repeat32_ne (by decide))]
+  have hcw_ne : tower.ct_eq_bytes32 (Array.repeat 32#usize 0x55#u8) (Array.repeat 32#usize 0x44#u8) = .ok false := by
+    rw [ct_eq_bytes32_spec, decide_eq_false (array_repeat32_ne (by decide))]
+  constructor
+  · refine ⟨st0, stBad, rfl, ?_, rfl⟩
+    unfold pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation
+    unfold pants_and_quorum_guards.poison_waistband_guard
+    dsimp only [st0, stBad, pk, params, goodRoot, badRoot, cw1]
+    simp only [Bool.false_eq_true, bne_self_eq_false, ↓reduceIte,
+      hpk_eq, hbad_ne, bind_eq_result_bind, result_bind_ok]
+  · refine ⟨st0, st1, st2, permit, rfl, ?_, rfl, ?_, rfl⟩
+    · unfold pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation
+      dsimp only [st0, st1, permit, pk, params, goodRoot, cw1]
+      simp only [Bool.false_eq_true, bne_self_eq_false, ↓reduceIte,
+        hpk_eq, bind_eq_result_bind, result_bind_ok]
+    · unfold pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation
+      unfold pants_and_quorum_guards.poison_waistband_guard
+      dsimp only [st0, st1, st2, pk, params, goodRoot, cw1, cw2]
+      simp only [Bool.false_eq_true, bne_self_eq_false, ↓reduceIte,
+        hpk_eq, hcw_ne, bind_eq_result_bind, result_bind_ok]
+
+
+/-! ## Authenticated public Belt boundary
+The preceding Belt transition lemmas concern the now-private `BeltQuorumCore`.
+The public Rust API verifies per-custodian tags before entering that core.
+These lemmas are about that newly extracted boundary, not a caller-provided MAC flag. -/
+
+/-- Population count is specified independently as the number of set bit positions. -/
+@[expose]
+def BeltAckCountInvariant (st : authenticated_belt.VerifiedBeltQuorumGuard) : Prop :=
+  st.inner.ack_count.val = (List.range 64).countP (fun i => st.ack_bitmap.bv.getLsbD i)
+
+theorem authenticated_belt_initial_count_invariant
+    (n t f q : Std.U32) (gl : Bool) (epoch window : Std.U64)
+    (commit wal : Array Std.U8 32#usize) (keys : Array (Array Std.U8 32#usize) 64#usize)
+    (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (h : authenticated_belt.VerifiedBeltQuorumGuard.new_validated n t f q gl epoch window commit keys wal =
+      .ok (core.result.Result.Ok st)) : BeltAckCountInvariant st := by
+  by_cases hn : n > 64#u32
+  · simp [authenticated_belt.VerifiedBeltQuorumGuard.new_validated, hn] at h
+  · by_cases hv : validBeltQuorumConfigBool n t f q gl = true
+    · simp [authenticated_belt.VerifiedBeltQuorumGuard.new_validated, hn,
+        pants_and_quorum_guards.BeltQuorumCore.new_validated,
+        validate_belt_quorum_config_eq, hv] at h
+      cases h
+      change (0#u32).val = (List.range 64).countP (fun i => (0#u64).bv.getLsbD i)
+      decide
+    · simp [authenticated_belt.VerifiedBeltQuorumGuard.new_validated, hn,
+        pants_and_quorum_guards.BeltQuorumCore.new_validated,
+        validate_belt_quorum_config_eq, hv] at h
+
+theorem authenticated_belt_forged_tag_fails_closed
+    (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (epoch : Std.U64) (msg key expected forged : Array Std.U8 32#usize) (id : Std.U8)
+    (hin : ¬ UScalar.cast .Usize id >= UScalar.cast .Usize st.inner.n)
+    (h64 : ¬ id >= 64#u8)
+    (hkey : Array.index_usize st.custodian_keys (UScalar.cast .Usize id) = .ok key)
+    (htag : authenticated_belt.custodian_ack_tag key st.guard_key_commit epoch msg id = .ok expected)
+    (hforged : expected ≠ forged) :
+    authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st epoch msg id forged =
+      .ok (st, core.result.Result.Err authenticated_belt.BeltAuthError.InvalidCustodianTag) := by
+  change ¬ (UScalar.cast .Usize st.inner.n).bv.toNat ≤ (UScalar.cast .Usize id).bv.toNat at hin
+  simp [authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack,
+    pants_and_quorum_guards.BeltQuorumCore.impl.n, hin, h64, hkey, htag,
+    ct_eq_bytes32_spec, hforged]
+
+theorem authenticated_belt_duplicate_ack_unchanged
+    (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (epoch : Std.U64) (msg key tag : Array Std.U8 32#usize) (id : Std.U8) (bit : Std.U64)
+    (hin : ¬ UScalar.cast .Usize id >= UScalar.cast .Usize st.inner.n)
+    (h64 : ¬ id >= 64#u8)
+    (hkey : Array.index_usize st.custodian_keys (UScalar.cast .Usize id) = .ok key)
+    (htag : authenticated_belt.custodian_ack_tag key st.guard_key_commit epoch msg id = .ok tag)
+    (hp : st.inner.poisoned = false) (hb : st.inner.has_bound_epoch = true)
+    (he : epoch = st.inner.bound_epoch) (hm : msg = st.inner.bound_msg_tag)
+    (hbit : (1#u64 <<< id : Result Std.U64) = .ok bit)
+    (hused : st.ack_bitmap &&& bit ≠ 0#u64) :
+    authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st epoch msg id tag =
+      .ok (st, core.result.Result.Ok st.inner.ack_count) := by
+  change ¬ (UScalar.cast .Usize st.inner.n).bv.toNat ≤ (UScalar.cast .Usize id).bv.toNat at hin
+  subst epoch
+  subst msg
+  simp [authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack,
+    pants_and_quorum_guards.BeltQuorumCore.impl.n,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+    pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+    hin, h64, hkey, htag, ct_eq_bytes32_spec, hp, hb, hbit, hused]
+
+/-- Execute the actual MIR acknowledgment entrypoint repeatedly, retaining even rejected states. -/
+@[expose]
+def repeatCustodianAck (epoch : Std.U64) (msg tag : Array Std.U8 32#usize) (id : Std.U8) :
+    Nat → authenticated_belt.VerifiedBeltQuorumGuard → Result authenticated_belt.VerifiedBeltQuorumGuard
+  | 0, st => .ok st
+  | n + 1, st => do
+      let (next, _) ← authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st epoch msg id tag
+      repeatCustodianAck epoch msg tag id n next
+
+theorem tooth_duplicate_custodian_cannot_reach_quorum
+    (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (epoch : Std.U64) (msg key tag : Array Std.U8 32#usize) (id : Std.U8) (bit : Std.U64)
+    (hin : ¬ UScalar.cast .Usize id >= UScalar.cast .Usize st.inner.n)
+    (h64 : ¬ id >= 64#u8)
+    (hkey : Array.index_usize st.custodian_keys (UScalar.cast .Usize id) = .ok key)
+    (htag : authenticated_belt.custodian_ack_tag key st.guard_key_commit epoch msg id = .ok tag)
+    (hp : st.inner.poisoned = false) (hb : st.inner.has_bound_epoch = true)
+    (he : epoch = st.inner.bound_epoch) (hm : msg = st.inner.bound_msg_tag)
+    (hbit : (1#u64 <<< id : Result Std.U64) = .ok bit)
+    (hused : st.ack_bitmap &&& bit ≠ 0#u64)
+    (hone : st.inner.ack_count.val = 1) (hq : 2 ≤ st.inner.q.val) (calls : Nat) :
+    repeatCustodianAck epoch msg tag id calls st = .ok st ∧ st.inner.ack_count.val < st.inner.q.val := by
+  constructor
+  · have hstep := authenticated_belt_duplicate_ack_unchanged st epoch msg key tag id bit
+      hin h64 hkey htag hp hb he hm hbit hused
+    induction calls with
+    | zero => rfl
+    | succ n ih => simp only [repeatCustodianAck, hstep, bind_eq_result_bind, result_bind_ok, ih]
+  · omega
+
+end qsag_verified.proofs
