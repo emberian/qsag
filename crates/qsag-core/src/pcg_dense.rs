@@ -1133,3 +1133,1321 @@ impl SeedBurnTracker for FsSeedBurnTracker {
 }
 
 /// Per-peer seed material inside a [`DensePcgPartySeed`] (`!Clone`, wiped on `Drop`).
+pub struct DensePcgPeerSeed {
+    /// Distinct peer party identifier in `0..num_parties`.
+    pub peer_id: u16,
+    sender_master_seed: [u8; 32],
+    punctured_indices: [u16; DENSE_PCG_NUM_TREES],
+    copaths: Vec<Vec<[u8; 32]>>,
+    corr_offsets: [Tower128; DENSE_PCG_NUM_TREES],
+    spcot_chal_coin: [u8; 32],
+    /// Receiver MAC of the one-time VOLE mask of each check repetition.
+    spcot_mask_macs: [Tower128; SPCOT_CHECK_REPS],
+    spcot_expected_tag: [u8; 32],
+}
+
+impl Drop for DensePcgPeerSeed {
+    fn drop(&mut self) {
+        wipe_bytes32(&mut self.sender_master_seed);
+        wipe_u16s(&mut self.punctured_indices);
+        for cp in &mut self.copaths {
+            for node in cp {
+                wipe_bytes32(node);
+            }
+        }
+        wipe_tower128_slice(&mut self.corr_offsets);
+        wipe_bytes32(&mut self.spcot_chal_coin);
+        wipe_tower128_slice(&mut self.spcot_mask_macs);
+        wipe_bytes32(&mut self.spcot_expected_tag);
+    }
+}
+
+/// Compact `< 36 KiB` Dense Dual-LPN PCG party seed.
+///
+/// The type is not `Clone` and [`Self::expand_local`] takes `self` by value, which stops one
+/// in-memory value from being expanded twice. That does not cover a seed that was serialized
+/// with [`Self::to_wire_bytes`] and decoded again, so expansion additionally burns
+/// [`Self::seed_id`] in a [`SeedBurnTracker`] before doing any work.
+pub struct DensePcgPartySeed {
+    /// 32-byte protocol session identifier.
+    pub session_id: [u8; 32],
+    /// Owning party index in `0..num_parties`.
+    pub party_id: usize,
+    /// Total committee size (`>= 2`).
+    pub num_parties: usize,
+    /// Validated GGM tree depth (`14` or `15`).
+    pub tree_depth: PcgTreeDepth,
+    mac_alpha: Tower128,
+    peers: Vec<DensePcgPeerSeed>,
+    /// Present only when `num_parties >= 3` (`0` bytes for 2-party seeds!).
+    multi_party_c_fix: Vec<u64>,
+}
+
+impl Drop for DensePcgPartySeed {
+    fn drop(&mut self) {
+        wipe_tower128_elem(&mut self.mac_alpha);
+        wipe_u64s(&mut self.multi_party_c_fix);
+    }
+}
+
+/// Flat contiguous BDOZ Subfield-VOLE and $\mathbb{F}_{2^{128}}$ VOLE material for one peer.
+pub struct DensePcgPeerVoleMaterial {
+    /// Peer party index in `0..num_parties`.
+    pub peer_id: usize,
+    /// `1024` `u64` words (`65,536` bits) of Receiver choice bits $x_R = H_{\mathrm{lpn}} \cdot e_{p^*}$.
+    pub subfield_choice_words: Vec<u64>,
+    /// `65,536` flat BDOZ Subfield-VOLE MACs ($t_R = H_{\mathrm{lpn}} \cdot s_{\neq p^*} \oplus H_{\mathrm{lpn}}[:, p^*] \cdot \Delta_{\mathrm{corr}}$).
+    pub subfield_macs: Vec<Tower128>,
+    /// `65,536` flat BDOZ Subfield-VOLE keys ($q_S = H_{\mathrm{lpn}} \cdot s$).
+    pub subfield_keys: Vec<Tower128>,
+    /// `64` $\mathbb{F}_{2^{128}}$ VOLE correlated field elements $u_R \in \mathcal{T}_7$.
+    pub gf128_u_vals: Vec<Tower128>,
+    /// `64` $\mathbb{F}_{2^{128}}$ VOLE MAC tags authenticating `gf128_u_vals` under peer's `mac_alpha`.
+    pub gf128_macs: Vec<Tower128>,
+    /// `64` $\mathbb{F}_{2^{128}}$ VOLE keys authenticating peer's `gf128_u_vals` under `self.mac_alpha`.
+    pub gf128_keys: Vec<Tower128>,
+    /// `64` dense additive $\mathbb{F}_{2^{128}}$ shares (`share_S ^ share_R == u` for each direction).
+    pub gf128_sender_dense_shares: Vec<Tower128>,
+    /// `64` dense additive $\mathbb{F}_{2^{128}}$ receiver shares (`share_S ^ share_R == gf128_u_vals`).
+    pub gf128_receiver_dense_shares: Vec<Tower128>,
+}
+
+impl Drop for DensePcgPeerVoleMaterial {
+    fn drop(&mut self) {
+        wipe_u64s(&mut self.subfield_choice_words);
+        wipe_tower128_slice(&mut self.subfield_macs);
+        wipe_tower128_slice(&mut self.subfield_keys);
+        wipe_tower128_slice(&mut self.gf128_u_vals);
+        wipe_tower128_slice(&mut self.gf128_macs);
+        wipe_tower128_slice(&mut self.gf128_keys);
+        wipe_tower128_slice(&mut self.gf128_sender_dense_shares);
+        wipe_tower128_slice(&mut self.gf128_receiver_dense_shares);
+    }
+}
+
+/// Locally expanded vault holding `65,536` Boolean Beaver triples `(a, b, c = a & b)`,
+/// `65,536` flat BDOZ Subfield-VOLEs, and `64` $\mathbb{F}_{2^{128}}$ VOLE companions per peer.
+pub struct DensePcgExpandedVault {
+    /// Owning party index in `0..num_parties`.
+    pub party_id: usize,
+    /// Committee size (`>= 2`).
+    pub num_parties: usize,
+    mac_alpha: Tower128,
+    /// `1024` words (`65,536` bits) of additive Boolean share `a_i`.
+    pub a_words: Vec<u64>,
+    /// `1024` words (`65,536` bits) of additive Boolean share `b_i`.
+    pub b_words: Vec<u64>,
+    /// `1024` words (`65,536` bits) of additive Boolean product share `c_i` (`(\bigoplus a_i) & (\bigoplus b_i) == \bigoplus c_i`).
+    pub c_words: Vec<u64>,
+    /// Flat per-peer Subfield-VOLE and $\mathbb{F}_{2^{128}}$ VOLE companion storage.
+    pub peer_voles: Vec<DensePcgPeerVoleMaterial>,
+    word_cursor: usize,
+}
+
+impl Drop for DensePcgExpandedVault {
+    fn drop(&mut self) {
+        wipe_tower128_elem(&mut self.mac_alpha);
+        wipe_u64s(&mut self.a_words);
+        wipe_u64s(&mut self.b_words);
+        wipe_u64s(&mut self.c_words);
+    }
+}
+
+impl DensePcgExpandedVault {
+    /// Global BDOZ / VOLE authentication scalar $\alpha_i \in \mathbb{F}_{2^{128}}$ (`LSB == 1`).
+    #[inline]
+    pub fn mac_alpha(&self) -> Tower128 {
+        self.mac_alpha
+    }
+
+    /// Total Boolean Beaver triples in this vault (`65,536`).
+    #[inline]
+    pub fn num_boolean_triples(&self) -> usize {
+        self.a_words.len() * 64
+    }
+
+    /// Stream the next 64 Boolean Beaver triples `(a_word, b_word, c_word)` without replacement.
+    pub fn next_bool_triple_word64(&mut self) -> Result<(u64, u64, u64), PreprocessError> {
+        if self.word_cursor >= self.a_words.len() {
+            return Err(PreprocessError::VaultExhausted {
+                kind: "pcg_dense_boolean_triples",
+            });
+        }
+        let idx = self.word_cursor;
+        self.word_cursor += 1;
+        let out = (self.a_words[idx], self.b_words[idx], self.c_words[idx]);
+        self.a_words[idx] = 0;
+        self.b_words[idx] = 0;
+        self.c_words[idx] = 0;
+        Ok(out)
+    }
+}
+
+impl DensePcgPartySeed {
+    /// Global BDOZ / VOLE authentication scalar $\alpha_i \in \mathbb{F}_{2^{128}}$.
+    #[inline]
+    pub fn mac_alpha(&self) -> Tower128 {
+        self.mac_alpha
+    }
+
+    /// Mutable test-only / audit-only helper to corrupt a Receiver GGM copath sibling byte in memory.
+    #[cfg(test)]
+    pub fn corrupt_copath_byte_for_audit(
+        &mut self,
+        peer_slot: usize,
+        tree_idx: usize,
+        level: usize,
+        byte_idx: usize,
+        xor_mask: u8,
+    ) {
+        self.peers[peer_slot].copaths[tree_idx][level][byte_idx] ^= xor_mask;
+    }
+
+    /// Mutable test-only / audit-only helper to corrupt a Receiver SPCOT correlation offset in memory.
+    #[cfg(test)]
+    pub fn corrupt_corr_offset_for_audit(
+        &mut self,
+        peer_slot: usize,
+        tree_idx: usize,
+        xor_mask: u128,
+    ) {
+        self.peers[peer_slot].corr_offsets[tree_idx].0 ^= xor_mask;
+    }
+
+    /// Validate structural, peer-ID, uniqueness, and punctured-index invariants (`P1-06`).
+    pub fn validate_invariants(&self) -> Result<(), PreprocessError> {
+        if self.num_parties < 2
+            || self.party_id >= self.num_parties
+            || (self.mac_alpha.0 & 1) == 0
+            || self.peers.len() != self.num_parties - 1
+        {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+
+        let d = self.tree_depth.depth();
+        let max_leaves = self.tree_depth.num_leaves();
+
+        for (slot_idx, peer) in self.peers.iter().enumerate() {
+            let pid = peer.peer_id as usize;
+            if pid >= self.num_parties || pid == self.party_id {
+                return Err(PreprocessError::PcgInvalidWireSeed);
+            }
+            for earlier in self.peers.iter().take(slot_idx) {
+                if earlier.peer_id == peer.peer_id {
+                    return Err(PreprocessError::PcgInvalidWireSeed);
+                }
+            }
+            if peer.copaths.len() != DENSE_PCG_NUM_TREES {
+                return Err(PreprocessError::PcgInvalidWireSeed);
+            }
+            for (&p_idx, cp) in peer.punctured_indices.iter().zip(peer.copaths.iter()) {
+                if (p_idx as usize) >= max_leaves || cp.len() != d {
+                    return Err(PreprocessError::PcgInvalidWireSeed);
+                }
+            }
+        }
+        let expected_fix_len = if self.num_parties == 2 {
+            0
+        } else {
+            DENSE_PCG_NUM_WORDS
+        };
+        if self.multi_party_c_fix.len() != expected_fix_len {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        Ok(())
+    }
+
+    /// Serialize this compact PCG seed to canonical wire bytes (`~30 KiB` at depth 14, `~34 KiB` at depth 15 for 2 parties).
+    pub fn to_wire_bytes(&self) -> Vec<u8> {
+        let d = self.tree_depth.depth();
+        let approx = 64
+            + self.peers.len()
+                * (164 + 16 * SPCOT_CHECK_REPS + DENSE_PCG_NUM_TREES * (34 + 32 * d));
+        let mut out = Vec::with_capacity(approx);
+        out.extend_from_slice(DENSE_PCG_WIRE_MAGIC);
+        out.extend_from_slice(&self.session_id);
+        out.extend_from_slice(&(self.party_id as u16).to_le_bytes());
+        out.extend_from_slice(&(self.num_parties as u16).to_le_bytes());
+        out.push(d as u8);
+        out.extend_from_slice(&self.mac_alpha.0.to_le_bytes());
+        out.extend_from_slice(&(self.peers.len() as u16).to_le_bytes());
+
+        for peer in &self.peers {
+            out.extend_from_slice(&peer.peer_id.to_le_bytes());
+            out.extend_from_slice(&peer.sender_master_seed);
+            for &p_idx in &peer.punctured_indices {
+                out.extend_from_slice(&p_idx.to_le_bytes());
+            }
+            for cp in &peer.copaths {
+                for node in cp {
+                    out.extend_from_slice(node);
+                }
+            }
+            for corr in &peer.corr_offsets {
+                out.extend_from_slice(&corr.0.to_le_bytes());
+            }
+            out.extend_from_slice(&peer.spcot_chal_coin);
+            for mac in &peer.spcot_mask_macs {
+                out.extend_from_slice(&mac.0.to_le_bytes());
+            }
+            out.extend_from_slice(&peer.spcot_expected_tag);
+        }
+        if self.multi_party_c_fix.is_empty() {
+            out.push(0u8);
+        } else {
+            out.push(1u8);
+            for &w in &self.multi_party_c_fix {
+                out.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        out
+    }
+
+    /// Deserialize and strictly validate a [`DensePcgPartySeed`] from canonical wire bytes (`P1-06`).
+    pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, PreprocessError> {
+        if bytes.len() >= 8 && (&bytes[0..8] == DENSE_PCG_WIRE_MAGIC_V1 || &bytes[0..8] == b"QSAGDPC2") {
+            return Err(PreprocessError::PcgObsoleteWireSeedFormat);
+        }
+        if bytes.len() > crate::preprocessing::MAX_FRAME_BUDGET || bytes.len() < 64 || &bytes[0..8] != DENSE_PCG_WIRE_MAGIC {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        let mut session_id = [0u8; 32];
+        session_id.copy_from_slice(&bytes[8..40]);
+        let party_id = u16::from_le_bytes([bytes[40], bytes[41]]) as usize;
+        let num_parties = u16::from_le_bytes([bytes[42], bytes[43]]) as usize;
+        let tree_depth = PcgTreeDepth::try_from(bytes[44] as usize)
+            .map_err(|_| PreprocessError::PcgInvalidWireSeed)?;
+        let mac_alpha = Tower128(read_u128_le(bytes, 45));
+        let num_peers = u16::from_le_bytes([bytes[61], bytes[62]]) as usize;
+
+        if num_parties < 2
+            || party_id >= num_parties
+            || (mac_alpha.0 & 1) == 0
+            || num_peers != num_parties - 1
+        {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        if bytes.len() > DENSE_PCG_MAX_SEED_BYTES {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+
+        let d = tree_depth.depth();
+        let mut cur = 63usize;
+        let peer_bytes = 2 + 32 + 2 * DENSE_PCG_NUM_TREES + 32 * d * DENSE_PCG_NUM_TREES
+            + 16 * DENSE_PCG_NUM_TREES + 32 + 16 * SPCOT_CHECK_REPS + 32;
+        crate::preprocessing::validate_frame_count(num_peers, peer_bytes, bytes.len() - cur)?;
+        let mut peers = Vec::with_capacity(num_peers);
+
+        for _ in 0..num_peers {
+            let fixed_need = 2
+                + 32
+                + 2 * DENSE_PCG_NUM_TREES
+                + 32 * d * DENSE_PCG_NUM_TREES
+                + 16 * DENSE_PCG_NUM_TREES
+                + 32
+                + 16 * SPCOT_CHECK_REPS
+                + 32;
+            if cur + fixed_need > bytes.len() {
+                return Err(PreprocessError::PcgInvalidWireSeed);
+            }
+            let peer_id = u16::from_le_bytes([bytes[cur], bytes[cur + 1]]);
+            cur += 2;
+
+            let mut sender_master_seed = [0u8; 32];
+            sender_master_seed.copy_from_slice(&bytes[cur..cur + 32]);
+            cur += 32;
+
+            let mut punctured_indices = [0u16; DENSE_PCG_NUM_TREES];
+            for slot in &mut punctured_indices {
+                *slot = u16::from_le_bytes([bytes[cur], bytes[cur + 1]]);
+                cur += 2;
+            }
+
+            let mut copaths = Vec::with_capacity(DENSE_PCG_NUM_TREES);
+            for _ in 0..DENSE_PCG_NUM_TREES {
+                let mut cp = Vec::with_capacity(d);
+                for _ in 0..d {
+                    let mut node = [0u8; 32];
+                    node.copy_from_slice(&bytes[cur..cur + 32]);
+                    cur += 32;
+                    cp.push(node);
+                }
+                copaths.push(cp);
+            }
+
+            let mut corr_offsets = [Tower128::ZERO; DENSE_PCG_NUM_TREES];
+            for slot in &mut corr_offsets {
+                *slot = Tower128(read_u128_le(bytes, cur));
+                cur += 16;
+            }
+
+            let mut spcot_chal_coin = [0u8; 32];
+            spcot_chal_coin.copy_from_slice(&bytes[cur..cur + 32]);
+            cur += 32;
+
+            let mut spcot_mask_macs = [Tower128::ZERO; SPCOT_CHECK_REPS];
+            for slot in &mut spcot_mask_macs {
+                *slot = Tower128(read_u128_le(bytes, cur));
+                cur += 16;
+            }
+
+            let mut spcot_expected_tag = [0u8; 32];
+            spcot_expected_tag.copy_from_slice(&bytes[cur..cur + 32]);
+            cur += 32;
+
+            peers.push(DensePcgPeerSeed {
+                peer_id,
+                sender_master_seed,
+                punctured_indices,
+                copaths,
+                corr_offsets,
+                spcot_chal_coin,
+                spcot_mask_macs,
+                spcot_expected_tag,
+            });
+        }
+
+        if cur >= bytes.len() {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        let has_c_fix = bytes[cur];
+        cur += 1;
+        let multi_party_c_fix = match (num_parties == 2, has_c_fix) {
+            (true, 0) => Vec::new(),
+            (false, 1) => {
+                let byte_len = DENSE_PCG_NUM_WORDS * 8;
+                if cur + byte_len > bytes.len() {
+                    return Err(PreprocessError::PcgInvalidWireSeed);
+                }
+                let mut words = Vec::with_capacity(DENSE_PCG_NUM_WORDS);
+                for _ in 0..DENSE_PCG_NUM_WORDS {
+                    words.push(read_u64_le(bytes, cur));
+                    cur += 8;
+                }
+                words
+            }
+            _ => return Err(PreprocessError::PcgInvalidWireSeed),
+        };
+
+        if cur != bytes.len() {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+
+        let seed = Self {
+            session_id,
+            party_id,
+            num_parties,
+            tree_depth,
+            mac_alpha,
+            peers,
+            multi_party_c_fix,
+        };
+        seed.validate_invariants()?;
+        Ok(seed)
+    }
+
+    /// Identity under which this seed is burned: a domain-separated digest of the session id
+    /// and the owning party index, and of nothing else.
+    ///
+    /// Every hash that produces a correlation (GGM nodes, tap streams, the Beaver CRH) is keyed
+    /// by the session id and by the ordered pair of party indices, and each party receives one
+    /// seed per session. `(session, party)` therefore names the correlations this seed can
+    /// expand to, while no editable field of the seed is part of the id: a copy with a changed
+    /// `multi_party_c_fix`, MAC key, master seed or check field has the same id and is refused
+    /// once the original was expanded. Changing the session id or party index in a copy gives
+    /// another id, and also re-keys every hash, so nothing of the original expansion recurs.
+    ///
+    /// Consequence: the first seed expanded under a `(session, party)` identity burns it, also
+    /// when that seed then fails its SPCOT check. A session id must not be reused for a second
+    /// setup.
+    pub fn seed_id(&self) -> [u8; 32] {
+        let party = (self.party_id as u64).to_le_bytes();
+        cshake256_32(
+            b"QSAG.DPCG.SEED.ID/v2",
+            &encode_multi_frame(&[&self.session_id, &party]),
+        )
+    }
+
+    /// Consume this seed and expand `65,536` Boolean Beaver triples, `65,536` BDOZ
+    /// Subfield-VOLEs and `64` $\mathbb{F}_{2^{128}}$ VOLE companions per peer with no network I/O.
+    ///
+    /// Order of operations:
+    /// 1. structural validation;
+    /// 2. [`Self::seed_id`] is burned in `burn_tracker`. If the id was burned before, this
+    ///    returns [`PreprocessError::PcgSeedAlreadyBurned`]; if the tracker cannot record the
+    ///    burn, [`PreprocessError::PcgSeedBurnNotRecorded`]. Nothing is expanded in either case;
+    /// 3. per peer, the SPCOT consistency check (all repetitions) is verified on the `64`
+    ///    punctured trees before any correlation derived from them is used.
+    ///
+    /// The burn is not rolled back if step 3 fails: a seed that failed its check stays burned.
+    pub fn expand_local<T: SeedBurnTracker + ?Sized>(
+        self,
+        burn_tracker: &mut T,
+    ) -> Result<DensePcgExpandedVault, PreprocessError> {
+        self.validate_invariants()?;
+
+        let seed_id = self.seed_id();
+        burn_tracker.begin_expansion(&self.session_id, &seed_id).map_err(|_| PreprocessError::PcgSeedBurnNotRecorded)?;
+        match burn_tracker.burn(&seed_id) {
+            Ok(()) => {}
+            Err(SeedBurnError::AlreadyBurned) => return Err(PreprocessError::PcgSeedAlreadyBurned),
+            Err(SeedBurnError::Io) => return Err(PreprocessError::PcgSeedBurnNotRecorded),
+        }
+
+        let me = self.party_id;
+        let n = self.num_parties;
+        let depth = self.tree_depth;
+        let d_u8 = depth.depth() as u8;
+
+        let mut a_words = vec![0u64; DENSE_PCG_NUM_WORDS];
+        let mut b_words = vec![0u64; DENSE_PCG_NUM_WORDS];
+        let mut cross_xor_words = vec![0u64; DENSE_PCG_NUM_WORDS];
+        let mut x_self_sum_words = vec![0u64; DENSE_PCG_NUM_WORDS];
+        let mut peer_voles = Vec::with_capacity(self.peers.len());
+
+        for (slot_idx, peer) in self.peers.iter().enumerate() {
+            let q = peer.peer_id as usize;
+
+            // Step 1: verify the SPCOT GGM-sum consistency check on all 64 punctured trees from
+            // peer `q` before any punctured leaf or correlation offset is used.
+            let mut q_to_me_macs = vec![0u128; TOTAL_LPN_ROWS];
+            let mut q_to_me_choices = vec![0u64; TOTAL_LPN_WORDS];
+            let mut w_recv = receiver_spcot_check_values(
+                &self.session_id,
+                me,
+                depth,
+                peer,
+                &mut q_to_me_macs,
+                &mut q_to_me_choices,
+            );
+
+            let recomputed_tag = compute_spcot_check_tag(
+                &self.session_id,
+                q,
+                me,
+                &peer.spcot_chal_coin,
+                &w_recv,
+            );
+            wipe_tower128_slice(&mut w_recv);
+            if !ct_eq_bytes32(&recomputed_tag, &peer.spcot_expected_tag) {
+                wipe_u128s(&mut q_to_me_macs);
+                wipe_u64s(&mut q_to_me_choices);
+                wipe_u64s(&mut a_words);
+                wipe_u64s(&mut b_words);
+                wipe_u64s(&mut cross_xor_words);
+                wipe_u64s(&mut x_self_sum_words);
+                return Err(PreprocessError::MacCheckFailed {
+                    phase: "pcg_dense_spcot_consistency",
+                    accused_party: Some(q),
+                });
+            }
+
+            // Step 2: Expand `me -> q` full GGM trees (`H_lpn * s`).
+            let roots = derive_sender_tree_roots(
+                &self.session_id,
+                me,
+                q,
+                &peer.sender_master_seed,
+            );
+            let mut me_to_q_keys = vec![0u128; TOTAL_LPN_ROWS];
+            for (tree_idx, root_seed) in roots.iter().enumerate() {
+                let dom = GgmTreeDomain {
+                    session_id: self.session_id,
+                    sender_id: me as u16,
+                    receiver_id: q as u16,
+                    tree_idx: tree_idx as u8,
+                };
+                let full = ggm_expand_full_4x(&dom, depth, root_seed);
+                let tap_ctx = LpnTapStreamCtx {
+                    session_id: self.session_id,
+                    sender_id: me as u16,
+                    receiver_id: q as u16,
+                    tree_idx: tree_idx as u8,
+                    depth: d_u8,
+                };
+                accumulate_sender_lpn_tree(tap_ctx, &full.leaves, &mut me_to_q_keys);
+            }
+
+            // Step 3: Slice 0 (`0..65,536`) -> Flat BDOZ Subfield-VOLEs.
+            let subfield_choice_words = q_to_me_choices[0..DENSE_PCG_NUM_WORDS].to_vec();
+            let subfield_macs: Vec<Tower128> = q_to_me_macs
+                [SLICE0_VOLE_ROW_START..SLICE0_VOLE_ROW_START + DENSE_PCG_NUM_BOOL_TRIPLES]
+                .iter()
+                .map(|&v| Tower128(v))
+                .collect();
+            let subfield_keys: Vec<Tower128> = me_to_q_keys
+                [SLICE0_VOLE_ROW_START..SLICE0_VOLE_ROW_START + DENSE_PCG_NUM_BOOL_TRIPLES]
+                .iter()
+                .map(|&v| Tower128(v))
+                .collect();
+
+            // Step 4: Slice 1 (`65,536..131,072`) -> Dense Boolean Beaver Triples `(a, b, c = a & b)`.
+            // Dense `b_i` share combines `LSB(H_lpn * s)` (as Sender) and `LSB(H_lpn * s_{!= p*} ^ ...)` (as Receiver)
+            // so `b_S ^ b_R == x_R` (`LSB(alpha) == 1`) while every individual share is 50% dense!
+            let q_slice1 = &me_to_q_keys
+                [SLICE1_BEAVER_ROW_START..SLICE1_BEAVER_ROW_START + DENSE_PCG_NUM_BOOL_TRIPLES];
+            let t_slice1 = &q_to_me_macs
+                [SLICE1_BEAVER_ROW_START..SLICE1_BEAVER_ROW_START + DENSE_PCG_NUM_BOOL_TRIPLES];
+            let x_slice1_words =
+                &q_to_me_choices[DENSE_PCG_NUM_WORDS..2 * DENSE_PCG_NUM_WORDS];
+
+            for (row_idx, (&q_tag, &t_tag)) in q_slice1.iter().zip(t_slice1.iter()).enumerate() {
+                let b_dense_bit = ((q_tag ^ t_tag) & 1) as u64;
+                b_words[row_idx >> 6] ^= b_dense_bit << (row_idx & 63);
+            }
+            for (dst, &xw) in x_self_sum_words.iter_mut().zip(x_slice1_words.iter()) {
+                *dst ^= xw;
+            }
+
+            let (mut a_pair_words, mut w_send_words) =
+                crh_beaver_sender_4x(&self.session_id, me, q, self.mac_alpha.0, q_slice1);
+            let mut w_recv_words = crh_beaver_receiver_4x(&self.session_id, q, me, t_slice1);
+
+            if slot_idx == 0 {
+                a_words.copy_from_slice(&a_pair_words);
+            }
+
+            for ((cw, &ws), &wr) in cross_xor_words
+                .iter_mut()
+                .zip(w_send_words.iter())
+                .zip(w_recv_words.iter())
+            {
+                *cw ^= ws ^ wr;
+            }
+
+            wipe_u64s(&mut a_pair_words);
+            wipe_u64s(&mut w_send_words);
+            wipe_u64s(&mut w_recv_words);
+
+            // Step 5: Slice 2 (`131,072..139,264`) -> `64` full-field `GF(2^128)` VOLE companions
+            // via 128-bit `Tower128` basis gadget `e_b = Tower128(1u128 << b)`.
+            let mut gf128_u_vals = Vec::with_capacity(DENSE_PCG_NUM_VOLE128);
+            let mut gf128_macs = Vec::with_capacity(DENSE_PCG_NUM_VOLE128);
+            let mut gf128_keys = Vec::with_capacity(DENSE_PCG_NUM_VOLE128);
+            let mut gf128_sender_dense_shares = Vec::with_capacity(DENSE_PCG_NUM_VOLE128);
+            let mut gf128_receiver_dense_shares = Vec::with_capacity(DENSE_PCG_NUM_VOLE128);
+
+            for m in 0..DENSE_PCG_NUM_VOLE128 {
+                let word_lo = 2 * DENSE_PCG_NUM_WORDS + 2 * m;
+                let u_lo = q_to_me_choices[word_lo] as u128;
+                let u_hi = q_to_me_choices[word_lo + 1] as u128;
+                let u_elem = Tower128(u_lo | (u_hi << 64));
+
+                let row_base = SLICE2_GF128_ROW_START + 128 * m;
+                let mut mac_acc = Tower128::ZERO;
+                let mut key_acc = Tower128::ZERO;
+                let mut s_share_bits = 0u128;
+                let mut r_share_bits = 0u128;
+
+                for bit in 0..128 {
+                    let basis = Tower128(1u128 << bit);
+                    let t_val = q_to_me_macs[row_base + bit];
+                    let q_val = me_to_q_keys[row_base + bit];
+                    mac_acc = mac_acc.add(Tower128(t_val).mul(basis));
+                    key_acc = key_acc.add(Tower128(q_val).mul(basis));
+                    s_share_bits |= (q_val & 1) << bit;
+                    r_share_bits |= (t_val & 1) << bit;
+                }
+
+                gf128_u_vals.push(u_elem);
+                gf128_macs.push(mac_acc);
+                gf128_keys.push(key_acc);
+                gf128_sender_dense_shares.push(Tower128(s_share_bits));
+                gf128_receiver_dense_shares.push(Tower128(r_share_bits));
+            }
+
+            wipe_u128s(&mut q_to_me_macs);
+            wipe_u64s(&mut q_to_me_choices);
+            wipe_u128s(&mut me_to_q_keys);
+
+            peer_voles.push(DensePcgPeerVoleMaterial {
+                peer_id: q,
+                subfield_choice_words,
+                subfield_macs,
+                subfield_keys,
+                gf128_u_vals,
+                gf128_macs,
+                gf128_keys,
+                gf128_sender_dense_shares,
+                gf128_receiver_dense_shares,
+            });
+        }
+
+        let mut c_words = vec![0u64; DENSE_PCG_NUM_WORDS];
+        for (((cw, &aw), &xw), &cross_w) in c_words
+            .iter_mut()
+            .zip(a_words.iter())
+            .zip(x_self_sum_words.iter())
+            .zip(cross_xor_words.iter())
+        {
+            *cw = (aw & xw) ^ cross_w;
+        }
+        for (cw, &fix_w) in c_words.iter_mut().zip(self.multi_party_c_fix.iter()) {
+            *cw ^= fix_w;
+        }
+        wipe_u64s(&mut cross_xor_words);
+        wipe_u64s(&mut x_self_sum_words);
+
+        Ok(DensePcgExpandedVault {
+            party_id: me,
+            num_parties: n,
+            mac_alpha: self.mac_alpha,
+            a_words,
+            b_words,
+            c_words,
+            peer_voles,
+            word_cursor: 0,
+        })
+    }
+}
+
+/// Receiver side of the SPCOT consistency check for the trees peer `peer.peer_id` sent to
+/// `receiver_id`: expand the `64` punctured trees, accumulate their dual-LPN contribution into
+/// `out_macs` / `out_choice_words`, and return the receiver check value of every repetition
+/// (`mask MAC + sum of per-tree terms`). The caller compares these against the sender's tag
+/// before using `out_macs` / `out_choice_words`.
+fn receiver_spcot_check_values(
+    session_id: &[u8; 32],
+    receiver_id: usize,
+    depth: PcgTreeDepth,
+    peer: &DensePcgPeerSeed,
+    out_macs: &mut [u128],
+    out_choice_words: &mut [u64],
+) -> [Tower128; SPCOT_CHECK_REPS] {
+    let sender_id = peer.peer_id as usize;
+    let weights = derive_all_spcot_challenge_weights(
+        session_id,
+        sender_id,
+        receiver_id,
+        &peer.spcot_chal_coin,
+        depth,
+    );
+    let mut w_recv = peer.spcot_mask_macs;
+
+    for tree_idx in 0..DENSE_PCG_NUM_TREES {
+        let p_star = peer.punctured_indices[tree_idx] as usize;
+        let dom = GgmTreeDomain {
+            session_id: *session_id,
+            sender_id: sender_id as u16,
+            receiver_id: receiver_id as u16,
+            tree_idx: tree_idx as u8,
+        };
+        let punc = ggm_expand_punctured_4x(&dom, depth, p_star, &peer.copaths[tree_idx]);
+        let delta_corr = punc.punc_xor_sum.add(peer.corr_offsets[tree_idx]);
+
+        for (w, rep_weights) in w_recv.iter_mut().zip(weights.iter()) {
+            let term = eval_punctured_tree_spcot_term(
+                rep_weights.tree_gammas[tree_idx],
+                &rep_weights.leaf_powers,
+                &punc.punc_leaves,
+                p_star,
+                delta_corr,
+            );
+            *w = w.add(term.combo);
+        }
+
+        let tap_ctx = LpnTapStreamCtx {
+            session_id: *session_id,
+            sender_id: sender_id as u16,
+            receiver_id: receiver_id as u16,
+            tree_idx: tree_idx as u8,
+            depth: depth.depth() as u8,
+        };
+        accumulate_receiver_lpn_tree(
+            tap_ctx,
+            &punc.punc_leaves,
+            p_star,
+            delta_corr.0,
+            out_macs,
+            out_choice_words,
+        );
+    }
+    w_recv
+}
+
+// ============================================================================
+// 6. Interactive Malicious-Secure Seed Setup Over `OtMesh`
+// ============================================================================
+
+struct DirectedSpcotTranscript {
+    sender_master_seed: [u8; 32],
+    punctured_indices: [u16; DENSE_PCG_NUM_TREES],
+    copaths: Vec<Vec<[u8; 32]>>,
+    corr_offsets: [Tower128; DENSE_PCG_NUM_TREES],
+    spcot_chal_coin: [u8; 32],
+    spcot_mask_macs: [Tower128; SPCOT_CHECK_REPS],
+    spcot_expected_tag: [u8; 32],
+    sender_a_words_slice1: Vec<u64>,
+    sender_w_words_slice1: Vec<u64>,
+    sender_b_lsb_words: Vec<u64>,
+    receiver_w_words_slice1: Vec<u64>,
+    receiver_b_lsb_words: Vec<u64>,
+    receiver_x_words_slice1: Vec<u64>,
+}
+
+impl Drop for DirectedSpcotTranscript {
+    fn drop(&mut self) {
+        wipe_bytes32(&mut self.sender_master_seed);
+        wipe_u16s(&mut self.punctured_indices);
+        for cp in &mut self.copaths {
+            for node in cp {
+                wipe_bytes32(node);
+            }
+        }
+        wipe_tower128_slice(&mut self.corr_offsets);
+        wipe_tower128_slice(&mut self.spcot_mask_macs);
+        wipe_u64s(&mut self.sender_a_words_slice1);
+        wipe_u64s(&mut self.sender_w_words_slice1);
+        wipe_u64s(&mut self.sender_b_lsb_words);
+        wipe_u64s(&mut self.receiver_w_words_slice1);
+        wipe_u64s(&mut self.receiver_b_lsb_words);
+        wipe_u64s(&mut self.receiver_x_words_slice1);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DirectedSpcotParams {
+    session_id: [u8; 32],
+    tree_depth: PcgTreeDepth,
+    sender_id: usize,
+    receiver_id: usize,
+    alpha_sender: Tower128,
+    fault: Option<SpcotFaultTarget>,
+}
+
+/// Run interactive dealerless setup of compact `< 36 KiB` [`DensePcgPartySeed`]s across `n >= 2` parties.
+pub fn setup_dense_pcg_seeds(
+    session_id: [u8; 32],
+    tree_depth: PcgTreeDepth,
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<DensePcgPartySeed>, PreprocessError> {
+    setup_dense_pcg_seeds_inner(session_id, tree_depth, ot_mesh, party_rngs, None)
+}
+
+/// Same as [`setup_dense_pcg_seeds`], with an optional adversarial [`SpcotFaultTarget`] hook
+/// verifying that corrupted GGM copath siblings or SPCOT correlation offsets are deterministically
+/// rejected during interactive setup before any seed is accepted.
+#[cfg(test)]
+pub fn setup_dense_pcg_seeds_with_fault_hook(
+    session_id: [u8; 32], tree_depth: PcgTreeDepth, ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng], fault: Option<SpcotFaultTarget>,
+) -> Result<Vec<DensePcgPartySeed>, PreprocessError> {
+    setup_dense_pcg_seeds_inner(session_id, tree_depth, ot_mesh, party_rngs, fault)
+}
+
+fn setup_dense_pcg_seeds_inner(
+    session_id: [u8; 32],
+    tree_depth: PcgTreeDepth,
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+    fault: Option<SpcotFaultTarget>,
+) -> Result<Vec<DensePcgPartySeed>, PreprocessError> {
+    let n = party_rngs.len();
+    if n < 2 || ot_mesh.n != n {
+        return Err(PreprocessError::InvalidThreshold { t: 2, n });
+    }
+
+    let mut alphas = Vec::with_capacity(n);
+    for rng in party_rngs.iter_mut() {
+        let mut a = rng.next_tower128();
+        a.0 |= 1; // Enforce LSB(alpha_i) == 1 (`127`-bit entropy, exact dense bit projection)
+        alphas.push(a);
+    }
+
+    let mut directed: Vec<Vec<Option<DirectedSpcotTranscript>>> =
+        (0..n).map(|_| (0..n).map(|_| None).collect()).collect();
+
+    for (sender_id, row) in directed.iter_mut().enumerate() {
+        for (receiver_id, slot) in row.iter_mut().enumerate() {
+            if sender_id == receiver_id {
+                continue;
+            }
+            let params = DirectedSpcotParams {
+                session_id,
+                tree_depth,
+                sender_id,
+                receiver_id,
+                alpha_sender: alphas[sender_id],
+                fault,
+            };
+            let tr = run_directed_spcot_setup(params, ot_mesh, party_rngs)?;
+            *slot = Some(tr);
+        }
+    }
+
+    // For `n >= 3`, use authenticated KOS/MASCOT multiplication with batch sacrifice so multi-party
+    // `(\bigoplus a_p) & (\bigoplus b_p) == \bigoplus c_p` holds with 0 cleartext leakage (`0` bytes for `n == 2`!).
+    let c_fixes = if n >= 3 {
+        compute_multiparty_beaver_c_fixes(&directed, ot_mesh, party_rngs)?
+    } else {
+        (0..n).map(|_| Vec::new()).collect()
+    };
+
+    let mut out_seeds = Vec::with_capacity(n);
+    for (me, multi_party_c_fix) in c_fixes.into_iter().enumerate() {
+        let mut peers = Vec::with_capacity(n - 1);
+        for (q, (me_slot, row_q)) in directed[me].iter().zip(directed.iter()).enumerate() {
+            if q == me {
+                continue;
+            }
+            let me_to_q = me_slot
+                .as_ref()
+                .ok_or(PreprocessError::PcgInvalidWireSeed)?;
+            let q_to_me = row_q[me]
+                .as_ref()
+                .ok_or(PreprocessError::PcgInvalidWireSeed)?;
+
+            peers.push(DensePcgPeerSeed {
+                peer_id: q as u16,
+                sender_master_seed: me_to_q.sender_master_seed,
+                punctured_indices: q_to_me.punctured_indices,
+                copaths: q_to_me.copaths.clone(),
+                corr_offsets: q_to_me.corr_offsets,
+                spcot_chal_coin: q_to_me.spcot_chal_coin,
+                spcot_mask_macs: q_to_me.spcot_mask_macs,
+                spcot_expected_tag: q_to_me.spcot_expected_tag,
+            });
+        }
+
+        out_seeds.push(DensePcgPartySeed {
+            session_id,
+            party_id: me,
+            num_parties: n,
+            tree_depth,
+            mac_alpha: alphas[me],
+            peers,
+            multi_party_c_fix,
+        });
+    }
+
+    wipe_tower128_slice(&mut alphas);
+    Ok(out_seeds)
+}
+
+fn compute_multiparty_beaver_c_fixes(
+    directed: &[Vec<Option<DirectedSpcotTranscript>>],
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<Vec<u64>>, PreprocessError> {
+    let n = directed.len();
+    let mut a_party = vec![vec![0u64; DENSE_PCG_NUM_WORDS]; n];
+    let mut b_party = vec![vec![0u64; DENSE_PCG_NUM_WORDS]; n];
+    let mut c_ggm = vec![vec![0u64; DENSE_PCG_NUM_WORDS]; n];
+
+    for me in 0..n {
+        let mut x_sum = vec![0u64; DENSE_PCG_NUM_WORDS];
+        let mut cross_xor = vec![0u64; DENSE_PCG_NUM_WORDS];
+        let mut slot = 0usize;
+        for (q, (me_slot, row_q)) in directed[me].iter().zip(directed.iter()).enumerate() {
+            if q == me {
+                continue;
+            }
+            let me_to_q = me_slot
+                .as_ref()
+                .ok_or(PreprocessError::PcgInvalidWireSeed)?;
+            let q_to_me = row_q[me]
+                .as_ref()
+                .ok_or(PreprocessError::PcgInvalidWireSeed)?;
+            if slot == 0 {
+                a_party[me].copy_from_slice(&me_to_q.sender_a_words_slice1);
+            }
+            for ((bw, &bs), &br) in b_party[me]
+                .iter_mut()
+                .zip(me_to_q.sender_b_lsb_words.iter())
+                .zip(q_to_me.receiver_b_lsb_words.iter())
+            {
+                *bw ^= bs ^ br;
+            }
+            for (xs, &xw) in x_sum.iter_mut().zip(q_to_me.receiver_x_words_slice1.iter()) {
+                *xs ^= xw;
+            }
+            for ((cx, &ws), &wr) in cross_xor
+                .iter_mut()
+                .zip(me_to_q.sender_w_words_slice1.iter())
+                .zip(q_to_me.receiver_w_words_slice1.iter())
+            {
+                *cx ^= ws ^ wr;
+            }
+            slot += 1;
+        }
+        for (((cg, &aw), &xw), &cx) in c_ggm[me]
+            .iter_mut()
+            .zip(a_party[me].iter())
+            .zip(x_sum.iter())
+            .zip(cross_xor.iter())
+        {
+            *cg = (aw & xw) ^ cx;
+        }
+        wipe_u64s(&mut x_sum);
+        wipe_u64s(&mut cross_xor);
+    }
+
+    let sid = directed[0][1].as_ref().ok_or(PreprocessError::PcgInvalidWireSeed)?.spcot_chal_coin;
+    let mut c_target = crate::preprocessing::checked_boolean_product(
+        &sid, &a_party, &b_party, ot_mesh, party_rngs)?;
+
+    let mut fixes = Vec::with_capacity(n);
+    for (ct, cg) in c_target.iter_mut().zip(c_ggm.iter_mut()) {
+        let fix = ct.iter().zip(cg.iter()).map(|(&t, &g)| t ^ g).collect();
+        fixes.push(fix);
+        wipe_u64s(ct);
+        wipe_u64s(cg);
+    }
+    for mut av in a_party {
+        wipe_u64s(&mut av);
+    }
+    for mut bv in b_party {
+        wipe_u64s(&mut bv);
+    }
+    Ok(fixes)
+}
+
+fn run_directed_spcot_setup(
+    params: DirectedSpcotParams,
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<DirectedSpcotTranscript, PreprocessError> {
+    let session_id = &params.session_id;
+    let tree_depth = params.tree_depth;
+    let sender_id = params.sender_id;
+    let receiver_id = params.receiver_id;
+    let alpha_sender = params.alpha_sender;
+    let fault = params.fault;
+    let d = tree_depth.depth();
+    let leaf_mask = (tree_depth.num_leaves() - 1) as u16;
+
+    // 1. Receiver samples 64 regular-noise punctured leaf positions `p*[0..64]`.
+    let mut punctured_indices = [0u16; DENSE_PCG_NUM_TREES];
+    for slot in &mut punctured_indices {
+        *slot = (party_rngs[receiver_id].next_u64() as u16) & leaf_mask;
+    }
+
+    let total_ot_bits = DENSE_PCG_NUM_TREES * d;
+    let num_ot_words = total_ot_bits.div_ceil(64);
+    let mut choice_words = vec![0u64; num_ot_words];
+    for (tree_idx, &p_star) in punctured_indices.iter().enumerate() {
+        for lvl in 0..d {
+            let bit = ((p_star as usize) >> (d - 1 - lvl)) & 1;
+            let ot_pos = tree_idx * d + lvl;
+            choice_words[ot_pos >> 6] |= (bit as u64) << (ot_pos & 63);
+        }
+    }
+
+    let (send_pads, recv_pads) =
+        ot_mesh.run_correlated_ot_words(sender_id, receiver_id, &choice_words, party_rngs)?;
+    wipe_u64s(&mut choice_words);
+
+    // 2. Sender expands its 64 full GGM trees (`4-way Keccak`), encrypts `(R_xor, L_xor)` under
+    // KOS OT pads, and forms `corr_offsets[j] = leaf_xor_sum[j] ^ alpha_sender`.
+    let sender_master_seed = party_rngs[sender_id].next_bytes32();
+    let roots = derive_sender_tree_roots(session_id, sender_id, receiver_id, &sender_master_seed);
+
+    let mut full_trees = Vec::with_capacity(DENSE_PCG_NUM_TREES);
+    let mut corr_offsets = [Tower128::ZERO; DENSE_PCG_NUM_TREES];
+    let mut ot_cts: Vec<([u8; 32], [u8; 32])> = Vec::with_capacity(total_ot_bits);
+
+    for (tree_idx, root) in roots.iter().enumerate() {
+        let dom = GgmTreeDomain {
+            session_id: *session_id,
+            sender_id: sender_id as u16,
+            receiver_id: receiver_id as u16,
+            tree_idx: tree_idx as u8,
+        };
+        let mut full = ggm_expand_full_4x(&dom, tree_depth, root);
+        let mut c_off = full.leaf_xor_sum.add(alpha_sender);
+
+        match fault {
+            Some(SpcotFaultTarget::CorrelationOffset {
+                sender_id: fs,
+                receiver_id: fr,
+                tree_idx: ft,
+                xor_mask,
+            }) if fs == sender_id && fr == receiver_id && ft == tree_idx => {
+                c_off.0 ^= xor_mask;
+            }
+            _ => {}
+        }
+        corr_offsets[tree_idx] = c_off;
+
+        for (lvl, (l_xor, r_xor)) in full.level_lr_xors.iter_mut().enumerate() {
+            match fault {
+                Some(SpcotFaultTarget::GgmLevelSibling {
+                    sender_id: fs,
+                    receiver_id: fr,
+                    tree_idx: ft,
+                    level: fl,
+                    xor_mask,
+                }) if fs == sender_id && fr == receiver_id && ft == tree_idx && fl == lvl => {
+                    for (rb, &mb) in r_xor.iter_mut().zip(xor_mask.iter()) {
+                        *rb ^= mb;
+                    }
+                    for (lb, &mb) in l_xor.iter_mut().zip(xor_mask.iter()) {
+                        *lb ^= mb;
+                    }
+                }
+                _ => {}
+            }
+
+            let ot_pos = tree_idx * d + lvl;
+            let (p0, p1) = &send_pads[ot_pos];
+            let mut ct0 = [0u8; 32];
+            let mut ct1 = [0u8; 32];
+            for ((dst, &m), &pad) in ct0.iter_mut().zip(r_xor.iter()).zip(p0[..32].iter()) {
+                *dst = m ^ pad;
+            }
+            for ((dst, &m), &pad) in ct1.iter_mut().zip(l_xor.iter()).zip(p1[..32].iter()) {
+                *dst = m ^ pad;
+            }
+            ot_cts.push((ct0, ct1));
+        }
+        full_trees.push(full);
+    }
+
+    // 3. Receiver decrypts its `64` GGM copaths from `ot_cts` and `recv_pads`.
+    let mut copaths = Vec::with_capacity(DENSE_PCG_NUM_TREES);
+    for (tree_idx, &p_star) in punctured_indices.iter().enumerate() {
+        let mut cp = Vec::with_capacity(d);
+        for lvl in 0..d {
+            let bit = (((p_star as usize) >> (d - 1 - lvl)) & 1) as u8;
+            let take_ct1 = 0u8.wrapping_sub(black_box(bit));
+            let ot_pos = tree_idx * d + lvl;
+            let (ct0, ct1) = &ot_cts[ot_pos];
+            let rpad = &recv_pads[ot_pos];
+            let mut node = [0u8; 32];
+            for (((dst, &c0), &c1), &p) in node
+                .iter_mut()
+                .zip(ct0.iter())
+                .zip(ct1.iter())
+                .zip(rpad[..32].iter())
+            {
+                *dst = (c0 ^ (take_ct1 & (c0 ^ c1))) ^ p;
+            }
+            cp.push(node);
+        }
+        copaths.push(cp);
+    }
+
+    // 4. One LHL-amplified one-time `Tower128` VOLE mask per check repetition, each from its
+    // own OTs and its own combiner coin.
+    let vole_masks = [
+        run_lhl_vole128_mask(session_id, sender_id, receiver_id, 0, alpha_sender, ot_mesh, party_rngs)?,
+        run_lhl_vole128_mask(session_id, sender_id, receiver_id, 1, alpha_sender, ot_mesh, party_rngs)?,
+    ];
+
+    // 5. Commit-and-open public coin `spcot_chal_coin`, bound to a digest of all `ot_cts` and
+    // `corr_offsets`, drawn after those and both VOLE masks are fixed.
+    let mut tr_xof = Cshake256Xof::new(b"QSAG.DPCG.SPCOT.TR/v1");
+    tr_xof.absorb(session_id);
+    tr_xof.absorb(&(sender_id as u64).to_le_bytes());
+    tr_xof.absorb(&(receiver_id as u64).to_le_bytes());
+    for (ct0, ct1) in &ot_cts {
+        tr_xof.absorb(ct0);
+        tr_xof.absorb(ct1);
+    }
+    for mask in &vole_masks { tr_xof.absorb(&mask.transcript_digest); }
+    for corr in &corr_offsets {
+        tr_xof.absorb(&corr.0.to_le_bytes());
+    }
+    let mut tr_digest = [0u8; 32];
+    tr_xof.squeeze(&mut tr_digest);
+
+    let spcot_chal_coin = run_commit_and_open_coin(
+        session_id,
+        b"QSAG.DPCG.SPCOT.COIN/v1",
+        &tr_digest,
+        party_rngs,
+    )?;
+
+    // 6. SPCOT GGM-sum consistency check, run `SPCOT_CHECK_REPS = 2` times.
+    //
+    // Repetition `r` expands the coin into its own tree weights `gamma_r[j]` and leaf challenge
+    // `chi_r`, and compares `mask_r + sum_j gamma_r[j] * sum_u chi_r^(u+1) * leaf[j, u]` between
+    // the sender's full trees and the receiver's reconstruction. For a discrepancy fixed before
+    // the coin is opened, one repetition accepts with probability at most
+    // `(2^d + 1) / (2^128 - 2)`: each tree's error polynomial has degree at most `2^d` in
+    // `chi_r`, and if some tree's error evaluates non-zero the `gamma_r` combination vanishes
+    // with probability `1 / (2^128 - 2)`. With the two repetitions modelled as independent
+    // (separate expansions of the coin, see `derive_spcot_challenge_weights`), both accept with
+    // probability at most `((2^d + 1) / (2^128 - 2))^2`, about `2^-226` at `d = 15` and `2^-228`
+    // at `d = 14`. This bounds one directed pair in one session; a union bound over pairs and
+    // sessions applies on top, as does the collision resistance of the 256-bit tag.
+    let chal_weights = derive_all_spcot_challenge_weights(
+        session_id,
+        sender_id,
+        receiver_id,
+        &spcot_chal_coin,
+        tree_depth,
+    );
+
+    let need_preview = n_requires_derand_preview(party_rngs.len());
+    let mut recv_mac_preview = if need_preview {
+        vec![0u128; TOTAL_LPN_ROWS]
+    } else {
+        Vec::new()
+    };
+    let mut recv_choice_preview = if need_preview {
+        vec![0u64; TOTAL_LPN_WORDS]
+    } else {
+        Vec::new()
+    };
+    let d_u8 = d as u8;
+
+    let mut x_chk: [Tower128; SPCOT_CHECK_REPS] =
+        core::array::from_fn(|rep| vole_masks[rep].x_receiver);
+    let mut w_recv: [Tower128; SPCOT_CHECK_REPS] =
+        core::array::from_fn(|rep| vole_masks[rep].mac_receiver);
+    for (tree_idx, &p_star_u16) in punctured_indices.iter().enumerate() {
+        let p_star = p_star_u16 as usize;
+
+        let dom = GgmTreeDomain {
+            session_id: *session_id,
+            sender_id: sender_id as u16,
+            receiver_id: receiver_id as u16,
+            tree_idx: tree_idx as u8,
+        };
+        let punc = ggm_expand_punctured_4x(&dom, tree_depth, p_star, &copaths[tree_idx]);
+        let delta_corr = punc.punc_xor_sum.add(corr_offsets[tree_idx]);
+        for (rep, rep_weights) in chal_weights.iter().enumerate() {
+            let term = eval_punctured_tree_spcot_term(
+                rep_weights.tree_gammas[tree_idx],
+                &rep_weights.leaf_powers,
+                &punc.punc_leaves,
+                p_star,
+                delta_corr,
+            );
+            // The receiver's message of repetition `rep` is its punctured-leaf weights masked
+            // by that repetition's own VOLE input `x_receiver`.
+            x_chk[rep] = x_chk[rep].add(term.punctured_weight);
+            w_recv[rep] = w_recv[rep].add(term.combo);
+        }
+
+        if need_preview {
+            let tap_ctx = LpnTapStreamCtx {
+                session_id: *session_id,
+                sender_id: sender_id as u16,
+                receiver_id: receiver_id as u16,
+                tree_idx: tree_idx as u8,
+                depth: d_u8,
+            };
+            accumulate_receiver_lpn_tree(
+                tap_ctx,
+                &punc.punc_leaves,
+                p_star,
+                delta_corr.0,
+                &mut recv_mac_preview,
+                &mut recv_choice_preview,
+            );
+        }
+    }
+
+    let mut w_send: [Tower128; SPCOT_CHECK_REPS] = core::array::from_fn(|rep| {
+        vole_masks[rep].key_sender.add(x_chk[rep].mul(alpha_sender))
+    });
+    let mut sender_keys = if need_preview {
+        vec![0u128; TOTAL_LPN_ROWS]
+    } else {
+        Vec::new()
+    };
+    for (tree_idx, full) in full_trees.iter().enumerate() {
+        for (w, rep_weights) in w_send.iter_mut().zip(chal_weights.iter()) {
+            let combo_s = eval_tree_spcot_linear_combo(
+                rep_weights.tree_gammas[tree_idx],
+                &rep_weights.leaf_powers,
+                &full.leaves,
+            );
+            *w = w.add(combo_s);
+        }
+
+        if need_preview {
+            let tap_ctx = LpnTapStreamCtx {
+                session_id: *session_id,
+                sender_id: sender_id as u16,
+                receiver_id: receiver_id as u16,
+                tree_idx: tree_idx as u8,
+                depth: d_u8,
+            };
+            accumulate_sender_lpn_tree(tap_ctx, &full.leaves, &mut sender_keys);
+        }
+    }
+
+    // One tag over the check values of both repetitions: the tags agree only if both do.
+    let spcot_expected_tag =
+        compute_spcot_check_tag(session_id, sender_id, receiver_id, &spcot_chal_coin, &w_send);
+    let receiver_tag =
+        compute_spcot_check_tag(session_id, sender_id, receiver_id, &spcot_chal_coin, &w_recv);
+    wipe_tower128_slice(&mut w_send);
+    wipe_tower128_slice(&mut w_recv);
+    wipe_tower128_slice(&mut x_chk);
+
+    if verify_spcot_receiver_tag(&spcot_expected_tag, &receiver_tag, sender_id).is_err() {
+        wipe_u128s(&mut sender_keys);
+        wipe_u128s(&mut recv_mac_preview);
+        wipe_u64s(&mut recv_choice_preview);
+        return Err(PreprocessError::MacCheckFailed {
+            phase: "pcg_dense_spcot_consistency",
+            accused_party: Some(sender_id),
+        });
+    }
+
+    let (
+        sender_a_words_slice1,
+        sender_w_words_slice1,
+        sender_b_lsb_words,
+        receiver_w_words_slice1,
+        receiver_b_lsb_words,
+        receiver_x_words_slice1,
+    ) = if need_preview {
+        let q_slice1 = &sender_keys
+            [SLICE1_BEAVER_ROW_START..SLICE1_BEAVER_ROW_START + DENSE_PCG_NUM_BOOL_TRIPLES];
+        let t_slice1 = &recv_mac_preview
+            [SLICE1_BEAVER_ROW_START..SLICE1_BEAVER_ROW_START + DENSE_PCG_NUM_BOOL_TRIPLES];
+        let (a_words, w_s_words) =
+            crh_beaver_sender_4x(session_id, sender_id, receiver_id, alpha_sender.0, q_slice1);
+        let w_r_words = crh_beaver_receiver_4x(session_id, sender_id, receiver_id, t_slice1);
+
+        let mut b_s = vec![0u64; DENSE_PCG_NUM_WORDS];
+        let mut b_r = vec![0u64; DENSE_PCG_NUM_WORDS];
+        for (idx, (&qv, &tv)) in q_slice1.iter().zip(t_slice1.iter()).enumerate() {
+            b_s[idx >> 6] |= ((qv & 1) as u64) << (idx & 63);
+            b_r[idx >> 6] |= ((tv & 1) as u64) << (idx & 63);
+        }
+        let x_r = recv_choice_preview[DENSE_PCG_NUM_WORDS..2 * DENSE_PCG_NUM_WORDS].to_vec();
+        (a_words, w_s_words, b_s, w_r_words, b_r, x_r)
+    } else {
+        (
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+    wipe_u128s(&mut sender_keys);
+    wipe_u128s(&mut recv_mac_preview);
+    wipe_u64s(&mut recv_choice_preview);
+
+    Ok(DirectedSpcotTranscript {
+        sender_master_seed,
+        punctured_indices,
+        copaths,
+        corr_offsets,
+        spcot_chal_coin,
+        spcot_mask_macs: core::array::from_fn(|rep| vole_masks[rep].mac_receiver),
+        spcot_expected_tag,
+        sender_a_words_slice1,
+        sender_w_words_slice1,
+        sender_b_lsb_words,
+        receiver_w_words_slice1,
+        receiver_b_lsb_words,
+        receiver_x_words_slice1,
+    })
+}
+
+#[inline]
+const fn n_requires_derand_preview(num_parties: usize) -> bool {
+    num_parties >= 3
+}
+
+
