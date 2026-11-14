@@ -976,7 +976,8 @@ theorem encodeRound1NoncePreimage_injective
   simp only [List.cons.injEq] at hF
   rcases pk₁ with ⟨s1, r1⟩
   rcases pk₂ with ⟨s2, r2⟩
-  exact ⟨congrArg₂ SlhPublicKey.mk hF.2.2.2.2.2.1 hF.2.2.2.2.2.2.1,
+  dsimp only at hF
+  exact ⟨by rw [hF.2.2.2.2.2.1, hF.2.2.2.2.2.2.1],
          leb128_inj hF.2.2.1, leb128_inj hF.2.2.2.1,
          hF.2.2.2.2.2.2.2.1, hF.2.2.2.2.2.2.2.2.1,
          leb128_inj hF.2.2.2.2.1, leb128_inj hF.2.1,
@@ -1018,7 +1019,8 @@ theorem encodeSlhPkPreimage_injective {pk₁ pk₂ : SlhPublicKey}
   simp only [List.cons.injEq] at hF
   rcases pk₁ with ⟨s1, r1⟩
   rcases pk₂ with ⟨s2, r2⟩
-  exact congrArg₂ SlhPublicKey.mk hF.2.1 hF.2.2.1
+  dsimp only at hF
+  rw [hF.2.1, hF.2.2.1]
 
 /-- Canonical digests bound in `WalLatchState` for public key `pk` and scheduled request `req`. -/
 def slhPkDigest (pk : SlhPublicKey) : List UInt8 :=
@@ -1115,9 +1117,7 @@ private theorem eq_of_zipXorTower_any_false (k : Nat) :
       by_cases hEq : towerAdd k x y = towerZero k
       · exact hEq
       · exact False.elim (Bool.noConfusion ((decide_eq_true hEq).symm.trans hAny.1))
-    exact congrArg₂ List.cons
-      (tower_eq_of_add_eq_zero k hxy)
-      (eq_of_zipXorTower_any_false k (Nat.succ.inj hL) hAny.2)
+    rw [tower_eq_of_add_eq_zero k hxy, eq_of_zipXorTower_any_false k (Nat.succ.inj hL) hAny.2]
 
 private theorem evalCoeffs_zipXorTower (k : Nat) (gamma : TowerElem k) :
     ∀ {xs ys : List (TowerElem k)},
@@ -1162,13 +1162,14 @@ theorem bbcggiWireAccumulator_eq_iff_batchDeviationPoly
     (hLen : sentWires.length = expectedWires.length) (gamma : Tower128) :
     (bbcggiWireAccumulator sentWires gamma == bbcggiWireAccumulator expectedWires gamma) =
       (batchDeviationPoly (zipXorTower 7 sentWires expectedWires) gamma == towerZero 7) := by
+  unfold bbcggiWireAccumulator
   rw [batchDeviationPoly_zipXorTower_eq 7 hLen gamma]
-  by_cases hEq : bbcggiWireAccumulator sentWires gamma = bbcggiWireAccumulator expectedWires gamma
+  by_cases hEq : bbcggiWireAccumulatorGen 7 sentWires gamma = bbcggiWireAccumulatorGen 7 expectedWires gamma
   · rw [hEq, towerAdd_self_zero, beq_self_eq_true, beq_self_eq_true]
-  · have hLhs : (bbcggiWireAccumulator sentWires gamma == bbcggiWireAccumulator expectedWires gamma) = false :=
+  · have hLhs : (bbcggiWireAccumulatorGen 7 sentWires gamma == bbcggiWireAccumulatorGen 7 expectedWires gamma) = false :=
       beq_false_of_ne hEq
-    have hRhs : (towerAdd 7 (bbcggiWireAccumulator sentWires gamma)
-                            (bbcggiWireAccumulator expectedWires gamma) == towerZero 7) = false :=
+    have hRhs : (towerAdd 7 (bbcggiWireAccumulatorGen 7 sentWires gamma)
+                            (bbcggiWireAccumulatorGen 7 expectedWires gamma) == towerZero 7) = false :=
       beq_false_of_ne (fun hZ => hEq (tower_eq_of_add_eq_zero 7 hZ))
     rw [hLhs, hRhs]
 
@@ -1217,14 +1218,6 @@ private theorem evalReplicatedGateCrossByte_one_headD (bs : List UInt8) (exp0 : 
     have hOne : towerLowByte (towerOne 7) = 1 := rfl
     rw [hShift, hOne, evalReplicatedGateCrossByte_nil_wires rest, uint8_xor_zero]
 
-private theorem xorByteStream_replicate_zero :
-    ∀ (xs : List UInt8), xorByteStream xs (List.replicate xs.length 0) = xs
-  | [] => rfl
-  | x :: xs => by
-    simp only [List.length_cons, List.replicate_succ, xorByteStream,
-               List.zipWith_cons_cons, uint8_xor_zero]
-    exact congrArg (List.cons x) (xorByteStream_replicate_zero xs)
-
 private theorem xorByteStream_zero_head_replicate {xs : List UInt8} {L : Nat}
     (hLen : xs.length = L) :
     xorByteStream xs ((0 : UInt8) :: List.replicate (L - 1) 0) = xs := by
@@ -1241,6 +1234,14 @@ private theorem byteArray_bne_self (b : ByteArray) : (b != b) = false := by
   change (!(b.data == b.data)) = false
   rw [beq_self_eq_true]
   rfl
+
+private theorem ite_bne_self_false {α : Type} (b : ByteArray) (t e : α) :
+    (if (b != b) = true then t else e) = e := by
+  rw [byteArray_bne_self]; rfl
+
+private theorem ite_not_beq_self_false {α β : Type} [BEq β] [ReflBEq β] (x : β) (t e : α) :
+    (if (!(x == x)) = true then t else e) = e := by
+  rw [beq_self_eq_true]; rfl
 
 private theorem drop_append_of_length_eq {α : Type} {xs ys : List α} {n : Nat}
     (h : xs.length = n) : (xs ++ ys).drop n = ys := by
@@ -2073,13 +2074,13 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
                 encodeSlhSig (slhSignInternal p (A.scheduleSession advSt).1.msg sk (A.scheduleSession advSt).1.optRand) := by
               rw [hCrossZero, hTrueSigEq]
               exact xorByteStream_zero_head_replicate
-                (encodeSlhSig_length (slhSignInternal_wellTyped p
-                  (A.scheduleSession advSt).1.msg sk (A.scheduleSession advSt).1.optRand))
+                (encodeSlhSig_slhSignInternal_length p
+                  (A.scheduleSession advSt).1.msg sk (A.scheduleSession advSt).1.optRand)
             rw [hPreCutEq, unpackWireBytes_packWireBytes]
             cases sharedFinalizeCutOpen p cIdx cl.tsig.pk _ _ _ with
             | inl cutErr =>
               dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
-              exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, hCheatEq, rfl, rfl, fun hp => by cases hp⟩⟩
+              exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hCheatEq, rfl, rfl, fun hp => by cases hp⟩⟩
             | inr outSigBytes =>
               dsimp only
               exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, hCheatEq, rfl, rfl, fun _ => rfl⟩⟩
@@ -3344,10 +3345,11 @@ private theorem sharedVerifyRound1_cursor (cIdx : Fin 3) (r1St : RssRound1State)
     (h : sharedVerifyRound1 cIdx r1St corrR1 = .inr r2Init) :
     r2Init.cursor = r1St.cursor := by
   unfold sharedVerifyRound1 at h
-  cases corrR1.find? (fun pr => pr.1 == cIdx.val) with
-  | none => simp at h
+  cases hFind : corrR1.find? (fun pr => pr.1 == cIdx.val) with
+  | none => rw [hFind] at h; cases h
   | some pr =>
     rcases pr with ⟨_, cWire⟩
+    rw [hFind] at h
     dsimp only at h
     split at h
     · cases h
@@ -3662,6 +3664,25 @@ private theorem parseCorruptRound2Wire_zero8 (deg : Nat) :
   unfold parseCorruptRound2Wire
   simp [unpackWireBytes_packWireBytes, splitByteChunks]
 
+private theorem sharedPreCutBarrier_passive_zero8
+    (cIdx : Fin 3) (deg : Nat) (pk : SlhPublicKey) (req : SessionScheduleReq)
+    (cur : Nat) (nA nB : BitVec 64) (gBits : BitVec 128) :
+    sharedPreCutBarrier cIdx deg pk req
+      { cursor := cur
+        corrR1Commit := round1NonceCommit pk req cur cIdx.val (List.replicate 8 0)
+        nonceA := nA
+        nonceB := nB
+        gammaBits := gBits }
+      [(cIdx.val, packWireBytes (List.replicate 8 0))] =
+    .inr { sentWires := [], expectedWires := [], cutShares := ⟨[], [], []⟩ } := by
+  unfold sharedPreCutBarrier
+  simp only [List.find?, beq_self_eq_true]
+  rw [parseCorruptRound2Wire_zero8]
+  dsimp only [List.length_nil]
+  refine (ite_bne_self_false _ _ _).trans ?_
+  dsimp only [deriveExpectedGateWires, List.range, List.range.loop, List.map]
+  exact ite_not_beq_self_false _ _ _
+
 private theorem batchDeviationPoly_nil (x : Tower128) :
     batchDeviationPoly ([] : List Tower128) x = towerZero 7 := by
   simp only [batchDeviationPoly, RoundPoly.evalCoeffs,
@@ -3802,13 +3823,8 @@ theorem execRealSession_passiveRushingAdv_ok
           corrR1Commit := round1NonceCommit pk (reqs sIdx) sIdx cIdx.val (List.replicate 8 0),
           nonceA := tape.nonceA, nonceB := tape.nonceB, gammaBits := tape.gammaBits }
         [(cIdx.val, packWireBytes (List.replicate 8 0))] =
-      .inr { sentWires := [], expectedWires := [], cutShares := ⟨[], [], []⟩ } := by
-    unfold sharedPreCutBarrier
-    simp only [List.find?, beq_self_eq_true]
-    rw [parseCorruptRound2Wire_zero8]
-    dsimp only [List.length_nil]
-    rw [byteArray_bne_self, deriveExpectedGateWires_zero, beq_self_eq_true]
-    rfl
+      .inr { sentWires := [], expectedWires := [], cutShares := ⟨[], [], []⟩ } :=
+    sharedPreCutBarrier_passive_zero8 cIdx deg pk (reqs sIdx) sIdx tape.nonceA tape.nonceB tape.gammaBits
   rw [hBar]
   dsimp only
   have hExt := extractHonestQuorumViews_deal p.sigBytes cIdx seedSh prfSh (reqs sIdx)
@@ -4188,6 +4204,31 @@ private theorem parseCorruptRound2Wire_one_wire (w : Tower128) :
   rw [hMin, hChunk]
   simp [decodeTower128Wire_encodeTower128Wire]
 
+private theorem sharedPreCutBarrier_forged_one
+    (pk : SlhPublicKey) (req : SessionScheduleReq)
+    (nA nB : BitVec 64) (gBits : BitVec 128) (w : Tower128) :
+    sharedPreCutBarrier ⟨0, by decide⟩ 1 pk req
+      { cursor := 0
+        corrR1Commit := round1NonceCommit pk req 0 0 (List.replicate 8 0)
+        nonceA := nA
+        nonceB := nB
+        gammaBits := gBits }
+      [(0, packWireBytes (List.replicate 8 0 ++ encodeTower128Wire w))] =
+    if !(bbcggiWireAccumulator [w] (unpackTower 7 gBits) ==
+         bbcggiWireAccumulator [deriveExpectedGateWire pk req 0 0 (List.replicate 8 0) 0] (unpackTower 7 gBits)) then
+      .inl .activeConsistencyFailed
+    else
+      .inr { sentWires := [w],
+             expectedWires := [deriveExpectedGateWire pk req 0 0 (List.replicate 8 0) 0],
+             cutShares := ⟨[], [], []⟩ } := by
+  unfold sharedPreCutBarrier
+  simp only [List.find?, beq_self_eq_true]
+  rw [parseCorruptRound2Wire_one_wire w]
+  dsimp only [List.length_singleton]
+  refine (ite_bne_self_false _ _ _).trans ?_
+  dsimp only [deriveExpectedGateWires, List.range, List.range.loop, List.map]
+  rfl
+
 /-- **`#tooth` Theorem 4a (`tooth_skipping_pre_cut_barrier_leaks_key_bit`)**:
     Proves the Mandatory Pre-Cut Consistency Barrier in `rssSlhInteractiveProtocol` is load-bearing:
     1. **Direct Secret-Share Key-Bit Leakage (`ratLe (1, 1)`)**: Under `mutantSkipPreCutProtocol`,
@@ -4282,7 +4323,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       (bbcggiWireAccumulator [forgedWire0] gamma == bbcggiWireAccumulator [exp0] gamma) =
         (batchDeviationPoly [towerOne 7] gamma == towerZero 7) := by
     intro gamma
-    rw [bbcggiWireAccumulator_eq_iff_batchDeviationPoly (rfl : [forgedWire0].length = [exp0].length) gamma,
+    rw [@bbcggiWireAccumulator_eq_iff_batchDeviationPoly [forgedWire0] [exp0] rfl gamma,
         hZipOne]
   have hMutHead : ∀ (seedSh : RssByteShares) (hSWf : seedSh.WellFormed)
       (hSame : reconstructRssBytes seedSh = reconstructRssBytes seedSh₀)
@@ -4481,16 +4522,8 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
             nonceA := tape.nonceA, nonceB := tape.nonceB, gammaBits := tape.gammaBits }
           [(0, packWireBytes (List.replicate 8 0 ++ encodeTower128Wire forgedWire0))] =
         .inl .activeConsistencyFailed := by
-      unfold sharedPreCutBarrier
-      simp only [List.find?, beq_self_eq_true]
-      rw [parseCorruptRound2Wire_one_wire forgedWire0]
-      dsimp only [List.length_singleton]
-      rw [byteArray_bne_self, deriveExpectedGateWires_one]
-      change (if !(bbcggiWireAccumulator [forgedWire0] (unpackTower 7 tape.gammaBits) ==
-                   bbcggiWireAccumulator [exp0] (unpackTower 7 tape.gammaBits))
-              then PSum.inl AbortReason.activeConsistencyFailed
-              else _) = _
-      rw [hAccEqBatch, hBatchF]
+      rw [sharedPreCutBarrier_forged_one pk req tape.nonceA tape.nonceB tape.gammaBits forgedWire0,
+          hAccEqBatch, hBatchF]
       rfl
     rw [hBarFail]
   have hCardEq : card = rssPadSessionCard p.sigBytes * (2 ^ 128) := by
@@ -4581,16 +4614,8 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
           nonceA := tape.nonceA, nonceB := tape.nonceB, gammaBits := tape.gammaBits }
         [(0, packWireBytes (List.replicate 8 0 ++ encodeTower128Wire forgedWire0))] =
       .inl .activeConsistencyFailed := by
-    unfold sharedPreCutBarrier
-    simp only [List.find?, beq_self_eq_true]
-    rw [parseCorruptRound2Wire_one_wire forgedWire0]
-    dsimp only [List.length_singleton]
-    rw [byteArray_bne_self, deriveExpectedGateWires_one]
-    change (if !(bbcggiWireAccumulator [forgedWire0] (unpackTower 7 tape.gammaBits) ==
-                 bbcggiWireAccumulator [exp0] (unpackTower 7 tape.gammaBits))
-            then PSum.inl AbortReason.activeConsistencyFailed
-            else _) = _
-    rw [hAccEqBatch, hBatchFalse]
+    rw [sharedPreCutBarrier_forged_one pk req tape.nonceA tape.nonceB tape.gammaBits forgedWire0,
+        hAccEqBatch, hBatchFalse]
     rfl
   rw [hBarFail]
   exact ⟨rfl, rfl, rfl⟩

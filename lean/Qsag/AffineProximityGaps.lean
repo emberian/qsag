@@ -51,7 +51,7 @@ set_option exponentiation.threshold 2048
     satisfying `a * inv a = 1` for `a ≠ 0`. -/
 class LawfulField (F : Type) extends LawfulCommRing F where
   inv : F → F
-  zero_ne_one : CommRingOps.zero ≠ CommRingOps.one
+  zero_ne_one : (CommRingOps.zero : F) ≠ (CommRingOps.one : F)
   mul_inv_cancel : ∀ {a : F}, a ≠ CommRingOps.zero →
     CommRingOps.mul a (inv a) = CommRingOps.one
 
@@ -78,7 +78,7 @@ theorem mul_eq_zero {a b : F} [DecidableEq F]
 
 /-- Constructive `NoZeroDivisors F` dictionary derived from `LawfulField F` without creating
     global typeclass diamonds against concrete rings that already register `NoZeroDivisors`. -/
-def toNoZeroDivisors (F : Type) [LawfulField F] [DecidableEq F] : NoZeroDivisors F where
+@[instance_reducible] def toNoZeroDivisors (F : Type) [LawfulField F] [DecidableEq F] : NoZeroDivisors F where
   eq_zero_or_eq_zero_of_mul_eq_zero := mul_eq_zero
 
 end LawfulField
@@ -105,7 +105,7 @@ instance : LawfulField GoldilocksExt2 where
 
 private theorem affineFoldDegreeIter_le_of_le :
     ∀ (s m d : Nat), s ≤ m → d ≤ 2 ^ m + 1 → affineFoldDegreeIter s d ≤ 2 ^ (m - s) + 1
-  | 0, m, d, _, hd => by simpa using hd
+  | 0, m, d, _, hd => by simpa [affineFoldDegreeIter] using hd
   | s + 1, 0, _, hs, _ => by omega
   | s + 1, m + 1, d, hs, hd => by
     have hpow : 2 ^ (m + 1) = 2 * 2 ^ m := by rw [Nat.pow_succ]; omega
@@ -122,8 +122,9 @@ private theorem affineFoldDegreeIter_le_of_le :
     **`≤ 2^(ℓ - s) + 1`** — i.e., **at most `2` overflow monomials** (`2^(ℓ - s) + 2` coefficients),
     never growing unboundedly with `s`! -/
 theorem affine_fold_degree_le_pow2_add_one (ℓ s : Nat) (hs : s ≤ ℓ) :
-    affineFoldDegreeIter s (2 ^ ℓ - 1) ≤ 2 ^ (ℓ - s) + 1 :=
-  affineFoldDegreeIter_le_of_le s ℓ (2 ^ ℓ - 1) hs (by omega)
+    affineFoldDegreeIter s (2 ^ ℓ - 1) ≤ 2 ^ (ℓ - s) + 1 := by
+  have hpos : 0 < 2 ^ ℓ := Nat.two_pow_pos ℓ
+  exact affineFoldDegreeIter_le_of_le s ℓ (2 ^ ℓ - 1) hs (by omega)
 
 /-- **Two-Point Affine Line Uniqueness (`affine_line_unique_of_two_points`)**:
     Over any `[LawfulField F] [DecidableEq F]`, if two affine functions `α₁ + β₁ x` and `α₂ + β₂ x`
@@ -144,17 +145,14 @@ theorem affine_line_unique_of_two_points
       (CommRingOps.add α₂ (CommRingOps.mul β₂ z₀))
       (CommRingOps.add α₂ (CommRingOps.mul β₂ z₁)) := by
     rw [h₀, h₁]
-  have cancel_alpha : ∀ a b x y : F,
+  have cancel_alpha : ∀ a x y : F,
       CommRingOps.sub (CommRingOps.add a x) (CommRingOps.add a y) = CommRingOps.sub x y := by
-    intro a b x y
+    intro a x y
     apply LawfulCommRing.add_left_cancel (a := CommRingOps.add a y)
     rw [LawfulCommRing.add_sub_cancel_left,
-        LawfulCommRing.add_comm a y,
-        ← LawfulCommRing.add_assoc y a (CommRingOps.sub x y),
-        LawfulCommRing.add_comm y a,
         LawfulCommRing.add_assoc a y (CommRingOps.sub x y),
         LawfulCommRing.add_sub_cancel_left]
-  rw [cancel_alpha α₁ α₁, cancel_alpha α₂ α₂,
+  rw [cancel_alpha α₁, cancel_alpha α₂,
       ← LawfulCommRing.mul_sub, ← LawfulCommRing.mul_sub] at hdiff
   have hprod : CommRingOps.mul (CommRingOps.sub β₁ β₂) (CommRingOps.sub z₀ z₁) =
       CommRingOps.zero := by
@@ -199,14 +197,22 @@ theorem solveAffineLine_eq_of_eval
     rw [LawfulCommRing.mul_assoc, LawfulField.inv_mul_cancel hzSub, LawfulCommRing.mul_one]
   have h₁' : CommRingOps.add α' (CommRingOps.mul β' z₁) = y₁ := by
     apply LawfulCommRing.add_left_cancel (a := CommRingOps.sub y₀ y₁)
-    have hL : CommRingOps.add (CommRingOps.sub y₀ y₁) (CommRingOps.add α' (CommRingOps.mul β' z₁)) =
-        CommRingOps.add α' (CommRingOps.add (CommRingOps.mul β' (CommRingOps.sub z₀ z₁))
-          (CommRingOps.mul β' z₁)) := by
-      rw [← hDiff, LawfulCommRing.add_comm (CommRingOps.mul β' _) _, LawfulCommRing.add_assoc]
-    rw [hL, LawfulCommRing.mul_sub, LawfulCommRing.add_comm (CommRingOps.sub _ _) _,
-        LawfulCommRing.add_sub_cancel_left, h₀',
-        LawfulCommRing.add_comm (CommRingOps.sub y₀ y₁) y₁,
-        LawfulCommRing.add_sub_cancel_left]
+    rw [LawfulCommRing.add_comm (CommRingOps.sub y₀ y₁) y₁,
+        LawfulCommRing.add_sub_cancel_left,
+        ← hDiff, LawfulCommRing.mul_sub,
+        ← LawfulCommRing.add_assoc
+            (CommRingOps.sub (CommRingOps.mul β' z₀) (CommRingOps.mul β' z₁)) α'
+            (CommRingOps.mul β' z₁),
+        LawfulCommRing.add_comm
+            (CommRingOps.sub (CommRingOps.mul β' z₀) (CommRingOps.mul β' z₁)) α',
+        LawfulCommRing.add_assoc α'
+            (CommRingOps.sub (CommRingOps.mul β' z₀) (CommRingOps.mul β' z₁))
+            (CommRingOps.mul β' z₁),
+        LawfulCommRing.add_comm
+            (CommRingOps.sub (CommRingOps.mul β' z₀) (CommRingOps.mul β' z₁))
+            (CommRingOps.mul β' z₁),
+        LawfulCommRing.add_sub_cancel_left,
+        h₀']
   rcases affine_line_unique_of_two_points hz (h₀.trans h₀'.symm) (h₁.trans h₁'.symm) with ⟨rfl, rfl⟩
   rfl
 
@@ -217,22 +223,15 @@ theorem solveAffineLine_eq_of_eval
 theorem prodPool_length {α : Type} (S : List α) :
     (prodPool S).length = S.length * S.length := by
   unfold prodPool
-  induction S with
-  | nil => rfl
-  | cons a tl ih =>
-    have hrec : ∀ (xs : List α) (k : Nat),
-        (xs.flatMap (fun x => List.map (fun b => (x, b)) (a :: tl))).length =
-        xs.length * (tl.length + 1) := by
-      intro xs _
-      induction xs with
-      | nil => simp
-      | cons _ rest ihr =>
-        simp only [List.flatMap_cons, List.length_append, List.length_map, List.length_cons]
-        rw [ihr]
-        omega
-    simp only [List.flatMap_cons, List.length_append, List.length_map, List.length_cons]
-    rw [hrec tl 0]
-    omega
+  have hrec : ∀ (xs B : List α),
+      (xs.flatMap (fun x => B.map (fun b => (x, b)))).length = xs.length * B.length := by
+    intro xs B
+    induction xs with
+    | nil => simp
+    | cons _ rest ihr =>
+      simp only [List.flatMap_cons, List.length_append, List.length_map, List.length_cons]
+      rw [ihr, Nat.add_mul, Nat.one_mul, Nat.add_comm]
+  exact hrec S S
 
 theorem mem_prodPool_iff {α : Type} {S : List α} {p : α × α} :
     p ∈ prodPool S ↔ p.1 ∈ S ∧ p.2 ∈ S := by
@@ -255,7 +254,7 @@ private theorem nodup_map_pair_right {α : Type} (a : α) :
     rw [List.mem_map] at hp
     rcases hp with ⟨b', hb', rfl⟩
     cases heq
-    exact hnot b' hb' rfl
+    exact hnot b hb' rfl
 
 private theorem nodup_flatMap_pairs {α : Type} (B : List α) (hB : B.Nodup) :
     ∀ {A : List α}, A.Nodup → (A.flatMap (fun a => B.map (fun b => (a, b)))).Nodup
@@ -305,6 +304,7 @@ private theorem mem_eraseFirst_of_ne {α : Type} [DecidableEq α] {x z : α} (hn
   | y :: ys, h => by
     unfold eraseFirst
     if hxy : x = y then
+      simp only [hxy, ↓reduceIte]
       subst hxy
       cases h with
       | head => exact False.elim (hne rfl)
@@ -348,7 +348,7 @@ private theorem filter_eq_max_one_of_nodup {α : Type} [DecidableEq α] (target 
             cases hnd with | cons _ t => exact t
           simp [List.filter, hyne, ih (fun z hz => hnot z (.tail _ hz)) hnd']
       rw [hempty]
-      decide
+      simp
     else
       simp only [hx, decide_false]
       exact filter_eq_max_one_of_nodup target hnd
@@ -357,12 +357,13 @@ private theorem filter_sub_length_le {α : Type} (p q : α → Bool) (hpq : ∀ 
     ∀ (xs : List α), (xs.filter p).length ≤ (xs.filter q).length
   | [] => Nat.le_refl 0
   | x :: xs => by
+    have ih := filter_sub_length_le p q hpq xs
     simp only [List.filter]
     cases hpx : p x
-    · cases hqx : q x <;> simp [filter_sub_length_le p q hpq xs] <;> omega
+    · cases hqx : q x <;> simp <;> omega
     · rw [hpq x hpx]
       simp only [List.length_cons]
-      exact Nat.succ_le_succ (filter_sub_length_le p q hpq xs)
+      exact Nat.succ_le_succ ih
 
 private theorem flatMap_filter_length_le {α β : Type} (f : α → List β) (p : β → Bool) (B : Nat) :
     ∀ {xs : List α}, (∀ x ∈ xs, ((f x).filter p).length ≤ B) →
@@ -400,17 +401,19 @@ theorem affine_duet_roots_le_card
       (B := 1) (xs := S) ?_
     · rw [Nat.mul_one] at hbound
       exact hbound
-    · intro a _
+    · intro a haS
       let target := CommRingOps.neg
         (CommRingOps.mul (CommRingOps.add Δ₀ (CommRingOps.mul a Δ₁)) (LawfulField.inv Δ₂))
       have hmap : ((S.map (fun b => (a, b))).filter
           (fun p => decide (evalAffineDuet Δ₀ Δ₁ Δ₂ p.1 p.2 = CommRingOps.zero))).length =
           (S.filter (fun b => decide (evalAffineDuet Δ₀ Δ₁ Δ₂ a b = CommRingOps.zero))).length := by
+        clear haS hS
         induction S with
         | nil => rfl
         | cons b bs ih =>
           simp only [List.map, List.filter]
-          cases decide (evalAffineDuet Δ₀ Δ₁ Δ₂ a b = CommRingOps.zero) <;> simp [ih]
+          cases decide (evalAffineDuet Δ₀ Δ₁ Δ₂ a b = CommRingOps.zero) <;>
+            simp only [List.length_cons, ih]
       rw [hmap]
       have hsub := filter_sub_length_le
         (fun b => decide (evalAffineDuet Δ₀ Δ₁ Δ₂ a b = CommRingOps.zero))
@@ -418,16 +421,12 @@ theorem affine_duet_roots_le_card
         (fun b hb => by
           have hev : evalAffineDuet Δ₀ Δ₁ Δ₂ a b = CommRingOps.zero := of_decide_eq_true hb
           unfold evalAffineDuet at hev
-          rw [LawfulCommRing.add_comm Δ₀ _, ← LawfulCommRing.add_assoc,
-              LawfulCommRing.add_comm (CommRingOps.mul a Δ₁) (CommRingOps.mul b Δ₂),
-              LawfulCommRing.add_assoc] at hev
+          rw [← LawfulCommRing.add_assoc Δ₀ (CommRingOps.mul a Δ₁) (CommRingOps.mul b Δ₂)] at hev
           have hmul0 : CommRingOps.mul b Δ₂ =
               CommRingOps.neg (CommRingOps.add Δ₀ (CommRingOps.mul a Δ₁)) := by
             apply LawfulCommRing.add_left_cancel
               (a := CommRingOps.add Δ₀ (CommRingOps.mul a Δ₁))
-            rw [LawfulCommRing.add_right_neg,
-                LawfulCommRing.add_comm Δ₀ _,
-                LawfulCommRing.add_comm _ (CommRingOps.mul b Δ₂)]
+            rw [LawfulCommRing.add_right_neg]
             exact hev
           have hbEq := congrArg (fun z => CommRingOps.mul z (LawfulField.inv Δ₂)) hmul0
           rw [LawfulCommRing.mul_assoc, LawfulField.mul_inv_cancel hΔ₂, LawfulCommRing.mul_one,
@@ -499,7 +498,8 @@ private theorem two_mul_unorderedPairs_length {α : Type} :
   | [] => rfl
   | x :: xs => by
     have ih := two_mul_unorderedPairs_length xs
-    simp only [unorderedPairs, List.length_append, List.length_map, List.length_cons]
+    simp only [unorderedPairs, List.length_append, List.length_map, List.length_cons,
+               Nat.add_sub_cancel]
     have hmul : (xs.length + 1) * xs.length = 2 * xs.length + xs.length * (xs.length - 1) := by
       cases xs with
       | nil => rfl
@@ -520,7 +520,8 @@ theorem ne_of_mem_unorderedPairs_nodup {α : Type} :
   | x :: xs, ⟨a, b⟩, .cons hnot hnd, hp => by
     simp only [unorderedPairs, List.mem_append, List.mem_map, Prod.mk.injEq] at hp
     rcases hp with ⟨y, hy, rfl, rfl⟩ | htl
-    · exact fun heq => hnot a (heq ▸ hy) rfl
+    · dsimp only
+      exact fun heq => hnot x (heq ▸ hy) rfl
     · exact ne_of_mem_unorderedPairs_nodup hnd htl
 
 private theorem filter_two_mem_unorderedPairs {α : Type} (pred : α → Bool) :
@@ -535,11 +536,12 @@ private theorem filter_two_mem_unorderedPairs {α : Type} (pred : α → Bool) :
       simp only [unorderedPairs, List.mem_append]
       exact .inr ih
     · rw [hpx] at h
-      cases h
-      have hz₁InFilt : z₁ ∈ xs.filter pred := .head _
+      injection h with hxEq htlEq
+      subst hxEq
+      have hz₁InFilt : z₁ ∈ xs.filter pred := by rw [htlEq]; exact .head _
       have hz₁InXs : z₁ ∈ xs := (List.mem_filter.mp hz₁InFilt).1
-      simp only [unorderedPairs, List.mem_append, List.mem_map, Prod.mk.injEq]
-      exact .inl ⟨z₁, hz₁InXs, rfl, rfl⟩
+      simp only [unorderedPairs, List.mem_append, List.mem_map]
+      exact .inl ⟨z₁, hz₁InXs, rfl⟩
 
 /-- Predicate testing whether coordinate `z` is an **accidental agreement** between `(F, G)` and `(f, g)`
     along `(α, β)`: `F(z) + (α + β z) G(z) = f(z) + (α + β z) g(z)` while `(F(z), G(z)) ≠ (f(z), g(z))`. -/
@@ -587,19 +589,17 @@ private theorem accidental_agreement_forces_ratio
     apply LawfulCommRing.add_left_cancel
       (a := CommRingOps.add (RoundPoly.evalCoeffs F_poly z)
               (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z)))
-    rw [LawfulCommRing.add_comm (RoundPoly.evalCoeffs F_poly z) _,
-        LawfulCommRing.add_assoc _ (RoundPoly.evalCoeffs F_poly z) _,
-        LawfulCommRing.add_comm (RoundPoly.evalCoeffs F_poly z) (CommRingOps.sub _ _),
-        ← LawfulCommRing.add_assoc,
+    rw [LawfulCommRing.add_assoc (RoundPoly.evalCoeffs F_poly z)
+          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z)) _,
         LawfulCommRing.add_sub_cancel_left,
-        LawfulCommRing.add_comm _ (RoundPoly.evalCoeffs F_poly z),
         hEq,
-        LawfulCommRing.add_comm (CommRingOps.mul _ (g z)) _,
-        ← LawfulCommRing.add_assoc,
-        LawfulCommRing.add_comm (f z) _,
-        LawfulCommRing.add_assoc,
+        LawfulCommRing.add_comm (RoundPoly.evalCoeffs F_poly z)
+          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z)),
+        LawfulCommRing.add_assoc
+          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z))
+          (RoundPoly.evalCoeffs F_poly z) _,
         LawfulCommRing.add_sub_cancel_left,
-        LawfulCommRing.add_comm]
+        LawfulCommRing.add_comm (f z) _]
   have hdGNe : dG ≠ CommRingOps.zero := by
     intro hdG0
     have hG : RoundPoly.evalCoeffs G_poly z = g z := LawfulCommRing.sub_eq_zero_iff.mp hdG0
@@ -671,7 +671,7 @@ theorem vanishingPoly_length {F : Type} [CommRingOps F] :
   | c :: cs => by
     simp only [vanishingPoly, RoundPoly.subCoeffs_length, List.length_cons, List.length_map,
                vanishingPoly_length cs]
-    omega
+    exact Nat.max_eq_left (by omega)
 
 private theorem evalCoeffs_map_mul {F : Type} [LawfulCommRing F] (c x : F) :
     ∀ (p : List F), RoundPoly.evalCoeffs (p.map (CommRingOps.mul c)) x =
@@ -727,7 +727,7 @@ private theorem last_subCoeffs_vanishingPoly
   | [], _, hp, _, _ => by cases hp
   | [c], [], _, hlast, _ => by
     simpa [RoundPoly.subCoeffs] using hlast
-  | [_], _ :: _, _, _, hlt => by simp at hlt; omega
+  | [_], _ :: _, _, _, hlt => by simp at hlt
   | c₀ :: c₁ :: cs, [], _, hlast, _ => by
     have hpos : 0 < (c₁ :: cs).length := by simp
     have ih := last_subCoeffs_vanishingPoly (c₁ :: cs) [] hpos hlast (by simp)
@@ -737,6 +737,30 @@ private theorem last_subCoeffs_vanishingPoly
     have hlt' : gs.length < (c₁ :: cs).length := by simp at hlt ⊢; omega
     have ih := last_subCoeffs_vanishingPoly (c₁ :: cs) gs hpos hlast hlt'
     simpa [RoundPoly.subCoeffs] using ih
+
+private theorem vanishingPoly_last_one
+    {F : Type} [LawfulField F] :
+    ∀ (C : List F), (vanishingPoly C).getD C.length CommRingOps.zero = CommRingOps.one
+  | [] => rfl
+  | c :: cs => by
+    have hcsLen : (vanishingPoly cs).length = cs.length + 1 := vanishingPoly_length cs
+    have h0Last : (CommRingOps.zero :: vanishingPoly cs).getD (cs.length + 1) CommRingOps.zero =
+        CommRingOps.one := by
+      simpa [List.getD] using vanishingPoly_last_one cs
+    have hmapLt : ((vanishingPoly cs).map (CommRingOps.mul c)).length <
+        (CommRingOps.zero :: vanishingPoly cs).length := by simp [hcsLen]
+    have h := last_subCoeffs_vanishingPoly
+      (CommRingOps.zero :: vanishingPoly cs)
+      ((vanishingPoly cs).map (CommRingOps.mul c))
+      (by simp) h0Last hmapLt
+    simpa [vanishingPoly, hcsLen] using h
+
+private theorem lt_length_of_getElem?_eq_some {α : Type} :
+    ∀ {xs : List α} {i : Nat} {x : α}, xs[i]? = some x → i < xs.length
+  | [], _, _, h => by simp at h
+  | _ :: _, 0, _, _ => by simp
+  | _ :: xs, i + 1, _, h =>
+    Nat.succ_lt_succ (lt_length_of_getElem?_eq_some (by simpa using h))
 
 private theorem exists_nonroot_of_monic_len
     {F : Type} [LawfulField F] [DecidableEq F] :
@@ -853,8 +877,10 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
   dsimp only
   intro r
   let cLen := A - s - 1
+  have hcLen : cLen = A - s - 1 := rfl
   let C := D.take cLen
   let blkStart := cLen + r.1 * (s + 1)
+  have hblkStart : blkStart = cLen + r.1 * (s + 1) := rfl
   let T := (D.drop blkStart).take (s + 1)
   let fg := scalarFloorWords D gammas A s
   have hBlockFit : cLen + (r.1 + 1) * (s + 1) ≤ D.length := by
@@ -862,6 +888,7 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
     have hrLe : r.1 ≤ (D.length - A) / (s + 1) := by omega
     have hmul := Nat.mul_le_mul_right (s + 1) hrLe
     have hdiv := Nat.div_mul_le_self (D.length - A) (s + 1)
+    have hexp : (r.1 + 1) * (s + 1) = r.1 * (s + 1) + (s + 1) := Nat.add_one_mul r.1 (s + 1)
     omega
   have hSubCT : ∀ z ∈ C ++ T, z ∈ D.filter (fun z =>
       decide (CommRingOps.add (fg.1 z) (CommRingOps.mul gammas[r] (fg.2 z)) =
@@ -872,10 +899,9 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
     · have hzD : z ∈ D := List.mem_of_mem_take hzC
       rw [List.mem_filter]
       refine ⟨hzD, decide_eq_true ?_⟩
-      -- On `C`, `g z = 0` and `idx < cLen` so `f z = 0`:
       rcases List.getElem?_of_mem hzC with ⟨i, hi⟩
       have hiLt : i < cLen := by
-        have hlt := List.lt_length_of_getElem? hi
+        have hlt := lt_length_of_getElem?_eq_some hi
         rw [List.length_take] at hlt
         omega
       have hiD : D[i]? = some z := by
@@ -888,18 +914,17 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
         rw [hidx]
         simp [cLen, hiLt]
       rw [hf0, hg0, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
-    · -- On `T`, `idx = blkStart + j` so `blk = r.1` and `f z = -gammas[r] * g z`:
-      rcases List.getElem?_of_mem hzT with ⟨j, hj⟩
+    · rcases List.getElem?_of_mem hzT with ⟨j, hj⟩
       have hjLt : j < s + 1 := by
-        have hlt := List.lt_length_of_getElem? hj
+        have hlt := lt_length_of_getElem?_eq_some hj
         rw [List.length_take] at hlt
         omega
       rw [List.getElem?_take_of_lt hjLt, List.getElem?_drop] at hj
       have hzD : z ∈ D := List.mem_of_getElem? hj
       have hidx := indexOf?_of_getElem? hD hj
-      have hgeC : ¬ (blkStart + j < cLen) := by dsimp [blkStart]; omega
+      have hgeC : ¬ (blkStart + j < cLen) := by omega
       have hblkEq : (blkStart + j - cLen) / (s + 1) = r.1 := by
-        have h1 : blkStart + j - cLen = j + r.1 * (s + 1) := by dsimp [blkStart]; omega
+        have h1 : blkStart + j - cLen = j + r.1 * (s + 1) := by omega
         rw [h1, Nat.add_mul_div_right _ _ (by omega), Nat.div_eq_of_lt hjLt, Nat.zero_add]
       have hgetGamma : gammas.getD r.1 CommRingOps.zero = gammas[r] := by
         simp [List.getD, r.2]
@@ -907,13 +932,13 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
         dsimp [fg, scalarFloorWords]
         rw [hidx]
         simp only [cLen, hgeC, ↓reduceIte, hblkEq, r.2, hBlockFit, and_self, hgetGamma]
+        rfl
       rw [List.mem_filter]
       refine ⟨hzD, decide_eq_true ?_⟩
       rw [hfVal, LawfulCommRing.add_left_neg]
   have hndCT : (C ++ T).Nodup := by
-    -- `C ++ T` is a sublist of `D` since `C = D.take cLen` and `T` is a slice of `D.drop cLen`:
     have hSubD : List.Sublist (C ++ T) (D.take cLen ++ D.drop cLen) := by
-      apply List.Sublist.append List.Sublist.refl
+      apply List.Sublist.append (List.Sublist.refl _)
       have h1 : T = ((D.drop cLen).drop (r.1 * (s + 1))).take (s + 1) := by
         dsimp [T, blkStart]
         rw [List.drop_drop, Nat.add_comm cLen]
@@ -921,46 +946,39 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
       exact List.Sublist.trans (List.take_sublist _ _) (List.drop_sublist _ _)
     rw [List.take_append_drop] at hSubD
     exact hSubD.nodup hD
+  have hLenC : C.length = cLen := List.length_take_of_le (by omega)
+  have hLenT : T.length = s + 1 := by
+    dsimp [T]
+    apply List.length_take_of_le
+    rw [List.length_drop]
+    have hexp : (r.1 + 1) * (s + 1) = r.1 * (s + 1) + (s + 1) := Nat.add_one_mul r.1 (s + 1)
+    omega
   have hLenCT : (C ++ T).length = A := by
-    rw [List.length_append, List.length_take, List.length_take, List.length_drop]
-    dsimp [cLen, blkStart]
+    rw [List.length_append, hLenC, hLenT]
     omega
   constructor
   · have hle := nodup_length_le_of_subset hndCT hSubCT
-    omega
+    rw [hLenCT] at hle
+    exact hle
   · intro G_poly hGLen
     let S_γ := D.filter (fun z =>
       decide (CommRingOps.add (fg.1 z) (CommRingOps.mul gammas[r] (fg.2 z)) = CommRingOps.zero))
     let diff := RoundPoly.subCoeffs (vanishingPoly C) G_poly
     have hpLen : (vanishingPoly C).length = cLen + 1 := by
-      rw [vanishingPoly_length, List.length_take]
-      dsimp [cLen]; omega
-    have hGLtP : G_poly.length < (vanishingPoly C).length := by rw [hpLen]; dsimp [cLen]; omega
+      rw [vanishingPoly_length, hLenC]
+    have hGLtP : G_poly.length < (vanishingPoly C).length := by rw [hpLen]; omega
     have hDiffLen : diff.length = cLen + 1 := by
       dsimp [diff]
       rw [RoundPoly.subCoeffs_length, hpLen]
-      omega
+      exact Nat.max_eq_left (by omega)
     have hVanLast : (vanishingPoly C).getD cLen CommRingOps.zero = CommRingOps.one := by
-      clear hSubCT hndCT hLenCT hGLtP hDiffLen diff S_γ fg T blkStart
-      induction C generalizing cLen with
-      | nil => simp at hpLen; subst hpLen; rfl
-      | cons c cs ih =>
-        have hcsLen : (vanishingPoly cs).length = cs.length + 1 := vanishingPoly_length cs
-        have h1 := ih cs.length hcsLen
-        have hcEq : cLen = cs.length + 1 := by simp [vanishingPoly_length] at hpLen; omega
-        subst hcEq
-        have hmapLt : ((vanishingPoly cs).map (CommRingOps.mul c)).length <
-            (CommRingOps.zero :: vanishingPoly cs).length := by simp [hcsLen]
-        have h0Last : (CommRingOps.zero :: vanishingPoly cs).getD (cs.length + 1) CommRingOps.zero =
-            CommRingOps.one := by simpa using h1
-        simpa [vanishingPoly, hcsLen] using
-          last_subCoeffs_vanishingPoly (CommRingOps.zero :: vanishingPoly cs)
-            ((vanishingPoly cs).map (CommRingOps.mul c)) (by simp) h0Last hmapLt
+      rw [← hLenC]
+      exact vanishingPoly_last_one C
     have hDiffLast : diff.getD cLen CommRingOps.zero = CommRingOps.one := by
       have h := last_subCoeffs_vanishingPoly (vanishingPoly C) G_poly
         (by rw [hpLen]; omega) (by rwa [hpLen, Nat.add_sub_cancel]) hGLtP
       rwa [hpLen, Nat.add_sub_cancel] at h
-    rcases exists_nonroot_of_monic_len cLen diff D hDiffLen hDiffLast hD (by dsimp [cLen]; omega)
+    rcases exists_nonroot_of_monic_len cLen diff D hDiffLen hDiffLast hD (by omega)
       with ⟨x₀, _, hx₀Ne⟩
     have hndS : S_γ.Nodup := List.Pairwise.filter _ hD
     have hRoots := @RoundPoly.roots_nodup_length_le F _ _ (LawfulField.toNoZeroDivisors F)
@@ -976,8 +994,103 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
       S_γ
     have hLeC : (S_γ.filter (fun z => decide (RoundPoly.evalCoeffs G_poly z = fg.2 z))).length ≤ cLen :=
       Nat.le_trans hSubAgree hRoots
-    dsimp [cLen] at hLeC
+    change (S_γ.filter (fun z => decide (RoundPoly.evalCoeffs G_poly z = fg.2 z))).length < A - s
     omega
+
+private theorem filter_eq_self_of_all {α : Type} (p : α → Bool) :
+    ∀ (xs : List α), (∀ x ∈ xs, p x = true) → xs.filter p = xs
+  | [], _ => rfl
+  | x :: xs, h => by
+    simp [List.filter, h x (.head _), filter_eq_self_of_all p xs (fun y hy => h y (.tail _ hy))]
+
+private theorem filter_eq_nil_of_all_false {α : Type} (p : α → Bool) :
+    ∀ (xs : List α), (∀ x ∈ xs, p x = false) → xs.filter p = []
+  | [], _ => rfl
+  | x :: xs, h => by
+    simp [List.filter, h x (.head _), filter_eq_nil_of_all_false p xs (fun y hy => h y (.tail _ hy))]
+
+private theorem filter_eq_singleton_of_nodup_iff {α : Type} (p : α → Bool) (z₀ : α) :
+    ∀ {xs : List α}, xs.Nodup → z₀ ∈ xs → (∀ x ∈ xs, p x = true ↔ x = z₀) → xs.filter p = [z₀]
+  | [], _, hz, _ => by cases hz
+  | x :: xs, .cons hnot hnd, hz, hiff => by
+    simp only [List.filter]
+    cases hpx : p x
+    · have hne : z₀ ≠ x := by
+        intro heq; subst heq
+        have ht := (hiff z₀ (.head _)).mpr rfl
+        rw [hpx] at ht; cases ht
+      cases hz with
+      | head => exact False.elim (hne rfl)
+      | tail _ hzs =>
+        exact filter_eq_singleton_of_nodup_iff p z₀ hnd hzs (fun y hy => hiff y (.tail _ hy))
+    · have hxEq : x = z₀ := (hiff x (.head _)).mp hpx
+      subst hxEq
+      rw [filter_eq_nil_of_all_false p xs]
+      intro y hy
+      cases hpy : p y
+      · rfl
+      · exact False.elim (hnot y hy ((hiff y (.tail _ hy)).mp hpy).symm)
+
+private theorem zeroLossRow_nodup
+    {F : Type} [LawfulField F] (z₀ : F) :
+    ∀ {bs : List F}, bs.Nodup →
+      (bs.map (fun β => (CommRingOps.neg (CommRingOps.mul β z₀), β))).Nodup
+  | [], _ => .nil
+  | b :: bs, .cons hnb hndb => by
+    simp only [List.map]
+    refine .cons ?_ (zeroLossRow_nodup z₀ hndb)
+    intro q hq heq
+    rw [List.mem_map] at hq
+    rcases hq with ⟨b', hb', rfl⟩
+    have hbEq : b = b' := (Prod.mk.inj heq).2
+    exact hnb b' hb' hbEq.symm
+
+private theorem zeroLossBadPairs_nodup
+    {F : Type} [LawfulField F] [DecidableEq F]
+    {S_nz : List F} (hSnz : S_nz.Nodup) (hSnzNe : ∀ β ∈ S_nz, β ≠ CommRingOps.zero) :
+    ∀ {zs : List F}, zs.Nodup →
+      (zs.flatMap (fun z₀ => S_nz.map (fun β => (CommRingOps.neg (CommRingOps.mul β z₀), β)))).Nodup
+  | [], _ => .nil
+  | z₀ :: zs, .cons hnot hnd => by
+    simp only [List.flatMap_cons]
+    rw [List.nodup_append]
+    refine ⟨zeroLossRow_nodup z₀ hSnz, zeroLossBadPairs_nodup hSnz hSnzNe hnd, ?_⟩
+    intro p₁ hp₁ p₂ hp₂ heq
+    subst heq
+    rw [List.mem_map] at hp₁
+    rw [List.mem_flatMap] at hp₂
+    rcases hp₁ with ⟨β₁, hβ₁Mem, rfl⟩
+    rcases hp₂ with ⟨z₁, hz₁Mem, hp₂'⟩
+    rw [List.mem_map] at hp₂'
+    rcases hp₂' with ⟨β₂, _, heq'⟩
+    have hβEq : β₂ = β₁ := (Prod.mk.inj heq').2
+    subst hβEq
+    have hβNe := hSnzNe β₂ hβ₁Mem
+    have hmulEq : CommRingOps.mul β₂ z₁ = CommRingOps.mul β₂ z₀ := by
+      have hn := congrArg CommRingOps.neg (Prod.mk.inj heq').1
+      simpa [LawfulCommRing.neg_neg] using hn
+    have hzEq : z₁ = z₀ := by
+      have hm := congrArg (CommRingOps.mul (LawfulField.inv β₂)) hmulEq
+      simpa [← LawfulCommRing.mul_assoc, LawfulField.inv_mul_cancel hβNe,
+             LawfulCommRing.one_mul] using hm
+    exact hnot z₁ hz₁Mem hzEq.symm
+
+private theorem exists_nonroot_or_all_roots
+    {F : Type} [CommRingOps F] [DecidableEq F] (G : List F) :
+    ∀ (C : List F),
+      (∃ c ∈ C, RoundPoly.evalCoeffs G c ≠ CommRingOps.zero) ∨
+      (∀ c ∈ C, RoundPoly.evalCoeffs G c = CommRingOps.zero)
+  | [] => .inr (fun _ h => by cases h)
+  | c :: cs =>
+    if hc : RoundPoly.evalCoeffs G c = CommRingOps.zero then
+      match exists_nonroot_or_all_roots G cs with
+      | .inl ⟨x, hx, hne⟩ => .inl ⟨x, .tail _ hx, hne⟩
+      | .inr hall => .inr (fun y hy => by
+          cases hy with
+          | head => exact hc
+          | tail _ hm => exact hall y hm)
+    else
+      .inl ⟨c, .head _, hc⟩
 
 /-- Adversarial received-word pair `(f = 0, g = 1_{D \ C})` for `[CWYZ26]` Proposition 6.2 (`s = 0`). -/
 def zeroLossAffineWords
@@ -1034,45 +1147,7 @@ theorem tooth_affine_combiner_zero_loss_linear_floor
         rw [Nat.add_mul, Nat.one_mul, Nat.add_comm]
     rw [aux restD, hLenRest]
   have hndRest : restD.Nodup := (List.drop_sublist (A - 1) D).nodup hD
-  have hBadNodup : badPairs.Nodup := by
-    have aux : ∀ {zs : List F}, zs.Nodup →
-        (zs.flatMap (fun z₀ => S_nz.map (fun β => (CommRingOps.neg (CommRingOps.mul β z₀), β)))).Nodup
-      | [], _ => .nil
-      | z₀ :: zs, .cons hnot hnd => by
-        simp only [List.flatMap_cons]
-        rw [List.nodup_append]
-        refine ⟨?_, aux hnd, ?_⟩
-        · have mnd : ∀ {bs : List F}, bs.Nodup →
-              (bs.map (fun β => (CommRingOps.neg (CommRingOps.mul β z₀), β))).Nodup
-            | [], _ => .nil
-            | b :: bs, .cons hnb hndb => by
-              simp only [List.map]
-              refine .cons ?_ (mnd hndb)
-              intro q hq heq
-              rw [List.mem_map] at hq
-              rcases hq with ⟨b', hb', rfl⟩
-              cases heq
-              exact hnb b' hb' rfl
-          exact mnd hSnz
-        · intro p₁ hp₁ p₂ hp₂ heq
-          subst heq
-          rw [List.mem_map] at hp₁
-          rw [List.mem_flatMap] at hp₂
-          rcases hp₁ with ⟨β₁, hβ₁Mem, rfl⟩
-          rcases hp₂ with ⟨z₁, hz₁Mem, hp₂'⟩
-          rw [List.mem_map] at hp₂'
-          rcases hp₂' with ⟨β₂, _, heq'⟩
-          cases heq'
-          have hβNe := hSnzNe β₁ hβ₁Mem
-          have hmulEq : CommRingOps.mul β₁ z₁ = CommRingOps.mul β₁ z₀ := by
-            have hn := congrArg CommRingOps.neg (Prod.mk.inj heq').1
-            simpa [LawfulCommRing.neg_neg] using hn
-          have hzEq : z₁ = z₀ := by
-            have hm := congrArg (CommRingOps.mul (LawfulField.inv β₁)) hmulEq
-            simpa [← LawfulCommRing.mul_assoc, LawfulField.inv_mul_cancel hβNe,
-                   LawfulCommRing.one_mul] using hm
-          exact hnot z₁ hz₁Mem hzEq.symm
-    exact aux hndRest
+  have hBadNodup : badPairs.Nodup := zeroLossBadPairs_nodup hSnz hSnzNe hndRest
   refine ⟨hBadLen, hBadNodup, ?_⟩
   intro p hp
   rw [List.mem_flatMap] at hp
@@ -1080,7 +1155,6 @@ theorem tooth_affine_combiner_zero_loss_linear_floor
   rw [List.mem_map] at hpMap
   rcases hpMap with ⟨β, hβMem, rfl⟩
   have hβNe := hSnzNe β hβMem
-  -- Show `S_p = C ++ [z₀]`!
   have hDisjCRest : ∀ x ∈ C, x ∉ restD := by
     have hApp : C ++ restD = D := List.take_append_drop (A - 1) D
     have hndApp : (C ++ restD).Nodup := hApp ▸ hD
@@ -1094,94 +1168,43 @@ theorem tooth_affine_combiner_zero_loss_linear_floor
         (CommRingOps.add (CommRingOps.neg (CommRingOps.mul β z₀)) (CommRingOps.mul β z))
         (fg.2 z)) = CommRingOps.zero)
   have hFiltC : C.filter predP = C := by
-    have hall : ∀ z ∈ C, predP z = true := by
-      intro z hzC
-      dsimp [predP, fg, zeroLossAffineWords]
-      simp [C, hzC, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
-    induction C with
-    | nil => rfl
-    | cons c cs ih =>
-      have hc := hall c (.head _)
-      simp only [List.filter, hc, ↓reduceIte]
-      exact congrArg (c :: ·) (ih (fun y hy => hall y (.tail _ hy))
-        (fun x hx => hDisjCRest x (.tail _ hx)) (fun h => hz₀NotC (.tail _ h)))
+    apply filter_eq_self_of_all predP C
+    intro z hzC
+    dsimp [predP, fg, zeroLossAffineWords]
+    simp [C, hzC, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
   have hFiltRest : restD.filter predP = [z₀] := by
-    have hiff : ∀ z ∈ restD, predP z = true ↔ z = z₀ := by
-      intro z hzR
-      have hzNotC : z ∉ C := fun hC => hDisjCRest z hC hzR
-      dsimp [predP, fg, zeroLossAffineWords]
-      simp only [C, hzNotC, ↓reduceIte, LawfulCommRing.zero_add, LawfulCommRing.mul_one,
-                 decide_eq_true_eq]
-      rw [LawfulCommRing.add_comm, ← LawfulCommRing.sub_eq_add_neg, ← LawfulCommRing.mul_sub]
-      constructor
-      · intro h0
-        rcases LawfulField.mul_eq_zero h0 with hb0 | hz0
-        · exact False.elim (hβNe hb0)
-        · exact LawfulCommRing.sub_eq_zero_iff.mp hz0
-      · intro heq; subst heq
-        rw [LawfulCommRing.sub_self, LawfulCommRing.mul_zero]
-    clear hBadLen hBadNodup hLenRest hFiltC
-    induction restD with
-    | nil => cases hz₀Rest
-    | cons r rs ih =>
-      cases hndRest with
-      | cons hnotR hndRs =>
-        simp only [List.filter]
-        if hrz : r = z₀ then
-          subst hrz
-          have hrTrue : predP r = true := (hiff r (.head _)).mpr rfl
-          rw [hrTrue]
-          have hrsEmpty : rs.filter predP = [] := by
-            have hallFalse : ∀ y ∈ rs, predP y = false := by
-              intro y hy
-              cases hpy : predP y
-              · rfl
-              · have hyz : y = r := (hiff y (.tail _ hy)).mp hpy
-                exact False.elim (hnotR y hy hyz.symm)
-            clear ih hiff hz₀Rest hDisjCRest hnotR hndRs hrTrue
-            induction rs with
-            | nil => rfl
-            | cons y ys ihy =>
-              simp [List.filter, hallFalse y (.head _), ihy (fun w hw => hallFalse w (.tail _ hw))]
-          rw [hrsEmpty]
-        else
-          have hrFalse : predP r = false := by
-            cases hpr : predP r
-            · rfl
-            · exact False.elim (hrz ((hiff r (.head _)).mp hpr))
-          rw [hrFalse]
-          cases hz₀Rest with
-          | head => exact False.elim (hrz rfl)
-          | tail _ hz₀InRs =>
-            exact ih hndRs hz₀InRs (fun x hx => hDisjCRest x) (fun z hz => hiff z (.tail _ hz))
+    apply filter_eq_singleton_of_nodup_iff predP z₀ hndRest hz₀Rest
+    intro z hzR
+    have hzNotC : z ∉ C := fun hC => hDisjCRest z hC hzR
+    dsimp [predP, fg, zeroLossAffineWords]
+    simp only [C, hzNotC, ↓reduceIte, LawfulCommRing.zero_add, LawfulCommRing.mul_one,
+               decide_eq_true_eq]
+    rw [LawfulCommRing.add_comm, ← LawfulCommRing.sub_eq_add_neg, ← LawfulCommRing.mul_sub]
+    constructor
+    · intro h0
+      rcases LawfulField.mul_eq_zero h0 with hb0 | hz0
+      · exact False.elim (hβNe hb0)
+      · exact LawfulCommRing.sub_eq_zero_iff.mp hz0
+    · intro heq; subst heq
+      rw [LawfulCommRing.sub_self, LawfulCommRing.mul_zero]
   have hSpEq : D.filter predP = C ++ [z₀] := by
     have hApp : D = C ++ restD := (List.take_append_drop (A - 1) D).symm
     conv => lhs; rw [hApp]
     rw [List.filter_append, hFiltC, hFiltRest]
   have hLenC : C.length = A - 1 := by
-    dsimp [C]; rw [List.length_take]; omega
+    dsimp [C]; exact List.length_take_of_le (by omega)
   refine ⟨?_, ?_, ?_⟩
   · change A ≤ (D.filter predP).length
     rw [hSpEq, List.length_append, hLenC, List.length_singleton]
     omega
   · intro G_poly hGLen
     change ∃ z ∈ D.filter predP, RoundPoly.evalCoeffs G_poly z ≠ fg.2 z
-    -- Constructively check via `List.find?` whether `G_poly` is non-zero on some `c ∈ C`;
-    -- otherwise every `c ∈ C` (`|C| = A - 1 > d`) is a root of `G_poly`, forcing `G_poly(z₀) = 0 ≠ 1 = g(z₀)`.
-    match hFind : C.find? (fun c => !(decide (RoundPoly.evalCoeffs G_poly c = CommRingOps.zero))) with
-    | some c =>
-      have hcMem : c ∈ C := List.mem_of_find?_eq_some hFind
-      have hcPred : (!(decide (RoundPoly.evalCoeffs G_poly c = CommRingOps.zero))) = true :=
-        List.find?_some hFind
-      have hcNe : RoundPoly.evalCoeffs G_poly c ≠ CommRingOps.zero := by
-        intro h0
-        simp [h0] at hcPred
-      have hgc : fg.2 c = CommRingOps.zero := by
+    rcases exists_nonroot_or_all_roots G_poly C with ⟨c, hcMem, hcNe⟩ | hAllRoots
+    · have hgc : fg.2 c = CommRingOps.zero := by
         dsimp [fg, zeroLossAffineWords]; simp [C, hcMem]
       refine ⟨c, by rw [hSpEq, List.mem_append]; exact .inl hcMem, ?_⟩
       rwa [hgc]
-    | none =>
-      refine ⟨z₀, by rw [hSpEq, List.mem_append]; exact .inr (.head _), ?_⟩
+    · refine ⟨z₀, by rw [hSpEq, List.mem_append]; exact .inr (.head _), ?_⟩
       have hgz₀ : fg.2 z₀ = CommRingOps.one := by
         dsimp [fg, zeroLossAffineWords]; simp [C, hz₀NotC]
       rw [hgz₀]
@@ -1189,23 +1212,9 @@ theorem tooth_affine_combiner_zero_loss_linear_floor
         rw [hz0Eq]
         exact LawfulField.zero_ne_one
       else
-        have hAllRoots : ∀ c ∈ C, RoundPoly.evalCoeffs G_poly c = CommRingOps.zero := by
-          intro c hc
-          if hc0 : RoundPoly.evalCoeffs G_poly c = CommRingOps.zero then
-            exact hc0
-          else
-            have hFalse := List.find?_eq_none.mp hFind c hc
-            simp [hc0] at hFalse
         have hFiltAll :
-            C.filter (fun c => decide (RoundPoly.evalCoeffs G_poly c = CommRingOps.zero)) = C := by
-          clear hFiltC hFiltRest hSpEq hLenC hFind
-          induction C with
-          | nil => rfl
-          | cons c cs ih =>
-            simp [List.filter, hAllRoots c (.head _),
-                  ih (fun x hx => hDisjCRest x (.tail _ hx))
-                     (fun h => hz₀NotC (.tail _ h))
-                     (fun y hy => hAllRoots y (.tail _ hy))]
+            C.filter (fun c => decide (RoundPoly.evalCoeffs G_poly c = CommRingOps.zero)) = C :=
+          filter_eq_self_of_all _ C (fun c hc => decide_eq_true (hAllRoots c hc))
         have hndC : C.Nodup := (List.take_sublist (A - 1) D).nodup hD
         cases d with
         | zero =>
@@ -1220,27 +1229,18 @@ theorem tooth_affine_combiner_zero_loss_linear_floor
             d' G_poly C hndC hGLen ⟨z₀, hz0Eq⟩
           rw [hFiltAll, hLenC] at hRoots
           omega
-  · -- At `s = 1`, `(0, 0)` agrees on `C` and fails only at `z₀`:
-    change ((D.filter predP).filter
-      (fun z => !(decide (CommRingOps.zero = fg.1 z) && decide (CommRingOps.zero = fg.2 z)))).length ≤ 1
+  · let lossPred := fun z =>
+      !(decide (CommRingOps.zero = fg.1 z) && decide (CommRingOps.zero = fg.2 z))
+    change ((D.filter predP).filter lossPred).length ≤ 1
     rw [hSpEq, List.filter_append]
-    have hCZero : C.filter
-        (fun z => !(decide (CommRingOps.zero = fg.1 z) && decide (CommRingOps.zero = fg.2 z))) = [] := by
-      have hall : ∀ z ∈ C,
-          (decide (CommRingOps.zero = fg.1 z) && decide (CommRingOps.zero = fg.2 z)) = true := by
-        intro z hzC
-        dsimp [fg, zeroLossAffineWords]
-        simp [C, hzC]
-      clear hFiltC hFiltRest hSpEq hLenC
-      induction C with
-      | nil => rfl
-      | cons c cs ih =>
-        simp [List.filter, hall c (.head _),
-              ih (fun x hx => hDisjCRest x (.tail _ hx))
-                 (fun h => hz₀NotC (.tail _ h))
-                 (fun y hy => hall y (.tail _ hy))]
+    have hCZero : C.filter lossPred = [] := by
+      apply filter_eq_nil_of_all_false lossPred C
+      intro z hzC
+      dsimp [lossPred, fg, zeroLossAffineWords]
+      simp [C, hzC]
     rw [hCZero, List.nil_append]
-    cases decide (CommRingOps.zero = fg.1 z₀) && decide (CommRingOps.zero = fg.2 z₀) <;> simp
+    simp only [List.filter]
+    cases lossPred z₀ <;> simp
 
 
 /-! ## §3. Constructive Homogeneous Linear Solver (`gauss_nullspace_witness`) -/
@@ -1348,13 +1348,12 @@ private theorem findNonzeroIdx_none {F : Type} [CommRingOps F] [DecidableEq F] :
   | x :: xs, h, y, hy => by
     simp only [findNonzeroIdx] at h
     if hx0 : x = CommRingOps.zero then
-      rw [if_pos hx0, Option.map_eq_none_iff] at h
+      simp only [hx0, ↓reduceIte, Option.map_eq_none_iff] at h
       cases hy with
       | head => exact hx0
       | tail _ hm => exact findNonzeroIdx_none h y hm
     else
-      rw [if_neg hx0] at h
-      cases h
+      simp [hx0] at h
 
 private theorem findNonzeroIdx_some {F : Type} [CommRingOps F] [DecidableEq F] :
     ∀ {r : List F} {p : Nat}, findNonzeroIdx r = some p →
@@ -1363,14 +1362,14 @@ private theorem findNonzeroIdx_some {F : Type} [CommRingOps F] [DecidableEq F] :
   | x :: xs, p, h => by
     simp only [findNonzeroIdx] at h
     if hx0 : x = CommRingOps.zero then
-      rw [if_pos hx0, Option.map_eq_some_iff] at h
+      simp only [hx0, ↓reduceIte, Option.map_eq_some_iff] at h
       rcases h with ⟨q, hq, rfl⟩
       rcases findNonzeroIdx_some hq with ⟨hqLt, hqNe⟩
       refine ⟨by simp; omega, ?_⟩
       simpa [List.getD] using hqNe
     else
-      rw [if_neg hx0] at h
-      cases h
+      simp only [hx0, ↓reduceIte, Option.some.injEq] at h
+      subst h
       exact ⟨by simp, by simpa [List.getD] using hx0⟩
 
 private theorem dotVec_all_zero {F : Type} [LawfulCommRing F] :
@@ -1386,7 +1385,8 @@ private theorem dotVec_scaleVec {F : Type} [LawfulCommRing F] (c : F) :
   | [], _ => by simp [scaleVec, dotVec, LawfulCommRing.mul_zero]
   | _ :: _, [] => by simp [scaleVec, dotVec, LawfulCommRing.mul_zero]
   | a :: as, b :: bs => by
-    simp only [scaleVec, List.map, dotVec]
+    change CommRingOps.add (CommRingOps.mul (CommRingOps.mul c a) b) (dotVec (scaleVec c as) bs) =
+      CommRingOps.mul c (CommRingOps.add (CommRingOps.mul a b) (dotVec as bs))
     rw [dotVec_scaleVec c as bs, LawfulCommRing.mul_assoc, ← LawfulCommRing.left_distrib]
 
 private theorem dotVec_subVec {F : Type} [LawfulCommRing F] :
@@ -1407,7 +1407,6 @@ private theorem dotVec_subVec {F : Type} [LawfulCommRing F] :
         ← LawfulCommRing.add_assoc (CommRingOps.mul b x),
         LawfulCommRing.add_sub_cancel_left,
         LawfulCommRing.add_assoc,
-        LawfulCommRing.add_comm (dotVec bs xs) _,
         LawfulCommRing.add_sub_cancel_left]
   | [], _ :: _, _ => fun h => by simp at h
   | _ :: _, [], _ => fun h => by simp at h
@@ -1423,7 +1422,8 @@ private theorem dotVec_insertIdxVal {F : Type} [LawfulCommRing F] :
   | 0, r0 :: rs, v, vp, _, _ => by
     simp [insertIdxVal, dropIdx, dotVec, List.getD]
   | p + 1, [], _, _, _, hp => by simp at hp
-  | p + 1, _ :: _, [], _, hlen, hp => by simp at hlen hp; omega
+  | p + 1, _ :: tl, [], _, hlen, hp => by
+    cases tl <;> simp at hlen hp
   | p + 1, r0 :: rs, w0 :: ws, vp, hlen, hp => by
     simp only [List.length_cons] at hlen hp
     have ih := dotVec_insertIdxVal p rs ws vp (by omega) (by omega)
@@ -1490,6 +1490,7 @@ theorem gauss_nullspace_witness
         | nil => simp at hl
         | cons _ tl => simp at hl ⊢; exact hl
       rcases gauss_nullspace_witness n rsTail hTailLt hTailLen with ⟨hvLen, hvAny, hvZero⟩
+      dsimp only [rsTail] at hvLen hvAny hvZero
       refine ⟨by simp [hvLen], ?_, ?_⟩
       · simp only [List.any_cons, hvAny, Bool.or_true]
       · intro row hrow
@@ -1510,6 +1511,7 @@ theorem gauss_nullspace_witness
       let invRp := LawfulField.inv rp
       let rDrop := dropIdx p r
       have hrDropLen : rDrop.length = n := by
+        dsimp only [rDrop]
         have h := dropIdx_length p r hpLt
         omega
       let elimRow := fun (row : List F) =>
@@ -1530,10 +1532,11 @@ theorem gauss_nullspace_witness
         · simp [scaleVec, hd, hrDropLen]
       rcases gauss_nullspace_witness n rs' hrs'Lt hrs'Len with ⟨hvLen, hvAny, hvZero⟩
       let v' := solveHomogeneous n rs'
+      have hv'Len : v'.length = n := hvLen
       let vp := CommRingOps.neg (CommRingOps.mul invRp (dotVec rDrop v'))
-      have hpLe : p ≤ v'.length := by rw [hvLen]; omega
+      have hpLe : p ≤ v'.length := by omega
       refine ⟨?_, ?_, ?_⟩
-      · rw [insertIdxVal_length p vp v' hpLe, hvLen]
+      · rw [insertIdxVal_length p vp v' hpLe, hv'Len]
       · rcases mem_of_any_true hvAny with ⟨z, hzMem, hzPred⟩
         exact any_true_of_mem (mem_insertIdxVal_of_mem p vp hzMem) hzPred
       · intro row hrow
@@ -1610,3 +1613,1901 @@ theorem dotVec_replicate_zero {F : Type} [LawfulCommRing F] :
   | m + 1, _ :: vs => by
     simp [List.replicate, dotVec, LawfulCommRing.zero_mul, LawfulCommRing.zero_add,
           dotVec_replicate_zero m vs]
+
+
+/-! ## §4. Constructive Euclidean Polynomials & Welch–Berlekamp Affine Proximity Gap (`Tier 1B`) -/
+
+/-- Coefficient of `X^k` in `p : List F` (`0` past `p.length`). -/
+def coeffAt {F : Type} [CommRingOps F] (p : List F) (k : Nat) : F :=
+  p.getD k CommRingOps.zero
+
+/-- Strip trailing zeros so every non-empty canonical polynomial has a non-zero leading coefficient. -/
+def trimPoly {F : Type} [CommRingOps F] [DecidableEq F] : List F → List F
+  | [] => []
+  | c :: cs =>
+    let cs' := trimPoly cs
+    if cs' = [] ∧ c = CommRingOps.zero then [] else c :: cs'
+
+/-- Canonical trimmedness predicate. -/
+def IsTrimmed {F : Type} [CommRingOps F] [DecidableEq F] (p : List F) : Prop :=
+  trimPoly p = p
+
+theorem coeffAt_nil {F : Type} [CommRingOps F] (k : Nat) :
+    coeffAt ([] : List F) k = CommRingOps.zero := by
+  simp [coeffAt]
+
+theorem coeffAt_cons_zero {F : Type} [CommRingOps F] (c : F) (cs : List F) :
+    coeffAt (c :: cs) 0 = c := by
+  simp [coeffAt]
+
+theorem coeffAt_cons_succ {F : Type} [CommRingOps F] (c : F) (cs : List F) (k : Nat) :
+    coeffAt (c :: cs) (k + 1) = coeffAt cs k := by
+  simp [coeffAt]
+
+theorem coeffAt_eq_zero_of_ge {F : Type} [CommRingOps F] :
+    ∀ (p : List F) (k : Nat), p.length ≤ k → coeffAt p k = CommRingOps.zero
+  | [], _, _ => rfl
+  | _ :: _, 0, h => by simp at h
+  | _ :: cs, k + 1, h => by
+    simp only [List.length_cons] at h
+    rw [coeffAt_cons_succ]
+    exact coeffAt_eq_zero_of_ge cs k (by omega)
+
+theorem trimPoly_length_le {F : Type} [CommRingOps F] [DecidableEq F] :
+    ∀ (p : List F), (trimPoly p).length ≤ p.length
+  | [] => Nat.le_refl 0
+  | c :: cs => by
+    simp only [trimPoly]
+    split
+    · simp
+    · simp only [List.length_cons]
+      exact Nat.succ_le_succ (trimPoly_length_le cs)
+
+theorem evalCoeffs_trimPoly {F : Type} [LawfulCommRing F] [DecidableEq F] (x : F) :
+    ∀ (p : List F), RoundPoly.evalCoeffs (trimPoly p) x = RoundPoly.evalCoeffs p x
+  | [] => rfl
+  | c :: cs => by
+    simp only [trimPoly]
+    split
+    · next h =>
+      rcases h with ⟨hcs, hc⟩
+      have ih := evalCoeffs_trimPoly x cs
+      rw [hcs, RoundPoly.evalCoeffs_nil] at ih
+      simp [RoundPoly.evalCoeffs, hc, ← ih, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    · simp [RoundPoly.evalCoeffs, evalCoeffs_trimPoly x cs]
+
+theorem coeffAt_trimPoly {F : Type} [CommRingOps F] [DecidableEq F] :
+    ∀ (p : List F) (k : Nat), coeffAt (trimPoly p) k = coeffAt p k
+  | [], _ => rfl
+  | c :: cs, k => by
+    simp only [trimPoly]
+    split
+    · next h =>
+      rcases h with ⟨hcs, hc⟩
+      cases k with
+      | zero => simp [coeffAt, hc]
+      | succ k' =>
+        have ih := coeffAt_trimPoly cs k'
+        rw [hcs, coeffAt_nil] at ih
+        rw [coeffAt_nil, coeffAt_cons_succ, ← ih]
+    · cases k with
+      | zero => rfl
+      | succ k' => exact coeffAt_trimPoly cs k'
+
+theorem trimPoly_idem {F : Type} [CommRingOps F] [DecidableEq F] :
+    ∀ (p : List F), trimPoly (trimPoly p) = trimPoly p
+  | [] => rfl
+  | c :: cs => by
+    simp only [trimPoly]
+    split
+    · rfl
+    · next h =>
+      simp only [trimPoly, trimPoly_idem cs, h, ↓reduceIte]
+
+theorem leadCoeff_ne_zero_of_trimPoly_ne_nil {F : Type} [CommRingOps F] [DecidableEq F] :
+    ∀ (p : List F), trimPoly p ≠ [] →
+      coeffAt (trimPoly p) ((trimPoly p).length - 1) ≠ CommRingOps.zero
+  | [], h => False.elim (h rfl)
+  | c :: cs, h => by
+    simp only [trimPoly] at h ⊢
+    if hcond : trimPoly cs = [] ∧ c = CommRingOps.zero then
+      simp [hcond] at h
+    else
+      simp only [hcond, ↓reduceIte]
+      if hcs : trimPoly cs = [] then
+        have hc : c ≠ CommRingOps.zero := fun hc0 => hcond ⟨hcs, hc0⟩
+        simpa [hcs, coeffAt] using hc
+      else
+        have ih := leadCoeff_ne_zero_of_trimPoly_ne_nil cs hcs
+        cases hq : trimPoly cs with
+        | nil => exact False.elim (hcs hq)
+        | cons d ds =>
+          rw [hq] at ih
+          simpa [coeffAt] using ih
+
+private theorem eq_of_isTrimmed_coeffAt {F : Type} [CommRingOps F] [DecidableEq F] :
+    ∀ (a b : List F), IsTrimmed a → IsTrimmed b →
+      (∀ k : Nat, coeffAt a k = coeffAt b k) → a = b
+  | [], [], _, _, _ => rfl
+  | [], y :: ys, _, hb, hcoeff => by
+    have hne : trimPoly (y :: ys) ≠ [] := by rw [hb]; simp
+    have hlead := leadCoeff_ne_zero_of_trimPoly_ne_nil (y :: ys) hne
+    rw [hb, ← hcoeff ((y :: ys).length - 1), coeffAt_nil] at hlead
+    exact False.elim (hlead rfl)
+  | x :: xs, [], ha, _, hcoeff => by
+    have hne : trimPoly (x :: xs) ≠ [] := by rw [ha]; simp
+    have hlead := leadCoeff_ne_zero_of_trimPoly_ne_nil (x :: xs) hne
+    rw [ha, hcoeff ((x :: xs).length - 1), coeffAt_nil] at hlead
+    exact False.elim (hlead rfl)
+  | x :: xs, y :: ys, ha, hb, hcoeff => by
+    have hxy : x = y := by simpa [coeffAt] using hcoeff 0
+    subst hxy
+    have hxs : IsTrimmed xs := by
+      unfold IsTrimmed at ha ⊢
+      simp only [trimPoly] at ha
+      split at ha
+      · cases ha
+      · injection ha with _ htl
+    have hys : IsTrimmed ys := by
+      unfold IsTrimmed at hb ⊢
+      simp only [trimPoly] at hb
+      split at hb
+      · cases hb
+      · injection hb with _ htl
+    have htl := eq_of_isTrimmed_coeffAt xs ys hxs hys (fun k => by
+      simpa [coeffAt_cons_succ] using hcoeff (k + 1))
+    rw [htl]
+
+/-- Canonical polynomial equality criterion: `trimPoly p = trimPoly q` iff all coefficients match. -/
+theorem trimPoly_eq_iff_coeffAt {F : Type} [CommRingOps F] [DecidableEq F] (p q : List F) :
+    trimPoly p = trimPoly q ↔ ∀ k : Nat, coeffAt p k = coeffAt q k := by
+  constructor
+  · intro heq k
+    rw [← coeffAt_trimPoly p k, ← coeffAt_trimPoly q k, heq]
+  · intro h
+    apply eq_of_isTrimmed_coeffAt (trimPoly p) (trimPoly q) (trimPoly_idem p) (trimPoly_idem q)
+    intro k
+    rw [coeffAt_trimPoly, coeffAt_trimPoly, h k]
+
+theorem trimPoly_eq_nil_iff {F : Type} [CommRingOps F] [DecidableEq F] (p : List F) :
+    trimPoly p = [] ↔ ∀ k : Nat, coeffAt p k = CommRingOps.zero := by
+  simpa [trimPoly, coeffAt_nil] using trimPoly_eq_iff_coeffAt p []
+
+theorem length_trimPoly_le_of_coeffAt_zero {F : Type} [CommRingOps F] [DecidableEq F]
+    (p : List F) (B : Nat) (h : ∀ k : Nat, B ≤ k → coeffAt p k = CommRingOps.zero) :
+    (trimPoly p).length ≤ B := by
+  if hnil : trimPoly p = [] then
+    rw [hnil]; exact Nat.zero_le B
+  else
+    have hlead := leadCoeff_ne_zero_of_trimPoly_ne_nil p hnil
+    rw [coeffAt_trimPoly] at hlead
+    if hle : (trimPoly p).length ≤ B then
+      exact hle
+    else
+      exact False.elim (hlead (h ((trimPoly p).length - 1) (by omega)))
+
+/-- Constructive non-root existence for ANY non-empty trimmed polynomial on a `Nodup` domain `U`
+    with `p.length ≤ U.length` (`0` classical axioms). -/
+theorem exists_nonroot_of_trim_ne_nil
+    {F : Type} [LawfulField F] [DecidableEq F]
+    {p U : List F}
+    (hpTrim : IsTrimmed p)
+    (hpNe : p ≠ [])
+    (hU : U.Nodup)
+    (hLen : p.length ≤ U.length) :
+    ∃ x₀ ∈ U, RoundPoly.evalCoeffs p x₀ ≠ CommRingOps.zero := by
+  let k := p.length - 1
+  have hk : p.length = k + 1 := by
+    cases p with
+    | nil => exact False.elim (hpNe rfl)
+    | cons _ _ => simp [k]
+  have hlcNe : coeffAt p k ≠ CommRingOps.zero := by
+    have h := leadCoeff_ne_zero_of_trimPoly_ne_nil p (by rwa [hpTrim])
+    rw [hpTrim] at h
+    exact h
+  let pMonic := p.map (CommRingOps.mul (LawfulField.inv (coeffAt p k)))
+  have hMonicLen : pMonic.length = k + 1 := by simp [pMonic, hk]
+  have hMonicLast : pMonic.getD k CommRingOps.zero = CommRingOps.one := by
+    have hkLt : k < p.length := by omega
+    have hget : pMonic.getD k CommRingOps.zero =
+        CommRingOps.mul (LawfulField.inv (coeffAt p k)) (coeffAt p k) := by
+      simp [pMonic, coeffAt, List.getD, hkLt]
+    rw [hget, LawfulField.inv_mul_cancel hlcNe]
+  rcases exists_nonroot_of_monic_len k pMonic U hMonicLen hMonicLast hU (by omega) with
+    ⟨x₀, hx₀Mem, hx₀Ne⟩
+  refine ⟨x₀, hx₀Mem, ?_⟩
+  intro hev0
+  apply hx₀Ne
+  rw [evalCoeffs_map_mul, hev0, LawfulCommRing.mul_zero]
+
+/-- Componentwise polynomial addition & negation on raw `List F` coefficient vectors. -/
+def rawAddCoeffs {F : Type} [CommRingOps F] : List F → List F → List F
+  | [], b => b
+  | a, [] => a
+  | c :: cs, d :: ds => CommRingOps.add c d :: rawAddCoeffs cs ds
+
+def rawNegCoeffs {F : Type} [CommRingOps F] (a : List F) : List F :=
+  a.map CommRingOps.neg
+
+theorem evalCoeffs_rawAdd {F : Type} [LawfulCommRing F] :
+    ∀ (a b : List F) (x : F),
+      RoundPoly.evalCoeffs (rawAddCoeffs a b) x =
+        CommRingOps.add (RoundPoly.evalCoeffs a x) (RoundPoly.evalCoeffs b x)
+  | [], b, x => by simp [rawAddCoeffs, RoundPoly.evalCoeffs, LawfulCommRing.zero_add]
+  | a, [], x => by cases a <;> simp [rawAddCoeffs, RoundPoly.evalCoeffs, LawfulCommRing.add_zero]
+  | c :: cs, d :: ds, x => by
+    simp only [rawAddCoeffs, RoundPoly.evalCoeffs, evalCoeffs_rawAdd cs ds x]
+    rw [LawfulCommRing.left_distrib, LawfulCommRing.add_add_add_comm]
+
+/-- Canonical trimmed univariate polynomial operations. -/
+def pAdd {F : Type} [CommRingOps F] [DecidableEq F] (a b : List F) : List F :=
+  trimPoly (rawAddCoeffs a b)
+
+def pSub {F : Type} [CommRingOps F] [DecidableEq F] (a b : List F) : List F :=
+  trimPoly (RoundPoly.subCoeffs a b)
+
+def pNeg {F : Type} [CommRingOps F] [DecidableEq F] (a : List F) : List F :=
+  trimPoly (rawNegCoeffs a)
+
+def pScale {F : Type} [CommRingOps F] [DecidableEq F] (c : F) (a : List F) : List F :=
+  trimPoly (a.map (CommRingOps.mul c))
+
+def rawMul {F : Type} [CommRingOps F] : List F → List F → List F
+  | [], _ => []
+  | c :: cs, b => rawAddCoeffs (b.map (CommRingOps.mul c)) (CommRingOps.zero :: rawMul cs b)
+
+def pMul {F : Type} [CommRingOps F] [DecidableEq F] (a b : List F) : List F :=
+  trimPoly (rawMul a b)
+
+def monomial {F : Type} [CommRingOps F] (deg : Nat) (c : F) : List F :=
+  List.replicate deg CommRingOps.zero ++ [c]
+
+private theorem coeffAt_addCoeffs {F : Type} [LawfulCommRing F] :
+    ∀ (a b : List F) (k : Nat),
+      coeffAt (rawAddCoeffs a b) k = CommRingOps.add (coeffAt a k) (coeffAt b k)
+  | [], b, k => by simp [rawAddCoeffs, coeffAt_nil, LawfulCommRing.zero_add]
+  | a, [], k => by
+    cases a <;> simp [rawAddCoeffs, coeffAt_nil, LawfulCommRing.add_zero]
+  | _ :: _, _ :: _, 0 => by simp [rawAddCoeffs, coeffAt]
+  | _ :: as, _ :: bs, k + 1 => by
+    simp only [rawAddCoeffs, coeffAt_cons_succ, coeffAt_addCoeffs as bs k]
+
+private theorem coeffAt_negCoeffs {F : Type} [LawfulCommRing F] :
+    ∀ (a : List F) (k : Nat),
+      coeffAt (rawNegCoeffs a) k = CommRingOps.neg (coeffAt a k)
+  | [], _ => by simp [rawNegCoeffs, coeffAt_nil, LawfulCommRing.neg_zero]
+  | _ :: _, 0 => by simp [rawNegCoeffs, coeffAt]
+  | c :: as, k + 1 => by
+    change coeffAt (CommRingOps.neg c :: rawNegCoeffs as) (k + 1) =
+      CommRingOps.neg (coeffAt (c :: as) (k + 1))
+    rw [coeffAt_cons_succ, coeffAt_cons_succ, coeffAt_negCoeffs as k]
+
+private theorem coeffAt_subCoeffs {F : Type} [LawfulCommRing F] :
+    ∀ (a b : List F) (k : Nat),
+      coeffAt (RoundPoly.subCoeffs a b) k = CommRingOps.sub (coeffAt a k) (coeffAt b k)
+  | [], [], k => by simp [RoundPoly.subCoeffs, coeffAt_nil, LawfulCommRing.sub_self]
+  | c :: cs, [], 0 => by simp [RoundPoly.subCoeffs, coeffAt, LawfulCommRing.sub_zero]
+  | c :: cs, [], k + 1 => by
+    simp only [RoundPoly.subCoeffs, coeffAt_cons_succ, coeffAt_subCoeffs cs [] k, coeffAt_nil]
+  | [], d :: ds, 0 => by
+    simp [RoundPoly.subCoeffs, coeffAt, LawfulCommRing.sub_eq_add_neg, LawfulCommRing.zero_add]
+  | [], d :: ds, k + 1 => by
+    simp only [RoundPoly.subCoeffs, coeffAt_cons_succ, coeffAt_subCoeffs [] ds k, coeffAt_nil]
+  | _ :: _, _ :: _, 0 => by simp [RoundPoly.subCoeffs, coeffAt]
+  | _ :: as, _ :: bs, k + 1 => by
+    simp only [RoundPoly.subCoeffs, coeffAt_cons_succ, coeffAt_subCoeffs as bs k]
+
+private theorem coeffAt_map_mul {F : Type} [LawfulCommRing F] (c : F) :
+    ∀ (a : List F) (k : Nat),
+      coeffAt (a.map (CommRingOps.mul c)) k = CommRingOps.mul c (coeffAt a k)
+  | [], _ => by simp [coeffAt_nil, LawfulCommRing.mul_zero]
+  | _ :: _, 0 => by simp [coeffAt]
+  | _ :: as, k + 1 => by simp [coeffAt_cons_succ, coeffAt_map_mul c as k]
+
+theorem coeffAt_pAdd {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) (k : Nat) :
+    coeffAt (pAdd a b) k = CommRingOps.add (coeffAt a k) (coeffAt b k) := by
+  rw [pAdd, coeffAt_trimPoly, coeffAt_addCoeffs]
+
+theorem coeffAt_pSub {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) (k : Nat) :
+    coeffAt (pSub a b) k = CommRingOps.sub (coeffAt a k) (coeffAt b k) := by
+  rw [pSub, coeffAt_trimPoly, coeffAt_subCoeffs]
+
+theorem coeffAt_pNeg {F : Type} [LawfulCommRing F] [DecidableEq F] (a : List F) (k : Nat) :
+    coeffAt (pNeg a) k = CommRingOps.neg (coeffAt a k) := by
+  rw [pNeg, coeffAt_trimPoly, coeffAt_negCoeffs]
+
+theorem coeffAt_pScale {F : Type} [LawfulCommRing F] [DecidableEq F] (c : F) (a : List F) (k : Nat) :
+    coeffAt (pScale c a) k = CommRingOps.mul c (coeffAt a k) := by
+  rw [pScale, coeffAt_trimPoly, coeffAt_map_mul]
+
+theorem evalCoeffs_rawMul {F : Type} [LawfulCommRing F] (x : F) :
+    ∀ (a b : List F), RoundPoly.evalCoeffs (rawMul a b) x =
+      CommRingOps.mul (RoundPoly.evalCoeffs a x) (RoundPoly.evalCoeffs b x)
+  | [], _ => by simp [rawMul, RoundPoly.evalCoeffs, LawfulCommRing.zero_mul]
+  | c :: cs, b => by
+    simp only [rawMul, evalCoeffs_rawAdd, evalCoeffs_map_mul, RoundPoly.evalCoeffs_cons,
+               LawfulCommRing.zero_add, evalCoeffs_rawMul x cs b]
+    rw [LawfulCommRing.right_distrib, LawfulCommRing.mul_assoc]
+
+theorem evalCoeffs_pAdd {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) (x : F) :
+    RoundPoly.evalCoeffs (pAdd a b) x =
+      CommRingOps.add (RoundPoly.evalCoeffs a x) (RoundPoly.evalCoeffs b x) := by
+  rw [pAdd, evalCoeffs_trimPoly, evalCoeffs_rawAdd]
+
+theorem evalCoeffs_pSub {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) (x : F) :
+    RoundPoly.evalCoeffs (pSub a b) x =
+      CommRingOps.sub (RoundPoly.evalCoeffs a x) (RoundPoly.evalCoeffs b x) := by
+  rw [pSub, evalCoeffs_trimPoly, RoundPoly.evalCoeffs_sub]
+
+theorem evalCoeffs_pScale {F : Type} [LawfulCommRing F] [DecidableEq F] (c : F) (a : List F) (x : F) :
+    RoundPoly.evalCoeffs (pScale c a) x = CommRingOps.mul c (RoundPoly.evalCoeffs a x) := by
+  rw [pScale, evalCoeffs_trimPoly, evalCoeffs_map_mul]
+
+theorem evalCoeffs_pMul {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) (x : F) :
+    RoundPoly.evalCoeffs (pMul a b) x =
+      CommRingOps.mul (RoundPoly.evalCoeffs a x) (RoundPoly.evalCoeffs b x) := by
+  rw [pMul, evalCoeffs_trimPoly, evalCoeffs_rawMul]
+
+private theorem coeffAt_rawMul_zero_left {F : Type} [LawfulCommRing F] (b : List F) :
+    ∀ (a : List F), (∀ i, coeffAt a i = CommRingOps.zero) →
+      ∀ k, coeffAt (rawMul a b) k = CommRingOps.zero
+  | [], _, k => by simp [rawMul, coeffAt_nil]
+  | c :: cs, ha, k => by
+    have hc : c = CommRingOps.zero := ha 0
+    have hcs : ∀ i, coeffAt cs i = CommRingOps.zero := fun i => ha (i + 1)
+    simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, hc, LawfulCommRing.zero_mul,
+               LawfulCommRing.zero_add]
+    cases k with
+    | zero => rfl
+    | succ k' => exact coeffAt_rawMul_zero_left b cs hcs k'
+
+private theorem coeffAt_rawMul_zero_right {F : Type} [LawfulCommRing F] :
+    ∀ (a b : List F), (∀ j, coeffAt b j = CommRingOps.zero) →
+      ∀ k, coeffAt (rawMul a b) k = CommRingOps.zero
+  | [], _, _, k => by simp [rawMul, coeffAt_nil]
+  | c :: cs, b, hb, k => by
+    simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, hb k, LawfulCommRing.mul_zero,
+               LawfulCommRing.zero_add]
+    cases k with
+    | zero => rfl
+    | succ k' => exact coeffAt_rawMul_zero_right cs b hb k'
+
+private theorem coeffAt_rawMul_high {F : Type} [LawfulCommRing F] (b : List F) (db : Nat)
+    (hb : ∀ j, db < j → coeffAt b j = CommRingOps.zero) :
+    ∀ (da : Nat) (a : List F),
+      (∀ i, da < i → coeffAt a i = CommRingOps.zero) →
+      (∀ k, da + db < k → coeffAt (rawMul a b) k = CommRingOps.zero) ∧
+      coeffAt (rawMul a b) (da + db) = CommRingOps.mul (coeffAt a da) (coeffAt b db)
+  | 0, [], _ => by
+    refine ⟨fun k _ => by simp [rawMul, coeffAt_nil], ?_⟩
+    simp [rawMul, coeffAt_nil, LawfulCommRing.zero_mul]
+  | 0, a0 :: as, ha => by
+    have has0 : ∀ i, coeffAt as i = CommRingOps.zero := fun i => by
+      simpa [coeffAt_cons_succ] using ha (i + 1) (by omega)
+    have htail : ∀ k, coeffAt (CommRingOps.zero :: rawMul as b) k = CommRingOps.zero := by
+      intro k
+      cases k with
+      | zero => rfl
+      | succ k' => exact coeffAt_rawMul_zero_left b as has0 k'
+    refine ⟨fun k hk => ?_, ?_⟩
+    · simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, htail k, LawfulCommRing.add_zero]
+      rw [hb k (by omega), LawfulCommRing.mul_zero]
+    · simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, htail db, LawfulCommRing.add_zero,
+                 coeffAt_cons_zero]
+  | da + 1, [], _ => by
+    refine ⟨fun k _ => by simp [rawMul, coeffAt_nil], ?_⟩
+    simp [rawMul, coeffAt_nil, LawfulCommRing.zero_mul]
+  | da + 1, a0 :: as, ha => by
+    have has : ∀ i, da < i → coeffAt as i = CommRingOps.zero := fun i hi => by
+      simpa [coeffAt_cons_succ] using ha (i + 1) (by omega)
+    rcases coeffAt_rawMul_high b db hb da as has with ⟨ihHigh, ihTop⟩
+    refine ⟨fun k hk => ?_, ?_⟩
+    · cases k with
+      | zero => omega
+      | succ k' =>
+        simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_cons_succ]
+        rw [hb (k' + 1) (by omega), ihHigh k' (by omega),
+            LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
+    · have hidx : da + 1 + db = (da + db) + 1 := by omega
+      rw [hidx]
+      simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_cons_succ]
+      rw [hb ((da + db) + 1) (by omega), LawfulCommRing.mul_zero, LawfulCommRing.zero_add, ihTop]
+
+private theorem coeffAt_rawMul_add_left {F : Type} [LawfulCommRing F] (b : List F) :
+    ∀ (a1 a2 : List F) (k : Nat),
+      coeffAt (rawMul (rawAddCoeffs a1 a2) b) k =
+        CommRingOps.add (coeffAt (rawMul a1 b) k) (coeffAt (rawMul a2 b) k)
+  | [], a2, k => by simp [rawAddCoeffs, rawMul, coeffAt_nil, LawfulCommRing.zero_add]
+  | a1, [], k => by
+    cases a1 <;> simp [rawAddCoeffs, rawMul, coeffAt_nil, LawfulCommRing.add_zero]
+  | x :: xs, y :: ys, k => by
+    simp only [rawAddCoeffs, rawMul, coeffAt_addCoeffs, coeffAt_map_mul,
+               LawfulCommRing.right_distrib]
+    cases k with
+    | zero =>
+      simp [coeffAt, LawfulCommRing.add_zero]
+    | succ k' =>
+      simp only [coeffAt_cons_succ, coeffAt_rawMul_add_left b xs ys k']
+      rw [← LawfulCommRing.add_assoc,
+          LawfulCommRing.add_assoc (CommRingOps.mul x _) (CommRingOps.mul y _) _,
+          LawfulCommRing.add_comm (CommRingOps.mul y _) (coeffAt (rawMul xs b) k'),
+          ← LawfulCommRing.add_assoc,
+          LawfulCommRing.add_assoc]
+
+private theorem coeffAt_rawMul_add_right {F : Type} [LawfulCommRing F] :
+    ∀ (a b1 b2 : List F) (k : Nat),
+      coeffAt (rawMul a (rawAddCoeffs b1 b2)) k =
+        CommRingOps.add (coeffAt (rawMul a b1) k) (coeffAt (rawMul a b2) k)
+  | [], _, _, _ => by simp [rawMul, coeffAt_nil, LawfulCommRing.zero_add]
+  | c :: cs, b1, b2, k => by
+    simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, LawfulCommRing.left_distrib]
+    cases k with
+    | zero => simp [coeffAt, LawfulCommRing.add_zero]
+    | succ k' =>
+      simp only [coeffAt_cons_succ, coeffAt_rawMul_add_right cs b1 b2 k']
+      rw [← LawfulCommRing.add_assoc,
+          LawfulCommRing.add_assoc (CommRingOps.mul c _) (CommRingOps.mul c _) _,
+          LawfulCommRing.add_comm (CommRingOps.mul c (coeffAt b2 (k' + 1))) _,
+          ← LawfulCommRing.add_assoc,
+          LawfulCommRing.add_assoc]
+
+private theorem coeffAt_rawMul_shift_right {F : Type} [LawfulCommRing F] :
+    ∀ (a b : List F) (k : Nat),
+      coeffAt (rawMul a (CommRingOps.zero :: b)) k =
+        coeffAt (CommRingOps.zero :: rawMul a b) k
+  | [], _, k => by cases k <;> simp [rawMul, coeffAt]
+  | c :: cs, b, 0 => by
+    simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_cons_zero,
+               LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  | c :: cs, b, k + 1 => by
+    simp [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_cons_succ,
+          coeffAt_rawMul_shift_right cs b k]
+
+private theorem coeffAt_rawMul_scale_left {F : Type} [LawfulCommRing F] (s : F) (b : List F) :
+    ∀ (a : List F) (k : Nat),
+      coeffAt (rawMul (a.map (CommRingOps.mul s)) b) k =
+        CommRingOps.mul s (coeffAt (rawMul a b) k)
+  | [], _ => by simp [rawMul, coeffAt_nil, LawfulCommRing.mul_zero]
+  | c :: cs, 0 => by
+    simp only [List.map, rawMul, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_cons_zero,
+               LawfulCommRing.add_zero, LawfulCommRing.mul_assoc]
+  | c :: cs, k + 1 => by
+    simp [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_cons_succ,
+          coeffAt_rawMul_scale_left s b cs k,
+          LawfulCommRing.left_distrib, LawfulCommRing.mul_assoc]
+
+private theorem coeffAt_rawMul_scale_right {F : Type} [LawfulCommRing F] (s : F) :
+    ∀ (a b : List F) (k : Nat),
+      coeffAt (rawMul a (b.map (CommRingOps.mul s))) k =
+        CommRingOps.mul s (coeffAt (rawMul a b) k)
+  | [], _, _ => by simp [rawMul, coeffAt_nil, LawfulCommRing.mul_zero]
+  | c :: cs, b, k => by
+    simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul]
+    have hcomm : CommRingOps.mul c (CommRingOps.mul s (coeffAt b k)) =
+        CommRingOps.mul s (CommRingOps.mul c (coeffAt b k)) := by
+      rw [← LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm c s, LawfulCommRing.mul_assoc]
+    rw [hcomm]
+    cases k with
+    | zero => simp only [coeffAt_cons_zero, LawfulCommRing.add_zero]
+    | succ k' =>
+      simp [coeffAt_cons_succ, coeffAt_rawMul_scale_right s cs b k', LawfulCommRing.left_distrib]
+
+private theorem coeffAt_rawMul_congr {F : Type} [LawfulCommRing F] :
+    ∀ (a1 a2 b1 b2 : List F),
+      (∀ i, coeffAt a1 i = coeffAt a2 i) →
+      (∀ j, coeffAt b1 j = coeffAt b2 j) →
+      ∀ k, coeffAt (rawMul a1 b1) k = coeffAt (rawMul a2 b2) k
+  | [], [], _, _, _, _, _ => rfl
+  | [], c :: cs, b1, b2, ha, _, k => by
+    have h0 : ∀ i, coeffAt (c :: cs) i = CommRingOps.zero := fun i => by
+      simpa [coeffAt_nil] using (ha i).symm
+    rw [show rawMul ([] : List F) b1 = [] from rfl, coeffAt_nil,
+        coeffAt_rawMul_zero_left b2 (c :: cs) h0 k]
+  | c :: cs, [], b1, b2, ha, _, k => by
+    have h0 : ∀ i, coeffAt (c :: cs) i = CommRingOps.zero := fun i => by
+      simpa [coeffAt_nil] using ha i
+    rw [show rawMul ([] : List F) b2 = [] from rfl, coeffAt_nil,
+        coeffAt_rawMul_zero_left b1 (c :: cs) h0 k]
+  | x :: xs, y :: ys, b1, b2, ha, hb, k => by
+    have hxy : x = y := by simpa [coeffAt] using ha 0
+    subst hxy
+    simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, hb k]
+    cases k with
+    | zero => rfl
+    | succ k' =>
+      simp only [coeffAt_cons_succ]
+      rw [coeffAt_rawMul_congr xs ys b1 b2
+        (fun i => by simpa [coeffAt_cons_succ] using ha (i + 1)) hb k']
+
+theorem pMul_trimPoly_left {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pMul (trimPoly a) b = pMul a b := by
+  unfold pMul
+  rw [trimPoly_eq_iff_coeffAt]
+  exact coeffAt_rawMul_congr (trimPoly a) a b b (coeffAt_trimPoly a) (fun _ => rfl)
+
+theorem pMul_trimPoly_right {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pMul a (trimPoly b) = pMul a b := by
+  unfold pMul
+  rw [trimPoly_eq_iff_coeffAt]
+  exact coeffAt_rawMul_congr a a (trimPoly b) b (fun _ => rfl) (coeffAt_trimPoly b)
+
+theorem pAdd_comm {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pAdd a b = pAdd b a := by
+  unfold pAdd; rw [trimPoly_eq_iff_coeffAt]; intro k
+  simp [coeffAt_addCoeffs, LawfulCommRing.add_comm]
+
+theorem pAdd_assoc {F : Type} [LawfulCommRing F] [DecidableEq F] (a b c : List F) :
+    pAdd (pAdd a b) c = pAdd a (pAdd b c) := by
+  unfold pAdd; rw [trimPoly_eq_iff_coeffAt]; intro k
+  simp [coeffAt_addCoeffs, coeffAt_trimPoly, LawfulCommRing.add_assoc]
+
+theorem pAdd_nil_right {F : Type} [LawfulCommRing F] [DecidableEq F] (a : List F) :
+    pAdd a [] = trimPoly a := by
+  unfold pAdd; rw [trimPoly_eq_iff_coeffAt]; intro k
+  simp [coeffAt_addCoeffs, coeffAt_nil, LawfulCommRing.add_zero]
+
+theorem pAdd_nil_left {F : Type} [LawfulCommRing F] [DecidableEq F] (a : List F) :
+    pAdd [] a = trimPoly a := by
+  rw [pAdd_comm, pAdd_nil_right]
+
+theorem pAdd_trimPoly_left {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pAdd (trimPoly a) b = pAdd a b := by
+  unfold pAdd; rw [trimPoly_eq_iff_coeffAt]; intro k
+  simp [coeffAt_addCoeffs, coeffAt_trimPoly]
+
+theorem pAdd_trimPoly_right {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pAdd a (trimPoly b) = pAdd a b := by
+  unfold pAdd; rw [trimPoly_eq_iff_coeffAt]; intro k
+  simp [coeffAt_addCoeffs, coeffAt_trimPoly]
+
+theorem pSub_eq_pAdd_pNeg {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pSub a b = pAdd a (pNeg b) := by
+  unfold pSub pAdd pNeg; rw [trimPoly_eq_iff_coeffAt]; intro k
+  simp [coeffAt_subCoeffs, coeffAt_addCoeffs, coeffAt_trimPoly, coeffAt_negCoeffs,
+        LawfulCommRing.sub_eq_add_neg]
+
+theorem pAdd_pSub_cancel {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pAdd b (pSub a b) = trimPoly a := by
+  unfold pAdd pSub; rw [trimPoly_eq_iff_coeffAt]; intro k
+  simp [coeffAt_addCoeffs, coeffAt_trimPoly, coeffAt_subCoeffs, LawfulCommRing.add_sub_cancel_left]
+
+theorem pSub_pAdd_cancel_left {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pSub (pAdd a b) a = trimPoly b := by
+  unfold pSub pAdd; rw [trimPoly_eq_iff_coeffAt]; intro k
+  rw [coeffAt_subCoeffs, coeffAt_trimPoly, coeffAt_addCoeffs,
+      LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_comm (coeffAt a k),
+      LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+
+theorem pMul_comm {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pMul a b = pMul b a := by
+  unfold pMul
+  rw [trimPoly_eq_iff_coeffAt]
+  induction a with
+  | nil =>
+    intro k
+    have h0 : ∀ j, coeffAt ([] : List F) j = CommRingOps.zero := coeffAt_nil
+    simp [rawMul, coeffAt_nil, coeffAt_rawMul_zero_right b [] h0 k]
+  | cons c cs ih =>
+    intro k
+    have h1 : ∀ j, coeffAt (rawMul b [c]) j = CommRingOps.mul c (coeffAt b j) := by
+      clear ih k cs
+      induction b with
+      | nil => intro j; simp [rawMul, coeffAt_nil, LawfulCommRing.mul_zero]
+      | cons d ds ihb =>
+        intro j
+        cases j with
+        | zero =>
+          simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_cons_zero,
+                     LawfulCommRing.add_zero, LawfulCommRing.mul_comm]
+        | succ j' =>
+          simp only [rawMul, coeffAt_addCoeffs, List.map, coeffAt_cons_succ, coeffAt_nil,
+                     LawfulCommRing.zero_add, ihb j']
+    have hsplit : ∀ i, coeffAt (c :: cs) i =
+        coeffAt (rawAddCoeffs [c] (CommRingOps.zero :: cs)) i := by
+      intro i
+      cases i with
+      | zero => simp [rawAddCoeffs, coeffAt, LawfulCommRing.add_zero]
+      | succ _ => simp [rawAddCoeffs, coeffAt]
+    rw [coeffAt_rawMul_congr b b (c :: cs) (rawAddCoeffs [c] (CommRingOps.zero :: cs))
+          (fun _ => rfl) hsplit k,
+        coeffAt_rawMul_add_right, h1 k, coeffAt_rawMul_shift_right]
+    simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul]
+    cases k with
+    | zero => rfl
+    | succ k' => simp [coeffAt_cons_succ, ih k']
+
+theorem pMul_assoc {F : Type} [LawfulCommRing F] [DecidableEq F] (a b c : List F) :
+    pMul (pMul a b) c = pMul a (pMul b c) := by
+  have h1 : pMul (pMul a b) c = pMul (rawMul a b) c := pMul_trimPoly_left (rawMul a b) c
+  have h2 : pMul a (pMul b c) = pMul a (rawMul b c) := pMul_trimPoly_right a (rawMul b c)
+  rw [h1, h2]
+  clear h1 h2
+  unfold pMul
+  rw [trimPoly_eq_iff_coeffAt]
+  have hshiftLeft : ∀ (u v : List F) (k : Nat),
+      coeffAt (rawMul (CommRingOps.zero :: u) v) k =
+        coeffAt (CommRingOps.zero :: rawMul u v) k := by
+    intro u v k
+    simp [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+  induction a with
+  | nil => intro k; rfl
+  | cons x xs ih =>
+    intro k
+    simp only [rawMul]
+    rw [coeffAt_rawMul_add_left, coeffAt_rawMul_scale_left, hshiftLeft,
+        coeffAt_addCoeffs, coeffAt_map_mul]
+    cases k with
+    | zero => simp only [coeffAt_cons_zero, LawfulCommRing.add_zero]
+    | succ k' => simp only [coeffAt_cons_succ, ih k']
+
+theorem pMul_pAdd_left {F : Type} [LawfulCommRing F] [DecidableEq F] (a1 a2 b : List F) :
+    pMul (pAdd a1 a2) b = pAdd (pMul a1 b) (pMul a2 b) := by
+  rw [show pAdd a1 a2 = trimPoly (rawAddCoeffs a1 a2) from rfl, pMul_trimPoly_left,
+      show pMul a1 b = trimPoly (rawMul a1 b) from rfl,
+      show pMul a2 b = trimPoly (rawMul a2 b) from rfl,
+      pAdd_trimPoly_left, pAdd_trimPoly_right]
+  unfold pMul pAdd; rw [trimPoly_eq_iff_coeffAt]
+  intro k
+  rw [coeffAt_rawMul_add_left, coeffAt_addCoeffs]
+
+theorem pMul_pAdd_right {F : Type} [LawfulCommRing F] [DecidableEq F] (a b1 b2 : List F) :
+    pMul a (pAdd b1 b2) = pAdd (pMul a b1) (pMul a b2) := by
+  rw [pMul_comm a _, pMul_pAdd_left, pMul_comm b1 a, pMul_comm b2 a]
+
+theorem pMul_pNeg_right {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) :
+    pMul a (pNeg b) = pNeg (pMul a b) := by
+  have heq : pNeg b = pScale (CommRingOps.neg CommRingOps.one) b := by
+    unfold pNeg pScale; rw [trimPoly_eq_iff_coeffAt]; intro k
+    rw [coeffAt_negCoeffs, coeffAt_map_mul, LawfulCommRing.neg_mul, LawfulCommRing.one_mul]
+  have heq2 : pNeg (pMul a b) = pScale (CommRingOps.neg CommRingOps.one) (pMul a b) := by
+    unfold pNeg pScale; rw [trimPoly_eq_iff_coeffAt]; intro k
+    rw [coeffAt_negCoeffs, coeffAt_map_mul, LawfulCommRing.neg_mul, LawfulCommRing.one_mul]
+  rw [heq, heq2]
+  unfold pScale
+  rw [pMul_trimPoly_right]
+  unfold pMul
+  rw [trimPoly_eq_iff_coeffAt]
+  intro k
+  rw [coeffAt_rawMul_scale_right, coeffAt_map_mul, coeffAt_trimPoly]
+
+theorem pMul_pSub_right {F : Type} [LawfulCommRing F] [DecidableEq F] (a b1 b2 : List F) :
+    pMul a (pSub b1 b2) = pSub (pMul a b1) (pMul a b2) := by
+  rw [pSub_eq_pAdd_pNeg, pSub_eq_pAdd_pNeg, pMul_pAdd_right, pMul_pNeg_right]
+
+theorem pMul_pScale_right {F : Type} [LawfulCommRing F] [DecidableEq F] (c : F) (a b : List F) :
+    pMul a (pScale c b) = pScale c (pMul a b) := by
+  unfold pScale; rw [pMul_trimPoly_right]
+  unfold pMul; rw [trimPoly_eq_iff_coeffAt]; intro k
+  rw [coeffAt_rawMul_scale_right, coeffAt_map_mul, coeffAt_trimPoly]
+
+theorem pMul_one_right {F : Type} [LawfulCommRing F] [DecidableEq F] (a : List F) :
+    pMul a [CommRingOps.one] = trimPoly a := by
+  rw [pMul_comm]
+  unfold pMul; rw [trimPoly_eq_iff_coeffAt]; intro k
+  simp [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, LawfulCommRing.one_mul]
+  cases k <;> simp [coeffAt, LawfulCommRing.add_zero]
+
+/-- Degree-additivity & integral-domain law for canonical polynomials over `[LawfulField F]`:
+    for non-empty trimmed `a, b`, `(pMul a b).length = a.length + b.length - 1` and `pMul a b ≠ []`. -/
+theorem pMul_length_of_trimmed_ne_nil
+    {F : Type} [LawfulField F] [DecidableEq F]
+    {a b : List F}
+    (haTrim : IsTrimmed a) (hbTrim : IsTrimmed b)
+    (haNe : a ≠ []) (hbNe : b ≠ []) :
+    (pMul a b).length = a.length + b.length - 1 ∧ pMul a b ≠ [] := by
+  let da := a.length - 1
+  let db := b.length - 1
+  have haLen : a.length = da + 1 := by cases a with | nil => contradiction | cons _ _ => simp [da]
+  have hbLen : b.length = db + 1 := by cases b with | nil => contradiction | cons _ _ => simp [db]
+  have haHigh : ∀ i, da < i → coeffAt a i = CommRingOps.zero :=
+    fun i hi => coeffAt_eq_zero_of_ge a i (by omega)
+  have hbHigh : ∀ j, db < j → coeffAt b j = CommRingOps.zero :=
+    fun j hj => coeffAt_eq_zero_of_ge b j (by omega)
+  rcases coeffAt_rawMul_high b db hbHigh da a haHigh with ⟨hHigh, hTop⟩
+  have hlaNe : coeffAt a da ≠ CommRingOps.zero := by
+    have h := leadCoeff_ne_zero_of_trimPoly_ne_nil a (by rwa [haTrim])
+    rw [haTrim] at h
+    exact h
+  have hlbNe : coeffAt b db ≠ CommRingOps.zero := by
+    have h := leadCoeff_ne_zero_of_trimPoly_ne_nil b (by rwa [hbTrim])
+    rw [hbTrim] at h
+    exact h
+  have hTopNe : coeffAt (rawMul a b) (da + db) ≠ CommRingOps.zero := by
+    rw [hTop]
+    intro h0
+    rcases LawfulField.mul_eq_zero h0 with h1 | h2
+    · exact hlaNe h1
+    · exact hlbNe h2
+  have hpNe : pMul a b ≠ [] := by
+    intro hnil
+    have h0 := (trimPoly_eq_nil_iff (rawMul a b)).mp hnil (da + db)
+    exact hTopNe h0
+  have hle : (pMul a b).length ≤ da + db + 1 :=
+    length_trimPoly_le_of_coeffAt_zero (rawMul a b) (da + db + 1)
+      (fun k hk => hHigh k (by omega))
+  have hge : da + db + 1 ≤ (pMul a b).length := by
+    if hlt : (pMul a b).length < da + db + 1 then
+      have h0 : coeffAt (pMul a b) (da + db) = CommRingOps.zero :=
+        coeffAt_eq_zero_of_ge (pMul a b) (da + db) (by omega)
+      rw [pMul, coeffAt_trimPoly] at h0
+      exact False.elim (hTopNe h0)
+    else
+      omega
+  refine ⟨by omega, hpNe⟩
+
+theorem pMul_eq_nil_iff {F : Type} [LawfulField F] [DecidableEq F] (a b : List F) :
+    pMul a b = [] ↔ trimPoly a = [] ∨ trimPoly b = [] := by
+  constructor
+  · intro h
+    if ha : trimPoly a = [] then
+      exact .inl ha
+    else if hb : trimPoly b = [] then
+      exact .inr hb
+    else
+      rw [← pMul_trimPoly_left, ← pMul_trimPoly_right (trimPoly a) b] at h
+      have hne := (pMul_length_of_trimmed_ne_nil (trimPoly_idem a) (trimPoly_idem b) ha hb).2
+      exact False.elim (hne h)
+  · rintro (ha | hb)
+    · rw [← pMul_trimPoly_left, ha]; rfl
+    · rw [← pMul_trimPoly_right, hb, pMul_comm]; rfl
+
+theorem pAdd_length_le {F : Type} [LawfulCommRing F] [DecidableEq F] (a b : List F) (B : Nat)
+    (ha : a.length ≤ B) (hb : b.length ≤ B) :
+    (pAdd a b).length ≤ B := by
+  apply length_trimPoly_le_of_coeffAt_zero _ B
+  intro k hk
+  rw [coeffAt_addCoeffs, coeffAt_eq_zero_of_ge a k (by omega),
+      coeffAt_eq_zero_of_ge b k (by omega), LawfulCommRing.add_zero]
+
+theorem pMul_length_le {F : Type} [LawfulField F] [DecidableEq F] (a b : List F) (ka kb : Nat)
+    (ha : a.length ≤ ka + 1) (hb : b.length ≤ kb + 1) :
+    (pMul a b).length ≤ ka + kb + 1 := by
+  if ha0 : trimPoly a = [] then
+    rw [(pMul_eq_nil_iff a b).mpr (.inl ha0)]; simp
+  else if hb0 : trimPoly b = [] then
+    rw [(pMul_eq_nil_iff a b).mpr (.inr hb0)]; simp
+  else
+    rw [← pMul_trimPoly_left, ← pMul_trimPoly_right (trimPoly a) b]
+    have hlen := (pMul_length_of_trimmed_ne_nil (trimPoly_idem a) (trimPoly_idem b) ha0 hb0).1
+    have haL := trimPoly_length_le a
+    have hbL := trimPoly_length_le b
+    omega
+
+private theorem coeffAt_monomial {F : Type} [CommRingOps F] :
+    ∀ (deg k : Nat) (c : F),
+      coeffAt (monomial deg c) k = if k = deg then c else CommRingOps.zero
+  | 0, 0, c => by simp [monomial, coeffAt]
+  | 0, _ + 1, _ => by simp [monomial, coeffAt]
+  | _ + 1, 0, _ => by simp [monomial, List.replicate, coeffAt]
+  | deg + 1, k + 1, c => by
+    simp [monomial, List.replicate, coeffAt_cons_succ, coeffAt_monomial deg k c]
+
+/-- Fuel-bounded constructive Euclidean polynomial division (`0` `WellFounded.fix`, `0` choice). -/
+def polyDivModFuel {F : Type} [LawfulField F] [DecidableEq F] :
+    Nat → List F → List F → List F × List F
+  | 0, a, _ => ([], trimPoly a)
+  | fuel + 1, a, b =>
+    let a' := trimPoly a
+    let b' := trimPoly b
+    if b' = [] ∨ a'.length < b'.length then
+      ([], a')
+    else
+      let da := a'.length - 1
+      let db := b'.length - 1
+      let coef := CommRingOps.mul (coeffAt a' da) (LawfulField.inv (coeffAt b' db))
+      let stepQ := monomial (da - db) coef
+      let rem1 := pSub a' (pMul stepQ b')
+      let qr := polyDivModFuel fuel rem1 b'
+      (pAdd stepQ qr.1, qr.2)
+
+/-- Constructive univariate Euclidean division `polyDivMod a b = (q, r)`. -/
+def polyDivMod {F : Type} [LawfulField F] [DecidableEq F] (a b : List F) : List F × List F :=
+  polyDivModFuel (trimPoly a).length a b
+
+private theorem polyDivModFuel_spec
+    {F : Type} [LawfulField F] [DecidableEq F] :
+    ∀ (fuel : Nat) (a b : List F),
+      trimPoly b ≠ [] →
+      (trimPoly a).length ≤ fuel →
+      let (q, r) := polyDivModFuel fuel a b
+      IsTrimmed q ∧ IsTrimmed r ∧
+      trimPoly a = pAdd (pMul q b) r ∧
+      r.length < (trimPoly b).length
+  | 0, a, b, hbNe, hfuel => by
+    have haNil : trimPoly a = [] := by
+      cases h : trimPoly a with
+      | nil => rfl
+      | cons _ _ => rw [h] at hfuel; simp at hfuel
+    have hbPos : 0 < (trimPoly b).length := by
+      cases h : trimPoly b with
+      | nil => exact False.elim (hbNe h)
+      | cons _ _ => simp
+    dsimp [polyDivModFuel]
+    refine ⟨rfl, trimPoly_idem a, ?_, by rw [haNil]; exact hbPos⟩
+    rw [haNil]
+    have hmul0 : pMul ([] : List F) b = [] := (pMul_eq_nil_iff [] b).mpr (.inl rfl)
+    rw [hmul0, pAdd_nil_left]; rfl
+  | fuel + 1, a, b, hbNe, hfuel => by
+    dsimp only [polyDivModFuel]
+    if hstop : trimPoly b = [] ∨ (trimPoly a).length < (trimPoly b).length then
+      simp only [hstop, ↓reduceIte]
+      rcases hstop with hb0 | hlt
+      · exact False.elim (hbNe hb0)
+      · refine ⟨rfl, trimPoly_idem a, ?_, hlt⟩
+        have hmul0 : pMul ([] : List F) b = [] := (pMul_eq_nil_iff [] b).mpr (.inl rfl)
+        rw [hmul0, pAdd_nil_left, trimPoly_idem]
+    else
+      simp only [hstop, ↓reduceIte]
+      have hge : (trimPoly b).length ≤ (trimPoly a).length := by omega
+      let a' := trimPoly a
+      let b' := trimPoly b
+      have hbPos : 1 ≤ b'.length := by
+        cases h : b' with
+        | nil => exact False.elim (hbNe h)
+        | cons _ _ => simp
+      have haPos : 1 ≤ a'.length := by omega
+      let da := a'.length - 1
+      let db := b'.length - 1
+      have hlbNe : coeffAt b' db ≠ CommRingOps.zero := by
+        have h := leadCoeff_ne_zero_of_trimPoly_ne_nil b hbNe
+        simpa [b', db] using h
+      let coef := CommRingOps.mul (coeffAt a' da) (LawfulField.inv (coeffAt b' db))
+      let stepQ := monomial (da - db) coef
+      let rem1 := pSub a' (pMul stepQ b')
+      -- Show `rem1.length ≤ da ≤ fuel` because the `X^da` leading term cancels!
+      have hStepHigh : ∀ i, da - db < i → coeffAt stepQ i = CommRingOps.zero := by
+        intro i hi
+        rw [coeffAt_monomial]
+        simp [show i ≠ da - db by omega]
+      have hbHigh : ∀ j, db < j → coeffAt b' j = CommRingOps.zero :=
+        fun j hj => coeffAt_eq_zero_of_ge b' j (by omega)
+      rcases coeffAt_rawMul_high b' db hbHigh (da - db) stepQ hStepHigh with ⟨hMulHigh, hMulTop⟩
+      have hdaEq : da - db + db = da := by omega
+      rw [hdaEq] at hMulHigh hMulTop
+      have hRemLen : rem1.length ≤ da := by
+        apply length_trimPoly_le_of_coeffAt_zero _ da
+        intro k hk
+        rw [coeffAt_subCoeffs, coeffAt_trimPoly]
+        if hkEq : k = da then
+          subst hkEq
+          rw [hMulTop, coeffAt_monomial]
+          simp only [↓reduceIte]
+          dsimp [coef]
+          rw [LawfulCommRing.mul_assoc, LawfulField.inv_mul_cancel hlbNe,
+              LawfulCommRing.mul_one, LawfulCommRing.sub_self]
+        else
+          rw [coeffAt_eq_zero_of_ge a' k (by omega), hMulHigh k (by omega),
+              LawfulCommRing.sub_self]
+      have hRemTrim : IsTrimmed rem1 := trimPoly_idem _
+      have hRemFuel : (trimPoly rem1).length ≤ fuel := by
+        rw [hRemTrim]; omega
+      have hb'Ne : trimPoly b' ≠ [] := by rwa [trimPoly_idem]
+      have ih := polyDivModFuel_spec fuel rem1 b' hb'Ne hRemFuel
+      let qr := polyDivModFuel fuel rem1 b'
+      rcases ih with ⟨hqTrim, hrTrim, hRemDecomp, hrLt⟩
+      rw [hRemTrim, trimPoly_idem] at hRemDecomp hrLt
+      refine ⟨trimPoly_idem _, hrTrim, ?_, hrLt⟩
+      -- `a' = pMul stepQ b' + rem1 = pMul stepQ b + (pMul qr.1 b + qr.2) = pMul (stepQ + qr.1) b + qr.2`
+      rw [pMul_pAdd_left, ← pMul_trimPoly_right stepQ b, ← pMul_trimPoly_right qr.1 b,
+          pAdd_assoc, ← hRemDecomp]
+      have hcancel := pAdd_pSub_cancel a' (pMul stepQ b')
+      rw [trimPoly_idem] at hcancel
+      exact hcancel.symm
+
+/-- **Constructive Euclidean Division Specification (`polyDivMod_spec`)**:
+    For any `a, b : List F` with `trimPoly b ≠ []`, `polyDivMod a b = (q, r)` produces canonical
+    trimmed polynomials satisfying `trimPoly a = pAdd (pMul q b) r` and `r.length < (trimPoly b).length`. -/
+theorem polyDivMod_spec
+    {F : Type} [LawfulField F] [DecidableEq F]
+    (a b : List F) (hbNe : trimPoly b ≠ []) :
+    let (q, r) := polyDivMod a b
+    IsTrimmed q ∧ IsTrimmed r ∧
+    trimPoly a = pAdd (pMul q b) r ∧
+    r.length < (trimPoly b).length :=
+  polyDivModFuel_spec (trimPoly a).length a b hbNe (Nat.le_refl _)
+
+/-- Divisibility relation on canonical trimmed polynomials. -/
+def DvdTrim {F : Type} [CommRingOps F] [DecidableEq F] (d a : List F) : Prop :=
+  ∃ k : List F, trimPoly a = pMul d k
+
+theorem dvdTrim_refl {F : Type} [LawfulCommRing F] [DecidableEq F] (d : List F) :
+    DvdTrim d d :=
+  ⟨[CommRingOps.one], (pMul_one_right d).symm⟩
+
+theorem dvdTrim_nil {F : Type} [LawfulField F] [DecidableEq F] (d : List F) :
+    DvdTrim d [] :=
+  ⟨[], ((pMul_eq_nil_iff d []).mpr (.inr rfl)).symm⟩
+
+theorem dvdTrim_trans {F : Type} [LawfulCommRing F] [DecidableEq F]
+    {a b c : List F} (hab : DvdTrim a b) (hbc : DvdTrim b c) : DvdTrim a c := by
+  rcases hab with ⟨k1, hk1⟩
+  rcases hbc with ⟨k2, hk2⟩
+  refine ⟨pMul k1 k2, ?_⟩
+  rw [hk2, ← pMul_trimPoly_left b k2, hk1, pMul_assoc]
+
+/-- Constructive exact quotient extraction: if `DvdTrim g a` and `trimPoly g ≠ []`, then
+    `polyDivMod a g` has remainder `[]` and its quotient `q = (polyDivMod a g).1` satisfies
+    `trimPoly a = pMul g q` (`0` classical choice!). -/
+theorem exactDiv_of_dvdTrim
+    {F : Type} [LawfulField F] [DecidableEq F]
+    (a g : List F) (hgNe : trimPoly g ≠ []) (hdvd : DvdTrim g a) :
+    let (q, r) := polyDivMod a g
+    IsTrimmed q ∧ r = [] ∧ trimPoly a = pMul g q := by
+  rcases polyDivMod_spec a g hgNe with ⟨hqTrim, hrTrim, hDecomp, hrLt⟩
+  rcases hdvd with ⟨k, hk⟩
+  -- `r = a - q*g = g*k - g*q = g*(k - q)`, and `r.length < (trimPoly g).length` forces `r = []`!
+  have hrEq : trimPoly (polyDivMod a g).2 = pMul (trimPoly g) (pSub k (polyDivMod a g).1) := by
+    have h1 := pSub_pAdd_cancel_left (pMul (polyDivMod a g).1 g) (polyDivMod a g).2
+    rw [← hDecomp, hk, pMul_comm (polyDivMod a g).1 g, ← pMul_pSub_right,
+        pMul_trimPoly_left] at h1
+    exact h1.symm
+  rw [hrTrim] at hrEq
+  have hrNil : (polyDivMod a g).2 = [] := by
+    if hrNe : (polyDivMod a g).2 = [] then
+      exact hrNe
+    else
+      have hdiffNe : trimPoly (pSub k (polyDivMod a g).1) ≠ [] := by
+        intro h0
+        rw [(pMul_eq_nil_iff (trimPoly g) _).mpr (.inr h0)] at hrEq
+        exact hrNe hrEq
+      rw [← pMul_trimPoly_right (trimPoly g)] at hrEq
+      have hlen := (pMul_length_of_trimmed_ne_nil (trimPoly_idem g) (trimPoly_idem _) hgNe hdiffNe).1
+      rw [← hrEq] at hlen
+      have hpos : 1 ≤ (trimPoly (pSub k (polyDivMod a g).1)).length := by
+        cases h : trimPoly (pSub k (polyDivMod a g).1) with
+        | nil => exact False.elim (hdiffNe h)
+        | cons _ _ => simp
+      omega
+  refine ⟨hqTrim, hrNil, ?_⟩
+  rw [hrNil, pAdd_nil_right, pMul_comm] at hDecomp
+  simpa [pMul, trimPoly_idem] using hDecomp
+
+/-- Fuel-bounded constructive Euclidean polynomial GCD (`0` `WellFounded.fix`, `0` choice). -/
+def polyGcdFuel {F : Type} [LawfulField F] [DecidableEq F] :
+    Nat → List F → List F → List F
+  | 0, a, _ => trimPoly a
+  | fuel + 1, a, b =>
+    let a' := trimPoly a
+    let b' := trimPoly b
+    if b' = [] then a'
+    else
+      let r := (polyDivMod a' b').2
+      polyGcdFuel fuel b' r
+
+/-- Constructive greatest common divisor `polyGcd a b` on `List F`. -/
+def polyGcd {F : Type} [LawfulField F] [DecidableEq F] (a b : List F) : List F :=
+  polyGcdFuel ((trimPoly b).length + 1) a b
+
+private theorem polyGcdFuel_spec
+    {F : Type} [LawfulField F] [DecidableEq F] :
+    ∀ (fuel : Nat) (a b : List F),
+      (trimPoly b).length < fuel →
+      let g := polyGcdFuel fuel a b
+      IsTrimmed g ∧
+      DvdTrim g a ∧ DvdTrim g b ∧
+      (∀ d : List F, DvdTrim d a → DvdTrim d b → DvdTrim d g)
+  | 0, _, _, hlt => by omega
+  | fuel + 1, a, b, hlt => by
+    dsimp only [polyGcdFuel]
+    if hb0 : trimPoly b = [] then
+      simp only [hb0, ↓reduceIte]
+      refine ⟨trimPoly_idem a, ?_, ?_, ?_⟩
+      · exact ⟨[CommRingOps.one], (pMul_one_right (trimPoly a)).symm.trans (by simp [pMul, trimPoly_idem])⟩
+      · exact ⟨[], by rw [hb0, (pMul_eq_nil_iff _ []).mpr (.inr rfl)]⟩
+      · intro d hda _
+        rcases hda with ⟨k, hk⟩
+        exact ⟨k, by rwa [trimPoly_idem]⟩
+    else
+      simp only [hb0, ↓reduceIte]
+      have hb'Ne : trimPoly (trimPoly b) ≠ [] := by rwa [trimPoly_idem]
+      rcases polyDivMod_spec (trimPoly a) (trimPoly b) hb'Ne with ⟨hqT, hrT, hDecomp, hrLt⟩
+      rw [trimPoly_idem, trimPoly_idem] at hDecomp hrLt
+      let q := (polyDivMod (trimPoly a) (trimPoly b)).1
+      let r := (polyDivMod (trimPoly a) (trimPoly b)).2
+      have hrFuel : (trimPoly r).length < fuel := by rw [hrT]; omega
+      rcases polyGcdFuel_spec fuel (trimPoly b) r hrFuel with ⟨hgT, hgb, hgr, hgUniv⟩
+      let g := polyGcdFuel fuel (trimPoly b) r
+      refine ⟨hgT, ?_, ?_, ?_⟩
+      · -- `g | b` and `g | r` implies `g | q*b + r = a`
+        rcases hgb with ⟨kb, hkb⟩
+        rcases hgr with ⟨kr, hkr⟩
+        rw [trimPoly_idem] at hkb
+        rw [hrT] at hkr
+        refine ⟨pAdd (pMul kb q) kr, ?_⟩
+        rw [hDecomp, pMul_comm q (trimPoly b), hkb, pMul_assoc, ← pMul_pAdd_right]
+      · rcases hgb with ⟨kb, hkb⟩
+        rw [trimPoly_idem] at hkb
+        exact ⟨kb, hkb⟩
+      · intro d hda hdb
+        apply hgUniv d
+        · rcases hdb with ⟨kb, hkb⟩
+          exact ⟨kb, by rwa [trimPoly_idem]⟩
+        · -- `d | a` and `d | b` implies `d | a - q*b = r`
+          rcases hda with ⟨ka, hka⟩
+          rcases hdb with ⟨kb, hkb⟩
+          have hrSub := pSub_pAdd_cancel_left (pMul q (trimPoly b)) r
+          rw [← hDecomp, hka, pMul_comm q (trimPoly b), hkb,
+              pMul_assoc, ← pMul_pSub_right] at hrSub
+          exact ⟨pSub ka (pMul kb q), hrSub.symm⟩
+
+/-- **Constructive Polynomial GCD Specification (`polyGcd_spec`)**. -/
+theorem polyGcd_spec
+    {F : Type} [LawfulField F] [DecidableEq F]
+    (a b : List F) :
+    let g := polyGcd a b
+    IsTrimmed g ∧
+    DvdTrim g a ∧ DvdTrim g b ∧
+    (∀ d : List F, DvdTrim d a → DvdTrim d b → DvdTrim d g) :=
+  polyGcdFuel_spec ((trimPoly b).length + 1) a b (Nat.lt_succ_self _)
+
+/-- `HasAffineWitnessS1 d f g D α β P` holds when there exist polynomials `F_poly` (`deg ≤ d`,
+    `length ≤ d + 1`) and `G_poly` (`deg ≤ d - 1`, `length ≤ d`) decomposing
+    `P(X) = F_poly(X) + (α + β X) G_poly(X)` with at most `s = 1` disagreement coordinate on the
+    agreement domain `S_{α,β}(P) ⊆ D` (`[CWYZ26]` Theorem 1.2 / Proposition 6.2). -/
+@[expose] def HasAffineWitnessS1
+    {F : Type} [CommRingOps F] [DecidableEq F]
+    (d : Nat) (f g : F → F) (D : List F) (α β : F) (P : List F) : Prop :=
+  ∃ F_poly G_poly : List F,
+    F_poly.length ≤ d + 1 ∧
+    G_poly.length ≤ d ∧
+    (∀ x : F, RoundPoly.evalCoeffs P x =
+      CommRingOps.add (RoundPoly.evalCoeffs F_poly x)
+        (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β x))
+          (RoundPoly.evalCoeffs G_poly x))) ∧
+    let S_p := D.filter (fun z =>
+      decide (RoundPoly.evalCoeffs P z =
+        CommRingOps.add (f z)
+          (CommRingOps.mul (CommRingOps.add α (CommRingOps.mul β z)) (g z))))
+    (S_p.filter (fun z =>
+      !(decide (RoundPoly.evalCoeffs F_poly z = f z) &&
+        decide (RoundPoly.evalCoeffs G_poly z = g z)))).length ≤ 1
+
+/-- **Constructive Welch–Berlekamp Affine Proximity-Gap Theorem (`welch_berlekamp_affine_proximity_gap`)**:
+    Over ANY `[LawfulField F] [DecidableEq F]` (`0` algebraic geometry, `0` classical choice),
+    whenever `A ≤ D.length` and `2 * D.length + d + 1 < 3 * A` (`δ < (1 - ρ) / 3`), for ANY received
+    words `f, g : F → F`, ANY duplicate-free challenge list `S`, ANY duplicate-free subset
+    `badPairs ⊆ prodPool S`, and ANY candidate map `P_of : F × F → List F` where every `p = (α, β) ∈ badPairs`
+    has `(P_of p).length ≤ d + 1`, `A ≤ |S_{α,β}(P_of p)|`, and `¬ HasAffineWitnessS1 d f g D α β (P_of p)`:
+    **`badPairs.length ≤ Nat.max S.length (D.length * (D.length - 1) / 2)`**! -/
+theorem welch_berlekamp_affine_proximity_gap
+    {F : Type} [LawfulField F] [DecidableEq F]
+    (f g : F → F) (D S : List F) (d A : Nat)
+    (badPairs : List (F × F)) (P_of : F × F → List F)
+    (hD : D.Nodup) (hS : S.Nodup)
+    (hAD : A ≤ D.length)
+    (hWB : 2 * D.length + d + 1 < 3 * A)
+    (hBadNd : badPairs.Nodup)
+    (hBadSub : ∀ p ∈ badPairs, p ∈ prodPool S)
+    (hBadDeg : ∀ p ∈ badPairs, (P_of p).length ≤ d + 1)
+    (hBadAgree : ∀ p ∈ badPairs,
+      A ≤ (D.filter (fun z =>
+        decide (RoundPoly.evalCoeffs (P_of p) z =
+          CommRingOps.add (f z)
+            (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (g z))))).length)
+    (hBadExc : ∀ p ∈ badPairs, ¬ HasAffineWitnessS1 d f g D p.1 p.2 (P_of p)) :
+    badPairs.length ≤ Nat.max S.length (D.length * (D.length - 1) / 2) := by
+  have hAd2 : d + 2 ≤ A := by omega
+  -- 1. Build the `2 * D.length < 3 * A - d - 1` homogeneous WB system `Q(X, Y, Z) = u₀ + u₁ Y + Q₁ Z`:
+  let N₀ := A
+  let N₁ := A - 1
+  let N₂ := A - d
+  let N := N₀ + N₁ + N₂
+  let rowF := fun (z : F) =>
+    geomVec z N₀ ++ List.replicate N₁ CommRingOps.zero ++ (geomVec z N₂).map (CommRingOps.mul (f z))
+  let rowG := fun (z : F) =>
+    List.replicate N₀ CommRingOps.zero ++ geomVec z N₁ ++ (geomVec z N₂).map (CommRingOps.mul (g z))
+  let rows := D.flatMap (fun z => [rowF z, rowG z])
+  have hRowsLen : rows.length = 2 * D.length := by
+    dsimp [rows]
+    induction D with
+    | nil => rfl
+    | cons _ tl ih => simp [List.flatMap_cons, ih]; omega
+  have hRowsLt : rows.length < N := by
+    rw [hRowsLen]; dsimp [N, N₀, N₁, N₂]; omega
+  have hRowWidth : ∀ row ∈ rows, row.length = N := by
+    intro row hmem
+    dsimp [rows] at hmem
+    rw [List.mem_flatMap] at hmem
+    rcases hmem with ⟨z, _, hr⟩
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hr
+    rcases hr with rfl | rfl <;>
+      simp [rowF, rowG, List.length_append, geomVec_length]
+  rcases gauss_nullspace_witness N rows hRowsLt hRowWidth with ⟨hvLen, hvAny, hvZero⟩
+  let v := solveHomogeneous N rows
+  let u₀ := v.take N₀
+  let u₁ := (v.drop N₀).take N₁
+  let Q₁ := v.drop (N₀ + N₁)
+  have hu₀Len : u₀.length = N₀ := by dsimp [u₀]; rw [List.length_take]; omega
+  have hu₁Len : u₁.length = N₁ := by dsimp [u₁]; rw [List.length_take, List.length_drop]; omega
+  have hQ₁Len : Q₁.length = N₂ := by dsimp [Q₁]; rw [List.length_drop]; omega
+  have hvSplit : v = (u₀ ++ u₁) ++ Q₁ := by
+    have h1 : v = v.take N₀ ++ v.drop N₀ := (List.take_append_drop N₀ v).symm
+    have h2 : v.drop N₀ = (v.drop N₀).take N₁ ++ (v.drop N₀).drop N₁ :=
+      (List.take_append_drop N₁ (v.drop N₀)).symm
+    rw [List.drop_drop, Nat.add_comm N₁ N₀] at h2
+    calc v = u₀ ++ v.drop N₀ := h1
+      _ = u₀ ++ (u₁ ++ Q₁) := congrArg (u₀ ++ ·) h2
+      _ = (u₀ ++ u₁) ++ Q₁ := (List.append_assoc u₀ u₁ Q₁).symm
+  -- Evaluate `rowF z` and `rowG z` on `v` for every `z ∈ D`:
+  have hInterpF : ∀ z ∈ D,
+      CommRingOps.add (RoundPoly.evalCoeffs u₀ z)
+        (CommRingOps.mul (f z) (RoundPoly.evalCoeffs Q₁ z)) = CommRingOps.zero := by
+    intro z hz
+    have h0 : dotVec (rowF z) v = CommRingOps.zero :=
+      hvZero (rowF z) (List.mem_flatMap.mpr ⟨z, hz, .head _⟩)
+    rw [hvSplit] at h0
+    dsimp [rowF] at h0
+    rw [dotVec_append_eq _ _ (u₀ ++ u₁) Q₁
+          (by simp [List.length_append, geomVec_length, hu₀Len, hu₁Len]),
+        dotVec_append_eq _ _ u₀ u₁ (by simp [geomVec_length, hu₀Len]),
+        dotVec_geomVec_eq_evalCoeffs z N₀ u₀ hu₀Len,
+        dotVec_replicate_zero, LawfulCommRing.add_zero,
+        dotVec_scaleVec (f z),
+        dotVec_geomVec_eq_evalCoeffs z N₂ Q₁ hQ₁Len] at h0
+    exact h0
+  have hInterpG : ∀ z ∈ D,
+      CommRingOps.add (RoundPoly.evalCoeffs u₁ z)
+        (CommRingOps.mul (g z) (RoundPoly.evalCoeffs Q₁ z)) = CommRingOps.zero := by
+    intro z hz
+    have h0 : dotVec (rowG z) v = CommRingOps.zero :=
+      hvZero (rowG z) (List.mem_flatMap.mpr ⟨z, hz, .tail _ (.head _)⟩)
+    rw [hvSplit] at h0
+    dsimp [rowG] at h0
+    rw [dotVec_append_eq _ _ (u₀ ++ u₁) Q₁
+          (by simp [List.length_append, geomVec_length, hu₀Len, hu₁Len]),
+        dotVec_append_eq _ _ u₀ u₁ (by simp [hu₀Len]),
+        dotVec_replicate_zero, LawfulCommRing.zero_add,
+        dotVec_geomVec_eq_evalCoeffs z N₁ u₁ hu₁Len,
+        dotVec_scaleVec (g z),
+        dotVec_geomVec_eq_evalCoeffs z N₂ Q₁ hQ₁Len] at h0
+    exact h0
+  -- 2. Prove `trimPoly Q₁ ≠ []`:
+  have hQ₁Ne : trimPoly Q₁ ≠ [] := by
+    intro hQ0
+    have hQEval0 : ∀ z, RoundPoly.evalCoeffs Q₁ z = CommRingOps.zero := by
+      intro z; rw [← evalCoeffs_trimPoly z Q₁, hQ0]; rfl
+    have hu₀Nil : trimPoly u₀ = [] := by
+      if hu0 : trimPoly u₀ = [] then exact hu0
+      else
+        rcases exists_nonroot_of_trim_ne_nil (trimPoly_idem u₀) hu0 hD
+          (Nat.le_trans (trimPoly_length_le u₀) (by rw [hu₀Len]; exact hAD)) with ⟨z, hzD, hzNe⟩
+        rw [evalCoeffs_trimPoly] at hzNe
+        have hf := hInterpF z hzD
+        rw [hQEval0 z, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hf
+        exact False.elim (hzNe hf)
+    have hu₁Nil : trimPoly u₁ = [] := by
+      if hu1 : trimPoly u₁ = [] then exact hu1
+      else
+        rcases exists_nonroot_of_trim_ne_nil (trimPoly_idem u₁) hu1 hD
+          (Nat.le_trans (trimPoly_length_le u₁) (by rw [hu₁Len]; omega)) with ⟨z, hzD, hzNe⟩
+        rw [evalCoeffs_trimPoly] at hzNe
+        have hg := hInterpG z hzD
+        rw [hQEval0 z, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hg
+        exact False.elim (hzNe hg)
+    have hallZero : ∀ w : List F, trimPoly w = [] → ∀ x ∈ w, x = CommRingOps.zero := by
+      intro w hw x hx
+      rcases List.getElem?_of_mem hx with ⟨idx, hidx⟩
+      have hc := (trimPoly_eq_nil_iff w).mp hw idx
+      simpa [coeffAt, List.getD, hidx] using hc
+    rcases mem_of_any_true hvAny with ⟨x, hxMem, hxPred⟩
+    rw [hvSplit, List.mem_append, List.mem_append] at hxMem
+    have hx0 : x = CommRingOps.zero := by
+      rcases hxMem with (hx0 | hx1) | hx2
+      · exact hallZero u₀ hu₀Nil x hx0
+      · exact hallZero u₁ hu₁Nil x hx1
+      · exact hallZero Q₁ hQ0 x hx2
+    simp [hx0] at hxPred
+  -- 3. Factor out `gcdPoly := polyGcd u₀ (polyGcd u₁ Q₁)` (`≠ []`):
+  let g12 := polyGcd u₁ Q₁
+  let gcdPoly := polyGcd u₀ g12
+  rcases polyGcd_spec u₁ Q₁ with ⟨hg12Trim, hg12Dvd1, hg12DvdQ, hg12Univ⟩
+  rcases polyGcd_spec u₀ g12 with ⟨hgcdTrim, hgcdDvd0, hgcdDvd12, hgcdUniv⟩
+  have hgcdDvd1 : DvdTrim gcdPoly u₁ := dvdTrim_trans hgcdDvd12 hg12Dvd1
+  have hgcdDvdQ : DvdTrim gcdPoly Q₁ := dvdTrim_trans hgcdDvd12 hg12DvdQ
+  have hgcdNe : trimPoly gcdPoly ≠ [] := by
+    rw [hgcdTrim]
+    intro h0
+    rcases hgcdDvdQ with ⟨k, hk⟩
+    rw [h0, (pMul_eq_nil_iff [] k).mpr (.inl rfl)] at hk
+    exact hQ₁Ne hk
+  rcases exactDiv_of_dvdTrim u₀ gcdPoly hgcdNe hgcdDvd0 with ⟨hũ₀Trim, _, hu₀Fact⟩
+  rcases exactDiv_of_dvdTrim u₁ gcdPoly hgcdNe hgcdDvd1 with ⟨hũ₁Trim, _, hu₁Fact⟩
+  rcases exactDiv_of_dvdTrim Q₁ gcdPoly hgcdNe hgcdDvdQ with ⟨hQ̃₁Trim, _, hQ₁Fact⟩
+  let ũ₀ := (polyDivMod u₀ gcdPoly).1
+  let ũ₁ := (polyDivMod u₁ gcdPoly).1
+  let Q̃₁ := (polyDivMod Q₁ gcdPoly).1
+  have hQ̃₁Ne : Q̃₁ ≠ [] := by
+    intro h0
+    rw [h0, (pMul_eq_nil_iff gcdPoly []).mpr (.inr rfl)] at hQ₁Fact
+    exact hQ₁Ne hQ₁Fact
+  -- Coprimality: any trimmed `h` dividing `(ũ₀, ũ₁, Q̃₁)` has `h.length ≤ 1`:
+  have hCoprime : ∀ h : List F, IsTrimmed h →
+      DvdTrim h ũ₀ → DvdTrim h ũ₁ → DvdTrim h Q̃₁ → h.length ≤ 1 := by
+    intro h hhTrim hd0 hd1 hdQ
+    if hhNil : h = [] then
+      rw [hhNil]; simp
+    else
+      rcases hd0 with ⟨k0, hk0⟩
+      rcases hd1 with ⟨k1, hk1⟩
+      rcases hdQ with ⟨kQ, hkQ⟩
+      rw [hũ₀Trim] at hk0; rw [hũ₁Trim] at hk1; rw [hQ̃₁Trim] at hkQ
+      have hdvd0 : DvdTrim (pMul gcdPoly h) u₀ :=
+        ⟨k0, by rw [hu₀Fact, hk0, pMul_assoc]⟩
+      have hdvd1 : DvdTrim (pMul gcdPoly h) u₁ :=
+        ⟨k1, by rw [hu₁Fact, hk1, pMul_assoc]⟩
+      have hdvdQ : DvdTrim (pMul gcdPoly h) Q₁ :=
+        ⟨kQ, by rw [hQ₁Fact, hkQ, pMul_assoc]⟩
+      have hdvdGcd : DvdTrim (pMul gcdPoly h) gcdPoly :=
+        hgcdUniv _ hdvd0 (hg12Univ _ hdvd1 hdvdQ)
+      rcases hdvdGcd with ⟨m, hm⟩
+      rw [hgcdTrim, pMul_assoc] at hm
+      have hhmNe : trimPoly (pMul h m) ≠ [] := by
+        rw [trimPoly_idem]
+        intro h0
+        rw [h0, (pMul_eq_nil_iff gcdPoly []).mpr (.inr rfl)] at hm
+        exact hgcdNe (by rwa [hgcdTrim])
+      have hgNeRaw : gcdPoly ≠ [] := by rwa [hgcdTrim] at hgcdNe
+      have hlen1 := (pMul_length_of_trimmed_ne_nil hgcdTrim (trimPoly_idem _) hgNeRaw
+        (by simpa [trimPoly_idem] using hhmNe)).1
+      rw [← hm] at hlen1
+      have hmNe : trimPoly m ≠ [] := by
+        intro hm0
+        rw [(pMul_eq_nil_iff h m).mpr (.inr hm0)] at hhmNe
+        exact hhmNe rfl
+      rw [← pMul_trimPoly_right h m] at hlen1
+      have hlen2 := (pMul_length_of_trimmed_ne_nil hhTrim (trimPoly_idem m) hhNil hmNe).1
+      rw [pMul_trimPoly_right] at hlen2
+      have hmPos : 1 ≤ (trimPoly m).length := by
+        cases hmEq : trimPoly m with
+        | nil => exact False.elim (hmNe hmEq)
+        | cons _ _ => simp
+      omega
+  -- 4. Reduced identity `ũ₀ + (α + β X) ũ₁ + Q̃₁ · P_of p = []` for every `p = (α, β) ∈ badPairs`:
+  have hReduced : ∀ p ∈ badPairs,
+      pAdd (pAdd ũ₀ (pMul [p.1, p.2] ũ₁)) (pMul Q̃₁ (P_of p)) = [] := by
+    intro p hpMem
+    let R := pAdd (pAdd u₀ (pMul [p.1, p.2] u₁)) (pMul Q₁ (P_of p))
+    have hRLen : R.length ≤ A := by
+      have hL1 : (pMul [p.1, p.2] u₁).length ≤ A := by
+        have h := pMul_length_le [p.1, p.2] u₁ 1 (A - 2) (by simp) (by rw [hu₁Len]; omega)
+        omega
+      have hL2 : (pMul Q₁ (P_of p)).length ≤ A := by
+        have h := pMul_length_le Q₁ (P_of p) (A - d - 1) d (by rw [hQ₁Len]; omega) (hBadDeg p hpMem)
+        omega
+      exact pAdd_length_le _ _ A
+        (pAdd_length_le _ _ A (by rw [hu₀Len]) hL1) hL2
+    let S_p := D.filter (fun z =>
+      decide (RoundPoly.evalCoeffs (P_of p) z =
+        CommRingOps.add (f z)
+          (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (g z))))
+    have hSpNd : S_p.Nodup := List.Pairwise.filter _ hD
+    have hSpLen : A ≤ S_p.length := hBadAgree p hpMem
+    have hRZeroOnSp : ∀ z ∈ S_p, RoundPoly.evalCoeffs R z = CommRingOps.zero := by
+      intro z hzSp
+      rcases List.mem_filter.mp hzSp with ⟨hzD, hzAgDec⟩
+      have hzAg : RoundPoly.evalCoeffs (P_of p) z =
+          CommRingOps.add (f z)
+            (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (g z)) :=
+        of_decide_eq_true hzAgDec
+      have hF0 := hInterpF z hzD
+      have hG0 := hInterpG z hzD
+      have hu₀Ev : RoundPoly.evalCoeffs u₀ z =
+          CommRingOps.neg (CommRingOps.mul (f z) (RoundPoly.evalCoeffs Q₁ z)) := by
+        apply LawfulCommRing.add_left_cancel
+          (a := CommRingOps.mul (f z) (RoundPoly.evalCoeffs Q₁ z))
+        rw [LawfulCommRing.add_right_neg, LawfulCommRing.add_comm]
+        exact hF0
+      have hu₁Ev : RoundPoly.evalCoeffs u₁ z =
+          CommRingOps.neg (CommRingOps.mul (g z) (RoundPoly.evalCoeffs Q₁ z)) := by
+        apply LawfulCommRing.add_left_cancel
+          (a := CommRingOps.mul (g z) (RoundPoly.evalCoeffs Q₁ z))
+        rw [LawfulCommRing.add_right_neg, LawfulCommRing.add_comm]
+        exact hG0
+      have hLinEv : RoundPoly.evalCoeffs [p.1, p.2] z =
+          CommRingOps.add p.1 (CommRingOps.mul p.2 z) := by
+        simp [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+              LawfulCommRing.mul_comm]
+      dsimp [R]
+      rw [evalCoeffs_pAdd, evalCoeffs_pAdd, evalCoeffs_pMul, evalCoeffs_pMul,
+          hLinEv, hu₀Ev, hu₁Ev, hzAg]
+      let lineVal := CommRingOps.add p.1 (CommRingOps.mul p.2 z)
+      let qVal := RoundPoly.evalCoeffs Q₁ z
+      change CommRingOps.add
+        (CommRingOps.add (CommRingOps.neg (CommRingOps.mul (f z) qVal))
+          (CommRingOps.mul lineVal (CommRingOps.neg (CommRingOps.mul (g z) qVal))))
+        (CommRingOps.mul qVal (CommRingOps.add (f z) (CommRingOps.mul lineVal (g z)))) =
+        CommRingOps.zero
+      rw [LawfulCommRing.mul_neg, ← LawfulCommRing.mul_assoc lineVal (g z) qVal,
+          ← LawfulCommRing.neg_add, LawfulCommRing.left_distrib,
+          LawfulCommRing.mul_comm qVal (f z), LawfulCommRing.mul_comm qVal _,
+          LawfulCommRing.add_left_neg]
+    have hRNil : R = [] := by
+      if hRNe : R = [] then exact hRNe
+      else
+        rcases exists_nonroot_of_trim_ne_nil (trimPoly_idem _) hRNe hSpNd (by omega) with
+          ⟨z, hzSp, hzNe⟩
+        exact False.elim (hzNe (hRZeroOnSp z hzSp))
+    -- Factor `gcdPoly` out of `R`:
+    have hRFact : R = pMul gcdPoly (pAdd (pAdd ũ₀ (pMul [p.1, p.2] ũ₁)) (pMul Q̃₁ (P_of p))) := by
+      dsimp [R]
+      rw [← pAdd_trimPoly_left u₀, hu₀Fact,
+          ← pMul_trimPoly_right [p.1, p.2] u₁, hu₁Fact,
+          pMul_comm [p.1, p.2] (pMul gcdPoly ũ₁), pMul_assoc, pMul_comm ũ₁ [p.1, p.2],
+          ← pMul_pAdd_right,
+          ← pMul_trimPoly_left Q₁, hQ₁Fact, pMul_assoc,
+          pAdd_trimPoly_left, ← pMul_pAdd_right]
+    rw [hRNil] at hRFact
+    rcases (pMul_eq_nil_iff gcdPoly _).mp hRFact.symm with hg0 | hRed0
+    · exact False.elim (hgcdNe hg0)
+    · rwa [trimPoly_idem] at hRed0
+  -- Helper identity `pMul [α, β] w = pAdd (pScale α w) (pScale β (0 :: w))`:
+  have hLinearMul : ∀ (α β : F) (w : List F),
+      pMul [α, β] w = pAdd (pScale α w) (pScale β (CommRingOps.zero :: w)) := by
+    intro α β w
+    unfold pMul pAdd pScale
+    rw [trimPoly_eq_iff_coeffAt]
+    intro k
+    rw [coeffAt_addCoeffs, coeffAt_trimPoly, coeffAt_trimPoly, coeffAt_map_mul, coeffAt_map_mul]
+    simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul]
+    cases k with
+    | zero => simp [coeffAt, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    | succ k' =>
+      simp [coeffAt_cons_succ, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_nil,
+            LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+  -- 5. Branch constructively on `Q̃₁.length`:
+  have hQ̃₁Pos : 1 ≤ Q̃₁.length := by
+    cases Q̃₁ with | nil => contradiction | cons _ _ => simp
+  if hQ̃₁One : Q̃₁.length = 1 then
+    -- Case A: `Q̃₁ = [c]` (`c ≠ 0`), so `P_of p = F_poly + (α + β X) G_poly` identically!
+    have hQ̃₁Form : ∃ c : F, Q̃₁ = [c] ∧ c ≠ CommRingOps.zero := by
+      rcases Q̃₁ with _ | ⟨c, _ | _⟩ <;> simp at hQ̃₁One
+      refine ⟨c, rfl, ?_⟩
+      intro hc0; subst hc0
+      simp [IsTrimmed, trimPoly] at hQ̃₁Trim
+    rcases hQ̃₁Form with ⟨c, hQ̃₁Eq, hcNe⟩
+    let negInvC := CommRingOps.neg (LawfulField.inv c)
+    let F_poly := pScale negInvC ũ₀
+    let G_poly := pScale negInvC ũ₁
+    have hFT : IsTrimmed F_poly := trimPoly_idem _
+    have hGT : IsTrimmed G_poly := trimPoly_idem _
+    have hPEq : ∀ p ∈ badPairs, trimPoly (P_of p) = pAdd F_poly (pMul [p.1, p.2] G_poly) := by
+      intro p hpMem
+      have hRed := hReduced p hpMem
+      -- Multiply `ũ₀ + [α,β] ũ₁ + [c] P = []` by `inv c`:
+      have hScaleC : ∀ w, pMul [c] w = pScale c w := by
+        intro w; unfold pMul pScale; rw [trimPoly_eq_iff_coeffAt]; intro k
+        simp [rawMul, coeffAt_addCoeffs, coeffAt_map_mul]
+        cases k <;> simp [coeffAt, LawfulCommRing.add_zero]
+      rw [hQ̃₁Eq, hScaleC] at hRed
+      apply eq_of_isTrimmed_coeffAt _ _ (trimPoly_idem _) (trimPoly_idem _)
+      intro k
+      have hc0 := (trimPoly_eq_nil_iff _).mp (by rw [trimPoly_idem]; exact hRed) k
+      rw [coeffAt_pAdd, coeffAt_pAdd, coeffAt_pScale] at hc0
+      -- `coeffAt ũ₀ k + coeffAt ([α,β]*ũ₁) k + c * coeffAt P k = 0`
+      have hmul := congrArg (CommRingOps.mul (LawfulField.inv c)) hc0
+      rw [LawfulCommRing.mul_zero, LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
+          ← LawfulCommRing.mul_assoc (LawfulField.inv c) c _,
+          LawfulField.inv_mul_cancel hcNe, LawfulCommRing.one_mul] at hmul
+      have hPval : coeffAt (P_of p) k =
+          CommRingOps.add
+            (CommRingOps.mul negInvC (coeffAt ũ₀ k))
+            (CommRingOps.mul negInvC (coeffAt (pMul [p.1, p.2] ũ₁) k)) := by
+        dsimp [negInvC]
+        rw [LawfulCommRing.neg_mul, LawfulCommRing.neg_mul, ← LawfulCommRing.neg_add]
+        apply LawfulCommRing.add_left_cancel
+          (a := CommRingOps.add (CommRingOps.mul (LawfulField.inv c) (coeffAt ũ₀ k))
+                  (CommRingOps.mul (LawfulField.inv c) (coeffAt (pMul [p.1, p.2] ũ₁) k)))
+        rw [LawfulCommRing.add_right_neg, hmul]
+      rw [coeffAt_trimPoly, hPval, coeffAt_pAdd,
+          pMul_pScale_right negInvC [p.1, p.2] ũ₁, coeffAt_pScale]
+      dsimp [F_poly]
+      rw [coeffAt_pScale]
+    if hDegFG : F_poly.length ≤ d + 1 ∧ G_poly.length ≤ d then
+      -- Subcase A1: `(F_poly, G_poly)` has admissible degree `(≤ d, ≤ d - 1)`, so every `p ∈ badPairs`
+      -- has at least `2` accidental agreements with `(F_poly, G_poly)` on `D`!
+      have hSubBad : ∀ p ∈ badPairs,
+          p ∈ (prodPool S).filter (fun q =>
+            decide (2 ≤ (D.filter (isAccidentalAgreement F_poly G_poly f g q.1 q.2)).length)) := by
+        intro p hpMem
+        rw [List.mem_filter]
+        refine ⟨hBadSub p hpMem, decide_eq_true ?_⟩
+        have hPolyEq : ∀ x : F, RoundPoly.evalCoeffs (P_of p) x =
+            CommRingOps.add (RoundPoly.evalCoeffs F_poly x)
+              (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 x))
+                (RoundPoly.evalCoeffs G_poly x)) := by
+          intro x
+          rw [← evalCoeffs_trimPoly x (P_of p), hPEq p hpMem, evalCoeffs_pAdd, evalCoeffs_pMul]
+          simp [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+                LawfulCommRing.mul_comm]
+        let S_p := D.filter (fun z =>
+          decide (RoundPoly.evalCoeffs (P_of p) z =
+            CommRingOps.add (f z)
+              (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (g z))))
+        let dis := S_p.filter (fun z =>
+          !(decide (RoundPoly.evalCoeffs F_poly z = f z) &&
+            decide (RoundPoly.evalCoeffs G_poly z = g z)))
+        have hDisGe2 : 2 ≤ dis.length := by
+          if hle1 : dis.length ≤ 1 then
+            exact False.elim (hBadExc p hpMem ⟨F_poly, G_poly, hDegFG.1, hDegFG.2, hPolyEq, hle1⟩)
+          else
+            omega
+        have hDisNd : dis.Nodup := List.Pairwise.filter _ (List.Pairwise.filter _ hD)
+        have hDisSub : ∀ z ∈ dis, z ∈ D.filter (isAccidentalAgreement F_poly G_poly f g p.1 p.2) := by
+          intro z hz
+          rcases List.mem_filter.mp hz with ⟨hzSp, hzNotBoth⟩
+          rcases List.mem_filter.mp hzSp with ⟨hzD, hzAgDec⟩
+          have hzAg := of_decide_eq_true hzAgDec
+          rw [hPolyEq z] at hzAg
+          rw [List.mem_filter]
+          refine ⟨hzD, ?_⟩
+          unfold isAccidentalAgreement
+          simp [hzAg, hzNotBoth]
+        exact Nat.le_trans hDisGe2 (nodup_length_le_of_subset hDisNd hDisSub)
+      have hle := Nat.le_trans
+        (nodup_length_le_of_subset hBadNd hSubBad)
+        (committed_polynomial_pair_bad_lines_le_choose2 F_poly G_poly f g D S hD hS)
+      exact Nat.le_trans hle (Nat.le_max_right _ _)
+    else
+      -- Subcase A2: `max (F_poly.length - 1) G_poly.length ≥ d + 1` gives a non-trivial affine duet!
+      let mTop := Nat.max (F_poly.length - 1) G_poly.length
+      have hmTopGe : d + 1 ≤ mTop := by dsimp [mTop]; omega
+      have hmTopPos : 1 ≤ mTop := by omega
+      let Δ₀ := coeffAt F_poly mTop
+      let Δ₁ := coeffAt G_poly mTop
+      let Δ₂ := coeffAt G_poly (mTop - 1)
+      have hΔNz : Δ₀ ≠ CommRingOps.zero ∨ Δ₁ ≠ CommRingOps.zero ∨ Δ₂ ≠ CommRingOps.zero := by
+        if hFG : G_poly.length ≤ F_poly.length - 1 then
+          have hmEq : mTop = F_poly.length - 1 := Nat.max_eq_left hFG
+          have hFNe : F_poly ≠ [] := by
+            intro h0; rw [h0] at hmEq; simp at hmEq; omega
+          have hLead := leadCoeff_ne_zero_of_trimPoly_ne_nil F_poly (by rwa [hFT])
+          rw [hFT, ← hmEq] at hLead
+          exact .inl hLead
+        else
+          have hmEq : mTop = G_poly.length := Nat.max_eq_right (by omega)
+          have hGNe : G_poly ≠ [] := by
+            intro h0; rw [h0] at hmEq; omega
+          have hLead := leadCoeff_ne_zero_of_trimPoly_ne_nil G_poly (by rwa [hGT])
+          rw [hGT, ← hmEq] at hLead
+          exact .inr (.inr hLead)
+      have hSubDuet : ∀ p ∈ badPairs,
+          p ∈ (prodPool S).filter (fun q =>
+            decide (evalAffineDuet Δ₀ Δ₁ Δ₂ q.1 q.2 = CommRingOps.zero)) := by
+        intro p hpMem
+        rw [List.mem_filter]
+        refine ⟨hBadSub p hpMem, decide_eq_true ?_⟩
+        have h0 : coeffAt (trimPoly (P_of p)) mTop = CommRingOps.zero := by
+          rw [coeffAt_trimPoly]
+          exact coeffAt_eq_zero_of_ge (P_of p) mTop (Nat.le_trans (hBadDeg p hpMem) hmTopGe)
+        rw [hPEq p hpMem, hLinearMul, coeffAt_pAdd, coeffAt_pAdd,
+            coeffAt_pScale, coeffAt_pScale] at h0
+        have hShift : coeffAt (CommRingOps.zero :: G_poly) mTop = coeffAt G_poly (mTop - 1) := by
+          cases hm : mTop with
+          | zero => omega
+          | succ m' => simp [coeffAt_cons_succ]
+        rw [hShift] at h0
+        simpa [evalAffineDuet, Δ₀, Δ₁, Δ₂] using h0
+      have hle := Nat.le_trans
+        (nodup_length_le_of_subset hBadNd hSubDuet)
+        (affine_duet_roots_le_card Δ₀ Δ₁ Δ₂ S hS hΔNz)
+      exact Nat.le_trans hle (Nat.le_max_left _ _)
+  else
+    -- Case B: `Q̃₁.length ≥ 2` (`deg Q̃₁ ≥ 1`). Reduce `(ũ₀, ũ₁, X ũ₁)` modulo `Q̃₁`!
+    have hQ̃₁Ge2 : 2 ≤ Q̃₁.length := by omega
+    have hQ̃₁TrimNe : trimPoly Q̃₁ ≠ [] := by rwa [hQ̃₁Trim]
+    rcases polyDivMod_spec ũ₀ Q̃₁ hQ̃₁TrimNe with ⟨_, hr₀T, hDiv0, hr₀Lt⟩
+    rcases polyDivMod_spec ũ₁ Q̃₁ hQ̃₁TrimNe with ⟨_, hr₁T, hDiv1, hr₁Lt⟩
+    rcases polyDivMod_spec (CommRingOps.zero :: ũ₁) Q̃₁ hQ̃₁TrimNe with ⟨_, hr₂T, hDiv2, hr₂Lt⟩
+    rw [hũ₀Trim, hQ̃₁Trim] at hDiv0 hr₀Lt
+    rw [hũ₁Trim, hQ̃₁Trim] at hDiv1 hr₁Lt
+    rw [hQ̃₁Trim] at hr₂Lt
+    let q₀ := (polyDivMod ũ₀ Q̃₁).1
+    let r₀ := (polyDivMod ũ₀ Q̃₁).2
+    let q₁ := (polyDivMod ũ₁ Q̃₁).1
+    let r₁ := (polyDivMod ũ₁ Q̃₁).2
+    let q₂ := (polyDivMod (CommRingOps.zero :: ũ₁) Q̃₁).1
+    let r₂ := (polyDivMod (CommRingOps.zero :: ũ₁) Q̃₁).2
+    have hNotBothNil : ¬ (r₀ = [] ∧ r₁ = []) := by
+      rintro ⟨hr0, hr1⟩
+      have hd0 : DvdTrim Q̃₁ ũ₀ := by
+        rw [hr0, pAdd_nil_right, pMul_comm] at hDiv0
+        exact ⟨q₀, by rw [hũ₀Trim, hDiv0]; simp [pMul, trimPoly_idem]⟩
+      have hd1 : DvdTrim Q̃₁ ũ₁ := by
+        rw [hr1, pAdd_nil_right, pMul_comm] at hDiv1
+        exact ⟨q₁, by rw [hũ₁Trim, hDiv1]; simp [pMul, trimPoly_idem]⟩
+      have hle1 := hCoprime Q̃₁ hQ̃₁Trim hd0 hd1 (dvdTrim_refl Q̃₁)
+      omega
+    let jIdx := if r₀ = [] then r₁.length - 1 else r₀.length - 1
+    let Δ₀ := coeffAt r₀ jIdx
+    let Δ₁ := coeffAt r₁ jIdx
+    let Δ₂ := coeffAt r₂ jIdx
+    have hΔNz : Δ₀ ≠ CommRingOps.zero ∨ Δ₁ ≠ CommRingOps.zero ∨ Δ₂ ≠ CommRingOps.zero := by
+      if hr0 : r₀ = [] then
+        have hr1Ne : r₁ ≠ [] := fun hr1 => hNotBothNil ⟨hr0, hr1⟩
+        have hLead := leadCoeff_ne_zero_of_trimPoly_ne_nil r₁ (by rwa [hr₁T])
+        rw [hr₁T] at hLead
+        exact .inr (.inl (by simpa [Δ₁, jIdx, hr0] using hLead))
+      else
+        have hLead := leadCoeff_ne_zero_of_trimPoly_ne_nil r₀ (by rwa [hr₀T])
+        rw [hr₀T] at hLead
+        exact .inl (by simpa [Δ₀, jIdx, hr0] using hLead)
+    have hSubDuet : ∀ p ∈ badPairs,
+        p ∈ (prodPool S).filter (fun q =>
+          decide (evalAffineDuet Δ₀ Δ₁ Δ₂ q.1 q.2 = CommRingOps.zero)) := by
+      intro p hpMem
+      rw [List.mem_filter]
+      refine ⟨hBadSub p hpMem, decide_eq_true ?_⟩
+      have hRed := hReduced p hpMem
+      rw [hLinearMul] at hRed
+      let rComb := pAdd (pAdd r₀ (pScale p.1 r₁)) (pScale p.2 r₂)
+      let qComb := pAdd (pAdd (pAdd q₀ (pScale p.1 q₁)) (pScale p.2 q₂)) (P_of p)
+      have hCombLen : rComb.length ≤ Q̃₁.length - 1 := by
+        have h1 : (pScale p.1 r₁).length ≤ Q̃₁.length - 1 :=
+          Nat.le_trans (trimPoly_length_le _) (by simp; omega)
+        have h2 : (pScale p.2 r₂).length ≤ Q̃₁.length - 1 :=
+          Nat.le_trans (trimPoly_length_le _) (by simp; omega)
+        exact pAdd_length_le _ _ (Q̃₁.length - 1)
+          (pAdd_length_le _ _ (Q̃₁.length - 1) (by omega) h1) h2
+      have hScaleAdd : ∀ (c : F) (x y : List F), pScale c (pAdd x y) = pAdd (pScale c x) (pScale c y) := by
+        intro c x y
+        unfold pScale pAdd; rw [trimPoly_eq_iff_coeffAt]; intro k
+        simp [coeffAt_map_mul, coeffAt_trimPoly, coeffAt_addCoeffs, LawfulCommRing.left_distrib]
+      have hScaleTrim : ∀ (c : F) (x : List F), pScale c (trimPoly x) = pScale c x := by
+        intro c x
+        unfold pScale; rw [trimPoly_eq_iff_coeffAt]; intro k
+        simp [coeffAt_map_mul, coeffAt_trimPoly]
+      have hScaleMulLeft : ∀ (c : F) (x y : List F), pScale c (pMul x y) = pMul (pScale c x) y := by
+        intro c x y
+        rw [pMul_comm, pMul_pScale_right, pMul_comm]
+      -- Rewrite `hRed` into `pAdd (pMul Q̃₁ qComb) rComb = []`:
+      have hSum0 : pAdd (pMul Q̃₁ qComb) rComb = [] := by
+        have hLHS : pAdd (pAdd ũ₀ (pAdd (pScale p.1 ũ₁) (pScale p.2 (CommRingOps.zero :: ũ₁))))
+            (pMul Q̃₁ (P_of p)) = pAdd (pMul Q̃₁ qComb) rComb := by
+          rw [← hScaleTrim p.2 (CommRingOps.zero :: ũ₁), hDiv2,
+              hDiv0, hDiv1, hScaleAdd, hScaleAdd,
+              hScaleMulLeft, hScaleMulLeft]
+          unfold pAdd
+          rw [trimPoly_eq_iff_coeffAt]
+          intro k
+          simp only [coeffAt_addCoeffs, coeffAt_trimPoly, qComb, rComb, pAdd]
+          -- By `pMul_pAdd_right` and commutativity/associativity of `CommRingOps.add`:
+          have hqExpand : coeffAt (pMul Q̃₁ (trimPoly (rawAddCoeffs
+              (trimPoly (rawAddCoeffs
+                (trimPoly (rawAddCoeffs q₀ (pScale p.1 q₁))) (pScale p.2 q₂)))
+              (P_of p)))) k =
+              CommRingOps.add
+                (CommRingOps.add
+                  (CommRingOps.add (coeffAt (pMul q₀ Q̃₁) k) (coeffAt (pMul (pScale p.1 q₁) Q̃₁) k))
+                  (coeffAt (pMul (pScale p.2 q₂) Q̃₁) k))
+                (coeffAt (pMul Q̃₁ (P_of p)) k) := by
+            change coeffAt (pMul Q̃₁ qComb) k = _
+            dsimp [qComb]
+            rw [pMul_pAdd_right, pMul_pAdd_right, pMul_pAdd_right,
+                coeffAt_pAdd, coeffAt_pAdd, coeffAt_pAdd,
+                pMul_comm Q̃₁ q₀, pMul_comm Q̃₁ (pScale p.1 q₁), pMul_comm Q̃₁ (pScale p.2 q₂)]
+          rw [hqExpand]
+          simp only [coeffAt_trimPoly, coeffAt_addCoeffs]
+          -- Rearrange `(A0 + R0) + ((A1 + R1) + (A2 + R2)) + A3 = (((A0 + A1) + A2) + A3) + ((R0 + R1) + R2)`
+          let A0 := coeffAt (pMul q₀ Q̃₁) k
+          let R0 := coeffAt r₀ k
+          let A1 := coeffAt (pMul (pScale p.1 q₁) Q̃₁) k
+          let R1 := coeffAt (pScale p.1 r₁) k
+          let A2 := coeffAt (pMul (pScale p.2 q₂) Q̃₁) k
+          let R2 := coeffAt (pScale p.2 r₂) k
+          let A3 := coeffAt (pMul Q̃₁ (P_of p)) k
+          change CommRingOps.add (CommRingOps.add (CommRingOps.add A0 R0)
+              (CommRingOps.add (CommRingOps.add A1 R1) (CommRingOps.add A2 R2))) A3 =
+            CommRingOps.add (CommRingOps.add (CommRingOps.add (CommRingOps.add A0 A1) A2) A3)
+              (CommRingOps.add (CommRingOps.add R0 R1) R2)
+          have mid : CommRingOps.add (CommRingOps.add A1 R1) (CommRingOps.add A2 R2) =
+              CommRingOps.add (CommRingOps.add A1 A2) (CommRingOps.add R1 R2) := by
+            rw [LawfulCommRing.add_assoc A1 R1 _,
+                ← LawfulCommRing.add_assoc R1 A2 R2,
+                LawfulCommRing.add_comm R1 A2,
+                LawfulCommRing.add_assoc A2 R1 R2,
+                ← LawfulCommRing.add_assoc A1 A2 _]
+          rw [mid]
+          have left2 : CommRingOps.add (CommRingOps.add A0 R0)
+              (CommRingOps.add (CommRingOps.add A1 A2) (CommRingOps.add R1 R2)) =
+              CommRingOps.add (CommRingOps.add (CommRingOps.add A0 A1) A2)
+                (CommRingOps.add (CommRingOps.add R0 R1) R2) := by
+            rw [LawfulCommRing.add_assoc A0 R0 _,
+                ← LawfulCommRing.add_assoc R0 (CommRingOps.add A1 A2) _,
+                LawfulCommRing.add_comm R0 (CommRingOps.add A1 A2),
+                LawfulCommRing.add_assoc (CommRingOps.add A1 A2) R0 _,
+                ← LawfulCommRing.add_assoc A0 (CommRingOps.add A1 A2) _,
+                ← LawfulCommRing.add_assoc A0 A1 A2,
+                ← LawfulCommRing.add_assoc R0 R1 R2]
+          rw [left2, LawfulCommRing.add_assoc _ _ A3,
+              LawfulCommRing.add_comm (CommRingOps.add (CommRingOps.add R0 R1) R2) A3,
+              ← LawfulCommRing.add_assoc]
+        rw [← hLHS, hRed]
+      -- Since `rComb = -Q̃₁ * qComb` and `rComb.length < Q̃₁.length`, `rComb = []`!
+      have hrCombEq : rComb = pMul Q̃₁ (pNeg qComb) := by
+        have hsub := pSub_pAdd_cancel_left (pMul Q̃₁ qComb) rComb
+        rw [hSum0, trimPoly_idem] at hsub
+        rw [← hsub, pSub_eq_pAdd_pNeg, pAdd_nil_left, trimPoly_idem, pMul_pNeg_right]
+      have hrCombNil : rComb = [] := by
+        if hrNe : rComb = [] then exact hrNe
+        else
+          have hqNe : trimPoly (pNeg qComb) ≠ [] := by
+            intro h0
+            rw [← pMul_trimPoly_right Q̃₁, h0, (pMul_eq_nil_iff Q̃₁ []).mpr (.inr rfl)] at hrCombEq
+            exact hrNe hrCombEq
+          rw [← pMul_trimPoly_right Q̃₁] at hrCombEq
+          have hlen := (pMul_length_of_trimmed_ne_nil hQ̃₁Trim (trimPoly_idem _) hQ̃₁Ne hqNe).1
+          rw [← hrCombEq] at hlen
+          have hpos : 1 ≤ (trimPoly (pNeg qComb)).length := by
+            cases h : trimPoly (pNeg qComb) with
+            | nil => exact False.elim (hqNe h)
+            | cons _ _ => simp
+          omega
+      have hc0 : coeffAt rComb jIdx = CommRingOps.zero := by rw [hrCombNil, coeffAt_nil]
+      dsimp [rComb] at hc0
+      rw [coeffAt_pAdd, coeffAt_pAdd, coeffAt_pScale, coeffAt_pScale] at hc0
+      simpa [evalAffineDuet, Δ₀, Δ₁, Δ₂] using hc0
+    have hle := Nat.le_trans
+      (nodup_length_le_of_subset hBadNd hSubDuet)
+      (affine_duet_roots_le_card Δ₀ Δ₁ Δ₂ S hS hΔNz)
+    exact Nat.le_trans hle (Nat.le_max_left _ _)
+
+/-- **Non-Vacuous Inhabitedness Witness (`inhabited_affine_proximity_gaps`)**:
+    Instantiates `welch_berlekamp_affine_proximity_gap` over `Goldilocks` with `d = 1, A = 5`,
+    `D = [0, 1, 2, 3, 4, 5]` (`n = 6`, `2 * 6 + 1 + 1 = 14 < 15 = 3 * 5`), `S = [0, 1, 2, 3, 4, 5, 6]`,
+    and a **strictly non-empty** exceptional list `badPairs = [(0, 1)]` (`P = 0`) where two accidental
+    agreements at `z = 4` (`f(4) = -4, g(4) = 1`) and `z = 5` (`f(5) = -5, g(5) = 1`) genuinely
+    defeat every `s = 1` witness (`¬ HasAffineWitnessS1`) while satisfying the proximity-gap bound! -/
+theorem inhabited_affine_proximity_gaps :
+    let D : List Goldilocks := [0, 1, 2, 3, 4, 5]
+    let S : List Goldilocks := [0, 1, 2, 3, 4, 5, 6]
+    let f : Goldilocks → Goldilocks := fun z =>
+      if z = 4 then CommRingOps.neg 4
+      else if z = 5 then CommRingOps.neg 5
+      else 0
+    let g : Goldilocks → Goldilocks := fun z =>
+      if z = 4 ∨ z = 5 then 1 else 0
+    let badPairs : List (Goldilocks × Goldilocks) := [(0, 1)]
+    0 < badPairs.length ∧
+    (∀ p ∈ badPairs, ¬ HasAffineWitnessS1 1 f g D p.1 p.2 []) ∧
+    badPairs.length ≤ Nat.max S.length (D.length * (D.length - 1) / 2) := by
+  dsimp only
+  let D : List Goldilocks := [0, 1, 2, 3, 4, 5]
+  let S : List Goldilocks := [0, 1, 2, 3, 4, 5, 6]
+  let f : Goldilocks → Goldilocks := fun z =>
+    if z = 4 then CommRingOps.neg 4
+    else if z = 5 then CommRingOps.neg 5
+    else 0
+  let g : Goldilocks → Goldilocks := fun z =>
+    if z = 4 ∨ z = 5 then 1 else 0
+  have hExc01 : ¬ HasAffineWitnessS1 1 f g D 0 1 [] := by
+    rintro ⟨F_poly, G_poly, _, hGLen, _, hLoss⟩
+    -- `G_poly` has `length ≤ 1`, so `evalCoeffs G_poly z` is a constant `c` independent of `z`:
+    have hGConst : ∀ x y : Goldilocks,
+        RoundPoly.evalCoeffs G_poly x = RoundPoly.evalCoeffs G_poly y := by
+      rcases G_poly with _ | ⟨c, _ | _⟩
+      · intro _ _; rfl
+      · intro _ _; simp [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero]
+      · simp at hGLen
+    have hSpEq : D.filter (fun z =>
+        decide (RoundPoly.evalCoeffs ([] : List Goldilocks) z =
+          CommRingOps.add (f z)
+            (CommRingOps.mul (CommRingOps.add (0 : Goldilocks) (CommRingOps.mul 1 z)) (g z)))) = D := by
+      decide
+    rw [hSpEq] at hLoss
+    -- Either `G_poly(0) = 0` (so `z = 4` and `z = 5` both fail, `loss ≥ 2`) or `G_poly(0) ≠ 0`
+    -- (so `z = 0` and `z = 1` both fail, `loss ≥ 2`):
+    if hc0 : RoundPoly.evalCoeffs G_poly 0 = 0 then
+      have h4 : RoundPoly.evalCoeffs G_poly 4 = 0 := (hGConst 4 0).trans hc0
+      have h5 : RoundPoly.evalCoeffs G_poly 5 = 0 := (hGConst 5 0).trans hc0
+      have hg4 : g 4 = 1 := by decide
+      have hg5 : g 5 = 1 := by decide
+      have h10 : (0 : Goldilocks) ≠ 1 := by decide
+      have hSub : ∀ z ∈ ([4, 5] : List Goldilocks),
+          z ∈ D.filter (fun w =>
+            !(decide (RoundPoly.evalCoeffs F_poly w = f w) &&
+              decide (RoundPoly.evalCoeffs G_poly w = g w))) := by
+        intro z hz
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at hz
+        rcases hz with rfl | rfl
+        · rw [List.mem_filter]; refine ⟨by decide, ?_⟩; simp [h4, hg4, h10]
+        · rw [List.mem_filter]; refine ⟨by decide, ?_⟩; simp [h5, hg5, h10]
+      have hge2 := nodup_length_le_of_subset (L := ([4, 5] : List Goldilocks)) (by decide) hSub
+      simp at hge2; omega
+    else
+      have h1 : RoundPoly.evalCoeffs G_poly 1 = RoundPoly.evalCoeffs G_poly 0 := hGConst 1 0
+      have hg0 : g 0 = 0 := by decide
+      have hg1 : g 1 = 0 := by decide
+      have hSub : ∀ z ∈ ([0, 1] : List Goldilocks),
+          z ∈ D.filter (fun w =>
+            !(decide (RoundPoly.evalCoeffs F_poly w = f w) &&
+              decide (RoundPoly.evalCoeffs G_poly w = g w))) := by
+        intro z hz
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at hz
+        rcases hz with rfl | rfl
+        · rw [List.mem_filter]; refine ⟨by decide, ?_⟩; simp [hg0, hc0]
+        · rw [List.mem_filter]; refine ⟨by decide, ?_⟩; simp [hg1, h1, hc0]
+      have hge2 := nodup_length_le_of_subset (L := ([0, 1] : List Goldilocks)) (by decide) hSub
+      simp at hge2; omega
+  have hExcAll : ∀ p ∈ ([(0, 1)] : List (Goldilocks × Goldilocks)),
+      ¬ HasAffineWitnessS1 1 f g D p.1 p.2 [] := by
+    intro p hp
+    simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
+    subst hp
+    exact hExc01
+  refine ⟨by decide, hExcAll, ?_⟩
+  exact welch_berlekamp_affine_proximity_gap f g D S 1 5 [(0, 1)] (fun _ => [])
+    (by decide) (by decide) (by decide) (by decide) (by decide)
+    (by intro p hp; simp at hp; subst hp; decide)
+    (by intro _ _; simp)
+    (by intro p hp; simp at hp; subst hp; decide)
+    hExcAll
+
+
+/-! ## §5. Finite `Theorem 4.8 + Theorem 5.1` Witness Verifier for `Hem` WHIR (`nv = 20` & `nv = 24`) -/
+
+/-- Explicit finite witness for `[CWYZ26]` Theorem 4.8 (finite MCA bound) + Theorem 5.1 (`Eq. 5.7`
+    equal-degree affine folding with linear evaluation claims across `sFolds` binary folds). -/
+structure WhirAffineWitness where
+  /-- Half-domain evaluation block length `n_f = |D_i| / 2` at fold step 0 of the WHIR stage. -/
+  n : Nat
+  /-- Folded univariate degree bound `d_f = 2^(ℓ - 1) + 1` (carrying the `+2` overflow monomials). -/
+  d : Nat
+  /-- Number of binary affine folds `s_i` executed in this WHIR stage. -/
+  sFolds : Nat
+  /-- Agreement threshold `A` (`|S_{θ,α,β}(P)| ≥ A`). -/
+  A : Nat
+  /-- Intermediate persistent-agreement threshold `B` (`n * (d + 1) < B^2`, `B < A`). -/
+  B : Nat
+  /-- Multiplicity parameter `m ≥ 3` in `[CWYZ26]` Lemma 4.2 / Theorem 4.8. -/
+  m : Nat
+  /-- Total `(Y, Z)`-degree bound `D ≥ 1` of the explainer polynomial `Q(X, Y, Z)`. -/
+  D : Nat
+  /-- Stage query count `q_i`. -/
+  queries : Nat
+  /-- Pure query soundness target bits (`128` classical, `256` QROM Grover pre-square-root). -/
+  queryTargetBits : Nat
+  deriving Repr, DecidableEq
+
+/-- Primitive-recursive accumulator for the unknown count `∑_{j=0}^M (m A - D - d j) (D - j + 1)`
+    in `[CWYZ26]` Equation `(4.5)` (`0` `WellFounded.fix`). -/
+@[expose] def interpUnknownsAux (mA_sub_D d D : Nat) : Nat → Nat
+  | 0 => mA_sub_D * (D + 1)
+  | j + 1 => interpUnknownsAux mA_sub_D d D j + (mA_sub_D - d * (j + 1)) * (D - (j + 1) + 1)
+
+/-- Primitive-recursive accumulator for the per-point equation count
+    `∑_{s=0}^K (m - s) (D - s + 1)` in `[CWYZ26]` Equation `(4.2)` / `(4.5)`. -/
+@[expose] def interpEquationsAux (m D : Nat) : Nat → Nat
+  | 0 => m * (D + 1)
+  | s + 1 => interpEquationsAux m D s + (m - (s + 1)) * (D - (s + 1) + 1)
+
+/-- Exact ceiling `⌈a / b⌉` for `b > 0`. -/
+@[expose] def natCeilDiv (a b : Nat) : Nat :=
+  (a + b - 1) / b
+
+/-- Conservative `1/q`-scaled numerator `s_i * (ℓ + 2 ℓ₀ + 1)` for `[CWYZ26]` Theorem 4.8 + Theorem 5.1
+    (`Eq. 5.7`, equal-degree affine folding **with linear claims** across `s_i` binary folds), valid
+    whenever `checkWhirAffineWitness w q = true` (`nonpersCeil ≤ q` and `n(n-1)/2 ≤ q`). -/
+@[expose] def whirAffineStageSimpleNum (w : WhirAffineWitness) : Nat :=
+  let ell := (w.n * (w.B - w.d - 1)) / (w.B * w.B - w.n * (w.d + 1))
+  let ell0 := (w.n * (w.A - 1 - w.d)) / ((w.A - 1) * (w.A - 1) - w.n * w.d)
+  w.sFolds * (ell + 2 * ell0 + 1)
+
+/-- Exact `q^2`-scaled numerator from `[CWYZ26]` Theorem 4.8 (`Eq. 4.13`) + Theorem 5.1 (`Eq. 5.7`)
+    across `w.sFolds` folds over a field of cardinality `q`. -/
+def whirAffineStageExactNumQ2 (w : WhirAffineWitness) (q : Nat) : Nat :=
+  let M := Nat.min w.D ((w.m * w.A - w.D - 1) / w.d)
+  let ell := (w.n * (w.B - w.d - 1)) / (w.B * w.B - w.n * (w.d + 1))
+  let ell0 := (w.n * (w.A - 1 - w.d)) / ((w.A - 1) * (w.A - 1) - w.n * w.d)
+  let maxQChoose := Nat.max q (w.n * (w.n - 1) / 2)
+  let nonpersCeil := w.D * w.D +
+    natCeilDiv (4 * w.d * w.d * M * M * w.D * w.D * w.D * w.n * w.n)
+               ((w.A - w.B) * (w.A - w.B))
+  w.sFolds * (ell * maxQChoose + 2 * ell0 * q + nonpersCeil)
+
+/-- Decidable verifier checking **every** side condition of `[CWYZ26]` Theorem 4.8 + Theorem 5.1
+    plus `s_i`-loss proximity query soundness `(A + s_i)^q_i * 2^targetBits < n^q_i`:
+    1. `sFolds ≥ 1`, `n ≥ 2`, `d ≥ 1`, `d + 2 ≤ B < A ≤ n`, `A + sFolds ≤ n`, `m ≥ 3`, `D ≥ 1`,
+    2. `D + 1 + d ≤ m * A` and `(m * A - D - 1) / d ≤ D` (so `M = (m * A - D - 1) / d ≥ 1` and
+       every term `m * A - D - d * j ≥ 1`, `D - j + 1 ≥ 1` has zero unsigned `Nat` underflow!),
+    3. Exact Equation `(4.5)` interpolation dimension inequality `unknowns > n * equations`,
+    4. Johnson denominator positivity `B^2 > n * (d + 1)` and `(A - 1)^2 > n * d`,
+    5. Field-size domination `n * (n - 1) / 2 ≤ q` and `nonpersCeil ≤ q`,
+    6. Pure `s_i`-loss query soundness `(A + sFolds)^queries * 2^queryTargetBits < n^queries`. -/
+@[expose] def checkWhirAffineWitness (w : WhirAffineWitness) (q : Nat) : Bool :=
+  let mA := w.m * w.A
+  let M := (mA - w.D - 1) / w.d
+  let K := Nat.min (w.m - 1) M
+  let unknowns := interpUnknownsAux (mA - w.D) w.d w.D M
+  let eqsPerPoint := interpEquationsAux w.m w.D K
+  let nonpersCeil := w.D * w.D +
+    natCeilDiv (4 * w.d * w.d * M * M * w.D * w.D * w.D * w.n * w.n)
+               ((w.A - w.B) * (w.A - w.B))
+  decide (
+    1 ≤ w.sFolds ∧
+    2 ≤ w.n ∧
+    1 ≤ w.d ∧
+    w.d + 2 ≤ w.B ∧
+    w.B < w.A ∧
+    w.A + w.sFolds ≤ w.n ∧
+    3 ≤ w.m ∧
+    1 ≤ w.D ∧
+    w.D + 1 + w.d ≤ mA ∧
+    1 ≤ M ∧
+    M ≤ w.D ∧
+    w.n * eqsPerPoint < unknowns ∧
+    w.n * (w.d + 1) < w.B * w.B ∧
+    w.n * w.d < (w.A - 1) * (w.A - 1) ∧
+    w.n * (w.n - 1) / 2 ≤ q ∧
+    nonpersCeil ≤ q ∧
+    (w.A + w.sFolds) ^ w.queries * 2 ^ w.queryTargetBits < w.n ^ w.queries
+  )
+
+/-- **Exact-to-Simple Bound Reduction (`whirAffineStageExactNumQ2_le_simple_mul_q`)**:
+    Whenever `checkWhirAffineWitness w q = true`, the exact `q^2`-scaled Theorem 4.8 + Theorem 5.1
+    numerator is bounded above by `whirAffineStageSimpleNum w * q`, certifying that
+    `whirAffineStageSimpleNum w / q` is a sound upper bound on `whirAffineStageExactNumQ2 w q / q^2`! -/
+theorem whirAffineStageExactNumQ2_le_simple_mul_q (w : WhirAffineWitness) (q : Nat)
+    (hok : checkWhirAffineWitness w q = true) :
+    whirAffineStageExactNumQ2 w q ≤ whirAffineStageSimpleNum w * q := by
+  unfold checkWhirAffineWitness at hok
+  have hProps := of_decide_eq_true hok
+  rcases hProps with ⟨_, _, _, _, _, _, _, _, _, _, hMD, _, _, _, hChooseQ, hNonpersQ, _⟩
+  unfold whirAffineStageExactNumQ2 whirAffineStageSimpleNum
+  dsimp only
+  have hMinEq : Nat.min w.D ((w.m * w.A - w.D - 1) / w.d) = (w.m * w.A - w.D - 1) / w.d :=
+    Nat.min_eq_right hMD
+  have hMaxEq : Nat.max q (w.n * (w.n - 1) / 2) = q :=
+    Nat.max_eq_left hChooseQ
+  rw [hMinEq, hMaxEq, Nat.mul_assoc]
+  apply Nat.mul_le_mul_left
+  rw [Nat.add_mul, Nat.add_mul, Nat.one_mul]
+  exact Nat.add_le_add_left hNonpersQ _
+
+/-- Complete explicit `[CWYZ26]` Theorem 4.8 + Theorem 5.1 stage witnesses for `Hem` WHIR
+    at `nv = 20` (`3` stages: `q = (129, 65, 44)` classical, `q = (258, 130, 88)` QROM) and
+    `nv = 24` (`4` stages: `q = (129, 65, 44, 33)` classical, `q = (258, 130, 88, 66)` QROM). -/
+@[expose] def whirAffineStageWitnesses (nv : Nat) (isQrom : Bool) : List WhirAffineWitness :=
+  let tBits := if isQrom then 256 else 128
+  if nv = 20 then
+    let q0 := if isQrom then 258 else 129
+    let q1 := if isQrom then 130 else 65
+    let q2 := if isQrom then 88 else 44
+    [ { n := 131072, d := 32770, sFolds := 5, A := 65884, B := 65798,
+        m := 122, D := 12150, queries := q0, queryTargetBits := tBits },
+      { n := 65536,  d := 4098,  sFolds := 3, A := 16734, B := 16648,
+        m := 48,  D := 3072,  queries := q1, queryTargetBits := tBits },
+      { n := 16384,  d := 258,   sFolds := 4, A := 2177,  B := 2148,
+        m := 64,  D := 3072,  queries := q2, queryTargetBits := tBits } ]
+  else
+    let q0 := if isQrom then 258 else 129
+    let q1 := if isQrom then 130 else 65
+    let q2 := if isQrom then 88 else 44
+    let q3 := if isQrom then 66 else 33
+    [ { n := 1048576, d := 262146, sFolds := 6, A := 527106, B := 526403,
+        m := 64,  D := 11007, queries := q0, queryTargetBits := tBits },
+      { n := 262144,  d := 16386,  sFolds := 4, A := 66944,  B := 66594,
+        m := 24,  D := 3200,  queries := q1, queryTargetBits := tBits },
+      { n := 131072,  d := 2050,   sFolds := 3, A := 17446,  B := 17184,
+        m := 12,  D := 768,   queries := q2, queryTargetBits := tBits },
+      { n := 65536,   d := 258,    sFolds := 3, A := 4452,   B := 4369,
+        m := 16,  D := 1536,  queries := q3, queryTargetBits := tBits } ]
+
+/-- **Kernel-Decided `Theorem 4.8 + Theorem 5.1` Soundness Certificate (`cwyz26_whir_nv20_and_nv24_all_stages_valid`)**:
+    Certifies by exact kernel arithmetic (`decide`, `0` floating point, `0` trust) that ALL 14 stage
+    witnesses across `nv = 20` (`3` stages) and `nv = 24` (`4` stages) for both `BciksJohnsonClassical128`
+    (`q = (129, 65, 44, 33)`) and `BciksJohnsonQrom128` (`q = (258, 130, 88, 66)`) over `GoldilocksExt4`
+    (`q = Goldilocks.PRIME ^ 4`) satisfy `checkWhirAffineWitness` AND have commit-folding numerator
+    **`< 2048`** (`> 245` bits of unconditional folding soundness per stage!). -/
+theorem cwyz26_whir_nv20_and_nv24_all_stages_valid :
+    let q := Goldilocks.PRIME ^ 4
+    (∀ w ∈ whirAffineStageWitnesses 20 false,
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 2048) ∧
+    (∀ w ∈ whirAffineStageWitnesses 20 true,
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 2048) ∧
+    (∀ w ∈ whirAffineStageWitnesses 24 false,
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 2048) ∧
+    (∀ w ∈ whirAffineStageWitnesses 24 true,
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 2048) := by
+  decide
+
+end Qsag

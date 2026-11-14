@@ -45,7 +45,9 @@ merge trees over the quartic Goldilocks extension field `Aggregation.GoldilocksE
 public import Qsag.Goldilocks
 import all Qsag.Goldilocks
 public import Qsag.Keccak
+import all Qsag.Keccak
 public import Qsag.HashSigs
+import all Qsag.HashSigs
 public import Qsag.HypertreeEufCma
 public import Qsag.MaliciousSecurity
 
@@ -268,9 +270,9 @@ def vBasis : GoldilocksExt4 := ⟨CommRingOps.zero, CommRingOps.one⟩
 
 instance : Inhabited GoldilocksExt4 := ⟨zero⟩
 
-@[simp] theorem ofExt2_c0 (a : GoldilocksExt2) : (ofExt2 a).c0 = a := rfl
-@[simp] theorem ofExt2_c1 (a : GoldilocksExt2) : (ofExt2 a).c1 = CommRingOps.zero := rfl
-@[simp] theorem embedBase_c0_c0 (a : Goldilocks) : (embedBase a).c0.c0 = a := rfl
+@[simp] theorem ofExt2_c0 (a : GoldilocksExt2) : (ofExt2 a).c0 = a := by rfl
+@[simp] theorem ofExt2_c1 (a : GoldilocksExt2) : (ofExt2 a).c1 = CommRingOps.zero := by rfl
+@[simp] theorem embedBase_c0_c0 (a : Goldilocks) : (embedBase a).c0.c0 = a := by rfl
 
 def add (x y : GoldilocksExt4) : GoldilocksExt4 :=
   ⟨CommRingOps.add x.c0 y.c0, CommRingOps.add x.c1 y.c1⟩
@@ -295,15 +297,21 @@ instance : CommRingOps GoldilocksExt4 where
   sub := sub
 
 instance : LawfulCommRing GoldilocksExt4 where
-  add_assoc x y z := ext (LawfulCommRing.add_assoc x.c0 y.c0 z.c0)
-    (LawfulCommRing.add_assoc x.c1 y.c1 z.c1)
-  add_comm x y := ext (LawfulCommRing.add_comm x.c0 y.c0)
-    (LawfulCommRing.add_comm x.c1 y.c1)
-  zero_add x := ext (LawfulCommRing.zero_add x.c0) (LawfulCommRing.zero_add x.c1)
-  add_zero x := ext (LawfulCommRing.add_zero x.c0) (LawfulCommRing.add_zero x.c1)
-  add_left_neg x := ext (LawfulCommRing.add_left_neg x.c0) (LawfulCommRing.add_left_neg x.c1)
-  sub_eq_add_neg x y := ext (LawfulCommRing.sub_eq_add_neg x.c0 y.c0)
-    (LawfulCommRing.sub_eq_add_neg x.c1 y.c1)
+  add_assoc x y z := by
+    exact ext (LawfulCommRing.add_assoc x.c0 y.c0 z.c0)
+      (LawfulCommRing.add_assoc x.c1 y.c1 z.c1)
+  add_comm x y := by
+    exact ext (LawfulCommRing.add_comm x.c0 y.c0)
+      (LawfulCommRing.add_comm x.c1 y.c1)
+  zero_add x := by
+    exact ext (LawfulCommRing.zero_add x.c0) (LawfulCommRing.zero_add x.c1)
+  add_zero x := by
+    exact ext (LawfulCommRing.add_zero x.c0) (LawfulCommRing.add_zero x.c1)
+  add_left_neg x := by
+    exact ext (LawfulCommRing.add_left_neg x.c0) (LawfulCommRing.add_left_neg x.c1)
+  sub_eq_add_neg x y := by
+    exact ext (LawfulCommRing.sub_eq_add_neg x.c0 y.c0)
+      (LawfulCommRing.sub_eq_add_neg x.c1 y.c1)
   mul_comm x y := by
     apply ext
     · change CommRingOps.add (CommRingOps.mul x.c0 y.c0)
@@ -336,27 +344,39 @@ instance : LawfulCommRing GoldilocksExt4 where
   left_distrib x y z := by
     apply ext
     · change CommRingOps.add (CommRingOps.mul x.c0 (CommRingOps.add y.c0 z.c0))
-          (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.add y.c1 z.c1))) = _
+          (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.add y.c1 z.c1))) =
+        CommRingOps.add
+          (CommRingOps.add (CommRingOps.mul x.c0 y.c0)
+            (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)))
+          (CommRingOps.add (CommRingOps.mul x.c0 z.c0)
+            (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 z.c1)))
       rw [LawfulCommRing.left_distrib, LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
           LawfulCommRing.add_add_add_comm]
-      rfl
     · change CommRingOps.add (CommRingOps.mul x.c0 (CommRingOps.add y.c1 z.c1))
-          (CommRingOps.mul x.c1 (CommRingOps.add y.c0 z.c0)) = _
+          (CommRingOps.mul x.c1 (CommRingOps.add y.c0 z.c0)) =
+        CommRingOps.add
+          (CommRingOps.add (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0))
+          (CommRingOps.add (CommRingOps.mul x.c0 z.c1) (CommRingOps.mul x.c1 z.c0))
       rw [LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
           LawfulCommRing.add_add_add_comm]
-      rfl
   right_distrib x y z := by
     apply ext
     · change CommRingOps.add (CommRingOps.mul (CommRingOps.add x.c0 y.c0) z.c0)
-          (CommRingOps.mul nonResidue (CommRingOps.mul (CommRingOps.add x.c1 y.c1) z.c1)) = _
+          (CommRingOps.mul nonResidue (CommRingOps.mul (CommRingOps.add x.c1 y.c1) z.c1)) =
+        CommRingOps.add
+          (CommRingOps.add (CommRingOps.mul x.c0 z.c0)
+            (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 z.c1)))
+          (CommRingOps.add (CommRingOps.mul y.c0 z.c0)
+            (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1)))
       rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib, LawfulCommRing.left_distrib,
           LawfulCommRing.add_add_add_comm]
-      rfl
     · change CommRingOps.add (CommRingOps.mul (CommRingOps.add x.c0 y.c0) z.c1)
-          (CommRingOps.mul (CommRingOps.add x.c1 y.c1) z.c0) = _
+          (CommRingOps.mul (CommRingOps.add x.c1 y.c1) z.c0) =
+        CommRingOps.add
+          (CommRingOps.add (CommRingOps.mul x.c0 z.c1) (CommRingOps.mul x.c1 z.c0))
+          (CommRingOps.add (CommRingOps.mul y.c0 z.c1) (CommRingOps.mul y.c1 z.c0))
       rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib,
           LawfulCommRing.add_add_add_comm]
-      rfl
   mul_assoc x y z := by
     apply ext
     · change CommRingOps.add
@@ -433,7 +453,7 @@ def sqrtNegOne : Goldilocks := ⟨2 ^ 48, by decide⟩
 
 theorem sqrtNegOne_sq :
     CommRingOps.mul sqrtNegOne sqrtNegOne = CommRingOps.neg CommRingOps.one := by
-  decide
+  decide +kernel
 
 /-- **`uBasis_not_square`**: `u = (0, 1) ∈ GoldilocksExt2` has no square root in `GoldilocksExt2`,
     so $v^2 - u$ is irreducible over $\mathbb{F}_{p^2}$. -/
@@ -442,7 +462,7 @@ theorem uBasis_not_square (z : GoldilocksExt2) :
   intro hsq
   have hc0 : CommRingOps.add (CommRingOps.mul z.c0 z.c0)
       (CommRingOps.mul GoldilocksExt2.nonResidue (CommRingOps.mul z.c1 z.c1)) =
-      Goldilocks.zero := congrArg GoldilocksExt2.c0 hsq
+      CommRingOps.zero := congrArg GoldilocksExt2.c0 hsq
   have hc1 : CommRingOps.add (CommRingOps.mul z.c0 z.c1) (CommRingOps.mul z.c1 z.c0) =
       Goldilocks.one := congrArg GoldilocksExt2.c1 hsq
   have hbNe : z.c1 ≠ Goldilocks.zero := by
@@ -451,8 +471,7 @@ theorem uBasis_not_square (z : GoldilocksExt2) :
     change CommRingOps.add (CommRingOps.mul z.c0 CommRingOps.zero)
       (CommRingOps.mul CommRingOps.zero z.c0) = Goldilocks.one at hc1
     rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_mul, LawfulCommRing.add_zero] at hc1
-    revert hc1
-    decide
+    exact absurd hc1 (by decide)
   have haSqEq : CommRingOps.mul z.c0 z.c0 =
       CommRingOps.neg (CommRingOps.mul GoldilocksExt2.nonResidue (CommRingOps.mul z.c1 z.c1)) := by
     apply LawfulCommRing.add_left_cancel
@@ -478,7 +497,7 @@ theorem uBasis_not_square (z : GoldilocksExt2) :
           ← LawfulCommRing.mul_assoc z.c1 (Goldilocks.inv z.c1) _,
           Goldilocks.mul_inv_cancel hbNe, LawfulCommRing.one_mul,
           Goldilocks.mul_inv_cancel hbNe]
-    rw [hassoc, haSqEq, ← LawfulCommRing.neg_mul,
+    rw [hassoc, haSqEq, LawfulCommRing.neg_mul,
         LawfulCommRing.mul_assoc GoldilocksExt2.nonResidue, hcancel, LawfulCommRing.mul_one]
   have hwSq : CommRingOps.mul w w = GoldilocksExt2.nonResidue := by
     dsimp only [w]
@@ -489,7 +508,7 @@ theorem uBasis_not_square (z : GoldilocksExt2) :
           LawfulCommRing.mul_comm sqrtNegOne q,
           LawfulCommRing.mul_assoc q sqrtNegOne _,
           ← LawfulCommRing.mul_assoc q q _]
-    rw [hassoc, hqSq, sqrtNegOne_sq, ← LawfulCommRing.neg_mul, ← LawfulCommRing.mul_neg,
+    rw [hassoc, hqSq, sqrtNegOne_sq, LawfulCommRing.neg_mul, LawfulCommRing.mul_neg,
         LawfulCommRing.mul_one]
     apply LawfulCommRing.add_left_cancel (a := CommRingOps.neg GoldilocksExt2.nonResidue)
     rw [LawfulCommRing.add_right_neg, LawfulCommRing.add_left_neg]
@@ -574,16 +593,16 @@ theorem mul_inv_cancel {z : GoldilocksExt4} (hz : z ≠ zero) :
         LawfulCommRing.mul_comm z.c1 z.c0,
         LawfulCommRing.add_left_neg]
 
-theorem ofExt2_injective {a b : GoldilocksExt2} (h : ofExt2 a = ofExt2 b) : a = b :=
-  congrArg c0 h
+theorem ofExt2_injective {a b : GoldilocksExt2} (h : ofExt2 a = ofExt2 b) : a = b := by
+  exact congrArg c0 h
 
 theorem ofExt2_add (a b : GoldilocksExt2) :
-    ofExt2 (CommRingOps.add a b) = CommRingOps.add (ofExt2 a) (ofExt2 b) :=
-  ext rfl (LawfulCommRing.add_zero _).symm
+    ofExt2 (CommRingOps.add a b) = CommRingOps.add (ofExt2 a) (ofExt2 b) := by
+  exact ext rfl (LawfulCommRing.add_zero _).symm
 
 theorem ofExt2_sub (a b : GoldilocksExt2) :
-    ofExt2 (CommRingOps.sub a b) = CommRingOps.sub (ofExt2 a) (ofExt2 b) :=
-  ext rfl (LawfulCommRing.sub_self _).symm
+    ofExt2 (CommRingOps.sub a b) = CommRingOps.sub (ofExt2 a) (ofExt2 b) := by
+  exact ext rfl (LawfulCommRing.sub_self _).symm
 
 theorem ofExt2_mul (a b : GoldilocksExt2) :
     ofExt2 (CommRingOps.mul a b) = CommRingOps.mul (ofExt2 a) (ofExt2 b) := by
@@ -596,8 +615,8 @@ theorem ofExt2_mul (a b : GoldilocksExt2) :
       CommRingOps.add (CommRingOps.mul a CommRingOps.zero) (CommRingOps.mul CommRingOps.zero b)
     rw [LawfulCommRing.mul_zero, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
 
-theorem embedBase_injective {a b : Goldilocks} (h : embedBase a = embedBase b) : a = b :=
-  GoldilocksExt2.ofBase_injective (ofExt2_injective h)
+theorem embedBase_injective {a b : Goldilocks} (h : embedBase a = embedBase b) : a = b := by
+  exact GoldilocksExt2.ofBase_injective (ofExt2_injective h)
 
 theorem embedBase_add (a b : Goldilocks) :
     embedBase (CommRingOps.add a b) = CommRingOps.add (embedBase a) (embedBase b) := by
@@ -689,7 +708,7 @@ theorem decodeBytes32_encodeBytes32 (z : GoldilocksExt4) :
   have t10 : ((encodeBytes32 z).drop 16).take 8 = be 8 z.c1.c0.val := by
     rw [d16, List.take_left' (length_be 8 z.c1.c0.val)]
   have d24 : (encodeBytes32 z).drop 24 = be 8 z.c1.c1.val := by
-    have h24 : (24 : Nat) = 8 + 16 := rfl
+    have h24 : (24 : Nat) = 16 + 8 := rfl
     rw [h24, ← List.drop_drop, d16, List.drop_left' (length_be 8 z.c1.c0.val)]
   have t11 : ((encodeBytes32 z).drop 24).take 8 = be 8 z.c1.c1.val := by
     rw [d24, List.take_of_length_le (Nat.le_of_eq (length_be 8 z.c1.c1.val))]
@@ -769,8 +788,8 @@ theorem sumcheck_degree8_ext4_roots_le_eight
     (hDiff : ∃ x₀ : GoldilocksExt4,
       RoundPoly.evalCoeffs claimedPoly x₀ ≠ RoundPoly.evalCoeffs honestPoly x₀) :
     (S.filter (fun r =>
-      decide (RoundPoly.evalCoeffs claimedPoly r = RoundPoly.evalCoeffs honestPoly r))).length ≤ 8 :=
-  ext4_poly_roots_le_degree 8 claimedPoly honestPoly S hNodup hLenC hLenH hDiff
+      decide (RoundPoly.evalCoeffs claimedPoly r = RoundPoly.evalCoeffs honestPoly r))).length ≤ 8 := by
+  exact ext4_poly_roots_le_degree 8 claimedPoly honestPoly S hNodup hLenC hLenH hDiff
 
 /-- **WHIR Out-of-Domain (OOD) List-Pinning Bound (`whir_ood_pin_roots_le_degree`)**:
     Any two distinct list-decoded candidate polynomials `candA, candB` of univariate degree `≤ d`
@@ -782,8 +801,8 @@ theorem whir_ood_pin_roots_le_degree (d : Nat)
     (hDiff : ∃ z₀ : GoldilocksExt4,
       RoundPoly.evalCoeffs candA z₀ ≠ RoundPoly.evalCoeffs candB z₀) :
     (S.filter (fun z =>
-      decide (RoundPoly.evalCoeffs candA z = RoundPoly.evalCoeffs candB z))).length ≤ d :=
-  ext4_poly_roots_le_degree d candA candB S hNodup hLenA hLenB hDiff
+      decide (RoundPoly.evalCoeffs candA z = RoundPoly.evalCoeffs candB z))).length ≤ d := by
+  exact ext4_poly_roots_le_degree d candA candB S hNodup hLenA hLenB hDiff
 
 /-- Quartic WHIR coset duet folding operator over `GoldilocksExt4` with base-field inverse twiddles
     `invTwo = 2^-1` and `invTwoY0 = (2 * y_0)^-1` (`pcs.rs`). -/
@@ -933,7 +952,7 @@ theorem bciksJohnsonQrom128_positive_slack :
     ∀ s ∈ whirSchedule4Stage .bciksJohnsonQrom128,
       2 ^ 256 < s.johnsonSqrtBlowup ^ s.numQueries ∧
       (1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * 2 ^ 256 < 1024 ^ s.numQueries := by
-  decide
+  decide +kernel
 
 end Aggregation
 
@@ -1189,9 +1208,9 @@ theorem checkAllActiveSigners_sound (suite : TweakableHashSuite) (params : PqHas
     (hPk : i < pks.length) (hB : i < bs.length)
     (hAll : checkAllActiveSigners suite params msg pks bs sigs = true)
     (hbTrue : bs[i]'hB = true) :
-    ∃ sig, verifyPqHashSig suite params (pks[i]'hPk) msg sig = true :=
+    ∃ sig, verifyPqHashSig suite params (pks[i]'hPk) msg sig = true := by
   let ⟨sig, hVer⟩ := extractActiveSignerSig suite params msg pks bs sigs i hPk hB hAll hbTrue
-  ⟨sig, hVer⟩
+  exact ⟨sig, hVer⟩
 
 /-- **Constructive Round-by-Round `GoldilocksExt4` Sumcheck Divergence Extractor
     (`extractSumcheckHitFromChain`, `0 Classical.choice`)**:
@@ -1233,7 +1252,7 @@ def extractSumcheckHitFromChain (maxDeg : Nat)
                           (RoundPoly.evalCoeffs pH GoldilocksExt4.one) = honestClaim ∧
           verifySumcheckChainDeg maxDeg (RoundPoly.evalCoeffs pH r) psH rs termEval = true := by
         simp only [verifySumcheckChainDeg, Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq] at hVerH
-        exact ⟨hUnpackH.1.1, hUnpackH.1.2, hUnpackH.2⟩
+        exact ⟨hVerH.1.1, hVerH.1.2, hVerH.2⟩
       let diffPt : GoldilocksExt4 :=
         if RoundPoly.evalCoeffs pC GoldilocksExt4.zero ≠ RoundPoly.evalCoeffs pH GoldilocksExt4.zero
         then GoldilocksExt4.zero
@@ -1318,8 +1337,8 @@ def aggregateInstanceFrame (inst : AggPublicInstance) (agg : AggregatedSignature
 theorem aggregate_frame_message_binding (first second : AggPublicInstance)
     (a b : AggregatedSignature)
     (h : aggregateInstanceFrame first a = aggregateInstanceFrame second b) :
-    first.message = second.message :=
-  (List.cons.inj (encodeMultiFrame_injective h)).1
+    first.message = second.message := by
+  exact (List.cons.inj (encodeMultiFrame_injective h)).1
 
 theorem aggregate_frame_regime_binding (first second : AggPublicInstance)
     (a b : AggregatedSignature)
@@ -1607,7 +1626,8 @@ theorem mem_sortedInsertDistinct {x z : Nat} :
       · exact .inr (.head _)
       · exact .inr (.tail _ hm)
     else if heq : x = y then
-      simp only [hlt, heq, ↓reduceIte] at h
+      subst heq
+      simp only [Nat.lt_irrefl, ↓reduceIte] at h
       exact .inr h
     else
       simp only [hlt, heq, ↓reduceIte, List.mem_cons] at h
@@ -1624,9 +1644,12 @@ theorem strictlyIncreasing_sortedInsertDistinct (x : Nat) :
   | y :: ys, h => by
     simp only [sortedInsertDistinct]
     if hlt : x < y then
-      simp only [hlt, ↓reduceIte, strictlyIncreasing, decide_eq_true hlt, h, Bool.and_self]
+      simp only [hlt, ↓reduceIte, strictlyIncreasing]
+      exact Bool.and_eq_true_iff.mpr ⟨decide_eq_true hlt, h⟩
     else if heq : x = y then
-      simp only [hlt, heq, ↓reduceIte, h]
+      subst heq
+      simp only [Nat.lt_irrefl, ↓reduceIte]
+      exact h
     else
       have hyx : y < x := by omega
       simp only [hlt, heq, ↓reduceIte]
@@ -1684,7 +1707,7 @@ theorem length_sortedInsertDistinct_of_not_mem (x : Nat) :
     if hlt : x < y then
       simp [hlt]
     else if heq : x = y then
-      exact False.elim (hNot (List.mem_cons_of_eq x heq))
+      exact False.elim (hNot (heq ▸ .head _))
     else
       simp only [hlt, heq, ↓reduceIte, List.length_cons]
       have hNotYs : x ∉ ys := fun hm => hNot (.tail _ hm)
@@ -1706,9 +1729,10 @@ theorem mem_sortedInsertDistinct_iff {x z : Nat} {l : List Nat} :
         simp only [hlt, ↓reduceIte, List.mem_cons]
         rcases h with rfl | hm
         · exact .inl rfl
-        · exact .inr hm
+        · exact .inr (List.mem_cons.mp hm)
       else if heq : x = y then
-        simp only [hlt, heq, ↓reduceIte]
+        subst heq
+        simp only [Nat.lt_irrefl, ↓reduceIte]
         rcases h with rfl | hm
         · exact .head _
         · exact hm
@@ -1728,7 +1752,9 @@ theorem length_sortedInsertDistinct_le (x : Nat) :
     if hlt : x < y then
       simp [hlt]
     else if heq : x = y then
-      simp [hlt, heq]
+      subst heq
+      simp only [Nat.lt_irrefl, ↓reduceIte]
+      omega
     else
       simp only [hlt, heq, ↓reduceIte, List.length_cons]
       exact Nat.succ_le_succ (length_sortedInsertDistinct_le x ys)
@@ -1745,7 +1771,8 @@ theorem length_sortedInsertDistinct_of_mem (x : Nat) :
       · exact Nat.lt_irrefl _ hlt
       · exact Nat.lt_asymm hlt (strictlyIncreasing_head_lt ys y hInc x hm)
     else if heq : x = y then
-      simp [hlt, heq]
+      subst heq
+      simp only [Nat.lt_irrefl, ↓reduceIte]
     else
       have hTail : strictlyIncreasing ys = true := by
         cases ys with
@@ -1797,18 +1824,18 @@ theorem mem_scanFillDistinct_lt {bound : Nat} (target : Nat) :
     · exact mem_scanFillDistinct_lt target xs _
         (fun y hy => hXs y (.tail _ hy))
         (fun w hw => by
-          rcases mem_sortedInsertDistinct hw with rfl | hm
-          · exact hXs x (.head _)
+          rcases mem_sortedInsertDistinct hw with hEq | hm
+          · rw [hEq]; exact hXs x (.head _)
           · exact hAcc w hm) z hz
 
 private theorem filter_ne_length_lt_of_mem (x : Nat) :
     ∀ (acc : List Nat), x ∈ acc → (acc.filter (fun z => decide (z ≠ x))).length < acc.length
   | [], hm => by cases hm
   | a :: as, hm => by
-    rcases List.mem_cons.mp hm with rfl | hms
-    · simp only [List.filter, ne_eq, not_true_eq_false, decide_false, List.length_cons]
-      have hLe := List.length_filter_le (fun z => decide (z ≠ x)) as
-      omega
+    rcases List.mem_cons.mp hm with hEq | hms
+    · subst hEq
+      simp only [List.filter, ne_eq, not_true_eq_false, decide_false, List.length_cons]
+      exact Nat.lt_succ_of_le (List.length_filter_le _ as)
     · have ih := filter_ne_length_lt_of_mem x as hms
       cases hd : decide (a ≠ x) <;> simp only [List.filter, hd, List.length_cons] <;> omega
 
@@ -1849,7 +1876,7 @@ theorem length_scanFillDistinct (target : Nat) :
       target ≤ (xs.filter (fun z => decide (z ∉ acc))).length + acc.length →
       (scanFillDistinct target xs acc).length = target
   | [], acc, _, _, hLe, hGe => by
-    simp only [scanFillDistinct, List.filter] at hGe ⊢
+    simp only [scanFillDistinct, List.filter, List.length_nil, Nat.zero_add] at hGe ⊢
     omega
   | x :: xs, acc, hInc, hNd, hLe, hGe => by
     simp only [scanFillDistinct]
@@ -2103,7 +2130,7 @@ theorem merge_tree_rejects_child_commitment (arith : RowArithmetization) (dom : 
 
 theorem merge_tree_depth_exhausted (arith : RowArithmetization) (dom : WhirDomain)
     (inst : AggPublicInstance) (tree : MergeNode) :
-    verifyMergeTree arith dom inst 0 tree = false := rfl
+    verifyMergeTree arith dom inst 0 tree = false := by rfl
 
 /-! ## 8. Constructive Multi-Stage WHIR Knowledge Soundness & Unforgeability Reduction -/
 
@@ -2218,8 +2245,9 @@ def stageTrajectorySound (sdom : WhirStageDomain)
     (nextStageInfo : Option (WhirStageDomain × List UInt8))
     (nextStageOpt : Option (WhirStageDomain × List GoldilocksExt4))
     (finalWord : List GoldilocksExt4) (bridgeOp : Option FoldLayerOpening)
-    (authPath : Nat → Nat → Nat → List (List UInt8)) :
-    ∀ (roots : List (List UInt8)) (αs : List GoldilocksExt4) (ops : List FoldLayerOpening)
+    (authPath : Nat → Nat → Nat → List (List UInt8))
+    (roots : List (List UInt8)) :
+    ∀ (αs : List GoldilocksExt4) (ops : List FoldLayerOpening)
       (tables : List (List GoldilocksExt4)) (layer groups idx : Nat)
       (expected : Option GoldilocksExt4),
       verifyStageTrajectory sdom nextStageInfo finalWord bridgeOp
@@ -2237,65 +2265,69 @@ def stageTrajectorySound (sdom : WhirStageDomain)
         | _, _ => False) →
       PSum (HashCollisionWitness pcsMerkleHash)
         (PLift (stageTableTrajectoryOk sdom nextStageOpt finalWord
-          layer groups idx expected tables αs = true))
-  | [], [], [], [], _, _, idx, expected, hV, _, hN =>
-    stageTerminalSound authPath nextStageInfo nextStageOpt finalWord idx expected bridgeOp hV hN
-  | [], [], [], _ :: _, _, _, _, _, _, hB, _ => False.elim hB
-  | _ :: _, _ :: _, _ :: _, [], _, _, _, _, _, hB, _ => False.elim hB
-  | [], [], _ :: _, _, _, _, _, _, hV, _, _ => False.elim (by simp [verifyStageTrajectory] at hV)
-  | [], _ :: _, ops, _, _, _, _, _, hV, _, _ =>
-    False.elim (by cases ops <;> simp [verifyStageTrajectory] at hV)
-  | _ :: _, [], ops, _, _, _, _, _, hV, _, _ =>
-    False.elim (by cases ops <;> simp [verifyStageTrajectory] at hV)
-  | _ :: _, _ :: _, [], _, _, _, _, _, hV, _, _ => False.elim (by simp [verifyStageTrajectory] at hV)
-  | root :: roots, α :: αs, op :: ops, w :: ws, layer, groups, idx, expected, hV, hB, hN =>
-    have hU : 0 < groups ∧ expectedSlotOk expected (idx / groups) op.v0 op.v1 = true ∧
-        op.path.length = merkleDepth groups ∧
-        merklePathRoot pcsMerkleHash
-          (pcsMerkleHash (duetLeafFrame sdom.stageIdx layer (idx % groups) op.v0 op.v1))
-          (idx % groups) op.path = root ∧
-        verifyStageTrajectory sdom nextStageInfo finalWord bridgeOp (layer + 1) (groups / 2)
-          (idx % groups)
-          (some (foldDuetExt4 op.v0 op.v1 (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α))
-          roots αs ops = true := by
-      have h0 : (decide (0 < groups) &&
-          expectedSlotOk expected (idx / groups) op.v0 op.v1 &&
-          decide (op.path.length = merkleDepth groups) &&
-          decide (merklePathRoot pcsMerkleHash
+          layer groups idx expected tables αs = true)) :=
+  match roots with
+  | [] => fun αs ops tables _ _ idx expected hV hB hN =>
+    match αs, ops, tables with
+    | [], [], [] =>
+      stageTerminalSound authPath nextStageInfo nextStageOpt finalWord idx expected bridgeOp hV hN
+    | [], [], _ :: _ => False.elim hB
+    | [], _ :: _, _ => False.elim (by simp [verifyStageTrajectory] at hV)
+    | _ :: _, ops, _ => False.elim (by cases ops <;> simp [verifyStageTrajectory] at hV)
+  | root :: roots => fun αs ops tables layer groups idx expected hV hB hN =>
+    match αs, ops, tables with
+    | [], ops, _ => False.elim (by cases ops <;> simp [verifyStageTrajectory] at hV)
+    | _ :: _, [], _ => False.elim (by simp [verifyStageTrajectory] at hV)
+    | _ :: _, _ :: _, [] => False.elim hB
+    | α :: αs, op :: ops, w :: ws =>
+      have hU : 0 < groups ∧ expectedSlotOk expected (idx / groups) op.v0 op.v1 = true ∧
+          op.path.length = merkleDepth groups ∧
+          merklePathRoot pcsMerkleHash
             (pcsMerkleHash (duetLeafFrame sdom.stageIdx layer (idx % groups) op.v0 op.v1))
-            (idx % groups) op.path = root) &&
+            (idx % groups) op.path = root ∧
           verifyStageTrajectory sdom nextStageInfo finalWord bridgeOp (layer + 1) (groups / 2)
             (idx % groups)
             (some (foldDuetExt4 op.v0 op.v1 (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α))
-            roots αs ops) = true := hV
-      rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, h5⟩
-      rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, h4⟩
-      rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, h3⟩
-      rcases Bool.and_eq_true_iff.mp h0 with ⟨h1, h2⟩
-      exact ⟨of_decide_eq_true h1, h2, of_decide_eq_true h3, of_decide_eq_true h4, h5⟩
-    have hBg := hB.1 (idx % groups) (Nat.mod_lt _ hU.1)
-    if hEq : op.v0 = w.getD (idx % groups) CommRingOps.zero ∧
-        op.v1 = w.getD (idx % groups + groups) CommRingOps.zero then
-      match stageTrajectorySound sdom nextStageInfo nextStageOpt finalWord bridgeOp authPath
-          roots αs ops ws (layer + 1) (groups / 2) (idx % groups) _ hU.2.2.2.2 hB.2 hN with
-      | .inl c => .inl c
-      | .inr ⟨hT⟩ => .inr ⟨by
-          show (decide (0 < groups) &&
-            expectedSlotOk expected (idx / groups)
-              (w.getD (idx % groups) CommRingOps.zero)
-              (w.getD (idx % groups + groups) CommRingOps.zero) &&
-            stageTableTrajectoryOk sdom nextStageOpt finalWord (layer + 1) (groups / 2)
+            roots αs ops = true := by
+        have h0 : (decide (0 < groups) &&
+            expectedSlotOk expected (idx / groups) op.v0 op.v1 &&
+            decide (op.path.length = merkleDepth groups) &&
+            decide (merklePathRoot pcsMerkleHash
+              (pcsMerkleHash (duetLeafFrame sdom.stageIdx layer (idx % groups) op.v0 op.v1))
+              (idx % groups) op.path = root) &&
+            verifyStageTrajectory sdom nextStageInfo finalWord bridgeOp (layer + 1) (groups / 2)
               (idx % groups)
-              (some (foldDuetExt4 (w.getD (idx % groups) CommRingOps.zero)
-                (w.getD (idx % groups + groups) CommRingOps.zero)
-                (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α)) ws αs) = true
-          rw [← hEq.1, ← hEq.2]
-          exact Bool.and_eq_true_iff.mpr
-            ⟨Bool.and_eq_true_iff.mpr ⟨decide_eq_true hU.1, hU.2.1⟩, hT⟩⟩
-    else
-      .inl (duetOpeningCollision sdom.stageIdx layer (idx % groups) op.v0 op.v1 _ _ op.path
-        (authPath sdom.stageIdx layer (idx % groups)) root hEq
-        (hU.2.2.1.trans hBg.2.symm) hU.2.2.2.1 hBg.1)
+              (some (foldDuetExt4 op.v0 op.v1 (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α))
+              roots αs ops) = true := hV
+        rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, h5⟩
+        rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, h4⟩
+        rcases Bool.and_eq_true_iff.mp h0 with ⟨h0, h3⟩
+        rcases Bool.and_eq_true_iff.mp h0 with ⟨h1, h2⟩
+        exact ⟨of_decide_eq_true h1, h2, of_decide_eq_true h3, of_decide_eq_true h4, h5⟩
+      have hBg := hB.1 (idx % groups) (Nat.mod_lt _ hU.1)
+      if hEq : op.v0 = w.getD (idx % groups) CommRingOps.zero ∧
+          op.v1 = w.getD (idx % groups + groups) CommRingOps.zero then
+        match stageTrajectorySound sdom nextStageInfo nextStageOpt finalWord bridgeOp authPath
+            roots αs ops ws (layer + 1) (groups / 2) (idx % groups) _ hU.2.2.2.2 hB.2 hN with
+        | .inl c => .inl c
+        | .inr ⟨hT⟩ => .inr ⟨by
+            show (decide (0 < groups) &&
+              expectedSlotOk expected (idx / groups)
+                (w.getD (idx % groups) CommRingOps.zero)
+                (w.getD (idx % groups + groups) CommRingOps.zero) &&
+              stageTableTrajectoryOk sdom nextStageOpt finalWord (layer + 1) (groups / 2)
+                (idx % groups)
+                (some (foldDuetExt4 (w.getD (idx % groups) CommRingOps.zero)
+                  (w.getD (idx % groups + groups) CommRingOps.zero)
+                  (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α)) ws αs) = true
+            rw [← hEq.1, ← hEq.2]
+            exact Bool.and_eq_true_iff.mpr
+              ⟨Bool.and_eq_true_iff.mpr ⟨decide_eq_true hU.1, hU.2.1⟩, hT⟩⟩
+      else
+        .inl (duetOpeningCollision sdom.stageIdx layer (idx % groups) op.v0 op.v1 _ _ op.path
+          (authPath sdom.stageIdx layer (idx % groups)) root hEq
+          (hU.2.2.1.trans hBg.2.symm) hU.2.2.2.1 hBg.1)
+termination_by structural roots
 
 def stageQueriesSound (sdom : WhirStageDomain)
     (nextStageInfo : Option (WhirStageDomain × List UInt8))
@@ -2425,7 +2457,7 @@ private theorem unpack_one_stage_verify {rowChallenges finalWord : List Goldiloc
   rcases Bool.and_eq_true_iff.mp h with ⟨_, c10⟩
   exact ⟨c10, of_decide_eq_true c11, c12⟩
 
-private def headRootBound {authPath : Nat → Nat → Nat → List (List UInt8)}
+private theorem headRootBound {authPath : Nat → Nat → Nat → List (List UInt8)}
     {nd : WhirStageDomain} {nt : List (List GoldilocksExt4)} {nsp : WhirStageProof}
     (hne : nt ≠ [])
     (hB : StageLayersBound authPath nd.stageIdx 0 nd.groups0 nt (stageAllRoots nsp)) :
@@ -2490,7 +2522,9 @@ def checkAllWhirStagesQueries (rowChallenges finalWord : List GoldilocksExt4)
   | _, [_], _ :: _ :: _, [_], _, hB => False.elim hB.2.2
   | _, [_], [_], _ :: _ :: _, hVer, _ =>
     False.elim (by simp [verifyWhirStages] at hVer)
-  | _, _ :: _ :: _, [_], _, _, hB => False.elim hB.2.2
+  | _, [_], _ :: _ :: _, _ :: _ :: _, _, hB => False.elim hB.2.2
+  | _, _ :: _ :: _, [_], [_], _, hB => False.elim hB.2.2
+  | _, _ :: _ :: _, [_], _ :: _ :: _, _, hB => False.elim hB.2.2
   | _, _ :: _ :: _, _ :: _ :: _, [_], _, hB => False.elim hB.2.2
   | prior, sdom :: nextDom :: restDoms, stTables :: nextTables :: restTables,
       sp :: nextSp :: restProofs, hVer, hB =>
@@ -2557,19 +2591,28 @@ def checkAllStageCodewordsAux (arith : RowArithmetization) :
       .inl ⟨0, sdom, stTables, ⟨rfl, rfl, by
         simpa only [Nat.add_zero] using Bool.eq_false_iff.mpr hOk⟩⟩
 
-theorem stagesBound_lengths {authPath : Nat → Nat → Nat → List (List UInt8)} :
-    ∀ {sdoms : List WhirStageDomain} {allTables : List (List (List GoldilocksExt4))}
-      {sps : List WhirStageProof},
-      StagesBound authPath sdoms allTables sps →
-      sdoms.length = allTables.length ∧ sdoms.length = sps.length
-  | [], [], [], _ => ⟨rfl, rfl⟩
-  | [], _ :: _, _, h => False.elim h
-  | [], [], _ :: _, h => False.elim h
-  | _ :: _, [], _, h => False.elim h
-  | _ :: _, _ :: _, [], h => False.elim h
-  | _ :: sdoms, _ :: restTables, _ :: sps, h => by
-    obtain ⟨h1, h2⟩ := stagesBound_lengths h.2.2
-    exact ⟨congrArg Nat.succ h1, congrArg Nat.succ h2⟩
+theorem stagesBound_lengths {authPath : Nat → Nat → Nat → List (List UInt8)}
+    {sdoms : List WhirStageDomain} {allTables : List (List (List GoldilocksExt4))}
+    {sps : List WhirStageProof}
+    (h : StagesBound authPath sdoms allTables sps) :
+    sdoms.length = allTables.length ∧ sdoms.length = sps.length := by
+  induction sdoms generalizing allTables sps with
+  | nil =>
+    cases allTables with
+    | nil =>
+      cases sps with
+      | nil => exact ⟨rfl, rfl⟩
+      | cons _ _ => exact False.elim h
+    | cons _ _ => exact False.elim h
+  | cons _ sdoms ih =>
+    cases allTables with
+    | nil => exact False.elim h
+    | cons _ restTables =>
+      cases sps with
+      | nil => exact False.elim h
+      | cons _ restSps =>
+        obtain ⟨h1, h2⟩ := ih h.2.2
+        exact ⟨congrArg Nat.succ h1, congrArg Nat.succ h2⟩
 
 /-- Lawfulness contract on a multi-stage `GoldilocksExt4` WHIR row arithmetization:
     - `complete`: whenever every stage table is a valid stage Reed–Solomon codeword, `verifyWhirStages`
@@ -3079,10 +3122,12 @@ theorem countGood_eraseFirstAt_good {α : Type} (p : α → Bool) :
   | 0, x :: _, _, hx => by
     have hx' : p x = true := hx
     simp only [eraseFirstAt, countGood, List.filter, hx', List.length_cons]
-  | i + 1, _ :: xs, hi, hx => by
+  | i + 1, y :: xs, hi, hx => by
     have ih := countGood_eraseFirstAt_good p i xs (Nat.lt_of_succ_lt_succ hi) hx
-    cases hpy : p _ <;>
-      simp only [eraseFirstAt, countGood, List.filter, hpy, List.length_cons] at ih ⊢ <;>
+    cases hpy : p y
+    · simp only [eraseFirstAt, countGood, List.filter, hpy]
+      exact ih
+    · simp only [eraseFirstAt, countGood, List.filter, hpy, List.length_cons] at ih ⊢
       omega
 
 /-- Ordered `q`-tuples drawn without replacement from `dom`. -/
@@ -3143,8 +3188,10 @@ private theorem range_filter_getElem_length {α : Type} (p : α → Bool) (dom :
       (fun i => match (x :: xs)[i]? with | none => false | some y => p y) Nat.succ (List.range xs.length)
     simp only [hS] at hm
     cases hp : p x
-    · simp only [hp, ↓reduceIte, hm, ih, countGood, List.filter]
-    · simp only [hp, ↓reduceIte, List.length_cons, hm, ih, countGood, List.filter]
+    · simp only [hp, Bool.false_eq_true, ↓reduceIte, countGood, List.filter]
+      exact hm.trans ih
+    · simp only [hp, ↓reduceIte, List.length_cons, countGood, List.filter]
+      exact congrArg Nat.succ (hm.trans ih)
 
 theorem distinctTuples_all_good_length {α : Type} (p : α → Bool) :
     ∀ (q : Nat) (dom : List α),
@@ -3152,7 +3199,7 @@ theorem distinctTuples_all_good_length {α : Type} (p : α → Bool) :
         fallingFactorial (countGood p dom) q
   | 0, _ => rfl
   | q + 1, dom => by
-    show (((List.range dom.length).flatMap _).filter (fun t => t.all p)).length =
+    show (((List.range dom.length).flatMap _).filter (fun (t : List α) => t.all p)).length =
       countGood p dom * fallingFactorial (countGood p dom - 1) q
     rw [filter_flatMap_eq]
     let isGoodIdx : Nat → Bool := fun i => match dom[i]? with | none => false | some x => p x
@@ -3230,11 +3277,11 @@ private theorem fallingFactorial_mul_pow_le (a b : Nat) (hab : a ≤ b) :
     show 1 * 1 ≤ 1 * 1; exact Nat.le_refl 1
   | q + 1, g, n, hgn, hbg => by
     rcases Nat.eq_zero_or_pos g with rfl | hgpos
-    · show 0 * _ ≤ _
-      rw [Nat.zero_mul]; exact Nat.zero_le _
+    · simp only [fallingFactorial, Nat.zero_mul]
+      exact Nat.zero_le _
     · have h1 : b * (g - 1) ≤ a * (n - 1) := by
         rw [Nat.mul_sub, Nat.mul_sub, Nat.mul_one, Nat.mul_one]
-        exact Nat.sub_le_sub hbg hab
+        omega
       have ih := fallingFactorial_mul_pow_le a b hab q (g - 1) (n - 1)
         (Nat.sub_le_sub_right hgn 1) h1
       show g * fallingFactorial (g - 1) q * (b ^ q * b) ≤
@@ -3259,9 +3306,9 @@ theorem whir_query_miss_bound {α : Type} (bad : α → Bool) (dom : List α) (q
   have hsum := countGood_add_complement bad dom
   have hGN : countGood (fun x => !bad x) dom ≤ dom.length := by omega
   apply fallingFactorial_mul_pow_le (dd - dn) dd (Nat.sub_le dd dn) q _ _ hGN
-  rw [Nat.sub_mul, Nat.mul_comm (countGood (fun x => !bad x) dom) dd]
+  rw [Nat.sub_mul]
   have e : dd * dom.length = dd * countGood (fun x => !bad x) dom + dd * countGood bad dom := by
-    rw [← Nat.mul_add, hsum]
+    rw [← Nat.mul_add, Nat.add_comm, hsum]
   omega
 
 /-! ## 10. Transcript-Bound WHIR Proximity, OOD, Fold & Query Soundness (`GoldilocksExt4`) -/
@@ -3417,7 +3464,7 @@ theorem whir_bciksJohnsonClassical128_query_miss_lt {α : Type}
       2 ^ 128 < (distinctTuples s.numQueries dom).length := by
   have hSlack := (bciksJohnsonClassical128_positive_slack s hs).2
   have hLe : 512 / s.johnsonSqrtBlowup + 1 ≤ 512 := by
-    revert hs; decide
+    decide +revert
   exact strict_query_miss_from_slack bad dom s.numQueries
     (512 / s.johnsonSqrtBlowup + 1) 512 128 hdom hLe hfar hSlack
 
@@ -3436,7 +3483,7 @@ theorem whir_bciksJohnsonQrom128_query_miss_lt {α : Type}
       2 ^ 256 < (distinctTuples s.numQueries dom).length := by
   have hSlack := (bciksJohnsonQrom128_positive_slack s hs).2
   have hLe : 1024 / s.johnsonSqrtBlowup + 1 ≤ 1024 := by
-    revert hs; decide
+    decide +revert
   exact strict_query_miss_from_slack bad dom s.numQueries
     (1024 / s.johnsonSqrtBlowup + 1) 1024 256 hdom hLe hfar hSlack
 
@@ -3450,7 +3497,7 @@ theorem whir_habr24Qrom128_query_miss_le {α : Type}
     ((distinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
       2 ^ 256 ≤ (distinctTuples s.numQueries dom).length := by
   have hb := whir_query_miss_bound bad dom s.numQueries (s.blowup - 1) s.blowup hfar
-  have hPos : 1 ≤ s.blowup := by revert hs; decide
+  have hPos : 1 ≤ s.blowup := by decide +revert
   have hSub : s.blowup - (s.blowup - 1) = 1 := by omega
   rw [hSub, Nat.one_pow, Nat.one_mul] at hb
   exact Nat.le_trans
@@ -3623,6 +3670,16 @@ theorem canonicalExt4Sample_nodup {k : Nat} (hk : k ≤ goldilocksPrime) :
       exact hrel y hy (hInjOn x y (hlt x (.head _)) (hlt y (.tail _ hy)) heq)
   exact hAux hRange (fun z hz => List.mem_range.mp hz)
 
+private theorem countGood_lt_range (m : Nat) :
+    ∀ (n : Nat), countGood (fun i => decide (i < m)) (List.range n) = min m n
+  | 0 => by simp [countGood]
+  | n + 1 => by
+    rw [countGood, List.range_succ, List.filter_append, List.length_append]
+    have ih : (List.filter (fun i => decide (i < m)) (List.range n)).length = min m n :=
+      countGood_lt_range m n
+    rw [ih]
+    by_cases hlt : n < m <;> simp [hlt] <;> omega
+
 /-- Non-`Unit` `GoldilocksExt4` + positive-slack `[BCIKS20]` satisfiability witness. -/
 theorem whir_bciksJohnson_hypotheses_satisfiable :
     ∃ (S : List GoldilocksExt4) (s : WhirStageSpec) (dom : List Nat) (bad : Nat → Bool),
@@ -3630,10 +3687,12 @@ theorem whir_bciksJohnson_hypotheses_satisfiable :
       s ∈ whirSchedule4Stage .bciksJohnsonClassical128 ∧
       s.numQueries ≤ dom.length ∧
       (512 - (512 / s.johnsonSqrtBlowup + 1)) * dom.length ≤ 512 * countGood bad dom ∧
-      countGood bad dom < dom.length :=
-  ⟨canonicalExt4Sample 256, ⟨0, 4, 2, 129, 16⟩, List.range 512, fun i => decide (i < 255),
+      countGood bad dom < dom.length := by
+  refine ⟨canonicalExt4Sample 256, ⟨0, 4, 2, 129, 16⟩, List.range 512, fun i => decide (i < 255),
     canonicalExt4Sample_nodup (by decide), by simp [canonicalExt4Sample_length],
-    by decide, by decide, by decide +kernel, by decide +kernel⟩
+    by decide, by decide, ?_, ?_⟩
+  · rw [countGood_lt_range, List.length_range]; decide
+  · rw [countGood_lt_range, List.length_range]; decide
 
 /-! ## 11. Genuine Reed–Solomon + Degree-7 S-Box `RowArithmetization.Lawful` Instance -/
 
@@ -3658,7 +3717,7 @@ private theorem leb128_of_lt_128 {n : Nat} (hn : n < 128) : leb128 n = [UInt8.of
   unfold leb128
   cases n with
   | zero => rfl
-  | succ k => simp [leb128Aux, hn]
+  | succ k => simp only [leb128Aux, hn, ↓reduceIte]
 
 private theorem uint8_toNat_of_lt_128 {n : Nat} (hn : n < 128) :
     (UInt8.ofNat n).toNat = n := by
@@ -3820,6 +3879,8 @@ theorem verifyPqHashSig_sbox7_iff (seed root x0 : Goldilocks) (msg : List UInt8)
                 | cons f4 r5 => cases r5 with
                   | nil => cases hInj
                   | cons f5 r6 => simp at hInj; rfl
+    dsimp only
+    unfold thHashMsg
     show extractBaseWDigits 2 2
       (thCall sbox7FieldSuite tagHMsg (be 32 seed.val) ⟨0, 0, .wotsHash, 0, 0, 0⟩
         [[], be 32 root.val, mu, be 4 0] ++
@@ -3916,7 +3977,36 @@ def powGold (base : Goldilocks) : Nat → Goldilocks
 def omega8Domain : List GoldilocksExt4 :=
   (List.range 8).map (fun j => GoldilocksExt4.embedBase (powGold omega8 j))
 
-theorem omega8Domain_nodup : omega8Domain.Nodup := by decide +kernel
+private theorem omega8_pow_inj {i j : Nat} (hi : i < 8) (hj : j < 8)
+    (h : powGold omega8 i = powGold omega8 j) : i = j := by
+  have hv : (powGold omega8 i).val = (powGold omega8 j).val := congrArg Goldilocks.val h
+  rcases i with _ | _ | _ | _ | _ | _ | _ | _ | i <;> try omega
+  all_goals (rcases j with _ | _ | _ | _ | _ | _ | _ | _ | j <;> try omega)
+  all_goals (first | rfl | exact absurd hv (by decide))
+
+private theorem omega8Domain_getD_inj {i j : Nat} (hi : i < 8) (hj : j < 8)
+    (h : omega8Domain.getD i GoldilocksExt4.zero = omega8Domain.getD j GoldilocksExt4.zero) :
+    i = j := by
+  have hiL : i < omega8Domain.length := by simpa [omega8Domain] using hi
+  have hjL : j < omega8Domain.length := by simpa [omega8Domain] using hj
+  rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hiL, Option.getD_some,
+      List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjL, Option.getD_some] at h
+  simp only [omega8Domain, List.getElem_map, List.getElem_range] at h
+  exact omega8_pow_inj hi hj (GoldilocksExt4.embedBase_injective h)
+
+theorem omega8Domain_nodup : omega8Domain.Nodup := by
+  unfold omega8Domain
+  have hAux : ∀ {xs : List Nat}, xs.Nodup → (∀ z ∈ xs, z < 8) →
+      (xs.map (fun j => GoldilocksExt4.embedBase (powGold omega8 j))).Nodup := by
+    intro xs hnd hlt
+    induction hnd with
+    | nil => exact .nil
+    | @cons x rest hrel hndRest ih =>
+      refine .cons (fun b hb heq => ?_) (ih (fun z hz => hlt z (.tail _ hz)))
+      obtain ⟨y, hy, rfl⟩ := List.mem_map.mp hb
+      exact hrel y hy (omega8_pow_inj (hlt x (.head _)) (hlt y (.tail _ hy))
+        (GoldilocksExt4.embedBase_injective heq))
+  exact hAux List.nodup_range (fun z hz => List.mem_range.mp hz)
 
 /-- Standard blowup-4 Reed–Solomon encoding of `P(Y) = a0 + a1 * Y` on `omega8Domain` (`8` points). -/
 def encodeLinearRs8 (a0 a1 : Goldilocks) : List GoldilocksExt4 :=
@@ -3981,6 +4071,7 @@ theorem isLinearBaseRs8_encodeLinearRs8 (a0 a1 : Goldilocks) :
     rw [LawfulCommRing.neg_mul, LawfulCommRing.one_mul, ← LawfulCommRing.sub_eq_add_neg]
   have hRec : recoverLinearCoeffs8 (encodeLinearRs8 a0 a1) = (c0, c1) := by
     unfold recoverLinearCoeffs8
+    dsimp only
     rw [ht0, ht4]
     have hSum : CommRingOps.add (CommRingOps.add c0 c1) (CommRingOps.sub c0 c1) =
         CommRingOps.mul c0 (CommRingOps.add GoldilocksExt4.one GoldilocksExt4.one) := by
@@ -3997,7 +4088,9 @@ theorem isLinearBaseRs8_encodeLinearRs8 (a0 a1 : Goldilocks) :
         hTwoInv, LawfulCommRing.mul_one, LawfulCommRing.mul_one]
   refine ⟨?_, hRec⟩
   unfold isLinearBaseRs8
+  dsimp only
   rw [hRec]
+  dsimp only
   have hLen : ((encodeLinearRs8 a0 a1).length == 8) = true := by simp [encodeLinearRs8, omega8Domain]
   have hBaseAll : (encodeLinearRs8 a0 a1).all GoldilocksExt4.isBase = true := by
     apply List.all_eq_true.mpr
@@ -4044,35 +4137,33 @@ theorem tooth_corrupted_round0_symbol_rejected (table0 : List GoldilocksExt4)
               (recoverLinearCoeffs8 (table0.set idx v')).2 ]
   let j1 := if idx = 0 then 1 else 0
   let j2 := if idx = 0 then 2 else if idx = 1 then 2 else 1
-  have hj1Lt : j1 < 8 := by dsimp [j1]; split <;> omega
-  have hj2Lt : j2 < 8 := by dsimp [j2]; split <;> try split <;> omega
-  have hj1Ne : j1 ≠ idx := by dsimp [j1]; split <;> omega
-  have hj2Ne : j2 ≠ idx := by dsimp [j2]; split <;> try split <;> omega
+  have hj1Lt : j1 < 8 := by dsimp [j1]; omega
+  have hj2Lt : j2 < 8 := by dsimp [j2]; omega
+  have hj1Ne : j1 ≠ idx := by dsimp [j1]; omega
+  have hj2Ne : j2 ≠ idx := by dsimp [j2]; omega
+  have hj12Ne : j1 ≠ j2 := by dsimp [j1, j2]; omega
   let x1 := omega8Domain.getD j1 GoldilocksExt4.zero
   let x2 := omega8Domain.getD j2 GoldilocksExt4.zero
-  have hxNe : x1 ≠ x2 := by
-    dsimp [x1, x2, j1, j2]
-    if h0 : idx = 0 then
-      simp only [h0, ↓reduceIte]; decide +kernel
-    else if h1 : idx = 1 then
-      simp only [h0, h1, ↓reduceIte]; decide +kernel
-    else
-      simp only [h0, h1, ↓reduceIte]; decide +kernel
+  have hxNe : x1 ≠ x2 := fun hEq =>
+    hj12Ne (omega8Domain_getD_inj hj1Lt hj2Lt hEq)
   have hNd2 : [x1, x2].Nodup := by simp [hxNe]
   have hAgree1 : RoundPoly.evalCoeffs p1 x1 = RoundPoly.evalCoeffs p2 x1 := by
     have e1 := isLinearBaseRs8_eval_at hValid hj1Lt
     have e2 := isLinearBaseRs8_eval_at hBad hj1Lt
+    dsimp only at e1 e2
     rw [getD_set_ne _ _ _ _ _ hj1Ne] at e2
     exact e1.symm.trans e2
   have hAgree2 : RoundPoly.evalCoeffs p1 x2 = RoundPoly.evalCoeffs p2 x2 := by
     have e1 := isLinearBaseRs8_eval_at hValid hj2Lt
     have e2 := isLinearBaseRs8_eval_at hBad hj2Lt
+    dsimp only at e1 e2
     rw [getD_set_ne _ _ _ _ _ hj2Ne] at e2
     exact e1.symm.trans e2
   have hDisagreeIdx : RoundPoly.evalCoeffs p1 (omega8Domain.getD idx GoldilocksExt4.zero) ≠
       RoundPoly.evalCoeffs p2 (omega8Domain.getD idx GoldilocksExt4.zero) := by
     have e1 := isLinearBaseRs8_eval_at hValid hIdx
     have e2 := isLinearBaseRs8_eval_at hBad hIdx
+    dsimp only at e1 e2
     rw [getD_set_eq table0 idx v' GoldilocksExt4.zero (hLen8 ▸ hIdx)] at e2
     rw [← e1, ← e2]
     exact fun hEq => hMut hEq.symm
@@ -4181,10 +4272,12 @@ theorem length_polyMul_le :
   | [p], qs, m, n, _, hq => by
     simp only [polyMul, length_polyAdd, length_polyScale, List.length_cons, List.length_nil]
     exact Nat.max_le.mpr ⟨by omega, by omega⟩
-  | p :: p2 :: ps, qs, 0, _, hp, _ => by simp at hp; omega
+  | p :: p2 :: ps, qs, 0, _, hp, _ => by simp at hp
   | p :: p2 :: ps, qs, m + 1, n, hp, hq => by
     have ih := length_polyMul_le (p2 :: ps) qs m n (by simp at hp ⊢; omega) hq
-    simp only [polyMul, length_polyAdd, length_polyScale, List.length_cons]
+    show (polyAdd (polyScale p qs) (GoldilocksExt4.zero :: polyMul (p2 :: ps) qs)).length ≤
+      m + 1 + n + 1
+    rw [length_polyAdd, length_polyScale, List.length_cons]
     exact Nat.max_le.mpr ⟨by omega, by omega⟩
 
 /-- Honest degree-8 row gate polynomial `(1 - Y) * ((c0 + c1 * Y)^7 + seed - root)` (`length ≤ 9`). -/
@@ -4204,14 +4297,23 @@ theorem honestSbox7RoundPoly_length_le_9 (seed root : Goldilocks) (table0 : List
     (honestSbox7RoundPoly seed root table0).length ≤ 9 := by
   unfold honestSbox7RoundPoly
   dsimp only
-  have l1 : [ (recoverLinearCoeffs8 table0).1, (recoverLinearCoeffs8 table0).2 ].length ≤ 1 + 1 := by simp
-  have l2 := length_polyMul_le _ _ 1 1 l1 l1
-  have l4 := length_polyMul_le _ _ 2 2 l2 l2
-  have l6 := length_polyMul_le _ _ 4 2 l4 l2
-  have l7 := length_polyMul_le _ _ 6 1 l6 l1
-  have lg7 : (polyAdd _ [GoldilocksExt4.embedBase (CommRingOps.sub seed root)]).length ≤ 7 + 1 := by
-    rw [length_polyAdd]; exact Nat.max_le.mpr ⟨l7, by simp⟩
-  exact length_polyMul_le _ _ 1 7 (by simp) lg7
+  let lin := [ (recoverLinearCoeffs8 table0).1, (recoverLinearCoeffs8 table0).2 ]
+  let lin2 := polyMul lin lin
+  let lin4 := polyMul lin2 lin2
+  let lin6 := polyMul lin4 lin2
+  let lin7 := polyMul lin6 lin
+  let gate7 := polyAdd lin7 [GoldilocksExt4.embedBase (CommRingOps.sub seed root)]
+  let sel0 := [GoldilocksExt4.one, CommRingOps.neg GoldilocksExt4.one]
+  have l1 : lin.length ≤ 1 + 1 := by simp [lin]
+  have l2 := length_polyMul_le lin lin 1 1 l1 l1
+  have l4 := length_polyMul_le lin2 lin2 2 2 l2 l2
+  have l6 := length_polyMul_le lin4 lin2 4 2 l4 l2
+  have l7 := length_polyMul_le lin6 lin 6 1 l6 l1
+  have lg7 : gate7.length ≤ 7 + 1 := by
+    dsimp only [gate7]
+    rw [length_polyAdd]
+    exact Nat.max_le.mpr ⟨l7, by simp⟩
+  exact length_polyMul_le sel0 gate7 1 7 (by simp [sel0]) lg7
 
 theorem honestSbox7RoundPoly_eval (seed root : Goldilocks) (table0 : List GoldilocksExt4)
     (y : GoldilocksExt4) :
@@ -4309,6 +4411,7 @@ private theorem foldDuetExt4_const (v : GoldilocksExt4) (twY : Goldilocks)
       CommRingOps.mul v (CommRingOps.add GoldilocksExt4.one GoldilocksExt4.one) := by
     rw [LawfulCommRing.left_distrib, LawfulCommRing.mul_one]
   unfold foldDuetExt4
+  dsimp only
   rw [LawfulCommRing.sub_self, LawfulCommRing.zero_mul, LawfulCommRing.mul_zero,
       LawfulCommRing.add_zero, hSum, LawfulCommRing.mul_assoc, hTwoInv, LawfulCommRing.mul_one]
 
