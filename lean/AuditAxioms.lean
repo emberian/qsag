@@ -56,7 +56,13 @@ import all Qsag.ThresholdApproval
 import all Qsag.ThresholdMlDsaAndToprf
 import all Qsag.ThresholdMpc
 import all Qsag.UcGames
+import all Qsag.CodingTheory.PolyMv3
+import all Qsag.CodingTheory.SylvesterResultant
+import all Qsag.CodingTheory.DynamicGcdSplit
+import all Qsag.CodingTheory.UniversalHenselLift
+import all Qsag.CodingTheory.TrivariateGsExplainer
 import all Qsag.Tactic.AssuranceKit
+import all Qsag.Tactic.ConstructiveRing
 import Lean
 public meta import AxiomAuditSupport
 
@@ -87,9 +93,15 @@ run_cmd do
 
   -- 2. Explicit proof-module vs meta-infrastructure manifest (all Qsag/*.lean modules).
   let infrastructureModules : Array Name := #[
-    `Qsag.Tactic.AssuranceKit
+    `Qsag.Tactic.AssuranceKit,
+    `Qsag.Tactic.ConstructiveRing
   ]
   let auditedProofModules : Array Name := #[
+    `Qsag.CodingTheory.PolyMv3,
+    `Qsag.CodingTheory.SylvesterResultant,
+    `Qsag.CodingTheory.DynamicGcdSplit,
+    `Qsag.CodingTheory.UniversalHenselLift,
+    `Qsag.CodingTheory.TrivariateGsExplainer,
     `Qsag.ElfFunctionalEquiv,
     `Qsag.CorduroyAndHemAirCompleteness,
     `Qsag.ActiveMigrationZeroTest,

@@ -767,8 +767,6 @@ theorem decodeAnnotationRaw_encode (a : SpirvAnnotation) :
     simp only [encodeAnnotationRaw]
     unfold decodeAnnotationRaw
     simp [encodeDecorateRaw, h] at h ⊢
-    simp [encodeDecorateRaw] at h
-    rw [h]
   | memberDecorate sId mem dec =>
     simp [encodeAnnotationRaw, decodeAnnotationRaw, decodeDecorationWords_encode]
 
@@ -1004,11 +1002,52 @@ def decodeInstRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvInst :=
 theorem decodeInstRaw_encode (i : SpirvInst) :
     decodeInstRaw (encodeInstRaw i) = .ok i := by
   cases i with
-  | opControlBarrier es ms sem =>
-    simp [encodeInstRaw, decodeInstRaw, SpirvScope.ofWord?_toWord]
   | opVariable ty res sc =>
-    simp [encodeInstRaw, decodeInstRaw, SpirvStorageClass.ofWord?_toWord]
-  | _ => simp [encodeInstRaw, decodeInstRaw]
+    change (match SpirvStorageClass.ofWord? sc.toWord with
+      | some c => .ok (.opVariable ty res c)
+      | none => .error (.malformedSection "bad function OpVariable storage class")) =
+      (Except.ok (.opVariable ty res sc) : Except SpirvDecodeError SpirvInst)
+    rw [SpirvStorageClass.ofWord?_toWord]
+  | opFunctionCall _ _ _ _ => rfl
+  | opLoad _ _ _ => rfl
+  | opStore _ _ => rfl
+  | opAccessChain _ _ _ _ => rfl
+  | opCompositeConstruct _ _ _ => rfl
+  | opCompositeExtract _ _ _ _ => rfl
+  | opUConvert _ _ _ => rfl
+  | opIAdd _ _ _ _ => rfl
+  | opISub _ _ _ _ => rfl
+  | opIMul _ _ _ _ => rfl
+  | opUMod _ _ _ _ => rfl
+  | opUMulExtended _ _ _ _ => rfl
+  | opSelect _ _ _ _ _ => rfl
+  | opIEqual _ _ _ _ => rfl
+  | opINotEqual _ _ _ _ => rfl
+  | opUGreaterThan _ _ _ _ => rfl
+  | opUGreaterThanEqual _ _ _ _ => rfl
+  | opSGreaterThanEqual _ _ _ _ => rfl
+  | opULessThan _ _ _ _ => rfl
+  | opULessThanEqual _ _ _ _ => rfl
+  | opShiftRightLogical _ _ _ _ => rfl
+  | opShiftLeftLogical _ _ _ _ => rfl
+  | opBitwiseXor _ _ _ _ => rfl
+  | opBitwiseOr _ _ _ _ => rfl
+  | opBitwiseAnd _ _ _ _ => rfl
+  | opNot _ _ _ => rfl
+  | opBitReverse _ _ _ => rfl
+  | opControlBarrier es ms sem =>
+    change (match SpirvScope.ofWord? es.toWord, SpirvScope.ofWord? ms.toWord with
+      | some e, some m => .ok (.opControlBarrier e m sem)
+      | _, _ => .error (.malformedSection "bad OpControlBarrier scope")) =
+      (Except.ok (.opControlBarrier es ms sem) : Except SpirvDecodeError SpirvInst)
+    rw [SpirvScope.ofWord?_toWord, SpirvScope.ofWord?_toWord]
+  | opLoopMerge _ _ _ => rfl
+  | opSelectionMerge _ _ => rfl
+  | opLabel _ => rfl
+  | opBranch _ => rfl
+  | opBranchConditional _ _ _ => rfl
+  | opReturn => rfl
+  | opReturnValue _ => rfl
 
 def encodeParamRaw (p : UInt32 × UInt32) : RawSpirvInst := ⟨55, [p.1, p.2]⟩
 
@@ -1273,13 +1312,6 @@ theorem decodeSpirvModule_encodeSpirvModule {m : SpirvModule}
       (∀ x : SpirvTyGlobal, pred (encodeTyGlobalRaw x).opcode = false) →
       HeadFails pred (m.tyGlobals.map encodeTyGlobalRaw ++ encodeFunctionsRaw m.functions) :=
     fun pred h54 h => headFails_map encodeTyGlobalRaw h m.tyGlobals (hFn pred h54)
-  have hTgOp : ∀ (pred : Nat → Bool), (∀ op, isTyGlobalOpcode op = true → pred op = false) →
-      ∀ x : SpirvTyGlobal, pred (encodeTyGlobalRaw x).opcode = false := by
-    intro pred h x
-    apply h
-    cases x with
-    | ty t => cases t <;> rfl
-    | glob g => cases g <;> rfl
   have hAnnOp : ∀ a : SpirvAnnotation, (encodeAnnotationRaw a).opcode = 71 ∨
       (encodeAnnotationRaw a).opcode = 72 := by
     intro a; cases a with
@@ -1287,12 +1319,12 @@ theorem decodeSpirvModule_encodeSpirvModule {m : SpirvModule}
     | memberDecorate _ _ _ => exact .inr rfl
   have hDbgOp : ∀ d : SpirvDebugDecl, isDebugOpcode (encodeDebugRaw d).opcode = true := by
     intro d; cases d <;> rfl
-  rw [takeSection_encode encodeCapabilityRaw (fun _ => rfl) decodeCapabilityRaw_encode
+  rw [takeSection_encode (pred := fun x => x == 17) encodeCapabilityRaw (fun _ => rfl) decodeCapabilityRaw_encode
     m.capabilities
-    (headFails_map encodeExtInstImportRaw (fun _ => rfl) m.extInstImports (ys := _ :: _) rfl)]
+    (headFails_map (pred := fun x => x == 17) encodeExtInstImportRaw (fun _ => rfl) m.extInstImports (ys := ⟨14, [m.addrModel.toWord, m.memModel.toWord]⟩ :: _) rfl)]
   dsimp only
-  rw [takeSection_encode encodeExtInstImportRaw (fun _ => rfl) decodeExtInstImportRaw_encode
-    m.extInstImports (ys := _ :: _) rfl]
+  rw [takeSection_encode (pred := fun x => x == 11) encodeExtInstImportRaw (fun _ => rfl) decodeExtInstImportRaw_encode
+    m.extInstImports (ys := ⟨14, [m.addrModel.toWord, m.memModel.toWord]⟩ :: _) rfl]
   simp only [bne_self_eq_false, Bool.or_self, Bool.false_eq_true, ↓reduceIte,
     SpirvAddressingModel.ofWord?_toWord, SpirvMemoryModelKind.ofWord?_toWord]
   rw [takeSection_encode (encodeExecModeRaw m.entryFuncId)
@@ -1300,16 +1332,22 @@ theorem decodeSpirvModule_encodeSpirvModule {m : SpirvModule}
     (headFails_map encodeDebugRaw (by intro d; cases d <;> rfl) m.debug
       (headFails_map encodeAnnotationRaw
         (by intro a; rcases hAnnOp a with h | h <;> simp [h]) m.annotations
-        (hTg _ rfl (hTgOp _ (by decide)))))]
+        (hTg _ rfl (by intro x; cases x with
+          | ty t => cases t <;> rfl
+          | glob g => cases g <;> rfl))))]
   dsimp only
   rw [takeSection_encode encodeDebugRaw hDbgOp decodeDebugRaw_encode m.debug
     (headFails_map encodeAnnotationRaw
       (by intro a; rcases hAnnOp a with h | h <;> simp [h, isDebugOpcode]) m.annotations
-      (hTg _ rfl (hTgOp _ (by decide))))]
+      (hTg _ rfl (by intro x; cases x with
+          | ty t => cases t <;> rfl
+          | glob g => cases g <;> rfl)))]
   dsimp only
   rw [takeSection_encode encodeAnnotationRaw
     (by intro a; rcases hAnnOp a with h | h <;> simp [h, isAnnotationOpcode])
-    decodeAnnotationRaw_encode m.annotations (hTg _ rfl (hTgOp _ (by decide)))]
+    decodeAnnotationRaw_encode m.annotations (hTg _ rfl (by intro x; cases x with
+          | ty t => cases t <;> rfl
+          | glob g => cases g <;> rfl))]
   dsimp only
   rw [takeSection_encode encodeTyGlobalRaw
     (by intro x; cases x with
@@ -2955,6 +2993,12 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
         env.ptrInfo d₁ = some (sc, b, w))
     | _, _ => False := by
   cases inst with
+  | opVariable _ _ _
+  | opFunctionCall _ _ _ _ | opCompositeConstruct _ _ _ | opUMod _ _ _ _
+  | opINotEqual _ _ _ _ | opUGreaterThan _ _ _ _ | opSGreaterThanEqual _ _ _ _
+  | opULessThanEqual _ _ _ _ | opNot _ _ _ | opBitReverse _ _ _
+  | opReturn | opReturnValue _ =>
+    simp [checkInstSimtCtStrict, checkInstSimtCt] at hCt
   | opStore p v => exact False.elim (hNotStore p v rfl)
   | opControlBarrier es ms sem => exact False.elim (hNotBarrier es ms sem rfl)
   | opLabel l => exact False.elim (hNotLabel l rfl)
@@ -3476,6 +3520,12 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
         unfold checkProgSimtCt at hProgCt
         exact List.all_eq_true.mp hProgCt inst hInstMem
       cases inst with
+      | opVariable _ _ _
+      | opFunctionCall _ _ _ _ | opCompositeConstruct _ _ _ | opUMod _ _ _ _
+      | opINotEqual _ _ _ _ | opUGreaterThan _ _ _ _ | opSGreaterThanEqual _ _ _ _
+      | opULessThanEqual _ _ _ _ | opNot _ _ _ | opBitReverse _ _ _
+      | opReturn | opReturnValue _ =>
+        simp [checkInstSimtCtStrict, checkInstSimtCt] at hInstCt
       | opControlBarrier es ms sem =>
         cases es with
         | workgroup =>
@@ -3754,7 +3804,7 @@ theorem spirv_normative_bitwise_and_comparison_decode :
     decodeInstRaw ⟨170, [1, 2, 3, 4]⟩ = .ok (.opIEqual 1 2 3 4) ∧
     decodeInstRaw ⟨174, [1, 2, 3, 4]⟩ = .ok (.opUGreaterThanEqual 1 2 3 4) ∧
     decodeInstRaw ⟨176, [1, 2, 3, 4]⟩ = .ok (.opULessThan 1 2 3 4) := by
-  simp [decodeInstRaw]
+  exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 end Qsag
 end

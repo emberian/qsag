@@ -11,7 +11,9 @@ are excluded. Ordinary theorems are always checked, including private ones. A li
 consumer of an excluded helper is still checked through its complete axiom dependency cone. -/
 def isCompileTimeAssurance (env : Environment) (name : Name) : Bool := Id.run do
   let some idx := env.getModuleIdxFor? name | return false
-  if env.header.moduleNames[idx.toNat]! != `Qsag.Tactic.AssuranceKit then return false
+  let modName := env.header.moduleNames[idx.toNat]!
+  if modName != `Qsag.Tactic.AssuranceKit && modName != `Qsag.Tactic.ConstructiveRing then
+    return false
   let some info := env.find? name | return false
   if info matches .thmInfo _ then return false
   if info matches .axiomInfo _ then return false
