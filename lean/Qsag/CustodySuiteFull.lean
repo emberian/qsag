@@ -4443,3 +4443,1413 @@ private theorem bech32FoldBv_unpack_id (t : BitVec 32)
     1. `bech32mVerify hrpLower (data5 ++ bech32mCreateChecksum hrpLower data5) = true`
     2. Legacy BIP-173 (`const = 1`) residual never collides with `Bech32m` (`0x2bc830a3 ≠ 1`)
     3. Official BIP-350 test vector `"a1lqfn3a"` (`hrp = [97]`, checksum `[31, 0, 9, 19, 17, 29]`) passes! -/
+theorem bech32m_encode_verify_roundtrip (hrpLower data5 : List UInt8) :
+    let cs := bech32mCreateChecksum hrpLower data5
+    bech32mVerify hrpLower (data5 ++ cs) = true ∧
+    (bech32Polymod (bech32HrpExpand hrpLower ++ (data5 ++ cs))).toBitVec ≠ bech32LegacyConstBv ∧
+    bech32mVerify [97] [31, 0, 9, 19, 17, 29] = true := by
+  intro cs
+  let pfx := bech32HrpExpand hrpLower ++ data5
+  let raw := bech32FoldBv 1#32 (pfx ++ [0, 0, 0, 0, 0, 0])
+  have hRawHi := bech32FoldBv_high_bits_zero 1#32 (pfx ++ [0, 0, 0, 0, 0, 0]) (by decide) (by decide)
+  have hTarget30 : (raw ^^^ bech32mConstBv).getLsbD 30 = false := by
+    rw [BitVec.getLsbD_xor, hRawHi.1]
+    decide
+  have hTarget31 : (raw ^^^ bech32mConstBv).getLsbD 31 = false := by
+    rw [BitVec.getLsbD_xor, hRawHi.2]
+    decide
+  have hFoldEq : bech32FoldBv 1#32 (bech32HrpExpand hrpLower ++ (data5 ++ cs)) = bech32mConstBv := by
+    have hAssoc : bech32HrpExpand hrpLower ++ (data5 ++ cs) = pfx ++ cs := by
+      simp [pfx, List.append_assoc]
+    rw [hAssoc, bech32FoldBv_append]
+    have hCsLen : cs.length = 6 := by simp [cs, bech32mCreateChecksum, unpackBech32ChecksumWords]
+    rw [bech32FoldBv_xor_zeros (bech32FoldBv 1#32 pfx) cs, hCsLen]
+    have hRep6 : List.replicate 6 (0 : UInt8) = [0, 0, 0, 0, 0, 0] := rfl
+    rw [hRep6, ← bech32FoldBv_append]
+    change raw ^^^ bech32FoldBv 0#32 (unpackBech32ChecksumWords (raw ^^^ bech32mConstBv)) = bech32mConstBv
+    rw [bech32FoldBv_unpack_id (raw ^^^ bech32mConstBv) hTarget30 hTarget31]
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp only [BitVec.getLsbD_xor]
+    cases raw.getLsbD i <;> cases bech32mConstBv.getLsbD i <;> rfl
+  have hVer : bech32mVerify hrpLower (data5 ++ cs) = true := by
+    unfold bech32mVerify bech32Polymod
+    simp [hFoldEq]
+  have hNotLegacy : (bech32Polymod (bech32HrpExpand hrpLower ++ (data5 ++ cs))).toBitVec ≠ bech32LegacyConstBv := by
+    unfold bech32Polymod
+    rw [UInt32.toBitVec_ofBitVec, hFoldEq]
+    decide
+  exact ⟨hVer, hNotLegacy, by decide⟩
+
+/-- Role tag separating classical and post-quantum signing transcripts inside `HybridPinnedEnvelope`. -/
+inductive HybridRole where
+  | classical
+  | postQuantum
+  deriving DecidableEq, Repr
+
+def hybridRoleByte : HybridRole → UInt8
+  | .classical => 0x01
+  | .postQuantum => 0x02
+
+/-- Production conjunctive hybrid `WitnessSuiteTag` constants (`crates/qsag-addr/src/lib.rs:61-62`). -/
+def suiteHybridSecp256k1MlDsa44 : Nat := 0x0501
+def suiteHybridEd25519MlDsa65 : Nat := 0x0502
+
+/-- Production `HybridComponentAlgorithm` `#[repr(u16)]` discriminants (`crates/qsag-addr/src/lib.rs:335-344`). -/
+def algClassicalSecp256k1 : Nat := 0x0001
+def algClassicalEd25519 : Nat := 0x0002
+def algPqMlDsa44 : Nat := 0x0101
+def algPqMlDsa65 : Nat := 0x0102
+
+/-- Exact production `HybridSuiteSpec::for_suite` mapping (`0x0501 ↔ (0x0001, 0x0101)`, `0x0502 ↔ (0x0002, 0x0102)`). -/
+def validHybridSuiteTriplet (suiteTag classicalAlg pqAlg : Nat) : Bool :=
+  decide ((suiteTag = suiteHybridSecp256k1MlDsa44 ∧
+           classicalAlg = algClassicalSecp256k1 ∧
+           pqAlg = algPqMlDsa44) ∨
+          (suiteTag = suiteHybridEd25519MlDsa65 ∧
+           classicalAlg = algClassicalEd25519 ∧
+           pqAlg = algPqMlDsa65))
+
+/-- Exact ASCII domain prefix `"QSAG.HYBRID.V2"` (`14` bytes). -/
+def hybridPinnedMagic : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x59, 0x42, 0x52, 0x49, 0x44, 0x2E, 0x56, 0x32]
+
+/-- Exact ASCII domain tag `"QSAG.HYBRID.PK_CLASSICAL.V2"` (`27` bytes). -/
+def hybridPkClassicalDomain : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x59, 0x42, 0x52, 0x49, 0x44, 0x2E,
+   0x50, 0x4B, 0x5F, 0x43, 0x4C, 0x41, 0x53, 0x53, 0x49, 0x43, 0x41, 0x4C, 0x2E, 0x56, 0x32]
+
+/-- Exact ASCII domain tag `"QSAG.HYBRID.PK_PQ.V2"` (`20` bytes). -/
+def hybridPkPqDomain : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x59, 0x42, 0x52, 0x49, 0x44, 0x2E,
+   0x50, 0x4B, 0x5F, 0x50, 0x51, 0x2E, 0x56, 0x32]
+
+/-- Exact ASCII domain tag `"QSAG.HYBRID.ID_COMMIT.V2"` (`24` bytes). -/
+def hybridIdCommitDomain : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x48, 0x59, 0x42, 0x52, 0x49, 0x44, 0x2E,
+   0x49, 0x44, 0x5F, 0x43, 0x4F, 0x4D, 0x4D, 0x49, 0x54, 0x2E, 0x56, 0x32]
+
+/-- Domain-separated sponge family `(customization : List UInt8) → (input : List UInt8) → List UInt8`,
+    instantiated directly in production by `cshake256Bytes`. -/
+abbrev DomainHash := List UInt8 → List UInt8 → List UInt8
+
+/-- Constructive same-domain collision witness on `H_dom`. -/
+structure DomainHashCollisionWitness (H_dom : DomainHash) where
+  domain : List UInt8
+  m1 : List UInt8
+  m2 : List UInt8
+  ne : m1 ≠ m2
+  eq : H_dom domain m1 = H_dom domain m2
+  deriving Repr
+
+/-- Exact `HybridPinnedEnvelope::hash_classical_pk`:
+    `cshake256_framed_32(b"QSAG.HYBRID.PK_CLASSICAL.V2", &[&suite_be2, &classical_alg_be2, pk_classical])`. -/
+def hashHybridClassicalPk (H_dom : DomainHash) (suiteTag classicalAlg : Nat)
+    (pkClassical : List UInt8) : List UInt8 :=
+  H_dom hybridPkClassicalDomain (encodeFramedU64Le [be 2 suiteTag, be 2 classicalAlg, pkClassical])
+
+/-- Exact `HybridPinnedEnvelope::hash_pq_pk`:
+    `cshake256_framed_32(b"QSAG.HYBRID.PK_PQ.V2", &[&suite_be2, &pq_alg_be2, pk_pq])`. -/
+def hashHybridPqPk (H_dom : DomainHash) (suiteTag pqAlg : Nat)
+    (pkPq : List UInt8) : List UInt8 :=
+  H_dom hybridPkPqDomain (encodeFramedU64Le [be 2 suiteTag, be 2 pqAlg, pkPq])
+
+/-- Exact `HybridPinnedEnvelope::compute_id_commit`:
+    `cshake256_framed_32(b"QSAG.HYBRID.ID_COMMIT.V2", &[&suite_be2, &c_be2, &pq_be2, pk_c_digest, pk_pq_digest])`. -/
+def computeAddrHybridIdCommit (H_dom : DomainHash) (suiteTag classicalAlg pqAlg : Nat)
+    (pkClassicalDigest pkPqDigest : List UInt8) : List UInt8 :=
+  H_dom hybridIdCommitDomain
+    (encodeFramedU64Le [be 2 suiteTag, be 2 classicalAlg, be 2 pqAlg,
+                        pkClassicalDigest, pkPqDigest])
+
+/-- Exact `HybridPinnedEnvelope::signing_transcript` (`crates/qsag-addr/src/lib.rs:566-586`):
+    `"QSAG.HYBRID.V2" || role (1) || suite (2, BE) || classical_alg (2, BE) || pq_alg (2, BE)`
+    `|| id_commit (32) || pk_classical_digest (32) || pk_pq_digest (32) || len(msg) (8, BE) || msg`. -/
+def encodeHybridRolePayload (role : HybridRole) (suiteTag classicalAlg pqAlg : Nat)
+    (idCommit pkClassicalDigest pkPqDigest msg : List UInt8) : List UInt8 :=
+  hybridPinnedMagic ++
+  ([hybridRoleByte role] ++
+  (be 2 suiteTag ++
+  (be 2 classicalAlg ++
+  (be 2 pqAlg ++
+  (idCommit ++
+  (pkClassicalDigest ++
+  (pkPqDigest ++
+  (be 8 msg.length ++ msg))))))))
+
+theorem encodeHybridRolePayload_injective
+    {r₁ r₂ : HybridRole} {s₁ s₂ c₁ c₂ p₁ p₂ : Nat}
+    {id₁ id₂ pkCD₁ pkCD₂ pkPD₁ pkPD₂ m₁ m₂ : List UInt8}
+    (hs₁ : s₁ < 256 ^ 2) (hs₂ : s₂ < 256 ^ 2)
+    (hc₁ : c₁ < 256 ^ 2) (hc₂ : c₂ < 256 ^ 2)
+    (hp₁ : p₁ < 256 ^ 2) (hp₂ : p₂ < 256 ^ 2)
+    (hid₁ : id₁.length = 32) (hid₂ : id₂.length = 32)
+    (hcd₁ : pkCD₁.length = 32) (hcd₂ : pkCD₂.length = 32)
+    (hpd₁ : pkPD₁.length = 32) (hpd₂ : pkPD₂.length = 32)
+    (hEq : encodeHybridRolePayload r₁ s₁ c₁ p₁ id₁ pkCD₁ pkPD₁ m₁ =
+           encodeHybridRolePayload r₂ s₂ c₂ p₂ id₂ pkCD₂ pkPD₂ m₂) :
+    r₁ = r₂ ∧ s₁ = s₂ ∧ c₁ = c₂ ∧ p₁ = p₂ ∧
+    id₁ = id₂ ∧ pkCD₁ = pkCD₂ ∧ pkPD₁ = pkPD₂ ∧ m₁ = m₂ := by
+  unfold encodeHybridRolePayload at hEq
+  obtain ⟨_, t1⟩ := List.append_inj hEq rfl
+  obtain ⟨hRole, t2⟩ := List.append_inj t1 rfl
+  obtain ⟨hS, t3⟩ := List.append_inj t2 (by simp [length_be])
+  obtain ⟨hC, t4⟩ := List.append_inj t3 (by simp [length_be])
+  obtain ⟨hP, t5⟩ := List.append_inj t4 (by simp [length_be])
+  obtain ⟨hId, t6⟩ := List.append_inj t5 (hid₁.trans hid₂.symm)
+  obtain ⟨hCD, t7⟩ := List.append_inj t6 (hcd₁.trans hcd₂.symm)
+  obtain ⟨hPD, t8⟩ := List.append_inj t7 (hpd₁.trans hpd₂.symm)
+  obtain ⟨_, hM⟩ := List.append_inj t8 (by simp [length_be])
+  have hr : r₁ = r₂ := by
+    cases r₁ <;> cases r₂ <;> simp [hybridRoleByte] at hRole <;> rfl
+  exact ⟨hr, be_injective hs₁ hs₂ hS, be_injective hc₁ hc₂ hC, be_injective hp₁ hp₂ hP,
+         hId, hCD, hPD, hM⟩
+
+/-- Non-malleable conjunctive hybrid signature envelope byte-aligned with `HybridPinnedEnvelope`
+    in `crates/qsag-addr/src/lib.rs:504-515`. -/
+structure HybridPinnedEnvelope where
+  suiteTag : Nat
+  classicalAlg : Nat
+  pqAlg : Nat
+  idCommit : List UInt8
+  pkClassicalDigest : List UInt8
+  pkPqDigest : List UInt8
+  pkClassical : List UInt8
+  pkPq : List UInt8
+  sigClassical : List UInt8
+  sigPq : List UInt8
+  deriving DecidableEq, Repr
+
+/-- Conjunctive hybrid envelope verifier pinning `validHybridSuiteTriplet` (`0x0501` / `0x0502`),
+    32-byte `pkClassicalDigest`, `pkPqDigest`, `idCommit` preimages (`u64 LE` framed), and both
+    role-separated `"QSAG.HYBRID.V2"` signatures. -/
+@[expose] def verifyHybridPinnedEnvelope (H_dom : DomainHash)
+    (verifyClassical verifyPq : List UInt8 → List UInt8 → List UInt8 → Bool)
+    (expectedSuite expectedClassicalAlg expectedPqAlg : Nat)
+    (expectedIdCommit msg : List UInt8)
+    (env : HybridPinnedEnvelope) : Bool :=
+  let suiteValid := validHybridSuiteTriplet env.suiteTag env.classicalAlg env.pqAlg
+  let widthsOk :=
+    decide (env.idCommit.length = 32 ∧
+            env.pkClassicalDigest.length = 32 ∧
+            env.pkPqDigest.length = 32 ∧
+            env.pkClassical.length < 256 ^ 8 ∧
+            env.pkPq.length < 256 ^ 8)
+  let tagsMatch :=
+    decide (env.suiteTag = expectedSuite ∧
+            env.classicalAlg = expectedClassicalAlg ∧
+            env.pqAlg = expectedPqAlg ∧
+            env.idCommit = expectedIdCommit)
+  let recomputedPkCD :=
+    hashHybridClassicalPk H_dom env.suiteTag env.classicalAlg env.pkClassical
+  let recomputedPkPD :=
+    hashHybridPqPk H_dom env.suiteTag env.pqAlg env.pkPq
+  let recomputedId :=
+    computeAddrHybridIdCommit H_dom env.suiteTag env.classicalAlg env.pqAlg
+      env.pkClassicalDigest env.pkPqDigest
+  let digestsMatch :=
+    decide (recomputedPkCD = env.pkClassicalDigest ∧
+            recomputedPkPD = env.pkPqDigest ∧
+            recomputedId = expectedIdCommit)
+  let cTranscript :=
+    encodeHybridRolePayload .classical env.suiteTag env.classicalAlg env.pqAlg
+      env.idCommit env.pkClassicalDigest env.pkPqDigest msg
+  let pqTranscript :=
+    encodeHybridRolePayload .postQuantum env.suiteTag env.classicalAlg env.pqAlg
+      env.idCommit env.pkClassicalDigest env.pkPqDigest msg
+  suiteValid && widthsOk && tagsMatch && digestsMatch &&
+  verifyClassical env.pkClassical cTranscript env.sigClassical &&
+  verifyPq env.pkPq pqTranscript env.sigPq
+
+/-- Constructive conjunctive EUF-CMA forgery witness on the exact pinned `(pkClassical, pkPq)` pair. -/
+structure HybridCombinedForgeryWitness
+    (verifyClassical verifyPq : List UInt8 → List UInt8 → List UInt8 → Bool)
+    (pinnedPkC pinnedPkPq : List UInt8)
+    (signedClassicalPayloads signedPqPayloads : List (List UInt8)) where
+  classicalPayload : List UInt8
+  classicalSig : List UInt8
+  classical_fresh : classicalPayload ∉ signedClassicalPayloads
+  classical_valid : verifyClassical pinnedPkC classicalPayload classicalSig = true
+  pqPayload : List UInt8
+  pqSig : List UInt8
+  pq_fresh : pqPayload ∉ signedPqPayloads
+  pq_valid : verifyPq pinnedPkPq pqPayload pqSig = true
+  role_disjoint : classicalPayload ≠ pqPayload
+
+private theorem hybridSuite_u16_bounds {s c p : Nat}
+    (h : validHybridSuiteTriplet s c p = true) :
+    s < 256 ^ 2 ∧ c < 256 ^ 2 ∧ p < 256 ^ 2 := by
+  unfold validHybridSuiteTriplet suiteHybridSecp256k1MlDsa44 suiteHybridEd25519MlDsa65
+    algClassicalSecp256k1 algClassicalEd25519 algPqMlDsa44 algPqMlDsa65 at h
+  rcases of_decide_eq_true h with ⟨rfl, rfl, rfl⟩ | ⟨rfl, rfl, rfl⟩ <;> decide
+
+/-- **Hybrid Non-Strippability & Conjunctive EUF-CMA Reduction
+    (`hybrid_pinned_non_strippable_and_combined_euf_cma`)**:
+    Suppose an identity pins `pinnedId = computeAddrHybridIdCommit H_dom suite cAlg pqAlg pkCD pkPD`
+    (with `pkCD = hashHybridClassicalPk H_dom suite cAlg pkC`, `pkPD = hashHybridPqPk H_dom suite pqAlg pkPq`,
+    `0x0501` or `0x0502`), and honest signers have only signed messages `m ∈ signedMsgs` under `(pkC, pkPq)`.
+    Any accepted `HybridPinnedEnvelope` on a fresh message `msg ∉ signedMsgs` (or with substituted keys)
+    constructively (`0 Classical.choice`) yields EITHER:
+    1. A same-domain `DomainHashCollisionWitness H_dom` on `"QSAG.HYBRID.ID_COMMIT.V2"`,
+       `"QSAG.HYBRID.PK_CLASSICAL.V2"`, or `"QSAG.HYBRID.PK_PQ.V2"` (blocking PQ/classical key stripping!), OR
+    2. A **simultaneous** `HybridCombinedForgeryWitness` breaking **BOTH** `verifyClassical` on `pkC`
+       AND `verifyPq` on `pkPq` with disjoint `"QSAG.HYBRID.V2"` role-separated transcripts! -/
+def hybrid_pinned_non_strippable_and_combined_euf_cma
+    (H_dom : DomainHash)
+    (verifyClassical verifyPq : List UInt8 → List UInt8 → List UInt8 → Bool)
+    (suite cAlg pqAlg : Nat) (pkC pkPq : List UInt8)
+    (signedMsgs : List (List UInt8))
+    (msg : List UInt8) (env : HybridPinnedEnvelope)
+    (hOut32 : ∀ dom x, (H_dom dom x).length = 32)
+    (hPkCBound : pkC.length < 256 ^ 8)
+    (hPkPqBound : pkPq.length < 256 ^ 8)
+    (hFreshOrSubst : msg ∉ signedMsgs ∨ env.pkClassical ≠ pkC ∨ env.pkPq ≠ pkPq)
+    (hAccept :
+      let pkCD := hashHybridClassicalPk H_dom suite cAlg pkC
+      let pkPD := hashHybridPqPk H_dom suite pqAlg pkPq
+      let pinnedId := computeAddrHybridIdCommit H_dom suite cAlg pqAlg pkCD pkPD
+      verifyHybridPinnedEnvelope H_dom verifyClassical verifyPq
+        suite cAlg pqAlg pinnedId msg env = true) :
+    let pkCD := hashHybridClassicalPk H_dom suite cAlg pkC
+    let pkPD := hashHybridPqPk H_dom suite pqAlg pkPq
+    let pinnedId := computeAddrHybridIdCommit H_dom suite cAlg pqAlg pkCD pkPD
+    let honestC := signedMsgs.map (fun m =>
+      encodeHybridRolePayload .classical suite cAlg pqAlg pinnedId pkCD pkPD m)
+    let honestPq := signedMsgs.map (fun m =>
+      encodeHybridRolePayload .postQuantum suite cAlg pqAlg pinnedId pkCD pkPD m)
+    PSum (DomainHashCollisionWitness H_dom)
+         (HybridCombinedForgeryWitness verifyClassical verifyPq pkC pkPq honestC honestPq) :=
+  let pkCD := hashHybridClassicalPk H_dom suite cAlg pkC
+  let pkPD := hashHybridPqPk H_dom suite pqAlg pkPq
+  let pinnedId := computeAddrHybridIdCommit H_dom suite cAlg pqAlg pkCD pkPD
+  have hUnpack :
+      validHybridSuiteTriplet env.suiteTag env.classicalAlg env.pqAlg = true ∧
+      (env.idCommit.length = 32 ∧ env.pkClassicalDigest.length = 32 ∧
+       env.pkPqDigest.length = 32 ∧ env.pkClassical.length < 256 ^ 8 ∧
+       env.pkPq.length < 256 ^ 8) ∧
+      (env.suiteTag = suite ∧ env.classicalAlg = cAlg ∧ env.pqAlg = pqAlg ∧ env.idCommit = pinnedId) ∧
+      (hashHybridClassicalPk H_dom env.suiteTag env.classicalAlg env.pkClassical = env.pkClassicalDigest ∧
+       hashHybridPqPk H_dom env.suiteTag env.pqAlg env.pkPq = env.pkPqDigest ∧
+       computeAddrHybridIdCommit H_dom env.suiteTag env.classicalAlg env.pqAlg
+         env.pkClassicalDigest env.pkPqDigest = pinnedId) ∧
+      verifyClassical env.pkClassical
+        (encodeHybridRolePayload .classical env.suiteTag env.classicalAlg env.pqAlg
+          env.idCommit env.pkClassicalDigest env.pkPqDigest msg) env.sigClassical = true ∧
+      verifyPq env.pkPq
+        (encodeHybridRolePayload .postQuantum env.suiteTag env.classicalAlg env.pqAlg
+          env.idCommit env.pkClassicalDigest env.pkPqDigest msg) env.sigPq = true := by
+    dsimp only at hAccept
+    unfold verifyHybridPinnedEnvelope at hAccept
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hAccept
+    exact ⟨hAccept.1.1.1.1.1, hAccept.1.1.1.1.2, hAccept.1.1.1.2,
+           hAccept.1.1.2, hAccept.1.2, hAccept.2⟩
+  if hKeysEq : env.pkClassical = pkC ∧ env.pkPq = pkPq then
+    have hMsgFresh : msg ∉ signedMsgs := by
+      rcases hFreshOrSubst with hm | hc | hp
+      · exact hm
+      · exact False.elim (hc hKeysEq.1)
+      · exact False.elim (hp hKeysEq.2)
+    have hSuiteValid : validHybridSuiteTriplet suite cAlg pqAlg = true := by
+      rcases hUnpack.2.2.1 with ⟨hS, hCA, hPA, _⟩
+      simpa [hS, hCA, hPA] using hUnpack.1
+    have hU16 := hybridSuite_u16_bounds hSuiteValid
+    have hEnvCD : env.pkClassicalDigest = pkCD := by
+      rcases hUnpack.2.2.1 with ⟨hS, hCA, _, _⟩
+      have hRec := hUnpack.2.2.2.1.1
+      rw [hS, hCA, hKeysEq.1] at hRec
+      exact hRec.symm
+    have hEnvPD : env.pkPqDigest = pkPD := by
+      rcases hUnpack.2.2.1 with ⟨hS, _, hPA, _⟩
+      have hRec := hUnpack.2.2.2.1.2.1
+      rw [hS, hPA, hKeysEq.2] at hRec
+      exact hRec.symm
+    let cPay := encodeHybridRolePayload .classical suite cAlg pqAlg pinnedId pkCD pkPD msg
+    let pqPay := encodeHybridRolePayload .postQuantum suite cAlg pqAlg pinnedId pkCD pkPD msg
+    have hcVal : verifyClassical pkC cPay env.sigClassical = true := by
+      rcases hUnpack.2.2.1 with ⟨hS, hCA, hPA, hId⟩
+      simpa [cPay, hS, hCA, hPA, hId, hEnvCD, hEnvPD, hKeysEq.1] using hUnpack.2.2.2.2.1
+    have hpqVal : verifyPq pkPq pqPay env.sigPq = true := by
+      rcases hUnpack.2.2.1 with ⟨hS, hCA, hPA, hId⟩
+      simpa [pqPay, hS, hCA, hPA, hId, hEnvCD, hEnvPD, hKeysEq.2] using hUnpack.2.2.2.2.2
+    have hId32 : pinnedId.length = 32 := hOut32 _ _
+    have hCD32 : pkCD.length = 32 := hOut32 _ _
+    have hPD32 : pkPD.length = 32 := hOut32 _ _
+    have hcFresh : cPay ∉ signedMsgs.map (fun m =>
+        encodeHybridRolePayload .classical suite cAlg pqAlg pinnedId pkCD pkPD m) := by
+      intro hMem
+      rw [List.mem_map] at hMem
+      obtain ⟨m', hm'Mem, hm'Eq⟩ := hMem
+      have hInj := encodeHybridRolePayload_injective
+        hU16.1 hU16.1 hU16.2.1 hU16.2.1 hU16.2.2 hU16.2.2
+        hId32 hId32 hCD32 hCD32 hPD32 hPD32 hm'Eq
+      exact hMsgFresh (hInj.2.2.2.2.2.2.2 ▸ hm'Mem)
+    have hpqFresh : pqPay ∉ signedMsgs.map (fun m =>
+        encodeHybridRolePayload .postQuantum suite cAlg pqAlg pinnedId pkCD pkPD m) := by
+      intro hMem
+      rw [List.mem_map] at hMem
+      obtain ⟨m', hm'Mem, hm'Eq⟩ := hMem
+      have hInj := encodeHybridRolePayload_injective
+        hU16.1 hU16.1 hU16.2.1 hU16.2.1 hU16.2.2 hU16.2.2
+        hId32 hId32 hCD32 hCD32 hPD32 hPD32 hm'Eq
+      exact hMsgFresh (hInj.2.2.2.2.2.2.2 ▸ hm'Mem)
+    have hDisj : cPay ≠ pqPay := fun hEq => by
+      have hR := (encodeHybridRolePayload_injective
+        hU16.1 hU16.1 hU16.2.1 hU16.2.1 hU16.2.2 hU16.2.2
+        hId32 hId32 hCD32 hCD32 hPD32 hPD32 hEq).1
+      cases hR
+    .inr { classicalPayload := cPay
+           classicalSig := env.sigClassical
+           classical_fresh := hcFresh
+           classical_valid := hcVal
+           pqPayload := pqPay
+           pqSig := env.sigPq
+           pq_fresh := hpqFresh
+           pq_valid := hpqVal
+           role_disjoint := hDisj }
+  else if hDigsEq : env.pkClassicalDigest = pkCD ∧ env.pkPqDigest = pkPD then
+    if hPkCEq : env.pkClassical = pkC then
+      have hPkPqNe : env.pkPq ≠ pkPq := fun hEq => hKeysEq ⟨hPkCEq, hEq⟩
+      let m1 := encodeFramedU64Le [be 2 env.suiteTag, be 2 env.pqAlg, env.pkPq]
+      let m2 := encodeFramedU64Le [be 2 suite, be 2 pqAlg, pkPq]
+      have hNe : m1 ≠ m2 := fun hmEq => by
+        have hF := encodeFramedU64Le_injective
+          (list3_len_lt_u64 _ _ _)
+          (fun f hf => by
+            rcases List.mem_cons.mp hf with rfl | hf1
+            · exact be_length_lt_u64 (by decide) _
+            · rcases List.mem_cons.mp hf1 with rfl | hf2
+              · exact be_length_lt_u64 (by decide) _
+              · rcases List.mem_cons.mp hf2 with rfl | hf3
+                · exact hUnpack.2.1.2.2.2.2
+                · cases hf3)
+          (list3_len_lt_u64 _ _ _)
+          (fun f hf => by
+            rcases List.mem_cons.mp hf with rfl | hf1
+            · exact be_length_lt_u64 (by decide) _
+            · rcases List.mem_cons.mp hf1 with rfl | hf2
+              · exact be_length_lt_u64 (by decide) _
+              · rcases List.mem_cons.mp hf2 with rfl | hf3
+                · exact hPkPqBound
+                · cases hf3)
+          hmEq
+        simp only [List.cons.injEq] at hF
+        exact hPkPqNe hF.2.2.1
+      have hHashEq : H_dom hybridPkPqDomain m1 = H_dom hybridPkPqDomain m2 := by
+        change hashHybridPqPk H_dom env.suiteTag env.pqAlg env.pkPq = pkPD
+        exact hUnpack.2.2.2.1.2.1.trans hDigsEq.2
+      .inl { domain := hybridPkPqDomain, m1 := m1, m2 := m2, ne := hNe, eq := hHashEq }
+    else
+      let m1 := encodeFramedU64Le [be 2 env.suiteTag, be 2 env.classicalAlg, env.pkClassical]
+      let m2 := encodeFramedU64Le [be 2 suite, be 2 cAlg, pkC]
+      have hNe : m1 ≠ m2 := fun hmEq => by
+        have hF := encodeFramedU64Le_injective
+          (list3_len_lt_u64 _ _ _)
+          (fun f hf => by
+            rcases List.mem_cons.mp hf with rfl | hf1
+            · exact be_length_lt_u64 (by decide) _
+            · rcases List.mem_cons.mp hf1 with rfl | hf2
+              · exact be_length_lt_u64 (by decide) _
+              · rcases List.mem_cons.mp hf2 with rfl | hf3
+                · exact hUnpack.2.1.2.2.2.1
+                · cases hf3)
+          (list3_len_lt_u64 _ _ _)
+          (fun f hf => by
+            rcases List.mem_cons.mp hf with rfl | hf1
+            · exact be_length_lt_u64 (by decide) _
+            · rcases List.mem_cons.mp hf1 with rfl | hf2
+              · exact be_length_lt_u64 (by decide) _
+              · rcases List.mem_cons.mp hf2 with rfl | hf3
+                · exact hPkCBound
+                · cases hf3)
+          hmEq
+        simp only [List.cons.injEq] at hF
+        exact hPkCEq hF.2.2.1
+      have hHashEq : H_dom hybridPkClassicalDomain m1 = H_dom hybridPkClassicalDomain m2 := by
+        change hashHybridClassicalPk H_dom env.suiteTag env.classicalAlg env.pkClassical = pkCD
+        exact hUnpack.2.2.2.1.1.trans hDigsEq.1
+      .inl { domain := hybridPkClassicalDomain, m1 := m1, m2 := m2, ne := hNe, eq := hHashEq }
+  else
+    let m1 := encodeFramedU64Le [be 2 env.suiteTag, be 2 env.classicalAlg, be 2 env.pqAlg,
+                                 env.pkClassicalDigest, env.pkPqDigest]
+    let m2 := encodeFramedU64Le [be 2 suite, be 2 cAlg, be 2 pqAlg, pkCD, pkPD]
+    have hNe : m1 ≠ m2 := fun hmEq => by
+      have hCD32 : pkCD.length = 32 := hOut32 _ _
+      have hPD32 : pkPD.length = 32 := hOut32 _ _
+      have hF := encodeFramedU64Le_injective
+        (list5_len_lt_u64 _ _ _ _ _)
+        (fun f hf => by
+          simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+          rcases hf with rfl | rfl | rfl | rfl | rfl
+          · exact be_length_lt_u64 (by decide) _
+          · exact be_length_lt_u64 (by decide) _
+          · exact be_length_lt_u64 (by decide) _
+          · rw [hUnpack.2.1.2.1]; decide
+          · rw [hUnpack.2.1.2.2.1]; decide)
+        (list5_len_lt_u64 _ _ _ _ _)
+        (fun f hf => by
+          simp only [List.mem_cons, List.not_mem_nil, or_false] at hf
+          rcases hf with rfl | rfl | rfl | rfl | rfl
+          · exact be_length_lt_u64 (by decide) _
+          · exact be_length_lt_u64 (by decide) _
+          · exact be_length_lt_u64 (by decide) _
+          · rw [hCD32]; decide
+          · rw [hPD32]; decide)
+        hmEq
+      simp only [List.cons.injEq] at hF
+      exact hDigsEq ⟨hF.2.2.2.1, hF.2.2.2.2.1⟩
+    have hHashEq : H_dom hybridIdCommitDomain m1 = H_dom hybridIdCommitDomain m2 :=
+      hUnpack.2.2.2.1.2.2
+    .inl { domain := hybridIdCommitDomain, m1 := m1, m2 := m2, ne := hNe, eq := hHashEq }
+
+/-- Naive unpinned hybrid verifier vulnerable to PQ key substitution / stripping. -/
+def unpinnedHybridVerify
+    (verifyClassical verifyPq : List UInt8 → List UInt8 → List UInt8 → Bool)
+    (pinnedPkC msg candidatePkPq sigC sigPq : List UInt8) : Bool :=
+  verifyClassical pinnedPkC msg sigC && verifyPq candidatePkPq msg sigPq
+
+/-- **`#tooth` Unpinned Hybrid Key-Stripping Attack (`tooth_unpinned_concatenation_allows_pq_key_stripping`)**:
+    If the classical signature signs raw `msg` without pinning `pkPq` (and the identity does not pin
+    `idCommit`), a quantum adversary who breaks ONLY `pinnedPkC` substitutes its OWN fresh `attackerPkPq ≠ honestPkPq`
+    and passes verification with zero forgery against `honestPkPq`! -/
+theorem tooth_unpinned_concatenation_allows_pq_key_stripping :
+    let verifyC : List UInt8 → List UInt8 → List UInt8 → Bool := fun pk m s => decide (s = pk ++ m)
+    let verifyPq : List UInt8 → List UInt8 → List UInt8 → Bool := fun pk m s => decide (s = pk ++ m)
+    let honestPkC : List UInt8 := [0x11]
+    let honestPkPq : List UInt8 := [0x22]
+    let attackerPkPq : List UInt8 := [0x99]
+    let msg : List UInt8 := [0x42]
+    attackerPkPq ≠ honestPkPq ∧
+    unpinnedHybridVerify verifyC verifyPq honestPkC msg attackerPkPq
+      (honestPkC ++ msg) (attackerPkPq ++ msg) = true ∧
+    verifyPq honestPkPq msg (attackerPkPq ++ msg) = false := by
+  decide
+
+/-- **`#tooth` Swapped Suite / Algorithm Triplet Rejection (`tooth_hybrid_swapped_suite_alg_rejected`)**:
+    Production `validHybridSuiteTriplet` accepts `0x0501 = (Secp256k1=0x0001, MlDsa44=0x0101)` and
+    `0x0502 = (Ed25519=0x0002, MlDsa65=0x0102)`, while rejecting swapped/colliding pairings such as
+    `(0x0501, 0x0002, 0x0102)`! -/
+theorem tooth_hybrid_swapped_suite_alg_rejected :
+    validHybridSuiteTriplet suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 algPqMlDsa44 = true ∧
+    validHybridSuiteTriplet suiteHybridEd25519MlDsa65 algClassicalEd25519 algPqMlDsa65 = true ∧
+    validHybridSuiteTriplet suiteHybridSecp256k1MlDsa44 algClassicalEd25519 algPqMlDsa65 = false := by
+  decide
+
+/-- Non-trivial inhabitedness witness for `verifyHybridPinnedEnvelope` over concrete SP 800-185
+    `cshake256Bytes`, production suite `0x0501` (`HybridSecp256k1MlDsa44`), and distinct role-tagged
+    classical/PQ verifiers. -/
+theorem witness_hybrid_envelope_inhabited :
+    let H_dom : DomainHash := cshake256Bytes
+    let verifyClassical : List UInt8 → List UInt8 → List UInt8 → Bool :=
+      fun pk pay sig => decide (sig = (0xC1 : UInt8) :: (pk ++ pay))
+    let verifyPq : List UInt8 → List UInt8 → List UInt8 → Bool :=
+      fun pk pay sig => decide (sig = (0x51 : UInt8) :: (pk ++ pay))
+    let pkC : List UInt8 := [0x02, 0x11, 0x22]
+    let pkPq : List UInt8 := [0x33, 0x44, 0x55]
+    let pkCD := hashHybridClassicalPk H_dom suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 pkC
+    let pkPD := hashHybridPqPk H_dom suiteHybridSecp256k1MlDsa44 algPqMlDsa44 pkPq
+    let idC := computeAddrHybridIdCommit H_dom suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 algPqMlDsa44 pkCD pkPD
+    let cPay := encodeHybridRolePayload .classical suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 algPqMlDsa44 idC pkCD pkPD [0xFF]
+    let pqPay := encodeHybridRolePayload .postQuantum suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 algPqMlDsa44 idC pkCD pkPD [0xFF]
+    let env : HybridPinnedEnvelope :=
+      { suiteTag := suiteHybridSecp256k1MlDsa44
+        classicalAlg := algClassicalSecp256k1
+        pqAlg := algPqMlDsa44
+        idCommit := idC
+        pkClassicalDigest := pkCD
+        pkPqDigest := pkPD
+        pkClassical := pkC
+        pkPq := pkPq
+        sigClassical := (0xC1 : UInt8) :: (pkC ++ cPay)
+        sigPq := (0x51 : UInt8) :: (pkPq ++ pqPay) }
+    (H_dom hybridIdCommitDomain [0x00]).length = 32 ∧
+    H_dom hybridIdCommitDomain [0x00] ≠ [0x00] ∧
+    verifyClassical pkC cPay env.sigPq = false ∧
+    verifyHybridPinnedEnvelope H_dom verifyClassical verifyPq
+      suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 algPqMlDsa44 idC [0xFF] env = true := by
+  intro H_dom verifyClassical verifyPq pkC pkPq pkCD pkPD idC cPay pqPay env
+  have hLen32 : (H_dom hybridIdCommitDomain [0x00]).length = 32 :=
+    cshake256Bytes_length hybridIdCommitDomain [0x00]
+  have hNotId : H_dom hybridIdCommitDomain [0x00] ≠ [0x00] := by
+    intro hEq
+    have hL := congrArg List.length hEq
+    rw [hLen32] at hL
+    cases hL
+  have hCrossRole : verifyClassical pkC cPay env.sigPq = false := by
+    dsimp only [verifyClassical, env]
+    exact decide_eq_false (fun h => by injection h with hHd _; cases hHd)
+  have hIdLen : idC.length = 32 := cshake256Bytes_length _ _
+  have hCDLen : pkCD.length = 32 := cshake256Bytes_length _ _
+  have hPDLen : pkPD.length = 32 := cshake256Bytes_length _ _
+  have hPkCLen : pkC.length < 256 ^ 8 := by decide
+  have hPkPqLen : pkPq.length < 256 ^ 8 := by decide
+  have hSuiteOk : validHybridSuiteTriplet suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 algPqMlDsa44 = true := by decide
+  have hCDDef : hashHybridClassicalPk H_dom suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 pkC = pkCD := rfl
+  have hPDDef : hashHybridPqPk H_dom suiteHybridSecp256k1MlDsa44 algPqMlDsa44 pkPq = pkPD := rfl
+  have hIdDef : computeAddrHybridIdCommit H_dom suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 algPqMlDsa44 pkCD pkPD = idC := rfl
+  have hcPayDef : encodeHybridRolePayload .classical suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 algPqMlDsa44 idC pkCD pkPD [0xFF] = cPay := rfl
+  have hpqPayDef : encodeHybridRolePayload .postQuantum suiteHybridSecp256k1MlDsa44 algClassicalSecp256k1 algPqMlDsa44 idC pkCD pkPD [0xFF] = pqPay := rfl
+  refine ⟨hLen32, hNotId, hCrossRole, ?_⟩
+  unfold verifyHybridPinnedEnvelope
+  dsimp only [env, verifyClassical, verifyPq]
+  simp only [hSuiteOk, hIdLen, hCDLen, hPDLen, hPkCLen, hPkPqLen,
+    hCDDef, hPDDef, hIdDef, hcPayDef, hpqPayDef, and_self, decide_true, Bool.and_self]
+
+/-! ## §4. `qsag-migrate` — 219-Repetition ZKBoo Soundness (`< 2^-128`) & 3-of-3 Outer-MPC Key Privacy -/
+
+/-- Count how many challenge vectors in `(Fin R → Fin 3)` pass all `R` frozen ZKBoo repetitions. -/
+def countAcceptingChallenges : (R : Nat) → (Fin R → Fin 3 → Bool) → Nat
+  | 0, _ => 1
+  | r + 1, accept =>
+    let sub := countAcceptingChallenges r (fun idx c => accept ⟨idx.val + 1, Nat.succ_lt_succ idx.isLt⟩ c)
+    (if accept ⟨0, Nat.zero_lt_succ r⟩ ⟨0, by decide⟩ then sub else 0) +
+    (if accept ⟨0, Nat.zero_lt_succ r⟩ ⟨1, by decide⟩ then sub else 0) +
+    (if accept ⟨0, Nat.zero_lt_succ r⟩ ⟨2, by decide⟩ then sub else 0)
+
+theorem countAcceptingChallenges_le_two_pow :
+    ∀ (R : Nat) (accept : Fin R → Fin 3 → Bool),
+      (∀ r : Fin R, ∃ bad : Fin 3, accept r bad = false) →
+      countAcceptingChallenges R accept ≤ 2 ^ R
+  | 0, _, _ => by simp [countAcceptingChallenges]
+  | r + 1, accept, hAtMostTwo => by
+    simp only [countAcceptingChallenges]
+    have ih := countAcceptingChallenges_le_two_pow r
+      (fun idx c => accept ⟨idx.val + 1, Nat.succ_lt_succ idx.isLt⟩ c)
+      (fun idx => hAtMostTwo ⟨idx.val + 1, Nat.succ_lt_succ idx.isLt⟩)
+    obtain ⟨⟨b, hb⟩, hBad0⟩ := hAtMostTwo ⟨0, Nat.zero_lt_succ r⟩
+    have hSumLe :
+        (if accept ⟨0, Nat.zero_lt_succ r⟩ ⟨0, by decide⟩ then
+           countAcceptingChallenges r (fun idx c => accept ⟨idx.val + 1, Nat.succ_lt_succ idx.isLt⟩ c) else 0) +
+        (if accept ⟨0, Nat.zero_lt_succ r⟩ ⟨1, by decide⟩ then
+           countAcceptingChallenges r (fun idx c => accept ⟨idx.val + 1, Nat.succ_lt_succ idx.isLt⟩ c) else 0) +
+        (if accept ⟨0, Nat.zero_lt_succ r⟩ ⟨2, by decide⟩ then
+           countAcceptingChallenges r (fun idx c => accept ⟨idx.val + 1, Nat.succ_lt_succ idx.isLt⟩ c) else 0) ≤
+        2 * countAcceptingChallenges r (fun idx c => accept ⟨idx.val + 1, Nat.succ_lt_succ idx.isLt⟩ c) := by
+      rcases (show b = 0 ∨ b = 1 ∨ b = 2 by omega) with rfl | rfl | rfl
+      · simp only [hBad0, Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+        split <;> split <;> omega
+      · simp only [hBad0, Bool.false_eq_true, ↓reduceIte, Nat.add_zero]
+        split <;> split <;> omega
+      · simp only [hBad0, Bool.false_eq_true, ↓reduceIte, Nat.add_zero]
+        split <;> split <;> omega
+    have hPow : 2 ^ (r + 1) = 2 * 2 ^ r := by rw [Nat.pow_succ, Nat.mul_comm]
+    omega
+
+/-- **219-Repetition ZKBoo Soundness Bound (`zkboo_219_soundness_lt_two_pow_neg128`)**:
+    1. Exact integer inequality `(2 : Nat) ^ 219 * 2 ^ 128 < 3 ^ 219` and rational `< 2^-128` bound
+       `ratLe (2 ^ 219, 3 ^ 219) (1, 2 ^ 128)`.
+    2. For ANY frozen 219-repetition ZKBoo ceremony commitment root on an invalid statement where each
+       repetition rejects at least 1 of the 3 head pairs `{0,1}`, `{1,2}`, `{2,0}`, at most `2 ^ 219`
+       of the `3 ^ 219` Fiat-Shamir challenge vectors accept, achieving `ratLe (accepting, 3 ^ 219) (1, 2 ^ 128)`. -/
+theorem zkboo_219_soundness_lt_two_pow_neg128 :
+    (2 : Nat) ^ 219 * 2 ^ 128 < 3 ^ 219 ∧
+    ratLe (2 ^ 219, 3 ^ 219) (1, 2 ^ 128) ∧
+    (∀ accept : Fin 219 → Fin 3 → Bool,
+      (∀ r : Fin 219, ∃ bad : Fin 3, accept r bad = false) →
+      countAcceptingChallenges 219 accept ≤ 2 ^ 219 ∧
+      ratLe (countAcceptingChallenges 219 accept, 3 ^ 219) (1, 2 ^ 128)) := by
+  have hStrict : (2 : Nat) ^ 219 * 2 ^ 128 < 3 ^ 219 := by decide
+  have hPos3 : 0 < (3 : Nat) ^ 219 := by decide
+  have hPos2 : 0 < (2 : Nat) ^ 128 := by decide
+  refine ⟨hStrict, ⟨hPos3, hPos2, Nat.le_of_lt (by rw [Nat.one_mul]; exact hStrict)⟩, ?_⟩
+  intro accept hLocal
+  have hCnt := countAcceptingChallenges_le_two_pow 219 accept hLocal
+  refine ⟨hCnt, ⟨hPos3, hPos2, ?_⟩⟩
+  have hMul := Nat.mul_le_mul_right (2 ^ 128) hCnt
+  omega
+
+/-- Cyclic successor `(c + 1) mod 3` on `Fin 3`. -/
+def nextFin3 : Fin 3 → Fin 3
+  | ⟨0, _⟩ => ⟨1, by decide⟩
+  | ⟨1, _⟩ => ⟨2, by decide⟩
+  | ⟨2, _⟩ => ⟨0, by decide⟩
+
+/-- Cyclic second successor `(c + 2) mod 3` on `Fin 3` (the unique unopened head / second honest custodian). -/
+def thirdFin3 : Fin 3 → Fin 3
+  | ⟨0, _⟩ => ⟨2, by decide⟩
+  | ⟨1, _⟩ => ⟨0, by decide⟩
+  | ⟨2, _⟩ => ⟨1, by decide⟩
+
+private theorem bvXor_comm {w : Nat} (a b : BitVec w) : a ^^^ b = b ^^^ a := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _; simp only [BitVec.getLsbD_xor]; cases a.getLsbD i <;> cases b.getLsbD i <;> rfl
+
+private theorem bvXor_assoc {w : Nat} (a b c : BitVec w) : (a ^^^ b) ^^^ c = a ^^^ (b ^^^ c) := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _; simp only [BitVec.getLsbD_xor]
+  cases a.getLsbD i <;> cases b.getLsbD i <;> cases c.getLsbD i <;> rfl
+
+private theorem bvXor_self {w : Nat} (a : BitVec w) : a ^^^ a = 0#w := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _; simp
+
+private theorem bvXor_zero {w : Nat} (a : BitVec w) : a ^^^ 0#w = a := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _; simp
+
+private theorem bvXor_cancel_right {w : Nat} (a b : BitVec w) : (a ^^^ b) ^^^ b = a := by
+  rw [bvXor_assoc, bvXor_self, bvXor_zero]
+
+private theorem bvXor_fin3_perm {w : Nat} (c : Fin 3) (f : Fin 3 → BitVec w) :
+    (f ⟨0, by decide⟩ ^^^ f ⟨1, by decide⟩) ^^^ f ⟨2, by decide⟩ =
+      (f c ^^^ f (nextFin3 c)) ^^^ f (thirdFin3 c) := by
+  rcases c with ⟨idx, hIdx⟩
+  rcases (show idx = 0 ∨ idx = 1 ∨ idx = 2 by omega) with rfl | rfl | rfl
+  · rfl
+  · dsimp only [nextFin3, thirdFin3]
+    rw [bvXor_comm (f ⟨0, by decide⟩) (f ⟨1, by decide⟩),
+        bvXor_assoc (f ⟨1, by decide⟩) (f ⟨0, by decide⟩) (f ⟨2, by decide⟩),
+        bvXor_comm (f ⟨0, by decide⟩) (f ⟨2, by decide⟩),
+        ← bvXor_assoc]
+  · dsimp only [nextFin3, thirdFin3]
+    rw [bvXor_comm ((f ⟨0, by decide⟩) ^^^ (f ⟨1, by decide⟩)) (f ⟨2, by decide⟩),
+        ← bvXor_assoc]
+
+/-- Complete 3-of-3 physical + virtual witness sharing configuration across `R` ZKBoo repetitions. -/
+structure OuterMpcConfig (wBits R : Nat) where
+  /-- Physical custodian shares `s_0, s_1, s_2` of witness `w = s_0 ⊕ s_1 ⊕ s_2`. -/
+  s : Fin 3 → BitVec wBits
+  /-- Virtual ZKBoo head shares `v_{r,0}, v_{r,1}, v_{r,2}` satisfying `v_{r,0} ⊕ v_{r,1} ⊕ v_{r,2} = w`. -/
+  v : Fin R → Fin 3 → BitVec wBits
+  /-- 3-of-3 outer-MPC physical masks `m_{r,h,0}, m_{r,h,1}, m_{r,h,2}` satisfying `⊕_p m_{r,h,p} = v_{r,h}`. -/
+  m : Fin R → Fin 3 → Fin 3 → BitVec wBits
+
+/-- Consistency predicate of a 3-of-3 outer-MPC configuration encoding private key `w`. -/
+def ValidOuterMpcConfig (wBits R : Nat) (w : BitVec wBits) (cfg : OuterMpcConfig wBits R) : Prop :=
+  (cfg.s ⟨0, by decide⟩ ^^^ cfg.s ⟨1, by decide⟩) ^^^ cfg.s ⟨2, by decide⟩ = w ∧
+  (∀ r : Fin R, (cfg.v r ⟨0, by decide⟩ ^^^ cfg.v r ⟨1, by decide⟩) ^^^ cfg.v r ⟨2, by decide⟩ = w) ∧
+  (∀ (r : Fin R) (h : Fin 3),
+    (cfg.m r h ⟨0, by decide⟩ ^^^ cfg.m r h ⟨1, by decide⟩) ^^^ cfg.m r h ⟨2, by decide⟩ = cfg.v r h)
+
+/-- Corrupted physical custodian `c`'s complete joint view across all `R` ZKBoo repetitions:
+    `(s_c, {m_{r,h,c}}_{r,h}, {(v_{r, e_r}, v_{r, e_r + 1})}_r)`. -/
+structure CustodianJointView (wBits R : Nat) where
+  ownKeyShare : BitVec wBits
+  ownHeadMasks : Fin R → Fin 3 → BitVec wBits
+  openedVirtualHeads : Fin R → BitVec wBits × BitVec wBits
+
+/-- Exact joint view projection observed by corrupted physical custodian `c` under challenge `e`. -/
+@[expose] def custodianJointView (wBits R : Nat) (c : Fin 3) (e : Fin R → Fin 3)
+    (cfg : OuterMpcConfig wBits R) : CustodianJointView wBits R :=
+  { ownKeyShare := cfg.s c
+    ownHeadMasks := fun r h => cfg.m r h c
+    openedVirtualHeads := fun r => (cfg.v r (e r), cfg.v r (nextFin3 (e r))) }
+
+/-- Fixed witness-and-view-independent honest mask residual space (`1 + 3*R` `wBits`-bit words). -/
+abbrev HonestOuterMaskSpace (wBits R : Nat) :=
+  BitVec wBits × (Fin R → Fin 3 → BitVec wBits)
+
+private theorem fin3_cases_disjoint : ∀ c : Fin 3,
+    nextFin3 c ≠ c ∧ thirdFin3 c ≠ c ∧ thirdFin3 c ≠ nextFin3 c
+  | ⟨0, _⟩ => ⟨fun h => (by cases h), fun h => (by cases h), fun h => (by cases h)⟩
+  | ⟨1, _⟩ => ⟨fun h => (by cases h), fun h => (by cases h), fun h => (by cases h)⟩
+  | ⟨2, _⟩ => ⟨fun h => (by cases h), fun h => (by cases h), fun h => (by cases h)⟩
+  | ⟨_ + 3, h⟩ => absurd h (by omega)
+
+private theorem fin3_trichotomy : ∀ u p : Fin 3,
+    p = u ∨ p = nextFin3 u ∨ p = thirdFin3 u
+  | ⟨0, _⟩, ⟨0, _⟩ => Or.inl rfl
+  | ⟨0, _⟩, ⟨1, _⟩ => Or.inr (Or.inl rfl)
+  | ⟨0, _⟩, ⟨2, _⟩ => Or.inr (Or.inr rfl)
+  | ⟨1, _⟩, ⟨1, _⟩ => Or.inl rfl
+  | ⟨1, _⟩, ⟨2, _⟩ => Or.inr (Or.inl rfl)
+  | ⟨1, _⟩, ⟨0, _⟩ => Or.inr (Or.inr rfl)
+  | ⟨2, _⟩, ⟨2, _⟩ => Or.inl rfl
+  | ⟨2, _⟩, ⟨0, _⟩ => Or.inr (Or.inl rfl)
+  | ⟨2, _⟩, ⟨1, _⟩ => Or.inr (Or.inr rfl)
+  | ⟨_ + 3, h⟩, _ => absurd h (by omega)
+  | _, ⟨_ + 3, h⟩ => absurd h (by omega)
+
+/-- Constructive `SimpleEquiv` (`0 Classical.choice`) proving that for ANY witness `w`, ANY corrupted
+    physical custodian `c ∈ Fin 3`, ANY challenge vector `e : Fin R → Fin 3`, and ANY target joint view
+    `V : CustodianJointView wBits R`, the fiber of valid configurations producing `V` is bijective to
+    the constant `HonestOuterMaskSpace wBits R`! -/
+def outerMpcViewFiberEquiv (wBits R : Nat) (w : BitVec wBits)
+    (c : Fin 3) (e : Fin R → Fin 3) (V : CustodianJointView wBits R) :
+    SimpleEquiv
+      (HonestOuterMaskSpace wBits R)
+      { cfg : OuterMpcConfig wBits R //
+          ValidOuterMpcConfig wBits R w cfg ∧ custodianJointView wBits R c e cfg = V } where
+  toFun := fun ⟨freeKeyMask, freeHeadMasks⟩ =>
+    let s : Fin 3 → BitVec wBits := fun p =>
+      if p = c then V.ownKeyShare
+      else if p = nextFin3 c then freeKeyMask
+      else (V.ownKeyShare ^^^ freeKeyMask) ^^^ w
+    let v : Fin R → Fin 3 → BitVec wBits := fun r h =>
+      if h = e r then (V.openedVirtualHeads r).1
+      else if h = nextFin3 (e r) then (V.openedVirtualHeads r).2
+      else ((V.openedVirtualHeads r).1 ^^^ (V.openedVirtualHeads r).2) ^^^ w
+    let m : Fin R → Fin 3 → Fin 3 → BitVec wBits := fun r h p =>
+      if p = c then V.ownHeadMasks r h
+      else if p = nextFin3 c then freeHeadMasks r h
+      else (V.ownHeadMasks r h ^^^ freeHeadMasks r h) ^^^ v r h
+    have hDisjC := fin3_cases_disjoint c
+    have hKeySum : (s ⟨0, by decide⟩ ^^^ s ⟨1, by decide⟩) ^^^ s ⟨2, by decide⟩ = w := by
+      rw [bvXor_fin3_perm c s]
+      have hs0 : s c = V.ownKeyShare := by simp [s]
+      have hs1 : s (nextFin3 c) = freeKeyMask := by simp [s, hDisjC.1]
+      have hs2 : s (thirdFin3 c) = (V.ownKeyShare ^^^ freeKeyMask) ^^^ w := by
+        simp [s, hDisjC.2.1, hDisjC.2.2]
+      rw [hs0, hs1, hs2, ← bvXor_assoc (V.ownKeyShare ^^^ freeKeyMask), bvXor_self,
+          bvXor_comm 0#wBits w, bvXor_zero]
+    have hVirtSum : ∀ r : Fin R,
+        (v r ⟨0, by decide⟩ ^^^ v r ⟨1, by decide⟩) ^^^ v r ⟨2, by decide⟩ = w := by
+      intro r
+      have hDisjE := fin3_cases_disjoint (e r)
+      rw [bvXor_fin3_perm (e r) (v r)]
+      have hv0 : v r (e r) = (V.openedVirtualHeads r).1 := by simp [v]
+      have hv1 : v r (nextFin3 (e r)) = (V.openedVirtualHeads r).2 := by simp [v, hDisjE.1]
+      have hv2 : v r (thirdFin3 (e r)) =
+          ((V.openedVirtualHeads r).1 ^^^ (V.openedVirtualHeads r).2) ^^^ w := by
+        simp [v, hDisjE.2.1, hDisjE.2.2]
+      rw [hv0, hv1, hv2, ← bvXor_assoc ((V.openedVirtualHeads r).1 ^^^ (V.openedVirtualHeads r).2),
+          bvXor_self, bvXor_comm 0#wBits w, bvXor_zero]
+    have hMaskSum : ∀ (r : Fin R) (h : Fin 3),
+        (m r h ⟨0, by decide⟩ ^^^ m r h ⟨1, by decide⟩) ^^^ m r h ⟨2, by decide⟩ = v r h := by
+      intro r h
+      rw [bvXor_fin3_perm c (m r h)]
+      have hm0 : m r h c = V.ownHeadMasks r h := by simp [m]
+      have hm1 : m r h (nextFin3 c) = freeHeadMasks r h := by simp [m, hDisjC.1]
+      have hm2 : m r h (thirdFin3 c) = (V.ownHeadMasks r h ^^^ freeHeadMasks r h) ^^^ v r h := by
+        simp [m, hDisjC.2.1, hDisjC.2.2]
+      rw [hm0, hm1, hm2, ← bvXor_assoc (V.ownHeadMasks r h ^^^ freeHeadMasks r h),
+          bvXor_self, bvXor_comm 0#wBits (v r h), bvXor_zero]
+    have hViewEq : custodianJointView wBits R c e ⟨s, v, m⟩ = V := by
+      cases V with
+      | mk ownK ownM openV =>
+        unfold custodianJointView
+        congr 1
+        · simp [s]
+        · funext r h; simp [m]
+        · funext r
+          have hDisjE := fin3_cases_disjoint (e r)
+          apply Prod.ext
+          · simp [v]
+          · simp [v, hDisjE.1]
+    ⟨⟨s, v, m⟩, ⟨⟨hKeySum, hVirtSum, hMaskSum⟩, hViewEq⟩⟩
+  invFun := fun ⟨cfg, _⟩ =>
+    (cfg.s (nextFin3 c), fun r h => cfg.m r h (nextFin3 c))
+  left_inv := fun ⟨freeKeyMask, freeHeadMasks⟩ => by
+    have hDisjC := fin3_cases_disjoint c
+    apply Prod.ext
+    · simp [hDisjC.1]
+    · funext r h; simp [hDisjC.1]
+  right_inv := fun ⟨⟨s, v, m⟩, ⟨⟨hKeySum, hVirtSum, hMaskSum⟩, hViewEq⟩⟩ => by
+    apply Subtype.ext
+    have hDisjC := fin3_cases_disjoint c
+    have hOwnK : V.ownKeyShare = s c := (congrArg CustodianJointView.ownKeyShare hViewEq).symm
+    have hOwnM : ∀ r h, V.ownHeadMasks r h = m r h c := fun r h =>
+      congrFun (congrFun (congrArg CustodianJointView.ownHeadMasks hViewEq).symm r) h
+    have hOpenV : ∀ r, V.openedVirtualHeads r = (v r (e r), v r (nextFin3 (e r))) := fun r =>
+      congrFun (congrArg CustodianJointView.openedVirtualHeads hViewEq).symm r
+    have hSolveThird : ∀ (u : Fin 3) (f : Fin 3 → BitVec wBits) (target : BitVec wBits),
+        (f ⟨0, by decide⟩ ^^^ f ⟨1, by decide⟩) ^^^ f ⟨2, by decide⟩ = target →
+        (f u ^^^ f (nextFin3 u)) ^^^ target = f (thirdFin3 u) := by
+      intro u f target hEq
+      rw [← hEq, bvXor_fin3_perm u f, ← bvXor_assoc (f u ^^^ f (nextFin3 u)),
+          bvXor_self, bvXor_comm 0#wBits _, bvXor_zero]
+    have hS : (fun p =>
+        if p = c then V.ownKeyShare
+        else if p = nextFin3 c then s (nextFin3 c)
+        else (V.ownKeyShare ^^^ s (nextFin3 c)) ^^^ w) = s := by
+      funext p
+      rcases fin3_trichotomy c p with rfl | rfl | rfl
+      · simp [hOwnK]
+      · simp [hDisjC.1]
+      · simp [hDisjC.2.1, hDisjC.2.2, hOwnK, hSolveThird c s w hKeySum]
+    have hV : (fun r h =>
+        if h = e r then (V.openedVirtualHeads r).1
+        else if h = nextFin3 (e r) then (V.openedVirtualHeads r).2
+        else ((V.openedVirtualHeads r).1 ^^^ (V.openedVirtualHeads r).2) ^^^ w) = v := by
+      funext r h
+      have hDisjE := fin3_cases_disjoint (e r)
+      rcases fin3_trichotomy (e r) h with rfl | rfl | rfl
+      · simp [hOpenV r]
+      · simp [hDisjE.1, hOpenV r]
+      · simp [hDisjE.2.1, hDisjE.2.2, hOpenV r, hSolveThird (e r) (v r) w (hVirtSum r)]
+    have hM : (fun r h p =>
+        if p = c then V.ownHeadMasks r h
+        else if p = nextFin3 c then m r h (nextFin3 c)
+        else (V.ownHeadMasks r h ^^^ m r h (nextFin3 c)) ^^^
+          (if h = e r then (V.openedVirtualHeads r).1
+           else if h = nextFin3 (e r) then (V.openedVirtualHeads r).2
+           else ((V.openedVirtualHeads r).1 ^^^ (V.openedVirtualHeads r).2) ^^^ w)) = m := by
+      funext r h p
+      have hVrh := congrFun (congrFun hV r) h
+      rw [hVrh]
+      rcases fin3_trichotomy c p with rfl | rfl | rfl
+      · simp [hOwnM r h]
+      · simp [hDisjC.1]
+      · simp [hDisjC.2.1, hDisjC.2.2, hOwnM r h, hSolveThird c (m r h) (v r h) (hMaskSum r h)]
+    dsimp only
+    rw [hS, hV, hM]
+
+/-- Direct constructive `SimpleEquiv` (`0 Classical.choice`) mapping valid configurations for witness
+    `w₁` bijectively to valid configurations for witness `w₂` with **identical** `custodianJointView c e`! -/
+def outerMpcWitnessShiftEquiv (wBits R : Nat) (w₁ w₂ : BitVec wBits)
+    (c : Fin 3) (e : Fin R → Fin 3) (V : CustodianJointView wBits R) :
+    SimpleEquiv
+      { cfg : OuterMpcConfig wBits R //
+          ValidOuterMpcConfig wBits R w₁ cfg ∧ custodianJointView wBits R c e cfg = V }
+      { cfg : OuterMpcConfig wBits R //
+          ValidOuterMpcConfig wBits R w₂ cfg ∧ custodianJointView wBits R c e cfg = V } :=
+  let e1 := outerMpcViewFiberEquiv wBits R w₁ c e V
+  let e2 := outerMpcViewFiberEquiv wBits R w₂ c e V
+  { toFun := fun x => e2.toFun (e1.invFun x)
+    invFun := fun y => e1.toFun (e2.invFun y)
+    left_inv := fun x => by rw [e2.left_inv, e1.right_inv]
+    right_inv := fun y => by rw [e1.left_inv, e2.right_inv] }
+
+/-- **3-of-3 Outer-MPC Single-Custodian Perfect Key Privacy (`cozk_outer_mpc_one_custodian_perfect_key_privacy`)**:
+    At deployed parameters (`wBits = 256` secp256k1/Ed25519 private key, `R = 219` ZKBoo repetitions),
+    for ANY corrupted physical custodian `c ∈ Fin 3`, ANY challenge vector `e : Fin 219 → Fin 3`,
+    ANY two candidate private keys `w₁, w₂ : BitVec 256`, and ANY target joint view `V`:
+    1. Both witness fibers `{ cfg | ValidOuterMpcConfig 256 219 w cfg ∧ custodianJointView 256 219 c e cfg = V }`
+       are constructively bijective to the constant `HonestOuterMaskSpace 256 219` (proving uniform
+       view distribution across ALL `V` and complete independence of `w`!).
+    2. `outerMpcWitnessShiftEquiv` gives an explicit constructive bijection (`0 Classical.choice`)
+       between the `w₁`-fiber and the `w₂`-fiber preserving `custodianJointView` identically! -/
+def cozk_outer_mpc_one_custodian_perfect_key_privacy
+    (c : Fin 3) (e : Fin 219 → Fin 3)
+    (w₁ w₂ : BitVec 256) (V : CustodianJointView 256 219) :
+    SimpleEquiv
+      (HonestOuterMaskSpace 256 219)
+      { cfg : OuterMpcConfig 256 219 //
+          ValidOuterMpcConfig 256 219 w₁ cfg ∧ custodianJointView 256 219 c e cfg = V } ×
+    SimpleEquiv
+      { cfg : OuterMpcConfig 256 219 //
+          ValidOuterMpcConfig 256 219 w₁ cfg ∧ custodianJointView 256 219 c e cfg = V }
+      { cfg : OuterMpcConfig 256 219 //
+          ValidOuterMpcConfig 256 219 w₂ cfg ∧ custodianJointView 256 219 c e cfg = V } :=
+  (outerMpcViewFiberEquiv 256 219 w₁ c e V,
+   outerMpcWitnessShiftEquiv 256 219 w₁ w₂ c e V)
+
+/-- Explicit 1-repetition private-key extractor against legacy direct-head custodian assignment. -/
+def recoverKeyFromDirectHeadAssignment {wBits : Nat} (c er : Fin 3)
+    (ownHeldHeads openedHeads : BitVec wBits × BitVec wBits) : BitVec wBits :=
+  if er = nextFin3 c then
+    (ownHeldHeads.1 ^^^ ownHeldHeads.2) ^^^ openedHeads.2
+  else
+    (ownHeldHeads.1 ^^^ ownHeldHeads.2) ^^^ openedHeads.1
+
+/-- **`#tooth` Direct-Head Assignment Single-Repetition Key Leak (`tooth_direct_head_assignment_leaks_key_in_one_rep`)**:
+    If physical custodian `c` directly holds virtual heads `(v_c, v_{c+1})` without outer-MPC 3-of-3
+    masking, then on ANY repetition where `e_r ≠ c` (`2/3` probability in 1 repetition!), `c` observes
+    the third virtual head share and deterministically recovers the full private key `w = v_0 ⊕ v_1 ⊕ v_2`! -/
+theorem tooth_direct_head_assignment_leaks_key_in_one_rep
+    {wBits : Nat} (w : BitVec wBits) (v : Fin 3 → BitVec wBits)
+    (hValid : (v ⟨0, by decide⟩ ^^^ v ⟨1, by decide⟩) ^^^ v ⟨2, by decide⟩ = w)
+    (c er : Fin 3) (hChallengeNe : er ≠ c) :
+    let ownHeld := (v c, v (nextFin3 c))
+    let opened := (v er, v (nextFin3 er))
+    recoverKeyFromDirectHeadAssignment c er ownHeld opened = w := by
+  intro ownHeld opened
+  have hPerm := bvXor_fin3_perm c v
+  rw [hValid] at hPerm
+  unfold recoverKeyFromDirectHeadAssignment
+  if hNext : er = nextFin3 c then
+    have hNext2 : nextFin3 (nextFin3 c) = thirdFin3 c := by
+      rcases c with ⟨ci, hci⟩
+      rcases (show ci = 0 ∨ ci = 1 ∨ ci = 2 by omega) with rfl | rfl | rfl <;> rfl
+    simp only [hNext, ↓reduceIte, ownHeld, opened, hNext2]
+    exact hPerm.symm
+  else
+    have hThird : er = thirdFin3 c := by
+      rcases c with ⟨ci, hci⟩; rcases er with ⟨ei, hei⟩
+      rcases (show ci = 0 ∨ ci = 1 ∨ ci = 2 by omega) with rfl | rfl | rfl <;>
+        rcases (show ei = 0 ∨ ei = 1 ∨ ei = 2 by omega) with rfl | rfl | rfl <;>
+        simp_all [nextFin3, thirdFin3]
+    have hNe3 : thirdFin3 c ≠ nextFin3 c := (fin3_cases_disjoint c).2.2
+    simp only [ownHeld, opened, hThird, hNe3, ↓reduceIte]
+    exact hPerm.symm
+
+/-- Inhabitedness witness for `cozk_outer_mpc_one_custodian_perfect_key_privacy` and `zkboo_219_soundness_lt_two_pow_neg128`. -/
+theorem witness_cozk_outer_mpc_inhabited :
+    let w : BitVec 256 := 42#256
+    let c : Fin 3 := ⟨0, by decide⟩
+    let e : Fin 219 → Fin 3 := fun _ => ⟨1, by decide⟩
+    let V : CustodianJointView 256 219 :=
+      { ownKeyShare := 0#256
+        ownHeadMasks := fun _ _ => 0#256
+        openedVirtualHeads := fun _ => (0#256, 0#256) }
+    ∃ cfg : OuterMpcConfig 256 219,
+      ValidOuterMpcConfig 256 219 w cfg ∧
+      custodianJointView 256 219 c e cfg = V := by
+  intro w c e V
+  let item := (outerMpcViewFiberEquiv 256 219 w c e V).toFun (0#256, fun _ _ => 0#256)
+  exact ⟨item.1, item.2⟩
+
+/-! ### §4c. Pre-Open Batch Beaver/BBCGGI19 Multiplication & Conversion Sacrifice Gate -/
+
+/-- Phase discipline for active 3-of-3 outer-MPC Co-ZK ceremony gating head openings behind
+    frozen ceremony root commitment and batch multiplication/conversion sacrifice. -/
+inductive CoZkCeremonyPhase where
+  | awaitingRootFreeze
+  | rootFrozen (ceremonyRoot : List UInt8) (sacrificeCoin1 sacrificeCoin2 : Tower128)
+  | sacrificeVerified (ceremonyRoot : List UInt8)
+  | headsReleased (ceremonyRoot : List UInt8)
+  | aborted
+  deriving DecidableEq
+
+/-- Persistent per-ceremony state enforcing single-shot execution and irreversible abort on fault. -/
+structure CoZkCeremonyState where
+  sessionTag : List UInt8
+  phase : CoZkCeremonyPhase
+  aborted : Bool
+  deriving DecidableEq
+
+/-- Candidate transitions of the pre-open sacrifice ceremony machine. -/
+inductive CoZkCeremonyInput where
+  | freezeCeremonyRoot
+      (statementBytes : List UInt8)
+      (repCommitDigests : List (List UInt8))
+      (coin1 coin2 : Tower128)
+  | verifyPreOpenSacrifice
+      (rssCheckMsg : RssActiveOpenMsg)
+      (gateDeltas : List Tower128)
+  | releaseChallengedHeads
+      (ceremonyRoot : List UInt8)
+      (openedHeadsDigest : List UInt8)
+  deriving DecidableEq
+
+/-- Publicly observable events emitted on accepted ceremony steps. -/
+inductive CoZkCeremonyEvent where
+  | ceremonyRootFrozen (ceremonyRoot : List UInt8)
+  | preOpenSacrificePassed (ceremonyRoot : List UInt8) (checkedGateCount : Nat)
+  | challengedHeadsReleased (ceremonyRoot : List UInt8) (openedHeadsDigest : List UInt8)
+  deriving DecidableEq, Repr
+
+/-- Rejection and quarantine reasons of `cozkPreOpenCeremonyStep`. -/
+inductive CoZkCeremonyReject where
+  | ceremonyAlreadyAborted
+  | preOpenSacrificeFailed
+  | rootMismatchOnOpen
+  | invalidPhaseTransition
+  deriving DecidableEq, Repr
+
+/-- Exact ASCII domain tag `"QSAG.MIGRATE.ROOT.V3"` (`20` bytes). -/
+def migrateRootDomain : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x4D, 0x49, 0x47, 0x52, 0x41, 0x54, 0x45, 0x2E,
+   0x52, 0x4F, 0x4F, 0x54, 0x2E, 0x56, 0x33]
+
+/-- Active pre-open outer-MPC ceremony step gating ZKBoo head-view release strictly behind:
+    1. Freezing the 219-repetition ceremony commitment root (`QSAG.MIGRATE.ROOT.V3` + `encodeFramedU64Le`),
+    2. 2-of-3 replicated holder cross-check (`verifyRssActiveOpen rssMsg == some 0`), and
+    3. Vanishing of two independent `Tower128` batch multiplication/conversion sacrifice polynomials. -/
+@[expose] def cozkPreOpenCeremonyStep (H : Hash)
+    (st : CoZkCeremonyState) (inp : CoZkCeremonyInput) :
+    CustodyStepOutcome CoZkCeremonyState CoZkCeremonyEvent CoZkCeremonyReject :=
+  if st.aborted then
+    .rejected { st with phase := .aborted, aborted := true } .ceremonyAlreadyAborted
+  else
+    match st.phase, inp with
+    | .awaitingRootFreeze, .freezeCeremonyRoot stmtBytes repCommits coin1 coin2 =>
+      let root := H (encodeFramedU64Le (migrateRootDomain ::
+                      st.sessionTag :: stmtBytes :: repCommits))
+      .accepted { st with phase := .rootFrozen root coin1 coin2 } (.ceremonyRootFrozen root)
+    | .rootFrozen root coin1 coin2, .verifyPreOpenSacrifice rssMsg gateDeltas =>
+      if verifyRssActiveOpen rssMsg == some 0 &&
+         batchDeviationPoly gateDeltas coin1 == towerZero 7 &&
+         batchDeviationPoly gateDeltas coin2 == towerZero 7 then
+        .accepted { st with phase := .sacrificeVerified root }
+          (.preOpenSacrificePassed root gateDeltas.length)
+      else
+        .rejected { st with phase := .aborted, aborted := true } .preOpenSacrificeFailed
+    | .sacrificeVerified root, .releaseChallengedHeads reqRoot openedDigest =>
+      if reqRoot == root then
+        .accepted { st with phase := .headsReleased root }
+          (.challengedHeadsReleased root openedDigest)
+      else
+        .rejected { st with phase := .aborted, aborted := true } .rootMismatchOnOpen
+    | _, _ =>
+      .rejected { st with phase := .aborted, aborted := true } .invalidPhaseTransition
+
+/-- Count how many `.challengedHeadsReleased` events appear in a ceremony event list. -/
+def cozkCountHeadReleases : List CoZkCeremonyEvent → Nat
+  | [] => 0
+  | .challengedHeadsReleased _ _ :: rest => 1 + cozkCountHeadReleases rest
+  | _ :: rest => cozkCountHeadReleases rest
+
+private theorem cozk_aborted_releases_nothing {H : Hash}
+    {st stFinal : CoZkCeremonyState}
+    {trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)}
+    (hAb : st.aborted = true)
+    (hTr : ValidCustodyTrace (cozkPreOpenCeremonyStep H) st trace stFinal) :
+    stFinal.aborted = true ∧ traceApprovedOutputs trace = [] := by
+  induction hTr with
+  | nil => exact ⟨hAb, rfl⟩
+  | consAccepted hStep _ _ =>
+    unfold cozkPreOpenCeremonyStep at hStep
+    simp [hAb] at hStep
+  | consRejected hStep _ ih =>
+    unfold cozkPreOpenCeremonyStep at hStep
+    simp only [hAb, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
+    rcases hStep with ⟨rfl, _⟩
+    simpa using ih rfl
+
+private theorem cozk_headsReleased_emits_nothing {H : Hash}
+    {st stFinal : CoZkCeremonyState} {r : List UInt8}
+    {trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)}
+    (hPh : st.phase = .headsReleased r)
+    (hTr : ValidCustodyTrace (cozkPreOpenCeremonyStep H) st trace stFinal) :
+    traceApprovedOutputs trace = [] := by
+  cases hTr with
+  | nil => rfl
+  | @consAccepted _ _ _ inp _ _ hStep _ =>
+    unfold cozkPreOpenCeremonyStep at hStep
+    if hAb : st.aborted = true then
+      simp [hAb] at hStep
+    else
+      simp only [hAb, Bool.false_eq_true, ↓reduceIte, hPh] at hStep
+      cases inp <;> cases hStep
+  | @consRejected _ s' _ inp _ rest hStep hRest =>
+    simp only [traceApprovedOutputs_cons_none]
+    unfold cozkPreOpenCeremonyStep at hStep
+    if hAb : st.aborted = true then
+      simp only [hAb, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
+      rcases hStep with ⟨rfl, _⟩
+      exact (cozk_aborted_releases_nothing rfl hRest).2
+    else
+      simp only [hAb, Bool.false_eq_true, ↓reduceIte, hPh] at hStep
+      cases inp <;> simp only [CustodyStepOutcome.rejected.injEq] at hStep <;>
+        rcases hStep with ⟨rfl, _⟩ <;>
+        exact (cozk_aborted_releases_nothing rfl hRest).2
+
+private theorem cozk_trace_ordering_and_single_release {H : Hash}
+    {st stFinal : CoZkCeremonyState}
+    {trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)}
+    (hTr : ValidCustodyTrace (cozkPreOpenCeremonyStep H) st trace stFinal) :
+    cozkCountHeadReleases (traceApprovedOutputs trace) ≤ 1 ∧
+    (∀ rOut dig,
+      .challengedHeadsReleased rOut dig ∈ traceApprovedOutputs trace →
+      (st.phase = .sacrificeVerified rOut ∧ st.aborted = false) ∨
+      ∃ nGates, .preOpenSacrificePassed rOut nGates ∈ traceApprovedOutputs trace) := by
+  induction hTr with
+  | nil =>
+    exact ⟨by simp [cozkCountHeadReleases], fun _ _ hm => by cases hm⟩
+  | @consAccepted s s' _ inp out rest hStep hRest ih =>
+    unfold cozkPreOpenCeremonyStep at hStep
+    if hAb : s.aborted = true then
+      simp [hAb] at hStep
+    else
+      have hAbFalse : s.aborted = false := Bool.eq_false_iff.mpr hAb
+      simp only [hAb, Bool.false_eq_true, ↓reduceIte] at hStep
+      cases hPh : s.phase <;> cases inp <;> simp only [hPh] at hStep
+      case awaitingRootFreeze.freezeCeremonyRoot stmtBytes repCommits coin1 coin2 =>
+        simp only [CustodyStepOutcome.accepted.injEq] at hStep
+        rcases hStep with ⟨rfl, rfl⟩
+        obtain ⟨hCnt, hOrd⟩ := ih
+        refine ⟨by simpa [cozkCountHeadReleases] using hCnt, ?_⟩
+        intro rOut dig hMem
+        rcases List.mem_cons.mp hMem with hEq | hTail
+        · cases hEq
+        · rcases hOrd rOut dig hTail with ⟨hBad, _⟩ | ⟨nG, hnG⟩
+          · cases hBad
+          · exact Or.inr ⟨nG, .tail _ hnG⟩
+      case rootFrozen.verifyPreOpenSacrifice root coin1 coin2 rssMsg gateDeltas =>
+        split at hStep
+        · simp only [CustodyStepOutcome.accepted.injEq] at hStep
+          rcases hStep with ⟨rfl, rfl⟩
+          obtain ⟨hCnt, hOrd⟩ := ih
+          refine ⟨by simpa [cozkCountHeadReleases] using hCnt, ?_⟩
+          intro rOut dig hMem
+          rcases List.mem_cons.mp hMem with hEq | hTail
+          · cases hEq
+          · rcases hOrd rOut dig hTail with ⟨hSv, _⟩ | ⟨nG, hnG⟩
+            · injection hSv with hRootEq
+              subst hRootEq
+              exact Or.inr ⟨gateDeltas.length, .head _⟩
+            · exact Or.inr ⟨nG, .tail _ hnG⟩
+        · cases hStep
+      case sacrificeVerified.releaseChallengedHeads root reqRoot openedDigest =>
+        split at hStep
+        · simp only [CustodyStepOutcome.accepted.injEq] at hStep
+          rcases hStep with ⟨rfl, rfl⟩
+          have hEmptyRest : traceApprovedOutputs rest = [] :=
+            cozk_headsReleased_emits_nothing rfl hRest
+          refine ⟨by simp [cozkCountHeadReleases, hEmptyRest], ?_⟩
+          intro rOut dig hMem
+          simp only [traceApprovedOutputs_cons_some, hEmptyRest, List.mem_singleton] at hMem
+          cases hMem
+          exact Or.inl ⟨rfl, hAbFalse⟩
+        · cases hStep
+      all_goals cases hStep
+  | @consRejected s s' _ inp err rest hStep hRest _ =>
+    simp only [traceApprovedOutputs_cons_none]
+    unfold cozkPreOpenCeremonyStep at hStep
+    if hAb : s.aborted = true then
+      simp only [hAb, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
+      rcases hStep with ⟨rfl, _⟩
+      have hEmpty := (cozk_aborted_releases_nothing rfl hRest).2
+      exact ⟨by simp [hEmpty, cozkCountHeadReleases], fun _ _ hm => by simp [hEmpty] at hm⟩
+    else
+      simp only [hAb, Bool.false_eq_true, ↓reduceIte] at hStep
+      have hNextAb : s'.aborted = true := by
+        cases hPh : s.phase <;> cases inp <;> simp only [hPh] at hStep
+        case awaitingRootFreeze.freezeCeremonyRoot =>
+          cases hStep
+        case rootFrozen.verifyPreOpenSacrifice =>
+          split at hStep
+          · cases hStep
+          · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+            rcases hStep with ⟨rfl, _⟩
+            rfl
+        case sacrificeVerified.releaseChallengedHeads =>
+          split at hStep
+          · cases hStep
+          · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+            rcases hStep with ⟨rfl, _⟩
+            rfl
+        all_goals
+          simp only [CustodyStepOutcome.rejected.injEq] at hStep
+          rcases hStep with ⟨rfl, _⟩
+          rfl
+      have hEmpty := (cozk_aborted_releases_nothing hNextAb hRest).2
+      exact ⟨by simp [hEmpty, cozkCountHeadReleases], fun _ _ hm => by simp [hEmpty] at hm⟩
+
+/-- **Pre-Open Batch Beaver/BBCGGI19 Multiplication & Conversion Sacrifice Soundness
+    (`cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release`)**:
+    1. **Strict Pre-Open Sacrifice Ordering & Single-Use Consumption**: Across ANY multi-step trace
+       from `.awaitingRootFreeze`, at most `1` `.challengedHeadsReleased` event is ever emitted, and
+       zero challenged head views are ever released unless `.preOpenSacrificePassed` accepted on the
+       exact frozen ceremony root.
+    2. **Irreversible Abort & 2-of-3 Replicated Cross-Check Soundness**: Any failed sacrifice check
+       irreversibly aborts the ceremony (`aborted = true`), and any accepted `verifyPreOpenSacrifice`
+       step enforces `verifyRssActiveOpen rssMsg = some 0` (which against `≤ 1` corrupt custodian
+       forces `reconstructRssWord trueShares = 0` with `0` error!) together with vanishing of both
+       `Tower128` sacrifice polynomials.
+    3. **Batch Multiplication / A2B-B2A Schwartz-Zippel Soundness (`< 2^-130 < 2^-128`)**: For ANY
+       circuit of `L ≤ 2 ^ 63` outer-MPC multiplication / conversion gates with at least one faulted
+       gate (`∃ d ∈ gateDeltas, d ≠ towerZero 7`), at most `L` single-coin challenges in any `Nodup`
+       `Tower128` domain accept, and the 2-coin cheating bound satisfies
+       `ratLe (L * L, 2 ^ 128 * 2 ^ 128) (1, 2 ^ 130)` (`< 2^-128`). -/
+theorem cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release (H : Hash) :
+    (∀ (tag : List UInt8) (stFinal : CoZkCeremonyState)
+       (trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)),
+      let st₀ : CoZkCeremonyState := { sessionTag := tag, phase := .awaitingRootFreeze, aborted := false }
+      ValidCustodyTrace (cozkPreOpenCeremonyStep H) st₀ trace stFinal →
+      cozkCountHeadReleases (traceApprovedOutputs trace) ≤ 1 ∧
+      (∀ rOut dig,
+        .challengedHeadsReleased rOut dig ∈ traceApprovedOutputs trace →
+        ∃ nGates, .preOpenSacrificePassed rOut nGates ∈ traceApprovedOutputs trace)) ∧
+    (∀ (st st' : CoZkCeremonyState) (rssMsg : RssActiveOpenMsg)
+       (gateDeltas : List Tower128) (ev : CoZkCeremonyEvent)
+       (trueCheckShares : RssWord64) (corruptIdx : Nat),
+      (corruptIdx ≠ 0 → rssMsg.p0_x0 = trueCheckShares.x0 ∧ rssMsg.p0_x1 = trueCheckShares.x1) →
+      (corruptIdx ≠ 1 → rssMsg.p1_x1 = trueCheckShares.x1 ∧ rssMsg.p1_x2 = trueCheckShares.x2) →
+      (corruptIdx ≠ 2 → rssMsg.p2_x2 = trueCheckShares.x2 ∧ rssMsg.p2_x0 = trueCheckShares.x0) →
+      cozkPreOpenCeremonyStep H st (.verifyPreOpenSacrifice rssMsg gateDeltas) = .accepted st' ev →
+      reconstructRssWord trueCheckShares = 0 ∧
+      ∃ root coin1 coin2,
+        st.phase = .rootFrozen root coin1 coin2 ∧
+        batchDeviationPoly gateDeltas coin1 = towerZero 7 ∧
+        batchDeviationPoly gateDeltas coin2 = towerZero 7) ∧
+    (∀ (L : Nat) (gateDeltas S : List Tower128),
+      L ≤ 2 ^ 63 →
+      S.Nodup →
+      gateDeltas.length ≤ L →
+      L + 1 ≤ S.length →
+      (∃ d ∈ gateDeltas, d ≠ towerZero 7) →
+      (S.filter (fun r => decide (batchDeviationPoly gateDeltas r = towerZero 7))).length ≤ L ∧
+      ratLe (L * L, 2 ^ 128 * 2 ^ 128) (1, 2 ^ 130)) := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro tag stFinal trace st₀ hTr
+    obtain ⟨hCnt, hOrd⟩ := cozk_trace_ordering_and_single_release hTr
+    refine ⟨hCnt, ?_⟩
+    intro rOut dig hMem
+    rcases hOrd rOut dig hMem with ⟨hBad, _⟩ | hOk
+    · cases hBad
+    · exact hOk
+  · intro st st' rssMsg gateDeltas ev trueShares corruptIdx hH0 hH1 hH2 hStep
+    unfold cozkPreOpenCeremonyStep at hStep
+    if hAb : st.aborted = true then
+      simp [hAb] at hStep
+    else
+      simp only [hAb, Bool.false_eq_true, ↓reduceIte] at hStep
+      cases hPh : st.phase <;> simp only [hPh] at hStep
+      case rootFrozen root coin1 coin2 =>
+        split at hStep
+        · rename_i hChecks
+          rcases Bool.and_eq_true_iff.mp hChecks with ⟨h01, hC2⟩
+          rcases Bool.and_eq_true_iff.mp h01 with ⟨hRss, hC1⟩
+          have hOpen0 : verifyRssActiveOpen rssMsg = some 0 := eq_of_beq hRss
+          have hTrue0 : (0 : UInt64) = reconstructRssWord trueShares :=
+            rss_flnw_active_open_sound trueShares rssMsg corruptIdx 0 hH0 hH1 hH2 hOpen0
+          exact ⟨hTrue0.symm, root, coin1, coin2, rfl, eq_of_beq hC1, eq_of_beq hC2⟩
+        · cases hStep
+      all_goals cases hStep
+  · intro L gateDeltas S hL63 hNodup hLen hDom hNonzero
+    have hRoots := (bdoz_2lane_mac_soundness L gateDeltas S hNodup hLen hDom hNonzero).1
+    have hDenPos : 0 < (2 : Nat) ^ 128 * 2 ^ 128 := by decide
+    have hTargetPos : 0 < (2 : Nat) ^ 130 := by decide
+    have hSq : L * L ≤ 2 ^ 63 * 2 ^ 63 := Nat.mul_le_mul hL63 hL63
+    have hScaled : L * L * 2 ^ 130 ≤ 2 ^ 63 * 2 ^ 63 * 2 ^ 130 :=
+      Nat.mul_le_mul_right (2 ^ 130) hSq
+    have hExactPow : (2 : Nat) ^ 63 * 2 ^ 63 * 2 ^ 130 = 1 * (2 ^ 128 * 2 ^ 128) := by decide
+    rw [hExactPow] at hScaled
+    exact ⟨hRoots, ⟨hDenPos, hTargetPos, hScaled⟩⟩
+
+/-- **`#tooth` Unverified Outer Multiplication Selective-Failure Key-Bit Leak
+    (`tooth_unverified_outer_mul_selective_fault_leaks_key_bit`)**:
+    In passive 3-of-3 XOR sharing (`w_bit = w0 ^^ w1 ^^ w2`, `guard = y0 ^^ y1 ^^ y2 = false`),
+    an honest AND gate `(w0 ^^ w1 ^^ w2) && (y0 ^^ y1 ^^ y2)` always outputs `false` (leaking `0`
+    bits of unknown share `w2`), whereas if corrupt custodian `0` flips ONLY `y0 ↦ !y0` inside an
+    unverified multiplication gate without pre-open sacrifice, the opened gate output equals the
+    secret witness bit `w0 ^^ w1 ^^ w2` identically! -/
+theorem tooth_unverified_outer_mul_selective_fault_leaks_key_bit
+    (w0 w1 w2 y0 y1 y2 : Bool)
+    (hZeroGuard : ((y0 ^^ y1) ^^ y2) = false) :
+    (((w0 ^^ w1) ^^ w2) && ((y0 ^^ y1) ^^ y2)) = false ∧
+    (((w0 ^^ w1) ^^ w2) && (((!y0) ^^ y1) ^^ y2)) = ((w0 ^^ w1) ^^ w2) := by
+  revert hZeroGuard
+  cases w0 <;> cases w1 <;> cases w2 <;> cases y0 <;> cases y1 <;> cases y2 <;> decide
+
+private theorem evalCoeffs_replicate_zero_tower128 :
+    ∀ (k : Nat) (r : Tower128),
+      RoundPoly.evalCoeffs (List.replicate k (towerZero 7)) r = towerZero 7
+  | 0, _ => rfl
+  | k + 1, r => by
+    change towerAdd 7 (towerZero 7)
+      (towerMul 7 r (RoundPoly.evalCoeffs (List.replicate k (towerZero 7)) r)) = towerZero 7
+    rw [evalCoeffs_replicate_zero_tower128 k r, towerMul_zero, towerAdd_zero]
+
+/-- **`#tooth` Non-Zero Multiplication Gate Deviation Aborts Ceremony (`tooth_cozk_nonzero_gate_delta_aborts_ceremony`)**:
+    When a faulted outer-MPC multiplication gate produces a non-zero residual
+    `gateDeltas = [towerOne 7, towerZero 7, towerZero 7]`, `cozkPreOpenCeremonyStep`
+    evaluates `batchDeviationPoly` at non-zero sacrifice coin `coin1 = towerOne 7`, detects
+    `towerOne 7 ≠ towerZero 7`, rejects with `.preOpenSacrificeFailed`, and irreversibly sets `aborted = true`! -/
+theorem tooth_cozk_nonzero_gate_delta_aborts_ceremony (H : Hash) :
+    let s0 : UInt64 := 0x123456789ABCDEF0
+    let s1 : UInt64 := 0x0FEDCBA987654321
+    let s2 : UInt64 := s0 ^^^ s1
+    let rss : RssActiveOpenMsg :=
+      { p0_x0 := s0, p0_x1 := s1, p1_x1 := s1, p1_x2 := s2, p2_x2 := s2, p2_x0 := s0 }
+    let coin1 : Tower128 := towerOne 7
+    let coin2 : Tower128 := (towerZero 6, towerOne 6)
+    let st : CoZkCeremonyState :=
+      { sessionTag := [0x09], phase := .rootFrozen [0xAA] coin1 coin2, aborted := false }
+    let faultedGates : List Tower128 := [towerOne 7, towerZero 7, towerZero 7]
+    cozkPreOpenCeremonyStep H st (.verifyPreOpenSacrifice rss faultedGates) =
+      .rejected { st with phase := .aborted, aborted := true } .preOpenSacrificeFailed := by
+  intro s0 s1 s2 rss coin1 coin2 st faultedGates
+  have hRssB : (verifyRssActiveOpen rss == some 0) = true := by decide
+  have hDevFault : batchDeviationPoly faultedGates coin1 = towerOne 7 := by
+    have hZ2 : RoundPoly.evalCoeffs [towerZero 7, towerZero 7] coin1 = towerZero 7 :=
+      evalCoeffs_replicate_zero_tower128 2 coin1
+    have hStep1 : RoundPoly.evalCoeffs [towerOne 7, towerZero 7, towerZero 7] coin1 = towerOne 7 := by
+      change towerAdd 7 (towerOne 7) (towerMul 7 coin1 (RoundPoly.evalCoeffs [towerZero 7, towerZero 7] coin1)) = towerOne 7
+      rw [hZ2, towerMul_zero, towerAdd_zero]
+    change towerAdd 7 (towerZero 7) (towerMul 7 (towerOne 7) (RoundPoly.evalCoeffs [towerOne 7, towerZero 7, towerZero 7] coin1)) = towerOne 7
+    rw [hStep1, towerMul_one, towerZero_add]
+  have hNe10 : (towerOne 7 == towerZero 7) = false := by decide
+  have hDevB : (batchDeviationPoly faultedGates coin1 == towerZero 7) = false := by
+    rw [hDevFault]; exact hNe10
+  unfold cozkPreOpenCeremonyStep
+  dsimp only [st]
+  rw [hRssB, hDevB]
+  rfl
+
+/-- Non-trivial inhabitedness witness for `cozkPreOpenCeremonyStep` and
+    `cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release` over concrete 256-bit `shake256Xof 32`,
+    non-zero 2-of-3 RSS shares summing to `0`, distinct non-zero `Tower128` sacrifice coins `coin1 ≠ coin2`,
+    and a non-empty 3-gate multiplication batch (`checkedGateCount = 3`). -/
+theorem witness_cozk_pre_open_ceremony_inhabited :
+    let H : Hash := shake256Xof 32
+    let st₀ : CoZkCeremonyState :=
+      { sessionTag := [0x09], phase := .awaitingRootFreeze, aborted := false }
+    let coin1 : Tower128 := towerOne 7
+    let coin2 : Tower128 := (towerZero 6, towerOne 6)
+    (H [0x00]).length = 32 ∧
+    H [0x00] ≠ [0x00] ∧
+    coin1 ≠ towerZero 7 ∧
+    coin2 ≠ towerZero 7 ∧
+    coin1 ≠ coin2 ∧
+    ∃ trace stFinal root,
+      ValidCustodyTrace (cozkPreOpenCeremonyStep H) st₀ trace stFinal ∧
+      traceApprovedOutputs trace =
+        [.ceremonyRootFrozen root,
+         .preOpenSacrificePassed root 3,
+         .challengedHeadsReleased root [0x77]] ∧
+      cozkCountHeadReleases (traceApprovedOutputs trace) = 1 ∧
+      stFinal.aborted = false := by
+  intro H st₀ coin1 coin2
+  have hLen32 : (H [0x00]).length = 32 := shake256Xof_length 32 [0x00]
+  have hNotId : H [0x00] ≠ [0x00] := by
+    intro hEq
+    have hL := congrArg List.length hEq
+    rw [hLen32] at hL
+    cases hL
+  have hc1Nz : coin1 ≠ towerZero 7 :=
+    fun h => by cases congrArg (fun p : TowerElem 7 => p.1.1.1.1.1.1.1) h
+  have hc2Nz : coin2 ≠ towerZero 7 :=
+    fun h => by cases congrArg (fun p : TowerElem 7 => p.2.1.1.1.1.1.1) h
+  have hc12Ne : coin1 ≠ coin2 :=
+    fun h => by cases congrArg (fun p : TowerElem 7 => p.1.1.1.1.1.1.1) h
+  refine ⟨hLen32, hNotId, hc1Nz, hc2Nz, hc12Ne, ?_⟩
+  let sh0 : UInt64 := 0x123456789ABCDEF0
+  let sh1 : UInt64 := 0x0FEDCBA987654321
+  let sh2 : UInt64 := sh0 ^^^ sh1
+  let honestRss : RssActiveOpenMsg :=
+    { p0_x0 := sh0, p0_x1 := sh1, p1_x1 := sh1, p1_x2 := sh2, p2_x2 := sh2, p2_x0 := sh0 }
+  let honestGates : List Tower128 := [towerZero 7, towerZero 7, towerZero 7]
+  let root := H (encodeFramedU64Le [migrateRootDomain, [0x09], [0x01], [0x02]])
+  let s1 : CoZkCeremonyState := { sessionTag := [0x09], phase := .rootFrozen root coin1 coin2, aborted := false }
+  let s2 : CoZkCeremonyState := { sessionTag := [0x09], phase := .sacrificeVerified root, aborted := false }
+  let s3 : CoZkCeremonyState := { sessionTag := [0x09], phase := .headsReleased root, aborted := false }
+  have hStep1 : cozkPreOpenCeremonyStep H st₀ (.freezeCeremonyRoot [0x01] [[0x02]] coin1 coin2) =
+      .accepted s1 (.ceremonyRootFrozen root) := rfl
+  have hStep2 : cozkPreOpenCeremonyStep H s1 (.verifyPreOpenSacrifice honestRss honestGates) =
+      .accepted s2 (.preOpenSacrificePassed root 3) := by
+    have hRssB : (verifyRssActiveOpen honestRss == some 0) = true := by decide
+    have hDev1 : batchDeviationPoly honestGates coin1 = towerZero 7 :=
+      evalCoeffs_replicate_zero_tower128 4 coin1
+    have hDev2 : batchDeviationPoly honestGates coin2 = towerZero 7 :=
+      evalCoeffs_replicate_zero_tower128 4 coin2
+    have hDevB1 : (batchDeviationPoly honestGates coin1 == towerZero 7) = true :=
+      beq_iff_eq.mpr hDev1
+    have hDevB2 : (batchDeviationPoly honestGates coin2 == towerZero 7) = true :=
+      beq_iff_eq.mpr hDev2
+    unfold cozkPreOpenCeremonyStep
+    dsimp only [s1, s2]
+    rw [hRssB, hDevB1, hDevB2]
+    rfl
+  have hStep3 : cozkPreOpenCeremonyStep H s2 (.releaseChallengedHeads root [0x77]) =
+      .accepted s3 (.challengedHeadsReleased root [0x77]) := by
+    have hRootB : (root == root) = true := uint8List_beq_self root
+    unfold cozkPreOpenCeremonyStep
+    dsimp only [s2, s3]
+    rw [hRootB]
+    rfl
+  refine ⟨[(.freezeCeremonyRoot [0x01] [[0x02]] coin1 coin2, some (.ceremonyRootFrozen root)),
+           (.verifyPreOpenSacrifice honestRss honestGates, some (.preOpenSacrificePassed root 3)),
+           (.releaseChallengedHeads root [0x77], some (.challengedHeadsReleased root [0x77]))],
+          s3, root, .consAccepted hStep1 (.consAccepted hStep2 (.consAccepted hStep3 (.nil s3))),
+          by rfl, by rfl, by rfl⟩
+
+/-! ### Compositional `SimulationSpine` `PartyMachine` Exports -/
+
+/-- `SimulationSpine` `PartyMachine` packaging `ftsSpnStep` (`qsag-fts`). -/
+def ftsSpnPartyMachine (H : Hash) : PartyMachine FtsEpochGuardState FtsSpnInput FtsSpnEvent :=
+  PartyMachine.ofCustodyStep (ftsSpnStep H)
+
+/-- `SimulationSpine` `PartyMachine` packaging `hdZeroTestStep` (`qsag-hd`). -/
+def hdZeroTestPartyMachine (H : Hash) (n dim : Nat) :
+    PartyMachine (HdFamilyState n dim) (HdZeroTestInput n dim) HdZeroTestEvent :=
+  PartyMachine.ofCustodyStep (hdZeroTestStep H n dim)
+
+/-- `SimulationSpine` `PartyMachine` packaging `policyGuardStep` (`qsag-policy`). -/
+def policyGuardPartyMachine :
+    PartyMachine StatefulPolicyGuard TransactionIntent ApprovedIntentEnvelope :=
+  PartyMachine.ofCustodyStep policyGuardStep
+
+/-- `SimulationSpine` `PartyMachine` packaging `policyWatermarkGuardStep` (`qsag-policy` watermark + sliding window). -/
+def policyWatermarkGuardPartyMachine :
+    PartyMachine PolicyWatermarkGuard PolicyWatermarkInput PolicyWatermarkEvent :=
+  PartyMachine.ofCustodyStep policyWatermarkGuardStep
+
+/-- `SimulationSpine` `PartyMachine` packaging `cozkPreOpenCeremonyStep` (`qsag-migrate`). -/
+def cozkCeremonyPartyMachine (H : Hash) :
+    PartyMachine CoZkCeremonyState CoZkCeremonyInput CoZkCeremonyEvent :=
+  PartyMachine.ofCustodyStep (cozkPreOpenCeremonyStep H)
+
+end Qsag
+end
