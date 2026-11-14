@@ -3817,3 +3817,1299 @@ def layer4IdealTsigMachine {PK : Type} {n : Nat}
               { envelope := env, committedEpoch := req.reqEpoch, sigBytes := sigBytes }
 
 /-- Read 32 bytes `[0x180, 0x1A0)` from `X86State` memory as a canonical `List UInt8`. -/
+def readShareMem32 (m : UInt64 → UInt8) : List UInt8 :=
+  (List.range 32).map (fun i => m (UInt64.ofNat 0x180 + UInt64.ofNat i))
+
+private theorem readShareMem32_write (m : UInt64 → UInt8) (sh : List UInt8) (hLen : sh.length = 32) :
+    readShareMem32 (writeBytesWindow m 0x180 sh) = sh := by
+  apply (list_eq_iff_getD_eq (by simp [readShareMem32, hLen])).mpr
+  intro i hi
+  simp only [readShareMem32, List.length_map, List.length_range] at hi
+  have hGet :
+      ((List.range 32).map (fun j => writeBytesWindow m 0x180 sh (UInt64.ofNat 0x180 + UInt64.ofNat j))).getD i 0 =
+        writeBytesWindow m 0x180 sh (UInt64.ofNat 0x180 + UInt64.ofNat i) := by
+    rw [List.getD_eq_getElem?_getD, List.getElem?_map, List.getElem?_range hi]
+    rfl
+  unfold readShareMem32
+  rw [hGet, writeBytesWindow_hit (hLen ▸ hi) (by omega)]
+
+private def Layer12SessionEq (s1 : Layer1ElfState) (s2 : Layer2MirState) : Prop :=
+  s1.activeSessionTag = s2.activeSessionTag ∧
+  s1.storedRound1Commits = s2.storedRound1Commits ∧
+  s1.verifierBginAlpha = s2.verifierBginAlpha ∧
+  s1.verifierBginKeyOffsets = s2.verifierBginKeyOffsets ∧
+  s1.quorumCertConfig = s2.quorumCertConfig
+
+private def Layer23SessionEq {PK : Type} (s2 : Layer2MirState) (s3 : Layer3ProtocolState PK) : Prop :=
+  s2.activeSessionTag = s3.activeSessionTag ∧
+  s2.storedRound1Commits = s3.storedRound1Commits ∧
+  s2.verifierBginAlpha = s3.verifierBginAlpha ∧
+  s2.verifierBginKeyOffsets = s3.verifierBginKeyOffsets ∧
+  s2.quorumCertConfig = s3.quorumCertConfig
+
+private def Layer34SessionEq {PK : Type} (s3 : Layer3ProtocolState PK) (s4 : Layer4IdealState PK) : Prop :=
+  s3.activeSessionTag = s4.activeSessionTag ∧
+  s3.storedRound1Commits = s4.storedRound1Commits ∧
+  s3.verifierBginAlpha = s4.verifierBginAlpha ∧
+  s3.verifierBginKeyOffsets = s4.verifierBginKeyOffsets ∧
+  s3.quorumCertConfig = s4.quorumCertConfig
+
+/-- **Link 1 (`sim_layer1_to_layer2`)**:
+    `ForwardSim` from `layer1CompiledElfMachine` (executing decoded `.rlib` x86-64 `ct_eq_32` and
+    `ct_memzero` slices) to `layer2MirGuardedMachine`, proved via `ct_eq_32_x86_64_mc_refines`
+    and `ct_memzero_x86_64_mc_refines`. -/
+def sim_layer1_to_layer2 {n : Nat} (q : Nat) (pkDigest : List UInt8)
+    (signFromShare : List UInt8 → List UInt8 → ByteArray) :
+    ForwardSim
+      (layer1CompiledElfMachine (n := n) q pkDigest (fun m msg => signFromShare (readShareMem32 m) msg))
+      (layer2MirGuardedMachine (n := n) q pkDigest signFromShare) where
+  Rel s1 s2 :=
+    s2.policy.pinnedPolicyDigest.length = 32 ∧
+    s2.policy.pinnedAuthorityDigest.length = 32 ∧
+    (∀ i : Nat, i < 32 →
+      s1.mem (UInt64.ofNat 0x100 + UInt64.ofNat i) = s2.policy.pinnedPolicyDigest.getD i 0) ∧
+    (∀ i : Nat, i < 32 →
+      s1.mem (UInt64.ofNat 0x140 + UInt64.ofNat i) = s2.policy.pinnedAuthorityDigest.getD i 0) ∧
+    s1.windowId = s2.policy.windowId ∧
+    s1.velocityWindowCap = s2.policy.velocityWindowCap ∧
+    s1.accumulatedSpend = s2.policy.accumulatedSpend ∧
+    s1.burnedNonces = s2.policy.burnedNonces ∧
+    s1.allowedRecipients = s2.policy.allowedRecipients ∧
+    s1.perTxCap = s2.policy.perTxCap ∧
+    s1.belt = s2.belt ∧
+    s1.cutPoisoned = s2.cut.poisoned ∧
+    s1.sharePresent = s2.shareBytes.isSome ∧
+    Layer12SessionEq s1 s2 ∧
+    (s1.cutPoisoned = false → s1.belt.poisoned = false → s1.sharePresent = true →
+      s2.shareBytes = some (readShareMem32 s1.mem)) ∧
+    (s1.cutPoisoned = true →
+      ∀ i : Nat, i < 32 → s1.mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0)
+  sim_ok {s1 s1' s2 req out} hRel hStep1 := by
+    rcases hRel with ⟨hPolLen, hAuthLen, hMemPol, hMemAuth, hWin, hVCap, hAcc, hBurn,
+      hRecip, hPTx, hBelt, hCutP, hShP, hSess, hShareEq, _⟩
+    rcases hSess with ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩
+    dsimp only [layer1CompiledElfMachine, layer2MirGuardedMachine, PartyMachine.ofOutcome] at hStep1 ⊢
+    cases hQuar1 : (s1.cutPoisoned || s1.belt.poisoned || !s1.sharePresent)
+    · have hCP0 : s1.cutPoisoned = false := by
+        cases hc : s1.cutPoisoned <;> simp [hc] at hQuar1; rfl
+      have hBP0 : s1.belt.poisoned = false := by
+        cases hb : s1.belt.poisoned <;> simp [hCP0, hb] at hQuar1; rfl
+      have hSP1 : s1.sharePresent = true := by
+        cases hs : s1.sharePresent <;> simp [hCP0, hBP0, hs] at hQuar1; rfl
+      have hSomeSh : s2.shareBytes = some (readShareMem32 s1.mem) := hShareEq hCP0 hBP0 hSP1
+      have hQuar2 : (s2.cut.poisoned || s2.belt.poisoned || s2.shareBytes.isNone) = false := by
+        rw [← hCutP, ← hBelt, hCP0, hBP0, hSomeSh]; rfl
+      rw [hQuar1] at hStep1
+      rw [hQuar2]
+      simp only [Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
+      have hElfPol :
+          execElfCtEq32 s1.mem (UInt64.ofNat 0x100) req.tx.policyDigest =
+            decide (req.tx.policyDigest = s2.policy.pinnedPolicyDigest) :=
+        execElfCtEq32_spec hPolLen (by omega) hMemPol
+      have hElfAuth :
+          execElfCtEq32 s1.mem (UInt64.ofNat 0x140) req.tx.authorityDigest =
+            decide (req.tx.authorityDigest = s2.policy.pinnedAuthorityDigest) :=
+        execElfCtEq32_spec hAuthLen (by omega) hMemAuth
+      rw [hElfPol, hElfAuth, hWin, hVCap, hAcc, hBurn, hRecip, hPTx, hBelt,
+          hSTag, hSCom, hBAlp, hBKey, hQCfg] at hStep1
+      have hBnePol :
+          (!decide (req.tx.policyDigest = s2.policy.pinnedPolicyDigest)) =
+            (req.tx.policyDigest != s2.policy.pinnedPolicyDigest) := by
+        if hEq : req.tx.policyDigest = s2.policy.pinnedPolicyDigest then
+          simp [hEq]
+        else
+          simp [hEq, bne, beq_false_of_ne hEq]
+      have hBneAuth :
+          (!decide (req.tx.authorityDigest = s2.policy.pinnedAuthorityDigest)) =
+            (req.tx.authorityDigest != s2.policy.pinnedAuthorityDigest) := by
+        if hEq : req.tx.authorityDigest = s2.policy.pinnedAuthorityDigest then
+          simp [hEq]
+        else
+          simp [hEq, bne, beq_false_of_ne hEq]
+      rw [hBnePol, hBneAuth] at hStep1
+      unfold mirPolicyStep
+      cases hW : (req.tx.windowId != s2.policy.windowId)
+      · rw [hW] at hStep1; simp only [Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
+        cases hP : (req.tx.policyDigest != s2.policy.pinnedPolicyDigest)
+        · rw [hP] at hStep1; simp only [Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
+          cases hA : (req.tx.authorityDigest != s2.policy.pinnedAuthorityDigest)
+          · rw [hA] at hStep1; simp only [Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
+            if hR : ¬ (req.tx.recipient ∈ s2.policy.allowedRecipients) then
+              simp [hR] at hStep1
+            else
+              simp only [hR, ↓reduceIte] at hStep1 ⊢
+              if hPT : ¬ (req.tx.amountUnits.toNat ≤ s2.policy.perTxCap.toNat) then
+                simp [hPT] at hStep1
+              else
+                simp only [hPT, ↓reduceIte] at hStep1 ⊢
+                if hVC : ¬ (req.tx.amountUnits.toNat ≤ (s2.policy.velocityWindowCap - s2.policy.accumulatedSpend).toNat) then
+                  simp [hVC] at hStep1
+                else
+                  simp only [hVC, ↓reduceIte] at hStep1 ⊢
+                  cases hN : u64MemBool req.tx.nonce s2.policy.burnedNonces
+                  · rw [hN] at hStep1
+                    simp only [Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
+                    cases hQ : verifyFourLayerQuorumCert s2.quorumCertConfig q pkDigest
+                        (encodeTransactionIntent req.tx.toTransactionIntent) req
+                    · rw [hQ] at hStep1; simp at hStep1
+                    · rw [hQ] at hStep1
+                      simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
+                      cases hE : (decide (pkDigest = s2.belt.enrolledPkDigest) && (req.reqEpoch == s2.belt.nextEpoch))
+                      · rw [hE] at hStep1; simp at hStep1
+                      · rw [hE] at hStep1
+                        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep1 ⊢
+                        cases hC : verifyPreCutTranscript s2.activeSessionTag s2.storedRound1Commits
+                            s2.verifierBginAlpha s2.verifierBginKeyOffsets req.quorum
+                            req.round1Openings req.round2Wires
+                        · rw [hC] at hStep1; simp at hStep1
+                        · rw [hC] at hStep1
+                          rw [hSomeSh]
+                          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+                            Option.some.injEq, Prod.mk.injEq] at hStep1 ⊢
+                          rcases hStep1 with ⟨rfl, rfl⟩
+                          exact ⟨rfl, hPolLen, hAuthLen, hMemPol, hMemAuth, rfl, rfl, rfl, rfl,
+                            rfl, rfl, rfl, hCP0, hSP1, ⟨rfl, rfl, rfl, rfl, rfl⟩,
+                            fun _ _ _ => rfl,
+                            fun hT => absurd hT (by rw [hCP0]; decide)⟩
+                  · rw [hN] at hStep1; simp at hStep1
+          · rw [hA] at hStep1; simp at hStep1
+        · rw [hP] at hStep1; simp at hStep1
+      · rw [hW] at hStep1; simp at hStep1
+    · rw [hQuar1] at hStep1; simp at hStep1
+  sim_err {s1 s2 req} hRel hNone1 := by
+    have hRelSaved := hRel
+    rcases hRel with ⟨hPolLen, hAuthLen, hMemPol, hMemAuth, hWin, hVCap, hAcc, hBurn,
+      hRecip, hPTx, hBelt, hCutP, hShP, hSess, hShareEq, _⟩
+    rcases hSess with ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩
+    dsimp only [layer1CompiledElfMachine, layer2MirGuardedMachine, PartyMachine.ofOutcome] at hNone1 ⊢
+    obtain ⟨hZeroMem, hPresBelow⟩ := execElfMemzeroShare32_spec s1.mem
+    have hMemPolZero : ∀ i : Nat, i < 32 →
+        execElfMemzeroShare32 s1.mem (UInt64.ofNat 0x100 + UInt64.ofNat i) =
+          s2.policy.pinnedPolicyDigest.getD i 0 := by
+      intro i hi
+      have hLt : (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat < 0x180 := by
+        rw [addr_offset_toNat (base := 0x100) (i := i) (by omega)]; omega
+      rw [hPresBelow _ hLt, hMemPol i hi]
+    have hMemAuthZero : ∀ i : Nat, i < 32 →
+        execElfMemzeroShare32 s1.mem (UInt64.ofNat 0x140 + UInt64.ofNat i) =
+          s2.policy.pinnedAuthorityDigest.getD i 0 := by
+      intro i hi
+      have hLt : (UInt64.ofNat 0x140 + UInt64.ofNat i).toNat < 0x180 := by
+        rw [addr_offset_toNat (base := 0x140) (i := i) (by omega)]; omega
+      rw [hPresBelow _ hLt, hMemAuth i hi]
+    have hQuarEq :
+        (s2.cut.poisoned || s2.belt.poisoned || s2.shareBytes.isNone) =
+          (s1.cutPoisoned || s1.belt.poisoned || !s1.sharePresent) := by
+      have hNoneNotSome : s2.shareBytes.isNone = !s1.sharePresent := by
+        rw [hShP]; cases s2.shareBytes <;> rfl
+      rw [← hCutP, ← hBelt, hNoneNotSome]
+    rw [hQuarEq]
+    cases hQuar1 : (s1.cutPoisoned || s1.belt.poisoned || !s1.sharePresent)
+    · have hCP0 : s1.cutPoisoned = false := by
+        cases hc : s1.cutPoisoned <;> simp [hc] at hQuar1; rfl
+      have hBP0 : s1.belt.poisoned = false := by
+        cases hb : s1.belt.poisoned <;> simp [hCP0, hb] at hQuar1; rfl
+      have hSP1 : s1.sharePresent = true := by
+        cases hs : s1.sharePresent <;> simp [hCP0, hBP0, hs] at hQuar1; rfl
+      rw [hQuar1] at hNone1
+      simp only [Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
+      have hElfPol :
+          execElfCtEq32 s1.mem (UInt64.ofNat 0x100) req.tx.policyDigest =
+            decide (req.tx.policyDigest = s2.policy.pinnedPolicyDigest) :=
+        execElfCtEq32_spec hPolLen (by omega) hMemPol
+      have hElfAuth :
+          execElfCtEq32 s1.mem (UInt64.ofNat 0x140) req.tx.authorityDigest =
+            decide (req.tx.authorityDigest = s2.policy.pinnedAuthorityDigest) :=
+        execElfCtEq32_spec hAuthLen (by omega) hMemAuth
+      have hBnePol :
+          (!decide (req.tx.policyDigest = s2.policy.pinnedPolicyDigest)) =
+            (req.tx.policyDigest != s2.policy.pinnedPolicyDigest) := by
+        if hEq : req.tx.policyDigest = s2.policy.pinnedPolicyDigest then simp [hEq]
+        else simp [hEq, bne, beq_false_of_ne hEq]
+      have hBneAuth :
+          (!decide (req.tx.authorityDigest = s2.policy.pinnedAuthorityDigest)) =
+            (req.tx.authorityDigest != s2.policy.pinnedAuthorityDigest) := by
+        if hEq : req.tx.authorityDigest = s2.policy.pinnedAuthorityDigest then simp [hEq]
+        else simp [hEq, bne, beq_false_of_ne hEq]
+      rw [hElfPol, hElfAuth, hBnePol, hBneAuth, hWin, hVCap, hAcc, hBurn, hRecip, hPTx, hBelt,
+          hSTag, hSCom, hBAlp, hBKey, hQCfg] at hNone1 ⊢
+      unfold mirPolicyStep
+      cases hW : (req.tx.windowId != s2.policy.windowId)
+      · rw [hW] at hNone1
+        simp only [Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
+        cases hP : (req.tx.policyDigest != s2.policy.pinnedPolicyDigest)
+        · rw [hP] at hNone1
+          simp only [Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
+          cases hA : (req.tx.authorityDigest != s2.policy.pinnedAuthorityDigest)
+          · rw [hA] at hNone1
+            simp only [Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
+            if hR : ¬ (req.tx.recipient ∈ s2.policy.allowedRecipients) then
+              rw [ite_eq_left hR, ite_eq_left hR]; dsimp only; exact ⟨rfl, hRelSaved⟩
+            else
+              simp only [hR, ↓reduceIte] at hNone1 ⊢
+              if hPT : ¬ (req.tx.amountUnits.toNat ≤ s2.policy.perTxCap.toNat) then
+                rw [ite_eq_left hPT, ite_eq_left hPT]; dsimp only; exact ⟨rfl, hRelSaved⟩
+              else
+                simp only [hPT, ↓reduceIte] at hNone1 ⊢
+                if hVC : ¬ (req.tx.amountUnits.toNat ≤ (s2.policy.velocityWindowCap - s2.policy.accumulatedSpend).toNat) then
+                  rw [ite_eq_left hVC, ite_eq_left hVC]; dsimp only; exact ⟨rfl, hRelSaved⟩
+                else
+                  simp only [hVC, ↓reduceIte] at hNone1 ⊢
+                  cases hN : u64MemBool req.tx.nonce s2.policy.burnedNonces
+                  · rw [hN] at hNone1
+                    simp only [Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
+                    cases hQ : verifyFourLayerQuorumCert s2.quorumCertConfig q pkDigest
+                        (encodeTransactionIntent req.tx.toTransactionIntent) req
+                    · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
+                      dsimp only; exact ⟨rfl, hRelSaved⟩
+                    · rw [hQ] at hNone1
+                      simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
+                      cases hE : (decide (pkDigest = s2.belt.enrolledPkDigest) && (req.reqEpoch == s2.belt.nextEpoch))
+                      · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
+                        dsimp only; exact ⟨rfl, hRelSaved⟩
+                      · rw [hE] at hNone1
+                        simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone1 ⊢
+                        cases hC : verifyPreCutTranscript s2.activeSessionTag s2.storedRound1Commits
+                            s2.verifierBginAlpha s2.verifierBginKeyOffsets req.quorum
+                            req.round1Openings req.round2Wires
+                        · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
+                          dsimp only
+                          exact ⟨rfl, hPolLen, hAuthLen, hMemPolZero, hMemAuthZero, rfl, rfl,
+                            rfl, rfl, rfl, rfl, rfl,
+                            rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩,
+                            fun hF => absurd hF (by decide), fun _ => hZeroMem⟩
+                        · have hSomeSh : s2.shareBytes = some (readShareMem32 s1.mem) := hShareEq hCP0 hBP0 hSP1
+                          rw [hC] at hNone1
+                          simp at hNone1
+                  · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
+                    dsimp only; exact ⟨rfl, hRelSaved⟩
+          · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
+            dsimp only; exact ⟨rfl, hRelSaved⟩
+        · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
+          dsimp only; exact ⟨rfl, hRelSaved⟩
+      · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
+        dsimp only; exact ⟨rfl, hRelSaved⟩
+    · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
+      dsimp only
+      exact ⟨rfl, hPolLen, hAuthLen, hMemPolZero, hMemAuthZero, hWin, hVCap,
+        hAcc, hBurn, hRecip, hPTx, congrArg (fun b => { b with poisoned := true }) hBelt,
+        rfl, rfl, ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩,
+        fun hF => absurd hF (by decide), fun _ => hZeroMem⟩
+
+private theorem sim12_zeroIfPoisoned {n : Nat} {q : Nat} {pkDigest : List UInt8}
+    {signFromShare : List UInt8 → List UInt8 → ByteArray}
+    {s1 : Layer1ElfState} {s2 : Layer2MirState}
+    (hRel : (sim_layer1_to_layer2 (n := n) q pkDigest signFromShare).Rel s1 s2) :
+    s1.cutPoisoned = true →
+      ∀ i : Nat, i < 32 → s1.mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0 := by
+  rcases hRel with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, hZero⟩
+  exact hZero
+
+private theorem quorumGate23_eq {PK : Type} {n q f : Nat}
+    (corrupt : List (Fin n)) (pkDigestOf : PK → List UInt8) (pk : PK)
+    (cfg : QuorumCertConfig) (msgBytes : List UInt8) (req : FourLayerReq n)
+    (tsig : IdealTsigState PK (List UInt8))
+    (hPk : tsig.pk = pk) (hNP : tsig.numParties = n) (hTh : tsig.threshold = q)
+    (hCorr1 : tsig.corruptParties = corrupt.map Fin.val)
+    (hCorr2 : tsig.identifiedCheaters = [])
+    (hBound : n + f < 2 * q) (hQPos : 0 < q) (hQLeN : q ≤ n)
+    (hCorruptNd : corrupt.Nodup) (hCorruptLe : corrupt.length ≤ f) :
+    (verifyFourLayerQuorumCert cfg tsig.threshold (pkDigestOf tsig.pk) msgBytes req &&
+      validThresholdApproval tsig
+        ((req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val)) =
+    verifyFourLayerQuorumCert cfg q (pkDigestOf pk) msgBytes req := by
+  rw [hPk, hTh]
+  cases hV : verifyFourLayerQuorumCert cfg q (pkDigestOf pk) msgBytes req
+  · simp
+  · simp only [Bool.true_and]
+    obtain ⟨hNd, hLen⟩ := verifyFourLayerQuorumCert_implies_nodup_and_len hV
+    exact (mirBeltLatch_quorum_discharges_idealTsig_approval
+      corrupt req.quorum tsig hNP hTh hQPos hQLeN hCorr1 hCorr2
+      hCorruptNd hCorruptLe hBound hNd hLen).1
+
+/-- **Link 2 (`sim_layer2_to_layer3`)**:
+    `ForwardSim` from fixed-width `layer2MirGuardedMachine` (`UInt64` policy + `2 * q > n + f`
+    `MirBeltLatchState` + sticky `MirRssCutSession`) to `layer3InteractiveProtocolMachine`. -/
+def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
+    (corrupt : List (Fin n)) (pkDigestOf : PK → List UInt8)
+    (pk : PK)
+    (dealtShares : Nat → Option (List UInt8))
+    (custodianShare : List UInt8)
+    (signFromShare : List UInt8 → List UInt8 → ByteArray)
+    (assembleThresholdSig : (Nat → Option (List UInt8)) → List UInt8 → ByteArray)
+    (_hBound : n + f < 2 * q)
+    (_hQPos : 0 < q) (_hQLeN : q ≤ n)
+    (_hCorruptNd : corrupt.Nodup) (_hCorruptLe : corrupt.length ≤ f)
+    (_hSigMatch : ∀ msg : List UInt8, assembleThresholdSig dealtShares msg = signFromShare custodianShare msg) :
+    ForwardSim
+      (layer2MirGuardedMachine q (pkDigestOf pk) signFromShare)
+      (layer3InteractiveProtocolMachine corrupt pkDigestOf assembleThresholdSig) where
+  Rel s2 s3 :=
+    s2.policy.accumulatedSpend.toNat ≤ s2.policy.velocityWindowCap.toNat ∧
+    s2.policy.toStatefulPolicyGuard = s3.policy ∧
+    s3.cluster.tsig.pk = pk ∧
+    s3.cluster.tsig.numParties = n ∧
+    s3.cluster.tsig.threshold = q ∧
+    (s3.cluster.tsig.corruptParties = corrupt.map Fin.val ∧
+      s3.cluster.tsig.identifiedCheaters = []) ∧
+    s2.belt.enrolledPkDigest = s3.cluster.honestWal.enrolledPkDigest ∧
+    s2.belt.nextEpoch = s3.cluster.honestWal.nextEpoch ∧
+    s2.belt.latchedRecord = s3.cluster.honestWal.latchedRecord ∧
+    s2.belt.poisoned = s3.cluster.honestWal.poisoned ∧
+    s2.cut.poisoned = s3.cluster.honestWal.poisoned ∧
+    Layer23SessionEq s2 s3 ∧
+    (s3.cluster.honestWal.poisoned = false →
+      s2.shareBytes = some custodianShare ∧ s3.cluster.honestShares = dealtShares)
+  sim_ok {s2 s2' s3 req out} hRel hStep2 := by
+    rcases hRel with ⟨hInvPol, hPolEq, hPk, hNP, hTh, hCorr, hWalPk, hWalEp, hWalLat,
+      hBeltP, hCutP, hSess, hIntact⟩
+    rcases hSess with ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩
+    dsimp only [layer2MirGuardedMachine, layer3InteractiveProtocolMachine,
+      PartyMachine.ofOutcome] at hStep2 ⊢
+    cases hP3 : s3.cluster.honestWal.poisoned
+    · obtain ⟨hSomeSh, hDealt⟩ := hIntact hP3
+      have hQuar2 : (s2.cut.poisoned || s2.belt.poisoned || s2.shareBytes.isNone) = false := by
+        rw [hCutP, hBeltP, hP3, hSomeSh]; rfl
+      rw [hQuar2] at hStep2
+      simp only [Bool.false_eq_true, ↓reduceIte] at hStep2 ⊢
+      have hPolStep := mirPolicyGuard_lockstepSim.step_eq req.tx hInvPol
+      dsimp only [mirPolicyGuard_lockstepSim, mirPolicyGuardMachine, specPolicyGuardMachine,
+        PartyMachine.ofOption, PartyMachine.ofOutcome] at hPolStep
+      cases hMirPol : mirPolicyStep s2.policy req.tx with
+      | none => rw [hMirPol] at hStep2; cases hStep2
+      | some polEnv =>
+        rcases polEnv with ⟨pol2', env⟩
+        rw [hMirPol] at hPolStep hStep2
+        rcases hPolStep with ⟨hInvPol', hSpecPolOk⟩
+        rw [hPolEq] at hSpecPolOk
+        cases hPol3 : policyGuardStep s3.policy req.tx.toTransactionIntent with
+        | rejected _ _ => rw [hPol3] at hSpecPolOk; cases hSpecPolOk
+        | accepted pol3' env3 =>
+          rw [hPol3] at hSpecPolOk
+          dsimp only [CustodyStepOutcome.toStepOutcome] at hSpecPolOk
+          injection hSpecPolOk with hPairPol
+          rcases Prod.mk.inj hPairPol with ⟨hPolEq', hEnv⟩
+          subst env3
+          dsimp only at hStep2 ⊢
+          rw [← hQCfg, quorumGate23_eq corrupt pkDigestOf pk s2.quorumCertConfig env.canonicalBytes
+            req s3.cluster.tsig hPk hNP hTh hCorr.1 hCorr.2 _hBound _hQPos _hQLeN _hCorruptNd _hCorruptLe]
+          cases hQ2 : verifyFourLayerQuorumCert s2.quorumCertConfig q (pkDigestOf pk) env.canonicalBytes req
+          · rw [hQ2] at hStep2; simp at hStep2
+          · rw [hQ2] at hStep2
+            simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep2 ⊢
+            rw [hPk, ← hWalPk, ← hWalEp, ← hSTag, ← hSCom, ← hBAlp, ← hBKey]
+            cases hE : (decide (pkDigestOf pk = s2.belt.enrolledPkDigest) && (req.reqEpoch == s2.belt.nextEpoch))
+            · rw [hE] at hStep2; simp at hStep2
+            · rw [hE] at hStep2
+              simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep2 ⊢
+              cases hC : verifyPreCutTranscript s2.activeSessionTag s2.storedRound1Commits
+                  s2.verifierBginAlpha s2.verifierBginKeyOffsets req.quorum
+                  req.round1Openings req.round2Wires
+              · rw [hC] at hStep2; simp at hStep2
+              · rw [hC, hSomeSh] at hStep2
+                simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+                  Option.some.injEq, Prod.mk.injEq] at hStep2
+                rcases hStep2 with ⟨rfl, rfl⟩
+                rw [ite_eq_right (by decide : ¬ ((!true) = true))]
+                dsimp only
+                rw [hDealt, _hSigMatch]
+                exact ⟨rfl, hInvPol', hPolEq'.symm, rfl, hNP, hTh, hCorr, rfl, rfl, rfl,
+                  hBeltP.trans hP3, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => ⟨rfl, rfl⟩⟩
+    · have hQuar2 : (s2.cut.poisoned || s2.belt.poisoned || s2.shareBytes.isNone) = true := by
+        rw [hCutP, hP3]; rfl
+      rw [hQuar2] at hStep2
+      simp at hStep2
+  sim_err {s2 s3 req} hRel hNone2 := by
+    have hRelSaved := hRel
+    rcases hRel with ⟨hInvPol, hPolEq, hPk, hNP, hTh, hCorr, hWalPk, hWalEp, hWalLat,
+      hBeltP, hCutP, hSess, hIntact⟩
+    rcases hSess with ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩
+    dsimp only [layer2MirGuardedMachine, layer3InteractiveProtocolMachine,
+      PartyMachine.ofOutcome] at hNone2 ⊢
+    cases hP3 : s3.cluster.honestWal.poisoned
+    · obtain ⟨hSomeSh, _⟩ := hIntact hP3
+      have hQuar2 : (s2.cut.poisoned || s2.belt.poisoned || s2.shareBytes.isNone) = false := by
+        rw [hCutP, hBeltP, hP3, hSomeSh]; rfl
+      rw [hQuar2] at hNone2 ⊢
+      simp only [Bool.false_eq_true, ↓reduceIte] at hNone2 ⊢
+      have hPolStep := mirPolicyGuard_lockstepSim.step_eq req.tx hInvPol
+      dsimp only [mirPolicyGuard_lockstepSim, mirPolicyGuardMachine, specPolicyGuardMachine,
+        PartyMachine.ofOption, PartyMachine.ofOutcome] at hPolStep
+      cases hMirPol : mirPolicyStep s2.policy req.tx with
+      | none =>
+        rw [hMirPol] at hPolStep
+        rcases hPolStep with ⟨_, hPolNone, _⟩
+        rw [hPolEq] at hPolNone
+        cases hPol3 : policyGuardStep s3.policy req.tx.toTransactionIntent with
+        | accepted _ _ => rw [hPol3] at hPolNone; cases hPolNone
+        | rejected _ _ => dsimp only; exact ⟨rfl, hRelSaved⟩
+      | some polEnv =>
+        rcases polEnv with ⟨pol2', env⟩
+        rw [hMirPol] at hPolStep hNone2
+        rcases hPolStep with ⟨_, hSpecPolOk⟩
+        rw [hPolEq] at hSpecPolOk
+        cases hPol3 : policyGuardStep s3.policy req.tx.toTransactionIntent with
+        | rejected _ _ => rw [hPol3] at hSpecPolOk; cases hSpecPolOk
+        | accepted pol3' env3 =>
+          rw [hPol3] at hSpecPolOk
+          dsimp only [CustodyStepOutcome.toStepOutcome] at hSpecPolOk
+          injection hSpecPolOk with hPairPol
+          rcases Prod.mk.inj hPairPol with ⟨_, hEnv⟩
+          subst env3
+          dsimp only at hNone2 ⊢
+          rw [← hQCfg, quorumGate23_eq corrupt pkDigestOf pk s2.quorumCertConfig env.canonicalBytes
+            req s3.cluster.tsig hPk hNP hTh hCorr.1 hCorr.2 _hBound _hQPos _hQLeN _hCorruptNd _hCorruptLe]
+          cases hQ2 : verifyFourLayerQuorumCert s2.quorumCertConfig q (pkDigestOf pk) env.canonicalBytes req
+          · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
+            dsimp only; exact ⟨rfl, hRelSaved⟩
+          · rw [hQ2] at hNone2
+            simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone2 ⊢
+            rw [hPk, ← hWalPk, ← hWalEp, ← hSTag, ← hSCom, ← hBAlp, ← hBKey]
+            cases hE : (decide (pkDigestOf pk = s2.belt.enrolledPkDigest) && (req.reqEpoch == s2.belt.nextEpoch))
+            · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
+              dsimp only; exact ⟨rfl, hRelSaved⟩
+            · rw [hE] at hNone2
+              simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone2 ⊢
+              cases hC : verifyPreCutTranscript s2.activeSessionTag s2.storedRound1Commits
+                  s2.verifierBginAlpha s2.verifierBginKeyOffsets req.quorum
+                  req.round1Openings req.round2Wires
+              · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
+                dsimp only [poisonRealCluster, walQuarantine]
+                exact ⟨rfl, hInvPol, hPolEq, hPk, hNP, hTh, hCorr, hWalPk, hWalEp, hWalLat,
+                  rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun hF => absurd hF (by decide)⟩
+              · rw [hC, hSomeSh] at hNone2
+                simp at hNone2
+    · have hQuar2 : (s2.cut.poisoned || s2.belt.poisoned || s2.shareBytes.isNone) = true := by
+        rw [hCutP, hP3]; rfl
+      rw [hQuar2]
+      rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
+      dsimp only [poisonRealCluster, walQuarantine]
+      exact ⟨rfl, hInvPol, hPolEq, hPk, hNP, hTh, hCorr, hWalPk, hWalEp, hWalLat,
+        rfl, rfl, ⟨hSTag, hSCom, hBAlp, hBKey, hQCfg⟩, fun hF => absurd hF (by decide)⟩
+
+/-- **Link 3 (`sim_layer3_to_layer4`)**:
+    Conditional `ForwardSim` from `layer3InteractiveProtocolMachine` (with secret shares) to
+    share-free `layer4IdealTsigMachine` parameterized by the threshold reconstruction equation
+    `_hOracleEq`. -/
+def sim_layer3_to_layer4 {PK : Type} {n : Nat}
+    (corrupt : List (Fin n)) (pkDigestOf : PK → List UInt8)
+    (dealtShares : Nat → Option (List UInt8))
+    (assembleThresholdSig : (Nat → Option (List UInt8)) → List UInt8 → ByteArray)
+    (idealSignOracle : List UInt8 → ByteArray)
+    (_hOracleEq : ∀ msg : List UInt8, assembleThresholdSig dealtShares msg = idealSignOracle msg) :
+    ForwardSim
+      (layer3InteractiveProtocolMachine corrupt pkDigestOf assembleThresholdSig)
+      (layer4IdealTsigMachine corrupt pkDigestOf idealSignOracle) where
+  Rel s3 s4 :=
+    s3.policy = s4.policy ∧
+    s3.cluster.tsig = s4.ideal.tsig ∧
+    s3.cluster.honestWal = s4.ideal.honestWal ∧
+    s3.cluster.maskSessionCursor = s4.ideal.maskSessionCursor ∧
+    Layer34SessionEq s3 s4 ∧
+    (s3.cluster.honestWal.poisoned = false → s3.cluster.honestShares = dealtShares)
+  sim_ok {s3 s3' s4 req out} hRel hStep3 := by
+    rcases s3 with ⟨pol, ⟨tsig, ⟨wPk, wEp, wLat, wPois⟩, cur, shares3⟩, aTag, sCom, vAlp, vKey, qCfg⟩
+    rcases s4 with ⟨pol4, ⟨tsig4, wal4, cur4⟩, aTag4, sCom4, vAlp4, vKey4, qCfg4⟩
+    dsimp only [Layer34SessionEq] at hRel
+    rcases hRel with ⟨rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, hSh⟩
+    dsimp only [layer3InteractiveProtocolMachine, layer4IdealTsigMachine,
+      PartyMachine.ofOutcome] at hStep3 ⊢
+    cases wPois
+    · have hDealt : shares3 = dealtShares := hSh rfl
+      simp only [Bool.false_eq_true, ↓reduceIte] at hStep3 ⊢
+      cases hPG : policyGuardStep pol req.tx.toTransactionIntent with
+      | rejected _ _ => rw [hPG] at hStep3; simp at hStep3
+      | accepted pol' env =>
+        rw [hPG] at hStep3
+        dsimp only at hStep3 ⊢
+        cases hQ : (verifyFourLayerQuorumCert qCfg tsig.threshold (pkDigestOf tsig.pk) env.canonicalBytes req &&
+            validThresholdApproval tsig
+              ((req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val))
+        · rw [hQ] at hStep3; simp at hStep3
+        · rw [hQ] at hStep3
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep3 ⊢
+          cases hE : (decide (pkDigestOf tsig.pk = wPk) && (req.reqEpoch == wEp))
+          · rw [hE] at hStep3; simp at hStep3
+          · rw [hE] at hStep3
+            simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep3 ⊢
+            cases hC : verifyPreCutTranscript aTag sCom vAlp vKey req.quorum
+                req.round1Openings req.round2Wires
+            · rw [hC] at hStep3; simp at hStep3
+            · rw [hC] at hStep3
+              simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+                Option.some.injEq, Prod.mk.injEq] at hStep3
+              rcases hStep3 with ⟨rfl, rfl⟩
+              rw [ite_eq_right (by decide : ¬ ((!true) = true))]
+              dsimp only
+              rw [hDealt, _hOracleEq]
+              exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => rfl⟩
+    · simp at hStep3
+  sim_err {s3 s4 req} hRel hNone3 := by
+    rcases s3 with ⟨pol, ⟨tsig, ⟨wPk, wEp, wLat, wPois⟩, cur, shares3⟩, aTag, sCom, vAlp, vKey, qCfg⟩
+    rcases s4 with ⟨pol4, ⟨tsig4, wal4, cur4⟩, aTag4, sCom4, vAlp4, vKey4, qCfg4⟩
+    dsimp only [Layer34SessionEq] at hRel
+    rcases hRel with ⟨rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, hSh⟩
+    dsimp only [layer3InteractiveProtocolMachine, layer4IdealTsigMachine,
+      PartyMachine.ofOutcome] at hNone3 ⊢
+    cases wPois
+    · have hDealt : shares3 = dealtShares := hSh rfl
+      simp only [Bool.false_eq_true, ↓reduceIte] at hNone3 ⊢
+      cases hPG : policyGuardStep pol req.tx.toTransactionIntent with
+      | rejected _ _ => exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => hDealt⟩
+      | accepted pol' env =>
+        rw [hPG] at hNone3
+        dsimp only at hNone3 ⊢
+        cases hQ : (verifyFourLayerQuorumCert qCfg tsig.threshold (pkDigestOf tsig.pk) env.canonicalBytes req &&
+            validThresholdApproval tsig
+              ((req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val))
+        · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
+          dsimp only
+          exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => hDealt⟩
+        · rw [hQ] at hNone3
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone3 ⊢
+          cases hE : (decide (pkDigestOf tsig.pk = wPk) && (req.reqEpoch == wEp))
+          · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
+            dsimp only
+            exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩, fun _ => hDealt⟩
+          · rw [hE] at hNone3
+            simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone3 ⊢
+            cases hC : verifyPreCutTranscript aTag sCom vAlp vKey req.quorum
+                req.round1Openings req.round2Wires
+            · rw [ite_eq_left Bool.not_false, ite_eq_left Bool.not_false]
+              dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
+              exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩,
+                fun hF => absurd hF (by decide)⟩
+            · rw [hC] at hNone3; simp at hNone3
+    · rw [ite_eq_left (rfl : true = true), ite_eq_left (rfl : true = true)]
+      dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
+      exact ⟨rfl, rfl, rfl, rfl, rfl, ⟨rfl, rfl, rfl, rfl, rfl⟩,
+        fun hF => absurd hF (by decide)⟩
+
+/-- **Conditional 4-Layer Control-Flow & Authorization Refinement (`isa_to_mir_to_protocol_to_ideal_sim`)**:
+    Composes `ForwardSim.trans` across:
+    `(1) Compiled ELF ISA Slice` $\to$ `(2) Fixed-Width Guard Model` $\to$
+    `(3) Centralized Threshold Transition Model` $\to$ `(4) Share-Free Target Authorization Model`.
+    Explicitly parameterized by the threshold reconstruction contracts `hSigMatch` and `hOracleEq`
+    (which are discharged algebraically via multi-share Lagrange interpolation in
+    `inhabited_four_layer_chain`, while cryptographic UC simulation lives in
+    `InteractiveUcEngine.lean`). -/
+@[expose]
+def isa_to_mir_to_protocol_to_ideal_sim {PK : Type} {n q f : Nat}
+    (corrupt : List (Fin n)) (pkDigestOf : PK → List UInt8)
+    (pk : PK)
+    (dealtShares : Nat → Option (List UInt8))
+    (custodianShare : List UInt8)
+    (signFromShare : List UInt8 → List UInt8 → ByteArray)
+    (assembleThresholdSig : (Nat → Option (List UInt8)) → List UInt8 → ByteArray)
+    (idealSignOracle : List UInt8 → ByteArray)
+    (hBound : n + f < 2 * q)
+    (hQPos : 0 < q) (hQLeN : q ≤ n)
+    (hCorruptNd : corrupt.Nodup) (hCorruptLe : corrupt.length ≤ f)
+    (hSigMatch : ∀ msg : List UInt8, assembleThresholdSig dealtShares msg = signFromShare custodianShare msg)
+    (hOracleEq : ∀ msg : List UInt8, assembleThresholdSig dealtShares msg = idealSignOracle msg) :
+    ForwardSim
+      (layer1CompiledElfMachine (n := n) q (pkDigestOf pk) (fun m msg => signFromShare (readShareMem32 m) msg))
+      (layer4IdealTsigMachine corrupt pkDigestOf idealSignOracle) :=
+  (sim_layer1_to_layer2 (n := n) q (pkDigestOf pk) signFromShare).trans
+    ((sim_layer2_to_layer3 corrupt pkDigestOf pk dealtShares custodianShare
+        signFromShare assembleThresholdSig hBound hQPos hQLeN hCorruptNd hCorruptLe hSigMatch).trans
+      (sim_layer3_to_layer4 corrupt pkDigestOf dealtShares assembleThresholdSig idealSignOracle hOracleEq))
+
+/-- Policy/epoch/quorum safety only: this predicate does not assert transcript MAC validity
+    or signature authenticity. The Round-2 model reuses fixed keys across sessions.
+    Multi-turn 4-layer transcript predicate:
+    1. Cumulative approved `amount_units` stays within `velocityWindowCap` (never fooled by `callerEchoedSpent`),
+    2. Approved intent nonces are strictly `Nodup`,
+    3. Approved signing epochs are strictly increasing (`Pairwise (· < ·)`),
+    4. Every approved request includes at least one honest validator `p ∈ req.quorum` with `p ∉ corrupt`. -/
+def FourLayerTraceSafe {n : Nat} (velocityWindowCap : Nat) (corrupt : List (Fin n))
+    (trace : List (FourLayerReq n × FourLayerOut)) : Prop :=
+  let approvedAmts := trace.map (fun p => p.2.envelope.intent.amount_units)
+  let approvedNonces := trace.map (fun p => p.2.envelope.intent.nonce)
+  let approvedEpochs := trace.map (fun p => p.2.committedEpoch)
+  approvedAmts.foldr (· + ·) 0 ≤ velocityWindowCap ∧
+  approvedNonces.Nodup ∧
+  approvedEpochs.Pairwise (· < ·) ∧
+  (∀ p ∈ trace, ∃ h ∈ p.1.quorum, h ∉ corrupt)
+
+private theorem layer4_validTrace_safe {PK : Type} {n : Nat}
+    (corrupt : List (Fin n)) (pkDigestOf : PK → List UInt8)
+    (idealSignOracle : List UInt8 → ByteArray)
+    {s₀ sFinal : Layer4IdealState PK} {trace : List (FourLayerReq n × FourLayerOut)}
+    (hCap : s₀.policy.accumulated_spend ≤ s₀.policy.velocity_window_cap)
+    (hCorrEq : s₀.ideal.tsig.corruptParties = corrupt.map Fin.val)
+    (hDishonest : s₀.ideal.tsig.corruptParties.length + 1 ≤ s₀.ideal.tsig.threshold)
+    (hTr : (layer4IdealTsigMachine corrupt pkDigestOf idealSignOracle).ValidTrace s₀ trace sFinal) :
+    ValidCustodyTrace policyGuardStep s₀.policy
+      (trace.map (fun p => (p.1.tx.toTransactionIntent, some p.2.envelope))) sFinal.policy ∧
+    s₀.ideal.honestWal.nextEpoch ≤ sFinal.ideal.honestWal.nextEpoch ∧
+    (∀ p ∈ trace, s₀.ideal.honestWal.nextEpoch ≤ p.2.committedEpoch) ∧
+    (trace.map (fun p => p.2.committedEpoch)).Pairwise (· < ·) ∧
+    (∀ p ∈ trace, ∃ h ∈ p.1.quorum, h ∉ corrupt) := by
+  revert hCap hCorrEq hDishonest
+  induction hTr with
+  | nil s₀ =>
+    intro _ _ _
+    refine ⟨.nil s₀.policy, Nat.le_refl _, ?_, List.Pairwise.nil, ?_⟩
+    · intro _ hm; cases hm
+    · intro _ hm; cases hm
+  | @accept s₀ s₁ sFinal req out rest hStep _ ih =>
+    intro hCap hCorrEq hDishonest
+    dsimp only [layer4IdealTsigMachine, PartyMachine.ofOutcome] at hStep
+    cases hP : s₀.ideal.honestWal.poisoned
+    · rw [hP] at hStep
+      simp only [Bool.false_eq_true, ↓reduceIte] at hStep
+      cases hPG : policyGuardStep s₀.policy req.tx.toTransactionIntent with
+      | rejected _ _ => rw [hPG] at hStep; cases hStep
+      | accepted pol₁ env =>
+        rw [hPG] at hStep
+        dsimp only at hStep
+        let honApp := (req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val
+        cases hQ : (verifyFourLayerQuorumCert s₀.quorumCertConfig s₀.ideal.tsig.threshold
+            (pkDigestOf s₀.ideal.tsig.pk) env.canonicalBytes req &&
+            validThresholdApproval s₀.ideal.tsig honApp)
+        · rw [hQ] at hStep; simp at hStep
+        · rw [hQ] at hStep
+          simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep
+          cases hE : (decide (pkDigestOf s₀.ideal.tsig.pk = s₀.ideal.honestWal.enrolledPkDigest) &&
+              (req.reqEpoch == s₀.ideal.honestWal.nextEpoch))
+          · rw [hE] at hStep; simp at hStep
+          · rw [hE] at hStep
+            simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hStep
+            cases hC : verifyPreCutTranscript s₀.activeSessionTag s₀.storedRound1Commits
+                s₀.verifierBginAlpha s₀.verifierBginKeyOffsets req.quorum
+                req.round1Openings req.round2Wires
+            · rw [hC] at hStep; simp at hStep
+            · rw [hC] at hStep
+              simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte,
+                Option.some.injEq, Prod.mk.injEq] at hStep
+              rcases hStep with ⟨rfl, rfl⟩
+              have hEpEq : req.reqEpoch = s₀.ideal.honestWal.nextEpoch :=
+                Nat.eq_of_beq_eq_true (Bool.and_eq_true_iff.mp hE).2
+              have hCapEq : pol₁.velocity_window_cap = s₀.policy.velocity_window_cap := by
+                unfold policyGuardStep at hPG
+                if c1 : (req.tx.toTransactionIntent.window_id != s₀.policy.window_id) = true then simp [c1] at hPG
+                else if c2 : (req.tx.toTransactionIntent.policy_digest != s₀.policy.pinned_policy_digest) = true then simp [c1, c2] at hPG
+                else if c3 : (req.tx.toTransactionIntent.authority_digest != s₀.policy.pinned_authority_digest) = true then simp [c1, c2, c3] at hPG
+                else if c4 : ¬ (req.tx.toTransactionIntent.recipient ∈ s₀.policy.allowed_recipients) then simp [c1, c2, c3, c4] at hPG
+                else if c5 : ¬ (req.tx.toTransactionIntent.amount_units ≤ s₀.policy.per_tx_cap) then simp [c1, c2, c3, c4, c5] at hPG
+                else if c6 : ¬ (s₀.policy.accumulated_spend + req.tx.toTransactionIntent.amount_units ≤ s₀.policy.velocity_window_cap) then simp [c1, c2, c3, c4, c5, c6] at hPG
+                else if c7 : req.tx.toTransactionIntent.nonce ∈ s₀.policy.burned_intent_nonces then simp [c1, c2, c3, c4, c5, c6, c7] at hPG
+                else
+                  simp only [c1, c2, c3, c4, c5, c6, c7, Bool.false_eq_true, ↓reduceIte,
+                    CustodyStepOutcome.accepted.injEq] at hPG
+                  rcases hPG with ⟨rfl, _⟩; rfl
+              have hPolCap₁ : pol₁.accumulated_spend ≤ pol₁.velocity_window_cap := by
+                rw [hCapEq]
+                exact (policy_multiturn_velocity_and_intent_binding hCap
+                  (.consAccepted hPG (.nil pol₁))).2.1
+              obtain ⟨hCustRest, hMonoRest, hGeRest, hPairRest, hHonRest⟩ :=
+                ih hPolCap₁ hCorrEq hDishonest
+              have hMonoStep : req.reqEpoch + 1 ≤ sFinal.ideal.honestWal.nextEpoch := hMonoRest
+              have hValApp : validThresholdApproval s₀.ideal.tsig honApp = true :=
+                (Bool.and_eq_true_iff.mp hQ).2
+              obtain ⟨hVal, hhMem, _, hhNotC⟩ :=
+                thresholdApproval_requires_honest_party s₀.ideal.tsig honApp hDishonest hValApp
+              rcases List.mem_map.mp hhMem with ⟨pFin, hpFilt, hpValEq⟩
+              have hpInQ : pFin ∈ req.quorum := mem_of_mem_filter_local hpFilt
+              have hpNotCorrupt : pFin ∉ corrupt := by
+                intro hc
+                apply hhNotC
+                rw [hCorrEq, ← hpValEq]
+                exact List.mem_map_of_mem hc
+              refine ⟨.consAccepted hPG hCustRest, by omega, ?_, ?_, ?_⟩
+              · intro p hp
+                rcases List.mem_cons.mp hp with rfl | hTail
+                · exact Nat.le_of_eq hEpEq.symm
+                · have h1 : req.reqEpoch + 1 ≤ p.2.committedEpoch := hGeRest p hTail
+                  omega
+              · simp only [List.map_cons, List.pairwise_cons]
+                refine ⟨?_, hPairRest⟩
+                intro ep₂ hep₂
+                rcases List.mem_map.mp hep₂ with ⟨p₂, hp₂Mem, rfl⟩
+                have h1 : req.reqEpoch + 1 ≤ p₂.2.committedEpoch := hGeRest p₂ hp₂Mem
+                change req.reqEpoch < p₂.2.committedEpoch
+                omega
+              · intro p hp
+                rcases List.mem_cons.mp hp with rfl | hTail
+                · exact ⟨pFin, hpInQ, hpNotCorrupt⟩
+                · exact hHonRest p hTail
+    · rw [hP] at hStep; simp at hStep
+  | @reject s₀ sFinal req rest hNone _ ih =>
+    intro hCap hCorrEq hDishonest
+    let sErr := (layer4IdealTsigMachine corrupt pkDigestOf idealSignOracle).errStep s₀ req
+    have hPres :
+        sErr.policy = s₀.policy ∧
+        sErr.ideal.tsig = s₀.ideal.tsig ∧
+        sErr.ideal.honestWal.nextEpoch = s₀.ideal.honestWal.nextEpoch := by
+      dsimp only [sErr, layer4IdealTsigMachine, PartyMachine.ofOutcome] at hNone ⊢
+      cases hP : s₀.ideal.honestWal.poisoned
+      · rw [hP] at hNone
+        simp only [Bool.false_eq_true, ↓reduceIte] at hNone ⊢
+        cases hPG : policyGuardStep s₀.policy req.tx.toTransactionIntent with
+        | rejected _ _ => exact ⟨rfl, rfl, rfl⟩
+        | accepted pol' env =>
+          rw [hPG] at hNone
+          dsimp only at hNone ⊢
+          let honApp := (req.quorum.filter (fun p => !finMemBool p corrupt)).map Fin.val
+          cases hQ : (verifyFourLayerQuorumCert s₀.quorumCertConfig s₀.ideal.tsig.threshold
+              (pkDigestOf s₀.ideal.tsig.pk) env.canonicalBytes req &&
+              validThresholdApproval s₀.ideal.tsig honApp)
+          · rw [ite_eq_left Bool.not_false]
+            dsimp only
+            exact ⟨rfl, rfl, rfl⟩
+          · rw [hQ] at hNone
+            simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone ⊢
+            cases hE : (decide (pkDigestOf s₀.ideal.tsig.pk = s₀.ideal.honestWal.enrolledPkDigest) &&
+                (req.reqEpoch == s₀.ideal.honestWal.nextEpoch))
+            · rw [ite_eq_left Bool.not_false]
+              dsimp only
+              exact ⟨rfl, rfl, rfl⟩
+            · rw [hE] at hNone
+              simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hNone ⊢
+              cases hC : verifyPreCutTranscript s₀.activeSessionTag s₀.storedRound1Commits
+                  s₀.verifierBginAlpha s₀.verifierBginKeyOffsets req.quorum
+                  req.round1Openings req.round2Wires
+              · rw [ite_eq_left Bool.not_false]
+                dsimp only [poisonIdealCluster, walQuarantine]
+                exact ⟨rfl, rfl, rfl⟩
+              · rw [hC] at hNone; simp at hNone
+      · rw [ite_eq_left (rfl : true = true)]
+        dsimp only [poisonIdealCluster, walQuarantine]
+        exact ⟨rfl, rfl, rfl⟩
+    have hCapErr : sErr.policy.accumulated_spend ≤ sErr.policy.velocity_window_cap := by
+      rw [hPres.1]; exact hCap
+    have hCorrErr : sErr.ideal.tsig.corruptParties = corrupt.map Fin.val := by
+      rw [hPres.2.1]; exact hCorrEq
+    have hDishErr : sErr.ideal.tsig.corruptParties.length + 1 ≤ sErr.ideal.tsig.threshold := by
+      rw [hPres.2.1]; exact hDishonest
+    obtain ⟨hCust, hMono, hGe, hPair, hHon⟩ :=
+      ih hCapErr hCorrErr hDishErr
+    rw [hPres.1] at hCust
+    rw [hPres.2.2] at hMono hGe
+    exact ⟨hCust, hMono, hGe, hPair, hHon⟩
+
+private theorem traceApprovedOutputs_fourLayer {n : Nat} :
+    ∀ (tr : List (FourLayerReq n × FourLayerOut)),
+      traceApprovedOutputs (tr.map (fun p => (p.1.tx.toTransactionIntent, some p.2.envelope))) =
+        tr.map (fun p => p.2.envelope)
+  | [] => traceApprovedOutputs_nil
+  | _ :: rest => by
+    simp only [List.map_cons, traceApprovedOutputs_cons_some, traceApprovedOutputs_fourLayer rest]
+
+/-- **End-to-End Multi-Turn Safety Preservation (`isa_to_ideal_preserves_multiturn_safety`)**:
+    Via `ForwardSim.preserve_trace_pred` on `isa_to_mir_to_protocol_to_ideal_sim`, ANY multi-turn
+    trace accepted by `layer1CompiledElfMachine` automatically satisfies `FourLayerTraceSafe`
+    (cumulative spend `≤ velocityWindowCap`, `Nodup` nonces, strictly increasing epochs, and
+    honest validator participation `h ∈ quorum \ corrupt`), AND if `s1Final.cutPoisoned = true`,
+    all 32 secret key-share bytes `[0x180, 0x1A0)` in Layer-1 memory are physically `0`! -/
+theorem isa_to_ideal_preserves_multiturn_safety {PK : Type} {n q f : Nat}
+    (corrupt : List (Fin n)) (pkDigestOf : PK → List UInt8)
+    (pk : PK)
+    (dealtShares : Nat → Option (List UInt8))
+    (custodianShare : List UInt8)
+    (signFromShare : List UInt8 → List UInt8 → ByteArray)
+    (assembleThresholdSig : (Nat → Option (List UInt8)) → List UInt8 → ByteArray)
+    (idealSignOracle : List UInt8 → ByteArray)
+    (hBound : n + f < 2 * q)
+    (hQPos : 0 < q) (hQLeN : q ≤ n)
+    (hCorruptNd : corrupt.Nodup) (hCorruptLe : corrupt.length ≤ f)
+    (hSigMatch : ∀ msg : List UInt8, assembleThresholdSig dealtShares msg = signFromShare custodianShare msg)
+    (hOracleEq : ∀ msg : List UInt8, assembleThresholdSig dealtShares msg = idealSignOracle msg)
+    {s1₀ s1Final : Layer1ElfState}
+    {s4₀ : Layer4IdealState PK}
+    {trace : List (FourLayerReq n × FourLayerOut)}
+    (hRel₀ :
+      (isa_to_mir_to_protocol_to_ideal_sim corrupt pkDigestOf pk dealtShares custodianShare
+        signFromShare assembleThresholdSig idealSignOracle
+        hBound hQPos hQLeN hCorruptNd hCorruptLe hSigMatch hOracleEq).Rel s1₀ s4₀)
+    (hTrace1 :
+      (layer1CompiledElfMachine q (pkDigestOf pk)
+        (fun m msg => signFromShare (readShareMem32 m) msg)).ValidTrace s1₀ trace s1Final) :
+    FourLayerTraceSafe s4₀.policy.velocity_window_cap corrupt trace ∧
+    (s1Final.cutPoisoned = true →
+      ∀ i : Nat, i < 32 → s1Final.mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0) := by
+  let sim := isa_to_mir_to_protocol_to_ideal_sim corrupt pkDigestOf pk dealtShares custodianShare
+    signFromShare assembleThresholdSig idealSignOracle
+    hBound hQPos hQLeN hCorruptNd hCorruptLe hSigMatch hOracleEq
+  rcases hRel₀ with ⟨s2₀, h12₀, s3₀, h23₀, h34₀⟩
+  have hCap₀ : s4₀.policy.accumulated_spend ≤ s4₀.policy.velocity_window_cap := by
+    rw [← h34₀.1, ← h23₀.2.1]
+    exact h23₀.1
+  have hCorr₀ : s4₀.ideal.tsig.corruptParties = corrupt.map Fin.val := by
+    rw [← h34₀.2.1]
+    exact h23₀.2.2.2.2.2.1.1
+  have hDishonest₀ : s4₀.ideal.tsig.corruptParties.length + 1 ≤ s4₀.ideal.tsig.threshold := by
+    rw [hCorr₀, List.length_map, ← h34₀.2.1, h23₀.2.2.2.2.1]
+    omega
+  have hSafe : FourLayerTraceSafe s4₀.policy.velocity_window_cap corrupt trace := by
+    apply ForwardSim.preserve_trace_pred sim ⟨s2₀, h12₀, s3₀, h23₀, h34₀⟩ _ hTrace1
+    intro tr s4F hTr4
+    obtain ⟨hCust, _, _, hEpPair, hHon⟩ :=
+      layer4_validTrace_safe corrupt pkDigestOf idealSignOracle hCap₀ hCorr₀ hDishonest₀ hTr4
+    have hPolMain := policy_multiturn_velocity_and_intent_binding hCap₀ hCust
+    rw [traceApprovedOutputs_fourLayer tr] at hPolMain
+    dsimp only at hPolMain
+    have hMapAmt :
+        ((tr.map (fun p => p.2.envelope)).map (fun e => e.intent.amount_units)) =
+          tr.map (fun p => p.2.envelope.intent.amount_units) := by
+      rw [List.map_map]; rfl
+    have hMapNonce :
+        ((tr.map (fun p => p.2.envelope)).map (fun e => e.intent.nonce)) =
+          tr.map (fun p => p.2.envelope.intent.nonce) := by
+      rw [List.map_map]; rfl
+    rw [hMapAmt, hMapNonce] at hPolMain
+    exact ⟨hPolMain.2.2.1, hPolMain.2.2.2.1, hEpPair, hHon⟩
+  obtain ⟨s4Final, _, s2Final, h12F, _⟩ :=
+    sim.lift_validTrace ⟨s2₀, h12₀, s3₀, h23₀, h34₀⟩ hTrace1
+  exact ⟨hSafe, sim12_zeroIfPoisoned h12F⟩
+
+/-! ### Multi-Share Shamir Algebra, `#tooth` Session-Gate Refutations & `inhabited_four_layer_chain` -/
+
+/-- Pack 4 canonical `Goldilocks` limbs into a 32-byte big-endian key/share slice. -/
+def packLane4Bytes32 (L : Lane4) : List UInt8 :=
+  be 8 L.x0.val ++ be 8 L.x1.val ++ be 8 L.x2.val ++ be 8 L.x3.val
+
+theorem packLane4Bytes32_length (L : Lane4) : (packLane4Bytes32 L).length = 32 := by
+  unfold packLane4Bytes32
+  simp [length_be]
+
+/-- Unpack a 32-byte big-endian key/share slice into a 4-limb `Lane4` element. -/
+def unpackLane4Bytes32 (bs : List UInt8) : Lane4 :=
+  ⟨Goldilocks.ofNat (ofBE (bs.take 8)),
+   Goldilocks.ofNat (ofBE ((bs.drop 8).take 8)),
+   Goldilocks.ofNat (ofBE ((bs.drop 16).take 8)),
+   Goldilocks.ofNat (ofBE ((bs.drop 24).take 8))⟩
+
+private theorem goldilocks_ofNat_val_eq (x : Goldilocks) : Goldilocks.ofNat x.val = x :=
+  Goldilocks.ext (Nat.mod_eq_of_lt x.isLt)
+
+theorem unpackLane4Bytes32_packLane4Bytes32 (L : Lane4) :
+    unpackLane4Bytes32 (packLane4Bytes32 L) = L := by
+  have hPow : (2 : Nat) ^ 64 = 256 ^ 8 := rfl
+  have hTake0 : (packLane4Bytes32 L).take 8 = be 8 L.x0.val := rfl
+  have hTake1 : ((packLane4Bytes32 L).drop 8).take 8 = be 8 L.x1.val := rfl
+  have hTake2 : ((packLane4Bytes32 L).drop 16).take 8 = be 8 L.x2.val := rfl
+  have hTake3 : ((packLane4Bytes32 L).drop 24).take 8 = be 8 L.x3.val := rfl
+  unfold unpackLane4Bytes32
+  rw [hTake0, hTake1, hTake2, hTake3,
+      ofBE_be (hPow ▸ Goldilocks.val_lt_two_pow_64 L.x0),
+      ofBE_be (hPow ▸ Goldilocks.val_lt_two_pow_64 L.x1),
+      ofBE_be (hPow ▸ Goldilocks.val_lt_two_pow_64 L.x2),
+      ofBE_be (hPow ▸ Goldilocks.val_lt_two_pow_64 L.x3),
+      goldilocks_ofNat_val_eq, goldilocks_ofNat_val_eq,
+      goldilocks_ofNat_val_eq, goldilocks_ofNat_val_eq]
+
+/-- Degree-2 Shamir polynomial $f(x) = \text{sk} + a_1 x + a_2 x^2$ on a single `Goldilocks` coordinate. -/
+def shamirEvalCoord (sk a₁ a₂ x : Goldilocks) : Goldilocks :=
+  Goldilocks.add sk (Goldilocks.add (Goldilocks.mul a₁ x)
+    (Goldilocks.mul a₂ (Goldilocks.mul x x)))
+
+/-- Degree-2 3-of-4 Shamir polynomial evaluation over 4-limb `Lane4` (`256`-bit secret space). -/
+def shamirEvalLane4 (sk a₁ a₂ : Lane4) (x : Goldilocks) : Lane4 :=
+  ⟨shamirEvalCoord sk.x0 a₁.x0 a₂.x0 x,
+   shamirEvalCoord sk.x1 a₁.x1 a₂.x1 x,
+   shamirEvalCoord sk.x2 a₁.x2 a₂.x2 x,
+   shamirEvalCoord sk.x3 a₁.x3 a₂.x3 x⟩
+
+/-- Non-zero evaluation point $x_p = p + 1 \in \{1, 2, 3, 4\}$ for custodian `p : Fin 4`. -/
+def shamirPoint (p : Fin 4) : Goldilocks :=
+  Goldilocks.ofNat (p.val + 1)
+
+/-- Multiplicative inverse of $x_p \in \{1, 2, 3, 4\}$ in `Goldilocks`. -/
+def shamirPointInv : Fin 4 → Goldilocks
+  | ⟨0, _⟩ => Goldilocks.ofNat 1
+  | ⟨1, _⟩ => Goldilocks.ofNat 9223372034707292161
+  | ⟨2, _⟩ => Goldilocks.ofNat 12297829379609722881
+  | ⟨3, _⟩ => Goldilocks.ofNat 13835058052060938241
+
+private theorem shamirPointInv_mul_point (p : Fin 4) :
+    Goldilocks.mul (shamirPointInv p) (shamirPoint p) = Goldilocks.one := by
+  rcases p with ⟨v, hv⟩
+  match v with
+  | 0 => dsimp only [shamirPointInv, shamirPoint]; decide
+  | 1 => dsimp only [shamirPointInv, shamirPoint]; decide
+  | 2 => dsimp only [shamirPointInv, shamirPoint]; decide
+  | 3 => dsimp only [shamirPointInv, shamirPoint]; decide
+  | n + 4 => omega
+
+/-- Unique degree-1 slope $a_1 = x_p^{-1}(y - (\text{sk} + a_2 x_p^2))$ mapping `sk` to single share `y`. -/
+def shamirRecoverSlopeCoord (p : Fin 4) (sk a₂ y : Goldilocks) : Goldilocks :=
+  let x := shamirPoint p
+  Goldilocks.mul (shamirPointInv p)
+    (Goldilocks.sub y (Goldilocks.add sk (Goldilocks.mul a₂ (Goldilocks.mul x x))))
+
+def shamirRecoverSlope (p : Fin 4) (sk a₂ y : Lane4) : Lane4 :=
+  ⟨shamirRecoverSlopeCoord p sk.x0 a₂.x0 y.x0,
+   shamirRecoverSlopeCoord p sk.x1 a₂.x1 y.x1,
+   shamirRecoverSlopeCoord p sk.x2 a₂.x2 y.x2,
+   shamirRecoverSlopeCoord p sk.x3 a₂.x3 y.x3⟩
+
+private theorem shamirEval_recover_coord (p : Fin 4) (sk a₂ y : Goldilocks) :
+    shamirEvalCoord sk (shamirRecoverSlopeCoord p sk a₂ y) a₂ (shamirPoint p) = y := by
+  unfold shamirEvalCoord shamirRecoverSlopeCoord
+  dsimp only
+  let x := shamirPoint p
+  let xInv := shamirPointInv p
+  let qTerm := Goldilocks.mul a₂ (Goldilocks.mul x x)
+  let diff := Goldilocks.sub y (Goldilocks.add sk qTerm)
+  have hCancelX : Goldilocks.mul (Goldilocks.mul xInv diff) x = diff := by
+    change CommRingOps.mul (CommRingOps.mul xInv diff) x = diff
+    rw [LawfulCommRing.mul_comm xInv diff, LawfulCommRing.mul_assoc]
+    change CommRingOps.mul diff (Goldilocks.mul xInv x) = diff
+    rw [shamirPointInv_mul_point p]
+    exact LawfulCommRing.mul_one diff
+  change Goldilocks.add sk (Goldilocks.add (Goldilocks.mul (Goldilocks.mul xInv diff) x) qTerm) = y
+  rw [hCancelX]
+  dsimp only [diff]
+  rw [← goldOfInt_nat sk, ← goldOfInt_nat y, ← goldOfInt_nat qTerm]
+  simp only [goldOfInt_add, goldOfInt_sub]
+  congr 1
+  omega
+
+private theorem shamirRecover_eval_coord (p : Fin 4) (sk a₁ a₂ : Goldilocks) :
+    shamirRecoverSlopeCoord p sk a₂ (shamirEvalCoord sk a₁ a₂ (shamirPoint p)) = a₁ := by
+  unfold shamirRecoverSlopeCoord shamirEvalCoord
+  dsimp only
+  let x := shamirPoint p
+  let xInv := shamirPointInv p
+  let qTerm := Goldilocks.mul a₂ (Goldilocks.mul x x)
+  have hSub :
+      Goldilocks.sub (Goldilocks.add sk (Goldilocks.add (Goldilocks.mul a₁ x) qTerm))
+        (Goldilocks.add sk qTerm) = Goldilocks.mul a₁ x := by
+    let lin := Goldilocks.mul a₁ x
+    change Goldilocks.sub (Goldilocks.add sk (Goldilocks.add lin qTerm)) (Goldilocks.add sk qTerm) = lin
+    rw [← goldOfInt_nat sk, ← goldOfInt_nat lin, ← goldOfInt_nat qTerm]
+    simp only [goldOfInt_add, goldOfInt_sub]
+    congr 1
+    omega
+  change Goldilocks.mul xInv
+    (Goldilocks.sub (Goldilocks.add sk (Goldilocks.add (Goldilocks.mul a₁ x) qTerm))
+      (Goldilocks.add sk qTerm)) = a₁
+  rw [hSub]
+  change CommRingOps.mul xInv (CommRingOps.mul a₁ x) = a₁
+  rw [LawfulCommRing.mul_comm a₁ x, ← LawfulCommRing.mul_assoc]
+  change CommRingOps.mul (Goldilocks.mul xInv x) a₁ = a₁
+  rw [shamirPointInv_mul_point p]
+  exact LawfulCommRing.one_mul a₁
+
+/-- **1-Share Information-Theoretic Independence (`singleShare_uniform_bijection`)**:
+    For EVERY custodian `p : Fin 4`, EVERY target secret `sk : Lane4`, and EVERY quadratic mask
+    `a₂ : Lane4`, `a₁ ↦ shamirEvalLane4 sk a₁ a₂ (shamirPoint p)` is an explicit constructive
+    bijection `Lane4 ≃ Lane4` inverted by `shamirRecoverSlope p sk a₂`: observing any single share
+    (such as Layer-1 custodian `1`'s share in `[0x180, 0x1A0)`) reveals zero information about `sk`. -/
+theorem singleShare_uniform_bijection (p : Fin 4) (sk a₂ : Lane4) :
+    (∀ y : Lane4,
+      shamirEvalLane4 sk (shamirRecoverSlope p sk a₂ y) a₂ (shamirPoint p) = y) ∧
+    (∀ a₁ : Lane4,
+      shamirRecoverSlope p sk a₂ (shamirEvalLane4 sk a₁ a₂ (shamirPoint p)) = a₁) := by
+  refine ⟨fun y => ?_, fun a₁ => ?_⟩
+  · exact Lane4.ext
+      (shamirEval_recover_coord p sk.x0 a₂.x0 y.x0)
+      (shamirEval_recover_coord p sk.x1 a₂.x1 y.x1)
+      (shamirEval_recover_coord p sk.x2 a₂.x2 y.x2)
+      (shamirEval_recover_coord p sk.x3 a₂.x3 y.x3)
+  · exact Lane4.ext
+      (shamirRecover_eval_coord p sk.x0 a₁.x0 a₂.x0)
+      (shamirRecover_eval_coord p sk.x1 a₁.x1 a₂.x1)
+      (shamirRecover_eval_coord p sk.x2 a₁.x2 a₂.x2)
+      (shamirRecover_eval_coord p sk.x3 a₁.x3 a₂.x3)
+
+/-- Exact Lagrange interpolation at $x = 0$ from quorum `{1, 2, 3}` ($x \in \{2, 3, 4\}$):
+    $\lambda_1(0) = 6,\; \lambda_2(0) = -8,\; \lambda_3(0) = 3$. -/
+def shamirReconstruct123Coord (y1 y2 y3 : Goldilocks) : Goldilocks :=
+  Goldilocks.add
+    (Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 6) y1)
+                    (Goldilocks.mul (Goldilocks.ofNat 8) y2))
+    (Goldilocks.mul (Goldilocks.ofNat 3) y3)
+
+def shamirReconstruct123 (sh1 sh2 sh3 : Lane4) : Lane4 :=
+  ⟨shamirReconstruct123Coord sh1.x0 sh2.x0 sh3.x0,
+   shamirReconstruct123Coord sh1.x1 sh2.x1 sh3.x1,
+   shamirReconstruct123Coord sh1.x2 sh2.x2 sh3.x2,
+   shamirReconstruct123Coord sh1.x3 sh2.x3 sh3.x3⟩
+
+/-- Exact Lagrange interpolation at $x = 0$ from quorum `{0, 1, 2}` ($x \in \{1, 2, 3\}$):
+    $\lambda_0(0) = 3,\; \lambda_1(0) = -3,\; \lambda_2(0) = 1$. -/
+def shamirReconstruct012Coord (y0 y1 y2 : Goldilocks) : Goldilocks :=
+  Goldilocks.add
+    (Goldilocks.sub (Goldilocks.mul (Goldilocks.ofNat 3) y0)
+                    (Goldilocks.mul (Goldilocks.ofNat 3) y1))
+    y2
+
+def shamirReconstruct012 (sh0 sh1 sh2 : Lane4) : Lane4 :=
+  ⟨shamirReconstruct012Coord sh0.x0 sh1.x0 sh2.x0,
+   shamirReconstruct012Coord sh0.x1 sh1.x1 sh2.x1,
+   shamirReconstruct012Coord sh0.x2 sh1.x2 sh2.x2,
+   shamirReconstruct012Coord sh0.x3 sh1.x3 sh2.x3⟩
+
+theorem shamirReconstruct123_correct (sk a₁ a₂ : Lane4) :
+    shamirReconstruct123
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨1, by decide⟩))
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨2, by decide⟩))
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨3, by decide⟩)) = sk := by
+  have h2 : Goldilocks.ofNat 2 = goldOfInt 2 := by decide
+  have h3 : Goldilocks.ofNat 3 = goldOfInt 3 := by decide
+  have h4 : Goldilocks.ofNat 4 = goldOfInt 4 := by decide
+  have h6 : Goldilocks.ofNat 6 = goldOfInt 6 := by decide
+  have h8 : Goldilocks.ofNat 8 = goldOfInt 8 := by decide
+  have hCoord : ∀ s b1 b2 : Goldilocks,
+      shamirReconstruct123Coord
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 2))
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 3))
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 4)) = s := by
+    intro s b1 b2
+    unfold shamirReconstruct123Coord shamirEvalCoord
+    rw [h2, h3, h4, h6, h8, ← goldOfInt_nat s, ← goldOfInt_nat b1, ← goldOfInt_nat b2]
+    simp only [goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+    congr 1
+    omega
+  exact Lane4.ext
+    (hCoord sk.x0 a₁.x0 a₂.x0)
+    (hCoord sk.x1 a₁.x1 a₂.x1)
+    (hCoord sk.x2 a₁.x2 a₂.x2)
+    (hCoord sk.x3 a₁.x3 a₂.x3)
+
+theorem shamirReconstruct012_correct (sk a₁ a₂ : Lane4) :
+    shamirReconstruct012
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨0, by decide⟩))
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨1, by decide⟩))
+      (shamirEvalLane4 sk a₁ a₂ (shamirPoint ⟨2, by decide⟩)) = sk := by
+  have h1 : Goldilocks.ofNat 1 = goldOfInt 1 := by decide
+  have h2 : Goldilocks.ofNat 2 = goldOfInt 2 := by decide
+  have h3 : Goldilocks.ofNat 3 = goldOfInt 3 := by decide
+  have hCoord : ∀ s b1 b2 : Goldilocks,
+      shamirReconstruct012Coord
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 1))
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 2))
+        (shamirEvalCoord s b1 b2 (Goldilocks.ofNat 3)) = s := by
+    intro s b1 b2
+    unfold shamirReconstruct012Coord shamirEvalCoord
+    rw [h1, h2, h3, ← goldOfInt_nat s, ← goldOfInt_nat b1, ← goldOfInt_nat b2]
+    simp only [goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+    congr 1
+    omega
+  exact Lane4.ext
+    (hCoord sk.x0 a₁.x0 a₂.x0)
+    (hCoord sk.x1 a₁.x1 a₂.x1)
+    (hCoord sk.x2 a₁.x2 a₂.x2)
+    (hCoord sk.x3 a₁.x3 a₂.x3)
+
+def samplePolPin : List UInt8 := List.replicate 32 0xA5
+def sampleAuthPin : List UInt8 := List.replicate 32 0x5A
+def samplePkPin : List UInt8 := List.replicate 32 0x3C
+def sampleRecipient : List UInt8 := [0x01, 0x02, 0x03, 0x04]
+
+/-- Concrete 256-bit (`Lane4`) master secret key and non-zero degree-2 Shamir masking polynomials. -/
+def sampleSecretKeyLane4 : Lane4 :=
+  ⟨Goldilocks.ofNat 0x1020304050607081, Goldilocks.ofNat 0x2131415161718192,
+   Goldilocks.ofNat 0x32425262728292A3, Goldilocks.ofNat 0x435363738393A3B4⟩
+
+def sampleShamirA1 : Lane4 :=
+  ⟨Goldilocks.ofNat 0x1111222233334445, Goldilocks.ofNat 0x5555666677778889,
+   Goldilocks.ofNat 0x9999AAAABBBBCCCD, Goldilocks.ofNat 0xDDDDEEEEFFFF0003⟩
+
+def sampleShamirA2 : Lane4 :=
+  ⟨Goldilocks.ofNat 0x01030507090B0D0F, Goldilocks.ofNat 0x121416181A1C1E20,
+   Goldilocks.ofNat 0x232527292B2D2F31, Goldilocks.ofNat 0x3436383A3C3E4042⟩
+
+def sampleSecretKeyBytes : List UInt8 :=
+  packLane4Bytes32 sampleSecretKeyLane4
+
+/-- Distinct 32-byte Shamir share for party `p ∈ {0, 1, 2, 3}` evaluated at $x_p = p + 1$. -/
+def sampleShareLane4 (p : Fin 4) : Lane4 :=
+  shamirEvalLane4 sampleSecretKeyLane4 sampleShamirA1 sampleShamirA2 (shamirPoint p)
+
+def sampleShareBytes (p : Fin 4) : List UInt8 :=
+  packLane4Bytes32 (sampleShareLane4 p)
+
+/-- Custodian `1`'s local 32-byte Shamir share stored in Layer-1 ELF memory `[0x180, 0x1A0)`. -/
+def sampleCustodianShare1 : List UInt8 :=
+  sampleShareBytes ⟨1, by decide⟩
+
+/-- Genuine 4-party dealt-share map assigning each custodian its distinct degree-2 Shamir share. -/
+def sampleDealtShares : Nat → Option (List UInt8)
+  | 0 => some (sampleShareBytes ⟨0, by decide⟩)
+  | 1 => some (sampleShareBytes ⟨1, by decide⟩)
+  | 2 => some (sampleShareBytes ⟨2, by decide⟩)
+  | 3 => some (sampleShareBytes ⟨3, by decide⟩)
+  | _ => none
+
+/-- Reconstruct the 32-byte master key from 3 distinct Shamir shares `{1, 2, 3}` and compute the
+    full 32-byte `Poseidon2` sponge signature tag. -/
+def assembleShamirThresholdSig (shMap : Nat → Option (List UInt8)) (msg : List UInt8) : ByteArray :=
+  let sh1 := unpackLane4Bytes32 ((shMap 1).getD [])
+  let sh2 := unpackLane4Bytes32 ((shMap 2).getD [])
+  let sh3 := unpackLane4Bytes32 ((shMap 3).getD [])
+  poseidon2TagBytes (packLane4Bytes32 (shamirReconstruct123 sh1 sh2 sh3)) msg
+
+/-- Round-3 signature assembly combining local custodian `1`'s share from `[0x180, 0x1A0)` with
+    peer Shamir shares `(sh_2, sh_3)` via `shamirReconstruct123`. -/
+def signFromCustodianShare1WithPeers (localSh1 : List UInt8) (msg : List UInt8) : ByteArray :=
+  let sh1 := unpackLane4Bytes32 localSh1
+  let sh2 := unpackLane4Bytes32 (sampleShareBytes ⟨2, by decide⟩)
+  let sh3 := unpackLane4Bytes32 (sampleShareBytes ⟨3, by decide⟩)
+  poseidon2TagBytes (packLane4Bytes32 (shamirReconstruct123 sh1 sh2 sh3)) msg
+
+theorem sampleShares_distinct_and_reconstruct :
+    sampleShareBytes ⟨0, by decide⟩ ≠ sampleShareBytes ⟨1, by decide⟩ ∧
+    sampleShareBytes ⟨1, by decide⟩ ≠ sampleShareBytes ⟨2, by decide⟩ ∧
+    sampleShareBytes ⟨2, by decide⟩ ≠ sampleShareBytes ⟨3, by decide⟩ ∧
+    sampleShareBytes ⟨0, by decide⟩ ≠ sampleSecretKeyBytes ∧
+    sampleShareBytes ⟨1, by decide⟩ ≠ sampleSecretKeyBytes ∧
+    sampleShareBytes ⟨2, by decide⟩ ≠ sampleSecretKeyBytes ∧
+    sampleShareBytes ⟨3, by decide⟩ ≠ sampleSecretKeyBytes ∧
+    (∀ msg : List UInt8,
+      assembleShamirThresholdSig sampleDealtShares msg =
+        signFromCustodianShare1WithPeers sampleCustodianShare1 msg) ∧
+    (∀ msg : List UInt8,
+      assembleShamirThresholdSig sampleDealtShares msg =
+        poseidon2TagBytes sampleSecretKeyBytes msg) := by
+  refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, by decide,
+    fun _ => rfl, fun msg => ?_⟩
+  change poseidon2TagBytes (packLane4Bytes32 (shamirReconstruct123
+    (unpackLane4Bytes32 (packLane4Bytes32 (sampleShareLane4 ⟨1, by decide⟩)))
+    (unpackLane4Bytes32 (packLane4Bytes32 (sampleShareLane4 ⟨2, by decide⟩)))
+    (unpackLane4Bytes32 (packLane4Bytes32 (sampleShareLane4 ⟨3, by decide⟩))))) msg = _
+  unfold sampleShareLane4 sampleSecretKeyBytes
+  rw [unpackLane4Bytes32_packLane4Bytes32,
+      unpackLane4Bytes32_packLane4Bytes32,
+      unpackLane4Bytes32_packLane4Bytes32,
+      shamirReconstruct123_correct]
+
+def sampleElfMem : UInt64 → UInt8 :=
+  writeBytesWindow
+    (writeBytesWindow
+      (writeBytesWindow (fun _ => 0) 0x100 samplePolPin)
+      0x140 sampleAuthPin)
+    0x180 sampleCustodianShare1
+
+private theorem sampleElfMem_pins :
+    (∀ i : Nat, i < 32 →
+      sampleElfMem (UInt64.ofNat 0x100 + UInt64.ofNat i) = samplePolPin.getD i 0) ∧
+    (∀ i : Nat, i < 32 →
+      sampleElfMem (UInt64.ofNat 0x140 + UInt64.ofNat i) = sampleAuthPin.getD i 0) ∧
+    readShareMem32 sampleElfMem = sampleCustodianShare1 := by
+  have hShLen : sampleCustodianShare1.length = 32 :=
+    packLane4Bytes32_length _
+  refine ⟨?_, ?_, ?_⟩
+  · intro i hi
+    unfold sampleElfMem
+    have h180 : ¬ (0x180 ≤ (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat ∧
+        (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat < 0x180 + sampleCustodianShare1.length) := by
+      rw [hShLen, addr_offset_toNat (base := 0x100) (i := i) (by omega)]; omega
+    have h140 : ¬ (0x140 ≤ (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat ∧
+        (UInt64.ofNat 0x100 + UInt64.ofNat i).toNat < 0x140 + sampleAuthPin.length) := by
+      rw [addr_offset_toNat (base := 0x100) (i := i) (by omega)]; omega
+    rw [writeBytesWindow_miss h180, writeBytesWindow_miss h140]
+    exact writeBytesWindow_hit (by simp [samplePolPin]; exact hi) (by simp [samplePolPin])
+  · intro i hi
+    unfold sampleElfMem
+    have h180 : ¬ (0x180 ≤ (UInt64.ofNat 0x140 + UInt64.ofNat i).toNat ∧
+        (UInt64.ofNat 0x140 + UInt64.ofNat i).toNat < 0x180 + sampleCustodianShare1.length) := by
+      rw [hShLen, addr_offset_toNat (base := 0x140) (i := i) (by omega)]; omega
+    rw [writeBytesWindow_miss h180]
+    exact writeBytesWindow_hit (by simp [sampleAuthPin]; exact hi) (by simp [sampleAuthPin])
+  · unfold sampleElfMem
+    exact readShareMem32_write _ sampleCustodianShare1 hShLen
+
+/-- Enrolled 32-byte validator authentication keys for `§4` quorum certificates. -/
+def sampleValidatorAuthKey (partyIdx : Nat) : List UInt8 :=
+  List.replicate 32 (UInt8.ofNat (0xC0 + partyIdx))
+
+def sampleQuorumCertConfig : QuorumCertConfig :=
+  { validatorAuthKeys :=
+      [(0, sampleValidatorAuthKey 0),
+       (1, sampleValidatorAuthKey 1),
+       (2, sampleValidatorAuthKey 2),
+       (3, sampleValidatorAuthKey 3)] }
+
+def mkSampleQuorumCert (quorum : List (Fin 4)) (epoch : Nat) (msgBytes : List UInt8) :
+    List (Fin 4 × List UInt8) :=
+  quorum.map (fun p =>
+    (p, computeValidatorAckTag (sampleValidatorAuthKey p.val) p.val epoch msgBytes))
+
+private theorem lookupSampleValidatorAuthKey (p : Fin 4) :
+    lookupValidatorAuthKey sampleQuorumCertConfig.validatorAuthKeys p.val =
+      some (sampleValidatorAuthKey p.val) := by
+  rcases p with ⟨v, hv⟩
+  match v with
+  | 0 => rfl
+  | 1 => rfl
+  | 2 => rfl
+  | 3 => rfl
+  | n + 4 => omega
+
+private theorem sampleQuorumCert_valid {req : FourLayerReq 4} {q : Nat}
+    {pk msg : List UInt8}
+    (hCert : req.quorumCert = mkSampleQuorumCert req.quorum req.reqEpoch msg)
+    (hNd : req.quorum.Nodup) (hLen : q ≤ req.quorum.length) :
+    verifyFourLayerQuorumCert sampleQuorumCertConfig q pk msg req = true := by
+  apply verifyFourLayerQuorumCert_eq_true
+  · rw [hCert]
+    simp only [mkSampleQuorumCert, List.map_map, Function.comp_def, List.map_id']
+  · exact hNd
+  · simpa only [hCert, mkSampleQuorumCert, List.length_map] using hLen
+  · intro e he
+    rw [hCert] at he
+    obtain ⟨p, _, rfl⟩ := List.mem_map.mp he
+    exact ⟨sampleValidatorAuthKey p.val, lookupSampleValidatorAuthKey p,
+      List.length_replicate, rfl⟩
+
+/-- Verifier-held non-zero `GF(2^128)` `BGIN19` MAC key `(α = X_7, keyOffset_0 = 1)` and valid wire opening. -/
+def sampleBginAlpha : Tower128 := towerX 7
+def sampleBginOffsets : List (Nat × Tower128) := [(0, towerOne 7)]
+def sampleHonestBginWires : List Round2WireOpening :=
+  [{ wireId := 0
+     xWire := towerOne 7
+     macShare := towerAdd 7 (towerMul 7 (towerX 7) (towerOne 7)) (towerOne 7) }]
+
+private theorem sampleHonestBginWires_ok :
+    verifySessionBginBatch sampleBginAlpha sampleBginOffsets sampleHonestBginWires = true := by
+  unfold verifySessionBginBatch verifySessionBginWire bginRelationHolds lookupBginKeyOffset
+    sampleBginAlpha sampleBginOffsets sampleHonestBginWires
+  dsimp only [List.all, List.any, List.find?, List.isEmpty, List.map]
+  simp only [towerMul_one]
+  decide
+
+def mkSampleRound1Opening (nonceVal maskVal sessionVal partyVal blindSeed : Nat) : Round1Opening :=
+  let blind : Lane4 :=
+    ⟨Goldilocks.ofNat (blindSeed + 101), Goldilocks.ofNat (blindSeed + 202),
+     Goldilocks.ofNat (blindSeed + 303), Goldilocks.ofNat (blindSeed + 404)⟩
+  { committedB0 := computeRound1CommitB0
+      (Goldilocks.ofNat nonceVal) (Goldilocks.ofNat maskVal)
+      (Goldilocks.ofNat sessionVal) (Goldilocks.ofNat partyVal) blind
+    nonceLimb := Goldilocks.ofNat nonceVal
+    maskLimb := Goldilocks.ofNat maskVal
+    sessionTag := Goldilocks.ofNat sessionVal
+    partyId := Goldilocks.ofNat partyVal
+    blind := blind }
+
+/-- A failed pre-cut check poisons the custodian and clears its share after the
+    preceding guards accept. Kept symbolic so concrete witnesses do not expand hashes. -/
+private theorem layer1_preCut_failure {n : Nat} (q : Nat) (pk : List UInt8)
+    (sign : (UInt64 → UInt8) → List UInt8 → ByteArray)
+    (s : Layer1ElfState) (req : FourLayerReq n)
+    (hQuar : (s.cutPoisoned || s.belt.poisoned || !s.sharePresent) = false)
+    (hWindow : (req.tx.windowId != s.windowId) = false)
+    (hPol : execElfCtEq32 s.mem (UInt64.ofNat 0x100) req.tx.policyDigest = true)
+    (hAuth : execElfCtEq32 s.mem (UInt64.ofNat 0x140) req.tx.authorityDigest = true)
+    (hRecipient : req.tx.recipient ∈ s.allowedRecipients)
+    (hPerTx : req.tx.amountUnits.toNat ≤ s.perTxCap.toNat)
+    (hVelocity : req.tx.amountUnits.toNat ≤ (s.velocityWindowCap - s.accumulatedSpend).toNat)
+    (hNonce : u64MemBool req.tx.nonce s.burnedNonces = false)
+    (hCert : verifyFourLayerQuorumCert s.quorumCertConfig q pk
+      (encodeTransactionIntent req.tx.toTransactionIntent) req = true)
+    (hEpoch : (decide (pk = s.belt.enrolledPkDigest) && (req.reqEpoch == s.belt.nextEpoch)) = true)
+    (hCut : verifyPreCutTranscript s.activeSessionTag s.storedRound1Commits
+      s.verifierBginAlpha s.verifierBginKeyOffsets req.quorum req.round1Openings req.round2Wires = false) :
+    let M := layer1CompiledElfMachine q pk sign
+    M.step s req = none ∧ (M.errStep s req).cutPoisoned = true ∧
+      (∀ i : Nat, i < 32 → (M.errStep s req).mem (UInt64.ofNat 0x180 + UInt64.ofNat i) = 0) := by
+  dsimp only [layer1CompiledElfMachine, PartyMachine.ofOutcome]
+  simp only [hQuar, hWindow, hPol, hAuth, hRecipient, hPerTx, hVelocity,
+    hNonce, hCert, hEpoch, hCut, Bool.not_true, Bool.not_false,
+    Bool.false_eq_true, not_true_eq_false, ↓reduceIte]
+  exact ⟨by trivial, by trivial, (execElfMemzeroShare32_spec s.mem).1⟩
+
+end Qsag
