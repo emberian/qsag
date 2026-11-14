@@ -1,0 +1,21 @@
+name = "qsag_aeneas"
+version = "0.1.0"
+defaultTargets = ["Aeneas", "QsagVerified", "QsagMirProofs", "AuditMirAxioms"]
+
+[leanOptions]
+autoImplicit = false
+
+[[lean_lib]]
+name = "Aeneas"
+
+[[lean_lib]]
+name = "QsagVerified"
+
+[[lean_lib]]
+name = "QsagMirProofs"
+
+[[lean_lib]]
+name = "QsagVerifiedChallenge"
+
+[[lean_lib]]
+name = "AuditMirAxioms"
