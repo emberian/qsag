@@ -1,0 +1,16 @@
+[package]
+name = "qsag-accel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Zero-dependency no_std certified hardware/GPU accelerator trait, constant-time Goldilocks/GF(2^128)/Keccak/Poseidon2 CPU reference backend, and verified kernel digest registry."
+
+[features]
+default = ["alloc"]
+alloc = []
+std = ["alloc", "qsag-asm/std"]
+
+[dependencies]
+# Strictly zero external crates.io dependencies.
+qsag-asm = { path = "../qsag-asm", default-features = false }
