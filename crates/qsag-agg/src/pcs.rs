@@ -47,8 +47,8 @@ use alloc::vec::Vec;
 use crate::field::eval_univariate_ext4_at_base;
 use crate::field::{
     Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
-    encode_rs_coset_goldilocks, eq_poly_ext4, eval_univariate_ext4,
-    fold_first_var_in_place_ext4, pow2_point_ext4,
+    encode_rs_coset_goldilocks, eq_poly_ext4, eval_univariate_ext4, fold_first_var_in_place_ext4,
+    pow2_point_ext4,
 };
 use crate::sponge::{
     CANOPY_MIDSTATE, FiatShamirTranscript, InstanceBound, POW_MIDSTATE,
@@ -635,7 +635,12 @@ impl MerkleCanopyTree {
                                         let c = 8 * g;
                                         let out4 = hash_merkle_internal_x4(
                                             (base_node + 4 * g) as u32,
-                                            [&c_sub[c], &c_sub[c + 2], &c_sub[c + 4], &c_sub[c + 6]],
+                                            [
+                                                &c_sub[c],
+                                                &c_sub[c + 2],
+                                                &c_sub[c + 4],
+                                                &c_sub[c + 6],
+                                            ],
                                             [
                                                 &c_sub[c + 1],
                                                 &c_sub[c + 3],
@@ -670,7 +675,8 @@ impl MerkleCanopyTree {
                     }
                 }
                 for idx in [3usize, 2, 1] {
-                    nodes[idx] = hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
+                    nodes[idx] =
+                        hash_merkle_internal(idx as u32, &nodes[2 * idx], &nodes[2 * idx + 1]);
                 }
                 let root = hash_tree_root(log_leaves as u8, &nodes[1]);
                 return Self {

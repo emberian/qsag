@@ -7,12 +7,12 @@ use crate::field::{Goldilocks, GoldilocksExt4};
 #[cfg(debug_assertions)]
 use crate::sig::wots_step_hash_injective;
 use crate::sig::{
-    AggSigProfile, DOMAIN_FORS_LEAF, DOMAIN_FORS_NODE, DOMAIN_FORS_ROOTS, DOMAIN_H_MSG_DET_TREE,
-    DOMAIN_H_MSG_STATEFUL, DOMAIN_H_MSG_STATELESS, DOMAIN_MERKLE_NODE, DOMAIN_WOTS_PK,
-    DOMAIN_WOTS_STEP, Digest5, FORS_HEIGHT, FORS_TREES, JORTS_XMSS_HEIGHT, CORDUROY_NUM_LAYERS,
-    CORDUROY_SUBTREE_HEIGHT, ValidatorPublicKey, ValidatorSignature, WOTS_CHAINS, WOTS_TARGET_SUM,
-    compute_hmsg_det_tree, compute_hmsg_stateful, derive_stateless_fors_and_leaf_checked,
-    extract_wots_digits_checked, pack_wots_addr_limb,
+    AggSigProfile, CORDUROY_NUM_LAYERS, CORDUROY_SUBTREE_HEIGHT, DOMAIN_FORS_LEAF,
+    DOMAIN_FORS_NODE, DOMAIN_FORS_ROOTS, DOMAIN_H_MSG_DET_TREE, DOMAIN_H_MSG_STATEFUL,
+    DOMAIN_H_MSG_STATELESS, DOMAIN_MERKLE_NODE, DOMAIN_WOTS_PK, DOMAIN_WOTS_STEP, Digest5,
+    FORS_HEIGHT, FORS_TREES, JORTS_XMSS_HEIGHT, ValidatorPublicKey, ValidatorSignature,
+    WOTS_CHAINS, WOTS_TARGET_SUM, compute_hmsg_det_tree, compute_hmsg_stateful,
+    derive_stateless_fors_and_leaf_checked, extract_wots_digits_checked, pack_wots_addr_limb,
 };
 use crate::sponge::{
     POSEIDON2_CONST_IV, POSEIDON2_HALF_EXT_ROUNDS, POSEIDON2_INT_ROUNDS, poseidon2_apply_me,
@@ -648,11 +648,12 @@ pub fn populate_active_signer_rows(
                     st_in[4 + i] += mu[i];
                 }
                 let perm_out = fill_row_perm(row, st_in);
-                let (f_idxs, _, sq) =
-                    match derive_stateless_fors_and_leaf_checked(pk.pk_seed, pk.pk_root, sig.r_rand, mu) {
-                        Some(derived) => derived,
-                        None => panic!("trace requires valid stateless derivation"),
-                    };
+                let (f_idxs, _, sq) = match derive_stateless_fors_and_leaf_checked(
+                    pk.pk_seed, pk.pk_root, sig.r_rand, mu,
+                ) {
+                    Some(derived) => derived,
+                    None => panic!("trace requires valid stateless derivation"),
+                };
                 debug_assert_eq!(&perm_out[0..7], &sq);
                 stateless_fors_idxs = f_idxs;
                 next[ST_MAIN_SPONGE..ST_MAIN_SPONGE + 12].copy_from_slice(&perm_out);

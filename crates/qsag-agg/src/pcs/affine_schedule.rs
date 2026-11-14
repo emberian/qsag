@@ -4,6 +4,8 @@ use super::*;
 
 // (variables, stage, A, m, D). B = A - 1. Exhaustively queried stages need no
 // proximity witness. The degree d = n/B_i + 2 conservatively includes overflow.
+// The Lean hemJohnsonQromWitnessTable certificate is checked for exact parity by
+// crates/qsag-agg/tests/check_affine_witness_parity.py.
 const WITNESSES: &[(usize, usize, u128, u128, u128)] = &[
     (9, 1, 127, 1, 20),
     (10, 0, 329, 1, 14),
