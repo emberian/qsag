@@ -1707,7 +1707,9 @@ impl RawVulkanEngine {
         pipeline: VkPipeline,
     ) -> Result<(), VulkanError> {
         let Some((get_properties, get_statistics)) = self.executable_fns else {
-            return Ok(());
+            return Err(VulkanError::PipelineAuditFailed(
+                "executable telemetry unavailable",
+            ));
         };
         let info = PipelineInfo {
             s_type: 1000269001,
@@ -1731,7 +1733,7 @@ impl RawVulkanEngine {
             ));
         }
         let subgroup_size = properties[0].subgroup_size;
-        if self.wave32 && subgroup_size != 32 {
+        if !self.wave32 || subgroup_size != 32 {
             return Err(VulkanError::UnexpectedSubgroupSize {
                 slot,
                 required: 32,
@@ -1785,12 +1787,12 @@ impl RawVulkanEngine {
             spilled_vgprs,
             spilled_sgprs,
         };
-        if scratch.is_some_and(|bytes| bytes != 0) {
+        if scratch != Some(0) {
             return Err(VulkanError::PipelineAuditFailed(
                 "nonzero private scratch memory",
             ));
         }
-        if spilled_vgprs.is_some_and(|n| n != 0) || spilled_sgprs.is_some_and(|n| n != 0) {
+        if spilled_vgprs != Some(0) || spilled_sgprs != Some(0) {
             return Err(VulkanError::PipelineAuditFailed("spilled registers"));
         }
         Ok(())
@@ -2281,7 +2283,7 @@ impl RawVulkanEngine {
         &mut self,
         job: impl FnOnce(&mut Self) -> Result<T, VulkanError>,
     ) -> Result<T, VulkanError> {
-        struct SettleOnExit<'a>(&'a mut RawVulkanEngine);
+        struct SettleOnExit<'a>(&'a mut RawVulkanEngine, bool);
         impl SettleOnExit<'_> {
             fn engine(&mut self) -> &mut RawVulkanEngine {
                 self.0
@@ -2291,11 +2293,15 @@ impl RawVulkanEngine {
             fn drop(&mut self) {
                 unsafe {
                     self.0.settle_staging();
+                    if self.1 && self.0.exec_state == EngineExecState::Ready {
+                        let _ = self.0.scrub_all_vram();
+                    }
                 }
             }
         }
-        let mut guard = SettleOnExit(self);
+        let mut guard = SettleOnExit(self, true);
         let res = job(guard.engine());
+        guard.1 = res.is_err();
         drop(guard);
         res
     }
@@ -2517,6 +2523,26 @@ impl RawVulkanEngine {
         }
     }
 
+    /// Best-effort explicit VRAM wipe after a failed job or before teardown.
+    /// Only queue work once completion of all previous submissions is established.
+    unsafe fn scrub_all_vram(&mut self) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
+        if self.cmd_buf.is_null() || self.vram_a.buffer == 0 {
+            return Ok(());
+        }
+        unsafe {
+            self.begin_cmd()?;
+            self.cmd_scrub_vram(&[
+                (self.vram_a.buffer, self.vram_a.capacity),
+                (self.vram_b.buffer, self.vram_b.capacity),
+                (self.vram_c.buffer, self.vram_c.capacity),
+            ]);
+            self.submit_and_wait()
+        }
+    }
+
     /// Zero the first `bytes` of the host-mapped staging buffer. Callers reach this only through
     /// `wipe_staging_residue` or teardown, both after device idle was established.
     unsafe fn scrub_staging(&mut self, bytes: u64) {
@@ -2525,7 +2551,9 @@ impl RawVulkanEngine {
         }
         let len = bytes.min(self.staging.capacity) as usize;
         unsafe {
-            core::ptr::write_bytes(self.staging.mapped, 0, len);
+            for offset in 0..len {
+                core::ptr::write_volatile(self.staging.mapped.add(offset), 0);
+            }
         }
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
     }
@@ -2568,7 +2596,7 @@ impl RawVulkanEngine {
         let wait_rc = match self.injected_rc(FaultPoint::FenceWait) {
             Some(rc) => rc,
             None => unsafe {
-                (self.fns.wait_for_fences)(self.device, 1, &self.fence, VK_TRUE, u64::MAX)
+                (self.fns.wait_for_fences)(self.device, 1, &self.fence, VK_TRUE, 5_000_000_000)
             },
         };
         if wait_rc != VK_SUCCESS {
@@ -3724,6 +3752,13 @@ impl RawVulkanEngine {
                     // For the same reason staging is not wiped: the device may still be reading
                     // or writing it. Its contents stay mapped until the process exits (module
                     // docs, "Limit").
+                    self.device = null_mut();
+                    self.instance = null_mut();
+                    self.lib_handle = null_mut();
+                    return;
+                }
+                self.exec_state = EngineExecState::Ready;
+                if self.scrub_all_vram().is_err() {
                     self.device = null_mut();
                     self.instance = null_mut();
                     self.lib_handle = null_mut();
