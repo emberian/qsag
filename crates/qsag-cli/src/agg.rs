@@ -34,8 +34,7 @@ fn wal_mac_key(seed: &[u8; 32], index: u32) -> [u8; 32] {
 /// Enroll a fresh committee: create every validator's epoch write-ahead log exactly once.
 /// Signing later only ever recovers these logs; a missing log is never treated as an unused key.
 pub fn enroll_committee(seed: &[u8; 32], validators: u32, wal_dir: &str) -> Result<(), CliError> {
-    std::fs::create_dir_all(wal_dir)
-        .map_err(|e| CliError::io(format_args!("creating {wal_dir}"), e))?;
+    crate::cli::private_dir(wal_dir, true)?;
     for index in 0..validators {
         let root = digest4_to_bytes(&validator(seed, index).pk.pk_root);
         FsWalEpochSink::create_new_for_fresh_key(
@@ -180,6 +179,7 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
             .ok_or_else(|| CliError::usage("missing required option --epoch"))?;
         let epoch = u32::try_from(epoch).map_err(|_| CliError::usage("--epoch out of range"))?;
         let wal_dir = args.require("wal-dir")?;
+        crate::cli::private_dir(wal_dir, false)?;
         let mut signers = Vec::new();
         for part in args.require("signers")?.split(',') {
             let index: usize = part
@@ -304,5 +304,35 @@ pub fn verify_agg(raw: &[String]) -> Result<(), CliError> {
         Ok(())
     } else {
         Err(CliError::verify("aggregate verification failed"))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn enrollment_keeps_validator_logs_in_an_owner_only_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "qsag-wal-dir-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let path = |name: &str| root.join(name).to_str().unwrap().to_owned();
+        let mode = |name: &str| std::fs::metadata(path(name)).unwrap().permissions().mode() & 0o777;
+
+        enroll_committee(&[7; 32], 1, &path("committee/wal")).unwrap();
+        assert_eq!(mode("committee"), 0o700);
+        assert_eq!(mode("committee/wal"), 0o700);
+        assert!(root.join("committee/wal/validator-0.wal").is_file());
+
+        // A directory other users can list is refused before any log is created in it.
+        std::fs::create_dir(path("shared")).unwrap();
+        std::fs::set_permissions(path("shared"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(enroll_committee(&[7; 32], 1, &path("shared")).is_err());
+        assert_eq!(std::fs::read_dir(path("shared")).unwrap().count(), 0);
+        assert_eq!(mode("shared"), 0o755);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

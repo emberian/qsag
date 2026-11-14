@@ -242,10 +242,13 @@ fn mint_release_tokens(
         std::process::id(),
         crate::codec::to_hex(&crate::cli::os_random_32()?)
     ));
-    std::fs::create_dir_all(work_dir.join("ledgers"))
-        .map_err(|e| CliError::io("creating policy ledger directory", e))?;
-    std::fs::create_dir_all(work_dir.join("fences"))
-        .map_err(|e| CliError::io("creating policy fence directory", e))?;
+    for state in ["ledgers", "fences"] {
+        let dir = work_dir.join(state);
+        let dir = dir
+            .to_str()
+            .ok_or_else(|| CliError::state("temporary directory path is not UTF-8"))?;
+        crate::cli::private_dir(dir, true)?;
+    }
 
     let persist_result = (|| -> Result<usize, CliError> {
         let mut ledgers = Vec::with_capacity(guards.len());
