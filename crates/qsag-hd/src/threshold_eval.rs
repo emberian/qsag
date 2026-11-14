@@ -7,6 +7,7 @@
 //! Arbitrary short-secret projections are not an authorized API.
 use super::*;
 use crate::seeds::CustodianSeeds;
+use crate::zero_gate::{CommittedZeroGates, peer_transcript};
 use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::keccak::commit_mpc_broadcast;
 
@@ -40,7 +41,9 @@ struct EvalState<'a> {
     mac_salt: [u8; 32],
     value_commitments: Vec<HdEvalCommitment>,
     mac_commitments: Vec<HdEvalCommitment>,
-    tags: [u32; SPDZ_LANES],
+    mac_digest: [u8; 32],
+    /// Verified custody of the MAC residuals from the moment they exist.
+    zero_test: Option<CommittedZeroGates>,
     expected_value: Option<u32>,
     opened_value: Option<u32>,
     complete: bool,
@@ -51,7 +54,6 @@ impl Drop for EvalState<'_> {
         ct_zeroize_u32s(core::slice::from_mut(&mut self.value));
         ct_zeroize_u32s(&mut self.gamma);
         ct_zeroize_u32s(&mut self.alpha);
-        ct_zeroize_u32s(&mut self.tags);
         ct_zeroize_bytes(&mut self.value_salt);
         ct_zeroize_bytes(&mut self.mac_salt);
         if !self.complete {
@@ -66,7 +68,7 @@ pub struct HdThresholdEvalRound2OpenShareAndCommitMac<'a>(EvalState<'a>);
 /// Earlier phases have no MAC-opening accessor.
 /// ```compile_fail
 /// use qsag_hd::linear_module::HdThresholdEvalRound2OpenShareAndCommitMac;
-/// fn leak(s: &HdThresholdEvalRound2OpenShareAndCommitMac<'_>) { let _ = s.mac_opening(); }
+/// fn leak(s: &mut HdThresholdEvalRound2OpenShareAndCommitMac<'_>) { let _ = s.mac_opening(); }
 /// ```
 pub struct HdThresholdEvalRound3VerifyMac<'a>(EvalState<'a>);
 
@@ -308,7 +310,8 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
             mac_salt,
             value_commitments: Vec::new(),
             mac_commitments: Vec::new(),
-            tags: [0; SPDZ_LANES],
+            mac_digest: [0; 32],
+            zero_test: None,
             expected_value,
             opened_value: None,
             complete: false,
@@ -393,22 +396,24 @@ impl<'a> HdThresholdEvalRound2OpenShareAndCommitMac<'a> {
         {
             return Err(HdError::MacCheckFailed);
         }
-        self.0.tags = core::array::from_fn(|lane| {
+        let mut tags: [u32; SPDZ_LANES] = core::array::from_fn(|lane| {
             mod_q_sub(self.0.gamma[lane], mod_q_mul(self.0.alpha[lane], value))
         });
+        self.0.mac_digest = commit_mpc_broadcast(
+            &self.0.session,
+            2,
+            self.0.share.party_id,
+            &tags_bytes(&tags),
+            &self.0.mac_salt,
+        );
+        self.0.zero_test = Some(CommittedZeroGates::hold(self.0.session, MODULE_Q, &mut tags));
         self.0.opened_value = Some(value);
         Ok(self.mac_commitment())
     }
     fn mac_commitment(&self) -> HdEvalCommitment {
         HdEvalCommitment {
             party_id: self.0.share.party_id,
-            digest: commit_mpc_broadcast(
-                &self.0.session,
-                2,
-                self.0.share.party_id,
-                &tags_bytes(&self.0.tags),
-                &self.0.mac_salt,
-            ),
+            digest: self.0.mac_digest,
         }
     }
     pub fn freeze_mac(
@@ -419,6 +424,16 @@ impl<'a> HdThresholdEvalRound2OpenShareAndCommitMac<'a> {
             return Err(HdError::MacCheckFailed);
         }
         freeze_commitments(&self.0, commitments, &self.mac_commitment())?;
+        let peers = peer_transcript(
+            &self.0.session,
+            self.0.share.party_id,
+            commitments.iter().map(|c| (c.party_id, c.digest)),
+        );
+        self.0
+            .zero_test
+            .as_mut()
+            .ok_or(HdError::MacCheckFailed)?
+            .freeze(peers)?;
         self.0.mac_commitments = commitments.to_vec();
         Ok(HdThresholdEvalRound3VerifyMac(self.0))
     }
@@ -427,7 +442,7 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
     /// Broadcast only after agreement on the frozen commitment transcript.
     /// This message may leak alpha on failure; no further family operations may
     /// proceed until every participating custodian has accepted the zero-test.
-    pub fn mac_opening(&self) -> Result<HdEvalMacOpening, HdError> {
+    pub fn mac_opening(&mut self) -> Result<HdEvalMacOpening, HdError> {
         if self.0.share.is_poisoned()
             || self
                 .0
@@ -443,9 +458,15 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
             }
             self.0.disclosure_started.set(true);
         }
+        let residuals = self
+            .0
+            .zero_test
+            .as_mut()
+            .ok_or(HdError::MacCheckFailed)?
+            .open()?;
         Ok(HdEvalMacOpening {
             party_id: self.0.share.party_id,
-            tags: self.0.tags,
+            tags: core::array::from_fn(|lane| residuals[lane]),
             salt: self.0.mac_salt,
         })
     }
@@ -455,7 +476,9 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
         if self.0.share.is_poisoned() || openings.len() != self.0.roster.len() {
             return Err(HdError::MacCheckFailed);
         }
-        let mut sums = [0; SPDZ_LANES];
+        let own = self.0.share.party_id;
+        let mut peer_sums = [0; SPDZ_LANES];
+        let mut recomputed = Vec::with_capacity(openings.len());
         for expected in &self.0.mac_commitments {
             let mut found = openings.iter().filter(|m| m.party_id == expected.party_id);
             let opening = found.next().ok_or(HdError::MacCheckFailed)?;
@@ -469,18 +492,27 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
                 &tags_bytes(&opening.tags),
                 &opening.salt,
             );
-            if !ct_eq_bytes(&actual, &expected.digest) {
-                return Err(HdError::MacCheckFailed);
+            if opening.party_id == own {
+                // The local residual never re-enters from the network.
+                if !ct_eq_bytes(&actual, &self.0.mac_digest) {
+                    return Err(HdError::MacCheckFailed);
+                }
+                continue;
             }
-            for (sum, &tag) in sums.iter_mut().zip(&opening.tags) {
+            recomputed.push((opening.party_id, actual));
+            for (sum, &tag) in peer_sums.iter_mut().zip(&opening.tags) {
                 *sum = mod_q_add(*sum, tag);
             }
         }
-        let invalid = sums.iter().fold(0, |acc, &x| acc | x) != 0;
-        ct_zeroize_u32s(&mut sums);
-        if invalid {
-            return Err(HdError::MacCheckFailed);
-        }
+        let peers = peer_transcript(&self.0.session, own, recomputed.into_iter());
+        let accepted = self
+            .0
+            .zero_test
+            .as_mut()
+            .ok_or(HdError::MacCheckFailed)
+            .and_then(|gates| gates.verify(peers, &peer_sums));
+        ct_zeroize_u32s(&mut peer_sums);
+        accepted?;
         let value = self.0.opened_value.ok_or(HdError::MacCheckFailed)?;
         #[cfg(feature = "std")]
         if self.0.disclosure_started.get() && let Some(journal) = &self.0.share.poison_journal {
@@ -673,8 +705,8 @@ mod tests {
             share.attach_poison_journal(Arc::new(FsHdPoisonJournal::create_new(dir.join(alloc::format!("{i}")), family, [9; 32]).unwrap())).unwrap();
         }
         assert!(verify_all(states(&mut shares, &pk, false)).is_ok());
-        let rounds = states(&mut shares, &pk, false);
-        for round in &rounds { round.mac_opening().unwrap(); }
+        let mut rounds = states(&mut shares, &pk, false);
+        for round in &mut rounds { round.mac_opening().unwrap(); }
         drop(rounds);
         drop(shares);
         for i in 0..3 {
@@ -690,9 +722,9 @@ mod tests {
     }
     // Test harness routes public messages only; verification consumes one local
     // custodian state at a time, just as separate network endpoints would.
-    fn verify_all(states: Vec<HdThresholdEvalRound3VerifyMac<'_>>) -> Result<Vec<u32>, HdError> {
+    fn verify_all(mut states: Vec<HdThresholdEvalRound3VerifyMac<'_>>) -> Result<Vec<u32>, HdError> {
         let openings: Vec<_> = states
-            .iter()
+            .iter_mut()
             .map(|s| s.mac_opening())
             .collect::<Result<_, _>>()?;
         states.into_iter().map(|s| s.verify(&openings)).collect()
@@ -701,6 +733,16 @@ mod tests {
         shares: &'a mut [LinearModulePartyShare],
         pk: &LinearModuleXPub,
         fault: bool,
+    ) -> Vec<HdThresholdEvalRound3VerifyMac<'a>> {
+        states_with_repair(shares, pk, fault, None)
+    }
+    /// With `repair`, the first custodian commits to residuals shifted by those
+    /// offsets before anyone freezes, as a corrupt party holding a leaked key would.
+    fn states_with_repair<'a>(
+        shares: &'a mut [LinearModulePartyShare],
+        pk: &LinearModuleXPub,
+        fault: bool,
+        repair: Option<[u32; 7]>,
     ) -> Vec<HdThresholdEvalRound3VerifyMac<'a>> {
         let roster: Vec<_> = shares
             .iter()
@@ -736,14 +778,41 @@ mod tests {
             .map(|s| s.freeze(&commits).unwrap())
             .collect();
         let openings: Vec<_> = states.iter().map(|s| s.share_opening()).collect();
-        let commits: Vec<_> = states
+        let mut commits: Vec<_> = states
             .iter_mut()
             .map(|s| s.commit_mac(&openings).unwrap())
             .collect();
+        if let Some(offsets) = repair {
+            let first = &mut states[0].0;
+            let value = first.opened_value.unwrap();
+            let mut tags: [u32; SPDZ_LANES] = core::array::from_fn(|lane| {
+                mod_q_add(
+                    mod_q_sub(first.gamma[lane], mod_q_mul(first.alpha[lane], value)),
+                    offsets[lane],
+                )
+            });
+            first.mac_digest = commit_mpc_broadcast(
+                &first.session,
+                2,
+                first.share.party_id,
+                &tags_bytes(&tags),
+                &first.mac_salt,
+            );
+            first.zero_test = Some(CommittedZeroGates::hold(first.session, MODULE_Q, &mut tags));
+            commits[0] = states[0].mac_commitment();
+        }
         states
             .into_iter()
             .map(|s| s.freeze_mac(&commits).unwrap())
             .collect()
+    }
+    fn residual_sums(states: &mut [HdThresholdEvalRound3VerifyMac<'_>]) -> [u32; 7] {
+        let openings: Vec<_> = states.iter_mut().map(|s| s.mac_opening().unwrap()).collect();
+        core::array::from_fn(|lane| {
+            openings
+                .iter()
+                .fold(0, |acc, o| mod_q_add(acc, o.tags[lane]))
+        })
     }
     fn alpha(shares: &[LinearModulePartyShare], pk: &LinearModuleXPub) -> [u32; 7] {
         let weights = quorum_weights(shares, pk).unwrap();
@@ -762,8 +831,8 @@ mod tests {
         for share in &mut shares {
             share.poisoned = Arc::new(AtomicBool::new(false));
         }
-        let rounds = states(&mut shares, &pk, true);
-        let openings: Vec<_> = rounds.iter().map(|s| s.mac_opening().unwrap()).collect();
+        let mut rounds = states(&mut shares, &pk, true);
+        let openings: Vec<_> = rounds.iter_mut().map(|s| s.mac_opening().unwrap()).collect();
         let leaked: [u32; 7] = core::array::from_fn(|lane| {
             mod_q_sub(
                 0,
@@ -795,7 +864,7 @@ mod tests {
         let mut rounds = states(&mut shares, &pk, false);
         // Abandoning one local state retires its shared family context.
         drop(rounds.pop());
-        for round in rounds {
+        for mut round in rounds {
             assert!(matches!(round.mac_opening(), Err(HdError::MacCheckFailed)));
             assert_eq!(round.verify(&[]), Err(HdError::MacCheckFailed));
         }
@@ -809,8 +878,8 @@ mod tests {
             for share in &mut shares {
                 share.poisoned = Arc::new(AtomicBool::new(false));
             }
-            let rounds = states(&mut shares, &pk, false);
-            let mut openings: Vec<_> = rounds.iter().map(|s| s.mac_opening().unwrap()).collect();
+            let mut rounds = states(&mut shares, &pk, false);
+            let mut openings: Vec<_> = rounds.iter_mut().map(|s| s.mac_opening().unwrap()).collect();
             if missing {
                 openings.pop();
             } else {
@@ -860,44 +929,19 @@ mod tests {
                 assert_ne!(a0[lane], a1[lane]);
                 assert_ne!(a2[lane], a1[lane]);
             }
-            let attack = states(&mut c1, &pk1, true);
+            let mut attack = states(&mut c1, &pk1, true);
             // A committed failed opening exposes c1's independent key.
             // The family must be retired before any subsequent use.
-            let leaked: [u32; 7] = core::array::from_fn(|lane| {
-                mod_q_sub(
-                    0,
-                    attack
-                        .iter()
-                        .fold(0, |acc, s| mod_q_add(acc, s.0.tags[lane])),
-                )
-            });
+            let leaked = residual_sums(&mut attack).map(|sum| mod_q_sub(0, sum));
             assert_eq!(leaked, a1);
+            // Corrupt party tries to repair the +1 using alpha extracted from c1.
             let (mut forged, key) = if victim_is_parent {
-                (states(&mut parents, &pk, true), a0)
+                (states_with_repair(&mut parents, &pk, true, Some(leaked)), a0)
             } else {
-                (states(&mut c2, &pk2, true), a2)
+                (states_with_repair(&mut c2, &pk2, true, Some(leaked)), a2)
             };
             {
-                // Corrupt party tries to repair the +1 using alpha extracted from c1.
-                for (tag, &known) in forged[0].0.tags.iter_mut().zip(&leaked) {
-                    *tag = mod_q_add(*tag, known);
-                }
-                let first = &forged[0];
-                let digest = commit_mpc_broadcast(
-                    &first.0.session,
-                    2,
-                    first.0.share.party_id,
-                    &tags_bytes(&first.0.tags),
-                    &first.0.mac_salt,
-                );
-                for s in &mut forged {
-                    s.0.mac_commitments[0].digest = digest;
-                }
-                let sums: [u32; 7] = core::array::from_fn(|lane| {
-                    forged
-                        .iter()
-                        .fold(0, |acc, s| mod_q_add(acc, s.0.tags[lane]))
-                });
+                let sums = residual_sums(&mut forged);
                 assert_eq!(
                     sums,
                     core::array::from_fn(|lane| mod_q_sub(leaked[lane], key[lane]))
@@ -1048,7 +1092,7 @@ mod tests {
         // Every custodian MUST abort inside `commit_mac` BEFORE computing or releasing the 7 MAC tags!
         for state in &mut round2 {
             assert_eq!(state.commit_mac(&share_openings), Err(HdError::MacCheckFailed));
-            assert_eq!(state.0.tags, [0; SPDZ_LANES]);
+            assert!(state.0.zero_test.is_none());
             assert_eq!(state.0.opened_value, None);
             assert!(state.0.share.is_poisoned());
         }

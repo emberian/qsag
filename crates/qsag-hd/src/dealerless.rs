@@ -1533,11 +1533,11 @@ mod tests {
                 .iter_mut()
                 .map(|s| s.commit_mac(&openings).unwrap())
                 .collect();
-            let states: Vec<_> = states
+            let mut states: Vec<_> = states
                 .into_iter()
                 .map(|s| s.freeze_mac(&commits).unwrap())
                 .collect();
-            let mac_openings: Vec<_> = states.iter().map(|s| s.mac_opening().unwrap()).collect();
+            let mac_openings: Vec<_> = states.iter_mut().map(|s| s.mac_opening().unwrap()).collect();
             for state in states {
                 assert_eq!(state.verify(&mac_openings), Ok(pk.t_vec[2].coeffs[41]));
             }

@@ -23,6 +23,7 @@ mod erase;
 pub mod inventory;
 pub mod linear_module;
 pub mod seeds;
+mod zero_gate;
 
 pub use inventory::{
     HdError, InventoryChildProof, InventoryMasterPublicKey, InventoryPartyShareVault, RekeyFault,
