@@ -1265,6 +1265,38 @@ mod regression_tests {
             Err(HdError::EvaluationBudgetExceeded)
         );
     }
+
+    #[test]
+    fn derivation_depth_cap_bounds_cbd2_norm_growth() {
+        assert_eq!(DEFAULT_MAX_DERIVATION_DEPTH, 8);
+        assert_eq!(MAX_NON_HARDENED_DERIVATION_DEPTH, 16);
+        assert_eq!(
+            max_cbd2_linf_norm_after_depth(DEFAULT_MAX_DERIVATION_DEPTH),
+            18
+        );
+        assert_eq!(
+            max_cbd2_linf_norm_after_depth(MAX_NON_HARDENED_DERIVATION_DEPTH),
+            34
+        );
+        assert!(
+            setup_shamir_linear_module([7; 32], 2, &[1, 2, 3], DEFAULT_MAX_DERIVATION_DEPTH)
+                .is_ok()
+        );
+        assert!(
+            setup_shamir_linear_module([7; 32], 2, &[1, 2, 3], MAX_NON_HARDENED_DERIVATION_DEPTH)
+                .is_ok()
+        );
+        assert_eq!(
+            setup_shamir_linear_module(
+                [7; 32],
+                2,
+                &[1, 2, 3],
+                MAX_NON_HARDENED_DERIVATION_DEPTH + 1,
+            )
+            .err(),
+            Some(HdError::InvalidThresholdParameters)
+        );
+    }
 }
 
 #[cfg(test)]
