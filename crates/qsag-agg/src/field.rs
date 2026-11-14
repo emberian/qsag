@@ -577,6 +577,11 @@ pub fn ntt_goldilocks(a: &mut [Goldilocks]) {
         return;
     }
 
+    #[cfg(feature = "vulkan")]
+    if crate::acceleration::ntt(a) {
+        return;
+    }
+
     #[cfg(feature = "std")]
     if n >= 16_384 {
         let threads = crate::parallel_pow2_workers(n / 2);
@@ -687,6 +692,7 @@ pub fn intt_goldilocks(a: &mut [Goldilocks]) {
 /// Coset Reed–Solomon encoding of polynomial coefficients `coeffs` (length $N = 2^k$) onto
 /// shifted multiplicative subgroup $g \cdot H$ of size $|H| = N \cdot \text{blowup}$ (`g = 7`).
 pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<Goldilocks> {
+    let _phase = crate::profile::span("encode_rs_coset_goldilocks");
     let n_c = coeffs.len();
     assert!(n_c.is_power_of_two());
     assert!(blowup.is_power_of_two() && blowup >= 2);
@@ -695,6 +701,11 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
         domain_len.trailing_zeros() <= 32,
         "RS domain exceeds Goldilocks two-adicity"
     );
+
+    #[cfg(feature = "vulkan")]
+    if let Some(values) = crate::acceleration::encode(coeffs, domain_len) {
+        return values;
+    }
 
     // Coset decomposition: `B = blowup` independent size-`N` shifted NTTs (`out[q * B + r] = NTT_N(c_i * (g * w_D^r)^i)[q]`),
     // keeping each sub-NTT L2/L3-cache resident with zero cross-coset synchronization.
@@ -1270,6 +1281,7 @@ fn ntt_ext4_parallel_stages(a: &mut [GoldilocksExt4], threads: usize) {
 
 /// Coset Reed–Solomon encoding over `GoldilocksExt4` onto shifted subgroup $g \cdot H$ (`g = 7`).
 pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<GoldilocksExt4> {
+    let _phase = crate::profile::span("encode_rs_coset_ext4");
     let n_c = coeffs.len();
     assert!(n_c.is_power_of_two());
     assert!(blowup.is_power_of_two() && blowup >= 2);
@@ -1419,6 +1431,30 @@ pub fn eval_univariate_ext4_at_base(coeffs: &[GoldilocksExt4], z: Goldilocks) ->
 /// Evaluate univariate polynomial $\sum_k c_k z^k$ (`coeffs` in ascending degree) at `z: GoldilocksExt4`.
 #[inline]
 pub fn eval_univariate_ext4(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> GoldilocksExt4 {
+    #[cfg(feature = "std")]
+    if coeffs.len() >= 16_384 {
+        let workers = crate::parallel_workers().min(8);
+        let chunk = coeffs.len().div_ceil(workers);
+        return std::thread::scope(|scope| {
+            let parts: Vec<_> = coeffs
+                .chunks(chunk)
+                .enumerate()
+                .map(|(i, sub)| {
+                    crate::spawn_bounded(scope, move || {
+                        let mut acc = GoldilocksExt4::ZERO;
+                        for &c in sub.iter().rev() {
+                            acc = acc * z + c;
+                        }
+                        acc * z.pow((i * chunk) as u64)
+                    })
+                })
+                .collect();
+            parts
+                .into_iter()
+                .map(crate::join_worker)
+                .fold(GoldilocksExt4::ZERO, |a, b| a + b)
+        });
+    }
     let mut acc = GoldilocksExt4::ZERO;
     for &c in coeffs.iter().rev() {
         acc = acc * z + c;
@@ -1621,6 +1657,28 @@ mod ext4_tests {
             )
         };
         GoldilocksExt4::from_limbs([m(1), m(2), m(3), m(4)])
+    }
+
+    #[test]
+    fn parallel_horner_matches_serial_with_nondivisible_chunks() {
+        let coeffs: Vec<_> = (0..16_387)
+            .map(|i| {
+                GoldilocksExt4::from_limbs(core::array::from_fn(|j| {
+                    Goldilocks::from_u64_reduced((i * 7919 + j * 31) as u64)
+                }))
+            })
+            .collect();
+        for z in [
+            GoldilocksExt4::ZERO,
+            GoldilocksExt4::ONE,
+            GoldilocksExt4::V + GoldilocksExt4::from_u64(17),
+        ] {
+            let expected = coeffs
+                .iter()
+                .rev()
+                .fold(GoldilocksExt4::ZERO, |a, &c| a * z + c);
+            assert_eq!(eval_univariate_ext4(&coeffs, z), expected);
+        }
     }
 
     #[test]

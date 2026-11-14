@@ -43,7 +43,6 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[cfg(any(test, debug_assertions))]
 use crate::field::eval_univariate_ext4_at_base;
 use crate::field::{
     Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
@@ -788,6 +787,7 @@ pub fn verify_canopy_multiproof(
     sorted_leaves: &[(usize, [u8; 32])],
     proof: &CanopyMultiProof,
 ) -> bool {
+    let _phase = crate::profile::span("verify_canopy_multiproof");
     let log_leaves = commitment.log_leaves as usize;
     if log_leaves > 28 {
         return false;
@@ -813,28 +813,50 @@ pub fn verify_canopy_multiproof(
         let mut write = 0usize;
         let mut k = 0usize;
         while k < active.len() {
-            let (u, hu) = active[k];
-            let sib = u ^ 1;
-            let parent = u >> 1;
-            let hsib = if k + 1 < active.len() && active[k + 1].0 == sib {
-                let coalesced = active[k + 1].1;
-                k += 2;
-                coalesced
-            } else {
-                let Some(&supplied) = proof.auth_siblings.get(sib_cursor) else {
+            let mut parents = [0u32; 4];
+            let mut lefts = [[0u8; 32]; 4];
+            let mut rights = [[0u8; 32]; 4];
+            let mut lanes = 0;
+            // Read a batch before overwriting the in-place frontier. Each parent consumes
+            // at least one input, so the write cursor never overtakes unread nodes.
+            while lanes < 4 && k < active.len() {
+                let (u, hu) = active[k];
+                let sib = u ^ 1;
+                let hsib = if k + 1 < active.len() && active[k + 1].0 == sib {
+                    let coalesced = active[k + 1].1;
+                    k += 2;
+                    coalesced
+                } else {
+                    let Some(&supplied) = proof.auth_siblings.get(sib_cursor) else {
+                        return false;
+                    };
+                    sib_cursor += 1;
+                    k += 1;
+                    supplied
+                };
+                let Some(pair) = qsag_whir_verified::step_merkle_pair_order(u as u64, 0, hu, hsib)
+                else {
                     return false;
                 };
-                sib_cursor += 1;
-                k += 1;
-                supplied
-            };
-            let Some(pair) = qsag_whir_verified::step_merkle_pair_order(u as u64, 0, hu, hsib)
-            else {
-                return false;
-            };
-            let hp = hash_merkle_internal_tagged(pair.tag, parent as u32, &pair.left, &pair.right);
-            active[write] = (parent, hp);
-            write += 1;
+                parents[lanes] = (u >> 1) as u32;
+                lefts[lanes] = pair.left;
+                rights[lanes] = pair.right;
+                lanes += 1;
+            }
+            if lanes == 4 {
+                let hashes = hash_merkle_nodes_x4(parents, lefts.each_ref(), rights.each_ref());
+                for lane in 0..4 {
+                    active[write + lane] = (parents[lane] as usize, hashes[lane]);
+                }
+            } else {
+                for lane in 0..lanes {
+                    active[write + lane] = (
+                        parents[lane] as usize,
+                        hash_merkle_internal(parents[lane], &lefts[lane], &rights[lane]),
+                    );
+                }
+            }
+            write += lanes;
         }
         active.truncate(write);
         cur_depth -= 1;
@@ -875,10 +897,24 @@ fn hash_merkle_internal_x4(
     lefts: [&[u8; 32]; 4],
     rights: [&[u8; 32]; 4],
 ) -> [[u8; 32]; 4] {
+    hash_merkle_nodes_x4(
+        core::array::from_fn(|k| base_node_idx + k as u32),
+        lefts,
+        rights,
+    )
+}
+
+/// Hash four arbitrary frontier positions, preserving the node-index domain binding.
+#[inline]
+fn hash_merkle_nodes_x4(
+    indices: [u32; 4],
+    lefts: [&[u8; 32]; 4],
+    rights: [&[u8; 32]; 4],
+) -> [[u8; 32]; 4] {
     let mut bufs = [[0u8; 69]; 4];
     for k in 0..4 {
         bufs[k][0] = TAG_MERKLE_INTERNAL;
-        bufs[k][1..5].copy_from_slice(&(base_node_idx + k as u32).to_le_bytes());
+        bufs[k][1..5].copy_from_slice(&indices[k].to_le_bytes());
         bufs[k][5..37].copy_from_slice(lefts[k]);
         bufs[k][37..69].copy_from_slice(rights[k]);
     }
@@ -971,6 +1007,65 @@ fn hash_round0_leaf(
         dst.copy_from_slice(&v.to_le_bytes());
     }
     cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf[..used_bytes])
+}
+
+/// Four arbitrary queried leaves, with exactly the scalar wire framing in every lane.
+fn queried_round0_hash_x4(
+    indices: &[usize],
+    salts: &[[u8; 16]],
+    num_polys: usize,
+    vals: &[Goldilocks],
+    per_query: usize,
+) -> [[u8; 32]; 4] {
+    let mut bufs = [[0u8; 23 + 8 * MAX_ROUND0_LEAF_VALS]; 4];
+    let header = if num_polys == 1 { 22 } else { 23 };
+    let used = header + 8 * per_query;
+    for (lane, buf) in bufs.iter_mut().enumerate() {
+        buf[0] = if num_polys == 1 {
+            TAG_ROUND0_SINGLE
+        } else {
+            TAG_ROUND0_BATCH
+        };
+        buf[1] = (per_query / num_polys) as u8;
+        let offset = if num_polys == 1 {
+            2
+        } else {
+            buf[2] = num_polys as u8;
+            3
+        };
+        buf[offset..offset + 4].copy_from_slice(&(indices[lane] as u32).to_le_bytes());
+        buf[offset + 4..header].copy_from_slice(&salts[lane]);
+        for (dst, v) in buf[header..used]
+            .chunks_exact_mut(8)
+            .zip(&vals[lane * per_query..(lane + 1) * per_query])
+        {
+            dst.copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| &b[..used]))
+}
+
+fn queried_ext4_hash_x4(
+    stage: u8,
+    indices: &[usize],
+    vals: &[GoldilocksExt4],
+    arity: usize,
+) -> [[u8; 32]; 4] {
+    let mut bufs = [[0u8; 7 + 32 * MAX_FIBER_ARITY]; 4];
+    let used = 7 + 32 * arity;
+    for (lane, buf) in bufs.iter_mut().enumerate() {
+        buf[0] = TAG_EXT4_STAGE_LEAF;
+        buf[1] = stage;
+        buf[2] = arity as u8;
+        buf[3..7].copy_from_slice(&(indices[lane] as u32).to_le_bytes());
+        for (dst, v) in buf[7..used]
+            .chunks_exact_mut(32)
+            .zip(&vals[lane * arity..(lane + 1) * arity])
+        {
+            dst.copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, bufs.each_ref().map(|b| &b[..used]))
 }
 
 /// 4-way SIMD Round-0 salted leaf hash for 4 consecutive fibers `base_g .. base_g + 4`.
@@ -1671,16 +1766,11 @@ fn fold_duet_affine_ext4(
     alpha: GoldilocksExt4,
     beta: GoldilocksExt4,
 ) -> GoldilocksExt4 {
-    from_verified_ext4(qsag_whir_verified::cwyz_duet_fold(
-        to_verified_ext4(v0),
-        to_verified_ext4(v1),
-        inv_two_xk.to_canonical_u64(),
-        inv_two.to_canonical_u64(),
-        xk_sq.to_canonical_u64(),
-        to_verified_ext4(theta),
-        to_verified_ext4(alpha),
-        to_verified_ext4(beta),
-    ))
+    // Same polynomial as the extracted reference, evaluated with canonical Goldilocks
+    // reductions rather than general u128 remainder in every field operation.
+    let even = (v0 + v1).mul_base(inv_two);
+    let odd = (v0 - v1).mul_base(inv_two_xk);
+    odd + (alpha + beta.mul_base(xk_sq)) * (even + theta * odd)
 }
 
 /// Fold a coset fiber `vals` of size $A = 2^s \in \{2, 4, 8, 16, 32, 64\}$ at points
@@ -1999,6 +2089,7 @@ pub fn whir_commit_batch_owned_with_schedule(
     salt_seed: &[u8; 32],
     schedule: &WhirSchedule,
 ) -> (CanopyCommitment, HemWhirProverState) {
+    let _phase = crate::profile::span("whir_commit_batch_owned_with_schedule");
     assert!(!polys.is_empty() && polys.len() <= MAX_BATCH_POLYS);
     let table_len = polys[0].len();
     assert!(table_len.is_power_of_two() && table_len >= 4);
@@ -2118,6 +2209,7 @@ pub fn whir_open_batch(
     evals: &[GoldilocksExt4],
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> HemWhirBatchOpeningProof {
+    let _phase = crate::profile::span("whir_open_batch");
     absorb_whir_schedule(transcript, &state.schedule);
     let num_polys = state.num_polys();
     let num_vars = state.num_vars;
@@ -3171,18 +3263,8 @@ fn whir_verify_core(
                 return false;
             };
 
-            let verified_final_coeffs: Vec<qsag_whir_verified::Ext4> = proof
-                .final_coeffs
-                .iter()
-                .copied()
-                .map(to_verified_ext4)
-                .collect();
             for &(z_u, v_shift) in &final_claims {
-                if !qsag_whir_verified::verify_ext4_univariate_at_base_pin(
-                    &verified_final_coeffs,
-                    z_u.to_canonical_u64(),
-                    to_verified_ext4(v_shift),
-                ) {
+                if eval_univariate_ext4_at_base(&proof.final_coeffs, z_u) != v_shift {
                     return false;
                 }
             }
@@ -3190,6 +3272,27 @@ fn whir_verify_core(
     }
 
     true
+}
+
+/// Independent public queries share the global bounded worker budget; output order is stable.
+fn map_query_indices<T: Send, F: Fn(usize) -> T + Sync>(count: usize, f: F) -> Vec<T> {
+    #[cfg(feature = "std")]
+    if count >= 128 {
+        let ranges: Vec<_> = (0..count)
+            .step_by(count.div_ceil(4))
+            .map(|start| start..(start + count.div_ceil(4)).min(count))
+            .collect();
+        return crate::map_chunks_bounded(&ranges, |ranges| {
+            ranges
+                .iter()
+                .flat_map(|range| range.clone().map(&f))
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect();
+    }
+    (0..count).map(f).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3207,6 +3310,7 @@ fn verify_and_fold_stage0_fibers(
     proof: &HemWhirOpeningProof,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> Option<Vec<(Goldilocks, GoldilocksExt4)>> {
+    let _phase = crate::profile::span("verify_and_fold_stage0_fibers");
     let num_groups_0 = domain_0 / arity_0;
     let q_indices = sample_stage_queries(transcript, 0, num_groups_0, num_queries);
     let per_query = num_polys * arity_0;
@@ -3222,15 +3326,36 @@ fn verify_and_fold_stage0_fibers(
     let step_vars = stage_chals.len();
 
     let mut sorted_leaves = Vec::with_capacity(q_indices.len());
-    let mut claims = Vec::with_capacity(q_indices.len());
 
-    for ((&g, salt), vals) in q_indices
-        .iter()
-        .zip(&proof.round0_salts)
-        .zip(proof.round0_vals.chunks_exact(per_query))
-    {
-        sorted_leaves.push((g, hash_round0_leaf(g as u32, salt, num_polys, vals)));
-
+    for (batch, indices) in q_indices.chunks(4).enumerate() {
+        let start = batch * 4;
+        if indices.len() == 4 {
+            let hashes = queried_round0_hash_x4(
+                indices,
+                &proof.round0_salts[start..],
+                num_polys,
+                &proof.round0_vals[start * per_query..],
+                per_query,
+            );
+            sorted_leaves.extend(indices.iter().copied().zip(hashes));
+        } else {
+            for (lane, &g) in indices.iter().enumerate() {
+                let i = start + lane;
+                sorted_leaves.push((
+                    g,
+                    hash_round0_leaf(
+                        g as u32,
+                        &proof.round0_salts[i],
+                        num_polys,
+                        &proof.round0_vals[i * per_query..(i + 1) * per_query],
+                    ),
+                ));
+            }
+        }
+    }
+    let claims = map_query_indices(q_indices.len(), |i| {
+        let g = q_indices[i];
+        let vals = &proof.round0_vals[i * per_query..(i + 1) * per_query];
         let mut ext_vals = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
         if num_polys == 1 {
             for (slot, &v) in ext_vals.iter_mut().zip(vals) {
@@ -3255,8 +3380,8 @@ fn verify_and_fold_stage0_fibers(
             stage_chals,
         );
         let z_u = pow2_iter_base(y0, step_vars);
-        claims.push((z_u, v_shift));
-    }
+        (z_u, v_shift)
+    });
 
     if !verify_canopy_multiproof(comm_0, &sorted_leaves, &proof.round0_multiproof) {
         return None;
@@ -3277,6 +3402,7 @@ fn verify_and_fold_ext4_stage_fibers(
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> Option<Vec<(Goldilocks, GoldilocksExt4)>> {
+    let _phase = crate::profile::span("verify_and_fold_ext4_stage_fibers");
     let num_groups_cur = domain_cur / arity;
     if layer.commitment.log_leaves > 28
         || (1usize << (layer.commitment.log_leaves as usize)) != num_groups_cur
@@ -3295,16 +3421,40 @@ fn verify_and_fold_ext4_stage_fibers(
     let stage_u8 = stage_idx as u8;
 
     let mut sorted_leaves = Vec::with_capacity(q_indices.len());
-    let mut claims = Vec::with_capacity(q_indices.len());
 
-    for (&g, vals) in q_indices.iter().zip(layer.opened_vals.chunks_exact(arity)) {
-        sorted_leaves.push((g, hash_ext4_group(stage_u8, g as u32, vals)));
+    for (batch, indices) in q_indices.chunks(4).enumerate() {
+        let start = batch * 4;
+        if indices.len() == 4 {
+            let hashes = queried_ext4_hash_x4(
+                stage_u8,
+                indices,
+                &layer.opened_vals[start * arity..],
+                arity,
+            );
+            sorted_leaves.extend(indices.iter().copied().zip(hashes));
+        } else {
+            for (lane, &g) in indices.iter().enumerate() {
+                let i = start + lane;
+                sorted_leaves.push((
+                    g,
+                    hash_ext4_group(
+                        stage_u8,
+                        g as u32,
+                        &layer.opened_vals[i * arity..(i + 1) * arity],
+                    ),
+                ));
+            }
+        }
+    }
+    let claims = map_query_indices(q_indices.len(), |i| {
+        let g = q_indices[i];
+        let vals = &layer.opened_vals[i * arity..(i + 1) * arity];
         let y0 = Goldilocks::NON_RESIDUE * omega.pow(g as u64);
         let inv_y0 = inv_shift * inv_omega.pow(g as u64);
         let v_shift = fold_coset_group_ext4(vals, inv_y0, inv_two, inv_zetas, stage_chals);
         let z_u = pow2_iter_base(y0, step_vars);
-        claims.push((z_u, v_shift));
-    }
+        (z_u, v_shift)
+    });
 
     if !verify_canopy_multiproof(&layer.commitment, &sorted_leaves, &layer.multiproof) {
         return None;
@@ -3319,6 +3469,7 @@ fn verify_and_fold_ext4_stage_fibers(
 /// Deterministically find the minimum `nonce: u64` whose `POW_MIDSTATE` digest has at least
 /// `PCS_POW_BITS` low zero bits, scanning in 4-way SIMD (`cshake256_pow_u64_x4`) across 8 threads.
 fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
+    let _phase = crate::profile::span("grind_pcs_pow");
     if PCS_POW_BITS == 0 {
         return 0;
     }
@@ -3721,6 +3872,58 @@ mod pcs_unit_tests {
         let mp = t_x4.open_multi_with_leaf_fn(&q, leaf_scalar);
         let leaves: Vec<(usize, [u8; 32])> = q.iter().map(|&i| (i, leaf_scalar(i))).collect();
         assert!(verify_canopy_multiproof(&t_x4.commitment(), &leaves, &mp));
+    }
+
+    #[test]
+    fn frontier_batches_reject_noncanonical_and_tampered_proofs() {
+        let leaf = |i: usize| cshake256_32_for_test(i);
+        let tree = MerkleCanopyTree::build_from_fn(32, leaf);
+        // Dense, sparse, sibling-coalescing, and non-multiple-of-four frontiers.
+        for stride in 1..=9 {
+            for offset in 0..stride {
+                let indices: Vec<_> = (offset..32).step_by(stride).collect();
+                let leaves: Vec<_> = indices.iter().map(|&i| (i, leaf(i))).collect();
+                let proof = tree.open_multi_with_leaf_fn(&indices, leaf);
+                assert!(verify_canopy_multiproof(
+                    &tree.commitment(),
+                    &leaves,
+                    &proof
+                ));
+                let mut extra = proof.clone();
+                extra.auth_siblings.push([0; 32]);
+                assert!(!verify_canopy_multiproof(
+                    &tree.commitment(),
+                    &leaves,
+                    &extra
+                ));
+                if !proof.auth_siblings.is_empty() {
+                    let mut short = proof.clone();
+                    short.auth_siblings.pop();
+                    assert!(!verify_canopy_multiproof(
+                        &tree.commitment(),
+                        &leaves,
+                        &short
+                    ));
+                    let mut bad = proof.clone();
+                    bad.auth_siblings[0][0] ^= 1;
+                    assert!(!verify_canopy_multiproof(&tree.commitment(), &leaves, &bad));
+                }
+                let mut bad = leaves.clone();
+                bad[0].1[0] ^= 1;
+                assert!(!verify_canopy_multiproof(&tree.commitment(), &bad, &proof));
+                let mut duplicate = leaves.clone();
+                duplicate.insert(0, leaves[0]);
+                assert!(!verify_canopy_multiproof(
+                    &tree.commitment(),
+                    &duplicate,
+                    &proof
+                ));
+            }
+        }
+    }
+
+    fn cshake256_32_for_test(i: usize) -> [u8; 32] {
+        crate::sponge::cshake256_32(b"frontier-test", &(i as u64).to_le_bytes())
     }
 
     #[test]

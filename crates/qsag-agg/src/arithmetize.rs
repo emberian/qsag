@@ -641,6 +641,7 @@ fn build_shard_witness(
     sigs: &[ValidatorSignature],
     blinding_seed: &[u8; 32],
 ) -> Vec<Goldilocks> {
+    let _phase = crate::profile::span("build_shard_witness");
     let r_rows = circuit.rows_per_signer();
     let num_signer_slots = circuit.num_signer_slots;
     let mut rows = vec![[Goldilocks::ZERO; NUM_TRACE_COLS]; num_signer_slots * r_rows];
@@ -688,6 +689,7 @@ fn prove_shard_rows(
     signers: &[ShardSigner],
     flat: &[Goldilocks],
 ) -> (ShardRowProof, Vec<GoldilocksExt4>, GoldilocksExt4) {
+    let _phase = crate::profile::span("prove_shard_rows");
     let unique_ops = &circuit.unique_ops;
     let step_to_uid = &circuit.step_to_uid;
     let r_rows = circuit.rows_per_signer();
@@ -1556,6 +1558,7 @@ fn verify_shard_rows(
     signers: &[ShardSigner],
     proof: &ShardRowProof,
 ) -> Option<(Vec<GoldilocksExt4>, GoldilocksExt4)> {
+    let _phase = crate::profile::span("verify_shard_rows");
     let r_rows = circuit.rows_per_signer();
     let log_rows = circuit.log_rows();
     let log_r = circuit.log_local();
