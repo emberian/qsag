@@ -310,3 +310,83 @@ mod bit_width_tests {
         assert_eq!(convert_bits(&[255], 8, 8, true).unwrap(), [255]);
     }
 }
+
+#[cfg(test)]
+mod adversarial_tests {
+    use super::*;
+
+    #[test]
+    fn bip350_vectors_and_legacy_rejection() {
+        // Generic codec vectors, not Bitcoin witness-program semantics.
+        // https://github.com/bitcoin/bips/blob/master/bip-0350.mediawiki
+        for encoded in [
+            "A1LQFN3A", "a1lqfn3a",
+            "an83characterlonghumanreadablepartthatcontainsthetheexcludedcharactersbioandnumber11sg7hg6",
+            "abcdef1l7aum6echk45nj3s0wdvt2fg8x9yrzpqzd3ryx",
+            "11llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllludsr8",
+            "split1checkupstagehandshakeupstreamerranterredcaperredlc445v", "?1v759aa",
+        ] {
+            let (hrp, data) = bech32m_decode_5bit(encoded).unwrap();
+            assert_eq!(bech32m_encode_5bit(&hrp, &data).unwrap(), encoded.to_ascii_lowercase());
+        }
+        for encoded in [
+            " 1xj0phk", "\u{7f}1g6xzxy", "\u{80}1vctc34",
+            "an84characterslonghumanreadablepartthatcontainsthetheexcludedcharactersbioandnumber11d6pts4",
+            "qyrz8wqd2c9m", "1qyrz8wqd2c9m", "y1b0jsk6g", "lt1igcx5c0",
+            "in1muywd", "mm1crxm3i", "au1s5cgom", "M1VUXWEZ", "16plkw9", "1p2gdwpf",
+        ] {
+            assert!(bech32m_decode_5bit(encoded).is_err(), "{encoded}");
+        }
+        for legacy in ["A12UEL5L", "a12uel5l", "split1checkupstagehandshakeupstreamerranterredcaperred2y9e3w", "?1ezyfcl"] {
+            assert_eq!(bech32m_decode_5bit(legacy), Err(AddrError::LegacyBech32Rejected));
+        }
+    }
+
+    #[test]
+    fn exhaustive_single_symbol_and_short_burst_mutations() {
+        let data: Vec<u8> = (0..57).map(|i| (i % 32) as u8).collect();
+        let original = bech32m_encode_5bit("qsp", &data).unwrap().into_bytes();
+        // Every printable substitution, including HRP and separator. A one-letter
+        // case change is mixed case, whereas all-uppercase remains valid.
+        for i in 0..original.len() {
+            for replacement in 33..=126 {
+                if replacement == original[i] { continue; }
+                let mut changed = original.clone();
+                changed[i] = replacement;
+                assert!(bech32m_decode_5bit(core::str::from_utf8(&changed).unwrap()).is_err());
+            }
+        }
+        // Deterministic bursts of 2..=4 changed GF(32) symbols, spanning data/checksum.
+        for width in 2..=4 {
+            for start in 4..=original.len() - width {
+                for delta in 1..32 {
+                    let mut changed = original.clone();
+                    for b in &mut changed[start..start + width] {
+                        *b = BECH32_CHARSET[(BECH32_REV[*b as usize] as usize) ^ delta];
+                    }
+                    assert!(bech32m_decode_5bit(core::str::from_utf8(&changed).unwrap()).is_err());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn case_charset_length_and_padding_boundaries() {
+        assert_eq!(bech32m_decode_5bit("a1LQFN3A"), Err(AddrError::MixedCase));
+        assert_eq!(bech32m_encode_5bit("qSp", &[]), Err(AddrError::MixedCase));
+        let hrp = "a".repeat(83);
+        let max = bech32m_encode_5bit(&hrp, &[]).unwrap();
+        assert_eq!(max.len(), 90);
+        assert!(bech32m_decode_5bit(&max).is_ok());
+        assert!(bech32m_encode_5bit(&hrp, &[0]).is_err());
+        assert!(bech32m_encode_5bit(&"a".repeat(84), &[]).is_err());
+        assert!(bech32m_encode_5bit("", &[]).is_err());
+        for symbol in 32..=255 {
+            assert_eq!(bech32m_create_checksum(b"qsp", &[symbol]), Err(AddrError::InvalidCharacter));
+            assert_eq!(bech32m_encode_5bit("qsp", &[symbol]), Err(AddrError::InvalidCharacter));
+        }
+        assert_eq!(convert_bits(&[0, 1], 5, 8, false), Err(AddrError::NonZeroPadding));
+        assert_eq!(convert_bits(&[0], 5, 8, false), Err(AddrError::InvalidBitConversion));
+        assert_eq!(convert_bits(&[0, 0], 5, 8, false).unwrap(), [0]);
+    }
+}

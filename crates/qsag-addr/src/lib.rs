@@ -1598,3 +1598,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod audit_tests;
