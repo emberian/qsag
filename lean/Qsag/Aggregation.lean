@@ -5637,6 +5637,15 @@ theorem succinct_knowledge_soundness_hypotheses_satisfiable :
     rw [(isLinearBaseRs8_encodeLinearRs8 x0 b1).2]
     simp [GoldilocksExt4.embedBase_c0_c0, verifyPqHashSig_sbox7_iff, root]
 
+attribute [local semireducible] cshake256Bytes pcsMerkleHash squeezeExt4Challenge
+  deriveStageQueryIndices honestSbox7RoundPoly honestSbox7RoundPolyDelta pow7Ext4 pow7Goldilocks
+  sbox7Stage0Proof sbox7Stage1Proof
+  buildMerkleRootByDepth buildMerklePathByDepth encodeLinearRs8
+  aggregateInstanceFrame rowSumcheckTranscriptTail stagePowSeed stageQuerySeed
+  Goldilocks.add Goldilocks.mul Goldilocks.sub Goldilocks.neg
+  GoldilocksExt2.add GoldilocksExt2.mul GoldilocksExt2.sub GoldilocksExt2.neg
+  GoldilocksExt4.add GoldilocksExt4.mul GoldilocksExt4.sub GoldilocksExt4.neg
+
 /-- `#tooth` `strictlyIncreasing` rejects repeated query indices. -/
 theorem strictlyIncreasing_rejects_repeat (x : Nat) (xs : List Nat) :
     strictlyIncreasing (x :: x :: xs) = false := by

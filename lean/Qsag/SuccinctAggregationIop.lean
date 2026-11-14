@@ -79,6 +79,8 @@ Reed-Solomon proximity-gap or list-decoding statement, so the per-query agreemen
 or `sqrt ρ` in the Johnson regime) is an input of the accounting.
 -/
 
+public import Qsag.ConcreteSecurityBudget
+import all Qsag.ConcreteSecurityBudget
 public import Qsag.Constructive
 public import Qsag.Goldilocks
 import all Qsag.Goldilocks
@@ -96,6 +98,7 @@ attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLa
 attribute [local irreducible] poseidon2Perm12 poseidon2Perm12Inv
 
 set_option autoImplicit false
+set_option exponentiation.threshold 2048
 
 /-! ## §1. Packed 4-Limb Goldilocks Field-Native Corduroy / XMSS Signature Engine (`sig.rs`) -/
 
@@ -10075,9 +10078,9 @@ def WhirSecurityRegime.schedule (r : WhirSecurityRegime) (numVars : Nat) : WhirS
     (whirLegacyStageGeometry numVars).stages.map
       (fun st => ⟨st.blowup, st.stepVars, r.numQueries st.blowup⟩)⟩
 
-/-- `pcs.rs:whir_stage_schedule`: the default (`habr24PostQuantum128`) schedule. -/
+/-- `pcs.rs:whir_stage_schedule`: the default (`habr24Qrom128`) schedule. -/
 def whirStageSchedule (numVars : Nat) : WhirSchedule :=
-  WhirSecurityRegime.habr24PostQuantum128.schedule numVars
+  WhirSecurityRegime.habr24Qrom128.schedule numVars
 
 /-- Denominator `blowup ^ numQueries` of the stage query error `ρ_i ^ q_i`: the error of `q_i`
     fiber queries when a cheating oracle agrees with the code on a `ρ_i` fraction. That
@@ -10118,7 +10121,7 @@ theorem whirSchedule_wellFormed (r : WhirSecurityRegime) (numVars : Nat)
   have hAll : ∀ (r : WhirSecurityRegime) (k : Nat), k < 25 → 2 ≤ k →
       whirScheduleWellFormed r k = true := by
     intro r
-    cases r <;> decide
+    cases r <;> decide +kernel
   exact hAll r numVars (Nat.lt_succ_of_le h24) h2
 
 /-- Query counts of the three regimes at the supported blowups `4, 16, 64, 256`. -/
@@ -10140,17 +10143,33 @@ theorem whir_johnson_qrom_schedule_deployed :
       ⟨.bciksJohnsonQrom128, 8,
         [⟨4, 6, 258⟩, ⟨16, 4, 130⟩, ⟨64, 3, 88⟩, ⟨256, 3, 66⟩]⟩ := by decide
 
+/-- Compatibility map from the historical IOP constructor names to the budget profiles. -/
+def WhirSecurityRegime.toBudgetRegime : WhirSecurityRegime → Qsag.WhirBudgetRegime
+  | .habr24Classical128 => .habr24Classical128
+  | .habr24PostQuantum128 => .habr24Interactive128
+  | .bciksJohnson128 => .bciksJohnsonClassical128
+  | .habr24Qrom128 => .habr24Qrom128
+  | .bciksJohnsonQrom128 => .bciksJohnsonQrom128
+
+/-- The IOP and concrete security budget use the same stage geometry and query counts in
+    every profile, including the deployed Johnson-QROM `(258,130,88,66)` schedule. -/
+theorem whir_iop_budget_schedule_agreement (r : WhirSecurityRegime) :
+    ((r.schedule 24).stages.map (fun st => (st.blowup, st.stepVars, st.numQueries))) =
+      ((Qsag.whirSchedule4Stage r.toBudgetRegime).map
+        (fun st => (st.sqrtBlowup ^ 2, st.stepVars, st.numQueries))) := by
+  cases r <;> decide +kernel
+
 /-- The default schedule at `numVars = 20` (the `K = 8` shard): `ρ = 1/4 → 1/16 → 1/64`,
-    `q = (64, 32, 22)`, eight variables sent in the clear. -/
+    `q = (128, 64, 43)`, eight variables sent in the clear. -/
 theorem whirStageSchedule_deployed :
     whirStageSchedule 20 =
-      ⟨.habr24PostQuantum128, 8, [⟨4, 5, 64⟩, ⟨16, 3, 32⟩, ⟨64, 4, 22⟩]⟩ := by decide
+      ⟨.habr24Qrom128, 8, [⟨4, 5, 128⟩, ⟨16, 3, 64⟩, ⟨64, 4, 43⟩]⟩ := by decide
 
-/-- Query error denominators of the default schedule at `numVars = 20`: `2^128, 2^128, 2^132`,
+/-- Query error denominators of the default schedule at `numVars = 20`: `2^256, 2^256, 2^258`,
     with no proof-of-work credit. -/
 theorem whirStageSchedule_deployed_denominators :
     (whirStageSchedule 20).stages.map (·.queryErrorDenominator) =
-      [2 ^ 128, 2 ^ 128, 2 ^ 132] := by decide
+      [2 ^ 256, 2 ^ 256, 2 ^ 258] := by decide
 
 /-- The fixed-count legacy geometry at `numVars = 20`: `ρ = 1/4 → 1/16 → 1/64` with
     `q = (56, 30, 21)`. -/
@@ -10176,10 +10195,10 @@ theorem whir_legacy_k8_stage_union_bound :
       2 ^ 128 * 2 ^ 136 * 2 ^ 142 := by decide
 
 /-- Union bound over the three stages of the default schedule at `numVars = 20`, without any
-    proof-of-work credit: `1/2^128 + 1/2^128 + 1/2^132 ≤ 2^-126`. -/
+    proof-of-work credit: `1/2^256 + 1/2^256 + 1/2^258 ≤ 2^-254`. -/
 theorem whirStageSchedule_deployed_union_bound :
-    2 ^ 126 * (2 ^ 128 * 2 ^ 132 + 2 ^ 128 * 2 ^ 132 + 2 ^ 128 * 2 ^ 128) ≤
-      2 ^ 128 * 2 ^ 128 * 2 ^ 132 := by decide
+    2 ^ 254 * (2 ^ 256 * 2 ^ 258 + 2 ^ 256 * 2 ^ 258 + 2 ^ 256 * 2 ^ 256) ≤
+      2 ^ 256 * 2 ^ 256 * 2 ^ 258 := by decide
 
 /-- Every stage of every supported schedule of regime `r` has
     `ρ_i^{-q_i} ≥ 2 ^ r.queryExponentBits`. -/
@@ -10193,11 +10212,11 @@ theorem whirSchedule_stage_query_ge (r : WhirSecurityRegime) (numVars : Nat) (h2
   simp only [Bool.and_eq_true, decide_eq_true_eq] at hSt'
   exact hSt'.2
 
-/-- Every stage of the default schedule has `ρ_i^{-q_i} ≥ 2^128` before any grinding credit. -/
+/-- Every stage of the default schedule has `ρ_i^{-q_i} ≥ 2^256` before any grinding credit. -/
 theorem whirStageSchedule_stage_query_ge (numVars : Nat) (h2 : 2 ≤ numVars)
     (h24 : numVars ≤ 24) (st : WhirStageSpec) (hSt : st ∈ (whirStageSchedule numVars).stages) :
-    2 ^ 128 ≤ st.queryErrorDenominator :=
-  whirSchedule_stage_query_ge .habr24PostQuantum128 numVars h2 h24 st hSt
+    2 ^ 256 ≤ st.queryErrorDenominator :=
+  whirSchedule_stage_query_ge .habr24Qrom128 numVars h2 h24 st hSt
 
 /-- `|GoldilocksExt4| = p^4 > 2^255`. -/
 theorem goldilocksExt4_card_gt_two_pow_255 : 2 ^ 255 < goldilocksPrime ^ 4 := by decide
