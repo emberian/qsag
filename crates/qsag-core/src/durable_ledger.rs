@@ -12,6 +12,24 @@ pub struct LedgerCheckpoint {
     pub tag: [u8; 32],
 }
 
+/// Independently durable, per-resource rollback protection (for example a TPM or
+/// remote monotonic service). The anchor must not share the WAL's rollback domain.
+/// `advance` atomically rejects older generations and unequal tags at equal generation;
+/// success means the checkpoint survives a crash. A fresh resource returns `None`.
+pub trait ExternalMonotoneAnchor: Send + Sync {
+    fn load(&self) -> std::io::Result<Option<LedgerCheckpoint>>;
+    fn advance(&self, checkpoint: LedgerCheckpoint) -> std::io::Result<()>;
+}
+
+pub(crate) fn advance_anchor(anchor: &dyn ExternalMonotoneAnchor, checkpoint: LedgerCheckpoint) -> std::io::Result<()> {
+    if let Some(old) = anchor.load()?
+        && (old.generation > checkpoint.generation ||
+            (old.generation == checkpoint.generation && old.tag != checkpoint.tag)) {
+        return Err(std::io::Error::other("external anchor rejects rolled-back state"));
+    }
+    anchor.advance(checkpoint)
+}
+
 pub(crate) struct Ledger {
     genesis: LockedRecord,
     slots: [Option<LockedRecord>; 2],
