@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# Reproducible end-to-end Rust MIR -> Charon (.llbc) -> Aeneas (Lean 4) -> Lake verification script.
+# Run on a Linux verification host with Charon, Aeneas, Rust, Lean, and Python 3 installed.
+# Optionally set AENEAS_TOOLS_DIR to the directory containing Charon and Aeneas.
+set -euo pipefail
+
+if [[ "$(uname -s)" != Linux ]]; then
+  echo "ERROR: extraction and verification must run on the designated Linux build host." >&2
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CRATE_DIR="${SCRIPT_DIR}/qsag-whir-verified"
+LEAN_DIR="${SCRIPT_DIR}/lean-whir"
+LLBC_FILE="${SCRIPT_DIR}/qsag_whir_verified.llbc"
+
+cleanup() {
+  rm -f "${LLBC_FILE}"
+}
+trap cleanup EXIT
+
+if [[ -d "${HOME}/.cargo/bin" ]]; then
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+fi
+if [[ -d "${HOME}/.elan/bin" ]]; then
+  export PATH="${HOME}/.elan/bin:${PATH}"
+fi
+
+if [[ -n "${AENEAS_TOOLS_DIR:-}" && -d "${AENEAS_TOOLS_DIR}" ]]; then
+  export PATH="${AENEAS_TOOLS_DIR}:${PATH}"
+fi
+for tool in charon aeneas; do
+  if ! command -v "${tool}" >/dev/null 2>&1; then
+    echo "ERROR: ${tool} is missing; install it on PATH or set AENEAS_TOOLS_DIR to its directory." >&2
+    exit 1
+  fi
+done
+
+echo "[1/5] Running standalone Rust boundary tests..."
+(
+  cd "${CRATE_DIR}"
+  cargo test -- --nocapture
+)
+
+echo "[2/5] Extracting Rustc MIR to LLBC via Charon..."
+(
+  cd "${CRATE_DIR}"
+  charon cargo --preset=aeneas --dest-file "${LLBC_FILE}" -- --lib
+)
+
+echo "[3/5] Translating LLBC to pure Lean 4.35 via Aeneas..."
+(
+  cd "${SCRIPT_DIR}"
+  aeneas -sequential -backend lean -split-files -dest "${LEAN_DIR}" -subdir QsagWhirVerified -no-progress-bar "${LLBC_FILE}"
+)
+
+for external in "${LEAN_DIR}/QsagWhirVerified/FunsExternal.lean" "${LEAN_DIR}/QsagWhirVerified/TypesExternal.lean"; do
+  if [[ -e "${external}" ]]; then
+    echo "ERROR: extraction produced an external-model dependency: ${external}" >&2
+    exit 1
+  fi
+done
+
+# Normalize generated headers for Lean 4.35's module system without file-wide @[expose].
+python3 - "${LEAN_DIR}/QsagWhirVerified" <<'PY_HEADERS'
+from pathlib import Path
+import re
+import sys
+
+for name in ("Types.lean", "Funs.lean"):
+    path = Path(sys.argv[1]) / name
+    lines = path.read_text().splitlines(keepends=True)
+    boundary = next((i for i, line in enumerate(lines)
+                     if line.startswith(("open ", "namespace ", "set_option "))), None)
+    if boundary is None:
+        raise SystemExit(f"Cannot identify generated header in {path}")
+    header, body = lines[:boundary], lines[boundary:]
+    imports = []
+    comments = []
+    for line in header:
+        stripped = line.strip()
+        match = re.fullmatch(r"(?:public\s+)?import\s+(.+)", stripped)
+        if match:
+            if match[1] not in imports:
+                imports.append(match[1])
+        elif stripped in ("module", "@[expose] public section", "public section"):
+            continue
+        elif not stripped or stripped.startswith("--"):
+            comments.append(line)
+        else:
+            raise SystemExit(f"Unexpected generated header in {path}: {stripped}")
+    if not imports:
+        raise SystemExit(f"Missing generated imports in {path}")
+    path.write_text("".join(comments) + "module\n"
+                    + "".join(f"public import {module}\n" for module in imports)
+                    + "public section\n" + "".join(body))
+PY_HEADERS
+
+echo "[4/5] Verifying Aeneas prelude, extracted MIR functions, and refinement theorems via Lake..."
+(
+  cd "${LEAN_DIR}"
+  lake build --wfail
+  lake exe audit-whir-mir-axioms
+  test -s lake-manifest.json
+)
+
+echo "[5/5] Checking production linkage, hierarchical composition, and lint policy..."
+(
+  cd "${SCRIPT_DIR}/.."
+  cargo test -p qsag-agg --lib extracted_affine_core_matches_tower_arithmetic
+  cargo test -p qsag-agg --lib pcs::affine::tests
+  cargo test -p qsag-agg --lib recursive::tests
+  cargo clippy -p qsag-agg --all-targets -- -D warnings
+  cargo check -p qsag-agg --no-default-features
+)
+
+echo "SUCCESS: Charon + Aeneas extraction and Lean 4 machine-checked proofs verified cleanly."
