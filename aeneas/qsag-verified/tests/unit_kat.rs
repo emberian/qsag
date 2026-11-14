@@ -666,3 +666,672 @@ fn test_dkg_frobenius_booleanity_and_crash_retry_epoch_latch() {
             requested_epoch: 0,
             key_epoch_id: key_id,
         },
+    )
+    .unwrap();
+    assert_eq!(adv0, 0);
+    assert_eq!(st_fresh_adv.next_epoch(), 1);
+    assert!(matches!(st_fresh_adv.last_bound(), LastBoundEpoch::Unset));
+    assert_eq!(st_fresh_adv.max_epoch(), 2);
+    assert_eq!(st_fresh_adv.key_epoch_id(), key_id);
+
+    // Advancing epoch 1 seals the bound epoch 0 against subsequent retries.
+    let (st_after_adv, adv1) = epoch_latch_advance(
+        bound_epoch0(),
+        EpochRequest {
+            requested_epoch: 1,
+            key_epoch_id: key_id,
+        },
+    )
+    .unwrap();
+    assert_eq!(adv1, 1);
+    assert_eq!(st_after_adv.next_epoch(), 2);
+    assert!(matches!(st_after_adv.last_bound(), LastBoundEpoch::Unset));
+    assert_eq!(st_after_adv.max_epoch(), 2);
+    assert_eq!(st_after_adv.key_epoch_id(), key_id);
+    assert_eq!(
+        st_after_adv.acquire_or_retry(req0).err(),
+        Some(EpochLatchError::NonSequentialEpoch {
+            expected: 2,
+            requested: 0,
+        })
+    );
+
+    // Key binding and sequential checks apply with either retry-slot state.
+    for bound in [false, true] {
+        let fixture = || {
+            if bound {
+                bound_epoch0()
+            } else {
+                epoch_latch_advance(EpochLatch::new(2, key_id), EpochRequest {
+                    requested_epoch: 0, key_epoch_id: key_id,
+                }).unwrap().0
+            }
+        };
+        assert_eq!(
+            epoch_latch_advance(fixture(), EpochRequest {
+                requested_epoch: 1, key_epoch_id: bad_key,
+            }).err(),
+            Some(EpochLatchError::KeyBindingMismatch)
+        );
+        for requested_epoch in [0, 2] {
+            assert_eq!(
+                epoch_latch_advance(fixture(), EpochRequest {
+                    requested_epoch, key_epoch_id: key_id,
+                }).err(),
+                Some(EpochLatchError::NonSequentialEpoch { expected: 1, requested: requested_epoch })
+            );
+        }
+    }
+
+
+}
+
+
+#[test]
+fn test_rss_cut_session_anti_dfa_phase_barrier() {
+    use qsag_verified::{
+        compute_rss_mask_commitment, RssCutError, RssCutGateSession, RssCutPhase, RssCutStepInput,
+        RssCutStepOutput,
+    };
+
+    let sid = [0x41u8; 32];
+    let mask = [0x7Fu8; 32];
+    let salt = [0x99u8; 32];
+    let cand = [0xEEu8; 32];
+    let commit = compute_rss_mask_commitment(&sid, 1, &mask, &salt);
+
+    // 1. Honest Round1 -> Round2 -> Round3 -> CutOpened flow
+    let s0 = RssCutGateSession::new_round1_committed(sid, commit);
+    assert!(matches!(s0.phase(), RssCutPhase::Round1MaskCommitted));
+    assert!(!s0.is_poisoned());
+    let (s1, r2) = s0.advance_round2_chi(sid, commit, cand);
+    assert_eq!(r2, Ok(()));
+    assert!(matches!(s1.phase(), RssCutPhase::Round2ChiEvaluated));
+    assert!(!s1.is_consistency_verified());
+
+    let (s2, r3) = s1.advance_round3_verify_consistency(sid, 0, 0, 0);
+    assert_eq!(r3, Ok(()));
+    assert!(matches!(s2.phase(), RssCutPhase::Round3ConsistencyVerified));
+    assert!(s2.is_consistency_verified());
+
+    let (s3, opened) = s2.open_verified_cut(sid);
+    assert_eq!(opened, Ok(cand));
+    assert!(matches!(s3.phase(), RssCutPhase::CutOpened));
+
+    // Second opening attempt MUST fail and poison!
+    let (s4, replay) = s3.open_verified_cut(sid);
+    assert_eq!(replay, Err(RssCutError::InvalidPhaseTransition));
+    assert!(s4.is_poisoned());
+
+    // 2. Skipping Round 3 consistency check MUST poison and never release cut!
+    let s_skip0 = RssCutGateSession::new_round1_committed(sid, commit);
+    let (s_skip1, _) = s_skip0.advance_round2_chi(sid, commit, cand);
+    let (s_skip2, skip_res) = s_skip1.open_verified_cut(sid);
+    assert_eq!(skip_res, Err(RssCutError::InvalidPhaseTransition));
+    assert!(s_skip2.is_poisoned());
+
+    // 3. Non-zero SPDZ MAC or BBCGGI19 dZK residual MUST poison and permanently block release!
+    let s_bad0 = RssCutGateSession::new_round1_committed(sid, commit);
+    let (s_bad1, _) = s_bad0.advance_round2_chi(sid, commit, cand);
+    let (s_bad2, bad_r3) = s_bad1.advance_round3_verify_consistency(sid, 0, 0, 1);
+    assert_eq!(bad_r3, Err(RssCutError::ConsistencyCheckFailed));
+    assert!(s_bad2.is_poisoned());
+    let (s_bad3, after_poison) = s_bad2.open_verified_cut(sid);
+    assert_eq!(after_poison, Err(RssCutError::SessionPoisoned));
+    assert!(s_bad3.is_poisoned());
+
+    // 4. Unified step() entry point parity
+    let u0 = RssCutGateSession::new_round1_committed(sid, commit);
+    let (u1, o1) = u0.step(RssCutStepInput::AdvanceRound2Chi {
+        req_session_id: sid,
+        recomputed_mask_commitment: commit,
+        chi_cut_candidate: cand,
+    });
+    assert!(matches!(o1, Ok(RssCutStepOutput::Round2Ready)));
+    let (u2, o2) = u1.step(RssCutStepInput::AdvanceRound3VerifyConsistency {
+        req_session_id: sid,
+        spdz_mac_residual_lo: 0,
+        spdz_mac_residual_hi: 0,
+        bbcggi_dzk_residual: 0,
+    });
+    assert!(matches!(o2, Ok(RssCutStepOutput::Round3Verified)));
+    let (_u3, o3) = u2.step(RssCutStepInput::OpenVerifiedCut {
+        req_session_id: sid,
+    });
+    assert!(matches!(o3, Ok(RssCutStepOutput::CutReleased(c)) if c == cand));
+}
+
+#[test]
+fn test_fts_spn_deferred_mac_and_single_use_wots_cs_guard() {
+    use qsag_verified::{
+        wots_cs_verify_68_array, wots_cs_verify_68_w5_sum136, FtsDeferredMacSession, FtsEpochGuard,
+        FtsGuardError, FTS_SPN_REQUIRED_ROUNDS,
+    };
+
+    let key_id = [0x11u8; 32];
+    let msg_a = [0x22u8; 32];
+    let msg_b = [0x33u8; 32];
+
+    // 1. 1-Use WOTS+CS Epoch Guard (P0-04): 0 -> 1 succeeds once, 2nd use rejected & poisoned!
+    let g0 = FtsEpochGuard::new_unused(key_id, 3, 16);
+    assert_eq!(g0.used(), 0);
+    assert!(!g0.poisoned());
+    let (g1, p1) = g0.consume_epoch_once(key_id, 3, msg_a);
+    let permit = p1.expect("first epoch burn must succeed");
+    assert_eq!(permit.authorized_epoch, 3);
+    assert_eq!(g1.used(), 1);
+    let (g2, p2) = g1.consume_epoch_once(key_id, 3, msg_b);
+    assert_eq!(p2.err(), Some(FtsGuardError::EpochAlreadyUsed));
+    assert!(g2.poisoned());
+    let (_g3, p3) = g2.consume_epoch_once(key_id, 3, msg_a);
+    assert_eq!(p3.err(), Some(FtsGuardError::GuardPoisoned));
+
+    // 2. 68-digit w = 5 constant-sum S = 136 verifier
+    let balanced = [2u8; 68]; // 68 * 2 = 136, every digit < 5
+    assert!(wots_cs_verify_68_array(&balanced));
+    assert!(!wots_cs_verify_68_w5_sum136(&balanced[..67]));
+    let mut wrong_sum = balanced;
+    wrong_sum[0] = 3;
+    assert!(!wots_cs_verify_68_array(&wrong_sum));
+    let mut out_of_range = balanced;
+    out_of_range[0] = 5;
+    out_of_range[1] = 0;
+    out_of_range[2] = 1; // 5 + 0 + 1 + 65*2 = 136, but out_of_range[0] == 5 >= w!
+    assert!(!wots_cs_verify_68_array(&out_of_range));
+
+    // 3. 48-Round SPN Deferred-MAC Session (P0-03)
+    let sid = [0x55u8; 32];
+    let out_lo = 0xDEAD_BEEF_CAFE_BABE_1122_3344_5566_7788u128;
+    let out_hi = 0x0102_0304_0506_0708_090A_0B0C_0D0E_0F10u128;
+
+    // Attempting release BEFORE intermediate MAC check MUST quarantine and fail!
+    let unv0 = FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
+    let (unv1, rel_unv) = unv0.release_spn_output(sid, &balanced);
+    assert_eq!(rel_unv, Err(FtsGuardError::IntermediateMacNotVerified));
+    assert!(unv1.is_quarantined());
+
+    // Non-zero intermediate MAC residual MUST quarantine and block release!
+    let bad0 = FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
+    let (bad1, mac_err) = bad0.verify_intermediate_mac(sid, 0, 1);
+    assert_eq!(mac_err, Err(FtsGuardError::IntermediateMacQuarantined));
+    assert!(bad1.is_quarantined());
+    let (_bad2, rel_after_quarantine) = bad1.release_spn_output(sid, &balanced);
+    assert_eq!(rel_after_quarantine, Err(FtsGuardError::SessionQuarantined));
+
+    // Honest 48-round + zero MAC residual + valid 68-digit sum=136 releases once!
+    let ok0 = FtsDeferredMacSession::new_spn48_evaluated(sid, FTS_SPN_REQUIRED_ROUNDS, out_lo, out_hi);
+    let (ok1, mac_ok) = ok0.verify_intermediate_mac(sid, 0, 0);
+    assert_eq!(mac_ok, Ok(()));
+    let (ok2, released) = ok1.release_spn_output(sid, &balanced);
+    assert_eq!(released, Ok((out_lo, out_hi)));
+    let (ok3, second_rel) = ok2.release_spn_output(sid, &balanced);
+    assert_eq!(second_rel, Err(FtsGuardError::OutputAlreadyReleased));
+    assert!(ok3.is_quarantined());
+}
+
+#[test]
+fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
+    use qsag_verified::{
+        check_hybrid_domain_framing, decode_intent_128, derive_hybrid_transcript_digest,
+        encode_intent_128, CanonicalIntent128, HybridRoleTag, IntentAddressVersion,
+        IntentIdentityKind, IntentSuiteTag, PolicyAddrError, StatefulVelocityGuard,
+        VelocitySpendRequest, SUITE_HYBRID_ED25519_MLDSA65,
+    };
+
+    let pol_pin = [0xAAu8; 32];
+    let auth_pin = [0xBBu8; 32];
+    let g0 = StatefulVelocityGuard::new_window(7, 1_000, pol_pin, auth_pin);
+
+    let (g1, a1) = g0.authorize_spend(VelocitySpendRequest {
+        window_id: 7,
+        nonce: 1,
+        amount_units: 600,
+        policy_pin: pol_pin,
+        authority_pin: auth_pin,
+    });
+    assert_eq!(a1, Ok(600));
+    assert_eq!(g1.spent_units(), 600);
+
+    // Nonce replay rejected without mutating spent_units
+    let (g1b, replay_err) = g1.authorize_spend(VelocitySpendRequest {
+        window_id: 7,
+        nonce: 1,
+        amount_units: 100,
+        policy_pin: pol_pin,
+        authority_pin: auth_pin,
+    });
+    assert_eq!(replay_err, Err(PolicyAddrError::NonMonotonicNonce));
+    assert_eq!(g1b.spent_units(), 600);
+
+    // Cap exceeded rejected
+    let (g1c, cap_err) = g1b.authorize_spend(VelocitySpendRequest {
+        window_id: 7,
+        nonce: 2,
+        amount_units: 401,
+        policy_pin: pol_pin,
+        authority_pin: auth_pin,
+    });
+    assert_eq!(cap_err, Err(PolicyAddrError::VelocityCapExceeded));
+    assert_eq!(g1c.spent_units(), 600);
+
+    // u128::MAX wraparound attempt rejected cleanly!
+    let (g1d, ovf_err) = g1c.authorize_spend(VelocitySpendRequest {
+        window_id: 7,
+        nonce: 2,
+        amount_units: u128::MAX - 500,
+        policy_pin: pol_pin,
+        authority_pin: auth_pin,
+    });
+    assert_eq!(ovf_err, Err(PolicyAddrError::VelocityArithmeticOverflow));
+    assert_eq!(g1d.spent_units(), 600);
+
+    // Exact remaining cap succeeds!
+    let (g2, a2) = g1d.authorize_spend(VelocitySpendRequest {
+        window_id: 7,
+        nonce: 2,
+        amount_units: 400,
+        policy_pin: pol_pin,
+        authority_pin: auth_pin,
+    });
+    assert_eq!(a2, Ok(400));
+    assert_eq!(g2.spent_units(), 1_000);
+
+    // Forward window rotation succeeds; backward/same window rejected
+    let (g2b, bad_rot) = g2.rotate_window(7, pol_pin, auth_pin);
+    assert_eq!(bad_rot, Err(PolicyAddrError::InvalidWindowRotation));
+    let (g3, ok_rot) = g2b.rotate_window(8, pol_pin, auth_pin);
+    assert_eq!(ok_rot, Ok(()));
+    assert_eq!(g3.window_id(), 8);
+    assert_eq!(g3.spent_units(), 0);
+
+    // Canonical 128-byte TransactionIntent roundtrip & tag validation
+    let intent = CanonicalIntent128 {
+        suite_tag: IntentSuiteTag::HybridEd25519MlDsa65,
+        address_version: IntentAddressVersion::V2,
+        identity_kind: IntentIdentityKind::ThresholdCommittee,
+        chain_id: 0x0102_0304_0506_0708,
+        nonce: 42,
+        timestamp_secs: 1_794_614_400,
+        amount_units: (0x1234_5678_9ABCu128 << 64) | 0xDEF0_1122_3344_5566u128,
+        rolling_window_spent: 999_999,
+        recipient_commitment: [0xCDu8; 32],
+        payload_digest: [0xEFu8; 32],
+    };
+    let encoded = encode_intent_128(&intent);
+    let decoded = decode_intent_128(&encoded).expect("canonical intent must decode");
+    assert_eq!(decoded.suite_tag, intent.suite_tag);
+    assert_eq!(decoded.address_version, intent.address_version);
+    assert_eq!(decoded.identity_kind, intent.identity_kind);
+    assert_eq!(decoded.chain_id, intent.chain_id);
+    assert_eq!(decoded.nonce, intent.nonce);
+    assert_eq!(decoded.timestamp_secs, intent.timestamp_secs);
+    assert_eq!(decoded.amount_units, intent.amount_units);
+    assert_eq!(decoded.rolling_window_spent, intent.rolling_window_spent);
+    assert_eq!(decoded.recipient_commitment, intent.recipient_commitment);
+    assert_eq!(decoded.payload_digest, intent.payload_digest);
+    assert_eq!(encode_intent_128(&decoded), encoded);
+
+    let mut bad_magic = encoded;
+    bad_magic[0] ^= 0x01;
+    assert!(decode_intent_128(&bad_magic).is_none());
+    let mut bad_suite = encoded;
+    bad_suite[4] = 0xFF;
+    assert!(decode_intent_128(&bad_suite).is_none());
+    let mut bad_ver = encoded;
+    bad_ver[6] = 0;
+    assert!(decode_intent_128(&bad_ver).is_none());
+    let mut bad_id = encoded;
+    bad_id[7] = 9;
+    assert!(decode_intent_128(&bad_id).is_none());
+
+    // Hybrid domain framing role separation
+    let magic = b"QSAG.HYBRID.V2";
+    let id_c = [0x77u8; 32];
+    let msg_d = [0x88u8; 32];
+    assert!(check_hybrid_domain_framing(
+        magic,
+        0x01,
+        HybridRoleTag::Classical,
+        SUITE_HYBRID_ED25519_MLDSA65,
+        &id_c,
+        &id_c,
+    ));
+    // Classical role byte MUST NOT validate as PostQuantum!
+    assert!(!check_hybrid_domain_framing(
+        magic,
+        0x01,
+        HybridRoleTag::PostQuantum,
+        SUITE_HYBRID_ED25519_MLDSA65,
+        &id_c,
+        &id_c,
+    ));
+    // Single-primitive suite code MUST NOT validate in hybrid framing!
+    assert!(!check_hybrid_domain_framing(
+        magic,
+        0x02,
+        HybridRoleTag::PostQuantum,
+        0x0302,
+        &id_c,
+        &id_c,
+    ));
+    let d_cls =
+        derive_hybrid_transcript_digest(HybridRoleTag::Classical, SUITE_HYBRID_ED25519_MLDSA65, &id_c, &msg_d)
+            .unwrap();
+    let d_pq =
+        derive_hybrid_transcript_digest(HybridRoleTag::PostQuantum, SUITE_HYBRID_ED25519_MLDSA65, &id_c, &msg_d)
+            .unwrap();
+    assert_ne!(d_cls, d_pq);
+}
+
+#[test]
+fn test_mldsa_release_gate_toprf_majority_and_hd_zero_test() {
+    use qsag_verified::{
+        check_mldsa44_norm_bounds, check_mldsa65_norm_bounds, mldsa44_sample_eta2_nibble_mod_q,
+        toprf_majority_of_3_goldilocks, CredHdGuardError, HdCommittedZeroTest, HdZeroTestPhase,
+        MlDsaBarrierChecks, MlDsaReleaseGate, MLDSA44_R0_NORM_BOUND, MLDSA44_Z_NORM_BOUND,
+        MLDSA65_R0_NORM_BOUND, MLDSA65_Z_NORM_BOUND, MLDSA_Q,
+    };
+
+    // 0. FIPS 204 ML-DSA-44 eta=2 uniform nibble rejection (b < 15 -> 2 - (b mod 5) mod q)
+    let mut counts = [0usize; 5]; // [0, 1, 2, q-2, q-1]
+    for b in 0u8..16 {
+        if b == 15 {
+            assert_eq!(mldsa44_sample_eta2_nibble_mod_q(b), None);
+        } else {
+            let v = mldsa44_sample_eta2_nibble_mod_q(b).unwrap();
+            match v {
+                0 => counts[0] += 1,
+                1 => counts[1] += 1,
+                2 => counts[2] += 1,
+                x if x == MLDSA_Q - 2 => counts[3] += 1,
+                x if x == MLDSA_Q - 1 => counts[4] += 1,
+                other => panic!("unexpected eta=2 residue {other}"),
+            }
+        }
+    }
+    assert_eq!(counts, [3, 3, 3, 3, 3]);
+    assert_eq!(
+        check_mldsa44_norm_bounds(MLDSA44_Z_NORM_BOUND - 1, MLDSA44_R0_NORM_BOUND - 1),
+        (true, true)
+    );
+    assert_eq!(
+        check_mldsa44_norm_bounds(MLDSA44_Z_NORM_BOUND, MLDSA44_R0_NORM_BOUND - 1),
+        (false, true)
+    );
+
+    // 1. Threshold ML-DSA Rejection-Barrier Release Gate (P0-06)
+    assert_eq!(
+        check_mldsa65_norm_bounds(MLDSA65_Z_NORM_BOUND - 1, MLDSA65_R0_NORM_BOUND - 1),
+        (true, true)
+    );
+    assert_eq!(
+        check_mldsa65_norm_bounds(MLDSA65_Z_NORM_BOUND, MLDSA65_R0_NORM_BOUND - 1),
+        (false, true)
+    );
+
+    let sid = [0x9Au8; 32];
+    let secret_z = [0x5Cu8; 32];
+
+    // Any single false barrier flag MUST block z_share release and abort!
+    let gate_rej = MlDsaReleaseGate::new_sealed(sid, 4, secret_z);
+    let (gate_rej1, res_rej) = gate_rej.try_release_z_share(MlDsaBarrierChecks {
+        req_session_id: sid,
+        req_attempt: 4,
+        z_norm_ok: true,
+        r0_norm_ok: false,
+        w1_match: true,
+        u_com_bound: true,
+    });
+    assert_eq!(res_rej, Err(CredHdGuardError::RejectionSamplingBarrierFailed));
+    assert!(gate_rej1.aborted());
+    let (_gate_rej2, res_after_abort) = gate_rej1.try_release_z_share(MlDsaBarrierChecks {
+        req_session_id: sid,
+        req_attempt: 4,
+        z_norm_ok: true,
+        r0_norm_ok: true,
+        w1_match: true,
+        u_com_bound: true,
+    });
+    assert_eq!(res_after_abort, Err(CredHdGuardError::GateAbortedOrReleased));
+
+    // All 4 barrier predicates true -> releases once, then blocks replay!
+    let gate_ok = MlDsaReleaseGate::new_sealed(sid, 4, secret_z);
+    let (gate_ok1, res_ok) = gate_ok.try_release_z_share(MlDsaBarrierChecks {
+        req_session_id: sid,
+        req_attempt: 4,
+        z_norm_ok: true,
+        r0_norm_ok: true,
+        w1_match: true,
+        u_com_bound: true,
+    });
+    assert_eq!(res_ok, Ok(secret_z));
+    assert!(gate_ok1.released());
+
+    // 2. 2-of-5 Poseidon2 TOPRF 2-of-3 Goldilocks Majority + Cheater Pinpointing
+    let v = GOLDILOCKS_PRIME - 7;
+    assert_eq!(toprf_majority_of_3_goldilocks(v, v, v), Some((v, None)));
+    assert_eq!(toprf_majority_of_3_goldilocks(99, v, v), Some((v, Some(0))));
+    assert_eq!(toprf_majority_of_3_goldilocks(v, u64::MAX, v), Some((v, Some(1))));
+    assert_eq!(
+        toprf_majority_of_3_goldilocks(v, v, GOLDILOCKS_PRIME),
+        Some((v, Some(2)))
+    );
+    assert_eq!(toprf_majority_of_3_goldilocks(1, 2, 3), None);
+    // Unanimous non-canonical >= GOLDILOCKS_PRIME MUST reject!
+    assert_eq!(
+        toprf_majority_of_3_goldilocks(GOLDILOCKS_PRIME, GOLDILOCKS_PRIME, GOLDILOCKS_PRIME),
+        None
+    );
+
+    // 3. qsag-hd Committed Zero-Test Gate (P0-10)
+    let q: u32 = 8_380_417;
+    let local_res: u32 = 1_234_567;
+    let peer_res: u32 = q - local_res;
+    let peer_com = [0xE1u8; 32];
+
+    // Premature local opening BEFORE freezing peer commitment MUST quarantine!
+    let hd_premature = HdCommittedZeroTest::new_awaiting_peer_commit(sid, local_res, q);
+    let (hd_q, pre_err) = hd_premature.open_local_residual(sid);
+    assert_eq!(pre_err, Err(CredHdGuardError::InvalidHdPhaseTransition));
+    assert!(hd_q.family_quarantined());
+
+    // Non-zero sum mismatch MUST quarantine!
+    let hd_bad0 = HdCommittedZeroTest::new_awaiting_peer_commit(sid, local_res, q);
+    let (hd_bad1, _) = hd_bad0.freeze_peer_commitment(sid, peer_com);
+    let (hd_bad2, opened_local) = hd_bad1.open_local_residual(sid);
+    assert_eq!(opened_local, Ok(local_res));
+    let (hd_bad3, zerr) = hd_bad2.verify_peer_opening(sid, peer_com, peer_res - 1);
+    assert_eq!(zerr, Err(CredHdGuardError::HdZeroTestMismatchQuarantined));
+    assert!(hd_bad3.family_quarantined());
+    assert!(matches!(hd_bad3.phase(), HdZeroTestPhase::FamilyQuarantined));
+
+    // Honest freeze -> open -> verify_peer_opening succeeds when (local + peer) % q == 0!
+    let hd_ok0 = HdCommittedZeroTest::new_awaiting_peer_commit(sid, local_res, q);
+    let (hd_ok1, f_ok) = hd_ok0.freeze_peer_commitment(sid, peer_com);
+    assert_eq!(f_ok, Ok(()));
+    let (hd_ok2, l_ok) = hd_ok1.open_local_residual(sid);
+    assert_eq!(l_ok, Ok(local_res));
+    let (hd_ok3, v_ok) = hd_ok2.verify_peer_opening(sid, peer_com, peer_res);
+    assert_eq!(v_ok, Ok(()));
+    assert!(matches!(hd_ok3.phase(), HdZeroTestPhase::VerifiedZero));
+    assert!(!hd_ok3.family_quarantined());
+}
+
+#[test]
+fn test_pants_and_quorum_guards_kat_and_adversarial() {
+    use qsag_verified::{
+        verified_wotsc256_extract_digits,
+        verified_wotsc256_verify_sum, wotsc256_extract_digit,
+        PantsGuardError, RssLatchStepInput, RssLatchStepOutput,
+        RssOpenPermit, VerifiedRssPoisonLatch, VerifiedWaistbandRootGuard,
+        VerifiedWotsC256Guard, WaistbandDerivationRequest, WOTSC256_BASE_W, WOTSC256_CHAINS,
+        WOTSC256_TARGET_SUM,
+    };
+
+    // =========================================================================
+    // 1. VerifiedBeltQuorumGuard: 2*q > n + f + global-liveness + jump + poison
+    // =========================================================================
+    // 2. VerifiedWotsC256Guard: w = 4, chains = 128, target_sum = 192
+    // =========================================================================
+    assert_eq!(WOTSC256_BASE_W, 4);
+    assert_eq!(WOTSC256_CHAINS, 128);
+    assert_eq!(WOTSC256_TARGET_SUM, 192);
+
+    // 0x99 = 0b10_01_10_01 -> base-4 digits [2, 1, 2, 1] per byte -> sum = 6 * 32 = 192!
+    let balanced_digest = [0x99u8; 32];
+    assert_eq!(wotsc256_extract_digit(&balanced_digest, 0), 2);
+    assert_eq!(wotsc256_extract_digit(&balanced_digest, 1), 1);
+    assert_eq!(wotsc256_extract_digit(&balanced_digest, 2), 2);
+    assert_eq!(wotsc256_extract_digit(&balanced_digest, 3), 1);
+    assert!(verified_wotsc256_verify_sum(&balanced_digest));
+
+    let digits = verified_wotsc256_extract_digits(&balanced_digest);
+    let manual_sum: u32 = digits.iter().map(|&d| u32::from(d)).sum();
+    assert_eq!(manual_sum, 192);
+
+    let wg = match VerifiedWotsC256Guard::from_digest_verified(balanced_digest) {
+        Ok(g) => g,
+        Err(e) => panic!("balanced 192-sum digest rejected: {e:?}"),
+    };
+    assert_eq!(wg.validated_digest(), balanced_digest);
+    assert_eq!(wg.verified_sum(), 192);
+    assert_eq!(wg.digits(), digits);
+    assert_eq!(wg.digit_at(0), Some(2));
+    assert_eq!(wg.digit_at(127), Some(1));
+    assert_eq!(wg.digit_at(128), None);
+
+    // Perturbing a single digit changes sum != 192 -> REJECT!
+    let mut bad_digest = balanced_digest;
+    bad_digest[0] = 0x98; // [2, 1, 2, 0] -> sum = 191
+    assert!(!verified_wotsc256_verify_sum(&bad_digest));
+    assert!(!verified_wotsc256_verify_sum(&[0x00u8; 32]));
+    assert!(!verified_wotsc256_verify_sum(&[0xFFu8; 32]));
+    match VerifiedWotsC256Guard::from_digest_verified(bad_digest) {
+        Ok(_) => panic!("sum=191 digest must be rejected"),
+        Err(e) => assert_eq!(e, PantsGuardError::InvalidWotsC256TargetSum),
+    }
+
+    // =========================================================================
+    // 3. VerifiedRssPoisonLatch: sticky poison BEFORE clearing pending_relations
+    // =========================================================================
+    let rl0 = VerifiedRssPoisonLatch::new_clean();
+    assert_eq!(rl0.pending_relations(), 0);
+    assert!(!rl0.is_unverified());
+    assert!(!rl0.is_poisoned());
+
+    // Staging relations marks unverified = true and blocks premature authorize_open()
+    let (rl1, stg_ok) = rl0.stage_relations(64);
+    assert_eq!(stg_ok, Ok(64));
+    assert!(rl1.is_unverified());
+    let (rl1b, early_open) = rl1.authorize_open();
+    assert_eq!(early_open, Err(PantsGuardError::RssOpenBeforeCheck));
+
+    // Failed check (`check_ok = false`) sets `poisoned = true` BEFORE clearing `pending_relations = 0`!
+    let (rl_failed, chk_err) = rl1b.record_check_result(false);
+    assert_eq!(chk_err, Err(PantsGuardError::RssVerificationCheckFailed));
+    assert!(rl_failed.is_poisoned());
+    assert!(rl_failed.is_unverified());
+    assert_eq!(rl_failed.pending_relations(), 0);
+
+    // Adversarial second check `record_check_result(true)` on `pending_relations == 0` MUST stay poisoned!
+    let (rl_retry_true, retry_chk) =
+        rl_failed.step(RssLatchStepInput::RecordCheckResult { check_ok: true });
+    assert_eq!(retry_chk, Err(PantsGuardError::RssEnginePoisoned));
+    assert!(rl_retry_true.is_poisoned());
+    let (_rl_final, open_after_fail) = rl_retry_true.step(RssLatchStepInput::AuthorizeOpen);
+    assert_eq!(open_after_fail, Err(PantsGuardError::RssEnginePoisoned));
+
+    // Honest flow: stage -> record_check_result(true) -> authorize_open() == Ok
+    let (h1, _) = VerifiedRssPoisonLatch::new_clean().stage_relations(32);
+    let (h2, hchk) = h1.record_check_result(true);
+    assert_eq!(hchk, Ok(()));
+    let (h3, hopen) = h2.authorize_open();
+    assert_eq!(hopen, Ok(RssOpenPermit { verified_clean: true }));
+    let (_h4, hstep_open) = h3.step(RssLatchStepInput::AuthorizeOpen);
+    assert_eq!(
+        hstep_open,
+        Ok(RssLatchStepOutput::OpenAuthorized(RssOpenPermit {
+            verified_clean: true
+        }))
+    );
+
+    // =========================================================================
+    // 4. VerifiedWaistbandRootGuard: pk/params/child_root + first-signed lock
+    // =========================================================================
+    let pk_tag = [0x11u8; 32];
+    let params_tag = [0x22u8; 32];
+    let child_root = [0x33u8; 32];
+    let cw_tag_1 = [0x44u8; 32];
+    let cw_tag_2 = [0x55u8; 32];
+
+    let wb0 = VerifiedWaistbandRootGuard::new_enrolled(pk_tag, params_tag, 3, 77, 5, child_root);
+    assert!(!wb0.has_locked_codeword());
+    assert!(!wb0.is_poisoned());
+    assert_eq!(wb0.expected_static_child_root(), child_root);
+
+    let honest_req = WaistbandDerivationRequest {
+        req_layer: 3,
+        req_tree: 77,
+        req_kp: 5,
+        cache_pk_tag: pk_tag,
+        cache_params_tag: params_tag,
+        recomputed_child_root: child_root,
+        candidate_ancestor_codeword_tag: cw_tag_1,
+    };
+
+    // Corrupted intermediate child root fails closed and poisons!
+    let mut bad_root_req = honest_req;
+    bad_root_req.recomputed_child_root[0] ^= 0xFF;
+    let (wb_bad, bad_res) = VerifiedWaistbandRootGuard::new_enrolled(
+        pk_tag,
+        params_tag,
+        3,
+        77,
+        5,
+        child_root,
+    )
+    .authorize_ancestor_derivation(bad_root_req);
+    assert_eq!(bad_res.err(), Some(PantsGuardError::WaistbandChildRootMismatch));
+    assert!(wb_bad.is_poisoned());
+
+    // Mismatched cache params tag fails closed and poisons!
+    let mut bad_params_req = honest_req;
+    bad_params_req.cache_params_tag[31] ^= 1;
+    let (wb_bad_p, bad_p_res) = VerifiedWaistbandRootGuard::new_enrolled(
+        pk_tag,
+        params_tag,
+        3,
+        77,
+        5,
+        child_root,
+    )
+    .authorize_ancestor_derivation(bad_params_req);
+    assert_eq!(
+        bad_p_res.err(),
+        Some(PantsGuardError::WaistbandCacheParamsMismatch)
+    );
+    assert!(wb_bad_p.is_poisoned());
+
+    // Honest derivation locks codeword 1; idempotent replay succeeds; distinct codeword 2 fails closed!
+    let (wb1, ok1) = wb0.authorize_ancestor_derivation(honest_req);
+    let p1 = match ok1 {
+        Ok(p) => p,
+        Err(e) => panic!("honest waistband derivation failed: {e:?}"),
+    };
+    assert_eq!(p1.verified_child_root, child_root);
+    assert_eq!(p1.authorized_codeword_tag, cw_tag_1);
+    assert!(wb1.has_locked_codeword());
+    assert_eq!(wb1.locked_ancestor_codeword_tag(), cw_tag_1);
+
+    let (wb2, ok2) = wb1.authorize_ancestor_derivation(honest_req);
+    assert!(ok2.is_ok());
+
+    let mut second_cw_req = honest_req;
+    second_cw_req.candidate_ancestor_codeword_tag = cw_tag_2;
+    let (wb3, eqv_cw) = wb2.authorize_ancestor_derivation(second_cw_req);
+    assert_eq!(
+        eqv_cw.err(),
+        Some(PantsGuardError::WaistbandCodewordEquivocation)
+    );
+    assert!(wb3.is_poisoned());
+}
