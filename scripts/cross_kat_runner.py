@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """Live Lean/Rust KATs; Linux only. No checked-in golden answers or crate edits.
 
-Usage on hbox: SWARM_MEM_MAX=12G python3 scripts/cross_kat_runner.py --build
-Builds Main through an ephemeral Lake configuration because the repository's
-qsag-kat target still names KatGen. The resulting .lake/build/bin/qsag-kat is
-then executed twice and all 277 records compared against linked production Rust.
+Usage on hbox: SWARM_MEM_MAX=8G python3 scripts/cross_kat_runner.py --build
+Builds the canonical qsag-kat Lake target and executes its --cross-kat mode
+twice, comparing all 277 records against linked production Rust.
 
 Negative checks corrupt every result independently, remove/append records, and
 exercise WOTS+C rejection of digest mutations in both languages. These are
 comparator/behavior checks, not claims of production-source mutation coverage.
 Rust Ext4 and Merkle compression use qsag-agg (not present in qsag-core).
---isolate-agg-tests explicitly stages that crate without its trailing cfg(test)
-module; this can bypass unrelated unit-test syntax errors, but does not certify
-that the full crate builds. The default always builds the unmodified crate.
+--isolate-agg-modules explicitly compiles its unmodified field/sponge/sig/pcs
+modules under a minimal no_std facade; this bypasses unrelated crate-root errors
+and does not certify that the full crate builds. The default always builds the unmodified crate.
 Intermediate tower inverses use Tower128's subfield embedding, independently
 of Lean's recursive norm inversion. Zero inverse is normalized to zero.
 Temporary sources/build products are owned by this process and cleaned on exit.
@@ -72,23 +71,18 @@ EXPECTED = {"gold": 24, "ext2": 25, "ext4": 25, "tower": 60,
 
 
 def bounded(command, cwd, **kwargs):
-    return subprocess.run(["timeout", "--kill-after=10s", "600s", "swarm-build", *command],
+    wrapper = ["swarm-build"] if shutil.which("swarm-build") else []
+    return subprocess.run(["timeout", "--kill-after=10s", "600s", *wrapper, *command],
                           cwd=cwd, check=True, text=True,
-                          env={**os.environ, "SWARM_MEM_MAX": "12G", "CARGO_BUILD_JOBS": "2"},
+                          env={**os.environ,
+                               "SWARM_MEM_MAX": os.environ.get("SWARM_MEM_MAX", "8G"),
+                               "CARGO_BUILD_JOBS": os.environ.get("CARGO_BUILD_JOBS", "4")},
                           **kwargs)
 
 
 def build_lean(root):
-    # An alternate config avoids modifying the existing KatGen target. Keep it in
-    # lean/ so Lake resolves source files and the seeded .lake in the same place.
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", prefix="cross-kat-",
-                                     dir=root / "lean") as config:
-        config.write('name = "qsag"\nversion = "0.1.0"\n'
-                     '[[lean_lib]]\nname = "Qsag"\nglobs = ["Qsag", "Qsag.+"]\n'
-                     '[[lean_exe]]\nname = "qsag-kat"\nroot = "Main"\n')
-        config.flush()
-        bounded(["lake", "-f", config.name, "build", "--wfail", "qsag-kat"], root / "lean",
-                stdout=sys.stderr)
+    bounded(["lake", "build", "--wfail", "qsag-kat"], root / "lean",
+            stdout=sys.stderr)
 
 
 def parse_vectors(output):
@@ -144,8 +138,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', action='store_true', help='build Main as qsag-kat first')
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument('--isolate-agg-tests', action='store_true',
-                        help='stage production qsag-agg without its trailing unit-test module')
+    parser.add_argument('--isolate-agg-modules', action='store_true',
+                        help='compile unmodified agg primitive modules under a minimal no_std facade')
     args = parser.parse_args()
     if platform.system() != 'Linux':
         parser.error('run on hbox/Linux; Lean and Cargo builds are forbidden on macOS')
@@ -153,26 +147,30 @@ def main():
     if args.build:
         build_lean(root)
     exe = root / 'lean/.lake/build/bin/qsag-kat'
-    first = bounded([str(exe)], root, capture_output=True).stdout
+    first = bounded([str(exe), "--cross-kat"], root, capture_output=True).stdout
     rows = parse_vectors(first)
-    if first != bounded([str(exe)], root, capture_output=True).stdout:
+    if first != bounded([str(exe), "--cross-kat"], root, capture_output=True).stdout:
         raise ValueError('Lean output is nondeterministic')
     # Use on-disk temporary storage; never /dev/shm, even if TMPDIR points there.
     with tempfile.TemporaryDirectory(prefix='cross-kat-', dir=root / 'scripts') as tmp:
         work = Path(tmp)
         (work / 'src').mkdir()
         agg = root / 'crates/qsag-agg'
-        if args.isolate_agg_tests:
-            # Explicit opt-in for a malformed trailing cfg(test) module. All
-            # production source is copied byte-for-byte, never patched in place.
+        if args.isolate_agg_modules:
+            # Compile complete production modules, not reimplementations or
+            # extracted function bodies. Only the crate-root wiring is replaced.
             staged = work / 'agg'
             shutil.copytree(agg / 'src', staged / 'src')
             shutil.copytree(agg / 'examples', staged / 'examples')
             lib = (agg / 'src/lib.rs').read_text()
-            marker = '#[cfg(test)]\nmod tests {'
-            if lib.count(marker) != 1:
-                raise ValueError('cannot identify unique trailing agg test module')
-            (staged / 'src/lib.rs').write_text(lib.split(marker)[0])
+            error_type = re.search(r'pub enum HemAggError \{[^}]+\}', lib)
+            if error_type is None:
+                raise ValueError('cannot identify agg error type')
+            facade = ('#![no_std]\nextern crate alloc;\n'
+                      'pub mod field; pub mod sponge; pub mod sig; pub mod pcs;\n'
+                      '#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n' + error_type[0] +
+                      '\npub type AggError = HemAggError;\n')
+            (staged / 'src/lib.rs').write_text(facade)
             # Preserve the original manifest, resolving only workspace/path fields.
             manifest = (agg / 'Cargo.toml').read_text()
             workspace = tomllib.loads((root / 'Cargo.toml').read_text())['workspace']['package']
@@ -181,9 +179,10 @@ def main():
                                             f'{key} = {json.dumps(workspace[key])}')
             manifest = re.sub(r'path = "([^"]+)"',
                               lambda m: 'path = ' + json.dumps(str((agg / m[1]).resolve())), manifest)
+            manifest = manifest.replace('default = ["std"]', 'default = []')
             (staged / 'Cargo.toml').write_text(manifest)
             agg = staged
-            print('NOTE: excluding trailing qsag-agg unit tests in temporary copy', file=sys.stderr)
+            print('NOTE: using unmodified qsag-agg primitive modules with a temporary no_std facade', file=sys.stderr)
         deps = '\n'.join(f'{name} = {{ path = {json.dumps(str(agg if name == "qsag-agg" else root / "crates" / name))} }}'
                          for name in ['qsag-core', 'qsag-agg'])
         (work / 'Cargo.toml').write_text('[workspace]\n[package]\nname="cross-kat-driver"\n'
@@ -201,7 +200,7 @@ def main():
     print(json.dumps({'status': 'PASS', 'vectors': len(rows), 'coverage': EXPECTED,
                       'output_and_count_mutations_rejected': mutations,
                       'wotsc_invalid_digests_rejected': 3, 'lean_deterministic': True,
-                      'isolated_agg_tests': args.isolate_agg_tests}, sort_keys=True))
+                      'isolated_agg_modules': args.isolate_agg_modules}, sort_keys=True))
 
 
 if __name__ == '__main__':
