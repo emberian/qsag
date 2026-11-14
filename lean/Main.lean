@@ -1,7 +1,7 @@
 module
 /- Executable cross-language vectors. No golden answers or reimplemented primitives.
    Run scripts/cross_kat_runner.py --build on Linux; the existing KatGen target is preserved.
-   Wire format: JSON array of [request, result], numeric values are decimal strings,
+   Wire format: JSON Lines records [request, result], numeric values are decimal strings,
    byte strings are lowercase hex, field-extension limbs are c0.c0,c0.c1,c1.c0,c1.c1. -/
 public import Qsag.BinaryTower
 public import Qsag.Fips205
@@ -55,8 +55,10 @@ def run : IO Unit := do
       emit s!"shake {outLen} {hex msg}" (hex (shake256Xof outLen msg))
       for custom in [[],[0,255],seqBytes 140] do
         emit s!"cshake {outLen} {hex custom} {hex msg}" (hex (cshake256Xof outLen custom msg))
-  for n in [0,1,136,200] do
-    let st := xorRate136 zeroKState (seqBytes n)
+  for n in [0,1,0x8000000000000000,0xffffffffffffffe0] do
+    let word := fun i => UInt64.ofNat (if n == 0 then 0 else n+i)
+    let st : KState :=
+      ⟨word 0,word 1,word 2,word 3,word 4,word 5,word 6,word 7,word 8,word 9,word 10,word 11,word 12,word 13,word 14,word 15,word 16,word 17,word 18,word 19,word 20,word 21,word 22,word 23,word 24⟩
     let out := keccakF1600 st
     -- All 25 lanes, including capacity, serialized little endian.
     let lanes := [out.a0,out.a1,out.a2,out.a3,out.a4,out.a5,out.a6,out.a7,out.a8,out.a9,
@@ -74,7 +76,7 @@ def run : IO Unit := do
     for value in [0,27,255] do
       let msg := List.replicate n (UInt8.ofNat value)
       emit s!"wotsplus {n} {value}" (csv (fipsWotsDigits (2*n) msg))
-  for value in [0,27,28,255] do
+  for value in [0,26,27,255] do
     let msg := List.replicate 32 (UInt8.ofNat value)
     let digits := extractBaseWDigits 4 128 msg
     emit s!"wotsc {value}" (csv digits ++ ";" ++ toString (checkTargetSum 4 128 192 digits))

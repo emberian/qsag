@@ -247,7 +247,7 @@ impl LockedRecord {
 
     pub fn read(&self) -> io::Result<std::vec::Vec<u8>> {
         let _operation = self.operations.lock().map_err(|_| io::Error::other("record mutex poisoned"))?;
-        let result = (|| {
+        (|| {
             self.check_lock()?;
             regular_metadata(&self.path)?;
             let mut file = options()?.read(true).open(&self.path)?;
@@ -264,9 +264,7 @@ impl LockedRecord {
             if verify_path(&file, &self.path)?.len() != meta.len() { return Err(invalid()); }
             self.check_lock()?;
             Ok(core::mem::take(&mut bytes.0))
-        })();
-        if result.is_err() { self.poisoned.store(true, Ordering::SeqCst); }
-        result
+        })()
     }
 
     /// Atomically replace and sync the record. Any failure permanently poisons this handle;
@@ -314,6 +312,22 @@ mod tests {
     }
     impl Drop for Temp {
         fn drop(&mut self) { fs::remove_dir_all(&self.0).unwrap(); }
+    }
+
+    #[test]
+    fn legacy_acquire_read_before_initial_write_remains_supported() {
+        let temp = Temp::new();
+        let record = LockedRecord::acquire(temp.record()).unwrap();
+        assert!(record.is_fresh());
+        assert_eq!(record.read().unwrap_err().kind(), io::ErrorKind::NotFound);
+        record.replace(b"genesis").unwrap();
+        assert_eq!(record.read().unwrap(), b"genesis");
+        // A damaged inactive slot can be replaced after the higher-level ledger
+        // authenticates its surviving slot and external checkpoint.
+        fs::write(temp.record(), b"torn").unwrap();
+        assert!(record.read().is_err());
+        record.replace(b"recovered").unwrap();
+        assert_eq!(record.read().unwrap(), b"recovered");
     }
 
     #[test]

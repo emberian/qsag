@@ -10,6 +10,9 @@ Negative checks corrupt every result independently, remove/append records, and
 exercise WOTS+C rejection of digest mutations in both languages. These are
 comparator/behavior checks, not claims of production-source mutation coverage.
 Rust Ext4 and Merkle compression use qsag-agg (not present in qsag-core).
+--isolate-agg-tests explicitly stages that crate without its trailing cfg(test)
+module; this can bypass unrelated unit-test syntax errors, but does not certify
+that the full crate builds. The default always builds the unmodified crate.
 Intermediate tower inverses use Tower128's subfield embedding, independently
 of Lean's recursive norm inversion. Zero inverse is normalized to zero.
 Temporary sources/build products are owned by this process and cleaned on exit.
@@ -20,9 +23,12 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 
 RUST = r'''
 use std::io::{self, BufRead};
@@ -47,7 +53,7 @@ fn eval(a:&[&str])->String{
    let z=match a[1]{"mul"=>tower_mul_bits(k,x,y),"inv"=>Tower128(x).ct_inv().0,_=>panic!()};z.to_string()},
   "shake"=>hex(&shake256_xof(a[1].parse().unwrap(),&bytes(a[2]))),
   "cshake"=>hex(&cshake256_xof(a[1].parse().unwrap(),&bytes(a[2]),&bytes(a[3]))),
-  "keccak"=>{let n:usize=a[1].parse().unwrap();let mut s=[0u64;25];for i in 0..n.min(136){s[i/8]^=((i%256) as u64)<<(8*(i%8));}keccak_f1600(&mut s);csv(s)},
+  "keccak"=>{let n:u64=a[1].parse().unwrap();let mut s=core::array::from_fn(|i|if n==0{0}else{n+i as u64});keccak_f1600(&mut s);csv(s)},
   "poseidon"=>{let n:u64=a[1].parse().unwrap();let mut s=core::array::from_fn(|i|G::from_u64_reduced(n+i as u64));poseidon2_perm12(&mut s);csv(s.map(|x|x.to_canonical_u64()))},
   "compress"|"tree"=>{let n:u64=a[1].parse().unwrap();let l=core::array::from_fn(|i|A::from_u64_reduced(n+i as u64));let r=core::array::from_fn(|i|A::from_u64_reduced(n+4+i as u64));let t=core::array::from_fn(|i|A::from_u64_reduced(n+8+i as u64));
    let z=if a[0]=="compress"{qsag_agg::sponge::poseidon2_compress12_ff(l,r,t)}else{qsag_agg::sig::merkle_node_hash(42,t,qsag_agg::sig::MerkleNodeAddr{layer:1,tree_idx:0x123456789abcdef0,level:3,node_idx:7},l,r)};csv(z.map(|x|x.to_canonical_u64()))},
@@ -129,7 +135,7 @@ def negative_checks(rows, results):
             raise ValueError("undetected record-count mutation")
     values = dict(rows)
     if not values['wotsc 27'].endswith(';true') or any(
-            not values[f'wotsc {v}'].endswith(';false') for v in [0,28,255]):
+            not values[f'wotsc {v}'].endswith(';false') for v in [0,26,255]):
         raise ValueError("WOTS+C valid/invalid digest mutation checks failed")
     return rejected
 
@@ -138,6 +144,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--build', action='store_true', help='build Main as qsag-kat first')
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument('--isolate-agg-tests', action='store_true',
+                        help='stage production qsag-agg without its trailing unit-test module')
     args = parser.parse_args()
     if platform.system() != 'Linux':
         parser.error('run on hbox/Linux; Lean and Cargo builds are forbidden on macOS')
@@ -153,7 +161,30 @@ def main():
     with tempfile.TemporaryDirectory(prefix='cross-kat-', dir=root / 'scripts') as tmp:
         work = Path(tmp)
         (work / 'src').mkdir()
-        deps = '\n'.join(f'{name} = {{ path = {json.dumps(str(root / "crates" / name))} }}'
+        agg = root / 'crates/qsag-agg'
+        if args.isolate_agg_tests:
+            # Explicit opt-in for a malformed trailing cfg(test) module. All
+            # production source is copied byte-for-byte, never patched in place.
+            staged = work / 'agg'
+            shutil.copytree(agg / 'src', staged / 'src')
+            shutil.copytree(agg / 'examples', staged / 'examples')
+            lib = (agg / 'src/lib.rs').read_text()
+            marker = '#[cfg(test)]\nmod tests {'
+            if lib.count(marker) != 1:
+                raise ValueError('cannot identify unique trailing agg test module')
+            (staged / 'src/lib.rs').write_text(lib.split(marker)[0])
+            # Preserve the original manifest, resolving only workspace/path fields.
+            manifest = (agg / 'Cargo.toml').read_text()
+            workspace = tomllib.loads((root / 'Cargo.toml').read_text())['workspace']['package']
+            for key in ['rust-version', 'version', 'edition', 'license']:
+                manifest = manifest.replace(f'{key}.workspace = true',
+                                            f'{key} = {json.dumps(workspace[key])}')
+            manifest = re.sub(r'path = "([^"]+)"',
+                              lambda m: 'path = ' + json.dumps(str((agg / m[1]).resolve())), manifest)
+            (staged / 'Cargo.toml').write_text(manifest)
+            agg = staged
+            print('NOTE: excluding trailing qsag-agg unit tests in temporary copy', file=sys.stderr)
+        deps = '\n'.join(f'{name} = {{ path = {json.dumps(str(agg if name == "qsag-agg" else root / "crates" / name))} }}'
                          for name in ['qsag-core', 'qsag-agg'])
         (work / 'Cargo.toml').write_text('[workspace]\n[package]\nname="cross-kat-driver"\n'
                                        'version="0.0.0"\nedition="2024"\n[dependencies]\n' + deps + '\n')
@@ -169,7 +200,8 @@ def main():
         mutations = negative_checks(rows, results)
     print(json.dumps({'status': 'PASS', 'vectors': len(rows), 'coverage': EXPECTED,
                       'output_and_count_mutations_rejected': mutations,
-                      'wotsc_invalid_digests_rejected': 3, 'lean_deterministic': True}, sort_keys=True))
+                      'wotsc_invalid_digests_rejected': 3, 'lean_deterministic': True,
+                      'isolated_agg_tests': args.isolate_agg_tests}, sort_keys=True))
 
 
 if __name__ == '__main__':

@@ -1407,7 +1407,10 @@ mod tests {
                 KeyIdentityKind::ScriptPredicate,
             ),
             (WitnessSuiteTag::MlDsa44, KeyIdentityKind::HybridConjunctive),
-            (WitnessSuiteTag::SlhDsa128s, KeyIdentityKind::ScriptPredicate),
+            (
+                WitnessSuiteTag::SlhDsa128s,
+                KeyIdentityKind::ScriptPredicate,
+            ),
             (
                 WitnessSuiteTag::PolicyPredicateScript,
                 KeyIdentityKind::HybridConjunctive,
@@ -1478,7 +1481,9 @@ mod tests {
         }
 
         // Address derived for a different HRP or a different envelope is rejected before verifiers run.
-        let testnet_addr = env.to_address("qstest", AddressVersion::V1Cshake256).unwrap();
+        let testnet_addr = env
+            .to_address("qstest", AddressVersion::V1Cshake256)
+            .unwrap();
         assert_eq!(
             env.verify_bound_address(&testnet_addr, "qsp", msg, toy_verify_cl, toy_verify_pq),
             Err(AddrError::AddressBindingMismatch)
