@@ -428,16 +428,8 @@ fn prove_hierarchical_hem_inner(
     #[cfg(feature = "std")]
     let shards: Vec<ShardHemBatch> = if policies.len() > 1 && crate::parallel_workers() > 1 {
         let pairs: Vec<_> = policies.iter().zip(witnesses).collect();
-        let workers = crate::parallel_workers().min(pairs.len());
-        let chunk = pairs.len().div_ceil(workers);
-        let prove_ref = &prove_shard;
-        let groups: Vec<Result<Vec<ShardHemBatch>, HemAggError>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = pairs
-                .chunks(chunk)
-                .map(|sub| scope.spawn(move || sub.iter().copied().map(prove_ref).collect()))
-                .collect();
-            handles.into_iter().map(crate::join_worker).collect()
-        });
+        let groups: Vec<Result<Vec<ShardHemBatch>, HemAggError>> =
+            crate::map_chunks_bounded(&pairs, |sub| sub.iter().copied().map(&prove_shard).collect());
         let mut out = Vec::with_capacity(policies.len());
         for g in groups {
             out.extend(g?);
@@ -547,20 +539,9 @@ fn verify_hierarchical_hem_inner(
     #[cfg(feature = "std")]
     let all_shards_valid = if policies.len() > 1 && crate::parallel_workers() > 1 {
         let pairs: Vec<_> = policies.iter().zip(&aggregate.shards).collect();
-        let workers = crate::parallel_workers().min(pairs.len());
-        let chunk = pairs.len().div_ceil(workers);
-        let verify_ref = &verify_shard;
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = pairs
-                .chunks(chunk)
-                .map(|sub| scope.spawn(move || sub.iter().copied().all(verify_ref)))
-                .collect();
-            let mut ok = true;
-            for h in handles {
-                ok = crate::join_worker(h) && ok;
-            }
-            ok
-        })
+        let verdicts =
+            crate::map_chunks_bounded(&pairs, |sub| sub.iter().copied().all(&verify_shard));
+        verdicts.into_iter().all(|v| v)
     } else {
         policies.iter().zip(&aggregate.shards).all(verify_shard)
     };

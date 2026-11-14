@@ -83,6 +83,98 @@ pub(crate) fn parallel_workers() -> usize {
     })
 }
 
+/// Global counter of active extra OS threads spawned across recursive/nested `qsag-agg` scopes,
+/// strictly bounded by `parallel_workers().saturating_sub(1)`.
+#[cfg(feature = "std")]
+static ACTIVE_EXTRA_WORKERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(feature = "std")]
+pub(crate) struct WorkerPermit(());
+
+#[cfg(feature = "std")]
+impl Drop for WorkerPermit {
+    fn drop(&mut self) {
+        ACTIVE_EXTRA_WORKERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// Non-blockingly acquire one global extra-worker permit (`None` when budget is saturated).
+#[cfg(feature = "std")]
+#[inline]
+pub(crate) fn try_acquire_worker_permit() -> Option<WorkerPermit> {
+    use std::sync::atomic::Ordering;
+    let cap = parallel_workers().saturating_sub(1);
+    if cap == 0 {
+        return None;
+    }
+    let mut cur = ACTIVE_EXTRA_WORKERS.load(Ordering::Relaxed);
+    while cur < cap {
+        match ACTIVE_EXTRA_WORKERS.compare_exchange_weak(
+            cur,
+            cur + 1,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return Some(WorkerPermit(())),
+            Err(actual) => cur = actual,
+        }
+    }
+    None
+}
+
+/// Partition `items` across at most `parallel_workers()` chunks, running chunk 0 on the caller
+/// thread and spawning remaining chunks under `WorkerPermit` + non-panicking `Builder::spawn_scoped`.
+#[cfg(feature = "std")]
+pub(crate) fn map_chunks_bounded<'a, T, R, F>(items: &'a [T], f: F) -> Vec<R>
+where
+    T: Sync,
+    R: Send,
+    F: Fn(&'a [T]) -> R + Sync,
+{
+    if items.is_empty() {
+        return Vec::new();
+    }
+    let workers = parallel_workers().min(items.len());
+    if workers <= 1 {
+        return alloc::vec![f(items)];
+    }
+    let chunk = items.len().div_ceil(workers);
+    let slices: Vec<&'a [T]> = items.chunks(chunk).collect();
+    let f_ref = &f;
+    std::thread::scope(|scope| {
+        let mut tail_slots: Vec<Option<R>> = (0..slices.len().saturating_sub(1))
+            .map(|_| None)
+            .collect();
+        let mut spawned = Vec::new();
+        for (idx, &sub) in slices[1..].iter().enumerate() {
+            if let Some(permit) = try_acquire_worker_permit() {
+                match std::thread::Builder::new().spawn_scoped(scope, move || {
+                    let _permit = permit;
+                    f_ref(sub)
+                }) {
+                    Ok(handle) => spawned.push((idx, handle)),
+                    Err(_) => tail_slots[idx] = Some(f_ref(sub)),
+                }
+            } else {
+                tail_slots[idx] = Some(f_ref(sub));
+            }
+        }
+        let head = f_ref(slices[0]);
+        for (idx, handle) in spawned {
+            tail_slots[idx] = Some(join_worker(handle));
+        }
+        let mut out = Vec::with_capacity(slices.len());
+        out.push(head);
+        for slot in tail_slots {
+            if let Some(val) = slot {
+                out.push(val);
+            }
+        }
+        out
+    })
+}
+
 /// Largest power-of-two worker count `<= parallel_workers().min(max_units.max(1))`.
 #[cfg(feature = "std")]
 #[inline]
@@ -527,12 +619,24 @@ impl AggStatement<'_> {
                     return false;
                 }
                 #[cfg(feature = "std")]
-                if parallel_workers() > 1 {
-                    return std::thread::scope(|scope| {
-                        let right_h = scope.spawn(|| self.verify_node(right, rem_depth - 1));
-                        let left_ok = self.verify_node(left, rem_depth - 1);
-                        left_ok && join_worker(right_h)
+                if let Some(permit) = try_acquire_worker_permit() {
+                    let right_ref = right.as_ref();
+                    let branched = std::thread::scope(|scope| {
+                        match std::thread::Builder::new().spawn_scoped(scope, move || {
+                            let _permit = permit;
+                            self.verify_node(right_ref, rem_depth - 1)
+                        }) {
+                            Ok(right_h) => {
+                                let left_ok = self.verify_node(left, rem_depth - 1);
+                                let right_ok = join_worker(right_h);
+                                Some(left_ok && right_ok)
+                            }
+                            Err(_) => None,
+                        }
                     });
+                    if let Some(res) = branched {
+                        return res;
+                    }
                 }
                 self.verify_node(left, rem_depth - 1) && self.verify_node(right, rem_depth - 1)
             }
@@ -686,16 +790,8 @@ pub fn aggregate_signatures_with_config(
 
     #[cfg(feature = "std")]
     let leaves: Vec<MergeNode> = if batch_jobs.len() > 1 && parallel_workers() > 1 {
-        let workers = parallel_workers().min(batch_jobs.len());
-        let chunk = batch_jobs.len().div_ceil(workers);
-        let prove_ref = &prove_one;
-        let groups: Vec<Result<Vec<MergeNode>, HemAggError>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = batch_jobs
-                .chunks(chunk)
-                .map(|sub| scope.spawn(move || sub.iter().map(prove_ref).collect()))
-                .collect();
-            handles.into_iter().map(join_worker).collect()
-        });
+        let groups: Vec<Result<Vec<MergeNode>, HemAggError>> =
+            map_chunks_bounded(&batch_jobs, |sub| sub.iter().map(&prove_one).collect());
         let mut flat_leaves = Vec::with_capacity(batch_jobs.len());
         for group in groups {
             flat_leaves.extend(group?);
