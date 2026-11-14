@@ -24,3 +24,5 @@ pub mod wire_channel;
 
 #[cfg(feature = "std")]
 pub mod poison_journal;
+
+pub use wire_channel::{ConfidentialWireChannel, MacSealedWireChannel};
