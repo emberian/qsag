@@ -588,6 +588,29 @@ impl PoisonJournal for MemoryPoisonJournal {
     }
 }
 
+const TAG_OPEN_BINDING: &[u8] = b"QSAG.RSS.OPEN.BINDING/v1";
+const TAG_OPEN_COPY: &[u8] = b"QSAG.RSS.OPEN.COPY/v1";
+
+/// The only place opened lanes are reconstructed from the three share slots. It consumes
+/// the release permit of the opening round, which only an accepting
+/// `qsag_verified::ConsumingOpeningGuard2Lane` can produce.
+fn reconstruct_opened(
+    _release: qsag_verified::OpeningReleasePermit,
+    states: usize,
+    words: usize,
+    mine: &[u64],
+    next: &[u64],
+    third: &[u64],
+) -> Vec<Vec<u64>> {
+    (0..states)
+        .map(|s| {
+            (0..words)
+                .map(|w| mine[s * words + w] ^ next[s * words + w] ^ third[s * words + w])
+                .collect()
+        })
+        .collect()
+}
+
 /// One party's replicated share of a `Keccak-f[1600]` state: share slot `party` and share
 /// slot `party + 1`. The state is the xor of the three slots.
 #[derive(Clone, PartialEq, Eq)]
@@ -762,6 +785,8 @@ pub struct IsolatedRss256Party<T: WireTransport, J: PoisonJournal> {
     states: Vec<SharePair>,
     wave: u64,
     barrier: u64,
+    /// Opening rounds started in this session; each gets its own release guard.
+    open_round: u64,
     record: GateRecord,
     verified_latch: Option<qsag_verified::VerifiedRssPoisonLatch>,
     unverified: bool,
@@ -815,13 +840,17 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             party: keys.party,
             session_id,
             slot_keys: keys.slot_keys,
-            mac_keys: keys.mac_keys,
+            // Provisioning may span sessions; derive traffic keys after reservation.
+            mac_keys: keys
+                .mac_keys
+                .map(|key| h32(b"QSAG.RSS.SESSION.MAC/v1", &[&key, &session_id])),
             rng: SeedRng::new(&keys.rng_seed, &session_id),
             transport,
             journal,
             states: Vec::new(),
             wave: 0,
             barrier: 0,
+            open_round: 0,
             record: GateRecord::default(),
             verified_latch: Some(verified_latch),
             unverified: false,
@@ -1427,13 +1456,36 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         if from_pred != from_succ {
             return Err(NodeError::OpenShareMismatch);
         }
-        Ok((0..self.states.len())
-            .map(|s| {
-                (0..words)
-                    .map(|w| mine[s * words + w] ^ next[s * words + w] ^ third[s * words + w])
-                    .collect()
-            })
-            .collect())
+        // The release decision is the extracted guard's: one decision per opening round,
+        // bound to this session, round and opened shape, accepting only if both holders of
+        // the missing slot committed to the same words.
+        let round = self.open_round;
+        self.open_round = round.checked_add(1).ok_or(NodeError::InvalidParameters)?;
+        let binding = h32(
+            TAG_OPEN_BINDING,
+            &[
+                &self.session_id,
+                &round.to_be_bytes(),
+                &self.barrier.to_be_bytes(),
+                &(words as u64).to_be_bytes(),
+                &(self.states.len() as u64).to_be_bytes(),
+            ],
+        );
+        let copy_pred = h32(TAG_OPEN_COPY, &[&binding, &from_pred]);
+        let copy_succ = h32(TAG_OPEN_COPY, &[&binding, &from_succ]);
+        let (_spent, release) =
+            qsag_verified::ConsumingOpeningGuard2Lane::new(self.session_id, round, binding, 1)
+                .absorb_opening(&copy_pred, &copy_succ, [0, 0])
+                .verify_once(&self.session_id, round, &binding);
+        let release = release.ok_or(NodeError::OpenShareMismatch)?;
+        Ok(reconstruct_opened(
+            release,
+            self.states.len(),
+            words,
+            &mine,
+            &next,
+            &third,
+        ))
     }
 }
 
@@ -1602,6 +1654,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_mac_keys_agree_and_reject_cross_session_replay() {
+        let provisioned = deal_rss256_keys(&SEED);
+        let make = |sid| {
+            let (endpoints, _) = InMemoryWireMesh::connect(3, sid);
+            endpoints
+                .into_iter()
+                .zip(provisioned.clone())
+                .map(|(endpoint, keys)| {
+                    IsolatedRss256Party::new(
+                        sid,
+                        keys,
+                        honest(endpoint),
+                        MemoryPoisonJournal::new(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let first = make(SESSION);
+        let second = make([0xFA; 32]);
+        for p in 0..3 {
+            let peer = (p + 1) % 3;
+            assert_eq!(first[p].pair_key(peer), first[peer].pair_key(p));
+            assert_ne!(first[p].pair_key(peer), second[p].pair_key(peer));
+            let payload = b"round-two-echo";
+            let tag = mac32(first[p].pair_key(peer), TAG_COIN_ECHO_MAC, &[payload]);
+            assert!(mac32_verify(
+                first[peer].pair_key(p),
+                TAG_COIN_ECHO_MAC,
+                &[payload],
+                &tag
+            ));
+            assert!(!mac32_verify(
+                second[peer].pair_key(p),
+                TAG_COIN_ECHO_MAC,
+                &[payload],
+                &tag
+            ));
+        }
+    }
+
     type RssParty = IsolatedRss256Party<TamperTransport, MemoryPoisonJournal>;
     /// Opened lanes of every state.
     type Opened = Vec<Vec<u64>>;
@@ -1709,6 +1803,8 @@ mod tests {
                         party.check().unwrap();
                         assert_eq!(party.barriers(), 2);
                         let second = party.open_prefix(4).unwrap();
+                        // Each opening round took its own release decision.
+                        assert_eq!(party.open_round, 2);
                         ((first, second), Box::new(party) as Keep)
                     }) as PartyFn<(Opened, Opened)>
                 })

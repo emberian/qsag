@@ -1972,7 +1972,16 @@ struct DirectedSpcotParams {
     fault: Option<SpcotFaultTarget>,
 }
 
-/// Run interactive dealerless setup of compact `< 36 KiB` [`DensePcgPartySeed`]s across `n >= 2` parties.
+/// Run interactive dealerless setup of [`DensePcgPartySeed`]s across `n >= 2` parties.
+///
+/// Only two-party seeds fit the 36 KiB wire cap. For three or more parties the
+/// setup also runs KOS/MASCOT through `checked_boolean_product` to correct the
+/// cross-party products; it is not a silent multi-party triple constructor.
+/// Expanded Boolean triples do not carry Shamir shares or two-lane SPDZ MACs.
+/// The separate VOLE material must not be mistaken for authentication of these
+/// triples. Production integration additionally requires a concrete security
+/// estimate for this dual-LPN matrix and an authenticated conversion/sacrifice
+/// protocol; the SPCOT consistency check alone does not supply either.
 pub fn setup_dense_pcg_seeds(
     session_id: [u8; 32],
     tree_depth: PcgTreeDepth,

@@ -30,7 +30,7 @@ structure Ext4 where
   d : Std.U64
 
 /-- [qsag_whir_verified::MerklePair]
-    Source: 'src/lib.rs', lines 380:0-384:1
+    Source: 'src/lib.rs', lines 404:0-408:1
     Visibility: public -/
 structure MerklePair where
   tag : Std.U8

@@ -53,11 +53,7 @@ impl Vault {
             .write(true)
             .create_new(create)
             .mode(0o600);
-        // Also verify descriptors and paths below, on every supported Unix.
-        #[cfg(target_os = "linux")]
-        options.custom_flags(0x20000 | 0x800); // O_NOFOLLOW | O_NONBLOCK
-        #[cfg(target_os = "macos")]
-        options.custom_flags(0x100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
+        crate::cli::set_nofollow_nonblocking(&mut options)?;
         let file = options.open(&path).map_err(|e| {
             if create {
                 CliError::io("enrolling vault lock", e)

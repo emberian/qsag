@@ -10,30 +10,12 @@ crash-resilient durable release, and full concrete `FORS+C` / `H_msg` / hypertre
    - MSB-first dibit packing, strict constant-sum incomparability (`wotsC256_strict_incomparability`),
      completeness, 1-use EUF-CMA witness extraction (`wotsC256_one_use_euf_cma_extract`), and
      unconstrained-sum forgery counterexample (`tooth_wotsc_without_target_sum_forges`).
-2. **Active-Malicious `Rss256` Algebra, Field Isomorphism, Barrier Soundness & View Privacy**:
-   - Constructive `SimpleEquiv PolyGf128 Tower128` ring/field isomorphism between Rust's polynomial
-     basis `GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`BitVec 128`) and Wiedemann `Tower128` (`TowerElem 7`),
-     preserving zero, one, bitwise XOR addition, `x`-shift reduction, multiplication, and nonzeroness.
-   - Per-slot holder transcript digest check, post-transcript commit-reveal coin uniformity / collision
-     extraction (`rss256_commit_reveal_coin_uniform_or_collision`), multi-round adaptive sumcheck
-     batching + 7-bit tensor + folding + quadratic product residual soundness over `PolyGf128`
-     (`rss256_multi_round_polyGf128_union_bound`, `rss256_rust_two_pass_barrier_full_soundness`),
-     1-corrupt gate + `BGIN19` + `split_message` view privacy, and sticky poison absorption.
-3. **Self-Authenticating `Waistband` Canopy & MAC-Enrolled Multi-Session Single-Codeword Safety**:
-   - Upward canopy chain verification (`verifyCanopyChainToTop_authentic_or_break`) constructively
-     eliminates `WaistbandMatchesKey`: across arbitrary adversarial caches, either every Round-2
-     static opening is canonical (`baggyCanonicalStaticDigits`) or we constructively extract a
-     `BaggyStaticCacheBreak` (`baggy_adversarial_cache_multi_session_canonical_or_break`), paired
-     with MAC-enrolled cache composition (`baggy_mac_enrolled_multi_session_canonical_or_forgery`).
-4. **Composed Crash-Resilient Pre-Round-2 Release & Concrete `FORS+C` / `H_msg` Full `Baggy` EUF-CMA**:
-   - End-to-end crash-resilient signing trace composing `authenticateBaggyLayerPlan` (`.fresh`,
-     `.signature`, `.leaves` with `must_exist` provenance enforcement), `baggyReleaseStep`
-     (`.plan -> .write -> .syncAck -> .release`), `baggyOpenReservedChains`, and `baggyVerify`
-     (`baggy_crash_resilient_trace_soundness`, `tooth_baggy_unanchored_cached_leaves_plan_rejected`).
-   - Full concrete `FORS+C` (`k - 1` signed height-`a` trees + forced zero `(k - 1)`-th index in
-     `parseBaggyHmsg`) + static layer-0 `WOTS+C` + hypertree constructive EUF-CMA reduction over an
-     explicit signing-oracle query history (`baggy_concrete_full_euf_cma_extract`,
-     `baggy_fors_subset_cover_single_hit_collision`).
+2. RSS256 field isomorphism, polynomial root bounds and recorded-wave release guards.
+   `rss256_packed_batch_roots` bounds fixed nonzero gate-error polynomials.
+3. Verified Waistband signing with explicit `WaistbandMatchesKey` assumptions, and
+   durable single-codeword reservations across multiple sessions.
+4. Crash-visible reservation/write/sync/release transitions. Full adaptive Rust
+   two-pass transcript soundness and concrete full Baggy EUF-CMA are separate obligations.
 -/
 
 public import Qsag.Constructive
@@ -2588,7 +2570,7 @@ def baggyRunMultiSessionVerified (suite : BaggySuite256) (p : BaggyTreeParams)
   | guard, [] => (guard, [], [])
   | guard, (cache, msg, msgCtr) :: rest =>
     match baggySignVerifiedWaistband suite p sk pk cache guard msg msgCtr with
-    | none => baggyRunMultiSessionVerified suite p sk pk guard rest
+    | none => (guard, [], [])
     | some (sig, guard', recs) =>
       let (guardFinal, sigs, restRecs) := baggyRunMultiSessionVerified suite p sk pk guard' rest
       (guardFinal, (msg, sig) :: sigs, recs ++ restRecs)
@@ -2598,6 +2580,20 @@ def WaistbandMatchesKey (suite : BaggySuite256) (p : BaggyTreeParams)
     (sk : BaggySecretKey256) (cache : VerifiedWaistbandCache) : Prop :=
   ∀ layer tree v, cache.expectedSubtreeRoot layer tree = some v →
     v = baggyTrueSubtreeRoot suite p sk layer tree
+
+/-- Honest root enrollment constructs the key-matching premise directly. -/
+def enrollWaistbandRoots (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (cache : VerifiedWaistbandCache) : VerifiedWaistbandCache :=
+  { cache with
+    pinnedPkSeed := sk.pkSeed
+    pinnedPkRoot := (baggyKeygen256 suite p sk).pkRoot
+    expectedSubtreeRoot := fun layer tree => some (baggyTrueSubtreeRoot suite p sk layer tree) }
+
+theorem enrolled_waistband_matches_key (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (cache : VerifiedWaistbandCache) :
+    WaistbandMatchesKey suite p sk (enrollWaistbandRoots suite p sk cache) := by
+  intro layer tree v hv
+  exact (Option.some.inj hv).symm
 
 private theorem baggySignLayerFresh_props (suite : BaggySuite256) (p : BaggyTreeParams)
     (sk : BaggySecretKey256) (layer tree kp : Nat) (childNode : BitVec 256)
@@ -2894,7 +2890,8 @@ theorem waistband_verified_multi_session_single_codeword
       rcases sess with ⟨cache, msg, msgCtr⟩
       simp only [baggyRunMultiSessionVerified]
       cases hSign : baggySignVerifiedWaistband suite p sk pk cache guard msg msgCtr with
-      | none => exact ih guard
+      | none =>
+        exact ⟨fun _ _ _ _ h => ⟨h, fun _ hm => by cases hm⟩, fun _ hm => by cases hm⟩
       | some out =>
         rcases out with ⟨sig, guard', recs⟩
         have hEnf : enforceDurableStaticOpenings guard recs = some guard' := by
@@ -2962,7 +2959,7 @@ theorem waistband_verified_multi_session_single_codeword
         fun s hs => hAllMatch s (.tail _ hs)
       simp only [baggyRunMultiSessionVerified]
       cases hSign : baggySignVerifiedWaistband suite p sk pk cache guard msg msgCtr with
-      | none => exact ih guard hTailMatch
+      | none => intro _ hm; cases hm
       | some out =>
         rcases out with ⟨sig, guard', recs⟩
         rcases hRunRest : baggyRunMultiSessionVerified suite p sk pk guard' rest with ⟨gFinal, sigsRest, restRecs⟩
@@ -3017,9 +3014,8 @@ theorem waistband_verified_multi_session_single_codeword
     injection hLook1 with hEq
     exact hEq.symm
 
-/-- Upper-hypertree reduction factor over the abstract `BaggySuite256` interface; composed with
-    concrete `FORS+C`, `H_msg`, and static layer-0 `WOTS+C` extraction in
-    `baggy_concrete_full_euf_cma_extract` (§5.4 below). -/
+/-- Upper-hypertree reduction factor over the abstract `BaggySuite256` interface.
+A concrete bottom-layer reduction remains a separate obligation. -/
 inductive BaggyUpperReductionResult (suite : BaggySuite256) (p : BaggyTreeParams)
     (sk : BaggySecretKey256) (approvedMsgs : List (BitVec 256)) (msgStar : BitVec 256) : Type where
   | bottomLayerReachedGenuineRoot
@@ -3194,8 +3190,7 @@ def walkUpperLayersBoundedExtract
           (by omega) (by simp) (by simp at hSum ⊢; omega)
           (by simpa [Nat.add_sub_cancel] using hHitTrue) hWalkRest hFinalEq
 
-/-- Upper-hypertree extraction factor over `BaggySuite256`; composed with concrete `FORS+C`,
-    `H_msg`, and static layer-0 `WOTS+C` extraction in `baggy_concrete_full_euf_cma_extract` (§5.4). -/
+/-- Upper-hypertree extraction factor over `BaggySuite256`. -/
 def baggy_verified_waistband_upper_extract
     (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
     (hWf : p.WellFormed) (hGrind : BaggySuite256.WellGrinded suite)
@@ -4213,9 +4208,8 @@ run_cmd do
 
 /-! ## Recorded RSS checks and degree-two product rounds
 
-Algebraic transcript machines with challenges sampled after `permuteInline` freezes the gates;
-see §5.1 below for the constructive `PolyGf128 ↔ Tower128` field isomorphism, post-wave
-commit-reveal coin uniformity, and multi-round tensor/folding `product_proof` soundness.
+Recorded gate checks and fixed-polynomial root bounds. The checks reject zero
+challenges; sampling assumptions are stated separately from deterministic acceptance.
 -/
 
 /-- Two 128-bit blocks per plane. Packing preserves all bits (unlike treating
@@ -4295,7 +4289,8 @@ inductive Rss256Wave where
   | bankWave (wave : Rss256BankWave)
 
 def Rss256Wave.check (w : Rss256Wave) (chi1 chi2 : Tower128) : Bool :=
-  match w with
+  (chi1 != towerZero 7) && (chi2 != towerZero 7) &&
+  (match w with
   | .inlineWave w =>
     rss256GateLinks w.input w.gates &&
       (batchDeviationPoly (rss256PackedGateErrors w.gates) chi1 == towerZero 7) &&
@@ -4303,7 +4298,70 @@ def Rss256Wave.check (w : Rss256Wave) (chi1 chi2 : Tower128) : Bool :=
   | .bankWave w =>
     decide (w.firstHolder.length = w.secondHolder.length) &&
       (ghashPoly chi1 w.firstHolder == ghashPoly chi1 w.secondHolder) &&
-      (ghashPoly chi2 w.firstHolder == ghashPoly chi2 w.secondHolder)
+      (ghashPoly chi2 w.firstHolder == ghashPoly chi2 w.secondHolder))
+
+theorem rss256_zero_challenge_rejected (w : Rss256Wave) (a : Tower128) :
+    w.check (towerZero 7) a = false ∧ w.check a (towerZero 7) = false := by
+  cases w <;> simp [Rss256Wave.check]
+
+/-- Two independent samples from a fixed finite coin set have at most L² root
+pairs for a nonzero frozen error polynomial. This is a cardinality bound, not a
+case split on an integrity failure. -/
+theorem rss256_two_coin_root_bound (errors coins : List Tower128) (L : Nat)
+    (hn : coins.Nodup) (hl : errors.length ≤ L) (hd : L + 1 ≤ coins.length)
+    (he : ∃ d ∈ errors, d ≠ towerZero 7) :
+    (coins.filter (fun r => decide (batchDeviationPoly errors r = towerZero 7))).length *
+      (coins.filter (fun r => decide (batchDeviationPoly errors r = towerZero 7))).length ≤ L * L := by
+  have h := (bdoz_2lane_mac_soundness L errors coins hn hl hd he).1
+  exact Nat.mul_le_mul h h
+
+private theorem rss256_packed_zero_gate (g : Rss256RecordedGate)
+    (h0 : (unpackTower128Pair g.error).1 = towerZero 7)
+    (h1 : (unpackTower128Pair g.error).2 = towerZero 7) :
+    g.z.reconstruct = g.x.reconstruct &&& g.y.reconstruct := by
+  have hp := congrArg (packTower 8) (show unpackTower 8 g.error = towerZero 8 from Prod.ext h0 h1)
+  simp only [packTower_unpackTower, packTower_zero] at hp
+  exact BitVec.xor_eq_zero_iff.mp hp
+
+private theorem rss256_zero_errors_integrity (input : Plane256) (gates : List Rss256RecordedGate)
+    (hl : rss256GateLinks input gates = true)
+    (hz : ∀ e ∈ rss256PackedGateErrors gates, e = towerZero 7) :
+    rss256GateOutput input gates = rss256GateIdeal input gates := by
+  induction gates generalizing input with
+  | nil => rfl
+  | cons g gs ih =>
+    obtain ⟨hx, ht⟩ := Bool.and_eq_true_iff.mp hl
+    have h0 := hz (unpackTower128Pair g.error).1 (by simp [rss256PackedGateErrors])
+    have h1 := hz (unpackTower128Pair g.error).2 (by simp [rss256PackedGateErrors])
+    have hg := rss256_packed_zero_gate g h0 h1
+    have tail := ih g.z.reconstruct ht (fun e he => hz e (by
+      simp only [rss256PackedGateErrors, List.flatMap_cons, List.mem_append] at he ⊢
+      exact Or.inr he))
+    simp only [rss256GateOutput, rss256GateIdeal]
+    rw [tail, hg, eq_of_beq hx]
+
+theorem rss256_fault_has_nonzero_errors (w : Rss256InlineWave)
+    (hl : rss256GateLinks w.input w.gates = true)
+    (hf : rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates) :
+    ∃ e ∈ rss256PackedGateErrors w.gates, e ≠ towerZero 7 := by
+  cases ha : (rss256PackedGateErrors w.gates).all (fun e => e == towerZero 7) with
+  | true =>
+    exact False.elim (hf (rss256_zero_errors_integrity w.input w.gates hl
+      (fun e he => eq_of_beq (List.all_eq_true.mp ha e he))))
+  | false =>
+    obtain ⟨e, he, hn⟩ := List.all_eq_false.mp ha
+    exact ⟨e, he, by simpa using hn⟩
+
+/-- Semantic output corruption forces a nonzero polynomial; for two independent
+uniform points in any listed coin set, accepting pairs are bounded by degree². -/
+theorem rss256_inline_integrity_root_bound (w : Rss256InlineWave) (coins : List Tower128)
+    (hl : rss256GateLinks w.input w.gates = true)
+    (hf : rss256GateOutput w.input w.gates ≠ rss256GateIdeal w.input w.gates)
+    (hn : coins.Nodup) (hd : (rss256PackedGateErrors w.gates).length + 1 ≤ coins.length) :
+    (coins.filter (fun r => decide (batchDeviationPoly (rss256PackedGateErrors w.gates) r = towerZero 7))).length ^ 2 ≤
+      (rss256PackedGateErrors w.gates).length ^ 2 := by
+  simpa only [Nat.pow_two] using rss256_two_coin_root_bound (rss256PackedGateErrors w.gates)
+    coins _ hn (Nat.le_refl _) hd (rss256_fault_has_nonzero_errors w hl hf)
 
 /-- Semantic fault is independent of verifier acceptance. In particular zero
 challenges do not turn a false gate into a semantically clean gate. -/
@@ -4314,17 +4372,46 @@ def Rss256Wave.Fault : Rss256Wave → Prop
 def Rss256Wave.BadChallenge (w : Rss256Wave) (chi1 chi2 : Tower128) : Prop :=
   w.Fault ∧ w.check chi1 chi2 = true
 
+def rss256WaveBytes : Rss256Wave → List UInt8
+  | .inlineWave w =>
+    encodeMultiFrame ([0] :: be 32 w.input.toNat :: w.gates.map (fun g =>
+      encodeMultiFrame ([g.x.s0, g.x.s1, g.x.s2, g.y.s0, g.y.s1, g.y.s2,
+        g.z.s0, g.z.s1, g.z.s2].map (fun x => be 32 x.toNat))))
+  | .bankWave w => encodeMultiFrame [[1],
+      encodeMultiFrame (w.firstHolder.map (fun x => be 16 (packTower 7 x).toNat)),
+      encodeMultiFrame (w.secondHolder.map (fun x => be 16 (packTower 7 x).toNat))]
+
+def rss256Transcript (waves : List Rss256Wave) : List UInt8 :=
+  cshake256Bytes "QSAG-WAVE-TRANSCRIPT-v1".toUTF8.data.toList
+    (encodeMultiFrame (waves.map rss256WaveBytes))
+
+def rss256CoinCommit (transcript : List UInt8) (seed : Tower128) : List UInt8 :=
+  cshake256Bytes "QSAG-WAVE-CHECK-COIN-v1".toUTF8.data.toList
+    (encodeMultiFrame [transcript, be 16 (packTower 7 seed).toNat])
+
+/-- The two lanes are domain-separated XOF outputs of the frozen transcript and
+revealed contributions. Zero is rejected by the wave checker. -/
+def rss256DerivedCoin (waves : List Rss256Wave) (a b : Tower128) (lane : Nat) : Tower128 :=
+  let seed := cshake256Bytes "QSAG-WAVE-CHECK-v1".toUTF8.data.toList
+    (encodeMultiFrame [rss256Transcript waves, be 16 (packTower 7 a).toNat,
+      be 16 (packTower 7 b).toNat])
+  let bytes := cshake256Bytes "QSAG-WAVE-HORNER-v1".toUTF8.data.toList
+    (encodeMultiFrame [seed, be 8 lane])
+  unpackTower 7 (BitVec.ofNat 128 (bytes.take 16 |>.foldl (fun n x => n * 256 + x.toNat) 0))
+
 structure Rss256EngineState where
   pending : List Rss256Wave
   accepted : List (Rss256Wave × Tower128 × Tower128)
   poisoned : Bool
+  coinCommits : Option (List UInt8 × List UInt8) := none
 
-def Rss256EngineState.init : Rss256EngineState := ⟨[], [], false⟩
+def Rss256EngineState.init : Rss256EngineState := ⟨[], [], false, none⟩
 
 inductive Rss256EngineOp where
   | permuteInline (wave : Rss256InlineWave)
   | permuteBank (wave : Rss256BankWave)
-  | check (chi1 chi2 : Tower128)
+  | commitCoins (commit1 commit2 : List UInt8)
+  | check (seed1 seed2 : Tower128)
   | openPlanes
 
 /-- Recorded-transcript barrier. Checks compute Horner equations internally;
@@ -4333,11 +4420,16 @@ def rss256StepHardened (st : Rss256EngineState) (op : Rss256EngineOp) :
     StepOutcome Rss256EngineState (List Plane256) Rss256EngineErr :=
   if st.poisoned then .err st .enginePoisoned
   else match op with
-  | .permuteInline w => .ok { st with pending := st.pending ++ [.inlineWave w] } []
-  | .permuteBank w => .ok { st with pending := st.pending ++ [.bankWave w] } []
+  | .permuteInline w => .ok { st with pending := st.pending ++ [.inlineWave w], coinCommits := none } []
+  | .permuteBank w => .ok { st with pending := st.pending ++ [.bankWave w], coinCommits := none } []
+  | .commitCoins c1 c2 => .ok { st with coinCommits := some (c1, c2) } []
   | .check a b =>
-    if st.pending.all (fun w => w.check a b) then
-      .ok { st with pending := [], accepted := st.accepted ++ st.pending.map (fun w => (w,a,b)) } []
+    let x := rss256DerivedCoin st.pending a b 0
+    let y := rss256DerivedCoin st.pending a b 1
+    if st.coinCommits == some (rss256CoinCommit (rss256Transcript st.pending) a,
+        rss256CoinCommit (rss256Transcript st.pending) b) &&
+        st.pending.all (fun w => w.check x y) then
+      .ok { st with pending := [], coinCommits := none, accepted := st.accepted ++ st.pending.map (fun w => (w,x,y)) } []
     else .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed
   | .openPlanes =>
     if st.pending.isEmpty then
@@ -4353,7 +4445,8 @@ theorem rss256_premature_open_preserves_state (st : Rss256EngineState)
   simp [rss256StepHardened, hp, hu]
 
 theorem rss256_failed_horner_poisons (st : Rss256EngineState) (a b : Tower128)
-    (hp : st.poisoned = false) (hf : st.pending.all (fun w => w.check a b) = false) :
+    (hp : st.poisoned = false) (hf : st.pending.all (fun w => w.check
+      (rss256DerivedCoin st.pending a b 0) (rss256DerivedCoin st.pending a b 1)) = false) :
     rss256StepHardened st (.check a b) =
       .err { st with poisoned := true, pending := [], accepted := [] } .multiplicationCheckFailed := by
   simp [rss256StepHardened, hp, hf]
@@ -4445,7 +4538,7 @@ def baggyReleaseStep {identity : BaggyLedgerIdentity}
   | .storageFailure | .verificationFailure =>
     { st with staged := [], plan := [], phase := .aborted }
   | .plan ps =>
-    if st.phase == .idle && ps.all (admitBaggyPlannedOpening st.durable) then
+    if (st.phase == .idle || st.phase == .opened) && ps.all (admitBaggyPlannedOpening st.durable) then
       { st with plan := ps, phase := .planned }
     else { st with phase := .aborted }
   | .write =>
@@ -4604,6 +4697,7 @@ theorem rss256_recorded_step_preserves_checked (st : Rss256EngineState)
     cases op with
     | permuteInline w => exact h
     | permuteBank w => exact h
+    | commitCoins c1 c2 => exact h
     | openPlanes =>
       dsimp only
       cases hEmp : st.pending.isEmpty
@@ -4611,7 +4705,10 @@ theorem rss256_recorded_step_preserves_checked (st : Rss256EngineState)
       · rw [ite_pos rfl]; exact h
     | check a b =>
       dsimp only
-      cases ha : st.pending.all (fun w => w.check a b)
+      cases good : st.coinCommits == some (rss256CoinCommit (rss256Transcript st.pending) a,
+          rss256CoinCommit (rss256Transcript st.pending) b) &&
+          st.pending.all (fun w => w.check (rss256DerivedCoin st.pending a b 0)
+            (rss256DerivedCoin st.pending a b 1))
       · rw [ite_neg (by decide)]
         intro e he; cases he
       · rw [ite_pos rfl]
@@ -4619,7 +4716,7 @@ theorem rss256_recorded_step_preserves_checked (st : Rss256EngineState)
         rcases List.mem_append.mp he with ho | hn
         · exact h e ho
         · obtain ⟨w, hw, rfl⟩ := List.mem_map.mp hn
-          exact List.all_eq_true.mp ha w hw
+          exact List.all_eq_true.mp (Bool.and_eq_true_iff.mp good).2 w hw
   · simp only [↓reduceIte]
     exact h
 

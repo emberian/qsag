@@ -23,6 +23,7 @@ with structural and cryptographic quorum gates:
 -/
 
 public import Qsag.Keccak
+public import Qsag.Tactic.AssuranceKit
 public import Qsag.UcGames
 
 public section
@@ -542,6 +543,18 @@ theorem tooth_constant_bool_codec_rejected :
   intro h
   have bad : false = true := h rfl
   cases bad
+
+/-- Concrete MAC instance witnesses reachability, not public-key unforgeability. -/
+theorem witness_cryptographic_threshold_approval :
+    ∃ (keys : Nat → Option (List UInt8))
+      (st : IdealTsigState (List UInt8) (List UInt8)) (epoch : Nat) (msg : List UInt8)
+      (certs : List (SignedQuorumApproval (List UInt8))),
+      verifyCryptographicThresholdApproval shakeApprovalAuthScheme keys
+        approvalBytesCodec approvalBytesCodec 1 st epoch msg certs = true := by
+  exact ⟨_, _, _, _, _, inhabited_cryptographic_threshold_approval⟩
+
+#tooth_pair Qsag.cryptographicThresholdApproval_sound vs Qsag.canonicalApproval_shared_key_rejected
+#verify_inhabited Qsag.cryptographicThresholdApproval_sound Qsag.witness_cryptographic_threshold_approval
 
 end Qsag
 end

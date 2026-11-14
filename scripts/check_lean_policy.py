@@ -55,16 +55,21 @@ files = sorted(
 errors = []
 challenge_paths = {"lean/QsagChallenge.lean", "aeneas/lean/QsagVerifiedChallenge.lean"}
 for path in files:
-    source = code(path.read_text())
+    raw = path.read_text()
+    source = code(raw)
     relative = str(path.relative_to(root))
     exposed = sum(bool(re.search(r"\bexpose\b", attrs))
                   for attrs in re.findall(r"@\[([^]]*)\]", source))
+    if len(raw.splitlines()) > 80:
+        for section in re.finditer(r"@\[[^]]*\bexpose\b[^]]*\]\s*public\s+section\b", source):
+            line = source[:section.start()].count("\n") + 1
+            errors.append(f"{relative}:{line}: file-wide expose section in module over 80 lines")
     if exposed > 12:
         errors.append(f"{relative}: {exposed} expose annotations")
     if relative.startswith("lean/Qsag/"):
         for escape in re.finditer(r"@\[[^]]*\b(?:implemented_by|extern)\b", source):
             errors.append(f"{relative}: executable substitution: {escape[0]}")
-    for match in re.finditer(r"\bsorry\b|\bnative_decide\b|\bbv_decide\b|\bClassical\.choice\b", source):
+    for match in re.finditer(r"\baxiom\b|\bsorry\b|\bnative_decide\b|\bbv_decide\b|\bClassical\.choice\b", source):
         if match[0] == "sorry" and relative in challenge_paths:
             continue
         # Quoted declaration names in rejection checks do not invoke the axiom.

@@ -6093,9 +6093,13 @@ def policyCanonicalApprovers : List UInt8 → Bool
   | a :: b :: rest =>
     match rest with
     | [] => true
-    | c :: d :: _ => decide (ofLE [b, a] ≤ ofLE [d, c]) && policyCanonicalApprovers rest
+    | c :: d :: _ => decide (ofLE [b, a] < ofLE [d, c]) && policyCanonicalApprovers rest
     | _ => false
   | _ => false
+
+theorem policy_duplicate_approvers_rejected (a b : UInt8) (rest : List UInt8) :
+    policyCanonicalApprovers (a :: b :: a :: b :: rest) = false := by
+  simp [policyCanonicalApprovers]
 
 /-- Unique tag check for THIS approver; duplicate entries fail even when one tag is correct. -/
 def policyAuthenticatedInitiator (g : AuthenticatedPolicyState) (tx : TransactionIntent)
@@ -6203,10 +6207,22 @@ def policyWatermarkGuardStep (g : AuthenticatedPolicyState) (inp : Authenticated
       let rules' : StatefulPolicyGuard :=
         { g.rules with window_id := auth.newWindow, accumulated_spend := 0 }
       let g' : AuthenticatedPolicyState :=
-        { g with rules := rules', externalSpendFloor := 0 }
+        { g with rules := rules' }
       .accepted g' (.epochAdvanced auth.newWindow 0)
     else
       .rejected g .epochAdvanceTooEarly
+
+theorem policy_window_advance_preserves_external_floor (g g' : AuthenticatedPolicyState)
+    (auth : PolicyWindowAuthorization) (ev : PolicyWatermarkEvent)
+    (h : policyWatermarkGuardStep g (.advance auth) = .accepted g' ev) :
+    g'.externalSpendFloor = g.externalSpendFloor := by
+  unfold policyWatermarkGuardStep at h
+  if hc : g.rules.window_id < auth.newWindow ∧ auth.newWindow < 256 ^ 8 ∧
+      auth.mac = policyWindowTag g auth.newWindow then
+    simp only [hc] at h
+    rcases CustodyStepOutcome.accepted.inj h with ⟨rfl, _⟩
+    rfl
+  else simp [hc] at h
 
 theorem policy_approval_requires_authentication (g g' : AuthenticatedPolicyState)
     (tx : TransactionIntent) (tags : List InitiatorPeerTag) (ts : Nat) (ev : PolicyWatermarkEvent)
@@ -6602,7 +6618,9 @@ def policyQuorumClusterStep (cl : PolicyQuorumCluster) (inp : PolicyQuorumInput)
     CustodyStepOutcome PolicyQuorumCluster PolicyQuorumEvent PolicyQuorumReject :=
   match inp with
   | .approveQuorum quorum tx tags ts =>
-    if ¬ (0 < cl.threshold ∧ cl.threshold ≤ quorum.length ∧ quorum.Nodup) then
+    if ¬ (0 < cl.threshold ∧ cl.threshold ≤ quorum.length ∧ quorum.Nodup ∧
+        (∀ p ∈ quorum, p < 256 ^ 2) ∧
+        tx.approver_bytes = quorum.flatMap (be 2) ∧ tx.quorum_bytes = quorum.flatMap (be 2)) then
       .rejected cl .invalidQuorumOrDuplicateParty
     else if ¬ (tx.window_id = cl.ledger.windowId ∧ tx.rolling_window_spent = cl.ledger.cumulativeSpent) then
       .rejected cl .ledgerWindowMismatch
@@ -6654,7 +6672,8 @@ private theorem policyQuorumCluster_rejection_state
   cases inp with
   | approveQuorum q tx tags ts =>
     unfold policyQuorumClusterStep at h
-    if h1 : ¬ (0 < cl.threshold ∧ cl.threshold ≤ q.length ∧ q.Nodup) then
+    if h1 : ¬ (0 < cl.threshold ∧ cl.threshold ≤ q.length ∧ q.Nodup ∧
+          (∀ p ∈ q, p < 256 ^ 2) ∧ tx.approver_bytes = q.flatMap (be 2) ∧ tx.quorum_bytes = q.flatMap (be 2)) then
       simp [h1] at h; exact h.1.symm
     else if h2 : ¬ (tx.window_id = cl.ledger.windowId ∧ tx.rolling_window_spent = cl.ledger.cumulativeSpent) then
       simp [h1, h2] at h; exact h.1.symm
@@ -6706,7 +6725,8 @@ private theorem policyQuorumCluster_burned_not_in_future
         exact ih
     | approveQuorum q tx tags ts =>
       unfold policyQuorumClusterStep at hStep
-      if h1 : ¬ (0 < st.threshold ∧ st.threshold ≤ q.length ∧ q.Nodup) then simp [h1] at hStep
+      if h1 : ¬ (0 < st.threshold ∧ st.threshold ≤ q.length ∧ q.Nodup ∧
+          (∀ p ∈ q, p < 256 ^ 2) ∧ tx.approver_bytes = q.flatMap (be 2) ∧ tx.quorum_bytes = q.flatMap (be 2)) then simp [h1] at hStep
       else if h2 : ¬ (tx.window_id = st.ledger.windowId ∧ tx.rolling_window_spent = st.ledger.cumulativeSpent) then
         simp [h1, h2] at hStep
       else if h3 : ¬ (st.ledger.cumulativeSpent + tx.amount_units ≤ st.ledger.velocityWindowCap ∧
@@ -6789,7 +6809,8 @@ theorem policy_quorum_switching_cumulative_spend_and_replay_sound
         cases hStay
     | approveQuorum q tx tags ts =>
       unfold policyQuorumClusterStep at hStep
-      if h1 : ¬ (0 < st.threshold ∧ st.threshold ≤ q.length ∧ q.Nodup) then simp [h1] at hStep
+      if h1 : ¬ (0 < st.threshold ∧ st.threshold ≤ q.length ∧ q.Nodup ∧
+          (∀ p ∈ q, p < 256 ^ 2) ∧ tx.approver_bytes = q.flatMap (be 2) ∧ tx.quorum_bytes = q.flatMap (be 2)) then simp [h1] at hStep
       else if h2 : ¬ (tx.window_id = st.ledger.windowId ∧ tx.rolling_window_spent = st.ledger.cumulativeSpent) then
         simp [h1, h2] at hStep
       else if h3 : ¬ (st.ledger.cumulativeSpent + tx.amount_units ≤ st.ledger.velocityWindowCap ∧
@@ -6803,7 +6824,7 @@ theorem policy_quorum_switching_cumulative_spend_and_replay_sound
         cases hUpd : policyUpdateQuorumCustodians q tx tags ts st.custodians <;>
           simp [hUpd] at hStep
         rcases hStep with ⟨rfl, rfl⟩
-        have hQProps : 0 < st.threshold ∧ st.threshold ≤ q.length ∧ q.Nodup := Decidable.of_not_not h1
+        have hQProps : 0 < st.threshold ∧ st.threshold ≤ q.length ∧ q.Nodup := ⟨(Decidable.of_not_not h1).1, (Decidable.of_not_not h1).2.1, (Decidable.of_not_not h1).2.2.1⟩
         have hVelProps : st.ledger.cumulativeSpent + tx.amount_units ≤ st.ledger.velocityWindowCap ∧
             st.ledger.cumulativeSpent + tx.amount_units < 256 ^ 16 := Decidable.of_not_not h3
         simp only [Bool.or_eq_true, not_or] at h4
@@ -7143,8 +7164,8 @@ inductive CoZkCommittedPhase where
   | completed
   | aborted
 
-/-- Private verifier tape `(verifierCoin1, verifierCoin2, zkbooChallenge)` fixed independently of
-    the prover at enrollment and revealed only AFTER `freezeWires` commits all wires & 3 head views. -/
+/-- Enrollment and phase state. The three legacy verifier-tape fields are retained
+for compatibility; the operational challenge step derives fresh values from the frozen root. -/
 structure CoZkCommittedState where
   sessionTag : List UInt8
   statement : List UInt8
@@ -7193,6 +7214,50 @@ def cozkFreezeExecution (H : Hash) (s : CoZkCommittedState) (ex : CoZkExecution)
     headViews := headViews
     headCommits := hc }
 
+/-- Interpret the supplied head seeds as two additive masks; the third head is
+computed from the recorded execution. No caller supplies the residual head. -/
+def cozkHeadMask (seed : List UInt8) (i : Nat) : Tower128 :=
+  unpackTower 7 (BitVec.ofNat 128 (ofLE ((seed.drop (16 * i)).take 16)))
+
+def cozkHeadShare (w : Tower128) (seeds : Fin 3 → List UInt8) (i : Nat)
+    (j : Fin 3) : Tower128 :=
+  let a := cozkHeadMask (seeds ⟨0, by decide⟩) i
+  let b := cozkHeadMask (seeds ⟨1, by decide⟩) i
+  if j.val = 0 then a else if j.val = 1 then b else towerAdd 7 w (towerAdd 7 a b)
+
+theorem cozk_heads_reconstruct_recorded_wire (w : Tower128) (seeds : Fin 3 → List UInt8) (i : Nat) :
+    towerAdd 7 (towerAdd 7 (cozkHeadShare w seeds i ⟨0, by decide⟩)
+      (cozkHeadShare w seeds i ⟨1, by decide⟩)) (cozkHeadShare w seeds i ⟨2, by decide⟩) = w := by
+  simp only [cozkHeadShare, ↓reduceIte]
+  rw [towerAdd_comm 7 w, ← towerAdd_assoc, towerAdd_self_zero, towerZero_add]
+
+def cozkExecutionHead (ex : CoZkExecution) (seeds : Fin 3 → List UInt8)
+    (j : Fin 3) : List Tower128 :=
+  ex.wires.zipIdx |>.map (fun (w, i) => cozkHeadShare w seeds i j)
+
+def cozkBoundHeadViews (ex : CoZkExecution) (seeds : Fin 3 → List UInt8) :
+    Fin 3 → List UInt8 := fun j => cozkEncodeWires (cozkExecutionHead ex seeds j)
+
+/-- Fiat-Shamir challenges are functions of the frozen root and statement. -/
+def cozkFrozenCoin (H : Hash) (s : CoZkCommittedState) (f : CoZkFrozenExecution)
+    (lane : Nat) : Tower128 :=
+  let x := unpackTower 7 (BitVec.ofNat 128 (ofLE (H (encodeMultiFrame
+    [migrateRootDomain, s.statement, f.root, be 1 lane]))))
+  if x = towerZero 7 then towerOne 7 else x
+
+theorem cozk_frozen_coin_nonzero (H : Hash) (s : CoZkCommittedState)
+    (f : CoZkFrozenExecution) (lane : Nat) :
+    cozkFrozenCoin H s f lane ≠ towerZero 7 := by
+  unfold cozkFrozenCoin
+  dsimp only
+  split
+  · exact towerOne_ne_zero 7
+  · assumption
+
+def cozkFrozenChallenge (H : Hash) (s : CoZkCommittedState) (f : CoZkFrozenExecution) : Fin 3 :=
+  ⟨ofLE (H (encodeMultiFrame [migrateRootDomain, s.statement, f.root, [3]])) % 3,
+    Nat.mod_lt _ (by decide)⟩
+
 /-- Operational commit-before-challenge Co-ZK sacrifice step:
     1. Freezes circuit wires and all 3 ZKBoo head commitments BEFORE exposing coins/challenge;
     2. Reveals `(verifierCoin1, verifierCoin2, zkbooChallenge)`;
@@ -7205,11 +7270,13 @@ def cozkPreOpenCeremonyStep (H : Hash) (s : CoZkCommittedState) (i : CoZkCommitt
     match cozkRecordExecution s.circuit outputs s.initialWires with
     | none => .rejected { s with phase := .aborted } .preOpenSacrificeFailed
     | some ex =>
-      let f := cozkFreezeExecution H s ex headViews headSalts salt
+      let f := cozkFreezeExecution H s ex (cozkBoundHeadViews ex headViews) headSalts salt
       .accepted { s with phase := .committed f } (.committed f.root)
   | .committed f, .challenge =>
-    .accepted { s with phase := .challenged f s.verifierCoin1 s.verifierCoin2 s.zkbooChallenge }
-      (.challenge f.root s.verifierCoin1 s.verifierCoin2 s.zkbooChallenge)
+    .accepted { s with phase := (.challenged f (cozkFrozenCoin H s f 1)
+        (cozkFrozenCoin H s f 2) (cozkFrozenChallenge H s f)) }
+      (.challenge f.root (cozkFrozenCoin H s f 1) (cozkFrozenCoin H s f 2)
+        (cozkFrozenChallenge H s f))
   | .challenged f c₁ c₂ eChal, .verify rss =>
     if verifyRssActiveOpen rss = some 0 ∧
        batchDeviationPoly f.execution.errors c₁ = towerZero 7 ∧
@@ -7380,23 +7447,23 @@ theorem cozk_multiturn_operational_ceremony_sound (H : Hash)
     cozkCountPublicReleases (traceApprovedOutputs tr) ≤ 1 ∧
     (∀ root digest eChal v0 v1 hcHidden,
       .released root digest eChal v0 v1 hcHidden ∈ traceApprovedOutputs tr →
-      eChal = s₀.zkbooChallenge ∧
       ∃ outputs hv hs salt ex rss,
         cozkRecordExecution s₀.circuit outputs s₀.initialWires = some ex ∧
-        let f := cozkFreezeExecution H s₀ ex hv hs salt
+        let f := cozkFreezeExecution H s₀ ex (cozkBoundHeadViews ex hv) hs salt
+        eChal = cozkFrozenChallenge H s₀ f ∧
         verifyRssActiveOpen rss = some 0 ∧
-        batchDeviationPoly f.execution.errors s₀.verifierCoin1 = towerZero 7 ∧
-        batchDeviationPoly f.execution.errors s₀.verifierCoin2 = towerZero 7 ∧
+        batchDeviationPoly f.execution.errors (cozkFrozenCoin H s₀ f 1) = towerZero 7 ∧
+        batchDeviationPoly f.execution.errors (cozkFrozenCoin H s₀ f 2) = towerZero 7 ∧
         root = f.root ∧ digest = f.headsDigest ∧
         v0 = f.headViews eChal ∧ v1 = f.headViews (cozkNextParty eChal) ∧
         hcHidden = f.headCommits (cozkHiddenParty eChal)) := by
   have hFromVerified : ∀ (f : CoZkFrozenExecution) {st stf : CoZkCommittedState}
       {t : List (CoZkCommittedInput × Option CoZkPublicEvent)},
-      st.phase = .verified f s₀.zkbooChallenge →
+      st.phase = .verified f (cozkFrozenChallenge H s₀ f) →
       ValidCustodyTrace (cozkPreOpenCeremonyStep H) st t stf →
       cozkCountPublicReleases (traceApprovedOutputs t) ≤ 1 ∧
       ∀ r d e v0 v1 hc, .released r d e v0 v1 hc ∈ traceApprovedOutputs t →
-        e = s₀.zkbooChallenge ∧ r = f.root ∧ d = f.headsDigest ∧
+        e = (cozkFrozenChallenge H s₀ f) ∧ r = f.root ∧ d = f.headsDigest ∧
         v0 = f.headViews e ∧ v1 = f.headViews (cozkNextParty e) ∧
         hc = f.headCommits (cozkHiddenParty e) := by
     intro f st stf t hp ht
@@ -7425,14 +7492,14 @@ theorem cozk_multiturn_operational_ceremony_sound (H : Hash)
         exact ⟨Nat.zero_le _, fun r d e v0 v1 hc hm => False.elim (hTerm.2 r d e v0 v1 hc hm)⟩
   have hFromChallenged : ∀ (f : CoZkFrozenExecution) {st stf : CoZkCommittedState}
       {t : List (CoZkCommittedInput × Option CoZkPublicEvent)},
-      st.phase = .challenged f s₀.verifierCoin1 s₀.verifierCoin2 s₀.zkbooChallenge →
+      st.phase = .challenged f (cozkFrozenCoin H s₀ f 1) (cozkFrozenCoin H s₀ f 2) (cozkFrozenChallenge H s₀ f) →
       ValidCustodyTrace (cozkPreOpenCeremonyStep H) st t stf →
       cozkCountPublicReleases (traceApprovedOutputs t) ≤ 1 ∧
       ∀ r d e v0 v1 hc, .released r d e v0 v1 hc ∈ traceApprovedOutputs t →
         ∃ rss, verifyRssActiveOpen rss = some 0 ∧
-          batchDeviationPoly f.execution.errors s₀.verifierCoin1 = towerZero 7 ∧
-          batchDeviationPoly f.execution.errors s₀.verifierCoin2 = towerZero 7 ∧
-          e = s₀.zkbooChallenge ∧ r = f.root ∧ d = f.headsDigest ∧
+          batchDeviationPoly f.execution.errors (cozkFrozenCoin H s₀ f 1) = towerZero 7 ∧
+          batchDeviationPoly f.execution.errors (cozkFrozenCoin H s₀ f 2) = towerZero 7 ∧
+          e = (cozkFrozenChallenge H s₀ f) ∧ r = f.root ∧ d = f.headsDigest ∧
           v0 = f.headViews e ∧ v1 = f.headViews (cozkNextParty e) ∧
           hc = f.headCommits (cozkHiddenParty e) := by
     intro f st stf t hp ht
@@ -7447,7 +7514,7 @@ theorem cozk_multiturn_operational_ceremony_sound (H : Hash)
         split at hs
         · rename_i hChk
           rcases hs with ⟨rfl, rfl⟩
-          have hv := @hFromVerified f { a with phase := .verified f s₀.zkbooChallenge } _ rest rfl hr
+          have hv := @hFromVerified f { a with phase := .verified f (cozkFrozenChallenge H s₀ f) } _ rest rfl hr
           simp only [traceApprovedOutputs_cons_some, cozkCountPublicReleases]
           refine ⟨hv.1, ?_⟩
           intro r d e v0 v1 hc hm
@@ -7476,20 +7543,18 @@ theorem cozk_multiturn_operational_ceremony_sound (H : Hash)
         exact ⟨Nat.zero_le _, fun r d e v0 v1 hc hm => False.elim (hTerm.2 r d e v0 v1 hc hm)⟩
   have hFromCommitted : ∀ (f : CoZkFrozenExecution) {st stf : CoZkCommittedState}
       {t : List (CoZkCommittedInput × Option CoZkPublicEvent)},
-      st.verifierCoin1 = s₀.verifierCoin1 →
-      st.verifierCoin2 = s₀.verifierCoin2 →
-      st.zkbooChallenge = s₀.zkbooChallenge →
+      st.statement = s₀.statement →
       st.phase = .committed f →
       ValidCustodyTrace (cozkPreOpenCeremonyStep H) st t stf →
       cozkCountPublicReleases (traceApprovedOutputs t) ≤ 1 ∧
       ∀ r d e v0 v1 hc, .released r d e v0 v1 hc ∈ traceApprovedOutputs t →
         ∃ rss, verifyRssActiveOpen rss = some 0 ∧
-          batchDeviationPoly f.execution.errors s₀.verifierCoin1 = towerZero 7 ∧
-          batchDeviationPoly f.execution.errors s₀.verifierCoin2 = towerZero 7 ∧
-          e = s₀.zkbooChallenge ∧ r = f.root ∧ d = f.headsDigest ∧
+          batchDeviationPoly f.execution.errors (cozkFrozenCoin H s₀ f 1) = towerZero 7 ∧
+          batchDeviationPoly f.execution.errors (cozkFrozenCoin H s₀ f 2) = towerZero 7 ∧
+          e = (cozkFrozenChallenge H s₀ f) ∧ r = f.root ∧ d = f.headsDigest ∧
           v0 = f.headViews e ∧ v1 = f.headViews (cozkNextParty e) ∧
           hc = f.headCommits (cozkHiddenParty e) := by
-    intro f st stf t hc1 hc2 hzk hp ht
+    intro f st stf t hstmt hp ht
     induction ht with
     | nil => exact ⟨Nat.zero_le _, fun _ _ _ _ _ _ hm => by simp [traceApprovedOutputs] at hm⟩
     | @consAccepted a b _ inp ev rest hs hr _ =>
@@ -7498,8 +7563,8 @@ theorem cozk_multiturn_operational_ceremony_sound (H : Hash)
       cases inp <;> simp at hs
       rcases hs with ⟨rfl, rfl⟩
       have hCh := @hFromChallenged f
-        { a with phase := .challenged f a.verifierCoin1 a.verifierCoin2 a.zkbooChallenge } _ rest
-        (by simp [hc1, hc2, hzk]) hr
+        { a with phase := (.challenged f (cozkFrozenCoin H a f 1) (cozkFrozenCoin H a f 2) (cozkFrozenChallenge H a f)) } _ rest
+        (by simp [cozkFrozenCoin, cozkFrozenChallenge, hstmt]) hr
       simp only [traceApprovedOutputs_cons_some, cozkCountPublicReleases]
       refine ⟨hCh.1, ?_⟩
       intro r d e v0 v1 hc hm
@@ -7527,16 +7592,16 @@ theorem cozk_multiturn_operational_ceremony_sound (H : Hash)
       | some ex =>
         simp only [hRec, CustodyStepOutcome.accepted.injEq] at hs
         rcases hs with ⟨rfl, rfl⟩
-        have hCm := @hFromCommitted (cozkFreezeExecution H s₀ ex hv hsSalts salt)
-          { s₀ with phase := .committed (cozkFreezeExecution H s₀ ex hv hsSalts salt) }
-          _ rest rfl rfl rfl rfl hr
+        have hCm := @hFromCommitted (cozkFreezeExecution H s₀ ex (cozkBoundHeadViews ex hv) hsSalts salt)
+          { s₀ with phase := .committed (cozkFreezeExecution H s₀ ex (cozkBoundHeadViews ex hv) hsSalts salt) }
+          _ rest rfl rfl hr
         simp only [traceApprovedOutputs_cons_some, cozkCountPublicReleases]
         refine ⟨hCm.1, ?_⟩
         intro r d e v0 v1 hc hm
         rcases List.mem_cons.mp hm with hEq | hTail
         · cases hEq
         · obtain ⟨rss, hRss, hB1, hB2, he, hr', hd', hv0', hv1', hhc'⟩ := hCm.2 r d e v0 v1 hc hTail
-          exact ⟨he, outputs, hv, hsSalts, salt, ex, rss, hRec, hRss, hB1, hB2, hr', hd', hv0', hv1', hhc'⟩
+          exact ⟨outputs, hv, hsSalts, salt, ex, rss, hRec, he, hRss, hB1, hB2, hr', hd', hv0', hv1', hhc'⟩
     | _ => simp at hs
   | @consRejected _ st' _ inp err rest hs hr =>
     unfold cozkPreOpenCeremonyStep at hs
@@ -7552,67 +7617,48 @@ theorem cozk_multiturn_operational_ceremony_sound (H : Hash)
     simp only [traceApprovedOutputs_cons_none, hTerm.1]
     exact ⟨Nat.zero_le _, fun r d e v0 v1 hc hm => False.elim (hTerm.2 r d e v0 v1 hc hm)⟩
 
-set_option maxHeartbeats 800000 in
-/-- Inhabitedness witness for `cozkPreOpenCeremonyStep` executing an honest 1-gate `Tower128`
-    circuit (`0 * 0 = 0`) under any hash `H` (e.g. `cshake256Bytes []`), committing 3 ZKBoo head views
-    before challenge disclosure, passing the sacrifice barrier, and releasing the challenged 2-of-3 head views. -/
+/-- Any hash admits an honest freeze/challenge/verify/release trace. Challenges
+and released heads are derived from the recorded execution, not preset fixture bytes. -/
 theorem inhabited_cozk_operational_ceremony_trace (H : Hash) :
-    let s₀ : CoZkCommittedState :=
-      { sessionTag := [0x01]
-        statement := [0x02]
-        initialWires := [towerZero 7, towerZero 7]
-        circuit := [⟨0, 1⟩]
-        verifierCoin1 := towerZero 7
-        verifierCoin2 := towerOne 7
-        zkbooChallenge := ⟨1, by decide⟩ }
-    let _hv : Fin 3 → List UInt8 := fun j => [UInt8.ofNat (0xA0 + j.val)]
-    let _hs : Fin 3 → List UInt8 := fun j => [UInt8.ofNat (0xB0 + j.val)]
-    let _rssZero : RssActiveOpenMsg := ⟨0, 0, 0, 0, 0, 0⟩
-    ∃ tr sf root digest hcHidden,
-      ValidCustodyTrace (cozkPreOpenCeremonyStep H) s₀ tr sf ∧
-      .released root digest ⟨1, by decide⟩ [0xA1] [0xA2] hcHidden ∈ traceApprovedOutputs tr := by
-  intro s₀ _hv _hs _rssZero
-  have hRec : cozkRecordExecution s₀.circuit [towerZero 7] s₀.initialWires =
-      some ⟨[towerZero 7, towerZero 7, towerZero 7], [towerZero 7]⟩ := by
-    have hMul0 : towerMul 7 (towerZero 7) (towerZero 7) = towerZero 7 := by decide
-    have hAdd0 : towerAdd 7 (towerZero 7) (towerZero 7) = towerZero 7 := by decide
-    simp [cozkRecordExecution, s₀, hMul0]
-  let ex : CoZkExecution := ⟨[towerZero 7, towerZero 7, towerZero 7], [towerZero 7]⟩
-  let f := cozkFreezeExecution H s₀ ex _hv _hs [0x99]
+    ∃ s₀ tr sf root digest e v0 v1 hc,
+      s₀.phase = .awaiting ∧ ValidCustodyTrace (cozkPreOpenCeremonyStep H) s₀ tr sf ∧
+      .released root digest e v0 v1 hc ∈ traceApprovedOutputs tr := by
+  let s₀ : CoZkCommittedState :=
+    { sessionTag := [1], statement := [2], initialWires := [], circuit := [],
+      verifierCoin1 := towerZero 7, verifierCoin2 := towerZero 7 }
+  let hv : Fin 3 → List UInt8 := fun _ => []
+  let ex : CoZkExecution := ⟨[], []⟩
+  let f := cozkFreezeExecution H s₀ ex (cozkBoundHeadViews ex hv) hv []
   let s1 := { s₀ with phase := .committed f }
-  let s2 := { s1 with phase := .challenged f s₀.verifierCoin1 s₀.verifierCoin2 s₀.zkbooChallenge }
-  let s3 := { s2 with phase := .verified f s₀.zkbooChallenge }
+  let c1 := cozkFrozenCoin H s1 f 1
+  let c2 := cozkFrozenCoin H s1 f 2
+  let e := cozkFrozenChallenge H s1 f
+  let s2 := { s1 with phase := .challenged f c1 c2 e }
+  let s3 := { s2 with phase := .verified f e }
   let s4 := { s3 with phase := .completed }
-  have hStep1 : cozkPreOpenCeremonyStep H s₀ (.freezeWires [towerZero 7] _hv _hs [0x99]) =
-      .accepted s1 (.committed f.root) := by
-    simp only [cozkPreOpenCeremonyStep, s₀] at *
-    rw [hRec]
-  have hStep2 : cozkPreOpenCeremonyStep H s1 .challenge =
-      .accepted s2 (.challenge f.root s₀.verifierCoin1 s₀.verifierCoin2 s₀.zkbooChallenge) := rfl
-  have hStep3 : cozkPreOpenCeremonyStep H s2 (.verify _rssZero) =
+  let rss : RssActiveOpenMsg := ⟨0, 0, 0, 0, 0, 0⟩
+  let ev := CoZkPublicEvent.released f.root f.headsDigest e
+    (f.headViews e) (f.headViews (cozkNextParty e)) (f.headCommits (cozkHiddenParty e))
+  have h1 : cozkPreOpenCeremonyStep H s₀ (.freezeWires [] hv hv []) =
+      .accepted s1 (.committed f.root) := rfl
+  have h2 : cozkPreOpenCeremonyStep H s1 .challenge =
+      .accepted s2 (.challenge f.root c1 c2 e) := rfl
+  have h3 : cozkPreOpenCeremonyStep H s2 (.verify rss) =
       .accepted s3 (.verified f.root) := by
-    have hfErr : f.execution.errors = [towerZero 7] := rfl
-    have hRss : verifyRssActiveOpen _rssZero = some 0 := by decide
-    have hB1 : batchDeviationPoly [towerZero 7] (towerZero 7) = towerZero 7 := by decide
-    have hB2 : batchDeviationPoly [towerZero 7] (towerOne 7) = towerZero 7 := by decide
-    unfold cozkPreOpenCeremonyStep
-    dsimp only [s2, s1]
-    rw [hfErr]
-    rw [ite_eq_left ⟨hRss, by simpa [s₀] using hB1, by simpa [s₀] using hB2⟩]
-  have hStep4 : cozkPreOpenCeremonyStep H s3 .release =
-      .accepted s4 (.released f.root f.headsDigest ⟨1, by decide⟩ [0xA1] [0xA2]
-        (f.headCommits ⟨0, by decide⟩)) := by
-    simp only [cozkPreOpenCeremonyStep, s3, s2, s1, s₀, f, cozkFreezeExecution, _hv,
-      cozkNextParty, cozkHiddenParty]
-    rfl
-  refine ⟨[(.freezeWires [towerZero 7] _hv _hs [0x99], some (.committed f.root)),
-           (.challenge, some (.challenge f.root s₀.verifierCoin1 s₀.verifierCoin2 s₀.zkbooChallenge)),
-           (.verify _rssZero, some (.verified f.root)),
-           (.release, some (.released f.root f.headsDigest ⟨1, by decide⟩ [0xA1] [0xA2]
-             (f.headCommits ⟨0, by decide⟩)))],
-          s4, f.root, f.headsDigest, f.headCommits ⟨0, by decide⟩,
-          .consAccepted hStep1 (.consAccepted hStep2 (.consAccepted hStep3 (.consAccepted hStep4 (.nil s4)))),
-          by simp [traceApprovedOutputs]⟩
+    have hr : verifyRssActiveOpen rss = some 0 := by decide
+    have hz (c : Tower128) : batchDeviationPoly [] c = towerZero 7 := by
+      change towerAdd 7 (towerZero 7) (towerMul 7 c (towerZero 7)) = towerZero 7
+      rw [towerMul_zero, towerAdd_zero]
+    change (if verifyRssActiveOpen rss = some 0 ∧ batchDeviationPoly [] c1 = towerZero 7 ∧
+        batchDeviationPoly [] c2 = towerZero 7 then _ else _) = _
+    rw [ite_eq_left ⟨hr, hz c1, hz c2⟩]
+  have h4 : cozkPreOpenCeremonyStep H s3 .release = .accepted s4 ev := rfl
+  refine ⟨s₀, [(.freezeWires [] hv hv [], some (.committed f.root)),
+    (.challenge, some (.challenge f.root c1 c2 e)), (.verify rss, some (.verified f.root)),
+    (.release, some ev)], s4, f.root, f.headsDigest, e, f.headViews e, f.headViews (cozkNextParty e),
+    f.headCommits (cozkHiddenParty e),
+    rfl, .consAccepted h1 (.consAccepted h2 (.consAccepted h3 (.consAccepted h4 (.nil s4)))), ?_⟩
+  simp [traceApprovedOutputs, ev]
 
 /-! ### §C. Operational Rust-Aligned 2-Lane Polynomial-Basis FTS SPN, Rushing-Abort Poisoning & Domain-Prefixed Signing -/
 
@@ -9108,13 +9154,10 @@ theorem tooth_cozk_substitution_cannot_accept (H : Hash)
 
 /-- An actual four-transition ceremony reaches a release from the initial phase. -/
 theorem inhabited_cozk_reachable_release (H : Hash) :
-    ∃ (s₀ : CoZkCommittedState), ∃ tr sf root digest hcHidden,
-      s₀.phase = .awaiting ∧
-      ValidCustodyTrace (cozkPreOpenCeremonyStep H) s₀ tr sf ∧
-      .released root digest ⟨1, by decide⟩ [0xA1] [0xA2] hcHidden ∈ traceApprovedOutputs tr := by
-  obtain ⟨tr, sf, root, digest, hcHidden, hTr, hRelease⟩ :=
-    inhabited_cozk_operational_ceremony_trace H
-  exact ⟨_, tr, sf, root, digest, hcHidden, rfl, hTr, hRelease⟩
+    ∃ (s₀ : CoZkCommittedState), ∃ tr sf root digest e v0 v1 hc,
+      s₀.phase = .awaiting ∧ ValidCustodyTrace (cozkPreOpenCeremonyStep H) s₀ tr sf ∧
+      .released root digest e v0 v1 hc ∈ traceApprovedOutputs tr :=
+  inhabited_cozk_operational_ceremony_trace H
 
 #verify_inhabited cozk_multiturn_operational_ceremony_sound inhabited_cozk_reachable_release
 #tooth_pair cozk_multiturn_operational_ceremony_sound vs tooth_cozk_substitution_cannot_accept

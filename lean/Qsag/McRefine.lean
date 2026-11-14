@@ -2297,4 +2297,740 @@ theorem ct_memzero_arm_nonempty_calls_kernel (fuel : Nat) (s : Arm64State)
   rw [beq_false_of_ne nonempty]
   rfl
 
+
+/-! Current source-build refinement, with explicit live instruction budgets.
+Historical challenge declarations above retain their original byte bindings. -/
+
+def current_ctEq32X86Prog : List (DecodedInstr X86Instr) := [
+  ⟨0, 3, .loadGpr 8 true 0 (.baseDisp 7 0)⟩,
+  ⟨3, 3, .aluLoad64 .xorOp 0 (.baseDisp 6 0)⟩,
+  ⟨6, 4, .loadGpr 8 true 1 (.baseDisp 7 8)⟩,
+  ⟨10, 4, .aluLoad64 .xorOp 1 (.baseDisp 6 8)⟩,
+  ⟨14, 4, .loadGpr 8 true 2 (.baseDisp 7 16)⟩,
+  ⟨18, 4, .aluLoad64 .xorOp 2 (.baseDisp 6 16)⟩,
+  ⟨22, 4, .loadGpr 8 true 8 (.baseDisp 7 24)⟩,
+  ⟨26, 4, .aluLoad64 .xorOp 8 (.baseDisp 6 24)⟩,
+  ⟨30, 3, .aluRegReg .orOp true 0 1⟩,
+  ⟨33, 3, .aluRegReg .orOp true 2 8⟩,
+  ⟨36, 3, .aluRegReg .orOp true 0 2⟩,
+  ⟨39, 3, .movRegReg true 1 0⟩,
+  ⟨42, 3, .negReg true 1⟩,
+  ⟨45, 3, .aluRegReg .orOp true 0 1⟩,
+  ⟨48, 4, .shiftImm .shr true 0 63⟩,
+  ⟨52, 3, .aluImm .xorOp false 0 1⟩,
+  ⟨55, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨57, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨59, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨62, 2, .aluRegReg .xorOp false 7 7⟩,
+  ⟨64, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨66, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨68, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨70, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨73, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨76, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨79, 3, .aluRegReg .xorOp false 11 11⟩,
+  ⟨82, 1, .ret⟩]
+
+theorem current_ctEq32X86_decodes :
+    (findSliceByNameBytes currentX86ExtractedSlices ctEq32X86Name).bind (fun sl => decodeX86Stream sl.code)
+      = some current_ctEq32X86Prog := by
+  decide +kernel
+
+theorem current_ctEq32X86_run (k : Nat) (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    (runX86 current_ctEq32X86Prog (k + 28)
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨82, ⟨maskGprWidth false (((ctEq32WordX86 m r7 r6 ||| (0 - ctEq32WordX86 m r7 r6)) >>>
+              UInt64.ofNat 63) ^^^ 1), 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+        y, false, false, true, dy, true, m⟩ := by
+  iterate 28
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_load64, stepX86_xorLoad64, stepX86_orRR, stepX86_movRR, stepX86_neg, stepX86_shr64,
+      stepX86_xorImm, stepX86_xorRR, stepX86_ret, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
+      b16get_0, b16get_1, b16get_2, b16get_6, b16get_7, b16get_8,
+      b16set_6, b16set_7, b16set_0, b16set_1, b16set_2, b16set_8]
+  refine Eq.trans (runX86_halted_fst _ _ _ rfl) ?_
+  rfl
+
+theorem current_ct_eq_32_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices ctEq32X86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 28 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        (runX86 prog fuel s).1.gpr.get 0 =
+          (if ∀ i : Nat, i < 32 →
+              s.mem (s.gpr.get 7 + UInt64.ofNat i) = s.mem (s.gpr.get 6 + UInt64.ofNat i)
+            then 1 else 0) ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 2 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 8 = 0 := by
+  obtain ⟨sl, hf, hd⟩ := slice_decode_x86 current_ctEq32X86_decodes
+  refine ⟨sl, current_ctEq32X86Prog, hf, hd, ?_⟩
+  intro s fuel hpc hh hfuel
+  obtain ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    y, cf, o, zf, dy, hlt, m⟩ := s
+  have hpc' : pc = 0 := hpc
+  have hh' : hlt = false := hh
+  subst hpc' hh'
+  obtain ⟨k, rfl⟩ := Nat.exists_eq_add_of_le hfuel
+  rw [Nat.add_comm 28 k, current_ctEq32X86_run]
+  refine ⟨rfl, ?_, rfl, rfl, rfl, rfl⟩
+  show maskGprWidth false (((ctEq32WordX86 m r7 r6 ||| (0 - ctEq32WordX86 m r7 r6)) >>>
+      UInt64.ofNat 63) ^^^ 1) =
+    if ∀ i : Nat, i < 32 → m (r7 + UInt64.ofNat i) = m (r6 + UInt64.ofNat i) then 1 else 0
+  have hiff : ctEq32WordX86 m r7 r6 = 0 ↔
+      ∀ i : Nat, i < 32 → m (r7 + UInt64.ofNat i) = m (r6 + UInt64.ofNat i) :=
+    xorOr4_eq_zero_iff m r7 r6 _ _ _ _ _ _ _ _ rfl rfl rfl rfl rfl rfl rfl rfl
+  rw [zeroTest64_masked]
+  if hW : ctEq32WordX86 m r7 r6 = 0 then
+    rw [ite_eq_left hW, ite_eq_left (hiff.mp hW)]
+  else
+    rw [ite_eq_right hW, ite_eq_right (fun h => hW (hiff.mpr h))]
+
+def current_goldAddX86Prog : List (DecodedInstr X86Instr) := [
+  ⟨0, 3, .movRegReg true 0 7⟩,
+  ⟨3, 3, .aluRegReg .add true 0 6⟩,
+  ⟨6, 3, .aluRegReg .sbb false 8 8⟩,
+  ⟨9, 3, .aluRegReg .add true 0 8⟩,
+  ⟨12, 3, .aluRegReg .sbb false 10 10⟩,
+  ⟨15, 3, .aluRegReg .add true 0 10⟩,
+  ⟨18, 6, .movImm false 9 4294967295⟩,
+  ⟨24, 3, .movRegReg true 8 0⟩,
+  ⟨27, 3, .aluRegReg .add true 8 9⟩,
+  ⟨30, 3, .aluRegReg .sbb true 1 1⟩,
+  ⟨33, 3, .aluRegReg .andOp true 1 9⟩,
+  ⟨36, 3, .aluRegReg .add true 0 1⟩,
+  ⟨39, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨41, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨44, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨47, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨50, 2, .aluRegReg .xorOp false 7 7⟩,
+  ⟨52, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨54, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨56, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨58, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨61, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨64, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨67, 3, .aluRegReg .xorOp false 11 11⟩,
+  ⟨70, 1, .ret⟩]
+
+theorem current_goldAddX86_decodes :
+    (findSliceByNameBytes currentX86ExtractedSlices goldAddX86Name).bind
+      (fun sl => decodeX86Stream sl.code) = some current_goldAddX86Prog := by
+  decide +kernel
+
+theorem current_goldAddX86_run (k : Nat) (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    (runX86 current_goldAddX86Prog (k + 25)
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨70, ⟨goldAddMc r7 r6, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+        y, false, false, true, dy, true, m⟩ := by
+  iterate 25
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_movRR, stepX86_addRR64, stepX86_sbbRR, stepX86_andRR, stepX86_movImm,
+      stepX86_xorRR, stepX86_ret, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
+      sbb32_self, sbb64_self, uint64_evalAdd_eq,
+      b16get_0, b16get_1, b16get_6, b16get_7, b16get_8, b16get_9, b16get_10,
+      b16set_2, b16set_6, b16set_7, b16set_11, b16get_2, b16get_11, b16set_0, b16set_1, b16set_8, b16set_9, b16set_10]
+  exact runX86_halted_fst _ _ _ rfl
+
+theorem current_goldilocks_add_ct_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices goldAddX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 25 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        ((runX86 prog fuel s).1.gpr.get 0).toNat =
+          ((s.gpr.get 7).toNat + (s.gpr.get 6).toNat) % goldilocksPrime ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 8 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 9 = 0 ∧ (runX86 prog fuel s).1.gpr.get 10 = 0 := by
+  obtain ⟨sl, hf, hd⟩ := slice_decode_x86 current_goldAddX86_decodes
+  refine ⟨sl, current_goldAddX86Prog, hf, hd, ?_⟩
+  intro s fuel hpc hh hfuel
+  obtain ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    y, cf, o, zf, dy, hlt, m⟩ := s
+  have hpc' : pc = 0 := hpc
+  have hh' : hlt = false := hh
+  subst hpc' hh'
+  obtain ⟨k, rfl⟩ := Nat.exists_eq_add_of_le hfuel
+  rw [Nat.add_comm 25 k, current_goldAddX86_run]
+  exact ⟨rfl, goldAddMc_toNat r7 r6, rfl, rfl, rfl, rfl, rfl⟩
+
+def current_goldSubX86Prog : List (DecodedInstr X86Instr) := [
+  ⟨0, 6, .movImm false 9 4294967295⟩,
+  ⟨6, 3, .movRegReg true 0 7⟩,
+  ⟨9, 3, .movRegReg true 8 0⟩,
+  ⟨12, 3, .aluRegReg .add true 8 9⟩,
+  ⟨15, 3, .aluRegReg .sbb true 1 1⟩,
+  ⟨18, 3, .aluRegReg .andOp true 1 9⟩,
+  ⟨21, 3, .aluRegReg .add true 0 1⟩,
+  ⟨24, 3, .movRegReg true 8 6⟩,
+  ⟨27, 3, .aluRegReg .add true 8 9⟩,
+  ⟨30, 3, .aluRegReg .sbb true 1 1⟩,
+  ⟨33, 3, .aluRegReg .andOp true 1 9⟩,
+  ⟨36, 3, .aluRegReg .add true 6 1⟩,
+  ⟨39, 3, .aluRegReg .sub true 0 6⟩,
+  ⟨42, 3, .aluRegReg .sbb true 8 8⟩,
+  ⟨45, 10, .movImm true 10 18446744069414584321⟩,
+  ⟨55, 3, .aluRegReg .andOp true 8 10⟩,
+  ⟨58, 3, .aluRegReg .add true 0 8⟩,
+  ⟨61, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨63, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨65, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨68, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨71, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨74, 2, .aluRegReg .xorOp false 7 7⟩,
+  ⟨76, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨78, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨80, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨82, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨85, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨88, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨91, 3, .aluRegReg .xorOp false 11 11⟩,
+  ⟨94, 1, .ret⟩]
+
+theorem current_goldSubX86_decodes :
+    (findSliceByNameBytes currentX86ExtractedSlices goldSubX86Name).bind
+      (fun sl => decodeX86Stream sl.code) = some current_goldSubX86Prog := by
+  decide +kernel
+
+theorem current_goldSubX86_run (k : Nat) (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    (runX86 current_goldSubX86Prog (k + 31)
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨94, ⟨goldSubMc r7 r6, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+        y, false, false, true, dy, true, m⟩ := by
+  iterate 31
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_movRR, stepX86_addRR64, stepX86_subRR64, stepX86_sbbRR, stepX86_andRR,
+      stepX86_movImm, stepX86_xorRR, stepX86_ret, maskGprWidth_true, mask32_xor_self,
+      u64_zero_beq_zero, sbb64_self, uint64_evalAdd_eq, uint64_evalSub_eq,
+      b16get_0, b16get_1, b16get_6, b16get_7, b16get_8, b16get_9, b16get_10,
+      b16set_2, b16set_7, b16set_11, b16get_2, b16get_11, b16set_0, b16set_1, b16set_6, b16set_8, b16set_9, b16set_10]
+  exact runX86_halted_fst _ _ _ rfl
+
+theorem current_goldilocks_sub_ct_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices goldSubX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 31 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        ((runX86 prog fuel s).1.gpr.get 0).toNat =
+          ((s.gpr.get 7).toNat + goldilocksPrime - (s.gpr.get 6).toNat % goldilocksPrime) %
+            goldilocksPrime ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 6 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 8 = 0 ∧ (runX86 prog fuel s).1.gpr.get 9 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 10 = 0 := by
+  obtain ⟨sl, hf, hd⟩ := slice_decode_x86 current_goldSubX86_decodes
+  refine ⟨sl, current_goldSubX86Prog, hf, hd, ?_⟩
+  intro s fuel hpc hh hfuel
+  obtain ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    y, cf, o, zf, dy, hlt, m⟩ := s
+  have hpc' : pc = 0 := hpc
+  have hh' : hlt = false := hh
+  subst hpc' hh'
+  obtain ⟨k, rfl⟩ := Nat.exists_eq_add_of_le hfuel
+  rw [Nat.add_comm 31 k, current_goldSubX86_run]
+  exact ⟨rfl, goldSubMc_toNat r7 r6, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+def current_goldMulX86Prog : List (DecodedInstr X86Instr) := [
+  ⟨0, 3, .movRegReg true 2 7⟩,
+  ⟨3, 5, .mulx 1 0 6⟩,
+  ⟨8, 3, .movRegReg true 2 1⟩,
+  ⟨11, 4, .shiftImm .shr true 1 32⟩,
+  ⟨15, 2, .movRegReg false 2 2⟩,
+  ⟨17, 3, .aluRegReg .sub true 0 1⟩,
+  ⟨20, 3, .aluRegReg .sbb false 8 8⟩,
+  ⟨23, 3, .aluRegReg .sub true 0 8⟩,
+  ⟨26, 3, .movRegReg true 9 2⟩,
+  ⟨29, 4, .shiftImm .shl true 9 32⟩,
+  ⟨33, 3, .aluRegReg .sub true 9 2⟩,
+  ⟨36, 3, .aluRegReg .add true 0 9⟩,
+  ⟨39, 3, .aluRegReg .sbb false 8 8⟩,
+  ⟨42, 3, .aluRegReg .add true 0 8⟩,
+  ⟨45, 6, .movImm false 9 4294967295⟩,
+  ⟨51, 3, .movRegReg true 8 0⟩,
+  ⟨54, 3, .aluRegReg .add true 8 9⟩,
+  ⟨57, 3, .aluRegReg .sbb true 1 1⟩,
+  ⟨60, 3, .aluRegReg .andOp true 1 9⟩,
+  ⟨63, 3, .aluRegReg .add true 0 1⟩,
+  ⟨66, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨68, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨70, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨73, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨76, 2, .aluRegReg .xorOp false 7 7⟩,
+  ⟨78, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨80, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨82, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨84, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨87, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨90, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨93, 3, .aluRegReg .xorOp false 11 11⟩,
+  ⟨96, 1, .ret⟩]
+
+theorem current_goldMulX86_decodes :
+    (findSliceByNameBytes currentX86ExtractedSlices goldMulX86Name).bind
+      (fun sl => decodeX86Stream sl.code) = some current_goldMulX86Prog := by
+  decide +kernel
+
+theorem current_goldMulX86_run (k : Nat) (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    (runX86 current_goldMulX86Prog (k + 33)
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨96, ⟨goldMulMc r7 r6, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+        y, false, false, true, dy, true, m⟩ := by
+  iterate 33
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_movRR, stepX86_mulx, stepX86_shr64, stepX86_shl64, stepX86_addRR64,
+      stepX86_subRR64, stepX86_sbbRR, stepX86_andRR, stepX86_movImm, stepX86_xorRR, stepX86_ret,
+      maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero, sbb32_self, sbb64_self,
+      uint64_evalAdd_eq, uint64_evalSub_eq,
+      b16get_0, b16get_1, b16get_2, b16get_6, b16get_7, b16get_8, b16get_9,
+      b16set_6, b16set_7, b16set_10, b16set_11, b16get_10, b16get_11, b16set_0, b16set_1, b16set_2, b16set_8, b16set_9]
+  exact runX86_halted_fst _ _ _ rfl
+
+theorem current_goldilocks_mul_ct_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices goldMulX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 33 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        ((runX86 prog fuel s).1.gpr.get 0).toNat =
+          ((s.gpr.get 7).toNat * (s.gpr.get 6).toNat) % goldilocksPrime ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 1 = 0 ∧ (runX86 prog fuel s).1.gpr.get 2 = 0 ∧
+        (runX86 prog fuel s).1.gpr.get 8 = 0 ∧ (runX86 prog fuel s).1.gpr.get 9 = 0 := by
+  obtain ⟨sl, hf, hd⟩ := slice_decode_x86 current_goldMulX86_decodes
+  refine ⟨sl, current_goldMulX86Prog, hf, hd, ?_⟩
+  intro s fuel hpc hh hfuel
+  obtain ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    y, cf, o, zf, dy, hlt, m⟩ := s
+  have hpc' : pc = 0 := hpc
+  have hh' : hlt = false := hh
+  subst hpc' hh'
+  obtain ⟨k, rfl⟩ := Nat.exists_eq_add_of_le hfuel
+  rw [Nat.add_comm 33 k, current_goldMulX86_run]
+  exact ⟨rfl, goldMulMc_toNat r7 r6, rfl, rfl, rfl, rfl, rfl⟩
+
+def current_goldMulArmProg : List (DecodedInstr Arm64Instr) := [
+  ⟨0, 4, .mulOp false 2 0 1⟩,
+  ⟨4, 4, .mulOp true 3 0 1⟩,
+  ⟨8, 4, .ubfm true 4 3 32 63⟩,
+  ⟨12, 4, .aluImm .andOp true 5 3 4294967295⟩,
+  ⟨16, 4, .movWide true false 6 0 0⟩,
+  ⟨20, 4, .aluReg .subs true 2 2 4 0 0⟩,
+  ⟨24, 4, .aluReg .sbc true 7 31 31 0 0⟩,
+  ⟨28, 4, .aluReg .andOp true 7 7 6 0 0⟩,
+  ⟨32, 4, .aluReg .sub true 2 2 7 0 0⟩,
+  ⟨36, 4, .ubfm true 8 5 32 31⟩,
+  ⟨40, 4, .aluReg .sub true 8 8 5 0 0⟩,
+  ⟨44, 4, .aluReg .adds true 2 2 8 0 0⟩,
+  ⟨48, 4, .aluReg .adc true 7 31 31 0 0⟩,
+  ⟨52, 4, .aluReg .sub true 7 31 7 0 0⟩,
+  ⟨56, 4, .aluReg .andOp true 7 7 6 0 0⟩,
+  ⟨60, 4, .aluReg .add true 2 2 7 0 0⟩,
+  ⟨64, 4, .aluReg .adds true 8 2 6 0 0⟩,
+  ⟨68, 4, .aluReg .adc true 7 31 31 0 0⟩,
+  ⟨72, 4, .aluReg .sub true 7 31 7 0 0⟩,
+  ⟨76, 4, .aluReg .andOp true 7 7 6 0 0⟩,
+  ⟨80, 4, .aluReg .add true 0 2 7 0 0⟩,
+  ⟨84, 4, .movWide false true 1 0 0⟩,
+  ⟨88, 4, .movWide false true 2 0 0⟩,
+  ⟨92, 4, .movWide false true 3 0 0⟩,
+  ⟨96, 4, .movWide false true 4 0 0⟩,
+  ⟨100, 4, .movWide false true 5 0 0⟩,
+  ⟨104, 4, .movWide false true 6 0 0⟩,
+  ⟨108, 4, .movWide false true 7 0 0⟩,
+  ⟨112, 4, .movWide false true 8 0 0⟩,
+  ⟨116, 4, .ret⟩]
+
+theorem current_goldMulArm_decodes :
+    (findSliceByNameBytes currentAarch64ExtractedSlices goldMulArmName).bind
+      (fun sl => decodeArm64Stream sl.code) = some current_goldMulArmProg := by
+  decide +kernel
+
+theorem current_goldMulArm_run (k : Nat) (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (hi : Bank16 UInt64) (v : Bank32 Vec128) (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    (runArm64 current_goldMulArmProg (k + 30)
+      ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        v, cf, zf, dit, false, m⟩).1 =
+      ⟨116, ⟨⟨armCanon (goldMulArmPre r0 r1), 0, 0, 0, 0, 0, 0, 0, 0, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        v, decide ((goldMulArmPre r0 r1).toNat + (0xFFFFFFFF : UInt64).toNat ≥ 0x10000000000000000),
+        goldMulArmPre r0 r1 + 0xFFFFFFFF == 0, dit, true, m⟩ := by
+  iterate 30
+    refine Eq.trans (runArm64_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepArm64_mul, stepArm64_umulh, stepArm64_lsr64, stepArm64_lsl32, stepArm64_andImm,
+      stepArm64_andRR, stepArm64_movn32, stepArm64_addRR, stepArm64_addsRR, stepArm64_subsRR,
+      stepArm64_subRR, stepArm64_adcRR, stepArm64_sbcRR, stepArm64_movz, stepArm64_ret,
+      u64_shl_zero_zero, uint64_evalSub_eq, uint64_evalAdd_eq, armAdcZero, armSbcZero, u64_neg_cond,
+      movn32_zero, condAll_and_eps, condNone_and_eps,
+      armGet_31, armGet_0, armGet_1, armGet_2, armGet_3, armGet_4, armGet_5, armGet_6, armGet_7, armGet_8,
+      armSet_1, armSet_0, armSet_2, armSet_3, armSet_4, armSet_5, armSet_6, armSet_7, armSet_8]
+  exact runArm64_halted_fst _ _ _ rfl
+
+theorem current_goldilocks_mul_ct_aarch64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes currentAarch64ExtractedSlices goldMulArmName = some slice ∧
+      decodeArm64Stream slice.code = some prog ∧
+      ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 30 ≤ fuel →
+        (runArm64 prog fuel s).1.halted = true ∧
+        ((runArm64 prog fuel s).1.gpr.get 0).toNat =
+          ((s.gpr.get 0).toNat * (s.gpr.get 1).toNat) % goldilocksPrime ∧
+        (runArm64 prog fuel s).1.mem = s.mem ∧
+        (∀ r : Nat, 2 ≤ r → r ≤ 8 → (runArm64 prog fuel s).1.gpr.get r = 0) := by
+  obtain ⟨sl, hf, hd⟩ := slice_decode_arm64 current_goldMulArm_decodes
+  refine ⟨sl, current_goldMulArmProg, hf, hd, ?_⟩
+  intro s fuel hpc hh hfuel
+  obtain ⟨pc, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+    v, cf, zf, dit, hlt, m⟩ := s
+  have hpc' : pc = 0 := hpc
+  have hh' : hlt = false := hh
+  subst hpc' hh'
+  obtain ⟨k, rfl⟩ := Nat.exists_eq_add_of_le hfuel
+  rw [Nat.add_comm 30 k, current_goldMulArm_run]
+  refine ⟨rfl, goldMulArm_toNat r0 r1, rfl, ?_⟩
+  intro r h2 h8
+  match r, h2, h8 with
+  | 2, _, _ => rfl
+  | 3, _, _ => rfl
+  | 4, _, _ => rfl
+  | 5, _, _ => rfl
+  | 6, _, _ => rfl
+  | 7, _, _ => rfl
+  | 8, _, _ => rfl
+  | 0, h, _ => exact absurd h (by decide)
+  | 1, h, _ => exact absurd h (by decide)
+  | n + 9, _, h => exact absurd h (by omega)
+
+/-- The frozen challenge's 20-step bound cannot describe the live 28-instruction kernel. -/
+theorem current_ct_eq_32_requires_new_budget :
+    (runX86 current_ctEq32X86Prog 20 (x86Init 0 0 0 0 0)).1.halted = false := by
+  decide +kernel
+
+theorem current_ctMemzeroArm_decodes :
+    (findSliceByNameBytes currentAarch64ExtractedSlices ctMemzeroArmName).bind
+      (fun sl => decodeArm64Stream sl.code) = some ctMemzeroArmProg := by
+  decide +kernel
+
+
+theorem current_ct_memzero_aarch64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes currentAarch64ExtractedSlices ctMemzeroArmName = some slice ∧
+      decodeArm64Stream slice.code = some prog ∧
+      ∀ (s : Arm64State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 1).toNat →
+        3 * (s.gpr.get 1).toNat + 2 ≤ fuel →
+        (runArm64 prog fuel s).1.halted = true ∧
+        (∀ i : Nat, i < (s.gpr.get 1).toNat →
+          (runArm64 prog fuel s).1.mem (s.gpr.get 0 + UInt64.ofNat i) = 0) ∧
+        (∀ a : UInt64, (∀ i : Nat, i < (s.gpr.get 1).toNat → a ≠ s.gpr.get 0 + UInt64.ofNat i) →
+          (runArm64 prog fuel s).1.mem a = s.mem a) := by
+  obtain ⟨sl, hf, hd⟩ := slice_decode_arm64 current_ctMemzeroArm_decodes
+  refine ⟨sl, ctMemzeroArmProg, hf, hd, ?_⟩
+  intro s fuel hpc hh hn hfuel
+  obtain ⟨pc, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+    v, cf, zf, dit, hlt, m⟩ := s
+  have hpc' : pc = 0 := hpc
+  have hh' : hlt = false := hh
+  subst hpc' hh'
+  have hn' : 0 < r1.toNat := hn
+  have hfuel' : 3 * r1.toNat + 2 ≤ fuel := hfuel
+  obtain ⟨k, hk⟩ : ∃ k, r1.toNat = k + 1 := ⟨r1.toNat - 1, by omega⟩
+  obtain ⟨j, hj⟩ : ∃ j, fuel = 3 * (k + 1) + 2 + j := ⟨fuel - (3 * (k + 1) + 2), by omega⟩
+  subst hj
+  rw [ctMemzeroArm_run m k j hk]
+  refine ⟨rfl, ?_, ?_⟩
+  · intro i hi
+    have hi' : i < r1.toNat := hi
+    exact zeroRange_inside (k + 1) m r0 i (by omega)
+  · intro a ha
+    have ha' : ∀ i : Nat, i < r1.toNat → a ≠ r0 + UInt64.ofNat i := ha
+    exact zeroRange_outside (k + 1) m r0 a (fun i hi => ha' i (by omega))
+
+
+def ctCurrentMemzeroX86Prog : List (DecodedInstr X86Instr) := [
+  ⟨0, 3, .movRegReg true 1 6⟩,
+  ⟨3, 2, .aluRegReg .xorOp false 0 0⟩,
+  ⟨5, 2, .storeGpr 1 0 (.baseDisp 7 0)⟩,
+  ⟨7, 3, .incDec true true 7⟩,
+  ⟨10, 3, .incDec false true 1⟩,
+  ⟨13, 2, .jcc 5 5⟩,
+  ⟨15, 3, .mfence⟩,
+  ⟨18, 2, .aluRegReg .xorOp false 7 7⟩,
+  ⟨20, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨22, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨24, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨26, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨29, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨32, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨35, 3, .aluRegReg .xorOp false 11 11⟩,
+  ⟨38, 2, .aluRegReg .xorOp false 0 0⟩,
+  ⟨40, 1, .ret⟩]
+
+theorem ctCurrentMemzeroX86_decodes :
+    (findSliceByNameBytes currentX86ExtractedSlices ctMemzeroX86Name).bind
+      (fun sl => decodeX86Stream sl.code) = some ctCurrentMemzeroX86Prog := by
+  decide +kernel
+
+section CurrentMemzeroX86
+variable {r2 r3 r4 r5 r6 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64} {y : Bank16 Vec256} {cf dy : Bool}
+
+/-- One trip round the store loop (four instructions). -/
+theorem ctCurrentMemzeroX86_body (c p : UInt64) (o zf : Bool) (m : UInt64 → UInt8) (fuel : Nat) :
+    (runX86 ctCurrentMemzeroX86Prog (fuel + 4)
+      ⟨5, ⟨0, c, r2, r3, r4, r5, r6, p, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+    (runX86 ctCurrentMemzeroX86Prog fuel
+      ⟨jccPc (!(c - 1 == 0)) 5 15, ⟨0, c - 1, r2, r3, r4, r5, r6, p + 1, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        y, cf, evalX86IncDecOf false true c, c - 1 == 0, dy, false, writeMem8 m p 0⟩).1 := by
+  iterate 4
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_store8, stepX86_inc, stepX86_dec, stepX86_jnz, maskGprWidth_true,
+      u64_add_neg_one, u64_zero_toUInt8, UInt64.add_zero, b16get_0, b16get_1, b16get_7, b16set_1, b16set_7]
+
+/-- The whole loop, by induction on the remaining count. -/
+theorem ctCurrentMemzeroX86_loop (k : Nat) : ∀ (c p : UInt64) (o zf : Bool) (m : UInt64 → UInt8) (fuel : Nat),
+    c.toNat = k + 1 →
+    (runX86 ctCurrentMemzeroX86Prog (4 * (k + 1) + fuel)
+      ⟨5, ⟨0, c, r2, r3, r4, r5, r6, p, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+    (runX86 ctCurrentMemzeroX86Prog fuel
+      ⟨15, ⟨0, 0, r2, r3, r4, r5, r6, p + UInt64.ofNat (k + 1), r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        y, cf, false, true, dy, false, zeroRange (k + 1) m p⟩).1 := by
+  induction k with
+  | zero =>
+    intro c p o zf m fuel hc
+    have hc1 : c = 1 := u64_eq_of_toNat hc
+    subst hc1
+    rw [show 4 * (0 + 1) + fuel = fuel + 4 from by omega, ctCurrentMemzeroX86_body, u64_one_sub_one,
+      u64_zero_beq_zero]
+    try rfl
+  | succ k ih =>
+    intro c p o zf m fuel hc
+    have hc' := u64_pred_toNat c k hc
+    have hne := u64_ne_zero_of_toNat_succ (c - 1) k hc'
+    rw [show 4 * (k + 1 + 1) + fuel = (4 * (k + 1) + fuel) + 4 from by omega, ctCurrentMemzeroX86_body,
+      beq_false_of_ne hne, show jccPc (!false) 5 15 = 5 from rfl,
+      ih (c - 1) (p + 1) (evalX86IncDecOf false true c) false (writeMem8 m p 0) fuel hc', addr_succ]
+    try rfl
+
+theorem ctCurrentMemzeroX86_run {r0 r1 r7 : UInt64} {o zf : Bool} (m : UInt64 → UInt8) (k j : Nat)
+    (hn : r6.toNat = k + 1) :
+    (runX86 ctCurrentMemzeroX86Prog (4 * (k + 1) + 13 + j)
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨40, ⟨0, 0, 0, r3, r4, r5, 0, 0, 0, 0, 0, 0, r12, r13, r14, r15⟩,
+        y, false, false, true, dy, true, zeroRange (k + 1) m r7⟩ := by
+  rw [show 4 * (k + 1) + 13 + j = (4 * (k + 1) + (j + 11)) + 2 from by omega]
+  iterate 2
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_movRR, stepX86_xorRR, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
+      b16get_0, b16get_6, b16set_0, b16set_1]
+  rw [ctCurrentMemzeroX86_loop k r6 r7 false true m (j + 11) hn]
+  iterate 11
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_mfence, stepX86_ret, stepX86_xorRR, mask32_xor_self, u64_zero_beq_zero, b16set_0, b16set_1, b16set_2, b16set_6, b16set_7, b16set_8, b16set_9, b16set_10, b16set_11]
+  exact runX86_halted_fst _ _ _ rfl
+
+end CurrentMemzeroX86
+
+/-- **Machine-code refinement of `qsag_asm_ct_memzero_x86_64`.** For a length `n = rsi ≥ 1` (the
+Rust wrapper returns early on empty buffers; the loop is bottom-tested), at most `4 n + 13` steps
+halt with the `n` bytes at `rdi, rdi + 1, …` (wrapping) zero and every other byte unchanged. -/
+theorem current_ct_memzero_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices ctMemzeroX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 6).toNat →
+        4 * (s.gpr.get 6).toNat + 13 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        (∀ i : Nat, i < (s.gpr.get 6).toNat →
+          (runX86 prog fuel s).1.mem (s.gpr.get 7 + UInt64.ofNat i) = 0) ∧
+        (∀ a : UInt64, (∀ i : Nat, i < (s.gpr.get 6).toNat → a ≠ s.gpr.get 7 + UInt64.ofNat i) →
+          (runX86 prog fuel s).1.mem a = s.mem a) := by
+  obtain ⟨sl, hf, hd⟩ := slice_decode_x86 ctCurrentMemzeroX86_decodes
+  refine ⟨sl, ctCurrentMemzeroX86Prog, hf, hd, ?_⟩
+  intro s fuel hpc hh hn hfuel
+  obtain ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    y, cf, o, zf, dy, hlt, m⟩ := s
+  have hpc' : pc = 0 := hpc
+  have hh' : hlt = false := hh
+  subst hpc' hh'
+  have hn' : 0 < r6.toNat := hn
+  have hfuel' : 4 * r6.toNat + 13 ≤ fuel := hfuel
+  obtain ⟨k, hk⟩ : ∃ k, r6.toNat = k + 1 := ⟨r6.toNat - 1, by omega⟩
+  obtain ⟨j, hj⟩ : ∃ j, fuel = 4 * (k + 1) + 13 + j := ⟨fuel - (4 * (k + 1) + 13), by omega⟩
+  subst hj
+  rw [ctCurrentMemzeroX86_run m k j hk]
+  refine ⟨rfl, ?_, ?_⟩
+  · intro i hi
+    have hi' : i < r6.toNat := hi
+    exact zeroRange_inside (k + 1) m r7 i (by omega)
+  · intro a ha
+    have ha' : ∀ i : Nat, i < r6.toNat → a ≠ r7 + UInt64.ofNat i := ha
+    exact zeroRange_outside (k + 1) m r7 a (fun i hi => ha' i (by omega))
+
+def ctCurrentEqBytesX86Prog : List (DecodedInstr X86Instr) := [
+  ⟨0, 2, .aluRegReg .xorOp false 0 0⟩,
+  ⟨2, 3, .movRegReg true 1 2⟩,
+  ⟨5, 4, .loadGpr 1 false 8 (.baseDisp 7 0)⟩,
+  ⟨9, 4, .loadGpr 1 false 9 (.baseDisp 6 0)⟩,
+  ⟨13, 3, .aluRegReg .xorOp false 8 9⟩,
+  ⟨16, 3, .aluRegReg .orOp false 0 8⟩,
+  ⟨19, 3, .incDec true true 7⟩,
+  ⟨22, 3, .incDec true true 6⟩,
+  ⟨25, 3, .incDec false true 1⟩,
+  ⟨28, 2, .jcc 5 5⟩,
+  ⟨30, 3, .aluImm .sub false 0 1⟩,
+  ⟨33, 3, .shiftImm .shr false 0 31⟩,
+  ⟨36, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨39, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨42, 2, .aluRegReg .xorOp false 7 7⟩,
+  ⟨44, 2, .aluRegReg .xorOp false 6 6⟩,
+  ⟨46, 2, .aluRegReg .xorOp false 2 2⟩,
+  ⟨48, 2, .aluRegReg .xorOp false 1 1⟩,
+  ⟨50, 3, .aluRegReg .xorOp false 8 8⟩,
+  ⟨53, 3, .aluRegReg .xorOp false 9 9⟩,
+  ⟨56, 3, .aluRegReg .xorOp false 10 10⟩,
+  ⟨59, 3, .aluRegReg .xorOp false 11 11⟩,
+  ⟨62, 1, .ret⟩]
+
+theorem ctCurrentEqBytesX86_decodes :
+    (findSliceByNameBytes currentX86ExtractedSlices ctEqBytesX86Name).bind
+      (fun sl => decodeX86Stream sl.code) = some ctCurrentEqBytesX86Prog := by
+  decide +kernel
+
+section CurrentEqBytesX86
+variable {r2 r3 r4 r5 r10 r11 r12 r13 r14 r15 : UInt64} {y : Bank16 Vec256} {dy : Bool}
+  {m : UInt64 → UInt8}
+
+/-- One trip round the compare loop (eight instructions). -/
+theorem ctCurrentEqBytesX86_body (c p q acc x8 x9 : UInt64) (cf o zf : Bool) (fuel : Nat) :
+    (runX86 ctCurrentEqBytesX86Prog (fuel + 8)
+      ⟨5, ⟨acc, c, r2, r3, r4, r5, q, p, x8, x9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+    (runX86 ctCurrentEqBytesX86Prog fuel
+      ⟨jccPc (!(c - 1 == 0)) 5 30,
+        ⟨maskGprWidth false (acc ||| byteDiff (m p) (m q)), c - 1, r2, r3, r4, r5, q + 1, p + 1,
+          byteDiff (m p) (m q), maskGprWidth false (m q).toUInt64, r10, r11, r12, r13, r14, r15⟩,
+        y, false, evalX86IncDecOf false true c, c - 1 == 0, dy, false, m⟩).1 := by
+  iterate 8
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_load8, stepX86_xorRR, stepX86_orRR, stepX86_inc, stepX86_dec, stepX86_jnz,
+      maskGprWidth_true, u64_add_neg_one, UInt64.add_zero,
+      b16get_0, b16get_1, b16get_6, b16get_7, b16get_8, b16get_9,
+      b16set_0, b16set_1, b16set_6, b16set_7, b16set_8, b16set_9]
+  try rfl
+
+theorem ctCurrentEqBytesX86_loop (k : Nat) : ∀ (c p q acc x8 x9 : UInt64) (cf o zf : Bool) (fuel : Nat),
+    c.toNat = k + 1 → ∃ x8' x9' : UInt64,
+    (runX86 ctCurrentEqBytesX86Prog (8 * (k + 1) + fuel)
+      ⟨5, ⟨acc, c, r2, r3, r4, r5, q, p, x8, x9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+    (runX86 ctCurrentEqBytesX86Prog fuel
+      ⟨30, ⟨eqAcc (k + 1) m p q acc, 0, r2, r3, r4, r5, q + UInt64.ofNat (k + 1), p + UInt64.ofNat (k + 1),
+          x8', x9', r10, r11, r12, r13, r14, r15⟩,
+        y, false, false, true, dy, false, m⟩).1 := by
+  induction k with
+  | zero =>
+    intro c p q acc x8 x9 cf o zf fuel hc
+    have hc1 : c = 1 := u64_eq_of_toNat hc
+    subst hc1
+    refine ⟨byteDiff (m p) (m q), maskGprWidth false (m q).toUInt64, ?_⟩
+    rw [show 8 * (0 + 1) + fuel = fuel + 8 from by omega, ctCurrentEqBytesX86_body, u64_one_sub_one,
+      u64_zero_beq_zero]
+    try rfl
+  | succ k ih =>
+    intro c p q acc x8 x9 cf o zf fuel hc
+    have hc' := u64_pred_toNat c k hc
+    have hne := u64_ne_zero_of_toNat_succ (c - 1) k hc'
+    obtain ⟨x8', x9', h⟩ := ih (c - 1) (p + 1) (q + 1) (maskGprWidth false (acc ||| byteDiff (m p) (m q)))
+      (byteDiff (m p) (m q)) (maskGprWidth false (m q).toUInt64) false (evalX86IncDecOf false true c) false fuel hc'
+    refine ⟨x8', x9', ?_⟩
+    rw [show 8 * (k + 1 + 1) + fuel = (8 * (k + 1) + fuel) + 8 from by omega, ctCurrentEqBytesX86_body,
+      beq_false_of_ne hne, show jccPc (!false) 5 30 = 5 from rfl, h, addr_succ, addr_succ]
+    try rfl
+
+theorem ctCurrentEqBytesX86_run {r0 r1 r6 r7 r8 r9 : UInt64} {cf o zf : Bool} (k j : Nat)
+    (hn : r2.toNat = k + 1) :
+    (runX86 ctCurrentEqBytesX86Prog (8 * (k + 1) + 15 + j)
+      ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨62, ⟨maskGprWidth false (maskGprWidth false (maskGprWidth false (UInt64.ofNat
+            (((maskGprWidth false (eqAcc (k + 1) m r7 r6 0)).toNat + 0x100000000 -
+              (maskGprWidth false 1).toNat) % 0x100000000))) >>> UInt64.ofNat (31 % 32)),
+          0, 0, r3, r4, r5, 0, 0, 0, 0,
+          0, 0, r12, r13, r14, r15⟩,
+        y, false, false, true, dy, true, m⟩ := by
+  rw [show 8 * (k + 1) + 15 + j = (8 * (k + 1) + (j + 13)) + 2 from by omega]
+  iterate 2
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_movRR, stepX86_xorRR, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
+      b16get_0, b16get_2, b16set_0, b16set_1]
+  obtain ⟨x8', x9', h⟩ := ctCurrentEqBytesX86_loop (r2 := r2) (r3 := r3) (r4 := r4) (r5 := r5) (r10 := r10)
+    (r11 := r11) (r12 := r12) (r13 := r13) (r14 := r14) (r15 := r15) (y := y) (dy := dy) (m := m)
+    k r2 r7 r6 0 r8 r9 false false true (j + 13) hn
+  rw [h]
+  iterate 13
+    refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
+    simp only [stepX86_subImm32, stepX86_shr32, stepX86_xorRR, stepX86_ret, mask32_xor_self,
+      u64_zero_beq_zero, b16get_0, b16get_8, b16get_9, b16set_0, b16set_1, b16set_2, b16set_6, b16set_7, b16set_8, b16set_9, b16set_10, b16set_11]
+  exact runX86_halted_fst _ _ _ rfl
+
+end CurrentEqBytesX86
+
+/-- **Machine-code refinement of `qsag_asm_ct_eq_bytes_x86_64`.** For a length `n = rdx ≥ 1` (the
+Rust wrapper returns early on empty slices; the loop is bottom-tested), at most `8 n + 15` steps
+halt with `rax = 1` when the `n` bytes at `rdi` equal the `n` bytes at `rsi` and `rax = 0`
+otherwise (addresses wrap modulo `2^64`); memory is untouched and `r8`, `r9` are wiped. -/
+theorem current_ct_eq_bytes_x86_64_mc_refines :
+    ∃ slice prog, findSliceByNameBytes currentX86ExtractedSlices ctEqBytesX86Name = some slice ∧
+      decodeX86Stream slice.code = some prog ∧
+      ∀ (s : X86State) (fuel : Nat), s.pc = 0 → s.halted = false → 0 < (s.gpr.get 2).toNat →
+        8 * (s.gpr.get 2).toNat + 15 ≤ fuel →
+        (runX86 prog fuel s).1.halted = true ∧
+        (runX86 prog fuel s).1.gpr.get 0 =
+          (if ∀ i : Nat, i < (s.gpr.get 2).toNat →
+              s.mem (s.gpr.get 7 + UInt64.ofNat i) = s.mem (s.gpr.get 6 + UInt64.ofNat i)
+            then 1 else 0) ∧
+        (runX86 prog fuel s).1.mem = s.mem ∧
+        (runX86 prog fuel s).1.gpr.get 8 = 0 ∧ (runX86 prog fuel s).1.gpr.get 9 = 0 := by
+  obtain ⟨sl, hf, hd⟩ := slice_decode_x86 ctCurrentEqBytesX86_decodes
+  refine ⟨sl, ctCurrentEqBytesX86Prog, hf, hd, ?_⟩
+  intro s fuel hpc hh hn hfuel
+  obtain ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    y, cf, o, zf, dy, hlt, m⟩ := s
+  have hpc' : pc = 0 := hpc
+  have hh' : hlt = false := hh
+  subst hpc' hh'
+  have hn' : 0 < r2.toNat := hn
+  have hfuel' : 8 * r2.toNat + 15 ≤ fuel := hfuel
+  obtain ⟨k, hk⟩ : ∃ k, r2.toNat = k + 1 := ⟨r2.toNat - 1, by omega⟩
+  obtain ⟨j, hj⟩ : ∃ j, fuel = 8 * (k + 1) + 15 + j := ⟨fuel - (8 * (k + 1) + 15), by omega⟩
+  subst hj
+  rw [ctCurrentEqBytesX86_run k j hk]
+  refine ⟨rfl, ?_, rfl, rfl, rfl⟩
+  obtain ⟨hlt, hz⟩ := eqAcc_spec m (k + 1) r7 r6 0 (by decide)
+  show maskGprWidth false (maskGprWidth false (maskGprWidth false (UInt64.ofNat
+      (((maskGprWidth false (eqAcc (k + 1) m r7 r6 0)).toNat + 0x100000000 -
+        (maskGprWidth false 1).toNat) % 0x100000000))) >>> UInt64.ofNat (31 % 32)) =
+    if ∀ i : Nat, i < r2.toNat → m (r7 + UInt64.ofNat i) = m (r6 + UInt64.ofNat i) then 1 else 0
+  rw [eqTail_spec _ hlt]
+  if hA : eqAcc (k + 1) m r7 r6 0 = 0 then
+    rw [ite_eq_left hA, ite_eq_left (fun i hi => (hz.mp hA).2 i (by omega))]
+  else
+    rw [ite_eq_right hA, ite_eq_right (fun h => hA (hz.mpr ⟨rfl, fun i hi => h i (by omega)⟩))]
+
+
+/-- Exact decoder regressions for the new transpose instruction forms. -/
+theorem current_arm_transpose_decode_regressions :
+    decodeArm64Word 0 0x4e080d27 = some (.vdup2d 7 9) ∧
+    decodeArm64Word 0 0xad400400 = some (.ldpQ 0 1 0 0) ∧
+    decodeArm64Word 0 0xad000400 = some (.stpQ 0 1 0 0) ∧
+    decodeArm64Word 0 0x6f600410 = some (.vshift2d false 16 0 32) ∧
+    decodeArm64Word 0 0x4f605610 = some (.vshift2d true 16 16 32) ∧
+    decodeArm64Word 0 0x4e271e10 = some (.vand16b 16 16 7) ∧
+    decodeArm64Word 0 0xad400000 = none ∧
+    decodeArm64Word 0 0xad4007e0 = none := by decide +kernel
+
+/-- USHR #64 zeros each lane, rather than applying a modulo-64 host shift. -/
+theorem current_arm_ushr64_semantics (s : Arm64State) :
+    (stepArm64 ⟨0, 4, .vshift2d false 0 1 64⟩ s).1.vec.get 0 = Vec128.zero := by
+  simp only [stepArm64, Bank32.get_set_eq]
+  rfl
+
+/-- The fresh transpose's final PC is represented rather than silently truncated. -/
+theorem current_pcmap_high_address :
+    (PcMap.empty.set 4260 (1 : Nat)).get 4260 = some 1 ∧
+    (PcMap.empty.set 8192 (1 : Nat)).get 8192 = none := by decide +kernel
+
 end Qsag

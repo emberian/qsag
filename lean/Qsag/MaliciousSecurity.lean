@@ -242,7 +242,8 @@ def evalSharedDkgFrobenius (k d : Nat)
     (sigmas : List (TowerElem (k + d))) : Option (List (TowerElem k)) :=
   let (sqSh, _, _) := evalSharedBeaverMul lambdas xSh xSh sqTriple
   let frobSh := shareZipSub sqSh xSh
-  if decide (yOpened = towerZero k) && verifyTowerZeroSumMac (k + d) sigmas then
+  if decide (yOpened = towerZero k) && verifyTowerZeroSumMac (k + d) sigmas &&
+      decide (ringDot lambdas frobSh = yOpened) then
     some frobSh
   else
     none
@@ -289,9 +290,8 @@ theorem verifySharedDkgFrobenius_complete (k d : Nat)
   change (if decide (ringDot lambdas frobSh = towerZero k) &&
       verifyTowerZeroSumMac (k + d)
         (computeTowerMacSigmas (k + d) (embedTowerChain k d (ringDot lambdas frobSh))
-          macFrob alphaShares zeroMasks) then some frobSh else none) = some frobSh
-  rw [decide_eq_true hY0, hMacOk]
-  rfl
+          macFrob alphaShares zeroMasks) && decide (ringDot lambdas frobSh = ringDot lambdas frobSh) then some frobSh else none) = some frobSh
+  simp only [decide_eq_true hY0, hMacOk, decide_true, Bool.and_self, ↓reduceIte]
 
 /-- **Distributed Frobenius Booleanity Soundness (`verifySharedDkgFrobenius_sound`)**:
     Conditional on the explicit `hMacSum` authentication relation, any transcript accepted by
@@ -331,11 +331,9 @@ def verifySharedDkgFrobenius_sound (k d : Nat)
         shareZipSub (evalSharedBeaverMul lambdas xSh xSh sqTriple).1 xSh = frobSh := by
       unfold evalSharedDkgFrobenius at hAccept
       dsimp only at hAccept
-      cases hCond : decide (yOpened = towerZero k) && verifyTowerZeroSumMac (k + d) sigmas with
-      | false => rw [hCond] at hAccept; cases hAccept
-      | true =>
-        rw [hCond] at hAccept
-        exact ⟨rfl, Option.some.inj hAccept⟩
+      split at hAccept
+      next h => exact ⟨(Bool.and_eq_true_iff.mp h).1, Option.some.inj hAccept⟩
+      next => cases hAccept
     let yTrue := ringDot lambdas frobSh
     if hOpenEq : yOpened = yTrue then
       .inl (by
@@ -363,6 +361,17 @@ def verifySharedDkgFrobenius_sound (k d : Nat)
   else
     .inr (.inl hcEq)
 
+/-- GF(256) seed DKG accepts only the low bit-plane. Each packed upper
+plane must be zero, matching the bit-plane check in the dealerless engine. -/
+def verifyDkgBitPlanes (planes : List (BitVec 64)) : Bool :=
+  decide (planes.length = 8) && (planes.drop 1).all (fun p => p == 0)
+
+theorem dkg_upper_bit_planes_zero (planes : List (BitVec 64))
+    (h : verifyDkgBitPlanes planes = true) :
+    planes.length = 8 ∧ ∀ p ∈ planes.drop 1, p = 0 := by
+  obtain ⟨hs, hz⟩ := Bool.and_eq_true_iff.mp h
+  exact ⟨of_decide_eq_true hs, fun p hp => eq_of_beq (List.all_eq_true.mp hz p hp)⟩
+
 def demoTower3Pt2 : TowerElem 3 := (towerZero 2, towerOne 2)
 
 def demoTower3Lambdas2 : List (TowerElem 3) :=
@@ -375,17 +384,18 @@ def demoTower3BeaverSq : SharedBeaverTriple (TowerElem 3) :=
              towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)]
   { aShares := s1, bShares := s1, cShares := s1 }
 
-/-- Acceptance of `evalSharedDkgFrobenius` on a zero opening is decided by the lifted zero-sum MAC
-    check alone; the Beaver squaring output is never inspected by the acceptance predicate. -/
+/-- A zero opening is accepted only when reconstructed squaring residual and MAC agree. -/
 theorem evalSharedDkgFrobenius_isSome_of_mac (k d : Nat)
     (lambdas xSh : List (TowerElem k))
     (sqTriple : SharedBeaverTriple (TowerElem k))
     (sigmas : List (TowerElem (k + d)))
-    (hMac : verifyTowerZeroSumMac (k + d) sigmas = true) :
+    (hMac : verifyTowerZeroSumMac (k + d) sigmas = true)
+    (hResidual : ringDot lambdas
+      (shareZipSub (evalSharedBeaverMul lambdas xSh xSh sqTriple).1 xSh) = towerZero k) :
     (evalSharedDkgFrobenius k d lambdas xSh sqTriple (towerZero k) sigmas).isSome = true := by
   unfold evalSharedDkgFrobenius
-  rcases evalSharedBeaverMul lambdas xSh xSh sqTriple with ⟨sqSh, delta, eps⟩
-  simp [hMac]
+  simp only [hResidual, hMac, decide_true, Bool.and_self, ↓reduceIte]
+  rfl
 
 private theorem demoTower7_macKey_nonzero :
     towerAdd 7 ((towerZero 6, towerOne 6) : TowerElem 7) (towerOne 6, towerZero 6) ≠ towerZero 7 := by
@@ -438,7 +448,7 @@ theorem shared_dkg_frobenius_inhabited :
       (hSelf.trans (towerMul_zero 7 _).symm) hSelf rfl
   exact ⟨demoTower7_macKey_nonzero, demoTower3_shares_open_to_one,
     demoTower3_frobenius_residual_zero,
-    evalSharedDkgFrobenius_isSome_of_mac 3 4 demoTower3Lambdas2 xSh demoTower3BeaverSq sigmas hMac⟩
+    evalSharedDkgFrobenius_isSome_of_mac 3 4 demoTower3Lambdas2 xSh demoTower3BeaverSq sigmas hMac demoTower3_frobenius_residual_zero⟩
 
 /-- **`#tooth` Non-Binary Shares Rejected by `evalSharedDkgFrobenius`
     (`tooth_shared_dkg_frobenius_rejects_nonbinary_shares`)**:
@@ -1791,17 +1801,17 @@ theorem jorts_quorum_never_double_signs
 /-- Crash-resilient per-validator `Jorts` state holding a durable disk WAL high-water mark
     `walHighWater` (persisted across power-loss crashes) alongside volatile `ramCachedShare`
     (wiped to `none` on crash/reboot) and the network audit log `emittedVotes`. -/
-structure WalJortsNodeState where
+private structure WalJortsNodeState where
   walHighWater   : Option (Nat × List UInt8)
   ramCachedShare : Option (Nat × List UInt8 × Goldilocks)
   emittedVotes   : List (Nat × List UInt8 × Goldilocks)
   deriving DecidableEq, Repr
 
-def initWalJortsState : WalJortsNodeState :=
+private def initWalJortsState : WalJortsNodeState :=
   { walHighWater := none, ramCachedShare := none, emittedVotes := [] }
 
 /-- Multi-turn adversarial node schedule interleaving signing requests with power-loss crashes. -/
-inductive WalJortsEvent where
+private inductive WalJortsEvent where
   | signReq (slot : Nat) (msg : List UInt8)
   | powerLossCrashAndReboot
   deriving DecidableEq, Repr
@@ -1811,7 +1821,7 @@ inductive WalJortsEvent where
     2. `.signReq slot msg` persists `walHighWater := some (slot, msg)` BEFORE emitting `(slot, msg, myShare)`
        when `walHighWater = none` or `hwSlot < slot`, allows idempotent retry of the exact `(hwSlot, hwMsg)`,
        and rejects every stale or equivocating request (`slot < hwSlot` or `slot = hwSlot ∧ msg ≠ hwMsg`). -/
-def stepWalJortsNode (myShare : Goldilocks) (st : WalJortsNodeState) (ev : WalJortsEvent) : WalJortsNodeState :=
+private def stepWalJortsNode (myShare : Goldilocks) (st : WalJortsNodeState) (ev : WalJortsEvent) : WalJortsNodeState :=
   match ev with
   | .powerLossCrashAndReboot =>
     { st with ramCachedShare := none }
@@ -1832,11 +1842,11 @@ def stepWalJortsNode (myShare : Goldilocks) (st : WalJortsNodeState) (ev : WalJo
       else
         st
 
-def runWalJortsTrace (myShare : Goldilocks) : WalJortsNodeState → List WalJortsEvent → WalJortsNodeState
+private def runWalJortsTrace (myShare : Goldilocks) : WalJortsNodeState → List WalJortsEvent → WalJortsNodeState
   | st, [] => st
   | st, ev :: evs => runWalJortsTrace myShare (stepWalJortsNode myShare st ev) evs
 
-def WalJortsNodeState.WellFormed (st : WalJortsNodeState) : Prop :=
+private def WalJortsNodeState.WellFormed (st : WalJortsNodeState) : Prop :=
   (∀ sl m sh, (sl, m, sh) ∈ st.emittedVotes →
     ∃ hwSlot hwMsg, st.walHighWater = some (hwSlot, hwMsg) ∧ (sl < hwSlot ∨ (sl = hwSlot ∧ m = hwMsg))) ∧
   (∀ sl m₁ sh₁ m₂ sh₂,
@@ -1958,7 +1968,7 @@ private theorem stepWalJortsNode_preserves_wellFormed
 /-- **Crash-Resilient Disk WAL Node Non-Equivocation (`walJortsNode_no_equivocation_across_crashes`)**:
     Across ANY multi-turn event trace `evs` interleaving `.signReq` and `.powerLossCrashAndReboot`,
     an honest node never emits partial shares for two distinct messages `m₁ ≠ m₂` at the same `slot`! -/
-theorem walJortsNode_no_equivocation_across_crashes
+private theorem walJortsNode_no_equivocation_across_crashes
     (myShare : Goldilocks) (evs : List WalJortsEvent)
     (slot : Nat) (m₁ : List UInt8) (sh₁ : Goldilocks) (m₂ : List UInt8) (sh₂ : Goldilocks)
     (h1 : (slot, m₁, sh₁) ∈ (runWalJortsTrace myShare initWalJortsState evs).emittedVotes)
@@ -1988,7 +1998,7 @@ theorem walJortsNode_no_equivocation_across_crashes
        `RoundPoly.evalCoeffs skPoly Goldilocks.zero`, AND
     2. NO two quorums `Q₁, Q₂ ⊆ V` of size $\ge 2f + 1$ can ever certify distinct messages
        `msg₁ ≠ msg₂` in the same consensus `slot`! -/
-theorem threshold_jorts_wal_quorum_never_double_signs
+private theorem threshold_jorts_wal_quorum_never_double_signs
     {PartyId : Type} [DecidableEq PartyId]
     (f slot : Nat) (msg₁ msg₂ : List UInt8)
     (skPoly : List Goldilocks) (hDeg : skPoly.length ≤ 2 * f + 1)
@@ -2040,7 +2050,7 @@ theorem threshold_jorts_wal_quorum_never_double_signs
     (`tooth_subthreshold_corrupt_cannot_form_quorum`)**:
     When `corrupt.length ≤ f`, ANY candidate signer subset `Q ⊆ corrupt` with `Q.Nodup` satisfies
     `Q.length < 2 * f + 1`, failing the threshold quorum requirement! -/
-theorem tooth_subthreshold_corrupt_cannot_form_quorum
+private theorem tooth_subthreshold_corrupt_cannot_form_quorum
     {PartyId : Type} [DecidableEq PartyId]
     (f : Nat) (Q corrupt : List PartyId)
     (hQNd : Q.Nodup) (hSub : ∀ x ∈ Q, x ∈ corrupt) (hCorrupt : corrupt.length ≤ f) :
@@ -2054,7 +2064,7 @@ theorem tooth_subthreshold_corrupt_cannot_form_quorum
     1. `.powerLossCrashAndReboot` wipes `ramCachedShare` to `none`, yet durable `walHighWater = some (1, [0xAA])` persists;
     2. Post-crash equivocation `signReq 1 [0xBB]` is **rejected** (never enters `emittedVotes`);
     3. Valid higher-slot `signReq 2 [0xCC]` succeeds, inhabiting multi-slot crash-recovery execution! -/
-theorem tooth_wal_latch_blocks_equivocation_after_crash :
+private theorem tooth_wal_latch_blocks_equivocation_after_crash :
     let sh := Goldilocks.ofNat 19
     let afterCrash := runWalJortsTrace sh initWalJortsState
       [.signReq 1 [0xAA], .powerLossCrashAndReboot]
@@ -2082,15 +2092,24 @@ structure CutMacContext where
 
 structure ContextBdozKeys where
   atContext : CutMacContext → BdozVerifierKeys
+  committee : List Nat := []
 
 structure ContextCutOpening where
   context : CutMacContext
   opening : BdozPairOpening
+  peers : List BdozPairOpening := []
 
 /-- Verification selects the pad by the entire expected context and the sender. -/
 def verifyContextCut (keys : ContextBdozKeys) (expected : CutMacContext)
     (t : ContextCutOpening) : Bool :=
-  decide (t.context = expected) && verifyBdozPairMac (keys.atContext expected) t.opening
+  (decide (t.context = expected) && verifyBdozPairMac (keys.atContext expected) t.opening) &&
+  decide ((t.opening :: t.peers).map (·.partyId) = keys.committee ∧ keys.committee.Nodup) &&
+  t.peers.all (verifyBdozPairMac (keys.atContext expected))
+
+theorem context_cut_committee_complete (keys : ContextBdozKeys) (ctx : CutMacContext)
+    (t : ContextCutOpening) (h : verifyContextCut keys ctx t = true) :
+    (t.opening :: t.peers).map (·.partyId) = keys.committee ∧ keys.committee.Nodup := by
+  exact of_decide_eq_true (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp h).1).2
 
 /-- Canonical operational entry point: bytes are derived from the authenticated
 share. There is no independent candidate-byte input. -/
@@ -2106,7 +2125,8 @@ def stepCanonicalMacBeforeOpenSignTurn (keys : ContextBdozKeys)
 theorem context_cut_acceptance (keys : ContextBdozKeys) (ctx : CutMacContext)
     (t : ContextCutOpening) (h : verifyContextCut keys ctx t = true) :
     t.context = ctx ∧ verifyBdozPairMac (keys.atContext ctx) t.opening = true := by
-  obtain ⟨hc, hm⟩ := Bool.and_eq_true_iff.mp h
+  obtain ⟨hc, hm⟩ := Bool.and_eq_true_iff.mp ((Bool.and_eq_true_iff.mp
+    (Bool.and_eq_true_iff.mp h).1).1)
   exact ⟨of_decide_eq_true hc, hm⟩
 
 theorem context_cut_replay_rejected (keys : ContextBdozKeys) (ctx : CutMacContext)
@@ -2132,7 +2152,7 @@ theorem context_cut_fault_extract (keys : ContextBdozKeys) (ctx : CutMacContext)
 at epoch one, even when its old share MAC is valid. -/
 theorem tooth_context_cut_epoch_replay (keys : ContextBdozKeys)
     (nonce digest : BitVec 256) (op : BdozPairOpening) :
-    verifyContextCut keys ⟨nonce, 1, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op⟩ = false := by
+    verifyContextCut keys ⟨nonce, 1, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op, []⟩ = false := by
   apply context_cut_replay_rejected
   intro h; cases h
 
@@ -2310,8 +2330,8 @@ theorem relabeled_context_acceptance_is_forgery (keys : ContextBdozKeys)
     (oldContext newContext : CutMacContext) (op : BdozPairOpening)
     (hHistory : ∀ m ∈ history, m.1 = oldContext)
     (hFresh : newContext ≠ oldContext)
-    (hAccepted : verifyContextCut keys newContext ⟨newContext, op⟩ = true) :
-    ContextCutForgery keys history ⟨newContext, op⟩ := by
+    (hAccepted : verifyContextCut keys newContext ⟨newContext, op, []⟩ = true) :
+    ContextCutForgery keys history ⟨newContext, op, []⟩ := by
   refine ⟨hAccepted, ?_⟩
   intro hm
   exact hFresh (hHistory _ hm)
@@ -2553,17 +2573,18 @@ def extractCanonicalContextTraceFaultOrAuthentic
     so even a subsequent valid epoch-1 opening is permanently blocked! -/
 theorem tooth_canonical_context_trace_blocks_midstream_replay_and_poisons
     (keys : ContextBdozKeys) (nonce digest : BitVec 256) (op0 op1 : BdozPairOpening)
-    (h0 : verifyBdozPairMac (keys.atContext ⟨nonce, 0, 0, digest⟩) op0 = true) :
-    let t0 : ContextCutOpening := ⟨⟨nonce, 0, 0, digest⟩, op0⟩
-    let tReplay : ContextCutOpening := ⟨⟨nonce, 0, 0, digest⟩, op0⟩
-    let t1 : ContextCutOpening := ⟨⟨nonce, 1, 0, digest⟩, op1⟩
+    (h0 : verifyBdozPairMac (keys.atContext ⟨nonce, 0, 0, digest⟩) op0 = true)
+    (hRoster : keys.committee = [op0.partyId]) :
+    let t0 : ContextCutOpening := ⟨⟨nonce, 0, 0, digest⟩, op0, []⟩
+    let tReplay : ContextCutOpening := ⟨⟨nonce, 0, 0, digest⟩, op0, []⟩
+    let t1 : ContextCutOpening := ⟨⟨nonce, 1, 0, digest⟩, op1, []⟩
     let finalSt := runCanonicalMacBeforeOpenTrace keys nonce digest 0 ⟨0, [], 0, false⟩ [t0, tReplay, t1]
     finalSt.poisoned = true ∧
     finalSt.nextEpoch = 1 ∧
     finalSt.releasedHistory = [(0, encodeCutShareBytes op0.shareX)] := by
-  have hVer0 : verifyContextCut keys ⟨nonce, 0, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op0⟩ = true := by
-    simp [verifyContextCut, h0]
-  have hRep : verifyContextCut keys ⟨nonce, 1, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op0⟩ = false :=
+  have hVer0 : verifyContextCut keys ⟨nonce, 0, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op0, []⟩ = true := by
+    simp [verifyContextCut, h0, hRoster]
+  have hRep : verifyContextCut keys ⟨nonce, 1, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op0, []⟩ = false :=
     tooth_context_cut_epoch_replay keys nonce digest op0
   simp [runCanonicalMacBeforeOpenTrace, stepCanonicalMacBeforeOpenSignTurn, hVer0, hRep]
 
@@ -2892,21 +2913,25 @@ structure ThresholdJortsQuorumCert (PartyId ShareVal : Type) where
   slot  : Nat
   msg   : List UInt8
   votes : List (ThresholdJortsPartialVote PartyId ShareVal)
+  signature : PqHashSig
   deriving DecidableEq, Repr
 
 /-- Explicit network verifier for `ThresholdJortsQuorumCert`: checks duplicate-free voters in `V`,
     quorum cardinality `≥ 2f + 1`, exact `(slot, msg)` agreement, and every vote's `authTag`. -/
 def verifyThresholdJortsQuorumCert {PartyId ShareVal : Type} [DecidableEq PartyId]
+    (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
     (V : List PartyId) (f : Nat)
     (authMac : PartyId → Nat → List UInt8 → ShareVal → BitVec 256)
     (cert : ThresholdJortsQuorumCert PartyId ShareVal) : Bool :=
-  decide (cert.votes.map (·.voter)).Nodup &&
+  (decide (cert.votes.map (·.voter)).Nodup &&
   decide (2 * f + 1 ≤ cert.votes.length) &&
   cert.votes.all (fun v =>
     decide (v.voter ∈ V) &&
     (v.slot == cert.slot) &&
     decide (v.msg = cert.msg) &&
-    (v.authTag == authMac v.voter cert.slot cert.msg v.sigShare))
+    (v.authTag == authMac v.voter cert.slot cert.msg v.sigShare))) &&
+  params.statefulJorts && decide (cert.signature.leafGlobalIdx = cert.slot) &&
+  verifyProductionPqHashSig suite params pk cert.msg cert.signature
 
 /-- Concrete forgery witness when a verified `ThresholdJortsQuorumCert` includes an unemitted vote
     attributed to an honest validator `honestVoter ∉ corrupt`. -/
@@ -2954,6 +2979,7 @@ private def findVoteByParty {PartyId ShareVal : Type} [DecidableEq PartyId]
     `ThresholdJortsVoteForgeryWitness` against an honest validator in `Q₁ ∩ Q₂ \ corrupt`! -/
 def extractThresholdJortsCertAgreementOrForgery
     {PartyId ShareVal : Type} [DecidableEq PartyId] [DecidableEq ShareVal]
+    (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
     (V corrupt : List PartyId) (f : Nat)
     (hVNodup : V.Nodup) (hVLen : V.length ≤ 3 * f + 1) (hCorruptLen : corrupt.length ≤ f)
     (slotShareAt : PartyId → Nat → List UInt8 → ShareVal)
@@ -2961,13 +2987,13 @@ def extractThresholdJortsCertAgreementOrForgery
     (traces : PartyId → List TwoPhaseJortsEvent)
     (cert₁ cert₂ : ThresholdJortsQuorumCert PartyId ShareVal)
     (hSameSlot : cert₁.slot = cert₂.slot)
-    (hVer1 : verifyThresholdJortsQuorumCert V f authMac cert₁ = true)
-    (hVer2 : verifyThresholdJortsQuorumCert V f authMac cert₂ = true) :
+    (hVer1 : verifyThresholdJortsQuorumCert suite params pk V f authMac cert₁ = true)
+    (hVer2 : verifyThresholdJortsQuorumCert suite params pk V f authMac cert₂ = true) :
     PSum (cert₁.msg = cert₂.msg)
       (PSum (ThresholdJortsVoteForgeryWitness corrupt slotShareAt authMac traces cert₁)
             (ThresholdJortsVoteForgeryWitness corrupt slotShareAt authMac traces cert₂)) :=
   have hUnpack : ∀ c : ThresholdJortsQuorumCert PartyId ShareVal,
-      verifyThresholdJortsQuorumCert V f authMac c = true →
+      verifyThresholdJortsQuorumCert suite params pk V f authMac c = true →
       (c.votes.map (·.voter)).Nodup ∧
       2 * f + 1 ≤ (c.votes.map (·.voter)).length ∧
       (∀ x ∈ c.votes.map (·.voter), x ∈ V) ∧
@@ -2975,6 +3001,8 @@ def extractThresholdJortsCertAgreementOrForgery
         v.authTag = authMac v.voter c.slot c.msg v.sigShare) := by
     intro c hV
     unfold verifyThresholdJortsQuorumCert at hV
+    have hV := (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp
+      (Bool.and_eq_true_iff.mp hV).1).1).1
     rcases Bool.and_eq_true_iff.mp hV with ⟨hLeft, hAll⟩
     rcases Bool.and_eq_true_iff.mp hLeft with ⟨hNdB, hLenB⟩
     refine ⟨of_decide_eq_true hNdB, ?_, ?_, ?_⟩
@@ -3096,7 +3124,7 @@ private theorem inhabited_canonical_context_initial (keys : ContextBdozKeys)
 
 theorem tooth_context_replay_cannot_accept (keys : ContextBdozKeys)
     (nonce digest : BitVec 256) (op : BdozPairOpening) :
-    ¬ verifyContextCut keys ⟨nonce, 1, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op⟩ = true := by
+    ¬ verifyContextCut keys ⟨nonce, 1, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op, []⟩ = true := by
   rw [tooth_context_cut_epoch_replay]
   decide
 

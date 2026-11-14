@@ -4675,5 +4675,59 @@ theorem rss_production_stateless_sign_refines
   thresholdProductionStatelessSign_eq_evalProductionStatelessSign _ _ _ _
     (mkRssProductionPqHashMpcOracles_matchesKey hs hp pkSeed tape) _ _ _
 
+/-- Compose an active authenticated Shamir gate with its online continuation.
+Failure is propagated before the continuation can release anything. -/
+def continueActiveShamirGate {Output : Type}
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (finish : List Goldilocks → Option Output) : Option Output :=
+  (execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs).bind finish
+
+theorem continueActiveShamirGate_abort {Output : Type}
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (finish : List Goldilocks → Option Output)
+    (h : execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs = none) :
+    continueActiveShamirGate lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs finish = none := by
+  simp only [continueActiveShamirGate, h, Option.bind_none]
+
+/-- Any online continuation receives a correct Shamir result, or the active
+opening pins the global MAC key. The MAC residual is computed from party shares
+by `execActiveSharedPow7Round`, not supplied as an `hSum` assumption. This local
+composition theorem does not assume that the continuation is an honest signer. -/
+theorem continueActiveShamirGate_sound_or_pins_key {Output : Type}
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (finish : List Goldilocks → Option Output) (out : Output)
+    (hSumOne : ringListSum lambdas = Goldilocks.one)
+    (hXLen : xSh.length = lambdas.length) (hTup : tup.validAt lambdas)
+    (hMacXLen : macX.length = alphaShares.length)
+    (hMacRLen : macR.length = alphaShares.length)
+    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (hMacXSum : ringListSum macX = CommRingOps.mul (ringListSum alphaShares)
+      (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh)))
+    (hMacRSum : ringListSum macR = CommRingOps.mul (ringListSum alphaShares)
+      (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+    (hZeroMask : ringListSum zeroMasks = CommRingOps.zero)
+    (hAccept : continueActiveShamirGate lambdas xSh tup macX macR alphaShares zeroMasks
+      deltaD sigmaDevs finish = some out) :
+    (∃ ySh, finish ySh = some out ∧ ySh.length = lambdas.length ∧
+      lagrangeCombine lambdas ySh = sbox7 (lagrangeCombine lambdas xSh)) ∨
+    (deltaD ≠ Goldilocks.zero ∧ ringListSum alphaShares =
+      CommRingOps.mul (ringListSum sigmaDevs) (GoldilocksExt2.inv (GoldilocksExt2.ofBase deltaD))) := by
+  unfold continueActiveShamirGate at hAccept
+  cases he : execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs with
+  | none => rw [he] at hAccept; cases hAccept
+  | some y =>
+    rw [he] at hAccept
+    obtain hok | hpin := execActiveSharedPow7Round_sound_or_pins_key
+      lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs y
+      hSumOne hXLen hTup hMacXLen hMacRLen hMaskLen hMacXSum hMacRSum hZeroMask he
+    · exact .inl ⟨y, hAccept, hok.2⟩
+    · exact .inr hpin
+
 end Qsag
 end

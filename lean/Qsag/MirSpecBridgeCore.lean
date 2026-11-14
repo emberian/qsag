@@ -4935,6 +4935,158 @@ def sampleDealtShares : Nat → Option (List UInt8)
   | 3 => some (sampleShareBytes ⟨3, by decide⟩)
   | _ => none
 
+/-- A threshold subset with distinct nonzero field points. The interpolation certificate
+is checked algebraically, rather than inferred from a party count. `n < p` prevents point
+aliasing after reduction to the Goldilocks field. -/
+structure ShamirThresholdSubset (n t : Nat) where
+  parties : List (Fin n)
+  threshold_pos : 0 < t
+  enough : t ≤ parties.length
+  distinct : parties.Nodup
+  field_bound : n < goldilocksPrime
+  quorum : ShamirQuorum Goldilocks t
+  points_eq : quorum.pts = parties.map (fun p => Goldilocks.ofNat (p.val + 1))
+  weights_length : quorum.lambdas.length = parties.length
+
+/-- Lagrange-at-zero coefficients for any supplied set of nonzero distinct field points.
+The subset certificate additionally checks the Vandermonde equations used by the proof. -/
+def shamirSubsetWeights (points : List Goldilocks) : List Goldilocks :=
+  points.map fun x => (points.filter (fun y => y != x)).foldl
+    (fun acc y => Goldilocks.mul acc
+      (Goldilocks.mul y (Goldilocks.inv (Goldilocks.sub y x)))) Goldilocks.one
+
+/-- Executable certificate construction for a selected threshold subset. Invalid indices
+are excluded by `Fin n`; repeated parties, insufficient shares, and field wrap are refused.
+Moment checks make the returned reconstruction guarantee independent of trusting inversion. -/
+def checkedShamirThresholdSubset (n t : Nat) (parties : List (Fin n)) :
+    Option (ShamirThresholdSubset n t) :=
+  let points := parties.map (fun p => Goldilocks.ofNat (p.val + 1))
+  let weights := shamirSubsetWeights points
+  if h : 0 < t ∧ t ≤ parties.length ∧ parties.Nodup ∧ n < goldilocksPrime ∧
+      ringDot weights (points.map (fun _ => (CommRingOps.one : Goldilocks))) = CommRingOps.one ∧
+      (∀ d : Fin t, 1 ≤ d.val →
+        ringDot weights (points.map (fun x => ringPow x d.val)) = CommRingOps.zero) then
+    some {
+      parties := parties
+      threshold_pos := h.1
+      enough := h.2.1
+      distinct := h.2.2.1
+      field_bound := h.2.2.2.1
+      quorum := {
+        pts := points
+        lambdas := weights
+        sum_one := h.2.2.2.2.1
+        kills_higher := fun d hd ht => h.2.2.2.2.2 ⟨d, ht⟩ hd }
+      points_eq := rfl
+      weights_length := by simp [weights, shamirSubsetWeights, points] }
+  else none
+
+/-- Reconstruct each coordinate using exactly the selected custodians. -/
+def reconstructShamirSubset {n t : Nat} (Q : ShamirThresholdSubset n t)
+    (shares : Fin n → Lane4) : Lane4 :=
+  let column := Q.parties.map shares
+  ⟨ringDot Q.quorum.lambdas (column.map (·.x0)),
+   ringDot Q.quorum.lambdas (column.map (·.x1)),
+   ringDot Q.quorum.lambdas (column.map (·.x2)),
+   ringDot Q.quorum.lambdas (column.map (·.x3))⟩
+
+/-- General threshold assembly; the legacy three-share entry point below remains a
+compatibility fixture for the exported concrete witnesses. -/
+def assembleShamirSubsetSig {n t : Nat} (Q : ShamirThresholdSubset n t)
+    (shares : Fin n → Lane4) (msg : List UInt8) : ByteArray :=
+  poseidon2TagBytes (packLane4Bytes32 (reconstructShamirSubset Q shares)) msg
+
+/-- Local custody replaces only this custodian's entry; peers supply all other shares. -/
+def signFromCustodianWithPeers {n t : Nat} (Q : ShamirThresholdSubset n t)
+    (custodian : Fin n) (localShare : Lane4) (peers : Fin n → Lane4)
+    (msg : List UInt8) : ByteArray :=
+  assembleShamirSubsetSig Q (fun p => if p = custodian then localShare else peers p) msg
+
+theorem signFromCustodianWithPeers_eq {n t : Nat} (Q : ShamirThresholdSubset n t)
+    (custodian : Fin n) (shares : Fin n → Lane4) (msg : List UInt8) :
+    signFromCustodianWithPeers Q custodian (shares custodian) shares msg =
+      assembleShamirSubsetSig Q shares msg := by
+  unfold signFromCustodianWithPeers
+  congr 1
+  funext p
+  split <;> simp_all
+
+/-- Arbitrary degree-bounded polynomial sharing, coordinate by coordinate. -/
+def evalShamirPolynomials (polys : Fin 4 → List Goldilocks) (x : Goldilocks) : Lane4 :=
+  ⟨RoundPoly.evalCoeffs (polys 0) x, RoundPoly.evalCoeffs (polys 1) x,
+   RoundPoly.evalCoeffs (polys 2) x, RoundPoly.evalCoeffs (polys 3) x⟩
+
+theorem reconstructShamirSubset_correct {n t : Nat} (Q : ShamirThresholdSubset n t)
+    (polys : Fin 4 → List Goldilocks) (degree : ∀ i, (polys i).length ≤ t) :
+    reconstructShamirSubset Q
+      (fun p => evalShamirPolynomials polys (Goldilocks.ofNat (p.val + 1))) =
+      evalShamirPolynomials polys Goldilocks.zero := by
+  have coord (i : Fin 4) := lagrangeAtZero_evalCoeffs Q.quorum.lambdas Q.quorum.pts
+    (polys i) t (degree i) Q.quorum.sum_one Q.quorum.kills_higher
+  have zero_eq : (CommRingOps.zero : Goldilocks) = Goldilocks.zero := rfl
+  simp only [Q.points_eq, List.map_map, Function.comp_def, zero_eq] at coord
+  apply Lane4.ext
+  · simpa only [reconstructShamirSubset, evalShamirPolynomials, List.map_map,
+      Function.comp_def] using coord 0
+  · simpa only [reconstructShamirSubset, evalShamirPolynomials, List.map_map,
+      Function.comp_def] using coord 1
+  · simpa only [reconstructShamirSubset, evalShamirPolynomials, List.map_map,
+      Function.comp_def] using coord 2
+  · simpa only [reconstructShamirSubset, evalShamirPolynomials, List.map_map,
+      Function.comp_def] using coord 3
+
+theorem assembleShamirSubsetSig_correct {n t : Nat} (Q : ShamirThresholdSubset n t)
+    (polys : Fin 4 → List Goldilocks) (degree : ∀ i, (polys i).length ≤ t)
+    (msg : List UInt8) :
+    assembleShamirSubsetSig Q
+      (fun p => evalShamirPolynomials polys (Goldilocks.ofNat (p.val + 1))) msg =
+    poseidon2TagBytes (packLane4Bytes32 (evalShamirPolynomials polys Goldilocks.zero)) msg := by
+  unfold assembleShamirSubsetSig
+  rw [reconstructShamirSubset_correct Q polys degree]
+
+/-- Byte-map adapter used by the four-layer machines. -/
+def assembleShamirSubsetBytesSig {n t : Nat} (Q : ShamirThresholdSubset n t)
+    (shares : Nat → Option (List UInt8)) (msg : List UInt8) : ByteArray :=
+  assembleShamirSubsetSig Q (fun p => unpackLane4Bytes32 ((shares p.val).getD [])) msg
+
+/-- The algebraic obligations at layers 2/3/4 are discharged for any certified subset
+and any degree-bounded dealing. This is still a refinement of the guard model: obtaining
+an extracted-source simulation requires the external extraction package. -/
+def shamirSubset_four_layer_sim {PK : Type} {n t f : Nat}
+    (Q : ShamirThresholdSubset n t) (corrupt : List (Fin n))
+    (pkDigestOf : PK → List UInt8) (pk : PK)
+    (dealt : Nat → Option (List UInt8)) (custodian : Fin n)
+    (localShare : List UInt8) (polys : Fin 4 → List Goldilocks)
+    (degree : ∀ i, (polys i).length ≤ t)
+    (hDealt : ∀ p : Fin n, unpackLane4Bytes32 ((dealt p.val).getD []) =
+      evalShamirPolynomials polys (Goldilocks.ofNat (p.val + 1)))
+    (hLocal : unpackLane4Bytes32 localShare = unpackLane4Bytes32 ((dealt custodian.val).getD []))
+    (hBound : n + f < 2 * t) (hTLeN : t ≤ n)
+    (hCorruptNd : corrupt.Nodup) (hCorruptLe : corrupt.length ≤ f) :
+    ForwardSim
+      (layer1CompiledElfMachine (n := n) t (pkDigestOf pk) (fun mem msg =>
+        signFromCustodianWithPeers Q custodian (unpackLane4Bytes32 (readShareMem32 mem))
+          (fun p => unpackLane4Bytes32 ((dealt p.val).getD [])) msg))
+      (layer4IdealTsigMachine corrupt pkDigestOf
+        (poseidon2TagBytes (packLane4Bytes32 (evalShamirPolynomials polys Goldilocks.zero)))) := by
+  apply isa_to_mir_to_protocol_to_ideal_sim corrupt pkDigestOf pk dealt localShare
+    (fun bytes msg => signFromCustodianWithPeers Q custodian (unpackLane4Bytes32 bytes)
+      (fun p => unpackLane4Bytes32 ((dealt p.val).getD [])) msg)
+    (assembleShamirSubsetBytesSig Q)
+    (poseidon2TagBytes (packLane4Bytes32 (evalShamirPolynomials polys Goldilocks.zero)))
+    hBound Q.threshold_pos hTLeN hCorruptNd hCorruptLe
+  · intro msg
+    rw [hLocal]
+    exact (signFromCustodianWithPeers_eq Q custodian
+      (fun p => unpackLane4Bytes32 ((dealt p.val).getD [])) msg).symm
+  · intro msg
+    unfold assembleShamirSubsetBytesSig
+    have hShares : (fun p : Fin n => unpackLane4Bytes32 ((dealt p.val).getD [])) =
+        (fun p => evalShamirPolynomials polys (Goldilocks.ofNat (p.val + 1))) :=
+      funext hDealt
+    rw [hShares]
+    exact assembleShamirSubsetSig_correct Q polys degree msg
+
 /-- Reconstruct the 32-byte master key from 3 distinct Shamir shares `{1, 2, 3}` and compute the
     full 32-byte `Poseidon2` sponge signature tag. -/
 def assembleShamirThresholdSig (shMap : Nat → Option (List UInt8)) (msg : List UInt8) : ByteArray :=

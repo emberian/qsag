@@ -13,6 +13,7 @@
 //! remains non-identifiable / unfair (`1` corrupt custodian can force an
 //! abort). See `SECURITY.md` for exact scope.
 pub use crate::outer_mpc::{Envelope, Error, Transport};
+use crate::secret::SecretVec;
 use crate::{
     circuit::{Circuit, Domain, Op},
     outer_mpc::{self, Bit, Engine, FieldWord, Sponge, Word},
@@ -133,14 +134,14 @@ impl CoZkCustodianShare {
         ct_zeroize_u64s(&mut own);
         // Both replicated witness components this custodian holds are wiped on
         // every exit path, as are its shares of all virtual-head tape seeds.
-        let witness = ZeroizeWordVec(vec![shared?]);
-        let witness: &[Bit] = &witness.0[0];
+        let witness = shared?;
+        let witness: &[Bit] = &witness;
         let circuit = crate::ownership::build(statement, &[0; 32]);
 
         let num_batches = MIT_REPETITIONS.div_ceil(64);
         let mut seeds = Vec::with_capacity(num_batches);
         for batch in 0..num_batches {
-            let mut heads = ZeroizeWordVec(Vec::with_capacity(3));
+            let mut heads = Vec::with_capacity(3);
             for head in 0..3 {
                 let mut lane_seeds: Vec<_> = (0..64)
                     .map(|lane| {
@@ -168,7 +169,7 @@ impl CoZkCustodianShare {
                 }
                 let shared = e.share(&own_seed);
                 ct_zeroize_u64s(&mut own_seed);
-                heads.0.push(shared?);
+                heads.push(shared?);
             }
             seeds.push(heads);
         }
@@ -245,7 +246,7 @@ impl CoZkCustodianShare {
                 });
                 let total_bits =
                     view.seed.len() + view.inputs.len() + view.products.len() + view.outputs.len();
-                let mut masked = Vec::with_capacity(total_bits);
+                let mut masked = Word::with_capacity(total_bits);
                 for part in [&view.seed, &view.inputs, &view.products, &view.outputs] {
                     masked.extend(part.iter().map(|b| Bit([b.0[0] & mask, b.0[1] & mask])));
                 }
@@ -338,7 +339,7 @@ fn open_batch_public_rounds<T: Transport>(
     #[cfg(test)]
     e.transport.on_public_or_view_open();
     let out_len = views[0].outputs.len();
-    let mut flat = Vec::with_capacity(3 * 256 + 3 * out_len);
+    let mut flat = Word::with_capacity(3 * 256 + 3 * out_len);
     for cb in commit_bits {
         flat.extend_from_slice(cb);
     }
@@ -383,7 +384,7 @@ fn compute_batches<T: Transport>(
     e: &mut Engine<T>,
     c: &Circuit,
     witness: &[Bit],
-    seeds: &[ZeroizeWordVec],
+    seeds: &[Vec<Word>],
     children: Vec<T>,
     ctx: BatchContext,
 ) -> Result<Vec<BatchComputed<T>>, Error> {
@@ -415,7 +416,7 @@ fn compute_batches<T: Transport>(
                             engine.mix_entropy(&batch_entropy);
                             ct_zeroize_bytes(&mut batch_entropy);
                             let mut result =
-                                compute_batch(&mut engine, c, witness, &seeds[batch].0, batch)?;
+                                compute_batch(&mut engine, c, witness, &seeds[batch], batch)?;
                             engine.batch_cancelled = None;
                             result.engine = Some(engine);
                             Ok(result)
@@ -450,7 +451,7 @@ fn compute_batches<T: Transport>(
     seeds
         .iter()
         .enumerate()
-        .map(|(batch, seed)| compute_batch(e, c, witness, &seed.0, batch))
+        .map(|(batch, seed)| compute_batch(e, c, witness, seed, batch))
         .collect()
 }
 
@@ -469,7 +470,7 @@ struct SharedView {
 impl SharedView {
     #[cfg(test)]
     fn bytes(&self) -> Word {
-        let mut out = Vec::with_capacity(
+        let mut out = Word::with_capacity(
             self.seed.len() + self.inputs.len() + self.products.len() + self.outputs.len(),
         );
         out.extend_from_slice(&self.seed);
@@ -477,31 +478,6 @@ impl SharedView {
         out.extend_from_slice(&self.products);
         out.extend_from_slice(&self.outputs);
         out
-    }
-}
-impl Drop for SharedView {
-    fn drop(&mut self) {
-        for v in [
-            &mut self.seed,
-            &mut self.inputs,
-            &mut self.products,
-            &mut self.outputs,
-        ] {
-            for b in v {
-                ct_zeroize_u64s(&mut b.0);
-            }
-        }
-    }
-}
-
-struct ZeroizeWordVec(Vec<Word>);
-impl Drop for ZeroizeWordVec {
-    fn drop(&mut self) {
-        for word in &mut self.0 {
-            for b in word {
-                ct_zeroize_u64s(&mut b.0);
-            }
-        }
     }
 }
 
@@ -514,7 +490,7 @@ impl SharedValue {
         if d == Domain::Bit {
             Self::Bit(Bit::default())
         } else {
-            Self::Field(vec![[[0; 4]; 2]; 64])
+            Self::Field(vec![[[0; 4]; 2]; 64].into())
         }
     }
     fn bit(&self) -> Bit {
@@ -534,13 +510,7 @@ impl Drop for SharedValue {
     fn drop(&mut self) {
         match self {
             Self::Bit(b) => ct_zeroize_u64s(&mut b.0),
-            Self::Field(f) => {
-                for pair in f {
-                    for part in pair {
-                        ct_zeroize_u64s(part);
-                    }
-                }
-            }
+            Self::Field(_) => {} // FieldWord owns its wipe-on-drop storage.
         }
     }
 }
@@ -586,7 +556,7 @@ struct FieldTapeDraw {
 
 fn fold_valid_bits<T: Transport>(
     e: &mut Engine<T>,
-    mut groups: [Vec<Bit>; 3],
+    mut groups: [Word; 3],
 ) -> Result<[Bit; 3], Error> {
     for g in &mut groups {
         if g.is_empty() {
@@ -594,7 +564,7 @@ fn fold_valid_bits<T: Transport>(
         }
     }
     while groups.iter().any(|g| g.len() > 1) {
-        let mut pairs = Vec::new();
+        let mut pairs = SecretVec::new();
         for g in &groups {
             for pair in g.chunks_exact(2) {
                 pairs.push((pair[0], pair[1]));
@@ -604,7 +574,7 @@ fn fold_valid_bits<T: Transport>(
         let mut cur = 0usize;
         for g in &mut groups {
             let num_pairs = g.len() / 2;
-            let mut next = Vec::with_capacity(num_pairs + (g.len() % 2));
+            let mut next = Word::with_capacity(num_pairs + (g.len() % 2));
             next.extend_from_slice(&prods[cur..cur + num_pairs]);
             cur += num_pairs;
             if g.len() % 2 == 1 {
@@ -616,12 +586,12 @@ fn fold_valid_bits<T: Transport>(
     Ok([groups[0][0], groups[1][0], groups[2][0]])
 }
 
-fn fold_all_true_bits<T: Transport>(e: &mut Engine<T>, mut bits: Vec<Bit>) -> Result<Bit, Error> {
+fn fold_all_true_bits<T: Transport>(e: &mut Engine<T>, mut bits: Word) -> Result<Bit, Error> {
     if bits.is_empty() {
         return Ok(e.constant(u64::MAX));
     }
     while bits.len() > 1 {
-        let mut pairs = Vec::with_capacity(bits.len() / 2);
+        let mut pairs = SecretVec::with_capacity(bits.len() / 2);
         for pair in bits.chunks_exact(2) {
             pairs.push((pair[0], pair[1]));
         }
@@ -750,7 +720,7 @@ fn evaluate_inner<T: Transport>(
         let s2 = &mut rest2[0];
         e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
     }
-    let squeezed = ZeroizeWordVec(outer_mpc::squeeze_sponges_lockstep(
+    let squeezed = outer_mpc::squeeze_sponges_lockstep(
         e,
         &mut tape_sponges,
         &[
@@ -758,28 +728,31 @@ fn evaluate_inner<T: Transport>(
             cursors[1].sponge_bits,
             cursors[2].sponge_bits,
         ],
-    )?);
+    )?;
 
     // 3. Batch-check `< modulus` across all field draws per domain and open `valid` upfront.
-    let mut valid_groups: [Vec<Bit>; 3] = core::array::from_fn(|_| Vec::new());
-    let mut raw_draw_words = ZeroizeWordVec(
-        field_draws
-            .iter()
-            .map(|fd| squeezed.0[fd.head][fd.start..fd.start + fd.domain.width()].to_vec())
-            .collect(),
-    );
+    let mut valid_groups: [Word; 3] = core::array::from_fn(|_| Word::new());
+    let mut raw_draw_words: Vec<Word> = field_draws
+        .iter()
+        .map(|fd| {
+            squeezed[fd.head][fd.start..fd.start + fd.domain.width()]
+                .iter()
+                .copied()
+                .collect()
+        })
+        .collect();
 
     for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
-        let mut dom_words = ZeroizeWordVec(Vec::new());
+        let mut dom_words = Vec::new();
         let mut dom_heads = Vec::new();
         for (idx, fd) in field_draws.iter().enumerate() {
             if fd.domain == dom {
-                dom_words.0.push(raw_draw_words.0[idx].clone());
+                dom_words.push(raw_draw_words[idx].clone());
                 dom_heads.push(fd.head);
             }
         }
-        if !dom_words.0.is_empty() {
-            let lt_bits = e.less_than_modulus_many(&dom_words.0, dom)?;
+        if !dom_words.is_empty() {
+            let lt_bits = e.less_than_modulus_many(&dom_words, dom)?;
             for (h, lt) in dom_heads.into_iter().zip(lt_bits) {
                 valid_groups[h].push(lt);
             }
@@ -791,7 +764,7 @@ fn evaluate_inner<T: Transport>(
     }
 
     // Only `NodeTape::InputField` draws are read again in Step 7; move all `MulField`
-    // draws directly into `bits_to_field_many` so their `Vec<Bit>` buffers free early.
+    // draws directly into `bits_to_field_many` so their `Word` buffers free early.
     let mut keep_raw_draw = vec![false; field_draws.len()];
     for nt in &node_tapes {
         if let NodeTape::InputField { draws, .. } = *nt {
@@ -804,21 +777,19 @@ fn evaluate_inner<T: Transport>(
     let mut draw_fields: Vec<Option<FieldWord>> = (0..field_draws.len()).map(|_| None).collect();
     for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
         let mut idxs = Vec::new();
-        let mut dom_words = ZeroizeWordVec(Vec::new());
+        let mut dom_words = Vec::new();
         for (idx, fd) in field_draws.iter().enumerate() {
             if fd.domain == dom {
                 idxs.push(idx);
                 if keep_raw_draw[idx] {
-                    dom_words.0.push(raw_draw_words.0[idx].clone());
+                    dom_words.push(raw_draw_words[idx].clone());
                 } else {
-                    dom_words
-                        .0
-                        .push(core::mem::take(&mut raw_draw_words.0[idx]));
+                    dom_words.push(core::mem::take(&mut raw_draw_words[idx]));
                 }
             }
         }
-        if !dom_words.0.is_empty() {
-            let converted = e.bits_to_field_many(&dom_words.0, dom)?;
+        if !dom_words.is_empty() {
+            let converted = e.bits_to_field_many(&dom_words, dom)?;
             for (idx, fw) in idxs.into_iter().zip(converted) {
                 draw_fields[idx] = Some(fw);
             }
@@ -905,7 +876,7 @@ fn evaluate_inner<T: Transport>(
             for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
                 let mut lift_idxs = Vec::new();
                 let mut lift_owners = Vec::new();
-                let mut lift_bits = Vec::new();
+                let mut lift_bits = Word::new();
                 for &idx in comm_nodes {
                     if c.nodes[idx].domain == dom
                         && let Op::Lift(a, owner) = c.nodes[idx].op
@@ -938,7 +909,8 @@ fn evaluate_inner<T: Transport>(
             }
             for &(a, owner) in &unique_sources {
                 if c.nodes[a].domain == Domain::Bit {
-                    encodings[a][owner] = Some(vec![wires[a].as_ref().unwrap()[owner].bit()]);
+                    encodings[a][owner] =
+                        Some(vec![wires[a].as_ref().unwrap()[owner].bit()].into());
                 }
             }
             for dom in [Domain::Gold, Domain::Secp, Domain::Ed] {
@@ -965,7 +937,7 @@ fn evaluate_inner<T: Transport>(
 
             // 5d. Boolean `Op::Mul` batched into a single `e.and`.
             let mut bit_mul_idxs = Vec::new();
-            let mut bit_mul_pairs = Vec::new();
+            let mut bit_mul_pairs = SecretVec::new();
             for &idx in comm_nodes {
                 if c.nodes[idx].domain == Domain::Bit
                     && let Op::Mul(a, b) = c.nodes[idx].op
@@ -987,9 +959,9 @@ fn evaluate_inner<T: Transport>(
                         unreachable!()
                     };
                     let m = [
-                        squeezed.0[0][pos[0]],
-                        squeezed.0[1][pos[1]],
-                        squeezed.0[2][pos[2]],
+                        squeezed[0][pos[0]],
+                        squeezed[1][pos[1]],
+                        squeezed[2][pos[2]],
                     ];
                     let parts = core::array::from_fn(|head| {
                         SharedValue::Bit(
@@ -1069,8 +1041,8 @@ fn evaluate_inner<T: Transport>(
                     let NodeTape::InputBit { witness_idx, pos } = node_tapes[idx] else {
                         unreachable!()
                     };
-                    let a = squeezed.0[0][pos[0]];
-                    let b = squeezed.0[1][pos[1]];
+                    let a = squeezed[0][pos[0]];
+                    let b = squeezed[1][pos[1]];
                     let secret = witness[witness_idx];
                     [
                         SharedValue::Bit(a),
@@ -1120,7 +1092,7 @@ fn evaluate_inner<T: Transport>(
     // Boolean and prime-field output residual reconstructs to `0` across all 3 ZKBoo
     // heads BEFORE converting views or opening any output shares / view commitments.
     if verify_zero_outputs {
-        let mut residual_bits: Vec<Bit> = Vec::new();
+        let mut residual_bits: Word = Word::new();
         for &out in &c.outputs {
             if c.nodes[out].domain == Domain::Bit {
                 let w = wires[out].as_ref().unwrap();
@@ -1151,7 +1123,7 @@ fn evaluate_inner<T: Transport>(
             }
         }
         let ones = e.constant(u64::MAX);
-        let zero_flags: Vec<Bit> = residual_bits.into_iter().map(|b| b ^ ones).collect();
+        let zero_flags: Word = residual_bits.into_iter().map(|b| b ^ ones).collect();
         let all_outputs_zero = fold_all_true_bits(e, zero_flags)?;
         // Explicitly verify all circuit, conversion, and tree-AND multiplications
         // BEFORE opening the single 1-bit `all_outputs_zero` predicate.
@@ -1216,9 +1188,9 @@ fn evaluate_inner<T: Transport>(
         .iter()
         .map(|seed| SharedView {
             seed: seed.clone(),
-            inputs: Vec::new(),
-            products: Vec::new(),
-            outputs: Vec::new(),
+            inputs: Word::new(),
+            products: Word::new(),
+            outputs: Word::new(),
         })
         .collect();
 
@@ -1235,8 +1207,8 @@ fn evaluate_inner<T: Transport>(
                     let NodeTape::InputField { draws, .. } = node_tapes[idx] else {
                         unreachable!()
                     };
-                    outer_mpc::encode(&mut views[0].inputs, &raw_draw_words.0[draws[0]]);
-                    outer_mpc::encode(&mut views[1].inputs, &raw_draw_words.0[draws[1]]);
+                    outer_mpc::encode(&mut views[0].inputs, &raw_draw_words[draws[0]]);
+                    outer_mpc::encode(&mut views[1].inputs, &raw_draw_words[draws[1]]);
                     outer_mpc::encode(&mut views[2].inputs, encodings[idx][2].as_ref().unwrap());
                 }
             }
@@ -1365,7 +1337,9 @@ fn compute_view_commit_bits<T: Transport>(
         e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
     }
 
-    Ok(core::array::from_fn(|h| sponges[h].state[..256].to_vec()))
+    Ok(core::array::from_fn(|h| {
+        sponges[h].state[..256].iter().copied().collect()
+    }))
 }
 
 #[cfg(test)]

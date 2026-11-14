@@ -20,3 +20,4 @@ public import QsagVerified.Proofs.CallerContracts
 public import QsagVerified.Proofs.BeltLatchKernel
 
 public import QsagVerified.Proofs.BdozConsumption
+public import QsagVerified.Proofs.ConsumingOpening

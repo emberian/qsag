@@ -146,6 +146,12 @@ pub const MAX_KEY_FILE_BYTES: u64 = 1024 * 1024;
 pub const MAX_SIG_PROOF_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_MSG_BYTES: u64 = 64 * 1024 * 1024;
 
+#[cfg(test)]
+std::thread_local! {
+    // Observe bytes only after wiping and before deallocation; never inspect freed memory.
+    static WIPED_BUFFERS: std::cell::RefCell<Option<Vec<(usize, bool)>>> = const { std::cell::RefCell::new(None) };
+}
+
 pub struct ZeroizingBuf(pub Vec<u8>);
 impl std::ops::Deref for ZeroizingBuf {
     type Target = [u8];
@@ -160,6 +166,12 @@ impl Drop for ZeroizingBuf {
             self.0.resize(cap, 0);
         }
         qsag_accel::ct::ct_zeroize_bytes(&mut self.0);
+        #[cfg(test)]
+        WIPED_BUFFERS.with(|events| {
+            if let Some(events) = &mut *events.borrow_mut() {
+                events.push((cap, self.0.iter().all(|byte| *byte == 0)));
+            }
+        });
         self.0.clear();
     }
 }
@@ -186,10 +198,8 @@ fn append_zeroizing(buf: &mut Vec<u8>, chunk: &[u8]) {
             .max(buf.len().saturating_add(chunk.len()));
         let mut next = Vec::with_capacity(next_cap);
         next.extend_from_slice(buf);
-        let old_len = buf.capacity();
-        buf.resize(old_len, 0);
-        qsag_accel::ct::ct_zeroize_bytes(buf);
-        *buf = next;
+        // Reuse the drop guard so reallocation and error cleanup share one wipe.
+        drop(ZeroizingBuf(std::mem::replace(buf, next)));
     }
     buf.extend_from_slice(chunk);
 }
@@ -233,32 +243,42 @@ fn read_limited(reader: impl Read, max: u64) -> Result<ZeroizingBuf, CliError> {
     read_limited_with_hint(reader, max, 256)
 }
 
+// Linux UAPI values differ by architecture. Keep the table testable on any host.
+fn linux_open_flags(arch: &str) -> Option<i32> {
+    let nofollow = match arch {
+        "aarch64" | "arm" => 0x8000,
+        "powerpc" | "powerpc64" => 0x10000,
+        "m68k" => 0x4000,
+        "x86_64" | "x86" | "riscv64" | "riscv32" => 0x20000,
+        _ => return None,
+    };
+    Some(nofollow | 0x800)
+}
+
+pub fn set_nofollow_nonblocking(opts: &mut std::fs::OpenOptions) -> Result<(), CliError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags = match std::env::consts::OS {
+            "linux" => linux_open_flags(std::env::consts::ARCH),
+            "macos" => Some(0x100 | 0x4),
+            _ => None,
+        }
+        .ok_or_else(|| CliError::state("unsupported no-follow file flags"))?;
+        opts.custom_flags(flags);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = opts;
+        Err(CliError::state("no-follow file access requires Unix"))
+    }
+}
+
 fn open_nonblocking_regular(path: &str) -> Result<std::fs::File, CliError> {
     let mut opts = std::fs::OpenOptions::new();
     opts.read(true);
-    #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(0x8000 | 0x800);
-    }
-    #[cfg(all(
-        target_os = "linux",
-        any(
-            target_arch = "x86_64",
-            target_arch = "x86",
-            target_arch = "riscv64",
-            target_arch = "riscv32"
-        )
-    ))]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(0x20000 | 0x800);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(0x100 | 0x4);
-    }
+    set_nofollow_nonblocking(&mut opts)?;
     opts.open(path)
         .map_err(|e| CliError::io("opening input", e))
 }
@@ -278,20 +298,28 @@ pub fn read_bounded_file(path: &str, max_bytes: u64) -> Result<ZeroizingBuf, Cli
 }
 
 /// Read a bounded message, including standard input.
-pub fn read_input(path: &str) -> Result<Vec<u8>, CliError> {
-    let mut bytes = if path == "-" {
-        read_limited(std::io::stdin(), MAX_MSG_BYTES)?
+pub fn read_input(path: &str) -> Result<ZeroizingBuf, CliError> {
+    if path == "-" {
+        read_limited(std::io::stdin(), MAX_MSG_BYTES)
     } else {
-        read_bounded_file(path, MAX_MSG_BYTES)?
-    };
-    Ok(std::mem::take(&mut bytes.0))
+        read_bounded_file(path, MAX_MSG_BYTES)
+    }
 }
 
-pub fn read_text(path: &str) -> Result<String, CliError> {
+pub struct ZeroizingText(ZeroizingBuf);
+impl std::ops::Deref for ZeroizingText {
+    type Target = str;
+    fn deref(&self) -> &str {
+        // Construction validates UTF-8; the buffer is never exposed mutably.
+        std::str::from_utf8(&self.0).expect("validated UTF-8")
+    }
+}
+
+pub fn read_text(path: &str) -> Result<ZeroizingText, CliError> {
     let bytes = read_bounded_file(path, MAX_KEY_FILE_BYTES)?;
     std::str::from_utf8(&bytes.0)
-        .map(str::to_owned)
-        .map_err(|_| CliError::input(format!("{path} is not UTF-8 text")))
+        .map_err(|_| CliError::input(format!("{path} is not UTF-8 text")))?;
+    Ok(ZeroizingText(bytes))
 }
 
 pub fn sync_parent(path: &str) -> Result<(), CliError> {
@@ -489,5 +517,63 @@ mod tests {
         let args = Args::parse(&strings(&["--n", "x"]), &["n"], &[]).unwrap();
         assert!(args.get_u64("n").is_err());
         assert!(args.require("missing").is_err());
+    }
+}
+
+#[cfg(test)]
+mod custody_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn linux_nofollow_architecture_constants() {
+        for arch in ["arm", "aarch64"] {
+            assert_eq!(linux_open_flags(arch), Some(0x8800));
+        }
+        for arch in ["powerpc", "powerpc64"] {
+            assert_eq!(linux_open_flags(arch), Some(0x10800));
+        }
+        assert_eq!(linux_open_flags("m68k"), Some(0x4800));
+        for arch in ["x86", "x86_64", "riscv32", "riscv64"] {
+            assert_eq!(linux_open_flags(arch), Some(0x20800));
+        }
+        assert_eq!(linux_open_flags("unknown"), None);
+    }
+
+    #[test]
+    fn secret_buffers_wipe_on_growth_drop_and_error() {
+        WIPED_BUFFERS.with(|events| *events.borrow_mut() = Some(Vec::new()));
+        let mut bytes = ZeroizingBuf(vec![0xAB; 17]);
+        let old_capacity = bytes.0.capacity();
+        append_zeroizing(&mut bytes.0, &[0xCD; 256]);
+        assert_eq!(&bytes[..17], &[0xAB; 17]);
+        assert_eq!(&bytes[17..], &[0xCD; 256]);
+        drop(bytes);
+        // Exercise decrypted JSON ownership, its clone used by vault MACs, and
+        // early-return unwinding while the plaintext strings are still live.
+        fn fail_with_plaintext() -> Result<(), CliError> {
+            let key =
+                crate::codec::Json::object(vec![("seed", crate::codec::Json::hex(&[0x42; 32]))]);
+            let opened = crate::envelope::open(&key, None)?;
+            let _unsigned = opened.clone();
+            let _encoded = ZeroizingBuf(opened.to_pretty().into_bytes());
+            Err(CliError::input("injected error"))?;
+            Ok(())
+        }
+        assert!(fail_with_plaintext().is_err());
+        let events = WIPED_BUFFERS.with(|events| events.borrow_mut().take().unwrap());
+        assert_eq!(events[0], (old_capacity, true));
+        assert!(events.iter().all(|(_, wiped)| *wiped));
+        // Original, decrypted, and cloned hex strings each reach the drop guard.
+        assert_eq!(events.iter().filter(|(cap, _)| *cap == 64).count(), 3);
+    }
+
+    #[test]
+    fn input_helpers_keep_zeroizing_ownership() {
+        // These signatures prevent accidentally returning an unguarded copy again.
+        let _: fn(&str) -> Result<ZeroizingBuf, CliError> = read_input;
+        let _: fn(&str) -> Result<ZeroizingText, CliError> = read_text;
+        assert!(std::mem::needs_drop::<ZeroizingText>());
+        let text = ZeroizingText(ZeroizingBuf(b"secret text".to_vec()));
+        assert_eq!(&*text, "secret text");
     }
 }

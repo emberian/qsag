@@ -277,18 +277,32 @@ both `Ok` completion and every `Err` early return:
   and folded vectors up to their high-water mark (`BitCheckScratch`), and the
   prime-field check vectors (`FpScratch`, `GoldScratch`);
 * shared views, circuit wire values, squeezed tapes and raw tape draws
-  (`SharedView`, `SharedValue`, `ZeroizeWordVec`), and outbound message payloads
-  (`Envelope`).
+  (`SharedView`, `SharedValue`, `Word`, `FieldWord`), and outbound message payloads
+  (`Envelope`);
+* arithmetic gadget words, adder pairs and carries, conversion scratch, validity
+  folds, Keccak stack scratch, field multiplication masks/products, and received
+  share buffers (`SecretVec`, `Secret`).
 
 The Boolean-check vectors, PRSS scratch and pending Boolean queue wipe their
 old allocation before growing, so no reallocation frees secret words.
 
-Not wiped: short-lived `Word` / `FieldWord` temporaries inside the arithmetic
-gadgets (adders, conversions, `fmul_many` products). Each holds two of three
-replicated components of an intermediate wire and is released to the allocator
-unwiped. A custodian that needs protection against later disclosure of its own
-freed heap must run the ceremony in a process whose memory is discarded as a
-whole.
+`Word` and `FieldWord` own `SecretVec` storage. Their destructors wipe on
+normal completion, error returns, and unwinding; growth copies into a new
+allocation and wipes the old one before releasing it. Truncation/clear and
+consuming iteration wipe vacated slots. Mutable access exposes only a slice,
+so callers cannot bypass guarded growth through a `Vec` method. Nested field
+arrays are flattened for one bulk wipe. Adder loops reuse preallocated pairs
+and output words; `fmul_many` generates masks in guarded stack storage one lane
+at a time and uses the returned local share buffer instead of duplicating every
+product word. Keccak's column and rotation buffers are guarded stack arrays.
+Circuit nodes wipe their values individually, including abandoned builders;
+builder growth wipes the old node allocation. Hash/curve gadget `Wire` arrays
+contain public node indices, not witness values.
+
+These are storage-lifetime guarantees, not a guarantee that Rust/LLVM clears
+registers or every compiler-generated copy. Destructors require normal scope
+exit or unwinding, rather than process abort. The storage tests cover growth,
+truncation, early iterator drop, error return, unwind, and allocation reuse.
 
 All 438 repetitions' view commitments and verified-zero output shares feed the
 ceremony-wide `QSAG.MIGRATE.ROOT.V3` Merkle/transcript root. Custodians execute

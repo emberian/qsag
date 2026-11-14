@@ -1,22 +1,25 @@
-//! Canonical authenticated V3 ledger codec. This is a snapshot, not a storage
+//! Canonical authenticated V4 ledger codec. This is a snapshot, not a storage
 //! transaction: callers must atomically persist it and fence its generation in
 //! trusted monotonic storage before releasing a signature. A MAC alone cannot
 //! detect rollback of both the checkpoint and its external generation fence.
 //!
 //! All integers are big endian. The MAC covers, in order: the 29-byte domain
-//! `QSAG.POLICY.DURABLE_LEDGER.V3`, key ID (32), enrolled party (u16), generation
+//! `QSAG.POLICY.DURABLE_LEDGER.V4`, key ID (32), enrolled party (u16), generation
 //! (u64), window (u64), spend (u128), next local slot (u16), poisoned and
 //! authenticated-initiator flags (one canonical 0/1 byte each), then nonce and
 //! session windows (each: u16 count, zero u16 cursor, count * 32 bytes), then
 //! two optional eviction watermarks (flag + 32 bytes each), then peer slots
-//! (u16 count, strictly ascending (u16 party, u64 mask) pairs). A 32-byte keyed
-//! cSHAKE256 framed tag follows. Trailing bytes and noncanonical encodings fail.
+//! (u16 count, strictly ascending (u16 party, u64 mask) pairs), then the verified
+//! velocity state: request nonce (u64), pinned-cap flag and cap (u128, zero when
+//! unpinned). A 32-byte keyed cSHAKE256 framed tag follows. On restore the extracted
+//! velocity guard is rebuilt from window, cap, nonce and spend through its own
+//! transition, so a snapshot whose spend exceeds its cap is refused. Trailing bytes and noncanonical encodings fail.
 //! Key identity identifies the original secret provisioning, not just party ID.
 //! Restore requires the same provisioned secrets; secrets are never serialized.
 
 use super::*;
 
-const DOMAIN: &[u8] = b"QSAG.POLICY.DURABLE_LEDGER.V3";
+const DOMAIN: &[u8] = b"QSAG.POLICY.DURABLE_LEDGER.V4";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyGuardError {
@@ -108,6 +111,10 @@ impl PolicySignerGuardShare {
             out.extend_from_slice(&peer.to_be_bytes());
             out.extend_from_slice(&mask.to_be_bytes());
         }
+        out.extend_from_slice(&self.velocity_generation.to_be_bytes());
+        let pinned_cap = self.verified_velocity.as_ref().map(|g| g.cap_units());
+        out.push(u8::from(pinned_cap.is_some()));
+        out.extend_from_slice(&pinned_cap.unwrap_or(0).to_be_bytes());
         let tag = cshake256_framed_32(DOMAIN, &[storage_mac_key, &out]);
         out.extend_from_slice(&tag);
         out
@@ -193,10 +200,32 @@ impl PolicySignerGuardShare {
             }
             peers.push((peer, mask));
         }
-        if !r.0.is_empty() {
+        let velocity_generation = u64::from_be_bytes(r.take()?);
+        let pinned = r.flag()?;
+        let cap = u128::from_be_bytes(r.take()?);
+        if !r.0.is_empty()
+            || (!pinned && (cap != 0 || spend != 0 || velocity_generation != 0))
+            || (spend != 0 && velocity_generation == 0)
+        {
             return Err(PolicyGuardError::InvalidCheckpoint);
         }
+        // Rebuild the verified guard before touching the ledger: the snapshot's spend must
+        // pass the extracted cap check under its own pinned cap.
+        let verified = if pinned {
+            let (guard, _) = rebuild_verified_velocity(
+                window,
+                cap,
+                self.durable_key_id,
+                velocity_generation,
+                spend,
+            )
+            .ok_or(PolicyGuardError::InvalidCheckpoint)?;
+            Some(guard)
+        } else {
+            None
+        };
         if generation < min_expected_generation.max(self.durable_generation.get())
+            || velocity_generation < self.velocity_generation
             || window < self.current_window_id
             || (window == self.current_window_id && spend < self.accumulated_window_spend)
             || self
@@ -221,6 +250,8 @@ impl PolicySignerGuardShare {
         }
         self.current_window_id = window;
         self.accumulated_window_spend = spend;
+        self.verified_velocity = verified;
+        self.velocity_generation = velocity_generation;
         self.burned_intent_nonces = nonces;
         self.burned_nonce_cursor = nonce_cursor;
         self.min_nonce_watermark = nonce_floor;
@@ -611,6 +642,33 @@ impl SharedWindowSpendLedger {
         }
         let (sessions, session_floor) = sets.pop().ok_or(PolicyGuardError::InvalidCheckpoint)?;
         let (nonces, nonce_floor) = sets.pop().ok_or(PolicyGuardError::InvalidCheckpoint)?;
+        // Rehydrate only after authentication, policy binding, and rollback checks.
+        // The checkpoint generation is the verified guard's monotone request nonce.
+        let cap = self
+            .verified_velocity
+            .as_ref()
+            .ok_or(PolicyGuardError::InvalidCheckpoint)?
+            .cap_units();
+        let mut verified = qsag_verified::StatefulVelocityGuard::new_window(
+            window,
+            cap,
+            self.policy_digest,
+            self.policy_digest,
+        );
+        if generation != 0 {
+            let (next, result) = verified.authorize_spend(qsag_verified::VelocitySpendRequest {
+                window_id: window,
+                nonce: generation,
+                amount_units: spend,
+                policy_pin: self.policy_digest,
+                authority_pin: self.policy_digest,
+            });
+            result.map_err(|_| PolicyGuardError::InvalidCheckpoint)?;
+            verified = next;
+        } else if spend != 0 {
+            return Err(PolicyGuardError::InvalidCheckpoint);
+        }
+        self.verified_velocity = Some(verified);
         self.generation = generation;
         self.current_window_id = window;
         self.accumulated_window_spend = spend;
@@ -639,7 +697,9 @@ mod tests {
         ));
         let mut guards = trusted_dealer_setup_for_testing([3; 32], &[1, 2]);
         let mut disk = FsPolicyDurableLedger::create_new(&path, [8; 32], &guards[0]).unwrap();
-        guards[0].record_approved_intent(4, [5; 32], [6; 32]);
+        guards[0]
+            .record_approved_intent(100, 4, [5; 32], [6; 32])
+            .unwrap();
         disk.sync_persist(&guards[0]).unwrap();
         let generation = disk.generation();
         drop(disk);
@@ -649,6 +709,26 @@ mod tests {
                 .unwrap();
         assert!(restarted[0].is_nonce_burned(&[5; 32]));
         assert!(restarted[0].is_session_burned(&[6; 32]));
+        // The verified guard came back with the snapshot's cap, spend and request nonce.
+        let verified = restarted[0].verified_velocity.as_ref().unwrap();
+        assert_eq!(
+            (verified.cap_units(), verified.spent_units(), verified.last_nonce()),
+            (100, 4, 1)
+        );
+        // It still enforces that cap: 97 more would exceed 100 and changes nothing.
+        assert_eq!(
+            restarted[0].record_approved_intent(100, 101, [7; 32], [8; 32]),
+            Err(PolicyViolation::VelocityCapOverflowOrExceeded)
+        );
+        assert_eq!(restarted[0].accumulated_window_spend(), 4);
+        assert!(!restarted[0].is_nonce_burned(&[7; 32]));
+        restarted[0]
+            .record_approved_intent(100, 100, [7; 32], [8; 32])
+            .unwrap();
+        assert_eq!(
+            restarted[0].verified_velocity.as_ref().unwrap().last_nonce(),
+            2
+        );
         drop(disk);
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(std::format!("{}.lock", path.display())).unwrap();

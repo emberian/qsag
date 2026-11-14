@@ -17,7 +17,7 @@ Shamir `WOTS+C` evaluation tables over `TowerElem 7` ($\mathbb{F}_{2^{128}}$) an
    - Domain tags and big-endian codecs for `belt_latch.rs`; concrete wire operations below
      separate cSHAKE customization from the retained abstract certificate model
      (`"QSAG.BELT.LATCH.BINDING/v1"`, `"QSAG.BELT.ECHO.MAC/v1"`, `"QSAG.BELT.ECHO.KEY/v1"`,
-     `"QSAG.BELT.LATCH.WAL.MAC/v1"`) and all 12 `quorum_jorts.rs` domain tags
+     `"QSAG.BELT.LATCH.WAL.MAC/v2"`) and all 12 `quorum_jorts.rs` domain tags
      (`"QSAG.QUORUM.CHAIN/v1"` through `"QSAG.QUORUM.STAGE.PKSEED/v1"`), with proved injectivity
      and cross-domain non-collision (`encodeNatBeBytes_injective`, `encodeBeltLatchRecord_injective`,
      `quorumLeafRecordBinding_binding`, `allBeltAndQuorumDomainTags_nodup`).
@@ -451,10 +451,10 @@ def beltEchoKeyTag : ByteArray :=
 theorem beltEchoKeyTag_size : beltEchoKeyTag.size = 21 := by
   simp [beltEchoKeyTag, ByteArray.size]
 
-/-- Exact 26-byte domain tag `"QSAG.BELT.LATCH.WAL.MAC/v1"` (`belt_latch.rs:68`). -/
+/-- Exact 26-byte domain tag `"QSAG.BELT.LATCH.WAL.MAC/v2"` (`belt_latch.rs:68`). -/
 def beltLatchWalMacTag : ByteArray :=
   ByteArray.mk #[0x51, 0x53, 0x41, 0x47, 0x2E, 0x42, 0x45, 0x4C, 0x54, 0x2E, 0x4C, 0x41, 0x54,
-                 0x43, 0x48, 0x2E, 0x57, 0x41, 0x4C, 0x2E, 0x4D, 0x41, 0x43, 0x2F, 0x76, 0x31]
+                 0x43, 0x48, 0x2E, 0x57, 0x41, 0x4C, 0x2E, 0x4D, 0x41, 0x43, 0x2F, 0x76, 0x32]
 
 theorem beltLatchWalMacTag_size : beltLatchWalMacTag.size = 26 := by
   simp [beltLatchWalMacTag, ByteArray.size]
@@ -658,27 +658,29 @@ theorem deriveBeltEchoMacKey_symm
   unfold deriveBeltEchoMacKey
   rw [Nat.min_comm, Nat.max_comm]
 
-/-- Durable WAL seal tag under `"QSAG.BELT.LATCH.WAL.MAC/v1"` (`FsBeltWal::tag`, `belt_latch.rs:271-273`). -/
+/-- Durable WAL seal tag under `"QSAG.BELT.LATCH.WAL.MAC/v2"` (`FsBeltWal::tag`, `belt_latch.rs:271-273`). -/
 def computeBeltWalSealTag
-    (H : List UInt8 → Digest256) (walKey : Digest256) (body : List UInt8) : Digest256 :=
-  H (encodeMultiFrame [beltLatchWalMacTag.data.toList, encodeMultiFrame [encodeDigest256 walKey, body]])
+    (H : List UInt8 → Digest256) (walKey : Digest256) (lockSeal : List UInt8)
+    (generation : UInt64) (body : List UInt8) : Digest256 :=
+  H (encodeMultiFrame [beltLatchWalMacTag.data.toList,
+    encodeMultiFrame [encodeDigest256 walKey, lockSeal, encodeNatBeBytes 8 generation.toNat, body]])
 
 theorem computeBeltWalSealTag_binding (H : List UInt8 → Digest256)
-    {k₁ k₂ : Digest256} {b₁ b₂ : List UInt8}
-    (hTag : computeBeltWalSealTag H k₁ b₁ = computeBeltWalSealTag H k₂ b₂) :
-    (k₁ = k₂ ∧ b₁ = b₂) ∨ Nonempty (HashCollision256 H) := by
-  let pre₁ := encodeMultiFrame [beltLatchWalMacTag.data.toList, encodeMultiFrame [encodeDigest256 k₁, b₁]]
-  let pre₂ := encodeMultiFrame [beltLatchWalMacTag.data.toList, encodeMultiFrame [encodeDigest256 k₂, b₂]]
+    {k₁ k₂ : Digest256} {l₁ l₂ b₁ b₂ : List UInt8} {g₁ g₂ : UInt64}
+    (hTag : computeBeltWalSealTag H k₁ l₁ g₁ b₁ = computeBeltWalSealTag H k₂ l₂ g₂ b₂) :
+    (k₁ = k₂ ∧ l₁ = l₂ ∧ encodeNatBeBytes 8 g₁.toNat = encodeNatBeBytes 8 g₂.toNat ∧ b₁ = b₂) ∨
+      Nonempty (HashCollision256 H) := by
+  let pre₁ := encodeMultiFrame [beltLatchWalMacTag.data.toList,
+    encodeMultiFrame [encodeDigest256 k₁, l₁, encodeNatBeBytes 8 g₁.toNat, b₁]]
+  let pre₂ := encodeMultiFrame [beltLatchWalMacTag.data.toList,
+    encodeMultiFrame [encodeDigest256 k₂, l₂, encodeNatBeBytes 8 g₂.toNat, b₂]]
   if hPre : pre₁ = pre₂ then
     have hOuter := encodeMultiFrame_injective hPre
-    injection hOuter with _ hR1
-    injection hR1 with hInnerEq _
-    have hInner := encodeMultiFrame_injective hInnerEq
-    injection hInner with hKey hR2
-    injection hR2 with hBody _
-    exact .inl ⟨encodeDigest256_injective hKey, hBody⟩
-  else
-    exact .inr ⟨⟨pre₁, pre₂, hPre, hTag⟩⟩
+    injection hOuter with _ hRest
+    injection hRest with hInner _
+    obtain ⟨hk, hl, hg, hb⟩ := list4_eq_iff (encodeMultiFrame_injective hInner)
+    exact .inl ⟨encodeDigest256_injective hk, hl, hg, hb⟩
+  else exact .inr ⟨⟨pre₁, pre₂, hPre, hTag⟩⟩
 
 /-- Pairwise MAC-authenticated `BeltEcho` message from `sender` to `receiver`. -/
 structure AuthenticatedBeltEcho (n : Nat) where
@@ -6245,10 +6247,10 @@ def checkQuorumWireRelease {n : Nat} (H : List UInt8 → Digest256)
     (keys : Fin n → Fin n → Digest256) (t subtreeHeight : Nat)
     (net : QuorumJortsNetworkState n) (Q : CustodiansMask n) (verifier : Fin n)
     (echoes : List (QuorumCommitteeEcho n)) : Option QuorumLeafRecord := do
-  if t = 0 ∨ n ≥ 2 ^ 64 ∨ Q.mem verifier = false then none else
+  if t = 0 ∨ n < t ∨ 255 < n ∨ Q.mem verifier = false then none else
     let cIdx ← committeeIndexOf t Q
     let st := net.slots verifier cIdx
-    if st.walPoisoned then none else
+    if st.walPoisoned || decide (16 < st.maxWindow) then none else
       let r ← st.inFlight
       let leafRec ← quorumLeafRecordFromLatch subtreeHeight cIdx r
       if verifyQuorumWirePeers H keys Q verifier cIdx r.epoch leafRec echoes then
@@ -6275,7 +6277,10 @@ def quorumRecordMatchesMessage (H : List UInt8 → Digest256) (pk : QuorumPublic
   let dig := quorumCounterDigest H rec.msgHash rec.counter
   decide (rec.msgHash = quorumMessageHash H pk rec.leaf msg) &&
   decide (rec.digits = (quorumDigitsFromDigest dig).map (fun d => UInt8.ofNat d.val)) &&
-  decide (((quorumDigitsFromDigest dig).map Fin.val).foldr (· + ·) 0 = 192)
+  decide (((quorumDigitsFromDigest dig).map Fin.val).foldr (· + ·) 0 = 192) &&
+  decide (rec.counter.toNat < 2 ^ 16) &&
+  (List.range rec.counter.toNat).all (fun i =>
+    decide (((quorumDigitsFromDigest (quorumCounterDigest H rec.msgHash (UInt32.ofNat i))).map Fin.val).foldr (· + ·) 0 ≠ 192))
 
 /-- A durable reservation is retained even if opening or verification subsequently fails.
     This is an atomic durable-store model; crash/recovery preserves these fields. -/
@@ -6448,7 +6453,7 @@ def stepQuorumWireNetwork {n : Nat} (H : List UInt8 → Digest256)
   match turn with
   | .latch action =>
     { st with
-      latches := stepQuorumJorts H (fun k bs => H (encodeDigest256 k ++ bs))
+      latches := stepQuorumJorts H (fun k bs => quorumWireMac H k quorumEchoMacTag [bs])
         keys Corrupt t height t st.latches action }
   | .echo sender receiver Q =>
     if Corrupt.mem sender || !Q.mem sender then st else
@@ -6561,47 +6566,83 @@ theorem QsBGlobalAllocator.reserve_disjoint {height : Nat}
   have := congrArg UInt64.toNat same
   omega
 
-/-- Permit-consuming global signing. The one shared cursor is reserved before invoking
-    the checked signer and is retained even when the signer rejects. A partition cannot
-    select a different global leaf by passing an independent signing argument. -/
-def signQsBWirePermit {n : Nat} (H : List UInt8 → Digest256)
-    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
-    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
-    (permit : QuorumWirePermit H keys t h net Q v echoes)
-    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
-    (allocator : QsBGlobalAllocator) (ledger : QuorumSigningLedger) :
-    QsBGlobalAllocator × QuorumSigningLedger × Option QuorumSteppedOpening :=
-  if permit.val.leaf.toNat = allocator.nextLeaf then
-    match allocator.reserve pk.height.toNat with
-    | none => (allocator, ledger, none)
-    | some (_, next) =>
-      let result := signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path ledger
-      (next, result.1, result.2)
-  else (allocator, ledger, none)
+/-- Global BFT enrollment, distinct from a QS-A threshold committee. -/
+structure QsBQuorumConfig where
+  n : Nat
+  t : Nat
+  f : Nat
+  q : Nat
 
-/-- The global allocator cannot bypass the authenticated-record signer. -/
-theorem signQsBWirePermit_output_authorized {n : Nat} (H : List UInt8 → Digest256)
-    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
-    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
-    (permit : QuorumWirePermit H keys t h net Q v echoes)
+def QsBQuorumConfig.valid (c : QsBQuorumConfig) : Bool :=
+  decide (0 < c.n ∧ c.n ≤ 255 ∧ c.f < c.t ∧ c.t ≤ c.q ∧ c.q ≤ c.n ∧
+    2 * c.q > c.n + c.f ∧ c.n ≥ 3 * c.f + 1 ∧ c.q ≤ c.n - c.f)
+
+structure QsBWireAck where
+  sender : Nat
+  receiver : Nat
+  leaf : UInt64
+  binding : Digest256
+  mac : Digest256
+
+/-- ACK authentication binds the sequential global leaf, never a committee subtree index. -/
+def checkQsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Digest256)
+    (cfg : QsBQuorumConfig) (receiver : Nat) (nextLeaf : Nat)
+    (rec : QuorumLeafRecord) (acks : List QsBWireAck) : Bool :=
+  cfg.valid && decide (receiver < cfg.n ∧ rec.leaf.toNat = nextLeaf ∧
+    (acks.map (·.sender)).Nodup ∧ cfg.q ≤ acks.length) &&
+  acks.all (fun a => decide (a.sender < cfg.n ∧ a.receiver = receiver ∧ a.leaf = rec.leaf ∧
+    a.binding = quorumLeafRecordBinding H rec ∧
+    a.mac = quorumWireMac H (keys a.sender receiver) quorumAckMacTag
+      [encodeNatBeBytes 8 a.sender, encodeNatBeBytes 8 receiver,
+        encodeNatBeBytes 8 rec.leaf.toNat, encodeDigest256 a.binding]))
+
+abbrev QsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Digest256)
+    (cfg : QsBQuorumConfig) (receiver nextLeaf : Nat) (acks : List QsBWireAck) :=
+  { rec : QuorumLeafRecord // checkQsBWirePermit H keys cfg receiver nextLeaf rec acks = true }
+
+/-- QS-B consumes a global ACK permit and reserves the shared cursor before opening.
+A QS-A committee permit cannot be passed to this interface. -/
+def signQsBWirePermit (H : List UInt8 → Digest256) (keys : Nat → Nat → Digest256)
+    (cfg : QsBQuorumConfig) (receiver : Nat) (acks : List QsBWireAck)
+    (allocator : QsBGlobalAllocator)
+    (permit : QsBWirePermit H keys cfg receiver allocator.nextLeaf acks)
     (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
-    (allocator : QsBGlobalAllocator) (ledger : QuorumSigningLedger) (out : QuorumSteppedOpening)
-    (produced : (signQsBWirePermit H keys t h net Q v echoes permit seed pk msg path
-      allocator ledger).2.2 = some out) :
+    (ledger : QuorumSigningLedger) :
+    QsBGlobalAllocator × QuorumSigningLedger × Option QuorumSteppedOpening :=
+  match allocator.reserve pk.height.toNat with
+  | none => (allocator, ledger, none)
+  | some (leaf, next) =>
+    let burned := { ledger with reserved := leaf :: ledger.reserved }
+    if leaf ∈ ledger.reserved then (next, burned, none) else
+    if quorumRecordMatchesMessage H pk msg permit.val &&
+        decide (pk.pkSeed = quorumStagePkSeed H seed) then
+      let sig := quorumJortsReferenceSign H seed leaf permit.val.counter
+        (quorumDigitsFromDigest (quorumCounterDigest H permit.val.msgHash permit.val.counter)) path
+      (next, { burned with signatures := sig :: ledger.signatures },
+        some { leaf := sig.leaf, counter := sig.counter, nodes := sig.nodes })
+    else (next, burned, none)
+
+theorem signQsBWirePermit_output_authorized (H : List UInt8 → Digest256)
+    (keys : Nat → Nat → Digest256) (cfg : QsBQuorumConfig) (receiver : Nat)
+    (acks : List QsBWireAck) (allocator : QsBGlobalAllocator)
+    (permit : QsBWirePermit H keys cfg receiver allocator.nextLeaf acks)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (ledger : QuorumSigningLedger) (out : QuorumSteppedOpening)
+    (h : (signQsBWirePermit H keys cfg receiver acks allocator permit seed pk msg path ledger).2.2 = some out) :
     out.leaf.toNat = allocator.nextLeaf ∧
-      checkQuorumWireRelease H keys t h net Q v echoes = some permit.val := by
-  unfold signQsBWirePermit at produced
-  split at produced
-  next current =>
-    cases allocated : allocator.reserve pk.height.toNat with
-    | none => simp only [allocated] at produced; cases produced
-    | some allocation =>
-      rcases allocation with ⟨leaf, next⟩
-      simp only [allocated] at produced
-      obtain ⟨authorized, leafEq, _⟩ := signQuorumWirePermit_output H keys t h net Q v echoes
-        permit seed pk msg path ledger out produced
-      exact ⟨(congrArg UInt64.toNat leafEq).trans current, authorized⟩
-  next mismatch => cases produced
+      checkQsBWirePermit H keys cfg receiver allocator.nextLeaf permit.val acks = true := by
+  unfold signQsBWirePermit at h
+  cases ha : allocator.reserve pk.height.toNat with
+  | none => simp [ha] at h
+  | some allocation =>
+    rcases allocation with ⟨leaf, next⟩
+    simp only [ha] at h
+    split at h
+    · cases h
+    · split at h
+      · cases Option.some.inj h
+        exact ⟨(QsBGlobalAllocator.reserve_bounds ha).1, permit.property⟩
+      · cases h
 
 /-- Allocated algebraic QS-B evaluator used for the quorum-independence theorem below.
     The permit-consuming operational entry is `signQsBWirePermit`. The responding subset changes interpolation inputs only;

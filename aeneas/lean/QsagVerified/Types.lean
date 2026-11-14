@@ -363,6 +363,27 @@ structure goldilocks.GoldilocksExt2 where
   c0 : goldilocks.Goldilocks
   c1 : goldilocks.Goldilocks
 
+/-- [qsag_verified::opening_guard::OpeningReleasePermit]
+    Source: 'src/opening_guard.rs', lines 17:0-21:1
+    Visibility: public -/
+structure opening_guard.OpeningReleasePermit where
+  session_id : Array Std.U8 32#usize
+  round_id : Std.U64
+  openings : Std.U64
+
+/-- [qsag_verified::opening_guard::ConsumingOpeningGuard2Lane]
+    Source: 'src/opening_guard.rs', lines 40:0-49:1
+    Visibility: public -/
+structure opening_guard.ConsumingOpeningGuard2Lane where
+  session_id : Array Std.U8 32#usize
+  round_id : Std.U64
+  binding : Array Std.U8 32#usize
+  expected_openings : Std.U64
+  absorbed : Std.U64
+  sum_lanes : Array Std.U128 2#usize
+  all_committed : Bool
+  consumed : Bool
+
 /-- [qsag_verified::pants_and_quorum_guards::BeltQuorumCoreInput]
     Source: 'src/pants_and_quorum_guards.rs', lines 86:0-100:1 -/
 @[discriminant isize]

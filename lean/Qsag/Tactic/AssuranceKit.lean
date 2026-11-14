@@ -647,8 +647,8 @@ private meta def domainConstants (e : Expr) : MetaM (Array Name) := do
     unless (`Qsag).isPrefixOf n do return false
     let some ci := env.find? n | return false
     match ci with
-    | .defnInfo _ => forallTelescope ci.type fun _ result =>
-        return !result.isSort || result == mkSort Level.zero
+    | .defnInfo _ => forallTelescope ci.type fun xs result =>
+        return (!xs.isEmpty && !result.isSort) || result == mkSort Level.zero
     | .inductInfo _ => forallTelescope ci.type fun _ result =>
         return result == mkSort Level.zero
     | _ => return false
@@ -664,9 +664,11 @@ private meta partial def meaningfulWitness (e : Expr) : MetaM Bool := do
   if let some (_, a, b) := e.eq? then
     return !(← withoutModifyingState (isDefEq a b))
   if e.getAppFn.isConstOf ``And then
-    return (← meaningfulWitness e.getAppArgs[0]!) || (← meaningfulWitness e.getAppArgs[1]!)
+    if ← meaningfulWitness e.getAppArgs[0]! then return true
+    return ← meaningfulWitness e.getAppArgs[1]!
   if e.getAppFn.isConstOf ``Or then
-    return (← meaningfulWitness e.getAppArgs[0]!) && (← meaningfulWitness e.getAppArgs[1]!)
+    unless ← meaningfulWitness e.getAppArgs[0]! do return false
+    return ← meaningfulWitness e.getAppArgs[1]!
   if e.getAppFn.isConstOf ``Exists then
     let args := e.getAppArgs
     return ← withLocalDeclD `_ args[0]! fun x => meaningfulWitness ((mkApp args[1]! x).headBeta)
@@ -816,6 +818,7 @@ private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
   let proof ← instantiateMVars (mkAppN (w.value! (allowOpaque := true)) wx)
   withWitnessFacts conclusion proof #[] fun facts => do
     let (sx, _, _) ← forallMetaTelescope s.type
+    let mut matchedWitnessPremise := false
     for x in sx do
       let ty ← instantiateMVars (← inferType x)
       if ← isProp ty then
@@ -825,8 +828,11 @@ private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
             unless ← isDefEq x fact do
               throwError "inhabitedness audit: inconsistent proof assignment"
             found := true
+            matchedWitnessPremise := true
             break
         if !found then pure ()
+    unless matchedWitnessPremise do
+      throwError "inhabitedness audit: no security premise supplied by the witness"
     for x in sx do
       let x ← instantiateMVars x
       if x.isMVar && !(← isProp (← inferType x)) then
@@ -836,8 +842,8 @@ private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
         let mut found := false
         for fact in facts do
           if ← matchWitnessType ty (← inferType fact) then
-            -- Preserve a witnessed list dimension when filling unconstrained data.
-            -- Every resulting premise is still proved below; this is only a search heuristic.
+            -- Shape synthesis is permitted only after a witness has supplied a real
+            -- security premise; every remaining premise is kernel-checked below.
             let candidate ← try
               if ty.getAppFn.isConstOf ``List then
                 let d ← mkDefault ty.getAppArgs[0]!

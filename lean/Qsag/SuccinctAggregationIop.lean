@@ -8337,6 +8337,79 @@ theorem stepOp256_shift_links_rows :
     rw [allZeroGoldilocks_append, Bool.and_eq_true] at hz
     exact stepOp256_shift_links_rows (r1 :: rest) g r r' h h' hz.2
 
+/-- Pointwise completeness as well as soundness of the intra-row residual stream.
+    The offset is retained so this also applies to a block inside a larger table. -/
+theorem stepOp256IntraResidualsFrom_iff (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (rows : List StepOpRow) (g : Nat),
+      allZeroGoldilocks (stepOp256IntraResidualsFrom profile slots g rows) = true ↔
+      ∀ (i : Nat) (row : StepOpRow), rows[i]? = some row →
+        allZeroGoldilocks (stepOp256RowResiduals profile
+          (slots.getD ((g + i) / stepOpRowsPerSigner profile) none)
+          ((g + i) % stepOpRowsPerSigner profile) row) = true
+  | [], _ => by simp [stepOp256IntraResidualsFrom, allZeroGoldilocks]
+  | r :: rs, g => by
+    constructor
+    · exact fun h i row hi => stepOp256IntraResidualsFrom_row_at profile slots _ g i row hi h
+    · intro h
+      rw [stepOp256IntraResidualsFrom, allZeroGoldilocks_append, Bool.and_eq_true]
+      refine ⟨?_, (stepOp256IntraResidualsFrom_iff profile slots rs (g + 1)).mpr ?_⟩
+      · simpa only [Nat.add_zero] using h 0 r rfl
+      · intro i row hi
+        have hr := h (i + 1) row (by simpa only [List.getElem?_cons_succ] using hi)
+        simpa only [Nat.add_right_comm g 1 i, Nat.add_assoc] using hr
+
+/-- The entire shift stream vanishes exactly when every adjacent pair hands over all
+    44 limbs. This converse permits constructing tables from executions, including
+    transitions across signer-block boundaries. -/
+theorem stepOp256ShiftResiduals_iff :
+    ∀ (rows : List StepOpRow),
+      allZeroGoldilocks (stepOp256ShiftResiduals rows) = true ↔
+      ∀ (i : Nat) (r r' : StepOpRow), rows[i]? = some r → rows[i + 1]? = some r' →
+        ∀ j < 44, r.nextState.getD j Goldilocks.zero = r'.prevState.getD j Goldilocks.zero
+  | [] => by simp [stepOp256ShiftResiduals, allZeroGoldilocks]
+  | [r] => by simp [stepOp256ShiftResiduals, allZeroGoldilocks]
+  | r :: r' :: rest => by
+    constructor
+    · exact fun h i a b ha hb => stepOp256_shift_links_rows _ i a b ha hb h
+    · intro h
+      rw [stepOp256ShiftResiduals, allZeroGoldilocks_append, Bool.and_eq_true]
+      refine ⟨(stepOp256_shift_iff r r').mpr (h 0 r r' rfl rfl),
+        (stepOp256ShiftResiduals_iff (r' :: rest)).mpr ?_⟩
+      intro i a b ha hb
+      exact h (i + 1) a b ha hb
+
+/-- Both boundary gates are necessary and sufficient; no condition is imposed on an
+    interior row by the boundary residuals. -/
+theorem stepOpBoundaryResiduals_iff (rowsPerSigner t : Nat) (row : StepOpRow) :
+    allZeroGoldilocks (stepOpBoundaryResiduals rowsPerSigner t row) = true ↔
+      (∀ j < 44, t = 0 → row.prevState.getD j Goldilocks.zero = Goldilocks.zero) ∧
+      (∀ j < 44, t + 1 = rowsPerSigner →
+        row.nextState.getD j Goldilocks.zero = Goldilocks.zero) := by
+  unfold stepOpBoundaryResiduals allZeroGoldilocks
+  simp only [List.all_flatMap, List.all_eq_true, List.mem_range, List.all_cons,
+    List.all_nil, Bool.and_true, Bool.and_eq_true, beq_iff_eq]
+  by_cases hFirst : t = 0 <;> by_cases hLast : t + 1 = rowsPerSigner <;>
+    simp [hFirst, hLast, forall_and]
+
+/-- A pointwise interface to the original 256-column table checker. All actual rows,
+    including active slots, must satisfy their scheduled gate, and all adjacent rows
+    must agree. Neither a signature-verifier premise nor a surrogate table is used. -/
+theorem stepOp256TableOk_iff_rows (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) :
+    stepOp256TableOk profile slots rows = true ↔
+      0 < slots.length ∧
+      rows.length = slots.length * stepOpRowsPerSigner profile ∧
+      (∀ row ∈ rows, row.wellShaped = true) ∧
+      (∀ (i : Nat) (row : StepOpRow), rows[i]? = some row →
+        allZeroGoldilocks (stepOp256RowResiduals profile
+          (slots.getD (i / stepOpRowsPerSigner profile) none)
+          (i % stepOpRowsPerSigner profile) row) = true) ∧
+      (∀ (i : Nat) (r r' : StepOpRow), rows[i]? = some r → rows[i + 1]? = some r' →
+        ∀ j < 44, r.nextState.getD j Goldilocks.zero = r'.prevState.getD j Goldilocks.zero) := by
+  unfold stepOp256TableOk
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true,
+    stepOp256IntraResidualsFrom_iff, stepOp256ShiftResiduals_iff, Nat.zero_add, and_assoc]
+
 /-! #### Row sumcheck claims over `GoldilocksExt4` at hypercube points -/
 
 /-- `Σ_{v < n} f v` over `GoldilocksExt4`. -/

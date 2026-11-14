@@ -89,6 +89,12 @@ fn run_beam_hierarchy_bench(
     subnet_specs: &[(u64, AggSigProfile, usize, usize)],
     regime: WhirSecurityRegime,
 ) {
+    // `QSAG_BEAM_ONLY=<substring>` restricts the run to matching scenario labels.
+    if let Ok(only) = std::env::var("QSAG_BEAM_ONLY")
+        && !label.contains(&only)
+    {
+        return;
+    }
     // This floor is a key-local leaf index; the beacon slot is bound in the message.
     let epoch_floor = 0u64;
     let beacon_root_msg = b"ethereum.beam.slot.128000.head_root.0x4a7b8c9d0e1f2a3b4c5d6e7f8091a2b3";
@@ -206,7 +212,12 @@ fn run_beam_hierarchy_bench(
         HierarchicalHemAggregate::from_bytes_canonical(&wire).expect("canonical wire roundtrip");
     assert_eq!(decoded, agg);
 
-    // Warm + 9-iteration median verification timing.
+    // Warm + median verification timing (`QSAG_VERIFY_ITERS`, default 9 samples).
+    let verify_iters = std::env::var("QSAG_VERIFY_ITERS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(9);
     assert!(verify_hierarchical_hem_registry_bound(
         &policies,
         epoch_floor,
@@ -215,8 +226,8 @@ fn run_beam_hierarchy_bench(
         regime,
         &decoded,
     ));
-    let mut samples_ms = Vec::with_capacity(9);
-    for _ in 0..9 {
+    let mut samples_ms = Vec::with_capacity(verify_iters);
+    for _ in 0..verify_iters {
         let t_v = Instant::now();
         let ok = verify_hierarchical_hem_registry_bound(
             &policies,
@@ -283,6 +294,12 @@ fn main() {
         WhirSecurityRegime::Habr24Qrom128,
     );
 
+    run_beam_hierarchy_bench(
+        "Beam-Jorts-4x32-Johnson-Qrom128",
+        &jorts_subnets,
+        WhirSecurityRegime::BciksJohnsonQrom128,
+    );
+
     // Scenario B: Mixed Stateful (`JortsPoseidon2`) + Stateless Hypertree (`CorduroyPoseidon2`) subnets
     let mixed_subnets = [
         (100, AggSigProfile::JortsPoseidon2, 32, 22),
@@ -295,4 +312,15 @@ fn main() {
         &mixed_subnets,
         WhirSecurityRegime::Habr24Qrom128,
     );
+    run_beam_hierarchy_bench(
+        "Beam-Mixed-Jorts+Corduroy-Johnson-Qrom128",
+        &mixed_subnets,
+        WhirSecurityRegime::BciksJohnsonQrom128,
+    );
+    #[cfg(feature = "vulkan")]
+    if let Some((submissions, receipts, fallbacks)) = qsag_agg::vulkan_execution_counts() {
+        println!(
+            "Vulkan totals: submissions={submissions} accepted_v4_receipts={receipts} cpu_fallbacks={fallbacks}"
+        );
+    }
 }

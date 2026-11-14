@@ -9601,12 +9601,9 @@ theorem vault_state_file_rollback_rejected {Secret : Type} (tag : Secret → Lis
 
 /-! ## 8. Rust storage layouts and explicit implementation boundaries
 
-The earlier single-record inode-sealed WAL and all-resource ceremony are specifications,
-not encodings of `LockedRecord` or `FsCeremonyJournal`. In particular their split-brain
-result requires authenticated inode identity, which Rust does not provide. Rust requires
-trusted ancestor directories and permanent live sidecars. Its eight-byte seal alone cannot
-establish inode equality. The definitions below use the actual backend-specific MAC inputs.
-No MAC security follows from a tag-length theorem; security is an experiment assumption.
+The backend encodings below include `LockedRecord.lock_identity_seal`: device and inode
+in little endian followed by the creation nonce. Identity verification compares all 24 bytes
+against authenticated custody and poisons the handle on mismatch.
 -/
 namespace RustDurability
 
@@ -9637,6 +9634,48 @@ theorem sidecarBytes_length (lockSeal : Bytes) (device inode : Nat) (h : lockSea
     (sidecarBytes lockSeal device inode).length = 32 := by
   simp [sidecarBytes, u64le, encodeU64BeNat_length, h]
 
+/-- `LockedRecord::lock_identity_seal`, in exactly its Rust field order. -/
+def lockIdentitySeal (device inode : Nat) (nonce : Bytes) : Bytes :=
+  u64le device ++ u64le inode ++ nonce
+
+theorem lockIdentitySeal_length (device inode : Nat) (nonce : Bytes) (h : nonce.length = 8) :
+    (lockIdentitySeal device inode nonce).length = 24 := by
+  simp [lockIdentitySeal, u64le, encodeU64BeNat_length, h]
+
+structure LockedIdentityHandle where
+  device : Nat
+  inode : Nat
+  nonce : Bytes
+  poisoned : Bool := false
+
+def verifyLockIdentity (s : LockedIdentityHandle) (authenticated : Bytes) :
+    LockedIdentityHandle × Bool :=
+  if s.poisoned || !(lockIdentitySeal s.device s.inode s.nonce == authenticated) then
+    ({ s with poisoned := true }, false)
+  else (s, true)
+
+theorem verifyLockIdentity_accepts_exact {s : LockedIdentityHandle} {expected : Bytes}
+    (h : (verifyLockIdentity s expected).2 = true) :
+    lockIdentitySeal s.device s.inode s.nonce = expected := by
+  unfold verifyLockIdentity at h
+  split at h
+  · cases h
+  · rename_i good
+    simp only [Bool.or_eq_true, Bool.not_eq_true', not_or] at good
+    have hb : (lockIdentitySeal s.device s.inode s.nonce == expected) = true := by
+      cases he : (lockIdentitySeal s.device s.inode s.nonce == expected) <;> simp_all
+    exact eq_of_beq hb
+
+structure CeremonyContext where
+  policyId : BitVec 256 := 0
+  spendAmount : UInt64 := 0
+  mpcNonceEpoch : UInt64 := 0
+  deriving Repr, DecidableEq
+
+def ceremonyContextBytes (c : CeremonyContext) : Bytes :=
+  List.ofFn (fun i : Fin 32 => UInt8.ofNat (c.policyId.toNat / 256 ^ (31 - i.val))) ++
+    encodeU64BeNat c.spendAmount.toNat ++ encodeU64BeNat c.mpcNonceEpoch.toNat
+
 structure Reservation where
   ceremonyId : Bytes
   keyId : Bytes
@@ -9649,7 +9688,7 @@ def Reservation.WellFormed (r : Reservation) : Prop :=
   r.ceremonyId.length = 32 ∧ r.keyId.length = 32 ∧ r.epochOrCodeword.length = 32 ∧
   r.seedBurnCursor < 2^64 ∧ r.hedgeGeneration < 2^64
 
-/-- Common 80-byte reservation prefix. V2 appends one flag byte and an eight-byte epoch;
+/-- Common 80-byte reservation prefix. V3 appends one flag byte and an eight-byte epoch;
 key identity remains in the header. -/
 def reservationBytes (r : Reservation) : Bytes :=
   r.ceremonyId ++ r.epochOrCodeword ++ encodeU64BeNat r.seedBurnCursor ++
@@ -9659,35 +9698,36 @@ theorem reservationBytes_length {r : Reservation} (h : r.WellFormed) :
     (reservationBytes r).length = 80 := by
   simp [reservationBytes, encodeU64BeNat_length, h.1, h.2.2.1]
 
-/-- Private v2 journal metadata accompanies the public reservation. Retries reuse the
+/-- Private v3 journal metadata accompanies the public reservation. Retries reuse the
 binding but require a fresh ceremony ID and strictly advancing seed/hedge cursors. -/
 structure JournalEntry where
   reservation : Reservation
   boundEpoch : Option Nat := none
   isRetry : Bool := false
+  context : CeremonyContext := {}
   deriving Repr, DecidableEq
 
-def freshEntry (r : Reservation) : JournalEntry := ⟨r, none, false⟩
+def freshEntry (r : Reservation) : JournalEntry := ⟨r, none, false, {}⟩
 
 def journalEntryBytes (e : JournalEntry) : Bytes :=
   reservationBytes e.reservation ++
     [UInt8.ofNat ((if e.boundEpoch.isSome then 1 else 0) + (if e.isRetry then 2 else 0))] ++
-    encodeU64BeNat (e.boundEpoch.getD 0)
+    encodeU64BeNat (e.boundEpoch.getD 0) ++ ceremonyContextBytes e.context
 
 theorem journalEntryBytes_length {e : JournalEntry} (h : e.reservation.WellFormed) :
-    (journalEntryBytes e).length = 89 := by
-  simp [journalEntryBytes, reservationBytes_length h, encodeU64BeNat_length]
+    (journalEntryBytes e).length = 137 := by
+  simp [journalEntryBytes, reservationBytes_length h, ceremonyContextBytes, encodeU64BeNat_length]
 
-def ceremonyBodyV2 (keyId : Bytes) (entries : List JournalEntry) : Bytes :=
-  [81,83,65,71,67,82,74,50] ++ keyId ++ encodeU64BeNat (entries.length + 1) ++
+def ceremonyBodyV3 (keyId : Bytes) (entries : List JournalEntry) : Bytes :=
+  [81,83,65,71,67,82,74,51] ++ keyId ++ encodeU64BeNat (entries.length + 1) ++
     entries.flatMap journalEntryBytes
 
-/-- The fresh-unbound subprotocol uses v2 records with flags=0 and encoded epoch=0. -/
+/-- The fresh-unbound subprotocol uses v3 records with flags=0 and encoded epoch=0. -/
 def ceremonyBody (keyId : Bytes) (entries : List Reservation) : Bytes :=
-  ceremonyBodyV2 keyId (entries.map freshEntry)
+  ceremonyBodyV3 keyId (entries.map freshEntry)
 
 def ceremonyTag (key lockSeal body : Bytes) : Bytes :=
-  keyedMac [0x51, 0x53, 0x41, 0x47, 0x2e, 0x43, 0x45, 0x52, 0x45, 0x4d, 0x4f, 0x4e, 0x59, 0x2e, 0x4a, 0x4f, 0x55, 0x52, 0x4e, 0x41, 0x4c, 0x2e, 0x4d, 0x41, 0x43, 0x2f, 0x76, 0x32] key (lockSeal ++ body)
+  keyedMac [0x51, 0x53, 0x41, 0x47, 0x2e, 0x43, 0x45, 0x52, 0x45, 0x4d, 0x4f, 0x4e, 0x59, 0x2e, 0x4a, 0x4f, 0x55, 0x52, 0x4e, 0x41, 0x4c, 0x2e, 0x4d, 0x41, 0x43, 0x2f, 0x76, 0x33] key (lockSeal ++ body)
 
 def ceremonyBytes (key lockSeal keyId : Bytes) (entries : List Reservation) : Bytes :=
   let body := ceremonyBody keyId entries
@@ -9728,7 +9768,7 @@ theorem reservation_fixture_wellFormed :
 /-- Current Belt MAC binds key, eight-byte seal, generation, and serialized state using
 core's LEB128 multi-frame codec (different from FTS's u64le framing). -/
 def beltTag (key lockSeal : Bytes) (generation : Nat) (payload : Bytes) : Bytes :=
-  cshake256Bytes [81,83,65,71,46,66,69,76,84,46,76,65,84,67,72,46,87,65,76,46,77,65,67,47,118,49]
+  cshake256Bytes [81,83,65,71,46,66,69,76,84,46,76,65,84,67,72,46,87,65,76,46,77,65,67,47,118,50]
     (encodeMultiFrame [key, lockSeal, encodeU64BeNat generation, payload])
 
 def ledgerTag (domain key genesisSeal ledgerId purpose body : Bytes) : Bytes :=
@@ -10198,27 +10238,27 @@ pushing each entry. This rejects duplicate ceremony/codeword IDs and non-increas
 def decodeReservations (keyId : Bytes) : Nat → Bytes → List Reservation → Option (List Reservation)
   | 0, bytes, entries => if bytes = [] then some entries else none
   | n+1, bytes, entries => do
-    let (entry, tail) ← splitExactBytes 89 bytes
-    if entry.drop 80 ≠ List.replicate 9 0 then none else do
+    let (entry, tail) ← splitExactBytes 137 bytes
+    if entry.drop 80 ≠ List.replicate 57 0 then none else do
     let r ← decodeReservation keyId (entry.take 80)
     if reservationValid keyId entries r then
       decodeReservations keyId n tail (entries ++ [r])
     else none
 
 /-- Decoder restricted to the fresh-unbound subprotocol. Full retries use
-`openCeremonyBytesV2` below; they must not be projected to an all-codewords-Nodup claim. -/
+`openCeremonyBytesV3` below; they must not be projected to an all-codewords-Nodup claim. -/
 def openCeremonyBytes (key lockSeal keyId bytes : Bytes) : Option (List Reservation) :=
-  if bytes.length < 80 ∨ (bytes.length - 80) % 89 ≠ 0 then none else do
+  if bytes.length < 80 ∨ (bytes.length - 80) % 137 ≠ 0 then none else do
     let body := bytes.take (bytes.length - 32)
-    let count := (bytes.length - 80) / 89
-    if bytes.take 40 ≠ [81,83,65,71,67,82,74,50] ++ keyId ∨
+    let count := (bytes.length - 80) / 137
+    if bytes.take 40 ≠ [81,83,65,71,67,82,74,51] ++ keyId ∨
         bytes.drop (bytes.length - 32) ≠ ceremonyTag key lockSeal body then none else do
     let generation ← decodeU64BeNat ((bytes.drop 40).take 8)
     if generation ≠ count + 1 then none else
     decodeReservations keyId count (body.drop 48) []
 
 theorem openCeremonyBytes_short_tail (key lockSeal keyId bytes : Bytes)
-    (h : (bytes.length - 80) % 89 ≠ 0) : openCeremonyBytes key lockSeal keyId bytes = none := by
+    (h : (bytes.length - 80) % 137 ≠ 0) : openCeremonyBytes key lockSeal keyId bytes = none := by
   simp [openCeremonyBytes, h]
 
 /-- Snapshot parser consumes all bytes and rejects duplicate map keys instead of silently
@@ -10377,7 +10417,7 @@ theorem beltPersistFailure_refuses (cap : Nat) (s : BeltState) (r : BeltBinding)
     beltBind cap (beltPersistFailure s) r = none := by
   simp [beltBind, beltPersistFailure]
 
-/-- Exact v2 validation: retries may repeat only the current binding; fresh numeric epochs
+/-- Exact v3 validation: retries may repeat only the current binding; fresh numeric epochs
 must exceed every previously bound epoch. Ceremony IDs are always fresh. -/
 def journalEntryValid (keyId : Bytes) (entries : List JournalEntry) (e : JournalEntry) : Bool :=
   e.reservation.keyId == keyId &&
@@ -10385,12 +10425,14 @@ def journalEntryValid (keyId : Bytes) (entries : List JournalEntry) (e : Journal
   (match entries.getLast? with
    | none => true
    | some old => decide (old.reservation.seedBurnCursor < e.reservation.seedBurnCursor ∧
-       old.reservation.hedgeGeneration < e.reservation.hedgeGeneration)) &&
+       old.reservation.hedgeGeneration < e.reservation.hedgeGeneration ∧
+       (e.context = {} ∧ old.context = {} ∨ old.context.mpcNonceEpoch < e.context.mpcNonceEpoch))) &&
   (if e.isRetry then
     match entries.getLast? with
     | none => false
-    | some old => old.boundEpoch == e.boundEpoch &&
-        old.reservation.epochOrCodeword == e.reservation.epochOrCodeword
+    | some old => (old.boundEpoch == e.boundEpoch &&
+        old.reservation.epochOrCodeword == e.reservation.epochOrCodeword) &&
+        decide (old.context.policyId = e.context.policyId ∧ old.context.spendAmount = e.context.spendAmount)
   else
     !(entries.any fun old => old.reservation.epochOrCodeword == e.reservation.epochOrCodeword) &&
     (match e.boundEpoch with
@@ -10398,8 +10440,8 @@ def journalEntryValid (keyId : Bytes) (entries : List JournalEntry) (e : Journal
      | some epoch => entries.all fun old =>
        match old.boundEpoch with | none => true | some prior => decide (prior < epoch)))
 
-def ceremonyBytesV2 (key lockSeal keyId : Bytes) (entries : List JournalEntry) : Bytes :=
-  let body := ceremonyBodyV2 keyId entries
+def ceremonyBytesV3 (key lockSeal keyId : Bytes) (entries : List JournalEntry) : Bytes :=
+  let body := ceremonyBodyV3 keyId entries
   body ++ ceremonyTag key lockSeal body
 
 def decodeJournalEntry (keyId bytes : Bytes) : Option JournalEntry := do
@@ -10407,31 +10449,44 @@ def decodeJournalEntry (keyId bytes : Bytes) : Option JournalEntry := do
   let r ← decodeReservation keyId rb
   match tail with
   | [] => none
-  | flag :: epochBytes =>
+  | flag :: fields =>
+    let (epochBytes, ctx) ← splitExactBytes 8 fields
+    let (policy, ctx) ← splitExactBytes 32 ctx
+    let (spend, nonce) ← splitExactBytes 8 ctx
+    let spend ← decodeU64BeNat spend
+    let nonce ← decodeU64BeNat nonce
     let epoch ← decodeU64BeNat epochBytes
     if 4 ≤ flag.toNat then none else
     let hasEpoch := flag.toNat % 2 == 1
     if !hasEpoch ∧ epoch ≠ 0 then none else
-    pure ⟨r, if hasEpoch then some epoch else none, decide (2 ≤ flag.toNat)⟩
+    pure ⟨r, if hasEpoch then some epoch else none, decide (2 ≤ flag.toNat),
+      ⟨BitVec.ofNat 256 (policy.foldl (fun n b => 256 * n + b.toNat) 0),
+        UInt64.ofNat spend, UInt64.ofNat nonce⟩⟩
+
+theorem ceremony_v3_nonzero_context_roundtrip :
+    let e : JournalEntry := ⟨⟨List.replicate 32 1, List.replicate 32 2,
+      List.replicate 32 3, 4, 5⟩, some 6, true, ⟨7, 8, 9⟩⟩
+    decodeJournalEntry e.reservation.keyId (journalEntryBytes e) = some e := by
+  decide +kernel
 
 def decodeJournalEntries (keyId : Bytes) : Nat → Bytes → List JournalEntry → Option (List JournalEntry)
   | 0, bytes, entries => if bytes = [] then some entries else none
   | n+1, bytes, entries => do
-    let (entry, tail) ← splitExactBytes 89 bytes
+    let (entry, tail) ← splitExactBytes 137 bytes
     let e ← decodeJournalEntry keyId entry
     if journalEntryValid keyId entries e then
       decodeJournalEntries keyId n tail (entries ++ [e])
     else none
 
-/-- Current `QSAGCRJ2` open: 48-byte header, 89-byte entries, 32-byte tag, generation=count+1,
+/-- Current `QSAGCRJ3` open: 48-byte header, 137-byte entries, 32-byte tag, generation=count+1,
 checkpoint generation/tag filter, reserved flag-bit rejection and strict replay validation. -/
-def openCeremonyBytesV2 (key lockSeal keyId bytes : Bytes) (anchor : ExternalMonotoneAnchor) :
+def openCeremonyBytesV3 (key lockSeal keyId bytes : Bytes) (anchor : ExternalMonotoneAnchor) :
     Option (Nat × List JournalEntry) :=
-  if bytes.length < 80 ∨ (bytes.length - 80) % 89 ≠ 0 then none else do
+  if bytes.length < 80 ∨ (bytes.length - 80) % 137 ≠ 0 then none else do
     let body := bytes.take (bytes.length - 32)
     let tag := bytes.drop (bytes.length - 32)
-    let count := (bytes.length - 80) / 89
-    if bytes.take 40 ≠ [81,83,65,71,67,82,74,50] ++ keyId ∨
+    let count := (bytes.length - 80) / 137
+    if bytes.take 40 ≠ [81,83,65,71,67,82,74,51] ++ keyId ∨
         tag ≠ ceremonyTag key lockSeal body then none else do
     let generation ← decodeU64BeNat ((bytes.drop 40).take 8)
     if generation ≠ count + 1 ∨ verifyAgainstExternalAnchor anchor generation tag ≠ true
@@ -10449,7 +10504,9 @@ theorem journal_retry_preserves_binding {key : Bytes} {entries : List JournalEnt
   | none => simp [hl] at valid
   | some old =>
     refine ⟨old, rfl, ?_⟩
-    simpa only [hl, Bool.and_eq_true, beq_iff_eq] using valid.2
+    have hv := valid.2
+    simp only [hl, Bool.and_eq_true, beq_iff_eq] at hv
+    exact hv.1
 
 theorem journalEntryValid_fresh_attempt {key : Bytes} {entries : List JournalEntry}
     {e : JournalEntry} (valid : journalEntryValid key entries e = true) :
@@ -10459,27 +10516,40 @@ theorem journalEntryValid_fresh_attempt {key : Bytes} {entries : List JournalEnt
   have h := List.any_eq_false.mp valid.1.1.2 old ho
   simpa only [beq_iff_eq] using h
 
-/-- Permit contains all v2 identity fields. The machine must additionally own and consume it;
+/-- Permit contains all v3 identity fields. The machine must additionally own and consume it;
 this pure checker does not turn freely constructible Lean values into linear capabilities. -/
-structure JournalPermitV2 where
+structure JournalPermitV3 where
   entry : JournalEntry
   generation : Nat
   lockSeal : Bytes
   deriving Repr, DecidableEq
 
-def verifyCurrentPermitV2 (key lockSeal keyId : Bytes) (entries : List JournalEntry)
-    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV2) : Bool :=
+def verifyCurrentPermitV3 (key lockSeal keyId : Bytes) (entries : List JournalEntry)
+    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV3) : Bool :=
   permit.lockSeal == lockSeal && permit.generation == checkpoint.attestedEpoch &&
   permit.entry.reservation.keyId == keyId && entries.getLast? == some permit.entry &&
   checkpoint.attestedEpoch == entries.length + 1 &&
-  checkpoint.attestedTag == ceremonyTag key lockSeal (ceremonyBodyV2 keyId entries) &&
-  readBack == ceremonyBytesV2 key lockSeal keyId entries
+  checkpoint.attestedTag == ceremonyTag key lockSeal (ceremonyBodyV3 keyId entries) &&
+  readBack == ceremonyBytesV3 key lockSeal keyId entries
 
-theorem stale_v2_permit_refused (key lockSeal keyId : Bytes) (entries : List JournalEntry)
-    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV2)
+/-- Policy-aware release must match the complete committed context. -/
+def verifyCurrentPermitWithContext (key lockSeal keyId : Bytes) (entries : List JournalEntry)
+    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV3)
+    (expected : CeremonyContext) : Bool :=
+  decide (permit.entry.context = expected) &&
+    verifyCurrentPermitV3 key lockSeal keyId entries checkpoint readBack permit
+
+theorem ceremony_context_mismatch_rejected (key lockSeal keyId : Bytes) (entries : List JournalEntry)
+    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV3)
+    (expected : CeremonyContext) (hm : permit.entry.context ≠ expected) :
+    verifyCurrentPermitWithContext key lockSeal keyId entries checkpoint readBack permit expected = false := by
+  simp [verifyCurrentPermitWithContext, hm]
+
+theorem stale_v3_permit_refused (key lockSeal keyId : Bytes) (entries : List JournalEntry)
+    (checkpoint : ExternalMonotoneAnchor) (readBack : Bytes) (permit : JournalPermitV3)
     (stale : permit.generation ≠ checkpoint.attestedEpoch) :
-    verifyCurrentPermitV2 key lockSeal keyId entries checkpoint readBack permit = false := by
-  simp [verifyCurrentPermitV2, stale]
+    verifyCurrentPermitV3 key lockSeal keyId entries checkpoint readBack permit = false := by
+  simp [verifyCurrentPermitV3, stale]
 
 /-- Retry attempts need fresh randomness even though the epoch/codeword binding is unchanged. -/
 theorem journalEntryValid_advances_cursors {key : Bytes} {entries : List JournalEntry}
@@ -10488,7 +10558,9 @@ theorem journalEntryValid_advances_cursors {key : Bytes} {entries : List Journal
     old.reservation.seedBurnCursor < e.reservation.seedBurnCursor ∧
     old.reservation.hedgeGeneration < e.reservation.hedgeGeneration := by
   simp only [journalEntryValid, Bool.and_eq_true] at valid
-  simpa only [last, decide_eq_true_eq] using valid.1.2
+  have hv := valid.1.2
+  simp only [last, decide_eq_true_eq] at hv
+  exact ⟨hv.1, hv.2.1⟩
 
 end RustDurability
 

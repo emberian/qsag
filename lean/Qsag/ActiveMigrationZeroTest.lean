@@ -1026,10 +1026,11 @@ theorem tooth_shor_crqc_breaks_legacy_pk_pre_migration (group : ScalarGroup) :
     rw [canonicalSubgroupHom_scalarMulKey_val, Nat.mod_eq_of_lt hLtOrd]
   exact ⟨shorDlog, ⟨shorDlog, hInv⟩, hInv⟩
 
-/-- Lossless 56-bit 5-limb Goldilocks packing of a 256-bit value (`5 * 56 = 280 > 256`, `scalar.rs:89, 92`). -/
+/-- Big-endian seven-byte chunks of the 32-byte value followed by `01 00 00`,
+    matching Rust `pack_bytes32_to_limbs56`. The final limb contains the delimiter. -/
 def pack256ToLimbs56 (x : BitVec 256) : Fin 5 → Goldilocks :=
   fun k =>
-    let slice := (x.toNat / (2 ^ (56 * k.val))) % (2 ^ 56)
+    let slice := ((x.toNat * 2 ^ 24 + 2 ^ 16) / (2 ^ (56 * (4 - k.val)))) % (2 ^ 56)
     have hLtP : slice < goldilocksPrime := by
       have hSliceLt : slice < 2 ^ 56 := Nat.mod_lt _ (Nat.two_pow_pos 56)
       have h56LtP : (2 : Nat) ^ 56 < goldilocksPrime := by unfold goldilocksPrime; decide
@@ -1038,24 +1039,26 @@ def pack256ToLimbs56 (x : BitVec 256) : Fin 5 → Goldilocks :=
 
 theorem pack256ToLimbs56_injective {a b : BitVec 256}
     (h : pack256ToLimbs56 a = pack256ToLimbs56 b) : a = b := by
-  apply bv_eq_of_getLsbD_eq
-  intro i hi
-  let k : Fin 5 := ⟨i / 56, by omega⟩
-  let r : Nat := i % 56
-  have hrLt : r < 56 := Nat.mod_lt i (by decide)
-  have hkEq : (pack256ToLimbs56 a k).val = (pack256ToLimbs56 b k).val :=
-    congrArg (fun f => (f k).val) h
-  dsimp only [pack256ToLimbs56] at hkEq
-  have hBitEq : (((a.toNat / 2 ^ (56 * k.val)) % 2 ^ 56).testBit r) =
-      (((b.toNat / 2 ^ (56 * k.val)) % 2 ^ 56).testBit r) :=
-    congrArg (fun v => v.testBit r) hkEq
-  rw [Nat.testBit_mod_two_pow, Nat.testBit_mod_two_pow, decide_eq_true hrLt,
-      Bool.true_and, Bool.true_and, Nat.testBit_div_two_pow, Nat.testBit_div_two_pow] at hBitEq
-  have hIdx : r + 56 * k.val = i := by
-    rw [Nat.add_comm]
-    exact Nat.div_add_mod i 56
-  rw [hIdx] at hBitEq
-  exact hBitEq
+  apply BitVec.eq_of_toNat_eq
+  have h0 := congrArg (fun f => (f ⟨0, by decide⟩).val) h
+  have h1 := congrArg (fun f => (f ⟨1, by decide⟩).val) h
+  have h2 := congrArg (fun f => (f ⟨2, by decide⟩).val) h
+  have h3 := congrArg (fun f => (f ⟨3, by decide⟩).val) h
+  have h4 := congrArg (fun f => (f ⟨4, by decide⟩).val) h
+  simp only [pack256ToLimbs56] at h0 h1 h2 h3 h4
+  have ha := a.isLt
+  have hb := b.isLt
+  omega
+
+/-- The delimiter survives even for an all-zero digest. -/
+theorem pack256ToLimbs56_zero_delimiter :
+    (pack256ToLimbs56 (0#256) ⟨4, by decide⟩).val = 65536 := by decide
+
+/-- Asymmetric end-byte vector catches reversed chunk order and a missing delimiter. -/
+theorem pack256ToLimbs56_end_bytes :
+    let x := BitVec.ofNat 256 (2 ^ 248 + 1)
+    (pack256ToLimbs56 x ⟨0, by decide⟩).val = 2 ^ 48 ∧
+    (pack256ToLimbs56 x ⟨4, by decide⟩).val = 2 ^ 24 + 2 ^ 16 := by decide
 
 /-- Complete 11-limb Poseidon2 nullifier preimage matching `scalar.rs:92-100` and `ownership.rs:294-300`. -/
 def migrationNullifierInput (group : ScalarGroup) (s migrationDomain : BitVec 256) :
@@ -1167,6 +1170,7 @@ theorem tooth_constant_hash_nullifier_collision :
   refine ⟨fun _ _ _ => Goldilocks.zero, .Secp256k1, 0, 0, 1, ?_, rfl⟩
   decide
 
+set_option maxRecDepth 4096 in
 #tooth_pair Qsag.post_ceremony_nullifier_domain_binding_and_replay_sound vs
   Qsag.tooth_constant_hash_nullifier_collision
 
@@ -2994,7 +2998,7 @@ def rustGf128Mul (a b : RustGf128) : RustGf128 :=
 def rustGf128OfLimbs (lo hi : UInt64) : RustGf128 :=
   BitVec.ofNat 128 (lo.toNat + 2^64 * hi.toNat)
 
-set_option maxRecDepth 4096 in
+set_option maxRecDepth 65536 in
 theorem rust_gf128_basis_kats :
     rustGf128Mul 2#128 2#128 = 4#128 ∧
     rustGf128Mul (BitVec.ofNat 128 (2^127)) 2#128 = 0x87#128 ∧
@@ -4458,14 +4462,17 @@ def settleWithoutReplayGuard {Authorization : Type}
     (_ledger : Ledger) (submission : Submission Authorization) : Ledger × SettlementResult :=
   settle verifyAuthorization compile ⟨[]⟩ submission
 
-/-- Nonvacuity: a concrete nonempty, linked AND execution settles once. -/
+/-- Nonvacuity: a four-gate linked AND/XOR execution settles once. -/
 def honestSubmission : Submission Unit where
   statement := ⟨[], 0#256, 7#256, 11#256, 0⟩
   authorization := ()
   witness := ⟨fun _ => 0xFFFFFFFFFFFFFFFF, fun _ => 0, fun _ => 0⟩
 
 def honestCircuit (_ : Statement) : List Gate :=
-  [.and 0 0 ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩]
+  [.and 0 0 ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩,
+   .xor 0 0,
+   .and 0 0 ⟨0, 0, 0⟩,
+   .xor 0 2]
 
 private theorem honestSubmission_lanes_ok :
     shareUniformLanesCheck honestSubmission.witness = true := by
@@ -4494,11 +4501,14 @@ private theorem honestSubmission_settle_eq :
   rw [honestSubmission_lanes_ok]
   simp only [↓reduceIte, evalGates, evalGate, honestSubmission_wires_zero]
   dsimp only [Bind.bind, Pure.pure, Option.bind]
-  have hFin : finish ⟨allOnes :: witnessWires honestSubmission.witness,
-      [⟨allOnes, allOnes, allOnes⟩]⟩ = .accepted := by
+  simp only [List.getElem?_cons_zero, List.getElem?_cons_succ]
+  have hFin : finish ⟨allOnes :: ⟨0, 0, 0⟩ :: ⟨0, 0, 0⟩ :: allOnes :: witnessWires honestSubmission.witness,
+      [⟨⟨0, 0, 0⟩, ⟨0, 0, 0⟩, ⟨0, 0, 0⟩⟩, ⟨allOnes, allOnes, allOnes⟩]⟩ = .accepted := by
     unfold finish PendingAnd.check RssWord64Shares3.reconstruct
     decide
-  rw [hFin]
+  have hX1 : xorShares allOnes allOnes = ⟨0, 0, 0⟩ := by decide
+  have hX2 : xorShares ⟨0, 0, 0⟩ allOnes = allOnes := by decide
+  rw [hX1, hX2, hFin]
   rfl
 
 theorem settlement_acceptance_witness :
@@ -4529,8 +4539,18 @@ theorem inhabited_accepted_settlement :
         honestCircuit ledger submission :=
   ⟨⟨[]⟩, honestSubmission, settlement_acceptance_witness⟩
 
+set_option maxRecDepth 8192 in
+/-- A statement-bound authorization witness, including destination and epoch.
+    This models an authenticated statement token, not a cryptographic signature scheme. -/
+theorem inhabited_statement_bound_settlement :
+    ∃ ledger : Ledger, ∃ submission : Submission Statement,
+      AcceptedSettlement (fun st authorization => decide (st = authorization))
+        honestCircuit ledger submission := by
+  refine ⟨⟨[]⟩, ⟨honestSubmission.statement, honestSubmission.statement, honestSubmission.witness⟩, ?_⟩
+  simpa only [AcceptedSettlement, settle, decide_true, ↓reduceIte] using settlement_acceptance_witness
+
 #verify_inhabited Qsag.MigrationExecution.accepted_settlement_spends
-  Qsag.MigrationExecution.inhabited_accepted_settlement
+  Qsag.MigrationExecution.inhabited_statement_bound_settlement
 
 /-- The same request is accepted twice only in the replay-guard mutant. -/
 theorem tooth_replay_guard_removal :
@@ -4627,6 +4647,40 @@ end MigrationExecution
   Qsag.multi_turn_hardened_ceremony_trace_safe
   Qsag.inhabited_migration_256_zero_test_and_tooth
   Qsag.inhabited_coin_permuted_bucketing_witness
+
+/-- Rust runs seven independent 64-lane engines, using 438 of their 448 lanes. -/
+def migrationMitRepetitions : Nat := 438
+abbrev MigrationWitnessBatches := Fin 7 → RssWitnessLanes3
+
+def migrationRepetitionWitness (batches : MigrationWitnessBatches) (rep : Fin 438) :
+    MigrationKey256 :=
+  extractRepetitionWitness (batches ⟨rep.val / 64, by omega⟩) (rep.val % 64)
+
+/-- Forks preserve the shared input witness; lane uniformity alone does not imply this. -/
+def MigrationBatchConsistent (batches : MigrationWitnessBatches) : Prop :=
+  (∀ b, shareUniformLanesCheck (batches b) = true) ∧
+  (∀ b, extractRepetitionWitness (batches b) 0 = extractRepetitionWitness (batches 0) 0)
+
+theorem migration_all_438_repetitions_same_witness (batches : MigrationWitnessBatches)
+    (h : MigrationBatchConsistent batches) (rep : Fin 438) :
+    migrationRepetitionWitness batches rep = extractRepetitionWitness (batches 0) 0 := by
+  unfold migrationRepetitionWitness
+  exact (shareUniformLanesCheck_implies_uniform_witness_across_lanes.1 _
+    (h.1 _) _ 0 (Nat.mod_lt _ (by decide)) (by decide)).trans (h.2 _)
+
+theorem migration_batch_geometry :
+    (migrationMitRepetitions + 63) / 64 = 7 ∧
+    migrationMitRepetitions = 6 * 64 + 54 ∧ 7 * 64 - migrationMitRepetitions = 10 := by decide
+
+theorem witness_migration_batch_consistent :
+    ∃ batches : MigrationWitnessBatches, MigrationBatchConsistent batches := by
+  let ks : RssKeyShares3 := ⟨1#256, 2#256, 4#256⟩
+  refine ⟨fun _ => buildWitnessLanes3 ks (fun j => expandUniformLane64 ((0#256).getLsbD j.val)), ?_⟩
+  exact ⟨fun _ => (shareUniformLanesCheck_implies_uniform_witness_across_lanes.2 ks 0).1,
+    fun _ => rfl⟩
+
+#verify_inhabited Qsag.migration_all_438_repetitions_same_witness
+  Qsag.witness_migration_batch_consistent
 
 end Qsag
 end

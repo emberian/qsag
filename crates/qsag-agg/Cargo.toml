@@ -9,8 +9,10 @@ description = "Hem post-quantum K-to-1 hash signature aggregation over Goldilock
 [features]
 default = ["std"]
 std = ["qsag-asm/std"]
+vulkan = ["std", "dep:qsag-accel", "qsag-accel/std"]
 
 [dependencies]
+qsag-accel = { path = "../qsag-accel", optional = true, default-features = false }
 qsag-whir-verified = { path = "../../aeneas/qsag-whir-verified", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }
 

@@ -77,4 +77,46 @@ theorem sponge_squeeze_rollover (s : keccak.Shake256Sponge) (dst : Slice Std.U8)
   simp only [keccak.Shake256Sponge.squeeze_loop.body, hlt, hge, hz, ite_true, ite_false,
     keccak_f1600_array_refines_qsag, bind_eq_result_bind, result_bind_ok]
 
+/-- An absorb step writes exactly the next input byte. At a full rate block it
+applies the canonical Keccak permutation to the XORed state; otherwise the state
+is unchanged. No bound on the number of preceding or following blocks is used. -/
+theorem sponge_absorb_byte (a : Array Std.U64 25#usize)
+    (buf : Array Std.U8 136#usize) (i pos : Std.Usize) (data : Slice Std.U8)
+    (hi : i.val < 136) (hp : pos.val < data.val.length) :
+    ∃ buf' i' pos',
+      buf'.val = buf.val.set i.val data.val[pos.val] ∧
+      i'.val = i.val + 1 ∧ pos'.val = pos.val + 1 ∧
+      keccak.Shake256Sponge.absorb_loop.body data a buf i pos =
+        (if i' = 136#usize then do
+          let mixed ← keccak.xor_rate_block a buf'
+          .ok (.cont (keccakArrayOfState (Qsag.keccakF1600 (keccakStateOfArray mixed)),
+            buf', 0#usize, pos'))
+        else .ok (.cont (a, buf', i', pos'))) := by
+  have hpos : pos < Slice.len data := by
+    change pos.val < (Slice.len data).val
+    rw [Slice.len_val]; exact hp
+  have hbuf : i < keccak.SHAKE256_RATE_BYTES := by
+    unfold keccak.SHAKE256_RATE_BYTES; exact hi
+  let buf' : Array Std.U8 136#usize :=
+    ⟨buf.val.set i.val data.val[pos.val], by rw [List.length_set]; exact buf.property⟩
+  have hv : Slice.index_usize data pos = .ok data.val[pos.val] := by
+    exact dite_eq_left hp
+  have hu : Array.update buf i data.val[pos.val] = .ok buf' := by
+    exact dite_eq_left (show i.val < buf.val.length by rw [buf.property]; exact hi)
+  obtain ⟨i', hi', vi'⟩ := checked_add_val i 1#usize
+    (by change i.val + 1 < 2 ^ 64; exact Nat.lt_of_le_of_lt hi (by decide))
+  obtain ⟨pos', hp', vp'⟩ := checked_add_val pos 1#usize (by
+    change pos.val + 1 < 2 ^ 64
+    exact Nat.lt_of_le_of_lt hp
+      (by simpa only [← Slice.len_val] using (Slice.len data).bv.isLt))
+  refine ⟨buf', i', pos', rfl, vi', vp', ?_⟩
+  simp only [keccak.Shake256Sponge.absorb_loop.body, hpos, hbuf, ite_true,
+    hv, hu, hi', hp', bind_eq_result_bind, result_bind_ok]
+  by_cases he : i' = 136#usize
+  · simp only [keccak.SHAKE256_RATE_BYTES, he, ite_true]
+    obtain ⟨mixed, hm⟩ := xor_rate_block_total a buf'
+    rw [hm, result_bind_ok, keccak_f1600_array_refines_qsag, result_bind_ok]
+    rfl
+  · simp only [keccak.SHAKE256_RATE_BYTES, he, ite_false]
+
 end qsag_verified.proofs

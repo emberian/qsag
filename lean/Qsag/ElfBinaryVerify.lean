@@ -15,8 +15,8 @@ Pure Lean 4.35 binary verification engine (`0 sorry`, `0` custom axioms, `0 nati
    `checkElfFuncThreeWayNI_sound` (`PC-NI`, `Mem-NI`, `DOIT-NI`, callee-saved preservation, `vzeroupper`,
    and scratch vector register zeroization before `ret`), discharged via kernel `decide` across all 16
    `x86_64` and all 7 `aarch64` symbols (`23` symbols, `1,298` machine instructions), one kernel
-   certificate per historical symbol. New source archives additionally pin all five bitslice
-   exports; their provenance alone is not a CT or functional-refinement certificate.
+   certificate per historical symbol. The current archive certificates in ElfFixtureVerify additionally cover all 28 live
+   exports (including the five bitslice kernels); CT does not imply functional refinement.
    Frame refinements specialize the 0x340-byte Keccak frame and its 0x320-byte wipe loop.
 4. **Mutation tests:** Negative checker tests accompany the structural and noninterference
    proofs. Input-output refinement of selected decoded kernels is in `Qsag.McRefine`.
@@ -1360,7 +1360,7 @@ inductive Arm64AluOp where
   | add | adds | sub | subs | adc | sbc | andOp | orr | eor | bic
   deriving DecidableEq, Repr
 
-/-- Decoded `AArch64` instruction covering all 7 `qsag_asm` `.rlib` kernels + forbidden variable-time classes. -/
+/-- Decoded `AArch64` instruction covering all 9 current `qsag_asm` `.rlib` kernels + forbidden variable-time classes. -/
 inductive Arm64Instr where
   | nop
   | msrDit (imm : Nat)
@@ -1376,6 +1376,11 @@ inductive Arm64Instr where
   | ldp64 (rt1 rt2 rn : Nat) (offBytes : UInt64)
   | stp64 (rt1 rt2 rn : Nat) (offBytes : UInt64)
   | strbPost (rt rn : Nat) (postOff : UInt64)
+  | ldpQ (rt1 rt2 rn : Nat) (offBytes : UInt64)
+  | stpQ (rt1 rt2 rn : Nat) (offBytes : UInt64)
+  | vdup2d (vd xn : Nat)
+  | vand16b (vd vn vm : Nat)
+  | vshift2d (left : Bool) (vd vn amount : Nat)
   | ldrQ (rt rn : Nat) (offBytes : UInt64)
   | strQ (rt rn : Nat) (offBytes : UInt64)
   | fmovDFromX (vd xn : Nat)
@@ -1533,6 +1538,22 @@ def decodeArm64Word (pc : Nat) (w : UInt32) : Option Arm64Instr :=
       if imm7 < 64 then UInt64.ofNat (imm7 * 8) else 0 - UInt64.ofNat ((128 - imm7) * 8)
     if rn == 31 then none
     else if isLoad then some (.ldp64 rd ra rn off64) else some (.stp64 rd ra rn off64)
+  -- Offset-only paired Q accesses; SP and duplicate load destinations are rejected.
+  else if (wn &&& 0xFFC00000) == 0xAD400000 || (wn &&& 0xFFC00000) == 0xAD000000 then
+    let isLoad := ((wn >>> 22) &&& 1) == 1
+    let imm7 := (wn >>> 15) &&& 0x7F
+    let off : UInt64 := if imm7 < 64 then UInt64.ofNat (imm7 * 16)
+                       else 0 - UInt64.ofNat ((128 - imm7) * 16)
+    if rn == 31 || (isLoad && rd == ra) then none
+    else if isLoad then some (.ldpQ rd ra rn off) else some (.stpQ rd ra rn off)
+  -- DUP Vd.2D, Xn; only the 64-bit element arrangement.
+  else if (wn &&& 0xFFFFFC00) == 0x4E080C00 then some (.vdup2d rd rn)
+  else if (wn &&& 0xFFE0FC00) == 0x4E201C00 then some (.vand16b rd rn rm)
+  -- SHL/USHR Vd.2D, Vn.2D, #imm. Bit 22 selects 64-bit lanes.
+  else if (wn &&& 0xFFC0FC00) == 0x4F405400 then
+    some (.vshift2d true rd rn ((wn >>> 16) &&& 63))
+  else if (wn &&& 0xFFC0FC00) == 0x6F400400 then
+    some (.vshift2d false rd rn (64 - ((wn >>> 16) &&& 63)))
   -- `STRB Wt, [Xn], #imm9` post-index (`00111000000 imm9 01 Rn Rt`)
   else if (wn &&& 0xFFE00C00) == 0x38000400 then
     let imm9 := (wn >>> 12) &&& 0x1FF
@@ -1710,6 +1731,30 @@ def stepArm64 (d : DecodedInstr Arm64Instr) (s : Arm64State) : (Arm64State × St
     let ea := getArmGpr s rn
     let m' := writeMem8 s.mem ea (getArmGpr s rt).toUInt8
     ({ s with pc := nextPc, gpr := setArmGpr s rn (ea + postOff), mem := m' }, ⟨d.offset, [(ea, 1)], true⟩)
+  | .ldpQ rt1 rt2 rn off =>
+    let ea := getArmGpr s rn + off
+    let v1 := readMem128 s.mem ea
+    let v2 := readMem128 s.mem (ea + 16)
+    ({ s with pc := nextPc, vec := (s.vec.set rt1 v1).set rt2 v2 },
+      ⟨d.offset, [(ea, 16), (ea + 16, 16)], true⟩)
+  | .stpQ rt1 rt2 rn off =>
+    let ea := getArmGpr s rn + off
+    let m := writeMem128 (writeMem128 s.mem ea (s.vec.get rt1)) (ea + 16) (s.vec.get rt2)
+    ({ s with pc := nextPc, mem := m }, ⟨d.offset, [(ea, 16), (ea + 16, 16)], true⟩)
+  | .vdup2d vd xn =>
+    ({ s with pc := nextPc, vec := s.vec.set vd ⟨getArmGpr s xn, getArmGpr s xn⟩ },
+      ⟨d.offset, [], true⟩)
+  | .vand16b vd vn vm =>
+    let a := s.vec.get vn; let b := s.vec.get vm
+    ({ s with pc := nextPc, vec := s.vec.set vd ⟨a.w0 &&& b.w0, a.w1 &&& b.w1⟩ },
+      ⟨d.offset, [], true⟩)
+  | .vshift2d left vd vn amount =>
+    let a := s.vec.get vn
+    -- UInt64 shifts mask their count; ISA USHR #64 instead yields zero.
+    let shift (v : UInt64) := if amount ≥ 64 then 0
+      else if left then v <<< UInt64.ofNat amount else v >>> UInt64.ofNat amount
+    ({ s with pc := nextPc, vec := s.vec.set vd ⟨shift a.w0, shift a.w1⟩ },
+      ⟨d.offset, [], true⟩)
   | .ldrQ rt rn off =>
     let ea := getArmGpr s rn + off
     let v := readMem128 s.mem ea
@@ -1785,17 +1830,17 @@ def runArm64 (prog : List (DecodedInstr Arm64Instr)) : Nat → Arm64State → (A
 
 /-! ## §5. 3-Way Hardware Constant-Time Noninterference & ABI Hygiene Verifier -/
 
-/-- 3-level 16-way radix map (`0 .. 4095`) giving `O(1)` 3-step PC lookup in kernel `decide`. -/
+/-- 3-level 32×16×16 radix map (`0 .. 8191`) giving `O(1)` 3-step PC lookup in kernel `decide`. -/
 structure PcMap (α : Type) where
-  root : Bank16 (Option (Bank16 (Option (Bank16 (Option α)))))
+  root : Bank32 (Option (Bank16 (Option (Bank16 (Option α)))))
 
 def PcMap.empty {α : Type} : PcMap α :=
-  ⟨Bank16.const none⟩
+  ⟨Bank32.const none⟩
 
 def PcMap.get {α : Type} (m : PcMap α) (pc : Nat) : Option α :=
-  if pc ≥ 4096 then none
+  if pc ≥ 8192 then none
   else
-    match Bank16.get m.root (pc / 256) with
+    match Bank32.get m.root (pc / 256) with
     | none => none
     | some p1 =>
       match Bank16.get p1 ((pc / 16) % 16) with
@@ -1803,19 +1848,19 @@ def PcMap.get {α : Type} (m : PcMap α) (pc : Nat) : Option α :=
       | some p0 => Bank16.get p0 (pc % 16)
 
 def PcMap.set {α : Type} (m : PcMap α) (pc : Nat) (v : α) : PcMap α :=
-  if pc ≥ 4096 then m
+  if pc ≥ 8192 then m
   else
     let i2 := pc / 256
     let i1 := (pc / 16) % 16
     let i0 := pc % 16
-    let p1 := match Bank16.get m.root i2 with | some b => b | none => Bank16.const none
+    let p1 := match Bank32.get m.root i2 with | some b => b | none => Bank16.const none
     let p0 := match Bank16.get p1 i1 with | some b => b | none => Bank16.const none
     let p0' := Bank16.set p0 i0 (some v)
     let p1' := Bank16.set p1 i1 (some p0')
-    ⟨Bank16.set m.root i2 (some p1')⟩
+    ⟨Bank32.set m.root i2 (some p1')⟩
 
 def PcMap.all {α : Type} (pred : Nat → α → Bool) (m : PcMap α) : Bool :=
-  Bank16.allIdx (fun i2 opt1 =>
+  Bank32.allIdx (fun i2 opt1 =>
     match opt1 with
     | none => true
     | some p1 =>
@@ -2218,13 +2263,13 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       gpr := st.gpr.set dst (if p then .pubVal else .secretVal)
       ofPub := p })]
   | .jcc cc targetPc =>
-    if !x86CondIsPublic cc st || targetPc < 0 || targetPc.toNat ≥ 4096 then none
+    if !x86CondIsPublic cc st || targetPc < 0 || targetPc.toNat ≥ 8192 then none
     else if st.stackZeroLoop == 3 && cc == 5 then
       some [(targetPc.toNat, { st with stackZeroLoop := 1 }), (nextPc, stNoLoop)]
     else
       some [(targetPc.toNat, stNoLoop), (nextPc, stNoLoop)]
   | .jmpRel targetPc =>
-    if targetPc < 0 || targetPc.toNat ≥ 4096 then none
+    if targetPc < 0 || targetPc.toNat ≥ 8192 then none
     else some [(targetPc.toNat, stNoLoop)]
   | .indirectBr _ | .divRem _ | .varShiftCl _ _ | .vpgather _ _ =>
     none
@@ -2451,9 +2496,11 @@ def arm64InstrRegsValid : Arm64Instr → Bool
   | .cbzOrTbz _ | .udivOrSdiv _ | .varShiftReg _ | .regOffsetMem _ => true
   | .movWide _ _ rd _ _ => rd < 32
   | .aluImm _ _ rd rn _ | .ubfm _ rd rn _ _ | .strbPost rd rn _
-  | .ldrQ rd rn _ | .strQ rd rn _ | .fmovDFromX rd rn => rd < 32 && rn < 32
+  | .ldrQ rd rn _ | .strQ rd rn _ | .fmovDFromX rd rn | .vdup2d rd rn
+  | .vshift2d _ rd rn _ => rd < 32 && rn < 32
   | .aluReg _ _ rd rn rm _ _ | .mulOp _ rd rn rm | .csel _ _ rd rn rm
   | .ldp64 rd rn rm _ | .stp64 rd rn rm _ | .veor16b rd rn rm
+  | .ldpQ rd rn rm _ | .stpQ rd rn rm _ | .vand16b rd rn rm
   | .vtrn _ _ _ rd rn rm | .vrax1_2d rd rn rm | .vxar_2d rd rn rm _ | .vpmull _ rd rn rm | .vext16b rd rn rm _ =>
     rd < 32 && rn < 32 && rm < 32
   | .vbcax16b vd vn vm va | .veor3_16b vd vn vm va =>
@@ -2525,12 +2572,19 @@ def transferArm64Instr (c : FuncContract) (d : DecodedInstr Arm64Instr) (st : Ar
   | .strbPost _rt rn _postOff =>
     if !(getArmAbsGpr st rn).isPublic then none
     else some [(nextPc, { st with gpr := setArmAbsGpr st rn .pubVal })]
+  | .ldpQ rt1 rt2 rn _off =>
+    if !(getArmAbsGpr st rn).isPublic then none
+    else some [(nextPc, { st with vec := (st.vec.set rt1 .secretVal).set rt2 .secretVal })]
+  | .stpQ _rt1 _rt2 rn _off =>
+    if !(getArmAbsGpr st rn).isPublic then none else some [(nextPc, st)]
+  | .vshift2d _ vd vn _ =>
+    some [(nextPc, { st with vec := st.vec.set vd (if (st.vec.get vn).isPublic then .pubVal else .secretVal) })]
   | .ldrQ rt rn _off =>
     if !(getArmAbsGpr st rn).isPublic then none
     else some [(nextPc, { st with vec := st.vec.set rt .secretVal })]
   | .strQ _rt rn _off =>
     if !(getArmAbsGpr st rn).isPublic then none else some [(nextPc, st)]
-  | .fmovDFromX vd xn =>
+  | .fmovDFromX vd xn | .vdup2d vd xn =>
     let o := getArmAbsGpr st xn
     let vo : VecOrigin :=
       if o == .zeroConst then .zeroConst else if o.isPublic then .pubVal else .secretVal
@@ -2544,11 +2598,11 @@ def transferArm64Instr (c : FuncContract) (d : DecodedInstr Arm64Instr) (st : Ar
   | .vbcax16b vd vn vm va | .veor3_16b vd vn vm va =>
     let p := (st.vec.get vn).isPublic && (st.vec.get vm).isPublic && (st.vec.get va).isPublic
     some [(nextPc, { st with vec := st.vec.set vd (if p then .pubVal else .secretVal) })]
-  | .vtrn _ _ _ vd vn vm | .vrax1_2d vd vn vm | .vxar_2d vd vn vm _ | .vpmull _ vd vn vm | .vext16b vd vn vm _ =>
+  | .vand16b vd vn vm | .vtrn _ _ _ vd vn vm | .vrax1_2d vd vn vm | .vxar_2d vd vn vm _ | .vpmull _ vd vn vm | .vext16b vd vn vm _ =>
     let p := (st.vec.get vn).isPublic && (st.vec.get vm).isPublic
     some [(nextPc, { st with vec := st.vec.set vd (if p then .pubVal else .secretVal) })]
   | .bCond cond targetPc =>
-    if !armCondIsPublic cond st || targetPc < 0 || targetPc.toNat ≥ 4096 then none
+    if !armCondIsPublic cond st || targetPc < 0 || targetPc.toNat ≥ 8192 then none
     else some [(targetPc.toNat, st), (nextPc, st)]
   | .cbzOrTbz _ | .udivOrSdiv _ | .varShiftReg _ | .regOffsetMem _ =>
     none
@@ -2660,6 +2714,18 @@ def aarch64SymbolContracts : List FuncContract := [
   mkContract "qsag_asm_ct_eq_32_aarch64"            [0, 1]          []           [2, 3, 4, 5, 6, 7],
   mkContract "qsag_asm_ct_memzero_aarch64"          [0, 1]
 ]
+
+ /-- Live archive contracts. Pointer/count inputs are public; loaded data remain secret. -/
+def currentX86SymbolContracts : List FuncContract :=
+  x86SymbolContracts ++ [
+    mkContract "qsag_asm_transpose64x256_avx2" [4, 7],
+    mkContract "qsag_asm_gf2_128_mul_acc_pclmul" [4, 7, 6, 2, 1],
+    mkContract "qsag_asm_gf2_128_mul_acc_vpclmul" [4, 7, 6, 2, 1]]
+
+def currentAarch64SymbolContracts : List FuncContract :=
+  aarch64SymbolContracts ++ [
+    mkContract "qsag_asm_transpose64x256_neon" [0],
+    mkContract "qsag_asm_gf2_128_mul_acc_pmull" [0, 1, 2, 3]]
 
 def verifySliceContractList : List ElfFuncSlice → List FuncContract → Bool
   | [], [] => true
@@ -2851,37 +2917,37 @@ theorem PcMap.empty_get {α : Type} (pc : Nat) :
   unfold PcMap.empty PcMap.get
   split
   · rfl
-  · rw [Bank16.get_const]
+  · rw [Bank32.get_const]
 
 theorem PcMap.get_some_lt {α : Type} {m : PcMap α} {pc : Nat} {v : α}
-    (h : m.get pc = some v) : pc < 4096 := by
+    (h : m.get pc = some v) : pc < 8192 := by
   unfold PcMap.get at h
   split at h
   · cases h
   · omega
 
-theorem PcMap.get_set_eq {α : Type} (m : PcMap α) {pc : Nat} (v : α) (hpc : pc < 4096) :
+theorem PcMap.get_set_eq {α : Type} (m : PcMap α) {pc : Nat} (v : α) (hpc : pc < 8192) :
     (m.set pc v).get pc = some v := by
-  have hge : ¬(pc ≥ 4096) := by intro h; omega
+  have hge : ¬(pc ≥ 8192) := by intro h; omega
   unfold PcMap.set PcMap.get
-  simp only [hge, ↓reduceIte, Bank16.get_set_eq]
+  simp only [hge, ↓reduceIte, Bank32.get_set_eq, Bank16.get_set_eq]
 
 theorem PcMap.get_set_ne {α : Type} (m : PcMap α) {pc q : Nat} (v : α)
-    (hq : q < 4096) (hne : pc ≠ q) :
+    (hq : q < 8192) (hne : pc ≠ q) :
     (m.set pc v).get q = m.get q := by
-  have hqge : ¬(q ≥ 4096) := by intro h; omega
-  by_cases hpc : pc ≥ 4096
+  have hqge : ¬(q ≥ 8192) := by intro h; omega
+  by_cases hpc : pc ≥ 8192
   · unfold PcMap.set; simp [hpc]
   · unfold PcMap.set PcMap.get
     simp only [hpc, hqge, ↓reduceIte]
-    have hi2p : pc / 256 < 16 := by omega
-    have hi2q : q / 256 < 16 := by omega
+    have hi2p : pc / 256 < 32 := by omega
+    have hi2q : q / 256 < 32 := by omega
     have hi1p : (pc / 16) % 16 < 16 := by omega
     have hi1q : (q / 16) % 16 < 16 := by omega
     have hi0p : pc % 16 < 16 := by omega
     have hi0q : q % 16 < 16 := by omega
     by_cases h2 : pc / 256 = q / 256
-    · rw [← h2, Bank16.get_set_eq]
+    · rw [← h2, Bank32.get_set_eq]
       dsimp only
       by_cases h1 : (pc / 16) % 16 = (q / 16) % 16
       · have h0ne : pc % 16 ≠ q % 16 := by omega
@@ -2899,18 +2965,18 @@ theorem PcMap.get_set_ne {α : Type} (m : PcMap α) {pc q : Nat} (v : α)
         cases hm2 : m.root.get (pc / 256) with
         | none => simp [Bank16.get_const]
         | some b1 => rfl
-    · rw [Bank16.get_set_ne _ _ hi2p hi2q h2]
+    · rw [Bank32.get_set_ne _ _ hi2p hi2q h2]
 
 theorem PcMap.all_get {α : Type} {pred : Nat → α → Bool} {m : PcMap α}
     (hAll : m.all pred = true) {pc : Nat} {v : α} (hGet : m.get pc = some v) :
     pred pc v = true := by
-  have hlt : pc < 4096 := PcMap.get_some_lt hGet
-  have hge : ¬(pc ≥ 4096) := by intro h; omega
+  have hlt : pc < 8192 := PcMap.get_some_lt hGet
+  have hge : ¬(pc ≥ 8192) := by intro h; omega
   unfold PcMap.get at hGet
   simp only [hge, ↓reduceIte] at hGet
   unfold PcMap.all at hAll
-  have h2 := Bank16.allIdx_get hAll (i := pc / 256) (by omega)
-  cases hm2 : Bank16.get m.root (pc / 256) with
+  have h2 := Bank32.allIdx_get hAll (i := pc / 256) (by omega)
+  cases hm2 : Bank32.get m.root (pc / 256) with
   | none => simp [hm2] at hGet
   | some p1 =>
     simp only [hm2] at hGet h2
@@ -2925,7 +2991,7 @@ theorem PcMap.all_get {α : Type} {pred : Nat → α → Bool} {m : PcMap α}
       simpa only [hIdx] using h0
 
 theorem buildProgMap_get_eq {Instr : Type} (prog : List (DecodedInstr Instr))
-    {pc : Nat} (hpc : pc < 4096) :
+    {pc : Nat} (hpc : pc < 8192) :
     (buildProgMap prog).get pc = findInstrAtPc pc prog := by
   induction prog with
   | nil => exact PcMap.empty_get pc
@@ -4722,7 +4788,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
       · simp only [hp, ↓reduceIte, RelX86Gpr]; rcases hEq hp with ⟨ed, es, eo⟩; simp [ed, es, eo]
       · simp [hp, RelX86Gpr]
     case jcc cc targetPc =>
-      by_cases hBad : (!x86CondIsPublic cc st || decide (targetPc < 0) || decide (targetPc.toNat ≥ 4096)) = true
+      by_cases hBad : (!x86CondIsPublic cc st || decide (targetPc < 0) || decide (targetPc.toNat ≥ 8192)) = true
       · simp [hBad] at hTr
       · simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hTr
         simp only [Bool.or_eq_true, Bool.not_eq_true', decide_eq_true_eq, not_or, Bool.not_eq_false] at hBad
@@ -4771,7 +4837,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
             exact Or.inr ⟨_, List.Mem.tail _ (List.Mem.head _), rfl, hH1, hH2, rGpr, rYmm, rCf, rOf, rZf,
               rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
     case jmpRel targetPc =>
-      by_cases hBad : (decide (targetPc < 0) || decide (targetPc.toNat ≥ 4096)) = true
+      by_cases hBad : (decide (targetPc < 0) || decide (targetPc.toNat ≥ 8192)) = true
       · simp [hBad] at hTr
       · simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hTr
         injection hTr with hS; subst hS
@@ -5099,7 +5165,7 @@ private theorem runX86_invariant_sound {c : FuncContract}
   | 0, s₁, s₂, st, _, hRel =>
     ⟨rfl, (fun _ h => nomatch h), Or.inr ⟨hRel.2.1, hRel.2.2.1⟩⟩
   | fuel + 1, s₁, s₂, st, hInvPc, hRel => by
-    have hPcLt : s₁.pc < 4096 := PcMap.get_some_lt hInvPc
+    have hPcLt : s₁.pc < 8192 := PcMap.get_some_lt hInvPc
     have hPred := PcMap.all_get hAll hInvPc
     rw [buildProgMap_get_eq prog hPcLt] at hPred
     cases hFind : findInstrAtPc s₁.pc prog with
@@ -5786,8 +5852,65 @@ private theorem transferArm64Instr_step_sound {c : FuncContract}
         simp only [Bool.and_eq_true] at hp
         rw [RelArmVec_public_eq (rVec vn hvn) hp.1, RelArmVec_public_eq (rVec vm hvm) hp.2]
       · simp [hp, RelArmVec]
+    case vdup2d vd xn =>
+      rcases hValid with ⟨hvd, hxn⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hz : (getArmAbsGpr st xn == .zeroConst) = true
+      · simp only [hz, ↓reduceIte, RelArmVec]
+        have rx := getArmGpr_rel hxn rGpr
+        rw [beq_iff_eq.mp hz] at rx
+        rcases rx with ⟨x1, x2⟩
+        simp [x1, x2, Vec128.zero]
+      · simp only [hz, Bool.false_eq_true, ↓reduceIte]
+        by_cases hp : (getArmAbsGpr st xn).isPublic = true
+        · simp only [hp, ↓reduceIte, RelArmVec]
+          rw [RelArmGpr_public_eq (getArmGpr_rel hxn rGpr) hp]
+        · simp [hp, RelArmVec]
+    case vand16b vd vn vm =>
+      rcases hValid with ⟨⟨hvd, hvn⟩, hvm⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hp : ((st.vec.get vn).isPublic && (st.vec.get vm).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmVec]
+        simp only [Bool.and_eq_true] at hp
+        rw [RelArmVec_public_eq (rVec vn hvn) hp.1, RelArmVec_public_eq (rVec vm hvm) hp.2]
+      · simp [hp, RelArmVec]
+    case vshift2d left vd vn amount =>
+      rcases hValid with ⟨hvd, hvn⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hp : (st.vec.get vn).isPublic = true
+      · simp only [hp, ↓reduceIte, RelArmVec]
+        rw [RelArmVec_public_eq (rVec vn hvn) hp]
+      · simp [hp, RelArmVec]
+    case ldpQ rt1 rt2 rn off =>
+      rcases hValid with ⟨⟨ht1, ht2⟩, hn⟩
+      cases hp : (getArmAbsGpr st rn).isPublic
+      · simp [hp] at hTr
+      · simp only [hp, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have he := RelArmGpr_public_eq (getArmGpr_rel hn rGpr) hp
+        simp only [stepArm64, hIns, he, true_and]
+        exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr,
+          RelArmVec_set ht2 (RelArmVec_set ht1 rVec trivial) trivial, rCf, rZf⟩
+    case stpQ rt1 rt2 rn off =>
+      rcases hValid with ⟨⟨_, _⟩, hn⟩
+      cases hp : (getArmAbsGpr st rn).isPublic
+      · simp [hp] at hTr
+      · simp only [hp, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have he := RelArmGpr_public_eq (getArmGpr_rel hn rGpr) hp
+        simp only [stepArm64, hIns, he, true_and]
+        exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
     case bCond cond targetPc =>
-      by_cases hBad : (!armCondIsPublic cond st || decide (targetPc < 0) || decide (targetPc.toNat ≥ 4096)) = true
+      by_cases hBad : (!armCondIsPublic cond st || decide (targetPc < 0) || decide (targetPc.toNat ≥ 8192)) = true
       · simp [hBad] at hTr
       · simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hTr
         injection hTr with hS; subst hS
@@ -5842,7 +5965,7 @@ private theorem runArm64_invariant_sound {c : FuncContract}
   | 0, s₁, s₂, st, _, hRel =>
     ⟨rfl, (fun _ h => nomatch h), Or.inr ⟨hRel.2.1, hRel.2.2.1⟩⟩
   | fuel + 1, s₁, s₂, st, hInvPc, hRel => by
-    have hPcLt : s₁.pc < 4096 := PcMap.get_some_lt hInvPc
+    have hPcLt : s₁.pc < 8192 := PcMap.get_some_lt hInvPc
     have hPred := PcMap.all_get hAll hInvPc
     rw [buildProgMap_get_eq prog hPcLt] at hPred
     cases hFind : findInstrAtPc s₁.pc prog with

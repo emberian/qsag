@@ -54,6 +54,7 @@ Lean 4.35 formalization of QSAG's classical and quantum concrete security founda
 -/
 
 public import Qsag.Constructive
+public import Qsag.Tactic.AssuranceKit
 public import Qsag.Goldilocks
 import all Qsag.Goldilocks
 public import Qsag.UcGames
@@ -3738,7 +3739,7 @@ theorem tooth_zkboo_219_quantum_grind_64bit :
 
 /-! ### §5.2 `ThresholdMlDsa`, `Poseidon2Toprf`, `DensePcg`, `HdRekey` (Exact 96-Bit Bias) & `ActiveMigration` -/
 
-/-- Exact `ML-DSA-44` (`FIPS 204`) challenge ball size `2^39 * C(256, 39)` (`≈ 2^195.46 > 2^192`),
+/-- Exact `ML-DSA-44` (`FIPS 204`) challenge ball size `2^39 * C(256, 39)` (`≈ 2^192.76 > 2^192`),
     computed via the exact falling factorial `256 * 255 * ... * 218 / 39!`. -/
 def mldsa44ChallengeLowerBound : Nat :=
   (2 ^ 39 *
@@ -3786,7 +3787,7 @@ def densePcgSpcotBound (depth qOnlineSessions : Nat) : RatBound :=
        (`strictlyMoreThanBits 227` at `depth = 14`, and `atLeastBits 193` across `2^32` sessions!),
     2. `#tooth` `tooth_dense_pcg_128bit_seed_grover_64bit`: 128-bit GGM seeds cap quantum seed-search
        at 64 Grover bits (`exceedsBitBudget 0` at `qHash = 2^64`), whereas 256-bit GGM seeds achieve
-       `atLeastBits 128` (`qHash < 2^54` across `64 * 15 = 960` tree expansions)! -/
+       `atLeastBits 128` (`qHash + 1 ≤ 2^56` for the legacy 960-target model, not a complete forest)! -/
 theorem dense_pcg_spcot_and_tooth_128bit_seed :
     strictlyMoreThanBits 225 (densePcgSpcotBound 15 1) ∧
     strictlyMoreThanBits 227 (densePcgSpcotBound 14 1) ∧
@@ -4221,7 +4222,9 @@ structure QsagPq128ProfileEntry where
 theorem mldsa44ChallengeLowerBound_pos : 0 < mldsa44ChallengeLowerBound := by
   unfold mldsa44ChallengeLowerBound; decide
 
-/-- Complete 12-profile parameterized `PQ128` concrete security roster evaluated at query budget `b`.
+/-- Legacy 12-profile roster, retained for source compatibility. Its 960-target GGM
+    model and online-only ML-DSA challenge term are not production accounting; use
+    `qsagCorrectedPortfolioRoster` below. The legacy PQ128 theorems concern only this model.
     `.hemExt4WhirPq128` is the Fiat–Shamir-ground IOP-layer budget of `Hem` at `num_vars = 20`
     over ALL three deployed stages: every term of `hemNv20ComposedPureTerms` (sumcheck, and per
     stage the `[CWYZ26]` fold bound, the dual-OOD bound and the pure distinct-fiber query bound
@@ -4560,5 +4563,127 @@ theorem rlwe_joint_signed_monomial_challenge_143_bits :
     (2 ^ 71) ^ 2 < rlweJointSignedMonomialChallengeCard ∧
     rlweJointSignedMonomialChallengeCard < (2 ^ 72) ^ 2 := by
   decide +kernel
+
+/-! Corrected production accounting. The earlier roster is retained for source compatibility;
+its 960-target seed model and online-only ML-DSA challenge model are not production budgets.
+These bounds explicitly expose why the old 2^56-query PQ128 claim cannot transfer. -/
+
+/-- All internal PRG expansions in 64 complete depth-15 trees. -/
+def densePcgV3NodeTargets : Nat := 64 * (2 ^ 15 - 1)
+
+theorem densePcgV3NodeTargets_exact :
+    densePcgV3NodeTargets = 2097088 ∧ 2048 * (64 * 15) < densePcgV3NodeTargets := by decide
+
+theorem mldsa44ChallengeLowerBound_exact_bit_interval :
+    2 ^ 192 < mldsa44ChallengeLowerBound ∧ mldsa44ChallengeLowerBound < 2 ^ 193 := by decide
+
+def densePcgV3SeedQuantumBound (qHash : Nat) : RatBound :=
+  quantumZhandryMultiTargetBound 256 densePcgV3NodeTargets qHash
+
+def densePcgV3SeedClassicalBound (qHash : Nat) : RatBound :=
+  ⟨densePcgV3NodeTargets * (qHash + 1), 2 ^ 256, Nat.two_pow_pos 256⟩
+
+/-- Offline Fiat–Shamir challenge search, including the QROM square and factor eight. -/
+def mldsa44OfflineChallengeQuantumBound (qHash : Nat) : RatBound :=
+  ⟨8 * (qHash + 1) ^ 2, mldsa44ChallengeLowerBound, mldsa44ChallengeLowerBound_pos⟩
+
+def mldsa44OfflineChallengeClassicalBound (qHash : Nat) : RatBound :=
+  ⟨qHash + 1, mldsa44ChallengeLowerBound, mldsa44ChallengeLowerBound_pos⟩
+
+/-- Corrected production entries include online sessions, offline grinding, and commitment search. -/
+def thresholdMlDsa44DkgAndSignCorrected (b : QueryBudget) : QsagPq128ProfileEntry :=
+  { profileId := .thresholdMlDsa44DkgAndSign
+    classicalBound := RatBound.add
+      (mldsa44OfflineChallengeClassicalBound b.qHash)
+      (RatBound.add
+        ⟨b.qOnlineSessions + 1, mldsa44ChallengeLowerBound, mldsa44ChallengeLowerBound_pos⟩
+        ⟨b.qHash + 1, 2 ^ 256, Nat.two_pow_pos 256⟩)
+    quantumBound := RatBound.add
+      (mldsa44OfflineChallengeQuantumBound b.qHash)
+      (RatBound.add
+        ⟨b.qOnlineSessions + 1, mldsa44ChallengeLowerBound, mldsa44ChallengeLowerBound_pos⟩
+        (quantumGroverSingleTargetBound 256 b.qHash)) }
+
+def densePcg256BitSeedSpcotCorrected (b : QueryBudget) : QsagPq128ProfileEntry :=
+  { profileId := .densePcg256BitSeedSpcot
+    classicalBound := RatBound.add (densePcgSpcotBound 15 (b.qOnlineSessions + 1))
+      (densePcgV3SeedClassicalBound b.qHash)
+    quantumBound := RatBound.add (densePcgSpcotBound 15 (b.qOnlineSessions + 1))
+      (densePcgV3SeedQuantumBound b.qHash) }
+
+def DensePcgV3QueryBudget (q : Nat) : Prop := q + 1 ≤ 2 ^ 56
+
+theorem densePcgV3SeedQuantumBound_120 (q : Nat) (hq : DensePcgV3QueryBudget q) :
+    atLeastBits 120 (densePcgV3SeedQuantumBound q) := by
+  unfold atLeastBits densePcgV3SeedQuantumBound quantumZhandryMultiTargetBound
+  dsimp only
+  exact Nat.le_trans
+    (Nat.mul_le_mul_right (2 ^ 120)
+      (Nat.mul_le_mul_left (8 * densePcgV3NodeTargets) (Nat.pow_le_pow_left hq 2)))
+    (by decide)
+
+theorem densePcgV3SeedQuantumBound_128 (q : Nat) (hq : q + 1 ≤ 2 ^ 52) :
+    atLeastBits 128 (densePcgV3SeedQuantumBound q) := by
+  unfold atLeastBits densePcgV3SeedQuantumBound quantumZhandryMultiTargetBound
+  dsimp only
+  exact Nat.le_trans
+    (Nat.mul_le_mul_right (2 ^ 128)
+      (Nat.mul_le_mul_left (8 * densePcgV3NodeTargets) (Nat.pow_le_pow_left hq 2)))
+    (by decide)
+
+theorem mldsa44OfflineChallengeQuantumBound_77 (q : Nat) (hq : q + 1 ≤ 2 ^ 56) :
+    atLeastBits 77 (mldsa44OfflineChallengeQuantumBound q) := by
+  unfold atLeastBits mldsa44OfflineChallengeQuantumBound
+  dsimp only
+  exact Nat.le_trans
+    (Nat.mul_le_mul_right (2 ^ 77)
+      (Nat.mul_le_mul_left 8 (Nat.pow_le_pow_left hq 2))) (by decide)
+
+theorem tooth_corrected_high_query_budget_not_pq128 (q : Nat) (hq : q + 1 = 2 ^ 56) :
+    ¬ atLeastBits 128 (densePcgV3SeedQuantumBound q) := by
+  unfold atLeastBits densePcgV3SeedQuantumBound quantumZhandryMultiTargetBound
+  dsimp only
+  rw [hq]
+  decide
+
+theorem tooth_mldsa44_offline_grinding_not_pq128 (q : Nat) (hq : q + 1 = 2 ^ 56) :
+    ¬ atLeastBits 128 (mldsa44OfflineChallengeQuantumBound q) := by
+  unfold atLeastBits mldsa44OfflineChallengeQuantumBound
+  dsimp only
+  rw [hq]
+  decide
+
+theorem witness_densePcgV3_query_budget : ∃ q : Nat, DensePcgV3QueryBudget q :=
+  ⟨2 ^ 56 - 1, by unfold DensePcgV3QueryBudget; decide⟩
+
+/-- Corrected roster replaces both affected entries without inheriting the legacy PQ128 claim. -/
+def qsagCorrectedPortfolioRoster (b : QueryBudget) : List QsagPq128ProfileEntry :=
+  (qsagPq128PortfolioRoster b).map fun e =>
+    if e.profileId = .thresholdMlDsa44DkgAndSign then thresholdMlDsa44DkgAndSignCorrected b
+    else if e.profileId = .densePcg256BitSeedSpcot then densePcg256BitSeedSpcotCorrected b
+    else e
+
+/-- Exact composed bounds at the requested high-query ceiling, including online terms. -/
+theorem corrected_high_query_components :
+    let b : QueryBudget := ⟨2 ^ 56 - 1, 0, 2 ^ 20 - 1⟩
+    atLeastBits 120 (densePcg256BitSeedSpcotCorrected b).quantumBound ∧
+    ¬ atLeastBits 128 (densePcg256BitSeedSpcotCorrected b).quantumBound ∧
+    atLeastBits 77 (thresholdMlDsa44DkgAndSignCorrected b).quantumBound ∧
+    ¬ atLeastBits 128 (thresholdMlDsa44DkgAndSignCorrected b).quantumBound := by
+  decide +kernel
+
+/-- A concrete replacement budget: both corrected components clear PQ128 at 2^30 queries. -/
+theorem corrected_components_pq128_at_2pow30 :
+    let b : QueryBudget := ⟨2 ^ 30 - 1, 0, 2 ^ 20 - 1⟩
+    atLeastBits 128 (densePcg256BitSeedSpcotCorrected b).quantumBound ∧
+    atLeastBits 128 (densePcg256BitSeedSpcotCorrected b).classicalBound ∧
+    atLeastBits 128 (thresholdMlDsa44DkgAndSignCorrected b).quantumBound ∧
+    atLeastBits 128 (thresholdMlDsa44DkgAndSignCorrected b).classicalBound := by
+  decide +kernel
+
+#tooth_pair Qsag.densePcgV3SeedQuantumBound_128 vs Qsag.tooth_corrected_high_query_budget_not_pq128
+#tooth_pair Qsag.mldsa44OfflineChallengeQuantumBound_77 vs Qsag.tooth_mldsa44_offline_grinding_not_pq128
+
+#verify_inhabited Qsag.densePcgV3SeedQuantumBound_120 Qsag.witness_densePcgV3_query_budget
 
 end Qsag

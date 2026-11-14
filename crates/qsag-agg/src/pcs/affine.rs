@@ -374,17 +374,64 @@ impl KernelClaim {
 }
 
 pub(super) fn terminal_sum(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]) -> E {
+    let _phase = crate::profile::span("verify_terminal_sum");
+    #[cfg(feature = "std")]
+    if claims.len() >= 128 {
+        let chunk = claims.len().div_ceil(4);
+        let ranges: Vec<_> = claims.chunks(chunk).collect();
+        return crate::map_chunks_bounded(&ranges, |ranges| {
+            ranges.iter().fold(E::ZERO, |acc, sub| {
+                acc + terminal_sum_serial(phis, early, sub, c)
+            })
+        })
+        .into_iter()
+        .fold(E::ZERO, |a, b| a + b);
+    }
+    terminal_sum_serial(phis, early, claims, c)
+}
+
+fn terminal_sum_serial(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]) -> E {
     let n = 1usize << early;
     let mut k = vec![E::ZERO; n + 2];
+    let mut suffix = vec![E::ZERO; n];
+    let mut base_suffix = vec![Goldilocks::ZERO; n];
     for claim in claims {
         let prefix = phis.len() - claim.offset;
         let mut scale = claim.weight;
-        for (&r, &phi) in claim.point.iter().zip(&phis[claim.offset..]) {
-            scale *= E::ONE + phi * r;
-        }
-        let suffix = monomial_table(&claim.point[prefix..]);
-        for (v, &w) in k[..n].iter_mut().zip(&suffix) {
-            *v += scale * w;
+        // Shift queries lie in the base field. Preserve that representation through
+        // contraction rather than paying for general quartic multiplication by zero limbs.
+        let base_point = claim
+            .point
+            .iter()
+            .all(|r| r.c0.c1 == Goldilocks::ZERO && r.c1 == crate::field::GoldilocksExt2::ZERO);
+        if base_point {
+            for (&r, &phi) in claim.point.iter().zip(&phis[claim.offset..]) {
+                scale *= E::ONE + phi.mul_base(r.c0.c0);
+            }
+            base_suffix[0] = Goldilocks::ONE;
+            for (bit, r) in claim.point[prefix..].iter().enumerate() {
+                let width = 1usize << bit;
+                for i in 0..width {
+                    base_suffix[width + i] = base_suffix[i] * r.c0.c0;
+                }
+            }
+            for (v, &w) in k[..n].iter_mut().zip(&base_suffix) {
+                *v += scale.mul_base(w);
+            }
+        } else {
+            for (&r, &phi) in claim.point.iter().zip(&phis[claim.offset..]) {
+                scale *= E::ONE + phi * r;
+            }
+            suffix[0] = E::ONE;
+            for (bit, &r) in claim.point[prefix..].iter().enumerate() {
+                let width = 1usize << bit;
+                for i in 0..width {
+                    suffix[width + i] = suffix[i] * r;
+                }
+            }
+            for (v, &w) in k[..n].iter_mut().zip(&suffix) {
+                *v += scale * w;
+            }
         }
         if prefix == 0 {
             k[n] += claim.weight * claim.overflow[0];
@@ -404,6 +451,47 @@ mod tests {
             Goldilocks::from_u64_reduced((i * 7919 + j * 313 + 17) as u64)
         }))
     }
+    #[test]
+    fn terminal_base_field_specialization_matches_generic_contraction() {
+        let phis: Vec<_> = (1..5).map(sample).collect();
+        let early = 4;
+        let n = 1 << early;
+        let c: Vec<_> = (0..n + 2).map(sample).collect();
+        let mut claims = Vec::new();
+        for offset in 0..=phis.len() {
+            for z in [E::from_base(Goldilocks::from_u64_reduced(7919)), sample(37)] {
+                claims.push(KernelClaim::evaluation(
+                    offset,
+                    sample(offset + 11),
+                    z,
+                    early + phis.len() - offset,
+                ));
+            }
+        }
+        let mut k = vec![E::ZERO; n + 2];
+        for claim in &claims {
+            let prefix = phis.len() - claim.offset;
+            let mut scale = claim.weight;
+            for (&r, &phi) in claim.point.iter().zip(&phis[claim.offset..]) {
+                scale *= E::ONE + phi * r;
+            }
+            let suffix = monomial_table(&claim.point[prefix..]);
+            for (v, &w) in k[..n].iter_mut().zip(&suffix) {
+                *v += scale * w;
+            }
+            if prefix == 0 {
+                k[n] += claim.weight * claim.overflow[0];
+                k[n + 1] += claim.weight * claim.overflow[1];
+            } else {
+                k[n] += claim.weight * (claim.overflow[0] + phis[claim.offset] * claim.overflow[1]);
+            }
+        }
+        assert_eq!(
+            terminal_sum(&phis, early, &claims, &c),
+            dot_ext4_fast(&c, &k)
+        );
+    }
+
     fn transcript() -> FiatShamirTranscript<InstanceBound> {
         FiatShamirTranscript::new()
             .bind_relation(b"AFFINE_TEST", b"v1", &whir_stage_schedule(8))

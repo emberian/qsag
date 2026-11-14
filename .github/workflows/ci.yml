@@ -71,6 +71,14 @@ jobs:
       - name: Workspace tests in release mode
         run: cargo test --workspace --release
 
+      - name: Workspace-excluded extracted Rust crates
+        env:
+          CARGO_BUILD_JOBS: "4"
+          SWARM_MEM_MAX: 8G
+        run: |
+          timeout --kill-after=10s 600s cargo test --manifest-path aeneas/qsag-verified/Cargo.toml
+          timeout --kill-after=10s 600s cargo test --manifest-path aeneas/qsag-whir-verified/Cargo.toml
+
       - name: CLI known-answer tests and smoke run
         run: |
           set -euo pipefail
@@ -143,7 +151,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bubblewrap curl git zstd jq
+          sudo apt-get install -y --no-install-recommends bubblewrap curl git zstd jq z3
           # The comparator replays proofs inside `bwrap --unshare-all`; Ubuntu 24.04 blocks
           # unprivileged user namespaces through AppArmor unless this is switched off.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -193,7 +201,7 @@ jobs:
         working-directory: ${{ matrix.workdir }}
         run: |
           if [ "${{ matrix.workdir }}" = lean ]; then
-            lake build --wfail Qsag AuditAxioms SpecOracle IsaCosim qsag-kat audit-axioms
+            lake build --wfail Qsag AuditAxioms SpecOracle IsaCosim spec-oracle qsag-kat audit-axioms
             lake build QsagChallenge
           elif [ "${{ matrix.workdir }}" = aeneas/lean ]; then
             lake build --wfail QsagVerified QsagSpecWeld QsagCustodyWeld AuditMirAxioms QsagMirProofs audit-mir-axioms
@@ -226,9 +234,18 @@ jobs:
           CARGO_BUILD_JOBS: "4"
           SWARM_MEM_MAX: 8G
         run: |
-          python3 scripts/cross_kat_runner.py --build
+          timeout --kill-after=10s 600s python3 scripts/cross_kat_runner.py --build
           timeout --kill-after=10s 600s lean/.lake/build/bin/qsag-kat > /tmp/qsag-kat.json
           python3 -m json.tool /tmp/qsag-kat.json > /dev/null
+
+      - name: Differential specification and ISA certificate verification
+        if: matrix.workdir == 'lean'
+        env:
+          CARGO_BUILD_JOBS: "4"
+          SWARM_MEM_MAX: 8G
+        run: |
+          timeout --kill-after=10s 600s python3 scripts/spec_differential_fuzz.py --strict-all
+          timeout --kill-after=10s 600s python3 scripts/sydtv_driver.py --self-test --require-z3 --check-lean
 
       - name: lake comparator --paranoid (bubblewrap sandbox, six kernels)
         if: matrix.comparator
@@ -296,7 +313,7 @@ jobs:
           set -euo pipefail
           CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_STRIP=none \
             cargo build --release --offline -p qsag-cli --target-dir target/ct-linked
-          python3 scripts/audit_elf_ct.py --elf-bin target/ct-linked/release/qsag
+          python3 scripts/audit_elf_ct.py --elf-bin target/ct-linked/release/qsag --strict-rust-branches
 
       - name: Bind certified fixture bytes to freshly built source artifacts
         run: |

@@ -19,7 +19,7 @@ use core::cell::Cell;
 use core::fmt;
 
 use qsag_accel::AcceleratorBackend;
-use qsag_accel::ct::{ct_eq_bytes, ct_eq_u128};
+use qsag_accel::ct::ct_eq_bytes;
 
 #[inline(never)]
 fn ct_zeroize_bytes(secret: &mut [u8]) {
@@ -474,6 +474,34 @@ pub struct PolicySignerGuardShare {
     window_authority: Option<WindowAuthority>,
     durable_key_id: [u8; 32],
     durable_generation: Cell<u64>,
+    /// Extracted velocity guard retained across approvals, rotations and restores. It is
+    /// pinned to a cap on first use; `velocity_generation` is its monotone request nonce.
+    verified_velocity: Option<qsag_verified::StatefulVelocityGuard>,
+    velocity_generation: u64,
+}
+
+/// A verified guard for `window` and `cap` holding `spent`, with request nonce `generation`
+/// (at least 1 once anything was spent). `None` if `spent` exceeds `cap`.
+fn rebuild_verified_velocity(
+    window: u64,
+    cap: u128,
+    pin: [u8; 32],
+    generation: u64,
+    spent: u128,
+) -> Option<(qsag_verified::StatefulVelocityGuard, u64)> {
+    let guard = qsag_verified::StatefulVelocityGuard::new_window(window, cap, pin, pin);
+    if spent == 0 && generation == 0 {
+        return Some((guard, 0));
+    }
+    let nonce = generation.max(1);
+    let (guard, result) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
+        window_id: window,
+        nonce,
+        amount_units: spent,
+        policy_pin: pin,
+        authority_pin: pin,
+    });
+    result.ok().map(|_| (guard, nonce))
 }
 
 impl fmt::Debug for PolicySignerGuardShare {
@@ -518,12 +546,15 @@ impl PolicySignerGuardShare {
             || self.next_slot.get() != 0
             || self.current_window_id != 0
             || self.accumulated_window_spend != 0
+            || self.velocity_generation != 0
             || self.active_phase.is_some()
             || self.poisoned
         {
             ct_zeroize_bytes(&mut key);
             return Err(PolicyViolation::IntentBindingMismatch);
         }
+        // The verified guard is pinned to the key ID, which changes below.
+        self.verified_velocity = None;
         // Durable snapshots cannot be restored under different authority provisioning.
         self.durable_key_id = cshake256_framed_32(
             b"QSAG.POLICY.WINDOW_KEY/v1",
@@ -599,6 +630,15 @@ impl PolicySignerGuardShare {
         );
         if !ct_eq_bytes(&expected.mac, &authorization.mac) {
             return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        if let Some(guard) = self.verified_velocity.take() {
+            let (guard, result) =
+                guard.rotate_window(next_window_id, self.durable_key_id, self.durable_key_id);
+            self.verified_velocity = Some(guard);
+            if result.is_err() {
+                self.poison();
+                return Err(PolicyViolation::LedgerPersistenceFailed);
+            }
         }
         self.current_window_id = next_window_id;
         self.accumulated_window_spend = 0;
@@ -719,41 +759,78 @@ impl PolicySignerGuardShare {
             .accumulated_window_spend
             .max(intent.rolling_window_spent)
             .max(external_floor);
-        let guard = qsag_verified::StatefulVelocityGuard::new_window(
-            self.current_window_id,
+        // The retained verified guard is the authority on this window's spend.
+        if let Some(guard) = &self.verified_velocity
+            && (guard.window_id() != self.current_window_id
+                || guard.spent_units() != self.accumulated_window_spend)
+        {
+            return Err(PolicyViolation::LedgerPersistenceFailed);
+        }
+        qsag_verified::policy_and_addr::checked_velocity_spend(
+            effective_prior,
+            intent.amount_units,
             velocity_window_cap,
-            self.durable_key_id,
-            *session_id,
-        );
-        let (guard, prior_res) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
-            window_id: intent.window_id,
-            nonce: 1,
-            amount_units: effective_prior,
-            policy_pin: self.durable_key_id,
-            authority_pin: *session_id,
-        });
-        if prior_res.is_err() {
-            return Err(PolicyViolation::VelocityCapOverflowOrExceeded);
-        }
-        let (guard, tx_res) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
-            window_id: intent.window_id,
-            nonce: 2,
-            amount_units: intent.amount_units,
-            policy_pin: self.durable_key_id,
-            authority_pin: *session_id,
-        });
-        match tx_res {
-            Ok(_) => Ok(guard.spent_units()),
-            Err(_) => Err(PolicyViolation::VelocityCapOverflowOrExceeded),
-        }
+        )
+        .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)
     }
 
+    /// Bring the retained verified guard to `cap` in the current window. A guard that has
+    /// to be built (first use, restore without a pinned cap, policy cap change) replays the
+    /// recorded spend through the verified transition, so it is refused if it exceeds `cap`.
+    fn pin_verified_velocity(&mut self, cap: u128) -> Result<(), PolicyViolation> {
+        if let Some(guard) = &self.verified_velocity
+            && guard.cap_units() == cap
+            && guard.window_id() == self.current_window_id
+            && guard.spent_units() == self.accumulated_window_spend
+        {
+            return Ok(());
+        }
+        let (guard, generation) = rebuild_verified_velocity(
+            self.current_window_id,
+            cap,
+            self.durable_key_id,
+            self.velocity_generation,
+            self.accumulated_window_spend,
+        )
+        .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
+        self.verified_velocity = Some(guard);
+        self.velocity_generation = generation;
+        Ok(())
+    }
+
+    /// Commit an approved spend through the retained verified guard. A refusal leaves the
+    /// ledger and the guard unchanged.
     fn record_approved_intent(
         &mut self,
+        velocity_window_cap: u128,
         projected_spend: u128,
         nonce: [u8; 32],
         session_id: [u8; 32],
-    ) {
+    ) -> Result<(), PolicyViolation> {
+        let amount = projected_spend
+            .checked_sub(self.accumulated_window_spend)
+            .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
+        self.pin_verified_velocity(velocity_window_cap)?;
+        let generation = self
+            .velocity_generation
+            .checked_add(1)
+            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
+        let guard = self
+            .verified_velocity
+            .take()
+            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
+        let (guard, result) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
+            window_id: self.current_window_id,
+            nonce: generation,
+            amount_units: amount,
+            policy_pin: self.durable_key_id,
+            authority_pin: self.durable_key_id,
+        });
+        self.verified_velocity = Some(guard);
+        if result.is_err() {
+            return Err(PolicyViolation::VelocityCapOverflowOrExceeded);
+        }
+        self.velocity_generation = generation;
         self.accumulated_window_spend = projected_spend;
         // Keep a bounded sparse window above a permanent lexicographic floor.
         // Evicted values remain burned forever, including across velocity windows.
@@ -776,6 +853,7 @@ impl PolicySignerGuardShare {
                 *floor = Some(values.remove(0));
             }
         }
+        Ok(())
     }
 
     fn incoming_slot_alpha(&self, peer_id: u16, peer_slot: usize) -> [u128; 2] {
@@ -877,7 +955,47 @@ pub struct AuthorizedSignReleaseToken {
     intent: TransactionIntent,
 }
 
+/// Run one committed sigma opening round through the extracted single-use guard. Each item
+/// is a frozen commitment, the commitment recomputed from the opening, and the opened lanes.
+/// The permit exists only if every opening matched and the lanes XOR to zero for exactly
+/// this session, round and binding.
+fn release_sigma_round(
+    session_id: &[u8; 32],
+    round_id: u64,
+    binding: &[u8; 32],
+    openings: &[([u8; 32], [u8; 32], [u128; 2])],
+) -> Result<qsag_verified::OpeningReleasePermit, PolicyViolation> {
+    let expected =
+        u64::try_from(openings.len()).map_err(|_| PolicyViolation::IntentBindingMismatch)?;
+    let mut guard =
+        qsag_verified::ConsumingOpeningGuard2Lane::new(*session_id, round_id, *binding, expected);
+    for (commitment, recomputed, lanes) in openings {
+        guard = guard.absorb_opening(commitment, recomputed, *lanes);
+    }
+    let (_spent, permit) = guard.verify_once(session_id, round_id, binding);
+    permit.ok_or(PolicyViolation::BarrierBdozMacFailed)
+}
+
 impl AuthorizedSignReleaseToken {
+    /// The only constructor. It consumes the permit of this session's sigma opening.
+    fn mint(
+        permit: qsag_verified::OpeningReleasePermit,
+        session_id: [u8; 32],
+        policy_digest: [u8; 32],
+        intent_digest: [u8; 32],
+        intent: TransactionIntent,
+    ) -> Result<Self, PolicyViolation> {
+        if !ct_eq_bytes(&permit.session_id(), &session_id) {
+            return Err(PolicyViolation::BarrierBdozMacFailed);
+        }
+        Ok(Self {
+            session_id,
+            policy_digest,
+            intent_digest,
+            intent,
+        })
+    }
+
     pub fn matches_signing(
         &self,
         key_id: &[u8; 32],
@@ -996,6 +1114,8 @@ pub fn trusted_dealer_setup_for_testing(
             window_authority: None,
             durable_key_id: cshake256_framed_32(b"QSAG.POLICY.DURABLE_KEY.V2", &[&local_salt_seed]),
             durable_generation: Cell::new(0),
+            verified_velocity: None,
+            velocity_generation: 0,
             local_salt_seed,
             pairwise_zero_seeds,
             preproc_r: all_r[i_idx].clone(),
@@ -1169,6 +1289,7 @@ impl PolicySignerGuardShare {
 /// every quorum switch.
 pub struct SharedWindowSpendLedger {
     policy_digest: [u8; 32],
+    verified_velocity: Option<qsag_verified::StatefulVelocityGuard>,
     generation: u64,
     failed: bool,
     current_window_id: u64,
@@ -1184,6 +1305,12 @@ impl SharedWindowSpendLedger {
     pub fn new(policy: &TransactionPolicy, initial_window_id: u64) -> Self {
         Self {
             policy_digest: policy.canonical_digest(),
+            verified_velocity: Some(qsag_verified::StatefulVelocityGuard::new_window(
+                initial_window_id,
+                policy.velocity_window_cap,
+                policy.canonical_digest(),
+                policy.canonical_digest(),
+            )),
             generation: 0,
             failed: false,
             current_window_id: initial_window_id,
@@ -1264,6 +1391,17 @@ impl SharedWindowSpendLedger {
             .generation
             .checked_add(1)
             .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
+        let guard = self
+            .verified_velocity
+            .take()
+            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
+        let (guard, result) =
+            guard.rotate_window(next_window_id, self.policy_digest, self.policy_digest);
+        self.verified_velocity = Some(guard);
+        if result.is_err() {
+            self.failed = true;
+            return Err(PolicyViolation::LedgerPersistenceFailed);
+        }
         self.current_window_id = next_window_id;
         self.accumulated_window_spend = 0;
         Ok(())
@@ -1290,33 +1428,20 @@ impl SharedWindowSpendLedger {
         let effective_prior = self
             .accumulated_window_spend
             .max(intent.rolling_window_spent);
-        let guard = qsag_verified::StatefulVelocityGuard::new_window(
-            self.current_window_id,
-            policy.velocity_window_cap,
-            self.policy_digest,
-            *session_id,
-        );
-        let (guard, prior_res) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
-            window_id: intent.window_id,
-            nonce: 1,
-            amount_units: effective_prior,
-            policy_pin: self.policy_digest,
-            authority_pin: *session_id,
-        });
-        if prior_res.is_err() {
-            return Err(PolicyViolation::VelocityCapOverflowOrExceeded);
+        let guard = self
+            .verified_velocity
+            .as_ref()
+            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
+        if guard.window_id() != self.current_window_id
+            || guard.spent_units() != self.accumulated_window_spend
+            || guard.cap_units() != policy.velocity_window_cap
+        {
+            return Err(PolicyViolation::LedgerPersistenceFailed);
         }
-        let (guard, tx_res) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
-            window_id: intent.window_id,
-            nonce: 2,
-            amount_units: intent.amount_units,
-            policy_pin: self.policy_digest,
-            authority_pin: *session_id,
-        });
-        match tx_res {
-            Ok(_) => Ok(guard.spent_units()),
-            Err(_) => Err(PolicyViolation::VelocityCapOverflowOrExceeded),
-        }
+        effective_prior
+            .checked_add(intent.amount_units)
+            .filter(|spent| *spent <= guard.cap_units())
+            .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)
     }
 
     fn record_approved_intent(
@@ -1324,9 +1449,31 @@ impl SharedWindowSpendLedger {
         projected_spend: u128,
         nonce: [u8; 32],
         session_id: [u8; 32],
-    ) {
-        // Capacity was checked before the barrier consumed preprocessing.
-        self.generation += 1;
+    ) -> Result<(), PolicyViolation> {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
+        let amount = projected_spend
+            .checked_sub(self.accumulated_window_spend)
+            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
+        let guard = self
+            .verified_velocity
+            .take()
+            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
+        let (guard, result) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
+            window_id: self.current_window_id,
+            nonce: generation,
+            amount_units: amount,
+            policy_pin: self.policy_digest,
+            authority_pin: self.policy_digest,
+        });
+        self.verified_velocity = Some(guard);
+        if result.is_err() {
+            self.failed = true;
+            return Err(PolicyViolation::VelocityCapOverflowOrExceeded);
+        }
+        self.generation = generation;
         self.accumulated_window_spend = projected_spend;
         for (values, floor, value) in [
             (
@@ -1347,6 +1494,7 @@ impl SharedWindowSpendLedger {
                 *floor = Some(values.remove(0));
             }
         }
+        Ok(())
     }
 }
 
@@ -1456,7 +1604,7 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
     }
 
     let mut r1_states: Vec<PartyLocalRound1> = Vec::with_capacity(m);
-    let online_res: Result<(), PolicyViolation> = (|| {
+    let online_res: Result<qsag_verified::OpeningReleasePermit, PolicyViolation> = (|| {
         for (g, intent_i) in quorum_guards.iter().zip(per_party_intents.iter()) {
             let slot = g.next_slot.get();
             g.next_slot.set(slot + 1);
@@ -1558,7 +1706,7 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         }
 
         // Round 2b: Verify ALL commitments in constant time FIRST, then verify `\bigoplus_i \sigma_i == (0, 0)`!
-        let mut sigma_xor = (0u128, 0u128);
+        let mut sigma_openings = Vec::with_capacity(commits.len());
         for ((c_pid, comm), (o_pid, payload, sigmas, salt)) in
             commits.iter().zip(deferred_openings.iter())
         {
@@ -1568,23 +1716,27 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
             if !ct_eq_bytes(&expected_comm, comm) {
                 return Err(PolicyViolation::BarrierCommitmentMismatch { party_id: *o_pid });
             }
-            sigma_xor.0 ^= sigmas.0;
-            sigma_xor.1 ^= sigmas.1;
+            sigma_openings.push((*comm, expected_comm, [sigmas.0, sigmas.1]));
         }
 
         let mut all_digests_equal = true;
         for st in &r1_states[1..] {
             all_digests_equal &= ct_eq_bytes(&st.intent_digest, &r1_states[0].intent_digest);
         }
-
-        if !ct_eq_u128(sigma_xor.0, 0) || !ct_eq_u128(sigma_xor.1, 0) || !all_digests_equal {
+        if !all_digests_equal {
             return Err(PolicyViolation::BarrierBdozMacFailed);
         }
 
-        Ok(())
+        // The zero-sum decision and the release permit come from the extracted guard.
+        release_sigma_round(
+            &session_id,
+            0x504F_4C32,
+            &r1_states[0].intent_digest,
+            &sigma_openings,
+        )
     })();
 
-    if let Err(err) = online_res {
+    let abort_all = |quorum_guards: &mut [PolicySignerGuardShare]| {
         for (idx, g_abort) in quorum_guards.iter_mut().enumerate() {
             if let Some(st_own) = r1_states.get(idx) {
                 let peer_slots: Vec<(u16, usize)> = r1_states
@@ -1595,15 +1747,22 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
                 g_abort.abort_session_slot(st_own.slot, &peer_slots);
             }
         }
-        return Err(err);
-    }
+    };
+    let permit = match online_res {
+        Ok(permit) => permit,
+        Err(err) => {
+            abort_all(quorum_guards);
+            return Err(err);
+        }
+    };
 
     let global_projected = projected_spends.iter().copied().max().unwrap_or(0);
     if let Some(ledger) = shared_ledger.as_deref_mut() {
-        ledger.record_approved_intent(global_projected, per_party_intents[0].nonce, session_id);
+        ledger.record_approved_intent(global_projected, per_party_intents[0].nonce, session_id)?;
     }
 
     // Atomically advance accumulated window spend, burn intent nonces + session ID, and retire slots.
+    let mut record_failure = None;
     for (idx, g) in quorum_guards.iter_mut().enumerate() {
         let peer_slots: Vec<(u16, usize)> = r1_states
             .iter()
@@ -1615,16 +1774,32 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         } else {
             projected_spends[idx]
         };
-        g.record_approved_intent(recorded_spend, per_party_intents[idx].nonce, session_id);
+        let recorded = g.record_approved_intent(
+            policy.velocity_window_cap,
+            recorded_spend,
+            per_party_intents[idx].nonce,
+            session_id,
+        );
         g.abort_session_slot(r1_states[idx].slot, &peer_slots);
+        if let Err(err) = recorded {
+            // The verified guard refused a spend the barrier approved: nothing is released.
+            g.poison();
+            record_failure = Some(err);
+            break;
+        }
+    }
+    if let Some(err) = record_failure {
+        abort_all(quorum_guards);
+        return Err(err);
     }
 
-    Ok(AuthorizedSignReleaseToken {
+    AuthorizedSignReleaseToken::mint(
+        permit,
         session_id,
         policy_digest,
-        intent_digest: r1_states[0].intent_digest,
-        intent: per_party_intents[0].clone(),
-    })
+        r1_states[0].intent_digest,
+        per_party_intents[0].clone(),
+    )
 }
 
 /// Evaluate `policy` across `guards`; peer/session MAC or commitment faults abort ONLY the
@@ -1884,6 +2059,8 @@ impl PolicyGuardDkgRound1 {
             window_authority: None,
             durable_key_id: cshake256_framed_32(b"QSAG.POLICY.DURABLE_KEY.V2", &[&local]),
             durable_generation: Cell::new(0),
+            verified_velocity: None,
+            velocity_generation: 0,
             local_salt_seed: local,
             pairwise_zero_seeds: Vec::new(),
             preproc_r: Vec::new(),
@@ -2646,24 +2823,28 @@ impl PartyPolicyFinalizeState {
             if opens.len() != self.commits.len() {
                 return Err(PolicyViolation::IntentBindingMismatch);
             }
-            let mut sum = [0u128; 2];
+            let mut sigma_openings = Vec::with_capacity(opens.len());
             for (c, o) in self.commits.iter().zip(&opens) {
-                if c.party_id != o.party_id
-                    || !ct_eq_bytes(
-                        &c.commitment,
-                        &sigma_commitment(c, &o.sigma_salt_i, &o.sigma_i),
-                    )
-                {
+                let recomputed = sigma_commitment(c, &o.sigma_salt_i, &o.sigma_i);
+                if c.party_id != o.party_id || !ct_eq_bytes(&c.commitment, &recomputed) {
                     return Err(PolicyViolation::BarrierCommitmentMismatch {
                         party_id: c.party_id,
                     });
                 }
-                sum[0] ^= o.sigma_i[0];
-                sum[1] ^= o.sigma_i[1];
+                sigma_openings.push((c.commitment, recomputed, o.sigma_i));
             }
-            if !ct_eq_u128(sum[0], 0) || !ct_eq_u128(sum[1], 0) {
-                return Err(PolicyViolation::BarrierBdozMacFailed);
-            }
+            // Round 4 froze one transcript digest for every commitment; it binds the round.
+            let binding = self
+                .commits
+                .first()
+                .map(|c| c.transcript_digest)
+                .ok_or(PolicyViolation::IntentBindingMismatch)?;
+            let permit = release_sigma_round(
+                &self.context.own.session_id,
+                own_slot as u64,
+                &binding,
+                &sigma_openings,
+            )?;
             let projected_spend = guard.check_window_nonce_and_projected_spend(
                 self.context.velocity_window_cap,
                 &self.context.intent,
@@ -2671,17 +2852,19 @@ impl PartyPolicyFinalizeState {
                 self.context.cumulative_epoch_spent,
             )?;
             guard.record_approved_intent(
+                self.context.velocity_window_cap,
                 projected_spend,
                 self.context.intent.nonce,
                 self.context.own.session_id,
-            );
+            )?;
             guard.abort_session_slot(own_slot, &peer_slots);
-            Ok(AuthorizedSignReleaseToken {
-                session_id: self.context.own.session_id,
-                policy_digest: self.context.own.policy_digest,
-                intent_digest: self.context.own.intent_digest,
-                intent: self.context.intent.clone(),
-            })
+            AuthorizedSignReleaseToken::mint(
+                permit,
+                self.context.own.session_id,
+                self.context.own.policy_digest,
+                self.context.own.intent_digest,
+                self.context.intent.clone(),
+            )
         })();
         policy_phase_result(guard, own_slot, &peer_slots, result)
     }
@@ -2800,6 +2983,40 @@ impl AuthorizedSignReleaseToken {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_verified_guard_survives_rotation_and_checkpoint() {
+        let (policy, _) = phase_fixture(&[1, 2]);
+        let mut ledger = SharedWindowSpendLedger::new(&policy, 0)
+            .with_window_authority([42; 32], [43; 32])
+            .unwrap();
+        ledger.record_approved_intent(7, [1; 32], [2; 32]).unwrap();
+        ledger.record_approved_intent(11, [3; 32], [4; 32]).unwrap();
+        assert_eq!(ledger.verified_velocity.as_ref().unwrap().last_nonce(), 2);
+        let auth = WindowAdvanceAuthorization::new(&[43; 32], &[42; 32], 0, 1);
+        ledger.advance_velocity_window(&auth).unwrap();
+        let guard = ledger.verified_velocity.as_ref().unwrap();
+        assert_eq!(guard.window_id(), 1);
+        assert_eq!(guard.spent_units(), 0);
+        assert_eq!(guard.last_nonce(), 2);
+        ledger.record_approved_intent(5, [5; 32], [6; 32]).unwrap();
+        assert_eq!(ledger.verified_velocity.as_ref().unwrap().last_nonce(), 4);
+        let bytes = ledger.export_durable_checkpoint(&[7; 32]);
+        let mut restored = SharedWindowSpendLedger::new(&policy, 0)
+            .with_window_authority([42; 32], [43; 32])
+            .unwrap();
+        restored
+            .restore_from_durable_checkpoint(&bytes, &[7; 32], 4)
+            .unwrap();
+        restored
+            .record_approved_intent(9, [8; 32], [9; 32])
+            .unwrap();
+        let guard = restored.verified_velocity.as_ref().unwrap();
+        assert_eq!(guard.spent_units(), 9);
+        assert_eq!(guard.last_nonce(), 5);
+        assert!(restored.is_nonce_burned(&[1; 32]));
+        assert!(restored.is_session_burned(&[2; 32]));
+    }
+
     fn raw_test_guards(entropy: [u8; 32], ids: &[u16]) -> Vec<PolicySignerGuardShare> {
         let mut guards: Vec<_> = super::trusted_dealer_setup_for_testing(entropy, ids)
             .into_iter()
@@ -2865,7 +3082,9 @@ mod tests {
         for i in 0u32..600 {
             let mut nonce = [0; 32];
             nonce[28..].copy_from_slice(&i.to_be_bytes());
-            guard.record_approved_intent(i as u128, nonce, nonce);
+            guard
+                .record_approved_intent(u128::MAX, i as u128, nonce, nonce)
+                .unwrap();
         }
         for i in 0u32..600 {
             let mut nonce = [0; 32];
@@ -2881,7 +3100,9 @@ mod tests {
         for i in 0u32..100 {
             let mut nonce = [0; 32];
             nonce[28..].copy_from_slice(&i.to_be_bytes());
-            older[0].record_approved_intent(i as u128, nonce, nonce);
+            older[0]
+                .record_approved_intent(u128::MAX, i as u128, nonce, nonce)
+                .unwrap();
         }
         older[0]
             .restore_from_durable_checkpoint(&checkpoint, &[7; 32], 600)
@@ -4158,6 +4379,24 @@ mod tests {
             .restore_from_durable_checkpoint(&saved, &[77; 32], generation)
             .unwrap();
         assert_eq!(recovered.accumulated_window_spend(), 60);
+        let verified = recovered.verified_velocity.as_ref().unwrap();
+        assert_eq!(verified.spent_units(), 60);
+        assert_eq!(verified.last_nonce(), generation);
+        assert_eq!(verified.cap_units(), policy.velocity_window_cap);
+        // Even a direct internal commit cannot bypass the retained verified cap.
+        let mut over_cap = SharedWindowSpendLedger::new(&policy, 0);
+        over_cap
+            .restore_from_durable_checkpoint(&saved, &[77; 32], generation)
+            .unwrap();
+        assert_eq!(
+            over_cap.record_approved_intent(policy.velocity_window_cap + 1, [0xA1; 32], [0xB1; 32]),
+            Err(PolicyViolation::VelocityCapOverflowOrExceeded)
+        );
+        assert!(over_cap.failed);
+        assert_eq!(
+            over_cap.verified_velocity.as_ref().unwrap().spent_units(),
+            60
+        );
         assert!(recovered.is_nonce_burned(&q1_intent.nonce));
         shared_ledger = recovered;
 

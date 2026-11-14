@@ -182,6 +182,23 @@ pub fn cwyz_duet_fold(
     affine_combine(mixed, odd, ext_add(alpha, ext_scale(beta, y0_sq)))
 }
 
+/// Production PCS entry point, in polynomial basis `[1, u, u^2, u^3]`.
+/// The PCS tower adapter must permute wire limbs `[0, 2, 1, 3]`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn fold_duet_affine_ext4(
+    v0: Ext4,
+    v1: Ext4,
+    inv_two_xk: u64,
+    inv_two: u64,
+    xk_sq: u64,
+    theta: Ext4,
+    alpha: Ext4,
+    beta: Ext4,
+) -> Ext4 {
+    cwyz_duet_fold(v0, v1, inv_two_xk, inv_two, xk_sq, theta, alpha, beta)
+}
+
 /// Exact acceptance gate for one asymmetric coset duet fold step.
 #[allow(clippy::too_many_arguments)]
 pub fn verify_cwyz_duet_fold_step(
@@ -338,6 +355,13 @@ pub fn eval_ext4_univariate_at_base(coeffs: &[Ext4], z: u64) -> Ext4 {
         );
     }
     acc
+}
+
+/// Production PCS Horner entry point; coefficients are in ascending degree.
+/// Elements use polynomial basis; the PCS tower adapter permutes `[0, 2, 1, 3]`.
+#[inline]
+pub fn eval_univariate_ext4_at_base(coeffs: &[Ext4], z: u64) -> Ext4 {
+    eval_ext4_univariate_at_base(coeffs, z)
 }
 
 /// Exact acceptance gate pinning an early-stop univariate `Ext4` polynomial at base-field query `z`.

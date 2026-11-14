@@ -4,13 +4,36 @@ Run `AENEAS_TOOLS_DIR=<tool-directory> ./aeneas/extract_whir.sh` from the reposi
 
 ## Production Linkage (`crates/qsag-agg`)
 
-`qsag-whir-verified` is a zero-dependency `#![no_std]` + `#![forbid(unsafe_code)]` Rust crate directly linked by `crates/qsag-agg` across every hot verifier gate:
+`qsag-whir-verified` is a zero-dependency `#![no_std]` + `#![forbid(unsafe_code)]` Rust crate linked by `crates/qsag-agg`. Production callers and library-only coverage are distinguished below:
 
 - **Canonical Wire Decoding (`field.rs`):** `decode_canonical_u64` and `decode_canonical_ext4` enforce `< GOLDILOCKS_P` on all 64-bit and 256-bit wire elements.
-- **Quartic Extension & Affine/CWYZ Folding (`pcs/affine.rs`, `pcs.rs`):** `verify_affine_duet_fold_step`, `verify_cwyz_duet_fold_step`, `cwyz_bridge_claim_step`, `verify_cwyz_bridge_claim_step`, `eval_quadratic_sumcheck_wire`, and `affine_cascade_claim_step`. `qsag_whir_verified::Ext4` uses polynomial order `[1, u, u², u³]` modulo `u⁴ − 7`; the production adapter maps its Karatsuba tower order `[1, u², u, u³]`, and `towerToPoly_mul_hom` in `Arithmetic.lean` proves exact multiplicative isomorphism.
-- **Arbitrary-Slice Polynomial Pin, Terminal/OOD Equality, PoW, & Query Indexing (`pcs.rs`, `arithmetize.rs`):** `eval_ext4_univariate_at_base`, `verify_ext4_univariate_at_base_pin`, `verify_ood_pin_eq`, `verify_stage_pow_mask`, and `canonical_query_group_idx`.
+- **Quartic Extension & Affine/CWYZ Folding (`pcs/affine.rs`, `pcs.rs`):** Production calls `cwyz_bridge_claim_step`, `eval_quadratic_sumcheck_wire`, and `affine_cascade_claim_step`. The acceptance wrappers `verify_affine_duet_fold_step`, `verify_cwyz_duet_fold_step`, and `verify_cwyz_bridge_claim_step` have test-only callers. `qsag_whir_verified::Ext4` uses polynomial order `[1, u, u², u³]` modulo `u⁴ − 7`; the production adapter maps its Karatsuba tower order `[1, u², u, u³]`, and `towerToPoly_mul_hom` in `Arithmetic.lean` proves exact multiplicative isomorphism.
+- **Terminal/OOD Equality, PoW, & Query Indexing (`pcs.rs`, `arithmetize.rs`):** Production calls `verify_ood_pin_eq`, `verify_stage_pow_mask`, and `canonical_query_group_idx`. The arbitrary-slice polynomial pin wrapper currently has test-only callers.
 - **Indexed Canopy Merkle Ordering (`pcs.rs`):** `step_merkle_pair_order` returns `MerklePair` carrying `TAG_CANOPY_MERKLE_INTERNAL = 0x00` along with direction-bit-ordered `(left, right)` 32-byte siblings, consumed directly by `hash_merkle_internal` inside `verify_canopy_multiproof` (where internal nodes use tag `0x00` and the tree root uses tag `0x01`).
 - **Overflow-Free Hierarchical Quorum Summation (`recursive.rs`):** `checked_quorum_sum` validates non-empty equal-length slices, positive per-shard and global quorum floors, per-shard threshold satisfaction, and checked 64-bit natural-number summation.
+
+## Fold and Horner integration contract
+
+The extracted Rust exports `fold_duet_affine_ext4(v0, v1, inv_two_xk, inv_two,
+xk_sq, theta, alpha, beta)` and `eval_univariate_ext4_at_base(coeffs, z)` are
+ready for the production PCS adapters. They delegate to the existing extracted
+CWYZ fold and descending-index Horner loop; the production names themselves are
+also present in generated `Funs.lean`. `Proofs.lean` proves their total refinements
+and the stronger coset-recovery / ascending-polynomial statements.
+
+Inputs and outputs use `Ext4` in polynomial basis, with base-field parameters as
+`u64`. Convert production tower limbs with permutation `[0, 2, 1, 3]` in both
+directions. Horner coefficients are ordered by ascending degree, and an empty
+slice returns zero. Production integration must adapt the coefficient slice as
+well as the result. These functions retain the extracted modular arithmetic;
+performance parity with the optimized production field implementation is not
+established by the proofs.
+
+The independent Rust tests recover known even/odd components from cosets and
+compare polynomial evaluation against an ascending power sum, including zero,
+empty, and modulus-boundary cases. Switching the current `pcs.rs` fold and
+`field.rs` Horner call sites to these exports remains a separate integration
+change; their availability does not establish production adoption.
 
 ## Lean 4.35 Theorem Coverage & Kernel Axiom Audit
 

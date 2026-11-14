@@ -8,6 +8,7 @@ import all QsagVerified.Proofs.AdrsConverse
 import all QsagVerified.Proofs.Bdoz
 import all QsagVerified.Proofs.BdozConsumption
 import all QsagVerified.Proofs.Common
+import all QsagVerified.Proofs.ConsumingOpening
 import all QsagVerified.Proofs.CredAndHdGuards
 import all QsagVerified.Proofs.Epoch
 import all QsagVerified.Proofs.FtsSpnGuard
@@ -32,6 +33,7 @@ import all QsagVerified.Proofs.RssCutSession
 import all QsagVerified.Proofs.ShamirDkg
 import all QsagVerified.Proofs.Sponge
 import all QsagVerified.Proofs.SpongeConformance
+import all QsagVerified.Proofs.SpongeFraming
 import all QsagVerified.Proofs.TowerBdoz
 import all QsagVerified.Proofs.Tsw
 import all QsagVerified.Proofs.Wots

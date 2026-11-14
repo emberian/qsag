@@ -5520,6 +5520,204 @@ def keccak.cshake256_32
   let (_, s1) ← keccak.Shake256Sponge.squeeze sp1 s
   ok (to_slice_mut_back s1)
 
+/-- [qsag_verified::opening_guard::{qsag_verified::opening_guard::OpeningReleasePermit}::session_id]:
+    Source: 'src/opening_guard.rs', lines 24:4-26:5
+    Visibility: public -/
+def opening_guard.OpeningReleasePermit.impl.session_id
+  (self : opening_guard.OpeningReleasePermit) :
+  Result (Array Std.U8 32#usize)
+  := do
+  ok self.session_id
+
+/-- [qsag_verified::opening_guard::{qsag_verified::opening_guard::OpeningReleasePermit}::round_id]:
+    Source: 'src/opening_guard.rs', lines 28:4-30:5
+    Visibility: public -/
+def opening_guard.OpeningReleasePermit.impl.round_id
+  (self : opening_guard.OpeningReleasePermit) : Result Std.U64 := do
+  ok self.round_id
+
+/-- [qsag_verified::opening_guard::{qsag_verified::opening_guard::OpeningReleasePermit}::openings]:
+    Source: 'src/opening_guard.rs', lines 33:4-35:5
+    Visibility: public -/
+def opening_guard.OpeningReleasePermit.impl.openings
+  (self : opening_guard.OpeningReleasePermit) : Result Std.U64 := do
+  ok self.openings
+
+/-- [qsag_verified::opening_guard::{qsag_verified::opening_guard::ConsumingOpeningGuard2Lane}::new]:
+    Source: 'src/opening_guard.rs', lines 52:4-68:5
+    Visibility: public -/
+def opening_guard.ConsumingOpeningGuard2Lane.new
+  (session_id : Array Std.U8 32#usize) (round_id : Std.U64)
+  (binding : Array Std.U8 32#usize) (expected_openings : Std.U64) :
+  Result opening_guard.ConsumingOpeningGuard2Lane
+  := do
+  let a := Array.repeat 2#usize 0#u128
+  ok
+    {
+      session_id,
+      round_id,
+      binding,
+      expected_openings,
+      absorbed := 0#u64,
+      sum_lanes := a,
+      all_committed := true,
+      consumed := false
+    }
+
+/-- [qsag_verified::opening_guard::{qsag_verified::opening_guard::ConsumingOpeningGuard2Lane}::is_consumed]:
+    Source: 'src/opening_guard.rs', lines 70:4-72:5
+    Visibility: public -/
+def opening_guard.ConsumingOpeningGuard2Lane.is_consumed
+  (self : opening_guard.ConsumingOpeningGuard2Lane) : Result Bool := do
+  ok self.consumed
+
+/-- [qsag_verified::opening_guard::{qsag_verified::opening_guard::ConsumingOpeningGuard2Lane}::absorbed]:
+    Source: 'src/opening_guard.rs', lines 74:4-76:5
+    Visibility: public -/
+def opening_guard.ConsumingOpeningGuard2Lane.impl.absorbed
+  (self : opening_guard.ConsumingOpeningGuard2Lane) : Result Std.U64 := do
+  ok self.absorbed
+
+/-- [qsag_verified::opening_guard::{qsag_verified::opening_guard::ConsumingOpeningGuard2Lane}::absorb_opening]:
+    Source: 'src/opening_guard.rs', lines 81:4-113:5
+    Visibility: public -/
+def opening_guard.ConsumingOpeningGuard2Lane.absorb_opening
+  (self : opening_guard.ConsumingOpeningGuard2Lane)
+  (commitment : Array Std.U8 32#usize) (recomputed : Array Std.U8 32#usize)
+  (lanes : Array Std.U128 2#usize) :
+  Result opening_guard.ConsumingOpeningGuard2Lane
+  := do
+  if self.consumed
+  then ok self
+  else
+    let committed ← tower.ct_eq_bytes32 commitment recomputed
+    if self.absorbed = core.num.U64.MAX
+    then
+      let i ← Array.index_usize self.sum_lanes 0#usize
+      let i1 ← Array.index_usize lanes 0#usize
+      let i2 ← lift (i ^^^ i1)
+      let i3 ← Array.index_usize self.sum_lanes 1#usize
+      let i4 ← Array.index_usize lanes 1#usize
+      let i5 ← lift (i3 ^^^ i4)
+      ok
+        {
+          self
+            with
+            sum_lanes := (Array.make 2#usize [ i2, i5 ]),
+            all_committed := false
+        }
+    else
+      let i ← self.absorbed + 1#u64
+      let i1 ← Array.index_usize self.sum_lanes 0#usize
+      let i2 ← Array.index_usize lanes 0#usize
+      let i3 ← lift (i1 ^^^ i2)
+      let i4 ← Array.index_usize self.sum_lanes 1#usize
+      let i5 ← Array.index_usize lanes 1#usize
+      let i6 ← lift (i4 ^^^ i5)
+      if self.all_committed
+      then
+        ok
+          {
+            self
+              with
+              absorbed := i,
+              sum_lanes := (Array.make 2#usize [ i3, i6 ]),
+              all_committed := committed
+          }
+      else
+        ok
+          {
+            self
+              with
+              absorbed := i, sum_lanes := (Array.make 2#usize [ i3, i6 ])
+          }
+
+/-- [qsag_verified::opening_guard::{qsag_verified::opening_guard::ConsumingOpeningGuard2Lane}::verify_once]:
+    Source: 'src/opening_guard.rs', lines 119:4-165:5
+    Visibility: public -/
+def opening_guard.ConsumingOpeningGuard2Lane.verify_once
+  (self : opening_guard.ConsumingOpeningGuard2Lane)
+  (session_id : Array Std.U8 32#usize) (round_id : Std.U64)
+  (binding : Array Std.U8 32#usize) :
+  Result (opening_guard.ConsumingOpeningGuard2Lane × (Option
+    opening_guard.OpeningReleasePermit))
+  := do
+  let a := Array.repeat 2#usize 0#u128
+  if self.consumed
+  then ok ({ self with sum_lanes := a, all_committed := false }, none)
+  else
+    let b ← tower.ct_eq_bytes32 self.session_id session_id
+    if b
+    then
+      if self.round_id != round_id
+      then
+        ok
+          ({ self with sum_lanes := a, all_committed := false, consumed := true
+           }, none)
+      else
+        let b1 ← tower.ct_eq_bytes32 self.binding binding
+        if b1
+        then
+          if self.expected_openings = 0#u64
+          then
+            ok
+              ({
+                 self
+                   with
+                   sum_lanes := a, all_committed := false, consumed := true
+               }, none)
+          else
+            if self.absorbed != self.expected_openings
+            then
+              ok
+                ({
+                   self
+                     with
+                     sum_lanes := a, all_committed := false, consumed := true
+                 }, none)
+            else
+              if self.all_committed
+              then
+                let i ← Array.index_usize self.sum_lanes 0#usize
+                let i1 ← Array.index_usize self.sum_lanes 1#usize
+                let i2 ← lift (i ||| i1)
+                if i2 != 0#u128
+                then
+                  ok
+                    ({
+                       self
+                         with
+                         sum_lanes := a,
+                         all_committed := false,
+                         consumed := true
+                     }, none)
+                else
+                  ok
+                    ({
+                       self
+                         with
+                         sum_lanes := a,
+                         all_committed := false,
+                         consumed := true
+                     }, some
+                    {
+                      session_id := self.session_id,
+                      round_id := self.round_id,
+                      openings := self.absorbed
+                    })
+              else ok ({ self with sum_lanes := a, consumed := true }, none)
+        else
+          ok
+            ({
+               self
+                 with
+                 sum_lanes := a, all_committed := false, consumed := true
+             }, none)
+    else
+      ok
+        ({ self with sum_lanes := a, all_committed := false, consumed := true },
+        none)
+
 /-- [qsag_verified::pants_and_quorum_guards::WOTSC256_BASE_W]
     Source: 'src/pants_and_quorum_guards.rs', lines 26:0-26:34
     Visibility: public -/
