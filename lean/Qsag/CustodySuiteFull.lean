@@ -1461,3 +1461,1464 @@ def sub (a b : HdFq204) : HdFq204 :=
   else
     ⟨a.val + hdModuleQ - b.val, by have := a.isLt; have := b.isLt; omega⟩
 
+theorem sub_val (a b : HdFq204) : (sub a b).val = (a.val + hdModuleQ - b.val) % hdModuleQ := by
+  unfold sub
+  have ha := a.isLt; have hb := b.isLt
+  if hle : b.val ≤ a.val then
+    simp only [hle, ↓reduceDIte]
+    have hEq : a.val + hdModuleQ - b.val = (a.val - b.val) + hdModuleQ * 1 := by omega
+    conv => rhs; rw [hEq, Nat.add_mul_mod_self_left]
+    exact (Nat.mod_eq_of_lt (by omega)).symm
+  else
+    simp only [hle, ↓reduceDIte]
+    exact (Nat.mod_eq_of_lt (by omega)).symm
+
+def mul (a b : HdFq204) : HdFq204 :=
+  ⟨(a.val * b.val) % hdModuleQ, Nat.mod_lt _ (by decide)⟩
+
+@[simp] theorem mul_val (a b : HdFq204) : (mul a b).val = (a.val * b.val) % hdModuleQ := by rfl
+
+theorem add_assoc (a b c : HdFq204) : add (add a b) c = add a (add b c) :=
+  ext <| by rw [add_val, add_val, add_val, add_val, Nat.add_mod_mod, Nat.mod_add_mod, Nat.add_assoc]
+
+theorem add_comm (a b : HdFq204) : add a b = add b a :=
+  ext <| by rw [add_val, add_val, Nat.add_comm]
+
+theorem zero_add (a : HdFq204) : add zero a = a :=
+  ext <| by rw [add_val, zero_val, Nat.zero_add, Nat.mod_eq_of_lt a.isLt]
+
+theorem add_zero (a : HdFq204) : add a zero = a :=
+  ext <| by rw [add_val, zero_val, Nat.add_zero, Nat.mod_eq_of_lt a.isLt]
+
+theorem add_left_neg (a : HdFq204) : add (neg a) a = zero :=
+  ext <| by
+    rw [add_val, neg_val, Nat.mod_add_mod]
+    have ha := a.isLt
+    have hEq : hdModuleQ - a.val + a.val = hdModuleQ := by omega
+    rw [hEq, Nat.mod_self, zero_val]
+
+theorem add_right_neg (a : HdFq204) : add a (neg a) = zero := by
+  rw [add_comm, add_left_neg]
+
+theorem sub_eq_add_neg (a b : HdFq204) : sub a b = add a (neg b) :=
+  ext <| by
+    rw [sub_val, add_val, neg_val, Nat.add_mod_mod]
+    have hb := b.isLt
+    have hEq : a.val + (hdModuleQ - b.val) = a.val + hdModuleQ - b.val := by omega
+    rw [hEq]
+
+theorem mul_assoc (a b c : HdFq204) : mul (mul a b) c = mul a (mul b c) :=
+  ext <| by rw [mul_val, mul_val, mul_val, mul_val, Nat.mod_mul_mod, Nat.mul_mod_mod, Nat.mul_assoc]
+
+theorem mul_comm (a b : HdFq204) : mul a b = mul b a :=
+  ext <| by rw [mul_val, mul_val, Nat.mul_comm]
+
+theorem one_mul (a : HdFq204) : mul one a = a :=
+  ext <| by rw [mul_val, one_val, Nat.one_mul, Nat.mod_eq_of_lt a.isLt]
+
+theorem mul_one (a : HdFq204) : mul a one = a :=
+  ext <| by rw [mul_val, one_val, Nat.mul_one, Nat.mod_eq_of_lt a.isLt]
+
+theorem mul_zero (a : HdFq204) : mul a zero = zero :=
+  ext <| by rw [mul_val, zero_val, Nat.mul_zero, Nat.zero_mod]
+
+theorem zero_mul (a : HdFq204) : mul zero a = zero :=
+  ext <| by rw [mul_val, zero_val, Nat.zero_mul, Nat.zero_mod]
+
+theorem left_distrib (a b c : HdFq204) : mul a (add b c) = add (mul a b) (mul a c) :=
+  ext <| by
+    rw [mul_val, add_val, add_val, mul_val, mul_val,
+        Nat.mul_mod, Nat.mod_mod, ← Nat.mul_mod, Nat.left_distrib, Nat.add_mod]
+
+theorem right_distrib (a b c : HdFq204) : mul (add a b) c = add (mul a c) (mul b c) :=
+  ext <| by
+    rw [mul_val, add_val, add_val, mul_val, mul_val,
+        Nat.mod_mul_mod, Nat.right_distrib, Nat.add_mod]
+
+theorem add_left_cancel {a b c : HdFq204} (h : add a b = add a c) : b = c := by
+  have h1 := congrArg (add (neg a)) h
+  rwa [← add_assoc, ← add_assoc, add_left_neg, zero_add, zero_add] at h1
+
+def ofInt (z : Int) : HdFq204 :=
+  ⟨(z % (hdModuleQ : Int)).toNat, by
+    have := Int.emod_nonneg z (show (hdModuleQ : Int) ≠ 0 by decide)
+    have := Int.emod_lt_of_pos z (show (0 : Int) < hdModuleQ by decide)
+    omega⟩
+
+theorem ofInt_val (z : Int) : ((ofInt z).val : Int) = z % (hdModuleQ : Int) :=
+  Int.toNat_of_nonneg (Int.emod_nonneg z (by decide))
+
+theorem ofInt_nat (a : HdFq204) : ofInt (a.val : Int) = a := by
+  apply ext; apply Int.ofNat_inj.mp
+  rw [ofInt_val]
+  exact Int.emod_eq_of_lt (by omega) (by have := a.isLt; omega)
+
+theorem mul_int (a b : HdFq204) :
+    ((mul a b).val : Int) = ((a.val : Int) * (b.val : Int)) % (hdModuleQ : Int) := by
+  rw [mul_val, Int.natCast_emod, Int.natCast_mul]
+
+theorem ofInt_mul (a b : Int) : mul (ofInt a) (ofInt b) = ofInt (a * b) := by
+  apply ext; apply Int.ofNat_inj.mp
+  rw [mul_int, ofInt_val, ofInt_val, ofInt_val, ← Int.mul_emod]
+
+/-- Constructive Bézout field inverse via `extGcd` (`0 ↦ 0`). -/
+def inv (a : HdFq204) : HdFq204 :=
+  if a.val = 0 then zero else ofInt (extGcd a.val hdModuleQ).2.1
+
+theorem mul_inv_cancel {a : HdFq204} (ha : a ≠ zero) : mul a (inv a) = one := by
+  have ha0 : a.val ≠ 0 := fun hz => ha (ext hz)
+  unfold inv
+  simp only [ha0, ↓reduceIte]
+  obtain ⟨hda, hdq⟩ := extGcd_dvd a.val hdModuleQ
+  have hg1 : (extGcd a.val hdModuleQ).1 = 1 := by
+    rcases hdModuleQ_dvd_cases _ hdq with h1 | hqq
+    · exact h1
+    · rw [hqq] at hda
+      have hle := Nat.le_of_dvd (by omega) hda
+      have := a.isLt; omega
+  have hbez := extGcd_bezout a.val hdModuleQ
+  rw [hg1] at hbez
+  generalize hx : (extGcd a.val hdModuleQ).2.1 = x at hbez ⊢
+  generalize hy : (extGcd a.val hdModuleQ).2.2 = y at hbez
+  rw [← ofInt_nat a, ofInt_mul]
+  apply ext; apply Int.ofNat_inj.mp
+  rw [ofInt_val, one_val]
+  have hEq : (a.val : Int) * x = (1 : Int) + (hdModuleQ : Int) * (-y) := by
+    rw [Int.mul_neg]
+    omega
+  rw [hEq, Int.add_mul_emod_self_left]
+  decide
+
+/-- Centered infinity-norm magnitude $|a \bmod^\pm q| \in [0, 4190208]$ over $\mathbb{Z}_{8380417}$. -/
+def centeredAbs (a : HdFq204) : Nat :=
+  if a.val ≤ hdModuleQ / 2 then a.val else hdModuleQ - a.val
+
+theorem val_lt_256_pow_4 (a : HdFq204) : a.val < 256 ^ 4 := by
+  have ha := a.isLt
+  unfold hdModuleQ at ha
+  omega
+
+end HdFq204
+
+instance : CommRingOps HdFq204 where
+  zero := HdFq204.zero
+  one := HdFq204.one
+  add := HdFq204.add
+  mul := HdFq204.mul
+  neg := HdFq204.neg
+  sub := HdFq204.sub
+
+instance : LawfulCommRing HdFq204 where
+  add_assoc := HdFq204.add_assoc
+  add_comm := HdFq204.add_comm
+  zero_add := HdFq204.zero_add
+  add_zero := HdFq204.add_zero
+  add_left_neg := HdFq204.add_left_neg
+  sub_eq_add_neg := HdFq204.sub_eq_add_neg
+  mul_assoc := HdFq204.mul_assoc
+  mul_comm := HdFq204.mul_comm
+  one_mul := HdFq204.one_mul
+  mul_one := HdFq204.mul_one
+  left_distrib := HdFq204.left_distrib
+  right_distrib := HdFq204.right_distrib
+
+instance : NoZeroDivisors HdFq204 where
+  eq_zero_or_eq_zero_of_mul_eq_zero {a b} h := by
+    have hval : (a.val * b.val) % hdModuleQ = 0 := congrArg HdFq204.val h
+    have hdvd : hdModuleQ ∣ a.val * b.val := Nat.dvd_of_mod_eq_zero hval
+    if ha0 : a.val = 0 then
+      exact .inl (HdFq204.ext ha0)
+    else
+      have hna : ¬ (hdModuleQ ∣ a.val) := fun hda => by
+        have hle := Nat.le_of_dvd (by omega) hda
+        have := a.isLt; omega
+      have hdb := hdModuleQ_dvd_mul hdvd hna
+      if hb0 : b.val = 0 then
+        exact .inr (HdFq204.ext hb0)
+      else
+        have hle := Nat.le_of_dvd (by omega) hdb
+        have := b.isLt; omega
+
+private theorem hdFq204_add_sub_self_left (a b : HdFq204) :
+    HdFq204.sub (HdFq204.add a b) a = b := by
+  change CommRingOps.sub (CommRingOps.add a b) a = b
+  rw [LawfulCommRing.sub_eq_add_neg (R := HdFq204),
+      LawfulCommRing.add_comm (R := HdFq204) a b,
+      LawfulCommRing.add_assoc (R := HdFq204),
+      LawfulCommRing.add_right_neg (R := HdFq204),
+      LawfulCommRing.add_zero (R := HdFq204)]
+
+/-- Concrete 7-repetition per-lane sacrifice verifier over `HdFq204`: a lane with additive fault
+    `delta` and per-repetition sacrifice mask errors `maskErr : Fin 7 → HdFq204` passes challenge
+    tuple `chals : Fin 7 → HdFq204` iff `delta * chals r + maskErr r = 0` for all `r : Fin 7`. -/
+def verifyHdRekeySacrificeLane7 (delta : HdFq204) (maskErr : Fin 7 → HdFq204)
+    (chals : Fin 7 → HdFq204) : Bool :=
+  let rec go (k : Nat) (hk : k ≤ 7) : Bool :=
+    match k with
+    | 0 => true
+    | m + 1 =>
+      let idx : Fin 7 := ⟨m, Nat.lt_of_succ_le hk⟩
+      decide (HdFq204.add (HdFq204.mul delta (chals idx)) (maskErr idx) = HdFq204.zero) &&
+      go m (Nat.le_of_succ_le hk)
+  go 7 (Nat.le_refl 7)
+
+theorem verifyHdRekeySacrificeLane7_true_iff (delta : HdFq204)
+    (maskErr chals : Fin 7 → HdFq204) :
+    verifyHdRekeySacrificeLane7 delta maskErr chals = true ↔
+      ∀ r : Fin 7, HdFq204.add (HdFq204.mul delta (chals r)) (maskErr r) = HdFq204.zero := by
+  unfold verifyHdRekeySacrificeLane7
+  suffices ∀ (k : Nat) (hk : k ≤ 7),
+      verifyHdRekeySacrificeLane7.go delta maskErr chals k hk = true ↔
+        ∀ r : Fin 7, r.val < k →
+          HdFq204.add (HdFq204.mul delta (chals r)) (maskErr r) = HdFq204.zero by
+    simpa using this 7 (Nat.le_refl 7)
+  intro k hk
+  induction k with
+  | zero => simp [verifyHdRekeySacrificeLane7.go]
+  | succ m ih =>
+    simp only [verifyHdRekeySacrificeLane7.go, Bool.and_eq_true, decide_eq_true_eq,
+               ih (Nat.le_of_succ_le hk)]
+    constructor
+    · rintro ⟨hM, hBelow⟩ ⟨rv, hrv⟩ hLtSucc
+      dsimp only at hLtSucc
+      if hEq : rv = m then
+        subst hEq; exact hM
+      else
+        exact hBelow ⟨rv, hrv⟩ (by dsimp only; omega)
+    · intro hAll
+      exact ⟨hAll ⟨m, Nat.lt_of_succ_le hk⟩ (Nat.lt_succ_self m),
+             fun r hr => hAll r (Nat.lt_succ_of_lt hr)⟩
+
+private theorem nodup_filter_length_le_one {α : Type} {xs : List α} {p : α → Bool}
+    (hNd : xs.Nodup) (hUniq : ∀ a b : α, p a = true → p b = true → a = b) :
+    (xs.filter p).length ≤ 1 := by
+  have hFiltNd : (xs.filter p).Nodup := hNd.sublist (List.filter_sublist)
+  cases hEq : xs.filter p with
+  | nil => simp
+  | cons a rest =>
+    cases rest with
+    | nil => simp
+    | cons b tl =>
+      rw [hEq] at hFiltNd
+      have haMem : a ∈ xs.filter p := hEq ▸ .head _
+      have hbMem : b ∈ xs.filter p := hEq ▸ .tail _ (.head _)
+      have haP : p a = true := (List.mem_filter.mp haMem).2
+      have hbP : p b = true := (List.mem_filter.mp hbMem).2
+      have hab : a = b := hUniq a b haP hbP
+      rcases List.nodup_cons.mp hFiltNd with ⟨haNotMem, _⟩
+      exact False.elim (haNotMem (hab ▸ .head _))
+
+private theorem filter_or_length_le {α : Type} (p q : α → Bool) (s : List α) :
+    (s.filter (fun x => p x || q x)).length ≤ (s.filter p).length + (s.filter q).length := by
+  induction s with
+  | nil => simp
+  | cons x tl ih =>
+    simp only [List.filter]
+    cases p x <;> cases q x <;> simp <;> omega
+
+private theorem filter_any_length_le_sum {α β : Type} (lanes : List β)
+    (pred : β → α → Bool) (xs : List α) :
+    (xs.filter (fun x => lanes.any (fun l => pred l x))).length ≤
+      (lanes.map (fun l => (xs.filter (pred l)).length)).sum := by
+  induction lanes with
+  | nil => simp
+  | cons l ls ih =>
+    simp only [List.map_cons, List.sum_cons, List.any_cons]
+    exact Nat.le_trans (filter_or_length_le (pred l) (fun x => ls.any (fun b => pred b x)) xs)
+      (Nat.add_le_add_left ih _)
+
+/-- **Algebraic Root-Counting & Schwartz-Zippel Sacrifice Bound (`hd_dealerless_rekey_sacrifice_soundness_lt_two_pow_neg157`)**:
+    1. **Univariate Polynomial Root Bound over `HdFq204`**: Any non-zero degree-`≤ d` sacrifice error
+       polynomial `errCoeffs : List HdFq204` (`errCoeffs.length ≤ d + 1`) vanishes on at most `d`
+       challenges in ANY duplicate-free challenge set `S : List HdFq204`.
+    2. **7-Repetition Per-Lane Pinning**: For any faulted lane with `delta ≠ 0`, at most **1**
+       7-challenge tuple `c : Fin 7 → HdFq204` in any duplicate-free `T` passes `verifyHdRekeySacrificeLane7`.
+    3. **14-Lane Union Bound `< 2^-157`**: Across any list `faultedLanes` of up to `14` faulted child +
+       parent MAC lanes (`faultedLanes.length ≤ hdTotalSacrificeLanes`), the total count of accepting
+       7-challenge tuples in `T` is `≤ 14`, so the cheating ratio over the `q^7 = 8380417^7` challenge
+       space satisfies `2^160 < q^7` and `ratLe (acceptingCount, q^7) (1, 2^157)`. -/
+theorem hd_dealerless_rekey_sacrifice_soundness_lt_two_pow_neg157 :
+    (∀ (d : Nat) (errCoeffs S : List HdFq204),
+      S.Nodup →
+      errCoeffs.length ≤ d + 1 →
+      (∃ z : HdFq204, RoundPoly.evalCoeffs errCoeffs z ≠ HdFq204.zero) →
+      (S.filter (fun c => decide (RoundPoly.evalCoeffs errCoeffs c = HdFq204.zero))).length ≤ d) ∧
+    (∀ (delta : HdFq204) (maskErr : Fin 7 → HdFq204) (T : List (Fin 7 → HdFq204)),
+      delta ≠ HdFq204.zero →
+      T.Nodup →
+      (T.filter (verifyHdRekeySacrificeLane7 delta maskErr)).length ≤ 1) ∧
+    (∀ (faultedLanes : List (HdFq204 × (Fin 7 → HdFq204))) (T : List (Fin 7 → HdFq204)),
+      faultedLanes.length ≤ hdTotalSacrificeLanes →
+      (∀ lane ∈ faultedLanes, lane.1 ≠ HdFq204.zero) →
+      T.Nodup →
+      let accepting := T.filter (fun c =>
+        faultedLanes.any (fun lane => verifyHdRekeySacrificeLane7 lane.1 lane.2 c))
+      accepting.length ≤ hdTotalSacrificeLanes ∧
+      2 ^ 160 < hdModuleQ ^ hdRekeySacrificeReps ∧
+      ratLe (accepting.length, hdModuleQ ^ hdRekeySacrificeReps) (1, 2 ^ 157)) := by
+  have hPerLane : ∀ (delta : HdFq204) (maskErr : Fin 7 → HdFq204) (T : List (Fin 7 → HdFq204)),
+      delta ≠ HdFq204.zero →
+      T.Nodup →
+      (T.filter (verifyHdRekeySacrificeLane7 delta maskErr)).length ≤ 1 := by
+    intro delta maskErr T hNe Tnd
+    apply nodup_filter_length_le_one Tnd
+    intro c1 c2 hc1 hc2
+    rw [verifyHdRekeySacrificeLane7_true_iff] at hc1 hc2
+    funext r
+    have hr1 := hc1 r
+    have hr2 := hc2 r
+    have hEqProd : HdFq204.mul delta (c1 r) = HdFq204.mul delta (c2 r) := by
+      have hAddEq : HdFq204.add (HdFq204.mul delta (c1 r)) (maskErr r) =
+          HdFq204.add (HdFq204.mul delta (c2 r)) (maskErr r) := hr1.trans hr2.symm
+      have hComm1 := HdFq204.add_comm (maskErr r) (HdFq204.mul delta (c1 r))
+      have hComm2 := HdFq204.add_comm (HdFq204.mul delta (c2 r)) (maskErr r)
+      exact HdFq204.add_left_cancel (hComm1.trans (hAddEq.trans hComm2))
+    have hSubZero : CommRingOps.mul delta (HdFq204.sub (c1 r) (c2 r)) = CommRingOps.zero := by
+      change HdFq204.mul delta (HdFq204.sub (c1 r) (c2 r)) = HdFq204.zero
+      rw [HdFq204.sub_eq_add_neg, HdFq204.left_distrib]
+      have hMulNeg : HdFq204.mul delta (HdFq204.neg (c2 r)) =
+          HdFq204.neg (HdFq204.mul delta (c2 r)) := by
+        apply HdFq204.add_left_cancel (a := HdFq204.mul delta (c2 r))
+        rw [← HdFq204.left_distrib, HdFq204.add_right_neg, HdFq204.mul_zero, HdFq204.add_right_neg]
+      rw [hMulNeg, hEqProd, HdFq204.add_right_neg]
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hSubZero with hZ | hDiffZ
+    · exact False.elim (hNe hZ)
+    · exact (LawfulCommRing.sub_eq_zero_iff (R := HdFq204)).mp hDiffZ
+  refine ⟨?_, hPerLane, ?_⟩
+  · intro d errCoeffs S hNd hLen hNz
+    exact RoundPoly.roots_nodup_length_le d errCoeffs S hNd hLen hNz
+  · intro faultedLanes T hLanesLe hAllNz hTnd accepting
+    have hSumBound :
+        (faultedLanes.map (fun lane =>
+          (T.filter (verifyHdRekeySacrificeLane7 lane.1 lane.2)).length)).sum ≤
+        faultedLanes.length := by
+      induction faultedLanes with
+      | nil => simp
+      | cons l ls ih =>
+        simp only [List.map_cons, List.sum_cons, List.length_cons]
+        have hl1 := hPerLane l.1 l.2 T (hAllNz l (.head _)) hTnd
+        have hls := ih (Nat.le_of_succ_le hLanesLe) (fun x hx => hAllNz x (.tail _ hx))
+        omega
+    have hAccLe : accepting.length ≤ hdTotalSacrificeLanes :=
+      Nat.le_trans (filter_any_length_le_sum faultedLanes
+        (fun lane c => verifyHdRekeySacrificeLane7 lane.1 lane.2 c) T)
+        (Nat.le_trans hSumBound hLanesLe)
+    have hPow : 2 ^ 160 < hdModuleQ ^ hdRekeySacrificeReps := by
+      unfold hdModuleQ hdRekeySacrificeReps; decide
+    refine ⟨hAccLe, hPow, ?_⟩
+    unfold ratLe hdModuleQ hdRekeySacrificeReps
+    dsimp only
+    unfold hdTotalSacrificeLanes at hAccLe
+    refine ⟨by decide, by decide, ?_⟩
+    have h14 : 14 * (2 ^ 157 : Nat) ≤ 1 * (8380417 ^ 7 : Nat) := by decide
+    exact Nat.le_trans (Nat.mul_le_mul_right (2 ^ 157) hAccLe) h14
+
+/-- Sum of an `n`-party `HdFq204` vector. -/
+def finHdFq204Sum : (n : Nat) → (Fin n → HdFq204) → HdFq204
+  | 0, _ => HdFq204.zero
+  | n + 1, f =>
+    HdFq204.add (f ⟨0, Nat.zero_lt_succ n⟩)
+      (finHdFq204Sum n (fun i => f ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩))
+
+/-- Inner product of a linear form `w : Fin dim → HdFq204` with secret vector `s : Fin dim → HdFq204`. -/
+def evalLinearForm : (dim : Nat) → (Fin dim → HdFq204) → (Fin dim → HdFq204) → HdFq204
+  | 0, _, _ => HdFq204.zero
+  | d + 1, w, s =>
+    HdFq204.add
+      (HdFq204.mul (w ⟨0, Nat.zero_lt_succ d⟩) (s ⟨0, Nat.zero_lt_succ d⟩))
+      (evalLinearForm d (fun i => w ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+                        (fun i => s ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩))
+
+/-- Coordinate basis vector `e_j : Fin dim → HdFq204` (`1` at `j`, `0` elsewhere). -/
+def basisLinearForm (dim : Nat) (j : Fin dim) : Fin dim → HdFq204 :=
+  fun i => if i = j then HdFq204.one else HdFq204.zero
+
+theorem evalLinearForm_basis : ∀ (dim : Nat) (j : Fin dim) (s : Fin dim → HdFq204),
+    evalLinearForm dim (basisLinearForm dim j) s = s j
+  | 0, j, _ => Fin.elim0 j
+  | d + 1, ⟨0, _⟩, s => by
+    simp only [evalLinearForm, basisLinearForm, ↓reduceIte]
+    have hZeroTail : ∀ (k : Nat) (f : Fin k → HdFq204),
+        evalLinearForm k (fun _ => HdFq204.zero) f = HdFq204.zero := by
+      intro k f
+      induction k with
+      | zero => rfl
+      | succ m ih =>
+        simp only [evalLinearForm, ih]
+        change CommRingOps.add (CommRingOps.mul CommRingOps.zero _) CommRingOps.zero = CommRingOps.zero
+        rw [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+    have hShiftZero :
+        (fun i : Fin d => if (⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩ : Fin (d + 1)) = ⟨0, Nat.zero_lt_succ d⟩
+          then HdFq204.one else HdFq204.zero) = (fun _ => HdFq204.zero) := by
+      funext i
+      simp
+    rw [hShiftZero, hZeroTail]
+    change CommRingOps.add (CommRingOps.mul CommRingOps.one (s ⟨0, _⟩)) CommRingOps.zero = s ⟨0, _⟩
+    rw [LawfulCommRing.one_mul, LawfulCommRing.add_zero]
+  | d + 1, ⟨k + 1, hk⟩, s => by
+    simp only [evalLinearForm, basisLinearForm]
+    have hNe0 : (⟨0, Nat.zero_lt_succ d⟩ : Fin (d + 1)) ≠ ⟨k + 1, hk⟩ :=
+      fun h => Nat.noConfusion (congrArg Fin.val h)
+    simp only [hNe0, ↓reduceIte]
+    have hShiftBasis :
+        (fun i : Fin d => if (⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩ : Fin (d + 1)) = ⟨k + 1, hk⟩
+          then HdFq204.one else HdFq204.zero) =
+        basisLinearForm d ⟨k, Nat.lt_of_succ_lt_succ hk⟩ := by
+      funext i
+      unfold basisLinearForm
+      by_cases hik : i.val = k
+      · have h2 : i = ⟨k, Nat.lt_of_succ_lt_succ hk⟩ := Fin.ext hik
+        simp [h2]
+      · have h1 : (⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩ : Fin (d + 1)) ≠ ⟨k + 1, hk⟩ :=
+          fun h => hik (Nat.succ.inj (congrArg Fin.val h))
+        have h2 : i ≠ ⟨k, Nat.lt_of_succ_lt_succ hk⟩ :=
+          fun h => hik (congrArg Fin.val h)
+        simp [h1, h2]
+    rw [hShiftBasis, evalLinearForm_basis d ⟨k, Nat.lt_of_succ_lt_succ hk⟩]
+    change CommRingOps.add (CommRingOps.mul CommRingOps.zero _) (s ⟨k + 1, hk⟩) = s ⟨k + 1, hk⟩
+    rw [LawfulCommRing.zero_mul, LawfulCommRing.zero_add]
+
+/-- Canonical length-framed custodian share commitment binding `hardened : Bool` (`0` string literals). -/
+def encodeHdShareCommit (ceremonyId : List UInt8) (partyIdx : Nat) (hardened : Bool)
+    (shareBytes : List UInt8) (chainCodeSecret : List UInt8) : List UInt8 :=
+  encodeMultiFrame [[0x48, 0x44, 0x53, 0x48], ceremonyId, leb128 partyIdx,
+                    [if hardened then 0x01 else 0x00], shareBytes, chainCodeSecret]
+
+/-- Strict injectivity of `encodeHdShareCommit` across all fields including `hardened : Bool`. -/
+theorem encodeHdShareCommit_injective
+    {c₁ c₂ : List UInt8} {p₁ p₂ : Nat} {h₁ h₂ : Bool}
+    {sh₁ sh₂ cc₁ cc₂ : List UInt8}
+    (hEq : encodeHdShareCommit c₁ p₁ h₁ sh₁ cc₁ = encodeHdShareCommit c₂ p₂ h₂ sh₂ cc₂) :
+    c₁ = c₂ ∧ p₁ = p₂ ∧ h₁ = h₂ ∧ sh₁ = sh₂ ∧ cc₁ = cc₂ := by
+  have hFrames := encodeMultiFrame_injective hEq
+  simp only [List.cons.injEq] at hFrames
+  rcases hFrames with ⟨_, rfl, hP, ⟨hFlag, _⟩, rfl, rfl, _⟩
+  have hPid : p₁ = p₂ := (leb128_prefix_inj (r₁ := []) (r₂ := []) (by simpa using hP)).1
+  have hBool : h₁ = h₂ := by cases h₁ <;> cases h₂ <;> simp at hFlag <;> rfl
+  exact ⟨rfl, hPid, hBool, rfl, rfl⟩
+
+/-- Canonical length-framed per-party MAC residual commitment preimage over `HdFq204` binding `hardened : Bool`. -/
+def encodeHdResidualCommit (sessionTag : List UInt8) (partyIdx : Nat) (hardened : Bool)
+    (residual : HdFq204) (salt : List UInt8) : List UInt8 :=
+  encodeMultiFrame [[0x48, 0x44, 0x5A, 0x54], sessionTag, leb128 partyIdx,
+                    [if hardened then 0x01 else 0x00], be 4 residual.val, salt]
+
+/-- Strict injectivity of `encodeHdResidualCommit` on all five protocol fields including `hardened : Bool`. -/
+theorem encodeHdResidualCommit_injective
+    {tag₁ tag₂ : List UInt8} {p₁ p₂ : Nat} {h₁ h₂ : Bool}
+    {z₁ z₂ : HdFq204} {s₁ s₂ : List UInt8}
+    (hEq : encodeHdResidualCommit tag₁ p₁ h₁ z₁ s₁ = encodeHdResidualCommit tag₂ p₂ h₂ z₂ s₂) :
+    tag₁ = tag₂ ∧ p₁ = p₂ ∧ h₁ = h₂ ∧ z₁ = z₂ ∧ s₁ = s₂ := by
+  have hFrames := encodeMultiFrame_injective hEq
+  simp only [List.cons.injEq] at hFrames
+  rcases hFrames with ⟨_, rfl, hP, ⟨hFlag, _⟩, hZ, rfl, _⟩
+  have hPid : p₁ = p₂ := (leb128_prefix_inj (r₁ := []) (r₂ := []) (by simpa using hP)).1
+  have hBool : h₁ = h₂ := by cases h₁ <;> cases h₂ <;> simp at hFlag <;> rfl
+  have hZVal := be_injective (HdFq204.val_lt_256_pow_4 z₁) (HdFq204.val_lt_256_pow_4 z₂) hZ
+  exact ⟨rfl, hPid, hBool, HdFq204.ext hZVal, rfl⟩
+
+/-- Frozen per-party MAC commitment barrier state over `HdFq204` before any MAC residual is opened. -/
+structure HdFrozenZeroTest (n : Nat) where
+  sessionTag : List UInt8
+  maskId : Nat
+  hardened : Bool
+  yTrue : HdFq204
+  yCandidate : HdFq204
+  alphaChild : HdFq204
+  deltaGamma : HdFq204
+  frozenCommits : Fin n → List UInt8
+
+/-- Persistent `qsag-hd` family state tracking enrolled `HdFq204` custodian shares, `parentHardened`
+    lineage pin, durable query budget, consumed `OpeningMask`s, and family quarantine. -/
+structure HdFamilyState (n dim : Nat) where
+  parentHardened : Bool
+  enrolledShares : Fin n → Fin dim → HdFq204
+  budgetCap : Nat
+  usedQueries : Nat
+  consumedMasks : List Nat
+  familyQuarantined : Bool
+  frozen : Option (HdFrozenZeroTest n)
+
+/-- Inputs to the two-phase committed MAC zero-test (`freeze -> open -> quarantine on mismatch`),
+    evaluating `wForm` directly against `enrolledShares` rather than trusting caller `yTrue`. -/
+inductive HdZeroTestInput (n dim : Nat) where
+  | freezeMacCommits (sessionTag : List UInt8) (maskId : Nat)
+      (reqHardened publicChainCodeProvided : Bool)
+      (wForm : Fin dim → HdFq204)
+      (yCandidate alphaChild deltaGamma : HdFq204)
+      (commits : Fin n → List UInt8)
+  | openMacResiduals (residuals : Fin n → HdFq204) (salts : Fin n → List UInt8)
+
+/-- Errors produced by `hdZeroTestStep`. -/
+inductive HdErr where
+  | familyQuarantined
+  | hardenedLineageDowngradeBlocked
+  | queryBudgetExceeded
+  | openingMaskReused
+  | invalidSessionPhase
+  | zeroTestOrCommitmentMismatch
+  deriving DecidableEq, Repr
+
+/-- Indexed verification that every custodian `i : Fin n` opened the exact `HdFq204` residual and
+    `hardened` lineage flag frozen in Phase 1. -/
+def verifyAllHdCommits (H : Hash) (sessionTag : List UInt8) (hardened : Bool) (n : Nat)
+    (commits : Fin n → List UInt8) (residuals : Fin n → HdFq204)
+    (salts : Fin n → List UInt8) : Bool :=
+  let rec go (k : Nat) (hk : k ≤ n) : Bool :=
+    match k with
+    | 0 => true
+    | m + 1 =>
+      let idx : Fin n := ⟨m, Nat.lt_of_succ_le hk⟩
+      (H (encodeHdResidualCommit sessionTag m hardened (residuals idx) (salts idx)) == commits idx) &&
+      go m (Nat.le_of_succ_le hk)
+  go n (Nat.le_refl n)
+
+theorem verifyAllHdCommits_true_iff (H : Hash) (sessionTag : List UInt8) (hardened : Bool) (n : Nat)
+    (commits : Fin n → List UInt8) (residuals : Fin n → HdFq204)
+    (salts : Fin n → List UInt8) :
+    verifyAllHdCommits H sessionTag hardened n commits residuals salts = true ↔
+      ∀ i : Fin n, H (encodeHdResidualCommit sessionTag i.val hardened (residuals i) (salts i)) = commits i := by
+  unfold verifyAllHdCommits
+  suffices ∀ (k : Nat) (hk : k ≤ n),
+      verifyAllHdCommits.go H sessionTag hardened n commits residuals salts k hk = true ↔
+        ∀ (i : Fin n), i.val < k →
+          H (encodeHdResidualCommit sessionTag i.val hardened (residuals i) (salts i)) = commits i by
+    simpa using this n (Nat.le_refl n)
+  intro k hk
+  induction k with
+  | zero =>
+    simp [verifyAllHdCommits.go]
+  | succ m ih =>
+    simp only [verifyAllHdCommits.go, Bool.and_eq_true, beq_iff_eq, ih (Nat.le_of_succ_le hk)]
+    constructor
+    · rintro ⟨hM, hBelow⟩ ⟨iv, hivLt⟩ hivSucc
+      dsimp only at hivSucc
+      if hEq : iv = m then
+        subst hEq
+        exact hM
+      else
+        have hivM : iv < m := by omega
+        exact hBelow ⟨iv, hivLt⟩ hivM
+    · intro hAll
+      exact ⟨hAll ⟨m, Nat.lt_of_succ_le hk⟩ (Nat.lt_succ_self m),
+             fun i hi => hAll i (Nat.lt_succ_of_lt hi)⟩
+
+/-- Outbound events of `hdZeroTestStep`. -/
+inductive HdZeroTestEvent where
+  | commitsFrozen (maskId : Nat) (hardened : Bool)
+  | scalarReleased (maskId : Nat) (hardened : Bool) (yOpened yTrue alphaChild deltaGamma : HdFq204)
+  deriving DecidableEq, Repr
+
+/-- Authoritative step transition of `qsag-hd` per-party committed MAC zero-testing over `HdFq204`
+    (`q = 8380417`) with hardened-lineage non-downgrade enforcement, internal `evalLinearForm`
+    evaluation against `enrolledShares`, single-use `OpeningMask`, bounded `DurableQueryBudget`,
+    and immediate family quarantine on mismatch. -/
+@[expose] def hdZeroTestStep (H : Hash) (n dim : Nat)
+    (st : HdFamilyState n dim) (inp : HdZeroTestInput n dim) :
+    CustodyStepOutcome (HdFamilyState n dim) HdZeroTestEvent HdErr :=
+  if st.familyQuarantined then
+    .rejected st .familyQuarantined
+  else
+    match inp, st.frozen with
+    | .freezeMacCommits tag maskId reqHard pubCcProvided wForm yCand alphaChild dGamma commits, none =>
+      if (st.parentHardened && !reqHard) || (reqHard && pubCcProvided) then
+        .rejected st .hardenedLineageDowngradeBlocked
+      else if ¬ (st.usedQueries < st.budgetCap) then
+        .rejected st .queryBudgetExceeded
+      else if maskId ∈ st.consumedMasks then
+        .rejected st .openingMaskReused
+      else
+        let yTrue := finHdFq204Sum n (fun i => evalLinearForm dim wForm (st.enrolledShares i))
+        let frz : HdFrozenZeroTest n :=
+          { sessionTag := tag
+            maskId := maskId
+            hardened := reqHard
+            yTrue := yTrue
+            yCandidate := yCand
+            alphaChild := alphaChild
+            deltaGamma := dGamma
+            frozenCommits := commits }
+        .accepted { st with usedQueries := st.usedQueries + 1
+                            consumedMasks := maskId :: st.consumedMasks
+                            frozen := some frz }
+                  (.commitsFrozen maskId reqHard)
+    | .openMacResiduals residuals salts, some frz =>
+      let commitsOk := verifyAllHdCommits H frz.sessionTag frz.hardened n frz.frozenCommits residuals salts
+      let sumZero := decide (finHdFq204Sum n residuals = HdFq204.zero)
+      let macConsistent :=
+        decide (finHdFq204Sum n residuals =
+          HdFq204.sub frz.deltaGamma (HdFq204.mul frz.alphaChild (HdFq204.sub frz.yCandidate frz.yTrue)))
+      if commitsOk && sumZero && macConsistent then
+        .accepted { st with frozen := none }
+          (.scalarReleased frz.maskId frz.hardened frz.yCandidate frz.yTrue frz.alphaChild frz.deltaGamma)
+      else
+        .rejected { st with familyQuarantined := true, frozen := none } .zeroTestOrCommitmentMismatch
+    | _, _ => .rejected st .invalidSessionPhase
+
+/-- **`#tooth` Hardened-Lineage Downgrade Rejection (`tooth_hd_hardened_parent_blocks_public_chaincode_downgrade`)**:
+    Any attempt to derive an unhardened child (`reqHard = false`) from a hardened parent share
+    (`parentHardened = true`), or to supply an untrusted `publicChainCodeProvided = true` on a
+    hardened derivation, is rejected immediately with `.hardenedLineageDowngradeBlocked`. -/
+theorem tooth_hd_hardened_parent_blocks_public_chaincode_downgrade
+    (H : Hash) (n dim : Nat) (st : HdFamilyState n dim)
+    (hClean : st.familyQuarantined = false) (hIdle : st.frozen = none)
+    (tag : List UInt8) (maskId : Nat) (wForm : Fin dim → HdFq204)
+    (yCand aChild dG : HdFq204) (commits : Fin n → List UInt8) :
+    (st.parentHardened = true →
+      hdZeroTestStep H n dim st
+        (.freezeMacCommits tag maskId false false wForm yCand aChild dG commits) =
+      .rejected st .hardenedLineageDowngradeBlocked) ∧
+    hdZeroTestStep H n dim st
+      (.freezeMacCommits tag maskId true true wForm yCand aChild dG commits) =
+      .rejected st .hardenedLineageDowngradeBlocked := by
+  constructor
+  · intro hPar
+    unfold hdZeroTestStep
+    simp [hClean, hIdle, hPar]
+  · unfold hdZeroTestStep
+    simp [hClean, hIdle]
+
+/-- Constructive anti-rushing commitment binding extractor (`0 Classical.choice`): any party `c`
+    opening an adapted residual `zAdapt ≠ zOrig` or flipped `hardened` flag against its frozen
+    commitment yields a hash collision. -/
+def extractHdRushingCollision (H : Hash) (sessionTag : List UInt8) (partyIdx : Nat)
+    (hOrig hAdapt : Bool) (zOrig zAdapt : HdFq204) (saltOrig saltAdapt : List UInt8)
+    (hAdaptNe : hAdapt ≠ hOrig ∨ zAdapt ≠ zOrig)
+    (hMatchFrozen :
+      H (encodeHdResidualCommit sessionTag partyIdx hAdapt zAdapt saltAdapt) =
+      H (encodeHdResidualCommit sessionTag partyIdx hOrig zOrig saltOrig)) :
+    HashCollisionWitness H :=
+  { m1 := encodeHdResidualCommit sessionTag partyIdx hAdapt zAdapt saltAdapt
+    m2 := encodeHdResidualCommit sessionTag partyIdx hOrig zOrig saltOrig
+    ne := fun hEq => by
+      have hInj := encodeHdResidualCommit_injective hEq
+      rcases hAdaptNe with hB | hZ
+      · exact hB hInj.2.2.1
+      · exact hZ hInj.2.2.2.1
+    eq := hMatchFrozen }
+
+/-- Constructive dealerless child-MAC rotation bijection over `HdFq204` proving that disclosing or
+    recovering `alphaChild = alphaParent + childPad` leaves `(alphaParent, alphaSibling)` uniform! -/
+def hdChildMacRotationIndependenceEquiv (disclosedAlphaChild : HdFq204) :
+    SimpleEquiv
+      (HdFq204 × HdFq204)
+      { state : (HdFq204 × HdFq204) × (HdFq204 × HdFq204) //
+          HdFq204.add state.1.1 state.2.1 = disclosedAlphaChild ∧
+          HdFq204.add state.1.1 state.2.2 = state.1.2 } where
+  toFun := fun ⟨aParent, aSibling⟩ =>
+    ⟨((aParent, aSibling),
+      (HdFq204.sub disclosedAlphaChild aParent, HdFq204.sub aSibling aParent)),
+     ⟨LawfulCommRing.add_sub_cancel_left (R := HdFq204) aParent disclosedAlphaChild,
+      LawfulCommRing.add_sub_cancel_left (R := HdFq204) aParent aSibling⟩⟩
+  invFun := fun ⟨⟨⟨aParent, aSibling⟩, _⟩, _⟩ => (aParent, aSibling)
+  left_inv := fun ⟨_, _⟩ => rfl
+  right_inv := fun ⟨⟨⟨aParent, aSibling⟩, ⟨cPad, sPad⟩⟩, ⟨hChild, hSib⟩⟩ => by
+    dsimp only at hChild hSib
+    apply Subtype.ext
+    apply Prod.ext
+    · rfl
+    · apply Prod.ext
+      · change HdFq204.sub disclosedAlphaChild aParent = cPad
+        rw [← hChild]; exact hdFq204_add_sub_self_left aParent cPad
+      · change HdFq204.sub aSibling aParent = sPad
+        rw [← hSib]; exact hdFq204_add_sub_self_left aParent sPad
+
+/-- **`qsag-hd` Committed Per-Party MAC Zero-Test, Hardened Binding & Quarantine (`hd_committed_zero_test_sound`)**:
+    1. **Anti-Rushing & Hardened-Flag Binding**: Adapting any residual `zAdapt ≠ zOrig` or flipping
+       `hardened` on either residual or share commitments constructively yields `Collision H`.
+    2. **Fault Soundness & Quarantine-Before-Release over `HdFq204`**: On any step of `hdZeroTestStep`,
+       no scalar with `yOpened ≠ yTrue` is ever released unless `dGamma * (yOpened - yTrue)⁻¹ = alphaChild`
+       in $\mathbb{Z}_{8380417}$, and any failed zero-test sets `familyQuarantined = true`.
+    3. **Dealerless Rotation Independence**: Any non-zero child rotation pad satisfies `alphaChild ≠ alphaParent`. -/
+theorem hd_committed_zero_test_sound (H : Hash) (n dim : Nat) :
+    (∀ sessionTag partyIdx hOrig hAdapt zOrig zAdapt saltOrig saltAdapt,
+      (hAdapt ≠ hOrig ∨ zAdapt ≠ zOrig) →
+      H (encodeHdResidualCommit sessionTag partyIdx hAdapt zAdapt saltAdapt) =
+        H (encodeHdResidualCommit sessionTag partyIdx hOrig zOrig saltOrig) →
+      Collision H) ∧
+    (∀ cid pid h1 h2 sh1 sh2 cc1 cc2,
+      h1 ≠ h2 →
+      H (encodeHdShareCommit cid pid h1 sh1 cc1) = H (encodeHdShareCommit cid pid h2 sh2 cc2) →
+      Collision H) ∧
+    (∀ (st st' : HdFamilyState n dim) (inp : HdZeroTestInput n dim)
+       (maskId : Nat) (hardened : Bool) (yOpened yTrue alphaChild dGamma : HdFq204),
+      hdZeroTestStep H n dim st inp =
+        .accepted st' (.scalarReleased maskId hardened yOpened yTrue alphaChild dGamma) →
+      yOpened = yTrue ∨
+        HdFq204.mul dGamma (HdFq204.inv (HdFq204.sub yOpened yTrue)) = alphaChild) ∧
+    (∀ (st stFinal : HdFamilyState n dim)
+       (trace : List (HdZeroTestInput n dim × Option HdZeroTestEvent)),
+      st.familyQuarantined = true →
+      ValidCustodyTrace (hdZeroTestStep H n dim) st trace stFinal →
+      stFinal.familyQuarantined = true ∧ traceApprovedOutputs trace = []) ∧
+    (∀ (alphaParent childPad : HdFq204),
+      childPad ≠ HdFq204.zero →
+      HdFq204.add alphaParent childPad ≠ alphaParent) := by
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · intro tag pid hO hA zOrig zAdapt sOrig sAdapt hNe hEq
+    exact (extractHdRushingCollision H tag pid hO hA zOrig zAdapt sOrig sAdapt hNe hEq).toCollision
+  · intro cid pid h1 h2 sh1 sh2 cc1 cc2 hNe hEq
+    exact (HashCollisionWitness.mk
+      (encodeHdShareCommit cid pid h1 sh1 cc1)
+      (encodeHdShareCommit cid pid h2 sh2 cc2)
+      (fun hPre => hNe (encodeHdShareCommit_injective hPre).2.2.1)
+      hEq).toCollision
+  · intro st st' inp maskId hardened yOpened yTrue alphaChild dGamma hStep
+    unfold hdZeroTestStep at hStep
+    if hQ : st.familyQuarantined = true then
+      simp [hQ] at hStep
+    else
+      simp only [hQ, Bool.false_eq_true, ↓reduceIte] at hStep
+      cases inp with
+      | freezeMacCommits _ _ _ _ _ _ _ _ _ =>
+        cases hFrz : st.frozen <;> simp only [hFrz] at hStep
+        · split at hStep
+          · cases hStep
+          · split at hStep
+            · cases hStep
+            · split at hStep <;> cases hStep
+        · cases hStep
+      | openMacResiduals residuals salts =>
+        cases hFrz : st.frozen with
+        | none => simp [hFrz] at hStep
+        | some frz =>
+          simp only [hFrz] at hStep
+          split at hStep
+          · rename_i hChecks
+            simp only [Bool.and_eq_true, decide_eq_true_eq] at hChecks
+            rcases hChecks with ⟨⟨_, hSum0⟩, hMacEq⟩
+            simp only [CustodyStepOutcome.accepted.injEq, HdZeroTestEvent.scalarReleased.injEq] at hStep
+            rcases hStep with ⟨_, _, _, hYO, hYT, hAC, hDG⟩
+            subst hYO hYT hAC hDG
+            if hEqY : frz.yCandidate = frz.yTrue then
+              exact Or.inl hEqY
+            else
+              right
+              have hSub0 : HdFq204.sub frz.deltaGamma
+                  (HdFq204.mul frz.alphaChild (HdFq204.sub frz.yCandidate frz.yTrue)) =
+                  HdFq204.zero := hMacEq.symm.trans hSum0
+              have hDgEq : frz.deltaGamma =
+                  HdFq204.mul frz.alphaChild (HdFq204.sub frz.yCandidate frz.yTrue) :=
+                (LawfulCommRing.sub_eq_zero_iff (R := HdFq204)).mp hSub0
+              have hDyNe : HdFq204.sub frz.yCandidate frz.yTrue ≠ HdFq204.zero :=
+                fun hZ => hEqY ((LawfulCommRing.sub_eq_zero_iff (R := HdFq204)).mp hZ)
+              rw [hDgEq, HdFq204.mul_assoc, HdFq204.mul_inv_cancel hDyNe, HdFq204.mul_one]
+          · cases hStep
+  · intro st stFinal trace hQuar hTr
+    induction hTr with
+    | nil => exact ⟨hQuar, rfl⟩
+    | consAccepted hStep _ _ =>
+      unfold hdZeroTestStep at hStep
+      simp [hQuar] at hStep
+    | consRejected hStep _ ih =>
+      unfold hdZeroTestStep at hStep
+      simp only [hQuar, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
+      rcases hStep with ⟨rfl, _⟩
+      simpa using ih hQuar
+  · intro alphaParent childPad hPadNe hEq
+    have hCancel := LawfulCommRing.add_left_cancel (R := HdFq204) (a := alphaParent)
+      (b := childPad) (c := HdFq204.zero)
+      (hEq.trans (LawfulCommRing.add_zero (R := HdFq204) alphaParent).symm)
+    exact hPadNe hCancel
+
+/-- **`#tooth` Uncommitted Zero-Test Vulnerability (`tooth_uncommitted_zero_test_rushing_forgery`)**:
+    Without Phase-1 commitment freezing, after honest custodians broadcast residual sum `zHonestSum`,
+    a single rushing custodian sets `zCorrupt := -zHonestSum` so `zHonestSum + zCorrupt = 0` passes
+    unconditionally for ANY forged scalar `yForged ≠ yTrue` over `HdFq204` without knowing `alphaChild`! -/
+theorem tooth_uncommitted_zero_test_rushing_forgery
+    (zHonestSum yTrue yForged : HdFq204) (hForged : yForged ≠ yTrue) :
+    let zCorrupt := HdFq204.neg zHonestSum
+    yForged ≠ yTrue ∧
+    HdFq204.add zHonestSum zCorrupt = HdFq204.zero :=
+  ⟨hForged, LawfulCommRing.add_right_neg (R := HdFq204) zHonestSum⟩
+
+/-- **`#tooth` Unrestricted Linear Forms Reconstruct Secret (`tooth_unrestricted_linear_forms_reconstruct_secret`)**:
+    Allowing callers to evaluate `dim` unrestricted linear forms recovers every coordinate of secret
+    vector `s : Fin dim → HdFq204` uniquely (`s₁ = s₂`). -/
+theorem tooth_unrestricted_linear_forms_reconstruct_secret (dim : Nat)
+    (s₁ s₂ : Fin dim → HdFq204)
+    (hSame : ∀ j : Fin dim,
+      evalLinearForm dim (basisLinearForm dim j) s₁ =
+      evalLinearForm dim (basisLinearForm dim j) s₂) :
+    s₁ = s₂ := by
+  funext j
+  have hj := hSame j
+  rw [evalLinearForm_basis, evalLinearForm_basis] at hj
+  exact hj
+
+/-- Short CBD infinity-norm predicate `‖v‖_∞ ≤ eta` over `HdFq204` (`centeredAbs ≤ eta`). -/
+def isShortHdVec (eta dim : Nat) (v : Fin dim → HdFq204) : Prop :=
+  ∀ i : Fin dim, HdFq204.centeredAbs (v i) ≤ eta
+
+/-- Public Module-LWE key map `t_pub(r) = ⟨A_r, s1⟩ + s2(r)` over `HdFq204` (`q = 8380417`). -/
+def mlwePublicRelation (d1 d2 : Nat) (A : Fin d2 → Fin d1 → HdFq204)
+    (s1 : Fin d1 → HdFq204) (s2 : Fin d2 → HdFq204) (r : Fin d2) : HdFq204 :=
+  HdFq204.add (evalLinearForm d1 (A r) s1) (s2 r)
+
+/-- Short Module-LWE witness fiber `(s1, s2)` over `HdFq204` satisfying `‖s1‖_∞ ≤ eta ∧ ‖s2‖_∞ ≤ eta`
+    and matching the public key `tPub = A s1 + s2`. -/
+abbrev ShortMlweWitness (eta d1 d2 : Nat)
+    (A : Fin d2 → Fin d1 → HdFq204) (tPub : Fin d2 → HdFq204) : Type :=
+  { sec : (Fin d1 → HdFq204) × (Fin d2 → HdFq204) //
+      isShortHdVec eta d1 sec.1 ∧
+      isShortHdVec eta d2 sec.2 ∧
+      mlwePublicRelation d1 d2 A sec.1 sec.2 = tPub }
+
+/-- **`#tooth` Short CBD Error Bound Rejects Arbitrary `s1` (`tooth_short_cbd_mlwe_rejects_arbitrary_s1`)**:
+    Unlike an unconstrained `s2 : Fin d2 → F_q` model where every `s1` trivially satisfies
+    `tPub = A s1 + s2`, enforcing `‖s2‖_∞ ≤ hdCbdEta` (`= 2`) over `HdFq204` genuinely constrains `s1`:
+    for `A = [[1]]`, `tPub = [1]` (admitting short witness `s1 = [1], s2 = [0]`), candidate `s1Bad = [100]`
+    forces `s2 = tPub - A s1Bad = -99` with `centeredAbs = 99 > 2`, so **no** short `s2` exists! -/
+theorem tooth_short_cbd_mlwe_rejects_arbitrary_s1 :
+    let A : Fin 1 → Fin 1 → HdFq204 := fun _ _ => HdFq204.one
+    let s1Good : Fin 1 → HdFq204 := fun _ => HdFq204.one
+    let s2Good : Fin 1 → HdFq204 := fun _ => HdFq204.zero
+    let tPub : Fin 1 → HdFq204 := mlwePublicRelation 1 1 A s1Good s2Good
+    let s1Bad : Fin 1 → HdFq204 := fun _ => ⟨100, by decide⟩
+    (isShortHdVec hdCbdEta 1 s1Good ∧ isShortHdVec hdCbdEta 1 s2Good) ∧
+    (¬ ∃ s2 : Fin 1 → HdFq204,
+      isShortHdVec hdCbdEta 1 s2 ∧ mlwePublicRelation 1 1 A s1Bad s2 = tPub) := by
+  intro A s1Good s2Good tPub s1Bad
+  refine ⟨⟨?_, ?_⟩, ?_⟩
+  · intro i
+    have hi : i = ⟨0, by decide⟩ := Fin.ext (by omega)
+    subst hi; decide
+  · intro i
+    have hi : i = ⟨0, by decide⟩ := Fin.ext (by omega)
+    subst hi; decide
+  · rintro ⟨s2, hShort, hRel⟩
+    have hr0 := congrFun hRel ⟨0, by decide⟩
+    have hs2Val : s2 ⟨0, by decide⟩ = HdFq204.sub (tPub ⟨0, by decide⟩)
+        (evalLinearForm 1 (A ⟨0, by decide⟩) s1Bad) := by
+      dsimp only [mlwePublicRelation] at hr0
+      rw [← hr0]
+      exact (hdFq204_add_sub_self_left _ _).symm
+    have hShort0 := hShort ⟨0, by decide⟩
+    rw [hs2Val] at hShort0
+    have hEvalBad : HdFq204.centeredAbs
+        (HdFq204.sub (tPub ⟨0, by decide⟩) (evalLinearForm 1 (A ⟨0, by decide⟩) s1Bad)) = 99 := by
+      dsimp only [tPub, mlwePublicRelation, A, s1Good, s2Good, s1Bad]
+      decide
+    rw [hEvalBad] at hShort0
+    unfold hdCbdEta at hShort0
+    omega
+
+/-- Constructive `SimpleEquiv` over `HdFq204` (`q = 8380417`) proving that across `Q` authorized
+    child projections `wForms : Fin Q → Fin d1 → HdFq204` protected by single-use `OpeningMask`s
+    `m : Fin Q → HdFq204`, every bounded short secret witness `(s1, s2) : ShortMlweWitness eta d1 d2 A tPub`
+    (`‖s1‖_∞ ≤ eta ∧ ‖s2‖_∞ ≤ eta`) pairs bijectively with a unique mask vector producing any observed
+    transcript `openedTranscript : Fin Q → HdFq204` — leaking **zero** bits about which short `(s1, s2)`
+    in the MLWE fiber is held! -/
+def hdAuthorizedMlweFiberEquiv (eta d1 d2 Q : Nat)
+    (A : Fin d2 → Fin d1 → HdFq204) (tPub : Fin d2 → HdFq204)
+    (wForms : Fin Q → Fin d1 → HdFq204)
+    (openedTranscript : Fin Q → HdFq204) :
+    SimpleEquiv
+      (ShortMlweWitness eta d1 d2 A tPub)
+      { state : ShortMlweWitness eta d1 d2 A tPub × (Fin Q → HdFq204) //
+          ∀ q : Fin Q,
+            HdFq204.add (evalLinearForm d1 (wForms q) state.1.val.1) (state.2 q) =
+              openedTranscript q } where
+  toFun := fun w =>
+    let masks : Fin Q → HdFq204 :=
+      fun q => HdFq204.sub (openedTranscript q) (evalLinearForm d1 (wForms q) w.val.1)
+    have hOpen : ∀ q : Fin Q,
+        HdFq204.add (evalLinearForm d1 (wForms q) w.val.1) (masks q) = openedTranscript q :=
+      fun q => LawfulCommRing.add_sub_cancel_left (R := HdFq204)
+        (evalLinearForm d1 (wForms q) w.val.1) (openedTranscript q)
+    ⟨(w, masks), hOpen⟩
+  invFun := fun ⟨⟨w, _⟩, _⟩ => w
+  left_inv := fun _ => rfl
+  right_inv := fun ⟨⟨w, masks⟩, hOpen⟩ => by
+    apply Subtype.ext
+    apply Prod.ext
+    · rfl
+    · funext q
+      have hq := hOpen q
+      dsimp only at hq ⊢
+      rw [← hq]
+      exact hdFq204_add_sub_self_left (evalLinearForm d1 (wForms q) w.val.1) (masks q)
+
+/-- Constructive `SimpleEquiv` over `HdFq204` proving that under any bounded query budget `used ≤ dim`,
+    the fiber of short secrets (`‖s‖_∞ ≤ eta`) consistent with `used` short opened coordinates
+    is bijective to `{ free : Fin (dim - used) → HdFq204 // isShortHdVec eta (dim - used) free }`. -/
+def hdBudgetSubspaceEntropyEquiv (eta dim used : Nat) (hLt : used ≤ dim)
+    (opened : Fin used → HdFq204) (hOpenedShort : isShortHdVec eta used opened) :
+    SimpleEquiv
+      { free : Fin (dim - used) → HdFq204 // isShortHdVec eta (dim - used) free }
+      { s : Fin dim → HdFq204 //
+          isShortHdVec eta dim s ∧
+          ∀ i : Fin used, s ⟨i.val, Nat.lt_of_lt_of_le i.isLt hLt⟩ = opened i } where
+  toFun := fun ⟨freeCoords, hFreeShort⟩ =>
+    ⟨fun j =>
+      if hj : j.val < used then
+        opened ⟨j.val, hj⟩
+      else
+        freeCoords ⟨j.val - used, by omega⟩,
+     ⟨fun j => by
+        dsimp only
+        if hj : j.val < used then
+          simp only [hj, ↓reduceDIte]
+          exact hOpenedShort ⟨j.val, hj⟩
+        else
+          simp only [hj, ↓reduceDIte]
+          exact hFreeShort ⟨j.val - used, by omega⟩,
+      fun i => by simp [i.isLt]⟩⟩
+  invFun := fun ⟨s, ⟨hShortS, _⟩⟩ =>
+    ⟨fun k => s ⟨used + k.val, by omega⟩,
+     fun k => hShortS ⟨used + k.val, by omega⟩⟩
+  left_inv := fun ⟨freeCoords, _⟩ => by
+    apply Subtype.ext
+    funext k
+    dsimp only
+    have hNotLt : ¬ (used + k.val < used) := by omega
+    have hSub : used + k.val - used = k.val := by omega
+    simp [hNotLt, hSub]
+  right_inv := fun ⟨s, ⟨_, hs⟩⟩ => by
+    apply Subtype.ext
+    funext j
+    dsimp only
+    if hj : j.val < used then
+      simp only [hj, ↓reduceDIte]
+      exact (hs ⟨j.val, hj⟩).symm
+    else
+      have hIdx : (⟨used + (j.val - used), by omega⟩ : Fin dim) = j := by
+        apply Fin.ext
+        dsimp only
+        omega
+      simp [hj, hIdx]
+
+/-- Extract all single-use `OpeningMask` IDs frozen along an HD event trace. -/
+def hdFrozenMaskIds : List HdZeroTestEvent → List Nat
+  | [] => []
+  | .commitsFrozen mid _ :: rest => mid :: hdFrozenMaskIds rest
+  | .scalarReleased _ _ _ _ _ _ :: rest => hdFrozenMaskIds rest
+
+private theorem hd_no_freeze_if_consumed {H : Hash} {n dim : Nat}
+    {st stFinal : HdFamilyState n dim}
+    {trace : List (HdZeroTestInput n dim × Option HdZeroTestEvent)}
+    (hTr : ValidCustodyTrace (hdZeroTestStep H n dim) st trace stFinal) :
+    ∀ m ∈ st.consumedMasks, m ∉ hdFrozenMaskIds (traceApprovedOutputs trace) := by
+  induction hTr with
+  | nil => intro _ _ hm; cases hm
+  | @consAccepted s s' _ inp out rest hStep _ ih =>
+    intro m hm
+    unfold hdZeroTestStep at hStep
+    if hQ : s.familyQuarantined = true then
+      simp [hQ] at hStep
+    else
+      simp only [hQ, Bool.false_eq_true, ↓reduceIte] at hStep
+      cases inp with
+      | freezeMacCommits tag maskId reqH pubCc wForm yCand alphaChild dGamma commits =>
+        cases hFrz : s.frozen with
+        | none =>
+          simp only [hFrz] at hStep
+          if hHard : ((s.parentHardened && !reqH) || (reqH && pubCc)) = true then
+            simp [hHard] at hStep
+          else
+            simp only [hHard, Bool.false_eq_true, ↓reduceIte] at hStep
+            if hCap : ¬ (s.usedQueries < s.budgetCap) then
+              simp [hCap] at hStep
+            else
+              simp only [hCap, ↓reduceIte] at hStep
+              if hUsed : maskId ∈ s.consumedMasks then
+                simp [hUsed] at hStep
+              else
+                simp only [hUsed, ↓reduceIte, CustodyStepOutcome.accepted.injEq] at hStep
+                rcases hStep with ⟨rfl, rfl⟩
+                have hNe : m ≠ maskId := fun hEq => hUsed (hEq ▸ hm)
+                simp only [traceApprovedOutputs_cons_some, hdFrozenMaskIds, List.mem_cons, not_or]
+                exact ⟨hNe, ih m (.tail _ hm)⟩
+        | some _ => simp [hFrz] at hStep
+      | openMacResiduals residuals salts =>
+        cases hFrz : s.frozen with
+        | none => simp [hFrz] at hStep
+        | some frz =>
+          simp only [hFrz] at hStep
+          split at hStep <;> cases hStep
+          simp only [traceApprovedOutputs_cons_some, hdFrozenMaskIds]
+          exact ih m hm
+  | @consRejected s s' _ inp err rest hStep _ ih =>
+    intro m hm
+    simp only [traceApprovedOutputs_cons_none]
+    unfold hdZeroTestStep at hStep
+    if hQ : s.familyQuarantined = true then
+      simp only [hQ, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
+      rcases hStep with ⟨rfl, _⟩; exact ih m hm
+    else
+      simp only [hQ, Bool.false_eq_true, ↓reduceIte] at hStep
+      cases inp with
+      | freezeMacCommits _ _ _ _ _ _ _ _ _ =>
+        cases hFrz : s.frozen <;> simp only [hFrz] at hStep
+        · split at hStep
+          · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+            rcases hStep with ⟨rfl, _⟩; exact ih m hm
+          · split at hStep
+            · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+              rcases hStep with ⟨rfl, _⟩; exact ih m hm
+            · split at hStep
+              · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+                rcases hStep with ⟨rfl, _⟩; exact ih m hm
+              · cases hStep
+        · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+          rcases hStep with ⟨rfl, _⟩; exact ih m hm
+      | openMacResiduals _ _ =>
+        cases hFrz : s.frozen <;> simp only [hFrz] at hStep
+        · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+          rcases hStep with ⟨rfl, _⟩; exact ih m hm
+        · split at hStep
+          · cases hStep
+          · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+            rcases hStep with ⟨rfl, _⟩; exact ih m hm
+
+/-- **Authorized HD Projection, Short-Secret MLWE & Bounded Budget Security
+    (`hd_authorized_budget_blocks_full_rank_reconstruction`)**:
+    1. Across any multi-turn `hdZeroTestStep` trace over `HdFq204` (`q = 8380417`) from `st₀`
+       (`st₀.usedQueries ≤ st₀.budgetCap`), `stFinal.usedQueries ≤ st₀.budgetCap` and all consumed
+       `OpeningMask` IDs are duplicate-free (`Nodup`).
+    2. For ANY two distinct short MLWE witnesses `wA ≠ wB : ShortMlweWitness hdCbdEta d1 d2 A tPub`
+       (`‖s1‖_∞ ≤ 2 ∧ ‖s2‖_∞ ≤ 2`) and ANY `Q` authorized projections `wForms` and transcript `tr`,
+       `hdAuthorizedMlweFiberEquiv` produces distinct masked states `(wA, masksA) ≠ (wB, masksB)`
+       matching **identical** public key `tPub` and **identical** masked openings `tr`.
+    3. Whenever `budgetCap < dim`, even unmasked prefix openings of a short secret (`‖opened‖_∞ ≤ hdCbdEta`)
+       admit distinct **short** secrets `sA ≠ sB` (`‖sA‖_∞ ≤ hdCbdEta ∧ ‖sB‖_∞ ≤ hdCbdEta`) matching all
+       `budgetCap` opened coordinates! -/
+theorem hd_authorized_budget_blocks_full_rank_reconstruction
+    (H : Hash) (n dim : Nat) :
+    (∀ {st₀ stFinal : HdFamilyState n dim}
+       {trace : List (HdZeroTestInput n dim × Option HdZeroTestEvent)},
+      st₀.usedQueries ≤ st₀.budgetCap →
+      ValidCustodyTrace (hdZeroTestStep H n dim) st₀ trace stFinal →
+      stFinal.usedQueries ≤ st₀.budgetCap ∧
+      (hdFrozenMaskIds (traceApprovedOutputs trace)).Nodup) ∧
+    (∀ (d1 d2 Q : Nat) (A : Fin d2 → Fin d1 → HdFq204) (tPub : Fin d2 → HdFq204)
+       (wForms : Fin Q → Fin d1 → HdFq204) (tr : Fin Q → HdFq204)
+       (wA wB : ShortMlweWitness hdCbdEta d1 d2 A tPub),
+      wA ≠ wB →
+      ∃ masksA masksB : Fin Q → HdFq204,
+        isShortHdVec hdCbdEta d1 wA.val.1 ∧ isShortHdVec hdCbdEta d2 wA.val.2 ∧
+        isShortHdVec hdCbdEta d1 wB.val.1 ∧ isShortHdVec hdCbdEta d2 wB.val.2 ∧
+        mlwePublicRelation d1 d2 A wA.val.1 wA.val.2 = tPub ∧
+        mlwePublicRelation d1 d2 A wB.val.1 wB.val.2 = tPub ∧
+        (∀ q : Fin Q,
+          HdFq204.add (evalLinearForm d1 (wForms q) wA.val.1) (masksA q) = tr q ∧
+          HdFq204.add (evalLinearForm d1 (wForms q) wB.val.1) (masksB q) = tr q)) ∧
+    (∀ (dimC budgetCap : Nat) (hCapLt : budgetCap < dimC)
+       (opened : Fin budgetCap → HdFq204) (_hShortOpen : isShortHdVec hdCbdEta budgetCap opened),
+      ∃ sA sB : Fin dimC → HdFq204,
+        sA ≠ sB ∧
+        isShortHdVec hdCbdEta dimC sA ∧
+        isShortHdVec hdCbdEta dimC sB ∧
+        (∀ i : Fin budgetCap, sA ⟨i.val, Nat.lt_trans i.isLt hCapLt⟩ = opened i) ∧
+        (∀ i : Fin budgetCap, sB ⟨i.val, Nat.lt_trans i.isLt hCapLt⟩ = opened i)) := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro st₀ stFinal trace hCap₀ hTr
+    suffices ∀ {s sf : HdFamilyState n dim}
+        {tr : List (HdZeroTestInput n dim × Option HdZeroTestEvent)},
+        ValidCustodyTrace (hdZeroTestStep H n dim) s tr sf →
+        s.usedQueries ≤ s.budgetCap →
+        sf.usedQueries ≤ s.budgetCap ∧
+        (hdFrozenMaskIds (traceApprovedOutputs tr)).Nodup by
+      exact this hTr hCap₀
+    intro s sf tr hT
+    induction hT with
+    | nil => intro hLe; exact ⟨hLe, .nil⟩
+    | @consAccepted st st' _ inp out rest hStep hRest ih =>
+      intro hLe
+      unfold hdZeroTestStep at hStep
+      if hQ : st.familyQuarantined = true then
+        simp [hQ] at hStep
+      else
+        simp only [hQ, Bool.false_eq_true, ↓reduceIte] at hStep
+        cases inp with
+        | freezeMacCommits tag maskId reqH pubCc wForm yCand alphaChild dGamma commits =>
+          cases hFrz : st.frozen with
+          | none =>
+            simp only [hFrz] at hStep
+            if hHard : ((st.parentHardened && !reqH) || (reqH && pubCc)) = true then
+              simp [hHard] at hStep
+            else
+              simp only [hHard, Bool.false_eq_true, ↓reduceIte] at hStep
+              if hCap : ¬ (st.usedQueries < st.budgetCap) then
+                simp [hCap] at hStep
+              else
+                simp only [hCap, ↓reduceIte] at hStep
+                if hUsed : maskId ∈ st.consumedMasks then
+                  simp [hUsed] at hStep
+                else
+                  simp only [hUsed, ↓reduceIte, CustodyStepOutcome.accepted.injEq] at hStep
+                  rcases hStep with ⟨rfl, rfl⟩
+                  have hUsedLt : st.usedQueries < st.budgetCap := Decidable.of_not_not hCap
+                  obtain ⟨hFinLe, hNdRest⟩ := ih (Nat.succ_le_of_lt hUsedLt)
+                  have hNotInRest : maskId ∉ hdFrozenMaskIds (traceApprovedOutputs rest) :=
+                    hd_no_freeze_if_consumed hRest maskId (.head _)
+                  simp only [traceApprovedOutputs_cons_some, hdFrozenMaskIds]
+                  exact ⟨hFinLe, .cons (fun x hx hEq => hNotInRest (hEq ▸ hx)) hNdRest⟩
+          | some _ => simp [hFrz] at hStep
+        | openMacResiduals residuals salts =>
+          cases hFrz : st.frozen with
+          | none => simp [hFrz] at hStep
+          | some frz =>
+            simp only [hFrz] at hStep
+            split at hStep <;> cases hStep
+            obtain ⟨hFinLe, hNdRest⟩ := ih hLe
+            simpa [traceApprovedOutputs_cons_some, hdFrozenMaskIds] using And.intro hFinLe hNdRest
+    | @consRejected st st' _ inp err rest hStep _ ih =>
+      intro hLe
+      simp only [traceApprovedOutputs_cons_none]
+      unfold hdZeroTestStep at hStep
+      if hQ : st.familyQuarantined = true then
+        simp only [hQ, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
+        rcases hStep with ⟨rfl, _⟩; exact ih hLe
+      else
+        simp only [hQ, Bool.false_eq_true, ↓reduceIte] at hStep
+        cases inp with
+        | freezeMacCommits _ _ _ _ _ _ _ _ _ =>
+          cases hFrz : st.frozen <;> simp only [hFrz] at hStep
+          · split at hStep
+            · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+              rcases hStep with ⟨rfl, _⟩; exact ih hLe
+            · split at hStep
+              · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+                rcases hStep with ⟨rfl, _⟩; exact ih hLe
+              · split at hStep
+                · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+                  rcases hStep with ⟨rfl, _⟩; exact ih hLe
+                · cases hStep
+          · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+            rcases hStep with ⟨rfl, _⟩; exact ih hLe
+        | openMacResiduals _ _ =>
+          cases hFrz : st.frozen <;> simp only [hFrz] at hStep
+          · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+            rcases hStep with ⟨rfl, _⟩; exact ih hLe
+          · split at hStep
+            · cases hStep
+            · simp only [CustodyStepOutcome.rejected.injEq] at hStep
+              rcases hStep with ⟨rfl, _⟩; exact ih hLe
+  · intro d1 d2 Q A tPub wForms tr wA wB _
+    let eqv := hdAuthorizedMlweFiberEquiv hdCbdEta d1 d2 Q A tPub wForms tr
+    let stA := eqv.toFun wA
+    let stB := eqv.toFun wB
+    exact ⟨stA.val.2, stB.val.2, wA.property.1, wA.property.2.1, wB.property.1, wB.property.2.1,
+           wA.property.2.2, wB.property.2.2, fun q => ⟨stA.property q, stB.property q⟩⟩
+  · intro dimC budgetCap hCapLt opened hShortOpen
+    let eqv := hdBudgetSubspaceEntropyEquiv hdCbdEta dimC budgetCap (Nat.le_of_lt hCapLt) opened hShortOpen
+    have hZShort : isShortHdVec hdCbdEta (dimC - budgetCap) (fun _ => HdFq204.zero) :=
+      fun _ => show HdFq204.zero.centeredAbs ≤ hdCbdEta by decide
+    have hOShort : isShortHdVec hdCbdEta (dimC - budgetCap) (fun _ => HdFq204.one) :=
+      fun _ => show HdFq204.one.centeredAbs ≤ hdCbdEta by decide
+    let sA := eqv.toFun ⟨fun _ => HdFq204.zero, hZShort⟩
+    let sB := eqv.toFun ⟨fun _ => HdFq204.one, hOShort⟩
+    have hNe : sA.val ≠ sB.val := by
+      intro hEq
+      have hk := congrFun hEq ⟨budgetCap, hCapLt⟩
+      dsimp only [sA, sB, eqv, hdBudgetSubspaceEntropyEquiv] at hk
+      have hIrrefl : ¬ (budgetCap < budgetCap) := Nat.lt_irrefl budgetCap
+      simp only [hIrrefl, ↓reduceDIte] at hk
+      exact Nat.noConfusion (congrArg HdFq204.val hk)
+    exact ⟨sA.val, sB.val, hNe, sA.property.1, sB.property.1, sA.property.2, sB.property.2⟩
+
+/-- Inhabitedness witness for `hd_committed_zero_test_sound` and `hd_authorized_budget_blocks_full_rank_reconstruction`
+    over `HdFq204` (`q = 8380417`) instantiated with authentic 256-bit `shake256Xof 32` (`H [0x00] ≠ [0x00]`),
+    hardened lineage (`parentHardened = true`), and internal linear-form share evaluation. -/
+theorem witness_hd_zero_test_inhabited :
+    let H : Hash := shake256Xof 32
+    let st₀ : HdFamilyState 1 1 :=
+      { parentHardened := true
+        enrolledShares := fun _ _ => HdFq204.one
+        budgetCap := 4
+        usedQueries := 0
+        consumedMasks := []
+        familyQuarantined := false
+        frozen := none }
+    (H [0x00]).length = 32 ∧
+    H [0x00] ≠ [0x00] ∧
+    ∃ trace stFinal,
+      ValidCustodyTrace (hdZeroTestStep H 1 1) st₀ trace stFinal ∧
+      hdFrozenMaskIds (traceApprovedOutputs trace) = [7] ∧
+      stFinal.usedQueries = 1 ∧
+      stFinal.familyQuarantined = false := by
+  intro H st₀
+  have hLen32 : (H [0x00]).length = 32 := shake256Xof_length 32 [0x00]
+  have hNotId : H [0x00] ≠ [0x00] := by
+    intro hEq
+    have hL := congrArg List.length hEq
+    rw [hLen32] at hL
+    cases hL
+  refine ⟨hLen32, hNotId, ?_⟩
+  let wForm : Fin 1 → HdFq204 := fun _ => HdFq204.one
+  let c0 := H (encodeHdResidualCommit [0x01] 0 true HdFq204.zero [0xAA])
+  let yTrueVal := finHdFq204Sum 1 (fun i => evalLinearForm 1 wForm (st₀.enrolledShares i))
+  let frz : HdFrozenZeroTest 1 :=
+    { sessionTag := [0x01], maskId := 7, hardened := true,
+      yTrue := yTrueVal, yCandidate := HdFq204.one,
+      alphaChild := HdFq204.one, deltaGamma := HdFq204.zero, frozenCommits := fun _ => c0 }
+  let s1 : HdFamilyState 1 1 :=
+    { st₀ with usedQueries := 1, consumedMasks := [7], frozen := some frz }
+  let s2 : HdFamilyState 1 1 :=
+    { st₀ with usedQueries := 1, consumedMasks := [7], frozen := none }
+  have hs1 : hdZeroTestStep H 1 1 st₀
+      (.freezeMacCommits [0x01] 7 true false wForm HdFq204.one HdFq204.one HdFq204.zero (fun _ => c0)) =
+      .accepted s1 (.commitsFrozen 7 true) := by
+    have hBudget : 0 < 4 := by decide
+    unfold hdZeroTestStep
+    dsimp only [st₀, s1, frz, yTrueVal]
+    simp only [Bool.false_eq_true, ↓reduceIte, Bool.not_true, Bool.and_false, Bool.or_self,
+      List.not_mem_nil, hBudget, not_true_eq_false, Nat.zero_add]
+  have hs2 : hdZeroTestStep H 1 1 s1
+      (.openMacResiduals (fun _ => HdFq204.zero) (fun _ => [0xAA])) =
+      .accepted s2 (.scalarReleased 7 true HdFq204.one yTrueVal HdFq204.one HdFq204.zero) := by
+    have hVer : verifyAllHdCommits H [0x01] true 1 (fun _ => c0) (fun _ => HdFq204.zero) (fun _ => [0xAA]) = true := by
+      rw [verifyAllHdCommits_true_iff]
+      intro ⟨i, hi⟩
+      have hi0 : i = 0 := by omega
+      subst hi0
+      rfl
+    have hYTrueEq : yTrueVal = HdFq204.one := by
+      dsimp only [yTrueVal, st₀, wForm]
+      decide
+    have hSum : finHdFq204Sum 1 (fun _ => HdFq204.zero) = HdFq204.zero := by decide
+    have hSub : HdFq204.sub HdFq204.zero
+        (HdFq204.mul HdFq204.one (HdFq204.sub HdFq204.one yTrueVal)) = HdFq204.zero := by
+      rw [hYTrueEq]; decide
+    unfold hdZeroTestStep
+    dsimp only [s1, s2, st₀, frz]
+    simp only [Bool.false_eq_true, ↓reduceIte, hVer, hSum, hSub, decide_true, Bool.and_self]
+  refine ⟨[(.freezeMacCommits [0x01] 7 true false wForm HdFq204.one HdFq204.one HdFq204.zero (fun _ => c0),
+            some (.commitsFrozen 7 true)),
+           (.openMacResiduals (fun _ => HdFq204.zero) (fun _ => [0xAA]),
+            some (.scalarReleased 7 true HdFq204.one yTrueVal HdFq204.one HdFq204.zero))],
+          s2, .consAccepted hs1 (.consAccepted hs2 (.nil s2)), by rfl, by rfl, by rfl⟩
+
+/-! ## §3. `qsag-policy` & `qsag-addr` — Stateful Velocity Guard, V2 Intent Codec, Watermark Replay & Hybrid Pinning -/
+
+/-- Fixed-width little-endian byte encoder (`w` low bytes of `n`, matching `to_le_bytes` in Rust). -/
+def le : Nat → Nat → List UInt8
+  | 0, _ => []
+  | w + 1, n => UInt8.ofNat (n % 256) :: le w (n / 256)
+
+/-- Little-endian byte list decoded as a natural number. -/
+def ofLE : List UInt8 → Nat
+  | [] => 0
+  | b :: rest => b.toNat + 256 * ofLE rest
+
+@[simp] theorem length_le (w n : Nat) : (le w n).length = w := by
+  induction w generalizing n with
+  | zero => rfl
+  | succ w ih => simp [le, ih]
+
+theorem ofLE_le {w n : Nat} (hn : n < 256 ^ w) : ofLE (le w n) = n := by
+  induction w generalizing n with
+  | zero => simp at hn; subst hn; rfl
+  | succ w ih =>
+    have hpow : 256 ^ (w + 1) = 256 ^ w * 256 := Nat.pow_succ ..
+    have hn' : n / 256 < 256 ^ w := (Nat.div_lt_iff_lt_mul (by decide)).mpr (hpow ▸ hn)
+    simp only [le, ofLE, ih hn', UInt8.toNat_ofNat']
+    have h8 : (2 : Nat) ^ 8 = 256 := rfl
+    rw [h8]
+    omega
+
+theorem le_injective {w n m : Nat} (hn : n < 256 ^ w) (hm : m < 256 ^ w)
+    (h : le w n = le w m) : n = m := by
+  have hDec := congrArg ofLE h
+  rw [ofLE_le hn, ofLE_le hm] at hDec
+  exact hDec
+
+/-- Structural body of `u64 LE` slice framing matching `cshake256_framed_32` in `qsag-core`. -/
+def encodeFramedU64LeBody : List (List UInt8) → List UInt8
+  | [] => []
+  | f :: fs => (le 8 f.length ++ f) ++ encodeFramedU64LeBody fs
+
+/-- Canonical `u64 LE` multi-slice framing: `(slices.len() as u64).to_le_bytes()` followed by
+    `(s.len() as u64).to_le_bytes() || s` for each slice, byte-exact with `cshake256_framed_32`. -/
+def encodeFramedU64Le (frames : List (List UInt8)) : List UInt8 :=
+  le 8 frames.length ++ encodeFramedU64LeBody frames
+
+/-- Stream decoder for `k` consecutive `u64 LE` length-prefixed byte slices. -/
+def decodeFramedU64LeItems : Nat → List UInt8 → Option (List (List UInt8) × List UInt8)
+  | 0, bs => some ([], bs)
+  | k + 1, bs =>
+    if bs.length < 8 then none
+    else
+      let flen := ofLE (bs.take 8)
+      let r1 := bs.drop 8
+      if r1.length < flen then none
+      else
+        let f := r1.take flen
+        let r2 := r1.drop flen
+        match decodeFramedU64LeItems k r2 with
+        | none => none
+        | some (fs, r3) => some (f :: fs, r3)
+
+/-- Exact decoder for `encodeFramedU64Le`. -/
+def decodeFramedU64Le (bs : List UInt8) : Option (List (List UInt8)) :=
+  if bs.length < 8 then none
+  else
+    let count := ofLE (bs.take 8)
+    match decodeFramedU64LeItems count (bs.drop 8) with
+    | some (fs, []) => some fs
+    | _ => none
+
+private theorem decodeFramedU64LeItems_encode :
+    ∀ (frames : List (List UInt8)) (rest : List UInt8),
+      (∀ f ∈ frames, f.length < 256 ^ 8) →
+      decodeFramedU64LeItems frames.length (encodeFramedU64LeBody frames ++ rest) =
+        some (frames, rest)
+  | [], rest, _ => rfl
+  | f :: fs, rest, hB => by
+    have hf : f.length < 256 ^ 8 := hB f (.head _)
+    have hfs : ∀ g ∈ fs, g.length < 256 ^ 8 := fun g hg => hB g (.tail _ hg)
+    simp only [List.length_cons, encodeFramedU64LeBody, List.append_assoc]
+    unfold decodeFramedU64LeItems
+    have hNotLt8 : ¬ ((le 8 f.length ++ (f ++ (encodeFramedU64LeBody fs ++ rest))).length < 8) := by
+      simp only [List.length_append, length_le]; omega
+    have hTake8 : (le 8 f.length ++ (f ++ (encodeFramedU64LeBody fs ++ rest))).take 8 = le 8 f.length := by
+      simp [length_le]
+    have hDrop8 : (le 8 f.length ++ (f ++ (encodeFramedU64LeBody fs ++ rest))).drop 8 =
+        f ++ (encodeFramedU64LeBody fs ++ rest) := by
+      simp [length_le]
+    simp only [hNotLt8, ↓reduceIte, hTake8, hDrop8, ofLE_le hf]
+    have hNotLtF : ¬ ((f ++ (encodeFramedU64LeBody fs ++ rest)).length < f.length) := by
+      rw [List.length_append]; omega
+    simp only [hNotLtF, ↓reduceIte, List.take_left, List.drop_left,
+      decodeFramedU64LeItems_encode fs rest hfs]
+
+theorem decodeFramedU64Le_encodeFramedU64Le {frames : List (List UInt8)}
+    (hCnt : frames.length < 256 ^ 8)
+    (hAll : ∀ f ∈ frames, f.length < 256 ^ 8) :
+    decodeFramedU64Le (encodeFramedU64Le frames) = some frames := by
+  unfold decodeFramedU64Le encodeFramedU64Le
+  have hNotLt8 : ¬ ((le 8 frames.length ++ encodeFramedU64LeBody frames).length < 8) := by
+    simp only [List.length_append, length_le]; omega
+  have hTake8 : (le 8 frames.length ++ encodeFramedU64LeBody frames).take 8 = le 8 frames.length := by
+    simp [length_le]
+  have hDrop8 : (le 8 frames.length ++ encodeFramedU64LeBody frames).drop 8 = encodeFramedU64LeBody frames := by
+    simp [length_le]
+  simp only [hNotLt8, ↓reduceIte, hTake8, hDrop8, ofLE_le hCnt]
+  have hItems := decodeFramedU64LeItems_encode frames [] hAll
+  rw [List.append_nil] at hItems
+  rw [hItems]
+
+theorem encodeFramedU64Le_injective {xs ys : List (List UInt8)}
+    (hCx : xs.length < 256 ^ 8) (hAx : ∀ f ∈ xs, f.length < 256 ^ 8)
+    (hCy : ys.length < 256 ^ 8) (hAy : ∀ f ∈ ys, f.length < 256 ^ 8)
+    (hEq : encodeFramedU64Le xs = encodeFramedU64Le ys) : xs = ys := by
+  have hDec := congrArg decodeFramedU64Le hEq
+  rw [decodeFramedU64Le_encodeFramedU64Le hCx hAx,
+      decodeFramedU64Le_encodeFramedU64Le hCy hAy] at hDec
+  injection hDec
+
+/-- Module-local structural unsigned LEB128 encoder for unbounded-`Nat` mathematical fallback (`0 Classical.choice`). -/
+def txLeb128Aux : Nat → Nat → List UInt8
+  | 0, _ => [0]
+  | f + 1, n =>
+    if n < 128 then
+      [UInt8.ofNat n]
+    else
+      UInt8.ofNat (128 + n % 128) :: txLeb128Aux f (n / 128)
+
+def txLeb128 (n : Nat) : List UInt8 :=
+  txLeb128Aux n n
+
+def txEncodeField (bs : List UInt8) : List UInt8 :=
+  txLeb128 bs.length ++ bs
+
+/-- Constructive structural unsigned LEB128 stream decoder (`0 Classical.choice`). -/
+def decodeLeb128 : List UInt8 → Option (Nat × List UInt8)
+  | [] => none
+  | b :: bs =>
+    if b.toNat < 128 then
+      some (b.toNat, bs)
+    else
+      match decodeLeb128 bs with
+      | none => none
+      | some (hi, rest) => some (b.toNat % 128 + 128 * hi, rest)
+
+private theorem decodeLeb128_txLeb128Aux :
+    ∀ (f n : Nat) (rest : List UInt8),
+      n ≤ f → decodeLeb128 (txLeb128Aux f n ++ rest) = some (n, rest)
+  | 0, n, rest, hn => by
+    have hz : n = 0 := by omega
+    subst hz
+    simp [txLeb128Aux, decodeLeb128]
+  | f + 1, n, rest, hn => by
+    simp only [txLeb128Aux]
+    if hlt : n < 128 then
+      have hToNat : (UInt8.ofNat n).toNat = n := by
+        rw [UInt8.toNat_ofNat']
+        have h8 : (2 : Nat) ^ 8 = 256 := rfl
+        rw [h8]; omega
+      simp [hlt, decodeLeb128, hToNat]
+    else
+      have hToNat : (UInt8.ofNat (128 + n % 128)).toNat = 128 + n % 128 := by
+        rw [UInt8.toNat_ofNat']
+        have h8 : (2 : Nat) ^ 8 = 256 := rfl
+        rw [h8]; omega
+      have hNotLt2 : ¬ (128 + n % 128 < 128) := by omega
+      have ih := decodeLeb128_txLeb128Aux f (n / 128) rest (by omega)
+      simp only [hlt, ↓reduceIte, List.cons_append]
+      unfold decodeLeb128
+      simp only [hToNat, hNotLt2, ↓reduceIte, ih]
+      congr 1; congr 1; omega
+
+theorem decodeLeb128_txLeb128 (n : Nat) (rest : List UInt8) :
+    decodeLeb128 (txLeb128 n ++ rest) = some (n, rest) :=
+  decodeLeb128_txLeb128Aux n n rest (Nat.le_refl n)
+
+def decodeLeb128Exact (bs : List UInt8) : Option Nat :=
+  match decodeLeb128 bs with
+  | some (n, []) => some n
+  | _ => none
+
+theorem decodeLeb128Exact_txLeb128 (n : Nat) :
+    decodeLeb128Exact (txLeb128 n) = some n := by
+  unfold decodeLeb128Exact
+  have h := decodeLeb128_txLeb128 n []
+  rw [List.append_nil] at h
+  rw [h]
+
+/-- Length-prefixed byte field stream decoder paired with `txEncodeField`. -/
+def decodeListField (xs : List UInt8) : Option (List UInt8 × List UInt8) :=
+  match decodeLeb128 xs with
+  | none => none
+  | some (len, rest) =>
+    if rest.length < len then none
+    else some (rest.take len, rest.drop len)
+
+theorem decodeListField_txEncodeField (field rest : List UInt8) :
+    decodeListField (txEncodeField field ++ rest) = some (field, rest) := by
+  unfold decodeListField txEncodeField
+  rw [List.append_assoc, decodeLeb128_txLeb128]
+  dsimp only
+  have hNotLt : ¬ ((field ++ rest).length < field.length) := by
+    rw [List.length_append]; omega
+  simp only [hNotLt, ↓reduceIte]
+  rw [List.take_left, List.drop_left]
+
+def txEncodeListFields : List (List UInt8) → List UInt8
+  | [] => []
+  | f :: fs => txEncodeField f ++ txEncodeListFields fs
+
+def txDecodeListFields : Nat → List UInt8 → Option (List (List UInt8) × List UInt8)
+  | 0, bs => some ([], bs)
+  | k + 1, bs =>
+    match decodeListField bs with
+    | none => none
+    | some (f, rest) =>
+      match txDecodeListFields k rest with
+      | none => none
+      | some (fs, rest2) => some (f :: fs, rest2)
+
+private theorem txDecodeListFields_txEncodeListFields :
+    ∀ (fs : List (List UInt8)),
+      txDecodeListFields fs.length (txEncodeListFields fs) = some (fs, [])
+  | [] => rfl
+  | f :: fs => by
+    simp only [List.length_cons, txEncodeListFields]
+    unfold txDecodeListFields
+    rw [decodeListField_txEncodeField]
+    dsimp only
+    rw [txDecodeListFields_txEncodeListFields fs]
+
+/-- Canonical transaction intent bound by `qsag-policy` (`QSAG.POLICY.INTENT.V2`, `0` string literals),
+    preserving all 24 production fields of `crates/qsag-policy` alongside `policy_digest`. -/
