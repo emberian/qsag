@@ -169,10 +169,47 @@ impl Json {
         }
     }
 
+    fn encoded_len(&self, indent: usize) -> usize {
+        let pad_len = |depth: usize| 1 + depth * 2;
+        match self {
+            Json::Null => 4,
+            Json::Bool(b) => if *b { 4 } else { 5 },
+            Json::Number(n) => n.len(),
+            Json::Str(s) => escaped_string_len(s),
+            Json::Array(items) if items.is_empty() => 2,
+            Json::Array(items) => {
+                let mut total = 1;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        total += 1;
+                    }
+                    total += pad_len(indent + 1) + item.encoded_len(indent + 1);
+                }
+                total + pad_len(indent) + 1
+            }
+            Json::Object(members) if members.is_empty() => 2,
+            Json::Object(members) => {
+                let mut total = 1;
+                for (i, (key, value)) in members.iter().enumerate() {
+                    if i > 0 {
+                        total += 1;
+                    }
+                    total += pad_len(indent + 1)
+                        + escaped_string_len(key)
+                        + 2
+                        + value.encoded_len(indent + 1);
+                }
+                total + pad_len(indent) + 1
+            }
+        }
+    }
+
     pub fn to_pretty(&self) -> String {
-        let mut out = String::new();
+        let exact = self.encoded_len(0) + 1;
+        let mut out = String::with_capacity(exact);
         self.write(&mut out, 0);
         out.push('\n');
+        debug_assert_eq!(out.len(), exact);
         out
     }
 
@@ -189,6 +226,18 @@ impl Json {
         }
         Ok(value)
     }
+}
+
+fn escaped_string_len(s: &str) -> usize {
+    let mut len = 2;
+    for c in s.chars() {
+        len += match c {
+            '"' | '\\' | '\n' | '\r' | '\t' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        };
+    }
+    len
 }
 
 fn write_string(out: &mut String, s: &str) {
@@ -316,7 +365,35 @@ impl Parser<'_> {
     }
     fn string(&mut self) -> Result<String, CliError> {
         self.expect(b'"')?;
-        let mut out = crate::cli::ZeroizingBuf(Vec::new());
+        // Scan forward to the closing quote so secret-bearing strings allocate their
+        // bounded capacity once and never leave unwiped reallocation remnants.
+        let mut scan = self.pos;
+        let mut max_decoded_len = 0usize;
+        loop {
+            let b = *self
+                .bytes
+                .get(scan)
+                .ok_or_else(|| self.error("unterminated string"))?;
+            scan += 1;
+            match b {
+                b'"' => break,
+                b'\\' => {
+                    let esc = *self
+                        .bytes
+                        .get(scan)
+                        .ok_or_else(|| self.error("unterminated escape"))?;
+                    scan += 1;
+                    if esc == b'u' {
+                        scan = scan.saturating_add(4);
+                        max_decoded_len += 4;
+                    } else {
+                        max_decoded_len += 1;
+                    }
+                }
+                _ => max_decoded_len += 1,
+            }
+        }
+        let mut out = crate::cli::ZeroizingBuf(Vec::with_capacity(max_decoded_len));
         loop {
             let byte = *self
                 .bytes

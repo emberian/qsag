@@ -325,7 +325,7 @@ fn mint_release_tokens(
                 fence.generation(),
             )
             .map_err(|e| CliError::io("verifying fenced policy checkpoint", e))?;
-            if !guard.is_nonce_burned(&intent.intent_nonce) || !guard.is_session_burned(&SESSION) {
+            if !guard.is_nonce_burned(&intent.nonce) || !guard.is_session_burned(&SESSION) {
                 return Err(CliError::verify("fenced policy checkpoint lost burned state"));
             }
         }
