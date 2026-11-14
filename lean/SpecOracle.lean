@@ -2,6 +2,8 @@ import Qsag.HashSigs
 import Qsag.Fips205
 import Qsag.BinaryTower
 import Qsag.SuccinctAggregationIop
+import Qsag.ThresholdMlDsaAndToprf
+import Qsag.JortsBeltLatchAndQuorumSwitching
 import Qsag.PosixCrashWal
 
 /- Streaming protocol: tab-separated operation and arguments; bytes are lowercase hex,
@@ -53,8 +55,76 @@ def walEvent (s : String) : Except String MultiCrashWalEvent := do
   | "delete" => return .deleteWalRecord
   | _ => throw "unknown WAL event"
 
+/-- Binary exponentiation using the executable extension multiplication. -/
+def extPow (x : GoldilocksExt4) (n : Nat) : GoldilocksExt4 :=
+  (List.range 64).foldl (fun acc i =>
+    let acc := GoldilocksExt4.mul acc acc
+    if n / 2^(63-i) % 2 == 1 then GoldilocksExt4.mul acc x else acc) GoldilocksExt4.one
+
+def latchTrace (events : String) : Except String String := do
+  let mut st := BeltLatchNodeState.init 12 64
+  let mut out := []
+  for event in events.splitOn "," do
+    if event == "crash" then st := beltLatchCrashAndRecover st
+    else if event == "fail" then st := { st with failNextPersist := true }
+    else
+      let fields ← (event.splitOn ":").mapM nat
+      if fields.length != 4 then throw "latch event arity"
+      let rec : BeltLatchRecord := ⟨UInt64.ofNat fields[0]!,
+        BitVec.ofNat 256 fields[1]!, BitVec.ofNat 256 fields[2]!, [UInt8.ofNat fields[3]!]⟩
+      match beltLatchBindStep st rec with
+      | .accepted next _ => st := next; out := out ++ ["true"]
+      | .rejected next _ => st := next; out := out ++ ["false"]
+  return String.intercalate "," out ++ ";" ++ toString st.nextEpoch ++ ";" ++ bool st.walPoisoned
+
 def eval (args : List String) : Except String String := do
   match args with
+  -- Current production ledger uses authenticated snapshots, not CRC. This
+  -- adapter table models post-authentication availability of generations 2/1.
+  | ["ledger", a, b, anchor] =>
+    let a ← nat a
+    let b ← nat b
+    let anchor ← nat anchor
+    if a == 0 && anchor ≤ 2 then return "2"
+    else if b == 0 && anchor ≤ 1 then return "1"
+    else return "reject"
+  | ["latchtrace", events] => latchTrace events
+  | ["poseidonhash", m] => return hex (poseidon2Hash32 (← unhex m))
+  | ["binary", level, op, a, b] =>
+    let k ← nat level
+    if k != 3 && k != 7 then throw "tower level"
+    let x := unpackTower k (BitVec.ofNat (2^k) (← nat a))
+    let y := unpackTower k (BitVec.ofNat (2^k) (← nat b))
+    let z ← match op with
+      | "add" => pure (towerAdd k x y)
+      | "mul" => pure (towerMul k x y)
+      | "square" => pure (towerMul k x x)
+      | "inv" => pure (towerInv k x)
+      | _ => throw "binary operation"
+    return toString (packTower k z).toNat
+  | ["rounding", r, z, hint] =>
+    let r := Fq204.ofNat (← nat r)
+    let z := Fq204.ofNat (← nat z)
+    let a := power2Round r
+    let b := decompose r
+    return String.intercalate "," [toString a.1, toString a.2, toString b.1,
+      toString b.2, bool (makeHint z r), toString (useHint ((← nat hint) == 1) r)]
+  | ["hem", v0, v1, x, theta, alpha, beta] =>
+    let dec := fun s => do requireSome (decodeExt4Bytes32 (← unhex s)) "extension"
+    let v0 ← dec v0
+    let v1 ← dec v1
+    let x := Goldilocks.ofNat (← nat x)
+    let theta ← dec theta
+    let alpha ← dec alpha
+    let beta ← dec beta
+    let half := Goldilocks.inv (Goldilocks.ofNat 2)
+    let even := GoldilocksExt4.mul (GoldilocksExt4.add v0 v1) (GoldilocksExt4.embedBase half)
+    let odd := GoldilocksExt4.mul (GoldilocksExt4.sub v0 v1)
+      (GoldilocksExt4.embedBase (Goldilocks.mul half (Goldilocks.inv x)))
+    let mix := GoldilocksExt4.add even (GoldilocksExt4.mul theta odd)
+    return hex (encodeExt4Bytes32 (GoldilocksExt4.add odd
+      (GoldilocksExt4.mul (GoldilocksExt4.add alpha
+        (GoldilocksExt4.mul beta (GoldilocksExt4.embedBase (Goldilocks.mul x x)))) mix)))
   | ["shake" , n, m] => return hex (shake256Xof (← nat n) (← unhex m))
   | ["cshake", n, d, m] => return hex (cshake256Xof (← nat n) (← unhex d) (← unhex m))
   | ["sha3", m] => return hex (squeezeXofAux 32 (absorbPadded (padForRate (← unhex m) 6)))
@@ -65,6 +135,7 @@ def eval (args : List String) : Except String String := do
       | "add" => pure (Goldilocks.add x y)
       | "sub" => pure (Goldilocks.sub x y)
       | "mul" => pure (Goldilocks.mul x y)
+      | "square" => pure (Goldilocks.mul x x)
       | "inv" => pure (Goldilocks.inv x)
       | _ => throw "unknown field operation"
     return toString z.val
@@ -75,6 +146,10 @@ def eval (args : List String) : Except String String := do
     let x ← requireSome (decodeExt4Bytes32 (← unhex a)) "noncanonical extension"
     let y ← requireSome (decodeExt4Bytes32 (← unhex b)) "noncanonical extension"
     let z ← match op with
+      | "add" => pure (GoldilocksExt4.add x y)
+      | "sub" => pure (GoldilocksExt4.sub x y)
+      | "square" => pure (GoldilocksExt4.mul x x)
+      | "frobenius" => pure (extPow x 18446744069414584321)
       | "mul" => pure (GoldilocksExt4.mul x y)
       | "inv" => pure (GoldilocksExt4.inv x)
       | _ => throw "unknown extension operation"
