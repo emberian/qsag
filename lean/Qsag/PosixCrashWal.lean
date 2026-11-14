@@ -1,13 +1,13 @@
 module
 /-
-# Qsag.PosixCrashWal — Hardware- & POSIX-Faithful Crash-Safe Storage, Dual-Bound Locking, & WAL Proofs
+# Qsag.PosixCrashWal — Conditional storage contracts and crash safety models
 
-Complete choice-free formalization (`0` proof gaps, `0` custom axioms, `≤ 12` `@[expose]`)
+Choice-free formalization (`0` proof gaps, `0` custom axioms, `≤ 12` `@[expose]`)
 of hardware-realistic three-tier crash semantics, POSIX inode/dentry/symlink/`flock` behavior,
 `CuttleFS`/`fsyncgate` sticky I/O-error handle poisoning, dual-bound `lockGenesisId` inode sealing,
 unified `CeremonyJournalRecord` crash-prefix atomicity, and reserve-before-sign multi-crash safety:
 
-1. **Hardware-True Three-Tier Storage + POSIX Inode / Dentry / Symlink / Open-Description `flock` Machine**:
+1. **Contractual Three-Tier Storage + POSIX Inode / Dentry / Symlink / Open-Description `flock` Machine**:
    - **Tier (a) Kernel Volatile State**: `FdTable` (`(Pid × FdId) → Option OpenDescriptionId`),
      kernel `OpenDescriptionId` table (`OpenDescriptionId → Option OpenFileDesc` refcounted across
      `dup`, `fork`, and `close`), `FlockTable` (`InodeId → Option OpenDescriptionId` matching Linux
@@ -77,6 +77,7 @@ unified `CeremonyJournalRecord` crash-prefix atomicity, and reserve-before-sign 
 
 public import Qsag.Constructive
 public import Qsag.SimulationSpine
+public import Qsag.Keccak
 
 public section
 
@@ -1755,14 +1756,13 @@ theorem verifyWalMac_signWalRecord (macFn : KeyedMacFn) (macKey : List UInt8) (b
     verifyWalMac macFn macKey (signWalRecord macFn macKey b) = true :=
   (beq_iff_eq (a := computeWalMac macFn macKey b) (b := computeWalMac macFn macKey b)).mpr rfl
 
-/-- **Existential EUF-CMA `MacForgery` Predicate (choice-free)**:
+/-- **Candidate-specific EUF-CMA bad event**:
     Holds iff an adversary produces a well-formed `WalRecord` with a valid 256-bit `keyedMac`
     whose `WalRecordBody` was **never** authenticated by the honest vault (`r.body ∉ honestBodies`). -/
 def MacForgery (macFn : KeyedMacFn) (macKey : List UInt8)
-    (honestBodies : List WalRecordBody) : Prop :=
-  ∃ r : WalRecord,
+    (queriedBodies : List WalRecordBody) (r : WalRecord) : Prop :=
     r.WellFormed ∧
-    r.body ∉ honestBodies ∧
+    r.body ∉ queriedBodies ∧
     verifyWalMac macFn macKey r = true
 
 /-- **Constructive Authentication Split (`verifyWalMac_authentic_or_macForgery`, `0 choice-free`)**:
@@ -1772,10 +1772,10 @@ theorem verifyWalMac_authentic_or_macForgery
     {macFn : KeyedMacFn} {macKey : List UInt8}
     {honestBodies : List WalRecordBody} {r : WalRecord}
     (hWf : r.WellFormed) (hVer : verifyWalMac macFn macKey r = true) :
-    r.body ∈ honestBodies ∨ MacForgery macFn macKey honestBodies := by
+    r.body ∈ honestBodies ∨ MacForgery macFn macKey honestBodies r := by
   by_cases hMem : r.body ∈ honestBodies
   · exact Or.inl hMem
-  · exact Or.inr ⟨r, hWf, hMem, hVer⟩
+  · exact Or.inr ⟨hWf, hMem, hVer⟩
 
 /-- Active locked vault handle held by a process after `openExisting` succeeds, bound to the
     exact kernel `OpenDescriptionId` (`lockDescId`) owning the advisory `flock`! -/
@@ -2991,7 +2991,7 @@ theorem openExisting_sound {st st' : PosixFsState} {pid : Pid} {basePath : DirNa
     rec.body.vaultKeyId = expectedVaultKeyId ∧
     rec.body.lockGenesisId = h.lockGenesisId ∧
     verifyWalMac macFn macKey rec = true ∧
-    (rec.body ∈ honestBodies ∨ MacForgery macFn macKey honestBodies) := by
+    (rec.body ∈ honestBodies ∨ MacForgery macFn macKey honestBodies rec) := by
   unfold openExisting at hOpen
   cases hOp1 : posixOpenExistingNoFollow st pid (walLockPath basePath) true with
   | error e => rw [hOp1] at hOpen; cases (Prod.mk.inj hOpen).2
@@ -3152,7 +3152,7 @@ theorem power_loss_preserves_committed_or_prior_record
       openExisting anyDisk recoverPid h.basePath oldRec.body.vaultKeyId macFn macKey =
         (stAfter, .ok (hOut, recOut)) →
       recOut.body = oldRec.body ∨ recOut.body = newRec.body ∨
-      MacForgery macFn macKey [oldRec.body, newRec.body]) := by
+      MacForgery macFn macKey [oldRec.body, newRec.body] recOut) := by
   intro newRec
   refine ⟨?_, ?_, ?_⟩
   · intro mid crashed hMid hCrash
@@ -3267,8 +3267,8 @@ def externalUnlinkAndRecreateLock (st : PosixFsState) (actorPid : Pid)
        **NO** second `openExisting` call by **any** `pid₂` (**even `pid₂ = h₁.pid` in the same process!**)
        can EVER succeed unless `MacForgery` occurs against `honestBodies`!
     2. **Unconditional Refusal Without `MacForgery`**:
-       Whenever `¬ MacForgery macFn macKey honestBodies`, `openExisting` deterministically returns
-       `.error` for every `pid₂ : Pid` (`∀ st' h₂ rec₂, openExisting ... ≠ (st', .ok (h₂, rec₂))`)! -/
+       For each candidate `rec₂`, absence of its fresh-valid-tag event excludes returning
+       that candidate. This is not a universal nonexistence assumption about valid tags. -/
 theorem dual_bound_lock_prevents_unlink_recreate_split_brain
     {st : PosixFsState} {h₁ : LockedVaultHandle} {genesisNonce₁ : List UInt8}
     {macFn : KeyedMacFn} {macKey : List UInt8}
@@ -3283,16 +3283,16 @@ theorem dual_bound_lock_prevents_unlink_recreate_split_brain
       h₁.lockDescId < stCur.kernel.openFds.nextDescId →
       stCur.kernel.flockTable.owner h₁.lockInode = some h₁.lockDescId →
       openExisting stCur pid₂ h₁.basePath h₁.vaultKeyId macFn macKey = (stAfter, .ok (h₂, rec₂)) →
-      MacForgery macFn macKey honestBodies) ∧
+      MacForgery macFn macKey honestBodies rec₂) ∧
     -- (B) Specifically, after `externalUnlinkAndRecreateLock` with ANY bytes, `h₁` retains its `flock`
     --     on `h₁.lockInode` (when `h₁.lockInode < st.nand.nextInode`) and EVERY `pid₂ : Pid` is rejected!
     (∀ (actorPid pid₂ : Pid) (spoofBytes : List UInt8),
       h₁.lockInode < st.nand.nextInode →
-      ¬ MacForgery macFn macKey honestBodies →
       let stTampered := externalUnlinkAndRecreateLock st actorPid h₁.basePath spoofBytes
       h₁.lockDescId < stTampered.kernel.openFds.nextDescId ∧
       stTampered.kernel.flockTable.owner h₁.lockInode = some h₁.lockDescId ∧
       ∀ stAfter h₂ rec₂,
+        ¬ MacForgery macFn macKey honestBodies rec₂ →
         openExisting stTampered pid₂ h₁.basePath h₁.vaultKeyId macFn macKey ≠
           (stAfter, .ok (h₂, rec₂))) := by
   have hCore :
@@ -3300,7 +3300,7 @@ theorem dual_bound_lock_prevents_unlink_recreate_split_brain
         h₁.lockDescId < stCur.kernel.openFds.nextDescId →
         stCur.kernel.flockTable.owner h₁.lockInode = some h₁.lockDescId →
         openExisting stCur pid₂ h₁.basePath h₁.vaultKeyId macFn macKey = (stAfter, .ok (h₂, rec₂)) →
-        MacForgery macFn macKey honestBodies := by
+        MacForgery macFn macKey honestBodies rec₂ := by
     intro stCur stAfter pid₂ h₂ rec₂ hDescLt hOwner₁ hOpen₂
     rcases openExisting_sound honestBodies hOpen₂ with
       ⟨_, _, _, _, _, hFlk₂, ⟨nonce₂, _, hIno₂Lt64, hGid₂⟩,
@@ -3320,7 +3320,7 @@ theorem dual_bound_lock_prevents_unlink_recreate_split_brain
       exact hInoNe hSameIno
     · exact hForge
   refine ⟨hCore, ?_⟩
-  intro actorPid pid₂ spoofBytes hInoLtNext hNoForge
+  intro actorPid pid₂ spoofBytes hInoLtNext
   dsimp only
   let lockPath := walLockPath h₁.basePath
   have hDescOrig : h₁.lockDescId < st.kernel.openFds.nextDescId := hActive₁.2.1
@@ -3380,7 +3380,7 @@ theorem dual_bound_lock_prevents_unlink_recreate_split_brain
       · simp only [hFlkNew, Bool.false_eq_true, ↓reduceIte]
         exact ⟨hDescLtNext, hOwnerOrig⟩
   refine ⟨hTamperedLock.1, hTamperedLock.2, ?_⟩
-  intro stAfter h₂ rec₂ hOpenOk
+  intro stAfter h₂ rec₂ hNoForge hOpenOk
   exact hNoForge (hCore _ _ pid₂ h₂ rec₂ hTamperedLock.1 hTamperedLock.2 hOpenOk)
 
 /-! ### Multi-Crash Reserve-Before-Sign Stateful Custody Machine (`BeltLatch` / `Frontier` / `PolicyGuard`) -/
@@ -7370,12 +7370,13 @@ theorem tooth_split_subordinate_wals_crash_between_commits_causes_resource_desyn
 /-! ## 6. Hardware / POSIX `#tooth` Mutation Witnesses & Concrete Multi-Crash Trace Witness -/
 
 /-- Constructive bounded key-digest accumulator for concrete protocol witnesses (`choice-free`). -/
-def concreteMacKeyDigest64 (key : List UInt8) : Nat :=
+def insecureTestMacKeyDigest64 (key : List UInt8) : Nat :=
   (key.length % 64) + 64 * key.foldl (fun (h : Nat) b => (h * 3 + b.toNat + 1) % 16) 5
 
-/-- Concrete 256-bit (32-byte) 4-lane sponge/FNV `KeyedMacFn` mixing every byte of `key` and `msg`. -/
-def concreteKeyedMac256 (key msg : List UInt8) : List UInt8 :=
-  let k0 : Nat := concreteMacKeyDigest64 key
+/-- INSECURE test authenticator: 32 output bytes, at most 16^4 message tags per key.
+    Used only for executable storage counterexamples; never a cryptographic instantiation. -/
+def insecureTestKeyedMac256 (key msg : List UInt8) : List UInt8 :=
+  let k0 : Nat := insecureTestMacKeyDigest64 key
   let m0 : Nat := msg.foldl (fun (h : Nat) b => (h * 3 + b.toNat + 1) % 16) 3
   let m1 : Nat := msg.foldl (fun (h : Nat) b => (h * 5 + b.toNat + 3) % 16) 7
   let m2 : Nat := msg.foldl (fun (h : Nat) b => (h * 7 + b.toNat + 5) % 16) 11
@@ -7385,9 +7386,9 @@ def concreteKeyedMac256 (key msg : List UInt8) : List UInt8 :=
   encodeU64BeNat (k0 + 1088 * m2 + 2) ++
   encodeU64BeNat (k0 + 1088 * m3 + 3)
 
-theorem concreteKeyedMac256_wellFormed : WellFormedMacFn concreteKeyedMac256 := by
+theorem insecureTestKeyedMac256_wellFormed : WellFormedMacFn insecureTestKeyedMac256 := by
   intro key msg
-  unfold concreteKeyedMac256
+  unfold insecureTestKeyedMac256
   simp [encodeU64BeNat_length]
 
 /-- Concrete 32-byte secret MAC key used in hardware/POSIX `#tooth` & trace witnesses. -/
@@ -7413,19 +7414,19 @@ private theorem foldl_mod_16_lt (bs : List UInt8) (step : Nat → UInt8 → Nat)
   | nil => exact hInit
   | cons b rest ih => exact ih (step init b) (hStep init b)
 
-/-- Constructive proof that `concreteKeyedMac256` under `concreteVaultMacKey` universally rejects
+/-- Constructive proof that `insecureTestKeyedMac256` under `concreteVaultMacKey` universally rejects
     any rogue record authenticated under the untrusted empty key `[]`! -/
-theorem concreteKeyedMac256_rogueReject (b : WalRecordBody) :
-    verifyWalMac concreteKeyedMac256 concreteVaultMacKey
-      (signWalRecord concreteKeyedMac256 [] b) = false := by
+theorem insecureTestKeyedMac256_rogueReject (b : WalRecordBody) :
+    verifyWalMac insecureTestKeyedMac256 concreteVaultMacKey
+      (signWalRecord insecureTestKeyedMac256 [] b) = false := by
   unfold verifyWalMac signWalRecord computeWalMac
   dsimp only
-  cases hBeq : (concreteKeyedMac256 [] (encodeWalBody b) ==
-                concreteKeyedMac256 concreteVaultMacKey (encodeWalBody b))
+  cases hBeq : (insecureTestKeyedMac256 [] (encodeWalBody b) ==
+                insecureTestKeyedMac256 concreteVaultMacKey (encodeWalBody b))
   · rfl
   · exfalso
     have hEq := eq_of_beq hBeq
-    unfold concreteKeyedMac256 at hEq
+    unfold insecureTestKeyedMac256 at hEq
     dsimp only at hEq
     have hTake := congrArg (List.take 8) hEq
     rw [List.append_assoc, List.append_assoc,
@@ -7436,10 +7437,10 @@ theorem concreteKeyedMac256_rogueReject (b : WalRecordBody) :
     have hm0Lt : m0 < 16 :=
       foldl_mod_16_lt (encodeWalBody b) (fun (h : Nat) x => (h * 3 + x.toNat + 1) % 16) 3
         (by decide) (fun _ _ => Nat.mod_lt _ (by decide))
-    have hkEmptyLt : concreteMacKeyDigest64 [] < 1088 := by
-      unfold concreteMacKeyDigest64; decide
-    have hkKeyLt : concreteMacKeyDigest64 concreteVaultMacKey < 1088 := by
-      unfold concreteMacKeyDigest64
+    have hkEmptyLt : insecureTestMacKeyDigest64 [] < 1088 := by
+      unfold insecureTestMacKeyDigest64; decide
+    have hkKeyLt : insecureTestMacKeyDigest64 concreteVaultMacKey < 1088 := by
+      unfold insecureTestMacKeyDigest64
       have hf := foldl_mod_16_lt concreteVaultMacKey (fun (h : Nat) x => (h * 3 + x.toNat + 1) % 16) 5
         (by decide) (fun _ _ => Nat.mod_lt _ (by decide))
       have hl : concreteVaultMacKey.length % 64 < 64 := Nat.mod_lt _ (by decide)
@@ -7451,13 +7452,13 @@ theorem concreteKeyedMac256_rogueReject (b : WalRecordBody) :
         omega
       exact Nat.lt_trans h18 (Nat.lt_trans h32
         two_pow_32_lt_two_pow_64)
-    have hLtA : concreteMacKeyDigest64 [] + 1088 * m0 < 2 ^ 64 := by omega
-    have hLtB : concreteMacKeyDigest64 concreteVaultMacKey + 1088 * m0 < 2 ^ 64 := by omega
+    have hLtA : insecureTestMacKeyDigest64 [] + 1088 * m0 < 2 ^ 64 := by omega
+    have hLtB : insecureTestMacKeyDigest64 concreteVaultMacKey + 1088 * m0 < 2 ^ 64 := by omega
     have hNatEq := encodeU64BeNat_injective hLtA hLtB hTake
-    have hKeyEq : concreteMacKeyDigest64 [] = concreteMacKeyDigest64 concreteVaultMacKey := by omega
-    have hModA : concreteMacKeyDigest64 [] % 64 = 0 := by unfold concreteMacKeyDigest64; decide
-    have hModB : concreteMacKeyDigest64 concreteVaultMacKey % 64 = 32 := by
-      unfold concreteMacKeyDigest64 concreteVaultMacKey
+    have hKeyEq : insecureTestMacKeyDigest64 [] = insecureTestMacKeyDigest64 concreteVaultMacKey := by omega
+    have hModA : insecureTestMacKeyDigest64 [] % 64 = 0 := by unfold insecureTestMacKeyDigest64; decide
+    have hModB : insecureTestMacKeyDigest64 concreteVaultMacKey % 64 = 32 := by
+      unfold insecureTestMacKeyDigest64 concreteVaultMacKey
       rw [List.length_replicate]
       omega
     have hModEq := congrArg (· % 64) hKeyEq
@@ -7604,7 +7605,7 @@ private theorem openExisting_ok_of_steps
 theorem tooth_missing_parent_dir_sync_loses_genesis_after_power_loss :
     let lockPath := walLockPath concreteBasePath
     let sealBytes := encodeLockSidecar { sealedLockInode := 1, genesisNonce := concreteGenesisNonce }
-    let rec0 := signWalRecord concreteKeyedMac256 concreteVaultMacKey
+    let rec0 := signWalRecord insecureTestKeyedMac256 concreteVaultMacKey
       { vaultKeyId := concreteVaultKeyId
         lockGenesisId := computeLockGenesisId 1 concreteGenesisNonce
         epoch := 0
@@ -7621,13 +7622,13 @@ theorem tooth_missing_parent_dir_sync_loses_genesis_after_power_loss :
       posixCloseFd s8 1 3 = .ok sNoDirSync ∧
       -- Before power loss, `openExisting` succeeds and reads `rec0`:
       (openExisting sNoDirSync 2 concreteBasePath concreteVaultKeyId
-        concreteKeyedMac256 concreteVaultMacKey).2 = .ok (hLive, rec0) ∧
+        insecureTestKeyedMac256 concreteVaultMacKey).2 = .ok (hLive, rec0) ∧
       -- After `PowerLossCrash .revertToNand`, unsynced dentries vanish and `openExisting` returns `.enoent`:
       let sCrashed :=
         PowerLossCrash .revertToNand (fun _ => SectorTearMask.dropAllVolatile) sNoDirSync
       assocLookup sCrashed.kernel.dirInode.unsyncedEntries concreteBasePath = none ∧
       openExisting sCrashed 2 concreteBasePath concreteVaultKeyId
-        concreteKeyedMac256 concreteVaultMacKey = (sCrashed, .error .enoent) := by
+        insecureTestKeyedMac256 concreteVaultMacKey = (sCrashed, .error .enoent) := by
   have h1Lt64 : (1 : InodeId) < 2 ^ 64 :=
     Nat.lt_trans (lt_two_pow_32_of_le_8192 (by decide : 1 ≤ 8192))
       two_pow_32_lt_two_pow_64
@@ -7642,7 +7643,7 @@ theorem tooth_missing_parent_dir_sync_loses_genesis_after_power_loss :
      computeLockGenesisId_length (by decide),
      Nat.pow_pos (by decide : 0 < 2),
      Nat.pow_pos (by decide : 0 < 2)⟩
-  have hRecWf := signWalRecord_wellFormed concreteKeyedMac256_wellFormed concreteVaultMacKey hBodyWf
+  have hRecWf := signWalRecord_wellFormed insecureTestKeyedMac256_wellFormed concreteVaultMacKey hBodyWf
   have hSealDec := decodeLockSidecar_encodeLockSidecar hSealWf
   have hRecDec := decodeWalRecord_encodeWalRecord hRecWf
   refine ⟨_, _, _, _, _, _, _, _, _,
@@ -7835,9 +7836,9 @@ theorem tooth_missing_wal_treated_as_fresh_causes_epoch_zero_amnesia :
     ∃ fs0 rec0 fsAfter1 rcpt₁ fsBuggy rcpt₂,
       provisionGenesis PosixFsState.empty 1 concreteBasePath
         concreteVaultKeyId concreteGenesisNonce initPay
-        concreteKeyedMac256 concreteVaultMacKey {} = (fs0, .ok (1, rec0)) ∧
+        insecureTestKeyedMac256 concreteVaultMacKey {} = (fs0, .ok (1, rec0)) ∧
       execReserveBeforeSignAtomic (KernelPanicCrash fs0) 1 concreteBasePath .beltLatch
-        concreteVaultKeyId 100 msg₁ concreteKeyedMac256 concreteVaultMacKey {} =
+        concreteVaultKeyId 100 msg₁ insecureTestKeyedMac256 concreteVaultMacKey {} =
         (fsAfter1, some rcpt₁) ∧
       let sDel := posixUnlinkIfPresent
                     (posixUnlinkIfPresent fsAfter1 concreteBasePath)
@@ -7845,12 +7846,12 @@ theorem tooth_missing_wal_treated_as_fresh_causes_epoch_zero_amnesia :
       let sMissingWal := KernelPanicCrash (posixSyncParentDir sDel false).1
       -- Hardened protocol refuses when WAL is missing:
       execReserveBeforeSignAtomic sMissingWal 1 concreteBasePath .beltLatch
-        concreteVaultKeyId 100 msg₂ concreteKeyedMac256 concreteVaultMacKey {} =
+        concreteVaultKeyId 100 msg₂ insecureTestKeyedMac256 concreteVaultMacKey {} =
         (sMissingWal, none) ∧
       -- Buggy `.enoent -> provisionGenesis` fallback resets to `epoch = 0` on `msg₂ ≠ msg₁`!
       buggySignTreatingMissingWalAsFresh sMissingWal 1 concreteBasePath .beltLatch
         concreteVaultKeyId concreteGenesisNonce 100 msg₂
-        concreteKeyedMac256 concreteVaultMacKey = (fsBuggy, some rcpt₂) ∧
+        insecureTestKeyedMac256 concreteVaultMacKey = (fsBuggy, some rcpt₂) ∧
       rcpt₁.epoch = 0 ∧
       rcpt₂.epoch = 0 ∧
       rcpt₁.msg ≠ rcpt₂.msg := by
@@ -7864,15 +7865,15 @@ theorem tooth_missing_wal_treated_as_fresh_causes_epoch_zero_amnesia :
   obtain ⟨fs0, hGen0, hNextFs0, hDur0⟩ :=
     provisionGenesis_rebooted_succeeds PosixFsState.empty 1 concreteBasePath
       concreteVaultKeyId concreteGenesisNonce initPay
-      concreteKeyedMac256 concreteKeyedMac256_wellFormed concreteVaultMacKey
+      insecureTestKeyedMac256 insecureTestKeyedMac256_wellFormed concreteVaultMacKey
       rfl rfl rfl rfl rfl rfl h1Lt64 (by decide) (by decide) hPay32
-  let rec0 := signWalRecord concreteKeyedMac256 concreteVaultMacKey
+  let rec0 := signWalRecord insecureTestKeyedMac256 concreteVaultMacKey
     { vaultKeyId := concreteVaultKeyId
       lockGenesisId := computeLockGenesisId 1 concreteGenesisNonce
       epoch := 0
       payload := initPay }
   have hDurClean0 : VaultDurableAt (KernelPanicCrash fs0) concreteBasePath 1
-      concreteGenesisNonce concreteKeyedMac256 concreteVaultMacKey rec0 :=
+      concreteGenesisNonce insecureTestKeyedMac256 concreteVaultMacKey rec0 :=
     vaultDurableAt_after_crash hDur0 (CrashStep.kernelPanic fs0)
   obtain ⟨fsAfter1, hSign1⟩ :=
     honest_sign_complete_when_healthy (rec := rec0) 1 .beltLatch 100 msg₁
@@ -7882,7 +7883,7 @@ theorem tooth_missing_wal_treated_as_fresh_causes_epoch_zero_amnesia :
     dsimp only [rec0, signWalRecord] at hUnf
     unfold execReserveBeforeSignAtomic at hUnf
     cases hOpA : openExisting (KernelPanicCrash fs0) 1 concreteBasePath concreteVaultKeyId
-        concreteKeyedMac256 concreteVaultMacKey with
+        insecureTestKeyedMac256 concreteVaultMacKey with
     | mk sO rO =>
       rw [hOpA] at hUnf
       cases rO with
@@ -7891,7 +7892,7 @@ theorem tooth_missing_wal_treated_as_fresh_causes_epoch_zero_amnesia :
         rcases pO with ⟨vhO, rRead⟩
         obtain ⟨_, _, _, _, hDurO⟩ := openExisting_ok_of_vaultDurableAt hDurClean0 hOpA
         have hSafeK0 : EntryWatermarkSafe (KernelPanicCrash fs0) concreteVaultKeyId
-            concreteKeyedMac256 concreteVaultMacKey 0
+            insecureTestKeyedMac256 concreteVaultMacKey 0
             (assocLookup (KernelPanicCrash fs0).kernel.dirInode.unsyncedEntries concreteBasePath) := by
           rcases hDurClean0 with ⟨_, _, _, _, _, _, _, _, _, _, _, _, rI, hRI, hRU, _, hRP, hRD, hRN⟩
           rw [hRU]
@@ -7904,10 +7905,10 @@ theorem tooth_missing_wal_treated_as_fresh_causes_epoch_zero_amnesia :
         · simp only [hc, Bool.false_eq_true, ↓reduceIte] at hUnf
           have hLeRep := replaceAtomic_nextInode_le sO vhO (rRead.body.epoch + 1)
             (encodeCustodyWalPayload .beltLatch 100 msg₁)
-            concreteKeyedMac256 concreteVaultMacKey {}
+            insecureTestKeyedMac256 concreteVaultMacKey {}
           cases hRepA : replaceAtomic sO vhO (rRead.body.epoch + 1)
               (encodeCustodyWalPayload .beltLatch 100 msg₁)
-              concreteKeyedMac256 concreteVaultMacKey {} with
+              insecureTestKeyedMac256 concreteVaultMacKey {} with
           | mk sR restR =>
             rcases restR with ⟨hR, resR⟩
             rw [hRepA] at hUnf hLeRep
@@ -7938,12 +7939,12 @@ theorem tooth_missing_wal_treated_as_fresh_causes_epoch_zero_amnesia :
     simp [sMissingWal, KernelPanicCrash, posixSyncParentDir, sDel, posixUnlinkIfPresent]
   have hOpenMiss :
       openExisting sMissingWal 1 concreteBasePath concreteVaultKeyId
-        concreteKeyedMac256 concreteVaultMacKey = (sMissingWal, .error .enoent) := by
+        insecureTestKeyedMac256 concreteVaultMacKey = (sMissingWal, .error .enoent) := by
     unfold openExisting posixOpenExistingNoFollow resolveDentryNoFollow
     rw [hMissLockNone]
   have hHardenedStop :
       execReserveBeforeSignAtomic sMissingWal 1 concreteBasePath .beltLatch
-        concreteVaultKeyId 100 msg₂ concreteKeyedMac256 concreteVaultMacKey {} =
+        concreteVaultKeyId 100 msg₂ insecureTestKeyedMac256 concreteVaultMacKey {} =
         (sMissingWal, none) := by
     unfold execReserveBeforeSignAtomic
     rw [hOpenMiss]
@@ -7955,7 +7956,7 @@ theorem tooth_missing_wal_treated_as_fresh_causes_epoch_zero_amnesia :
   obtain ⟨stReinit, hGenReinit, _, hDurReinit⟩ :=
     provisionGenesis_rebooted_succeeds sMissingWal 1 concreteBasePath
       concreteVaultKeyId concreteGenesisNonce initPay
-      concreteKeyedMac256 concreteKeyedMac256_wellFormed concreteVaultMacKey
+      insecureTestKeyedMac256 insecureTestKeyedMac256_wellFormed concreteVaultMacKey
       rfl rfl rfl rfl hMissBaseNone hMissLockNone hMissNext64 (by decide) (by decide) hPay32
   have hDurReinitClean :=
     vaultDurableAt_after_crash hDurReinit (CrashStep.kernelPanic stReinit)
@@ -7965,7 +7966,7 @@ theorem tooth_missing_wal_treated_as_fresh_causes_epoch_zero_amnesia :
   have hBuggyRun :
       buggySignTreatingMissingWalAsFresh sMissingWal 1 concreteBasePath .beltLatch
         concreteVaultKeyId concreteGenesisNonce 100 msg₂
-        concreteKeyedMac256 concreteVaultMacKey =
+        insecureTestKeyedMac256 concreteVaultMacKey =
       (fsBuggy, some { keyKind := .beltLatch
                        vaultKeyId := concreteVaultKeyId
                        epoch := 0
@@ -8031,10 +8032,10 @@ theorem inhabited_posix_crash_wal_trace :
     ∃ (s₀ : MultiCrashCustodyState) (c₀ : CeremonyCrashState),
       initProvisionedCustodyState 1 concreteBasePath .beltLatch
         concreteVaultKeyId concreteGenesisNonce 1024
-        concreteKeyedMac256 concreteVaultMacKey = some s₀ ∧
+        insecureTestKeyedMac256 concreteVaultMacKey = some s₀ ∧
       initProvisionedCeremonyState 1 concreteBasePath
         concreteVaultKeyId concreteGenesisNonce 1000
-        concreteKeyedMac256 concreteVaultMacKey = some c₀ ∧
+        insecureTestKeyedMac256 concreteVaultMacKey = some c₀ ∧
       let prefixTrace : List MultiCrashWalEvent :=
         [.kernelPanic,
          .signAtomic 1 [0xAA] {},
@@ -8047,8 +8048,8 @@ theorem inhabited_posix_crash_wal_trace :
          .attemptReprovisionGenesis 99 (List.replicate 32 0x99),
          .contenderSignAttempt 2 [0xFF],
          .deleteWalRecord]
-      let sMid := runMultiCrashCustodyTrace concreteKeyedMac256 concreteVaultMacKey s₀ prefixTrace
-      let sFinal := runMultiCrashCustodyTrace concreteKeyedMac256 concreteVaultMacKey s₀
+      let sMid := runMultiCrashCustodyTrace insecureTestKeyedMac256 concreteVaultMacKey s₀ prefixTrace
+      let sFinal := runMultiCrashCustodyTrace insecureTestKeyedMac256 concreteVaultMacKey s₀
                       (prefixTrace ++ suffixTrace)
       sMid.emittedReceipts.length = 2 ∧
       (∃ r₀ ∈ sMid.emittedReceipts, r₀.epoch = 0 ∧ r₀.msg = [0xAA]) ∧
@@ -8060,10 +8061,10 @@ theorem inhabited_posix_crash_wal_trace :
           .reserveAndEmitRound1 1 (List.replicate 32 0x33) [0xCA, 0xFE] 25 (List.replicate 32 0x44) {},
           .releaseSignatureFromRound1 1 [0x55, 0x66] {},
           .powerLoss .revertToNand SectorTearMask.dropAllVolatile []]
-       let cFinal := runCeremonyCrashTrace concreteKeyedMac256 concreteVaultMacKey c₀ cTrace
+       let cFinal := runCeremonyCrashTrace insecureTestKeyedMac256 concreteVaultMacKey c₀ cTrace
        ∃ fsRecovered rec j views,
          CrashRecoverCeremony (KernelPanicCrash cFinal.fs) 2 cFinal.basePath cFinal.vaultKeyId
-           concreteKeyedMac256 concreteVaultMacKey = (fsRecovered, .ok (rec, j, views)) ∧
+           insecureTestKeyedMac256 concreteVaultMacKey = (fsRecovered, .ok (rec, j, views)) ∧
          views.policyCumulativeSpend ≤ cFinal.policySpendCap ∧
          (∀ sig ∈ cFinal.releasedSigs, AllRequiredReservationsDurable sig views) ∧
          (∀ pkt ∈ cFinal.emittedRound1Msgs, AllRound1ReservationsDurable pkt views)) := by
@@ -8080,7 +8081,7 @@ theorem inhabited_posix_crash_wal_trace :
   obtain ⟨fsCust0, hGenCust0, _, hDurCust0⟩ :=
     provisionGenesis_rebooted_succeeds PosixFsState.empty 1 concreteBasePath
       concreteVaultKeyId concreteGenesisNonce initCustPay
-      concreteKeyedMac256 concreteKeyedMac256_wellFormed concreteVaultMacKey
+      insecureTestKeyedMac256 insecureTestKeyedMac256_wellFormed concreteVaultMacKey
       rfl rfl rfl rfl rfl rfl h1Lt64 (by decide) (by decide) hCustPay32
   let s₀ : MultiCrashCustodyState :=
     { fs := fsCust0
@@ -8095,7 +8096,7 @@ theorem inhabited_posix_crash_wal_trace :
   have hInitCust :
       initProvisionedCustodyState 1 concreteBasePath .beltLatch
         concreteVaultKeyId concreteGenesisNonce 1024
-        concreteKeyedMac256 concreteVaultMacKey = some s₀ := by
+        insecureTestKeyedMac256 concreteVaultMacKey = some s₀ := by
     unfold initProvisionedCustodyState
     dsimp +zetaDelta only
     rw [hGenCust0]
@@ -8107,7 +8108,7 @@ theorem inhabited_posix_crash_wal_trace :
   obtain ⟨fsCer0, hGenCer0, _, _⟩ :=
     provisionGenesis_rebooted_succeeds PosixFsState.empty 1 concreteBasePath
       concreteVaultKeyId concreteGenesisNonce initCerPay
-      concreteKeyedMac256 concreteKeyedMac256_wellFormed concreteVaultMacKey
+      insecureTestKeyedMac256 insecureTestKeyedMac256_wellFormed concreteVaultMacKey
       rfl rfl rfl rfl rfl rfl h1Lt64 (by decide) (by decide) hCerPay32
   let c₀ : CeremonyCrashState :=
     { fs := fsCer0
@@ -8120,7 +8121,7 @@ theorem inhabited_posix_crash_wal_trace :
   have hInitCer :
       initProvisionedCeremonyState 1 concreteBasePath
         concreteVaultKeyId concreteGenesisNonce 1000
-        concreteKeyedMac256 concreteVaultMacKey = some c₀ := by
+        insecureTestKeyedMac256 concreteVaultMacKey = some c₀ := by
     unfold initProvisionedCeremonyState
     dsimp +zetaDelta only
     rw [hGenCer0]
@@ -8133,8 +8134,8 @@ theorem inhabited_posix_crash_wal_trace :
   have hStepSignEq : ∀ (stX : PosixFsState) (msgX : List UInt8) (stY : PosixFsState) (rcptX : SignedEpochReceipt)
       (emX : List SignedEpochReceipt) (wmX : Nat),
       execReserveBeforeSignAtomic stX 1 concreteBasePath .beltLatch concreteVaultKeyId 1024
-        msgX concreteKeyedMac256 concreteVaultMacKey {} = (stY, some rcptX) →
-      (stepMultiCrashCustody concreteKeyedMac256 concreteVaultMacKey
+        msgX insecureTestKeyedMac256 concreteVaultMacKey {} = (stY, some rcptX) →
+      (stepMultiCrashCustody insecureTestKeyedMac256 concreteVaultMacKey
         { fs := stX, basePath := concreteBasePath, keyKind := .beltLatch,
           vaultKeyId := concreteVaultKeyId,
           enrolledGenesisId := computeLockGenesisId 1 concreteGenesisNonce,
@@ -8150,7 +8151,7 @@ theorem inhabited_posix_crash_wal_trace :
     unfold execReserveBeforeSignAtomic at hEx
     unfold stepMultiCrashCustody
     dsimp only
-    cases hO : openExisting stX 1 concreteBasePath concreteVaultKeyId concreteKeyedMac256 concreteVaultMacKey with
+    cases hO : openExisting stX 1 concreteBasePath concreteVaultKeyId insecureTestKeyedMac256 concreteVaultMacKey with
     | mk sO rO =>
       rw [hO] at hEx
       cases rO with
@@ -8163,7 +8164,7 @@ theorem inhabited_posix_crash_wal_trace :
         · simp only [hc, Bool.false_eq_true, ↓reduceIte] at hEx ⊢
           cases hR : replaceAtomic sO vhO (recO.body.epoch + 1)
               (encodeCustodyWalPayload .beltLatch 1024 msgX)
-              concreteKeyedMac256 concreteVaultMacKey {} with
+              insecureTestKeyedMac256 concreteVaultMacKey {} with
           | mk sR restR =>
             rcases restR with ⟨hR, resR⟩
             rw [hR] at hEx
@@ -8175,18 +8176,18 @@ theorem inhabited_posix_crash_wal_trace :
               injection hSomeEq with hRcptEq
               rw [← hStYEq, ← hRcptEq]
   -- Also prove `VaultDurableAt` at `epoch = 1` on `fsAfterA`:
-  let recCust1 := signWalRecord concreteKeyedMac256 concreteVaultMacKey
+  let recCust1 := signWalRecord insecureTestKeyedMac256 concreteVaultMacKey
     { vaultKeyId := concreteVaultKeyId
       lockGenesisId := computeLockGenesisId 1 concreteGenesisNonce
       epoch := 1
       payload := encodeCustodyWalPayload .beltLatch 1024 [0xAA] }
   have hDurAfterA : VaultDurableAt fsAfterA concreteBasePath 1
-      concreteGenesisNonce concreteKeyedMac256 concreteVaultMacKey recCust1 := by
+      concreteGenesisNonce insecureTestKeyedMac256 concreteVaultMacKey recCust1 := by
     have hEx := hExecA
     dsimp only [signWalRecord] at hEx
     unfold execReserveBeforeSignAtomic at hEx
     cases hO : openExisting (KernelPanicCrash fsCust0) 1 concreteBasePath concreteVaultKeyId
-        concreteKeyedMac256 concreteVaultMacKey with
+        insecureTestKeyedMac256 concreteVaultMacKey with
     | mk sO rO =>
       rw [hO] at hEx
       cases rO with
@@ -8200,7 +8201,7 @@ theorem inhabited_posix_crash_wal_trace :
         simp only [hDec1024, h1Lt64, decide_true, Bool.not_true, Bool.false_or, Bool.false_eq_true, ↓reduceIte] at hEx
         cases hR : replaceAtomic sO vhO 1
             (encodeCustodyWalPayload .beltLatch 1024 [0xAA])
-            concreteKeyedMac256 concreteVaultMacKey {} with
+            insecureTestKeyedMac256 concreteVaultMacKey {} with
         | mk sR restR =>
           rcases restR with ⟨vhR, resR⟩
           rw [hR] at hEx
@@ -8211,7 +8212,7 @@ theorem inhabited_posix_crash_wal_trace :
             have hDurOH := hDurO
             rw [← hBaseO] at hDurOH
             obtain ⟨_, hComEq, hDurR⟩ :=
-              replaceAtomic_ok_durable concreteKeyedMac256_wellFormed hVkO hGidO hDurOH hR
+              replaceAtomic_ok_durable insecureTestKeyedMac256_wellFormed hVkO hGidO hDurOH hR
             rw [hBaseO] at hDurR
             have hComRec1 : recCom = recCust1 := by
               rw [hComEq, hVkO, hGidO]; rfl
@@ -8223,7 +8224,7 @@ theorem inhabited_posix_crash_wal_trace :
   let fsCrashP := PowerLossCrash .revertToNand
     (evalFiniteTearSchedule SectorTearMask.dropAllVolatile []) fsAfterA
   have hDurP1 : VaultDurableAt fsCrashP concreteBasePath 1
-      concreteGenesisNonce concreteKeyedMac256 concreteVaultMacKey recCust1 :=
+      concreteGenesisNonce insecureTestKeyedMac256 concreteVaultMacKey recCust1 :=
     vaultDurableAt_after_crash hDurAfterA
       (CrashStep.powerLoss .revertToNand
         (evalFiniteTearSchedule SectorTearMask.dropAllVolatile []) fsAfterA)
@@ -8247,7 +8248,7 @@ theorem inhabited_posix_crash_wal_trace :
   let rcpt₁ : SignedEpochReceipt :=
     { keyKind := .beltLatch, vaultKeyId := concreteVaultKeyId, epoch := 1, msg := [0xBB] }
   have hSMidEq :
-      runMultiCrashCustodyTrace concreteKeyedMac256 concreteVaultMacKey s₀ prefixTrace =
+      runMultiCrashCustodyTrace insecureTestKeyedMac256 concreteVaultMacKey s₀ prefixTrace =
       { fs := KernelPanicCrash fsAfterB
         basePath := concreteBasePath
         keyKind := .beltLatch
@@ -8258,13 +8259,13 @@ theorem inhabited_posix_crash_wal_trace :
         emittedReceipts := [rcpt₀, rcpt₁]
         ghostWatermark := 2 } := by
     dsimp only [prefixTrace, runMultiCrashCustodyTrace]
-    have hK0 : (stepMultiCrashCustody concreteKeyedMac256 concreteVaultMacKey s₀ .kernelPanic).1 =
+    have hK0 : (stepMultiCrashCustody insecureTestKeyedMac256 concreteVaultMacKey s₀ .kernelPanic).1 =
         { s₀ with fs := KernelPanicCrash fsCust0, activeHold := none } := rfl
     rw [hK0]
     have hS1 := hStepSignEq (KernelPanicCrash fsCust0) [0xAA] fsAfterA rcpt₀ [] 0 hExecA
     rw [hS1]
     dsimp only [List.nil_append, rcpt₀]
-    have hP1 : (stepMultiCrashCustody concreteKeyedMac256 concreteVaultMacKey
+    have hP1 : (stepMultiCrashCustody insecureTestKeyedMac256 concreteVaultMacKey
         { fs := fsAfterA, basePath := concreteBasePath, keyKind := .beltLatch,
           vaultKeyId := concreteVaultKeyId,
           enrolledGenesisId := computeLockGenesisId 1 concreteGenesisNonce,
@@ -8283,8 +8284,8 @@ theorem inhabited_posix_crash_wal_trace :
   -- Instantiate both flagship theorems!
   have hCustFlagship :=
     reserve_before_sign_multi_crash_epoch_uniqueness
-      concreteKeyedMac256_wellFormed
-      (fun b _ _ => concreteKeyedMac256_rogueReject b)
+      insecureTestKeyedMac256_wellFormed
+      (fun b _ _ => insecureTestKeyedMac256_rogueReject b)
       hInitCust prefixTrace suffixTrace
   dsimp +zetaDelta only at hCustFlagship
   rcases hCustFlagship with ⟨hNodupFin, _, hWmLeFin, _⟩
@@ -8295,7 +8296,7 @@ theorem inhabited_posix_crash_wal_trace :
      .powerLoss .revertToNand SectorTearMask.dropAllVolatile []]
   have hCerFlagship :=
     ceremony_journal_released_implies_all_reservations_durable_and_no_reuse
-      (recoveryPid := 2) concreteKeyedMac256_wellFormed hInitCer cTrace
+      (recoveryPid := 2) insecureTestKeyedMac256_wellFormed hInitCer cTrace
       (CrashStep.kernelPanic _)
   dsimp +zetaDelta only at hCerFlagship
   rcases hCerFlagship with ⟨_, _, _, _, _, _, ⟨fsRecC, recC, jC, viewsC, hCrOk, _, hPolC, hSigC, hPktC⟩⟩
@@ -8502,7 +8503,7 @@ theorem witness_unanchored_device_restore_reuses_epoch :
     ∃ (s : AnchoredCustodyState) (trace : List AnchoredCustodyEvent),
       s.emitted = [] ∧
       ¬ ((runAnchoredCustody false concreteBasePath .beltLatch concreteVaultKeyId 1024
-        concreteKeyedMac256 concreteVaultMacKey s trace).emitted.map (·.epoch)).Nodup := by
+        insecureTestKeyedMac256 concreteVaultMacKey s trace).emitted.map (·.epoch)).Nodup := by
   have h1Lt64 : (1 : InodeId) < 2 ^ 64 :=
     Nat.lt_trans (lt_two_pow_32_of_le_8192 (by decide : 1 ≤ 8192)) two_pow_32_lt_two_pow_64
   have hPay32 : (encodeCustodyWalPayload .beltLatch 1024 []).length < 2 ^ 32 :=
@@ -8510,7 +8511,7 @@ theorem witness_unanchored_device_restore_reuses_epoch :
   obtain ⟨fs0, _, _, hDur0⟩ :=
     provisionGenesis_rebooted_succeeds PosixFsState.empty 1 concreteBasePath
       concreteVaultKeyId concreteGenesisNonce (encodeCustodyWalPayload .beltLatch 1024 [])
-      concreteKeyedMac256 concreteKeyedMac256_wellFormed concreteVaultMacKey
+      insecureTestKeyedMac256 insecureTestKeyedMac256_wellFormed concreteVaultMacKey
       rfl rfl rfl rfl rfl rfl h1Lt64 (by decide) (by decide) hPay32
   have hDurBoot := vaultDurableAt_after_crash hDur0 (CrashStep.kernelPanic fs0)
   obtain ⟨fs1, hSign⟩ := honest_sign_complete_when_healthy (st := KernelPanicCrash fs0) 1
@@ -8519,7 +8520,7 @@ theorem witness_unanchored_device_restore_reuses_epoch :
     [.reserve 1 [0xAA] {}, .release, .replaceDevice (KernelPanicCrash fs0),
      .reserve 1 [0xAA] {}, .release], rfl, ?_⟩
   rw [tooth_unanchored_device_restore_reuses_epoch concreteBasePath .beltLatch concreteVaultKeyId
-    1024 concreteKeyedMac256 concreteVaultMacKey _ 1 [0xAA] {} rfl hSign]
+    1024 insecureTestKeyedMac256 concreteVaultMacKey _ 1 [0xAA] {} rfl hSign]
   intro hNd
   simp at hNd
 

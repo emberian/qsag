@@ -5382,7 +5382,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
 /-- Extract Party 1's 64-bit Round-2 masked Keccak `χ`-row word from a public `SessionWireRecord`. -/
 def extractParty1ChiWord (rec : SessionWireRecord) : BitVec 64 :=
   match rec.honestRound2 with
-  | (_, wireA) :: _ => fixedBytesToBv 8 ((unpackWireBytes wireA).drop 8)
+  | (_, wireA) :: _ => fixedBytesToBv 8 (unpackWireBytes wireA)
   | [] => 0#64
 
 /-- Public key-free 2-session wire-XOR distinguisher checking `(word₀ ^^^ word₁) == 1#64`. -/
@@ -5463,7 +5463,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
       let cl : RealClusterState SlhPublicKey RssPartyKeyShare :=
         ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
           dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
-      multiSessionBadHit p ⟨0, by decide⟩ 1 A 2 cl 0 ω = false := by
+      multiSessionBadHit true p ⟨0, by decide⟩ 1 A 2 cl 0 ω = false := by
     intro prfSh hPWf hSame ω cl
     let cur := splitFinLeft (rssMultiSessionCard_pos p.sigBytes 1) ω
     have hPk : cl.tsig.pk =
@@ -5485,8 +5485,8 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
     rw [multiSessionBadHit]
     change (match execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) A cl 0
       (decodeSingleFullTape p.sigBytes cur) with
-      | (next, st, _) => sessionBadHit p ⟨0, by decide⟩ 1 A cl 0 cur ||
-          multiSessionBadHit p ⟨0, by decide⟩ 1 A 1 next st
+      | (next, st, _) => sessionBadHit true p ⟨0, by decide⟩ 1 A cl 0 cur ||
+          multiSessionBadHit true p ⟨0, by decide⟩ 1 A 1 next st
             (splitFinRight (rssMultiSessionCard_pos p.sigBytes 1) ω)) = false
     rw [hRun]
     dsimp only
@@ -5581,18 +5581,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
       rw [hR2_0]
       dsimp only [honestPairForCorrupt]
       simp only [Nat.reduceBEq, ↓reduceIte, unpackWireBytes_packWireBytes]
-      have hDrop0 :
-          (bvToFixedBytes 8 (tapes 0).nonceA ++
-            bvToFixedBytes 8
-              ((match dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh 1 with
-                | some shA => computeHonestChiWord 1 shA (reqs 0).msg
-                | none => 0#64) ^^^ (tapes 0).chiMaskA)).drop 8 =
-          bvToFixedBytes 8
-            ((match dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh 1 with
-              | some shA => computeHonestChiWord 1 shA (reqs 0).msg
-              | none => 0#64) ^^^ (tapes 0).chiMaskA) :=
-        drop_append_of_length_eq (bvToFixedBytes_length 8 (tapes 0).nonceA)
-      rw [hDrop0, fixedBytesToBv_bvToFixedBytes 8]
+      rw [fixedBytesToBv_bvToFixedBytes 8]
     have hExt1 : extractParty1ChiWord rec1 =
         (match dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh 1 with
          | some sh1 => computeHonestChiWord 1 sh1 (reqs 1).msg | none => 0#64) ^^^ (tapes 1).chiMaskA := by
@@ -5600,18 +5589,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
       rw [hR2_1]
       dsimp only [honestPairForCorrupt]
       simp only [Nat.reduceBEq, ↓reduceIte, unpackWireBytes_packWireBytes]
-      have hDrop1 :
-          (bvToFixedBytes 8 (tapes 1).nonceA ++
-            bvToFixedBytes 8
-              ((match dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh 1 with
-                | some shA => computeHonestChiWord 1 shA (reqs 1).msg
-                | none => 0#64) ^^^ (tapes 1).chiMaskA)).drop 8 =
-          bvToFixedBytes 8
-            ((match dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh 1 with
-              | some shA => computeHonestChiWord 1 shA (reqs 1).msg
-              | none => 0#64) ^^^ (tapes 1).chiMaskA) :=
-        drop_append_of_length_eq (bvToFixedBytes_length 8 (tapes 1).nonceA)
-      rw [hDrop1, fixedBytesToBv_bvToFixedBytes 8]
+      rw [fixedBytesToBv_bvToFixedBytes 8]
     dsimp only [reusedMaskWireDistinguisher]
     rw [hExt0, hExt1]
   have hBvXorCancel : ∀ (a b m : BitVec 64), ((a ^^^ m) ^^^ (b ^^^ m)) = (a ^^^ b) := by
@@ -5671,10 +5649,12 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
   let B4 := (2 ^ 64) * ((2 ^ (8 * p.sigBytes)) * (2 ^ (8 * p.sigBytes)))
   have hB4Pos : 0 < B4 := Nat.mul_pos (Nat.two_pow_pos 64)
     (Nat.mul_pos (Nat.two_pow_pos _) (Nat.two_pow_pos _))
-  let P_two := rssFullSessionCard p.sigBytes * ((2 ^ 64) * ((2 ^ 64) * (B4 * (2 ^ 128))))
+  let P_two := rssFullSessionCard p.sigBytes *
+    ((2 ^ 128) * ((2 ^ 192) * ((2 ^ 64) * ((2 ^ 64) * (B4 * (2 ^ 128))))))
   have hPtwoPos : 0 < P_two := Nat.mul_pos (rssFullSessionCard_pos p.sigBytes)
-    (Nat.mul_pos (Nat.two_pow_pos 64) (Nat.mul_pos (Nat.two_pow_pos 64)
-      (Nat.mul_pos hB4Pos (Nat.two_pow_pos 128))))
+    (Nat.mul_pos (Nat.two_pow_pos 128) (Nat.mul_pos (Nat.two_pow_pos 192)
+      (Nat.mul_pos (Nat.two_pow_pos 64) (Nat.mul_pos (Nat.two_pow_pos 64)
+        (Nat.mul_pos hB4Pos (Nat.two_pow_pos 128))))))
   have hF1 : card = rssFullSessionCard p.sigBytes * rssFullSessionCard p.sigBytes := by
     dsimp only [card, rssMultiSessionCard]; rw [Nat.mul_one]
   have hCardTwoEq : card = P_two * (2 ^ 64) := by
@@ -5712,7 +5692,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
           if reusedMaskWireDistinguisher (freshZeroView ⟨(pairFin ω0 ω1).val,
             Nat.lt_of_lt_of_eq (pairFin ω0 ω1).isLt hF1.symm⟩)
           then 1 else 0) =
-        (2 ^ 64) * ((2 ^ 64) * (B4 * (2 ^ 128))) := by
+        (2 ^ 128) * ((2 ^ 192) * ((2 ^ 64) * ((2 ^ 64) * (B4 * (2 ^ 128))))) := by
       intro ω0
       let cA0 := (decodeSingleFullTape p.sigBytes ω0).chiMaskA
       have hStep1 : ∀ ω1 : Fin (rssFullSessionCard p.sigBytes),
@@ -5768,28 +5748,36 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
         rw [finSum_congr (fun g1 => by rw [hC g1]), finSum_const, Nat.mul_comm]
       rw [finSum_congr hCollapseG]
       unfold rssPadSessionCard
-      rw [finSum_prod_eq (2 ^ 64),
-          finSum_congr (fun nA1 => finSum_prod_eq (2 ^ 64) _ _),
-          finSum_congr (fun nA1 => finSum_congr (fun nB1 => finSum_prod_eq (2 ^ 64) B4 _))]
-      have hInnerCA : ∀ (nA1 nB1 : Fin (2 ^ 64)),
+      rw [finSum_prod_eq (2 ^ 128),
+          finSum_congr (fun kB1 => finSum_prod_eq (2 ^ 192) _ _),
+          finSum_congr (fun kB1 => finSum_congr (fun sd1 => finSum_prod_eq (2 ^ 64) _ _)),
+          finSum_congr (fun kB1 => finSum_congr (fun sd1 => finSum_congr (fun nA1 =>
+            finSum_prod_eq (2 ^ 64) _ _))),
+          finSum_congr (fun kB1 => finSum_congr (fun sd1 => finSum_congr (fun nA1 =>
+            finSum_congr (fun nB1 => finSum_prod_eq (2 ^ 64) B4 _))))]
+      have hInnerCA : ∀ (kB1 : Fin (2 ^ 128)) (sd1 : Fin (2 ^ 192)) (nA1 nB1 : Fin (2 ^ 64)),
           finSum (2 ^ 64) (fun cA1 => finSum B4 (fun r3 =>
             (if (cA0 ^^^ (decodeRssSessionTape p.sigBytes
-              (pairFin nA1 (pairFin nB1 (pairFin cA1 r3))) ⟨0, Nat.two_pow_pos 128⟩).chiMaskA) == 1#64
+              (pairFin kB1 (pairFin sd1 (pairFin nA1 (pairFin nB1 (pairFin cA1 r3)))))
+                ⟨0, Nat.two_pow_pos 128⟩).chiMaskA) == 1#64
              then 1 else 0) * (2 ^ 128))) =
           B4 * (2 ^ 128) := by
-        intro nA1 nB1
+        intro kB1 sd1 nA1 nB1
         have hCA1 : ∀ (cA1 : Fin (2 ^ 64)) (r3 : Fin B4),
             (decodeRssSessionTape p.sigBytes
-              (pairFin nA1 (pairFin nB1 (pairFin cA1 r3))) ⟨0, Nat.two_pow_pos 128⟩).chiMaskA =
+              (pairFin kB1 (pairFin sd1 (pairFin nA1 (pairFin nB1 (pairFin cA1 r3)))))
+                ⟨0, Nat.two_pow_pos 128⟩).chiMaskA =
             BitVec.ofFin cA1 := by
           intro cA1 r3
           unfold decodeRssSessionTape
           dsimp only
-          rw [splitFinRight_pairFin, splitFinRight_pairFin, splitFinLeft_pairFin]
+          rw [splitFinRight_pairFin, splitFinRight_pairFin, splitFinRight_pairFin,
+              splitFinRight_pairFin, splitFinLeft_pairFin]
         have hR3Const : ∀ cA1 : Fin (2 ^ 64),
             finSum B4 (fun r3 =>
               (if (cA0 ^^^ (decodeRssSessionTape p.sigBytes
-                (pairFin nA1 (pairFin nB1 (pairFin cA1 r3))) ⟨0, Nat.two_pow_pos 128⟩).chiMaskA) == 1#64
+                (pairFin kB1 (pairFin sd1 (pairFin nA1 (pairFin nB1 (pairFin cA1 r3)))))
+                  ⟨0, Nat.two_pow_pos 128⟩).chiMaskA) == 1#64
                then 1 else 0) * (2 ^ 128)) =
             (if (cA0 ^^^ BitVec.ofFin cA1) == 1#64 then 1 else 0) * (B4 * (2 ^ 128)) := by
           intro cA1
@@ -5805,8 +5793,12 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
             | succ n ih => intro m f; simp only [finSum, ih m, Nat.add_mul]
           exact hGen _ _ _
         rw [hFactor, hXorHitSum cA0, Nat.one_mul]
-      rw [finSum_congr (fun nA1 => finSum_congr (fun nB1 => hInnerCA nA1 nB1)),
-          finSum_congr (fun _ => finSum_const (2 ^ 64) (B4 * (2 ^ 128))),
+      rw [finSum_congr (fun kB1 => finSum_congr (fun sd1 => finSum_congr (fun nA1 =>
+            finSum_congr (fun nB1 => hInnerCA kB1 sd1 nA1 nB1)))),
+          finSum_congr (fun _ => finSum_congr (fun _ => finSum_congr (fun _ =>
+            finSum_const (2 ^ 64) (B4 * (2 ^ 128))))),
+          finSum_congr (fun _ => finSum_congr (fun _ => finSum_const (2 ^ 64) _)),
+          finSum_congr (fun _ => finSum_const (2 ^ 192) _),
           finSum_const]
     rw [finSum_congr hEach0, finSum_const, Nat.mul_one]
     exact Nat.le_refl _
