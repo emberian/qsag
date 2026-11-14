@@ -380,18 +380,52 @@ fn eval_public_matrix_128x16_bs256(
     }
 }
 
-/// Accumulate a public `128 x 16` bit-matrix across all 256 lanes.
 #[inline(always)]
-fn xor_public_matrix_128x16_bs256(
+fn build_nibble_tab256(p: &[BitPlane256], tab: &mut [BitPlane256; 16]) {
+    let p0 = p[0];
+    let p1 = p[1];
+    let p2 = p[2];
+    let p3 = p[3];
+    let p01 = xor_plane256(p0, p1);
+    let p23 = xor_plane256(p2, p3);
+    tab[0] = [0; 4];
+    tab[1] = p0;
+    tab[2] = p1;
+    tab[3] = p01;
+    tab[4] = p2;
+    tab[5] = xor_plane256(p2, p0);
+    tab[6] = xor_plane256(p2, p1);
+    tab[7] = xor_plane256(p2, p01);
+    tab[8] = p3;
+    tab[9] = xor_plane256(p3, p0);
+    tab[10] = xor_plane256(p3, p1);
+    tab[11] = xor_plane256(p3, p01);
+    tab[12] = p23;
+    tab[13] = xor_plane256(p23, p0);
+    tab[14] = xor_plane256(p23, p1);
+    tab[15] = xor_plane256(p23, p01);
+}
+
+#[inline(always)]
+fn build_nibble_tabs4_bs256(words16: &[BitPlane256; 16], tabs4: &mut [[BitPlane256; 16]; 4]) {
+    for (nib, tab) in tabs4.iter_mut().enumerate() {
+        build_nibble_tab256(&words16[nib * 4..nib * 4 + 4], tab);
+    }
+}
+
+/// Accumulate (`^=`) a public `128 x 16` bit-matrix across 256 lanes into `out`.
+#[inline(always)]
+fn xor_public_matrix_128x16_nibble_bs256(
     row_masks: &[u16; 128],
-    tabs: &[[BitPlane256; 256]; 2],
+    tabs4: &[[BitPlane256; 16]; 4],
     out: &mut Bs256,
 ) {
     for (dst, &mask) in out.iter_mut().zip(row_masks) {
-        let prod = xor_plane256(
-            tabs[0][(mask & 0xff) as usize],
-            tabs[1][(mask >> 8) as usize],
-        );
+        let v0 = tabs4[0][(mask & 0xf) as usize];
+        let v1 = tabs4[1][((mask >> 4) & 0xf) as usize];
+        let v2 = tabs4[2][((mask >> 8) & 0xf) as usize];
+        let v3 = tabs4[3][(mask >> 12) as usize];
+        let prod = xor_plane256(xor_plane256(v0, v1), xor_plane256(v2, v3));
         *dst = xor_plane256(*dst, prod);
     }
 }
@@ -413,20 +447,22 @@ fn build_public_mul_masks_bs256(c: Gf128) -> [[u16; 128]; 8] {
 }
 
 /// Constant-time bitsliced accumulation `acc ^= c * src` across all 256 `GF(2^128)` lanes in `src`
-/// using 8-bit byte tables indexed strictly by public `masks8`.
+/// using nibble tables indexed strictly by public `masks8`. Rebuilding byte tables
+/// for each single-use fold costs more than the saved lookups; Step 1 reuses byte
+/// tables across both challenges.
 #[inline]
 fn xor_mul_bs256_by_public(
     src: &Bs256,
     masks8: &[[u16; 128]; 8],
-    tabs8: &mut [[BitPlane256; 256]; 2],
+    tabs4: &mut [[BitPlane256; 16]; 4],
     acc: &mut Bs256,
 ) {
     for (chunk_idx, row_masks) in masks8.iter().enumerate() {
         let slice16: &[BitPlane256; 16] = src[chunk_idx * 16..chunk_idx * 16 + 16]
             .try_into()
             .expect("16-row slice");
-        build_byte_tabs_bs256(slice16, tabs8);
-        xor_public_matrix_128x16_bs256(row_masks, tabs8, acc);
+        build_nibble_tabs4_bs256(slice16, tabs4);
+        xor_public_matrix_128x16_nibble_bs256(row_masks, tabs4, acc);
     }
 }
 
@@ -598,6 +634,7 @@ struct BitCheckScratch {
     hwm_bs: usize,
     step2_lanes: Box<[[[Gf128; STEP2_QUAD_CHUNK * 4]; 64]; 8]>,
     tabs8: Box<[[BitPlane256; 256]; 2]>,
+    tabs4: Box<[[BitPlane256; 16]; 4]>,
     bs256_buf: Box<Bs256>,
     h_fold: Box<[Gf128Lanes; 4]>,
     c_claim: [RepGf128Lanes; 2],
@@ -622,6 +659,7 @@ impl BitCheckScratch {
             hwm_bs: 0,
             step2_lanes: Box::new([[[[0u64; 2]; STEP2_QUAD_CHUNK * 4]; 64]; 8]),
             tabs8: Box::new([[[0u64; 4]; 256]; 2]),
+            tabs4: Box::new([[[0u64; 4]; 16]; 4]),
             bs256_buf: Box::new([[0u64; 4]; 128]),
             h_fold: Box::new([z_lanes; 4]),
             c_claim: [[z_lanes; 2]; 2],
@@ -678,6 +716,11 @@ impl BitCheckScratch {
         for arr in self.step2_lanes.iter_mut() {
             for lane_slice in arr.iter_mut() {
                 zeroize_gf128_slice(lane_slice);
+            }
+        }
+        for tab in self.tabs4.iter_mut() {
+            for entry in tab.iter_mut() {
+                ct_zeroize_u64s(entry);
             }
         }
         for tab in self.tabs8.iter_mut() {
@@ -1546,7 +1589,7 @@ impl<T: Transport> Engine<T> {
 
         // Step 2: In-place Arity-2 half-split BBCGGI19 inner-product folding on `Bs256` quads
         // (`cur_quads -> ceil(cur_quads / 2) -> ... -> 1`), streaming cross-terms in L2-sized
-        // chunks into contiguous `PCLMULQDQ` dot products and folding vectors via 8-bit byte
+        // chunks into contiguous `PCLMULQDQ` dot products and folding vectors via 4-bit nibble
         // public matrix evaluation (`0` `a_next`/`b_next` buffers).
         let mut cur_quads = num_quads;
         let mut quad_tmp = [[[0u64; 2]; 64]; 4];
@@ -1688,7 +1731,7 @@ impl<T: Transport> Engine<T> {
 
                     let (lo_a, hi_a) = sp.a_bs[t][side].split_at_mut(half_q);
                     for (dst_a, src_a) in lo_a.iter_mut().zip(&*hi_a) {
-                        xor_mul_bs256_by_public(src_a, &rk_masks[t], &mut sp.tabs8, dst_a);
+                        xor_mul_bs256_by_public(src_a, &rk_masks[t], &mut sp.tabs4, dst_a);
                     }
                     sp.a_bs[t][side].truncate(half_q);
 
@@ -1698,7 +1741,7 @@ impl<T: Transport> Engine<T> {
                         xor_mul_bs256_by_public(
                             dst_b,
                             &rk_masks[t],
-                            &mut sp.tabs8,
+                            &mut sp.tabs4,
                             &mut sp.bs256_buf,
                         );
                         *dst_b = *sp.bs256_buf;
@@ -4017,7 +4060,7 @@ pub(crate) mod tests {
         let pub_masks8 = build_public_mul_masks_bs256(pub_c);
         let src_bs = *scratch.bs256_buf;
         let mut prod_bs = [[0u64; 4]; 128];
-        xor_mul_bs256_by_public(&src_bs, &pub_masks8, &mut scratch.tabs8, &mut prod_bs);
+        xor_mul_bs256_by_public(&src_bs, &pub_masks8, &mut scratch.tabs4, &mut prod_bs);
         let mut prod_quad = [[[0u64; 2]; 64]; 4];
         transpose_bs256_to_quad_lanes(&prod_bs, &mut prod_quad, &mut scratch.tr_rows, backend);
         for sub in 0..4 {
@@ -4068,6 +4111,7 @@ pub(crate) mod tests {
         assert_eq!(scratch.step0_buf[0], [0, 0]);
         assert!(scratch.c_claim[0][0].iter().all(|&w| w == [0, 0]));
         assert!(scratch.tabs8.iter().flatten().all(|&w| w == [0, 0, 0, 0]));
+        assert!(scratch.tabs4.iter().flatten().all(|&w| w == [0, 0, 0, 0]));
 
         // 6. Verify `u^3 - 7` is irreducible over Goldilocks: `3 | (p - 1)` and `7^((p-1)/3) != 1`.
         let exp = (GOLDILOCKS_P - 1) / 3;
