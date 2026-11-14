@@ -2,7 +2,40 @@
 
 ## Artifact scope and active integration
 
-The fixture inventory below records specific historical artifacts. Its hashes and
+Validation on 2026-11-14 distinguishes the passing component checks from the
+unfinished end-to-end gate:
+
+- The seven buildable modules (`ElfBinaryVerify`, `ElfFixtureVerify`, `McRefine`,
+  `ConstantTimeIsa`, `IsaCosim`, `SimdBinaryEquiv`, `SpirvSimtGpuEquiv`) pass an
+  `import all` / `setExporting false` audit of 8,626 declarations, with axioms
+  restricted to `propext` and `Quot.sound`. This does not include the two
+  unfinished modules.
+- The native scalar/SIMD instruction comparison covered 7,184 vectors with zero
+  discrepancies. The SIMD release-byte tests passed 512 batches for each multiply
+  kernel and 512 transpose matrices. AArch64 extraction is mandatory; these runs
+  do not claim native AArch64 execution.
+- The positive-count SyDTV Python analysis runs, but the Lean SyDTV module still
+  fails elaboration after the shared instruction-semantics changes. Its generated
+  proof template also needs migration to the current certificate API.
+- The recovered functional-equivalence draft is not yet a verified module. The
+  larger SIMD functional-refinement draft also has unresolved proof errors.
+- Exact object freshness fails for both certificate archives. The fresh object
+  hashes are `85d7429a69d32eeaf3ba41602e48975fd8cc10b438f5dfcca5ae3e21ba63e115`
+  (x86_64) and `9cf028bfc3026a4ab25df434b4e4b6cc6a7ecc518652a205431f13807e9f1ba5`
+  (AArch64). The table below identifies the embedded certificates, not these
+  fresh objects. Regeneration requires coordinated changes to
+  `CompiledRlibFixtures.lean`, `ElfFixtureSlices.lean` and `ElfInvCerts.lean`.
+- `Qsag.IsaCosim` contains the pure executor adapter and regression vectors;
+  `lean/IsaCosim.lean` imports it for JSON transport. The central axiom-audit
+  manifest must register the new proof module before its inventory gate can pass.
+
+The SPIR-V module proves codec, scheduling, race-freedom and leakage-model
+properties. Runtime shader functional equivalence remains unproved; its former
+§4 claim has been removed. Both SPIR-V 1.5 and 1.6 are represented explicitly.
+
+
+The fixture inventory below records the certificate archives embedded in
+`CompiledRlibFixtures.lean`, with decode counts checked by `ElfFixtureVerify.lean`. Its hashes and
 instruction counts do not describe every current build. `ElfBinaryVerify.lean`
 and `ConstantTimeIsa.lean` connect selected decoded ELF64 bytes to taint
 noninterference, scratch zero-on-exit and mutation `#tooth` witnesses. They do not
@@ -33,7 +66,7 @@ compiler, wrapper, dispatch or linked-executable boundary.
 Specifically, the verification pipeline:
 1. Parses `GNU ar` (`!<arch>\n`) archive headers and extended `//` filename tables in pure Lean 4 (`parseArArchive`, `parseArMember_subslice`).
 2. Locates the `ELF64` relocatable object member (`.rcgu.o`), validates `Elf64_Ehdr`, `.shstrtab`, `.symtab`, `.strtab`, and `.text` `Elf64_Shdr` headers, and slices the exact `[st_value .. st_value + st_size)` machine bytes of every `STT_FUNC` symbol (`extractElfFuncBytes_in_text_section`).
-3. Decodes all **23** exported cryptographic assembly kernels (**954** `x86_64` instructions + **191** `AArch64` instructions = **1,145** machine instructions) into operational semantics (`stepX86`/`runX86`, `stepArm64`/`runArm64`) with explicit leakage observations `StepObs` (`pc`, `(addr, width)` memory accesses, `isDoitSafe`).
+3. Decodes all **23** exported cryptographic assembly kernels (**999** `x86_64` instructions + **299** `AArch64` instructions = **1,298** machine instructions) into operational semantics (`stepX86`/`runX86`, `stepArm64`/`runArm64`) with explicit leakage observations `StepObs` (`pc`, `(addr, width)` memory accesses, `isDoitSafe`).
 4. Runs the relational abstract-origin & loop-invariant verifier `checkElfFuncThreeWayNI` (`O(1)` 3-level 16-way `PcMap` lookup) backed by the deductive soundness theorem **`checkElfFuncThreeWayNI_sound`**, discharging 3-way hardware constant-time noninterference (`PC-NI`, `Mem-NI`, `DOIT-NI`) plus System V AMD64 / AAPCS64 callee-saved preservation, `vzeroupper` hygiene, and scratch register zeroization before `ret`.
 5. Supplies decoded-byte evidence for functional refinement work in `McRefine.lean`; complete byte-to-algebra coverage must be established per symbol, separately from noninterference.
 
@@ -41,18 +74,18 @@ Specifically, the verification pipeline:
 
 ## 2. Cryptographic Provenance of Verified `.rlib` Binaries
 
-Both `.rlib` archives were compiled with `cargo build -p qsag-asm --release` (`rustc 1.94.0`) on remote Linux hardware (`x86 Linux build host` for `x86_64`, `ARM Linux build host` for `aarch64`) and embedded as compact 32-word little-endian `UInt64` chunks in `lean/Qsag/CompiledRlibFixtures.lean` via `scripts/extract_rlib_elf.py`:
+Both `.rlib` archives were compiled with `cargo build -p qsag-asm --release` (`release profile with LTO disabled`) on remote Linux hardware (`x86 Linux build host` for `x86_64`, `ARM Linux build host` for `aarch64`) and embedded as compact 32-word little-endian `UInt64` chunks in `lean/Qsag/CompiledRlibFixtures.lean` via `scripts/extract_rlib_elf.py`:
 
 | Target Triple | Build Host | Artifact | Byte Size | SHA-256 Digest | Symbols / Instrs |
 | :--- | :--- | :--- | ---: | :--- | ---: |
-| `x86_64-unknown-linux-gnu` | `x86 Linux build host` | `libqsag_asm.rlib` | `73,616 B` | `a2e3936516179b83660464bb94fee5df1df43cca2b672ec7ddf3cc8669392f3e` | — |
-| `x86_64-unknown-linux-gnu` | `x86 Linux build host` | `qsag_asm-*.rcgu.o` (`ELF64`, `EM_X86_64 = 62`) | `6,320 B` | `7f8df20ca3c5baa7ec30092aa8b9ae739c0275fad7ede7704b2c258ef42a1b5f` | `16` (`954` instrs) |
-| `aarch64-unknown-linux-gnu` | `ARM Linux build host` | `libqsag_asm.rlib` | `253,874 B` | `986c9ab494fb313d14174e223668db5a2df4899af43661a10ed5d32669828dd9` | — |
-| `aarch64-unknown-linux-gnu` | `ARM Linux build host` | `qsag_asm-*.rcgu.o` (`ELF64`, `EM_AARCH64 = 183`) | `1,832 B` | `5855a055f08795cdeda6ce41a417bab1d380b14ccd491069a21e7f11fcc08576` | `7` (`191` instrs) |
+| `x86_64-unknown-linux-gnu` | `x86 Linux build host` | `libqsag_asm.rlib` | `499,610 B` | `7b7ec65deaa64bc7cc8392aaa417af7cdb011f6acd6e0001a5daac062b9937bf` | — |
+| `x86_64-unknown-linux-gnu` | `x86 Linux build host` | `qsag_asm-*.rcgu.o` (`ELF64`, `EM_X86_64 = 62`) | `78,104 B` | `fbe87faf1486cb90698fba4dfd7497b66f50032a70d69abb7cddeaf1ee332702` | `16` (`999` instrs) |
+| `aarch64-unknown-linux-gnu` | `ARM Linux build host` | `libqsag_asm.rlib` | `474,566 B` | `fa402d30bc323fa46d045c8717b143c5387f6d2372e3e45dff1ea31f1859e4bc` | — |
+| `aarch64-unknown-linux-gnu` | `ARM Linux build host` | `qsag_asm-*.rcgu.o` (`ELF64`, `EM_AARCH64 = 183`) | `62,048 B` | `8ca2b4c1c28ee5d653803c2b4aa57681481179243f4addcc15eba797e3be8c7e` | `7` (`299` instrs) |
 
 ### Full 23-Symbol Inventory Verified by Kernel Reduction (`0 native_decide`)
 
-#### `x86_64` (`16` symbols, `954` instructions — `rlib_x86_all_16_three_way_ni`, `rlib_x86_every_symbol_three_way_ni_sound`)
+#### `x86_64` (`16` symbols, `999` instructions — `rlib_x86_all_16_three_way_ni`, `rlib_x86_every_symbol_three_way_ni_sound`)
 1. `qsag_asm_keccak_f1600_avx2_4x` (`0x0000..0x07f6`, 4-way AVX2 Keccak-$f[1600]$ with 32-byte aligned `0x340` stack frame, explicit 25-block `vmovdqa [rax], ymm0` stack scrub loop, `ymm0..ymm11` wipe, `vzeroupper`)
 2. `qsag_asm_keccak_chi_mpc_avx2` (`0x0800`-aligned MPC $\chi$ gate over AVX2 shares)
 3. `qsag_asm_gf256_shamir_mul_gfni` (`VGF2P8AFFINEQB` + `VGF2P8MULB` Wiedemann $\mathcal{T}_3$ multiplication, `ymm0..2, 14..15` wipe, `vzeroupper`)
@@ -70,7 +103,7 @@ Both `.rlib` archives were compiled with `cargo build -p qsag-asm --release` (`r
 15. `qsag_asm_ct_eq_bytes_x86_64` (branchless arbitrary-length byte-slice equality check with `r8`, `r9` wipe)
 16. `qsag_asm_ct_memzero_x86_64` (looping byte wipe followed by `MFENCE` compiler/memory barrier)
 
-#### `aarch64` (`7` symbols, `191` instructions — `rlib_aarch64_all_7_three_way_ni`, `rlib_aarch64_every_symbol_three_way_ni_sound`)
+#### `aarch64` (`7` symbols, `299` instructions — `rlib_aarch64_all_7_three_way_ni`, `rlib_aarch64_every_symbol_three_way_ni_sound`)
 1. `qsag_asm_enable_dit_aarch64` (`MSR DIT, #1` + `ISB` hardware data-independent timing enablement)
 2. `qsag_asm_keccak_sha3_neon` (`ARMv8.4-A+SHA3` `EOR` + `BCAX` 5-lane SIMD Keccak $\chi$ row with `v0..v7, v16..v20` wipe)
 3. `qsag_asm_keccak_theta_rho_sha3_neon` (`EOR3` + `RAX1` + `XAR` Keccak $\theta + \rho$ step with `v0..v7, v16..v18` wipe)
@@ -117,7 +150,7 @@ premises rather than extrapolating from the fixture inventory.
 ## 4. `LAW-M1` Encapsulation & Fast Kernel Elaboration Design
 
 1. **Compact 32-Word `UInt64` Chunk Fixtures (`lean/Qsag/CompiledRlibFixtures.lean`, 11 `@[expose]` $\le 12$):** Raw `.rlib` and `.rcgu.o` binaries are stored as flat 32-word little-endian `UInt64` chunks decoded tail-recursively via `decodeU64WordChunks` (`0` nested `OfNat.ofNat UInt8` AST chains), elaborating in `< 1s`.
-2. **Flat Register Banks & 3-Level Radix `PcMap` (`lean/Qsag/ElfBinaryVerify.lean`, `0` `@[expose]`):** `Bank16`, `Bank32`, and `PcMap` avoid `Array` bounds proof obligations and turn abstract-interpretation lookups into 3-step `O(1)` projections so kernel `decide +kernel` verifies all 1,145 instructions cleanly without `native_decide`.
+2. **Flat Register Banks & 3-Level Radix `PcMap` (`lean/Qsag/ElfBinaryVerify.lean`, `0` `@[expose]`):** `Bank16`, `Bank32`, and `PcMap` avoid `Array` bounds proof obligations and turn abstract-interpretation lookups into 3-step `O(1)` projections so kernel `decide +kernel` verifies all 1,298 instructions cleanly without `native_decide`.
 
 ---
 
