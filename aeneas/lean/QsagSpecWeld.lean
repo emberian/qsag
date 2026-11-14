@@ -1,39 +1,34 @@
 module
 import Lean
-public import QsagVerified.Proofs.RealSpecGuardBoundary
-import all QsagVerified.Proofs.RealSpecGuardBoundary
-public import QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld
-import all QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld
 public import QsagVerified.Proofs.RealSpecFieldWeld
 import all QsagVerified.Proofs.RealSpecFieldWeld
 public import QsagVerified.Proofs.RealSpecHashWeld
 import all QsagVerified.Proofs.RealSpecHashWeld
 public import QsagVerified.Proofs.RealSpecTowerWeld
 import all QsagVerified.Proofs.RealSpecTowerWeld
-public import QsagVerified.Proofs.RealSpecBeltWeld
-import all QsagVerified.Proofs.RealSpecBeltWeld
 public import QsagVerified.Proofs.RealSpecKeccakWeld
 import all QsagVerified.Proofs.RealSpecKeccakWeld
 
 /-!
-# Cross-package weld library and its axiom census
+# Primitive weld library and its axiom census
 
-Root of the `QsagSpecWeld` library: the modules that import both the Aeneas extraction and the
-`Qsag` specifications. Building it also runs the same axiom policy as `AuditMirAxioms`
-(`propext` and `Quot.sound` only) over every declaration those modules own, with a negative
-control. The census measures axiom dependencies, not production linkage or completeness.
+Root of the `QsagSpecWeld` library: the modules that weld extracted primitives to the `Qsag`
+specifications of the same primitives. Its `Qsag` imports are the primitive specifications only
+(`Goldilocks`, `SimulationSpine`, `BinaryTower`, `HashSigs`, `Keccak` and what those import), so
+it builds independently of the protocol-level `Qsag` modules. The welds whose statements mention
+protocol specifications (`MirSpecBridge`, `JortsBeltLatchAndQuorumSwitching`) are the separate
+`QsagCustodyWeld` library.
 
-Current mathematical boundaries:
+Building this root runs the axiom policy of `AuditMirAxioms` (`propext` and `Quot.sound` only)
+over every declaration those modules own, with a negative control. The census measures axiom
+dependencies, not production linkage.
+
+Mathematical content:
 * Goldilocks: add/sub/mul and canonical inversion, including exact nonzero MIR cancellation.
-* Binary towers: GF(256) multiplication; GF(256), Tower128, Tower256 addition.
+* Binary towers: addition and multiplication at GF(256), Tower128 and Tower256 against the
+  canonical recursive field, and absence of zero divisors for the extracted Tower128 product.
 * Hash signatures: WOTS+C digit acceptance/rejection, not hash-chain verification.
-* Keccak: arbitrary-state 24-round permutation and streaming phase laws, not multi-block XOF.
-* Belt: validated local guard grants and authenticated mask provenance, not production IO.
-
-Outstanding targets: canonical wider-tower multiplication, KoalaBear extraction, streaming
-absorb/pad/squeeze byte equivalence, production arithmetic linkage, and production BeltLatch
-persistence/recovery/echo refinement. These require additional proofs and, for missing
-production entry points, changes to Rust/extraction outside these weld modules.
+* Keccak: arbitrary-state 24-round permutation and streaming phase laws.
 -/
 
 open Lean Elab Command in
@@ -46,18 +41,14 @@ run_cmd do
     "QsagVerified.Proofs.RealSpecFieldWeld",
     "QsagVerified.Proofs.RealSpecTowerWeld",
     "QsagVerified.Proofs.RealSpecHashWeld",
-    "QsagVerified.Proofs.RealSpecKeccakWeld",
-    "QsagVerified.Proofs.RealSpecBeltWeld",
-    "QsagVerified.Proofs.RealSpecGuardBoundary",
-    "QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld"]
+    "QsagVerified.Proofs.RealSpecKeccakWeld"]
   let mut coveredModules : List String := []
   let mut checked : Nat := 0
   let mut rejected : Nat := 0
   for (name, _) in env.constants.toList do
     if let some idx := env.getModuleIdxFor? name then
       let owner := env.header.moduleNames[idx.toNat]!.toString
-      if owner.startsWith "QsagVerified.Proofs.RealSpec" ||
-          owner == "QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld" then
+      if requiredModules.contains owner then
         if !coveredModules.contains owner then
           coveredModules := owner :: coveredModules
         checked := checked + 1

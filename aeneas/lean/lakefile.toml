@@ -1,6 +1,6 @@
 name = "qsag_aeneas"
 version = "0.1.0"
-defaultTargets = ["Aeneas", "QsagVerified", "QsagMirProofs", "QsagSpecWeld", "AuditMirAxioms"]
+defaultTargets = ["Aeneas", "QsagVerified", "QsagMirProofs", "QsagSpecWeld", "AuditMirAxioms", "QsagCustodyWeld"]
 
 [leanOptions]
 autoImplicit = false
@@ -20,9 +20,13 @@ name = "QsagVerifiedChallenge"
 [[lean_lib]]
 name = "AuditMirAxioms"
 
-# Cross-package welds and their axiom census are mandatory default targets.
+# Cross-package welds and their axiom census are mandatory default targets. `QsagSpecWeld`
+# imports only primitive `Qsag` specifications; `QsagCustodyWeld` imports protocol-level ones.
 [[lean_lib]]
 name = "QsagSpecWeld"
+
+[[lean_lib]]
+name = "QsagCustodyWeld"
 
 [[require]]
 name = "qsag"

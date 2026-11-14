@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 
 root = Path(__file__).resolve().parent
-gates = ("AuditMirAxioms.lean",)
+gates = ("AuditMirAxioms.lean", "QsagCustodyWeld.lean")
 covered = set()
 for gate in gates:
     covered.update(re.findall(r"^import all (\S+)$", (root / gate).read_text(), re.M))
