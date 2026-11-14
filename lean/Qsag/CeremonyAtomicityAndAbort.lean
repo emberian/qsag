@@ -2055,3 +2055,1025 @@ private def buggyDoubleSignAttackTrace : List MultiLedgerEvent := [
     allows a `PowerLossCrash` (dropping or tearing the uncommitted leaf-burn write while retaining
     prior policy/preprocessing commits) followed by a post-reboot ceremony on a distinct message
     `msg₂ ≠ msg₁` to sign on `OutboundNetworkWire` under the **exact same `epochOrIndex`**! -/
+theorem tooth_release_before_durable_burn_reuses_leaf :
+    ∃ (trace : List MultiLedgerEvent) (finalState : MultiLedgerHostState)
+      (e₁ e₂ : WireEmission),
+      runTraceWith stepBuggyReleaseBeforeLeafFlush (initMultiLedgerHostState 100) trace =
+        some finalState ∧
+      e₁ ∈ finalState.outboundWire ∧
+      e₂ ∈ finalState.outboundWire ∧
+      e₁.epochOrIndex = e₂.epochOrIndex ∧
+      e₁.msgDigest ≠ e₂.msgDigest := by
+  cases hRun : runTraceWith stepBuggyReleaseBeforeLeafFlush (initMultiLedgerHostState 100)
+      buggyDoubleSignAttackTrace with
+  | none =>
+    exfalso
+    revert hRun
+    decide
+  | some sFinal =>
+    refine ⟨buggyDoubleSignAttackTrace, sFinal,
+      { ceremonyId := 1, windowId := 0, amount := 30, batchIdx := 0, epochOrIndex := 7,
+        msgDigest := BitVec.ofNat 256 0xAA01, party := 0, share := BitVec.ofNat 256 0x5001 },
+      { ceremonyId := 2, windowId := 0, amount := 40, batchIdx := 1, epochOrIndex := 7,
+        msgDigest := BitVec.ofNat 256 0xBB02, party := 0, share := BitVec.ofNat 256 0x5002 },
+      hRun, ?_, ?_, rfl, by decide⟩
+    · decide +revert
+    · decide +revert
+
+/-- Broken variant of `stepMultiLedgerHost` whose `EmitNetworkShare` checks the durable receipt
+    but NOT `ledgersCheckpointSaved`: reserved material is released while an older snapshot is
+    still an acceptable recovery result. -/
+def stepBuggyReleaseBeforeCheckpoint (host : MultiLedgerHostState) (ev : MultiLedgerEvent) :
+    Option MultiLedgerHostState :=
+  match ev with
+  | .EmitNetworkShare cid party share =>
+    match lookupVolatilePhase cid host.volatileCeremonies with
+    | some (.receiptIssued ceremonyReceipt) =>
+      if hostOperational host && ceremonyReceiptDurableValid host cid ceremonyReceipt then
+        let emitted : WireEmission := {
+          ceremonyId := cid
+          windowId := ceremonyReceipt.windowId
+          amount := ceremonyReceipt.amount
+          batchIdx := ceremonyReceipt.batchIdx
+          epochOrIndex := ceremonyReceipt.epochOrIndex
+          msgDigest := ceremonyReceipt.msgDigest
+          party := party
+          share := share
+        }
+        some { host with outboundWire := host.outboundWire ++ [emitted] }
+      else
+        none
+    | _ => none
+  | _ => stepMultiLedgerHost host ev
+
+private def uncheckpointedRollbackAttackTrace : List MultiLedgerEvent := [
+  .ObserveCleanPoisonLatch 1,
+  .StagePolicySpend 1 30 (BitVec.ofNat 256 0x1111),
+  .FlushPolicyWal 1,
+  .SaveCheckpoint .policy,
+  .StagePreprocBurn 1 0,
+  .FlushPreprocWal 1,
+  .SaveCheckpoint .preproc,
+  .StageLeafOrFtsReserve 1 7 (BitVec.ofNat 256 0xAA01),
+  .FlushLeafWal 1,
+  .EmitNetworkShare 1 0 (BitVec.ofNat 256 0x5001),
+  .PowerLossCrash .dropVolatile .dropVolatile .dropVolatile .tornActiveSlot,
+  .ObserveCleanPoisonLatch 2,
+  .StagePolicySpend 2 40 (BitVec.ofNat 256 0x2222),
+  .FlushPolicyWal 2,
+  .SaveCheckpoint .policy,
+  .StagePreprocBurn 2 1,
+  .FlushPreprocWal 2,
+  .SaveCheckpoint .preproc,
+  .StageLeafOrFtsReserve 2 7 (BitVec.ofNat 256 0xBB02),
+  .FlushLeafWal 2,
+  .SaveCheckpoint .leaf,
+  .EmitNetworkShare 2 0 (BitVec.ofNat 256 0x5002)
+]
+
+/-- **`#tooth` Counterexample (`tooth_release_before_checkpoint_rolls_back_leaf`)**:
+    The leaf reservation of ceremony 1 is DURABLY flushed before release, yet its external
+    checkpoint is not saved. Power loss damages the active leaf slot; recovery legitimately
+    accepts the older snapshot (the checkpoint is only a minimum generation), the reservation is
+    gone, and a second ceremony signs a distinct message under the **same `epochOrIndex`**. A
+    durable flush alone does not make a burn irrevocable. -/
+theorem tooth_release_before_checkpoint_rolls_back_leaf :
+    ∃ (trace : List MultiLedgerEvent) (finalState : MultiLedgerHostState)
+      (e₁ e₂ : WireEmission),
+      runTraceWith stepBuggyReleaseBeforeCheckpoint (initMultiLedgerHostState 100) trace =
+        some finalState ∧
+      e₁ ∈ finalState.outboundWire ∧
+      e₂ ∈ finalState.outboundWire ∧
+      e₁.epochOrIndex = e₂.epochOrIndex ∧
+      e₁.msgDigest ≠ e₂.msgDigest := by
+  cases hRun : runTraceWith stepBuggyReleaseBeforeCheckpoint (initMultiLedgerHostState 100)
+      uncheckpointedRollbackAttackTrace with
+  | none =>
+    exfalso
+    revert hRun
+    decide
+  | some sFinal =>
+    refine ⟨uncheckpointedRollbackAttackTrace, sFinal,
+      { ceremonyId := 1, windowId := 0, amount := 30, batchIdx := 0, epochOrIndex := 7,
+        msgDigest := BitVec.ofNat 256 0xAA01, party := 0, share := BitVec.ofNat 256 0x5001 },
+      { ceremonyId := 2, windowId := 0, amount := 40, batchIdx := 1, epochOrIndex := 7,
+        msgDigest := BitVec.ofNat 256 0xBB02, party := 0, share := BitVec.ofNat 256 0x5002 },
+      hRun, ?_, ?_, rfl, by decide⟩
+    · decide +revert
+    · decide +revert
+
+private theorem validMultiLedgerTrace_of_runTraceWith :
+    ∀ (s : MultiLedgerHostState) (evs : List MultiLedgerEvent) (sFinal : MultiLedgerHostState),
+      runTraceWith stepMultiLedgerHost s evs = some sFinal →
+      ValidMultiLedgerTrace s evs sFinal
+  | s, [], sFinal, h => by
+    injection h with hEq
+    subst hEq
+    exact .nil s
+  | s, ev :: rest, sFinal, h => by
+    unfold runTraceWith at h
+    cases hStep : stepMultiLedgerHost s ev with
+    | none =>
+      rw [hStep] at h
+      cases h
+    | some sNext =>
+      rw [hStep] at h
+      exact .cons hStep (validMultiLedgerTrace_of_runTraceWith sNext rest sFinal h)
+
+private def sampleCeremonyPrefix : List MultiLedgerEvent := [
+  .ObserveCleanPoisonLatch 10,
+  .ObserveCleanPoisonLatch 20,
+  .StagePolicySpend 10 25 (BitVec.ofNat 256 101),
+  .FlushPolicyWal 10,
+  .SaveCheckpoint .policy,
+  .StagePreprocBurn 10 0,
+  .FlushPreprocWal 10,
+  .SaveCheckpoint .preproc,
+  .StageLeafOrFtsReserve 10 0 (BitVec.ofNat 256 9001),
+  .FlushLeafWal 10,
+  .SaveCheckpoint .leaf,
+  .EmitNetworkShare 10 0 (BitVec.ofNat 256 7001)
+]
+
+private def sampleInterleavedCrashTrace : List MultiLedgerEvent :=
+  sampleCeremonyPrefix ++ [
+  .StagePolicySpend 20 15 (BitVec.ofNat 256 202),
+  .PowerLossCrash .dropVolatile .flushedBeforePowerLoss .dropVolatile .dropVolatile,
+  .ObserveCleanPoisonLatch 30,
+  .StagePolicySpend 30 30 (BitVec.ofNat 256 303),
+  .FlushPolicyWal 30,
+  .SaveCheckpoint .policy,
+  .StagePreprocBurn 30 1,
+  .FlushPreprocWal 30,
+  .SaveCheckpoint .preproc,
+  .StageLeafOrFtsReserve 30 1 (BitVec.ofNat 256 9003),
+  .FlushLeafWal 30,
+  .PowerLossCrash .dropVolatile .dropVolatile .dropVolatile .tornActiveSlot,
+  .ObserveCleanPoisonLatch 40,
+  .StagePolicySpend 40 30 (BitVec.ofNat 256 404),
+  .FlushPolicyWal 40,
+  .SaveCheckpoint .policy,
+  .StagePreprocBurn 40 2,
+  .FlushPreprocWal 40,
+  .SaveCheckpoint .preproc,
+  .StageLeafOrFtsReserve 40 1 (BitVec.ofNat 256 9004),
+  .FlushLeafWal 40,
+  .SaveCheckpoint .leaf,
+  .EmitNetworkShare 40 0 (BitVec.ofNat 256 7004)
+]
+
+private def sampleInterleavedFinalState : MultiLedgerHostState :=
+  (runTraceWith stepMultiLedgerHost (initMultiLedgerHostState 100) sampleInterleavedCrashTrace).getD
+    (initMultiLedgerHostState 100)
+
+/-- Non-vacuous multi-ceremony, multi-crash reachable trace witness: interleaved ceremonies, an
+    asymmetric per-file flush at power loss, and loss of the ACTIVE leaf slot holding a flushed but
+    un-checkpointed reservation. Recovery rolls the leaf ledger back one generation; the reservation
+    was never released, so the host stays operational and legitimately reuses that `epochOrIndex`
+    for a later ceremony. Two emissions complete. -/
+theorem witness_multi_ledger_crash_trace_inhabited :
+    ∃ (trace : List MultiLedgerEvent) (finalState : MultiLedgerHostState),
+      ValidMultiLedgerTrace (initMultiLedgerHostState 100) trace finalState ∧
+      hostOperational finalState = true ∧
+      finalState.outboundWire.length = 2 ∧
+      wireWindowSpend 0 finalState.outboundWire = 55 := by
+  have hRun : runTraceWith stepMultiLedgerHost (initMultiLedgerHostState 100)
+      sampleInterleavedCrashTrace = some sampleInterleavedFinalState := by decide
+  have hOp : hostOperational sampleInterleavedFinalState = true := by decide
+  have hLen : sampleInterleavedFinalState.outboundWire.length = 2 := by decide
+  have hSpend : wireWindowSpend 0 sampleInterleavedFinalState.outboundWire = 55 := by decide
+  exact ⟨sampleInterleavedCrashTrace, sampleInterleavedFinalState,
+    validMultiLedgerTrace_of_runTraceWith _ _ _ hRun, hOp, hLen, hSpend⟩
+
+private def sampleFailClosedTrace : List MultiLedgerEvent :=
+  sampleCeremonyPrefix ++ [
+  .PowerLossCrash .dropVolatile .dropVolatile .dropVolatile .tornActiveSlot
+]
+
+private def sampleFailClosedFinalState : MultiLedgerHostState :=
+  (runTraceWith stepMultiLedgerHost (initMultiLedgerHostState 100) sampleFailClosedTrace).getD
+    (initMultiLedgerHostState 100)
+
+/-- Reachable fail-closed witness: after a RELEASED ceremony (leaf checkpoint saved), loss of the
+    active leaf slot leaves no snapshot at or above the checkpoint. The host is `HostFailedClosed`,
+    refuses to start a new ceremony, and its single emission stays on the wire. -/
+theorem witness_torn_checkpointed_leaf_fails_closed :
+    ∃ (trace : List MultiLedgerEvent) (finalState : MultiLedgerHostState),
+      ValidMultiLedgerTrace (initMultiLedgerHostState 100) trace finalState ∧
+      HostFailedClosed finalState ∧
+      finalState.outboundWire.length = 1 ∧
+      stepMultiLedgerHost finalState (.ObserveCleanPoisonLatch 50) = none := by
+  have hRun : runTraceWith stepMultiLedgerHost (initMultiLedgerHostState 100)
+      sampleFailClosedTrace = some sampleFailClosedFinalState := by decide
+  have hDead : HostFailedClosed sampleFailClosedFinalState :=
+    ⟨by decide, by decide, by decide, by decide, by decide⟩
+  have hLen : sampleFailClosedFinalState.outboundWire.length = 1 := by decide
+  have hRefuse : stepMultiLedgerHost sampleFailClosedFinalState (.ObserveCleanPoisonLatch 50) =
+      none := by decide
+  exact ⟨sampleFailClosedTrace, sampleFailClosedFinalState,
+    validMultiLedgerTrace_of_runTraceWith _ _ _ hRun, hDead, hLen, hRefuse⟩
+
+/-! ## §2. Cut-the-Hash 2-Phase Transcript & Selective-Abort Statistical Independence -/
+
+/-- Constructive modular subtraction `x - y mod Q` on `Fin Q` (`0 < Q`), modeling additive Beaver/BDOZ
+    masked wire openings `d_i = x_i - a_i mod Q`. -/
+def subModFinQ (Q : Nat) (hQ : 0 < Q) (x y : Fin Q) : Fin Q :=
+  ⟨(x.val + Q - y.val) % Q, Nat.mod_lt _ hQ⟩
+
+theorem subModFinQ_involutive (Q : Nat) (hQ : 0 < Q) (x a : Fin Q) :
+    subModFinQ Q hQ x (subModFinQ Q hQ x a) = a := by
+  apply Fin.ext
+  simp only [subModFinQ]
+  have hx : x.val < Q := x.isLt
+  have ha : a.val < Q := a.isLt
+  by_cases hle : a.val ≤ x.val
+  · have h1 : (x.val + Q - a.val) % Q = x.val - a.val := by
+      have hEq : x.val + Q - a.val = (x.val - a.val) + 1 * Q := by omega
+      rw [hEq, Nat.add_mul_mod_self_right]
+      exact Nat.mod_eq_of_lt (by omega)
+    rw [h1]
+    have h2 : x.val + Q - (x.val - a.val) = a.val + 1 * Q := by omega
+    rw [h2, Nat.add_mul_mod_self_right]
+    exact Nat.mod_eq_of_lt ha
+  · have h1 : (x.val + Q - a.val) % Q = x.val + Q - a.val :=
+      Nat.mod_eq_of_lt (by omega)
+    rw [h1]
+    have h2 : x.val + Q - (x.val + Q - a.val) = a.val := by omega
+    rw [h2]
+    exact Nat.mod_eq_of_lt ha
+
+/-- Uniform Beaver mask bijection over `Fin Q` (`d = x - a mod Q`). -/
+@[expose] def maskBijectionFinQ (Q : Nat) (hQ : 0 < Q) (wireSecret : Fin Q) :
+    SimpleEquiv (Fin Q) (Fin Q) where
+  toFun a := subModFinQ Q hQ wireSecret a
+  invFun d := subModFinQ Q hQ wireSecret d
+  left_inv a := subModFinQ_involutive Q hQ wireSecret a
+  right_inv d := subModFinQ_involutive Q hQ wireSecret d
+
+/-- Uniform XOR Beaver/commitment mask bijection over `BitVec w` (`d = x ^^^ a`). -/
+@[expose] def maskBijectionBitVec (w : Nat) (wireSecret : BitVec w) :
+    SimpleEquiv (BitVec w) (BitVec w) where
+  toFun a := wireSecret ^^^ a
+  invFun d := wireSecret ^^^ d
+  left_inv a := by bv_xor_cancel
+  right_inv d := by bv_xor_cancel
+
+/-- Honest Phase-1 randomness in Cut-the-Hash prior to the `MAC-OK` barrier:
+    1. `beaverRingMask : Fin Q` (additive Beaver/BDOZ wire mask `a_i`),
+    2. `beaverXorMask : BitVec w` (boolean/sponge Beaver wire mask),
+    3. `commitBlindMask : BitVec w` (hiding pad blinding `COMMIT(y_share, mac_share)`). -/
+structure HonestPreOpenMasks (Q w : Nat) where
+  beaverRingMask : Fin Q
+  beaverXorMask : BitVec w
+  commitBlindMask : BitVec w
+  deriving Repr, DecidableEq
+
+/-- Malicious adversary's complete pre-`OPEN` view in Phase 1 prior to the `MAC-OK` barrier:
+    masked Beaver differences `(dRing, dXor)` plus hiding commitment `commitTag` to `(y_share, mac_share)`. -/
+structure AdvPreOpenView (Q w : Nat) where
+  maskedDiffRing : Fin Q
+  maskedDiffXor : BitVec w
+  commitTag : BitVec w
+  deriving Repr, DecidableEq
+
+/-- Rushing corrupt party. Its Phase-1 contributions are chosen AFTER it has seen the honest
+    messages of the same round: `reactToRingOpen` is its input to the boolean layer, picked after
+    the honest masked ring opening; `reactToAllOpens` is its complete corrupt contribution (its
+    shares, its MAC material, any injected additive error), picked after every honest masked
+    opening and before the honest commitment is formed. -/
+structure RushingCorruptStrategy (CorruptIn : Type) (Q w : Nat) where
+  reactToRingOpen : Fin Q → CorruptIn
+  reactToAllOpens : Fin Q → BitVec w → CorruptIn
+
+/-- A non-adaptive corrupt party with one fixed contribution. -/
+def RushingCorruptStrategy.const {CorruptIn : Type} {Q w : Nat} (c : CorruptIn) :
+    RushingCorruptStrategy CorruptIn Q w where
+  reactToRingOpen := fun _ => c
+  reactToAllOpens := fun _ _ => c
+
+/-- The corrupt party's complete Phase-1 contribution, replayed from the view it reacted to. -/
+def corruptContribution {CorruptIn : Type} {Q w : Nat}
+    (adv : RushingCorruptStrategy CorruptIn Q w) (view : AdvPreOpenView Q w) : CorruptIn :=
+  adv.reactToAllOpens view.maskedDiffRing view.maskedDiffXor
+
+/-- Parameterized Cut-the-Hash 2-phase signing specification (`Phase 1` masked Beaver + `COMMIT` ->
+    `MAC-OK` barrier -> `Phase 2` `OPEN(y_share)` reconstructing `finalSignature sk msg R`).
+
+    - The honest ring wire is opened first and cannot depend on corrupt input; the boolean wire and
+      both output shares may depend on what the rushing corrupt party contributed.
+    - `commitHiding` is the PERFECT-HIDING hypothesis on the commitment, stated explicitly: for
+      every committed pair `(y_share, mac_share)` the map `blind ↦ COMMIT(y_share, mac_share; blind)`
+      is a bijection of `BitVec w`, so a uniformly blinded tag is uniform whatever was committed.
+      A hash commitment is only computationally hiding and does not inhabit this field.
+    - `reconstruct_eq` is correctness of every run that passes the `MAC-OK` barrier, for every
+      corrupt contribution (binding of the commitment and soundness of the MAC check are assumed
+      here, not derived). -/
+structure CutTheHashProtocolSpec (SK Msg Rand CorruptIn : Type) (Q w : Nat) where
+  wireRingSecret : SK → Msg → Rand → Fin Q
+  wireXorSecret : SK → Msg → Rand → CorruptIn → BitVec w
+  yShareHonest : SK → Msg → Rand → CorruptIn → BitVec w
+  yShareCorrupt : SK → Msg → Rand → CorruptIn → BitVec w
+  macShareHonest : SK → Msg → Rand → CorruptIn → BitVec w
+  commitHiding : BitVec w → BitVec w → SimpleEquiv (BitVec w) (BitVec w)
+  finalSignature : SK → Msg → Rand → BitVec w
+  reconstruct_eq : ∀ sk msg R cIn,
+    yShareHonest sk msg R cIn ^^^ yShareCorrupt sk msg R cIn = finalSignature sk msg R
+
+/-- Phase-1 pre-`OPEN` adversary view induced by `(sk, msg, R)`, the rushing strategy `adv` and
+    honest masks `m`, in protocol order: honest masked ring opening, corrupt reaction, honest
+    masked boolean opening, corrupt reaction, honest blinded commitment. -/
+def evalPreOpenView {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (m : HonestPreOpenMasks Q w) : AdvPreOpenView Q w :=
+  let dRing := subModFinQ Q hQ (spec.wireRingSecret sk msg R) m.beaverRingMask
+  let dXor := spec.wireXorSecret sk msg R (adv.reactToRingOpen dRing) ^^^ m.beaverXorMask
+  let cAll := adv.reactToAllOpens dRing dXor
+  { maskedDiffRing := dRing
+    maskedDiffXor := dXor
+    commitTag :=
+      (spec.commitHiding (spec.yShareHonest sk msg R cAll)
+        (spec.macShareHonest sk msg R cAll)).toFun m.commitBlindMask }
+
+/-- **Uniform Mask Bijection (`maskBijection`)**:
+    For EVERY fixed `(sk, msg, R)` and EVERY rushing corrupt strategy `adv`, the Phase-1 transcript
+    map `evalPreOpenView` is an explicit `SimpleEquiv` bijection from `HonestPreOpenMasks Q w` onto
+    `AdvPreOpenView Q w`. The inverse peels the rounds in order, replaying the adversary's own
+    reactions, so the view is uniform and independent of `(sk, finalSignature sk msg R)` even
+    though later honest messages depend on adaptively chosen corrupt input. -/
+@[expose] def maskBijection {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q) :
+    SimpleEquiv (HonestPreOpenMasks Q w) (AdvPreOpenView Q w) where
+  toFun m := evalPreOpenView spec sk msg R adv hQ m
+  invFun v :=
+    let cAll := corruptContribution adv v
+    { beaverRingMask := subModFinQ Q hQ (spec.wireRingSecret sk msg R) v.maskedDiffRing
+      beaverXorMask :=
+        spec.wireXorSecret sk msg R (adv.reactToRingOpen v.maskedDiffRing) ^^^ v.maskedDiffXor
+      commitBlindMask :=
+        (spec.commitHiding (spec.yShareHonest sk msg R cAll)
+          (spec.macShareHonest sk msg R cAll)).invFun v.commitTag }
+  left_inv m := by
+    cases m with
+    | mk mr mx mc =>
+      have hx : ∀ a : BitVec w, a ^^^ (a ^^^ mx) = mx := fun a => by bv_xor_cancel
+      simp only [evalPreOpenView, corruptContribution, subModFinQ_involutive, hx, SimpleEquiv.left_inv]
+  right_inv v := by
+    cases v with
+    | mk vr vx vc =>
+      have hx : ∀ a : BitVec w, a ^^^ (a ^^^ vx) = vx := fun a => by bv_xor_cancel
+      simp only [evalPreOpenView, corruptContribution, subModFinQ_involutive, hx, SimpleEquiv.right_inv]
+
+/-- Two-phase Cut-the-Hash execution with `MAC-OK` barrier:
+    - Phase 1 computes `view := evalPreOpenView ...` against the rushing strategy `adv`.
+    - At the `MAC-OK` barrier, if the selective-abort adversary outputs `abortPred view = true`,
+      the ceremony halts cleanly (`none`) BEFORE `OPEN(y_share)`.
+    - Otherwise (`abortPred view = false`), Phase 2 opens `y_H` and outputs
+      `some (y_H ^^^ y_C) = some (finalSignature sk msg R)`. -/
+def execCutTheHashWithBarrier {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (m : HonestPreOpenMasks Q w)
+    (abortPred : AdvPreOpenView Q w → Bool) : Option (BitVec w) :=
+  if abortPred (evalPreOpenView spec sk msg R adv hQ m) then
+    none
+  else
+    some (spec.yShareHonest sk msg R (corruptContribution adv (evalPreOpenView spec sk msg R adv hQ m)) ^^^
+      spec.yShareCorrupt sk msg R (corruptContribution adv (evalPreOpenView spec sk msg R adv hQ m)))
+
+/-! ### Constructive Finite Sample-Space Enumerations for `HonestPreOpenMasks` & `AdvPreOpenView` -/
+
+/-- Constructive enumeration of `BitVec w` by `Fin (2 ^ w)`. -/
+def enumBitVec (w : Nat) : SimpleEquiv (Fin (2 ^ w)) (BitVec w) where
+  toFun i := BitVec.ofNat w i.val
+  invFun bv := ⟨bv.toNat, bv.isLt⟩
+  left_inv i := by
+    apply Fin.ext
+    simp only [BitVec.toNat_ofNat]
+    exact Nat.mod_eq_of_lt i.isLt
+  right_inv bv := BitVec.eq_of_toNat_eq (by simp)
+
+private theorem prod_idx_lt {n m : Nat} (a : Fin n) (b : Fin m) :
+    a.val * m + b.val < n * m := by
+  have ha1 : a.val + 1 ≤ n := a.isLt
+  have hMul : (a.val + 1) * m ≤ n * m := Nat.mul_le_mul_right m ha1
+  rw [Nat.add_mul, Nat.one_mul] at hMul
+  have hb : b.val < m := b.isLt
+  omega
+
+private theorem div_lt_of_lt_mul {n m k : Nat} (_hm : 0 < m) (hk : k < n * m) :
+    k / m < n := by
+  by_cases hLt : k / m < n
+  · exact hLt
+  · exfalso
+    have hGe : n ≤ k / m := Nat.le_of_not_lt hLt
+    have hMul : n * m ≤ (k / m) * m := Nat.mul_le_mul_right m hGe
+    have hDivMod := Nat.div_add_mod k m
+    rw [Nat.mul_comm] at hDivMod
+    omega
+
+/-- Constructive product enumeration `SimpleEquiv (Fin (n * m)) (A × B)` for `0 < m`. -/
+def enumProd {A B : Type} {n m : Nat} (hm : 0 < m)
+    (ea : SimpleEquiv (Fin n) A) (eb : SimpleEquiv (Fin m) B) :
+    SimpleEquiv (Fin (n * m)) (A × B) where
+  toFun k :=
+    (ea.toFun ⟨k.val / m, div_lt_of_lt_mul hm k.isLt⟩,
+     eb.toFun ⟨k.val % m, Nat.mod_lt k.val hm⟩)
+  invFun p :=
+    ⟨(ea.invFun p.1).val * m + (eb.invFun p.2).val, prod_idx_lt (ea.invFun p.1) (eb.invFun p.2)⟩
+  left_inv k := by
+    simp only [ea.left_inv, eb.left_inv]
+    apply Fin.ext
+    have hDivMod := Nat.div_add_mod k.val m
+    rw [Nat.mul_comm] at hDivMod
+    exact hDivMod
+  right_inv p := by
+    rcases p with ⟨a, b⟩
+    let ia := ea.invFun a
+    let ib := eb.invFun b
+    have hComm : ia.val * m + ib.val = ib.val + m * ia.val := by
+      rw [Nat.mul_comm ia.val m, Nat.add_comm]
+    have hDiv : (ia.val * m + ib.val) / m = ia.val := by
+      rw [hComm, Nat.add_mul_div_left ib.val ia.val hm, Nat.div_eq_of_lt ib.isLt, Nat.zero_add]
+    have hMod : (ia.val * m + ib.val) % m = ib.val := by
+      rw [hComm, Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt ib.isLt]
+    have hFst : (⟨(ia.val * m + ib.val) / m, div_lt_of_lt_mul hm (prod_idx_lt ia ib)⟩ : Fin n) = ia :=
+      Fin.ext hDiv
+    have hSnd : (⟨(ia.val * m + ib.val) % m, Nat.mod_lt _ hm⟩ : Fin m) = ib :=
+      Fin.ext hMod
+    exact Prod.ext
+      (by change ea.toFun _ = a; rw [hFst]; exact ea.right_inv a)
+      (by change eb.toFun _ = b; rw [hSnd]; exact eb.right_inv b)
+
+/-- Total mask-space cardinality `Q * 2^w * 2^w`. -/
+abbrev preOpenMaskCard (Q w : Nat) : Nat := Q * 2 ^ w * 2 ^ w
+
+/-- Constructive enumeration of `HonestPreOpenMasks Q w`. -/
+def enumHonestPreOpenMasks (Q w : Nat) :
+    SimpleEquiv (Fin (preOpenMaskCard Q w)) (HonestPreOpenMasks Q w) :=
+  let eqv12 := enumProd (Nat.two_pow_pos w)
+    { toFun := id, invFun := id, left_inv := fun _ => rfl, right_inv := fun _ => rfl }
+    (enumBitVec w)
+  let eqv123 := enumProd (Nat.two_pow_pos w) eqv12 (enumBitVec w)
+  { toFun := fun k =>
+      let ((mr, mx), mc) := eqv123.toFun k
+      ⟨mr, mx, mc⟩
+    invFun := fun ⟨mr, mx, mc⟩ => eqv123.invFun ((mr, mx), mc)
+    left_inv := fun k => eqv123.left_inv k
+    right_inv := fun ⟨mr, mx, mc⟩ => by
+      have h := eqv123.right_inv ((mr, mx), mc)
+      exact congrArg (fun p => HonestPreOpenMasks.mk p.1.1 p.1.2 p.2) h }
+
+/-- Constructive enumeration of `AdvPreOpenView Q w`. -/
+def enumAdvPreOpenViews (Q w : Nat) :
+    SimpleEquiv (Fin (preOpenMaskCard Q w)) (AdvPreOpenView Q w) :=
+  let base := enumHonestPreOpenMasks Q w
+  { toFun := fun k =>
+      let m := base.toFun k
+      ⟨m.beaverRingMask, m.beaverXorMask, m.commitBlindMask⟩
+    invFun := fun v => base.invFun ⟨v.maskedDiffRing, v.maskedDiffXor, v.commitTag⟩
+    left_inv := fun k => base.left_inv k
+    right_inv := fun ⟨vr, vx, vc⟩ => by
+      have h := base.right_inv ⟨vr, vx, vc⟩
+      exact congrArg (fun m => AdvPreOpenView.mk m.beaverRingMask m.beaverXorMask m.commitBlindMask) h }
+
+/-- Secret-independent count of pre-`OPEN` views accepted (`abortPred v = false`) by the adversary. -/
+def viewMaskSurviveCount {Q w : Nat} (abortPred : AdvPreOpenView Q w → Bool) : Nat :=
+  finSum (preOpenMaskCard Q w) (fun idx =>
+    if abortPred ((enumAdvPreOpenViews Q w).toFun idx) then 0 else 1)
+
+/-- Standalone FIPS 205 / Baggy / Jorts / QS-B signature output count over randomizer space `Fin cardR`. -/
+def idealStandaloneSigCount {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
+    (targetSig : BitVec w) : Nat :=
+  finSum cardR (fun rIdx =>
+    if spec.finalSignature sk msg (decodeRand rIdx) = targetSig then 1 else 0)
+
+/-- Surviving emitted signature count for `targetSig` under selective abort `abortPred`. -/
+def survivingRealSigCount {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPred : AdvPreOpenView Q w → Bool) (targetSig : BitVec w) : Nat :=
+  finSum cardR (fun rIdx =>
+    finSum (preOpenMaskCard Q w) (fun mIdx =>
+      if execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
+          ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred = some targetSig then 1 else 0))
+
+/-- Constructive `{0, 1}` indicator of `Option.isSome` avoiding per-declaration `_match` duplication. -/
+def optSomeIndicator {α : Type} : Option α → Nat
+  | some _ => 1
+  | none => 0
+
+/-- Total non-aborted executions across `(Fin cardR × Fin (preOpenMaskCard Q w))`. -/
+def totalSurvivingRuns {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPred : AdvPreOpenView Q w → Bool) : Nat :=
+  finSum cardR (fun rIdx =>
+    finSum (preOpenMaskCard Q w) (fun mIdx =>
+      optSomeIndicator (execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
+        ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred)))
+
+/-- Cross-multiplied L1 statistical distance numerator over all `2^w` possible `w`-bit signatures
+    comparing the abort-conditioned surviving Cut-the-Hash output distribution against the
+    standalone signer. -/
+def abortConditionedStatDistNum {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPred : AdvPreOpenView Q w → Bool) : Nat :=
+  let totalSurv := totalSurvivingRuns spec sk msg cardR decodeRand adv hQ abortPred
+  finSum (2 ^ w) (fun sIdx =>
+    let sig := (enumBitVec w).toFun sIdx
+    natAbsDiff
+      (survivingRealSigCount spec sk msg cardR decodeRand adv hQ abortPred sig * cardR)
+      (idealStandaloneSigCount spec sk msg cardR decodeRand sig * totalSurv))
+
+private theorem finSum_mul_right {n : Nat} (f : Fin n → Nat) (c : Nat) :
+    finSum n (fun i => f i * c) = finSum n f * c := by
+  have h1 : finSum n (fun i => f i * c) = finSum n (fun i => c * f i) :=
+    finSum_congr (fun i => Nat.mul_comm (f i) c)
+  rw [h1, finSum_mul_left, Nat.mul_comm]
+
+private theorem finSum_two (f : Fin 2 → Nat) :
+    finSum 2 f = f ⟨0, Nat.zero_lt_succ 1⟩ + f ⟨1, Nat.succ_lt_succ (Nat.zero_lt_succ 0)⟩ := by
+  simp [finSum]
+
+private theorem natAbsDiff_zero_left (n : Nat) : natAbsDiff 0 n = n := by
+  simp [natAbsDiff]
+
+private theorem optSomeIndicator_ite {α : Type} (b : Bool) (x : α) :
+    optSomeIndicator (if b then none else some x) = if b then 0 else 1 := by
+  cases b <;> rfl
+
+private theorem indicator_ite_none_some {α : Type} [DecidableEq α] (b : Bool) (x y : α) :
+    (if (if b then none else some x) = some y then 1 else 0) =
+      if b then 0 else (if x = y then 1 else 0) := by
+  cases b
+  · change (if (some x : Option α) = some y then 1 else 0) = if x = y then 1 else 0
+    by_cases h : x = y
+    · subst h; simp only [↓reduceIte]
+    · have hNe : (some x : Option α) ≠ some y := fun he => h (Option.some.inj he)
+      simp only [hNe, h, ↓reduceIte]
+  · rfl
+
+private theorem preOpenView_sum_invariant {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (weight : AdvPreOpenView Q w → Nat) :
+    finSum (preOpenMaskCard Q w) (fun mIdx =>
+      weight (evalPreOpenView spec sk msg R adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx))) =
+    finSum (preOpenMaskCard Q w) (fun vIdx =>
+      weight ((enumAdvPreOpenViews Q w).toFun vIdx)) := by
+  let bij := maskBijection spec sk msg R adv hQ
+  let enumM := enumHonestPreOpenMasks Q w
+  let enumV := enumAdvPreOpenViews Q w
+  let π : Fin (preOpenMaskCard Q w) → Fin (preOpenMaskCard Q w) :=
+    fun mIdx => enumV.invFun (bij.toFun (enumM.toFun mIdx))
+  let πinv : Fin (preOpenMaskCard Q w) → Fin (preOpenMaskCard Q w) :=
+    fun vIdx => enumM.invFun (bij.invFun (enumV.toFun vIdx))
+  have hPerm := finSum_perm_invariant π πinv
+    (fun i => by simp [π, πinv, enumV.right_inv, bij.left_inv, enumM.left_inv])
+    (fun j => by simp [π, πinv, enumM.right_inv, bij.right_inv, enumV.left_inv])
+    (fun vIdx => weight (enumV.toFun vIdx))
+  have hCong :
+      finSum (preOpenMaskCard Q w) (fun mIdx =>
+        weight (evalPreOpenView spec sk msg R adv hQ (enumM.toFun mIdx))) =
+      finSum (preOpenMaskCard Q w) (fun i => weight (enumV.toFun (π i))) := by
+    apply finSum_congr
+    intro i
+    dsimp only [π, bij, maskBijection]
+    rw [enumV.right_inv]
+  exact hCong.trans hPerm
+
+/-- **Exact Fiber Uniformity of Pre-`OPEN` View**:
+    For every `(sk, msg, R)`, every rushing corrupt strategy `adv` and every target
+    `targetView : AdvPreOpenView Q w`, there is
+    exact honest-mask multiplicity `1` producing `targetView`, completely independent of
+    `(sk, finalSignature sk msg R)`. -/
+theorem preOpenView_exact_fiber_one {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (targetView : AdvPreOpenView Q w) :
+    finSum (preOpenMaskCard Q w) (fun mIdx =>
+      if evalPreOpenView spec sk msg R adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx) = targetView
+      then 1 else 0) = 1 := by
+  rw [preOpenView_sum_invariant spec sk msg R adv hQ (fun v => if v = targetView then 1 else 0)]
+  let enumV := enumAdvPreOpenViews Q w
+  let iStar := enumV.invFun targetView
+  have hCongr :
+      finSum (preOpenMaskCard Q w) (fun vIdx => if enumV.toFun vIdx = targetView then 1 else 0) =
+      finSum (preOpenMaskCard Q w) (fun vIdx => if vIdx = iStar then 1 else 0) := by
+    apply finSum_congr
+    intro vIdx
+    by_cases hEq : vIdx = iStar
+    · subst hEq
+      simp [iStar, enumV.right_inv]
+    · have hNeV : enumV.toFun vIdx ≠ targetView := by
+        intro hv
+        apply hEq
+        have := congrArg enumV.invFun hv
+        simpa [iStar, enumV.left_inv] using this
+      simp [hEq, hNeV]
+  rw [hCongr, finSum_eq_indicator]
+
+/-- Total surviving executions factor unconditionally as `cardR * viewMaskSurviveCount abortPred`. -/
+theorem totalSurvivingRuns_eq {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPred : AdvPreOpenView Q w → Bool) :
+    totalSurvivingRuns spec sk msg cardR decodeRand adv hQ abortPred =
+      cardR * viewMaskSurviveCount abortPred := by
+  have hInnerSurv : ∀ rIdx : Fin cardR,
+      finSum (preOpenMaskCard Q w) (fun mIdx =>
+        optSomeIndicator (execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
+          ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred)) = viewMaskSurviveCount abortPred := by
+    intro rIdx
+    have hPoint :
+        finSum (preOpenMaskCard Q w) (fun mIdx =>
+          optSomeIndicator (execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
+            ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred)) =
+        finSum (preOpenMaskCard Q w) (fun mIdx =>
+          if abortPred (evalPreOpenView spec sk msg (decodeRand rIdx) adv hQ
+              ((enumHonestPreOpenMasks Q w).toFun mIdx)) then 0 else 1) := by
+      apply finSum_congr
+      intro mIdx
+      unfold execCutTheHashWithBarrier
+      exact optSomeIndicator_ite _ _
+    rw [hPoint]
+    exact preOpenView_sum_invariant spec sk msg (decodeRand rIdx) adv hQ
+      (fun v => if abortPred v then 0 else 1)
+  unfold totalSurvivingRuns
+  rw [finSum_congr hInnerSurv, finSum_const]
+
+/-- Positive survival-count precondition (`0 < totalSurvivingRuns ...`) for selective-abort
+    conditioning. -/
+abbrev NonZeroSurvivingRuns {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPred : AdvPreOpenView Q w → Bool) : Prop :=
+  0 < totalSurvivingRuns spec sk msg cardR decodeRand adv hQ abortPred
+
+/-- **Selective-Abort Statistical Independence for Cut-the-Hash
+    (`cutTheHash_abort_conditioned_sd_zero`)**:
+    For EVERY fixed secret key `sk`, message `msg`, rushing corrupt strategy `adv` (corrupt
+    contributions chosen adaptively from the honest Phase-1 openings), randomizer space
+    `decodeRand : Fin cardR → Rand`, and ANY malicious pre-`OPEN` selective-abort predicate
+    `abortPred : AdvPreOpenView Q w → Bool` with non-zero survival count (`0 < totalSurvive`):
+    1. Pre-`OPEN` mask survival count per randomizer `R` is `viewMaskSurviveCount abortPred`,
+       independent of `(sk, msg, R)`.
+    2. Total surviving runs factor cleanly as `totalSurvive = cardR * viewMaskSurviveCount abortPred`.
+    3. For every `targetSig : BitVec w`, cross-multiplied conditional probability matches the
+       standalone FIPS 205 / Baggy / Jorts / QS-B signer **with zero bias**:
+       `survivingRealSigCount ... targetSig * cardR = idealStandaloneSigCount ... targetSig * totalSurvive`.
+    4. Exact L1 statistical distance numerator across all `2^w` signatures is identically `0`:
+       `abortConditionedStatDistNum ... = 0`. -/
+theorem cutTheHash_abort_conditioned_sd_zero {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (abortPred : AdvPreOpenView Q w → Bool)
+    (hSurvivePos : NonZeroSurvivingRuns spec sk msg cardR decodeRand adv hQ abortPred) :
+    let totalSurvive := totalSurvivingRuns spec sk msg cardR decodeRand adv hQ abortPred
+    (0 < cardR ∧ 0 < viewMaskSurviveCount abortPred) ∧
+    totalSurvive = cardR * viewMaskSurviveCount abortPred ∧
+    (∀ targetSig : BitVec w,
+      survivingRealSigCount spec sk msg cardR decodeRand adv hQ abortPred targetSig * cardR =
+        idealStandaloneSigCount spec sk msg cardR decodeRand targetSig * totalSurvive) ∧
+    abortConditionedStatDistNum spec sk msg cardR decodeRand adv hQ abortPred = 0 := by
+  intro totalSurvive
+  have hTotalEq : totalSurvive = cardR * viewMaskSurviveCount abortPred :=
+    totalSurvivingRuns_eq spec sk msg cardR decodeRand adv hQ abortPred
+  have hPosBoth : 0 < cardR ∧ 0 < viewMaskSurviveCount abortPred := by
+    have hPosProd : 0 < cardR * viewMaskSurviveCount abortPred := by
+      simpa [totalSurvive, hTotalEq] using hSurvivePos
+    refine ⟨?_, ?_⟩
+    · cases cardR with
+      | zero => simp at hPosProd
+      | succ k => exact Nat.zero_lt_succ k
+    · cases hv : viewMaskSurviveCount abortPred with
+      | zero => rw [hv, Nat.mul_zero] at hPosProd; exact False.elim (Nat.lt_irrefl 0 hPosProd)
+      | succ k => exact Nat.zero_lt_succ k
+  have hSigFactor : ∀ targetSig : BitVec w,
+      survivingRealSigCount spec sk msg cardR decodeRand adv hQ abortPred targetSig =
+        idealStandaloneSigCount spec sk msg cardR decodeRand targetSig * viewMaskSurviveCount abortPred := by
+    intro targetSig
+    unfold survivingRealSigCount
+    have hPerR : ∀ rIdx : Fin cardR,
+        finSum (preOpenMaskCard Q w) (fun mIdx =>
+          if execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
+              ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred = some targetSig then 1 else 0) =
+        (if spec.finalSignature sk msg (decodeRand rIdx) = targetSig then 1 else 0) *
+          viewMaskSurviveCount abortPred := by
+      intro rIdx
+      have hRec := spec.reconstruct_eq sk msg (decodeRand rIdx)
+      by_cases hMatch : spec.finalSignature sk msg (decodeRand rIdx) = targetSig
+      · simp only [hMatch, ↓reduceIte, Nat.one_mul]
+        have hEqSurv :
+            finSum (preOpenMaskCard Q w) (fun mIdx =>
+              if execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
+                  ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred = some targetSig then 1 else 0) =
+            finSum (preOpenMaskCard Q w) (fun mIdx =>
+              if abortPred (evalPreOpenView spec sk msg (decodeRand rIdx) adv hQ
+                  ((enumHonestPreOpenMasks Q w).toFun mIdx)) then 0 else 1) := by
+          apply finSum_congr
+          intro mIdx
+          unfold execCutTheHashWithBarrier
+          rw [hRec, hMatch, indicator_ite_none_some]
+          simp only [↓reduceIte]
+        rw [hEqSurv]
+        exact preOpenView_sum_invariant spec sk msg (decodeRand rIdx) adv hQ
+          (fun v => if abortPred v then 0 else 1)
+      · simp only [hMatch, ↓reduceIte, Nat.zero_mul]
+        have hZero :
+            finSum (preOpenMaskCard Q w) (fun mIdx =>
+              if execCutTheHashWithBarrier spec sk msg (decodeRand rIdx) adv hQ
+                  ((enumHonestPreOpenMasks Q w).toFun mIdx) abortPred = some targetSig then 1 else 0) =
+            finSum (preOpenMaskCard Q w) (fun _ => 0) := by
+          apply finSum_congr
+          intro mIdx
+          unfold execCutTheHashWithBarrier
+          rw [hRec, indicator_ite_none_some]
+          simp only [hMatch, ↓reduceIte]
+          cases abortPred (evalPreOpenView spec sk msg (decodeRand rIdx) adv hQ ((enumHonestPreOpenMasks Q w).toFun mIdx)) <;> rfl
+        rw [hZero, finSum_const, Nat.mul_zero]
+    rw [finSum_congr hPerR, finSum_mul_right]
+    rfl
+  have hCrossEq : ∀ targetSig : BitVec w,
+      survivingRealSigCount spec sk msg cardR decodeRand adv hQ abortPred targetSig * cardR =
+        idealStandaloneSigCount spec sk msg cardR decodeRand targetSig * totalSurvive := by
+    intro targetSig
+    rw [hSigFactor targetSig, hTotalEq]
+    rw [Nat.mul_assoc, Nat.mul_comm (viewMaskSurviveCount abortPred) cardR, ← Nat.mul_assoc]
+  refine ⟨hPosBoth, hTotalEq, hCrossEq, ?_⟩
+  unfold abortConditionedStatDistNum
+  dsimp only
+  have hAllZero :
+      finSum (2 ^ w) (fun sIdx =>
+        let sig := (enumBitVec w).toFun sIdx
+        natAbsDiff
+          (survivingRealSigCount spec sk msg cardR decodeRand adv hQ abortPred sig * cardR)
+          (idealStandaloneSigCount spec sk msg cardR decodeRand sig * totalSurvive)) =
+      finSum (2 ^ w) (fun _ => 0) := by
+    apply finSum_congr
+    intro sIdx
+    dsimp only
+    rw [hCrossEq ((enumBitVec w).toFun sIdx)]
+    simp [natAbsDiff]
+  rw [hAllZero, finSum_const, Nat.mul_zero]
+
+/-! ### Leaky Pre-`OPEN` Protocols & `#tooth` Distribution-Skew Witnesses -/
+
+/-- Adversary view in a broken protocol that hands the corrupt party one extra `w`-bit word
+    correlated with the honest output share BEFORE the `MAC-OK` barrier. -/
+structure LeakyPreOpenView (Q w : Nat) where
+  preOpen : AdvPreOpenView Q w
+  leakedWord : BitVec w
+  deriving Repr, DecidableEq
+
+/-- Leak (a): Party 0 opens `y_0` itself before the `MAC-OK` barrier. -/
+def earlyOpenLeak {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w) :
+    SK → Msg → Rand → CorruptIn → BitVec w :=
+  spec.yShareHonest
+
+/-- Leak (b): the Phase-1 commitment goes out WITHOUT its blinding mask, so the tag is a
+    deterministic function `body` of the committed pair `(y_share, mac_share)`. -/
+def unblindedCommitLeak {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (body : BitVec w → BitVec w → BitVec w) :
+    SK → Msg → Rand → CorruptIn → BitVec w :=
+  fun sk msg R cIn => body (spec.yShareHonest sk msg R cIn) (spec.macShareHonest sk msg R cIn)
+
+/-- Execution of a leaky protocol: the corrupt party additionally sees `leak sk msg R cAll`
+    before deciding whether to abort. -/
+def execLeakyPreOpen {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (R : Rand) (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (m : HonestPreOpenMasks Q w)
+    (leak : SK → Msg → Rand → CorruptIn → BitVec w)
+    (leakyAbortPred : LeakyPreOpenView Q w → Bool) : Option (BitVec w) :=
+  if leakyAbortPred
+      { preOpen := evalPreOpenView spec sk msg R adv hQ m
+        leakedWord := leak sk msg R (corruptContribution adv (evalPreOpenView spec sk msg R adv hQ m)) }
+  then
+    none
+  else
+    some (spec.yShareHonest sk msg R (corruptContribution adv (evalPreOpenView spec sk msg R adv hQ m)) ^^^
+      spec.yShareCorrupt sk msg R (corruptContribution adv (evalPreOpenView spec sk msg R adv hQ m)))
+
+/-- Total surviving executions of a leaky protocol. -/
+def leakyTotalSurvivingRuns {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (leak : SK → Msg → Rand → CorruptIn → BitVec w)
+    (leakyAbortPred : LeakyPreOpenView Q w → Bool) : Nat :=
+  finSum cardR (fun rIdx =>
+    finSum (preOpenMaskCard Q w) (fun mIdx =>
+      optSomeIndicator (execLeakyPreOpen spec sk msg (decodeRand rIdx) adv hQ
+        ((enumHonestPreOpenMasks Q w).toFun mIdx) leak leakyAbortPred)))
+
+/-- Surviving signature count for `targetSig` under a leaky protocol. -/
+def leakySurvivingSigCount {SK Msg Rand CorruptIn : Type} {Q w : Nat}
+    (spec : CutTheHashProtocolSpec SK Msg Rand CorruptIn Q w)
+    (sk : SK) (msg : Msg) (cardR : Nat) (decodeRand : Fin cardR → Rand)
+    (adv : RushingCorruptStrategy CorruptIn Q w) (hQ : 0 < Q)
+    (leak : SK → Msg → Rand → CorruptIn → BitVec w)
+    (leakyAbortPred : LeakyPreOpenView Q w → Bool) (targetSig : BitVec w) : Nat :=
+  finSum cardR (fun rIdx =>
+    finSum (preOpenMaskCard Q w) (fun mIdx =>
+      if execLeakyPreOpen spec sk msg (decodeRand rIdx) adv hQ
+          ((enumHonestPreOpenMasks Q w).toFun mIdx) leak leakyAbortPred = some targetSig
+      then 1 else 0))
+
+private def concreteSk0 : BitVec 8 := BitVec.ofNat 8 0x42
+private def concreteMsg0 : BitVec 8 := BitVec.ofNat 8 0x99
+private def concreteCIn0 : BitVec 8 := BitVec.ofNat 8 0x17
+
+private abbrev fin2Zero : Fin 2 := ⟨0, Nat.zero_lt_succ 1⟩
+private abbrev fin2One : Fin 2 := ⟨1, Nat.succ_lt_succ (Nat.zero_lt_succ 0)⟩
+
+private def toySigOf (r : Fin 2) : BitVec 8 :=
+  if r.val = 0 then BitVec.ofNat 8 0 else BitVec.ofNat 8 1
+
+/-- Toy two-signature scheme: the randomizer bit `r` selects the signature; the corrupt share is
+    a value the corrupt party itself holds; the MAC share is message-derived. -/
+private def toyCutSpec (Q : Nat) (hQ : 0 < Q) :
+    CutTheHashProtocolSpec (BitVec 8) (BitVec 8) (Fin 2) (BitVec 8) Q 8 where
+  wireRingSecret := fun _ _ r => ⟨r.val % Q, Nat.mod_lt _ hQ⟩
+  wireXorSecret := fun sk msg _ cIn => sk ^^^ msg ^^^ cIn
+  yShareHonest := fun sk msg r cIn => toySigOf r ^^^ sk ^^^ msg ^^^ cIn
+  yShareCorrupt := fun sk msg _ cIn => sk ^^^ msg ^^^ cIn
+  macShareHonest := fun _ msg _ _ => msg
+  commitHiding := fun y mac => maskBijectionBitVec 8 (y ^^^ mac)
+  finalSignature := fun _ _ r => toySigOf r
+  reconstruct_eq := fun sk msg r cIn => by bv_xor_cancel
+
+private def toyConstAdv (Q : Nat) : RushingCorruptStrategy (BitVec 8) Q 8 :=
+  RushingCorruptStrategy.const concreteCIn0
+
+/-- The corrupt party's own output share in the toy run: a value it knows. -/
+private def toyCorruptShare : BitVec 8 := concreteSk0 ^^^ concreteMsg0 ^^^ concreteCIn0
+
+private def toyHonestShare (r : Fin 2) : BitVec 8 :=
+  toySigOf r ^^^ concreteSk0 ^^^ concreteMsg0 ^^^ concreteCIn0
+
+/-- Abort whenever bit 0 of `leaked y_0 ^^^ y_C` is set. -/
+private def earlyOpenLsbAbortPred {Q : Nat} (v : LeakyPreOpenView Q 8) : Bool :=
+  (v.leakedWord ^^^ toyCorruptShare).getLsbD 0
+
+/-- Abort whenever bit 0 of `tag ^^^ mac ^^^ y_C` is set, for the unblinded tag `y_0 ^^^ mac`. -/
+private def unblindedTagLsbAbortPred {Q : Nat} (v : LeakyPreOpenView Q 8) : Bool :=
+  (v.leakedWord ^^^ concreteMsg0 ^^^ toyCorruptShare).getLsbD 0
+
+private theorem toyEarlyOpen_closed_zero :
+    (if ((toyHonestShare fin2Zero) ^^^ toyCorruptShare).getLsbD 0 then none
+     else some (toyHonestShare fin2Zero ^^^ toyCorruptShare)) = some (BitVec.ofNat 8 0) := by
+  decide
+
+private theorem toyEarlyOpen_closed_one :
+    (if ((toyHonestShare fin2One) ^^^ toyCorruptShare).getLsbD 0 then none
+     else some (toyHonestShare fin2One ^^^ toyCorruptShare)) = (none : Option (BitVec 8)) := by
+  decide
+
+private theorem toyUnblinded_closed_zero :
+    (if ((toyHonestShare fin2Zero ^^^ concreteMsg0) ^^^ concreteMsg0 ^^^ toyCorruptShare).getLsbD 0
+     then none
+     else some (toyHonestShare fin2Zero ^^^ toyCorruptShare)) = some (BitVec.ofNat 8 0) := by
+  decide
+
+private theorem toyUnblinded_closed_one :
+    (if ((toyHonestShare fin2One ^^^ concreteMsg0) ^^^ concreteMsg0 ^^^ toyCorruptShare).getLsbD 0
+     then none
+     else some (toyHonestShare fin2One ^^^ toyCorruptShare)) = (none : Option (BitVec 8)) := by
+  decide
+
+private theorem toySomeZero_ne_someOne :
+    (if (some (BitVec.ofNat 8 0) : Option (BitVec 8)) = some (BitVec.ofNat 8 1) then 1 else 0) =
+      0 := by
+  decide
+
+private theorem toyIdealOdd_closed :
+    ((if toySigOf fin2Zero = BitVec.ofNat 8 1 then 1 else 0) +
+     (if toySigOf fin2One = BitVec.ofNat 8 1 then 1 else 0)) = 1 := by
+  decide
+
+/-- Any leak that lets the corrupt party keep every `r = 0` run and abort every `r = 1` run skews
+    the surviving distribution: signature `1` has ideal weight `1/2` and surviving weight `0`. -/
+private theorem toyLeakySkew (Q : Nat) (hQ : 0 < Q)
+    (leak : BitVec 8 → BitVec 8 → Fin 2 → BitVec 8 → BitVec 8)
+    (pred : LeakyPreOpenView Q 8 → Bool)
+    (h0 : ∀ m : HonestPreOpenMasks Q 8,
+      execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2Zero (toyConstAdv Q) hQ m
+        leak pred = some (BitVec.ofNat 8 0))
+    (h1 : ∀ m : HonestPreOpenMasks Q 8,
+      execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2One (toyConstAdv Q) hQ m
+        leak pred = none) :
+    0 < leakyTotalSurvivingRuns (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id (toyConstAdv Q) hQ
+          leak pred ∧
+    0 < natAbsDiff
+          (leakySurvivingSigCount (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id (toyConstAdv Q) hQ
+            leak pred (BitVec.ofNat 8 1) * 2)
+          (idealStandaloneSigCount (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id
+            (BitVec.ofNat 8 1) *
+           leakyTotalSurvivingRuns (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id (toyConstAdv Q) hQ
+             leak pred) := by
+  have hCardPos : 0 < preOpenMaskCard Q 8 :=
+    Nat.mul_pos (Nat.mul_pos hQ (Nat.two_pow_pos 8)) (Nat.two_pow_pos 8)
+  have hSurv0 :
+      finSum (preOpenMaskCard Q 8) (fun mIdx =>
+        optSomeIndicator (execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0
+          fin2Zero (toyConstAdv Q) hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred)) =
+      preOpenMaskCard Q 8 := by
+    have hCong :
+        finSum (preOpenMaskCard Q 8) (fun mIdx =>
+          optSomeIndicator (execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0
+            fin2Zero (toyConstAdv Q) hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred)) =
+        finSum (preOpenMaskCard Q 8) (fun _ => 1) := by
+      apply finSum_congr
+      intro mIdx
+      rw [h0]
+      rfl
+    rw [hCong, finSum_const, Nat.mul_one]
+  have hSurv1 :
+      finSum (preOpenMaskCard Q 8) (fun mIdx =>
+        optSomeIndicator (execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0
+          fin2One (toyConstAdv Q) hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred)) = 0 := by
+    have hCong :
+        finSum (preOpenMaskCard Q 8) (fun mIdx =>
+          optSomeIndicator (execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0
+            fin2One (toyConstAdv Q) hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred)) =
+        finSum (preOpenMaskCard Q 8) (fun _ => 0) := by
+      apply finSum_congr
+      intro mIdx
+      rw [h1]
+      rfl
+    rw [hCong, finSum_const, Nat.mul_zero]
+  have hTotal :
+      leakyTotalSurvivingRuns (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id (toyConstAdv Q) hQ
+        leak pred = preOpenMaskCard Q 8 := by
+    unfold leakyTotalSurvivingRuns
+    rw [finSum_two]
+    dsimp only [id]
+    rw [hSurv0, hSurv1, Nat.add_zero]
+  have hNoneNeOne :
+      (if (none : Option (BitVec 8)) = some (BitVec.ofNat 8 1) then 1 else 0) = 0 := rfl
+  have hOdd0 :
+      finSum (preOpenMaskCard Q 8) (fun mIdx =>
+        if execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2Zero (toyConstAdv Q)
+            hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred = some (BitVec.ofNat 8 1)
+        then 1 else 0) = 0 := by
+    have hCong :
+        finSum (preOpenMaskCard Q 8) (fun mIdx =>
+          if execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2Zero (toyConstAdv Q)
+              hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred = some (BitVec.ofNat 8 1)
+          then 1 else 0) =
+        finSum (preOpenMaskCard Q 8) (fun _ => 0) := by
+      apply finSum_congr
+      intro mIdx
+      rw [h0]
+      exact toySomeZero_ne_someOne
+    rw [hCong, finSum_const, Nat.mul_zero]
+  have hOdd1 :
+      finSum (preOpenMaskCard Q 8) (fun mIdx =>
+        if execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2One (toyConstAdv Q)
+            hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred = some (BitVec.ofNat 8 1)
+        then 1 else 0) = 0 := by
+    have hCong :
+        finSum (preOpenMaskCard Q 8) (fun mIdx =>
+          if execLeakyPreOpen (toyCutSpec Q hQ) concreteSk0 concreteMsg0 fin2One (toyConstAdv Q)
+              hQ ((enumHonestPreOpenMasks Q 8).toFun mIdx) leak pred = some (BitVec.ofNat 8 1)
+          then 1 else 0) =
+        finSum (preOpenMaskCard Q 8) (fun _ => 0) := by
+      apply finSum_congr
+      intro mIdx
+      rw [h1]
+      exact hNoneNeOne
+    rw [hCong, finSum_const, Nat.mul_zero]
+  have hLeakyOdd :
+      leakySurvivingSigCount (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id (toyConstAdv Q) hQ
+        leak pred (BitVec.ofNat 8 1) = 0 := by
+    unfold leakySurvivingSigCount
+    rw [finSum_two]
+    dsimp only [id]
+    rw [hOdd0, hOdd1]
+  have hIdealOdd :
+      idealStandaloneSigCount (toyCutSpec Q hQ) concreteSk0 concreteMsg0 2 id
+        (BitVec.ofNat 8 1) = 1 := by
+    unfold idealStandaloneSigCount
+    rw [finSum_two]
+    exact toyIdealOdd_closed
+  rw [hTotal, hLeakyOdd, hIdealOdd, Nat.zero_mul, Nat.one_mul, natAbsDiff_zero_left]
+  exact ⟨hCardPos, hCardPos⟩
+
+/-- **`#tooth` Witness (`tooth_early_open_before_mac_barrier_skews_distribution`)**:
+    If Party 0 opens `y_0` BEFORE the `MAC-OK` barrier, a selective-abort adversary (aborting
+    whenever bit 0 of `y_0 ^^^ y_1` equals `1`) strictly biases the surviving byte distribution
+    away from the standalone signer (`SD > 0`, with non-zero survival count!). -/
