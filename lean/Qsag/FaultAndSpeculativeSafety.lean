@@ -949,3 +949,959 @@ def faultedCandidate (suite : TweakableHashSuite) (params : PqHashParams) (sk : 
             layerSigs := asm.layerSigs } }
 
 /-- The faulted signer driven by a per-turn fault schedule. -/
+def faultedSignerTurns (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (pk : PqPublicKey) (maxGrind : Nat) (schedule : ComputeFault) :
+    Turn → List SignRequest → List FaultedSignTurn
+  | _, [] => []
+  | t, req :: rest =>
+    match faultedCandidate suite params sk pk maxGrind req (schedule t) with
+    | none => faultedSignerTurns suite params sk pk maxGrind schedule (t + 1) rest
+    | some turn => turn :: faultedSignerTurns suite params sk pk maxGrind schedule (t + 1) rest
+
+/-- The guarded signer under every transient fault schedule and every request sequence: one
+    one-time message and one opening per upper key, or a collision. -/
+theorem guarded_signer_survives_any_fault_schedule (suite : TweakableHashSuite)
+    (params : PqHashParams) (sk : PqSecretKey) (pk : PqPublicKey) (maxGrind : Nat)
+    (schedule : ComputeFault) (reqs : List SignRequest) (r₁ r₂ : ReleasedSig)
+    (h₁ : r₁ ∈ guardedSignTrace suite params pk OtsCache.empty
+      (faultedSignerTurns suite params sk pk maxGrind schedule 0 reqs))
+    (h₂ : r₂ ∈ guardedSignTrace suite params pk OtsCache.empty
+      (faultedSignerTurns suite params sk pk maxGrind schedule 0 reqs))
+    (hLeaf : r₁.upperLeaf = r₂.upperLeaf) :
+    r₁.signed = r₂.signed ∧ (r₁.upperSig = r₂.upperSig ∨ Collision suite.rawHash) :=
+  verify_before_release_prevents_fault_wots_reuse_two_layer suite params pk _ r₁ r₂ h₁ h₂ hLeaf
+
+/-- Any signature the real verifier accepts on a two-layer hypertree is released by the gate
+    from an empty cache; in particular the honest signer's output is
+    (`verifyPqHashSig_evalSingleSign`). The gate is not vacuously safe. -/
+theorem gate_releases_accepted_two_layer_signature (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turn : FaultedSignTurn)
+    (hLayers : params.numLayers = 2)
+    (h : verifyPqHashSig suite params pk turn.msg turn.candidate = true) :
+    (verifyBeforeRelease suite params pk OtsCache.empty turn).isSome = true := by
+  obtain ⟨rand, start, hStart, hVer, hLen⟩ :=
+    verifyPqHashSig_layers suite params pk turn.msg turn.candidate h
+  rw [hLayers] at hLen
+  match hSigs : turn.candidate.layerSigs, hLen with
+  | [lower, upper], _ =>
+    rw [hSigs] at hVer
+    obtain ⟨mid, hMid, _⟩ := (verifyHypertreeLayers_split suite params pk.pkSeed pk.pkRoot rand 0
+      turn.candidate.leafGlobalIdx start lower [upper] pk.pkRoot).mp hVer
+    simp [verifyBeforeRelease, gateView, h, hStart, hSigs, hMid, OtsCache.empty]
+
+/-! ### Verification alone is not enough -/
+
+/-- The layer-0 signature of the real signer still verifies when its auth path is replaced by
+    any path that the signer's own leaf node walks to some root: verification only checks that
+    leaf, path and root are consistent with each other. -/
+theorem lower_layer_verifies_on_walked_path (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (pkRoot rRand : List UInt8) (maxGrind : Nat) (mu : List UInt8) (g : Nat)
+    (lower : LayerXmssSig) (path : List (List UInt8)) (root : List UInt8)
+    (hLower : signHypertreeLayers suite params sk pkRoot rRand maxGrind 0 g mu 1 = some [lower])
+    (hWalk : walkMerkleAuthPath suite sk.pkSeed (UInt32.ofNat 0)
+      (UInt64.ofNat (g / 2 ^ params.subtreeHeight)) .tree params.subtreeHeight 0
+      (g % 2 ^ params.subtreeHeight)
+      (computeWotsPk suite params sk (UInt32.ofNat 0)
+        (UInt64.ofNat (g / 2 ^ params.subtreeHeight)) (g % 2 ^ params.subtreeHeight))
+      path = some root) :
+    verifyHypertreeLayers suite params sk.pkSeed pkRoot rRand 0 g mu
+      [{ lower with authPath := path }] = some root := by
+  rw [signHypertreeLayers] at hLower
+  cases hGrind : grindTswCounterAux suite params.w params.ell1 params.targetSum
+      rRand sk.pkSeed pkRoot mu (UInt32.ofNat 0)
+      (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
+      (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) 0 maxGrind with
+  | none => rw [hGrind] at hLower; cases hLower
+  | some triple =>
+    rcases triple with ⟨ctr, digits, hmsgG⟩
+    rw [hGrind] at hLower
+    simp only [signHypertreeLayers, Option.some.injEq, List.cons.injEq, and_true] at hLower
+    subst hLower
+    obtain ⟨hMsgEq, hDigEq, hChk⟩ := grindTswCounterAux_sound hGrind
+    simp only [verifyHypertreeLayers]
+    rw [← hMsgEq, ← hDigEq, hChk]
+    have hChainsLen : ((List.range params.ell1).map fun r =>
+        wotsChainSteps suite sk.pkSeed (UInt32.ofNat 0)
+          (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
+          (g % 2 ^ params.subtreeHeight) r 0 (digits.getD r 0)
+          (wotsSecretBase suite sk (UInt32.ofNat 0)
+            (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
+            (g % 2 ^ params.subtreeHeight) r)).length = params.ell1 := by simp
+    simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte, hChainsLen, ne_eq, not_true_eq_false]
+    have hWotsEq := recoverWotsPkFromSig_eq_computeWotsPk suite params sk
+      (UInt32.ofNat 0) (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
+      (g % 2 ^ params.subtreeHeight) digits hChk
+    dsimp only at hWotsEq
+    rw [hWotsEq, hWalk]
+
+/-- **Tooth: sign-then-verify without the one-time-key cache does not stop grafting.** A single
+    fault on a lower-tree sibling node that feeds both the emitted auth path and the root
+    recomputation yields a complete two-layer signature that passes the real verifier, exactly
+    like the fault-free one, while the upper one-time key has signed a different root. The only
+    alternative is a hash collision. Full verification cannot tell the grafted subtree from the
+    real one; the write-once cache of `verifyBeforeRelease` is what rejects it. -/
+theorem tooth_verify_only_gate_releases_consistent_graft
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (pkRoot rRand : List UInt8) (maxGrind : Nat) (mu : List UInt8) (g level : Nat)
+    (corrupt : List UInt8 → List UInt8)
+    (hUpper : g / 2 ^ params.subtreeHeight < 2 ^ params.subtreeHeight)
+    (honest faulted : FaultedAssembly)
+    (hHonest : faultedAssemble suite params sk pkRoot rRand maxGrind mu g none = some honest)
+    (hFaulted : faultedAssemble suite params sk pkRoot rRand maxGrind mu g
+      (some ⟨.lowerAuthSibling level, corrupt⟩) = some faulted)
+    (hVisible : faultPath (some ⟨.lowerAuthSibling level, corrupt⟩)
+      (lowerAuthPath suite params sk g) ≠ lowerAuthPath suite params sk g) :
+    (verifyHypertreeLayers suite params sk.pkSeed pkRoot rRand 0 g mu honest.layerSigs =
+        some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat 1) 0) ∧
+     verifyHypertreeLayers suite params sk.pkSeed pkRoot rRand 0 g mu faulted.layerSigs =
+        some (computeXmssSubtreeRoot suite params sk (UInt32.ofNat 1) 0) ∧
+     Nonempty (WotsTwoMessageWitness suite params sk.pkSeed pkRoot
+        (g / 2 ^ params.subtreeHeight)
+        (computeXmssSubtreeRoot suite params sk (UInt32.ofNat 1) 0))) ∨
+      Collision suite.rawHash := by
+  obtain ⟨lower₁, upper₁, wires₁, hLower₁, hWires₁, hRoot₁, hSigs₁, hAcc₁⟩ :=
+    faultedAssemble_upper_accepts suite params sk pkRoot rRand maxGrind mu g none honest hUpper
+      (fun _ => rfl) hHonest
+  obtain ⟨lower₂, upper₂, wires₂, hLower₂, hWires₂, hRoot₂, hSigs₂, hAcc₂⟩ :=
+    faultedAssemble_upper_accepts suite params sk pkRoot rRand maxGrind mu g _ faulted hUpper
+      (fun _ => rfl) hFaulted
+  rw [faultedLowerWires_none] at hWires₁
+  simp only [Option.some.injEq] at hWires₁
+  subst hWires₁
+  unfold faultedLowerWires at hWires₂
+  simp only [faultLeaf, faultRoot, Option.map_eq_some_iff] at hWires₂
+  obtain ⟨r₂, hWalk₂, hW₂⟩ := hWires₂
+  subst hW₂
+  have hWalk₁ := lowerWalk_honest suite params sk g
+  by_cases hEq : r₂ = computeXmssSubtreeRoot suite params sk (UInt32.ofNat 0)
+      (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
+  · right
+    rw [hEq] at hWalk₂
+    exact (walkMerkleAuthPath_collision_extract suite sk.pkSeed (UInt32.ofNat 0)
+      (UInt64.ofNat (g / 2 ^ params.subtreeHeight)) .tree params.subtreeHeight 0
+      (g % 2 ^ params.subtreeHeight) (Or.inr hVisible) hWalk₂ hWalk₁).toCollision
+  · left
+    have hV₁ := lower_layer_verifies_on_walked_path suite params sk pkRoot rRand maxGrind mu g
+      lower₁ _ _ hLower₁ hWalk₁
+    have hV₂ := lower_layer_verifies_on_walked_path suite params sk pkRoot rRand maxGrind mu g
+      lower₂ _ _ hLower₂ hWalk₂
+    rw [hRoot₁] at hAcc₁
+    rw [hRoot₂] at hAcc₂
+    refine ⟨?_, ?_, ⟨{ root₁ := _, root₂ := _, sig₁ := upper₁, sig₂ := upper₂
+                       roots_ne := fun h => hEq h.symm, accepts₁ := hAcc₁, accepts₂ := hAcc₂ }⟩⟩
+    · rw [hSigs₁]
+      exact (verifyHypertreeLayers_split suite params sk.pkSeed pkRoot rRand 0 g mu _ [upper₁]
+        _).mpr ⟨_, hV₁, hAcc₁⟩
+    · rw [hSigs₂]
+      exact (verifyHypertreeLayers_split suite params sk.pkSeed pkRoot rRand 0 g mu _ [upper₂]
+        _).mpr ⟨_, hV₂, hAcc₂⟩
+
+/-! ### BDOZ MAC gate on a faulted party share -/
+
+/-- Share-release gate of a threshold party: the share leaves only if its two-lane BDOZ MAC
+    verifies under the receiver's keys. -/
+def bdozGatedShareRelease (vk : BdozVerifierKeys) (op : BdozPairOpening) : Option Tower128 :=
+  if verifyBdozPairMac vk op then some op.shareX else none
+
+/-- The gate releases the dealt share of an honest, unfaulted party. -/
+theorem bdozGatedShareRelease_honest (vk : BdozVerifierKeys) (j : Nat) (x : Tower128) :
+    bdozGatedShareRelease vk (bdozHonestOpening vk j x) = some x := by
+  unfold bdozGatedShareRelease
+  rw [bdozHonestOpening_accepted]
+  rfl
+
+/-- **BDOZ MAC blocks release of faulted shares, across a whole trace.** Let `faulted` be the
+    openings a party's faulted computation produced over any number of turns, each with a share
+    different from the dealt one and with arbitrarily corrupted tags. If the gate releases any of
+    them under global key `alpha`, then `alpha` is one of the `faulted.length` key guesses that
+    `bdozKeyGuess` computes from the faulted openings and the party's own view. The faults do not
+    depend on the key, so at most `N` of the `2^256` two-lane keys (one in `2^128` per lane and
+    per turn) let a faulted share out. -/
+theorem bdoz_mac_blocks_faulted_party_share_release
+    (hon : Nat → Tower128 × Tower128 × Tower128) (faulted : List BdozPairOpening)
+    (hFault : ∀ op ∈ faulted, op.shareX ≠ (hon op.partyId).1)
+    (alpha : Tower128 × Tower128)
+    (hRelease : ∃ op ∈ faulted,
+      (bdozGatedShareRelease (bdozKeyFromView alpha hon) op).isSome = true) :
+    alpha ∈ faulted.map (bdozKeyGuess hon) := by
+  obtain ⟨op, hMem, hSome⟩ := hRelease
+  have hAcc : verifyBdozPairMac (bdozKeyFromView alpha hon) op = true := by
+    unfold bdozGatedShareRelease at hSome
+    cases hV : verifyBdozPairMac (bdozKeyFromView alpha hon) op
+    · rw [hV] at hSome
+      cases hSome
+    · rfl
+  exact List.mem_map.mpr ⟨op, hMem, (bdoz_forgery_pins_key alpha hon op (hFault op hMem) hAcc).symm⟩
+
+/-! ## 3. The Physical Boundary: Dual Glitch on the Release Gate -/
+
+/-- Instructions of a software release gate over an output register of type `α`: a pure
+    computation step, a conditional abort on a pure predicate, and the release itself. -/
+inductive GateInstr (α : Type) where
+  | step (f : α → α)
+  | check (p : α → Bool)
+  | emit
+
+/-- A physical glitch on one instruction slot: optionally upset the register, and optionally
+    skip the instruction (`PC → PC + 1` without executing it, which for a `check` is the same as
+    forcing its decision bit). -/
+structure Glitch (α : Type) where
+  upset : Option α
+  skip : Bool
+
+abbrev GlitchSchedule (α : Type) := Nat → Option (Glitch α)
+
+def Glitch.applyUpset {α : Type} (g : Option (Glitch α)) (reg : α) : α :=
+  match g with
+  | some ⟨some v, _⟩ => v
+  | _ => reg
+
+def Glitch.skips {α : Type} (g : Option (Glitch α)) : Bool :=
+  match g with
+  | some ⟨_, true⟩ => true
+  | _ => false
+
+/-- Run a release gate under a glitch schedule. `none` means nothing was released. -/
+def runGate {α : Type} (sched : GlitchSchedule α) : List (GateInstr α) → Nat → α → Option α
+  | [], _, _ => none
+  | ins :: rest, pc, reg =>
+    if Glitch.skips (sched pc) then runGate sched rest (pc + 1) (Glitch.applyUpset (sched pc) reg)
+    else
+      match ins with
+      | .step f => runGate sched rest (pc + 1) (f (Glitch.applyUpset (sched pc) reg))
+      | .check p =>
+        if p (Glitch.applyUpset (sched pc) reg) then
+          runGate sched rest (pc + 1) (Glitch.applyUpset (sched pc) reg)
+        else none
+      | .emit => some (Glitch.applyUpset (sched pc) reg)
+
+/-- **Software side of the boundary.** If the gate ends in `check p; emit`, has no earlier
+    `emit`, and the last two instruction slots are not glitched, then whatever is released
+    satisfies `p`. Every glitch before the terminal check is tolerated: register upsets, skipped
+    computation, skipped earlier checks. -/
+theorem terminal_check_holds_when_gate_tail_unglitched {α : Type} (p : α → Bool)
+    (sched : GlitchSchedule α) (out : α) :
+    ∀ (pre : List (GateInstr α)) (pc : Nat) (reg : α),
+      GateInstr.emit ∉ pre →
+      sched (pc + pre.length) = none → sched (pc + pre.length + 1) = none →
+      runGate sched (pre ++ [.check p, .emit]) pc reg = some out → p out = true
+  | [], pc, reg, _, hCheck, hEmit, hRun => by
+    simp only [List.length_nil, Nat.add_zero] at hCheck hEmit
+    simp only [List.nil_append, runGate, hCheck, hEmit, Glitch.skips, Glitch.applyUpset,
+      Bool.false_eq_true, ↓reduceIte] at hRun
+    split at hRun
+    · next hp =>
+      simp only [Option.some.injEq] at hRun
+      rw [← hRun]
+      exact hp
+    · cases hRun
+  | ins :: rest, pc, reg, hNoEmit, hCheck, hEmit, hRun => by
+    have hRest : GateInstr.emit ∉ rest := fun hi => hNoEmit (List.mem_cons_of_mem _ hi)
+    have hCheck' : sched (pc + 1 + rest.length) = none := by
+      rw [← hCheck]; congr 1; simp only [List.length_cons]; omega
+    have hEmit' : sched (pc + 1 + rest.length + 1) = none := by
+      rw [← hEmit]; congr 1; simp only [List.length_cons]; omega
+    simp only [List.cons_append, runGate] at hRun
+    split at hRun
+    · exact terminal_check_holds_when_gate_tail_unglitched p sched out rest (pc + 1) _ hRest
+        hCheck' hEmit' hRun
+    · cases ins with
+      | step f =>
+        exact terminal_check_holds_when_gate_tail_unglitched p sched out rest (pc + 1) _ hRest
+          hCheck' hEmit' hRun
+      | check q =>
+        simp only at hRun
+        split at hRun
+        · exact terminal_check_holds_when_gate_tail_unglitched p sched out rest (pc + 1) _ hRest
+            hCheck' hEmit' hRun
+        · cases hRun
+      | emit =>
+        exact absurd List.mem_cons_self hNoEmit
+
+/-- The dual-glitch schedule against a gate whose first `emit` sits at slot `n`: upset the
+    register to `target` at slot `0`, and skip every slot before `n`. -/
+def dualGlitchSchedule {α : Type} (n : Nat) (target : α) : GlitchSchedule α :=
+  fun pc => some { upset := if pc = 0 then some target else none, skip := decide (pc < n) }
+
+theorem runGate_dualGlitch_tail {α : Type} (target : α) (post : List (GateInstr α)) (n : Nat) :
+    ∀ (pre : List (GateInstr α)) (pc : Nat), 0 < pc → pc + pre.length = n →
+      runGate (dualGlitchSchedule n target) (pre ++ GateInstr.emit :: post) pc target =
+        some target
+  | [], pc, hPos, hLen => by
+    have hpc : pc = n := by simpa using hLen
+    have hne : ¬ pc = 0 := by omega
+    simp [runGate, dualGlitchSchedule, Glitch.skips, Glitch.applyUpset, hpc ▸ hne, hpc]
+  | ins :: rest, pc, hPos, hLen => by
+    have hlt : pc < n := by simp only [List.length_cons] at hLen; omega
+    have hne : ¬ pc = 0 := by omega
+    have ih := runGate_dualGlitch_tail target post n rest (pc + 1) (by omega)
+      (by simp only [List.length_cons] at hLen; omega)
+    simp [runGate, dualGlitchSchedule, Glitch.skips, Glitch.applyUpset, hlt, hne]
+    simpa [dualGlitchSchedule] using ih
+
+/-- **Physical side of the boundary: no software gate survives a dual glitch.** For every gate
+    program that can release at all (it contains an `emit`), whatever pure predicates it checks
+    and however often, and for every target value, there is a glitch schedule that upsets the
+    register once, before any check has run, and otherwise only skips instructions, under which
+    the gate releases the target. The predicates are never evaluated on it, so no choice of
+    predicate helps: the release decision itself has to be protected physically. -/
+theorem dual_glitch_control_flow_bypass_impossibility {α : Type} (prog : List (GateInstr α))
+    (hEmit : GateInstr.emit ∈ prog) (reg target : α) :
+    ∃ sched : GlitchSchedule α,
+      (∀ pc g, 0 < pc → sched pc = some g → g.upset = none) ∧
+      runGate sched prog 0 reg = some target := by
+  obtain ⟨pre, post, rfl⟩ := List.append_of_mem hEmit
+  refine ⟨dualGlitchSchedule pre.length target, ?_, ?_⟩
+  · intro pc g hPos hg
+    have hne : ¬ pc = 0 := by omega
+    simp only [dualGlitchSchedule, hne, ↓reduceIte, Option.some.injEq] at hg
+    rw [← hg]
+  · cases pre with
+    | nil => simp [runGate, dualGlitchSchedule, Glitch.skips, Glitch.applyUpset]
+    | cons ins rest =>
+      have ih := runGate_dualGlitch_tail target post (rest.length + 1) rest 1 (by omega)
+        (by omega)
+      simp [runGate, dualGlitchSchedule, Glitch.skips, Glitch.applyUpset]
+      simpa [dualGlitchSchedule] using ih
+
+/-- The canonical verify-then-release gate falls to one dual glitch on its check slot, for every
+    predicate, every honest register content and every target. -/
+theorem single_dual_glitch_defeats_any_predicate {α : Type} (p : α → Bool) (reg target : α) :
+    runGate (dualGlitchSchedule 1 target) [.check p, .emit] 0 reg = some target := by
+  simp [runGate, dualGlitchSchedule, Glitch.skips, Glitch.applyUpset]
+
+/-- The signing gate of Section 2 as a gate program over the output buffer. -/
+def signReleaseGate (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
+    (cache : OtsCache) : List (GateInstr FaultedSignTurn) :=
+  [.check (fun turn => (verifyBeforeRelease suite params pk cache turn).isSome), .emit]
+
+/-- **The exact line for the signer.** Without a glitch on its two slots, the signing gate only
+    releases candidates that `verifyBeforeRelease` accepts (so Section 2 applies); with one dual
+    glitch it releases any candidate at all, including a grafted one the gate would reject. -/
+theorem sign_release_gate_boundary (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (cache : OtsCache) :
+    (∀ (sched : GlitchSchedule FaultedSignTurn) (buf out : FaultedSignTurn),
+      sched 0 = none → sched 1 = none →
+      runGate sched (signReleaseGate suite params pk cache) 0 buf = some out →
+      (verifyBeforeRelease suite params pk cache out).isSome = true) ∧
+    (∀ buf bad : FaultedSignTurn,
+      runGate (dualGlitchSchedule 1 bad) (signReleaseGate suite params pk cache) 0 buf =
+        some bad) := by
+  refine ⟨?_, ?_⟩
+  · intro sched buf out h0 h1 hRun
+    exact terminal_check_holds_when_gate_tail_unglitched _ sched out [] 0 buf
+      List.not_mem_nil h0 h1 hRun
+  · intro buf bad
+    exact single_dual_glitch_defeats_any_predicate _ buf bad
+/-! ## 4. Speculative Execution: Branch-Misprediction Shadow Semantics -/
+
+/-- Conditional-branch conditions of the speculative ISA layer. `nz r` is the
+    `test r, r; jnz` idiom; `below` / `aboveEq` read the carry flag left by `sub64`. -/
+inductive BranchCond where
+  | nz (r : X86Gpr)
+  | below
+  | aboveEq
+  deriving DecidableEq, Repr
+
+def BranchCond.eval (c : BranchCond) (st : ConstantTimeIsa.X86State) : Bool :=
+  match c with
+  | .nz r => st.gpr r != 0#64
+  | .below => st.flags.cf
+  | .aboveEq => !st.flags.cf
+
+/-- Speculative ISA layer over the constant-time `ConstantTimeIsa.X86Instr` set: every non-branching instruction
+    is an `op`, `jcc c skip` jumps forward over `skip` instructions when `c` holds, `lfence` is a
+    speculation barrier, and `ret` ends the kernel. -/
+inductive SpecInstr where
+  | op (i : ConstantTimeIsa.X86Instr)
+  | jcc (c : BranchCond) (skip : Nat)
+  | lfence
+  | ret
+  deriving DecidableEq, Repr
+
+abbrev Code := List SpecInstr
+
+/-- Adversarial branch predictor: any function of the branch address and the history of
+    directions it has seen. The same oracle is used on both runs of a non-interference pair. -/
+abbrev PredictorOracle := Nat → List Bool → Bool
+
+/-- Attacker-visible observation: an architecturally committed leakage event, or one emitted by
+    a transient (later squashed) instruction. -/
+inductive SpecObs where
+  | arch (ev : LeakageEvent)
+  | transient (ev : LeakageEvent)
+  deriving DecidableEq, Repr
+
+def branchEvent (pc : Nat) (taken : Bool) : LeakageEvent :=
+  { pc := pc
+    branchTaken := some taken
+    memAddrs := []
+    varLatencyOperands := []
+    dirtyUpperYmmOnRet := false }
+
+def retEvent (pc : Nat) (st : ConstantTimeIsa.X86State) : LeakageEvent :=
+  { pc := pc
+    branchTaken := none
+    memAddrs := []
+    varLatencyOperands := []
+    dirtyUpperYmmOnRet := st.ymmUpperDirty }
+
+/-- Transient execution down a mispredicted path. Runs on a shadow copy of the state for at most
+    `W` executed instructions, recording every leakage event (load/store addresses and
+    variable-latency operands included). Nested branches follow the predictor. `lfence` and `ret`
+    end the window; `skip` counts instructions still to be jumped over. -/
+def transientWindow (pred : PredictorOracle) :
+    Code → Nat → Nat → Nat → List Bool → ConstantTimeIsa.X86State → List LeakageEvent
+  | [], _, _, _, _, _ => []
+  | _ :: rest, skip + 1, W, pc, hist, st => transientWindow pred rest skip W (pc + 1) hist st
+  | _ :: _, 0, 0, _, _, _ => []
+  | ins :: rest, 0, W + 1, pc, hist, st =>
+    match ins with
+    | .op i =>
+      (execX86Instr i pc st).2 ::
+        transientWindow pred rest 0 W (pc + 1) hist (execX86Instr i pc st).1
+    | .jcc _ k =>
+      branchEvent pc (pred pc hist) ::
+        transientWindow pred rest (if pred pc hist then k else 0) W (pc + 1)
+          (pred pc hist :: hist) st
+    | .lfence => []
+    | .ret => [retEvent pc st]
+
+/-- Speculative machine. At each `jcc` the predictor guesses; on a wrong guess the machine first
+    runs `transientWindow` along the wrong direction, then rolls back to the architectural state
+    and continues along the right one. -/
+def specRun (pred : PredictorOracle) (W : Nat) :
+    Code → Nat → Nat → List Bool → ConstantTimeIsa.X86State → List SpecObs
+  | [], _, _, _, _ => []
+  | _ :: rest, skip + 1, pc, hist, st => specRun pred W rest skip (pc + 1) hist st
+  | ins :: rest, 0, pc, hist, st =>
+    match ins with
+    | .op i =>
+      .arch (execX86Instr i pc st).2 ::
+        specRun pred W rest 0 (pc + 1) hist (execX86Instr i pc st).1
+    | .jcc c k =>
+      .arch (branchEvent pc (c.eval st)) ::
+        ((if pred pc hist = c.eval st then []
+          else transientWindow pred rest (if pred pc hist then k else 0) W (pc + 1)
+            (pred pc hist :: hist) st).map .transient ++
+         specRun pred W rest (if c.eval st then k else 0) (pc + 1) (c.eval st :: hist) st)
+    | .lfence => specRun pred W rest 0 (pc + 1) hist st
+    | .ret => [.arch (retEvent pc st)]
+
+def execSpeculativeWindow (prog : Code) (W : Nat) (pred : PredictorOracle) (st : ConstantTimeIsa.X86State) :
+    List SpecObs :=
+  specRun pred W prog 0 0 [] st
+
+def execSpeculativeObs (prog : Code) (st : ConstantTimeIsa.X86State) (pred : PredictorOracle) (W : Nat) :
+    List SpecObs :=
+  execSpeculativeWindow prog W pred st
+
+/-- Branch-free code: a block of constant-time ISA instructions. -/
+def straightline (blk : List ConstantTimeIsa.X86Instr) : Code := blk.map .op
+
+theorem specRun_straightline_append (pred : PredictorOracle) (W : Nat) (blk : List ConstantTimeIsa.X86Instr)
+    (rest : Code) (pc : Nat) (hist : List Bool) (st : ConstantTimeIsa.X86State) :
+    specRun pred W (straightline blk ++ rest) 0 pc hist st =
+      (execX86Block blk pc st).2.map .arch ++
+        specRun pred W rest 0 (pc + blk.length) hist (execX86Block blk pc st).1 := by
+  induction blk generalizing pc st with
+  | nil => simp [straightline, execX86Block]
+  | cons ins tl ih =>
+    have ih' := ih (pc + 1) (execX86Instr ins pc st).1
+    simp only [straightline] at ih' ⊢
+    simp only [List.map_cons, List.cons_append, specRun, execX86Block, ih', List.length_cons,
+      Nat.add_assoc, Nat.add_comm 1]
+
+theorem specRun_straightline (pred : PredictorOracle) (W : Nat) (blk : List ConstantTimeIsa.X86Instr)
+    (pc : Nat) (hist : List Bool) (st : ConstantTimeIsa.X86State) :
+    specRun pred W (straightline blk) 0 pc hist st = (execX86Block blk pc st).2.map .arch := by
+  have h := specRun_straightline_append pred W blk [] pc hist st
+  simpa [specRun] using h
+
+theorem specRun_skip_all (pred : PredictorOracle) (W : Nat) (code : Code)
+    (pc : Nat) (hist : List Bool) (st : ConstantTimeIsa.X86State) :
+    specRun pred W code code.length pc hist st = [] := by
+  induction code generalizing pc with
+  | nil => simp [specRun]
+  | cons ins tl ih => simp only [List.length_cons, specRun, ih]
+
+theorem transientWindow_straightline (pred : PredictorOracle) (blk : List ConstantTimeIsa.X86Instr) (W : Nat)
+    (pc : Nat) (hist : List Bool) (st : ConstantTimeIsa.X86State) :
+    transientWindow pred (straightline blk) 0 W pc hist st = (execX86Block blk pc st).2.take W := by
+  induction blk generalizing W pc st with
+  | nil => cases W <;> simp [straightline, execX86Block, transientWindow]
+  | cons ins tl ih =>
+    cases W with
+    | zero => simp [straightline, transientWindow]
+    | succ n =>
+      have ih' := ih n (pc + 1) (execX86Instr ins pc st).1
+      simp only [straightline] at ih' ⊢
+      simp only [List.map_cons, transientWindow, execX86Block, ih', List.take_succ_cons]
+
+theorem transientWindow_skip_all (pred : PredictorOracle) (code : Code) (W : Nat)
+    (pc : Nat) (hist : List Bool) (st : ConstantTimeIsa.X86State) :
+    transientWindow pred code code.length W pc hist st = [] := by
+  induction code generalizing pc with
+  | nil => simp [transientWindow]
+  | cons ins tl ih => simp only [List.length_cons, transientWindow, ih]
+
+/-- Embed a `ConstantTimeIsa` program that has no `jccNz` and no `pubLoop` back-edge. -/
+def compileStraight : List X86Stmt → Option Code
+  | [] => some []
+  | .instr i :: rest => (compileStraight rest).map (SpecInstr.op i :: ·)
+  | .ret :: _ => some [.ret]
+  | .jccNz _ _ _ :: _ => none
+  | .pubLoop _ _ :: _ => none
+
+/-- On branch-free code the speculative machine emits exactly the architectural leakage trace of
+    `execX86Prog`, for every predictor and every window: there is no branch to mispredict. -/
+theorem straightline_speculation_is_architectural (pred : PredictorOracle) (W : Nat) :
+    ∀ (prog : List X86Stmt) (code : Code) (pc : Nat) (hist : List Bool) (st : ConstantTimeIsa.X86State),
+      compileStraight prog = some code →
+      specRun pred W code 0 pc hist st = (execX86Prog prog pc st).2.map .arch
+  | [], code, pc, hist, st, h => by
+    simp only [compileStraight, Option.some.injEq] at h
+    subst h
+    simp [specRun, execX86Prog]
+  | .instr i :: rest, code, pc, hist, st, h => by
+    simp only [compileStraight, Option.map_eq_some_iff] at h
+    obtain ⟨tl, hTl, rfl⟩ := h
+    have ih := straightline_speculation_is_architectural pred W rest tl (pc + 1) hist
+      (execX86Instr i pc st).1 hTl
+    simp only [specRun, execX86Prog, ih, List.map_cons]
+  | .ret :: _, code, pc, hist, st, h => by
+    simp only [compileStraight, Option.some.injEq] at h
+    subst h
+    simp [specRun, execX86Prog, retEvent]
+  | .jccNz _ _ _ :: _, _, _, _, _, h => by simp [compileStraight] at h
+  | .pubLoop _ _ :: _, _, _, _, _, h => by simp [compileStraight] at h
+
+/-- **Unbounded speculative non-interference of branch-free constant-time kernels.** A program
+    accepted by the `ConstantTimeIsa` taint checker that contains no conditional branch emits the
+    same speculative observation trace on any two states that agree on public inputs, for every
+    speculation window `W` and every adversarial predictor. -/
+theorem straightline_ct_implies_unbounded_speculative_ni
+    (memPol : BitVec 64 → SecLabel) (secHeap : Bool)
+    (hPol : secHeap = true → ∀ a, memPol a = .sec)
+    (prog : List X86Stmt) (code : Code) (τ τ' : X86TaintState)
+    (hStraight : compileStraight prog = some code)
+    (hCheck : checkX86Prog secHeap τ prog = some τ')
+    (s₁ s₂ : ConstantTimeIsa.X86State) (hLow : X86LowEq memPol τ s₁ s₂)
+    (pred : PredictorOracle) (W : Nat) :
+    execSpeculativeObs code s₁ pred W = execSpeculativeObs code s₂ pred W := by
+  unfold execSpeculativeObs execSpeculativeWindow
+  rw [straightline_speculation_is_architectural pred W prog code 0 [] s₁ hStraight,
+    straightline_speculation_is_architectural pred W prog code 0 [] s₂ hStraight,
+    (x86_ct_checker_sound memPol secHeap hPol prog τ τ' 0 hCheck s₁ s₂ hLow).1]
+
+/-- `ct_eq_bytes32` (`ctEq32X86Prog`) as speculative code. -/
+def ctEq32SpecCode : Code := (compileStraight ctEq32X86Prog).getD []
+
+/-- Canonical Goldilocks multiplication (`goldilocksMulCtX86Prog`) as speculative code. -/
+def goldilocksMulSpecCode : Code := (compileStraight goldilocksMulCtX86Prog).getD []
+
+theorem ctEq32_unbounded_speculative_ni (s₁ s₂ : ConstantTimeIsa.X86State)
+    (hLow : X86LowEq (fun _ => .sec) sysvPtrArgs4Taint s₁ s₂)
+    (pred : PredictorOracle) (W : Nat) :
+    execSpeculativeObs ctEq32SpecCode s₁ pred W = execSpeculativeObs ctEq32SpecCode s₂ pred W := by
+  have hChk : ∃ τOut, checkX86Prog true sysvPtrArgs4Taint ctEq32X86Prog = some τOut := ⟨_, rfl⟩
+  rcases hChk with ⟨τOut, hOpt⟩
+  exact straightline_ct_implies_unbounded_speculative_ni (fun _ => .sec) true (fun _ _ => rfl)
+    ctEq32X86Prog ctEq32SpecCode sysvPtrArgs4Taint τOut rfl hOpt s₁ s₂ hLow pred W
+
+theorem goldilocksMul_unbounded_speculative_ni (s₁ s₂ : ConstantTimeIsa.X86State)
+    (hLow : X86LowEq (fun _ => .sec) glAllSecretX86Taint s₁ s₂)
+    (pred : PredictorOracle) (W : Nat) :
+    execSpeculativeObs goldilocksMulSpecCode s₁ pred W =
+      execSpeculativeObs goldilocksMulSpecCode s₂ pred W := by
+  have hChk : ∃ τOut, checkX86Prog true glAllSecretX86Taint goldilocksMulCtX86Prog = some τOut :=
+    ⟨_, rfl⟩
+  rcases hChk with ⟨τOut, hOpt⟩
+  exact straightline_ct_implies_unbounded_speculative_ni (fun _ => .sec) true (fun _ _ => rfl)
+    goldilocksMulCtX86Prog goldilocksMulSpecCode glAllSecretX86Taint τOut rfl hOpt s₁ s₂ hLow pred W
+
+/-! ### Bounds-checked table lookup: Spectre-v1 leak, SLH mask, `lfence` -/
+
+/-- `pre; jcc c over body; body`: a block guarded by one forward conditional branch. -/
+def guardedBlock (pre : List ConstantTimeIsa.X86Instr) (c : BranchCond) (body : List ConstantTimeIsa.X86Instr) : Code :=
+  straightline pre ++ .jcc c body.length :: straightline body
+
+/-- The same guard with an `lfence` as the first instruction of the guarded body. -/
+def guardedBlockLfence (pre : List ConstantTimeIsa.X86Instr) (c : BranchCond) (body : List ConstantTimeIsa.X86Instr) : Code :=
+  straightline pre ++ .jcc c (body.length + 1) :: .lfence :: straightline body
+
+/-- Closed form of the speculative trace of a guarded block: the only transient events are the
+    first `W` events of the body, run on the pre-branch state, when the branch is architecturally
+    taken (body skipped) and the predictor says not-taken. -/
+theorem execSpeculativeObs_guardedBlock (pre : List ConstantTimeIsa.X86Instr) (c : BranchCond)
+    (body : List ConstantTimeIsa.X86Instr) (st : ConstantTimeIsa.X86State) (pred : PredictorOracle) (W : Nat) :
+    execSpeculativeObs (guardedBlock pre c body) st pred W =
+      (execX86Block pre 0 st).2.map .arch ++
+        .arch (branchEvent pre.length (c.eval (execX86Block pre 0 st).1)) ::
+          ((if pred pre.length [] = c.eval (execX86Block pre 0 st).1 then []
+            else if pred pre.length [] then []
+            else (execX86Block body (pre.length + 1) (execX86Block pre 0 st).1).2.take W).map
+              .transient ++
+           (if c.eval (execX86Block pre 0 st).1 then []
+            else (execX86Block body (pre.length + 1) (execX86Block pre 0 st).1).2.map .arch)) := by
+  unfold execSpeculativeObs execSpeculativeWindow guardedBlock
+  rw [specRun_straightline_append]
+  simp only [specRun, Nat.zero_add]
+  have hLen : (straightline body).length = body.length := by simp [straightline]
+  cases hG : pred pre.length [] <;> cases hA : c.eval (execX86Block pre 0 st).1 <;>
+    simp [transientWindow_straightline, specRun_straightline,
+      ← hLen, transientWindow_skip_all, specRun_skip_all]
+
+theorem execX86Block_trace_length (blk : List ConstantTimeIsa.X86Instr) (pc : Nat) (st : ConstantTimeIsa.X86State) :
+    (execX86Block blk pc st).2.length = blk.length := by
+  induction blk generalizing pc st with
+  | nil => rfl
+  | cons ins tl ih => simp only [execX86Block, List.length_cons, ih]
+
+/-- A speculation window longer than the guarded body adds nothing: the transient run ends when
+    the body does. -/
+theorem guardedBlock_window_saturates (pre : List ConstantTimeIsa.X86Instr) (c : BranchCond)
+    (body : List ConstantTimeIsa.X86Instr) (st : ConstantTimeIsa.X86State) (pred : PredictorOracle) (W : Nat)
+    (hW : body.length ≤ W) :
+    execSpeculativeObs (guardedBlock pre c body) st pred W =
+      execSpeculativeObs (guardedBlock pre c body) st pred body.length := by
+  rw [execSpeculativeObs_guardedBlock, execSpeculativeObs_guardedBlock,
+    List.take_of_length_le (by rw [execX86Block_trace_length]; exact hW),
+    List.take_of_length_le (by rw [execX86Block_trace_length]; exact Nat.le_refl _)]
+
+/-- With `lfence` at the head of the guarded body there are no transient events at all: the
+    trace is independent of the predictor and of the speculation window. -/
+theorem execSpeculativeObs_guardedBlockLfence (pre : List ConstantTimeIsa.X86Instr) (c : BranchCond)
+    (body : List ConstantTimeIsa.X86Instr) (st : ConstantTimeIsa.X86State) (pred : PredictorOracle) (W : Nat) :
+    execSpeculativeObs (guardedBlockLfence pre c body) st pred W =
+      (execX86Block pre 0 st).2.map .arch ++
+        .arch (branchEvent pre.length (c.eval (execX86Block pre 0 st).1)) ::
+          (if c.eval (execX86Block pre 0 st).1 then []
+           else (execX86Block body (pre.length + 2) (execX86Block pre 0 st).1).2.map .arch) := by
+  unfold execSpeculativeObs execSpeculativeWindow guardedBlockLfence
+  rw [specRun_straightline_append]
+  simp only [specRun, Nat.zero_add]
+  have hLen : (SpecInstr.lfence :: straightline body).length = body.length + 1 := by
+    simp [straightline]
+  cases hG : pred pre.length [] <;> cases hA : c.eval (execX86Block pre 0 st).1 <;>
+    cases W <;>
+    simp [transientWindow, specRun, specRun_straightline,
+      ← hLen, transientWindow_skip_all, specRun_skip_all]
+
+/-- Bounds-check prefix: `rax := idx - len`, leaving `cf = (idx < len)`. -/
+def boundsCheckPre : List ConstantTimeIsa.X86Instr :=
+  [.movReg64 .rax .rdi, .sub64 .rax .rsi]
+
+/-- Unhardened body: `rcx := arr[idx]; r8 := table[rcx]`. -/
+def boundsLookupBody : List ConstantTimeIsa.X86Instr :=
+  [.loadIndexed64 .rcx .rdx .rdi 8#64, .loadIndexed64 .r8 .rbx .rcx 8#64]
+
+/-- `if idx < pub_len then table[arr[idx]]` with `idx = rdi`, `pub_len = rsi`, `arr = rdx`,
+    `table = rbx`, compiled to a compare and a forward `jae`. -/
+def unmaskedBoundsProg : Code := guardedBlock boundsCheckPre .aboveEq boundsLookupBody
+
+/-- The same lookup with `lfence` after the bounds branch. -/
+def lfenceBoundsProg : Code := guardedBlockLfence boundsCheckPre .aboveEq boundsLookupBody
+
+/-- Speculative-load-hardening prefix: the predicate mask `r9 := cf ? allOnes : 0` is computed
+    from the comparison itself by `sbb`, so it carries the true bounds predicate into whichever
+    direction the predictor sends execution. -/
+def slhPre : List ConstantTimeIsa.X86Instr :=
+  [.movReg64 .rax .rdi, .sub64 .rax .rsi, .sbbSelf64 .r9]
+
+/-- Hardened body: the index is masked before the first load. -/
+def slhBody : List ConstantTimeIsa.X86Instr :=
+  [.and64 .rdi .r9, .loadIndexed64 .rcx .rdx .rdi 8#64, .loadIndexed64 .r8 .rbx .rcx 8#64]
+
+def slhMaskedBoundsProg : Code := guardedBlock slhPre .aboveEq slhBody
+
+/-- Public view of the lookup: all registers (index, length, both base pointers) and the
+    in-bounds cells `arr[0 .. pub_len)`. Every other memory cell, including everything past the
+    end of `arr`, is secret. -/
+def BoundsLowEq (s₁ s₂ : ConstantTimeIsa.X86State) : Prop :=
+  s₁.gpr = s₂.gpr ∧
+  ∀ i : BitVec 64, i.toNat < (s₁.gpr .rsi).toNat →
+    s₁.mem (s₁.gpr .rdx + i * 8#64) = s₂.mem (s₁.gpr .rdx + i * 8#64)
+
+/-- The SLH-masked index: `idx` when in bounds, `0` otherwise. -/
+def slhIndex (st : ConstantTimeIsa.X86State) : BitVec 64 :=
+  st.gpr .rdi &&& (if (st.gpr .rdi).toNat < (st.gpr .rsi).toNat then 0xFFFFFFFFFFFFFFFF#64 else 0#64)
+
+theorem slhIndex_in_bounds (st : ConstantTimeIsa.X86State) (hLen : 0 < (st.gpr .rsi).toNat) :
+    (slhIndex st).toNat < (st.gpr .rsi).toNat := by
+  unfold slhIndex
+  rw [BitVec.toNat_and]
+  by_cases h : (st.gpr .rdi).toNat < (st.gpr .rsi).toNat
+  · exact Nat.lt_of_le_of_lt Nat.and_le_left h
+  · simp only [h, ↓reduceIte]
+    exact Nat.lt_of_le_of_lt Nat.and_le_right hLen
+
+theorem boundsCheck_exec (st : ConstantTimeIsa.X86State) :
+    (execX86Block boundsCheckPre 0 st).2 = [LeakageEvent.clean 0, LeakageEvent.clean 1] ∧
+    BranchCond.aboveEq.eval (execX86Block boundsCheckPre 0 st).1 =
+      !decide ((st.gpr .rdi).toNat < (st.gpr .rsi).toNat) ∧
+    ∀ pc, (execX86Block boundsLookupBody pc (execX86Block boundsCheckPre 0 st).1).2 =
+      [LeakageEvent.clean pc [st.gpr .rdx + st.gpr .rdi * 8#64],
+       LeakageEvent.clean (pc + 1)
+         [st.gpr .rbx + st.mem (st.gpr .rdx + st.gpr .rdi * 8#64) * 8#64]] := by
+  refine ⟨?_, ?_, ?_⟩ <;>
+    simp [boundsCheckPre, boundsLookupBody, execX86Block, execX86Instr, ConstantTimeIsa.X86State.setGpr,
+      BranchCond.eval]
+
+theorem slh_exec (st : ConstantTimeIsa.X86State) :
+    (execX86Block slhPre 0 st).2 =
+      [LeakageEvent.clean 0, LeakageEvent.clean 1, LeakageEvent.clean 2] ∧
+    BranchCond.aboveEq.eval (execX86Block slhPre 0 st).1 =
+      !decide ((st.gpr .rdi).toNat < (st.gpr .rsi).toNat) ∧
+    ∀ pc, (execX86Block slhBody pc (execX86Block slhPre 0 st).1).2 =
+      [LeakageEvent.clean pc,
+       LeakageEvent.clean (pc + 1) [st.gpr .rdx + slhIndex st * 8#64],
+       LeakageEvent.clean (pc + 2)
+         [st.gpr .rbx + st.mem (st.gpr .rdx + slhIndex st * 8#64) * 8#64]] := by
+  refine ⟨?_, ?_, ?_⟩ <;>
+    simp [slhPre, slhBody, execX86Block, execX86Instr, ConstantTimeIsa.X86State.setGpr, BranchCond.eval, slhIndex]
+
+/-- **Speculative load hardening blocks the out-of-bounds transient secret load.** For a
+    non-empty public array, the SLH-masked lookup emits the same speculative observation trace on
+    any two states with the same public view, for every speculation window `W` and every
+    adversarial predictor: under misprediction the masked index is `0`, so the transient loads
+    touch `arr[0]` and `table[arr[0]]` only. -/
+theorem slh_predicate_mask_prevents_oob_speculative_secret_load
+    (s₁ s₂ : ConstantTimeIsa.X86State) (hLow : BoundsLowEq s₁ s₂) (hNonEmpty : 0 < (s₁.gpr .rsi).toNat)
+    (pred : PredictorOracle) (W : Nat) :
+    execSpeculativeObs slhMaskedBoundsProg s₁ pred W =
+      execSpeculativeObs slhMaskedBoundsProg s₂ pred W := by
+  obtain ⟨hGpr, hMem⟩ := hLow
+  have hIdx : slhIndex s₂ = slhIndex s₁ := by unfold slhIndex; rw [hGpr]
+  have hCell := hMem (slhIndex s₁) (slhIndex_in_bounds s₁ hNonEmpty)
+  obtain ⟨hPre₁, hCond₁, hBody₁⟩ := slh_exec s₁
+  obtain ⟨hPre₂, hCond₂, hBody₂⟩ := slh_exec s₂
+  have hBody : ∀ pc, (execX86Block slhBody pc (execX86Block slhPre 0 s₂).1).2 =
+      (execX86Block slhBody pc (execX86Block slhPre 0 s₁).1).2 := by
+    intro pc
+    rw [hBody₁, hBody₂, hIdx, ← hGpr, hCell]
+  unfold slhMaskedBoundsProg
+  rw [execSpeculativeObs_guardedBlock, execSpeculativeObs_guardedBlock, hPre₁, hPre₂, hCond₁,
+    hCond₂, hBody, ← hGpr]
+
+/-- Every transient load of the SLH-masked lookup stays inside the public array or reads the
+    table at a public in-bounds array value: no transient address depends on a cell outside
+    `arr[0 .. pub_len)`. -/
+theorem slh_transient_loads_stay_in_bounds
+    (st : ConstantTimeIsa.X86State) (hNonEmpty : 0 < (st.gpr .rsi).toNat) (pred : PredictorOracle) (W : Nat)
+    (ev : LeakageEvent)
+    (hEv : SpecObs.transient ev ∈ execSpeculativeObs slhMaskedBoundsProg st pred W)
+    (a : BitVec 64) (ha : a ∈ ev.memAddrs) :
+    ∃ i : BitVec 64, i.toNat < (st.gpr .rsi).toNat ∧
+      (a = st.gpr .rdx + i * 8#64 ∨ a = st.gpr .rbx + st.mem (st.gpr .rdx + i * 8#64) * 8#64) := by
+  obtain ⟨hPre, hCond, hBody⟩ := slh_exec st
+  unfold slhMaskedBoundsProg at hEv
+  rw [execSpeculativeObs_guardedBlock, hPre, hCond, hBody] at hEv
+  have hIn : ev ∈ [LeakageEvent.clean (slhPre.length + 1),
+      LeakageEvent.clean (slhPre.length + 1 + 1) [st.gpr .rdx + slhIndex st * 8#64],
+      LeakageEvent.clean (slhPre.length + 1 + 2)
+        [st.gpr .rbx + st.mem (st.gpr .rdx + slhIndex st * 8#64) * 8#64]] := by
+    simp only [List.mem_append, List.mem_cons, List.mem_map, reduceCtorEq, false_or,
+      SpecObs.transient.injEq, exists_eq_right] at hEv
+    rcases hEv with hEv | hEv
+    · simp at hEv
+    · rcases hEv with hEv | hEv
+      · split at hEv
+        · simp at hEv
+        · split at hEv
+          · simp at hEv
+          · exact List.mem_of_mem_take hEv
+      · split at hEv <;> simp at hEv
+  refine ⟨slhIndex st, slhIndex_in_bounds st hNonEmpty, ?_⟩
+  simp only [List.mem_cons, List.not_mem_nil, or_false] at hIn
+  rcases hIn with rfl | rfl | rfl
+  · simp [LeakageEvent.clean] at ha
+  · left; simpa [LeakageEvent.clean] using ha
+  · right; simpa [LeakageEvent.clean] using ha
+
+/-- Victim state for the Spectre-v1 witness: `idx = 5` is out of bounds for `pub_len = 4`,
+    `arr = 0x1000`, `table = 0x8000`, and the cell `arr[5]` (address `0x1028`) holds a secret. -/
+def boundsVictimState (len secret : BitVec 64) : ConstantTimeIsa.X86State :=
+  { gpr := fun r =>
+      match r with
+      | .rdi => 5#64
+      | .rsi => len
+      | .rdx => 0x1000#64
+      | .rbx => 0x8000#64
+      | _ => 0#64
+    ymm := fun _ => ConstantTimeIsa.Vec256.zero
+    flags := { cf := false, of := false, zf := false }
+    mem := fun a => if a == 0x1028#64 then secret else 0#64
+    doitEnabled := true
+    ymmUpperDirty := false }
+
+theorem boundsVictimState_lowEq (s₁ s₂ : BitVec 64) :
+    BoundsLowEq (boundsVictimState 4#64 s₁) (boundsVictimState 4#64 s₂) := by
+  refine ⟨rfl, ?_⟩
+  intro i hi
+  have hi4 : i.toNat < 4 := hi
+  have hCases : i = 0#64 ∨ i = 1#64 ∨ i = 2#64 ∨ i = 3#64 := by
+    have h : i.toNat = 0 ∨ i.toNat = 1 ∨ i.toNat = 2 ∨ i.toNat = 3 := by omega
+    rcases h with h | h | h | h
+    · exact Or.inl (BitVec.eq_of_toNat_eq (by rw [h]; rfl))
+    · exact Or.inr (Or.inl (BitVec.eq_of_toNat_eq (by rw [h]; rfl)))
+    · exact Or.inr (Or.inr (Or.inl (BitVec.eq_of_toNat_eq (by rw [h]; rfl))))
+    · exact Or.inr (Or.inr (Or.inr (BitVec.eq_of_toNat_eq (by rw [h]; rfl))))
+  rcases hCases with rfl | rfl | rfl | rfl <;> rfl
+
+/-- The predictor that always guesses "bounds check passes" (branch not taken). -/
+def alwaysInBoundsPredictor : PredictorOracle := fun _ _ => false
+
+/-- **Spectre-v1 tooth.** The unhardened bounds-checked lookup
+    `if idx < pub_len then table[arr[idx]]`:
+    1. is architecturally constant-time: without speculation (`W = 0`) the trace is the same on
+       any two states with the same public view, whatever the predictor does;
+    2. still does not leak with a one-instruction window;
+    3. leaks for every window `W ≥ 2`: two states with the same public view that differ only in
+       the secret cell past the end of `arr` emit different traces once the predictor mispredicts
+       the bounds check, because the second transient load is addressed by the secret. -/
+theorem tooth_unmasked_bounds_branch_leaks_under_speculation :
+    (∀ (s₁ s₂ : ConstantTimeIsa.X86State), BoundsLowEq s₁ s₂ → ∀ (pred : PredictorOracle) (W : Nat), W ≤ 1 →
+      execSpeculativeObs unmaskedBoundsProg s₁ pred W =
+        execSpeculativeObs unmaskedBoundsProg s₂ pred W) ∧
+    BoundsLowEq (boundsVictimState 4#64 0#64) (boundsVictimState 4#64 1#64) ∧
+    (∀ W : Nat, 2 ≤ W →
+      execSpeculativeObs unmaskedBoundsProg (boundsVictimState 4#64 0#64)
+          alwaysInBoundsPredictor W ≠
+        execSpeculativeObs unmaskedBoundsProg (boundsVictimState 4#64 1#64)
+          alwaysInBoundsPredictor W) := by
+  refine ⟨?_, boundsVictimState_lowEq 0#64 1#64, ?_⟩
+  · intro s₁ s₂ hLow pred W hW
+    obtain ⟨hGpr, hMem⟩ := hLow
+    obtain ⟨hPre₁, hCond₁, hBody₁⟩ := boundsCheck_exec s₁
+    obtain ⟨hPre₂, hCond₂, hBody₂⟩ := boundsCheck_exec s₂
+    unfold unmaskedBoundsProg
+    rw [execSpeculativeObs_guardedBlock, execSpeculativeObs_guardedBlock, hPre₁, hPre₂, hCond₁,
+      hCond₂, hBody₁, hBody₂, ← hGpr]
+    by_cases hIn : (s₁.gpr .rdi).toNat < (s₁.gpr .rsi).toNat
+    · rw [hMem _ hIn]
+    · have hW' : W = 0 ∨ W = 1 := by omega
+      rcases hW' with rfl | rfl <;> simp [hIn]
+  · intro W hW
+    unfold unmaskedBoundsProg
+    rw [guardedBlock_window_saturates boundsCheckPre .aboveEq boundsLookupBody _ _ W hW,
+      guardedBlock_window_saturates boundsCheckPre .aboveEq boundsLookupBody _ _ W hW]
+    decide
+
+/-- **`lfence` after the bounds branch restores non-interference** for every window and every
+    predictor: the barrier ends the transient window before the first load. -/
+theorem lfence_after_bounds_branch_blocks_speculative_leak
+    (s₁ s₂ : ConstantTimeIsa.X86State) (hLow : BoundsLowEq s₁ s₂) (pred : PredictorOracle) (W : Nat) :
+    execSpeculativeObs lfenceBoundsProg s₁ pred W =
+      execSpeculativeObs lfenceBoundsProg s₂ pred W := by
+  obtain ⟨hGpr, hMem⟩ := hLow
+  obtain ⟨hPre₁, hCond₁, hBody₁⟩ := boundsCheck_exec s₁
+  obtain ⟨hPre₂, hCond₂, hBody₂⟩ := boundsCheck_exec s₂
+  unfold lfenceBoundsProg
+  rw [execSpeculativeObs_guardedBlockLfence, execSpeculativeObs_guardedBlockLfence, hPre₁, hPre₂,
+    hCond₁, hCond₂, hBody₁, hBody₂, ← hGpr]
+  by_cases hIn : (s₁.gpr .rdi).toNat < (s₁.gpr .rsi).toNat
+  · rw [hMem _ hIn]
+  · simp [hIn]
+
+/-- **Tooth: the SLH mask needs a non-empty array.** With `pub_len = 0` the masked index `0` is
+    itself out of bounds, and the hardened lookup leaks the secret cell `arr[0]` for `W ≥ 3`. -/
+theorem tooth_slh_mask_leaks_on_empty_array :
+    let sA : ConstantTimeIsa.X86State := { boundsVictimState 0#64 0#64 with mem := fun _ => 0#64 }
+    let sB : ConstantTimeIsa.X86State :=
+      { boundsVictimState 0#64 0#64 with mem := fun a => if a == 0x1000#64 then 1#64 else 0#64 }
+    BoundsLowEq sA sB ∧
+    ∀ W : Nat, 3 ≤ W →
+      execSpeculativeObs slhMaskedBoundsProg sA alwaysInBoundsPredictor W ≠
+        execSpeculativeObs slhMaskedBoundsProg sB alwaysInBoundsPredictor W := by
+  refine ⟨⟨rfl, ?_⟩, ?_⟩
+  · intro i hi
+    exact absurd hi (Nat.not_lt_zero _)
+  · intro W hW
+    unfold slhMaskedBoundsProg
+    rw [guardedBlock_window_saturates slhPre .aboveEq slhBody _ _ W hW,
+      guardedBlock_window_saturates slhPre .aboveEq slhBody _ _ W hW]
+    decide
+
+
+/-! ## 5. All-layer release cache
+
+The cache below stores the message at every upper position. Its list representation is an
+append-only journal: repeated positions must agree on both root and counter. No secret key or
+honest-computation premise is required of a candidate. The two-layer circuit above remains a
+small fault example; this gate handles any number of layers.
+-/
+
+structure OtsPosition where
+  layer : Nat
+  treeIdx : Nat
+  leafIdx : Nat
+  deriving DecidableEq, Repr
+
+structure LayerRelease where
+  key : OtsPosition
+  signed : OtsMessage
+  opening : LayerXmssSig
+  deriving DecidableEq
+
+/-- Recompute each input root by the real verifier, never trusting a root supplied by the
+    signing computation. Failure at any layer fails the entire traversal. -/
+def verifiedLayerMessages (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) : Nat → Nat → List UInt8 → List UInt8 →
+      List LayerXmssSig → Option (List LayerRelease)
+  | _, _, _, _, [] => some []
+  | layer, g, rand, root, sig :: rest => do
+    let next ← verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot rand layer g root [sig]
+    let tail ← verifiedLayerMessages suite params pk (layer + 1)
+      (g / 2 ^ params.subtreeHeight) [] next rest
+    pure (⟨⟨layer, g / 2 ^ params.subtreeHeight, g % 2 ^ params.subtreeHeight⟩,
+      ⟨root, sig.tswCtr⟩, sig⟩ :: tail)
+
+/-- Every verifier-accepted hypertree has a complete cache view, with one entry per layer. -/
+theorem verifiedLayerMessages_complete (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (sigs : List LayerXmssSig) :
+    ∀ layer g rand root top,
+    verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot rand layer g root sigs = some top →
+    ∃ entries, verifiedLayerMessages suite params pk layer g rand root sigs = some entries ∧
+      entries.map (fun e => e.key.layer) = List.range' layer sigs.length := by
+  induction sigs with
+  | nil => intro layer g rand root top _; exact ⟨[], rfl, rfl⟩
+  | cons sig rest ih =>
+    intro layer g rand root top h
+    obtain ⟨mid, hm, ht⟩ := (verifyHypertreeLayers_split suite params pk.pkSeed pk.pkRoot
+      rand layer g root sig rest top).mp h
+    obtain ⟨entries, he, hl⟩ := ih _ _ _ _ _ ht
+    refine ⟨⟨⟨layer, g / 2 ^ params.subtreeHeight, g % 2 ^ params.subtreeHeight⟩,
+      ⟨root, sig.tswCtr⟩, sig⟩ :: entries, ?_, ?_⟩
+    · simp [verifiedLayerMessages, hm, he]
+    · simp [List.range', hl]
+
+/-- Pairwise agreement, including repeated uses in the same batch. -/
+def CacheConsistent (entries : List LayerRelease) : Prop :=
+  ∀ a ∈ entries, ∀ b ∈ entries, a.key = b.key → a.signed = b.signed
+
+instance (entries : List LayerRelease) : Decidable (CacheConsistent entries) :=
+  inferInstanceAs (Decidable (∀ a ∈ entries, ∀ b ∈ entries,
+    a.key = b.key → a.signed = b.signed))
+
+/-- Full verification followed by a transactional cache check. Layer zero is omitted from the
+    upper-layer journal. Returning `none` commits neither a signature nor a partial cache. -/
+def verifyBeforeReleaseAll (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (cache : List LayerRelease) (turn : FaultedSignTurn) :
+    Option (List LayerRelease) := do
+  if !verifyPqHashSig suite params pk turn.msg turn.candidate then none else do
+    let (rand, root) ← hypertreeStart suite params pk turn.msg turn.candidate
+    let entries ← verifiedLayerMessages suite params pk 0 turn.candidate.leafGlobalIdx
+      rand root turn.candidate.layerSigs
+    if CacheConsistent (cache ++ entries.drop 1) then some (entries.drop 1) else none
+
+/-- The returned journal contains precisely the upper entries of successfully released
+    candidates. Rejecting a turn leaves the journal unchanged. -/
+def guardedSignTraceAll (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) : List LayerRelease → List FaultedSignTurn → List LayerRelease
+  | cache, [] => cache
+  | cache, turn :: rest =>
+    match verifyBeforeReleaseAll suite params pk cache turn with
+    | none => guardedSignTraceAll suite params pk cache rest
+    | some entries => guardedSignTraceAll suite params pk (cache ++ entries) rest
+
