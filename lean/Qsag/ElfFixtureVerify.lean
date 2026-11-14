@@ -3,8 +3,8 @@ module
 # Qsag.ElfFixtureVerify — certificates for the compiled `qsag-asm` archives
 
 Fixture-specific half of the binary verification: everything here is about the two compiled
-archives in `Qsag.CompiledRlibFixtures`.
-1. Decode counts for all 23 extracted symbols.
+historical and current archives in `Qsag.CompiledRlibFixtures`.
+1. Decode counts for 23 historical and 28 current extracted symbols.
 2. One kernel-checked invariant certificate per symbol (`Qsag.ElfInvCerts`), checked by
    `certSliceAt`: decode the symbol's bytes and verify the supplied invariant is inductive.
 3. The end-to-end corollaries: every symbol the parser extracts from each archive satisfies
@@ -265,6 +265,196 @@ theorem current_bitslice_exports_pinned :
       [("qsag_asm_transpose64x256_neon", 4264),
        ("qsag_asm_gf2_128_mul_acc_pmull", 216)] := by
   rw [currentX86_rlib_extracted_slices, currentAarch64_rlib_extracted_slices]
+  decide +kernel
+
+theorem currentX86_symbol_00_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 0 = true := by decide +kernel
+
+theorem currentX86_symbol_01_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 1 = true := by decide +kernel
+
+theorem currentX86_symbol_02_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 2 = true := by decide +kernel
+
+theorem currentX86_symbol_03_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 3 = true := by decide +kernel
+
+theorem currentX86_symbol_04_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 4 = true := by decide +kernel
+
+theorem currentX86_symbol_05_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 5 = true := by decide +kernel
+
+theorem currentX86_symbol_06_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 6 = true := by decide +kernel
+
+theorem currentX86_symbol_07_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 7 = true := by decide +kernel
+
+theorem currentX86_symbol_08_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 8 = true := by decide +kernel
+
+theorem currentX86_symbol_09_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 9 = true := by decide +kernel
+
+theorem currentX86_symbol_10_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 10 = true := by decide +kernel
+
+theorem currentX86_symbol_11_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 11 = true := by decide +kernel
+
+theorem currentX86_symbol_12_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 12 = true := by decide +kernel
+
+theorem currentX86_symbol_13_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 13 = true := by decide +kernel
+
+theorem currentX86_symbol_14_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 14 = true := by decide +kernel
+
+theorem currentX86_symbol_15_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 15 = true := by decide +kernel
+
+theorem currentX86_symbol_16_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 16 = true := by decide +kernel
+
+theorem currentX86_symbol_17_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 17 = true := by decide +kernel
+
+theorem currentX86_symbol_18_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts 18 = true := by decide +kernel
+
+theorem currentX86_all_symbol_certificates (i : Nat) (hi : i < currentX86ExtractedSlices.length) :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts currentX86InvCerts i = true := by
+  have hn : i < 19 := hi
+  match i, hn with
+  | 0, _ => exact currentX86_symbol_00_certificate
+  | 1, _ => exact currentX86_symbol_01_certificate
+  | 2, _ => exact currentX86_symbol_02_certificate
+  | 3, _ => exact currentX86_symbol_03_certificate
+  | 4, _ => exact currentX86_symbol_04_certificate
+  | 5, _ => exact currentX86_symbol_05_certificate
+  | 6, _ => exact currentX86_symbol_06_certificate
+  | 7, _ => exact currentX86_symbol_07_certificate
+  | 8, _ => exact currentX86_symbol_08_certificate
+  | 9, _ => exact currentX86_symbol_09_certificate
+  | 10, _ => exact currentX86_symbol_10_certificate
+  | 11, _ => exact currentX86_symbol_11_certificate
+  | 12, _ => exact currentX86_symbol_12_certificate
+  | 13, _ => exact currentX86_symbol_13_certificate
+  | 14, _ => exact currentX86_symbol_14_certificate
+  | 15, _ => exact currentX86_symbol_15_certificate
+  | 16, _ => exact currentX86_symbol_16_certificate
+  | 17, _ => exact currentX86_symbol_17_certificate
+  | 18, _ => exact currentX86_symbol_18_certificate
+  | k + 19, h => exact absurd h (Nat.not_lt_of_ge (Nat.le_add_left 19 k))
+
+theorem currentX86_rlib_every_symbol_three_way_ni_sound :
+    (extractAllRlibFuncs currentX86RlibArchiveBytes).length = currentX86SymbolContracts.length ∧
+    ∀ i : Nat, (hs : i < (extractAllRlibFuncs currentX86RlibArchiveBytes).length) →
+      (hc : i < currentX86SymbolContracts.length) →
+      ((extractAllRlibFuncs currentX86RlibArchiveBytes)[i]'hs).name =
+        (currentX86SymbolContracts[i]'hc).symName ∧
+      ElfSliceThreeWayNISafe ((extractAllRlibFuncs currentX86RlibArchiveBytes)[i]'hs)
+        (currentX86SymbolContracts[i]'hc) := by
+  have key : ∀ sl : List ElfFuncSlice, sl = currentX86ExtractedSlices →
+      (sl.length = currentX86SymbolContracts.length ∧
+       ∀ i : Nat, (hs : i < sl.length) → (hc : i < currentX86SymbolContracts.length) →
+        sl[i].name = currentX86SymbolContracts[i].symName ∧
+        ElfSliceThreeWayNISafe sl[i] currentX86SymbolContracts[i]) := by
+    intro sl h
+    subst h
+    exact ⟨by decide, fun i hs hc => certSliceAt_sound currentX86_all_symbol_certificates i hs hc⟩
+  exact key _ currentX86_rlib_extracted_slices
+
+
+theorem currentAarch64_symbol_00_certificate :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts 0 = true := by decide +kernel
+
+theorem currentAarch64_symbol_01_certificate :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts 1 = true := by decide +kernel
+
+theorem currentAarch64_symbol_02_certificate :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts 2 = true := by decide +kernel
+
+theorem currentAarch64_symbol_03_certificate :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts 3 = true := by decide +kernel
+
+theorem currentAarch64_symbol_04_certificate :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts 4 = true := by decide +kernel
+
+theorem currentAarch64_symbol_05_certificate :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts 5 = true := by decide +kernel
+
+theorem currentAarch64_symbol_06_certificate :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts 6 = true := by decide +kernel
+
+theorem currentAarch64_symbol_07_certificate :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts 7 = true := by decide +kernel
+
+theorem currentAarch64_symbol_08_certificate :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts 8 = true := by decide +kernel
+
+theorem currentAarch64_all_symbol_certificates (i : Nat) (hi : i < currentAarch64ExtractedSlices.length) :
+    certSliceAt currentAarch64ExtractedSlices currentAarch64SymbolContracts currentAarch64InvCerts i = true := by
+  have hn : i < 9 := hi
+  match i, hn with
+  | 0, _ => exact currentAarch64_symbol_00_certificate
+  | 1, _ => exact currentAarch64_symbol_01_certificate
+  | 2, _ => exact currentAarch64_symbol_02_certificate
+  | 3, _ => exact currentAarch64_symbol_03_certificate
+  | 4, _ => exact currentAarch64_symbol_04_certificate
+  | 5, _ => exact currentAarch64_symbol_05_certificate
+  | 6, _ => exact currentAarch64_symbol_06_certificate
+  | 7, _ => exact currentAarch64_symbol_07_certificate
+  | 8, _ => exact currentAarch64_symbol_08_certificate
+  | k + 9, h => exact absurd h (Nat.not_lt_of_ge (Nat.le_add_left 9 k))
+
+theorem currentAarch64_rlib_every_symbol_three_way_ni_sound :
+    (extractAllRlibFuncs currentAarch64RlibArchiveBytes).length = currentAarch64SymbolContracts.length ∧
+    ∀ i : Nat, (hs : i < (extractAllRlibFuncs currentAarch64RlibArchiveBytes).length) →
+      (hc : i < currentAarch64SymbolContracts.length) →
+      ((extractAllRlibFuncs currentAarch64RlibArchiveBytes)[i]'hs).name =
+        (currentAarch64SymbolContracts[i]'hc).symName ∧
+      ElfSliceThreeWayNISafe ((extractAllRlibFuncs currentAarch64RlibArchiveBytes)[i]'hs)
+        (currentAarch64SymbolContracts[i]'hc) := by
+  have key : ∀ sl : List ElfFuncSlice, sl = currentAarch64ExtractedSlices →
+      (sl.length = currentAarch64SymbolContracts.length ∧
+       ∀ i : Nat, (hs : i < sl.length) → (hc : i < currentAarch64SymbolContracts.length) →
+        sl[i].name = currentAarch64SymbolContracts[i].symName ∧
+        ElfSliceThreeWayNISafe sl[i] currentAarch64SymbolContracts[i]) := by
+    intro sl h
+    subst h
+    exact ⟨by decide, fun i hs hc => certSliceAt_sound currentAarch64_all_symbol_certificates i hs hc⟩
+  exact key _ currentAarch64_rlib_extracted_slices
+
+theorem currentX86_all_symbols_decode :
+    sumDecodedX86Loop (extractAllRlibFuncs currentX86RlibArchiveBytes) 0 = some 1935 := by
+  rw [currentX86_rlib_extracted_slices]
+  decide +kernel
+
+theorem currentAarch64_all_symbols_decode :
+    sumDecodedArm64Loop (extractAllRlibFuncs currentAarch64RlibArchiveBytes) 0 = some 1420 := by
+  rw [currentAarch64_rlib_extracted_slices]
+  decide +kernel
+
+
+/-- Fresh bytes require fresh invariants: the historical scalar certificate misses the epilogue. -/
+theorem current_rejects_historical_certificate :
+    certSliceAt currentX86ExtractedSlices currentX86SymbolContracts x86InvCerts 13 = false := by
+  decide +kernel
+
+/-- Removing both architectural vector-clear instructions is detected in the fresh GFNI body. -/
+theorem current_gfni_missing_vector_cleanup_rejected :
+    checkX86WithInv (patchBytesAt currentX86ExtractedSlices[2].code 0x72
+      [0x90, 0x90, 0x90, 0x90, 0x90])
+      currentX86SymbolContracts[2] qsag_asm_gf256_shamir_mul_gfni_currentInv = false := by
+  decide +kernel
+
+theorem current_pmull_missing_wipe_rejected :
+    checkArm64WithInv (patchBytesAt currentAarch64ExtractedSlices[3].code 0x104
+      [0x1F, 0x20, 0x03, 0xD5])
+      currentAarch64SymbolContracts[3] qsag_asm_tower128_bdoz_mac_pmull_currentInv = false := by
   decide +kernel
 
 end Qsag
