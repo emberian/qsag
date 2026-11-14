@@ -1785,3 +1785,932 @@ private theorem evalCoeffs_scalarMul {R : Type} [LawfulCommRing R] (s : R) :
     1. Reconstructing the parties' local cut-wire shares yields `(u, v) = (sk - a, (sk + m) - b)`;
     2. Reconstructing the parties' local `evalPartyBeaverOutShare u v` shares yields the exact
        non-linear circuit output `mul sk (add sk m)` without any party ever holding `sk`! -/
+theorem evalSharedBeaverCircuit_reconstructs {R : Type} [LawfulCommRing R] {d : Nat}
+    (lambdas : List R) (parties : List (Nat × R))
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ d + 1 →
+      ringDot lambdas (parties.map (fun px => RoundPoly.evalCoeffs coeffs px.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (vault : SharedBeaverSessionVault R d) (m : R) :
+    let u := sub vault.skVal vault.aVal
+    let v := sub (add vault.skVal m) vault.bVal
+    ringDot lambdas (parties.map (fun px => (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).1)) = u ∧
+    ringDot lambdas (parties.map (fun px => (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).2)) = v ∧
+    ringDot lambdas (parties.map (fun px => evalPartyBeaverOutShare u v (dealPartyBeaverShares vault px.2))) =
+      mul vault.skVal (add vault.skVal m) := by
+  intro u v
+  let negOne : R := neg one
+  have hSubAsAdd : ∀ x y : R, sub x y = add x (mul negOne y) := by
+    intro x y
+    dsimp only [negOne]
+    rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.neg_mul, LawfulCommRing.one_mul]
+  let pSk : List R := vault.skVal :: vault.skPad.1
+  let pA : List R := vault.aVal :: vault.aPad.1
+  let pB : List R := vault.bVal :: vault.bPad.1
+  let pC : List R := mul vault.aVal vault.bVal :: vault.cPad.1
+  have hpSkLen : pSk.length ≤ d + 1 := by simp [pSk, vault.skPad.2]
+  have hpALen : pA.length ≤ d + 1 := by simp [pA, vault.aPad.2]
+  have hpBLen : pB.length ≤ d + 1 := by simp [pB, vault.bPad.2]
+  have hpCLen : pC.length ≤ d + 1 := by simp [pC, vault.cPad.2]
+  let pU := polyZipAdd pSk (pA.map (mul negOne))
+  let pSkM := polyZipAdd pSk [m]
+  let pV := polyZipAdd pSkM (pB.map (mul negOne))
+  let pOut := polyZipAdd [mul u v]
+                (polyZipAdd (pB.map (mul u))
+                  (polyZipAdd (pA.map (mul v)) pC))
+  have hpULen : pU.length ≤ d + 1 :=
+    polyZipAdd_length_le _ _ _ hpSkLen (by simpa using hpALen)
+  have hpSkMLen : pSkM.length ≤ d + 1 :=
+    polyZipAdd_length_le _ _ _ hpSkLen (by simp)
+  have hpVLen : pV.length ≤ d + 1 :=
+    polyZipAdd_length_le _ _ _ hpSkMLen (by simpa using hpBLen)
+  have hpOutLen : pOut.length ≤ d + 1 :=
+    polyZipAdd_length_le _ _ _ (by simp)
+      (polyZipAdd_length_le _ _ _ (by simpa using hpBLen)
+        (polyZipAdd_length_le _ _ _ (by simpa using hpALen) hpCLen))
+  have hSingleEval : ∀ (c x : R), RoundPoly.evalCoeffs [c] x = c := by
+    intro c x
+    simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+  have hMapU : parties.map (fun px => (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).1) =
+      parties.map (fun px => RoundPoly.evalCoeffs pU px.2) := by
+    apply List.map_congr_left
+    intro px _
+    dsimp only [evalPartyCutWireShares, dealPartyBeaverShares, pU, pSk, pA]
+    rw [evalCoeffs_polyZipAdd, evalCoeffs_scalarMul, ← hSubAsAdd]
+  have hMapV : parties.map (fun px => (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).2) =
+      parties.map (fun px => RoundPoly.evalCoeffs pV px.2) := by
+    apply List.map_congr_left
+    intro px _
+    dsimp only [evalPartyCutWireShares, dealPartyBeaverShares, pV, pSkM, pSk, pB]
+    rw [evalCoeffs_polyZipAdd, evalCoeffs_polyZipAdd, evalCoeffs_scalarMul, hSingleEval, ← hSubAsAdd]
+  have hMapOut : parties.map (fun px => evalPartyBeaverOutShare u v (dealPartyBeaverShares vault px.2)) =
+      parties.map (fun px => RoundPoly.evalCoeffs pOut px.2) := by
+    apply List.map_congr_left
+    intro px _
+    dsimp only [evalPartyBeaverOutShare, dealPartyBeaverShares, pOut, pA, pB, pC]
+    rw [evalCoeffs_polyZipAdd, evalCoeffs_polyZipAdd, evalCoeffs_polyZipAdd,
+        evalCoeffs_scalarMul, evalCoeffs_scalarMul, hSingleEval]
+  refine ⟨?_, ?_, ?_⟩
+  · rw [hMapU, hRecon pU hpULen]
+    dsimp only [pU, pSk, pA]
+    rw [evalCoeffs_polyZipAdd, evalCoeffs_scalarMul]
+    simp only [RoundPoly.evalCoeffs_cons, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+    rw [← hSubAsAdd]
+  · rw [hMapV, hRecon pV hpVLen]
+    dsimp only [pV, pSkM, pSk, pB]
+    rw [evalCoeffs_polyZipAdd, evalCoeffs_polyZipAdd, evalCoeffs_scalarMul, hSingleEval]
+    simp only [RoundPoly.evalCoeffs_cons, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+    rw [← hSubAsAdd]
+  · rw [hMapOut, hRecon pOut hpOutLen]
+    dsimp only [pOut, pA, pB, pC]
+    rw [evalCoeffs_polyZipAdd, evalCoeffs_polyZipAdd, evalCoeffs_polyZipAdd,
+        evalCoeffs_scalarMul, evalCoeffs_scalarMul, hSingleEval]
+    simp only [RoundPoly.evalCoeffs_cons, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+    -- Algebraic Beaver identity: `u*v + (u*b + (v*a + a*b)) = (u + a) * (v + b) = sk * (sk + m)`!
+    have hFactor : add (mul u v) (add (mul u vault.bVal) (add (mul vault.aVal v) (mul vault.aVal vault.bVal))) =
+        mul (add u vault.aVal) (add v vault.bVal) := by
+      calc add (mul u v) (add (mul u vault.bVal) (add (mul vault.aVal v) (mul vault.aVal vault.bVal)))
+          = add (add (mul u v) (mul u vault.bVal)) (add (mul vault.aVal v) (mul vault.aVal vault.bVal)) := by
+              rw [← LawfulCommRing.add_assoc]
+        _ = add (mul u (add v vault.bVal)) (mul vault.aVal (add v vault.bVal)) := by
+              rw [← LawfulCommRing.left_distrib, ← LawfulCommRing.left_distrib]
+        _ = mul (add u vault.aVal) (add v vault.bVal) := by
+              rw [← LawfulCommRing.right_distrib]
+    have hva : mul v vault.aVal = mul vault.aVal v := LawfulCommRing.mul_comm v vault.aVal
+    rw [hva, hFactor]
+    have huAdd : add u vault.aVal = vault.skVal := by
+      dsimp only [u]
+      rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+          LawfulCommRing.add_comm (neg vault.aVal) vault.aVal,
+          LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+    have hvAdd : add v vault.bVal = add vault.skVal m := by
+      dsimp only [v]
+      rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+          LawfulCommRing.add_comm (neg vault.bVal) vault.bVal,
+          LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+    rw [huAdd, hvAdd]
+
+/-- **`#tooth` Beaver Triple Integrity Witness (`tooth_corrupted_beaver_triple_shifts_output`)**:
+    Over `TowerElem k` (and specifically `Tower128 = TowerElem 7`, `GF(2^128)`), if a corrupted
+    Beaver triple replaces `c = a * b` with `c' = a * b + delta` (`delta ≠ 0`), local Beaver
+    evaluation shifts the reconstructed signature by `delta ≠ 0`! -/
+private theorem tooth_corrupted_beaver_triple_shifts_output_gen (k : Nat)
+    (sk m a b delta : TowerElem k) (hDelta : delta ≠ towerZero k) :
+    let u := towerAdd k sk a
+    let v := towerAdd k (towerAdd k sk m) b
+    let honestOut := evalPartyBeaverOutShare u v (sk, a, b, towerMul k a b)
+    let corruptOut := evalPartyBeaverOutShare u v (sk, a, b, towerAdd k (towerMul k a b) delta)
+    corruptOut ≠ honestOut := by
+  intro u v honestOut corruptOut hEq
+  dsimp only [honestOut, corruptOut, evalPartyBeaverOutShare] at hEq
+  change towerAdd k (towerMul k u v)
+      (towerAdd k (towerMul k u b) (towerAdd k (towerMul k v a) (towerAdd k (towerMul k a b) delta))) =
+    towerAdd k (towerMul k u v)
+      (towerAdd k (towerMul k u b) (towerAdd k (towerMul k v a) (towerMul k a b))) at hEq
+  let base := towerAdd k (towerMul k u v) (towerAdd k (towerMul k u b) (towerAdd k (towerMul k v a) (towerMul k a b)))
+  have hAssoc :
+      towerAdd k (towerMul k u v) (towerAdd k (towerMul k u b) (towerAdd k (towerMul k v a) (towerAdd k (towerMul k a b) delta))) =
+      towerAdd k base delta := by
+    dsimp only [base]
+    simp only [towerAdd_assoc]
+  rw [hAssoc] at hEq
+  have hZero : delta = towerZero k := by
+    have hAdd := congrArg (towerAdd k base) hEq
+    rw [← towerAdd_assoc, towerAdd_self_zero, towerZero_add] at hAdd
+    exact hAdd
+  exact hDelta hZero
+
+theorem tooth_corrupted_beaver_triple_shifts_output
+    (sk m a b delta : Tower128) (hDelta : delta ≠ towerZero 7) :
+    let u := towerAdd 7 sk a
+    let v := towerAdd 7 (towerAdd 7 sk m) b
+    let honestOut := evalPartyBeaverOutShare u v (sk, a, b, towerMul 7 a b)
+    let corruptOut := evalPartyBeaverOutShare u v (sk, a, b, towerAdd 7 (towerMul 7 a b) delta)
+    corruptOut ≠ honestOut :=
+  tooth_corrupted_beaver_triple_shifts_output_gen 7 sk m a b delta hDelta
+
+private def towerFirstBit : (k : Nat) → TowerElem k → Bool
+  | 0, b => b
+  | k + 1, a => towerFirstBit k a.1
+
+private theorem towerFirstBit_zero : ∀ (k : Nat), towerFirstBit k (towerZero k) = false
+  | 0 => rfl
+  | k + 1 => towerFirstBit_zero k
+
+private theorem towerFirstBit_one : ∀ (k : Nat), towerFirstBit k (towerOne k) = true
+  | 0 => rfl
+  | k + 1 => towerFirstBit_one k
+
+/-- The element `X` of `GF(4)` embedded into full 128-bit `Tower128 = TowerElem 7` (`GF(2^128)`). -/
+def tower128X : Tower128 :=
+  embedTower 6 (embedTower 5 (embedTower 4 (embedTower 3 (embedTower 2 (embedTower 1 (false, true))))))
+
+/-- Full-width 128-bit `Tower128` (`GF(2^128)`) session parameters:
+    threshold `t = 2` (`d = 1`), `k = 2` Beaver-masked cut wires `(sk - a, (sk + m) - b)`,
+    identity 128-bit MAC field embedding (`emb = id, unemb = id`). -/
+@[expose] def tower128Params : TsigParams Tower128 Tower128 :=
+  { d := 1, k := 2, encSig := id, decSig := id, emb := id, unemb := id
+    lambdas := [towerOne 7, towerOne 7, towerOne 7]
+    slot := fun j h => 3 * j + h }
+
+/-- Non-linear quadratic threshold-PRF signature over `Tower128` (`GF(2^128)`):
+    `sign(sk, m) = sk * (sk + m)`. -/
+def tower128BeaverSig : AbstractSigScheme Unit Tower128 Tower128 Tower128 :=
+  { sign := fun sk m => towerMul 7 sk (towerAdd 7 sk m)
+    verify := fun _ _ _ => true
+    complete := fun _ _ => True
+    completeness := fun _ _ => rfl }
+
+def tower128State : IdealTsigState Unit Tower128 :=
+  { pk := (), threshold := 2, numParties := 3, corruptParties := [2]
+    approvedMsgs := [], identifiedCheaters := [] }
+
+/-- Party 2 is corrupt and sits at `1 + tower128X ∈ GF(2^128) \ {0}`. -/
+def tower128Corrupt : List (Nat × Tower128) := [(2, towerAdd 7 (towerOne 7) tower128X)]
+
+/-- Parties 0 and 1 are honest and sit at `1` and `tower128X` in `GF(2^128)`. -/
+def tower128Honest : List (Nat × Tower128) := [(0, towerOne 7), (1, tower128X)]
+
+private theorem tower_recon3_zero (k : Nat) :
+    towerAdd k (towerMul k (towerOne k) (towerZero k))
+      (towerAdd k (towerMul k (towerOne k) (towerZero k))
+        (towerAdd k (towerMul k (towerOne k) (towerZero k)) (towerZero k))) = towerZero k := by
+  simp only [towerMul_zero, towerAdd_zero]
+
+private theorem tower_recon3_one (k : Nat) (c a : TowerElem k) :
+    towerAdd k (towerMul k (towerOne k) (towerAdd k a (towerMul k (towerOne k) (towerZero k))))
+      (towerAdd k (towerMul k (towerOne k) (towerAdd k a (towerMul k c (towerZero k))))
+        (towerAdd k
+          (towerMul k (towerOne k)
+            (towerAdd k a (towerMul k (towerAdd k (towerOne k) c) (towerZero k))))
+          (towerZero k))) =
+      towerAdd k a (towerMul k (towerZero k) (towerZero k)) := by
+  simp only [towerOne_mul, towerMul_zero, towerAdd_zero, towerAdd_cancel]
+
+private theorem tower_recon3_two (k : Nat) (c a b : TowerElem k) :
+    towerAdd k
+      (towerMul k (towerOne k)
+        (towerAdd k a (towerMul k (towerOne k)
+          (towerAdd k b (towerMul k (towerOne k) (towerZero k))))))
+      (towerAdd k
+        (towerMul k (towerOne k)
+          (towerAdd k a (towerMul k c (towerAdd k b (towerMul k c (towerZero k))))))
+        (towerAdd k
+          (towerMul k (towerOne k)
+            (towerAdd k a (towerMul k (towerAdd k (towerOne k) c)
+              (towerAdd k b (towerMul k (towerAdd k (towerOne k) c) (towerZero k))))))
+          (towerZero k))) =
+      towerAdd k a (towerMul k (towerZero k)
+        (towerAdd k b (towerMul k (towerZero k) (towerZero k)))) := by
+  simp only [towerOne_mul, towerMul_zero, towerZero_mul, towerAdd_zero, towerAdd_mul_distrib]
+  simp only [towerAdd_comm, towerAdd_left_comm, towerAdd_self_zero, towerAdd_zero,
+    towerAdd_cancel]
+
+private theorem towerK_recon (k : Nat) (c : TowerElem k) :
+    ∀ coeffs : List (TowerElem k), coeffs.length ≤ 2 →
+    ringDot [towerOne k, towerOne k, towerOne k]
+      ((((0 : Nat), towerOne k) :: [(1, c)] ++ [(2, towerAdd k (towerOne k) c)]).map
+        (fun hx : Nat × TowerElem k => RoundPoly.evalCoeffs coeffs hx.2)) =
+      RoundPoly.evalCoeffs coeffs (@CommRingOps.zero (TowerElem k) _) := by
+  intro coeffs hLen
+  rcases coeffs with _ | ⟨a, _ | ⟨b, _ | ⟨_, _⟩⟩⟩
+  · exact tower_recon3_zero k
+  · exact tower_recon3_one k c a
+  · exact tower_recon3_two k c a b
+  · exact absurd (Nat.le_of_succ_le_succ (Nat.le_of_succ_le_succ hLen)) (Nat.not_succ_le_zero _)
+
+/-- Weights `[1, 1, 1]` reconstruct `P(0)` for every polynomial of degree `≤ 1` over `Tower128`
+    from its values at `1`, `tower128X`, and `1 + tower128X`. -/
+theorem tower128_recon : ∀ coeffs : List Tower128, coeffs.length ≤ tower128Params.d + 1 →
+    ringDot tower128Params.lambdas
+      ((tower128Honest ++ tower128Corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+      RoundPoly.evalCoeffs coeffs zero := by
+  have hL : tower128Params.lambdas = [towerOne 7, towerOne 7, towerOne 7] := rfl
+  have hH : tower128Honest = [(0, towerOne 7), (1, tower128X)] := rfl
+  have hC : tower128Corrupt = [(2, towerAdd 7 (towerOne 7) tower128X)] := rfl
+  have hD : tower128Params.d + 1 = 2 := rfl
+  have hZ : (zero : Tower128) = @CommRingOps.zero (TowerElem 7) _ := rfl
+  rw [hL, hH, hC, hD, hZ]
+  exact towerK_recon 7 tower128X
+
+private theorem tower128Corrupt_nonzero : ∀ cx ∈ tower128Corrupt, cx.2 ≠ (zero : Tower128) := by
+  intro cx hcx hEq
+  rw [List.mem_singleton.mp hcx] at hEq
+  have hBit := congrArg (towerFirstBit 7) hEq
+  have hL : towerFirstBit 7 (towerAdd 7 (towerOne 7) tower128X) = true := rfl
+  have hR : towerFirstBit 7 (zero : Tower128) = false := towerFirstBit_zero 7
+  rw [hL, hR] at hBit
+  cases hBit
+
+/-- `sk`-free party-share execution (`tsigSharedBeaverRealExec`):
+    Takes **ONLY** per-party shares `partyShares : R → R × R × R × R` (`(sk_x, a_x, b_x, c_x)`) —
+    **ZERO cleartext `sk` parameter exists in its signature!**
+    Parties locally evaluate cut-wire shares `evalPartyCutWireShares`, open masked `(u, v)`, and
+    locally evaluate `evalPartyBeaverOutShare u v`. -/
+def tsigSharedBeaverRealExec {R PK Msg Sig : Type} [CommRingOps R]
+    (pp : TsigParams R Sig)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (partyShares : R → R × R × R × R) (m : R)
+    (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (tape : TsigPadTape R pp.d pp.k) (macKey : Tower128 × Tower128) : Bool :=
+  let allParties := honest ++ corrupt
+  let u := ringDot pp.lambdas (allParties.map (fun px => (evalPartyCutWireShares (partyShares px.2) m).1))
+  let v := ringDot pp.lambdas (allParties.map (fun px => (evalPartyCutWireShares (partyShares px.2) m).2))
+  let y := ringDot pp.lambdas (allParties.map (fun px => evalPartyBeaverOutShare u v (partyShares px.2)))
+  let w : Fin pp.k → R := fun j => if j.val = 0 then u else v
+  if validThresholdApproval st approvers then
+    let view := tsigSessionView pp corruptVk corrupt honest w y tape
+    let exp := tsigSessionExpected pp corrupt w y tape
+    Adv.verdict view
+      (tsigRealOutcome pp corrupt.length (tsigVerifierKey macKey corruptTags exp)
+        exp view.outHonestOpenings (Adv.openings view))
+  else
+    Adv.idle .rejectedQuorum
+
+/-- Reconstructed Beaver cut-wire values `(u, v)` computed purely from local party shares
+    `dealPartyBeaverShares vault px.2` (`0` cleartext `sk` in party evaluation!). -/
+def tower128SharedWireVals (a b : Tower128)
+    (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (sk m : Tower128) (j : Fin tower128Params.k) : Tower128 :=
+  let vault : SharedBeaverSessionVault Tower128 1 := ⟨sk, skPad, a, aPad, b, bPad, cPad⟩
+  if j.val = 0 then
+    ringDot tower128Params.lambdas
+      ((tower128Honest ++ tower128Corrupt).map (fun px =>
+        (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).1))
+  else
+    ringDot tower128Params.lambdas
+      ((tower128Honest ++ tower128Corrupt).map (fun px =>
+        (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).2))
+
+/-- Generic distributed Beaver evaluation over any ring `R`: parties hold only `partyShares px.2`
+    (`0` cleartext `sk` parameter!), reconstruct masked cut wires `(u, v)`, and reconstruct the
+    local Beaver output shares `evalPartyBeaverOutShare u v`. -/
+def evalDistributedBeaverOut {R : Type} [CommRingOps R]
+    (lambdas : List R) (parties : List (Nat × R))
+    (partyShares : R → R × R × R × R) (m : R) : R :=
+  let u := ringDot lambdas (parties.map (fun px => (evalPartyCutWireShares (partyShares px.2) m).1))
+  let v := ringDot lambdas (parties.map (fun px => (evalPartyCutWireShares (partyShares px.2) m).2))
+  ringDot lambdas (parties.map (fun px => evalPartyBeaverOutShare u v (partyShares px.2)))
+
+theorem evalDistributedBeaverOut_eq_circuit {R : Type} [LawfulCommRing R] {d : Nat}
+    (lambdas : List R) (parties : List (Nat × R))
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ d + 1 →
+      ringDot lambdas (parties.map (fun px => RoundPoly.evalCoeffs coeffs px.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (vault : SharedBeaverSessionVault R d) (m : R) :
+    evalDistributedBeaverOut lambdas parties (dealPartyBeaverShares vault) m =
+      mul vault.skVal (add vault.skVal m) := by
+  obtain ⟨hu, hv, hOut⟩ := evalSharedBeaverCircuit_reconstructs lambdas parties hRecon vault m
+  unfold evalDistributedBeaverOut
+  dsimp only at hu hv hOut ⊢
+  rw [hu, hv, hOut]
+
+/-- Reconstructed Beaver output value computed from the parties' local `evalPartyBeaverOutShare`
+    shares (without cleartext `sk` in party evaluation!). -/
+def tower128SharedOutVal (a b : Tower128)
+    (skPad aPad bPad cPad : ShamirPadPoly Tower128 1) (sk m : Tower128) : Tower128 :=
+  let vault : SharedBeaverSessionVault Tower128 1 := ⟨sk, skPad, a, aPad, b, bPad, cPad⟩
+  evalDistributedBeaverOut tower128Params.lambdas
+    (tower128Honest ++ tower128Corrupt) (dealPartyBeaverShares vault) m
+
+/-- Equivalence proving that `sk`-free `tsigSharedBeaverRealExec` on `dealPartyBeaverShares` is
+    equal to `tsigRealExec` with `tower128SharedWireVals` and `tower128SharedOutVal`! -/
+theorem tsigSharedBeaverRealExec_eq_tsigRealExec
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (a b : Tower128) (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (sk m : Tower128) (approvers : List Nat)
+    (Adv : TsigAdversary Tower128 Tower128 tower128Params.k)
+    (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+    (κ : Tower128 × Tower128) :
+    let vault : SharedBeaverSessionVault Tower128 1 := ⟨sk, skPad, a, aPad, b, bPad, cPad⟩
+    tsigSharedBeaverRealExec tower128Params tower128State tower128Corrupt tower128Honest
+      corruptVk corruptTags (dealPartyBeaverShares vault) m approvers Adv τ κ =
+    tsigRealExec tower128Params
+      (tower128SharedWireVals a b skPad aPad bPad cPad)
+      (tower128SharedOutVal a b skPad aPad bPad cPad)
+      tower128State tower128Corrupt tower128Honest corruptVk corruptTags sk m approvers Adv τ κ := by
+  intro vault
+  have hW :
+      (fun j : Fin tower128Params.k =>
+        if j.val = 0 then
+          ringDot tower128Params.lambdas
+            ((tower128Honest ++ tower128Corrupt).map (fun px =>
+              (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).1))
+        else
+          ringDot tower128Params.lambdas
+            ((tower128Honest ++ tower128Corrupt).map (fun px =>
+              (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).2))) =
+      tower128SharedWireVals a b skPad aPad bPad cPad sk m := by
+    funext j
+    unfold tower128SharedWireVals
+    rfl
+  have hY :
+      ringDot tower128Params.lambdas
+        ((tower128Honest ++ tower128Corrupt).map (fun px =>
+          evalPartyBeaverOutShare
+            (ringDot tower128Params.lambdas
+              ((tower128Honest ++ tower128Corrupt).map (fun px =>
+                (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).1)))
+            (ringDot tower128Params.lambdas
+              ((tower128Honest ++ tower128Corrupt).map (fun px =>
+                (evalPartyCutWireShares (dealPartyBeaverShares vault px.2) m).2)))
+            (dealPartyBeaverShares vault px.2))) =
+      tower128SharedOutVal a b skPad aPad bPad cPad sk m := by
+    unfold tower128SharedOutVal evalDistributedBeaverOut
+    rfl
+  unfold tsigSharedBeaverRealExec tsigRealExec
+  dsimp only
+  rw [hW, hY]
+
+/-- Proved `hCircuit` theorem for `tower128SharedOutVal`: local Beaver share evaluation reconstructs
+    `tower128BeaverSig.sign sk m = sk * (sk + m)`! -/
+theorem tower128SharedOutVal_eq_sign (a b : Tower128)
+    (skPad aPad bPad cPad : ShamirPadPoly Tower128 1) (sk m : Tower128) :
+    tower128SharedOutVal a b skPad aPad bPad cPad sk m =
+      tower128Params.encSig (tower128BeaverSig.sign sk m) := by
+  unfold tower128SharedOutVal
+  exact evalDistributedBeaverOut_eq_circuit tower128Params.lambdas
+    (tower128Honest ++ tower128Corrupt) tower128_recon
+    ⟨sk, skPad, a, aPad, b, bPad, cPad⟩ m
+
+/-- Multi-turn real threshold execution driven **exclusively by party shares** (`partyShares : R → R × R × R × R`),
+    with **ZERO cleartext `sk` parameter** in its signature! -/
+def execSharedRealTsig {R PK : Type} [CommRingOps R]
+    (verifyFn : PK → R → R → Bool)
+    (lambdas : List R) (parties : List (Nat × R))
+    (partyShares : R → R × R × R × R)
+    (verifyMacCulprit : Nat → Bool)
+    (st : IdealTsigState PK R) : UcTsigEnv PK R R → Bool
+  | .halt b => b
+  | .stepSign m honestApprovers next =>
+    if validThresholdApproval st honestApprovers then
+      let st' := { st with approvedMsgs := m :: st.approvedMsgs }
+      let sigOut := evalDistributedBeaverOut lambdas parties partyShares m
+      execSharedRealTsig verifyFn lambdas parties partyShares verifyMacCulprit st' (next (.signed sigOut))
+    else
+      execSharedRealTsig verifyFn lambdas parties partyShares verifyMacCulprit st (next .rejectedQuorum)
+  | .stepAbort culprit next =>
+    if verifyMacCulprit culprit then
+      let st' := { st with identifiedCheaters := culprit :: st.identifiedCheaters }
+      execSharedRealTsig verifyFn lambdas parties partyShares verifyMacCulprit st' (next (.abortedBy culprit))
+    else
+      execSharedRealTsig verifyFn lambdas parties partyShares verifyMacCulprit st (next .rejectedFraming)
+  | .stepVerify m sig next =>
+    execSharedRealTsig verifyFn lambdas parties partyShares verifyMacCulprit st (next (verifyFn st.pk m sig))
+
+/-- **Assumption-Free Multi-Turn UC Realization from Shared Beaver + BDOZ MACs
+    (`protocol_realizes_idealTsig_from_shared_beaver_bdoz`)**:
+    Proves that `sk`-free `execSharedRealTsig` (which takes **ONLY** `dealPartyBeaverShares vault` and
+    **ZERO cleartext `sk` parameter**) realizes `execIdealTsig S (S.sign sk)` with concrete BDOZ MAC
+    blame soundness (`tsigCheckOpenings_blame_mem`), discharging BOTH `hCircuit` AND `hMacSound` without
+    external hypotheses! -/
+theorem protocol_realizes_idealTsig_from_shared_beaver_bdoz {PK : Type}
+    (S : AbstractSigScheme PK Tower128 Tower128 Tower128)
+    (hSignDef : ∀ sk m, S.sign sk m = towerMul 7 sk (towerAdd 7 sk m))
+    (a b : Tower128) (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (sk : Tower128)
+    (st : IdealTsigState PK Tower128)
+    (vk : BdozVerifierKeys) (exp : List (Nat × Tower128))
+    (hExpIds : ∀ e ∈ exp, e.1 ∈ st.corruptParties)
+    (abortTrace : Nat → List BdozPairOpening)
+    (hCorruptCaught : ∀ c ∈ st.corruptParties, tsigCheckOpenings vk 0 exp (abortTrace c) = some c)
+    (Z : UcTsigEnv PK Tower128 Tower128) :
+    let vault : SharedBeaverSessionVault Tower128 1 := ⟨sk, skPad, a, aPad, b, bPad, cPad⟩
+    let bdozVerifyCulprit : Nat → Bool :=
+      fun c => tsigCheckOpenings vk 0 exp (abortTrace c) == some c
+    (∀ c, c ∉ st.corruptParties → bdozVerifyCulprit c = false) ∧
+    (execSharedRealTsig S.verify tower128Params.lambdas (tower128Honest ++ tower128Corrupt)
+       (dealPartyBeaverShares vault) bdozVerifyCulprit st Z =
+       (execIdealTsig S (S.sign sk) st Z).1 ∨
+     ∃ mStar sigStar approvedAtStep,
+       findTsigDivergence S (S.sign sk) bdozVerifyCulprit st Z =
+         some (.inl (mStar, sigStar, approvedAtStep)) ∧
+       mStar ∉ approvedAtStep ∧
+       S.verify st.pk mStar sigStar = true) := by
+  intro vault bdozVerifyCulprit
+  have hAntiFrame : ∀ c, c ∉ st.corruptParties → bdozVerifyCulprit c = false := by
+    intro c hcNot
+    dsimp only [bdozVerifyCulprit]
+    apply beq_false_of_ne
+    intro hSome
+    have hMemMap := tsigCheckOpenings_blame_mem vk exp 0 (abortTrace c) c hSome
+    rw [List.mem_map] at hMemMap
+    obtain ⟨e, heMem, rfl⟩ := hMemMap
+    exact hcNot (hExpIds e heMem)
+  have hMacSound : ∀ c, bdozVerifyCulprit c = decide (c ∈ st.corruptParties) := by
+    intro c
+    by_cases hc : c ∈ st.corruptParties
+    · simp only [hc, decide_true]
+      dsimp only [bdozVerifyCulprit]
+      rw [hCorruptCaught c hc]
+      exact beq_self_eq_true _
+    · simp only [hc, decide_false]
+      exact hAntiFrame c hc
+  have hSharedEqReal : ∀ stCur (ZCur : UcTsigEnv PK Tower128 Tower128),
+      execSharedRealTsig S.verify tower128Params.lambdas (tower128Honest ++ tower128Corrupt)
+        (dealPartyBeaverShares vault) bdozVerifyCulprit stCur ZCur =
+      execRealTsig S sk bdozVerifyCulprit stCur ZCur := by
+    intro stCur ZCur
+    induction ZCur generalizing stCur with
+    | halt _ => rfl
+    | stepSign m apps next ih =>
+      dsimp only [execSharedRealTsig, execRealTsig]
+      split
+      · have hOutEq : evalDistributedBeaverOut tower128Params.lambdas
+            (tower128Honest ++ tower128Corrupt) (dealPartyBeaverShares vault) m = S.sign sk m := by
+          have h1 : evalDistributedBeaverOut tower128Params.lambdas
+              (tower128Honest ++ tower128Corrupt) (dealPartyBeaverShares vault) m =
+              tower128SharedOutVal a b skPad aPad bPad cPad sk m := rfl
+          rw [h1, tower128SharedOutVal_eq_sign, hSignDef]
+          rfl
+        rw [hOutEq]
+        exact ih _ _
+      · exact ih _ _
+    | stepAbort c next ih =>
+      dsimp only [execSharedRealTsig, execRealTsig]
+      split <;> exact ih _ _
+    | stepVerify m sig next ih =>
+      dsimp only [execSharedRealTsig, execRealTsig]
+      exact ih _ _
+  refine ⟨hAntiFrame, ?_⟩
+  rw [hSharedEqReal st Z]
+  exact protocol_realizes_idealTsig_id_abort S sk (S.sign sk) bdozVerifyCulprit
+    (fun _ => rfl) st hMacSound Z
+
+private def tsigPairFin {A B : Nat} (a : Fin A) (b : Fin B) : Fin (A * B) :=
+  ⟨a.val * B + b.val, by
+    have h1 : a.val + 1 ≤ A := a.isLt
+    have h2 : (a.val + 1) * B ≤ A * B := Nat.mul_le_mul_right B h1
+    rw [Nat.add_mul, Nat.one_mul] at h2
+    have h3 : b.val < B := b.isLt
+    omega⟩
+
+private def tsigSplitLeft {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) : Fin A :=
+  ⟨x.val / B, (Nat.div_lt_iff_lt_mul hB).mpr x.isLt⟩
+
+private def tsigSplitRight {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) : Fin B :=
+  ⟨x.val % B, Nat.mod_lt x.val hB⟩
+
+private theorem tsigPair_split {A B : Nat} (hB : 0 < B) (x : Fin (A * B)) :
+    tsigPairFin (tsigSplitLeft hB x) (tsigSplitRight hB x) = x := by
+  apply Fin.ext
+  dsimp [tsigPairFin, tsigSplitLeft, tsigSplitRight]
+  have h := Nat.div_add_mod x.val B
+  rw [Nat.mul_comm B (x.val / B)] at h
+  exact h
+
+private theorem tsigSplitLeft_pair {A B : Nat} (hB : 0 < B) (a : Fin A) (b : Fin B) :
+    tsigSplitLeft hB (tsigPairFin a b) = a := by
+  apply Fin.ext
+  dsimp [tsigSplitLeft, tsigPairFin]
+  rw [Nat.mul_comm a.val B, Nat.mul_add_div hB, Nat.div_eq_of_lt b.isLt, Nat.add_zero]
+
+private theorem tsigSplitRight_pair {A B : Nat} (hB : 0 < B) (a : Fin A) (b : Fin B) :
+    tsigSplitRight hB (tsigPairFin a b) = b := by
+  apply Fin.ext
+  dsimp [tsigSplitRight, tsigPairFin]
+  rw [Nat.mul_comm a.val B, Nat.mul_add_mod, Nat.mod_eq_of_lt b.isLt]
+
+private def finToTower128 (i : Fin (2 ^ 128)) : Tower128 :=
+  unpackTower 7 (BitVec.ofFin i)
+
+private def tower128ToFin (x : Tower128) : Fin (2 ^ 128) :=
+  (packTower 7 x).toFin
+
+private theorem tower128ToFin_finToTower128 (i : Fin (2 ^ 128)) :
+    tower128ToFin (finToTower128 i) = i := by
+  unfold tower128ToFin finToTower128
+  rw [packTower_unpackTower 7, BitVec.toFin_ofFin]
+
+private theorem finToTower128_tower128ToFin (x : Tower128) :
+    finToTower128 (tower128ToFin x) = x := by
+  unfold finToTower128 tower128ToFin
+  rw [BitVec.ofFin_toFin, unpackTower_packTower 7]
+
+private def padCard7 (C : Nat) : Nat :=
+  C * (C * (C * (C * (C * (C * C)))))
+
+/-- Cardinality `(2^128)^7 = 2^896` of `TsigPadTape Tower128 1 2` (`7` full-width `GF(2^128)` elements). -/
+def tower128PadCard : Nat := padCard7 (2 ^ 128)
+
+/-- Cardinality `(2^128) * (2^128) = 2^256` of the full 2-lane `Tower128 × Tower128` BDOZ MAC key space. -/
+def tower128KeyCard : Nat :=
+  (2 ^ 128) * (2 ^ 128)
+
+theorem tower128PadCard_pos : 0 < tower128PadCard :=
+  Nat.mul_pos (Nat.two_pow_pos 128)
+    (Nat.mul_pos (Nat.two_pow_pos 128)
+      (Nat.mul_pos (Nat.two_pow_pos 128)
+        (Nat.mul_pos (Nat.two_pow_pos 128)
+          (Nat.mul_pos (Nat.two_pow_pos 128)
+            (Nat.mul_pos (Nat.two_pow_pos 128) (Nat.two_pow_pos 128))))))
+
+theorem tower128KeyCard_pos : 0 < tower128KeyCard :=
+  Nat.mul_pos (Nat.two_pow_pos 128) (Nat.two_pow_pos 128)
+
+private def padHdGen {R : Type} (r0 : R) (l : List R) : R := l.headD r0
+
+private theorem list_len1_gen {R : Type} (r0 : R) : ∀ (l : List R), l.length = 1 → l = [padHdGen r0 l]
+  | [_], _ => rfl
+  | [], h => by cases h
+  | _ :: _ :: _, h => absurd (Nat.succ.inj h) (Nat.succ_ne_zero _)
+
+private theorem list_len2_gen {R : Type} (r0 : R) : ∀ (l : List R), l.length = 2 → l = [padHdGen r0 l, padHdGen r0 l.tail]
+  | [_, _], _ => rfl
+  | [], h => by cases h
+  | [_], h => absurd (Nat.succ.inj h) (Nat.succ_ne_zero 0).symm
+  | _ :: _ :: _ :: _, h => absurd (Nat.succ.inj (Nat.succ.inj h)) (Nat.succ_ne_zero _)
+
+private def padDecGen {R : Type} {C : Nat} (hC : 0 < C) (dec : Fin C → R)
+    (idx : Fin (padCard7 C)) : TsigPadTape R 1 2 :=
+  let B6 := C * (C * (C * (C * (C * C))))
+  have hB6 : 0 < B6 := Nat.mul_pos hC (Nat.mul_pos hC (Nat.mul_pos hC (Nat.mul_pos hC (Nat.mul_pos hC hC))))
+  let B5 := C * (C * (C * (C * C)))
+  have hB5 : 0 < B5 := Nat.mul_pos hC (Nat.mul_pos hC (Nat.mul_pos hC (Nat.mul_pos hC hC)))
+  let B4 := C * (C * (C * C))
+  have hB4 : 0 < B4 := Nat.mul_pos hC (Nat.mul_pos hC (Nat.mul_pos hC hC))
+  let B3 := C * (C * C)
+  have hB3 : 0 < B3 := Nat.mul_pos hC (Nat.mul_pos hC hC)
+  let B2 := C * C
+  have hB2 : 0 < B2 := Nat.mul_pos hC hC
+  let i0 := tsigSplitLeft hB6 idx
+  let r6 := tsigSplitRight hB6 idx
+  let i1 := tsigSplitLeft hB5 r6
+  let r5 := tsigSplitRight hB5 r6
+  let i2 := tsigSplitLeft hB4 r5
+  let r4 := tsigSplitRight hB4 r5
+  let i3 := tsigSplitLeft hB3 r4
+  let r3 := tsigSplitRight hB3 r4
+  let i4 := tsigSplitLeft hB2 r3
+  let r2 := tsigSplitRight hB2 r3
+  let i5 := tsigSplitLeft hC r2
+  let i6 := tsigSplitRight hC r2
+  { share := fun j =>
+      if j.val == 0 then ⟨[dec i0], rfl⟩
+      else ⟨[dec i1], rfl⟩
+    pad := fun j =>
+      if j.val == 0 then ⟨[dec i2, dec i3], rfl⟩
+      else ⟨[dec i4, dec i5], rfl⟩
+    out := ⟨[dec i6], rfl⟩ }
+
+private def padEncGen {R : Type} {C : Nat} (r0 : R) (enc : R → Fin C)
+    (τ : TsigPadTape R 1 2) : Fin (padCard7 C) :=
+  let s0 := enc (padHdGen r0 (τ.share ⟨0, by decide⟩).1)
+  let s1 := enc (padHdGen r0 (τ.share ⟨1, by decide⟩).1)
+  let p00 := enc (padHdGen r0 (τ.pad ⟨0, by decide⟩).1)
+  let p01 := enc (padHdGen r0 (τ.pad ⟨0, by decide⟩).1.tail)
+  let p10 := enc (padHdGen r0 (τ.pad ⟨1, by decide⟩).1)
+  let p11 := enc (padHdGen r0 (τ.pad ⟨1, by decide⟩).1.tail)
+  let o0 := enc (padHdGen r0 τ.out.1)
+  tsigPairFin s0 (tsigPairFin s1 (tsigPairFin p00 (tsigPairFin p01 (tsigPairFin p10 (tsigPairFin p11 o0)))))
+
+private theorem pad_left_gen {R : Type} {C : Nat} (hC : 0 < C) (r0 : R)
+    (dec : Fin C → R) (enc : R → Fin C) (hLR : ∀ i, enc (dec i) = i)
+    (idx : Fin (padCard7 C)) :
+    padEncGen r0 enc (padDecGen hC dec idx) = idx := by
+  unfold padEncGen padDecGen padHdGen
+  unfold padCard7 at idx ⊢
+  simp only [Nat.reduceBEq, Bool.false_eq_true, ↓reduceIte, List.headD, List.tail, hLR]
+  rw [tsigPair_split, tsigPair_split, tsigPair_split, tsigPair_split, tsigPair_split, tsigPair_split]
+
+private theorem pad_right_gen {R : Type} {C : Nat} (hC : 0 < C) (r0 : R)
+    (dec : Fin C → R) (enc : R → Fin C) (hRL : ∀ x, dec (enc x) = x)
+    (τ : TsigPadTape R 1 2) :
+    padDecGen hC dec (padEncGen r0 enc τ) = τ := by
+  unfold padDecGen padEncGen
+  dsimp only
+  rw [tsigSplitLeft_pair, tsigSplitRight_pair,
+      tsigSplitLeft_pair, tsigSplitRight_pair,
+      tsigSplitLeft_pair, tsigSplitRight_pair,
+      tsigSplitLeft_pair, tsigSplitRight_pair,
+      tsigSplitLeft_pair, tsigSplitRight_pair,
+      tsigSplitLeft_pair, tsigSplitRight_pair]
+  simp only [hRL]
+  apply tsigPadTape_ext
+  · intro j
+    rcases j with ⟨_ | _ | n, hj⟩
+    · apply Subtype.ext
+      exact (list_len1_gen r0 _ (τ.share ⟨0, by decide⟩).2).symm
+    · apply Subtype.ext
+      exact (list_len1_gen r0 _ (τ.share ⟨1, by decide⟩).2).symm
+    · exact absurd hj (by omega)
+  · intro j
+    rcases j with ⟨_ | _ | n, hj⟩
+    · apply Subtype.ext
+      exact (list_len2_gen r0 _ (τ.pad ⟨0, by decide⟩).2).symm
+    · apply Subtype.ext
+      exact (list_len2_gen r0 _ (τ.pad ⟨1, by decide⟩).2).symm
+    · exact absurd hj (by omega)
+  · apply Subtype.ext
+    exact (list_len1_gen r0 _ τ.out.2).symm
+
+def tower128PadDec (idx : Fin tower128PadCard) : TsigPadTape Tower128 1 2 :=
+  padDecGen (Nat.two_pow_pos 128) finToTower128 idx
+
+def tower128PadEnc (τ : TsigPadTape Tower128 1 2) : Fin tower128PadCard :=
+  padEncGen (towerZero 7) tower128ToFin τ
+
+/-- Exact constructive bijection over all `2^896` full-width `Tower128` pad tapes (`0` `decide` loops!). -/
+def tower128PadEnum : SimpleEquiv (Fin tower128PadCard) (TsigPadTape Tower128 1 2) :=
+  { toFun := tower128PadDec, invFun := tower128PadEnc,
+    left_inv := pad_left_gen (Nat.two_pow_pos 128) (towerZero 7) finToTower128 tower128ToFin
+                  tower128ToFin_finToTower128,
+    right_inv := pad_right_gen (Nat.two_pow_pos 128) (towerZero 7) finToTower128 tower128ToFin
+                   finToTower128_tower128ToFin }
+
+private def keyDecGen {R : Type} {C : Nat} (hC : 0 < C) (dec : Fin C → R)
+    (idx : Fin (C * C)) : R × R :=
+  (dec (tsigSplitLeft hC idx), dec (tsigSplitRight hC idx))
+
+private theorem keyDecGen_injective {R : Type} {C : Nat} (hC : 0 < C)
+    (dec : Fin C → R) (enc : R → Fin C) (hLR : ∀ i, enc (dec i) = i) :
+    ∀ i j : Fin (C * C), keyDecGen hC dec i = keyDecGen hC dec j → i = j := by
+  intro i j hEq
+  have h1 : enc (keyDecGen hC dec i).1 = enc (keyDecGen hC dec j).1 :=
+    congrArg enc (congrArg Prod.fst hEq)
+  have h2 : enc (keyDecGen hC dec i).2 = enc (keyDecGen hC dec j).2 :=
+    congrArg enc (congrArg Prod.snd hEq)
+  unfold keyDecGen at h1 h2
+  dsimp only at h1 h2
+  rw [hLR, hLR] at h1 h2
+  calc i = tsigPairFin (tsigSplitLeft hC i) (tsigSplitRight hC i) := (tsigPair_split hC i).symm
+    _ = tsigPairFin (tsigSplitLeft hC j) (tsigSplitRight hC j) := by rw [h1, h2]
+    _ = j := tsigPair_split hC j
+
+/-- Exact enumeration of all `2^256` full-width 2-lane `Tower128 × Tower128` BDOZ global MAC keys. -/
+def tower128KeyDec (idx : Fin tower128KeyCard) : Tower128 × Tower128 :=
+  keyDecGen (Nat.two_pow_pos 128) finToTower128 idx
+
+theorem tower128KeyDec_injective : ∀ i j : Fin tower128KeyCard, tower128KeyDec i = tower128KeyDec j → i = j :=
+  keyDecGen_injective (Nat.two_pow_pos 128) finToTower128 tower128ToFin tower128ToFin_finToTower128
+
+/-- **Full-Width `TowerElem 7` (`GF(2^128)`) Shared-Beaver Advantage Bound
+    (`ucSimulatorTsig_advantage_bound_tower128`)**:
+    Instantiates `ucSimulatorTsig_advantage_bound` over `GF(2^128)` (`Tower128`), where BOTH
+    `wireFn` (`tower128SharedWireVals`) AND `outFn` (`tower128SharedOutVal`) are computed by
+    **distributed Beaver gate evaluation** (`tsigSharedBeaverRealExec`, `hCircuit` proved by
+    `tower128SharedOutVal_eq_sign`, `0` cleartext `sk` in party code!), over all `2^896` pad tapes
+    and all `2^256` 2-lane BDOZ MAC keys! -/
+theorem ucSimulatorTsig_advantage_bound_tower128
+    (Adv : TsigAdversary Tower128 Tower128 tower128Params.k)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (a b : Tower128) (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (sk m : Tower128)
+    (Cs : Nat) (prg : Fin Cs → TsigPadTape Tower128 tower128Params.d tower128Params.k)
+    (Co : Nat) (ot : Fin Co → Tower128 × Tower128) :
+    let vault : SharedBeaverSessionVault Tower128 1 := ⟨sk, skPad, a, aPad, b, bPad, cPad⟩
+    let real := fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+      tsigSharedBeaverRealExec tower128Params tower128State tower128Corrupt
+        tower128Honest corruptVk corruptTags (dealPartyBeaverShares vault) m [0] Adv τ κ
+    let ideal := fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+      tsigIdealExec tower128BeaverSig tower128Params tower128State tower128Corrupt tower128Honest
+        corruptVk corruptTags sk m [0] Adv ⟨τ, κ⟩
+    validThresholdApproval tower128State [0] = true ∧
+    natAbsDiff
+      (acceptPairs Cs Co prg ot real * (tower128PadCard * tower128KeyCard))
+      (acceptPairs tower128PadCard tower128KeyCard tower128PadEnum.toFun tower128KeyDec ideal * (Cs * Co)) ≤
+      Cs * Co * (tower128PadCard * ((tower128Params.k + 1) * tower128Corrupt.length))
+        + tower128KeyCard * prgReductionAdvNum Cs tower128PadCard Co prg tower128PadEnum.toFun ot real
+        + Cs * otReductionAdvNum tower128PadCard Co tower128KeyCard tower128PadEnum.toFun ot tower128KeyDec real := by
+  intro vault real ideal
+  refine ⟨by decide, ?_⟩
+  have hReal : (fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+      (κ : Tower128 × Tower128) =>
+      tsigSharedBeaverRealExec tower128Params tower128State tower128Corrupt
+        tower128Honest corruptVk corruptTags (dealPartyBeaverShares vault) m [0] Adv τ κ) =
+      (fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+        tsigRealExec tower128Params
+          (tower128SharedWireVals a b skPad aPad bPad cPad)
+          (tower128SharedOutVal a b skPad aPad bPad cPad)
+          tower128State tower128Corrupt tower128Honest corruptVk corruptTags sk m [0] Adv τ κ) :=
+    funext (fun τ => funext (fun κ =>
+      tsigSharedBeaverRealExec_eq_tsigRealExec corruptVk corruptTags
+        a b skPad aPad bPad cPad sk m [0] Adv τ κ))
+  dsimp only [real, ideal]
+  rw [hReal]
+  exact ucSimulatorTsig_advantage_bound tower128BeaverSig tower128Params
+    (tower128SharedWireVals a b skPad aPad bPad cPad)
+    (tower128SharedOutVal a b skPad aPad bPad cPad)
+    (tower128SharedOutVal_eq_sign a b skPad aPad bPad cPad) (fun _ => rfl) (fun _ => rfl)
+    (towerInv 7) (towerMul_inv 7) tower128State tower128Corrupt tower128Honest rfl rfl (by decide)
+    tower128Corrupt_nonzero tower128_recon corruptVk corruptTags sk m [0] Adv
+    tower128PadCard tower128PadEnum tower128KeyCard tower128KeyDec tower128KeyDec_injective
+    Cs prg Co ot
+
+/-- **Strict Sub-Unity Non-Vacuity Theorem over `GF(2^128)` (`ucSimulatorTsig_nonvacuous_sub_unity_tower128`)**:
+    Under uniform preprocessing (`prg = tower128PadEnum.toFun`, `ot = tower128KeyDec`), the concrete
+    rational distinguishing advantage between real shared-Beaver threshold execution (`tsigSharedBeaverRealExec`)
+    and `ucSimulatorTsig` is bounded by `(3, 2 ^ 256)` (`3 / 2^256 < 2^{-254}`), with **explicitly proved
+    `3 < tower128KeyCard`** (strictly `< 1`, eliminating the old `512 / 512 = 1` vacuity)! -/
+theorem ucSimulatorTsig_nonvacuous_sub_unity_tower128
+    (Adv : TsigAdversary Tower128 Tower128 tower128Params.k)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (a b : Tower128) (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (sk m : Tower128) :
+    let vault : SharedBeaverSessionVault Tower128 1 := ⟨sk, skPad, a, aPad, b, bPad, cPad⟩
+    let real := fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+      tsigSharedBeaverRealExec tower128Params tower128State tower128Corrupt
+        tower128Honest corruptVk corruptTags (dealPartyBeaverShares vault) m [0] Adv τ κ
+    let ideal := fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+      tsigIdealExec tower128BeaverSig tower128Params tower128State tower128Corrupt tower128Honest
+        corruptVk corruptTags sk m [0] Adv ⟨τ, κ⟩
+    let sampleSpace := tower128PadCard * tower128KeyCard
+    let advGap := natAbsDiff
+      (acceptPairs tower128PadCard tower128KeyCard tower128PadEnum.toFun tower128KeyDec real)
+      (acceptPairs tower128PadCard tower128KeyCard tower128PadEnum.toFun tower128KeyDec ideal)
+    ratLe (advGap, sampleSpace) (3, tower128KeyCard) ∧
+    3 < tower128KeyCard := by
+  intro vault real ideal sampleSpace advGap
+  have hGap : advGap ≤ tower128PadCard * 3 := by
+    have hReal : (fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+        (κ : Tower128 × Tower128) =>
+        tsigSharedBeaverRealExec tower128Params tower128State tower128Corrupt
+          tower128Honest corruptVk corruptTags (dealPartyBeaverShares vault) m [0] Adv τ κ) =
+        (fun (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k)
+          (κ : Tower128 × Tower128) =>
+          tsigRealExec tower128Params
+            (tower128SharedWireVals a b skPad aPad bPad cPad)
+            (tower128SharedOutVal a b skPad aPad bPad cPad)
+            tower128State tower128Corrupt tower128Honest corruptVk corruptTags sk m [0] Adv τ κ) :=
+      funext (fun τ => funext (fun κ =>
+        tsigSharedBeaverRealExec_eq_tsigRealExec corruptVk corruptTags
+          a b skPad aPad bPad cPad sk m [0] Adv τ κ))
+    have hRaw := tsig_uniform_hybrid_gap tower128BeaverSig tower128Params
+      (tower128SharedWireVals a b skPad aPad bPad cPad)
+      (tower128SharedOutVal a b skPad aPad bPad cPad)
+      (tower128SharedOutVal_eq_sign a b skPad aPad bPad cPad) (fun _ => rfl) (fun _ => rfl)
+      (towerInv 7) (towerMul_inv 7) tower128State tower128Corrupt tower128Honest rfl (by decide)
+      tower128Corrupt_nonzero tower128_recon corruptVk corruptTags sk m [0] Adv
+      tower128PadCard tower128PadEnum tower128KeyCard tower128KeyDec tower128KeyDec_injective
+    have hCoeff : (tower128Params.k + 1) * tower128Corrupt.length = 3 := rfl
+    rw [hCoeff] at hRaw
+    dsimp only [advGap, real, ideal]
+    rw [hReal]
+    exact hRaw
+  have hSamplePos : 0 < sampleSpace := Nat.mul_pos tower128PadCard_pos tower128KeyCard_pos
+  have hSubUnity : 3 < tower128KeyCard := by
+    unfold tower128KeyCard
+    have h4 : 4 ≤ 2 ^ 128 := Nat.pow_le_pow_right (by decide : 0 < 2) (by decide : 2 ≤ 128)
+    have h16 : 16 ≤ (2 ^ 128) * (2 ^ 128) := Nat.mul_le_mul h4 h4
+    exact Nat.lt_of_lt_of_le (by decide : 3 < 16) h16
+  refine ⟨⟨hSamplePos, tower128KeyCard_pos, ?_⟩, hSubUnity⟩
+  dsimp only [sampleSpace]
+  calc advGap * tower128KeyCard
+      ≤ (tower128PadCard * 3) * tower128KeyCard := Nat.mul_le_mul_right tower128KeyCard hGap
+    _ = 3 * (tower128PadCard * tower128KeyCard) := by ac_rfl
+
+/-- Perfect Hop-1 view indistinguishability over all `2^896` `GF(2^128)` pad tapes. -/
+theorem ucSimulatorTsig_hop1_perfect_tower128
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (a b : Tower128) (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (sk m : Tower128) (macKey : Tower128 × Tower128)
+    (D : Option (TsigAdvView Tower128 tower128Params.k) → Bool) :
+    finSum tower128PadCard (fun i =>
+      if D (some (tsigSessionView tower128Params corruptVk tower128Corrupt tower128Honest
+        (tower128SharedWireVals a b skPad aPad bPad cPad sk m)
+        (tower128SharedOutVal a b skPad aPad bPad cPad sk m)
+        (tower128PadEnum.toFun i))) then 1 else 0) =
+    finSum tower128PadCard (fun i =>
+      if D (ucSimulatorTsig tower128Params
+        ⟨(), m, tower128Corrupt, tower128Honest, corruptVk, corruptTags,
+          .signed (tower128BeaverSig.sign sk m)⟩
+        ⟨tower128PadEnum.toFun i, macKey⟩) then 1 else 0) :=
+  ucSimulatorTsig_hop1_perfect tower128BeaverSig tower128Params
+    (tower128SharedWireVals a b skPad aPad bPad cPad)
+    (tower128SharedOutVal a b skPad aPad bPad cPad)
+    (tower128SharedOutVal_eq_sign a b skPad aPad bPad cPad)
+    (towerInv 7) (towerMul_inv 7) () tower128Corrupt tower128Honest (by decide)
+    tower128Corrupt_nonzero corruptVk corruptTags sk m tower128PadCard tower128PadEnum macKey D
+
+private theorem tsigSessionExpected_singleton {R Sig : Type} [CommRingOps R]
+    (pp : TsigParams R Sig) (cid : Nat) (cpt : R)
+    (w : Fin pp.k → R) (y : R) (τ : TsigPadTape R pp.d pp.k) :
+    tsigSessionExpected pp [(cid, cpt)] w y τ =
+      (cid, pp.emb (RoundPoly.evalCoeffs (y :: τ.out.1) cpt)) ::
+        finFlat pp.k (fun j =>
+          [(cid, cpt)].map (fun cx =>
+            (cx.1, pp.emb (add (RoundPoly.evalCoeffs (w j :: (τ.share j).1) cx.2)
+                               (RoundPoly.evalCoeffs (τ.pad j).1 cx.2))))) :=
+  rfl
+
+private theorem tsigRealOutcome_tower128_rejects_head
+    (corruptVk : Nat → BdozVerifierKeys) (tags : Nat → Tower128 × Tower128)
+    (alpha : Tower128 × Tower128)
+    (w : Fin tower128Params.k → Tower128) (y : Tower128)
+    (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k) (ops : List BdozPairOpening) :
+    tsigRealOutcome tower128Params tower128Corrupt.length
+        (tsigVerifierKey alpha tags
+          (tsigSessionExpected tower128Params tower128Corrupt w y τ))
+        (tsigSessionExpected tower128Params tower128Corrupt w y τ)
+        (tsigSessionView tower128Params corruptVk tower128Corrupt tower128Honest w y τ).outHonestOpenings
+        ({ bdozViewOpening (fun s => (tsigShareAt
+            (tsigSessionExpected tower128Params tower128Corrupt w y τ) s,
+              tags s)) 0 with
+            mac0 := towerAdd 7 (tags 0).1 (towerOne 7) } :: ops) = .abortedBy 2 := by
+  have hOne : towerOne 7 ≠ towerZero 7 := by
+    intro hEq
+    have hBit := congrArg (towerFirstBit 7) hEq
+    rw [towerFirstBit_one 7, towerFirstBit_zero 7] at hBit
+    cases hBit
+  have hC : tower128Corrupt = [(2, towerAdd 7 (towerOne 7) tower128X)] := rfl
+  have hExp : tsigSessionExpected tower128Params tower128Corrupt w y τ =
+      (2, tower128Params.emb (RoundPoly.evalCoeffs (y :: τ.out.1) (towerAdd 7 (towerOne 7) tower128X))) ::
+        finFlat tower128Params.k (fun j =>
+          tower128Corrupt.map (fun cx =>
+            (cx.1, tower128Params.emb (add (RoundPoly.evalCoeffs (w j :: (τ.share j).1) cx.2)
+                                           (RoundPoly.evalCoeffs (τ.pad j).1 cx.2))))) := by
+    conv => lhs; rw [hC]
+    rw [tsigSessionExpected_singleton, ← hC]
+  rw [hExp]
+  exact tsigRealOutcome_rejects_tampered_tag tower128Params tower128Corrupt.length alpha tags
+    (2, tower128Params.emb (RoundPoly.evalCoeffs (y :: τ.out.1) (towerAdd 7 (towerOne 7) tower128X)))
+    _ _ ops (towerOne 7) hOne
+
+/-- Completeness and identifiable-abort rejection over `GF(2^128)` (`Tower128`):
+    dealt openings reconstruct `sk * (sk + m)` via local Beaver shares, and tampering with any
+    BDOZ MAC tag aborts and blames corrupt party `2`. -/
+theorem tsigRealOutcome_tower128_signs_and_rejects
+    (corruptVk : Nat → BdozVerifierKeys) (tags : Nat → Tower128 × Tower128)
+    (alpha : Tower128 × Tower128) (a b sk m : Tower128)
+    (skPad aPad bPad cPad : ShamirPadPoly Tower128 1)
+    (τ : TsigPadTape Tower128 tower128Params.d tower128Params.k) (ops : List BdozPairOpening) :
+    let w := tower128SharedWireVals a b skPad aPad bPad cPad sk m
+    let y := tower128SharedOutVal a b skPad aPad bPad cPad sk m
+    tsigRealOutcome tower128Params tower128Corrupt.length
+        (tsigVerifierKey alpha tags
+          (tsigSessionExpected tower128Params tower128Corrupt w y τ))
+        (tsigSessionExpected tower128Params tower128Corrupt w y τ)
+        (tsigSessionView tower128Params corruptVk tower128Corrupt tower128Honest w y τ).outHonestOpenings
+        (tsigDealtOpenings
+          (fun s => (tsigShareAt
+            (tsigSessionExpected tower128Params tower128Corrupt w y τ) s, tags s))
+          0 (tsigSessionExpected tower128Params tower128Corrupt w y τ).length) =
+      .signed (towerMul 7 sk (towerAdd 7 sk m)) ∧
+    tsigRealOutcome tower128Params tower128Corrupt.length
+        (tsigVerifierKey alpha tags
+          (tsigSessionExpected tower128Params tower128Corrupt w y τ))
+        (tsigSessionExpected tower128Params tower128Corrupt w y τ)
+        (tsigSessionView tower128Params corruptVk tower128Corrupt tower128Honest w y τ).outHonestOpenings
+        ({ bdozViewOpening (fun s => (tsigShareAt
+            (tsigSessionExpected tower128Params tower128Corrupt w y τ) s,
+              tags s)) 0 with
+            mac0 := towerAdd 7 (tags 0).1 (towerOne 7) } :: ops) = .abortedBy 2 := by
+  intro w y
+  have hRej := tsigRealOutcome_tower128_rejects_head corruptVk tags alpha w y τ ops
+  have hy : y = towerMul 7 sk (towerAdd 7 sk m) :=
+    tower128SharedOutVal_eq_sign a b skPad aPad bPad cPad sk m
+  refine ⟨?_, hRej⟩
+  rw [hy]
+  exact tsigRealOutcome_dealt_openings_sign tower128Params tower128State corruptVk tower128Corrupt
+    tower128Honest rfl (fun _ => rfl) (fun _ => rfl) tower128_recon w
+    (towerMul 7 sk (towerAdd 7 sk m)) τ alpha tags
+
+end TsigSharedBeaverAndTower128
+
+end Qsag
+end
