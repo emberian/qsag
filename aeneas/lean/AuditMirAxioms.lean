@@ -6,6 +6,7 @@ import all QsagVerified.Proofs
 import all QsagVerified.Proofs.Adrs
 import all QsagVerified.Proofs.AdrsConverse
 import all QsagVerified.Proofs.Bdoz
+import all QsagVerified.Proofs.BdozConsumption
 import all QsagVerified.Proofs.Common
 import all QsagVerified.Proofs.CredAndHdGuards
 import all QsagVerified.Proofs.Epoch
@@ -30,12 +31,14 @@ import all QsagVerified.Proofs.PolicyAndAddr
 import all QsagVerified.Proofs.RssCutSession
 import all QsagVerified.Proofs.ShamirDkg
 import all QsagVerified.Proofs.Sponge
+import all QsagVerified.Proofs.SpongeConformance
 import all QsagVerified.Proofs.TowerBdoz
 import all QsagVerified.Proofs.Tsw
 import all QsagVerified.Proofs.Wots
 import all QsagVerified.Types
 
 import all QsagVerified.Proofs.BeltAckProvenance
+import all QsagVerified.Proofs.BeltLatchKernel
 import all QsagVerified.Proofs.CallerContracts
 import all QsagVerified.Proofs.MultiTurnMediationAndReachability
 import all QsagVerified.Proofs.RealSpecFieldWeld
@@ -82,6 +85,11 @@ run_cmd do
     ``qsag_verified.proofs.tower128_mul_eq_zero_iff,
     ``qsag_verified.proofs.tower256_mul_refines_qsag,
     ``qsag_verified.proofs.bdoz_verify_arbitrary_batch,
+    ``qsag_verified.proofs.belt_latch_bind_eq,
+    ``qsag_verified.proofs.belt_latch_epoch_binding_unique,
+    ``qsag_verified.proofs.belt_latch_poison_absorbing,
+    ``qsag_verified.proofs.belt_latch_recover_then_replay,
+    ``qsag_verified.proofs.checked_velocity_spend_spec,
     ``qsag_verified.proofs.inhabited_belt_one_fault_multi_epoch]
   for name in requiredTheorems do
     match env.find? name with

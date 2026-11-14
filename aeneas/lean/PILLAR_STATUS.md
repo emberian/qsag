@@ -1,87 +1,120 @@
 # MIR verification and canonical weld status
 
-Updated 2026-11-14 by the MIR pillar deputy. This records the delivered statements and
-remaining work, rather than treating the entire pillar as complete.
+Updated 2026-11-14. Statements delivered, how they were checked, and what is still open.
+
+## Layout
+
+- `aeneas/qsag-verified`: the `no_std`, dependency-free Rust crate. `extract.sh` runs its tests
+  (including differential tests against `crates/qsag-core`), Charon, Aeneas, and Lake.
+- `QsagVerified/Funs.lean`, `Types.lean`: generated; never edited by hand.
+- `QsagVerified/Proofs/*.lean`: proofs about the generated functions.
+- `QsagSpecWeld`: welds of extracted primitives to the `Qsag` specifications of the same
+  primitives (`RealSpecFieldWeld`, `RealSpecTowerWeld`, `RealSpecHashWeld`,
+  `RealSpecKeccakWeld`). Imports only primitive `Qsag` modules.
+- `QsagCustodyWeld`: welds whose statements mention protocol specifications
+  (`AuthenticatedBeltAndRealSpecWeld`, `RealSpecBeltWeld`, `RealSpecGuardBoundary`). Needs
+  `Qsag.MirSpecBridge` and `Qsag.JortsBeltLatchAndQuorumSwitching` to build.
+- `AuditMirAxioms`: axiom census (`propext`, `Quot.sound` only) over every declaration of the
+  extraction, the proofs and `QsagSpecWeld`, with required-theorem anchors and a negative
+  control. `QsagCustodyWeld` runs the same census over its three modules.
 
 ## Delivered
 
-- `BeltAckProvenance.lean`: per-bit complete mediation of the real authenticated
-  `VerifiedBeltQuorumGuard.step`; chronological `BeltRun` executions include rejected calls.
-  `belt_grant_authenticated_history` produces a duplicate-free set of at least `q`
-  custodians below `n`, each with an earlier accepted MAC-valid ack at exactly the grant's
-  epoch and message, after the pre-state was bound to that pair.
-- `belt_two_grants_authenticated_intersection`: more than `f` common distinct custodians,
-  with accepted authenticated evidence in each grant's own history, even across epochs.
-  Enrollment is invariant. `belt_ack_seen_provisioned` attaches nonzero and uniquely
-  enrolled key witnesses under `BeltProvisionedKeys`; no key secrecy or MAC unforgeability
-  is inferred from successful verification alone.
-- `belt_new_validated_provenance_init` discharges the empty-bitmap, quorum-configuration,
-  and count/range invariants from the actual constructor. `belt_trace_to_run` connects
-  the existing arbitrary-action reachability relation to the chronological history API.
-- `RealSpecTowerWeld.lean`: every extracted GF(256) multiplication refines both
-  `Qsag.mulExec 3` and the abstract `Qsag.towerMul 3` under canonical unpacking.
-- `RealSpecHashWeld.lean`: the extracted 128-chain base-4 WOTS+C checker equals
-  `Qsag.checkTargetSum 4 128 192` on its extracted digits, including length/range validity.
-  A zero-digest rejection witness distinguishes acceptance from totality.
-- `RealSpecKeccakWeld.lean`: one full extracted Keccak round and all 24 rounds refine
-  `Qsag.roundS` and `Qsag.keccakF1600`. The array round-trip theorem extends the result
-  to every extracted input array. The symbolic round is connected to MIR by individual
-  bind equalities; it is not an assumed replacement for the generated function.
-- `RealSpecBeltWeld.lean`: extracted grants refine the canonical Jorts `CustodiansMask`
-  cardinality and intersection algebra, with the authenticated history attached to members.
-- `RealSpecGuardBoundary.lean`: a concrete cross-package witness shows the monotone-nonce
-  MIR guard rejecting nonce 1 from last nonce 2 while the canonical used-nonce-list model
-  with burned list `[2]` accepts it. The simple field-for-field mapping cannot support
-  matching rejection behavior.
-- `CallerContracts.lean`: separate ML-DSA norm/commitment obligations, FTS round-count and
-  residual obligations, and RSS residual obligations appear in multi-turn release theorems.
-- Existing Goldilocks welds remain in the default weld. `QsagMirProofs` exports the new
-  interfaces and the previous multi-turn reachability interface. Every proof source has
-  an explicit import-all audit gate, checked by `check_audit_coverage.py`.
+Fields.
+- Goldilocks add/sub/mul/inverse refine `Qsag.Goldilocks`; `goldilocks_inverse_mul_eq_one`
+  gives `a * a⁻¹ = 1` in MIR for every nonzero residue, and `goldilocks_inv_none_iff_zero`
+  pins the `Option` behaviour.
+- Binary towers: `gf256_mul_refines_qsag`, `tower128_mul_refines_qsag`,
+  `tower256_mul_refines_qsag` and the three addition welds identify every extracted tower
+  operation with `Qsag.towerMul` / `Qsag.towerAdd` at levels 3, 7 and 8. The wide levels come
+  from one level-generic Karatsuba step. `tower128_mul_eq_zero_iff`: the extracted product has
+  no zero divisors.
 
-## Build and axiom gates
+Hashing.
+- The comparator now checks the full Keccak zero-state vector (lane 0
+  `0xF1258F7940E1DDE7`), universal permutation refinement, exact big-endian ADRS layout,
+  and every WOTS chain step against iteration of the extracted F with successive addresses.
+  Specification definitions are explicitly pinned in `comparator.json`.
+- `SpongeConformance`: each squeeze step writes the exact little-endian rate byte;
+  rate-boundary steps apply canonical `Qsag.keccakF1600` and reset the offset. These laws
+  apply to SHAKE and cSHAKE states. They do not establish absorb/padding/framing equivalence.
+- One Keccak round and the 24-round permutation refine `Qsag.keccakF1600` on every state.
+- The 128-chain base-4 WOTS+C digit check equals `Qsag.checkTargetSum 4 128 192`.
 
-All Lean compilation was performed on the designated Linux build host in an isolated checkout, with
-`SWARM_MEM_MAX=12G timeout --kill-after=10s 600s swarm-build lake build --wfail`.
-The wrapper enforces the memory cap. No RAM-backed scratch directory was used.
+Guards (multi-turn, arbitrary request sequences including refusals).
+- `BdozConsumption`: the extracted one-shot opening API terminates on all inputs, clears
+  keys on every attempt, rejects every subsequent use, and accepts only the provisioned
+  session/round after actual MAC verification. Rust tests cover successful-use replay,
+  context mismatches, tag/MAC tampering, empty batches, and retries following rejection.
+- The comparator includes exact arbitrary-length BDOZ batch acceptance and canonical
+  Tower128 multiplication, including its zero-product characterization.
+- `BeltLatchKernel.lean`: the transition kernel of production `BeltLatch::bind`, with the
+  durable write as an input. `belt_latch_bind_eq` (total, closed form);
+  `belt_latch_epoch_binding_unique` (two accepted binds of one epoch carry the same digest,
+  salt and digits, and the later is a replay); `belt_latch_fresh_epochs_increase`;
+  `belt_latch_poison_absorbing`; `belt_latch_failed_persist_binds_nothing`;
+  `belt_latch_recover_then_replay`. `tests/parity_qsag_core.rs` drives the kernel and
+  production `BeltLatch<MemoryWal>` with the same requests.
+- `BeltAckProvenance.lean`: every certified grant of the authenticated quorum guard has at
+  least `q` distinct enrolled custodians with earlier accepted MAC-valid acknowledgments;
+  two grants share more than `f` of them. `inhabited_belt_one_fault_multi_epoch` is the
+  `n=3, t=2, f=1, q=3` two-epoch witness.
+- `MultiTurnMediationAndReachability.lean`: `bdoz_generated_loop_fold` and
+  `bdoz_verify_arbitrary_batch` give exact acceptance of the BDOZ verifier for batches of any
+  length; `bdoz_successful_trace_checks_every_batch` lifts it to traces.
+- `PolicyAndAddr.lean`: `checked_velocity_spend_spec`, the helper production admission calls.
+- `CallerContracts.lean`: what unextracted callers must establish for ML-DSA, FTS and RSS
+  releases, and a concrete RSS execution showing those contracts are not derivable from the
+  guard alone.
 
-The default build includes `QsagSpecWeld`. On the verified snapshot:
+## Gates
 
-- Default build: 86 jobs, successful.
-- `AuditMirAxioms`: 4,892 declarations, zero rejected.
-- `QsagSpecWeld`: 151 declarations, zero rejected.
-- Axiom allowlist: `propext`, `Quot.sound` only; negative controls remain active.
-- Import coverage: 40 proof source modules, zero missing gates.
+Run on the Linux build host with `CARGO_BUILD_JOBS=4 SWARM_MEM_MAX=8G timeout --kill-after=10s 600s`:
 
-The census found and removed two imported nonconstructive dependencies during development:
-`BitVec.setWidth_setWidth` in the GF(256) simplification and `List.nodup_range` in the
-64-slot signer proof. The former is excluded from that simplification; the latter is
-replaced with a direct kernel-checked finite proof. The axiom policy itself was not relaxed.
+    lake build --wfail QsagVerified QsagSpecWeld AuditMirAxioms QsagMirProofs
 
-## Full RSS integration
+Result on 2026-11-14 against a fresh Charon/Aeneas extraction of the current Rust source:
+successful; `AuditMirAxioms` 5,244 declarations and `QsagSpecWeld` 129 declarations, none
+rejected. `cargo test` in `qsag-verified`: all suites pass, parity 5/5.
+`QsagVerifiedChallenge` builds with only its intentional statement placeholders.
+`check_audit_coverage.py` covers all 43 proof modules. The runtime census is available as
+`lake build audit-mir-axioms` followed by `.lake/build/bin/audit-mir-axioms`; the runtime
+census also checked 5,244 declarations with zero rejected axioms.
+`lake comparator --paranoid --inadvisably-no-sandbox` passed all 65 theorem obligations
+and 17 pinned definitions, including Lean's default and paranoid kernels and all four
+external checkers. The sandboxed invocation could not start because the verification host
+disallows user-namespace mapping; the completed comparison used the isolated checkout.
 
-The earlier snapshot failed in the sibling-owned `ThresholdMlDsaAndToprf` module.
-The final upstream snapshot compiles that module and `MirSpecBridge`. The existing
-RSS `ForwardSim` weld is therefore back in `QsagSpecWeld`, `QsagMirProofs`, and the
-mandatory import-all `AuditMirAxioms` census. The temporary separate gate was removed;
-no proof module is relegated to an optional audit target.
+`QsagCustodyWeld` was not rebuilt on that date: `Qsag.MaliciousSecurity` and
+`Qsag.AdvancedMpcAndCreds`, which its `Qsag` imports depend on, did not compile in the
+working tree. `BeltAckProvenance`, which `RealSpecBeltWeld` imports, changed since those three
+modules last compiled (one proof repaired, statements unchanged).
 
-## Remaining proof work
+Constructive proof conventions:
+- `by_cases` on a proposition with no `Decidable` instance silently uses `Classical.choice`;
+  generated enums have no `DecidableEq`, so case on the constructor instead.
+- `omega` uses `Classical.choice` when an implication is among the hypotheses; `clear` it.
+- `Nat.and_two_pow_sub_one_eq_mod` and `Nat.testBit_two_pow_sub_one` depend on
+  `Classical.choice`; `RealSpecTowerWeld` carries a constructive replacement.
+- In a `module` file, `simp only [bind_eq_result_bind, result_bind_ok]` on
+  `checked_velocity_spend` exhausted 12 GB; `bind_ok_step` with `change` does not.
 
-1. Extend the canonical field weld beyond GF(256) to the wider tower kernels. Existing
-   within-package arithmetic proofs remain, but are not new cross-package welds.
-2. Weld the streaming `Shake256Sponge` absorb/squeeze/padding state to the canonical sponge.
-   The full permutation weld does not establish the streaming sponge refinement.
-3. Construct canonical guard simulations for `EpochLatch` and `StatefulVelocityGuard`.
-   The velocity rejection mismatch is now a proved counterexample; an environment contract
-   or a canonical specification change is needed for that particular mapping.
-4. Relate the local authenticated quorum guard to the full Jorts network state machine
-   through an appropriate environment/composition relation. The certificate-mask weld is
-   not a whole-machine `ForwardSim` to the different `BeltLatch` transition system.
-5. Extend semantic caller contracts to HD residual derivation, the legacy poison latch's
-   `check_ok`, and the unauthenticated core's WAL flag. Policy pins require trusted
-   provisioning; BDOZ operands must be connected to the external wire transcript.
+## Open
 
-None of these results establishes linkage to a production binary or fresh extraction
-parity. Generated `Funs.lean`/`Types.lean`, challenge files, and sibling crate/spec sources
-were not edited by this work.
+1. Streaming `Shake256Sponge`: absorb/pad/squeeze byte equivalence with the canonical sponge,
+   across rate boundaries, and cSHAKE framing. The permutation weld does not give this.
+2. Production arithmetic: `crates/qsag-core/src/field` implements Goldilocks and the towers
+   separately from the verified crate. The parity tests compare them on samples; no theorem
+   covers the production code until it calls the verified functions.
+3. `BeltLatch` beyond `bind`: echo construction and verification (`verify_peer_echoes`), the
+   log's own MAC and checkpoint, and the relation between the local quorum guard and the
+   three-party network. Production `BeltLatch` does not yet call the kernel.
+4. RSS session registry and caller adoption of the BDOZ opening handle:
+   `RssCutGateSession::new_round1_committed` takes no prior state. The legacy BDOZ burn-on-abort
+   API permits successful-opening replay; both counterexamples remain valid for those APIs.
+   `BdozOpeningGuard2Lane` now consumes every attempt, binds the session and round, and clears
+   both key lanes. Its constructor still requires caller-provisioned fresh keys and masks;
+   it is not a persistent session registry and production callers must explicitly adopt it.
+5. `EpochLatch` and `StatefulVelocityGuard` have no canonical simulation; the velocity mismatch
+   is a proved counterexample (`RealSpecGuardBoundary`).
+6. KoalaBear is not in the verified crate.

@@ -31,3 +31,7 @@ name = "QsagCustodyWeld"
 [[require]]
 name = "qsag"
 path = "../../lean"
+
+[[lean_exe]]
+name = "audit-mir-axioms"
+root = "AuditMirAxiomsMain"

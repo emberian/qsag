@@ -16,16 +16,17 @@ There is no intermediate structure standing in for the Rust: the concrete machin
 step function itself, viewed as a `Qsag.PartyMachine` by `extractedPartyMachine`
 (`RealSpecFieldWeld.lean`).
 
-Scope. Welded: the cut-session guard `rss_cut_session.RssCutGateSession.step` against
-`Qsag.mirRssCutMachine`, and (in `RealSpecFieldWeld.lean`) the Goldilocks kernels against
-`Qsag.Goldilocks`. Not welded: `gf256` / `tower` against `Qsag.BinaryTower`, the Keccak sponge
-against `Qsag.Keccak`, `wotsc256`, `EpochLatch`, and `StatefulVelocityGuard` (whose design differs
-from `Qsag.MirPolicyGuardState`). Those extracted functions have theorems only inside this
-package. The verified crate is a separate Cargo workspace that no production crate links, so none
-of this is a statement about a shipped binary.
+Scope. This file welds the cut-session guard `rss_cut_session.RssCutGateSession.step` against
+`Qsag.mirRssCutMachine`. The primitive welds live beside it: Goldilocks in
+`RealSpecFieldWeld.lean`, the binary towers in `RealSpecTowerWeld.lean`, the Keccak permutation in
+`RealSpecKeccakWeld.lean` and the WOTS+C digit check in `RealSpecHashWeld.lean`. `EpochLatch` has
+no weld, and `StatefulVelocityGuard` differs from `Qsag.MirPolicyGuardState`
+(`RealSpecGuardBoundary.lean` proves the mismatch). Production crates link the verified crate and
+call some of its functions; a theorem here transfers to production only for a function production
+actually calls.
 
-Build. This module is the root content of the `QsagSpecWeld` library, not of `QsagMirProofs`,
-because it needs the whole import cone of `Qsag.MirSpecBridge`.
+Build. This module belongs to the `QsagCustodyWeld` library, because it needs the whole import
+cone of `Qsag.MirSpecBridge`; the primitive welds are the separate `QsagSpecWeld` library.
 -/
 
 public section

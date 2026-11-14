@@ -42,7 +42,7 @@ theorem fips205_f_total (pk_seed : Std.Array Std.U8 16#usize)
   rw [hresult, result_bind_ok]
   exact ⟨_, rfl⟩
 
-private def wotsIter (pk_seed : Std.Array Std.U8 16#usize) (adrs : fips205.Fips205Adrs)
+@[expose] def wotsIter (pk_seed : Std.Array Std.U8 16#usize) (adrs : fips205.Fips205Adrs)
     (start : Nat) : Nat → Std.Array Std.U8 16#usize → Result (Std.Array Std.U8 16#usize)
   | 0, x => .ok x
   | n + 1, x => do
@@ -118,6 +118,16 @@ private theorem wots_chain_run (x pk : Std.Array Std.U8 16#usize) (a : fips205.F
       exact hout
   exact ⟨out, by simp only [fips205.fips205_wots_chain, hstart, hsteps, ite_false,
     hsub, hlast, hloop, bind_eq_result_bind, result_bind_ok], hout⟩
+
+/-- Every in-range step evaluates F with the current hash address. -/
+theorem fips205_wots_chain_steps (x pk : Std.Array Std.U8 16#usize)
+    (a : fips205.Fips205Adrs) (start steps : Std.U32)
+    (h : start.val + steps.val ≤ 15) :
+    fips205.fips205_wots_chain x start steps pk a =
+      (do let y ← wotsIter pk a start.val steps.val x; .ok (some y)) := by
+  obtain ⟨out, ho, hi⟩ := wots_chain_run x pk a start steps h
+  rw [ho, hi]
+  rfl
 
 theorem fips205_wots_chain_compose (x pk_seed : Std.Array Std.U8 16#usize)
     (adrs : fips205.Fips205Adrs) (start_i s1 s2 : Std.U32)

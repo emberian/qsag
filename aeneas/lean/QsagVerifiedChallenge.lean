@@ -3,6 +3,8 @@ module
 public import Aeneas
 public import QsagVerified.Types
 public import QsagVerified.Funs
+public import Qsag.Keccak
+public import Qsag.BinaryTower
 
 public section
 
@@ -17,8 +19,8 @@ that the proof development (`QsagMirProofs`) proves exactly these statements,
 over identical definitions, using no axiom other than `propext` and
 `Quot.sound`, and replays the proofs through the external kernels.
 
-It imports only the generated model (`Aeneas`, `QsagVerified.Types`,
-`QsagVerified.Funs`) and never a proofs module. Every specification definition
+It imports the generated model and canonical Keccak and binary-tower specifications,
+but never a proofs module. Every specification definition
 a statement mentions is declared again here, verbatim, so the comparison also
 pins those definitions.
 
@@ -26,13 +28,14 @@ Every theorem body below is `sorry`. That is the comparator convention for a
 statement file: only the types are compared, and the proofs are taken from the
 solution module. This is the only module in the package where `sorry` appears.
 
-Coverage boundary. The Keccak theorems state termination without failure
-plus one non-constancy witness, not general FIPS 202 value equivalence.
-Tower128 now has MIR equality to independent pure Wiedemann arithmetic,
-commutativity, and basis-sensitive vectors; the general recursive tower and
-basis-change theorem remain separate obligations. The WOTS+ chain
-theorems cover composition and range rejection, not the hash values. Lagrange
-reconstruction is covered for 2-of-2 and 3-of-3 only. Theorems outside the
+Coverage boundary. Keccak is compared on every input lane and against the exact
+zero-state vector. ADRS bytes have fixed field positions and big-endian encoding.
+WOTS steps evaluate the extracted F at successive hash addresses; this pins the
+chain semantics but does not establish full sponge absorb/padding equivalence.
+Squeeze byte selection and canonical permutation at rate boundaries are checked.
+BDOZ checks arbitrary batch residuals and one-shot handle consumption; fresh handle
+provisioning and commitment-before-challenge remain caller obligations.
+Lagrange reconstruction is covered for 2-of-2 and 3-of-3 only. Theorems outside the
 roster in `comparator.json` are not checked by this gate.
 -/
 
@@ -201,9 +204,7 @@ theorem tower128_mul_total (a b : tower.Tower128) :
 theorem keccak_f1600_total (state : Array Std.U64 25#usize) :
     ∃ state', keccak.keccak_f1600 state = .ok state' := sorry
 
-theorem keccak_f1600_zero_state_nonconstant :
-    ∃ out, keccak.keccak_f1600 (Std.Array.repeat 25#usize 0#u64) = .ok out ∧
-      out ≠ Std.Array.repeat 25#usize 0#u64 := sorry
+
 
 /-! ## FIPS 205: ADRS codec, WOTS+ checksum and chain -/
 
@@ -632,5 +633,172 @@ theorem tower128_mul_small_vectors :
     pureTower128Mul 0#u128 7#u128 = 0#u128 ∧
     pureTower128Mul 1#u128 7#u128 = 7#u128 ∧
     pureTower128Mul 2#u128 2#u128 = 3#u128 := sorry
+
+
+/-! ## Exact value and lifecycle conformance -/
+
+@[expose] def keccakZeroExpected : Std.Array Std.U64 25#usize :=
+  Std.Array.make 25#usize [
+    17376452488221285863#u64, 9571781953733019530#u64, 15391093639620504046#u64, 13624874521033984333#u64, 10027350355371872343#u64,
+    18417369716475457492#u64, 10448040663659726788#u64, 10113917136857017974#u64, 12479658147685402012#u64, 3500241080921619556#u64,
+    16959053435453822517#u64, 12224711289652453635#u64, 9342009439668884831#u64, 4879704952849025062#u64, 140226327413610143#u64,
+    424854978622500449#u64, 7259519967065370866#u64, 7004910057750291985#u64, 13293599522548616907#u64, 10105770293752443592#u64,
+    10668034807192757780#u64, 1747952066141424100#u64, 1654286879329379778#u64, 8500057116360352059#u64, 16929593379567477321#u64
+  ]
+
+def keccakArrayOfState (s : Qsag.KState) : Array Std.U64 25#usize :=
+  Array.make 25#usize [⟨s.a0.toBitVec⟩, ⟨s.a1.toBitVec⟩, ⟨s.a2.toBitVec⟩, ⟨s.a3.toBitVec⟩, ⟨s.a4.toBitVec⟩, ⟨s.a5.toBitVec⟩, ⟨s.a6.toBitVec⟩, ⟨s.a7.toBitVec⟩, ⟨s.a8.toBitVec⟩, ⟨s.a9.toBitVec⟩, ⟨s.a10.toBitVec⟩, ⟨s.a11.toBitVec⟩, ⟨s.a12.toBitVec⟩, ⟨s.a13.toBitVec⟩, ⟨s.a14.toBitVec⟩, ⟨s.a15.toBitVec⟩, ⟨s.a16.toBitVec⟩, ⟨s.a17.toBitVec⟩, ⟨s.a18.toBitVec⟩, ⟨s.a19.toBitVec⟩, ⟨s.a20.toBitVec⟩, ⟨s.a21.toBitVec⟩, ⟨s.a22.toBitVec⟩, ⟨s.a23.toBitVec⟩, ⟨s.a24.toBitVec⟩]
+
+def keccakStateOfArray (a : Array Std.U64 25#usize) : Qsag.KState :=
+  ⟨UInt64.ofBitVec (a.val.getD 0 0#u64).bv, UInt64.ofBitVec (a.val.getD 1 0#u64).bv, UInt64.ofBitVec (a.val.getD 2 0#u64).bv, UInt64.ofBitVec (a.val.getD 3 0#u64).bv, UInt64.ofBitVec (a.val.getD 4 0#u64).bv, UInt64.ofBitVec (a.val.getD 5 0#u64).bv, UInt64.ofBitVec (a.val.getD 6 0#u64).bv, UInt64.ofBitVec (a.val.getD 7 0#u64).bv, UInt64.ofBitVec (a.val.getD 8 0#u64).bv, UInt64.ofBitVec (a.val.getD 9 0#u64).bv, UInt64.ofBitVec (a.val.getD 10 0#u64).bv, UInt64.ofBitVec (a.val.getD 11 0#u64).bv, UInt64.ofBitVec (a.val.getD 12 0#u64).bv, UInt64.ofBitVec (a.val.getD 13 0#u64).bv, UInt64.ofBitVec (a.val.getD 14 0#u64).bv, UInt64.ofBitVec (a.val.getD 15 0#u64).bv, UInt64.ofBitVec (a.val.getD 16 0#u64).bv, UInt64.ofBitVec (a.val.getD 17 0#u64).bv, UInt64.ofBitVec (a.val.getD 18 0#u64).bv, UInt64.ofBitVec (a.val.getD 19 0#u64).bv, UInt64.ofBitVec (a.val.getD 20 0#u64).bv, UInt64.ofBitVec (a.val.getD 21 0#u64).bv, UInt64.ofBitVec (a.val.getD 22 0#u64).bv, UInt64.ofBitVec (a.val.getD 23 0#u64).bv, UInt64.ofBitVec (a.val.getD 24 0#u64).bv⟩
+
+def adrsByte32 (v : Std.U32) (shift : Nat) : Std.U8 :=
+  UScalar.cast .U8 ((⟨v.bv >>> shift⟩ : Std.U32) &&& 255#u32)
+
+def adrsByte64 (v : Std.U64) (shift : Nat) : Std.U8 :=
+  UScalar.cast .U8 ((⟨v.bv >>> shift⟩ : Std.U64) &&& 255#u64)
+
+def adrsTypeWord : fips205.Fips205AdrsType → Std.U32
+  | .WotsHash => 0#u32
+  | .WotsPk => 1#u32
+  | .Tree => 2#u32
+  | .ForsTree => 3#u32
+  | .ForsRoots => 4#u32
+  | .WotsPrf => 5#u32
+  | .ForsPrf => 6#u32
+
+def adrsBytes (a : fips205.Fips205Adrs) : Std.Array Std.U8 32#usize :=
+  Std.Array.make 32#usize [
+    adrsByte32 a.layer 24, adrsByte32 a.layer 16, adrsByte32 a.layer 8, adrsByte32 a.layer 0,
+    adrsByte32 a.tree_hi 24, adrsByte32 a.tree_hi 16, adrsByte32 a.tree_hi 8, adrsByte32 a.tree_hi 0,
+    adrsByte64 a.tree_lo 56, adrsByte64 a.tree_lo 48, adrsByte64 a.tree_lo 40, adrsByte64 a.tree_lo 32, adrsByte64 a.tree_lo 24, adrsByte64 a.tree_lo 16, adrsByte64 a.tree_lo 8, adrsByte64 a.tree_lo 0,
+    adrsByte32 (adrsTypeWord a.adrs_type) 24, adrsByte32 (adrsTypeWord a.adrs_type) 16, adrsByte32 (adrsTypeWord a.adrs_type) 8, adrsByte32 (adrsTypeWord a.adrs_type) 0,
+    adrsByte32 a.kp 24, adrsByte32 a.kp 16, adrsByte32 a.kp 8, adrsByte32 a.kp 0,
+    adrsByte32 a.chain 24, adrsByte32 a.chain 16, adrsByte32 a.chain 8, adrsByte32 a.chain 0,
+    adrsByte32 a.hash 24, adrsByte32 a.hash 16, adrsByte32 a.hash 8, adrsByte32 a.hash 0]
+
+@[expose] def wotsIter (pk_seed : Std.Array Std.U8 16#usize) (adrs : fips205.Fips205Adrs)
+    (start : Nat) : Nat → Std.Array Std.U8 16#usize → Result (Std.Array Std.U8 16#usize)
+  | 0, x => .ok x
+  | n + 1, x => do
+      let y ← fips205.fips205_f pk_seed { adrs with hash := ⟨BitVec.ofNat 32 start⟩ } x
+      wotsIter pk_seed adrs (start + 1) n y
+
+@[expose] def spongeRateByte (a : Array Std.U64 25#usize) (offset : Nat) : Std.U8 :=
+  UScalar.cast .U8 ((⟨(a.val.getD (offset / 8) 0#u64).bv >>> (8 * (offset % 8))⟩ : Std.U64) &&& 255#u64)
+
+abbrev BdozBatchFoldState := Std.U8 × tower.Tower128 × tower.Tower128 × tower.Tower128
+
+def bdozBatchFoldStep (a : BdozBatchFoldState) (item : tower.BdozWireOpening2Lane) :
+    BdozBatchFoldState :=
+  (if item.chal_weight = 0#u128 then 0#u8 else a.1,
+   a.2.1 ^^^ pureTower128Mul item.chal_weight (UScalar.cast .U128 item.opened_value),
+   a.2.2.1 ^^^ pureTower128Mul item.chal_weight (item.key_lanes.val.getD 0 0#u128),
+   a.2.2.2 ^^^ pureTower128Mul item.chal_weight (item.key_lanes.val.getD 1 0#u128))
+
+def bdozBatchFold : List tower.BdozWireOpening2Lane → BdozBatchFoldState → BdozBatchFoldState
+  | [], a => a
+  | item :: rest, a => bdozBatchFold rest (bdozBatchFoldStep a item)
+
+def bdozBatchAccum (batch : tower.BdozCommittedBatchOpening2Lane)
+    (openings : Slice tower.BdozWireOpening2Lane) : BdozBatchFoldState :=
+  bdozBatchFold openings.val (1#u8, batch.mask_value,
+    batch.mask_key_lanes.val.getD 0 0#u128, batch.mask_key_lanes.val.getD 1 0#u128)
+
+@[expose] def bdozSpent (s : tower.BdozOpeningGuard2Lane) : tower.BdozOpeningGuard2Lane :=
+  { s with alpha_lanes := Array.make 2#usize [0#u128, 0#u128], consumed := true }
+
+theorem keccak_f1600_zero_state_nist :
+    keccak.keccak_f1600 (Std.Array.repeat 25#usize 0#u64) =
+      .ok keccakZeroExpected := sorry
+
+theorem keccak_zero_expected_lane0 :
+    keccakZeroExpected.val.getD 0 0#u64 = 0xF1258F7940E1DDE7#u64 := sorry
+
+theorem keccak_f1600_array_refines_qsag (a : Array Std.U64 25#usize) :
+    keccak.keccak_f1600 a =
+      .ok (keccakArrayOfState (Qsag.keccakF1600 (keccakStateOfArray a))) := sorry
+
+theorem adrs_encode_eq (a : fips205.Fips205Adrs) :
+    fips205.encode_fips205_adrs a = .ok (adrsBytes a) := sorry
+
+theorem fips205_wots_chain_steps (x pk : Std.Array Std.U8 16#usize)
+    (a : fips205.Fips205Adrs) (start steps : Std.U32)
+    (h : start.val + steps.val ≤ 15) :
+    fips205.fips205_wots_chain x start steps pk a =
+      (do let y ← wotsIter pk a start.val steps.val x; .ok (some y)) := sorry
+
+theorem sponge_squeeze_byte (s : keccak.Shake256Sponge) (dst : Slice Std.U8)
+    (i : Std.Usize) (hi : i.val < dst.val.length) (ho : s.squeeze_offset.val < 136) :
+    ∃ dst' i' off',
+      keccak.Shake256Sponge.squeeze_loop.body s dst i =
+        .ok (.cont ({s with squeeze_offset := off'}, dst', i')) ∧
+      dst'.val = dst.val.set i.val (spongeRateByte s.state s.squeeze_offset.val) ∧
+      i'.val = i.val + 1 ∧ off'.val = s.squeeze_offset.val + 1 := sorry
+
+theorem sponge_squeeze_rollover (s : keccak.Shake256Sponge) (dst : Slice Std.U8)
+    (i : Std.Usize) (hi : i.val < dst.val.length) (ho : 136 ≤ s.squeeze_offset.val) :
+    keccak.Shake256Sponge.squeeze_loop.body s dst i =
+      keccak.Shake256Sponge.squeeze_loop.body
+        {s with state := keccakArrayOfState (Qsag.keccakF1600 (keccakStateOfArray s.state)), squeeze_offset := 0#usize} dst i := sorry
+
+theorem tower128_mul_refines_qsag (a b : Std.U128) :
+    ∃ y, tower.tower128_mul a b = .ok y ∧
+      Qsag.unpackTower 7 y.bv =
+        Qsag.towerMul 7 (Qsag.unpackTower 7 a.bv) (Qsag.unpackTower 7 b.bv) := sorry
+
+theorem tower128_mul_eq_zero_iff (a b : Std.U128) :
+    tower.tower128_mul a b = .ok 0#u128 ↔ a = 0#u128 ∨ b = 0#u128 := sorry
+
+theorem bdoz_verify_arbitrary_batch
+    (alphas : Array tower.Tower128 2#usize)
+    (batch : tower.BdozCommittedBatchOpening2Lane)
+    (openings : Slice tower.BdozWireOpening2Lane) (tag : Array Std.U8 32#usize)
+    (htag : tower.bdoz_commit_masked_tag batch.session_id batch.round_id
+      (bdozBatchAccum batch openings).2.1 batch.peer_masked_mac_lanes batch.open_nonce = .ok tag) :
+    tower.verify_mac_2lane alphas batch openings = .ok (decide (
+      openings.val ≠ [] ∧
+      (∀ item ∈ openings.val, item.chal_weight ≠ 0#u128) ∧
+      tag = batch.tag_commitment ∧
+      ((batch.peer_masked_mac_lanes.val.getD 0 0#u128 ^^^
+          ((bdozBatchAccum batch openings).2.2.1 ^^^
+            pureTower128Mul (alphas.val.getD 0 0#u128) (bdozBatchAccum batch openings).2.1)) |||
+       (batch.peer_masked_mac_lanes.val.getD 1 0#u128 ^^^
+          ((bdozBatchAccum batch openings).2.2.2 ^^^
+            pureTower128Mul (alphas.val.getD 1 0#u128) (bdozBatchAccum batch openings).2.1))) = 0#u128)) := sorry
+
+theorem bdoz_verify_once_eq (s : tower.BdozOpeningGuard2Lane)
+    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane) :
+    tower.BdozOpeningGuard2Lane.verify_once s b xs =
+      if s.consumed then .ok (bdozSpent s, false)
+      else if s.session_id = b.session_id ∧ s.round_id = b.round_id then
+        (do let ok ← tower.verify_mac_2lane s.alpha_lanes b xs; .ok (bdozSpent s, ok))
+      else .ok (bdozSpent s, false) := sorry
+
+theorem bdoz_verify_once_replay (s : tower.BdozOpeningGuard2Lane)
+    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane)
+    (h : s.consumed = true) :
+    tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (bdozSpent s, false) := sorry
+
+theorem bdoz_verify_once_consumes (s t : tower.BdozOpeningGuard2Lane)
+    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane)
+    (ok : Bool) (h : tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (t, ok)) :
+    t = bdozSpent s := sorry
+
+theorem bdoz_verify_once_single_consumption (s t : tower.BdozOpeningGuard2Lane)
+    (b b' : tower.BdozCommittedBatchOpening2Lane)
+    (xs ys : Slice tower.BdozWireOpening2Lane) (ok : Bool)
+    (h : tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (t, ok)) :
+    tower.BdozOpeningGuard2Lane.verify_once t b' ys = .ok (bdozSpent t, false) := sorry
+
+theorem bdoz_verify_once_accepted (s t : tower.BdozOpeningGuard2Lane)
+    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane)
+    (h : tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (t, true)) :
+    s.consumed = false ∧ s.session_id = b.session_id ∧ s.round_id = b.round_id ∧
+      tower.verify_mac_2lane s.alpha_lanes b xs = .ok true := sorry
+
+theorem bdoz_verify_once_total (s : tower.BdozOpeningGuard2Lane)
+    (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane) :
+    ∃ ok, tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (bdozSpent s, ok) := sorry
 
 end qsag_verified.proofs
