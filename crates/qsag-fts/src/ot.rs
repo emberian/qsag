@@ -276,7 +276,7 @@ impl<W: AuthenticatedOtWire> ParallelSeededDkgOt for CommittedCorrelatedOt<W> {
         if total == 0 {
             return Err(invalid());
         }
-        let mut output = Vec::new();
+        let mut output = Vec::with_capacity(total);
         for (index, chunk) in choices.chunks(MAX_OTS / 128).enumerate() {
             let mut bits: Vec<bool> = chunk
                 .iter()
@@ -286,7 +286,10 @@ impl<W: AuthenticatedOtWire> ParallelSeededDkgOt for CommittedCorrelatedOt<W> {
             bits.fill(false);
             core::hint::black_box(&mut bits);
             match result {
-                Ok(mut values) => output.append(&mut values),
+                Ok(mut values) => {
+                    output.extend_from_slice(&values);
+                    qsag_accel::ct::ct_zeroize_u128s(&mut values);
+                },
                 Err(error) => {
                     qsag_accel::ct::ct_zeroize_u128s(&mut output);
                     return Err(error);

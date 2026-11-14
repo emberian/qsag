@@ -150,6 +150,15 @@ impl<'a> ParallelSeededSignSession<'a> {
         }
         persistence.burn_epoch_before_sign(&pk.pk_seed_bytes, share.party_id, epoch, count + 1)?;
         share.epoch_uses[epoch as usize] = count + 1;
+        let (_, permit) = qsag_verified::FtsEpochGuard::new_unused(
+            pk.pk_seed_bytes, epoch, share.epoch_uses.len() as u32,
+        ).consume_epoch_once(pk.pk_seed_bytes, epoch,
+            cshake256_framed_32(b"QSAG.FTS.EPOCH.MESSAGE.V1", &[msg]));
+        let (key, authorized_epoch, _) = permit
+            .map_err(|_| ParallelSeededError::EpochUseBudgetExhausted)?.into_binding();
+        if key != pk.pk_seed_bytes || authorized_epoch != epoch {
+            return Err(ParallelSeededError::PersistenceFailed);
+        }
         let mut state = Self::new(share, request, Mode::Randomizer, count + 1);
         let original = core::array::from_fn(|lane| AuthWire128 {
             val_sh: state.share.sk_prf_lanes[lane],
@@ -432,7 +441,9 @@ impl<'a> ParallelSeededSignSession<'a> {
         if self.phase == Phase::Complete {
             return Err(ParallelSeededError::SignatureVerificationFailed);
         }
-        let mut values = vec![0u128; self.payload.len()];
+        // Reconstructed openings: in the value phase these are candidates no MAC check
+        // has accepted, so every exit wipes them.
+        let mut values = SecretValues(vec![0u128; self.payload.len()]);
         for &(id, digest) in &self.commitments {
             let mut matching = messages.iter().filter(
                 |m| matches!(m,ParallelSeededSignMessage::Opening {party_id,..} if *party_id==id),
@@ -453,7 +464,7 @@ impl<'a> ParallelSeededSignSession<'a> {
             {
                 if *session != self.session
                     || *round != self.sequence
-                    || part.len() != values.len()
+                    || part.len() != values.0.len()
                     || !ct_eq_bytes(
                         &digest,
                         &commit_mpc_broadcast(
@@ -467,7 +478,7 @@ impl<'a> ParallelSeededSignSession<'a> {
                 {
                     return Err(ParallelSeededError::CommitmentMismatch { party_id: id });
                 }
-                for (sum, &value) in values.iter_mut().zip(part) {
+                for (sum, &value) in values.0.iter_mut().zip(part) {
                     *sum ^= value;
                 }
             }
@@ -477,10 +488,10 @@ impl<'a> ParallelSeededSignSession<'a> {
             .checked_add(1)
             .ok_or(ParallelSeededError::BdozMacCheckFailed)?;
         match self.phase {
-            Phase::PowerOpen => self.apply_open_powers(&values),
-            Phase::ValueOpen => self.prepare_mac(values),
+            Phase::PowerOpen => self.apply_open_powers(&values.0),
+            Phase::ValueOpen => self.prepare_mac(core::mem::take(&mut values.0)),
             Phase::IntermediateMacOpen => {
-                if values.iter().any(|&v| v != 0) {
+                if values.0.iter().any(|&v| v != 0) {
                     return Err(ParallelSeededError::BdozMacCheckFailed);
                 }
                 self.mac_opening_exposed = false;
@@ -496,6 +507,7 @@ impl<'a> ParallelSeededSignSession<'a> {
             }
             Phase::MacOpen => {
                 let residual: [u128; 2] = values
+                    .0
                     .as_slice()
                     .try_into()
                     .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
@@ -664,23 +676,25 @@ impl<'a> ParallelSeededSignSession<'a> {
         }
     }
     fn prepare_mac(&mut self, opened: Vec<u128>) -> Result<(), ParallelSeededError> {
-        let mut values = opened.clone();
-        values.extend(self.share.pending_openings.iter().map(|(value, _)| *value));
+        // The working copy and its encoding hold unverified candidates; both are wiped
+        // here, and the capacity is exact so no reallocation leaves a copy behind.
+        let pending = &self.share.pending_openings;
+        let mut values = SecretValues(Vec::with_capacity(opened.len() + pending.len()));
+        values.0.extend_from_slice(&opened);
+        values.0.extend(pending.iter().map(|(value, _)| *value));
+        let mut encoded = encode_values(&values.0);
         let digest = cshake256_framed_32(
             b"QSAG.PSFTS.BATCH_VALUES.V4",
-            &[
-                &self.session,
-                &self.sequence.to_be_bytes(),
-                &encode_values(&values),
-            ],
+            &[&self.session, &self.sequence.to_be_bytes(), &encoded],
         );
+        ct_zeroize_bytes(&mut encoded);
         let wires = self
             .jobs
             .iter()
             .flat_map(|job| job.state.iter())
             .chain(self.share.pending_openings.iter().map(|(_, wire)| wire));
         let mut sigma = [0u128; 2];
-        for (index, (wire, &value)) in wires.zip(&values).enumerate() {
+        for (index, (wire, &value)) in wires.zip(&values.0).enumerate() {
             let random = cshake256_framed_32(
                 b"QSAG.PSFTS.BATCH_WEIGHT.V4",
                 &[&digest, &(index as u64).to_be_bytes()],
