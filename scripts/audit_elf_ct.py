@@ -1703,10 +1703,6 @@ def main():
     if not paths and not args.self_test and not args.cross_aarch64_bitslice and not args.check_fixtures:
         root = Path(__file__).resolve().parents[1]
         generation = 'current-elf' if args.fixture_generation == 'current' else 'historical-elf'
-        if not (root / 'lean/fixtures' / generation).is_dir():
-            # Compatibility with the original fixture directory names.
-            generation = ''.join(map(chr, (119, 97, 118, 101, 52))) + (
-                'b-elf' if args.fixture_generation == 'current' else '-elf')
         paths = [str(root / 'lean/fixtures' / generation / f'{arch}.rlib')
                  for arch in ('x86_64', 'aarch64')]
         print(f'Default inventory: {generation}; retained archives, not a live rebuild')
