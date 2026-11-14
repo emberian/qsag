@@ -8,8 +8,9 @@ use qsag_accel::{
     keccak::{KECCAK_RC, cshake256_framed_32, init_cshake256, keccak_f1600, reduce_192_zero_bias},
 };
 use qsag_asm::{
-    BitPlane256, SimdBackend, detect_backend, gf2_128_mul_acc_batch_portable,
-    gf2_128_mul_acc_batch_with_backend, gf2_128_mul_portable, transpose64x256_portable,
+    BitPlane256, SimdBackend,
+    bitslice::{gf2_128_mul_acc_batch_portable, transpose64x256_portable},
+    detect_backend, gf2_128_mul_acc_batch_with_backend, gf2_128_mul_portable,
 };
 
 const MAX_PENDING_BITS: usize = 65_536;
