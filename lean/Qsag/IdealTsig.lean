@@ -916,3 +916,872 @@ private theorem tsigSimCheck_none_shares {β : Type} (u : Tower128 → β) (vk :
 
 /-- A found forgery is an accepted opening at some position `s + i` of the record whose share
     differs from the dealt share of that position. -/
+theorem tsigFindForgery_sound (vk : BdozVerifierKeys) :
+    ∀ (es : List (Nat × Tower128)) (s : Nat) (ops : List BdozPairOpening) (op : BdozPairOpening),
+      tsigFindForgery vk s es ops = some op →
+      ∃ i, op ∈ ops ∧ op.partyId = s + i ∧ verifyBdozPairMac vk op = true ∧
+        op.shareX ≠ tsigShareAt es i
+  | [], _, _, _, h => by
+    have h' : (none : Option BdozPairOpening) = some _ := h
+    cases h'
+  | _ :: _, _, [], _, h => by
+    have h' : (none : Option BdozPairOpening) = some _ := h
+    cases h'
+  | e :: es, s, op' :: ops, op, h => by
+    rw [tsigFindForgery_cons] at h
+    cases hA : (tsigOpAccepted vk s op' && !(op'.shareX == e.2)) with
+    | true =>
+      rw [hA] at h
+      have h' : some op' = some op := h
+      cases h'
+      rcases Bool.and_eq_true_iff.mp hA with ⟨hAcc, hNe⟩
+      obtain ⟨hPid, hVer⟩ := tsigOpAccepted_spec hAcc
+      refine ⟨0, .head _, hPid, hVer, ?_⟩
+      intro hEq
+      have hb : (op'.shareX == e.2) = true := by
+        rw [show op'.shareX = e.2 from hEq]
+        exact beq_self_eq_true _
+      rw [hb] at hNe
+      cases hNe
+    | false =>
+      rw [hA] at h
+      obtain ⟨i, hMem, hPid, hVer, hNe⟩ := tsigFindForgery_sound vk es (s + 1) ops op h
+      refine ⟨i + 1, .tail _ hMem, ?_, hVer, hNe⟩
+      rw [hPid]
+      omega
+
+/-- **Hop 2, witness (`tsig_forgery_yields_key_guess`)**: a session in which a corrupt party's
+    opening with a wrong share is accepted exhibits that opening among the adversary's messages,
+    a MAC forgery witness against the honest verifier's key, and the equation showing that the
+    global key equals a value computed from the adversary's own message, shares and tags. -/
+theorem tsig_forgery_yields_key_guess (alpha : Tower128 × Tower128)
+    (tags : Nat → Tower128 × Tower128) (exp : List (Nat × Tower128))
+    (ops : List BdozPairOpening) (op : BdozPairOpening)
+    (h : tsigFindForgery (tsigVerifierKey alpha tags exp) 0 exp ops = some op) :
+    op ∈ ops ∧
+    BdozMacForgeryWitness (tsigVerifierKey alpha tags exp)
+      (bdozViewOpening (fun s => (tsigShareAt exp s, tags s)) op.partyId) op ∧
+    alpha = bdozKeyGuess (fun s => (tsigShareAt exp s, tags s)) op := by
+  obtain ⟨i, hMem, hPid, hVer, hNe⟩ := tsigFindForgery_sound _ exp 0 ops op h
+  rw [Nat.zero_add] at hPid
+  have hNe' : op.shareX ≠ tsigShareAt exp op.partyId := by
+    rw [hPid]
+    exact hNe
+  exact ⟨hMem,
+    ⟨rfl, fun hEq => hNe' hEq.symm,
+      bdozKeyFromView_accepts_view alpha (fun s => (tsigShareAt exp s, tags s)) op.partyId, hVer⟩,
+    bdoz_forgery_pins_key alpha (fun s => (tsigShareAt exp s, tags s)) op hNe' hVer⟩
+
+private theorem isSome_false_eq_none {α : Type} : ∀ (o : Option α), o.isSome = false → o = none
+  | none, _ => rfl
+  | some _, h => by cases h
+
+/-- **Hop 2, counting (`tsigForgery_keys_le`)**: for fixed openings, among `CK` distinct global
+    keys at most one per expected opening makes the verifier accept a wrong share. -/
+theorem tsigForgery_keys_le (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128)
+    (hInj : ∀ i j, keyDec i = keyDec j → i = j) :
+    ∀ (es : List (Nat × Tower128)) (s : Nat) (ops : List BdozPairOpening)
+      (hon : Nat → Tower128 × Tower128 × Tower128),
+      (∀ i, (hon (s + i)).1 = tsigShareAt es i) →
+      finSum CK (fun i =>
+        if (tsigFindForgery (bdozKeyFromView (keyDec i) hon) s es ops).isSome then 1 else 0) ≤
+        es.length
+  | [], s, ops, hon, _ =>
+    Nat.le_of_eq ((finSum_congr (g := fun _ => 0) (fun _ => rfl)).trans
+      ((finSum_const CK 0).trans (Nat.mul_zero CK)))
+  | e :: es, s, [], hon, _ =>
+    Nat.le_trans (Nat.le_of_eq ((finSum_congr (g := fun _ => 0) (fun _ => rfl)).trans
+      ((finSum_const CK 0).trans (Nat.mul_zero CK)))) (Nat.zero_le _)
+  | e :: es, s, op :: ops, hon, hHon => by
+    have hStep : ∀ i : Fin CK,
+        (if (tsigFindForgery (bdozKeyFromView (keyDec i) hon) s (e :: es) (op :: ops)).isSome
+          then 1 else 0) =
+        (if ((tsigOpAccepted (bdozKeyFromView (keyDec i) hon) s op && !(op.shareX == e.2)) ||
+              (tsigFindForgery (bdozKeyFromView (keyDec i) hon) (s + 1) es ops).isSome)
+          then 1 else 0) := by
+      intro i
+      rw [tsigFindForgery_cons]
+      cases (tsigOpAccepted (bdozKeyFromView (keyDec i) hon) s op && !(op.shareX == e.2)) <;> rfl
+    have h0 : (hon s).1 = e.2 := hHon 0
+    have h1 := finSum_indicator_le_one_of_unique CK
+      (fun i => tsigOpAccepted (bdozKeyFromView (keyDec i) hon) s op && !(op.shareX == e.2))
+      (fun i j hi hj => by
+        rcases Bool.and_eq_true_iff.mp hi with ⟨hAi, hNeB⟩
+        rcases Bool.and_eq_true_iff.mp hj with ⟨hAj, _⟩
+        obtain ⟨hPid, hVi⟩ := tsigOpAccepted_spec hAi
+        obtain ⟨_, hVj⟩ := tsigOpAccepted_spec hAj
+        have hNe : op.shareX ≠ (hon op.partyId).1 := by
+          rw [hPid, h0]
+          intro hEq
+          have hb : (op.shareX == e.2) = true := by
+            rw [hEq]
+            exact beq_self_eq_true _
+          rw [hb] at hNeB
+          cases hNeB
+        exact hInj i j ((bdoz_forgery_pins_key (keyDec i) hon op hNe hVi).trans
+          (bdoz_forgery_pins_key (keyDec j) hon op hNe hVj).symm))
+    have h2 := tsigForgery_keys_le CK keyDec hInj es (s + 1) ops hon (fun i => by
+      have h := hHon (i + 1)
+      rw [show s + (i + 1) = s + 1 + i by omega] at h
+      exact h)
+    exact Nat.le_trans (Nat.le_of_eq (finSum_congr hStep))
+      (Nat.le_trans
+        (finSum_indicator_or_le
+          (fun i => tsigOpAccepted (bdozKeyFromView (keyDec i) hon) s op && !(op.shareX == e.2))
+          (fun i => (tsigFindForgery (bdozKeyFromView (keyDec i) hon) (s + 1) es ops).isSome))
+        (Nat.le_trans (Nat.add_le_add h1 h2) (by simp only [List.length_cons]; omega)))
+
+/-! ### Real execution, ideal functionality, simulator -/
+
+/-- Honest parties' outcome in the real protocol: blame the first failed opening, otherwise
+    reconstruct the output from the honest output shares and the opened corrupt output shares. -/
+def tsigRealOutcome {R Sig : Type} [CommRingOps R] (pp : TsigParams R Sig) (nc : Nat)
+    (vk : BdozVerifierKeys) (exp : List (Nat × Tower128)) (honestOut : List R)
+    (ops : List BdozPairOpening) : TsActionResult Sig :=
+  match tsigCheckOpenings vk 0 exp ops with
+  | some c => .abortedBy c
+  | none => .signed (pp.decSig (ringDot pp.lambdas
+      (honestOut ++ (ops.take nc).map (fun op => pp.unemb op.shareX))))
+
+private theorem tsigRealOutcome_abort {R Sig : Type} [CommRingOps R] (pp : TsigParams R Sig)
+    (nc : Nat) (vk : BdozVerifierKeys) (exp : List (Nat × Tower128)) (honestOut : List R)
+    (ops : List BdozPairOpening) (c : Nat) (h : tsigCheckOpenings vk 0 exp ops = some c) :
+    tsigRealOutcome pp nc vk exp honestOut ops = .abortedBy c := by
+  unfold tsigRealOutcome
+  rw [h]
+
+private theorem tsigRealOutcome_signed {R Sig : Type} [CommRingOps R] (pp : TsigParams R Sig)
+    (nc : Nat) (vk : BdozVerifierKeys) (exp : List (Nat × Tower128)) (honestOut : List R)
+    (ops : List BdozPairOpening) (h : tsigCheckOpenings vk 0 exp ops = none) :
+    tsigRealOutcome pp nc vk exp honestOut ops =
+      .signed (pp.decSig (ringDot pp.lambdas
+        (honestOut ++ (ops.take nc).map (fun op => pp.unemb op.shareX)))) := by
+  unfold tsigRealOutcome
+  rw [h]
+
+/-- **Real execution of one session.** The adversary's view is produced by the share-and-MAC
+    steps on the wire values `wireVals sk m` and the output wire value `outVal sk m`; the honest
+    outcome is computed from the openings the adversary returns. No signing function is called. -/
+@[expose] def tsigRealExec {R PK SK Msg Sig : Type} [CommRingOps R] (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (tape : TsigPadTape R pp.d pp.k) (macKey : Tower128 × Tower128) : Bool :=
+  if validThresholdApproval st approvers then
+    Adv.verdict (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) tape)
+      (tsigRealOutcome pp corrupt.length
+        (tsigVerifierKey macKey corruptTags
+          (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) tape))
+        (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) tape)
+        (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) tape).outHonestOpenings
+        (Adv.openings
+          (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) tape)))
+  else Adv.idle .rejectedQuorum
+
+/-- The ideal functionality's answer to a signing request: it alone holds `sk`. -/
+@[expose] def tsigIdealFunctionality {PK SK Msg Sig : Type} (S : AbstractSigScheme PK SK Msg Sig)
+    (st : IdealTsigState PK Msg) (sk : SK) (m : Msg) (approvers : List Nat) : TsActionResult Sig :=
+  if validThresholdApproval st approvers then .signed (S.sign sk m) else .rejectedQuorum
+
+/-- **The simulator (`ucSimulatorTsig`).** From the functionality's output and its own tape it
+    produces the corrupt parties' incoming messages by running the honest code on all-zero wire
+    values and on the signature it was handed. Its arguments contain no secret key, no wire
+    value and no honest share. -/
+@[expose] def ucSimulatorTsig {R PK Msg Sig : Type} [CommRingOps R] (pp : TsigParams R Sig)
+    (inp : TsigSimInput R PK Msg Sig) (tape : TsigSimTape R pp.d pp.k) :
+    Option (TsigAdvView R pp.k) :=
+  match inp.fOut with
+  | .signed sig =>
+    some (tsigSessionView pp inp.corruptVk inp.corrupt inp.honest (fun _ => zero)
+      (pp.encSig sig) tape.pads)
+  | _ => none
+
+/-- Second move of the simulator: from the corrupt parties' openings, whom to report to the
+    functionality as the cheater (if anyone). -/
+@[expose] def ucSimulatorTsigBlame {R PK Msg Sig : Type} [CommRingOps R] (pp : TsigParams R Sig)
+    (inp : TsigSimInput R PK Msg Sig) (tape : TsigSimTape R pp.d pp.k)
+    (ops : List BdozPairOpening) : Option Nat :=
+  match inp.fOut with
+  | .signed sig =>
+    tsigSimCheckOpenings
+      (tsigVerifierKey tape.macKey inp.corruptTags
+        (tsigSessionExpected pp inp.corrupt (fun _ => zero) (pp.encSig sig) tape.pads))
+      0 (tsigSessionExpected pp inp.corrupt (fun _ => zero) (pp.encSig sig) tape.pads) ops
+  | _ => none
+
+/-- Honest parties' outcome in the ideal world: an abort report is filtered by
+    `idealTsigRecordAbort`; otherwise the functionality's own output is delivered. -/
+def tsigIdealOutcome {PK Msg Sig : Type} (st : IdealTsigState PK Msg)
+    (fOut : TsActionResult Sig) (blame : Option Nat) : TsActionResult Sig :=
+  match blame with
+  | some c =>
+    (match idealTsigRecordAbort st c with
+     | some _ => .abortedBy c
+     | none => .rejectedFraming)
+  | none => fOut
+
+private theorem tsigIdealOutcome_abort {PK Msg Sig : Type} (st : IdealTsigState PK Msg)
+    (fOut : TsActionResult Sig) (c : Nat) (hc : c ∈ st.corruptParties) :
+    tsigIdealOutcome st fOut (some c) = .abortedBy c := by
+  simp only [tsigIdealOutcome, idealTsigRecordAbort, hc, ↓reduceIte]
+
+/-- **Ideal execution of one session**: functionality, simulator and the same adversary. -/
+@[expose] def tsigIdealExec {R PK SK Msg Sig : Type} [CommRingOps R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (tape : TsigSimTape R pp.d pp.k) : Bool :=
+  let inp : TsigSimInput R PK Msg Sig :=
+    { pk := st.pk, msg := m, corrupt := corrupt, honest := honest, corruptVk := corruptVk,
+      corruptTags := corruptTags, fOut := tsigIdealFunctionality S st sk m approvers }
+  match ucSimulatorTsig pp inp tape with
+  | none => Adv.idle inp.fOut
+  | some view =>
+    Adv.verdict view
+      (tsigIdealOutcome st inp.fOut (ucSimulatorTsigBlame pp inp tape (Adv.openings view)))
+
+private theorem tsigRealExec_rejected {R PK SK Msg Sig : Type} [CommRingOps R]
+    (pp : TsigParams R Sig) (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (tape : TsigPadTape R pp.d pp.k) (macKey : Tower128 × Tower128)
+    (hV : validThresholdApproval st approvers = false) :
+    tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv
+      tape macKey = Adv.idle .rejectedQuorum := by
+  unfold tsigRealExec
+  rw [hV]
+  rfl
+
+private theorem tsigRealExec_approved {R PK SK Msg Sig : Type} [CommRingOps R]
+    (pp : TsigParams R Sig) (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (tape : TsigPadTape R pp.d pp.k) (macKey : Tower128 × Tower128)
+    (hV : validThresholdApproval st approvers = true) :
+    tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv
+      tape macKey =
+    Adv.verdict (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) tape)
+      (tsigRealOutcome pp corrupt.length
+        (tsigVerifierKey macKey corruptTags
+          (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) tape))
+        (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) tape)
+        (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) tape).outHonestOpenings
+        (Adv.openings
+          (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) tape))) := by
+  unfold tsigRealExec
+  rw [hV]
+  rfl
+
+private theorem tsigIdealExec_rejected {R PK SK Msg Sig : Type} [CommRingOps R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (tape : TsigSimTape R pp.d pp.k)
+    (hV : validThresholdApproval st approvers = false) :
+    tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv tape =
+      Adv.idle .rejectedQuorum := by
+  unfold tsigIdealExec tsigIdealFunctionality
+  rw [hV]
+  rfl
+
+private theorem tsigIdealExec_approved {R PK SK Msg Sig : Type} [CommRingOps R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (pads : TsigPadTape R pp.d pp.k) (macKey : Tower128 × Tower128)
+    (hV : validThresholdApproval st approvers = true) :
+    tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv ⟨pads, macKey⟩ =
+    Adv.verdict
+      (tsigSessionView pp corruptVk corrupt honest (fun _ => zero) (pp.encSig (S.sign sk m)) pads)
+      (tsigIdealOutcome st (.signed (S.sign sk m))
+        (tsigSimCheckOpenings
+          (tsigVerifierKey macKey corruptTags
+            (tsigSessionExpected pp corrupt (fun _ => zero) (pp.encSig (S.sign sk m)) pads))
+          0 (tsigSessionExpected pp corrupt (fun _ => zero) (pp.encSig (S.sign sk m)) pads)
+          (Adv.openings (tsigSessionView pp corruptVk corrupt honest (fun _ => zero)
+            (pp.encSig (S.sign sk m)) pads)))) := by
+  unfold tsigIdealExec tsigIdealFunctionality
+  rw [hV]
+  rfl
+
+/-- Without an accepted wrong share the real outcome equals the ideal one: the same blame, or the
+    reconstructed output equals the signature the functionality delivers. -/
+theorem tsig_outcomes_agree {R PK Msg Sig : Type} [LawfulCommRing R]
+    (pp : TsigParams R Sig) (st : IdealTsigState PK Msg)
+    (corruptVk : Nat → BdozVerifierKeys) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (w : Fin pp.k → R) (sig : Sig) (τ : TsigPadTape R pp.d pp.k)
+    (vk : BdozVerifierKeys) (ops : List BdozPairOpening)
+    (hNo : tsigFindForgery vk 0 (tsigSessionExpected pp corrupt w (pp.encSig sig) τ) ops = none) :
+    tsigRealOutcome pp corrupt.length vk (tsigSessionExpected pp corrupt w (pp.encSig sig) τ)
+        (tsigSessionView pp corruptVk corrupt honest w (pp.encSig sig) τ).outHonestOpenings ops =
+      tsigIdealOutcome st (.signed sig)
+        (tsigSimCheckOpenings vk 0 (tsigSessionExpected pp corrupt w (pp.encSig sig) τ) ops) := by
+  have hEq := tsigCheck_eq_simCheck_of_no_forgery vk _ 0 ops hNo
+  cases hS : tsigSimCheckOpenings vk 0 (tsigSessionExpected pp corrupt w (pp.encSig sig) τ) ops with
+  | some c =>
+    have hc : c ∈ st.corruptParties := by
+      rw [hIds]
+      obtain ⟨e, he, hec⟩ := List.mem_map.mp (tsigSimCheckOpenings_blame_mem vk _ 0 ops c hS)
+      rw [← hec]
+      exact tsigSessionExpected_ids pp corrupt w (pp.encSig sig) τ e he
+    rw [tsigRealOutcome_abort pp corrupt.length vk _ _ ops c (hEq.trans hS),
+        tsigIdealOutcome_abort st _ c hc]
+  | none =>
+    rw [tsigRealOutcome_signed pp corrupt.length vk _ _ ops (hEq.trans hS)]
+    have hTake := tsigSimCheck_none_shares pp.unemb vk
+      (corrupt.map (fun cx : Nat × R =>
+        (cx.1, pp.emb (RoundPoly.evalCoeffs (pp.encSig sig :: τ.out.1) cx.2)))) 0 _ ops hS
+    rw [List.length_map, List.map_map] at hTake
+    have hShares : (ops.take corrupt.length).map (fun op => pp.unemb op.shareX) =
+        corrupt.map (fun cx => RoundPoly.evalCoeffs (pp.encSig sig :: τ.out.1) cx.2) :=
+      hTake.trans (List.map_congr_left (fun cx _ => hEmb _))
+    have hLen : (pp.encSig sig :: τ.out.1).length ≤ pp.d + 1 := by
+      rw [List.length_cons, τ.out.2]
+      exact Nat.le_refl _
+    rw [hShares]
+    show TsActionResult.signed (pp.decSig (ringDot pp.lambdas
+      (honest.map (fun hx => RoundPoly.evalCoeffs (pp.encSig sig :: τ.out.1) hx.2) ++
+        corrupt.map (fun cx => RoundPoly.evalCoeffs (pp.encSig sig :: τ.out.1) cx.2)))) =
+      TsActionResult.signed sig
+    rw [← List.map_append, hRecon (pp.encSig sig :: τ.out.1) hLen, RoundPoly.evalCoeffs_cons,
+        LawfulCommRing.zero_mul, LawfulCommRing.add_zero, hDec]
+
+/-- **Hop 1 + Hop 2, pointwise (`tsig_real_eq_ideal_unless_forgery`)**: on every pad tape and
+    MAC key on which no wrong share is accepted, the real execution outputs exactly what the
+    ideal execution outputs on the rebalanced simulator tape. `hCircuit` states that the output
+    wire of the evaluated circuit carries the encoded signature. -/
+theorem tsig_real_eq_ideal_unless_forgery {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hCard : (corrupt.map Prod.snd).length + 1 ≤ pp.d + 1)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128)
+    (hNoForgery : tsigFindForgery
+      (tsigVerifierKey κ corruptTags
+        (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ)) 0
+      (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ)
+      (Adv.openings
+        (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) τ)) = none) :
+    tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv τ κ =
+    tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv
+      ⟨(tsigTapeRebalance inv pp.d pp.k (corrupt.map Prod.snd) hCard (wireVals sk m)).toFun τ, κ⟩ := by
+  cases hV : validThresholdApproval st approvers with
+  | false =>
+    rw [tsigRealExec_rejected pp wireVals outVal st corrupt honest corruptVk corruptTags sk m
+          approvers Adv τ κ hV,
+        tsigIdealExec_rejected S pp st corrupt honest corruptVk corruptTags sk m approvers Adv _ hV]
+  | true =>
+    obtain ⟨hView, hExp⟩ := tsigSession_rebalance pp inv hInv corruptVk corrupt honest hCard
+      hNonZero (wireVals sk m) (pp.encSig (S.sign sk m)) τ
+    rw [tsigRealExec_approved pp wireVals outVal st corrupt honest corruptVk corruptTags sk m
+          approvers Adv τ κ hV,
+        tsigIdealExec_approved S pp st corrupt honest corruptVk corruptTags sk m approvers Adv _ κ hV,
+        hView, hExp]
+    rw [hCircuit sk m] at hNoForgery ⊢
+    exact congrArg
+      (Adv.verdict (tsigSessionView pp corruptVk corrupt honest (wireVals sk m)
+        (pp.encSig (S.sign sk m)) τ))
+      (tsig_outcomes_agree pp st corruptVk corrupt honest hIds hDec hEmb hRecon (wireVals sk m)
+        (S.sign sk m) τ _ _ hNoForgery)
+
+/-- **Hop 2, reduction form (`tsig_real_eq_ideal_or_forgery`)**: on every tape and key, either
+    real and ideal executions agree, or one of the adversary's own openings is a MAC forgery
+    against the honest verifier's key and determines that key. -/
+theorem tsig_real_eq_ideal_or_forgery {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hCard : (corrupt.map Prod.snd).length + 1 ≤ pp.d + 1)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) :
+    tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv τ κ =
+      tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv
+        ⟨(tsigTapeRebalance inv pp.d pp.k (corrupt.map Prod.snd) hCard (wireVals sk m)).toFun τ, κ⟩ ∨
+    ∃ op ∈ Adv.openings
+        (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) τ),
+      BdozMacForgeryWitness
+        (tsigVerifierKey κ corruptTags
+          (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ))
+        (bdozViewOpening (fun s =>
+          (tsigShareAt (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ) s,
+            corruptTags s)) op.partyId) op ∧
+      κ = bdozKeyGuess (fun s =>
+          (tsigShareAt (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ) s,
+            corruptTags s)) op := by
+  cases hF : tsigFindForgery
+      (tsigVerifierKey κ corruptTags
+        (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ)) 0
+      (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ)
+      (Adv.openings
+        (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) τ)) with
+  | none =>
+    exact .inl (tsig_real_eq_ideal_unless_forgery S pp wireVals outVal hCircuit hDec hEmb inv hInv
+      st corrupt honest hIds hCard hNonZero hRecon corruptVk corruptTags sk m approvers Adv τ κ hF)
+  | some op =>
+    obtain ⟨hMem, hW, hKey⟩ := tsig_forgery_yields_key_guess κ corruptTags _ _ op hF
+    exact .inr ⟨op, hMem, hW, hKey⟩
+
+/-- **Hop 1, distribution form (`ucSimulatorTsig_hop1_perfect`)**: for an approved request and
+    any test `D` of the corrupt parties' incoming messages, the number of honest tapes on which
+    `D` accepts the real messages equals the number of simulator tapes on which `D` accepts the
+    simulator's output; the two distributions are identical. -/
+theorem ucSimulatorTsig_hop1_perfect {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (pk : PK) (corrupt honest : List (Nat × R))
+    (hCard : (corrupt.map Prod.snd).length + 1 ≤ pp.d + 1)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg)
+    (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
+    (macKey : Tower128 × Tower128) (D : Option (TsigAdvView R pp.k) → Bool) :
+    finSum Ct (fun i =>
+      if D (some (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m)
+        (padEnum.toFun i))) then 1 else 0) =
+    finSum Ct (fun i =>
+      if D (ucSimulatorTsig pp
+        ⟨pk, m, corrupt, honest, corruptVk, corruptTags, .signed (S.sign sk m)⟩
+        ⟨padEnum.toFun i, macKey⟩) then 1 else 0) := by
+  have hInvar := finSum_bijection_invariant padEnum
+    (tsigTapeRebalance inv pp.d pp.k (corrupt.map Prod.snd) hCard (wireVals sk m))
+    (fun τ => if D (ucSimulatorTsig pp
+        ⟨pk, m, corrupt, honest, corruptVk, corruptTags, .signed (S.sign sk m)⟩
+        ⟨τ, macKey⟩) then 1 else 0)
+  refine Eq.trans (finSum_congr (fun i => ?_)) hInvar
+  have hView := (tsigSession_rebalance pp inv hInv corruptVk corrupt honest hCard hNonZero
+    (wireVals sk m) (pp.encSig (S.sign sk m)) (padEnum.toFun i)).1
+  have hView' :
+      tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) (padEnum.toFun i) =
+      tsigSessionView pp corruptVk corrupt honest (fun _ => zero) (pp.encSig (S.sign sk m))
+        ((tsigTapeRebalance inv pp.d pp.k (corrupt.map Prod.snd) hCard (wireVals sk m)).toFun
+          (padEnum.toFun i)) := by
+    rw [hCircuit sk m]
+    exact hView.symm
+  exact congrArg (fun v => if D v then 1 else 0) (congrArg some hView')
+
+/-- **Uniform-preprocessing hybrid (`tsig_uniform_hybrid_gap`)**: over uniform pad tape and
+    `CK` distinct MAC keys, real and ideal executions differ on at most
+    `Ct * ((k + 1) * |corrupt|)` of the `Ct * CK` sample pairs. -/
+theorem tsig_uniform_hybrid_gap {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hCard : (corrupt.map Prod.snd).length + 1 ≤ pp.d + 1)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
+    (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128)
+    (hKeyInj : ∀ i j, keyDec i = keyDec j → i = j) :
+    natAbsDiff
+      (acceptPairs Ct CK padEnum.toFun keyDec (fun τ κ =>
+        tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv τ κ))
+      (acceptPairs Ct CK padEnum.toFun keyDec (fun τ κ =>
+        tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv ⟨τ, κ⟩)) ≤
+      Ct * ((pp.k + 1) * corrupt.length) := by
+  refine acceptPairs_gap_of_bijection padEnum
+    (tsigTapeRebalance inv pp.d pp.k (corrupt.map Prod.snd) hCard (wireVals sk m)) keyDec _ _
+    (fun τ κ => (tsigFindForgery
+      (tsigVerifierKey κ corruptTags
+        (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ)) 0
+      (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ)
+      (Adv.openings
+        (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) τ))).isSome)
+    _ ?_ ?_
+  · intro τ κ hb
+    exact tsig_real_eq_ideal_unless_forgery S pp wireVals outVal hCircuit hDec hEmb inv hInv
+      st corrupt honest hIds hCard hNonZero hRecon corruptVk corruptTags sk m approvers Adv τ κ
+      (isSome_false_eq_none _ hb)
+  · intro τ
+    exact Nat.le_trans
+      (tsigForgery_keys_le CK keyDec hKeyInj
+        (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ) 0
+        (Adv.openings
+          (tsigSessionView pp corruptVk corrupt honest (wireVals sk m) (outVal sk m) τ))
+        (fun s => (tsigShareAt
+          (tsigSessionExpected pp corrupt (wireVals sk m) (outVal sk m) τ) s, corruptTags s))
+        (fun i => by rw [Nat.zero_add]))
+      (Nat.le_of_eq (tsigSessionExpected_length pp corrupt (wireVals sk m) (outVal sk m) τ))
+
+/-- **Simulator Advantage Bound (`ucSimulatorTsig_advantage_bound`)**.
+    Real world: pad tape `prg s` for a uniform seed `s : Fin Cs`, honest MAC key `ot o` for a
+    uniform `o : Fin Co`. Ideal world: the simulator with a uniform tape (`Ct` pad tapes, `CK`
+    distinct MAC keys). The difference of the two acceptance probabilities, over the common
+    denominator `Cs * Co * Ct * CK`, is at most
+
+    * `q / CK` with `q = (k + 1) * |corrupt|` the number of corrupt openings (MAC term, proved by
+      counting keys),
+    * plus the advantage of the explicit reduction `prgReductionAdvNum` in telling `prg` from a
+      uniform tape,
+    * plus the advantage of the explicit reduction `otReductionAdvNum` in telling `ot` from a
+      uniform key. -/
+theorem ucSimulatorTsig_advantage_bound {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hThreshold : st.threshold = pp.d + 1)
+    (hBound : st.corruptParties.length + 1 ≤ st.threshold)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
+    (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128)
+    (hKeyInj : ∀ i j, keyDec i = keyDec j → i = j)
+    (Cs : Nat) (prg : Fin Cs → TsigPadTape R pp.d pp.k)
+    (Co : Nat) (ot : Fin Co → Tower128 × Tower128) :
+    let real := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv τ κ
+    let ideal := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv ⟨τ, κ⟩
+    natAbsDiff (acceptPairs Cs Co prg ot real * (Ct * CK))
+               (acceptPairs Ct CK padEnum.toFun keyDec ideal * (Cs * Co)) ≤
+      Cs * Co * (Ct * ((pp.k + 1) * corrupt.length))
+        + CK * prgReductionAdvNum Cs Ct Co prg padEnum.toFun ot real
+        + Cs * otReductionAdvNum Ct Co CK padEnum.toFun ot keyDec real := by
+  intro real ideal
+  have hCard : (corrupt.map Prod.snd).length + 1 ≤ pp.d + 1 := by
+    have h1 : st.corruptParties.length = corrupt.length := by rw [hIds, List.length_map]
+    rw [List.length_map, ← h1, ← hThreshold]
+    exact hBound
+  exact preprocessing_hybrid_bound Cs Ct Co CK prg padEnum.toFun ot keyDec real ideal _
+    (tsig_uniform_hybrid_gap S pp wireVals outVal hCircuit hDec hEmb inv hInv st corrupt honest
+      hIds hCard hNonZero hRecon corruptVk corruptTags sk m approvers Adv Ct padEnum CK keyDec
+      hKeyInj)
+
+/-- The same bound as an inequality of fractions over the common denominator. -/
+theorem ucSimulatorTsig_advantage_ratLe {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hThreshold : st.threshold = pp.d + 1)
+    (hBound : st.corruptParties.length + 1 ≤ st.threshold)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
+    (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128)
+    (hKeyInj : ∀ i j, keyDec i = keyDec j → i = j)
+    (Cs : Nat) (prg : Fin Cs → TsigPadTape R pp.d pp.k)
+    (Co : Nat) (ot : Fin Co → Tower128 × Tower128)
+    (hDen : 0 < Cs * Co * (Ct * CK)) :
+    let real := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv τ κ
+    let ideal := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv ⟨τ, κ⟩
+    ratLe
+      (natAbsDiff (acceptPairs Cs Co prg ot real * (Ct * CK))
+                  (acceptPairs Ct CK padEnum.toFun keyDec ideal * (Cs * Co)),
+        Cs * Co * (Ct * CK))
+      (Cs * Co * (Ct * ((pp.k + 1) * corrupt.length))
+          + CK * prgReductionAdvNum Cs Ct Co prg padEnum.toFun ot real
+          + Cs * otReductionAdvNum Ct Co CK padEnum.toFun ot keyDec real,
+        Cs * Co * (Ct * CK)) := by
+  intro real ideal
+  exact ⟨hDen, hDen, Nat.mul_le_mul_right _
+    (ucSimulatorTsig_advantage_bound S pp wireVals outVal hCircuit hDec hEmb inv hInv st corrupt
+      honest hIds hThreshold hBound hNonZero hRecon corruptVk corruptTags sk m approvers Adv Ct
+      padEnum CK keyDec hKeyInj Cs prg Co ot)⟩
+
+/-- **Hop 3, break witness (`ucSimulatorTsig_distinguisher_breaks_generator`)**: a distinguishing
+    advantage above the MAC term gives non-zero advantage to one of the two explicit reductions. -/
+theorem ucSimulatorTsig_distinguisher_breaks_generator {R PK SK Msg Sig : Type} [LawfulCommRing R]
+    (S : AbstractSigScheme PK SK Msg Sig) (pp : TsigParams R Sig)
+    (wireVals : SK → Msg → Fin pp.k → R) (outVal : SK → Msg → R)
+    (hCircuit : ∀ sk m, outVal sk m = pp.encSig (S.sign sk m))
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (inv : R → R) (hInv : ∀ x : R, x ≠ zero → mul x (inv x) = one)
+    (st : IdealTsigState PK Msg) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hThreshold : st.threshold = pp.d + 1)
+    (hBound : st.corruptParties.length + 1 ≤ st.threshold)
+    (hNonZero : ∀ cx ∈ corrupt, cx.2 ≠ zero)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (corruptVk : Nat → BdozVerifierKeys) (corruptTags : Nat → Tower128 × Tower128)
+    (sk : SK) (m : Msg) (approvers : List Nat) (Adv : TsigAdversary R Sig pp.k)
+    (Ct : Nat) (padEnum : SimpleEquiv (Fin Ct) (TsigPadTape R pp.d pp.k))
+    (CK : Nat) (keyDec : Fin CK → Tower128 × Tower128)
+    (hKeyInj : ∀ i j, keyDec i = keyDec j → i = j)
+    (Cs : Nat) (prg : Fin Cs → TsigPadTape R pp.d pp.k)
+    (Co : Nat) (ot : Fin Co → Tower128 × Tower128) :
+    let real := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigRealExec pp wireVals outVal st corrupt honest corruptVk corruptTags sk m approvers Adv τ κ
+    let ideal := fun (τ : TsigPadTape R pp.d pp.k) (κ : Tower128 × Tower128) =>
+      tsigIdealExec S pp st corrupt honest corruptVk corruptTags sk m approvers Adv ⟨τ, κ⟩
+    Cs * Co * (Ct * ((pp.k + 1) * corrupt.length)) <
+        natAbsDiff (acceptPairs Cs Co prg ot real * (Ct * CK))
+                   (acceptPairs Ct CK padEnum.toFun keyDec ideal * (Cs * Co)) →
+    0 < prgReductionAdvNum Cs Ct Co prg padEnum.toFun ot real ∨
+    0 < otReductionAdvNum Ct Co CK padEnum.toFun ot keyDec real := by
+  intro real ideal hDist
+  have hCard : (corrupt.map Prod.snd).length + 1 ≤ pp.d + 1 := by
+    have h1 : st.corruptParties.length = corrupt.length := by rw [hIds, List.length_map]
+    rw [List.length_map, ← h1, ← hThreshold]
+    exact hBound
+  exact preprocessing_break_witness Cs Ct Co CK prg padEnum.toFun ot keyDec real ideal _
+    (tsig_uniform_hybrid_gap S pp wireVals outVal hCircuit hDec hEmb inv hInv st corrupt honest
+      hIds hCard hNonZero hRecon corruptVk corruptTags sk m approvers Adv Ct padEnum CK keyDec
+      hKeyInj) hDist
+
+/-- Negative regression for the real verifier: if the first opening is a dealt opening with a
+    shifted tag, the real execution aborts and blames the first expected sender. -/
+theorem tsigRealOutcome_rejects_tampered_tag {R Sig : Type} [CommRingOps R]
+    (pp : TsigParams R Sig) (nc : Nat) (alpha : Tower128 × Tower128)
+    (tags : Nat → Tower128 × Tower128) (e : Nat × Tower128) (es : List (Nat × Tower128))
+    (honestOut : List R) (ops : List BdozPairOpening)
+    (delta : Tower128) (hDelta : delta ≠ towerZero 7) :
+    tsigRealOutcome pp nc (tsigVerifierKey alpha tags (e :: es)) (e :: es) honestOut
+      ({ bdozViewOpening (fun s => (tsigShareAt (e :: es) s, tags s)) 0 with
+          mac0 := towerAdd 7 (tags 0).1 delta } :: ops) = .abortedBy e.1 := by
+  apply tsigRealOutcome_abort
+  rw [tsigCheckOpenings_cons]
+  have hRej := bdoz_tag_tamper_rejected (tsigVerifierKey alpha tags (e :: es))
+    (bdozViewOpening (fun s => (tsigShareAt (e :: es) s, tags s)) 0)
+    (bdozKeyFromView_accepts_view alpha (fun s => (tsigShareAt (e :: es) s, tags s)) 0)
+    delta hDelta
+  have hAcc : tsigOpAccepted (tsigVerifierKey alpha tags (e :: es)) 0
+      { bdozViewOpening (fun s => (tsigShareAt (e :: es) s, tags s)) 0 with
+          mac0 := towerAdd 7 (tags 0).1 delta } = false := by
+    unfold tsigOpAccepted
+    rw [show verifyBdozPairMac (tsigVerifierKey alpha tags (e :: es))
+          { bdozViewOpening (fun s => (tsigShareAt (e :: es) s, tags s)) 0 with
+              mac0 := towerAdd 7 (tags 0).1 delta } = false from hRej, Bool.and_false]
+  rw [hAcc]
+  rfl
+
+/-- The openings a corrupt party sends when it follows the protocol: its dealt share and tags,
+    for `n` consecutive positions starting at `s`. -/
+def tsigDealtOpenings (hon : Nat → Tower128 × Tower128 × Tower128) : Nat → Nat → List BdozPairOpening
+  | _, 0 => []
+  | s, n + 1 => bdozViewOpening hon s :: tsigDealtOpenings hon (s + 1) n
+
+private theorem tsigDealtOpenings_pass (alpha : Tower128 × Tower128) :
+    ∀ (es : List (Nat × Tower128)) (s : Nat) (hon : Nat → Tower128 × Tower128 × Tower128),
+      (∀ i, (hon (s + i)).1 = tsigShareAt es i) →
+      tsigSimCheckOpenings (bdozKeyFromView alpha hon) s es
+          (tsigDealtOpenings hon s es.length) = none ∧
+      tsigFindForgery (bdozKeyFromView alpha hon) s es
+          (tsigDealtOpenings hon s es.length) = none
+  | [], _, _, _ => ⟨rfl, rfl⟩
+  | e :: es, s, hon, hHon => by
+    have h0 : (hon s).1 = e.2 := hHon 0
+    have hAcc : tsigOpAccepted (bdozKeyFromView alpha hon) s (bdozViewOpening hon s) = true := by
+      unfold tsigOpAccepted
+      rw [bdozKeyFromView_accepts_view, Bool.and_true]
+      exact beq_self_eq_true s
+    have hEq : ((bdozViewOpening hon s).shareX == e.2) = true := by
+      show ((hon s).1 == e.2) = true
+      rw [h0]
+      exact beq_self_eq_true _
+    obtain ⟨ih1, ih2⟩ := tsigDealtOpenings_pass alpha es (s + 1) hon (fun i => by
+      have h := hHon (i + 1)
+      rw [show s + (i + 1) = s + 1 + i by omega] at h
+      exact h)
+    refine ⟨?_, ?_⟩
+    · show tsigSimCheckOpenings (bdozKeyFromView alpha hon) s (e :: es)
+        (bdozViewOpening hon s :: tsigDealtOpenings hon (s + 1) es.length) = none
+      rw [tsigSimCheckOpenings_cons, hAcc, hEq]
+      exact ih1
+    · show tsigFindForgery (bdozKeyFromView alpha hon) s (e :: es)
+        (bdozViewOpening hon s :: tsigDealtOpenings hon (s + 1) es.length) = none
+      rw [tsigFindForgery_cons, hAcc, hEq]
+      exact ih2
+
+/-- **Completeness of the real execution (`tsigRealOutcome_dealt_openings_sign`)**: when the
+    corrupt parties send their dealt openings, the honest parties reconstruct exactly the
+    signature carried by the output wire, under every MAC key and every pad tape. -/
+theorem tsigRealOutcome_dealt_openings_sign {R PK Msg Sig : Type} [LawfulCommRing R]
+    (pp : TsigParams R Sig) (st : IdealTsigState PK Msg)
+    (corruptVk : Nat → BdozVerifierKeys) (corrupt honest : List (Nat × R))
+    (hIds : st.corruptParties = corrupt.map Prod.fst)
+    (hDec : ∀ s, pp.decSig (pp.encSig s) = s)
+    (hEmb : ∀ r, pp.unemb (pp.emb r) = r)
+    (hRecon : ∀ coeffs : List R, coeffs.length ≤ pp.d + 1 →
+      ringDot pp.lambdas ((honest ++ corrupt).map (fun hx => RoundPoly.evalCoeffs coeffs hx.2)) =
+        RoundPoly.evalCoeffs coeffs zero)
+    (w : Fin pp.k → R) (sig : Sig) (τ : TsigPadTape R pp.d pp.k)
+    (alpha : Tower128 × Tower128) (tags : Nat → Tower128 × Tower128) :
+    tsigRealOutcome pp corrupt.length
+        (tsigVerifierKey alpha tags (tsigSessionExpected pp corrupt w (pp.encSig sig) τ))
+        (tsigSessionExpected pp corrupt w (pp.encSig sig) τ)
+        (tsigSessionView pp corruptVk corrupt honest w (pp.encSig sig) τ).outHonestOpenings
+        (tsigDealtOpenings
+          (fun s => (tsigShareAt (tsigSessionExpected pp corrupt w (pp.encSig sig) τ) s, tags s))
+          0 (tsigSessionExpected pp corrupt w (pp.encSig sig) τ).length) = .signed sig := by
+  obtain ⟨hPass, hNo⟩ := tsigDealtOpenings_pass alpha
+    (tsigSessionExpected pp corrupt w (pp.encSig sig) τ) 0
+    (fun s => (tsigShareAt (tsigSessionExpected pp corrupt w (pp.encSig sig) τ) s, tags s))
+    (fun i => by rw [Nat.zero_add])
+  have hAgree := tsig_outcomes_agree pp st corruptVk corrupt honest hIds hDec hEmb hRecon w sig τ
+    (tsigVerifierKey alpha tags (tsigSessionExpected pp corrupt w (pp.encSig sig) τ)) _ hNo
+  rw [hAgree]
+  have hPass' : tsigSimCheckOpenings
+      (tsigVerifierKey alpha tags (tsigSessionExpected pp corrupt w (pp.encSig sig) τ)) 0
+      (tsigSessionExpected pp corrupt w (pp.encSig sig) τ)
+      (tsigDealtOpenings
+        (fun s => (tsigShareAt (tsigSessionExpected pp corrupt w (pp.encSig sig) τ) s, tags s))
+        0 (tsigSessionExpected pp corrupt w (pp.encSig sig) τ).length) = none := hPass
+  rw [hPass']
+  rfl
+
+end UcSimulator
+
+/-! ## 6. Secret-Shared Beaver Gate Evaluation & Non-Vacuous 128-Bit `TowerElem 7` (`GF(2^128)`) UC Bound
+
+Replaces cleartext-`sk` `wireVals`/`outVal` assumptions and vacuous `GF(4)` (`512/512 = 1`) instantiation with:
+1. **Secret-Shared Non-Linear Beaver Gate Evaluation (`SharedBeaverSessionVault`, `evalPartyBeaverOutShare`,
+   `evalSharedBeaverCircuit_reconstructs`)**:
+   No party holds cleartext `sk`! Parties hold only Shamir shares of `sk` and a degree-`≤ d` Beaver
+   multiplication triple `(a, b, c = a * b)` to evaluate the quadratic circuit `sk * (sk + m)` locally
+   on shares; `evalSharedBeaverCircuit_reconstructs` **proves** `hCircuit` from ring axioms + Shamir
+   linearity (`0` cleartext `sk` in party code!).
+2. **Full 128-Bit `TowerElem 7` (`GF(2^128)` = `Tower128`) Concrete Non-Vacuous Instantiation
+   (`tower128Params`, `ucSimulatorTsig_advantage_bound_tower128`, `ucSimulatorTsig_nonvacuous_sub_unity_tower128`)**:
+   Enumerates the full `7 × 128 = 896`-bit pad space `Fin ((2^128)^7)` and full `256`-bit 2-lane BDOZ MAC
+   key space `Fin ((2^128) * (2^128))` without `decide` blowups, proving a concrete rational advantage bound
+   `(3, 2 ^ 256)` with **explicitly proved strict sub-unity `3 < (2 ^ 128) * (2 ^ 128)`** (`< 2^{-254} < 1`)! -/
+
+section TsigSharedBeaverAndTower128
+open CommRingOps
+
+/-- Distributed Shamir vault for a quadratic threshold-PRF circuit `sign(sk, m) = sk * (sk + m)`:
+    each party at evaluation point `x ≠ 0` receives ONLY its local shares `(sk_x, a_x, b_x, c_x)`
+    evaluated from degree-`≤ d` Shamir polynomials; no party ever receives cleartext `sk`! -/
+structure SharedBeaverSessionVault (R : Type) (d : Nat) where
+  skVal : R
+  skPad : ShamirPadPoly R d
+  aVal  : R
+  aPad  : ShamirPadPoly R d
+  bVal  : R
+  bPad  : ShamirPadPoly R d
+  cPad  : ShamirPadPoly R d
+
+/-- Local Shamir share tuple `(sk_x, a_x, b_x, c_x)` held by party at public coordinate `x : R`
+    when the Beaver triple satisfies `c = mul aVal bVal`. -/
+def dealPartyBeaverShares {R : Type} [CommRingOps R] {d : Nat}
+    (vault : SharedBeaverSessionVault R d) (x : R) : R × R × R × R :=
+  (RoundPoly.evalCoeffs (vault.skVal :: vault.skPad.1) x,
+   RoundPoly.evalCoeffs (vault.aVal :: vault.aPad.1) x,
+   RoundPoly.evalCoeffs (vault.bVal :: vault.bPad.1) x,
+   RoundPoly.evalCoeffs (mul vault.aVal vault.bVal :: vault.cPad.1) x)
+
+/-- Local cut-wire share computed by a party from its local `(sk_x, a_x, b_x)` shares and public `m`:
+    wire `0` masks `sk - a`; wire `1` masks `(sk + m) - b`. -/
+def evalPartyCutWireShares {R : Type} [CommRingOps R]
+    (partySh : R × R × R × R) (m : R) : R × R :=
+  (sub partySh.1 partySh.2.1, sub (add partySh.1 m) partySh.2.2.1)
+
+/-- Local Beaver linearized output share computed by each party purely from opened masked differences
+    `(u, v)` and its private Beaver shares `(a_x, b_x, c_x)` — **zero cleartext `sk` access!** -/
+def evalPartyBeaverOutShare {R : Type} [CommRingOps R]
+    (u v : R) (partySh : R × R × R × R) : R :=
+  let a_x := partySh.2.1
+  let b_x := partySh.2.2.1
+  let c_x := partySh.2.2.2
+  add (mul u v) (add (mul u b_x) (add (mul v a_x) c_x))
+
+private def polyZipAdd {R : Type} [CommRingOps R] : List R → List R → List R
+  | [], ys => ys
+  | x :: xs, [] => x :: xs
+  | x :: xs, y :: ys => add x y :: polyZipAdd xs ys
+
+private theorem polyZipAdd_length_le {R : Type} [CommRingOps R] :
+    ∀ (xs ys : List R) (n : Nat), xs.length ≤ n → ys.length ≤ n → (polyZipAdd xs ys).length ≤ n
+  | [], ys, _, _, hy => hy
+  | _ :: _, [], _, hx, _ => hx
+  | _ :: xs, _ :: _, 0, hx, _ => by simp at hx
+  | _ :: xs, _ :: ys, n + 1, hx, hy => by
+    simp only [polyZipAdd, List.length_cons] at hx hy ⊢
+    exact Nat.succ_le_succ (polyZipAdd_length_le xs ys n (Nat.le_of_succ_le_succ hx) (Nat.le_of_succ_le_succ hy))
+
+private theorem evalCoeffs_polyZipAdd {R : Type} [LawfulCommRing R] :
+    ∀ (xs ys : List R) (x : R),
+      RoundPoly.evalCoeffs (polyZipAdd xs ys) x =
+      add (RoundPoly.evalCoeffs xs x) (RoundPoly.evalCoeffs ys x)
+  | [], ys, x => by simp [polyZipAdd, RoundPoly.evalCoeffs, LawfulCommRing.zero_add]
+  | _ :: _, [], x => by simp [polyZipAdd, RoundPoly.evalCoeffs, LawfulCommRing.add_zero]
+  | a :: xs, b :: ys, x => by
+    simp only [polyZipAdd, RoundPoly.evalCoeffs_cons, evalCoeffs_polyZipAdd xs ys x]
+    rw [LawfulCommRing.left_distrib]
+    have hAssoc1 := LawfulCommRing.add_assoc a b (add (mul x (RoundPoly.evalCoeffs xs x)) (mul x (RoundPoly.evalCoeffs ys x)))
+    have hAssoc2 := LawfulCommRing.add_assoc a (mul x (RoundPoly.evalCoeffs xs x)) (add b (mul x (RoundPoly.evalCoeffs ys x)))
+    have hMid : add b (add (mul x (RoundPoly.evalCoeffs xs x)) (mul x (RoundPoly.evalCoeffs ys x))) =
+        add (mul x (RoundPoly.evalCoeffs xs x)) (add b (mul x (RoundPoly.evalCoeffs ys x))) := by
+      rw [← LawfulCommRing.add_assoc, LawfulCommRing.add_comm b, LawfulCommRing.add_assoc]
+    rw [hAssoc1, hMid, ← hAssoc2]
+
+private theorem evalCoeffs_scalarMul {R : Type} [LawfulCommRing R] (s : R) :
+    ∀ (xs : List R) (x : R),
+      RoundPoly.evalCoeffs (xs.map (mul s)) x = mul s (RoundPoly.evalCoeffs xs x)
+  | [], _ => by simp [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero]
+  | a :: xs, x => by
+    simp only [List.map_cons, RoundPoly.evalCoeffs_cons, evalCoeffs_scalarMul s xs x]
+    rw [LawfulCommRing.left_distrib, ← LawfulCommRing.mul_assoc,
+        LawfulCommRing.mul_comm x s, LawfulCommRing.mul_assoc]
+
+/-- **Beaver Shared Gate Reconstruction Theorem (`evalSharedBeaverCircuit_reconstructs`)**:
+    Proves `hCircuit` constructively from Shamir linearity + Beaver identity:
+    1. Reconstructing the parties' local cut-wire shares yields `(u, v) = (sk - a, (sk + m) - b)`;
+    2. Reconstructing the parties' local `evalPartyBeaverOutShare u v` shares yields the exact
+       non-linear circuit output `mul sk (add sk m)` without any party ever holding `sk`! -/
