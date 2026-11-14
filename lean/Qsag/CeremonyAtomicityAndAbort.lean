@@ -68,6 +68,7 @@ public import Qsag.SimulationSpine
 public import Qsag.Goldilocks
 public import Qsag.BinaryTower
 public import Qsag.UcGames
+public import Qsag.PosixCrashWal
 public import Qsag.Tactic.AssuranceKit
 
 import all Qsag.Constructive
@@ -208,6 +209,14 @@ def tearActiveWalSlot {S : Type} (wal : TwoSlotWal S) : TwoSlotWal S :=
   else
     { wal with slotOdd := invalidateWalSlot wal.slotOdd, volatileStage := none }
 
+/-- Media damage to the slot that is NOT the active one (bit-rot or a bad block on the idle
+    older snapshot), together with loss of anything staged. The active snapshot is untouched. -/
+def damageIdleWalSlot {S : Type} (wal : TwoSlotWal S) : TwoSlotWal S :=
+  if activeWalGen wal % 2 = 0 then
+    { wal with slotOdd := invalidateWalSlot wal.slotOdd, volatileStage := none }
+  else
+    { wal with slotEven := invalidateWalSlot wal.slotEven, volatileStage := none }
+
 /-- Per-ledger non-atomic OS crash behavior on sudden `PowerLossCrash`:
     - `dropVolatile`: uncommitted staging buffer is lost cleanly;
     - `tornInactiveWrite`: uncommitted write partially hits the inactive slot with invalid MAC;
@@ -220,6 +229,7 @@ inductive WalCrashBehavior where
   | tornInactiveWrite
   | flushedBeforePowerLoss
   | tornActiveSlot
+  | idleSlotDamaged
   deriving Repr, DecidableEq
 
 /-- Independent single-ledger crash recovery on `PowerLossCrash`. -/
@@ -235,6 +245,7 @@ def crashRecoverWal {S : Type} (mode : WalCrashBehavior) (wal : TwoSlotWal S) : 
     | none => wal
     | some (g, p) => writeDurableWalSlot wal g p true
   | .tornActiveSlot => tearActiveWalSlot wal
+  | .idleSlotDamaged => damageIdleWalSlot wal
 
 /-- `walRecoverable` is exactly "fail-closed recovery returns a snapshot". -/
 theorem walRecoverable_eq_isSome {S : Type} (wal : TwoSlotWal S) :
@@ -690,6 +701,65 @@ private theorem tearActiveWalSlot_inv {S : Type} {rel : S → S → Prop} {inv :
       rw [hC, hC']
       exact ⟨walInv_of_shape hShape' hpp rfl, hRefl pp⟩
 
+private theorem damageIdleWalSlot_stage_none {S : Type} (wal : TwoSlotWal S) :
+    (damageIdleWalSlot wal).volatileStage = none := by
+  unfold damageIdleWalSlot
+  split <;> rfl
+
+/-- Damage to the idle slot never fails the ledger: the active snapshot stays the recovered one
+    and becomes the rollback floor. -/
+private theorem damageIdleWalSlot_inv {S : Type} {rel : S → S → Prop} {inv : S → Prop}
+    {wal : TwoSlotWal S} (hRefl : ∀ x, rel x x) (hWal : TwoSlotWalInv rel inv wal) :
+    TwoSlotWalInv rel inv (damageIdleWalSlot wal) ∧
+    rel (checkpointedWalPayload wal) (checkpointedWalPayload (damageIdleWalSlot wal)) := by
+  obtain ⟨g, p, hp, hShape⟩ := hWal.shape
+  obtain ⟨hRec, _, _, hFloor⟩ := walShape_view hShape
+  have hGen : activeWalGen wal = g := by simp [activeWalGen, hRec]
+  have hFloorRel : rel (checkpointedWalPayload wal) p := by
+    rcases hFloor with hF | ⟨pp, hF, _, hR, _⟩
+    · have hC : checkpointedWalPayload wal = p := by simp [checkpointedWalPayload, hF]
+      rw [hC]; exact hRefl p
+    · have hC : checkpointedWalPayload wal = pp := by simp [checkpointedWalPayload, hF]
+      rw [hC]; exact hR
+  rcases hShape with ⟨hE, _⟩ | ⟨hO, _⟩
+  · obtain ⟨_, _, hpar⟩ := walSlotUsable_inv hE
+    have hT : damageIdleWalSlot wal =
+        { wal with slotOdd := invalidateWalSlot wal.slotOdd, volatileStage := none } := by
+      simp [damageIdleWalSlot, hGen, hpar]
+    rw [hT]
+    have hTorn : walSlotUsable wal.anchorGen 1 (invalidateWalSlot wal.slotOdd) = none :=
+      walSlotUsable_invalidate _ _ _
+    have hOlder : WalOlderOk rel inv g p
+        (walSlotUsable wal.anchorGen 1 (invalidateWalSlot wal.slotOdd)) := by
+      rw [hTorn]; exact True.intro
+    have hShape' : WalShape rel inv
+        { wal with slotOdd := invalidateWalSlot wal.slotOdd, volatileStage := none } g p :=
+      Or.inl ⟨hE, hOlder⟩
+    have hC' : checkpointedWalPayload
+        { wal with slotOdd := invalidateWalSlot wal.slotOdd, volatileStage := none } = p := by
+      simp [checkpointedWalPayload, rollbackFloorWal, hE, hTorn]
+    rw [hC']
+    exact ⟨walInv_of_shape hShape' hp rfl, hFloorRel⟩
+  · obtain ⟨_, _, hpar⟩ := walSlotUsable_inv hO
+    have hNe : ¬ g % 2 = 0 := by omega
+    have hT : damageIdleWalSlot wal =
+        { wal with slotEven := invalidateWalSlot wal.slotEven, volatileStage := none } := by
+      simp [damageIdleWalSlot, hGen, hNe]
+    rw [hT]
+    have hTorn : walSlotUsable wal.anchorGen 0 (invalidateWalSlot wal.slotEven) = none :=
+      walSlotUsable_invalidate _ _ _
+    have hOlder : WalOlderOk rel inv g p
+        (walSlotUsable wal.anchorGen 0 (invalidateWalSlot wal.slotEven)) := by
+      rw [hTorn]; exact True.intro
+    have hShape' : WalShape rel inv
+        { wal with slotEven := invalidateWalSlot wal.slotEven, volatileStage := none } g p :=
+      Or.inr ⟨hO, hOlder⟩
+    have hC' : checkpointedWalPayload
+        { wal with slotEven := invalidateWalSlot wal.slotEven, volatileStage := none } = p := by
+      simp [checkpointedWalPayload, rollbackFloorWal, hO, hTorn]
+    rw [hC']
+    exact ⟨walInv_of_shape hShape' hp rfl, hFloorRel⟩
+
 private theorem crashRecoverWal_stage_none {S : Type} (mode : WalCrashBehavior)
     (wal : TwoSlotWal S) : (crashRecoverWal mode wal).volatileStage = none := by
   cases mode with
@@ -705,6 +775,7 @@ private theorem crashRecoverWal_stage_none {S : Type} (mode : WalCrashBehavior)
     | none => exact hS
     | some gp => exact writeDurableWalSlot_stage_none _ _ _ _
   | tornActiveSlot => exact tearActiveWalSlot_stage_none wal
+  | idleSlotDamaged => exact damageIdleWalSlot_stage_none wal
 
 /-- Single-ledger crash recovery under EVERY crash mode: the ledger fails closed, or it stays
     healthy and its rollback floor only moves forward along `rel`. -/
@@ -738,6 +809,7 @@ private theorem crashRecoverWal_inv {S : Type} {rel : S → S → Prop} {inv : S
       rcases hSt with ⟨rfl, hRel, hNextInv⟩
       exact Or.inr (writeDurableWalSlot_inv hRefl hWal pNext true (fun _ => ⟨hRel, hNextInv⟩))
   | tornActiveSlot => exact tearActiveWalSlot_inv hRefl hWal
+  | idleSlotDamaged => exact Or.inr (damageIdleWalSlot_inv hRefl hWal)
 
 private theorem walUsable_none_of_dead {S : Type} {wal : TwoSlotWal S}
     (h : walRecoverable wal = false) :
@@ -771,6 +843,40 @@ private theorem crashRecoverWal_dead_stays_dead {S : Type} (mode : WalCrashBehav
     split
     · simp [walRecoverable, walSlotUsable_invalidate, hO]
     · simp [walRecoverable, walSlotUsable_invalidate, hE]
+  | idleSlotDamaged =>
+    show walRecoverable (damageIdleWalSlot wal) = false
+    unfold damageIdleWalSlot
+    split
+    · simp [walRecoverable, walSlotUsable_invalidate, hE]
+    · simp [walRecoverable, walSlotUsable_invalidate, hO]
+
+/-- **Whole-device rollback below the external checkpoint fails closed**: if both slot files are
+    replaced by ANY contents whose generations lie below `anchorGen` (a restored disk image,
+    whatever it holds and however it authenticates), no slot is usable and the ledger does not
+    open. The anchor is held outside the rollback domain, so it does not move. -/
+theorem whole_device_rollback_below_anchor_fails_closed {S : Type} (wal : TwoSlotWal S)
+    (oldEven oldOdd : Option (WalSlot S))
+    (hEven : ∀ s, oldEven = some s → s.generation < wal.anchorGen)
+    (hOdd : ∀ s, oldOdd = some s → s.generation < wal.anchorGen) :
+    recoverTwoSlotWal
+      { wal with slotEven := oldEven, slotOdd := oldOdd, volatileStage := none } = none ∧
+    walRecoverable
+      { wal with slotEven := oldEven, slotOdd := oldOdd, volatileStage := none } = false := by
+  have hU : ∀ (par : Nat) (o : Option (WalSlot S)),
+      (∀ s, o = some s → s.generation < wal.anchorGen) →
+      walSlotUsable wal.anchorGen par o = none := by
+    intro par o h
+    cases o with
+    | none => rfl
+    | some s =>
+      have hLt := h s rfl
+      have hNle : ¬ wal.anchorGen ≤ s.generation := by omega
+      simp [walSlotUsable, hNle]
+  have h0 := hU 0 oldEven hEven
+  have h1 := hU 1 oldOdd hOdd
+  refine ⟨?_, ?_⟩
+  · simp [recoverTwoSlotWal, h0, h1]
+  · simp [walRecoverable, h0, h1]
 
 /-! ### Durable Payloads of the Five Host Ledgers -/
 
@@ -972,6 +1078,7 @@ inductive MultiLedgerEvent where
   | StageLeafOrFtsReserve (ceremonyId : Nat) (epochOrIndex : Nat) (msgDigest : Digest256)
   | FlushLeafWal (ceremonyId : Nat)
   | AdvancePolicyWindow (nextWindow : Nat)
+  | FlushPolicyWindowWal
   | LatchPoisonFault (reasonCode : UInt64)
   | FlushPoisonWal
   | SaveCheckpoint (ledger : HostLedgerId)
@@ -1125,7 +1232,12 @@ def stepOperationalHost (host : MultiLedgerHostState) (ev : MultiLedgerEvent) :
     let pol := activeWalPayload host.policyWindowLedger
     if host.policyWindowLedger.volatileStage.isNone && decide (pol.currentWindow < nextWin) then
       let nextPol : PolicyWindowLedger := { pol with currentWindow := nextWin }
-      some { host with policyWindowLedger := flushTwoSlotWal (stageTwoSlotWal host.policyWindowLedger nextPol) }
+      some { host with policyWindowLedger := stageTwoSlotWal host.policyWindowLedger nextPol }
+    else
+      none
+  | .FlushPolicyWindowWal =>
+    if host.policyWindowLedger.volatileStage.isSome then
+      some { host with policyWindowLedger := flushTwoSlotWal host.policyWindowLedger }
     else
       none
   | .LatchPoisonFault reasonCode =>
@@ -1500,8 +1612,18 @@ private theorem stepOperationalHost_preserves_inv {policyCap : Nat}
       have hPolRel : policyRel pol nextPol := ⟨rfl, Nat.le_of_lt hCond.2, fun _ hm => hm⟩
       have hNextInv : policyInv nextPol := walInv_active hInv.policy_wal
       obtain ⟨hStInv, hPaySt⟩ := stageTwoSlotWal_inv hInv.policy_wal hPolRel hNextInv
-      obtain ⟨hFlInv, _, hFlRel⟩ := flushTwoSlotWal_inv policyRel_refl hStInv
-      rw [hPaySt] at hFlRel
+      refine ⟨hInv.poison_wal, hStInv, hInv.preproc_wal, hInv.leaf_wal, ?_, ?_⟩
+      · dsimp only; rw [hPaySt]; exact hInv.cap_fixed
+      · intro w hw
+        dsimp only
+        rw [hPaySt]
+        exact hInv.wire_backed w hw
+    · cases hStep
+  | FlushPolicyWindowWal =>
+    simp only [stepOperationalHost] at hStep
+    split at hStep
+    · injection hStep with hEq; subst hEq
+      obtain ⟨hFlInv, _, hFlRel⟩ := flushTwoSlotWal_inv policyRel_refl hInv.policy_wal
       refine ⟨hInv.poison_wal, hFlInv, hInv.preproc_wal, hInv.leaf_wal, ?_, ?_⟩
       · exact hFlRel.1.trans hInv.cap_fixed
       · intro w hw
