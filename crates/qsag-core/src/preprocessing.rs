@@ -849,6 +849,20 @@ const RLWE_ZKPOK_CHAL_MASK: u32 = (1u32 << RLWE_ZKPOK_CHAL_BITS) - 1;
 /// with no mask-indexed table access. Each exponential evaluation has absolute
 /// error $< 64 / 2^{192}$. Expected acceptance is $\approx 0.735 / 24 \approx 1 / 32.6$,
 /// and all rejections restart the entire joint real-branch transcript.
+///
+/// Bimodal rejection (Ducas–Durmus–Lepoint–Lyubashevsky, BLISS: `z = y + b v` with a secret
+/// sign `b` and acceptance `1 / (M exp(-|v|^2 / 2 sigma^2) cosh(<z, v> / sigma^2))`) would give
+/// `M = exp(17_888 / 980_000) < 1.02` here, but it does not apply to this statement. The sign
+/// must cancel in the verification equation, which BLISS obtains from a homogeneous relation
+/// `A S = q (mod 2q)`; for `Y = a s + e` that means proving `[2a | 2 | q - 2Y] (s, e, 1) = q
+/// (mod 2q)` with a third response `z_3 = y_3 + b c`. Two accepting transcripts then agree only
+/// modulo `q`-multiples of the challenge difference: the extractor learns
+/// `a ds + de = Y dz_3 (mod q)` for a short `dz_3` with `dz_3 = c - c' (mod 2)` that the prover
+/// chooses, not for `c - c'` itself. The exact extraction this proof relies on, where
+/// `c - c'` is a difference of signed monomials dividing 2, is lost, and at `q = 12289` (fully
+/// split, `|dz_3|_inf` up to `q / 2`) a relaxed witness with an arbitrary short denominator
+/// carries no soundness for the receiver's key. `M = 24` is the cost of exact extraction at
+/// this modulus.
 const RLWE_ZKPOK_Z_BOUND: i16 = 3070;
 
 /// Constant-time HVZK OR-Sigma proof of short Ring-LWE witness knowledge for [`RlweOtReceiverMsg`]:
