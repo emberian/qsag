@@ -726,6 +726,11 @@ impl<'a> ParallelSeededSignSession<'a> {
                     merkle_siblings: self.siblings.clone(),
                 };
                 verify_parallel_seeded_fts(&self.pk, &self.msg, &sig, &CpuReferenceBackend)?;
+                crate::parallel_mpc::verify_canonical_minimal_grind_counter(
+                    &self.pk,
+                    &self.msg,
+                    &sig,
+                )?;
                 ParallelSeededSignResult::Signature(sig)
             });
             self.complete = true;

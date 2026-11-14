@@ -262,6 +262,29 @@ mod tests {
     }
 
     #[test]
+    fn frontier_recovers_vault_reservation_before_wal_append() {
+        let path = std::env::temp_dir().join(std::format!("frontier-gap-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let make = || crate::FrontierFtsSigningKey::keygen(crate::FrontierFtsProfile::Compact770, [1; 32], [2; 32], [3; 32], true, &qsag_accel::CpuReferenceBackend);
+        let id = make().wal_key();
+        drop(FsWalFtsEpochLatch::create(&path, id, [8; 32]).unwrap());
+        // Simulate a crash after the vault committed use 1, before the WAL did.
+        let wal = FsWalFtsEpochLatch::open(&path, id, [8; 32]).unwrap();
+        let key = make().resume_at(1).unwrap().attach_wal(alloc::boxed::Box::new(wal)).unwrap();
+        assert_eq!(key.uses_completed(), 1);
+        drop(key);
+        let wal = FsWalFtsEpochLatch::open(&path, id, [8; 32]).unwrap();
+        let mut key = make().attach_wal(alloc::boxed::Box::new(wal)).unwrap();
+        assert_eq!(key.uses_completed(), 1);
+        let dp = crate::FrontierDpTable::build(crate::FrontierFtsProfile::Compact770);
+        let signature = key.sign(&dp, b"after recovery", &[0; 32]).unwrap();
+        crate::verify_frontier_fts(&key.pk, &dp, b"after recovery", &signature).unwrap();
+        assert_eq!(key.uses_completed(), 2);
+        assert_eq!(key.sign(&dp, b"exhausted", &[0; 32]), Err(crate::FrontierFtsError::UseBudgetExhausted));
+        drop(key);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn authenticated_recovery_and_descriptor_lock() {
         let dir = std::env::temp_dir().join(std::format!(
             "qsag-burn-{}-{}",
