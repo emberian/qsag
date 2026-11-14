@@ -519,17 +519,23 @@ fn rejection_verdict_is_the_exact_fips_predicate() {
             let mut engine = engine_for(net, &st, me);
             let planes = bit_planes(&st, me, &masks, 4);
             let mask_values = compose(&planes);
+            let z_sh = deal(&st, me, &z, 100);
+            let z_masked = z_sh
+                .add(&engine.public_const(z_bound - 1, z.len())?)
+                .add(&mask_values.slice(0, z.len()));
+            let low_masks = mask_values.slice(z.len(), low.len());
             rejection_verdict(
                 &mut engine,
-                (&deal(&st, me, &z, 100), z_bound),
-                (&deal(&st, me, &low, 200), low_bound),
-                &mask_values,
+                (&z_masked, z_bound),
+                (&deal(&st, me, &low, 200), low_bound, &low_masks),
                 &planes,
                 low_bound + 1,
             )
         });
         for result in results {
-            let accepted = result.unwrap().is_some_and(|(z, low, high)| z && low && high);
+            let accepted = result
+                .unwrap()
+                .is_some_and(|(z, low, high)| z && low && high);
             assert_eq!(accepted, *expected, "case {index}");
         }
     }
@@ -1318,6 +1324,7 @@ fn durable_nonce_restart_recovers_epoch_and_rejects_both_replay_keys() {
 #[test]
 fn verified_response_gate_enforces_every_barrier_and_context() {
     let context = [37; 32];
+    let seal_entropy = [91; 32];
     let good = MlDsaBarrierChecks {
         req_session_id: context,
         req_attempt: 9,
@@ -1329,10 +1336,17 @@ fn verified_response_gate_enforces_every_barrier_and_context() {
     let response = || Sh {
         c: vec![vec![1, 2, 3]],
     };
-    let released = PendingResponse::new(response(), context, 9)
-        .release(good)
-        .unwrap();
+    let pending = PendingResponse::new_sealed(response(), context, 9, &seal_entropy);
+    // The pending response must be XOF-encrypted in RAM while waiting on the barrier.
+    assert_ne!(pending.sealed_response.c, vec![vec![1, 2, 3]]);
+    let released = pending.release(good).unwrap();
     assert_eq!(released.c, vec![vec![1, 2, 3]]);
+
+    // Ciphertext tampering before release must fail closed even when all barriers hold.
+    let mut tampered = PendingResponse::new_sealed(response(), context, 9, &seal_entropy);
+    tampered.sealed_response.c[0][0] = fq_add(tampered.sealed_response.c[0][0], 1);
+    assert!(tampered.release(good).is_err());
+
     for mutation in 0..6 {
         let mut checks = good;
         match mutation {
@@ -1344,7 +1358,7 @@ fn verified_response_gate_enforces_every_barrier_and_context() {
             _ => checks.req_attempt += 1,
         }
         assert!(
-            PendingResponse::new(response(), context, 9)
+            PendingResponse::new_sealed(response(), context, 9, &seal_entropy)
                 .release(checks)
                 .is_err()
         );

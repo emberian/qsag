@@ -40,9 +40,9 @@
 //! on opened values, so all honest parties execute the same rounds.
 
 use crate::fips204_ntt::{MLDSA_Q, fq_add, fq_inv_or_zero, fq_mul, fq_sub};
+use crate::secret_buffer::{SecretBuffer, Wipe};
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::secret_buffer::SecretBuffer;
 use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u32s};
 use qsag_accel::keccak::{Shake256, cshake256_framed_32, finalize_cshake256, init_cshake256};
 
@@ -379,6 +379,10 @@ struct KAcc {
     pending: u32,
 }
 
+impl Drop for KAcc {
+    fn drop(&mut self) { qsag_accel::ct::ct_zeroize_u64s(&mut self.limbs); }
+}
+
 impl KAcc {
     fn new() -> Self {
         Self {
@@ -438,10 +442,10 @@ fn pack(values: &[u32], out: &mut Vec<u8>) {
 }
 
 fn unpack(bytes: &[u8], count: usize) -> Option<Vec<u32>> {
-    if bytes.len() != count * 3 {
+    if count.checked_mul(3) != Some(bytes.len()) {
         return None;
     }
-    let mut out = Vec::with_capacity(count);
+    let mut out = SecretBuffer(Vec::with_capacity(count));
     for chunk in bytes.as_chunks::<3>().0 {
         let v = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], 0]);
         if v >= MLDSA_Q {
@@ -449,7 +453,7 @@ fn unpack(bytes: &[u8], count: usize) -> Option<Vec<u32>> {
         }
         out.push(v);
     }
-    Some(out)
+    Some(core::mem::take(&mut out.0))
 }
 
 /// Keyed pseudorandom stream shared by the holders of one subset.
@@ -964,7 +968,7 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
         let result = (|| {
             let parties = self.st.parties;
             let total: usize = values.iter().map(|v| v.len()).sum();
-            let mut mine: Vec<Vec<u8>> = Vec::with_capacity(self.comps.len());
+            let mut mine = SecretBuffer(Vec::with_capacity(self.comps.len()));
             for i in 0..self.comps.len() {
                 let mut bytes = Vec::with_capacity(total * 3);
                 for value in values {
@@ -972,7 +976,11 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                 }
                 mine.push(bytes);
             }
-            let mut private = vec![Vec::new(); parties];
+            let private = (0..parties).map(|j| {
+                let count = self.comps.iter().filter(|&&s| self.st.lowest_holder(s) == self.me && !self.st.holds(s, j)).count();
+                Vec::with_capacity(count * total * 3)
+            }).collect::<Vec<_>>();
+            let mut private = SecretBuffer(private);
             let mut broadcast = Vec::with_capacity(32 * self.comps.len());
             for (i, &s) in self.comps.iter().enumerate() {
                 broadcast.extend_from_slice(&cshake256_framed_32(b"QSAG.RSS.OPEN.V1", &[&mine[i]]));
@@ -985,9 +993,9 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                 }
             }
             let my_digests = broadcast.clone();
-            let inbox = self.round(RoundKind::Open, private, broadcast)?;
+            let inbox = self.round(RoundKind::Open, core::mem::take(&mut private.0), broadcast)?;
             let mut cursor = vec![0usize; parties];
-            let mut sum = vec![0u32; total];
+            let mut sum = SecretBuffer(vec![0u32; total]);
             for s in 0..self.st.subsets.len() {
                 let component = match self.comps.iter().position(|&c| c == s) {
                     Some(i) => unpack(&mine[i], total).expect("own encoding is canonical"),
@@ -1012,7 +1020,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                         unpack(bytes, total).ok_or(MpcError::OpeningInconsistent { subset: s })?
                     }
                 };
-                for (acc, &v) in sum.iter_mut().zip(&component) {
+                let component = SecretBuffer(component);
+                for (acc, &v) in sum.iter_mut().zip(component.iter()) {
                     *acc = fq_add(*acc, v);
                 }
             }
@@ -1121,16 +1130,16 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             self.stats.verifications += 1;
 
             // Masking tuple at index 0.
-            let mask_a = self.rand_k(1)?;
-            let mask_b = self.rand_k(1)?;
-            let mask_c_local = self.ip_local(&mask_a, &mask_b, 0, 1);
-            let mask_c = self.reshare_k(&[mask_c_local])?;
+            let mask_a = SecretBuffer(self.rand_k(1)?);
+            let mask_b = SecretBuffer(self.rand_k(1)?);
+            let mask_c_local = SecretBuffer(self.ip_local(&mask_a, &mask_b, 0, 1));
+            let mask_c = SecretBuffer(self.reshare_k(core::slice::from_ref(&*mask_c_local))?);
             let lambda = self.coin()?;
 
             let mut dim = (gates + 1).div_ceil(FOLD) * FOLD;
-            let mut x: Vec<Vec<Kx>> = (0..comps).map(|_| Vec::with_capacity(dim)).collect();
-            let mut y: Vec<Vec<Kx>> = (0..comps).map(|_| Vec::with_capacity(dim)).collect();
-            let mut z: Vec<Kx> = (0..comps).map(|i| mask_c[i][0]).collect();
+            let mut x = SecretBuffer((0..comps).map(|_| Vec::with_capacity(dim)).collect::<Vec<Vec<Kx>>>());
+            let mut y = SecretBuffer((0..comps).map(|_| Vec::with_capacity(dim)).collect::<Vec<Vec<Kx>>>());
+            let mut z = SecretBuffer((0..comps).map(|i| mask_c[i][0]).collect::<Vec<Kx>>());
             for i in 0..comps {
                 x[i].push(mask_a[i][0]);
                 y[i].push(mask_b[i][0]);
@@ -1157,22 +1166,22 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
             while dim > 1 {
                 let groups = dim / FOLD;
                 // Evaluations of the group polynomials at the extra points.
-                let mut locals = Vec::with_capacity(FOLD_POINTS - 1);
+                let mut locals = SecretBuffer(Vec::with_capacity(FOLD_POINTS - 1));
                 for p in 0..FOLD - 1 {
                     locals.push(self.ip_local(&x, &y, p, FOLD));
                 }
                 for row in &tables.extra {
-                    let xe: Vec<Vec<Kx>> = x
+                    let xe = SecretBuffer(x
                         .iter()
                         .map(|comp| eval_groups(comp, row, groups))
-                        .collect();
-                    let ye: Vec<Vec<Kx>> = y
+                        .collect::<Vec<Vec<Kx>>>());
+                    let ye = SecretBuffer(y
                         .iter()
                         .map(|comp| eval_groups(comp, row, groups))
-                        .collect();
+                        .collect::<Vec<Vec<Kx>>>());
                     locals.push(self.ip_local(&xe, &ye, 0, 1));
                 }
-                let shared = self.reshare_k(&locals)?;
+                let shared = SecretBuffer(self.reshare_k(&locals)?);
                 let xi = self.coin()?;
                 let basis = tables.basis_at(&xi);
                 let full = tables.full_basis_at(&xi);
@@ -1190,8 +1199,12 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                         next = k_add(&next, &k_mul(&full[p], &shared[i][p - 1]));
                     }
                     z[i] = next;
-                    x[i] = fold_groups(&x[i], &basis, groups);
-                    y[i] = fold_groups(&y[i], &basis, groups);
+                    let next = fold_groups(&x[i], &basis, groups);
+                    x[i].wipe();
+                    x[i] = next;
+                    let next = fold_groups(&y[i], &basis, groups);
+                    y[i].wipe();
+                    y[i] = next;
                 }
                 mask_coefficient = k_mul(&mask_coefficient, &basis[0]);
                 dim = groups;
@@ -1269,15 +1282,16 @@ fn eval_groups(values: &[Kx], row: &[u32; FOLD], groups: usize) -> Vec<Kx> {
 
 /// `out[g] = sum_d basis[d] * values[FOLD * g + d]` for extension weights.
 fn fold_groups(values: &[Kx], basis: &[Kx; FOLD], groups: usize) -> Vec<Kx> {
-    (0..groups)
-        .map(|g| {
-            let mut acc = KAcc::new();
-            for (d, weight) in basis.iter().enumerate() {
-                acc.add_prod(weight, &values[FOLD * g + d]);
-            }
-            acc.reduce()
-        })
-        .collect()
+    // The next round pads to a full fold; reserve that tail before writing secrets.
+    let mut out = Vec::with_capacity(groups.div_ceil(FOLD) * FOLD);
+    for g in 0..groups {
+        let mut acc = KAcc::new();
+        for (d, weight) in basis.iter().enumerate() {
+            acc.add_prod(weight, &values[FOLD * g + d]);
+        }
+        out.push(acc.reduce());
+    }
+    out
 }
 
 /// Lagrange data for nodes `0..FOLD` (group polynomials) and `0..FOLD_POINTS`

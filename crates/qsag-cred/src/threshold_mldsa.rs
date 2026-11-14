@@ -69,7 +69,7 @@
 
 use crate::fips204_ntt::{
     MLDSA_D, MLDSA_N, MLDSA_Q, MlDsaLevel, MlDsaParams, Poly256, compute_fips204_mu, expand_a_ntt,
-    fq_add, fq_sub, high_bits_ct, mat_vec_mul_ntt, ml_dsa_verify, pk_encode, power2round,
+    fq_add, fq_mul, fq_sub, high_bits_ct, mat_vec_mul_ntt, ml_dsa_verify, pk_encode, power2round,
     sample_in_ball, sig_encode, use_hint, w1_encode,
 };
 use crate::rss_mpc::{
@@ -79,7 +79,7 @@ use crate::rss_mpc::{
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
-use qsag_accel::ct::ct_eq_bytes;
+use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes};
 use qsag_accel::keccak::{Shake256, cshake256_framed_32};
 use qsag_policy::AuthorizedSignReleaseToken;
 use qsag_verified::{MlDsaBarrierChecks, MlDsaReleaseGate};
@@ -872,19 +872,18 @@ fn high_bits_circuit<T: MpcTransport>(
 /// are shared by the circuits; no unmasked coefficient is released.
 fn rejection_verdict<T: MpcTransport>(
     engine: &mut Engine<'_, T>,
-    (z, z_bound): (&Sh, u32),
-    (low, low_bound): (&Sh, u32),
-    masks: &Sh,
+    (z_masked, z_bound): (&Sh, u32),
+    (low, low_bound, low_masks): (&Sh, u32, &Sh),
     planes: &[Sh],
     high_bound: u32,
 ) -> Result<Option<(bool, bool, bool)>, MpcError> {
-    let z_len = z.len();
+    let z_len = z_masked.len();
     let low_len = low.len();
-    let shifted = Sh::concat(&[
-        &z.add(&engine.public_const(z_bound - 1, z_len)?),
-        &low.add(&engine.public_const(low_bound - 1, low_len)?),
-    ]);
-    let opened = engine.open(&[&shifted.add(masks)])?.remove(0);
+    let low_masked = low
+        .add(&engine.public_const(low_bound - 1, low_len)?)
+        .add(low_masks);
+    let masked = Sh::concat(&[z_masked, &low_masked]);
+    let opened = engine.open(&[&masked])?.remove(0);
     let mut widths = vec![2 * z_bound - 1; z_len];
     widths.extend_from_slice(&vec![2 * low_bound - 1; low_len]);
     let inside = masked_range_test(engine, &opened, &widths, planes)?;
@@ -894,10 +893,17 @@ fn rejection_verdict<T: MpcTransport>(
     // A wider residual interval checks the HighBits relation separately from
     // the stricter rejection norm. Shifting a masked public value by a public
     // constant preserves its mask and does not disclose the residual.
-    let high_opened: Vec<u32> = opened[z_len..].iter()
-        .map(|&v| fq_add(v, high_bound - low_bound)).collect();
+    let high_opened: Vec<u32> = opened[z_len..]
+        .iter()
+        .map(|&v| fq_add(v, high_bound - low_bound))
+        .collect();
     let high_planes: Vec<Sh> = planes.iter().map(|p| p.slice(z_len, low_len)).collect();
-    let high_inside = masked_range_test(engine, &high_opened, &vec![2 * high_bound - 1; low_len], &high_planes)?;
+    let high_inside = masked_range_test(
+        engine,
+        &high_opened,
+        &vec![2 * high_bound - 1; low_len],
+        &high_planes,
+    )?;
     let high_failures = engine.public_const(1, low_len)?.sub(&high_inside).sum();
     let joint_failures = z_failures.add(&low_failures).add(&high_failures);
     let joint_blind = engine.rand(EXT_DEGREE)?;
@@ -915,30 +921,92 @@ fn rejection_verdict<T: MpcTransport>(
     Ok(Some((bits[0], bits[1], bits[2])))
 }
 
-/// Owns the entire pending response while the verified affine gate holds its
-/// session capability. A rejected gate drops (and zeroizes) the response; only
-/// successful consumption returns shares that the caller can open.
+/// Branchless reduction of 128 uniform keystream bits modulo `MLDSA_Q` (`< 2^-103` bias).
+#[inline]
+fn stream_word_mod_q(block: &[u8; 16]) -> u32 {
+    const RADIX_21: u32 = 1 << 21;
+    const MASK_21: u128 = (1u128 << 21) - 1;
+    let raw = u128::from_le_bytes(*block);
+    let mut acc = ((raw >> 105) & MASK_21) as u32;
+    let mut shift = 84u32;
+    loop {
+        let limb = ((raw >> shift) & MASK_21) as u32;
+        acc = fq_add(fq_mul(acc, RADIX_21), limb);
+        if shift == 0 {
+            break;
+        }
+        shift -= 21;
+    }
+    acc
+}
+
+fn apply_response_stream_cipher(
+    response: &mut Sh,
+    seal_key: &[u8; 32],
+    context: &[u8; 32],
+    attempt: u32,
+    encrypt: bool,
+) {
+    let mut xof = Shake256::new();
+    xof.absorb(b"QSAG.MLDSA.PENDING_CIPHER.V1");
+    xof.absorb(seal_key);
+    xof.absorb(context);
+    xof.absorb(&attempt.to_be_bytes());
+    xof.finalize(0x1f);
+    let mut block = [0u8; 16];
+    for component in &mut response.c {
+        for coeff in component.iter_mut() {
+            xof.squeeze(&mut block);
+            let mask = stream_word_mod_q(&block);
+            *coeff = if encrypt {
+                fq_add(*coeff, mask)
+            } else {
+                fq_sub(*coeff, mask)
+            };
+        }
+    }
+    ct_zeroize_bytes(&mut block);
+}
+
+/// Seals the pending `z` shares under a per-attempt XOF stream cipher whose only
+/// decryption key is held privately inside `qsag_verified::MlDsaReleaseGate`.
+/// Any failed rejection-sampling or commitment barrier wipes the key to `[0u8; 32]`
+/// inside `qsag-verified`, rendering `sealed_response` cryptographically unrecoverable.
 struct PendingResponse {
-    response: Sh,
+    sealed_response: Sh,
+    ciphertext_tag: [u8; 32],
     gate: MlDsaReleaseGate,
 }
 
 impl PendingResponse {
-    fn new(response: Sh, context: [u8; 32], attempt: u32) -> Self {
-        let digest = Self::digest(&response, &context, attempt);
+    fn new_sealed(
+        mut response: Sh,
+        context: [u8; 32],
+        attempt: u32,
+        seal_entropy: &[u8; 32],
+    ) -> Self {
+        let mut seal_key = cshake256_framed_32(
+            b"QSAG.MLDSA.SEAL_KEY.V1",
+            &[seal_entropy, &context, &attempt.to_be_bytes()],
+        );
+        apply_response_stream_cipher(&mut response, &seal_key, &context, attempt, true);
+        let ciphertext_tag = Self::ciphertext_tag(&response, &context, attempt);
+        let gate = MlDsaReleaseGate::new_sealed(context, attempt, seal_key);
+        ct_zeroize_bytes(&mut seal_key);
         Self {
-            response,
-            gate: MlDsaReleaseGate::new_sealed(context, attempt, digest),
+            sealed_response: response,
+            ciphertext_tag,
+            gate,
         }
     }
 
-    fn digest(response: &Sh, context: &[u8; 32], attempt: u32) -> [u8; 32] {
+    fn ciphertext_tag(ciphertext: &Sh, context: &[u8; 32], attempt: u32) -> [u8; 32] {
         let mut sponge = Shake256::new();
-        sponge.absorb(b"QSAG.MLDSA.PENDING_RESPONSE.V1");
+        sponge.absorb(b"QSAG.MLDSA.PENDING_CT_TAG.V1");
         sponge.absorb(context);
         sponge.absorb(&attempt.to_be_bytes());
-        sponge.absorb(&(response.c.len() as u64).to_be_bytes());
-        for component in &response.c {
+        sponge.absorb(&(ciphertext.c.len() as u64).to_be_bytes());
+        for component in &ciphertext.c {
             sponge.absorb(&(component.len() as u64).to_be_bytes());
             for coefficient in component {
                 sponge.absorb(&coefficient.to_le_bytes());
@@ -950,14 +1018,28 @@ impl PendingResponse {
         digest
     }
 
-    fn release(self, checks: MlDsaBarrierChecks) -> Result<Sh, ThresholdMlDsaError> {
-        let (_, released) = self.gate.try_release_z_share(checks);
-        let released = released.map_err(|_| ThresholdMlDsaError::ProtocolInvariantViolated)?;
-        let expected = Self::digest(&self.response, &checks.req_session_id, checks.req_attempt);
-        if !ct_eq_bytes(&released, &expected) {
+    fn release(mut self, checks: MlDsaBarrierChecks) -> Result<Sh, ThresholdMlDsaError> {
+        let (_, released_key) = self.gate.try_release_z_share(checks);
+        let mut seal_key =
+            released_key.map_err(|_| ThresholdMlDsaError::ProtocolInvariantViolated)?;
+        let expected_tag = Self::ciphertext_tag(
+            &self.sealed_response,
+            &checks.req_session_id,
+            checks.req_attempt,
+        );
+        if !ct_eq_bytes(&self.ciphertext_tag, &expected_tag) {
+            ct_zeroize_bytes(&mut seal_key);
             return Err(ThresholdMlDsaError::ProtocolInvariantViolated);
         }
-        Ok(self.response)
+        apply_response_stream_cipher(
+            &mut self.sealed_response,
+            &seal_key,
+            &checks.req_session_id,
+            checks.req_attempt,
+            false,
+        );
+        ct_zeroize_bytes(&mut seal_key);
+        Ok(self.sealed_response)
     }
 }
 
@@ -1189,12 +1271,25 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
         let low_bound = gamma2 - params.beta;
         let test_idx: Vec<usize> = z_idx.iter().chain(low_idx).copied().collect();
         let test_planes: Vec<Sh> = planes.iter().map(|plane| plane.gather(&test_idx)).collect();
-        let pending = PendingResponse::new(z, context, attempt);
+        let z_masked = z
+            .add(&engine.public_const(z_bound - 1, z_len)?)
+            .add(&mask_values.gather(z_idx));
+        let mut seal_entropy = cshake256_framed_32(
+            b"QSAG.TMLDSA.SEAL_ENTROPY.V1",
+            &[
+                &hedged,
+                &context,
+                &attempt.to_be_bytes(),
+                &epoch.to_be_bytes(),
+            ],
+        );
+        let pending = PendingResponse::new_sealed(z, context, attempt, &seal_entropy);
+        ct_zeroize_bytes(&mut seal_entropy);
+        let low_masks = mask_values.gather(low_idx);
         let checks = rejection_verdict(
             &mut engine,
-            (&pending.response, z_bound),
-            (&low, low_bound),
-            &mask_values.gather(&test_idx),
+            (&z_masked, z_bound),
+            (&low, low_bound, &low_masks),
             &test_planes,
             gamma2,
         )?;

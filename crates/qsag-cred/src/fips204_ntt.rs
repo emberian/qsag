@@ -189,7 +189,9 @@ pub struct Poly256 {
 }
 
 impl Drop for Poly256 {
-    fn drop(&mut self) { self.zeroize(); }
+    fn drop(&mut self) {
+        self.zeroize();
+    }
 }
 
 impl Default for Poly256 {
@@ -745,10 +747,16 @@ pub fn ml_dsa_verify(
         return false;
     };
 
-    // 1. Check `||z||_inf < gamma1 - beta`
+    // 1. Check `||z||_inf < gamma1 - beta` (via MIR-verified norm predicates on ML-DSA-44/65).
     let z_bound = params.gamma1 - params.beta;
     for z_poly in &z {
-        if z_poly.inf_norm() >= z_bound {
+        let z_norm = z_poly.inf_norm();
+        let z_ok = match level {
+            MlDsaLevel::MlDsa44 => qsag_verified::check_mldsa44_norm_bounds(z_norm, 0).0,
+            MlDsaLevel::MlDsa65 => qsag_verified::check_mldsa65_norm_bounds(z_norm, 0).0,
+            MlDsaLevel::MlDsa87 => z_norm < z_bound,
+        };
+        if !z_ok {
             return false;
         }
     }
@@ -859,14 +867,15 @@ fn expand_secret_poly(seed: &[u8; 64], nonce: u16, eta: u32) -> Poly256 {
     while filled < MLDSA_N {
         xof.squeeze(&mut byte.0);
         for nibble in [byte.0[0] & 15, byte.0[0] >> 4] {
-            let valid = if eta == 2 { nibble < 15 } else { nibble < 9 };
-            if valid && filled < MLDSA_N {
-                let value = if eta == 2 {
-                    nibble as u32 % 5
-                } else {
-                    nibble as u32
-                };
-                poly.coeffs[filled] = fq_sub(eta, value);
+            if eta == 2 {
+                if let Some(sampled) = qsag_verified::mldsa44_sample_eta2_nibble_mod_q(nibble)
+                    && filled < MLDSA_N
+                {
+                    poly.coeffs[filled] = sampled;
+                    filled += 1;
+                }
+            } else if nibble < 9 && filled < MLDSA_N {
+                poly.coeffs[filled] = fq_sub(eta, nibble as u32);
                 filled += 1;
             }
         }
@@ -1041,7 +1050,13 @@ pub fn ml_dsa_sign_deterministic(sk: &MlDsaSigningKey, msg: &[u8], ctx: &[u8]) -
             let mut response = c.pointwise_mul(secret);
             response.inv_ntt();
             response = response.add(mask);
-            reject |= response.inf_norm() >= params.gamma1 - params.beta;
+            let z_norm = response.inf_norm();
+            let z_ok = match sk.level {
+                MlDsaLevel::MlDsa44 => qsag_verified::check_mldsa44_norm_bounds(z_norm, 0).0,
+                MlDsaLevel::MlDsa65 => qsag_verified::check_mldsa65_norm_bounds(z_norm, 0).0,
+                MlDsaLevel::MlDsa87 => z_norm < params.gamma1 - params.beta,
+            };
+            reject |= !z_ok;
             z.0.push(response);
         }
         let mut hints = vec![[0; MLDSA_N]; params.k];
@@ -1062,7 +1077,13 @@ pub fn ml_dsa_sign_deterministic(sk: &MlDsaSigningKey, msg: &[u8], ctx: &[u8]) -
                 .zip(hint_row)
             {
                 let base = fq_sub(wi, ei);
-                reject |= low_bits_abs_ct(base, params.gamma2) >= params.gamma2 - params.beta;
+                let r0_abs = low_bits_abs_ct(base, params.gamma2);
+                let r0_ok = match sk.level {
+                    MlDsaLevel::MlDsa44 => qsag_verified::check_mldsa44_norm_bounds(0, r0_abs).1,
+                    MlDsaLevel::MlDsa65 => qsag_verified::check_mldsa65_norm_bounds(0, r0_abs).1,
+                    MlDsaLevel::MlDsa87 => r0_abs < params.gamma2 - params.beta,
+                };
+                reject |= !r0_ok;
                 *hint = make_hint_ct(fq_sub(0, ti), fq_add(base, ti), params.gamma2);
                 ones += *hint as usize;
             }
