@@ -3,7 +3,7 @@ module
 # Qsag.PosixCrashWal — Conditional storage contracts and crash safety models
 
 Choice-free formalization (`0` proof gaps, `0` custom axioms, `≤ 12` `@[expose]`)
-of hardware-realistic three-tier crash semantics, POSIX inode/dentry/symlink/`flock` behavior,
+of explicitly contracted three-tier crash semantics, POSIX inode/dentry/symlink/`flock` behavior,
 `CuttleFS`/`fsyncgate` sticky I/O-error handle poisoning, dual-bound `lockGenesisId` inode sealing,
 unified `CeremonyJournalRecord` crash-prefix atomicity, and reserve-before-sign multi-crash safety:
 
@@ -8862,13 +8862,17 @@ def FreshReservation (entries : List Reservation) (r : Reservation) : Prop :=
   ∀ e ∈ entries, e.ceremonyId ≠ r.ceremonyId ∧ e.epochOrCodeword ≠ r.epochOrCodeword
 
 theorem reservationValid_fresh {key : Bytes} {entries : List Reservation} {r : Reservation}
-    (h : reservationValid key entries r = true) : FreshReservation entries r := by
+    (h : reservationValid key entries r = true) :
+    ∀ e ∈ entries, e.ceremonyId ≠ r.ceremonyId ∧ e.epochOrCodeword ≠ r.epochOrCodeword := by
   simp only [reservationValid, Bool.and_eq_true, Bool.not_eq_true'] at h
   have ha := h.1.2
   intro e he
   have hf : (e.ceremonyId == r.ceremonyId || e.epochOrCodeword == r.epochOrCodeword) = false :=
     by simpa using (List.any_eq_false.mp ha) e he
   simpa only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] using hf
+
+theorem reservationValid_empty_self (r : Reservation) : reservationValid r.keyId [] r = true := by
+  simp [reservationValid]
 
 /-- Backend MAC domains differ: Belt's payload tag does not cover the wrapper lockSeal. -/
 def beltTag (key payload : Bytes) : Bytes :=
@@ -9154,6 +9158,8 @@ inductive BeltBindOutcome where
   | fresh | replay
   deriving Repr, DecidableEq
 
+/-- Binding decision and post-state on successful persistence. `beltPersistFailure` is the
+error branch; this function alone is not an I/O refinement theorem. -/
 def beltBind (capacityLog2 : Nat) (s : BeltState) (r : BeltBinding) :
     Option (BeltState × BeltBindOutcome) :=
   if s.poisoned then none else
@@ -9178,6 +9184,195 @@ theorem belt_same_epoch_different_binding_rejected {cap : Nat} {s : BeltState}
     {old r : BeltBinding} (held : s.inFlight = some old) (epoch : old.epoch = r.epoch)
     (different : old ≠ r) : beltBind cap s r = none := by
   simp [beltBind, held, different, epoch]
+
+/-- Decode exactly one fixed-width reservation, with key identity supplied by the header. -/
+def decodeReservation (keyId bytes : Bytes) : Option Reservation := do
+  let (cid, b1) ← splitExactBytes 32 bytes
+  let (codeword, b2) ← splitExactBytes 32 b1
+  let (seed, b3) ← splitExactBytes 8 b2
+  let (hedge, tail) ← splitExactBytes 8 b3
+  if tail ≠ [] then none else do
+    let seed ← decodeU64BeNat seed
+    let hedge ← decodeU64BeNat hedge
+    pure ⟨cid, keyId, codeword, seed, hedge⟩
+
+/-- Decode and validate in insertion order, just as `open_existing` calls `validate` before
+pushing each entry. This rejects duplicate ceremony/codeword IDs and non-increasing cursors. -/
+def decodeReservations (keyId : Bytes) : Nat → Bytes → List Reservation → Option (List Reservation)
+  | 0, bytes, entries => if bytes = [] then some entries else none
+  | n+1, bytes, entries => do
+    let (entry, tail) ← splitExactBytes 80 bytes
+    let r ← decodeReservation keyId entry
+    if reservationValid keyId entries r then
+      decodeReservations keyId n tail (entries ++ [r])
+    else none
+
+def openCeremonyBytes (key lockSeal keyId bytes : Bytes) : Option (List Reservation) :=
+  if bytes.length < 72 ∨ (bytes.length - 72) % 80 ≠ 0 then none else
+  let body := bytes.take (bytes.length - 32)
+  if bytes.take 40 ≠ ceremonyBody keyId [] ∨
+      bytes.drop (bytes.length - 32) ≠ ceremonyTag key lockSeal body then none else
+  decodeReservations keyId ((bytes.length - 72) / 80) (body.drop 40) []
+
+theorem openCeremonyBytes_short_tail (key lockSeal keyId bytes : Bytes)
+    (h : (bytes.length - 72) % 80 ≠ 0) : openCeremonyBytes key lockSeal keyId bytes = none := by
+  simp [openCeremonyBytes, h]
+
+/-- Snapshot parser consumes all bytes and rejects duplicate map keys instead of silently
+letting insertion overwrite an earlier value. -/
+def decodeLedgerRecords : Nat → Bytes → List (Bytes × Bytes) → Option (List (Bytes × Bytes))
+  | 0, bytes, records => if bytes = [] then some records else none
+  | n+1, bytes, records => do
+    let (kb, b1) ← splitExactBytes 4 bytes
+    let (vb, b2) ← splitExactBytes 4 b1
+    let k ← pcwDecodeU32Be kb.reverse
+    let v ← pcwDecodeU32Be vb.reverse
+    let (key, b3) ← splitExactBytes k b2
+    let (value, tail) ← splitExactBytes v b3
+    if records.any (fun kv => kv.1 == key) then none else
+    decodeLedgerRecords n tail (records ++ [(key, value)])
+
+/-- `read_slot` after the LockedRecord wrapper and seal checks. The byte-size limit,
+MAC, parity, bounded count, duplicate keys, and exact parser exhaustion are all checked. -/
+def openLedgerSlot (domain key genesisSeal ledgerId : Bytes) (parity : Nat)
+    (bytes : Bytes) : Option Snapshot :=
+  if bytes.length < 48 ∨ 16 * 1024 * 1024 < bytes.length then none else do
+    let body := bytes.take (bytes.length - 32)
+    let tag := bytes.drop (bytes.length - 32)
+    if tag ≠ ledgerTag domain key genesisSeal ledgerId [115,110,97,112,115,104,111,116] body
+      then none else do
+    let (gb, b1) ← splitExactBytes 8 body
+    let (cb, recordsBytes) ← splitExactBytes 8 b1
+    let generation ← decodeU64BeNat gb.reverse
+    let count ← decodeU64BeNat cb.reverse
+    if generation % 2 ≠ parity ∨ recordsBytes.length / 8 < count then none else do
+      let records ← decodeLedgerRecords count recordsBytes []
+      pure ⟨generation, records, tag⟩
+
+def ledgerGenesisBytes (domain key genesisSeal ledgerId sealA sealB : Bytes) : Bytes :=
+  let body := ledgerGenesisBody ledgerId sealA sealB
+  body ++ ledgerTag domain key genesisSeal ledgerId [103,101,110,101,115,105,115] body
+
+/-- An unavailable slot remains unavailable for future writes. Opening the surviving slot
+never recreates a sidecar or silently changes its genesis-authenticated seal. -/
+def recoverLedgerBytes (domain key genesisSeal ledgerId sealA sealB genesisBytes : Bytes)
+    (anchor : ExternalMonotoneAnchor) (slotA slotB : Option Bytes) : Option Snapshot :=
+  recoverLedger (genesisBytes == ledgerGenesisBytes domain key genesisSeal ledgerId sealA sealB)
+    anchor (slotA.bind (openLedgerSlot domain key genesisSeal ledgerId 0))
+      (slotB.bind (openLedgerSlot domain key genesisSeal ledgerId 1))
+
+theorem recoverLedgerBytes_checkpoint {domain key genesisSeal ledgerId sealA sealB genesis : Bytes}
+    {anchor : ExternalMonotoneAnchor} {a b : Option Bytes} {out : Snapshot}
+    (h : recoverLedgerBytes domain key genesisSeal ledgerId sealA sealB genesis anchor a b = some out) :
+    verifyAgainstExternalAnchor anchor out.generation out.tag = true :=
+  recoverLedger_anchor h
+
+/-- Locked FTS descriptor state. The same journal inode remains locked throughout append;
+there is no temp inode and no rename. `failed` is set before identity checking or writing. -/
+structure BurnAppendState where
+  keyId : Bytes
+  genesis : Bytes
+  lastTag : Bytes
+  bodies : List Bytes
+  inode : Nat
+  descriptor : Nat
+  locked : Bool
+  failed : Bool
+  disk : Bytes
+  visible : Bytes
+  pending : Option Bytes := none
+  dirty : Bool := false
+  deriving Repr, DecidableEq
+
+/-- Caller supplies the observed pathname inode and length from `check_identity`. -/
+def beginBurnAppend (key : Bytes) (s : BurnAppendState) (requestedKey : Bytes)
+    (pathInode party epoch : Nat) : BurnAppendState :=
+  if s.failed ∨ requestedKey ≠ s.keyId ∨ burnRecordBody party epoch ∈ s.bodies then s else
+  let failed := { s with failed := true }
+  if !s.locked ∨ pathInode ≠ s.inode ∨ s.visible.length ≠ 104 + 42*s.bodies.length ∨
+      2^16 ≤ party ∨ 2^64 ≤ epoch then failed else
+  { failed with pending := some (burnRecord key s.keyId s.genesis s.lastTag party epoch) }
+
+/-- Partial progress of `write_all`; 0 through 42 bytes can be present at a crash cut. -/
+def writeBurnAppend (s : BurnAppendState) (written : Nat) : BurnAppendState :=
+  match s.pending with
+  | none => s
+  | some record => { s with visible := s.disk ++ record.take written, dirty := true }
+
+/-- Full media sync is the commit point. No receipt exists for partial append or failed sync. -/
+def syncBurnAppend (s : BurnAppendState) (ioSucceeded : Bool) : BurnAppendState × Option Bytes :=
+  match s.pending with
+  | none => (s, none)
+  | some record =>
+    if ioSucceeded ∧ s.visible = s.disk ++ record ∧ record.length = 42 then
+      ({ s with disk := s.visible, bodies := s.bodies ++ [record.take 10], lastTag := record.drop 10, pending := none, failed := false, dirty := false }, some (record.take 10))
+    else ({ s with failed := true, pending := none }, none)
+
+/-- Physical sectors overlap the old tail and new append: corruption is applied to the whole
+inode, not only to the appended 42 bytes. Process/descriptor lifetime ends on power loss. -/
+def crashBurnAppend (s : BurnAppendState) (mask : SectorTearMask) : Bytes :=
+  if s.dirty then mixSectors mask.geometry.byteWidth mask.sectorChoices s.disk s.visible
+  else s.disk
+
+/-- Direct weld to the existing inode crash semantics. In particular a tear can damage an
+already present record sharing the append sector; the byte decoder may then refuse recovery. -/
+theorem burnAppend_posix_crash_outcomes {fs crashed : PosixFsState} {inode : Nat}
+    {old : Bytes} (disk : assocLookup fs.nand.fileBlocks inode = some old)
+    (crash : CrashStep fs crashed) :
+    assocLookup crashed.nand.fileBlocks inode = some old ∨
+    (∃ cache, assocLookup fs.driveCache.cachedFiles inode = some cache ∧
+      assocLookup crashed.nand.fileBlocks inode = some cache) ∨
+    (∃ (pending : Bytes) (mask : SectorTearMask), pendingVolatileWrite fs inode = some pending ∧
+      assocLookup crashed.nand.fileBlocks inode =
+        some (mixSectors mask.geometry.byteWidth mask.sectorChoices old pending)) :=
+  crashStep_inode_outcome disk crash
+
+theorem syncBurnAppend_release_durable {s s' : BurnAppendState} {ok : Bool} {body : Bytes}
+    (h : syncBurnAppend s ok = (s', some body)) :
+    s'.disk = s.visible ∧ body ∈ s'.bodies ∧ s'.failed = false := by
+  unfold syncBurnAppend at h
+  cases hp : s.pending with
+  | none => simp [hp] at h
+  | some record =>
+    simp only [hp] at h
+    split at h
+    · cases h
+      exact ⟨rfl, List.mem_append_right _ (List.mem_singleton_self _), rfl⟩
+    · cases h
+
+/-- Independent unsynced metadata operations are not a whole-directory snapshot. Each
+writeback chooses one operation, preserving its order relative to other selected operations.
+A filesystem-specific contract must additionally constrain dependency ordering and barriers. -/
+inductive MetadataOp where
+  | put (name : DirName) (inode : InodeId)
+  | remove (name : DirName)
+  deriving Repr, DecidableEq
+
+def applyMetadataOp (entries : List (DirName × EntryTarget)) : MetadataOp → List (DirName × EntryTarget)
+  | .put name inode => assocInsert name (.regular inode) entries
+  | .remove name => assocErase name entries
+
+def persistMetadata (entries : List (DirName × EntryTarget)) : List (Bool × MetadataOp) →
+    List (DirName × EntryTarget)
+  | [] => entries
+  | (persist, op) :: rest =>
+    persistMetadata (if persist then applyMetadataOp entries op else entries) rest
+
+/-- Explicit counterexample to treating `DirCrashOutcome` as unrestricted POSIX semantics. -/
+theorem independent_metadata_writeback_not_whole_snapshot :
+    let a : MetadataOp := .put ⟨[1]⟩ 1
+    let b : MetadataOp := .put ⟨[2]⟩ 2
+    persistMetadata [] [(true, a), (false, b)] ≠ [] ∧
+    persistMetadata [] [(true, a), (false, b)] ≠ persistMetadata [] [(true, a), (true, b)] := by
+  decide
+
+/-- Full-write failure poisons Belt's in-memory handle; it does not roll back the on-disk
+write or authorize retry with a different binding. Recovery uses a new handle. -/
+def beltPersistFailure (s : BeltState) : BeltState := { s with poisoned := true }
+
+theorem beltPersistFailure_refuses (cap : Nat) (s : BeltState) (r : BeltBinding) :
+    beltBind cap (beltPersistFailure s) r = none := by
+  simp [beltBind, beltPersistFailure]
 
 end RustDurability
 

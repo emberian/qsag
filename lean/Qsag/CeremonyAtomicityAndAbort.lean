@@ -6380,7 +6380,8 @@ structure AnchorService where
 This is the additional external service contract a deployment must supply. -/
 def anchorCAS (s : AnchorService) (expected owner : Nat) (r : Reservation) :
     AnchorService × Option AnchorTicket :=
-  if expected = s.nextEpoch ∧ r.keyId = s.keyId then
+  if expected = s.nextEpoch ∧ r.keyId = s.keyId ∧
+      reservationValid s.keyId (s.tickets.map (·.context)) r = true then
     let t : AnchorTicket := ⟨expected, owner, r⟩
     ({ s with nextEpoch := expected + 1, tickets := s.tickets ++ [t] }, some t)
   else (s, none)
@@ -6391,7 +6392,7 @@ theorem anchorCAS_success {s s' : AnchorService} {expected owner : Nat}
     t.owner = owner ∧ t.context = r ∧ r.keyId = s.keyId := by
   unfold anchorCAS at h
   split at h
-  · next hg => cases h; simp [hg.1, hg.2]
+  · next hg => cases h; simp [hg.1, hg.2.1]
   · cases h
 
 /-- Two disk clones with the same observed generation cannot both reserve it, even when
@@ -6480,6 +6481,69 @@ theorem anchoredJournal_trace_no_reuse {s t : AnchoredJournal}
   induction run with
   | refl => exact inv
   | next run step ih => exact anchoredJournalStep_preserves step ih
+
+private def advancePc : Nat → ReplacePc → ReplacePc
+  | 0, pc => pc
+  | n+1, pc => nextReplacePc (advancePc n pc)
+
+private theorem advanceJournal (key : Bytes) (s : JournalState) (r : Reservation)
+    (healthy : s.poisoned = false) (staged : s.staged = some r) (n : Nat) :
+    JournalRun key s { s with pc := advancePc n s.pc } := by
+  induction n with
+  | zero => simpa [advancePc] using JournalRun.refl (key := key) s
+  | succ n ih =>
+    exact JournalRun.next ih (JournalStep.advance _ r healthy staged)
+
+private theorem journalRun_trans {key : Bytes} {s t u : JournalState}
+    (a : JournalRun key s t) (b : JournalRun key t u) : JournalRun key s u := by
+  induction b with
+  | refl => exact a
+  | next run step ih => exact JournalRun.next ih step
+
+/-- Non-vacuity: an actual ten-syscall reservation path issues a permit and releases exactly
+one reservation. The MAC is the concrete cSHAKE encoder in the read-back guard. The proof
+never substitutes an insecure test MAC or assumes a forged receipt. -/
+theorem journal_successful_release (key keyId lockSeal : Bytes) (r : Reservation)
+    (wf : r.WellFormed) (valid : reservationValid keyId [] r = true) :
+    ∃ s, JournalRun key (initialJournal keyId lockSeal) s ∧ s.released = [r] := by
+  let start := initialJournal keyId lockSeal
+  let staging : JournalState := { start with staged := some r, permit := none, pc := .checkBefore }
+  have hbegin : JournalRun key start staging :=
+    JournalRun.next (.refl _) (.begin start r rfl rfl wf valid)
+  have hsync := advanceJournal key staging r rfl rfl 10
+  let synced : JournalState := { staging with pc := .done }
+  have hd : JournalRun key staging synced := by
+    simpa only [advancePc, nextReplacePc, staging] using hsync
+  let committed : JournalState := { synced with entries := [r], staged := none, permit := some r }
+  have hc : JournalRun key start committed :=
+    JournalRun.next (journalRun_trans hbegin hd) (.committed synced r rfl rfl rfl valid)
+  let released : JournalState := { committed with permit := none, released := [r] }
+  refine ⟨released, ?_, rfl⟩
+  exact JournalRun.next hc (.consume committed r
+    (ceremonyBytes key lockSeal keyId [r]) rfl rfl rfl rfl)
+
+theorem witness_real_cshake_journal_release :
+    let keyId : Bytes := List.replicate 32 4
+    let r : Reservation := ⟨List.replicate 32 1, keyId, List.replicate 32 2, 1, 1⟩
+    ∃ s, JournalRun (List.replicate 32 5)
+      (initialJournal keyId (List.replicate 8 6)) s ∧ s.released = [r] := by
+  dsimp only
+  apply journal_successful_release
+  · unfold Reservation.WellFormed; decide
+  · change reservationValid (List.replicate 32 4) [] _ = true
+    exact reservationValid_empty_self _
+
+/-- The CAS history check rejects reuse of the reserved resource, even with a fresh serial. -/
+theorem anchorCAS_no_duplicate_context {s s' : AnchorService} {expected owner : Nat}
+    {r : Reservation} {t : AnchorTicket} (h : anchorCAS s expected owner r = (s', some t)) :
+    ∀ old ∈ s.tickets, old.context.ceremonyId ≠ r.ceremonyId ∧
+      old.context.epochOrCodeword ≠ r.epochOrCodeword := by
+  unfold anchorCAS at h
+  split at h
+  · next hg =>
+    intro old ho
+    exact reservationValid_fresh hg.2.2 _ (List.mem_map.mpr ⟨old, ho, rfl⟩)
+  · cases h
 
 end RustDurability
 
