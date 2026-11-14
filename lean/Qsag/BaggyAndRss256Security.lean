@@ -1,51 +1,24 @@
 module
 /-
-# Qsag.BaggyAndRss256Security — 256-Bit `WOTS+C`, `Rss256Engine` (`CNF-RSS` + `BGIN19`), `Baggy` & `Waistband` Security
+# Qsag.BaggyAndRss256Security
 
-Self-contained Lean 4.35 constructive security proofs and mechanized `#tooth` cryptanalysis
-(`0` proof gaps, `0` custom axioms, `0 Classical.choice`, `≤ 12` `@[expose]`):
+Constructive WOTS+C extraction, RSS algebraic transcript checks, and Baggy cache
+and reservation models. The boolean barrier model is retained for historical
+counterexamples; `rss256StepHardened` accepts recorded data and computes checks.
 
-1. **256-Bit `WOTS+C` (`w = 4, chains = 128, target_sum = 192, zero_digits = 0`)**:
-   - MSB-first within each byte, matching `wots.rs` / `wots_c.rs`; bijective 128-digit base-4 decomposition of `BitVec 256` (`wotsC256DigitOfDigest_injective`,
-     `packDigits256_extract`).
-   - Constructive `Type`-valued dominated-index extractor (`extractStrictDropIdx`) and bidirectional
-     codeword incomparability (`wotsC256_strict_incomparability`).
-   - Constructive `Type`-valued 1-use EUF-CMA reduction (`wotsC256_one_use_euf_cma_extract`,
-     `wotsC256_one_use_euf_cma_sound`) extracting an explicit `thDigest` second preimage, `thTl`
-     leaf-compression collision, `thF` chain SM-TCR collision, or unrevealed `thF` chain preimage.
-   - `#tooth` `tooth_wotsc_without_target_sum_forges`: omitting the `sum = 192` target-sum check
-     allows forging on a distinct message with 1 public `thF` evaluation and 0 secret-key access.
-
-2. **`Rss256Engine` 256-Way Bitsliced `CNF-RSS` Privacy, Post-Wave 2-Challenge `BGIN19` Soundness & Sticky Poisoning**:
-   - Exact 1-corrupt joint view privacy (`rss256_and_bgin19_privacy_equiv`,
-     `rss256_one_corrupt_perfect_view_privacy`, statistical distance `0` via `SimpleEquiv`) covering
-     BOTH 256-lane bitsliced AND-gate wire messages `u` AND masked `BGIN19` degree-2 polynomial
-     prover shares under the `(prg1, prg2, prg0)` mask-key assignment.
-   - `#tooth` `tooth_off_by_one_prg_map_leaks_and_wire`: the naive `(prg0, prg1, prg2)` assignment
-     preserves gate reconstruction (`u0 ⊕ u1 ⊕ u2 = x & y`) while letting verifier `P0` cancel both
-     pads and recover `(x0 & y1) ⊕ (x1 & y0)` with probability `1`.
-   - Post-wave commit-reveal 2-challenge `GF(2^{128})` (`Tower128`) `BGIN19` / Horner soundness
-     (`rss256_post_wave_two_challenge_bgin19_soundness`, `ratLe` error `≤ ((2 * deg)^2, (2^128)^2)`).
-   - `#tooth` `tooth_pre_wave_challenge_kernel_bypass`: a rushing attacker who learns `χ` before
-     committing `u` injects a nonzero fault pair `(e1, e2) = (χ, 1) ∈ ker(χ)` passing verification
-     with probability `1` (and `[χ1*χ2, χ1⊕χ2, 1]` passes two pre-wave challenges with probability `1`).
-   - Sticky `poisoned = true` terminal absorption (`rss256_sticky_poison_terminal_absorption`,
-     `rss256_hardened_never_opens_faulted_wave`) across arbitrary multi-step `Rss256BarrierOp` traces.
-   - `#tooth` `tooth_non_sticky_check_clear_unlocks_unverified_open`: clearing
-     `pending` / `opened` before returning `Err` without latching `poisoned = true` lets a second
-     `check()` clear `unverified` and `open_planes()` release unverified faulted shares.
-
-3. **`Waistband` Canopy Top-`L` Static Child-Root Cache Soundness & `#tooth` Witnesses**:
-   - `VerifiedWaistbandCache` bound to `(pkSeed, pkRoot, paramsDigest)` with verified upward
-     `childRoot -> layerRoot -> pkRoot` canopy Merkle chaining (`verifyWaistbandCanopy`) and durable
-     first-signed digits per static `(layer, tree, kp)` (`DurableStaticWotsGuard`).
-   - Multi-session single-codeword equivalence (`waistband_verified_multi_session_single_codeword`)
-     and constructive upper-hypertree reduction (with an explicit bottom-layer obligation)
-     (`baggy_verified_waistband_upper_extract`, `baggy_verified_waistband_upper_reduction`).
-   - `#tooth` `tooth_corrupted_intermediate_waistband_opens_second_ancestor_codeword`: a corrupted
-     auth-path sibling in a cached intermediate layer `l` under an uncached parent `l + 1` passes
-     final `pkRoot` and `baggyVerify` checks while opening TWO distinct codewords on parent
-     `(l + 1, tree, kp)` across two sessions, yielding an explicit 0-inversion rogue-root forgery.
+Scope boundaries for the wave-2 review:
+* The quadratic product equation and its root count are proved below. The Rust
+  polynomial-basis field correspondence, tensor/folding composition, and
+  commit-reveal challenge distribution remain integration obligations.
+* `BaggyUpperReductionResult.bottomLayerReachedGenuineRoot` is an intermediate
+  obligation. `BaggySuite256` has no primitive FORS/H_msg game interface or oracle
+  history, so the upper reduction is not a full hash-game EUF-CMA theorem.
+* The canopy canonicality theorem remains conditional on `WaistbandMatchesKey`.
+  The added cache-MAC theorem uses an enrolled signing history but is not yet
+  composed into that multi-session canopy theorem.
+* The crash-visible release machine and reserved-chain opener are separate from
+  the pure full-signature specification. Their full-signature trace refinement,
+  including cached-leaf plan provenance, remains to be composed.
 -/
 
 public import Qsag.Constructive
@@ -2730,7 +2703,7 @@ private theorem baggyLayersVerifiedCacheAux_canonical
       split at hAux
       · cases hAux
       next hAbsent =>
-       cases hFresh : baggySignLayerFresh suite p sk layer tree kp node with
+        cases hFresh : baggySignLayerFresh suite p sk layer tree kp node with
         | none => rw [hFresh] at hAux; cases hAux
         | some freshRes =>
           rcases freshRes with ⟨sig, nextRoot, recOpt⟩
@@ -3196,11 +3169,9 @@ def walkUpperLayersBoundedExtract
           (by omega) (by simp) (by simp at hSum ⊢; omega)
           (by simpa [Nat.add_sub_cancel] using hHitTrue) hWalkRest hFinalEq
 
-/-- **Crown-Jewel `Waistband` Theorem 2 (`baggy_verified_waistband_upper_extract`, `0 Classical.choice`)**:
-    Multi-session `Baggy` signing with `VerifiedWaistbandCache` preserves the full constructive
-    hypertree EUF-CMA reduction: EVERY static (`layer ≥ 1`) WOTS address opened across `sessions`
-    reveals at most its single canonical codeword `baggyCanonicalStaticDigits`, and any valid forgery
-    `(msgStar, sigStar)` outside the signed message list constructively yields a `BaggyUpperReductionResult`! -/
+/-- An accepting fresh-message forgery yields either an upper-layer WOTS/hash
+break or a bottom-layer acceptance obligation. This is an upper-hypertree
+reduction, not a completed FORS/H_msg/bottom-WOTS security theorem. -/
 def baggy_verified_waistband_upper_extract
     (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
     (hWf : p.WellFormed) (hGrind : BaggySuite256.WellGrinded suite)
@@ -4475,7 +4446,8 @@ theorem baggy_failed_verification_preserves_reservations {identity : BaggyLedger
 theorem baggy_release_requires_sync {identity : BaggyLedgerIdentity}
     (st : BaggyReleaseState identity) (h : st.phase ≠ .synced) :
     (baggyReleaseStep st .release).released = st.released := by
-  simp [baggyReleaseStep, h]
+  have hb : (st.phase == .synced) = false := beq_false_of_ne h
+  simp [baggyReleaseStep, hb]
 
 /-- Every newly emitted opening is checked against an acknowledged durable entry.
 The theorem concerns the released record, not a discarded tentative reservation. -/
@@ -4507,12 +4479,15 @@ theorem tooth_baggy_crash_between_write_and_sync (identity : BaggyLedgerIdentity
 /-- Secret chain generation consumes a durable reservation. The record's digits
 must also match the actual hash grind, preventing an arbitrary signedNode from
 borrowing a reservation for another codeword. -/
-def baggyOpenReservedChains (suite : BaggySuite256) (sk : BaggySecretKey256)
+def baggyOpenReservedChains (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
     (identity : BaggyLedgerIdentity) (st : BaggyReleaseState identity)
     (r : StaticWotsOpeningRecord) : Option (Fin 128 → BitVec 256) :=
   let adrs := baggyLeafAdrs r.layer r.tree r.kp
   let ctr := suite.grindCounter sk.pkSeed adrs r.signedNode
-  if decide (identity.pkSeed = sk.pkSeed) &&
+  if decide (identity.pkSeed = sk.pkSeed ∧
+      identity.pkRoot = (baggyKeygen256 suite p sk).pkRoot ∧
+      identity.paramsDigest = suite.paramsDigest p ∧
+      r ∈ st.plan.map (·.record) ∧ r.layer < p.numLayers ∧ r.kp < 2 ^ p.subtreeHeight) &&
       (st.phase == .synced) &&
       (lookupDurableDigits st.durable r.layer r.tree r.kp == some r.digits) &&
       (wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs r.signedNode ctr) == some r.digits) then
@@ -4576,6 +4551,115 @@ theorem baggy_cache_authentic_or_forgery
   by_cases hm : e.message ∈ history
   · exact .inl (hHistory e.message hm (of_decide_eq_true hi))
   · exact .inr ⟨eq_of_beq ht, hm⟩
+
+/-- Accepted transcripts retain the exact coins with which they were checked. -/
+def Rss256EngineState.Checked (st : Rss256EngineState) : Prop :=
+  ∀ e ∈ st.accepted, e.1.check e.2.1 e.2.2 = true
+
+theorem rss256_recorded_step_preserves_checked (st : Rss256EngineState)
+    (op : Rss256EngineOp) (h : st.Checked) :
+    match rss256StepHardened st op with
+    | .ok next _ => next.Checked
+    | .err next _ => next.Checked := by
+  unfold rss256StepHardened
+  split
+  · exact h
+  · cases op with
+    | permuteInline w => exact h
+    | permuteBank w => exact h
+    | openPlanes => split <;> exact h
+    | check a b =>
+      split
+      next ha =>
+        intro e he
+        rcases List.mem_append.mp he with ho | hn
+        · exact h e ho
+        · obtain ⟨w, hw, rfl⟩ := List.mem_map.mp hn
+          exact List.all_eq_true.mp ha w hw
+      next => intro e he; cases he
+
+/-- Every emitted plane comes from the very transcript whose equations passed.
+Its semantic output is correct or that transcript is a concrete bad-challenge
+witness. This conclusion never equates verifier acceptance with semantic validity. -/
+theorem rss256_recorded_release_integrity (st next : Rss256EngineState)
+    (outputs : List Plane256) (h : st.Checked)
+    (ho : rss256StepHardened st .openPlanes = .ok next outputs)
+    (out : Plane256) (hm : out ∈ outputs) :
+    ∃ w : Rss256InlineWave, ∃ a b : Tower128,
+      out = rss256GateOutput w.input w.gates ∧
+      (out = rss256GateIdeal w.input w.gates ∨ (Rss256Wave.inlineWave w).BadChallenge a b) := by
+  unfold rss256StepHardened at ho
+  split at ho
+  · cases ho
+  · split at ho
+    next =>
+      injection ho with _ hOutputs
+      rw [← hOutputs] at hm
+      obtain ⟨entry, he, hv⟩ := List.mem_filterMap.mp hm
+      rcases entry with ⟨wave, a, b⟩
+      cases wave with
+      | bankWave w => cases hv
+      | inlineWave w =>
+        have heq : rss256GateOutput w.input w.gates = out := Option.some.inj hv
+        refine ⟨w, a, b, heq.symm, ?_⟩
+        by_cases hi : out = rss256GateIdeal w.input w.gates
+        · exact .inl hi
+        · right
+          exact ⟨fun hc => hi (heq.symm.trans hc), h _ he⟩
+    next => cases ho
+
+/-- A present invalid signature cache entry cannot fall back to fresh signing. -/
+theorem baggy_invalid_cache_entry_rejects (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256) (cache : VerifiedWaistbandCache)
+    (leaf layer remaining : Nat) (node : BitVec 256)
+    (hInvalid : verifyWaistbandCanopy suite p pk cache layer
+      (p.pathAt leaf layer).2 (p.pathAt leaf layer).1 node = none)
+    (hPresent : (cache.cachedSig layer (p.pathAt leaf layer).2 (p.pathAt leaf layer).1).isSome = true) :
+    baggySignLayersVerifiedCacheAux suite p sk pk cache leaf layer (remaining + 1) node = none := by
+  simp only [baggySignLayersVerifiedCacheAux, hInvalid, hPresent, ↓reduceIte]
+
+/-- Convert an authenticated cached child root into a planned ancestor opening.
+The provenance tag is produced here, and Rust's `must_exist` rule is checked
+against the durable guard. Authentication failure is never treated as a miss. -/
+def planBaggyCachedChild (mac : BaggyCacheMessage → BitVec 256)
+    (suite : BaggySuite256) (p : BaggyTreeParams)
+    (identity : BaggyLedgerIdentity) (guard : DurableStaticWotsGuard)
+    (entry : BaggyAuthenticatedCacheEntry) (childKp : Nat) (childPlan : BaggyLayerCachePlan p)
+    (r : StaticWotsOpeningRecord) : Option BaggyPlannedOpening :=
+  if verifyBaggyCacheMac mac identity entry && decide
+      (1 ≤ r.layer ∧ entry.message.layer = r.layer - 1 ∧
+        entry.message.tree = baggyChildTreeIdx p r.tree r.kp ∧
+        entry.message.root = r.signedNode) then
+    match authenticateBaggyLayerPlan suite p identity.pkSeed entry.message.layer
+        entry.message.tree childKp childPlan with
+    | some (some root, provenance) =>
+      let plan : BaggyPlannedOpening := ⟨r, provenance⟩
+      if root == entry.message.root && admitBaggyPlannedOpening guard plan then some plan else none
+    | _ => none
+  else none
+
+run_cmd do
+  let env ← Lean.getEnv
+  let names : Array Lean.Name := #[
+    `Qsag.rss256_product_degree_two_roots,
+    `Qsag.rss256_product_residual_evaluation,
+    `Qsag.rss256_recorded_step_preserves_checked,
+    `Qsag.rss256_recorded_release_integrity,
+    `Qsag.baggy_release_has_durable_codeword,
+    `Qsag.tooth_baggy_crash_between_write_and_sync,
+    `Qsag.baggy_cache_authentic_or_forgery,
+    `Qsag.baggy_invalid_cache_entry_rejects,
+    `Qsag.context_cut_fault_extract,
+    `Qsag.tooth_context_cut_epoch_replay,
+    `Qsag.signed_slashing_attribution,
+    `Qsag.evalGeneratedDkgFrobenius_sound]
+  for name in names do
+    if (env.find? name).isNone then
+      throwError "Missing wave-2 declaration {name}"
+    let dependencies ← Lean.collectAxioms name
+    let forbidden := dependencies.filter fun ax => ax != ``propext && ax != ``Quot.sound
+    unless forbidden.isEmpty do
+      throwError "Forbidden axioms in {name}: {forbidden}"
 
 end Qsag
 end
