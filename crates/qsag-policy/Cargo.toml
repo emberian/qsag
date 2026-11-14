@@ -1,0 +1,19 @@
+[package]
+name = "qsag-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Authenticated transaction-predicate guard evaluating recipient allowlists, amount velocity caps, anti-self-approval, and quorum-tier rules inside committed BDOZ GF(2^128) MAC barriers."
+
+[features]
+default = ["alloc"]
+alloc = ["qsag-accel/alloc", "qsag-addr/alloc"]
+test-dealer = []
+std = ["qsag-asm/std", "alloc", "qsag-accel/std", "qsag-addr/std"]
+
+[dependencies]
+qsag-fts = { path = "../qsag-fts", default-features = false }
+qsag-asm = { path = "../qsag-asm", default-features = false }
+qsag-accel = { path = "../qsag-accel", default-features = false }
+qsag-addr = { path = "../qsag-addr", default-features = false }
