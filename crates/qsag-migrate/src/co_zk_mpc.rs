@@ -1839,7 +1839,12 @@ mod tests {
         fn acquire() -> Self {
             let (active, ready) = &HEAVY_CEREMONIES;
             let mut count = active.lock().unwrap_or_else(|e| e.into_inner());
-            while *count >= 2 {
+            let limit = if std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24) {
+                4
+            } else {
+                2
+            };
+            while *count >= limit {
                 count = ready.wait(count).unwrap_or_else(|e| e.into_inner());
             }
             *count += 1;
