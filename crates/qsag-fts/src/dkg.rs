@@ -577,3 +577,527 @@ fn check_tag_digest(context: &[u8; 32], id: u16, tags: &[u128; 2], salt: &[u8; 3
 
 /// Broadcast first: binds this party's check coin before any coin is opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParallelSeededDkgCheckCommit {
+    pub party_id: u16,
+    pub context: [u8; 32],
+    pub digest: [u8; 32],
+}
+/// Broadcast second, only after every [`ParallelSeededDkgCheckCommit`] is frozen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParallelSeededDkgCheckCoin {
+    pub party_id: u16,
+    pub context: [u8; 32],
+    pub coin: [u8; 32],
+}
+/// Broadcast third: this party's additive shares of every masked opening.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParallelSeededDkgCheckShares {
+    pub party_id: u16,
+    pub context: [u8; 32],
+    pub rho: Vec<u128>,
+    pub sigma: Vec<u128>,
+    pub masked: u128,
+}
+/// Broadcast fourth: binds this party's MAC tags before any tag is opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParallelSeededDkgCheckTagCommit {
+    pub party_id: u16,
+    pub context: [u8; 32],
+    pub digest: [u8; 32],
+}
+/// Broadcast fifth, only after every [`ParallelSeededDkgCheckTagCommit`] is frozen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParallelSeededDkgCheckTagOpen {
+    pub party_id: u16,
+    pub context: [u8; 32],
+    pub tags: [u128; 2],
+    pub salt: [u8; 32],
+}
+
+/// One custodian's DKG result before the active consistency check. The share and preprocessing
+/// are released only by [`Self::activate`]. Every method must see the same authenticated
+/// broadcast, in roster order, at every party. Any error is final for this ceremony.
+pub struct ParallelSeededDkgUnverifiedOutput {
+    output: Option<ParallelSeededDkgOutput>,
+    roster: Vec<u16>,
+    party_id: u16,
+    context: [u8; 32],
+    layout: CheckLayout,
+    alpha: [u128; 2],
+    values: SecretValues,
+    macs: [SecretValues; 2],
+    coin: [u8; 32],
+    salt: [u8; 32],
+    step: u8,
+    coin_commits: Vec<ParallelSeededDkgCheckCommit>,
+    joint_coin: [u8; 32],
+    own_shares_digest: [u8; 32],
+    tags: [u128; 2],
+    tag_commits: Vec<ParallelSeededDkgCheckTagCommit>,
+}
+impl Drop for ParallelSeededDkgUnverifiedOutput {
+    fn drop(&mut self) {
+        ct_zeroize_u128s(&mut self.alpha);
+        ct_zeroize_u128s(&mut self.tags);
+        ct_zeroize_bytes(&mut self.coin);
+        ct_zeroize_bytes(&mut self.salt);
+    }
+}
+impl ParallelSeededDkgUnverifiedOutput {
+    const FAILED: u8 = u8::MAX;
+
+    fn fail<T>(&mut self, error: ParallelSeededError) -> Result<T, ParallelSeededError> {
+        self.step = Self::FAILED;
+        self.output = None;
+        Err(error)
+    }
+    /// A broadcast is acceptable only if it has one entry per roster member, in roster order,
+    /// bound to this ceremony's check context.
+    fn roster_matches(&self, entries: impl ExactSizeIterator<Item = (u16, [u8; 32])>) -> bool {
+        entries.len() == self.roster.len()
+            && entries
+                .zip(&self.roster)
+                .all(|((id, context), expected)| id == *expected && context == self.context)
+    }
+    fn challenge_frames(&self) -> [[u8; 8]; 2] {
+        [
+            (self.layout.power_count as u64).to_be_bytes(),
+            (self.layout.output_triples as u64).to_be_bytes(),
+        ]
+    }
+    fn relation_challenges(&self) -> Vec<u128> {
+        let [powers, triples] = self.challenge_frames();
+        check_challenges(
+            b"QSAG.DKG.CHECK.SACRIFICE_T.V1",
+            &[&self.context, &self.joint_coin, &powers, &triples],
+            self.layout.relation_count(),
+        )
+    }
+    fn fold_weights(&self) -> Vec<u128> {
+        let [powers, triples] = self.challenge_frames();
+        check_challenges(
+            b"QSAG.DKG.CHECK.FOLD_WEIGHTS.V1",
+            &[&self.context, &self.joint_coin, &powers, &triples],
+            self.layout.output_value_count(),
+        )
+    }
+    fn shares_digest(shares: &ParallelSeededDkgCheckShares) -> [u8; 32] {
+        let mut bytes = Vec::with_capacity((shares.rho.len() + shares.sigma.len() + 1) * 16);
+        for value in shares
+            .rho
+            .iter()
+            .chain(&shares.sigma)
+            .chain(core::iter::once(&shares.masked))
+        {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        cshake256_framed_32(
+            b"QSAG.DKG.CHECK.SHARES.V1",
+            &[
+                &shares.context,
+                &shares.party_id.to_be_bytes(),
+                &(shares.rho.len() as u64).to_be_bytes(),
+                &bytes,
+            ],
+        )
+    }
+
+    /// Step 1: this party's check-coin commitment.
+    pub fn check_commitment(&self) -> ParallelSeededDkgCheckCommit {
+        ParallelSeededDkgCheckCommit {
+            party_id: self.party_id,
+            context: self.context,
+            digest: check_coin_digest(&self.context, self.party_id, &self.coin),
+        }
+    }
+    /// Step 2: freeze every party's coin commitment, then reveal this party's coin.
+    pub fn reveal_check_coin(
+        &mut self,
+        commits: &[ParallelSeededDkgCheckCommit],
+    ) -> Result<ParallelSeededDkgCheckCoin, ParallelSeededError> {
+        if self.step != 0
+            || !self.roster_matches(commits.iter().map(|c| (c.party_id, c.context)))
+            || !commits.contains(&self.check_commitment())
+        {
+            return self.fail(ParallelSeededError::InvalidThresholdParameters);
+        }
+        self.coin_commits = commits.to_vec();
+        self.step = 1;
+        Ok(ParallelSeededDkgCheckCoin {
+            party_id: self.party_id,
+            context: self.context,
+            coin: self.coin,
+        })
+    }
+    /// Step 3: verify every coin opening, derive the challenges, and return this party's
+    /// shares of the masked openings.
+    pub fn masked_shares(
+        &mut self,
+        coins: &[ParallelSeededDkgCheckCoin],
+    ) -> Result<ParallelSeededDkgCheckShares, ParallelSeededError> {
+        if self.step != 1 || !self.roster_matches(coins.iter().map(|c| (c.party_id, c.context))) {
+            return self.fail(ParallelSeededError::InvalidThresholdParameters);
+        }
+        let mismatch = coins.iter().zip(&self.coin_commits).find(|(coin, commit)| {
+            !ct_eq_bytes(
+                &check_coin_digest(&self.context, coin.party_id, &coin.coin),
+                &commit.digest,
+            )
+        });
+        if let Some(party_id) = mismatch.map(|(coin, _)| coin.party_id) {
+            return self.fail(ParallelSeededError::CommitmentMismatch { party_id });
+        }
+        let mut opened = Vec::with_capacity(coins.len() * 32);
+        for coin in coins {
+            opened.extend_from_slice(&coin.coin);
+        }
+        self.joint_coin =
+            cshake256_framed_32(b"QSAG.DKG.CHECK.JOINT_COIN.V1", &[&self.context, &opened]);
+        let challenges = self.relation_challenges();
+        let weights = self.fold_weights();
+        let values = &self.values.0;
+        let mut rho = Vec::with_capacity(challenges.len());
+        let mut sigma = Vec::with_capacity(challenges.len());
+        for (index, &t) in challenges.iter().enumerate() {
+            let r = self.layout.relation(index);
+            rho.push(gf2_128_mul(t, values[r.x]) ^ values[r.u]);
+            sigma.push(values[r.y] ^ values[r.v]);
+        }
+        let masked = weights.iter().zip(values).fold(
+            values[self.layout.mask_index()],
+            |acc, (&weight, &value)| acc ^ gf2_128_mul(weight, value),
+        );
+        let shares = ParallelSeededDkgCheckShares {
+            party_id: self.party_id,
+            context: self.context,
+            rho,
+            sigma,
+            masked,
+        };
+        self.own_shares_digest = Self::shares_digest(&shares);
+        self.step = 2;
+        Ok(shares)
+    }
+    /// Step 4: reconstruct the masked openings from every party's shares, compute this party's
+    /// MAC tag on both lanes, and commit to it.
+    pub fn tag_commitment(
+        &mut self,
+        shares: &[ParallelSeededDkgCheckShares],
+    ) -> Result<ParallelSeededDkgCheckTagCommit, ParallelSeededError> {
+        let relations = self.layout.relation_count();
+        if self.step != 2
+            || !self.roster_matches(shares.iter().map(|s| (s.party_id, s.context)))
+            || shares
+                .iter()
+                .any(|s| s.rho.len() != relations || s.sigma.len() != relations)
+            || !shares.iter().any(|s| {
+                s.party_id == self.party_id
+                    && ct_eq_bytes(&Self::shares_digest(s), &self.own_shares_digest)
+            })
+        {
+            return self.fail(ParallelSeededError::InvalidThresholdParameters);
+        }
+        let mut rho = vec![0u128; relations];
+        let mut sigma = vec![0u128; relations];
+        let mut masked = 0u128;
+        let mut transcript = Vec::with_capacity(shares.len() * 32);
+        for share in shares {
+            for (acc, value) in rho.iter_mut().zip(&share.rho) {
+                *acc ^= value;
+            }
+            for (acc, value) in sigma.iter_mut().zip(&share.sigma) {
+                *acc ^= value;
+            }
+            masked ^= share.masked;
+            transcript.extend_from_slice(&Self::shares_digest(share));
+        }
+        let challenges = self.relation_challenges();
+        let weights = self.fold_weights();
+        // The MAC weights depend on every broadcast share, so they are fixed only after the
+        // opened values are.
+        let mac_weights = check_challenges(
+            b"QSAG.DKG.CHECK.MAC_WEIGHTS.V1",
+            &[&self.context, &self.joint_coin, &transcript],
+            3 * relations + 1,
+        );
+        let mut tags = [0u128; 2];
+        for (lane, tag) in tags.iter_mut().enumerate() {
+            let (alpha, mac) = (self.alpha[lane], &self.macs[lane].0);
+            for index in 0..relations {
+                let r = self.layout.relation(index);
+                let (t, rho, sigma) = (challenges[index], rho[index], sigma[index]);
+                let rho_tag = gf2_128_mul(t, mac[r.x]) ^ mac[r.u] ^ gf2_128_mul(alpha, rho);
+                let sigma_tag = mac[r.y] ^ mac[r.v] ^ gf2_128_mul(alpha, sigma);
+                // MAC share of `t*c + w + sigma*u + rho*v + rho*sigma`, which must open to zero.
+                let zero_tag = gf2_128_mul(t, mac[r.c])
+                    ^ mac[r.w]
+                    ^ gf2_128_mul(sigma, mac[r.u])
+                    ^ gf2_128_mul(rho, mac[r.v])
+                    ^ gf2_128_mul(alpha, gf2_128_mul(rho, sigma));
+                *tag ^= gf2_128_mul(mac_weights[3 * index], rho_tag)
+                    ^ gf2_128_mul(mac_weights[3 * index + 1], sigma_tag)
+                    ^ gf2_128_mul(mac_weights[3 * index + 2], zero_tag);
+            }
+            let masked_tag = weights.iter().zip(mac).fold(
+                mac[self.layout.mask_index()] ^ gf2_128_mul(alpha, masked),
+                |acc, (&weight, &share)| acc ^ gf2_128_mul(weight, share),
+            );
+            *tag ^= gf2_128_mul(mac_weights[3 * relations], masked_tag);
+        }
+        self.tags = tags;
+        self.step = 3;
+        Ok(ParallelSeededDkgCheckTagCommit {
+            party_id: self.party_id,
+            context: self.context,
+            digest: check_tag_digest(&self.context, self.party_id, &self.tags, &self.salt),
+        })
+    }
+    /// Step 5: freeze every party's tag commitment, then open this party's tags.
+    pub fn open_tags(
+        &mut self,
+        commits: &[ParallelSeededDkgCheckTagCommit],
+    ) -> Result<ParallelSeededDkgCheckTagOpen, ParallelSeededError> {
+        let own = check_tag_digest(&self.context, self.party_id, &self.tags, &self.salt);
+        if self.step != 3
+            || !self.roster_matches(commits.iter().map(|c| (c.party_id, c.context)))
+            || !commits
+                .iter()
+                .any(|c| c.party_id == self.party_id && ct_eq_bytes(&c.digest, &own))
+        {
+            return self.fail(ParallelSeededError::InvalidThresholdParameters);
+        }
+        self.tag_commits = commits.to_vec();
+        self.step = 4;
+        Ok(ParallelSeededDkgCheckTagOpen {
+            party_id: self.party_id,
+            context: self.context,
+            tags: self.tags,
+            salt: self.salt,
+        })
+    }
+    /// Verify every tag opening against its commitment and require the tags to cancel on both
+    /// MAC lanes. Only then is the key share released.
+    pub fn activate(
+        mut self,
+        openings: &[ParallelSeededDkgCheckTagOpen],
+    ) -> Result<ParallelSeededDkgOutput, ParallelSeededError> {
+        if self.step != 4 || !self.roster_matches(openings.iter().map(|o| (o.party_id, o.context)))
+        {
+            return self.fail(ParallelSeededError::InvalidThresholdParameters);
+        }
+        let mismatch = openings
+            .iter()
+            .zip(&self.tag_commits)
+            .find(|(open, commit)| {
+                !ct_eq_bytes(
+                    &check_tag_digest(&self.context, open.party_id, &open.tags, &open.salt),
+                    &commit.digest,
+                )
+            });
+        if let Some(party_id) = mismatch.map(|(open, _)| open.party_id) {
+            return self.fail(ParallelSeededError::CommitmentMismatch { party_id });
+        }
+        let sum = openings.iter().fold([0u128; 2], |acc, open| {
+            [acc[0] ^ open.tags[0], acc[1] ^ open.tags[1]]
+        });
+        if !(qsag_accel::ct::ct_eq_u128(sum[0], 0) & qsag_accel::ct::ct_eq_u128(sum[1], 0)) {
+            return self.fail(ParallelSeededError::BdozMacCheckFailed);
+        }
+        self.output.take().ok_or(ParallelSeededError::Poisoned)
+    }
+}
+
+/// Finalize only one custodian. Commitments must already be frozen. Private
+/// packages contain exactly the incoming lower-ID pair seeds. All cross terms,
+/// including both MAC lanes, flow through pairwise oblivious products; alpha and
+/// global seeds are never formed. Any error consumes and erases local state.
+///
+/// The result is unverified: run the consistency check on it and call
+/// [`ParallelSeededDkgUnverifiedOutput::activate`] to obtain the key share.
+pub fn finalize_parallel_seeded_dkg_party<T: ParallelSeededDkgProducts>(
+    state: ParallelSeededDkgRound1State,
+    openings: &[ParallelSeededDkgRound2Open],
+    packages: Vec<ParallelSeededDkgSharePackage>,
+    backend: &mut T,
+) -> Result<ParallelSeededDkgUnverifiedOutput, ParallelSeededError> {
+    let layout = CheckLayout::new(state.config.power_count, state.config.beaver_count)
+        .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
+    let frozen = state.frozen_context()?;
+    let commits = state
+        .commits
+        .as_ref()
+        .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
+    if !state.packages_sent
+        || backend.party_id() != state.party_id
+        || openings.len() != commits.len()
+    {
+        return Err(ParallelSeededError::InvalidThresholdParameters);
+    }
+    let mut coin = [0u8; 32];
+    for (open, commit) in openings.iter().zip(commits) {
+        if open.party_id != commit.party_id
+            || open.context != state.context
+            || !ct_eq_bytes(
+                &coin_digest(&state.context, open.party_id, &open.coin),
+                &commit.digest,
+            )
+        {
+            return Err(ParallelSeededError::CommitmentMismatch {
+                party_id: commit.party_id,
+            });
+        }
+        for (acc, value) in coin.iter_mut().zip(open.coin) {
+            *acc ^= value;
+        }
+    }
+    let key_seed = cshake256_framed_32(b"QSAG.DKG.PUBLIC_SEED.V1", &[&frozen, &coin]);
+    let mut share = ParallelSeededPartyShare {
+        party_id: state.party_id,
+        params: state.config.params,
+        key_seed,
+        committee: state.config.roster.clone(),
+        sk_seed_lanes: [0; 2],
+        sk_seed_macs: [[0; 2]; 2],
+        sk_prf_lanes: [0; 2],
+        sk_prf_macs: [[0; 2]; 2],
+        bdoz_alpha_share: [0; 2],
+        local_salt_seed: cshake256_framed_32(b"QSAG.DKG.SALT.V1", &[&state.entropy, &frozen]),
+        pairwise_zero_seeds: Vec::new(),
+        beaver_pool: Vec::new(),
+        beaver_cursor: 0,
+        epoch_uses: vec![0; 1usize << state.config.params.tree_height],
+        poisoned: false,
+        pending_openings: Vec::new(),
+        #[cfg(test)]
+        power_fault: false,
+    };
+    let incoming = state
+        .config
+        .roster
+        .iter()
+        .filter(|&&id| id < state.party_id)
+        .count();
+    if packages.len() != incoming {
+        return Err(ParallelSeededError::InvalidThresholdParameters);
+    }
+    for &peer in &state.config.roster {
+        if peer == state.party_id {
+            continue;
+        }
+        let seed = if peer > state.party_id {
+            state.pair_seed(peer, &frozen)
+        } else {
+            let mut found = packages.iter().filter(|p| p.sender == peer);
+            let p = found
+                .next()
+                .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
+            if found.next().is_some() || p.recipient != state.party_id || p.context != frozen {
+                return Err(ParallelSeededError::InvalidThresholdParameters);
+            }
+            p.seed
+        };
+        share.pairwise_zero_seeds.push((peer, seed));
+    }
+    let private = state.sample(b"KEYS", 6);
+    share.sk_seed_lanes.copy_from_slice(&private.0[..2]);
+    share.sk_prf_lanes.copy_from_slice(&private.0[2..4]);
+    share.bdoz_alpha_share.copy_from_slice(&private.0[4..6]);
+    let mut products = Products {
+        backend,
+        roster: &state.config.roster,
+        context: cshake256_framed_32(b"QSAG.DKG.CORRELATIONS.V1", &[&frozen, &key_seed]),
+        sequence: 0,
+    };
+    let a = state.sample(b"POWER_MASKS", state.config.power_count);
+    let a2 = SecretValues(a.0.iter().map(|&x| gf2_128_mul(x, x)).collect());
+    let a3 = products.multiply(&a.0, &a2.0)?;
+    let a4 = SecretValues(a2.0.iter().map(|&x| gf2_128_mul(x, x)).collect());
+    let a5 = products.multiply(&a.0, &a4.0)?;
+    let a6 = SecretValues(a3.0.iter().map(|&x| gf2_128_mul(x, x)).collect());
+    let a7 = products.multiply(&a3.0, &a4.0)?;
+    // Output triples first, then one sacrificial triple per checked relation.
+    let u = state.sample(b"BEAVER_U", layout.total_triples());
+    let v = state.sample(b"BEAVER_V", layout.total_triples());
+    let uv = products.multiply(&u.0, &v.0)?;
+    let mask = state.sample(b"CHECK_MASK", 1);
+    let mut values = SecretValues(private.0[..4].to_vec());
+    for (index, _) in a.0.iter().enumerate() {
+        for power in [&a, &a2, &a3, &a4, &a5, &a6, &a7] {
+            values.0.push(power.0[index]);
+        }
+    }
+    for ((&u, &v), &uv) in u.0.iter().zip(&v.0).zip(&uv.0) {
+        values.0.extend_from_slice(&[u, v, uv]);
+    }
+    values.0.push(mask.0[0]);
+    if values.0.len() != layout.value_count() {
+        return Err(ParallelSeededError::InvalidThresholdParameters);
+    }
+    let mut macs = Vec::new();
+    for alpha in share.bdoz_alpha_share {
+        let keys = SecretValues(vec![alpha; values.0.len()]);
+        macs.push(products.multiply(&keys.0, &values.0)?);
+    }
+    let wire = |i: usize| AuthWire128 {
+        val_sh: values.0[i],
+        mac: [macs[0].0[i], macs[1].0[i]],
+    };
+    share.sk_seed_macs = [wire(0).mac, wire(1).mac];
+    share.sk_prf_macs = [wire(2).mac, wire(3).mac];
+    for index in 0..state.config.power_count {
+        share.beaver_pool.push(AuthenticatedPowerShare {
+            powers: core::array::from_fn(|j| wire(4 + index * 7 + j)),
+        });
+    }
+    let start = 4 + state.config.power_count * 7;
+    let beaver_triples = (0..state.config.beaver_count)
+        .map(|i| ParallelSeededDkgBeaverShare {
+            values: core::array::from_fn(|j| values.0[start + i * 3 + j]),
+            macs: core::array::from_fn(|j| wire(start + i * 3 + j).mac),
+        })
+        .collect();
+    let context = cshake256_framed_32(
+        b"QSAG.DKG.CHECK.CONTEXT.V1",
+        &[
+            &frozen,
+            &key_seed,
+            &(layout.power_count as u64).to_be_bytes(),
+            &(layout.output_triples as u64).to_be_bytes(),
+        ],
+    );
+    let id = state.party_id.to_be_bytes();
+    let coin = cshake256_framed_32(b"QSAG.DKG.CHECK.COIN.V1", &[&state.entropy, &context, &id]);
+    let salt = cshake256_framed_32(
+        b"QSAG.DKG.CHECK.TAG_SALT.V1",
+        &[&state.entropy, &context, &id],
+    );
+    let alpha = share.bdoz_alpha_share;
+    let mac_lane_1 = macs
+        .pop()
+        .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
+    let mac_lane_0 = macs
+        .pop()
+        .ok_or(ParallelSeededError::InvalidThresholdParameters)?;
+    Ok(ParallelSeededDkgUnverifiedOutput {
+        output: Some(ParallelSeededDkgOutput {
+            pk_seed_bytes: key_seed,
+            share,
+            beaver_triples,
+        }),
+        roster: state.config.roster.clone(),
+        party_id: state.party_id,
+        context,
+        layout,
+        alpha,
+        values,
+        macs: [mac_lane_0, mac_lane_1],
+        coin,
+        salt,
+        step: 0,
+        coin_commits: Vec::new(),
+        joint_coin: [0; 32],
+        own_shares_digest: [0; 32],
+        tags: [0; 2],
+        tag_commits: Vec::new(),
+    })
+}
