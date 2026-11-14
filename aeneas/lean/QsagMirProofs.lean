@@ -550,3 +550,7 @@ export qsag_verified.proofs (
   tooth_extractedRssCut_nonzero_residual_rejected
 )
 end QsagMirProofs
+
+namespace QsagMirProofs
+export qsag_verified.proofs (tooth_velocity_used_nonce_model_is_not_monotone_nonce)
+end QsagMirProofs

@@ -3,6 +3,13 @@ public import QsagVerified.Proofs.BeltAckProvenance
 public import Qsag.JortsBeltLatchAndQuorumSwitching
 import all Qsag.JortsBeltLatchAndQuorumSwitching
 
+/-!
+This is the local authenticated guard's certificate-to-mask refinement. It includes
+constructor-established invariants and histories containing rejected calls. Production
+BeltLatch durable records, retry salts, recovery, and receiver-specific peer echoes are
+not represented by this extracted guard; no whole-network transition refinement is claimed.
+-/
+
 public section
 namespace qsag_verified.proofs
 open Aeneas Aeneas.Std Result
@@ -62,4 +69,26 @@ theorem belt_quorum_intersection_refines_qsag
     f.val < Qsag.maskCard (Qsag.maskInter (beltMaskAbs a) (beltMaskAbs b)) := by
   rw [← beltMaskAbs_inter, beltMaskAbs_card]
   exact belt_quorum_intersection hc ha hba hb hbb
+/-- Constructor-to-grant weld: the caller need not assume empty bitmap, count/range
+invariants, or the quorum intersection configuration separately. They follow from the
+actual validated constructor, and the run includes rejected calls. -/
+theorem belt_validated_grant_refines_qsag_mask
+    {n t f q : Std.U32} {gl : Bool} {e0 window : Std.U64}
+    {commit wal : Array Std.U8 32#usize} {keys : Array (Array Std.U8 32#usize) 64#usize}
+    {initial st st' : authenticated_belt.VerifiedBeltQuorumGuard}
+    {calls : List BeltCall} {a : BeltAction}
+    {g : pants_and_quorum_guards.BeltAuthorizationGrant}
+    (hn : authenticated_belt.VerifiedBeltQuorumGuard.new_validated
+      n t f q gl e0 window commit keys wal = .ok (.Ok initial))
+    (hr : BeltRun initial calls st)
+    (hg : authenticated_belt.VerifiedBeltQuorumGuard.step st a =
+      .ok (st', .Ok (.SharesAuthorized g))) :
+    n.val + f.val < 2 * q.val ∧
+    q.val ≤ Qsag.maskCard (beltMaskAbs st.ack_bitmap) ∧
+    g.certified_acks.val = Qsag.maskCard (beltMaskAbs st.ack_bitmap) ∧
+    ∀ i : Fin 64, (beltMaskAbs st.ack_bitmap).mem i = true →
+      i.val < n.val ∧ BeltAckSeen st g.authorized_epoch g.msg_tag i.val calls := by
+  obtain ⟨hz, hi, hq⟩ := belt_new_validated_provenance_init hn
+  exact ⟨hq, belt_grant_refines_qsag_mask hr hz hi hg⟩
+
 end qsag_verified.proofs
