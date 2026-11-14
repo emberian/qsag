@@ -231,11 +231,12 @@ impl CoZkCustodianShare {
                         mask
                     }
                 });
-                let masked: Word = view
-                    .bytes()
-                    .iter()
-                    .map(|b| Bit([b.0[0] & mask, b.0[1] & mask]))
-                    .collect();
+                let total_bits =
+                    view.seed.len() + view.inputs.len() + view.products.len() + view.outputs.len();
+                let mut masked = Vec::with_capacity(total_bits);
+                for part in [&view.seed, &view.inputs, &view.products, &view.outputs] {
+                    masked.extend(part.iter().map(|b| Bit([b.0[0] & mask, b.0[1] & mask])));
+                }
                 #[cfg(test)]
                 opening_engine.transport.on_public_or_view_open();
                 let clear = opening_engine.open(&masked)?;

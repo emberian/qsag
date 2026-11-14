@@ -591,19 +591,19 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                 let mut xof = init_cshake256(b"", b"QSAG.RSS.KEY.V1");
                 xof.absorb(context);
                 xof.absorb(&(s as u32).to_le_bytes());
-                for j in 0..parties {
+                for (j, cursor_at) in cursor.iter_mut().enumerate() {
                     if !self.st.holds(s, j) {
                         continue;
                     }
                     if j == self.me {
                         xof.absorb(&mine[i]);
                     } else {
-                        let at = cursor[j];
+                        let at = *cursor_at;
                         let bytes = inbox.private[j]
                             .get(at..at + 32)
                             .ok_or(MpcError::MalformedMessage { from: j })?;
                         xof.absorb(bytes);
-                        cursor[j] = at + 32;
+                        *cursor_at = at + 32;
                     }
                 }
                 finalize_cshake256(&mut xof, true);
@@ -852,8 +852,8 @@ impl<'a, T: MpcTransport> Engine<'a, T> {
                         b"QSAG.RSS.VIEW.V1",
                         &[&self.views[i], &(party as u32).to_le_bytes(), bytes],
                     );
-                    for k in 0..len {
-                        out.c[i][k] = fq_add(out.c[i][k], values[k]);
+                    for (slot, value) in out.c[i].iter_mut().zip(&values) {
+                        *slot = fq_add(*slot, *value);
                     }
                 }
             }
