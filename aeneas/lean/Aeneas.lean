@@ -414,6 +414,9 @@ namespace num
 def U64.MAX : U64 := ⟨BitVec.allOnes 64⟩
 
 @[expose]
+def U128.MAX : U128 := ⟨BitVec.allOnes 128⟩
+
+@[expose]
 def U64.rotate_left (x : U64) (n : U32) : U64 :=
   ⟨x.bv.rotateLeft (n.val % 64)⟩
 end num
