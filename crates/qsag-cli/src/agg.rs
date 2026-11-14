@@ -75,7 +75,7 @@ fn load_committee(path: &str) -> Result<Vec<ValidatorPublicKey>, CliError> {
         .and_then(Json::as_array)
         .ok_or_else(|| CliError::input("missing validators"))?;
     let committee = committee_from_json(keys)?;
-    if public.field_hex("committee_root")? != compute_committee_root(&committee) {
+    if *public.field_hex("committee_root")? != compute_committee_root(&committee) {
         return Err(CliError::input(
             "committee_root does not match the listed validators",
         ));
@@ -132,7 +132,16 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
         &[
-            "secret", "public", "signers", "epoch", "wal-dir", "merge", "in", "out",
+            "secret",
+            "public",
+            "signers",
+            "epoch",
+            "wal-dir",
+            "merge",
+            "in",
+            "out",
+            "passphrase-env",
+            "passphrase-file",
         ],
         &["deterministic", "json", "help"],
     )?;
@@ -157,11 +166,14 @@ pub fn aggregate(raw: &[String]) -> Result<(), CliError> {
         let secret_path = args.require("secret")?;
         let mut vault = crate::vault::Vault::acquire(secret_path, false)?;
         let mut secret = load_json(secret_path, SECRET_FORMAT)?;
+        let passphrase = crate::envelope::passphrase(&args)?;
+        let opened = crate::envelope::open(&secret, passphrase.as_deref())?;
+        vault.set_key_material(&opened)?;
         vault.authenticate(&secret)?;
         if scheme_of(&secret)? != Scheme::AggCommittee {
             return Err(CliError::usage("--secret must be a committee key file"));
         }
-        let seed = crate::cli::Secret32(from_hex_exact(secret.field_str("seed")?, "seed")?);
+        let seed = crate::codec::from_hex_secret32(opened.field_str("seed")?, "seed")?;
         let size = secret.field_u64("validators")? as u32;
         let epoch = args
             .get_u64("epoch")?

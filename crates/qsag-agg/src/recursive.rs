@@ -577,3 +577,570 @@ fn verify_hierarchical_hem_inner(
 
 /// Prove a two-layer hierarchical `Hem` aggregate across `policies` (`JortsPoseidon2`,
 /// `CorduroyPoseidon2`, or mixed regional profiles).
+pub fn prove_hierarchical_hem(
+    policies: &[ShardHemPolicy],
+    witnesses: &[ShardHemWitness<'_>],
+    epoch_floor: u64,
+    message: impl AsRef<[u8]>,
+    minimum_global_quorums: usize,
+    config: &HemAggConfig,
+) -> Result<HierarchicalHemAggregate, HemAggError> {
+    prove_hierarchical_hem_inner(
+        policies,
+        witnesses,
+        epoch_floor,
+        message.as_ref(),
+        minimum_global_quorums,
+        config,
+        false,
+    )
+}
+
+/// Verify a two-layer hierarchical `Hem` aggregate against `policies`, exact `epoch_floor` and
+/// `message`, global quorum threshold, and `regime`.
+pub fn verify_hierarchical_hem(
+    policies: &[ShardHemPolicy],
+    epoch_floor: u64,
+    message: impl AsRef<[u8]>,
+    minimum_global_quorums: usize,
+    regime: WhirSecurityRegime,
+    aggregate: &HierarchicalHemAggregate,
+) -> bool {
+    verify_hierarchical_hem_inner(
+        policies,
+        epoch_floor,
+        message.as_ref(),
+        minimum_global_quorums,
+        regime,
+        aggregate,
+        false,
+    )
+}
+
+/// Prove a registry-pinned two-layer hierarchical `Hem` aggregate whose individual quorum
+/// signatures sign [`hierarchical_hem_registry_bound_message`].
+pub fn prove_hierarchical_hem_registry_bound(
+    policies: &[ShardHemPolicy],
+    witnesses: &[ShardHemWitness<'_>],
+    epoch_floor: u64,
+    message: impl AsRef<[u8]>,
+    minimum_global_quorums: usize,
+    config: &HemAggConfig,
+) -> Result<HierarchicalHemAggregate, HemAggError> {
+    prove_hierarchical_hem_inner(
+        policies,
+        witnesses,
+        epoch_floor,
+        message.as_ref(),
+        minimum_global_quorums,
+        config,
+        true,
+    )
+}
+
+/// Verify a registry-pinned two-layer hierarchical `Hem` aggregate produced by
+/// [`prove_hierarchical_hem_registry_bound`].
+pub fn verify_hierarchical_hem_registry_bound(
+    policies: &[ShardHemPolicy],
+    epoch_floor: u64,
+    message: impl AsRef<[u8]>,
+    minimum_global_quorums: usize,
+    regime: WhirSecurityRegime,
+    aggregate: &HierarchicalHemAggregate,
+) -> bool {
+    verify_hierarchical_hem_inner(
+        policies,
+        epoch_floor,
+        message.as_ref(),
+        minimum_global_quorums,
+        regime,
+        aggregate,
+        true,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ValidatorKeypair;
+
+    #[test]
+    fn hierarchical_three_regions_twelve_quorums() {
+        let mut policies = Vec::new();
+        let mut signatures = Vec::new();
+        let epoch = 17;
+        let digest = [42u8; 32];
+        for region in 0..3u64 {
+            let mut keys: Vec<_> = (0..4)
+                .map(|i| {
+                    ValidatorKeypair::keygen_deterministic(
+                        AggSigProfile::JortsPoseidon2,
+                        &[region as u8 + 1; 32],
+                        i,
+                    )
+                })
+                .collect();
+            let policy = ShardHemPolicy {
+                shard_id: region,
+                custodian_cluster: [region as u8; 32],
+                quorum_keys: keys.iter().map(|k| k.pk).collect(),
+                minimum_quorums: 4,
+            };
+            let message = hierarchical_hem_message(&policy, epoch, digest);
+            signatures.push(
+                keys.iter_mut()
+                    .map(|k| k.sign_stateful_for_unit_test(&message, 0).unwrap())
+                    .collect::<Vec<_>>(),
+            );
+            policies.push(policy);
+        }
+        let bitmap = SignerBitmap::from_active_indices(4, &[0, 1, 2, 3]).unwrap();
+        let witnesses: Vec<_> = signatures
+            .iter()
+            .map(|s| ShardHemWitness {
+                bitmap: &bitmap,
+                signatures: s,
+            })
+            .collect();
+        let config = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [7; 32]);
+        let proof =
+            prove_hierarchical_hem(&policies, &witnesses, epoch, digest, 12, &config).unwrap();
+        let verify = |p: &HierarchicalHemAggregate| {
+            verify_hierarchical_hem(&policies, epoch, digest, 12, config.regime, p)
+        };
+        assert!(verify(&proof));
+        assert_eq!(proof.checked_total_quorums(), Some(12));
+
+        // Canonical wire serialization roundtrip + trailing/truncated byte rejection.
+        let wire = proof.to_bytes();
+        let decoded = HierarchicalHemAggregate::from_bytes_canonical(&wire).unwrap();
+        assert_eq!(decoded, proof);
+        assert!(verify(&decoded));
+        let mut trailing = wire.clone();
+        trailing.push(0);
+        assert_eq!(
+            HierarchicalHemAggregate::from_bytes_canonical(&trailing),
+            Err(HemAggError::MalformedWireBytes)
+        );
+        assert_eq!(
+            HierarchicalHemAggregate::from_bytes_canonical(&wire[..wire.len() - 1]),
+            Err(HemAggError::MalformedWireBytes)
+        );
+
+        assert!(!verify_hierarchical_hem(
+            &policies,
+            epoch + 1,
+            digest,
+            12,
+            config.regime,
+            &proof
+        ));
+        assert!(!verify_hierarchical_hem(
+            &policies,
+            epoch,
+            [43u8; 32],
+            12,
+            config.regime,
+            &proof
+        ));
+        assert!(!verify_hierarchical_hem(
+            &policies,
+            epoch,
+            digest,
+            13,
+            config.regime,
+            &proof
+        ));
+        let mut tampered = proof.clone();
+        tampered.root_commitment[0] ^= 1;
+        assert!(!verify(&tampered));
+        let mut tampered = proof.clone();
+        tampered.policy_registry_root[0] ^= 1;
+        assert!(!verify(&tampered));
+        let mut tampered = proof.clone();
+        tampered.shards[1] = tampered.shards[0].clone();
+        tampered.root_commitment =
+            root_commitment(&tampered.policy_registry_root, &tampered.shards);
+        assert!(!verify(&tampered));
+        let mut tampered = proof.clone();
+        tampered.shards[0].shard_quorum_set_root[0] ^= 1;
+        tampered.root_commitment =
+            root_commitment(&tampered.policy_registry_root, &tampered.shards);
+        assert!(!verify(&tampered));
+        let mut tampered = proof.clone();
+        tampered.shards[0].proof.committee_root[0] ^= 1;
+        tampered.root_commitment =
+            root_commitment(&tampered.policy_registry_root, &tampered.shards);
+        assert!(!verify(&tampered));
+
+        // Recomputing public summaries after relabeling epoch or shard_id still fails verification.
+        let mut relabeled = proof.clone();
+        for shard in &mut relabeled.shards {
+            shard.epoch_floor += 1;
+        }
+        relabeled.root_commitment =
+            root_commitment(&relabeled.policy_registry_root, &relabeled.shards);
+        assert!(!verify_hierarchical_hem(
+            &policies,
+            epoch + 1,
+            digest,
+            12,
+            config.regime,
+            &relabeled
+        ));
+        let mut registry = policies.clone();
+        registry[2].shard_id = 100;
+        let mut relabeled = proof.clone();
+        relabeled.shards[2].shard_id = 100;
+        relabeled.policy_registry_root = compute_policy_registry_root(&registry);
+        relabeled.root_commitment =
+            root_commitment(&relabeled.policy_registry_root, &relabeled.shards);
+        assert!(!verify_hierarchical_hem(
+            &registry,
+            epoch,
+            digest,
+            12,
+            config.regime,
+            &relabeled
+        ));
+        let mut registry = policies.clone();
+        registry[1].custodian_cluster = registry[0].custodian_cluster;
+        assert!(!verify_hierarchical_hem(
+            &registry,
+            epoch,
+            digest,
+            12,
+            config.regime,
+            &proof
+        ));
+        registry = policies.clone();
+        registry[1].shard_id = registry[0].shard_id;
+        assert!(!valid_policies(&registry));
+        registry = policies.clone();
+        registry[1].quorum_keys[0] = registry[0].quorum_keys[0];
+        assert!(!valid_policies(&registry));
+        assert!(!valid_policies(&[]));
+    }
+
+    #[test]
+    fn hierarchical_stateless_corduroy_and_mixed_profile_registry_binding() {
+        // 1. Pure stateless `CorduroyPoseidon2` 2-region x 2-quorum hierarchy:
+        let epoch = 91u64;
+        let payload = b"consensus-checkpoint:height=9100:variable-length-payload";
+        let mut corduroy_policies = Vec::new();
+        let mut corduroy_sigs = Vec::new();
+        for region in 0..2u64 {
+            let mut keys: Vec<_> = (0..2)
+                .map(|i| {
+                    ValidatorKeypair::keygen_deterministic(
+                        AggSigProfile::CorduroyPoseidon2,
+                        &[0xA0 + region as u8; 32],
+                        i,
+                    )
+                })
+                .collect();
+            let policy = ShardHemPolicy {
+                shard_id: 10 + region,
+                custodian_cluster: [0xC0 + region as u8; 32],
+                quorum_keys: keys.iter().map(|k| k.pk).collect(),
+                minimum_quorums: 2,
+            };
+            let msg = hierarchical_hem_message(&policy, epoch, payload);
+            corduroy_sigs.push(
+                keys.iter_mut()
+                    .map(|k| k.sign_stateless_for_unit_test(&msg).unwrap())
+                    .collect::<Vec<_>>(),
+            );
+            corduroy_policies.push(policy);
+        }
+        let bm2 = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
+        let corduroy_witnesses: Vec<_> = corduroy_sigs
+            .iter()
+            .map(|s| ShardHemWitness {
+                bitmap: &bm2,
+                signatures: s,
+            })
+            .collect();
+        let cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [0x55; 32]);
+        let corduroy_agg = prove_hierarchical_hem(
+            &corduroy_policies,
+            &corduroy_witnesses,
+            epoch,
+            payload,
+            4,
+            &cfg,
+        )
+        .unwrap();
+        assert!(verify_hierarchical_hem(
+            &corduroy_policies,
+            epoch,
+            payload,
+            4,
+            cfg.regime,
+            &corduroy_agg
+        ));
+        assert_eq!(corduroy_agg.checked_total_quorums(), Some(4));
+        let roundtrip =
+            HierarchicalHemAggregate::from_bytes_canonical(&corduroy_agg.to_bytes()).unwrap();
+        assert_eq!(roundtrip, corduroy_agg);
+
+        // 2. Mixed `JortsPoseidon2` (Shard 0, 4 quorums) + `CorduroyPoseidon2` (Shard 1, 2 quorums)
+        //    with strict registry-bound quorum signatures, plus cross-registry shard-splicing rejection!
+        let mut jorts_keys: Vec<_> = (0..4)
+            .map(|i| {
+                ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[0x11; 32], i)
+            })
+            .collect();
+        let mut cord_keys_a: Vec<_> = (0..2)
+            .map(|i| {
+                ValidatorKeypair::keygen_deterministic(
+                    AggSigProfile::CorduroyPoseidon2,
+                    &[0x22; 32],
+                    i,
+                )
+            })
+            .collect();
+        let mut cord_keys_b: Vec<_> = (0..2)
+            .map(|i| {
+                ValidatorKeypair::keygen_deterministic(
+                    AggSigProfile::CorduroyPoseidon2,
+                    &[0x33; 32],
+                    i,
+                )
+            })
+            .collect();
+
+        let p_jorts = ShardHemPolicy {
+            shard_id: 0,
+            custodian_cluster: [0x01; 32],
+            quorum_keys: jorts_keys.iter().map(|k| k.pk).collect(),
+            minimum_quorums: 3,
+        };
+        let p_cord_a = ShardHemPolicy {
+            shard_id: 1,
+            custodian_cluster: [0x02; 32],
+            quorum_keys: cord_keys_a.iter().map(|k| k.pk).collect(),
+            minimum_quorums: 2,
+        };
+        let p_cord_b = ShardHemPolicy {
+            shard_id: 2,
+            custodian_cluster: [0x03; 32],
+            quorum_keys: cord_keys_b.iter().map(|k| k.pk).collect(),
+            minimum_quorums: 2,
+        };
+
+        let registry_ab = alloc::vec![p_jorts.clone(), p_cord_a.clone()];
+        let root_ab = compute_policy_registry_root(&registry_ab);
+        let msg_jorts_ab =
+            hierarchical_hem_registry_bound_message(&root_ab, &p_jorts, epoch, payload);
+        let msg_cord_a =
+            hierarchical_hem_registry_bound_message(&root_ab, &p_cord_a, epoch, payload);
+        let bm_jorts = SignerBitmap::from_active_indices(4, &[0, 2, 3]).unwrap();
+        let sigs_jorts_ab: Vec<_> = [0usize, 2, 3]
+            .into_iter()
+            .map(|idx| {
+                jorts_keys[idx]
+                    .sign_stateful_for_unit_test(&msg_jorts_ab, 3)
+                    .unwrap()
+            })
+            .collect();
+        let sigs_cord_a: Vec<_> = cord_keys_a
+            .iter_mut()
+            .map(|k| k.sign_stateless_for_unit_test(&msg_cord_a).unwrap())
+            .collect();
+
+        let mixed_agg = prove_hierarchical_hem_registry_bound(
+            &registry_ab,
+            &[
+                ShardHemWitness {
+                    bitmap: &bm_jorts,
+                    signatures: &sigs_jorts_ab,
+                },
+                ShardHemWitness {
+                    bitmap: &bm2,
+                    signatures: &sigs_cord_a,
+                },
+            ],
+            epoch,
+            payload,
+            5,
+            &cfg,
+        )
+        .unwrap();
+        assert!(verify_hierarchical_hem_registry_bound(
+            &registry_ab,
+            epoch,
+            payload,
+            5,
+            cfg.regime,
+            &mixed_agg
+        ));
+
+        // Splicing Shard 0 from `registry_ab` into `registry_ac = [p_jorts, p_cord_b]` must fail
+        // even when Shard 2 (`p_cord_b`) genuinely signed for `registry_ac`!
+        let registry_ac = alloc::vec![p_jorts.clone(), p_cord_b.clone()];
+        let root_ac = compute_policy_registry_root(&registry_ac);
+        let msg_cord_b =
+            hierarchical_hem_registry_bound_message(&root_ac, &p_cord_b, epoch, payload);
+        let sigs_cord_b: Vec<_> = cord_keys_b
+            .iter_mut()
+            .map(|k| k.sign_stateless_for_unit_test(&msg_cord_b).unwrap())
+            .collect();
+        let batch_cord_b = aggregate_signatures_with_config(
+            &p_cord_b.quorum_keys,
+            &bm2,
+            &SigningMode::SharedMessage(&msg_cord_b),
+            &sigs_cord_b,
+            &HemAggConfig::default_for(AggSigProfile::CorduroyPoseidon2, [0x99; 32]),
+        )
+        .unwrap();
+
+        let mut spliced_shards = alloc::vec![
+            mixed_agg.shards[0].clone(),
+            ShardHemBatch {
+                shard_id: p_cord_b.shard_id,
+                custodian_cluster: p_cord_b.custodian_cluster,
+                shard_quorum_set_root: compute_committee_root(&p_cord_b.quorum_keys),
+                minimum_quorums: p_cord_b.minimum_quorums as u64,
+                epoch_floor: epoch,
+                message_digest: compute_framed_message_digest(payload),
+                proof: batch_cord_b,
+            },
+        ];
+        let spliced_agg = HierarchicalHemAggregate {
+            policy_registry_root: root_ac,
+            root_commitment: root_commitment(&root_ac, &spliced_shards),
+            shards: core::mem::take(&mut spliced_shards),
+        };
+        assert!(!verify_hierarchical_hem_registry_bound(
+            &registry_ac,
+            epoch,
+            payload,
+            5,
+            cfg.regime,
+            &spliced_agg
+        ));
+    }
+
+    #[test]
+    fn framing_injectivity_and_quorum_sum_overflow_rejection() {
+        let k0 =
+            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[0x41; 32], 0)
+                .pk;
+        let k1 =
+            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[0x41; 32], 1)
+                .pk;
+        let k2 =
+            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[0x41; 32], 2)
+                .pk;
+
+        // Moving `k1` across the shard boundary `[k0, k1] | [k2]` vs `[k0] | [k1, k2]` must change
+        // both `encode_policy_registry` and `compute_policy_registry_root`.
+        let reg_left = [
+            ShardHemPolicy {
+                shard_id: 0,
+                custodian_cluster: [1; 32],
+                quorum_keys: alloc::vec![k0, k1],
+                minimum_quorums: 1,
+            },
+            ShardHemPolicy {
+                shard_id: 1,
+                custodian_cluster: [2; 32],
+                quorum_keys: alloc::vec![k2],
+                minimum_quorums: 1,
+            },
+        ];
+        let reg_right = [
+            ShardHemPolicy {
+                shard_id: 0,
+                custodian_cluster: [1; 32],
+                quorum_keys: alloc::vec![k0],
+                minimum_quorums: 1,
+            },
+            ShardHemPolicy {
+                shard_id: 1,
+                custodian_cluster: [2; 32],
+                quorum_keys: alloc::vec![k1, k2],
+                minimum_quorums: 1,
+            },
+        ];
+        assert_ne!(
+            encode_policy_registry(&reg_left),
+            encode_policy_registry(&reg_right)
+        );
+        assert_ne!(
+            compute_policy_registry_root(&reg_left),
+            compute_policy_registry_root(&reg_right)
+        );
+
+        // Changing `minimum_quorums` changes both the registry root and the signed regional frame.
+        let mut p_min2 = reg_left[0].clone();
+        p_min2.minimum_quorums = 2;
+        assert_ne!(
+            hierarchical_hem_message(&reg_left[0], 7, b"abc"),
+            hierarchical_hem_message(&p_min2, 7, b"abc")
+        );
+        assert_ne!(
+            hierarchical_hem_message(&reg_left[0], 7, b""),
+            hierarchical_hem_message(&reg_left[0], 7, b"\x00")
+        );
+
+        // Cross-profile reuse of the same `(pk_seed, pk_root)` across shards must be rejected.
+        let k0_alias = ValidatorPublicKey {
+            profile: AggSigProfile::CorduroyPoseidon2,
+            pk_seed: k0.pk_seed,
+            pk_root: k0.pk_root,
+        };
+        let cross_profile_dup = [
+            ShardHemPolicy {
+                shard_id: 0,
+                custodian_cluster: [1; 32],
+                quorum_keys: alloc::vec![k0],
+                minimum_quorums: 1,
+            },
+            ShardHemPolicy {
+                shard_id: 1,
+                custodian_cluster: [2; 32],
+                quorum_keys: alloc::vec![k0_alias],
+                minimum_quorums: 1,
+            },
+        ];
+        assert!(!valid_policies(&cross_profile_dup));
+
+        // Zero integer overflow on summed quorum weights (`usize::MAX` / `u64::MAX` boundaries).
+        assert_eq!(checked_sum_usize([usize::MAX, 1]), None);
+        assert_eq!(checked_sum_usize([usize::MAX - 5, 5]), Some(usize::MAX));
+        assert_eq!(
+            qsag_whir_verified::checked_quorum_sum(&[u64::MAX - 3, 4], &[1, 1], 1),
+            None
+        );
+        assert_eq!(
+            qsag_whir_verified::checked_quorum_sum(&[u64::MAX - 4, 4], &[1, 1], u64::MAX),
+            Some(u64::MAX)
+        );
+
+        // Up-front rejection of impossible `minimum_global_quorums = usize::MAX` without overflow.
+        let bm1 = SignerBitmap::from_active_indices(2, &[0]).unwrap();
+        let cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, [9; 32]);
+        assert_eq!(
+            prove_hierarchical_hem(
+                &reg_left,
+                &[
+                    ShardHemWitness {
+                        bitmap: &bm1,
+                        signatures: &[],
+                    },
+                    ShardHemWitness {
+                        bitmap: &bm1,
+                        signatures: &[],
+                    },
+                ],
+                1,
+                b"msg",
+                usize::MAX,
+                &cfg,
+            ),
+            Err(HemAggError::EmptySigners)
+        );
+    }
+}
