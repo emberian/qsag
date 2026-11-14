@@ -32,6 +32,10 @@ use crate::vulkan_ffi::RawVulkanEngine;
 pub enum VulkanError {
     /// Target OS, pointer width, or crate feature configuration does not enable the Linux Vulkan loader.
     UnsupportedPlatform,
+    /// Fixed shader resources exceed device limits.
+    UnsupportedDeviceLimits,
+    /// Driver executable telemetry rejected the compiled pipeline.
+    PipelineAuditFailed(&'static str),
     /// `dlopen("libvulkan.so.1")` failed (no Vulkan loader installed or accessible).
     LibraryLoadFailed,
     /// A required core Vulkan entry point was not exported by the loader or ICD.
@@ -57,6 +61,8 @@ pub enum VulkanError {
 impl core::fmt::Display for VulkanError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match *self {
+            Self::UnsupportedDeviceLimits => f.write_str("device limits cannot support the embedded shaders"),
+            Self::PipelineAuditFailed(reason) => write!(f, "pipeline audit failed: {reason}"),
             Self::UnsupportedPlatform => {
                 f.write_str("Vulkan SPIR-V backend requires 64-bit Linux with feature `std`")
             }
@@ -91,11 +97,25 @@ impl From<AccelError> for VulkanError {
     }
 }
 
+/// Driver-reported executable statistics. `None` means unavailable, never zero.
+/// Zero scratch is a compiler report, not a proof of hardware constant-time execution.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PipelineTelemetry {
+    pub subgroup_size: Option<u32>,
+    pub scratch_bytes: Option<u64>,
+    pub vgprs: Option<u64>,
+    pub sgprs: Option<u64>,
+    pub lds_bytes: Option<u64>,
+}
+
 /// Hardware identity and compute limits reported by `vkGetPhysicalDeviceProperties`.
 #[derive(Clone, Copy)]
 pub struct VulkanDeviceInfo {
     pub(crate) name_bytes: [u8; 256],
     pub(crate) name_len: usize,
+    pub max_compute_shared_memory_size: u32,
+    pub wave32_required: bool,
+    pub pipelines: [PipelineTelemetry; KernelSlot::COUNT],
     pub vendor_id: u32,
     pub device_id: u32,
     pub driver_version: u32,
