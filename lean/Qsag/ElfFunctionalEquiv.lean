@@ -3237,3 +3237,1092 @@ private theorem enableDitArm_reaches (g : Bank32 UInt64) (v : Bank32 Vec128)
   apply StepsArm64.toExecReaches
   exact StepsArm64.cons rfl rfl rfl (StepsArm64.cons rfl rfl rfl (StepsArm64.zero _))
 
+theorem rlib_enable_dit_aarch64_functional_and_ct :
+    ∃ slice m,
+      extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_enable_dit_aarch64" = some slice ∧
+      m ∈ parseArArchive aarch64RlibArchiveBytes ∧
+      ArPayloadOk aarch64RlibArchiveBytes m ∧
+      checkElfFuncThreeWayNI m.payload "qsag_asm_enable_dit_aarch64"
+        (mkContract "qsag_asm_enable_dit_aarch64" []) = true ∧
+      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_enable_dit_aarch64" []) ∧
+      decodeArm64Slice slice.code = some enableDitArmProg ∧
+      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
+        (∃ st2 tr2, execDecodedArm64 slice.code 2 st = some (st2, tr2) ∧ st2.halted = false) ∧
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedArm64 slice.code (3 + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = 8 ∧ trace.length = 3 ∧
+          st'.dit = true ∧
+          st'.gpr = st.gpr ∧
+          st'.vec = st.vec ∧
+          st'.cf = st.cf ∧ st'.zf = st.zf ∧
+          Arm64CalleeSavedPreserved st st' ∧
+          st'.mem = st.mem := by
+  cases hFind : aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_enable_dit_aarch64") with
+  | none => exfalso; revert hFind; decide +kernel
+  | some slice =>
+    have hExt : extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_enable_dit_aarch64" = some slice := by
+      rw [extractRlibFuncBytes_aarch64_eq, hFind]
+    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_enable_dit_aarch64" []) = true := by
+      have hCheck : ((aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_enable_dit_aarch64")).map
+          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_enable_dit_aarch64" []))) =
+          some true := by decide +kernel
+      rw [hFind] at hCheck
+      exact Option.some.inj hCheck
+    have hDec : decodeArm64Slice slice.code = some enableDitArmProg := by
+      have hD : (aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_enable_dit_aarch64")).bind
+          (fun sl => decodeArm64Slice sl.code) = some enableDitArmProg := by decide +kernel
+      rw [hFind] at hD
+      exact hD
+    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
+      extractRlibFuncBytes_member_ni_sound aarch64_rlib_distinct_names hExt hNI
+    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
+    intro st hpc hh
+    rcases st with ⟨pc, ⟨lo, hi⟩, v, cf, zf, dit, hlt, mem⟩
+    dsimp only at hpc hh; subst hpc hh
+    let st0 : Arm64BvState := ⟨0, ⟨lo, hi⟩, v, cf, zf, dit, false, mem⟩
+    obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl
+      (enableDitArm_reaches (bank32ToU64 ⟨lo, hi⟩) v cf zf dit (fun a => mem a.toBitVec)) rfl rfl
+    refine ⟨hPre, fun extra => ?_⟩
+    obtain ⟨tr, hExec, hL⟩ := hPost extra
+    refine ⟨_, tr, hExec, rfl, rfl, hL, rfl, ?_, rfl, rfl, rfl, arm64_callee_saved_of_hi_vec, mem_roundtrip mem⟩
+    show (⟨bank16OfU64 (bank16ToU64 lo), bank16OfU64 (bank16ToU64 hi)⟩ : Bank32 (BitVec 64)) = ⟨lo, hi⟩
+    rw [bank16_roundtrip, bank16_roundtrip]
+
+/-! ### §5.3 `qsag_asm_gf256_shamir_mul_gfni` (`x86_64` AVX2 + GFNI `BinaryTower` Shamir Multiplication & Loop) -/
+
+def gf256MulGfniProg : List (DecodedInstr X86Instr) := [
+  ⟨0, 10, .movImm true 0 0x71500a8a86be78ce⟩,
+  ⟨10, 5, .vmovGprToXmm true 14 0⟩,
+  ⟨15, 5, .vpbroadcast true 14 14⟩,
+  ⟨20, 10, .movImm true 0 0xa1e4f8e072a2700c⟩,
+  ⟨30, 5, .vmovGprToXmm true 15 0⟩,
+  ⟨35, 5, .vpbroadcast true 15 15⟩,
+  ⟨40, 4, .vload true 0 (.baseDisp 6 0)⟩,
+  ⟨44, 4, .vload true 1 (.baseDisp 2 0)⟩,
+  ⟨48, 6, .vgf2p8affineqb true 0 0 14 0⟩,
+  ⟨54, 6, .vgf2p8affineqb true 1 1 14 0⟩,
+  ⟨60, 5, .vbinOp .vgf2p8mulb true 2 0 1⟩,
+  ⟨65, 6, .vgf2p8affineqb true 2 2 15 0⟩,
+  ⟨71, 4, .vstore true 2 (.baseDisp 7 0)⟩,
+  ⟨75, 4, .aluImm .add true 6 32⟩,
+  ⟨79, 4, .aluImm .add true 2 32⟩,
+  ⟨83, 4, .aluImm .add true 7 32⟩,
+  ⟨87, 3, .incDec false true 1⟩,
+  ⟨90, 2, .jcc 5 40⟩,
+  ⟨92, 4, .vbinOp .vpxor true 0 0 0⟩,
+  ⟨96, 4, .vbinOp .vpxor true 1 1 1⟩,
+  ⟨100, 4, .vbinOp .vpxor true 2 2 2⟩,
+  ⟨104, 5, .vbinOp .vpxor true 14 14 14⟩,
+  ⟨109, 5, .vbinOp .vpxor true 15 15 15⟩,
+  ⟨114, 3, .vzeroupper⟩,
+  ⟨117, 1, .ret⟩
+]
+
+def gf256MulGfniCoreProg : List (DecodedInstr X86Instr) :=
+  gf256MulGfniProg.take 23
+
+def gf256MulGfniVec (vA vB : Vec256) : Vec256 :=
+  let mT2R : Vec256 := ⟨gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat⟩
+  let mR2T : Vec256 := ⟨gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat⟩
+  gfniAffineVec256 (mapBytesVec256 (gfniAffineVec256 vA mT2R 0) (gfniAffineVec256 vB mT2R 0) gfniMulByte) mR2T 0
+
+def gf256MulGfniStepMem (mem : UInt64 → UInt8) (dst srcA srcB : UInt64) : UInt64 → UInt8 :=
+  writeMem256 mem dst (gf256MulGfniVec (readMem256 mem srcA) (readMem256 mem srcB))
+
+def gf256MulGfniIterMem : Nat → (UInt64 → UInt8) → UInt64 → UInt64 → UInt64 → (UInt64 → UInt8)
+  | 0, mem, _, _, _ => mem
+  | k + 1, mem, dst, srcA, srcB =>
+    gf256MulGfniIterMem k (gf256MulGfniStepMem mem dst srcA srcB) (dst + 32) (srcA + 32) (srcB + 32)
+
+private theorem gf256MulGfniVec_lane_byte (vA vB : Vec256) (r : Nat) (hr : r < 8) :
+    getByte64 (gf256MulGfniVec vA vB).w0 r =
+        gfniTowerMulByte (getByte64 vA.w0 r) (getByte64 vB.w0 r) ∧
+    getByte64 (gf256MulGfniVec vA vB).w1 r =
+        gfniTowerMulByte (getByte64 vA.w1 r) (getByte64 vB.w1 r) ∧
+    getByte64 (gf256MulGfniVec vA vB).w2 r =
+        gfniTowerMulByte (getByte64 vA.w2 r) (getByte64 vB.w2 r) ∧
+    getByte64 (gf256MulGfniVec vA vB).w3 r =
+        gfniTowerMulByte (getByte64 vA.w3 r) (getByte64 vB.w3 r) := by
+  unfold gf256MulGfniVec gfniAffineVec256 mapBytesVec256 gfniTowerMulByte
+  dsimp only
+  refine ⟨?_, ?_, ?_, ?_⟩ <;>
+    rw [getByte64_mapBytes64 _ r hr, getByte64_mapBytes64 _ r hr,
+        getByte64_mapBytes64 _ r hr, getByte64_mapBytes64 _ r hr]
+
+theorem gf256MulGfniStepMem_at (mem : UInt64 → UInt8) (dst srcA srcB : UInt64) (k : Nat) (hk : k < 32) :
+    gf256MulGfniStepMem mem dst srcA srcB (dst + UInt64.ofNat k) =
+      gfniTowerMulByte (mem (srcA + UInt64.ofNat k)) (mem (srcB + UInt64.ofNat k)) := by
+  unfold gf256MulGfniStepMem
+  rw [writeMem256_at _ dst _ k hk]
+  by_cases h0 : k < 8
+  · simp only [h0, ↓reduceIte]
+    rw [(gf256MulGfniVec_lane_byte _ _ k h0).1]
+    unfold readMem256; dsimp only
+    rw [getByte64_readMem64 mem srcA k h0, getByte64_readMem64 mem srcB k h0]
+  · by_cases h1 : k < 16
+    · simp only [h0, h1, ↓reduceIte]
+      rw [(gf256MulGfniVec_lane_byte _ _ (k - 8) (by omega)).2.1]
+      unfold readMem256; dsimp only
+      rw [getByte64_readMem64 mem (srcA + 8) (k - 8) (by omega),
+          getByte64_readMem64 mem (srcB + 8) (k - 8) (by omega)]
+      have ha : (srcA + 8) + UInt64.ofNat (k - 8) = srcA + UInt64.ofNat k := by
+        change (srcA + UInt64.ofNat 8) + UInt64.ofNat (k - 8) = srcA + UInt64.ofNat k
+        rw [u64_add_ofNat_assoc srcA 8 (k - 8) (by omega), show 8 + (k - 8) = k by omega]
+      have hb : (srcB + 8) + UInt64.ofNat (k - 8) = srcB + UInt64.ofNat k := by
+        change (srcB + UInt64.ofNat 8) + UInt64.ofNat (k - 8) = srcB + UInt64.ofNat k
+        rw [u64_add_ofNat_assoc srcB 8 (k - 8) (by omega), show 8 + (k - 8) = k by omega]
+      rw [ha, hb]
+    · by_cases h2 : k < 24
+      · simp only [h0, h1, h2, ↓reduceIte]
+        rw [(gf256MulGfniVec_lane_byte _ _ (k - 16) (by omega)).2.2.1]
+        unfold readMem256; dsimp only
+        rw [getByte64_readMem64 mem (srcA + 16) (k - 16) (by omega),
+            getByte64_readMem64 mem (srcB + 16) (k - 16) (by omega)]
+        have ha : (srcA + 16) + UInt64.ofNat (k - 16) = srcA + UInt64.ofNat k := by
+          change (srcA + UInt64.ofNat 16) + UInt64.ofNat (k - 16) = srcA + UInt64.ofNat k
+          rw [u64_add_ofNat_assoc srcA 16 (k - 16) (by omega), show 16 + (k - 16) = k by omega]
+        have hb : (srcB + 16) + UInt64.ofNat (k - 16) = srcB + UInt64.ofNat k := by
+          change (srcB + UInt64.ofNat 16) + UInt64.ofNat (k - 16) = srcB + UInt64.ofNat k
+          rw [u64_add_ofNat_assoc srcB 16 (k - 16) (by omega), show 16 + (k - 16) = k by omega]
+        rw [ha, hb]
+      · simp only [h0, h1, h2, ↓reduceIte]
+        rw [(gf256MulGfniVec_lane_byte _ _ (k - 24) (by omega)).2.2.2]
+        unfold readMem256; dsimp only
+        rw [getByte64_readMem64 mem (srcA + 24) (k - 24) (by omega),
+            getByte64_readMem64 mem (srcB + 24) (k - 24) (by omega)]
+        have ha : (srcA + 24) + UInt64.ofNat (k - 24) = srcA + UInt64.ofNat k := by
+          change (srcA + UInt64.ofNat 24) + UInt64.ofNat (k - 24) = srcA + UInt64.ofNat k
+          rw [u64_add_ofNat_assoc srcA 24 (k - 24) (by omega), show 24 + (k - 24) = k by omega]
+        have hb : (srcB + 24) + UInt64.ofNat (k - 24) = srcB + UInt64.ofNat k := by
+          change (srcB + UInt64.ofNat 24) + UInt64.ofNat (k - 24) = srcB + UInt64.ofNat k
+          rw [u64_add_ofNat_assoc srcB 24 (k - 24) (by omega), show 24 + (k - 24) = k by omega]
+        rw [ha, hb]
+
+theorem gf256MulGfniStepMem_outside (mem : UInt64 → UInt8) (dst srcA srcB a : UInt64)
+    (ha : ∀ k : Nat, k < 32 → a ≠ dst + UInt64.ofNat k) :
+    gf256MulGfniStepMem mem dst srcA srcB a = mem a :=
+  writeMem256_outside mem dst _ a ha
+
+theorem gf256MulGfniIterMem_outside (n : Nat) (mem : UInt64 → UInt8) (dst srcA srcB a : UInt64)
+    (hn : 32 * n ≤ 0x10000000000000000)
+    (ha : ∀ idx : Nat, idx < 32 * n → a ≠ dst + UInt64.ofNat idx) :
+    gf256MulGfniIterMem n mem dst srcA srcB a = mem a := by
+  induction n generalizing mem dst srcA srcB with
+  | zero => rfl
+  | succ k ih =>
+    unfold gf256MulGfniIterMem
+    rw [ih _ (dst + 32) (srcA + 32) (srcB + 32) (by omega) (fun idx hidx heq => by
+      change a = (dst + UInt64.ofNat 32) + UInt64.ofNat idx at heq
+      rw [u64_add_ofNat_assoc dst 32 idx (by omega)] at heq
+      exact ha (32 + idx) (by omega) heq)]
+    exact gf256MulGfniStepMem_outside mem dst srcA srcB a (fun j hj => ha j (by omega))
+
+theorem gf256MulGfniIterMem_at (n : Nat) (mem : UInt64 → UInt8) (dst srcA srcB : UInt64)
+    (hn : 32 * n ≤ 0x10000000000000000)
+    (hDisjA : ∀ i j : Nat, i < 32 * n → j < 32 * n → dst + UInt64.ofNat i ≠ srcA + UInt64.ofNat j)
+    (hDisjB : ∀ i j : Nat, i < 32 * n → j < 32 * n → dst + UInt64.ofNat i ≠ srcB + UInt64.ofNat j)
+    (idx : Nat) (hidx : idx < 32 * n) :
+    gf256MulGfniIterMem n mem dst srcA srcB (dst + UInt64.ofNat idx) =
+      gfniTowerMulByte (mem (srcA + UInt64.ofNat idx)) (mem (srcB + UInt64.ofNat idx)) := by
+  induction n generalizing mem dst srcA srcB idx with
+  | zero => exact absurd hidx (by omega)
+  | succ k ih =>
+    unfold gf256MulGfniIterMem
+    by_cases hFirst : idx < 32
+    · rw [gf256MulGfniIterMem_outside k _ (dst + 32) (srcA + 32) (srcB + 32) _ (by omega)
+        (fun j hj heq => by
+          change dst + UInt64.ofNat idx = (dst + UInt64.ofNat 32) + UInt64.ofNat j at heq
+          rw [u64_add_ofNat_assoc dst 32 j (by omega)] at heq
+          have := u64_add_ofNat_inj (by omega) (by omega) heq
+          omega)]
+      exact gf256MulGfniStepMem_at mem dst srcA srcB idx hFirst
+    · have hAddr : dst + UInt64.ofNat idx = (dst + 32) + UInt64.ofNat (idx - 32) := by
+        change dst + UInt64.ofNat idx = (dst + UInt64.ofNat 32) + UInt64.ofNat (idx - 32)
+        rw [u64_add_ofNat_assoc dst 32 (idx - 32) (by omega), show 32 + (idx - 32) = idx by omega]
+      rw [hAddr, ih (gf256MulGfniStepMem mem dst srcA srcB) (dst + 32) (srcA + 32) (srcB + 32) (by omega)
+        (fun i j hi hj heq => by
+          change (dst + UInt64.ofNat 32) + UInt64.ofNat i = (srcA + UInt64.ofNat 32) + UInt64.ofNat j at heq
+          rw [u64_add_ofNat_assoc dst 32 i (by omega), u64_add_ofNat_assoc srcA 32 j (by omega)] at heq
+          exact hDisjA (32 + i) (32 + j) (by omega) (by omega) heq)
+        (fun i j hi hj heq => by
+          change (dst + UInt64.ofNat 32) + UInt64.ofNat i = (srcB + UInt64.ofNat 32) + UInt64.ofNat j at heq
+          rw [u64_add_ofNat_assoc dst 32 i (by omega), u64_add_ofNat_assoc srcB 32 j (by omega)] at heq
+          exact hDisjB (32 + i) (32 + j) (by omega) (by omega) heq)
+        (idx - 32) (by omega)]
+      have hA : (srcA + 32) + UInt64.ofNat (idx - 32) = srcA + UInt64.ofNat idx := by
+        change (srcA + UInt64.ofNat 32) + UInt64.ofNat (idx - 32) = srcA + UInt64.ofNat idx
+        rw [u64_add_ofNat_assoc srcA 32 (idx - 32) (by omega), show 32 + (idx - 32) = idx by omega]
+      have hB : (srcB + 32) + UInt64.ofNat (idx - 32) = srcB + UInt64.ofNat idx := by
+        change (srcB + UInt64.ofNat 32) + UInt64.ofNat (idx - 32) = srcB + UInt64.ofNat idx
+        rw [u64_add_ofNat_assoc srcB 32 (idx - 32) (by omega), show 32 + (idx - 32) = idx by omega]
+      rw [hA, hB,
+          gf256MulGfniStepMem_outside mem dst srcA srcB (srcA + UInt64.ofNat idx)
+            (fun j hj heq => hDisjA j idx (by omega) hidx heq.symm),
+          gf256MulGfniStepMem_outside mem dst srcA srcB (srcB + UInt64.ofNat idx)
+            (fun j hj heq => hDisjB j idx (by omega) hidx heq.symm)]
+
+private theorem stepX86_addImm64 (off len pc dst : Nat) (imm : UInt64)
+    (g : Bank16 UInt64) (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    (stepX86 ⟨off, len, .aluImm .add true dst imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (g.get dst + imm), y,
+        decide ((g.get dst).toNat + imm.toNat ≥ 0x10000000000000000),
+        evalX86AluOf .add true (g.get dst) imm cf,
+        (g.get dst + imm) == 0, dy, false, m⟩ := by
+  have h : (stepX86 ⟨off, len, .aluImm .add true dst imm⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len,
+        g.set dst (UInt64.ofNat (((g.get dst).toNat + imm.toNat) % 0x10000000000000000)), y,
+        decide ((g.get dst).toNat + imm.toNat ≥ 0x10000000000000000),
+        evalX86AluOf .add true (g.get dst) imm cf,
+        UInt64.ofNat (((g.get dst).toNat + imm.toNat) % 0x10000000000000000) == 0,
+        dy, false, m⟩ := by rfl
+  rw [h, uint64_evalAdd_eq]
+
+private theorem stepX86_dec64 (off len pc dst : Nat)
+    (g : Bank16 UInt64) (y : Bank16 Vec256) (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    (stepX86 ⟨off, len, .incDec false true dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
+      ⟨off + len, g.set dst (g.get dst - 1), y, cf, evalX86IncDecOf false true (g.get dst),
+        (g.get dst - 1) == 0, dy, false, m⟩ := by
+  have hsub : g.get dst + (0 - 1) = g.get dst - 1 := by
+    apply UInt64.eq_of_toBitVec_eq; simp [BitVec.sub_eq_add_neg]
+  simp only [stepX86_dec, maskGprWidth_true, hsub]
+
+private theorem u64_xor_self (x : UInt64) : x ^^^ x = 0 := by
+  apply UInt64.eq_of_toBitVec_eq; simp
+
+private theorem u64_add_zero (x : UInt64) : x + 0 = x := by
+  apply UInt64.eq_of_toBitVec_eq; simp
+
+private theorem gf256MulGfniBody_one_iter
+    (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 : Vec256)
+    (cf o zf : Bool) (m : UInt64 → UInt8) :
+    let mT2R : Vec256 := ⟨gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat⟩
+    let mR2T : Vec256 := ⟨gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat⟩
+    StepsX86 gf256MulGfniCoreProg 12
+      ⟨40, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, mT2R, mR2T⟩,
+        cf, o, zf, true, false, m⟩
+      ⟨jccPc (!((r1 - 1) == 0)) 40 92,
+        ⟨r0, r1 - 1, r2 + 32, r3, r4, r5, r6 + 32, r7 + 32, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨gfniAffineVec256 (readMem256 m r6) mT2R 0,
+          gfniAffineVec256 (readMem256 m r2) mT2R 0,
+          gf256MulGfniVec (readMem256 m r6) (readMem256 m r2),
+          y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, mT2R, mR2T⟩,
+        decide (r7.toNat + (32 : UInt64).toNat ≥ 0x10000000000000000),
+        evalX86IncDecOf false true r1,
+        (r1 - 1) == 0, true, false, gf256MulGfniStepMem m r7 r6 r2⟩ := by
+  dsimp only
+  iterate 7
+    apply StepsX86.cons rfl rfl
+    · simp only [stepX86, evalX86Addr, clampVecWidth, evalVecBin256,
+        u64_add_zero, b16get_2, b16get_6, b16get_7]
+      rfl
+  iterate 3
+    apply StepsX86.cons rfl rfl
+    · rw [stepX86_addImm64]
+  apply StepsX86.cons rfl rfl
+  · rw [stepX86_dec64]
+  apply StepsX86.cons rfl rfl
+  · rw [stepX86_jnz]
+  exact StepsX86.zero _
+
+private theorem StepsX86_trans {prog : List (DecodedInstr X86Instr)} {m n : Nat}
+    {s0 s1 s2 : X86State} (h1 : StepsX86 prog m s0 s1) (h2 : StepsX86 prog n s1 s2) :
+    StepsX86 prog (m + n) s0 s2 := by
+  induction h1 with
+  | zero _ => simpa using h2
+  | cons hh hf hs1 _ ih =>
+    rw [Nat.succ_add]
+    exact StepsX86.cons hh hf hs1 (ih h2)
+
+private theorem gf256MulGfniLoop_steps (k : Nat) (hk : k + 1 < 0x10000000000000000)
+    (r0 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 : Vec256)
+    (cf o zf : Bool) (m : UInt64 → UInt8) :
+    let mT2R : Vec256 := ⟨gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat⟩
+    let mR2T : Vec256 := ⟨gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat⟩
+    ∃ cf' o' zf',
+      StepsX86 gf256MulGfniCoreProg (17 + 12 * k)
+        ⟨40, ⟨r0, UInt64.ofNat (k + 1), r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+          ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, mT2R, mR2T⟩,
+          cf, o, zf, true, false, m⟩
+        ⟨114,
+          ⟨r0, 0, r2 + UInt64.ofNat (32 * (k + 1)), r3, r4, r5,
+            r6 + UInt64.ofNat (32 * (k + 1)), r7 + UInt64.ofNat (32 * (k + 1)),
+            r8, r9, r10, r11, r12, r13, r14, r15⟩,
+          ⟨Vec256.zero, Vec256.zero, Vec256.zero, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13,
+            Vec256.zero, Vec256.zero⟩,
+          cf', o', zf', true, false, gf256MulGfniIterMem (k + 1) m r7 r6 r2⟩ := by
+  induction k generalizing r2 r6 r7 y0 y1 y2 cf o zf m with
+  | zero =>
+    dsimp only
+    have h1 : UInt64.ofNat 1 - 1 = 0 := by decide
+    have hIter := gf256MulGfniBody_one_iter r0 (UInt64.ofNat 1) r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15
+      y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 cf o zf m
+    dsimp only at hIter
+    rw [h1, u64_zero_beq_zero] at hIter
+    rw [show jccPc (!true) 40 92 = 92 from rfl] at hIter
+    have hEpi : StepsX86 gf256MulGfniCoreProg 5
+        ⟨92, ⟨r0, 0, r2 + 32, r3, r4, r5, r6 + 32, r7 + 32, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+          ⟨gfniAffineVec256 (readMem256 m r6) ⟨gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat⟩ 0,
+            gfniAffineVec256 (readMem256 m r2) ⟨gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat⟩ 0,
+            gf256MulGfniVec (readMem256 m r6) (readMem256 m r2),
+            y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13,
+            ⟨gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat⟩,
+            ⟨gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat⟩⟩,
+          decide (r7.toNat + (32 : UInt64).toNat ≥ 0x10000000000000000),
+          evalX86IncDecOf false true (UInt64.ofNat 1),
+          true, true, false, gf256MulGfniStepMem m r7 r6 r2⟩
+        ⟨114, ⟨r0, 0, r2 + 32, r3, r4, r5, r6 + 32, r7 + 32, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+          ⟨Vec256.zero, Vec256.zero, Vec256.zero, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13,
+            Vec256.zero, Vec256.zero⟩,
+          decide (r7.toNat + (32 : UInt64).toNat ≥ 0x10000000000000000),
+          evalX86IncDecOf false true (UInt64.ofNat 1),
+          true, true, false, gf256MulGfniStepMem m r7 r6 r2⟩ := by
+      iterate 5
+        apply StepsX86.cons rfl rfl
+        · simp only [stepX86, clampVecWidth, evalVecBin256, u64_xor_self]
+          rfl
+      exact StepsX86.zero _
+    have hComb := StepsX86_trans hIter hEpi
+    exact ⟨_, _, _, hComb⟩
+  | succ j ih =>
+    dsimp only
+    have hDec : UInt64.ofNat (j + 1 + 1) - 1 = UInt64.ofNat (j + 1) := by
+      apply UInt64.eq_of_toBitVec_eq
+      apply BitVec.eq_of_toNat_eq
+      have hlt2 : j + 1 < 0x10000000000000000 := by omega
+      simp [UInt64.toNat_toBitVec, Nat.mod_eq_of_lt hlt2]
+    have hNz : (UInt64.ofNat (j + 1) == 0) = false := by
+      cases h : UInt64.ofNat (j + 1) == 0
+      · rfl
+      · have hn := congrArg UInt64.toNat (beq_iff_eq.mp h)
+        have hlt : j + 1 < 0x10000000000000000 := by omega
+        rw [show (UInt64.ofNat (j + 1)).toNat = j + 1 from Nat.mod_eq_of_lt hlt] at hn
+        exact absurd hn (Nat.succ_ne_zero j)
+    have hIter := gf256MulGfniBody_one_iter r0 (UInt64.ofNat (j + 1 + 1)) r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15
+      y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 cf o zf m
+    dsimp only at hIter
+    rw [hDec, hNz] at hIter
+    rw [show jccPc (!false) 40 92 = 40 from rfl] at hIter
+    obtain ⟨cf', o', zf', hRest⟩ := ih (by omega) (r2 + 32) (r6 + 32) (r7 + 32)
+      (gfniAffineVec256 (readMem256 m r6) ⟨gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat⟩ 0)
+      (gfniAffineVec256 (readMem256 m r2) ⟨gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat⟩ 0)
+      (gf256MulGfniVec (readMem256 m r6) (readMem256 m r2))
+      (decide (r7.toNat + (32 : UInt64).toNat ≥ 0x10000000000000000))
+      (evalX86IncDecOf false true (UInt64.ofNat (j + 1 + 1))) false (gf256MulGfniStepMem m r7 r6 r2)
+    have hComb := StepsX86_trans hIter hRest
+    have hStepEq : 12 + (17 + 12 * j) = 17 + 12 * (j + 1) := by omega
+    have hAddPtr : ∀ p : UInt64, (p + 32) + UInt64.ofNat (32 * (j + 1)) = p + UInt64.ofNat (32 * (j + 1 + 1)) := by
+      intro p
+      apply UInt64.eq_of_toBitVec_eq
+      simp only [UInt64.toBitVec_add, BitVec.add_assoc]
+      congr 1
+      apply BitVec.eq_of_toNat_eq
+      simp [UInt64.toNat_toBitVec]
+      omega
+    rw [hStepEq, hAddPtr r2, hAddPtr r6, hAddPtr r7] at hComb
+    exact ⟨cf', o', zf', hComb⟩
+
+private theorem gf256MulGfniCore_reaches (k : Nat) (hk : k + 1 < 0x10000000000000000)
+    (r0 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 : Vec256)
+    (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    ∃ cf' o' zf',
+      StepsX86 gf256MulGfniCoreProg (23 + 12 * k)
+        ⟨0, ⟨r0, UInt64.ofNat (k + 1), r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+          ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+          cf, o, zf, dy, false, m⟩
+        ⟨114,
+          ⟨gfniRijndaelToTowerMat, 0, r2 + UInt64.ofNat (32 * (k + 1)), r3, r4, r5,
+            r6 + UInt64.ofNat (32 * (k + 1)), r7 + UInt64.ofNat (32 * (k + 1)),
+            r8, r9, r10, r11, r12, r13, r14, r15⟩,
+          ⟨Vec256.zero, Vec256.zero, Vec256.zero, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13,
+            Vec256.zero, Vec256.zero⟩,
+          cf', o', zf', true, false, gf256MulGfniIterMem (k + 1) m r7 r6 r2⟩ := by
+  have hPrologue : StepsX86 gf256MulGfniCoreProg 6
+      ⟨0, ⟨r0, UInt64.ofNat (k + 1), r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+        cf, o, zf, dy, false, m⟩
+      ⟨40, ⟨gfniRijndaelToTowerMat, UInt64.ofNat (k + 1), r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13,
+          ⟨gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat, gfniTowerToRijndaelMat⟩,
+          ⟨gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat, gfniRijndaelToTowerMat⟩⟩,
+        cf, o, zf, true, false, m⟩ := by
+    iterate 6
+      apply StepsX86.cons rfl rfl
+      · simp only [stepX86, maskGprWidth_true, b16get_0, b16set_0]
+        rfl
+    exact StepsX86.zero _
+  obtain ⟨cf', o', zf', hLoop⟩ := gf256MulGfniLoop_steps k hk gfniRijndaelToTowerMat
+    r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15
+    y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 cf o zf m
+  have hComb := StepsX86_trans hPrologue hLoop
+  have hEq : 6 + (17 + 12 * k) = 23 + 12 * k := by omega
+  rw [hEq] at hComb
+  exact ⟨cf', o', zf', hComb⟩
+
+def progPreservesNonRet (prog1 prog2 : List (DecodedInstr X86Instr)) : Bool :=
+  prog1.all fun d => d.instr == .ret || findInstrAtPc d.offset prog2 == some d
+
+private theorem findInstrAtPc_mem_and_offset {I : Type} {pc : Nat} {prog : List (DecodedInstr I)}
+    {d : DecodedInstr I} (h : findInstrAtPc pc prog = some d) :
+    d ∈ prog ∧ d.offset = pc := by
+  induction prog with
+  | nil => simp [findInstrAtPc] at h
+  | cons hd tl ih =>
+    unfold findInstrAtPc at h
+    by_cases hpc : hd.offset == pc
+    · rw [ite_eq_left hpc] at h
+      cases h
+      exact ⟨List.Mem.head _, beq_iff_eq.mp hpc⟩
+    · rw [ite_eq_right hpc] at h
+      obtain ⟨hm, ho⟩ := ih h
+      exact ⟨List.Mem.tail _ hm, ho⟩
+
+theorem ExecReachesX86_transfer_nonret {prog1 prog2 : List (DecodedInstr X86Instr)} {k : Nat}
+    {s sRet : X86State}
+    (hPres : progPreservesNonRet prog1 prog2 = true)
+    (hReach : ExecReachesX86 prog1 k s sRet)
+    (hhRet : sRet.halted = false) :
+    ExecReachesX86 prog2 k s sRet := by
+  induction k generalizing s with
+  | zero =>
+    have h0 := (hReach 0).1
+    simp only [runX86] at h0
+    subst h0
+    exact ExecReachesX86_zero prog2 _
+  | succ k ih =>
+    have hh : s.halted = false := by
+      cases hs : s.halted
+      · rfl
+      · have h0 := (hReach 0).1
+        rw [Nat.add_zero, runX86_halted_fst prog1 (k + 1) s hs] at h0
+        change s = sRet at h0
+        rw [← h0, hs] at hhRet
+        cases hhRet
+    cases hf1 : findInstrAtPc s.pc prog1 with
+    | none =>
+      have h0 := (hReach 0).1
+      simp only [runX86, hh, hf1] at h0
+      rw [← h0] at hhRet
+      cases hhRet
+    | some d =>
+      have hNotRet : d.instr ≠ .ret := by
+        intro hIr
+        rcases d with ⟨off, len, instr⟩
+        dsimp only at hIr; subst hIr
+        have h0 := (hReach 0).1
+        simp only [runX86, hh, hf1, stepX86] at h0
+        rw [runX86_halted_fst prog1 k _ rfl] at h0
+        rw [← h0] at hhRet
+        cases hhRet
+      obtain ⟨hdMem, hdOff⟩ := findInstrAtPc_mem_and_offset hf1
+      have hAll := List.all_eq_true.mp hPres d hdMem
+      have hBeqFalse : (d.instr == .ret) = false := by
+        cases h : d.instr == .ret
+        · rfl
+        · exact absurd (beq_iff_eq.mp h) hNotRet
+      rw [hBeqFalse, Bool.false_or] at hAll
+      have hf2 : findInstrAtPc s.pc prog2 = some d := by
+        rw [← hdOff]; exact beq_iff_eq.mp hAll
+      have hRest : ExecReachesX86 prog1 k (stepX86 d s).1 sRet := by
+        intro extra
+        have ⟨he, hl⟩ := hReach extra
+        rw [Nat.add_right_comm k 1 extra] at he hl
+        simp only [runX86, hh, hf1] at he hl
+        exact ⟨he, by simp at hl; omega⟩
+      exact ExecReachesX86_cons hh hf2 rfl (ih hRest)
+
+private theorem gf256MulGfni_reaches_full (k : Nat) (hk : k + 1 < 0x10000000000000000)
+    (r0 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64)
+    (y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 : Vec256)
+    (cf o zf dy : Bool) (m : UInt64 → UInt8) :
+    ∃ cf' o' zf',
+      ExecReachesX86 gf256MulGfniProg (24 + 12 * k)
+        ⟨0, ⟨r0, UInt64.ofNat (k + 1), r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+          ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+          cf, o, zf, dy, false, m⟩
+        ⟨117,
+          ⟨gfniRijndaelToTowerMat, 0, r2 + UInt64.ofNat (32 * (k + 1)), r3, r4, r5,
+            r6 + UInt64.ofNat (32 * (k + 1)), r7 + UInt64.ofNat (32 * (k + 1)),
+            r8, r9, r10, r11, r12, r13, r14, r15⟩,
+          ⟨Vec256.zero, Vec256.zero, Vec256.zero,
+            ⟨y3.w0, y3.w1, 0, 0⟩, ⟨y4.w0, y4.w1, 0, 0⟩, ⟨y5.w0, y5.w1, 0, 0⟩,
+            ⟨y6.w0, y6.w1, 0, 0⟩, ⟨y7.w0, y7.w1, 0, 0⟩, ⟨y8.w0, y8.w1, 0, 0⟩,
+            ⟨y9.w0, y9.w1, 0, 0⟩, ⟨y10.w0, y10.w1, 0, 0⟩, ⟨y11.w0, y11.w1, 0, 0⟩,
+            ⟨y12.w0, y12.w1, 0, 0⟩, ⟨y13.w0, y13.w1, 0, 0⟩,
+            Vec256.zero, Vec256.zero⟩,
+          cf', o', zf', false, false, gf256MulGfniIterMem (k + 1) m r7 r6 r2⟩ := by
+  obtain ⟨cf', o', zf', hCore⟩ := gf256MulGfniCore_reaches k hk
+    r0 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15
+    y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 cf o zf dy m
+  have hPres : progPreservesNonRet gf256MulGfniCoreProg gf256MulGfniProg = true := by decide +kernel
+  have hTrans := ExecReachesX86_transfer_nonret hPres hCore.toExecReaches rfl
+  have hVzu : ExecReachesX86 gf256MulGfniProg 1
+      ⟨114,
+        ⟨gfniRijndaelToTowerMat, 0, r2 + UInt64.ofNat (32 * (k + 1)), r3, r4, r5,
+          r6 + UInt64.ofNat (32 * (k + 1)), r7 + UInt64.ofNat (32 * (k + 1)),
+          r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨Vec256.zero, Vec256.zero, Vec256.zero, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13,
+          Vec256.zero, Vec256.zero⟩,
+        cf', o', zf', true, false, gf256MulGfniIterMem (k + 1) m r7 r6 r2⟩
+      ⟨117,
+        ⟨gfniRijndaelToTowerMat, 0, r2 + UInt64.ofNat (32 * (k + 1)), r3, r4, r5,
+          r6 + UInt64.ofNat (32 * (k + 1)), r7 + UInt64.ofNat (32 * (k + 1)),
+          r8, r9, r10, r11, r12, r13, r14, r15⟩,
+        ⟨Vec256.zero, Vec256.zero, Vec256.zero,
+          ⟨y3.w0, y3.w1, 0, 0⟩, ⟨y4.w0, y4.w1, 0, 0⟩, ⟨y5.w0, y5.w1, 0, 0⟩,
+          ⟨y6.w0, y6.w1, 0, 0⟩, ⟨y7.w0, y7.w1, 0, 0⟩, ⟨y8.w0, y8.w1, 0, 0⟩,
+          ⟨y9.w0, y9.w1, 0, 0⟩, ⟨y10.w0, y10.w1, 0, 0⟩, ⟨y11.w0, y11.w1, 0, 0⟩,
+          ⟨y12.w0, y12.w1, 0, 0⟩, ⟨y13.w0, y13.w1, 0, 0⟩,
+          Vec256.zero, Vec256.zero⟩,
+        cf', o', zf', false, false, gf256MulGfniIterMem (k + 1) m r7 r6 r2⟩ :=
+    ExecReachesX86_step rfl rfl rfl
+  have hFull := ExecReachesX86_trans hTrans hVzu
+  have hStepEq : (23 + 12 * k) + 1 = 24 + 12 * k := by omega
+  rw [hStepEq] at hFull
+  exact ⟨cf', o', zf', hFull⟩
+
+/-- End-to-end single-block (`rcx = 1#64`, 32 lanes) byte-decoded functional equivalence and 3-way
+    CT-NI certificate for `qsag_asm_gf256_shamir_mul_gfni` (`N = 25`, `retPc = 117`), refining
+    every output byte against `BinaryTower.towerMul 3` via `Simulates 3` with zero aliasing or
+    wraparound preconditions. -/
+theorem rlib_gf256_shamir_mul_gfni_functional_and_ct :
+    ∃ slice m,
+      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_gf256_shamir_mul_gfni" = some slice ∧
+      m ∈ parseArArchive x86RlibArchiveBytes ∧
+      ArPayloadOk x86RlibArchiveBytes m ∧
+      checkElfFuncThreeWayNI m.payload "qsag_asm_gf256_shamir_mul_gfni"
+        (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]) = true ∧
+      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]) ∧
+      decodeX86Slice slice.code = some gf256MulGfniProg ∧
+      ∀ (st : X86BvState), st.pc = 0 → st.halted = false → st.gpr.get 1 = 1#64 →
+        (∃ st24 tr24, execDecodedX86 slice.code 24 st = some (st24, tr24) ∧ st24.halted = false) ∧
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedX86 slice.code (25 + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = 117 ∧ trace.length = 25 ∧
+          st'.ymmDirty = false ∧
+          st'.gpr.get 1 = 0#64 ∧
+          st'.gpr.get 7 = st.gpr.get 7 + 32#64 ∧
+          st'.gpr.get 6 = st.gpr.get 6 + 32#64 ∧
+          st'.gpr.get 2 = st.gpr.get 2 + 32#64 ∧
+          st'.ymm.get 0 = Vec256.zero ∧ st'.ymm.get 1 = Vec256.zero ∧
+          st'.ymm.get 2 = Vec256.zero ∧ st'.ymm.get 14 = Vec256.zero ∧
+          st'.ymm.get 15 = Vec256.zero ∧
+          X86CalleeSavedPreserved st st' ∧
+          (∀ k : Nat, k < 32 →
+            st'.mem (st.gpr.get 7 + BitVec.ofNat 64 k) =
+              gfniTowerMulByte (st.mem (st.gpr.get 6 + BitVec.ofNat 64 k))
+                               (st.mem (st.gpr.get 2 + BitVec.ofNat 64 k)) ∧
+            Simulates 3
+              (towerMul 3 (unpackTower 3 (st.mem (st.gpr.get 6 + BitVec.ofNat 64 k)).toBitVec)
+                          (unpackTower 3 (st.mem (st.gpr.get 2 + BitVec.ofNat 64 k)).toBitVec))
+              (st'.mem (st.gpr.get 7 + BitVec.ofNat 64 k)).toBitVec) ∧
+          (∀ a : BitVec 64, (∀ k : Nat, k < 32 → a ≠ st.gpr.get 7 + BitVec.ofNat 64 k) →
+            st'.mem a = st.mem a) := by
+  cases hFind : x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_gf256_shamir_mul_gfni") with
+  | none => exfalso; revert hFind; decide +kernel
+  | some slice =>
+    have hExt : extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_gf256_shamir_mul_gfni" = some slice := by
+      rw [extractRlibFuncBytes_x86_eq, hFind]
+    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]) = true := by
+      have hCheck : ((x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_gf256_shamir_mul_gfni")).map
+          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]))) =
+          some true := by decide +kernel
+      rw [hFind] at hCheck
+      exact Option.some.inj hCheck
+    have hDec : decodeX86Slice slice.code = some gf256MulGfniProg := by
+      have hD : (x86ExtractedSlices.find? (fun s => s.name == "qsag_asm_gf256_shamir_mul_gfni")).bind
+          (fun sl => decodeX86Slice sl.code) = some gf256MulGfniProg := by decide +kernel
+      rw [hFind] at hD
+      exact hD
+    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
+      extractRlibFuncBytes_member_ni_sound x86_rlib_distinct_names hExt hNI
+    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
+    intro st hpc hh hrcx
+    rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+      ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+      cf, o, zf, dy, hlt, mem⟩
+    dsimp only at hpc hh; subst hpc hh
+    have hr1 : r1 = 1#64 := hrcx; subst hr1
+    let st0 : X86BvState :=
+      ⟨0, ⟨r0, 1#64, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+       ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+       cf, o, zf, dy, false, mem⟩
+    obtain ⟨cf', o', zf', hR⟩ := gf256MulGfni_reaches_full 0 (by decide)
+      (UInt64.ofBitVec r0) (UInt64.ofBitVec r2) (UInt64.ofBitVec r3) (UInt64.ofBitVec r4)
+      (UInt64.ofBitVec r5) (UInt64.ofBitVec r6) (UInt64.ofBitVec r7) (UInt64.ofBitVec r8)
+      (UInt64.ofBitVec r9) (UInt64.ofBitVec r10) (UInt64.ofBitVec r11) (UInt64.ofBitVec r12)
+      (UInt64.ofBitVec r13) (UInt64.ofBitVec r14) (UInt64.ofBitVec r15)
+      y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 cf o zf dy (fun a => mem a.toBitVec)
+    obtain ⟨hPre, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec rfl hR rfl rfl
+    refine ⟨hPre, fun extra => ?_⟩
+    obtain ⟨tr, hExec, hL⟩ := hPost extra
+    have hAdd32 : ∀ x : BitVec 64, (UInt64.ofBitVec x + UInt64.ofNat 32).toBitVec = x + 32#64 := by
+      intro x; simp [UInt64.toBitVec_add]
+    have hOfNatBv : ∀ (x : BitVec 64) (k : Nat), k < 32 →
+        (UInt64.ofBitVec x + UInt64.ofNat k) = UInt64.ofBitVec (x + BitVec.ofNat 64 k) := by
+      intro x k _
+      apply UInt64.eq_of_toBitVec_eq
+      simp only [UInt64.toBitVec_add]
+      congr 1
+    refine ⟨_, tr, hExec, rfl, rfl, hL, rfl, rfl, hAdd32 r7, hAdd32 r6, hAdd32 r2,
+      rfl, rfl, rfl, rfl, rfl, x86_callee_saved_of_roundtrip, ?_, ?_⟩
+    · intro k hk
+      dsimp only [X86BvState.ofX86State, gf256MulGfniIterMem]
+      simp only [b16get_7, b16get_6, b16get_2]
+      rw [← hOfNatBv r7 k hk, gf256MulGfniStepMem_at _ _ _ _ k hk]
+      have hA : ((UInt64.ofBitVec r6 + UInt64.ofNat k).toBitVec) = r6 + BitVec.ofNat 64 k := by
+        rw [hOfNatBv r6 k hk, u64_roundtrip]
+      have hB : ((UInt64.ofBitVec r2 + UInt64.ofNat k).toBitVec) = r2 + BitVec.ofNat 64 k := by
+        rw [hOfNatBv r2 k hk, u64_roundtrip]
+      rw [hA, hB]
+      exact ⟨rfl, gfniTowerMulByte_simulates_binaryTower _ _⟩
+    · intro a ha
+      dsimp only [X86BvState.ofX86State, gf256MulGfniIterMem]
+      rw [gf256MulGfniStepMem_outside _ _ _ _ (UInt64.ofBitVec a) (fun k hk heq => by
+        rw [hOfNatBv r7 k hk] at heq
+        have hb := congrArg UInt64.toBitVec heq
+        rw [u64_roundtrip, u64_roundtrip] at hb
+        exact ha k hk hb), u64_roundtrip]
+
+/-- Multi-block inductive backward-`JNZ` loop functional equivalence for
+    `qsag_asm_gf256_shamir_mul_gfni`: for every block count `k + 1` (`32 * (k + 1) ≤ 2^64`),
+    execution halts in exact step count `N = 25 + 12 * k` with every byte `idx < 32 * (k + 1)`
+    simulating `BinaryTower.towerMul 3` whenever output `[dst, dst + 32*(k+1))` is disjoint from
+    inputs. -/
+theorem rlib_gf256_shamir_mul_gfni_loop_functional :
+    ∃ slice,
+      extractRlibFuncBytes x86RlibArchiveBytes "qsag_asm_gf256_shamir_mul_gfni" = some slice ∧
+      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_gf256_shamir_mul_gfni" [4, 7, 6, 2, 1]) ∧
+      ∀ (k : Nat), 32 * (k + 1) ≤ 0x10000000000000000 →
+      ∀ (st : X86BvState), st.pc = 0 → st.halted = false →
+        st.gpr.get 1 = BitVec.ofNat 64 (k + 1) →
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedX86 slice.code ((25 + 12 * k) + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = 117 ∧ trace.length = 25 + 12 * k ∧
+          st'.ymmDirty = false ∧
+          st'.gpr.get 1 = 0#64 ∧
+          st'.gpr.get 7 = st.gpr.get 7 + BitVec.ofNat 64 (32 * (k + 1)) ∧
+          st'.gpr.get 6 = st.gpr.get 6 + BitVec.ofNat 64 (32 * (k + 1)) ∧
+          st'.gpr.get 2 = st.gpr.get 2 + BitVec.ofNat 64 (32 * (k + 1)) ∧
+          X86CalleeSavedPreserved st st' ∧
+          ((∀ i j : Nat, i < 32 * (k + 1) → j < 32 * (k + 1) →
+              st.gpr.get 7 + BitVec.ofNat 64 i ≠ st.gpr.get 6 + BitVec.ofNat 64 j ∧
+              st.gpr.get 7 + BitVec.ofNat 64 i ≠ st.gpr.get 2 + BitVec.ofNat 64 j) →
+            (∀ idx : Nat, idx < 32 * (k + 1) →
+              Simulates 3
+                (towerMul 3 (unpackTower 3 (st.mem (st.gpr.get 6 + BitVec.ofNat 64 idx)).toBitVec)
+                            (unpackTower 3 (st.mem (st.gpr.get 2 + BitVec.ofNat 64 idx)).toBitVec))
+                (st'.mem (st.gpr.get 7 + BitVec.ofNat 64 idx)).toBitVec)) ∧
+          (∀ a : BitVec 64, (∀ idx : Nat, idx < 32 * (k + 1) → a ≠ st.gpr.get 7 + BitVec.ofNat 64 idx) →
+            st'.mem a = st.mem a) := by
+  obtain ⟨slice, _, hExt, _, _, _, hSafe, hDec, _⟩ := rlib_gf256_shamir_mul_gfni_functional_and_ct
+  refine ⟨slice, hExt, hSafe, fun k hk st hpc hh hrcx extra => ?_⟩
+  rcases st with ⟨pc, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+    ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+    cf, o, zf, dy, hlt, mem⟩
+  dsimp only at hpc hh; subst hpc hh
+  have hr1 : r1 = BitVec.ofNat 64 (k + 1) := hrcx; subst hr1
+  have hr1U : UInt64.ofBitVec (BitVec.ofNat 64 (k + 1)) = UInt64.ofNat (k + 1) := by
+    apply UInt64.eq_of_toBitVec_eq; apply BitVec.eq_of_toNat_eq
+    simp [UInt64.toNat_toBitVec, Nat.mod_eq_of_lt (show k + 1 < 0x10000000000000000 by omega)]
+  let st0 : X86BvState :=
+    ⟨0, ⟨r0, BitVec.ofNat 64 (k + 1), r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩,
+     ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+     cf, o, zf, dy, false, mem⟩
+  obtain ⟨cf', o', zf', hR⟩ := gf256MulGfni_reaches_full k (by omega)
+    (UInt64.ofBitVec r0) (UInt64.ofBitVec r2) (UInt64.ofBitVec r3) (UInt64.ofBitVec r4)
+    (UInt64.ofBitVec r5) (UInt64.ofBitVec r6) (UInt64.ofBitVec r7) (UInt64.ofBitVec r8)
+    (UInt64.ofBitVec r9) (UInt64.ofBitVec r10) (UInt64.ofBitVec r11) (UInt64.ofBitVec r12)
+    (UInt64.ofBitVec r13) (UInt64.ofBitVec r14) (UInt64.ofBitVec r15)
+    y0 y1 y2 y3 y4 y5 y6 y7 y8 y9 y10 y11 y12 y13 y14 y15 cf o zf dy (fun a => mem a.toBitVec)
+  have hSt0 : st0.toX86State =
+      ⟨0, ⟨UInt64.ofBitVec r0, UInt64.ofNat (k + 1), UInt64.ofBitVec r2, UInt64.ofBitVec r3,
+           UInt64.ofBitVec r4, UInt64.ofBitVec r5, UInt64.ofBitVec r6, UInt64.ofBitVec r7,
+           UInt64.ofBitVec r8, UInt64.ofBitVec r9, UInt64.ofBitVec r10, UInt64.ofBitVec r11,
+           UInt64.ofBitVec r12, UInt64.ofBitVec r13, UInt64.ofBitVec r14, UInt64.ofBitVec r15⟩,
+       ⟨y0, y1, y2, y3, y4, y5, y6, y7, y8, y9, y10, y11, y12, y13, y14, y15⟩,
+       cf, o, zf, dy, false, fun a => mem a.toBitVec⟩ := by
+    simp [st0, X86BvState.toX86State, bank16ToU64, hr1U]
+  obtain ⟨_, hPost⟩ := execDecodedX86_ret_of_reaches st0 hDec hSt0 hR rfl rfl
+  have hStepN : (24 + 12 * k) + 1 = 25 + 12 * k := by omega
+  obtain ⟨tr, hExec, hL⟩ := hPost extra
+  rw [hStepN] at hExec hL
+  have hOfNatBv : ∀ (x : BitVec 64) (mNat : Nat), mNat ≤ 0x10000000000000000 →
+      (mNat < 0x10000000000000000 ∨ mNat = 0x10000000000000000) →
+      (UInt64.ofBitVec x + UInt64.ofNat mNat).toBitVec = x + BitVec.ofNat 64 mNat := by
+    intro x mNat _ _
+    simp only [UInt64.toBitVec_add]
+    congr 1
+  have hOfNatU : ∀ (x : BitVec 64) (idx : Nat), idx < 32 * (k + 1) →
+      UInt64.ofBitVec (x + BitVec.ofNat 64 idx) = UInt64.ofBitVec x + UInt64.ofNat idx := by
+    intro x idx hidx
+    apply UInt64.eq_of_toBitVec_eq
+    rw [u64_roundtrip, hOfNatBv x idx (by omega) (Or.inl (by omega))]
+  refine ⟨_, tr, hExec, rfl, rfl, hL, rfl, rfl,
+    hOfNatBv r7 (32 * (k + 1)) hk (by omega),
+    hOfNatBv r6 (32 * (k + 1)) hk (by omega),
+    hOfNatBv r2 (32 * (k + 1)) hk (by omega),
+    x86_callee_saved_of_roundtrip, ?_, ?_⟩
+  · intro hDisj idx hidx
+    dsimp only [X86BvState.ofX86State]
+    simp only [b16get_7, b16get_6, b16get_2]
+    rw [hOfNatU r7 idx hidx]
+    rw [gf256MulGfniIterMem_at (k + 1) _ _ _ _ hk
+      (fun i j hi hj heq => by
+        have hb := congrArg UInt64.toBitVec heq
+        rw [hOfNatBv r7 i (by omega) (Or.inl (by omega)),
+            hOfNatBv r6 j (by omega) (Or.inl (by omega))] at hb
+        exact (hDisj i j hi hj).1 hb)
+      (fun i j hi hj heq => by
+        have hb := congrArg UInt64.toBitVec heq
+        rw [hOfNatBv r7 i (by omega) (Or.inl (by omega)),
+            hOfNatBv r2 j (by omega) (Or.inl (by omega))] at hb
+        exact (hDisj i j hi hj).2 hb)
+      idx hidx]
+    rw [hOfNatBv r6 idx (by omega) (Or.inl (by omega)),
+        hOfNatBv r2 idx (by omega) (Or.inl (by omega))]
+    exact gfniTowerMulByte_simulates_binaryTower _ _
+  · intro a ha
+    dsimp only [X86BvState.ofX86State]
+    rw [gf256MulGfniIterMem_outside (k + 1) _ _ _ _ (UInt64.ofBitVec a) hk
+      (fun idx hidx heq => by
+        have hb := congrArg UInt64.toBitVec heq
+        rw [u64_roundtrip, hOfNatBv r7 idx (by omega) (Or.inl (by omega))] at hb
+        exact ha idx hidx hb), u64_roundtrip]
+
+/-! ### §5.4 `qsag_asm_keccak_sha3_neon` (`AArch64` SHA3 NEON `EOR` + `BCAX` 2-Share Keccak $\chi$ Rows 0 & 1) -/
+
+def keccakSha3NeonProg : List (DecodedInstr Arm64Instr) := [
+  ⟨0, 4, .ldrQ 0 1 0⟩, ⟨4, 4, .ldrQ 1 1 16⟩, ⟨8, 4, .ldrQ 2 1 32⟩,
+  ⟨12, 4, .ldrQ 3 1 48⟩, ⟨16, 4, .ldrQ 4 1 64⟩,
+  ⟨20, 4, .ldrQ 5 2 0⟩, ⟨24, 4, .ldrQ 6 2 16⟩, ⟨28, 4, .ldrQ 7 2 32⟩,
+  ⟨32, 4, .veor16b 0 0 5⟩, ⟨36, 4, .veor16b 1 1 6⟩, ⟨40, 4, .veor16b 2 2 7⟩,
+  ⟨44, 4, .ldrQ 5 2 48⟩, ⟨48, 4, .ldrQ 6 2 64⟩,
+  ⟨52, 4, .veor16b 3 3 5⟩, ⟨56, 4, .veor16b 4 4 6⟩,
+  ⟨60, 4, .vbcax16b 16 0 2 1⟩, ⟨64, 4, .vbcax16b 17 1 3 2⟩,
+  ⟨68, 4, .vbcax16b 18 2 4 3⟩, ⟨72, 4, .vbcax16b 19 3 0 4⟩, ⟨76, 4, .vbcax16b 20 4 1 0⟩,
+  ⟨80, 4, .strQ 16 0 0⟩, ⟨84, 4, .strQ 17 0 16⟩, ⟨88, 4, .strQ 18 0 32⟩,
+  ⟨92, 4, .strQ 19 0 48⟩, ⟨96, 4, .strQ 20 0 64⟩,
+  ⟨100, 4, .veor16b 0 0 0⟩, ⟨104, 4, .veor16b 1 1 1⟩, ⟨108, 4, .veor16b 2 2 2⟩,
+  ⟨112, 4, .veor16b 3 3 3⟩, ⟨116, 4, .veor16b 4 4 4⟩, ⟨120, 4, .veor16b 5 5 5⟩,
+  ⟨124, 4, .veor16b 6 6 6⟩, ⟨128, 4, .veor16b 7 7 7⟩,
+  ⟨132, 4, .veor16b 16 16 16⟩, ⟨136, 4, .veor16b 17 17 17⟩, ⟨140, 4, .veor16b 18 18 18⟩,
+  ⟨144, 4, .veor16b 19 19 19⟩, ⟨148, 4, .veor16b 20 20 20⟩,
+  ⟨152, 4, .ret⟩
+]
+
+def keccakNeonOutMem (mem : UInt64 → UInt8) (outPtr s0Ptr s1Ptr : UInt64) : UInt64 → UInt8 :=
+  let u0 := readMem128 mem s0Ptr
+  let u1 := readMem128 mem (s0Ptr + 16)
+  let u2 := readMem128 mem (s0Ptr + 32)
+  let u3 := readMem128 mem (s0Ptr + 48)
+  let u4 := readMem128 mem (s0Ptr + 64)
+  let w0 := readMem128 mem s1Ptr
+  let w1 := readMem128 mem (s1Ptr + 16)
+  let w2 := readMem128 mem (s1Ptr + 32)
+  let w3 := readMem128 mem (s1Ptr + 48)
+  let w4 := readMem128 mem (s1Ptr + 64)
+  let a0 : Vec128 := ⟨u0.w0 ^^^ w0.w0, u0.w1 ^^^ w0.w1⟩
+  let a1 : Vec128 := ⟨u1.w0 ^^^ w1.w0, u1.w1 ^^^ w1.w1⟩
+  let a2 : Vec128 := ⟨u2.w0 ^^^ w2.w0, u2.w1 ^^^ w2.w1⟩
+  let a3 : Vec128 := ⟨u3.w0 ^^^ w3.w0, u3.w1 ^^^ w3.w1⟩
+  let a4 : Vec128 := ⟨u4.w0 ^^^ w4.w0, u4.w1 ^^^ w4.w1⟩
+  let c0 : Vec128 := ⟨a0.w0 ^^^ (a2.w0 &&& (~~~a1.w0)), a0.w1 ^^^ (a2.w1 &&& (~~~a1.w1))⟩
+  let c1 : Vec128 := ⟨a1.w0 ^^^ (a3.w0 &&& (~~~a2.w0)), a1.w1 ^^^ (a3.w1 &&& (~~~a2.w1))⟩
+  let c2 : Vec128 := ⟨a2.w0 ^^^ (a4.w0 &&& (~~~a3.w0)), a2.w1 ^^^ (a4.w1 &&& (~~~a3.w1))⟩
+  let c3 : Vec128 := ⟨a3.w0 ^^^ (a0.w0 &&& (~~~a4.w0)), a3.w1 ^^^ (a0.w1 &&& (~~~a4.w1))⟩
+  let c4 : Vec128 := ⟨a4.w0 ^^^ (a1.w0 &&& (~~~a0.w0)), a4.w1 ^^^ (a1.w1 &&& (~~~a0.w1))⟩
+  let m0 := writeMem128 mem outPtr c0
+  let m1 := writeMem128 m0 (outPtr + 16) c1
+  let m2 := writeMem128 m1 (outPtr + 32) c2
+  let m3 := writeMem128 m2 (outPtr + 48) c3
+  writeMem128 m3 (outPtr + 64) c4
+
+private theorem keccakSha3Neon_reaches
+    (r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64) (hi : Bank16 UInt64)
+    (v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15 : Vec128)
+    (v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30 v31 : Vec128)
+    (cf zf dit : Bool) (m : UInt64 → UInt8) :
+    ExecReachesArm64 keccakSha3NeonProg 38
+      ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        ⟨⟨v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15⟩,
+         ⟨v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31⟩⟩,
+        cf, zf, dit, false, m⟩
+      ⟨152, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        ⟨⟨Vec128.zero, Vec128.zero, Vec128.zero, Vec128.zero,
+          Vec128.zero, Vec128.zero, Vec128.zero, Vec128.zero,
+          v8, v9, v10, v11, v12, v13, v14, v15⟩,
+         ⟨Vec128.zero, Vec128.zero, Vec128.zero, Vec128.zero, Vec128.zero,
+          v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31⟩⟩,
+        cf, zf, dit, false, keccakNeonOutMem m r0 r1 r2⟩ := by
+  apply StepsArm64.toExecReaches
+  iterate 38
+    apply StepsArm64.cons rfl rfl
+    · simp only [stepArm64, getArmGpr, u64_add_zero, u64_xor_self]
+      rfl
+  exact StepsArm64.zero _
+
+private theorem u64_bcax_eq_chi (x z y : UInt64) :
+    x ^^^ (z &&& (~~~y)) = x ^^^ ((~~~y) &&& z) := by
+  apply UInt64.eq_of_toBitVec_eq; simp [BitVec.and_comm]
+
+theorem keccakNeonOutMem_lanes (mem : UInt64 → UInt8) (outPtr s0Ptr s1Ptr : UInt64)
+    (K : KState)
+    (ha0 : K.a0 = readMem64 mem s0Ptr ^^^ readMem64 mem s1Ptr)
+    (ha1 : K.a1 = readMem64 mem (s0Ptr + 16) ^^^ readMem64 mem (s1Ptr + 16))
+    (ha2 : K.a2 = readMem64 mem (s0Ptr + 32) ^^^ readMem64 mem (s1Ptr + 32))
+    (ha3 : K.a3 = readMem64 mem (s0Ptr + 48) ^^^ readMem64 mem (s1Ptr + 48))
+    (ha4 : K.a4 = readMem64 mem (s0Ptr + 64) ^^^ readMem64 mem (s1Ptr + 64))
+    (ha5 : K.a5 = readMem64 mem (s0Ptr + 8) ^^^ readMem64 mem (s1Ptr + 8))
+    (ha6 : K.a6 = readMem64 mem (s0Ptr + 24) ^^^ readMem64 mem (s1Ptr + 24))
+    (ha7 : K.a7 = readMem64 mem (s0Ptr + 40) ^^^ readMem64 mem (s1Ptr + 40))
+    (ha8 : K.a8 = readMem64 mem (s0Ptr + 56) ^^^ readMem64 mem (s1Ptr + 56))
+    (ha9 : K.a9 = readMem64 mem (s0Ptr + 72) ^^^ readMem64 mem (s1Ptr + 72)) :
+    let m' := keccakNeonOutMem mem outPtr s0Ptr s1Ptr
+    readMem64 m' outPtr = (chiS K).a0 ∧
+    readMem64 m' (outPtr + 16) = (chiS K).a1 ∧
+    readMem64 m' (outPtr + 32) = (chiS K).a2 ∧
+    readMem64 m' (outPtr + 48) = (chiS K).a3 ∧
+    readMem64 m' (outPtr + 64) = (chiS K).a4 ∧
+    readMem64 m' (outPtr + 8) = (chiS K).a5 ∧
+    readMem64 m' (outPtr + 24) = (chiS K).a6 ∧
+    readMem64 m' (outPtr + 40) = (chiS K).a7 ∧
+    readMem64 m' (outPtr + 56) = (chiS K).a8 ∧
+    readMem64 m' (outPtr + 72) = (chiS K).a9 := by
+  dsimp only
+  have hDisj : ∀ (off1 off2 : Nat) (a1 a2 : UInt64) (_h1 : off1 ≤ 72) (_h2 : off2 ≤ 64)
+      (_hd : off1 + 8 ≤ off2 ∨ off2 + 16 ≤ off1)
+      (_e1 : a1 = outPtr + UInt64.ofNat off1) (_e2 : a2 = outPtr + UInt64.ofNat off2)
+      (m : UInt64 → UInt8) (v : Vec128),
+      readMem64 (writeMem128 m a2 v) a1 = readMem64 m a1 := by
+    intro off1 off2 a1 a2 _h1 _h2 _hd e1 e2 m v
+    subst e1 e2
+    apply readMem64_writeMem128_disjoint
+    intro i k _hi _hk heq
+    rw [u64_add_ofNat_assoc outPtr off1 i (by omega),
+        u64_add_ofNat_assoc outPtr off2 k (by omega)] at heq
+    have := u64_add_ofNat_inj (by omega) (by omega) heq
+    omega
+  have hp0 : outPtr = outPtr + UInt64.ofNat 0 := by apply UInt64.eq_of_toBitVec_eq; simp
+  have h16_8 : (outPtr + 16) + 8 = outPtr + 24 := by
+    change (outPtr + UInt64.ofNat 16) + UInt64.ofNat 8 = outPtr + UInt64.ofNat 24
+    exact u64_add_ofNat_assoc outPtr 16 8 (by decide)
+  have h32_8 : (outPtr + 32) + 8 = outPtr + 40 := by
+    change (outPtr + UInt64.ofNat 32) + UInt64.ofNat 8 = outPtr + UInt64.ofNat 40
+    exact u64_add_ofNat_assoc outPtr 32 8 (by decide)
+  have h48_8 : (outPtr + 48) + 8 = outPtr + 56 := by
+    change (outPtr + UInt64.ofNat 48) + UInt64.ofNat 8 = outPtr + UInt64.ofNat 56
+    exact u64_add_ofNat_assoc outPtr 48 8 (by decide)
+  have h64_8 : (outPtr + 64) + 8 = outPtr + 72 := by
+    change (outPtr + UInt64.ofNat 64) + UInt64.ofNat 8 = outPtr + UInt64.ofNat 72
+    exact u64_add_ofNat_assoc outPtr 64 8 (by decide)
+  have hs16_8 : ∀ p : UInt64, (p + 16) + 8 = p + 24 := fun p => by
+    change (p + UInt64.ofNat 16) + UInt64.ofNat 8 = p + UInt64.ofNat 24
+    exact u64_add_ofNat_assoc p 16 8 (by decide)
+  have hs32_8 : ∀ p : UInt64, (p + 32) + 8 = p + 40 := fun p => by
+    change (p + UInt64.ofNat 32) + UInt64.ofNat 8 = p + UInt64.ofNat 40
+    exact u64_add_ofNat_assoc p 32 8 (by decide)
+  have hs48_8 : ∀ p : UInt64, (p + 48) + 8 = p + 56 := fun p => by
+    change (p + UInt64.ofNat 48) + UInt64.ofNat 8 = p + UInt64.ofNat 56
+    exact u64_add_ofNat_assoc p 48 8 (by decide)
+  have hs64_8 : ∀ p : UInt64, (p + 64) + 8 = p + 72 := fun p => by
+    change (p + UInt64.ofNat 64) + UInt64.ofNat 8 = p + UInt64.ofNat 72
+    exact u64_add_ofNat_assoc p 64 8 (by decide)
+  unfold keccakNeonOutMem chiS readMem128
+  dsimp only
+  simp only [hs16_8, hs32_8, hs48_8, hs64_8,
+    ← ha0, ← ha1, ← ha2, ← ha3, ← ha4, ← ha5, ← ha6, ← ha7, ← ha8, ← ha9,
+    u64_bcax_eq_chi]
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [hDisj 0 64 outPtr (outPtr + 64) (by decide) (by decide) (by omega) hp0 rfl,
+        hDisj 0 48 outPtr (outPtr + 48) (by decide) (by decide) (by omega) hp0 rfl,
+        hDisj 0 32 outPtr (outPtr + 32) (by decide) (by decide) (by omega) hp0 rfl,
+        hDisj 0 16 outPtr (outPtr + 16) (by decide) (by decide) (by omega) hp0 rfl,
+        readMem64_writeMem128_lo]
+  · rw [hDisj 16 64 (outPtr + 16) (outPtr + 64) (by decide) (by decide) (by omega) rfl rfl,
+        hDisj 16 48 (outPtr + 16) (outPtr + 48) (by decide) (by decide) (by omega) rfl rfl,
+        hDisj 16 32 (outPtr + 16) (outPtr + 32) (by decide) (by decide) (by omega) rfl rfl,
+        readMem64_writeMem128_lo]
+  · rw [hDisj 32 64 (outPtr + 32) (outPtr + 64) (by decide) (by decide) (by omega) rfl rfl,
+        hDisj 32 48 (outPtr + 32) (outPtr + 48) (by decide) (by decide) (by omega) rfl rfl,
+        readMem64_writeMem128_lo]
+  · rw [hDisj 48 64 (outPtr + 48) (outPtr + 64) (by decide) (by decide) (by omega) rfl rfl,
+        readMem64_writeMem128_lo]
+  · exact readMem64_writeMem128_lo _ (outPtr + 64) _
+  · rw [hDisj 8 64 (outPtr + 8) (outPtr + 64) (by decide) (by decide) (by omega) rfl rfl,
+        hDisj 8 48 (outPtr + 8) (outPtr + 48) (by decide) (by decide) (by omega) rfl rfl,
+        hDisj 8 32 (outPtr + 8) (outPtr + 32) (by decide) (by decide) (by omega) rfl rfl,
+        hDisj 8 16 (outPtr + 8) (outPtr + 16) (by decide) (by decide) (by omega) rfl rfl]
+    exact readMem64_writeMem128_hi _ outPtr _
+  · rw [hDisj 24 64 (outPtr + 24) (outPtr + 64) (by decide) (by decide) (by omega) rfl rfl,
+        hDisj 24 48 (outPtr + 24) (outPtr + 48) (by decide) (by decide) (by omega) rfl rfl,
+        hDisj 24 32 (outPtr + 24) (outPtr + 32) (by decide) (by decide) (by omega) rfl rfl,
+        ← h16_8]
+    exact readMem64_writeMem128_hi _ (outPtr + 16) _
+  · rw [hDisj 40 64 (outPtr + 40) (outPtr + 64) (by decide) (by decide) (by omega) rfl rfl,
+        hDisj 40 48 (outPtr + 40) (outPtr + 48) (by decide) (by decide) (by omega) rfl rfl,
+        ← h32_8]
+    exact readMem64_writeMem128_hi _ (outPtr + 32) _
+  · rw [hDisj 56 64 (outPtr + 56) (outPtr + 64) (by decide) (by decide) (by omega) rfl rfl,
+        ← h48_8]
+    exact readMem64_writeMem128_hi _ (outPtr + 48) _
+  · rw [← h64_8]
+    exact readMem64_writeMem128_hi _ (outPtr + 64) _
+
+theorem keccakNeonOutMem_outside (mem : UInt64 → UInt8) (outPtr s0Ptr s1Ptr a : UInt64)
+    (ha : ∀ k : Nat, k < 80 → a ≠ outPtr + UInt64.ofNat k) :
+    keccakNeonOutMem mem outPtr s0Ptr s1Ptr a = mem a := by
+  unfold keccakNeonOutMem
+  dsimp only
+  have hout : ∀ (base : Nat) (_hb : base ≤ 64) (m : UInt64 → UInt8) (v : Vec128),
+      writeMem128 m (outPtr + UInt64.ofNat base) v a = m a := by
+    intro base _hb m v
+    apply writeMem128_outside
+    intro k _hk heq
+    rw [u64_add_ofNat_assoc outPtr base k (by omega)] at heq
+    exact ha (base + k) (by omega) heq
+  change writeMem128 (writeMem128 (writeMem128 (writeMem128 (writeMem128 mem outPtr _)
+    (outPtr + UInt64.ofNat 16) _) (outPtr + UInt64.ofNat 32) _)
+    (outPtr + UInt64.ofNat 48) _) (outPtr + UInt64.ofNat 64) _ a = mem a
+  rw [hout 64 (by decide), hout 48 (by decide), hout 32 (by decide), hout 16 (by decide)]
+  exact writeMem128_outside mem outPtr _ a (fun k hk => ha k (by omega))
+
+/-- End-to-end byte-decoded functional equivalence + 3-way CT-NI certificate for
+    `qsag_asm_keccak_sha3_neon` (`N = 39`, `retPc = 152`), connecting the compiled `AArch64`
+    SHA3 NEON `EOR` + `BCAX` byte slice directly to `Keccak.chiS` (Rows 0 & 1) and bitwise
+    `Keccak.keccakChiBit` (`chiWordBit_eq_keccakChiBit`), with full NEON scratch wiping and zero
+    aliasing/wraparound preconditions. -/
+theorem rlib_keccak_sha3_neon_functional_and_ct :
+    ∃ slice m,
+      extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_keccak_sha3_neon" = some slice ∧
+      m ∈ parseArArchive aarch64RlibArchiveBytes ∧
+      ArPayloadOk aarch64RlibArchiveBytes m ∧
+      checkElfFuncThreeWayNI m.payload "qsag_asm_keccak_sha3_neon"
+        (mkContract "qsag_asm_keccak_sha3_neon" [0, 1, 2]) = true ∧
+      ElfSliceThreeWayNISafe slice (mkContract "qsag_asm_keccak_sha3_neon" [0, 1, 2]) ∧
+      decodeArm64Slice slice.code = some keccakSha3NeonProg ∧
+      ∀ (st : Arm64BvState), st.pc = 0 → st.halted = false →
+        (∃ st38 tr38, execDecodedArm64 slice.code 38 st = some (st38, tr38) ∧ st38.halted = false) ∧
+        ∀ extra : Nat, ∃ st' trace,
+          execDecodedArm64 slice.code (39 + extra) st = some (st', trace) ∧
+          st'.halted = true ∧ st'.pc = 152 ∧ trace.length = 39 ∧
+          st'.gpr = st.gpr ∧
+          Arm64CalleeSavedPreserved st st' ∧
+          (∀ vIdx : Nat, (vIdx < 8 ∨ (16 ≤ vIdx ∧ vIdx ≤ 20)) → st'.vec.get vIdx = Vec128.zero) ∧
+          (∀ (K : KState),
+            let memU := fun a : UInt64 => st.mem a.toBitVec
+            let memU' := fun a : UInt64 => st'.mem a.toBitVec
+            let outP := UInt64.ofBitVec (st.gpr.get 0)
+            let s0P := UInt64.ofBitVec (st.gpr.get 1)
+            let s1P := UInt64.ofBitVec (st.gpr.get 2)
+            K.a0 = readMem64 memU s0P ^^^ readMem64 memU s1P →
+            K.a1 = readMem64 memU (s0P + 16) ^^^ readMem64 memU (s1P + 16) →
+            K.a2 = readMem64 memU (s0P + 32) ^^^ readMem64 memU (s1P + 32) →
+            K.a3 = readMem64 memU (s0P + 48) ^^^ readMem64 memU (s1P + 48) →
+            K.a4 = readMem64 memU (s0P + 64) ^^^ readMem64 memU (s1P + 64) →
+            K.a5 = readMem64 memU (s0P + 8) ^^^ readMem64 memU (s1P + 8) →
+            K.a6 = readMem64 memU (s0P + 24) ^^^ readMem64 memU (s1P + 24) →
+            K.a7 = readMem64 memU (s0P + 40) ^^^ readMem64 memU (s1P + 40) →
+            K.a8 = readMem64 memU (s0P + 56) ^^^ readMem64 memU (s1P + 56) →
+            K.a9 = readMem64 memU (s0P + 72) ^^^ readMem64 memU (s1P + 72) →
+              readMem64 memU' outP = (chiS K).a0 ∧
+              readMem64 memU' (outP + 16) = (chiS K).a1 ∧
+              readMem64 memU' (outP + 32) = (chiS K).a2 ∧
+              readMem64 memU' (outP + 48) = (chiS K).a3 ∧
+              readMem64 memU' (outP + 64) = (chiS K).a4 ∧
+              readMem64 memU' (outP + 8) = (chiS K).a5 ∧
+              readMem64 memU' (outP + 24) = (chiS K).a6 ∧
+              readMem64 memU' (outP + 40) = (chiS K).a7 ∧
+              readMem64 memU' (outP + 56) = (chiS K).a8 ∧
+              readMem64 memU' (outP + 72) = (chiS K).a9 ∧
+              (∀ bit : Nat, bit < 64 →
+                (readMem64 memU' outP).toBitVec.getLsbD bit =
+                  keccakChiBit (K.a0.toBitVec.getLsbD bit) (K.a1.toBitVec.getLsbD bit) (K.a2.toBitVec.getLsbD bit))) ∧
+          (∀ a : BitVec 64, (∀ k : Nat, k < 80 → a ≠ st.gpr.get 0 + BitVec.ofNat 64 k) →
+            st'.mem a = st.mem a) := by
+  cases hFind : aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_keccak_sha3_neon") with
+  | none => exfalso; revert hFind; decide +kernel
+  | some slice =>
+    have hExt : extractRlibFuncBytes aarch64RlibArchiveBytes "qsag_asm_keccak_sha3_neon" = some slice := by
+      rw [extractRlibFuncBytes_aarch64_eq, hFind]
+    have hNI : checkElfSliceThreeWayNI slice (mkContract "qsag_asm_keccak_sha3_neon" [0, 1, 2]) = true := by
+      have hCheck : ((aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_keccak_sha3_neon")).map
+          (fun sl => checkElfSliceThreeWayNI sl (mkContract "qsag_asm_keccak_sha3_neon" [0, 1, 2]))) =
+          some true := by decide +kernel
+      rw [hFind] at hCheck
+      exact Option.some.inj hCheck
+    have hDec : decodeArm64Slice slice.code = some keccakSha3NeonProg := by
+      have hD : (aarch64ExtractedSlices.find? (fun s => s.name == "qsag_asm_keccak_sha3_neon")).bind
+          (fun sl => decodeArm64Slice sl.code) = some keccakSha3NeonProg := by decide +kernel
+      rw [hFind] at hD
+      exact hD
+    obtain ⟨m, hm, hPay, _, hMemNI, _, hSafe⟩ :=
+      extractRlibFuncBytes_member_ni_sound aarch64_rlib_distinct_names hExt hNI
+    refine ⟨slice, m, hExt, hm, hPay, hMemNI, hSafe, hDec, ?_⟩
+    intro st hpc hh
+    rcases st with ⟨pc,
+      ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+      ⟨⟨v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15⟩,
+       ⟨v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31⟩⟩,
+      cf, zf, dit, hlt, mem⟩
+    dsimp only at hpc hh; subst hpc hh
+    let st0 : Arm64BvState :=
+      ⟨0, ⟨⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, hi⟩,
+        ⟨⟨v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15⟩,
+         ⟨v16, v17, v18, v19, v20, v21, v22, v23, v24, v25, v26, v27, v28, v29, v30, v31⟩⟩,
+        cf, zf, dit, false, mem⟩
+    have hR := keccakSha3Neon_reaches
+      (UInt64.ofBitVec r0) (UInt64.ofBitVec r1) (UInt64.ofBitVec r2) (UInt64.ofBitVec r3)
+      (UInt64.ofBitVec r4) (UInt64.ofBitVec r5) (UInt64.ofBitVec r6) (UInt64.ofBitVec r7)
+      (UInt64.ofBitVec r8) (UInt64.ofBitVec r9) (UInt64.ofBitVec r10) (UInt64.ofBitVec r11)
+      (UInt64.ofBitVec r12) (UInt64.ofBitVec r13) (UInt64.ofBitVec r14) (UInt64.ofBitVec r15)
+      (bank16ToU64 hi) v0 v1 v2 v3 v4 v5 v6 v7 v8 v9 v10 v11 v12 v13 v14 v15
+      v16 v17 v18 v19 v20 v21 v22 v23 v24 v25 v26 v27 v28 v29 v30 v31 cf zf dit
+      (fun a => mem a.toBitVec)
+    obtain ⟨hPre, hPost⟩ := execDecodedArm64_ret_of_reaches st0 hDec rfl hR rfl rfl
+    refine ⟨hPre, fun extra => ?_⟩
+    obtain ⟨tr, hExec, hL⟩ := hPost extra
+    refine ⟨_, tr, hExec, rfl, rfl, hL, ?_, ?_, ?_, ?_, ?_⟩
+    · exact congrArg (Bank32.mk _) (bank16_roundtrip hi)
+    · refine ⟨fun r hr1 _ => ?_, fun vIdx hv1 hv2 => ?_⟩
+      · have hNot16 : ¬ r < 16 := by omega
+        simp only [Arm64BvState.ofArm64State, bank32OfU64, bank16_roundtrip, Bank32.get, ite_eq_right hNot16]
+      · match vIdx, hv1, hv2 with
+        | 8, _, _ | 9, _, _ | 10, _, _ | 11, _, _ | 12, _, _ | 13, _, _ | 14, _, _ | 15, _, _ => rfl
+        | n + 16, _, h => exact absurd h (by omega)
+        | 0, h, _ | 1, h, _ | 2, h, _ | 3, h, _ | 4, h, _ | 5, h, _ | 6, h, _ | 7, h, _ => exact absurd h (by omega)
+    · intro vIdx hv
+      rcases hv with hlt8 | ⟨hge16, hle20⟩
+      · match vIdx, hlt8 with
+        | 0, _ | 1, _ | 2, _ | 3, _ | 4, _ | 5, _ | 6, _ | 7, _ => rfl
+        | n + 8, h => exact absurd h (by omega)
+      · match vIdx, hge16, hle20 with
+        | 16, _, _ | 17, _, _ | 18, _, _ | 19, _, _ | 20, _, _ => rfl
+        | n + 21, _, h => exact absurd h (by omega)
+        | 0, h, _ | 1, h, _ | 2, h, _ | 3, h, _ | 4, h, _ | 5, h, _ | 6, h, _ | 7, h, _
+        | 8, h, _ | 9, h, _ | 10, h, _ | 11, h, _ | 12, h, _ | 13, h, _ | 14, h, _ | 15, h, _ =>
+          exact absurd h (by omega)
+    · intro K
+      dsimp only
+      intro ha0 ha1 ha2 ha3 ha4 ha5 ha6 ha7 ha8 ha9
+      obtain ⟨c0, c1, c2, c3, c4, c5, c6, c7, c8, c9⟩ :=
+        keccakNeonOutMem_lanes (fun x => mem x.toBitVec) (UInt64.ofBitVec r0)
+          (UInt64.ofBitVec r1) (UInt64.ofBitVec r2) K ha0 ha1 ha2 ha3 ha4 ha5 ha6 ha7 ha8 ha9
+      refine ⟨c0, c1, c2, c3, c4, c5, c6, c7, c8, c9, fun bit hbit => ?_⟩
+      exact (congrArg (fun w : UInt64 => w.toBitVec.getLsbD bit) c0).trans
+        (chiWordBit_eq_keccakChiBit K.a0 K.a1 K.a2 bit hbit)
+    · intro a ha
+      dsimp only [Arm64BvState.ofArm64State, b32get_0]
+      rw [keccakNeonOutMem_outside _ _ _ _ (UInt64.ofBitVec a) (fun k hk heq => by
+        have hb := congrArg UInt64.toBitVec heq
+        rw [u64_roundtrip] at hb
+        have hOfNat : (UInt64.ofBitVec r0 + UInt64.ofNat k).toBitVec = r0 + BitVec.ofNat 64 k := by
+          simp only [UInt64.toBitVec_add]
+          congr 1
+        rw [hOfNat] at hb
+        exact ha k hk hb), u64_roundtrip]
+
+end Qsag
