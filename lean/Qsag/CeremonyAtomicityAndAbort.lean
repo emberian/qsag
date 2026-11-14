@@ -6192,11 +6192,17 @@ theorem mldsa_attempt_rom_reprogramming_bound {Ch J I X : Type} {N : Nat} [Decid
 /-! ## §4. Implemented reservation authority and separately supplied external CAS
 
 The earlier five-ledger and unified-resource models are conditional specifications. The
-Rust journal stores only `Reservation`; it does not allocate a policy budget or an MPC nonce
-slot. The machine here models that narrower authority. Capabilities are transition-owned:
+Rust v2 journal stores reservations plus epoch/retry metadata; it does not allocate a policy
+budget or an MPC nonce slot. `JournalStep` models its fresh-unbound subprotocol only.
+The retry-aware validator and binding-preservation results retain repeated identical bindings. Capabilities are transition-owned:
 constructing a Lean record is never evidence that a Rust permit was issued or consumed.
 The external service below is an additional deployment contract, not code implemented by
 `LedgerCheckpoint`. It must be authenticated, linearizable, and outside disk rollback.
+`anchoredJournal_released_resources_unique`: with it, released tickets never share a
+codeword/leaf epoch or a ceremony id, under arbitrary replacement of the local disk.
+In `JournalStep` and `RetryJournalStep` the field `entries` IS the durable history: a crash
+never shortens it. That is the acknowledged-write contract stated above, and whole-disk
+rollback is outside it; only the anchored machine survives rollback.
 -/
 namespace RustDurability
 
@@ -6374,6 +6380,7 @@ structure AnchorService where
   keyId : Bytes
   nextEpoch : Nat
   tickets : List AnchorTicket := []
+  spent : List Nat := []
   deriving Repr, DecidableEq
 
 /-- Linearizable authenticated compare-and-advance, durable in an independent failure domain.
@@ -6410,58 +6417,161 @@ theorem anchorCAS_fences_clone {s s' : AnchorService} {expected owner : Nat}
   have hn : expected ≠ s'.nextEpoch := by omega
   simp [anchorCAS, hn]
 
+/-- Consuming the server ticket fences even a clone of client memory made after issuance.
+A deployment that only advances on reserve but copies live permits across clones lacks this
+protection. Consumption must itself be authenticated and durably linearized by the service. -/
+def anchorConsume (s : AnchorService) (ticket : AnchorTicket) : Option AnchorService :=
+  if ticket ∈ s.tickets ∧ ticket.epoch ∉ s.spent then
+    some { s with spent := ticket.epoch :: s.spent }
+  else none
+
+theorem anchorConsume_preserves_next {s s' : AnchorService} {ticket : AnchorTicket}
+    (h : anchorConsume s ticket = some s') : s'.nextEpoch = s.nextEpoch := by
+  unfold anchorConsume at h
+  split at h
+  · cases h; rfl
+  · cases h
+
+theorem anchorConsume_once {s s' : AnchorService} {ticket : AnchorTicket}
+    (h : anchorConsume s ticket = some s') : anchorConsume s' ticket = none := by
+  unfold anchorConsume at h
+  split at h
+  · cases h; simp [anchorConsume]
+  · cases h
+
+/-- The CAS history check rejects reuse of the reserved resource, even with a fresh serial. -/
+theorem anchorCAS_no_duplicate_context {s s' : AnchorService} {expected owner : Nat}
+    {r : Reservation} {t : AnchorTicket} (h : anchorCAS s expected owner r = (s', some t)) :
+    ∀ old ∈ s.tickets, old.context.ceremonyId ≠ r.ceremonyId ∧
+      old.context.epochOrCodeword ≠ r.epochOrCodeword := by
+  unfold anchorCAS at h
+  split at h
+  · next hg =>
+    intro old ho
+    exact reservationValid_fresh hg.2.2 _ (List.mem_map.mpr ⟨old, ho, rfl⟩)
+  · cases h
+
+theorem anchorCAS_tickets {s s' : AnchorService} {expected owner : Nat}
+    {r : Reservation} {t : AnchorTicket} (h : anchorCAS s expected owner r = (s', some t)) :
+    s'.tickets = s.tickets ++ [t] := by
+  unfold anchorCAS at h
+  split at h
+  · cases h; rfl
+  · cases h
+
+theorem anchorConsume_tickets {s s' : AnchorService} {ticket : AnchorTicket}
+    (h : anchorConsume s ticket = some s') : s'.tickets = s.tickets := by
+  unfold anchorConsume at h
+  split at h
+  · cases h; rfl
+  · cases h
+
+private theorem nodup_map_of_injOn {α β γ : Type} (f : α → β) (g : α → γ) :
+    ∀ xs : List α, (xs.map g).Nodup →
+      (∀ a ∈ xs, ∀ b ∈ xs, f a = f b → a = b) → (xs.map f).Nodup
+  | [], _, _ => List.nodup_nil
+  | a :: rest, hg, hInj => by
+    rw [List.map_cons, List.Nodup, List.pairwise_cons] at hg ⊢
+    refine ⟨?_, nodup_map_of_injOn f g rest hg.2
+      (fun x hx y hy => hInj x (List.mem_cons_of_mem _ hx) y (List.mem_cons_of_mem _ hy))⟩
+    intro y hy hEq
+    obtain ⟨b, hb, rfl⟩ := List.mem_map.mp hy
+    have hab : a = b := hInj a (List.mem_cons_self ..) b (List.mem_cons_of_mem _ hb) hEq
+    exact hg.1 (g b) (List.mem_map_of_mem hb) (by rw [hab])
+
 /-- Local stages are rollbackable; the external service is not. No ticket is issued by a disk
 restore, a crash, a local write, or a caller-created output record. -/
 structure AnchoredJournal where
   service : AnchorService
   localBytes : Bytes
+  localDurable : Option Reservation := none
   staged : Option Reservation := none
   pending : Option AnchorTicket := none
   released : List AnchorTicket := []
 
 inductive AnchoredJournalStep : AnchoredJournal → AnchoredJournal → Prop where
   | stage (s : AnchoredJournal) (r : Reservation) :
-      AnchoredJournalStep s { s with staged := some r, pending := none }
-  | localCommit (s : AnchoredJournal) (bytes : Bytes) :
-      AnchoredJournalStep s { s with localBytes := bytes }
+      AnchoredJournalStep s { s with staged := some r, pending := none, localDurable := none }
+  | localCommit (s : AnchoredJournal) (bytes : Bytes) (r : Reservation)
+      (staged : s.staged = some r) :
+      AnchoredJournalStep s { s with localBytes := bytes, localDurable := some r }
   | reserve (s : AnchoredJournal) (r : Reservation) (owner expected : Nat)
       (service : AnchorService) (ticket : AnchorTicket)
-      (staged : s.staged = some r)
+      (staged : s.staged = some r) (durable : s.localDurable = some r)
       (cas : anchorCAS s.service expected owner r = (service, some ticket)) :
       AnchoredJournalStep s { s with service, pending := some ticket, staged := none }
-  | release (s : AnchoredJournal) (t : AnchorTicket) (owned : s.pending = some t) :
-      AnchoredJournalStep s { s with pending := none, released := s.released ++ [t] }
+  | release (s : AnchoredJournal) (t : AnchorTicket) (service : AnchorService)
+      (owned : s.pending = some t) (durable : s.localDurable = some t.context)
+      (consumed : anchorConsume s.service t = some service) :
+      AnchoredJournalStep s { s with service, pending := none, released := s.released ++ [t] }
   | crash (s : AnchoredJournal) :
       AnchoredJournalStep s { s with staged := none, pending := none }
   | restoreDisk (s : AnchoredJournal) (bytes : Bytes) :
-      AnchoredJournalStep s { s with localBytes := bytes }
+      AnchoredJournalStep s { s with localBytes := bytes, localDurable := none }
 
+/-- Ticket serials are released at most once, and everything released or pending is a ticket
+the service actually issued; the service never issued two tickets for one codeword/leaf or one
+ceremony id. -/
 def AnchoredJournalInv (s : AnchoredJournal) : Prop :=
   (s.released.map (·.epoch)).Nodup ∧
   (∀ t ∈ s.released, t.epoch < s.service.nextEpoch) ∧
   (∀ t, s.pending = some t → t.epoch < s.service.nextEpoch ∧
-    ∀ u ∈ s.released, u.epoch ≠ t.epoch)
+    ∀ u ∈ s.released, u.epoch ≠ t.epoch) ∧
+  (s.service.tickets.map (·.context.epochOrCodeword)).Nodup ∧
+  (s.service.tickets.map (·.context.ceremonyId)).Nodup ∧
+  (∀ t ∈ s.released, t ∈ s.service.tickets) ∧
+  (∀ t, s.pending = some t → t ∈ s.service.tickets)
 
 theorem anchoredJournalStep_preserves {s t : AnchoredJournal}
     (step : AnchoredJournalStep s t) (inv : AnchoredJournalInv s) : AnchoredJournalInv t := by
-  obtain ⟨hn, hl, hp⟩ := inv
+  obtain ⟨hn, hl, hp, hCw, hCid, hRel, hPend⟩ := inv
   cases step with
-  | stage r => exact ⟨hn, hl, by intro t h; simp at h⟩
-  | localCommit bytes => exact ⟨hn, hl, hp⟩
-  | restoreDisk bytes => exact ⟨hn, hl, hp⟩
-  | crash => exact ⟨hn, hl, by intro t h; simp at h⟩
-  | reserve r owner expected service ticket staged cas =>
-    obtain ⟨hs, ht, _⟩ := anchorCAS_success cas
-    refine ⟨hn, ?_, ?_⟩
+  | stage r => exact ⟨hn, hl, by intro t h; simp at h, hCw, hCid, hRel, by intro t h; simp at h⟩
+  | localCommit bytes r staged => exact ⟨hn, hl, hp, hCw, hCid, hRel, hPend⟩
+  | restoreDisk bytes => exact ⟨hn, hl, hp, hCw, hCid, hRel, hPend⟩
+  | crash => exact ⟨hn, hl, by intro t h; simp at h, hCw, hCid, hRel, by intro t h; simp at h⟩
+  | reserve r owner expected service ticket staged durable cas =>
+    obtain ⟨hs, ht, _, hCtx, _⟩ := anchorCAS_success cas
+    have hT := anchorCAS_tickets cas
+    have hFresh := anchorCAS_no_duplicate_context cas
+    refine ⟨hn, ?_, ?_, ?_, ?_, ?_, ?_⟩
     · intro t hm; have := hl t hm; dsimp; omega
     · intro t he
       have heq := Option.some.inj he
       subst t
       refine ⟨by dsimp; omega, ?_⟩
       intro u hu; have := hl u hu; omega
-  | release t owned =>
+    · dsimp only
+      rw [hT, List.map_append]
+      apply journal_nodup_snoc hCw
+      intro v hv
+      obtain ⟨old, ho, rfl⟩ := List.mem_map.mp hv
+      show old.context.epochOrCodeword ≠ ticket.context.epochOrCodeword
+      rw [hCtx]
+      exact (hFresh old ho).2
+    · dsimp only
+      rw [hT, List.map_append]
+      apply journal_nodup_snoc hCid
+      intro v hv
+      obtain ⟨old, ho, rfl⟩ := List.mem_map.mp hv
+      show old.context.ceremonyId ≠ ticket.context.ceremonyId
+      rw [hCtx]
+      exact (hFresh old ho).1
+    · intro t hm
+      dsimp only
+      rw [hT]
+      exact List.mem_append_left _ (hRel t hm)
+    · intro t he
+      have heq := Option.some.inj he
+      subst t
+      dsimp only
+      rw [hT]
+      exact List.mem_append_right _ (List.mem_singleton_self _)
+  | release t service owned durable consumed =>
+    have hepoch := anchorConsume_preserves_next consumed
+    have hT := anchorConsume_tickets consumed
     obtain ⟨ht, hf⟩ := hp t owned
-    refine ⟨?_, ?_, by intro u h; simp at h⟩
+    refine ⟨?_, ?_, by intro u h; simp at h, ?_, ?_, ?_, by intro u h; simp at h⟩
     · rw [List.map_append]
       apply journal_nodup_snoc hn
       intro e he
@@ -6469,8 +6579,34 @@ theorem anchoredJournalStep_preserves {s t : AnchoredJournal}
       exact hf u hu
     · intro u hu
       rcases List.mem_append.mp hu with hu | hu
-      · exact hl u hu
-      · obtain rfl := List.mem_singleton.mp hu; exact ht
+      · dsimp; rw [hepoch]; exact hl u hu
+      · obtain rfl := List.mem_singleton.mp hu; dsimp; rw [hepoch]; exact ht
+    · dsimp only; rw [hT]; exact hCw
+    · dsimp only; rw [hT]; exact hCid
+    · intro u hu
+      dsimp only
+      rw [hT]
+      rcases List.mem_append.mp hu with hu | hu
+      · exact hRel u hu
+      · obtain rfl := List.mem_singleton.mp hu; exact hPend _ owned
+
+/-- **Anchored release never reuses a resource**: the released tickets carry pairwise distinct
+codewords/leaf epochs and pairwise distinct ceremony ids, whatever happened to the local disk
+(`restoreDisk` replaces it by arbitrary bytes at any time). -/
+theorem anchoredJournal_released_resources_unique {s : AnchoredJournal}
+    (inv : AnchoredJournalInv s) :
+    (s.released.map (·.context.epochOrCodeword)).Nodup ∧
+    (s.released.map (·.context.ceremonyId)).Nodup := by
+  obtain ⟨hn, _, _, hCw, hCid, hRel, _⟩ := inv
+  exact ⟨nodup_map_of_injOn _ (·.epoch) s.released hn
+      (fun a ha b hb h => eq_of_mem_of_map_nodup hCw (hRel a ha) (hRel b hb) h),
+    nodup_map_of_injOn _ (·.epoch) s.released hn
+      (fun a ha b hb h => eq_of_mem_of_map_nodup hCid (hRel a ha) (hRel b hb) h)⟩
+
+theorem anchoredJournal_initial_inv (keyId localBytes : Bytes) (nextEpoch : Nat) :
+    AnchoredJournalInv { service := { keyId, nextEpoch }, localBytes } :=
+  ⟨List.nodup_nil, fun _ h => (by cases h), fun _ h => (by cases h), List.nodup_nil,
+    List.nodup_nil, fun _ h => (by cases h), fun _ h => (by cases h)⟩
 
 inductive AnchoredJournalRun : AnchoredJournal → AnchoredJournal → Prop where
   | refl (s) : AnchoredJournalRun s s
@@ -6529,21 +6665,101 @@ theorem witness_real_cshake_journal_release :
       (initialJournal keyId (List.replicate 8 6)) s ∧ s.released = [r] := by
   dsimp only
   apply journal_successful_release
-  · unfold Reservation.WellFormed; decide
+  · exact reservation_fixture_wellFormed
   · change reservationValid (List.replicate 32 4) [] _ = true
-    exact reservationValid_empty_self _
+    exact reservationValid_empty_self ⟨List.replicate 32 1, List.replicate 32 4, List.replicate 32 2, 1, 1⟩
 
-/-- The CAS history check rejects reuse of the reserved resource, even with a fresh serial. -/
-theorem anchorCAS_no_duplicate_context {s s' : AnchorService} {expected owner : Nat}
-    {r : Reservation} {t : AnchorTicket} (h : anchorCAS s expected owner r = (s', some t)) :
-    ∀ old ∈ s.tickets, old.context.ceremonyId ≠ r.ceremonyId ∧
-      old.context.epochOrCodeword ≠ r.epochOrCodeword := by
-  unfold anchorCAS at h
-  split at h
-  · next hg =>
-    intro old ho
-    exact reservationValid_fresh hg.2.2 _ (List.mem_map.mpr ⟨old, ho, rfl⟩)
-  · cases h
+/-- Full v2 attempt machine, including explicit retries. Unlike the fresh-only machine,
+codeword repetitions are legal; the theorem tracks fresh attempt identities and durable history. -/
+structure RetryJournalState where
+  keyId : Bytes
+  macKey : Bytes := []
+  lockSeal : Bytes := []
+  entries : List JournalEntry := []
+  staged : Option JournalEntry := none
+  permit : Option JournalEntry := none
+  pc : ReplacePc := .done
+  poisoned : Bool := false
+  released : List JournalEntry := []
+
+inductive RetryJournalStep : RetryJournalState → RetryJournalState → Prop where
+  | begin (s : RetryJournalState) (e : JournalEntry)
+      (healthy : s.poisoned = false) (idle : s.staged = none)
+      (valid : journalEntryValid s.keyId s.entries e = true) :
+      RetryJournalStep s { s with staged := some e, permit := none, pc := .checkBefore }
+  | advance (s : RetryJournalState) (e : JournalEntry)
+      (healthy : s.poisoned = false) (staged : s.staged = some e) :
+      RetryJournalStep s { s with pc := nextReplacePc s.pc }
+  | committed (s : RetryJournalState) (e : JournalEntry)
+      (healthy : s.poisoned = false) (staged : s.staged = some e) (synced : s.pc = .done)
+      (valid : journalEntryValid s.keyId s.entries e = true) :
+      RetryJournalStep s { s with entries := s.entries ++ [e], staged := none, permit := some e }
+  | consume (s : RetryJournalState) (e : JournalEntry) (readBack : Bytes)
+      (healthy : s.poisoned = false) (owned : s.permit = some e)
+      (current : s.entries.getLast? = some e)
+      (verified : verifyCurrentPermitV2 s.macKey s.lockSeal s.keyId s.entries
+        ⟨s.entries.length + 1, ceremonyTag s.macKey s.lockSeal (ceremonyBodyV2 s.keyId s.entries)⟩
+        readBack ⟨e, s.entries.length + 1, s.lockSeal⟩ = true) :
+      RetryJournalStep s { s with permit := none, released := s.released ++ [e] }
+  | ioError (s : RetryJournalState) :
+      RetryJournalStep s { s with poisoned := true, pc := .poisoned, permit := none }
+  | crash (s : RetryJournalState) :
+      RetryJournalStep s { s with staged := none, permit := none, pc := .done }
+  | crashPublishes (s : RetryJournalState) (e : JournalEntry)
+      (staged : s.staged = some e) (cut : mayPublishAfterCrash s.pc)
+      (valid : journalEntryValid s.keyId s.entries e = true) :
+      RetryJournalStep s { s with entries := s.entries ++ [e], staged := none, permit := none, pc := .done }
+  | reopen (s : RetryJournalState) (readBack : Bytes)
+      (verified : openCeremonyBytesV2 s.macKey s.lockSeal s.keyId readBack
+        ⟨s.entries.length + 1, ceremonyTag s.macKey s.lockSeal (ceremonyBodyV2 s.keyId s.entries)⟩
+        = some (s.entries.length + 1, s.entries)) :
+      RetryJournalStep s { s with poisoned := false, staged := none, permit := none, pc := .done }
+
+def RetryJournalInv (s : RetryJournalState) : Prop :=
+  (s.released.map (·.reservation.ceremonyId)).Nodup ∧
+  (∀ e ∈ s.released, e ∈ s.entries) ∧
+  (∀ e, s.permit = some e → e ∈ s.entries ∧
+    ∀ old ∈ s.released, old.reservation.ceremonyId ≠ e.reservation.ceremonyId)
+
+theorem retryJournalStep_preserves {s t : RetryJournalState}
+    (step : RetryJournalStep s t) (inv : RetryJournalInv s) : RetryJournalInv t := by
+  obtain ⟨hn, hm, hp⟩ := inv
+  cases step with
+  | begin e healthy idle valid => exact ⟨hn, hm, by intro e h; simp at h⟩
+  | advance e healthy staged => exact ⟨hn, hm, hp⟩
+  | committed e healthy staged synced valid =>
+    refine ⟨hn, fun old ho => List.mem_append_left _ (hm old ho), ?_⟩
+    intro r he
+    obtain rfl := Option.some.inj he
+    exact ⟨List.mem_append_right _ (List.mem_singleton_self _),
+      fun old ho => journalEntryValid_fresh_attempt valid old (hm old ho)⟩
+  | consume e readBack healthy owned current verified =>
+    obtain ⟨he, hf⟩ := hp e owned
+    refine ⟨?_, ?_, by intro e h; simp at h⟩
+    · rw [List.map_append]
+      apply journal_nodup_snoc hn
+      intro x hx
+      obtain ⟨old, ho, rfl⟩ := List.mem_map.mp hx
+      exact hf old ho
+    · intro old ho
+      rcases List.mem_append.mp ho with ho | ho
+      · exact hm old ho
+      · obtain rfl := List.mem_singleton.mp ho; exact he
+  | ioError => exact ⟨hn, hm, by intro e h; simp at h⟩
+  | crash => exact ⟨hn, hm, by intro e h; simp at h⟩
+  | crashPublishes e staged cut valid =>
+    exact ⟨hn, fun old ho => List.mem_append_left _ (hm old ho), by intro e h; simp at h⟩
+  | reopen readBack verified => exact ⟨hn, hm, by intro e h; simp at h⟩
+
+inductive RetryJournalRun : RetryJournalState → RetryJournalState → Prop where
+  | refl (s) : RetryJournalRun s s
+  | next {s t u} : RetryJournalRun s t → RetryJournalStep t u → RetryJournalRun s u
+
+theorem retryJournal_trace_no_attempt_reuse {s t : RetryJournalState}
+    (run : RetryJournalRun s t) (inv : RetryJournalInv s) : RetryJournalInv t := by
+  induction run with
+  | refl => exact inv
+  | next run step ih => exact retryJournalStep_preserves step ih
 
 end RustDurability
 
