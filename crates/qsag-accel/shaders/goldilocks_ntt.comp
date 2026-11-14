@@ -28,24 +28,39 @@ layout(push_constant) uniform PushConsts {
 const uint64_t GL_P   = 0xFFFFFFFF00000001ul;
 const uint64_t GL_EPS = 0xFFFFFFFFul;
 
-shared uint64_t s_lds[512];
+// Scalar 32-bit planes: each LDS instruction addresses one word per lane.
+// XOR the low five bits with bit 5 replicated. For a butterfly's first five
+// stages, its omitted bank bit is supplied by bit 5; later stages are contiguous.
+// This is a bijection within each 32-word row (no padding or extra LDS required).
+shared uint s_lds[2][512];
+uint lds_index(uint i) { return i ^ (((i >> 5u) & 1u) * 31u); }
+uint64_t lds_load(uint i) {
+    uint a = lds_index(i);
+    return uint64_t(s_lds[0][a]) | (uint64_t(s_lds[1][a]) << 32u);
+}
+void lds_store(uint i, uint64_t v) {
+    uint a = lds_index(i);
+    s_lds[0][a] = uint(v);
+    s_lds[1][a] = uint(v >> 32u);
+}
 
 uint64_t fp_reduce_u64(uint64_t x) {
-    return (x >= GL_P) ? (x - GL_P) : x;
+    return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
 }
 
 uint64_t fp_add(uint64_t a, uint64_t b) {
     uint64_t a_c = fp_reduce_u64(a);
     uint64_t b_c = fp_reduce_u64(b);
     uint64_t rem_p = GL_P - b_c;
-    return (a_c < rem_p) ? (a_c + b_c) : (a_c - rem_p);
+    uint64_t mask = 0ul - uint64_t(a_c < rem_p);
+    return ((a_c + b_c) & mask) | ((a_c - rem_p) & ~mask);
 }
 
 uint64_t fp_sub(uint64_t a, uint64_t b) {
     uint64_t a_c = fp_reduce_u64(a);
     uint64_t b_c = fp_reduce_u64(b);
     uint64_t diff = a_c - b_c;
-    return (a_c < b_c) ? (diff + GL_P) : diff;
+    return diff + (GL_P & (0ul - uint64_t(a_c < b_c)));
 }
 
 uint64_t fp_reduce128(uint64_t lo, uint64_t hi) {
@@ -121,8 +136,8 @@ void main() {
             return;
         }
         uint base = wg * 512u;
-        s_lds[lid]        = buf.words[base + lid];
-        s_lds[lid + 256u] = buf.words[base + lid + 256u];
+        lds_store(lid, buf.words[base + lid]);
+        lds_store(lid + 256u, buf.words[base + lid + 256u]);
         barrier();
 
         uint64_t w_roots[10];
@@ -137,15 +152,15 @@ void main() {
             uint idx0 = ((lid >> (s - 1u)) << s) + j;
             uint idx1 = idx0 + half_len;
             uint64_t w = fp_pow_u32(w_roots[s], j);
-            uint64_t u = s_lds[idx0];
-            uint64_t v = fp_mul(s_lds[idx1], w);
-            s_lds[idx0] = fp_add(u, v);
-            s_lds[idx1] = fp_sub(u, v);
+            uint64_t u = lds_load(idx0);
+            uint64_t v = fp_mul(lds_load(idx1), w);
+            lds_store(idx0, fp_add(u, v));
+            lds_store(idx1, fp_sub(u, v));
             barrier();
         }
 
-        buf.words[base + lid]        = s_lds[lid];
-        buf.words[base + lid + 256u] = s_lds[lid + 256u];
+        buf.words[base + lid]        = lds_load(lid);
+        buf.words[base + lid + 256u] = lds_load(lid + 256u);
         return;
     }
 
@@ -158,7 +173,7 @@ void main() {
         if (half_len >= 256u) {
             if (lid == 0u) {
                 uint j_base = (wg * 256u) & (half_len - 1u);
-                s_lds[0] = fp_pow_u32(pc.w_step, j_base);
+                lds_store(0, fp_pow_u32(pc.w_step, j_base));
             }
             barrier();
             if (gid < half_n) {
@@ -166,7 +181,7 @@ void main() {
                 uint j     = gid & (half_len - 1u);
                 uint idx0  = (block << s) + j;
                 uint idx1  = idx0 + half_len;
-                uint64_t w = fp_mul(s_lds[0], fp_pow_u32(pc.w_step, lid));
+                uint64_t w = fp_mul(lds_load(0), fp_pow_u32(pc.w_step, lid));
                 uint64_t u = buf.words[idx0];
                 uint64_t v = fp_mul(buf.words[idx1], w);
                 buf.words[idx0] = fp_add(u, v);

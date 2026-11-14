@@ -1021,7 +1021,7 @@ impl FrontierFtsSigningKey {
         let Some(expected_ctr) = canonical_ctr else {
             return Err(FrontierFtsError::SignatureVerificationFailed);
         };
-        if !rand_ok || ct_eq_u64(sig.grind_counter as u64, expected_ctr as u64) != u64::MAX {
+        if !rand_ok || !ct_eq_u64(sig.grind_counter as u64, expected_ctr as u64) {
             return Err(FrontierFtsError::SignatureVerificationFailed);
         }
         let Some(slot) = self.released_uses.get_mut(use_seq as usize) else {
@@ -1246,7 +1246,7 @@ mod rank_domain_tests {
     fn verify_before_release_blocks_chain_randomizer_and_grind_counter_faults() {
         use qsag_accel::CpuReferenceBackend;
 
-        let profile = FrontierFtsProfile::Compact514B;
+        let profile = FrontierFtsProfile::Compact514;
         let dp = FrontierDpTable::build(profile);
         let msg = b"frontier fault-grafting regression";
         let hedge = [0x42u8; 32];
@@ -1258,7 +1258,7 @@ mod rank_domain_tests {
             [2u8; 32],
             [3u8; 32],
             true,
-            &CpuReferenceBackend,
+            &CpuReferenceBackend::new(),
         );
         sk_chain.test_fault = Some(FrontierFaultInjection::ChainByteFlip {
             index: 0,
@@ -1278,7 +1278,7 @@ mod rank_domain_tests {
             [2u8; 32],
             [3u8; 32],
             true,
-            &CpuReferenceBackend,
+            &CpuReferenceBackend::new(),
         );
         sk_rand.test_fault = Some(FrontierFaultInjection::PreGrindRandomizerFlip {
             index: 0,
@@ -1298,7 +1298,7 @@ mod rank_domain_tests {
             [2u8; 32],
             [3u8; 32],
             true,
-            &CpuReferenceBackend,
+            &CpuReferenceBackend::new(),
         );
         sk_ctr.test_fault = Some(FrontierFaultInjection::SkipMinimalGrindCounter);
         assert_eq!(
@@ -1314,7 +1314,7 @@ mod rank_domain_tests {
             [2u8; 32],
             [3u8; 32],
             true,
-            &CpuReferenceBackend,
+            &CpuReferenceBackend::new(),
         );
         sk_cache.released_uses[0] = Some((vec![0xFF; profile.params().node_bytes], 7));
         assert_eq!(

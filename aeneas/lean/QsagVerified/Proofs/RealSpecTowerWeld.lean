@@ -81,19 +81,40 @@ theorem tower128_add_refines_qsag (a b : Std.U128) :
 
 /-! ## Level-generic packed Karatsuba step -/
 
+/-- Constructive form of the low-mask bit test (the core lemma depends on `Classical.choice`). -/
+private theorem testBit_lowMask (n i : Nat) : (2 ^ n - 1).testBit i = decide (i < n) := by
+  induction n generalizing i with
+  | zero => simp
+  | succ n ih =>
+    have hpos : 0 < 2 ^ n := Nat.pos_pow (by decide)
+    have hpow : 2 ^ (n + 1) = 2 * 2 ^ n := by rw [Nat.pow_succ, Nat.mul_comm]
+    cases i with
+    | zero =>
+      rw [Nat.testBit_zero]
+      have : (2 ^ (n + 1) - 1) % 2 = 1 := by omega
+      simp [this]
+    | succ i =>
+      rw [Nat.testBit_succ, show (2 ^ (n + 1) - 1) / 2 = 2 ^ n - 1 by omega, ih]
+      simp
+
+private theorem and_lowMask (x n : Nat) : x &&& (2 ^ n - 1) = x % 2 ^ n := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_and, testBit_lowMask, Nat.testBit_mod_two_pow, Bool.and_comm]
+
 private theorem towerLow (k : Nat) (a m : BitVec (2 ^ (k + 1)))
     (hm : m.toNat = 2 ^ (2 ^ k) - 1) :
     (a &&& m).setWidth (2 ^ k) = Qsag.lowBits k a := by
   apply BitVec.eq_of_toNat_eq
   simp only [Qsag.lowBits, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
-    BitVec.extractLsb'_toNat, Nat.and_two_pow_sub_one_eq_mod, Nat.shiftRight_zero, Nat.mod_mod]
+    BitVec.extractLsb'_toNat, and_lowMask, Nat.shiftRight_zero, Nat.mod_mod]
 
 private theorem towerHigh (k : Nat) (a m : BitVec (2 ^ (k + 1)))
     (hm : m.toNat = 2 ^ (2 ^ k) - 1) :
     ((a >>> (2 ^ k)) &&& m).setWidth (2 ^ k) = Qsag.highBits k a := by
   apply BitVec.eq_of_toNat_eq
   simp only [Qsag.highBits, BitVec.toNat_setWidth, BitVec.toNat_and, hm,
-    BitVec.extractLsb'_toNat, Nat.and_two_pow_sub_one_eq_mod, BitVec.toNat_ushiftRight,
+    BitVec.extractLsb'_toNat, and_lowMask, BitVec.toNat_ushiftRight,
     Nat.mod_mod]
 
 private theorem towerJoin (k : Nat) (lo hi : BitVec (2 ^ k)) :

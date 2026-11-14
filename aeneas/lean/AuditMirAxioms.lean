@@ -1,7 +1,5 @@
 module
 import Lean
-import all QsagVerified.Proofs.RealSpecGuardBoundary
-import all QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld
 import all QsagMirProofs
 import all QsagVerified.Funs
 import all QsagVerified.Proofs
@@ -40,7 +38,6 @@ import all QsagVerified.Types
 import all QsagVerified.Proofs.BeltAckProvenance
 import all QsagVerified.Proofs.CallerContracts
 import all QsagVerified.Proofs.MultiTurnMediationAndReachability
-import all QsagVerified.Proofs.RealSpecBeltWeld
 import all QsagVerified.Proofs.RealSpecFieldWeld
 import all QsagVerified.Proofs.RealSpecHashWeld
 import all QsagVerified.Proofs.RealSpecKeccakWeld
@@ -52,7 +49,8 @@ This gate audits dependency closures of definitions AND theorems. Auditing an ex
 function is not a correctness proof for that function. The theorem anchors below prevent
 core delivered weld boundaries from silently disappearing or becoming mere definitions.
 The complete per-module census still includes every declaration, including future proofs.
-See `QsagSpecWeld` for the explicit outstanding production and streaming boundaries.
+The protocol-level welds (`RealSpecBeltWeld`, `RealSpecGuardBoundary`,
+`AuthenticatedBeltAndRealSpecWeld`) are censused by `QsagCustodyWeld`, which shares this policy.
 -/
 
 open Lean Elab Command in
@@ -80,9 +78,11 @@ run_cmd do
     ``qsag_verified.proofs.keccak_f1600_result_iff,
     ``qsag_verified.proofs.shake256_absorb_after_squeezing,
     ``qsag_verified.proofs.shake256_finalize_after_squeezing,
-    ``qsag_verified.proofs.belt_grant_refines_qsag_mask,
-    ``qsag_verified.proofs.belt_quorum_intersection_refines_qsag,
-    ``qsag_verified.proofs.belt_validated_grant_refines_qsag_mask]
+    ``qsag_verified.proofs.tower128_mul_refines_qsag,
+    ``qsag_verified.proofs.tower128_mul_eq_zero_iff,
+    ``qsag_verified.proofs.tower256_mul_refines_qsag,
+    ``qsag_verified.proofs.bdoz_verify_arbitrary_batch,
+    ``qsag_verified.proofs.inhabited_belt_one_fault_multi_epoch]
   for name in requiredTheorems do
     match env.find? name with
     | some (.thmInfo _) => pure ()

@@ -28,7 +28,25 @@ layout(push_constant) uniform PushConsts {
     uint _pad;
 } pc;
 
-shared u64vec4 s_red[256];
+// Eight scalar word planes avoid the original 32-byte lane stride.
+// Each scalar access visits all 32 banks once; reduction partner offsets are public.
+shared uint s_red[8][256];
+u64vec4 red_load(uint i) {
+    return u64vec4(uint64_t(s_red[0][i]) | (uint64_t(s_red[1][i]) << 32u),
+        uint64_t(s_red[2][i]) | (uint64_t(s_red[3][i]) << 32u),
+        uint64_t(s_red[4][i]) | (uint64_t(s_red[5][i]) << 32u),
+        uint64_t(s_red[6][i]) | (uint64_t(s_red[7][i]) << 32u));
+}
+void red_store(uint i, u64vec4 v) {
+    s_red[0][i] = uint(v[0]);
+    s_red[1][i] = uint(v[0] >> 32u);
+    s_red[2][i] = uint(v[1]);
+    s_red[3][i] = uint(v[1] >> 32u);
+    s_red[4][i] = uint(v[2]);
+    s_red[5][i] = uint(v[2] >> 32u);
+    s_red[6][i] = uint(v[3]);
+    s_red[7][i] = uint(v[3] >> 32u);
+}
 
 u64vec2 gf2_128_mul(u64vec2 a, u64vec2 b) {
     u64vec2 acc = u64vec2(0ul, 0ul);
@@ -87,19 +105,19 @@ void main() {
         }
     }
 
-    s_red[lid] = acc;
+    red_store(lid, acc);
     barrier();
 
     for (uint half_sz = 128u; half_sz > 0u; half_sz >>= 1u) {
         if (lid < half_sz) {
-            s_red[lid] ^= s_red[lid + half_sz];
+            red_store(lid, red_load(lid) ^ red_load(lid + half_sz));
         }
         barrier();
     }
 
     if (lid == 0u) {
         uint out_idx = (pc.mode == 0u) ? (wg * 4u) : 0u;
-        u64vec4 res = s_red[0];
+        u64vec4 res = red_load(0u);
         out_buf.words[out_idx + 0u] = res.x;
         out_buf.words[out_idx + 1u] = res.y;
         out_buf.words[out_idx + 2u] = res.z;

@@ -37,6 +37,8 @@ public import Qsag.Poseidon2
 public import Qsag.UcGames
 import all Qsag.Goldilocks
 import all Qsag.BinaryTower
+import all Qsag.Poseidon2
+import all Qsag.UcGames
 import Qsag.Tactic.AssuranceKit
 
 public section
@@ -159,29 +161,29 @@ theorem ringListSum_zipAdd :
     simp only [ringListZipAdd, ringListSum, ringListSum_zipAdd xs ys]
     exact (LawfulCommRing.add_add_add_comm x (ringListSum xs) y (ringListSum ys)).symm
 
-/-- Inductive witness that an $n$-party share vector `ws` (`ws.length = us.length = vs.length`)
-    arises from local inputs `us`, `vs` via pairwise OLE correlations
+/-- Inductive witness that an $n$-party share vector `ws` (`ws.length = us.length = vShares.length`)
+    arises from local inputs `us`, `vShares` via pairwise OLE correlations
     ($s_{i,j}^{(1)} + s_{i,j}^{(2)} = u_i \cdot v_j$) with zero trusted dealer. -/
 inductive ValidPairwiseOleShares : List R → List R → List R → Prop where
   | nil : ValidPairwiseOleShares [] [] []
-  | cons {u0 v0 : R} {us vs wsTail : List R}
+  | cons {u0 v0 : R} {us vShares wsTail : List R}
       (s0Right1 s0Right2 sLeft0_1 sLeft0_2 : List R)
-      (hTail : ValidPairwiseOleShares us vs wsTail)
+      (hTail : ValidPairwiseOleShares us vShares wsTail)
       (hLenR1 : s0Right1.length = wsTail.length)
       (hLenR2 : s0Right2.length = wsTail.length)
       (hLenL1 : sLeft0_1.length = wsTail.length)
       (hLenL2 : sLeft0_2.length = wsTail.length)
-      (hRightSum : add (ringListSum s0Right1) (ringListSum s0Right2) = mul u0 (ringListSum vs))
+      (hRightSum : add (ringListSum s0Right1) (ringListSum s0Right2) = mul u0 (ringListSum vShares))
       (hLeftSum  : add (ringListSum sLeft0_1) (ringListSum sLeft0_2) = mul (ringListSum us) v0) :
-      ValidPairwiseOleShares (u0 :: us) (v0 :: vs)
+      ValidPairwiseOleShares (u0 :: us) (v0 :: vShares)
         (add (mul u0 v0) (add (ringListSum s0Right1) (ringListSum sLeft0_2)) ::
          ringListZipAdd wsTail (ringListZipAdd s0Right2 sLeft0_1))
 
-/-- True $n$-party arity preservation: `ValidPairwiseOleShares us vs ws` produces one output
-    share per party (`ws.length = us.length` and `vs.length = us.length`). -/
-theorem ValidPairwiseOleShares.length_eq {us vs ws : List R}
-    (hValid : ValidPairwiseOleShares us vs ws) :
-    ws.length = us.length ∧ vs.length = us.length := by
+/-- True $n$-party arity preservation: `ValidPairwiseOleShares us vShares ws` produces one output
+    share per party (`ws.length = us.length` and `vShares.length = us.length`). -/
+theorem ValidPairwiseOleShares.length_eq {us vShares ws : List R}
+    (hValid : ValidPairwiseOleShares us vShares ws) :
+    ws.length = us.length ∧ vShares.length = us.length := by
   induction hValid with
   | nil => exact ⟨rfl, rfl⟩
   | @cons _ _ _ _ wsTail _ s0R2 sL1 _ _ _ hLenR2 hLenL1 _ _ _ ih =>
@@ -196,13 +198,13 @@ theorem ValidPairwiseOleShares.length_eq {us vs ws : List R}
     Over ANY commutative ring `R` (`Goldilocks`, `GoldilocksExt2`, `Bool` / `TowerElem 0`,
     `TowerElem 3`, `Tower128`), $n$-party pairwise OLE cross-terms sum identically to
     $(\sum u_i) \cdot (\sum v_j)$ with zero trusted dealer! -/
-theorem ole_pairwise_cross_sum_eq_mul {us vs ws : List R}
-    (hValid : ValidPairwiseOleShares us vs ws) :
-    ringListSum ws = mul (ringListSum us) (ringListSum vs) := by
+theorem ole_pairwise_cross_sum_eq_mul {us vShares ws : List R}
+    (hValid : ValidPairwiseOleShares us vShares ws) :
+    ringListSum ws = mul (ringListSum us) (ringListSum vShares) := by
   induction hValid with
   | nil =>
     simp [ringListSum, LawfulCommRing.mul_zero]
-  | @cons u0 v0 us vs wsTail s0R1 s0R2 sL1 sL2 _ _ _ _ _ hR hL ih =>
+  | @cons u0 v0 us vShares wsTail s0R1 s0R2 sL1 sL2 _ _ _ _ _ hR hL ih =>
     simp only [ringListSum, ringListSum_zipAdd]
     rw [LawfulCommRing.right_distrib, LawfulCommRing.left_distrib, LawfulCommRing.left_distrib]
     rw [← hR, ← hL, ← ih]
@@ -2422,23 +2424,25 @@ theorem tooth_rlwe_fo_corrupted_batch_rejected :
     verifyRlweFoBatch [⟨false, true, 4000, rlweNoisyEncode false true 4000⟩] 1 = false :=
   tooth_rlwe_fo_corrupted_ciphertext_caught.2.2
 
+private def demoForgedZeroSacrificeOpening : SharedSpdzSacrificeOpening :=
+  let rho : GoldilocksExt2 := ⟨Goldilocks.ofNat 2, Goldilocks.one⟩
+  let badTr : AuthenticatedSharedTriple :=
+    { demoHonestAuthTriple with
+      triple := { demoHonestAuthTriple.triple with
+                  cShares := [Goldilocks.ofNat 20, Goldilocks.ofNat 27, Goldilocks.ofNat 34] }
+      macC := mkDemoMacShares 13 }
+  let op := honestSharedSpdzSacrificeOpening demoLambdas2of3 rho
+    demoAlphaShares3 badTr demoCompanionAuthTriple demoZeroMasks3 demoZeroMasks3 demoZeroMasks3
+  let macW := shareZipSub
+    (shareZipSub (shareScale rho badTr.macC) demoCompanionAuthTriple.macC)
+    (ringListZipAdd (shareScale op.uOpened badTr.macB) (shareScale op.vOpened demoCompanionAuthTriple.macA))
+  { op with wOpened := CommRingOps.zero,
+            sigmaW := spdzComputeSigmas CommRingOps.zero macW demoAlphaShares3 demoZeroMasks3 }
+
 /-- **`#tooth` Forged Zero-Opening SPDZ Sacrifice Rejected (`tooth_shared_spdz_forged_zero_rejected`)**:
     Atomic MAC-rejection projection of `tooth_shared_spdz_sacrifice_rejects_corrupted_triple`. -/
 theorem tooth_shared_spdz_forged_zero_rejected :
-    let rho : GoldilocksExt2 := ⟨Goldilocks.ofNat 2, Goldilocks.one⟩
-    let badTr : AuthenticatedSharedTriple :=
-      { demoHonestAuthTriple with
-        triple := { demoHonestAuthTriple.triple with
-                    cShares := [Goldilocks.ofNat 20, Goldilocks.ofNat 27, Goldilocks.ofNat 34] }
-        macC := mkDemoMacShares 13 }
-    let op := honestSharedSpdzSacrificeOpening demoLambdas2of3 rho
-      demoAlphaShares3 badTr demoCompanionAuthTriple demoZeroMasks3 demoZeroMasks3 demoZeroMasks3
-    let macW := shareZipSub
-      (shareZipSub (shareScale rho badTr.macC) demoCompanionAuthTriple.macC)
-      (ringListZipAdd (shareScale op.uOpened badTr.macB) (shareScale op.vOpened demoCompanionAuthTriple.macA))
-    verifySharedSpdzSacrifice
-      { op with wOpened := CommRingOps.zero,
-                sigmaW := spdzComputeSigmas CommRingOps.zero macW demoAlphaShares3 demoZeroMasks3 } = false :=
+    verifySharedSpdzSacrifice demoForgedZeroSacrificeOpening = false :=
   tooth_shared_spdz_sacrifice_rejects_corrupted_triple.2.2
 
 /-- **`#tooth` Rank-Deficient Zero-Row Extractor Collides (`tooth_zero_row_extractor_collides_pair`)**:
@@ -2459,16 +2463,15 @@ theorem tooth_kos_prechallenge_cancels_fault_witness (chi : Tower128) :
 /-- **`#tooth` Unbounded `Q + 1` Queries Break `Q`-Query GGM Hiding (`tooth_ggm_extra_query_distinguishes`)**:
     With `Q = 0` budget violated by a 1-query distinguisher, `keyedPrfRealAccept ≠ keyedPrfIdealAccept`. -/
 theorem tooth_ggm_extra_query_distinguishes :
-    let baseGgm : Fin 1 × Unit → Bool := fun _ => false
-    let secretLeaf : Unit → Bool := fun _ => true
-    let A : OracleComp (Fin 1 × Unit) Bool Bool :=
-      OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure
-    keyedPrfRealAccept 1 baseGgm secretLeaf A ≠ keyedPrfIdealAccept 1 baseGgm A := by
+    keyedPrfRealAccept 1 (fun _ : Fin 1 × Unit => false) (fun _ : Unit => true)
+      (OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure) ≠
+    keyedPrfIdealAccept 1 (fun _ : Fin 1 × Unit => false)
+      (OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure) := by
   decide +kernel
 
-/-- Genuine non-empty 2-party pairwise OLE share witness (`us = [2, 3], vs = [4, 5], sum(ws) = 5 * 9 = 45`). -/
+/-- Genuine non-empty 2-party pairwise OLE share witness (`us = [2, 3], vShares = [4, 5], sum(ws) = 5 * 9 = 45`). -/
 theorem witness_valid_pairwise_ole_inhabited :
-    ∃ (us vs ws : List Goldilocks), ValidPairwiseOleShares us vs ws := by
+    ∃ (us vShares ws : List Goldilocks), ValidPairwiseOleShares us vShares ws := by
   have h1 : ValidPairwiseOleShares
       [Goldilocks.ofNat 3] [Goldilocks.ofNat 5]
       [CommRingOps.add (CommRingOps.mul (Goldilocks.ofNat 3) (Goldilocks.ofNat 5))
@@ -2482,7 +2485,9 @@ theorem witness_valid_pairwise_ole_inhabited :
 
 theorem witness_beaver_triple_val_inhabited :
     ∃ (t : BeaverTripleVal Goldilocks), t.valid :=
-  ⟨⟨Goldilocks.ofNat 3, Goldilocks.ofNat 4, Goldilocks.ofNat 12⟩, by decide +kernel⟩
+  ⟨⟨Goldilocks.ofNat 3, Goldilocks.ofNat 4, Goldilocks.ofNat 12⟩,
+    show Goldilocks.ofNat 12 = CommRingOps.mul (Goldilocks.ofNat 3) (Goldilocks.ofNat 4) by
+      decide +kernel⟩
 
 theorem witness_shared_triple_validAt_inhabited :
     ∃ (lambdas : List Goldilocks) (tr : SharedBeaverTriple Goldilocks), tr.validAt lambdas :=

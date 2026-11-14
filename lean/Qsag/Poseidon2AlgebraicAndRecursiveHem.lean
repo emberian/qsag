@@ -4047,7 +4047,7 @@ theorem poseidon2_symbolic_round_degree_bound (x : Nat → Fin 4 → PoseidonExp
     have h := symbolicRound4_degree_le (rc r) (x r) (7 ^ r) ih i
     simpa only [Nat.pow_succ, Nat.mul_comm] using h
 
-/-! ## 7. Concrete accepting hierarchical certificates -/
+/-! ## 7. Concrete accepting hierarchical certificates & prover transcripts -/
 
 /-- Two distinct singleton committees use the same relation `x^7 = 0`, represented by
     `(seed, root) = (0, 0)` and `(1, 1)`. Both use the honest two-stage WHIR prover.
@@ -4063,29 +4063,80 @@ def concreteHemShard (second : Bool) : HemShardProof :=
 
 def concreteHemArith : RowArithmetization := rsSbox7TraceArith Goldilocks.zero Goldilocks.zero
 
-def concreteHemRegistryDigest : List UInt8 :=
-  poseidon2Hash32 (encodeRegistry ([concreteHemShard false, concreteHemShard true].map
-    HemShardProof.registration))
+def concreteHemRegistry : List ShardRegistration :=
+  [concreteHemShard false, concreteHemShard true].map HemShardProof.registration
 
+def concreteHemRegistryDigest : List UInt8 :=
+  poseidon2Hash32 (encodeRegistry concreteHemRegistry)
+
+private theorem concreteHemArith_eq_seed (second : Bool) :
+    let seed := if second then Goldilocks.one else Goldilocks.zero
+    rsSbox7TraceArith seed (CommRingOps.add (pow7Goldilocks Goldilocks.zero) seed) =
+      concreteHemArith := by
+  cases second <;>
+    (dsimp only [concreteHemArith, rsSbox7TraceArith]
+     congr 1
+     decide)
+
+private theorem concreteSeedRoot_eq (second : Bool) :
+    let seed := if second then Goldilocks.one else Goldilocks.zero
+    CommRingOps.add (pow7Goldilocks Goldilocks.zero) seed = seed := by
+  cases second <;> decide
+
+set_option maxRecDepth 4096 in
 theorem concreteHemShard_accepts (second : Bool) :
     verifyHemShard concreteHemArith rsSbox7WhirDomain [] [] (concreteHemShard second) = true := by
   have hAcc := (honestSbox7WhirProof_accepts
     (if second then Goldilocks.one else Goldilocks.zero)
     Goldilocks.zero Goldilocks.one
     (shardBoundMessage [if second then 1 else 0] [] [])).1
+  rw [concreteHemArith_eq_seed second, concreteSeedRoot_eq second] at hAcc
   cases second <;>
-    (change true && true && _ = true
+    (change true && true && true && true && _ = true
      simpa only [Bool.true_and] using hAcc)
+
+theorem concreteHemShard_lawful (second : Bool) :
+    concreteHemArith.Lawful rsSbox7WhirDomain (concreteHemShard second).inst := by
+  let seed := if second then Goldilocks.one else Goldilocks.zero
+  let msg := shardBoundMessage [if second then 1 else 0] [] []
+  have hLaw := rsSbox7TraceArith_lawful seed seed msg
+  have hArith : rsSbox7TraceArith seed seed = concreteHemArith := by
+    rw [← concreteSeedRoot_eq second]
+    exact concreteHemArith_eq_seed second
+  rw [hArith] at hLaw
+  exact hLaw
+
+/-- Concrete prover commitment-opening transcript for `concreteHemShard second`. -/
+def concreteHemShardTranscript (second : Bool) :
+    ShardProverTranscript concreteHemArith rsSbox7WhirDomain :=
+  let seed := if second then Goldilocks.one else Goldilocks.zero
+  let sid : List UInt8 := [if second then 1 else 0]
+  let msg := shardBoundMessage sid [] []
+  let bundle := buildHonestSbox7WhirBundle seed Goldilocks.zero Goldilocks.one msg
+  { shard := concreteHemShard second
+    law := concreteHemShard_lawful second
+    transcript := transcriptOfBoundView rsSbox7WhirDomain bundle.2.2 }
+
+theorem concreteHemShardTranscript_accepts (second : Bool) :
+    verifyCommittedTableTranscript rsSbox7WhirDomain (concreteHemShard second).proof
+      (concreteHemShardTranscript second).transcript = true := by
+  have hBound := (honestSbox7WhirProof_accepts
+    (if second then Goldilocks.one else Goldilocks.zero)
+    Goldilocks.zero Goldilocks.one
+    (shardBoundMessage [if second then 1 else 0] [] [])).2
+  have hNodup : (rsSbox7WhirDomain.stages.map (·.stageIdx)).Nodup := by decide
+  exact verifyCommittedTableTranscript_transcriptOfBoundView rsSbox7WhirDomain _ _ hNodup hBound
 
 /-- A root certificate with two distinct shard ids, two distinct public keys, and two active
     signers. Its registry commitment is computed by the deployed Poseidon2 hash. -/
 theorem inhabited_verifyHierarchicalHem_two_shards :
     verifyHierarchicalHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
       concreteHemRegistryDigest [] [] [concreteHemShard false, concreteHemShard true] = true ∧
+    verifyHemHierarchyAgainstRegistry concreteHemArith rsSbox7WhirDomain
+      concreteHemRegistry [] [] [concreteHemShard false, concreteHemShard true] = true ∧
     hierarchicalClaimedWeight [concreteHemShard false, concreteHemShard true] = 2 ∧
-    hierarchicalThresholdSum [concreteHemShard false, concreteHemShard true] = 2 := by
-  refine ⟨?_, rfl, rfl⟩
-  unfold verifyHierarchicalHem concreteHemRegistryDigest
+    hierarchicalThresholdSum [concreteHemShard false, concreteHemShard true] = 2 ∧
+    registryThresholdSum concreteHemRegistry = 2 := by
   have hIds : (hierarchicalShardIds [concreteHemShard false, concreteHemShard true]).Nodup := by
     decide
   have hKeys : (hierarchicalCommittee [concreteHemShard false, concreteHemShard true]).Nodup := by
@@ -4093,8 +4144,136 @@ theorem inhabited_verifyHierarchicalHem_two_shards :
   have hall : [concreteHemShard false, concreteHemShard true].all
       (verifyHemShard concreteHemArith rsSbox7WhirDomain [] []) = true := by
     simp only [List.all_cons, List.all_nil, concreteHemShard_accepts, Bool.and_self]
-  simp only [Bool.and_eq_true, decide_eq_true_eq]
-  exact ⟨⟨⟨rfl, hIds⟩, hKeys⟩, hall⟩
+  have hWf : concreteHemRegistry.all ShardRegistration.WellFormed = true := by decide
+  refine ⟨?_, ?_, rfl, rfl, rfl⟩
+  · unfold verifyHierarchicalHem concreteHemRegistryDigest concreteHemRegistry
+    simp only [Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨⟨⟨trivial, hIds⟩, hKeys⟩, hall⟩
+  · unfold verifyHemHierarchyAgainstRegistry concreteHemRegistry
+    simp only [Bool.and_eq_true, decide_eq_true_eq]
+    exact ⟨⟨⟨⟨Bool.and_eq_true_iff.mp hWf |>.1,
+      by simpa [concreteHemRegistry] using hWf⟩, trivial⟩, hIds⟩, hKeys, hall⟩
+
+/-- End-to-end inhabitedness of transcript-grounded hierarchical extraction & query cost accounting:
+    two concrete prover transcripts pass `verifyCommittedTableTranscript` with exact sweep cost
+    `hierarchyTranscriptQueryCost rsSbox7WhirDomain 2 = 24`. -/
+theorem inhabited_transcript_grounded_two_shards :
+    let trs := [concreteHemShardTranscript false, concreteHemShardTranscript true]
+    (∀ t ∈ trs, verifyCommittedTableTranscript rsSbox7WhirDomain t.shard.proof t.transcript = true) ∧
+    verifyHierarchicalHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      concreteHemRegistryDigest [] [] (trs.map (·.shard)) = true ∧
+    hierarchySweepOpeningCount trs = 24 ∧
+    hierarchyTranscriptQueryCost rsSbox7WhirDomain trs.length = 24 := by
+  intro trs
+  have hAllTr : ∀ t ∈ trs,
+      verifyCommittedTableTranscript rsSbox7WhirDomain t.shard.proof t.transcript = true := by
+    intro t ht
+    rcases List.mem_cons.mp ht with rfl | ht'
+    · exact concreteHemShardTranscript_accepts false
+    · rcases List.mem_cons.mp ht' with rfl | hNil
+      · exact concreteHemShardTranscript_accepts true
+      · cases hNil
+  have hVer : verifyHierarchicalHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      concreteHemRegistryDigest [] [] (trs.map (·.shard)) = true :=
+    inhabited_verifyHierarchicalHem_two_shards.1
+  have hF := verifyHierarchicalHem_facts hVer
+  have hCostEq : hierarchySweepOpeningCount trs =
+      hierarchyTranscriptQueryCost rsSbox7WhirDomain trs.length :=
+    hierarchySweepOpeningCount_eq_queryCost trs (fun t ht =>
+      ⟨hF.2.2.2 t.shard (List.mem_map.mpr ⟨t, ht, rfl⟩), hAllTr t ht⟩)
+  have hQuery24 : hierarchyTranscriptQueryCost rsSbox7WhirDomain trs.length = 24 := by decide
+  exact ⟨hAllTr, hVer, hCostEq.trans hQuery24, hQuery24⟩
+
+/-- Kernel-reducible UTF-8 bytes of `"QSAG.PQ.SUITE.SBOX7/v1"` for concrete Poseidon2 evaluation. -/
+def concretePoseidonSuiteTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x51, 0x2e, 0x53, 0x55, 0x49, 0x54,
+   0x45, 0x2e, 0x53, 0x42, 0x4f, 0x58, 0x37, 0x2f, 0x76, 0x31]
+
+def concreteTwoKeyCommittee : List PqPublicKey :=
+  [mkSbox7Pk Goldilocks.zero Goldilocks.zero, mkSbox7Pk Goldilocks.one Goldilocks.one]
+
+def concreteTwoKeyRegistry : List ShardRegistration :=
+  [{ shardId := [0]
+     threshold := 2
+     suiteId := concretePoseidonSuiteTag
+     params := sbox7Params
+     committee := concreteTwoKeyCommittee }]
+
+def concreteTwoKeyRegistryDigest : List UInt8 :=
+  poseidon2Hash32 (encodeRegistry concreteTwoKeyRegistry)
+
+def concreteLoweredTwoKeyShard : HemShardProof :=
+  let base := concreteHemShard false
+  { base with
+    shardId := [0]
+    threshold := 1
+    inst := { base.inst with
+              suite := { base.inst.suite with suiteId := concretePoseidonSuiteTag }
+              committee := concreteTwoKeyCommittee } }
+
+/-- `#tooth` **Forged Lower Shard Threshold Rejected (`tooth_forged_lower_shard_threshold_rejected`)**:
+    (a) **General security refutation**: for any hash `H`, registered policy `registry`, and
+        submitted `shards`, if shard `i` lowers `threshold < (registry[i]).threshold` under an
+        unchanged `registryDigest = H (encodeRegistry registry)`, then
+        `verifyHemHierarchyAgainstRegistry` unconditionally returns `false`, and either
+        `verifyHierarchicalHem` returns `false` or `forgedLowerThreshold_rejected_or_collision`
+        constructively extracts a `HashCollisionWitness H`.
+    (b) **Concrete `poseidon2Hash32` witnesses**:
+        1. Lowering shard `0`'s threshold from `1` to `0` on the accepted two-shard Poseidon2
+           hierarchy flips `verifyHierarchicalHem` from `true` to `false`.
+        2. Lowering a 2-key committee's threshold from `2` to `1` (while keeping `1 ≤ 1 ≤ 2`
+           well-formed and keeping `shardId`, `suiteId`, `params`, and `committee` identical)
+           changes the concrete `poseidon2Hash32` registry digest and causes
+           `verifyHierarchicalHem` to evaluate to `false`. -/
+theorem tooth_forged_lower_shard_threshold_rejected :
+    (∀ (H : Hash) (arith : RowArithmetization) (dom : WhirDomain)
+       (registryDigest epochFloor msg : List UInt8) (registry : List ShardRegistration)
+       (_hReg : H (encodeRegistry registry) = registryDigest)
+       (shards : List HemShardProof) (i : Nat)
+       (hiS : i < shards.length) (hiR : i < registry.length),
+      (shards[i]'hiS).threshold < (registry[i]'hiR).threshold →
+      verifyHemHierarchyAgainstRegistry arith dom registry epochFloor msg shards = false ∧
+      (verifyHierarchicalHem H arith dom registryDigest epochFloor msg shards = false ∨
+       Nonempty (HashCollisionWitness H))) ∧
+    verifyHierarchicalHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      concreteHemRegistryDigest [] []
+      [{ concreteHemShard false with threshold := 0 }, concreteHemShard true] = false ∧
+    concreteLoweredTwoKeyShard.registration.WellFormed = true ∧
+    poseidon2Hash32 (encodeRegistry [concreteLoweredTwoKeyShard.registration]) ≠
+      concreteTwoKeyRegistryDigest ∧
+    verifyHierarchicalHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      concreteTwoKeyRegistryDigest [] [] [concreteLoweredTwoKeyShard] = false := by
+  refine ⟨?_, ?_, by decide, ?_, ?_⟩
+  · intro H arith dom registryDigest epochFloor msg registry hReg shards i hiS hiR hLower
+    match forgedLowerThreshold_rejected_or_collision H arith dom registryDigest epochFloor msg
+        registry hReg shards i hiS hiR hLower with
+    | .inl ⟨hHierFalse, hDirectFalse⟩ => exact ⟨hDirectFalse, .inl hHierFalse⟩
+    | .inr col =>
+      have hNe : shards.map HemShardProof.registration ≠ registry := fun hEq => by
+        have hAt : (shards.map HemShardProof.registration)[i]? = registry[i]? :=
+          congrArg (·[i]?) hEq
+        rw [List.getElem?_map, List.getElem?_eq_getElem hiS, List.getElem?_eq_getElem hiR,
+            Option.map_some, Option.some.injEq] at hAt
+        have hThr := congrArg ShardRegistration.threshold hAt
+        omega
+      refine ⟨?_, .inr ⟨col⟩⟩
+      unfold verifyHemHierarchyAgainstRegistry
+      simp [decide_eq_false hNe]
+  · apply Bool.eq_false_iff.mpr
+    intro hAcc
+    have hAll := (verifyHierarchicalHem_facts hAcc).2.2.2
+    have h0 := hAll { concreteHemShard false with threshold := 0 } (List.mem_cons_self ..)
+    have hGe1 := (verifyHemShard_facts h0).2.1
+    simp at hGe1
+  · unfold concreteTwoKeyRegistryDigest
+    decide
+  · have hDigNe :
+        poseidon2Hash32 (encodeRegistry ([concreteLoweredTwoKeyShard].map
+          HemShardProof.registration)) ≠ concreteTwoKeyRegistryDigest := by
+      unfold concreteTwoKeyRegistryDigest
+      decide
+    unfold verifyHierarchicalHem
+    simp [decide_eq_false hDigNe]
 
 /-- Unconditional replay: the same actual accepting one-signer certificate is counted twice
     by the unscoped verifier, while the scoped root rejects it. No accepted-shard premise. -/
@@ -4114,18 +4293,21 @@ theorem tooth_concrete_unscoped_shard_replay :
 
 end Qsag
 
-/- Audit every declaration owned by this module, including private certificate helpers.
-    Imported proof dependencies are traversed transitively by the kernel axiom collector. -/
+/- Audit every declaration owned by this module, including private certificate helpers, and
+    include an explicit negative control confirming `Classical.choice` would be rejected. -/
 open Lean Elab Command in
 run_cmd do
-  let env ← getEnv
+  let allow (ax : Name) : Bool := ax == ``propext || ax == ``Quot.sound
+  let neg ← Lean.collectAxioms ``Classical.choice
+  if (neg.filter (!allow ·)).isEmpty then
+    throwError "Axiom audit negative control failed: Classical.choice was not rejected"
+  let privEnv := (← getEnv).setExporting false
   let mut checked : Nat := 0
-  for (name, _) in env.constants.toList do
-    if !env.isImportedConst name then
-      let roots ← Lean.collectAxioms name
-      let rejected := roots.filter fun ax => ax != ``propext && ax != ``Quot.sound
+  for (name, _) in privEnv.constants.toList do
+    if !privEnv.isImportedConst name then
+      let roots ← withEnv privEnv <| Lean.collectAxioms name
+      let rejected := roots.filter (!allow ·)
       unless rejected.isEmpty do
         throwError "Rejected axioms in {name}: {rejected}"
       checked := checked + 1
   if checked == 0 then throwError "Empty module axiom audit"
-  logInfo m!"Module axiom audit: {checked} declarations; 0 rejected axioms"

@@ -2019,10 +2019,9 @@ theorem schedPerm_of_same_counts :
 def twoWaveReductionEnv : SpirvModuleEnv where
   intWidths id := if id == 8 then some .w32 else none
   ptrInfo id :=
-    if id == 2 || id == 6 then some (.workgroup, 0, .w32)
-    else if id == 3 then some (.storageBuffer, 0, .w32)
-    else if id == 4 then some (.storageBuffer, 1, .w32)
-    else if id == 7 then some (.storageBuffer, 0, .w32)
+    if id == 2 || id == 6 || id == 12 || id == 13 || id == 16 then some (.workgroup, 0, .w32)
+    else if id == 3 || id == 7 || id == 10 then some (.storageBuffer, 0, .w32)
+    else if id == 4 || id == 19 then some (.storageBuffer, 1, .w32)
     else none
   initConst id := if id == 5 then .vU32 32 else .vUndef
   builtIns id := if id == 1 then some .localInvocationId else none
@@ -2069,17 +2068,19 @@ theorem tooth_missing_barrier_causes_cross_wave_lds_race :
                             List.replicate 8 0 ++ List.replicate 8 1
     let initSt := initWorkgroupExecState twoWaveReductionEnv twoWaveCfg initMem
     -- 1. Without OpControlBarrier, two valid 12-step-per-wave schedules disagree on outBuf[0]:
-    (match runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedWave0First initSt,
-           runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedInterleaved initSt with
-     | .ok stA, .ok stB => stA.mem.ssbo 1 0 = 10 ∧ stB.mem.ssbo 1 0 = 52 ∧ stA.mem.ssbo 1 0 ≠ stB.mem.ssbo 1 0
-     | _, _ => False) ∧
-    -- 2. With OpControlBarrier separating the two epochs, Wave-0-first schedule produces 52:
-    (match runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
-             [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
-             [List.replicate 5 0 ++ List.replicate 5 1, List.replicate 8 0 ++ List.replicate 8 1]
-             initSt with
-     | .ok stFixed => stFixed.mem.ssbo 1 0 = 52 ∧ stFixed.mem.ssbo 1 32 = 52
-     | .error _ => False) := by
+    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedWave0First initSt).map
+      (fun s => s.mem.ssbo 1 0) = .ok 10 ∧
+    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedInterleaved initSt).map
+      (fun s => s.mem.ssbo 1 0) = .ok 52 ∧
+    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedWave0First initSt).map
+      (fun s => s.mem.ssbo 1 0) ≠
+    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg buggyNoBarrierProg schedInterleaved initSt).map
+      (fun s => s.mem.ssbo 1 0) ∧
+    -- 2. With OpControlBarrier separating the two epochs, Wave-0-first schedule produces 52 on both waves:
+    (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
+      [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
+      [List.replicate 5 0 ++ List.replicate 5 1, List.replicate 8 0 ++ List.replicate 8 1]
+      initSt).map (fun s => (s.mem.ssbo 1 0, s.mem.ssbo 1 32)) = .ok (52, 52) := by
   decide
 
 /-- **`#tooth` Single-Wave Wiped-LDS Execution Corrupts Multi-Wave Barrier Reductions
@@ -2093,20 +2094,19 @@ theorem tooth_single_wave_lds_wipe_corrupts_multiwave_reduction :
         ssbo := fun b idx => if b == 0 then (if idx < 32 then 10 else 42) else 0
         pushConsts := fun _ => 0 }
     let initSt := initWorkgroupExecState twoWaveReductionEnv twoWaveCfg initMem
-    -- Honest persistent multi-wave LDS execution: Wave 1 reads Wave 0's `10` and outputs `52`:
-    (match runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
-             [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
-             [canonicalEpochSchedule 2 5, canonicalEpochSchedule 2 8] initSt with
-     | .ok stHonest =>
-       -- Broken single-wave wiped-LDS execution of Wave 1 alone with wiped LDS outputs `42 ≠ 52`:
-       let wipedWave1Prog := twoWavePhase0WriteLds ++ twoWavePhase1CrossWaveRead
-       match runInterleavedSchedule twoWaveReductionEnv twoWaveCfg wipedWave1Prog
-               (List.replicate 12 1) initSt with
-       | .ok stWiped =>
-         stHonest.mem.ssbo 1 32 = 52 ∧ stWiped.mem.ssbo 1 32 = 42 ∧
-         stHonest.mem.ssbo 1 32 ≠ stWiped.mem.ssbo 1 32
-       | .error _ => False
-     | .error _ => False) := by
+    let wipedWave1Prog := twoWavePhase0WriteLds ++ twoWavePhase1CrossWaveRead
+    (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
+      [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
+      [canonicalEpochSchedule 2 5, canonicalEpochSchedule 2 8] initSt).map
+      (fun s => s.mem.ssbo 1 32) = .ok 52 ∧
+    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg wipedWave1Prog
+      (List.replicate 12 1) initSt).map (fun s => s.mem.ssbo 1 32) = .ok 42 ∧
+    (runMultiWaveEpochs twoWaveReductionEnv twoWaveCfg
+      [twoWavePhase0WriteLds, twoWavePhase1CrossWaveRead]
+      [canonicalEpochSchedule 2 5, canonicalEpochSchedule 2 8] initSt).map
+      (fun s => s.mem.ssbo 1 32) ≠
+    (runInterleavedSchedule twoWaveReductionEnv twoWaveCfg wipedWave1Prog
+      (List.replicate 12 1) initSt).map (fun s => s.mem.ssbo 1 32) := by
   decide
 
 /-! ### `SIMT-CT` Constant-Time Side-Channel Model & 32-Bank RDNA2 LDS Conflict Freedom -/
@@ -2129,36 +2129,38 @@ def ldsLane0BankWays (byteAddrFn : Nat → Nat) : Nat :=
   ((List.range 32).filter fun l =>
     decide (ldsBank (byteAddrFn l) = ldsBank (byteAddrFn 0))).length
 
+private theorem pow_two_dvd_of_odd :
+    ∀ (k g c : Nat), c % 2 = 1 → 2 ^ k ∣ g * c → 2 ^ k ∣ g
+  | 0, g, _, _, _ => Nat.one_dvd g
+  | k + 1, g, c, hodd, hdvd => by
+    have h2prime : IsPrimeNat 2 := ⟨by decide, fun d hd => by
+      have hpos : 0 < d := Nat.pos_of_dvd_of_pos hd (by decide)
+      have hle : d ≤ 2 := Nat.le_of_dvd (by decide) hd
+      omega⟩
+    have hnc : ¬ (2 ∣ c) := fun hc => by obtain ⟨t, rfl⟩ := hc; omega
+    have h2dvd : 2 ∣ g * c := by
+      rw [Nat.pow_succ] at hdvd
+      exact Nat.dvd_trans (Nat.dvd_mul_left 2 (2 ^ k)) hdvd
+    obtain ⟨g', rfl⟩ := h2prime.dvd_mul (Nat.mul_comm g c ▸ h2dvd) hnc
+    have hk : 2 ^ k ∣ g' * c := by
+      obtain ⟨u, hu⟩ := hdvd
+      refine ⟨u, ?_⟩
+      rw [Nat.pow_succ, Nat.mul_comm (2 ^ k) 2] at hu
+      have hAssoc : 2 * (g' * c) = 2 * (2 ^ k * u) := by
+        calc 2 * (g' * c) = 2 * g' * c := (Nat.mul_assoc 2 g' c).symm
+        _ = 2 * 2 ^ k * u := hu
+        _ = 2 * (2 ^ k * u) := Nat.mul_assoc 2 (2 ^ k) u
+      exact (Nat.mul_right_inj (by decide : 2 ≠ 0)).mp hAssoc
+    exact Nat.mul_dvd_mul_left 2 (pow_two_dvd_of_odd k g' c hodd hk)
+
 private theorem odd_mul_sub_not_dvd_32 {s d : Nat} (hOdd : s % 2 = 1) (hdPos : 0 < d) (hdLt : d < 32) :
     (s * d) % 32 ≠ 0 := by
   intro hMod0
-  -- Peel powers of 2 from `d < 32`: write `32 ∣ s * d`; since `s` is odd, `d` must be divisible by `32`.
-  have hPrime2 : IsPrimeNat 2 := ⟨by decide, fun k hk => by
-    have hle := Nat.le_of_dvd (by decide) hk; omega⟩
-  have hNot2S : ¬ (2 ∣ s) := fun ⟨q, hq⟩ => by omega
-  have hdvd32 : 32 ∣ s * d := Nat.dvd_of_mod_eq_zero hMod0
-  have step : ∀ {m x : Nat}, m > 0 → (2 * m) ∣ s * x → m ∣ s * (x / 2) ∧ x = 2 * (x / 2) := by
-    intro m x _ h2m
-    have h2sx : 2 ∣ s * x := Nat.dvd_trans ⟨m, by omega⟩ h2m
-    have h2x : 2 ∣ x := hPrime2.dvd_mul h2sx hNot2S
-    have hxEq : x = 2 * (x / 2) := by have := Nat.mod_eq_zero_of_dvd h2x; omega
-    have hDiv : m ∣ s * (x / 2) := ⟨(s * x) / (2 * m), by
-      have hRem := Nat.mod_eq_zero_of_dvd h2m
-      have hEq1 : (2 * m) * ((s * x) / (2 * m)) = s * x := by
-        have := Nat.div_add_mod (s * x) (2 * m); omega
-      have hEq2 : s * x = 2 * (s * (x / 2)) := by
-        calc s * x = s * (2 * (x / 2)) := by rw [← hxEq]
-        _ = 2 * (s * (x / 2)) := by rw [← Nat.mul_assoc, Nat.mul_comm s 2, Nat.mul_assoc]
-      rw [hEq2] at hEq1
-      have hAssoc : 2 * (m * ((s * x) / (2 * m))) = 2 * (s * (x / 2)) := by
-        simpa [Nat.mul_assoc] using hEq1
-      exact (Nat.mul_right_inj (by decide : 0 < 2)).mp hAssoc.symm⟩
-    exact ⟨hDiv, hxEq⟩
-  obtain ⟨h16, hx1⟩ := step (m := 16) (by decide) hdvd32
-  obtain ⟨h8, hx2⟩ := step (m := 8) (by decide) h16
-  obtain ⟨h4, hx3⟩ := step (m := 4) (by decide) h8
-  obtain ⟨h2, hx4⟩ := step (m := 2) (by decide) h4
-  obtain ⟨_, hx5⟩ := step (m := 1) (by decide) h2
+  have hdvd : 2 ^ 5 ∣ d * s := by
+    rw [Nat.mul_comm]
+    exact Nat.dvd_of_mod_eq_zero hMod0
+  have hd32 : 32 ∣ d := pow_two_dvd_of_odd 5 d s hOdd hdvd
+  have hle := Nat.le_of_dvd hdPos hd32
   omega
 
 /-- **Universal Odd-Stride Wave32 LDS Bank-Conflict-Free Theorem (`odd_stride_lds_bank_conflict_free`)**:
@@ -2231,9 +2233,10 @@ theorem merkle_skewed_lds_bank_conflict_free_both_epochs (w d : Nat) :
   refine ⟨?_, ?_⟩
   · intro l₁ l₂ hl₁ hl₂ hBank
     unfold wave32Lanes at hl₁ hl₂
+    dsimp only at hBank
     have hEqFn : ∀ l < 32, 4 * (merkleSkewedLdsDword (w * 32 + l) + d) =
         4 * ((289 * w + d) + 9 * l) := by
-      intro l hl; unfold merkleSkewedLdsDword
+      intro l _; unfold merkleSkewedLdsDword
       have hDiv : (w * 32 + l) / 32 = w := by omega
       omega
     rw [hEqFn l₁ hl₁, hEqFn l₂ hl₂] at hBank
@@ -2408,10 +2411,8 @@ def checkInstSimtCt (pol : SimtCtPolicy) : SpirvInst → Bool
     (pol.regSec idxId.toNat == .pub) &&
     (pol.regSec resId.toNat == .pub)
   | .opAccessChain _ _ _ _ => false
-  | .opLoad _ resId ptrId =>
-    (pol.regSec ptrId.toNat == .pub) &&
-    (pol.regSec resId.toNat == .sec ||
-      (pol.ldsSec == .pub && (∀ _ : Unit, true))) -- conservative: allow `.sec` dst always; `.pub` checked below
+  | .opLoad _ _ ptrId =>
+    pol.regSec ptrId.toNat == .pub
   | .opStore ptrId _ =>
     pol.regSec ptrId.toNat == .pub
   | .opCompositeExtract _ resId compId _ =>
@@ -2524,7 +2525,7 @@ theorem initWave_lowEq (env : SpirvModuleEnv) (pol : SimtCtPolicy) (cfg : Workgr
   intro w
   refine ⟨rfl, rfl, rfl, fun lane _ => ⟨fun _ => SpirvVal.sameShape_refl _, fun _ _ => rfl, ?_⟩⟩
   intro id sc b off width hEq _
-  unfold initLaneRegs at hEq
+  dsimp only [initLaneRegs] at hEq
   cases hb : env.builtIns id with
   | some bi => rw [hb] at hEq; cases bi <;> cases hEq
   | none =>
@@ -2567,6 +2568,58 @@ private theorem writeFn_laneRegsLowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy
     · simp only [hid, ↓reduceIte] at hEq
       exact hLow.2.2 id sc b off w hEq hPub
 
+private theorem evalBinU32U64_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
+    {r₁ r₂ : Nat → SpirvVal} (resId aId bId : UInt32)
+    (f32 : UInt32 → UInt32 → SpirvVal) (f64 : UInt64 → UInt64 → SpirvVal)
+    (hSh32 : ∀ x₁ y₁ x₂ y₂, SpirvVal.SameShape (f32 x₁ y₁) (f32 x₂ y₂))
+    (hNoPtr32 : ∀ x y sc b o w, f32 x y ≠ .vPtr sc b o w)
+    (hSh64 : ∀ x₁ y₁ x₂ y₂, SpirvVal.SameShape (f64 x₁ y₁) (f64 x₂ y₂))
+    (hNoPtr64 : ∀ x y sc b o w, f64 x y ≠ .vPtr sc b o w)
+    (hRegs : LaneRegsLowEq env pol r₁ r₂)
+    (hCt : ((pol.regSec resId.toNat == .sec) ||
+            ((pol.regSec aId.toNat == .pub) && (pol.regSec bId.toNat == .pub))) = true) :
+    match (match r₁ aId.toNat, r₁ bId.toNat with
+           | .vU32 a, .vU32 b => Except.ok (resId.toNat, f32 a b)
+           | .vU64 a, .vU64 b => Except.ok (resId.toNat, f64 a b)
+           | _, _ => Except.error SimtExecError.typeMismatch),
+          (match r₂ aId.toNat, r₂ bId.toNat with
+           | .vU32 a, .vU32 b => Except.ok (resId.toNat, f32 a b)
+           | .vU64 a, .vU64 b => Except.ok (resId.toNat, f64 a b)
+           | _, _ => Except.error SimtExecError.typeMismatch) with
+    | .error e₁, .error e₂ => e₁ = e₂
+    | .ok (d₁, v₁), .ok (d₂, v₂) =>
+      d₁ = d₂ ∧
+      SpirvVal.SameShape v₁ v₂ ∧
+      (pol.regSec d₁ = .pub → v₁ = v₂) ∧
+      (∀ sc b off w, v₁ = .vPtr sc b off w → pol.regSec d₁ = .pub →
+        env.ptrInfo d₁ = some (sc, b, w))
+    | _, _ => False := by
+  have hShA := hRegs.1 aId.toNat
+  have hShB := hRegs.1 bId.toNat
+  have hPubOps : pol.regSec resId.toNat = .pub → r₁ aId.toNat = r₂ aId.toNat ∧ r₁ bId.toNat = r₂ bId.toNat := by
+    intro hPub
+    rw [hPub] at hCt
+    simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hCt
+    rcases hCt with hBad | ⟨ha, hb⟩
+    · cases hBad
+    · exact ⟨hRegs.2.1 _ ha, hRegs.2.1 _ hb⟩
+  cases ha1 : r₁ aId.toNat <;> cases ha2 : r₂ aId.toNat <;>
+    (rw [ha1, ha2] at hShA; try cases hShA) <;>
+  cases hb1 : r₁ bId.toNat <;> cases hb2 : r₂ bId.toNat <;>
+    (rw [hb1, hb2] at hShB; try cases hShB) <;>
+  dsimp only
+  · refine ⟨rfl, hSh32 _ _ _ _, fun hPub => ?_, fun sc b off w hPtr _ => False.elim (hNoPtr32 _ _ sc b off w hPtr)⟩
+    obtain ⟨ea, eb⟩ := hPubOps hPub
+    rw [ha1, ha2] at ea; cases ea
+    rw [hb1, hb2] at eb; cases eb
+    rfl
+  · refine ⟨rfl, hSh64 _ _ _ _, fun hPub => ?_, fun sc b off w hPtr _ => False.elim (hNoPtr64 _ _ sc b off w hPtr)⟩
+    obtain ⟨ea, eb⟩ := hPubOps hPub
+    rw [ha1, ha2] at ea; cases ea
+    rw [hb1, hb2] at eb; cases eb
+    rfl
+  all_goals rfl
+
 private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
     {m₁ m₂ : GpuMemState} {r₁ r₂ : Nat → SpirvVal} {inst : SpirvInst}
     (hMem : MemLowEq pol m₁ m₂)
@@ -2584,17 +2637,6 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       (∀ sc b off w, v₁ = .vPtr sc b off w → pol.regSec d₁ = .pub →
         env.ptrInfo d₁ = some (sc, b, w))
     | _, _ => False := by
-  -- Helper tactic pattern for binary ALU operations on `r₁ aId` and `r₂ bId`:
-  have binAluProp : ∀ (resId aId bId : UInt32),
-      ((pol.regSec resId.toNat == .sec) ||
-       ((pol.regSec aId.toNat == .pub) && (pol.regSec bId.toNat == .pub))) = true →
-      (pol.regSec resId.toNat = .pub → r₁ aId.toNat = r₂ aId.toNat ∧ r₁ bId.toNat = r₂ bId.toNat) := by
-    intro resId aId bId hChk hPub
-    rw [hPub] at hChk
-    simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hChk
-    rcases hChk with hBad | ⟨ha, hb⟩
-    · cases hBad
-    · exact ⟨hRegs.2.1 _ ha, hRegs.2.1 _ hb⟩
   cases inst with
   | opStore p v => exact False.elim (hNotStore p v rfl)
   | opControlBarrier es ms sem => exact False.elim (hNotBarrier es ms sem rfl)
@@ -2608,37 +2650,62 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       cases rest with
       | cons _ _ => simp [checkInstSimtCtStrict] at hCt
       | nil =>
-        unfold checkInstSimtCtStrict at hCt
+        dsimp only [checkInstSimtCtStrict] at hCt
         simp only [Bool.and_eq_true, beq_iff_eq] at hCt
-        rcases hCt with ⟨⟨⟨hBasePub, hIdxPub⟩, hResPub⟩, hPtrMeta⟩
+        rcases hCt with ⟨⟨⟨hBasePub, hIdxPub⟩, _⟩, hPtrMeta⟩
         have hBaseEq := hRegs.2.1 baseId.toNat hBasePub
         have hIdxEq := hRegs.2.1 idxId.toNat hIdxPub
-        unfold evalLanePureInst
+        dsimp only [evalLanePureInst]
         rw [← hBaseEq, ← hIdxEq]
-        cases hB : r₁ baseId.toNat <;> cases hI : r₁ idxId.toNat <;> simp [SpirvVal.SameShape]
-        all_goals
-          intro sc' b' off' w' hEq _
-          rcases hEq with ⟨rfl, rfl, _, rfl⟩
-          have hInfoBase := hRegs.2.2 baseId.toNat _ _ _ _ hB hBasePub
-          rw [hInfoBase] at hPtrMeta
-          cases hResInfo : env.ptrInfo resId.toNat with
-          | none => rw [hResInfo] at hPtrMeta; simp at hPtrMeta
-          | some p2 =>
-            cases hTyInfo : env.ptrInfo tyId.toNat with
-            | none => rw [hResInfo, hTyInfo] at hPtrMeta; simp at hPtrMeta
-            | some p3 =>
-              rw [hResInfo, hTyInfo] at hPtrMeta
-              rcases p2 with ⟨sc2, b2, w2⟩
-              rcases p3 with ⟨sc3, b3, w3⟩
-              simp only [decide_eq_true_eq] at hPtrMeta
-              rcases hPtrMeta with ⟨rfl, rfl, rfl, _, _, rfl⟩
-              simp [hTyInfo]
+        cases hB : r₁ baseId.toNat with
+        | vPtr sc binding baseOff elemW =>
+          cases hI : r₁ idxId.toNat with
+          | vU32 idx =>
+            refine ⟨rfl, ⟨rfl, rfl, rfl, rfl⟩, fun _ => rfl, ?_⟩
+            intro sc' b' off' w' hEq _
+            injection hEq with hsc hb _ hw
+            subst hsc; subst hb; subst hw
+            have hInfoBase := hRegs.2.2 baseId.toNat _ _ _ _ hB hBasePub
+            rw [hInfoBase] at hPtrMeta
+            cases hResInfo : env.ptrInfo resId.toNat with
+            | none => rw [hResInfo] at hPtrMeta; simp at hPtrMeta
+            | some p2 =>
+              cases hTyInfo : env.ptrInfo tyId.toNat with
+              | none => rw [hResInfo, hTyInfo] at hPtrMeta; simp at hPtrMeta
+              | some p3 =>
+                rw [hResInfo, hTyInfo] at hPtrMeta
+                rcases p2 with ⟨sc2, b2, w2⟩
+                rcases p3 with ⟨sc3, b3, w3⟩
+                simp only [decide_eq_true_eq] at hPtrMeta
+                rcases hPtrMeta with ⟨rfl, rfl, rfl, _, _, rfl⟩
+                simp [hTyInfo]
+          | vU64 idx =>
+            refine ⟨rfl, ⟨rfl, rfl, rfl, rfl⟩, fun _ => rfl, ?_⟩
+            intro sc' b' off' w' hEq _
+            injection hEq with hsc hb _ hw
+            subst hsc; subst hb; subst hw
+            have hInfoBase := hRegs.2.2 baseId.toNat _ _ _ _ hB hBasePub
+            rw [hInfoBase] at hPtrMeta
+            cases hResInfo : env.ptrInfo resId.toNat with
+            | none => rw [hResInfo] at hPtrMeta; simp at hPtrMeta
+            | some p2 =>
+              cases hTyInfo : env.ptrInfo tyId.toNat with
+              | none => rw [hResInfo, hTyInfo] at hPtrMeta; simp at hPtrMeta
+              | some p3 =>
+                rw [hResInfo, hTyInfo] at hPtrMeta
+                rcases p2 with ⟨sc2, b2, w2⟩
+                rcases p3 with ⟨sc3, b3, w3⟩
+                simp only [decide_eq_true_eq] at hPtrMeta
+                rcases hPtrMeta with ⟨rfl, rfl, rfl, _, _, rfl⟩
+                simp [hTyInfo]
+          | _ => rfl
+        | _ => cases r₁ idxId.toNat <;> rfl
   | opLoad tyId resId ptrId =>
-    unfold checkInstSimtCtStrict at hCt
+    dsimp only [checkInstSimtCtStrict] at hCt
     simp only [Bool.and_eq_true, beq_iff_eq] at hCt
     rcases hCt with ⟨hPtrPub, hDstChk⟩
     have hPtrEq := hRegs.2.1 ptrId.toNat hPtrPub
-    unfold evalLanePureInst
+    dsimp only [evalLanePureInst]
     rw [← hPtrEq]
     cases hP : r₁ ptrId.toNat with
     | vPtr sc binding elemIdx width =>
@@ -2651,7 +2718,7 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
           split
           · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
             rw [hPub, hInfo] at hDstChk
-            simp only [ beq_iff_eq] at hDstChk
+            simp only [beq_iff_eq] at hDstChk
             rw [hMem.2.1 hDstChk]
           · rfl
         | w64 =>
@@ -2684,94 +2751,189 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
           rw [hMem.1]
       | input | function =>
         cases width <;> rfl
-    | _ => simp
+    | _ => rfl
   | opCompositeExtract tyId resId compId fieldIdx =>
-    unfold checkInstSimtCtStrict checkInstSimtCt at hCt
+    dsimp only [checkInstSimtCtStrict, checkInstSimtCt] at hCt
     have hSh := hRegs.1 compId.toNat
-    unfold evalLanePureInst
+    dsimp only [evalLanePureInst]
     cases h1 : r₁ compId.toNat <;> cases h2 : r₂ compId.toNat <;>
       (rw [h1, h2] at hSh; try cases hSh)
-    all_goals
-      try simp
-      try (cases hF : fieldIdx.toNat with
-           | zero =>
-             simp only [SpirvVal.SameShape, true_and]
-             refine ⟨fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
-             rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
-             rcases hCt with hBad | hCompPub
-             · cases hBad
-             · have hEq := hRegs.2.1 compId.toNat hCompPub; rw [h1, h2] at hEq; cases hEq; rfl
-           | succ n =>
-             cases n with
-             | zero =>
-               simp only [SpirvVal.SameShape, true_and]
-               refine ⟨fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
-               rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
-               rcases hCt with hBad | hCompPub
-               · cases hBad
-               · have hEq := hRegs.2.1 compId.toNat hCompPub; rw [h1, h2] at hEq; cases hEq; rfl
-             | succ _ => simp)
-  | opUConvert tyId resId valId =>
-    unfold checkInstSimtCtStrict checkInstSimtCt at hCt
-    have hSh := hRegs.1 valId.toNat
-    unfold evalLanePureInst
-    cases hw : env.intWidths tyId.toNat with
-    | none => simp
-    | some w =>
-      cases w <;> cases h1 : r₁ valId.toNat <;> cases h2 : r₂ valId.toNat <;>
-        (rw [h1, h2] at hSh; try cases hSh) <;> simp [SpirvVal.SameShape]
-      all_goals
-        intro hPub
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · cases hF : fieldIdx.toNat with
+      | zero =>
+        refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
         rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
-        rcases hCt with hBad | hValPub
+        rcases hCt with hBad | hCompPub
         · cases hBad
-        · have hEq := hRegs.2.1 valId.toNat hValPub; rw [h1, h2] at hEq; cases hEq; rfl
+        · have hEq := hRegs.2.1 compId.toNat hCompPub; rw [h1, h2] at hEq; cases hEq; rfl
+      | succ n =>
+        cases n with
+        | zero =>
+          refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+          rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
+          rcases hCt with hBad | hCompPub
+          · cases hBad
+          · have hEq := hRegs.2.1 compId.toNat hCompPub; rw [h1, h2] at hEq; cases hEq; rfl
+        | succ _ => rfl
+    · cases hF : fieldIdx.toNat with
+      | zero =>
+        refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+        rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
+        rcases hCt with hBad | hCompPub
+        · cases hBad
+        · have hEq := hRegs.2.1 compId.toNat hCompPub; rw [h1, h2] at hEq; cases hEq; rfl
+      | succ n =>
+        cases n with
+        | zero =>
+          refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+          rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
+          rcases hCt with hBad | hCompPub
+          · cases hBad
+          · have hEq := hRegs.2.1 compId.toNat hCompPub; rw [h1, h2] at hEq; cases hEq; rfl
+        | succ _ => rfl
+    · cases fieldIdx.toNat with
+      | zero => rfl
+      | succ n => cases n <;> rfl
+  | opUConvert tyId resId valId =>
+    dsimp only [checkInstSimtCtStrict, checkInstSimtCt] at hCt
+    have hSh := hRegs.1 valId.toNat
+    dsimp only [evalLanePureInst]
+    cases hw : env.intWidths tyId.toNat with
+    | none => rfl
+    | some w =>
+      cases w with
+      | w32 =>
+        cases h1 : r₁ valId.toNat <;> cases h2 : r₂ valId.toNat <;>
+          (rw [h1, h2] at hSh; try cases hSh)
+        · rfl
+        · rfl
+        · rfl
+        · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+          rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
+          rcases hCt with hBad | hValPub
+          · cases hBad
+          · have hEq := hRegs.2.1 valId.toNat hValPub; rw [h1, h2] at hEq; cases hEq; rfl
+        · rfl
+        · rfl
+        · rfl
+      | w64 =>
+        cases h1 : r₁ valId.toNat <;> cases h2 : r₂ valId.toNat <;>
+          (rw [h1, h2] at hSh; try cases hSh)
+        · rfl
+        · rfl
+        · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+          rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
+          rcases hCt with hBad | hValPub
+          · cases hBad
+          · have hEq := hRegs.2.1 valId.toNat hValPub; rw [h1, h2] at hEq; cases hEq; rfl
+        · rfl
+        · rfl
+        · rfl
+        · rfl
   | opSelect tyId resId cId tId fId =>
-    unfold checkInstSimtCtStrict checkInstSimtCt at hCt
+    dsimp only [checkInstSimtCtStrict, checkInstSimtCt] at hCt
     have hShC := hRegs.1 cId.toNat
     have hShT := hRegs.1 tId.toNat
     have hShF := hRegs.1 fId.toNat
-    unfold evalLanePureInst
+    dsimp only [evalLanePureInst]
     cases hc1 : r₁ cId.toNat <;> cases hc2 : r₂ cId.toNat <;>
       (rw [hc1, hc2] at hShC; try cases hShC)
-    · simp
+    · rfl
     · cases ht1 : r₁ tId.toNat <;> cases ht2 : r₂ tId.toNat <;>
-        (rw [ht1, ht2] at hShT; try cases hShT) <;> try simp
-      all_goals
-        cases hf1 : r₁ fId.toNat <;> cases hf2 : r₂ fId.toNat <;>
-          (rw [hf1, hf2] at hShF; try cases hShF) <;> simp [SpirvVal.SameShape]
-        intro hPub
-        rw [hPub] at hCt
-        simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hCt
-        rcases hCt with hBad | ⟨⟨hCPub, hTPub⟩, hFPub⟩
-        · cases hBad
-        · have ec := hRegs.2.1 cId.toNat hCPub; rw [hc1, hc2] at ec; cases ec
-          have et := hRegs.2.1 tId.toNat hTPub; rw [ht1, ht2] at et; cases et
-          have ef := hRegs.2.1 fId.toNat hFPub; rw [hf1, hf2] at ef; cases ef
-          rfl
-    all_goals simp
-  | opIAdd _ resId aId bId | opISub _ resId aId bId | opIMul _ resId aId bId
-  | opUMulExtended _ resId aId bId | opIEqual _ resId aId bId
-  | opUGreaterThanEqual _ resId aId bId | opULessThan _ resId aId bId
-  | opShiftRightLogical _ resId aId bId | opShiftLeftLogical _ resId aId bId
-  | opBitwiseXor _ resId aId bId | opBitwiseOr _ resId aId bId
+        (rw [ht1, ht2] at hShT; try cases hShT)
+      · rfl
+      · rfl
+      · cases hf1 : r₁ fId.toNat <;> cases hf2 : r₂ fId.toNat <;>
+          (rw [hf1, hf2] at hShF; try cases hShF)
+        · rfl
+        · rfl
+        · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+          rw [hPub] at hCt; simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hCt
+          rcases hCt with hBad | ⟨⟨hCPub, hTPub⟩, hFPub⟩
+          · cases hBad
+          · have ec := hRegs.2.1 cId.toNat hCPub; rw [hc1, hc2] at ec; cases ec
+            have et := hRegs.2.1 tId.toNat hTPub; rw [ht1, ht2] at et; cases et
+            have ef := hRegs.2.1 fId.toNat hFPub; rw [hf1, hf2] at ef; cases ef
+            rfl
+        · rfl
+        · rfl
+        · rfl
+        · rfl
+      · cases hf1 : r₁ fId.toNat <;> cases hf2 : r₂ fId.toNat <;>
+          (rw [hf1, hf2] at hShF; try cases hShF)
+        · rfl
+        · rfl
+        · rfl
+        · refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+          rw [hPub] at hCt; simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hCt
+          rcases hCt with hBad | ⟨⟨hCPub, hTPub⟩, hFPub⟩
+          · cases hBad
+          · have ec := hRegs.2.1 cId.toNat hCPub; rw [hc1, hc2] at ec; cases ec
+            have et := hRegs.2.1 tId.toNat hTPub; rw [ht1, ht2] at et; cases et
+            have ef := hRegs.2.1 fId.toNat hFPub; rw [hf1, hf2] at ef; cases ef
+            rfl
+        · rfl
+        · rfl
+        · rfl
+      · rfl
+      · rfl
+      · rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+    · rfl
+  | opIAdd _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opISub _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opIMul _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opUMulExtended _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opIEqual _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opUGreaterThanEqual _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opULessThan _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opShiftRightLogical _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opShiftLeftLogical _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opBitwiseXor _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
+  | opBitwiseOr _ resId aId bId =>
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
   | opBitwiseAnd _ resId aId bId =>
-    unfold checkInstSimtCtStrict checkInstSimtCt at hCt
-    have hBin := binAluProp resId aId bId hCt
-    have hShA := hRegs.1 aId.toNat
-    have hShB := hRegs.1 bId.toNat
-    unfold evalLanePureInst
-    cases ha1 : r₁ aId.toNat <;> cases ha2 : r₂ aId.toNat <;>
-      (rw [ha1, ha2] at hShA; try cases hShA) <;>
-    cases hb1 : r₁ bId.toNat <;> cases hb2 : r₂ bId.toNat <;>
-      (rw [hb1, hb2] at hShB; try cases hShB) <;>
-    simp [SpirvVal.SameShape]
-    all_goals
-      intro hPub
-      obtain ⟨ea, eb⟩ := hBin hPub
-      rw [ha1, ha2] at ea; cases ea
-      rw [hb1, hb2] at eb; cases eb
-      rfl
+    exact evalBinU32U64_lowEq resId aId bId _ _
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h)
+      (fun _ _ _ _ => trivial) (fun _ _ _ _ _ _ h => by cases h) hRegs hCt
 
 private theorem applyLaneStore_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
     {m₁ m₂ : GpuMemState} {r₁ r₂ : Nat → SpirvVal} {ptrId valId : UInt32}
@@ -2782,71 +2944,105 @@ private theorem applyLaneStore_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
     | .error e₁, .error e₂ => e₁ = e₂
     | .ok m₁', .ok m₂' => MemLowEq pol m₁' m₂'
     | _, _ => False := by
-  unfold checkInstSimtCtStrict at hCt
+  dsimp only [checkInstSimtCtStrict] at hCt
   simp only [Bool.and_eq_true, beq_iff_eq] at hCt
   rcases hCt with ⟨hPtrPub, hFlowChk⟩
   have hPtrEq := hRegs.2.1 ptrId.toNat hPtrPub
   have hValSh := hRegs.1 valId.toNat
-  unfold applyLaneStore
+  dsimp only [applyLaneStore]
   rw [← hPtrEq]
   cases hP : r₁ ptrId.toNat with
   | vPtr sc binding elemIdx width =>
     have hInfo := hRegs.2.2 ptrId.toNat sc binding elemIdx width hP hPtrPub
     cases sc with
     | workgroup =>
-      cases width <;>
+      cases width with
+      | w32 =>
         cases hv1 : r₁ valId.toNat <;> cases hv2 : r₂ valId.toNat <;>
-        (rw [hv1, hv2] at hValSh; try cases hValSh) <;> simp
-      · split
-        · refine ⟨hMem.1, fun hLdsPub => ?_, hMem.2.2⟩
-          have hValPub : pol.regSec valId.toNat = .pub := by
-            cases hSec : pol.regSec valId.toNat with
-            | pub => rfl
-            | sec => rw [hSec, hInfo, hLdsPub] at hFlowChk; simp at hFlowChk
-          have hvEq := hRegs.2.1 valId.toNat hValPub
-          rw [hv1, hv2] at hvEq; cases hvEq
-          rw [hMem.2.1 hLdsPub]
+          (rw [hv1, hv2] at hValSh; try cases hValSh)
         · rfl
-      · split
-        · refine ⟨hMem.1, fun hLdsPub => ?_, hMem.2.2⟩
-          have hValPub : pol.regSec valId.toNat = .pub := by
-            cases hSec : pol.regSec valId.toNat with
-            | pub => rfl
-            | sec => rw [hSec, hInfo, hLdsPub] at hFlowChk; simp at hFlowChk
-          have hvEq := hRegs.2.1 valId.toNat hValPub
-          rw [hv1, hv2] at hvEq; cases hvEq
-          rw [hMem.2.1 hLdsPub]
+        · rfl
+        · dsimp only
+          split
+          · refine ⟨hMem.1, fun hLdsPub => ?_, hMem.2.2⟩
+            have hValPub : pol.regSec valId.toNat = .pub := by
+              cases hSec : pol.regSec valId.toNat with
+              | pub => rfl
+              | sec => rw [hSec, hInfo, hLdsPub] at hFlowChk; simp at hFlowChk
+            have hvEq := hRegs.2.1 valId.toNat hValPub
+            rw [hv1, hv2] at hvEq; cases hvEq
+            rw [hMem.2.1 hLdsPub]
+          · rfl
+        · rfl
+        · rfl
+        · rfl
+        · rfl
+      | w64 =>
+        cases hv1 : r₁ valId.toNat <;> cases hv2 : r₂ valId.toNat <;>
+          (rw [hv1, hv2] at hValSh; try cases hValSh)
+        · rfl
+        · rfl
+        · rfl
+        · dsimp only
+          split
+          · refine ⟨hMem.1, fun hLdsPub => ?_, hMem.2.2⟩
+            have hValPub : pol.regSec valId.toNat = .pub := by
+              cases hSec : pol.regSec valId.toNat with
+              | pub => rfl
+              | sec => rw [hSec, hInfo, hLdsPub] at hFlowChk; simp at hFlowChk
+            have hvEq := hRegs.2.1 valId.toNat hValPub
+            rw [hv1, hv2] at hvEq; cases hvEq
+            rw [hMem.2.1 hLdsPub]
+          · rfl
+        · rfl
+        · rfl
         · rfl
     | storageBuffer =>
-      cases width <;>
+      cases width with
+      | w32 =>
         cases hv1 : r₁ valId.toNat <;> cases hv2 : r₂ valId.toNat <;>
-        (rw [hv1, hv2] at hValSh; try cases hValSh) <;> simp
-      · refine ⟨hMem.1, hMem.2.1, fun b' hb' => ?_⟩
-        by_cases hbb : b' = binding
-        · subst hbb
-          have hValPub : pol.regSec valId.toNat = .pub := by
-            cases hSec : pol.regSec valId.toNat with
-            | pub => rfl
-            | sec => rw [hSec, hInfo, hb'] at hFlowChk; simp at hFlowChk
-          have hvEq := hRegs.2.1 valId.toNat hValPub
-          rw [hv1, hv2] at hvEq; cases hvEq
-          funext k
-          simp [writeSsboDword, hMem.2.2 b' hb']
-        · funext k
-          simp [writeSsboDword, hbb, hMem.2.2 b' hb']
-      · refine ⟨hMem.1, hMem.2.1, fun b' hb' => ?_⟩
-        by_cases hbb : b' = binding
-        · subst hbb
-          have hValPub : pol.regSec valId.toNat = .pub := by
-            cases hSec : pol.regSec valId.toNat with
-            | pub => rfl
-            | sec => rw [hSec, hInfo, hb'] at hFlowChk; simp at hFlowChk
-          have hvEq := hRegs.2.1 valId.toNat hValPub
-          rw [hv1, hv2] at hvEq; cases hvEq
-          funext k
-          simp [writeSsboU64, writeSsboDword, hMem.2.2 b' hb']
-        · funext k
-          simp [writeSsboU64, writeSsboDword, hbb, hMem.2.2 b' hb']
+          (rw [hv1, hv2] at hValSh; try cases hValSh)
+        · rfl
+        · rfl
+        · refine ⟨hMem.1, hMem.2.1, fun b' hb' => ?_⟩
+          by_cases hbb : b' = binding
+          · subst hbb
+            have hValPub : pol.regSec valId.toNat = .pub := by
+              cases hSec : pol.regSec valId.toNat with
+              | pub => rfl
+              | sec => rw [hSec, hInfo, hb'] at hFlowChk; simp at hFlowChk
+            have hvEq := hRegs.2.1 valId.toNat hValPub
+            rw [hv1, hv2] at hvEq; cases hvEq
+            funext k
+            simp [writeSsboDword, hMem.2.2 b' hb']
+          · funext k
+            simp [writeSsboDword, hbb, hMem.2.2 b' hb']
+        · rfl
+        · rfl
+        · rfl
+        · rfl
+      | w64 =>
+        cases hv1 : r₁ valId.toNat <;> cases hv2 : r₂ valId.toNat <;>
+          (rw [hv1, hv2] at hValSh; try cases hValSh)
+        · rfl
+        · rfl
+        · rfl
+        · refine ⟨hMem.1, hMem.2.1, fun b' hb' => ?_⟩
+          by_cases hbb : b' = binding
+          · subst hbb
+            have hValPub : pol.regSec valId.toNat = .pub := by
+              cases hSec : pol.regSec valId.toNat with
+              | pub => rfl
+              | sec => rw [hSec, hInfo, hb'] at hFlowChk; simp at hFlowChk
+            have hvEq := hRegs.2.1 valId.toNat hValPub
+            rw [hv1, hv2] at hvEq; cases hvEq
+            funext k
+            simp [writeSsboU64, writeSsboDword, hMem.2.2 b' hb']
+          · funext k
+            simp [writeSsboU64, writeSsboDword, hbb, hMem.2.2 b' hb']
+        · rfl
+        · rfl
+        · rfl
     | input | function | pushConstant =>
       cases width <;> cases r₁ valId.toNat <;> cases r₂ valId.toNat <;> rfl
   | _ =>

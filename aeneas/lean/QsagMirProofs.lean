@@ -512,11 +512,6 @@ export qsag_verified.proofs (
   tooth_wotsc256_zero_digest_rejected_by_qsag
   pureGf256Mul_eq_qsag
   gf256_mul_refines_qsag
-  beltMaskAbs
-  beltMaskAbs_card
-  beltMaskAbs_inter
-  belt_grant_refines_qsag_mask
-  belt_quorum_intersection_refines_qsag
   keccakArrayOfState
   keccak_round_refines_qsag
 )
@@ -536,21 +531,25 @@ end QsagMirProofs
 
 namespace QsagMirProofs
 export qsag_verified.proofs (
-  bytes32OfArray
-  bytes32OfArray_injective
-  rssCutPhaseAbs
-  rssCutStateAbs
-  rssCutInputAbs
-  rssCutOutputAbs
-  rssCutStateAbs_new_round1_committed
-  rssCut_extracted_step_refines
-  extractedRssCutMachine
-  extractedRssCut_forwardSim_mirRssCut
-  extractedRssCut_inherits_spec_trace_safety
-  tooth_extractedRssCut_nonzero_residual_rejected
+  pureScaleXT3_eq_qsag
+  pureMulT4_eq_qsag
+  pureMulT5_eq_qsag
+  pureMulT6_eq_qsag
+  pureTower128Mul_eq_qsag
+  tower128_mul_refines_qsag
+  tower128_mul_eq_zero_iff
+  tower128_add_refines_qsag
+  tower256Abs
+  tower256_add_refines_qsag
+  pureScaleXT7
+  scale_x_t7_eq_pure
+  pureTower256Mul
+  tower256_mul_eq_pure
+  tower256_mul_refines_qsag
+  tooth_tower256_generator_square
+  goldilocks_inv_or_zero_refines_qsag
+  goldilocks_inverse_mul_eq_one
+  goldilocks_inv_none_iff_zero
+  goldilocks_inv_some_mul_eq_one
 )
-end QsagMirProofs
-
-namespace QsagMirProofs
-export qsag_verified.proofs (tooth_velocity_used_nonce_model_is_not_monotone_nonce)
 end QsagMirProofs

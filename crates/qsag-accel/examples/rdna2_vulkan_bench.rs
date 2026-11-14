@@ -47,6 +47,10 @@ fn main() {
     };
 
     let info = *gpu_raw.device_info();
+    println!("LDS limit: {} bytes; Wave32 required: {}", info.max_compute_shared_memory_size, info.wave32_required);
+    for (slot, stats) in info.pipelines.iter().enumerate() {
+        println!("Pipeline {slot}: {stats:?}");
+    }
     let (api_maj, api_min, api_pat) = info.api_version_triple();
     let (drv_maj, drv_min, drv_pat) = info.driver_version_triple();
 

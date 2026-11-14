@@ -555,6 +555,46 @@ type PfnVkCreateDevice = unsafe extern "C" fn(
 ) -> i32;
 type PfnVkGetDeviceProcAddr = unsafe extern "C" fn(VkDevice, *const c_char) -> PfnVoid;
 
+
+// Extension ABI mirrors vulkan_core.h. All output buffers are initialized, bounded,
+// and remain alive through their synchronous Vulkan calls.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ExtensionProperties { name: [u8; 256], version: u32 }
+#[repr(C)]
+struct FeatureChain { s_type: u32, p_next: *mut c_void, enabled: u32, extra: u32 }
+#[repr(C)]
+struct Features2 { s_type: u32, p_next: *mut c_void, features: VkPhysicalDeviceFeatures }
+#[repr(C)]
+struct Properties2 { s_type: u32, p_next: *mut c_void, properties: VkPhysicalDevicePropertiesRaw }
+#[repr(C)]
+struct SubgroupProperties {
+    s_type: u32, p_next: *mut c_void, min: u32, max: u32,
+    max_compute_subgroups: u32, required_stages: u32,
+}
+#[repr(C)]
+struct RequiredSubgroup { s_type: u32, p_next: *const c_void, size: u32 }
+#[repr(C)]
+struct PipelineInfo { s_type: u32, p_next: *const c_void, pipeline: VkPipeline }
+#[repr(C)]
+struct ExecutableInfo { s_type: u32, p_next: *const c_void, pipeline: VkPipeline, index: u32 }
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ExecutableProperties {
+    s_type: u32, p_next: *mut c_void, stages: u32,
+    name: [u8; 256], description: [u8; 256], subgroup_size: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ExecutableStatistic {
+    s_type: u32, p_next: *mut c_void, name: [u8; 256], description: [u8; 256],
+    format: u32, value: u64,
+}
+const _: () = assert!(size_of::<ExecutableProperties>() == 536);
+const _: () = assert!(size_of::<ExecutableStatistic>() == 544);
+type GetExecutables = unsafe extern "C" fn(VkDevice, *const PipelineInfo, *mut u32, *mut ExecutableProperties) -> i32;
+type GetStatistics = unsafe extern "C" fn(VkDevice, *const ExecutableInfo, *mut u32, *mut ExecutableStatistic) -> i32;
+
 struct DeviceFns {
     destroy_device: unsafe extern "C" fn(VkDevice, *const c_void),
     get_device_queue: unsafe extern "C" fn(VkDevice, u32, u32, *mut VkQueue),
@@ -715,6 +755,9 @@ pub(crate) struct RawVulkanEngine {
     fns: DeviceFns,
     queue: VkQueue,
     mem_props: VkPhysicalDeviceMemoryProperties,
+    wave32: bool,
+    executable_fns: Option<(GetExecutables, GetStatistics)>,
+    telemetry: [crate::vulkan::PipelineTelemetry; KernelSlot::COUNT],
     max_wg_x: u32,
     max_storage_range: u64,
     exec_state: EngineExecState,
@@ -1052,6 +1095,62 @@ impl RawVulkanEngine {
             None => return Err(VulkanError::NoDiscreteGpuFound),
         };
 
+        // SPIR-V modules target Vulkan 1.2. Check all fixed shader resource limits
+        // before creating any device objects (not merely before dispatch).
+        if props.api_version < VK_API_VERSION_1_2
+            || props.max_compute_work_group_invocations() < 256
+            || props.read_limits_u32(532 - 296) < 256
+            || props.max_push_constants_size() < 72
+            || props.read_limits_u32(512 - 296) < 8192
+            || props.max_compute_work_group_count_x() == 0
+        {
+            return Err(VulkanError::UnsupportedDeviceLimits);
+        }
+        let enumerate_extensions: unsafe extern "C" fn(VkPhysicalDevice, *const c_char, *mut u32, *mut ExtensionProperties) -> i32 =
+            unsafe { load_inst_fn(gipa, instance, c"vkEnumerateDeviceExtensionProperties", "vkEnumerateDeviceExtensionProperties")? };
+        let mut count = 0;
+        check_vk("vkEnumerateDeviceExtensionProperties", unsafe { enumerate_extensions(phys_dev, null(), &mut count, null_mut()) })?;
+        let mut extensions = std::vec![ExtensionProperties { name: [0; 256], version: 0 }; count as usize];
+        check_vk("vkEnumerateDeviceExtensionProperties", unsafe { enumerate_extensions(phys_dev, null(), &mut count, extensions.as_mut_ptr()) })?;
+        extensions.truncate(count as usize);
+        let has = |name: &core::ffi::CStr| extensions.iter().any(|e| e.name.starts_with(name.to_bytes_with_nul()));
+        let has_exec = has(c"VK_KHR_pipeline_executable_properties");
+        let has_subgroup = has(c"VK_EXT_subgroup_size_control");
+        let mut executable = FeatureChain { s_type: 1000269000, p_next: null_mut(), enabled: 0, extra: 0 };
+        let mut subgroup = FeatureChain { s_type: 1000225002, p_next: null_mut(), enabled: 0, extra: 0 };
+        let mut features2 = Features2 { s_type: 1000059000, p_next: null_mut(), features: VkPhysicalDeviceFeatures { flags: [0; 55] } };
+        if has_exec { features2.p_next = (&mut executable as *mut FeatureChain).cast(); }
+        if has_subgroup {
+            subgroup.p_next = features2.p_next;
+            features2.p_next = (&mut subgroup as *mut FeatureChain).cast();
+        }
+        let get_features2: unsafe extern "C" fn(VkPhysicalDevice, *mut Features2) = unsafe { load_inst_fn(gipa, instance, c"vkGetPhysicalDeviceFeatures2", "vkGetPhysicalDeviceFeatures2")? };
+        unsafe { get_features2(phys_dev, &mut features2); }
+        let mut sg_props = SubgroupProperties { s_type: 1000225000, p_next: null_mut(), min: 0, max: 0, max_compute_subgroups: 0, required_stages: 0 };
+        if has_subgroup {
+            let get_properties2: unsafe extern "C" fn(VkPhysicalDevice, *mut Properties2) = unsafe { load_inst_fn(gipa, instance, c"vkGetPhysicalDeviceProperties2", "vkGetPhysicalDeviceProperties2")? };
+            let mut p2 = Properties2 { s_type: 1000059001, p_next: (&mut sg_props as *mut SubgroupProperties).cast(), properties: unsafe { core::mem::zeroed() } };
+            unsafe { get_properties2(phys_dev, &mut p2); }
+        }
+        let wave32 = has_subgroup && subgroup.enabled != 0 && sg_props.min <= 32 && sg_props.max >= 32
+            && sg_props.required_stages & VK_SHADER_STAGE_COMPUTE_BIT != 0 && sg_props.max_compute_subgroups >= 8;
+        let capture = has_exec && executable.enabled != 0;
+        // Enable only queried features we actually use, preserving the pNext lifetimes.
+        subgroup.enabled = u32::from(wave32);
+        subgroup.extra = 0;
+        subgroup.p_next = null_mut();
+        executable.p_next = null_mut();
+        let mut enabled_extensions = std::vec::Vec::new();
+        let mut device_chain: *mut c_void = null_mut();
+        if capture {
+            enabled_extensions.push(c"VK_KHR_pipeline_executable_properties".as_ptr());
+            device_chain = (&mut executable as *mut FeatureChain).cast();
+        }
+        if wave32 {
+            enabled_extensions.push(c"VK_EXT_subgroup_size_control".as_ptr());
+            subgroup.p_next = device_chain;
+            device_chain = (&mut subgroup as *mut FeatureChain).cast();
+        }
         let mut mem_props =
             unsafe { MaybeUninit::<VkPhysicalDeviceMemoryProperties>::zeroed().assume_init() };
         unsafe {
@@ -1114,14 +1213,14 @@ impl RawVulkanEngine {
 
         let dev_info_create = VkDeviceCreateInfo {
             s_type: VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            p_next: null(),
+            p_next: device_chain,
             flags: 0,
             queue_create_info_count: 1,
             p_queue_create_infos: &q_info,
             enabled_layer_count: 0,
             pp_enabled_layer_names: null(),
-            enabled_extension_count: 0,
-            pp_enabled_extension_names: null(),
+            enabled_extension_count: enabled_extensions.len() as u32,
+            pp_enabled_extension_names: enabled_extensions.as_ptr(),
             p_enabled_features: &enabled_features,
         };
         let mut device: VkDevice = null_mut();
@@ -1160,7 +1259,10 @@ impl RawVulkanEngine {
             .unwrap_or(props.device_name.len());
         let (name_bytes, copy_len) =
             VulkanDeviceInfo::sanitize_device_name(&props.device_name[..name_len]);
-        let dev_info = VulkanDeviceInfo {
+        let mut dev_info = VulkanDeviceInfo {
+            max_compute_shared_memory_size: props.read_limits_u32(512 - 296),
+            wave32_required: wave32,
+            pipelines: [crate::vulkan::PipelineTelemetry::default(); KernelSlot::COUNT],
             name_bytes,
             name_len: copy_len,
             vendor_id: props.vendor_id,
@@ -1181,7 +1283,10 @@ impl RawVulkanEngine {
             fns,
             queue,
             mem_props,
-            max_wg_x: props.max_compute_work_group_count_x().max(1),
+            wave32,
+            executable_fns: None,
+            telemetry: [crate::vulkan::PipelineTelemetry::default(); KernelSlot::COUNT],
+            max_wg_x: props.max_compute_work_group_count_x(),
             max_storage_range: props.max_storage_buffer_range() as u64,
             exec_state: EngineExecState::Ready,
             #[cfg(test)]
@@ -1209,9 +1314,16 @@ impl RawVulkanEngine {
         };
 
         unsafe {
+            if capture {
+                engine.executable_fns = Some((
+                    load_dev_fn(gdpa, device, c"vkGetPipelineExecutablePropertiesKHR", "vkGetPipelineExecutablePropertiesKHR")?,
+                    load_dev_fn(gdpa, device, c"vkGetPipelineExecutableStatisticsKHR", "vkGetPipelineExecutableStatisticsKHR")?,
+                ));
+            }
             engine.build_pipelines_and_pools(qf_idx)?;
         }
 
+        dev_info.pipelines = engine.telemetry;
         Ok((engine, dev_info))
     }
 
@@ -1410,6 +1522,51 @@ impl RawVulkanEngine {
         }
     }
 
+    unsafe fn collect_telemetry(&mut self, slot: KernelSlot, pipeline: VkPipeline) -> Result<(), VulkanError> {
+        let Some((get_properties, get_statistics)) = self.executable_fns else { return Ok(()); };
+        let info = PipelineInfo { s_type: 1000269001, p_next: null(), pipeline };
+        let mut count = 0;
+        check_vk("vkGetPipelineExecutablePropertiesKHR(count)", unsafe { get_properties(self.device, &info, &mut count, null_mut()) })?;
+        let mut properties = std::vec![ExecutableProperties { s_type: 1000269002, p_next: null_mut(), stages: 0, name: [0; 256], description: [0; 256], subgroup_size: 0 }; count as usize];
+        check_vk("vkGetPipelineExecutablePropertiesKHR", unsafe { get_properties(self.device, &info, &mut count, properties.as_mut_ptr()) })?;
+        properties.truncate(count as usize);
+        // These are single-stage compute pipelines. Refuse ambiguous telemetry rather
+        // than silently reporting one executable's statistics as the whole pipeline.
+        if properties.len() != 1 { return Err(VulkanError::PipelineAuditFailed("expected one compute executable")); }
+        let subgroup_size = properties[0].subgroup_size;
+        if self.wave32 && subgroup_size != 32 { return Err(VulkanError::PipelineAuditFailed("required Wave32 was not reported")); }
+        let info = ExecutableInfo { s_type: 1000269003, p_next: null(), pipeline, index: 0 };
+        let mut count = 0;
+        check_vk("vkGetPipelineExecutableStatisticsKHR(count)", unsafe { get_statistics(self.device, &info, &mut count, null_mut()) })?;
+        let mut stats = std::vec![ExecutableStatistic { s_type: 1000269004, p_next: null_mut(), name: [0; 256], description: [0; 256], format: 0, value: 0 }; count as usize];
+        check_vk("vkGetPipelineExecutableStatisticsKHR", unsafe { get_statistics(self.device, &info, &mut count, stats.as_mut_ptr()) })?;
+        stats.truncate(count as usize);
+        let mut scratch = None;
+        let mut vgprs = None;
+        let mut sgprs = None;
+        let mut lds = None;
+        for stat in stats {
+            let end = stat.name.iter().position(|b| *b == 0).unwrap_or(256);
+            let name = core::str::from_utf8(&stat.name[..end]).unwrap_or("");
+            // UINT64 is the only accepted representation; absence is never zero.
+            if stat.format != 2 { continue; }
+            match name {
+                "Scratch size" | "scratch_memory" => scratch = Some(stat.value),
+                "VGPRs" | "num_vgprs" => vgprs = Some(stat.value),
+                "SGPRs" | "num_sgprs" => sgprs = Some(stat.value),
+                "LDS size" | "lds_size" => lds = Some(stat.value),
+                _ => {},
+            }
+        }
+        self.telemetry[slot as usize] = crate::vulkan::PipelineTelemetry {
+            subgroup_size: Some(subgroup_size), scratch_bytes: scratch, vgprs, sgprs, lds_bytes: lds,
+        };
+        if scratch.is_some_and(|bytes| bytes != 0) {
+            return Err(VulkanError::PipelineAuditFailed("nonzero private scratch memory"));
+        }
+        Ok(())
+    }
+
     unsafe fn create_dsl(&self, num_bindings: u32) -> Result<VkDescriptorSetLayout, VulkanError> {
         let mut bindings = [VkDescriptorSetLayoutBinding {
             binding: 0,
@@ -1508,13 +1665,14 @@ impl RawVulkanEngine {
             })?;
             self.pipelines[slot as usize].pipeline_layout = pl;
 
+            let required = RequiredSubgroup { s_type: 1000225001, p_next: null(), size: 32 };
             let cp_info = VkComputePipelineCreateInfo {
                 s_type: VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
                 p_next: null(),
-                flags: 0,
+                flags: if self.executable_fns.is_some() { 0x40 } else { 0 },
                 stage: VkPipelineShaderStageCreateInfo {
                     s_type: VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                    p_next: null(),
+                    p_next: if self.wave32 { (&required as *const RequiredSubgroup).cast() } else { null() },
                     flags: 0,
                     stage: VK_SHADER_STAGE_COMPUTE_BIT,
                     module: sm,
@@ -1530,6 +1688,7 @@ impl RawVulkanEngine {
                 (self.fns.create_compute_pipelines)(self.device, 0, 1, &cp_info, null(), &mut pipe)
             })?;
             self.pipelines[slot as usize].pipeline = pipe;
+            unsafe { self.collect_telemetry(slot, pipe)?; }
         }
 
         // Descriptor pool: 4 sets (1 + 2 + 2 + 3 = 8 storage buffer descriptors).

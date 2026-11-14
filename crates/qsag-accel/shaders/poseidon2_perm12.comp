@@ -62,21 +62,22 @@ const uint64_t RC_EXT_TERM[48] = uint64_t[48](
 );
 
 uint64_t fp_reduce_u64(uint64_t x) {
-    return (x >= GL_P) ? (x - GL_P) : x;
+    return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
 }
 
 uint64_t fp_add(uint64_t a, uint64_t b) {
     uint64_t a_c = fp_reduce_u64(a);
     uint64_t b_c = fp_reduce_u64(b);
     uint64_t rem_p = GL_P - b_c;
-    return (a_c < rem_p) ? (a_c + b_c) : (a_c - rem_p);
+    uint64_t mask = 0ul - uint64_t(a_c < rem_p);
+    return ((a_c + b_c) & mask) | ((a_c - rem_p) & ~mask);
 }
 
 uint64_t fp_sub(uint64_t a, uint64_t b) {
     uint64_t a_c = fp_reduce_u64(a);
     uint64_t b_c = fp_reduce_u64(b);
     uint64_t diff = a_c - b_c;
-    return (a_c < b_c) ? (diff + GL_P) : diff;
+    return diff + (GL_P & (0ul - uint64_t(a_c < b_c)));
 }
 
 uint64_t fp_neg(uint64_t a) {

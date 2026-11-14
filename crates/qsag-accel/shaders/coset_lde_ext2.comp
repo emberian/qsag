@@ -28,24 +28,42 @@ layout(push_constant) uniform PushConsts {
 const uint64_t GL_P   = 0xFFFFFFFF00000001ul;
 const uint64_t GL_EPS = 0xFFFFFFFFul;
 
-shared u64vec2 s_lds[512];
+// Scalar 32-bit planes: each LDS instruction addresses one word per lane.
+// XOR the low five bits with bit 5 replicated. For a butterfly's first five
+// stages, its omitted bank bit is supplied by bit 5; later stages are contiguous.
+// This is a bijection within each 32-word row (no padding or extra LDS required).
+shared uint s_lds[4][512];
+uint lds_index(uint i) { return i ^ (((i >> 5u) & 1u) * 31u); }
+u64vec2 lds_load(uint i) {
+    uint a = lds_index(i);
+    return u64vec2(uint64_t(s_lds[0][a]) | (uint64_t(s_lds[1][a]) << 32u),
+                   uint64_t(s_lds[2][a]) | (uint64_t(s_lds[3][a]) << 32u));
+}
+void lds_store(uint i, u64vec2 v) {
+    uint a = lds_index(i);
+    s_lds[0][a] = uint(v.x);
+    s_lds[1][a] = uint(v.x >> 32u);
+    s_lds[2][a] = uint(v.y);
+    s_lds[3][a] = uint(v.y >> 32u);
+}
 
 uint64_t fp_reduce_u64(uint64_t x) {
-    return (x >= GL_P) ? (x - GL_P) : x;
+    return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
 }
 
 uint64_t fp_add(uint64_t a, uint64_t b) {
     uint64_t a_c = fp_reduce_u64(a);
     uint64_t b_c = fp_reduce_u64(b);
     uint64_t rem_p = GL_P - b_c;
-    return (a_c < rem_p) ? (a_c + b_c) : (a_c - rem_p);
+    uint64_t mask = 0ul - uint64_t(a_c < rem_p);
+    return ((a_c + b_c) & mask) | ((a_c - rem_p) & ~mask);
 }
 
 uint64_t fp_sub(uint64_t a, uint64_t b) {
     uint64_t a_c = fp_reduce_u64(a);
     uint64_t b_c = fp_reduce_u64(b);
     uint64_t diff = a_c - b_c;
-    return (a_c < b_c) ? (diff + GL_P) : diff;
+    return diff + (GL_P & (0ul - uint64_t(a_c < b_c)));
 }
 
 uint64_t fp_reduce128(uint64_t lo, uint64_t hi) {
@@ -122,8 +140,8 @@ void main() {
             return;
         }
         uint base = wg * 512u;
-        s_lds[lid]        = buf.elems[base + lid];
-        s_lds[lid + 256u] = buf.elems[base + lid + 256u];
+        lds_store(lid, buf.elems[base + lid]);
+        lds_store(lid + 256u, buf.elems[base + lid + 256u]);
         barrier();
 
         uint64_t w_roots[10];
@@ -138,16 +156,16 @@ void main() {
             uint idx0 = ((lid >> (s - 1u)) << s) + j;
             uint idx1 = idx0 + half_len;
             uint64_t w = fp_pow_u32(w_roots[s], j);
-            u64vec2 u  = s_lds[idx0];
-            u64vec2 vr = s_lds[idx1];
+            u64vec2 u  = lds_load(idx0);
+            u64vec2 vr = lds_load(idx1);
             u64vec2 v  = u64vec2(fp_mul(vr.x, w), fp_mul(vr.y, w));
-            s_lds[idx0] = u64vec2(fp_add(u.x, v.x), fp_add(u.y, v.y));
-            s_lds[idx1] = u64vec2(fp_sub(u.x, v.x), fp_sub(u.y, v.y));
+            lds_store(idx0, u64vec2(fp_add(u.x, v.x), fp_add(u.y, v.y)));
+            lds_store(idx1, u64vec2(fp_sub(u.x, v.x), fp_sub(u.y, v.y)));
             barrier();
         }
 
-        buf.elems[base + lid]        = s_lds[lid];
-        buf.elems[base + lid + 256u] = s_lds[lid + 256u];
+        buf.elems[base + lid]        = lds_load(lid);
+        buf.elems[base + lid + 256u] = lds_load(lid + 256u);
         return;
     }
 
@@ -159,7 +177,7 @@ void main() {
         if (half_len >= 256u) {
             if (lid == 0u) {
                 uint j_base = (wg * 256u) & (half_len - 1u);
-                s_lds[0].x = fp_pow_u32(pc.w_step, j_base);
+                lds_store(0u, u64vec2(fp_pow_u32(pc.w_step, j_base), 0ul));
             }
             barrier();
             if (gid < half_n) {
@@ -167,7 +185,7 @@ void main() {
                 uint j     = gid & (half_len - 1u);
                 uint idx0  = (block << s) + j;
                 uint idx1  = idx0 + half_len;
-                uint64_t w = fp_mul(s_lds[0].x, fp_pow_u32(pc.w_step, lid));
+                uint64_t w = fp_mul(lds_load(0).x, fp_pow_u32(pc.w_step, lid));
                 u64vec2 u  = buf.elems[idx0];
                 u64vec2 vr = buf.elems[idx1];
                 u64vec2 v  = u64vec2(fp_mul(vr.x, w), fp_mul(vr.y, w));
@@ -194,14 +212,14 @@ void main() {
     if (pc.mode == 3u) {
         if (lid == 0u) {
             uint base_j = wg * 256u;
-            s_lds[0].x = (base_j < pc.aux_n)
+            lds_store(0u, u64vec2((base_j < pc.aux_n)
                 ? fp_mul(pc.w_step, fp_pow_u32(pc.shift_c, base_j))
-                : 0ul;
+                : 0ul, 0ul));
         }
         barrier();
         if (gid < pc.len) {
             if (gid < pc.aux_n) {
-                uint64_t scale = fp_mul(s_lds[0].x, fp_pow_u32(pc.shift_c, lid));
+                uint64_t scale = fp_mul(lds_load(0).x, fp_pow_u32(pc.shift_c, lid));
                 u64vec2 v = buf.elems[gid];
                 buf.elems[gid] = u64vec2(fp_mul(v.x, scale), fp_mul(v.y, scale));
             } else {
