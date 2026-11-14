@@ -1049,3 +1049,1058 @@ theorem productionAggParams_derived :
     productionAggParams.maxDomain = 2 ^ 28 ∧ productionAggParams.maxQueryGroups = 2 ^ 24 := by
   decide
 
+/-! ## 6. Counting challenge vectors: adaptive union bound -/
+
+private theorem filter_const_false {α : Type} : ∀ (l : List α), l.filter (fun _ => false) = []
+  | [] => rfl
+  | _ :: xs => filter_const_false xs
+
+private theorem filter_eq_nil_of_forall {α : Type} {p : α → Bool} :
+    ∀ (l : List α), (∀ x ∈ l, p x = false) → l.filter p = []
+  | [], _ => rfl
+  | x :: xs, h => by
+    have hx := h x (List.mem_cons_self ..)
+    simp only [List.filter, hx]
+    exact filter_eq_nil_of_forall xs (fun y hy => h y (List.mem_cons_of_mem _ hy))
+
+private theorem filter_eq_self_of_all {α : Type} {p : α → Bool} :
+    ∀ (l : List α), (∀ x ∈ l, p x = true) → l.filter p = l
+  | [], _ => rfl
+  | x :: xs, h => by
+    have hx := h x (List.mem_cons_self ..)
+    simp only [List.filter, hx]
+    exact congrArg (x :: ·) (filter_eq_self_of_all xs (fun y hy => h y (List.mem_cons_of_mem _ hy)))
+
+private theorem filter_length_le_self {α : Type} (p : α → Bool) :
+    ∀ (l : List α), (l.filter p).length ≤ l.length
+  | [] => Nat.le_refl _
+  | x :: xs => by
+    have ih := filter_length_le_self p xs
+    cases hp : p x
+    · simp only [List.filter, hp, List.length_cons]
+      exact Nat.le_succ_of_le ih
+    · simp only [List.filter, hp, List.length_cons]
+      exact Nat.succ_le_succ ih
+
+private theorem filter_length_mono {α : Type} {p q : α → Bool} :
+    ∀ (l : List α), (∀ x ∈ l, p x = true → q x = true) → (l.filter p).length ≤ (l.filter q).length
+  | [], _ => Nat.le_refl _
+  | x :: xs, h => by
+    have ih := filter_length_mono xs (fun y hy => h y (List.mem_cons_of_mem _ hy))
+    cases hp : p x
+    · cases hq : q x
+      · simp only [List.filter, hp, hq]
+        exact ih
+      · simp only [List.filter, hp, hq, List.length_cons]
+        exact Nat.le_succ_of_le ih
+    · have hq := h x (List.mem_cons_self ..) hp
+      simp only [List.filter, hp, hq, List.length_cons]
+      exact Nat.succ_le_succ ih
+
+private theorem filter_flatMap_eq {α β : Type} (p : β → Bool) (f : α → List β) :
+    ∀ (l : List α), (l.flatMap f).filter p = l.flatMap (fun x => (f x).filter p)
+  | [] => rfl
+  | x :: xs => by
+    rw [List.flatMap_cons, List.flatMap_cons, List.filter_append, filter_flatMap_eq p f xs]
+
+private theorem filter_map_length {α β : Type} (p : β → Bool) (f : α → β) :
+    ∀ (l : List α), ((l.map f).filter p).length = (l.filter (fun x => p (f x))).length
+  | [] => rfl
+  | x :: xs => by
+    have ih := filter_map_length p f xs
+    cases hp : p (f x)
+    · simp only [List.map, List.filter, hp]
+      exact ih
+    · simp only [List.map, List.filter, hp, List.length_cons]
+      exact congrArg Nat.succ ih
+
+private theorem length_flatMap_const {α β : Type} (k : Nat) (f : α → List β) :
+    ∀ (l : List α), (∀ c ∈ l, (f c).length = k) → (l.flatMap f).length = l.length * k
+  | [], _ => by
+    show 0 = 0 * k
+    rw [Nat.zero_mul]
+  | c :: l, h => by
+    have ih := length_flatMap_const k f l (fun x hx => h x (List.mem_cons_of_mem _ hx))
+    have hc := h c (List.mem_cons_self ..)
+    rw [List.flatMap_cons, List.length_append, ih, hc, List.length_cons, Nat.add_mul, Nat.one_mul,
+      Nat.add_comm]
+
+/-- Weighted sum bound: elements flagged by `b` contribute at most `T`, the others at most `M`. -/
+private theorem length_flatMap_le_split {α β : Type} (b : α → Bool) (T M : Nat) (f : α → List β) :
+    ∀ (l : List α), (∀ c ∈ l, (f c).length ≤ if b c = true then T else M) →
+      (l.flatMap f).length ≤ (l.filter b).length * T + l.length * M
+  | [], _ => Nat.zero_le _
+  | c :: l, h => by
+    have ih := length_flatMap_le_split b T M f l (fun x hx => h x (List.mem_cons_of_mem _ hx))
+    have hc := h c (List.mem_cons_self ..)
+    rw [List.flatMap_cons, List.length_append, List.length_cons, Nat.add_mul, Nat.one_mul]
+    cases hb : b c
+    · rw [hb] at hc
+      have hc' : (f c).length ≤ M := hc
+      simp only [List.filter, hb]
+      omega
+    · rw [hb] at hc
+      have hc' : (f c).length ≤ T := hc
+      simp only [List.filter, hb, List.length_cons]
+      rw [Nat.add_mul, Nat.one_mul]
+      omega
+
+/-- All length-`n` challenge vectors over the challenge list `S`. -/
+def challengeVectors {α : Type} (S : List α) : Nat → List (List α)
+  | 0 => [[]]
+  | n + 1 => S.flatMap (fun r => (challengeVectors S n).map (fun rs => r :: rs))
+
+theorem challengeVectors_length {α : Type} (S : List α) :
+    ∀ (n : Nat), (challengeVectors S n).length = S.length ^ n
+  | 0 => rfl
+  | n + 1 => by
+    show (S.flatMap (fun r => (challengeVectors S n).map (fun rs => r :: rs))).length = _
+    rw [length_flatMap_const (S.length ^ n) _ S
+      (fun r _ => by rw [List.length_map, challengeVectors_length S n]),
+      Nat.pow_succ, Nat.mul_comm]
+
+theorem length_of_mem_challengeVectors {α : Type} (S : List α) :
+    ∀ (n : Nat) (rs : List α), rs ∈ challengeVectors S n → rs.length = n
+  | 0, rs, h => by
+    have hrs : rs = [] := List.mem_singleton.mp h
+    rw [hrs]
+    rfl
+  | n + 1, rs, h => by
+    have h' : rs ∈ S.flatMap (fun r => (challengeVectors S n).map (fun rs => r :: rs)) := h
+    rw [List.mem_flatMap] at h'
+    obtain ⟨r, _, hr⟩ := h'
+    rw [List.mem_map] at hr
+    obtain ⟨tl, htl, hEq⟩ := hr
+    rw [← hEq, List.length_cons, length_of_mem_challengeVectors S n tl htl]
+
+/-- A per-round event that may depend on every earlier challenge (the prefix, oldest first)
+    occurs in at least one round of the challenge vector. -/
+def anyRoundEvent {α : Type} : (List α → α → Bool) → List α → Bool
+  | _, [] => false
+  | E, r :: rs => E [] r || anyRoundEvent (fun pre => E (r :: pre)) rs
+
+/-- `d 0 + d 1 + ... + d (n - 1)`. -/
+def roundBoundSum : (Nat → Nat) → Nat → Nat
+  | _, 0 => 0
+  | d, n + 1 => d 0 + roundBoundSum (fun j => d (j + 1)) n
+
+theorem roundBoundSum_const (d : Nat) : ∀ (n : Nat), roundBoundSum (fun _ => d) n = n * d
+  | 0 => by
+    show 0 = 0 * d
+    rw [Nat.zero_mul]
+  | n + 1 => by
+    show d + roundBoundSum (fun _ => d) n = (n + 1) * d
+    rw [roundBoundSum_const d n, Nat.add_mul, Nat.one_mul, Nat.add_comm]
+
+/-- **Adaptive union bound.** If for every prefix at most `d (prefix length)` challenges of `S`
+    trigger the round event, then at most `(d 0 + ... + d (n-1)) * |S|^(n-1)` of the `|S|^n`
+    challenge vectors trigger it in some round. -/
+theorem anyRoundEvent_count_le {α : Type} (S : List α) :
+    ∀ (n : Nat) (E : List α → α → Bool) (d : Nat → Nat),
+      (∀ pre, (S.filter (E pre)).length ≤ d pre.length) →
+      ((challengeVectors S n).filter (anyRoundEvent E)).length ≤
+        roundBoundSum d n * S.length ^ (n - 1)
+  | 0, E, d, _ => by
+    show (([[]] : List (List α)).filter (anyRoundEvent E)).length ≤ _
+    simp only [List.filter, anyRoundEvent]
+    exact Nat.zero_le _
+  | n + 1, E, d, h => by
+    show ((S.flatMap (fun r => (challengeVectors S n).map (fun rs => r :: rs))).filter
+      (anyRoundEvent E)).length ≤ (d 0 + roundBoundSum (fun j => d (j + 1)) n) * S.length ^ (n + 1 - 1)
+    rw [filter_flatMap_eq, Nat.add_sub_cancel]
+    let M := roundBoundSum (fun j => d (j + 1)) n * S.length ^ (n - 1)
+    have hEach : ∀ r ∈ S,
+        (((challengeVectors S n).map (fun rs => r :: rs)).filter (anyRoundEvent E)).length ≤
+          if E [] r = true then S.length ^ n else M := by
+      intro r _
+      rw [filter_map_length]
+      cases hE : E [] r
+      · have hfun : (fun rs => anyRoundEvent E (r :: rs)) =
+            anyRoundEvent (fun pre => E (r :: pre)) := by
+          funext rs
+          show (E [] r || anyRoundEvent (fun pre => E (r :: pre)) rs) = _
+          rw [hE]
+          rfl
+        rw [hfun]
+        exact anyRoundEvent_count_le S n (fun pre => E (r :: pre)) (fun j => d (j + 1))
+          (fun pre => h (r :: pre))
+      · have hle := filter_length_le_self (fun rs => anyRoundEvent E (r :: rs)) (challengeVectors S n)
+        rw [challengeVectors_length] at hle
+        exact hle
+    have hSplit := length_flatMap_le_split (E []) (S.length ^ n) M
+      (fun r => ((challengeVectors S n).map (fun rs => r :: rs)).filter (anyRoundEvent E)) S hEach
+    have h0 : (S.filter (E [])).length ≤ d 0 := h []
+    have hA : (S.filter (E [])).length * S.length ^ n ≤ d 0 * S.length ^ n :=
+      Nat.mul_le_mul_right _ h0
+    have hB : S.length * M ≤ roundBoundSum (fun j => d (j + 1)) n * S.length ^ n := by
+      cases n with
+      | zero =>
+        show S.length * (0 * S.length ^ (0 - 1)) ≤ _
+        rw [Nat.zero_mul, Nat.mul_zero]
+        exact Nat.zero_le _
+      | succ k =>
+        show S.length * (roundBoundSum (fun j => d (j + 1)) (k + 1) * S.length ^ (k + 1 - 1)) ≤ _
+        rw [Nat.add_sub_cancel, Nat.pow_succ, Nat.mul_left_comm, Nat.mul_comm S.length (S.length ^ k)]
+        exact Nat.le_refl _
+    rw [Nat.add_mul]
+    exact Nat.le_trans hSplit (Nat.add_le_add hA hB)
+
+/-- Uniform per-round bound `d`: at most `n * d * |S|^(n-1)` challenge vectors trigger the event. -/
+theorem anyRoundEvent_count_le_uniform {α : Type} (S : List α) (n d : Nat)
+    (E : List α → α → Bool) (h : ∀ pre, (S.filter (E pre)).length ≤ d) :
+    ((challengeVectors S n).filter (anyRoundEvent E)).length ≤ n * d * S.length ^ (n - 1) := by
+  have hb := anyRoundEvent_count_le S n E (fun _ => d) h
+  rw [roundBoundSum_const] at hb
+  exact hb
+
+/-! ## 7. Degree-8 sumcheck: counting bound against adaptive provers -/
+
+/-- Round polynomials of a prover whose round-`j` message is a function of the challenges
+    `r_0, ..., r_{j-1}` already issued. -/
+def adaptivePolys : (List GoldilocksExt2 → List GoldilocksExt2) → List GoldilocksExt2 →
+    List (List GoldilocksExt2)
+  | _, [] => []
+  | strat, r :: rs => strat [] :: adaptivePolys (fun pre => strat (r :: pre)) rs
+
+/-- Nine distinct field points; two polynomials of degree at most eight that agree on all of them
+    agree everywhere. -/
+def sumcheckProbePoints : List GoldilocksExt2 :=
+  [0, 1, 2, 3, 4, 5, 6, 7, 8].map (fun k => GoldilocksExt2.ofBase (Goldilocks.ofNat k))
+
+theorem sumcheckProbePoints_nodup : sumcheckProbePoints.Nodup := by decide +kernel
+
+/-- Decidable form of "the two round polynomials are different functions". -/
+def roundPolysDiffer (c h : List GoldilocksExt2) : Bool :=
+  sumcheckProbePoints.any
+    (fun x => decide (RoundPoly.evalCoeffs c x ≠ RoundPoly.evalCoeffs h x))
+
+theorem exists_of_roundPolysDiffer (c h : List GoldilocksExt2) (hb : roundPolysDiffer c h = true) :
+    ∃ x : GoldilocksExt2, RoundPoly.evalCoeffs c x ≠ RoundPoly.evalCoeffs h x := by
+  obtain ⟨x, _, hx⟩ := List.any_eq_true.mp hb
+  exact ⟨x, of_decide_eq_true hx⟩
+
+theorem roundPolysDiffer_of_exists (c h : List GoldilocksExt2)
+    (hc : c.length ≤ 9) (hh : h.length ≤ 9)
+    (hd : ∃ x : GoldilocksExt2, RoundPoly.evalCoeffs c x ≠ RoundPoly.evalCoeffs h x) :
+    roundPolysDiffer c h = true := by
+  cases hb : roundPolysDiffer c h with
+  | true => rfl
+  | false =>
+    exfalso
+    have hall : ∀ x ∈ sumcheckProbePoints,
+        decide (RoundPoly.evalCoeffs c x = RoundPoly.evalCoeffs h x) = true := by
+      intro x hx
+      apply decide_eq_true
+      apply Decidable.of_not_not
+      intro hne
+      have ht : roundPolysDiffer c h = true := List.any_eq_true.mpr ⟨x, hx, decide_eq_true hne⟩
+      rw [hb] at ht
+      cases ht
+    have hbound := sumcheck_round_roots_le_degree 8 c h sumcheckProbePoints
+      sumcheckProbePoints_nodup hc hh hd
+    rw [filter_eq_self_of_all _ hall] at hbound
+    exact absurd hbound (by decide)
+
+/-- Round event: both polynomials have at most nine coefficients, are different functions, and
+    agree at the round challenge. -/
+def sumcheckRoundEvent (claimed honest : List GoldilocksExt2 → List GoldilocksExt2)
+    (pre : List GoldilocksExt2) (r : GoldilocksExt2) : Bool :=
+  (decide ((claimed pre).length ≤ 9) && decide ((honest pre).length ≤ 9) &&
+    roundPolysDiffer (claimed pre) (honest pre)) &&
+  decide (RoundPoly.evalCoeffs (claimed pre) r = RoundPoly.evalCoeffs (honest pre) r)
+
+/-- Some round of the transcript `(adaptivePolys claimed rs, adaptivePolys honest rs, rs)` is a
+    Schwartz–Zippel hit. -/
+def sumcheckHitOccurs (claimed honest : List GoldilocksExt2 → List GoldilocksExt2)
+    (rs : List GoldilocksExt2) : Bool :=
+  anyRoundEvent (sumcheckRoundEvent claimed honest) rs
+
+theorem sumcheckRoundEvent_roots_le_eight
+    (claimed honest : List GoldilocksExt2 → List GoldilocksExt2) (S : List GoldilocksExt2)
+    (hS : S.Nodup) (pre : List GoldilocksExt2) :
+    (S.filter (sumcheckRoundEvent claimed honest pre)).length ≤ 8 := by
+  cases hg : (decide ((claimed pre).length ≤ 9) && decide ((honest pre).length ≤ 9) &&
+      roundPolysDiffer (claimed pre) (honest pre)) with
+  | false =>
+    have hfun : sumcheckRoundEvent claimed honest pre = fun _ => false := by
+      funext r
+      unfold sumcheckRoundEvent
+      rw [hg]
+      rfl
+    rw [hfun, filter_const_false]
+    exact Nat.zero_le 8
+  | true =>
+    have hfun : sumcheckRoundEvent claimed honest pre = fun r =>
+        decide (RoundPoly.evalCoeffs (claimed pre) r = RoundPoly.evalCoeffs (honest pre) r) := by
+      funext r
+      unfold sumcheckRoundEvent
+      rw [hg]
+      rfl
+    rw [hfun]
+    rcases Bool.and_eq_true_iff.mp hg with ⟨hlen, hdiff⟩
+    rcases Bool.and_eq_true_iff.mp hlen with ⟨hc, hh⟩
+    exact sumcheck_degree8_round_roots_le_eight _ _ S hS (of_decide_eq_true hc)
+      (of_decide_eq_true hh) (exists_of_roundPolysDiffer _ _ hdiff)
+
+/-- Every transcript-indexed hit of an adaptive transcript is seen by `sumcheckHitOccurs`. -/
+theorem sumcheckHitOccurs_of_round :
+    ∀ (rs : List GoldilocksExt2) (claimed honest : List GoldilocksExt2 → List GoldilocksExt2)
+      (i : Nat) (cp hp : List GoldilocksExt2) (ch : GoldilocksExt2),
+      (adaptivePolys claimed rs)[i]? = some cp →
+      (adaptivePolys honest rs)[i]? = some hp →
+      rs[i]? = some ch →
+      cp.length ≤ 9 → hp.length ≤ 9 →
+      (∃ x : GoldilocksExt2, RoundPoly.evalCoeffs cp x ≠ RoundPoly.evalCoeffs hp x) →
+      RoundPoly.evalCoeffs cp ch = RoundPoly.evalCoeffs hp ch →
+      sumcheckHitOccurs claimed honest rs = true
+  | [], _, _, _, _, _, _, _, _, hch, _, _, _, _ => by
+    simp only [List.getElem?_nil] at hch
+    cases hch
+  | r :: rs, claimed, honest, 0, cp, hp, ch, hc, hh, hch, lc, lh, hd, he => by
+    have hc' : claimed [] = cp := Option.some.inj hc
+    have hh' : honest [] = hp := Option.some.inj hh
+    have hch' : r = ch := Option.some.inj hch
+    subst hc' hh' hch'
+    have hEv : sumcheckRoundEvent claimed honest [] r = true :=
+      Bool.and_eq_true_iff.mpr ⟨Bool.and_eq_true_iff.mpr ⟨Bool.and_eq_true_iff.mpr
+        ⟨decide_eq_true lc, decide_eq_true lh⟩, roundPolysDiffer_of_exists _ _ lc lh hd⟩,
+        decide_eq_true he⟩
+    show (sumcheckRoundEvent claimed honest [] r ||
+      anyRoundEvent (fun pre => sumcheckRoundEvent claimed honest (r :: pre)) rs) = true
+    rw [hEv]
+    rfl
+  | r :: rs, claimed, honest, i + 1, cp, hp, ch, hc, hh, hch, lc, lh, hd, he => by
+    have ih : anyRoundEvent (fun pre => sumcheckRoundEvent claimed honest (r :: pre)) rs = true :=
+      sumcheckHitOccurs_of_round rs (fun pre => claimed (r :: pre)) (fun pre => honest (r :: pre))
+        i cp hp ch hc hh hch lc lh hd he
+    show (sumcheckRoundEvent claimed honest [] r ||
+      anyRoundEvent (fun pre => sumcheckRoundEvent claimed honest (r :: pre)) rs) = true
+    rw [ih]
+    exact Bool.or_true _
+
+theorem sumcheckHitOccurs_of_hit (claimed honest : List GoldilocksExt2 → List GoldilocksExt2)
+    (rs : List GoldilocksExt2)
+    (hit : SumcheckSchwartzZippelHit (adaptivePolys claimed rs) (adaptivePolys honest rs) rs) :
+    sumcheckHitOccurs claimed honest rs = true :=
+  sumcheckHitOccurs_of_round rs claimed honest hit.roundIdx hit.claimedPoly hit.honestPoly
+    hit.challenge hit.claimed_at hit.honest_at hit.challenge_at hit.lenClaimed hit.lenHonest
+    ⟨hit.diffPoint, hit.polyNe⟩ hit.hitEq
+
+/-- A false claim accepted against the same terminal value as the honest chain forces a hit. -/
+theorem sumcheck_false_claim_accept_forces_hit
+    (claimed honest : List GoldilocksExt2 → List GoldilocksExt2)
+    (curClaim honestClaim : GoldilocksExt2) (rs : List GoldilocksExt2) (termEval : GoldilocksExt2)
+    (hNe : curClaim ≠ honestClaim)
+    (hC : verifySumcheckChain curClaim (adaptivePolys claimed rs) rs termEval = true)
+    (hH : verifySumcheckChain honestClaim (adaptivePolys honest rs) rs termEval = true) :
+    sumcheckHitOccurs claimed honest rs = true :=
+  sumcheckHitOccurs_of_hit claimed honest rs
+    (extractSumcheckHitFromChain _ curClaim honestClaim _ rs termEval hNe hC hH)
+
+/-- At most `n * 8 * |S|^(n-1)` of the `|S|^n` challenge vectors produce a hit, for any adaptive
+    prover and honest strategies and any duplicate-free challenge list `S`. -/
+theorem sumcheck_hit_challenges_le (S : List GoldilocksExt2) (hS : S.Nodup) (n : Nat)
+    (claimed honest : List GoldilocksExt2 → List GoldilocksExt2) :
+    ((challengeVectors S n).filter (sumcheckHitOccurs claimed honest)).length ≤
+      n * 8 * S.length ^ (n - 1) :=
+  anyRoundEvent_count_le_uniform S n 8 (sumcheckRoundEvent claimed honest)
+    (sumcheckRoundEvent_roots_le_eight claimed honest S hS)
+
+/-- No challenge vector lets a false claim pass without a hit. `termEval rs` is the terminal
+    value both chains are checked against (the committed-polynomial evaluation). -/
+theorem sumcheck_false_claim_accepting_without_hit_count_zero
+    (S : List GoldilocksExt2) (n : Nat)
+    (claimed honest : List GoldilocksExt2 → List GoldilocksExt2)
+    (curClaim honestClaim : GoldilocksExt2) (termEval : List GoldilocksExt2 → GoldilocksExt2)
+    (hNe : curClaim ≠ honestClaim)
+    (hHonest : ∀ rs ∈ challengeVectors S n,
+      verifySumcheckChain honestClaim (adaptivePolys honest rs) rs (termEval rs) = true) :
+    ((challengeVectors S n).filter (fun rs =>
+      verifySumcheckChain curClaim (adaptivePolys claimed rs) rs (termEval rs) &&
+      !sumcheckHitOccurs claimed honest rs)).length = 0 := by
+  rw [filter_eq_nil_of_forall]
+  · rfl
+  · intro rs hrs
+    cases hAcc : verifySumcheckChain curClaim (adaptivePolys claimed rs) rs (termEval rs)
+    · rfl
+    · rw [sumcheck_false_claim_accept_forces_hit claimed honest curClaim honestClaim rs
+        (termEval rs) hNe hAcc (hHonest rs hrs)]
+      rfl
+
+/-- **Sumcheck soundness count.** A false claim is accepted on at most `n * 8 * |S|^(n-1)` of
+    the `|S|^n` challenge vectors. -/
+theorem sumcheck_false_claim_accepting_challenges_le
+    (S : List GoldilocksExt2) (hS : S.Nodup) (n : Nat)
+    (claimed honest : List GoldilocksExt2 → List GoldilocksExt2)
+    (curClaim honestClaim : GoldilocksExt2) (termEval : List GoldilocksExt2 → GoldilocksExt2)
+    (hNe : curClaim ≠ honestClaim)
+    (hHonest : ∀ rs ∈ challengeVectors S n,
+      verifySumcheckChain honestClaim (adaptivePolys honest rs) rs (termEval rs) = true) :
+    ((challengeVectors S n).filter (fun rs =>
+      verifySumcheckChain curClaim (adaptivePolys claimed rs) rs (termEval rs))).length ≤
+      n * 8 * S.length ^ (n - 1) :=
+  Nat.le_trans
+    (filter_length_mono (challengeVectors S n) (fun rs hrs hAcc =>
+      sumcheck_false_claim_accept_forces_hit claimed honest curClaim honestClaim rs (termEval rs)
+        hNe hAcc (hHonest rs hrs)))
+    (sumcheck_hit_challenges_le S hS n claimed honest)
+
+/-- Production instantiation: with at most 16 degree-8 rounds over a challenge set at least as
+    large as `GoldilocksExt2`, the accepting fraction is below `2^-120`. -/
+theorem sumcheck_production_error_lt (s n : Nat) (hn0 : 0 < n)
+    (hn : n ≤ productionAggParams.maxRowRounds) (hs : productionAggParams.fieldSize ≤ s) :
+    (n * productionAggParams.rowSumcheckDegree * s ^ (n - 1)) * 2 ^ 120 < s ^ n := by
+  cases n with
+  | zero => exact absurd hn0 (Nat.lt_irrefl 0)
+  | succ k =>
+    have hn' : k + 1 ≤ 16 := hn
+    have hs' : goldilocksPrime ^ 2 ≤ s := hs
+    have h1 : (k + 1) * 8 * 2 ^ 120 < s :=
+      Nat.lt_of_le_of_lt
+        (Nat.mul_le_mul_right _ (Nat.mul_le_mul_right _ hn'))
+        (Nat.lt_of_lt_of_le (by decide : 16 * 8 * 2 ^ 120 < goldilocksPrime ^ 2) hs')
+    have hsPos : 0 < s := Nat.lt_of_le_of_lt (Nat.zero_le _) h1
+    have hpos : 0 < s ^ k := Nat.pow_pos hsPos
+    show (k + 1) * 8 * s ^ (k + 1 - 1) * 2 ^ 120 < s ^ (k + 1)
+    have hpow : s ^ (k + 1) = s * s ^ k := by rw [Nat.pow_succ, Nat.mul_comm]
+    rw [Nat.add_sub_cancel, Nat.mul_right_comm, hpow]
+    exact Nat.mul_lt_mul_of_pos_right h1 hpos
+
+/-- Toy honest prover for `g(x, y) = x * y`: round polynomials `X` and `r₁ * Y`. -/
+private def toyHonestStrategy : List GoldilocksExt2 → List GoldilocksExt2
+  | [] => [CommRingOps.zero, CommRingOps.one]
+  | r :: _ => [CommRingOps.zero, r]
+
+private def toyTerminal : List GoldilocksExt2 → GoldilocksExt2
+  | [r₁, r₂] => CommRingOps.mul r₁ r₂
+  | _ => CommRingOps.zero
+
+private theorem evalCoeffs_pair (a b x : GoldilocksExt2) :
+    RoundPoly.evalCoeffs [a, b] x = CommRingOps.add a (CommRingOps.mul x b) := by
+  simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+
+/-- Inhabitedness of the counting hypotheses: a genuine two-round sumcheck (for `x * y`, true
+    sum `1`) whose honest chain verifies at every challenge vector, a false claim `0`, and a
+    cheating prover that is accepted at the challenge vector `(0, 0)`. -/
+theorem sumcheck_counting_hypotheses_satisfiable :
+    ∃ (honest claimed : List GoldilocksExt2 → List GoldilocksExt2)
+      (honestClaim curClaim : GoldilocksExt2) (termEval : List GoldilocksExt2 → GoldilocksExt2),
+      curClaim ≠ honestClaim ∧
+      (∀ (S : List GoldilocksExt2), ∀ rs ∈ challengeVectors S 2,
+        verifySumcheckChain honestClaim (adaptivePolys honest rs) rs (termEval rs) = true) ∧
+      (∃ rs : List GoldilocksExt2, rs.length = 2 ∧
+        verifySumcheckChain curClaim (adaptivePolys claimed rs) rs (termEval rs) = true) := by
+  refine ⟨toyHonestStrategy, fun _ => [CommRingOps.zero], CommRingOps.one, CommRingOps.zero,
+    toyTerminal, by decide +kernel, ?_, ⟨[CommRingOps.zero, CommRingOps.zero], rfl, by decide +kernel⟩⟩
+  intro S rs hrs
+  have hlen := length_of_mem_challengeVectors S 2 rs hrs
+  match rs, hlen with
+  | [r₁, r₂], _ =>
+    have hz : (CommRingOps.zero : GoldilocksExt2) = GoldilocksExt2.zero := rfl
+    have ho : (CommRingOps.one : GoldilocksExt2) = GoldilocksExt2.one := rfl
+    simp only [adaptivePolys, toyHonestStrategy, toyTerminal, verifySumcheckChain,
+      evalCoeffs_pair, ← hz, ← ho, List.length_cons, List.length_nil,
+      LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
+      LawfulCommRing.zero_add, LawfulCommRing.one_mul, LawfulCommRing.mul_one,
+      LawfulCommRing.mul_comm r₂ r₁, beq_self_eq_true, Bool.and_true, Bool.and_self,
+      decide_eq_true_eq]
+    decide
+
+/-! ## 8. BaseFold query phase: counting distinct query tuples
+
+`pcs.rs:36-45` (`sample_pcs_queries`) inserts squeezed indices into a `BTreeSet` until it holds
+`min(NUM_PCS_QUERIES, domain)` of them: the verifier queries a set of *distinct* round-0 coset
+groups. The counting below is over ordered tuples of pairwise distinct positions; every
+`q`-subset corresponds to the same number `q!` of such tuples, so the fractions coincide (that
+correspondence is not formalised here). -/
+
+/-- Every way of removing one position from a list: the removed element and the remainder. -/
+def picks {α : Type} : List α → List (α × List α)
+  | [] => []
+  | x :: xs => (x, xs) :: (picks xs).map (fun p => (p.1, x :: p.2))
+
+/-- Ordered `q`-tuples drawn from pairwise distinct positions of `dom`. -/
+def distinctTuples {α : Type} : Nat → List α → List (List α)
+  | 0, _ => [[]]
+  | q + 1, dom => (picks dom).flatMap (fun p => (distinctTuples q p.2).map (fun t => p.1 :: t))
+
+/-- `n * (n - 1) * ... * (n - q + 1)`. -/
+def fallingFactorial : Nat → Nat → Nat
+  | _, 0 => 1
+  | n, q + 1 => n * fallingFactorial (n - 1) q
+
+/-- Number of positions of `l` satisfying `good`. -/
+def countGood {α : Type} (good : α → Bool) (l : List α) : Nat := (l.filter good).length
+
+private theorem countGood_cons {α : Type} (good : α → Bool) (x : α) (xs : List α) :
+    countGood good (x :: xs) = (if good x = true then 1 else 0) + countGood good xs := by
+  cases hg : good x
+  · simp only [countGood, List.filter, hg]
+    show _ = 0 + _
+    rw [Nat.zero_add]
+  · simp only [countGood, List.filter, hg, List.length_cons]
+    show _ = 1 + _
+    rw [Nat.add_comm]
+
+private theorem countGood_const_true {α : Type} :
+    ∀ (l : List α), countGood (fun _ => true) l = l.length
+  | [] => rfl
+  | x :: xs => by
+    rw [countGood_cons, countGood_const_true xs, List.length_cons]
+    show 1 + xs.length = xs.length + 1
+    rw [Nat.add_comm]
+
+theorem countGood_not_add {α : Type} (bad : α → Bool) :
+    ∀ (l : List α), countGood (fun x => !bad x) l + countGood bad l = l.length
+  | [] => rfl
+  | x :: xs => by
+    have ih := countGood_not_add bad xs
+    rw [countGood_cons, countGood_cons, List.length_cons]
+    cases hb : bad x
+    · show (1 + _) + (0 + _) = _
+      omega
+    · show (0 + _) + (1 + _) = _
+      omega
+
+private theorem picks_map_fst {α : Type} : ∀ (l : List α), (picks l).map Prod.fst = l
+  | [] => rfl
+  | x :: xs => by
+    show x :: ((picks xs).map (fun p => (p.1, x :: p.2))).map Prod.fst = x :: xs
+    rw [List.map_map]
+    exact congrArg (x :: ·) (picks_map_fst xs)
+
+private theorem picks_good_split {α : Type} (good : α → Bool) :
+    ∀ (l : List α) (p : α × List α), p ∈ picks l →
+      countGood good p.2 + (if good p.1 = true then 1 else 0) = countGood good l
+  | [], _, h => by cases h
+  | x :: xs, p, h => by
+    rcases List.mem_cons.mp h with hp | hp
+    · rw [hp, countGood_cons, Nat.add_comm]
+    · obtain ⟨p', hp', hEq⟩ := List.mem_map.mp hp
+      have ih := picks_good_split good xs p' hp'
+      rw [← hEq]
+      show countGood good (x :: p'.2) + (if good p'.1 = true then 1 else 0) = _
+      rw [countGood_cons, countGood_cons]
+      omega
+
+private theorem picks_spec {α : Type} :
+    ∀ (l : List α) (p : α × List α), p ∈ picks l → l.Nodup →
+      p.1 ∈ l ∧ p.1 ∉ p.2 ∧ p.2.Nodup ∧ ∀ y ∈ p.2, y ∈ l
+  | [], _, h, _ => by cases h
+  | x :: xs, p, h, hnd => by
+    have hx : x ∉ xs := (List.nodup_cons.mp hnd).1
+    have hxs : xs.Nodup := (List.nodup_cons.mp hnd).2
+    rcases List.mem_cons.mp h with hp | hp
+    · rw [hp]
+      exact ⟨List.mem_cons_self .., hx, hxs, fun y hy => List.mem_cons_of_mem _ hy⟩
+    · obtain ⟨p', hp', hEq⟩ := List.mem_map.mp hp
+      obtain ⟨h0, h1, h2, h3⟩ := picks_spec xs p' hp' hxs
+      rw [← hEq]
+      refine ⟨List.mem_cons_of_mem _ h0, ?_, List.nodup_cons.mpr ⟨fun hm => hx (h3 x hm), h2⟩, ?_⟩
+      · intro hm
+        rcases List.mem_cons.mp hm with e | e
+        · exact hx (e ▸ h0)
+        · exact h1 e
+      · intro y hy
+        rcases List.mem_cons.mp hy with e | e
+        · rw [e]
+          exact List.mem_cons_self ..
+        · exact List.mem_cons_of_mem _ (h3 y e)
+
+/-- Tuples drawn from a duplicate-free domain have pairwise distinct entries, all in the domain. -/
+theorem distinctTuples_nodup {α : Type} :
+    ∀ (q : Nat) (dom : List α) (t : List α), dom.Nodup → t ∈ distinctTuples q dom →
+      t.Nodup ∧ t.length = q ∧ ∀ y ∈ t, y ∈ dom
+  | 0, _, t, _, h => by
+    have ht : t = [] := List.mem_singleton.mp h
+    rw [ht]
+    exact ⟨List.Pairwise.nil, rfl, fun y hy => by cases hy⟩
+  | q + 1, dom, t, hnd, h => by
+    have h' : t ∈ (picks dom).flatMap
+        (fun p => (distinctTuples q p.2).map (fun t => p.1 :: t)) := h
+    obtain ⟨p, hp, ht⟩ := List.mem_flatMap.mp h'
+    obtain ⟨tl, htl, hEq⟩ := List.mem_map.mp ht
+    obtain ⟨h0, h1, h2, h3⟩ := picks_spec dom p hp hnd
+    obtain ⟨i1, i2, i3⟩ := distinctTuples_nodup q p.2 tl h2 htl
+    rw [← hEq]
+    refine ⟨List.nodup_cons.mpr ⟨fun hm => h1 (i3 p.1 hm), i1⟩, ?_, ?_⟩
+    · rw [List.length_cons, i2]
+    · intro y hy
+      rcases List.mem_cons.mp hy with e | e
+      · rw [e]
+        exact h0
+      · exact h3 y (i3 y e)
+
+private theorem length_flatMap_picks {α β : Type} (good : α → Bool) (c : Nat)
+    (F : α × List α → List β) :
+    ∀ (ps : List (α × List α)),
+      (∀ p ∈ ps, (F p).length = if good p.1 = true then c else 0) →
+      (ps.flatMap F).length = countGood good (ps.map Prod.fst) * c
+  | [], _ => by
+    show 0 = 0 * c
+    rw [Nat.zero_mul]
+  | p :: ps, h => by
+    have ih := length_flatMap_picks good c F ps (fun x hx => h x (List.mem_cons_of_mem _ hx))
+    have hp := h p (List.mem_cons_self ..)
+    rw [List.flatMap_cons, List.length_append, ih, hp]
+    show _ = countGood good (p.1 :: ps.map Prod.fst) * c
+    rw [countGood_cons, Nat.add_mul]
+    cases hg : good p.1
+    · show 0 + _ = 0 * c + _
+      rw [Nat.zero_mul]
+    · show c + _ = 1 * c + _
+      rw [Nat.one_mul]
+
+/-- Exact count: tuples all of whose positions are good. -/
+theorem distinctTuples_all_good_length {α : Type} (good : α → Bool) :
+    ∀ (q : Nat) (dom : List α),
+      ((distinctTuples q dom).filter (fun t => t.all good)).length =
+        fallingFactorial (countGood good dom) q
+  | 0, _ => rfl
+  | q + 1, dom => by
+    show (((picks dom).flatMap (fun p => (distinctTuples q p.2).map (fun t => p.1 :: t))).filter
+      (fun t => t.all good)).length =
+        countGood good dom * fallingFactorial (countGood good dom - 1) q
+    have hEach : ∀ p ∈ picks dom,
+        (((distinctTuples q p.2).map (fun t => p.1 :: t)).filter (fun t => t.all good)).length =
+          if good p.1 = true then fallingFactorial (countGood good dom - 1) q else 0 := by
+      intro p hp
+      rw [filter_map_length]
+      have hsplit := picks_good_split good dom p hp
+      cases hg : good p.1
+      · have hfun : (fun t : List α => (p.1 :: t).all good) = fun _ => false := by
+          funext t
+          show (good p.1 && t.all good) = false
+          rw [hg]
+          rfl
+        rw [hfun, filter_const_false]
+        rfl
+      · have hfun : (fun t : List α => (p.1 :: t).all good) = fun t => t.all good := by
+          funext t
+          show (good p.1 && t.all good) = t.all good
+          rw [hg]
+          rfl
+        rw [hfun, distinctTuples_all_good_length good q p.2]
+        rw [hg] at hsplit
+        have h1 : countGood good p.2 + 1 = countGood good dom := hsplit
+        have h2 : countGood good p.2 = countGood good dom - 1 := by omega
+        rw [h2]
+        rfl
+    rw [filter_flatMap_eq, length_flatMap_picks good _ _ (picks dom) hEach, picks_map_fst]
+
+private theorem all_const_true {α : Type} : ∀ (t : List α), t.all (fun _ => true) = true
+  | [] => rfl
+  | _ :: xs => all_const_true xs
+
+/-- Exact count of all distinct-position tuples. -/
+theorem distinctTuples_length {α : Type} (q : Nat) (dom : List α) :
+    (distinctTuples q dom).length = fallingFactorial dom.length q := by
+  have h := distinctTuples_all_good_length (fun _ : α => true) q dom
+  rw [filter_eq_self_of_all _ (fun t _ => all_const_true t), countGood_const_true] at h
+  exact h
+
+theorem fallingFactorial_pos : ∀ (q n : Nat), q ≤ n → 0 < fallingFactorial n q
+  | 0, _, _ => Nat.one_pos
+  | q + 1, 0, h => absurd h (Nat.not_succ_le_zero q)
+  | q + 1, n + 1, h => by
+    show 0 < (n + 1) * fallingFactorial (n + 1 - 1) q
+    rw [Nat.add_sub_cancel]
+    exact Nat.mul_pos (Nat.succ_pos n) (fallingFactorial_pos q n (Nat.le_of_succ_le_succ h))
+
+/-- If `G / N ≤ a / b ≤ 1` then `G(G-1)...(G-q+1) / N(N-1)...(N-q+1) ≤ (a / b)^q`. -/
+theorem fallingFactorial_mul_pow_le (a b : Nat) (hab : a ≤ b) :
+    ∀ (q G N : Nat), G ≤ N → G * b ≤ a * N →
+      fallingFactorial G q * b ^ q ≤ a ^ q * fallingFactorial N q
+  | 0, _, _, _, _ => Nat.le_refl 1
+  | q + 1, 0, N, _, _ => by
+    show 0 * fallingFactorial (0 - 1) q * b ^ (q + 1) ≤ _
+    rw [Nat.zero_mul, Nat.zero_mul]
+    exact Nat.zero_le _
+  | q + 1, G + 1, 0, hGN, _ => absurd hGN (Nat.not_succ_le_zero G)
+  | q + 1, G + 1, N + 1, hGN, hfar => by
+    have hGN' : G ≤ N := Nat.le_of_succ_le_succ hGN
+    have hfar' : G * b ≤ a * N := by
+      have e1 : (G + 1) * b = G * b + b := by rw [Nat.add_mul, Nat.one_mul]
+      have e2 : a * (N + 1) = a * N + a := by rw [Nat.mul_add, Nat.mul_one]
+      rw [e1, e2] at hfar
+      omega
+    have ih := fallingFactorial_mul_pow_le a b hab q G N hGN' hfar'
+    show (G + 1) * fallingFactorial (G + 1 - 1) q * b ^ (q + 1) ≤
+      a ^ (q + 1) * ((N + 1) * fallingFactorial (N + 1 - 1) q)
+    rw [Nat.add_sub_cancel, Nat.add_sub_cancel, Nat.pow_succ, Nat.pow_succ]
+    have hL : (G + 1) * fallingFactorial G q * (b ^ q * b) =
+        ((G + 1) * b) * (fallingFactorial G q * b ^ q) := by
+      simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+    have hR : a ^ q * a * ((N + 1) * fallingFactorial N q) =
+        (a * (N + 1)) * (a ^ q * fallingFactorial N q) := by
+      simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+    rw [hL, hR]
+    exact Nat.mul_le_mul hfar ih
+
+/-- **Query-miss count (exact Nat inequality).** If the bad positions are at least a `dn / dd`
+    fraction of the query domain, then among all ordered tuples of `q` distinct positions the
+    fraction that misses every bad position is at most `((dd - dn) / dd)^q`. -/
+theorem basefold_query_miss_bound {α : Type} (bad : α → Bool) (dom : List α) (q dn dd : Nat)
+    (hfar : dn * dom.length ≤ dd * countGood bad dom) :
+    ((distinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * dd ^ q ≤
+      (dd - dn) ^ q * (distinctTuples q dom).length := by
+  rw [distinctTuples_all_good_length, distinctTuples_length]
+  have hsum := countGood_not_add bad dom
+  have hGN : countGood (fun x => !bad x) dom ≤ dom.length := by omega
+  apply fallingFactorial_mul_pow_le (dd - dn) dd (Nat.sub_le dd dn) q _ _ hGN
+  rw [Nat.sub_mul, Nat.mul_comm (countGood (fun x => !bad x) dom) dd]
+  have e : dd * dom.length =
+      dd * countGood (fun x => !bad x) dom + dd * countGood bad dom := by
+    rw [← Nat.mul_add, hsum]
+  omega
+
+/-- `(17/32)^160 < 2^-145`: the unique-decoding query error for rate `1/16` and 160 queries. -/
+theorem basefold_production_query_exponent :
+    (2 * productionAggParams.rsBlowup - (productionAggParams.rsBlowup - 1)) ^
+        productionAggParams.numQueries * 2 ^ 145 <
+      (2 * productionAggParams.rsBlowup) ^ productionAggParams.numQueries := by
+  decide
+
+/-- The exponent 145 is the true one for these parameters: `(17/32)^160 > 2^-147`. -/
+theorem basefold_production_query_exponent_tight :
+    (2 * productionAggParams.rsBlowup) ^ productionAggParams.numQueries <
+      (2 * productionAggParams.rsBlowup - (productionAggParams.rsBlowup - 1)) ^
+        productionAggParams.numQueries * 2 ^ 147 := by
+  decide
+
+/-- **Production query bound.** With `NUM_PCS_QUERIES = 160` distinct queries and a bad set of
+    relative size at least `(1 - 1/16) / 2 = 15/32` (the unique-decoding radius of the rate-1/16
+    code), fewer than a `2^-145` fraction of the query tuples miss the bad set. -/
+theorem basefold_production_query_miss_lt {α : Type} (bad : α → Bool) (dom : List α)
+    (hdom : productionAggParams.numQueries ≤ dom.length)
+    (hfar : (productionAggParams.rsBlowup - 1) * dom.length ≤
+      2 * productionAggParams.rsBlowup * countGood bad dom) :
+    ((distinctTuples productionAggParams.numQueries dom).filter
+      (fun t => t.all (fun x => !bad x))).length * 2 ^ 145 <
+      (distinctTuples productionAggParams.numQueries dom).length := by
+  have hb := basefold_query_miss_bound bad dom productionAggParams.numQueries
+    (productionAggParams.rsBlowup - 1) (2 * productionAggParams.rsBlowup) hfar
+  have hT : 0 < (distinctTuples productionAggParams.numQueries dom).length := by
+    rw [distinctTuples_length]
+    exact fallingFactorial_pos _ _ hdom
+  have hK := basefold_production_query_exponent
+  rcases Nat.lt_or_ge
+    (((distinctTuples productionAggParams.numQueries dom).filter
+      (fun t => t.all (fun x => !bad x))).length * 2 ^ 145)
+    (distinctTuples productionAggParams.numQueries dom).length with hlt | hge
+  · exact hlt
+  · exfalso
+    generalize ((distinctTuples productionAggParams.numQueries dom).filter
+      (fun t => t.all (fun x => !bad x))).length = X at hb hge
+    generalize (distinctTuples productionAggParams.numQueries dom).length = T at hb hge hT
+    generalize (2 * productionAggParams.rsBlowup - (productionAggParams.rsBlowup - 1)) ^
+      productionAggParams.numQueries = M at hb hK
+    generalize (2 * productionAggParams.rsBlowup) ^ productionAggParams.numQueries = K at hb hK
+    have hX : 0 < X := by
+      cases X with
+      | zero =>
+        rw [Nat.zero_mul] at hge
+        exact absurd hT (Nat.not_lt.mpr hge)
+      | succ k => exact Nat.succ_pos k
+    have h1 : M * T ≤ M * (X * 2 ^ 145) := Nat.mul_le_mul_left M hge
+    have h2 : M * (X * 2 ^ 145) = X * (M * 2 ^ 145) := Nat.mul_left_comm M X (2 ^ 145)
+    have h3 : X * (M * 2 ^ 145) < X * K := Nat.mul_lt_mul_of_pos_left hK hX
+    rw [h2] at h1
+    exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le h3 (Nat.le_trans hb h1))
+
+/-! ## 9. BaseFold fold consistency: per-round challenge count -/
+
+/-- A committed coset duet together with a candidate folded value fixed before the challenge. -/
+structure TrackedDuet where
+  v0 : GoldilocksExt2
+  v1 : GoldilocksExt2
+  invTwoY0 : Goldilocks
+  invTwo : Goldilocks
+  next : GoldilocksExt2
+
+/-- The duet folds to the candidate at challenge `r` although it does not at `0` or not at `1`
+    (so the affine fold relation is not an identity in the challenge). -/
+def foldDuetEvent (d : TrackedDuet) (r : GoldilocksExt2) : Bool :=
+  (decide (foldDuetExt2 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.zero ≠ d.next) ||
+    decide (foldDuetExt2 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.one ≠ d.next)) &&
+  decide (foldDuetExt2 d.v0 d.v1 d.invTwoY0 d.invTwo r = d.next)
+
+theorem foldDuetEvent_roots_le_one (d : TrackedDuet) (S : List GoldilocksExt2) (hS : S.Nodup) :
+    (S.filter (foldDuetEvent d)).length ≤ 1 := by
+  cases hg : (decide (foldDuetExt2 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.zero ≠ d.next) ||
+      decide (foldDuetExt2 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.one ≠ d.next)) with
+  | false =>
+    have hfun : foldDuetEvent d = fun _ => false := by
+      funext r
+      unfold foldDuetEvent
+      rw [hg]
+      rfl
+    rw [hfun, filter_const_false]
+    exact Nat.zero_le 1
+  | true =>
+    have hfun : foldDuetEvent d =
+        fun r => decide (foldDuetExt2 d.v0 d.v1 d.invTwoY0 d.invTwo r = d.next) := by
+      funext r
+      unfold foldDuetEvent
+      rw [hg]
+      rfl
+    rw [hfun]
+    have hne : ∃ r, foldDuetExt2 d.v0 d.v1 d.invTwoY0 d.invTwo r ≠ d.next := by
+      cases h0 : decide (foldDuetExt2 d.v0 d.v1 d.invTwoY0 d.invTwo CommRingOps.zero ≠ d.next) with
+      | true => exact ⟨_, of_decide_eq_true h0⟩
+      | false =>
+        rw [h0] at hg
+        exact ⟨_, of_decide_eq_true hg⟩
+    exact basefold_coset_duet_roots_le_one d.v0 d.v1 d.next d.invTwoY0 d.invTwo S hS hne
+
+private theorem filter_or_length_le {α : Type} (p q : α → Bool) :
+    ∀ (l : List α), (l.filter (fun x => p x || q x)).length ≤
+      (l.filter p).length + (l.filter q).length
+  | [] => Nat.le_refl _
+  | x :: xs => by
+    have ih := filter_or_length_le p q xs
+    cases hp : p x <;> cases hq : q x <;>
+      simp only [List.filter, hp, hq, Bool.or_self, Bool.or_true, Bool.or_false,
+        List.length_cons] <;> omega
+
+private theorem filter_any_length_le {α β : Type} (S : List α) (ev : β → α → Bool) (k : Nat) :
+    ∀ (ds : List β), (∀ d ∈ ds, (S.filter (ev d)).length ≤ k) →
+      (S.filter (fun r => ds.any (fun d => ev d r))).length ≤ ds.length * k
+  | [], _ => by
+    show (S.filter (fun _ => false)).length ≤ _
+    rw [filter_const_false]
+    exact Nat.zero_le _
+  | d :: ds, h => by
+    have ih := filter_any_length_le S ev k ds (fun x hx => h x (List.mem_cons_of_mem _ hx))
+    have hd := h d (List.mem_cons_self ..)
+    have hor := filter_or_length_le (ev d) (fun r => ds.any (fun d => ev d r)) S
+    rw [List.length_cons, Nat.add_mul, Nat.one_mul]
+    have hor' : (S.filter (fun r => (d :: ds).any (fun d => ev d r))).length ≤
+        (S.filter (ev d)).length + (S.filter (fun r => ds.any (fun d => ev d r))).length := hor
+    omega
+
+/-- Some tracked duet of the round is a fold event. The tracked duets may depend on all earlier
+    challenges. -/
+def foldRoundEvent (tracked : List GoldilocksExt2 → List TrackedDuet)
+    (pre : List GoldilocksExt2) (r : GoldilocksExt2) : Bool :=
+  (tracked pre).any (fun d => foldDuetEvent d r)
+
+theorem foldRoundEvent_roots_le (tracked : List GoldilocksExt2 → List TrackedDuet)
+    (S : List GoldilocksExt2) (hS : S.Nodup) (pre : List GoldilocksExt2) :
+    (S.filter (foldRoundEvent tracked pre)).length ≤ (tracked pre).length := by
+  have h := filter_any_length_le S foldDuetEvent 1 (tracked pre)
+    (fun d _ => foldDuetEvent_roots_le_one d S hS)
+  rw [Nat.mul_one] at h
+  exact h
+
+/-- **Fold-challenge count.** With at most `m` tracked committed duets per round, at most
+    `n * m * |S|^(n-1)` of the `|S|^n` folding-challenge vectors make some tracked duet fold to
+    its pre-committed candidate without doing so identically. -/
+theorem basefold_fold_hit_challenges_le (S : List GoldilocksExt2) (hS : S.Nodup) (n m : Nat)
+    (tracked : List GoldilocksExt2 → List TrackedDuet)
+    (hm : ∀ pre, (tracked pre).length ≤ m) :
+    ((challengeVectors S n).filter (anyRoundEvent (foldRoundEvent tracked))).length ≤
+      n * m * S.length ^ (n - 1) :=
+  anyRoundEvent_count_le_uniform S n m (foldRoundEvent tracked)
+    (fun pre => Nat.le_trans (foldRoundEvent_roots_le tracked S hS pre) (hm pre))
+
+/-! ## 10. Succinct aggregate verifier with a Merkle-opened BaseFold query phase
+
+Model (see the notes at `verifySuccinctAggregate`): an interleaved commit / degree-8 sumcheck /
+arity-2 fold protocol. Round `j` absorbs the layer-`j` Merkle root and the round polynomial before
+its challenge is derived; that one challenge is both the sumcheck challenge and the folding
+challenge of layer `j`. After the last round the final word is absorbed and distinct query
+positions are derived. Each query opens one coset duet per layer with a Merkle path and the
+verifier recomputes `foldDuetExt2` along the trajectory down to the final word. -/
+
+/-- Hash used for Merkle leaves and nodes of the succinct model. -/
+def pcsMerkleHash : Hash := cshake256Bytes "QSAG.AGG.SUCCINCT.MERKLE/v1".toUTF8.toList
+
+def merkleNodeFrame (idx : Nat) (node sib : List UInt8) : List UInt8 :=
+  encodeMultiFrame (if idx % 2 = 0 then [node, sib] else [sib, node])
+
+theorem merkleNodeFrame_node_injective {idx : Nat} {n1 s1 n2 s2 : List UInt8}
+    (h : merkleNodeFrame idx n1 s1 = merkleNodeFrame idx n2 s2) : n1 = n2 := by
+  have hinj := encodeMultiFrame_injective h
+  by_cases hpar : idx % 2 = 0
+  · simp only [hpar, ↓reduceIte] at hinj
+    exact (List.cons.inj hinj).1
+  · simp only [hpar, ↓reduceIte] at hinj
+    exact (List.cons.inj (List.cons.inj hinj).2).1
+
+/-- Root recomputed from a node, its index and the sibling path. -/
+def merklePathRoot (H : Hash) : List UInt8 → Nat → List (List UInt8) → List UInt8
+  | node, _, [] => node
+  | node, idx, sib :: rest => merklePathRoot H (H (merkleNodeFrame idx node sib)) (idx / 2) rest
+
+/-- Two equally long paths from different nodes at the same index to the same root contain a
+    collision of `H`, located constructively. -/
+def merklePathCollision (H : Hash) :
+    ∀ (p1 p2 : List (List UInt8)) (n1 n2 : List UInt8) (idx : Nat),
+      p1.length = p2.length → n1 ≠ n2 →
+      merklePathRoot H n1 idx p1 = merklePathRoot H n2 idx p2 → HashCollisionWitness H
+  | [], [], _, _, _, _, hne, hroot => False.elim (hne hroot)
+  | [], _ :: _, _, _, _, hlen, _, _ => False.elim (Nat.succ_ne_zero _ hlen.symm)
+  | _ :: _, [], _, _, _, hlen, _, _ => False.elim (Nat.succ_ne_zero _ hlen)
+  | s1 :: r1, s2 :: r2, n1, n2, idx, hlen, hne, hroot =>
+    if hH : H (merkleNodeFrame idx n1 s1) = H (merkleNodeFrame idx n2 s2) then
+      ⟨merkleNodeFrame idx n1 s1, merkleNodeFrame idx n2 s2,
+        fun h => hne (merkleNodeFrame_node_injective h), hH⟩
+    else
+      merklePathCollision H r1 r2 _ _ (idx / 2) (Nat.succ.inj hlen) hH hroot
+
+def encodeExt2 (x : GoldilocksExt2) : List UInt8 := be 8 x.c0.val ++ be 8 x.c1.val
+
+theorem encodeExt2_injective {x y : GoldilocksExt2} (h : encodeExt2 x = encodeExt2 y) : x = y := by
+  have hb : goldilocksPrime < 256 ^ 8 := by decide
+  have hsplit := List.append_inj h (by rw [length_be, length_be])
+  have h0 := be_injective (Nat.lt_trans x.c0.isLt hb) (Nat.lt_trans y.c0.isLt hb) hsplit.1
+  have h1 := be_injective (Nat.lt_trans x.c1.isLt hb) (Nat.lt_trans y.c1.isLt hb) hsplit.2
+  exact GoldilocksExt2.ext (Goldilocks.ext h0) (Goldilocks.ext h1)
+
+/-- Leaf preimage of the coset duet `(v0, v1)` of group `g` in fold layer `layer`. -/
+def duetLeafFrame (layer g : Nat) (v0 v1 : GoldilocksExt2) : List UInt8 :=
+  encodeMultiFrame [(toString layer).toUTF8.toList, (toString g).toUTF8.toList,
+    encodeExt2 v0, encodeExt2 v1]
+
+theorem duetLeafFrame_injective {layer g : Nat} {v0 v1 t0 t1 : GoldilocksExt2}
+    (h : duetLeafFrame layer g v0 v1 = duetLeafFrame layer g t0 t1) : v0 = t0 ∧ v1 = t1 := by
+  have h1 := (List.cons.inj (encodeMultiFrame_injective h)).2
+  have h2 := (List.cons.inj h1).2
+  have h3 := List.cons.inj h2
+  exact ⟨encodeExt2_injective h3.1, encodeExt2_injective (List.cons.inj h3.2).1⟩
+
+/-- Two authenticated openings of the same leaf position with different duets give a collision. -/
+def duetOpeningCollision (layer g : Nat) (v0 v1 t0 t1 : GoldilocksExt2)
+    (p1 p2 : List (List UInt8)) (root : List UInt8)
+    (hne : ¬ (v0 = t0 ∧ v1 = t1)) (hlen : p1.length = p2.length)
+    (h1 : merklePathRoot pcsMerkleHash (pcsMerkleHash (duetLeafFrame layer g v0 v1)) g p1 = root)
+    (h2 : merklePathRoot pcsMerkleHash (pcsMerkleHash (duetLeafFrame layer g t0 t1)) g p2 = root) :
+    HashCollisionWitness pcsMerkleHash :=
+  if hH : pcsMerkleHash (duetLeafFrame layer g v0 v1) = pcsMerkleHash (duetLeafFrame layer g t0 t1) then
+    ⟨duetLeafFrame layer g v0 v1, duetLeafFrame layer g t0 t1,
+      fun h => hne (duetLeafFrame_injective h), hH⟩
+  else
+    merklePathCollision pcsMerkleHash p1 p2 _ _ g hlen hH (h1.trans h2.symm)
+
+def merkleDepthFuel : Nat → Nat → Nat
+  | 0, _ => 0
+  | fuel + 1, n => if n ≤ 1 then 0 else merkleDepthFuel fuel (n / 2) + 1
+
+/-- Path length of a Merkle tree with `n` leaves. -/
+def merkleDepth (n : Nat) : Nat := merkleDepthFuel n n
+
+/-- Public description of the folding domain. `invTwoY0 layer g` is the inverse twiddle
+    `(2 * y0)^-1` of coset group `g` in layer `layer` (`inv_two * inv_y0`, `pcs.rs:971`). -/
+structure FoldDomain where
+  groups0 : Nat
+  numQueries : Nat
+  invTwo : Goldilocks
+  invTwoY0 : Nat → Nat → Goldilocks
+  sampleFuel : Nat
+
+structure FoldLayerOpening where
+  v0 : GoldilocksExt2
+  v1 : GoldilocksExt2
+  path : List (List UInt8)
+
+structure QueryOpening where
+  index : Nat
+  layers : List FoldLayerOpening
+
+/-- Succinct certificate: `agg.traceCommitment` is the layer-0 Merkle root; no signature is opened. -/
+structure SuccinctAggregateProof where
+  agg : AggregatedSignature
+  layerRoots : List (List UInt8)
+  finalWord : List GoldilocksExt2
+  queries : List QueryOpening
+
+def succinctRoots (proof : SuccinctAggregateProof) : List (List UInt8) :=
+  proof.agg.traceCommitment :: proof.layerRoots
+
+/-- Round `j` challenge: derived after absorbing the layer-`j` root and the round polynomial. -/
+def deriveInterleavedChallenges (prior : List UInt8) :
+    List (List UInt8) → List (List GoldilocksExt2) → List GoldilocksExt2
+  | root :: roots, p :: ps =>
+    let frame := encodeMultiFrame [prior, root, encodeRoundPoly p]
+    let bytes := cshake256Bytes "QSAG.AGG.SUCCINCT.FS/v1".toUTF8.toList frame
+    let natOf := fun bs : List UInt8 => bs.foldl (fun n b => 256 * n + b.toNat) 0
+    let r : GoldilocksExt2 := ⟨Goldilocks.ofNat (natOf (bytes.take 16)),
+      Goldilocks.ofNat (natOf (bytes.drop 16))⟩
+    r :: deriveInterleavedChallenges frame roots ps
+  | _, _ => []
+
+def interleavedTranscriptTail (prior : List UInt8) :
+    List (List UInt8) → List (List GoldilocksExt2) → List UInt8
+  | root :: roots, p :: ps =>
+    interleavedTranscriptTail (encodeMultiFrame [prior, root, encodeRoundPoly p]) roots ps
+  | _, _ => prior
+
+/-- Query seed: the whole interleaved transcript followed by the final word. -/
+def succinctQuerySeed (fsTranscript : List UInt8) (proof : SuccinctAggregateProof) : List UInt8 :=
+  encodeMultiFrame [interleavedTranscriptTail fsTranscript (succinctRoots proof) proof.agg.roundPolys,
+    encodeRoundPoly proof.finalWord]
+
+def sortedInsertDistinct (x : Nat) : List Nat → List Nat
+  | [] => [x]
+  | y :: ys =>
+    if x < y then x :: y :: ys else if x = y then y :: ys else y :: sortedInsertDistinct x ys
+
+/-- Rejection sampling into a sorted set until it holds `target` distinct indices
+    (`sample_pcs_queries`, `pcs.rs:36-45`). -/
+def sampleDistinctLoop (cand : Nat → Nat) (target : Nat) : Nat → Nat → List Nat → List Nat
+  | 0, _, acc => acc
+  | fuel + 1, k, acc =>
+    if target ≤ acc.length then acc
+    else sampleDistinctLoop cand target fuel (k + 1) (sortedInsertDistinct (cand k) acc)
+
+def squeezeQueryIndex (seed : List UInt8) (groups k : Nat) : Nat :=
+  ((cshake256Bytes "QSAG.AGG.SUCCINCT.QUERY/v1".toUTF8.toList
+    (encodeMultiFrame [seed, (toString k).toUTF8.toList])).take 8).foldl
+      (fun n b => 256 * n + b.toNat) 0 % groups
+
+def deriveQueryIndices (dom : FoldDomain) (seed : List UInt8) : List Nat :=
+  sampleDistinctLoop (squeezeQueryIndex seed dom.groups0) (min dom.numQueries dom.groups0)
+    dom.sampleFuel 0 []
+
+def strictlyIncreasing : List Nat → Bool
+  | [] => true
+  | [_] => true
+  | x :: y :: ys => decide (x < y) && strictlyIncreasing (y :: ys)
+
+theorem strictlyIncreasing_head_lt :
+    ∀ (l : List Nat) (x : Nat), strictlyIncreasing (x :: l) = true → ∀ y ∈ l, x < y
+  | [], _, _, _, hy => by cases hy
+  | z :: zs, x, h, y, hy => by
+    have h' := Bool.and_eq_true_iff.mp h
+    have hxz : x < z := of_decide_eq_true h'.1
+    rcases List.mem_cons.mp hy with e | e
+    · rw [e]
+      exact hxz
+    · exact Nat.lt_trans hxz (strictlyIncreasing_head_lt zs z h'.2 y e)
+
+theorem strictlyIncreasing_nodup : ∀ (l : List Nat), strictlyIncreasing l = true → l.Nodup
+  | [], _ => List.Pairwise.nil
+  | x :: l, h => by
+    have htail : strictlyIncreasing l = true := by
+      cases l with
+      | nil => rfl
+      | cons z zs => exact (Bool.and_eq_true_iff.mp h).2
+    exact List.nodup_cons.mpr
+      ⟨fun hm => Nat.lt_irrefl x (strictlyIncreasing_head_lt l x h x hm),
+        strictlyIncreasing_nodup l htail⟩
+
+/-- The value folded from the previous layer must sit in the right slot of the opened duet. -/
+def expectedSlotOk (expected : Option GoldilocksExt2) (slot : Nat) (v0 v1 : GoldilocksExt2) : Bool :=
+  match expected with
+  | none => true
+  | some e => decide ((if slot = 0 then v0 else v1) = e)
+
+def finalValueOk (finalWord : List GoldilocksExt2) (idx : Nat)
+    (expected : Option GoldilocksExt2) : Bool :=
+  match expected with
+  | none => false
+  | some e => decide (finalWord[idx]? = some e)
+
+/-- One query trajectory: Merkle-authenticated duet per layer, fold check between layers
+    (`pcs.rs:1717-1744`), final-word check (`pcs.rs:1764-1768`). `groups` halves per layer. -/

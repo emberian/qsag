@@ -2102,3 +2102,1093 @@ theorem tooth_non_sticky_check_clear_unlocks_unverified_open (faultedPlane : Pla
     (rss256RunTrace rss256StepHardened Rss256EngineState.init bankAttack).1.poisoned = true := by
   exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
 
+/-! ## 3. `Waistband` Canopy Top-`L` Static Child-Root Cache Soundness & `#tooth` Witnesses -/
+
+/-- `Baggy` hypertree & `Waistband` canopy geometry (`topLayers < numLayers`, so layer `0` is dynamic). -/
+structure BaggyTreeParams where
+  numLayers : Nat
+  subtreeHeight : Nat
+  topLayers : Nat
+  deriving DecidableEq, Repr
+
+def BaggyTreeParams.WellFormed (p : BaggyTreeParams) : Prop :=
+  2 ≤ p.numLayers ∧ 1 ≤ p.subtreeHeight ∧ p.topLayers < p.numLayers
+
+def BaggyTreeParams.coversLayer (p : BaggyTreeParams) (layer : Nat) : Bool :=
+  decide (p.numLayers ≤ layer + p.topLayers ∧ 1 ≤ layer)
+
+def BaggyTreeParams.pathAt (p : BaggyTreeParams) (leafIdx : Nat) (layer : Nat) : Nat × Nat :=
+  let shifted := leafIdx / (2 ^ (p.subtreeHeight * layer))
+  let subLeaves := 2 ^ p.subtreeHeight
+  (shifted % subLeaves, shifted / subLeaves)
+
+/-- Child subtree index `(tree * 2^{h'} + kp)` signed by static leaf `(layer, tree, kp)` (`layer ≥ 1`). -/
+def baggyChildTreeIdx (p : BaggyTreeParams) (tree kp : Nat) : Nat :=
+  tree * (2 ^ p.subtreeHeight) + kp
+
+theorem baggyChildTreeIdx_pathAt (p : BaggyTreeParams) (leafIdx layer : Nat) :
+    let (kpParent, treeParent) := p.pathAt leafIdx (layer + 1)
+    let (_, treeChild) := p.pathAt leafIdx layer
+    baggyChildTreeIdx p treeParent kpParent = treeChild := by
+  dsimp only [BaggyTreeParams.pathAt, baggyChildTreeIdx]
+  have hPow : 2 ^ (p.subtreeHeight * (layer + 1)) = (2 ^ (p.subtreeHeight * layer)) * (2 ^ p.subtreeHeight) := by
+    rw [Nat.mul_succ, Nat.pow_add]
+  rw [hPow, ← Nat.div_div_eq_div_mul]
+  let S := (leafIdx / (2 ^ (p.subtreeHeight * layer))) / (2 ^ p.subtreeHeight)
+  let B := 2 ^ p.subtreeHeight
+  change (S / B) * B + S % B = S
+  rw [Nat.mul_comm (S / B) B]
+  exact Nat.div_add_mod S B
+
+structure BaggySecretKey256 where
+  pkSeed : BitVec 256
+  skSeed : BitVec 256
+  skPrf : BitVec 256
+
+structure BaggyPublicKey256 where
+  pkSeed : BitVec 256
+  pkRoot : BitVec 256
+  deriving DecidableEq, Repr
+
+/-- Tweakable hash & `FORS+C` suite for `Baggy` over 256-bit `WOTS+C` (`w = 4, v = 128, S = 192`). -/
+structure BaggySuite256 where
+  wots : WotsC256HashSuite
+  thNodeH : BitVec 256 → Nat → Nat → Nat → Nat → BitVec 256 → BitVec 256 → BitVec 256
+  paramsDigest : BaggyTreeParams → BitVec 256
+  prfRand : BitVec 256 → BitVec 256 → BitVec 256
+  hmsgLeaf : BaggyTreeParams → BaggyPublicKey256 → BitVec 256 → BitVec 256 → UInt32 → Option Nat
+  forsSign : BitVec 256 → BitVec 256 → Nat → Nat → BitVec 256 → BitVec 256 × BitVec 256
+  forsRecoverPk : BitVec 256 → Nat → Nat → BitVec 256 → BitVec 256 → BitVec 256
+  /-- Deterministic valid `WOTS+C` grind counter (`wotsC256DecodeValidDigest ... = some d`). -/
+  grindCounter : BitVec 256 → WotsLeafAdrs → BitVec 256 → UInt32
+
+def BaggySuite256.WellGrinded (suite : BaggySuite256) : Prop :=
+  (∀ pkSeed skSeed tree0 kp0 msg,
+    let (forsSig, forsPk) := suite.forsSign pkSeed skSeed tree0 kp0 msg
+    suite.forsRecoverPk pkSeed tree0 kp0 msg forsSig = forsPk) ∧
+  (∀ pkSeed adrs node,
+    (wotsC256DecodeValidDigest
+      (suite.wots.thDigest pkSeed adrs node (suite.grindCounter pkSeed adrs node))).isSome = true)
+
+/-- Binary Merkle subtree root over `2 ^ hp` leaves (`0 Classical.choice`). -/
+def baggyMerkleRoot (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    (hp : Nat) → (prefixIdx : Nat) → (Fin (2 ^ hp) → BitVec 256) → BitVec 256
+  | 0, _, leaves => leaves ⟨0, Nat.zero_lt_one⟩
+  | hp + 1, prefixIdx, leaves =>
+    let hHalf : 2 ^ hp + 2 ^ hp = 2 ^ (hp + 1) := by rw [Nat.pow_succ, Nat.mul_two]
+    let left := baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx)
+      (fun i => leaves ⟨i.val, by omega⟩)
+    let right := baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx + 1)
+      (fun i => leaves ⟨2 ^ hp + i.val, by omega⟩)
+    suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx left right
+
+/-- Root-first authentication path of leaf `kp < 2 ^ hp` (`baggy.rs` / `wots_c.rs:307`). -/
+def baggyMerkleAuthPath (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    (hp : Nat) → (prefixIdx : Nat) → (Fin (2 ^ hp) → BitVec 256) → (kp : Nat) → List (BitVec 256)
+  | 0, _, _, _ => []
+  | hp + 1, prefixIdx, leaves, kp =>
+    let hHalf : 2 ^ hp + 2 ^ hp = 2 ^ (hp + 1) := by rw [Nat.pow_succ, Nat.mul_two]
+    let leftFn : Fin (2 ^ hp) → BitVec 256 := fun i => leaves ⟨i.val, by omega⟩
+    let rightFn : Fin (2 ^ hp) → BitVec 256 := fun i => leaves ⟨2 ^ hp + i.val, by omega⟩
+    if kp < 2 ^ hp then
+      baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx + 1) rightFn ::
+        baggyMerkleAuthPath suite pkSeed layer tree hp (2 * prefixIdx) leftFn kp
+    else
+      baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx) leftFn ::
+        baggyMerkleAuthPath suite pkSeed layer tree hp (2 * prefixIdx + 1) rightFn (kp - 2 ^ hp)
+
+/-- Walk a root-first authentication path from `leaf` at `kp` up to the height-`hp` subtree root. -/
+def baggyWalkMerkleRootFirst (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    (hp : Nat) → (prefixIdx : Nat) → (kp : Nat) → BitVec 256 → List (BitVec 256) → Option (BitVec 256)
+  | 0, _, _, leaf, [] => some leaf
+  | 0, _, _, _, _ :: _ => none
+  | _ + 1, _, _, _, [] => none
+  | hp + 1, prefixIdx, kp, leaf, sib :: rest =>
+    if kp < 2 ^ hp then
+      match baggyWalkMerkleRootFirst suite pkSeed layer tree hp (2 * prefixIdx) kp leaf rest with
+      | none => none
+      | some childL => some (suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx childL sib)
+    else
+      match baggyWalkMerkleRootFirst suite pkSeed layer tree hp (2 * prefixIdx + 1) (kp - 2 ^ hp) leaf rest with
+      | none => none
+      | some childR => some (suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx sib childR)
+
+private theorem baggyWalkMerkle_authPath_eq (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    ∀ (hp prefixIdx : Nat) (leaves : Fin (2 ^ hp) → BitVec 256) (kp : Fin (2 ^ hp)),
+      baggyWalkMerkleRootFirst suite pkSeed layer tree hp prefixIdx kp.val (leaves kp)
+        (baggyMerkleAuthPath suite pkSeed layer tree hp prefixIdx leaves kp.val) =
+      some (baggyMerkleRoot suite pkSeed layer tree hp prefixIdx leaves)
+  | 0, _, leaves, ⟨0, _⟩ => rfl
+  | 0, _, _, ⟨k + 1, hk⟩ => False.elim (Nat.not_lt_zero k (Nat.lt_of_succ_lt_succ hk))
+  | hp + 1, prefixIdx, leaves, ⟨kp, hKp⟩ => by
+    have hHalf : 2 ^ hp + 2 ^ hp = 2 ^ (hp + 1) := by rw [Nat.pow_succ, Nat.mul_two]
+    simp only [baggyMerkleAuthPath, baggyMerkleRoot]
+    if hLt : kp < 2 ^ hp then
+      simp only [hLt, ↓reduceIte, baggyWalkMerkleRootFirst]
+      have ih := baggyWalkMerkle_authPath_eq suite pkSeed layer tree hp (2 * prefixIdx)
+        (fun i => leaves ⟨i.val, by have := i.isLt; omega⟩)
+        ⟨kp, hLt⟩
+      rw [ih]
+    else
+      simp only [hLt, ↓reduceIte, baggyWalkMerkleRootFirst]
+      have hSubLt : kp - 2 ^ hp < 2 ^ hp := by omega
+      have ih := baggyWalkMerkle_authPath_eq suite pkSeed layer tree hp (2 * prefixIdx + 1)
+        (fun i => leaves ⟨2 ^ hp + i.val, by have := i.isLt; omega⟩)
+        ⟨kp - 2 ^ hp, hSubLt⟩
+      have hIdxEq : (⟨2 ^ hp + (kp - 2 ^ hp), by omega⟩ : Fin (2 ^ (hp + 1))) =
+          ⟨kp, hKp⟩ := Fin.ext (Nat.add_sub_of_le (Nat.le_of_not_lt hLt))
+      rw [hIdxEq] at ih
+      rw [ih]
+
+/-- Explicit Merkle node collision witness (`0 Classical.choice`). -/
+structure BaggyMerkleCollision (suite : BaggySuite256) (pkSeed : BitVec 256) : Type where
+  layer : Nat
+  tree : Nat
+  height : Nat
+  prefixIdx : Nat
+  left1 : BitVec 256
+  right1 : BitVec 256
+  left2 : BitVec 256
+  right2 : BitVec 256
+  pair_ne : (left1, right1) ≠ (left2, right2)
+  hash_eq : suite.thNodeH pkSeed layer tree height prefixIdx left1 right1 =
+            suite.thNodeH pkSeed layer tree height prefixIdx left2 right2
+
+/-- Constructively extract a `BaggyMerkleCollision` whenever a walked path reaches the genuine root from a different leaf. -/
+def extractBaggyMerkleCollision (suite : BaggySuite256) (pkSeed : BitVec 256) (layer tree : Nat) :
+    ∀ (hp prefixIdx : Nat) (leaves : Fin (2 ^ hp) → BitVec 256) (kp : Fin (2 ^ hp))
+      (leaf' : BitVec 256) (auth' : List (BitVec 256)),
+      leaf' ≠ leaves kp →
+      baggyWalkMerkleRootFirst suite pkSeed layer tree hp prefixIdx kp.val leaf' auth' =
+        some (baggyMerkleRoot suite pkSeed layer tree hp prefixIdx leaves) →
+      BaggyMerkleCollision suite pkSeed
+  | 0, _, leaves, ⟨0, _⟩, leaf', [], hLeafNe, hWalk =>
+    False.elim <| by
+      simp only [baggyWalkMerkleRootFirst, baggyMerkleRoot] at hWalk
+      injection hWalk with hEq
+      exact hLeafNe hEq
+  | 0, _, _, ⟨0, _⟩, _, _ :: _, _, hWalk => False.elim (by cases hWalk)
+  | 0, _, _, ⟨k + 1, hk⟩, _, _, _, _ => False.elim (Nat.not_lt_zero k (Nat.lt_of_succ_lt_succ hk))
+  | _ + 1, _, _, _, _, [], _, hWalk => False.elim (by cases hWalk)
+  | hp + 1, prefixIdx, leaves, ⟨kp, hKp⟩, leaf', sib :: rest, hLeafNe, hWalk =>
+    let hHalf : 2 ^ hp + 2 ^ hp = 2 ^ (hp + 1) := by rw [Nat.pow_succ, Nat.mul_two]
+    let leftFn : Fin (2 ^ hp) → BitVec 256 := fun i => leaves ⟨i.val, by have := i.isLt; omega⟩
+    let rightFn : Fin (2 ^ hp) → BitVec 256 := fun i => leaves ⟨2 ^ hp + i.val, by have := i.isLt; omega⟩
+    let L := baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx) leftFn
+    let R := baggyMerkleRoot suite pkSeed layer tree hp (2 * prefixIdx + 1) rightFn
+    if hLt : kp < 2 ^ hp then
+      match hChild : baggyWalkMerkleRootFirst suite pkSeed layer tree hp (2 * prefixIdx) kp leaf' rest with
+      | none =>
+        False.elim <| by
+          simp only [baggyWalkMerkleRootFirst, hLt, ↓reduceIte, hChild] at hWalk
+          cases hWalk
+      | some childL =>
+        have hRootEq : suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx childL sib =
+            suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx L R := by
+          simp only [baggyWalkMerkleRootFirst, baggyMerkleRoot, hLt, ↓reduceIte, hChild] at hWalk
+          injection hWalk with hEq
+        if hPairEq : (childL, sib) = (L, R) then
+          extractBaggyMerkleCollision suite pkSeed layer tree hp (2 * prefixIdx) leftFn ⟨kp, hLt⟩
+            leaf' rest hLeafNe (hChild.trans (congrArg (some ∘ Prod.fst) hPairEq))
+        else
+          { layer := layer, tree := tree, height := hp + 1, prefixIdx := prefixIdx
+            left1 := childL, right1 := sib, left2 := L, right2 := R
+            pair_ne := hPairEq, hash_eq := hRootEq }
+    else
+      match hChild : baggyWalkMerkleRootFirst suite pkSeed layer tree hp (2 * prefixIdx + 1) (kp - 2 ^ hp) leaf' rest with
+      | none =>
+        False.elim <| by
+          simp only [baggyWalkMerkleRootFirst, hLt, ↓reduceIte, hChild] at hWalk
+          cases hWalk
+      | some childR =>
+        have hRootEq : suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx sib childR =
+            suite.thNodeH pkSeed layer tree (hp + 1) prefixIdx L R := by
+          simp only [baggyWalkMerkleRootFirst, baggyMerkleRoot, hLt, ↓reduceIte, hChild] at hWalk
+          injection hWalk with hEq
+        if hPairEq : (sib, childR) = (L, R) then
+          have hSubLt : kp - 2 ^ hp < 2 ^ hp := by omega
+          have hIdxEq : (⟨2 ^ hp + (kp - 2 ^ hp), by omega⟩ : Fin (2 ^ (hp + 1))) = ⟨kp, hKp⟩ :=
+            Fin.ext (Nat.add_sub_of_le (Nat.le_of_not_lt hLt))
+          have hLeafNeR : leaf' ≠ rightFn ⟨kp - 2 ^ hp, hSubLt⟩ := by
+            dsimp [rightFn]; rw [hIdxEq]; exact hLeafNe
+          extractBaggyMerkleCollision suite pkSeed layer tree hp (2 * prefixIdx + 1) rightFn
+            ⟨kp - 2 ^ hp, hSubLt⟩ leaf' rest hLeafNeR
+            (hChild.trans (congrArg (some ∘ Prod.snd) hPairEq))
+        else
+          { layer := layer, tree := tree, height := hp + 1, prefixIdx := prefixIdx
+            left1 := sib, right1 := childR, left2 := L, right2 := R
+            pair_ne := hPairEq, hash_eq := hRootEq }
+
+def baggyLeafAdrs (layer tree kp : Nat) : WotsLeafAdrs :=
+  { layer := UInt32.ofNat layer, tree := UInt64.ofNat tree, keyPair := UInt32.ofNat kp }
+
+def baggySubtreeLeaves (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree : Nat) : Fin (2 ^ p.subtreeHeight) → BitVec 256 :=
+  fun kp => wotsC256PkLeaf suite.wots sk.pkSeed sk.skSeed (baggyLeafAdrs layer tree kp.val)
+
+def baggyTrueSubtreeRoot (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree : Nat) : BitVec 256 :=
+  baggyMerkleRoot suite sk.pkSeed layer tree p.subtreeHeight 0 (baggySubtreeLeaves suite p sk layer tree)
+
+def baggyKeygen256 (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256) : BaggyPublicKey256 :=
+  { pkSeed := sk.pkSeed
+    pkRoot := baggyTrueSubtreeRoot suite p sk (p.numLayers - 1) 0 }
+
+/-- Layer signature (`WOTS+C` counter + 128 chain nodes + height-`h'` authentication path). -/
+structure BaggyLayerSig256 where
+  ctr : UInt32
+  chains : Fin 128 → BitVec 256
+  auth : List (BitVec 256)
+
+/-- Complete `Baggy` signature over 256-bit `WOTS+C`. -/
+structure BaggySig256 where
+  r : BitVec 256
+  msgCtr : UInt32
+  forsSig : BitVec 256
+  layers : List BaggyLayerSig256
+
+/-- Recompute the subtree root implied by `layerSig` signing `childNode` (`baggy.rs:313` `layer_root`). -/
+def baggyLayerRecoverRoot (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pkSeed : BitVec 256) (layer tree kp : Nat) (childNode : BitVec 256)
+    (sig : BaggyLayerSig256) : Option (BitVec 256) :=
+  let adrs := baggyLeafAdrs layer tree kp
+  match wotsC256DecodeValidDigest (suite.wots.thDigest pkSeed adrs childNode sig.ctr) with
+  | none => none
+  | some d =>
+    let leaf := suite.wots.thTl pkSeed adrs (fun c =>
+      wotsC256CompleteTo3 suite.wots pkSeed adrs c (d.digits c) (sig.chains c))
+    baggyWalkMerkleRootFirst suite pkSeed layer tree p.subtreeHeight 0 kp leaf sig.auth
+
+def baggyWalkLayersVerify (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pkSeed : BitVec 256) (leafIdx : Nat) :
+    Nat → BitVec 256 → List BaggyLayerSig256 → Option (BitVec 256)
+  | _, node, [] => some node
+  | layer, node, sig :: rest =>
+    let (kp, tree) := p.pathAt leafIdx layer
+    match baggyLayerRecoverRoot suite p pkSeed layer tree kp node sig with
+    | none => none
+    | some nextRoot => baggyWalkLayersVerify suite p pkSeed leafIdx (layer + 1) nextRoot rest
+
+/-- Standalone `Baggy` signature verification (`baggy.rs:351` `baggy_verify`). -/
+@[expose] def baggyVerify (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pk : BaggyPublicKey256) (msg : BitVec 256) (sig : BaggySig256) : Bool :=
+  if sig.layers.length != p.numLayers then false
+  else
+    match suite.hmsgLeaf p pk sig.r msg sig.msgCtr with
+    | none => false
+    | some leafIdx =>
+      let (kp0, tree0) := p.pathAt leafIdx 0
+      let forsPk := suite.forsRecoverPk pk.pkSeed tree0 kp0 msg sig.forsSig
+      match baggyWalkLayersVerify suite p pk.pkSeed leafIdx 0 forsPk sig.layers with
+      | none => false
+      | some finalRoot => finalRoot == pk.pkRoot
+
+/-- Static child root signed by `(layer, tree, kp)` for `layer ≥ 1` (`trueSubtreeRoot (layer - 1) childTree`). -/
+def baggyCanonicalStaticChildRoot (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree kp : Nat) : BitVec 256 :=
+  baggyTrueSubtreeRoot suite p sk (layer - 1) (baggyChildTreeIdx p tree kp)
+
+/-- Canonical single `WOTS+C` codeword ever signed by static address `(layer, tree, kp)` (`layer ≥ 1`) in uncached `Baggy`. -/
+def baggyCanonicalStaticDigits (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree kp : Nat) : Option WotsC256Digits :=
+  let adrs := baggyLeafAdrs layer tree kp
+  let childRoot := baggyCanonicalStaticChildRoot suite p sk layer tree kp
+  let ctr := suite.grindCounter sk.pkSeed adrs childRoot
+  wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs childRoot ctr)
+
+/-- Record of a static (`layer ≥ 1`) WOTS+C Round-2 codeword opening during signing. -/
+structure StaticWotsOpeningRecord where
+  layer : Nat
+  tree : Nat
+  kp : Nat
+  signedNode : BitVec 256
+  digits : WotsC256Digits
+  deriving DecidableEq
+
+/-- Build one genuine layer signature and record static (`layer ≥ 1`) codeword openings. -/
+def baggySignLayerFresh (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree kp : Nat) (childNode : BitVec 256) :
+    Option (BaggyLayerSig256 × BitVec 256 × Option StaticWotsOpeningRecord) :=
+  if _hKp : kp < 2 ^ p.subtreeHeight then
+    let adrs := baggyLeafAdrs layer tree kp
+    let ctr := suite.grindCounter sk.pkSeed adrs childNode
+    match wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs childNode ctr),
+          wotsC256Sign suite.wots sk.pkSeed sk.skSeed adrs childNode ctr with
+    | some d, some chains =>
+      let leaves := baggySubtreeLeaves suite p sk layer tree
+      let auth := baggyMerkleAuthPath suite sk.pkSeed layer tree p.subtreeHeight 0 leaves kp
+      let root := baggyMerkleRoot suite sk.pkSeed layer tree p.subtreeHeight 0 leaves
+      let recOpt := if 1 ≤ layer then some { layer := layer, tree := tree, kp := kp, signedNode := childNode, digits := d } else none
+      some ({ ctr := ctr, chains := chains, auth := auth }, root, recOpt)
+    | _, _ => none
+  else
+    none
+
+def baggySignLayersUncachedAux (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (leafIdx : Nat) :
+    Nat → Nat → BitVec 256 → Option (List BaggyLayerSig256 × BitVec 256 × List StaticWotsOpeningRecord)
+  | _, 0, node => some ([], node, [])
+  | layer, rem + 1, node =>
+    let (kp, tree) := p.pathAt leafIdx layer
+    match baggySignLayerFresh suite p sk layer tree kp node with
+    | none => none
+    | some (sig, nextRoot, recOpt) =>
+      match baggySignLayersUncachedAux suite p sk leafIdx (layer + 1) rem nextRoot with
+      | none => none
+      | some (restSigs, topRoot, restRecs) =>
+        let allRecs := match recOpt with | some r => r :: restRecs | none => restRecs
+        some (sig :: restSigs, topRoot, allRecs)
+
+/-- Uncached `Baggy` signer returning `(sig, staticOpenings)`. -/
+def baggySignUncached (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256)
+    (msg : BitVec 256) (msgCtr : UInt32) : Option (BaggySig256 × List StaticWotsOpeningRecord) :=
+  if pk.pkSeed != sk.pkSeed then none
+  else
+    let r := suite.prfRand sk.skPrf msg
+    match suite.hmsgLeaf p pk r msg msgCtr with
+    | none => none
+    | some leafIdx =>
+      let (kp0, tree0) := p.pathAt leafIdx 0
+      let (forsSig, forsPk) := suite.forsSign sk.pkSeed sk.skSeed tree0 kp0 msg
+      match baggySignLayersUncachedAux suite p sk leafIdx 0 p.numLayers forsPk with
+      | none => none
+      | some (layers, topRoot, recs) =>
+        if topRoot != pk.pkRoot then none
+        else
+          let sig : BaggySig256 := { r := r, msgCtr := msgCtr, forsSig := forsSig, layers := layers }
+          if baggyVerify suite p pk msg sig then some (sig, recs) else none
+
+/-- **Hardened `VerifiedWaistbandCache` (cache-mutation Fix)**:
+    1. Pinned to `(pinnedPkSeed, pinnedPkRoot, pinnedParamsDigest)`.
+    2. Carries authenticated `expectedSubtreeRoot (layer, tree)` chained up to `(d - 1, 0) = pkRoot`! -/
+structure VerifiedWaistbandCache where
+  pinnedPkSeed : BitVec 256
+  pinnedPkRoot : BitVec 256
+  pinnedParamsDigest : BitVec 256
+  expectedSubtreeRoot : Nat → Nat → Option (BitVec 256)
+  cachedSig : Nat → Nat → Nat → Option BaggyLayerSig256
+
+/-- Check upward Merkle-signature chaining from `(layer, tree)` up to `(d - 1, 0) == pkRoot` (`0 Classical.choice`). -/
+def verifyCanopyChainToTop (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pk : BaggyPublicKey256) (cache : VerifiedWaistbandCache) :
+    (stepsToTop : Nat) → (layer : Nat) → (tree : Nat) → (curRoot : BitVec 256) → Bool
+  | 0, layer, tree, curRoot =>
+    (layer == p.numLayers - 1) && (tree == 0) && (curRoot == pk.pkRoot)
+  | rem + 1, layer, tree, curRoot =>
+    let subLeaves := 2 ^ p.subtreeHeight
+    let kpParent := tree % subLeaves
+    let treeParent := tree / subLeaves
+    let parentLayer := layer + 1
+    match cache.expectedSubtreeRoot parentLayer treeParent,
+          cache.cachedSig parentLayer treeParent kpParent with
+    | some expParentRoot, some parentSig =>
+      (baggyLayerRecoverRoot suite p pk.pkSeed parentLayer treeParent kpParent curRoot parentSig ==
+        some expParentRoot) &&
+      verifyCanopyChainToTop suite p pk cache rem parentLayer treeParent expParentRoot
+    | _, _ => false
+
+/-- Verify a `VerifiedWaistbandCache` hit at `(layer, tree, kp)` on `childNode` BEFORE using it (`Astra P0-3` fix!). -/
+@[expose] def verifyWaistbandCanopy (suite : BaggySuite256) (p : BaggyTreeParams)
+    (pk : BaggyPublicKey256) (cache : VerifiedWaistbandCache)
+    (layer tree kp : Nat) (childNode : BitVec 256) : Option (BaggyLayerSig256 × BitVec 256) :=
+  if cache.pinnedPkSeed != pk.pkSeed ||
+     cache.pinnedPkRoot != pk.pkRoot ||
+     cache.pinnedParamsDigest != suite.paramsDigest p ||
+     !p.coversLayer layer then
+    none
+  else
+    match cache.expectedSubtreeRoot (layer - 1) (baggyChildTreeIdx p tree kp),
+          cache.expectedSubtreeRoot layer tree,
+          cache.cachedSig layer tree kp with
+    | some expChildRoot, some expLayerRoot, some sig =>
+      if childNode != expChildRoot then none
+      else if baggyLayerRecoverRoot suite p pk.pkSeed layer tree kp childNode sig != some expLayerRoot then none
+      else if !verifyCanopyChainToTop suite p pk cache ((p.numLayers - 1) - layer) layer tree expLayerRoot then none
+      else some (sig, expLayerRoot)
+    | _, _, _ => none
+
+/-- Durable per-party static WOTS record `(layer, tree, kp) ↦ firstSignedDigits` (`Fable P1-1` fix!). -/
+abbrev DurableStaticWotsGuard := List (Nat × Nat × Nat × WotsC256Digits)
+
+def lookupDurableDigits (g : DurableStaticWotsGuard) (layer tree kp : Nat) : Option WotsC256Digits :=
+  match g with
+  | [] => none
+  | (l, t, k, d) :: rest =>
+    if l == layer && t == tree && k == kp then some d
+    else lookupDurableDigits rest layer tree kp
+
+/-- Enforce durable first-signed digits on every new static (`layer ≥ 1`) WOTS opening before Round-2 release! -/
+def enforceDurableStaticOpenings :
+    DurableStaticWotsGuard → List StaticWotsOpeningRecord → Option DurableStaticWotsGuard
+  | g, [] => some g
+  | g, rec :: rest =>
+    match lookupDurableDigits g rec.layer rec.tree rec.kp with
+    | some prevDigits =>
+      if prevDigits == rec.digits then
+        enforceDurableStaticOpenings g rest
+      else
+        none
+    | none =>
+      enforceDurableStaticOpenings ((rec.layer, rec.tree, rec.kp, rec.digits) :: g) rest
+
+/-- Recursive layer planner/signer with `VerifiedWaistbandCache`:
+    cached hits emit `0` fresh MPC openings; misses compute genuine subtree roots and record static openings. -/
+def baggySignLayersVerifiedCacheAux (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256) (cache : VerifiedWaistbandCache)
+    (leafIdx : Nat) :
+    Nat → Nat → BitVec 256 → Option (List BaggyLayerSig256 × BitVec 256 × List StaticWotsOpeningRecord)
+  | _, 0, node => some ([], node, [])
+  | layer, rem + 1, node =>
+    let (kp, tree) := p.pathAt leafIdx layer
+    match verifyWaistbandCanopy suite p pk cache layer tree kp node with
+    | some (cachedLayerSig, verifiedRoot) =>
+      match baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx (layer + 1) rem verifiedRoot with
+      | none => none
+      | some (restSigs, topRoot, restRecs) =>
+        some (cachedLayerSig :: restSigs, topRoot, restRecs)
+    | none =>
+      match baggySignLayerFresh suite p sk layer tree kp node with
+      | none => none
+      | some (sig, nextRoot, recOpt) =>
+        match baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx (layer + 1) rem nextRoot with
+        | none => none
+        | some (restSigs, topRoot, restRecs) =>
+          let allRecs := match recOpt with | some r => r :: restRecs | none => restRecs
+          some (sig :: restSigs, topRoot, allRecs)
+
+/-- Hardened single-session `Baggy` signer with `VerifiedWaistbandCache` + `DurableStaticWotsGuard`
+    checked **strictly before** Round-2 secret chain-node release! -/
+def baggySignVerifiedWaistband (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256)
+    (cache : VerifiedWaistbandCache) (guard : DurableStaticWotsGuard)
+    (msg : BitVec 256) (msgCtr : UInt32) :
+    Option (BaggySig256 × DurableStaticWotsGuard × List StaticWotsOpeningRecord) :=
+  if pk.pkSeed != sk.pkSeed then none
+  else
+    let r := suite.prfRand sk.skPrf msg
+    match suite.hmsgLeaf p pk r msg msgCtr with
+    | none => none
+    | some leafIdx =>
+      let (kp0, tree0) := p.pathAt leafIdx 0
+      let (forsSig, forsPk) := suite.forsSign sk.pkSeed sk.skSeed tree0 kp0 msg
+      match baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx 0 p.numLayers forsPk with
+      | none => none
+      | some (layers, topRoot, recs) =>
+        if topRoot != pk.pkRoot then none
+        else
+          -- Durable first-signed WOTS check runs BEFORE Round-2 secret node opening!
+          match enforceDurableStaticOpenings guard recs with
+          | none => none
+          | some guard' =>
+            let sig : BaggySig256 := { r := r, msgCtr := msgCtr, forsSig := forsSig, layers := layers }
+            if baggyVerify suite p pk msg sig then some (sig, guard', recs) else none
+
+/-- Multi-session `Baggy` signing runner accumulating all Round-2 static WOTS codeword openings across sessions. -/
+def baggyRunMultiSessionVerified (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256) :
+    DurableStaticWotsGuard → List (VerifiedWaistbandCache × BitVec 256 × UInt32) →
+    DurableStaticWotsGuard × List (BitVec 256 × BaggySig256) × List StaticWotsOpeningRecord
+  | guard, [] => (guard, [], [])
+  | guard, (cache, msg, msgCtr) :: rest =>
+    match baggySignVerifiedWaistband suite p sk pk cache guard msg msgCtr with
+    | none => baggyRunMultiSessionVerified suite p sk pk guard rest
+    | some (sig, guard', recs) =>
+      let (guardFinal, sigs, restRecs) := baggyRunMultiSessionVerified suite p sk pk guard' rest
+      (guardFinal, (msg, sig) :: sigs, recs ++ restRecs)
+
+/-- Predicate stating that `cache` was honestly populated (`WaistbandCache::precompute`) from `sk`. -/
+def WaistbandMatchesKey (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (cache : VerifiedWaistbandCache) : Prop :=
+  ∀ layer tree v, cache.expectedSubtreeRoot layer tree = some v →
+    v = baggyTrueSubtreeRoot suite p sk layer tree
+
+private theorem baggySignLayerFresh_props (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (layer tree kp : Nat) (childNode : BitVec 256)
+    {sig : BaggyLayerSig256} {nextRoot : BitVec 256} {recOpt : Option StaticWotsOpeningRecord}
+    (hFresh : baggySignLayerFresh suite p sk layer tree kp childNode = some (sig, nextRoot, recOpt)) :
+    nextRoot = baggyTrueSubtreeRoot suite p sk layer tree ∧
+    baggyLayerRecoverRoot suite p sk.pkSeed layer tree kp childNode sig = some nextRoot ∧
+    (∀ r : StaticWotsOpeningRecord, recOpt = some r →
+      1 ≤ layer ∧ r.layer = layer ∧ r.tree = tree ∧ r.kp = kp ∧ r.signedNode = childNode ∧
+      wotsC256DecodeValidDigest
+        (suite.wots.thDigest sk.pkSeed (baggyLeafAdrs layer tree kp) childNode
+          (suite.grindCounter sk.pkSeed (baggyLeafAdrs layer tree kp) childNode)) = some r.digits) := by
+  unfold baggySignLayerFresh at hFresh
+  if hKp : kp < 2 ^ p.subtreeHeight then
+    rw [dite_pos hKp] at hFresh
+    let adrs := baggyLeafAdrs layer tree kp
+    let ctr := suite.grindCounter sk.pkSeed adrs childNode
+    cases hDec : wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs childNode ctr) with
+    | none =>
+      simp [adrs, ctr, hDec] at hFresh
+    | some d =>
+      cases hSign : wotsC256Sign suite.wots sk.pkSeed sk.skSeed adrs childNode ctr with
+      | none =>
+        simp [adrs, ctr, hDec, hSign] at hFresh
+      | some chains =>
+        simp only [adrs, ctr, hDec, hSign] at hFresh
+        injection hFresh with hTuple
+        rcases Prod.mk.inj hTuple with ⟨hSigEq, hRestEq⟩
+        rcases Prod.mk.inj hRestEq with ⟨hRootEq, hRecEq⟩
+        subst hSigEq hRootEq
+        refine ⟨rfl, ?_, ?_⟩
+        · unfold baggyLayerRecoverRoot
+          dsimp only
+          dsimp only [adrs, ctr] at hDec
+          rw [hDec]
+          dsimp only
+          have hVer := wotsC256_sign_verify_complete suite.wots sk.pkSeed sk.skSeed adrs childNode ctr chains hSign
+          unfold wotsC256Verify at hVer
+          rw [hDec] at hVer
+          dsimp only at hVer
+          have hLeafEq : suite.wots.thTl sk.pkSeed adrs
+              (fun c => wotsC256CompleteTo3 suite.wots sk.pkSeed adrs c (d.digits c) (chains c)) =
+              baggySubtreeLeaves suite p sk layer tree ⟨kp, hKp⟩ := eq_of_beq hVer
+          rw [hLeafEq]
+          exact baggyWalkMerkle_authPath_eq suite sk.pkSeed layer tree p.subtreeHeight 0
+            (baggySubtreeLeaves suite p sk layer tree) ⟨kp, hKp⟩
+        · intro r hr
+          rw [← hRecEq] at hr
+          if hGe1 : 1 ≤ layer then
+            rw [ite_pos hGe1] at hr
+            injection hr with hrEq
+            subst hrEq
+            exact ⟨hGe1, rfl, rfl, rfl, rfl, rfl⟩
+          else
+            rw [ite_neg hGe1] at hr
+            cases hr
+  else
+    rw [dite_neg hKp] at hFresh
+    cases hFresh
+
+private theorem baggyLayersVerifiedCacheAux_canonical
+    (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256) (cache : VerifiedWaistbandCache)
+    (hSeedEq : pk.pkSeed = sk.pkSeed)
+    (hMatch : WaistbandMatchesKey suite p sk cache)
+    (leafIdx : Nat) :
+    ∀ (rem layer : Nat) (node : BitVec 256)
+      {layers : List BaggyLayerSig256} {topRoot : BitVec 256} {recs : List StaticWotsOpeningRecord},
+      (1 ≤ layer → node = baggyTrueSubtreeRoot suite p sk (layer - 1) (p.pathAt leafIdx (layer - 1)).2) →
+      baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx layer rem node = some (layers, topRoot, recs) →
+      (∀ r ∈ recs,
+        1 ≤ r.layer ∧
+        r.signedNode = baggyCanonicalStaticChildRoot suite p sk r.layer r.tree r.kp ∧
+        baggyCanonicalStaticDigits suite p sk r.layer r.tree r.kp = some r.digits) := by
+  have _ := hSeedEq
+  intro rem
+  induction rem with
+  | zero =>
+    intro layer node layers topRoot recs _ hAux r hr
+    unfold baggySignLayersVerifiedCacheAux at hAux
+    injection hAux with hEq
+    rcases Prod.mk.inj hEq with ⟨_, hEq2⟩
+    rcases Prod.mk.inj hEq2 with ⟨_, hRecs⟩
+    rw [← hRecs] at hr
+    cases hr
+  | succ rem ihRem =>
+    intro layer node layers topRoot recs hNodeInv hAux r hr
+    unfold baggySignLayersVerifiedCacheAux at hAux
+    dsimp only at hAux
+    let kp := (p.pathAt leafIdx layer).1
+    let tree := (p.pathAt leafIdx layer).2
+    cases hCanopy : verifyWaistbandCanopy suite p pk cache layer tree kp node with
+    | some hit =>
+      rcases hit with ⟨cachedSig, verifiedRoot⟩
+      rw [hCanopy] at hAux
+      dsimp only at hAux
+      cases hRec : baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx (layer + 1) rem verifiedRoot with
+      | none => rw [hRec] at hAux; cases hAux
+      | some res =>
+        rcases res with ⟨restSigs, topR, restRecs⟩
+        rw [hRec] at hAux
+        injection hAux with hEq
+        rcases Prod.mk.inj hEq with ⟨_, hEq2⟩
+        rcases Prod.mk.inj hEq2 with ⟨_, hRecsEq⟩
+        rw [← hRecsEq] at hr
+        have hVerRoot : verifiedRoot = baggyTrueSubtreeRoot suite p sk layer tree := by
+          unfold verifyWaistbandCanopy at hCanopy
+          split at hCanopy
+          · cases hCanopy
+          · cases hExpC : cache.expectedSubtreeRoot (layer - 1) (baggyChildTreeIdx p tree kp) <;>
+            cases hExpL : cache.expectedSubtreeRoot layer tree <;>
+            cases hCSig : cache.cachedSig layer tree kp <;>
+              simp [hExpC, hExpL, hCSig] at hCanopy
+            rcases hCanopy with ⟨_, _, _, _, hVr⟩
+            rw [← hVr]
+            exact hMatch layer tree _ hExpL
+        exact ihRem (layer + 1) verifiedRoot (fun _ => by simp [tree, hVerRoot]) hRec r hr
+    | none =>
+      rw [hCanopy] at hAux
+      cases hFresh : baggySignLayerFresh suite p sk layer tree kp node with
+      | none => rw [hFresh] at hAux; cases hAux
+      | some freshRes =>
+        rcases freshRes with ⟨sig, nextRoot, recOpt⟩
+        rw [hFresh] at hAux
+        dsimp only at hAux
+        obtain ⟨hNextTrue, _, hRecProps⟩ := baggySignLayerFresh_props suite p sk layer tree kp node hFresh
+        cases hRec : baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx (layer + 1) rem nextRoot with
+        | none => rw [hRec] at hAux; cases hAux
+        | some res =>
+          rcases res with ⟨restSigs, topR, restRecs⟩
+          rw [hRec] at hAux
+          injection hAux with hEq
+          rcases Prod.mk.inj hEq with ⟨_, hEq2⟩
+          rcases Prod.mk.inj hEq2 with ⟨_, hRecsEq⟩
+          rw [← hRecsEq] at hr
+          have ih := ihRem (layer + 1) nextRoot (fun _ => by simp [tree, hNextTrue]) hRec
+          cases hOpt : recOpt with
+          | none =>
+            rw [hOpt] at hr
+            exact ih r hr
+          | some rec0 =>
+            rw [hOpt] at hr
+            rcases List.mem_cons.mp hr with rfl | hMemRest
+            · obtain ⟨hGe1, hRLayer, hRTree, hRKp, hSignedEq, hDigEq⟩ := hRecProps r hOpt
+              have hChildTree : (p.pathAt leafIdx (layer - 1)).2 = baggyChildTreeIdx p tree kp := by
+                have hLayerSucc : (layer - 1) + 1 = layer := Nat.sub_add_cancel hGe1
+                have hPath := baggyChildTreeIdx_pathAt p leafIdx (layer - 1)
+                dsimp only at hPath
+                rw [hLayerSucc] at hPath
+                exact hPath.symm
+              have hNodeCanon : node = baggyCanonicalStaticChildRoot suite p sk layer tree kp := by
+                rw [hNodeInv hGe1, hChildTree]
+                rfl
+              rw [hRLayer, hRTree, hRKp]
+              refine ⟨hGe1, hSignedEq.trans hNodeCanon, ?_⟩
+              unfold baggyCanonicalStaticDigits
+              rw [← hNodeCanon]
+              exact hDigEq
+            · exact ih r hMemRest
+
+private theorem lookupDurableDigits_preserved :
+    ∀ {g g' : DurableStaticWotsGuard} {recs : List StaticWotsOpeningRecord}
+      {layer tree kp : Nat} {d0 : WotsC256Digits},
+      lookupDurableDigits g layer tree kp = some d0 →
+      enforceDurableStaticOpenings g recs = some g' →
+      lookupDurableDigits g' layer tree kp = some d0 ∧
+      (∀ r ∈ recs, r.layer = layer ∧ r.tree = tree ∧ r.kp = kp → r.digits = d0)
+  | g, g', [], _, _, _, _, hLook, hEnf => by
+    injection hEnf with hEq
+    subst hEq
+    exact ⟨hLook, fun _ hm => by cases hm⟩
+  | g, g', rec :: rest, layer, tree, kp, d0, hLook, hEnf => by
+    unfold enforceDurableStaticOpenings at hEnf
+    cases hCur : lookupDurableDigits g rec.layer rec.tree rec.kp with
+    | some prev =>
+      rw [hCur] at hEnf
+      dsimp only at hEnf
+      if hEqD : prev == rec.digits then
+        rw [ite_pos hEqD] at hEnf
+        obtain ⟨hPres, hRest⟩ := lookupDurableDigits_preserved hLook hEnf
+        refine ⟨hPres, fun r hr ⟨hl, ht, hk⟩ => ?_⟩
+        rcases List.mem_cons.mp hr with rfl | hTl
+        · subst hl ht hk
+          rw [hLook] at hCur
+          injection hCur with hPrevEq
+          exact (eq_of_beq hEqD).symm.trans hPrevEq.symm
+        · exact hRest r hTl ⟨hl, ht, hk⟩
+      else
+        rw [ite_neg hEqD] at hEnf
+        cases hEnf
+    | none =>
+      rw [hCur] at hEnf
+      dsimp only at hEnf
+      have hDiffAddr : ¬ (rec.layer == layer && rec.tree == tree && rec.kp == kp) = true := by
+        intro hSame
+        rcases Bool.and_eq_true_iff.mp hSame with ⟨h12, hk⟩
+        rcases Bool.and_eq_true_iff.mp h12 with ⟨hl, ht⟩
+        rw [eq_of_beq hl, eq_of_beq ht, eq_of_beq hk, hLook] at hCur
+        cases hCur
+      have hLookCons :
+          lookupDurableDigits ((rec.layer, rec.tree, rec.kp, rec.digits) :: g) layer tree kp = some d0 := by
+        simp [lookupDurableDigits, hDiffAddr, hLook]
+      obtain ⟨hPres, hRest⟩ := lookupDurableDigits_preserved hLookCons hEnf
+      refine ⟨hPres, fun r hr ⟨hl, ht, hk⟩ => ?_⟩
+      rcases List.mem_cons.mp hr with rfl | hTl
+      · subst hl ht hk
+        rw [hLook] at hCur
+        cases hCur
+      · exact hRest r hTl ⟨hl, ht, hk⟩
+
+private theorem enforceDurableStaticOpenings_unique :
+    ∀ {g g' : DurableStaticWotsGuard} {recs : List StaticWotsOpeningRecord},
+      enforceDurableStaticOpenings g recs = some g' →
+      ∀ r ∈ recs, lookupDurableDigits g' r.layer r.tree r.kp = some r.digits
+  | _, _, [], _, _, hr => by cases hr
+  | g, g', rec :: rest, hEnf, r, hr => by
+    unfold enforceDurableStaticOpenings at hEnf
+    cases hCur : lookupDurableDigits g rec.layer rec.tree rec.kp with
+    | some prev =>
+      rw [hCur] at hEnf
+      dsimp only at hEnf
+      if hEqD : prev == rec.digits then
+        rw [ite_pos hEqD] at hEnf
+        rcases List.mem_cons.mp hr with rfl | hTl
+        · have hEqPrev : prev = r.digits := eq_of_beq hEqD
+          subst hEqPrev
+          exact (lookupDurableDigits_preserved hCur hEnf).1
+        · exact enforceDurableStaticOpenings_unique hEnf r hTl
+      else
+        rw [ite_neg hEqD] at hEnf
+        cases hEnf
+    | none =>
+      rw [hCur] at hEnf
+      dsimp only at hEnf
+      have hHead : lookupDurableDigits ((rec.layer, rec.tree, rec.kp, rec.digits) :: g)
+          rec.layer rec.tree rec.kp = some rec.digits := by
+        simp [lookupDurableDigits]
+      rcases List.mem_cons.mp hr with rfl | hTl
+      · exact (lookupDurableDigits_preserved hHead hEnf).1
+      · exact enforceDurableStaticOpenings_unique hEnf r hTl
+
+/-- **Crown-Jewel `Waistband` Theorem 1 (`waistband_verified_multi_session_single_codeword`)**:
+    1. **Exact Single-Codeword Equivalence with Uncached `Baggy`**: Across ANY multi-session signing
+       batch where `WaistbandMatchesKey` holds, EVERY static (`layer ≥ 1`) WOTS opening in
+       `baggyRunMultiSessionVerified` signs `baggyCanonicalStaticChildRoot` and opens the **exact
+       single codeword `baggyCanonicalStaticDigits`** opened by uncached `Baggy`!
+    2. **Unconditional Multi-Session Anti-Double-Codeword Safety (`DurableStaticWotsGuard`)**: Even
+       against an **arbitrarily corrupted** sequence of caches across sessions (`0` assumptions on
+       `cache`!), for any two openings `r1, r2` at the same static address `(layer, tree, kp)` across
+       the entire multi-session execution, **`r1.digits = r2.digits`**! -/
+theorem waistband_verified_multi_session_single_codeword
+    (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (pk : BaggyPublicKey256) :
+    (∀ (sessions : List (VerifiedWaistbandCache × BitVec 256 × UInt32))
+       (guard : DurableStaticWotsGuard),
+      (∀ s ∈ sessions, WaistbandMatchesKey suite p sk s.1) →
+      ∀ r ∈ (baggyRunMultiSessionVerified suite p sk pk guard sessions).2.2,
+        1 ≤ r.layer ∧
+        r.signedNode = baggyCanonicalStaticChildRoot suite p sk r.layer r.tree r.kp ∧
+        baggyCanonicalStaticDigits suite p sk r.layer r.tree r.kp = some r.digits) ∧
+    (∀ (sessions : List (VerifiedWaistbandCache × BitVec 256 × UInt32))
+       (guard : DurableStaticWotsGuard)
+       (r1 r2 : StaticWotsOpeningRecord),
+      let (_, _, allOpenings) := baggyRunMultiSessionVerified suite p sk pk guard sessions
+      r1 ∈ allOpenings → r2 ∈ allOpenings →
+      r1.layer = r2.layer ∧ r1.tree = r2.tree ∧ r1.kp = r2.kp →
+      r1.digits = r2.digits) := by
+  have hGuardTrace :
+      ∀ (sessions : List (VerifiedWaistbandCache × BitVec 256 × UInt32))
+        (guard : DurableStaticWotsGuard),
+        let (guardFinal, _, allOpenings) := baggyRunMultiSessionVerified suite p sk pk guard sessions
+        (∀ l t k d0, lookupDurableDigits guard l t k = some d0 →
+          lookupDurableDigits guardFinal l t k = some d0 ∧
+          (∀ r ∈ allOpenings, r.layer = l ∧ r.tree = t ∧ r.kp = k → r.digits = d0)) ∧
+        (∀ r ∈ allOpenings, lookupDurableDigits guardFinal r.layer r.tree r.kp = some r.digits) := by
+    intro sessions
+    induction sessions with
+    | nil =>
+      intro guard
+      dsimp [baggyRunMultiSessionVerified]
+      refine ⟨fun _ _ _ _ hLook => ⟨hLook, fun _ hm => by cases hm⟩, fun _ hm => by cases hm⟩
+    | cons sess rest ih =>
+      intro guard
+      rcases sess with ⟨cache, msg, msgCtr⟩
+      simp only [baggyRunMultiSessionVerified]
+      cases hSign : baggySignVerifiedWaistband suite p sk pk cache guard msg msgCtr with
+      | none => exact ih guard
+      | some out =>
+        rcases out with ⟨sig, guard', recs⟩
+        have hEnf : enforceDurableStaticOpenings guard recs = some guard' := by
+          unfold baggySignVerifiedWaistband at hSign
+          if hS : pk.pkSeed != sk.pkSeed then simp [hS] at hSign
+          else
+            simp only [hS, Bool.false_eq_true, ↓reduceIte] at hSign
+            cases hL : suite.hmsgLeaf p pk (suite.prfRand sk.skPrf msg) msg msgCtr with
+            | none => simp [hL] at hSign
+            | some leafIdx =>
+              simp only [hL] at hSign
+              cases hA : baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx 0 p.numLayers
+                  (suite.forsSign sk.pkSeed sk.skSeed (p.pathAt leafIdx 0).2 (p.pathAt leafIdx 0).1 msg).2 with
+              | none => simp [hA] at hSign
+              | some aRes =>
+                rcases aRes with ⟨ls, topR, rs⟩
+                simp only [hA] at hSign
+                if hTop : topR != pk.pkRoot then simp [hTop] at hSign
+                else
+                  simp only [hTop, Bool.false_eq_true, ↓reduceIte] at hSign
+                  cases hE : enforceDurableStaticOpenings guard rs with
+                  | none => simp [hE] at hSign
+                  | some gNext =>
+                    simp only [hE] at hSign
+                    let candSig : BaggySig256 :=
+                      { r := suite.prfRand sk.skPrf msg
+                        msgCtr := msgCtr
+                        forsSig := (suite.forsSign sk.pkSeed sk.skSeed (p.pathAt leafIdx 0).2 (p.pathAt leafIdx 0).1 msg).1
+                        layers := ls }
+                    if hV : baggyVerify suite p pk msg candSig then
+                      simp only [candSig, hV, ↓reduceIte] at hSign
+                      injection hSign with hTuple
+                      rcases Prod.mk.inj hTuple with ⟨_, hRestT⟩
+                      rcases Prod.mk.inj hRestT with ⟨hGEq, hREq⟩
+                      subst hGEq hREq
+                      exact hE
+                    else
+                      simp [candSig, hV] at hSign
+        have ih' := ih guard'
+        rcases hRunRest : baggyRunMultiSessionVerified suite p sk pk guard' rest with ⟨gFinal, sigsRest, restRecs⟩
+        dsimp only
+        rw [hRunRest] at ih' ⊢
+        dsimp only at ih' ⊢
+        refine ⟨?_, ?_⟩
+        · intro l t k d0 hLook
+          obtain ⟨hMidLook, hHeadEq⟩ := lookupDurableDigits_preserved hLook hEnf
+          obtain ⟨hFinLook, hTailEq⟩ := ih'.1 l t k d0 hMidLook
+          refine ⟨hFinLook, fun r hr hAddr => ?_⟩
+          rcases List.mem_append.mp hr with hInHead | hInTail
+          · exact hHeadEq r hInHead hAddr
+          · exact hTailEq r hInTail hAddr
+        · intro r hr
+          rcases List.mem_append.mp hr with hInHead | hInTail
+          · have hMid := enforceDurableStaticOpenings_unique hEnf r hInHead
+            exact (ih'.1 r.layer r.tree r.kp r.digits hMid).1
+          · exact ih'.2 r hInTail
+  refine ⟨?_, ?_⟩
+  · intro sessions guard hAllMatch
+    induction sessions generalizing guard with
+    | nil => intro _ hm; cases hm
+    | cons sess rest ih =>
+      rcases sess with ⟨cache, msg, msgCtr⟩
+      have hHeadMatch : WaistbandMatchesKey suite p sk cache := hAllMatch _ (.head _)
+      have hTailMatch : ∀ s ∈ rest, WaistbandMatchesKey suite p sk s.1 :=
+        fun s hs => hAllMatch s (.tail _ hs)
+      simp only [baggyRunMultiSessionVerified]
+      cases hSign : baggySignVerifiedWaistband suite p sk pk cache guard msg msgCtr with
+      | none => exact ih guard hTailMatch
+      | some out =>
+        rcases out with ⟨sig, guard', recs⟩
+        rcases hRunRest : baggyRunMultiSessionVerified suite p sk pk guard' rest with ⟨gFinal, sigsRest, restRecs⟩
+        have ihRest := ih guard' hTailMatch
+        dsimp only
+        rw [hRunRest] at ihRest ⊢
+        dsimp only at ihRest ⊢
+        intro r hr
+        rcases List.mem_append.mp hr with hInHead | hInTail
+        · unfold baggySignVerifiedWaistband at hSign
+          if hSeedNe : pk.pkSeed != sk.pkSeed then simp [hSeedNe] at hSign
+          else
+            have hSeedEq : pk.pkSeed = sk.pkSeed := by
+              cases hBeq : (pk.pkSeed == sk.pkSeed)
+              · rw [bne, hBeq] at hSeedNe; simp at hSeedNe
+              · exact eq_of_beq hBeq
+            simp only [hSeedNe, Bool.false_eq_true, ↓reduceIte] at hSign
+            cases hL : suite.hmsgLeaf p pk (suite.prfRand sk.skPrf msg) msg msgCtr with
+            | none => simp [hL] at hSign
+            | some leafIdx =>
+              simp only [hL] at hSign
+              cases hA : baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx 0 p.numLayers
+                  (suite.forsSign sk.pkSeed sk.skSeed (p.pathAt leafIdx 0).2 (p.pathAt leafIdx 0).1 msg).2 with
+              | none => simp [hA] at hSign
+              | some aRes =>
+                rcases aRes with ⟨ls, topR, rs⟩
+                simp only [hA] at hSign
+                if hTop : topR != pk.pkRoot then simp [hTop] at hSign
+                else
+                  simp only [hTop, Bool.false_eq_true, ↓reduceIte] at hSign
+                  cases hE : enforceDurableStaticOpenings guard rs with
+                  | none => simp [hE] at hSign
+                  | some gNext =>
+                    simp only [hE] at hSign
+                    split at hSign
+                    · injection hSign with hTup
+                      have hRsEq : rs = recs := (Prod.mk.inj (Prod.mk.inj hTup).2).2
+                      rw [← hRsEq] at hInHead
+                      exact baggyLayersVerifiedCacheAux_canonical suite p sk pk cache hSeedEq hHeadMatch
+                        leafIdx p.numLayers 0 _ (fun h1 => False.elim (Nat.not_succ_le_zero 0 h1)) hA r hInHead
+                    · cases hSign
+        · exact ihRest r hInTail
+  · intro sessions guard r1 r2
+    have hTr := hGuardTrace sessions guard
+    rcases hRun : baggyRunMultiSessionVerified suite p sk pk guard sessions with ⟨gFinal, sigs, allOpenings⟩
+    rw [hRun] at hTr
+    dsimp only at hTr ⊢
+    intro hr1 hr2 ⟨hl, ht, hk⟩
+    have hLook1 := hTr.2 r1 hr1
+    have hLook2 := hTr.2 r2 hr2
+    rw [hl, ht, hk, hLook2] at hLook1
+    injection hLook1 with hEq
+    exact hEq.symm
+
+/-- Constructive `Type`-valued security break extracted from any multi-session `Baggy` forgery
+    under `VerifiedWaistbandCache` (`0 Classical.choice`). -/
+inductive BaggyHypertreeBreakWitness (suite : BaggySuite256) (p : BaggyTreeParams)
+    (sk : BaggySecretKey256) (approvedMsgs : List (BitVec 256)) (msgStar : BitVec 256) : Type where
+  | bottomLayerReachedGenuineRoot
+      (leafIdx : Nat) (forsSigStar : BitVec 256) (sig0 : BaggyLayerSig256)
+      (hNotApproved : msgStar ∉ approvedMsgs)
+      (hLayer0RecoversTrue :
+        let (kp0, tree0) := p.pathAt leafIdx 0
+        baggyLayerRecoverRoot suite p sk.pkSeed 0 tree0 kp0
+          (suite.forsRecoverPk sk.pkSeed tree0 kp0 msgStar forsSigStar) sig0 =
+        some (baggyTrueSubtreeRoot suite p sk 0 tree0))
+  | merkleCollision (coll : BaggyMerkleCollision suite sk.pkSeed)
+  | staticLayerWotsBreak (layer tree kp : Nat)
+      (hStaticLayer : 1 ≤ layer)
+      (wotsBreak : WotsC256BreakWitness suite.wots sk.pkSeed sk.skSeed
+        (baggyLeafAdrs layer tree kp)
+        (baggyCanonicalStaticChildRoot suite p sk layer tree kp)
+        (suite.grindCounter sk.pkSeed (baggyLeafAdrs layer tree kp)
+          (baggyCanonicalStaticChildRoot suite p sk layer tree kp)))
+
+def extractStaticLayerBreakFromTransition
+    (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
+    (hGrind : BaggySuite256.WellGrinded suite)
+    (approvedMsgs : List (BitVec 256)) (msgStar : BitVec 256)
+    (leafIdx layer : Nat) (hGe1 : 1 ≤ layer)
+    (nodeStar : BitVec 256) (sigStar : BaggyLayerSig256)
+    (hChildMismatch : nodeStar ≠ baggyCanonicalStaticChildRoot suite p sk layer
+      (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1)
+    (hParentMatchesTrue :
+      baggyLayerRecoverRoot suite p sk.pkSeed layer
+        (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1 nodeStar sigStar =
+      some (baggyTrueSubtreeRoot suite p sk layer (p.pathAt leafIdx layer).2)) :
+    BaggyHypertreeBreakWitness suite p sk approvedMsgs msgStar :=
+  let kp := (p.pathAt leafIdx layer).1
+  let tree := (p.pathAt leafIdx layer).2
+  let adrs := baggyLeafAdrs layer tree kp
+  let canonChild := baggyCanonicalStaticChildRoot suite p sk layer tree kp
+  let canonCtr := suite.grindCounter sk.pkSeed adrs canonChild
+  have hKpLt : kp < 2 ^ p.subtreeHeight :=
+    Nat.mod_lt _ (Nat.two_pow_pos p.subtreeHeight)
+  match hHonDec : wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs canonChild canonCtr) with
+  | none =>
+    False.elim <| by
+      have hSome := hGrind.2 sk.pkSeed adrs canonChild
+      change (wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs canonChild canonCtr)).isSome = true at hSome
+      rw [hHonDec] at hSome
+      cases hSome
+  | some dCanon =>
+    match hStarDec : wotsC256DecodeValidDigest (suite.wots.thDigest sk.pkSeed adrs nodeStar sigStar.ctr) with
+    | none =>
+      False.elim <| by
+        unfold baggyLayerRecoverRoot at hParentMatchesTrue
+        dsimp only at hParentMatchesTrue
+        dsimp only [adrs, kp, tree] at hStarDec
+        rw [hStarDec] at hParentMatchesTrue
+        cases hParentMatchesTrue
+    | some dStar =>
+      let leafStar := suite.wots.thTl sk.pkSeed adrs (fun c =>
+        wotsC256CompleteTo3 suite.wots sk.pkSeed adrs c (dStar.digits c) (sigStar.chains c))
+      let honestLeaf := baggySubtreeLeaves suite p sk layer tree ⟨kp, hKpLt⟩
+      if hLeafEq : leafStar = honestLeaf then
+        have hWotsVer : wotsC256Verify suite.wots sk.pkSeed adrs
+            (wotsC256PkLeaf suite.wots sk.pkSeed sk.skSeed adrs) nodeStar sigStar.ctr sigStar.chains = true := by
+          unfold wotsC256Verify
+          rw [hStarDec]
+          dsimp only
+          exact beq_iff_eq.mpr hLeafEq
+        .staticLayerWotsBreak layer tree kp hGe1
+          (wotsC256_one_use_euf_cma_extract suite.wots sk.pkSeed sk.skSeed adrs
+            canonChild canonCtr dCanon hHonDec nodeStar sigStar.ctr sigStar.chains
+            (fun hEq => hChildMismatch (congrArg Prod.fst hEq)) hWotsVer)
+      else
+        have hWalkEq : baggyWalkMerkleRootFirst suite sk.pkSeed layer tree p.subtreeHeight 0 kp leafStar sigStar.auth =
+            some (baggyMerkleRoot suite sk.pkSeed layer tree p.subtreeHeight 0 (baggySubtreeLeaves suite p sk layer tree)) := by
+          unfold baggyLayerRecoverRoot at hParentMatchesTrue
+          dsimp only at hParentMatchesTrue
+          dsimp only [adrs, kp, tree] at hStarDec
+          rw [hStarDec] at hParentMatchesTrue
+          exact hParentMatchesTrue
+        .merkleCollision (extractBaggyMerkleCollision suite sk.pkSeed layer tree
+          p.subtreeHeight 0 (baggySubtreeLeaves suite p sk layer tree) ⟨kp, hKpLt⟩ leafStar sigStar.auth hLeafEq hWalkEq)
+
+private theorem pathAt_topLayer_tree_zero (p : BaggyTreeParams) (hWf : p.WellFormed)
+    {leafIdx : Nat} (hLeafBound : leafIdx < 2 ^ (p.subtreeHeight * p.numLayers)) :
+    (p.pathAt leafIdx (p.numLayers - 1)).2 = 0 := by
+  dsimp [BaggyTreeParams.pathAt]
+  rw [Nat.div_div_eq_div_mul]
+  have hExp : p.subtreeHeight * (p.numLayers - 1) + p.subtreeHeight = p.subtreeHeight * p.numLayers := by
+    calc p.subtreeHeight * (p.numLayers - 1) + p.subtreeHeight
+      _ = p.subtreeHeight * ((p.numLayers - 1) + 1) := (Nat.mul_succ p.subtreeHeight (p.numLayers - 1)).symm
+      _ = p.subtreeHeight * p.numLayers := by
+        have hGe1 : 1 ≤ p.numLayers := Nat.le_of_succ_le hWf.1
+        rw [Nat.sub_add_cancel hGe1]
+  have hPowEq : (2 ^ (p.subtreeHeight * (p.numLayers - 1))) * (2 ^ p.subtreeHeight) =
+      2 ^ (p.subtreeHeight * p.numLayers) := by
+    rw [← Nat.pow_add, hExp]
+  rw [hPowEq]
+  exact Nat.div_eq_of_lt hLeafBound
+
+def walkUpperLayersBoundedExtract
+    (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
+    (hWf : p.WellFormed) (hGrind : BaggySuite256.WellGrinded suite)
+    (approvedMsgs : List (BitVec 256)) (msgStar : BitVec 256)
+    (leafIdx : Nat) (hLeafBound : leafIdx < 2 ^ (p.subtreeHeight * p.numLayers)) :
+    ∀ (layer : Nat) (sigs : List BaggyLayerSig256) (nodeStar : BitVec 256) (finalRoot : BitVec 256),
+      1 ≤ layer →
+      1 ≤ sigs.length →
+      layer + sigs.length = p.numLayers →
+      nodeStar ≠ baggyTrueSubtreeRoot suite p sk (layer - 1) (p.pathAt leafIdx (layer - 1)).2 →
+      baggyWalkLayersVerify suite p sk.pkSeed leafIdx layer nodeStar sigs = some finalRoot →
+      finalRoot = baggyTrueSubtreeRoot suite p sk (p.numLayers - 1) 0 →
+      BaggyHypertreeBreakWitness suite p sk approvedMsgs msgStar
+  | _, [], _, _, _, hNeEmpty, _, _, _, _ => False.elim (Nat.not_succ_le_zero 0 hNeEmpty)
+  | layer, [topSig], nodeStar, finalRoot, hGe1, _, hSum, hNodeNe, hWalk, hFinalEq =>
+    have hTopLayer : layer = p.numLayers - 1 := by simp at hSum; omega
+    have hTree0 : (p.pathAt leafIdx layer).2 = 0 := by
+      rw [hTopLayer]; exact pathAt_topLayer_tree_zero p hWf hLeafBound
+    match hRec : baggyLayerRecoverRoot suite p sk.pkSeed layer (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1 nodeStar topSig with
+    | none =>
+      False.elim <| by
+        unfold baggyWalkLayersVerify at hWalk
+        dsimp only at hWalk
+        rw [hRec] at hWalk
+        cases hWalk
+    | some topOut =>
+      have hTopOutEq : topOut = finalRoot := by
+        unfold baggyWalkLayersVerify at hWalk
+        dsimp only at hWalk
+        rw [hRec] at hWalk
+        unfold baggyWalkLayersVerify at hWalk
+        injection hWalk with hE
+      have hParentTrue : baggyLayerRecoverRoot suite p sk.pkSeed layer (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1 nodeStar topSig =
+          some (baggyTrueSubtreeRoot suite p sk layer (p.pathAt leafIdx layer).2) := by
+        rw [hRec, hTopOutEq, hFinalEq, ← hTopLayer, hTree0]
+      have hChildNe : nodeStar ≠ baggyCanonicalStaticChildRoot suite p sk layer (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1 := by
+        unfold baggyCanonicalStaticChildRoot
+        have hPath := baggyChildTreeIdx_pathAt p leafIdx (layer - 1)
+        dsimp only at hPath
+        have hSucc : (layer - 1) + 1 = layer := Nat.sub_add_cancel hGe1
+        rw [hSucc] at hPath
+        rw [hPath]
+        exact hNodeNe
+      extractStaticLayerBreakFromTransition suite p sk hGrind approvedMsgs msgStar leafIdx layer hGe1
+        nodeStar topSig hChildNe hParentTrue
+  | layer, sigCur :: sigNext :: rest, nodeStar, finalRoot, hGe1, _, hSum, hNodeNe, hWalk, hFinalEq =>
+    match hRec : baggyLayerRecoverRoot suite p sk.pkSeed layer (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1 nodeStar sigCur with
+    | none =>
+      False.elim <| by
+        unfold baggyWalkLayersVerify at hWalk
+        dsimp only at hWalk
+        rw [hRec] at hWalk
+        cases hWalk
+    | some nextRoot =>
+      if hHitTrue : nextRoot = baggyTrueSubtreeRoot suite p sk layer (p.pathAt leafIdx layer).2 then
+        have hChildNe : nodeStar ≠ baggyCanonicalStaticChildRoot suite p sk layer (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1 := by
+          unfold baggyCanonicalStaticChildRoot
+          have hPath := baggyChildTreeIdx_pathAt p leafIdx (layer - 1)
+          dsimp only at hPath
+          have hSucc : (layer - 1) + 1 = layer := Nat.sub_add_cancel hGe1
+          rw [hSucc] at hPath
+          rw [hPath]
+          exact hNodeNe
+        extractStaticLayerBreakFromTransition suite p sk hGrind approvedMsgs msgStar leafIdx layer hGe1
+          nodeStar sigCur hChildNe (hRec.trans (congrArg some hHitTrue))
+      else
+        have hWalkRest : baggyWalkLayersVerify suite p sk.pkSeed leafIdx (layer + 1) nextRoot (sigNext :: rest) = some finalRoot := by
+          unfold baggyWalkLayersVerify at hWalk
+          dsimp only at hWalk
+          rw [hRec] at hWalk
+          exact hWalk
+        walkUpperLayersBoundedExtract suite p sk hWf hGrind approvedMsgs msgStar leafIdx hLeafBound
+          (layer + 1) (sigNext :: rest) nextRoot finalRoot
+          (by omega) (by simp) (by simp at hSum ⊢; omega)
+          (by simpa [Nat.add_sub_cancel] using hHitTrue) hWalkRest hFinalEq
+
+/-- **Crown-Jewel `Waistband` Theorem 2 (`baggy_verified_waistband_euf_cma_extract`, `0 Classical.choice`)**:
+    Multi-session `Baggy` signing with `VerifiedWaistbandCache` preserves the full constructive
+    hypertree EUF-CMA reduction: EVERY static (`layer ≥ 1`) WOTS address opened across `sessions`
+    reveals at most its single canonical codeword `baggyCanonicalStaticDigits`, and any valid forgery
+    `(msgStar, sigStar)` outside the signed message list constructively yields a `BaggyHypertreeBreakWitness`! -/
