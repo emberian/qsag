@@ -3051,3 +3051,1017 @@ theorem gfni_isomorphism_homomorphic (a b : BitVec 8) :
 
 /-- Exact `qsag_asm_gf256_shamir_mul_gfni` program (`x86_64_asm.rs:550-576`) for `blocks` × 32B.
     `.pubLoop blocks` models the lib.rs dispatch guard `blocks >= 1`. -/
+def gf256ShamirMulGfniProg (blocks : Nat) : List X86Stmt :=
+  [ .instr (.movImm64 .rax gfniTowerToPolyMat)
+  , .instr (.vpbroadcastqGpr .ymm14 .rax)
+  , .instr (.movImm64 .rax gfniPolyToTowerMat)
+  , .instr (.vpbroadcastqGpr .ymm15 .rax)
+  , .pubLoop blocks
+      [ .vmovdquLoad .ymm0 .rsi 0#64
+      , .vmovdquLoad .ymm1 .rdx 0#64
+      , .vgf2p8affineqb0 .ymm0 .ymm0 .ymm14
+      , .vgf2p8affineqb0 .ymm1 .ymm1 .ymm14
+      , .vgf2p8mulb .ymm2 .ymm0 .ymm1
+      , .vgf2p8affineqb0 .ymm2 .ymm2 .ymm15
+      , .vmovdquStore .rdi 0#64 .ymm2
+      , .addImm64 .rsi 32#64
+      , .addImm64 .rdx 32#64
+      , .addImm64 .rdi 32#64 ]
+  , .instr (.vpxor .ymm0 .ymm0 .ymm0)
+  , .instr (.vpxor .ymm1 .ymm1 .ymm1)
+  , .instr (.vpxor .ymm2 .ymm2 .ymm2)
+  , .instr (.vpxor .ymm14 .ymm14 .ymm14)
+  , .instr (.vpxor .ymm15 .ymm15 .ymm15)
+  , .instr .vzeroupper
+  , .ret ]
+
+private theorem x86_taint_setYmm_gpr (τ : X86TaintState) (y : YmmReg) (l : SecLabel) (r : X86Gpr) :
+    (τ.setYmm y l).gpr r = τ.gpr r := rfl
+
+private theorem x86_taint_setGpr_gpr (τ : X86TaintState) (r q : X86Gpr) (l : SecLabel) :
+    (τ.setGpr r l).gpr q = if q == r then l else τ.gpr q := rfl
+
+private theorem checkX86Block_cons {secHeap : Bool} {τ τ1 : X86TaintState}
+    {ins : X86Instr} {rest : List X86Instr}
+    (h1 : checkX86Instr secHeap τ ins = some τ1) :
+    checkX86Block secHeap τ (ins :: rest) = checkX86Block secHeap τ1 rest := by
+  simp [checkX86Block, h1]
+
+theorem checkX86Loop_gfni_invariant (blocks : Nat) (τ : X86TaintState)
+    (hRsi : τ.gpr .rsi = .pub) (hRdx : τ.gpr .rdx = .pub) (hRdi : τ.gpr .rdi = .pub) :
+    ∃ τ', checkX86Loop true blocks τ
+      [ .vmovdquLoad .ymm0 .rsi 0#64
+      , .vmovdquLoad .ymm1 .rdx 0#64
+      , .vgf2p8affineqb0 .ymm0 .ymm0 .ymm14
+      , .vgf2p8affineqb0 .ymm1 .ymm1 .ymm14
+      , .vgf2p8mulb .ymm2 .ymm0 .ymm1
+      , .vgf2p8affineqb0 .ymm2 .ymm2 .ymm15
+      , .vmovdquStore .rdi 0#64 .ymm2
+      , .addImm64 .rsi 32#64
+      , .addImm64 .rdx 32#64
+      , .addImm64 .rdi 32#64 ] = some τ' := by
+  induction blocks generalizing τ with
+  | zero => exact ⟨τ, rfl⟩
+  | succ n ih =>
+    let τ1 := τ.setYmm .ymm0 .sec
+    let τ2 := τ1.setYmm .ymm1 .sec
+    let τ3 := τ2.setYmm .ymm0 ((τ2.ymm .ymm0).join (τ2.ymm .ymm14))
+    let τ4 := τ3.setYmm .ymm1 ((τ3.ymm .ymm1).join (τ3.ymm .ymm14))
+    let τ5 := τ4.setYmm .ymm2 ((τ4.ymm .ymm0).join (τ4.ymm .ymm1))
+    let τ6 := τ5.setYmm .ymm2 ((τ5.ymm .ymm2).join (τ5.ymm .ymm15))
+    let τ7 : X86TaintState := { (τ6.setGpr .rsi (τ6.gpr .rsi)) with cf := τ6.gpr .rsi, of := τ6.gpr .rsi, zf := τ6.gpr .rsi }
+    let τ8 : X86TaintState := { (τ7.setGpr .rdx (τ7.gpr .rdx)) with cf := τ7.gpr .rdx, of := τ7.gpr .rdx, zf := τ7.gpr .rdx }
+    let τ9 : X86TaintState := { (τ8.setGpr .rdi (τ8.gpr .rdi)) with cf := τ8.gpr .rdi, of := τ8.gpr .rdi, zf := τ8.gpr .rdi }
+    have s1 : checkX86Instr true τ (.vmovdquLoad .ymm0 .rsi 0#64) = some τ1 := by
+      dsimp only [checkX86Instr]; rw [hRsi]; rfl
+    have s2 : checkX86Instr true τ1 (.vmovdquLoad .ymm1 .rdx 0#64) = some τ2 := by
+      dsimp only [checkX86Instr]; change (if τ.gpr .rdx == .pub then some τ2 else none) = some τ2
+      rw [hRdx]; rfl
+    have s7 : checkX86Instr true τ6 (.vmovdquStore .rdi 0#64 .ymm2) = some τ6 := by
+      dsimp only [checkX86Instr]
+      change (if (τ.gpr .rdi == .pub && (true || τ6.ymm .ymm2 == .pub)) then some τ6 else none) = some τ6
+      rw [hRdi]; rfl
+    have hBlk : checkX86Block true τ
+        [ .vmovdquLoad .ymm0 .rsi 0#64
+        , .vmovdquLoad .ymm1 .rdx 0#64
+        , .vgf2p8affineqb0 .ymm0 .ymm0 .ymm14
+        , .vgf2p8affineqb0 .ymm1 .ymm1 .ymm14
+        , .vgf2p8mulb .ymm2 .ymm0 .ymm1
+        , .vgf2p8affineqb0 .ymm2 .ymm2 .ymm15
+        , .vmovdquStore .rdi 0#64 .ymm2
+        , .addImm64 .rsi 32#64
+        , .addImm64 .rdx 32#64
+        , .addImm64 .rdi 32#64 ] = some τ9 := by
+      rw [checkX86Block_cons s1, checkX86Block_cons s2,
+          checkX86Block_cons (rfl : checkX86Instr true τ2 _ = some τ3),
+          checkX86Block_cons (rfl : checkX86Instr true τ3 _ = some τ4),
+          checkX86Block_cons (rfl : checkX86Instr true τ4 _ = some τ5),
+          checkX86Block_cons (rfl : checkX86Instr true τ5 _ = some τ6),
+          checkX86Block_cons s7,
+          checkX86Block_cons (rfl : checkX86Instr true τ6 _ = some τ7),
+          checkX86Block_cons (rfl : checkX86Instr true τ7 _ = some τ8),
+          checkX86Block_cons (rfl : checkX86Instr true τ8 _ = some τ9)]
+      rfl
+    dsimp only [checkX86Loop]
+    rw [hBlk]
+    exact ih τ9 hRsi hRdx hRdi
+
+/-- **Timing-Noninterference of `qsag_asm_gf256_shamir_mul_gfni` for ALL `blocks : Nat`**: -/
+theorem gf256ShamirMulGfni_constant_time
+    (blocks : Nat) (s₁ s₂ : X86State)
+    (hLow : X86LowEq (fun _ => .sec) sysvPtrArgs4Taint s₁ s₂) :
+    (execX86Prog (gf256ShamirMulGfniProg blocks) 0 s₁).2 =
+      (execX86Prog (gf256ShamirMulGfniProg blocks) 0 s₂).2 := by
+  let τPre := ((((sysvPtrArgs4Taint.setGpr .rax .pub).setYmm .ymm14 .pub).setGpr
+    .rax .pub).setYmm .ymm15 .pub)
+  obtain ⟨τLoop, hLoop⟩ := checkX86Loop_gfni_invariant blocks τPre rfl rfl rfl
+  have hSome : (checkX86Prog true sysvPtrArgs4Taint (gf256ShamirMulGfniProg blocks)).isSome = true := by
+    dsimp only [gf256ShamirMulGfniProg, checkX86Prog, checkX86Instr]
+    change (match checkX86Loop true blocks τPre _ with
+      | none => none
+      | some τ1 => _).isSome = true
+    rw [hLoop]
+    rfl
+  rcases hOpt : checkX86Prog true sysvPtrArgs4Taint (gf256ShamirMulGfniProg blocks) with _ | τEnd
+  · simp [hOpt] at hSome
+  · exact (x86_ct_checker_sound (fun _ => .sec) true (fun _ _ => rfl)
+      (gf256ShamirMulGfniProg blocks) sysvPtrArgs4Taint τEnd 0 hOpt s₁ s₂ hLow).1
+
+private theorem gfni_word64_correct (wa wb : BitVec 64) (r : Fin 8) :
+    let aFwd := packBytes64 (fun i => gfniAffineByte gfniTowerToPolyMat (extractByte64 wa i.val) 0#8)
+    let bFwd := packBytes64 (fun i => gfniAffineByte gfniTowerToPolyMat (extractByte64 wb i.val) 0#8)
+    let prod := zipBytes64 gfniPolyMul aFwd bFwd
+    let res  := packBytes64 (fun i => gfniAffineByte gfniPolyToTowerMat (extractByte64 prod i.val) 0#8)
+    extractByte64 res r.val = towerGf256Mul (extractByte64 wa r.val) (extractByte64 wb r.val) := by
+  dsimp only [zipBytes64]
+  rw [extractByte64_packBytes64, extractByte64_packBytes64,
+      extractByte64_packBytes64, extractByte64_packBytes64]
+  exact gfni_isomorphism_homomorphic _ _
+
+/-- **32-Lane SIMD Functional Correctness of `vgf2p8affineqb + vgf2p8mulb` Block**:
+    Every byte lane `idx : Fin 32` of the SIMD GFNI pipeline equals `towerGf256Mul (a[idx]) (b[idx])`. -/
+theorem gf256ShamirMulGfni_32lane_correct (va vb : Vec256) (idx : Fin 32) :
+    let mFwd := Vec256.broadcastQ gfniTowerToPolyMat
+    let mInv := Vec256.broadcastQ gfniPolyToTowerMat
+    let res := Vec256.gfniAffine0
+      (Vec256.gfniMul (Vec256.gfniAffine0 va mFwd) (Vec256.gfniAffine0 vb mFwd)) mInv
+    res.getByte idx = towerGf256Mul (va.getByte idx) (vb.getByte idx) := by
+  rcases idx with ⟨k, hk⟩
+  have hq : k / 8 = 0 ∨ k / 8 = 1 ∨ k / 8 = 2 ∨ k / 8 = 3 := by omega
+  let rFin : Fin 8 := ⟨k % 8, by omega⟩
+  dsimp only [Vec256.getByte, Vec256.gfniAffine0, Vec256.gfniMul, Vec256.broadcastQ]
+  rcases hq with h0 | h1 | h2 | h3
+  · simp only [h0, beq_self_eq_true, ↓reduceIte]
+    exact gfni_word64_correct va.w0 vb.w0 rFin
+  · simp only [h1]; split <;> try contradiction
+    split <;> try contradiction
+    exact gfni_word64_correct va.w1 vb.w1 rFin
+  · simp only [h2]; split <;> try contradiction
+    split <;> try contradiction
+    split <;> try contradiction
+    exact gfni_word64_correct va.w2 vb.w2 rFin
+  · simp only [h3]; split <;> try contradiction
+    split <;> try contradiction
+    split <;> try contradiction
+    exact gfni_word64_correct va.w3 vb.w3 rFin
+
+/-! ### 7.3 `tower128_bdoz_mac_vpclmul`: 2-Lane `VPCLMULQDQ` BDOZ MAC & `0x87` Reduction -/
+
+/-- Exact `qsag_asm_tower128_bdoz_mac_vpclmul` program (`x86_64_asm.rs:881-925`). -/
+-- `.pubLoop count` models the lib.rs dispatch guard `count >= 1`.
+def tower128BdozVpclmulProg (count : Nat) : List X86Stmt :=
+  [ .instr (.vpxor .ymm0 .ymm0 .ymm0)
+  , .instr (.vpxor .ymm1 .ymm1 .ymm1)
+  , .pubLoop count
+      [ .vmovdquLoad .ymm2 .rsi 0#64
+      , .vmovdquLoad .ymm3 .rdx 0#64
+      , .vpclmulqdq .ymm4 .ymm2 .ymm3 0x00#8
+      , .vpclmulqdq .ymm5 .ymm2 .ymm3 0x11#8
+      , .vpclmulqdq .ymm6 .ymm2 .ymm3 0x01#8
+      , .vpclmulqdq .ymm7 .ymm2 .ymm3 0x10#8
+      , .vpxor .ymm6 .ymm6 .ymm7
+      , .vpslldq8 .ymm7 .ymm6
+      , .vpsrldq8 .ymm6 .ymm6
+      , .vpxor .ymm4 .ymm4 .ymm7
+      , .vpxor .ymm5 .ymm5 .ymm6
+      , .vpxor .ymm0 .ymm0 .ymm4
+      , .vpxor .ymm1 .ymm1 .ymm5
+      , .addImm64 .rsi 32#64
+      , .addImm64 .rdx 32#64 ]
+  , .instr (.movImm64 .rax 0x87#64)
+  , .instr (.vpbroadcastqGpr .ymm8 .rax)
+  , .instr (.vpclmulqdq .ymm4 .ymm1 .ymm8 0x01#8)
+  , .instr (.vpslldq8 .ymm5 .ymm4)
+  , .instr (.vpsrldq8 .ymm6 .ymm4)
+  , .instr (.vpxor .ymm0 .ymm0 .ymm5)
+  , .instr (.vpxor .ymm1 .ymm1 .ymm6)
+  , .instr (.vpclmulqdq .ymm4 .ymm1 .ymm8 0x00#8)
+  , .instr (.vpxor .ymm0 .ymm0 .ymm4)
+  , .instr (.vmovdquStore .rdi 0#64 .ymm0)
+  , .instr (.vpxor .ymm0 .ymm0 .ymm0)
+  , .instr (.vpxor .ymm1 .ymm1 .ymm1)
+  , .instr (.vpxor .ymm2 .ymm2 .ymm2)
+  , .instr (.vpxor .ymm3 .ymm3 .ymm3)
+  , .instr (.vpxor .ymm4 .ymm4 .ymm4)
+  , .instr (.vpxor .ymm5 .ymm5 .ymm5)
+  , .instr (.vpxor .ymm6 .ymm6 .ymm6)
+  , .instr (.vpxor .ymm7 .ymm7 .ymm7)
+  , .instr (.vpxor .ymm8 .ymm8 .ymm8)
+  , .instr (.xor64 .rax .rax)
+  , .instr .vzeroupper
+  , .ret ]
+
+theorem checkX86Loop_vpclmul_invariant (count : Nat) (τ : X86TaintState)
+    (hRsi : τ.gpr .rsi = .pub) (hRdx : τ.gpr .rdx = .pub) :
+    ∃ τ', checkX86Loop true count τ
+      [ .vmovdquLoad .ymm2 .rsi 0#64
+      , .vmovdquLoad .ymm3 .rdx 0#64
+      , .vpclmulqdq .ymm4 .ymm2 .ymm3 0x00#8
+      , .vpclmulqdq .ymm5 .ymm2 .ymm3 0x11#8
+      , .vpclmulqdq .ymm6 .ymm2 .ymm3 0x01#8
+      , .vpclmulqdq .ymm7 .ymm2 .ymm3 0x10#8
+      , .vpxor .ymm6 .ymm6 .ymm7
+      , .vpslldq8 .ymm7 .ymm6
+      , .vpsrldq8 .ymm6 .ymm6
+      , .vpxor .ymm4 .ymm4 .ymm7
+      , .vpxor .ymm5 .ymm5 .ymm6
+      , .vpxor .ymm0 .ymm0 .ymm4
+      , .vpxor .ymm1 .ymm1 .ymm5
+      , .addImm64 .rsi 32#64
+      , .addImm64 .rdx 32#64 ] = some τ' ∧ τ'.gpr .rdi = τ.gpr .rdi := by
+  induction count generalizing τ with
+  | zero => exact ⟨τ, rfl, rfl⟩
+  | succ n ih =>
+    let τ1 := τ.setYmm .ymm2 .sec
+    let τ2 := τ1.setYmm .ymm3 .sec
+    let τ3 := τ2.setYmm .ymm4 ((τ2.ymm .ymm2).join (τ2.ymm .ymm3))
+    let τ4 := τ3.setYmm .ymm5 ((τ3.ymm .ymm2).join (τ3.ymm .ymm3))
+    let τ5 := τ4.setYmm .ymm6 ((τ4.ymm .ymm2).join (τ4.ymm .ymm3))
+    let τ6 := τ5.setYmm .ymm7 ((τ5.ymm .ymm2).join (τ5.ymm .ymm3))
+    let τ7 := τ6.setYmm .ymm6 ((τ6.ymm .ymm6).join (τ6.ymm .ymm7))
+    let τ8 := τ7.setYmm .ymm7 (τ7.ymm .ymm6)
+    let τ9 := τ8.setYmm .ymm6 (τ8.ymm .ymm6)
+    let τ10 := τ9.setYmm .ymm4 ((τ9.ymm .ymm4).join (τ9.ymm .ymm7))
+    let τ11 := τ10.setYmm .ymm5 ((τ10.ymm .ymm5).join (τ10.ymm .ymm6))
+    let τ12 := τ11.setYmm .ymm0 ((τ11.ymm .ymm0).join (τ11.ymm .ymm4))
+    let τ13 := τ12.setYmm .ymm1 ((τ12.ymm .ymm1).join (τ12.ymm .ymm5))
+    let τ14 : X86TaintState := { (τ13.setGpr .rsi (τ13.gpr .rsi)) with cf := τ13.gpr .rsi, of := τ13.gpr .rsi, zf := τ13.gpr .rsi }
+    let τ15 : X86TaintState := { (τ14.setGpr .rdx (τ14.gpr .rdx)) with cf := τ14.gpr .rdx, of := τ14.gpr .rdx, zf := τ14.gpr .rdx }
+    have s1 : checkX86Instr true τ (.vmovdquLoad .ymm2 .rsi 0#64) = some τ1 := by
+      dsimp only [checkX86Instr]; rw [hRsi]; rfl
+    have s2 : checkX86Instr true τ1 (.vmovdquLoad .ymm3 .rdx 0#64) = some τ2 := by
+      dsimp only [checkX86Instr]; change (if τ.gpr .rdx == .pub then some τ2 else none) = some τ2
+      rw [hRdx]; rfl
+    have hBlk : checkX86Block true τ
+        [ .vmovdquLoad .ymm2 .rsi 0#64
+        , .vmovdquLoad .ymm3 .rdx 0#64
+        , .vpclmulqdq .ymm4 .ymm2 .ymm3 0x00#8
+        , .vpclmulqdq .ymm5 .ymm2 .ymm3 0x11#8
+        , .vpclmulqdq .ymm6 .ymm2 .ymm3 0x01#8
+        , .vpclmulqdq .ymm7 .ymm2 .ymm3 0x10#8
+        , .vpxor .ymm6 .ymm6 .ymm7
+        , .vpslldq8 .ymm7 .ymm6
+        , .vpsrldq8 .ymm6 .ymm6
+        , .vpxor .ymm4 .ymm4 .ymm7
+        , .vpxor .ymm5 .ymm5 .ymm6
+        , .vpxor .ymm0 .ymm0 .ymm4
+        , .vpxor .ymm1 .ymm1 .ymm5
+        , .addImm64 .rsi 32#64
+        , .addImm64 .rdx 32#64 ] = some τ15 := by
+      rw [checkX86Block_cons s1, checkX86Block_cons s2,
+          checkX86Block_cons (rfl : checkX86Instr true τ2 _ = some τ3),
+          checkX86Block_cons (rfl : checkX86Instr true τ3 _ = some τ4),
+          checkX86Block_cons (rfl : checkX86Instr true τ4 _ = some τ5),
+          checkX86Block_cons (rfl : checkX86Instr true τ5 _ = some τ6),
+          checkX86Block_cons (rfl : checkX86Instr true τ6 _ = some τ7),
+          checkX86Block_cons (rfl : checkX86Instr true τ7 _ = some τ8),
+          checkX86Block_cons (rfl : checkX86Instr true τ8 _ = some τ9),
+          checkX86Block_cons (rfl : checkX86Instr true τ9 _ = some τ10),
+          checkX86Block_cons (rfl : checkX86Instr true τ10 _ = some τ11),
+          checkX86Block_cons (rfl : checkX86Instr true τ11 _ = some τ12),
+          checkX86Block_cons (rfl : checkX86Instr true τ12 _ = some τ13),
+          checkX86Block_cons (rfl : checkX86Instr true τ13 _ = some τ14),
+          checkX86Block_cons (rfl : checkX86Instr true τ14 _ = some τ15)]
+      rfl
+    dsimp only [checkX86Loop]
+    rw [hBlk]
+    obtain ⟨τ', h1, h2⟩ := ih τ15 hRsi hRdx
+    exact ⟨τ', h1, h2⟩
+
+/-- **Timing-Noninterference of `qsag_asm_tower128_bdoz_mac_vpclmul` for ALL `count : Nat`**: -/
+theorem tower128BdozVpclmul_constant_time
+    (count : Nat) (s₁ s₂ : X86State)
+    (hLow : X86LowEq (fun _ => .sec) sysvPtrArgs4Taint s₁ s₂) :
+    (execX86Prog (tower128BdozVpclmulProg count) 0 s₁).2 =
+      (execX86Prog (tower128BdozVpclmulProg count) 0 s₂).2 := by
+  let τPre := (sysvPtrArgs4Taint.setYmm .ymm0 .pub).setYmm .ymm1 .pub
+  obtain ⟨τLoop, hLoop, hRdi⟩ := checkX86Loop_vpclmul_invariant count τPre rfl rfl
+  have hRdiPub : τLoop.gpr .rdi = .pub := hRdi
+  have hSome : (checkX86Prog true sysvPtrArgs4Taint (tower128BdozVpclmulProg count)).isSome = true := by
+    dsimp only [tower128BdozVpclmulProg, checkX86Prog, checkX86Instr]
+    change (match checkX86Loop true count τPre _ with
+      | none => none
+      | some τ1 => _).isSome = true
+    rw [hLoop]
+    simp [X86TaintState.setGpr, X86TaintState.setYmm, hRdiPub]
+  rcases hOpt : checkX86Prog true sysvPtrArgs4Taint (tower128BdozVpclmulProg count) with _ | τEnd
+  · simp [hOpt] at hSome
+  · exact (x86_ct_checker_sound (fun _ => .sec) true (fun _ _ => rfl)
+      (tower128BdozVpclmulProg count) sysvPtrArgs4Taint τEnd 0 hOpt s₁ s₂ hLow).1
+
+private theorem bv64_shr_ge64_zero (x : BitVec 64) (s : Nat) (hs : s ≥ 64) :
+    x >>> s = 0#64 := by
+  apply BitVec.eq_of_toNat_eq
+  rw [BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]
+  have hPow : 2 ^ 64 ≤ 2 ^ s := Nat.pow_le_pow_right (by omega) hs
+  have hLt : x.toNat < 2 ^ s := Nat.lt_of_lt_of_le x.isLt hPow
+  simp [Nat.div_eq_of_lt hLt]
+
+/-- **Closed-Form Carryless `0x87` (`z⁷ + z² + z + 1`) Reduction Lemma & `< 128`-Bit Degree Bound**:
+    Proves that `(clmul64 c3 0x87#64).hi` equals `(c3 >>> 57) ^^^ (c3 >>> 62) ^^^ (c3 >>> 63)`
+    and strictly vanishes above bit 6 (`>>> 7 = 0#64`), guaranteeing that the 2-step `VPCLMULQDQ`
+    `0x87` modular fold produces a canonical `< 128`-bit remainder with zero high overflow! -/
+theorem clmul64_0x87_hi_degree_bound (c3 : BitVec 64) :
+    (clmul64 c3 0x87#64).hi = (c3 >>> 57) ^^^ (c3 >>> 62) ^^^ (c3 >>> 63) ∧
+    (clmul64 c3 0x87#64).hi >>> 7 = 0#64 := by
+  have hHi : (clmul64 c3 0x87#64).hi = (c3 >>> 57) ^^^ (c3 >>> 62) ^^^ (c3 >>> 63) := by
+    simp [clmul64, clmul64Step, Vec128.zero, BitVec.xor_assoc]
+  refine ⟨hHi, ?_⟩
+  have hShrShr (x : BitVec 64) (a b : Nat) : (x >>> a) >>> b = x >>> (a + b) := by
+    apply BitVec.eq_of_toNat_eq
+    rw [BitVec.toNat_ushiftRight, BitVec.toNat_ushiftRight, BitVec.toNat_ushiftRight,
+        Nat.shiftRight_eq_div_pow, Nat.shiftRight_eq_div_pow, Nat.shiftRight_eq_div_pow,
+        Nat.div_div_eq_div_mul, ← Nat.pow_add]
+  rw [hHi, bv_shr_xor, bv_shr_xor, hShrShr, hShrShr, hShrShr,
+      bv64_shr_ge64_zero c3 64 (by omega),
+      bv64_shr_ge64_zero c3 69 (by omega),
+      bv64_shr_ge64_zero c3 70 (by omega)]
+  rfl
+
+/-! ### 7.4 `goldilocks_mul_ct` (`x86_64` & `aarch64`): Universal `< p` Canonical Proof -/
+
+@[expose]
+def goldilocksPrime : Nat := 0xFFFFFFFF00000001
+
+/-- Goldilocks x86 kernel including its four-register scratch wipe. -/
+def goldilocksMulCtX86Prog : List X86Stmt :=
+  [ .instr (.movReg64 .rdx .rdi)
+  , .instr (.mulx64 .rcx .rax .rsi)
+  , .instr (.movReg64 .rdx .rcx)
+  , .instr (.shrImm64 .rcx 32)
+  , .instr (.mov32Zext .rdx .rdx)
+  , .instr (.sub64 .rax .rcx)
+  , .instr (.sbbSelf32Zext .r8)
+  , .instr (.sub64 .rax .r8)
+  , .instr (.movReg64 .r9 .rdx)
+  , .instr (.shlImm64 .r9 32)
+  , .instr (.sub64 .r9 .rdx)
+  , .instr (.add64 .rax .r9)
+  , .instr (.sbbSelf32Zext .r8)
+  , .instr (.add64 .rax .r8)
+  , .instr (.movImm64 .r9 0x00000000FFFFFFFF#64)
+  , .instr (.movReg64 .r8 .rax)
+  , .instr (.add64 .r8 .r9)
+  , .instr (.sbbSelf64 .rcx)
+  , .instr (.and64 .rcx .r9)
+  , .instr (.add64 .rax .rcx)
+  , .instr (.xor64 .rcx .rcx)
+  , .instr (.xor64 .rdx .rdx)
+  , .instr (.xor64 .r8 .r8)
+  , .instr (.xor64 .r9 .r9)
+  , .ret ]
+
+/-- Goldilocks ARM instruction stream, entered under the caller's DIT guard. -/
+def goldilocksMulCtArmProg : List ArmStmt :=
+  [ .instr (.mulLo64 .x2 .x0 .x1)
+  , .instr (.umulh64 .x3 .x0 .x1)
+  , .instr (.lsrImm64 .x4 .x3 32)
+  , .instr (.andImm64 .x5 .x3 0x00000000FFFFFFFF#64)
+  , .instr (.movImm64 .x6 0x00000000FFFFFFFF#64)
+  , .instr (.subs64 .x2 .x2 .x4)
+  , .instr (.sbcMask64 .x7)
+  , .instr (.and64 .x7 .x7 .x6)
+  , .instr (.sub64 .x2 .x2 .x7)
+  , .instr (.lslImm64 .x8 .x5 32)
+  , .instr (.sub64 .x8 .x8 .x5)
+  , .instr (.adds64 .x2 .x2 .x8)
+  , .instr (.adcZero64 .x7)
+  , .instr (.neg64 .x7 .x7)
+  , .instr (.and64 .x7 .x7 .x6)
+  , .instr (.add64 .x2 .x2 .x7)
+  , .instr (.adds64 .x8 .x2 .x6)
+  , .instr (.adcZero64 .x7)
+  , .instr (.neg64 .x7 .x7)
+  , .instr (.and64 .x7 .x7 .x6)
+  , .instr (.add64 .x0 .x2 .x7)
+  , .instr (.movImm64 .x2 0#64)
+  , .instr (.movImm64 .x3 0#64)
+  , .instr (.movImm64 .x4 0#64)
+  , .instr (.movImm64 .x5 0#64)
+  , .instr (.movImm64 .x6 0#64)
+  , .instr (.movImm64 .x7 0#64)
+  , .instr (.movImm64 .x8 0#64)
+  , .ret ]
+
+def glAllSecretX86Taint : X86TaintState :=
+  { gpr := fun _ => .sec
+    ymm := fun _ => .pub
+    cf := .sec, of := .sec, zf := .sec
+    doitAssumed := false, upperYmmClean := true }
+
+def glAllSecretArmTaint : ArmTaintState :=
+  { gpr := fun _ => .sec
+    neon := fun _ => .pub
+    z := .sec, c := .sec
+    ditAssumed := true }
+
+theorem goldilocksMulCtX86_constant_time
+    (s₁ s₂ : X86State)
+    (hLow : X86LowEq (fun _ => .sec) glAllSecretX86Taint s₁ s₂) :
+    (execX86Prog goldilocksMulCtX86Prog 0 s₁).2 = (execX86Prog goldilocksMulCtX86Prog 0 s₂).2 := by
+  have hChk : ∃ τOut, checkX86Prog true glAllSecretX86Taint goldilocksMulCtX86Prog = some τOut :=
+    ⟨_, rfl⟩
+  rcases hChk with ⟨τOut, hOpt⟩
+  exact (x86_ct_checker_sound (fun _ => .sec) true (fun _ _ => rfl)
+    goldilocksMulCtX86Prog glAllSecretX86Taint τOut 0 hOpt s₁ s₂ hLow).1
+
+theorem goldilocksMulCtArm_constant_time
+    (s₁ s₂ : ArmState)
+    (hLow : ArmLowEq (fun _ => .sec) glAllSecretArmTaint s₁ s₂) :
+    (execArmProg goldilocksMulCtArmProg 0 s₁).2 = (execArmProg goldilocksMulCtArmProg 0 s₂).2 := by
+  have hChk : ∃ τOut, checkArmProg true glAllSecretArmTaint goldilocksMulCtArmProg = some τOut :=
+    ⟨_, rfl⟩
+  rcases hChk with ⟨τOut, hOpt⟩
+  exact (arm_ct_checker_sound (fun _ => .sec) true (fun _ _ => rfl)
+    goldilocksMulCtArmProg glAllSecretArmTaint τOut 0 hOpt s₁ s₂ hLow).1
+
+private theorem bitvec64_and_mask32_toNat (x : BitVec 64) :
+    (x &&& 0x00000000FFFFFFFF#64).toNat = x.toNat % 4294967296 := by
+  change (x &&& BitVec.ofNat 64 (2 ^ 32 - 1)).toNat = x.toNat % 4294967296
+  rw [BitVec.toNat_and]
+  exact Constructive.and_mask x.toNat 32
+
+private theorem bitvec64_zext32_toNat (x : BitVec 64) :
+    ((x.truncate 32).zeroExtend 64).toNat = x.toNat % 4294967296 := by
+  simp; omega
+
+private theorem bitvec64_shl32_sub_self_toNat (u : BitVec 64) (hu : u.toNat < 4294967296) :
+    ((u <<< 32) - u).toNat = 4294967295 * u.toNat := by
+  have hShl : (u <<< 32).toNat = u.toNat * 4294967296 := by
+    rw [BitVec.toNat_shiftLeft]
+    have : u.toNat <<< 32 = u.toNat * 4294967296 := by
+      rw [Nat.shiftLeft_eq]
+    rw [this, Nat.mod_eq_of_lt (by omega)]
+  rw [BitVec.toNat_sub, hShl]
+  omega
+
+/-- Pure arithmetic soundness of the 3-step `sbb`/`sbc` Goldilocks reduction over **all**
+    `(a, b) ∈ [0, 2⁶⁴ - 1]²`, including `a = b = 2⁶⁴ - 1` (`0xFFFFFFFFFFFFFFFF`)! -/
+theorem goldilocks_reduce128_nat_sound (a b : Nat) (ha : a < 2 ^ 64) (hb : b < 2 ^ 64) :
+    let p := goldilocksPrime
+    let prod := a * b
+    let lo := prod % (2 ^ 64)
+    let hi := prod / (2 ^ 64)
+    let hiHi := hi / 4294967296
+    let hiLo := hi % 4294967296
+    let t1 := if lo < hiHi then lo + (2 ^ 64) - hiHi - 4294967295 else lo - hiHi
+    let mid := 4294967295 * hiLo
+    let t2 := if t1 + mid ≥ 2 ^ 64 then t1 + mid - (2 ^ 64) + 4294967295 else t1 + mid
+    let res := if t2 + 4294967295 ≥ 2 ^ 64 then t2 + 4294967295 - (2 ^ 64) else t2
+    res < p ∧ res = prod % p := by
+  have hProdBound : a * b ≤ (2 ^ 64 - 1) * (2 ^ 64 - 1) := Nat.mul_le_mul (by omega) (by omega)
+  dsimp only [goldilocksPrime]
+  generalize hProdEq : a * b = prod at hProdBound ⊢
+  generalize hLoEq : prod % (2 ^ 64) = lo
+  generalize hHiEq : prod / (2 ^ 64) = hi
+  have hLoLt : lo < 18446744073709551616 := by subst hLoEq; omega
+  have hHiLt : hi < 18446744073709551615 := by subst hHiEq; omega
+  have hProdDecomp : prod = lo + 18446744073709551616 * hi := by subst hLoEq hHiEq; omega
+  generalize hHiHiEq : hi / 4294967296 = hiHi
+  generalize hHiLoEq : hi % 4294967296 = hiLo
+  have hHiLoLt : hiLo < 4294967296 := by subst hHiLoEq; omega
+  have hHiHiLt : hiHi < 4294967296 := by subst hHiHiEq; omega
+  have hHiDecomp : hi = hiLo + 4294967296 * hiHi := by subst hHiLoEq hHiHiEq; omega
+  have hMidBound : 4294967295 * hiLo ≤ 4294967295 * 4294967295 := by omega
+  have hBoth :
+      let t1 := if lo < hiHi then lo + (2 ^ 64) - hiHi - 4294967295 else lo - hiHi
+      let mid := 4294967295 * hiLo
+      let t2 := if t1 + mid ≥ 2 ^ 64 then t1 + mid - (2 ^ 64) + 4294967295 else t1 + mid
+      let res := if t2 + 4294967295 ≥ 2 ^ 64 then t2 + 4294967295 - (2 ^ 64) else t2
+      res < 18446744069414584321 ∧ ∃ q : Nat, prod = 18446744069414584321 * q + res := by
+    dsimp only
+    by_cases h1 : lo < hiHi <;> simp only [h1, ↓reduceIte]
+    · by_cases h2 : lo + 2 ^ 64 - hiHi - 4294967295 + 4294967295 * hiLo ≥ 2 ^ 64 <;>
+        simp only [h2, ↓reduceIte]
+      · by_cases h3 : lo + 2 ^ 64 - hiHi - 4294967295 + 4294967295 * hiLo - 2 ^ 64 + 4294967295 +
+            4294967295 ≥ 2 ^ 64 <;> simp only [h3, ↓reduceIte]
+        · refine ⟨by omega, hiLo + 4294967297 * hiHi + 1, by omega⟩
+        · refine ⟨by omega, hiLo + 4294967297 * hiHi, by omega⟩
+      · by_cases h3 : lo + 2 ^ 64 - hiHi - 4294967295 + 4294967295 * hiLo + 4294967295 ≥ 2 ^ 64 <;>
+          simp only [h3, ↓reduceIte]
+        · refine ⟨by omega, hiLo + 4294967297 * hiHi, by omega⟩
+        · refine ⟨by omega, hiLo + 4294967297 * hiHi - 1, by omega⟩
+    · by_cases h2 : lo - hiHi + 4294967295 * hiLo ≥ 2 ^ 64 <;>
+        simp only [h2, ↓reduceIte]
+      · by_cases h3 : lo - hiHi + 4294967295 * hiLo - 2 ^ 64 + 4294967295 + 4294967295 ≥ 2 ^ 64 <;>
+          simp only [h3, ↓reduceIte]
+        · refine ⟨by omega, hiLo + 4294967297 * hiHi + 2, by omega⟩
+        · refine ⟨by omega, hiLo + 4294967297 * hiHi + 1, by omega⟩
+      · by_cases h3 : lo - hiHi + 4294967295 * hiLo + 4294967295 ≥ 2 ^ 64 <;>
+          simp only [h3, ↓reduceIte]
+        · refine ⟨by omega, hiLo + 4294967297 * hiHi + 1, by omega⟩
+        · refine ⟨by omega, hiLo + 4294967297 * hiHi, by omega⟩
+  rcases hBoth with ⟨hResLt, q, hq⟩
+  refine ⟨hResLt, ?_⟩
+  rw [hq, Nat.mul_add_mod, Nat.mod_eq_of_lt hResLt]
+
+def initGlX86State (a b : BitVec 64) : X86State :=
+  { gpr := fun r => if r == .rdi then a else if r == .rsi then b else 0#64
+    ymm := fun _ => Vec256.zero
+    flags := { cf := false, of := false, zf := false }
+    mem := fun _ => 0#64
+    doitEnabled := false
+    ymmUpperDirty := false }
+
+def initGlArmState (a b : BitVec 64) : ArmState :=
+  { gpr := fun r => if r == .x0 then a else if r == .x1 then b else 0#64
+    neon := fun _ => Vec128.zero
+    flags := { z := false, c := false }
+    mem := fun _ => 0#64
+    ditEnabled := false }
+
+private theorem x86_state_setGpr_gpr (s : X86State) (r q : X86Gpr) (v : BitVec 64) :
+    (s.setGpr r v).gpr q = if q == r then v else s.gpr q := rfl
+
+private theorem x86_state_setGpr_flags (s : X86State) (r : X86Gpr) (v : BitVec 64) :
+    (s.setGpr r v).flags = s.flags := rfl
+
+private theorem arm_state_setGpr_gpr (s : ArmState) (r q : ArmGpr) (v : BitVec 64) :
+    (s.setGpr r v).gpr q = if q == r then v else s.gpr q := rfl
+
+private theorem gl_step1_toNat (u v : BitVec 64) (hv : v.toNat < 4294967296) :
+    ((u - v) - (if decide (u.toNat < v.toNat) then 0x00000000FFFFFFFF#64 else 0#64)).toNat =
+    if u.toNat < v.toNat then u.toNat + (2 ^ 64) - v.toNat - 4294967295
+    else u.toNat - v.toNat := by
+  have hu : u.toNat < 2 ^ 64 := u.isLt
+  have hd : (0x00000000FFFFFFFF#64 : BitVec 64).toNat = 4294967295 := rfl
+  by_cases h : u.toNat < v.toNat <;>
+    simp only [h, decide_true, decide_false, Bool.false_eq_true, ↓reduceIte]
+  · rw [BitVec.toNat_sub, BitVec.toNat_sub, hd]; omega
+  · rw [BitVec.sub_zero, BitVec.toNat_sub]; omega
+
+private theorem gl_step2_toNat (t1 mid : BitVec 64) (hMid : mid.toNat ≤ 4294967295 * 4294967295) :
+    ((t1 + mid) +
+      (if decide (t1.toNat + mid.toNat ≥ 2 ^ 64) then 0x00000000FFFFFFFF#64 else 0#64)).toNat =
+    if t1.toNat + mid.toNat ≥ 2 ^ 64 then t1.toNat + mid.toNat - (2 ^ 64) + 4294967295
+    else t1.toNat + mid.toNat := by
+  have ht1 : t1.toNat < 2 ^ 64 := t1.isLt
+  have hd : (0x00000000FFFFFFFF#64 : BitVec 64).toNat = 4294967295 := rfl
+  by_cases h : t1.toNat + mid.toNat ≥ 2 ^ 64 <;>
+    simp only [h, decide_true, decide_false, Bool.false_eq_true, ↓reduceIte]
+  · rw [BitVec.toNat_add, BitVec.toNat_add, hd]; omega
+  · rw [BitVec.add_zero, BitVec.toNat_add]; omega
+
+private theorem gl_step3_toNat (t2 : BitVec 64) :
+    (t2 + ((if decide (t2.toNat + (0x00000000FFFFFFFF#64 : BitVec 64).toNat ≥ 2 ^ 64)
+            then 0xFFFFFFFFFFFFFFFF#64 else 0#64) &&& 0x00000000FFFFFFFF#64)).toNat =
+    if t2.toNat + 4294967295 ≥ 2 ^ 64 then t2.toNat + 4294967295 - (2 ^ 64)
+    else t2.toNat := by
+  have ht2 : t2.toNat < 2 ^ 64 := t2.isLt
+  have hd : (0x00000000FFFFFFFF#64 : BitVec 64).toNat = 4294967295 := rfl
+  have hmT : (0xFFFFFFFFFFFFFFFF#64 &&& 0x00000000FFFFFFFF#64 : BitVec 64) = 0x00000000FFFFFFFF#64 := rfl
+  have hmF : (0#64 &&& 0x00000000FFFFFFFF#64 : BitVec 64) = 0#64 := rfl
+  rw [hd]
+  by_cases h : t2.toNat + 4294967295 ≥ 2 ^ 64 <;>
+    simp only [h, decide_true, decide_false, Bool.false_eq_true, ↓reduceIte]
+  · rw [hmT, BitVec.toNat_add, hd]; omega
+  · rw [hmF, BitVec.add_zero]
+
+/-- **Universal Functional Correctness of `qsag_asm_goldilocks_mul_ct_x86_64`**:
+    For **all** `(a, b) : BitVec 64 × BitVec 64` (`[0, 2⁶⁴ - 1]²`), `rax` on return is strictly
+    canonical (`< p`) and equals `(a.toNat * b.toNat) % p`. -/
+theorem goldilocksMulCtX86_canonical_correct (a b : BitVec 64) :
+    let out := (execX86Prog goldilocksMulCtX86Prog 0 (initGlX86State a b)).1.gpr .rax
+    out.toNat < goldilocksPrime ∧ out.toNat = (a.toNat * b.toNat) % goldilocksPrime := by
+  have hArith := goldilocks_reduce128_nat_sound a.toNat b.toNat a.isLt b.isLt
+  have hProdBound : a.toNat * b.toNat ≤ (2 ^ 64 - 1) * (2 ^ 64 - 1) :=
+    Nat.mul_le_mul (by omega) (by omega)
+  let prod := a.toNat * b.toNat
+  let loBv := BitVec.ofNat 64 prod
+  let hiBv := BitVec.ofNat 64 (prod / (2 ^ 64))
+  have hLo : loBv.toNat = prod % (2 ^ 64) := BitVec.toNat_ofNat prod 64
+  have hHi : hiBv.toNat = prod / (2 ^ 64) := by
+    rw [BitVec.toNat_ofNat]; exact Nat.mod_eq_of_lt (by omega)
+  have hHiHi : (hiBv >>> 32).toNat = hiBv.toNat / 4294967296 := by
+    rw [BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]
+  have hHiLo : ((hiBv.truncate 32).zeroExtend 64).toNat = hiBv.toNat % 4294967296 :=
+    bitvec64_zext32_toNat hiBv
+  have hMid : ((((hiBv.truncate 32).zeroExtend 64) <<< 32) - ((hiBv.truncate 32).zeroExtend 64)).toNat =
+      4294967295 * (hiBv.toNat % 4294967296) := by
+    rw [bitvec64_shl32_sub_self_toNat _ (by rw [hHiLo]; omega), hHiLo]
+  have hMidLe : ((((hiBv.truncate 32).zeroExtend 64) <<< 32) - ((hiBv.truncate 32).zeroExtend 64)).toNat ≤
+      4294967295 * 4294967295 := by
+    rw [hMid]; have := Nat.mod_lt hiBv.toNat (by omega : 0 < 4294967296); omega
+  have hHiHiLt : (hiBv >>> 32).toNat < 4294967296 := by
+    rw [hHiHi]; have := hiBv.isLt; omega
+  have hEqNat :
+      ((execX86Prog goldilocksMulCtX86Prog 0 (initGlX86State a b)).1.gpr .rax).toNat =
+      (let lo := prod % (2 ^ 64)
+       let hi := prod / (2 ^ 64)
+       let hiHi := hi / 4294967296
+       let hiLo := hi % 4294967296
+       let t1 := if lo < hiHi then lo + (2 ^ 64) - hiHi - 4294967295 else lo - hiHi
+       let mid := 4294967295 * hiLo
+       let t2 := if t1 + mid ≥ 2 ^ 64 then t1 + mid - (2 ^ 64) + 4294967295 else t1 + mid
+       if t2 + 4294967295 ≥ 2 ^ 64 then t2 + 4294967295 - (2 ^ 64) else t2) := by
+    dsimp only [goldilocksMulCtX86Prog, execX86Prog, execX86Instr, initGlX86State]
+    simp only [x86_state_setGpr_gpr, beq_iff_eq, reduceCtorEq, ↓reduceIte]
+    change (
+      let s1 := loBv - (hiBv >>> 32)
+      let b1 := decide (loBv.toNat < (hiBv >>> 32).toNat)
+      let m1 : BitVec 64 := if b1 then 0x00000000FFFFFFFF#64 else 0#64
+      let t1Bv := s1 - m1
+      let rdxZ := (hiBv.truncate 32).zeroExtend 64
+      let midBv := (rdxZ <<< 32) - rdxZ
+      let s2 := t1Bv + midBv
+      let c2 := decide (t1Bv.toNat + midBv.toNat ≥ 2 ^ 64)
+      let m2 : BitVec 64 := if c2 then 0x00000000FFFFFFFF#64 else 0#64
+      let t2Bv := s2 + m2
+      let c3 := decide (t2Bv.toNat + (0x00000000FFFFFFFF#64 : BitVec 64).toNat ≥ 2 ^ 64)
+      let m3 : BitVec 64 := (if c3 then 0xFFFFFFFFFFFFFFFF#64 else 0#64) &&& 0x00000000FFFFFFFF#64
+      (t2Bv + m3).toNat) = _
+    dsimp only
+    rw [gl_step3_toNat, gl_step2_toNat _ _ hMidLe, hMid, gl_step1_toNat _ _ hHiHiLt, hLo, hHiHi, hHi]
+  dsimp only at hEqNat ⊢
+  rw [hEqNat]
+  exact hArith
+
+/-- **Universal Functional Correctness & Cross-ISA Equivalence of `qsag_asm_goldilocks_mul_ct_aarch64`**:
+    Proves that the `aarch64` `mul + umulh + subs/sbc + adds/adc` kernel (with ARM64 inverted
+    `PSTATE.C = !borrow` semantics!) returns the **exact same canonical `< p` field element** as
+    `qsag_asm_goldilocks_mul_ct_x86_64` across all $2^{128}$ input pairs `(a, b) : BitVec 64 × BitVec 64`! -/
+theorem goldilocksMulCt_x86_eq_arm (a b : BitVec 64) :
+    (execArmProg goldilocksMulCtArmProg 0 (initGlArmState a b)).1.gpr .x0 =
+      (execX86Prog goldilocksMulCtX86Prog 0 (initGlX86State a b)).1.gpr .rax := by
+  apply BitVec.eq_of_toNat_eq
+  let prod := a.toNat * b.toNat
+  let loBv := BitVec.ofNat 64 prod
+  let hiBv := BitVec.ofNat 64 (prod / (2 ^ 64))
+  have hAndEqZext : hiBv &&& 0x00000000FFFFFFFF#64 = (hiBv.truncate 32).zeroExtend 64 := by
+    apply BitVec.eq_of_toNat_eq
+    rw [bitvec64_and_mask32_toNat, bitvec64_zext32_toNat]
+  have hSbcMask (p : Bool) :
+      ((if p then 0#64 else 0xFFFFFFFFFFFFFFFF#64) &&& 0x00000000FFFFFFFF#64) =
+      (if !p then 0x00000000FFFFFFFF#64 else 0#64) := by
+    cases p <;> rfl
+  have hX86Mask (p : Bool) :
+      ((if p then 0xFFFFFFFFFFFFFFFF#64 else 0#64) &&& 0x00000000FFFFFFFF#64) =
+      (if p then 0x00000000FFFFFFFF#64 else 0#64) := by
+    cases p <;> rfl
+  have hAdcNegMask (p : Bool) :
+      ((0#64 - (if p then 1#64 else 0#64)) &&& 0x00000000FFFFFFFF#64) =
+      (if p then 0x00000000FFFFFFFF#64 else 0#64) := by
+    cases p <;> rfl
+  have hBorrowCmp :
+      (!decide (loBv.toNat ≥ (hiBv >>> 32).toNat)) = decide (loBv.toNat < (hiBv >>> 32).toNat) := by
+    generalize loBv.toNat = u
+    generalize (hiBv >>> 32).toNat = v
+    by_cases h : u < v
+    · have hge : ¬(u ≥ v) := by omega
+      simp only [h, hge, decide_true, decide_false]; rfl
+    · have hge : u ≥ v := by omega
+      simp only [h, hge, decide_true, decide_false]; rfl
+  dsimp only [goldilocksMulCtArmProg, execArmProg, execArmInstr, initGlArmState,
+              goldilocksMulCtX86Prog, execX86Prog, execX86Instr, initGlX86State]
+  simp only [arm_state_setGpr_gpr,
+             x86_state_setGpr_gpr,
+             beq_iff_eq, reduceCtorEq, ↓reduceIte]
+  change (
+    let s1 := loBv - (hiBv >>> 32)
+    let c1 := decide (loBv.toNat ≥ (hiBv >>> 32).toNat)
+    let m1 := (if c1 then 0#64 else 0xFFFFFFFFFFFFFFFF#64) &&& 0x00000000FFFFFFFF#64
+    let t1 := s1 - m1
+    let r5 := hiBv &&& 0x00000000FFFFFFFF#64
+    let mid := (r5 <<< 32) - r5
+    let s2 := t1 + mid
+    let c2 := decide (t1.toNat + mid.toNat ≥ 2 ^ 64)
+    let m2 := (0#64 - (if c2 then 1#64 else 0#64)) &&& 0x00000000FFFFFFFF#64
+    let t2 := s2 + m2
+    let c3 := decide (t2.toNat + (0x00000000FFFFFFFF#64 : BitVec 64).toNat ≥ 2 ^ 64)
+    let m3 := (0#64 - (if c3 then 1#64 else 0#64)) &&& 0x00000000FFFFFFFF#64
+    (t2 + m3).toNat) =
+    (let s1 := loBv - (hiBv >>> 32)
+     let b1 := decide (loBv.toNat < (hiBv >>> 32).toNat)
+     let m1 : BitVec 64 := if b1 then 0x00000000FFFFFFFF#64 else 0#64
+     let t1 := s1 - m1
+     let rdxZ := (hiBv.truncate 32).zeroExtend 64
+     let mid := (rdxZ <<< 32) - rdxZ
+     let s2 := t1 + mid
+     let c2 := decide (t1.toNat + mid.toNat ≥ 2 ^ 64)
+     let m2 : BitVec 64 := if c2 then 0x00000000FFFFFFFF#64 else 0#64
+     let t2 := s2 + m2
+     let c3 := decide (t2.toNat + (0x00000000FFFFFFFF#64 : BitVec 64).toNat ≥ 2 ^ 64)
+     let m3 : BitVec 64 := (if c3 then 0xFFFFFFFFFFFFFFFF#64 else 0#64) &&& 0x00000000FFFFFFFF#64
+     (t2 + m3).toNat)
+  dsimp only
+  rw [hSbcMask, hBorrowCmp, hAndEqZext, hAdcNegMask, hAdcNegMask, hX86Mask]
+
+/-! ### 7.5 `ct_eq_32` (`x86_64` & `aarch64`): Branchless 256-Bit BDOZ Tag Comparison -/
+
+/-- Branchless `((d ||| -d) >>> 63) ^^^ 1` zero-detection identity over **all** `d : BitVec 64`. -/
+theorem or_neg_shr63_xor1_eq_beq_zero (d : BitVec 64) :
+    (((d ||| (0#64 - d)) >>> 63) ^^^ 1#64) = (if d == 0#64 then 1#64 else 0#64) := by
+  by_cases hd : d = 0#64
+  · subst hd; rfl
+  · have hdBeq : (d == 0#64) = false := beq_false_of_ne hd
+    rw [hdBeq]; simp only [Bool.false_eq_true, ↓reduceIte]
+    have hdPos : 0 < d.toNat := by
+      have : d.toNat ≠ 0 := fun h0 => hd (BitVec.eq_of_toNat_eq h0)
+      omega
+    have hdLt : d.toNat < 2 ^ 64 := d.isLt
+    have hNegNat : (0#64 - d).toNat = 2 ^ 64 - d.toNat := by
+      rw [BitVec.toNat_sub]
+      change (18446744073709551616 - d.toNat + 0) % 18446744073709551616 = _
+      omega
+    have hOrGe : (d ||| (0#64 - d)).toNat ≥ 2 ^ 63 := by
+      rw [BitVec.toNat_or]
+      by_cases hHalf : d.toNat ≥ 2 ^ 63
+      · exact Nat.le_trans hHalf (Nat.left_le_or)
+      · have hNegHalf : (0#64 - d).toNat ≥ 2 ^ 63 := by omega
+        exact Nat.le_trans hNegHalf (Nat.right_le_or)
+    have hOrLt : (d ||| (0#64 - d)).toNat < 2 ^ 64 := (d ||| (0#64 - d)).isLt
+    have hShr1 : (d ||| (0#64 - d)) >>> 63 = 1#64 := by
+      apply BitVec.eq_of_toNat_eq
+      rw [BitVec.toNat_ushiftRight, Nat.shiftRight_eq_div_pow]
+      change (d ||| (0#64 - d)).toNat / (2 ^ 63) = 1
+      omega
+    rw [hShr1]; rfl
+
+/-- Straight-line 32-byte tag comparison program on `x86_64` (`qsag_asm_ct_eq_32_x86_64`). -/
+def ctEq32X86Prog : List X86Stmt :=
+  [ .instr (.load64 .rax .rdi 0#64)
+  , .instr (.xorMem64 .rax .rsi 0#64)
+  , .instr (.load64 .rcx .rdi 8#64)
+  , .instr (.xorMem64 .rcx .rsi 8#64)
+  , .instr (.load64 .rdx .rdi 16#64)
+  , .instr (.xorMem64 .rdx .rsi 16#64)
+  , .instr (.load64 .r8 .rdi 24#64)
+  , .instr (.xorMem64 .r8 .rsi 24#64)
+  , .instr (.or64 .rax .rcx)
+  , .instr (.or64 .rdx .r8)
+  , .instr (.or64 .rax .rdx)
+  , .instr (.movReg64 .rcx .rax)
+  , .instr (.neg64 .rcx)
+  , .instr (.or64 .rax .rcx)
+  , .instr (.shrImm64 .rax 63)
+  , .instr (.xorImm64 .rax 1#64)
+  , .instr (.xor64 .rcx .rcx)
+  , .instr (.xor64 .rdx .rdx)
+  , .instr (.xor64 .r8 .r8)
+  , .ret ]
+
+/-- ARM 32-byte equality model: the 22-instruction kernel with four paired loads
+    expanded into eight scalar loads (26 model statements). -/
+def ctEq32ArmProg : List ArmStmt :=
+  [ .instr (.ldr64 .x2 .x0 0#64)
+  , .instr (.ldr64 .x3 .x0 8#64)
+  , .instr (.ldr64 .x4 .x1 0#64)
+  , .instr (.ldr64 .x5 .x1 8#64)
+  , .instr (.eor64 .x2 .x2 .x4)
+  , .instr (.eor64 .x3 .x3 .x5)
+  , .instr (.orr64 .x2 .x2 .x3)
+  , .instr (.ldr64 .x4 .x0 16#64)
+  , .instr (.ldr64 .x5 .x0 24#64)
+  , .instr (.ldr64 .x6 .x1 16#64)
+  , .instr (.ldr64 .x7 .x1 24#64)
+  , .instr (.eor64 .x4 .x4 .x6)
+  , .instr (.eor64 .x5 .x5 .x7)
+  , .instr (.orr64 .x4 .x4 .x5)
+  , .instr (.orr64 .x2 .x2 .x4)
+  , .instr (.neg64 .x3 .x2)
+  , .instr (.orr64 .x2 .x2 .x3)
+  , .instr (.lsrImm64 .x0 .x2 63)
+  , .instr (.eorImm64 .x0 .x0 1#64)
+  , .instr (.movImm64 .x2 0#64)
+  , .instr (.movImm64 .x3 0#64)
+  , .instr (.movImm64 .x4 0#64)
+  , .instr (.movImm64 .x5 0#64)
+  , .instr (.movImm64 .x6 0#64)
+  , .instr (.movImm64 .x7 0#64)
+  , .ret ]
+
+theorem ctEq32X86_constant_time
+    (s₁ s₂ : X86State)
+    (hLow : X86LowEq (fun _ => .sec) sysvPtrArgs4Taint s₁ s₂) :
+    (execX86Prog ctEq32X86Prog 0 s₁).2 = (execX86Prog ctEq32X86Prog 0 s₂).2 := by
+  have hChk : ∃ τOut, checkX86Prog true sysvPtrArgs4Taint ctEq32X86Prog = some τOut := ⟨_, rfl⟩
+  rcases hChk with ⟨τOut, hOpt⟩
+  exact (x86_ct_checker_sound (fun _ => .sec) true (fun _ _ => rfl)
+    ctEq32X86Prog sysvPtrArgs4Taint τOut 0 hOpt s₁ s₂ hLow).1
+
+theorem ctEq32Arm_constant_time
+    (s₁ s₂ : ArmState)
+    (hLow : ArmLowEq (fun _ => .sec) aapcsPtrArgs3Taint s₁ s₂) :
+    (execArmProg ctEq32ArmProg 0 s₁).2 = (execArmProg ctEq32ArmProg 0 s₂).2 := by
+  have hChk : ∃ τOut, checkArmProg true aapcsPtrArgs3Taint ctEq32ArmProg = some τOut := ⟨_, rfl⟩
+  rcases hChk with ⟨τOut, hOpt⟩
+  exact (arm_ct_checker_sound (fun _ => .sec) true (fun _ _ => rfl)
+    ctEq32ArmProg aapcsPtrArgs3Taint τOut 0 hOpt s₁ s₂ hLow).1
+
+private theorem arm_setGpr_gpr (s : ArmState) (r q : ArmGpr) (v : BitVec 64) :
+    (s.setGpr r v).gpr q = if q == r then v else s.gpr q := rfl
+
+private theorem arm_setGpr_mem (s : ArmState) (r : ArmGpr) (v : BitVec 64) :
+    (s.setGpr r v).mem = s.mem := rfl
+
+/-- **256-Bit Functional Soundness of `ctEq32ArmProg`**:
+    Returns `1#64` iff all four 64-bit limbs of `[x0 + 0..24]` equal `[x1 + 0..24]`, `0#64` otherwise,
+    and wipes all scratch registers `x2..x7` to `0#64`! -/
+theorem ctEq32Arm_functional_correct (st : ArmState) :
+    let outSt := (execArmProg ctEq32ArmProg 0 st).1
+    let pA := st.gpr .x0
+    let pB := st.gpr .x1
+    let eqAll :=
+      (st.mem pA == st.mem pB) &&
+      (st.mem (pA + 8#64) == st.mem (pB + 8#64)) &&
+      (st.mem (pA + 16#64) == st.mem (pB + 16#64)) &&
+      (st.mem (pA + 24#64) == st.mem (pB + 24#64))
+    outSt.gpr .x0 = (if eqAll then 1#64 else 0#64) ∧
+    outSt.gpr .x2 = 0#64 ∧ outSt.gpr .x7 = 0#64 := by
+  have hOrZero (u v : BitVec 64) : ((u ||| v) == 0#64) = ((u == 0#64) && (v == 0#64)) := by
+    by_cases hu : u = 0#64 <;> by_cases hv : v = 0#64
+    · subst hu hv; rfl
+    · subst hu; simp [beq_false_of_ne hv]
+    · subst hv; simp [beq_false_of_ne hu]
+    · have huv : u ||| v ≠ 0#64 := by
+        intro h0
+        apply hu
+        apply BitVec.eq_of_getLsbD_eq
+        intro i _
+        have := congrArg (fun z => z.getLsbD i) h0
+        simp at this; simp [this.1]
+      simp [beq_false_of_ne hu, beq_false_of_ne hv, beq_false_of_ne huv]
+  have hXorZero (u v : BitVec 64) : ((u ^^^ v) == 0#64) = (u == v) := by
+    by_cases h : u = v
+    · subst h; simp
+    · have hne : u ^^^ v ≠ 0#64 := by
+        intro h0; apply h
+        have := congrArg (fun z => z ^^^ v) h0
+        simpa [BitVec.xor_assoc] using this
+      have hb : (u == v) = false := beq_false_of_ne h
+      simp [hb, beq_false_of_ne hne]
+  dsimp only [ctEq32ArmProg, execArmProg, execArmInstr]
+  simp only [arm_setGpr_gpr, arm_setGpr_mem, beq_iff_eq, reduceCtorEq, ↓reduceIte]
+  refine ⟨?_, trivial, trivial⟩
+  rw [or_neg_shr63_xor1_eq_beq_zero]
+  simp only [BitVec.add_zero, hOrZero, hXorZero, Bool.and_assoc]
+
+
+/-- Secret UMULH requires DIT; without it both operands enter the leakage trace. -/
+theorem tooth_arm_umulh_requires_dit (st : ArmState) (h : st.ditEnabled = false) :
+    checkArmInstr true { glAllSecretArmTaint with ditAssumed := false }
+      (.umulh64 .x2 .x0 .x1) = none ∧
+    (execArmInstr (.umulh64 .x2 .x0 .x1) 0 st).2.varLatencyOperands =
+      [st.gpr .x0, st.gpr .x1] := by
+  exact ⟨rfl, by simp [execArmInstr, h]⟩
+
+/-- The actual kernel stream cannot manufacture its caller's DIT guard. -/
+theorem tooth_goldilocks_arm_entry_requires_dit :
+    checkArmProg true { glAllSecretArmTaint with ditAssumed := false }
+      goldilocksMulCtArmProg = none := by rfl
+
+theorem tooth_secret_pmull_requires_dit :
+    checkArmInstr true
+      { glAllSecretArmTaint with neon := fun _ => .sec, ditAssumed := false }
+      (.pmull1q .v0 .v1 .v2) = none := by rfl
+
+private theorem x86_state_setGpr_mem (s : X86State) (r : X86Gpr) (v : BitVec 64) :
+    (s.setGpr r v).mem = s.mem := rfl
+
+theorem ctEq32X86_functional_correct (st : X86State) :
+    let outSt := (execX86Prog ctEq32X86Prog 0 st).1
+    let pA := st.gpr .rdi
+    let pB := st.gpr .rsi
+    let eqAll :=
+      (st.mem pA == st.mem pB) &&
+      (st.mem (pA + 8#64) == st.mem (pB + 8#64)) &&
+      (st.mem (pA + 16#64) == st.mem (pB + 16#64)) &&
+      (st.mem (pA + 24#64) == st.mem (pB + 24#64))
+    outSt.gpr .rax = (if eqAll then 1#64 else 0#64) ∧
+    outSt.gpr .rcx = 0#64 ∧ outSt.gpr .rdx = 0#64 ∧
+    outSt.gpr .r8 = 0#64 ∧ outSt.gpr .r9 = st.gpr .r9 := by
+  have hOrZero (u v : BitVec 64) : ((u ||| v) == 0#64) = ((u == 0#64) && (v == 0#64)) := by
+    by_cases hu : u = 0#64 <;> by_cases hv : v = 0#64
+    · subst hu hv; rfl
+    · subst hu; simp [beq_false_of_ne hv]
+    · subst hv; simp [beq_false_of_ne hu]
+    · have huv : u ||| v ≠ 0#64 := by
+        intro h0
+        apply hu
+        apply BitVec.eq_of_getLsbD_eq
+        intro i _
+        have := congrArg (fun z => z.getLsbD i) h0
+        simp at this; simp [this.1]
+      simp [beq_false_of_ne hu, beq_false_of_ne hv, beq_false_of_ne huv]
+  have hXorZero (u v : BitVec 64) : ((u ^^^ v) == 0#64) = (u == v) := by
+    by_cases h : u = v
+    · subst h; simp
+    · have hne : u ^^^ v ≠ 0#64 := by
+        intro h0; apply h
+        have := congrArg (fun z => z ^^^ v) h0
+        simpa [BitVec.xor_assoc] using this
+      have hb : (u == v) = false := beq_false_of_ne h
+      simp [hb, beq_false_of_ne hne]
+  dsimp only [ctEq32X86Prog, execX86Prog, execX86Instr]
+  simp only [x86_state_setGpr_gpr, x86_state_setGpr_mem, beq_iff_eq, reduceCtorEq, ↓reduceIte]
+  refine ⟨?_, trivial, trivial, trivial, trivial⟩
+  rw [or_neg_shr63_xor1_eq_beq_zero]
+  simp only [BitVec.add_zero, hOrZero, hXorZero, Bool.and_assoc]
+
+
+
+/-- Every x86 Goldilocks scratch register is wiped, for arbitrary initial state. -/
+theorem goldilocksMulCtX86_scratch_zero (st : X86State) :
+    (execX86Prog goldilocksMulCtX86Prog 0 st).1.gpr .rcx = 0#64 ∧
+    (execX86Prog goldilocksMulCtX86Prog 0 st).1.gpr .rdx = 0#64 ∧
+    (execX86Prog goldilocksMulCtX86Prog 0 st).1.gpr .r8 = 0#64 ∧
+    (execX86Prog goldilocksMulCtX86Prog 0 st).1.gpr .r9 = 0#64 := ⟨rfl, rfl, rfl, rfl⟩
+
+/-- Every ARM Goldilocks scratch register is wiped, for arbitrary initial state. -/
+theorem goldilocksMulCtArm_scratch_zero (st : ArmState) :
+    (execArmProg goldilocksMulCtArmProg 0 st).1.gpr .x2 = 0#64 ∧
+    (execArmProg goldilocksMulCtArmProg 0 st).1.gpr .x3 = 0#64 ∧
+    (execArmProg goldilocksMulCtArmProg 0 st).1.gpr .x4 = 0#64 ∧
+    (execArmProg goldilocksMulCtArmProg 0 st).1.gpr .x5 = 0#64 ∧
+    (execArmProg goldilocksMulCtArmProg 0 st).1.gpr .x6 = 0#64 ∧
+    (execArmProg goldilocksMulCtArmProg 0 st).1.gpr .x7 = 0#64 ∧
+    (execArmProg goldilocksMulCtArmProg 0 st).1.gpr .x8 = 0#64 := ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- Address cancellation, including wrapping 64-bit address arithmetic. -/
+private theorem addr_eq_offset (a i j : BitVec 64) :
+    ((a + i) == (a + j)) = (i == j) := by
+  apply Bool.eq_iff_iff.mpr
+  simp only [beq_iff_eq]
+  constructor
+  · intro h
+    have := congrArg (fun x => x - a) h
+    simpa [BitVec.add_comm, BitVec.add_sub_cancel] using this
+  · intro h; rw [h]
+
+private theorem readMem256_writeMem256 (st : X86State) (a : BitVec 64) (v : Vec256) :
+    (st.writeMem256 a v).readMem256 a = v := by
+  have h0 : a = a + 0#64 := by simp
+  simp only [X86State.readMem256, X86State.writeMem256, X86State.writeMem64]
+  conv => lhs; rw [h0]
+  simp only [BitVec.add_assoc, addr_eq_offset]
+  rfl
+
+set_option maxRecDepth 8192 in
+/-- Executing one guarded GFNI block writes all 32 tower-field products.
+    All inputs are loaded before the store, so this also holds for aliased buffers. -/
+theorem gf256ShamirMulGfni_exec_1block_correct (st : X86State) (idx : Fin 32) :
+    ((execX86Prog (gf256ShamirMulGfniProg 1) 0 st).1.readMem256 (st.gpr .rdi)).getByte idx =
+      towerGf256Mul ((st.readMem256 (st.gpr .rsi)).getByte idx)
+        ((st.readMem256 (st.gpr .rdx)).getByte idx) := by
+  let va := st.readMem256 (st.gpr .rsi)
+  let vb := st.readMem256 (st.gpr .rdx)
+  let result := Vec256.gfniAffine0
+      (Vec256.gfniMul (Vec256.gfniAffine0 va (Vec256.broadcastQ gfniTowerToPolyMat))
+        (Vec256.gfniAffine0 vb (Vec256.broadcastQ gfniTowerToPolyMat)))
+      (Vec256.broadcastQ gfniPolyToTowerMat)
+  have hm : (execX86Prog (gf256ShamirMulGfniProg 1) 0 st).1.mem =
+      (st.writeMem256 (st.gpr .rdi) result).mem := by
+    simp only [gf256ShamirMulGfniProg, execX86Prog, execX86Loop, execX86Block, execX86Instr,
+      X86State.setGpr, X86State.setYmm, X86State.writeMem256, X86State.writeMem64,
+      beq_self_eq_true, ↓reduceIte, BitVec.add_zero]
+    rfl
+  change (X86State.readMem256 _ _).getByte idx = _
+  have hr : (execX86Prog (gf256ShamirMulGfniProg 1) 0 st).1.readMem256 (st.gpr .rdi) = result := by
+    change (⟨_, _, _, _⟩ : Vec256) = _
+    simp only [hm]
+    exact readMem256_writeMem256 st (st.gpr .rdi) result
+  rw [hr]
+  exact gf256ShamirMulGfni_32lane_correct va vb idx
+
+/-- The 256-bit RSS share-lane expression computed by the AVX2 kernel. -/
+abbrev keccakChiMpcLane256 := keccakChiMpcShareVec256
+
+set_option maxRecDepth 16384 in
+set_option maxHeartbeats 2000000 in
+/-- The actual program stores the RSS chi result in output lane zero.
+    Later stores use distinct offsets even under wrapping address arithmetic;
+    no disjointness assumption on input and output buffers is needed for this lane. -/
+theorem keccakChiMpcAvx2_exec_lane0_correct (st : X86State) :
+    (execX86Prog keccakChiMpcAvx2Prog 0 st).1.readMem256 (st.gpr .rdi) =
+      keccakChiMpcLane256
+        (st.readMem256 (st.gpr .rsi))
+        (st.readMem256 (st.gpr .rsi + 32#64))
+        (st.readMem256 (st.gpr .rsi + 64#64))
+        (st.readMem256 (st.gpr .rdx + 32#64))
+        (st.readMem256 (st.gpr .rdx + 64#64))
+        (st.readMem256 (st.gpr .rcx)) := by
+  let a := st.gpr .rdi
+  let v0 := (execX86Prog (keccakChiMpcAvx2Prog.take 17) 0 st).1.ymm .ymm10
+  let v1 := (execX86Prog (keccakChiMpcAvx2Prog.take 25) 0 st).1.ymm .ymm10
+  let v2 := (execX86Prog (keccakChiMpcAvx2Prog.take 33) 0 st).1.ymm .ymm10
+  let v3 := (execX86Prog (keccakChiMpcAvx2Prog.take 41) 0 st).1.ymm .ymm10
+  let v4 := (execX86Prog (keccakChiMpcAvx2Prog.take 49) 0 st).1.ymm .ymm10
+  have hm : (execX86Prog keccakChiMpcAvx2Prog 0 st).1.mem =
+      (((((st.writeMem256 (a + 0#64) v0).writeMem256 (a + 32#64) v1).writeMem256
+        (a + 64#64) v2).writeMem256 (a + 96#64) v3).writeMem256 (a + 128#64) v4).mem := by
+    rfl
+  have frame (u0 u1 u2 u3 u4 : Vec256) :
+      (((((st.writeMem256 (a + 0#64) u0).writeMem256 (a + 32#64) u1).writeMem256
+        (a + 64#64) u2).writeMem256 (a + 96#64) u3).writeMem256 (a + 128#64) u4).readMem256 a = u0 := by
+    simp [X86State.readMem256, X86State.writeMem256, X86State.writeMem64,
+      BitVec.add_assoc, BitVec.self_eq_add_right]
+  have hr : (execX86Prog keccakChiMpcAvx2Prog 0 st).1.readMem256 a = v0 := by
+    change (⟨_, _, _, _⟩ : Vec256) = _
+    simp only [hm]
+    exact frame v0 v1 v2 v3 v4
+  rw [hr]
+  simp only [v0, keccakChiMpcAvx2Prog, List.take, execX86Prog, execX86Instr,
+    X86State.setYmm, beq_iff_eq, reduceCtorEq, ↓reduceIte, BitVec.add_zero]
+  rfl
+
+end Qsag.ConstantTimeIsa
