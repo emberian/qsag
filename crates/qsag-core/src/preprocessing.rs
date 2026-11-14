@@ -2078,6 +2078,65 @@ fn derive_extractor_matrix_128x384(
     mat
 }
 
+/// Bulk two-lane BDOZ inner product in the protocol's tower basis.
+/// Converts both inputs through the exact field isomorphism before dispatch;
+/// backend failures propagate without accepting a partial check.
+pub fn batch_bdoz_gf2128_dot(
+    backend: &dyn qsag_accel::AcceleratorBackend,
+    shares: &[[u128; 2]],
+    weights: &[[u128; 2]],
+) -> Result<[u128; 2], qsag_accel::AccelError> {
+    if shares.len() != weights.len() {
+        return Err(qsag_accel::AccelError::LengthMismatch {
+            what: "BDOZ weights",
+            expected: shares.len(),
+            actual: weights.len(),
+        });
+    }
+    let convert = |input: &[[u128; 2]]| {
+        let mut converted = SecretBuffer(Vec::with_capacity(input.len()));
+        for chunk in input.chunks(32) {
+            let mut flat = SecretBuffer([0u128; 64]);
+            flat[..chunk.len() * 2].copy_from_slice(chunk.as_flattened());
+            qsag_asm::tower128_to_poly128_x64_ct(&mut flat);
+            converted.extend((0..chunk.len()).map(|i| (flat[2 * i], flat[2 * i + 1])));
+        }
+        converted
+    };
+    let shares = convert(shares);
+    let weights = convert(weights);
+    let result = SecretBuffer(backend.bdoz_gf2_128_batch_dot(&shares, &weights)?);
+    Ok([
+        qsag_asm::poly128_to_tower128_ct(result.0.0),
+        qsag_asm::poly128_to_tower128_ct(result.0.1),
+    ])
+}
+
+/// Visit disjoint slots in deterministic index order within each worker.
+fn parallel_slots<T: Send, F: Fn(usize, &mut T) + Sync>(slots: &mut [T], f: F) {
+    #[cfg(feature = "std")]
+    {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(12);
+        let chunk_len = slots.len().div_ceil(workers).max(1);
+        std::thread::scope(|scope| {
+            for (chunk, values) in slots.chunks_mut(chunk_len).enumerate() {
+                let f = &f;
+                scope.spawn(move || {
+                    for (offset, value) in values.iter_mut().enumerate() {
+                        f(chunk * chunk_len + offset, value);
+                    }
+                });
+            }
+        });
+    }
+    #[cfg(not(feature = "std"))]
+    for (index, value) in slots.iter_mut().enumerate() {
+        f(index, value);
+    }
+}
+
 /// Fast single-block `keccak_f1600` PRF (`0` heap allocations!) for the 4-ciphertext parity combiner.
 #[inline]
 fn combiner_step_hash32(
@@ -2089,6 +2148,25 @@ fn combiner_step_hash32(
     label_a: &[u8; 32],
     seed_b: &[u8; 32],
 ) -> [u8; 32] {
+    let mut st = combiner_step_state(session_id, row_idx, step_idx, beta, gamma, label_a, seed_b);
+    keccak_f1600(&mut st);
+    let mut out = [0u8; 32];
+    for i in 0..4 {
+        out[8 * i..8 * i + 8].copy_from_slice(&st[i].to_le_bytes());
+    }
+    wipe_u64s(&mut st);
+    out
+}
+
+fn combiner_step_state(
+    session_id: &[u8; 32],
+    row_idx: usize,
+    step_idx: usize,
+    beta: u8,
+    gamma: u8,
+    label_a: &[u8; 32],
+    seed_b: &[u8; 32],
+) -> [u64; 25] {
     let mut st = [0u64; 25];
     st[0] = u64::from_le_bytes(*b"QSAG.OT.");
     st[1] = u64::from_le_bytes(*b"PARCOMB1");
@@ -2108,13 +2186,29 @@ fn combiner_step_hash32(
         ((row_idx as u64) << 32) | ((step_idx as u64) << 8) | ((beta as u64) << 1) | (gamma as u64);
     st[15] = 0x1f;
     st[16] = 0x8000_0000_0000_0000;
-    keccak_f1600(&mut st);
-    let mut out = [0u8; 32];
-    for i in 0..4 {
-        out[8 * i..8 * i + 8].copy_from_slice(&st[i].to_le_bytes());
-    }
-    wipe_u64s(&mut st);
-    out
+    st
+}
+
+fn combiner_step_hash32_x4(
+    session_id: &[u8; 32],
+    row: usize,
+    step: usize,
+    labels: &([u8; 32], [u8; 32]),
+    seeds: &([u8; 32], [u8; 32]),
+) -> [[u8; 32]; 4] {
+    let mut states = SecretBuffer(core::array::from_fn::<_, 4, _>(|slot| {
+        combiner_step_state(
+            session_id,
+            row,
+            step,
+            (slot / 2) as u8,
+            (slot % 2) as u8,
+            if slot / 2 == 0 { &labels.0 } else { &labels.1 },
+            if slot % 2 == 0 { &seeds.0 } else { &seeds.1 },
+        )
+    }));
+    qsag_asm::keccak_f1600_batch(&mut states[..]);
+    core::array::from_fn(|slot| core::array::from_fn(|b| states[slot][b / 8].to_le_bytes()[b % 8]))
 }
 
 #[inline]
@@ -2672,29 +2766,39 @@ impl BaseOtExtSenderRound1 {
             });
         }
         let mut base_seeds = SecretBuffer(vec![[0u8; 32]; RLWE_BASE_OT_COUNT]);
+        let mut results = (0..RLWE_BASE_OT_COUNT)
+            .map(|_| (SecretBuffer([0u8; 32]), Ok(0u8)))
+            .collect::<Vec<_>>();
+        parallel_slots(&mut results, |m, result| {
+            result.1 = (|| {
+                let a_ntt = RlwePoly::from_crs_xof_with_coin(
+                    &self.crs_coin,
+                    &self.session_id,
+                    self.ext_receiver_id,
+                    self.ext_sender_id,
+                    m as u32,
+                    0,
+                )
+                .to_ntt();
+                let t_crs = RlwePoly::from_crs_xof_with_coin(
+                    &self.crs_coin,
+                    &self.session_id,
+                    self.ext_receiver_id,
+                    self.ext_sender_id,
+                    m as u32,
+                    1,
+                );
+                let (seed_m, ok_m) =
+                    rlwe_ot_decrypt_ct_mask(&self.sec_states[m], &a_ntt, &t_crs, &msg2.resps[m])?;
+                *result.0 = seed_m;
+                Ok::<_, PreprocessError>(ok_m)
+            })();
+        });
         let mut all_ok = 1u8;
-        for (m, base_seeds_m_item) in base_seeds[..RLWE_BASE_OT_COUNT].iter_mut().enumerate() {
-            let a_ntt = RlwePoly::from_crs_xof_with_coin(
-                &self.crs_coin,
-                &self.session_id,
-                self.ext_receiver_id,
-                self.ext_sender_id,
-                m as u32,
-                0,
-            )
-            .to_ntt();
-            let t_crs = RlwePoly::from_crs_xof_with_coin(
-                &self.crs_coin,
-                &self.session_id,
-                self.ext_receiver_id,
-                self.ext_sender_id,
-                m as u32,
-                1,
-            );
-            let (seed_m, ok_m) =
-                rlwe_ot_decrypt_ct_mask(&self.sec_states[m], &a_ntt, &t_crs, &msg2.resps[m])?;
-            *base_seeds_m_item = seed_m;
-            all_ok &= ok_m;
+        for (m, result) in results.into_iter().enumerate() {
+            let (seed, ok) = result;
+            base_seeds[m] = *seed;
+            all_ok &= ok?;
         }
         if black_box(all_ok) == 0 {
             return Err(PreprocessError::BaseOtFoCheckFailed {
@@ -2766,7 +2870,8 @@ impl BaseOtExtReceiverRound2 {
                 receiver_id: ext_sender_id,
             });
         }
-        for blk in 0..RLWE_BASE_OT_BLOCKS {
+        let mut proof_valid = [false; RLWE_BASE_OT_BLOCKS];
+        parallel_slots(&mut proof_valid, |blk, valid| {
             let m0 = (blk * RLWE_BASE_OT_SLOTS_PER_BLOCK) as u32;
             let a0_ntt = RlwePoly::from_crs_xof_with_coin(
                 &crs_coin,
@@ -2785,7 +2890,7 @@ impl BaseOtExtReceiverRound2 {
                 m0,
                 1,
             );
-            if !msg1.block_poks[blk].verify(
+            *valid = msg1.block_poks[blk].verify(
                 &crs_coin,
                 &session_id,
                 ext_receiver_id,
@@ -2794,20 +2899,31 @@ impl BaseOtExtReceiverRound2 {
                 &a0_ntt,
                 &t0,
                 &msg1.pk0s[m0 as usize],
-            ) {
-                return Err(PreprocessError::BaseOtReceiverProofFailed {
-                    sender_id: ext_receiver_id,
-                    receiver_id: ext_sender_id,
-                });
-            }
+            );
+        });
+        if proof_valid.iter().any(|valid| !valid) {
+            return Err(PreprocessError::BaseOtReceiverProofFailed {
+                sender_id: ext_receiver_id,
+                receiver_id: ext_sender_id,
+            });
         }
-        let mut base_seed_pairs = Vec::with_capacity(RLWE_BASE_OT_COUNT);
-        let mut resps = Vec::with_capacity(RLWE_BASE_OT_COUNT);
-        for (m, pk0) in msg1.pk0s.iter().enumerate() {
-            let s0 = receiver_rng.next_bytes32();
-            let s1 = receiver_rng.next_bytes32();
-            let mut rho0 = receiver_rng.next_bytes32();
-            let mut rho1 = receiver_rng.next_bytes32();
+        // Preserve the RNG schedule independently of worker scheduling.
+        let mut seeds = SecretBuffer(
+            (0..RLWE_BASE_OT_COUNT)
+                .map(|_| {
+                    [
+                        receiver_rng.next_bytes32(),
+                        receiver_rng.next_bytes32(),
+                        receiver_rng.next_bytes32(),
+                        receiver_rng.next_bytes32(),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        );
+        let mut results = (0..RLWE_BASE_OT_COUNT).map(|_| None).collect::<Vec<_>>();
+        parallel_slots(&mut results, |m, result| {
+            let pk0 = &msg1.pk0s[m];
+            let [mut s0, mut s1, mut rho0, mut rho1] = seeds[m];
             let a_ntt = RlwePoly::from_crs_xof_with_coin(
                 &crs_coin,
                 &session_id,
@@ -2852,9 +2968,21 @@ impl BaseOtExtReceiverRound2 {
             );
             wipe_bytes32(&mut rho0);
             wipe_bytes32(&mut rho1);
-            base_seed_pairs.push((s0, s1));
-            resps.push(RlweOtSenderMsg { u0, v0, u1, v1 });
+            wipe_bytes32(&mut s0);
+            wipe_bytes32(&mut s1);
+            *result = Some(RlweOtSenderMsg { u0, v0, u1, v1 });
+        });
+        let mut base_seed_pairs = Vec::with_capacity(RLWE_BASE_OT_COUNT);
+        for seed in seeds.iter_mut() {
+            base_seed_pairs.push((seed[0], seed[1]));
+            for value in seed {
+                wipe_bytes32(value);
+            }
         }
+        let resps = results
+            .into_iter()
+            .map(|r| r.expect("every slot is evaluated"))
+            .collect();
         let my_coin_share = receiver_rng.next_bytes32();
         let combiner_prf_seed = receiver_rng.next_bytes32();
         let receiver_coin_commit = commit_combiner_coin_share(
@@ -2916,16 +3044,28 @@ impl BaseOtExtReceiverRound2 {
             PartyPrivateRng::from_seed(self.combiner_prf_seed, b"QSAG.OT.PARCOMB.RNG/v1");
         wipe_bytes32(&mut self.combiner_prf_seed);
 
-        let mut combined_seed_pairs = [([0u8; 32], [0u8; 32]); 128];
-        let mut parity_tables = Vec::with_capacity(128);
-
-        for row in 0..128 {
-            let mut support = Vec::with_capacity(192);
-            for m in 0..RLWE_BASE_OT_COUNT {
-                if ((extractor[row][m / 64] >> (m % 64)) & 1) == 1 {
-                    support.push(m);
-                }
-            }
+        let supports: Vec<Vec<usize>> = extractor
+            .iter()
+            .map(|bits| {
+                (0..RLWE_BASE_OT_COUNT)
+                    .filter(|&m| ((bits[m / 64] >> (m % 64)) & 1) == 1)
+                    .collect()
+            })
+            .collect();
+        // Draw all masks in the original row/step order before scheduling work.
+        let masks = SecretBuffer(
+            supports
+                .iter()
+                .map(|support| {
+                    (1..support.len())
+                        .map(|_| (comb_rng.next_bytes32(), comb_rng.next_bytes32()))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+        );
+        let mut rows = SecretBuffer(vec![(([0u8; 32], [0u8; 32]), Vec::new()); 128]);
+        parallel_slots(&mut rows[..], |row, output| {
+            let support = &supports[row];
             let m0 = support[0];
             let mut cur_l0 = combiner_step_hash32(
                 &self.session_id,
@@ -2949,28 +3089,23 @@ impl BaseOtExtReceiverRound2 {
             let mut row_tables = Vec::with_capacity(support.len().saturating_sub(1));
             for (step_minus1, &mr) in support.iter().skip(1).enumerate() {
                 let step = step_minus1 + 1;
-                let next_l0 = comb_rng.next_bytes32();
-                let next_l1 = comb_rng.next_bytes32();
+                let (next_l0, next_l1) = masks[row][step_minus1];
                 let mut tbl = [[0u8; 32]; 4];
-                for beta in 0..2u8 {
-                    let la = if beta == 0 { &cur_l0 } else { &cur_l1 };
-                    for gamma in 0..2u8 {
-                        let sb = if gamma == 0 {
-                            &self.base_seed_pairs[mr].0
-                        } else {
-                            &self.base_seed_pairs[mr].1
-                        };
-                        let pad =
-                            combiner_step_hash32(&self.session_id, row, step, beta, gamma, la, sb);
-                        let target = if (beta ^ gamma) == 0 {
-                            &next_l0
-                        } else {
-                            &next_l1
-                        };
-                        let slot = (2 * beta + gamma) as usize;
-                        for b in 0..32 {
-                            tbl[slot][b] = target[b] ^ pad[b];
-                        }
+                let pads = SecretBuffer(combiner_step_hash32_x4(
+                    &self.session_id,
+                    row,
+                    step,
+                    &(cur_l0, cur_l1),
+                    &self.base_seed_pairs[mr],
+                ));
+                for slot in 0..4 {
+                    let target = if (slot / 2) ^ (slot % 2) == 0 {
+                        &next_l0
+                    } else {
+                        &next_l1
+                    };
+                    for b in 0..32 {
+                        tbl[slot][b] = target[b] ^ pads[slot][b];
                     }
                 }
                 wipe_bytes32(&mut cur_l0);
@@ -2979,8 +3114,15 @@ impl BaseOtExtReceiverRound2 {
                 cur_l1 = next_l1;
                 row_tables.push(tbl);
             }
-            combined_seed_pairs[row] = (cur_l0, cur_l1);
-            parity_tables.push(row_tables);
+            *output = ((cur_l0, cur_l1), row_tables);
+        });
+        let mut combined_seed_pairs = [([0u8; 32], [0u8; 32]); 128];
+        let mut parity_tables = Vec::with_capacity(128);
+        for (row, (mut pair, tables)) in core::mem::take(&mut rows.0).into_iter().enumerate() {
+            combined_seed_pairs[row] = pair;
+            wipe_bytes32(&mut pair.0);
+            wipe_bytes32(&mut pair.1);
+            parity_tables.push(tables);
         }
 
         for (s0, s1) in &mut self.base_seed_pairs {
@@ -3043,19 +3185,26 @@ impl BaseOtExtSenderRound3 {
         let mut delta = 0u128;
         let mut combined_seeds = [[0u8; 32]; 128];
 
-        for row in 0..128 {
-            let mut support = Vec::with_capacity(192);
-            for m in 0..RLWE_BASE_OT_COUNT {
-                if ((extractor[row][m / 64] >> (m % 64)) & 1) == 1 {
-                    support.push(m);
-                }
-            }
+        let supports: Vec<Vec<usize>> = extractor
+            .iter()
+            .map(|bits| {
+                (0..RLWE_BASE_OT_COUNT)
+                    .filter(|&m| ((bits[m / 64] >> (m % 64)) & 1) == 1)
+                    .collect()
+            })
+            .collect();
+        for (row, support) in supports.iter().enumerate() {
             if msg4.parity_tables[row].len() + 1 != support.len() {
                 return Err(PreprocessError::KosOtCheckFailed {
                     sender_id: self.ext_sender_id,
                     receiver_id: self.ext_receiver_id,
                 });
             }
+        }
+        let mut row_bits = [0u8; 128];
+        let mut rows = SecretBuffer([([0u8; 32], 0u8); 128]);
+        parallel_slots(&mut rows[..], |row, output| {
+            let support = &supports[row];
             let m0 = support[0];
             let mut acc_bit = ((black_box(self.c_tilde_words[m0 / 64]) >> (m0 % 64)) & 1) as u8;
             let mut cur_label = combiner_step_hash32(
@@ -3087,9 +3236,14 @@ impl BaseOtExtSenderRound3 {
                 }
                 acc_bit ^= gamma;
             }
-            delta |= (acc_bit as u128) << row;
-            combined_seeds[row] = cur_label;
+            *output = (cur_label, acc_bit);
+        });
+        for row in 0..128 {
+            combined_seeds[row] = rows[row].0;
+            row_bits[row] = rows[row].1;
+            delta |= (row_bits[row] as u128) << row;
         }
+        wipe_bytes(&mut row_bits);
 
         wipe_u64s(&mut self.c_tilde_words);
         for s in &mut self.base_seeds {
@@ -13237,5 +13391,34 @@ mod assurance_tests {
         assert_ne!(x, y);
         let mut exhausted = HedgedTranscriptRng::new([7; 32], u64::MAX);
         assert!(exhausted.fill_bytes(&[], &[], &mut x).is_err());
+    }
+}
+
+#[cfg(test)]
+mod combiner_batch_tests {
+    use super::*;
+    #[test]
+    fn four_branches_match_scalar_combiner() {
+        let labels = ([0x19; 32], [0xe1; 32]);
+        let seeds = ([0x28; 32], [0x83; 32]);
+        for row in [0, 127] {
+            for step in [0, 1, 383] {
+                let batch = combiner_step_hash32_x4(&[0x57; 32], row, step, &labels, &seeds);
+                for (slot, value) in batch.iter().enumerate() {
+                    assert_eq!(
+                        *value,
+                        combiner_step_hash32(
+                            &[0x57; 32],
+                            row,
+                            step,
+                            (slot / 2) as u8,
+                            (slot % 2) as u8,
+                            if slot / 2 == 0 { &labels.0 } else { &labels.1 },
+                            if slot % 2 == 0 { &seeds.0 } else { &seeds.1 }
+                        )
+                    );
+                }
+            }
+        }
     }
 }

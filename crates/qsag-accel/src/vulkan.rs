@@ -23,15 +23,18 @@
 //!   jobs and the failed job's inputs stay in staging memory and VRAM until the process exits.
 
 #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::goldilocks::{GOLDILOCKS_TWO_ADICITY, check_goldilocks_twiddles};
 use crate::keccak::{cshake256_framed_32, finalize_cshake256, init_cshake256};
-use crate::spirv_kernels::{canonical_spirv_pin, canonical_spirv_pins, spirv_kernel_bytes};
+use crate::spirv_kernels::{
+    canonical_prover_spirv_pin, canonical_prover_spirv_pins, canonical_spirv_pin,
+    canonical_spirv_pins, prover_spirv_kernel_bytes, spirv_kernel_bytes,
+};
 use crate::{
     AccelError, AcceleratorBackend, BackendAttestationKey, BatchJobDescriptor, CertifiedKernelPin,
-    ExecutionReceipt, KernelSlot, KernelTargetArch, merkle_layer_input_digest,
-    merkle_layer_output_digest,
+    CertifiedProverKernelPin, ExecutionReceipt, KernelSlot, KernelTargetArch, ProverKernelSlot,
+    merkle_layer_input_digest, merkle_layer_output_digest,
 };
 
 #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
@@ -51,6 +54,12 @@ pub enum VulkanError {
     /// Executable properties disagree with the required subgroup size.
     UnexpectedSubgroupSize {
         slot: KernelSlot,
+        required: u32,
+        reported: u32,
+    },
+    /// Prover pipeline executable properties disagree with the required subgroup size.
+    UnexpectedProverSubgroupSize {
+        slot: ProverKernelSlot,
         required: u32,
         reported: u32,
     },
@@ -83,6 +92,14 @@ impl core::fmt::Display for VulkanError {
                 f.write_str("device limits cannot support the embedded shaders")
             }
             Self::UnexpectedSubgroupSize {
+                slot,
+                required,
+                reported,
+            } => write!(
+                f,
+                "{slot:?}: required subgroup {required}, driver reported {reported}"
+            ),
+            Self::UnexpectedProverSubgroupSize {
                 slot,
                 required,
                 reported,
@@ -147,6 +164,7 @@ pub struct VulkanDeviceInfo {
     pub max_compute_shared_memory_size: u32,
     pub wave32_required: bool,
     pub pipelines: [PipelineTelemetry; KernelSlot::COUNT],
+    pub prover_pipelines: [PipelineTelemetry; ProverKernelSlot::COUNT],
     pub vendor_id: u32,
     pub device_id: u32,
     pub driver_version: u32,
@@ -191,7 +209,7 @@ impl VulkanDeviceInfo {
                 "subgroup size 32 was not required at pipeline creation",
             ));
         }
-        for stats in &self.pipelines {
+        for stats in self.pipelines.iter().chain(self.prover_pipelines.iter()) {
             if stats.subgroup_size != Some(32) {
                 return Err(VulkanError::PipelineAuditFailed(
                     "a pipeline did not report subgroup size 32",
@@ -217,7 +235,8 @@ impl VulkanDeviceInfo {
     /// Like the receipt itself this is a report by the key holder, not a proof.
     pub fn audit_evidence_digest(&self) -> [u8; 32] {
         const PER_PIPELINE: usize = 7 * 9;
-        let mut body = [0u8; 17 + KernelSlot::COUNT * PER_PIPELINE];
+        const TOTAL_PIPELINES: usize = KernelSlot::COUNT + ProverKernelSlot::COUNT;
+        let mut body = [0u8; 17 + TOTAL_PIPELINES * PER_PIPELINE];
         body[0..4].copy_from_slice(&self.vendor_id.to_le_bytes());
         body[4..8].copy_from_slice(&self.device_id.to_le_bytes());
         body[8..12].copy_from_slice(&self.driver_version.to_le_bytes());
@@ -225,7 +244,7 @@ impl VulkanDeviceInfo {
         body[16] = self.wave32_required as u8;
         for (chunk, stats) in body[17..]
             .chunks_exact_mut(PER_PIPELINE)
-            .zip(&self.pipelines)
+            .zip(self.pipelines.iter().chain(self.prover_pipelines.iter()))
         {
             let fields = [
                 stats.subgroup_size.map(u64::from),
@@ -293,11 +312,15 @@ pub struct VulkanSpirvBackend {
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     pins: [CertifiedKernelPin; KernelSlot::COUNT],
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+    prover_pins: [CertifiedProverKernelPin; ProverKernelSlot::COUNT],
+    #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     engine: std::sync::Mutex<RawVulkanEngine>,
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     gpu_submissions: AtomicU64,
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     cpu_fallbacks: AtomicU64,
+    #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+    prover_session_in_use: AtomicBool,
     /// `info.secret_slot_audit().is_ok()`, fixed at construction.
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     secret_slots_audited: bool,
@@ -387,12 +410,15 @@ impl VulkanSpirvBackend {
             let (engine, info) = RawVulkanEngine::try_new()?;
             info.secret_slot_audit()?;
             let pins = canonical_spirv_pins();
+            let prover_pins = canonical_prover_spirv_pins();
             Ok(Self {
                 info,
                 pins,
+                prover_pins,
                 engine: std::sync::Mutex::new(engine),
                 gpu_submissions: AtomicU64::new(0),
                 cpu_fallbacks: AtomicU64::new(0),
+                prover_session_in_use: AtomicBool::new(false),
                 secret_slots_audited: info.secret_slot_audit().is_ok(),
             })
         }
@@ -458,6 +484,41 @@ impl VulkanSpirvBackend {
                 spirv_kernel_bytes(slot),
             )
         })
+    }
+
+    /// Canonical `KernelTargetArch::SpirV15` pin for a VRAM-resident [`ProverKernelSlot`].
+    pub fn canonical_prover_pin(slot: ProverKernelSlot) -> CertifiedProverKernelPin {
+        canonical_prover_spirv_pin(slot)
+    }
+
+    /// Canonical `KernelTargetArch::SpirV15` pins for all 4 [`ProverKernelSlot`]s.
+    pub fn canonical_prover_pins() -> [CertifiedProverKernelPin; ProverKernelSlot::COUNT] {
+        canonical_prover_spirv_pins()
+    }
+
+    /// Independently measure all 4 embedded VRAM-resident prover SPIR-V binaries.
+    pub fn measure_embedded_prover_spirv_pins()
+    -> [CertifiedProverKernelPin; ProverKernelSlot::COUNT] {
+        ProverKernelSlot::ALL.map(|slot| {
+            CertifiedProverKernelPin::from_kernel_artifact(
+                slot,
+                KernelTargetArch::SpirV15,
+                prover_spirv_kernel_bytes(slot),
+            )
+        })
+    }
+
+    /// Certified pin for a bound VRAM-resident [`ProverKernelSlot`].
+    pub fn prover_kernel_pin(&self, slot: ProverKernelSlot) -> CertifiedProverKernelPin {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.prover_pins[slot as usize]
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = slot;
+            match self._uninhabited {}
+        }
     }
 
     /// Hardware properties of the bound discrete Vulkan GPU.

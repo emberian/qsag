@@ -294,6 +294,77 @@ impl CertifiedKernelPin {
     }
 }
 
+/// Enumerates the 4 certified VRAM-resident WHIR/Hem & AIR row-sumcheck compute pipelines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ProverKernelSlot {
+    WhirLdeCommitment = 0,
+    WhirFoldSumcheck = 1,
+    AirRowGroupA = 2,
+    AirRowGroupB = 3,
+}
+
+impl ProverKernelSlot {
+    pub const COUNT: usize = 4;
+
+    /// Algorithm domain label bound into certified prover kernel pins and audit digests.
+    pub const fn algorithm_domain(self) -> &'static [u8] {
+        match self {
+            Self::WhirLdeCommitment => b"QSAG.ACCEL.PROVER.WHIR_LDE_COMMIT.V1",
+            Self::WhirFoldSumcheck => b"QSAG.ACCEL.PROVER.WHIR_FOLD_SUMCHECK.V1",
+            Self::AirRowGroupA => b"QSAG.ACCEL.PROVER.AIR_ROW_GROUP_A.V1",
+            Self::AirRowGroupB => b"QSAG.ACCEL.PROVER.AIR_ROW_GROUP_B.V1",
+        }
+    }
+
+    pub const ALL: [Self; 4] = [
+        Self::WhirLdeCommitment,
+        Self::WhirFoldSumcheck,
+        Self::AirRowGroupA,
+        Self::AirRowGroupB,
+    ];
+}
+
+/// Dual-hash certified binary/shader pin for a single [`ProverKernelSlot`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CertifiedProverKernelPin {
+    pub slot: ProverKernelSlot,
+    pub target_arch: KernelTargetArch,
+    /// SHA-256 digest of the certified SPIR-V binary blob.
+    pub sha256_digest: [u8; 32],
+    /// Algebraic Width-12 Goldilocks Poseidon2 digest (4 canonical limbs).
+    pub poseidon2_digest: [u64; 4],
+}
+
+impl CertifiedProverKernelPin {
+    /// Construct a prover kernel pin deterministically from a certified SPIR-V artifact slice.
+    pub fn from_kernel_artifact(
+        slot: ProverKernelSlot,
+        target_arch: KernelTargetArch,
+        artifact_bytes: &[u8],
+    ) -> Self {
+        let header = [0x80u8 | (slot as u8), target_arch as u8];
+        let sha256_digest = {
+            let mut h = sha2::Sha256Hasher::new();
+            h.update(b"QSAG.ACCEL.PROVER_KERNEL.SHA256.V1");
+            h.update(&header);
+            h.update(&(artifact_bytes.len() as u64).to_le_bytes());
+            h.update(artifact_bytes);
+            h.finalize()
+        };
+        let poseidon2_digest = poseidon2_hash_framed_limbs4(
+            0x5052_5652_5F50_494E, // "PRVR_PIN"
+            &[b"QSAG.ACCEL.PROVER_KERNEL.P2.V1", &header, artifact_bytes],
+        );
+        Self {
+            slot,
+            target_arch,
+            sha256_digest,
+            poseidon2_digest,
+        }
+    }
+}
+
 /// Secret MAC key identifying one backend instance to the host that operates it.
 ///
 /// The key stays with the trusted host or loader, never with the accelerator whose output is
