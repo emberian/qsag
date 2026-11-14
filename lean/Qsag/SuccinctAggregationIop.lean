@@ -71,7 +71,9 @@ batching and `#tooth` statements listed above, and completeness for inactive slo
 simulation between the 44-limb step machine and `verifyAggNativeSig` is proved downstream, in
 `Qsag.CorduroyAndHemAirCompleteness`: a satisfying `StepOp` table yields an accepted native
 signature for every active slot of either profile (`stepOp256TableOk_xmss_extract`,
-`stepOp256TableOk_corduroy_extract`), and through it an accepted row-committed trace. The
+`stepOp256TableOk_corduroy_extract`), and through it an accepted row-committed trace; an
+accepted `XmssPoseidon2` signature yields a satisfying table (`stepXmssRows_of_verify`), while
+the `CorduroyPoseidon2` table constructor is not built. The
 equality and shift claims have constructive random-`tau` root bounds
 of `ell * |S|^(ell - 1)` on `S^ell`, and fixed-order constraint-column batching has a separate
 `gamma` root bound. Instantiating that column list with the deployed unique-op offsets, the
