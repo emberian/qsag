@@ -37,6 +37,7 @@ public import Qsag.Poseidon2
 public import Qsag.UcGames
 import all Qsag.Goldilocks
 import all Qsag.BinaryTower
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -2404,6 +2405,126 @@ theorem ggm_punctured_tree_hiding {TagDom Cod : Type}
                            (keyedPrfIdealAccept cardSeeds baseGgm A)
     diff ≤ Q ∧ ratLe (diff, cardSeeds) (2 * Q, cardSeeds) :=
   hidingAdv_le cardSeeds Q hPos baseGgm secretLeafFn A hQb
+
+/-! ## 7. Mechanical Assurance Gates (`#tooth_pair`, `#verify_inhabited`, `#verify_constructive`) -/
+
+section AssuranceGates
+
+/-- **`#tooth` Overflowing Ring-LWE Noise Flips Decoded OT Bit (`tooth_rlwe1024_overflow_flips_decoded_bit`)**:
+    Exceeding the `2049 < 3072` decryption margin (`eMag = 4000`) flips `rlweDecodeBit` on `bit = false`. -/
+theorem tooth_rlwe1024_overflow_flips_decoded_bit :
+    rlweDecodeBit (rlweNoisyEncode false true 4000) ≠ false := by
+  decide +kernel
+
+/-- **`#tooth` Corrupted FO Ciphertext Rejected When Chosen (`tooth_rlwe_fo_corrupted_batch_rejected`)**:
+    Atomic batch-rejection projection of `tooth_rlwe_fo_corrupted_ciphertext_caught`. -/
+theorem tooth_rlwe_fo_corrupted_batch_rejected :
+    verifyRlweFoBatch [⟨false, true, 4000, rlweNoisyEncode false true 4000⟩] 1 = false :=
+  tooth_rlwe_fo_corrupted_ciphertext_caught.2.2
+
+/-- **`#tooth` Forged Zero-Opening SPDZ Sacrifice Rejected (`tooth_shared_spdz_forged_zero_rejected`)**:
+    Atomic MAC-rejection projection of `tooth_shared_spdz_sacrifice_rejects_corrupted_triple`. -/
+theorem tooth_shared_spdz_forged_zero_rejected :
+    let rho : GoldilocksExt2 := ⟨Goldilocks.ofNat 2, Goldilocks.one⟩
+    let badTr : AuthenticatedSharedTriple :=
+      { demoHonestAuthTriple with
+        triple := { demoHonestAuthTriple.triple with
+                    cShares := [Goldilocks.ofNat 20, Goldilocks.ofNat 27, Goldilocks.ofNat 34] }
+        macC := mkDemoMacShares 13 }
+    let op := honestSharedSpdzSacrificeOpening demoLambdas2of3 rho
+      demoAlphaShares3 badTr demoCompanionAuthTriple demoZeroMasks3 demoZeroMasks3 demoZeroMasks3
+    let macW := shareZipSub
+      (shareZipSub (shareScale rho badTr.macC) demoCompanionAuthTriple.macC)
+      (ringListZipAdd (shareScale op.uOpened badTr.macB) (shareScale op.vOpened demoCompanionAuthTriple.macA))
+    verifySharedSpdzSacrifice
+      { op with wOpened := CommRingOps.zero,
+                sigmaW := spdzComputeSigmas CommRingOps.zero macW demoAlphaShares3 demoZeroMasks3 } = false :=
+  tooth_shared_spdz_sacrifice_rejects_corrupted_triple.2.2
+
+/-- **`#tooth` Rank-Deficient Zero-Row Extractor Collides (`tooth_zero_row_extractor_collides_pair`)**:
+    Atomic collision witness for `extract384To128_two_universal`. -/
+theorem tooth_zero_row_extractor_collides_pair :
+    ∃ M : BinaryExtractorMatrix, extract384To128 M 0#384 = extract384To128 M 1#384 :=
+  ⟨fun _ => 0#384, tooth_zero_row_extractor_collides.2⟩
+
+/-- **`#tooth` Pre-Challenge Adaptive Fault Cancels KOS Residual (`tooth_kos_prechallenge_cancels_fault_witness`)**:
+    Atomic cancellation witness for `kos_batched_poly_check_sound`. -/
+theorem tooth_kos_prechallenge_cancels_fault_witness (chi : Tower128) :
+    ∃ deltaUs : List (TowerBitVec 7),
+      kosBatchedPolyResidual 7 deltaUs (BitVec.allOnes 128) (towerZero 7) chi = towerZero 7 ∧
+      unpackTower 7 (packTower 7 (towerOne 7) &&& BitVec.allOnes 128) ≠ towerZero 7 := by
+  have h := tooth_kos_prechallenge_two_column_cancellation chi
+  exact ⟨[packTower 7 chi, packTower 7 (towerOne 7)], h.2, h.1⟩
+
+/-- **`#tooth` Unbounded `Q + 1` Queries Break `Q`-Query GGM Hiding (`tooth_ggm_extra_query_distinguishes`)**:
+    With `Q = 0` budget violated by a 1-query distinguisher, `keyedPrfRealAccept ≠ keyedPrfIdealAccept`. -/
+theorem tooth_ggm_extra_query_distinguishes :
+    let baseGgm : Fin 1 × Unit → Bool := fun _ => false
+    let secretLeaf : Unit → Bool := fun _ => true
+    let A : OracleComp (Fin 1 × Unit) Bool Bool :=
+      OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure
+    keyedPrfRealAccept 1 baseGgm secretLeaf A ≠ keyedPrfIdealAccept 1 baseGgm A := by
+  decide +kernel
+
+/-- Genuine non-empty 2-party pairwise OLE share witness (`us = [2, 3], vs = [4, 5], sum(ws) = 5 * 9 = 45`). -/
+theorem witness_valid_pairwise_ole_inhabited :
+    ∃ (us vs ws : List Goldilocks), ValidPairwiseOleShares us vs ws := by
+  have h1 : ValidPairwiseOleShares
+      [Goldilocks.ofNat 3] [Goldilocks.ofNat 5]
+      [CommRingOps.add (CommRingOps.mul (Goldilocks.ofNat 3) (Goldilocks.ofNat 5))
+        (CommRingOps.add (ringListSum ([] : List Goldilocks)) (ringListSum ([] : List Goldilocks)))] :=
+    ValidPairwiseOleShares.cons [] [] [] [] ValidPairwiseOleShares.nil
+      rfl rfl rfl rfl (by decide +kernel) (by decide +kernel)
+  have h2 := ValidPairwiseOleShares.cons (u0 := Goldilocks.ofNat 2) (v0 := Goldilocks.ofNat 4)
+      [Goldilocks.ofNat 3] [Goldilocks.ofNat 7] [Goldilocks.ofNat 5] [Goldilocks.ofNat 7]
+      h1 rfl rfl rfl rfl (by decide +kernel) (by decide +kernel)
+  exact ⟨_, _, _, h2⟩
+
+theorem witness_beaver_triple_val_inhabited :
+    ∃ (t : BeaverTripleVal Goldilocks), t.valid :=
+  ⟨⟨Goldilocks.ofNat 3, Goldilocks.ofNat 4, Goldilocks.ofNat 12⟩, by decide +kernel⟩
+
+theorem witness_shared_triple_validAt_inhabited :
+    ∃ (lambdas : List Goldilocks) (tr : SharedBeaverTriple Goldilocks), tr.validAt lambdas :=
+  ⟨demoLambdas2of3, demoHonestAuthTriple.triple,
+    ⟨rfl, rfl, rfl, shared_spdz_sacrifice_inhabited.2.1⟩⟩
+
+theorem witness_auth_triple_validMacs_inhabited :
+    ∃ (lambdas : List Goldilocks) (alphaShares : List GoldilocksExt2) (tr : AuthenticatedSharedTriple),
+      tr.validMacs lambdas alphaShares :=
+  ⟨demoLambdas2of3, demoAlphaShares3, demoHonestAuthTriple,
+    ⟨rfl, rfl, rfl, by decide +kernel, by decide +kernel, by decide +kernel⟩⟩
+
+theorem witness_ggm_query_bounded_inhabited :
+    ∃ (A : OracleComp (Fin 2 × Unit) Bool Bool), QueryBounded 1 A :=
+  ⟨OracleComp.query (⟨0, by decide⟩, ()) OracleComp.pure, fun _ => trivial⟩
+
+#tooth_pair Qsag.rlwe1024_ot_decrypt_exact vs Qsag.tooth_rlwe1024_overflow_flips_decoded_bit
+#tooth_pair Qsag.rlwe_fo_cut_and_choose_sound vs Qsag.tooth_rlwe_fo_corrupted_batch_rejected
+#tooth_pair Qsag.verifySharedSpdzSacrifice_complete vs Qsag.tooth_shared_spdz_forged_zero_rejected
+#tooth_pair Qsag.verifySharedSpdzSacrifice_sound vs Qsag.tooth_shared_spdz_forged_zero_rejected
+#tooth_pair Qsag.extract384To128_two_universal vs Qsag.tooth_zero_row_extractor_collides_pair
+#tooth_pair Qsag.kos_batched_poly_check_sound vs Qsag.tooth_kos_prechallenge_cancels_fault_witness
+#tooth_pair Qsag.ggm_punctured_tree_hiding vs Qsag.tooth_ggm_extra_query_distinguishes
+
+#verify_inhabited Qsag.ole_pairwise_cross_sum_eq_mul Qsag.witness_valid_pairwise_ole_inhabited
+#verify_inhabited Qsag.pow7Tree_correct Qsag.witness_beaver_triple_val_inhabited
+#verify_inhabited Qsag.evalSharedPow7Tree_correct Qsag.witness_shared_triple_validAt_inhabited
+#verify_inhabited Qsag.verifySharedSpdzSacrifice_complete Qsag.witness_auth_triple_validMacs_inhabited
+#verify_inhabited Qsag.ggm_punctured_tree_hiding Qsag.witness_ggm_query_bounded_inhabited
+
+#verify_constructive Qsag.rlwe1024_ot_decrypt_exact
+#verify_constructive Qsag.ole_pairwise_cross_sum_eq_mul
+#verify_constructive Qsag.pow7Tree_correct
+#verify_constructive Qsag.evalSharedPow7Tree_correct
+#verify_constructive Qsag.verifySharedSpdzSacrifice_complete
+#verify_constructive Qsag.verifySharedSpdzSacrifice_sound
+#verify_constructive Qsag.rlwe_fo_cut_and_choose_sound
+#verify_constructive Qsag.extract384To128_two_universal
+#verify_constructive Qsag.kos_batched_poly_check_sound
+#verify_constructive Qsag.ggm_punctured_tree_hiding
+
+end AssuranceGates
 
 end Qsag
 end
