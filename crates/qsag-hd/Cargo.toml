@@ -1,0 +1,18 @@
+[package]
+name = "qsag-hd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.89"
+description = "Signature-key inventory and dealerless linear-module HD custody."
+
+[features]
+default = ["alloc"]
+alloc = ["qsag-accel/alloc", "qsag-addr/alloc"]
+std = ["qsag-asm/std", "alloc", "qsag-accel/std", "qsag-addr/std"]
+
+[dependencies]
+qsag-asm = { path = "../qsag-asm", default-features = false }
+qsag-core = { path = "../qsag-core", default-features = false }
+qsag-accel = { path = "../qsag-accel", default-features = false }
+qsag-addr = { path = "../qsag-addr", default-features = false }
