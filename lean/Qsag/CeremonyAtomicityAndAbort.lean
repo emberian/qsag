@@ -1282,9 +1282,10 @@ def ceremonyReceiptDurableValid (host : MultiLedgerHostState) (cid : Nat) (r : C
   decide (LeafBurnEntry.mk cid r.epochOrIndex r.msgDigest ∈
     (activeWalPayload host.leafOrFtsBurnLedger).reservedLeaves)
 
-/-- The external checkpoints of the three burn ledgers have caught up with their active
+/-- The external checkpoints of all four ledgers have caught up with their active
     generations, so no crash mode can roll any of them back below what is about to be released. -/
 def ledgersCheckpointSaved (host : MultiLedgerHostState) : Bool :=
+  walCheckpointSaved host.poisonLatch &&
   walCheckpointSaved host.policyWindowLedger &&
   walCheckpointSaved host.preprocCursorLedger &&
   walCheckpointSaved host.leafOrFtsBurnLedger
@@ -1494,7 +1495,7 @@ def stepOperationalHost (host : MultiLedgerHostState) (ev : MultiLedgerEvent) :
       none
   | .FlushPoisonWal =>
     if host.poisonLatch.volatileStage.isSome then
-      some { host with poisonLatch := flushTwoSlotWal host.poisonLatch }
+      some { host with poisonLatch := saveWalCheckpoint (flushTwoSlotWal host.poisonLatch) }
     else
       none
   | .EmitNetworkShare cid party share =>
@@ -1888,8 +1889,9 @@ private theorem stepOperationalHost_preserves_inv {policyCap : Nat}
     simp only [stepOperationalHost] at hStep
     split at hStep
     · injection hStep with hEq; subst hEq
-      obtain ⟨hFlInv, _, _⟩ := flushTwoSlotWal_inv poisonRel_refl hInv.poison_wal
-      exact ⟨hFlInv, hInv.policy_wal, hInv.preproc_wal, hInv.leaf_wal, hInv.cap_fixed, hInv.wire_backed⟩
+      obtain ⟨hFlInv, hIdle, _⟩ := flushTwoSlotWal_inv poisonRel_refl hInv.poison_wal
+      obtain ⟨hSaved, _⟩ := saveWalCheckpoint_inv poisonRel_refl hFlInv hIdle
+      exact ⟨hSaved, hInv.policy_wal, hInv.preproc_wal, hInv.leaf_wal, hInv.cap_fixed, hInv.wire_backed⟩
     · cases hStep
   | SaveCheckpoint ledger =>
     cases ledger with
@@ -1945,7 +1947,7 @@ private theorem stepOperationalHost_preserves_inv {policyCap : Nat}
         simp only [Bool.and_eq_true, ceremonyReceiptDurableValid, ledgersCheckpointSaved,
           decide_eq_true_eq] at hCond
         rcases hCond with
-          ⟨⟨⟨⟨⟨⟨⟨_, _⟩, _⟩, hPolMem⟩, hPreMem⟩, hLfMem⟩, ⟨⟨hPolSaved, hPreSaved⟩, hLfSaved⟩⟩, _⟩
+          ⟨⟨⟨⟨⟨⟨⟨_, _⟩, _⟩, hPolMem⟩, hPreMem⟩, hLfMem⟩, ⟨⟨⟨_, hPolSaved⟩, hPreSaved⟩, hLfSaved⟩⟩, _⟩
         rw [← walInv_saved_floor hInv.policy_wal hPolSaved] at hPolMem
         rw [← walInv_saved_floor hInv.preproc_wal hPreSaved] at hPreMem
         rw [← walInv_saved_floor hInv.leaf_wal hLfSaved] at hLfMem
@@ -6727,7 +6729,7 @@ theorem witness_real_cshake_journal_release :
   · change reservationValid (List.replicate 32 4) [] _ = true
     exact reservationValid_empty_self ⟨List.replicate 32 1, List.replicate 32 4, List.replicate 32 2, 1, 1⟩
 
-/-- Full v2 attempt machine, including explicit retries. Unlike the fresh-only machine,
+/-- Full v3 attempt machine, including explicit retries. Unlike the fresh-only machine,
 codeword repetitions are legal; the theorem tracks fresh attempt identities and durable history. -/
 structure RetryJournalState where
   keyId : Bytes
@@ -6752,12 +6754,12 @@ inductive RetryJournalStep : RetryJournalState → RetryJournalState → Prop wh
       (healthy : s.poisoned = false) (staged : s.staged = some e) (synced : s.pc = .done)
       (valid : journalEntryValid s.keyId s.entries e = true) :
       RetryJournalStep s { s with entries := s.entries ++ [e], staged := none, permit := some e }
-  | consume (s : RetryJournalState) (e : JournalEntry) (readBack : Bytes)
+  | consume (s : RetryJournalState) (e : JournalEntry) (readBack : Bytes) (expected : CeremonyContext)
       (healthy : s.poisoned = false) (owned : s.permit = some e)
       (current : s.entries.getLast? = some e)
-      (verified : verifyCurrentPermitV2 s.macKey s.lockSeal s.keyId s.entries
-        ⟨s.entries.length + 1, ceremonyTag s.macKey s.lockSeal (ceremonyBodyV2 s.keyId s.entries)⟩
-        readBack ⟨e, s.entries.length + 1, s.lockSeal⟩ = true) :
+      (verified : verifyCurrentPermitWithContext s.macKey s.lockSeal s.keyId s.entries
+        ⟨s.entries.length + 1, ceremonyTag s.macKey s.lockSeal (ceremonyBodyV3 s.keyId s.entries)⟩
+        readBack ⟨e, s.entries.length + 1, s.lockSeal⟩ expected = true) :
       RetryJournalStep s { s with permit := none, released := s.released ++ [e] }
   | ioError (s : RetryJournalState) :
       RetryJournalStep s { s with poisoned := true, pc := .poisoned, permit := none }
@@ -6768,8 +6770,8 @@ inductive RetryJournalStep : RetryJournalState → RetryJournalState → Prop wh
       (valid : journalEntryValid s.keyId s.entries e = true) :
       RetryJournalStep s { s with entries := s.entries ++ [e], staged := none, permit := none, pc := .done }
   | reopen (s : RetryJournalState) (readBack : Bytes)
-      (verified : openCeremonyBytesV2 s.macKey s.lockSeal s.keyId readBack
-        ⟨s.entries.length + 1, ceremonyTag s.macKey s.lockSeal (ceremonyBodyV2 s.keyId s.entries)⟩
+      (verified : openCeremonyBytesV3 s.macKey s.lockSeal s.keyId readBack
+        ⟨s.entries.length + 1, ceremonyTag s.macKey s.lockSeal (ceremonyBodyV3 s.keyId s.entries)⟩
         = some (s.entries.length + 1, s.entries)) :
       RetryJournalStep s { s with poisoned := false, staged := none, permit := none, pc := .done }
 
@@ -6791,7 +6793,7 @@ theorem retryJournalStep_preserves {s t : RetryJournalState}
     obtain rfl := Option.some.inj he
     exact ⟨List.mem_append_right _ (List.mem_singleton_self _),
       fun old ho => journalEntryValid_fresh_attempt valid old (hm old ho)⟩
-  | consume e readBack healthy owned current verified =>
+  | consume e readBack expected healthy owned current verified =>
     obtain ⟨he, hf⟩ := hp e owned
     refine ⟨?_, ?_, by intro e h; simp at h⟩
     · rw [List.map_append]

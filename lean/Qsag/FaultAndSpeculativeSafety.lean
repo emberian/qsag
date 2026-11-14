@@ -1,6 +1,7 @@
 module
 
 public import Qsag.HashSigs
+public import Qsag.PosixCrashWal
 public import Qsag.MaliciousSecurity
 public import Qsag.ConstantTimeIsa
 public import Qsag.ElfBinaryVerify
@@ -3746,6 +3747,7 @@ def DurableUpperJournalState.init : DurableUpperJournalState :=
 inductive RecoverableGateEvent where
   | signAndPersistOk (turn : FaultedSignTurn)
   | signDiskWriteFail (turn : FaultedSignTurn)
+  | persistThenCrash (turn : FaultedSignTurn)
   | powerLossAndRecover
 
 /-- Transactional step: a candidate signature is emitted (`some sig`) **only** when
@@ -3765,6 +3767,13 @@ def stepRecoverableProductionGate (suite : TweakableHashSuite) (params : PqHashP
          volatileCache := committed
          emittedEntries := st.emittedEntries ++ es },
        some turn.candidate)
+  | .persistThenCrash turn =>
+    match verifyProductionBeforeReleaseAll suite params pk st.diskJournal turn with
+    | none => ({ st with volatileCache := st.diskJournal }, none)
+    | some es =>
+      ({ diskJournal := st.diskJournal ++ es
+         volatileCache := st.diskJournal ++ es
+         emittedEntries := st.emittedEntries }, none)
   | .signDiskWriteFail _ =>
     ({ st with volatileCache := st.diskJournal }, none)
   | .powerLossAndRecover =>
@@ -3780,7 +3789,7 @@ def runRecoverableProductionSchedule (suite : TweakableHashSuite) (params : PqHa
 def DurableJournalInv (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (st : DurableUpperJournalState) : Prop :=
   st.volatileCache = st.diskJournal ∧
-  st.emittedEntries = st.diskJournal ∧
+  (∀ e ∈ st.emittedEntries, e ∈ st.diskJournal) ∧
   AdrsCacheConsistent st.diskJournal ∧
   (∀ e ∈ st.diskJournal, e.key.ValidCoords = true) ∧
   (∀ e ∈ st.diskJournal, ProductionOpeningBound suite params pk st.diskJournal e)
@@ -3801,7 +3810,11 @@ theorem stepRecoverableProductionGate_preserves_inv (suite : TweakableHashSuite)
       rw [hVol] at hVer
       obtain ⟨hCons', hValEs, hBoundEs⟩ :=
         verifyProductionBeforeReleaseAll_props suite params pk st.diskJournal es turn hVer
-      refine ⟨rfl, by rw [hEmit], hCons', ?_, ?_⟩
+      refine ⟨rfl, ?_, hCons', ?_, ?_⟩
+      · intro e he
+        rcases List.mem_append.mp he with ho | hn
+        · exact List.mem_append_left _ (hEmit e ho)
+        · exact List.mem_append_right _ hn
       · intro e hm
         rcases List.mem_append.mp hm with hOld | hNew
         · exact hVal e hOld
@@ -3811,6 +3824,22 @@ theorem stepRecoverableProductionGate_preserves_inv (suite : TweakableHashSuite)
         · exact productionOpeningBound_mono suite params pk st.diskJournal (st.diskJournal ++ es) e
             (fun x hx => List.mem_append.mpr (Or.inl hx)) (hBound e hOld)
         · exact hBoundEs e hNew
+  | persistThenCrash turn =>
+    simp only [stepRecoverableProductionGate]
+    cases hv : verifyProductionBeforeReleaseAll suite params pk st.diskJournal turn with
+    | none => exact ⟨rfl, hEmit, hCons, hVal, hBound⟩
+    | some es =>
+      obtain ⟨hc, hvEs, hbEs⟩ := verifyProductionBeforeReleaseAll_props suite params pk st.diskJournal es turn hv
+      refine ⟨rfl, fun e he => List.mem_append_left _ (hEmit e he), hc, ?_, ?_⟩
+      · intro e he
+        rcases List.mem_append.mp he with ho | hn
+        · exact hVal e ho
+        · exact hvEs e hn
+      · intro e he
+        rcases List.mem_append.mp he with ho | hn
+        · exact productionOpeningBound_mono suite params pk _ _ e
+            (fun x hx => List.mem_append_left _ hx) (hBound e ho)
+        · exact hbEs e hn
   | signDiskWriteFail _ =>
     exact ⟨rfl, hEmit, hCons, hVal, hBound⟩
   | powerLossAndRecover =>
@@ -3839,13 +3868,12 @@ theorem recoverable_production_journal_prevents_upper_wots_reuse_across_crashes
     (hk : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
     a.key = b.key ∧ a.signed = b.signed ∧ (a.opening = b.opening ∨ Collision suite.rawHash) := by
   have hInit : DurableJournalInv suite params pk .init :=
-    ⟨rfl, rfl, by simp [AdrsCacheConsistent, DurableUpperJournalState.init],
+    ⟨rfl, by simp [DurableUpperJournalState.init], by simp [AdrsCacheConsistent, DurableUpperJournalState.init],
      by simp [DurableUpperJournalState.init], by simp [DurableUpperJournalState.init]⟩
   obtain ⟨_, hEmit, hCons, hVal, hBound⟩ :=
     runRecoverableProductionSchedule_preserves_inv suite params pk evs .init hInit
-  rw [hEmit] at ha hb
   exact production_bound_cached_openings_unique_or_collision suite params pk _
-    hCons hVal hBound a b ha hb hk
+    hCons hVal hBound a b (hEmit a ha) (hEmit b hb) hk
 
 /-- Uninterrupted single-session corollary on `guardedProductionSignTraceAll`. -/
 theorem production_verify_before_release_adrs_unique_or_collision
@@ -3875,11 +3903,10 @@ theorem production_verify_before_release_adrs_unique_or_collision
   rw [hInit] at ha hb
   have hInv := runRecoverableProductionSchedule_preserves_inv suite params pk
     (turns.map RecoverableGateEvent.signAndPersistOk) .init
-    ⟨rfl, rfl, by simp [AdrsCacheConsistent, DurableUpperJournalState.init],
+    ⟨rfl, by simp [DurableUpperJournalState.init], by simp [AdrsCacheConsistent, DurableUpperJournalState.init],
      by simp [DurableUpperJournalState.init], by simp [DurableUpperJournalState.init]⟩
-  rw [← hInv.2.1] at ha hb
-  exact recoverable_production_journal_prevents_upper_wots_reuse_across_crashes
-    suite params pk (turns.map RecoverableGateEvent.signAndPersistOk) a b ha hb hk
+  exact production_bound_cached_openings_unique_or_collision suite params pk _
+    hInv.2.2.1 hInv.2.2.2.1 hInv.2.2.2.2 a b ha hb hk
 
 /-- **`#tooth` Witness (`tooth_volatile_only_cache_forgets_across_crash_allows_reuse`)**:
     A broken crash model that wipes `volatileCache` to `[]` on reboot instead of reloading a
@@ -3901,6 +3928,82 @@ theorem tooth_volatile_only_cache_forgets_across_crash_allows_reuse :
     cases congrArg OtsMessage.tswCtr he
   · simp [AdrsCacheConsistent]
   · intro h; cases congrArg OtsMessage.tswCtr h
+
+/-- Canonical framed upper-journal payload. Counters use unbounded canonical
+LEB128, so malformed/truncated fixed-width coordinates cannot alias here. -/
+def upperJournalPayload (keyId : List UInt8) (generation : Nat)
+    (entries : List LayerRelease) : List UInt8 :=
+  encodeMultiFrame [keyId, leb128 generation, encodeMultiFrame (entries.map (fun e =>
+    encodeMultiFrame [e.key.toEncodedAdrs, e.signed.root, leb128 e.signed.tswCtr,
+      leb128 e.opening.tswCtr, encodeMultiFrame e.opening.wotsChains,
+      encodeMultiFrame e.opening.authPath]))]
+
+def upperJournalTag (key identity keyId : List UInt8) (generation : Nat)
+    (entries : List LayerRelease) : List UInt8 :=
+  RustDurability.keyedMac "QSAG.UPPER.JOURNAL.MAC/v1".toUTF8.data.toList key
+    (encodeMultiFrame [identity, upperJournalPayload keyId generation entries])
+
+/-- A decoded candidate is accepted only after exact byte re-encoding, lock identity,
+MAC and independent rollback-floor checks. Decoder failure is represented by `none`. -/
+structure UpperJournalCandidate where
+  generation : Nat
+  entries : List LayerRelease
+  identity : List UInt8
+  body : List UInt8
+  tag : List UInt8
+
+structure AuthenticatedUpperJournal where
+  keyId : List UInt8
+  macKey : List UInt8
+  lock : RustDurability.LockedIdentityHandle
+  anchor : ExternalMonotoneAnchor
+  runtime : DurableUpperJournalState
+  generation : Nat
+  poisoned : Bool := false
+
+def recoverAuthenticatedUpperJournal (st : AuthenticatedUpperJournal)
+    (candidate : Option UpperJournalCandidate) : Option AuthenticatedUpperJournal := do
+  let c ← candidate
+  if st.poisoned || !(RustDurability.verifyLockIdentity st.lock c.identity).2 then none else
+  if c.body ≠ upperJournalPayload st.keyId c.generation c.entries ∨
+      c.tag ≠ upperJournalTag st.macKey c.identity st.keyId c.generation c.entries ∨
+      verifyAgainstExternalAnchor st.anchor c.generation c.tag ≠ true then none else
+    some { st with generation := c.generation, runtime := { st.runtime with diskJournal := c.entries, volatileCache := c.entries } }
+
+/-- Storage errors poison the live handle. A completed persistence barrier updates
+both the authenticated snapshot generation and retained checkpoint before emission.
+`persistThenCrash` commits exactly the same bytes without releasing a signature. -/
+def stepAuthenticatedUpperJournal (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (st : AuthenticatedUpperJournal) (ev : RecoverableGateEvent)
+    (syncSucceeded : Bool) : AuthenticatedUpperJournal × Option PqHashSig :=
+  if st.poisoned then (st, none) else
+  if !syncSucceeded then ({ st with poisoned := true }, none) else
+    let result := stepRecoverableProductionGate suite params pk st.runtime ev
+    let generation := st.generation + 1
+    let identity := RustDurability.lockIdentitySeal st.lock.device st.lock.inode st.lock.nonce
+    let tag := upperJournalTag st.macKey identity st.keyId generation result.1.diskJournal
+    ({ st with runtime := result.1, generation := generation, anchor := ⟨generation, tag⟩ }, result.2)
+
+theorem authenticated_upper_storage_failure_no_release (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (st : AuthenticatedUpperJournal)
+    (ev : RecoverableGateEvent) :
+    (stepAuthenticatedUpperJournal suite params pk st ev false).2 = none := by
+  cases hp : st.poisoned <;> simp [stepAuthenticatedUpperJournal, hp]
+
+theorem authenticated_upper_recovery_checks_anchor (st next : AuthenticatedUpperJournal)
+    (c : UpperJournalCandidate)
+    (h : recoverAuthenticatedUpperJournal st (some c) = some next) :
+    verifyAgainstExternalAnchor st.anchor c.generation c.tag = true ∧
+    c.body = upperJournalPayload st.keyId c.generation c.entries ∧
+    c.tag = upperJournalTag st.macKey c.identity st.keyId c.generation c.entries := by
+  simp only [recoverAuthenticatedUpperJournal, Option.bind_eq_bind, Option.bind_some] at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · rename_i good
+      simp only [not_or, Decidable.not_not] at good
+      exact ⟨good.2.2, good.1, good.2.1⟩
 
 end Qsag.FaultAndSpeculativeSafety
 
