@@ -908,3 +908,673 @@ pub fn holder_prepare_blind_issuance_with_profile(
 }
 
 /// Verify a request against externally authorized attributes and schema.
+pub fn verify_blind_issuance_request(
+    req: &BlindIssuanceRequest,
+    issuer_attested_attrs: &[u64],
+    expected_schema_id: u64,
+) -> bool {
+    verify_blind_issuance_request_with_profile(
+        req,
+        issuer_attested_attrs,
+        expected_schema_id,
+        ZkSoundnessProfile::Quantum128,
+    )
+}
+
+/// Use an explicit verifier-selected soundness budget.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_blind_issuance_request_with_profile(
+    req: &BlindIssuanceRequest,
+    issuer_attested_attrs: &[u64],
+    expected_schema_id: u64,
+    profile: ZkSoundnessProfile,
+) -> bool {
+    if req.schema_id != expected_schema_id
+        || !(1..=MAX_VC_ATTRS).contains(&issuer_attested_attrs.len())
+        || req.issuer_attested_attrs != issuer_attested_attrs
+        || !issuer_attested_attrs.iter().all(|&v| gl_is_canonical(v))
+    {
+        return false;
+    }
+    if req.opened_reps.len() != profile.repetitions() {
+        return false;
+    }
+    for &c in &req.attr_commit {
+        if !gl_is_canonical(c) {
+            return false;
+        }
+    }
+
+    let mut inst_bytes = Vec::with_capacity(72);
+    inst_bytes.extend_from_slice(&req.session_id);
+    inst_bytes.extend_from_slice(&req.schema_id.to_le_bytes());
+    inst_bytes.extend_from_slice(&req.issuer_pk_digest);
+    inst_bytes.extend_from_slice(&req.issuer_epoch.to_le_bytes());
+    inst_bytes.extend_from_slice(&(issuer_attested_attrs.len() as u32).to_le_bytes());
+    for value in issuer_attested_attrs {
+        inst_bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    for &c in &req.attr_commit {
+        inst_bytes.extend_from_slice(&c.to_le_bytes());
+    }
+    if profile == ZkSoundnessProfile::Quantum128 {
+        inst_bytes.extend_from_slice(b"QSAG.VC.PROFILE.Quantum128:438");
+    }
+    let mut tr = InterleavedTranscript::new(b"QSAG.BLIND_VC.ISSUE_ZK.V1", &inst_bytes);
+    if profile == ZkSoundnessProfile::Quantum128 {
+        tr.absorb(b"VC_SOUNDNESS_PROFILE", b"Quantum128:438");
+    }
+
+    let mut round1_bundle = Vec::with_capacity(profile.repetitions() * 192);
+
+    for (rep, o) in req.opened_reps.iter().enumerate() {
+        let e = o.e as usize;
+        if e >= 3
+            || o.num_active_final_outs != 6
+            || o.final_outs_all3[6..].iter().flatten().any(|&v| v != 0)
+            || o.in_shares_e.len() != 10
+            || o.in_shares_e1.len() != 10
+        {
+            return false;
+        }
+        let e1 = (e + 1) % 3;
+        let e2 = (e + 2) % 3;
+
+        for index in 0..MAX_VC_ATTRS {
+            let value = issuer_attested_attrs.get(index).copied().unwrap_or(0);
+            if o.in_shares_e[index] != if e == 0 { value } else { 0 }
+                || o.in_shares_e1[index] != if e1 == 0 { value } else { 0 }
+            {
+                return false;
+            }
+        }
+        for &x in o.in_shares_e.iter().chain(o.in_shares_e1.iter()) {
+            if !gl_is_canonical(x) {
+                return false;
+            }
+        }
+        for &x in o.gate_outs_e.iter().chain(o.gate_outs_e1.iter()) {
+            if !gl_is_canonical(x) {
+                return false;
+            }
+        }
+
+        let mut verifier = ZkBooVerifierTape::new(
+            e,
+            &o.tape_seed_e,
+            &o.tape_seed_e1,
+            &o.gate_outs_e,
+            &o.gate_outs_e1,
+            GATES_PER_PERM12,
+        );
+        let wire_2: [[u64; 2]; 10] =
+            core::array::from_fn(|w| [o.in_shares_e[w], o.in_shares_e1[w]]);
+        let mut st: [[u64; 2]; 13] = [
+            wire_2[0],
+            wire_2[1],
+            wire_2[2],
+            wire_2[3],
+            wire_2[4],
+            wire_2[5],
+            wire_2[6],
+            wire_2[7],
+            wire_2[8],
+            wire_2[9],
+            verifier.add_const([0, 0], req.schema_id & 0xffff_ffff),
+            verifier.add_const(
+                [0, 0],
+                gl_add(req.schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
+            ),
+            verifier.add_const([0, 0], issuer_attested_attrs.len() as u64),
+        ];
+        verifier.perm12(&mut st);
+        if !verifier.ok {
+            return false;
+        }
+
+        for (j, wire) in st.iter().take(6).enumerate() {
+            for &s_val in &o.final_outs_all3[j] {
+                if !gl_is_canonical(s_val) {
+                    return false;
+                }
+            }
+            if wire[0] != o.final_outs_all3[j][e] || wire[1] != o.final_outs_all3[j][e1] {
+                return false;
+            }
+            let recon = gl_add(
+                o.final_outs_all3[j][0],
+                gl_add(o.final_outs_all3[j][1], o.final_outs_all3[j][2]),
+            );
+            if recon != req.attr_commit[j] {
+                return false;
+            }
+        }
+
+        let f_e: [u64; 6] = core::array::from_fn(|j| o.final_outs_all3[j][e]);
+        let f_e1: [u64; 6] = core::array::from_fn(|j| o.final_outs_all3[j][e1]);
+        let d_e = digest_party_view(&o.in_shares_e, &o.tape_seed_e, &o.gate_outs_e, &f_e);
+        let d_e1 = digest_party_view(&o.in_shares_e1, &o.tape_seed_e1, &o.gate_outs_e1, &f_e1);
+        let com_e = commit_mpc_broadcast(&req.session_id, rep as u32, e as u16, &d_e, &o.salt_e);
+        let com_e1 =
+            commit_mpc_broadcast(&req.session_id, rep as u32, e1 as u16, &d_e1, &o.salt_e1);
+
+        let mut commits = [[0u8; 32]; 3];
+        commits[e] = com_e;
+        commits[e1] = com_e1;
+        commits[e2] = o.unopened_commitment;
+        for c in &commits {
+            round1_bundle.extend_from_slice(c);
+        }
+        for fout in o.final_outs_all3.iter().take(6) {
+            for &val in fout {
+                round1_bundle.extend_from_slice(&val.to_le_bytes());
+            }
+        }
+    }
+
+    tr.absorb(b"VC_ISS_R1_COMMITS", &round1_bundle);
+    let expected_trits = squeeze_ternary_challenges(&mut tr, profile.repetitions());
+    for (o, exp_e) in req.opened_reps.iter().zip(expected_trits) {
+        if (o.e as usize) != exp_e {
+            return false;
+        }
+    }
+    true
+}
+
+/// Domain-separated 32-byte commitment tag binding `(issuer_pk_digest, issuer_epoch, accumulator_root)`.
+pub fn compute_accumulator_root_tag(
+    issuer_pk_digest: &[u8; 32],
+    issuer_epoch: u64,
+    accumulator_root: &[u64; 6],
+) -> [u8; 32] {
+    let mut root_le = [0u8; 48];
+    for (i, &limb) in accumulator_root.iter().enumerate() {
+        root_le[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+    }
+    cshake256_framed_32(
+        b"QSAG.VC.ACC_ROOT_TAG.V1",
+        &[issuer_pk_digest, &issuer_epoch.to_le_bytes(), &root_le],
+    )
+}
+
+/// Issuer-signed commitment/attestation binding `(issuer_pk_digest, issuer_epoch, accumulator_root)`
+/// under FIPS 204 `ML-DSA` (compatible with both single-signer [`ml_dsa_sign_deterministic`] and
+/// dealerless [`crate::threshold_mldsa::threshold_sign_mldsa_party`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuerRootAttestation {
+    issuer_pk_digest: [u8; 32],
+    mldsa_level: MlDsaLevel,
+    issuer_mldsa_pk: Vec<u8>,
+    issuer_epoch: u64,
+    accumulator_root: [u64; 6],
+    root_tag: [u8; 32],
+    mldsa_signature: Vec<u8>,
+}
+
+impl IssuerRootAttestation {
+    pub const SIGNING_CONTEXT: &'static [u8] = b"QSAG.VC.ROOT_ATTEST.CTX.V1";
+
+    pub fn signing_message(
+        issuer_pk_digest: &[u8; 32],
+        issuer_epoch: u64,
+        accumulator_root: &[u64; 6],
+        root_tag: &[u8; 32],
+    ) -> [u8; 142] {
+        let mut msg = [0u8; 142];
+        msg[..22].copy_from_slice(b"QSAG.VC.ROOT_ATTEST.V1");
+        msg[22..54].copy_from_slice(issuer_pk_digest);
+        msg[54..62].copy_from_slice(&issuer_epoch.to_le_bytes());
+        for (i, &limb) in accumulator_root.iter().enumerate() {
+            msg[62 + i * 8..62 + (i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+        }
+        msg[110..142].copy_from_slice(root_tag);
+        msg
+    }
+
+    pub const fn issuer_pk_digest(&self) -> &[u8; 32] {
+        &self.issuer_pk_digest
+    }
+
+    pub const fn mldsa_level(&self) -> MlDsaLevel {
+        self.mldsa_level
+    }
+
+    pub fn issuer_mldsa_pk(&self) -> &[u8] {
+        &self.issuer_mldsa_pk
+    }
+
+    pub const fn issuer_epoch(&self) -> u64 {
+        self.issuer_epoch
+    }
+
+    pub const fn accumulator_root(&self) -> &[u64; 6] {
+        &self.accumulator_root
+    }
+
+    pub const fn root_tag(&self) -> &[u8; 32] {
+        &self.root_tag
+    }
+
+    pub fn mldsa_signature(&self) -> &[u8] {
+        &self.mldsa_signature
+    }
+
+    /// Cryptographically verify `(issuer_pk_digest, issuer_epoch, accumulator_root, root_tag)`
+    /// against `expected_issuer_mldsa_pk` and `expected_oprf_pk`.
+    pub fn verify(&self, expected_issuer_mldsa_pk: &[u8], expected_oprf_pk: &PublicKey) -> bool {
+        if !ct_eq_bytes(&self.issuer_pk_digest, &expected_oprf_pk.commitment()) {
+            return false;
+        }
+        if self.issuer_mldsa_pk.len() != expected_issuer_mldsa_pk.len()
+            || !ct_eq_bytes(&self.issuer_mldsa_pk, expected_issuer_mldsa_pk)
+        {
+            return false;
+        }
+        if self.accumulator_root.iter().any(|&x| !gl_is_canonical(x)) {
+            return false;
+        }
+        let expected_tag = compute_accumulator_root_tag(
+            &self.issuer_pk_digest,
+            self.issuer_epoch,
+            &self.accumulator_root,
+        );
+        if !ct_eq_bytes(&self.root_tag, &expected_tag) {
+            return false;
+        }
+        let msg = Self::signing_message(
+            &self.issuer_pk_digest,
+            self.issuer_epoch,
+            &self.accumulator_root,
+            &self.root_tag,
+        );
+        ml_dsa_verify(
+            self.mldsa_level,
+            expected_issuer_mldsa_pk,
+            &msg,
+            Self::SIGNING_CONTEXT,
+            &self.mldsa_signature,
+        )
+    }
+}
+
+/// Holder-local authorization path; contains no other holders' leaves or tokens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CredentialMembershipWitness {
+    pub leaf_index: usize,
+    pub siblings: [[u64; 6]; VC_ACCUMULATOR_DEPTH],
+    pub accumulator_root: [u64; 6],
+    pub issuer_epoch: u64,
+    pub issuer_pk_digest: [u8; 32],
+    pub issuance_token: Option<[u8; 32]>,
+}
+
+/// Authoritative issuer accumulator of OPRF-issued credential commitments.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IssuerCredentialAccumulator {
+    pub oprf_key: PublicKey,
+    pub issuer_epoch: u64,
+    leaves: Vec<[u64; 6]>,
+    enrolled_tokens: Vec<Option<[u8; 32]>>,
+    empty_leaf: [u64; 6],
+}
+
+impl IssuerCredentialAccumulator {
+    pub const CAPACITY: usize = 1 << VC_ACCUMULATOR_DEPTH;
+
+    pub fn new(oprf_key: PublicKey, issuer_epoch: u64) -> Self {
+        let empty_leaf = [
+            gl_reduce_u64(0x454D_5054_595F_4C30),
+            gl_reduce_u64(0x454D_5054_595F_4C31),
+            (issuer_epoch & 0xffff_ffff),
+            issuer_epoch >> 32,
+            0,
+            0,
+        ];
+        Self {
+            oprf_key,
+            issuer_epoch,
+            leaves: Vec::new(),
+            enrolled_tokens: Vec::new(),
+            empty_leaf,
+        }
+    }
+
+    #[cfg(test)]
+    fn enroll(&mut self, attr_commit: [u64; 6]) -> Result<usize, BlindVcError> {
+        if self.leaves.len() >= Self::CAPACITY {
+            return Err(BlindVcError::AccumulatorFull);
+        }
+        let idx = self.leaves.len();
+        self.leaves.push(attr_commit);
+        self.enrolled_tokens.push(None);
+        Ok(idx)
+    }
+
+    fn enroll_issued(
+        &mut self,
+        attr_commit: [u64; 6],
+        issuance_token: [u8; 32],
+    ) -> Result<usize, BlindVcError> {
+        if self.leaves.len() >= Self::CAPACITY {
+            return Err(BlindVcError::AccumulatorFull);
+        }
+        let idx = self.leaves.len();
+        self.leaves.push(attr_commit);
+        self.enrolled_tokens.push(Some(issuance_token));
+        Ok(idx)
+    }
+
+    pub fn root_tag(&self) -> [u8; 32] {
+        compute_accumulator_root_tag(&self.oprf_key.commitment(), self.issuer_epoch, &self.root())
+    }
+
+    /// Produce an authenticated [`IssuerRootAttestation`] over `(oprf_key, issuer_epoch, root())`
+    /// using an arbitrary FIPS 204 `ML-DSA` signer (single-party or threshold MPC).
+    pub fn attest_root<F>(
+        &self,
+        mldsa_level: MlDsaLevel,
+        issuer_mldsa_pk: Vec<u8>,
+        sign_fn: F,
+    ) -> Result<IssuerRootAttestation, BlindVcError>
+    where
+        F: FnOnce(&[u8], &[u8]) -> Result<Vec<u8>, BlindVcError>,
+    {
+        let issuer_pk_digest = self.oprf_key.commitment();
+        let accumulator_root = self.root();
+        let root_tag =
+            compute_accumulator_root_tag(&issuer_pk_digest, self.issuer_epoch, &accumulator_root);
+        let msg = IssuerRootAttestation::signing_message(
+            &issuer_pk_digest,
+            self.issuer_epoch,
+            &accumulator_root,
+            &root_tag,
+        );
+        let mldsa_signature = sign_fn(&msg, IssuerRootAttestation::SIGNING_CONTEXT)?;
+        let attestation = IssuerRootAttestation {
+            issuer_pk_digest,
+            mldsa_level,
+            issuer_mldsa_pk,
+            issuer_epoch: self.issuer_epoch,
+            accumulator_root,
+            root_tag,
+            mldsa_signature,
+        };
+        if !attestation.verify(&attestation.issuer_mldsa_pk, &self.oprf_key) {
+            return Err(BlindVcError::RootAttestationFailed);
+        }
+        Ok(attestation)
+    }
+
+    /// Convenience deterministic FIPS 204 `ML-DSA` attestation for single-key or test issuers.
+    pub fn attest_root_deterministic(
+        &self,
+        mldsa_level: MlDsaLevel,
+        issuer_mldsa_sk: &MlDsaSigningKey,
+        issuer_mldsa_pk: Vec<u8>,
+    ) -> Result<IssuerRootAttestation, BlindVcError> {
+        self.attest_root(mldsa_level, issuer_mldsa_pk, |msg, ctx| {
+            ml_dsa_sign_deterministic(issuer_mldsa_sk, msg, ctx)
+                .ok_or(BlindVcError::RootAttestationFailed)
+        })
+    }
+
+    fn sparse_layers(&self) -> (Vec<Vec<[u64; 6]>>, Vec<[u64; 6]>) {
+        let mut layers = vec![self.leaves.clone()];
+        let mut empty = vec![self.empty_leaf];
+        for level in 0..VC_ACCUMULATOR_DEPTH {
+            let nodes = &layers[level];
+            let next = nodes
+                .chunks(2)
+                .map(|pair| {
+                    merkle_hash_pair(
+                        &pair[0],
+                        pair.get(1).unwrap_or(&empty[level]),
+                        self.issuer_epoch,
+                        level as u32,
+                    )
+                })
+                .collect();
+            empty.push(merkle_hash_pair(
+                &empty[level],
+                &empty[level],
+                self.issuer_epoch,
+                level as u32,
+            ));
+            layers.push(next);
+        }
+        (layers, empty)
+    }
+
+    pub fn root(&self) -> [u64; 6] {
+        let (layers, empty) = self.sparse_layers();
+        layers[VC_ACCUMULATOR_DEPTH]
+            .first()
+            .copied()
+            .unwrap_or(empty[VC_ACCUMULATOR_DEPTH])
+    }
+
+    pub fn membership_witness(
+        &self,
+        leaf_index: usize,
+    ) -> Result<CredentialMembershipWitness, BlindVcError> {
+        Ok(CredentialMembershipWitness {
+            leaf_index,
+            siblings: self.merkle_path(leaf_index)?,
+            accumulator_root: self.root(),
+            issuer_epoch: self.issuer_epoch,
+            issuer_pk_digest: self.oprf_key.commitment(),
+            issuance_token: self.enrolled_tokens[leaf_index],
+        })
+    }
+
+    pub fn merkle_path(
+        &self,
+        leaf_index: usize,
+    ) -> Result<[[u64; 6]; VC_ACCUMULATOR_DEPTH], BlindVcError> {
+        if leaf_index >= self.leaves.len() {
+            return Err(BlindVcError::InvalidAccumulatorLeafIndex);
+        }
+        let (layers, empty) = self.sparse_layers();
+        Ok(core::array::from_fn(|level| {
+            layers[level]
+                .get((leaf_index >> level) ^ 1)
+                .copied()
+                .unwrap_or(empty[level])
+        }))
+    }
+}
+
+/// Canonical input to the TOPRF, binding epoch, schema and the blinded leaf.
+pub fn issuance_input(req: &BlindIssuanceRequest) -> [u8; 72] {
+    encode_issuance_message(req.issuer_epoch, req.schema_id, &req.attr_commit)
+}
+/// Enroll an issuer-authorized request after obtaining its OPRF evaluation over
+/// authenticated server channels. `evaluation` must be finalized by the issuer's
+/// channel adapter, never accepted as a holder-supplied deserialized object.
+pub fn threshold_issue_blind_vc(
+    accumulator: &mut IssuerCredentialAccumulator,
+    req: &BlindIssuanceRequest,
+    issuer_attested_attrs: &[u64],
+    evaluation: &Evaluation,
+    expected_schema_id: u64,
+) -> Result<BlindVerifiableCredential, BlindVcError> {
+    threshold_issue_blind_vc_with_profile(
+        accumulator,
+        req,
+        issuer_attested_attrs,
+        evaluation,
+        expected_schema_id,
+        ZkSoundnessProfile::Quantum128,
+    )
+}
+
+/// Use an explicit verifier-selected soundness budget.
+#[allow(clippy::too_many_arguments)]
+pub fn threshold_issue_blind_vc_with_profile(
+    accumulator: &mut IssuerCredentialAccumulator,
+    req: &BlindIssuanceRequest,
+    issuer_attested_attrs: &[u64],
+    evaluation: &Evaluation,
+    expected_schema_id: u64,
+    profile: ZkSoundnessProfile,
+) -> Result<BlindVerifiableCredential, BlindVcError> {
+    if req.issuer_epoch != accumulator.issuer_epoch
+        || req.issuer_pk_digest != accumulator.oprf_key.commitment()
+        || !verify_blind_issuance_request_with_profile(
+            req,
+            issuer_attested_attrs,
+            expected_schema_id,
+            profile,
+        )
+    {
+        return Err(BlindVcError::BlindIssuanceProofInvalid);
+    }
+    let issuance_token = evaluation
+        .value_for(&accumulator.oprf_key, &issuance_input(req))
+        .ok_or(BlindVcError::InvalidOprfEvaluation)?;
+    if ct_eq_bytes(&issuance_token, &[0u8; 32]) {
+        return Err(BlindVcError::InvalidOprfEvaluation);
+    }
+    let accumulator_leaf_index = accumulator.enroll_issued(req.attr_commit, issuance_token)?;
+    Ok(BlindVerifiableCredential {
+        issuer_epoch: accumulator.issuer_epoch,
+        schema_id: req.schema_id,
+        attr_commit: req.attr_commit,
+        issuance_token,
+        accumulator_leaf_index,
+    })
+}
+
+// ============================================================================
+// Phase 3: Unlinkable Selective-Disclosure Presentation (`prove_selective_disclosure`)
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresentationMode {
+    UnlinkableFresh,
+    ScopedPseudonym([u8; 32]),
+}
+
+fn presentation_scope(
+    scope: &[u8],
+    challenge: &[u8; 32],
+    nonce: &[u8; 32],
+    mode: PresentationMode,
+) -> [u64; 4] {
+    let domain = match mode {
+        PresentationMode::UnlinkableFresh => {
+            cshake256_framed_32(b"QSAG.VC.FRESH.V1", &[scope, challenge, nonce])
+        }
+        PresentationMode::ScopedPseudonym(id) => {
+            cshake256_framed_32(b"QSAG.VC.SCOPED.V1", &[scope, &id])
+        }
+    };
+    hash_verifier_scope_to_limbs(&domain)
+}
+
+/// Unlinkable selective-disclosure presentation (`0` `attr_commit`, `0` `leaf_idx`, `0` `issuance_token`!).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectiveDisclosurePresentation {
+    pub arity: usize,
+    pub verifier_challenge: [u8; 32],
+    pub mode: PresentationMode,
+    pub presentation_nonce: [u8; 32],
+    pub issuer_epoch: u64,
+    pub schema_id: u64,
+    pub accumulator_root: [u64; 6],
+    /// Domain-separated commitment tag binding `(issuer_pk_digest, issuer_epoch, accumulator_root)`.
+    pub issuer_root_tag: [u8; 32],
+    pub verifier_scope_limbs: [u64; 4],
+    /// Sorted `(attr_index, disclosed_value)` pairs.
+    pub disclosed_attrs: Vec<(usize, u64)>,
+    /// Fresh per-presentation rerandomized commitment `Poseidon2(attrs, pres_blind)`.
+    pub pres_commit: [u64; 6],
+    /// Scope-bound pseudonym/nullifier `Poseidon2(holder_blind, verifier_scope_limbs)`.
+    pub scope_tag: [u64; 6],
+    pub opened_reps: Vec<OpenedZkBooRepetition>,
+}
+
+const SD_NUM_PERMS: usize = 3 + VC_ACCUMULATOR_DEPTH; // Attribute, Merkle path, presentation, scope.
+const SD_MERKLE_MUX_GATES: usize = VC_ACCUMULATOR_DEPTH * (1 + 6); // One Boolean check and six limb swaps per level.
+const SD_TOTAL_GATES: usize = SD_NUM_PERMS * GATES_PER_PERM12 + SD_MERKLE_MUX_GATES;
+
+/// The public statement of a selective-disclosure proof.
+struct SdInstance<'a> {
+    arity: usize,
+    presentation_nonce: &'a [u8; 32],
+    issuer_epoch: u64,
+    schema_id: u64,
+    accumulator_root: &'a [u64; 6],
+    issuer_root_tag: &'a [u8; 32],
+    verifier_scope_limbs: &'a [u64; 4],
+    disclosed_attrs: &'a [(usize, u64)],
+    pres_commit: &'a [u64; 6],
+    scope_tag: &'a [u64; 6],
+}
+
+fn serialize_sd_instance(instance: &SdInstance<'_>) -> Vec<u8> {
+    let SdInstance {
+        arity,
+        presentation_nonce,
+        issuer_epoch,
+        schema_id,
+        accumulator_root,
+        issuer_root_tag,
+        verifier_scope_limbs,
+        disclosed_attrs,
+        pres_commit,
+        scope_tag,
+    } = *instance;
+    let mut out = Vec::with_capacity(256);
+    out.extend_from_slice(&(arity as u64).to_le_bytes());
+    out.extend_from_slice(presentation_nonce);
+    out.extend_from_slice(&issuer_epoch.to_le_bytes());
+    out.extend_from_slice(&schema_id.to_le_bytes());
+    out.extend_from_slice(issuer_root_tag);
+    for &x in accumulator_root
+        .iter()
+        .chain(verifier_scope_limbs.iter())
+        .chain(pres_commit.iter())
+        .chain(scope_tag.iter())
+    {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out.extend_from_slice(&(disclosed_attrs.len() as u32).to_le_bytes());
+    for &(idx, val) in disclosed_attrs {
+        out.extend_from_slice(&(idx as u32).to_le_bytes());
+        out.extend_from_slice(&val.to_le_bytes());
+    }
+    out
+}
+
+/// What the verifier asked for: its scope, its fresh challenge, and whether
+/// presentations to it may be linked.
+pub struct PresentationRequest<'a> {
+    pub verifier_scope: &'a [u8],
+    pub verifier_challenge: &'a [u8; 32],
+    pub mode: PresentationMode,
+}
+
+/// Generate an **unlinkable selective-disclosure ZK presentation** revealing ONLY `disclosed_indices`.
+pub fn prove_selective_disclosure(
+    cred: &BlindVerifiableCredential,
+    holder_secret: &HolderCredentialSecret,
+    membership: &CredentialMembershipWitness,
+    disclosed_indices: &[usize],
+    request: PresentationRequest<'_>,
+    presentation_entropy: [u8; 32],
+) -> Result<SelectiveDisclosurePresentation, BlindVcError> {
+    prove_selective_disclosure_with_profile(
+        cred,
+        holder_secret,
+        membership,
+        disclosed_indices,
+        request,
+        presentation_entropy,
+        ZkSoundnessProfile::Quantum128,
+    )
+}
+
+/// Use an explicit verifier-selected soundness budget.
+#[allow(clippy::too_many_arguments)]

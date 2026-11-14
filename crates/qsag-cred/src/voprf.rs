@@ -534,3 +534,560 @@ pub fn blind(
 /// Fields are private so callers deserialize exclusively via [`Output::from_wire`] rather than
 /// mutating unauthenticated components in memory.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Output {
+    context: Context,
+    components: Vec<[[u64; 5]; 4]>,
+}
+impl Output {
+    pub const fn context(&self) -> &Context {
+        &self.context
+    }
+    pub fn components(&self) -> &[[[u64; 5]; 4]] {
+        &self.components
+    }
+}
+impl Server {
+    pub fn public_key(&self) -> &PublicKey {
+        &self.key
+    }
+    pub fn evaluate<T: Transport>(
+        &mut self,
+        request: Request,
+        store: &mut dyn CounterStore,
+        transport: &mut T,
+    ) -> Result<Output, Error> {
+        if request.party != self.party
+            || request.context.key != self.key.commitment
+            || request.context.items != request.inputs.len()
+            || request.inputs.is_empty()
+            || request.inputs.len() > MAX_BATCH
+        {
+            return Err(Error::Context);
+        }
+        // Reject `u64::MAX` and unbounded counter jumps BEFORE any network broadcast or durable
+        // counter mutation so a single uncorroborated `counter = u64::MAX` packet cannot brick
+        // the server's monotone high-water mark!
+        if request.context.counter == u64::MAX {
+            return Err(Error::Counter);
+        }
+        match self.last_counter {
+            Some(last) => {
+                if request.context.counter <= last
+                    || request.context.counter - last > MAX_COUNTER_WINDOW
+                {
+                    return Err(Error::Counter);
+                }
+            }
+            None => {
+                if request.context.counter >= MAX_COUNTER_WINDOW {
+                    return Err(Error::Counter);
+                }
+            }
+        }
+        let context = request.context.digest();
+        let agreement =
+            transport.broadcast(hash(b"QSAG.TOPRF.START.V1", &[&context]), context.to_vec())?;
+        if agreement.iter().filter(|c| c.as_slice() == context).count() < 4 {
+            return Err(Error::Context);
+        }
+        store.reserve(
+            &self.key.commitment,
+            self.party,
+            request.context.counter,
+            request.inputs.len(),
+        )?;
+        self.last_counter = Some(request.context.counter);
+        // Bind the client's replicated input before any key-dependent gate.
+        // Unanimity among a component's four holders deliberately permits abort:
+        // a majority alone could admit inconsistent malicious-client shares.
+        let mut commitments = Vec::new();
+        for component in 0..5 {
+            commitments.extend_from_slice(&input_commitment(&request, component));
+        }
+        let input_commits =
+            transport.broadcast(hash(b"QSAG.TOPRF.INPUT.CHECK.V1", &[&context]), commitments)?;
+        let mut verified_commitments = Vec::new();
+        for component in 0..5 {
+            let mut expected = None;
+            for (party, message) in input_commits.iter().enumerate() {
+                if party != component {
+                    let digest = message
+                        .get(component * 32..component * 32 + 32)
+                        .ok_or(Error::BadDelivery { party })?;
+                    if expected.is_some_and(|e| e != digest) {
+                        return Err(Error::InconsistentShares);
+                    }
+                    expected = Some(digest);
+                }
+            }
+            verified_commitments.extend_from_slice(expected.ok_or(Error::InconsistentShares)?);
+        }
+        if hash(b"QSAG.TOPRF.REQUEST.V1", &[&verified_commitments]) != request.context.request {
+            return Err(Error::Context);
+        }
+        let mut states = Zeroizing(vec![[[0; 5]; 12]; request.inputs.len()]);
+        for (st, input) in states.iter_mut().zip(&request.inputs) {
+            st[..4].copy_from_slice(input);
+            st[8..].copy_from_slice(&self.key_share);
+            engine::public(&mut st[4], self.party, 1);
+            engine::public(&mut st[7], self.party, 0x544f50524631);
+        }
+        let result = engine::Engine {
+            party: self.party,
+            seeds: &self.seeds,
+            context,
+            layer: 0,
+            transport,
+        }
+        .permute(&mut states);
+        result?;
+        let components = states
+            .iter()
+            .map(|st| core::array::from_fn(|lane| st[lane]))
+            .collect();
+        Ok(Output {
+            context: request.context.clone(),
+            components,
+        })
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+pub struct Evaluation {
+    values: Vec<[u8; 32]>,
+    pub faulty_servers: Vec<usize>,
+    key: [u8; 32],
+    input_digests: Vec<[u8; 32]>,
+}
+impl Evaluation {
+    pub fn values(&self) -> &[[u8; 32]] {
+        &self.values
+    }
+    pub fn value_for(&self, key: &PublicKey, input: &[u8]) -> Option<[u8; 32]> {
+        if self.key != key.commitment {
+            return None;
+        }
+        let digest = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]);
+        self.input_digests
+            .iter()
+            .position(|d| *d == digest)
+            .map(|i| self.values[i])
+    }
+}
+impl Client {
+    /// Array indices MUST come from authenticated channel identities. Up to one
+    /// bad/missing output is corrected; evidence names a channel, not a public
+    /// signature that can be used as a transferable slashing receipt.
+    pub fn finalize(self, outputs: [Option<Output>; 5]) -> Result<Evaluation, Error> {
+        let mut faulty = Vec::new();
+        let mut values = Vec::new();
+        for item in 0..self.context.items {
+            let mut result = Zeroizing([0; 4]);
+            for (lane, slot) in result.iter_mut().enumerate() {
+                for component in 0..5 {
+                    let candidates: Vec<_> = outputs
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(party, out)| {
+                            let o = out.as_ref()?;
+                            if party == component
+                                || o.context != self.context
+                                || o.components.len() != self.context.items
+                            {
+                                return None;
+                            }
+                            let value = o.components[item][lane][component];
+                            (value < qsag_accel::goldilocks::GOLDILOCKS_PRIME)
+                                .then_some((party, value))
+                        })
+                        .collect();
+                    let correct = majority(&candidates, 3)?;
+                    *slot = gl_add(*slot, correct);
+                    for party in 0..5 {
+                        if party != component
+                            && !candidates.contains(&(party, correct))
+                            && !faulty.contains(&party)
+                        {
+                            faulty.push(party)
+                        }
+                    }
+                }
+            }
+            values.push(finish(&result[..]));
+        }
+        faulty.sort_unstable();
+        if faulty.len() > 1 {
+            return Err(Error::InconsistentShares);
+        }
+        Ok(Evaluation {
+            values,
+            faulty_servers: faulty,
+            key: self.context.key,
+            input_digests: self.input_digests,
+        })
+    }
+}
+
+impl Request {
+    /// Canonical private request: 107-byte header, four 32-byte hidden salts,
+    /// then 16 canonical 64-bit field limbs per item. No excluded share is sent.
+    pub fn to_wire(&self) -> Vec<u8> {
+        let mut bytes = Vec::from(self.context.key);
+        bytes.extend_from_slice(&self.context.session);
+        bytes.extend_from_slice(&self.context.counter.to_le_bytes());
+        bytes.extend_from_slice(&(self.context.items as u16).to_le_bytes());
+        bytes.push(self.party as u8);
+        bytes.extend_from_slice(&self.context.request);
+        for (c, salt) in self.salts.iter().enumerate() {
+            if c != self.party {
+                bytes.extend_from_slice(salt)
+            }
+        }
+        for input in &self.inputs {
+            for wire in input {
+                for (c, &v) in wire.iter().enumerate() {
+                    if c != self.party {
+                        engine::put(&mut bytes, v)
+                    }
+                }
+            }
+        }
+        bytes
+    }
+    /// The receiving channel must additionally authenticate the client and quota.
+    pub fn from_wire(bytes: &[u8]) -> Result<Self, Error> {
+        if bytes.len() < 235 {
+            return Err(Error::Encoding);
+        }
+        let key = bytes[..32].try_into().map_err(|_| Error::Encoding)?;
+        let session = bytes[32..64].try_into().map_err(|_| Error::Encoding)?;
+        let counter = u64::from_le_bytes(bytes[64..72].try_into().map_err(|_| Error::Encoding)?);
+        let items =
+            u16::from_le_bytes(bytes[72..74].try_into().map_err(|_| Error::Encoding)?) as usize;
+        let party = bytes[74] as usize;
+        if party >= 5 || items == 0 || items > MAX_BATCH || bytes.len() != 235 + 128 * items {
+            return Err(Error::Encoding);
+        }
+        let mut salts = Zeroizing([[0; 32]; 5]);
+        let mut cursor = 107;
+        for (c, salt) in salts.iter_mut().enumerate() {
+            if c != party {
+                salt.copy_from_slice(&bytes[cursor..cursor + 32]);
+                cursor += 32;
+            }
+        }
+        let mut inputs = Zeroizing(vec![[[0; 5]; 4]; items]);
+        for input in inputs.iter_mut() {
+            for wire in input {
+                for (c, v) in wire.iter_mut().enumerate() {
+                    if c != party {
+                        *v = engine::read(bytes, &mut cursor)?
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            context: Context {
+                request: bytes[75..107].try_into().map_err(|_| Error::Encoding)?,
+                key,
+                session,
+                counter,
+                items,
+            },
+            party,
+            inputs: core::mem::take(&mut *inputs),
+            salts: *salts,
+        })
+    }
+}
+
+impl Output {
+    /// Canonical authenticated private output, omitting the excluded component.
+    pub fn to_wire(&self, party: usize) -> Result<Vec<u8>, Error> {
+        if party >= 5
+            || self.context.items == 0
+            || self.context.items > MAX_BATCH
+            || self.components.len() != self.context.items
+        {
+            return Err(Error::Encoding);
+        }
+        let mut bytes = Vec::from(self.context.key);
+        bytes.extend_from_slice(&self.context.session);
+        bytes.extend_from_slice(&self.context.counter.to_le_bytes());
+        bytes.extend_from_slice(&(self.context.items as u16).to_le_bytes());
+        bytes.push(party as u8);
+        bytes.extend_from_slice(&self.context.request);
+        for lanes in &self.components {
+            for wire in lanes {
+                for (c, &v) in wire.iter().enumerate() {
+                    if c != party {
+                        if v >= qsag_accel::goldilocks::GOLDILOCKS_PRIME {
+                            return Err(Error::Encoding);
+                        }
+                        engine::put(&mut bytes, v)
+                    }
+                }
+            }
+        }
+        Ok(bytes)
+    }
+    /// `party` is the authenticated sender index from enrollment.
+    pub fn from_wire(bytes: &[u8], party: usize) -> Result<Self, Error> {
+        if bytes.len() < 107 || party >= 5 || bytes[74] as usize != party {
+            return Err(Error::Encoding);
+        }
+        let key = bytes[..32].try_into().map_err(|_| Error::Encoding)?;
+        let session = bytes[32..64].try_into().map_err(|_| Error::Encoding)?;
+        let counter = u64::from_le_bytes(bytes[64..72].try_into().map_err(|_| Error::Encoding)?);
+        let items =
+            u16::from_le_bytes(bytes[72..74].try_into().map_err(|_| Error::Encoding)?) as usize;
+        if items == 0 || items > MAX_BATCH || bytes.len() != 107 + 128 * items {
+            return Err(Error::Encoding);
+        }
+        let mut components = Zeroizing(vec![[[0; 5]; 4]; items]);
+        let mut cursor = 107;
+        for lanes in components.iter_mut() {
+            for wire in lanes {
+                for (c, v) in wire.iter_mut().enumerate() {
+                    if c != party {
+                        *v = engine::read(bytes, &mut cursor)?
+                    }
+                }
+            }
+        }
+        Ok(Self {
+            context: Context {
+                request: bytes[75..107].try_into().map_err(|_| Error::Encoding)?,
+                key,
+                session,
+                counter,
+                items,
+            },
+            components: core::mem::take(&mut *components),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct AbortTransport;
+    impl Transport for AbortTransport {
+        fn broadcast(&mut self, _: [u8; 32], _: Vec<u8>) -> Result<[Vec<u8>; 5], Error> {
+            Err(Error::Transport)
+        }
+        fn exchange(&mut self, _: [u8; 32], _: [Vec<u8>; 5]) -> Result<[Vec<u8>; 5], Error> {
+            Err(Error::Transport)
+        }
+    }
+    struct Store;
+    impl CounterStore for Store {
+        fn reserve(&mut self, _: &[u8; 32], _: usize, _: u64, _: usize) -> Result<(), Error> {
+            Ok(())
+        }
+    }
+    #[test]
+    fn aborts_drop_secret_owners() {
+        assert_eq!(
+            dkg(Config, 5, [1; 32], [2; 32], &mut AbortTransport).unwrap_err(),
+            Error::Encoding
+        );
+        assert_eq!(
+            dkg(Config, 0, [1; 32], [2; 32], &mut AbortTransport).unwrap_err(),
+            Error::Transport
+        );
+        assert!(matches!(
+            blind(&PublicKey::test_key(), &[], [1; 32], 0, [2; 32]),
+            Err(Error::Quota)
+        ));
+        let mut server = Server {
+            party: 0,
+            key: PublicKey::test_key(),
+            seeds: [[3; 32]; 25],
+            key_share: [[4; 5]; 4],
+            last_counter: None,
+        };
+        let (_, requests) = blind(&server.key, &[b"input"], [1; 32], 0, [2; 32]).unwrap();
+        let request = requests.into_iter().next().unwrap();
+        assert_eq!(
+            server
+                .evaluate(request, &mut Store, &mut AbortTransport)
+                .unwrap_err(),
+            Error::Transport
+        );
+    }
+    #[test]
+    fn delivery_abort_after_partial_joint_and_seed_generation() {
+        struct Delivery {
+            commits: [Vec<u8>; 5],
+            delivered: [Vec<u8>; 5],
+        }
+        impl Transport for Delivery {
+            fn broadcast(&mut self, _: [u8; 32], _: Vec<u8>) -> Result<[Vec<u8>; 5], Error> {
+                Ok(self.commits.clone())
+            }
+            fn exchange(&mut self, _: [u8; 32], _: [Vec<u8>; 5]) -> Result<[Vec<u8>; 5], Error> {
+                Ok(self.delivered.clone())
+            }
+        }
+        let session = [1; 32];
+        let mut transport = Delivery {
+            commits: core::array::from_fn(|_| Vec::new()),
+            delivered: core::array::from_fn(|_| Vec::new()),
+        };
+        for dealer in 0..5 {
+            for i in 0..5 {
+                for j in i..5 {
+                    let value = if dealer != i && dealer != j {
+                        hash(
+                            b"QSAG.TOPRF.DKG.SEED.V1",
+                            &[&[2; 32], &session, &[dealer as u8, i as u8, j as u8]],
+                        )
+                    } else {
+                        [0; 32]
+                    };
+                    transport.commits[dealer].extend_from_slice(&hash(
+                        b"QSAG.TOPRF.DKG.COMMIT.V1",
+                        &[&session, &[dealer as u8, i as u8, j as u8], &value],
+                    ));
+                    if i != 0 && j != 0 && dealer != i && dealer != j {
+                        transport.delivered[dealer].extend_from_slice(&value);
+                    }
+                }
+            }
+        }
+        // First subset completes; a later dealer fails after a partial joint buffer exists.
+        transport.delivered[4][32] ^= 1;
+        assert_eq!(
+            dkg(Config, 0, session, [2; 32], &mut transport).unwrap_err(),
+            Error::BadDelivery { party: 4 }
+        );
+        transport.delivered[4].truncate(32);
+        assert_eq!(
+            dkg(Config, 0, session, [2; 32], &mut transport).unwrap_err(),
+            Error::BadDelivery { party: 4 }
+        );
+    }
+
+    #[test]
+    fn evaluation_aborts_after_secret_state_is_initialized() {
+        struct GateAbort {
+            step: usize,
+            commits: [Vec<u8>; 5],
+        }
+        impl Transport for GateAbort {
+            fn broadcast(&mut self, _: [u8; 32], message: Vec<u8>) -> Result<[Vec<u8>; 5], Error> {
+                self.step += 1;
+                if self.step == 1 {
+                    Ok(core::array::from_fn(|_| message.clone()))
+                } else {
+                    Ok(self.commits.clone())
+                }
+            }
+            fn exchange(&mut self, _: [u8; 32], _: [Vec<u8>; 5]) -> Result<[Vec<u8>; 5], Error> {
+                Err(Error::Transport)
+            }
+        }
+        let mut server = Server {
+            party: 0,
+            key: PublicKey::test_key(),
+            seeds: [[3; 32]; 25],
+            key_share: [[4; 5]; 4],
+            last_counter: None,
+        };
+        let (_, requests) = blind(&server.key, &[b"input"], [1; 32], 0, [2; 32]).unwrap();
+        let commits = core::array::from_fn(|p| {
+            (0..5)
+                .flat_map(|c| input_commitment(&requests[p], c))
+                .collect()
+        });
+        let mut transport = GateAbort { step: 0, commits };
+        assert_eq!(
+            server
+                .evaluate(
+                    requests.into_iter().next().unwrap(),
+                    &mut Store,
+                    &mut transport
+                )
+                .unwrap_err(),
+            Error::Transport
+        );
+        assert_eq!(transport.step, 2);
+        assert_eq!(server.last_counter, Some(0));
+    }
+
+    #[test]
+    fn recursive_wipe_clears_nested_buffers() {
+        let mut secret = Zeroizing(vec![[[7u64; 5]; 4]; 2]);
+        secret.0.wipe();
+        assert!(secret.iter().flatten().flatten().all(|x| *x == 0));
+    }
+
+    #[test]
+    fn client_view_simulation_and_private_wire() {
+        let public = PublicKey::test_key();
+        let mut histogram = [[[0usize; 8]; 2]; 5];
+        for sample in 0..1024u64 {
+            let entropy = hash(b"test coins", &[&sample.to_le_bytes()]);
+            for choice in [0usize, 1] {
+                let input = if choice == 0 {
+                    b"low entropy input A"
+                } else {
+                    b"low entropy input B"
+                };
+                let (_, requests) = blind(&public, &[input], [11; 32], sample, entropy).unwrap();
+                for (party, request) in requests.iter().enumerate() {
+                    assert_eq!(request.salts[party], [0; 32]);
+                    assert_eq!(request.inputs[0][0][party], 0);
+                    let observed = request.inputs[0][0][if party == 4 { 0 } else { 4 }];
+                    histogram[party][choice][(observed & 7) as usize] += 1;
+                    let bytes = request.to_wire();
+                    assert_eq!(bytes.len(), 363);
+                    assert_eq!(Request::from_wire(&bytes).unwrap().to_wire(), bytes);
+                    assert!(Request::from_wire(&bytes[..362]).is_err());
+                    let mut noncanonical = bytes;
+                    noncanonical[235..243]
+                        .copy_from_slice(&qsag_accel::goldilocks::GOLDILOCKS_PRIME.to_le_bytes());
+                    assert!(Request::from_wire(&noncanonical).is_err());
+                }
+            }
+        }
+        // Coarse, deterministic statistical smoke check, not a security proof.
+        for hist in histogram {
+            for (a, b) in hist[0].iter().zip(hist[1]) {
+                assert!(a.abs_diff(b) < 80);
+            }
+        }
+        // For the server missing the residual component, identically coupled
+        // coins give exactly the simulator's private shares for two inputs.
+        // The public salted commitment is computationally hiding, not identical.
+        let (_, a) = blind(&public, &[b"a"], [12; 32], 0, [13; 32]).unwrap();
+        let (_, b) = blind(&public, &[b"b"], [12; 32], 0, [13; 32]).unwrap();
+        assert_eq!(a[4].inputs, b[4].inputs);
+        assert_eq!(a[4].salts, b[4].salts);
+        assert_ne!(a[4].context.request, b[4].context.request);
+    }
+    #[test]
+    fn basis_attack_fails_even_given_raw_output_limbs() {
+        let evaluate = |input: [u64; 4]| {
+            let mut st = [0; 12];
+            st[..4].copy_from_slice(&input);
+            st[4] = 1;
+            st[7] = 0x544f50524631;
+            st[8..].copy_from_slice(&[13, 17, 23, 29]);
+            poseidon2_perm12(&mut st);
+            [st[0], st[1], st[2], st[3]]
+        };
+        let a = evaluate([1, 0, 0, 0]);
+        let b = evaluate([0, 1, 0, 0]);
+        for coefficient in 2..66 {
+            let target = evaluate([coefficient, 7, 0, 0]);
+            let prediction = core::array::from_fn(|i| {
+                gl_add(
+                    qsag_accel::goldilocks::gl_mul(coefficient, a[i]),
+                    qsag_accel::goldilocks::gl_mul(7, b[i]),
+                )
+            });
+            assert_ne!(target, prediction);
+        }
+    }
+}
