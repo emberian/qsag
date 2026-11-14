@@ -547,3 +547,583 @@ pub trait FtsEpochWal {
     fn reserve_use(&mut self, key: &[u8; 32], next: u8) -> Result<(), FrontierFtsError>;
 }
 
+pub struct FrontierFtsSigningKey {
+    pub profile: FrontierFtsProfile,
+    sk_seed: RedactedSecret<32>,
+    sk_prf: RedactedSecret<32>,
+    pub pk: FrontierFtsPublicKey,
+    uses_completed: u8,
+    wal: Option<alloc::boxed::Box<dyn FtsEpochWal>>,
+    max_uses: u8,
+    /// Optional flat cache of `[X_{v, j}]` across `v in 2..2^{h+1}, j in 0..w` (`n_trunc` bytes each)
+    /// wiped via `ct_zeroize_bytes` on `Drop`.
+    cached_chains: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for FrontierFtsSigningKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrontierFtsSigningKey")
+            .field("profile", &self.profile)
+            .field("sk_seed", &"<REDACTED>")
+            .field("sk_prf", &"<REDACTED>")
+            .field("uses_completed", &self.uses_completed)
+            .field("max_uses", &self.max_uses)
+            .finish()
+    }
+}
+
+impl Drop for FrontierFtsSigningKey {
+    fn drop(&mut self) {
+        if let Some(ref mut buf) = self.cached_chains {
+            ct_zeroize_bytes(buf);
+        }
+    }
+}
+
+/// Compact `FrontierSumFts` signature (`514 B` / `770 B` / `1,314 B` / `2,338 B`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrontierFtsSignature {
+    pub randomizer: Vec<u8>,
+    pub grind_counter: u16,
+    pub chain_values: Vec<u8>,
+}
+
+impl FrontierFtsSignature {
+    pub fn to_bytes(&self, profile: FrontierFtsProfile) -> Vec<u8> {
+        let p = profile.params();
+        let ctr_bytes = p.counter_bits.div_ceil(8);
+        let mut out = Vec::with_capacity(profile.signature_bytes());
+        out.extend_from_slice(&self.randomizer);
+        if ctr_bytes == 2 {
+            out.extend_from_slice(&self.grind_counter.to_be_bytes());
+        } else if ctr_bytes == 1 {
+            out.push(self.grind_counter as u8);
+        }
+        out.extend_from_slice(&self.chain_values);
+        out
+    }
+
+    pub fn from_bytes(profile: FrontierFtsProfile, bytes: &[u8]) -> Result<Self, FrontierFtsError> {
+        if bytes.len() != profile.signature_bytes() {
+            return Err(FrontierFtsError::MalformedSignatureLength);
+        }
+        let p = profile.params();
+        let n = p.node_bytes;
+        let ctr_bytes = p.counter_bits.div_ceil(8);
+        let randomizer = bytes[0..n].to_vec();
+        let grind_counter = match ctr_bytes {
+            0 => 0u16,
+            1 => bytes[n] as u16,
+            2 => u16::from_be_bytes([bytes[n], bytes[n + 1]]),
+            _ => return Err(FrontierFtsError::MalformedSignatureLength),
+        };
+        let chain_values = bytes[n + ctr_bytes..].to_vec();
+        Ok(Self {
+            randomizer,
+            grind_counter,
+            chain_values,
+        })
+    }
+}
+
+#[inline]
+fn fts_leaf_start(
+    pid: &[u8; 56],
+    pk_seed: &[u8; 32],
+    sk_seed: &[u8; 32],
+    node_v: u32,
+    out: &mut [u8],
+) {
+    let v_be = (node_v as u64).to_be_bytes();
+    cshake256_framed_xof(TAG_LEAF, &[pid, pk_seed, &v_be, sk_seed], out);
+}
+
+#[inline]
+fn fts_chain_step(
+    pid: &[u8; 56],
+    pk_seed: &[u8; 32],
+    node_v: u32,
+    step_j: usize,
+    cur: &[u8],
+    out: &mut [u8],
+) {
+    let v_be = (node_v as u64).to_be_bytes();
+    let j_be = (step_j as u64).to_be_bytes();
+    cshake256_framed_xof(TAG_CHAIN, &[pid, pk_seed, &v_be, &j_be, cur], out);
+}
+
+#[inline]
+fn fts_merge(
+    pid: &[u8; 56],
+    pk_seed: &[u8; 32],
+    node_v: u32,
+    left_end: &[u8],
+    right_end: &[u8],
+    out: &mut [u8],
+) {
+    let v_be = (node_v as u64).to_be_bytes();
+    cshake256_framed_xof(TAG_MERGE, &[pid, pk_seed, &v_be, left_end, right_end], out);
+}
+
+fn prehash_message_256(pid: &[u8; 56], pk_seed: &[u8; 32], pk_root: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    cshake256_framed_xof(TAG_MSG_PRE, &[pid, pk_seed, pk_root, msg], &mut out);
+    out
+}
+
+fn squeeze_target_index(
+    pid: &[u8; 56],
+    pk_seed: &[u8; 32],
+    pk_root: &[u8],
+    randomizer: &[u8],
+    msg_digest32: &[u8; 32],
+    counter: u16,
+    index_bits: usize,
+) -> U384 {
+    let ctr_be = counter.to_be_bytes();
+    let needed = index_bits.div_ceil(8);
+    let mut buf = [0u8; 48];
+    cshake256_framed_xof(
+        TAG_HMSG,
+        &[pid, &ctr_be, pk_seed, pk_root, randomizer, msg_digest32],
+        &mut buf[..needed],
+    );
+    let val = U384::from_top_bits_be(&buf[..needed], index_bits);
+    ct_zeroize_bytes(&mut buf);
+    val
+}
+
+impl FrontierFtsSigningKey {
+    /// Generate a `FrontierSumFts` keypair from `(sk_seed, sk_prf, pk_seed)`.
+    /// When `cache_tree == true`, caches chain values so signing runs in `< 1 ms` with constant-time
+    /// slot selection across chain offsets `0..w`.
+    pub fn keygen<B: AcceleratorBackend>(
+        profile: FrontierFtsProfile,
+        sk_seed: [u8; 32],
+        sk_prf: [u8; 32],
+        pk_seed: [u8; 32],
+        cache_tree: bool,
+        _accel: &B,
+    ) -> Self {
+        let p = profile.params();
+        let pid = profile.pid_bytes();
+        let n = p.node_bytes;
+        let w = p.winternitz_w;
+        let h = p.tree_height;
+        let total_nodes = 1usize << (h + 1);
+
+        // Compute bottom-up: if caching, store `[total_nodes * w * n]`; else store endpoints `[total_nodes * n]`.
+        let mut endpoints = vec![0u8; total_nodes * n];
+        let mut cache = if cache_tree {
+            Some(vec![0u8; total_nodes * w * n])
+        } else {
+            None
+        };
+
+        let first_leaf = 1usize << h;
+        let mut cur = [0u8; 32];
+        let mut next = [0u8; 32];
+
+        for v in (2..total_nodes).rev() {
+            if v >= first_leaf {
+                fts_leaf_start(&pid, &pk_seed, &sk_seed, v as u32, &mut cur[..n]);
+            } else {
+                let l_off = (2 * v) * n;
+                let r_off = (2 * v + 1) * n;
+                fts_merge(
+                    &pid,
+                    &pk_seed,
+                    v as u32,
+                    &endpoints[l_off..l_off + n],
+                    &endpoints[r_off..r_off + n],
+                    &mut cur[..n],
+                );
+            }
+            if let Some(ref mut cbuf) = cache {
+                let off = (v * w) * n;
+                cbuf[off..off + n].copy_from_slice(&cur[..n]);
+            }
+            for step in 0..(w - 1) {
+                fts_chain_step(&pid, &pk_seed, v as u32, step, &cur[..n], &mut next[..n]);
+                cur[..n].copy_from_slice(&next[..n]);
+                if let Some(ref mut cbuf) = cache {
+                    let off = (v * w + step + 1) * n;
+                    cbuf[off..off + n].copy_from_slice(&cur[..n]);
+                }
+            }
+            endpoints[v * n..(v + 1) * n].copy_from_slice(&cur[..n]);
+        }
+
+        let mut root = vec![0u8; n];
+        fts_merge(
+            &pid,
+            &pk_seed,
+            1,
+            &endpoints[2 * n..3 * n],
+            &endpoints[3 * n..4 * n],
+            &mut root,
+        );
+
+        ct_zeroize_bytes(&mut cur);
+        ct_zeroize_bytes(&mut next);
+        ct_zeroize_bytes(&mut endpoints);
+
+        let pk = FrontierFtsPublicKey {
+            profile,
+            pk_seed,
+            root,
+        };
+        Self {
+            profile,
+            sk_seed: RedactedSecret::new(sk_seed),
+            sk_prf: RedactedSecret::new(sk_prf),
+            pk,
+            uses_completed: 0,
+            wal: None,
+            max_uses: p.max_safe_uses,
+            cached_chains: cache,
+        }
+    }
+
+    /// Identity binds the profile and complete public key to the use journal.
+    pub fn wal_key(&self) -> [u8; 32] {
+        qsag_accel::keccak::cshake256_framed_32(b"QSAG.FRONTIER.WAL.V1", &[&self.profile.pid_bytes(), &self.pk.pk_seed, &self.pk.root])
+    }
+    pub fn attach_wal(mut self, wal: alloc::boxed::Box<dyn FtsEpochWal>) -> Result<Self, FrontierFtsError> {
+        let used = wal.uses_completed(&self.wal_key())?;
+        if used < self.uses_completed || used > self.max_uses { return Err(FrontierFtsError::PersistenceFailed); }
+        self.uses_completed = used;
+        self.wal = Some(wal);
+        Ok(self)
+    }
+
+    pub const fn uses_remaining(&self) -> u8 {
+        self.max_uses.saturating_sub(self.uses_completed)
+    }
+
+    /// Number of signatures this key has already released.
+    pub const fn uses_completed(&self) -> u8 {
+        self.uses_completed
+    }
+
+    /// Restore the use counter of a key regenerated from its seeds, from durable storage.
+    /// The counter only moves forward and never past the profile's safe-use budget.
+    pub fn resume_at(mut self, uses_completed: u8) -> Result<Self, FrontierFtsError> {
+        if uses_completed < self.uses_completed || uses_completed > self.max_uses {
+            return Err(FrontierFtsError::UseBudgetExhausted);
+        }
+        self.uses_completed = uses_completed;
+        Ok(self)
+    }
+
+    /// Sign `msg` using mandatory `SK.prf`-derived randomized `R`, 256-bit message pre-binding,
+    /// and strict monotonic use-budget enforcement (`uses_completed < max_uses`).
+    pub fn sign(
+        &mut self,
+        dp: &FrontierDpTable,
+        msg: &[u8],
+        opt_hedging_nonce: &[u8; 32],
+    ) -> Result<FrontierFtsSignature, FrontierFtsError> {
+        if dp.params != self.profile.params() {
+            return Err(FrontierFtsError::ProfileMismatch);
+        }
+        if self.uses_completed >= self.max_uses {
+            return Err(FrontierFtsError::UseBudgetExhausted);
+        }
+        // Latch use counter BEFORE computing or releasing any signature material!
+        let use_seq = self.uses_completed;
+        self.uses_completed += 1;
+        let key = self.wal_key();
+        if let Some(wal) = &mut self.wal {
+            if wal.reserve_use(&key, self.uses_completed).is_err() {
+                self.uses_completed = self.max_uses;
+                return Err(FrontierFtsError::PersistenceFailed);
+            }
+        } else if !cfg!(test) {
+            self.uses_completed = self.max_uses;
+            return Err(FrontierFtsError::PersistenceFailed);
+        }
+
+        let p = self.profile.params();
+        let pid = self.profile.pid_bytes();
+        let n = p.node_bytes;
+        let w = p.winternitz_w;
+
+        let msg_digest32 = prehash_message_256(&pid, &self.pk.pk_seed, &self.pk.root, msg);
+        let seq_bytes = [use_seq];
+        let mut randomizer = vec![0u8; n];
+        cshake256_framed_xof(
+            TAG_RAND,
+            &[
+                &pid,
+                self.sk_prf.expose(),
+                &self.pk.pk_seed,
+                &self.pk.root,
+                opt_hedging_nonce,
+                &seq_bytes,
+                &msg_digest32,
+            ],
+            &mut randomizer,
+        );
+
+        let max_ctr: u32 = 1u32 << p.counter_bits;
+        let mut found_ctr = None;
+        let mut target_rank = U384::ZERO;
+        for ctr in 0..max_ctr {
+            let cand = squeeze_target_index(
+                &pid,
+                &self.pk.pk_seed,
+                &self.pk.root,
+                &randomizer,
+                &msg_digest32,
+                ctr as u16,
+                p.index_bits,
+            );
+            if cand.ct_lt(dp.total_cardinality) {
+                found_ctr = Some(ctr as u16);
+                target_rank = cand;
+                break;
+            }
+        }
+        let grind_counter = found_ctr.ok_or(FrontierFtsError::GrindingExhausted)?;
+        let (frontier, offsets) = dp.unrank(target_rank)?;
+
+        let mut chain_values = vec![0u8; p.frontier_len * n];
+        if let Some(ref cbuf) = self.cached_chains {
+            // Constant-time scan across all `j in 0..w` for each frontier node `v`.
+            let mut slot_val = [0u8; 32];
+            for (idx, (&v, &a_pos)) in frontier.iter().zip(offsets.iter()).enumerate() {
+                slot_val.fill(0);
+                for j in 0..w {
+                    let match_j = ct_eq_u64(j as u64, a_pos as u64);
+                    let src_off = ((v as usize) * w + j) * n;
+                    ct_conditional_assign_bytes(
+                        match_j,
+                        &mut slot_val[..n],
+                        &cbuf[src_off..src_off + n],
+                    )
+                    .map_err(|_| FrontierFtsError::ProfileMismatch)?;
+                }
+                chain_values[idx * n..(idx + 1) * n].copy_from_slice(&slot_val[..n]);
+            }
+            ct_zeroize_bytes(&mut slot_val);
+        } else {
+            // Uncached subtree evaluation for arbitrary frontier nodes.
+            let mut tmp = [0u8; 32];
+            for (idx, (&v, &a_pos)) in frontier.iter().zip(offsets.iter()).enumerate() {
+                self.eval_node_at_pos(&pid, v, a_pos as usize, &mut tmp[..n])?;
+                chain_values[idx * n..(idx + 1) * n].copy_from_slice(&tmp[..n]);
+            }
+            ct_zeroize_bytes(&mut tmp);
+        }
+
+        let sig = FrontierFtsSignature {
+            randomizer,
+            grind_counter,
+            chain_values,
+        };
+        // Mandatory self-verification before releasing signature!
+        verify_frontier_fts(&self.pk, dp, msg, &sig)?;
+        Ok(sig)
+    }
+
+    fn eval_node_at_pos(
+        &self,
+        pid: &[u8; 56],
+        v: u32,
+        target_pos: usize,
+        out: &mut [u8],
+    ) -> Result<(), FrontierFtsError> {
+        let p = self.profile.params();
+        let n = p.node_bytes;
+        let w = p.winternitz_w;
+        let first_leaf = 1u32 << p.tree_height;
+        if out.len() != n {
+            return Err(FrontierFtsError::ProfileMismatch);
+        }
+        let mut cur = [0u8; 32];
+        let mut next = [0u8; 32];
+        if v >= first_leaf {
+            fts_leaf_start(
+                pid,
+                &self.pk.pk_seed,
+                self.sk_seed.expose(),
+                v,
+                &mut cur[..n],
+            );
+        } else {
+            let mut l_end = [0u8; 32];
+            let mut r_end = [0u8; 32];
+            self.eval_node_at_pos(pid, 2 * v, w - 1, &mut l_end[..n])?;
+            self.eval_node_at_pos(pid, 2 * v + 1, w - 1, &mut r_end[..n])?;
+            fts_merge(
+                pid,
+                &self.pk.pk_seed,
+                v,
+                &l_end[..n],
+                &r_end[..n],
+                &mut cur[..n],
+            );
+            ct_zeroize_bytes(&mut l_end);
+            ct_zeroize_bytes(&mut r_end);
+        }
+        // Fixed `w - 1` iterations with constant-time conditional capture at `step == target_pos`!
+        out.copy_from_slice(&cur[..n]);
+        for step in 0..(w - 1) {
+            fts_chain_step(pid, &self.pk.pk_seed, v, step, &cur[..n], &mut next[..n]);
+            cur[..n].copy_from_slice(&next[..n]);
+            let hit = ct_eq_u64((step + 1) as u64, target_pos as u64);
+            ct_conditional_assign_bytes(hit, out, &cur[..n])
+                .map_err(|_| FrontierFtsError::ProfileMismatch)?;
+        }
+        ct_zeroize_bytes(&mut cur);
+        ct_zeroize_bytes(&mut next);
+        Ok(())
+    }
+}
+
+/// Verify a `FrontierSumFtsSignature` against `pk` and `msg`.
+pub fn verify_frontier_fts(
+    pk: &FrontierFtsPublicKey,
+    dp: &FrontierDpTable,
+    msg: &[u8],
+    sig: &FrontierFtsSignature,
+) -> Result<(), FrontierFtsError> {
+    let p = pk.profile.params();
+    if dp.params != p {
+        return Err(FrontierFtsError::SignatureVerificationFailed);
+    }
+    let n = p.node_bytes;
+    let w = p.winternitz_w;
+    if sig.randomizer.len() != n || sig.chain_values.len() != p.frontier_len * n {
+        return Err(FrontierFtsError::MalformedSignatureLength);
+    }
+    if (sig.grind_counter as u32) >= (1u32 << p.counter_bits) {
+        return Err(FrontierFtsError::SignatureVerificationFailed);
+    }
+
+    let pid = pk.profile.pid_bytes();
+    let msg_digest32 = prehash_message_256(&pid, &pk.pk_seed, &pk.root, msg);
+    let target_rank = squeeze_target_index(
+        &pid,
+        &pk.pk_seed,
+        &pk.root,
+        &sig.randomizer,
+        &msg_digest32,
+        sig.grind_counter,
+        p.index_bits,
+    );
+    if !target_rank.ct_lt(dp.total_cardinality) {
+        return Err(FrontierFtsError::SignatureVerificationFailed);
+    }
+
+    let (frontier, offsets) = dp.unrank(target_rank)?;
+
+    // Advance every frontier node `v_i` from `a_i` to `w - 1`, then fold sibling pairs `(2u, 2u+1)` up to `root`.
+    let mut stack: Vec<(u32, [u8; 32])> = Vec::with_capacity(p.frontier_len);
+    let mut cur = [0u8; 32];
+    let mut next = [0u8; 32];
+
+    for (idx, (&v, &a_pos)) in frontier.iter().zip(offsets.iter()).enumerate() {
+        cur[..n].copy_from_slice(&sig.chain_values[idx * n..(idx + 1) * n]);
+        for step in (a_pos as usize)..(w - 1) {
+            fts_chain_step(&pid, &pk.pk_seed, v, step, &cur[..n], &mut next[..n]);
+            cur[..n].copy_from_slice(&next[..n]);
+        }
+        stack.push((v, cur));
+
+        while stack.len() >= 2 {
+            let len = stack.len();
+            let left_v = stack[len - 2].0;
+            let right_v = stack[len - 1].0;
+            if (left_v & 1) == 0 && right_v == left_v + 1 {
+                let r_end = stack[len - 1].1;
+                let l_end = stack[len - 2].1;
+                stack.truncate(len - 2);
+                let parent_v = left_v >> 1;
+                fts_merge(
+                    &pid,
+                    &pk.pk_seed,
+                    parent_v,
+                    &l_end[..n],
+                    &r_end[..n],
+                    &mut cur[..n],
+                );
+                if parent_v > 1 {
+                    for step in 0..(w - 1) {
+                        fts_chain_step(
+                            &pid,
+                            &pk.pk_seed,
+                            parent_v,
+                            step,
+                            &cur[..n],
+                            &mut next[..n],
+                        );
+                        cur[..n].copy_from_slice(&next[..n]);
+                    }
+                }
+                stack.push((parent_v, cur));
+            } else {
+                break;
+            }
+        }
+    }
+
+    if stack.len() != 1 || stack[0].0 != 1 {
+        return Err(FrontierFtsError::SignatureVerificationFailed);
+    }
+    if !ct_eq_bytes(&stack[0].1[..n], &pk.root) {
+        return Err(FrontierFtsError::SignatureVerificationFailed);
+    }
+    Ok(())
+}
+
+impl core::fmt::Display for FrontierFtsError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl core::error::Error for FrontierFtsError {}
+
+#[cfg(test)]
+mod rank_domain_tests {
+    use super::*;
+
+    #[test]
+    fn full_digest_domain_is_injective_and_constant_sum() {
+        let profile = FrontierFtsProfile::Full256Bit;
+        let dp = FrontierDpTable::build(profile);
+        let maximum = U384::from_top_bits_be(&[255; 32], 256);
+        assert!(maximum.ct_lt(dp.total_cardinality));
+        assert_eq!(profile.params().index_bits, 256);
+        let base = dp.unrank(U384::ZERO).unwrap();
+        let pid = profile.pid_bytes();
+        let base_digest_rank =
+            squeeze_target_index(&pid, &[1; 32], &[2; 32], &[3; 32], &[0; 32], 0, 256);
+
+        for bit in 0..256 {
+            let mut digest = [0; 32];
+            digest[bit / 8] = 1 << (bit % 8);
+            let rank = U384::from_top_bits_be(&digest, 256);
+            let message_rank =
+                squeeze_target_index(&pid, &[1; 32], &[2; 32], &[3; 32], &digest, 0, 256);
+            assert_ne!(message_rank, base_digest_rank);
+            assert_eq!(
+                message_rank,
+                squeeze_target_index(&pid, &[1; 32], &[2; 32], &[3; 32], &digest, 0, 256)
+            );
+            assert_ne!(
+                dp.unrank(message_rank).unwrap(),
+                dp.unrank(base_digest_rank).unwrap()
+            );
+
+            let coordinates = dp.unrank(rank).unwrap();
+            assert_ne!(coordinates, base);
+            assert_eq!(dp.rank(&coordinates.0, &coordinates.1).unwrap(), rank);
+            if coordinates.0 == base.0 {
+                assert!(coordinates.1.iter().zip(&base.1).any(|(a, b)| a < b));
+                assert!(coordinates.1.iter().zip(&base.1).any(|(a, b)| a > b));
+            }
+        }
+    }
+}

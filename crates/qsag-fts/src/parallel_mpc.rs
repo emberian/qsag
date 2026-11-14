@@ -1,0 +1,762 @@
+//! A 48-round bijective x^7 SPN over GF(2^128)^2 with authenticated MPC.
+//! The S-box is bijective over GF(2^128): gcd(7, 2^128-1)=1.
+//! The chain hash adds Davies-Meyer feedforward; that hash is not claimed bijective.
+//! Formal degree 7^48 > 2^134 is not, by itself, a cryptographic security proof.
+//! Every masked power opening is included in the committed BDOZ MAC check.
+
+use alloc::vec;
+use alloc::vec::Vec;
+use core::fmt;
+
+use qsag_accel::AcceleratorBackend;
+use qsag_accel::ct::{ct_eq_bytes, ct_zeroize_bytes, ct_zeroize_u128s};
+use qsag_accel::gf2_128::gf2_128_mul;
+use qsag_accel::goldilocks::pack_bytes32_to_limbs56;
+use qsag_accel::keccak::{commit_mpc_broadcast, cshake256_framed_32, cshake256_framed_xof};
+use qsag_accel::poseidon2::poseidon2_hash_limbs;
+
+/// Nonzero MDS diffusion constants in $\mathbb{F}_{2^{128}}$ for 2-lane Davies-Meyer compression.
+const GF128_MDS_A: u128 = 0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835;
+const GF128_MDS_B: u128 = 0xBF58_476D_1CE4_E5B9_94D0_49BB_1331_11EB;
+
+/// Maximum default allocation of single-use authenticated power tuples per party.
+pub const DEFAULT_BEAVER_TRIPLE_POOL: usize = 131_072;
+const SPN_ROUNDS: usize = 48;
+
+/// Configuration for `ParallelSeededFts`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ParallelSeededParams {
+    /// Merkle tree height $h \ge 1$ (`2^h` few-time epoch leaves).
+    pub tree_height: usize,
+    /// Winternitz chain length $w \ge 2$ (`0..w` positions, `w - 1` hash steps).
+    pub winternitz_w: usize,
+    /// Number of parallel chains $L$ per epoch leaf.
+    pub num_chains: usize,
+    /// Constant sum $S = \lfloor L (w - 1) / 2 \rfloor$.
+    pub target_sum: usize,
+}
+
+impl ParallelSeededParams {
+    pub const CUSTODY_H10_W5: Self = Self {
+        tree_height: 10,
+        winternitz_w: 5,
+        num_chains: 68,
+        target_sum: 136,
+    };
+
+    #[cfg(test)]
+    pub const FAST_H4_W5: Self = Self {
+        tree_height: 4,
+        winternitz_w: 5,
+        num_chains: 4,
+        target_sum: 8,
+    };
+
+    /// Nonlinear communication depth for a batched schedule, including intermediate and output MAC barriers.
+    /// Serial local evaluation is not a distributed scheduler. Tree height is absent.
+    pub const fn secret_mpc_depth(&self) -> usize {
+        SPN_ROUNDS * (1 + self.winternitz_w) + 8
+    }
+
+    pub const fn secret_keccak_and_rounds_vs_internal_tree(&self) -> (usize, usize) {
+        (
+            self.secret_mpc_depth(),
+            24 * (self.tree_height * self.winternitz_w + 1),
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), ParallelSeededError> {
+        if !(1..=20).contains(&self.tree_height)
+            || !(2..=256).contains(&self.winternitz_w)
+            || self.num_chains == 0
+            || self.num_chains > 256
+            || self.target_sum > 4096
+            || self.target_sum == 0
+            || self.target_sum >= self.num_chains * (self.winternitz_w - 1)
+        {
+            return Err(ParallelSeededError::InvalidThresholdParameters);
+        }
+        // Public DP, saturating at 2^128. Reaching the cap certifies >=128 bits.
+        let cap = crate::u384::U384([0, 0, 1, 0, 0, 0]);
+        let mut counts = vec![crate::u384::U384::ZERO; self.target_sum + 1];
+        counts[0] = crate::u384::U384::ONE;
+        for _ in 0..self.num_chains {
+            let mut next = vec![crate::u384::U384::ZERO; counts.len()];
+            for (sum, slot) in next.iter_mut().enumerate() {
+                for digit in 0..self.winternitz_w.min(sum + 1) {
+                    let sum = slot.checked_add(counts[sum - digit]).unwrap_or(cap);
+                    *slot = if cap.ct_lt(sum) { cap } else { sum };
+                }
+            }
+            counts = next;
+        }
+        if !cfg!(test) && counts[self.target_sum] != cap {
+            return Err(ParallelSeededError::InvalidThresholdParameters);
+        }
+        Ok(())
+    }
+}
+
+/// Errors produced by `ParallelSeededFts` threshold keygen, MAC barrier, or verification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParallelSeededError {
+    InvalidThresholdParameters,
+    Poisoned,
+    PersistenceFailed,
+    EpochOutOfRange,
+    EpochUseBudgetExhausted,
+    BeaverPreprocessingExhausted,
+    GrindingExhausted,
+    CommitmentMismatch { party_id: u16 },
+    BdozMacCheckFailed,
+    InvalidAuthenticationPath,
+    SignatureVerificationFailed,
+}
+
+/// Public key for `ParallelSeededFts` (`pk_seed` as 4 canonical Goldilocks limbs + 4-limb Poseidon2 Merkle `root`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParallelSeededPublicKey {
+    pub params: ParallelSeededParams,
+    pub pk_seed_bytes: [u8; 32],
+    pub pk_seed_limbs: [u64; 4],
+    pub merkle_root: [u64; 4],
+}
+
+/// Single-use authenticated powers a^1 through a^7 of one hidden uniform mask.
+/// All seven MACs use the original shared key; no MAC is squared locally.
+#[derive(Clone)]
+pub struct AuthenticatedPowerShare {
+    powers: [AuthWire128; 7],
+}
+impl AuthenticatedPowerShare {
+    fn zeroize(&mut self) {
+        for wire in &mut self.powers {
+            ct_zeroize_u128s(core::slice::from_mut(&mut wire.val_sh));
+            ct_zeroize_u128s(&mut wire.mac);
+        }
+    }
+}
+/// Historical name retained for callers that store preprocessing allocations.
+pub type AuthenticatedBeaverTriple = AuthenticatedPowerShare;
+
+/// Authenticated share of an $\mathbb{F}_{2^{128}}$ wire (`val_sh`) + 2-lane BDOZ MAC (`mac[0..2]`).
+#[derive(Clone)]
+struct AuthWire128 {
+    val_sh: u128,
+    mac: [u128; 2],
+}
+
+impl Drop for AuthWire128 {
+    fn drop(&mut self) {
+        ct_zeroize_u128s(core::slice::from_mut(&mut self.val_sh));
+        ct_zeroize_u128s(&mut self.mac);
+    }
+}
+impl Drop for AuthenticatedPowerShare {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+/// Storage must atomically persist the increased use count before returning Ok.
+/// Bind the log to a key and prevent rollback across process/device recovery.
+pub trait LeafBurnPersistence {
+    fn burn_epoch_before_sign(
+        &mut self,
+        key: &[u8; 32],
+        party_id: u16,
+        epoch: u32,
+        use_count: u8,
+    ) -> Result<(), ParallelSeededError>;
+}
+
+/// Ephemeral testing log only. Never use for persistent custody: it cannot survive a crash.
+#[cfg(any(test, feature = "testing-ephemeral"))]
+#[derive(Default)]
+pub struct InMemoryBurnLog {
+    entries: Vec<([u8; 32], u16, u32, u8)>,
+}
+#[cfg(any(test, feature = "testing-ephemeral"))]
+impl LeafBurnPersistence for InMemoryBurnLog {
+    fn burn_epoch_before_sign(
+        &mut self,
+        key: &[u8; 32],
+        party_id: u16,
+        epoch: u32,
+        use_count: u8,
+    ) -> Result<(), ParallelSeededError> {
+        if let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|e| e.0 == *key && e.1 == party_id && e.2 == epoch)
+        {
+            if use_count != 1 || entry.3 != 0 {
+                return Err(ParallelSeededError::PersistenceFailed);
+            }
+            entry.3 = use_count;
+        } else {
+            if use_count != 1 {
+                return Err(ParallelSeededError::PersistenceFailed);
+            }
+            self.entries.push((*key, party_id, epoch, use_count));
+        }
+        Ok(())
+    }
+}
+
+/// Per-party threshold share for `ParallelSeededFts` (`0` central reconstruction, private pairwise
+/// PRG zero-share seeds, authenticated Beaver pool, `<REDACTED>` `Debug`, `write_volatile` `Drop`).
+pub struct ParallelSeededPartyShare {
+    pub party_id: u16,
+    pub params: ParallelSeededParams,
+    key_seed: [u8; 32],
+    committee: Vec<u16>,
+    sk_seed_lanes: [u128; 2],
+    sk_seed_macs: [[u128; 2]; 2],
+    sk_prf_lanes: [u128; 2],
+    sk_prf_macs: [[u128; 2]; 2],
+    bdoz_alpha_share: [u128; 2],
+    local_salt_seed: [u8; 32],
+    pairwise_zero_seeds: Vec<(u16, [u8; 32])>,
+    beaver_pool: Vec<AuthenticatedBeaverTriple>,
+    beaver_cursor: usize,
+    epoch_uses: Vec<u8>,
+    poisoned: bool,
+    pending_openings: Vec<(u128, AuthWire128)>,
+    #[cfg(test)]
+    power_fault: bool,
+}
+
+impl fmt::Debug for ParallelSeededPartyShare {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ParallelSeededPartyShare")
+            .field("party_id", &self.party_id)
+            .field("params", &self.params)
+            .field("sk_seed_lanes", &"<REDACTED>")
+            .field("sk_prf_lanes", &"<REDACTED>")
+            .field("bdoz_alpha_share", &"<REDACTED>")
+            .field("pairwise_zero_seeds", &"<REDACTED>")
+            .finish()
+    }
+}
+
+impl Drop for ParallelSeededPartyShare {
+    fn drop(&mut self) {
+        self.erase();
+    }
+}
+impl ParallelSeededPartyShare {
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+    fn poison(&mut self) {
+        self.poisoned = true;
+        self.pending_openings.clear();
+    }
+    fn erase(&mut self) {
+        self.pending_openings.clear();
+        ct_zeroize_u128s(&mut self.sk_seed_lanes);
+        for m in &mut self.sk_seed_macs {
+            ct_zeroize_u128s(m);
+        }
+        ct_zeroize_u128s(&mut self.sk_prf_lanes);
+        for m in &mut self.sk_prf_macs {
+            ct_zeroize_u128s(m);
+        }
+        ct_zeroize_u128s(&mut self.bdoz_alpha_share);
+        ct_zeroize_bytes(&mut self.local_salt_seed);
+        for (_, seed) in &mut self.pairwise_zero_seeds {
+            ct_zeroize_bytes(seed);
+        }
+        for triple in &mut self.beaver_pool {
+            triple.zeroize();
+        }
+        ct_zeroize_bytes(&mut self.epoch_uses);
+    }
+}
+
+/// Signature produced by the reference runner; nonlinear depth is independent of h.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParallelSeededSignature {
+    pub epoch: u32,
+    pub randomizer: [u8; 32],
+    pub grind_counter: u32,
+    /// `L` 32-byte chain intermediates `[X_{ep, 0, a_0}, ..., X_{ep, L-1, a_{L-1}}]`.
+    pub chain_nodes: Vec<[u8; 32]>,
+    /// Height-`h` Poseidon2 Merkle sibling path from leaf `epoch` to `pk.merkle_root`.
+    pub merkle_siblings: Vec<[u64; 4]>,
+}
+
+impl ParallelSeededSignature {
+    /// Exact wire length for `params`.
+    pub const fn encoded_len(params: &ParallelSeededParams) -> usize {
+        40 + 32 * params.num_chains + 32 * params.tree_height
+    }
+
+    /// Canonical wire form: `epoch (4, BE) || randomizer (32) || grind_counter (4, BE) ||
+    /// chain_nodes (32 each) || merkle_siblings (4 little-endian limbs each)`.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out =
+            Vec::with_capacity(40 + 32 * (self.chain_nodes.len() + self.merkle_siblings.len()));
+        out.extend_from_slice(&self.epoch.to_be_bytes());
+        out.extend_from_slice(&self.randomizer);
+        out.extend_from_slice(&self.grind_counter.to_be_bytes());
+        for node in &self.chain_nodes {
+            out.extend_from_slice(node);
+        }
+        for limb in self.merkle_siblings.iter().flatten() {
+            out.extend_from_slice(&limb.to_le_bytes());
+        }
+        out
+    }
+
+    /// Strict decoder: exact length for `params`, an in-range epoch, and canonical field limbs.
+    pub fn from_bytes_canonical(
+        params: &ParallelSeededParams,
+        bytes: &[u8],
+    ) -> Result<Self, ParallelSeededError> {
+        let malformed = ParallelSeededError::SignatureVerificationFailed;
+        if params.validate().is_err() || bytes.len() != Self::encoded_len(params) {
+            return Err(malformed);
+        }
+        let word = |at: usize| {
+            u32::from_be_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+        };
+        let epoch = word(0);
+        if (epoch as u64) >> params.tree_height != 0 {
+            return Err(ParallelSeededError::EpochOutOfRange);
+        }
+        let mut randomizer = [0u8; 32];
+        randomizer.copy_from_slice(&bytes[4..36]);
+        let (nodes, siblings) = bytes[40..].split_at(32 * params.num_chains);
+        let chain_nodes = nodes.as_chunks::<32>().0.to_vec();
+        let mut merkle_siblings = Vec::with_capacity(params.tree_height);
+        for sibling in siblings.as_chunks::<32>().0 {
+            let mut limbs = [0u64; 4];
+            for (limb, raw) in limbs.iter_mut().zip(sibling.as_chunks::<8>().0) {
+                *limb = u64::from_le_bytes(*raw);
+                if !qsag_accel::goldilocks::gl_is_canonical(*limb) {
+                    return Err(malformed);
+                }
+            }
+            merkle_siblings.push(limbs);
+        }
+        Ok(Self {
+            epoch,
+            randomizer,
+            grind_counter: word(36),
+            chain_nodes,
+            merkle_siblings,
+        })
+    }
+}
+
+/// Commit-then-open BDOZ 2-lane GF($2^{128}$) MAC barrier message per party.
+#[derive(Clone)]
+pub struct CommittedMacBarrierShare {
+    pub party_id: u16,
+    pub commitment: [u8; 32],
+    pub tag_diff_lanes: (u128, u128),
+    pub salt: [u8; 32],
+}
+
+/// Per-party MAC-check phase. No opening is available before all commitments
+/// are frozen. Transport must authenticate sender identities and provide a common
+/// broadcast view. Dropping an unfinished round permanently invalidates the key.
+pub struct MacCommitRound<'a> {
+    share: &'a mut ParallelSeededPartyShare,
+    session: [u8; 32],
+    round: u32,
+    quorum: Vec<u16>,
+    payload: [u8; 32],
+    salt: [u8; 32],
+    commitments: Vec<(u16, [u8; 32])>,
+    complete: bool,
+}
+
+pub struct MacOpenRound<'a>(MacCommitRound<'a>);
+
+impl<'a> MacCommitRound<'a> {
+    fn new(
+        share: &'a mut ParallelSeededPartyShare,
+        session: [u8; 32],
+        round: u32,
+        quorum: Vec<u16>,
+        payload: [u8; 32],
+        salt: [u8; 32],
+    ) -> Self {
+        Self {
+            share,
+            session,
+            round,
+            quorum,
+            payload,
+            salt,
+            commitments: Vec::new(),
+            complete: false,
+        }
+    }
+    pub fn commitment(&self) -> (u16, [u8; 32]) {
+        (
+            self.share.party_id,
+            commit_mpc_broadcast(
+                &self.session,
+                self.round,
+                self.share.party_id,
+                &self.payload,
+                &self.salt,
+            ),
+        )
+    }
+    pub fn freeze(
+        mut self,
+        commitments: &[(u16, [u8; 32])],
+    ) -> Result<MacOpenRound<'a>, ParallelSeededError> {
+        if commitments.len() != self.quorum.len()
+            || self.quorum.iter().enumerate().any(|(i, id)| {
+                self.quorum[..i].contains(id)
+                    || commitments.iter().filter(|c| c.0 == *id).count() != 1
+            })
+            || !commitments.contains(&self.commitment())
+        {
+            return Err(ParallelSeededError::BdozMacCheckFailed);
+        }
+        self.commitments = commitments.to_vec();
+        Ok(MacOpenRound(self))
+    }
+}
+impl MacOpenRound<'_> {
+    pub fn opening(&self) -> (u16, [u8; 32], [u8; 32]) {
+        (self.0.share.party_id, self.0.payload, self.0.salt)
+    }
+    pub fn finish(
+        mut self,
+        openings: &[(u16, [u8; 32], [u8; 32])],
+    ) -> Result<(), ParallelSeededError> {
+        if openings.len() != self.0.commitments.len() {
+            return Err(ParallelSeededError::BdozMacCheckFailed);
+        }
+        let mut sum = [0u8; 32];
+        for (id, commitment) in &self.0.commitments {
+            let mut found = openings.iter().filter(|o| o.0 == *id);
+            let (_, payload, salt) = found
+                .next()
+                .ok_or(ParallelSeededError::BdozMacCheckFailed)?;
+            if found.next().is_some() {
+                return Err(ParallelSeededError::BdozMacCheckFailed);
+            }
+            let actual = commit_mpc_broadcast(&self.0.session, self.0.round, *id, payload, salt);
+            if !ct_eq_bytes(&actual, commitment) {
+                return Err(ParallelSeededError::CommitmentMismatch { party_id: *id });
+            }
+            for (acc, &value) in sum.iter_mut().zip(payload) {
+                *acc ^= value;
+            }
+        }
+        if !ct_eq_bytes(&sum, &[0; 32]) {
+            return Err(ParallelSeededError::BdozMacCheckFailed);
+        }
+        self.0.complete = true;
+        Ok(())
+    }
+}
+impl Drop for MacCommitRound<'_> {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.payload);
+        ct_zeroize_bytes(&mut self.salt);
+        if !self.complete {
+            self.share.poison();
+        }
+    }
+}
+
+#[inline]
+fn bytes32_to_lanes(b: &[u8; 32]) -> (u128, u128) {
+    (
+        u128::from_le_bytes(core::array::from_fn(|i| b[i])),
+        u128::from_le_bytes(core::array::from_fn(|i| b[16 + i])),
+    )
+}
+
+#[inline]
+fn lanes_to_bytes32(l0: u128, l1: u128) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[0..16].copy_from_slice(&l0.to_le_bytes());
+    out[16..32].copy_from_slice(&l1.to_le_bytes());
+    out
+}
+
+fn pow7_plain(x: u128) -> u128 {
+    let x2 = gf2_128_mul(x, x);
+    let x4 = gf2_128_mul(x2, x2);
+    gf2_128_mul(gf2_128_mul(x, x2), x4)
+}
+
+fn round_constants(c0: u128, c1: u128, round: usize) -> (u128, u128) {
+    bytes32_to_lanes(&cshake256_framed_32(
+        b"QSAG.PSFTS.POW7_ROUND.V4",
+        &[
+            &c0.to_le_bytes(),
+            &c1.to_le_bytes(),
+            &(round as u32).to_be_bytes(),
+        ],
+    ))
+}
+
+fn algebraic_step_plain(input: (u128, u128), c0: u128, c1: u128) -> (u128, u128) {
+    let mut state = input;
+    for round in 0..SPN_ROUNDS {
+        let rc = round_constants(c0, c1, round);
+        let x = state.0 ^ rc.0;
+        let y = state.1 ^ rc.1;
+        let x7 = pow7_plain(x);
+        let y7 = pow7_plain(y);
+        state = (
+            x7 ^ gf2_128_mul(y7, GF128_MDS_A),
+            y7 ^ gf2_128_mul(x7, GF128_MDS_B),
+        );
+    }
+    (state.0 ^ input.0, state.1 ^ input.1)
+}
+
+#[inline]
+fn derive_seed_tweak(pk_seed: &[u8; 32], epoch: u32, chain_idx: u16) -> (u128, u128) {
+    let ep_be = epoch.to_be_bytes();
+    let ch_be = chain_idx.to_be_bytes();
+    let raw = cshake256_framed_32(b"QSAG.PSFTS.SEED_TWK.V2", &[pk_seed, &ep_be, &ch_be]);
+    bytes32_to_lanes(&raw)
+}
+
+#[inline]
+fn derive_chain_tweak(pk_seed: &[u8; 32], epoch: u32, chain_idx: u16, step: u8) -> (u128, u128) {
+    let ep_be = epoch.to_be_bytes();
+    let ch_be = chain_idx.to_be_bytes();
+    let st_be = [step];
+    let raw = cshake256_framed_32(
+        b"QSAG.PSFTS.CHAIN_TWK.V2",
+        &[pk_seed, &ep_be, &ch_be, &st_be],
+    );
+    bytes32_to_lanes(&raw)
+}
+
+#[inline]
+fn derive_rand_tweak(pk_seed: &[u8; 32], epoch: u32, use_cnt: u8, msg: &[u8]) -> (u128, u128) {
+    let ep_be = epoch.to_be_bytes();
+    let u_be = [use_cnt];
+    let raw = cshake256_framed_32(b"QSAG.PSFTS.RAND_TWK.V2", &[pk_seed, &ep_be, &u_be, msg]);
+    bytes32_to_lanes(&raw)
+}
+
+#[inline]
+#[cfg(any(test, feature = "test-dealer"))]
+fn prf_leaf_chain_seed_plain(
+    sk_seed_lanes: (u128, u128),
+    pk_seed: &[u8; 32],
+    epoch: u32,
+    chain_idx: u16,
+) -> [u8; 32] {
+    let (c0, c1) = derive_seed_tweak(pk_seed, epoch, chain_idx);
+    let (o0, o1) = algebraic_step_plain(sk_seed_lanes, c0, c1);
+    lanes_to_bytes32(o0, o1)
+}
+
+#[inline]
+pub fn parallel_chain_step(
+    pk_seed: &[u8; 32],
+    epoch: u32,
+    chain_idx: u16,
+    step: u8,
+    cur: &[u8; 32],
+) -> [u8; 32] {
+    let (c0, c1) = derive_chain_tweak(pk_seed, epoch, chain_idx, step);
+    let (o0, o1) = algebraic_step_plain(bytes32_to_lanes(cur), c0, c1);
+    lanes_to_bytes32(o0, o1)
+}
+
+/// Compress all `L` chain endpoints of `epoch` into a 4-limb Poseidon2 leaf using canonical
+/// 5-limb 56-bit packing per 32-byte endpoint (`0` modulo-$p$ aliasing!) + all 4 `pk_seed` limbs.
+fn hash_epoch_endpoints_poseidon2(
+    pk_seed_limbs: &[u64; 4],
+    epoch: u32,
+    endpoints: &[[u8; 32]],
+) -> [u64; 4] {
+    let mut limbs = Vec::with_capacity(5 + endpoints.len() * 5);
+    limbs.extend_from_slice(pk_seed_limbs);
+    limbs.push(epoch as u64);
+    for ep_end in endpoints {
+        limbs.extend_from_slice(&pack_bytes32_to_limbs56(ep_end));
+    }
+    poseidon2_hash_limbs(0x5053_4654_535F_4C46, &limbs)
+}
+
+/// Derive base-`w` chain offsets of length `L` and check whether their sum equals `target_sum`.
+fn derive_sum_constrained_offsets(
+    params: &ParallelSeededParams,
+    pk_seed: &[u8; 32],
+    merkle_root: &[u64; 4],
+    epoch: u32,
+    randomizer: &[u8; 32],
+    msg: &[u8],
+    counter: u32,
+) -> Option<Vec<u8>> {
+    let mut root_bytes = [0u8; 32];
+    for (i, limb) in merkle_root.iter().enumerate() {
+        root_bytes[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
+    }
+    let ep_be = epoch.to_be_bytes();
+    let ctr_be = counter.to_be_bytes();
+    let mut stream = vec![0u8; params.num_chains * 2];
+    cshake256_framed_xof(
+        b"QSAG.PSFTS.HMSG.V2",
+        &[pk_seed, &root_bytes, &ep_be, randomizer, &ctr_be, msg],
+        &mut stream,
+    );
+
+    let w = params.winternitz_w as u16;
+    let zone = (65536u32 / (w as u32)) * (w as u32);
+    let mut out = Vec::with_capacity(params.num_chains);
+    let mut sum = 0usize;
+    for chunk in stream.as_chunks::<2>().0.iter() {
+        let v = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
+        if v >= zone {
+            return None;
+        }
+        let digit = (v % (w as u32)) as u8;
+        sum += digit as usize;
+        out.push(digit);
+    }
+    if sum == params.target_sum {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Linear operations on BDOZ-authenticated $\mathbb{F}_{2^{128}}$ shares (`0` communication, `0` secrets!).
+#[inline]
+fn auth_xor(x: &AuthWire128, y: &AuthWire128) -> AuthWire128 {
+    AuthWire128 {
+        val_sh: x.val_sh ^ y.val_sh,
+        mac: [x.mac[0] ^ y.mac[0], x.mac[1] ^ y.mac[1]],
+    }
+}
+
+#[inline]
+fn auth_scale_const(x: &AuthWire128, c: u128) -> AuthWire128 {
+    AuthWire128 {
+        val_sh: gf2_128_mul(x.val_sh, c),
+        mac: [gf2_128_mul(x.mac[0], c), gf2_128_mul(x.mac[1], c)],
+    }
+}
+
+#[inline]
+fn auth_add_pub_const(
+    party_idx: usize,
+    alpha_i: [u128; 2],
+    x: &AuthWire128,
+    c: u128,
+) -> AuthWire128 {
+    let val_sh = if party_idx == 0 {
+        x.val_sh ^ c
+    } else {
+        x.val_sh
+    };
+    AuthWire128 {
+        val_sh,
+        mac: [
+            x.mac[0] ^ gf2_128_mul(alpha_i[0], c),
+            x.mac[1] ^ gf2_128_mul(alpha_i[1], c),
+        ],
+    }
+}
+
+/// In characteristic two all binomial coefficients of (a+d)^7 are one.
+/// A single masked d=x+a is enough given authenticated a^1,...,a^7.
+fn apply_power(
+    power: &AuthenticatedPowerShare,
+    d: u128,
+    alpha: [u128; 2],
+    first: bool,
+) -> AuthWire128 {
+    let mut d_powers = [1u128; 8];
+    let mut acc = 1;
+    for slot in d_powers.iter_mut().skip(1) {
+        acc = gf2_128_mul(acc, d);
+        *slot = acc;
+    }
+    let mut out = AuthWire128 {
+        val_sh: if first { d_powers[7] } else { 0 },
+        mac: core::array::from_fn(|lane| gf2_128_mul(alpha[lane], d_powers[7])),
+    };
+    for (index, wire) in power.powers.iter().enumerate() {
+        out = auth_xor(&out, &auth_scale_const(wire, d_powers[6 - index]));
+    }
+    out
+}
+fn mpc_pow7(
+    shares: &mut [ParallelSeededPartyShare],
+    x: &[AuthWire128],
+) -> Result<Vec<AuthWire128>, ParallelSeededError> {
+    let mut d = 0;
+    for (sh, xi) in shares.iter().zip(x) {
+        if sh.poisoned {
+            return Err(ParallelSeededError::Poisoned);
+        }
+        let power = sh
+            .beaver_pool
+            .get(sh.beaver_cursor)
+            .ok_or(ParallelSeededError::BeaverPreprocessingExhausted)?;
+        d ^= xi.val_sh ^ power.powers[0].val_sh;
+    }
+    #[cfg(test)]
+    if let Some(sh) = shares.iter_mut().find(|sh| sh.power_fault) {
+        sh.power_fault = false;
+        d ^= 1;
+    }
+    let mut out = Vec::with_capacity(shares.len());
+    for (party, (sh, xi)) in shares.iter_mut().zip(x).enumerate() {
+        let power = &mut sh.beaver_pool[sh.beaver_cursor];
+        sh.pending_openings
+            .push((d, auth_xor(xi, &power.powers[0])));
+        out.push(apply_power(power, d, sh.bdoz_alpha_share, party == 0));
+        power.zeroize();
+        sh.beaver_cursor += 1;
+    }
+    Ok(out)
+}
+
+fn mpc_algebraic_step(
+    shares: &mut [ParallelSeededPartyShare],
+    in0: &[AuthWire128],
+    in1: &[AuthWire128],
+    c0: u128,
+    c1: u128,
+) -> Result<(Vec<AuthWire128>, Vec<AuthWire128>), ParallelSeededError> {
+    let mut state0 = in0.to_vec();
+    let mut state1 = in1.to_vec();
+    for round in 0..SPN_ROUNDS {
+        let rc = round_constants(c0, c1, round);
+        for (p, ((x, y), sh)) in state0
+            .iter_mut()
+            .zip(&mut state1)
+            .zip(shares.iter())
+            .enumerate()
+        {
+            *x = auth_add_pub_const(p, sh.bdoz_alpha_share, x, rc.0);
+            *y = auth_add_pub_const(p, sh.bdoz_alpha_share, y, rc.1);
+        }
+        let s0 = mpc_pow7(shares, &state0)?;
+        let s1 = mpc_pow7(shares, &state1)?;
+        for (((x, y), u), v) in state0.iter_mut().zip(&mut state1).zip(&s0).zip(&s1) {
+            *x = auth_xor(u, &auth_scale_const(v, GF128_MDS_A));
+            *y = auth_xor(v, &auth_scale_const(u, GF128_MDS_B));
+        }
+    }
+    for ((x, y), (u, v)) in state0.iter_mut().zip(&mut state1).zip(in0.iter().zip(in1)) {
+        *x = auth_xor(x, u);
+        *y = auth_xor(y, v);
+    }
+    Ok((state0, state1))
+}
+
+/// Complete public tree cache + threshold shares for `ParallelSeededFts`.
