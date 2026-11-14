@@ -3229,4 +3229,210 @@ theorem rss_constructor_reinitializes_poisoned_id
       fresh.phase = .Round1MaskCommitted := by
   exact ⟨_, rfl, rfl, rfl, rfl⟩
 
+
+/-- The four accumulators of the generated opening loop. -/
+abbrev BdozBatchFoldState := Std.U8 × tower.Tower128 × tower.Tower128 × tower.Tower128
+
+def bdozBatchFoldStep (a : BdozBatchFoldState) (item : tower.BdozWireOpening2Lane) :
+    BdozBatchFoldState :=
+  (if item.chal_weight = 0#u128 then 0#u8 else a.1,
+   a.2.1 ^^^ pureTower128Mul item.chal_weight (UScalar.cast .U128 item.opened_value),
+   a.2.2.1 ^^^ pureTower128Mul item.chal_weight (item.key_lanes.val.getD 0 0#u128),
+   a.2.2.2 ^^^ pureTower128Mul item.chal_weight (item.key_lanes.val.getD 1 0#u128))
+
+/-- Arbitrary-length masked-value and two-key fold, with nonzero-weight tracking. -/
+def bdozBatchFold : List tower.BdozWireOpening2Lane → BdozBatchFoldState → BdozBatchFoldState
+  | [], a => a
+  | item :: rest, a => bdozBatchFold rest (bdozBatchFoldStep a item)
+
+private theorem bdoz_loopFuel_suffix
+    (openings : Slice tower.BdozWireOpening2Lane)
+    (xs : List tower.BdozWireOpening2Lane) (i : Std.Usize)
+    (w : Std.U8) (v k0 k1 : tower.Tower128)
+    (hsuffix : openings.val.drop i.val = xs) :
+    loopFuel (xs.length + 1)
+      (fun (w, v, k0, k1, i) => tower.verify_mac_2lane_loop.body openings w v k0 k1 i)
+      (w, v, k0, k1, i) = .ok (bdozBatchFold xs (w, v, k0, k1)) := by
+  induction xs generalizing i w v k0 k1 with
+  | nil =>
+    have hlen := congrArg List.length hsuffix
+    simp only [List.length_drop, List.length_nil] at hlen
+    have hstop : ¬ i < Slice.len openings := by
+      change ¬ i.val < (Slice.len openings).val
+      rw [Slice.len_val]
+      omega
+    simp [loopFuel_succ, tower.verify_mac_2lane_loop.body, hstop, bdozBatchFold]
+  | cons item rest ih =>
+    have hlen := congrArg List.length hsuffix
+    simp only [List.length_drop, List.length_cons] at hlen
+    have hlt : i.val < openings.val.length := by omega
+    have hgo : i < Slice.len openings := by
+      change i.val < (Slice.len openings).val
+      rw [Slice.len_val]
+      exact hlt
+    have hsplit := List.drop_eq_getElem_cons hlt
+    rw [hsuffix] at hsplit
+    have hitem := (List.cons.inj hsplit).1.symm
+    have htail := (List.cons.inj hsplit).2.symm
+    have hindex : Slice.index_usize openings i = .ok item := by
+      simp only [Slice.index_usize, dite_eq_left hlt, hitem]
+    have hk0 := array_index_getD item.key_lanes 0#usize 0#u128 (by decide)
+    have hk1 := array_index_getD item.key_lanes 1#usize 0#u128 (by decide)
+    obtain ⟨j, hj, hvj⟩ := checked_add_val i 1#usize (by
+      change i.val + 1 < 2 ^ 64
+      have hb : openings.val.length < 2 ^ 64 := by
+        simpa only [← Slice.len_val] using (Slice.len openings).bv.isLt
+      omega)
+    change j.val = i.val + 1 at hvj
+    have hrest : openings.val.drop j.val = rest := by rw [hvj]; exact htail
+    have hbody : tower.verify_mac_2lane_loop.body openings w v k0 k1 i =
+        .ok (.cont ((bdozBatchFoldStep (w, v, k0, k1) item).1,
+          (bdozBatchFoldStep (w, v, k0, k1) item).2.1,
+          (bdozBatchFoldStep (w, v, k0, k1) item).2.2.1,
+          (bdozBatchFoldStep (w, v, k0, k1) item).2.2.2, j)) := by
+      by_cases hw : item.chal_weight = 0#u128
+      all_goals simp [tower.verify_mac_2lane_loop.body, hgo, hindex, hw,
+        tower.embed_gf256_to_tower128, tower128_mul_eq_independent,
+        tower.tower128_add, hk0, hk1, hj, bdozBatchFoldStep]
+    rw [List.length_cons, loopFuel_succ, hbody, result_bind_ok]
+    exact ih j _ _ _ _ hrest
+
+/-- List induction over the generated MIR loop identifies all four accumulators,
+for arbitrary slice length (including zero), rather than only singleton openings. -/
+theorem bdoz_generated_loop_fold
+    (openings : Slice tower.BdozWireOpening2Lane)
+    (w : Std.U8) (v k0 k1 : tower.Tower128) :
+    tower.verify_mac_2lane_loop openings w v k0 k1 0#usize =
+      .ok (bdozBatchFold openings.val (w, v, k0, k1)) := by
+  unfold tower.verify_mac_2lane_loop
+  apply loop_ok_of_loopFuel (fuel := openings.val.length + 1)
+  · simpa only [Slice.len_val] using usize_lt_loopMaxFuel (Slice.len openings)
+  · exact bdoz_loopFuel_suffix openings openings.val 0#usize w v k0 k1 rfl
+
+/-- The generated loop's weight byte is exactly the conjunction of nonzero weights. -/
+theorem bdoz_batch_fold_weights (xs : List tower.BdozWireOpening2Lane)
+    (w : Std.U8) (v k0 k1 : tower.Tower128) :
+    (bdozBatchFold xs (w, v, k0, k1)).1 = 1#u8 ↔
+      w = 1#u8 ∧ ∀ item ∈ xs, item.chal_weight ≠ 0#u128 := by
+  induction xs generalizing w v k0 k1 with
+  | nil => simp [bdozBatchFold]
+  | cons item rest ih =>
+    change (bdozBatchFold rest _).1 = 1#u8 ↔ _
+    dsimp only [bdozBatchFoldStep]
+    rw [ih]
+    by_cases hw : item.chal_weight = 0#u128
+    · simp [hw]
+    · simp [hw, and_assoc, and_left_comm, and_comm]
+
+/-- Initial accumulators include the supplied mask and both mask keys. -/
+def bdozBatchAccum (batch : tower.BdozCommittedBatchOpening2Lane)
+    (openings : Slice tower.BdozWireOpening2Lane) : BdozBatchFoldState :=
+  bdozBatchFold openings.val (1#u8, batch.mask_value,
+    batch.mask_key_lanes.val.getD 0 0#u128, batch.mask_key_lanes.val.getD 1 0#u128)
+
+/-- Exact acceptance for arbitrary batches, expressed as both folded MAC residuals.
+The hash equality is an execution premise, not a hash-binding or timing assumption.
+Commitment-before-challenge and mask freshness are absent from the extracted state. -/
+theorem bdoz_verify_arbitrary_batch
+    (alphas : Array tower.Tower128 2#usize)
+    (batch : tower.BdozCommittedBatchOpening2Lane)
+    (openings : Slice tower.BdozWireOpening2Lane) (tag : Array Std.U8 32#usize)
+    (htag : tower.bdoz_commit_masked_tag batch.session_id batch.round_id
+      (bdozBatchAccum batch openings).2.1 batch.peer_masked_mac_lanes batch.open_nonce = .ok tag) :
+    tower.verify_mac_2lane alphas batch openings = .ok (decide (
+      openings.val ≠ [] ∧
+      (∀ item ∈ openings.val, item.chal_weight ≠ 0#u128) ∧
+      tag = batch.tag_commitment ∧
+      ((batch.peer_masked_mac_lanes.val.getD 0 0#u128 ^^^
+          ((bdozBatchAccum batch openings).2.2.1 ^^^
+            pureTower128Mul (alphas.val.getD 0 0#u128) (bdozBatchAccum batch openings).2.1)) |||
+       (batch.peer_masked_mac_lanes.val.getD 1 0#u128 ^^^
+          ((bdozBatchAccum batch openings).2.2.2 ^^^
+            pureTower128Mul (alphas.val.getD 1 0#u128) (bdozBatchAccum batch openings).2.1))) = 0#u128)) := by
+  have mk0 := array_index_getD batch.mask_key_lanes 0#usize 0#u128 (by decide)
+  have mk1 := array_index_getD batch.mask_key_lanes 1#usize 0#u128 (by decide)
+  have a0 := array_index_getD alphas 0#usize 0#u128 (by decide)
+  have a1 := array_index_getD alphas 1#usize 0#u128 (by decide)
+  have m0 := array_index_getD batch.peer_masked_mac_lanes 0#usize 0#u128 (by decide)
+  have m1 := array_index_getD batch.peer_masked_mac_lanes 1#usize 0#u128 (by decide)
+  have hw : (bdozBatchAccum batch openings).1 = 1#u8 ↔
+      ∀ item ∈ openings.val, item.chal_weight ≠ 0#u128 := by
+    simpa only [bdozBatchAccum, eq_self_iff_true, true_and] using
+      bdoz_batch_fold_weights openings.val 1#u8 batch.mask_value
+        (batch.mask_key_lanes.val.getD 0 0#u128) (batch.mask_key_lanes.val.getD 1 0#u128)
+  unfold tower.verify_mac_2lane
+  simp only [core.slice.Slice.is_empty, bind_eq_result_bind, result_bind_ok]
+  by_cases he : openings.val = []
+  · simp [he]
+  · have hne : openings.val.isEmpty = false := List.isEmpty_eq_false_iff.mpr he
+    simp only [hne, Bool.false_eq_true, ite_false, mk0, mk1, result_bind_ok,
+      bdoz_generated_loop_fold]
+    change (do
+      let expected ← tower.bdoz_commit_masked_tag batch.session_id batch.round_id
+        (bdozBatchAccum batch openings).2.1 batch.peer_masked_mac_lanes batch.open_nonce
+      let commit_ok ← tower.ct_eq_bytes32 expected batch.tag_commitment
+      let a ← Array.index_usize alphas 0#usize
+      let p ← tower.tower128_mul a (bdozBatchAccum batch openings).2.1
+      let e0 ← tower.tower128_add (bdozBatchAccum batch openings).2.2.1 p
+      let a' ← Array.index_usize alphas 1#usize
+      let p' ← tower.tower128_mul a' (bdozBatchAccum batch openings).2.1
+      let e1 ← tower.tower128_add (bdozBatchAccum batch openings).2.2.2 p'
+      let m ← Array.index_usize batch.peer_masked_mac_lanes 0#usize
+      let d0 ← lift (m ^^^ e0)
+      let m' ← Array.index_usize batch.peer_masked_mac_lanes 1#usize
+      let d1 ← lift (m' ^^^ e1)
+      if (bdozBatchAccum batch openings).1 = 1#u8 then
+        if commit_ok then do
+          let d ← lift (d0 ||| d1)
+          ok (d = 0#u128)
+        else ok false
+      else ok false) = _
+    simp only [htag, ct_eq_bytes32_spec, a0, a1, m0, m1,
+      tower128_mul_eq_independent, tower.tower128_add,
+      bind_eq_result_bind, result_bind_ok, lift_eq_ok]
+    by_cases hw' : (bdozBatchAccum batch openings).1 = 1#u8
+    · have hall := hw.mp hw'
+      by_cases ht : tag = batch.tag_commitment <;> simp [he, hw', hall, ht]
+    · have hbad := fun h => hw' (hw.mpr h)
+      simp [he, hw', hbad]
+
+
+private theorem bdoz_accepted_call_checks_batch
+    {s s' : tower.BdozVerifierSession2Lane}
+    {batch : tower.BdozCommittedBatchOpening2Lane}
+    {openings : Slice tower.BdozWireOpening2Lane}
+    (h : tower.verify_mac_2lane_with_burn s batch openings = .ok (s', true)) :
+    tower.verify_mac_2lane s.alpha_lanes batch openings = .ok true := by
+  have hb := ((bdoz_burn_step_inv h).1 rfl).1
+  cases hv : tower.verify_mac_2lane s.alpha_lanes batch openings with
+  | fail e => simp [tower.verify_mac_2lane_with_burn, hb, hv] at h
+  | div => simp [tower.verify_mac_2lane_with_burn, hb, hv] at h
+  | ok b =>
+    cases b with
+    | false => simp [tower.verify_mac_2lane_with_burn, hb, hv] at h
+    | true => rfl
+
+/-- Arbitrarily many successful batches all satisfy the generated opening verifier
+under the same original keys. Together with `bdoz_verify_arbitrary_batch` this gives
+folded-value/key soundness for every batch in the list. It does not imply freshness. -/
+theorem bdoz_successful_trace_checks_every_batch
+    {s t : tower.BdozVerifierSession2Lane}
+    {calls : List (tower.BdozCommittedBatchOpening2Lane × Slice tower.BdozWireOpening2Lane)}
+    {verdicts : List Bool}
+    (ht : BdozBurnTrace s calls verdicts t)
+    (ha : ∀ b ∈ verdicts, b = true) :
+    ∀ call ∈ calls, tower.verify_mac_2lane s.alpha_lanes call.1 call.2 = .ok true := by
+  induction ht with
+  | nil s => intro call hc; cases hc
+  | @call s s' t batch openings b calls verdicts h htail ih =>
+    have hb : b = true := ha b (List.mem_cons_self)
+    subst b
+    have hs : s' = s := ((bdoz_burn_step_inv h).1 rfl).2
+    subst s'
+    have hrest := ih (fun b hb => ha b (List.mem_cons_of_mem _ hb))
+    intro call hc
+    rcases List.mem_cons.mp hc with rfl | hc
+    · exact bdoz_accepted_call_checks_batch h
+    · exact hrest call hc
+
 end qsag_verified.proofs
