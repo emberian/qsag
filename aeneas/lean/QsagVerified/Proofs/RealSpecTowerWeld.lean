@@ -86,7 +86,7 @@ private theorem testBit_lowMask (n i : Nat) : (2 ^ n - 1).testBit i = decide (i 
   induction n generalizing i with
   | zero => simp
   | succ n ih =>
-    have hpos : 0 < 2 ^ n := Nat.pos_pow (by decide)
+    have hpos : 0 < 2 ^ n := Nat.pow_pos (by decide)
     have hpow : 2 ^ (n + 1) = 2 * 2 ^ n := by rw [Nat.pow_succ, Nat.mul_comm]
     cases i with
     | zero =>
