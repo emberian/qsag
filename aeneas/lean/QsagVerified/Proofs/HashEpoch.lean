@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.Wots
 public import QsagVerified.Proofs.Hash

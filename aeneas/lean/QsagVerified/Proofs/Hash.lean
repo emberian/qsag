@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.Adrs
 public import QsagVerified.Proofs.Sponge
