@@ -6048,27 +6048,23 @@ theorem honest_coin_openings_open_round1_commitments (p : Fips205Params) (cIdx :
   simp only [List.map, unpackWireBytes_packWireBytes, openingCoin_coinOpeningBytes]
 
 /-- **`#tooth`: the corrupt opening is checked against the Round-1 commitment.** A Round-2 frame
-    whose opening does not hash to the commitment the corrupt party sent in Round 1 is rejected
-    by `sharedCoinTossBarrier`, whatever its wires are. Two different openings accepted against
-    one commitment are a `SHAKE256` collision (`round1NonceCommit_binding_or_collision`). -/
+    whose opening fails the byte comparison with the commitment the corrupt party sent in
+    Round 1 is rejected by `sharedCoinTossBarrier`, whatever its wires and whatever the honest
+    coin shares are. Two different openings that both pass against one commitment are a
+    `SHAKE256` collision (`round1NonceCommit_binding_or_collision`). -/
 theorem tooth_corrupt_coin_opening_must_match_commitment (cIdx : Fin 3) (deg : Nat)
     (pk : SlhPublicKey) (req : SessionScheduleReq) (r2St : RssRound2State)
     (cWire2 : ByteArray) (opening : List UInt8) (wires : List Tower128)
     (hParse : parseCorruptRound2Wire deg cWire2 = some (opening, wires))
-    (hMismatch : round1NonceCommit pk req r2St.cursor cIdx.val opening ≠ r2St.corrR1Commit) :
+    (hMismatch :
+      (round1NonceCommit pk req r2St.cursor cIdx.val opening != r2St.corrR1Commit) = true) :
     sharedCoinTossBarrier cIdx deg pk req r2St [(cIdx.val, cWire2)] =
       .inl (.round1CommitMismatch cIdx.val) := by
-  have hNe : (round1NonceCommit pk req r2St.cursor cIdx.val opening != r2St.corrR1Commit) = true := by
-    unfold bne
-    change (!((round1NonceCommit pk req r2St.cursor cIdx.val opening).data ==
-      r2St.corrR1Commit.data)) = true
-    rw [beq_false_of_ne (fun h => hMismatch (unpackWire_injective (congrArg Array.toList h)))]
-    rfl
   unfold sharedCoinTossBarrier sharedPreCutBarrier
   simp only [List.find?, beq_self_eq_true]
   rw [hParse]
   dsimp only
-  rw [hNe]
+  rw [hMismatch]
   rfl
 
 /-- **`#tooth`: a challenge known before the wires are fixed protects nothing.** For every

@@ -2424,7 +2424,7 @@ theorem tooth_rlwe_fo_corrupted_batch_rejected :
     verifyRlweFoBatch [⟨false, true, 4000, rlweNoisyEncode false true 4000⟩] 1 = false :=
   tooth_rlwe_fo_corrupted_ciphertext_caught.2.2
 
-private def demoForgedZeroSacrificeOpening : SharedSpdzSacrificeOpening :=
+def demoForgedZeroSacrificeOpening : SharedSpdzSacrificeOpening :=
   let rho : GoldilocksExt2 := ⟨Goldilocks.ofNat 2, Goldilocks.one⟩
   let badTr : AuthenticatedSharedTriple :=
     { demoHonestAuthTriple with
@@ -2446,10 +2446,10 @@ theorem tooth_shared_spdz_forged_zero_rejected :
   tooth_shared_spdz_sacrifice_rejects_corrupted_triple.2.2
 
 /-- **`#tooth` Rank-Deficient Zero-Row Extractor Collides (`tooth_zero_row_extractor_collides_pair`)**:
-    Atomic collision witness for `extract384To128_two_universal`. -/
+    Atomic collision refutation witness for `extract384To128_two_universal` on distinct inputs `0#384 ≠ 1#384`. -/
 theorem tooth_zero_row_extractor_collides_pair :
-    ∃ M : BinaryExtractorMatrix, extract384To128 M 0#384 = extract384To128 M 1#384 :=
-  ⟨fun _ => 0#384, tooth_zero_row_extractor_collides.2⟩
+    ¬ (extract384To128 (fun _ => 0#384) 0#384 ≠ extract384To128 (fun _ => 0#384) 1#384) :=
+  fun hNe => hNe tooth_zero_row_extractor_collides.2
 
 /-- **`#tooth` Pre-Challenge Adaptive Fault Cancels KOS Residual (`tooth_kos_prechallenge_cancels_fault_witness`)**:
     Atomic cancellation witness for `kos_batched_poly_check_sound`. -/

@@ -6256,4 +6256,31 @@ theorem tooth_x86_rotate_cannot_launder_secret_zf :
       [0x48, 0x83, 0xc0, 0x01, 0x48, 0xc1, 0xc9, 0x01, 0x74, 0x00, 0xc3]
       (mkContract "rotate_zf" [4, 1]) = false := by decide +kernel
 
+/-- `#tooth`: `xor r8d, r8d; inc rax; adox r8, r9; mov rcx, [rdi + r8*8]; ret` (`45 31 c0; 48 ff c0;
+    f3 4d 0f 38 f6 c1; 4a 8b 0c c7; c3`) leaks the signed overflow of secret `rax` (`0` vs
+    `0x7fffffffffffffff`) into the memory load address (`rdi` vs `rdi + 8`) and is rejected (`false`)
+    by `checkX86ThreeWayNI`. -/
+theorem tooth_x86_inc_adox_secret_overflow_rejected :
+    let code : List UInt8 :=
+      [0x45, 0x31, 0xC0, 0x48, 0xFF, 0xC0, 0xF3, 0x4D, 0x0F, 0x38, 0xF6, 0xC1,
+       0x4A, 0x8B, 0x0C, 0xC7, 0xC3]
+    checkX86ThreeWayNI code (mkContract "inc_adox_leak" [4, 7, 8, 9]) = false ∧
+    (match decodeX86Stream code with
+     | none => false
+     | some prog =>
+       let mkS (rax : UInt64) : X86State :=
+         ⟨0, ((Bank16.const 0).set 7 0x1000).set 0 rax, Bank16.const Vec256.zero,
+          false, false, false, false, false, fun _ => 0⟩
+       (runX86 prog 8 (mkS 0)).2 != (runX86 prog 8 (mkS 0x7FFFFFFFFFFFFFFF)).2) = true := by
+  decide +kernel
+
+/-- `#tooth`: 32-bit `cmove eax, ecx` (`0f 44 c1`) zero-extends `eax` into `rax` even when `ZF = 0`
+    (condition false), clearing bits `63:32` of `rax` exactly per Intel SDM. -/
+theorem tooth_x86_cmovcc_32bit_untaken_zero_extends :
+    let s : X86State :=
+      ⟨0, ((Bank16.const 0).set 0 0xDEADBEEF12345678).set 1 0x99999999,
+       Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩
+    (stepX86 ⟨0, 3, .cmovcc 4 false 0 1⟩ s).1.gpr.get 0 = 0x0000000012345678 := by
+  decide +kernel
+
 end Qsag

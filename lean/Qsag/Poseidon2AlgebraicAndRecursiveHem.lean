@@ -731,9 +731,7 @@ theorem verifyHemShard_wellFormed {arith : RowArithmetization} {dom : WhirDomain
     (h : verifyHemShard arith dom epochFloor msg s = true) :
     s.registration.WellFormed = true := by
   have hF := verifyHemShard_facts h
-  simp only [ShardRegistration.WellFormed, HemShardProof.registration,
-    Bool.and_eq_true, decide_eq_true_eq]
-  exact ⟨hF.2.1, hF.2.2.1⟩
+  exact Bool.and_eq_true_iff.mpr ⟨decide_eq_true hF.2.1, decide_eq_true hF.2.2.1⟩
 
 theorem verifyHierarchicalHem_facts {H : Hash} {arith : RowArithmetization} {dom : WhirDomain}
     {registryDigest epochFloor msg : List UInt8} {shards : List HemShardProof}
@@ -1268,13 +1266,15 @@ private theorem verifyLayerSweepAux_getD {stageIdx layer groups : Nat} {root : L
       verifyDuetCosetOpening stageIdx layer groups root (base + i)
         (ops.getD i defaultFoldOpening) = true
   | [], _, _, hi, _ => absurd hi (Nat.not_lt_zero _)
-  | op :: _, base, 0, _, h => by
-    simpa only [Nat.add_zero] using (Bool.and_eq_true_iff.mp h).1
+  | _ :: _, base, 0, _, h => by
+    rw [Nat.add_zero]
+    exact (Bool.and_eq_true_iff.mp h).1
   | _ :: ops, base, i + 1, hi, h => by
     have ih := verifyLayerSweepAux_getD ops (base + 1) i (Nat.lt_of_succ_lt_succ hi)
       (Bool.and_eq_true_iff.mp h).2
     have hAdd : base + (i + 1) = (base + 1) + i := by omega
-    simpa only [hAdd] using ih
+    rw [hAdd]
+    exact ih
 
 private theorem verifyLayerSweep_at {stageIdx layer groups : Nat} {root : List UInt8}
     {ops : List FoldLayerOpening}
@@ -1314,7 +1314,9 @@ private theorem stageLayersBound_of_sweeps (authPath : Nat → Nat → Nat → L
     · have hgOps : g < ops.length := hLen.symm ▸ hg
       have hOpen := verifyDuetCosetOpening_facts (hAt g hg)
       have hPath : authPath stageIdx baseLayer g = (ops.getD g defaultFoldOpening).path := by
-        simpa only [Nat.add_zero] using hAuth 0 g
+        have h0 := hAuth 0 g
+        rw [Nat.add_zero] at h0
+        exact h0
       rw [reconstructLayerTable_getD_left ops g hgOps,
           ← hLen, reconstructLayerTable_getD_right ops g hgOps, hLen, hPath]
       exact ⟨hOpen.2, hOpen.1⟩
@@ -1341,14 +1343,15 @@ private theorem lookupStageOpenings_of_nodup :
     obtain ⟨hNotMem, hNdTail⟩ := List.nodup_cons.mp hNd
     have hMem : sdom ∈ sds := List.mem_of_getElem? hd
     have hNe : sd.stageIdx ≠ sdom.stageIdx := fun hEq =>
-      hNotMem (hEq ▸ List.mem_map.mpr ⟨sdom, hMem, rfl⟩)
+      hNotMem (List.mem_map.mpr ⟨sdom, hMem, hEq.symm⟩)
     simp only [lookupStageOpenings, hNe, ↓reduceIte]
     exact lookupStageOpenings_of_nodup sds rest pos sdom stOps hNdTail hd ha
 
 private theorem stagesBound_of_sweeps (authPath : Nat → Nat → Nat → List (List UInt8)) :
     ∀ (sdoms : List WhirStageDomain) (allOps : List (List (List FoldLayerOpening)))
       (sps : List WhirStageProof),
-      (∀ pos sdom stOps, sdoms[pos]? = some sdom → allOps[pos]? = some stOps →
+      (∀ (pos : Nat) (sdom : WhirStageDomain) (stOps : List (List FoldLayerOpening)),
+        sdoms[pos]? = some sdom → allOps[pos]? = some stOps →
         ∀ layer g, authPath sdom.stageIdx layer g =
           ((stOps.getD layer []).getD g defaultFoldOpening).path) →
       verifyAllStageSweeps sdoms allOps sps = true →
@@ -1366,7 +1369,8 @@ private theorem stagesBound_of_sweeps (authPath : Nat → Nat → Nat → List (
     · apply stageLayersBound_of_sweeps authPath sdom.stageIdx stOps (stageAllRoots sp)
         0 sdom.groups0
       · intro k g
-        simpa only [Nat.zero_add] using hAuth 0 sdom stOps rfl rfl k g
+        rw [Nat.zero_add]
+        exact hAuth 0 sdom stOps rfl rfl k g
       · exact hLayers
     · exact stagesBound_of_sweeps authPath sdoms restOps sps
         (fun pos sd ops hd ha => hAuth (pos + 1) sd ops hd ha) hRest
@@ -1380,8 +1384,8 @@ theorem reconstructSuccinctView_stagesBound (dom : WhirDomain) (proof : Succinct
   rcases Bool.and_eq_true_iff.mp hTr with ⟨h12, _⟩
   rcases Bool.and_eq_true_iff.mp h12 with ⟨hNdDec, hSweeps⟩
   have hNd : (dom.stages.map (·.stageIdx)).Nodup := of_decide_eq_true hNdDec
-  apply stagesBound_of_sweeps (transcriptAuthPath dom tr) dom.stages tr.stageLayerOpenings
-    proof.stages _ hSweeps
+  refine stagesBound_of_sweeps (transcriptAuthPath dom tr) dom.stages tr.stageLayerOpenings
+    proof.stages ?_ hSweeps
   intro pos sdom stOps hd ha layer g
   unfold transcriptAuthPath
   rw [lookupStageOpenings_of_nodup dom.stages tr.stageLayerOpenings pos sdom stOps hNd hd ha]
@@ -1412,14 +1416,16 @@ private theorem verifyStageLayerSweeps_at (stageIdx : Nat) :
         root (stOps.getD layer []) = true
   | _, [], _, _, _, _, _, hr => by cases hr
   | [], _ :: _, _, _, _, _, h, _ => absurd h Bool.false_ne_true
-  | ops :: _, r0 :: _, baseLayer, groups, 0, root, h, hr => by
+  | _ :: _, _ :: _, baseLayer, groups, 0, root, h, hr => by
     cases hr
-    simpa only [Nat.add_zero, layerGroupsAt] using (Bool.and_eq_true_iff.mp h).1
+    rw [Nat.add_zero]
+    exact (Bool.and_eq_true_iff.mp h).1
   | _ :: restOps, _ :: roots, baseLayer, groups, l + 1, root, h, hr => by
     have ih := verifyStageLayerSweeps_at stageIdx restOps roots (baseLayer + 1) (groups / 2)
       l root (Bool.and_eq_true_iff.mp h).2 hr
     have hAdd : (baseLayer + 1) + l = baseLayer + (l + 1) := by omega
-    simpa only [hAdd, layerGroupsAt] using ih
+    rw [← hAdd]
+    exact ih
 
 /-- Constructively cross-check one rewound opening against the base coset sweep: either the duet
     values agree with the reconstructed table, or `duetOpeningCollision` extracts a concrete
@@ -1438,12 +1444,11 @@ def checkOneRewoundOpening (dom : WhirDomain) (proof : SuccinctAggregateProof)
     .inl ⟨hEq⟩
   else
     match hd : dom.stages[ro.stagePos]?, hp : proof.stages[ro.stagePos]? with
-    | none, _ => absurd (by simpa [verifyRewoundOpening, hd] using hRo) Bool.false_ne_true
-    | some _, none => absurd (by simpa [verifyRewoundOpening, hd, hp] using hRo) Bool.false_ne_true
+    | none, _ => by simp [verifyRewoundOpening, hd] at hRo
+    | some _, none => by simp [verifyRewoundOpening, hd, hp] at hRo
     | some sdom, some sp =>
       match hr : (stageAllRoots sp)[ro.layer]? with
-      | none =>
-        absurd (by simpa [verifyRewoundOpening, hd, hp, hr] using hRo) Bool.false_ne_true
+      | none => by simp [verifyRewoundOpening, hd, hp, hr] at hRo
       | some root =>
         have hRo' : ro.cosetIdx < layerGroupsAt sdom.groups0 ro.layer ∧
             verifyDuetCosetOpening sdom.stageIdx ro.layer
@@ -1684,6 +1689,7 @@ private theorem verifyOneWhirStage_allRoots_len {rowChalls finalWord : List Gold
   rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
   rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
   rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
+  rcases Bool.and_eq_true_iff.mp h with ⟨h, _⟩
   rcases Bool.and_eq_true_iff.mp h with ⟨_, hRoots⟩
   exact of_decide_eq_true hRoots
 
@@ -1752,9 +1758,10 @@ theorem hierarchySweepOpeningCount_eq_queryCost {arith : RowArithmetization}
     have hHead := transcriptSweepOpeningCount_eq_domainQueryCost ht.1 ht.2
     have ih := hierarchySweepOpeningCount_eq_queryCost rest
       (fun t' ht' => h t' (List.mem_cons_of_mem _ ht'))
-    simp only [hierarchySweepOpeningCount, List.foldr_cons, List.length_cons,
-      hierarchyTranscriptQueryCost, hHead, ih, Nat.succ_mul]
-    omega
+    change transcriptSweepOpeningCount t.transcript + hierarchySweepOpeningCount rest =
+      hierarchyTranscriptQueryCost dom (rest.length + 1)
+    rw [hHead, ih, hierarchyTranscriptQueryCost, hierarchyTranscriptQueryCost,
+        Nat.add_one_mul, Nat.add_comm]
 
 /-- Shard-by-shard transcript conversion into `HemShardEnv`, preserving shards and reconstructed views. -/
 def extractShardEnvsFromTranscripts (arith : RowArithmetization) (dom : WhirDomain) :
@@ -1766,7 +1773,7 @@ def extractShardEnvsFromTranscripts (arith : RowArithmetization) (dom : WhirDoma
         ∀ (i : Nat) (he : i < envs.length) (ht : i < trs.length),
           (envs[i]'he).shard = (trs[i]'ht).shard ∧
           (envs[i]'he).view = reconstructSuccinctView dom (trs[i]'ht).transcript }
-      (Σ j : Fin trs.length, HashCollisionWitness pcsMerkleHash)
+      (Fin trs.length × HashCollisionWitness pcsMerkleHash)
   | [], _ => .inl ⟨[], rfl, rfl, fun _ h => absurd h (Nat.not_lt_zero _)⟩
   | t :: ts, hTrs =>
     have ht0 := hTrs t (List.mem_cons_self ..)
@@ -4075,15 +4082,13 @@ private theorem concreteHemArith_eq_seed (second : Bool) :
       concreteHemArith := by
   cases second <;>
     (dsimp only [concreteHemArith, rsSbox7TraceArith]
-     congr 1
-     decide)
+     congr 1)
 
 private theorem concreteSeedRoot_eq (second : Bool) :
     let seed := if second then Goldilocks.one else Goldilocks.zero
     CommRingOps.add (pow7Goldilocks Goldilocks.zero) seed = seed := by
   cases second <;> decide
 
-set_option maxRecDepth 4096 in
 theorem concreteHemShard_accepts (second : Bool) :
     verifyHemShard concreteHemArith rsSbox7WhirDomain [] [] (concreteHemShard second) = true := by
   have hAcc := (honestSbox7WhirProof_accepts
@@ -4091,20 +4096,30 @@ theorem concreteHemShard_accepts (second : Bool) :
     Goldilocks.zero Goldilocks.one
     (shardBoundMessage [if second then 1 else 0] [] [])).1
   rw [concreteHemArith_eq_seed second, concreteSeedRoot_eq second] at hAcc
-  cases second <;>
-    (change true && true && true && true && _ = true
-     simpa only [Bool.true_and] using hAcc)
+  have c1 : decide ((concreteHemShard second).inst.message =
+      shardBoundMessage (concreteHemShard second).shardId [] []) = true := by
+    cases second <;> exact decide_eq_true rfl
+  have c2 : decide (1 ≤ (concreteHemShard second).threshold) = true := by
+    cases second <;> decide
+  have c3 : decide ((concreteHemShard second).threshold ≤
+      (concreteHemShard second).inst.committee.length) = true := by
+    cases second <;> decide
+  have c4 : decide ((concreteHemShard second).threshold ≤
+      bitmapPopcountSpec (concreteHemShard second).proof.agg.bitmap) = true := by
+    cases second <;> exact decide_eq_true (Nat.le_refl 1)
+  unfold verifyHemShard
+  rw [c1, c2, c3, c4]
+  exact hAcc
 
 theorem concreteHemShard_lawful (second : Bool) :
     concreteHemArith.Lawful rsSbox7WhirDomain (concreteHemShard second).inst := by
-  let seed := if second then Goldilocks.one else Goldilocks.zero
-  let msg := shardBoundMessage [if second then 1 else 0] [] []
-  have hLaw := rsSbox7TraceArith_lawful seed seed msg
-  have hArith : rsSbox7TraceArith seed seed = concreteHemArith := by
-    rw [← concreteSeedRoot_eq second]
-    exact concreteHemArith_eq_seed second
-  rw [hArith] at hLaw
-  exact hLaw
+  cases second
+  · exact rsSbox7TraceArith_lawful Goldilocks.zero Goldilocks.zero (shardBoundMessage [0] [] [])
+  · have hLaw := rsSbox7TraceArith_lawful Goldilocks.one Goldilocks.one (shardBoundMessage [1] [] [])
+    have hEq : rsSbox7TraceArith Goldilocks.one Goldilocks.one = concreteHemArith := by
+      dsimp only [concreteHemArith, rsSbox7TraceArith]
+      congr 1
+    rwa [hEq] at hLaw
 
 /-- Concrete prover commitment-opening transcript for `concreteHemShard second`. -/
 def concreteHemShardTranscript (second : Bool) :
@@ -4145,14 +4160,18 @@ theorem inhabited_verifyHierarchicalHem_two_shards :
       (verifyHemShard concreteHemArith rsSbox7WhirDomain [] []) = true := by
     simp only [List.all_cons, List.all_nil, concreteHemShard_accepts, Bool.and_self]
   have hWf : concreteHemRegistry.all ShardRegistration.WellFormed = true := by decide
+  have hDig : decide (poseidon2Hash32 (encodeRegistry
+      ([concreteHemShard false, concreteHemShard true].map HemShardProof.registration)) =
+      concreteHemRegistryDigest) = true := decide_eq_true rfl
+  have hRegEq : decide ([concreteHemShard false, concreteHemShard true].map
+      HemShardProof.registration = concreteHemRegistry) = true := decide_eq_true rfl
   refine ⟨?_, ?_, rfl, rfl, rfl⟩
-  · unfold verifyHierarchicalHem concreteHemRegistryDigest concreteHemRegistry
-    simp only [Bool.and_eq_true, decide_eq_true_eq]
-    exact ⟨⟨⟨trivial, hIds⟩, hKeys⟩, hall⟩
-  · unfold verifyHemHierarchyAgainstRegistry concreteHemRegistry
-    simp only [Bool.and_eq_true, decide_eq_true_eq]
-    exact ⟨⟨⟨⟨Bool.and_eq_true_iff.mp hWf |>.1,
-      by simpa [concreteHemRegistry] using hWf⟩, trivial⟩, hIds⟩, hKeys, hall⟩
+  · unfold verifyHierarchicalHem
+    rw [hDig, decide_eq_true hIds, decide_eq_true hKeys, hall]
+    rfl
+  · unfold verifyHemHierarchyAgainstRegistry
+    rw [hWf, hRegEq, decide_eq_true hIds, decide_eq_true hKeys, hall]
+    rfl
 
 /-- End-to-end inhabitedness of transcript-grounded hierarchical extraction & query cost accounting:
     two concrete prover transcripts pass `verifyCommittedTableTranscript` with exact sweep cost
@@ -4204,13 +4223,15 @@ def concreteTwoKeyRegistryDigest : List UInt8 :=
 
 def concreteLoweredTwoKeyShard : HemShardProof :=
   let base := concreteHemShard false
-  { base with
-    shardId := [0]
+  { shardId := [0]
     threshold := 1
-    inst := { base.inst with
-              suite := { base.inst.suite with suiteId := concretePoseidonSuiteTag }
-              committee := concreteTwoKeyCommittee } }
+    inst := { rsSbox7Inst Goldilocks.zero Goldilocks.zero (shardBoundMessage [0] [] []) with
+              suite := { sbox7FieldSuite with suiteId := concretePoseidonSuiteTag }
+              committee := concreteTwoKeyCommittee }
+    proof := base.proof
+    fs := base.fs }
 
+set_option maxRecDepth 16384 in
 /-- `#tooth` **Forged Lower Shard Threshold Rejected (`tooth_forged_lower_shard_threshold_rejected`)**:
     (a) **General security refutation**: for any hash `H`, registered policy `registry`, and
         submitted `shards`, if shard `i` lowers `threshold < (registry[i]).threshold` under an
@@ -4243,7 +4264,12 @@ theorem tooth_forged_lower_shard_threshold_rejected :
       concreteTwoKeyRegistryDigest ∧
     verifyHierarchicalHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
       concreteTwoKeyRegistryDigest [] [] [concreteLoweredTwoKeyShard] = false := by
-  refine ⟨?_, ?_, by decide, ?_, ?_⟩
+  have hDigNe :
+      poseidon2Hash32 (encodeRegistry [concreteLoweredTwoKeyShard.registration]) ≠
+        concreteTwoKeyRegistryDigest := by
+    unfold concreteTwoKeyRegistryDigest
+    decide
+  refine ⟨?_, ?_, by decide, hDigNe, ?_⟩
   · intro H arith dom registryDigest epochFloor msg registry hReg shards i hiS hiR hLower
     match forgedLowerThreshold_rejected_or_collision H arith dom registryDigest epochFloor msg
         registry hReg shards i hiS hiR hLower with
@@ -4254,8 +4280,9 @@ theorem tooth_forged_lower_shard_threshold_rejected :
           congrArg (·[i]?) hEq
         rw [List.getElem?_map, List.getElem?_eq_getElem hiS, List.getElem?_eq_getElem hiR,
             Option.map_some, Option.some.injEq] at hAt
-        have hThr := congrArg ShardRegistration.threshold hAt
-        omega
+        have hThr : (shards[i]'hiS).threshold = (registry[i]'hiR).threshold :=
+          congrArg ShardRegistration.threshold hAt
+        exact absurd (hThr ▸ hLower) (Nat.lt_irrefl _)
       refine ⟨?_, .inr ⟨col⟩⟩
       unfold verifyHemHierarchyAgainstRegistry
       simp [decide_eq_false hNe]
@@ -4265,15 +4292,12 @@ theorem tooth_forged_lower_shard_threshold_rejected :
     have h0 := hAll { concreteHemShard false with threshold := 0 } (List.mem_cons_self ..)
     have hGe1 := (verifyHemShard_facts h0).2.1
     simp at hGe1
-  · unfold concreteTwoKeyRegistryDigest
-    decide
-  · have hDigNe :
+  · unfold verifyHierarchicalHem
+    have hDigNeMap :
         poseidon2Hash32 (encodeRegistry ([concreteLoweredTwoKeyShard].map
-          HemShardProof.registration)) ≠ concreteTwoKeyRegistryDigest := by
-      unfold concreteTwoKeyRegistryDigest
-      decide
-    unfold verifyHierarchicalHem
-    simp [decide_eq_false hDigNe]
+          HemShardProof.registration)) ≠ concreteTwoKeyRegistryDigest := hDigNe
+    rw [decide_eq_false hDigNeMap]
+    rfl
 
 /-- Unconditional replay: the same actual accepting one-signer certificate is counted twice
     by the unscoped verifier, while the scoped root rejects it. No accepted-shard premise. -/
