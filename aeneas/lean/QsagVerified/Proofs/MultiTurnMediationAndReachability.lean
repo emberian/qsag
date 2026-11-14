@@ -2124,3 +2124,1082 @@ theorem auth_belt_new_validated_inv
       number is at least `q`, and every signer is below `n`;
     * any two certificates share more than `f` signers;
     * the signer-set invariant holds in the final state. -/
+theorem belt_trace_fork_free_and_epoch_monotone
+    (n t f q : Std.U32) (gl : Bool) (e0 window : Std.U64)
+    (commit wal : Array Std.U8 32#usize) (keys : Array (Array Std.U8 32#usize) 64#usize)
+    (st0 stF : authenticated_belt.VerifiedBeltQuorumGuard)
+    (acts : List BeltAction) (certs : List BeltCert)
+    (hnew : authenticated_belt.VerifiedBeltQuorumGuard.new_validated
+      n t f q gl e0 window commit keys wal = .ok (.Ok st0))
+    (hTr : BeltTraceReachable st0 acts certs stF) :
+    n.val + f.val < 2 * q.val ∧
+    certs.Pairwise (fun c1 c2 =>
+      c1.grant.authorized_epoch.val < c2.grant.authorized_epoch.val ∨
+      (c1.grant.authorized_epoch = c2.grant.authorized_epoch ∧
+        c1.grant.msg_tag = c2.grant.msg_tag)) ∧
+    (∀ c ∈ certs,
+      e0.val ≤ c.grant.authorized_epoch.val ∧
+      c.grant.certified_acks.val = beltPopcount c.signers ∧
+      q.val ≤ beltPopcount c.signers ∧
+      (∀ i, c.signers.bv.getLsbD i = true → i < n.val)) ∧
+    (∀ c1 ∈ certs, ∀ c2 ∈ certs, f.val < beltPopcount (c1.signers &&& c2.signers)) ∧
+    BeltGuardInv n q stF := by
+  obtain ⟨hProp, _, hn, hq, hb0, hne0, _, hc0, hbm0⟩ := auth_belt_new_validated_inv hnew
+  have hcfg : n.val + f.val < 2 * q.val := by
+    unfold ValidBeltQuorumConfigProp at hProp
+    exact hProp.2.2.2.2.1
+  have hinv0 : BeltGuardInv n q st0 := by
+    refine ⟨hn, hq, ?_, ?_⟩
+    · rw [hc0, hbm0]; exact belt_zero_count_popcount
+    · intro i hi
+      rw [hbm0, belt_zero_getLsbD] at hi
+      cases hi
+  obtain ⟨hquorum, hinvF⟩ := belt_trace_certs_quorum hTr hinv0
+  refine ⟨hcfg, belt_trace_certs_monotone hTr, ?_, ?_, hinvF⟩
+  · intro c hc
+    refine ⟨?_, hquorum c hc⟩
+    rcases belt_trace_certs_ahead hTr c hc with ⟨hb, _, _⟩ | hge
+    · rw [hb0] at hb; cases hb
+    · rw [hne0] at hge; exact hge
+  · intro c1 hc1 c2 hc2
+    exact belt_quorum_intersection hcfg (hquorum c1 hc1).2.1 (hquorum c1 hc1).2.2
+      (hquorum c2 hc2).2.1 (hquorum c2 hc2).2.2
+
+/-- **Poison is absorbing for the authenticated guard.** From a poisoned core, no call
+    sequence yields a certificate and the core stays poisoned. -/
+theorem belt_poisoned_trace_no_certs
+    {st stF : authenticated_belt.VerifiedBeltQuorumGuard} {acts : List BeltAction}
+    {certs : List BeltCert} (hTr : BeltTraceReachable st acts certs stF)
+    (hp : st.inner.poisoned = true) :
+    certs = [] ∧ stF.inner.poisoned = true := by
+  have hstep : ∀ {s s' : authenticated_belt.VerifiedBeltQuorumGuard} {obs : BeltObs},
+      s.inner.poisoned = true → BeltStepOutcome s s' obs →
+      s'.inner.poisoned = true ∧ ∀ g, obs ≠ .granted g := by
+    intro s s' obs hps ho
+    have hcor : ∀ (hc : beltGuardCorrupt s.inner = false), False := by
+      intro hc
+      have := (belt_not_corrupt_facts hc).1
+      rw [hps] at this
+      cases this
+    cases ho with
+    | rejected_unchanged h => subst h; exact ⟨hps, fun g hg => by cases hg⟩
+    | rejected_poisoned h1 h2 =>
+      exact ⟨by rw [h1], fun g hg => by cases hg⟩
+    | retried h => subst h; exact ⟨hps, fun g hg => by cases hg⟩
+    | bound ep msg hc _ _ _ _ => exact (hcor hc).elim
+    | duplicate h => subst h; exact ⟨hps, fun g hg => by cases hg⟩
+    | acked id hc _ _ _ _ _ _ => exact (hcor hc).elim
+    | granted hc _ _ _ => exact (hcor hc).elim
+  induction hTr with
+  | nil st => exact ⟨rfl, hp⟩
+  | bound h _ ih => exact ih (hstep hp (belt_step_outcome h)).1
+  | acked h _ ih => exact ih (hstep hp (belt_step_outcome h)).1
+  | @certified st st' stF a acts certs g h _ ih =>
+    have ho : BeltStepOutcome st st' (.granted g) := belt_step_outcome h
+    exact absurd rfl ((hstep hp ho).2 g)
+  | failed h _ ih => exact ih (hstep hp (belt_step_outcome h)).1
+
+/-! ## 8. Totality: the guard never aborts -/
+
+/-- `Shake256Sponge::absorb` returns on every input slice, across any number of rate
+    blocks. -/
+theorem sponge_absorb_total (sp : keccak.Shake256Sponge) (data : Slice Std.U8)
+    (hn : sp.squeezing = false) (hbuf : sp.buf_len.val < 136) :
+    ∃ out, keccak.Shake256Sponge.absorb sp data = .ok out ∧
+      out.squeezing = false ∧ out.buf_len.val < 136 := by
+  let body := fun (a, buf, i, pos) => keccak.Shake256Sponge.absorb_loop.body data a buf i pos
+  let P := fun (n : Nat) (x : Std.Array Std.U64 25#usize × Std.Array Std.U8 136#usize ×
+      Std.Usize × Std.Usize) =>
+    x.2.2.2.val + n = data.val.length ∧ x.2.2.1.val < 136
+  let Q := fun (x : Std.Array Std.U64 25#usize × Std.Array Std.U8 136#usize × Std.Usize) =>
+    x.2.2.val < 136
+  have hz : ∀ x, P 0 x → ∃ y, body x = .ok (.done y) ∧ Q y := by
+    rintro ⟨a, buf, i, pos⟩ ⟨hp, hi⟩
+    have he : ¬ pos < Slice.len data := by
+      change ¬ pos.val < (Slice.len data).val
+      rw [Slice.len_val]
+      change pos.val + 0 = data.val.length at hp
+      rw [← hp, Nat.add_zero]
+      exact Nat.lt_irrefl _
+    exact ⟨(a, buf, i),
+      by simp only [body, keccak.Shake256Sponge.absorb_loop.body, he, ite_false], hi⟩
+  have step : ∀ n x, P (n + 1) x → ∃ x', body x = .ok (.cont x') ∧ P n x' := by
+    rintro n ⟨a, buf, i, pos⟩ ⟨hp, hib⟩
+    change pos.val + (n + 1) = data.val.length at hp
+    change i.val < 136 at hib
+    have hpos : pos < Slice.len data := by
+      change pos.val < (Slice.len data).val
+      rw [Slice.len_val]
+      exact rank_lt hp
+    have hilt : i < keccak.SHAKE256_RATE_BYTES := by
+      unfold keccak.SHAKE256_RATE_BYTES
+      exact hib
+    obtain ⟨v, hv⟩ := slice_index_total data pos (rank_lt hp)
+    obtain ⟨buf', hbuf'⟩ := array_update_total buf i v hib
+    obtain ⟨i', hi', vi'⟩ := checked_add_val i 1#usize
+      (by change i.val + 1 < 2 ^ 64; exact Nat.lt_trans (Nat.succ_lt_succ hib) (by decide))
+    obtain ⟨pos', hp', vp'⟩ := checked_add_val pos 1#usize (by
+      change pos.val + 1 < 2 ^ 64
+      exact Nat.lt_of_le_of_lt (rank_succ_le hp)
+        (by simpa only [← Slice.len_val] using (Slice.len data).bv.isLt))
+    change i'.val = i.val + 1 at vi'
+    change pos'.val = pos.val + 1 at vp'
+    by_cases he : i' = keccak.SHAKE256_RATE_BYTES
+    · obtain ⟨a', ha'⟩ := xor_rate_block_total a buf'
+      obtain ⟨a'', ha''⟩ := keccak_f1600_total a'
+      refine ⟨(a'', buf', 0#usize, pos'), ?_, ?_⟩
+      · simp only [body, keccak.Shake256Sponge.absorb_loop.body, hpos, hilt, ite_true,
+          hv, hbuf', hi', hp', he, ha', ha'', bind_eq_result_bind, result_bind_ok]
+      · constructor
+        · change pos'.val + n = data.val.length
+          rw [vp']; exact rank_next hp
+        · show (0#usize : Std.Usize).val < 136
+          decide
+    · have hsmall : i'.val < 136 := by
+        have hne : i'.val ≠ 136 := by
+          intro hv136
+          apply he
+          apply UScalar.eq_of_val_eq
+          rw [hv136, keccak.SHAKE256_RATE_BYTES]
+          rfl
+        omega
+      refine ⟨(a, buf', i', pos'), ?_, ?_⟩
+      · simp only [body, keccak.Shake256Sponge.absorb_loop.body, hpos, hilt, ite_true,
+          hv, hbuf', hi', hp', he, ite_false, bind_eq_result_bind, result_bind_ok]
+      · constructor
+        · change pos'.val + n = data.val.length
+          rw [vp']; exact rank_next hp
+        · exact hsmall
+  obtain ⟨⟨a, buf, i⟩, hloop, hi⟩ := loopFuel_total_rank body P Q hz step data.val.length
+    (sp.state, sp.buf, sp.buf_len, 0#usize) ⟨Nat.zero_add _, hbuf⟩
+  have hactual : keccak.Shake256Sponge.absorb_loop sp.state sp.buf sp.buf_len data 0#usize =
+      .ok (a, buf, i) := by
+    unfold keccak.Shake256Sponge.absorb_loop
+    apply loop_ok_of_loopFuel (fuel := data.val.length + 1)
+    · simpa only [Slice.len_val] using usize_lt_loopMaxFuel (Slice.len data)
+    · exact hloop
+  refine ⟨{ sp with state := a, buf := buf, buf_len := i }, ?_, hn, hi⟩
+  simp only [keccak.Shake256Sponge.absorb, hn, Bool.false_eq_true, ite_false,
+    hactual, bind_eq_result_bind, result_bind_ok]
+
+theorem u64_shr_i32_total (x : Std.U64) (s : Std.I32)
+    (h : (!s.bv.msb && decide (s.bv.toNat < UScalarTy.U64.numBits)) = true) :
+    ∃ y, (x >>> s : Result Std.U64) = .ok y :=
+  ⟨⟨x.bv >>> s.bv.toNat⟩, by rw [hShrI_uscalar_eq, ite_eq_left h]⟩
+
+theorem belt_encode_epoch_total (epoch : Std.U64) :
+    ∃ a, authenticated_belt.encode_epoch epoch = .ok a := by
+  obtain ⟨i1, h1⟩ := u64_shr_i32_total epoch 8#i32 (by decide)
+  obtain ⟨i3, h3⟩ := u64_shr_i32_total epoch 16#i32 (by decide)
+  obtain ⟨i5, h5⟩ := u64_shr_i32_total epoch 24#i32 (by decide)
+  obtain ⟨i7, h7⟩ := u64_shr_i32_total epoch 32#i32 (by decide)
+  obtain ⟨i9, h9⟩ := u64_shr_i32_total epoch 40#i32 (by decide)
+  obtain ⟨i11, h11⟩ := u64_shr_i32_total epoch 48#i32 (by decide)
+  obtain ⟨i13, h13⟩ := u64_shr_i32_total epoch 56#i32 (by decide)
+  unfold authenticated_belt.encode_epoch
+  simp only [h1, h3, h5, h7, h9, h11, h13, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
+  exact ⟨_, rfl⟩
+
+/-- Six-part domain-separated SHAKE256 tag, the common shape of the custodian
+    acknowledgment tag and the WAL receipt tag. -/
+theorem belt_sponge_six_absorb_squeeze_total
+    (d0 : Slice Std.U8) (d1 d2 d3 d4 d5 : Slice Std.U8) :
+    ∃ out : Std.Array Std.U8 32#usize,
+      (do
+        let sponge ← keccak.Shake256Sponge.new_shake256
+        let sponge1 ← keccak.Shake256Sponge.absorb sponge d0
+        let sponge2 ← keccak.Shake256Sponge.absorb sponge1 d1
+        let sponge3 ← keccak.Shake256Sponge.absorb sponge2 d2
+        let sponge4 ← keccak.Shake256Sponge.absorb sponge3 d3
+        let sponge5 ← keccak.Shake256Sponge.absorb sponge4 d4
+        let sponge6 ← keccak.Shake256Sponge.absorb sponge5 d5
+        let (_, s7) ← keccak.Shake256Sponge.squeeze sponge6
+          (Std.Array.to_slice_mut (Std.Array.repeat 32#usize 0#u8)).1
+        ok ((Std.Array.to_slice_mut (Std.Array.repeat 32#usize 0#u8)).2 s7)) = .ok out := by
+  let sp0 : keccak.Shake256Sponge :=
+    ⟨Std.Array.repeat 25#usize 0#u64, Std.Array.repeat 136#usize 0#u8,
+      0#usize, 31#u8, false, 0#usize⟩
+  have hnew : keccak.Shake256Sponge.new_shake256 = .ok sp0 := rfl
+  obtain ⟨sp1, hsp1, hn1, hv1⟩ := sponge_absorb_total sp0 d0 rfl (by decide)
+  obtain ⟨sp2, hsp2, hn2, hv2⟩ := sponge_absorb_total sp1 d1 hn1 hv1
+  obtain ⟨sp3, hsp3, hn3, hv3⟩ := sponge_absorb_total sp2 d2 hn2 hv2
+  obtain ⟨sp4, hsp4, hn4, hv4⟩ := sponge_absorb_total sp3 d3 hn3 hv3
+  obtain ⟨sp5, hsp5, hn5, hv5⟩ := sponge_absorb_total sp4 d4 hn4 hv4
+  obtain ⟨sp6, hsp6, hn6, hv6⟩ := sponge_absorb_total sp5 d5 hn5 hv5
+  obtain ⟨result, hresult⟩ := sponge_squeeze_short sp6
+    (Std.Array.to_slice_mut (Std.Array.repeat 32#usize 0#u8)).1 32
+    (by decide) hn6 hv6 rfl
+  simp only [hnew, bind_eq_result_bind, result_bind_ok]
+  rw [hsp1, result_bind_ok, hsp2, result_bind_ok, hsp3, result_bind_ok,
+    hsp4, result_bind_ok, hsp5, result_bind_ok, hsp6, result_bind_ok, hresult, result_bind_ok]
+  exact ⟨_, rfl⟩
+
+theorem belt_custodian_ack_tag_total (key commit : Array Std.U8 32#usize) (epoch : Std.U64)
+    (msg : Array Std.U8 32#usize) (id : Std.U8) :
+    ∃ tag, authenticated_belt.custodian_ack_tag key commit epoch msg id = .ok tag := by
+  obtain ⟨a, ha⟩ := belt_encode_epoch_total epoch
+  obtain ⟨out, hout⟩ := belt_sponge_six_absorb_squeeze_total
+    (Array.to_slice (Array.make 16#usize [
+      81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 66#u8, 69#u8, 76#u8, 84#u8, 46#u8,
+      65#u8, 67#u8, 75#u8, 46#u8, 118#u8, 49#u8 ]))
+    (Array.to_slice key) (Array.to_slice commit) (Array.to_slice a) (Array.to_slice msg)
+    (Array.to_slice (Array.make 1#usize [ id ]))
+  refine ⟨out, ?_⟩
+  unfold authenticated_belt.custodian_ack_tag
+  simp only [ha, bind_eq_result_bind, result_bind_ok, lift_eq_ok] at hout ⊢
+  exact hout
+
+theorem belt_wal_receipt_tag_total (key commit : Array Std.U8 32#usize) (epoch : Std.U64)
+    (msg receipt_digest : Array Std.U8 32#usize) :
+    ∃ tag, authenticated_belt.wal_receipt_tag key commit epoch msg receipt_digest = .ok tag := by
+  obtain ⟨a, ha⟩ := belt_encode_epoch_total epoch
+  obtain ⟨out, hout⟩ := belt_sponge_six_absorb_squeeze_total
+    (Array.to_slice (Array.make 16#usize [
+      81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 66#u8, 69#u8, 76#u8, 84#u8, 46#u8,
+      87#u8, 65#u8, 76#u8, 46#u8, 118#u8, 49#u8 ]))
+    (Array.to_slice key) (Array.to_slice commit) (Array.to_slice a) (Array.to_slice msg)
+    (Array.to_slice receipt_digest)
+  refine ⟨out, ?_⟩
+  unfold authenticated_belt.wal_receipt_tag
+  simp only [ha, bind_eq_result_bind, result_bind_ok, lift_eq_ok] at hout ⊢
+  exact hout
+
+/-- `BeltQuorumCore::record_custodian_ack` returns on every state and input: its one
+    checked addition is guarded by `ack_count < n`. -/
+theorem belt_core_ack_total (s : pants_and_quorum_guards.BeltQuorumCore) (ep : Std.U64)
+    (tag : Array Std.U8 32#usize) :
+    ∃ p, pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack s ep tag = .ok p := by
+  unfold pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack
+  rw [validate_belt_quorum_config_eq]
+  simp only [pants_and_quorum_guards.poison_belt_guard, ct_eq_bytes32_spec,
+    bind_eq_result_bind, result_bind_ok]
+  by_cases hge : s.ack_count >= s.n
+  · cases s.phase <;> simp only [eq_true hge, Bool.false_eq_true, ↓reduceIte] <;>
+      (repeat' (first | split | simp only [result_bind_ok])) <;>
+      exact ⟨_, rfl⟩
+  · have hlt : s.ack_count.val < s.n.val :=
+      Nat.lt_of_not_le (fun h => hge ((UScalar.le_iff_val _ _).mpr h))
+    have hn : s.n.val < 2 ^ 32 := s.n.bv.isLt
+    obtain ⟨c, hc, _⟩ := checked_add_val s.ack_count 1#u32
+      (by show s.ack_count.val + 1 < 2 ^ 32; omega)
+    cases s.phase <;>
+      simp only [eq_false hge, hc, result_bind_ok, Bool.false_eq_true, ↓reduceIte] <;>
+      (repeat' (first | split | simp only [result_bind_ok])) <;>
+      exact ⟨_, rfl⟩
+
+theorem belt_core_authorize_total (s : pants_and_quorum_guards.BeltQuorumCore) (ep : Std.U64)
+    (tag : Array Std.U8 32#usize) :
+    ∃ p, pants_and_quorum_guards.BeltQuorumCore.authorize_shares s ep tag = .ok p := by
+  unfold pants_and_quorum_guards.BeltQuorumCore.authorize_shares
+  rw [validate_belt_quorum_config_eq]
+  simp only [pants_and_quorum_guards.poison_belt_guard, ct_eq_bytes32_spec,
+    bind_eq_result_bind, result_bind_ok]
+  cases s.phase <;> simp only [Bool.false_eq_true, ↓reduceIte] <;>
+    (repeat' (first | split | simp only [result_bind_ok])) <;>
+    exact ⟨_, rfl⟩
+
+/-- `BeltQuorumCore::propose_or_retry_epoch` returns on every state and input: the
+    checked subtraction is guarded by `next_epoch ≤ proposed_epoch` and the checked
+    increment by `proposed_epoch ≠ u64::MAX`. -/
+theorem belt_core_propose_total (s : pants_and_quorum_guards.BeltQuorumCore) (ep : Std.U64)
+    (tag : Array Std.U8 32#usize) (walOk : Bool) :
+    ∃ p, pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch s ep tag walOk =
+      .ok p := by
+  unfold pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch
+  rw [validate_belt_quorum_config_eq]
+  simp only [pants_and_quorum_guards.poison_belt_guard, ct_eq_bytes32_spec,
+    bind_eq_result_bind, result_bind_ok]
+  by_cases hlt : ep < s.next_epoch
+  · cases s.phase <;> cases s.poisoned <;>
+      cases validBeltQuorumConfigBool s.n s.t s.f s.q s.global_liveness_mode <;>
+      cases s.has_bound_epoch <;> cases walOk <;>
+      (try simp only [eq_true hlt, Bool.false_eq_true, ↓reduceIte]) <;>
+      (repeat' (first | split | simp only [result_bind_ok])) <;>
+      exact ⟨_, rfl⟩
+  · have hge : s.next_epoch.val ≤ ep.val :=
+      Nat.le_of_not_lt (fun h => hlt ((UScalar.lt_iff_val _ _).mpr h))
+    have hsub : (ep - s.next_epoch : Result Std.U64) = .ok ⟨ep.bv - s.next_epoch.bv⟩ := by
+      rw [hSub_uscalar_eq, ite_eq_left hge]
+    by_cases hmax : ep = core.num.U64.MAX
+    · cases s.phase <;> cases s.poisoned <;>
+        cases validBeltQuorumConfigBool s.n s.t s.f s.q s.global_liveness_mode <;>
+        cases s.has_bound_epoch <;> cases walOk <;>
+        (try simp only [eq_false hlt, hsub, eq_true hmax, result_bind_ok,
+          Bool.false_eq_true, ↓reduceIte]) <;>
+        (repeat' (first | split | simp only [result_bind_ok])) <;>
+        exact ⟨_, rfl⟩
+    · obtain ⟨c, hc, _⟩ := checked_add_val ep 1#u64
+        (by show ep.val + 1 < 2 ^ 64; exact u64_val_succ_lt_of_ne_max hmax)
+      cases s.phase <;> cases s.poisoned <;>
+        cases validBeltQuorumConfigBool s.n s.t s.f s.q s.global_liveness_mode <;>
+        cases s.has_bound_epoch <;> cases walOk <;>
+        (try simp only [eq_false hlt, hsub, eq_false hmax, hc, result_bind_ok,
+          Bool.false_eq_true, ↓reduceIte]) <;>
+        (repeat' (first | split | simp only [result_bind_ok])) <;>
+        exact ⟨_, rfl⟩
+
+/-! ## 9. Completeness: accepted paths, total `step`, and inhabited traces -/
+
+theorem belt_not_corrupt_of_facts {s : pants_and_quorum_guards.BeltQuorumCore}
+    (hp : s.poisoned = false) (hph : isBeltPhasePoisoned s.phase = false)
+    (hv : validBeltQuorumConfigBool s.n s.t s.f s.q s.global_liveness_mode = true)
+    (hb : s.has_bound_epoch = true → s.bound_epoch.val < s.next_epoch.val) :
+    beltGuardCorrupt s = false := by
+  cases hbb : s.has_bound_epoch with
+  | false => simp [beltGuardCorrupt, hp, hph, hv, hbb]
+  | true =>
+    have hlt := hb hbb
+    have hd : decide (s.next_epoch.val ≤ s.bound_epoch.val) = false :=
+      decide_eq_false (Nat.not_le.mpr hlt)
+    simp [beltGuardCorrupt, hp, hph, hv, hbb, hd]
+
+/-- Core state right after binding a fresh epoch. -/
+abbrev beltFreshCore (s : pants_and_quorum_guards.BeltQuorumCore) (e : Std.U64)
+    (msg : Array Std.U8 32#usize) : pants_and_quorum_guards.BeltQuorumCore :=
+  { s with next_epoch := ⟨e.bv + (1#u64).bv⟩,
+           phase := .EpochBoundPendingQuorum,
+           has_bound_epoch := true,
+           bound_epoch := e,
+           bound_msg_tag := msg,
+           ack_count := 0#u32 }
+
+abbrev beltAfterPropose (st : authenticated_belt.VerifiedBeltQuorumGuard) (e : Std.U64)
+    (msg : Array Std.U8 32#usize) : authenticated_belt.VerifiedBeltQuorumGuard :=
+  { st with inner := beltFreshCore st.inner e msg, ack_bitmap := 0#u64 }
+
+abbrev beltAfterAck (st : authenticated_belt.VerifiedBeltQuorumGuard) (id : Std.U8) :
+    authenticated_belt.VerifiedBeltQuorumGuard :=
+  { st with
+    inner := { st.inner with ack_count := ⟨st.inner.ack_count.bv + (1#u32).bv⟩ },
+    ack_bitmap := st.ack_bitmap ||| beltCustodianBit id }
+
+abbrev beltAfterGrant (st : authenticated_belt.VerifiedBeltQuorumGuard) :
+    authenticated_belt.VerifiedBeltQuorumGuard :=
+  { st with inner := { st.inner with phase := .SharesAuthorized } }
+
+theorem belt_not_corrupt_fresh {s : pants_and_quorum_guards.BeltQuorumCore} {e : Std.U64}
+    (msg : Array Std.U8 32#usize) (hc : beltGuardCorrupt s = false)
+    (hlt : e.val + 1 < 2 ^ 64) : beltGuardCorrupt (beltFreshCore s e msg) = false := by
+  obtain ⟨hp, _, hv, _⟩ := belt_not_corrupt_facts hc
+  refine belt_not_corrupt_of_facts hp rfl hv (fun _ => ?_)
+  show e.val < (⟨e.bv + (1#u64).bv⟩ : Std.U64).val
+  rw [u64_succ_val hlt]
+  exact Nat.lt_succ_self _
+
+theorem belt_not_corrupt_set_ack_count {s : pants_and_quorum_guards.BeltQuorumCore}
+    (c : Std.U32) (hc : beltGuardCorrupt s = false) :
+    beltGuardCorrupt { s with ack_count := c } = false := by
+  obtain ⟨hp, hph, hv, hb⟩ := belt_not_corrupt_facts hc
+  exact belt_not_corrupt_of_facts hp hph hv hb
+
+theorem belt_mealy_propose_fresh {s : pants_and_quorum_guards.BeltQuorumCore} {e : Std.U64}
+    (msg : Array Std.U8 32#usize) (hc : beltGuardCorrupt s = false)
+    (hnr : ¬ (s.has_bound_epoch = true ∧ e = s.bound_epoch))
+    (hge : s.next_epoch.val ≤ e.val)
+    (hwin : e.val - s.next_epoch.val ≤ s.max_jump_window.val)
+    (hmax : e ≠ core.num.U64.MAX) :
+    beltQuorumMealy.step s (.ProposeOrRetryEpoch e msg true) =
+      some (beltFreshCore s e msg, .EpochBound) := by
+  have hr' : (s.has_bound_epoch && decide (e = s.bound_epoch)) = false := by
+    cases hb : s.has_bound_epoch with
+    | false => rfl
+    | true =>
+      have hne : ¬ e = s.bound_epoch := fun he => hnr ⟨hb, he⟩
+      simp [hne]
+  have hlt : ¬ e.val < s.next_epoch.val := Nat.not_lt.mpr hge
+  have hw : ¬ s.max_jump_window.val < e.val - s.next_epoch.val := Nat.not_lt.mpr hwin
+  dsimp only [beltQuorumMealy]
+  rw [hc, hr']
+  simp [hlt, hw, hmax]
+
+theorem belt_mealy_ack_fresh {s : pants_and_quorum_guards.BeltQuorumCore}
+    (hc : beltGuardCorrupt s = false) (hb : s.has_bound_epoch = true)
+    (hcnt : s.ack_count.val < s.n.val) :
+    beltQuorumMealy.step s (.RecordCustodianAck s.bound_epoch s.bound_msg_tag) =
+      some ({ s with ack_count := ⟨s.ack_count.bv + (1#u32).bv⟩ },
+            .AckRecorded ⟨s.ack_count.bv + (1#u32).bv⟩) := by
+  have hn : ¬ s.n.val ≤ s.ack_count.val := Nat.not_le.mpr hcnt
+  dsimp only [beltQuorumMealy]
+  rw [hc]
+  simp [hb, hn]
+
+theorem belt_mealy_authorize_granted {s : pants_and_quorum_guards.BeltQuorumCore}
+    (hc : beltGuardCorrupt s = false) (hb : s.has_bound_epoch = true)
+    (hq : s.q.val ≤ s.ack_count.val) :
+    beltQuorumMealy.step s (.AuthorizeShares s.bound_epoch s.bound_msg_tag) =
+      some ({ s with phase := .SharesAuthorized },
+            .SharesAuthorized { authorized_epoch := s.bound_epoch,
+                                msg_tag := s.bound_msg_tag,
+                                certified_acks := s.ack_count }) := by
+  have hnq : ¬ s.ack_count.val < s.q.val := Nat.not_lt.mpr hq
+  dsimp only [beltQuorumMealy]
+  rw [hc]
+  simp [hb, hnq]
+
+/-- Every accepting step of the pure belt specification is realised by the extracted
+    `propose_or_retry_epoch` (the converse of the simulation, obtained from totality). -/
+theorem belt_core_propose_of_mealy
+    {s s' : pants_and_quorum_guards.BeltQuorumCore} {ep : Std.U64}
+    {tag : Array Std.U8 32#usize} {walOk : Bool}
+    {o : pants_and_quorum_guards.BeltQuorumCoreOutput}
+    (hm : beltQuorumMealy.step s (.ProposeOrRetryEpoch ep tag walOk) = some (s', o)) :
+    pants_and_quorum_guards.BeltQuorumCore.propose_or_retry_epoch s ep tag walOk =
+      .ok (s', .Ok ()) := by
+  obtain ⟨⟨s2, r⟩, hcore⟩ := belt_core_propose_total s ep tag walOk
+  cases r with
+  | Ok u =>
+    have h2 := belt_core_propose_ok_mealy hcore
+    rw [hm] at h2
+    injection h2 with h2
+    injection h2 with h3 _
+    rw [hcore, h3]
+  | Err e =>
+    have h2 := (belt_core_propose_err_mealy hcore).1
+    rw [hm] at h2
+    cases h2
+
+theorem belt_core_ack_of_mealy
+    {s s' : pants_and_quorum_guards.BeltQuorumCore} {ep : Std.U64}
+    {tag : Array Std.U8 32#usize} {k : Std.U32}
+    (hm : beltQuorumMealy.step s (.RecordCustodianAck ep tag) = some (s', .AckRecorded k)) :
+    pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack s ep tag =
+      .ok (s', .Ok k) := by
+  obtain ⟨⟨s2, r⟩, hcore⟩ := belt_core_ack_total s ep tag
+  cases r with
+  | Ok k2 =>
+    have h2 := belt_core_ack_ok_mealy hcore
+    rw [hm] at h2
+    injection h2 with h2
+    injection h2 with h3 h4
+    injection h4 with h5
+    rw [hcore, h3, h5]
+  | Err e =>
+    have h2 := (belt_core_ack_err_mealy hcore).1
+    rw [hm] at h2
+    cases h2
+
+theorem belt_core_authorize_of_mealy
+    {s s' : pants_and_quorum_guards.BeltQuorumCore} {ep : Std.U64}
+    {tag : Array Std.U8 32#usize} {g : pants_and_quorum_guards.BeltAuthorizationGrant}
+    (hm : beltQuorumMealy.step s (.AuthorizeShares ep tag) = some (s', .SharesAuthorized g)) :
+    pants_and_quorum_guards.BeltQuorumCore.authorize_shares s ep tag =
+      .ok (s', .Ok g) := by
+  obtain ⟨⟨s2, r⟩, hcore⟩ := belt_core_authorize_total s ep tag
+  cases r with
+  | Ok g2 =>
+    have h2 := belt_core_authorize_ok_mealy hcore
+    rw [hm] at h2
+    injection h2 with h2
+    injection h2 with h3 h4
+    injection h4 with h5
+    rw [hcore, h3, h5]
+  | Err e =>
+    have h2 := (belt_core_authorize_err_mealy hcore).1
+    rw [hm] at h2
+    cases h2
+
+theorem auth_belt_propose_total (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg rd rt : Array Std.U8 32#usize) :
+    ∃ p, authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch st ep msg rd rt =
+      .ok p := by
+  obtain ⟨expected, hw⟩ :=
+    belt_wal_receipt_tag_total st.wal_key st.guard_key_commit ep msg rd
+  obtain ⟨⟨inner, cr⟩, hcore⟩ :=
+    belt_core_propose_total st.inner ep msg (decide (expected = rt))
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch
+  rw [hw]
+  simp only [bind_eq_result_bind, result_bind_ok, ct_eq_bytes32_spec,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned]
+  rw [hcore]
+  cases cr <;> (repeat' (first | split | simp only [result_bind_ok])) <;> exact ⟨_, rfl⟩
+
+theorem auth_belt_ack_total (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg : Array Std.U8 32#usize) (id : Std.U8)
+    (tag : Array Std.U8 32#usize) :
+    ∃ p, authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack st ep msg id tag =
+      .ok p := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack
+  simp only [pants_and_quorum_guards.BeltQuorumCore.impl.n,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+    pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+    ct_eq_bytes32_spec, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
+  by_cases hin : UScalar.cast .Usize id >= UScalar.cast .Usize st.inner.n
+  · rw [ite_eq_left hin]; exact ⟨_, rfl⟩
+  · rw [ite_eq_right hin]
+    by_cases h64 : id >= 64#u8
+    · rw [ite_eq_left h64]; exact ⟨_, rfl⟩
+    · rw [ite_eq_right h64]
+      have hid : id.val < 64 :=
+        Nat.lt_of_not_le
+          (fun (h : (64#u8 : Std.U8).val ≤ id.val) => h64 ((UScalar.le_iff_val _ _).mpr h))
+      have hcast : (UScalar.cast .Usize id).val = id.val :=
+        uscalar_cast_val_eq .Usize id (Nat.lt_of_lt_of_le id.bv.isLt (by decide))
+      obtain ⟨key, hkey⟩ := array_index_total st.custodian_keys (UScalar.cast .Usize id)
+        (by rw [hcast]; exact hid)
+      obtain ⟨expected, htag⟩ :=
+        belt_custodian_ack_tag_total key st.guard_key_commit ep msg id
+      obtain ⟨⟨inner, cr⟩, hcore⟩ := belt_core_ack_total st.inner ep msg
+      have hshl : (1#u64 <<< id : Result Std.U64) = .ok (beltCustodianBit id) :=
+        (hShlU_uscalar_eq (1#u64) id).trans (ite_eq_left hid)
+      rw [hkey]
+      simp only [result_bind_ok]
+      rw [htag]
+      simp only [result_bind_ok, hshl, hcore]
+      cases cr <;> (repeat' (first | split | simp only [result_bind_ok])) <;> exact ⟨_, rfl⟩
+
+theorem auth_belt_authorize_total (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg : Array Std.U8 32#usize) :
+    ∃ p, authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares st ep msg = .ok p := by
+  obtain ⟨⟨inner, cr⟩, hcore⟩ := belt_core_authorize_total st.inner ep msg
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares
+  rw [hcore]
+  simp only [bind_eq_result_bind, result_bind_ok,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned]
+  cases cr <;> (repeat' (first | split | simp only [result_bind_ok])) <;> exact ⟨_, rfl⟩
+
+/-- **The guard never aborts.** `VerifiedBeltQuorumGuard::step` returns a state and a
+    verdict on every state and every input: no arithmetic overflow, no out-of-bounds
+    index, no divergence. -/
+theorem belt_step_total (st : authenticated_belt.VerifiedBeltQuorumGuard) (a : BeltAction) :
+    ∃ st' res, authenticated_belt.VerifiedBeltQuorumGuard.step st a = .ok (st', res) := by
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.step
+  cases a with
+  | ProposeOrRetryEpoch ep msg rd rt =>
+    dsimp only
+    obtain ⟨⟨nx, r⟩, hf⟩ := auth_belt_propose_total st ep msg rd rt
+    rw [hf]
+    cases r <;> exact ⟨_, _, rfl⟩
+  | RecordCustodianAck ep msg id tag =>
+    dsimp only
+    obtain ⟨⟨nx, r⟩, hf⟩ := auth_belt_ack_total st ep msg id tag
+    rw [hf]
+    cases r <;> exact ⟨_, _, rfl⟩
+  | AuthorizeShares ep msg =>
+    dsimp only
+    obtain ⟨⟨nx, r⟩, hf⟩ := auth_belt_authorize_total st ep msg
+    rw [hf]
+    cases r <;> exact ⟨_, _, rfl⟩
+
+/-- **`BeltTraceReachable` does not narrow the adversary.** Every list of actions, from
+    every state, has a trace; the safety theorems therefore speak about all call
+    sequences, not about the ones that happen to return. -/
+theorem belt_trace_exists :
+    ∀ (acts : List BeltAction) (st : authenticated_belt.VerifiedBeltQuorumGuard),
+      ∃ certs stF, BeltTraceReachable st acts certs stF
+  | [], st => ⟨[], st, .nil st⟩
+  | a :: acts, st => by
+    obtain ⟨st', res, h⟩ := belt_step_total st a
+    obtain ⟨certs, stF, hTr⟩ := belt_trace_exists acts st'
+    cases res with
+    | Ok o =>
+      cases o with
+      | EpochBound => exact ⟨_, _, .bound h hTr⟩
+      | AckRecorded k => exact ⟨_, _, .acked h hTr⟩
+      | SharesAuthorized g => exact ⟨_, _, .certified h hTr⟩
+    | Err e => exact ⟨_, _, .failed h hTr⟩
+
+theorem BeltTraceReachable.append
+    {st st1 st2 : authenticated_belt.VerifiedBeltQuorumGuard}
+    {a1 a2 : List BeltAction} {c1 c2 : List BeltCert}
+    (h1 : BeltTraceReachable st a1 c1 st1) (h2 : BeltTraceReachable st1 a2 c2 st2) :
+    BeltTraceReachable st (a1 ++ a2) (c1 ++ c2) st2 := by
+  induction h1 with
+  | nil st => exact h2
+  | bound h _ ih => exact .bound h (ih h2)
+  | acked h _ ih => exact .acked h (ih h2)
+  | certified h _ ih => exact .certified h (ih h2)
+  | failed h _ ih => exact .failed h (ih h2)
+
+theorem beltCustodianBit_and_eq_zero_of {bm : Std.U64} {id : Std.U8} (hk : id.val < 64)
+    (h : bm.bv.getLsbD id.val = false) : bm &&& beltCustodianBit id = 0#u64 := by
+  apply UScalar.ext
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  show (bm.bv &&& (beltCustodianBit id).bv).getLsbD i = (0#64).getLsbD i
+  rw [BitVec.getLsbD_and, beltCustodianBit_getLsbD id hk, BitVec.getLsbD_zero]
+  by_cases hik : id.val = i
+  · rw [← hik, h]; rfl
+  · rw [decide_eq_false hik, Bool.and_false]
+
+/-- A fresh in-window proposal carrying the WAL receipt tag the guard computes binds the
+    epoch and clears the signer bitmap. -/
+theorem belt_step_propose_fresh (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (e : Std.U64) (msg rd rt : Array Std.U8 32#usize)
+    (hwal : authenticated_belt.wal_receipt_tag st.wal_key st.guard_key_commit e msg rd = .ok rt)
+    (hc : beltGuardCorrupt st.inner = false)
+    (hnr : ¬ (st.inner.has_bound_epoch = true ∧ e = st.inner.bound_epoch))
+    (hge : st.inner.next_epoch.val ≤ e.val)
+    (hwin : e.val - st.inner.next_epoch.val ≤ st.inner.max_jump_window.val)
+    (hmax : e ≠ core.num.U64.MAX) :
+    authenticated_belt.VerifiedBeltQuorumGuard.step st (.ProposeOrRetryEpoch e msg rd rt) =
+      .ok (beltAfterPropose st e msg, .Ok .EpochBound) := by
+  have hcore := belt_core_propose_of_mealy (belt_mealy_propose_fresh msg hc hnr hge hwin hmax)
+  have hp := (belt_not_corrupt_facts hc).1
+  have hvalid : decide (rt = rt) = true := decide_eq_true rfl
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.step
+  dsimp only
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.propose_or_retry_epoch
+  rw [hwal]
+  simp only [bind_eq_result_bind, result_bind_ok]
+  rw [ct_eq_bytes32_spec, hvalid]
+  simp only [result_bind_ok,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned, hcore]
+  (repeat' (first | split | simp only [result_bind_ok])) <;>
+    first
+      | rfl
+      | exact absurd ⟨by assumption, by (apply Eq.symm; assumption)⟩ hnr
+      | (exfalso; simp_all)
+
+/-- A first acknowledgment by an in-range custodian with the tag the guard computes is
+    recorded: the counter grows by one and exactly that custodian's bit is set. -/
+theorem belt_step_ack_fresh (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (ep : Std.U64) (msg : Array Std.U8 32#usize) (id : Std.U8)
+    (tag key : Array Std.U8 32#usize)
+    (hid : id.val < st.inner.n.val) (h64 : id.val < 64)
+    (hkey : Array.index_usize st.custodian_keys (UScalar.cast .Usize id) = .ok key)
+    (htag : authenticated_belt.custodian_ack_tag key st.guard_key_commit ep msg id = .ok tag)
+    (hc : beltGuardCorrupt st.inner = false) (hb : st.inner.has_bound_epoch = true)
+    (he : ep = st.inner.bound_epoch) (hm : msg = st.inner.bound_msg_tag)
+    (hbit : st.ack_bitmap.bv.getLsbD id.val = false)
+    (hcnt : st.inner.ack_count.val < st.inner.n.val) :
+    authenticated_belt.VerifiedBeltQuorumGuard.step st (.RecordCustodianAck ep msg id tag) =
+      .ok (beltAfterAck st id,
+           .Ok (.AckRecorded ⟨st.inner.ack_count.bv + (1#u32).bv⟩)) := by
+  subst he; subst hm
+  have hcore := belt_core_ack_of_mealy (belt_mealy_ack_fresh hc hb hcnt)
+  have hp := (belt_not_corrupt_facts hc).1
+  have hc1 : (UScalar.cast .Usize id).val = id.val :=
+    uscalar_cast_val_eq .Usize id (Nat.lt_of_lt_of_le id.bv.isLt (by decide))
+  have hc2 : (UScalar.cast .Usize st.inner.n).val = st.inner.n.val :=
+    uscalar_cast_val_eq .Usize st.inner.n (Nat.lt_of_lt_of_le st.inner.n.bv.isLt (by decide))
+  have hin : ¬ UScalar.cast .Usize id >= UScalar.cast .Usize st.inner.n := by
+    intro hx
+    have hle := (UScalar.le_iff_val _ _).mp hx
+    omega
+  have h64' : ¬ id >= 64#u8 := by
+    intro hx
+    have hle : (64#u8 : Std.U8).val ≤ id.val := (UScalar.le_iff_val _ _).mp hx
+    have h64v : (64#u8 : Std.U8).val = 64 := rfl
+    omega
+  have hshl : (1#u64 <<< id : Result Std.U64) = .ok (beltCustodianBit id) :=
+    (hShlU_uscalar_eq (1#u64) id).trans (ite_eq_left h64)
+  have hz := beltCustodianBit_and_eq_zero_of h64 hbit
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.step
+  dsimp only
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.record_custodian_ack
+  simp only [pants_and_quorum_guards.BeltQuorumCore.impl.n,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned,
+    pants_and_quorum_guards.BeltQuorumCore.impl.has_bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_epoch,
+    pants_and_quorum_guards.BeltQuorumCore.impl.bound_msg_tag,
+    pants_and_quorum_guards.BeltQuorumCore.impl.ack_count,
+    ct_eq_bytes32_spec, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
+  rw [ite_eq_right hin, ite_eq_right h64', hkey]
+  simp only [result_bind_ok]
+  rw [htag]
+  simp only [result_bind_ok, hshl, hcore]
+  (repeat' (first | split | simp only [result_bind_ok])) <;>
+    first
+      | rfl
+      | (exfalso; simp_all)
+
+/-- With at least `q` acknowledgments recorded for the bound epoch, authorization is
+    granted for exactly that epoch and message. -/
+theorem belt_step_authorize_granted (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (hc : beltGuardCorrupt st.inner = false) (hb : st.inner.has_bound_epoch = true)
+    (hq : st.inner.q.val ≤ st.inner.ack_count.val) :
+    authenticated_belt.VerifiedBeltQuorumGuard.step st
+        (.AuthorizeShares st.inner.bound_epoch st.inner.bound_msg_tag) =
+      .ok (beltAfterGrant st,
+           .Ok (.SharesAuthorized { authorized_epoch := st.inner.bound_epoch,
+                                    msg_tag := st.inner.bound_msg_tag,
+                                    certified_acks := st.inner.ack_count })) := by
+  have hcore := belt_core_authorize_of_mealy (belt_mealy_authorize_granted hc hb hq)
+  have hp := (belt_not_corrupt_facts hc).1
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.step
+  dsimp only
+  unfold authenticated_belt.VerifiedBeltQuorumGuard.authorize_shares
+  rw [hcore]
+  simp only [bind_eq_result_bind, result_bind_ok,
+    pants_and_quorum_guards.BeltQuorumCore.is_poisoned]
+  (repeat' (first | split | simp only [result_bind_ok])) <;>
+    first
+      | rfl
+      | (exfalso; simp_all)
+
+/-- **Completeness of a two-custodian round.** From any uncorrupted guard whose quorum
+    is at most two, a fresh in-window epoch proposed with the guard's own WAL receipt
+    tag and acknowledged by two distinct in-range custodians with the guard's own
+    acknowledgment tags is certified, with exactly those two signers. -/
+theorem belt_two_custodian_round_certifies
+    (st : authenticated_belt.VerifiedBeltQuorumGuard) (e : Std.U64)
+    (msg rd rt tagA tagB keyA keyB : Array Std.U8 32#usize) (a b : Std.U8)
+    (hc : beltGuardCorrupt st.inner = false)
+    (hq : st.inner.q.val ≤ 2)
+    (hnr : ¬ (st.inner.has_bound_epoch = true ∧ e = st.inner.bound_epoch))
+    (hge : st.inner.next_epoch.val ≤ e.val)
+    (hwin : e.val - st.inner.next_epoch.val ≤ st.inner.max_jump_window.val)
+    (hmax : e ≠ core.num.U64.MAX)
+    (ha : a.val < st.inner.n.val) (hb : b.val < st.inner.n.val) (hab : a.val ≠ b.val)
+    (ha64 : a.val < 64) (hb64 : b.val < 64)
+    (hwal : authenticated_belt.wal_receipt_tag st.wal_key st.guard_key_commit e msg rd = .ok rt)
+    (hkA : Array.index_usize st.custodian_keys (UScalar.cast .Usize a) = .ok keyA)
+    (htA : authenticated_belt.custodian_ack_tag keyA st.guard_key_commit e msg a = .ok tagA)
+    (hkB : Array.index_usize st.custodian_keys (UScalar.cast .Usize b) = .ok keyB)
+    (htB : authenticated_belt.custodian_ack_tag keyB st.guard_key_commit e msg b = .ok tagB) :
+    BeltTraceReachable st
+      [.ProposeOrRetryEpoch e msg rd rt, .RecordCustodianAck e msg a tagA,
+       .RecordCustodianAck e msg b tagB, .AuthorizeShares e msg]
+      [⟨{ authorized_epoch := e, msg_tag := msg, certified_acks := 2#u32 },
+        (0#u64 ||| beltCustodianBit a) ||| beltCustodianBit b⟩]
+      (beltAfterGrant (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) a) b)) := by
+  have hlt := u64_val_succ_lt_of_ne_max hmax
+  have hc1 : beltGuardCorrupt (beltAfterPropose st e msg).inner = false :=
+    belt_not_corrupt_fresh msg hc hlt
+  have hc2 : beltGuardCorrupt (beltAfterAck (beltAfterPropose st e msg) a).inner = false :=
+    belt_not_corrupt_set_ack_count _ hc1
+  have hc3 : beltGuardCorrupt
+      (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) a) b).inner = false :=
+    belt_not_corrupt_set_ack_count _ hc2
+  have hcnt0 : (beltAfterPropose st e msg).inner.ack_count.val <
+      (beltAfterPropose st e msg).inner.n.val := by
+    show (0 : Nat) < st.inner.n.val
+    omega
+  have hcnt1 : (beltAfterAck (beltAfterPropose st e msg) a).inner.ack_count.val <
+      (beltAfterAck (beltAfterPropose st e msg) a).inner.n.val := by
+    show (1 : Nat) < st.inner.n.val
+    omega
+  have hbitB : (beltAfterAck (beltAfterPropose st e msg) a).ack_bitmap.bv.getLsbD b.val =
+      false := by
+    show ((0#u64 : Std.U64).bv ||| (beltCustodianBit a).bv).getLsbD b.val = false
+    rw [BitVec.getLsbD_or, belt_zero_getLsbD, beltCustodianBit_getLsbD a ha64]
+    simp [hab]
+  have hq3 : (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) a) b).inner.q.val ≤
+      (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) a) b).inner.ack_count.val := by
+    show st.inner.q.val ≤ 2
+    exact hq
+  refine .bound (belt_step_propose_fresh st e msg rd rt hwal hc hnr hge hwin hmax) ?_
+  refine .acked (belt_step_ack_fresh (beltAfterPropose st e msg) e msg a tagA keyA
+    ha ha64 hkA htA hc1 rfl rfl rfl (belt_zero_getLsbD _) hcnt0) ?_
+  refine .acked (belt_step_ack_fresh (beltAfterAck (beltAfterPropose st e msg) a) e msg b
+    tagB keyB hb hb64 hkB htB hc2 rfl rfl rfl hbitB hcnt1) ?_
+  refine .certified (belt_step_authorize_granted
+    (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) a) b) hc3 rfl hq3) ?_
+  exact .nil _
+
+/-- State after one certified two-custodian round. -/
+abbrev beltRoundEnd (st : authenticated_belt.VerifiedBeltQuorumGuard) (e : Std.U64)
+    (msg : Array Std.U8 32#usize) (a b : Std.U8) :
+    authenticated_belt.VerifiedBeltQuorumGuard :=
+  beltAfterGrant (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) a) b)
+
+/-- **Liveness of a two-custodian round.** Inputs that make the round succeed always
+    exist: the tag functions are total, so the guard is never vacuously safe for
+    parties that can compute its tags. -/
+theorem belt_two_custodian_round_exists
+    (st : authenticated_belt.VerifiedBeltQuorumGuard) (e : Std.U64)
+    (msg : Array Std.U8 32#usize) (a b : Std.U8)
+    (hc : beltGuardCorrupt st.inner = false)
+    (hq : st.inner.q.val ≤ 2)
+    (hnr : ¬ (st.inner.has_bound_epoch = true ∧ e = st.inner.bound_epoch))
+    (hge : st.inner.next_epoch.val ≤ e.val)
+    (hwin : e.val - st.inner.next_epoch.val ≤ st.inner.max_jump_window.val)
+    (hmax : e ≠ core.num.U64.MAX)
+    (ha : a.val < st.inner.n.val) (hb : b.val < st.inner.n.val) (hab : a.val ≠ b.val)
+    (ha64 : a.val < 64) (hb64 : b.val < 64) :
+    ∃ acts : List BeltAction, acts.length = 4 ∧
+      BeltTraceReachable st acts
+        [⟨{ authorized_epoch := e, msg_tag := msg, certified_acks := 2#u32 },
+          (0#u64 ||| beltCustodianBit a) ||| beltCustodianBit b⟩]
+        (beltRoundEnd st e msg a b) := by
+  obtain ⟨rt, hwal⟩ := belt_wal_receipt_tag_total st.wal_key st.guard_key_commit e msg msg
+  have hca : (UScalar.cast .Usize a).val = a.val :=
+    uscalar_cast_val_eq .Usize a (Nat.lt_of_lt_of_le a.bv.isLt (by decide))
+  have hcb : (UScalar.cast .Usize b).val = b.val :=
+    uscalar_cast_val_eq .Usize b (Nat.lt_of_lt_of_le b.bv.isLt (by decide))
+  obtain ⟨keyA, hkA⟩ := array_index_total st.custodian_keys (UScalar.cast .Usize a)
+    (by rw [hca]; exact ha64)
+  obtain ⟨keyB, hkB⟩ := array_index_total st.custodian_keys (UScalar.cast .Usize b)
+    (by rw [hcb]; exact hb64)
+  obtain ⟨tagA, htA⟩ := belt_custodian_ack_tag_total keyA st.guard_key_commit e msg a
+  obtain ⟨tagB, htB⟩ := belt_custodian_ack_tag_total keyB st.guard_key_commit e msg b
+  exact ⟨_, rfl, belt_two_custodian_round_certifies st e msg msg rt tagA tagB keyA keyB a b
+    hc hq hnr hge hwin hmax ha hb hab ha64 hb64 hwal hkA htA hkB htB⟩
+
+/-! ## 10. Inhabited multi-turn witnesses and mutation teeth -/
+
+abbrev beltWitnessBytes : Array Std.U8 32#usize := Array.repeat 32#usize 0#u8
+
+abbrev beltWitnessKeys : Array (Array Std.U8 32#usize) 64#usize :=
+  Array.repeat 64#usize beltWitnessBytes
+
+/-- The guard `new_validated` builds for `n = 3, t = 2, f = 0, q = 2`, first epoch 10. -/
+abbrev beltWitnessState0 : authenticated_belt.VerifiedBeltQuorumGuard :=
+  { inner :=
+      { n := 3#u32, t := 2#u32, f := 0#u32, q := 2#u32, global_liveness_mode := false,
+        next_epoch := 10#u64, max_jump_window := 4#u64, phase := .Idle,
+        has_bound_epoch := false, bound_epoch := 0#u64, bound_msg_tag := beltWitnessBytes,
+        ack_count := 0#u32, poisoned := false },
+    guard_key_commit := beltWitnessBytes,
+    custodian_keys := beltWitnessKeys,
+    wal_key := beltWitnessBytes,
+    ack_bitmap := 0#u64 }
+
+/-- **Inhabitedness of the multi-turn theorems.** A guard built by `new_validated`
+    runs a twelve-call trace that certifies epochs 10, 11 and 12 with the custodian
+    pairs `{0, 1}`, `{1, 2}` and `{0, 2}`. The hypotheses of
+    `belt_trace_fork_free_and_epoch_monotone` are therefore satisfiable with three
+    certificates, and its conclusions are not vacuous. -/
+theorem inhabited_belt_trace_three_certificates :
+    ∃ (stF : authenticated_belt.VerifiedBeltQuorumGuard) (acts : List BeltAction)
+      (certs : List BeltCert),
+      authenticated_belt.VerifiedBeltQuorumGuard.new_validated
+        3#u32 2#u32 0#u32 2#u32 false 10#u64 4#u64
+        beltWitnessBytes beltWitnessKeys beltWitnessBytes = .ok (.Ok beltWitnessState0) ∧
+      BeltTraceReachable beltWitnessState0 acts certs stF ∧
+      certs.length ≥ 3 ∧
+      certs.map (fun c => c.grant.authorized_epoch.val) = [10, 11, 12] ∧
+      certs.map (fun c => beltPopcount c.signers) = [2, 2, 2] := by
+  have hnew : authenticated_belt.VerifiedBeltQuorumGuard.new_validated
+      3#u32 2#u32 0#u32 2#u32 false 10#u64 4#u64
+      beltWitnessBytes beltWitnessKeys beltWitnessBytes = .ok (.Ok beltWitnessState0) := by
+    unfold authenticated_belt.VerifiedBeltQuorumGuard.new_validated
+      pants_and_quorum_guards.BeltQuorumCore.new_validated
+    rw [validate_belt_quorum_config_eq]
+    rfl
+  obtain ⟨acts1, _, h1⟩ := belt_two_custodian_round_exists beltWitnessState0 10#u64
+    beltWitnessBytes 0#u8 1#u8 (by decide) (by decide) (by decide) (by decide) (by decide)
+    (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
+  obtain ⟨acts2, _, h2⟩ := belt_two_custodian_round_exists
+    (beltRoundEnd beltWitnessState0 10#u64 beltWitnessBytes 0#u8 1#u8) 11#u64
+    beltWitnessBytes 1#u8 2#u8 (by decide) (by decide) (by decide) (by decide) (by decide)
+    (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
+  obtain ⟨acts3, _, h3⟩ := belt_two_custodian_round_exists
+    (beltRoundEnd (beltRoundEnd beltWitnessState0 10#u64 beltWitnessBytes 0#u8 1#u8)
+      11#u64 beltWitnessBytes 1#u8 2#u8) 12#u64
+    beltWitnessBytes 0#u8 2#u8 (by decide) (by decide) (by decide) (by decide) (by decide)
+    (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
+  exact ⟨_, _, _, hnew, h1.append (h2.append h3), by decide, by decide, by decide⟩
+
+/-- The wrapper's fresh-acknowledgment path with its bitmap test removed: forward the
+    acknowledgment to the core and set the custodian's bit, without first checking
+    whether the bit is already set. -/
+@[expose]
+def beltAckWithoutDedup (st : authenticated_belt.VerifiedBeltQuorumGuard) (ep : Std.U64)
+    (msg : Array Std.U8 32#usize) (id : Std.U8) :
+    Result (authenticated_belt.VerifiedBeltQuorumGuard ×
+      core.result.Result Std.U32 pants_and_quorum_guards.PantsGuardError) := do
+  let (inner, r) ←
+    pants_and_quorum_guards.BeltQuorumCore.record_custodian_ack st.inner ep msg
+  ok ({ st with inner := inner, ack_bitmap := st.ack_bitmap ||| beltCustodianBit id }, r)
+
+/-- The mutant accepts an acknowledgment whether or not the custodian has signed
+    already: the extracted core counts calls, not custodians. -/
+theorem beltAckWithoutDedup_accepts (st : authenticated_belt.VerifiedBeltQuorumGuard)
+    (id : Std.U8) (hc : beltGuardCorrupt st.inner = false)
+    (hb : st.inner.has_bound_epoch = true)
+    (hcnt : st.inner.ack_count.val < st.inner.n.val) :
+    beltAckWithoutDedup st st.inner.bound_epoch st.inner.bound_msg_tag id =
+      .ok (beltAfterAck st id, .Ok ⟨st.inner.ack_count.bv + (1#u32).bv⟩) := by
+  unfold beltAckWithoutDedup
+  rw [belt_core_ack_of_mealy (belt_mealy_ack_fresh hc hb hcnt)]
+  rfl
+
+/-- A guard with `n = 3, f = 1, q = 3` that has bound epoch 10 and recorded nothing. -/
+abbrev beltToothState : authenticated_belt.VerifiedBeltQuorumGuard :=
+  { inner :=
+      { n := 3#u32, t := 2#u32, f := 1#u32, q := 3#u32, global_liveness_mode := false,
+        next_epoch := 11#u64, max_jump_window := 4#u64, phase := .EpochBoundPendingQuorum,
+        has_bound_epoch := true, bound_epoch := 10#u64, bound_msg_tag := beltWitnessBytes,
+        ack_count := 0#u32, poisoned := false },
+    guard_key_commit := beltWitnessBytes,
+    custodian_keys := beltWitnessKeys,
+    wal_key := beltWitnessBytes,
+    ack_bitmap := 0#u64 }
+
+/-- `#tooth`: the signer bitmap test is load-bearing. Starting from a state that
+    satisfies `BeltGuardInv`, custodian `0` alone replays its acknowledgment three
+    times through the mutant `beltAckWithoutDedup`. The extracted `step` then grants
+    a certificate with `certified_acks = 3` while the signer bitmap holds one
+    custodian. Both `BeltGuardInv` and the conclusion `q ≤ beltPopcount signers` of
+    `belt_trace_certs_quorum` fail, with `q = 3`. -/
+theorem tooth_belt_ack_without_signer_dedup_forges_quorum :
+    BeltGuardInv 3#u32 3#u32 beltToothState ∧
+    beltAckWithoutDedup beltToothState 10#u64 beltWitnessBytes 0#u8 =
+      .ok (beltAfterAck beltToothState 0#u8, .Ok 1#u32) ∧
+    beltAckWithoutDedup (beltAfterAck beltToothState 0#u8) 10#u64 beltWitnessBytes 0#u8 =
+      .ok (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8, .Ok 2#u32) ∧
+    beltAckWithoutDedup (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8)
+        10#u64 beltWitnessBytes 0#u8 =
+      .ok (beltAfterAck (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8) 0#u8,
+           .Ok 3#u32) ∧
+    authenticated_belt.VerifiedBeltQuorumGuard.step
+        (beltAfterAck (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8) 0#u8)
+        (.AuthorizeShares 10#u64 beltWitnessBytes) =
+      .ok (beltAfterGrant
+             (beltAfterAck (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8) 0#u8),
+           .Ok (.SharesAuthorized { authorized_epoch := 10#u64,
+                                    msg_tag := beltWitnessBytes,
+                                    certified_acks := 3#u32 })) ∧
+    beltPopcount
+      (beltAfterAck (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8) 0#u8).ack_bitmap
+        = 1 ∧
+    ¬ BeltGuardInv 3#u32 3#u32
+      (beltAfterAck (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8) 0#u8) := by
+  refine ⟨⟨rfl, rfl, belt_zero_count_popcount, ?_⟩, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · intro i hi
+    have hi' : (0#u64 : Std.U64).bv.getLsbD i = true := hi
+    rw [belt_zero_getLsbD] at hi'
+    cases hi'
+  · exact beltAckWithoutDedup_accepts beltToothState 0#u8 (by decide) rfl (by decide)
+  · exact beltAckWithoutDedup_accepts (beltAfterAck beltToothState 0#u8) 0#u8
+      (by decide) rfl (by decide)
+  · exact beltAckWithoutDedup_accepts (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8)
+      0#u8 (by decide) rfl (by decide)
+  · exact belt_step_authorize_granted
+      (beltAfterAck (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8) 0#u8)
+      (by decide) rfl (by decide)
+  · decide
+  · intro h
+    exact absurd h.2.2.1 (by decide)
+
+/-! ## 11. Velocity guard and BDOZ burn latch: accepted paths and inhabited traces -/
+
+theorem velocity_max_sub_spent (spent : Std.U128) :
+    ∃ rem : Std.U128,
+      (policy_and_addr.MAX_VELOCITY_U128 - spent : Result Std.U128) = .ok rem ∧
+      rem.val = 340282366920938463463374607431768211455 - spent.val := by
+  have hb : spent.val ≤ 340282366920938463463374607431768211455 :=
+    Nat.le_of_lt_succ spent.bv.isLt
+  refine ⟨⟨(340282366920938463463374607431768211455#u128).bv - spent.bv⟩, ?_, ?_⟩
+  · unfold policy_and_addr.MAX_VELOCITY_U128
+    have hb' : spent.val ≤ (340282366920938463463374607431768211455#u128).val := hb
+    simp only [hSub_uscalar_eq, hb', ↓reduceIte]
+  · change ((340282366920938463463374607431768211455#u128).bv - spent.bv).toNat = _
+    rw [BitVec.toNat_sub_of_le (BitVec.le_def.mpr hb)]
+    rfl
+
+/-- `authorize_spend` returns on every state and request: the checked addition is only
+    reached when the amount fits under `u128::MAX - spent_units`. -/
+theorem velocity_authorize_spend_total (st : policy_and_addr.StatefulVelocityGuard)
+    (req : policy_and_addr.VelocitySpendRequest) :
+    ∃ p, policy_and_addr.StatefulVelocityGuard.authorize_spend st req = .ok p := by
+  obtain ⟨rem, hrem, hremv⟩ := velocity_max_sub_spent st.spent_units
+  unfold policy_and_addr.StatefulVelocityGuard.authorize_spend
+  rw [ct_eq_bytes32_spec, ct_eq_bytes32_spec, hrem]
+  simp only [bind_eq_result_bind, result_bind_ok]
+  by_cases hov : req.amount_units > rem
+  · simp only [eq_true hov, ↓reduceIte]
+    (repeat' (first | split | simp only [result_bind_ok])) <;> exact ⟨_, rfl⟩
+  · have hle : req.amount_units.val ≤ rem.val :=
+      Nat.le_of_not_lt (fun h => hov ((UScalar.lt_iff_val _ _).mpr h))
+    have hsp : st.spent_units.val ≤ 340282366920938463463374607431768211455 :=
+      Nat.le_of_lt_succ st.spent_units.bv.isLt
+    obtain ⟨c, hc, _⟩ := checked_add_val st.spent_units req.amount_units
+      (by show st.spent_units.val + req.amount_units.val < 2 ^ 128; omega)
+    simp only [eq_false hov, hc, result_bind_ok, ↓reduceIte]
+    (repeat' (first | split | simp only [result_bind_ok])) <;> exact ⟨_, rfl⟩
+
+/-- Every accepting step of the pure velocity specification is realised by the extracted
+    `authorize_spend`. -/
+theorem velocity_spend_of_step
+    {st st' : policy_and_addr.StatefulVelocityGuard}
+    {req : policy_and_addr.VelocitySpendRequest} {amt : Std.U128}
+    (hs : velocitySpendStep st req = some (st', amt)) :
+    policy_and_addr.StatefulVelocityGuard.authorize_spend st req = .ok (st', .Ok amt) := by
+  obtain ⟨⟨s2, r⟩, hcore⟩ := velocity_authorize_spend_total st req
+  cases r with
+  | Ok amt2 =>
+    have h2 := mirSim_ok_step_eq velocity_spend_step_sim hcore
+    dsimp only [velocitySpendMealy, MealySpec.ofPure] at h2
+    rw [hs] at h2
+    injection h2 with h2
+    injection h2 with h3 h4
+    rw [hcore, h3, h4]
+  | Err e =>
+    have h2 := (mirSim_err_step_eq velocity_spend_step_sim hcore).1
+    dsimp only [velocitySpendMealy, MealySpec.ofPure] at h2
+    rw [hs] at h2
+    cases h2
+
+/-- A request with matching pins, the current window, a fresh nonce and an amount that
+    fits under the cap is authorized. -/
+theorem velocity_spend_accepts (st : policy_and_addr.StatefulVelocityGuard)
+    (req : policy_and_addr.VelocitySpendRequest)
+    (hc : (decide (st.policy_pin = req.policy_pin) &&
+           decide (st.authority_pin = req.authority_pin) &&
+           decide (req.window_id = st.window_id) &&
+           decide (st.last_nonce.val < req.nonce.val) &&
+           decide (st.spent_units.val + req.amount_units.val ≤ st.cap_units.val)) = true) :
+    policy_and_addr.StatefulVelocityGuard.authorize_spend st req =
+      .ok ({ st with spent_units := ⟨st.spent_units.bv + req.amount_units.bv⟩,
+                     last_nonce := req.nonce }, .Ok req.amount_units) := by
+  apply velocity_spend_of_step
+  unfold velocitySpendStep
+  rw [ite_eq_left hc]
+
+/-- A rotation with matching pins to a strictly larger window id is accepted and
+    resets the spent counter. -/
+theorem velocity_rotate_accepts (st : policy_and_addr.StatefulVelocityGuard) (w : Std.U64)
+    (p a : Array Std.U8 32#usize)
+    (hp : st.policy_pin = p) (ha : st.authority_pin = a) (hlt : st.window_id.val < w.val) :
+    policy_and_addr.StatefulVelocityGuard.rotate_window st w p a =
+      .ok ({ st with window_id := w, spent_units := 0#u128 }, .Ok ()) := by
+  obtain ⟨st', res, heq, hiff, hok, _⟩ := rotate_window_resets_spent_monotone_spec st w p a
+  have hres := hiff.mpr ⟨hp, ha, hlt⟩
+  rw [heq, hres, hok hres]
+
+/-- Inhabitedness of `velocity_multiwindow_cap_conservation`: a spend of 60 under a cap
+    of 100, a rotation from window 7 to window 8, and a second spend of 60. Each window
+    stays under the cap while the two windows together exceed it, which is what a
+    rolling window is for. -/
+theorem inhabited_velocity_trace_two_windows :
+    ∃ (st0 stF : policy_and_addr.StatefulVelocityGuard) (acts : List VelocityAction)
+      (acc : List policy_and_addr.VelocitySpendRequest),
+      policy_and_addr.StatefulVelocityGuard.new_window 7#u64 100#u128
+        (Array.repeat 32#usize 0#u8) (Array.repeat 32#usize 0#u8) = .ok st0 ∧
+      VelocityTraceReachable st0 acts acc stF ∧
+      acts.length = 3 ∧
+      windowSpendNat 7#u64 acc = 60 ∧ windowSpendNat 8#u64 acc = 60 := by
+  exact ⟨_, _, _, _, rfl,
+    VelocityTraceReachable.spend_ok
+      (velocity_spend_accepts _
+        { window_id := 7#u64, nonce := 1#u64, amount_units := 60#u128,
+          policy_pin := Array.repeat 32#usize 0#u8,
+          authority_pin := Array.repeat 32#usize 0#u8 } (by decide))
+    (VelocityTraceReachable.rotate_ok
+      (velocity_rotate_accepts _ 8#u64 (Array.repeat 32#usize 0#u8)
+        (Array.repeat 32#usize 0#u8) rfl rfl (by decide))
+    (VelocityTraceReachable.spend_ok
+      (velocity_spend_accepts _
+        { window_id := 8#u64, nonce := 2#u64, amount_units := 60#u128,
+          policy_pin := Array.repeat 32#usize 0#u8,
+          authority_pin := Array.repeat 32#usize 0#u8 } (by decide))
+    (VelocityTraceReachable.nil _))),
+    rfl, by decide, by decide⟩
+
+/-- Inhabitedness of the burn-latch theorems: an unburned verifier session rejects an
+    empty opening batch, is burned by that rejection, and rejects again. -/
+theorem inhabited_bdoz_burn_trace (s : tower.BdozVerifierSession2Lane)
+    (batch : tower.BdozCommittedBatchOpening2Lane) (hb : s.burned = false) :
+    ∃ sF, BdozBurnTrace s
+        [(batch, ⟨[], by decide⟩), (batch, ⟨[], by decide⟩)] [false, false] sF ∧
+      sF.burned = true := by
+  have h1 : tower.verify_mac_2lane_with_burn s batch ⟨[], by decide⟩ =
+      .ok ({ alpha_lanes := Array.make 2#usize [0#u128, 0#u128], burned := true }, false) := by
+    unfold tower.verify_mac_2lane_with_burn
+    rw [verify_mac_2lane_rejects_empty]
+    simp [hb]
+  have h2 := (verify_mac_2lane_burn_irreversible
+    { alpha_lanes := Array.make 2#usize [0#u128, 0#u128], burned := true }
+    batch ⟨[], by decide⟩).1 rfl
+  exact ⟨_, .call h1 (.call h2 (.nil _)), rfl⟩
+
+end qsag_verified.proofs

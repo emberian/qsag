@@ -1,6 +1,7 @@
 module
 
 public import QsagVerified.Proofs
+public import QsagSpecWeld
 
 public section
 
@@ -24,6 +25,35 @@ export qsag_verified.proofs (
   BeltAckCountInvariant
   repeatCustodianAck
   authenticated_belt_initial_count_invariant
+  BeltEnrollmentUnchanged
+  authenticated_belt_step_enrollment_unchanged
+  authenticated_belt_authorize_preserves_count
+  BeltProvisionedKeys
+  authenticated_belt_step_preserves_provisioned_keys
+  custodian_ack_tag_total
+  authenticated_belt_accepted_proposal_receipt
+  authenticated_belt_zero_key_accepts_public_tag
+  authenticated_belt_accepted_ack_tag
+  authenticated_belt_propose_preserves_count
+  authenticated_belt_propose_core_projection
+  authenticated_belt_ack_core_projection
+  authenticated_belt_authorize_core_projection
+  authenticated_belt_trace_enrollment_unchanged
+  authenticated_belt_trace_preserves_provisioned_keys
+  BeltAuthenticatedInput
+  authenticated_belt_step_accepted_input
+  authenticated_belt_trace_mac_valid
+  authenticated_belt_ack_preserves_count
+  authenticated_belt_step_preserves_count
+  authenticated_belt_trace_preserves_count
+  authenticated_belt_trace_core_projection
+  authenticated_belt_step_committee_unchanged
+  authenticated_belt_trace_ack_range
+  authenticated_belt_quorum_guard_multiturn_sound
+  authenticated_belt_provisioned_trace_ack_keys
+  BeltCoreInputFor
+  authenticated_belt_step_core_projection
+  mldsa_rejected_turn_wipes_and_seals
   authenticated_belt_forged_tag_fails_closed
   authenticated_belt_duplicate_ack_unchanged
   tooth_duplicate_custodian_cannot_reach_quorum
@@ -294,4 +324,229 @@ example : (traceAssignedEpochs
   exact (epoch_latch_multiturn_safety 4#u64 epochWitnessBytes initial final _ rfl
     (.advance_ok step (.nil final))).2.2.2.2.1
 
+end QsagMirProofs
+
+namespace QsagMirProofs
+export qsag_verified.proofs (
+  mirSim_ok_step_eq
+  mirSim_err_step_eq
+  VelocityAction
+  VelocityTraceReachable
+  windowSpendNat
+  windowSpendNat_eq_zero_of_forall_ne
+  velocity_spend_ok_inv
+  velocity_spend_err_inv
+  velocity_rotate_ok_inv
+  velocity_rotate_err_inv
+  velocity_trace_nonce_burn
+  velocity_trace_window_budget
+  velocity_multiwindow_cap_conservation
+  BdozBurnTrace
+  bdoz_burn_step_inv
+  bdoz_burn_trace_absorbing
+  bdoz_burn_trace_never_unburns
+  RssSessionTable
+  RssSessionEvent
+  RssMultiSessionTrace
+  RssSealed
+  rss_sealed_mealy_none
+  rss_sealed_step
+  rss_step_err_poisons
+  rss_step_release_inv
+  rss_poisoned_step_exact
+  rss_multisession_sealed_absorbing
+  rss_multisession_sticky_poison_absorbency
+  rss_multisession_release_at_most_once
+  rss_step_round2_accepts
+  rss_step_round3_accepts
+  rss_step_round3_rejects_nonzero_residual
+  rss_step_open_accepts
+  rss_multisession_two_sessions_release
+  inhabited_rss_multisession_trace
+  tooth_rss_reinit_resets_poison_and_releases
+  u64_val_succ_lt_of_ne_max
+  belt_not_corrupt_facts
+  belt_mealy_propose_inv
+  belt_mealy_ack_inv
+  belt_mealy_authorize_inv
+  belt_mealy_errStep_cases
+  belt_core_propose_ok_mealy
+  belt_core_propose_err_mealy
+  belt_core_ack_ok_mealy
+  belt_core_ack_err_mealy
+  belt_core_authorize_ok_mealy
+  belt_core_authorize_err_mealy
+  uscalar_cast_val_eq
+  u64_succ_val
+  u32_succ_val
+  beltCustodianBit
+  belt_zero_getLsbD
+  beltCustodianBit_getLsbD
+  beltCustodianBit_and_eq_zero
+  BeltObs
+  beltObsOf
+  BeltStepOutcome
+  beltObsOfPropose
+  beltObsOfAck
+  beltObsOfAuthorize
+  authProposeBitmap
+  authProposeResult
+  auth_belt_propose_peel
+  auth_belt_propose_outcome
+  belt_mealy_errStep_ack_mismatch
+  auth_belt_ack_outcome
+  auth_belt_authorize_outcome
+  belt_step_outcome
+  beltPopcount
+  beltAckCountInvariant_iff
+  belt_zero_count_popcount
+  countP_range_or_single
+  countP_inter_union
+  countP_range_le_of_bounded
+  beltPopcount_or_bit
+  belt_or_bit_getLsbD_true
+  beltPopcount_inter_ge
+  BeltGuardInv
+  belt_outcome_preserves_inv
+  belt_outcome_binding
+  belt_outcome_granted_inv
+  BeltCert
+  BeltAction
+  BeltTraceReachable
+  belt_failed_call_unchanged_or_poisoned
+  BeltCertAhead
+  belt_cert_ahead_transfer
+  belt_trace_certs_ahead
+  belt_trace_certs_monotone
+  pairwise_mem_cases
+  belt_trace_same_epoch_same_message
+  belt_trace_certs_quorum
+  belt_quorum_intersection
+  auth_belt_new_validated_inv
+  belt_trace_fork_free_and_epoch_monotone
+  belt_poisoned_trace_no_certs
+  sponge_absorb_total
+  u64_shr_i32_total
+  belt_encode_epoch_total
+  belt_sponge_six_absorb_squeeze_total
+  belt_custodian_ack_tag_total
+  belt_wal_receipt_tag_total
+  belt_core_ack_total
+  belt_core_authorize_total
+  belt_core_propose_total
+  belt_not_corrupt_of_facts
+  beltFreshCore
+  beltAfterPropose
+  beltAfterAck
+  beltAfterGrant
+  belt_not_corrupt_fresh
+  belt_not_corrupt_set_ack_count
+  belt_mealy_propose_fresh
+  belt_mealy_ack_fresh
+  belt_mealy_authorize_granted
+  belt_core_propose_of_mealy
+  belt_core_ack_of_mealy
+  belt_core_authorize_of_mealy
+  auth_belt_propose_total
+  auth_belt_ack_total
+  auth_belt_authorize_total
+  belt_step_total
+  belt_trace_exists
+  beltCustodianBit_and_eq_zero_of
+  belt_step_propose_fresh
+  belt_step_ack_fresh
+  belt_step_authorize_granted
+  belt_two_custodian_round_certifies
+  beltRoundEnd
+  belt_two_custodian_round_exists
+  beltWitnessBytes
+  beltWitnessKeys
+  beltWitnessState0
+  inhabited_belt_trace_three_certificates
+  beltAckWithoutDedup
+  beltAckWithoutDedup_accepts
+  beltToothState
+  tooth_belt_ack_without_signer_dedup_forges_quorum
+  velocity_max_sub_spent
+  velocity_authorize_spend_total
+  velocity_spend_of_step
+  velocity_spend_accepts
+  velocity_rotate_accepts
+  inhabited_velocity_trace_two_windows
+  inhabited_bdoz_burn_trace
+  belt_ack_success_shape
+  BeltBitInherited
+  BeltBitInserted
+  belt_step_bit_origin
+  BeltCall
+  BeltRun
+  BeltAckSeen
+  BeltBitmapProvenance
+  belt_bitmap_provenance_step
+  belt_run_bitmap_provenance
+  belt_run_guard_inv
+  beltSigners
+  beltSigners_nodup
+  beltSigners_length
+  belt_grant_authenticated_history
+  belt_run_enrollment
+  belt_ack_seen_provisioned
+  belt_two_grants_authenticated_intersection
+  belt_trace_to_run
+  BooleanContract
+  MlDsaCallerContract
+  mldsa_release_under_caller_contract
+  FtsResidualContract
+  fts_release_under_caller_contract
+  RssResidualContract
+  rss_release_under_caller_contract
+  extractedPartyMachine
+  comapInputs
+  goldilocksAbs
+  goldilocks_add_refines_qsag
+  goldilocks_sub_refines_qsag
+  goldilocks_mul_refines_qsag
+  tooth_goldilocks_mul_weld_is_not_add
+  qsag_sumDigits_eq_sum
+  wotsc256_verify_refines_qsag
+  tooth_wotsc256_zero_digest_rejected_by_qsag
+  pureGf256Mul_eq_qsag
+  gf256_mul_refines_qsag
+  beltMaskAbs
+  beltMaskAbs_card
+  beltMaskAbs_inter
+  belt_grant_refines_qsag_mask
+  belt_quorum_intersection_refines_qsag
+  keccakArrayOfState
+  keccak_round_refines_qsag
+)
+end QsagMirProofs
+
+namespace QsagMirProofs
+export qsag_verified.proofs (
+  belt_new_validated_provenance_init
+  keccakRoundRaw
+  keccak_round_eq_raw
+  keccak_f1600_refines_qsag
+  keccakStateOfArray
+  keccakArrayOfState_roundtrip
+  keccak_f1600_array_refines_qsag
+)
+end QsagMirProofs
+
+namespace QsagMirProofs
+export qsag_verified.proofs (
+  bytes32OfArray
+  bytes32OfArray_injective
+  rssCutPhaseAbs
+  rssCutStateAbs
+  rssCutInputAbs
+  rssCutOutputAbs
+  rssCutStateAbs_new_round1_committed
+  rssCut_extracted_step_refines
+  extractedRssCutMachine
+  extractedRssCut_forwardSim_mirRssCut
+  extractedRssCut_inherits_spec_trace_safety
+  tooth_extractedRssCut_nonzero_residual_rejected
+)
 end QsagMirProofs
