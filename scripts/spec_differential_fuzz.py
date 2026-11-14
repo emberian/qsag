@@ -400,8 +400,8 @@ def build_driver(root, directory):
     (directory / "Cargo.toml").write_text('[workspace]\n[package]\nname="spec-driver"\nversion="0.0.0"\nedition="2024"\n[features]\ndefault=["testing-ephemeral"]\ntesting-ephemeral=[]\n[dependencies]\n' + deps.replace('qsag-core = {', 'qsag-core = { features = ["std", "testing-ephemeral"],') + '\n[profile.release]\nopt-level=2\n')
     (directory / "src/main.rs").write_text(driver_source(root))
     command = ["timeout", "--kill-after=10s", "600s", *(["swarm-build"] if shutil.which("swarm-build") else []), "cargo", "build",
-               "--release", "--manifest-path", str(directory / "Cargo.toml"), "-j", "2"]
-    subprocess.run(command, check=True, env={**os.environ, "SWARM_MEM_MAX": "8G",
+               "--release", "--manifest-path", str(directory / "Cargo.toml"), "-j", "4"]
+    subprocess.run(command, check=True, env={**os.environ, "SWARM_MEM_MAX": "10G", "CARGO_BUILD_JOBS": "4",
                                                   "CARGO_TARGET_DIR": str((directory / "target").resolve())})
     return directory / "target/release/spec-driver"
 
@@ -513,6 +513,12 @@ def boundary_requests():
             yield ["shake",out,bytes(i%256 for i in range(n)).hex()]
     for trace in ["fail,crash,1:0:0:1", "1:0:0:1,fail,crash,2:0:0:1"]:
         yield ["latchtrace",trace]
+    for _, _, values in QUORUM_MUTANTS:
+        yield ["quorum", *values]
+    yield ["quorum", 2, 4, 1, 3]
+    for digest in [bytes(32), bytes([0x66])*32, bytes([0xff])*32,
+                   bytes([0xff])*16 + bytes(16)]:
+        yield ["wotsgeneric", digest.hex()]
     for _, _, _, trace in LATCH_MUTANTS:
         yield ["latchtrace",trace]
 
@@ -554,7 +560,7 @@ def mutation_search(rust, lean=None):
     """Execute independently compiled single-fault production-source mutants.
 
     Compilation is outside this timer. Every witness rejects on the production
-    baseline, differs on the mutant, and (for latch/WOTS) agrees with live Lean.
+    baseline, differs on the mutant, and agrees with live Lean when supplied.
     The redundant n >= 3f+1 check is deliberately not counted: intersection plus
     honest availability already imply it, so dropping it is an equivalent mutant.
     """
@@ -570,9 +576,11 @@ def mutation_search(rust, lean=None):
         found[name] = {"request": request, "baseline": baseline, "mutant": mutant, "lean_crosschecked": lean is not None}
     for name, _, values in QUORUM_MUTANTS:
         baseline = rust.ask(["quorum", *values])
+        if lean is not None:
+            assert baseline == lean.ask(["quorum", *values]), (name, baseline)
         mutant = rust.ask(["mutation", name, *values])
         assert baseline == "false" and mutant == "true", (name,baseline,mutant)
-        found[name] = {"request": ["quorum", *values], "baseline": baseline, "mutant": mutant, "lean_crosschecked": False}
+        found[name] = {"request": ["quorum", *values], "baseline": baseline, "mutant": mutant, "lean_crosschecked": lean is not None}
     digest = "00" * 32
     baseline = rust.ask(["wots", digest])
     assert baseline.endswith(";false")
@@ -582,13 +590,17 @@ def mutation_search(rust, lean=None):
     assert mutant == "true"
     found["target_sum"] = {"request": ["wots", digest], "baseline": baseline, "mutant": mutant, "lean_crosschecked": lean is not None}
     generic_baseline = rust.ask(["wotsgeneric", digest])
+    if lean is not None:
+        assert generic_baseline == lean.ask(["wotsgeneric", digest])
     generic_mutant = rust.ask(["mutation", "generic_target_sum", digest])
     assert generic_baseline == "false" and generic_mutant == "true"
     found["generic_target_sum"] = {"request": ["wotsgeneric", digest],
                                    "baseline": generic_baseline, "mutant": generic_mutant,
-                                   "lean_crosschecked": False}
+                                   "lean_crosschecked": lean is not None}
     elapsed = time.perf_counter() - start
     assert len(found) == 13 and elapsed < 5, (len(found), elapsed)
+    if lean is not None:
+        assert all(w["lean_crosschecked"] for w in found.values())
     return {"caught": len(found), "total": 13, "elapsed_ms": elapsed*1000,
             "kind": "compiled production-source clause drops", "lean_crosschecked_count": sum(bool(w.get("lean_crosschecked", lean is not None)) for w in found.values()), "witnesses": found}
 
@@ -637,7 +649,8 @@ def run(args, rust):
             expected = f < t <= q and n >= 3*f+1 and 2*q > n+f and q <= n-f
             actual = rust.ask(["quorum", t, n, f, q])
             assert actual == str(expected).lower(), (t, n, f, q, expected, actual)
-            counts["rust_quorum_guards"] += 1
+            assert actual == lean.ask(["quorum", t, n, f, q]), (t, n, f, q, actual)
+            counts["lean_rust_quorum_guards"] += 1
         for iteration in range(args.metamorphic):
             assert rust.ask(["certificates",rng.randbytes(32).hex(),rng.randbytes(32).hex()]) == "14"
             counts["rust_certificate_cases"] += 14
@@ -666,9 +679,9 @@ def run(args, rust):
                   "limitations":["Repository Poseidon2 is width 12, not width 16.",
                     "SHA3 is padding around live Keccak, not a separately exported digest API.",
                     "WAL schedules execute the Lean model; Rust POSIX crash equivalence is not asserted.",
-                    "Ledger decision table is an oracle adapter; no two-slot Qsag definition currently exists.",
+                    "Ledger fixtures exercise Lean authenticated snapshot decoding and Rust filesystem recovery; identities differ.",
                     "Hem calls the extracted private Rust fold; its oracle formula composes live Qsag field operations.",
-                    "Quorum configuration is Rust-only; certificate equivalence is not asserted."]}
+                    "Quorum configuration predicates are cross-checked; certificate equivalence is not asserted."]}
         print(json.dumps(report,indent=2), flush=True)
         assert counts["unexpected_mismatches"] == 0, mismatches
         return report

@@ -8,7 +8,7 @@ This is the continuing acceptance tracker. A successful build is distinct from p
 
 | Gap | Integrated work | Outstanding acceptance |
 | --- | --- | --- |
-| C-01: Corduroy/Hem/QROM | AIR module imported, active-row transition extraction, formal list/query accounting | Active-slot completeness; native signature witness extraction; the 256-column/14-column layout bridge; applicable Johnson-radius soundness and quantum commitment extraction. |
+| C-01: Corduroy/Hem/QROM | AIR imported; pointwise row/boundary/shift equivalences; guarded opcode next-state construction with rejection and non-Idle inhabitedness gates; formal list/query accounting | Active-slot completeness; native signature witness extraction; the 256-column/14-column layout bridge; applicable Johnson-radius soundness and quantum commitment extraction. |
 | C-02a: protocol challenge | Repaired theorem roster and independent challenge statements | Sandboxed six-kernel replay passes all 107 configured main theorems. |
 | C-02b/c: foundation | Nested FIPS signature shapes; injective canonical threshold authorization encoding; strict inhabited/tooth registrations; downstream caller repairs | Full implementation-to-spec refinement is distinct from these checks. |
 | C-02d: MIR challenge | Keccak, ADRS, WOTS steps, sponge byte/rollover, session-bound consuming BDOZ handle; independent challenge helper modules retain exposure semantics | Full sponge absorb/framing equivalence and production adoption of the consuming handle remain separate. |
