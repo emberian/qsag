@@ -60,6 +60,8 @@ public import Qsag.HashSigs
 import all Qsag.HashSigs
 public import Qsag.HypertreeEufCma
 
+public import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -6537,6 +6539,22 @@ theorem nineRoundSbox7Whir_sound (msg : List UInt8) (x root : Goldilocks)
       (evalSbox7Rounds (rounds.map (·.seed)) x = root ∨
         ∃ r ∈ rounds, Sbox7WhirRoundBreak r) :=
   ⟨(List.length_map ..).trans hn, sbox7WhirChain_sound msg x root rounds h⟩
+
+theorem tooth_whir_pow_nonce_mutation :
+    ∃ nonce : Nat, nonce ≠ 5791 ∧
+      verifyWhirStagePow (stagePowDigest powWitnessSeedV2) nonce 16 = false :=
+  ⟨0, by decide, tooth_whir_pow16_nonce0_rejected⟩
+
+#tooth_pair verifyWhirStagePow_16_iff vs tooth_whir_pow_nonce_mutation
+theorem inhabited_whir_pow_inputs :
+    ∃ (chal : List UInt8) (nonce : Nat),
+      chal = stagePowDigest powWitnessSeedV2 ∧ nonce = 5791 ∧
+      chal.length = 32 ∧ nonce < 2 ^ 64 ∧ verifyWhirStagePow chal nonce 16 = true :=
+  ⟨stagePowDigest powWitnessSeedV2, 5791, rfl, rfl, stagePowDigest_length _,
+    by decide, inhabited_whir_stage_pow_16⟩
+
+#verify_inhabited verifyWhirStagePow_16_iff inhabited_whir_pow_inputs
+
 
 end Aggregation
 

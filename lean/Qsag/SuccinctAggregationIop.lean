@@ -91,6 +91,8 @@ public import Qsag.UcGames
 public import Qsag.Aggregation
 import all Qsag.Aggregation
 
+public import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -11815,6 +11817,25 @@ theorem inhabited_canopy_collision_extractor :
     ⟨extractHashCollisionFromCanopyTranscripts canopyPrefixHash canopyPrefixHash_length 1
       canopyAuditCommitment [(0, canopyConstDigest 5)] [(0, canopyConstDigest 5)]
       [canopyConstDigest 7] [canopyConstDigest 8] rfl (by decide) (by decide) (by decide)⟩⟩
+
+theorem tooth_canopy_sibling_mutation :
+    ∃ proof : List Nat, proof ≠ canopyToyProof ∧
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        canopyToyLeaves proof = false :=
+  ⟨[canopyToyLeaf 0, canopyToyLeaf 3, canopyToyLeaf 7 + 1,
+    canopyToyNodeHash 6 (canopyToyLeaf 4) (canopyToyLeaf 5)],
+    by decide, canopyToy_flipped_sibling_rejected⟩
+
+#tooth_pair canopyToy_honest_accepted vs tooth_canopy_sibling_mutation
+theorem inhabited_canopy_nonempty_opening :
+    ∃ (leaves : List (Nat × Nat)) (proof : List Nat),
+      leaves = canopyToyLeaves ∧ proof = canopyToyProof ∧
+      verifyCanopyMultiproof canopyToyNodeHash canopyToyRootHash 3 canopyToyCommitment
+        leaves proof = true :=
+  ⟨canopyToyLeaves, canopyToyProof, rfl, rfl, canopyToy_honest_accepted⟩
+
+#verify_inhabited verifyCanopyMultiproof_exact_sibling_count inhabited_canopy_nonempty_opening
+
 
 end Qsag
 end

@@ -8,6 +8,8 @@ import all Qsag.ConcreteSecurityBudget
 public import Qsag.AffineProximityGaps
 import all Qsag.AffineProximityGaps
 
+public import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -1949,6 +1951,35 @@ theorem hemAffineWhir_rbr_completeness_and_doomed_init :
     rcases honest_cascade_completeness_poly W kernel domPts d₀ α β hWLen with ⟨hVal, hVer⟩
     exact ⟨hVal, accept_implies_live_poly _ _ hVer, hVer⟩
 
+/-- Removing the input candidate list makes the current Boolean language reject even an
+    honest nonzero polynomial, without changing transcript verification. Hence candidate
+    completeness is necessary before this state can support a nontrivial RBR theorem.
+    The counterexample works for every cascade weight, not only a zero challenge. -/
+theorem tooth_hem_missing_candidates_accepts
+    (α β : QuarticGoldilocks) :
+    let W : List QuarticGoldilocks := [CommRingOps.one]
+    let kernel : List QuarticGoldilocks := [CommRingOps.one]
+    let dom : List QuarticGoldilocks := [CommRingOps.one]
+    let inst : HemWhirInstance QuarticGoldilocks :=
+      { batchOracles := [fun idx => RoundPoly.evalCoeffs W (dom.getD idx CommRingOps.zero)]
+        batchClaims := [ringDot W kernel]
+        batchCandidateLists := [[]]
+        initDomainPts := dom
+        initDegBound := 0
+        initMinAgree := dom.length
+        initKernel := kernel
+        stages := [] }
+    let tr : List (HemTranscriptRound QuarticGoldilocks) :=
+      [.cascade [ringDot (shiftPoly W) kernel] [(α, β)] [evalCascadePolySum [W] [(α, β)]],
+       .finalQuery (evalCascadePolySum [W] [(α, β)])]
+    hemAffineWhirStateFunction inst [] = false ∧
+    verifyHemAffineWhir inst tr = true := by
+  dsimp only
+  refine ⟨rfl, ?_⟩
+  exact (honest_cascade_completeness_poly
+    ([CommRingOps.one] : List QuarticGoldilocks) [CommRingOps.one] [CommRingOps.one]
+    0 α β (Nat.le_refl _)).2
+
 
 /-! ## §3. Multi-Round Fiat–Shamir QROM Reduction via Measure-and-Reprogram & Online Merkle Extraction -/
 
@@ -3031,38 +3062,22 @@ def hemV6Habr24QueryBounds : List RatBound :=
 def hemV6BciksJohnsonQueryBounds : List RatBound :=
   (whirAffineStageWitnesses 24 true).map whirAffinePureQueryBoundOrOne
 
-/-- **Multi-round Fiat–Shamir QROM numerical budget (`multiRoundFsQrom_budget_bound`)**.
-    For every oracle budget `Q + 1 ≤ 2^40`, `multiRoundFsQromCompilerBound` at the deployed
-    `num_vars = 24` parameters (five aggregated RBR entries derived from the deployed witness
-    rows, five committed Merkle roots over `256`-bit digests, four query stages) is strictly
-    below `2^-128`, for both the conjectural `Habr24Qrom128` query bounds and the
-    witness-derived `BciksJohnsonQrom128` query bounds.
-
-    The range is forced by the collision term of commitment extraction: at `Q + 1 = 2^41` the
-    same expression exceeds `2^-128` (`tooth_multiRoundFsQrom_budget_fails_at_2pow41`).
-
-    This is arithmetic about the budget expression. It becomes an acceptance-probability bound
-    for the deployed verifier only together with (a) an `RbrStateFunction` for the `Hem`
-    transcript whose flip bounds are the listed round bounds, which needs `[CWYZ26]`
-    Theorem 4.8 at the Johnson radius, and (b) a quantum extraction reduction for the
-    commitment charge. Neither is proved in this module. -/
-theorem multiRoundFsQrom_budget_bound :
-    hemV6FiveRoundRbrBounds.length = 5 ∧
-    (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
-      strictlyMoreThanBits 128
-        (multiRoundFsQromCompilerBound Q 5 256
-          hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) ∧
-      atLeastBits 128
-        (multiRoundFsQromCompilerBound Q 5 256
-          hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)) ∧
-    (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
-      strictlyMoreThanBits 128
-        (multiRoundFsQromCompilerBound Q 5 256
-          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
-      atLeastBits 128
-        (multiRoundFsQromCompilerBound Q 5 256
-          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) := by
-  let QMax : Nat := 2 ^ 40 - 1
+private theorem hemCompiler_budget_up_to (QMax digestBits : Nat)
+    (hHabrMax : strictlyMoreThanBits 128
+      (multiRoundFsQromCompilerBound QMax 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds))
+    (hBciksMax : strictlyMoreThanBits 128
+      (multiRoundFsQromCompilerBound QMax 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) :
+    ∀ Q : Nat, Q ≤ QMax →
+      (strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) ∧
+       atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)) ∧
+      (strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+       atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 digestBits
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) := by
   have hMonoScale : ∀ {a b : Nat} (hab : a ≤ b) (r : RatBound),
       RatBound.le (RatBound.scale a r) (RatBound.scale b r) := by
     intro a b hab r
@@ -3122,8 +3137,8 @@ theorem multiRoundFsQrom_budget_bound :
       exact Nat.not_le_of_gt h3 hGe
   have hCompilerMono : ∀ {Q : Nat} (hQ : Q ≤ QMax) (qBounds : List RatBound),
       RatBound.le
-        (multiRoundFsQromCompilerBound Q 5 256 hemV6FiveRoundRbrBounds qBounds)
-        (multiRoundFsQromCompilerBound QMax 5 256 hemV6FiveRoundRbrBounds qBounds) := by
+        (multiRoundFsQromCompilerBound Q 5 digestBits hemV6FiveRoundRbrBounds qBounds)
+        (multiRoundFsQromCompilerBound QMax 5 digestBits hemV6FiveRoundRbrBounds qBounds) := by
     intro Q hQ qBounds
     unfold multiRoundFsQromCompilerBound
     have hSqLe : (2 * Q + 1) ^ 2 ≤ (2 * QMax + 1) ^ 2 :=
@@ -3147,8 +3162,8 @@ theorem multiRoundFsQrom_budget_bound :
       simp only [List.get_eq_getElem, List.getElem_map]
       exact hMonoScale hGrindLe _
     have hMerkleLe :
-        RatBound.le (qromMerkleOnlineExtractBound 5 256 Q)
-          (qromMerkleOnlineExtractBound 5 256 QMax) := by
+        RatBound.le (qromMerkleOnlineExtractBound 5 digestBits Q)
+          (qromMerkleOnlineExtractBound 5 digestBits QMax) := by
       unfold qromMerkleOnlineExtractBound
       apply hScaleMono
       apply RatBound.add_le_add
@@ -3161,31 +3176,50 @@ theorem multiRoundFsQrom_budget_bound :
         exact Nat.mul_le_mul_right _
           (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
     exact RatBound.add_le_add hRbrLe (RatBound.add_le_add hMerkleLe hQueryLe)
-  have hHabrMax :
+  intro Q hQ
+  have hh := hStrictOfLe (hCompilerMono hQ hemV6Habr24QueryBounds) hHabrMax
+  have hb := hStrictOfLe (hCompilerMono hQ hemV6BciksJohnsonQueryBounds) hBciksMax
+  exact ⟨⟨hh, Nat.le_of_lt hh⟩, ⟨hb, Nat.le_of_lt hb⟩⟩
+
+/-- **Multi-round Fiat–Shamir QROM numerical budget (`multiRoundFsQrom_budget_bound`)**.
+    For every oracle budget `Q + 1 ≤ 2^40`, `multiRoundFsQromCompilerBound` at the deployed
+    `num_vars = 24` parameters (five aggregated RBR entries derived from the deployed witness
+    rows, five committed Merkle roots over `256`-bit digests, four query stages) is strictly
+    below `2^-128`, for both the conjectural `Habr24Qrom128` query bounds and the
+    witness-derived `BciksJohnsonQrom128` query bounds.
+
+    The range is forced by the collision term of commitment extraction: at `Q + 1 = 2^41` the
+    same expression exceeds `2^-128` (`tooth_multiRoundFsQrom_budget_fails_at_2pow41`).
+
+    This is arithmetic about the budget expression. It becomes an acceptance-probability bound
+    for the deployed verifier only together with (a) an `RbrStateFunction` for the `Hem`
+    transcript whose flip bounds are the listed round bounds, which needs `[CWYZ26]`
+    Theorem 4.8 at the Johnson radius, and (b) a quantum extraction reduction for the
+    commitment charge. Neither is proved in this module. -/
+theorem multiRoundFsQrom_budget_bound :
+    hemV6FiveRoundRbrBounds.length = 5 ∧
+    (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
       strictlyMoreThanBits 128
-        (multiRoundFsQromCompilerBound QMax 5 256
-          hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) := by
-    show strictlyMoreThanBits 128
-      (multiRoundFsQromCompilerBound (2 ^ 40 - 1) 5 256
-        hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)
-    decide +kernel
-  have hBciksMax :
+        (multiRoundFsQromCompilerBound Q 5 256
+          hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) ∧
+      atLeastBits 128
+        (multiRoundFsQromCompilerBound Q 5 256
+          hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)) ∧
+    (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
       strictlyMoreThanBits 128
-        (multiRoundFsQromCompilerBound QMax 5 256
-          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
-    show strictlyMoreThanBits 128
-      (multiRoundFsQromCompilerBound (2 ^ 40 - 1) 5 256
-        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)
-    decide +kernel
+        (multiRoundFsQromCompilerBound Q 5 256
+          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+      atLeastBits 128
+        (multiRoundFsQromCompilerBound Q 5 256
+          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) := by
   refine ⟨by decide +kernel, ?_, ?_⟩
-  · intro Q hQ1
-    have hQ : Q ≤ QMax := by dsimp [QMax]; omega
-    have hStrict := hStrictOfLe (hCompilerMono hQ hemV6Habr24QueryBounds) hHabrMax
-    exact ⟨hStrict, Nat.le_of_lt hStrict⟩
-  · intro Q hQ1
-    have hQ : Q ≤ QMax := by dsimp [QMax]; omega
-    have hStrict := hStrictOfLe (hCompilerMono hQ hemV6BciksJohnsonQueryBounds) hBciksMax
-    exact ⟨hStrict, Nat.le_of_lt hStrict⟩
+  · intro Q hQ
+    exact (hemCompiler_budget_up_to (2 ^ 40 - 1) 256
+      (by decide +kernel) (by decide +kernel) Q (by omega)).1
+  · intro Q hQ
+    exact (hemCompiler_budget_up_to (2 ^ 40 - 1) 256
+      (by decide +kernel) (by decide +kernel) Q (by omega)).2
+
 
 /-- `#tooth`: the oracle-budget range of `multiRoundFsQrom_budget_bound` is not slack. One more
     bit of budget (`Q + 1 = 2^41`) pushes the same expression above `2^-128`, through the
@@ -3469,5 +3503,37 @@ theorem inhabited_multi_round_fs_qrom :
       intro _ _
       decide)
   simpa only [↓reduceIte, BitVec.toNat_ofFin] using hStep
+
+
+/-- Arithmetic repair for a portfolio budget of `2^56` oracle queries: 384-bit commitment
+    digests suffice with the same field and query schedule. This changes the commitment
+    parameter; it is not a security claim for the deployed 256-bit Merkle implementation. -/
+theorem multiRoundFsQrom_budget_384_at_2pow56 (Q : Nat) (hQ : Q ≤ 2 ^ 56) :
+    (strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 384
+      hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) ∧
+     atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
+      hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)) ∧
+    (strictlyMoreThanBits 128 (multiRoundFsQromCompilerBound Q 5 384
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
+     atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) :=
+  hemCompiler_budget_up_to (2 ^ 56) 384 (by decide +kernel) (by decide +kernel) Q hQ
+
+/-- Keeping the deployed 256-bit commitment parameter fails the requested budget. -/
+theorem tooth_multiRoundFsQrom_256_at_2pow56 :
+    ¬ atLeastBits 128 (multiRoundFsQromCompilerBound (2 ^ 56) 5 256
+      hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+  decide +kernel
+
+/-- Nonzero portfolio query budget satisfying the repaired bound. -/
+theorem inhabited_multiRoundFsQrom_384 :
+    ∃ Q : Nat, Q = 2 ^ 56 ∧ Q ≤ 2 ^ 56 ∧
+      atLeastBits 128 (multiRoundFsQromCompilerBound Q 5 384
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
+  ⟨2 ^ 56, rfl, Nat.le_refl _,
+    (multiRoundFsQrom_budget_384_at_2pow56 (2 ^ 56) (Nat.le_refl _)).2.2⟩
+
+#tooth_pair multiRoundFsQrom_budget_384_at_2pow56 vs tooth_multiRoundFsQrom_256_at_2pow56
+#verify_inhabited multiRoundFsQrom_budget_384_at_2pow56 inhabited_multiRoundFsQrom_384
 
 end Qsag
