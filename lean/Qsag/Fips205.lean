@@ -1022,16 +1022,109 @@ def fipsSplitDigest (p : Fips205Params) (digest : List UInt8) : List UInt8 × Na
   let htSig := fipsHtSignAux p sk.skSeed sk.pkSeed 0 idxTree idxLeaf pkFors p.d
   { rRand := rRand, forsSig := forsSig, htSig := htSig }
 
+/-- Exact nested vector sizes at the structured Algorithm 20 boundary. -/
+def fipsXmssSigShape (p : Fips205Params) (sig : FipsXmssSig) : Bool :=
+  decide (sig.wotsSig.length = p.ell) &&
+  sig.wotsSig.all (fun x => decide (x.length = p.n)) &&
+  decide (sig.authPath.length = p.hp) &&
+  sig.authPath.all (fun x => decide (x.length = p.n))
+
+def fipsForsSigShape (p : Fips205Params) (sig : FipsForsTreeSig) : Bool :=
+  decide (sig.skVal.length = p.n) &&
+  decide (sig.authPath.length = p.a) &&
+  sig.authPath.all (fun x => decide (x.length = p.n))
+
+private theorem fipsXmssNode_width (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree : Nat) (z ni : Nat) :
+    (fipsXmssNode p skSeed pkSeed layer tree z ni).length = p.n := by
+  cases z <;> simp [fipsXmssNode, fipsWotsPkGen]
+
+private theorem fipsXmssAuthPath_width (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (layer tree : Nat) (z ni li : Nat) :
+    (fipsXmssAuthPath p skSeed pkSeed layer tree z ni li).all
+      (fun x => decide (x.length = p.n)) = true := by
+  induction z generalizing ni li with
+  | zero => rfl
+  | succ z ih =>
+    simp only [fipsXmssAuthPath]
+    split <;> simp [List.all_append, ih, fipsXmssNode_width]
+
+private theorem fipsForsNode_width (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (tree idxLeaf : Nat) (z ni : Nat) :
+    (fipsForsNode p skSeed pkSeed tree idxLeaf z ni).length = p.n := by
+  cases z <;> simp [fipsForsNode]
+
+private theorem fipsForsAuthPath_width (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (tree idxLeaf : Nat) (z ni li : Nat) :
+    (fipsForsAuthPath p skSeed pkSeed tree idxLeaf z ni li).all
+      (fun x => decide (x.length = p.n)) = true := by
+  induction z generalizing ni li with
+  | zero => rfl
+  | succ z ih =>
+    simp only [fipsForsAuthPath]
+    split <;> simp [List.all_append, ih, fipsForsNode_width]
+
+private theorem fipsXmssSign_shape (p : Fips205Params) (msg skSeed pkSeed : List UInt8)
+    (layer tree idx : Nat) :
+    fipsXmssSigShape p (fipsXmssSign p msg skSeed pkSeed layer tree idx) = true := by
+  simp [fipsXmssSigShape, fipsXmssSign, fipsWotsSign, fipsChain_length,
+    fipsXmssAuthPath_length, fipsXmssAuthPath_width]
+
+private theorem fipsForsSign_shape (p : Fips205Params) (md skSeed pkSeed : List UInt8)
+    (tree idxLeaf : Nat) :
+    (fipsForsSign p md skSeed pkSeed tree idxLeaf).all (fipsForsSigShape p) = true := by
+  simp [fipsForsSign, fipsForsSigShape, fipsForsAuthPath_length, fipsForsAuthPath_width]
+
+private theorem fipsHtSignAux_shape (p : Fips205Params) (skSeed pkSeed : List UInt8)
+    (rem layer it il : Nat) (msg : List UInt8) :
+    (fipsHtSignAux p skSeed pkSeed layer it il msg rem).all (fipsXmssSigShape p) = true := by
+  induction rem generalizing layer it il msg with
+  | zero => rfl
+  | succ rem ih => simp [fipsHtSignAux, fipsXmssSign_shape, ih]
+
 /-- Algorithm 20 `slh_verify_internal(M', SIG, PK)`. -/
 @[expose] def slhVerifyInternal (p : Fips205Params) (msgPrime : List UInt8) (sig : SlhSignature)
     (pk : SlhPublicKey) : Bool :=
-  if sig.rRand.length ≠ p.n || sig.forsSig.length ≠ p.k || sig.htSig.length ≠ p.d then false
+  if sig.rRand.length ≠ p.n || sig.forsSig.length ≠ p.k || sig.htSig.length ≠ p.d ||
+      !(sig.forsSig.all (fipsForsSigShape p)) || !(sig.htSig.all (fipsXmssSigShape p)) then false
   else
     let digest := fipsHMsg p.m sig.rRand pk.pkSeed pk.pkRoot msgPrime
     let (md, idxTree, idxLeaf) := fipsSplitDigest p digest
     let pkFors := fipsForsPkFromSig p sig.forsSig md pk.pkSeed idxTree idxLeaf
     let computedRoot := fipsHtVerifyAux p pk.pkSeed 0 idxTree idxLeaf pkFors sig.htSig
     decide (computedRoot = pk.pkRoot)
+
+/-- Acceptance requires every nested FORS and XMSS signature to have its exact shape. -/
+theorem slhVerifyInternal_shapes (p : Fips205Params) (msg : List UInt8)
+    (sig : SlhSignature) (pk : SlhPublicKey)
+    (h : slhVerifyInternal p msg sig pk = true) :
+    sig.rRand.length = p.n ∧ sig.forsSig.length = p.k ∧ sig.htSig.length = p.d ∧
+    sig.forsSig.all (fipsForsSigShape p) = true ∧
+    sig.htSig.all (fipsXmssSigShape p) = true := by
+  unfold slhVerifyInternal at h
+  split at h
+  · contradiction
+  · rename_i hs
+    simp only [Bool.or_eq_true, Bool.not_eq_true, decide_eq_true_eq, not_or] at hs
+    exact ⟨Decidable.of_not_not hs.1.1.1.1, Decidable.of_not_not hs.1.1.1.2,
+      Decidable.of_not_not hs.1.1.2, (by simpa only [Bool.not_eq_false'] using hs.1.2),
+      (by simpa only [Bool.not_eq_false'] using hs.2)⟩
+
+/-- Adding even one byte as an extra WOTS element is rejected before hashing. -/
+theorem tooth_slh_trailing_wots_rejected (p : Fips205Params) (msg : List UInt8)
+    (sig : SlhSignature) (pk : SlhPublicKey) (x : FipsXmssSig) (rest : List FipsXmssSig)
+    (hLen : x.wotsSig.length = p.ell) :
+    slhVerifyInternal p msg
+      { sig with htSig := { x with wotsSig := x.wotsSig ++ [[0]] } :: rest } pk = false := by
+  apply Bool.eq_false_iff.mpr
+  intro h
+  have hs := (slhVerifyInternal_shapes p msg _ pk h).2.2.2.2
+  simp only [List.all_cons, Bool.and_eq_true] at hs
+  have hc := hs.1
+  simp only [fipsXmssSigShape, Bool.and_eq_true, decide_eq_true_eq] at hc
+  have bad := hc.1.1.1
+  simp only [List.length_append, List.length_cons, List.length_nil, hLen] at bad
+  omega
 
 private theorem fipsHtSignAux_length (p : Fips205Params) (skSeed pkSeed : List UInt8) :
     ∀ (rem layer idxTree idxLeaf : Nat) (curMsg : List UInt8),
@@ -1059,6 +1152,7 @@ theorem slhVerifyInternal_slhSignInternal (p : Fips205Params) (hWf : p.wellForme
   have hHtLen : (fipsHtSignAux p skSeed pkSeed 0 split.2.1 split.2.2
       (fipsForsPkFromSig p (fipsForsSign p split.1 skSeed pkSeed split.2.1 split.2.2) split.1 pkSeed split.2.1 split.2.2) p.d).length = p.d :=
     fipsHtSignAux_length p skSeed pkSeed p.d 0 _ _ _
+  simp only [fipsForsSign_shape, fipsHtSignAux_shape, Bool.not_true, Bool.or_false]
   change (if (fipsPrfMsg p.n skPrf optRand msgPrime).length ≠ p.n ||
              (fipsForsSign p split.1 skSeed pkSeed split.2.1 split.2.2).length ≠ p.k ||
              (fipsHtSignAux p skSeed pkSeed 0 split.2.1 split.2.2
@@ -1280,6 +1374,39 @@ private theorem flatten_map_fixed_len {α : Type} (xs : List α) (f : α → Lis
     simp only [List.map_cons, List.flatten_cons, List.length_append, List.length_cons]
     rw [hEach x (.head _), ih (fun y hy => hEach y (.tail _ hy)), Nat.succ_mul]
     omega
+
+/-- Structured acceptance implies the exact Algorithm 20 wire length; nested checks
+also exclude compensating overlong and short vectors with the same total byte count. -/
+theorem slhVerifyInternal_encoded_length (p : Fips205Params) (msg : List UInt8)
+    (sig : SlhSignature) (pk : SlhPublicKey)
+    (h : slhVerifyInternal p msg sig pk = true) :
+    (encodeSlhSig sig).length = p.sigBytes := by
+  obtain ⟨hr, hf, hh, hfs, hhs⟩ := slhVerifyInternal_shapes p msg sig pk h
+  have flatLen (xs : List (List UInt8)) (n : Nat)
+      (hw : xs.all (fun x => decide (x.length = n)) = true) :
+      xs.flatten.length = xs.length * n := by
+    have he : ∀ x ∈ xs, (id x).length = n := by
+      simpa only [List.all_eq_true, decide_eq_true_eq, id_eq] using hw
+    simpa using flatten_map_fixed_len xs id n he
+  have hfb : (sig.forsSig.map fun f => f.skVal ++ f.authPath.flatten).flatten.length =
+      p.k * (1 + p.a) * p.n := by
+    rw [flatten_map_fixed_len sig.forsSig _ ((1 + p.a) * p.n)]
+    · rw [hf, Nat.mul_assoc]
+    · intro f hmem
+      have hw := List.all_eq_true.mp hfs f hmem
+      simp only [fipsForsSigShape, Bool.and_eq_true, decide_eq_true_eq] at hw
+      rw [List.length_append, hw.1.1, flatLen _ _ hw.2, hw.1.2]
+      simp [Nat.add_mul]
+  have hhb : (sig.htSig.map fun x => x.wotsSig.flatten ++ x.authPath.flatten).flatten.length =
+      p.d * (p.ell + p.hp) * p.n := by
+    rw [flatten_map_fixed_len sig.htSig _ ((p.ell + p.hp) * p.n)]
+    · rw [hh, Nat.mul_assoc]
+    · intro x hmem
+      have hw := List.all_eq_true.mp hhs x hmem
+      simp only [fipsXmssSigShape, Bool.and_eq_true, decide_eq_true_eq] at hw
+      rw [List.length_append, flatLen _ _ hw.1.1.2, flatLen _ _ hw.2,
+        hw.1.1.1, hw.1.2, Nat.add_mul]
+  simp only [encodeSlhSig, List.length_append, hr, hfb, hhb, Fips205Params.sigBytes]
 
 theorem encodeSlhSig_slhSignInternal_length (p : Fips205Params)
     (msgPrime : List UInt8) (sk : SlhSecretKey) (optRand : List UInt8) :
