@@ -1121,3 +1121,1102 @@ impl EpochWalSink for FsWalEpochSink {
 
 /// Monotonic durable reservation counter. Reserve BEFORE computing any signature.
 /// The sink must bind reservations to the key and serialize competing writers.
+pub trait StatelessBudgetWalSink {
+    fn reserve(&mut self, pk_root: &[u8; 32], limit: u64) -> Result<u64, SigError>;
+}
+
+/// Durable stateless reservations backed by an authenticated, locked epoch record.
+/// Use a dedicated WAL path and MAC key for this signing key's stateless budget.
+#[cfg(feature = "std")]
+pub struct FsStatelessBudgetWal(FsWalEpochSink);
+
+#[cfg(feature = "std")]
+impl FsStatelessBudgetWal {
+    pub fn create_new_for_fresh_key(
+        path: impl Into<std::path::PathBuf>,
+        pk_root: &[u8; 32],
+        mac_key: [u8; 32],
+    ) -> Result<Self, SigError> {
+        Ok(Self(
+            FsWalEpochSink::create_new_for_fresh_key(path, pk_root, mac_key)?.0,
+        ))
+    }
+    pub fn open_or_recover(
+        path: impl Into<std::path::PathBuf>,
+        pk_root: &[u8; 32],
+        mac_key: [u8; 32],
+    ) -> Result<Self, SigError> {
+        Ok(Self(
+            FsWalEpochSink::open_or_recover(path, pk_root, mac_key)?.0,
+        ))
+    }
+}
+
+#[cfg(feature = "std")]
+impl StatelessBudgetWalSink for FsStatelessBudgetWal {
+    fn reserve(&mut self, pk_root: &[u8; 32], limit: u64) -> Result<u64, SigError> {
+        let used = self
+            .0
+            .recovered_state(pk_root)?
+            .map_or(0, |s| u64::from(s.0));
+        if used >= limit || used >= u64::from(u32::MAX) {
+            return Err(SigError::StatelessBudgetExhausted);
+        }
+        self.0.persist_latched_epoch(
+            pk_root,
+            (used + 1) as u32,
+            used as u32,
+            &cshake256_32(b"QSAG.STATELESS.BUDGET/v1", pk_root),
+        )?;
+        Ok(used + 1)
+    }
+}
+
+/// Non-cloneable stateful `EpochLatch` (`[P0-04]`): enforces monotonic epoch progression and
+/// idempotent crash-retry on `(epoch, mu_bytes)` while strictly forbidding `Clone` fork hazards!
+#[derive(Default, PartialEq, Eq)]
+pub struct StatefulEpochLatch {
+    next_unused_epoch: u32,
+    last_latched: Option<(u32, [u8; 32], Digest4)>,
+}
+
+impl core::fmt::Debug for StatefulEpochLatch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StatefulEpochLatch")
+            .field("next_unused_epoch", &self.next_unused_epoch)
+            .field("has_latched_epoch", &self.last_latched.is_some())
+            .finish()
+    }
+}
+
+impl StatefulEpochLatch {
+    pub const fn new() -> Self {
+        Self {
+            next_unused_epoch: 0,
+            last_latched: None,
+        }
+    }
+
+    pub fn next_unused_epoch(&self) -> u32 {
+        self.next_unused_epoch
+    }
+}
+
+/// Non-cloneable validator keypair with redacted `Debug`, `Drop` zeroization, integrated
+/// `StatefulEpochLatch`, and stateless `CORDUROY_MAX_STATELESS_SIGS_PER_KEY` counter (`[P0-04]`).
+pub struct ValidatorKeypair {
+    sk_seed: Digest4,
+    sk_prf: Digest4,
+    pub pk: ValidatorPublicKey,
+    top_subtree_leaves: Vec<Digest4>,
+    latch: StatefulEpochLatch,
+    stateless_sigs_issued: u64,
+}
+
+impl core::fmt::Debug for ValidatorKeypair {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ValidatorKeypair")
+            .field("pk", &self.pk)
+            .field("sk_seed", &"[REDACTED]")
+            .field("sk_prf", &"[REDACTED]")
+            .field("next_unused_epoch", &self.latch.next_unused_epoch)
+            .field("stateless_sigs_issued", &self.stateless_sigs_issued)
+            .finish()
+    }
+}
+
+impl Drop for ValidatorKeypair {
+    fn drop(&mut self) {
+        qsag_asm::volatile_fill(&mut self.sk_seed, Goldilocks::ZERO);
+        qsag_asm::volatile_fill(&mut self.sk_prf, Goldilocks::ZERO);
+        if let Some((_, ref mut mu_b, ref mut r_b)) = self.latch.last_latched {
+            qsag_asm::volatile_fill(mu_b, 0);
+            qsag_asm::volatile_fill(r_b, Goldilocks::ZERO);
+        }
+    }
+}
+
+impl ValidatorKeypair {
+    /// Generate a genuine full-tree `ValidatorKeypair` from `(master_seed, validator_idx)`.
+    pub fn keygen_deterministic(
+        profile: AggSigProfile,
+        master_seed: &[u8; 32],
+        validator_idx: u32,
+    ) -> Self {
+        let idx_bytes = validator_idx.to_le_bytes();
+        let mut raw_sk = cshake256_32(
+            b"QSAG.KEYGEN.SK/v2",
+            &encode_multi_frame(&[master_seed, &idx_bytes]),
+        );
+        let mut raw_prf = cshake256_32(
+            b"QSAG.KEYGEN.PRF/v2",
+            &encode_multi_frame(&[master_seed, &idx_bytes]),
+        );
+        let raw_pub = cshake256_32(
+            b"QSAG.KEYGEN.PKSEED/v2",
+            &encode_multi_frame(&[master_seed, &idx_bytes]),
+        );
+
+        let to_d4 = |b: &[u8; 32]| -> Digest4 {
+            let mut d = [Goldilocks::ZERO; 4];
+            for i in 0..4 {
+                let mut limb = [0u8; 8];
+                limb.copy_from_slice(&b[8 * i..8 * (i + 1)]);
+                d[i] = Goldilocks::from_u64_reduced(u64::from_le_bytes(limb));
+            }
+            d
+        };
+        let sk_seed = to_d4(&raw_sk);
+        let sk_prf = to_d4(&raw_prf);
+        let pk_seed = to_d4(&raw_pub);
+        qsag_asm::volatile_fill(&mut raw_sk, 0);
+        qsag_asm::volatile_fill(&mut raw_prf, 0);
+
+        let (top_layer, sub_height) = match profile {
+            AggSigProfile::JortsPoseidon2 => (0u32, JORTS_XMSS_HEIGHT),
+            AggSigProfile::CorduroyPoseidon2 => {
+                ((CORDUROY_NUM_LAYERS - 1) as u32, CORDUROY_SUBTREE_HEIGHT)
+            }
+        };
+        let (top_subtree_leaves, pk_root) =
+            Self::build_xmss_subtree(sk_seed, pk_seed, top_layer, 0, sub_height);
+
+        Self {
+            sk_seed,
+            sk_prf,
+            pk: ValidatorPublicKey {
+                profile,
+                pk_seed,
+                pk_root,
+            },
+            top_subtree_leaves,
+            latch: StatefulEpochLatch::new(),
+            stateless_sigs_issued: 0,
+        }
+    }
+
+    #[inline]
+    pub fn next_unused_epoch(&self) -> u32 {
+        self.latch.next_unused_epoch
+    }
+
+    #[inline]
+    pub fn stateless_sigs_issued(&self) -> u64 {
+        self.stateless_sigs_issued
+    }
+
+    /// Restore durable `StatefulEpochLatch` state recovered by `FsWalEpochSink::open_or_recover`.
+    pub fn restore_from_wal(
+        &mut self,
+        next_unused_epoch: u32,
+        latched_epoch: u32,
+        mu_bytes: [u8; 32],
+    ) -> Result<(), SigError> {
+        if next_unused_epoch == 0
+            || next_unused_epoch < self.latch.next_unused_epoch
+            || (next_unused_epoch == self.latch.next_unused_epoch
+                && self
+                    .latch
+                    .last_latched
+                    .as_ref()
+                    .is_some_and(|(ep, mu, _)| *ep != latched_epoch || *mu != mu_bytes))
+            || latched_epoch >= next_unused_epoch
+            || (next_unused_epoch as usize) > (1usize << JORTS_XMSS_HEIGHT)
+        {
+            return Err(SigError::WalPersistenceFailed);
+        }
+        let mu = bytes32_to_limbs56(&mu_bytes);
+        let r = self.derive_deterministic_r_rand(mu, latched_epoch as u64);
+        self.latch.next_unused_epoch = next_unused_epoch;
+        self.latch.last_latched = Some((latched_epoch, mu_bytes, r));
+        Ok(())
+    }
+
+    fn build_xmss_subtree(
+        sk_seed: Digest4,
+        pk_seed: Digest4,
+        layer: u32,
+        tree_idx: u64,
+        sub_height: usize,
+    ) -> (Vec<Digest4>, Digest4) {
+        let num_leaves = 1usize << sub_height;
+        let mut leaves = Vec::with_capacity(num_leaves);
+        for kp in 0..num_leaves {
+            let mut endpoints = [[Goldilocks::ZERO; 4]; WOTS_CHAINS];
+            for (r, endpoint) in endpoints.iter_mut().enumerate().take(WOTS_CHAINS) {
+                let mut cur =
+                    Self::wots_base_secret(sk_seed, pk_seed, layer, tree_idx, kp as u32, r as u32);
+                for step in 0..(WOTS_MAX_STEP as u32) {
+                    cur = wots_step_hash_injective(
+                        pk_seed, cur, layer, tree_idx, kp as u32, r as u32, step,
+                    );
+                }
+                *endpoint = cur;
+                qsag_asm::volatile_fill(&mut cur, Goldilocks::ZERO);
+            }
+            leaves.push(compress_wots_endpoints_sponge(
+                pk_seed, layer, tree_idx, kp as u32, &endpoints,
+            ));
+        }
+
+        let mut cur_layer = leaves.clone();
+        for lvl in 0..sub_height {
+            let mut next = Vec::with_capacity(cur_layer.len() / 2);
+            for p in 0..(cur_layer.len() / 2) {
+                next.push(merkle_node_hash(
+                    DOMAIN_MERKLE_NODE,
+                    pk_seed,
+                    MerkleNodeAddr {
+                        layer,
+                        tree_idx,
+                        level: (lvl + 1) as u32,
+                        node_idx: p as u32,
+                    },
+                    cur_layer[2 * p],
+                    cur_layer[2 * p + 1],
+                ));
+            }
+            cur_layer = next;
+        }
+        (leaves, cur_layer[0])
+    }
+
+    #[inline]
+    fn wots_base_secret(
+        sk_seed: Digest4,
+        pk_seed: Digest4,
+        layer: u32,
+        tree_idx: u64,
+        kp_idx: u32,
+        chain_idx: u32,
+    ) -> Digest4 {
+        let tweak = [
+            Goldilocks::from_u64_reduced(DOMAIN_PRF_WOTS),
+            pack_wots_addr_limb(layer, kp_idx, chain_idx, 0),
+            Goldilocks::from_u64_reduced(tree_idx & 0xFFFF_FFFF),
+            Goldilocks::from_u64_reduced(tree_idx >> 32),
+        ];
+        poseidon2_compress12_ff(sk_seed, pk_seed, tweak)
+    }
+
+    #[inline]
+    fn fors_leaf_secret(&self, tree_idx: u64, kp_idx: u32, global_fors_leaf: u64) -> Digest4 {
+        let tweak = [
+            Goldilocks::from_u64_reduced(DOMAIN_FORS_PRF),
+            Goldilocks::from_u64_reduced(((kp_idx as u64) << 24) | global_fors_leaf),
+            Goldilocks::from_u64_reduced(tree_idx & 0xFFFF_FFFF),
+            Goldilocks::from_u64_reduced(tree_idx >> 32),
+        ];
+        poseidon2_compress12_ff(self.sk_seed, self.pk.pk_seed, tweak)
+    }
+
+    #[inline]
+    fn derive_deterministic_r_rand(&self, mu: Digest5, epoch_or_nonce: u64) -> Digest4 {
+        let mut st = [
+            self.sk_prf[0],
+            self.sk_prf[1],
+            self.sk_prf[2],
+            self.sk_prf[3],
+            self.pk.pk_seed[0],
+            self.pk.pk_seed[1],
+            self.pk.pk_seed[2],
+            self.pk.pk_seed[3],
+            Goldilocks::from_u64_reduced(DOMAIN_PRF_MSG),
+            Goldilocks::from_u64_reduced(epoch_or_nonce),
+            mu[4],
+            Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+        ];
+        poseidon2_perm12(&mut st);
+        for i in 0..4 {
+            st[i] += mu[i];
+        }
+        poseidon2_perm12(&mut st);
+        let out = [st[0], st[1], st[2], st[3]];
+        qsag_asm::volatile_fill(&mut st, Goldilocks::ZERO);
+        out
+    }
+
+    /// Stateful signing with mandatory `StatefulEpochLatch` (`[P0-04]`):
+    /// - Idempotently returns the identical signature if `(epoch, msg)` matches the last latched call,
+    /// - Rejects any attempt to sign a different message at an already-latched epoch or out-of-order epoch!
+    pub fn sign_stateful(
+        &mut self,
+        msg: &[u8],
+        epoch: u32,
+        wal: &mut dyn EpochWalSink,
+    ) -> Result<ValidatorSignature, SigError> {
+        self.sign_stateful_with_wal(msg, epoch, wal)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sign_stateful_for_unit_test(
+        &mut self,
+        msg: &[u8],
+        epoch: u32,
+    ) -> Result<ValidatorSignature, SigError> {
+        self.sign_stateful_internal(msg, epoch, None)
+    }
+
+    /// Load a stateful key and initialize its latch directly from authenticated storage.
+    pub fn from_master_seed_with_wal(
+        profile: AggSigProfile,
+        master_seed: &[u8; 32],
+        validator_idx: u32,
+        wal: &dyn EpochWalSink,
+    ) -> Result<Self, SigError> {
+        if profile != AggSigProfile::JortsPoseidon2 {
+            return Err(SigError::ProfileMismatch);
+        }
+        let mut key = Self::keygen_deterministic(profile, master_seed, validator_idx);
+        if let Some((next, epoch, mu)) = wal.recovered_state(&digest4_to_bytes(&key.pk.pk_root))? {
+            key.restore_from_wal(next, epoch, mu)?;
+        }
+        Ok(key)
+    }
+
+    /// Stateful signing backed by a durable `EpochWalSink` (`FsWalEpochSink` under `std`), ensuring
+    /// the advanced epoch is `fsync`ed to stable storage **strictly BEFORE** any WOTS+C chain values
+    /// are computed or returned (`[P0-04]`).
+    pub fn sign_stateful_with_wal(
+        &mut self,
+        msg: &[u8],
+        epoch: u32,
+        wal: &mut dyn EpochWalSink,
+    ) -> Result<ValidatorSignature, SigError> {
+        if self.pk.profile != AggSigProfile::JortsPoseidon2 {
+            return Err(SigError::ProfileMismatch);
+        }
+        let root = digest4_to_bytes(&self.pk.pk_root);
+        if let Some((next, prev, mu)) = wal.recovered_state(&root)? {
+            self.restore_from_wal(next, prev, mu)?;
+        }
+        self.sign_stateful_internal(msg, epoch, Some(wal))
+    }
+
+    fn sign_stateful_internal(
+        &mut self,
+        msg: &[u8],
+        epoch: u32,
+        wal: Option<&mut dyn EpochWalSink>,
+    ) -> Result<ValidatorSignature, SigError> {
+        if self.pk.profile != AggSigProfile::JortsPoseidon2 {
+            return Err(SigError::ProfileMismatch);
+        }
+        if (epoch as usize) >= (1usize << JORTS_XMSS_HEIGHT) {
+            return Err(SigError::EpochOutOfBounds);
+        }
+        let (mu_bytes, mu) = compute_message_mu(&self.pk, msg);
+        if let Some((prev, prev_mu, _)) = self.latch.last_latched {
+            if epoch == prev && prev_mu != mu_bytes {
+                return Err(SigError::EpochReuseDifferentMessage);
+            }
+            if epoch != prev && epoch < self.latch.next_unused_epoch {
+                return Err(SigError::EpochMonotonicityViolation);
+            }
+        }
+        if let Some(sink) = wal {
+            sink.persist_latched_epoch(
+                &digest4_to_bytes(&self.pk.pk_root),
+                epoch + 1,
+                epoch,
+                &mu_bytes,
+            )?;
+        }
+        let r_rand = if let Some((prev_ep, prev_mu, cached_r)) = self.latch.last_latched {
+            if epoch == prev_ep {
+                if mu_bytes == prev_mu {
+                    cached_r
+                } else {
+                    return Err(SigError::EpochReuseDifferentMessage);
+                }
+            } else if epoch < self.latch.next_unused_epoch {
+                return Err(SigError::EpochMonotonicityViolation);
+            } else {
+                let next_ep = epoch + 1;
+                let r = self.derive_deterministic_r_rand(mu, epoch as u64);
+                self.latch.next_unused_epoch = next_ep;
+                self.latch.last_latched = Some((epoch, mu_bytes, r));
+                r
+            }
+        } else {
+            let next_ep = epoch + 1;
+            let r = self.derive_deterministic_r_rand(mu, epoch as u64);
+            self.latch.next_unused_epoch = next_ep;
+            self.latch.last_latched = Some((epoch, mu_bytes, r));
+            r
+        };
+
+        let mut tsw_ctr = 0u32;
+        let digits = loop {
+            let hmsg =
+                compute_hmsg_stateful(self.pk.pk_seed, self.pk.pk_root, r_rand, mu, epoch, tsw_ctr);
+            if let Some(d) = extract_wots_digits_checked(&hmsg) {
+                let s: usize = d.iter().map(|&x| x as usize).sum();
+                if s == WOTS_TARGET_SUM {
+                    break d;
+                }
+            }
+            tsw_ctr = tsw_ctr.checked_add(1).ok_or(SigError::SigningCounterExhausted)?;
+        };
+
+        let mut wots_chains = Vec::with_capacity(WOTS_CHAINS);
+        for (r, &digit) in digits.iter().enumerate().take(WOTS_CHAINS) {
+            let mut cur =
+                Self::wots_base_secret(self.sk_seed, self.pk.pk_seed, 0, 0, epoch, r as u32);
+            for step in 0..(digit as u32) {
+                cur = wots_step_hash_injective(self.pk.pk_seed, cur, 0, 0, epoch, r as u32, step);
+            }
+            wots_chains.push(cur);
+            qsag_asm::volatile_fill(&mut cur, Goldilocks::ZERO);
+        }
+
+        let mut merkle_path = Vec::with_capacity(JORTS_XMSS_HEIGHT);
+        let mut cur_layer = self.top_subtree_leaves.clone();
+        let mut idx = epoch as usize;
+        for lvl in 0..JORTS_XMSS_HEIGHT {
+            merkle_path.push(cur_layer[idx ^ 1]);
+            let mut next = Vec::with_capacity(cur_layer.len() / 2);
+            for p in 0..(cur_layer.len() / 2) {
+                next.push(merkle_node_hash(
+                    DOMAIN_MERKLE_NODE,
+                    self.pk.pk_seed,
+                    MerkleNodeAddr {
+                        layer: 0,
+                        tree_idx: 0,
+                        level: (lvl + 1) as u32,
+                        node_idx: p as u32,
+                    },
+                    cur_layer[2 * p],
+                    cur_layer[2 * p + 1],
+                ));
+            }
+            cur_layer = next;
+            idx >>= 1;
+        }
+        debug_assert_eq!(cur_layer[0], self.pk.pk_root);
+
+        Ok(ValidatorSignature {
+            profile: AggSigProfile::JortsPoseidon2,
+            r_rand,
+            stateful_leaf_idx: epoch,
+            fors_openings: Vec::new(),
+            layers: vec![HypertreeLayerSig {
+                tsw_ctr,
+                wots_chains,
+                merkle_path,
+            }],
+        })
+    }
+
+    /// Stateless signing for `CorduroyPoseidon2` (`[P0-03]`):
+    /// - Enforces `stateless_sigs_issued < CORDUROY_MAX_STATELESS_SIGS_PER_KEY` ($2^{20}$) so $(k=32, a=8)$
+    ///   FORS subset-resilience maintains $> 128$-bit post-quantum security against multi-hit collisions,
+    /// - Derives `(fors_idxs, leaf_global_idx)` from XOF `H_msg_stateless` over disjoint bit windows,
+    /// - Signs static `fors_pk` and upper-layer `child_root`s deterministically WITHOUT `r_rand` or `mu`!
+    pub fn sign_stateless(
+        &mut self,
+        msg: &[u8],
+        wal: &mut dyn StatelessBudgetWalSink,
+    ) -> Result<ValidatorSignature, SigError> {
+        self.sign_stateless_with_wal(msg, wal)
+    }
+
+    pub fn sign_stateless_with_wal(
+        &mut self,
+        msg: &[u8],
+        wal: &mut dyn StatelessBudgetWalSink,
+    ) -> Result<ValidatorSignature, SigError> {
+        if self.pk.profile != AggSigProfile::CorduroyPoseidon2 {
+            return Err(SigError::ProfileMismatch);
+        }
+        let issued = wal.reserve(
+            &digest4_to_bytes(&self.pk.pk_root),
+            CORDUROY_MAX_STATELESS_SIGS_PER_KEY,
+        )?;
+        if issued == 0
+            || issued <= self.stateless_sigs_issued
+            || issued > CORDUROY_MAX_STATELESS_SIGS_PER_KEY
+        {
+            return Err(SigError::WalPersistenceFailed);
+        }
+        self.stateless_sigs_issued = issued;
+        self.sign_stateless_internal(msg)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sign_stateless_for_unit_test(
+        &mut self,
+        msg: &[u8],
+    ) -> Result<ValidatorSignature, SigError> {
+        if self.stateless_sigs_issued >= CORDUROY_MAX_STATELESS_SIGS_PER_KEY {
+            return Err(SigError::StatelessBudgetExhausted);
+        }
+        self.stateless_sigs_issued += 1;
+        self.sign_stateless_internal(msg)
+    }
+
+    fn sign_stateless_internal(&mut self, msg: &[u8]) -> Result<ValidatorSignature, SigError> {
+        if self.pk.profile != AggSigProfile::CorduroyPoseidon2 {
+            return Err(SigError::ProfileMismatch);
+        }
+        let (_, mu) = compute_message_mu(&self.pk, msg);
+
+        let mut r_nonce = 0u64;
+        let (r_rand, fors_idxs, leaf_global_idx) = loop {
+            let r_cand = self.derive_deterministic_r_rand(mu, r_nonce);
+            if let Some((f_idxs, leaf_idx, _)) =
+                derive_stateless_fors_and_leaf_checked(self.pk.pk_seed, self.pk.pk_root, r_cand, mu)
+            {
+                break (r_cand, f_idxs, leaf_idx);
+            }
+            r_nonce += 1;
+        };
+
+        let kp0 = (leaf_global_idx & ((1u64 << CORDUROY_SUBTREE_HEIGHT) - 1)) as u32;
+        let tree0 = leaf_global_idx >> CORDUROY_SUBTREE_HEIGHT;
+        let fors_leaf_cnt = 1usize << FORS_HEIGHT;
+        let mut fors_openings = Vec::with_capacity(FORS_TREES);
+        let mut fors_roots = [[Goldilocks::ZERO; 4]; FORS_TREES];
+
+        for j in 0..FORS_TREES {
+            let mut leaves = Vec::with_capacity(fors_leaf_cnt);
+            for l in 0..fors_leaf_cnt {
+                let gl = ((j as u64) << FORS_HEIGHT) | (l as u64);
+                let mut sec = self.fors_leaf_secret(tree0, kp0, gl);
+                let lt = [
+                    Goldilocks::from_u64_reduced(DOMAIN_FORS_LEAF),
+                    Goldilocks::from_u64_reduced(((kp0 as u64) << 24) | gl),
+                    Goldilocks::from_u64_reduced(tree0 & 0xFFFF_FFFF),
+                    Goldilocks::from_u64_reduced(tree0 >> 32),
+                ];
+                leaves.push(poseidon2_compress12_ff(sec, self.pk.pk_seed, lt));
+                qsag_asm::volatile_fill(&mut sec, Goldilocks::ZERO);
+            }
+            let mut auth_path = [[Goldilocks::ZERO; 4]; FORS_HEIGHT];
+            let mut cur_layer = leaves;
+            let mut cur_idx = fors_idxs[j];
+            for (lvl, path_item) in auth_path.iter_mut().enumerate().take(FORS_HEIGHT) {
+                *path_item = cur_layer[cur_idx ^ 1];
+                let mut next = Vec::with_capacity(cur_layer.len() / 2);
+                for p in 0..(cur_layer.len() / 2) {
+                    let addr_node = ((j as u32) << (FORS_HEIGHT - 1 - lvl)) + (p as u32);
+                    next.push(merkle_node_hash(
+                        DOMAIN_FORS_NODE,
+                        self.pk.pk_seed,
+                        MerkleNodeAddr {
+                            layer: 0,
+                            tree_idx: tree0,
+                            level: (lvl + 1) as u32,
+                            node_idx: (kp0 << 16) | addr_node,
+                        },
+                        cur_layer[2 * p],
+                        cur_layer[2 * p + 1],
+                    ));
+                }
+                cur_layer = next;
+                cur_idx >>= 1;
+            }
+            fors_roots[j] = cur_layer[0];
+            let chosen_gl = ((j as u64) << FORS_HEIGHT) | (fors_idxs[j] as u64);
+            fors_openings.push(ForsOpening {
+                secret_val: self.fors_leaf_secret(tree0, kp0, chosen_gl),
+                auth_path,
+            });
+        }
+
+        let mut st = [
+            self.pk.pk_seed[0],
+            self.pk.pk_seed[1],
+            self.pk.pk_seed[2],
+            self.pk.pk_seed[3],
+            Goldilocks::from_u64_reduced(kp0 as u64),
+            Goldilocks::from_u64_reduced(tree0 & 0xFFFF_FFFF),
+            Goldilocks::from_u64_reduced(tree0 >> 32),
+            Goldilocks::from_u64_reduced(FORS_TREES as u64),
+            Goldilocks::from_u64_reduced(DOMAIN_FORS_ROOTS),
+            Goldilocks::ZERO,
+            Goldilocks::ZERO,
+            Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV),
+        ];
+        poseidon2_perm12(&mut st);
+        for pair in 0..(FORS_TREES / 2) {
+            for i in 0..4 {
+                st[i] += fors_roots[2 * pair][i];
+                st[4 + i] += fors_roots[2 * pair + 1][i];
+            }
+            poseidon2_perm12(&mut st);
+        }
+        st[0] += Goldilocks::ONE;
+        poseidon2_perm12(&mut st);
+        let mut cur_root = [st[0], st[1], st[2], st[3]];
+
+        let mut layers = Vec::with_capacity(CORDUROY_NUM_LAYERS);
+        let mut idx_cursor = leaf_global_idx;
+        for layer in 0..CORDUROY_NUM_LAYERS {
+            let kp_idx = (idx_cursor & ((1u64 << CORDUROY_SUBTREE_HEIGHT) - 1)) as u32;
+            let tree_idx = idx_cursor >> CORDUROY_SUBTREE_HEIGHT;
+
+            // Deterministic WOTS+C counter strictly from `(pk_seed, pk_root, layer, tree_idx, kp_idx, cur_root)`!
+            let mut tsw_ctr = 0u32;
+            let digits = loop {
+                let hmsg = compute_hmsg_det_tree(
+                    self.pk.pk_seed,
+                    self.pk.pk_root,
+                    layer as u32,
+                    tree_idx,
+                    kp_idx,
+                    tsw_ctr,
+                    cur_root,
+                );
+                if let Some(d) = extract_wots_digits_checked(&hmsg) {
+                    let s: usize = d.iter().map(|&x| x as usize).sum();
+                    if s == WOTS_TARGET_SUM {
+                        break d;
+                    }
+                }
+                tsw_ctr = tsw_ctr.checked_add(1).ok_or(SigError::SigningCounterExhausted)?;
+            };
+
+            let mut wots_chains = Vec::with_capacity(WOTS_CHAINS);
+            for (r, &digit) in digits.iter().enumerate().take(WOTS_CHAINS) {
+                let mut cur = Self::wots_base_secret(
+                    self.sk_seed,
+                    self.pk.pk_seed,
+                    layer as u32,
+                    tree_idx,
+                    kp_idx,
+                    r as u32,
+                );
+                for step in 0..(digit as u32) {
+                    cur = wots_step_hash_injective(
+                        self.pk.pk_seed,
+                        cur,
+                        layer as u32,
+                        tree_idx,
+                        kp_idx,
+                        r as u32,
+                        step,
+                    );
+                }
+                wots_chains.push(cur);
+                qsag_asm::volatile_fill(&mut cur, Goldilocks::ZERO);
+            }
+
+            let (sub_leaves, next_root) = if layer + 1 == CORDUROY_NUM_LAYERS {
+                (self.top_subtree_leaves.clone(), self.pk.pk_root)
+            } else {
+                Self::build_xmss_subtree(
+                    self.sk_seed,
+                    self.pk.pk_seed,
+                    layer as u32,
+                    tree_idx,
+                    CORDUROY_SUBTREE_HEIGHT,
+                )
+            };
+            let mut merkle_path = Vec::with_capacity(CORDUROY_SUBTREE_HEIGHT);
+            let mut cur_layer = sub_leaves;
+            let mut sub_idx = kp_idx as usize;
+            for lvl in 0..CORDUROY_SUBTREE_HEIGHT {
+                merkle_path.push(cur_layer[sub_idx ^ 1]);
+                let mut next = Vec::with_capacity(cur_layer.len() / 2);
+                for p in 0..(cur_layer.len() / 2) {
+                    next.push(merkle_node_hash(
+                        DOMAIN_MERKLE_NODE,
+                        self.pk.pk_seed,
+                        MerkleNodeAddr {
+                            layer: layer as u32,
+                            tree_idx,
+                            level: (lvl + 1) as u32,
+                            node_idx: p as u32,
+                        },
+                        cur_layer[2 * p],
+                        cur_layer[2 * p + 1],
+                    ));
+                }
+                cur_layer = next;
+                sub_idx >>= 1;
+            }
+            debug_assert_eq!(cur_layer[0], next_root);
+            cur_root = next_root;
+            idx_cursor = tree_idx;
+
+            layers.push(HypertreeLayerSig {
+                tsw_ctr,
+                wots_chains,
+                merkle_path,
+            });
+        }
+
+        Ok(ValidatorSignature {
+            profile: AggSigProfile::CorduroyPoseidon2,
+            r_rand,
+            stateful_leaf_idx: 0,
+            fors_openings,
+            layers,
+        })
+    }
+}
+
+// ============================================================================
+// Canonical Signer Bitmap & Committee Commitment
+// ============================================================================
+
+/// Canonical bitvector over `0..num_validators` tracking participating signers.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SignerBitmap {
+    num_validators: u32,
+    words: Vec<u64>,
+}
+
+impl SignerBitmap {
+    pub fn new_empty(num_validators: u32) -> Self {
+        let n_words = (num_validators as usize).div_ceil(64);
+        Self {
+            num_validators,
+            words: vec![0u64; n_words],
+        }
+    }
+
+    pub fn from_active_indices(num_validators: u32, indices: &[usize]) -> Option<Self> {
+        let mut bm = Self::new_empty(num_validators);
+        for &idx in indices {
+            if idx >= num_validators as usize || bm.contains(idx) {
+                return None;
+            }
+            bm.set(idx);
+        }
+        Some(bm)
+    }
+
+    #[inline]
+    pub fn num_validators(&self) -> u32 {
+        self.num_validators
+    }
+
+    #[inline]
+    pub fn set(&mut self, idx: usize) {
+        assert!(idx < self.num_validators as usize);
+        self.words[idx / 64] |= 1u64 << (idx % 64);
+    }
+
+    #[inline]
+    pub fn contains(&self, idx: usize) -> bool {
+        if idx >= self.num_validators as usize {
+            return false;
+        }
+        ((self.words[idx / 64] >> (idx % 64)) & 1) == 1
+    }
+
+    #[inline]
+    pub fn count_ones(&self) -> usize {
+        self.words.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    /// Lowest active signer index, if any.
+    pub fn first_active(&self) -> Option<usize> {
+        self.words
+            .iter()
+            .enumerate()
+            .find(|&(_, &w)| w != 0)
+            .map(|(wi, &w)| wi * 64 + w.trailing_zeros() as usize)
+    }
+
+    pub fn active_indices(&self) -> Vec<usize> {
+        let mut out = Vec::with_capacity(self.count_ones());
+        for (wi, &word) in self.words.iter().enumerate() {
+            let mut w = word;
+            while w != 0 {
+                let tz = w.trailing_zeros() as usize;
+                out.push(wi * 64 + tz);
+                w &= w - 1;
+            }
+        }
+        out
+    }
+
+    /// Strict disjointness predicate: same committee size AND zero overlapping bits (`A & B == 0`).
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        if self.num_validators != other.num_validators || self.words.len() != other.words.len() {
+            return false;
+        }
+        self.words
+            .iter()
+            .zip(other.words.iter())
+            .all(|(&a, &b)| (a & b) == 0)
+    }
+
+    /// Disjoint union (`A | B`), returning `None` if committees mismatch or ANY signer bit overlaps.
+    pub fn union_disjoint(&self, other: &Self) -> Option<Self> {
+        if !self.is_disjoint(other) {
+            return None;
+        }
+        let words = self
+            .words
+            .iter()
+            .zip(other.words.iter())
+            .map(|(&a, &b)| a | b)
+            .collect();
+        Some(Self {
+            num_validators: self.num_validators,
+            words,
+        })
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(4 + 8 * self.words.len());
+        out.extend_from_slice(&self.num_validators.to_le_bytes());
+        for &w in &self.words {
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn from_bytes_canonical(bytes: &[u8]) -> Option<(Self, usize)> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        let mut nv = [0u8; 4];
+        nv.copy_from_slice(&bytes[0..4]);
+        let num_validators = u32::from_le_bytes(nv);
+        let n_words = (num_validators as usize).div_ceil(64);
+        let need = 4 + 8 * n_words;
+        if bytes.len() < need {
+            return None;
+        }
+        let mut words = Vec::with_capacity(n_words);
+        for i in 0..n_words {
+            let mut wb = [0u8; 8];
+            wb.copy_from_slice(&bytes[4 + 8 * i..4 + 8 * (i + 1)]);
+            words.push(u64::from_le_bytes(wb));
+        }
+        let rem = (num_validators as usize) % 64;
+        if rem != 0 {
+            if let Some(&last) = words.last() {
+                if (last >> rem) != 0 {
+                    return None;
+                }
+            }
+        }
+        Some((
+            Self {
+                num_validators,
+                words,
+            },
+            need,
+        ))
+    }
+}
+
+/// Message binding mode for an aggregate proof.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SigningMode<'a> {
+    /// Consensus fast-path: all active signers sign the same message `msg`.
+    SharedMessage(&'a [u8]),
+    /// Multi-statement aggregation: the `k`-th active signer in `bitmap.active_indices()` signs `msgs[k]`.
+    PerSignerMessages(&'a [&'a [u8]]),
+}
+
+/// Canonical 32-byte domain-separated commitment to the ordered validator committee `pks`.
+pub fn compute_committee_root(pks: &[ValidatorPublicKey]) -> [u8; 32] {
+    let mut encoded = Vec::with_capacity(4 + 65 * pks.len());
+    encoded.extend_from_slice(&(pks.len() as u32).to_le_bytes());
+    for pk in pks {
+        encoded.extend_from_slice(&pk.to_bytes());
+    }
+    cshake256_32(b"QSAG.COMMITTEE.ROOT/v2", &encoded)
+}
+
+/// Verify that all active validators in `bitmap` have matching `profile` and **pairwise distinct**
+/// `(pk_seed, pk_root)` (`[P0-04]` anti-duplicate-validator replay defense).
+pub fn validate_unique_active_committee(
+    pks: &[ValidatorPublicKey],
+    bitmap: &SignerBitmap,
+    expected_profile: AggSigProfile,
+) -> bool {
+    if pks.len() != bitmap.num_validators() as usize {
+        return false;
+    }
+    let active = bitmap.active_indices();
+    if active.is_empty() {
+        return false;
+    }
+    let mut seen = BTreeSet::new();
+    for &idx in &active {
+        let pk = pks[idx];
+        if pk.profile != expected_profile {
+            return false;
+        }
+        if !seen.insert((pk.pk_seed, pk.pk_root)) {
+            return false;
+        }
+    }
+    true
+}
+
+impl core::fmt::Display for SigError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::error::Error for SigError {}
+
+#[cfg(test)]
+mod persistence_and_encoding_tests {
+    use super::*;
+
+    #[test]
+    fn signature_canonical_decoding() {
+        for profile in [
+            AggSigProfile::JortsPoseidon2,
+            AggSigProfile::CorduroyPoseidon2,
+        ] {
+            let bytes = vec![0; profile.raw_signature_bytes()];
+            let parsed = ValidatorSignature::from_bytes_canonical(profile, &bytes).unwrap();
+            assert_eq!(parsed.to_bytes(), bytes);
+            let mut trailing = bytes.clone();
+            trailing.push(0);
+            assert!(ValidatorSignature::from_bytes_canonical(profile, &trailing).is_err());
+            assert!(
+                ValidatorSignature::from_bytes_canonical(profile, &bytes[..bytes.len() - 1])
+                    .is_err()
+            );
+            // Every digest limb, including FORS paths and all hypertree layers.
+            let mut offsets: Vec<usize> = (0..32).step_by(8).collect();
+            let mut pos = 32;
+            if profile == AggSigProfile::JortsPoseidon2 {
+                pos += 4;
+            } else {
+                let end = pos + FORS_TREES * (1 + FORS_HEIGHT) * 32;
+                offsets.extend((pos..end).step_by(8));
+                pos = end;
+            }
+            let (layers, height) = if profile == AggSigProfile::JortsPoseidon2 {
+                (1, JORTS_XMSS_HEIGHT)
+            } else {
+                (CORDUROY_NUM_LAYERS, CORDUROY_SUBTREE_HEIGHT)
+            };
+            for _ in 0..layers {
+                pos += 4;
+                let end = pos + (WOTS_CHAINS + height) * 32;
+                offsets.extend((pos..end).step_by(8));
+                pos = end;
+            }
+            assert_eq!(pos, bytes.len());
+            for offset in offsets {
+                let mut bad = bytes.clone();
+                bad[offset..offset + 8]
+                    .copy_from_slice(&crate::field::GOLDILOCKS_PRIME.to_le_bytes());
+                assert!(ValidatorSignature::from_bytes_canonical(profile, &bad).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn stateful_signing_refuses_failed_wal() {
+        struct FailedWal;
+        impl EpochWalSink for FailedWal {
+            fn recovered_state(&self, _: &[u8; 32]) -> Result<Option<WalEpochState>, SigError> {
+                Ok(None)
+            }
+            fn persist_latched_epoch(
+                &mut self,
+                _: &[u8; 32],
+                _: u32,
+                _: u32,
+                _: &[u8; 32],
+            ) -> Result<(), SigError> {
+                Err(SigError::WalPersistenceFailed)
+            }
+        }
+        let mut key =
+            ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[15; 32], 0);
+        assert_eq!(
+            key.sign_stateful(b"must not sign", 0, &mut FailedWal),
+            Err(SigError::WalPersistenceFailed)
+        );
+        assert_eq!(key.next_unused_epoch(), 0);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn stateless_signing_reserves_before_release_and_recovers_count() {
+        let path = std::env::temp_dir().join(std::format!(
+            "qsag_sign_budget_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let profile = AggSigProfile::CorduroyPoseidon2;
+        let mut key = ValidatorKeypair::keygen_deterministic(profile, &[13; 32], 0);
+        let root = digest4_to_bytes(&key.pk.pk_root);
+        let mut wal =
+            FsStatelessBudgetWal::create_new_for_fresh_key(&path, &root, [19; 32]).unwrap();
+        let signature = key.sign_stateless(b"persisted", &mut wal).unwrap();
+        assert!(verify_individual_signature(
+            &key.pk,
+            b"persisted",
+            &signature
+        ));
+        assert_eq!(
+            ValidatorSignature::from_bytes_canonical(profile, &signature.to_bytes()).unwrap(),
+            signature
+        );
+        assert_eq!(key.stateless_sigs_issued(), 1);
+        drop(wal);
+        let mut key = ValidatorKeypair::keygen_deterministic(profile, &[13; 32], 0);
+        let mut wal = FsStatelessBudgetWal::open_or_recover(&path, &root, [19; 32]).unwrap();
+        assert!(key.sign_stateless(b"after restart", &mut wal).is_ok());
+        assert_eq!(key.stateless_sigs_issued(), 2);
+        struct FailedWal;
+        impl StatelessBudgetWalSink for FailedWal {
+            fn reserve(&mut self, _: &[u8; 32], _: u64) -> Result<u64, SigError> {
+                Err(SigError::WalPersistenceFailed)
+            }
+        }
+        assert_eq!(
+            key.sign_stateless(b"must not sign", &mut FailedWal),
+            Err(SigError::WalPersistenceFailed)
+        );
+        assert_eq!(key.stateless_sigs_issued(), 2);
+        drop(wal);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn durable_stateless_budget_survives_restart_and_rejects_wrong_key() {
+        let path = std::env::temp_dir().join(std::format!(
+            "qsag_budget_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = [9; 32];
+        {
+            let mut wal =
+                FsStatelessBudgetWal::create_new_for_fresh_key(&path, &root, [7; 32]).unwrap();
+            assert_eq!(wal.reserve(&root, 2), Ok(1));
+            assert_eq!(
+                wal.reserve(&[8; 32], 2),
+                Err(SigError::WalPersistenceFailed)
+            );
+        }
+        {
+            let mut wal = FsStatelessBudgetWal::open_or_recover(&path, &root, [7; 32]).unwrap();
+            assert_eq!(wal.reserve(&root, 2), Ok(2));
+        }
+        let mut wal = FsStatelessBudgetWal::open_or_recover(&path, &root, [7; 32]).unwrap();
+        assert_eq!(
+            wal.reserve(&root, 2),
+            Err(SigError::StatelessBudgetExhausted)
+        );
+        drop(wal);
+        std::fs::remove_file(&path).unwrap();
+        assert!(FsStatelessBudgetWal::open_or_recover(&path, &root, [7; 32]).is_err());
+    }
+}

@@ -557,3 +557,486 @@ fn apply_m4_base(b: [Goldilocks; 4]) -> [Goldilocks; 4] {
 }
 
 #[inline(always)]
+pub fn poseidon2_apply_me(st: &mut [Goldilocks; 12]) {
+    let y0 = apply_m4_base([st[0], st[1], st[2], st[3]]);
+    let y1 = apply_m4_base([st[4], st[5], st[6], st[7]]);
+    let y2 = apply_m4_base([st[8], st[9], st[10], st[11]]);
+    for i in 0..4 {
+        let s = (y0[i] + y1[i]) + y2[i];
+        st[i] = y0[i] + s;
+        st[4 + i] = y1[i] + s;
+        st[8 + i] = y2[i] + s;
+    }
+}
+
+#[inline(always)]
+pub fn poseidon2_apply_mi(st: &mut [Goldilocks; 12]) {
+    let mut s = Goldilocks::ZERO;
+    for x in st.iter() {
+        s += *x;
+    }
+    st[0] = (Goldilocks::TWO * st[0]).const_neg() + s;
+    st[1] += s;
+    let mut d = Goldilocks::TWO;
+    for x in st.iter_mut().skip(2) {
+        *x = d * *x + s;
+        d = d + d;
+    }
+}
+
+#[inline(always)]
+pub const fn poseidon2_sbox7_ext4(x: GoldilocksExt4) -> GoldilocksExt4 {
+    let x2 = x.square();
+    let x3 = x2.const_mul(x);
+    let x4 = x2.square();
+    x3.const_mul(x4)
+}
+
+#[inline(always)]
+fn apply_m4_ext4(b: [GoldilocksExt4; 4]) -> [GoldilocksExt4; 4] {
+    let s = (b[0] + b[1]) + (b[2] + b[3]);
+    [
+        s + (b[0] + b[1] + b[1]),
+        s + (b[1] + b[2] + b[2]),
+        s + (b[2] + b[3] + b[3]),
+        s + (b[3] + b[0] + b[0]),
+    ]
+}
+
+#[inline(always)]
+pub fn poseidon2_apply_me_ext4(st: &mut [GoldilocksExt4; 12]) {
+    let y0 = apply_m4_ext4([st[0], st[1], st[2], st[3]]);
+    let y1 = apply_m4_ext4([st[4], st[5], st[6], st[7]]);
+    let y2 = apply_m4_ext4([st[8], st[9], st[10], st[11]]);
+    for i in 0..4 {
+        let s = (y0[i] + y1[i]) + y2[i];
+        st[i] = y0[i] + s;
+        st[4 + i] = y1[i] + s;
+        st[8 + i] = y2[i] + s;
+    }
+}
+
+#[inline(always)]
+pub fn poseidon2_apply_mi_ext4(st: &mut [GoldilocksExt4; 12]) {
+    let mut s = GoldilocksExt4::ZERO;
+    for x in st.iter() {
+        s += *x;
+    }
+    st[0] = -(st[0] + st[0]) + s;
+    st[1] += s;
+    let mut d = Goldilocks::TWO;
+    for x in st.iter_mut().skip(2) {
+        *x = x.mul_base(d) + s;
+        d = d + d;
+    }
+}
+
+/// Full 30-round Width-12 `Poseidon2` permutation (`4` ext + `22` int + `4` ext),
+/// matching `lean/Qsag/Poseidon2.lean` and `qsag-core` bit-for-bit.
+#[inline]
+pub fn poseidon2_perm12(st: &mut [Goldilocks; 12]) {
+    poseidon2_apply_me(st);
+    for round_consts in &POSEIDON2_RC_EXT0 {
+        for (x, &rc) in st.iter_mut().zip(round_consts) {
+            *x = poseidon2_sbox7(*x + rc);
+        }
+        poseidon2_apply_me(st);
+    }
+    for &rc in &POSEIDON2_RC_INT {
+        st[0] = poseidon2_sbox7(st[0] + rc);
+        poseidon2_apply_mi(st);
+    }
+    for round_consts in &POSEIDON2_RC_EXT2 {
+        for (x, &rc) in st.iter_mut().zip(round_consts) {
+            *x = poseidon2_sbox7(*x + rc);
+        }
+        poseidon2_apply_me(st);
+    }
+}
+
+/// Zero-allocation streaming 32-byte `Poseidon2` hash (`Qsag.poseidon2Hash32`) with volatile zeroization.
+pub fn poseidon2_hash32(msg: &[u8]) -> [u8; 32] {
+    let mut st = [Goldilocks::ZERO; 12];
+    st[8] = Goldilocks::from_u64_reduced(8);
+    st[9] = Goldilocks::from_u64_reduced(4);
+    st[10] = Goldilocks::from_u64_reduced(32);
+    st[11] = Goldilocks::from_u64_reduced(POSEIDON2_CONST_IV);
+
+    let mut blk = [Goldilocks::ZERO; 8];
+    let mut cur_l = 0usize;
+
+    let mut chunks7 = msg.chunks_exact(7);
+    for c in &mut chunks7 {
+        let v = ((c[0] as u64) << 48)
+            | ((c[1] as u64) << 40)
+            | ((c[2] as u64) << 32)
+            | ((c[3] as u64) << 24)
+            | ((c[4] as u64) << 16)
+            | ((c[5] as u64) << 8)
+            | (c[6] as u64);
+        blk[cur_l] = Goldilocks::from_u64_reduced(v);
+        cur_l += 1;
+        if cur_l == 8 {
+            for i in 0..8 {
+                st[i] += blk[i];
+            }
+            poseidon2_perm12(&mut st);
+            blk = [Goldilocks::ZERO; 8];
+            cur_l = 0;
+        }
+    }
+
+    let rem = chunks7.remainder();
+    let mut last7 = [0u8; 7];
+    last7[..rem.len()].copy_from_slice(rem);
+    last7[rem.len()] = 0x01;
+    let v_last = ((last7[0] as u64) << 48)
+        | ((last7[1] as u64) << 40)
+        | ((last7[2] as u64) << 32)
+        | ((last7[3] as u64) << 24)
+        | ((last7[4] as u64) << 16)
+        | ((last7[5] as u64) << 8)
+        | (last7[6] as u64);
+    qsag_asm::volatile_fill(&mut last7, 0);
+
+    blk[cur_l] = Goldilocks::from_u64_reduced(v_last);
+    cur_l += 1;
+    if cur_l == 8 {
+        for i in 0..8 {
+            st[i] += blk[i];
+        }
+        poseidon2_perm12(&mut st);
+        blk = [Goldilocks::ZERO; 8];
+        cur_l = 0;
+    }
+
+    if cur_l == 7 {
+        blk[7] = Goldilocks::from_u64_reduced((1u64 << 56) + 1);
+    } else {
+        blk[cur_l] = Goldilocks::ONE;
+        blk[7] = Goldilocks::from_u64_reduced(1u64 << 56);
+    }
+    for i in 0..8 {
+        st[i] += blk[i];
+    }
+    poseidon2_perm12(&mut st);
+
+    qsag_asm::volatile_fill(&mut blk, Goldilocks::ZERO);
+
+    let mut out = [0u8; 32];
+    for (i, limb) in st[..4].iter().enumerate() {
+        out[8 * i..8 * (i + 1)].copy_from_slice(&limb.to_canonical_u64().to_be_bytes());
+    }
+    qsag_asm::volatile_fill(&mut st, Goldilocks::ZERO);
+    out
+}
+
+/// Algebraic 256-bit (4-limb) compression `H_comp(left4, right4, tweak4) -> [Goldilocks; 4]`:
+/// runs `poseidon2_perm12([left4, right4, tweak4])` with Jive/feed-forward `+ left4` so the
+/// compression function is non-invertible even though `poseidon2_perm12` is a permutation!
+#[inline]
+pub fn poseidon2_compress12_ff(
+    mut in0: [Goldilocks; 4],
+    in1: [Goldilocks; 4],
+    tweak: [Goldilocks; 4],
+) -> [Goldilocks; 4] {
+    let mut st = [
+        in0[0], in0[1], in0[2], in0[3], in1[0], in1[1], in1[2], in1[3], tweak[0], tweak[1],
+        tweak[2], tweak[3],
+    ];
+    poseidon2_perm12(&mut st);
+    let out = [
+        st[0] + in0[0],
+        st[1] + in0[1],
+        st[2] + in0[2],
+        st[3] + in0[3],
+    ];
+    qsag_asm::volatile_fill(&mut st, Goldilocks::ZERO);
+    qsag_asm::volatile_fill(&mut in0, Goldilocks::ZERO);
+    out
+}
+
+// ============================================================================
+// 4. Typestate Fenzi Instance-Bound Fiat–Shamir Transcript
+// ============================================================================
+
+/// Transcript phase before binding protocol relation (`squeeze` NOT available).
+pub struct Unbound;
+/// Transcript phase after binding relation, before binding public instance (`squeeze` NOT available).
+pub struct RelationBound;
+/// Transcript phase after binding BOTH relation and full public instance (`squeeze` enabled!).
+pub struct InstanceBound;
+
+/// Anti-grinding Fiat–Shamir transcript parameterized by compile-time phase `P`.
+///
+/// Follows Fenzi et al. (`IACR 2025`): challenges cannot be squeezed at compile time until
+/// BOTH `.bind_relation(...)` AND `.bind_instance(...)` have been executed on self-delimiting
+/// multi-field frames, eliminating weak-Fiat–Shamir last-round grinding attacks.
+#[derive(Clone)]
+pub struct FiatShamirTranscript<P> {
+    chain_digest: [u8; 32],
+    counter: u64,
+    _phase: PhantomData<P>,
+}
+
+const FS_CUSTOM: &[u8] = b"QSAG.AGG.FS_TRANSCRIPT/v1";
+const FS_MIDSTATE: [u64; 25] = cshake256_static_midstate(FS_CUSTOM);
+
+impl FiatShamirTranscript<Unbound> {
+    /// Initialize a fresh unbound Fiat–Shamir transcript.
+    pub fn new() -> Self {
+        let init = cshake256_from_midstate_32(&FS_MIDSTATE, b"INIT");
+        Self {
+            chain_digest: init,
+            counter: 0,
+            _phase: PhantomData,
+        }
+    }
+
+    /// Bind protocol relation identifier & public circuit/WHIR PCS parameters.
+    pub fn bind_relation(
+        self,
+        relation_tag: &[u8],
+        params_bytes: &[u8],
+        schedule: &crate::pcs::WhirSchedule,
+    ) -> FiatShamirTranscript<RelationBound> {
+        let mut encoded = schedule.to_bytes();
+        encoded.extend_from_slice(&crate::pcs::PCS_POW_BITS.to_le_bytes());
+        let frame = encode_multi_frame(&[
+            b"BIND_RELATION_HEM_WHIR_EXT4_V5",
+            &self.chain_digest,
+            relation_tag,
+            params_bytes,
+            &encoded,
+        ]);
+        FiatShamirTranscript {
+            chain_digest: cshake256_from_midstate_32(&FS_MIDSTATE, &frame),
+            counter: 0,
+            _phase: PhantomData,
+        }
+    }
+}
+
+impl Default for FiatShamirTranscript<Unbound> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FiatShamirTranscript<RelationBound> {
+    /// Bind the complete public statement (`committee_root`, `bitmap`, `signing_mode`, `profile`).
+    pub fn bind_instance(self, instance_fields: &[&[u8]]) -> FiatShamirTranscript<InstanceBound> {
+        let inner = encode_multi_frame(instance_fields);
+        let frame = encode_multi_frame(&[b"BIND_INSTANCE", &self.chain_digest, &inner]);
+        FiatShamirTranscript {
+            chain_digest: cshake256_from_midstate_32(&FS_MIDSTATE, &frame),
+            counter: 0,
+            _phase: PhantomData,
+        }
+    }
+}
+
+impl FiatShamirTranscript<InstanceBound> {
+    /// Absorb a labeled prover message / Merkle-Canopy commitment / polynomial evaluation.
+    pub fn absorb(&mut self, label: &[u8], payload: &[u8]) {
+        let frame = encode_multi_frame(&[b"ABSORB", &self.chain_digest, label, payload]);
+        self.chain_digest = cshake256_from_midstate_32(&FS_MIDSTATE, &frame);
+        self.counter = 0;
+    }
+
+    /// Absorb an `Ext4` element with canonical 32-byte little-endian framing.
+    pub fn absorb_ext4(&mut self, label: &[u8], val: GoldilocksExt4) {
+        self.absorb(label, &val.to_le_bytes());
+    }
+
+    /// Squeeze an unbiased `Goldilocks` challenge via rejection sampling over 64-bit blocks.
+    pub fn squeeze_base(&mut self, label: &[u8]) -> Goldilocks {
+        let mut sub_try: u64 = 0;
+        loop {
+            let ctr_bytes = self.counter.to_le_bytes();
+            let try_bytes = sub_try.to_le_bytes();
+            let frame = encode_multi_frame(&[
+                b"SQUEEZE_F",
+                &self.chain_digest,
+                label,
+                &ctr_bytes,
+                &try_bytes,
+            ]);
+            let mut raw = [0u8; 8];
+            cshake256_from_midstate_into(&FS_MIDSTATE, &frame, &mut raw);
+            let cand = u64::from_le_bytes(raw);
+            if let Some(f) = Goldilocks::from_canonical_u64(cand) {
+                self.counter += 1;
+                return f;
+            }
+            sub_try += 1;
+        }
+    }
+
+    /// Squeeze an unbiased `GoldilocksExt4` challenge ($\ge 255.99$ bits of min-entropy).
+    pub fn squeeze_ext4(&mut self, label: &[u8]) -> GoldilocksExt4 {
+        let l0 = self.squeeze_base(label);
+        let l1 = self.squeeze_base(label);
+        let l2 = self.squeeze_base(label);
+        let l3 = self.squeeze_base(label);
+        GoldilocksExt4::from_limbs([l0, l1, l2, l3])
+    }
+
+    /// Squeeze `count` independent `GoldilocksExt4` challenges.
+    pub fn squeeze_ext4_vec(&mut self, label: &[u8], count: usize) -> Vec<GoldilocksExt4> {
+        (0..count).map(|_| self.squeeze_ext4(label)).collect()
+    }
+
+    /// Squeeze `num_queries` uniform indices in `0..half_domain_len` (`half_domain_len` power of 2).
+    pub fn squeeze_query_indices(
+        &mut self,
+        label: &[u8],
+        half_domain_len: usize,
+        num_queries: usize,
+    ) -> Vec<usize> {
+        assert!(half_domain_len.is_power_of_two());
+        let mask = half_domain_len - 1;
+        let ctr_bytes = self.counter.to_le_bytes();
+        self.counter += 1;
+        let frame = encode_multi_frame(&[b"SQUEEZE_IDX", &self.chain_digest, label, &ctr_bytes]);
+        let mut raw = vec![0u8; 8 * num_queries];
+        cshake256_from_midstate_into(&FS_MIDSTATE, &frame, &mut raw);
+        raw.chunks_exact(8)
+            .map(|c| {
+                let mut b = [0u8; 8];
+                b.copy_from_slice(c);
+                (u64::from_le_bytes(b) as usize) & mask
+            })
+            .collect()
+    }
+
+    /// Current transcript binding digest.
+    pub fn transcript_digest(&self) -> [u8; 32] {
+        self.chain_digest
+    }
+}
+
+/// The internal diffusion matrix used here is the one whose invertibility and
+/// invariant-subspace properties are established by the unit tests of
+/// `qsag_accel::poseidon2` (see `POSEIDON2_INTERNAL_DIAG` there). These tests pin that identity.
+#[cfg(test)]
+mod internal_matrix_tests {
+    use super::*;
+    use qsag_accel::poseidon2::{POSEIDON2_INTERNAL_DIAG, poseidon2_perm12 as reference_perm12};
+
+    fn expected_entry(row: usize, col: usize) -> u64 {
+        let diag = if row == col {
+            POSEIDON2_INTERNAL_DIAG[row]
+        } else {
+            0
+        };
+        (Goldilocks::ONE + Goldilocks::from_u64_reduced(diag)).to_canonical_u64()
+    }
+
+    #[test]
+    fn internal_matrix_is_all_ones_plus_the_analysed_diagonal() {
+        for col in 0..12 {
+            let mut base = [Goldilocks::ZERO; 12];
+            base[col] = Goldilocks::ONE;
+            poseidon2_apply_mi(&mut base);
+            // Both extension-field variants must act as the same matrix on each coordinate.
+
+            let mut ext4 = [GoldilocksExt4::ZERO; 12];
+            ext4[col] = GoldilocksExt4::from_limbs([
+                Goldilocks::ONE,
+                Goldilocks::from_u64_reduced(3),
+                Goldilocks::from_u64_reduced(5),
+                Goldilocks::from_u64_reduced(11),
+            ]);
+            poseidon2_apply_mi_ext4(&mut ext4);
+
+            for row in 0..12 {
+                let entry = expected_entry(row, col);
+                let g_entry = Goldilocks::from_u64_reduced(entry);
+                assert_eq!(
+                    base[row].to_canonical_u64(),
+                    entry,
+                    "row {row}, column {col}"
+                );
+                let limbs = ext4[row].to_limbs();
+                assert_eq!(limbs[0], g_entry);
+                assert_eq!(limbs[1], g_entry * Goldilocks::from_u64_reduced(3));
+                assert_eq!(limbs[2], g_entry * Goldilocks::from_u64_reduced(5));
+                assert_eq!(limbs[3], g_entry * Goldilocks::from_u64_reduced(11));
+            }
+        }
+    }
+
+    #[test]
+    fn permutation_matches_the_reference_implementation() {
+        for seed in [0u64, 1, 0xFFFF_FFFF_0000_0000, 0x1234_5678_9ABC_DEF0] {
+            let raw: [u64; 12] =
+                core::array::from_fn(|i| seed.wrapping_mul(i as u64 + 1).wrapping_add(i as u64));
+            let mut state = raw.map(Goldilocks::from_u64_reduced);
+            let mut reference = raw;
+            poseidon2_perm12(&mut state);
+            reference_perm12(&mut reference);
+            assert_eq!(state.map(|x| x.to_canonical_u64()), reference);
+        }
+    }
+
+    #[test]
+    fn unequal_x4_lanes_match_scalar() {
+        let data = [0xabu8; 409];
+        for lengths in [[0, 17, 136, 205], [409, 272, 135, 1], [136, 0, 137, 271]] {
+            let inputs = lengths.map(|len| &data[..len]);
+            let expected = inputs.map(|input| cshake256_from_midstate_32(&CANOPY_MIDSTATE, input));
+            assert_eq!(cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, inputs), expected);
+            let short = cshake256_from_midstate_16_x4(&CANOPY_MIDSTATE, inputs);
+            for lane in 0..4 {
+                assert_eq!(short[lane], expected[lane][..16]);
+            }
+        }
+    }
+
+    #[test]
+    fn canopy_midstate_and_x4_match_cshake256_bit_for_bit() {
+        for len in [0usize, 1, 69, 135, 136, 137, 272, 310] {
+            let mut bufs = [
+                vec![0u8; len],
+                vec![0u8; len],
+                vec![0u8; len],
+                vec![0u8; len],
+            ];
+            for (k, b) in bufs.iter_mut().enumerate() {
+                for (i, byte) in b.iter_mut().enumerate() {
+                    *byte = ((i * 37 + k * 91 + len * 13) & 0xFF) as u8;
+                }
+            }
+            let got_x4 = cshake256_from_midstate_32_x4(
+                &CANOPY_MIDSTATE,
+                [&bufs[0], &bufs[1], &bufs[2], &bufs[3]],
+            );
+            for k in 0..4 {
+                let exp = cshake256_32(CANOPY_CUSTOM, &bufs[k]);
+                let single = cshake256_from_midstate_32(&CANOPY_MIDSTATE, &bufs[k]);
+                assert_eq!(single, exp, "midstate single mismatch at len={len}");
+                assert_eq!(
+                    got_x4[k], exp,
+                    "midstate x4 mismatch at len={len}, lane={k}"
+                );
+            }
+        }
+
+        let chal = [0x5Au8; 32];
+        let got_pow = cshake256_pow_u64_x4(&POW_MIDSTATE, &chal, 100);
+        for k in 0..4u64 {
+            let mut raw_in = [0u8; 40];
+            raw_in[0..32].copy_from_slice(&chal);
+            raw_in[32..40].copy_from_slice(&(100 + k).to_le_bytes());
+            let mut ref_out = [0u8; 8];
+            cshake256_into(POW_CUSTOM, &raw_in, &mut ref_out);
+            let exp_u64 = u64::from_le_bytes(ref_out);
+            assert_eq!(got_pow[k as usize], exp_u64);
+            assert_eq!(
+                cshake256_pow_u64_single(&POW_MIDSTATE, &chal, 100 + k),
+                exp_u64
+            );
+        }
+    }
+}
