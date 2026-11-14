@@ -516,3 +516,583 @@ impl Drop for OpeningMask {
 /// accepted by `begin` only for the exact projection it was derived for; deriving
 /// it twice for the same `(session, roster, projection)` repeats the same broadcast
 /// and reveals nothing further. No private message and no dealer is involved.
+pub fn dealerless_opening_mask(
+    seeds: &CustodianSeeds,
+    roster: &[(u16, u32)],
+    session: [u8; 32],
+    projection: AuthorizedHdProjection,
+) -> Result<OpeningMask, HdError> {
+    let config = seeds.config();
+    let party_id = seeds.party_id();
+    if roster.len() < usize::from(config.threshold())
+        || roster.windows(2).any(|w| w[0].0 >= w[1].0)
+        || roster.iter().any(|entry| !config.members().contains(entry))
+        || !roster.iter().any(|entry| entry.0 == party_id)
+    {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    let AuthorizedHdProjection::PublicRelationCoefficient { row, coefficient } = projection;
+    let mut context = Vec::with_capacity(16 + roster.len() * 6);
+    context.extend_from_slice(&(row as u64).to_be_bytes());
+    context.extend_from_slice(&(coefficient as u64).to_be_bytes());
+    for &(id, x) in roster {
+        context.extend_from_slice(&id.to_be_bytes());
+        context.extend_from_slice(&x.to_be_bytes());
+    }
+    let own = seeds.position();
+    let mut value = 0;
+    for &(id, _) in roster {
+        let other = config
+            .position(id)
+            .ok_or(HdError::InvalidThresholdParameters)?;
+        let Some(mut key) = seeds.pairwise_key(other, b"QSAG.HD.OPENING_ZERO.PAIR.V1") else {
+            continue;
+        };
+        let mut wide = [0u8; 24];
+        cshake256_framed_xof(
+            b"QSAG.HD.OPENING_ZERO.DEALERLESS.V1",
+            &[&key, &session, &context],
+            &mut wide,
+        );
+        ct_zeroize_bytes(&mut key);
+        let term = reduce_wide_mod_q(&wide);
+        ct_zeroize_bytes(&mut wide);
+        value = if own < other {
+            mod_q_add(value, term)
+        } else {
+            mod_q_sub(value, term)
+        };
+    }
+    Ok(OpeningMask {
+        party_id,
+        roster: roster.to_vec(),
+        session,
+        projection: Some(projection),
+        value,
+    })
+}
+
+/// Test-only trusted-dealer zero-sharing fixture for the historical regressions.
+#[cfg(test)]
+pub(crate) fn trusted_dealer_opening_masks(
+    roster: &[(u16, u32)],
+    session: [u8; 32],
+    mut fresh_entropy: [u8; 32],
+) -> Result<Vec<OpeningMask>, HdError> {
+    let entropy = RedactedSecret::new(fresh_entropy);
+    ct_zeroize_bytes(&mut fresh_entropy);
+    if roster.is_empty() || roster.windows(2).any(|w| w[0].0 >= w[1].0) {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    let xs: Vec<_> = roster.iter().map(|p| p.1).collect();
+    validate_shamir_eval_points(&xs)?;
+    let mut context = Vec::with_capacity(roster.len() * 6);
+    for &(id, x) in roster {
+        context.extend_from_slice(&id.to_be_bytes());
+        context.extend_from_slice(&x.to_be_bytes());
+    }
+    let mask_seed = RedactedSecret::new(cshake256_framed_32(
+        b"QSAG.HD.OPENING_ZERO.CONTEXT.V1",
+        &[entropy.expose(), &session, &context],
+    ));
+    let mut coeffs: Vec<_> = (0..roster.len())
+        .map(|i| {
+            if i == 0 {
+                0
+            } else {
+                sample_scalar_uniform_mod_q(
+                    b"QSAG.HD.OPENING_ZERO.V1",
+                    mask_seed.expose(),
+                    i as u32,
+                )
+            }
+        })
+        .collect();
+    let masks = roster
+        .iter()
+        .map(|&(id, x)| {
+            let mut num = 1;
+            let mut den = 1;
+            for &other in &xs {
+                if other != x {
+                    num = mod_q_mul(num, mod_q_sub(0, other));
+                    den = mod_q_mul(den, mod_q_sub(x, other));
+                }
+            }
+            let lambda = mod_q_mul(num, mod_q_inv_or_zero(den));
+            let z = coeffs
+                .iter()
+                .rev()
+                .fold(0, |acc, &c| mod_q_add(mod_q_mul(acc, x), c));
+            OpeningMask {
+                party_id: id,
+                roster: roster.to_vec(),
+                session,
+                projection: None,
+                value: mod_q_mul(lambda, z),
+            }
+        })
+        .collect();
+    ct_zeroize_u32s(&mut coeffs);
+    Ok(masks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn form() -> [RingPoly; MODULE_SECRET_L] {
+        core::array::from_fn(|j| RingPoly {
+            coeffs: core::array::from_fn(|i| ((j * 256 + i + 1) % 37) as u32),
+        })
+    }
+    // Test harness routes public messages only; verification consumes one local
+    // custodian state at a time, just as separate network endpoints would.
+    fn verify_all(states: Vec<HdThresholdEvalRound3VerifyMac<'_>>) -> Result<Vec<u32>, HdError> {
+        let openings: Vec<_> = states
+            .iter()
+            .map(|s| s.mac_opening())
+            .collect::<Result<_, _>>()?;
+        states.into_iter().map(|s| s.verify(&openings)).collect()
+    }
+    fn states<'a>(
+        shares: &'a mut [LinearModulePartyShare],
+        pk: &LinearModuleXPub,
+        fault: bool,
+    ) -> Vec<HdThresholdEvalRound3VerifyMac<'a>> {
+        let roster: Vec<_> = shares
+            .iter()
+            .map(|s| match s.scheme {
+                ShareScheme::Shamir { eval_point, .. } => (s.party_id, eval_point),
+                _ => unreachable!(),
+            })
+            .collect();
+        let masks = trusted_dealer_opening_masks(&roster, [1; 32], [31; 32]).unwrap();
+        let mut states: Vec<_> = shares
+            .iter_mut()
+            .zip(masks)
+            .map(|(s, mask)| {
+                HdThresholdEvalRound1Commit::begin_inner(
+                    s,
+                    pk,
+                    &roster,
+                    &form(),
+                    [1; 32],
+                    mask,
+                    [2; 32],
+                )
+                .unwrap()
+            })
+            .collect();
+        // EXACT report attack: commit a +1 value, retaining the honest gamma/alpha.
+        if fault {
+            states[0].0.value = mod_q_add(states[0].0.value, 1);
+        }
+        let commits: Vec<_> = states.iter().map(|s| s.commitment()).collect();
+        let mut states: Vec<_> = states
+            .into_iter()
+            .map(|s| s.freeze(&commits).unwrap())
+            .collect();
+        let openings: Vec<_> = states.iter().map(|s| s.share_opening()).collect();
+        let commits: Vec<_> = states
+            .iter_mut()
+            .map(|s| s.commit_mac(&openings).unwrap())
+            .collect();
+        states
+            .into_iter()
+            .map(|s| s.freeze_mac(&commits).unwrap())
+            .collect()
+    }
+    fn alpha(shares: &[LinearModulePartyShare], pk: &LinearModuleXPub) -> [u32; 7] {
+        let weights = quorum_weights(shares, pk).unwrap();
+        core::array::from_fn(|lane| {
+            shares.iter().zip(&weights).fold(0, |sum, (s, &w)| {
+                mod_q_add(sum, mod_q_mul(w, s.spdz_alpha_shares[lane]))
+            })
+        })
+    }
+    #[test]
+    fn distributed_zero_test_rejects_fault_and_retires_each_custodian() {
+        let (pk, mut shares) = setup_shamir_linear_module([61; 32], 3, &[1, 2, 3], 4).unwrap();
+        let key = alpha(&shares, &pk);
+        // Separate processes have separate quarantine latches. Every endpoint
+        // must reject independently, not merely observe another endpoint's latch.
+        for share in &mut shares {
+            share.poisoned = Arc::new(AtomicBool::new(false));
+        }
+        let rounds = states(&mut shares, &pk, true);
+        let openings: Vec<_> = rounds.iter().map(|s| s.mac_opening().unwrap()).collect();
+        let leaked: [u32; 7] = core::array::from_fn(|lane| {
+            mod_q_sub(
+                0,
+                openings
+                    .iter()
+                    .fold(0, |sum, o| mod_q_add(sum, o.tags[lane])),
+            )
+        });
+        // Commitment prevents adaptive cancellation, NOT abort-transcript leakage.
+        assert_eq!(leaked, key);
+        for round in rounds {
+            assert!(!round.0.share.is_poisoned());
+            assert_eq!(round.verify(&openings), Err(HdError::MacCheckFailed));
+        }
+        for share in &shares {
+            assert!(share.is_poisoned());
+            assert_eq!(share.spdz_alpha_shares, [0; 7]);
+        }
+    }
+
+    #[test]
+    fn family_abort_blocks_pending_residual_release() {
+        let (pk, mut shares) = setup_shamir_linear_module([63; 32], 3, &[1, 2, 3], 4).unwrap();
+        // Model handles enrolled in the same local family quarantine context.
+        let latch = Arc::new(AtomicBool::new(false));
+        for share in &mut shares {
+            share.poisoned = Arc::clone(&latch);
+        }
+        let mut rounds = states(&mut shares, &pk, false);
+        // Abandoning one local state retires its shared family context.
+        drop(rounds.pop());
+        for round in rounds {
+            assert!(matches!(round.mac_opening(), Err(HdError::MacCheckFailed)));
+            assert_eq!(round.verify(&[]), Err(HdError::MacCheckFailed));
+        }
+        assert!(shares.iter().all(LinearModulePartyShare::is_poisoned));
+    }
+
+    #[test]
+    fn distributed_zero_test_rejects_modified_opening_and_missing_party() {
+        for missing in [false, true] {
+            let (pk, mut shares) = setup_shamir_linear_module([62; 32], 3, &[1, 2, 3], 4).unwrap();
+            for share in &mut shares {
+                share.poisoned = Arc::new(AtomicBool::new(false));
+            }
+            let rounds = states(&mut shares, &pk, false);
+            let mut openings: Vec<_> = rounds.iter().map(|s| s.mac_opening().unwrap()).collect();
+            if missing {
+                openings.pop();
+            } else {
+                openings[0].tags[0] = mod_q_add(openings[0].tags[0], 1);
+            }
+            for round in rounds {
+                assert_eq!(round.verify(&openings), Err(HdError::MacCheckFailed));
+            }
+            assert!(shares.iter().all(LinearModulePartyShare::is_poisoned));
+        }
+    }
+
+    #[test]
+    fn exact_abort_extraction_cannot_forge_sibling_or_parent() {
+        sibling_isolation(|_| {
+            let (pk, mut parents) = setup_shamir_linear_module([77; 32], 2, &[1, 2, 3], 5).unwrap();
+            let c1 = trusted_dealer_rekey_child(&mut parents, &pk, 1, [11; 32], false).unwrap();
+            let c2 = trusted_dealer_rekey_child(&mut parents, &pk, 2, [12; 32], false).unwrap();
+            ((pk, parents), c1, c2)
+        });
+    }
+
+    /// The same exact attack against children produced by the dealerless rekey,
+    /// for non-hardened and hardened siblings.
+    #[test]
+    fn dealerless_children_isolate_an_extracted_mac_key() {
+        use crate::linear_module::harness::{committee, honest};
+        let seeds = crate::seeds::run_seed_ceremony(&committee(2, 3), 0x66);
+        sibling_isolation(|victim_is_parent| {
+            let hardened = victim_is_parent;
+            let (pk, parents) = honest(&seeds, None, 0, false, 1);
+            let c1 = honest(&seeds, Some((&parents, &pk)), 1, hardened, 2);
+            let c2 = honest(&seeds, Some((&parents, &pk)), 2, hardened, 3);
+            ((pk, parents), c1, c2)
+        });
+    }
+
+    type Family = (LinearModuleXPub, Vec<LinearModulePartyShare>);
+
+    fn sibling_isolation(make: impl Fn(bool) -> (Family, Family, Family)) {
+        for victim_is_parent in [false, true] {
+            let ((pk, mut parents), (pk1, mut c1), (pk2, mut c2)) = make(victim_is_parent);
+            let a0 = alpha(&parents, &pk);
+            let a1 = alpha(&c1, &pk1);
+            let a2 = alpha(&c2, &pk2);
+            for lane in 0..7 {
+                assert_ne!(a0[lane], a1[lane]);
+                assert_ne!(a2[lane], a1[lane]);
+            }
+            let attack = states(&mut c1, &pk1, true);
+            // A committed failed opening exposes c1's independent key.
+            // The family must be retired before any subsequent use.
+            let leaked: [u32; 7] = core::array::from_fn(|lane| {
+                mod_q_sub(
+                    0,
+                    attack
+                        .iter()
+                        .fold(0, |acc, s| mod_q_add(acc, s.0.tags[lane])),
+                )
+            });
+            assert_eq!(leaked, a1);
+            let (mut forged, key) = if victim_is_parent {
+                (states(&mut parents, &pk, true), a0)
+            } else {
+                (states(&mut c2, &pk2, true), a2)
+            };
+            {
+                // Corrupt party tries to repair the +1 using alpha extracted from c1.
+                for (tag, &known) in forged[0].0.tags.iter_mut().zip(&leaked) {
+                    *tag = mod_q_add(*tag, known);
+                }
+                let first = &forged[0];
+                let digest = commit_mpc_broadcast(
+                    &first.0.session,
+                    2,
+                    first.0.share.party_id,
+                    &tags_bytes(&first.0.tags),
+                    &first.0.mac_salt,
+                );
+                for s in &mut forged {
+                    s.0.mac_commitments[0].digest = digest;
+                }
+                let sums: [u32; 7] = core::array::from_fn(|lane| {
+                    forged
+                        .iter()
+                        .fold(0, |acc, s| mod_q_add(acc, s.0.tags[lane]))
+                });
+                assert_eq!(
+                    sums,
+                    core::array::from_fn(|lane| mod_q_sub(leaked[lane], key[lane]))
+                );
+                assert!(sums.iter().any(|&x| x != 0));
+                // Neither test may pass merely because a preceding abort set a latch.
+                assert!(forged.iter().all(|s| !s.0.share.is_poisoned()));
+                assert_eq!(verify_all(forged), Err(HdError::MacCheckFailed));
+            }
+            assert_eq!(verify_all(attack), Err(HdError::MacCheckFailed));
+            assert!(parents.iter().all(LinearModulePartyShare::is_poisoned));
+        }
+    }
+    #[test]
+    fn fresh_zero_masks_and_honest_opening() {
+        let roster = [(0, 1), (1, 2), (2, 3)];
+        let a = trusted_dealer_opening_masks(&roster, [1; 32], [20; 32]).unwrap();
+        let b = trusted_dealer_opening_masks(&roster, [1; 32], [21; 32]).unwrap();
+        assert_eq!(a.iter().fold(0, |sum, m| mod_q_add(sum, m.value)), 0);
+        assert_eq!(b.iter().fold(0, |sum, m| mod_q_add(sum, m.value)), 0);
+        assert_ne!(a[0].value, b[0].value);
+        let (pk, mut shares) = setup_shamir_linear_module([18; 32], 3, &[1, 2, 3], 3).unwrap();
+        let secret = reconstruct_for_recovery_or_test(&shares, &pk).unwrap();
+        let expected = form().iter().zip(&secret).fold(0, |sum, (l, s)| {
+            l.coeffs
+                .iter()
+                .zip(&s.coeffs)
+                .fold(sum, |acc, (&a, &b)| mod_q_add(acc, mod_q_mul(a, b)))
+        });
+        let weights = quorum_weights(&shares, &pk).unwrap();
+        let projections: Vec<_> = shares
+            .iter()
+            .map(|s| linear_value(&form(), &s.s_shares))
+            .collect();
+        let rounds = states(&mut shares, &pk, false);
+        // Exact old t>=3 transcript attack: divide each broadcast by its Lagrange
+        // weight to recover the party's polynomial projection. Fresh masks defeat it.
+        for ((state, &weight), &projection) in rounds.iter().zip(&weights).zip(&projections) {
+            assert_ne!(
+                mod_q_mul(state.0.value, mod_q_inv_or_zero(weight)),
+                projection
+            );
+        }
+        assert_eq!(verify_all(rounds).unwrap(), [expected; 3]);
+    }
+    #[test]
+    fn exact_radix_five_recovery_forms_are_rejected() {
+        let (pk, shares) = setup_shamir_linear_module([45; 32], 3, &[1, 2, 3], 4).unwrap();
+        let secret = reconstruct_for_recovery_or_test(&shares, &pk).unwrap();
+        let mut recovered = Vec::new();
+        // Reproduce the old attack: 9 CBD2 coefficients per field opening, 228 queries.
+        // Demonstrate recovery algebra, then send the exact same form to the new allowlist.
+        for start in (0..2048).step_by(9) {
+            let count = core::cmp::min(9, 2048 - start);
+            let mut form = core::array::from_fn(|_| RingPoly::zero());
+            let mut power = 1;
+            let mut offset = 0;
+            let mut opened = 0;
+            for j in 0..count {
+                let index = start + j;
+                form[index / 256].coeffs[index % 256] = power;
+                opened = mod_q_add(
+                    opened,
+                    mod_q_mul(power, secret[index / 256].coeffs[index % 256]),
+                );
+                offset += 2 * power;
+                power *= 5;
+            }
+            let mut digits = mod_q_add(opened, offset);
+            for _ in 0..count {
+                recovered.push(mod_q_sub(digits % 5, 2));
+                digits /= 5;
+            }
+            assert_eq!(
+                AuthorizedHdProjection::from_form(&pk, &form),
+                Err(HdError::UnauthorizedProjection)
+            );
+        }
+        assert_eq!(
+            recovered,
+            secret.iter().flat_map(|p| p.coeffs).collect::<Vec<_>>()
+        );
+        // Positive control: every permitted projection matches the public relation.
+        for row in 0..MODULE_K {
+            for coefficient in [0, 1, 127, 255] {
+                let projection =
+                    AuthorizedHdProjection::PublicRelationCoefficient { row, coefficient };
+                let form = projection.form(&pk).unwrap();
+                assert_eq!(
+                    AuthorizedHdProjection::from_form(&pk, &form),
+                    Ok(projection)
+                );
+                let value = form.iter().zip(&secret).fold(0, |sum, (l, s)| {
+                    l.coeffs
+                        .iter()
+                        .zip(&s.coeffs)
+                        .fold(sum, |acc, (&a, &b)| mod_q_add(acc, mod_q_mul(a, b)))
+                });
+                assert_eq!(value, pk.t_vec[row].coeffs[coefficient]);
+            }
+        }
+    }
+
+    #[test]
+    fn public_projection_begin_aborts_wrong_opened_scalar_before_releasing_mac_tags() {
+        use crate::linear_module::harness::{committee, honest};
+        let config = committee(2, 3);
+        let seeds = crate::seeds::run_seed_ceremony(&config, 0x7A);
+        let (pk, mut shares) = honest(&seeds, None, 0, false, 1);
+        for share in &mut shares {
+            share.poisoned = Arc::new(AtomicBool::new(false));
+        }
+        let roster = config.members().to_vec();
+        let projection = AuthorizedHdProjection::PublicRelationCoefficient {
+            row: 1,
+            coefficient: 17,
+        };
+        let masks: Vec<_> = (0..3)
+            .map(|p| dealerless_opening_mask(&seeds[p], &roster, [0x44; 32], projection).unwrap())
+            .collect();
+        let mut round1: Vec<_> = shares
+            .iter_mut()
+            .zip(masks)
+            .enumerate()
+            .map(|(idx, (share, mask))| {
+                HdThresholdEvalRound1Commit::begin(
+                    share,
+                    &pk,
+                    &roster,
+                    projection,
+                    [0x44; 32],
+                    mask,
+                    [idx as u8 + 1; 32],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // Corrupt custodian 0 injects a +1 additive fault into its opened share.
+        round1[0].0.value = mod_q_add(round1[0].0.value, 1);
+        let commits: Vec<_> = round1.iter().map(|s| s.commitment()).collect();
+        let mut round2: Vec<_> = round1
+            .into_iter()
+            .map(|s| s.freeze(&commits).unwrap())
+            .collect();
+        let share_openings: Vec<_> = round2.iter().map(|s| s.share_opening()).collect();
+
+        // Every custodian MUST abort inside `commit_mac` BEFORE computing or releasing the 7 MAC tags!
+        for state in &mut round2 {
+            assert_eq!(state.commit_mac(&share_openings), Err(HdError::MacCheckFailed));
+            assert_eq!(state.0.tags, [0; SPDZ_LANES]);
+            assert_eq!(state.0.opened_value, None);
+            assert!(state.0.share.is_poisoned());
+        }
+        for state in round2 {
+            assert!(state.freeze_mac(&[]).is_err());
+        }
+        assert!(shares.iter().all(LinearModulePartyShare::is_poisoned));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn durable_budget_is_inherited_by_child_and_recovered_before_begin() {
+        use crate::budget::DurableQueryBudget;
+        use std::sync::Mutex;
+        let dir = std::env::temp_dir().join(alloc::format!(
+            "hd-eval-budget-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("journal");
+        let (pk, mut parents) = setup_shamir_linear_module([51; 32], 1, &[1], 3).unwrap();
+        let family = parents[0].family_id();
+        let journal = Arc::new(Mutex::new(
+            DurableQueryBudget::create(&path, family, [4; 32]).unwrap(),
+        ));
+        parents[0].attach_budget(Arc::clone(&journal)).unwrap();
+        let (child_pk, mut child) =
+            trusted_dealer_rekey_child(&mut parents, &pk, 7, [44; 32], true).unwrap();
+        for _ in 0..127 {
+            parents[0].burn_query().unwrap();
+        }
+        let mask = trusted_dealer_opening_masks(&[(0, 1)], [1; 32], [9; 32])
+            .unwrap()
+            .remove(0);
+        let projection = AuthorizedHdProjection::PublicRelationCoefficient {
+            row: 0,
+            coefficient: 3,
+        };
+        let state = HdThresholdEvalRound1Commit::begin_inner(
+            &mut child[0],
+            &child_pk,
+            &[(0, 1)],
+            &projection.form(&child_pk).unwrap(),
+            [1; 32],
+            mask,
+            [8; 32],
+        )
+        .unwrap();
+        let commitment = state.commitment();
+        let mut state = state.freeze(&[commitment]).unwrap();
+        let opening = state.share_opening();
+        let mac = state.commit_mac(&[opening]).unwrap();
+        let state = state.freeze_mac(&[mac]).unwrap();
+        assert_eq!(
+            verify_all(alloc::vec![state]).unwrap(),
+            [child_pk.t_vec[0].coeffs[3]]
+        );
+        drop(child);
+        drop(parents);
+        drop(journal);
+        // A fresh process-equivalent root handle cannot reset the durable family counter.
+        let (pk, mut restored) = setup_shamir_linear_module([51; 32], 1, &[1], 3).unwrap();
+        let journal = Arc::new(Mutex::new(
+            DurableQueryBudget::open(&path, family, [4; 32]).unwrap(),
+        ));
+        restored[0].attach_budget(Arc::clone(&journal)).unwrap();
+        let mask = trusted_dealer_opening_masks(&[(0, 1)], [2; 32], [10; 32])
+            .unwrap()
+            .remove(0);
+        assert!(matches!(
+            HdThresholdEvalRound1Commit::begin_inner(
+                &mut restored[0],
+                &pk,
+                &[(0, 1)],
+                &projection.form(&pk).unwrap(),
+                [2; 32],
+                mask,
+                [8; 32]
+            ),
+            Err(HdError::EvaluationBudgetExceeded)
+        ));
+        drop(restored);
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}

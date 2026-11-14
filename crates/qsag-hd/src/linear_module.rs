@@ -549,3 +549,717 @@ impl LinearModulePartyShare {
 
 /// Validate that all `0..n` Shamir evaluation points are nonzero mod `MODULE_Q` and pairwise distinct!
 /// Directly prevents the `eval_points[m] == 0` cleartext secret disclosure bug.
+pub fn validate_shamir_eval_points(eval_points: &[u32]) -> Result<(), HdError> {
+    for (i, &xi_raw) in eval_points.iter().enumerate() {
+        let xi = ct_reduce_mod_q_u64(xi_raw as u64);
+        if xi == 0 || xi_raw >= MODULE_Q {
+            return Err(HdError::DuplicateOrZeroEvalPoint);
+        }
+        for &xj_raw in &eval_points[i + 1..] {
+            if xi == (ct_reduce_mod_q_u64(xj_raw as u64)) {
+                return Err(HdError::DuplicateOrZeroEvalPoint);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn eval_poly(coeffs: &[RingPoly], x: u32) -> RingPoly {
+    coeffs
+        .iter()
+        .rev()
+        .fold(RingPoly::zero(), |acc, c| acc.scale(x).add(c))
+}
+
+/// Test-only trusted-dealer fixture. The dealer knows all secrets; production
+/// roots come from the dealerless ceremony in `dealerless.rs`.
+#[cfg(test)]
+pub(crate) fn setup_shamir_linear_module(
+    master_entropy: [u8; 32],
+    threshold: u16,
+    eval_points: &[u32],
+    max_depth: u16,
+) -> Result<(LinearModuleXPub, Vec<LinearModulePartyShare>), HdError> {
+    if threshold == 0
+        || usize::from(threshold) > eval_points.len()
+        || eval_points.len() > usize::from(u16::MAX)
+        || max_depth == 0
+    {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    validate_shamir_eval_points(eval_points)?;
+    let mut ent = master_entropy;
+    let seed_a = cshake256_framed_32(b"QSAG.HD.LMOD.SEED_A.V2", &[&ent]);
+    let chain_code = cshake256_framed_32(b"QSAG.HD.LMOD.ROOT_CC.V2", &[&ent]);
+    let s_secret: [RingPoly; MODULE_SECRET_L] = core::array::from_fn(|j| {
+        RingPoly::sample_cbd2_ct(b"QSAG.HD.LMOD.ROOT_S.V2", &ent, j as u32)
+    });
+    let matrix = Arc::new(ExpandedHdMatrix::new(seed_a));
+    let t_vec = matrix.relation(&s_secret);
+    let family_id = hash_t_vec(&seed_a, &t_vec);
+    let degree = usize::from(threshold);
+    let poly_coeffs: [Vec<RingPoly>; MODULE_SECRET_L] = core::array::from_fn(|j| {
+        (0..degree)
+            .map(|d| {
+                if d == 0 {
+                    s_secret[j].clone()
+                } else {
+                    RingPoly::sample_uniform_mod_q(
+                        b"QSAG.HD.LMOD.SHAMIR.V2",
+                        &ent,
+                        ((j as u32) << 16) | d as u32,
+                    )
+                }
+            })
+            .collect()
+    });
+    let mut alpha_coeffs: [Vec<u32>; MODULE_MAC_LANES] = core::array::from_fn(|lane| {
+        (0..degree)
+            .map(|d| {
+                sample_scalar_uniform_mod_q(
+                    b"QSAG.HD.LMOD.ALPHA.V2",
+                    &ent,
+                    ((lane as u32) << 16) | d as u32,
+                )
+            })
+            .collect()
+    });
+    let mac_coeffs: [[Vec<RingPoly>; MODULE_SECRET_L]; MODULE_MAC_LANES] =
+        core::array::from_fn(|lane| {
+            core::array::from_fn(|j| {
+                (0..degree)
+                    .map(|d| {
+                        if d == 0 {
+                            s_secret[j].scale(alpha_coeffs[lane][0])
+                        } else {
+                            RingPoly::sample_uniform_mod_q(
+                                b"QSAG.HD.LMOD.MAC.V2",
+                                &ent,
+                                ((lane as u32) << 24) | ((j as u32) << 16) | d as u32,
+                            )
+                        }
+                    })
+                    .collect()
+            })
+        });
+    let shares = eval_points
+        .iter()
+        .enumerate()
+        .map(|(p, &x)| LinearModulePartyShare {
+            party_id: p as u16,
+            scheme: ShareScheme::Shamir {
+                threshold,
+                eval_point: x,
+            },
+            seed_a,
+            t_vec: t_vec.clone(),
+            chain_code: RedactedSecret::new(chain_code),
+            chain_code_key: RedactedSecret::new(cshake256_framed_32(b"QSAG.HD.CC.KEY.V1", &[&ent])),
+            hardened: false,
+            derivation_index: 0,
+            s_shares: core::array::from_fn(|j| SecretRingPoly::new(eval_poly(&poly_coeffs[j], x))),
+            spdz_macs: core::array::from_fn(|lane| {
+                core::array::from_fn(|j| SecretRingPoly::new(eval_poly(&mac_coeffs[lane][j], x)))
+            }),
+            spdz_alpha_shares: core::array::from_fn(|lane| {
+                alpha_coeffs[lane]
+                    .iter()
+                    .rev()
+                    .fold(0, |acc, &c| mod_q_add(mod_q_mul(acc, x), c))
+            }),
+            matrix: Arc::clone(&matrix),
+            family_id,
+            #[cfg(feature = "std")]
+            budget: None,
+            committee: eval_points
+                .iter()
+                .enumerate()
+                .map(|(i, &x)| (i as u16, x))
+                .collect(),
+            #[cfg(feature = "std")]
+            poison_journal: None,
+            poisoned: Arc::new(AtomicBool::new(false)),
+            evaluation_queries: Arc::new(AtomicUsize::new(0)),
+            depth_used: 0,
+            max_depth,
+        })
+        .collect();
+    for coeffs in &mut alpha_coeffs {
+        ct_zeroize_u32s(coeffs);
+    }
+    ct_zeroize_bytes(&mut ent);
+    Ok((
+        LinearModuleXPub {
+            seed_a,
+            t_vec,
+            chain_code: Some(chain_code),
+            matrix,
+            depth_used: 0,
+            max_depth,
+        },
+        shares,
+    ))
+}
+
+#[cfg(test)]
+fn quorum_weights(
+    quorum: &[LinearModulePartyShare],
+    expected: &LinearModuleXPub,
+) -> Result<Vec<u32>, HdError> {
+    if expected.seed_a != expected.matrix.seed {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    let first = quorum.first().ok_or(HdError::InvalidThresholdParameters)?;
+    let threshold = match first.scheme {
+        ShareScheme::Shamir { threshold, .. } => threshold,
+        _ => return Err(HdError::InvalidThresholdParameters),
+    };
+    if threshold == 0 || quorum.len() < usize::from(threshold) {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    let mut xs = Vec::with_capacity(quorum.len());
+    for (i, sh) in quorum.iter().enumerate() {
+        if sh.is_poisoned()
+            || sh.seed_a != expected.seed_a
+            || sh.t_vec != expected.t_vec
+            || sh.depth_used != expected.depth_used
+            || sh.max_depth != expected.max_depth
+            || expected
+                .chain_code
+                .is_some_and(|cc| sh.chain_code.expose() != &cc)
+            || quorum[..i]
+                .iter()
+                .any(|prior| prior.party_id == sh.party_id)
+        {
+            return Err(HdError::InvalidThresholdParameters);
+        }
+        match sh.scheme {
+            ShareScheme::Shamir {
+                threshold: t,
+                eval_point: x,
+            } if t == threshold => xs.push(x),
+            _ => return Err(HdError::InvalidThresholdParameters),
+        }
+    }
+    validate_shamir_eval_points(&xs)?;
+    Ok(xs
+        .iter()
+        .enumerate()
+        .map(|(i, &xi)| {
+            let mut num = 1;
+            let mut den = 1;
+            for (j, &xj) in xs.iter().enumerate() {
+                if i != j {
+                    num = mod_q_mul(num, mod_q_sub(0, xj));
+                    den = mod_q_mul(den, mod_q_sub(xi, xj));
+                }
+            }
+            mod_q_mul(num, mod_q_inv_or_zero(den))
+        })
+        .collect())
+}
+
+/// Test-only oracle: reconstructs complete secrets and authentication keys and
+/// checks all seven MAC lanes and the key relation. Absent from every non-test build.
+#[cfg(test)]
+pub(crate) fn reconstruct_for_recovery_or_test(
+    quorum: &[LinearModulePartyShare],
+    expected_xpub: &LinearModuleXPub,
+) -> Result<[RingPoly; MODULE_SECRET_L], HdError> {
+    let weights = quorum_weights(quorum, expected_xpub)?;
+    let secret = core::array::from_fn(|j| {
+        quorum
+            .iter()
+            .zip(&weights)
+            .fold(RingPoly::zero(), |acc, (sh, &w)| {
+                acc.add(&sh.s_shares[j].expose().scale(w))
+            })
+    });
+    let mut alpha = [0; MODULE_MAC_LANES];
+    let mut difference = 0u32;
+    for (lane, key) in alpha.iter_mut().enumerate() {
+        *key = quorum.iter().zip(&weights).fold(0, |acc, (sh, &w)| {
+            mod_q_add(acc, mod_q_mul(sh.spdz_alpha_shares[lane], w))
+        });
+        for (j, value) in secret.iter().enumerate() {
+            let mac = quorum
+                .iter()
+                .zip(&weights)
+                .fold(RingPoly::zero(), |acc, (sh, &w)| {
+                    acc.add(&sh.spdz_macs[lane][j].expose().scale(w))
+                });
+            let expected = value.scale(*key);
+            for (&a, &b) in mac.coeffs.iter().zip(&expected.coeffs) {
+                difference |= a ^ b;
+            }
+        }
+    }
+    ct_zeroize_u32s(&mut alpha);
+    if difference != 0 {
+        return Err(HdError::MacCheckFailed);
+    }
+    if expected_xpub.matrix.relation(&secret) != expected_xpub.t_vec {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    Ok(secret)
+}
+
+fn cyclic_ntt(values: &mut [u32; MODULE_N], inverse: bool) {
+    for i in 0..MODULE_N {
+        let j = (i as u8).reverse_bits() as usize;
+        if i < j {
+            values.swap(i, j);
+        }
+    }
+    let omega = mod_q_mul(1753, 1753);
+    let root = if inverse {
+        mod_q_inv_or_zero(omega)
+    } else {
+        omega
+    };
+    let mut width = 2;
+    while width <= MODULE_N {
+        let mut step = 1;
+        for _ in 0..MODULE_N / width {
+            step = mod_q_mul(step, root);
+        }
+        for block in values.chunks_exact_mut(width) {
+            let mut w = 1;
+            for j in 0..width / 2 {
+                let a = block[j];
+                let b = mod_q_mul(block[j + width / 2], w);
+                block[j] = mod_q_add(a, b);
+                block[j + width / 2] = mod_q_sub(a, b);
+                w = mod_q_mul(w, step);
+            }
+        }
+        width *= 2;
+    }
+    if inverse {
+        let scale = mod_q_inv_or_zero(MODULE_N as u32);
+        for value in values {
+            *value = mod_q_mul(*value, scale);
+        }
+    }
+}
+
+/// Test-only alias of the reconstruction oracle.
+#[cfg(test)]
+pub(crate) fn reconstruct_shamir_and_verify_key_relation(
+    quorum: &[LinearModulePartyShare],
+    expected_xpub: &LinearModuleXPub,
+) -> Result<[RingPoly; MODULE_SECRET_L], HdError> {
+    reconstruct_for_recovery_or_test(quorum, expected_xpub)
+}
+
+#[path = "threshold_eval.rs"]
+mod threshold_eval;
+pub use threshold_eval::*;
+
+#[path = "dealerless.rs"]
+mod dealerless;
+pub use dealerless::*;
+
+#[cfg(test)]
+mod ntt_tests {
+    use super::*;
+    #[test]
+    fn ntt_matches_schoolbook() {
+        for seed in [0, 1, 29, 255] {
+            let a = RingPoly::sample_uniform_mod_q(b"test", &[seed; 32], 0);
+            let b = RingPoly::sample_uniform_mod_q(b"test", &[seed; 32], 1);
+            let mut expected = RingPoly::zero();
+            for (i, &left) in a.coeffs.iter().enumerate() {
+                for (j, &right) in b.coeffs.iter().enumerate() {
+                    let product = mod_q_mul(left, right);
+                    let index = (i + j) % MODULE_N;
+                    expected.coeffs[index] = if i + j < MODULE_N {
+                        mod_q_add(expected.coeffs[index], product)
+                    } else {
+                        mod_q_sub(expected.coeffs[index], product)
+                    };
+                }
+            }
+            assert_eq!(a.mul_negacyclic(&b), expected);
+        }
+    }
+}
+
+#[cfg(test)]
+mod mac_tests {
+    use super::*;
+    #[test]
+    fn every_coordinate_and_mac_lane_is_checked() {
+        for coord in 0..MODULE_SECRET_L {
+            let (pk, mut shares) = setup_shamir_linear_module([9; 32], 2, &[1, 2, 3], 4).unwrap();
+            let last = shares.remove(2);
+            let mut quorum = [shares.remove(0), last];
+            quorum[0].s_shares[coord].0.coeffs[127] =
+                mod_q_add(quorum[0].s_shares[coord].0.coeffs[127], 1);
+            assert_eq!(
+                reconstruct_shamir_and_verify_key_relation(&quorum, &pk),
+                Err(HdError::MacCheckFailed)
+            );
+        }
+        for lane in 0..MODULE_MAC_LANES {
+            let (pk, mut shares) = setup_shamir_linear_module([9; 32], 2, &[1, 2, 3], 4).unwrap();
+            let last = shares.remove(2);
+            let mut quorum = [shares.remove(0), last];
+            quorum[0].spdz_macs[lane][7].0.coeffs[255] =
+                mod_q_add(quorum[0].spdz_macs[lane][7].0.coeffs[255], 1);
+            assert_eq!(
+                reconstruct_shamir_and_verify_key_relation(&quorum, &pk),
+                Err(HdError::MacCheckFailed)
+            );
+        }
+    }
+}
+
+/// Immutable public matrix cached in the twisted NTT domain.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExpandedHdMatrix {
+    seed: [u8; 32],
+    ntt: [[RingPoly; MODULE_L]; MODULE_K],
+}
+fn forward(poly: &RingPoly) -> RingPoly {
+    let mut out = poly.clone();
+    let mut twist = 1;
+    for c in &mut out.coeffs {
+        *c = mod_q_mul(*c, twist);
+        twist = mod_q_mul(twist, 1753);
+    }
+    cyclic_ntt(&mut out.coeffs, false);
+    out
+}
+fn inverse(mut poly: RingPoly) -> RingPoly {
+    cyclic_ntt(&mut poly.coeffs, true);
+    let inv = mod_q_inv_or_zero(1753);
+    let mut twist = 1;
+    for c in &mut poly.coeffs {
+        *c = mod_q_mul(*c, twist);
+        twist = mod_q_mul(twist, inv);
+    }
+    poly
+}
+impl ExpandedHdMatrix {
+    pub fn new(seed: [u8; 32]) -> Self {
+        Self::from_coefficients(seed, &expand_matrix_a(&seed))
+    }
+    fn from_coefficients(seed: [u8; 32], matrix: &[[RingPoly; MODULE_L]; MODULE_K]) -> Self {
+        Self {
+            seed,
+            ntt: core::array::from_fn(|r| core::array::from_fn(|c| forward(&matrix[r][c]))),
+        }
+    }
+    pub fn multiply(&self, secret: &[RingPoly; MODULE_L]) -> [RingPoly; MODULE_K] {
+        let transformed: [RingPoly; MODULE_L] = core::array::from_fn(|c| forward(&secret[c]));
+        core::array::from_fn(|r| {
+            let mut acc = RingPoly::zero();
+            for (a, b) in self.ntt[r].iter().zip(&transformed) {
+                for (c, (&x, &y)) in acc.coeffs.iter_mut().zip(a.coeffs.iter().zip(&b.coeffs)) {
+                    *c = mod_q_add(*c, mod_q_mul(x, y));
+                }
+            }
+            inverse(acc)
+        })
+    }
+    fn relation(&self, secret: &[RingPoly; MODULE_SECRET_L]) -> [RingPoly; MODULE_K] {
+        let product = self.multiply(&core::array::from_fn(|j| secret[j].clone()));
+        core::array::from_fn(|r| product[r].add(&secret[MODULE_L + r]))
+    }
+}
+
+impl RingPoly {
+    /// Version 1 external coefficient codec: exactly 736 bytes, little-endian 23-bit residues.
+    /// Transcript hashing deliberately retains its original four-byte encoding.
+    pub fn encode_packed_v1(&self) -> Result<[u8; 736], HdError> {
+        if self.coeffs.iter().any(|&c| c >= MODULE_Q) {
+            return Err(HdError::InvalidThresholdParameters);
+        }
+        let mut out = [0; 736];
+        for (i, &c) in self.coeffs.iter().enumerate() {
+            for bit in 0..23 {
+                out[(i * 23 + bit) / 8] |= (((c >> bit) & 1) as u8) << ((i * 23 + bit) % 8);
+            }
+        }
+        Ok(out)
+    }
+    pub fn decode_packed_v1(bytes: &[u8]) -> Result<Self, HdError> {
+        if bytes.len() != 736 {
+            return Err(HdError::InvalidThresholdParameters);
+        }
+        let out = Self {
+            coeffs: core::array::from_fn(|i| {
+                (0..23).fold(0, |acc, bit| {
+                    acc | (u32::from((bytes[(i * 23 + bit) / 8] >> ((i * 23 + bit) % 8)) & 1)
+                        << bit)
+                })
+            }),
+        };
+        if out.coeffs.iter().any(|&c| c >= MODULE_Q) {
+            return Err(HdError::InvalidThresholdParameters);
+        }
+        Ok(out)
+    }
+}
+
+/// Test-only trusted-dealer hardened fixture.
+#[cfg(test)]
+pub(crate) fn setup_hardened_shamir_linear_module(
+    entropy: [u8; 32],
+    threshold: u16,
+    eval_points: &[u32],
+    max_depth: u16,
+) -> Result<(LinearModuleXPub, Vec<LinearModulePartyShare>), HdError> {
+    let (mut pk, mut shares) = setup_shamir_linear_module(entropy, threshold, eval_points, max_depth)?;
+    pk.chain_code = None;
+    for share in &mut shares { share.hardened = true; }
+    Ok((pk, shares))
+}
+
+/// Test-only trusted-dealer rekey fixture retained for the historical regressions.
+/// Production rekey is `LinearModulePartyShare::derive_child_share`.
+#[cfg(test)]
+pub(crate) fn trusted_dealer_rekey_child(
+    parents: &mut [LinearModulePartyShare],
+    expected: &LinearModuleXPub,
+    child_index: u32,
+    mut fresh_entropy: [u8; 32],
+    hardened: bool,
+) -> Result<(LinearModuleXPub, Vec<LinearModulePartyShare>), HdError> {
+    let entropy = RedactedSecret::new(fresh_entropy);
+    ct_zeroize_bytes(&mut fresh_entropy);
+    let parent_secret = match reconstruct_for_recovery_or_test(parents, expected) {
+        Ok(s) => s,
+        Err(e) => {
+            for p in parents {
+                p.poison();
+            }
+            return Err(e);
+        }
+    };
+    let first = &parents[0];
+    if parents.len() != first.committee.len()
+        || parents.iter().zip(&first.committee).any(|(p, &(id, x))| {
+            p.party_id != id
+                || !matches!(p.scheme,ShareScheme::Shamir{eval_point,..} if eval_point==x)
+        })
+    {
+        return Err(HdError::InvalidThresholdParameters);
+    }
+    if expected.depth_used >= expected.max_depth {
+        return Err(HdError::DerivationBudgetExceeded {
+            current: expected.depth_used,
+            max: expected.max_depth,
+        });
+    }
+    if expected.chain_code.is_none() && !hardened {
+        return Err(HdError::HardenedDerivationRequired);
+    }
+    let digest = hash_t_vec(&expected.seed_a, &expected.t_vec);
+    let seed = RedactedSecret::new(cshake256_framed_32(
+        b"QSAG.HD.REKEY.V1",
+        &[
+            entropy.expose(),
+            &digest,
+            &child_index.to_be_bytes(),
+            &expected.depth_used.to_be_bytes(),
+        ],
+    ));
+    // Hardened secret derivation is deterministic in the parent/path. Rekey entropy
+    // changes authentication/sharing only. The secret binding also permits a public
+    // non-hardened parent to derive a genuinely hardened child.
+    let secret_binding = RedactedSecret::new(hash_t_vec(
+        &expected.seed_a,
+        &core::array::from_fn(|j| parent_secret[j].clone()),
+    ));
+    let private_cc = RedactedSecret::new(cshake256_framed_32(
+        b"QSAG.HD.HARDENED_CC.V1",
+        &[first.chain_code.expose(), secret_binding.expose(), &digest],
+    ));
+    let cc = if hardened {
+        private_cc.expose()
+    } else {
+        first.chain_code.expose()
+    };
+    let (tweak, next_cc) = expand_linear_tweak(cc, &digest, child_index);
+    let target: [RingPoly; MODULE_SECRET_L] =
+        core::array::from_fn(|j| parent_secret[j].add(&tweak[j]));
+    let xs: Vec<_> = first.committee.iter().map(|entry| entry.1).collect();
+    let threshold = match first.scheme {
+        ShareScheme::Shamir { threshold, .. } => threshold,
+        _ => unreachable!(),
+    };
+    let (random_pk, mut children) =
+        setup_shamir_linear_module(*seed.expose(), threshold, &xs, expected.max_depth)?;
+    let random_secret = reconstruct_for_recovery_or_test(&children, &random_pk)?;
+    let delta: [RingPoly; MODULE_SECRET_L] =
+        core::array::from_fn(|j| target[j].sub(&random_secret[j]));
+    let pk = LinearModuleXPub {
+        seed_a: expected.seed_a,
+        t_vec: first.matrix.relation(&target),
+        chain_code: if hardened { None } else { Some(next_cc) },
+        matrix: Arc::clone(&first.matrix),
+        depth_used: expected.depth_used + 1,
+        max_depth: expected.max_depth,
+    };
+    for (child, parent) in children.iter_mut().zip(parents.iter()) {
+        for (j, shift) in delta.iter().enumerate() {
+            child.s_shares[j] = SecretRingPoly::new(child.s_shares[j].expose().add(shift));
+            for lane in 0..MODULE_MAC_LANES {
+                child.spdz_macs[lane][j] = SecretRingPoly::new(
+                    child.spdz_macs[lane][j]
+                        .expose()
+                        .add(&shift.scale(child.spdz_alpha_shares[lane])),
+                );
+            }
+        }
+        child.seed_a = pk.seed_a;
+        child.t_vec = pk.t_vec.clone();
+        child.chain_code = RedactedSecret::new(next_cc);
+        child.chain_code_key = RedactedSecret::new(*parent.chain_code_key.expose());
+        child.hardened = hardened;
+        child.derivation_index = child_index;
+        child.depth_used = pk.depth_used;
+        child.matrix = Arc::clone(&parent.matrix);
+        child.family_id = parent.family_id;
+        child.poisoned = Arc::clone(&parent.poisoned);
+        child.evaluation_queries = Arc::clone(&parent.evaluation_queries);
+        #[cfg(feature = "std")]
+        {
+            child.budget = parent.budget.clone();
+            child.poison_journal = parent.poison_journal.clone();
+        }
+    }
+    let checked = reconstruct_for_recovery_or_test(&children, &pk)?;
+    if checked != target {
+        return Err(HdError::MacCheckFailed);
+    }
+    Ok((pk, children))
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[test]
+    fn reducer_cache_hash_and_codec_preserve_mappings() {
+        for seed in [0, 1, 19, 255] {
+            let mut bytes = [seed; 6144];
+            cshake256_framed_xof(b"reduction-test", &[&[seed]], &mut bytes);
+            for chunk in bytes.as_chunks::<24>().0 {
+                let mut old = 0;
+                for &byte in chunk {
+                    for bit in (0..8).rev() {
+                        old = mod_q_add(old, old);
+                        old = mod_q_add(old, u32::from((byte >> bit) & 1));
+                    }
+                }
+                assert_eq!(reduce_wide_mod_q(chunk), old);
+            }
+        }
+        let matrix = expand_matrix_a(&[1; 32]);
+        let cached = ExpandedHdMatrix::new([1; 32]);
+        let secret =
+            core::array::from_fn(|j| RingPoly::sample_uniform_mod_q(b"test", &[2; 32], j as u32));
+        let old: [RingPoly; MODULE_K] = core::array::from_fn(|r| {
+            matrix[r]
+                .iter()
+                .zip(&secret)
+                .fold(RingPoly::zero(), |sum, (a, b)| {
+                    sum.add(&a.mul_negacyclic(b))
+                })
+        });
+        assert_eq!(cached.multiply(&secret), old);
+        let old_bytes: Vec<_> = old.iter().map(RingPoly::to_bytes).collect();
+        assert_eq!(
+            hash_t_vec(&[1; 32], &old),
+            cshake256_framed_32(
+                b"QSAG.HD.LMOD.PK_HASH.V1",
+                &[
+                    &[1; 32],
+                    &old_bytes[0],
+                    &old_bytes[1],
+                    &old_bytes[2],
+                    &old_bytes[3]
+                ]
+            )
+        );
+        let poly = RingPoly {
+            coeffs: core::array::from_fn(|i| if i % 2 == 0 { MODULE_Q - 1 } else { 0 }),
+        };
+        let packed = poly.encode_packed_v1().unwrap();
+        assert_eq!(RingPoly::decode_packed_v1(&packed).unwrap(), poly);
+        assert!(RingPoly::decode_packed_v1(&packed[..735]).is_err());
+        assert!(RingPoly::decode_packed_v1(&[255; 736]).is_err());
+    }
+    #[test]
+    fn hardened_descriptor_blocks_public_parent_recovery_and_bad_parent_rekey() {
+        let (pk, mut parents) =
+            setup_hardened_shamir_linear_module([5; 32], 2, &[1, 2, 3], 5).unwrap();
+        assert!(pk.chain_code.is_none());
+        assert_eq!(pk.derive_child(9), Err(HdError::HardenedDerivationRequired));
+        let (child_pk, child) =
+            trusted_dealer_rekey_child(&mut parents, &pk, 9, [91; 32], true).unwrap();
+        assert!(child_pk.chain_code.is_none());
+        let (repeat_pk, repeat) =
+            trusted_dealer_rekey_child(&mut parents, &pk, 9, [93; 32], true).unwrap();
+        assert_eq!(repeat_pk, child_pk);
+        assert_ne!(repeat[0].spdz_alpha_shares, child[0].spdz_alpha_shares);
+        let exposed_child = reconstruct_for_recovery_or_test(&child, &child_pk).unwrap();
+        let parent = reconstruct_for_recovery_or_test(&parents, &pk).unwrap();
+        // The report's attack using a public/placeholder chain code no longer recovers the parent.
+        let (guessed_tweak, _) =
+            expand_linear_tweak(&[0; 32], &hash_t_vec(&pk.seed_a, &pk.t_vec), 9);
+        let guessed_parent: [RingPoly; MODULE_SECRET_L] =
+            core::array::from_fn(|j| exposed_child[j].sub(&guessed_tweak[j]));
+        assert_ne!(guessed_parent, parent);
+        parents[0].spdz_macs[6][7].0.coeffs[255] =
+            mod_q_add(parents[0].spdz_macs[6][7].0.coeffs[255], 1);
+        assert!(matches!(
+            trusted_dealer_rekey_child(&mut parents, &pk, 10, [92; 32], true),
+            Err(HdError::MacCheckFailed)
+        ));
+    }
+    #[test]
+    fn query_basis_attack_stops_before_228_queries() {
+        let (_, shares) = setup_shamir_linear_module([5; 32], 2, &[1, 2, 3], 5).unwrap();
+        for _ in 0..128 {
+            shares[0].burn_query().unwrap();
+        }
+        assert_eq!(
+            shares[0].burn_query(),
+            Err(HdError::EvaluationBudgetExceeded)
+        );
+    }
+}
+
+#[cfg(test)]
+mod reduction_tests {
+    use super::*;
+
+    #[test]
+    fn barrett_boundaries_and_full_width_random_inputs() {
+        let q = MODULE_Q as u64;
+        // Exhaust every residue at both ends of the u64 domain.
+        for r in 0..q {
+            for x in [r, q + r, u64::MAX - r] {
+                assert_eq!(ct_reduce_mod_q_u64(x) as u64, x % q);
+            }
+        }
+        for k in [0, 1, 2, u32::MAX as u64, u64::MAX / q] {
+            let x = k * q;
+            for v in [x.saturating_sub(1), x, x.saturating_add(1)] {
+                assert_eq!(ct_reduce_mod_q_u64(v) as u64, v % q);
+            }
+        }
+        let mut x = u128::MAX;
+        for _ in 0..100_000 {
+            assert_eq!(ct_reduce_mod_q_u128(x) as u128, x % q as u128);
+            assert_eq!(ct_reduce_mod_q_u64(x as u64) as u64, (x as u64) % q);
+            x = x
+                .wrapping_mul(0xda942042e4dd58b5)
+                .wrapping_add(0x9e3779b97f4a7c15);
+        }
+    }
+}
