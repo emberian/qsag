@@ -30,10 +30,12 @@ public import Qsag.ElfFixtureSlices
 public import Qsag.ElfParse
 import all Qsag.ElfParse
 
+import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag
 
 attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
+  UInt64.instLawfulOrderOrd Std.instLawfulEqOrdOfLawfulOrderOrdOfAntisymmLe
 
 set_option autoImplicit false
 set_option maxRecDepth 65536
@@ -167,7 +169,7 @@ inductive X86AluOp where
   deriving DecidableEq, Repr
 
 inductive X86ShiftKind where
-  | shl | shr | rol | ror
+  | shl | shr | rol | ror | sar
   deriving DecidableEq, Repr
 
 inductive X86VecBinOp where
@@ -223,7 +225,7 @@ inductive X86Instr where
   | vload (is256 : Bool) (dst : Nat) (addr : X86MemAddr)
   | vstore (is256 : Bool) (src : Nat) (addr : X86MemAddr)
   | vmovGprToXmm (is64 : Bool) (dstVec srcGpr : Nat)
-  | vpbroadcast (isQword : Bool) (dst srcVec : Nat)
+  | vpbroadcast (isQword is256 : Bool) (dst srcVec : Nat)
   | vpbroadcastLoad64 (dst : Nat) (addr : X86MemAddr)
   | vbinOp (op : X86VecBinOp) (is256 : Bool) (dst src1 src2 : Nat)
   | vpxorLoad256 (dst src1 : Nat) (addr : X86MemAddr)
@@ -333,11 +335,16 @@ def decodeShiftDigit? : Nat → Option X86ShiftKind
   | 1 => some .ror
   | 4 => some .shl
   | 5 => some .shr
+  | 7 => some .sar
   | _ => none
 
-/-- Decode one variable-length `x86_64` instruction at byte offset `pc`. -/
-def decodeX86InstrAt (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Instr) := do
-  let (prefLen, rest0, p66, _pf2, pf3) := stripX86LegacyPrefixes 12 bs false false false
+/-- Decode one variable-length `x86_64` instruction at byte offset `pc`, before the
+    architectural 15-byte length cap that `decodeX86InstrAt` applies to the result. -/
+def decodeX86InstrAtUncapped (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Instr) := do
+  let (prefLen, rest0, p66, pf2, pf3) := stripX86LegacyPrefixes 12 bs false false false
+  -- No supported encoding takes `0xF2` (`REPNE` / mandatory-prefix escape): it selects a
+  -- different instruction in every opcode map decoded below, so it is rejected, never dropped.
+  if pf2 then return ← none
   let b0 ← rest0[0]?
   let (rexLen, rex, rest) :=
     if 0x40 ≤ b0 && b0 ≤ 0x4F then (1, b0.toNat, rest0.drop 1) else (0, 0, rest0)
@@ -350,6 +357,8 @@ def decodeX86InstrAt (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Inst
   -- Scalar 16-bit partial writes are not represented by the Boolean width model.
   if p66 && !rexW && op != 0x0F then return ← none
   if op == 0xC5 || op == 0xC4 then
+    -- `66` / `F3` / `REX` in front of a VEX prefix raise `#UD`.
+    if p66 || pf3 || rexLen != 0 then return ← none
     let (vexLen, vexR, vexX, vexB, mmmmm, vexW, vvvReg, vexL, pp, afterVex) ←
       if op == 0xC5 then do
         let v1 ← rest[1]?
@@ -398,7 +407,7 @@ def decodeX86InstrAt (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Inst
         | .mem _ => none
       else if mmmmm == 2 && pp == 1 && (vop == 0x59 || vop == 0x78) then
         match opnd with
-        | .reg srcVec => pure ⟨pc, baseLen, .vpbroadcast (vop == 0x59) regF srcVec⟩
+        | .reg srcVec => pure ⟨pc, baseLen, .vpbroadcast (vop == 0x59) vexL regF srcVec⟩
         | .mem addr =>
           if vop == 0x59 && vexL then pure ⟨pc, baseLen, .vpbroadcastLoad64 regF addr⟩ else none
       else if mmmmm == 1 && pp == 1 && vop == 0xEF then
@@ -700,6 +709,11 @@ def decodeX86InstrAt (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Inst
     else none
   else
     none
+
+/-- Decode one `x86_64` instruction at byte offset `pc`. An instruction longer than 15 bytes
+    (redundant prefixes included) raises `#UD` and is rejected. -/
+def decodeX86InstrAt (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Instr) :=
+  (decodeX86InstrAtUncapped pc bs).bind fun d => if d.byteLen ≤ 15 then some d else none
 
 def dropExact? : Nat → List UInt8 → Option (List UInt8)
   | 0, bs => some bs
@@ -1097,6 +1111,13 @@ def evalX86Shift (sk : X86ShiftKind) (is64 : Bool) (v : UInt64) (cnt : Nat)
       let cf' := (res &&& msbMask) != 0
       let of' := cf' != ((res &&& nextMsbMask) != 0)
       (res, cf', of', zfIn)
+    | .sar =>
+      -- The vacated high `c` bits take the sign bit; `OF = 0` for a 1-bit `SAR`.
+      let signFill : UInt64 :=
+        if (cur &&& msbMask) != 0 then maskGprWidth is64 ((0 - 1 : UInt64) <<< UInt64.ofNat (w - c)) else 0
+      let res := (cur >>> UInt64.ofNat c) ||| signFill
+      let cf' := ((cur >>> UInt64.ofNat (c - 1)) &&& 1) != 0
+      (res, cf', false, res == 0)
 
 /-- Small-step `x86_64` operational semantics emitting `StepObs` (`pc`, `(addr, bytes)`, `isDoitSafe`). -/
 def stepX86 (d : DecodedInstr X86Instr) (s : X86State) : (X86State × StepObs) :=
@@ -1288,10 +1309,12 @@ def stepX86 (d : DecodedInstr X86Instr) (s : X86State) : (X86State × StepObs) :
   | .vmovGprToXmm is64 dstVec srcGpr =>
     let v := maskGprWidth is64 (s.gpr.get srcGpr)
     ({ s with pc := nextPc, ymm := s.ymm.set dstVec ⟨v, 0, 0, 0⟩ }, ⟨d.offset, [], true⟩)
-  | .vpbroadcast isQword dst srcVec =>
+  | .vpbroadcast isQword is256 dst srcVec =>
     let sv := s.ymm.get srcVec
     let w := if isQword then sv.w0 else mapBytes64 (fun _ => sv.w0.toUInt8)
-    ({ s with pc := nextPc, ymm := s.ymm.set dst ⟨w, w, w, w⟩, ymmDirty := true }, ⟨d.offset, [], true⟩)
+    -- `VEX.L = 0` writes `xmm` and zeroes bits `[255:128]`; `VEX.L = 1` writes all of `ymm`.
+    ({ s with pc := nextPc, ymm := s.ymm.set dst (clampVecWidth is256 ⟨w, w, w, w⟩),
+              ymmDirty := s.ymmDirty || is256 }, ⟨d.offset, [], true⟩)
   | .vpbroadcastLoad64 dst addr =>
     let ea := evalX86Addr s nextPc addr
     let w := readMem64 s.mem ea
@@ -1372,7 +1395,7 @@ inductive Arm64Instr where
   | movWide (isMovn : Bool) (is64 : Bool) (rd : Nat) (imm16 shift : Nat)
   | ubfm (is64 : Bool) (rd rn immr imms : Nat)
   | mulOp (isUmulh : Bool) (rd rn rm : Nat)
-  | csel (cond : Nat) (isInv : Bool) (rd rn rm : Nat)
+  | csel (cond : Nat) (isInv : Bool) (is64 : Bool) (rd rn rm : Nat)
   | ldp64 (rt1 rt2 rn : Nat) (offBytes : UInt64)
   | stp64 (rt1 rt2 rn : Nat) (offBytes : UInt64)
   | strbPost (rt rn : Nat) (postOff : UInt64)
@@ -1470,10 +1493,10 @@ def decodeArm64Word (pc : Nat) (w : UInt32) : Option Arm64Instr :=
   -- `CSEL` / `CSINV` (`CSETM`)
   else if (wn &&& 0x7FE00C00) == 0x1A800000 then
     let cond := (wn >>> 12) &&& 0xF
-    if cond < 4 then some (.csel cond false rd rn rm) else none
+    if cond < 4 then some (.csel cond false is64 rd rn rm) else none
   else if (wn &&& 0x7FE00C00) == 0x5A800000 then
     let cond := (wn >>> 12) &&& 0xF
-    if cond < 4 then some (.csel cond true rd rn rm) else none
+    if cond < 4 then some (.csel cond true is64 rd rn rm) else none
   -- Add/Sub immediate (`x0010001 sh imm12 Rn Rd`)
   else if (wn &&& 0x1F800000) == 0x11000000 then
     let opc := (wn >>> 29) &&& 3
@@ -1490,14 +1513,17 @@ def decodeArm64Word (pc : Nat) (w : UInt32) : Option Arm64Instr :=
     let shiftAmt := (wn >>> 10) &&& 0x3F
     let aop : Arm64AluOp :=
       if opc == 0 then .add else if opc == 1 then .adds else if opc == 2 then .sub else .subs
-    some (.aluReg aop is64 rd rn rm shiftKind shiftAmt)
+    -- `shift == 0b11` is reserved for Add/Sub, and `imm6 ≥ 32` is unallocated when `sf = 0`.
+    if shiftKind == 3 || (!is64 && shiftAmt ≥ 32) then none
+    else some (.aluReg aop is64 rd rn rm shiftKind shiftAmt)
   -- Logical shifted register (`xx001010 shift N Rm imm6 Rn Rd`)
   else if (wn &&& 0x1F000000) == 0x0A000000 then
     let opc := (wn >>> 29) &&& 3
     let nInv := ((wn >>> 21) &&& 1) == 1
     let shiftKind := (wn >>> 22) &&& 3
     let shiftAmt := (wn >>> 10) &&& 0x3F
-    if opc == 0 && !nInv then some (.aluReg .andOp is64 rd rn rm shiftKind shiftAmt)
+    if !is64 && shiftAmt ≥ 32 then none
+    else if opc == 0 && !nInv then some (.aluReg .andOp is64 rd rn rm shiftKind shiftAmt)
     else if opc == 0 && nInv then some (.aluReg .bic is64 rd rn rm shiftKind shiftAmt)
     else if opc == 1 && !nInv then some (.aluReg .orr is64 rd rn rm shiftKind shiftAmt)
     else if opc == 2 && !nInv then some (.aluReg .eor is64 rd rn rm shiftKind shiftAmt)
@@ -1636,6 +1662,12 @@ def applyArmShift (is64 : Bool) (v : UInt64) (kind amt : Nat) : UInt64 :=
   if c == 0 then v'
   else if kind == 0 then maskGprWidth is64 (v' <<< UInt64.ofNat c)
   else if kind == 1 then maskGprWidth is64 (v' >>> UInt64.ofNat c)
+  else if kind == 2 then
+    -- `ASR`: the vacated high `c` bits take the sign bit (bit `w - 1`) of the `w`-bit operand.
+    let fill : UInt64 :=
+      if (v' >>> UInt64.ofNat (w - 1)) &&& 1 == 1
+      then maskGprWidth is64 ((0 - 1 : UInt64) <<< UInt64.ofNat (w - c)) else 0
+    (v' >>> UInt64.ofNat c) ||| fill
   else maskGprWidth is64 ((v' >>> UInt64.ofNat c) ||| (v' <<< UInt64.ofNat (w - c)))
 
 def evalArmAlu (op : Arm64AluOp) (is64 : Bool) (a b : UInt64) (cfIn zfIn : Bool) : (UInt64 × Bool × Bool) :=
@@ -1711,11 +1743,12 @@ def stepArm64 (d : DecodedInstr Arm64Instr) (s : Arm64State) : (Arm64State × St
     let res := if isUmulh then UInt64.ofNat (prod / 0x10000000000000000)
                else UInt64.ofNat (prod % 0x10000000000000000)
     ({ s with pc := nextPc, gpr := setArmGpr s rd res }, ⟨d.offset, [], s.dit⟩)
-  | .csel cond isInv rd rn rm =>
+  | .csel cond isInv is64 rd rn rm =>
     let taken := evalArmCond cond s
     let v := if taken then getArmGpr s rn
              else if isInv then ~~~(getArmGpr s rm) else getArmGpr s rm
-    ({ s with pc := nextPc, gpr := setArmGpr s rd v }, ⟨d.offset, [], s.dit⟩)
+    -- `sf = 0` writes the 32-bit result zero-extended into `Xd`; `sf = 1` writes all 64 bits.
+    ({ s with pc := nextPc, gpr := setArmGpr s rd (maskGprWidth is64 v) }, ⟨d.offset, [], s.dit⟩)
   | .ldp64 rt1 rt2 rn off =>
     let ea := getArmGpr s rn + off
     let v1 := readMem64 s.mem ea
@@ -2048,7 +2081,7 @@ def x86InstrRegsValid : X86Instr → Bool
   | .negReg _ r | .notReg _ r | .setcc _ r | .bswap _ r | .mulOneOp _ _ r | .shiftImm _ _ r _ | .varShiftCl _ r => r < 16
   | .movRegReg _ d s | .aluRegReg _ _ d s | .testRegReg _ d s | .cmpRegReg _ d s | .cmovcc _ _ d s | .adcx d s | .adox d s
   | .ssePcmpeqb d s | .ssePand d s | .ssePmovmskb d s
-  | .vmovGprToXmm _ d s | .vpbroadcast _ d s | .vshiftImm _ _ d s _ => d < 16 && s < 16
+  | .vmovGprToXmm _ d s | .vpbroadcast _ _ d s | .vshiftImm _ _ d s _ => d < 16 && s < 16
   | .mulx h l s | .vbinOp _ _ h l s | .vpclmulqdq _ h l s _
   | .vgf2p8affineqb _ h l s _ | .vperm2i128 h l s _ => h < 16 && l < 16 && s < 16
   | .loadGpr w _ r a | .storeGpr w r a => (w == 1 || w == 8) && r < 16 && x86AddrRegsValid a
@@ -2067,6 +2100,8 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
   else
   let nextPc := d.offset + d.byteLen
   let stNoLoop := { st with stackZeroLoop := 0 }
+  -- Used by the epilogue steps that write no memory: a completed frame wipe (`4`) stays valid.
+  let stKeep := { st with stackZeroLoop := if st.stackZeroLoop == 4 then 4 else 0 }
   match d.instr with
   | .nop | .mfence =>
     some [(nextPc, stNoLoop)]
@@ -2080,7 +2115,7 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
     else none
   | .popReg r =>
     if c.usesRbpFrame && r == 5 && st.gpr.get 4 == .spMinus8 && st.rbpSaved then
-      some [(nextPc, { stNoLoop with
+      some [(nextPc, { stKeep with
         gpr := (st.gpr.set 4 (.initSame 4)).set 5 (.initOwn 5) })]
     else none
   | .ret =>
@@ -2094,7 +2129,9 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
     let ymmClean := !st.ymmDirty
     let vecWiped := st.ymm.allIdx (fun _ vo => vo != .secretVal && vo != .pubVal)
     let gprWiped := c.wipedScratchGprs.all (fun r => st.gpr.get r == .zeroConst)
-    if spOk && allCalleeOk && ymmClean && vecWiped && gprWiped then some [] else none
+    -- A frame-allocating kernel may only return once its spill area has been wiped.
+    let frameOk := !c.usesRbpFrame || st.stackZeroLoop == 4
+    if spOk && allCalleeOk && ymmClean && vecWiped && gprWiped && frameOk then some [] else none
   | .movRegReg is64 dst src =>
     if is64 && dst == 0 && src == 4 && st.gpr.get 4 == .frameSp &&
        st.gpr.get 1 == .constVal 25 then
@@ -2105,7 +2142,7 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       let orig :=
         if is64 then st.gpr.get src
         else if (st.gpr.get src).isPublic then .pubVal else .secretVal
-      some [(nextPc, { stNoLoop with gpr := st.gpr.set dst orig })]
+      some [(nextPc, { stKeep with gpr := st.gpr.set dst orig })]
   | .movImm is64 dst imm =>
     let v := maskGprWidth is64 imm
     let orig : RegOrigin := if v == 0 then .zeroConst else .constVal v
@@ -2122,7 +2159,7 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       some [(nextPc, { stNoLoop with memUnmodified := false, rbpSaved := rbpOk })]
   | .aluRegReg op _is64 dst src =>
     if op == .xorOp && dst == src then
-      some [(nextPc, { stNoLoop with
+      some [(nextPc, { stKeep with
         gpr := st.gpr.set dst .zeroConst
         cfPub := true, ofPub := true, zfPub := true })]
     else if op == .sbb && dst == src then
@@ -2158,7 +2195,7 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       some [(nextPc, { stNoLoop with
         gpr := st.gpr.set 4 .frameSp
         cfPub := true, ofPub := false, zfPub := true })]
-    else if is64 && op == .add && dst == 0 && imm == 0x20 && st.stackZeroLoop == 1 then
+    else if is64 && op == .add && dst == 0 && imm == 0x20 && st.stackZeroLoop == 5 then
       some [(nextPc, { st with
         gpr := st.gpr.set 0 .pubVal
         cfPub := true, ofPub := false, zfPub := true
@@ -2265,7 +2302,7 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
   | .jcc cc targetPc =>
     if !x86CondIsPublic cc st || targetPc < 0 || targetPc.toNat ≥ 8192 then none
     else if st.stackZeroLoop == 3 && cc == 5 then
-      some [(targetPc.toNat, { st with stackZeroLoop := 1 }), (nextPc, stNoLoop)]
+      some [(targetPc.toNat, { st with stackZeroLoop := 1 }), (nextPc, { st with stackZeroLoop := 4 })]
     else
       some [(targetPc.toNat, stNoLoop), (nextPc, stNoLoop)]
   | .jmpRel targetPc =>
@@ -2280,9 +2317,9 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       | .pubVal => VecOrigin.pubVal
       | .initVec r => VecOrigin.initVec r
       | .secretVal => VecOrigin.secretVal)
-    some [(nextPc, { stNoLoop with ymm := ymmPreserved, ymmDirty := false })]
+    some [(nextPc, { stKeep with ymm := ymmPreserved, ymmDirty := false })]
   | .vzeroall =>
-    some [(nextPc, { stNoLoop with ymm := Bank16.ofFn (fun _ => .zeroConst), ymmDirty := false })]
+    some [(nextPc, { stKeep with ymm := Bank16.ofFn (fun _ => .zeroConst), ymmDirty := false })]
   | .vload is256 dst addr =>
     if !x86AddrIsPublic st addr then none
     else
@@ -2291,12 +2328,14 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       some [(nextPc, { stNoLoop with
         ymm := st.ymm.set dst vo
         ymmDirty := st.ymmDirty || is256 })]
-  | .vstore is256 _src addr =>
+  | .vstore is256 src addr =>
     if !x86AddrIsPublic st addr then none
     else
       let w := if is256 then 32 else 16
       let rbpOk := if st.rbpSaved then storePreservesSavedRbp c st addr w else false
-      let nextLoop := if st.stackZeroLoop == 1 && addr == .baseDisp 0 0 && is256 then 1 else 0
+      let nextLoop :=
+        if st.stackZeroLoop == 1 && addr == .baseDisp 0 0 && is256 && st.ymm.get src == .zeroConst
+        then 5 else 0
       some [(nextPc, { st with
         memUnmodified := false
         rbpSaved := rbpOk
@@ -2307,11 +2346,11 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       else if (st.gpr.get srcGpr).isPublic then .pubVal
       else .secretVal
     some [(nextPc, { stNoLoop with ymm := st.ymm.set dstVec vo })]
-  | .vpbroadcast _isQword dst srcVec =>
+  | .vpbroadcast _isQword is256 dst srcVec =>
     let svo := st.ymm.get srcVec
     let vo : VecOrigin :=
       if svo == .zeroConst then .zeroConst else if svo.isPublic then .pubVal else .secretVal
-    some [(nextPc, { stNoLoop with ymm := st.ymm.set dst vo, ymmDirty := true })]
+    some [(nextPc, { stNoLoop with ymm := st.ymm.set dst vo, ymmDirty := st.ymmDirty || is256 })]
   | .vpbroadcastLoad64 dst addr =>
     if !x86AddrIsPublic st addr then none
     else
@@ -2319,12 +2358,12 @@ def transferX86Instr (c : FuncContract) (d : DecodedInstr X86Instr) (st : X86Abs
       some [(nextPc, { stNoLoop with ymm := st.ymm.set dst vo, ymmDirty := true })]
   | .vbinOp op is256 dst src1 src2 =>
     if op == .vpxor && src1 == src2 then
-      some [(nextPc, { stNoLoop with
+      some [(nextPc, { stKeep with
         ymm := st.ymm.set dst .zeroConst
         ymmDirty := st.ymmDirty || is256 })]
     else
       let p := (st.ymm.get src1).isPublic && (st.ymm.get src2).isPublic
-      some [(nextPc, { stNoLoop with
+      some [(nextPc, { stKeep with
         ymm := st.ymm.set dst (if p then .pubVal else .secretVal)
         ymmDirty := st.ymmDirty || is256 })]
   | .vpxorLoad128 dst src1 addr =>
@@ -2473,7 +2512,8 @@ def isArm64CalleeSavedVec (v : Nat) : Bool :=
   8 ≤ v && v ≤ 15
 
 def initArm64AbsState (c : FuncContract) : Arm64AbsState :=
-  { gpr := Bank32.ofFn (fun r =>
+  { dit := c.doitEnabled
+    gpr := Bank32.ofFn (fun r =>
       if r == 31 then .zeroConst
       else if r ∈ c.pubGprs then .initSame r
       else if isArm64CalleeSavedGpr r then .initOwn r
@@ -2498,7 +2538,7 @@ def arm64InstrRegsValid : Arm64Instr → Bool
   | .aluImm _ _ rd rn _ | .ubfm _ rd rn _ _ | .strbPost rd rn _
   | .ldrQ rd rn _ | .strQ rd rn _ | .fmovDFromX rd rn | .vdup2d rd rn
   | .vshift2d _ rd rn _ => rd < 32 && rn < 32
-  | .aluReg _ _ rd rn rm _ _ | .mulOp _ rd rn rm | .csel _ _ rd rn rm
+  | .aluReg _ _ rd rn rm _ _ | .mulOp _ rd rn rm | .csel _ _ _ rd rn rm
   | .ldp64 rd rn rm _ | .stp64 rd rn rm _ | .veor16b rd rn rm
   | .ldpQ rd rn rm _ | .stpQ rd rn rm _ | .vand16b rd rn rm
   | .vtrn _ _ _ rd rn rm | .vrax1_2d rd rn rm | .vxar_2d rd rn rm _ | .vpmull _ rd rn rm | .vext16b rd rn rm _ =>
@@ -2507,7 +2547,7 @@ def arm64InstrRegsValid : Arm64Instr → Bool
     vd < 32 && vn < 32 && vm < 32 && va < 32
 
 def armRequiresDit : Arm64Instr → Bool
-  | .mulOp _ _ _ _ | .csel _ _ _ _ _ | .vpmull _ _ _ _ => true
+  | .mulOp _ _ _ _ | .csel _ _ _ _ _ _ | .vpmull _ _ _ _ => true
   | _ => false
 
 def transferArm64Instr (c : FuncContract) (d : DecodedInstr Arm64Instr) (st : Arm64AbsState) :
@@ -2559,7 +2599,7 @@ def transferArm64Instr (c : FuncContract) (d : DecodedInstr Arm64Instr) (st : Ar
   | .mulOp _isUmulh rd rn rm =>
     let p := (getArmAbsGpr st rn).isPublic && (getArmAbsGpr st rm).isPublic
     some [(nextPc, { st with gpr := setArmAbsGpr st rd (if p then .pubVal else .secretVal) })]
-  | .csel cond _isInv rd rn rm =>
+  | .csel cond _isInv _is64 rd rn rm =>
     let p := armCondIsPublic cond st && (getArmAbsGpr st rn).isPublic && (getArmAbsGpr st rm).isPublic
     some [(nextPc, { st with gpr := setArmAbsGpr st rd (if p then .pubVal else .secretVal) })]
   | .ldp64 rt1 rt2 rn _off =>
@@ -3413,7 +3453,13 @@ def X86ContractInit (c : FuncContract) (s₁ s₂ : X86State) : Prop :=
        s₂.mem (s₂.gpr.get regLen.1 + UInt64.ofNat off)) ∧
   X86FramePrecond c s₁ ∧ X86FramePrecond c s₂
 
-/-- System V AMD64 ABI & Epilogue Zeroization postcondition upon `ret`. -/
+/-- Base of the 32-byte-aligned `0x340`-byte frame that a `usesRbpFrame` kernel allocates with
+    `push rbp; mov rbp, rsp; and rsp, -32; sub rsp, 0x340`, as a function of the entry `rsp`. -/
+def x86FrameSpVal (rsp₀ : UInt64) : UInt64 :=
+  ((rsp₀ - 8) &&& 0xFFFFFFFFFFFFFFE0) - 0x340
+
+/-- System V AMD64 ABI & Epilogue Zeroization postcondition upon `ret`. A `usesRbpFrame`
+    kernel additionally leaves its 800-byte (25 × 32) stack spill area zeroed. -/
 def X86ExitHygiene (c : FuncContract) (s₁₀ s₂₀ s₁ s₂ : X86State) : Prop :=
   (s₁.gpr.get 4 = s₁₀.gpr.get 4 ∧ s₂.gpr.get 4 = s₂₀.gpr.get 4) ∧
   (∀ r ∈ [3, 5, 12, 13, 14, 15],
@@ -3425,7 +3471,11 @@ def X86ExitHygiene (c : FuncContract) (s₁₀ s₂₀ s₁ s₂ : X86State) : P
        ((s₁.ymm.get i = s₁₀.ymm.get r ∧ s₂.ymm.get i = s₂₀.ymm.get r) ∨
         (s₁.ymm.get i = ⟨(s₁₀.ymm.get r).w0, (s₁₀.ymm.get r).w1, 0, 0⟩ ∧
          s₂.ymm.get i = ⟨(s₂₀.ymm.get r).w0, (s₂₀.ymm.get r).w1, 0, 0⟩)))) ∧
-  (∀ r ∈ c.wipedScratchGprs, s₁.gpr.get r = 0 ∧ s₂.gpr.get r = 0)
+  (∀ r ∈ c.wipedScratchGprs, s₁.gpr.get r = 0 ∧ s₂.gpr.get r = 0) ∧
+  (c.usesRbpFrame = true →
+     ∀ j : Nat, j < 800 →
+       s₁.mem (x86FrameSpVal (s₁₀.gpr.get 4) + UInt64.ofNat j) = 0 ∧
+       s₂.mem (x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat j) = 0)
 
 /-- Initial `AArch64` relational contract $\Gamma(s_1, s_2)$:
     both executions start at `pc = 0`, agree on public GPRs (`x0..x3` pointers / lengths),
@@ -3433,7 +3483,7 @@ def X86ExitHygiene (c : FuncContract) (s₁₀ s₂₀ s₁ s₂ : X86State) : P
 def Arm64ContractInit (c : FuncContract) (s₁ s₂ : Arm64State) : Prop :=
   s₁.pc = 0 ∧ s₂.pc = 0 ∧
   s₁.halted = false ∧ s₂.halted = false ∧
-  s₁.dit = true ∧ s₂.dit = true ∧
+  s₁.dit = c.doitEnabled ∧ s₂.dit = c.doitEnabled ∧
   (∀ r ∈ c.pubGprs, r < 31 ∧ s₁.gpr.get r = s₂.gpr.get r)
 
 /-- AAPCS64 ABI & NEON Epilogue Zeroization postcondition upon `ret`. -/
@@ -3541,16 +3591,14 @@ theorem aarch64_contract_init_inhabited (c : FuncContract)
       s₁.mem 0x10000 ≠ s₂.mem 0x10000 ∧ Arm64ContractInit c s₁ s₂ := by
   let s₁ : Arm64State := {
     pc := 0, gpr := Bank32.const 0x4000, vec := Bank32.const Vec128.zero,
-    cf := false, zf := false, dit := true, halted := false,
+    cf := false, zf := false, dit := c.doitEnabled, halted := false,
     mem := fun _ => 0xAA
   }
   let s₂ : Arm64State := { s₁ with mem := fun _ => 0x55 }
-  exact ⟨s₁, s₂, by decide, ⟨rfl, rfl, rfl, rfl, rfl, rfl, fun r hr => ⟨hPubLt r hr, rfl⟩⟩⟩
+  exact ⟨s₁, s₂, show (0xAA : UInt8) ≠ 0x55 by decide,
+    ⟨rfl, rfl, rfl, rfl, rfl, rfl, fun r hr => ⟨hPubLt r hr, rfl⟩⟩⟩
 
 /-! #### Inductive Relational Invariant & Step Soundness for `x86_64` -/
-
-private def x86FrameSpVal (rsp₀ : UInt64) : UInt64 :=
-  ((rsp₀ - 8) &&& 0xFFFFFFFFFFFFFFE0) - 0x340
 
 private def RelX86Gpr (s₁₀ s₂₀ : X86State) (orig : RegOrigin) (v₁ v₂ : UInt64) : Prop :=
   match orig with
@@ -3620,6 +3668,113 @@ private theorem RelX86Vec_mono {s₁₀ s₂₀ : X86State} {a b : VecOrigin} {v
   · trivial
   · exact RelX86Vec_public_eq hRel hPub
 
+private theorem writeMem8_zero_keep (m : UInt64 → UInt8) (a q : UInt64) (h : m q = 0 ∨ q = a) :
+    writeMem8 m a 0 q = 0 := by
+  unfold writeMem8
+  by_cases hq : q = a
+  · simp [hq]
+  · rcases h with h | h
+    · simp [hq, h]
+    · exact absurd h hq
+
+private theorem writeMem64_zero_keep (m : UInt64 → UInt8) (a q : UInt64)
+    (h : m q = 0 ∨ q = a ∨ q = a + 1 ∨ q = a + 2 ∨ q = a + 3 ∨ q = a + 4 ∨ q = a + 5 ∨ q = a + 6 ∨ q = a + 7) :
+    writeMem64 m a 0 q = 0 := by
+  have z0 : (0 : UInt64).toUInt8 = 0 := by decide
+  have z1 : ((0 : UInt64) >>> 8).toUInt8 = 0 := by decide
+  have z2 : ((0 : UInt64) >>> 16).toUInt8 = 0 := by decide
+  have z3 : ((0 : UInt64) >>> 24).toUInt8 = 0 := by decide
+  have z4 : ((0 : UInt64) >>> 32).toUInt8 = 0 := by decide
+  have z5 : ((0 : UInt64) >>> 40).toUInt8 = 0 := by decide
+  have z6 : ((0 : UInt64) >>> 48).toUInt8 = 0 := by decide
+  have z7 : ((0 : UInt64) >>> 56).toUInt8 = 0 := by decide
+  unfold writeMem64
+  simp only [z0, z1, z2, z3, z4, z5, z6, z7]
+  rcases h with h | h | h | h | h | h | h | h | h
+  · exact writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl h)))))))))))))))
+  · exact writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inr h)))))))))))))))
+  · exact writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inr h)))))))))))))
+  · exact writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inr h)))))))))))
+  · exact writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inr h)))))))))
+  · exact writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inr h)))))))
+  · exact writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inr h)))))
+  · exact writeMem8_zero_keep _ _ _ (Or.inl (writeMem8_zero_keep _ _ _ (Or.inr h)))
+  · exact writeMem8_zero_keep _ _ _ (Or.inr h)
+
+private theorem writeMem256_zero_keep (m : UInt64 → UInt8) (a q : UInt64)
+    (h : m q = 0 ∨ ∃ i : Nat, i < 32 ∧ q = a + UInt64.ofNat i) :
+    writeMem256 m a Vec256.zero q = 0 := by
+  show writeMem64 (writeMem64 (writeMem64 (writeMem64 m a 0) (a + 8) 0) (a + 16) 0) (a + 24) 0 q = 0
+  by_cases h0 : m q = 0
+  · exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl
+      (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl h0)))))))
+  · rcases h with h | ⟨i, hi, rfl⟩
+    · exact absurd h h0
+    match i, hi with
+    | 0, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inl (UInt64.add_zero a)))))))))
+    | 1, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inl (rfl))))))))))
+    | 2, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inl (rfl)))))))))))
+    | 3, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl (rfl))))))))))))
+    | 4, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl (rfl)))))))))))))
+    | 5, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl (rfl))))))))))))))
+    | 6, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl (rfl)))))))))))))))
+    | 7, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (rfl)))))))))))))))
+    | 8, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inl (rfl)))))))
+    | 9, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 8 1).symm))))))))
+    | 10, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 8 2).symm)))))))))
+    | 11, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 8 3).symm))))))))))
+    | 12, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 8 4).symm)))))))))))
+    | 13, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 8 5).symm))))))))))))
+    | 14, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 8 6).symm)))))))))))))
+    | 15, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ((UInt64.add_assoc a 8 7).symm)))))))))))))
+    | 16, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inl (rfl)))))
+    | 17, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 16 1).symm))))))
+    | 18, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 16 2).symm)))))))
+    | 19, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 16 3).symm))))))))
+    | 20, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 16 4).symm)))))))))
+    | 21, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 16 5).symm))))))))))
+    | 22, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 16 6).symm)))))))))))
+    | 23, _ => exact writeMem64_zero_keep _ _ _ (Or.inl (writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ((UInt64.add_assoc a 16 7).symm)))))))))))
+    | 24, _ => exact writeMem64_zero_keep _ _ _ (Or.inr (Or.inl (rfl)))
+    | 25, _ => exact writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 24 1).symm))))
+    | 26, _ => exact writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 24 2).symm)))))
+    | 27, _ => exact writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 24 3).symm))))))
+    | 28, _ => exact writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 24 4).symm)))))))
+    | 29, _ => exact writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 24 5).symm))))))))
+    | 30, _ => exact writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inl ((UInt64.add_assoc a 24 6).symm)))))))))
+    | 31, _ => exact writeMem64_zero_keep _ _ _ (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr ((UInt64.add_assoc a 24 7).symm)))))))))
+    | n + 32, hn => exact absurd hn (by omega)
+
+private theorem frame_addr_split (a : UInt64) (y z : Nat) :
+    a + UInt64.ofNat (y + z) = a + UInt64.ofNat y + UInt64.ofNat z := by
+  apply uint64_eq_of_toNat_eq
+  have h64 : (2 : Nat) ^ 64 = 0x10000000000000000 := rfl
+  simp only [UInt64.toNat_add, UInt64.toNat_ofNat', h64]
+  omega
+
+/-- One iteration of the frame wipe: storing 32 zero bytes at `base + (25 - k) * 32` extends a
+    zeroed prefix of `(25 - k) * 32` bytes to `(26 - k) * 32` bytes. -/
+private theorem frame_store_zero_step (k : Nat) (m : UInt64 → UInt8) (base : UInt64)
+    (hz : ∀ j : Nat, j < (25 - k) * 32 → m (base + UInt64.ofNat j) = 0)
+    (j : Nat) (hj : j < (26 - k) * 32) (hk : k ≤ 25) :
+    writeMem256 m (base + UInt64.ofNat ((25 - k) * 32)) Vec256.zero (base + UInt64.ofNat j) = 0 := by
+  apply writeMem256_zero_keep
+  by_cases hlt : j < (25 - k) * 32
+  · exact Or.inl (hz j hlt)
+  · refine Or.inr ⟨j - (25 - k) * 32, by omega, ?_⟩
+    have hsplit : j = (25 - k) * 32 + (j - (25 - k) * 32) := by omega
+    rw [← frame_addr_split, ← hsplit]
+
+/-- Both executions hold zero bytes on the first `n` bytes of their aligned spill frame. -/
+@[reducible] private def FrameZeroed (s₁₀ s₂₀ s₁ s₂ : X86State) (n : Nat) : Prop :=
+  ∀ j : Nat, j < n →
+    s₁.mem (x86FrameSpVal (s₁₀.gpr.get 4) + UInt64.ofNat j) = 0 ∧
+    s₂.mem (x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat j) = 0
+
+/-- Frame-wipe loop phases (`mov ecx, 25; mov rax, rsp; L: vmovdqa [rax], ymm0; add rax, 32;
+    dec ecx; jne L`): `1` at the store, `5` after it, `2` after the pointer bump, `3` after the
+    decrement, `4` once the loop has exited with all 800 bytes zeroed. Every phase carries the
+    zeroed prefix written so far. -/
 private def RelX86Loop (s₁₀ s₂₀ s₁ s₂ : X86State) (loopSt : Nat) : Prop :=
   if loopSt == 0 then True
   else if loopSt == 1 then
@@ -3627,21 +3782,46 @@ private def RelX86Loop (s₁₀ s₂₀ s₁ s₂ : X86State) (loopSt : Nat) : P
     ∃ k : Nat, 1 ≤ k ∧ k ≤ 25 ∧
       s₁.gpr.get 1 = UInt64.ofNat k ∧ s₂.gpr.get 1 = UInt64.ofNat k ∧
       s₁.gpr.get 0 = x86FrameSpVal (s₁₀.gpr.get 4) + UInt64.ofNat ((25 - k) * 32) ∧
-      s₂.gpr.get 0 = x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat ((25 - k) * 32)
+      s₂.gpr.get 0 = x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat ((25 - k) * 32) ∧
+      FrameZeroed s₁₀ s₂₀ s₁ s₂ ((25 - k) * 32)
   else if loopSt == 2 then
     x86FrameSpVal (s₁₀.gpr.get 4) = x86FrameSpVal (s₂₀.gpr.get 4) ∧
     ∃ k : Nat, 1 ≤ k ∧ k ≤ 25 ∧
       s₁.gpr.get 1 = UInt64.ofNat k ∧ s₂.gpr.get 1 = UInt64.ofNat k ∧
       s₁.gpr.get 0 = x86FrameSpVal (s₁₀.gpr.get 4) + UInt64.ofNat ((26 - k) * 32) ∧
-      s₂.gpr.get 0 = x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat ((26 - k) * 32)
+      s₂.gpr.get 0 = x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat ((26 - k) * 32) ∧
+      FrameZeroed s₁₀ s₂₀ s₁ s₂ ((26 - k) * 32)
   else if loopSt == 3 then
     x86FrameSpVal (s₁₀.gpr.get 4) = x86FrameSpVal (s₂₀.gpr.get 4) ∧
     ∃ k' : Nat, k' ≤ 24 ∧
       s₁.gpr.get 1 = UInt64.ofNat k' ∧ s₂.gpr.get 1 = UInt64.ofNat k' ∧
       s₁.gpr.get 0 = x86FrameSpVal (s₁₀.gpr.get 4) + UInt64.ofNat ((25 - k') * 32) ∧
       s₂.gpr.get 0 = x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat ((25 - k') * 32) ∧
-      s₁.zf = (k' == 0) ∧ s₂.zf = (k' == 0)
+      s₁.zf = (k' == 0) ∧ s₂.zf = (k' == 0) ∧
+      FrameZeroed s₁₀ s₂₀ s₁ s₂ ((25 - k') * 32)
+  else if loopSt == 4 then FrameZeroed s₁₀ s₂₀ s₁ s₂ 800
+  else if loopSt == 5 then
+    x86FrameSpVal (s₁₀.gpr.get 4) = x86FrameSpVal (s₂₀.gpr.get 4) ∧
+    ∃ k : Nat, 1 ≤ k ∧ k ≤ 25 ∧
+      s₁.gpr.get 1 = UInt64.ofNat k ∧ s₂.gpr.get 1 = UInt64.ofNat k ∧
+      s₁.gpr.get 0 = x86FrameSpVal (s₁₀.gpr.get 4) + UInt64.ofNat ((25 - k) * 32) ∧
+      s₂.gpr.get 0 = x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat ((25 - k) * 32) ∧
+      FrameZeroed s₁₀ s₂₀ s₁ s₂ ((26 - k) * 32)
   else False
+
+/-- The wiped phase survives any step that leaves memory untouched; every other phase resets. -/
+private theorem RelX86Loop_keep4 {s₁₀ s₂₀ s₁ s₂ s₁' s₂' : X86State} {n : Nat}
+    (h : RelX86Loop s₁₀ s₂₀ s₁ s₂ n) (hm1 : s₁'.mem = s₁.mem) (hm2 : s₂'.mem = s₂.mem) :
+    RelX86Loop s₁₀ s₂₀ s₁' s₂' (if n == 4 then 4 else 0) := by
+  by_cases h4 : (n == 4) = true
+  · have hn : n = 4 := beq_iff_eq.mp h4
+    subst hn
+    unfold RelX86Loop at h ⊢
+    simp only [show (4 == 0) = false from rfl, show (4 == 1) = false from rfl, show (4 == 2) = false from rfl, show (4 == 3) = false from rfl, beq_self_eq_true, ↓reduceIte] at h ⊢
+    intro j hj
+    rw [hm1, hm2]
+    exact h j hj
+  · simp [h4, RelX86Loop]
 
 private def RelX86 (s₁₀ s₂₀ : X86State) (st : X86AbsState) (s₁ s₂ : X86State) : Prop :=
   s₁.pc = s₂.pc ∧
@@ -3902,7 +4082,7 @@ private theorem storePreservesSavedRbp_disjoint {c : FuncContract} {s₁₀ s₂
               rcases hc3 with ⟨⟨⟨rfl, rfl⟩, rfl⟩, hLoop1⟩
               unfold RelX86Loop at rLoop
               simp only [hLoop1, show (1 == 0) = false from rfl, beq_self_eq_true, ↓reduceIte] at rLoop
-              rcases rLoop with ⟨_, ⟨m, hm1, hm25, _, _, ha1, ha2⟩⟩
+              rcases rLoop with ⟨_, ⟨m, hm1, hm25, _, _, ha1, ha2, _⟩⟩
               have hAdd0 (x : UInt64) : x + 0 = x := by
                 apply UInt64.eq_of_toBitVec_eq; simp
               have hDispM : (UInt64.ofNat ((25 - m) * 32)).toNat + 32 ≤ 0x320 := by
@@ -4159,7 +4339,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
           apply UInt64.eq_of_toBitVec_eq; simp
         simp only [stepX86, hIns, hs1_4, hs2_4, ← hSp0Eq, true_and]
         refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf, rZf, rDirty, rMem,
-          fun _ => ⟨hSp0Eq, hMem5_1, hSp0Eq ▸ hMem5_2⟩, by simp [RelX86Loop]⟩
+          fun _ => ⟨hSp0Eq, hMem5_1, hSp0Eq ▸ hMem5_2⟩, RelX86Loop_keep4 rLoop rfl rfl⟩
         refine RelX86Gpr_set (by omega)
           (RelX86Gpr_set (by omega) rGpr ⟨by omega, hAdd8 _, hSp0Eq ▸ hAdd8 _, rfl⟩)
           ⟨by omega, hMem5_1, by rwa [hSp0Eq]⟩
@@ -4172,13 +4352,14 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
            [3, 5, 12, 13, 14, 15].all (fun r => st.gpr.get r == .initOwn r || st.gpr.get r == .initSame r)) &&
           !st.ymmDirty &&
           st.ymm.allIdx (fun _ vo => vo != .secretVal && vo != .pubVal) &&
-          c.wipedScratchGprs.all (fun r => st.gpr.get r == .zeroConst)) = true
+          c.wipedScratchGprs.all (fun r => st.gpr.get r == .zeroConst) &&
+          (!c.usesRbpFrame || st.stackZeroLoop == 4)) = true
       · simp only [Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', beq_iff_eq,
           List.all_eq_true] at hRetOk
-        rcases hRetOk with ⟨⟨⟨⟨⟨hSp4, _⟩, ⟨_, hCallee⟩⟩, hClean⟩, hVecWiped⟩, hGprWiped⟩
+        rcases hRetOk with ⟨⟨⟨⟨⟨⟨hSp4, _⟩, ⟨_, hCallee⟩⟩, hClean⟩, hVecWiped⟩, hGprWiped⟩, hFrame⟩
         simp only [stepX86, hIns, true_and]
         left
-        refine ⟨?_, ?_, rDirty hClean, ?_, ?_⟩
+        refine ⟨?_, ?_, rDirty hClean, ?_, ?_, ?_⟩
         · have r4 := rGpr 4 (by omega); rw [hSp4] at r4; exact ⟨r4.2.1, r4.2.2.1⟩
         · intro r hr
           have hcr := hCallee r hr
@@ -4207,12 +4388,19 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
             have rr := rGpr 15 (by omega)
             rw [h15 st.gpr] at hZ; rw [hZ] at rr
             rw [h15 s₁.gpr, h15 s₂.gpr]; exact rr
+        · intro hFr
+          rcases hFrame with hNo | h4
+          · rw [hNo] at hFr; cases hFr
+          · unfold RelX86Loop at rLoop
+            simp only [h4, show (4 == 0) = false from rfl, show (4 == 1) = false from rfl, show (4 == 2) = false from rfl, show (4 == 3) = false from rfl, beq_self_eq_true, ↓reduceIte] at rLoop
+            exact rLoop
       · have hF : ((st.gpr.get 4 == .initSame 4 && decide (4 ∈ c.pubGprs)) &&
             (((st.gpr.get 3).le (.initOwn 3) || st.gpr.get 3 == .initSame 3) &&
              [3, 5, 12, 13, 14, 15].all (fun r => st.gpr.get r == .initOwn r || st.gpr.get r == .initSame r)) &&
             !st.ymmDirty &&
             st.ymm.allIdx (fun _ vo => vo != .secretVal && vo != .pubVal) &&
-            c.wipedScratchGprs.all (fun r => st.gpr.get r == .zeroConst)) = false :=
+            c.wipedScratchGprs.all (fun r => st.gpr.get r == .zeroConst) &&
+            (!c.usesRbpFrame || st.stackZeroLoop == 4)) = false :=
           Bool.eq_false_iff.mpr hRetOk
         simp only [hF, Bool.false_eq_true, ↓reduceIte] at hTr; cases hTr
     case movRegReg is64 dst src =>
@@ -4239,7 +4427,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
           simp only [show (1 == 0) = false from rfl, beq_self_eq_true, ↓reduceIte]
           have hFspEq : x86FrameSpVal (s₁₀.gpr.get 4) = x86FrameSpVal (s₂₀.gpr.get 4) := by
             rw [← h4_1, ← h4_2, h4eq]
-          refine ⟨hFspEq, 25, by omega, by omega, ?_, ?_, ?_, ?_⟩
+          refine ⟨hFspEq, 25, by omega, by omega, ?_, ?_, ?_, ?_, fun j hj => absurd hj (by omega)⟩
           · rw [Bank16.get_set_ne _ _ (by omega) (by omega) (by omega)]; exact h1_1
           · rw [Bank16.get_set_ne _ _ (by omega) (by omega) (by omega)]; exact h1_2
           · simp only [Bank16.get_set_eq, Nat.sub_self, Nat.zero_mul]
@@ -4250,7 +4438,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         injection hTr with hS; subst hS
         simp only [stepX86, hIns, true_and]
         refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, ?_, rYmm, rCf, rOf, rZf, rDirty, rMem, rRbp,
-          by simp [RelX86Loop]⟩
+          RelX86Loop_keep4 rLoop rfl rfl⟩
         apply RelX86Gpr_set hd16 rGpr
         cases is64
         · simp only [Bool.false_eq_true, ↓reduceIte]
@@ -4341,7 +4529,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         simp only [stepX86, hIns, evalX86Alu_xor_self, evalX86AluOf, true_and]
         exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2,
           RelX86Gpr_set hd16 rGpr ⟨rfl, rfl⟩,
-          rYmm, fun _ => rfl, fun _ => rfl, fun _ => rfl, rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
+          rYmm, fun _ => rfl, fun _ => rfl, fun _ => rfl, rDirty, rMem, rRbp, RelX86Loop_keep4 rLoop rfl rfl⟩
       · simp only [hXorSelf, Bool.false_eq_true, ↓reduceIte] at hTr
         by_cases hSbbSelf : (op == .sbb && dst == src) = true
         · simp only [hSbbSelf, ↓reduceIte] at hTr
@@ -4450,14 +4638,14 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
             rYmm, (fun _ => by rw [h4eq]), (fun h => nomatch h), (fun _ => by rw [h4eq]),
             rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
         · simp only [hc2, Bool.false_eq_true, ↓reduceIte] at hTr
-          by_cases hc3 : (is64 && op == .add && dst == 0 && imm == 0x20 && st.stackZeroLoop == 1) = true
+          by_cases hc3 : (is64 && op == .add && dst == 0 && imm == 0x20 && st.stackZeroLoop == 5) = true
           · simp only [hc3, ↓reduceIte] at hTr
             injection hTr with hS; subst hS
             simp only [Bool.and_eq_true, beq_iff_eq] at hc3
             rcases hc3 with ⟨⟨⟨⟨rfl, rfl⟩, rfl⟩, rfl⟩, hLoop1⟩
             unfold RelX86Loop at rLoop
-            simp only [hLoop1, show (1 == 0) = false from rfl, beq_self_eq_true, ↓reduceIte] at rLoop
-            rcases rLoop with ⟨hFspEq, k, hk1, hk25, hk1_1, hk1_2, ha0_1, ha0_2⟩
+            simp only [hLoop1, show (5 == 0) = false from rfl, show (5 == 1) = false from rfl, show (5 == 2) = false from rfl, show (5 == 3) = false from rfl, show (5 == 4) = false from rfl, beq_self_eq_true, ↓reduceIte] at rLoop
+            rcases rLoop with ⟨hFspEq, k, hk1, hk25, hk1_1, hk1_2, ha0_1, ha0_2, hZ⟩
             have h0eq : s₁.gpr.get 0 = s₂.gpr.get 0 := by rw [ha0_1, ha0_2, hFspEq]
             simp only [stepX86, hIns, evalX86Alu, maskGprWidth, ↓reduceIte, uint64_evalAdd_eq, true_and]
             refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2,
@@ -4472,7 +4660,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
               have hMul : (25 - k) * 32 + 32 = (26 - k) * 32 := by omega
               simp only [UInt64.toNat_add, UInt64.toNat_ofNat', h20, Nat.add_mod_mod, Nat.mod_add_mod,
                 Nat.add_assoc, hMul]
-            refine ⟨hFspEq, k, hk1, hk25, ?_, ?_, ?_, ?_⟩
+            refine ⟨hFspEq, k, hk1, hk25, ?_, ?_, ?_, ?_, hZ⟩
             · rw [Bank16.get_set_ne _ _ (by omega) (by omega) (by omega)]; exact hk1_1
             · rw [Bank16.get_set_ne _ _ (by omega) (by omega) (by omega)]; exact hk1_2
             · simp only [Bank16.get_set_eq, ha0_1, hStep32]
@@ -4513,7 +4701,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         unfold RelX86Loop at rLoop
         simp only [hLoop2, show (2 == 0) = false from rfl, show (2 == 1) = false from rfl,
           beq_self_eq_true, ↓reduceIte] at rLoop
-        rcases rLoop with ⟨hFspEq, k, hk1, hk25, hk1_1, hk1_2, ha0_1, ha0_2⟩
+        rcases rLoop with ⟨hFspEq, k, hk1, hk25, hk1_1, hk1_2, ha0_1, ha0_2, hZ⟩
         rcases loop_dec_ecx_step hk1 hk25 with ⟨hDecVal, hDecZf, hDecOf⟩
         simp only [stepX86, hIns, Bool.false_eq_true, ↓reduceIte, hk1_1, hk1_2, hDecVal, hDecOf, true_and]
         have hZfEq : (UInt64.ofNat (k - 1) == (0 : UInt64)) = (k - 1 == 0) := by
@@ -4526,7 +4714,8 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
           show (3 == 2) = false from rfl, beq_self_eq_true, ↓reduceIte]
         have hSubEq : 26 - k = 25 - (k - 1) := by omega
         refine ⟨hFspEq, k - 1, by omega,
-          by simp [Bank16.get_set_eq], by simp [Bank16.get_set_eq], ?_, ?_, hZfEq, hZfEq⟩
+          by simp [Bank16.get_set_eq], by simp [Bank16.get_set_eq], ?_, ?_, hZfEq, hZfEq,
+          by rw [← hSubEq]; exact hZ⟩
         · rw [Bank16.get_set_ne _ _ (by omega) (by omega) (by omega), ha0_1, hSubEq]
         · rw [Bank16.get_set_ne _ _ (by omega) (by omega) (by omega), ha0_2, hSubEq]
       · simp only [hcLoop, Bool.false_eq_true, ↓reduceIte] at hTr
@@ -4803,7 +4992,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
           unfold RelX86Loop at rLoop
           simp only [hSt3, show (3 == 0) = false from rfl, show (3 == 1) = false from rfl,
             show (3 == 2) = false from rfl, beq_self_eq_true, ↓reduceIte] at rLoop
-          rcases rLoop with ⟨hFspEq, k', hk'24, hk1, hk2, ha1, ha2, hzf1, hzf2⟩
+          rcases rLoop with ⟨hFspEq, k', hk'24, hk1, hk2, ha1, ha2, hzf1, hzf2, hZ⟩
           simp only [stepX86, hIns, decide_eq_true hGe0, Bool.and_true, true_and]
           by_cases hTaken : evalX86Cond 5 s₁ = true
           · have hTaken2 : evalX86Cond 5 s₂ = true := hCondEq ▸ hTaken
@@ -4817,12 +5006,20 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
             refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr, rYmm, rCf, rOf, rZf, rDirty, rMem, rRbp, ?_⟩
             unfold RelX86Loop
             simp only [show (1 == 0) = false from rfl, beq_self_eq_true, ↓reduceIte]
-            exact ⟨hFspEq, k', hk'Pos, by omega, hk1, hk2, ha1, ha2⟩
+            exact ⟨hFspEq, k', hk'Pos, by omega, hk1, hk2, ha1, ha2, hZ⟩
           · have hTakenF1 : evalX86Cond 5 s₁ = false := Bool.eq_false_iff.mpr hTaken
             have hTakenF2 : evalX86Cond 5 s₂ = false := hCondEq ▸ hTakenF1
+            have hk'Z : k' = 0 := by
+              by_cases h0 : k' = 0
+              · exact h0
+              · exact absurd (by simp [evalX86Cond, hzf1, h0]) hTaken
             simp only [hTakenF1, hTakenF2, Bool.false_eq_true, ↓reduceIte]
-            exact Or.inr ⟨_, List.Mem.tail _ (List.Mem.head _), rfl, hH1, hH2, rGpr, rYmm, rCf, rOf, rZf,
-              rDirty, rMem, rRbp, by simp [RelX86Loop]⟩
+            refine Or.inr ⟨_, List.Mem.tail _ (List.Mem.head _), rfl, hH1, hH2, rGpr, rYmm, rCf, rOf, rZf,
+              rDirty, rMem, rRbp, ?_⟩
+            unfold RelX86Loop
+            simp only [show (4 == 0) = false from rfl, show (4 == 1) = false from rfl, show (4 == 2) = false from rfl, show (4 == 3) = false from rfl, beq_self_eq_true, ↓reduceIte]
+            intro j hj
+            exact hZ j (by omega)
         · simp only [hLoop3, Bool.false_eq_true, ↓reduceIte] at hTr
           injection hTr with hS; subst hS
           simp only [stepX86, hIns, decide_eq_true hGe0, Bool.and_true, true_and]
@@ -4854,7 +5051,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
       injection hTr with hS; subst hS
       simp only [stepX86, hIns, true_and]
       refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr, ?_, rCf, rOf, rZf,
-        fun _ => ⟨rfl, rfl⟩, rMem, rRbp, by simp [RelX86Loop]⟩
+        fun _ => ⟨rfl, rfl⟩, rMem, rRbp, RelX86Loop_keep4 rLoop rfl rfl⟩
       intro i hi
       rw [Bank16.get_ofFn _ hi, Bank16.get_ofFn _ hi]
       exact ⟨rfl, rfl⟩
@@ -4862,7 +5059,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
       injection hTr with hS; subst hS
       simp only [stepX86, hIns, true_and]
       refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr, ?_, rCf, rOf, rZf,
-        fun _ => ⟨rfl, rfl⟩, rMem, rRbp, by simp [RelX86Loop]⟩
+        fun _ => ⟨rfl, rfl⟩, rMem, rRbp, RelX86Loop_keep4 rLoop rfl rfl⟩
       intro i hi
       rw [Bank16.get_ofFn _ hi, Bank16.get_ofFn _ hi, Bank16.get_ofFn _ hi]
       have rv := rYmm i hi
@@ -4931,12 +5128,33 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
               · simp only [↓reduceIte] at hDisj2 ⊢
                 rw [readMem64_congr (fun k hk => writeMem256_ne _ _ (fun j hj => hDisj2 j k hj hk))]
                 exact hM2
-        · by_cases hKeepLoop : (st.stackZeroLoop == 1 && addr == .baseDisp 0 0 && is256) = true
+        · by_cases hKeepLoop : (st.stackZeroLoop == 1 && addr == .baseDisp 0 0 && is256 &&
+              st.ymm.get src == .zeroConst) = true
           · simp only [hKeepLoop, ↓reduceIte]
             simp only [Bool.and_eq_true, beq_iff_eq] at hKeepLoop
-            have hL1 := hKeepLoop.1.1
+            rcases hKeepLoop with ⟨⟨⟨hL1, rfl⟩, rfl⟩, hSrcZ⟩
+            have rv := rYmm src hs16
+            rw [hSrcZ] at rv
+            rcases rv with ⟨hv1, hv2⟩
             unfold RelX86Loop at rLoop ⊢
-            simpa only [hL1] using rLoop
+            simp only [hL1, show (1 == 0) = false from rfl, beq_self_eq_true, ↓reduceIte] at rLoop
+            simp only [show (5 == 0) = false from rfl, show (5 == 1) = false from rfl, show (5 == 2) = false from rfl, show (5 == 3) = false from rfl, show (5 == 4) = false from rfl, beq_self_eq_true, ↓reduceIte]
+            rcases rLoop with ⟨hFspEq, k, hk1, hk25, hc1, hc2, ha1, ha2, hZ⟩
+            have hEa2 (n : Nat) : evalX86Addr s₂ n (.baseDisp 0 0) =
+                x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat ((25 - k) * 32) := by
+              show s₂.gpr.get 0 + 0 = _
+              rw [UInt64.add_zero, ha2]
+            refine ⟨hFspEq, k, hk1, hk25, hc1, hc2, ha1, ha2, ?_⟩
+            intro j hj
+            refine ⟨?_, ?_⟩
+            · show writeMem256 s₁.mem (evalX86Addr s₂ _ (.baseDisp 0 0)) (s₁.ymm.get src)
+                (x86FrameSpVal (s₁₀.gpr.get 4) + UInt64.ofNat j) = 0
+              rw [hEa2, hv1, ← hFspEq]
+              exact frame_store_zero_step k s₁.mem _ (fun j hj => (hZ j hj).1) j hj hk25
+            · show writeMem256 s₂.mem (evalX86Addr s₂ _ (.baseDisp 0 0)) (s₂.ymm.get src)
+                (x86FrameSpVal (s₂₀.gpr.get 4) + UInt64.ofNat j) = 0
+              rw [hEa2, hv2]
+              exact frame_store_zero_step k s₂.mem _ (fun j hj => (hZ j hj).2) j hj hk25
           · simp [hKeepLoop, RelX86Loop]
     case vmovGprToXmm is64 dstVec srcGpr =>
       rcases hValid with ⟨hd16, hs16⟩
@@ -4957,27 +5175,29 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         · simp only [hp, ↓reduceIte, RelX86Vec]
           rw [RelX86Gpr_public_eq (rGpr srcGpr hs16) hp]
         · simp [hp, RelX86Vec]
-    case vpbroadcast isQword dst srcVec =>
+    case vpbroadcast isQword is256 dst srcVec =>
       rcases hValid with ⟨hd16, hs16⟩
       injection hTr with hS; subst hS
       simp only [stepX86, hIns, true_and]
       refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr, ?_, rCf, rOf, rZf,
-        (fun h => nomatch h), rMem, rRbp, by simp [RelX86Loop]⟩
-      apply RelX86Vec_set hd16 rYmm
-      by_cases hz : (st.ymm.get srcVec == .zeroConst) = true
-      · simp only [hz, ↓reduceIte, RelX86Vec]
-        have rv := rYmm srcVec hs16
-        rw [beq_iff_eq.mp hz] at rv
-        rcases rv with ⟨r1, r2⟩
-        have hmb0 : mapBytes64 (fun _ => 0) = 0 := by decide
-        cases isQword
-        · simp [r1, r2, Vec256.zero, hmb0]
-        · simp [r1, r2, Vec256.zero]
-      · simp only [hz, Bool.false_eq_true, ↓reduceIte]
-        by_cases hp : (st.ymm.get srcVec).isPublic = true
-        · simp only [hp, ↓reduceIte, RelX86Vec]
-          rw [RelX86Vec_public_eq (rYmm srcVec hs16) hp]
-        · simp [hp, RelX86Vec]
+        ?_, rMem, rRbp, by simp [RelX86Loop]⟩
+      · apply RelX86Vec_set hd16 rYmm
+        by_cases hz : (st.ymm.get srcVec == .zeroConst) = true
+        · simp only [hz, ↓reduceIte, RelX86Vec]
+          have rv := rYmm srcVec hs16
+          rw [beq_iff_eq.mp hz] at rv
+          rcases rv with ⟨r1, r2⟩
+          have hmb0 : mapBytes64 (fun _ => 0) = 0 := by decide
+          cases isQword <;> cases is256 <;> simp [r1, r2, Vec256.zero, hmb0, clampVecWidth]
+        · simp only [hz, Bool.false_eq_true, ↓reduceIte]
+          by_cases hp : (st.ymm.get srcVec).isPublic = true
+          · simp only [hp, ↓reduceIte, RelX86Vec]
+            rw [RelX86Vec_public_eq (rYmm srcVec hs16) hp]
+          · simp [hp, RelX86Vec]
+      · intro hClean
+        simp only [Bool.or_eq_false_iff] at hClean
+        rcases rDirty hClean.1 with ⟨d1, d2⟩
+        simp [d1, d2, hClean.2]
     case vpbroadcastLoad64 dst addr =>
       rcases hValid with ⟨hd16, hAddrReg⟩
       cases hAddrPub : x86AddrIsPublic st addr
@@ -5007,7 +5227,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         simp only [stepX86, hIns, hXorZ, true_and]
         refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr,
           RelX86Vec_set hd16 rYmm ⟨rfl, rfl⟩,
-          rCf, rOf, rZf, ?_, rMem, rRbp, by simp [RelX86Loop]⟩
+          rCf, rOf, rZf, ?_, rMem, rRbp, RelX86Loop_keep4 rLoop rfl rfl⟩
         intro hClean
         simp only [Bool.or_eq_false_iff] at hClean
         rcases rDirty hClean.1 with ⟨d1, d2⟩
@@ -5016,7 +5236,7 @@ private theorem transferX86Instr_step_sound {c : FuncContract}
         injection hTr with hS; subst hS
         simp only [stepX86, hIns, true_and]
         refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rGpr, ?_, rCf, rOf, rZf, ?_, rMem, rRbp,
-          by simp [RelX86Loop]⟩
+          RelX86Loop_keep4 rLoop rfl rfl⟩
         · apply RelX86Vec_set hd16 rYmm
           by_cases hp : ((st.ymm.get src1).isPublic && (st.ymm.get src2).isPublic) = true
           · simp only [hp, ↓reduceIte, RelX86Vec]
@@ -5667,7 +5887,7 @@ private theorem transferArm64Instr_step_sound {c : FuncContract}
         rw [RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hp.1,
             RelArmGpr_public_eq (getArmGpr_rel hm32 rGpr) hp.2]
       · simp [hp, RelArmGpr]
-    case csel cond isInv rd rn rm =>
+    case csel cond isInv is64 rd rn rm =>
       have hd : st.dit = true := hAllowed (by simp [hIns, armRequiresDit])
       rcases hValid with ⟨⟨hd32, hn32⟩, hm32⟩
       injection hTr with hS; subst hS
@@ -6327,9 +6547,23 @@ theorem mulOneOp_32bit_flag_vectors :
     imulSignedOverflow 0x100000000 0x40000000 2 = true := by
   decide +kernel
 
-/-- Immediate arithmetic right shift is outside the decoder's supported subset. -/
-theorem tooth_x86_sar_rejected :
-    decodeX86Stream [0x48, 0xc1, 0xf8, 0x01, 0xc3] = none := by decide +kernel
+/-- Immediate arithmetic right shift (`C1 /7`, `D1 /7`) decodes and replicates the sign bit at
+    both widths; the 32-bit form zero-extends its result. -/
+theorem x86_sar_decodes_and_sign_extends :
+    decodeX86InstrAt 0 [0x48, 0xc1, 0xf8, 0x01] = some ⟨0, 4, .shiftImm .sar true 0 1⟩ ∧
+    decodeX86InstrAt 0 [0x48, 0xd1, 0xf8] = some ⟨0, 3, .shiftImm .sar true 0 1⟩ ∧
+    evalX86Shift .sar true 0x8000000000000001 1 false true false =
+      (0xC000000000000000, true, false, false) ∧
+    evalX86Shift .sar true 0x4000000000000000 4 false false false =
+      (0x0400000000000000, false, false, false) ∧
+    evalX86Shift .sar false 0xFFFFFFFF80000000 31 false false false =
+      (0xFFFFFFFF, false, false, false) ∧
+    evalX86Shift .sar true 1 1 false false false = (0, true, false, true) := by decide +kernel
+
+/-- `#tooth`: arithmetic and logical right shift disagree on a negative operand. -/
+theorem tooth_x86_sar_is_not_shr :
+    (evalX86Shift .sar true 0x8000000000000001 1 false false false).1 ≠
+      (evalX86Shift .shr true 0x8000000000000001 1 false false false).1 := by decide +kernel
 
 /-- Every shift/rotate forgets CF/OF publicity, including zero counts. This conservative
     transfer prevents subsequent carry/overflow consumers from treating secret flags as public. -/
@@ -6404,5 +6638,186 @@ theorem tooth_x86_cmovcc_32bit_untaken_zero_extends :
        Bank16.const Vec256.zero, false, false, false, false, false, fun _ => 0⟩
     (stepX86 ⟨0, 3, .cmovcc 4 false 0 1⟩ s).1.gpr.get 0 = 0x0000000012345678 := by
   decide +kernel
+
+/-! #### Decoder and semantics regressions: shifts, `sf`, prefixes, vector width, frame wipe, DIT -/
+
+/-- `ASR` (shift kind `2`) replicates the operand's sign bit at both widths, `ROR` (kind `3`)
+    rotates, and the two differ on the same input. -/
+theorem arm64_asr_is_arithmetic :
+    applyArmShift true 0x8000000000000000 2 4 = 0xF800000000000000 ∧
+    applyArmShift true 0x4000000000000000 2 4 = 0x0400000000000000 ∧
+    applyArmShift false 0x80000000 2 4 = 0xF8000000 ∧
+    applyArmShift false 0xFFFFFFFF40000000 2 4 = 0x04000000 ∧
+    applyArmShift true 1 2 1 = 0 ∧
+    applyArmShift true 1 3 1 = 0x8000000000000000 := by decide +kernel
+
+/-- `#tooth`: a shift-kind-`2` operand is no longer the rotation the decoder used to compute. -/
+theorem tooth_arm64_asr_differs_from_ror :
+    applyArmShift true 1 2 1 ≠ applyArmShift true 1 3 1 := by decide +kernel
+
+/-- `add x0, x1, x2, asr #4` decodes; the reserved Add/Sub shift `0b11` and `imm6 ≥ 32` under
+    `sf = 0` (Add/Sub and logical) are rejected. -/
+theorem arm64_shifted_register_reserved_encodings :
+    decodeArm64Word 0 0x8B821020 = some (.aluReg .add true 0 1 2 2 4) ∧
+    decodeArm64Word 0 0x8BC20420 = none ∧
+    decodeArm64Word 0 0x0B028020 = none ∧
+    decodeArm64Word 0 0x0A028020 = none := by decide +kernel
+
+/-- `csel w0, w1, w2, eq` keeps `sf = 0` and writes a zero-extended 32-bit result on both the
+    taken and the untaken path; `csel x0, x1, x2, eq` writes all 64 bits. -/
+theorem arm64_csel_sf_width :
+    decodeArm64Word 0 0x1A820020 = some (.csel 0 false false 0 1 2) ∧
+    decodeArm64Word 0 0x9A820020 = some (.csel 0 false true 0 1 2) ∧
+    (let s : Arm64State :=
+      ⟨0, ((Bank32.const 0).set 1 0xDEADBEEF12345678).set 2 0xCAFEF00D9ABCDEF0,
+       Bank32.const Vec128.zero, false, true, true, false, fun _ => 0⟩
+     (stepArm64 ⟨0, 4, .csel 0 false false 0 1 2⟩ s).1.gpr.get 0 = 0x12345678 ∧
+     (stepArm64 ⟨0, 4, .csel 1 false false 0 1 2⟩ s).1.gpr.get 0 = 0x9ABCDEF0 ∧
+     (stepArm64 ⟨0, 4, .csel 1 true false 0 1 2⟩ s).1.gpr.get 0 = 0x6543210F ∧
+     (stepArm64 ⟨0, 4, .csel 0 false true 0 1 2⟩ s).1.gpr.get 0 = 0xDEADBEEF12345678) := by
+  decide +kernel
+
+/-- `#tooth`: the 32-bit and 64-bit `csel` forms are distinct instructions with distinct results. -/
+theorem tooth_arm64_csel_w_is_not_x :
+    decodeArm64Word 0 0x1A820020 ≠ decodeArm64Word 0 0x9A820020 := by decide +kernel
+
+/-- `0xF2` in front of a supported opcode, and `66` / `F3` / `REX` in front of a VEX prefix, are
+    rejected; the same bytes without the offending prefix decode. -/
+theorem x86_prefix_discipline :
+    decodeX86InstrAt 0 [0xF2, 0x48, 0x31, 0xC0] = none ∧
+    decodeX86InstrAt 0 [0x48, 0x31, 0xC0] = some ⟨0, 3, .aluRegReg .xorOp true 0 0⟩ ∧
+    decodeX86InstrAt 0 [0x66, 0xC5, 0xFD, 0xEF, 0xC0] = none ∧
+    decodeX86InstrAt 0 [0xF3, 0xC5, 0xFD, 0xEF, 0xC0] = none ∧
+    decodeX86InstrAt 0 [0x48, 0xC5, 0xFD, 0xEF, 0xC0] = none ∧
+    decodeX86InstrAt 0 [0xC5, 0xFD, 0xEF, 0xC0] = some ⟨0, 4, .vbinOp .vpxor true 0 0 0⟩ := by
+  decide +kernel
+
+/-- Eleven redundant `2E` prefixes on a 4-byte `add rax, 1` reach exactly 15 bytes and decode;
+    a twelfth makes 16 bytes, which only the uncapped decoder accepts. -/
+theorem x86_fifteen_byte_cap :
+    (decodeX86InstrAt 0 (List.replicate 11 0x2E ++ [0x48, 0x83, 0xC0, 0x01])).map (·.byteLen) = some 15 ∧
+    (decodeX86InstrAtUncapped 0 (List.replicate 12 0x2E ++ [0x48, 0x83, 0xC0, 0x01])).map (·.byteLen) = some 16 ∧
+    decodeX86InstrAt 0 (List.replicate 12 0x2E ++ [0x48, 0x83, 0xC0, 0x01]) = none := by
+  decide +kernel
+
+/-- Every instruction the decoder returns is at most 15 bytes long. -/
+theorem decodeX86InstrAt_byteLen_le (pc : Nat) (bs : List UInt8) (d : DecodedInstr X86Instr)
+    (h : decodeX86InstrAt pc bs = some d) : d.byteLen ≤ 15 := by
+  unfold decodeX86InstrAt at h
+  cases hU : decodeX86InstrAtUncapped pc bs with
+  | none => rw [hU] at h; cases h
+  | some d' =>
+    rw [hU] at h
+    by_cases hLe : d'.byteLen ≤ 15
+    · simp only [Option.bind_some, hLe, ↓reduceIte] at h
+      cases h; exact hLe
+    · simp only [Option.bind_some, hLe, ↓reduceIte] at h
+      cases h
+
+/-- `vpbroadcastq xmm0, xmm1` (`VEX.L = 0`) writes the low 128 bits and zeroes the rest without
+    dirtying the upper state; `vpbroadcastq ymm0, xmm1` (`VEX.L = 1`) fills all four lanes. -/
+theorem x86_vpbroadcast_honors_vexL :
+    decodeX86InstrAt 0 [0xC4, 0xE2, 0x79, 0x59, 0xC1] = some ⟨0, 5, .vpbroadcast true false 0 1⟩ ∧
+    decodeX86InstrAt 0 [0xC4, 0xE2, 0x7D, 0x59, 0xC1] = some ⟨0, 5, .vpbroadcast true true 0 1⟩ ∧
+    (let s : X86State :=
+      ⟨0, Bank16.const 0, (Bank16.const ⟨7, 7, 7, 7⟩).set 1 ⟨0x1122334455667788, 9, 9, 9⟩,
+       false, false, false, false, false, fun _ => 0⟩
+     let x := (stepX86 ⟨0, 5, .vpbroadcast true false 0 1⟩ s).1
+     let y := (stepX86 ⟨0, 5, .vpbroadcast true true 0 1⟩ s).1
+     x.ymm.get 0 = ⟨0x1122334455667788, 0x1122334455667788, 0, 0⟩ ∧ x.ymmDirty = false ∧
+     y.ymm.get 0 = ⟨0x1122334455667788, 0x1122334455667788, 0x1122334455667788, 0x1122334455667788⟩ ∧
+     y.ymmDirty = true) := by
+  decide +kernel
+
+/-- `#tooth`: the 128-bit broadcast is not the 256-bit one. -/
+theorem tooth_x86_vpbroadcast_xmm_is_not_ymm :
+    decodeX86InstrAt 0 [0xC4, 0xE2, 0x79, 0x59, 0xC1] ≠ decodeX86InstrAt 0 [0xC4, 0xE2, 0x7D, 0x59, 0xC1] := by
+  decide +kernel
+
+/-- Contract of a minimal frame-allocating kernel (`rsp`, `rdi`, `rsi` public, `rbp` frame). -/
+def frameWipeProbeContract : FuncContract :=
+  mkContract "frame_wipe_probe" [4, 7, 6] [] [] true 7 0x320
+
+/-- `push rbp; mov rbp, rsp; and rsp, -32; sub rsp, 0x340; vpxor ymm0, ymm0, ymm0; mov ecx, 25;
+    mov rax, rsp; L: vmovdqa [rax], ymm0; add rax, 32; dec ecx; jne L; vzeroall; vzeroupper;
+    mov rsp, rbp; pop rbp; xor eax, eax; xor ecx, ecx; ret`. -/
+def frameWipeProbeCode : List UInt8 :=
+  [0x55, 0x48, 0x89, 0xE5, 0x48, 0x83, 0xE4, 0xE0, 0x48, 0x81, 0xEC, 0x40, 0x03, 0x00, 0x00,
+   0xC5, 0xFD, 0xEF, 0xC0, 0xB9, 0x19, 0x00, 0x00, 0x00, 0x48, 0x89, 0xE0,
+   0xC5, 0xFD, 0x7F, 0x00, 0x48, 0x83, 0xC0, 0x20, 0xFF, 0xC9, 0x75, 0xF4,
+   0xC5, 0xFC, 0x77, 0xC5, 0xF8, 0x77, 0x48, 0x89, 0xEC, 0x5D, 0x31, 0xC0, 0x31, 0xC9, 0xC3]
+
+/-- The same kernel with the wipe store replaced by four `nop`s. -/
+def frameWipeProbeNoStoreCode : List UInt8 :=
+  (frameWipeProbeCode.take 27) ++ [0x90, 0x90, 0x90, 0x90] ++ (frameWipeProbeCode.drop 31)
+
+/-- The same kernel with the `vpxor ymm0, ymm0, ymm0` replaced by `nop`s, so the loop stores
+    caller data instead of zeros. -/
+def frameWipeProbeDirtyStoreCode : List UInt8 :=
+  (frameWipeProbeCode.take 15) ++ [0x90, 0x90, 0x90, 0x90] ++ (frameWipeProbeCode.drop 19)
+
+/-- A frame-allocating kernel that wipes its 800-byte spill area is accepted. -/
+theorem x86_frame_wipe_probe_accepted :
+    checkX86ThreeWayNI frameWipeProbeCode frameWipeProbeContract = true := by decide +kernel
+
+/-- `#tooth`: returning with the spill area never stored to, or stored with non-zero data, is
+    rejected. -/
+theorem tooth_x86_frame_not_wiped_rejected :
+    checkX86ThreeWayNI frameWipeProbeNoStoreCode frameWipeProbeContract = false ∧
+    checkX86ThreeWayNI frameWipeProbeDirtyStoreCode frameWipeProbeContract = false := by
+  decide +kernel
+
+/-- `ret` under a frame contract is refused in every abstract state that is not the wiped phase. -/
+theorem x86_ret_requires_frame_wipe (c : FuncContract) (st : X86AbsState) (off : Nat)
+    (hFrame : c.usesRbpFrame = true) (hNot : st.stackZeroLoop ≠ 4) :
+    transferX86Instr c ⟨off, 1, .ret⟩ st = none := by
+  have h4 : (st.stackZeroLoop == 4) = false := beq_false_of_ne hNot
+  simp [transferX86Instr, x86InstrRegsValid, hFrame, h4]
+
+/-- `mul x2, x0, x1; ret` needs `PSTATE.DIT` on entry: it is accepted only under a contract that
+    declares the caller established DIT, and `msr dit, #1` in the kernel removes that need. -/
+theorem arm64_dit_is_a_declared_contract_assumption :
+    checkArm64ThreeWayNI [0x02, 0x7C, 0x01, 0x9B, 0xC0, 0x03, 0x5F, 0xD6]
+      (mkContract "mul_dit_assumed" []) = true ∧
+    checkArm64ThreeWayNI [0x5F, 0x41, 0x03, 0xD5, 0x02, 0x7C, 0x01, 0x9B, 0xC0, 0x03, 0x5F, 0xD6]
+      (mkContract "mul_dit_set" [] [] [] false 0 0 false) = true := by decide +kernel
+
+/-- `#tooth`: the same multiply under a contract that does not assume DIT on entry is rejected. -/
+theorem tooth_arm64_mul_without_dit_rejected :
+    checkArm64ThreeWayNI [0x02, 0x7C, 0x01, 0x9B, 0xC0, 0x03, 0x5F, 0xD6]
+      (mkContract "mul_no_dit" [] [] [] false 0 0 false) = false := by decide +kernel
+
+/-- The two executions of a contract start with `PSTATE.DIT` exactly as the contract declares. -/
+theorem arm64_contract_init_dit (c : FuncContract) (s₁ s₂ : Arm64State)
+    (h : Arm64ContractInit c s₁ s₂) : s₁.dit = c.doitEnabled ∧ s₂.dit = c.doitEnabled :=
+  ⟨h.2.2.2.2.1, h.2.2.2.2.2.1⟩
+
+
+theorem decode_overlong_tooth :
+    ∃ bs : List UInt8,
+      (decodeX86InstrAtUncapped 0 bs).map (·.byteLen) = some 16 ∧
+      decodeX86InstrAt 0 bs = none := by
+  exact ⟨List.replicate 12 0x2E ++ [0x48, 0x83, 0xC0, 0x01], by decide +kernel⟩
+
+theorem arm64_no_dit_contract_tooth :
+    ∃ c : FuncContract, c.doitEnabled = false ∧
+      checkArm64ThreeWayNI [0x00, 0x7C, 0x01, 0x9B, 0xC0, 0x03, 0x5F, 0xD6] c = false := by
+  exact ⟨mkContract "mul_no_dit" [] [] [] false 0 0 false, by decide +kernel⟩
+
+theorem x86_broadcast_width_mutation_tooth :
+    ∃ code : List UInt8, decodeX86InstrAt 0 code ≠
+      decodeX86InstrAt 0 [0xC4, 0xE2, 0x7D, 0x59, 0xC1] :=
+  ⟨[0xC4, 0xE2, 0x79, 0x59, 0xC1], tooth_x86_vpbroadcast_xmm_is_not_ymm⟩
+
+theorem decode_byteLen_inhabited :
+    ∃ pc bs d, decodeX86InstrAt pc bs = some d :=
+  ⟨0, [0x90], ⟨0, 1, .nop⟩, by decide +kernel⟩
+
+#tooth_pair decodeX86InstrAt_byteLen_le vs decode_overlong_tooth
+#verify_inhabited decodeX86InstrAt_byteLen_le decode_byteLen_inhabited
+#tooth_pair arm64_asr_is_arithmetic vs tooth_arm64_asr_differs_from_ror
+#tooth_pair arm64_csel_sf_width vs tooth_arm64_csel_w_is_not_x
+#tooth_pair x86_vpbroadcast_honors_vexL vs x86_broadcast_width_mutation_tooth
+#tooth_pair arm64_dit_is_a_declared_contract_assumption vs arm64_no_dit_contract_tooth
 
 end Qsag

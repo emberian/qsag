@@ -19,6 +19,7 @@ Contents:
 public import Qsag.CompiledRlibFixtures
 public import Qsag.ElfFixtureSlices
 
+import Qsag.Tactic.AssuranceKit
 public section
 namespace Qsag
 
@@ -858,5 +859,16 @@ theorem currentAarch64_all_symbols_provenance (slice : ElfFuncSlice)
   apply extractAllRlibFuncs_provenance
   rw [currentAarch64_rlib_extracted_slices]
   exact h
+
+
+theorem truncated_archive_provenance_tooth :
+    (parseArArchive (Bytes.ofList [0x21, 0x3c])).length ≠ 1 := by decide +kernel
+
+theorem currentX86_provenance_inhabited :
+    ∃ slice : ElfFuncSlice, slice ∈ currentX86ExtractedSlices ∧ slice.symSize > 0 :=
+  ⟨currentX86ExtractedSlices[0], List.mem_cons_self, by decide +kernel⟩
+
+#tooth_pair currentX86_all_symbols_provenance vs truncated_archive_provenance_tooth
+#verify_inhabited currentX86_all_symbols_provenance currentX86_provenance_inhabited
 
 end Qsag

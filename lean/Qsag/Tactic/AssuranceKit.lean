@@ -839,6 +839,9 @@ private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
           for fact in facts do
             unless matchedWitnessPremise do
               if ← matchWitnessType side (← inferType fact) then
+                let f ← instantiateMVars fact
+                check f
+                auditDag (← getEnv) f.getUsedConstants.toList
                 matchedWitnessPremise := true
     unless matchedWitnessPremise do
       throwError "inhabitedness audit: no security premise supplied by the witness"
@@ -849,19 +852,34 @@ private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
         if let .some inst ← (try trySynthInstance ty catch _ => pure .none) then
           if ← isDefEq x inst then continue
         let mut found := false
+        -- Pass 1: directly bind any witness value of matching type not yet bound to an
+        -- earlier binder in `sx` (never silently replacing explicit list witnesses with
+        -- `List.replicate _ default`).
         for fact in facts do
           if ← matchWitnessType ty (← inferType fact) then
-            -- Shape synthesis is permitted only after a witness has supplied a real
-            -- security premise; every remaining premise is kernel-checked below.
-            let candidate ← try
-              if ty.getAppFn.isConstOf ``List then
-                let d ← mkDefault ty.getAppArgs[0]!
-                mkAppM ``List.replicate #[← mkAppM ``List.length #[fact], d]
-              else pure fact
-            catch _ => pure fact
-            if ← isDefEq x candidate then
-              found := true
-              break
+            let alreadyBound ← sx.anyM fun b => do
+              let b ← instantiateMVars b
+              if b.isMVar then pure false
+              else if b == fact then pure true
+              else withNewMCtxDepth <| isDefEq b fact
+            if !alreadyBound then
+              if ← isDefEq x fact then
+                found := true
+                break
+        -- Pass 2: only for remaining auxiliary binders whose matching witness values were
+        -- already consumed by earlier binders, synthesize a dimension-matched default.
+        if !found then
+          for fact in facts do
+            if ← matchWitnessType ty (← inferType fact) then
+              let candidate ← try
+                if ty.getAppFn.isConstOf ``List then
+                  let d ← mkDefault ty.getAppArgs[0]!
+                  mkAppM ``List.replicate #[← mkAppM ``List.length #[fact], d]
+                else pure fact
+              catch _ => pure fact
+              if ← isDefEq x candidate then
+                found := true
+                break
         if !found then pure ()
     -- Infer dimensions from structured witness values before defaulting free data.
     for x in sx do
@@ -1669,6 +1687,13 @@ theorem emptySubtypeWitness (s : {_n : Nat // False}) : ∃ n, BelowOne n :=
 theorem wrappedTruth : True := trivialTooth
 theorem scalarSecurity (x : UInt64) : x = x := rfl
 theorem scalarTooth : ∃ x : UInt64, x = 0 ∧ x ≠ 1 := ⟨0, rfl, by decide⟩
+def HasLenTwo (xs : List Nat) : Prop := xs.length = 2
+theorem bogusListDefaulting (xs ys : List Nat) (_hLen : HasLenTwo xs) (_hZero : ys = [0, 0]) :
+    xs.length + ys.length = 4 := by
+  subst _hZero
+  simpa [HasLenTwo] using _hLen
+theorem nonzeroListWitness : ∃ xs ys : List Nat, HasLenTwo xs ∧ ys.length = 2 :=
+  ⟨[1, 2], [3, 4], rfl, rfl⟩
 end AssuranceRegression
 
 #verify_constructive xorEval_norm_eq XorTree.norm_sound xor_rss16 xor_rss32 frameList_append_inj
@@ -1692,6 +1717,10 @@ run_cmd do
   expectRejection "contradictory joint premises" (liftTermElabM <| checkInhabited impossible reachable)
   let (_, emptyWitness) ← verifyConstructiveDecl (← `(ident| Qsag.AssuranceRegression.emptySubtypeWitness))
   expectRejection "empty subtype parameter" (liftTermElabM <| checkInhabited impossible emptyWitness)
+  let (_, bogusListSec) ← verifyConstructiveDecl (← `(ident| Qsag.AssuranceRegression.bogusListDefaulting))
+  let (_, nonzeroListWit) ← verifyConstructiveDecl (← `(ident| Qsag.AssuranceRegression.nonzeroListWitness))
+  expectRejection "unbound list witness replaced by default"
+    (liftTermElabM <| checkInhabited bogusListSec nonzeroListWit)
   let sec ← `(ident| Qsag.AssuranceRegression.security)
   for t in #[← `(ident| Qsag.AssuranceRegression.trivialTooth),
       ← `(ident| Qsag.AssuranceRegression.unrelated),
