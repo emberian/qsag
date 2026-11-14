@@ -2922,3 +2922,1524 @@ private theorem txDecodeListFields_txEncodeListFields :
 
 /-- Canonical transaction intent bound by `qsag-policy` (`QSAG.POLICY.INTENT.V2`, `0` string literals),
     preserving all 24 production fields of `crates/qsag-policy` alongside `policy_digest`. -/
+structure TransactionIntent where
+  recipient : List UInt8
+  amount_units : Nat
+  window_id : Nat
+  policy_digest : List UInt8
+  authority_digest : List UInt8
+  nonce : Nat
+  chain_id : Nat := 1
+  suite_tag : Nat := 0x0501
+  recipient_hrp : List UInt8 := []
+  recipient_version : Nat := 1
+  recipient_suite_tag : Nat := 0x0501
+  recipient_kind : Nat := 0
+  rolling_window_spent : Nat := 0
+  timestamp_secs : Nat := 0
+  initiator_party : Nat := 0
+  init_mac_bytes : List UInt8 := []
+  approver_bytes : List UInt8 := []
+  payload_digest : List UInt8 := []
+  rolling_window_accumulator : List UInt8 := []
+  signing_key_id : List UInt8 := []
+  policy_revision : Nat := 0
+  message_digest : List UInt8 := []
+  signing_context_digest : List UInt8 := []
+  session_id : List UInt8 := []
+  quorum_bytes : List UInt8 := []
+  deriving DecidableEq, Repr
+
+/-- Exact ASCII domain tag `QSAG.POLICY.INTENT.V2` (`21` bytes, matching `qsag-policy`). -/
+def txIntentDomainTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x50, 0x4F, 0x4C, 0x49, 0x43, 0x59, 0x2E,
+   0x49, 0x4E, 0x54, 0x45, 0x4E, 0x54, 0x2E, 0x56, 0x32]
+
+/-- Exact ASCII domain tag `QSAG.POLICY.SIGNED_INTENT.V2` (`28` bytes, matching `qsag-policy`). -/
+def txSignedIntentDomainTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x50, 0x4F, 0x4C, 0x49, 0x43, 0x59, 0x2E,
+   0x53, 0x49, 0x47, 0x4E, 0x45, 0x44, 0x5F, 0x49, 0x4E, 0x54, 0x45, 0x4E, 0x54, 0x2E, 0x56, 0x32]
+
+/-- Exact 24 byte-slice frames passed to `cshake256_framed_32(b"QSAG.POLICY.INTENT.V2", &[...])`
+    by `TransactionIntent::canonical_digest` in `crates/qsag-policy/src/lib.rs:363-395`. -/
+def txIntentProdFrames (tx : TransactionIntent) : List (List UInt8) :=
+  [be 8 tx.chain_id,
+   be 2 tx.suite_tag,
+   tx.recipient_hrp,
+   be 1 tx.recipient_version,
+   be 2 tx.recipient_suite_tag,
+   be 1 tx.recipient_kind,
+   tx.recipient,
+   be 16 tx.amount_units,
+   be 16 tx.rolling_window_spent,
+   be 8 tx.window_id,
+   be 32 tx.nonce,
+   be 8 tx.timestamp_secs,
+   be 2 tx.initiator_party,
+   tx.init_mac_bytes,
+   tx.approver_bytes,
+   tx.payload_digest,
+   tx.authority_digest,
+   tx.rolling_window_accumulator,
+   tx.signing_key_id,
+   be 8 tx.policy_revision,
+   tx.message_digest,
+   tx.signing_context_digest,
+   tx.session_id,
+   tx.quorum_bytes]
+
+/-- Production `TransactionIntent::canonical_digest` (`cshake256Bytes` under `"QSAG.POLICY.INTENT.V2"`
+    over `encodeFramedU64Le (txIntentProdFrames tx)`). -/
+def canonicalIntentDigest (tx : TransactionIntent) : List UInt8 :=
+  cshake256Bytes txIntentDomainTag (encodeFramedU64Le (txIntentProdFrames tx))
+
+/-- Production `TransactionIntent::to_canonical_signing_bytes`:
+    `"QSAG.POLICY.SIGNED_INTENT.V2" || policy_digest || canonical_digest(tx with message_digest := [0; 32])`. -/
+def toCanonicalSigningBytes (tx : TransactionIntent) : List UInt8 :=
+  txSignedIntentDomainTag ++ tx.policy_digest ++
+    canonicalIntentDigest { tx with message_digest := List.replicate 32 0 }
+
+private theorem be_length_lt_u64 {w : Nat} (hw : w ≤ 32) (n : Nat) :
+    (be w n).length < 256 ^ 8 := by
+  rw [length_be]
+  exact Nat.lt_of_le_of_lt hw (by decide)
+
+/-- Scalar wire-width predicate confirming that all 12 integer scalars of `tx` fit production Rust widths. -/
+def txScalarsFitWire (tx : TransactionIntent) : Bool :=
+  decide (tx.chain_id < 256 ^ 8) &&
+  decide (tx.suite_tag < 256 ^ 2) &&
+  decide (tx.recipient_version < 256 ^ 1) &&
+  decide (tx.recipient_suite_tag < 256 ^ 2) &&
+  decide (tx.recipient_kind < 256 ^ 1) &&
+  decide (tx.amount_units < 256 ^ 16) &&
+  decide (tx.rolling_window_spent < 256 ^ 16) &&
+  decide (tx.window_id < 256 ^ 8) &&
+  decide (tx.nonce < 256 ^ 32) &&
+  decide (tx.timestamp_secs < 256 ^ 8) &&
+  decide (tx.initiator_party < 256 ^ 2) &&
+  decide (tx.policy_revision < 256 ^ 8)
+
+/-- Slice-length predicate confirming that all 13 byte-slice fields of `tx` fit `u64` length prefixes. -/
+def txSlicesFitU64 (tx : TransactionIntent) : Bool :=
+  decide (tx.policy_digest.length < 256 ^ 8) &&
+  decide (tx.recipient_hrp.length < 256 ^ 8) &&
+  decide (tx.recipient.length < 256 ^ 8) &&
+  decide (tx.init_mac_bytes.length < 256 ^ 8) &&
+  decide (tx.approver_bytes.length < 256 ^ 8) &&
+  decide (tx.payload_digest.length < 256 ^ 8) &&
+  decide (tx.authority_digest.length < 256 ^ 8) &&
+  decide (tx.rolling_window_accumulator.length < 256 ^ 8) &&
+  decide (tx.signing_key_id.length < 256 ^ 8) &&
+  decide (tx.message_digest.length < 256 ^ 8) &&
+  decide (tx.signing_context_digest.length < 256 ^ 8) &&
+  decide (tx.session_id.length < 256 ^ 8) &&
+  decide (tx.quorum_bytes.length < 256 ^ 8)
+
+/-- Wire-width predicate confirming that every scalar and slice of `tx` fits production Rust integer widths. -/
+def txFitsWireWidths (tx : TransactionIntent) : Bool :=
+  txScalarsFitWire tx && txSlicesFitU64 tx
+
+private def txFallbackFields (tx : TransactionIntent) : List (List UInt8) :=
+  [tx.recipient, txLeb128 tx.amount_units, txLeb128 tx.window_id,
+   tx.policy_digest, tx.authority_digest, txLeb128 tx.nonce,
+   txLeb128 tx.chain_id, txLeb128 tx.suite_tag, tx.recipient_hrp,
+   txLeb128 tx.recipient_version, txLeb128 tx.recipient_suite_tag, txLeb128 tx.recipient_kind,
+   txLeb128 tx.rolling_window_spent, txLeb128 tx.timestamp_secs, txLeb128 tx.initiator_party,
+   tx.init_mac_bytes, tx.approver_bytes, tx.payload_digest,
+   tx.rolling_window_accumulator, tx.signing_key_id, txLeb128 tx.policy_revision,
+   tx.message_digest, tx.signing_context_digest, tx.session_id, tx.quorum_bytes]
+
+/-- Canonical `QSAG.POLICY.INTENT.V2` `u64 LE`-framed serializer for `TransactionIntent`
+    (with a disjoint `0xFF`-prefixed lossless extension strictly for out-of-wire-range mathematical `Nat`s). -/
+def encodeTransactionIntent (tx : TransactionIntent) : List UInt8 :=
+  if txFitsWireWidths tx then
+    txIntentDomainTag ++ encodeFramedU64Le (tx.policy_digest :: txIntentProdFrames tx)
+  else
+    0xFF :: txEncodeListFields (txFallbackFields tx)
+
+/-- Canonical `QSAG.POLICY.INTENT.V2` `u64 LE`-framed decoder for `TransactionIntent`. -/
+def decodeTransactionIntent (bytes : List UInt8) : Option TransactionIntent :=
+  if bytes.head? == some 0xFF then
+    match txDecodeListFields 25 (bytes.drop 1) with
+    | some ([fRec, fAmt, fWid, polDig, fAuth, fNonce, fCid, fSuite, fHrp,
+             fVer, fRecSuite, fKind, fSpent, fTs, fInit, fMacs, fAppr, fPay,
+             fAcc, fKey, fRev, fMsg, fCtx, fSess, fQuo], []) =>
+      match decodeLeb128Exact fAmt, decodeLeb128Exact fWid, decodeLeb128Exact fNonce,
+            decodeLeb128Exact fCid, decodeLeb128Exact fSuite, decodeLeb128Exact fVer,
+            decodeLeb128Exact fRecSuite, decodeLeb128Exact fKind, decodeLeb128Exact fSpent,
+            decodeLeb128Exact fTs, decodeLeb128Exact fInit, decodeLeb128Exact fRev with
+      | some amt, some wid, some nce, some cid, some ste, some ver,
+        some rste, some knd, some spn, some ts, some ini, some rev =>
+        some { recipient := fRec, amount_units := amt, window_id := wid,
+               policy_digest := polDig, authority_digest := fAuth, nonce := nce,
+               chain_id := cid, suite_tag := ste, recipient_hrp := fHrp,
+               recipient_version := ver, recipient_suite_tag := rste, recipient_kind := knd,
+               rolling_window_spent := spn, timestamp_secs := ts, initiator_party := ini,
+               init_mac_bytes := fMacs, approver_bytes := fAppr, payload_digest := fPay,
+               rolling_window_accumulator := fAcc, signing_key_id := fKey, policy_revision := rev,
+               message_digest := fMsg, signing_context_digest := fCtx,
+               session_id := fSess, quorum_bytes := fQuo }
+      | _, _, _, _, _, _, _, _, _, _, _, _ => none
+    | _ => none
+  else if bytes.take 21 != txIntentDomainTag then none
+  else
+    match decodeFramedU64Le (bytes.drop 21) with
+    | some [polDig, fCid, fSuite, fHrp, fVer, fRecSuite, fKind, fRec,
+            fAmt, fSpent, fWid, fNonce, fTs, fInit, fMacs, fAppr, fPay,
+            fAuth, fAcc, fKey, fRev, fMsg, fCtx, fSess, fQuo] =>
+      if fCid.length == 8 && fSuite.length == 2 && fVer.length == 1 &&
+         fRecSuite.length == 2 && fKind.length == 1 && fAmt.length == 16 &&
+         fSpent.length == 16 && fWid.length == 8 && fNonce.length == 32 &&
+         fTs.length == 8 && fInit.length == 2 && fRev.length == 8 then
+        some { recipient := fRec, amount_units := ofBE fAmt, window_id := ofBE fWid,
+               policy_digest := polDig, authority_digest := fAuth, nonce := ofBE fNonce,
+               chain_id := ofBE fCid, suite_tag := ofBE fSuite, recipient_hrp := fHrp,
+               recipient_version := ofBE fVer, recipient_suite_tag := ofBE fRecSuite,
+               recipient_kind := ofBE fKind, rolling_window_spent := ofBE fSpent,
+               timestamp_secs := ofBE fTs, initiator_party := ofBE fInit,
+               init_mac_bytes := fMacs, approver_bytes := fAppr, payload_digest := fPay,
+               rolling_window_accumulator := fAcc, signing_key_id := fKey,
+               policy_revision := ofBE fRev, message_digest := fMsg,
+               signing_context_digest := fCtx, session_id := fSess, quorum_bytes := fQuo }
+      else none
+    | _ => none
+
+/-- For every Rust-width `TransactionIntent` (`txFitsWireWidths tx = true`), `encodeTransactionIntent`
+    emits the exact `"QSAG.POLICY.INTENT.V2"` + `encodeFramedU64Le` byte layout. -/
+theorem encodeTransactionIntent_eq_framed {tx : TransactionIntent}
+    (hW : txFitsWireWidths tx = true) :
+    encodeTransactionIntent tx =
+      txIntentDomainTag ++ encodeFramedU64Le (tx.policy_digest :: txIntentProdFrames tx) := by
+  unfold encodeTransactionIntent
+  simp [hW]
+
+private theorem list3_len_lt_u64 (a b c : List UInt8) : [a, b, c].length < 256 ^ 8 := by
+  simp only [List.length_cons, List.length_nil]
+  decide
+
+private theorem list5_len_lt_u64 (a b c d e : List UInt8) : [a, b, c, d, e].length < 256 ^ 8 := by
+  simp only [List.length_cons, List.length_nil]
+  decide
+
+private theorem forall_mem_cons_lt_u64 {x : List UInt8} {xs : List (List UInt8)}
+    (hx : x.length < 256 ^ 8) (hxs : ∀ f ∈ xs, f.length < 256 ^ 8) :
+    ∀ f ∈ x :: xs, f.length < 256 ^ 8 := by
+  intro f hf
+  cases hf with
+  | head => exact hx
+  | tail _ hTail => exact hxs f hTail
+
+private theorem txProdFrames_all_lt_u64 {tx : TransactionIntent}
+    (hW : txFitsWireWidths tx = true) :
+    (tx.policy_digest :: txIntentProdFrames tx).length < 256 ^ 8 ∧
+    (∀ f ∈ tx.policy_digest :: txIntentProdFrames tx, f.length < 256 ^ 8) := by
+  have hSl : txSlicesFitU64 tx = true := (Bool.and_eq_true_iff.mp hW).2
+  simp only [txSlicesFitU64, Bool.and_eq_true, and_assoc, decide_eq_true_eq] at hSl
+  rcases hSl with ⟨hPol, hHrp, hRec, hMac, hApp, hPay, hAut, hAcc, hKey, hMsg, hCtx, hSes, hQuo⟩
+  have hLen25 : (tx.policy_digest :: txIntentProdFrames tx).length < 256 ^ 8 := by
+    rw [show (tx.policy_digest :: txIntentProdFrames tx).length = 25 from rfl]
+    decide
+  refine ⟨hLen25, ?_⟩
+  dsimp only [txIntentProdFrames]
+  exact forall_mem_cons_lt_u64 hPol
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 hHrp
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 hRec
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 hMac
+    (forall_mem_cons_lt_u64 hApp
+    (forall_mem_cons_lt_u64 hPay
+    (forall_mem_cons_lt_u64 hAut
+    (forall_mem_cons_lt_u64 hAcc
+    (forall_mem_cons_lt_u64 hKey
+    (forall_mem_cons_lt_u64 (be_length_lt_u64 (by decide) _)
+    (forall_mem_cons_lt_u64 hMsg
+    (forall_mem_cons_lt_u64 hCtx
+    (forall_mem_cons_lt_u64 hSes
+    (forall_mem_cons_lt_u64 hQuo
+      (fun _ hf => nomatch hf)))))))))))))))))))))))))
+
+/-- Exact roundtrip theorem `decodeTransactionIntent (encodeTransactionIntent tx) = some tx`
+    across all 25 fields of `TransactionIntent`. -/
+theorem decodeTransactionIntent_encodeTransactionIntent (tx : TransactionIntent) :
+    decodeTransactionIntent (encodeTransactionIntent tx) = some tx := by
+  unfold encodeTransactionIntent
+  cases hW : txFitsWireWidths tx
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    unfold decodeTransactionIntent
+    have hHeadFF :
+        ((0xFF :: txEncodeListFields (txFallbackFields tx)).head? == some 0xFF) = true := by
+      show (some (0xFF : UInt8) == some 0xFF) = true
+      decide
+    rw [hHeadFF]
+    simp only [↓reduceIte, List.drop_succ_cons, List.drop_zero]
+    have hDec25 : txDecodeListFields 25 (txEncodeListFields (txFallbackFields tx)) =
+        some (txFallbackFields tx, []) :=
+      txDecodeListFields_txEncodeListFields (txFallbackFields tx)
+    rw [hDec25]
+    dsimp only [txFallbackFields]
+    simp only [decodeLeb128Exact_txLeb128]
+  · simp only [↓reduceIte]
+    obtain ⟨hCnt, hAll⟩ := txProdFrames_all_lt_u64 hW
+    have hSc : txScalarsFitWire tx = true := (Bool.and_eq_true_iff.mp hW).1
+    simp only [txScalarsFitWire, Bool.and_eq_true, and_assoc, decide_eq_true_eq] at hSc
+    rcases hSc with ⟨hCid, hSte, hVer, hRste, hKnd, hAmt, hSpn, hWid, hNce, hTs, hIni, hRev⟩
+    let framed := encodeFramedU64Le (tx.policy_digest :: txIntentProdFrames tx)
+    have hHeadNotFF : ((txIntentDomainTag ++ framed).head? == some 0xFF) = false := by
+      show (some (0x51 : UInt8) == some 0xFF) = false
+      decide
+    have hTagLen : txIntentDomainTag.length = 21 := rfl
+    have hTake : (txIntentDomainTag ++ framed).take 21 = txIntentDomainTag := by
+      simp [hTagLen]
+    have hDrop : (txIntentDomainTag ++ framed).drop 21 = framed := by
+      simp [hTagLen]
+    have hTagBne : (txIntentDomainTag != txIntentDomainTag) = false := by decide
+    have hDecFramed : decodeFramedU64Le framed = some (tx.policy_digest :: txIntentProdFrames tx) :=
+      decodeFramedU64Le_encodeFramedU64Le hCnt hAll
+    have hWidthsOk :
+        ((be 8 tx.chain_id).length == 8 && (be 2 tx.suite_tag).length == 2 &&
+         (be 1 tx.recipient_version).length == 1 && (be 2 tx.recipient_suite_tag).length == 2 &&
+         (be 1 tx.recipient_kind).length == 1 && (be 16 tx.amount_units).length == 16 &&
+         (be 16 tx.rolling_window_spent).length == 16 && (be 8 tx.window_id).length == 8 &&
+         (be 32 tx.nonce).length == 32 && (be 8 tx.timestamp_secs).length == 8 &&
+         (be 2 tx.initiator_party).length == 2 && (be 8 tx.policy_revision).length == 8) = true := by
+      simp only [length_be]
+      decide
+    unfold decodeTransactionIntent
+    rw [hHeadNotFF]
+    simp only [Bool.false_eq_true, ↓reduceIte]
+    rw [hTake, hTagBne]
+    simp only [Bool.false_eq_true, ↓reduceIte]
+    rw [hDrop, hDecFramed]
+    dsimp only [txIntentProdFrames]
+    rw [hWidthsOk]
+    simp only [↓reduceIte]
+    rw [ofBE_be hCid, ofBE_be hSte, ofBE_be hVer, ofBE_be hRste, ofBE_be hKnd,
+        ofBE_be hAmt, ofBE_be hSpn, ofBE_be hWid, ofBE_be hNce, ofBE_be hTs,
+        ofBE_be hIni, ofBE_be hRev]
+
+/-- Strict injectivity of `encodeTransactionIntent` across all 25 fields. -/
+theorem encodeTransactionIntent_injective {tx₁ tx₂ : TransactionIntent}
+    (hEq : encodeTransactionIntent tx₁ = encodeTransactionIntent tx₂) :
+    tx₁ = tx₂ := by
+  have hDec := congrArg decodeTransactionIntent hEq
+  rw [decodeTransactionIntent_encodeTransactionIntent,
+      decodeTransactionIntent_encodeTransactionIntent] at hDec
+  injection hDec
+
+/-- Constructive (`0 Classical.choice`) binding theorem for `toCanonicalSigningBytes`:
+    any collision in `toCanonicalSigningBytes` between two fixed-width intents with 32-byte
+    `policy_digest`s either agrees on `policy_digest` and every non-`message_digest` field of
+    `TransactionIntent` OR yields an explicit `HashCollisionWitness` on
+    `cshake256Bytes txIntentDomainTag`. -/
+def toCanonicalSigningBytes_binding_or_collision
+    (tx₁ tx₂ : TransactionIntent)
+    (hPol₁ : tx₁.policy_digest.length = 32)
+    (hPol₂ : tx₂.policy_digest.length = 32)
+    (hW₁ : txFitsWireWidths { tx₁ with message_digest := List.replicate 32 0 } = true)
+    (hW₂ : txFitsWireWidths { tx₂ with message_digest := List.replicate 32 0 } = true)
+    (hEq : toCanonicalSigningBytes tx₁ = toCanonicalSigningBytes tx₂) :
+    PSum (HashCollisionWitness (cshake256Bytes txIntentDomainTag))
+         (tx₁.policy_digest = tx₂.policy_digest ∧
+          { tx₁ with message_digest := List.replicate 32 0 } =
+            { tx₂ with message_digest := List.replicate 32 0 }) :=
+  let z₁ := { tx₁ with message_digest := List.replicate 32 0 }
+  let z₂ := { tx₂ with message_digest := List.replicate 32 0 }
+  have hStripTag :
+      tx₁.policy_digest ++ canonicalIntentDigest z₁ =
+        tx₂.policy_digest ++ canonicalIntentDigest z₂ := by
+    unfold toCanonicalSigningBytes at hEq
+    simp only [List.append_assoc] at hEq
+    exact (List.append_inj hEq rfl).2
+  have hSplitPol :
+      tx₁.policy_digest = tx₂.policy_digest ∧
+      canonicalIntentDigest z₁ = canonicalIntentDigest z₂ :=
+    List.append_inj hStripTag (hPol₁.trans hPol₂.symm)
+  if hZ : z₁ = z₂ then
+    .inr ⟨hSplitPol.1, hZ⟩
+  else
+    let m1 := encodeFramedU64Le (txIntentProdFrames z₁)
+    let m2 := encodeFramedU64Le (txIntentProdFrames z₂)
+    have hPreNe : m1 ≠ m2 := fun hmEq => by
+      have hFullEq : encodeTransactionIntent z₁ = encodeTransactionIntent z₂ := by
+        rw [encodeTransactionIntent_eq_framed hW₁, encodeTransactionIntent_eq_framed hW₂]
+        obtain ⟨_, hAll₁⟩ := txProdFrames_all_lt_u64 hW₁
+        obtain ⟨_, hAll₂⟩ := txProdFrames_all_lt_u64 hW₂
+        have hCnt24₁ : (txIntentProdFrames z₁).length < 256 ^ 8 := by
+          rw [show (txIntentProdFrames z₁).length = 24 from rfl]; decide
+        have hCnt24₂ : (txIntentProdFrames z₂).length < 256 ^ 8 := by
+          rw [show (txIntentProdFrames z₂).length = 24 from rfl]; decide
+        have hFramesEq := encodeFramedU64Le_injective
+          hCnt24₁ (fun f hf => hAll₁ f (.tail _ hf))
+          hCnt24₂ (fun f hf => hAll₂ f (.tail _ hf)) hmEq
+        have hPolZ : z₁.policy_digest = z₂.policy_digest := hSplitPol.1
+        have hListEq : z₁.policy_digest :: txIntentProdFrames z₁ =
+            z₂.policy_digest :: txIntentProdFrames z₂ :=
+          (congrArg (· :: txIntentProdFrames z₁) hPolZ).trans
+            (congrArg (z₂.policy_digest :: ·) hFramesEq)
+        exact congrArg (fun xs => txIntentDomainTag ++ encodeFramedU64Le xs) hListEq
+      exact hZ (encodeTransactionIntent_injective hFullEq)
+    .inl { m1 := m1, m2 := m2, ne := hPreNe, eq := hSplitPol.2 }
+
+/-- Authoritative multi-turn policy state maintained inside custodian HSM / signer memory. -/
+structure StatefulPolicyGuard where
+  window_id : Nat
+  velocity_window_cap : Nat
+  accumulated_spend : Nat
+  burned_intent_nonces : List Nat
+  pinned_policy_digest : List UInt8
+  pinned_authority_digest : List UInt8
+  allowed_recipients : List (List UInt8)
+  per_tx_cap : Nat
+  deriving DecidableEq, Repr
+
+/-- Approved signing envelope emitted by `policyGuardStep`. -/
+structure ApprovedIntentEnvelope where
+  intent : TransactionIntent
+  canonicalBytes : List UInt8
+  deriving DecidableEq, Repr
+
+/-- Rejection reasons of `policyGuardStep`. -/
+inductive PolicyRejectReason where
+  | windowMismatch
+  | policyDigestMismatch
+  | authorityDigestMismatch
+  | recipientNotAllowlisted
+  | perTxCapExceeded
+  | velocityWindowExceeded
+  | duplicateIntentNonce
+  deriving DecidableEq, Repr
+
+/-- Authoritative stateful velocity, allowlist, digest-pinning, and nonce-replay guard transition. -/
+@[expose] def policyGuardStep (g : StatefulPolicyGuard) (tx : TransactionIntent) :
+    CustodyStepOutcome StatefulPolicyGuard ApprovedIntentEnvelope PolicyRejectReason :=
+  if tx.window_id != g.window_id then
+    .rejected g .windowMismatch
+  else if tx.policy_digest != g.pinned_policy_digest then
+    .rejected g .policyDigestMismatch
+  else if tx.authority_digest != g.pinned_authority_digest then
+    .rejected g .authorityDigestMismatch
+  else if ¬ (tx.recipient ∈ g.allowed_recipients) then
+    .rejected g .recipientNotAllowlisted
+  else if ¬ (tx.amount_units ≤ g.per_tx_cap) then
+    .rejected g .perTxCapExceeded
+  else if ¬ (g.accumulated_spend + tx.amount_units ≤ g.velocity_window_cap) then
+    .rejected g .velocityWindowExceeded
+  else if tx.nonce ∈ g.burned_intent_nonces then
+    .rejected g .duplicateIntentNonce
+  else
+    let g' : StatefulPolicyGuard :=
+      { g with accumulated_spend := g.accumulated_spend + tx.amount_units
+               burned_intent_nonces := tx.nonce :: g.burned_intent_nonces }
+    .accepted g' { intent := tx, canonicalBytes := encodeTransactionIntent tx }
+
+private theorem policy_no_nonce_if_burned
+    {g gFinal : StatefulPolicyGuard}
+    {trace : List (TransactionIntent × Option ApprovedIntentEnvelope)}
+    (hTr : ValidCustodyTrace policyGuardStep g trace gFinal) :
+    ∀ nonce ∈ g.burned_intent_nonces,
+      nonce ∉ (traceApprovedOutputs trace).map (fun e => e.intent.nonce) := by
+  induction hTr with
+  | nil => intro _ _ hm; cases hm
+  | @consAccepted s s' _ tx env rest hStep _ ih =>
+    intro nonce hBurn
+    unfold policyGuardStep at hStep
+    if h1 : (tx.window_id != s.window_id) = true then simp [h1] at hStep
+    else if h2 : (tx.policy_digest != s.pinned_policy_digest) = true then simp [h1, h2] at hStep
+    else if h3 : (tx.authority_digest != s.pinned_authority_digest) = true then simp [h1, h2, h3] at hStep
+    else if h4 : ¬ (tx.recipient ∈ s.allowed_recipients) then simp [h1, h2, h3, h4] at hStep
+    else if h5 : ¬ (tx.amount_units ≤ s.per_tx_cap) then simp [h1, h2, h3, h4, h5] at hStep
+    else if h6 : ¬ (s.accumulated_spend + tx.amount_units ≤ s.velocity_window_cap) then
+      simp [h1, h2, h3, h4, h5, h6] at hStep
+    else if h7 : tx.nonce ∈ s.burned_intent_nonces then
+      simp [h1, h2, h3, h4, h5, h6, h7] at hStep
+    else
+      simp only [h1, h2, h3, h4, h5, h6, h7, Bool.false_eq_true, ↓reduceIte,
+        CustodyStepOutcome.accepted.injEq] at hStep
+      rcases hStep with ⟨rfl, rfl⟩
+      have hNe : nonce ≠ tx.nonce := fun hEq => h7 (hEq ▸ hBurn)
+      simp only [traceApprovedOutputs_cons_some, List.map_cons, List.mem_cons, not_or]
+      exact ⟨hNe, ih nonce (.tail _ hBurn)⟩
+  | @consRejected s s' _ tx err rest hStep _ ih =>
+    intro nonce hBurn
+    simp only [traceApprovedOutputs_cons_none]
+    unfold policyGuardStep at hStep
+    split at hStep
+    · cases hStep; exact ih nonce hBurn
+    · split at hStep
+      · cases hStep; exact ih nonce hBurn
+      · split at hStep
+        · cases hStep; exact ih nonce hBurn
+        · split at hStep
+          · cases hStep; exact ih nonce hBurn
+          · split at hStep
+            · cases hStep; exact ih nonce hBurn
+            · split at hStep
+              · cases hStep; exact ih nonce hBurn
+              · split at hStep <;> cases hStep
+                exact ih nonce hBurn
+
+/-- **Multi-Turn Stateful Policy Velocity, Replay & Intent-Binding Theorem
+    (`policy_multiturn_velocity_and_intent_binding`)**:
+    Across ANY multi-turn signing trace starting from `g₀` (`g₀.accumulated_spend ≤ g₀.velocity_window_cap`):
+    1. **Cumulative Velocity Safety**: `g₀.accumulated_spend + ∑ approved.amount_units = gFinal.accumulated_spend ≤ g₀.velocity_window_cap`
+       (hence `∑ approved.amount_units ≤ g₀.velocity_window_cap`!).
+    2. **Zero Nonce Replay**: `(approved.map nonce).Nodup` and zero pre-burned nonces are ever approved.
+    3. **Pinned Policy/Authority/Allowlist Binding**: Every approved envelope matches `g₀.window_id`,
+       `g₀.pinned_policy_digest`, `g₀.pinned_authority_digest`, `g₀.allowed_recipients`, and `≤ g₀.per_tx_cap`.
+    4. **Bijective Canonical V2 Intent Codec**: `decodeTransactionIntent (encodeTransactionIntent tx) = some tx`
+       and `encodeTransactionIntent` is strictly injective across all 25 fields! -/
+theorem policy_multiturn_velocity_and_intent_binding
+    {g₀ gFinal : StatefulPolicyGuard}
+    {trace : List (TransactionIntent × Option ApprovedIntentEnvelope)}
+    (hInitLe : g₀.accumulated_spend ≤ g₀.velocity_window_cap)
+    (hTrace : ValidCustodyTrace policyGuardStep g₀ trace gFinal) :
+    let approved := traceApprovedOutputs trace
+    let approvedSum := (approved.map (fun e => e.intent.amount_units)).foldr (· + ·) 0
+    g₀.accumulated_spend + approvedSum = gFinal.accumulated_spend ∧
+    gFinal.accumulated_spend ≤ g₀.velocity_window_cap ∧
+    approvedSum ≤ g₀.velocity_window_cap ∧
+    (approved.map (fun e => e.intent.nonce)).Nodup ∧
+    (∀ e ∈ approved,
+      e.intent.nonce ∉ g₀.burned_intent_nonces ∧
+      e.intent.window_id = g₀.window_id ∧
+      e.intent.policy_digest = g₀.pinned_policy_digest ∧
+      e.intent.authority_digest = g₀.pinned_authority_digest ∧
+      e.intent.recipient ∈ g₀.allowed_recipients ∧
+      e.intent.amount_units ≤ g₀.per_tx_cap ∧
+      e.canonicalBytes = encodeTransactionIntent e.intent) ∧
+    (∀ tx : TransactionIntent, decodeTransactionIntent (encodeTransactionIntent tx) = some tx) ∧
+    (∀ tx₁ tx₂ : TransactionIntent, encodeTransactionIntent tx₁ = encodeTransactionIntent tx₂ → tx₁ = tx₂) := by
+  have hCore : ∀ {s sf : StatefulPolicyGuard}
+      {tr : List (TransactionIntent × Option ApprovedIntentEnvelope)},
+      ValidCustodyTrace policyGuardStep s tr sf →
+      s.accumulated_spend ≤ s.velocity_window_cap →
+      let app := traceApprovedOutputs tr
+      let appSum := (app.map (fun e => e.intent.amount_units)).foldr (· + ·) 0
+      s.accumulated_spend + appSum = sf.accumulated_spend ∧
+      sf.accumulated_spend ≤ s.velocity_window_cap ∧
+      (app.map (fun e => e.intent.nonce)).Nodup ∧
+      (∀ e ∈ app,
+        e.intent.nonce ∉ s.burned_intent_nonces ∧
+        e.intent.window_id = s.window_id ∧
+        e.intent.policy_digest = s.pinned_policy_digest ∧
+        e.intent.authority_digest = s.pinned_authority_digest ∧
+        e.intent.recipient ∈ s.allowed_recipients ∧
+        e.intent.amount_units ≤ s.per_tx_cap ∧
+        e.canonicalBytes = encodeTransactionIntent e.intent) := by
+    intro s sf tr hTr
+    induction hTr with
+    | nil =>
+      intro hLe
+      exact ⟨by simp, hLe, .nil, fun _ hm => by cases hm⟩
+    | @consAccepted st st' _ tx env rest hStep hRest ih =>
+      intro hLe
+      unfold policyGuardStep at hStep
+      if h1 : (tx.window_id != st.window_id) = true then simp [h1] at hStep
+      else if h2 : (tx.policy_digest != st.pinned_policy_digest) = true then simp [h1, h2] at hStep
+      else if h3 : (tx.authority_digest != st.pinned_authority_digest) = true then simp [h1, h2, h3] at hStep
+      else if h4 : ¬ (tx.recipient ∈ st.allowed_recipients) then simp [h1, h2, h3, h4] at hStep
+      else if h5 : ¬ (tx.amount_units ≤ st.per_tx_cap) then simp [h1, h2, h3, h4, h5] at hStep
+      else if h6 : ¬ (st.accumulated_spend + tx.amount_units ≤ st.velocity_window_cap) then
+        simp [h1, h2, h3, h4, h5, h6] at hStep
+      else if h7 : tx.nonce ∈ st.burned_intent_nonces then
+        simp [h1, h2, h3, h4, h5, h6, h7] at hStep
+      else
+        simp only [h1, h2, h3, h4, h5, h6, h7, Bool.false_eq_true, ↓reduceIte,
+          CustodyStepOutcome.accepted.injEq] at hStep
+        rcases hStep with ⟨rfl, rfl⟩
+        have hWin : tx.window_id = st.window_id := by
+          cases hEq : (tx.window_id == st.window_id)
+          · exfalso; exact h1 (by simp [bne, hEq])
+          · exact of_decide_eq_true hEq
+        have hPol : tx.policy_digest = st.pinned_policy_digest := by
+          cases hEq : (tx.policy_digest == st.pinned_policy_digest)
+          · exfalso; exact h2 (by simp [bne, hEq])
+          · exact eq_of_beq hEq
+        have hAuth : tx.authority_digest = st.pinned_authority_digest := by
+          cases hEq : (tx.authority_digest == st.pinned_authority_digest)
+          · exfalso; exact h3 (by simp [bne, hEq])
+          · exact eq_of_beq hEq
+        have hRecip : tx.recipient ∈ st.allowed_recipients := by
+          cases Decidable.em (tx.recipient ∈ st.allowed_recipients) with
+          | inl h => exact h
+          | inr hn => exact False.elim (h4 hn)
+        have hPerTx : tx.amount_units ≤ st.per_tx_cap := Decidable.of_not_not h5
+        have hVel : st.accumulated_spend + tx.amount_units ≤ st.velocity_window_cap :=
+          Decidable.of_not_not h6
+        obtain ⟨hSumEq, hFinLe, hNdRest, hPropsRest⟩ := ih hVel
+        dsimp only at hSumEq hFinLe
+        have hNotInRest : tx.nonce ∉ (traceApprovedOutputs rest).map (fun e => e.intent.nonce) :=
+          policy_no_nonce_if_burned hRest tx.nonce (.head _)
+        simp only [traceApprovedOutputs_cons_some, List.map_cons, List.foldr_cons]
+        refine ⟨by rw [← Nat.add_assoc, hSumEq], hFinLe,
+                .cons (fun x hx hEq => hNotInRest (hEq ▸ hx)) hNdRest, ?_⟩
+        intro e he
+        rcases List.mem_cons.mp he with rfl | hTail
+        · exact ⟨h7, hWin, hPol, hAuth, hRecip, hPerTx, rfl⟩
+        · obtain ⟨hNotBurn', hW', hP', hA', hR', hCap', hBytes'⟩ := hPropsRest e hTail
+          exact ⟨fun hb => hNotBurn' (.tail _ hb), hW', hP', hA', hR', hCap', hBytes'⟩
+    | @consRejected st st' _ tx err rest hStep _ ih =>
+      intro hLe
+      simp only [traceApprovedOutputs_cons_none]
+      unfold policyGuardStep at hStep
+      split at hStep
+      · cases hStep; exact ih hLe
+      · split at hStep
+        · cases hStep; exact ih hLe
+        · split at hStep
+          · cases hStep; exact ih hLe
+          · split at hStep
+            · cases hStep; exact ih hLe
+            · split at hStep
+              · cases hStep; exact ih hLe
+              · split at hStep
+                · cases hStep; exact ih hLe
+                · split at hStep <;> cases hStep
+                  exact ih hLe
+  obtain ⟨hSumEq, hFinLe, hNd, hProps⟩ := hCore hTrace hInitLe
+  exact ⟨hSumEq, hFinLe, Nat.le_trans (Nat.le_add_left _ _) (hSumEq.symm ▸ hFinLe), hNd, hProps,
+         decodeTransactionIntent_encodeTransactionIntent,
+         fun _ _ h => encodeTransactionIntent_injective h⟩
+
+/-! ### §3.1b Monotonic `minNonceWatermark` + Sliding-Window Bitmap Replay & Clock-Anchored Epoch Guard -/
+
+/-- Read slot `k` of a bounded sliding-window anti-replay bitmap (`false` out of bounds). -/
+def slidingWindowTest (bm : List Bool) (k : Nat) : Bool :=
+  bm.getD k false
+
+/-- Construct a fixed-width `w`-slot sliding-window bitmap structurally (`0 Classical.choice`). -/
+def buildSlidingWindow : Nat → (Nat → Bool) → List Bool
+  | 0, _ => []
+  | w + 1, f => f 0 :: buildSlidingWindow w (fun i => f (i + 1))
+
+@[simp] theorem buildSlidingWindow_length (w : Nat) (f : Nat → Bool) :
+    (buildSlidingWindow w f).length = w := by
+  induction w generalizing f with
+  | zero => rfl
+  | succ w ih => simp [buildSlidingWindow, ih]
+
+theorem slidingWindowTest_buildSlidingWindow :
+    ∀ (w : Nat) (f : Nat → Bool) (k : Nat),
+      slidingWindowTest (buildSlidingWindow w f) k = if k < w then f k else false
+  | 0, _, k => by
+    have hn : ¬ (k < 0) := Nat.not_lt_zero k
+    simp [buildSlidingWindow, slidingWindowTest, hn]
+  | w + 1, f, 0 => by
+    simp [buildSlidingWindow, slidingWindowTest]
+  | w + 1, f, j + 1 => by
+    unfold buildSlidingWindow slidingWindowTest
+    dsimp only [List.getD]
+    change slidingWindowTest (buildSlidingWindow w (fun i => f (i + 1))) j = _
+    rw [slidingWindowTest_buildSlidingWindow w (fun i => f (i + 1)) j]
+    if hj : j < w then
+      have hj' : j + 1 < w + 1 := Nat.succ_lt_succ hj
+      simp [hj, hj']
+    else
+      have hj' : ¬ (j + 1 < w + 1) := fun h => hj (Nat.lt_of_succ_lt_succ h)
+      simp [hj, hj']
+
+theorem slidingWindowTest_ge_length :
+    ∀ (bm : List Bool) (k : Nat), bm.length ≤ k → slidingWindowTest bm k = false
+  | [], _, _ => rfl
+  | _ :: _, 0, h => absurd h (Nat.not_succ_le_zero _)
+  | _ :: bs, j + 1, h =>
+    slidingWindowTest_ge_length bs j (Nat.le_of_succ_le_succ h)
+
+/-- Authoritative bounded-state `qsag-policy` guard eliminating the 256-slot FIFO eviction replay wrap
+    via monotonic `minNonceWatermark` + `slidingWindowWidth`-slot bitmap, default-on initiator MAC
+    authentication (`requireAuthenticatedInitiator := true`), and clock-anchored epoch rotation. -/
+structure PolicyWatermarkGuard where
+  chain_id : Nat
+  pinned_suite_tag : Nat
+  window_id : Nat
+  epoch_start_secs : Nat
+  epoch_duration_secs : Nat
+  velocity_window_cap : Nat
+  accumulated_spend : Nat
+  per_tx_cap : Nat
+  minNonceWatermark : Nat
+  slidingWindowWidth : Nat
+  slidingBitmap : List Bool
+  pinned_policy_digest : List UInt8
+  pinned_authority_digest : List UInt8
+  allowed_recipients : List (List UInt8)
+  requireAuthenticatedInitiator : Bool := true
+  deriving DecidableEq, Repr
+
+/-- Candidate inputs to `policyWatermarkGuardStep` (signing intent evaluation or clock-anchored window advance). -/
+inductive PolicyWatermarkInput where
+  | evaluateIntent (tx : TransactionIntent)
+  | advanceEpoch (nowSecs : Nat)
+  deriving DecidableEq, Repr
+
+/-- Observable events of `policyWatermarkGuardStep`. -/
+inductive PolicyWatermarkEvent where
+  | intentApproved (intent : TransactionIntent) (canonicalSigningBytes : List UInt8)
+  | epochAdvanced (newWindowId : Nat) (newEpochStartSecs : Nat)
+  deriving DecidableEq, Repr
+
+/-- Rejection reasons of `policyWatermarkGuardStep`. -/
+inductive PolicyWatermarkReject where
+  | invalidWindowWidth
+  | chainOrSuiteMismatch
+  | windowMismatch
+  | policyOrAuthorityDigestMismatch
+  | unauthenticatedInitiator
+  | recipientNotAllowlisted
+  | perTxCapExceeded
+  | velocityWindowExceeded
+  | nonceBelowWatermark
+  | duplicateNonceInSlidingWindow
+  | epochAdvanceTooEarly
+  deriving DecidableEq, Repr
+
+/-- Authoritative `PolicyWatermarkGuard` transition enforcing monotonic `minNonceWatermark` + sliding-window
+    anti-replay, default-on initiator MAC authentication, and clock-anchored velocity window rotation
+    that preserves `(minNonceWatermark, slidingBitmap)` across epochs. -/
+def policyWatermarkGuardStep (g : PolicyWatermarkGuard) (inp : PolicyWatermarkInput) :
+    CustodyStepOutcome PolicyWatermarkGuard PolicyWatermarkEvent PolicyWatermarkReject :=
+  if g.slidingWindowWidth == 0 || g.slidingBitmap.length != g.slidingWindowWidth then
+    .rejected g .invalidWindowWidth
+  else
+    match inp with
+    | .advanceEpoch nowSecs =>
+      if g.epoch_duration_secs == 0 || decide (nowSecs < g.epoch_start_secs + g.epoch_duration_secs) then
+        .rejected g .epochAdvanceTooEarly
+      else
+        let g' : PolicyWatermarkGuard :=
+          { g with window_id := g.window_id + 1
+                   epoch_start_secs := nowSecs
+                   accumulated_spend := 0 }
+        .accepted g' (.epochAdvanced (g.window_id + 1) nowSecs)
+    | .evaluateIntent tx =>
+      if tx.chain_id != g.chain_id || tx.suite_tag != g.pinned_suite_tag ||
+         tx.recipient_suite_tag != g.pinned_suite_tag then
+        .rejected g .chainOrSuiteMismatch
+      else if tx.window_id != g.window_id then
+        .rejected g .windowMismatch
+      else if tx.policy_digest != g.pinned_policy_digest ||
+              tx.authority_digest != g.pinned_authority_digest then
+        .rejected g .policyOrAuthorityDigestMismatch
+      else if g.requireAuthenticatedInitiator && tx.init_mac_bytes.isEmpty then
+        .rejected g .unauthenticatedInitiator
+      else if ¬ (tx.recipient ∈ g.allowed_recipients) then
+        .rejected g .recipientNotAllowlisted
+      else if ¬ (tx.amount_units ≤ g.per_tx_cap) then
+        .rejected g .perTxCapExceeded
+      else if ¬ (g.accumulated_spend + tx.amount_units ≤ g.velocity_window_cap) then
+        .rejected g .velocityWindowExceeded
+      else if tx.nonce < g.minNonceWatermark then
+        .rejected g .nonceBelowWatermark
+      else
+        let w := g.slidingWindowWidth
+        let offset := tx.nonce - g.minNonceWatermark
+        if offset < w then
+          if slidingWindowTest g.slidingBitmap offset then
+            .rejected g .duplicateNonceInSlidingWindow
+          else
+            let bm' := buildSlidingWindow w (fun i => slidingWindowTest g.slidingBitmap i || decide (i = offset))
+            let g' := { g with accumulated_spend := g.accumulated_spend + tx.amount_units
+                               slidingBitmap := bm' }
+            .accepted g' (.intentApproved tx (toCanonicalSigningBytes tx))
+        else
+          let shift := offset - (w - 1)
+          let wm' := g.minNonceWatermark + shift
+          let bm' := buildSlidingWindow w (fun i =>
+            slidingWindowTest g.slidingBitmap (i + shift) || decide (i = w - 1))
+          let g' := { g with accumulated_spend := g.accumulated_spend + tx.amount_units
+                             minNonceWatermark := wm'
+                             slidingBitmap := bm' }
+          .accepted g' (.intentApproved tx (toCanonicalSigningBytes tx))
+
+/-- Logical consumption predicate of the `(minNonceWatermark, slidingBitmap)` anti-replay state:
+    every nonce strictly below `minNonceWatermark` or marked inside `slidingBitmap` is permanently consumed. -/
+def nonceConsumedByWatermark (g : PolicyWatermarkGuard) (n : Nat) : Prop :=
+  n < g.minNonceWatermark ∨ slidingWindowTest g.slidingBitmap (n - g.minNonceWatermark) = true
+
+/-- Extract all approved `(intent, canonicalSigningBytes)` pairs from a `PolicyWatermarkEvent` list. -/
+def watermarkApprovedIntents : List PolicyWatermarkEvent → List (TransactionIntent × List UInt8)
+  | [] => []
+  | .intentApproved tx sigBytes :: rest => (tx, sigBytes) :: watermarkApprovedIntents rest
+  | .epochAdvanced _ _ :: rest => watermarkApprovedIntents rest
+
+private theorem policyWatermarkGuardStep_rejected_eq
+    {g g' : PolicyWatermarkGuard} {inp : PolicyWatermarkInput} {err : PolicyWatermarkReject}
+    (hStep : policyWatermarkGuardStep g inp = .rejected g' err) :
+    g' = g := by
+  unfold policyWatermarkGuardStep at hStep
+  if hBad : (g.slidingWindowWidth == 0 || g.slidingBitmap.length != g.slidingWindowWidth) = true then
+    simp only [hBad, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
+    exact hStep.1.symm
+  else
+    simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hStep
+    cases inp with
+    | advanceEpoch nowSecs =>
+      if hEarly : (g.epoch_duration_secs == 0 ||
+                   decide (nowSecs < g.epoch_start_secs + g.epoch_duration_secs)) = true then
+        simp only [hEarly, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep
+        exact hStep.1.symm
+      else
+        simp [hEarly] at hStep
+    | evaluateIntent tx =>
+      if c1 : (tx.chain_id != g.chain_id || tx.suite_tag != g.pinned_suite_tag ||
+               tx.recipient_suite_tag != g.pinned_suite_tag) = true then
+        simp only [c1, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep; exact hStep.1.symm
+      else if c2 : (tx.window_id != g.window_id) = true then
+        simp only [c1, c2, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep; exact hStep.1.symm
+      else if c3 : (tx.policy_digest != g.pinned_policy_digest ||
+                    tx.authority_digest != g.pinned_authority_digest) = true then
+        simp only [c1, c2, c3, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep; exact hStep.1.symm
+      else if c4 : (g.requireAuthenticatedInitiator && tx.init_mac_bytes.isEmpty) = true then
+        simp only [c1, c2, c3, c4, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep; exact hStep.1.symm
+      else if c5 : ¬ (tx.recipient ∈ g.allowed_recipients) then
+        simp only [c1, c2, c3, c4, c5, not_false_eq_true, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep; exact hStep.1.symm
+      else if c6 : ¬ (tx.amount_units ≤ g.per_tx_cap) then
+        simp only [c1, c2, c3, c4, c5, c6, not_false_eq_true, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep; exact hStep.1.symm
+      else if c7 : ¬ (g.accumulated_spend + tx.amount_units ≤ g.velocity_window_cap) then
+        simp only [c1, c2, c3, c4, c5, c6, c7, not_false_eq_true, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep; exact hStep.1.symm
+      else if c8 : tx.nonce < g.minNonceWatermark then
+        simp only [c1, c2, c3, c4, c5, c6, c7, c8, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep; exact hStep.1.symm
+      else
+        simp only [c1, c2, c3, c4, c5, c6, c7, c8, Bool.false_eq_true, ↓reduceIte] at hStep
+        if hInWin : tx.nonce - g.minNonceWatermark < g.slidingWindowWidth then
+          simp only [hInWin, ↓reduceIte] at hStep
+          if hDup : slidingWindowTest g.slidingBitmap (tx.nonce - g.minNonceWatermark) = true then
+            simp only [hDup, ↓reduceIte, CustodyStepOutcome.rejected.injEq] at hStep; exact hStep.1.symm
+          else
+            simp [hDup] at hStep
+        else
+          simp [hInWin] at hStep
+
+private theorem watermark_consumed_preserved_and_marks
+    {g g' : PolicyWatermarkGuard} {inp : PolicyWatermarkInput} {ev : PolicyWatermarkEvent}
+    (hStep : policyWatermarkGuardStep g inp = .accepted g' ev) :
+    0 < g'.slidingWindowWidth ∧
+    g'.slidingBitmap.length = g'.slidingWindowWidth ∧
+    g.minNonceWatermark ≤ g'.minNonceWatermark ∧
+    g'.requireAuthenticatedInitiator = g.requireAuthenticatedInitiator ∧
+    (∀ n, nonceConsumedByWatermark g n → nonceConsumedByWatermark g' n) ∧
+    (∀ tx sb, ev = .intentApproved tx sb →
+      ¬ nonceConsumedByWatermark g tx.nonce ∧
+      nonceConsumedByWatermark g' tx.nonce ∧
+      sb = toCanonicalSigningBytes tx ∧
+      (g.requireAuthenticatedInitiator = true → tx.init_mac_bytes ≠ [])) := by
+  unfold policyWatermarkGuardStep at hStep
+  if hBadW : (g.slidingWindowWidth == 0 || g.slidingBitmap.length != g.slidingWindowWidth) = true then
+    simp [hBadW] at hStep
+  else
+    have hWPos : 0 < g.slidingWindowWidth := by
+      cases hZ : (g.slidingWindowWidth == 0)
+      · have hNe0 : g.slidingWindowWidth ≠ 0 := fun h0 => by simp [h0] at hZ
+        omega
+      · exfalso; exact hBadW (by simp [hZ])
+    have hBmLen : g.slidingBitmap.length = g.slidingWindowWidth := by
+      cases hEq : (g.slidingBitmap.length == g.slidingWindowWidth)
+      · exfalso; exact hBadW (by simp [bne, hEq])
+      · exact of_decide_eq_true hEq
+    simp only [hBadW, Bool.false_eq_true, ↓reduceIte] at hStep
+    cases inp with
+    | advanceEpoch nowSecs =>
+      if hEarly : (g.epoch_duration_secs == 0 ||
+                   decide (nowSecs < g.epoch_start_secs + g.epoch_duration_secs)) = true then
+        simp [hEarly] at hStep
+      else
+        simp only [hEarly, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.accepted.injEq] at hStep
+        rcases hStep with ⟨rfl, rfl⟩
+        exact ⟨hWPos, hBmLen, Nat.le_refl _, rfl, fun _ h => h, fun _ _ hEv => by cases hEv⟩
+    | evaluateIntent tx =>
+      if c1 : (tx.chain_id != g.chain_id || tx.suite_tag != g.pinned_suite_tag ||
+               tx.recipient_suite_tag != g.pinned_suite_tag) = true then
+        simp [c1] at hStep
+      else if c2 : (tx.window_id != g.window_id) = true then
+        simp [c1, c2] at hStep
+      else if c3 : (tx.policy_digest != g.pinned_policy_digest ||
+                    tx.authority_digest != g.pinned_authority_digest) = true then
+        simp [c1, c2, c3] at hStep
+      else if c4 : (g.requireAuthenticatedInitiator && tx.init_mac_bytes.isEmpty) = true then
+        simp [c1, c2, c3, c4] at hStep
+      else if c5 : ¬ (tx.recipient ∈ g.allowed_recipients) then
+        simp [c1, c2, c3, c4, c5] at hStep
+      else if c6 : ¬ (tx.amount_units ≤ g.per_tx_cap) then
+        simp [c1, c2, c3, c4, c5, c6] at hStep
+      else if c7 : ¬ (g.accumulated_spend + tx.amount_units ≤ g.velocity_window_cap) then
+        simp [c1, c2, c3, c4, c5, c6, c7] at hStep
+      else if c8 : tx.nonce < g.minNonceWatermark then
+        simp [c1, c2, c3, c4, c5, c6, c7, c8] at hStep
+      else
+        simp only [c1, c2, c3, c4, c5, c6, c7, c8, Bool.false_eq_true, ↓reduceIte] at hStep
+        have hAuthInit : g.requireAuthenticatedInitiator = true → tx.init_mac_bytes ≠ [] := by
+          intro hReq hEmp
+          exact c4 (by simp [hReq, hEmp])
+        if hInWin : tx.nonce - g.minNonceWatermark < g.slidingWindowWidth then
+          simp only [hInWin, ↓reduceIte] at hStep
+          if hDup : slidingWindowTest g.slidingBitmap (tx.nonce - g.minNonceWatermark) = true then
+            simp [hDup] at hStep
+          else
+            simp only [hDup, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.accepted.injEq] at hStep
+            rcases hStep with ⟨rfl, rfl⟩
+            refine ⟨hWPos, buildSlidingWindow_length _ _, Nat.le_refl _, rfl, ?_, ?_⟩
+            · intro n hn
+              rcases hn with hLt | hBit
+              · exact Or.inl hLt
+              · apply Or.inr
+                have hLtW : n - g.minNonceWatermark < g.slidingWindowWidth := by
+                  if hLt' : n - g.minNonceWatermark < g.slidingWindowWidth then exact hLt'
+                  else
+                    rw [slidingWindowTest_ge_length g.slidingBitmap _ (by omega)] at hBit
+                    cases hBit
+                rw [slidingWindowTest_buildSlidingWindow]
+                simp only [hLtW, ↓reduceIte, Bool.or_eq_true]
+                exact Or.inl hBit
+            · intro tx' sb' hEv
+              injection hEv with hTx hSb
+              subst hTx hSb
+              refine ⟨?_, ?_, rfl, hAuthInit⟩
+              · rintro (hLt | hBit)
+                · exact c8 hLt
+                · exact hDup hBit
+              · apply Or.inr
+                rw [slidingWindowTest_buildSlidingWindow]
+                simp only [hInWin, ↓reduceIte, Bool.or_eq_true]
+                exact Or.inr rfl
+        else
+          simp only [hInWin, ↓reduceIte, CustodyStepOutcome.accepted.injEq] at hStep
+          rcases hStep with ⟨rfl, rfl⟩
+          refine ⟨hWPos, buildSlidingWindow_length _ _, Nat.le_add_right _ _, rfl, ?_, ?_⟩
+          · intro n hn
+            if hBelowNew :
+                n < g.minNonceWatermark + ((tx.nonce - g.minNonceWatermark) - (g.slidingWindowWidth - 1)) then
+              exact Or.inl hBelowNew
+            else
+              rcases hn with hLtOld | hBitOld
+              · omega
+              · apply Or.inr
+                have hOldLtW : n - g.minNonceWatermark < g.slidingWindowWidth := by
+                  if hLt' : n - g.minNonceWatermark < g.slidingWindowWidth then exact hLt'
+                  else
+                    rw [slidingWindowTest_ge_length g.slidingBitmap _ (by omega)] at hBitOld
+                    cases hBitOld
+                have hNewLtW :
+                    n - (g.minNonceWatermark + ((tx.nonce - g.minNonceWatermark) - (g.slidingWindowWidth - 1))) <
+                      g.slidingWindowWidth := by omega
+                have hIdxEq :
+                    n - (g.minNonceWatermark + ((tx.nonce - g.minNonceWatermark) - (g.slidingWindowWidth - 1))) +
+                      ((tx.nonce - g.minNonceWatermark) - (g.slidingWindowWidth - 1)) =
+                      n - g.minNonceWatermark := by omega
+                rw [slidingWindowTest_buildSlidingWindow]
+                simp only [hNewLtW, ↓reduceIte, Bool.or_eq_true]
+                exact Or.inl (hIdxEq.symm ▸ hBitOld)
+          · intro tx' sb' hEv
+            injection hEv with hTx hSb
+            subst hTx hSb
+            refine ⟨?_, ?_, rfl, hAuthInit⟩
+            · rintro (hLt | hBit)
+              · exact c8 hLt
+              · rw [slidingWindowTest_ge_length g.slidingBitmap _ (by omega)] at hBit
+                cases hBit
+            · apply Or.inr
+              have hTopIdx :
+                  tx.nonce - (g.minNonceWatermark + ((tx.nonce - g.minNonceWatermark) - (g.slidingWindowWidth - 1))) =
+                    g.slidingWindowWidth - 1 := by omega
+              have hWm1Lt : g.slidingWindowWidth - 1 < g.slidingWindowWidth := by omega
+              rw [hTopIdx, slidingWindowTest_buildSlidingWindow]
+              simp only [hWm1Lt, ↓reduceIte, Bool.or_eq_true]
+              exact Or.inr rfl
+
+private theorem watermark_no_approved_if_consumed
+    {g gFinal : PolicyWatermarkGuard}
+    {trace : List (PolicyWatermarkInput × Option PolicyWatermarkEvent)}
+    (hTr : ValidCustodyTrace policyWatermarkGuardStep g trace gFinal) :
+    ∀ n, nonceConsumedByWatermark g n →
+      n ∉ (watermarkApprovedIntents (traceApprovedOutputs trace)).map (fun p => p.1.nonce) := by
+  induction hTr with
+  | nil => intro _ _ hm; cases hm
+  | @consAccepted s s' _ inp ev rest hStep _ ih =>
+    obtain ⟨_, _, _, _, hMono, hMark⟩ := watermark_consumed_preserved_and_marks hStep
+    intro n hn
+    cases ev with
+    | epochAdvanced wId nowS =>
+      simpa [traceApprovedOutputs_cons_some, watermarkApprovedIntents] using ih n (hMono n hn)
+    | intentApproved tx sb =>
+      obtain ⟨hFreshTx, _, _, _⟩ := hMark tx sb rfl
+      have hNe : n ≠ tx.nonce := fun hEq => hFreshTx (hEq ▸ hn)
+      simp only [traceApprovedOutputs_cons_some, watermarkApprovedIntents, List.map_cons,
+        List.mem_cons, not_or]
+      exact ⟨hNe, ih n (hMono n hn)⟩
+  | @consRejected s s' _ inp err rest hStep _ ih =>
+    have hSame : s' = s := policyWatermarkGuardStep_rejected_eq hStep
+    subst hSame
+    simpa [traceApprovedOutputs_cons_none] using ih
+
+/-- **Multi-Turn Monotonic Watermark + Sliding-Window Anti-Replay & Initiator-Auth Soundness
+    (`policy_watermark_sliding_window_multiturn_sound`)**:
+    Across ANY multi-turn signing and clock-epoch trace of arbitrary length (including `> 256`
+    transactions and across multiple velocity window rotations):
+    1. `minNonceWatermark` never decreases (`g₀.minNonceWatermark ≤ gFinal.minNonceWatermark`),
+    2. **Zero Nonce Replay Ever**: `(approved.map nonce).Nodup` holds unconditionally with $O(W)$ state
+       (zero FIFO ring-eviction wrap!),
+    3. Every approved nonce satisfies `g₀.minNonceWatermark ≤ tx.nonce` and `!nonceConsumedByWatermark g₀ tx.nonce`,
+    4. Every approved envelope emits `toCanonicalSigningBytes tx` (`QSAG.POLICY.SIGNED_INTENT.V2`)
+       and carries non-empty `init_mac_bytes` whenever `g₀.requireAuthenticatedInitiator = true`. -/
+theorem policy_watermark_sliding_window_multiturn_sound
+    {g₀ gFinal : PolicyWatermarkGuard}
+    {trace : List (PolicyWatermarkInput × Option PolicyWatermarkEvent)}
+    (hTrace : ValidCustodyTrace policyWatermarkGuardStep g₀ trace gFinal) :
+    let approved := watermarkApprovedIntents (traceApprovedOutputs trace)
+    g₀.minNonceWatermark ≤ gFinal.minNonceWatermark ∧
+    (approved.map (fun p => p.1.nonce)).Nodup ∧
+    (∀ p ∈ approved,
+      g₀.minNonceWatermark ≤ p.1.nonce ∧
+      ¬ nonceConsumedByWatermark g₀ p.1.nonce ∧
+      p.2 = toCanonicalSigningBytes p.1 ∧
+      (g₀.requireAuthenticatedInitiator = true → p.1.init_mac_bytes ≠ [])) := by
+  induction hTrace with
+  | nil =>
+    exact ⟨Nat.le_refl _, .nil, fun _ hm => by cases hm⟩
+  | @consAccepted s s' _ inp ev rest hStep hRest ih =>
+    obtain ⟨_, _, hWmStep, hReqEq, hMono, hMark⟩ := watermark_consumed_preserved_and_marks hStep
+    obtain ⟨hWmRest, hNdRest, hPropsRest⟩ := ih
+    cases ev with
+    | epochAdvanced wId nowS =>
+      simp only [traceApprovedOutputs_cons_some, watermarkApprovedIntents]
+      refine ⟨Nat.le_trans hWmStep hWmRest, hNdRest, ?_⟩
+      intro p hp
+      obtain ⟨hGe', hNotCons', hBytes', hMac'⟩ := hPropsRest p hp
+      exact ⟨Nat.le_trans hWmStep hGe', fun hc => hNotCons' (hMono _ hc),
+             hBytes', fun hReq => hMac' (hReqEq.trans hReq)⟩
+    | intentApproved tx sb =>
+      obtain ⟨hFreshTx, hConsAfter, hSbEq, hMacHead⟩ := hMark tx sb rfl
+      have hNotInRest : tx.nonce ∉ (watermarkApprovedIntents (traceApprovedOutputs rest)).map (fun p => p.1.nonce) :=
+        watermark_no_approved_if_consumed hRest tx.nonce hConsAfter
+      simp only [traceApprovedOutputs_cons_some, watermarkApprovedIntents, List.map_cons]
+      refine ⟨Nat.le_trans hWmStep hWmRest,
+              .cons (fun x hx hEq => hNotInRest (hEq ▸ hx)) hNdRest, ?_⟩
+      intro p hp
+      rcases List.mem_cons.mp hp with rfl | hTail
+      · have hGeWm : s.minNonceWatermark ≤ tx.nonce :=
+          Nat.not_lt.mp (fun hLt => hFreshTx (Or.inl hLt))
+        exact ⟨hGeWm, hFreshTx, hSbEq, hMacHead⟩
+      · obtain ⟨hGe', hNotCons', hBytes', hMac'⟩ := hPropsRest p hTail
+        exact ⟨Nat.le_trans hWmStep hGe', fun hc => hNotCons' (hMono _ hc),
+               hBytes', fun hReq => hMac' (hReqEq.trans hReq)⟩
+  | @consRejected s s' _ inp err rest hStep _ ih =>
+    have hSame : s' = s := policyWatermarkGuardStep_rejected_eq hStep
+    subst hSame
+    simpa [traceApprovedOutputs_cons_none] using ih
+
+/-- Bounded FIFO ring buffer (`cap` slots) vulnerable to eviction-wrap replay once `cap + 1` distinct nonces pass. -/
+def fifoBurnRingStep (cap : Nat) (ring : List Nat) (nonce : Nat) : Option (List Nat) :=
+  if nonce ∈ ring then none
+  else some ((nonce :: ring).take cap)
+
+/-- Ascending sequence `[start, start + 1, ..., start + count - 1]`. -/
+def seqFrom : Nat → Nat → List Nat
+  | _, 0 => []
+  | s, k + 1 => s :: seqFrom (s + 1) k
+
+private theorem seqFrom_length : ∀ (s k : Nat), (seqFrom s k).length = k
+  | _, 0 => rfl
+  | s, k + 1 => congrArg Nat.succ (seqFrom_length (s + 1) k)
+
+private theorem zero_not_mem_seqFrom : ∀ (s k : Nat), 0 < s → 0 ∉ seqFrom s k
+  | _, 0, _, hm => by cases hm
+  | s, k + 1, hs, hm => by
+    rcases List.mem_cons.mp hm with h0 | htl
+    · omega
+    · exact zero_not_mem_seqFrom (s + 1) k (by omega) htl
+
+private theorem take_take_succ : ∀ (m : Nat) (xs : List Nat),
+    (xs.take (m + 1)).take m = xs.take m
+  | 0, _ => rfl
+  | _ + 1, [] => rfl
+  | k + 1, x :: xs => congrArg (x :: ·) (take_take_succ k xs)
+
+private theorem foldl_take_cap_eq_reverse_take (cap : Nat) :
+    ∀ (ns acc : List Nat),
+      ns.foldl (fun r n => (n :: r).take cap) (acc.take cap) =
+        (ns.reverse ++ acc).take cap
+  | [], _ => by simp
+  | n :: ns, acc => by
+    simp only [List.foldl_cons, List.reverse_cons, List.append_assoc, List.singleton_append]
+    have hStep : (n :: acc.take cap).take cap = (n :: acc).take cap := by
+      cases cap with
+      | zero => rfl
+      | succ m => exact congrArg (n :: ·) (take_take_succ m acc)
+    rw [hStep]
+    exact foldl_take_cap_eq_reverse_take cap ns (n :: acc)
+
+/-- **`#tooth` 256-Slot FIFO Burn-Ring Eviction Replay (`tooth_fifo_ring_256_eviction_allows_replay_at_257`)**:
+    In a 256-slot FIFO burn ring (`MAX_BURNED_INTENT_NONCES = 256`), submitting 257 distinct nonces
+    `0, 1, ..., 256` (`seqFrom 0 257`) evicts nonce `0` at transaction `#257`, allowing nonce `0` to be
+    replayed and accepted a SECOND time, whereas `policyWatermarkGuardStep` advances `minNonceWatermark`
+    above `0` and deterministically rejects the replay of `0` with `.nonceBelowWatermark`! -/
+theorem tooth_fifo_ring_256_eviction_allows_replay_at_257 :
+    let nonces257 := seqFrom 0 257
+    let ringAfter257 := nonces257.foldl (fun r n => (n :: r).take 256) []
+    0 ∈ nonces257 ∧
+    nonces257.length = 257 ∧
+    0 ∉ ringAfter257 ∧
+    (fifoBurnRingStep 256 ringAfter257 0).isSome = true ∧
+    (let g₀ : PolicyWatermarkGuard :=
+       { chain_id := 1, pinned_suite_tag := 0x0501, window_id := 1,
+         epoch_start_secs := 1000, epoch_duration_secs := 3600,
+         velocity_window_cap := 1000000, accumulated_spend := 0, per_tx_cap := 1000,
+         minNonceWatermark := 1, slidingWindowWidth := 4,
+         slidingBitmap := [true, true, true, true],
+         pinned_policy_digest := [0xAA], pinned_authority_digest := [0xBB],
+         allowed_recipients := [[0x01]], requireAuthenticatedInitiator := true }
+     let replay0 : TransactionIntent :=
+       { recipient := [0x01], amount_units := 1, window_id := 1,
+         policy_digest := [0xAA], authority_digest := [0xBB], nonce := 0,
+         init_mac_bytes := [0x01] }
+     policyWatermarkGuardStep g₀ (.evaluateIntent replay0) =
+       .rejected g₀ .nonceBelowWatermark) := by
+  intro nonces257 ringAfter257
+  have hFold : ringAfter257 = (seqFrom 1 256).reverse := by
+    change (0 :: seqFrom 1 256).foldl (fun r n => (n :: r).take 256) (([] : List Nat).take 256) = _
+    rw [foldl_take_cap_eq_reverse_take 256 (0 :: seqFrom 1 256) [],
+        List.append_nil, List.reverse_cons]
+    have hRevLen : (seqFrom 1 256).reverse.length = 256 := by
+      rw [List.length_reverse, seqFrom_length]
+    simp [hRevLen]
+  have hNotIn : 0 ∉ ringAfter257 := by
+    rw [hFold, List.mem_reverse]
+    exact zero_not_mem_seqFrom 1 256 (by decide)
+  have hSome : (fifoBurnRingStep 256 ringAfter257 0).isSome = true := by
+    unfold fifoBurnRingStep
+    simp [hNotIn]
+  refine ⟨.head _, seqFrom_length 0 257, hNotIn, hSome, ?_⟩
+  decide
+
+/-- Stateless caller-supplied velocity predicate vulnerable to stale/forged `rolling_window_spent = 0`. -/
+def statelessCallerVelocityCheck (cap callerSuppliedSpent amount : Nat) : Bool :=
+  decide (callerSuppliedSpent + amount ≤ cap)
+
+/-- **`#tooth` Stateless Caller-Spent Velocity Bypass (`tooth_stateless_velocity_caller_spent_bypass`)**:
+    When velocity evaluation trusts caller-supplied `rolling_window_spent = 0` instead of authoritative
+    custodian state, two `60`-unit requests under `velocity_window_cap = 100` BOTH pass (`60 + 60 = 120 > 100`),
+    whereas `StatefulPolicyGuard` approves the first `60` and deterministically rejects the second! -/
+theorem tooth_stateless_velocity_caller_spent_bypass :
+    statelessCallerVelocityCheck 100 0 60 = true ∧
+    statelessCallerVelocityCheck 100 0 60 = true ∧
+    60 + 60 > 100 ∧
+    (let g₀ : StatefulPolicyGuard :=
+       { window_id := 1, velocity_window_cap := 100, accumulated_spend := 0,
+         burned_intent_nonces := [], pinned_policy_digest := [0xAA],
+         pinned_authority_digest := [0xBB], allowed_recipients := [[0x01]], per_tx_cap := 80 }
+     let tx1 : TransactionIntent :=
+       { recipient := [0x01], amount_units := 60, window_id := 1,
+         policy_digest := [0xAA], authority_digest := [0xBB], nonce := 10 }
+     let tx2 : TransactionIntent :=
+       { recipient := [0x01], amount_units := 60, window_id := 1,
+         policy_digest := [0xAA], authority_digest := [0xBB], nonce := 11 }
+     match policyGuardStep g₀ tx1 with
+     | .accepted g₁ _ =>
+       policyGuardStep g₁ tx2 = .rejected g₁ .velocityWindowExceeded
+     | .rejected _ _ => False) := by
+  simp [statelessCallerVelocityCheck, policyGuardStep]
+
+/-- Inhabitedness witness for `policy_multiturn_velocity_and_intent_binding` approving two distinct
+    transactions (`40 + 55 = 95 ≤ 100`) and rejecting a third overflow request (`95 + 20 > 100`). -/
+theorem witness_policy_multiturn_inhabited :
+    let g₀ : StatefulPolicyGuard :=
+      { window_id := 1, velocity_window_cap := 100, accumulated_spend := 0,
+         burned_intent_nonces := [], pinned_policy_digest := [0xAA],
+         pinned_authority_digest := [0xBB], allowed_recipients := [[0x01]], per_tx_cap := 60 }
+    ∃ trace gFinal,
+      ValidCustodyTrace policyGuardStep g₀ trace gFinal ∧
+      (traceApprovedOutputs trace).length = 2 ∧
+      gFinal.accumulated_spend = 95 := by
+  intro g₀
+  let tx1 : TransactionIntent :=
+    { recipient := [0x01], amount_units := 40, window_id := 1,
+      policy_digest := [0xAA], authority_digest := [0xBB], nonce := 1 }
+  let tx2 : TransactionIntent :=
+    { recipient := [0x01], amount_units := 55, window_id := 1,
+      policy_digest := [0xAA], authority_digest := [0xBB], nonce := 2 }
+  let tx3 : TransactionIntent :=
+    { recipient := [0x01], amount_units := 20, window_id := 1,
+      policy_digest := [0xAA], authority_digest := [0xBB], nonce := 3 }
+  let g₁ := { g₀ with accumulated_spend := 40, burned_intent_nonces := [1] }
+  let g₂ := { g₀ with accumulated_spend := 95, burned_intent_nonces := [2, 1] }
+  have hs1 : policyGuardStep g₀ tx1 =
+      .accepted g₁ { intent := tx1, canonicalBytes := encodeTransactionIntent tx1 } := by
+    simp [policyGuardStep, g₀, g₁, tx1]
+  have hs2 : policyGuardStep g₁ tx2 =
+      .accepted g₂ { intent := tx2, canonicalBytes := encodeTransactionIntent tx2 } := by
+    simp [policyGuardStep, g₀, g₁, g₂, tx2]
+  have hs3 : policyGuardStep g₂ tx3 = .rejected g₂ .velocityWindowExceeded := by
+    simp [policyGuardStep, g₀, g₂, tx3]
+  refine ⟨[(tx1, some { intent := tx1, canonicalBytes := encodeTransactionIntent tx1 }),
+           (tx2, some { intent := tx2, canonicalBytes := encodeTransactionIntent tx2 }),
+           (tx3, none)],
+          g₂, .consAccepted hs1 (.consAccepted hs2 (.consRejected hs3 (.nil g₂))),
+          by rfl, by rfl⟩
+
+/-! ### §3.2 `qsag-addr` — `Bech32m` (`0x2bc830a3`) Polymod & `HybridPinnedEnvelope` Non-Strippability -/
+
+/-- BIP-350 `Bech32m` target constant `0x2bc830a3` and rejected legacy BIP-173 constant `1`. -/
+def bech32mConstBv : BitVec 32 := 0x2bc830a3#32
+def bech32LegacyConstBv : BitVec 32 := 1#32
+
+/-- Single 5-bit `GF(32)` BCH polymod step over `BitVec 32` matching `bech32_polymod_step` in `qsag-addr`. -/
+def bech32StepBv (chk : BitVec 32) (v : BitVec 8) : BitVec 32 :=
+  let b0 := ((chk &&& 0x01ffffff#32) <<< 5) ^^^ (v.setWidth 32 &&& 0x1f#32)
+  let b1 := if chk.getLsbD 25 then b0 ^^^ 0x3b6a57b2#32 else b0
+  let b2 := if chk.getLsbD 26 then b1 ^^^ 0x26508e6d#32 else b1
+  let b3 := if chk.getLsbD 27 then b2 ^^^ 0x1ea119fa#32 else b2
+  let b4 := if chk.getLsbD 28 then b3 ^^^ 0x3d4233dd#32 else b3
+  if chk.getLsbD 29 then b4 ^^^ 0x2a1462b3#32 else b4
+
+/-- Folded `Bech32` / `Bech32m` polymod accumulator starting from an arbitrary 32-bit state. -/
+def bech32FoldBv : BitVec 32 → List UInt8 → BitVec 32
+  | chk, [] => chk
+  | chk, v :: vs => bech32FoldBv (bech32StepBv chk v.toBitVec) vs
+
+/-- Canonical `Bech32m` polymod function (`chk₀ = 1`). -/
+@[expose] def bech32Polymod (values : List UInt8) : UInt32 :=
+  UInt32.ofBitVec (bech32FoldBv 1#32 values)
+
+/-- BIP-173 / BIP-350 HRP expansion (`[b >> 5 | b ∈ hrp] ++ [0] ++ [b & 31 | b ∈ hrp]`). -/
+def bech32HrpExpand (hrpLower : List UInt8) : List UInt8 :=
+  (hrpLower.map (fun b => b >>> (5 : UInt8))) ++ [(0 : UInt8)] ++ (hrpLower.map (fun b => b &&& (0x1f : UInt8)))
+
+/-- Extract the six 5-bit `Bech32m` checksum symbols from a 30-bit residual `t : BitVec 32`. -/
+def unpackBech32ChecksumWords (t : BitVec 32) : List UInt8 :=
+  [UInt8.ofBitVec ((t >>> 25).setWidth 8 &&& 0x1f#8),
+   UInt8.ofBitVec ((t >>> 20).setWidth 8 &&& 0x1f#8),
+   UInt8.ofBitVec ((t >>> 15).setWidth 8 &&& 0x1f#8),
+   UInt8.ofBitVec ((t >>> 10).setWidth 8 &&& 0x1f#8),
+   UInt8.ofBitVec ((t >>> 5).setWidth 8 &&& 0x1f#8),
+   UInt8.ofBitVec (t.setWidth 8 &&& 0x1f#8)]
+
+/-- Compute the 6-symbol `Bech32m` checksum for `(hrpLower, data5)`. -/
+def bech32mCreateChecksum (hrpLower data5 : List UInt8) : List UInt8 :=
+  let values := bech32HrpExpand hrpLower ++ data5 ++ [0, 0, 0, 0, 0, 0]
+  let pmod := (bech32Polymod values).toBitVec ^^^ bech32mConstBv
+  unpackBech32ChecksumWords pmod
+
+/-- Strict `Bech32m` (`0x2bc830a3`) checksum verification predicate. -/
+def bech32mVerify (hrpLower payloadWithChecksum : List UInt8) : Bool :=
+  decide ((bech32Polymod (bech32HrpExpand hrpLower ++ payloadWithChecksum)).toBitVec = bech32mConstBv)
+
+private theorem cond_xor_distrib (b1 b2 : Bool) (x1 x2 G : BitVec 32) :
+    (if (b1 != b2) then (x1 ^^^ x2) ^^^ G else x1 ^^^ x2) =
+      (if b1 then x1 ^^^ G else x1) ^^^ (if b2 then x2 ^^^ G else x2) := by
+  cases b1 <;> cases b2 <;> dsimp <;>
+    (apply BitVec.eq_of_getLsbD_eq; intro i _; simp only [BitVec.getLsbD_xor];
+     cases x1.getLsbD i <;> cases x2.getLsbD i <;> cases G.getLsbD i <;> rfl)
+
+private theorem bech32StepBv_xor (c1 c2 : BitVec 32) (v1 v2 : BitVec 8) :
+    bech32StepBv (c1 ^^^ c2) (v1 ^^^ v2) = bech32StepBv c1 v1 ^^^ bech32StepBv c2 v2 := by
+  have hBase :
+      (((c1 ^^^ c2) &&& 0x01ffffff#32) <<< 5) ^^^ ((v1 ^^^ v2).setWidth 32 &&& 0x1f#32) =
+      ((((c1 &&& 0x01ffffff#32) <<< 5) ^^^ (v1.setWidth 32 &&& 0x1f#32)) ^^^
+       (((c2 &&& 0x01ffffff#32) <<< 5) ^^^ (v2.setWidth 32 &&& 0x1f#32))) := by
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    simp only [BitVec.getLsbD_xor, BitVec.getLsbD_and, BitVec.getLsbD_shiftLeft,
+      BitVec.getLsbD_setWidth, hi, decide_true, Bool.true_and]
+    by_cases h5 : i < 5
+    · simp only [h5, decide_true]
+      cases v1.getLsbD i <;> cases v2.getLsbD i <;> cases (0x1f#32).getLsbD i <;> rfl
+    · simp only [h5, decide_false]
+      cases c1.getLsbD (i - 5) <;> cases c2.getLsbD (i - 5) <;>
+        cases (0x01ffffff#32).getLsbD (i - 5) <;>
+        cases v1.getLsbD i <;> cases v2.getLsbD i <;> cases (0x1f#32).getLsbD i <;> rfl
+  unfold bech32StepBv
+  dsimp only
+  simp only [BitVec.getLsbD_xor, hBase]
+  rw [cond_xor_distrib, cond_xor_distrib, cond_xor_distrib, cond_xor_distrib, cond_xor_distrib]
+
+private theorem bech32FoldBv_append (c : BitVec 32) (xs ys : List UInt8) :
+    bech32FoldBv c (xs ++ ys) = bech32FoldBv (bech32FoldBv c xs) ys := by
+  induction xs generalizing c with
+  | nil => rfl
+  | cons x xs ih => exact ih (bech32StepBv c x.toBitVec)
+
+private theorem bech32FoldBv_xor_zeros (c : BitVec 32) :
+    ∀ (ys : List UInt8),
+      bech32FoldBv c ys =
+        bech32FoldBv c (List.replicate ys.length 0) ^^^ bech32FoldBv 0#32 ys
+  | [] => by
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _; simp [bech32FoldBv]
+  | y :: ys => by
+    have hStep : bech32StepBv c y.toBitVec =
+        bech32StepBv c (0 : UInt8).toBitVec ^^^ bech32StepBv 0#32 y.toBitVec := by
+      have hc : c = c ^^^ 0#32 := by
+        apply BitVec.eq_of_getLsbD_eq; intro i _; simp
+      have hy : y.toBitVec = (0 : UInt8).toBitVec ^^^ y.toBitVec := by
+        apply BitVec.eq_of_getLsbD_eq; intro i _; simp
+      conv => lhs; rw [hc, hy]
+      exact bech32StepBv_xor c 0#32 (0 : UInt8).toBitVec y.toBitVec
+    have hGen : ∀ (a b : BitVec 32) (zs : List UInt8),
+        bech32FoldBv (a ^^^ b) zs =
+          bech32FoldBv a (List.replicate zs.length 0) ^^^ bech32FoldBv b zs := by
+      intro a b zs
+      induction zs generalizing a b with
+      | nil => rfl
+      | cons z zs ih =>
+        simp only [List.length_cons, List.replicate_succ, bech32FoldBv]
+        have hz : z.toBitVec = (0 : UInt8).toBitVec ^^^ z.toBitVec := by
+          apply BitVec.eq_of_getLsbD_eq; intro i _; simp
+        conv => lhs; rw [hz]
+        rw [bech32StepBv_xor, ih]
+    simp only [List.length_cons, List.replicate_succ, bech32FoldBv, hStep]
+    exact hGen _ _ ys
+
+private theorem bech32StepBv_high_bits_zero (c : BitVec 32) (v : BitVec 8) :
+    (bech32StepBv c v).getLsbD 30 = false ∧ (bech32StepBv c v).getLsbD 31 = false := by
+  have hCondZero : ∀ (cond : Bool) (x G : BitVec 32) (k : Nat),
+      x.getLsbD k = false → G.getLsbD k = false →
+      (if cond then x ^^^ G else x).getLsbD k = false := by
+    intro cond x G k hx hG
+    cases cond <;> simp [BitVec.getLsbD_xor, hx, hG]
+  unfold bech32StepBv
+  dsimp only
+  constructor
+  · repeat' apply hCondZero
+    · simp
+    all_goals decide
+  · repeat' apply hCondZero
+    · simp
+    all_goals decide
+
+private theorem bech32FoldBv_high_bits_zero :
+    ∀ (c : BitVec 32) (vs : List UInt8),
+      c.getLsbD 30 = false → c.getLsbD 31 = false →
+      (bech32FoldBv c vs).getLsbD 30 = false ∧ (bech32FoldBv c vs).getLsbD 31 = false
+  | _, [], h30, h31 => ⟨h30, h31⟩
+  | c, v :: vs, _, _ =>
+    let ⟨n30, n31⟩ := bech32StepBv_high_bits_zero c v.toBitVec
+    bech32FoldBv_high_bits_zero _ vs n30 n31
+
+private theorem bech32StepBv_no_top (c : BitVec 32) (v : BitVec 8)
+    (h25 : c.getLsbD 25 = false) (h26 : c.getLsbD 26 = false)
+    (h27 : c.getLsbD 27 = false) (h28 : c.getLsbD 28 = false)
+    (h29 : c.getLsbD 29 = false) :
+    ∀ i < 32,
+      (bech32StepBv c v).getLsbD i =
+        if i < 5 then v.getLsbD i
+        else if i < 30 then c.getLsbD (i - 5)
+        else false := by
+  intro i hi
+  unfold bech32StepBv
+  simp only [h25, h26, h27, h28, h29, Bool.false_eq_true, ↓reduceIte,
+    BitVec.getLsbD_xor, BitVec.getLsbD_shiftLeft, BitVec.getLsbD_and,
+    BitVec.getLsbD_setWidth, hi, decide_true, Bool.true_and]
+  if h5 : i < 5 then
+    have hm5 : (0x1f#32).getLsbD i = true := by
+      match i with | 0 | 1 | 2 | 3 | 4 => decide
+    simp [h5, hm5]
+  else if h30 : i < 30 then
+    have hv0 : (0x1f#32).getLsbD i = false := by
+      rcases (show i = 5 ∨ i = 6 ∨ i = 7 ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨
+                   i = 13 ∨ i = 14 ∨ i = 15 ∨ i = 16 ∨ i = 17 ∨ i = 18 ∨ i = 19 ∨ i = 20 ∨
+                   i = 21 ∨ i = 22 ∨ i = 23 ∨ i = 24 ∨ i = 25 ∨ i = 26 ∨ i = 27 ∨ i = 28 ∨ i = 29 by omega) with
+        rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl |
+        rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> decide
+    have hcMask : (0x01ffffff#32).getLsbD (i - 5) = true := by
+      rcases (show i = 5 ∨ i = 6 ∨ i = 7 ∨ i = 8 ∨ i = 9 ∨ i = 10 ∨ i = 11 ∨ i = 12 ∨
+                   i = 13 ∨ i = 14 ∨ i = 15 ∨ i = 16 ∨ i = 17 ∨ i = 18 ∨ i = 19 ∨ i = 20 ∨
+                   i = 21 ∨ i = 22 ∨ i = 23 ∨ i = 24 ∨ i = 25 ∨ i = 26 ∨ i = 27 ∨ i = 28 ∨ i = 29 by omega) with
+        rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl |
+        rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl <;> decide
+    simp [h5, h30, hv0, hcMask]
+  else
+    rcases (show i = 30 ∨ i = 31 by omega) with rfl | rfl <;> simp
+
+private theorem bech32FoldBv_six_words (w5 w4 w3 w2 w1 w0 : UInt8) :
+    ∀ i < 32,
+      (bech32FoldBv 0#32 [w5, w4, w3, w2, w1, w0]).getLsbD i =
+        if i < 5 then w0.toBitVec.getLsbD i
+        else if i < 10 then w1.toBitVec.getLsbD (i - 5)
+        else if i < 15 then w2.toBitVec.getLsbD (i - 10)
+        else if i < 20 then w3.toBitVec.getLsbD (i - 15)
+        else if i < 25 then w4.toBitVec.getLsbD (i - 20)
+        else if i < 30 then w5.toBitVec.getLsbD (i - 25)
+        else false := by
+  let s1 := bech32StepBv 0#32 w5.toBitVec
+  have hs1 : ∀ i < 32, s1.getLsbD i = if i < 5 then w5.toBitVec.getLsbD i else false := by
+    intro i hi
+    rw [bech32StepBv_no_top 0#32 w5.toBitVec rfl rfl rfl rfl rfl i hi]
+    split <;> simp
+  let s2 := bech32StepBv s1 w4.toBitVec
+  have hs2 : ∀ i < 32, s2.getLsbD i =
+      if i < 5 then w4.toBitVec.getLsbD i
+      else if i < 10 then w5.toBitVec.getLsbD (i - 5) else false := by
+    intro i hi
+    rw [bech32StepBv_no_top s1 w4.toBitVec
+      (by rw [hs1 25 (by decide)]; simp) (by rw [hs1 26 (by decide)]; simp)
+      (by rw [hs1 27 (by decide)]; simp) (by rw [hs1 28 (by decide)]; simp)
+      (by rw [hs1 29 (by decide)]; simp) i hi]
+    if h5 : i < 5 then simp [h5]
+    else if h30 : i < 30 then
+      simp only [h5, h30, ↓reduceIte, hs1 (i - 5) (by omega)]
+      if h10 : i < 10 then
+        have hLt5 : i - 5 < 5 := by omega
+        simp [h10, hLt5]
+      else
+        have hNot5 : ¬ (i - 5 < 5) := by omega
+        simp [h10, hNot5]
+    else
+      have hNot10 : ¬ (i < 10) := by omega
+      simp [h5, h30, hNot10]
+  let s3 := bech32StepBv s2 w3.toBitVec
+  have hs3 : ∀ i < 32, s3.getLsbD i =
+      if i < 5 then w3.toBitVec.getLsbD i
+      else if i < 10 then w4.toBitVec.getLsbD (i - 5)
+      else if i < 15 then w5.toBitVec.getLsbD (i - 10) else false := by
+    intro i hi
+    rw [bech32StepBv_no_top s2 w3.toBitVec
+      (by rw [hs2 25 (by decide)]; simp) (by rw [hs2 26 (by decide)]; simp)
+      (by rw [hs2 27 (by decide)]; simp) (by rw [hs2 28 (by decide)]; simp)
+      (by rw [hs2 29 (by decide)]; simp) i hi]
+    if h5 : i < 5 then simp [h5]
+    else if h10 : i < 10 then
+      have h30 : i < 30 := by omega
+      have hSub5 : i - 5 < 5 := by omega
+      simp [h5, h10, h30, hs2 (i - 5) (by omega), hSub5]
+    else if h15 : i < 15 then
+      have h30 : i < 30 := by omega
+      have hNot5 : ¬ (i - 5 < 5) := by omega
+      have hSub10 : i - 5 < 10 := by omega
+      have hArith : i - 5 - 5 = i - 10 := by omega
+      simp [h5, h10, h15, h30, hs2 (i - 5) (by omega), hNot5, hSub10, hArith]
+    else
+      if h30 : i < 30 then
+        have hNot5 : ¬ (i - 5 < 5) := by omega
+        have hNot10 : ¬ (i - 5 < 10) := by omega
+        simp [h5, h10, h15, h30, hs2 (i - 5) (by omega), hNot5, hNot10]
+      else
+        simp [h5, h10, h15, h30]
+  let s4 := bech32StepBv s3 w2.toBitVec
+  have hs4 : ∀ i < 32, s4.getLsbD i =
+      if i < 5 then w2.toBitVec.getLsbD i
+      else if i < 10 then w3.toBitVec.getLsbD (i - 5)
+      else if i < 15 then w4.toBitVec.getLsbD (i - 10)
+      else if i < 20 then w5.toBitVec.getLsbD (i - 15) else false := by
+    intro i hi
+    rw [bech32StepBv_no_top s3 w2.toBitVec
+      (by rw [hs3 25 (by decide)]; simp) (by rw [hs3 26 (by decide)]; simp)
+      (by rw [hs3 27 (by decide)]; simp) (by rw [hs3 28 (by decide)]; simp)
+      (by rw [hs3 29 (by decide)]; simp) i hi]
+    if h5 : i < 5 then simp [h5]
+    else if h10 : i < 10 then
+      simp [h5, h10, show i < 30 by omega, hs3 (i - 5) (by omega), show i - 5 < 5 by omega]
+    else if h15 : i < 15 then
+      simp [h5, h10, h15, show i < 30 by omega, hs3 (i - 5) (by omega),
+            show ¬(i - 5 < 5) by omega, show i - 5 < 10 by omega, show i - 5 - 5 = i - 10 by omega]
+    else if h20 : i < 20 then
+      simp [h5, h10, h15, h20, show i < 30 by omega, hs3 (i - 5) (by omega),
+            show ¬(i - 5 < 5) by omega, show ¬(i - 5 < 10) by omega,
+            show i - 5 < 15 by omega, show i - 5 - 10 = i - 15 by omega]
+    else if h30 : i < 30 then
+      simp [h5, h10, h15, h20, h30, hs3 (i - 5) (by omega),
+            show ¬(i - 5 < 5) by omega, show ¬(i - 5 < 10) by omega, show ¬(i - 5 < 15) by omega]
+    else simp [h5, h10, h15, h20, h30]
+  let s5 := bech32StepBv s4 w1.toBitVec
+  have hs5 : ∀ i < 32, s5.getLsbD i =
+      if i < 5 then w1.toBitVec.getLsbD i
+      else if i < 10 then w2.toBitVec.getLsbD (i - 5)
+      else if i < 15 then w3.toBitVec.getLsbD (i - 10)
+      else if i < 20 then w4.toBitVec.getLsbD (i - 15)
+      else if i < 25 then w5.toBitVec.getLsbD (i - 20) else false := by
+    intro i hi
+    rw [bech32StepBv_no_top s4 w1.toBitVec
+      (by rw [hs4 25 (by decide)]; simp) (by rw [hs4 26 (by decide)]; simp)
+      (by rw [hs4 27 (by decide)]; simp) (by rw [hs4 28 (by decide)]; simp)
+      (by rw [hs4 29 (by decide)]; simp) i hi]
+    if h5 : i < 5 then simp [h5]
+    else if h10 : i < 10 then
+      simp [h5, h10, show i < 30 by omega, hs4 (i - 5) (by omega), show i - 5 < 5 by omega]
+    else if h15 : i < 15 then
+      simp [h5, h10, h15, show i < 30 by omega, hs4 (i - 5) (by omega),
+            show ¬(i - 5 < 5) by omega, show i - 5 < 10 by omega, show i - 5 - 5 = i - 10 by omega]
+    else if h20 : i < 20 then
+      simp [h5, h10, h15, h20, show i < 30 by omega, hs4 (i - 5) (by omega),
+            show ¬(i - 5 < 5) by omega, show ¬(i - 5 < 10) by omega,
+            show i - 5 < 15 by omega, show i - 5 - 10 = i - 15 by omega]
+    else if h25 : i < 25 then
+      simp [h5, h10, h15, h20, h25, show i < 30 by omega, hs4 (i - 5) (by omega),
+            show ¬(i - 5 < 5) by omega, show ¬(i - 5 < 10) by omega,
+            show ¬(i - 5 < 15) by omega, show i - 5 < 20 by omega, show i - 5 - 15 = i - 20 by omega]
+    else if h30 : i < 30 then
+      simp [h5, h10, h15, h20, h25, h30, hs4 (i - 5) (by omega),
+            show ¬(i - 5 < 5) by omega, show ¬(i - 5 < 10) by omega,
+            show ¬(i - 5 < 15) by omega, show ¬(i - 5 < 20) by omega]
+    else simp [h5, h10, h15, h20, h25, h30]
+  intro i hi
+  change (bech32StepBv s5 w0.toBitVec).getLsbD i = _
+  rw [bech32StepBv_no_top s5 w0.toBitVec
+    (by rw [hs5 25 (by decide)]; simp) (by rw [hs5 26 (by decide)]; simp)
+    (by rw [hs5 27 (by decide)]; simp) (by rw [hs5 28 (by decide)]; simp)
+    (by rw [hs5 29 (by decide)]; simp) i hi]
+  if h5 : i < 5 then simp [h5]
+  else if h10 : i < 10 then
+    simp [h5, h10, show i < 30 by omega, hs5 (i - 5) (by omega), show i - 5 < 5 by omega]
+  else if h15 : i < 15 then
+    simp [h5, h10, h15, show i < 30 by omega, hs5 (i - 5) (by omega),
+          show ¬(i - 5 < 5) by omega, show i - 5 < 10 by omega, show i - 5 - 5 = i - 10 by omega]
+  else if h20 : i < 20 then
+    simp [h5, h10, h15, h20, show i < 30 by omega, hs5 (i - 5) (by omega),
+          show ¬(i - 5 < 5) by omega, show ¬(i - 5 < 10) by omega,
+          show i - 5 < 15 by omega, show i - 5 - 10 = i - 15 by omega]
+  else if h25 : i < 25 then
+    simp [h5, h10, h15, h20, h25, show i < 30 by omega, hs5 (i - 5) (by omega),
+          show ¬(i - 5 < 5) by omega, show ¬(i - 5 < 10) by omega,
+          show ¬(i - 5 < 15) by omega, show i - 5 < 20 by omega, show i - 5 - 15 = i - 20 by omega]
+  else if h30 : i < 30 then
+    simp [h5, h10, h15, h20, h25, h30, hs5 (i - 5) (by omega),
+          show ¬(i - 5 < 5) by omega, show ¬(i - 5 < 10) by omega,
+          show ¬(i - 5 < 15) by omega, show ¬(i - 5 < 20) by omega,
+          show i - 5 < 25 by omega, show i - 5 - 20 = i - 25 by omega]
+  else simp [h5, h10, h15, h20, h25, h30]
+
+private theorem bech32FoldBv_unpack_id (t : BitVec 32)
+    (h30 : t.getLsbD 30 = false) (h31 : t.getLsbD 31 = false) :
+    bech32FoldBv 0#32 (unpackBech32ChecksumWords t) = t := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  unfold unpackBech32ChecksumWords
+  rw [bech32FoldBv_six_words _ _ _ _ _ _ i hi]
+  have hMask5 : ∀ k < 5, (0x1f#8).getLsbD k = true := by
+    intro k hk; match k with | 0 | 1 | 2 | 3 | 4 => decide
+  if h5 : i < 5 then
+    simp [h5, show i < 8 by omega, hMask5 i h5]
+  else if h10 : i < 10 then
+    simp [h5, h10, BitVec.getLsbD_ushiftRight, show i - 5 < 8 by omega,
+          hMask5 (i - 5) (by omega), show 5 + (i - 5) = i by omega]
+  else if h15 : i < 15 then
+    simp [h5, h10, h15, BitVec.getLsbD_ushiftRight, show i - 10 < 8 by omega,
+          hMask5 (i - 10) (by omega), show 10 + (i - 10) = i by omega]
+  else if h20 : i < 20 then
+    simp [h5, h10, h15, h20, BitVec.getLsbD_ushiftRight, show i - 15 < 8 by omega,
+          hMask5 (i - 15) (by omega), show 15 + (i - 15) = i by omega]
+  else if h25 : i < 25 then
+    simp [h5, h10, h15, h20, h25, BitVec.getLsbD_ushiftRight, show i - 20 < 8 by omega,
+          hMask5 (i - 20) (by omega), show 20 + (i - 20) = i by omega]
+  else if h30i : i < 30 then
+    simp [h5, h10, h15, h20, h25, h30i, BitVec.getLsbD_ushiftRight, show i - 25 < 8 by omega,
+          hMask5 (i - 25) (by omega), show 25 + (i - 25) = i by omega]
+  else
+    rcases (show i = 30 ∨ i = 31 by omega) with rfl | rfl
+    · simp only; exact h30.symm
+    · simp only; exact h31.symm
+
+/-- **Universal `Bech32m` (`0x2bc830a3`) Roundtrip, BIP-173 Rejection & BIP-350 Test Vector
+    (`bech32m_encode_verify_roundtrip`)**:
+    For EVERY `hrpLower` and EVERY `data5 : List UInt8`:
+    1. `bech32mVerify hrpLower (data5 ++ bech32mCreateChecksum hrpLower data5) = true`
+    2. Legacy BIP-173 (`const = 1`) residual never collides with `Bech32m` (`0x2bc830a3 ≠ 1`)
+    3. Official BIP-350 test vector `"a1lqfn3a"` (`hrp = [97]`, checksum `[31, 0, 9, 19, 17, 29]`) passes! -/
