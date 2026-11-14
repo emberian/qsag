@@ -468,3 +468,442 @@ impl Cshake256WordStream4 {
 }
 
 /// Exact `out_len`-byte `SHAKE256` XOF matching `Qsag.shake256Xof` bit-for-bit.
+pub fn shake256_xof(out_len: usize, input: &[u8]) -> Vec<u8> {
+    let mut xof = Cshake256Xof::new_shake256();
+    xof.absorb(input);
+    let mut out = vec![0u8; out_len];
+    xof.squeeze(&mut out);
+    out
+}
+
+/// Exact `out_len`-byte `cSHAKE256` XOF matching `Qsag.cshake256Xof` bit-for-bit.
+pub fn cshake256_xof(out_len: usize, customization: &[u8], input: &[u8]) -> Vec<u8> {
+    let mut xof = Cshake256Xof::new(customization);
+    xof.absorb(input);
+    let mut out = vec![0u8; out_len];
+    xof.squeeze(&mut out);
+    out
+}
+
+/// Exact 32-byte `cSHAKE256` evaluation matching `Qsag.cshake256Bytes`.
+pub fn cshake256_32(customization: &[u8], input: &[u8]) -> [u8; 32] {
+    let mut xof = Cshake256Xof::new(customization);
+    xof.absorb(input);
+    let mut out = [0u8; 32];
+    xof.squeeze(&mut out);
+    out
+}
+
+/// Exact 32-byte `SHAKE256` evaluation.
+#[inline]
+pub fn shake256_32(input: &[u8]) -> [u8; 32] {
+    cshake256_32(&[], input)
+}
+
+// ============================================================================
+// Self-Delimiting LEB128 Framing (Matching `Qsag.encodeMultiFrame`)
+// ============================================================================
+
+/// Canonical self-delimiting unsigned LEB128 encoding matching `Qsag.leb128`.
+pub fn leb128(mut n: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4);
+    loop {
+        if n < 128 {
+            out.push(n as u8);
+            break;
+        }
+        out.push(0x80 | ((n & 0x7F) as u8));
+        n >>= 7;
+    }
+    out
+}
+
+/// `leb128` for `u64` step counters and epochs.
+pub fn leb128_u64(mut n: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(5);
+    loop {
+        if n < 128 {
+            out.push(n as u8);
+            break;
+        }
+        out.push(0x80 | ((n & 0x7F) as u8));
+        n >>= 7;
+    }
+    out
+}
+
+/// Length-prefixed byte field `leb128(xs.len()) || xs`, matching `Qsag.encodeListField`.
+pub fn encode_list_field(xs: &[u8]) -> Vec<u8> {
+    let mut out = leb128(xs.len());
+    out.extend_from_slice(xs);
+    out
+}
+
+/// Self-delimiting multi-field byte frame `leb128(fields.len()) || encode_list_field(f0) || ...`,
+/// matching `Qsag.encodeMultiFrame` (proved unconditionally injective in `Keccak.lean`).
+pub fn encode_multi_frame(fields: &[&[u8]]) -> Vec<u8> {
+    let total: usize = 5 + fields.iter().map(|f| 5 + f.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&leb128(fields.len()));
+    for f in fields {
+        out.extend_from_slice(&leb128(f.len()));
+        out.extend_from_slice(f);
+    }
+    out
+}
+
+/// Injectively framed 3-field payload `encode_list_field(a) || encode_list_field(b) || encode_list_field(c)`.
+pub fn encode_frame(a: &[u8], b: &[u8], c: &[u8]) -> Vec<u8> {
+    let mut out = encode_list_field(a);
+    out.extend_from_slice(&encode_list_field(b));
+    out.extend_from_slice(&encode_list_field(c));
+    out
+}
+
+/// Encode a UTF-8 string via LEB128 Unicode scalar values.
+pub fn encode_string_codepoints(s: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    for ch in s.chars() {
+        out.extend_from_slice(&leb128(ch as usize));
+    }
+    out
+}
+
+// ============================================================================
+// Compile-Time Typestate `FiatShamirTranscript<Phase>`
+// ============================================================================
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// Sealed marker trait for compile-time Fiat–Shamir transcript phases.
+pub trait TranscriptPhase: sealed::Sealed + Clone + Copy {}
+
+/// Initial phase: context seed absorbed; relation and statement instance not yet bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unbound;
+impl sealed::Sealed for Unbound {}
+impl TranscriptPhase for Unbound {}
+
+/// Second phase: `(protocol_id, vk_digest, circuit_desc)` bound; awaiting instance binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RelationBound;
+impl sealed::Sealed for RelationBound {}
+impl TranscriptPhase for RelationBound {}
+
+/// Active phase: both relation and statement instance are bound; challenges may be squeezed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InstanceBound;
+impl sealed::Sealed for InstanceBound {}
+impl TranscriptPhase for InstanceBound {}
+
+/// Compile-time typestate Fiat–Shamir sponge transcript backed by 256-bit `cSHAKE256`.
+///
+/// Attempting to squeeze any challenge before calling both `bind_relation` and `bind_instance`
+/// is rejected at compile time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FiatShamirTranscript<Phase: TranscriptPhase> {
+    state: [u8; 32],
+    step_count: u64,
+    relation_digest: [u8; 32],
+    instance_digest: [u8; 32],
+    _phase: PhantomData<Phase>,
+}
+
+impl<Phase: TranscriptPhase> Drop for FiatShamirTranscript<Phase> {
+    fn drop(&mut self) {
+        wipe_bytes32(&mut self.state);
+    }
+}
+
+impl<Phase: TranscriptPhase> FiatShamirTranscript<Phase> {
+    #[inline]
+    pub const fn state(&self) -> &[u8; 32] {
+        &self.state
+    }
+
+    #[inline]
+    pub const fn step_count(&self) -> u64 {
+        self.step_count
+    }
+
+    #[inline]
+    pub const fn relation_digest(&self) -> &[u8; 32] {
+        &self.relation_digest
+    }
+
+    #[inline]
+    pub const fn instance_digest(&self) -> &[u8; 32] {
+        &self.instance_digest
+    }
+}
+
+impl FiatShamirTranscript<Unbound> {
+    /// Construct a fresh `Unbound` transcript from a session/context seed.
+    pub fn new(context_seed: &[u8]) -> Self {
+        let state = cshake256_32(FS_SEED_CUSTOMIZATION, context_seed);
+        Self {
+            state,
+            step_count: 0,
+            relation_digest: [0u8; 32],
+            instance_digest: [0u8; 32],
+            _phase: PhantomData,
+        }
+    }
+
+    /// Injectively bind `(protocol_id, vk_digest, circuit_desc)` to transition to `RelationBound`.
+    pub fn bind_relation(
+        self,
+        protocol_id: &str,
+        vk_digest: &[u8; 32],
+        circuit_desc: &[u8],
+    ) -> FiatShamirTranscript<RelationBound> {
+        let mut proto_bytes = encode_string_codepoints(protocol_id);
+        let mut rel_frame = encode_frame(&proto_bytes, vk_digest, circuit_desc);
+        let state_field = encode_list_field(&self.state);
+        let mut preimage = Vec::with_capacity(state_field.len() + rel_frame.len());
+        preimage.extend_from_slice(&state_field);
+        preimage.extend_from_slice(&rel_frame);
+        let next_state = cshake256_32(FS_BIND_CUSTOMIZATION, &preimage);
+        wipe_bytes(&mut proto_bytes);
+        wipe_bytes(&mut rel_frame);
+        wipe_bytes(&mut preimage);
+        FiatShamirTranscript {
+            state: next_state,
+            step_count: 1,
+            relation_digest: next_state,
+            instance_digest: [0u8; 32],
+            _phase: PhantomData,
+        }
+    }
+}
+
+impl FiatShamirTranscript<RelationBound> {
+    /// Injectively bind `(comm_bytes, claimed_sum, point)` to transition to `InstanceBound`.
+    pub fn bind_instance(
+        self,
+        comm_bytes: &[u8],
+        claimed_sum: GoldilocksExt2,
+        point: &[GoldilocksExt2],
+    ) -> FiatShamirTranscript<InstanceBound> {
+        let sum_bytes = claimed_sum.to_be_bytes();
+        let len_hdr = leb128(point.len());
+        let mut pt_bytes = Vec::with_capacity(len_hdr.len() + 16 * point.len());
+        pt_bytes.extend_from_slice(&len_hdr);
+        for coord in point {
+            pt_bytes.extend_from_slice(&coord.to_be_bytes());
+        }
+        let mut inst_frame = encode_frame(comm_bytes, &sum_bytes, &pt_bytes);
+        let state_field = encode_list_field(&self.state);
+        let step_hdr = leb128_u64(self.step_count);
+        let mut preimage =
+            Vec::with_capacity(state_field.len() + step_hdr.len() + inst_frame.len());
+        preimage.extend_from_slice(&state_field);
+        preimage.extend_from_slice(&step_hdr);
+        preimage.extend_from_slice(&inst_frame);
+        let next_state = cshake256_32(FS_INSTANCE_CUSTOMIZATION, &preimage);
+        wipe_bytes(&mut pt_bytes);
+        wipe_bytes(&mut inst_frame);
+        wipe_bytes(&mut preimage);
+        FiatShamirTranscript {
+            state: next_state,
+            step_count: self.step_count + 1,
+            relation_digest: self.relation_digest,
+            instance_digest: next_state,
+            _phase: PhantomData,
+        }
+    }
+}
+
+impl FiatShamirTranscript<InstanceBound> {
+    /// Absorb a labeled message into an `InstanceBound` transcript (`0` heap reallocation).
+    pub fn absorb(&mut self, label: &[u8], msg_bytes: &[u8]) {
+        let step_hdr = leb128_u64(self.step_count);
+        let mut step_and_msg = Vec::with_capacity(step_hdr.len() + msg_bytes.len());
+        step_and_msg.extend_from_slice(&step_hdr);
+        step_and_msg.extend_from_slice(msg_bytes);
+        let mut frame = encode_frame(&self.state, label, &step_and_msg);
+        self.state = cshake256_32(FS_ABSORB_CUSTOMIZATION, &frame);
+        wipe_bytes(&mut step_and_msg);
+        wipe_bytes(&mut frame);
+        self.step_count += 1;
+    }
+
+    #[inline]
+    pub fn absorb_field(&mut self, label: &[u8], val: Goldilocks) {
+        let mut b = val.to_be_bytes();
+        self.absorb(label, &b);
+        wipe_bytes(&mut b);
+    }
+
+    #[inline]
+    pub fn absorb_ext2(&mut self, label: &[u8], val: GoldilocksExt2) {
+        let mut b = val.to_be_bytes();
+        self.absorb(label, &b);
+        wipe_bytes(&mut b);
+    }
+
+    /// Squeeze a full 32-byte (256-bit) challenge and ratchet the transcript state forward.
+    pub fn squeeze_challenge_256(&mut self) -> [u8; 32] {
+        let state_field = encode_list_field(&self.state);
+        let step_hdr = leb128_u64(self.step_count);
+        let mut payload = Vec::with_capacity(state_field.len() + step_hdr.len());
+        payload.extend_from_slice(&state_field);
+        payload.extend_from_slice(&step_hdr);
+        let out_bytes = cshake256_32(FS_SQUEEZE_CUSTOMIZATION, &payload);
+        wipe_bytes(&mut payload);
+
+        let out_field = encode_list_field(&out_bytes);
+        let mut ratchet_in = Vec::with_capacity(state_field.len() + out_field.len());
+        ratchet_in.extend_from_slice(&state_field);
+        ratchet_in.extend_from_slice(&out_field);
+        self.state = cshake256_32(FS_RATCHET_CUSTOMIZATION, &ratchet_in);
+        wipe_bytes(&mut ratchet_in);
+        self.step_count += 1;
+        out_bytes
+    }
+
+    /// Squeeze a 128-bit challenge in `GoldilocksExt2` ($\mathbb{F}_{p^2}$) from two independent
+    /// 128-bit halves of `squeeze_challenge_256`.
+    pub fn squeeze_ext2(&mut self) -> GoldilocksExt2 {
+        let bytes = self.squeeze_challenge_256();
+        let mut lo_arr = [0u8; 16];
+        let mut hi_arr = [0u8; 16];
+        lo_arr.copy_from_slice(&bytes[0..16]);
+        hi_arr.copy_from_slice(&bytes[16..32]);
+        GoldilocksExt2::new(
+            Goldilocks::from_u128_reduced(u128::from_be_bytes(lo_arr)),
+            Goldilocks::from_u128_reduced(u128::from_be_bytes(hi_arr)),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rss_four_shakes_match_scalar_and_reject_multiblock_inputs() {
+        let inputs = [vec![], vec![0x8f], vec![0x42; 80], vec![0xa3; 135]];
+        let refs = core::array::from_fn(|i| inputs[i].as_slice());
+        let output = shake256_4x_32(refs).unwrap();
+        for (input, actual) in inputs.iter().zip(output) {
+            assert_eq!(actual, shake256_32(input));
+        }
+        for len in [136, 137, 272] {
+            let too_long = vec![0; len];
+            assert!(shake256_4x_32([&[], &too_long, &[], &[]]).is_none());
+        }
+    }
+
+    #[test]
+    fn word_stream4_matches_scalar_cshake_per_stream_across_blocks() {
+        let tag = b"QSAG.TEST.WORDSTREAM/v1";
+        let mid = cshake256_static_midstate(tag);
+        for seed_len in [0usize, 1, 72, 133, 134] {
+            let seed: Vec<u8> = (0..seed_len).map(|i| (i * 7 + 3) as u8).collect();
+            let mut stream = Cshake256WordStream4::new(&mid, &seed);
+            // Uneven chunks exercise block boundaries.
+            let mut words = vec![0u64; 3 * Cshake256WordStream4::WORDS_PER_BLOCK + 5];
+            let (head, tail) = words.split_at_mut(7);
+            stream.fill_words(head);
+            stream.fill_words(tail);
+            for i in 0..4usize {
+                let mut input = seed.clone();
+                input.push(i as u8);
+                let reference = cshake256_xof(8 * SHAKE256_RATE_LANES * 4, tag, &input);
+                for (w, word) in words.iter().enumerate().filter(|(w, _)| w % 4 == i) {
+                    let block = w / Cshake256WordStream4::WORDS_PER_BLOCK;
+                    let lane = (w % Cshake256WordStream4::WORDS_PER_BLOCK) / 4;
+                    let off = 8 * (block * SHAKE256_RATE_LANES + lane);
+                    let expected = u64::from_le_bytes(reference[off..off + 8].try_into().unwrap());
+                    assert_eq!(*word, expected, "stream {i} word {w}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn static_midstates_match_generic_prefix_and_keep_domains_distinct() {
+        for tag in [
+            b"QSAG.RSS.U64.OPEN.COM/v1".as_slice(),
+            b"QSAG.RSS.CHI.MASK/v2",
+            b"QSAG.TH.PRF/v1",
+            &[0x61; 31],
+            &[0x62; 32],
+            &[0x63; 128],
+        ] {
+            let mut expected = [0u64; 25];
+            let prefix = cshake256_customization_prefix(tag);
+            for block in prefix.as_chunks::<SHAKE256_RATE_BYTES>().0 {
+                xor_rate_block(&mut expected, block);
+                keccak_f1600(&mut expected);
+            }
+            assert_eq!(cshake256_static_midstate(tag), expected);
+            let mut generic = Cshake256Xof::new_shake256();
+            generic.suffix = 4;
+            generic.absorb(&prefix);
+            let input = [0x81; 273];
+            generic.absorb(&input);
+            let mut reference = [0u8; 300];
+            generic.squeeze(&mut reference);
+            assert_eq!(cshake256_xof(300, tag, &input), reference);
+            assert_ne!(
+                cshake256_xof(300, tag, &input),
+                cshake256_xof(300, b"other", &input)
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn static_midstate_rejects_empty_shake_domain() {
+        cshake256_static_midstate(&[]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn static_midstate_rejects_multiblock_tag() {
+        cshake256_static_midstate(&[0; 129]);
+    }
+    use super::*;
+
+    #[test]
+    fn test_fips202_shake256_official_vectors() {
+        let empty = shake256_32(&[]);
+        assert_eq!(
+            empty,
+            [
+                0x46, 0xb9, 0xdd, 0x2b, 0x0b, 0xa8, 0x8d, 0x13, 0x23, 0x3b, 0x3f, 0xeb, 0x74, 0x3e,
+                0xeb, 0x24, 0x3f, 0xcd, 0x52, 0xea, 0x62, 0xb8, 0x1b, 0x82, 0xb5, 0x0c, 0x27, 0x64,
+                0x6e, 0xd5, 0x76, 0x2f
+            ]
+        );
+        let abc = shake256_32(b"abc");
+        assert_eq!(
+            abc,
+            [
+                0x48, 0x33, 0x66, 0x60, 0x13, 0x60, 0xa8, 0x77, 0x1c, 0x68, 0x63, 0x08, 0x0c, 0xc4,
+                0x11, 0x4d, 0x8d, 0xb4, 0x45, 0x30, 0xf8, 0xf1, 0xe1, 0xee, 0x4f, 0x94, 0xea, 0x37,
+                0xe7, 0x8b, 0x57, 0x39
+            ]
+        );
+    }
+
+    #[test]
+    fn test_cshake256_multi_block_and_domain_separation() {
+        let msg = [0xA5u8; 300]; // spans 3 rate blocks (300 > 272 = 2 * 136)
+        let d1 = cshake256_32(b"DOMAIN.A", &msg);
+        let d2 = cshake256_32(b"DOMAIN.B", &msg);
+        assert_ne!(d1, d2);
+
+        let xof_long = cshake256_xof(300, b"DOMAIN.A", &msg);
+        assert_eq!(&xof_long[..32], &d1);
+    }
+
+    #[test]
+    fn test_multi_frame_collision_resistance() {
+        let f1 = encode_multi_frame(&[b"ab", b"c"]);
+        let f2 = encode_multi_frame(&[b"a", b"bc"]);
+        assert_ne!(f1, f2);
+    }
+}
