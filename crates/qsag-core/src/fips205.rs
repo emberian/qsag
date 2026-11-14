@@ -285,65 +285,25 @@ impl Fips205Adrs {
     /// Encode to 32 big-endian bytes matching `Qsag.encodeFips205Adrs`.
     #[inline]
     pub const fn to_bytes(&self) -> [u8; 32] {
-        let mut out = [0u8; 32];
-        let lb = self.layer.to_be_bytes();
-        out[0] = lb[0];
-        out[1] = lb[1];
-        out[2] = lb[2];
-        out[3] = lb[3];
-
-        // 96-bit big-endian tree index in bytes 4..16
-        let tb = self.tree.to_be_bytes();
-        let mut i = 0usize;
-        while i < 12 {
-            out[4 + i] = tb[4 + i];
-            i += 1;
-        }
-
-        let ty = self.adrs_type.to_u32().to_be_bytes();
-        out[16] = ty[0];
-        out[17] = ty[1];
-        out[18] = ty[2];
-        out[19] = ty[3];
-
-        let kp = self.key_pair.to_be_bytes();
-        out[20] = kp[0];
-        out[21] = kp[1];
-        out[22] = kp[2];
-        out[23] = kp[3];
-
-        let b5 = self.f5.to_be_bytes();
-        out[24] = b5[0];
-        out[25] = b5[1];
-        out[26] = b5[2];
-        out[27] = b5[3];
-
-        let b6 = self.f6.to_be_bytes();
-        out[28] = b6[0];
-        out[29] = b6[1];
-        out[30] = b6[2];
-        out[31] = b6[3];
-        out
+        let ty = match qsag_verified::Fips205AdrsType::from_u32(self.adrs_type.to_u32()) {
+            Some(ty) => ty,
+            None => unreachable!(),
+        };
+        qsag_verified::encode_fips205_adrs(qsag_verified::Fips205Adrs::from_tree_u96(
+            self.layer, self.tree, ty, self.key_pair, self.f5, self.f6,
+        ))
     }
 
     /// Decode a canonical 32-byte uncompressed `ADRS` (`None` if `type > 6`).
     pub fn from_bytes(bytes: &[u8; 32]) -> Option<Self> {
-        let layer = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let mut tb = [0u8; 16];
-        tb[4..16].copy_from_slice(&bytes[4..16]);
-        let tree = u128::from_be_bytes(tb);
-        let ty = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
-        let adrs_type = Fips205AdrsType::from_u32(ty)?;
-        let key_pair = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
-        let f5 = u32::from_be_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]);
-        let f6 = u32::from_be_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]);
+        let adrs = qsag_verified::decode_fips205_adrs(bytes)?;
         Some(Self {
-            layer,
-            tree,
-            adrs_type,
-            key_pair,
-            f5,
-            f6,
+            layer: adrs.layer,
+            tree: (u128::from(adrs.tree_hi) << 64) | u128::from(adrs.tree_lo),
+            adrs_type: Fips205AdrsType::from_u32(adrs.adrs_type.to_u32())?,
+            key_pair: adrs.kp,
+            f5: adrs.chain,
+            f6: adrs.hash,
         })
     }
 

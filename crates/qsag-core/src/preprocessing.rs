@@ -327,10 +327,11 @@ impl PartyPrivateRng {
                 self.buf[offset..offset + 8].copy_from_slice(&word.to_le_bytes());
             }
         }
-        for state in &mut states { wipe_u64s(state); }
+        qsag_asm::volatile_fill(&mut states, [0u64; 25]);
         self.off = 0;
     }
 
+    #[inline(always)]
     pub fn fill_bytes(&mut self, out: &mut [u8]) {
         let mut written = 0usize;
         while written < out.len() {
@@ -469,12 +470,12 @@ const PSI_POWS: [u16; RLWE_N] = {
     arr
 };
 
-const PSI_INV_POWS: [u16; RLWE_N] = {
+const NTT_INVERSE_SCALES: [u16; RLWE_N] = {
     let mut arr = [0u16; RLWE_N];
     let mut cur = 1u16;
     let mut i = 0usize;
     while i < RLWE_N {
-        arr[i] = cur;
+        arr[i] = rlwe_mul(cur, RLWE_N_INV);
         cur = rlwe_mul(cur, RLWE_PSI_INV_2048);
         i += 1;
     }
@@ -529,10 +530,9 @@ impl RlwePolyNtt {
     #[inline]
     pub fn from_ntt(&self) -> RlwePoly {
         let mut c = self.0;
-        RlwePoly::ntt_cyclic(&mut c, &OMEGA_INV_POWS);
+        RlwePoly::ntt_inverse(&mut c);
         for i in 0..RLWE_N {
-            let scaled = rlwe_mul(c[i], RLWE_N_INV);
-            c[i] = rlwe_mul(scaled, PSI_INV_POWS[i]);
+            c[i] = rlwe_mul(c[i], NTT_INVERSE_SCALES[i]);
         }
         RlwePoly(c)
     }
@@ -589,31 +589,38 @@ impl RlwePoly {
         Self(out)
     }
 
-    fn bit_reverse_1024(a: &mut [u16; RLWE_N]) {
-        for i in 0..RLWE_N {
-            let rev = i.reverse_bits() >> (usize::BITS - 10);
-            if i < rev {
-                a.swap(i, rev);
+    // Forward Gentleman–Sande DIF leaves evaluations in bit-reversed order.
+    // Pointwise products retain that order; inverse Cooley–Tukey DIT consumes
+    // it directly. All indices and loop bounds depend only on the public size.
+    fn ntt_forward(a: &mut [u16; RLWE_N]) {
+        let mut len = RLWE_N;
+        while len >= 2 {
+            let half = len / 2;
+            let step = RLWE_N / len;
+            for block in a.chunks_exact_mut(len) {
+                let (left, right) = block.split_at_mut(half);
+                for (j, (u, v)) in left.iter_mut().zip(right).enumerate() {
+                    let sum = rlwe_add(*u, *v);
+                    *v = rlwe_mul(rlwe_sub(*u, *v), OMEGA_POWS[j * step]);
+                    *u = sum;
+                }
             }
+            len >>= 1;
         }
     }
 
-    fn ntt_cyclic(a: &mut [u16; RLWE_N], twiddles: &[u16; RLWE_N / 2]) {
-        Self::bit_reverse_1024(a);
-        let mut len = 2usize;
+    fn ntt_inverse(a: &mut [u16; RLWE_N]) {
+        let mut len = 2;
         while len <= RLWE_N {
             let half = len / 2;
             let step = RLWE_N / len;
-            let mut start = 0usize;
-            while start < RLWE_N {
-                for j in 0..half {
-                    let w = twiddles[j * step];
-                    let u = a[start + j];
-                    let v = rlwe_mul(a[start + j + half], w);
-                    a[start + j] = rlwe_add(u, v);
-                    a[start + j + half] = rlwe_sub(u, v);
+            for block in a.chunks_exact_mut(len) {
+                let (left, right) = block.split_at_mut(half);
+                for (j, (u, v)) in left.iter_mut().zip(right).enumerate() {
+                    let product = rlwe_mul(*v, OMEGA_INV_POWS[j * step]);
+                    *v = rlwe_sub(*u, product);
+                    *u = rlwe_add(*u, product);
                 }
-                start += len;
             }
             len <<= 1;
         }
@@ -625,7 +632,7 @@ impl RlwePoly {
         for i in 0..RLWE_N {
             a[i] = rlwe_mul(a[i], PSI_POWS[i]);
         }
-        Self::ntt_cyclic(&mut a, &OMEGA_POWS);
+        Self::ntt_forward(&mut a);
         RlwePolyNtt(a)
     }
 
@@ -635,15 +642,14 @@ impl RlwePoly {
         for i in 0..RLWE_N {
             b[i] = rlwe_mul(b[i], PSI_POWS[i]);
         }
-        Self::ntt_cyclic(&mut b, &OMEGA_POWS);
+        Self::ntt_forward(&mut b);
         let mut c = [0u16; RLWE_N];
         for i in 0..RLWE_N {
             c[i] = rlwe_mul(lhs_ntt.0[i], b[i]);
         }
-        Self::ntt_cyclic(&mut c, &OMEGA_INV_POWS);
+        Self::ntt_inverse(&mut c);
         for i in 0..RLWE_N {
-            let scaled = rlwe_mul(c[i], RLWE_N_INV);
-            c[i] = rlwe_mul(scaled, PSI_INV_POWS[i]);
+            c[i] = rlwe_mul(c[i], NTT_INVERSE_SCALES[i]);
         }
         wipe_u16s(&mut b);
         Self(c)
@@ -737,39 +743,38 @@ impl RlwePoly {
     }
 }
 
-/// Number of parallel/sequential repetitions in [`RlweReceiverZkPok`] (`13 * 20 = 260` challenge bits; this is not an extraction theorem).
+/// Number of parallel/sequential repetitions in [`RlweReceiverZkPok`] (`13 * 11 = 143` challenge bits over
+/// pairwise-invertible signed monomials $\pm X^k$; matches `rlweOrSigmaParallelReps` in `RlweCyclotomicExtraction.lean`).
 pub const RLWE_ZKPOK_REPS: usize = 13;
-/// Joint Gaussian rejection parameters. Verifier bounds, modulus and joint
-/// challenge space are unchanged. Key generation conditions the two CBD_1
-/// polynomials on total squared norm <=1376. Their energy before conditioning
-/// is Binomial(2048,1/2); the Chernoff bound exp(-2048*KL(1376/2048 || 1/2))
-/// is below 2^-178. This bounds the change to the original RLWE distribution.
-/// Since a challenge has two signed terms, the thirteen-repetition response shift
-/// satisfies ||v||^2 <= 13*4*1376 = 71552.
+/// Bit-width of one single signed-monomial challenge `c in {0..2048}` (`deg = c & 0x3ff`, `sign = (c >> 10) & 1`),
+/// matching `SignedMonomialChal.ofFinIndex` / `signedMonomial_challenge_set_pairwise_invertible` in Lean.
+pub const RLWE_ZKPOK_CHAL_BITS: u32 = 11;
+const RLWE_ZKPOK_CHAL_MASK: u32 = (1u32 << RLWE_ZKPOK_CHAL_BITS) - 1;
+/// Joint Gaussian rejection parameters over the single signed-monomial challenge set
+/// $\mathcal{C} = \{\pm X^k : 0 \le k < 1024\}$ (`2048` challenges per repetition, `100%` pairwise
+/// invertible over $R_{12289}$ via $(c_1 - c_2) g(X) = 2$). Key generation conditions the two
+/// $\mathrm{CBD}_1$ polynomials on total squared norm $\le 1376$ (Chernoff tail $< 2^{-178}$).
+/// Because negacyclic multiplication by $\pm X^k$ is an exact $\ell_2$ and $\ell_\infty$ isometry,
+/// every coordinate of the shift lies in $[-1, 1]$ and the 13-repetition response shift satisfies
+/// $\|v\|_2^2 \le 13 \times 1376 = 17{,}888$.
 ///
-/// Masks follow exp(-y^2/(2*700^2)) on [-3072,3071]. Accept z=y+v only in
-/// [-3070,3069], with probability min(1, exp((||y||^2-||z||^2)/980000)/M),
-/// where M=exp(ceil(980000 ln(512))/980000). All target responses have preimages
-/// in the mask box because every shift coordinate lies in [-2,2]. Simulated
-/// responses use the same Gaussian conditioned on the response box. Without
-/// clipping the likelihood ratio this gives exactly witness-independent output.
-/// Discrete Gaussian MGF domination bounds the clipped tail below 2^-155;
-/// conditioning on the response box (mass >0.6) gives distance below 2^-154.
-/// This is statistical HVZK, not perfect HVZK, and is not a QROM reduction.
+/// Masks follow $\exp(-y^2 / (2 \cdot 700^2))$ on $[-3072, 3071]$. Accept $z = y + v$ only in
+/// $[-3070, 3069]$, with probability $\min(1, \exp((\|y\|^2 - \|z\|^2)/980000) / M)$ where
+/// $M = \exp(\lceil 980000 \ln(24) \rceil / 980000)$ (`RLWE_GAUSSIAN_LOG_M = 3_114_493`).
+/// Every target response has preimages inside $[-3072, 3071]$ since $\|v\|_\infty \le 1$.
+/// Exact discrete-Gaussian MGF domination over $\|v\|_2^2 \le 17{,}888, \|v\|_\infty \le 1$ bounds
+/// the unclipped tail below $2^{-197.3}$; conditioning on acceptance and the response-box mass
+/// ($> 0.73$) leaves statistical HVZK distance below $2^{-192}$ (`0` QROM claim).
 ///
 /// Sampling uses uniform proposals and fixed-work, 192-bit Bernoulli rejection,
 /// with no mask-indexed table access. Each exponential evaluation has absolute
-/// error <64/2^192, including 120-digit constant generation and multiplication
-/// rounding. Combining coordinates and conditioning on proof acceptance leaves
-/// implementation error below 2^-160. Bounds here are per joint proof; composed
-/// sessions require the usual union bound. Expected acceptance is about 1/512,
-/// versus 0.000088 for uniform masks. All rejections restart the entire joint
-/// transcript; no independently grindable per-repetition challenges are used.
+/// error $< 64 / 2^{192}$. Expected acceptance is $\approx 0.735 / 24 \approx 1 / 32.6$,
+/// and all rejections restart the entire joint real-branch transcript.
 const RLWE_ZKPOK_Z_BOUND: i16 = 3070;
 
 /// Constant-time HVZK OR-Sigma proof of short Ring-LWE witness knowledge for [`RlweOtReceiverMsg`]:
-/// proves knowledge of short `(s, e)` on EITHER `Y_0 = pk0` OR `Y_1 = pk0 + t_crs` under `a_crs`,
-/// defeating malformed-`pk0` active Receiver key-extraction attacks (unchanged challenge space, statistical HVZK).
+/// proves knowledge of short `(s, e)` on EITHER `Y_0 = pk0` OR `Y_1 = pk0 + t_crs` under `a_crs`
+/// over the 11-bit pairwise-invertible signed-monomial challenge set $\pm X^k$ (`13` repetitions).
 #[derive(Clone, Debug)]
 pub struct RlweReceiverZkPok {
     pub chal0: [u32; RLWE_ZKPOK_REPS],
@@ -780,90 +785,140 @@ pub struct RlweReceiverZkPok {
     pub z_e1: Box<[[i16; RLWE_N]; RLWE_ZKPOK_REPS]>,
 }
 
+/// Realize 11-bit signed-monomial challenge `u` (`deg = u & 0x3ff`, `sign = (u >> 10) & 1`) in $R_q$
+/// in constant time (`false -> +X^deg`, `true -> -X^deg`, matching `SignedMonomialChal.ofFinIndex`).
 #[inline]
-fn poly_from_chal20(u: u32) -> RlwePoly {
-    let pos0 = (u & 0x1FF) as usize; // 0..512
-    let sign0 = ((u >> 9) & 1) as u16;
-    let pos1 = 512 + (((u >> 10) & 0x1FF) as usize); // 512..1024
-    let sign1 = ((u >> 19) & 1) as u16;
+fn poly_from_chal11(u: u32) -> RlwePoly {
+    let deg = (u & 0x3FF) as usize;
+    let sign = ((u >> 10) & 1) as u16;
     let mut coeffs = [0u16; RLWE_N];
-    let value0 = 1 ^ (0u16.wrapping_sub(sign0) & (1 ^ (RLWE_Q - 1)));
-    let value1 = 1 ^ (0u16.wrapping_sub(sign1) & (1 ^ (RLWE_Q - 1)));
+    let value = 1 ^ (0u16.wrapping_sub(sign) & (1 ^ (RLWE_Q - 1)));
     for (i, coeff) in coeffs.iter_mut().enumerate() {
-        *coeff = (value0 & 0u16.wrapping_sub(black_box((i == pos0) as u16)))
-            | (value1 & 0u16.wrapping_sub(black_box((i == pos1) as u16)));
+        *coeff = value & 0u16.wrapping_sub(black_box((i == deg) as u16));
     }
     RlwePoly(coeffs)
 }
 
-/// Multiply public `poly` by public 2-sparse `d(u)` in $R_q = \mathbb{Z}_q[X]/(X^{1024}+1)$ in $O(N)$ (`0` NTTs).
+/// Multiply public `poly` by public signed monomial `(-1)^{sign} X^{deg}` in $R_q = \mathbb{Z}_q[X]/(X^{1024}+1)$
+/// in $O(N)$ (`0` NTTs).
 #[inline]
-fn mul_chal20_public(poly: &RlwePoly, u: u32) -> RlwePoly {
-    let pos0 = (u & 0x1FF) as usize;
-    let neg0 = ((u >> 9) & 1) == 1;
-    let pos1 = 512 + (((u >> 10) & 0x1FF) as usize);
-    let neg1 = ((u >> 19) & 1) == 1;
+fn mul_chal11_public(poly: &RlwePoly, u: u32) -> RlwePoly {
+    let deg = (u & 0x3FF) as usize;
+    let is_neg = ((u >> 10) & 1) == 1;
     let mut out = [0u16; RLWE_N];
-    for (pos, is_neg) in [(pos0, neg0), (pos1, neg1)] {
-        for (i, &coeff) in poly.0.iter().enumerate() {
-            let (dst, wrap_neg) = if i + pos < RLWE_N {
-                (i + pos, is_neg)
-            } else {
-                (i + pos - RLWE_N, !is_neg)
-            };
-            let term = if wrap_neg {
-                if coeff == 0 { 0 } else { RLWE_Q - coeff }
-            } else {
-                coeff
-            };
-            let sum = out[dst] + term;
-            out[dst] = if sum >= RLWE_Q { sum - RLWE_Q } else { sum };
-        }
+    for (dst, slot) in out.iter_mut().enumerate() {
+        let (src, wrap_neg) = if dst >= deg {
+            (dst - deg, is_neg)
+        } else {
+            (dst + RLWE_N - deg, !is_neg)
+        };
+        let coeff = poly.0[src];
+        *slot = if wrap_neg && coeff != 0 {
+            RLWE_Q - coeff
+        } else {
+            coeff
+        };
     }
     RlwePoly(out)
+}
+
+/// Constant-time 10-stage barrel-rotator negacyclic product `(-1)^{sign} X^{deg} * poly` over
+/// signed integer coefficients (`0` NTTs, fixed compile-time offsets, `0` secret/challenge branches).
+#[inline]
+fn mul_chal11_signed_ct(poly: &[i16; RLWE_N], u: u32) -> [i16; RLWE_N] {
+    let u = black_box(u);
+    let mut cur = *poly;
+    let sign_mask = 0i16.wrapping_sub(((u >> 10) & 1) as i16);
+    for x in &mut cur {
+        *x = (*x ^ sign_mask).wrapping_sub(sign_mask);
+    }
+    for stage in 0..10u32 {
+        let shift = 1usize << stage;
+        let sel = 0i16.wrapping_sub(((u >> stage) & 1) as i16);
+        let prev = cur;
+        for (dst, slot) in cur.iter_mut().enumerate() {
+            let shifted = if dst >= shift {
+                prev[dst - shift]
+            } else {
+                prev[dst + RLWE_N - shift].wrapping_neg()
+            };
+            *slot = prev[dst] ^ (sel & (prev[dst] ^ shifted));
+        }
+    }
+    cur
+}
+
+#[inline]
+fn rlwe_ternary_to_i16_ct(poly: &RlwePoly) -> [i16; RLWE_N] {
+    let mut out = [0i16; RLWE_N];
+    for (dst, &c) in out.iter_mut().zip(&poly.0) {
+        let is_one = (c == 1) as i16;
+        let is_neg_one = (c == RLWE_Q - 1) as i16;
+        *dst = is_one - is_neg_one;
+    }
+    out
 }
 
 #[inline]
 fn signed_box_to_rlwe_poly(v: &[i16; RLWE_N]) -> RlwePoly {
     let mut out = [0u16; RLWE_N];
     for i in 0..RLWE_N {
-        let x = v[i] as i32;
-        let rem = x.rem_euclid(i32::from(RLWE_Q));
-        out[i] = rem as u16;
+        let x = i32::from(v[i]);
+        let neg_mask = (x >> 31) & i32::from(RLWE_Q);
+        out[i] = (x + neg_mask).rem_euclid(i32::from(RLWE_Q)) as u16;
     }
     RlwePoly(out)
-}
-
-#[inline]
-fn center_small_mod_q(poly: &RlwePoly) -> [i16; RLWE_N] {
-    let mut out = [0i16; RLWE_N];
-    for (i, out_i_item) in out[..RLWE_N].iter_mut().enumerate() {
-        let c = poly.0[i];
-        let gt_half = ((RLWE_HALF_Q.wrapping_sub(1).wrapping_sub(c)) >> 15) & 1;
-        let neg_adj = (RLWE_Q as i16) * (gt_half as i16);
-        *out_i_item = (c as i16) - neg_adj;
-    }
-    out
 }
 
 
 // Fixed-point unsigned fractions in little-endian limbs, with denominator 2^192.
 // The schoolbook product retains the high half, rounding toward zero.
+#[inline(always)]
 fn gaussian_fraction_mul(a: [u64; 3], b: [u64; 3]) -> [u64; 3] {
-    let mut product = [0u64; 6];
-    for (i, &ai) in a.iter().enumerate() {
-        let mut carry = 0u128;
-        for (j, &bj) in b.iter().enumerate() {
-            let value = u128::from(ai) * u128::from(bj)
-                + u128::from(product[i + j]) + carry;
-            product[i + j] = value as u64;
-            carry = value >> 64;
-        }
-        product[i + 3] = carry as u64;
-    }
-    [product[3], product[4], product[5]]
+    let a0 = u128::from(a[0]);
+    let a1 = u128::from(a[1]);
+    let a2 = u128::from(a[2]);
+    let b0 = u128::from(b[0]);
+    let b1 = u128::from(b[1]);
+    let b2 = u128::from(b[2]);
+
+    let p00 = a0 * b0;
+    let c0 = p00 >> 64;
+
+    let s1_a = a0 * b1 + c0;
+    let p1_a = s1_a as u64;
+    let c1_a = s1_a >> 64;
+
+    let s2_a = a0 * b2 + c1_a;
+    let p2_a = s2_a as u64;
+    let p3_a = (s2_a >> 64) as u64;
+
+    let s1_b = a1 * b0 + u128::from(p1_a);
+    let c1_b = s1_b >> 64;
+
+    let s2_b = a1 * b1 + u128::from(p2_a) + c1_b;
+    let p2_b = s2_b as u64;
+    let c2_b = s2_b >> 64;
+
+    let s3_b = a1 * b2 + u128::from(p3_a) + c2_b;
+    let p3_b = s3_b as u64;
+    let p4_b = (s3_b >> 64) as u64;
+
+    let s2_c = a2 * b0 + u128::from(p2_b);
+    let c2_c = s2_c >> 64;
+
+    let s3_c = a2 * b1 + u128::from(p3_b) + c2_c;
+    let p3 = s3_c as u64;
+    let c3_c = s3_c >> 64;
+
+    let s4_c = a2 * b2 + u128::from(p4_b) + c3_c;
+    let p4 = s4_c as u64;
+    let p5 = (s4_c >> 64) as u64;
+
+    [p3, p4, p5]
 }
 
+#[inline(always)]
 fn gaussian_fraction_lt(a: [u64; 3], b: [u64; 3]) -> bool {
     let mut borrow = false;
     for (&ai, &bi) in a.iter().zip(&b) {
@@ -879,29 +934,38 @@ fn gaussian_fraction_lt(a: [u64; 3], b: [u64; 3]) -> bool {
 // depend on the accepted mask. Trial counts are independent of the final sample.
 fn sample_gaussian_box(rng: &mut PartyPrivateRng, response: bool) -> [i16; RLWE_N] {
     let half = if response { RLWE_ZKPOK_Z_BOUND } else { RLWE_ZKPOK_Z_BOUND + 2 };
-    core::array::from_fn(|_| loop {
-        let mut coins = [0u8; 26];
-        rng.fill_bytes(&mut coins);
+    let mut coins = [0u8; 26];
+    let out = core::array::from_fn(|_| loop {
+        rng.fill_bytes(&mut coins[..10]);
         let proposal = u16::from_le_bytes([coins[0], coins[1]]) & 0x1fff;
         let valid = proposal < 2 * half as u16;
         let mask = 0u16.wrapping_sub(u16::from(valid));
         let x = (proposal & mask) as i16 - half;
         let exponent = (i64::from(x) * i64::from(x)) as u64;
-        let random = core::array::from_fn(|i| u64::from_le_bytes(
-            core::array::from_fn(|j| coins[2 + 8*i + j])));
+        let high = u64::from_le_bytes(core::array::from_fn(|j| coins[2 + j]));
         // Reject only when the cheap upper bound proves that the full 192-bit
         // comparison would reject. Every accepted proposal still takes the same
         // fixed-work exact path; discarded proposals are independent of it.
         let upper = gaussian_exp_upper_bound(exponent);
-        if black_box(u128::from(random[2]) >= upper) {
-            wipe_bytes(&mut coins);
+        if black_box(u128::from(high) >= upper) {
             continue;
         }
+        // The upper-bound rejection is decided by the high limb alone. Draw
+        // the other two independent limbs only for surviving proposals. Rejected
+        // proposals cannot affect the next sample, and every accepted proposal
+        // still takes the same fixed-work 192-bit comparison path.
+        rng.fill_bytes(&mut coins[10..]);
+        let random = [
+            u64::from_le_bytes(core::array::from_fn(|j| coins[10 + j])),
+            u64::from_le_bytes(core::array::from_fn(|j| coins[18 + j])),
+            high,
+        ];
         let probability = gaussian_exp_probability::<24>(exponent);
         let accept = gaussian_fraction_lt(random, probability) & valid;
-        wipe_bytes(&mut coins);
         if black_box(accept) { break x; }
-    })
+    });
+    wipe_bytes(&mut coins);
+    out
 }
 
 // Ignore the low fourteen exponent bits for this bound only. This increases
@@ -912,6 +976,7 @@ fn sample_gaussian_box(rng: &mut PartyPrivateRng, response: bool) -> [i16; RLWE_
 // loses <1 more. Adding 21 therefore gives a strict upper bound. Keep the sum
 // in u128 because it can exceed u64::MAX near probability one.
 // No table index, loop bound or branch depends on the proposal.
+#[inline(always)]
 fn gaussian_exp_upper_bound(exponent: u64) -> u128 {
     let mut probability = u64::MAX;
     for (bit, factor) in RLWE_GAUSSIAN_EXP_POWERS[14..24].iter().enumerate() {
@@ -922,6 +987,7 @@ fn gaussian_exp_upper_bound(exponent: u64) -> u128 {
     u128::from(probability) + 21
 }
 
+#[inline(always)]
 fn gaussian_exp_probability<const BITS: usize>(exponent: u64) -> [u64; 3] {
     let mut probability = [u64::MAX; 3];
     for (bit, &factor) in RLWE_GAUSSIAN_EXP_POWERS[..BITS].iter().enumerate() {
@@ -982,7 +1048,8 @@ const RLWE_GAUSSIAN_EXP_POWERS: [[u64; 3]; 30] = [
     [0x0000000000000000, 0x0000000000000000, 0x0000000000000000],
     [0x0000000000000000, 0x0000000000000000, 0x0000000000000000],
 ];
-const RLWE_GAUSSIAN_LOG_M: i64 = 6113559;
+/// `ceil(980_000 * ln(24)) = 3_114_493` (`M = 24` over single signed-monomial shifts `||v||_2^2 <= 17_888`).
+const RLWE_GAUSSIAN_LOG_M: i64 = 3_114_493;
 const RLWE_WITNESS_ENERGY_BOUND: usize = 1376;
 
 fn bounded_ternary_witness(s: &RlwePoly, e: &RlwePoly) -> bool {
@@ -1011,13 +1078,14 @@ fn hash_rlwe_zkpok_joint_challenges(
     receiver_id: usize, ot_idx: u32, pk0: &RlwePoly, t_crs: &RlwePoly,
     commitments: &[(RlwePoly, RlwePoly)],
 ) -> [u32; RLWE_ZKPOK_REPS] {
-    let mut xof = Cshake256Xof::new(b"QSAG.OT.RLWE.ZKPOK/v2");
+    let mut xof = Cshake256Xof::new(b"QSAG.OT.RLWE.ZKPOK/v3");
     xof.absorb(crs_coin);
     xof.absorb(session_id);
     xof.absorb(&(sender_id as u64).to_be_bytes());
     xof.absorb(&(receiver_id as u64).to_be_bytes());
     xof.absorb(&ot_idx.to_be_bytes());
     xof.absorb(&(RLWE_ZKPOK_REPS as u32).to_be_bytes());
+    xof.absorb(&RLWE_ZKPOK_CHAL_BITS.to_be_bytes());
     for p in core::iter::once(pk0).chain(core::iter::once(t_crs))
         .chain(commitments.iter().flat_map(|(a, b)| [a, b])) {
         for &c in &p.0 { xof.absorb(&c.to_le_bytes()); }
@@ -1025,7 +1093,7 @@ fn hash_rlwe_zkpok_joint_challenges(
     core::array::from_fn(|_| {
         let mut out = [0u8; 4];
         xof.squeeze(&mut out);
-        u32::from_le_bytes(out) & 0xFFFFF
+        u32::from_le_bytes(out) & RLWE_ZKPOK_CHAL_MASK
     })
 }
 
@@ -1047,10 +1115,9 @@ impl RlweReceiverZkPok {
     ) -> Self {
         let pk1 = pk0.add(t_crs);
         // When `choice_bit == false`, fake branch is `1` (`pk1`); when `true`, fake branch is `0` (`pk0`).
-        let y_fake = RlwePoly::ct_select(choice_bit, pk0, &pk1);
-        let mut y_fake_ntt = y_fake.to_ntt();
-        let s_r_ntt = s_r.to_ntt();
-        let e1_ntt = e1.to_ntt();
+        let mut y_fake = RlwePoly::ct_select(choice_bit, pk0, &pk1);
+        let mut s_signed = rlwe_ternary_to_i16_ct(s_r);
+        let mut e_signed = rlwe_ternary_to_i16_ct(e1);
 
         let mut chal0 = [0u32; RLWE_ZKPOK_REPS];
         let mut chal1 = [0u32; RLWE_ZKPOK_REPS];
@@ -1059,80 +1126,111 @@ impl RlweReceiverZkPok {
         let mut z_s1 = Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]);
         let mut z_e1 = Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]);
 
-        // Reuse storage, but replace every transcript element on each attempt.
-        let mut commitments = Vec::with_capacity(RLWE_ZKPOK_REPS);
-        let mut masks = Vec::with_capacity(RLWE_ZKPOK_REPS);
-        let mut fake = Vec::with_capacity(RLWE_ZKPOK_REPS);
-        // Rejection restarts the entire joint transcript. Keeping an accepted
-        // repetition while changing other commitments would bias its challenge.
+        // Simulated branch `(u_fake, zs_fake, ze_fake, w_fake)` is witness-independent;
+        // single-attempt real-branch acceptance probability is uniform across `u_real` up to `< 2^-197`.
+        let mut u_fakes = [0u32; RLWE_ZKPOK_REPS];
+        let mut zs_fakes = Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]);
+        let mut ze_fakes = Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]);
+        let mut w_fakes = [RlwePoly::ZERO; RLWE_ZKPOK_REPS];
+        for rep in 0..RLWE_ZKPOK_REPS {
+            let u_fake = (rng.next_u64() as u32) & RLWE_ZKPOK_CHAL_MASK;
+            let zs_fake = sample_gaussian_box(rng, true);
+            let ze_fake = sample_gaussian_box(rng, true);
+            let d_poly = poly_from_chal11(u_fake);
+            let w_fake = signed_box_to_rlwe_poly(&zs_fake)
+                .mul_ntt(a_ntt)
+                .add(&signed_box_to_rlwe_poly(&ze_fake))
+                .sub(&y_fake.mul_negacyclic(&d_poly));
+            u_fakes[rep] = u_fake;
+            zs_fakes[rep] = zs_fake;
+            ze_fakes[rep] = ze_fake;
+            w_fakes[rep] = w_fake;
+        }
+        wipe_u16s(&mut y_fake.0);
+
+        let mut commitments = vec![(RlwePoly::ZERO, RlwePoly::ZERO); RLWE_ZKPOK_REPS];
+        let mut ys_masks = Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]);
+        let mut ye_masks = Box::new([[0i16; RLWE_N]; RLWE_ZKPOK_REPS]);
+        let mut u_reals = [0u32; RLWE_ZKPOK_REPS];
+        let mut ds = [0i16; RLWE_N];
+        let mut de = [0i16; RLWE_N];
+
+        // Rejection restarts the entire joint real-branch transcript.
         loop {
-            commitments.clear();
-            masks.clear();
-            fake.clear();
-            for _ in 0..RLWE_ZKPOK_REPS {
-                let u_fake = (rng.next_u64() as u32) & 0xFFFFF;
-                let zs_fake = sample_gaussian_box(rng, true);
-                let ze_fake = sample_gaussian_box(rng, true);
-                let w_fake = signed_box_to_rlwe_poly(&zs_fake).mul_ntt(a_ntt)
-                    .add(&signed_box_to_rlwe_poly(&ze_fake))
-                    .sub(&poly_from_chal20(u_fake).mul_ntt(&y_fake_ntt));
+            for rep in 0..RLWE_ZKPOK_REPS {
                 let ys = sample_gaussian_box(rng, false);
                 let ye = sample_gaussian_box(rng, false);
-                let w_real = signed_box_to_rlwe_poly(&ys).mul_ntt(a_ntt)
+                let w_real = signed_box_to_rlwe_poly(&ys)
+                    .mul_ntt(a_ntt)
                     .add(&signed_box_to_rlwe_poly(&ye));
-                commitments.push((RlwePoly::ct_select(choice_bit, &w_fake, &w_real),
-                    RlwePoly::ct_select(choice_bit, &w_real, &w_fake)));
-                masks.push((ys, ye));
-                fake.push((u_fake, zs_fake, ze_fake));
+                commitments[rep] = (
+                    RlwePoly::ct_select(choice_bit, &w_fakes[rep], &w_real),
+                    RlwePoly::ct_select(choice_bit, &w_real, &w_fakes[rep]),
+                );
+                ys_masks[rep] = ys;
+                ye_masks[rep] = ye;
             }
-            let challenges = hash_rlwe_zkpok_joint_challenges(crs_coin, session_id,
-                sender_id, receiver_id, ot_idx, pk0, t_crs, &commitments);
+            let challenges = hash_rlwe_zkpok_joint_challenges(
+                crs_coin,
+                session_id,
+                sender_id,
+                receiver_id,
+                ot_idx,
+                pk0,
+                t_crs,
+                &commitments,
+            );
             let mut in_bounds = 1u32;
             let mut log_ratio = 0i64;
             for rep in 0..RLWE_ZKPOK_REPS {
-                let (u_fake, zs_fake, ze_fake) = &fake[rep];
-                let u_real = challenges[rep] ^ u_fake;
-                let d_ntt = poly_from_chal20(u_real).to_ntt();
-                let mut ds_ntt = [0u16; RLWE_N];
-                let mut de_ntt = [0u16; RLWE_N];
+                let u_real = challenges[rep] ^ u_fakes[rep];
+                u_reals[rep] = u_real;
+                ds = mul_chal11_signed_ct(&s_signed, u_real);
+                de = mul_chal11_signed_ct(&e_signed, u_real);
+                let ys = &mut ys_masks[rep];
+                let ye = &mut ye_masks[rep];
                 for i in 0..RLWE_N {
-                    ds_ntt[i] = rlwe_mul(d_ntt.0[i], s_r_ntt.0[i]);
-                    de_ntt[i] = rlwe_mul(d_ntt.0[i], e1_ntt.0[i]);
+                    let dsi = i64::from(ds[i]);
+                    let dei = i64::from(de[i]);
+                    log_ratio += 2 * i64::from(ys[i]) * dsi + dsi * dsi;
+                    log_ratio += 2 * i64::from(ye[i]) * dei + dei * dei;
+                    ys[i] += ds[i];
+                    ye[i] += de[i];
+                    in_bounds &= ((i32::from(ys[i]) + 3070) as u32 < 6140) as u32;
+                    in_bounds &= ((i32::from(ye[i]) + 3070) as u32 < 6140) as u32;
                 }
-                let mut ds = center_small_mod_q(&RlwePolyNtt(ds_ntt).from_ntt());
-                let mut de = center_small_mod_q(&RlwePolyNtt(de_ntt).from_ntt());
-                wipe_u16s(&mut ds_ntt);
-                wipe_u16s(&mut de_ntt);
-                let (ys, ye) = &mut masks[rep];
-                for i in 0..RLWE_N {
-                    log_ratio += 2 * i64::from(ys[i]) * i64::from(ds[i]) + i64::from(ds[i]).pow(2);
-                    log_ratio += 2 * i64::from(ye[i]) * i64::from(de[i]) + i64::from(de[i]).pow(2);
-                    ys[i] += ds[i]; ye[i] += de[i];
-                    in_bounds &= (((ys[i] as i32 + 3070) as u32) < 6140) as u32;
-                    in_bounds &= (((ye[i] as i32 + 3070) as u32) < 6140) as u32;
-                }
-                let c_mask = 0u32.wrapping_sub(black_box(choice_bit as u32));
-                chal0[rep] = u_real ^ (c_mask & (u_real ^ u_fake));
-                chal1[rep] = u_fake ^ (c_mask & (u_fake ^ u_real));
-                z_s0[rep] = ct_select_i16_array(choice_bit, zs_fake, ys);
-                z_e0[rep] = ct_select_i16_array(choice_bit, ze_fake, ye);
-                z_s1[rep] = ct_select_i16_array(choice_bit, ys, zs_fake);
-                z_e1[rep] = ct_select_i16_array(choice_bit, ye, ze_fake);
-                qsag_asm::volatile_fill(&mut ds, 0);
-                qsag_asm::volatile_fill(&mut de, 0);
-            }
-            for (ys, ye) in &mut masks {
-                qsag_asm::volatile_fill(ys, 0); qsag_asm::volatile_fill(ye, 0);
-            }
-            for (u, zs, ze) in &mut fake {
-                qsag_asm::volatile_fill(core::slice::from_mut(u), 0);
-                qsag_asm::volatile_fill(zs, 0); qsag_asm::volatile_fill(ze, 0);
             }
             let accept = gaussian_accept(log_ratio, rng);
-            if black_box(in_bounds) == 1 && black_box(accept) { break; }
+            if black_box(in_bounds) == 1 && black_box(accept) {
+                break;
+            }
         }
 
-        wipe_u16s(&mut y_fake_ntt.0);
+        let c_mask = 0u32.wrapping_sub(black_box(choice_bit as u32));
+        for rep in 0..RLWE_ZKPOK_REPS {
+            let u_real = u_reals[rep];
+            let u_fake = u_fakes[rep];
+            chal0[rep] = u_real ^ (c_mask & (u_real ^ u_fake));
+            chal1[rep] = u_fake ^ (c_mask & (u_fake ^ u_real));
+            z_s0[rep] = ct_select_i16_array(choice_bit, &zs_fakes[rep], &ys_masks[rep]);
+            z_e0[rep] = ct_select_i16_array(choice_bit, &ze_fakes[rep], &ye_masks[rep]);
+            z_s1[rep] = ct_select_i16_array(choice_bit, &ys_masks[rep], &zs_fakes[rep]);
+            z_e1[rep] = ct_select_i16_array(choice_bit, &ye_masks[rep], &ze_fakes[rep]);
+        }
+
+        qsag_asm::volatile_fill(&mut s_signed, 0);
+        qsag_asm::volatile_fill(&mut e_signed, 0);
+        qsag_asm::volatile_fill(&mut ds, 0);
+        qsag_asm::volatile_fill(&mut de, 0);
+        qsag_asm::volatile_fill(&mut u_fakes, 0);
+        qsag_asm::volatile_fill(&mut u_reals, 0);
+        for rep in 0..RLWE_ZKPOK_REPS {
+            qsag_asm::volatile_fill(&mut zs_fakes[rep], 0);
+            qsag_asm::volatile_fill(&mut ze_fakes[rep], 0);
+            qsag_asm::volatile_fill(&mut ys_masks[rep], 0);
+            qsag_asm::volatile_fill(&mut ye_masks[rep], 0);
+            wipe_u16s(&mut w_fakes[rep].0);
+        }
         Self {
             chal0,
             chal1,
@@ -1159,7 +1257,9 @@ impl RlweReceiverZkPok {
         let y1 = pk0.add(t_crs);
         let mut commitments = Vec::with_capacity(RLWE_ZKPOK_REPS);
         for rep in 0..RLWE_ZKPOK_REPS {
-            if (self.chal0[rep] >> 20) != 0 || (self.chal1[rep] >> 20) != 0 {
+            if (self.chal0[rep] >> RLWE_ZKPOK_CHAL_BITS) != 0
+                || (self.chal1[rep] >> RLWE_ZKPOK_CHAL_BITS) != 0
+            {
                 return false;
             }
             for arr in [&self.z_s0[rep], &self.z_e0[rep], &self.z_s1[rep], &self.z_e1[rep]] {
@@ -1177,11 +1277,11 @@ impl RlweReceiverZkPok {
             let w0 = zs0_p
                 .mul_ntt(a_ntt)
                 .add(&ze0_p)
-                .sub(&mul_chal20_public(&y0, self.chal0[rep]));
+                .sub(&mul_chal11_public(&y0, self.chal0[rep]));
             let w1 = zs1_p
                 .mul_ntt(a_ntt)
                 .add(&ze1_p)
-                .sub(&mul_chal20_public(&y1, self.chal1[rep]));
+                .sub(&mul_chal11_public(&y1, self.chal1[rep]));
             commitments.push((w0, w1));
         }
         let challenges = hash_rlwe_zkpok_joint_challenges(crs_coin, session_id,
@@ -1509,11 +1609,8 @@ pub fn rlwe_ot_transfer(
     seed0: &[u8; 32],
     seed1: &[u8; 32],
     rng: &mut PartyPrivateRng,
-) -> RlweOtSenderMsg {
-    match try_rlwe_ot_transfer(session_id, sender_id, receiver_id, ot_idx, req, seed0, seed1, rng) {
-        Ok(message) => message,
-        Err(error) => panic!("rlwe_ot_transfer simulation failed: {error}"),
-    }
+) -> Result<RlweOtSenderMsg, PreprocessError> {
+    try_rlwe_ot_transfer(session_id, sender_id, receiver_id, ot_idx, req, seed0, seed1, rng)
 }
 
 fn rlwe_ot_decrypt_with_crs(
@@ -1806,9 +1903,17 @@ impl BaseOtCrsSenderRound0 {
 
 /// Wire message 1 of per-party OT-extension channel setup (`OT-Ext Sender -> OT-Ext Receiver`,
 /// containing `384` random-choice Ring-LWE Base-OT requests + OR-Sigma ZKPoKs).
+/// Number of 128-slot Multi-CRS Ring-LWE Base-OT blocks (`3 * 128 = 384` OTs, `3` OR-Sigma proofs).
+pub const RLWE_BASE_OT_BLOCKS: usize = 3;
+/// Number of independent CRS Ring-LWE OT slots packed per short Ring-LWE secret (`128`).
+pub const RLWE_BASE_OT_SLOTS_PER_BLOCK: usize = RLWE_BASE_OT_COUNT / RLWE_BASE_OT_BLOCKS;
+
 #[derive(Clone, Debug)]
 pub struct BaseOtRound1Msg {
-    pub reqs: Vec<RlweOtReceiverMsg>,
+    /// `384` Ring-LWE receiver public keys `pk0[m] = a_m * s_{m / 128} + e_m - b_m * t_m`.
+    pub pk0s: Vec<RlwePoly>,
+    /// `3` constant-time 13-rep OR-Sigma ZKPoKs on block anchors `(a_{128*blk}, t_{128*blk}, pk0[128*blk])`.
+    pub block_poks: Vec<RlweReceiverZkPok>,
 }
 
 /// Wire message 2 of per-party OT-extension channel setup (`OT-Ext Receiver -> OT-Ext Sender`,
@@ -1923,7 +2028,147 @@ fn commit_combiner_coin_share(
     )
 }
 
+// Bound additional proof workers across concurrent mesh bootstraps.
+#[cfg(any(test, feature = "std"))]
+static BASE_PROOF_WORKERS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+#[cfg(any(test, feature = "std"))]
+struct BaseProofWorkers { count: usize }
+#[cfg(any(test, feature = "std"))]
+impl BaseProofWorkers {
+    fn acquire(requested: usize) -> Self {
+        use core::sync::atomic::Ordering;
+        let mut current = BASE_PROOF_WORKERS.load(Ordering::Relaxed);
+        loop {
+            let count = requested.min(32usize.saturating_sub(current)).max(1);
+            match BASE_PROOF_WORKERS.compare_exchange_weak(current, current + count - 1,
+                Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return Self { count },
+                Err(value) => current = value,
+            }
+        }
+    }
+}
+#[cfg(any(test, feature = "std"))]
+impl Drop for BaseProofWorkers {
+    fn drop(&mut self) {
+        BASE_PROOF_WORKERS.fetch_sub(self.count - 1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 impl BaseOtExtSenderRound1 {
+    #[expect(clippy::too_many_arguments, reason = "Explicit block statement, role and randomness bindings")]
+    fn build_packed_block(
+        crs_coin: &[u8; 32],
+        session_id: &[u8; 32],
+        ext_sender_id: usize,
+        ext_receiver_id: usize,
+        blk: usize,
+        c_tilde_words: &[u64; RLWE_BASE_OT_WORDS],
+        rng: &mut PartyPrivateRng,
+    ) -> (Vec<RlweOtReceiverSecret>, Vec<RlwePoly>, RlweReceiverZkPok) {
+        let m0 = blk * RLWE_BASE_OT_SLOTS_PER_BLOCK;
+        let (mut s_blk, mut e0) = loop {
+            let mut s = RlwePoly::sample_ternary_eta1(rng);
+            let mut e = RlwePoly::sample_ternary_eta1(rng);
+            if black_box(bounded_ternary_witness(&s, &e)) {
+                break (s, e);
+            }
+            wipe_u16s(&mut s.0);
+            wipe_u16s(&mut e.0);
+        };
+        let mut s_blk_ntt = s_blk.to_ntt();
+        let a0_ntt = RlwePoly::from_crs_xof_with_coin(
+            crs_coin,
+            session_id,
+            ext_receiver_id,
+            ext_sender_id,
+            m0 as u32,
+            0,
+        )
+        .to_ntt();
+        let t0 = RlwePoly::from_crs_xof_with_coin(
+            crs_coin,
+            session_id,
+            ext_receiver_id,
+            ext_sender_id,
+            m0 as u32,
+            1,
+        );
+        let bit0 = ((c_tilde_words[m0 / 64] >> (m0 % 64)) & 1) == 1;
+        let rlwe0 = s_blk.mul_ntt(&a0_ntt).add(&e0);
+        let shifted0 = rlwe0.sub(&t0);
+        let pk0_0 = RlwePoly::ct_select(bit0, &shifted0, &rlwe0);
+        let pok = RlweReceiverZkPok::prove_ct(
+            crs_coin,
+            session_id,
+            ext_receiver_id,
+            ext_sender_id,
+            m0 as u32,
+            &a0_ntt,
+            &t0,
+            &pk0_0,
+            &s_blk,
+            &e0,
+            bit0,
+            rng,
+        );
+        wipe_u16s(&mut e0.0);
+
+        let mut secs = Vec::with_capacity(RLWE_BASE_OT_SLOTS_PER_BLOCK);
+        let mut pk0s = Vec::with_capacity(RLWE_BASE_OT_SLOTS_PER_BLOCK);
+        secs.push(RlweOtReceiverSecret {
+            crs_coin: *crs_coin,
+            session_id: *session_id,
+            sender_id: ext_receiver_id,
+            receiver_id: ext_sender_id,
+            ot_idx: m0 as u32,
+            pk0: pk0_0,
+            s_r: s_blk,
+            choice_bit: bit0,
+        });
+        pk0s.push(pk0_0);
+
+        for slot in 1..RLWE_BASE_OT_SLOTS_PER_BLOCK {
+            let m = m0 + slot;
+            let bit_m = ((c_tilde_words[m / 64] >> (m % 64)) & 1) == 1;
+            let a_m = RlwePoly::from_crs_xof_with_coin(
+                crs_coin,
+                session_id,
+                ext_receiver_id,
+                ext_sender_id,
+                m as u32,
+                0,
+            );
+            let t_m = RlwePoly::from_crs_xof_with_coin(
+                crs_coin,
+                session_id,
+                ext_receiver_id,
+                ext_sender_id,
+                m as u32,
+                1,
+            );
+            let mut e_m = RlwePoly::sample_ternary_eta1(rng);
+            let rlwe_m = a_m.mul_ntt(&s_blk_ntt).add(&e_m);
+            wipe_u16s(&mut e_m.0);
+            let shifted_m = rlwe_m.sub(&t_m);
+            let pk0_m = RlwePoly::ct_select(bit_m, &shifted_m, &rlwe_m);
+            secs.push(RlweOtReceiverSecret {
+                crs_coin: *crs_coin,
+                session_id: *session_id,
+                sender_id: ext_receiver_id,
+                receiver_id: ext_sender_id,
+                ot_idx: m as u32,
+                pk0: pk0_m,
+                s_r: s_blk,
+                choice_bit: bit_m,
+            });
+            pk0s.push(pk0_m);
+        }
+        wipe_u16s(&mut s_blk_ntt.0);
+        wipe_u16s(&mut s_blk.0);
+        (secs, pk0s, pok)
+    }
+
     /// Step 1 (`OT-Ext Sender` local) bound to a jointly committed CRS coin `crs_coin`.
     pub fn start_with_crs(
         crs_coin: [u8; 32],
@@ -1936,40 +2181,76 @@ impl BaseOtExtSenderRound1 {
         for w in &mut c_tilde_words {
             *w = sender_rng.next_u64();
         }
-        let a_ntt = RlwePoly::from_crs_xof_with_coin(
-            &crs_coin,
-            &session_id,
-            ext_receiver_id,
-            ext_sender_id,
-            0,
-            0,
-        )
-        .to_ntt();
         let mut sec_states = Vec::with_capacity(RLWE_BASE_OT_COUNT);
-        let mut reqs = Vec::with_capacity(RLWE_BASE_OT_COUNT);
-        for m in 0..RLWE_BASE_OT_COUNT {
-            let bit = ((c_tilde_words[m / 64] >> (m % 64)) & 1) == 1;
-            let t_crs = RlwePoly::from_crs_xof_with_coin(
+        let mut pk0s = Vec::with_capacity(RLWE_BASE_OT_COUNT);
+        let mut block_poks = Vec::with_capacity(RLWE_BASE_OT_BLOCKS);
+
+        #[cfg(any(test, feature = "std"))]
+        {
+            let mut jobs: Vec<_> = (0..RLWE_BASE_OT_BLOCKS)
+                .map(|blk| {
+                    (
+                        blk,
+                        PartyPrivateRng::from_seed(
+                            sender_rng.next_bytes32(),
+                            b"QSAG.BASE_OT.PROOF/v2",
+                        ),
+                    )
+                })
+                .collect();
+            let requested = std::thread::available_parallelism()
+                .map_or(1, usize::from)
+                .min(RLWE_BASE_OT_BLOCKS);
+            let budget = BaseProofWorkers::acquire(requested);
+            let chunk_size = jobs.len().div_ceil(budget.count);
+            let results = std::thread::scope(|scope| {
+                let words = &c_tilde_words;
+                let handles: Vec<_> = jobs
+                    .chunks_mut(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            chunk
+                                .iter_mut()
+                                .map(|(blk, rng)| {
+                                    Self::build_packed_block(
+                                        &crs_coin,
+                                        &session_id,
+                                        ext_sender_id,
+                                        ext_receiver_id,
+                                        *blk,
+                                        words,
+                                        rng,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .flat_map(|h| h.join().expect("base proof worker failed"))
+                    .collect::<Vec<_>>()
+            });
+            for (secs, pks, pok) in results {
+                sec_states.extend(secs);
+                pk0s.extend(pks);
+                block_poks.push(pok);
+            }
+        }
+        #[cfg(not(any(test, feature = "std")))]
+        for blk in 0..RLWE_BASE_OT_BLOCKS {
+            let (secs, pks, pok) = Self::build_packed_block(
                 &crs_coin,
                 &session_id,
-                ext_receiver_id,
                 ext_sender_id,
-                m as u32,
-                1,
-            );
-            let (sec, msg) = rlwe_ot_choose_with_crs(
-                &crs_coin,
-                &session_id,
                 ext_receiver_id,
-                ext_sender_id,
-                m as u32,
-                &a_ntt,
-                &t_crs,
-                bit,
+                blk,
+                &c_tilde_words,
                 sender_rng,
             );
-            sec_states.push(sec);
-            reqs.push(msg);
+            sec_states.extend(secs);
+            pk0s.extend(pks);
+            block_poks.push(pok);
         }
         (
             Self {
@@ -1980,12 +2261,12 @@ impl BaseOtExtSenderRound1 {
                 c_tilde_words,
                 sec_states,
             },
-            BaseOtRound1Msg { reqs },
+            BaseOtRound1Msg { pk0s, block_poks },
         )
     }
 
     /// Step 1 (`OT-Ext Sender` local): sample 384 random Base-OT choice bits $\tilde{\mathbf{c}}$
-    /// using ONLY `sender_rng` and emit `BaseOtRound1Msg` (including 384 OR-Sigma ZKPoKs).
+    /// using ONLY `sender_rng` and emit `BaseOtRound1Msg` (3 packed 128-slot blocks with OR-Sigma ZKPoKs).
     pub fn start(
         session_id: [u8; 32],
         ext_sender_id: usize,
@@ -2010,18 +2291,18 @@ impl BaseOtExtSenderRound1 {
                 ot_idx: 0,
             });
         }
-        let a_ntt = RlwePoly::from_crs_xof_with_coin(
-            &self.crs_coin,
-            &self.session_id,
-            self.ext_receiver_id,
-            self.ext_sender_id,
-            0,
-            0,
-        )
-        .to_ntt();
         let mut base_seeds = vec![[0u8; 32]; RLWE_BASE_OT_COUNT];
         let mut all_ok = 1u8;
         for (m, base_seeds_m_item) in base_seeds[..RLWE_BASE_OT_COUNT].iter_mut().enumerate() {
+            let a_ntt = RlwePoly::from_crs_xof_with_coin(
+                &self.crs_coin,
+                &self.session_id,
+                self.ext_receiver_id,
+                self.ext_sender_id,
+                m as u32,
+                0,
+            )
+            .to_ntt();
             let t_crs = RlwePoly::from_crs_xof_with_coin(
                 &self.crs_coin,
                 &self.session_id,
@@ -2087,8 +2368,9 @@ impl BaseOtRound2Msg {
 }
 
 impl BaseOtExtReceiverRound2 {
-    /// Step 2 (`OT-Ext Receiver` local) bound to jointly committed `crs_coin`: verifies all 384
-    /// Receiver OR-Sigma ZKPoKs (`BaseOtReceiverProofFailed` on tamper!) before FO-encrypting seeds.
+    /// Step 2 (`OT-Ext Receiver` local) bound to jointly committed `crs_coin`: verifies all 3
+    /// block Receiver OR-Sigma ZKPoKs (`BaseOtReceiverProofFailed` on tamper!) before FO-encrypting
+    /// all 384 seed pairs under per-slot `(a_m, t_m)` (`PVW08` lossy-branch security on every slot).
     pub fn respond_with_crs(
         crs_coin: [u8; 32],
         session_id: [u8; 32],
@@ -2097,27 +2379,64 @@ impl BaseOtExtReceiverRound2 {
         msg1: &BaseOtRound1Msg,
         receiver_rng: &mut PartyPrivateRng,
     ) -> Result<(Self, BaseOtRound2Msg), PreprocessError> {
-        if msg1.reqs.len() != RLWE_BASE_OT_COUNT {
+        if msg1.pk0s.len() != RLWE_BASE_OT_COUNT || msg1.block_poks.len() != RLWE_BASE_OT_BLOCKS {
             return Err(PreprocessError::BaseOtFoCheckFailed {
                 sender_id: ext_receiver_id,
                 receiver_id: ext_sender_id,
                 ot_idx: 0,
             });
         }
-        let a_ntt = RlwePoly::from_crs_xof_with_coin(
-            &crs_coin,
-            &session_id,
-            ext_receiver_id,
-            ext_sender_id,
-            0,
-            0,
-        )
-        .to_ntt();
+        for blk in 0..RLWE_BASE_OT_BLOCKS {
+            let m0 = (blk * RLWE_BASE_OT_SLOTS_PER_BLOCK) as u32;
+            let a0_ntt = RlwePoly::from_crs_xof_with_coin(
+                &crs_coin,
+                &session_id,
+                ext_receiver_id,
+                ext_sender_id,
+                m0,
+                0,
+            )
+            .to_ntt();
+            let t0 = RlwePoly::from_crs_xof_with_coin(
+                &crs_coin,
+                &session_id,
+                ext_receiver_id,
+                ext_sender_id,
+                m0,
+                1,
+            );
+            if !msg1.block_poks[blk].verify(
+                &crs_coin,
+                &session_id,
+                ext_receiver_id,
+                ext_sender_id,
+                m0,
+                &a0_ntt,
+                &t0,
+                &msg1.pk0s[m0 as usize],
+            ) {
+                return Err(PreprocessError::BaseOtReceiverProofFailed {
+                    sender_id: ext_receiver_id,
+                    receiver_id: ext_sender_id,
+                });
+            }
+        }
         let mut base_seed_pairs = Vec::with_capacity(RLWE_BASE_OT_COUNT);
         let mut resps = Vec::with_capacity(RLWE_BASE_OT_COUNT);
-        for (m, req) in msg1.reqs.iter().enumerate() {
-            let mut s0 = receiver_rng.next_bytes32();
-            let mut s1 = receiver_rng.next_bytes32();
+        for (m, pk0) in msg1.pk0s.iter().enumerate() {
+            let s0 = receiver_rng.next_bytes32();
+            let s1 = receiver_rng.next_bytes32();
+            let mut rho0 = receiver_rng.next_bytes32();
+            let mut rho1 = receiver_rng.next_bytes32();
+            let a_ntt = RlwePoly::from_crs_xof_with_coin(
+                &crs_coin,
+                &session_id,
+                ext_receiver_id,
+                ext_sender_id,
+                m as u32,
+                0,
+            )
+            .to_ntt();
             let t_crs = RlwePoly::from_crs_xof_with_coin(
                 &crs_coin,
                 &session_id,
@@ -2126,33 +2445,35 @@ impl BaseOtExtReceiverRound2 {
                 m as u32,
                 1,
             );
-            match try_rlwe_ot_transfer_with_crs(
+            let pk1 = pk0.add(&t_crs);
+            let (u0, v0) = rlwe_fo_encrypt_branch(
                 &crs_coin,
                 &session_id,
                 ext_receiver_id,
                 ext_sender_id,
                 m as u32,
+                0,
                 &a_ntt,
-                &t_crs,
-                req,
+                pk0,
                 &s0,
+                &rho0,
+            );
+            let (u1, v1) = rlwe_fo_encrypt_branch(
+                &crs_coin,
+                &session_id,
+                ext_receiver_id,
+                ext_sender_id,
+                m as u32,
+                1,
+                &a_ntt,
+                &pk1,
                 &s1,
-                receiver_rng,
-            ) {
-                Ok(resp) => {
-                    base_seed_pairs.push((s0, s1));
-                    resps.push(resp);
-                }
-                Err(e) => {
-                    wipe_bytes32(&mut s0);
-                    wipe_bytes32(&mut s1);
-                    for (p0, p1) in &mut base_seed_pairs {
-                        wipe_bytes32(p0);
-                        wipe_bytes32(p1);
-                    }
-                    return Err(e);
-                }
-            }
+                &rho1,
+            );
+            wipe_bytes32(&mut rho0);
+            wipe_bytes32(&mut rho1);
+            base_seed_pairs.push((s0, s1));
+            resps.push(RlweOtSenderMsg { u0, v0, u1, v1 });
         }
         let my_coin_share = receiver_rng.next_bytes32();
         let combiner_prf_seed = receiver_rng.next_bytes32();
@@ -2497,10 +2818,9 @@ pub fn try_establish_rlwe_ot_ext_channel(
 
 /// Ideal base-OT functionality for unit tests of the OT extension and its
 /// consumers. Production never compiles this constructor. Base proofs, FO,
-/// committed CRS and KOS attacks have separate default regressions; the complete
-/// 384-transfer bootstrap has an explicit integration soak test.
+/// committed CRS and KOS attacks also have a real default end-to-end regression.
 #[cfg(test)]
-fn ideal_ot_ext_channel_for_test(
+fn establish_ideal_ot_ext_channel_for_test(
     session_id: [u8; 32], sender_id: usize, receiver_id: usize,
     sender_rng: &mut PartyPrivateRng, receiver_rng: &mut PartyPrivateRng,
 ) -> (OtExtSenderChannel, OtExtReceiverChannel) {
@@ -2514,23 +2834,12 @@ fn ideal_ot_ext_channel_for_test(
         combined_seed_pairs: pairs, batch_ctr: 0 })
 }
 
-/// Honest-simulation wrapper around [`try_establish_rlwe_ot_ext_channel`].
-/// Unit-test builds use ideal base-OT correlations; the full bootstrap is tested
-/// separately through the fallible entrypoint.
+/// Fallible full-protocol bootstrap; identical in production and test builds.
 pub fn establish_rlwe_ot_ext_channel(
-    session_id: [u8; 32],
-    sender_id: usize,
-    receiver_id: usize,
-    sender_rng: &mut PartyPrivateRng,
-    receiver_rng: &mut PartyPrivateRng,
-) -> (OtExtSenderChannel, OtExtReceiverChannel) {
-    #[cfg(test)]
-    return ideal_ot_ext_channel_for_test(session_id, sender_id, receiver_id, sender_rng, receiver_rng);
-    #[cfg(not(test))]
-    match try_establish_rlwe_ot_ext_channel(session_id, sender_id, receiver_id, sender_rng, receiver_rng) {
-        Ok(channels) => channels,
-        Err(error) => panic!("base-OT simulation failed: {error}"),
-    }
+    session_id: [u8; 32], sender_id: usize, receiver_id: usize,
+    sender_rng: &mut PartyPrivateRng, receiver_rng: &mut PartyPrivateRng,
+) -> Result<(OtExtSenderChannel, OtExtReceiverChannel), PreprocessError> {
+    try_establish_rlwe_ot_ext_channel(session_id, sender_id, receiver_id, sender_rng, receiver_rng)
 }
 
 /// Interactive KOS OT-Extension Message 1 (`OT Receiver -> OT Sender`: locks `128` parity-combined
@@ -3107,19 +3416,17 @@ impl OtMesh {
         })
     }
 
-    /// Convenience constructor for honest multi-party orchestration.
-    /// Unit-test builds use ideal independent base-OT seed correlations, so
-    /// downstream security regressions do not repeat the full bootstrap soak.
-    pub fn establish(session_id: [u8; 32], party_rngs: &mut [PartyPrivateRng]) -> Self {
-        #[cfg(test)]
-        return Self::try_establish_with(session_id, party_rngs, |sid, i, j, sender, receiver| {
-            Ok(ideal_ot_ext_channel_for_test(sid, i, j, sender, receiver))
-        }).expect("ideal base-OT unit-test mesh");
-        #[cfg(not(test))]
-        match Self::try_establish(session_id, party_rngs) {
-            Ok(mesh) => mesh,
-            Err(error) => panic!("OT mesh simulation failed: {error}"),
-        }
+    /// Explicit ideal base OT for fast tests of downstream protocols.
+    #[cfg(test)]
+    pub(crate) fn establish_ideal_for_test(session_id: [u8; 32], party_rngs: &mut [PartyPrivateRng]) -> Self {
+        Self::try_establish_with(session_id, party_rngs, |sid, i, j, sender, receiver| {
+            Ok(establish_ideal_ot_ext_channel_for_test(sid, i, j, sender, receiver))
+        }).expect("ideal base-OT unit-test mesh")
+    }
+
+    /// Fallible real-protocol convenience constructor.
+    pub fn establish(session_id: [u8; 32], party_rngs: &mut [PartyPrivateRng]) -> Result<Self, PreprocessError> {
+        Self::try_establish(session_id, party_rngs)
     }
 
     /// Execute an interactive 3-message KOS correlated OT batch from `sender_id` to `receiver_id`
@@ -4261,10 +4568,15 @@ fn checked_boolean_product_with_hook<F: FnMut(&mut [Vec<BitslicedGf256x64>])>(
                         let triple = &vaults[p].triples[k];
                         bs_gf256_xor_assign(&mut inputs[p][2*k], &triple.a);
                         bs_gf256_xor_assign(&mut inputs[p][2*k+1], &triple.b);
-                        for lane in 0..2 { for bit in 0..64 {
-                            macs[p][2*k][lane][bit] = macs[p][2*k][lane][bit].add(triple.a_mac[lane][bit]);
-                            macs[p][2*k+1][lane][bit] = macs[p][2*k+1][lane][bit].add(triple.b_mac[lane][bit]);
-                        }}
+                        for (word, triple_mac) in macs[p][2*k..2*k+2]
+                            .iter_mut().zip([&triple.a_mac, &triple.b_mac])
+                        {
+                            for (lane, triple_lane) in word.iter_mut().zip(triple_mac) {
+                                for (value, &mask) in lane.iter_mut().zip(triple_lane) {
+                                    *value = value.add(mask);
+                                }
+                            }
+                        }
                     }
                 }
                 fault(&mut inputs);
@@ -5032,6 +5344,7 @@ pub fn spdz_authenticate_bs_gf256_words(
     //    `64 * num_words` elements with random `Tower128` weights `chi_{k, bit}`:
     let mut z_sh = vec![Tower128::ZERO; n];
     let mut z_mac = vec![[Tower128::ZERO; 2]; n];
+    #[expect(clippy::needless_range_loop, reason = "Coordinate order binds the same lane across all party MAC matrices")]
     for b_idx in 0..16 {
         let basis = Tower128(1u128 << (8 * b_idx));
         for p in 0..n {
@@ -5042,6 +5355,7 @@ pub fn spdz_authenticate_bs_gf256_words(
         }
     }
     // Also fold lanes `16..64` of `r_chk_sh` so all 64 lanes of `r_chk_sh` are bound
+    #[expect(clippy::needless_range_loop, reason = "Coordinate order binds the same lane across all party MAC matrices")]
     for bit in 16..64 {
         let mut cb = [0u8; 16];
         chk_xof.squeeze(&mut cb);
@@ -5054,6 +5368,7 @@ pub fn spdz_authenticate_bs_gf256_words(
         }
     }
     for k in 0..num_words {
+        #[expect(clippy::needless_range_loop, reason = "Coordinate order binds the same lane across all party MAC matrices")]
         for bit in 0..64 {
             let mut cb = [0u8; 16];
             chk_xof.squeeze(&mut cb);
@@ -5325,7 +5640,7 @@ pub fn commit_and_open_spdz_bs_gf256_batch_quorum(
 
     let mut opened = Vec::with_capacity(batch_len);
     let mut dig_xof = Cshake256Xof::new(b"QSAG.SPDZ.BS64.BATCH.DIG/v1");
-    for w in 0..batch_len {
+    for (w, _) in batch_shares[0].iter().enumerate() {
         let mut sec = [0u64; 8];
         for q in 0..t {
             lambda0_mats[q].scale_xor_into(&mut sec, &batch_shares[q][w]);
@@ -9182,10 +9497,10 @@ fn authenticate_tower128_batch(
 
     for i in 0..n {
         for k in 0..count {
-            for lane in 0..2 {
+            for (lane, alpha) in alphas[i].iter().enumerate() {
                 let m = party_rngs[i].next_tower128();
                 out[i][k].keys[i][lane] = m;
-                out[i][k].macs[i][lane] = m.add(alphas[i][lane].mul(vals_per_party[i][k]));
+                out[i][k].macs[i][lane] = m.add(alpha.mul(vals_per_party[i][k]));
             }
         }
         for j in 0..n {
@@ -9897,8 +10212,7 @@ impl PcgSeedExpansion {
             // Commit-before-open `[W_{sac_lane}]` with full 2-lane BDOZ MAC verification and assert `W_{sac_lane} == 0`!
             let mut w_shares: Vec<PcgAuthTower128Share> =
                 (0..n).map(|p| vaults[p].companion_c_sums[sac_lane].clone()).collect();
-            #[expect(clippy::needless_range_loop, reason = "One index selects matching shares from every party vault")]
-            for k in 0..vaults[0].bool_triple_words.len() {
+            for (k, _) in vaults[0].bool_triple_words.iter().enumerate() {
                 for bit in 0..64 {
                     let ell = 64 * k + bit;
                     let off = (ell * 2 + sac_lane) * 16;
@@ -10006,9 +10320,9 @@ fn open_and_verify_pcg_tower128(
     for p in 0..n {
         sum = sum.add(shares[p].value);
         for verifier_q in 0..n {
-            for lane in 0..2 {
+            for (lane, alpha) in alphas[verifier_q].iter().enumerate() {
                 let lhs = shares[p].macs[verifier_q][lane].add(shares[verifier_q].keys[p][lane]);
-                let rhs = alphas[verifier_q][lane].mul(shares[p].value);
+                let rhs = alpha.mul(shares[p].value);
                 if !lhs.ct_eq(rhs) {
                     return Err(PreprocessError::MacCheckFailed {
                         phase,
@@ -10696,7 +11010,7 @@ mod tests {
     fn dense_active_three_party_product() {
         let sid = [0x19; 32];
         let mut rngs: Vec<_> = (0..3).map(|i| PartyPrivateRng::from_seed([i+1; 32], b"dense-active-test")).collect();
-        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
         let a = vec![vec![0x123456789abcdef0], vec![0xdeadbeefcafebabe], vec![0x33335555ffff0000]];
         let b = vec![vec![0x12340000ffff9876], vec![0x5555aaaa12344321], vec![0x777788889999aaaa]];
         let c = checked_boolean_product(&sid, &a, &b, &mut mesh, &mut rngs).unwrap();
@@ -10773,7 +11087,7 @@ mod tests {
         let _ = crs_s0_ok_sh;
         // Exercise KOS with ideal base OTs; the full bootstrap has a separate soak.
         let (mut s_chan, mut r_chan) =
-            ideal_ot_ext_channel_for_test(sid, 0, 1, &mut rng_s, &mut rng_r);
+            establish_ideal_ot_ext_channel_for_test(sid, 0, 1, &mut rng_s, &mut rng_r);
         let _ = (r_crs_coin, good_crs_open);
 
         let choices = [0xCAFE_BABE_1234_5678u64];
@@ -10792,7 +11106,7 @@ mod tests {
         let mut rng_s = PartyPrivateRng::from_seed([0x31; 32], b"kos-s");
         let mut rng_r = PartyPrivateRng::from_seed([0x32; 32], b"kos-r");
         let (mut s_chan, mut r_chan) =
-            establish_rlwe_ot_ext_channel([0x55; 32], 0, 1, &mut rng_s, &mut rng_r);
+            establish_ideal_ot_ext_channel_for_test([0x55; 32], 0, 1, &mut rng_s, &mut rng_r);
         let choices = [0xDEAD_BEEF_CAFE_BABEu64, 0x0123_4567_89AB_CDEFu64];
 
         let (pend_r, u_msg) = r_chan.round1_send_u_cols(&choices, &mut rng_r);
@@ -10841,7 +11155,7 @@ mod tests {
         let sid = [0x99; 32];
         let n = 2usize;
         let mut rngs = make_party_rngs(n, 0x71);
-        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
 
         let seeds = PcgSeedExpansion::setup_seeds(sid, 14, &mut mesh, &mut rngs).unwrap();
         for s in &seeds {
@@ -10906,7 +11220,7 @@ mod tests {
         let n = 4usize;
         let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
         let mut rngs = make_party_rngs(n, 0x40);
-        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
 
         // `[P0-10]` regression guard: zero or duplicate `eval_point` at index `>= t` MUST be rejected!
         let mut bad_pts_zero = pts.clone();
@@ -11049,7 +11363,7 @@ mod tests {
         F: FnMut(usize, &mut [BitslicedGf256x64], &mut [BitslicedGf256x64]),
     {
         let mut rngs = make_party_rngs(pts.len(), rng_tag);
-        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
         let (alpha_contribs, alpha_shamir) = spdz_setup_alpha_gf256(&sid, t, pts, &mut rngs)?;
         run_dealerless_pi_triple_f2_with_alpha_and_fault(
             sid,
@@ -11232,7 +11546,7 @@ mod tests {
         let n = 4usize;
         let pts: Vec<Goldilocks> = (1..=n as u64).map(Goldilocks::from_u64_reduced).collect();
         let mut rngs = make_party_rngs(n, 0x60);
-        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
 
         let mut vaults =
             run_dealerless_pi_pow7(sid, t, &pts, 2, 2, 1, &mut mesh, &mut rngs).unwrap();
@@ -11332,6 +11646,44 @@ mod tests {
 #[cfg(test)]
 mod hardening_regressions {
     #[test]
+    fn test_negacyclic_ntt_matches_schoolbook_exact() {
+        // Independent integer convolution, including wraparound signs, checks
+        // every coefficient rather than an evaluation or a digest of the result.
+        let mut rng = PartyPrivateRng::from_seed([0x97; 32], b"ntt-differential");
+        for case in 0..12 {
+            let mut a = RlwePoly::ZERO;
+            let mut b = RlwePoly::ZERO;
+            for (x, y) in a.0.iter_mut().zip(&mut b.0) {
+                *x = (rng.next_u64() % u64::from(RLWE_Q)) as u16;
+                *y = (rng.next_u64() % u64::from(RLWE_Q)) as u16;
+            }
+            match case {
+                0 => a.0.fill(0),
+                1 => { a.0.fill(0); a.0[0] = 1; }
+                2 => { a.0.fill(0); a.0[RLWE_N - 1] = 1; }
+                3 => { a.0.fill(RLWE_Q - 1); b.0.fill(RLWE_Q - 1); }
+                _ => {}
+            }
+            let mut convolution = [0i64; RLWE_N];
+            for (i, &x) in a.0.iter().enumerate() {
+                for (j, &y) in b.0.iter().enumerate() {
+                    let product = i64::from(x) * i64::from(y);
+                    if i + j < RLWE_N {
+                        convolution[i + j] += product;
+                    } else {
+                        convolution[i + j - RLWE_N] -= product;
+                    }
+                }
+            }
+            let expected = RlwePoly(convolution.map(|x| x.rem_euclid(i64::from(RLWE_Q)) as u16));
+            assert_eq!(a.mul_negacyclic(&b), expected, "case {case}");
+            let cached = a.to_ntt();
+            assert_eq!(b.mul_ntt(&cached), expected, "cached case {case}");
+            assert_eq!(cached.from_ntt(), a, "round trip case {case}");
+        }
+    }
+
+    #[test]
     fn gaussian_witness_energy_rejects_overweight_and_nonternary_inputs() {
         let s = RlwePoly([1; RLWE_N]);
         let mut e = RlwePoly([0; RLWE_N]);
@@ -11362,13 +11714,24 @@ mod hardening_regressions {
             for _ in 0..8 {
                 let expected: [i16; RLWE_N] = core::array::from_fn(|_| loop {
                     let mut coins = [0; 26];
-                    reference.fill_bytes(&mut coins);
+                    reference.fill_bytes(&mut coins[..10]);
                     let proposal = u16::from_le_bytes([coins[0], coins[1]]) & 0x1fff;
                     let valid = proposal < 2 * half as u16;
                     let x = (proposal & 0u16.wrapping_sub(u16::from(valid))) as i16 - half;
-                    let probability = gaussian_exp_probability::<24>((i64::from(x) * i64::from(x)) as u64);
-                    let random = core::array::from_fn(|i| u64::from_le_bytes(
-                        core::array::from_fn(|j| coins[2 + 8*i + j])));
+                    let exponent = (i64::from(x) * i64::from(x)) as u64;
+                    let probability = gaussian_exp_probability::<24>(exponent);
+                    let high = u64::from_le_bytes(core::array::from_fn(|j| coins[2 + j]));
+                    if u128::from(high) >= gaussian_exp_upper_bound(exponent) {
+                        // Even all-zero lower limbs cannot accept this proposal.
+                        assert!(!gaussian_fraction_lt([0, 0, high], probability));
+                        continue;
+                    }
+                    reference.fill_bytes(&mut coins[10..]);
+                    let random = [
+                        u64::from_le_bytes(core::array::from_fn(|j| coins[10 + j])),
+                        u64::from_le_bytes(core::array::from_fn(|j| coins[18 + j])),
+                        high,
+                    ];
                     if gaussian_fraction_lt(random, probability) & valid { break x; }
                 });
                 assert_eq!(sample_gaussian_box(&mut fast, response), expected);
@@ -11421,8 +11784,7 @@ mod hardening_regressions {
     }
 
     #[test]
-    #[ignore = "Full 384-transfer bootstrap soak; proof, FO, CRS and KOS regressions run by default"]
-    fn full_base_ot_bootstrap_soak() {
+    fn test_real_rlwe_base_ot_bootstrap_end_to_end() {
         let mut sender = PartyPrivateRng::from_seed([0x31; 32], b"bootstrap-soak");
         let mut receiver = PartyPrivateRng::from_seed([0x32; 32], b"bootstrap-soak");
         let (mut send, mut recv) = try_establish_rlwe_ot_ext_channel(
