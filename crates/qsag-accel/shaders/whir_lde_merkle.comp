@@ -1,0 +1,754 @@
+#version 460
+#extension GL_ARB_gpu_shader_int64 : require
+
+// Certified SPIR-V 1.5 compute kernel for `ProverKernelSlot::WhirLdeCommitment`.
+// VRAM-resident Mobius basis conversion, 4-way coset-decomposed base-field Reed-Solomon LDE,
+// intermediate-stage `Ext4` overflow LDE, Canopy `cSHAKE256` Merkle leaf + internal layer
+// reductions, and selective Steiner multi-proof + fiber gathering.
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) buffer Buf0 { uint64_t words[]; } b0;
+layout(std430, set = 0, binding = 1) buffer Buf1 { uint64_t words[]; } b1;
+layout(std430, set = 0, binding = 2) buffer Buf2 { uint64_t words[]; } b2;
+layout(std430, set = 0, binding = 3) buffer Buf3 { uint64_t words[]; } b3;
+layout(std430, set = 0, binding = 4) buffer Buf4 { uint64_t words[]; } b4;
+layout(std430, set = 0, binding = 5) buffer Buf5 { uint64_t words[]; } b5;
+
+layout(push_constant) uniform PushConsts {
+    uint64_t scalar0;
+    uint64_t scalar1;
+    uint64_t scalar2;
+    uint64_t scalar3;
+    uint     mode;
+    uint     len;
+    uint     aux0;
+    uint     aux1;
+    uint     aux2;
+    uint     aux3;
+    uint     aux4;
+    uint     aux5;
+} pc;
+
+const uint64_t GL_P   = 0xFFFFFFFF00000001ul;
+const uint64_t GL_EPS = 0xFFFFFFFFul;
+
+const uint64_t KECCAK_RC[24] = uint64_t[24](
+    0x0000000000000001ul, 0x0000000000008082ul, 0x800000000000808aul, 0x8000000080008000ul,
+    0x000000000000808bul, 0x0000000080000001ul, 0x8000000080008081ul, 0x8000000000008009ul,
+    0x000000000000008aul, 0x0000000000000088ul, 0x0000000080008009ul, 0x000000008000000aul,
+    0x000000008000808bul, 0x800000000000008bul, 0x8000000000008089ul, 0x8000000000008003ul,
+    0x8000000000008002ul, 0x8000000000000080ul, 0x000000000000800aul, 0x800000008000000aul,
+    0x8000000080008081ul, 0x8000000000008080ul, 0x0000000080000001ul, 0x8000000080008008ul
+);
+
+const uint KECCAK_RHO[24] = uint[24](
+    1u, 3u, 6u, 10u, 15u, 21u, 28u, 36u, 45u, 55u, 2u, 14u,
+    27u, 41u, 56u, 8u, 25u, 43u, 62u, 18u, 39u, 61u, 20u, 44u
+);
+
+const uint KECCAK_PI[24] = uint[24](
+    10u, 7u, 11u, 17u, 18u, 3u, 5u, 16u, 8u, 21u, 24u, 4u,
+    15u, 23u, 19u, 13u, 12u, 2u, 20u, 14u, 22u, 9u, 6u, 1u
+);
+
+// Precomputed post-prefix `cSHAKE256` midstate for `b"QSAG.PCS.CANOPY/v2"`.
+const uint64_t CANOPY_MID[25] = uint64_t[25](
+    0xEC954FC7C2FC5381ul, 0x36020892BCB1E761ul, 0x748DC5BCEA037DD5ul, 0xFC481597CF683315ul,
+    0x2EC2F3F44F0D3969ul, 0x9C0DFC53513C2627ul, 0x5415C0EDFFCD33B8ul, 0x403107F0FC877484ul,
+    0x798D84E67C6DAFA6ul, 0x6E6EA3127D335E8Eul, 0x5606EA8555392F99ul, 0xD3BAC257BBE1D044ul,
+    0x1E5C61027D60223Cul, 0x48C4972C4005A2DEul, 0xE62560E08EBDD299ul, 0xA3C6CE028DFF6B56ul,
+    0x14E16D5699388C63ul, 0x8D68335C54A43AE4ul, 0x74A909E5002C19F7ul, 0x48A12FAC4EEC8F3Dul,
+    0x797C9923EA11DFB5ul, 0x2121D5B260157781ul, 0x704AA293B550C49Aul, 0xDDCB710A40908D75ul,
+    0x856C96F5DC9851AAul
+);
+
+// Bank-conflict-free 16 KiB LDS supporting both `512` `u64`s and `512` `Ext4`s.
+shared uint s_lds[8][512];
+
+uint lds_index(uint i) {
+    return i ^ (((i >> 5u) & 1u) * 31u);
+}
+
+uint64_t lds_u64_load(uint i) {
+    uint a = lds_index(i);
+    return uint64_t(s_lds[0][a]) | (uint64_t(s_lds[1][a]) << 32u);
+}
+
+void lds_u64_store(uint i, uint64_t v) {
+    uint a = lds_index(i);
+    s_lds[0][a] = uint(v);
+    s_lds[1][a] = uint(v >> 32u);
+}
+
+u64vec4 lds_ext4_load(uint i) {
+    uint a = lds_index(i);
+    return u64vec4(
+        uint64_t(s_lds[0][a]) | (uint64_t(s_lds[1][a]) << 32u),
+        uint64_t(s_lds[2][a]) | (uint64_t(s_lds[3][a]) << 32u),
+        uint64_t(s_lds[4][a]) | (uint64_t(s_lds[5][a]) << 32u),
+        uint64_t(s_lds[6][a]) | (uint64_t(s_lds[7][a]) << 32u)
+    );
+}
+
+void lds_ext4_store(uint i, u64vec4 v) {
+    uint a = lds_index(i);
+    s_lds[0][a] = uint(v.x);
+    s_lds[1][a] = uint(v.x >> 32u);
+    s_lds[2][a] = uint(v.y);
+    s_lds[3][a] = uint(v.y >> 32u);
+    s_lds[4][a] = uint(v.z);
+    s_lds[5][a] = uint(v.z >> 32u);
+    s_lds[6][a] = uint(v.w);
+    s_lds[7][a] = uint(v.w >> 32u);
+}
+
+uint64_t fp_reduce_u64(uint64_t x) {
+    return x - (GL_P & (0ul - uint64_t(x >= GL_P)));
+}
+
+uint64_t fp_add(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t rem_p = GL_P - b_c;
+    uint64_t mask = 0ul - uint64_t(a_c < rem_p);
+    return ((a_c + b_c) & mask) | ((a_c - rem_p) & ~mask);
+}
+
+uint64_t fp_sub(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t diff = a_c - b_c;
+    return diff + (GL_P & (0ul - uint64_t(a_c < b_c)));
+}
+
+uint64_t fp_reduce128(uint64_t lo, uint64_t hi) {
+    uint64_t hi_lo = hi & GL_EPS;
+    uint64_t hi_hi = hi >> 32u;
+    uint64_t mid = (hi_lo << 32u) - hi_lo;
+    uint64_t lo_c = fp_reduce_u64(lo);
+    return fp_sub(fp_add(lo_c, mid), hi_hi);
+}
+
+uint64_t fp_mul(uint64_t a, uint64_t b) {
+    uint64_t a_c = fp_reduce_u64(a);
+    uint64_t b_c = fp_reduce_u64(b);
+    uint64_t a_lo = a_c & 0xFFFFFFFFul;
+    uint64_t a_hi = a_c >> 32u;
+    uint64_t b_lo = b_c & 0xFFFFFFFFul;
+    uint64_t b_hi = b_c >> 32u;
+    uint64_t p0 = a_lo * b_lo;
+    uint64_t p1 = a_lo * b_hi;
+    uint64_t p2 = a_hi * b_lo;
+    uint64_t p3 = a_hi * b_hi;
+    uint64_t mid = (p0 >> 32u) + (p1 & 0xFFFFFFFFul) + (p2 & 0xFFFFFFFFul);
+    uint64_t lo = (p0 & 0xFFFFFFFFul) | (mid << 32u);
+    uint64_t hi = p3 + (p1 >> 32u) + (p2 >> 32u) + (mid >> 32u);
+    return fp_reduce128(lo, hi);
+}
+
+uint64_t fp_pow_u32(uint64_t base_val, uint exp) {
+    uint64_t res = 1ul;
+    uint64_t cur = fp_reduce_u64(base_val);
+    uint e = exp;
+    while (e != 0u) {
+        if ((e & 1u) != 0u) {
+            res = fp_mul(res, cur);
+        }
+        e >>= 1u;
+        if (e != 0u) {
+            cur = fp_mul(cur, cur);
+        }
+    }
+    return res;
+}
+
+u64vec4 fp4_add(u64vec4 a, u64vec4 b) {
+    return u64vec4(fp_add(a.x, b.x), fp_add(a.y, b.y), fp_add(a.z, b.z), fp_add(a.w, b.w));
+}
+
+u64vec4 fp4_sub(u64vec4 a, u64vec4 b) {
+    return u64vec4(fp_sub(a.x, b.x), fp_sub(a.y, b.y), fp_sub(a.z, b.z), fp_sub(a.w, b.w));
+}
+
+u64vec4 fp4_mul_base(u64vec4 a, uint64_t s) {
+    return u64vec4(fp_mul(a.x, s), fp_mul(a.y, s), fp_mul(a.z, s), fp_mul(a.w, s));
+}
+
+u64vec4 load_ext4_b0(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b0.words[o], b0.words[o + 1u], b0.words[o + 2u], b0.words[o + 3u]);
+}
+
+u64vec4 load_ext4_b1(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b1.words[o], b1.words[o + 1u], b1.words[o + 2u], b1.words[o + 3u]);
+}
+
+void store_ext4_b1(uint idx, u64vec4 v) {
+    uint o = idx * 4u;
+    b1.words[o]      = v.x;
+    b1.words[o + 1u] = v.y;
+    b1.words[o + 2u] = v.z;
+    b1.words[o + 3u] = v.w;
+}
+
+u64vec4 load_ext4_b4(uint idx) {
+    uint o = idx * 4u;
+    return u64vec4(b4.words[o], b4.words[o + 1u], b4.words[o + 2u], b4.words[o + 3u]);
+}
+
+void store_ext4_b4(uint idx, u64vec4 v) {
+    uint o = idx * 4u;
+    b4.words[o]      = v.x;
+    b4.words[o + 1u] = v.y;
+    b4.words[o + 2u] = v.z;
+    b4.words[o + 3u] = v.w;
+}
+
+uint64_t rotl64(uint64_t x, uint r) {
+    return (x << r) | (x >> (64u - r));
+}
+
+void keccak_f1600(inout uint64_t st[25]) {
+    uint64_t bc[5];
+    for (uint rnd = 0u; rnd < 24u; ++rnd) {
+        for (uint i = 0u; i < 5u; ++i) {
+            bc[i] = st[i] ^ st[i + 5u] ^ st[i + 10u] ^ st[i + 15u] ^ st[i + 20u];
+        }
+        for (uint i = 0u; i < 5u; ++i) {
+            uint64_t t = bc[(i + 4u) % 5u] ^ rotl64(bc[(i + 1u) % 5u], 1u);
+            st[i]       ^= t;
+            st[i + 5u]  ^= t;
+            st[i + 10u] ^= t;
+            st[i + 15u] ^= t;
+            st[i + 20u] ^= t;
+        }
+        uint64_t t = st[1];
+        for (uint k = 0u; k < 24u; ++k) {
+            uint j = KECCAK_PI[k];
+            uint64_t next = st[j];
+            st[j] = rotl64(t, KECCAK_RHO[k]);
+            t = next;
+        }
+        for (uint row = 0u; row < 25u; row += 5u) {
+            bc[0] = st[row + 0u];
+            bc[1] = st[row + 1u];
+            bc[2] = st[row + 2u];
+            bc[3] = st[row + 3u];
+            bc[4] = st[row + 4u];
+            st[row + 0u] = bc[0] ^ ((~bc[1]) & bc[2]);
+            st[row + 1u] = bc[1] ^ ((~bc[2]) & bc[3]);
+            st[row + 2u] = bc[2] ^ ((~bc[3]) & bc[4]);
+            st[row + 3u] = bc[3] ^ ((~bc[4]) & bc[0]);
+            st[row + 4u] = bc[4] ^ ((~bc[0]) & bc[1]);
+        }
+        st[0] ^= KECCAK_RC[rnd];
+    }
+}
+
+void init_canopy_state(out uint64_t st[25]) {
+    for (uint i = 0u; i < 25u; ++i) {
+        st[i] = CANOPY_MID[i];
+    }
+}
+
+// Constant-indexed lane XOR so ACO keeps all 25 lanes in VGPRs with 0 scratch bytes.
+void xor_rate_lane(inout uint64_t st[25], uint lane, uint64_t val) {
+    switch (lane) {
+        case 0u:  st[0]  ^= val; break;
+        case 1u:  st[1]  ^= val; break;
+        case 2u:  st[2]  ^= val; break;
+        case 3u:  st[3]  ^= val; break;
+        case 4u:  st[4]  ^= val; break;
+        case 5u:  st[5]  ^= val; break;
+        case 6u:  st[6]  ^= val; break;
+        case 7u:  st[7]  ^= val; break;
+        case 8u:  st[8]  ^= val; break;
+        case 9u:  st[9]  ^= val; break;
+        case 10u: st[10] ^= val; break;
+        case 11u: st[11] ^= val; break;
+        case 12u: st[12] ^= val; break;
+        case 13u: st[13] ^= val; break;
+        case 14u: st[14] ^= val; break;
+        case 15u: st[15] ^= val; break;
+        default:  st[16] ^= val; break;
+    }
+}
+
+void sponge_feed_u64(
+    inout uint64_t st[25],
+    inout uint lane,
+    inout uint64_t carry,
+    uint bit_off,
+    uint64_t w
+) {
+    uint64_t full_lane = carry | (w << bit_off);
+    carry = w >> (64u - bit_off);
+    xor_rate_lane(st, lane, full_lane);
+    lane += 1u;
+    if (lane == 17u) {
+        keccak_f1600(st);
+        lane = 0u;
+    }
+}
+
+u64vec4 sponge_finalize_32(inout uint64_t st[25], uint lane, uint64_t carry, uint bit_off) {
+    xor_rate_lane(st, lane, carry | (0x04ul << bit_off));
+    st[16] ^= 0x8000000000000000ul;
+    keccak_f1600(st);
+    return u64vec4(st[0], st[1], st[2], st[3]);
+}
+
+u64vec2 derive_round0_salt_gpu(uint g) {
+    uint64_t st[25];
+    init_canopy_state(st);
+    st[0] ^= 0x02ul | (pc.scalar0 << 8u);
+    st[1] ^= (pc.scalar0 >> 56u) | (pc.scalar1 << 8u);
+    st[2] ^= (pc.scalar1 >> 56u) | (pc.scalar2 << 8u);
+    st[3] ^= (pc.scalar2 >> 56u) | (pc.scalar3 << 8u);
+    st[4] ^= (pc.scalar3 >> 56u) | (uint64_t(g) << 8u) | (0x04ul << 40u);
+    st[16] ^= 0x8000000000000000ul;
+    keccak_f1600(st);
+    return u64vec2(st[0], st[1]);
+}
+
+u64vec4 hash_merkle_internal_gpu(uint idx, u64vec4 left, u64vec4 right) {
+    uint64_t st[25];
+    init_canopy_state(st);
+    st[0] ^= (uint64_t(idx) << 8u) | (left.x << 40u);
+    st[1] ^= (left.x >> 24u) | (left.y << 40u);
+    st[2] ^= (left.y >> 24u) | (left.z << 40u);
+    st[3] ^= (left.z >> 24u) | (left.w << 40u);
+    st[4] ^= (left.w >> 24u) | (right.x << 40u);
+    st[5] ^= (right.x >> 24u) | (right.y << 40u);
+    st[6] ^= (right.y >> 24u) | (right.z << 40u);
+    st[7] ^= (right.z >> 24u) | (right.w << 40u);
+    st[8] ^= (right.w >> 24u) | (0x04ul << 40u);
+    st[16] ^= 0x8000000000000000ul;
+    keccak_f1600(st);
+    return u64vec4(st[0], st[1], st[2], st[3]);
+}
+
+void main() {
+    uint lid = gl_LocalInvocationID.x;
+
+    if (pc.mode == 0u) {
+        // Fused <=9-bit LDS Mobius transform across `num_polys = pc.aux1`.
+        uint len = pc.len;
+        uint log_c = pc.aux0;
+        uint num_polys = pc.aux1;
+        uint poly_stride = pc.aux2;
+        uint wgs_per_poly = max(len >> 9u, 1u);
+        uint wg_total = pc.aux3 + gl_WorkGroupID.x;
+        uint poly_idx = wg_total / wgs_per_poly;
+        uint blk_base = (wg_total % wgs_per_poly) * 512u;
+        uint base = poly_idx * poly_stride + blk_base;
+        bool active_wg = (poly_idx < num_polys);
+
+        uint half_blk = min(256u, len >> 1u);
+        uint stages = min(9u, log_c);
+        if (active_wg && lid < half_blk) {
+            lds_u64_store(lid, fp_reduce_u64(b0.words[base + lid]));
+            lds_u64_store(lid + half_blk, fp_reduce_u64(b0.words[base + lid + half_blk]));
+        }
+        barrier();
+
+        for (uint bit = 0u; bit < stages; ++bit) {
+            if (active_wg && lid < half_blk) {
+                uint stride = 1u << bit;
+                uint lo = ((lid >> bit) << (bit + 1u)) | (lid & (stride - 1u));
+                uint hi = lo + stride;
+                lds_u64_store(hi, fp_sub(lds_u64_load(hi), lds_u64_load(lo)));
+            }
+            barrier();
+        }
+
+        if (active_wg && lid < half_blk) {
+            b0.words[base + lid] = lds_u64_load(lid);
+            b0.words[base + lid + half_blk] = lds_u64_load(lid + half_blk);
+        }
+        return;
+    }
+
+    if (pc.mode == 1u) {
+        // Global single-bit Mobius transform (`bit = pc.aux0 >= 9`).
+        uint half_len = pc.len >> 1u;
+        uint bit = pc.aux0;
+        uint num_polys = pc.aux1;
+        uint poly_stride = pc.aux2;
+        uint pair_id = pc.aux3 + gl_GlobalInvocationID.x;
+        if (pair_id >= half_len * num_polys) {
+            return;
+        }
+        uint p = pair_id / half_len;
+        uint j = pair_id % half_len;
+        uint stride = 1u << bit;
+        uint lo = p * poly_stride + (((j >> bit) << (bit + 1u)) | (j & (stride - 1u)));
+        uint hi = lo + stride;
+        b0.words[hi] = fp_sub(b0.words[hi], b0.words[lo]);
+        return;
+    }
+
+    if (pc.mode == 2u) {
+        // 4-coset base-field shifted bit-reverse copy (`b0 -> b1`).
+        uint coset_y = gl_WorkGroupID.y;
+        if (coset_y >= pc.aux4) {
+            return;
+        }
+        uint i = pc.aux3 + gl_GlobalInvocationID.x;
+        if (i >= pc.len) {
+            return;
+        }
+        uint log_c = pc.aux0;
+        uint poly_idx = pc.aux1;
+        uint poly_stride = pc.aux2;
+        uint64_t s_r = (coset_y == 0u) ? pc.scalar0
+                     : (coset_y == 1u) ? pc.scalar1
+                     : (coset_y == 2u) ? pc.scalar2
+                                       : pc.scalar3;
+        uint64_t c_val = b0.words[poly_idx * poly_stride + i];
+        uint rev = (log_c == 0u) ? 0u : (bitfieldReverse(i) >> (32u - log_c));
+        b1.words[coset_y * pc.len + rev] = fp_mul(c_val, fp_pow_u32(s_r, i));
+        return;
+    }
+
+    if (pc.mode == 3u) {
+        // 4-coset fused <=9-stage LDS base-field NTT (`b1` in-place, twiddles in `b3`).
+        uint coset_y = gl_WorkGroupID.y;
+        uint len = pc.len;
+        uint log_c = pc.aux0;
+        uint blk_base = (pc.aux3 + gl_WorkGroupID.x) * 512u;
+        bool active_wg = (coset_y < pc.aux4) && (blk_base < len || (len < 512u && gl_WorkGroupID.x == 0u));
+        uint base = coset_y * len + blk_base;
+        uint half_blk = min(256u, len >> 1u);
+        uint stages = min(9u, log_c);
+
+        if (active_wg && lid < half_blk) {
+            lds_u64_store(lid, b1.words[base + lid]);
+            lds_u64_store(lid + half_blk, b1.words[base + lid + half_blk]);
+        }
+        barrier();
+
+        for (uint s = 1u; s <= stages; ++s) {
+            if (active_wg && lid < half_blk) {
+                uint half_m = 1u << (s - 1u);
+                uint j = lid & (half_m - 1u);
+                uint k = (lid >> (s - 1u)) << s;
+                uint64_t tw = b3.words[j << (24u - s)];
+                uint64_t u = lds_u64_load(k + j);
+                uint64_t v = fp_mul(lds_u64_load(k + j + half_m), tw);
+                lds_u64_store(k + j, fp_add(u, v));
+                lds_u64_store(k + j + half_m, fp_sub(u, v));
+            }
+            barrier();
+        }
+
+        if (active_wg && lid < half_blk) {
+            b1.words[base + lid] = lds_u64_load(lid);
+            b1.words[base + lid + half_blk] = lds_u64_load(lid + half_blk);
+        }
+        return;
+    }
+
+    if (pc.mode == 4u) {
+        // 4-coset global single-stage base-field NTT (`b1` in-place, `stage = pc.aux0 >= 10`).
+        uint coset_y = gl_WorkGroupID.y;
+        if (coset_y >= pc.aux4) {
+            return;
+        }
+        uint half_len = pc.len >> 1u;
+        uint pair_idx = pc.aux3 + gl_GlobalInvocationID.x;
+        if (pair_idx >= half_len) {
+            return;
+        }
+        uint stage = pc.aux0;
+        uint half_m = 1u << (stage - 1u);
+        uint j = pair_idx & (half_m - 1u);
+        uint k = (pair_idx >> (stage - 1u)) << stage;
+        uint64_t tw = (stage <= 24u)
+            ? b3.words[j << (24u - stage)]
+            : fp_pow_u32(pc.scalar0, j);
+        uint base = coset_y * pc.len;
+        uint i0 = base + k + j;
+        uint i1 = i0 + half_m;
+        uint64_t u = b1.words[i0];
+        uint64_t v = fp_mul(b1.words[i1], tw);
+        b1.words[i0] = fp_add(u, v);
+        b1.words[i1] = fp_sub(u, v);
+        return;
+    }
+
+    if (pc.mode == 5u) {
+        // Coalesced 4-coset scatter from `b1` into `b2` (`vram_cw0`).
+        uint q = pc.aux3 + gl_GlobalInvocationID.x;
+        if (q >= pc.len) {
+            return;
+        }
+        uint blowup = pc.aux0;
+        uint poly_idx = pc.aux1;
+        uint r_base = pc.aux2;
+        uint batch_c = pc.aux4;
+        uint domain_len = pc.len * blowup;
+        uint dst = poly_idx * domain_len + q * blowup + r_base;
+        for (uint c = 0u; c < batch_c; ++c) {
+            b2.words[dst + c] = b1.words[c * pc.len + q];
+        }
+        return;
+    }
+
+    if (pc.mode == 6u) {
+        // Intermediate stage `Ext4` `encode_overflow` shifted bit-reverse copy (`b0 -> b1`).
+        uint i = pc.aux3 + gl_GlobalInvocationID.x;
+        if (i >= pc.len) {
+            return;
+        }
+        uint log_d = pc.aux0;
+        uint coeff_len = pc.aux1;
+        uint dst_base = pc.aux2;
+        uint rev = (log_d == 0u) ? 0u : (bitfieldReverse(i) >> (32u - log_d));
+        u64vec4 out_v = u64vec4(0ul);
+        if (rev < coeff_len) {
+            out_v = fp4_mul_base(load_ext4_b0(rev), fp_pow_u32(7ul, rev));
+        }
+        store_ext4_b1(dst_base + i, out_v);
+        return;
+    }
+
+    if (pc.mode == 7u) {
+        // Fused <=9-stage LDS `Ext4` NTT (`b1` in-place starting at `Ext4` offset `pc.aux2`).
+        uint len = pc.len;
+        uint log_d = pc.aux0;
+        uint dst_base = pc.aux2;
+        uint blk_base = (pc.aux3 + gl_WorkGroupID.x) * 512u;
+        bool active_wg = (blk_base < len) || (len < 512u && gl_WorkGroupID.x == 0u);
+        uint base = dst_base + blk_base;
+        uint half_blk = min(256u, len >> 1u);
+        uint stages = min(9u, log_d);
+
+        if (active_wg && lid < half_blk) {
+            lds_ext4_store(lid, load_ext4_b1(base + lid));
+            lds_ext4_store(lid + half_blk, load_ext4_b1(base + lid + half_blk));
+        }
+        barrier();
+
+        for (uint s = 1u; s <= stages; ++s) {
+            if (active_wg && lid < half_blk) {
+                uint half_m = 1u << (s - 1u);
+                uint j = lid & (half_m - 1u);
+                uint k = (lid >> (s - 1u)) << s;
+                uint64_t tw = b3.words[j << (24u - s)];
+                u64vec4 u = lds_ext4_load(k + j);
+                u64vec4 v = fp4_mul_base(lds_ext4_load(k + j + half_m), tw);
+                lds_ext4_store(k + j, fp4_add(u, v));
+                lds_ext4_store(k + j + half_m, fp4_sub(u, v));
+            }
+            barrier();
+        }
+
+        if (active_wg && lid < half_blk) {
+            store_ext4_b1(base + lid, lds_ext4_load(lid));
+            store_ext4_b1(base + lid + half_blk, lds_ext4_load(lid + half_blk));
+        }
+        return;
+    }
+
+    if (pc.mode == 8u) {
+        // Global single-stage `Ext4` NTT (`b1` in-place starting at `Ext4` offset `pc.aux2`).
+        uint half_len = pc.len >> 1u;
+        uint pair_idx = pc.aux3 + gl_GlobalInvocationID.x;
+        if (pair_idx >= half_len) {
+            return;
+        }
+        uint stage = pc.aux0;
+        uint dst_base = pc.aux2;
+        uint half_m = 1u << (stage - 1u);
+        uint j = pair_idx & (half_m - 1u);
+        uint k = (pair_idx >> (stage - 1u)) << stage;
+        uint64_t tw = (stage <= 24u)
+            ? b3.words[j << (24u - stage)]
+            : fp_pow_u32(pc.scalar0, j);
+        uint i0 = dst_base + k + j;
+        uint i1 = i0 + half_m;
+        u64vec4 u = load_ext4_b1(i0);
+        u64vec4 v = fp4_mul_base(load_ext4_b1(i1), tw);
+        store_ext4_b1(i0, fp4_add(u, v));
+        store_ext4_b1(i1, fp4_sub(u, v));
+        return;
+    }
+
+    if (pc.mode == 9u) {
+        // Round-0 Canopy salted leaf hashing (`Single` & `Batch`, `b2 -> b4`).
+        uint g = pc.aux3 + gl_GlobalInvocationID.x;
+        uint num_groups = pc.len;
+        if (g >= num_groups) {
+            return;
+        }
+        uint arity = pc.aux0;
+        uint num_polys = pc.aux1;
+        uint tree_base = pc.aux2;
+        uint domain_len = num_groups * arity;
+
+        u64vec2 salt = derive_round0_salt_gpu(g);
+
+        uint64_t st[25];
+        init_canopy_state(st);
+        uint lane = 0u;
+        uint bit_off = (num_polys == 1u) ? 48u : 56u;
+        uint64_t carry = (num_polys == 1u)
+            ? (0x10ul | (uint64_t(arity) << 8u) | (uint64_t(g) << 16u))
+            : (0x11ul | (uint64_t(arity) << 8u) | (uint64_t(num_polys) << 16u) | (uint64_t(g) << 24u));
+
+        sponge_feed_u64(st, lane, carry, bit_off, salt.x);
+        sponge_feed_u64(st, lane, carry, bit_off, salt.y);
+
+        for (uint p = 0u; p < num_polys; ++p) {
+            uint p_base = p * domain_len + g;
+            for (uint k = 0u; k < arity; ++k) {
+                uint64_t w = b2.words[p_base + k * num_groups];
+                sponge_feed_u64(st, lane, carry, bit_off, w);
+            }
+        }
+        u64vec4 dig = sponge_finalize_32(st, lane, carry, bit_off);
+        store_ext4_b4(tree_base + num_groups + g, dig);
+        return;
+    }
+
+    if (pc.mode == 10u) {
+        // Stage >= 1 Canopy `Ext4` leaf hashing (`b1 -> b4`).
+        uint g = pc.aux3 + gl_GlobalInvocationID.x;
+        uint num_groups = pc.len;
+        if (g >= num_groups) {
+            return;
+        }
+        uint arity = pc.aux0;
+        uint cw_base = pc.aux1;
+        uint stage_idx = pc.aux2;
+        uint tree_base = pc.aux4;
+
+        uint64_t st[25];
+        init_canopy_state(st);
+        uint lane = 0u;
+        uint bit_off = 56u;
+        uint64_t carry = 0x12ul
+            | (uint64_t(stage_idx) << 8u)
+            | (uint64_t(arity) << 16u)
+            | (uint64_t(g) << 24u);
+
+        for (uint k = 0u; k < arity; ++k) {
+            u64vec4 v = load_ext4_b1(cw_base + g + k * num_groups);
+            sponge_feed_u64(st, lane, carry, bit_off, v.x);
+            sponge_feed_u64(st, lane, carry, bit_off, v.y);
+            sponge_feed_u64(st, lane, carry, bit_off, v.z);
+            sponge_feed_u64(st, lane, carry, bit_off, v.w);
+        }
+        u64vec4 dig = sponge_finalize_32(st, lane, carry, bit_off);
+        store_ext4_b4(tree_base + num_groups + g, dig);
+        return;
+    }
+
+    if (pc.mode == 11u) {
+        // Single internal Canopy Merkle layer (`half = pc.len`, `tree_base = pc.aux2`).
+        uint off = pc.aux3 + gl_GlobalInvocationID.x;
+        uint half_nodes = pc.len;
+        if (off >= half_nodes) {
+            return;
+        }
+        uint tree_base = pc.aux2;
+        uint idx = half_nodes + off;
+        u64vec4 left  = load_ext4_b4(tree_base + 2u * idx);
+        u64vec4 right = load_ext4_b4(tree_base + 2u * idx + 1u);
+        store_ext4_b4(tree_base + idx, hash_merkle_internal_gpu(idx, left, right));
+        return;
+    }
+
+    if (pc.mode == 12u) {
+        // Fused top-tree Merkle reduction (`half <= 256` down to `nodes[1]`) in 1 workgroup.
+        if (gl_WorkGroupID.x != 0u) {
+            return;
+        }
+        uint tree_base = pc.aux2;
+        for (uint h = pc.len; h >= 1u; h >>= 1u) {
+            if (lid < h) {
+                uint idx = h + lid;
+                u64vec4 left  = load_ext4_b4(tree_base + 2u * idx);
+                u64vec4 right = load_ext4_b4(tree_base + 2u * idx + 1u);
+                store_ext4_b4(tree_base + idx, hash_merkle_internal_gpu(idx, left, right));
+            }
+            memoryBarrierBuffer();
+            barrier();
+        }
+        return;
+    }
+
+    if (pc.mode == 13u) {
+        // Selective query fiber + salt + Steiner sibling gather.
+        // `b3` holds `[q_indices[0..num_queries], sib_indices[0..num_sibs]]` as `u64`s.
+        // `b5` receives `[salts (if stage 0), fiber_words, sibling_words]`.
+        uint tid = gl_GlobalInvocationID.x;
+        uint num_queries = pc.len;
+        uint arity = pc.aux0;
+        uint num_polys = pc.aux1;
+        uint num_sibs = pc.aux2;
+        uint is_ext4 = pc.aux4;
+        uint num_groups = pc.aux5;
+
+        // 1. Gather Steiner siblings (`tid < num_sibs`):
+        uint salt_words = (is_ext4 == 0u) ? (2u * num_queries) : 0u;
+        uint fiber_words_per_q = (is_ext4 == 0u) ? (num_polys * arity) : (4u * arity);
+        uint sib_out_base = salt_words + num_queries * fiber_words_per_q;
+        // For Stage >= 1, `pc.scalar0` carries `tree_base` and `pc.scalar1` carries `cw_base`.
+        uint t_base = (is_ext4 == 0u) ? 0u : uint(pc.scalar0);
+        uint c_base = (is_ext4 == 0u) ? 0u : uint(pc.scalar1);
+
+        if (tid < num_sibs) {
+            uint sib_idx = uint(b3.words[num_queries + tid]);
+            u64vec4 node = load_ext4_b4(t_base + sib_idx);
+            uint o = sib_out_base + tid * 4u;
+            b5.words[o]      = node.x;
+            b5.words[o + 1u] = node.y;
+            b5.words[o + 2u] = node.z;
+            b5.words[o + 3u] = node.w;
+        }
+
+        // 2. Derive salts & gather fibers (`tid < num_queries`):
+        if (tid < num_queries) {
+            uint g = uint(b3.words[tid]);
+            if (is_ext4 == 0u) {
+                u64vec2 salt = derive_round0_salt_gpu(g);
+                b5.words[2u * tid]      = salt.x;
+                b5.words[2u * tid + 1u] = salt.y;
+                uint domain_len = num_groups * arity;
+                uint f_out = salt_words + tid * fiber_words_per_q;
+                uint cursor = 0u;
+                for (uint p = 0u; p < num_polys; ++p) {
+                    uint p_base = p * domain_len + g;
+                    for (uint k = 0u; k < arity; ++k) {
+                        b5.words[f_out + cursor] = b2.words[p_base + k * num_groups];
+                        cursor += 1u;
+                    }
+                }
+            } else {
+                uint f_out = tid * fiber_words_per_q;
+                for (uint k = 0u; k < arity; ++k) {
+                    u64vec4 v = load_ext4_b1(c_base + g + k * num_groups);
+                    uint o = f_out + k * 4u;
+                    b5.words[o]      = v.x;
+                    b5.words[o + 1u] = v.y;
+                    b5.words[o + 2u] = v.z;
+                    b5.words[o + 3u] = v.w;
+                }
+            }
+        }
+        return;
+    }
+
+    if (pc.mode == 14u) {
+        // Initialize `vram_twiddles_24` (`b3.words[gid] = omega_24^{gid}`).
+        uint gid = pc.aux3 + gl_GlobalInvocationID.x;
+        if (gid < pc.len) {
+            b3.words[gid] = fp_pow_u32(pc.scalar0, gid);
+        }
+        return;
+    }
+}
