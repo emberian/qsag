@@ -77,8 +77,8 @@ unified `CeremonyJournalRecord` crash-prefix atomicity, and reserve-before-sign 
    uniqueness theorem quantifies over traces containing it. In the ceremony machine an I/O
    error is not a crash: the host is poisoned (`ioPoisoned`), keeps the kernel state the failed
    replacement left, serves nothing, and any later crash of either kind recovers the old or the
-   new journal record. Not modeled there: a process restart on a dirty page cache without a
-   system crash (the custody machine does cover that).
+   new journal record. `ProcessRestart` separately drops descriptors and locks while preserving
+   dirty pages and NAND; `processRestart_is_not_fsync` prevents treating that restart as a commit.
 
 5. **Hardware/POSIX `#tooth` Mutation Witnesses & Concrete Multi-Crash Trace Witness**:
    - `tooth_split_subordinate_wals_crash_between_commits_causes_resource_desync`
@@ -94,6 +94,7 @@ unified `CeremonyJournalRecord` crash-prefix atomicity, and reserve-before-sign 
 public import Qsag.Constructive
 public import Qsag.SimulationSpine
 public import Qsag.Keccak
+import Qsag.Tactic.AssuranceKit
 
 public section
 
@@ -1225,6 +1226,33 @@ inductive CrashStep : PosixFsState → PosixFsState → Prop where
       CrashStep st (KernelPanicCrash st)
   | powerLoss (dirPick : DirCrashOutcome) (tearFn : InodeId → SectorTearMask) (st : PosixFsState) :
       CrashStep st (PowerLossCrash dirPick tearFn st)
+
+/-- Process restart closes descriptors and drops advisory locks, but is not a storage barrier:
+    the kernel page cache and every storage tier retain their exact previous contents. -/
+def ProcessRestart (st : PosixFsState) : PosixFsState :=
+  { st with kernel := { st.kernel with openFds := {}, flockTable := {} } }
+
+theorem processRestart_preserves_dirty_pages (st : PosixFsState) :
+    (ProcessRestart st).kernel.pageCache = st.kernel.pageCache ∧
+    (ProcessRestart st).driveCache = st.driveCache ∧
+    (ProcessRestart st).nand = st.nand := ⟨rfl, rfl, rfl⟩
+
+theorem processRestart_dirty_page_remains_readable (st : PosixFsState) (ino : InodeId)
+    (bytes : List UInt8) (hDirty : assocLookup st.kernel.pageCache.dirtyFiles ino = some bytes) :
+    readInodeHierarchy (ProcessRestart st) ino = some bytes ∧
+      assocLookup (ProcessRestart st).nand.fileBlocks ino = assocLookup st.nand.fileBlocks ino := by
+  have hPending : pendingVolatileWrite (ProcessRestart st) ino = some bytes := by
+    simp [pendingVolatileWrite, ProcessRestart, hDirty]
+  exact ⟨by simp [readInodeHierarchy, hPending], rfl⟩
+
+/-- Restart alone supplies no durable-release event: a dirty page survives for subsequent reads,
+    while NAND is unchanged until an explicit successful media sync. -/
+theorem processRestart_is_not_fsync (st : PosixFsState) (ino : InodeId) (bytes : List UInt8)
+    (hDirty : assocLookup st.kernel.pageCache.dirtyFiles ino = some bytes) :
+    (ProcessRestart st).kernel.flockTable.locks = [] ∧
+      assocLookup (ProcessRestart st).kernel.pageCache.dirtyFiles ino = some bytes ∧
+      assocLookup (ProcessRestart st).nand.fileBlocks ino = assocLookup st.nand.fileBlocks ino := by
+  exact ⟨rfl, hDirty, rfl⟩
 
 /-- **Synced Inode Crash Immunity (`syncedInode_immune_to_crashStep`)**:
     Any inode `ino` with zero uncommitted writes in `InodePageCache` and `DriveWriteCache`
@@ -9666,6 +9694,39 @@ theorem verifyLockIdentity_accepts_exact {s : LockedIdentityHandle} {expected : 
       cases he : (lockIdentitySeal s.device s.inode s.nonce == expected) <;> simp_all
     exact eq_of_beq hb
 
+/-- Evidence for the deployed `LockedRecord` opening order. Each syscall consumes the state
+    produced by the previous one; the identity check is on the inode returned by `fstat`, not
+    on a pathname looked up before `flock`. -/
+structure LockedRecordOpenEvidence where
+  initial : PosixFsState
+  openedState : PosixFsState
+  lockedState : PosixFsState
+  pid : Pid
+  path : DirName
+  fd : FdId
+  description : OpenDescriptionId
+  device : Nat
+  inode : InodeId
+  nonce : Bytes
+  authenticated : Bytes
+  opened : posixOpenExistingNoFollow initial pid path true = .ok (openedState, fd)
+  locked : posixFlockExNb openedState pid fd = .ok lockedState
+  stated : posixFstatDescAndInode lockedState pid fd = .ok (description, inode)
+  sealed : lockIdentitySeal device inode nonce = authenticated
+
+def LockedRecordOpenEvidence.handle (e : LockedRecordOpenEvidence) : LockedIdentityHandle :=
+  ⟨e.device, e.inode, e.nonce, false⟩
+
+theorem lockedRecord_open_identity_seal (e : LockedRecordOpenEvidence) :
+    verifyLockIdentity e.handle e.authenticated = (e.handle, true) := by
+  simp [verifyLockIdentity, LockedRecordOpenEvidence.handle, e.sealed]
+
+theorem lockedRecord_open_uses_locked_fd (e : LockedRecordOpenEvidence) :
+    posixFstatDescAndInode e.lockedState e.pid e.fd = .ok (e.description, e.inode) ∧
+      posixFlockExNb e.openedState e.pid e.fd = .ok e.lockedState ∧
+      posixOpenExistingNoFollow e.initial e.pid e.path true = .ok (e.openedState, e.fd) :=
+  ⟨e.stated, e.locked, e.opened⟩
+
 structure CeremonyContext where
   policyId : BitVec 256 := 0
   spendAmount : UInt64 := 0
@@ -10275,6 +10336,62 @@ def decodeLedgerRecords : Nat → Bytes → List (Bytes × Bytes) → Option (Li
     if records.any (fun kv => kv.1 == key) then none else
     decodeLedgerRecords n tail (records ++ [(key, value)])
 
+private theorem decodeLedgerRecords_roundtrip_aux :
+    ∀ (records acc : List (Bytes × Bytes)),
+      (records.map Prod.fst).Nodup →
+      (∀ kv ∈ records, kv.1.length < 2 ^ 32 ∧ kv.2.length < 2 ^ 32) →
+      (∀ old ∈ acc, ∀ r ∈ records, old.1 ≠ r.1) →
+      decodeLedgerRecords records.length (records.flatMap fun kv =>
+        u32le kv.1.length ++ u32le kv.2.length ++ kv.1 ++ kv.2) acc = some (acc ++ records) := by
+  intro records
+  induction records with
+  | nil => intro acc _ _ _; simp [decodeLedgerRecords]
+  | cons r rest ih =>
+    rcases r with ⟨k, v⟩
+    intro acc hNd hBounds hDisjoint
+    have hKv := hBounds (k, v) List.mem_cons_self
+    have hNdTail : (rest.map Prod.fst).Nodup := (List.nodup_cons.mp hNd).2
+    have hFresh : k ∉ rest.map Prod.fst := (List.nodup_cons.mp hNd).1
+    have hNot : (acc.any fun old => old.1 == k) = false := by
+      apply List.any_eq_false.mpr
+      intro old hOld hTrue
+      exact hDisjoint old hOld (k, v) List.mem_cons_self (eq_of_beq hTrue)
+    simp only [List.length_cons, List.flatMap_cons, decodeLedgerRecords]
+    rw [splitExactBytes_append (by simp [u32le, pcwEncodeU32Be_length] :
+      (u32le k.length).length = 4)]
+    dsimp only
+    rw [splitExactBytes_append (by simp [u32le, pcwEncodeU32Be_length] :
+      (u32le v.length).length = 4)]
+    dsimp only
+    simp only [u32le, List.reverse_reverse]
+    rw [pcwDecodeU32Be_encodeU32Be hKv.1, pcwDecodeU32Be_encodeU32Be hKv.2]
+    dsimp only
+    rw [splitExactBytes_append rfl, splitExactBytes_append rfl]
+    dsimp only
+    rw [hNot]
+    dsimp only
+    have hNext : ∀ old ∈ acc ++ [(k, v)], ∀ r ∈ rest, old.1 ≠ r.1 := by
+      intro old hOld r hr
+      rcases List.mem_append.mp hOld with hPrev | hNew
+      · exact hDisjoint old hPrev r (List.mem_cons_of_mem (k, v) hr)
+      · rcases List.mem_singleton.mp hNew with rfl
+        intro hEq
+        apply hFresh
+        have hm : r.1 ∈ rest.map Prod.fst := List.mem_map.mpr ⟨r, hr, rfl⟩
+        rwa [← hEq]
+    simpa only [List.append_assoc, List.cons_append, List.nil_append] using
+      ih (acc ++ [(k, v)]) hNdTail
+        (fun kv hkv => hBounds kv (List.mem_cons_of_mem (k, v) hkv)) hNext
+
+/-- General snapshot-record roundtrip: canonical fixed-width lengths and duplicate-free keys
+    decode to exactly the original association list, with no accumulator or fixture restriction. -/
+theorem decodeLedgerRecords_roundtrip (records : List (Bytes × Bytes))
+    (hNd : (records.map Prod.fst).Nodup)
+    (hBounds : ∀ kv ∈ records, kv.1.length < 2 ^ 32 ∧ kv.2.length < 2 ^ 32) :
+    decodeLedgerRecords records.length (records.flatMap fun kv =>
+      u32le kv.1.length ++ u32le kv.2.length ++ kv.1 ++ kv.2) [] = some records := by
+  simpa using decodeLedgerRecords_roundtrip_aux records [] hNd hBounds (by simp)
+
 /-- `read_slot` after the LockedRecord wrapper and seal checks. The byte-size limit,
 MAC, parity, bounded count, duplicate keys, and exact parser exhaustion are all checked. -/
 def openLedgerSlot (domain key genesisSeal ledgerId : Bytes) (parity : Nat)
@@ -10382,6 +10499,67 @@ theorem syncBurnAppend_release_durable {s s' : BurnAppendState} {ok : Bool} {bod
     · cases h
       exact ⟨rfl, List.mem_append_right _ (List.mem_singleton_self _), rfl⟩
     · cases h
+
+/-- Record-level host view of the byte-oriented append machine. Failed handles are closed;
+    every successfully synced body is both recovered state and a burned host leaf. -/
+def burnAppendHostOfFile (s : BurnAppendState) (f : BurnJournalFile) : BurnHost :=
+  { file := f
+    handle := if s.failed then none else some (s.bodies, s.lastTag)
+    burned := s.bodies }
+
+theorem burnAppendHostOfFile_inv (tagFn : List UInt8 → List UInt8 → List UInt8)
+    (genesisTag : List UInt8) (s : BurnAppendState) (f : BurnJournalFile)
+    (hOpen : openBurnJournal tagFn genesisTag f = some (s.bodies, s.lastTag)) :
+    BurnHostInv tagFn genesisTag (burnAppendHostOfFile s f) := by
+  have hNd := (openBurnJournal_some hOpen).2.2
+  right
+  refine ⟨?_, ?_, ?_⟩
+  · simpa [burnAppendHostOfFile] using hNd
+  · intro bodies last h b hb
+    have hEq := Option.some.inj (hOpen.symm.trans h)
+    have hBodies : s.bodies = bodies := (Prod.mk.inj hEq).1
+    rw [← hBodies]
+    exact hb
+  · intro bodies last h
+    simp only [burnAppendHostOfFile] at h
+    split at h
+    · cases h
+    · obtain ⟨rfl, rfl⟩ := Prod.mk.inj (Option.some.inj h)
+      exact hOpen
+
+/-- A successful full-length `fsync` append is exactly the existing host `reserve` step. -/
+theorem burnAppend_sync_welds_host_reserve (key identity keyId genesis : Bytes)
+    (s : BurnAppendState) (f : BurnJournalFile) (party epoch : Nat)
+    (hOpen : openBurnJournal (burnRecordTag key keyId genesis)
+      (burnGenesisTag key identity keyId genesis) f = some (s.bodies, s.lastTag))
+    (hPending : s.pending = some (burnRecord key keyId genesis s.lastTag party epoch))
+    (hVisible : s.visible = s.disk ++ burnRecord key keyId genesis s.lastTag party epoch)
+    (hFailed : s.failed = false)
+    (hFresh : burnRecordBody party epoch ∉ s.bodies) :
+    BurnHostStep (burnRecordTag key keyId genesis) (burnGenesisTag key identity keyId genesis)
+      (burnAppendHostOfFile s f)
+      (burnAppendHostOfFile (syncBurnAppend s true).1
+        (appendBurnRecord (burnRecordTag key keyId genesis) s.lastTag
+          (burnRecordBody party epoch) f)) := by
+  let body := burnRecordBody party epoch
+  let next : BurnAppendState :=
+    { s with
+      disk := s.visible
+      bodies := s.bodies ++ [body]
+      lastTag := (burnRecord key keyId genesis s.lastTag party epoch).drop 10
+      pending := none
+      failed := false
+      dirty := false }
+  have hSync : syncBurnAppend s true = (next, some body) := by
+    simp [syncBurnAppend, hPending, hVisible, next, body, burnRecord, burnRecordBody,
+      burnRecordTag, burnRecord_length]
+  rw [hSync]
+  have hLive : (burnAppendHostOfFile s f).handle = some (s.bodies, s.lastTag) := by
+    simp [burnAppendHostOfFile, hFailed]
+  have hStep := BurnHostStep.reserve (tagFn := burnRecordTag key keyId genesis)
+    (genesisTag := burnGenesisTag key identity keyId genesis)
+    (burnAppendHostOfFile s f) s.bodies s.lastTag (burnRecordBody party epoch) hLive hFresh
+  simpa [burnAppendHostOfFile, burnRecord, burnRecordBody] using hStep
 
 /-- Independent unsynced metadata operations are not a whole-directory snapshot. Each
 writeback chooses one operation, preserving its order relative to other selected operations.
@@ -10563,5 +10741,8 @@ theorem journalEntryValid_advances_cursors {key : Bytes} {entries : List Journal
   exact ⟨hv.1, hv.2.1⟩
 
 end RustDurability
+
+#verify_inhabited burnHost_multi_crash_no_double_burn witness_burnHost_burn_then_torn_append
+#tooth_pair burnHost_multi_crash_no_double_burn vs tooth_burnJournal_truncation_is_undetectable_without_anchor
 
 end Qsag
