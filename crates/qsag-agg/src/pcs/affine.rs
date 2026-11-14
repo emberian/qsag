@@ -3,14 +3,48 @@ use super::*;
 
 type E = GoldilocksExt4;
 
-pub(super) fn monomial_table(point: &[E]) -> Vec<E> {
-    let mut out = vec![E::ONE];
+fn monomial_table_core(point: &[E]) -> Vec<E> {
+    let mut out = Vec::with_capacity(1usize << point.len());
+    out.push(E::ONE);
     for &r in point {
         let n = out.len();
         for i in 0..n {
             out.push(out[i] * r);
         }
     }
+    out
+}
+
+pub(super) fn monomial_table(point: &[E]) -> Vec<E> {
+    #[cfg(feature = "std")]
+    if point.len() >= 14 {
+        let workers = crate::parallel_pow2_workers(1usize << (point.len() - 10));
+        let top_bits = workers.trailing_zeros() as usize;
+        if top_bits > 0 && top_bits < point.len() {
+            let split = point.len() - top_bits;
+            let top = monomial_table_core(&point[split..]);
+            let bot = &point[..split];
+            let total = 1usize << point.len();
+            let sub_len = 1usize << split;
+            let mut out = vec![E::ZERO; total + 2];
+            std::thread::scope(|scope| {
+                for (t_idx, sub) in out[..total].chunks_mut(sub_len).enumerate() {
+                    let init = top[t_idx];
+                    scope.spawn(move || {
+                        sub[0] = init;
+                        for (bit, &r) in bot.iter().enumerate() {
+                            let n = 1usize << bit;
+                            for i in 0..n {
+                                sub[n + i] = sub[i] * r;
+                            }
+                        }
+                    });
+                }
+            });
+            return out;
+        }
+    }
+    let mut out = monomial_table_core(point);
     out.resize(out.len() + 2, E::ZERO);
     out
 }
@@ -21,18 +55,30 @@ pub(super) fn geometric(z: E, len: usize) -> Vec<E> {
 
 /// The dual fold has one extra zero slot; overflow never wraps into the core.
 pub(super) fn fold_kernel(k: &[E], phi: E) -> Vec<E> {
-    let mut out: Vec<_> = k.chunks_exact(2).map(|v| v[0] + phi * v[1]).collect();
-    out.push(E::ZERO);
+    let pairs = k.len() / 2;
+    let mut out = vec![E::ZERO; pairs + 1];
+    fill_indexed(&mut out[..pairs], |i| k[2 * i] + phi * k[2 * i + 1]);
     out
 }
 
 pub(super) fn fold_coeffs(c: &[E], [theta, alpha, beta]: [E; 3]) -> Vec<E> {
-    let mut out = vec![E::ZERO; c.len() / 2 + 1];
-    for (i, pair) in c.chunks_exact(2).enumerate() {
-        let mix = pair[0] + theta * pair[1];
-        out[i] += pair[1] + alpha * mix;
-        out[i + 1] += beta * mix;
+    let m = c.len() / 2;
+    if m == 0 {
+        return vec![E::ZERO];
     }
+    let mut out = vec![E::ZERO; m + 1];
+    let mix0 = c[0] + theta * c[1];
+    out[0] = c[1] + alpha * mix0;
+    if m > 1 {
+        fill_indexed(&mut out[1..m], |off| {
+            let i = off + 1;
+            let prev_mix = c[2 * (i - 1)] + theta * c[2 * (i - 1) + 1];
+            let cur_mix = c[2 * i] + theta * c[2 * i + 1];
+            (beta * prev_mix) + (c[2 * i + 1] + alpha * cur_mix)
+        });
+    }
+    let last_mix = c[2 * (m - 1)] + theta * c[2 * (m - 1) + 1];
+    out[m] = beta * last_mix;
     out
 }
 
@@ -55,12 +101,19 @@ pub(super) fn bridge_finish(
     let theta = tr.squeeze_ext4(b"WHIR_AFFINE_THETA");
     let alpha = tr.squeeze_ext4(b"WHIR_AFFINE_ALPHA");
     let beta = tr.squeeze_ext4(b"WHIR_AFFINE_BETA");
-    let f = wire[0] + phi * wire[1];
-    let g = wire[2] + phi * (claim - wire[0]);
-    (
-        g + alpha * (f + theta * g) + beta * (wire[3] + theta * wire[4]),
-        [theta, alpha, beta],
-    )
+    let next = from_verified_ext4(qsag_whir_verified::cwyz_bridge_claim_step(
+        to_verified_ext4(wire[0]),
+        to_verified_ext4(wire[1]),
+        to_verified_ext4(wire[2]),
+        to_verified_ext4(wire[3]),
+        to_verified_ext4(wire[4]),
+        to_verified_ext4(claim),
+        to_verified_ext4(phi),
+        to_verified_ext4(theta),
+        to_verified_ext4(alpha),
+        to_verified_ext4(beta),
+    ));
+    (next, [theta, alpha, beta])
 }
 
 pub(super) fn prove_fold(
@@ -70,17 +123,106 @@ pub(super) fn prove_fold(
     tr: &mut FiatShamirTranscript<InstanceBound>,
 ) -> ([E; 5], [E; 3]) {
     let mut wire = [E::ZERO; 5];
-    for (a, b) in c.chunks_exact(2).zip(k.chunks_exact(2)) {
-        wire[0] += a[0] * b[0];
-        wire[1] += a[0] * b[1];
-        wire[2] += a[1] * b[0];
+    let pairs_ck = (c.len() / 2).min(k.len() / 2);
+    let cross_range = |c_ref: &[E], k_ref: &[E], i0: usize, i1: usize| -> [E; 3] {
+        let mut acc = [E::ZERO; 3];
+        for i in i0..i1 {
+            let a0 = c_ref[2 * i];
+            let a1 = c_ref[2 * i + 1];
+            let b0 = k_ref[2 * i];
+            let b1 = k_ref[2 * i + 1];
+            acc[0] += a0 * b0;
+            acc[1] += a0 * b1;
+            acc[2] += a1 * b0;
+        }
+        acc
+    };
+    #[cfg(feature = "std")]
+    if pairs_ck >= 4_096 {
+        let workers = crate::parallel_workers().min(pairs_ck);
+        let chunk = pairs_ck.div_ceil(workers);
+        let c_ref = c.as_slice();
+        let k_ref = k.as_slice();
+        let cross_fn = &cross_range;
+        let parts: Vec<[E; 3]> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .filter_map(|t_idx| {
+                    let i0 = t_idx * chunk;
+                    (i0 < pairs_ck).then(|| {
+                        let i1 = (i0 + chunk).min(pairs_ck);
+                        scope.spawn(move || cross_fn(c_ref, k_ref, i0, i1))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(crate::join_worker).collect()
+        });
+        for p in parts {
+            wire[0] += p[0];
+            wire[1] += p[1];
+            wire[2] += p[2];
+        }
+    } else {
+        let p = cross_range(c, k, 0, pairs_ck);
+        wire[0] = p[0];
+        wire[1] = p[1];
+        wire[2] = p[2];
     }
+    #[cfg(not(feature = "std"))]
+    {
+        let p = cross_range(c, k, 0, pairs_ck);
+        wire[0] = p[0];
+        wire[1] = p[1];
+        wire[2] = p[2];
+    }
+
     let phi = bridge_prefix(&wire, tr);
     *k = fold_kernel(k, phi);
-    for (i, a) in c.chunks_exact(2).enumerate() {
-        wire[3] += a[0] * k[i + 1];
-        wire[4] += a[1] * k[i + 1];
+
+    let pairs_c = c.len() / 2;
+    let shift_range = |c_ref: &[E], k_ref: &[E], i0: usize, i1: usize| -> [E; 2] {
+        let mut acc = [E::ZERO; 2];
+        for i in i0..i1 {
+            let ki1 = k_ref[i + 1];
+            acc[0] += c_ref[2 * i] * ki1;
+            acc[1] += c_ref[2 * i + 1] * ki1;
+        }
+        acc
+    };
+    #[cfg(feature = "std")]
+    if pairs_c >= 4_096 {
+        let workers = crate::parallel_workers().min(pairs_c);
+        let chunk = pairs_c.div_ceil(workers);
+        let c_ref = c.as_slice();
+        let k_ref = k.as_slice();
+        let shift_fn = &shift_range;
+        let parts: Vec<[E; 2]> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .filter_map(|t_idx| {
+                    let i0 = t_idx * chunk;
+                    (i0 < pairs_c).then(|| {
+                        let i1 = (i0 + chunk).min(pairs_c);
+                        scope.spawn(move || shift_fn(c_ref, k_ref, i0, i1))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(crate::join_worker).collect()
+        });
+        for p in parts {
+            wire[3] += p[0];
+            wire[4] += p[1];
+        }
+    } else {
+        let p = shift_range(c, k, 0, pairs_c);
+        wire[3] = p[0];
+        wire[4] = p[1];
     }
+    #[cfg(not(feature = "std"))]
+    {
+        let p = shift_range(c, k, 0, pairs_c);
+        wire[3] = p[0];
+        wire[4] = p[1];
+    }
+
     let (next, chals) = bridge_finish(&wire, *claim, phi, tr);
     *claim = next;
     *c = fold_coeffs(c, chals);
@@ -106,8 +248,9 @@ pub(super) fn encode_overflow(c: &[E], blowup: usize) -> Vec<E> {
         }
     };
     #[cfg(feature = "std")]
-    if cw.len() >= 16_384 {
-        let chunk = cw.len().div_ceil(16);
+    if cw.len() >= 8_192 {
+        let workers = crate::parallel_workers();
+        let chunk = cw.len().div_ceil(workers);
         std::thread::scope(|scope| {
             for (i, part) in cw.chunks_mut(chunk).enumerate() {
                 let add = &add;
@@ -144,7 +287,15 @@ pub(super) fn combine_claims(weights: &[[E; 2]], evals: &[E], shifts: &[E]) -> E
         .iter()
         .zip(evals)
         .zip(shifts)
-        .fold(E::ZERO, |acc, ((w, &e), &s)| acc + w[0] * e + w[1] * s)
+        .fold(E::ZERO, |acc, ((w, &e), &s)| {
+            from_verified_ext4(qsag_whir_verified::affine_cascade_claim_step(
+                to_verified_ext4(acc),
+                to_verified_ext4(w[0]),
+                to_verified_ext4(w[1]),
+                to_verified_ext4(e),
+                to_verified_ext4(s),
+            ))
+        })
 }
 
 /// Deferred tensor kernel, including the two explicit overflow weights.

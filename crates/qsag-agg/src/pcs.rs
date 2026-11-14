@@ -87,7 +87,7 @@ const MAX_ROUND0_LEAF_VALS: usize = MAX_BATCH_POLYS * MAX_FIBER_ARITY;
 const MAX_WHIR_STAGES: usize = 4;
 
 // Prefix-free 1-byte domain tags under `CANOPY_MIDSTATE` (`cSHAKE256("", ., "QSAG.PCS.CANOPY/v2")`):
-const TAG_MERKLE_INTERNAL: u8 = 0x00;
+const TAG_MERKLE_INTERNAL: u8 = qsag_whir_verified::TAG_CANOPY_MERKLE_INTERNAL;
 const TAG_MERKLE_ROOT: u8 = 0x01;
 const TAG_ROUND0_SALT: u8 = 0x02;
 const TAG_ROUND0_SINGLE: u8 = 0x10;
@@ -791,21 +791,23 @@ pub fn verify_canopy_multiproof(
             let (u, hu) = active[k];
             let sib = u ^ 1;
             let parent = u >> 1;
-            let hp = if k + 1 < active.len() && active[k + 1].0 == sib {
+            let hsib = if k + 1 < active.len() && active[k + 1].0 == sib {
+                let coalesced = active[k + 1].1;
                 k += 2;
-                hash_merkle_internal(parent as u32, &hu, &active[k - 1].1)
+                coalesced
             } else {
-                let Some(hsib) = proof.auth_siblings.get(sib_cursor) else {
+                let Some(&supplied) = proof.auth_siblings.get(sib_cursor) else {
                     return false;
                 };
                 sib_cursor += 1;
                 k += 1;
-                if (u & 1) == 0 {
-                    hash_merkle_internal(parent as u32, &hu, hsib)
-                } else {
-                    hash_merkle_internal(parent as u32, hsib, &hu)
-                }
+                supplied
             };
+            let Some(pair) = qsag_whir_verified::step_merkle_pair_order(u as u64, 0, hu, hsib)
+            else {
+                return false;
+            };
+            let hp = hash_merkle_internal_tagged(pair.tag, parent as u32, &pair.left, &pair.right);
             active[write] = (parent, hp);
             write += 1;
         }
@@ -821,13 +823,23 @@ pub fn verify_canopy_multiproof(
 /// Zero-alloc fixed-frame internal node hash (`[0x00] || node_idx(4B) || left(32B) || right(32B)` = `69` bytes,
 /// `1` Keccak permutation from [`CANOPY_MIDSTATE`]).
 #[inline]
-fn hash_merkle_internal(node_idx: u32, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+fn hash_merkle_internal_tagged(
+    tag: u8,
+    node_idx: u32,
+    left: &[u8; 32],
+    right: &[u8; 32],
+) -> [u8; 32] {
     let mut buf = [0u8; 69];
-    buf[0] = TAG_MERKLE_INTERNAL;
+    buf[0] = tag;
     buf[1..5].copy_from_slice(&node_idx.to_le_bytes());
     buf[5..37].copy_from_slice(left);
     buf[37..69].copy_from_slice(right);
     cshake256_from_midstate_32(&CANOPY_MIDSTATE, &buf)
+}
+
+#[inline]
+fn hash_merkle_internal(node_idx: u32, left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    hash_merkle_internal_tagged(TAG_MERKLE_INTERNAL, node_idx, left, right)
 }
 
 /// 4-way SIMD internal node hash (`4` consecutive parent indices `base_node_idx .. base_node_idx + 4`
@@ -1440,9 +1452,9 @@ pub fn hypercube_to_monomial_coeffs(evals: &[Goldilocks]) -> Vec<Goldilocks> {
     let mut coeffs = evals.to_vec();
 
     #[cfg(feature = "std")]
-    if coeffs.len() >= 65_536 {
-        const THREADS: usize = 16;
-        let chunk_n = coeffs.len() / THREADS;
+    if coeffs.len() >= 32_768 {
+        let threads = crate::parallel_pow2_workers(coeffs.len() / 2);
+        let chunk_n = coeffs.len() / threads;
         let chunk_bits = chunk_n.trailing_zeros() as usize;
         std::thread::scope(|scope| {
             for sub in coeffs.chunks_mut(chunk_n) {
@@ -1463,7 +1475,7 @@ pub fn hypercube_to_monomial_coeffs(evals: &[Goldilocks]) -> Vec<Goldilocks> {
             let stride = 1usize << bit;
             for block in coeffs.chunks_mut(stride * 2) {
                 let (lo, hi) = block.split_at_mut(stride);
-                let sub_len = (stride / THREADS).max(1);
+                let sub_len = (stride / threads).max(1);
                 std::thread::scope(|scope| {
                     for (lo_c, hi_c) in lo.chunks(sub_len).zip(hi.chunks_mut(sub_len)) {
                         scope.spawn(move || {
@@ -1497,9 +1509,9 @@ pub fn hypercube_to_monomial_coeffs_ext4(evals: &[GoldilocksExt4]) -> Vec<Goldil
     let mut coeffs = evals.to_vec();
 
     #[cfg(feature = "std")]
-    if coeffs.len() >= 16_384 {
-        const THREADS: usize = 16;
-        let chunk_n = coeffs.len() / THREADS;
+    if coeffs.len() >= 8_192 {
+        let threads = crate::parallel_pow2_workers(coeffs.len() / 2);
+        let chunk_n = coeffs.len() / threads;
         let chunk_bits = chunk_n.trailing_zeros() as usize;
         std::thread::scope(|scope| {
             for sub in coeffs.chunks_mut(chunk_n) {
@@ -1520,7 +1532,7 @@ pub fn hypercube_to_monomial_coeffs_ext4(evals: &[GoldilocksExt4]) -> Vec<Goldil
             let stride = 1usize << bit;
             for block in coeffs.chunks_mut(stride * 2) {
                 let (lo, hi) = block.split_at_mut(stride);
-                let sub_len = (stride / THREADS).max(1);
+                let sub_len = (stride / threads).max(1);
                 std::thread::scope(|scope| {
                     for (lo_c, hi_c) in lo.chunks(sub_len).zip(hi.chunks_mut(sub_len)) {
                         scope.spawn(move || {
@@ -1608,6 +1620,20 @@ fn collect_coset_group_ext4(
     out
 }
 
+// The wire tower basis is [1, u², u, u³]; the extracted core uses polynomial order.
+fn to_verified_ext4(x: GoldilocksExt4) -> qsag_whir_verified::Ext4 {
+    let l = x.to_limbs();
+    qsag_whir_verified::Ext4 {
+        a: l[0].to_canonical_u64(),
+        b: l[2].to_canonical_u64(),
+        c: l[1].to_canonical_u64(),
+        d: l[3].to_canonical_u64(),
+    }
+}
+fn from_verified_ext4(x: qsag_whir_verified::Ext4) -> GoldilocksExt4 {
+    GoldilocksExt4::from_limbs([x.a, x.c, x.b, x.d].map(Goldilocks::from_u64_reduced))
+}
+
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn fold_duet_affine_ext4(
@@ -1620,9 +1646,16 @@ fn fold_duet_affine_ext4(
     alpha: GoldilocksExt4,
     beta: GoldilocksExt4,
 ) -> GoldilocksExt4 {
-    let even = (v0 + v1).mul_base(inv_two);
-    let odd = (v0 - v1).mul_base(inv_two_xk);
-    odd + (alpha + beta.mul_base(xk_sq)) * (even + theta * odd)
+    from_verified_ext4(qsag_whir_verified::cwyz_duet_fold(
+        to_verified_ext4(v0),
+        to_verified_ext4(v1),
+        inv_two_xk.to_canonical_u64(),
+        inv_two.to_canonical_u64(),
+        xk_sq.to_canonical_u64(),
+        to_verified_ext4(theta),
+        to_verified_ext4(alpha),
+        to_verified_ext4(beta),
+    ))
 }
 
 /// Fold a coset fiber `vals` of size $A = 2^s \in \{2, 4, 8, 16, 32, 64\}$ at points
@@ -1697,9 +1730,9 @@ where
     F: Fn(usize) -> T + Sync,
 {
     #[cfg(feature = "std")]
-    if out.len() >= 16_384 {
-        const THREADS: usize = 16;
-        let chunk = out.len().div_ceil(THREADS);
+    if out.len() >= 8_192 {
+        let threads = crate::parallel_workers().min(out.len());
+        let chunk = out.len().div_ceil(threads);
         let f_ref = &f;
         std::thread::scope(|scope| {
             for (t_idx, sub) in out.chunks_mut(chunk).enumerate() {
@@ -1728,7 +1761,7 @@ fn fold_base_first_var_ext4(table: &[Goldilocks], r: GoldilocksExt4) -> Vec<Gold
     out
 }
 
-/// Fold first variable of `table` at `r`, parallelizing across 16 threads when `table` is large.
+/// Fold first variable of `table` at `r`, parallelizing across hardware workers when `table` is large.
 fn fold_first_var_ext4_fast(table: &mut Vec<GoldilocksExt4>, r: GoldilocksExt4) {
     #[cfg(feature = "std")]
     if table.len() >= 16_384 {
@@ -1747,20 +1780,24 @@ fn fold_first_var_ext4_fast(table: &mut Vec<GoldilocksExt4>, r: GoldilocksExt4) 
 fn dot_base_ext4_fast(base_tbl: &[Goldilocks], ext_tbl: &[GoldilocksExt4]) -> GoldilocksExt4 {
     debug_assert_eq!(base_tbl.len(), ext_tbl.len());
     #[cfg(feature = "std")]
-    if base_tbl.len() >= 32_768 {
-        const THREADS: usize = 16;
-        let chunk = base_tbl.len() / THREADS;
+    if base_tbl.len() >= 16_384 {
+        let threads = crate::parallel_workers().min(base_tbl.len());
+        let chunk = base_tbl.len().div_ceil(threads);
         return std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..THREADS)
-                .map(|t_idx| {
-                    let b_sub = &base_tbl[t_idx * chunk..(t_idx + 1) * chunk];
-                    let e_sub = &ext_tbl[t_idx * chunk..(t_idx + 1) * chunk];
-                    scope.spawn(move || {
-                        let mut acc = GoldilocksExt4::ZERO;
-                        for (&b, &e) in b_sub.iter().zip(e_sub.iter()) {
-                            acc += e.mul_base(b);
-                        }
-                        acc
+            let handles: Vec<_> = (0..threads)
+                .filter_map(|t_idx| {
+                    let start = t_idx * chunk;
+                    (start < base_tbl.len()).then(|| {
+                        let end = (start + chunk).min(base_tbl.len());
+                        let b_sub = &base_tbl[start..end];
+                        let e_sub = &ext_tbl[start..end];
+                        scope.spawn(move || {
+                            let mut acc = GoldilocksExt4::ZERO;
+                            for (&b, &e) in b_sub.iter().zip(e_sub.iter()) {
+                                acc += e.mul_base(b);
+                            }
+                            acc
+                        })
                     })
                 })
                 .collect();
@@ -1781,25 +1818,24 @@ fn dot_base_ext4_fast(base_tbl: &[Goldilocks], ext_tbl: &[GoldilocksExt4]) -> Go
 fn dot_ext4_fast(a: &[GoldilocksExt4], b: &[GoldilocksExt4]) -> GoldilocksExt4 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(feature = "std")]
-    if a.len() >= 32_768 {
-        const THREADS: usize = 16;
-        let chunk = a.len() / THREADS;
+    if a.len() >= 16_384 {
+        let threads = crate::parallel_workers().min(a.len());
+        let chunk = a.len().div_ceil(threads);
         return std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..THREADS)
-                .map(|t_idx| {
-                    let end = if t_idx + 1 == THREADS {
-                        a.len()
-                    } else {
-                        (t_idx + 1) * chunk
-                    };
-                    let a_sub = &a[t_idx * chunk..end];
-                    let b_sub = &b[t_idx * chunk..end];
-                    scope.spawn(move || {
-                        let mut acc = GoldilocksExt4::ZERO;
-                        for (&x, &y) in a_sub.iter().zip(b_sub.iter()) {
-                            acc += x * y;
-                        }
-                        acc
+            let handles: Vec<_> = (0..threads)
+                .filter_map(|t_idx| {
+                    let start = t_idx * chunk;
+                    (start < a.len()).then(|| {
+                        let end = (start + chunk).min(a.len());
+                        let a_sub = &a[start..end];
+                        let b_sub = &b[start..end];
+                        scope.spawn(move || {
+                            let mut acc = GoldilocksExt4::ZERO;
+                            for (&x, &y) in a_sub.iter().zip(b_sub.iter()) {
+                                acc += x * y;
+                            }
+                            acc
+                        })
                     })
                 })
                 .collect();
@@ -1820,9 +1856,9 @@ fn dot_ext4_fast(a: &[GoldilocksExt4], b: &[GoldilocksExt4]) -> GoldilocksExt4 {
 fn axpy_ext4_fast(dst: &mut [GoldilocksExt4], scale: GoldilocksExt4, src: &[GoldilocksExt4]) {
     debug_assert_eq!(dst.len(), src.len());
     #[cfg(feature = "std")]
-    if dst.len() >= 32_768 {
-        const THREADS: usize = 16;
-        let chunk = dst.len() / THREADS;
+    if dst.len() >= 16_384 {
+        let threads = crate::parallel_workers().min(dst.len());
+        let chunk = dst.len().div_ceil(threads);
         std::thread::scope(|scope| {
             for (d_sub, s_sub) in dst.chunks_mut(chunk).zip(src.chunks(chunk)) {
                 scope.spawn(move || {
@@ -1857,10 +1893,12 @@ fn eval_quadratic_wire(
     sum_claim: GoldilocksExt4,
     x: GoldilocksExt4,
 ) -> GoldilocksExt4 {
-    let c0 = wire[0];
-    let c2 = wire[1];
-    let c1 = sum_claim - (c0 + c0) - c2;
-    (c2 * x + c1) * x + c0
+    from_verified_ext4(qsag_whir_verified::eval_quadratic_sumcheck_wire(
+        to_verified_ext4(wire[0]),
+        to_verified_ext4(wire[1]),
+        to_verified_ext4(sum_claim),
+        to_verified_ext4(x),
+    ))
 }
 
 fn powers_of_ext4(base: GoldilocksExt4, count: usize) -> Vec<GoldilocksExt4> {
@@ -2155,21 +2193,19 @@ where
     };
 
     #[cfg(feature = "std")]
-    if half >= 8_192 {
-        const THREADS: usize = 16;
-        let chunk = half / THREADS;
+    if half >= 4_096 {
+        let threads = crate::parallel_workers().min(half);
+        let chunk = half.div_ceil(threads);
         let run_ref = &run;
         let mut total = (GoldilocksExt4::ZERO, GoldilocksExt4::ZERO);
         std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..THREADS)
-                .map(|t_idx| {
+            let handles: Vec<_> = (0..threads)
+                .filter_map(|t_idx| {
                     let j0 = t_idx * chunk;
-                    let j1 = if t_idx + 1 == THREADS {
-                        half
-                    } else {
-                        j0 + chunk
-                    };
-                    scope.spawn(move || run_ref(j0, j1))
+                    (j0 < half).then(|| {
+                        let j1 = (j0 + chunk).min(half);
+                        scope.spawn(move || run_ref(j0, j1))
+                    })
                 })
                 .collect();
             for h in handles {
@@ -2199,13 +2235,39 @@ fn whir_open_core(
     let early_stop = sched.early_stop_vars;
     let fold_vars = state.num_vars - early_stop;
     absorb_whir_schedule(transcript, sched);
-    let mut cur_coeffs = vec![GoldilocksExt4::ZERO; (1usize << state.num_vars) + 2];
+    let core_len = 1usize << state.num_vars;
+    let mut cur_coeffs = vec![GoldilocksExt4::ZERO; core_len + 2];
     for (w, table) in weights.iter().zip(&state.hypercube_evals) {
         let c = hypercube_to_monomial_coeffs(table);
-        for (i, &v) in c.iter().enumerate() {
-            cur_coeffs[i] += w[0].mul_base(v);
-            cur_coeffs[i + 1] += w[1].mul_base(v);
+        cur_coeffs[0] += w[0].mul_base(c[0]);
+        #[cfg(feature = "std")]
+        if core_len >= 16_384 {
+            let workers = crate::parallel_workers();
+            let chunk = (core_len - 1).div_ceil(workers);
+            let c_ref = c.as_slice();
+            let w0 = w[0];
+            let w1 = w[1];
+            std::thread::scope(|scope| {
+                for (t_idx, sub) in cur_coeffs[1..core_len].chunks_mut(chunk).enumerate() {
+                    let base_i = 1 + t_idx * chunk;
+                    scope.spawn(move || {
+                        for (off, dst) in sub.iter_mut().enumerate() {
+                            let i = base_i + off;
+                            *dst = (*dst + w1.mul_base(c_ref[i - 1])) + w0.mul_base(c_ref[i]);
+                        }
+                    });
+                }
+            });
+        } else {
+            for i in 1..core_len {
+                cur_coeffs[i] = (cur_coeffs[i] + w[1].mul_base(c[i - 1])) + w[0].mul_base(c[i]);
+            }
         }
+        #[cfg(not(feature = "std"))]
+        for i in 1..core_len {
+            cur_coeffs[i] = (cur_coeffs[i] + w[1].mul_base(c[i - 1])) + w[0].mul_base(c[i]);
+        }
+        cur_coeffs[core_len] += w[1].mul_base(c[core_len - 1]);
     }
     let z_ood_0 = core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
     let stage0_ood_evals = z_ood_0.map(|z| eval_univariate_ext4(&cur_coeffs, z));
@@ -2700,7 +2762,10 @@ pub fn whir_verify_batch_with_schedule(
     {
         expected += w * eq_poly_ext4(point, &rho) * e;
     }
-    if claim != expected {
+    if !qsag_whir_verified::verify_ood_pin_eq(
+        &expected.to_limbs().map(Goldilocks::to_canonical_u64),
+        &claim.to_limbs().map(Goldilocks::to_canonical_u64),
+    ) {
         return false;
     }
     for &e in &proof.common_point_evals {
@@ -2917,7 +2982,12 @@ fn whir_verify_core(
             // Mandatory terminal sumcheck check across all accumulated evaluation, OOD, and shift claims!
             let expected_terminal =
                 terminal_sum(&phis, early_stop, &kernel_claims, &proof.final_coeffs);
-            if cur_sum_claim != expected_terminal {
+            if !qsag_whir_verified::verify_ood_pin_eq(
+                &expected_terminal
+                    .to_limbs()
+                    .map(Goldilocks::to_canonical_u64),
+                &cur_sum_claim.to_limbs().map(Goldilocks::to_canonical_u64),
+            ) {
                 return false;
             }
 
@@ -2966,9 +3036,18 @@ fn whir_verify_core(
                 return false;
             };
 
-            let final_coeffs = &proof.final_coeffs;
+            let verified_final_coeffs: Vec<qsag_whir_verified::Ext4> = proof
+                .final_coeffs
+                .iter()
+                .copied()
+                .map(to_verified_ext4)
+                .collect();
             for &(z_u, v_shift) in &final_claims {
-                if eval_univariate_ext4_at_base(final_coeffs, z_u) != v_shift {
+                if !qsag_whir_verified::verify_ext4_univariate_at_base_pin(
+                    &verified_final_coeffs,
+                    z_u.to_canonical_u64(),
+                    to_verified_ext4(v_shift),
+                ) {
                     return false;
                 }
             }
@@ -3114,16 +3193,16 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
     #[cfg(feature = "std")]
     {
         use core::sync::atomic::{AtomicU64, Ordering};
-        const THREADS: u64 = 16;
-        const PER_THREAD: u64 = 4_096; // 1,024 `x4` calls per thread; 65,536 nonces per window
-        const WINDOW: u64 = THREADS * PER_THREAD;
+        let threads = crate::parallel_workers() as u64;
+        const PER_THREAD: u64 = 4_096; // 1,024 `x4` calls per thread
+        let window: u64 = threads * PER_THREAD;
 
         let mut win_base = 0u64;
         loop {
             let best = AtomicU64::new(u64::MAX);
             let best_ref = &best;
             std::thread::scope(|scope| {
-                for t in 0..THREADS {
+                for t in 0..threads {
                     let start = win_base + t * PER_THREAD;
 
                     scope.spawn(move || {
@@ -3148,7 +3227,7 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
             if found != u64::MAX {
                 return found;
             }
-            win_base = match win_base.checked_add(WINDOW) {
+            win_base = match win_base.checked_add(window) {
                 Some(next) => next,
                 None => panic!("PoW nonce space exhausted"),
             };
@@ -3180,12 +3259,117 @@ fn verify_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>, nonce: u64) 
     }
     let chal = transcript.transcript_digest();
     let word = cshake256_pow_u64_single(&POW_MIDSTATE, &chal, nonce);
-    (word & ((1u64 << PCS_POW_BITS) - 1)) == 0
+    qsag_whir_verified::verify_stage_pow_mask(word, PCS_POW_BITS)
 }
 
 #[cfg(test)]
 mod pcs_unit_tests {
     use super::*;
+
+    #[test]
+    fn extracted_affine_core_matches_tower_arithmetic() {
+        let mut state = 1u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            Goldilocks::from_u64_reduced(state)
+        };
+        for _ in 0..1024 {
+            let v0 = GoldilocksExt4::from_limbs(core::array::from_fn(|_| next()));
+            let v1 = GoldilocksExt4::from_limbs(core::array::from_fn(|_| next()));
+            let theta = GoldilocksExt4::from_limbs(core::array::from_fn(|_| next()));
+            let alpha = GoldilocksExt4::from_limbs(core::array::from_fn(|_| next()));
+            let beta = GoldilocksExt4::from_limbs(core::array::from_fn(|_| next()));
+            let iy = next();
+            let it = next();
+            let yy = next();
+            let even = (v0 + v1).mul_base(it);
+            let odd = (v0 - v1).mul_base(iy);
+            let expected = odd + (alpha + beta.mul_base(yy)) * (even + theta * odd);
+            assert_eq!(
+                fold_duet_affine_ext4(v0, v1, iy, it, yy, theta, alpha, beta),
+                expected
+            );
+            assert!(qsag_whir_verified::verify_cwyz_duet_fold_step(
+                to_verified_ext4(v0),
+                to_verified_ext4(v1),
+                iy.to_canonical_u64(),
+                it.to_canonical_u64(),
+                yy.to_canonical_u64(),
+                to_verified_ext4(theta),
+                to_verified_ext4(alpha),
+                to_verified_ext4(beta),
+                to_verified_ext4(expected),
+            ));
+            assert!(!qsag_whir_verified::verify_cwyz_duet_fold_step(
+                to_verified_ext4(v0),
+                to_verified_ext4(v1),
+                iy.to_canonical_u64(),
+                it.to_canonical_u64(),
+                yy.to_canonical_u64(),
+                to_verified_ext4(theta),
+                to_verified_ext4(alpha),
+                to_verified_ext4(beta),
+                to_verified_ext4(expected + GoldilocksExt4::ONE),
+            ));
+            let w0 = v0;
+            let w1 = v1;
+            let w2 = theta;
+            let w3 = alpha;
+            let w4 = beta;
+            let claim = GoldilocksExt4::from_limbs(core::array::from_fn(|_| next()));
+            let phi = GoldilocksExt4::from_limbs(core::array::from_fn(|_| next()));
+            let f = w0 + phi * w1;
+            let g = w2 + phi * (claim - w0);
+            let bridge_expected = g + alpha * (f + theta * g) + beta * (w3 + theta * w4);
+            assert!(qsag_whir_verified::verify_cwyz_bridge_claim_step(
+                to_verified_ext4(w0),
+                to_verified_ext4(w1),
+                to_verified_ext4(w2),
+                to_verified_ext4(w3),
+                to_verified_ext4(w4),
+                to_verified_ext4(claim),
+                to_verified_ext4(phi),
+                to_verified_ext4(theta),
+                to_verified_ext4(alpha),
+                to_verified_ext4(beta),
+                to_verified_ext4(bridge_expected),
+            ));
+            assert_eq!(
+                eval_quadratic_wire(&[v0, v1], claim, phi),
+                (v1 * phi + (claim - (v0 + v0) - v1)) * phi + v0
+            );
+            let poly = [v0, v1, theta, alpha, beta];
+            let poly_v: Vec<_> = poly.iter().copied().map(to_verified_ext4).collect();
+            let horner_expected = eval_univariate_ext4_at_base(&poly, iy);
+            assert!(qsag_whir_verified::verify_ext4_univariate_at_base_pin(
+                &poly_v,
+                iy.to_canonical_u64(),
+                to_verified_ext4(horner_expected),
+            ));
+            assert!(!qsag_whir_verified::verify_ext4_univariate_at_base_pin(
+                &poly_v,
+                iy.to_canonical_u64(),
+                to_verified_ext4(horner_expected + GoldilocksExt4::V),
+            ));
+            let simple = odd + alpha * even;
+            assert!(qsag_whir_verified::verify_affine_duet_fold_step(
+                to_verified_ext4(v0),
+                to_verified_ext4(v1),
+                iy.to_canonical_u64(),
+                it.to_canonical_u64(),
+                to_verified_ext4(alpha),
+                to_verified_ext4(simple)
+            ));
+            assert!(!qsag_whir_verified::verify_affine_duet_fold_step(
+                to_verified_ext4(v0),
+                to_verified_ext4(v1),
+                iy.to_canonical_u64(),
+                it.to_canonical_u64(),
+                to_verified_ext4(alpha),
+                to_verified_ext4(simple + GoldilocksExt4::ONE)
+            ));
+        }
+    }
 
     #[test]
     fn exact_regime_ladder() {

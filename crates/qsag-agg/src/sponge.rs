@@ -308,9 +308,9 @@ pub fn cshake256_from_midstate_32_x4(midstate: &[u64; 25], inputs: [&[u8]; 4]) -
     qsag_asm::keccak_f1600_x4(&mut st);
 
     let mut out = [[0u8; 32]; 4];
-    for lane in 0..4 {
-        for k in 0..4 {
-            out[k][8 * lane..8 * (lane + 1)].copy_from_slice(&st.0[lane][k].to_le_bytes());
+    for (lane, st_lane) in st.0.iter().enumerate().take(4) {
+        for (dst, &word) in out.iter_mut().zip(st_lane.iter()) {
+            dst[8 * lane..8 * (lane + 1)].copy_from_slice(&word.to_le_bytes());
         }
     }
     out
@@ -321,8 +321,8 @@ pub fn cshake256_from_midstate_32_x4(midstate: &[u64; 25], inputs: [&[u8]; 4]) -
 pub fn cshake256_from_midstate_16_x4(midstate: &[u64; 25], inputs: [&[u8]; 4]) -> [[u8; 16]; 4] {
     let full = cshake256_from_midstate_32_x4(midstate, inputs);
     let mut out = [[0u8; 16]; 4];
-    for k in 0..4 {
-        out[k].copy_from_slice(&full[k][..16]);
+    for (dst, src) in out.iter_mut().zip(full.iter()) {
+        dst.copy_from_slice(&src[..16]);
     }
     out
 }
@@ -895,7 +895,7 @@ impl FiatShamirTranscript<InstanceBound> {
         num_queries: usize,
     ) -> Vec<usize> {
         assert!(half_domain_len.is_power_of_two());
-        let mask = half_domain_len - 1;
+
         let ctr_bytes = self.counter.to_le_bytes();
         self.counter += 1;
         let frame = encode_multi_frame(&[b"SQUEEZE_IDX", &self.chain_digest, label, &ctr_bytes]);
@@ -905,7 +905,11 @@ impl FiatShamirTranscript<InstanceBound> {
             .map(|c| {
                 let mut b = [0u8; 8];
                 b.copy_from_slice(c);
-                (u64::from_le_bytes(b) as usize) & mask
+                qsag_whir_verified::canonical_query_group_idx(
+                    u64::from_le_bytes(b),
+                    half_domain_len as u64,
+                )
+                .expect("nonempty query domain") as usize
             })
             .collect()
     }
@@ -986,7 +990,10 @@ mod internal_matrix_tests {
         for lengths in [[0, 17, 136, 205], [409, 272, 135, 1], [136, 0, 137, 271]] {
             let inputs = lengths.map(|len| &data[..len]);
             let expected = inputs.map(|input| cshake256_from_midstate_32(&CANOPY_MIDSTATE, input));
-            assert_eq!(cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, inputs), expected);
+            assert_eq!(
+                cshake256_from_midstate_32_x4(&CANOPY_MIDSTATE, inputs),
+                expected
+            );
             let short = cshake256_from_midstate_16_x4(&CANOPY_MIDSTATE, inputs);
             for lane in 0..4 {
                 assert_eq!(short[lane], expected[lane][..16]);

@@ -660,7 +660,7 @@ fn build_shard_witness(
 
     #[cfg(feature = "std")]
     if num_signer_slots >= 2 {
-        let w_threads = 8usize.min(num_signer_slots);
+        let w_threads = crate::parallel_pow2_workers(num_signer_slots);
         let chunk_slots = num_signer_slots / w_threads;
         let fill_ref = &fill_slot;
         std::thread::scope(|scope| {
@@ -1175,7 +1175,7 @@ fn prove_shard_rows(
 
         #[cfg(feature = "std")]
         let mut sum_evals = if half >= 16 {
-            let sc_threads = 16usize.min(half);
+            let sc_threads = crate::parallel_workers().min(half);
             let chunk = half / sc_threads;
             let eval_ref = &eval_range;
             let partials: Vec<[GoldilocksExt4; ROW_SUMCHECK_COEFFS]> =
@@ -1197,8 +1197,8 @@ fn prove_shard_rows(
                 });
             let mut tot = [GoldilocksExt4::ZERO; ROW_SUMCHECK_COEFFS];
             for part in partials {
-                for k in 0..ROW_SUMCHECK_COEFFS {
-                    tot[k] += part[k];
+                for (dst, &val) in tot.iter_mut().zip(part.iter()) {
+                    *dst += val;
                 }
             }
             tot
@@ -1227,7 +1227,7 @@ fn prove_shard_rows(
             cols_ext4 = vec![[GoldilocksExt4::ZERO; NUM_TRACE_COLS]; half];
             #[cfg(feature = "std")]
             if half >= 64 {
-                let fold_threads = 16usize.min(half);
+                let fold_threads = crate::parallel_pow2_workers(half);
                 let chunk = half / fold_threads;
                 std::thread::scope(|scope| {
                     for (t_idx, sub_dst) in cols_ext4.chunks_mut(chunk).enumerate() {
@@ -1271,7 +1271,7 @@ fn prove_shard_rows(
             let (lo_half, hi_half) = cols_ext4.split_at_mut(half);
             #[cfg(feature = "std")]
             if half >= 64 {
-                let fold_threads = 16usize.min(half);
+                let fold_threads = crate::parallel_pow2_workers(half);
                 let chunk = half / fold_threads;
                 std::thread::scope(|scope| {
                     for (lo_sub, hi_sub) in
@@ -1322,18 +1322,20 @@ fn prove_shard_rows(
                 let a0 = active_tbl[s];
                 let a1 = active_tbl[s + half_s];
                 active_tbl[s] = a0 + chal * (a1 - a0);
-                for i in 0..4 {
-                    let p0 = pk_seed_tbl[s][i];
-                    let p1 = pk_seed_tbl[s + half_s][i];
-                    pk_seed_tbl[s][i] = p0 + chal * (p1 - p0);
-                    let r0 = pk_root_tbl[s][i];
-                    let r1 = pk_root_tbl[s + half_s][i];
-                    pk_root_tbl[s][i] = r0 + chal * (r1 - r0);
+                let p_hi = pk_seed_tbl[s + half_s];
+                for (dst, &p1) in pk_seed_tbl[s].iter_mut().zip(p_hi.iter()) {
+                    let p0 = *dst;
+                    *dst = p0 + chal * (p1 - p0);
                 }
-                for i in 0..5 {
-                    let m0 = mu_tbl[s][i];
-                    let m1 = mu_tbl[s + half_s][i];
-                    mu_tbl[s][i] = m0 + chal * (m1 - m0);
+                let r_hi = pk_root_tbl[s + half_s];
+                for (dst, &r1) in pk_root_tbl[s].iter_mut().zip(r_hi.iter()) {
+                    let r0 = *dst;
+                    *dst = r0 + chal * (r1 - r0);
+                }
+                let m_hi = mu_tbl[s + half_s];
+                for (dst, &m1) in mu_tbl[s].iter_mut().zip(m_hi.iter()) {
+                    let m0 = *dst;
+                    *dst = m0 + chal * (m1 - m0);
                 }
             }
             active_tbl.truncate(half_s);
@@ -1646,7 +1648,12 @@ fn verify_shard_rows(
     // CRITICAL TERMINAL SUMCHECK CHECK (`cur_sum_claim == committed_mle_eval` constraint polynomial):
     let expected_terminal_val =
         eval_batched_row_constraints_ext4(&circuit.unique_ops, &cols_arr, &pub_eval, gamma);
-    if cur_sum_claim != expected_terminal_val {
+    if !qsag_whir_verified::verify_ood_pin_eq(
+        &expected_terminal_val
+            .to_limbs()
+            .map(Goldilocks::to_canonical_u64),
+        &cur_sum_claim.to_limbs().map(Goldilocks::to_canonical_u64),
+    ) {
         return None;
     }
 
