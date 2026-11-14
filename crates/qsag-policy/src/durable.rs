@@ -463,6 +463,113 @@ impl FsPolicyGenerationFence {
     }
 }
 
+const SHARED_DOMAIN: &[u8] = b"QSAG.POLICY.SHARED_LEDGER.V1";
+
+impl SharedWindowSpendLedger {
+    /// Monotonic revision to fence outside the checkpoint's rollback domain.
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Authenticate the shared accounting state. Persist this together with participating
+    /// guard checkpoints before release. Recovery must retain the same window authority.
+    pub fn export_durable_checkpoint(&self, storage_mac_key: &[u8; 32]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(SHARED_DOMAIN);
+        out.extend_from_slice(&self.policy_digest);
+        out.extend_from_slice(&self.authority_binding());
+        out.extend_from_slice(&self.generation.to_be_bytes());
+        out.extend_from_slice(&self.current_window_id.to_be_bytes());
+        out.extend_from_slice(&self.accumulated_window_spend.to_be_bytes());
+        for (values, floor) in [
+            (&self.burned_intent_nonces, self.min_nonce_watermark),
+            (&self.burned_sessions, self.min_session_watermark),
+        ] {
+            out.extend_from_slice(&(values.len() as u16).to_be_bytes());
+            for value in values { out.extend_from_slice(value); }
+            out.push(u8::from(floor.is_some()));
+            out.extend_from_slice(&floor.unwrap_or([0; 32]));
+        }
+        let tag = cshake256_framed_32(SHARED_DOMAIN, &[storage_mac_key, &out]);
+        out.extend_from_slice(&tag);
+        out
+    }
+
+    fn authority_binding(&self) -> [u8; 32] {
+        match &self.window_authority {
+            None => cshake256_framed_32(SHARED_DOMAIN, &[b"no authority"]),
+            Some(a) => cshake256_framed_32(SHARED_DOMAIN, &[b"authority", &a.policy_id, &a.key]),
+        }
+    }
+
+    /// Restore only a fully authenticated, canonical, nonregressing state. The generation
+    /// floor must come from independently retained storage, never from the supplied bytes.
+    /// Restore into a newly provisioned handle under the same exclusive storage lock.
+    pub fn restore_from_durable_checkpoint(
+        &mut self,
+        bytes: &[u8],
+        storage_mac_key: &[u8; 32],
+        min_expected_generation: u64,
+    ) -> Result<u64, PolicyGuardError> {
+        let split = bytes.len().checked_sub(32).ok_or(PolicyGuardError::InvalidCheckpoint)?;
+        let (body, tag) = bytes.split_at(split);
+        if !ct_eq_bytes(&cshake256_framed_32(SHARED_DOMAIN, &[storage_mac_key, body]), tag) {
+            return Err(PolicyGuardError::AuthenticationFailed);
+        }
+        let mut r = Reader(body);
+        if r.take::<28>()? != SHARED_DOMAIN {
+            return Err(PolicyGuardError::InvalidCheckpoint);
+        }
+        if !ct_eq_bytes(&r.take::<32>()?, &self.policy_digest)
+            || !ct_eq_bytes(&r.take::<32>()?, &self.authority_binding()) {
+            return Err(PolicyGuardError::WrongGuard);
+        }
+        let generation = u64::from_be_bytes(r.take()?);
+        let window = u64::from_be_bytes(r.take()?);
+        let spend = u128::from_be_bytes(r.take()?);
+        let mut sets = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let count = r.short()?;
+            if count > MAX_BURNED_INTENT_NONCES { return Err(PolicyGuardError::InvalidCheckpoint); }
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count { values.push(r.take::<32>()?); }
+            let present = r.flag()?;
+            let raw = r.take::<32>()?;
+            if !present && raw != [0; 32] { return Err(PolicyGuardError::InvalidCheckpoint); }
+            let floor = present.then_some(raw);
+            if values.windows(2).any(|w| w[0] >= w[1])
+                || values.iter().any(|v| floor.is_some_and(|f| *v <= f)) {
+                return Err(PolicyGuardError::InvalidCheckpoint);
+            }
+            sets.push((values, floor));
+        }
+        if !r.0.is_empty() { return Err(PolicyGuardError::InvalidCheckpoint); }
+        if self.failed || generation < min_expected_generation.max(self.generation)
+            || window < self.current_window_id
+            || (window == self.current_window_id && spend < self.accumulated_window_spend) {
+            return Err(PolicyGuardError::Rollback);
+        }
+        for ((old, old_floor), (new, floor)) in [
+            (&self.burned_intent_nonces, self.min_nonce_watermark),
+            (&self.burned_sessions, self.min_session_watermark),
+        ].into_iter().zip(&sets) {
+            if *floor < old_floor || old.iter().any(|v| !new.contains(v) && !floor.is_some_and(|f| *v <= f)) {
+                return Err(PolicyGuardError::Rollback);
+            }
+        }
+        let (sessions, session_floor) = sets.pop().ok_or(PolicyGuardError::InvalidCheckpoint)?;
+        let (nonces, nonce_floor) = sets.pop().ok_or(PolicyGuardError::InvalidCheckpoint)?;
+        self.generation = generation;
+        self.current_window_id = window;
+        self.accumulated_window_spend = spend;
+        self.burned_intent_nonces = nonces;
+        self.min_nonce_watermark = nonce_floor;
+        self.burned_sessions = sessions;
+        self.min_session_watermark = session_floor;
+        Ok(generation)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
