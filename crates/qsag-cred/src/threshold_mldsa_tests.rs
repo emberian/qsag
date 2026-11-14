@@ -646,3 +646,652 @@ fn assert_fips_key(shares: &[ThresholdMlDsaSignerShare]) {
     );
     // The public key is the standard key of this secret, and the standard
     // signer with this secret verifies under it.
+    let (standard_pk, standard_sk) =
+        signing_key_from_secret_for_test(MlDsaLevel::MlDsa44, pack.rho, s1, s2);
+    assert_eq!(standard_pk, pack.pk_bytes);
+    let signature = ml_dsa_sign_deterministic(&standard_sk, b"standard signer", b"").unwrap();
+    assert!(ml_dsa_verify(
+        MlDsaLevel::MlDsa44,
+        &pack.pk_bytes,
+        b"standard signer",
+        b"",
+        &signature
+    ));
+}
+
+#[test]
+fn two_of_three_keygen_and_signing_are_standard_fips204() {
+    let started = Instant::now();
+    let mut shares = dkg(&[30, 10, 20], 2, 1);
+    let keygen = started.elapsed();
+    assert_fips_key(&shares);
+    let pk = shares[0].verification_pack().pk_bytes.clone();
+
+    for (session, msg) in [
+        (2u8, &b"threshold message one"[..]),
+        (3, &b"threshold message two"[..]),
+    ] {
+        let started = Instant::now();
+        let (results, log) = sign(&mut shares, &[10, 20, 30], session, msg, Vec::new(), None);
+        let elapsed = started.elapsed();
+        let outputs: Vec<ThresholdSignOutput> = results.into_iter().map(|r| r.unwrap()).collect();
+        assert!(outputs.iter().all(|o| o.signature == outputs[0].signature));
+        assert_eq!(outputs[0].signature.len(), 2420);
+        assert!(ml_dsa_verify(
+            MlDsaLevel::MlDsa44,
+            &pk,
+            msg,
+            b"ctx",
+            &outputs[0].signature
+        ));
+        assert!(!ml_dsa_verify(
+            MlDsaLevel::MlDsa44,
+            &pk,
+            b"another message",
+            b"ctx",
+            &outputs[0].signature
+        ));
+        assert!(!ml_dsa_verify(
+            MlDsaLevel::MlDsa44,
+            &pk,
+            msg,
+            b"other",
+            &outputs[0].signature
+        ));
+        // z is released at most once per attempt, and only straight after a
+        // verdict opening of the rejection phase.
+        let releases: Vec<usize> = (0..log.len())
+            .filter(|&i| log[i].phase == PHASE_SIGN_RELEASE)
+            .collect();
+        assert!(!releases.is_empty() && releases.len() <= outputs[0].attempts as usize);
+        for &i in &releases {
+            assert_eq!(log[i].kind, RoundKind::Open);
+            assert_eq!(
+                (log[i - 1].phase, log[i - 1].kind),
+                (PHASE_SIGN_REJECTION, RoundKind::Open)
+            );
+        }
+        let bytes: u64 = outputs.iter().map(|o| o.stats.bytes_sent).sum();
+        println!(
+            "MEASURE (2,3) sign: attempts={} rounds={} bytes_all_parties={} multiplications={} elapsed_ms={:.1} per_attempt_ms={:.1}",
+            outputs[0].attempts,
+            outputs[0].stats.rounds,
+            bytes,
+            outputs[0].stats.multiplications,
+            elapsed.as_secs_f64() * 1e3,
+            elapsed.as_secs_f64() * 1e3 / outputs[0].attempts as f64,
+        );
+    }
+    println!(
+        "MEASURE (2,3) keygen: elapsed_ms={:.1}",
+        keygen.as_secs_f64() * 1e3
+    );
+}
+
+#[test]
+fn two_of_five_signs_with_any_three_custodians() {
+    let started = Instant::now();
+    let mut shares = dkg(&[1, 2, 3, 4, 5], 2, 4);
+    println!(
+        "MEASURE (2,5) keygen: elapsed_ms={:.1}",
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    assert_fips_key(&shares);
+    let pk = shares[0].verification_pack().pk_bytes.clone();
+    for (session, quorum) in [(5u8, [1u16, 3, 5]), (6, [2, 3, 4])] {
+        let started = Instant::now();
+        let (results, _) = sign(
+            &mut shares,
+            &quorum,
+            session,
+            b"any three of five",
+            Vec::new(),
+            None,
+        );
+        let elapsed = started.elapsed();
+        let outputs: Vec<ThresholdSignOutput> = results.into_iter().map(|r| r.unwrap()).collect();
+        assert!(ml_dsa_verify(
+            MlDsaLevel::MlDsa44,
+            &pk,
+            b"any three of five",
+            b"ctx",
+            &outputs[0].signature
+        ));
+        let bytes: u64 = outputs.iter().map(|o| o.stats.bytes_sent).sum();
+        println!(
+            "MEASURE (2,5) sign quorum {:?}: attempts={} rounds={} bytes_all_parties={} elapsed_ms={:.1}",
+            quorum,
+            outputs[0].attempts,
+            outputs[0].stats.rounds,
+            bytes,
+            elapsed.as_secs_f64() * 1e3,
+        );
+    }
+}
+
+#[test]
+fn three_of_five_keygen_is_standard_fips204() {
+    let started = Instant::now();
+    let shares = dkg(&[1, 2, 3, 4, 5], 3, 7);
+    println!(
+        "MEASURE (3,5) keygen: elapsed_ms={:.1}",
+        started.elapsed().as_secs_f64() * 1e3
+    );
+    assert_fips_key(&shares);
+    let other = dkg(&[1, 2, 3, 4], 2, 8);
+    assert_fips_key(&other);
+}
+
+#[test]
+fn unsupported_configurations_and_quorums_are_rejected() {
+    let mut net = Endpoint {
+        net: Arc::new(LocalNet {
+            state: Mutex::new(NetState {
+                round: 0,
+                posted: Vec::new(),
+                taken: Vec::new(),
+                stopped: true,
+                log: Vec::new(),
+            }),
+            changed: Condvar::new(),
+        }),
+        me: 0,
+        tamper: None,
+    };
+    let config = |level, threshold, ids: &[u16]| ThresholdMlDsaDkgConfig {
+        level,
+        threshold,
+        party_ids: ids.to_vec(),
+        session_id: [0; 32],
+    };
+    let attempt = |c: ThresholdMlDsaDkgConfig, net: &mut Endpoint| {
+        threshold_mldsa_dkg_party(&c, 1, &[0; 32], net).unwrap_err()
+    };
+    assert_eq!(
+        attempt(config(MlDsaLevel::MlDsa44, 2, &[1, 2]), &mut net),
+        ThresholdMlDsaError::InsufficientHonestHolderCoverage {
+            threshold: 2,
+            num_parties: 2
+        }
+    );
+    assert_eq!(
+        attempt(config(MlDsaLevel::MlDsa44, 3, &[1, 2, 3, 4]), &mut net),
+        ThresholdMlDsaError::InsufficientHonestHolderCoverage {
+            threshold: 3,
+            num_parties: 4
+        }
+    );
+    assert_eq!(
+        attempt(config(MlDsaLevel::MlDsa44, 1, &[1, 2, 3]), &mut net),
+        ThresholdMlDsaError::InvalidThresholdParameters {
+            threshold: 1,
+            num_parties: 3
+        }
+    );
+    assert_eq!(
+        attempt(config(MlDsaLevel::MlDsa65, 2, &[1, 2, 3]), &mut net),
+        ThresholdMlDsaError::UnsupportedLevel
+    );
+    assert_eq!(
+        attempt(config(MlDsaLevel::MlDsa44, 2, &[1, 2, 2]), &mut net),
+        ThresholdMlDsaError::DuplicateOrUnknownParty { party_id: 2 }
+    );
+
+    // Two custodians of a (2,3) key are a dishonest-majority quorum: refused.
+    let mut shares = dkg(&[1, 2, 3], 2, 9);
+    let request = ThresholdSignSession {
+        session_id: [1; 32],
+        quorum: vec![1, 2],
+    };
+    let error = threshold_sign_mldsa_party(
+        &mut shares[0],
+        &request,
+        b"m",
+        b"",
+        &[0; 32],
+        &mut AllowBurn,
+        &mut net,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        ThresholdMlDsaError::QuorumTooSmall { have: 2, need: 3 }
+    );
+    let request = ThresholdSignSession {
+        session_id: [1; 32],
+        quorum: vec![1, 2, 9],
+    };
+    let error = threshold_sign_mldsa_party(
+        &mut shares[0],
+        &request,
+        b"m",
+        b"",
+        &[0; 32],
+        &mut AllowBurn,
+        &mut net,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        ThresholdMlDsaError::DuplicateOrUnknownParty { party_id: 9 }
+    );
+}
+
+#[test]
+fn a_refused_attempt_reservation_stops_before_any_mask_exists() {
+    struct DenyBurn;
+    impl NonceBurnPersistence for DenyBurn {
+        fn reserve(&mut self, _: u16, _: u64, _: &[u8; 32], _: u32) -> bool {
+            false
+        }
+    }
+    let mut shares = dkg(&[1, 2, 3], 2, 12);
+    let request = ThresholdSignSession {
+        session_id: [3; 32],
+        quorum: vec![1, 2, 3],
+    };
+    let states: Vec<&mut ThresholdMlDsaSignerShare> = shares.iter_mut().collect();
+    let (results, log) = run(states, Vec::new(), |me, share, net| {
+        threshold_sign_mldsa_party(
+            share,
+            &request,
+            b"m",
+            b"",
+            &[me as u8; 32],
+            &mut DenyBurn,
+            net,
+        )
+    });
+    assert!(
+        results
+            .iter()
+            .all(|r| r == &Err(ThresholdMlDsaError::NoncePersistenceFailed))
+    );
+    assert!(log.iter().all(|r| r.phase == PHASE_SETUP));
+}
+
+#[test]
+fn custodians_given_different_messages_never_start() {
+    let mut shares = dkg(&[1, 2, 3], 2, 13);
+    let request = ThresholdSignSession {
+        session_id: [4; 32],
+        quorum: vec![1, 2, 3],
+    };
+    let states: Vec<&mut ThresholdMlDsaSignerShare> = shares.iter_mut().collect();
+    let (results, log) = run(states, Vec::new(), |me, share, net| {
+        let msg: &[u8] = if me == 2 {
+            b"pay mallory"
+        } else {
+            b"pay alice"
+        };
+        threshold_sign_mldsa_party(
+            share,
+            &request,
+            msg,
+            b"",
+            &[me as u8 + 9; 32],
+            &mut AllowBurn,
+            net,
+        )
+    });
+    for result in &results {
+        assert!(matches!(
+            result,
+            Err(ThresholdMlDsaError::Mpc(
+                MpcError::KeyConfirmationMismatch { .. }
+            ))
+        ));
+    }
+    assert!(
+        log.iter()
+            .all(|r| matches!(r.kind, RoundKind::KeySetup | RoundKind::KeyConfirm))
+    );
+}
+
+#[test]
+fn malformed_mask_share_aborts_before_anything_about_y_is_opened() {
+    // The corrupt custodian adds an error to a product inside the bit
+    // generation of y and the conversion masks, making a "bit" a non-bit.
+    for nth in [0usize, 1, 7] {
+        let mut shares = dkg(&[1, 2, 3], 2, 14);
+        let fault = Some((1, PHASE_SIGN_MASKS, nth));
+        let (results, log) = sign(
+            &mut shares,
+            &[1, 2, 3],
+            20 + nth as u8,
+            b"m",
+            Vec::new(),
+            fault,
+        );
+        for result in &results {
+            assert_eq!(
+                result,
+                &Err(ThresholdMlDsaError::Mpc(
+                    MpcError::MultiplicationCheckFailed
+                ))
+            );
+        }
+        assert!(
+            log.iter().all(|r| r.phase <= PHASE_SIGN_MASKS),
+            "no w1, verdict or z round may exist"
+        );
+        // The only openings are verification coins and the masked final claim.
+        let opens = log
+            .iter()
+            .filter(|r| r.phase == PHASE_SIGN_MASKS && r.kind == RoundKind::Open)
+            .count();
+        let reshares = log
+            .iter()
+            .filter(|r| r.kind == RoundKind::VerifyReshare)
+            .count();
+        assert_eq!(opens, reshares + 1);
+    }
+}
+
+#[test]
+fn a_share_rewritten_in_transit_aborts_before_any_opening() {
+    // Rewriting a correction on the wire makes sender and receiver views of
+    // the subset differ; either the digest comparison or the multiplication
+    // check must stop the session before w1, the verdict or z exist.
+    let mut shares = dkg(&[1, 2, 3], 2, 19);
+    let tampers = vec![
+        None,
+        flip(RoundKind::Multiply, PHASE_SIGN_MASKS, 1, None),
+        None,
+    ];
+    let (results, log) = sign(&mut shares, &[1, 2, 3], 60, b"m", tampers, None);
+    for (me, result) in results.iter().enumerate() {
+        if me != 1 {
+            assert!(matches!(
+                result,
+                Err(ThresholdMlDsaError::Mpc(
+                    MpcError::ViewDigestMismatch { .. } | MpcError::MultiplicationCheckFailed
+                ))
+            ));
+        }
+    }
+    assert!(log.iter().all(|r| r.phase <= PHASE_SIGN_MASKS));
+}
+
+#[test]
+fn a_fault_in_high_bits_or_in_the_rejection_circuit_never_releases_z() {
+    for (phase, nth) in [
+        (PHASE_SIGN_HIGH_BITS, 0usize),
+        (PHASE_SIGN_HIGH_BITS, 60),
+        (PHASE_SIGN_REJECTION, 0),
+        (PHASE_SIGN_REJECTION, 21),
+        (PHASE_SIGN_REJECTION, 22),
+    ] {
+        let mut shares = dkg(&[1, 2, 3], 2, 15);
+        let (results, log) = sign(
+            &mut shares,
+            &[1, 2, 3],
+            30 + nth as u8,
+            b"m",
+            Vec::new(),
+            Some((2, phase, nth)),
+        );
+        for result in &results {
+            assert_eq!(
+                result,
+                &Err(ThresholdMlDsaError::Mpc(
+                    MpcError::MultiplicationCheckFailed
+                ))
+            );
+        }
+        assert!(
+            log.iter().all(|r| r.phase != PHASE_SIGN_RELEASE),
+            "z must not be released"
+        );
+        assert!(
+            log.iter().all(|r| r.phase <= phase),
+            "abort happens inside the faulted phase"
+        );
+    }
+}
+
+#[test]
+fn a_substituted_response_share_is_refused() {
+    // After acceptance the corrupt custodian reports a z component that is
+    // not the committed y component plus c times its key component.
+    let mut shares = dkg(&[1, 2, 3], 2, 16);
+    let pk = shares[0].verification_pack().pk_bytes.clone();
+    let tampers = vec![
+        None,
+        flip(RoundKind::Open, PHASE_SIGN_RELEASE, 0, None),
+        None,
+    ];
+    let (results, _) = sign(&mut shares, &[1, 2, 3], 40, b"m", tampers, None);
+    assert!(matches!(
+        results[0],
+        Err(ThresholdMlDsaError::Mpc(
+            MpcError::OpeningInconsistent { .. }
+        ))
+    ));
+    for result in results.iter().flatten() {
+        assert!(ml_dsa_verify(
+            MlDsaLevel::MlDsa44,
+            &pk,
+            b"m",
+            b"ctx",
+            &result.signature
+        ));
+    }
+
+    // Lying in the broadcast digest instead is seen by everyone.
+    let mut shares = dkg(&[1, 2, 3], 2, 17);
+    let mut tampers: Vec<Option<Tamper>> = vec![None, None, None];
+    tampers[1] = Some(Box::new(|info, _, broadcast| {
+        if info.kind == RoundKind::Open && info.phase == PHASE_SIGN_RELEASE {
+            broadcast[0] ^= 1;
+        }
+    }));
+    let (results, _) = sign(&mut shares, &[1, 2, 3], 41, b"m", tampers, None);
+    for (me, result) in results.iter().enumerate() {
+        if me != 1 {
+            assert!(matches!(
+                result,
+                Err(ThresholdMlDsaError::Mpc(
+                    MpcError::OpeningInconsistent { .. }
+                ))
+            ));
+        }
+    }
+}
+
+#[test]
+fn rejected_attempts_expose_only_masked_values() {
+    // Run sessions until one needs several attempts, then check the public
+    // round structure of every rejected attempt: no release round.
+    let mut shares = dkg(&[1, 2, 3], 2, 18);
+    let mut session = 50u8;
+    loop {
+        let (results, log) = sign(
+            &mut shares,
+            &[1, 2, 3],
+            session,
+            b"abort structure",
+            Vec::new(),
+            None,
+        );
+        let output = results[0].clone().unwrap();
+        session += 1;
+        if output.attempts < 2 {
+            continue;
+        }
+        // Split party 0's log into attempts at each return to the mask phase.
+        let mut attempts: Vec<Vec<RoundInfo>> = Vec::new();
+        for (i, record) in log.iter().enumerate() {
+            if record.phase == PHASE_SIGN_MASKS && (i == 0 || log[i - 1].phase != PHASE_SIGN_MASKS)
+            {
+                attempts.push(Vec::new());
+            }
+            if let Some(current) = attempts.last_mut() {
+                current.push(*record);
+            }
+        }
+        assert_eq!(attempts.len(), output.attempts as usize);
+        let (last, rejected) = attempts.split_last().unwrap();
+        for attempt in rejected {
+            assert!(attempt.iter().all(|r| r.phase != PHASE_SIGN_RELEASE));
+        }
+        assert_eq!(
+            last.iter()
+                .filter(|r| r.phase == PHASE_SIGN_RELEASE)
+                .count(),
+            1
+        );
+        break;
+    }
+}
+
+#[test]
+fn attempt_counts_follow_the_fips_rejection_rate() {
+    // ML-DSA-44 accepts an attempt with probability about 0.235. Twelve
+    // sessions on one key: every signature verifies and the mean number of
+    // attempts is plausible for that rate (the exact rate is not asserted).
+    let mut shares = dkg(&[1, 2, 3], 2, 70);
+    let pk = shares[0].verification_pack().pk_bytes.clone();
+    let mut attempts = Vec::new();
+    let mut bytes = 0u64;
+    let mut rounds = 0u64;
+    let started = Instant::now();
+    for session in 0..12u8 {
+        let msg = [session; 9];
+        let (results, _) = sign(
+            &mut shares,
+            &[1, 2, 3],
+            100 + session,
+            &msg,
+            Vec::new(),
+            None,
+        );
+        let outputs: Vec<ThresholdSignOutput> = results.into_iter().map(|r| r.unwrap()).collect();
+        assert!(ml_dsa_verify(
+            MlDsaLevel::MlDsa44,
+            &pk,
+            &msg,
+            b"ctx",
+            &outputs[0].signature
+        ));
+        attempts.push(outputs[0].attempts);
+        rounds += outputs[0].stats.rounds;
+        bytes += outputs.iter().map(|o| o.stats.bytes_sent).sum::<u64>();
+    }
+    let total: u32 = attempts.iter().sum();
+    println!(
+        "MEASURE (2,3) 12 signatures: attempts={attempts:?} total_attempts={total} mean_ms_per_signature={:.1} mean_bytes_per_signature={} mean_rounds_per_signature={}",
+        started.elapsed().as_secs_f64() * 1e3 / 12.0,
+        bytes / 12,
+        rounds / 12,
+    );
+    assert!(
+        attempts.iter().any(|&a| a != attempts[0]),
+        "attempt counts must vary across sessions"
+    );
+    assert!(
+        (20..=110).contains(&total),
+        "mean attempts {} is implausible",
+        total as f64 / 12.0
+    );
+}
+
+#[test]
+fn three_of_five_signs_with_all_five_custodians() {
+    // Privacy threshold two: the quorum is all five, ten subsets of three.
+    let mut shares = dkg(&[1, 2, 3, 4, 5], 3, 80);
+    let pk = shares[0].verification_pack().pk_bytes.clone();
+    let started = Instant::now();
+    let (results, _) = sign(
+        &mut shares,
+        &[1, 2, 3, 4, 5],
+        81,
+        b"three of five",
+        Vec::new(),
+        None,
+    );
+    let elapsed = started.elapsed();
+    let outputs: Vec<ThresholdSignOutput> = results.into_iter().map(|r| r.unwrap()).collect();
+    assert!(ml_dsa_verify(
+        MlDsaLevel::MlDsa44,
+        &pk,
+        b"three of five",
+        b"ctx",
+        &outputs[0].signature
+    ));
+    let bytes: u64 = outputs.iter().map(|o| o.stats.bytes_sent).sum();
+    println!(
+        "MEASURE (3,5) sign: attempts={} rounds={} bytes_all_parties={} multiplications={} elapsed_ms={:.1}",
+        outputs[0].attempts,
+        outputs[0].stats.rounds,
+        bytes,
+        outputs[0].stats.multiplications,
+        elapsed.as_secs_f64() * 1e3,
+    );
+}
+
+#[test]
+fn zero_width_range_returns_error_without_underflow() {
+    let st = Structure::new(3, 2).unwrap();
+    let (results, _) = run(vec![(); 3], Vec::new(), |me, (), net| {
+        let mut engine = engine_for(net, &st, me);
+        assert_eq!(
+            masked_range_test(&mut engine, &[0], &[0], &[]).unwrap_err(),
+            MpcError::InvalidRange
+        );
+        assert_eq!(
+            masked_range_test(&mut engine, &[0], &[], &[]).unwrap_err(),
+            MpcError::InvalidRange
+        );
+        engine.verify()
+    });
+    for result in results {
+        result.unwrap();
+    }
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn durable_nonce_restart_recovers_epoch_and_rejects_both_replay_keys() {
+    let dir = std::env::temp_dir().join(std::format!("qsag-cred-nonce-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let path = dir.join("burns");
+    let (pk_bytes, _) = crate::fips204_ntt::ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[91; 32]);
+    let pack = ThresholdVerificationPack {
+        level: MlDsaLevel::MlDsa44,
+        threshold: 2,
+        party_ids: vec![1, 2, 3],
+        rho: [0; 32],
+        pk_bytes,
+        t: Vec::new(),
+    };
+    let key_id = pack.policy_signing_key_id();
+    {
+        let mut store = FsNonceBurnStore::create(&path, key_id).unwrap();
+        assert!(store.reserve(1, 7, &[3; 32], 2));
+        assert!(!store.reserve(1, 7, &[4; 32], 3));
+        assert!(!store.reserve(1, 8, &[3; 32], 2));
+    }
+    assert!(FsNonceBurnStore::open(&path, [0; 32]).is_err());
+    {
+        let mut store = FsNonceBurnStore::open(&path, key_id).unwrap();
+        let mut restarted = ThresholdMlDsaSignerShare {
+            party_id: 1,
+            pack,
+            subsets: Vec::new(),
+            next_epoch: 0,
+        };
+        restarted.recover_epoch_from_store(&store).unwrap();
+        assert_eq!(restarted.next_epoch, 8);
+        assert!(!store.reserve(1, 7, &[9; 32], 0));
+        assert!(!store.reserve(1, 8, &[3; 32], 2));
+        assert!(store.reserve(1, 8, &[3; 32], 3));
+        assert!(store.reserve(2, 0, &[3; 32], 2));
+        restarted.recover_epoch_from_store(&store).unwrap();
+        assert_eq!(restarted.next_epoch, 9);
+    }
+    let store = FsNonceBurnStore::open(&path, key_id).unwrap();
+    assert_eq!(store.next_epoch(&key_id, 1).unwrap(), 9);
+    drop(store);
+    std::fs::remove_dir_all(dir).unwrap();
+}
