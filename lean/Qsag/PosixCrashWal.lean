@@ -8769,4 +8769,283 @@ theorem vault_state_file_rollback_rejected {Secret : Type} (tag : Secret → Lis
   show ((tag old == tag old) && (tag new == tag old)) = false
   rw [h, Bool.and_false]
 
+/-! ## 8. Rust storage layouts and explicit implementation boundaries
+
+The earlier single-record inode-sealed WAL and all-resource ceremony are specifications,
+not encodings of `LockedRecord` or `FsCeremonyJournal`. In particular their split-brain
+result requires authenticated inode identity, which Rust does not provide. Rust requires
+trusted ancestor directories and permanent live sidecars. Its eight-byte seal alone cannot
+establish inode equality. The definitions below use the actual backend-specific MAC inputs.
+No MAC security follows from a tag-length theorem; security is an experiment assumption.
+-/
+namespace RustDurability
+
+abbrev Bytes := List UInt8
+
+def u64le (n : Nat) : Bytes := (encodeU64BeNat n).reverse
+
+def u32le (n : Nat) : Bytes := (pcwEncodeU32Be n).reverse
+
+def framed64 (frames : List Bytes) : Bytes :=
+  u64le frames.length ++ (frames.flatMap fun b => u64le b.length ++ b)
+
+/-- Actual cSHAKE256 keyed primitive, not the small-state test authenticator. -/
+def keyedMac (domain key input : Bytes) : Bytes := cshake256Bytes domain (key ++ input)
+
+theorem keyedMac_width (domain : Bytes) : WellFormedMacFn (keyedMac domain) := by
+  intro key input
+  exact cshake256Bytes_length _ _
+
+/-- `LockedRecord` sidecar: seal is random eight bytes; identity is unauthenticated metadata. -/
+def sidecarBytes (seal : Bytes) (device inode : Nat) : Bytes :=
+  "QSAGLCK1".toUTF8.toList ++ seal ++ u64le device ++ u64le inode
+
+def recordBytes (seal payload : Bytes) : Bytes :=
+  "QSAGREC1".toUTF8.toList ++ seal ++ payload
+
+theorem sidecarBytes_length (seal : Bytes) (device inode : Nat) (h : seal.length = 8) :
+    (sidecarBytes seal device inode).length = 32 := by
+  simp [sidecarBytes, u64le, encodeU64BeNat_length, h]
+
+/-- Same seal on different inodes is possible; seal equality is not inode authentication. -/
+theorem seal_does_not_bind_inode (seal : Bytes) (payload : Bytes) :
+    recordBytes seal payload = recordBytes seal payload ∧ (0 : Nat) ≠ 1 :=
+  ⟨rfl, by decide⟩
+
+structure Reservation where
+  ceremonyId : Bytes
+  keyId : Bytes
+  epochOrCodeword : Bytes
+  seedBurnCursor : Nat
+  hedgeGeneration : Nat
+  deriving Repr, DecidableEq
+
+def Reservation.WellFormed (r : Reservation) : Prop :=
+  r.ceremonyId.length = 32 ∧ r.keyId.length = 32 ∧ r.epochOrCodeword.length = 32 ∧
+  r.seedBurnCursor < 2^64 ∧ r.hedgeGeneration < 2^64
+
+/-- Exactly the 80-byte entry, with key identity in the journal header rather than each entry. -/
+def reservationBytes (r : Reservation) : Bytes :=
+  r.ceremonyId ++ r.epochOrCodeword ++ encodeU64BeNat r.seedBurnCursor ++
+    encodeU64BeNat r.hedgeGeneration
+
+theorem reservationBytes_length {r : Reservation} (h : r.WellFormed) :
+    (reservationBytes r).length = 80 := by
+  simp [reservationBytes, encodeU64BeNat_length, h.1, h.2.2.1]
+
+def ceremonyBody (keyId : Bytes) (entries : List Reservation) : Bytes :=
+  "QSAGCRJ1".toUTF8.toList ++ keyId ++ entries.flatMap reservationBytes
+
+def ceremonyTag (key seal body : Bytes) : Bytes :=
+  keyedMac "QSAG.CEREMONY.JOURNAL.MAC/v1".toUTF8.toList key (seal ++ body)
+
+def ceremonyBytes (key seal keyId : Bytes) (entries : List Reservation) : Bytes :=
+  let body := ceremonyBody keyId entries
+  body ++ ceremonyTag key seal body
+
+/-- `validate` before appending, including both uniqueness checks and strict last-entry cursors. -/
+def reservationValid (keyId : Bytes) (entries : List Reservation) (r : Reservation) : Bool :=
+  r.keyId == keyId &&
+  !(entries.any fun e => e.ceremonyId == r.ceremonyId || e.epochOrCodeword == r.epochOrCodeword) &&
+  (match entries.getLast? with
+   | none => true
+   | some e => decide (e.seedBurnCursor < r.seedBurnCursor ∧ e.hedgeGeneration < r.hedgeGeneration))
+
+/-- Backend MAC domains differ: Belt's payload tag does not cover the wrapper seal. -/
+def beltTag (key payload : Bytes) : Bytes :=
+  keyedMac "QSAG.BELT.LATCH.WAL.MAC/v1".toUTF8.toList key payload
+
+def ledgerTag (domain key genesisSeal ledgerId purpose body : Bytes) : Bytes :=
+  cshake256Bytes "QSAG.LEDGER.MAC/v2".toUTF8.toList
+    (u64le domain.length ++ domain ++ key ++ genesisSeal ++ ledgerId ++ purpose ++ body)
+
+def ledgerGenesisBody (ledgerId sealA sealB : Bytes) : Bytes :=
+  "QSAGLDG2".toUTF8.toList ++ ledgerId ++ sealA ++ sealB
+
+def ledgerSnapshotBody (generation : Nat) (records : List (Bytes × Bytes)) : Bytes :=
+  u64le generation ++ u64le records.length ++ records.flatMap
+    (fun (k, v) => u32le k.length ++ u32le v.length ++ k ++ v)
+
+structure Snapshot where
+  generation : Nat
+  records : List (Bytes × Bytes)
+  tag : Bytes
+  deriving Repr, DecidableEq
+
+/-- Decoded slot candidate. Unavailable sidecars and any failed codec/MAC check are `none`.
+The filter includes the tag at equal generation, absent from the older `TwoSlotWal` abstraction. -/
+def usableSnapshot (anchor : ExternalMonotoneAnchor) (parity : Nat)
+    (candidate : Option Snapshot) : Option Snapshot := do
+  let c ← candidate
+  if c.generation % 2 = parity ∧
+      verifyAgainstExternalAnchor anchor c.generation c.tag = true then some c else none
+
+/-- Rust visits A then B and changes `best` only for a strictly greater generation. -/
+def selectSnapshots (a b : Option Snapshot) : Option Snapshot :=
+  match a, b with
+  | none, b => b
+  | a, none => a
+  | some a, some b => if a.generation < b.generation then some b else some a
+
+def recoverLedger (genesisValid : Bool) (anchor : ExternalMonotoneAnchor)
+    (a b : Option Snapshot) : Option Snapshot :=
+  if genesisValid then selectSnapshots (usableSnapshot anchor 0 a) (usableSnapshot anchor 1 b)
+  else none
+
+theorem usableSnapshot_anchor {anchor : ExternalMonotoneAnchor} {parity : Nat}
+    {input : Option Snapshot} {out : Snapshot} (h : usableSnapshot anchor parity input = some out) :
+    verifyAgainstExternalAnchor anchor out.generation out.tag = true := by
+  cases input with
+  | none => simp [usableSnapshot] at h
+  | some c =>
+    simp only [usableSnapshot, Option.bind_some] at h
+    split at h
+    · next hc => cases Option.some.inj h; exact hc.2
+    · simp at h
+
+theorem selectSnapshots_member {a b : Option Snapshot} {out : Snapshot}
+    (h : selectSnapshots a b = some out) : a = some out ∨ b = some out := by
+  cases a <;> cases b <;> simp_all [selectSnapshots]
+  split at h <;> simp_all
+
+theorem recoverLedger_anchor {g : Bool} {anchor : ExternalMonotoneAnchor}
+    {a b : Option Snapshot} {out : Snapshot} (h : recoverLedger g anchor a b = some out) :
+    verifyAgainstExternalAnchor anchor out.generation out.tag = true := by
+  unfold recoverLedger at h
+  split at h
+  · rcases selectSnapshots_member h with ha | hb
+    · exact usableSnapshot_anchor ha
+    · exact usableSnapshot_anchor hb
+  · simp at h
+
+theorem recoverLedger_rejects_stale {g : Bool} {anchor : ExternalMonotoneAnchor}
+    {a b : Option Snapshot} {out : Snapshot} (h : recoverLedger g anchor a b = some out) :
+    anchor.attestedEpoch ≤ out.generation :=
+  externalAnchor_admits_only_min_generation (recoverLedger_anchor h)
+
+/-- Missing genesis cannot be replaced by an empty fallback snapshot. -/
+theorem recoverLedger_missing_genesis (anchor : ExternalMonotoneAnchor) (a b : Option Snapshot) :
+    recoverLedger false anchor a b = none := rfl
+
+/-- Full FTS framing, including the number of frames and each little-endian u64 length. -/
+def burnTag (domain : Bytes) (frames : List Bytes) : Bytes :=
+  cshake256Bytes domain (framed64 frames)
+
+def burnHeaderBody (keyId genesis : Bytes) : Bytes :=
+  "QSBURN02".toUTF8.toList ++ keyId ++ genesis
+
+def burnHeader (key keyId genesis : Bytes) : Bytes :=
+  let body := burnHeaderBody keyId genesis
+  body ++ burnTag "QSAG.BURN.GENESIS.V2".toUTF8.toList [key, body]
+
+def burnRecordBody (party epoch : Nat) : Bytes :=
+  [UInt8.ofNat (party / 256), UInt8.ofNat party] ++ encodeU64BeNat epoch
+
+def burnRecordTag (key keyId genesis previous body : Bytes) : Bytes :=
+  burnTag "QSAG.BURN.RECORD.V2".toUTF8.toList [key, keyId, genesis, previous, body]
+
+def burnRecord (key keyId genesis previous : Bytes) (party epoch : Nat) : Bytes :=
+  let body := burnRecordBody party epoch
+  body ++ burnRecordTag key keyId genesis previous body
+
+theorem burnHeader_length {key keyId genesis : Bytes}
+    (hk : keyId.length = 32) (hg : genesis.length = 32) :
+    (burnHeader key keyId genesis).length = 104 := by
+  simp [burnHeader, burnHeaderBody, burnTag, cshake256Bytes_length, hk, hg]
+
+theorem burnRecord_length (key keyId genesis previous : Bytes) (party epoch : Nat) :
+    (burnRecord key keyId genesis previous party epoch).length = 42 := by
+  simp [burnRecord, burnRecordBody, burnRecordTag, burnTag, encodeU64BeNat_length]
+
+/-- Byte decoder: reject a short tail, split full chunks into 10-byte bodies and 32-byte tags.
+Fuel is derived from the input length; no recursive encoder is exposed to the compiler. -/
+def burnChunks : Nat → Bytes → Option (List (Bytes × Bytes))
+  | 0, bs => if bs = [] then some [] else none
+  | n+1, bs =>
+    if bs = [] then some [] else
+    if bs.length < 42 then none else do
+      let rest ← burnChunks n (bs.drop 42)
+      pure ((bs.take 10, (bs.drop 10).take 32) :: rest)
+
+def openBurnBytes (key keyId : Bytes) (bytes : Bytes) : Option (List Bytes × Bytes) := do
+  if bytes.length < 104 ∨ (bytes.length - 104) % 42 ≠ 0 then none else do
+    let genesis := (bytes.drop 40).take 32
+    if bytes.take 104 ≠ burnHeader key keyId genesis then none else do
+      let chunks ← burnChunks ((bytes.length - 104) / 42) (bytes.drop 104)
+      openBurnJournal (burnRecordTag key keyId genesis) ((bytes.drop 72).take 32) ⟨chunks, []⟩
+
+theorem openBurnBytes_short_tail (key keyId bytes : Bytes)
+    (h : (bytes.length - 104) % 42 ≠ 0) : openBurnBytes key keyId bytes = none := by
+  simp [openBurnBytes, h]
+
+/-- A partial `write_all` is observable in file length. It is not atomic replacement. -/
+theorem partial_append_refuses (key keyId old tail : Bytes) (n : Nat)
+    (hOld : old.length = 104 + 42*n) (hTail : 0 < tail.length ∧ tail.length < 42) :
+    openBurnBytes key keyId (old ++ tail) = none := by
+  apply openBurnBytes_short_tail
+  rw [List.length_append, hOld]
+  have h : 104 + 42*n + tail.length - 104 = 42*n + tail.length := by omega
+  rw [h, Nat.add_mod, Nat.mul_mod_right, Nat.zero_add, Nat.mod_eq_of_lt hTail.2]
+  omega
+
+/-- System-call stages; checks and three writes are separate crash cuts. Temp fd stays open
+through directory sync. Errors poison the handle without changing other processes or locks. -/
+inductive ReplacePc where
+  | checkBefore | checkTypes | createTemp | writeMagic | writeSeal | writePayload
+  | syncTemp | checkAfter | rename | syncParent | done | poisoned
+  deriving Repr, DecidableEq
+
+structure ReplaceState where
+  pc : ReplacePc
+  temp : Bytes
+  visible : Bytes
+  durable : Bytes
+  tempFdOpen : Bool
+  mutexHeld : Bool
+  deriving Repr, DecidableEq
+
+/-- A successful syscall, under the trusted-directory contract. Failure is a separate step.
+The `durable` projection is the directory-synced file; crash recovery before that barrier is
+specified separately by the filesystem contract, not inferred from universal POSIX semantics. -/
+def replaceTick (seal payload : Bytes) (s : ReplaceState) : ReplaceState :=
+  match s.pc with
+  | .checkBefore => { s with pc := .checkTypes, mutexHeld := true }
+  | .checkTypes => { s with pc := .createTemp }
+  | .createTemp => { s with pc := .writeMagic, temp := [], tempFdOpen := true }
+  | .writeMagic => { s with pc := .writeSeal, temp := "QSAGREC1".toUTF8.toList }
+  | .writeSeal => { s with pc := .writePayload, temp := s.temp ++ seal }
+  | .writePayload => { s with pc := .syncTemp, temp := s.temp ++ payload }
+  | .syncTemp => { s with pc := .checkAfter }
+  | .checkAfter => { s with pc := .rename }
+  | .rename => { s with pc := .syncParent, visible := s.temp }
+  | .syncParent => { s with pc := .done, durable := s.visible,
+      tempFdOpen := false, mutexHeld := false }
+  | .done | .poisoned => s
+
+/-- `prefix` permits an arbitrary short write before the error. It changes only temp contents;
+no kernel panic, drive-cache drain, or other process's descriptor close is manufactured. -/
+def replaceIoError (s : ReplaceState) (prefix : Bytes) : ReplaceState :=
+  { s with pc := .poisoned, temp := s.temp ++ prefix, tempFdOpen := false, mutexHeld := false }
+
+theorem replaceIoError_preserves_disk (s : ReplaceState) (prefix : Bytes) :
+    (replaceIoError s prefix).durable = s.durable ∧
+    (replaceIoError s prefix).visible = s.visible := ⟨rfl, rfl⟩
+
+theorem poisoned_replace_refuses (seal payload prefix : Bytes) (s : ReplaceState) :
+    replaceTick seal payload (replaceIoError s prefix) = replaceIoError s prefix := rfl
+
+/-- Ordered provisioning includes the sidecar's directory barrier before initial replacement.
+Interrupted creation leaves existing evidence; a subsequent MustCreate cannot erase it. -/
+inductive ProvisionPc where
+  | absent | sidecarCreated | sidecarWritten | sidecarSynced | sidecarParentSynced
+  | initialReplacement | ready
+  deriving Repr, DecidableEq
+
+def mayCreate (pc : ProvisionPc) : Bool := pc == .absent
+
+theorem interrupted_provision_not_fresh (pc : ProvisionPc) (h : pc ≠ .absent) :
+    mayCreate pc = false := by simp [mayCreate, h]
+
+end RustDurability
+
 end Qsag
