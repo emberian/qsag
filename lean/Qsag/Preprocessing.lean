@@ -2419,10 +2419,11 @@ theorem tooth_rlwe1024_overflow_flips_decoded_bit :
   decide +kernel
 
 /-- **`#tooth` Corrupted FO Ciphertext Rejected When Chosen (`tooth_rlwe_fo_corrupted_batch_rejected`)**:
-    Atomic batch-rejection projection of `tooth_rlwe_fo_corrupted_ciphertext_caught`. -/
+    Atomic batch-rejection refutation witness for `rlwe_fo_cut_and_choose_sound`. -/
 theorem tooth_rlwe_fo_corrupted_batch_rejected :
-    verifyRlweFoBatch [⟨false, true, 4000, rlweNoisyEncode false true 4000⟩] 1 = false :=
-  tooth_rlwe_fo_corrupted_ciphertext_caught.2.2
+    verifyRlweFoBatch [⟨false, true, 4000, rlweNoisyEncode false true 4000⟩] 1 ≠ true := by
+  rw [tooth_rlwe_fo_corrupted_ciphertext_caught.2.2]
+  decide
 
 def demoForgedZeroSacrificeOpening : SharedSpdzSacrificeOpening :=
   let rho : GoldilocksExt2 := ⟨Goldilocks.ofNat 2, Goldilocks.one⟩
@@ -2440,10 +2441,11 @@ def demoForgedZeroSacrificeOpening : SharedSpdzSacrificeOpening :=
             sigmaW := spdzComputeSigmas CommRingOps.zero macW demoAlphaShares3 demoZeroMasks3 }
 
 /-- **`#tooth` Forged Zero-Opening SPDZ Sacrifice Rejected (`tooth_shared_spdz_forged_zero_rejected`)**:
-    Atomic MAC-rejection projection of `tooth_shared_spdz_sacrifice_rejects_corrupted_triple`. -/
+    Atomic MAC-rejection refutation witness for `verifySharedSpdzSacrifice`. -/
 theorem tooth_shared_spdz_forged_zero_rejected :
-    verifySharedSpdzSacrifice demoForgedZeroSacrificeOpening = false :=
-  tooth_shared_spdz_sacrifice_rejects_corrupted_triple.2.2
+    verifySharedSpdzSacrifice demoForgedZeroSacrificeOpening ≠ true := by
+  rw [tooth_shared_spdz_sacrifice_rejects_corrupted_triple.2.2]
+  decide
 
 /-- **`#tooth` Rank-Deficient Zero-Row Extractor Collides (`tooth_zero_row_extractor_collides_pair`)**:
     Atomic collision refutation witness for `extract384To128_two_universal` on distinct inputs `0#384 ≠ 1#384`. -/

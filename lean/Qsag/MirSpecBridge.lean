@@ -3689,7 +3689,7 @@ def layer1CompiledElfMachine {n : Nat} (q : Nat) (pkDigest : List UInt8)
             burnedNonces := req.tx.nonce :: s.burnedNonces
             belt := belt'
             activeSessionTag := Goldilocks.add s.activeSessionTag Goldilocks.one
-            storedRound1Commits := consumeRound1Commits s.storedRound1Commits req.round1Openings }
+            storedRound1Commits := consumeRound1Commits s.storedRound1Commits req.quorum }
         .ok s' { envelope := env, committedEpoch := req.reqEpoch, sigBytes := sigBytes }
 
 /-- **Layer 2 Machine (`layer2MirGuardedMachine`)**:
@@ -3736,7 +3736,7 @@ def layer2MirGuardedMachine {n : Nat} (q : Nat) (pkDigest : List UInt8)
                   cut := cut'
                   shareBytes := some sh
                   activeSessionTag := Goldilocks.add s.activeSessionTag Goldilocks.one
-                  storedRound1Commits := consumeRound1Commits s.storedRound1Commits req.round1Openings }
+                  storedRound1Commits := consumeRound1Commits s.storedRound1Commits req.quorum }
                 { envelope := env, committedEpoch := req.reqEpoch, sigBytes := sigBytes }
 
 /-- **Layer 3 Machine (`layer3InteractiveProtocolMachine`)**:
@@ -3785,7 +3785,7 @@ def layer3InteractiveProtocolMachine {PK : Type} {n : Nat}
                 policy := pol'
                 cluster := cl'
                 activeSessionTag := Goldilocks.add s.activeSessionTag Goldilocks.one
-                storedRound1Commits := consumeRound1Commits s.storedRound1Commits req.round1Openings }
+                storedRound1Commits := consumeRound1Commits s.storedRound1Commits req.quorum }
               { envelope := env, committedEpoch := req.reqEpoch, sigBytes := sigBytes }
 
 /-- **Layer 4 Machine (`layer4IdealTsigMachine`)**:
@@ -3834,7 +3834,7 @@ def layer4IdealTsigMachine {PK : Type} {n : Nat}
                 policy := pol'
                 ideal := icl'
                 activeSessionTag := Goldilocks.add s.activeSessionTag Goldilocks.one
-                storedRound1Commits := consumeRound1Commits s.storedRound1Commits req.round1Openings }
+                storedRound1Commits := consumeRound1Commits s.storedRound1Commits req.quorum }
               { envelope := env, committedEpoch := req.reqEpoch, sigBytes := sigBytes }
 
 /-- Read 32 bytes `[0x180, 0x1A0)` from `X86State` memory as a canonical `List UInt8`. -/

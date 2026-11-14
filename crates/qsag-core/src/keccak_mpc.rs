@@ -291,18 +291,18 @@ pub fn run_dealerless_rss_dkg_2of3(
         pk_contribs[i] = party_rngs[i].next_bytes32();
         pk_salts[i] = party_rngs[i].next_bytes32();
         let i_be = (i as u64).to_be_bytes();
-        pk_coms[i] = cshake256_32(
+        pk_coms[i] = cshake256_32_multi_frame(
             b"QSAG.RSS.DKG.PK.COM/v1",
-            &encode_multi_frame(&[&session_id, &i_be, &pk_salts[i], &pk_contribs[i]]),
+            &[&session_id, &i_be, &pk_salts[i], &pk_contribs[i]],
         );
     }
     // Round 2: Verify `pk_seed` openings
     let mut pk_seed = [0u8; 32];
     for i in 0..3 {
         let i_be = (i as u64).to_be_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.RSS.DKG.PK.COM/v1",
-            &encode_multi_frame(&[&session_id, &i_be, &pk_salts[i], &pk_contribs[i]]),
+            &[&session_id, &i_be, &pk_salts[i], &pk_contribs[i]],
         );
         wipe_bytes32(&mut pk_salts[i]);
         if !ct_eq_bytes32(&exp, &pk_coms[i]) {
@@ -511,10 +511,10 @@ impl RssMaskSession {
             run_commit_and_open_coin(session_id, b"RSS_MASK_HEDGE_COIN", &[0u8; 32], party_rngs)?;
         let hedge = |slot: usize, prg: &[u8; 32], seed: &[u8; 32], prf: &[u8; 32]| {
             let slot_be = (slot as u64).to_be_bytes();
-            let mut frame = encode_multi_frame(&[session_id, &coin, &slot_be, prg, seed, prf]);
-            let key = cshake256_32(b"QSAG.RSS.MASK.HEDGE/v1", &frame);
-            wipe_bytes(&mut frame);
-            key
+            cshake256_32_multi_frame(
+                b"QSAG.RSS.MASK.HEDGE/v1",
+                &[session_id, &coin, &slot_be, prg, seed, prf],
+            )
         };
         let prim: [[u8; 32]; 3] = core::array::from_fn(|p| {
             hedge(
@@ -2928,11 +2928,12 @@ fn verify_pending_spdz_mac_batch(
 
     for w in 0..total_words {
         chi_xof.squeeze(&mut chi_buf);
-        let chis: [[u128; 2]; 64] = core::array::from_fn(|bit| core::array::from_fn(|lane| {
-            let off = (2 * bit + lane) * 16;
-            let value = u128::from_le_bytes(core::array::from_fn(|i| chi_buf[off + i]));
-            if value == 0 { 1 } else { value }
-        }));
+        let chis: [[u128; 2]; 64] = core::array::from_fn(|bit| {
+            core::array::from_fn(|lane| {
+                let off = (2 * bit + lane) * 16;
+                u128::from_le_bytes(core::array::from_fn(|i| chi_buf[off + i]))
+            })
+        });
         for (bit, pair) in chis.iter().enumerate() {
             let value = bs_gf256_extract_lane(&pending_opened[w], bit);
             for lane in 0..2 {
@@ -2985,9 +2986,9 @@ fn verify_pending_spdz_mac_batch(
         let q_be = (q as u64).to_be_bytes();
         let s0_b = sig_q[0].0.to_le_bytes();
         let s1_b = sig_q[1].0.to_le_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.KECCAK.PEND.MAC.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &q_be, &s0_b, &s1_b, &salt]),
+            &[session_id, phase.as_bytes(), &q_be, &s0_b, &s1_b, &salt],
         );
         sigmas.push(sig_q);
         sig_salts.push(salt);
@@ -3006,16 +3007,16 @@ fn verify_pending_spdz_mac_batch(
         let q_be = (q as u64).to_be_bytes();
         let s0_b = sigmas[q][0].0.to_le_bytes();
         let s1_b = sigmas[q][1].0.to_le_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.KECCAK.PEND.MAC.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &q_be,
                 &s0_b,
                 &s1_b,
                 &sig_salts[q],
-            ]),
+            ],
         );
         wipe_bytes32(&mut sig_salts[q]);
         if !ct_eq_bytes32(&exp, &sig_coms[q]) {

@@ -448,13 +448,154 @@ fn parity_fips205_and_tsw_against_qsag_core() {
     }
 }
 
+fn kernel_digits(digits: &[u8]) -> qsag_verified::BeltLatchDigits {
+    let mut rows = [[0u8; 32]; 4];
+    for (i, d) in digits.iter().enumerate() {
+        rows[i / 32][i % 32] = *d;
+    }
+    qsag_verified::BeltLatchDigits {
+        len: digits.len() as u8,
+        row0: rows[0],
+        row1: rows[1],
+        row2: rows[2],
+        row3: rows[3],
+    }
+}
+
+fn kernel_error_of(e: belt_latch::BeltLatchError) -> qsag_verified::BeltLatchKernelError {
+    use belt_latch::BeltLatchError as P;
+    use qsag_verified::BeltLatchKernelError as K;
+    match e {
+        P::Exhausted => K::Exhausted,
+        P::EpochAlreadyBound => K::EpochAlreadyBound,
+        P::RetrySaltMismatch => K::RetrySaltMismatch,
+        P::DigitsMismatch => K::DigitsMismatch,
+        P::EpochConsumed => K::EpochConsumed,
+        P::EpochJumpTooLarge => K::EpochJumpTooLarge,
+        P::WalPoisoned => K::WalPoisoned,
+        P::Wal(_) => K::WalPersistFailed,
+        other => panic!("bind returned an error outside the kernel's range: {other:?}"),
+    }
+}
+
+fn assert_latch_states_agree(
+    prod: &belt_latch::BeltLatch<belt_latch::MemoryWal>,
+    kernel: &qsag_verified::BeltLatchKernel,
+) {
+    assert_eq!(prod.next_epoch(), kernel.next_epoch());
+    assert_eq!(prod.is_wal_poisoned(), kernel.is_wal_poisoned());
+    assert_eq!(prod.in_flight().is_some(), kernel.has_in_flight());
+    if let Some(rec) = prod.in_flight() {
+        let k = kernel.in_flight();
+        assert_eq!(rec.epoch, k.epoch);
+        assert_eq!(rec.msg_digest, k.msg_digest);
+        assert_eq!(rec.retry_salt, k.retry_salt);
+        assert_eq!(kernel_digits(&rec.target_sum_digits), k.digits);
+    }
+}
+
+/// Drive production `BeltLatch<MemoryWal>` and the extracted kernel with the same requests,
+/// including failed persists and recoveries, and require the same verdict and state after
+/// every call.
+fn parity_belt_latch_kernel_against_qsag_core() {
+    use belt_latch::{BeltLatch, BindOutcome, MemoryWal};
+    use qsag_verified::{BeltLatchBindOutcome, BeltLatchBindRequest, BeltLatchKernel};
+
+    let mut rng = DetCshake256Stream::new(0xBE17_1A7C);
+    let mut seen = [0usize; 9];
+    for capacity_log2 in [1usize, 3, 7, 62] {
+        let limit = 1u64 << capacity_log2;
+        let mut prod = BeltLatch::recover(MemoryWal::new(), capacity_log2).expect("recover");
+        let mut kernel = match BeltLatchKernel::new_empty(limit) {
+            Ok(k) => k,
+            Err(e) => panic!("{e:?}"),
+        };
+        // Small pools make equal and unequal requests both frequent.
+        let msgs = [[1u8; 32], [2u8; 32]];
+        let salts = [[3u8; 32], [4u8; 32]];
+        let digit_pool: [&[u8]; 4] = [&[3, 0, 2, 1], &[1, 2, 0, 3], &[], &[3; 128]];
+        for _ in 0..4000 {
+            let r = rng.next_u64();
+            let base = prod.next_epoch();
+            let epoch = match r % 8 {
+                0 => base.wrapping_sub(1 + (r >> 8) % 3),
+                1 => base + (r >> 8) % 70,
+                2 => base + 64,
+                3 => base + 65,
+                4 => limit - 1,
+                5 => limit,
+                _ => prod.in_flight().map(|x| x.epoch).unwrap_or(base),
+            };
+            let msg = msgs[((r >> 16) % 2) as usize];
+            let salt = salts[((r >> 17) % 2) as usize];
+            let digits = digit_pool[((r >> 18) % 4) as usize];
+            let persist_ok = (r >> 24) % 16 != 0;
+            if !persist_ok {
+                prod.wal_mut().fail_next_persist();
+            }
+            let persists_before = prod.wal_mut().persist_count();
+            let got_prod = prod.bind(epoch, &msg, &salt, digits);
+            let (next, got_kernel) = kernel.bind(BeltLatchBindRequest {
+                epoch,
+                msg_digest: msg,
+                retry_salt: salt,
+                digits: kernel_digits(digits),
+                persist_ok,
+            });
+            kernel = next;
+            let want = match got_prod {
+                Ok(BindOutcome::Fresh) => Ok(BeltLatchBindOutcome::Fresh),
+                Ok(BindOutcome::Replay) => Ok(BeltLatchBindOutcome::Replay),
+                Err(e) => Err(kernel_error_of(e)),
+            };
+            assert_eq!(got_kernel, want, "epoch {epoch} base {base} limit {limit}");
+            assert_latch_states_agree(&prod, &kernel);
+            seen[match got_kernel {
+                Ok(BeltLatchBindOutcome::Fresh) => 0,
+                Ok(BeltLatchBindOutcome::Replay) => 1,
+                Err(e) => 2 + (e as usize).min(6),
+            }] += 1;
+            // The kernel reads `persist_ok` exactly when production called the log.
+            let wrote = prod.wal_mut().persist_count() != persists_before;
+            assert_eq!(wrote, got_kernel == Ok(BeltLatchBindOutcome::Fresh));
+            if !persist_ok && !matches!(got_prod, Err(belt_latch::BeltLatchError::Wal(_))) {
+                // Production never reached the log, so the armed failure is still pending.
+                disarm_pending_failure(prod.wal_mut());
+            }
+            if prod.is_wal_poisoned() && (r >> 32) % 4 == 0 {
+                let (has, rec) = (kernel.has_in_flight(), kernel.in_flight());
+                let next_epoch = kernel.next_epoch();
+                prod = BeltLatch::recover(prod.into_wal(), capacity_log2).expect("recover");
+                kernel = match BeltLatchKernel::recover(limit, next_epoch, has, rec) {
+                    Ok(k) => k,
+                    Err(e) => panic!("{e:?}"),
+                };
+                assert_latch_states_agree(&prod, &kernel);
+            }
+        }
+    }
+    assert!(seen[0] > 0 && seen[1] > 0, "fresh and replay must both occur: {seen:?}");
+}
+
+/// `MemoryWal` keeps an armed failure until a persist consumes it. Re-persisting the state
+/// it already holds consumes the flag (that persist fails and stores nothing).
+fn disarm_pending_failure(wal: &mut belt_latch::MemoryWal) {
+    use belt_latch::DurableWal;
+    let state = wal.load().expect("load").unwrap_or_default();
+    assert!(wal.sync_persist(&state).is_err(), "a failure was expected to be pending");
+}
+
 #[inline]
 const fn kp_val() -> u32 {
     7
 }
 
 fn main() {
-    let cases: [(&str, fn()); 4] = [
+    let cases: [(&str, fn()); 5] = [
+        (
+            "parity_belt_latch_kernel_against_qsag_core",
+            parity_belt_latch_kernel_against_qsag_core,
+        ),
         (
             "parity_goldilocks_and_ext2_against_qsag_core",
             parity_goldilocks_and_ext2_against_qsag_core,
@@ -477,5 +618,5 @@ fn main() {
         f();
         println!("test {} ... ok", name);
     }
-    println!("[parity_qsag_core] PASS: 4/4 differential parity suites matched qsag-core");
+    println!("[parity_qsag_core] PASS: 5/5 differential parity suites matched qsag-core");
 }

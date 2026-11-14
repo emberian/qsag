@@ -508,7 +508,7 @@ def bech32PolymodStep (chk : BitVec 30) (v : BitVec 5) : BitVec 30 :=
 /-- Polymod fold over an arbitrary list of 5-bit symbols from initial accumulator `chk`. -/
 def bech32PolymodFrom (chk : BitVec 30) : List (BitVec 5) → BitVec 30
   | [] => chk
-  | v :: vs => bech32PolymodFrom (bech32PolymodStep chk v) vs
+  | v :: rest => bech32PolymodFrom (bech32PolymodStep chk v) rest
 
 /-- Strict `Bech32m` checksum predicate (`bech32PolymodFrom 1#30 cw == 0x2bc830a3#30`). -/
 @[expose] def bech32mValid (cw : List (BitVec 5)) : Prop :=
@@ -2607,8 +2607,7 @@ theorem words_injective (xs ys : List Goldilocks) (h : words xs = words ys) : xs
         (by simpa using Goldilocks.val_lt_two_pow_64 y) hp.1)
       subst y
       congr 1
-      apply ih ys hp.2
-      omega
+      exact ih ys hp.2 (Nat.succ.inj hl)
 
 /-- Fixed chunk lengths make concatenation injective. -/
 theorem chunks_injective (xs ys : List Bytes)
@@ -2623,7 +2622,7 @@ theorem chunks_injective (xs ys : List Bytes)
       simp only [List.map_cons, List.cons.injEq] at hl
       change x ++ xs.flatten = y ++ ys.flatten at h
       have hp := List.append_inj h hl.1
-      exact congrArg₂ List.cons hp.1 (ih ys hl.2 hp.2)
+      rw [hp.1, ih ys hl.2 hp.2]
 
 /-- Flat serialization retains every wire, with no missing-tail/zero-padding alias.
 The hypothesis fixes the validated circuit shape, not the secret values. -/
@@ -2686,8 +2685,10 @@ def init (protocol : String) (instanceBytes : Bytes) : Transcript :=
 
 /-- Rust's labeled absorb transition, including the payload. -/
 def absorbMessage (tr : Transcript) (label : String) (payload : Bytes) : Transcript :=
-  { tr with chain := hashFrames "QSAG.FS.ABSORB.V1"
-      [tr.chain.val, le 8 tr.round.toNat, ascii label, payload], absorbed := true }
+  { tr with
+    chain := hashFrames "QSAG.FS.ABSORB.V1"
+      [tr.chain.val, le 8 tr.round.toNat, ascii label, payload]
+    absorbed := true }
 
 /-- Reject overflow instead of permitting a wrapped round identifier. -/
 def squeeze (tr : Transcript) (label : String) (count : Nat) :
@@ -2727,11 +2728,37 @@ def challenges (fuel : Nat) (tr : Transcript) (count : Nat) :
   let (raw, next) ← squeeze tr "VC_ZKBOO_OPEN_TRITS" 64
   extendTrits fuel next 0 count (raw.flatMap fiveTrits)
 
+private def countRangeAux (p : Nat → Bool) : Nat → Nat → Nat
+  | 0, acc => acc
+  | n + 1, acc => countRangeAux p n (if p n then acc + 1 else acc)
+
+private theorem countRangeAux_add (p : Nat → Bool) :
+    ∀ (n acc : Nat), countRangeAux p n acc = acc + countRangeAux p n 0
+  | 0, acc => by simp [countRangeAux]
+  | n + 1, acc => by
+    unfold countRangeAux
+    rw [countRangeAux_add p n _, countRangeAux_add p n (if p n then 1 else 0)]
+    cases p n <;> omega
+
+private theorem filter_range_length_eq_countRangeAux (p : Nat → Bool) :
+    ∀ (n : Nat), ((List.range n).filter p).length = countRangeAux p n 0
+  | 0 => rfl
+  | n + 1 => by
+    rw [List.range_succ, List.filter_append, List.length_append,
+        filter_range_length_eq_countRangeAux p n]
+    unfold countRangeAux
+    rw [countRangeAux_add p n (if p n then 1 else 0)]
+    cases p n <;> simp [List.filter] <;> omega
+
 /-- Each position of the accepted 243-byte alphabet has exactly 81 preimages
 for each trit. This is a finite counting fact, not a randomness claim about SHAKE. -/
 theorem accepted_trit_fibers :
     ∀ i ∈ List.range 5, ∀ t ∈ List.range 3,
       ((List.range 243).filter (fun b => (b / 3^i) % 3 == t)).length = 81 := by
+  intro i hi t ht
+  rw [filter_range_length_eq_countRangeAux]
+  revert t
+  revert i
   decide
 
 /-- Accepted bytes have unique five-digit ternary expansions. -/
@@ -2768,9 +2795,7 @@ def fieldAcceptedBijection :
     simpa [UInt64.toNat_ofNat', Nat.mod_eq_of_lt (Goldilocks.val_lt_two_pow_64 x)] using x.isLt⟩
   left_inv := by
     intro w
-    apply Subtype.ext
-    apply UInt64.toNat_inj.mp
-    simp [UInt64.toNat_ofNat', Nat.mod_eq_of_lt w.val.toNat_lt_size]
+    exact Subtype.ext UInt64.ofNat_toNat
   right_inv := by
     intro x
     apply Goldilocks.ext
@@ -2847,7 +2872,8 @@ def PolicyAccepted {Proof : Type} (expected supplied : Policy)
 theorem presentation_context_authenticated {Proof : Type} (expected supplied : Policy)
     (verifyRelation : Policy → Proof → Bool) (proof : Proof)
     (h : PolicyAccepted expected supplied verifyRelation proof) : supplied = expected := by
-  exact of_decide_eq_true (Bool.and_eq_true.mp h).1
+  simp only [PolicyAccepted, verifyPresentation, Bool.and_eq_true, decide_eq_true_eq] at h
+  exact h.1
 
 theorem tooth_substituted_context_rejected {Proof : Type} (expected supplied : Policy)
     (verifyRelation : Policy → Proof → Bool) (proof : Proof) (h : supplied ≠ expected) :
@@ -2972,7 +2998,11 @@ theorem view_wire_known_answer :
     viewBytes viewFixture = ascii "QSAG.VC.VIEW_COM.V1" ++ List.replicate 32 1 ++
       [1,0,0,0, 2,0,0,0,0,0,0,0,
        1,0,0,0, 3,0,0,0,0,0,0,0,
-       1,0,0,0, 4,0,0,0,0,0,0,0] := by decide
+       1,0,0,0, 4,0,0,0,0,0,0,0] := by
+  simp only [viewBytes, viewFixture, words, List.flatMap_cons, List.flatMap_nil,
+    Goldilocks.ofNat_val, List.append_assoc]
+  congr 1
+  decide
 
 /-- Width mutation witnesses exercise the actual commitment frame constructor. -/
 theorem commitment_widths (sid digest salt : Bytes32) (r : UInt32) (p : Fin 3) :
@@ -3029,7 +3059,7 @@ theorem tooth_fresh_blinds_do_not_hide_arbitrary_commitments
 /-- An adaptive oracle can select an accepting challenge at every repetition.
 The fixed-transcript two-of-three count alone gives no oracle-security bound. -/
 theorem tooth_adaptive_challenge_oracle (rounds : Nat) :
-    (∀ i : Fin rounds, (fun c : Fin 3 => c.val < 2) (0 : Fin 3)) ∧
+    (∀ _ : Fin rounds, (fun c : Fin 3 => c.val < 2) (0 : Fin 3)) ∧
     ¬ (∀ c : Fin 3, c.val < 2) := by
   exact ⟨fun _ => by decide, fun h => by have := h 2; omega⟩
 

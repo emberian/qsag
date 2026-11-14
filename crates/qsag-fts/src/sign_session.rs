@@ -916,16 +916,21 @@ mod release_barrier_tests {
         // Advance until `IntermediateMacOpen`, where honest party 2 has already released its
         // MAC differences; corrupt party 1 then supplies an invalid salt to trigger
         // `CommitmentMismatch` instead of `BdozMacCheckFailed`.
+        let corrupted_id = roster[0];
+        let mut reached_mac_open = false;
         for _ in 0..200 {
             if sessions[0].phase == Phase::IntermediateMacOpen {
+                reached_mac_open = true;
                 let mut messages: Vec<_> = sessions.iter().map(|s| s.outbound().unwrap()).collect();
                 if let ParallelSeededSignMessage::Opening { salt, .. } = &mut messages[0] {
                     salt[0] ^= 1;
                 }
-                assert!(matches!(
+                assert_eq!(
                     sessions[1].advance(&messages),
-                    Err(ParallelSeededError::CommitmentMismatch { party_id: 1 })
-                ));
+                    Err(ParallelSeededError::CommitmentMismatch {
+                        party_id: corrupted_id
+                    })
+                );
                 break;
             }
             let messages: Vec<_> = sessions.iter().map(|s| s.outbound().unwrap()).collect();
@@ -933,6 +938,7 @@ mod release_barrier_tests {
                 s.advance(&messages).unwrap();
             }
         }
+        assert!(reached_mac_open);
         drop(sessions);
         // Honest party 2 MUST be poisoned immediately so compromised authentication keys
         // cannot be reused on a subsequent signing session!

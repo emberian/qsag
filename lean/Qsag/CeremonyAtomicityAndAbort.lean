@@ -6212,18 +6212,6 @@ structure JournalState where
   released : List Reservation := []
   deriving Repr, DecidableEq
 
-def FreshReservation (entries : List Reservation) (r : Reservation) : Prop :=
-  ∀ e ∈ entries, e.ceremonyId ≠ r.ceremonyId ∧ e.epochOrCodeword ≠ r.epochOrCodeword
-
-theorem reservationValid_fresh {key : Bytes} {entries : List Reservation} {r : Reservation}
-    (h : reservationValid key entries r = true) : FreshReservation entries r := by
-  simp only [reservationValid, Bool.and_eq_true, Bool.not_eq_true'] at h
-  have ha := h.1.2
-  intro e he
-  have hf : (e.ceremonyId == r.ceremonyId || e.epochOrCodeword == r.epochOrCodeword) = false :=
-    (List.any_eq_false.mp ha) e he
-  simpa only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] using hf
-
 /-- Crash cuts after temp fsync may publish the staged complete replacement. Earlier cuts
 retain the prior record or fail closed. This is an explicit filesystem contract: it excludes
 silent rollback of acknowledged directory syncs. Arbitrary accepted corrupt bytes instead
@@ -6274,8 +6262,7 @@ inductive JournalStep (macKey : Bytes) : JournalState → JournalState → Prop 
   | crashPublishes (s : JournalState) (r : Reservation)
       (staged : s.staged = some r) (cut : mayPublishAfterCrash s.pc)
       (valid : reservationValid s.keyId s.entries r = true) :
-      JournalStep macKey s { s with entries := s.entries ++ [r], staged := none,
-        permit := none, pc := .done }
+      JournalStep macKey s { s with entries := s.entries ++ [r], staged := none, permit := none, pc := .done }
   | reopen (s : JournalState) (readBack : Bytes)
       (readMatches : readBack = ceremonyBytes macKey s.lockSeal s.keyId s.entries) :
       JournalStep macKey s { s with poisoned := false, staged := none, permit := none, pc := .done }
@@ -6289,11 +6276,24 @@ def JournalInv (s : JournalState) : Prop :=
   (∀ r, s.permit = some r → r ∈ s.entries ∧
     ∀ e ∈ s.released, e.ceremonyId ≠ r.ceremonyId ∧ e.epochOrCodeword ≠ r.epochOrCodeword)
 
+private theorem journal_nodup_snoc {α : Type} {xs : List α} {x : α}
+    (hNodup : xs.Nodup) (hFresh : ∀ y ∈ xs, y ≠ x) : (xs ++ [x]).Nodup := by
+  induction xs with
+  | nil => simp [List.Nodup]
+  | cons a rest ih =>
+    rw [List.cons_append, List.Nodup, List.pairwise_cons] at *
+    refine ⟨?_, ih hNodup.2 (fun y hy => hFresh y (by simp [hy]))⟩
+    intro y hy
+    rcases List.mem_append.mp hy with h | h
+    · exact hNodup.1 y h
+    · obtain rfl := List.mem_singleton.mp h
+      exact hFresh a (by simp)
+
 private theorem released_snoc_nodup (rs : List Reservation) (r : Reservation)
     (field : Reservation → Bytes) (h : (rs.map field).Nodup)
     (fresh : ∀ e ∈ rs, field e ≠ field r) : ((rs ++ [r]).map field).Nodup := by
   rw [List.map_append]
-  apply nodup_snoc h
+  apply journal_nodup_snoc h
   intro v hv
   obtain ⟨e, he, rfl⟩ := List.mem_map.mp hv
   exact fresh e he
@@ -6302,10 +6302,10 @@ theorem journalStep_preserves (key : Bytes) {s t : JournalState}
     (step : JournalStep key s t) (inv : JournalInv s) : JournalInv t := by
   obtain ⟨hId, hEpoch, hMem, hPermit⟩ := inv
   cases step with
-  | begin s r healthy idle wf valid =>
+  | begin r healthy idle wf valid =>
     exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
-  | advance s r healthy staged => exact ⟨hId, hEpoch, hMem, hPermit⟩
-  | committed s r healthy staged synced valid =>
+  | advance r healthy staged => exact ⟨hId, hEpoch, hMem, hPermit⟩
+  | committed r healthy staged synced valid =>
     refine ⟨hId, hEpoch, ?_, ?_⟩
     · intro e he; exact List.mem_append_left _ (hMem e he)
     · intro e he
@@ -6313,21 +6313,21 @@ theorem journalStep_preserves (key : Bytes) {s t : JournalState}
       subst e
       exact ⟨List.mem_append_right _ (List.mem_singleton_self _),
         fun e he => reservationValid_fresh valid e (hMem e he)⟩
-  | consume s r readBack healthy owned current readMatches =>
+  | consume r readBack healthy owned current readMatches =>
     obtain ⟨hr, hf⟩ := hPermit r owned
     refine ⟨released_snoc_nodup _ _ _ hId (fun e he => (hf e he).1),
       released_snoc_nodup _ _ _ hEpoch (fun e he => (hf e he).2), ?_, ?_⟩
     · intro e he
       rcases List.mem_append.mp he with he | he
       · exact hMem e he
-      · simpa only [List.mem_singleton] using he ▸ hr
+      · obtain rfl := List.mem_singleton.mp he; exact hr
     · intro e he; simp at he
-  | ioError s => exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
-  | crash s => exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
-  | crashPublishes s r staged cut valid =>
+  | ioError => exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
+  | crash => exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
+  | crashPublishes r staged cut valid =>
     exact ⟨hId, hEpoch, fun e he => List.mem_append_left _ (hMem e he),
       by intro r h; simp at h⟩
-  | reopen s readBack readMatches =>
+  | reopen readBack readMatches =>
     exact ⟨hId, hEpoch, hMem, by intro r h; simp at h⟩
 
 inductive JournalRun (key : Bytes) : JournalState → JournalState → Prop where
@@ -6445,11 +6445,11 @@ theorem anchoredJournalStep_preserves {s t : AnchoredJournal}
     (step : AnchoredJournalStep s t) (inv : AnchoredJournalInv s) : AnchoredJournalInv t := by
   obtain ⟨hn, hl, hp⟩ := inv
   cases step with
-  | stage s r => exact ⟨hn, hl, by intro t h; simp at h⟩
-  | localCommit s bytes => exact ⟨hn, hl, hp⟩
-  | restoreDisk s bytes => exact ⟨hn, hl, hp⟩
-  | crash s => exact ⟨hn, hl, by intro t h; simp at h⟩
-  | reserve s r owner expected service ticket staged cas =>
+  | stage r => exact ⟨hn, hl, by intro t h; simp at h⟩
+  | localCommit bytes => exact ⟨hn, hl, hp⟩
+  | restoreDisk bytes => exact ⟨hn, hl, hp⟩
+  | crash => exact ⟨hn, hl, by intro t h; simp at h⟩
+  | reserve r owner expected service ticket staged cas =>
     obtain ⟨hs, ht, _⟩ := anchorCAS_success cas
     refine ⟨hn, ?_, ?_⟩
     · intro t hm; have := hl t hm; dsimp; omega
@@ -6458,11 +6458,11 @@ theorem anchoredJournalStep_preserves {s t : AnchoredJournal}
       subst t
       refine ⟨by dsimp; omega, ?_⟩
       intro u hu; have := hl u hu; omega
-  | release s t owned =>
+  | release t owned =>
     obtain ⟨ht, hf⟩ := hp t owned
     refine ⟨?_, ?_, by intro u h; simp at h⟩
     · rw [List.map_append]
-      apply nodup_snoc hn
+      apply journal_nodup_snoc hn
       intro e he
       obtain ⟨u, hu, rfl⟩ := List.mem_map.mp he
       exact hf u hu

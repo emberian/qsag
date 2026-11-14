@@ -4109,11 +4109,30 @@ pub(crate) mod tests {
             assert_eq!(e.open(&square).unwrap(), vec![0x5555 ^ 0x3333 ^ 0xf0f0]);
             // Exercise both halves of a super-block, partial 16-gate blocks,
             // odd quad folding, and the maximum flush boundary with varied lanes.
-            for len in [15, 16, 17, 63, 64, 65, 127, 128, 129, 193, MAX_PENDING_BITS + 1] {
-                let xs: Vec<_> = (0..len).map(|i| {
-                    (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(p as u32 * 7)
-                }).collect();
-                let ys: Vec<_> = xs.iter().map(|x| x.rotate_left(23) ^ 0xa55a_f00f_1234_5678).collect();
+            for len in [
+                15,
+                16,
+                17,
+                63,
+                64,
+                65,
+                127,
+                128,
+                129,
+                193,
+                MAX_PENDING_BITS + 1,
+            ] {
+                let xs: Vec<_> = (0..len)
+                    .map(|i| {
+                        (i as u64)
+                            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                            .rotate_left(p as u32 * 7)
+                    })
+                    .collect();
+                let ys: Vec<_> = xs
+                    .iter()
+                    .map(|x| x.rotate_left(23) ^ 0xa55a_f00f_1234_5678)
+                    .collect();
                 let x = e.share(&xs).unwrap();
                 let y = e.share(&ys).unwrap();
                 let pairs: Vec<_> = x.into_iter().zip(y).collect();
@@ -4123,7 +4142,9 @@ pub(crate) mod tests {
                     let mut clear_x = 0;
                     let mut clear_y = 0;
                     for party in 0..3 {
-                        let x = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(party * 7);
+                        let x = (i as u64)
+                            .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                            .rotate_left(party * 7);
                         clear_x ^= x;
                         clear_y ^= x.rotate_left(23) ^ 0xa55a_f00f_1234_5678;
                     }

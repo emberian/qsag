@@ -913,19 +913,19 @@ def evalX86IncDecOf (isInc is64 : Bool) (v : UInt64) : Bool :=
 /-- Byte-swap helper for 32-bit and 64-bit `BSWAP`. -/
 def evalX86Bswap (is64 : Bool) (v : UInt64) : UInt64 :=
   if is64 then
-    ((v &&& 0x00000000000000FF) <<< 56) |||
-    ((v &&& 0x000000000000FF00) <<< 40) |||
-    ((v &&& 0x0000000000FF0000) <<< 24) |||
-    ((v &&& 0x00000000FF000000) <<< 8)  |||
-    ((v >>> 8)  &&& 0x00000000FF000000) |||
-    ((v >>> 24) &&& 0x0000000000FF0000) |||
-    ((v >>> 40) &&& 0x000000000000FF00) |||
-    ((v >>> 56) &&& 0x00000000000000FF)
+    ((v &&& 0x00000000000000FF) <<< (56 : UInt64)) |||
+    ((v &&& 0x000000000000FF00) <<< (40 : UInt64)) |||
+    ((v &&& 0x0000000000FF0000) <<< (24 : UInt64)) |||
+    ((v &&& 0x00000000FF000000) <<< (8 : UInt64))  |||
+    ((v >>> (8 : UInt64))  &&& 0x00000000FF000000) |||
+    ((v >>> (24 : UInt64)) &&& 0x0000000000FF0000) |||
+    ((v >>> (40 : UInt64)) &&& 0x000000000000FF00) |||
+    ((v >>> (56 : UInt64)) &&& 0x00000000000000FF)
   else
-    ((v &&& 0x000000FF) <<< 24) |||
-    ((v &&& 0x0000FF00) <<< 8)  |||
-    ((v >>> 8)  &&& 0x0000FF00) |||
-    ((v >>> 24) &&& 0x000000FF)
+    ((v &&& 0x000000FF) <<< (24 : UInt64)) |||
+    ((v &&& 0x0000FF00) <<< (8 : UInt64))  |||
+    ((v >>> (8 : UInt64))  &&& 0x0000FF00) |||
+    ((v >>> (24 : UInt64)) &&& 0x000000FF)
 
 /-- 16-bit byte-MSB mask extracted by `PMOVMSKB r32, xmm`. -/
 def evalPmovmskb128 (v : Vec256) : UInt64 :=
@@ -3657,7 +3657,7 @@ private theorem evalX86AluOf_congr (op : X86AluOp) (is64 : Bool)
 
 private theorem evalX86AluOf_sbb_self (is64 : Bool) (v : UInt64) (cf : Bool) :
     evalX86AluOf .sbb is64 v v cf = false := by
-  unfold evalX86AluOf signedOutOfBounds
+  dsimp only [evalX86AluOf, signedOutOfBounds]
   rw [Int.sub_self]
   cases is64 <;> cases cf <;> decide
 
@@ -3665,22 +3665,14 @@ private theorem evalX86Shift_fst_congr (sk : X86ShiftKind) (is64 : Bool) {v₁ v
     (cf₁ of₁ zf₁ cf₂ of₂ zf₂ : Bool) (hv : v₁ = v₂) :
     (evalX86Shift sk is64 v₁ cnt cf₁ of₁ zf₁).1 = (evalX86Shift sk is64 v₂ cnt cf₂ of₂ zf₂).1 := by
   subst hv
-  unfold evalX86Shift
-  split
-  · rfl
-  · cases sk <;> rfl
+  cases is64 <;> cases sk <;> (dsimp only [evalX86Shift]; split <;> rfl)
 
 private theorem evalX86Shift_zf (sk : X86ShiftKind) (is64 : Bool) (v : UInt64) (cnt : Nat)
     (cf of_ zf : Bool) :
     (evalX86Shift sk is64 v cnt cf of_ zf).2.2.2 =
       if x86ShiftPreservesZf sk is64 cnt then zf
       else (evalX86Shift sk is64 v cnt cf of_ zf).1 == 0 := by
-  unfold evalX86Shift x86ShiftPreservesZf
-  split
-  · rename_i hc0
-    simp [hc0]
-  · rename_i hc0
-    cases sk <;> simp [hc0]
+  cases is64 <;> cases sk <;> (dsimp only [evalX86Shift, x86ShiftPreservesZf]; split <;> rename_i hc0 <;> simp [hc0])
 
 private theorem evalX86Addr_public_eq {s₁₀ s₂₀ s₁ s₂ : X86State} {st : X86AbsState}
     {addr : X86MemAddr} (nextPc : Nat)
@@ -3695,11 +3687,14 @@ private theorem evalX86Addr_public_eq {s₁₀ s₂₀ s₁ s₂ : X86State} {st
   | ripDisp disp => rfl
   | absDisp disp => rfl
   | indexedSib baseOpt idx scale disp =>
-    simp only [x86AddrIsPublic, x86AddrRegsValid, Bool.and_eq_true, decide_eq_true_eq] at hAddrOk hRegsOk
-    have hIdx := RelX86Gpr_public_eq (hGpr idx hRegsOk.1) hAddrOk.1
     cases baseOpt with
-    | none => simp [evalX86Addr, hIdx]
+    | none =>
+      simp only [x86AddrIsPublic, x86AddrRegsValid, Bool.and_true, decide_eq_true_eq] at hAddrOk hRegsOk
+      have hIdx := RelX86Gpr_public_eq (hGpr idx hRegsOk) hAddrOk
+      simp [evalX86Addr, hIdx]
     | some b =>
+      simp only [x86AddrIsPublic, x86AddrRegsValid, Bool.and_eq_true, decide_eq_true_eq] at hAddrOk hRegsOk
+      have hIdx := RelX86Gpr_public_eq (hGpr idx hRegsOk.1) hAddrOk.1
       have hBase := RelX86Gpr_public_eq (hGpr b hRegsOk.2) hAddrOk.2
       simp [evalX86Addr, hIdx, hBase]
 

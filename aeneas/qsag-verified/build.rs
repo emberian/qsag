@@ -105,6 +105,7 @@ fn main() {
         "sponge/poseidon2.rs",
         "fips205.rs",
         "tsw_baggy.rs",
+        "belt_latch.rs",
     ] {
         let src_file = core_src.join(relative_path);
         println!("cargo:rerun-if-changed={}", src_file.display());
@@ -132,6 +133,7 @@ fn main() {
         ("sponge", "sponge/mod.rs"),
         ("fips205", "fips205.rs"),
         ("tsw_baggy", "tsw_baggy.rs"),
+        ("belt_latch", "belt_latch.rs"),
     ] {
         let path = mirror_root.join(relative_path);
         modules.push_str(&format!("#[allow(clippy::all)]\n#[path = {:?}]\nmod {};\n", path, name));

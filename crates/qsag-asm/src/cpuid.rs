@@ -392,11 +392,11 @@ pub(crate) fn ensure_aarch64_dit_enabled() -> DitGuard {
         }
         previous = Some(saved);
     }
-    DitGuard(previous)
+    DitGuard(previous, core::marker::PhantomData)
 }
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) struct DitGuard(Option<u64>);
+pub(crate) struct DitGuard(Option<u64>, core::marker::PhantomData<*mut ()>);
 #[cfg(target_arch = "aarch64")]
 impl Drop for DitGuard {
     fn drop(&mut self) {
@@ -417,7 +417,14 @@ pub struct HardwareDitUnavailable;
 
 /// Keeps hardware DIT enabled for the lexical lifetime of a sensitive operation.
 /// Strict mode rejects x86 too: userspace cannot establish that DOITM is enabled.
+/// The guard is neither Send nor Sync: processor state belongs to its creating thread.
+///
+/// ```compile_fail
+/// let guard = qsag_asm::DitRequirement::BestEffort.enter().unwrap();
+/// std::thread::spawn(move || drop(guard));
+/// ```
 pub struct HardwareDitGuard {
+    _thread: core::marker::PhantomData<*mut ()>,
     #[cfg(target_arch = "aarch64")]
     _guard: DitGuard,
 }
@@ -431,10 +438,10 @@ impl DitRequirement {
             if self == Self::RequireHardwareDit && !probe_capabilities().aarch64_dit {
                 return Err(HardwareDitUnavailable);
             }
-            Ok(HardwareDitGuard { _guard: ensure_aarch64_dit_enabled() })
+            Ok(HardwareDitGuard { _guard: ensure_aarch64_dit_enabled(), _thread: core::marker::PhantomData })
         }
         #[cfg(not(target_arch = "aarch64"))]
-        Ok(HardwareDitGuard {})
+        Ok(HardwareDitGuard { _thread: core::marker::PhantomData })
     }
 }
 

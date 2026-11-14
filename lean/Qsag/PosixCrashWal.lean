@@ -5847,7 +5847,8 @@ def CrashRecoverCeremony (st : PosixFsState) (pid : Pid) (basePath : DirName)
     | none => (stClosed, .error .einval)
     | some j => (stClosed, .ok (rec, j, deriveSubordinateViews j))
 
-/-- Type-gated durable Round-1 resource lease required before emitting any Round-1 network packet. -/
+/-- Abstract-model Round-1 receipt data. This public Lean value is not an unforgeable capability;
+    only issuance and consumption in a reachable machine execution authorize output. -/
 structure DurableRound1Lease where
   txId                  : List UInt8
   msgContext            : List UInt8
@@ -5884,7 +5885,8 @@ def emitRound1NetworkPacket (lease : DurableRound1Lease) : Round1NetworkPacket :
     mpcPrepCursor := lease.mpcPrepCursor
     mpcNonceSlot := lease.mpcNonceSlot }
 
-/-- Type-gated durable release receipt required before releasing a final ceremony signature (`G1-H`). -/
+/-- Abstract-model release receipt data; the trace transition, not this public constructor,
+    supplies authority. See `RustDurability.IssuedReceipt` for reachability-backed evidence. -/
 structure DurableReleaseReceipt where
   txId                  : List UInt8
   msgContext            : List UInt8
@@ -5910,7 +5912,7 @@ structure ReleasedCeremonySig where
   sigBytes              : List UInt8
   deriving Repr, DecidableEq
 
-/-- Type-gated final signature release builder: requires a `DurableReleaseReceipt`. -/
+/-- Pure output formatter. Calling it is not an authorized release transition. -/
 def releaseCeremonySignature (rcpt : DurableReleaseReceipt) (sigBytes : List UInt8) :
     ReleasedCeremonySig :=
   { txId := rcpt.txId
@@ -7202,8 +7204,9 @@ theorem runCeremonyCrashTrace_preserves_inv
     3. **Post-Round-1 Crash-Prefix Burn Durability**: for every `pkt ∈ sFinal.emittedRound1Msgs`
        (including aborted ceremonies that crashed after Round-1 network output!),
        `AllRound1ReservationsDurable pkt views` holds in the recovered subordinate views, and
-    4. **Strict Global Resource No-Reuse**: `mpcNonceSlot`, `mpcPrepCursor`, `rngSeedGen`, and
-       `leafOrEpoch` are globally `Nodup` across all `emittedRound1Msgs` and `releasedSigs`! -/
+    4. All four resource projections are `Nodup` for Round-1 packets; the signature conclusions
+       establish nonce-slot and leaf uniqueness. This is the richer abstract journal, not the
+       80-byte Rust reservation schema. -/
 theorem ceremony_journal_released_implies_all_reservations_durable_and_no_reuse
     {pid recoveryPid : Pid} {basePath : DirName}
     {vaultKeyId genesisNonce : List UInt8} {policySpendCap : Nat}
@@ -8807,10 +8810,14 @@ theorem sidecarBytes_length (lockSeal : Bytes) (device inode : Nat) (h : lockSea
     (sidecarBytes lockSeal device inode).length = 32 := by
   simp [sidecarBytes, u64le, encodeU64BeNat_length, h]
 
-/-- Same lockSeal on different inodes is possible; lockSeal equality is not inode authentication. -/
-theorem seal_does_not_bind_inode (lockSeal : Bytes) (payload : Bytes) :
-    recordBytes lockSeal payload = recordBytes lockSeal payload ∧ (0 : Nat) ≠ 1 :=
-  ⟨rfl, by decide⟩
+/-- No decoder can recover inode identity from an eight-byte seal alone. The Rust check
+uses the sidecar's separate device/inode metadata and a trusted-directory contract. -/
+theorem lockSeal_cannot_recover_inode (lockSeal : Bytes) (decode : Bytes → Nat) :
+    ¬ (∀ inode : Nat, decode lockSeal = inode) := by
+  intro h
+  have h0 := h 0
+  have h1 := h 1
+  omega
 
 structure Reservation where
   ceremonyId : Bytes
@@ -8850,6 +8857,18 @@ def reservationValid (keyId : Bytes) (entries : List Reservation) (r : Reservati
   (match entries.getLast? with
    | none => true
    | some e => decide (e.seedBurnCursor < r.seedBurnCursor ∧ e.hedgeGeneration < r.hedgeGeneration))
+
+def FreshReservation (entries : List Reservation) (r : Reservation) : Prop :=
+  ∀ e ∈ entries, e.ceremonyId ≠ r.ceremonyId ∧ e.epochOrCodeword ≠ r.epochOrCodeword
+
+theorem reservationValid_fresh {key : Bytes} {entries : List Reservation} {r : Reservation}
+    (h : reservationValid key entries r = true) : FreshReservation entries r := by
+  simp only [reservationValid, Bool.and_eq_true, Bool.not_eq_true'] at h
+  have ha := h.1.2
+  intro e he
+  have hf : (e.ceremonyId == r.ceremonyId || e.epochOrCodeword == r.epochOrCodeword) = false :=
+    by simpa using (List.any_eq_false.mp ha) e he
+  simpa only [Bool.or_eq_false_iff, beq_eq_false_iff_ne] using hf
 
 /-- Backend MAC domains differ: Belt's payload tag does not cover the wrapper lockSeal. -/
 def beltTag (key payload : Bytes) : Bytes :=
@@ -9048,6 +9067,117 @@ def mayCreate (pc : ProvisionPc) : Bool := pc == .absent
 
 theorem interrupted_provision_not_fresh (pc : ProvisionPc) (h : pc ≠ .absent) :
     mayCreate pc = false := by simp [mayCreate, h]
+
+/-- Adaptive adversary with access only to the signing oracle's returned tags. Its final
+record is the candidate, not an existential quantifier over all mathematically valid tags. -/
+inductive WalMacAttack where
+  | output (candidate : WalRecord)
+  | query (body : WalRecordBody) (wellFormed : body.WellFormed) (next : Bytes → WalMacAttack)
+
+def runWalMacAttack (mac : KeyedMacFn) (key : Bytes) :
+    WalMacAttack → List WalRecordBody × WalRecord
+  | .output r => ([], r)
+  | .query b _ next =>
+    let result := runWalMacAttack mac key (next (computeWalMac mac key b))
+    (b :: result.1, result.2)
+
+theorem runWalMacAttack_queries_wellFormed (mac : KeyedMacFn) (key : Bytes)
+    (attack : WalMacAttack) :
+    ∀ b ∈ (runWalMacAttack mac key attack).1, b.WellFormed := by
+  induction attack with
+  | output r => simp [runWalMacAttack]
+  | query b wf next ih =>
+    intro x hx
+    simp only [runWalMacAttack, List.mem_cons] at hx
+    rcases hx with rfl | hx
+    · exact wf
+    · exact ih _ x hx
+
+/-- The standard primitive-game output: a candidate preimage/tag pair and the actual oracle
+query preimages. Width and authentication security are deliberately separate obligations. -/
+def primitiveMacWin (mac : KeyedMacFn) (key : Bytes)
+    (queries : List Bytes) (message tag : Bytes) : Prop :=
+  message ∉ queries ∧ tag = mac key message
+
+theorem wal_forgery_extracts_primitive_forgery (mac : KeyedMacFn) (key : Bytes)
+    (queries : List WalRecordBody) (r : WalRecord)
+    (wf : ∀ b ∈ queries, b.WellFormed) (bad : MacForgery mac key queries r) :
+    primitiveMacWin mac key (queries.map encodeWalBody) (encodeWalBody r.body) r.keyedMac := by
+  refine ⟨?_, ?_⟩
+  · intro hm
+    obtain ⟨b, hb, he⟩ := List.mem_map.mp hm
+    have eq := encodeWalBody_injective (wf b hb) bad.1.1 he
+    exact bad.2.1 (eq ▸ hb)
+  · exact eq_of_beq bad.2.2
+
+/-- Explicit finite probability transfer. Each sample fixes key and adversary coins; the
+adversary may adapt its queries to returned tags. Counts divided by `samples.length` are
+probabilities when the list is nonempty. Any primitive-game bound transfers with no loss. -/
+theorem wal_mac_experiment_bound (mac : KeyedMacFn) (samples : List (Bytes × WalMacAttack))
+    (walWin primitiveWin : Bytes × WalMacAttack → Bool)
+    (walSpec : ∀ sample, walWin sample = true →
+      MacForgery mac sample.1 (runWalMacAttack mac sample.1 sample.2).1
+        (runWalMacAttack mac sample.1 sample.2).2)
+    (primitiveSpec : ∀ sample,
+      primitiveMacWin mac sample.1 ((runWalMacAttack mac sample.1 sample.2).1.map encodeWalBody)
+        (encodeWalBody (runWalMacAttack mac sample.1 sample.2).2.body)
+        (runWalMacAttack mac sample.1 sample.2).2.keyedMac → primitiveWin sample = true) :
+    (samples.filter walWin).length ≤ (samples.filter primitiveWin).length := by
+  have pointwise : ∀ sample, walWin sample = true → primitiveWin sample = true := by
+    intro sample h
+    exact primitiveSpec sample (wal_forgery_extracts_primitive_forgery mac sample.1 _ _
+      (runWalMacAttack_queries_wellFormed mac sample.1 sample.2) (walSpec sample h))
+  induction samples with
+  | nil => simp
+  | cons sample rest ih =>
+    cases hw : walWin sample <;> cases hp : primitiveWin sample <;>
+      simp_all <;> omega
+
+/-- Belt's resource identity is key-scoped; identical replay is permitted, different
+message/salt/digits for the same epoch are not. Capacity and bounded forward jumps are real
+checks in `latched_salt`, not a globally unique receipt-epoch abstraction. -/
+structure BeltBinding where
+  epoch : Nat
+  digest : Bytes
+  retrySalt : Bytes
+  digits : Bytes
+  deriving Repr, DecidableEq
+
+structure BeltState where
+  keyId : Bytes
+  nextEpoch : Nat
+  inFlight : Option BeltBinding
+  poisoned : Bool
+  deriving Repr, DecidableEq
+
+inductive BeltBindOutcome where
+  | fresh | replay
+  deriving Repr, DecidableEq
+
+def beltBind (capacityLog2 : Nat) (s : BeltState) (r : BeltBinding) :
+    Option (BeltState × BeltBindOutcome) :=
+  if s.poisoned then none else
+  if s.inFlight = some r then some (s, .replay) else
+  if (s.inFlight.any fun old => old.epoch == r.epoch) then none else
+  if s.nextEpoch ≤ r.epoch ∧ r.epoch < 2^capacityLog2 ∧ r.epoch ≤ s.nextEpoch + 64 then
+    some ({ s with nextEpoch := r.epoch + 1, inFlight := some r }, .fresh)
+  else none
+
+theorem belt_replay_identical {cap : Nat} {s s' : BeltState} {r : BeltBinding}
+    (h : beltBind cap s r = some (s', .replay)) : s.inFlight = some r := by
+  unfold beltBind at h
+  split at h
+  · cases h
+  · split at h
+    · assumption
+    · split at h
+      · cases h
+      · split at h <;> cases h
+
+theorem belt_same_epoch_different_binding_rejected {cap : Nat} {s : BeltState}
+    {old r : BeltBinding} (held : s.inFlight = some old) (epoch : old.epoch = r.epoch)
+    (different : old ≠ r) : beltBind cap s r = none := by
+  simp [beltBind, held, different, epoch]
 
 end RustDurability
 

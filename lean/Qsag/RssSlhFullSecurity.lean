@@ -2656,8 +2656,9 @@ private theorem ratLe_real_bad_of_decoy_bound {bR bD card num : Nat} (hCard : 0 
 
 /-- **Crown-Jewel Theorem 1 (`rss_slh_real_ideal_view_indistinguishable`)**:
     Across ANY `Q_cuts` (`Q_s`) adaptively scheduled interactive rushing signing sessions with 1
-    static malicious party `cIdx : Fin 3`, ANY outer calling protocol context `ctx`, ANY distinguisher
-    `D`, and ANY real-world tape generator `realPrfTapeGen : Fin prfCard → (Nat → RssSlhSessionTape p.sigBytes)`:
+    static malicious party `cIdx : Fin 3`, ANY post-processing `ctx` of the finished transcript, ANY
+    distinguisher `D`, and ANY real-world tape generator
+    `realPrfTapeGen : Fin prfCard → (Nat → RssSlhSessionTape p.sigBytes)`:
     1. **Exact root-hit bound.** Between `RealProtocolExec` on uniform tapes and
        `IdealFunctionalityExec` (`IdealTsig` + `sk`-free `Sim_RssSlh`), the distance of the entire
        multi-round, multi-session `ExecTranscript` (wire `ByteArray`s and `Abort(reason)` outcomes
@@ -2671,8 +2672,11 @@ private theorem ratLe_real_bad_of_decoy_bound {bR bD card num : Nat} (hCard : 0 
        advantage of one explicit test (did a root hit occur) against the hiding of the honest
        Round-1 commitment `round1NonceCommit`; it is not bounded in this file, and an
        unbounded adversary that inverts `SHAKE256` on the 24-byte opening makes it large.
-    4. **Real tapes.** Composing with `realPrfTapeGen` via `uc_transitive_composition` adds the
-       tape-generator distance `advPrf`. -/
+    4. **Real tapes.** The triangle inequality `uc_transitive_composition` adds `advPrf`, which
+       is by definition the distance between the execution on `realPrfTapeGen` tapes and on
+       uniform tapes. No PRF reduction bounds it here.
+    Sessions run one after another to completion; this is a sequential multi-session statement,
+    not a composition theorem for interleaved executions. -/
 theorem rss_slh_real_ideal_view_indistinguishable {AdvState OuterView : Type}
     (p : Fips205Params) (hWf : p.wellFormed = true)
     (cIdx : Fin 3) (Q_cuts deg : Nat)
@@ -4245,7 +4249,8 @@ theorem rss_slh_uc_forgery_to_hash_game {AdvState : Type}
     adaptively scheduled rushing sessions is at most `Q_s * deg / 2^128` plus the coin-commitment
     hop `|badReal - badDecoy| / card` (see `rss_slh_real_ideal_view_indistinguishable`).
     Contrapositively, a forger exceeding that bound exhibits, on some tape, a concrete
-    FORS / WOTS+ / XMSS / `H_msg` witness. -/
+    FORS / WOTS+ / XMSS / `H_msg` witness. The premise is qualitative (no witness on any tape);
+    the theorem does not bound the probability of a witness by a hash-game advantage. -/
 theorem rss_slh_fresh_enrollment_euf_cma_bound {AdvState : Type}
     (p : Fips205Params) (hWf : p.wellFormed = true)
     (cIdx : Fin 3) (Q_s deg : Nat)
