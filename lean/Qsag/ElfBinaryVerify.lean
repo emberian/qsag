@@ -198,6 +198,18 @@ inductive X86Instr where
   | mulOneOp (isSigned : Bool) (is64 : Bool) (src : Nat)
   | shiftImm (kind : X86ShiftKind) (is64 : Bool) (dst : Nat) (cnt : Nat)
   | cmovcc (cc : Nat) (is64 : Bool) (dst src : Nat)
+  | testRegReg (is64 : Bool) (r1 r2 : Nat)
+  | cmpRegReg (is64 : Bool) (dst src : Nat)
+  | cmpImm (is64 : Bool) (dst : Nat) (imm : UInt64)
+  | lea (is64 : Bool) (dst : Nat) (addr : X86MemAddr)
+  | storeImm8 (addr : X86MemAddr) (imm : UInt8)
+  | notReg (is64 : Bool) (dst : Nat)
+  | setcc (cc : Nat) (dst : Nat)
+  | bswap (is64 : Bool) (dst : Nat)
+  | sseMovdquLoad (dst : Nat) (addr : X86MemAddr)
+  | ssePcmpeqb (dst src : Nat)
+  | ssePand (dst src : Nat)
+  | ssePmovmskb (dst src : Nat)
   | mulx (hiDst loDst src : Nat)
   | adcx (dst src : Nat)
   | adox (dst src : Nat)
@@ -325,7 +337,7 @@ def decodeShiftDigit? : Nat → Option X86ShiftKind
 
 /-- Decode one variable-length `x86_64` instruction at byte offset `pc`. -/
 def decodeX86InstrAt (pc : Nat) (bs : List UInt8) : Option (DecodedInstr X86Instr) := do
-  let (prefLen, rest0, p66, _pf2, pf3) := stripX86LegacyPrefixes 4 bs false false false
+  let (prefLen, rest0, p66, _pf2, pf3) := stripX86LegacyPrefixes 12 bs false false false
   let b0 ← rest0[0]?
   let (rexLen, rex, rest) :=
     if 0x40 ≤ b0 && b0 ≤ 0x4F then (1, b0.toNat, rest0.drop 1) else (0, 0, rest0)

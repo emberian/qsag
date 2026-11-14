@@ -477,6 +477,18 @@ theorem tower128_roots_finSum_le (deg : Nat) (deltas : List Tower128)
     exact hdNe (hCoeffsZero d (.tail _ hdMem))
   · omega
 
+/-- The root count is invariant under translating the challenge by a fixed `k`: a uniform coin
+    share XORed with any value fixed beforehand is still a uniform challenge. -/
+theorem tower128_shifted_roots_finSum_le (deg : Nat) (deltas : List Tower128) (k : BitVec 128)
+    (hLen : deltas.length ≤ deg)
+    (hNonzero : ∃ d ∈ deltas, d ≠ towerZero 7) :
+    finSum (2 ^ 128)
+      (fun r => if batchDeviationPoly deltas (unpackTower 7 (BitVec.ofFin r ^^^ k)) == towerZero 7
+                then 1 else 0) ≤ deg := by
+  refine Nat.le_trans (Nat.le_of_eq ?_) (tower128_roots_finSum_le deg deltas hLen hNonzero)
+  refine Eq.trans ?_ (finSum_equiv_eq (finBitVecXorEquiv 128 k) _)
+  exact finSum_congr (fun _ => rfl)
+
 /-! ## 2. Exact `FIPS 205` Wire Codec & Concrete 3-Round Interactive RSS/SPDZ Protocol -/
 
 /-- Split a flat byte stream into `count` consecutive `chunkSize`-byte chunks. -/
@@ -4462,7 +4474,11 @@ private theorem sessionBadHit_passive
         rw [hp]
         dsimp only
         rw [hl]
-        rw [ite_not_beq_self_false]
+        have hbne : (!(round1NonceCommit pk (reqs idx) idx cIdx.val (List.replicate 24 0) ==
+            round1NonceCommit pk (reqs idx) idx cIdx.val (List.replicate 24 0))) = false :=
+          byteArray_bne_self _
+        rw [hbne]
+        simp only [Bool.false_eq_true, ↓reduceIte]
         have hz : ∀ xs : List Tower128,
             (zipXorTower 7 xs xs).any (fun d => decide (d ≠ towerZero 7)) = false := by
           intro xs
@@ -4877,7 +4893,7 @@ def mutantSkipPreCutProtocol (p : Fips205Params) (cIdx : Fin 3) (deg : Nat) :
     extracts the opened first byte `(b0[0] ^^^ b1[0] ^^^ b2[0])` directly from public wire messages! -/
 def extractPublicRound3HeadByte (L : Nat) (honR3 : List (Nat × ByteArray)) : Option UInt8 :=
   match honR3 with
-  | [(_, w1), (_, w2)] =>
+  | (_, w1) :: (_, w2) :: _ =>
     let b1 := (unpackWireBytes w1).take L
     let b2 := (unpackWireBytes w1).drop L
     let b0 := (unpackWireBytes w2).drop L
@@ -4939,8 +4955,8 @@ private theorem sharedPreCutBarrier_forged_one
     2. **Simulator Indistinguishability Breakdown (`ratLe (2^128 - 1, 2^128)`)**: Against `Sim_RssSlh`,
        the public distinguisher `D_hasR3` distinguishes `mutantSkipPreCutProtocol` from
        `IdealFunctionalityExec` with advantage **`≥ (2 ^ 128 - 1) / 2 ^ 128`**!
-    3. **Unmodified Guard Protection**: On `rssSlhInteractiveProtocol`, every non-zero challenge
-       `unpackTower 7 tape.gammaBits ≠ towerZero 7` aborts strictly before Round 3 (`honestRound3 = []`,
+    3. **Unmodified Guard Protection**: On `rssSlhInteractiveProtocol`, every non-zero joint coin
+       `coinA ⊕ coinB ⊕ corruptCoin` aborts strictly before Round 3 (`honestRound3 = []`,
        `honestWal.poisoned = true`, `outcome = .abort .activeConsistencyFailed`), bounding whole-transcript
        advantage by **`(1, 2 ^ 128)`**! -/
 theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
@@ -4989,7 +5005,8 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
     ratLe (2 ^ 128 - 1, 2 ^ 128) (rationalAcceptDiff card mutView₀ card idealView D_hasR3) ∧
     ratLe (rationalAcceptDiff card realView₀ card idealView D_hasR3) (1, 2 ^ 128) ∧
     (∀ tape : RssSlhSessionTape p.sigBytes,
-      unpackTower 7 tape.gammaBits ≠ towerZero 7 →
+      unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin (List.replicate 24 0)) ≠
+        towerZero 7 →
       let runOut :=
         execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) A cl₀ () tape
       runOut.2.2.honestRound3 = [] ∧
@@ -5026,6 +5043,13 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
     intro gamma
     rw [@bbcggiWireAccumulator_eq_iff_batchDeviationPoly [forgedWire0] [exp0] rfl gamma,
         hZipOne]
+  have hCoin :
+      corruptOpenedCoin ⟨0, by decide⟩ 1
+        [(0, packWireBytes (List.replicate 24 0 ++ encodeTower128Wire forgedWire0))] =
+      openingCoin (List.replicate 24 0) := by
+    unfold corruptOpenedCoin
+    simp only [List.find?, beq_self_eq_true]
+    rw [parseCorruptRound2Wire_one_wire forgedWire0]
   have hMutHead : ∀ (seedSh : RssByteShares) (hSWf : seedSh.WellFormed)
       (hSame : reconstructRssBytes seedSh = reconstructRssBytes seedSh₀)
       (tape : RssSlhSessionTape p.sigBytes),
@@ -5128,7 +5152,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
     have hPair0 : (honestPairForCorrupt ⟨0, by decide⟩).2.2 = .p12 := rfl
     rw [hPair0, hQBytes, hCrossLeak]
     cases sharedFinalizeCutOpen p ⟨0, by decide⟩ pk req ⟨cutB0, cutB1, cutB2⟩ [(0, ByteArray.empty)] <;>
-      exact ⟨hNeNil, hExtractCut⟩
+      exact ⟨fun h => hNeNil (List.append_eq_nil_iff.mp h).1, hExtractCut⟩
   -- Part 1: `D_leakBit` accepts 100% on `mutView₁` and 0% on `mutView₀` -> `ratLe (1, 1)`
   have hMut1All : distAcceptCount card mutView₁ D_leakBit = card := by
     unfold distAcceptCount
@@ -5194,11 +5218,13 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       rw [hD]; rfl
     rw [finSum_congr hEach, finSum_const, Nat.mul_one]
   have hIdealR3WhenNonzero : ∀ tape : RssSlhSessionTape p.sigBytes,
-      (batchDeviationPoly [towerOne 7] (unpackTower 7 tape.gammaBits) == towerZero 7) = false →
+      (batchDeviationPoly [towerOne 7]
+        (unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin (List.replicate 24 0))) ==
+          towerZero 7) = false →
       (execIdealSession (slhIdealSignOracle p sk) (Sim_RssSlh p ⟨0, by decide⟩ 1) A icl () tape).2.2.honestRound3 = [] := by
     intro tape hBatchF
     dsimp only [A, icl]
-    unfold execIdealSession Sim_RssSlh activeFaultRushingAdv
+    unfold execIdealSession Sim_RssSlh sharedCoinTossBarrier activeFaultRushingAdv
     dsimp only
     rw [hQuorum, ite_eq_right (by decide : ¬ ((!true) = true)), hWal0]
     dsimp only
@@ -5220,13 +5246,14 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
         sharedPreCutBarrier ⟨0, by decide⟩ 1 pk req
           { cursor := 0,
             corrR1Commit := round1NonceCommit pk req 0 0 (List.replicate 24 0),
-            nonceA := tape.nonceA, nonceB := tape.nonceB, gammaBits := tape.gammaBits }
+            nonceA := tape.nonceA, nonceB := tape.nonceB,
+            gammaBits := (tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin (List.replicate 24 0) }
           [(0, packWireBytes (List.replicate 24 0 ++ encodeTower128Wire forgedWire0))] =
         .inl .activeConsistencyFailed := by
-      rw [sharedPreCutBarrier_forged_one pk req tape.nonceA tape.nonceB tape.gammaBits forgedWire0,
+      rw [sharedPreCutBarrier_forged_one pk req tape.nonceA tape.nonceB _ forgedWire0,
           hAccEqBatch, hBatchF]
       rfl
-    rw [hBarFail]
+    rw [hCoin, hBarFail]
   have hCardEq : card = rssPadSessionCard p.sigBytes * (2 ^ 128) := by
     dsimp only [card, rssMultiSessionCard, rssFullSessionCard]
     exact Nat.mul_one _
@@ -5241,11 +5268,15 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       have hPtLe : ∀ gIdx : Fin (2 ^ 128),
           (if D_hasR3 (idealView ⟨(pairFin padIdx gIdx).val,
             Nat.lt_of_lt_of_eq (pairFin padIdx gIdx).isLt hCardEq.symm⟩) then 1 else 0) ≤
-          (if batchDeviationPoly [towerOne 7] (unpackTower 7 (BitVec.ofFin gIdx)) == towerZero 7 then 1 else 0) := by
+          (if batchDeviationPoly [towerOne 7] (unpackTower 7 (BitVec.ofFin gIdx ^^^
+              ((decodeRssSessionTape p.sigBytes padIdx ⟨0, Nat.two_pow_pos 128⟩).coinB ^^^
+                openingCoin (List.replicate 24 0)))) == towerZero 7 then 1 else 0) := by
         intro gIdx
         let ωIdx : Fin card := ⟨(pairFin padIdx gIdx).val,
           Nat.lt_of_lt_of_eq (pairFin padIdx gIdx).isLt hCardEq.symm⟩
-        cases hB : (batchDeviationPoly [towerOne 7] (unpackTower 7 (BitVec.ofFin gIdx)) == towerZero 7)
+        cases hB : (batchDeviationPoly [towerOne 7] (unpackTower 7 (BitVec.ofFin gIdx ^^^
+              ((decodeRssSessionTape p.sigBytes padIdx ⟨0, Nat.two_pow_pos 128⟩).coinB ^^^
+                openingCoin (List.replicate 24 0)))) == towerZero 7)
         · have hTapeEq : decodeMultiSessionTapes p.sigBytes 1 ωIdx 0 =
               decodeRssSessionTape p.sigBytes padIdx gIdx := by
             unfold decodeMultiSessionTapes
@@ -5254,7 +5285,14 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
                 pairFin padIdx gIdx := by
               apply Fin.ext; dsimp [ωIdx, splitFinLeft, rssMultiSessionCard]; exact Nat.div_one _
             rw [hCurEq, splitFinLeft_pairFin, splitFinRight_pairFin]
-          have hGamma : (decodeRssSessionTape p.sigBytes padIdx gIdx).gammaBits = BitVec.ofFin gIdx := rfl
+          have hGamma :
+              ((decodeRssSessionTape p.sigBytes padIdx gIdx).gammaBits ^^^
+                (decodeRssSessionTape p.sigBytes padIdx gIdx).coinB) ^^^
+                  openingCoin (List.replicate 24 0) =
+              BitVec.ofFin gIdx ^^^
+                ((decodeRssSessionTape p.sigBytes padIdx ⟨0, Nat.two_pow_pos 128⟩).coinB ^^^
+                  openingCoin (List.replicate 24 0)) :=
+            BitVec.xor_assoc _ _ _
           have hEmpty := hIdealR3WhenNonzero (decodeRssSessionTape p.sigBytes padIdx gIdx) (by rw [hGamma]; exact hB)
           have hDF : D_hasR3 (idealView ωIdx) = false := by
             dsimp only [idealView, D_hasR3]
@@ -5269,7 +5307,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
           exact Nat.le_refl 0
         · cases D_hasR3 _ <;> decide
       exact Nat.le_trans (finSum_le_finSum hPtLe)
-        (tower128_roots_finSum_le 1 [towerOne 7] (Nat.le_refl 1) ⟨towerOne 7, .head _, by decide⟩)
+        (tower128_shifted_roots_finSum_le 1 [towerOne 7] _ (Nat.le_refl 1) ⟨towerOne 7, .head _, by decide⟩)
     calc finSum (rssPadSessionCard p.sigBytes) (fun padIdx => _)
         ≤ finSum (rssPadSessionCard p.sigBytes) (fun _ => 1) := finSum_le_finSum hInnerLe
       _ = rssPadSessionCard p.sigBytes * 1 := finSum_const _ 1
@@ -5279,15 +5317,32 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
   -- Part 3: Unmodified `rssSlhInteractiveProtocol` satisfies `(1, 2 ^ 128)` AND aborts + poisons!
   have hMatch0 : RealIdealClusterMatch ⟨0, by decide⟩ seedSh₀ prfSh cl₀ icl :=
     ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, fun _ => rfl⟩
-  have hHonestBound := (rss_slh_real_ideal_view_indistinguishable p hWf ⟨0, by decide⟩ 1 1
+  have hInd := rss_slh_real_ideal_view_indistinguishable p hWf ⟨0, by decide⟩ 1 1
     ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ pkSeed A cl₀ icl () hMatch0 rfl ⟨id⟩ D_hasR3
-    card (rssMultiSessionCard_pos p.sigBytes 1) (decodeMultiSessionTapes p.sigBytes 1)).1
+    card (rssMultiSessionCard_pos p.sigBytes 1) (decodeMultiSessionTapes p.sigBytes 1)
+  -- This adversary ignores every honest message, so the commitment-decoy game has the same
+  -- root-hit event and the counted bound applies to the protocol itself.
+  have hBadSame : ∀ ω : Fin card,
+      multiSessionBadHit true p ⟨0, by decide⟩ 1 A 1 cl₀ () ω =
+      multiSessionBadHit false p ⟨0, by decide⟩ 1 A 1 cl₀ () ω := fun _ => rfl
+  have hCountSame :
+      finSum card (fun ω => if multiSessionBadHit true p ⟨0, by decide⟩ 1 A 1 cl₀ () ω then 1 else 0) =
+      finSum card (fun ω => if multiSessionBadHit false p ⟨0, by decide⟩ 1 A 1 cl₀ () ω then 1 else 0) :=
+    finSum_congr (fun ω => by rw [hBadSame ω])
+  have hRealCount :
+      ratLe (finSum card (fun ω =>
+        if multiSessionBadHit true p ⟨0, by decide⟩ 1 A 1 cl₀ () ω then 1 else 0), card)
+        (1 * 1, 2 ^ 128) := by
+    rw [hCountSame]
+    exact hInd.2.1
+  have hHonestBound := ratLe_trans hInd.1 hRealCount
   have hMul1 : 1 * 1 = 1 := rfl
   rw [hMul1] at hHonestBound
   refine ⟨hSeedSame, hSeedNe, hLeak1, hBreakSim, hHonestBound, ?_⟩
   intro tape hGammaNe runOut
   dsimp only [runOut, A, cl₀]
-  unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol activeFaultRushingAdv poisonRealCluster
+  unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol sharedCoinTossBarrier
+    activeFaultRushingAdv poisonRealCluster
   dsimp only
   rw [hQuorum, ite_eq_right (by decide : ¬ ((!true) = true)), hWal0]
   dsimp only
@@ -5305,20 +5360,23 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
     rfl
   rw [hVR1]
   dsimp only
-  have hBatchFalse : (batchDeviationPoly [towerOne 7] (unpackTower 7 tape.gammaBits) == towerZero 7) = false := by
+  have hBatchFalse : (batchDeviationPoly [towerOne 7]
+      (unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin (List.replicate 24 0))) ==
+        towerZero 7) = false := by
     rw [batchDeviationPoly_singleton_one]
     exact beq_false_of_ne hGammaNe
   have hBarFail :
       sharedPreCutBarrier ⟨0, by decide⟩ 1 pk req
         { cursor := 0,
           corrR1Commit := round1NonceCommit pk req 0 0 (List.replicate 24 0),
-          nonceA := tape.nonceA, nonceB := tape.nonceB, gammaBits := tape.gammaBits }
+          nonceA := tape.nonceA, nonceB := tape.nonceB,
+          gammaBits := (tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin (List.replicate 24 0) }
         [(0, packWireBytes (List.replicate 24 0 ++ encodeTower128Wire forgedWire0))] =
       .inl .activeConsistencyFailed := by
-    rw [sharedPreCutBarrier_forged_one pk req tape.nonceA tape.nonceB tape.gammaBits forgedWire0,
+    rw [sharedPreCutBarrier_forged_one pk req tape.nonceA tape.nonceB _ forgedWire0,
         hAccEqBatch, hBatchFalse]
     rfl
-  rw [hBarFail]
+  rw [hCoin, hBarFail]
   exact ⟨rfl, rfl, rfl⟩
 
 /-- Extract Party 1's 64-bit Round-2 masked Keccak `χ`-row word from a public `SessionWireRecord`. -/

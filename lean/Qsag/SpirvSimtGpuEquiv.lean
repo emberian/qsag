@@ -1799,11 +1799,11 @@ theorem stepWorkgroupWave_comm {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
                 · rw [hpc₁₂, hpc₁, hpc₂₁, hpc₂]
               rw [hWavesEq, hMemEq]
     · unfold stepWorkgroupWave
-      simp only [hw₂, ↓reduceIte]
-      cases stepWorkgroupWave env cfg prog w₁ st <;> simp [stepWorkgroupWave, hw₂]
+      simp only [Bind.bind, Except.bind, hw₂, ↓reduceIte]
+      cases stepWave32One env prog (st.waves w₁) st.mem <;> simp [hw₁, hw₂]
   · unfold stepWorkgroupWave
-    simp only [hw₁, ↓reduceIte]
-    cases stepWorkgroupWave env cfg prog w₂ st <;> simp [stepWorkgroupWave, hw₁]
+    simp only [Bind.bind, Except.bind, hw₁, ↓reduceIte]
+    cases stepWave32One env prog (st.waves w₂) st.mem <;> simp [hw₁, hw₂]
 
 /-- Adjacent-swap equivalence of wave schedules (`w₁ :: w₂ :: ws ~ w₂ :: w₁ :: ws` for `w₁ ≠ w₂`). -/
 inductive SchedPerm : List Nat → List Nat → Prop where
@@ -1836,12 +1836,7 @@ theorem multiWave_schedule_confluence {env : SpirvModuleEnv} {cfg : WorkgroupCon
     obtain ⟨s₂, hs₂⟩ := hTotal w₂ st
     obtain ⟨s₁₂, hs₁₂⟩ := hTotal w₂ s₁
     obtain ⟨s₂₁, hs₂₁⟩ := hTotal w₁ s₂
-    change (match stepWorkgroupWave env cfg prog w₁ st with
-            | .error e => .error e
-            | .ok st' => runInterleavedSchedule env cfg prog (w₂ :: rest) st') =
-           (match stepWorkgroupWave env cfg prog w₂ st with
-            | .error e => .error e
-            | .ok st' => runInterleavedSchedule env cfg prog (w₁ :: rest) st')
+    dsimp only [runInterleavedSchedule]
     rw [hs₁, hs₂]
     dsimp only [runInterleavedSchedule]
     rw [hs₁₂, hs₂₁]
@@ -1865,7 +1860,7 @@ private theorem schedPerm_bubble_front (w : Nat) :
     ∀ (xs ys : List Nat),
       (∀ x ∈ xs, x ≠ w) →
       SchedPerm (xs ++ w :: ys) (w :: xs ++ ys)
-  | [], ys, _ => .refl _
+  | [], _, _ => .refl _
   | x :: xs, ys, hne =>
     have hx : x ≠ w := hne x (.head _)
     have hrest : ∀ z ∈ xs, z ≠ w := fun z hz => hne z (.tail _ hz)
@@ -1908,9 +1903,9 @@ private theorem schedPerm_extractAllWave (w : Nat) :
         | nil => exact .refl _
         | cons z ws ih =>
           have hzw : z = w := hws z (.head _)
-          subst hzw
+          cases hzw
           exact .trans (.swap hxw (ws ++ rest))
-            (.cons w (ih (fun u hu => hws u (.tail _ hu))))
+            (.cons z (ih (fun u hu => hws u (.tail _ hu))))
       exact .trans (.cons x hPermTail) (hPushX _ _ hAllW)
 
 private theorem extractAllWave_fst_eq_replicate (w : Nat) :
@@ -1922,7 +1917,7 @@ private theorem extractAllWave_fst_eq_replicate (w : Nat) :
     · subst hxw
       simp [List.count_cons_self, List.replicate_succ, extractAllWave_fst_eq_replicate x xs]
     · have hne : (x == w) = false := beq_false_of_ne hxw
-      simp [hxw, List.count_cons, hne, extractAllWave_fst_eq_replicate w xs]
+      simp [hxw, List.count_cons, extractAllWave_fst_eq_replicate w xs]
 
 private theorem extractAllWave_snd_count (w u : Nat) :
     ∀ s : List Nat, ((extractAllWave w s).2).count u = if u = w then 0 else s.count u
