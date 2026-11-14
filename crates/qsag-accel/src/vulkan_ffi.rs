@@ -983,3 +983,988 @@ impl RawVulkanEngine {
         let mut chosen: Option<(VkPhysicalDevice, VkPhysicalDevicePropertiesRaw, VkPhysicalDeviceFeatures)> =
             None;
         let mut saw_discrete_without_int64 = false;
+        for &pd in &phys_devs {
+            let mut props = unsafe { MaybeUninit::<VkPhysicalDevicePropertiesRaw>::zeroed().assume_init() };
+            let mut feats = unsafe { MaybeUninit::<VkPhysicalDeviceFeatures>::zeroed().assume_init() };
+            unsafe {
+                get_props(pd, &mut props);
+                get_feats(pd, &mut feats);
+            }
+            if props.device_type == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU {
+                if feats.flags[FEATURE_SHADER_INT64_INDEX] == 0 {
+                    saw_discrete_without_int64 = true;
+                    continue;
+                }
+                let replace = match &chosen {
+                    None => true,
+                    Some((_, prev_props, _)) => {
+                        prev_props.vendor_id != 0x1002 && props.vendor_id == 0x1002
+                    }
+                };
+                if replace {
+                    chosen = Some((pd, props, feats));
+                }
+            }
+        }
+
+        let (phys_dev, props, _) = match chosen {
+            Some(c) => c,
+            None if saw_discrete_without_int64 => return Err(VulkanError::MissingShaderInt64),
+            None => return Err(VulkanError::NoDiscreteGpuFound),
+        };
+
+        let mut mem_props =
+            unsafe { MaybeUninit::<VkPhysicalDeviceMemoryProperties>::zeroed().assume_init() };
+        unsafe {
+            get_mem_props(phys_dev, &mut mem_props);
+        }
+
+        let mut qf_count = 0u32;
+        unsafe {
+            get_q_props(phys_dev, &mut qf_count, null_mut());
+        }
+        if qf_count == 0 {
+            return Err(VulkanError::NoComputeQueueFamily);
+        }
+        let mut qf_props = std::vec![
+            VkQueueFamilyProperties {
+                queue_flags: 0,
+                queue_count: 0,
+                timestamp_valid_bits: 0,
+                min_image_transfer_granularity: [0; 3],
+            };
+            qf_count as usize
+        ];
+        unsafe {
+            get_q_props(phys_dev, &mut qf_count, qf_props.as_mut_ptr());
+        }
+
+        // Prefer dedicated async compute + transfer queue family (`!GRAPHICS`), fallback to any compute queue.
+        let mut queue_family_index: Option<u32> = None;
+        for (idx, qf) in qf_props.iter().enumerate() {
+            if qf.queue_count > 0
+                && (qf.queue_flags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT))
+                    == (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT)
+                && (qf.queue_flags & VK_QUEUE_GRAPHICS_BIT) == 0
+            {
+                queue_family_index = Some(idx as u32);
+                break;
+            }
+        }
+        if queue_family_index.is_none() {
+            for (idx, qf) in qf_props.iter().enumerate() {
+                if qf.queue_count > 0 && (qf.queue_flags & VK_QUEUE_COMPUTE_BIT) != 0 {
+                    queue_family_index = Some(idx as u32);
+                    break;
+                }
+            }
+        }
+        let qf_idx = queue_family_index.ok_or(VulkanError::NoComputeQueueFamily)?;
+
+        let priority: f32 = 1.0;
+        let q_info = VkDeviceQueueCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+            p_next: null(),
+            flags: 0,
+            queue_family_index: qf_idx,
+            queue_count: 1,
+            p_queue_priorities: &priority,
+        };
+        let mut enabled_features = VkPhysicalDeviceFeatures { flags: [0u32; 55] };
+        enabled_features.flags[FEATURE_SHADER_INT64_INDEX] = VK_TRUE;
+
+        let dev_info_create = VkDeviceCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+            p_next: null(),
+            flags: 0,
+            queue_create_info_count: 1,
+            p_queue_create_infos: &q_info,
+            enabled_layer_count: 0,
+            pp_enabled_layer_names: null(),
+            enabled_extension_count: 0,
+            pp_enabled_extension_names: null(),
+            p_enabled_features: &enabled_features,
+        };
+        let mut device: VkDevice = null_mut();
+        check_vk("vkCreateDevice", unsafe {
+            create_device(phys_dev, &dev_info_create, null(), &mut device)
+        })?;
+
+        let fns = match unsafe { Self::load_device_fns(gdpa, device) } {
+            Ok(f) => f,
+            Err(e) => {
+                if let Ok(destroy_dev) = unsafe {
+                    load_dev_fn::<unsafe extern "C" fn(VkDevice, *const c_void)>(
+                        gdpa,
+                        device,
+                        c"vkDestroyDevice",
+                        "vkDestroyDevice",
+                    )
+                } {
+                    unsafe {
+                        destroy_dev(device, null());
+                    }
+                }
+                return Err(e);
+            }
+        };
+
+        let mut queue: VkQueue = null_mut();
+        unsafe {
+            (fns.get_device_queue)(device, qf_idx, 0, &mut queue);
+        }
+
+        let name_len = props
+            .device_name
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(props.device_name.len());
+        let (name_bytes, copy_len) =
+            VulkanDeviceInfo::sanitize_device_name(&props.device_name[..name_len]);
+        let dev_info = VulkanDeviceInfo {
+            name_bytes,
+            name_len: copy_len,
+            vendor_id: props.vendor_id,
+            device_id: props.device_id,
+            driver_version: props.driver_version,
+            api_version: props.api_version,
+            device_type: props.device_type,
+            max_push_constants_size: props.max_push_constants_size(),
+            max_storage_buffer_range: props.max_storage_buffer_range(),
+            max_compute_work_group_invocations: props.max_compute_work_group_invocations(),
+        };
+
+        let mut engine = Self {
+            lib_handle,
+            destroy_instance,
+            instance,
+            device,
+            fns,
+            queue,
+            mem_props,
+            max_wg_x: props.max_compute_work_group_count_x().max(1),
+            max_storage_range: props.max_storage_buffer_range() as u64,
+            dsl_1buf: 0,
+            dsl_2buf: 0,
+            dsl_3buf: 0,
+            pipelines: [KernelPipeline {
+                shader_module: 0,
+                pipeline_layout: 0,
+                pipeline: 0,
+            }; KernelSlot::COUNT],
+            desc_pool: 0,
+            ds_1buf_a: 0,
+            ds_2buf_ab: 0,
+            ds_2buf_ba: 0,
+            ds_3buf_abc: 0,
+            cmd_pool: 0,
+            cmd_buf: null_mut(),
+            fence: 0,
+            staging: GpuBuffer::default(),
+            vram_a: GpuBuffer::default(),
+            vram_b: GpuBuffer::default(),
+            vram_c: GpuBuffer::default(),
+        };
+
+        // Note: if any setup step below returns `Err`, `engine` drops here and cleans up
+        // `device` (`Drop` also destroys `instance` + `dlclose`, so guard against double-cleanup
+        // by returning cleanly without letting caller also destroy `instance`).
+        // To avoid double-destroy on `Err`, `init_with_instance` handles cleanup via `Drop`
+        // and we nullify `instance` only if needed; even simpler, let `build_pipelines_and_pools`
+        // run and on `Err` prevent `init_with_instance`'s caller from double-freeing by doing
+        // top-level cleanup solely inside `Drop`!
+        if let Err(e) = unsafe { engine.build_pipelines_and_pools(qf_idx) } {
+            // `engine` Drop will destroy `device`, `instance`, and `dlclose(lib_handle)`.
+            // Prevent caller of `init_with_instance` from destroying `instance` a second time
+            // by handling full teardown right here and forgetting `engine`? No: let `try_new`
+            // delegate teardown once `engine` exists. See below!
+            unsafe {
+                engine.teardown_device_only();
+            }
+            core::mem::forget(engine);
+            return Err(e);
+        }
+
+        Ok((engine, dev_info))
+    }
+
+    unsafe fn load_device_fns(
+        gdpa: PfnVkGetDeviceProcAddr,
+        device: VkDevice,
+    ) -> Result<DeviceFns, VulkanError> {
+        unsafe {
+            Ok(DeviceFns {
+                destroy_device: load_dev_fn(gdpa, device, c"vkDestroyDevice", "vkDestroyDevice")?,
+                get_device_queue: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkGetDeviceQueue",
+                    "vkGetDeviceQueue",
+                )?,
+                create_buffer: load_dev_fn(gdpa, device, c"vkCreateBuffer", "vkCreateBuffer")?,
+                destroy_buffer: load_dev_fn(gdpa, device, c"vkDestroyBuffer", "vkDestroyBuffer")?,
+                get_buffer_memory_requirements: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkGetBufferMemoryRequirements",
+                    "vkGetBufferMemoryRequirements",
+                )?,
+                allocate_memory: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkAllocateMemory",
+                    "vkAllocateMemory",
+                )?,
+                free_memory: load_dev_fn(gdpa, device, c"vkFreeMemory", "vkFreeMemory")?,
+                map_memory: load_dev_fn(gdpa, device, c"vkMapMemory", "vkMapMemory")?,
+                unmap_memory: load_dev_fn(gdpa, device, c"vkUnmapMemory", "vkUnmapMemory")?,
+                bind_buffer_memory: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkBindBufferMemory",
+                    "vkBindBufferMemory",
+                )?,
+                create_shader_module: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCreateShaderModule",
+                    "vkCreateShaderModule",
+                )?,
+                destroy_shader_module: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkDestroyShaderModule",
+                    "vkDestroyShaderModule",
+                )?,
+                create_descriptor_set_layout: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCreateDescriptorSetLayout",
+                    "vkCreateDescriptorSetLayout",
+                )?,
+                destroy_descriptor_set_layout: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkDestroyDescriptorSetLayout",
+                    "vkDestroyDescriptorSetLayout",
+                )?,
+                create_pipeline_layout: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCreatePipelineLayout",
+                    "vkCreatePipelineLayout",
+                )?,
+                destroy_pipeline_layout: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkDestroyPipelineLayout",
+                    "vkDestroyPipelineLayout",
+                )?,
+                create_compute_pipelines: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCreateComputePipelines",
+                    "vkCreateComputePipelines",
+                )?,
+                destroy_pipeline: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkDestroyPipeline",
+                    "vkDestroyPipeline",
+                )?,
+                create_descriptor_pool: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCreateDescriptorPool",
+                    "vkCreateDescriptorPool",
+                )?,
+                destroy_descriptor_pool: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkDestroyDescriptorPool",
+                    "vkDestroyDescriptorPool",
+                )?,
+                allocate_descriptor_sets: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkAllocateDescriptorSets",
+                    "vkAllocateDescriptorSets",
+                )?,
+                update_descriptor_sets: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkUpdateDescriptorSets",
+                    "vkUpdateDescriptorSets",
+                )?,
+                create_command_pool: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCreateCommandPool",
+                    "vkCreateCommandPool",
+                )?,
+                destroy_command_pool: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkDestroyCommandPool",
+                    "vkDestroyCommandPool",
+                )?,
+                reset_command_pool: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkResetCommandPool",
+                    "vkResetCommandPool",
+                )?,
+                allocate_command_buffers: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkAllocateCommandBuffers",
+                    "vkAllocateCommandBuffers",
+                )?,
+                begin_command_buffer: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkBeginCommandBuffer",
+                    "vkBeginCommandBuffer",
+                )?,
+                end_command_buffer: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkEndCommandBuffer",
+                    "vkEndCommandBuffer",
+                )?,
+                cmd_copy_buffer: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCmdCopyBuffer",
+                    "vkCmdCopyBuffer",
+                )?,
+                cmd_bind_pipeline: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCmdBindPipeline",
+                    "vkCmdBindPipeline",
+                )?,
+                cmd_bind_descriptor_sets: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCmdBindDescriptorSets",
+                    "vkCmdBindDescriptorSets",
+                )?,
+                cmd_push_constants: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCmdPushConstants",
+                    "vkCmdPushConstants",
+                )?,
+                cmd_dispatch: load_dev_fn(gdpa, device, c"vkCmdDispatch", "vkCmdDispatch")?,
+                cmd_pipeline_barrier: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkCmdPipelineBarrier",
+                    "vkCmdPipelineBarrier",
+                )?,
+                create_fence: load_dev_fn(gdpa, device, c"vkCreateFence", "vkCreateFence")?,
+                destroy_fence: load_dev_fn(gdpa, device, c"vkDestroyFence", "vkDestroyFence")?,
+                reset_fences: load_dev_fn(gdpa, device, c"vkResetFences", "vkResetFences")?,
+                wait_for_fences: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkWaitForFences",
+                    "vkWaitForFences",
+                )?,
+                queue_submit: load_dev_fn(gdpa, device, c"vkQueueSubmit", "vkQueueSubmit")?,
+                device_wait_idle: load_dev_fn(
+                    gdpa,
+                    device,
+                    c"vkDeviceWaitIdle",
+                    "vkDeviceWaitIdle",
+                )?,
+            })
+        }
+    }
+
+    unsafe fn create_dsl(&self, num_bindings: u32) -> Result<VkDescriptorSetLayout, VulkanError> {
+        let mut bindings = [VkDescriptorSetLayoutBinding {
+            binding: 0,
+            descriptor_type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            descriptor_count: 1,
+            stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
+            p_immutable_samplers: null(),
+        }; 3];
+        for (i, b) in bindings.iter_mut().enumerate().take(num_bindings as usize) {
+            b.binding = i as u32;
+        }
+        let info = VkDescriptorSetLayoutCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            p_next: null(),
+            flags: 0,
+            binding_count: num_bindings,
+            p_bindings: bindings.as_ptr(),
+        };
+        let mut dsl: VkDescriptorSetLayout = 0;
+        check_vk("vkCreateDescriptorSetLayout", unsafe {
+            (self.fns.create_descriptor_set_layout)(self.device, &info, null(), &mut dsl)
+        })?;
+        Ok(dsl)
+    }
+
+    unsafe fn build_pipelines_and_pools(&mut self, qf_idx: u32) -> Result<(), VulkanError> {
+        self.dsl_1buf = unsafe { self.create_dsl(1)? };
+        self.dsl_2buf = unsafe { self.create_dsl(2)? };
+        self.dsl_3buf = unsafe { self.create_dsl(3)? };
+
+        let specs: [(KernelSlot, VkDescriptorSetLayout, u32); KernelSlot::COUNT] = [
+            (
+                KernelSlot::BatchKeccakF1600,
+                self.dsl_1buf,
+                size_of::<BatchStatesPushConsts>() as u32,
+            ),
+            (
+                KernelSlot::BatchPoseidon2Perm12,
+                self.dsl_1buf,
+                size_of::<BatchStatesPushConsts>() as u32,
+            ),
+            (
+                KernelSlot::GoldilocksNtt,
+                self.dsl_1buf,
+                size_of::<NttPushConsts>() as u32,
+            ),
+            (
+                KernelSlot::CosetLdeExt2,
+                self.dsl_1buf,
+                size_of::<CosetLdePushConsts>() as u32,
+            ),
+            (
+                KernelSlot::MerkleLayerPoseidon2,
+                self.dsl_2buf,
+                size_of::<MerklePushConsts>() as u32,
+            ),
+            (
+                KernelSlot::BdozGf2128BatchDot,
+                self.dsl_3buf,
+                size_of::<BdozDotPushConsts>() as u32,
+            ),
+        ];
+
+        for (slot, dsl, pc_size) in specs {
+            let spv = spirv_kernel_words(slot);
+            let sm_info = VkShaderModuleCreateInfo {
+                s_type: VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                p_next: null(),
+                flags: 0,
+                code_size: spv.len() * 4,
+                p_code: spv.as_ptr(),
+            };
+            let mut sm: VkShaderModule = 0;
+            check_vk("vkCreateShaderModule", unsafe {
+                (self.fns.create_shader_module)(self.device, &sm_info, null(), &mut sm)
+            })?;
+            self.pipelines[slot as usize].shader_module = sm;
+
+            let pc_range = VkPushConstantRange {
+                stage_flags: VK_SHADER_STAGE_COMPUTE_BIT,
+                offset: 0,
+                size: pc_size,
+            };
+            let pl_info = VkPipelineLayoutCreateInfo {
+                s_type: VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                p_next: null(),
+                flags: 0,
+                set_layout_count: 1,
+                p_set_layouts: &dsl,
+                push_constant_range_count: 1,
+                p_push_constant_ranges: &pc_range,
+            };
+            let mut pl: VkPipelineLayout = 0;
+            check_vk("vkCreatePipelineLayout", unsafe {
+                (self.fns.create_pipeline_layout)(self.device, &pl_info, null(), &mut pl)
+            })?;
+            self.pipelines[slot as usize].pipeline_layout = pl;
+
+            let cp_info = VkComputePipelineCreateInfo {
+                s_type: VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+                p_next: null(),
+                flags: 0,
+                stage: VkPipelineShaderStageCreateInfo {
+                    s_type: VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                    p_next: null(),
+                    flags: 0,
+                    stage: VK_SHADER_STAGE_COMPUTE_BIT,
+                    module: sm,
+                    p_name: c"main".as_ptr(),
+                    p_specialization_info: null(),
+                },
+                layout: pl,
+                base_pipeline_handle: 0,
+                base_pipeline_index: -1,
+            };
+            let mut pipe: VkPipeline = 0;
+            check_vk("vkCreateComputePipelines", unsafe {
+                (self.fns.create_compute_pipelines)(self.device, 0, 1, &cp_info, null(), &mut pipe)
+            })?;
+            self.pipelines[slot as usize].pipeline = pipe;
+        }
+
+        // Descriptor pool: 4 sets (1 + 2 + 2 + 3 = 8 storage buffer descriptors).
+        let pool_size = VkDescriptorPoolSize {
+            ty: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            descriptor_count: 8,
+        };
+        let dp_info = VkDescriptorPoolCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            p_next: null(),
+            flags: 0,
+            max_sets: 4,
+            pool_size_count: 1,
+            p_pool_sizes: &pool_size,
+        };
+        check_vk("vkCreateDescriptorPool", unsafe {
+            (self.fns.create_descriptor_pool)(self.device, &dp_info, null(), &mut self.desc_pool)
+        })?;
+
+        let set_layouts = [self.dsl_1buf, self.dsl_2buf, self.dsl_2buf, self.dsl_3buf];
+        let mut sets = [0u64; 4];
+        let dsa_info = VkDescriptorSetAllocateInfo {
+            s_type: VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            p_next: null(),
+            descriptor_pool: self.desc_pool,
+            descriptor_set_count: 4,
+            p_set_layouts: set_layouts.as_ptr(),
+        };
+        check_vk("vkAllocateDescriptorSets", unsafe {
+            (self.fns.allocate_descriptor_sets)(self.device, &dsa_info, sets.as_mut_ptr())
+        })?;
+        self.ds_1buf_a = sets[0];
+        self.ds_2buf_ab = sets[1];
+        self.ds_2buf_ba = sets[2];
+        self.ds_3buf_abc = sets[3];
+
+        let cp_info = VkCommandPoolCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+            p_next: null(),
+            flags: VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+            queue_family_index: qf_idx,
+        };
+        check_vk("vkCreateCommandPool", unsafe {
+            (self.fns.create_command_pool)(self.device, &cp_info, null(), &mut self.cmd_pool)
+        })?;
+
+        let cba_info = VkCommandBufferAllocateInfo {
+            s_type: VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            p_next: null(),
+            command_pool: self.cmd_pool,
+            level: VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            command_buffer_count: 1,
+        };
+        check_vk("vkAllocateCommandBuffers", unsafe {
+            (self.fns.allocate_command_buffers)(self.device, &cba_info, &mut self.cmd_buf)
+        })?;
+
+        let fence_info = VkFenceCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            p_next: null(),
+            flags: 0,
+        };
+        check_vk("vkCreateFence", unsafe {
+            (self.fns.create_fence)(self.device, &fence_info, null(), &mut self.fence)
+        })?;
+
+        // Pre-allocate initial workspace buffers and bind descriptor sets.
+        unsafe {
+            self.ensure_staging(MIN_BUFFER_ALLOC_BYTES)?;
+            self.ensure_vram_buffers(
+                MIN_BUFFER_ALLOC_BYTES,
+                MIN_BUFFER_ALLOC_BYTES,
+                MIN_BUFFER_ALLOC_BYTES,
+            )?;
+        }
+        Ok(())
+    }
+
+    unsafe fn destroy_gpu_buffer(&mut self, buf: &mut GpuBuffer) {
+        if !buf.mapped.is_null() && buf.memory != 0 {
+            unsafe {
+                (self.fns.unmap_memory)(self.device, buf.memory);
+            }
+            buf.mapped = null_mut();
+        }
+        if buf.buffer != 0 {
+            unsafe {
+                (self.fns.destroy_buffer)(self.device, buf.buffer, null());
+            }
+            buf.buffer = 0;
+        }
+        if buf.memory != 0 {
+            unsafe {
+                (self.fns.free_memory)(self.device, buf.memory, null());
+            }
+            buf.memory = 0;
+        }
+        buf.capacity = 0;
+    }
+
+    unsafe fn alloc_gpu_buffer(&self, byte_size: u64, host_staging: bool) -> Result<GpuBuffer, VulkanError> {
+        let cap = byte_size.max(MIN_BUFFER_ALLOC_BYTES);
+        let usage = if host_staging {
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+        } else {
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+        };
+        let b_info = VkBufferCreateInfo {
+            s_type: VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            p_next: null(),
+            flags: 0,
+            size: cap,
+            usage,
+            sharing_mode: VK_SHARING_MODE_EXCLUSIVE,
+            queue_family_index_count: 0,
+            p_queue_family_indices: null(),
+        };
+        let mut buffer: VkBuffer = 0;
+        check_vk("vkCreateBuffer", unsafe {
+            (self.fns.create_buffer)(self.device, &b_info, null(), &mut buffer)
+        })?;
+
+        let mut req = VkMemoryRequirements {
+            size: 0,
+            alignment: 0,
+            memory_type_bits: 0,
+            _pad: 0,
+        };
+        unsafe {
+            (self.fns.get_buffer_memory_requirements)(self.device, buffer, &mut req);
+        }
+
+        let mem_type = if host_staging {
+            find_memory_type(
+                &self.mem_props,
+                req.memory_type_bits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
+            )
+            .ok_or(VulkanError::NoSuitableMemoryType {
+                what: "host-coherent staging buffer",
+            })
+        } else {
+            find_memory_type(
+                &self.mem_props,
+                req.memory_type_bits,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_DEVICE_UNCACHED_BIT_AMD,
+            )
+            .ok_or(VulkanError::NoSuitableMemoryType {
+                what: "device-local VRAM storage buffer",
+            })
+        };
+
+        let mem_type = match mem_type {
+            Ok(idx) => idx,
+            Err(e) => {
+                unsafe {
+                    (self.fns.destroy_buffer)(self.device, buffer, null());
+                }
+                return Err(e);
+            }
+        };
+
+        let a_info = VkMemoryAllocateInfo {
+            s_type: VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+            p_next: null(),
+            allocation_size: req.size,
+            memory_type_index: mem_type,
+        };
+        let mut memory: VkDeviceMemory = 0;
+        if let Err(e) = check_vk("vkAllocateMemory", unsafe {
+            (self.fns.allocate_memory)(self.device, &a_info, null(), &mut memory)
+        }) {
+            unsafe {
+                (self.fns.destroy_buffer)(self.device, buffer, null());
+            }
+            return Err(e);
+        }
+
+        if let Err(e) = check_vk("vkBindBufferMemory", unsafe {
+            (self.fns.bind_buffer_memory)(self.device, buffer, memory, 0)
+        }) {
+            unsafe {
+                (self.fns.destroy_buffer)(self.device, buffer, null());
+                (self.fns.free_memory)(self.device, memory, null());
+            }
+            return Err(e);
+        }
+
+        let mut mapped: *mut u8 = null_mut();
+        if host_staging {
+            let mut raw_ptr: *mut c_void = null_mut();
+            if let Err(e) = check_vk("vkMapMemory", unsafe {
+                (self.fns.map_memory)(self.device, memory, 0, cap, 0, &mut raw_ptr)
+            }) {
+                unsafe {
+                    (self.fns.destroy_buffer)(self.device, buffer, null());
+                    (self.fns.free_memory)(self.device, memory, null());
+                }
+                return Err(e);
+            }
+            mapped = raw_ptr.cast::<u8>();
+        }
+
+        Ok(GpuBuffer {
+            buffer,
+            memory,
+            capacity: cap,
+            mapped,
+        })
+    }
+
+    unsafe fn ensure_staging(&mut self, required: u64) -> Result<(), VulkanError> {
+        if self.staging.capacity >= required && self.staging.buffer != 0 {
+            return Ok(());
+        }
+        let target = required
+            .checked_next_power_of_two()
+            .unwrap_or(required)
+            .max(MIN_BUFFER_ALLOC_BYTES);
+        let new_buf = unsafe { self.alloc_gpu_buffer(target, true)? };
+        let mut old = core::mem::replace(&mut self.staging, new_buf);
+        unsafe {
+            self.destroy_gpu_buffer(&mut old);
+        }
+        Ok(())
+    }
+
+    unsafe fn ensure_single_vram(
+        &mut self,
+        slot: u8,
+        required: u64,
+    ) -> Result<bool, VulkanError> {
+        let cur_cap = match slot {
+            0 => self.vram_a.capacity,
+            1 => self.vram_b.capacity,
+            _ => self.vram_c.capacity,
+        };
+        let cur_buf = match slot {
+            0 => self.vram_a.buffer,
+            1 => self.vram_b.buffer,
+            _ => self.vram_c.buffer,
+        };
+        if required > self.max_storage_range {
+            return Err(VulkanError::BufferExceedsMaxStorageRange {
+                requested: required,
+                limit: self.max_storage_range,
+            });
+        }
+        if cur_cap >= required && cur_buf != 0 {
+            return Ok(false);
+        }
+        let target = required
+            .checked_next_power_of_two()
+            .unwrap_or(required)
+            .min(self.max_storage_range)
+            .max(required)
+            .max(MIN_BUFFER_ALLOC_BYTES);
+        let new_buf = unsafe { self.alloc_gpu_buffer(target, false)? };
+        let mut old = match slot {
+            0 => core::mem::replace(&mut self.vram_a, new_buf),
+            1 => core::mem::replace(&mut self.vram_b, new_buf),
+            _ => core::mem::replace(&mut self.vram_c, new_buf),
+        };
+        unsafe {
+            self.destroy_gpu_buffer(&mut old);
+        }
+        Ok(true)
+    }
+
+    unsafe fn ensure_vram_buffers(
+        &mut self,
+        req_a: u64,
+        req_b: u64,
+        req_c: u64,
+    ) -> Result<(), VulkanError> {
+        let mut changed = false;
+        if req_a > 0 {
+            changed |= unsafe { self.ensure_single_vram(0, req_a)? };
+        }
+        if req_b > 0 {
+            changed |= unsafe { self.ensure_single_vram(1, req_b)? };
+        }
+        if req_c > 0 {
+            changed |= unsafe { self.ensure_single_vram(2, req_c)? };
+        }
+        if changed {
+            unsafe {
+                self.refresh_descriptor_sets();
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn refresh_descriptor_sets(&self) {
+        let info_a = VkDescriptorBufferInfo {
+            buffer: self.vram_a.buffer,
+            offset: 0,
+            range: VK_WHOLE_SIZE,
+        };
+        let info_b = VkDescriptorBufferInfo {
+            buffer: self.vram_b.buffer,
+            offset: 0,
+            range: VK_WHOLE_SIZE,
+        };
+        let info_c = VkDescriptorBufferInfo {
+            buffer: self.vram_c.buffer,
+            offset: 0,
+            range: VK_WHOLE_SIZE,
+        };
+        let mk_write = |dst_set: VkDescriptorSet, binding: u32, info: *const VkDescriptorBufferInfo| {
+            VkWriteDescriptorSet {
+                s_type: VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                p_next: null(),
+                dst_set,
+                dst_binding: binding,
+                dst_array_element: 0,
+                descriptor_count: 1,
+                descriptor_type: VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                p_image_info: null(),
+                p_buffer_info: info,
+                p_texel_buffer_view: null(),
+            }
+        };
+        let writes = [
+            mk_write(self.ds_1buf_a, 0, &info_a),
+            mk_write(self.ds_2buf_ab, 0, &info_a),
+            mk_write(self.ds_2buf_ab, 1, &info_b),
+            mk_write(self.ds_2buf_ba, 0, &info_b),
+            mk_write(self.ds_2buf_ba, 1, &info_a),
+            mk_write(self.ds_3buf_abc, 0, &info_a),
+            mk_write(self.ds_3buf_abc, 1, &info_b),
+            mk_write(self.ds_3buf_abc, 2, &info_c),
+        ];
+        unsafe {
+            (self.fns.update_descriptor_sets)(
+                self.device,
+                writes.len() as u32,
+                writes.as_ptr(),
+                0,
+                null(),
+            );
+        }
+    }
+
+    unsafe fn begin_cmd(&self) -> Result<(), VulkanError> {
+        check_vk("vkResetCommandPool", unsafe {
+            (self.fns.reset_command_pool)(self.device, self.cmd_pool, 0)
+        })?;
+        let begin_info = VkCommandBufferBeginInfo {
+            s_type: VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            p_next: null(),
+            flags: VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+            p_inheritance_info: null(),
+        };
+        check_vk("vkBeginCommandBuffer", unsafe {
+            (self.fns.begin_command_buffer)(self.cmd_buf, &begin_info)
+        })
+    }
+
+    unsafe fn cmd_barrier(&self, src_stage: u32, dst_stage: u32, src_access: u32, dst_access: u32) {
+        let mb = VkMemoryBarrier {
+            s_type: VK_STRUCTURE_TYPE_MEMORY_BARRIER,
+            p_next: null(),
+            src_access_mask: src_access,
+            dst_access_mask: dst_access,
+        };
+        unsafe {
+            (self.fns.cmd_pipeline_barrier)(
+                self.cmd_buf,
+                src_stage,
+                dst_stage,
+                0,
+                1,
+                &mb,
+                0,
+                null(),
+                0,
+                null(),
+            );
+        }
+    }
+
+    unsafe fn submit_and_wait(&self) -> Result<(), VulkanError> {
+        check_vk("vkEndCommandBuffer", unsafe {
+            (self.fns.end_command_buffer)(self.cmd_buf)
+        })?;
+        check_vk("vkResetFences", unsafe {
+            (self.fns.reset_fences)(self.device, 1, &self.fence)
+        })?;
+        let submit = VkSubmitInfo {
+            s_type: VK_STRUCTURE_TYPE_SUBMIT_INFO,
+            p_next: null(),
+            wait_semaphore_count: 0,
+            p_wait_semaphores: null(),
+            p_wait_dst_stage_mask: null(),
+            command_buffer_count: 1,
+            p_command_buffers: &self.cmd_buf,
+            signal_semaphore_count: 0,
+            p_signal_semaphores: null(),
+        };
+        check_vk("vkQueueSubmit", unsafe {
+            (self.fns.queue_submit)(self.queue, 1, &submit, self.fence)
+        })?;
+        check_vk("vkWaitForFences", unsafe {
+            (self.fns.wait_for_fences)(self.device, 1, &self.fence, VK_TRUE, u64::MAX)
+        })
+    }
+
+    unsafe fn write_staging_u64s(&mut self, offset_bytes: usize, src: &[u64]) {
+        let dst = unsafe { self.staging.mapped.add(offset_bytes) };
+        // Little-endian x86_64/aarch64 Linux: `u64` native representation is IEEE/SPIR-V little-endian.
+        unsafe {
+            core::ptr::copy_nonoverlapping(src.as_ptr().cast::<u8>(), dst, src.len() * 8);
+        }
+    }
+
+    unsafe fn read_staging_u64s(&self, offset_bytes: usize, dst: &mut [u64]) {
+        let src = unsafe { self.staging.mapped.add(offset_bytes) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, dst.as_mut_ptr().cast::<u8>(), dst.len() * 8);
+        }
+    }
+
+    unsafe fn exec_inplace_states<const LANES: usize>(
+        &mut self,
+        slot: KernelSlot,
+        states: &mut [[u64; LANES]],
+    ) -> Result<(), VulkanError> {
+        let num_states = states.len();
+        if num_states == 0 {
+            return Ok(());
+        }
+        let total_words = num_states
+            .checked_mul(LANES)
+            .ok_or(VulkanError::BufferExceedsMaxStorageRange {
+                requested: u64::MAX,
+                limit: self.max_storage_range,
+            })?;
+        let byte_len = (total_words as u64)
+            .checked_mul(8)
+            .ok_or(VulkanError::BufferExceedsMaxStorageRange {
+                requested: u64::MAX,
+                limit: self.max_storage_range,
+            })?;
+
+        unsafe {
+            self.ensure_staging(byte_len)?;
+            self.ensure_vram_buffers(byte_len, 0, 0)?;
+
+            let flat_in = core::slice::from_raw_parts(states.as_ptr().cast::<u64>(), total_words);
+            self.write_staging_u64s(0, flat_in);
+
+            self.begin_cmd()?;
+            let copy = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: byte_len,
+            };
+            (self.fns.cmd_copy_buffer)(self.cmd_buf, self.staging.buffer, self.vram_a.buffer, 1, &copy);
