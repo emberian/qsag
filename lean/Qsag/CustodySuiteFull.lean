@@ -1716,12 +1716,21 @@ private theorem filter_or_length_le {α : Type} (p q : α → Bool) (s : List α
     simp only [List.filter]
     cases p x <;> cases q x <;> simp <;> omega
 
+private theorem filter_const_false_len {α : Type} :
+    ∀ (xs : List α), (xs.filter (fun _ => false)).length = 0
+  | [] => rfl
+  | _ :: tl => filter_const_false_len tl
+
 private theorem filter_any_length_le_sum {α β : Type} (lanes : List β)
     (pred : β → α → Bool) (xs : List α) :
     (xs.filter (fun x => lanes.any (fun l => pred l x))).length ≤
       (lanes.map (fun l => (xs.filter (pred l)).length)).sum := by
   induction lanes with
-  | nil => simp
+  | nil =>
+    have h0 : (xs.filter (fun x => ([] : List β).any (fun l => pred l x))).length = 0 :=
+      filter_const_false_len xs
+    rw [h0]
+    exact Nat.zero_le _
   | cons l ls ih =>
     simp only [List.map_cons, List.sum_cons, List.any_cons]
     exact Nat.le_trans (filter_or_length_le (pred l) (fun x => ls.any (fun b => pred b x)) xs)
@@ -1793,7 +1802,7 @@ theorem hd_dealerless_rekey_sacrifice_soundness_lt_two_pow_neg157 :
           (T.filter (verifyHdRekeySacrificeLane7 lane.1 lane.2)).length)).sum ≤
         faultedLanes.length := by
       induction faultedLanes with
-      | nil => simp
+      | nil => exact Nat.zero_le 0
       | cons l ls ih =>
         simp only [List.map_cons, List.sum_cons, List.length_cons]
         have hl1 := hPerLane l.1 l.2 T (hAllNz l (.head _)) hTnd
@@ -3548,6 +3557,11 @@ theorem slidingWindowTest_buildSlidingWindow :
       have hj' : ¬ (j + 1 < w + 1) := fun h => hj (Nat.lt_of_succ_lt_succ h)
       simp [hj, hj']
 
+theorem slidingWindowTest_buildSlidingWindow_of_lt {w k : Nat} (f : Nat → Bool) (hk : k < w) :
+    slidingWindowTest (buildSlidingWindow w f) k = f k := by
+  rw [slidingWindowTest_buildSlidingWindow]
+  simp only [hk, ↓reduceIte]
+
 theorem slidingWindowTest_ge_length :
     ∀ (bm : List Bool) (k : Nat), bm.length ≤ k → slidingWindowTest bm k = false
   | [], _, _ => rfl
@@ -3735,58 +3749,64 @@ private theorem watermark_consumed_preserved_and_marks
       (g.requireAuthenticatedInitiator = true → tx.init_mac_bytes ≠ [])) := by
   unfold policyWatermarkGuardStep at hStep
   if hBadW : (g.slidingWindowWidth == 0 || g.slidingBitmap.length != g.slidingWindowWidth) = true then
-    simp [hBadW] at hStep
+    simp only [hBadW, ↓reduceIte] at hStep; nomatch hStep
   else
     have hWPos : 0 < g.slidingWindowWidth := by
       cases hZ : (g.slidingWindowWidth == 0)
-      · have hNe0 : g.slidingWindowWidth ≠ 0 := fun h0 => by simp [h0] at hZ
+      · have hNe0 : g.slidingWindowWidth ≠ 0 := fun h0 => by rw [h0] at hZ; cases hZ
         omega
-      · exfalso; exact hBadW (by simp [hZ])
+      · exfalso; rw [hZ] at hBadW; exact hBadW rfl
     have hBmLen : g.slidingBitmap.length = g.slidingWindowWidth := by
       cases hEq : (g.slidingBitmap.length == g.slidingWindowWidth)
-      · exfalso; exact hBadW (by simp [bne, hEq])
+      · exfalso
+        cases hZ : (g.slidingWindowWidth == 0) <;>
+          simp only [hZ, bne, hEq, Bool.not_false, Bool.or_true] at hBadW <;>
+          exact hBadW trivial
       · exact of_decide_eq_true hEq
     simp only [hBadW, Bool.false_eq_true, ↓reduceIte] at hStep
     cases inp with
     | advanceEpoch nowSecs =>
       if hEarly : (g.epoch_duration_secs == 0 ||
                    decide (nowSecs < g.epoch_start_secs + g.epoch_duration_secs)) = true then
-        simp [hEarly] at hStep
+        simp only [hEarly, ↓reduceIte] at hStep; nomatch hStep
       else
-        simp only [hEarly, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.accepted.injEq] at hStep
-        rcases hStep with ⟨rfl, rfl⟩
+        simp only [hEarly, Bool.false_eq_true, ↓reduceIte] at hStep
+        injection hStep with hSt hEv
+        subst hSt hEv
         exact ⟨hWPos, hBmLen, Nat.le_refl _, rfl, fun _ h => h, fun _ _ hEv => by cases hEv⟩
     | evaluateIntent tx =>
       if c1 : (tx.chain_id != g.chain_id || tx.suite_tag != g.pinned_suite_tag ||
                tx.recipient_suite_tag != g.pinned_suite_tag) = true then
-        simp [c1] at hStep
+        simp only [c1, ↓reduceIte] at hStep; nomatch hStep
       else if c2 : (tx.window_id != g.window_id) = true then
-        simp [c1, c2] at hStep
+        simp only [c1, c2, Bool.false_eq_true, ↓reduceIte] at hStep; nomatch hStep
       else if c3 : (tx.policy_digest != g.pinned_policy_digest ||
                     tx.authority_digest != g.pinned_authority_digest) = true then
-        simp [c1, c2, c3] at hStep
+        simp only [c1, c2, c3, Bool.false_eq_true, ↓reduceIte] at hStep; nomatch hStep
       else if c4 : (g.requireAuthenticatedInitiator && tx.init_mac_bytes.isEmpty) = true then
-        simp [c1, c2, c3, c4] at hStep
+        simp only [c1, c2, c3, c4, Bool.false_eq_true, ↓reduceIte] at hStep; nomatch hStep
       else if c5 : ¬ (tx.recipient ∈ g.allowed_recipients) then
-        simp [c1, c2, c3, c4, c5] at hStep
+        simp only [c1, c2, c3, c4, c5, not_false_eq_true, Bool.false_eq_true, ↓reduceIte] at hStep; nomatch hStep
       else if c6 : ¬ (tx.amount_units ≤ g.per_tx_cap) then
-        simp [c1, c2, c3, c4, c5, c6] at hStep
+        simp only [c1, c2, c3, c4, c5, c6, not_false_eq_true, Bool.false_eq_true, ↓reduceIte] at hStep; nomatch hStep
       else if c7 : ¬ (g.accumulated_spend + tx.amount_units ≤ g.velocity_window_cap) then
-        simp [c1, c2, c3, c4, c5, c6, c7] at hStep
+        simp only [c1, c2, c3, c4, c5, c6, c7, not_false_eq_true, Bool.false_eq_true, ↓reduceIte] at hStep; nomatch hStep
       else if c8 : tx.nonce < g.minNonceWatermark then
-        simp [c1, c2, c3, c4, c5, c6, c7, c8] at hStep
+        simp only [c1, c2, c3, c4, c5, c6, c7, c8, Bool.false_eq_true, ↓reduceIte] at hStep; nomatch hStep
       else
         simp only [c1, c2, c3, c4, c5, c6, c7, c8, Bool.false_eq_true, ↓reduceIte] at hStep
         have hAuthInit : g.requireAuthenticatedInitiator = true → tx.init_mac_bytes ≠ [] := by
           intro hReq hEmp
-          exact c4 (by simp [hReq, hEmp])
+          rw [hReq, hEmp] at c4
+          exact c4 rfl
         if hInWin : tx.nonce - g.minNonceWatermark < g.slidingWindowWidth then
           simp only [hInWin, ↓reduceIte] at hStep
           if hDup : slidingWindowTest g.slidingBitmap (tx.nonce - g.minNonceWatermark) = true then
-            simp [hDup] at hStep
+            simp only [hDup, ↓reduceIte] at hStep; nomatch hStep
           else
-            simp only [hDup, Bool.false_eq_true, ↓reduceIte, CustodyStepOutcome.accepted.injEq] at hStep
-            rcases hStep with ⟨rfl, rfl⟩
+            simp only [hDup, Bool.false_eq_true, ↓reduceIte] at hStep
+            injection hStep with hSt hEvStep
+            subst hSt hEvStep
             refine ⟨hWPos, buildSlidingWindow_length _ _, Nat.le_refl _, rfl, ?_, ?_⟩
             · intro n hn
               rcases hn with hLt | hBit
@@ -3797,9 +3817,8 @@ private theorem watermark_consumed_preserved_and_marks
                   else
                     rw [slidingWindowTest_ge_length g.slidingBitmap _ (by omega)] at hBit
                     cases hBit
-                rw [slidingWindowTest_buildSlidingWindow]
-                simp only [hLtW, ↓reduceIte, Bool.or_eq_true]
-                exact Or.inl hBit
+                rw [slidingWindowTest_buildSlidingWindow_of_lt _ hLtW]
+                exact Bool.or_eq_true_iff.mpr (Or.inl hBit)
             · intro tx' sb' hEv
               injection hEv with hTx hSb
               subst hTx hSb
@@ -3808,12 +3827,12 @@ private theorem watermark_consumed_preserved_and_marks
                 · exact c8 hLt
                 · exact hDup hBit
               · apply Or.inr
-                rw [slidingWindowTest_buildSlidingWindow]
-                simp only [hInWin, ↓reduceIte, Bool.or_eq_true]
-                exact Or.inr rfl
+                rw [slidingWindowTest_buildSlidingWindow_of_lt _ hInWin]
+                exact Bool.or_eq_true_iff.mpr (Or.inr (decide_eq_true rfl))
         else
-          simp only [hInWin, ↓reduceIte, CustodyStepOutcome.accepted.injEq] at hStep
-          rcases hStep with ⟨rfl, rfl⟩
+          simp only [hInWin, ↓reduceIte] at hStep
+          injection hStep with hSt hEvStep
+          subst hSt hEvStep
           refine ⟨hWPos, buildSlidingWindow_length _ _, Nat.le_add_right _ _, rfl, ?_, ?_⟩
           · intro n hn
             if hBelowNew :
@@ -3835,9 +3854,8 @@ private theorem watermark_consumed_preserved_and_marks
                     n - (g.minNonceWatermark + ((tx.nonce - g.minNonceWatermark) - (g.slidingWindowWidth - 1))) +
                       ((tx.nonce - g.minNonceWatermark) - (g.slidingWindowWidth - 1)) =
                       n - g.minNonceWatermark := by omega
-                rw [slidingWindowTest_buildSlidingWindow]
-                simp only [hNewLtW, ↓reduceIte, Bool.or_eq_true]
-                exact Or.inl (hIdxEq.symm ▸ hBitOld)
+                rw [slidingWindowTest_buildSlidingWindow_of_lt _ hNewLtW]
+                exact Bool.or_eq_true_iff.mpr (Or.inl (hIdxEq.symm ▸ hBitOld))
           · intro tx' sb' hEv
             injection hEv with hTx hSb
             subst hTx hSb
@@ -3851,9 +3869,8 @@ private theorem watermark_consumed_preserved_and_marks
                   tx.nonce - (g.minNonceWatermark + ((tx.nonce - g.minNonceWatermark) - (g.slidingWindowWidth - 1))) =
                     g.slidingWindowWidth - 1 := by omega
               have hWm1Lt : g.slidingWindowWidth - 1 < g.slidingWindowWidth := by omega
-              rw [hTopIdx, slidingWindowTest_buildSlidingWindow]
-              simp only [hWm1Lt, ↓reduceIte, Bool.or_eq_true]
-              exact Or.inr rfl
+              rw [hTopIdx, slidingWindowTest_buildSlidingWindow_of_lt _ hWm1Lt]
+              exact Bool.or_eq_true_iff.mpr (Or.inr (decide_eq_true rfl))
 
 private theorem watermark_no_approved_if_consumed
     {g gFinal : PolicyWatermarkGuard}

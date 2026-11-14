@@ -43,15 +43,16 @@ post-quantum threshold signature, oblivious PRF, and selective-disclosure creden
      (`"QSAG.TOPRF.EVAL.V1"`) (`toprf_input_root_blocks_relabeling_and_equivocation`) + `#tooth`
      (`tooth_omitting_base_digest_allows_cross_session_replay`).
 
-4. **§4. `BlindVC` Rate-6/Capacity-6 6-Limb `sponge12` Commitment & ZKBoo Selective Disclosure:**
-   - Explicit-arity (`1 ≤ arity ≤ 6`) 13-limb `vcSponge13` outputting 6-limb `Lane6` (`> 383`-bit)
-     commitments (`computeVcPoseidon2Commit`), cross-arity & same-arity binding reduction to `vcSponge13`
-     collisions, and `#tooth` (`tooth_unframed_trailing_zero_collision`).
+4. **§4. `BlindVC` Rate-6/Capacity-6 6-Limb `absorbRate6Sponge3` Commitment & ZKBoo Selective Disclosure:**
+   - Explicit-arity (`1 ≤ arity ≤ 6`) 3-permutation `absorbRate6Sponge3` outputting 6-limb `Lane6` (`> 383`-bit)
+     commitments (`computeVcPoseidon2Commit`), cross-arity & same-arity binding reduction to
+     `Poseidon2Perm12Sponge6Collision`, and `#tooth` (`tooth_unframed_trailing_zero_collision`).
    - Strict ascending `disclosedAttrs` enforcement inside `verifyBlindVcPresentation`, Round-1
-     `"QSAG.COMMIT.V1"` party-view commitments + PRG `tapeSeed` replay + Fiat-Shamir challenge derivation,
-     3-challenge witness extraction, `ZkSoundnessProfile` (`Quantum128 = 438` `< 2^{-256}` = 128-bit QROM
-     Grover challenge-grinding vs `Classical128 = 219` `< 2^{-128}` classical ROM / `< 65`-bit QROM),
-     and full `OpenedBlindVcRep` (`PartyVcRepView` pair + `unopenedCommit` + `finalOuts`) `SimpleEquiv` simulation.
+     `"QSAG.VC.VIEW_COM.V1"` + `"QSAG.COMMIT.V1"` party-view commitments, `"QSAG.VC.ZKBOO_R.V1"` PRG `tapeSeed`
+     replay, `"QSAG.FS.INIT/ABSORB/SQUEEZE.V1"` Fiat-Shamir challenge derivation, 3-challenge witness extraction,
+     `ZkSoundnessProfile` (`Quantum128 = 438` `< 2^{-256}` = 128-bit QROM Grover challenge-grinding vs
+     `Classical128 = 219` `< 2^{-128}` classical ROM / `< 65`-bit QROM), and full `OpenedBlindVcRep`
+     (`PartyVcRepView` pair + `unopenedCommit` + `finalOuts`) `SimpleEquiv` simulation (`zkMultiRepViewEquiv`).
 -/
 
 public import Qsag.Constructive
@@ -2554,7 +2555,14 @@ theorem cshake256FramedBytes_eq_sponge (customization : List UInt8) (frames : Li
     cshake256FramedBytes customization frames =
       squeezeXofAux 32 (absorbPadded (padForRate
         (cshake256FramedPreimage customization frames)
-        (if customization = [] then 0x1f else 0x04))) := rfl
+        (if customization = [] then 0x1f else 0x04))) := by
+  unfold cshake256FramedBytes cshake256FramedPreimage cshake256Bytes cshake256Xof
+  rfl
+
+@[simp] theorem cshake256FramedBytes_length (customization : List UInt8) (frames : List (List UInt8)) :
+    (cshake256FramedBytes customization frames).length = 32 := by
+  unfold cshake256FramedBytes
+  exact cshake256Bytes_length customization (encodeFramesU64Le frames)
 
 theorem cshake256FramedPreimage_frames_injective {customization : List UInt8}
     {fs gs : List (List UInt8)}
@@ -2716,7 +2724,7 @@ private theorem ext6Scale_one (x : Ext6Fq204) : ext6Scale x Fq204.one = x := by
   simp only [ext6Scale, Fq204.mul_one]
 
 /-- Constructive `Ext6Fq204` bijection `chi ↦ rest + k_scale(chi, delta)` for any nonzero gate error
-    `delta ≠ 0` (`rss_mpc.rs:1066-1095`): proves that across all $q^6 = 8380417^6 > 2^{138}$ extension
+    `delta ≠ 0` (`rss_mpc.rs:1066-1095`): proves that across all $q^6 = 8380417^6 > 2^{137}$ extension
     challenges `chi : Ext6Fq204`, **at most one** `chi` cancels `rest` to `ext6Zero`! -/
 def ext6BatchChallengeEquiv (delta : Fq204) (hDelta : delta ≠ Fq204.zero) (rest : Ext6Fq204) :
     SimpleEquiv Ext6Fq204 Ext6Fq204 where
@@ -2747,8 +2755,8 @@ private theorem nodup_map_on_list_fq {α β : Type} (f : α → β) :
     refine .cons ?_ (nodup_map_on_list_fq f hTail (fun a ha b hb => hInj a (.tail _ ha) b (.tail _ hb)))
     intro y hy hEq
     rcases List.mem_map.mp hy with ⟨z, hzMem, rfl⟩
-    have hxz := hInj x (.head _) z (.tail _ hzMem) hEq.symm
-    exact hNotMem z hzMem hxz.symm
+    have hxz := hInj x (.head _) z (.tail _ hzMem) hEq
+    exact hNotMem z hzMem hxz
 
 private theorem exists_mem_of_filter_length_lt_fq {α : Type} (p : α → Bool) :
     ∀ (xs : List α), (xs.filter p).length < xs.length → ∃ x ∈ xs, p x = false
@@ -2829,7 +2837,7 @@ private theorem exists_eval_nonzero_fq204 :
 /-- **Irreducibility & Batch-Sacrifice Soundness of $\mathbb{F}_q[X]/(X^6 - 7)$ (`rss_mpc.rs:53-56, 1066-1206`)**:
     1. Serret–Kummer binomial irreducibility certificate for $X^6 - 7$ over $\mathbb{F}_{8380417}$:
        $6 \mid (q - 1)$, $7^{(q-1)/2} \equiv q - 1 \not\equiv 1 \pmod q$ ($7$ is a quadratic non-residue),
-       $7^{(q-1)/3} \not\equiv 1 \pmod q$ ($7$ is a cubic non-residue), and $2^{138} < q^6$.
+       $7^{(q-1)/3} \not\equiv 1 \pmod q$ ($7$ is a cubic non-residue), and $2^{137} < q^6$.
     2. Unique `Ext6Fq204` batch root: for any nonzero base-field gate error $\Delta \ne 0$ and arbitrary
        batch accumulator `rest`, `ext6Add rest (ext6Scale chi Δ) = ext6Zero` holds for **at most 1**
        challenge `chi : Ext6Fq204` (`(ext6BatchChallengeEquiv Δ hΔ rest).invFun ext6Zero`).
@@ -2841,7 +2849,7 @@ theorem rss_ext6_irreducibility_and_batch_sacrifice_sound :
      fq204PowModNat 7 ((mldsaQ - 1) / 2) = mldsaQ - 1 ∧
      fq204PowModNat 7 ((mldsaQ - 1) / 2) ≠ 1 ∧
      fq204PowModNat 7 ((mldsaQ - 1) / 3) ≠ 1 ∧
-     2 ^ 138 < mldsaQ ^ 6) ∧
+     2 ^ 137 < mldsaQ ^ 6) ∧
     (∀ (delta : Fq204) (hDelta : delta ≠ Fq204.zero) (rest chi₁ chi₂ : Ext6Fq204),
       ext6Add rest (ext6Scale chi₁ delta) = ext6Zero →
       ext6Add rest (ext6Scale chi₂ delta) = ext6Zero →
@@ -2895,7 +2903,7 @@ private theorem matVecMul4_rssZeroVec4 (A : PolyMat4) :
   dsimp only [matVecMul4, rssZeroVec4]
   have hMul0 : ∀ p : Poly256, negacyclicMul p (PolyTree.zero 8) = PolyTree.zero 8 :=
     LawfulCommRing.mul_zero
-  rw [hMul0, hMul0, hMul0, hMul0, polyTree_add_zero, polyTree_add_zero, polyTree_add_zero]
+  simp only [hMul0, polyTree_add_zero]
 
 private theorem addVec4_assoc (a b c : PolyVec4) :
     addVec4 (addVec4 a b) c = addVec4 a (addVec4 b c) := by
@@ -2965,9 +2973,10 @@ theorem tooth_uncommitted_dkg_rogue_key_forgery (t₀ tStar : PolyVec4) :
        rejection or exhibits an explicit length-framed `cshake256_framed_32` collision under `H`! -/
 theorem dkg_confirm_transcript_binding_and_rss_consistency
     (H : List UInt8 → List UInt8) :
-    (∀ (t m : Nat) (subset corrupt : List (Fin m)),
+    (∀ (t m : Nat) (subset corrupt : List Nat),
       1 ≤ t → 2 * t - 1 ≤ m →
-      subset.Nodup → subset.length = m - t + 1 → corrupt.length ≤ t - 1 →
+      corrupt.Nodup → corrupt.length ≤ t - 1 →
+      subset.Nodup → subset.length = m - t + 1 →
       ∃ h ∈ subset, h ∉ corrupt) ∧
     (∀ (A : PolyMat4) (s1Subs s2Subs : List PolyVec4),
       s1Subs.length = s2Subs.length →
@@ -2982,8 +2991,11 @@ theorem dkg_confirm_transcript_binding_and_rss_consistency
         (dkgConfirmPreimage sid₁ mSeed₁ pk₁ ≠ dkgConfirmPreimage sid₂ mSeed₂ pk₂ ∧
          H (dkgConfirmPreimage sid₁ mSeed₁ pk₁) = H (dkgConfirmPreimage sid₂ mSeed₂ pk₂))) := by
   refine ⟨?_, ?_, ?_⟩
-  · intro t m subset corrupt ht hm hNd hSubLen hCorLen
-    exact subset_honest_holder_exists t m ht hm subset corrupt hNd hSubLen hCorLen
+  · intro t m subset corrupt ht hm hCNd hCLen hSNd hSLen
+    obtain ⟨h, _, hIn, hNotIn⟩ :=
+      (subset_honest_holder_exists ht hm hCNd hCLen hSNd hSLen idMat4 0
+        ⟨rssZeroVec4, rssZeroVec4, rssZeroVec4⟩).1
+    exact ⟨h, hIn, hNotIn⟩
   · intro A s1Subs s2Subs hLen
     have hZipEq :
         List.zipWith (fun s1 s2 => addVec4 (matVecMul4 A s1) s2) s1Subs s2Subs =
@@ -3021,7 +3033,7 @@ theorem dkg_confirm_transcript_binding_and_rss_consistency
           · rcases List.mem_cons.mp h2 with rfl | h3
             · exact hp2
             · cases h3
-      have hFrEq := cshake256FramedPreimage_frames_injective (by decide) (by decide) hAll1 hAll2 hPreEq
+      have hFrEq := cshake256FramedPreimage_frames_injective (by simp) (by simp) hAll1 hAll2 hPreEq
       injection hFrEq with eSid t1
       injection t1 with eSeed t2
       injection t2 with ePk _
@@ -3268,7 +3280,8 @@ def rssMaskAddEquiv (target : PolyVec4) : SimpleEquiv PolyVec4 PolyVec4 where
 /-- Triple `< q` RSS mask bijection over `(maskW, maskZ, maskLow)`. -/
 def rssMaskTripleEquiv (w z u : PolyVec4) :
     SimpleEquiv (PolyVec4 × PolyVec4 × PolyVec4) (PolyVec4 × PolyVec4 × PolyVec4) :=
-  SimpleEquiv.prod (rssMaskAddEquiv w) (SimpleEquiv.prod (rssMaskAddEquiv z) (rssMaskAddEquiv u))
+  SimpleEquiv.prodCongr (rssMaskAddEquiv w)
+    (SimpleEquiv.prodCongr (rssMaskAddEquiv z) (rssMaskAddEquiv u))
 
 /-- Explicit leakage-parameterized abort simulator (`threshold_mldsa.rs:940-1015`):
     given **only** the public ideal abort leakage `(leakedW1, rejectBit := true, usedAttempt)` and uniform
@@ -3283,6 +3296,78 @@ def rssAbortSimulator
     openedMaskedLow := simMasks.2.2
     rejectBit := true
     usedAttempt := usedAttempt }
+
+private def mkRssSignAttemptOutcome
+    (stBurned : RssMlDsaSignerState) (usedAttempt : Nat)
+    (cTilde : List UInt8) (w z u maskW maskZ maskLow : PolyVec4)
+    (w1 : Fin 4 → NatTree 8) (h : Fin 4 → HintTree 8) (accept : Bool) :
+    StepOutcome RssMlDsaSignerState
+      (RssSignPublicAbortView × Option ThresholdSignSig)
+      RssPreOpenAbortReason :=
+  let publicView : RssSignPublicAbortView :=
+    { openedMaskedW := addVec4 w maskW
+      openedW1 := w1
+      openedMaskedZ := addVec4 z maskZ
+      openedMaskedLow := addVec4 u maskLow
+      rejectBit := !accept
+      usedAttempt := usedAttempt }
+  match accept with
+  | true =>
+    .ok stBurned (publicView, some { cTilde := cTilde, z := z, h := h, usedAttempt := usedAttempt })
+  | false =>
+    .ok stBurned (publicView, none)
+
+private theorem mkRssSignAttemptOutcome_eq_ok
+    {stBurned st' : RssMlDsaSignerState} {usedAttempt : Nat}
+    {cTilde : List UInt8} {w z u maskW maskZ maskLow : PolyVec4}
+    {w1 : Fin 4 → NatTree 8} {h : Fin 4 → HintTree 8} {accept : Bool}
+    {pubView : RssSignPublicAbortView} {mSig : Option ThresholdSignSig}
+    (hOk : mkRssSignAttemptOutcome stBurned usedAttempt cTilde w z u maskW maskZ maskLow w1 h accept =
+           .ok st' (pubView, mSig)) :
+    st' = stBurned ∧
+    pubView = { openedMaskedW := addVec4 w maskW, openedW1 := w1,
+                openedMaskedZ := addVec4 z maskZ, openedMaskedLow := addVec4 u maskLow,
+                rejectBit := !accept, usedAttempt := usedAttempt } ∧
+    ((accept = true ∧ mSig = some { cTilde := cTilde, z := z, h := h, usedAttempt := usedAttempt }) ∨
+     (accept = false ∧ mSig = none)) := by
+  unfold mkRssSignAttemptOutcome at hOk
+  cases accept with
+  | true =>
+    injection hOk with hSt hPair
+    injection hPair with hPub hSig
+    exact ⟨hSt.symm, hPub.symm, Or.inl ⟨rfl, hSig.symm⟩⟩
+  | false =>
+    injection hOk with hSt hPair
+    injection hPair with hPub hSig
+    exact ⟨hSt.symm, hPub.symm, Or.inr ⟨rfl, hSig.symm⟩⟩
+
+private theorem mkRssSignAttemptOutcome_true
+    (stBurned : RssMlDsaSignerState) (usedAttempt : Nat)
+    (cTilde : List UInt8) (w z u maskW maskZ maskLow : PolyVec4)
+    (w1 : Fin 4 → NatTree 8) (h : Fin 4 → HintTree 8) {accept : Bool}
+    (hAcc : accept = true) :
+    mkRssSignAttemptOutcome stBurned usedAttempt cTilde w z u maskW maskZ maskLow w1 h accept =
+      .ok stBurned
+        ({ openedMaskedW := addVec4 w maskW, openedW1 := w1,
+           openedMaskedZ := addVec4 z maskZ, openedMaskedLow := addVec4 u maskLow,
+           rejectBit := false, usedAttempt := usedAttempt },
+         some { cTilde := cTilde, z := z, h := h, usedAttempt := usedAttempt }) := by
+  subst hAcc
+  rfl
+
+private theorem mkRssSignAttemptOutcome_false
+    (stBurned : RssMlDsaSignerState) (usedAttempt : Nat)
+    (cTilde : List UInt8) (w z u maskW maskZ maskLow : PolyVec4)
+    (w1 : Fin 4 → NatTree 8) (h : Fin 4 → HintTree 8) {accept : Bool}
+    (hAcc : accept = false) :
+    mkRssSignAttemptOutcome stBurned usedAttempt cTilde w z u maskW maskZ maskLow w1 h accept =
+      .ok stBurned
+        ({ openedMaskedW := addVec4 w maskW, openedW1 := w1,
+           openedMaskedZ := addVec4 z maskZ, openedMaskedLow := addVec4 u maskLow,
+           rejectBit := true, usedAttempt := usedAttempt },
+         none) := by
+  subst hAcc
+  rfl
 
 /-- Per-attempt RSS transition of `threshold_sign_mldsa_party` (`threshold_mldsa.rs:795-1055`):
     - Enforces `(inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt)` and immediately burns
@@ -3299,9 +3384,13 @@ def rssThresholdSignStep
     StepOutcome RssMlDsaSignerState
       (RssSignPublicAbortView × Option ThresholdSignSig)
       RssPreOpenAbortReason :=
-  if inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt then
+  match decide (inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt) with
+  | false => .err st .attemptReplay
+  | true =>
     let stBurned : RssMlDsaSignerState := { st with nextAttempt := st.nextAttempt + 1 }
-    if inp.mpcSacrificeOk = true then
+    match inp.mpcSacrificeOk with
+    | false => .err stBurned .mpcSacrificeFailed
+    | true =>
       let s1 := rssSumVec4List st.s1Subsets
       let s2 := rssSumVec4List st.s2Subsets
       let y := rssSumVec4List inp.ySubsets
@@ -3320,21 +3409,8 @@ def rssThresholdSignStep
         decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
         decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
         decide (hintWeightVec4 h ≤ mldsa44Omega)
-      let publicView : RssSignPublicAbortView :=
-        { openedMaskedW := addVec4 w inp.maskW
-          openedW1 := w1
-          openedMaskedZ := addVec4 z inp.maskZ
-          openedMaskedLow := addVec4 u inp.maskLow
-          rejectBit := !accept
-          usedAttempt := inp.attempt }
-      if accept = true then
-        .ok stBurned (publicView, some { cTilde := cTilde, z := z, h := h, usedAttempt := inp.attempt })
-      else
-        .ok stBurned (publicView, none)
-    else
-      .err stBurned .mpcSacrificeFailed
-  else
-    .err st .attemptReplay
+      mkRssSignAttemptOutcome stBurned inp.attempt cTilde w z u
+        inp.maskW inp.maskZ inp.maskLow w1 h accept
 
 /-- Canonical `SimulationSpine.PartyMachine` instantiation of `rssThresholdSignStep`. -/
 def rssThresholdSignMachine
@@ -3362,71 +3438,43 @@ private theorem rssThresholdSignStep_ok_meta
         (power2RoundHighVec4 (addVec4 (matVecMul4 st.A (rssSumVec4List st.s1Subsets)) (rssSumVec4List st.s2Subsets)))
         inp.mu sig.cTilde sig.z sig.h = true) := by
   unfold rssThresholdSignStep at hOk
-  if hGate : inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt then
-    rw [ite_true_of hGate] at hOk
-    dsimp only at hOk
-    if hSac : inp.mpcSacrificeOk = true then
-      rw [ite_true_of hSac] at hOk
-      let s1 := rssSumVec4List st.s1Subsets
-      let s2 := rssSumVec4List st.s2Subsets
-      let y := rssSumVec4List inp.ySubsets
-      let t := addVec4 (matVecMul4 st.A s1) s2
-      let t0 := power2RoundLowVec4 t
-      let w := matVecMul4 st.A y
-      let w1 := highBitsVec4 w
-      let cTilde := chalHash inp.mu w1
-      let c := sampleInBall cTilde
-      let ct0 := mulPolyVec4 c t0
-      let z := addVec4 y (mulPolyVec4 c s1)
-      let u := subVec4 w (mulPolyVec4 c s2)
-      let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
-      let accept : Bool :=
-        decide (infNormVec4 ct0 < mldsa44Gamma2) &&
-        decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
-        decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
-        decide (hintWeightVec4 h ≤ mldsa44Omega)
-      if hAcc : accept = true then
-        rw [ite_true_of hAcc] at hOk
-        injection hOk with hSt hOut
-        injection hOut with hPub hSigOpt
-        rw [← hSt, ← hPub]
-        refine ⟨hGate.1, hGate.2, rfl, rfl, hGate.2, ?_⟩
-        intro sig hSome
-        rw [← hSigOpt] at hSome
-        injection hSome with hSigEq
-        rw [← hSigEq]
-        dsimp only
+  cases hGate : decide (inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt) with
+  | false => rw [hGate] at hOk; cases hOk
+  | true =>
+    rw [hGate] at hOk
+    obtain ⟨hEp, hAtt⟩ := of_decide_eq_true hGate
+    cases hSac : inp.mpcSacrificeOk with
+    | false => rw [hSac] at hOk; cases hOk
+    | true =>
+      rw [hSac] at hOk
+      obtain ⟨hSt, hPub, hBranch⟩ := mkRssSignAttemptOutcome_eq_ok hOk
+      subst hSt hPub
+      refine ⟨hEp, hAtt, rfl, rfl, hAtt, ?_⟩
+      intro sig hSome
+      rcases hBranch with ⟨hAcc, hSigEq⟩ | ⟨_, hNone⟩
+      · rw [hSigEq] at hSome
+        injection hSome with hSig
+        subst hSig
         rw [hAcc]
-        have hAccProps :
-            ((infNormVec4 ct0 < mldsa44Gamma2 ∧ infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) ∧
-             centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) ∧
-            hintWeightVec4 h ≤ mldsa44Omega := by
-          dsimp only [accept] at hAcc
-          simpa only [Bool.and_eq_true, decide_eq_true_eq] using hAcc
-        rcases hAccProps with ⟨⟨⟨hCt0Lt, hzLt⟩, hDiffLt⟩, hWeightLe⟩
+        dsimp only [Bool.not_true]
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hAcc
+        rcases hAcc with ⟨⟨⟨hCt0Lt, hzLt⟩, hDiffLt⟩, hWeightLe⟩
         have hB : mldsa44Gamma2 - mldsa44Beta ≤ 95232 := by decide
-        obtain ⟨hLowLt, hHighEq⟩ := (centeredDiffNormVec4_lt_iff u w hB).mp hDiffLt
-        refine ⟨rfl, hGate.2, ?_⟩
+        obtain ⟨hLowLt, hHighEq⟩ := (centeredDiffNormVec4_lt_iff _ _ hB).mp hDiffLt
+        refine ⟨rfl, hAtt, ?_⟩
         unfold mldsaVerify
         dsimp only
-        have hUseHint := highBits_az_sub_ct_eq_w1 st.A s1 s2 y c mldsa44Beta hLowLt hCt0Lt
+        have hUseHint := highBits_az_sub_ct_eq_w1 st.A
+          (rssSumVec4List st.s1Subsets) (rssSumVec4List st.s2Subsets)
+          (rssSumVec4List inp.ySubsets)
+          (sampleInBall (chalHash inp.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inp.ySubsets)))))
+          mldsa44Beta hLowLt hCt0Lt
         dsimp only at hUseHint
         rw [hUseHint, hHighEq]
         simp only [Bool.and_eq_true, decide_eq_true_eq]
         exact ⟨⟨hzLt, hWeightLe⟩, rfl⟩
-      else
-        rw [ite_false_of hAcc] at hOk
-        injection hOk with hSt hOut
-        injection hOut with hPub hSigOpt
-        rw [← hSt, ← hPub]
-        refine ⟨hGate.1, hGate.2, rfl, rfl, hGate.2, ?_⟩
-        intro sig hSome
-        rw [← hSigOpt] at hSome
+      · rw [hNone] at hSome
         cases hSome
-    else
-      rw [ite_false_of hSac] at hOk; cases hOk
-  else
-    rw [ite_false_of hGate] at hOk; cases hOk
 
 private theorem rssThresholdSignStep_err_attempt
     (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
@@ -3446,21 +3494,24 @@ private theorem rssThresholdSignStep_err_attempt
   | err st' _ =>
     dsimp only
     unfold rssThresholdSignStep at hOut
-    if hGate : inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt then
-      rw [ite_true_of hGate] at hOut
-      dsimp only at hOut
-      if hSac : inp.mpcSacrificeOk = true then
-        rw [ite_true_of hSac] at hOut
-        split at hOut <;> cases hOut
-      else
-        rw [ite_false_of hSac] at hOut
-        injection hOut with hSt _
-        rw [← hSt]; dsimp only; exact ⟨by omega, fun _ => rfl⟩
-    else
-      rw [ite_false_of hGate] at hOut
+    cases hGate : decide (inp.epoch = st.epoch ∧ inp.attempt = st.nextAttempt) with
+    | false =>
+      rw [hGate] at hOut
       injection hOut with hSt _
-      rw [← hSt]
-      exact ⟨Nat.le_refl _, fun hg => False.elim (hGate hg)⟩
+      subst hSt
+      exact ⟨Nat.le_refl _, fun hg => by rw [decide_eq_true hg] at hGate; cases hGate⟩
+    | true =>
+      rw [hGate] at hOut
+      cases hSac : inp.mpcSacrificeOk with
+      | false =>
+        rw [hSac] at hOut
+        injection hOut with hSt _
+        subst hSt
+        exact ⟨by omega, fun _ => rfl⟩
+      | true =>
+        rw [hSac] at hOut
+        unfold mkRssSignAttemptOutcome at hOut
+        split at hOut <;> cases hOut
 
 private theorem rssThresholdSignMachine_attempt_mono
     {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
@@ -3593,18 +3644,12 @@ theorem threshold_mldsa_rss_abort_leakage_and_completeness
         usedAttempt := inp.attempt }
     refine ⟨stBurned, pubView, ?_, rfl, rfl, rfl, rfl⟩
     dsimp only [M, rssThresholdSignMachine, PartyMachine.ofOutcome]
-    unfold rssThresholdSignStep
-    rw [ite_true_of ⟨hEp, hAtt⟩, ite_true_of hSac]
-    dsimp only
-    have hAccNeTrue : ¬ (decide (infNormVec4 (mulPolyVec4 c (power2RoundLowVec4 (addVec4 (matVecMul4 st.A s1) s2))) < mldsa44Gamma2) &&
-         decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
-         decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta) &&
-         decide (hintWeightVec4 (makeHintVec4
-           (negVec4 (mulPolyVec4 c (power2RoundLowVec4 (addVec4 (matVecMul4 st.A s1) s2))))
-           (addVec4 u (mulPolyVec4 c (power2RoundLowVec4 (addVec4 (matVecMul4 st.A s1) s2))))) ≤ mldsa44Omega)) = true := by
-      rw [hAccFalse]; decide
-    rw [ite_false_of hAccNeTrue, hAccFalse]
-    rfl
+    have hStepFalse : rssThresholdSignStep chalHash sampleInBall st inp = .ok stBurned (pubView, none) := by
+      unfold rssThresholdSignStep
+      rw [decide_eq_true ⟨hEp, hAtt⟩, hSac]
+      exact mkRssSignAttemptOutcome_false stBurned inp.attempt (chalHash inp.mu w1)
+        w z u inp.maskW inp.maskZ inp.maskLow w1 _ hAccFalse
+    rw [hStepFalse]
   · intro st₀ st_final trace hTr
     obtain ⟨hMono, _, hPair⟩ := rssThresholdSignMachine_attempt_mono hTr
     exact ⟨hMono, hPair⟩
@@ -3720,37 +3765,71 @@ theorem threshold_mldsa_rss_inhabited :
     decide
   obtain ⟨stRej, pubRej, hStepRej, _, hRejBit, _, _⟩ :=
     (threshold_mldsa_rss_abort_leakage_and_completeness chalHash sampleInBall).1 st inpRej rfl rfl rfl (Or.inl hZBad)
-  cases hOutAcc : rssThresholdSignStep chalHash sampleInBall st inpAcc with
-  | err _ _ =>
-    exfalso
-    unfold rssThresholdSignStep at hOutAcc
-    dsimp only [st, inpAcc, sampleInBall] at hOutAcc
-    rw [ite_true_of ⟨rfl, rfl⟩, ite_true_of rfl] at hOutAcc
-    dsimp only at hOutAcc
-    rw [hSum1, hSum1] at hOutAcc
-    rw [ite_true_of hAcc] at hOutAcc
-    cases hOutAcc
-  | ok stAcc outPair =>
-    rcases outPair with ⟨pubAcc, mSig⟩
-    cases mSig with
-    | none =>
-      exfalso
-      unfold rssThresholdSignStep at hOutAcc
-      dsimp only [st, inpAcc, sampleInBall] at hOutAcc
-      rw [ite_true_of ⟨rfl, rfl⟩, ite_true_of rfl] at hOutAcc
-      dsimp only at hOutAcc
-      rw [hSum1, hSum1, ite_true_of hAcc] at hOutAcc
-      injection hOutAcc with _ hP
-      injection hP with _ hNone
-      cases hNone
-    | some sig =>
-      have hStepAcc : (rssThresholdSignMachine chalHash sampleInBall).step st inpAcc = some (stAcc, (pubAcc, some sig)) := by
-        dsimp only [rssThresholdSignMachine, PartyMachine.ofOutcome]
-        rw [hOutAcc]
-      obtain ⟨hRejFalse, hVer⟩ :=
-        (threshold_mldsa_rss_abort_leakage_and_completeness chalHash sampleInBall).2.2 _ _ _ _ _ hStepAcc
-      exact ⟨chalHash, sampleInBall, st, stAcc, stRej, inpAcc, inpRej, pubAcc, pubRej, sig,
-             hStepAcc, hRejFalse, hVer, hStepRej, hRejBit⟩
+  have hAccFull :
+      (decide (infNormVec4 (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+        (power2RoundLowVec4 (addVec4 (matVecMul4 st.A (rssSumVec4List st.s1Subsets)) (rssSumVec4List st.s2Subsets)))) < mldsa44Gamma2) &&
+       decide (infNormVec4 (addVec4 (rssSumVec4List inpAcc.ySubsets)
+         (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+           (rssSumVec4List st.s1Subsets))) < mldsa44Gamma1 - mldsa44Beta) &&
+       decide (centeredDiffNormVec4
+         (subVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets))
+           (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+             (rssSumVec4List st.s2Subsets)))
+         (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets))) < mldsa44Gamma2 - mldsa44Beta) &&
+       decide (hintWeightVec4 (makeHintVec4
+         (negVec4 (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+           (power2RoundLowVec4 (addVec4 (matVecMul4 st.A (rssSumVec4List st.s1Subsets)) (rssSumVec4List st.s2Subsets)))))
+         (addVec4 (subVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets))
+           (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+             (rssSumVec4List st.s2Subsets)))
+           (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+             (power2RoundLowVec4 (addVec4 (matVecMul4 st.A (rssSumVec4List st.s1Subsets)) (rssSumVec4List st.s2Subsets)))))) ≤ mldsa44Omega)) = true := by
+    dsimp only [st, inpAcc, sampleInBall]
+    rw [hSum1, hSum1]
+    exact hAcc
+  have hOutAccEq := mkRssSignAttemptOutcome_true
+    { st with nextAttempt := st.nextAttempt + 1 } inpAcc.attempt
+    (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets))))
+    (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets))
+    (addVec4 (rssSumVec4List inpAcc.ySubsets)
+      (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+        (rssSumVec4List st.s1Subsets)))
+    (subVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets))
+      (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+        (rssSumVec4List st.s2Subsets)))
+    inpAcc.maskW inpAcc.maskZ inpAcc.maskLow
+    (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))
+    _ hAccFull
+  have hStepAcc :
+      (rssThresholdSignMachine chalHash sampleInBall).step st inpAcc =
+        some ({ st with nextAttempt := st.nextAttempt + 1 },
+          ({ openedMaskedW := addVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)) inpAcc.maskW,
+             openedW1 := highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)),
+             openedMaskedZ := addVec4 (addVec4 (rssSumVec4List inpAcc.ySubsets)
+               (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+                 (rssSumVec4List st.s1Subsets))) inpAcc.maskZ,
+             openedMaskedLow := addVec4 (subVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets))
+               (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+                 (rssSumVec4List st.s2Subsets))) inpAcc.maskLow,
+             rejectBit := false,
+             usedAttempt := inpAcc.attempt },
+           some { cTilde := chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets))),
+                  z := addVec4 (rssSumVec4List inpAcc.ySubsets)
+                    (mulPolyVec4 (sampleInBall (chalHash inpAcc.mu (highBitsVec4 (matVecMul4 st.A (rssSumVec4List inpAcc.ySubsets)))))
+                      (rssSumVec4List st.s1Subsets)),
+                  h := _,
+                  usedAttempt := inpAcc.attempt })) := by
+    dsimp only [rssThresholdSignMachine, PartyMachine.ofOutcome]
+    have hRun : rssThresholdSignStep chalHash sampleInBall st inpAcc = _ := by
+      unfold rssThresholdSignStep
+      rw [decide_eq_true (⟨rfl, rfl⟩ : inpAcc.epoch = st.epoch ∧ inpAcc.attempt = st.nextAttempt)]
+      change mkRssSignAttemptOutcome _ _ _ _ _ _ _ _ _ _ _ _ = _
+      exact hOutAccEq
+    rw [hRun]
+  obtain ⟨hRejFalse, hVer⟩ :=
+    (threshold_mldsa_rss_abort_leakage_and_completeness chalHash sampleInBall).2.2 _ _ _ _ _ hStepAcc
+  exact ⟨chalHash, sampleInBall, st, _, stRej, inpAcc, inpRej, _, pubRej, _,
+         hStepAcc, hRejFalse, hVer, hStepRej, hRejBit⟩
 
 /-! ## §3. Dealerless 2-of-5 Replicated Poseidon2 Threshold OPRF (`voprf.rs` / `toprf_engine.rs`, `P0-08`–`P0-09`) -/
 
@@ -4411,7 +4490,7 @@ theorem toprf_2of5_corrects_one_malicious_server
                   · rcases List.mem_cons.mp hy3 with rfl | hy4
                     · rw [encodeGoldilocksVecLe_length]; omega
                     · cases hy4
-            have hListEq := cshake256FramedPreimage_frames_injective (by decide) (by decide) hAll1 hAll2 hPreEq
+            have hListEq := cshake256FramedPreimage_frames_injective (by simp) (by simp) hAll1 hAll2 hPreEq
             injection hListEq with _ t1
             injection t1 with _ t2
             injection t2 with _ t3
@@ -4744,7 +4823,7 @@ theorem toprfContextBasePreimage_injective {ctx₁ ctx₂ : ToprfEvalContext}
         · rcases List.mem_cons.mp h3 with rfl | h4
           · rw [FixedCodec.u64le.encode_len]; decide
           · cases h4
-  have hFr := cshake256FramedPreimage_frames_injective (by decide) (by decide) hAll₁ hAll₂ hEq
+  have hFr := cshake256FramedPreimage_frames_injective (by simp) (by simp) hAll₁ hAll₂ hEq
   injection hFr with eKey t1
   injection t1 with eSes t2
   injection t2 with eCnt t3
@@ -4780,56 +4859,61 @@ def toprfInputCommit (H : List UInt8 → List UInt8) (baseDigest : List UInt8) (
 
 /-- **`#tooth` (`tooth_omitting_base_digest_allows_cross_session_replay`)**:
     A broken input commitment omitting `context.base_digest()` produces **byte-identical** commitments
-    across distinct sessions/counters `ctx₁ ≠ ctx₂` (`rfl`), whereas `toprfInputCommit` (including
-    `toprfContextBaseDigest`) strictly separates `ctx₁` and `ctx₂` under injective `H = id`! -/
+    across distinct sessions/counters `ctx₁ ≠ ctx₂` (`rfl`), whereas `toprfContextBasePreimage` strictly
+    separates `ctx₁` and `ctx₂` and `toprfInputCommitPreimage` strictly separates any two distinct
+    `< 256^8`-byte base digests (including 32-byte `cshake256Bytes` digests)! -/
 theorem tooth_omitting_base_digest_allows_cross_session_replay :
     let brokenPreimage (c : Fin 5) (salt : List UInt8) (shares : List Goldilocks) : List UInt8 :=
       cshake256FramedPreimage toprfInputCommitTag [[UInt8.ofNat c.val], salt, encodeGoldilocksVecLe shares]
     let ctx₁ : ToprfEvalContext := { key := [0x11], session := [0xA1], counter := 0, items := 1 }
     let ctx₂ : ToprfEvalContext := { key := [0x11], session := [0xB2], counter := 1, items := 1 }
+    let H₀ : List UInt8 → List UInt8 := fun bs =>
+      if bs = toprfContextBasePreimage ctx₁ then [0x01] else [0x02]
     ctx₁ ≠ ctx₂ ∧
+    toprfContextBasePreimage ctx₁ ≠ toprfContextBasePreimage ctx₂ ∧
     brokenPreimage 0 [0x55] [Goldilocks.one] = brokenPreimage 0 [0x55] [Goldilocks.one] ∧
-    toprfInputCommit id (toprfContextBaseDigest id ctx₁) 0 [0x55] [Goldilocks.one] ≠
-      toprfInputCommit id (toprfContextBaseDigest id ctx₂) 0 [0x55] [Goldilocks.one] := by
-  refine ⟨by decide, rfl, ?_⟩
+    toprfInputCommit id (toprfContextBaseDigest H₀ ctx₁) 0 [0x55] [Goldilocks.one] ≠
+      toprfInputCommit id (toprfContextBaseDigest H₀ ctx₂) 0 [0x55] [Goldilocks.one] := by
+  have hPreNe :
+      toprfContextBasePreimage { key := [0x11], session := [0xA1], counter := 0, items := 1 } ≠
+        toprfContextBasePreimage { key := [0x11], session := [0xB2], counter := 1, items := 1 } := by
+    intro hBaseEq
+    have hCtxEq := toprfContextBasePreimage_injective (by simp) (by simp) (by simp) (by simp) hBaseEq
+    injection hCtxEq with _ eSes _ _
+    cases eSes
+  refine ⟨by decide, hPreNe, rfl, ?_⟩
   intro hEq
-  unfold toprfInputCommit toprfContextBaseDigest id at hEq
-  have hBaseEq : toprfContextBasePreimage { key := [0x11], session := [0xA1], counter := 0, items := 1 } =
-      toprfContextBasePreimage { key := [0x11], session := [0xB2], counter := 1, items := 1 } := by
-    have h1Len : (toprfContextBasePreimage { key := [0x11], session := [0xA1], counter := 0, items := 1 }).length < 256 ^ 8 := by decide
-    have h2Len : (toprfContextBasePreimage { key := [0x11], session := [0xB2], counter := 1, items := 1 }).length < 256 ^ 8 := by decide
-    have hAll1 : ∀ f ∈ [toprfContextBasePreimage { key := [0x11], session := [0xA1], counter := 0, items := 1 },
-                        [UInt8.ofNat (0 : Fin 5).val], ([0x55] : List UInt8),
-                        encodeGoldilocksVecLe [Goldilocks.one]], f.length < 256 ^ 8 := by
-      intro f hf
-      rcases List.mem_cons.mp hf with rfl | t1
-      · exact h1Len
-      · rcases List.mem_cons.mp t1 with rfl | t2
+  dsimp only [toprfInputCommit, toprfContextBaseDigest, id] at hEq
+  rw [if_pos rfl, if_neg (Ne.symm hPreNe)] at hEq
+  have hEncLen : (encodeGoldilocksVecLe [Goldilocks.one]).length < 256 ^ 8 := by
+    rw [encodeGoldilocksVecLe_length]; decide
+  have hAll1 : ∀ f ∈ [([0x01] : List UInt8), [UInt8.ofNat (0 : Fin 5).val], ([0x55] : List UInt8),
+                      encodeGoldilocksVecLe [Goldilocks.one]], f.length < 256 ^ 8 := by
+    intro f hf
+    rcases List.mem_cons.mp hf with rfl | t1
+    · decide
+    · rcases List.mem_cons.mp t1 with rfl | t2
+      · decide
+      · rcases List.mem_cons.mp t2 with rfl | t3
         · decide
-        · rcases List.mem_cons.mp t2 with rfl | t3
-          · decide
-          · rcases List.mem_cons.mp t3 with rfl | t4
-            · decide
-            · cases t4
-    have hAll2 : ∀ g ∈ [toprfContextBasePreimage { key := [0x11], session := [0xB2], counter := 1, items := 1 },
-                        [UInt8.ofNat (0 : Fin 5).val], ([0x55] : List UInt8),
-                        encodeGoldilocksVecLe [Goldilocks.one]], g.length < 256 ^ 8 := by
-      intro g hg
-      rcases List.mem_cons.mp hg with rfl | t1
-      · exact h2Len
-      · rcases List.mem_cons.mp t1 with rfl | t2
+        · rcases List.mem_cons.mp t3 with rfl | t4
+          · exact hEncLen
+          · cases t4
+  have hAll2 : ∀ g ∈ [([0x02] : List UInt8), [UInt8.ofNat (0 : Fin 5).val], ([0x55] : List UInt8),
+                      encodeGoldilocksVecLe [Goldilocks.one]], g.length < 256 ^ 8 := by
+    intro g hg
+    rcases List.mem_cons.mp hg with rfl | t1
+    · decide
+    · rcases List.mem_cons.mp t1 with rfl | t2
+      · decide
+      · rcases List.mem_cons.mp t2 with rfl | t3
         · decide
-        · rcases List.mem_cons.mp t2 with rfl | t3
-          · decide
-          · rcases List.mem_cons.mp t3 with rfl | t4
-            · decide
-            · cases t4
-    have hFr := cshake256FramedPreimage_frames_injective (by decide) (by decide) hAll1 hAll2 hEq
-    injection hFr with eBase _
-    exact eBase
-  have hCtxEq := toprfContextBasePreimage_injective (by decide) (by decide) (by decide) (by decide) hBaseEq
-  injection hCtxEq with _ eSes _ _
-  cases eSes
+        · rcases List.mem_cons.mp t3 with rfl | t4
+          · exact hEncLen
+          · cases t4
+  have hFr := cshake256FramedPreimage_frames_injective (by simp) (by simp) hAll1 hAll2 hEq
+  injection hFr with eBase _
+  cases eBase
 
 /-- 4-holder unanimity check on component `c` (`voprf.rs:511-525`): all 4 servers `p ≠ c` must broadcast
     the identical 32-byte commitment digest `expected`! -/
@@ -4992,7 +5076,7 @@ theorem toprf_input_root_blocks_relabeling_and_equivocation
               · rcases List.mem_cons.mp t3 with rfl | t4
                 · rw [encodeGoldilocksVecLe_length]; omega
                 · cases t4
-        have hFr := cshake256FramedPreimage_frames_injective (by decide) (by decide) hAll1 hAll2 hPreEq
+        have hFr := cshake256FramedPreimage_frames_injective (by simp) (by simp) hAll1 hAll2 hPreEq
         injection hFr with eBd t1
         injection t1 with _ t2
         injection t2 with eSalt t3
@@ -5031,7 +5115,7 @@ theorem toprf_input_root_blocks_relabeling_and_equivocation
               intro f hf; rcases List.mem_cons.mp hf with rfl | h0; exact hxLen; cases h0
             have hAll2 : ∀ g ∈ [queried], g.length < 256 ^ 8 := by
               intro g hg; rcases List.mem_cons.mp hg with rfl | h0; exact hQLen; cases h0
-            have hFr := cshake256FramedPreimage_frames_injective (by decide) (by decide) hAll1 hAll2 hPreEq
+            have hFr := cshake256FramedPreimage_frames_injective (by simp) (by simp) hAll1 hAll2 hPreEq
             injection hFr with hxEqQ _
             exact hxNeQ hxEqQ
           else
@@ -5044,9 +5128,9 @@ theorem toprf_input_root_blocks_relabeling_and_equivocation
       rw [ite_false_of hKey]
       exact Or.inl rfl
 
-/-! ## §4. `BlindVC` Rate-8/Capacity-4 `sponge12` Commitment & Selective Disclosure (`blind_vc.rs`, `P1-10` & `[P0-01].4`) -/
+/-! ## §4. `BlindVC` Rate-6/Capacity-6 6-Limb `absorbRate6Sponge3` Commitment & ZKBoo Selective Disclosure (`blind_vc.rs`, fixing `C0-3` & `C1-2`) -/
 
-/-! ### §4.1 Full-Width 4-Limb `sponge12` Commitment & Fixed-Arity Binding (`[P0-01].4`) -/
+/-! ### §4.1 6-Limb `Lane6` Digests, `ZkSoundnessProfile` (ROM vs QROM) & Arity-Framed `absorbRate6Sponge3` Binding -/
 
 /-- Maximum canonical Goldilocks attributes per `BlindVC` credential (`MAX_VC_ATTRS = 6`, `blind_vc.rs:43`). -/
 def vcMaxAttrs : Nat := 6
@@ -5054,8 +5138,98 @@ def vcMaxAttrs : Nat := 6
 /-- Deployed Poseidon2 Merkle accumulator depth (`VC_ACCUMULATOR_DEPTH = 20`, `blind_vc.rs:45`). -/
 def vcAccumulatorDepth : Nat := 20
 
-/-- Deployed ZKBoo MPC-in-the-head parallel repetitions (`VC_ZKBOO_REPS = 219`, `blind_vc.rs:47`). -/
-def vcZkBooReps : Nat := 219
+/-- ZKBoo soundness profile (`ZkSoundnessProfile`, `blind_vc.rs:47, 780-810`, fixing `C1-2`):
+    - `.classical128`: `219` repetitions (`(2/3)^219 < 2^{-128}` classical ROM soundness,
+      whereas `2^{-130} < (2/3)^219` yields `< 65`-bit security against QROM Grover challenge grinding);
+    - `.quantum128`: `438` repetitions (`VC_ZKBOO_REPS = 438`, default post-quantum profile:
+      `(2/3)^438 < 2^{-256}`, sustaining `≥ 128`-bit QROM soundness against $O(2^{k/2})$ Grover
+      amplitude amplification over Fiat-Shamir challenge grinding). -/
+inductive ZkSoundnessProfile where
+  | classical128
+  | quantum128
+  deriving DecidableEq, Repr
+
+def ZkSoundnessProfile.repetitions : ZkSoundnessProfile → Nat
+  | .classical128 => 219
+  | .quantum128 => 438
+
+/-- Default post-quantum ZKBoo repetition count (`VC_ZKBOO_REPS = 438`, `blind_vc.rs:47`). -/
+def vcZkBooReps : Nat := ZkSoundnessProfile.quantum128.repetitions
+
+/-- Legacy classical-ROM repetition count (`219`, `ZkSoundnessProfile::Classical128`). -/
+def vcClassicalZkBooReps : Nat := ZkSoundnessProfile.classical128.repetitions
+
+set_option exponentiation.threshold 1024 in
+/-- **Explicit Classical-ROM (`219`) vs Post-Quantum QROM (`438`) Soundness Separation
+    (`zkSoundnessProfile_rom_vs_qrom_bounds`, fixing `C1-2`)**:
+    1. `Classical128 = 219` achieves `< 2^{-128}` soundness in the classical ROM, **but** satisfies
+       `2^{-130} ≤ (2/3)^219` (`< 65` bits under QROM Grover square-root challenge grinding);
+    2. `Quantum128 = 438` (`vcZkBooReps`) achieves `(2/3)^438 ≤ 2^{-256}`, sustaining `≥ 128`-bit
+       post-quantum QROM soundness `((2/3)^438)^{1/2} ≤ 2^{-128}`. -/
+theorem zkSoundnessProfile_rom_vs_qrom_bounds :
+    ZkSoundnessProfile.classical128.repetitions = 219 ∧
+    ZkSoundnessProfile.quantum128.repetitions = 438 ∧
+    vcZkBooReps = 438 ∧
+    ratLe (2 ^ ZkSoundnessProfile.classical128.repetitions, 3 ^ ZkSoundnessProfile.classical128.repetitions)
+      (1, 2 ^ 128) ∧
+    ratLe (1, 2 ^ 130)
+      (2 ^ ZkSoundnessProfile.classical128.repetitions, 3 ^ ZkSoundnessProfile.classical128.repetitions) ∧
+    ratLe (2 ^ ZkSoundnessProfile.quantum128.repetitions, 3 ^ ZkSoundnessProfile.quantum128.repetitions)
+      (1, 2 ^ 256) := by
+  unfold ZkSoundnessProfile.repetitions vcZkBooReps ratLe
+  decide
+
+/-- 6-limb Goldilocks digest (`[u64; 6]`, `VC_DIGEST_LIMBS = 6`, `blind_vc.rs:41`):
+    6-limb rate/capacity (`p^6 > 2^{383}`), providing `> 191`-bit classical birthday and
+    `≥ 128`-bit (`p^2 > 2^{127.9999999996}`) post-quantum BHT / CNS sponge security. -/
+structure Lane6 where
+  x0 : Goldilocks
+  x1 : Goldilocks
+  x2 : Goldilocks
+  x3 : Goldilocks
+  x4 : Goldilocks
+  x5 : Goldilocks
+  deriving DecidableEq, Repr
+
+theorem Lane6.ext {a b : Lane6}
+    (h0 : a.x0 = b.x0) (h1 : a.x1 = b.x1) (h2 : a.x2 = b.x2)
+    (h3 : a.x3 = b.x3) (h4 : a.x4 = b.x4) (h5 : a.x5 = b.x5) : a = b := by
+  cases a; cases b; subst h0 h1 h2 h3 h4 h5; rfl
+
+def lane6Zero : Lane6 :=
+  ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero,
+   Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩
+
+def lane6Add (a b : Lane6) : Lane6 :=
+  ⟨Goldilocks.add a.x0 b.x0, Goldilocks.add a.x1 b.x1, Goldilocks.add a.x2 b.x2,
+   Goldilocks.add a.x3 b.x3, Goldilocks.add a.x4 b.x4, Goldilocks.add a.x5 b.x5⟩
+
+def lane6Sub (a b : Lane6) : Lane6 :=
+  ⟨Goldilocks.sub a.x0 b.x0, Goldilocks.sub a.x1 b.x1, Goldilocks.sub a.x2 b.x2,
+   Goldilocks.sub a.x3 b.x3, Goldilocks.sub a.x4 b.x4, Goldilocks.sub a.x5 b.x5⟩
+
+def lane6Scale (c : Goldilocks) (a : Lane6) : Lane6 :=
+  ⟨Goldilocks.mul c a.x0, Goldilocks.mul c a.x1, Goldilocks.mul c a.x2,
+   Goldilocks.mul c a.x3, Goldilocks.mul c a.x4, Goldilocks.mul c a.x5⟩
+
+def state12Rate6 (st : Poseidon2State12) : Lane6 :=
+  ⟨st.b0.x0, st.b0.x1, st.b0.x2, st.b0.x3, st.b1.x0, st.b1.x1⟩
+
+def state12Cap6 (st : Poseidon2State12) : Lane6 :=
+  ⟨st.b1.x2, st.b1.x3, st.b2.x0, st.b2.x1, st.b2.x2, st.b2.x3⟩
+
+def mkState12Of6 (rate cap : Lane6) : Poseidon2State12 :=
+  ⟨⟨rate.x0, rate.x1, rate.x2, rate.x3⟩,
+   ⟨rate.x4, rate.x5, cap.x0, cap.x1⟩,
+   ⟨cap.x2, cap.x3, cap.x4, cap.x5⟩⟩
+
+private theorem state12Rate6_mk (r c : Lane6) : state12Rate6 (mkState12Of6 r c) = r := rfl
+private theorem state12Cap6_mk (r c : Lane6) : state12Cap6 (mkState12Of6 r c) = c := rfl
+
+private theorem mkState12Of6_eta (st : Poseidon2State12) :
+    mkState12Of6 (state12Rate6 st) (state12Cap6 st) = st := by
+  rcases st with ⟨⟨_, _, _, _⟩, ⟨_, _, _, _⟩, ⟨_, _, _, _⟩⟩
+  rfl
 
 /-- Domain tag `"VCATTRV1"` (`0x5643_4154_5452_5631`, `blind_vc.rs:53`). -/
 def vcAttrCommitTag : UInt64 := 0x5643415454525631
@@ -5069,15 +5243,13 @@ def vcScopeTagDom : UInt64 := 0x564353434F505631
 /-- Domain tag `"VCMKLEV1"` (`0x5643_4D4B_4C45_5631`, `blind_vc.rs:56`). -/
 def vcMerkleNodeTag : UInt64 := 0x56434D4B4C455631
 
-/-- Exact 2-permutation Width-12 (`rate = 8, capacity = 4`) `Poseidon2` sponge (`blind_vc.rs:98-107`):
-    1. Save `tail = st.b2` (`st[8..12]`), zero capacity `st[8..12] := 0`, apply `poseidon2Perm12`;
-    2. Absorb `tail` into `st[0..4]` (`b0`), add `1` domain separator into `st[4]` (`b1.x0`),
-       and apply the second `poseidon2Perm12`. -/
-@[expose] def sponge12 (st : Poseidon2State12) : Poseidon2State12 :=
-  let tail := st.b2
-  let p1 := poseidon2Perm12 ⟨st.b0, st.b1, lane4Zero⟩
-  let b1Sep : Lane4 := ⟨Goldilocks.add p1.b1.x0 Goldilocks.one, p1.b1.x1, p1.b1.x2, p1.b1.x3⟩
-  poseidon2Perm12 ⟨lane4Add p1.b0 tail, b1Sep, p1.b2⟩
+/-- Exact 3-permutation Width-12 (`rate = 6, capacity = 6`) `Poseidon2` sponge (`blind_vc.rs:98-115`):
+    absorbs three 6-limb rate chunks `(c0, c1, c2)` with capacity `lane6Zero` and outputs the
+    permuted 12-limb state (whose 6-limb rate `state12Rate6` is the 6-limb digest). -/
+@[expose] def absorbRate6Sponge3 (c0 c1 c2 : Lane6) : Poseidon2State12 :=
+  let p1 := poseidon2Perm12 (mkState12Of6 c0 lane6Zero)
+  let p2 := poseidon2Perm12 (mkState12Of6 (lane6Add (state12Rate6 p1) c1) (state12Cap6 p1))
+  poseidon2Perm12 (mkState12Of6 (lane6Add (state12Rate6 p2) c2) (state12Cap6 p2))
 
 private theorem gold_add_left_cancel_vc {a b c : Goldilocks}
     (h : Goldilocks.add a b = Goldilocks.add a c) : b = c := by
@@ -5097,35 +5269,90 @@ private theorem gold_add_right_cancel_vc {a b c : Goldilocks}
     congr 1; omega
   rwa [hCancel, hCancel] at hs
 
-/-- For fixed rate blocks `(b0, b1)`, `sponge12` is strictly injective in the 4-limb tail `b2`. -/
-theorem sponge12_tail_injective (b0 b1 tail₁ tail₂ : Lane4)
-    (h : sponge12 ⟨b0, b1, tail₁⟩ = sponge12 ⟨b0, b1, tail₂⟩) :
-    tail₁ = tail₂ := by
-  unfold sponge12 at h
-  dsimp only at h
-  have hMid := (poseidon2Perm12_bijective _ _).2.2.1.mp h
-  have hb0 := congrArg Poseidon2State12.b0 hMid
-  dsimp only at hb0
-  rw [lane4Add_eq, lane4Add_eq] at hb0
-  exact Lane4.ext
-    (gold_add_left_cancel_vc (congrArg Lane4.x0 hb0))
-    (gold_add_left_cancel_vc (congrArg Lane4.x1 hb0))
-    (gold_add_left_cancel_vc (congrArg Lane4.x2 hb0))
-    (gold_add_left_cancel_vc (congrArg Lane4.x3 hb0))
+private theorem lane6Add_left_cancel {a b c : Lane6}
+    (h : lane6Add a b = lane6Add a c) : b = c :=
+  Lane6.ext
+    (gold_add_left_cancel_vc (congrArg Lane6.x0 h))
+    (gold_add_left_cancel_vc (congrArg Lane6.x1 h))
+    (gold_add_left_cancel_vc (congrArg Lane6.x2 h))
+    (gold_add_left_cancel_vc (congrArg Lane6.x3 h))
+    (gold_add_left_cancel_vc (congrArg Lane6.x4 h))
+    (gold_add_left_cancel_vc (congrArg Lane6.x5 h))
 
-/-- Fixed-arity credential schema (`schemaId` + fixed attribute count `arity ≤ 6`, fixing `[P0-01].4`). -/
+/-- Authentic 6-limb rate or 6-limb capacity collision on `poseidon2Perm12`. -/
+def Poseidon2Perm12Sponge6Collision (stA stB : Poseidon2State12) : Prop :=
+  stA ≠ stB ∧
+  (state12Rate6 (poseidon2Perm12 stA) = state12Rate6 (poseidon2Perm12 stB) ∨
+   state12Cap6 (poseidon2Perm12 stA) = state12Cap6 (poseidon2Perm12 stB))
+
+/-- Constructive sponge collision reduction (`0 Classical.choice`):
+    any two distinct 3-chunk sequences `(c0₁, c1₁, c2₁) ≠ (c0₂, c1₂, c2₂)` colliding on
+    `state12Rate6 (absorbRate6Sponge3 ...)` exhibit an explicit `Poseidon2Perm12Sponge6Collision`. -/
+theorem absorbRate6Sponge3_collision_reduction
+    {c0₁ c1₁ c2₁ c0₂ c1₂ c2₂ : Lane6}
+    (hNe : (c0₁, c1₁, c2₁) ≠ (c0₂, c1₂, c2₂))
+    (hDig : state12Rate6 (absorbRate6Sponge3 c0₁ c1₁ c2₁) =
+            state12Rate6 (absorbRate6Sponge3 c0₂ c1₂ c2₂)) :
+    ∃ stA stB : Poseidon2State12, Poseidon2Perm12Sponge6Collision stA stB := by
+  let s1₁ := mkState12Of6 c0₁ lane6Zero
+  let s1₂ := mkState12Of6 c0₂ lane6Zero
+  let p1₁ := poseidon2Perm12 s1₁
+  let p1₂ := poseidon2Perm12 s1₂
+  let s2₁ := mkState12Of6 (lane6Add (state12Rate6 p1₁) c1₁) (state12Cap6 p1₁)
+  let s2₂ := mkState12Of6 (lane6Add (state12Rate6 p1₂) c1₂) (state12Cap6 p1₂)
+  let p2₁ := poseidon2Perm12 s2₁
+  let p2₂ := poseidon2Perm12 s2₂
+  let s3₁ := mkState12Of6 (lane6Add (state12Rate6 p2₁) c2₁) (state12Cap6 p2₁)
+  let s3₂ := mkState12Of6 (lane6Add (state12Rate6 p2₂) c2₂) (state12Cap6 p2₂)
+  if h3 : s3₁ = s3₂ then
+    if h2 : s2₁ = s2₂ then
+      have hp2 : p2₁ = p2₂ := congrArg poseidon2Perm12 h2
+      have hRate3 : lane6Add (state12Rate6 p2₁) c2₁ = lane6Add (state12Rate6 p2₂) c2₂ := by
+        have hr := congrArg state12Rate6 h3
+        rwa [state12Rate6_mk, state12Rate6_mk] at hr
+      rw [hp2] at hRate3
+      have hc2 : c2₁ = c2₂ := lane6Add_left_cancel hRate3
+      if h1 : s1₁ = s1₂ then
+        have hp1 : p1₁ = p1₂ := congrArg poseidon2Perm12 h1
+        have hRate2 : lane6Add (state12Rate6 p1₁) c1₁ = lane6Add (state12Rate6 p1₂) c1₂ := by
+          have hr := congrArg state12Rate6 h2
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        rw [hp1] at hRate2
+        have hc1 : c1₁ = c1₂ := lane6Add_left_cancel hRate2
+        have hc0 : c0₁ = c0₂ := by
+          have hr := congrArg state12Rate6 h1
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        exact False.elim (hNe (by rw [hc0, hc1, hc2]))
+      else
+        have hCap1 : state12Cap6 p1₁ = state12Cap6 p1₂ := by
+          have hc := congrArg state12Cap6 h2
+          rwa [state12Cap6_mk, state12Cap6_mk] at hc
+        exact ⟨s1₁, s1₂, h1, Or.inr hCap1⟩
+    else
+      have hCap2 : state12Cap6 p2₁ = state12Cap6 p2₂ := by
+        have hc := congrArg state12Cap6 h3
+        rwa [state12Cap6_mk, state12Cap6_mk] at hc
+      exact ⟨s2₁, s2₂, h2, Or.inr hCap2⟩
+  else
+    exact ⟨s3₁, s3₂, h3, Or.inl hDig⟩
+
+/-- Fixed-arity credential schema (`1 ≤ arity ≤ 6`, matching `VcSchema::new` in `blind_vc.rs:79-85`). -/
 structure VcSchema where
   schemaId : UInt64
   arity : Nat
-  hArity : arity ≤ vcMaxAttrs
+  hArityPos : 1 ≤ arity
+  hArityLe : arity ≤ vcMaxAttrs
   deriving DecidableEq, Repr
+
+theorem VcSchema.ext {s₁ s₂ : VcSchema}
+    (hId : s₁.schemaId = s₂.schemaId) (hAr : s₁.arity = s₂.arity) : s₁ = s₂ := by
+  cases s₁; cases s₂; dsimp only at hId hAr; subst hId hAr; rfl
 
 /-- Low 32-bit limb `schema_id & 0xffff_ffff` (`blind_vc.rs:129, 155, 181`). -/
 def vcSchemaLo (sid : UInt64) : Goldilocks :=
   Goldilocks.ofNat (sid.toNat % 4294967296)
 
-/-- High 32-bit limb combined with reduced 64-bit domain tag `gl_add(schema_id >> 32, gl_reduce_u64(tag))`
-    (`blind_vc.rs:130, 156, 184`). -/
+/-- High 32-bit limb combined with reduced 64-bit domain tag (`blind_vc.rs:130, 156, 184`). -/
 def vcSchemaHiWithTag (sid tag : UInt64) : Goldilocks :=
   Goldilocks.add (Goldilocks.ofNat (sid.toNat / 4294967296)) (Goldilocks.ofNat tag.toNat)
 
@@ -5133,20 +5360,25 @@ def vcSchemaHiWithTag (sid tag : UInt64) : Goldilocks :=
 def vcAttrAt (attrs : List Goldilocks) (idx : Nat) : Goldilocks :=
   (attrs[idx]?).getD Goldilocks.zero
 
-/-- Unframed 12-limb pre-sponge state matching `compute_vc_poseidon2_commit` (`blind_vc.rs:118-131`). -/
-def vcCommitState12 (sid : UInt64) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) :
-    Poseidon2State12 :=
-  ⟨⟨vcAttrAt attrs 0, vcAttrAt attrs 1, vcAttrAt attrs 2, vcAttrAt attrs 3⟩,
-   ⟨vcAttrAt attrs 4, vcAttrAt attrs 5, blind.x0, blind.x1⟩,
-   ⟨blind.x2, blind.x3, vcSchemaLo sid, vcSchemaHiWithTag sid tag⟩⟩
+/-- 13-limb + `1` separator rate-6 chunking for `compute_vc_poseidon2_commit` (`blind_vc.rs:118-137`):
+    explicitly absorbs `Goldilocks.ofNat schema.arity` in `c2.x0` followed by separator `1` in `c2.x1`! -/
+def vcCommitChunks (schema : VcSchema) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) :
+    Lane6 × Lane6 × Lane6 :=
+  (⟨vcAttrAt attrs 0, vcAttrAt attrs 1, vcAttrAt attrs 2,
+    vcAttrAt attrs 3, vcAttrAt attrs 4, vcAttrAt attrs 5⟩,
+   ⟨blind.x0, blind.x1, blind.x2, blind.x3,
+    vcSchemaLo schema.schemaId, vcSchemaHiWithTag schema.schemaId tag⟩,
+   ⟨Goldilocks.ofNat schema.arity, Goldilocks.one,
+    Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩)
 
-/-- Fixed-arity length-framed `BlindVC` commitment (`blind_vc.rs:112-136` + fixed schema arity):
-    enforces `attrs.length = schema.arity` (`≤ 6`) and squeezes the full 4-limb (`> 2^255`)
-    rate digest `(sponge12 (vcCommitState12 ...)).b0 : Lane4`. -/
+/-- Arity-framed 6-limb `BlindVC` commitment (`blind_vc.rs:112-138`, fixing `C0-3`):
+    enforces `attrs.length = schema.arity` (`1 ≤ arity ≤ 6`), absorbs `schema.arity` into the
+    3-permutation rate-6/capacity-6 sponge, and squeezes the 6-limb (`> 383`-bit) digest `Lane6`. -/
 @[expose] def computeVcPoseidon2Commit
-    (schema : VcSchema) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) : Option Lane4 :=
+    (schema : VcSchema) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) : Option Lane6 :=
   if attrs.length = schema.arity then
-    some (sponge12 (vcCommitState12 schema.schemaId attrs blind tag)).b0
+    let (c0, c1, c2) := vcCommitChunks schema attrs blind tag
+    some (state12Rate6 (absorbRate6Sponge3 c0 c1 c2))
   else
     none
 
@@ -5156,7 +5388,6 @@ private theorem vcSchema_limbs_injective {sid₁ sid₂ tag : UInt64}
     sid₁ = sid₂ := by
   have hx := sid₁.toNat_lt_size
   have hy := sid₂.toNat_lt_size
-  have hp : 4294967296 < goldilocksPrime := by decide
   have hxl : sid₁.toNat % 4294967296 < goldilocksPrime := by
     have := Nat.mod_lt sid₁.toNat (by decide : 0 < 4294967296)
     omega
@@ -5177,32 +5408,43 @@ private theorem vcSchema_limbs_injective {sid₁ sid₂ tag : UInt64}
   apply UInt64.toNat_inj.mp
   omega
 
-private theorem vcCommitState12_injective_of_same_len
-    {sid₁ sid₂ : UInt64} {attrs₁ attrs₂ : List Goldilocks} {blind₁ blind₂ : Lane4} {tag : UInt64}
-    (hLe : attrs₁.length ≤ vcMaxAttrs)
-    (hLenEq : attrs₁.length = attrs₂.length)
-    (hEq : vcCommitState12 sid₁ attrs₁ blind₁ tag = vcCommitState12 sid₂ attrs₂ blind₂ tag) :
-    sid₁ = sid₂ ∧ attrs₁ = attrs₂ ∧ blind₁ = blind₂ := by
-  have hSid : sid₁ = sid₂ :=
+private theorem vcCommitChunks_injective
+    {schema₁ schema₂ : VcSchema} {attrs₁ attrs₂ : List Goldilocks}
+    {blind₁ blind₂ : Lane4} {tag : UInt64}
+    (hLen₁ : attrs₁.length = schema₁.arity)
+    (hLen₂ : attrs₂.length = schema₂.arity)
+    (hEq : vcCommitChunks schema₁ attrs₁ blind₁ tag = vcCommitChunks schema₂ attrs₂ blind₂ tag) :
+    schema₁ = schema₂ ∧ attrs₁ = attrs₂ ∧ blind₁ = blind₂ := by
+  have hArVal := congrArg (fun p => p.2.2.x0.val) hEq
+  dsimp only [vcCommitChunks] at hArVal
+  have hArLt₁ : schema₁.arity < goldilocksPrime := by
+    have := schema₁.hArityLe; unfold vcMaxAttrs at this; have hp : 6 < goldilocksPrime := by decide; omega
+  have hArLt₂ : schema₂.arity < goldilocksPrime := by
+    have := schema₂.hArityLe; unfold vcMaxAttrs at this; have hp : 6 < goldilocksPrime := by decide; omega
+  simp only [Goldilocks.ofNat_val, Nat.mod_eq_of_lt hArLt₁, Nat.mod_eq_of_lt hArLt₂] at hArVal
+  have hSid : schema₁.schemaId = schema₂.schemaId :=
     vcSchema_limbs_injective
-      (congrArg (fun s => s.b2.x2) hEq)
-      (congrArg (fun s => s.b2.x3) hEq)
+      (congrArg (fun p => p.2.1.x4) hEq)
+      (congrArg (fun p => p.2.1.x5) hEq)
+  have hSchema : schema₁ = schema₂ := VcSchema.ext hSid hArVal
   have hBlind : blind₁ = blind₂ :=
     Lane4.ext
-      (congrArg (fun s => s.b1.x2) hEq)
-      (congrArg (fun s => s.b1.x3) hEq)
-      (congrArg (fun s => s.b2.x0) hEq)
-      (congrArg (fun s => s.b2.x1) hEq)
-  have h0 : vcAttrAt attrs₁ 0 = vcAttrAt attrs₂ 0 := congrArg (fun s => s.b0.x0) hEq
-  have h1 : vcAttrAt attrs₁ 1 = vcAttrAt attrs₂ 1 := congrArg (fun s => s.b0.x1) hEq
-  have h2 : vcAttrAt attrs₁ 2 = vcAttrAt attrs₂ 2 := congrArg (fun s => s.b0.x2) hEq
-  have h3 : vcAttrAt attrs₁ 3 = vcAttrAt attrs₂ 3 := congrArg (fun s => s.b0.x3) hEq
-  have h4 : vcAttrAt attrs₁ 4 = vcAttrAt attrs₂ 4 := congrArg (fun s => s.b1.x0) hEq
-  have h5 : vcAttrAt attrs₁ 5 = vcAttrAt attrs₂ 5 := congrArg (fun s => s.b1.x1) hEq
+      (congrArg (fun p => p.2.1.x0) hEq)
+      (congrArg (fun p => p.2.1.x1) hEq)
+      (congrArg (fun p => p.2.1.x2) hEq)
+      (congrArg (fun p => p.2.1.x3) hEq)
+  have h0 : vcAttrAt attrs₁ 0 = vcAttrAt attrs₂ 0 := congrArg (fun p => p.1.x0) hEq
+  have h1 : vcAttrAt attrs₁ 1 = vcAttrAt attrs₂ 1 := congrArg (fun p => p.1.x1) hEq
+  have h2 : vcAttrAt attrs₁ 2 = vcAttrAt attrs₂ 2 := congrArg (fun p => p.1.x2) hEq
+  have h3 : vcAttrAt attrs₁ 3 = vcAttrAt attrs₂ 3 := congrArg (fun p => p.1.x3) hEq
+  have h4 : vcAttrAt attrs₁ 4 = vcAttrAt attrs₂ 4 := congrArg (fun p => p.1.x4) hEq
+  have h5 : vcAttrAt attrs₁ 5 = vcAttrAt attrs₂ 5 := congrArg (fun p => p.1.x5) hEq
+  have hLenEq : attrs₁.length = attrs₂.length := by omega
   have hAttrs : attrs₁ = attrs₂ := by
     apply List.ext_getElem hLenEq
     intro i hi1 hi2
-    have hiMax : i < 6 := by unfold vcMaxAttrs at hLe; omega
+    have hLe1 : attrs₁.length ≤ 6 := hLen₁ ▸ schema₁.hArityLe
+    have hiMax : i < 6 := by omega
     have hGet1 : vcAttrAt attrs₁ i = attrs₁[i] := by
       unfold vcAttrAt; rw [List.getElem?_eq_getElem hi1]; rfl
     have hGet2 : vcAttrAt attrs₂ i = attrs₂[i] := by
@@ -5216,43 +5458,40 @@ private theorem vcCommitState12_injective_of_same_len
     · exact h3
     · exact h4
     · exact h5
-  exact ⟨hSid, hAttrs, hBlind⟩
+  exact ⟨hSchema, hAttrs, hBlind⟩
 
-/-- **Flagship §4.1 Theorem — `BlindVC` Full-Width `sponge12` Commitment Binding
-    (`blind_vc_commit_binding_reduces_to_sponge12_collision`, fixing `[P0-01].4` & `P1-10`)**:
-    1. **Fixed-Arity Framing**: `computeVcPoseidon2Commit` accepts `attrs` iff `attrs.length = schema.arity` (`≤ 6`);
-    2. **Binding Reduction to Authentic `sponge12` Collisions**: Any two distinct openings
-       `(schema₁.schemaId, attrs₁, blind₁) ≠ (schema₂.schemaId, attrs₂, blind₂)` at the same arity
-       yielding `some c` produce **genuinely distinct** 12-limb preimages `st₁ ≠ st₂` colliding on
-       `(sponge12 st₁).b0 = (sponge12 st₂).b0` over the 4-limb Goldilocks digest space;
-    3. **Cross-Domain Non-Confusion**: `VC_ATTR_COMMIT_TAG` and `VC_PRES_COMMIT_TAG` states are disjoint
-       for every `(sid, attrs₁, blind₁, attrs₂, blind₂)`;
-    4. **Full 256-Bit Digest Cardinality**: `2 ^ 255 < deployedCardGoldilocks4`. -/
+set_option exponentiation.threshold 1024 in
+/-- **Flagship §4.1 Theorem — `BlindVC` 6-Limb Arity-Framed Sponge Commitment Binding
+    (`blind_vc_commit_binding_reduces_to_sponge12_collision`, fixing `C0-3`)**:
+    1. **Explicit Arity Framing**: `computeVcPoseidon2Commit` accepts iff `1 ≤ attrs.length = schema.arity ≤ 6`;
+    2. **Same-Arity & Cross-Arity Binding Reduction**: ANY two distinct openings
+       `(schema₁, attrs₁, blind₁) ≠ (schema₂, attrs₂, blind₂)` (including cross-arity `[x]` vs `[x, 0]`)
+       yielding `some c` constructively exhibit `Poseidon2Perm12Sponge6Collision stA stB`;
+    3. **Cross-Domain Non-Confusion**: `vcAttrCommitTag` and `vcPresCommitTag` chunk tuples are disjoint;
+    4. **Full 384-Bit Digest Space**: `2 ^ 383 < goldilocksPrime ^ 6`. -/
 theorem blind_vc_commit_binding_reduces_to_sponge12_collision :
-    (∀ (schema : VcSchema) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) (c : Lane4),
+    (∀ (schema : VcSchema) (attrs : List Goldilocks) (blind : Lane4) (tag : UInt64) (c : Lane6),
       computeVcPoseidon2Commit schema attrs blind tag = some c →
-      attrs.length = schema.arity ∧ attrs.length ≤ vcMaxAttrs) ∧
+      1 ≤ attrs.length ∧ attrs.length = schema.arity ∧ attrs.length ≤ vcMaxAttrs) ∧
     (∀ (schema₁ schema₂ : VcSchema) (attrs₁ attrs₂ : List Goldilocks)
-       (blind₁ blind₂ : Lane4) (tag : UInt64) (c : Lane4),
-      schema₁.arity = schema₂.arity →
+       (blind₁ blind₂ : Lane4) (tag : UInt64) (c : Lane6),
       computeVcPoseidon2Commit schema₁ attrs₁ blind₁ tag = some c →
       computeVcPoseidon2Commit schema₂ attrs₂ blind₂ tag = some c →
-      (schema₁.schemaId, attrs₁, blind₁) ≠ (schema₂.schemaId, attrs₂, blind₂) →
-      let st₁ := vcCommitState12 schema₁.schemaId attrs₁ blind₁ tag
-      let st₂ := vcCommitState12 schema₂.schemaId attrs₂ blind₂ tag
-      st₁ ≠ st₂ ∧ (sponge12 st₁).b0 = (sponge12 st₂).b0) ∧
-    (∀ (sid : UInt64) (attrs₁ attrs₂ : List Goldilocks) (blind₁ blind₂ : Lane4),
-      vcCommitState12 sid attrs₁ blind₁ vcAttrCommitTag ≠
-        vcCommitState12 sid attrs₂ blind₂ vcPresCommitTag) ∧
-    2 ^ 255 < deployedCardGoldilocks4 := by
-  refine ⟨?_, ?_, ?_, deployedCardGoldilocks4_ne_bitVec256.2.1⟩
+      (schema₁, attrs₁, blind₁) ≠ (schema₂, attrs₂, blind₂) →
+      ∃ stA stB : Poseidon2State12, Poseidon2Perm12Sponge6Collision stA stB) ∧
+    (∀ (s₁ s₂ : VcSchema) (attrs₁ attrs₂ : List Goldilocks) (blind₁ blind₂ : Lane4),
+      s₁.schemaId = s₂.schemaId →
+      vcCommitChunks s₁ attrs₁ blind₁ vcAttrCommitTag ≠
+        vcCommitChunks s₂ attrs₂ blind₂ vcPresCommitTag) ∧
+    2 ^ 383 < goldilocksPrime ^ 6 := by
+  refine ⟨?_, ?_, ?_, by decide⟩
   · intro schema attrs blind tag c hCom
     unfold computeVcPoseidon2Commit at hCom
     if hLen : attrs.length = schema.arity then
-      exact ⟨hLen, hLen ▸ schema.hArity⟩
+      exact ⟨hLen ▸ schema.hArityPos, hLen, hLen ▸ schema.hArityLe⟩
     else
       rw [ite_false_of hLen] at hCom; cases hCom
-  · intro schema₁ schema₂ attrs₁ attrs₂ blind₁ blind₂ tag c hArEq hCom1 hCom2 hNe
+  · intro schema₁ schema₂ attrs₁ attrs₂ blind₁ blind₂ tag c hCom1 hCom2 hNe
     unfold computeVcPoseidon2Commit at hCom1 hCom2
     if hLen1 : attrs₁.length = schema₁.arity then
       rw [ite_true_of hLen1] at hCom1
@@ -5260,18 +5499,20 @@ theorem blind_vc_commit_binding_reduces_to_sponge12_collision :
         rw [ite_true_of hLen2] at hCom2
         injection hCom1 with hc1
         injection hCom2 with hc2
-        refine ⟨?_, hc1.trans hc2.symm⟩
-        intro hStEq
-        have hLenEq : attrs₁.length = attrs₂.length := by omega
-        obtain ⟨hSid, hAttrs, hBlind⟩ :=
-          vcCommitState12_injective_of_same_len (hLen1 ▸ schema₁.hArity) hLenEq hStEq
-        exact hNe (Prod.ext hSid (Prod.ext hAttrs hBlind))
+        have hChunksNe : vcCommitChunks schema₁ attrs₁ blind₁ tag ≠ vcCommitChunks schema₂ attrs₂ blind₂ tag := by
+          intro hEq
+          obtain ⟨hs, ha, hb⟩ := vcCommitChunks_injective hLen1 hLen2 hEq
+          exact hNe (by rw [hs, ha, hb])
+        exact absorbRate6Sponge3_collision_reduction hChunksNe (hc1.trans hc2.symm)
       else
         rw [ite_false_of hLen2] at hCom2; cases hCom2
     else
       rw [ite_false_of hLen1] at hCom1; cases hCom1
-  · intro sid attrs₁ attrs₂ blind₁ blind₂ hStEq
-    have hTagEq := gold_add_left_cancel_vc (congrArg (fun s => s.b2.x3) hStEq)
+  · intro s₁ s₂ attrs₁ attrs₂ blind₁ blind₂ hSid hEq
+    have hHi := congrArg (fun p => p.2.1.x5) hEq
+    dsimp only [vcCommitChunks] at hHi
+    rw [hSid] at hHi
+    have hTagEq := gold_add_left_cancel_vc hHi
     have hValEq := congrArg Goldilocks.val hTagEq
     have hNeVal : (Goldilocks.ofNat vcAttrCommitTag.toNat).val ≠
         (Goldilocks.ofNat vcPresCommitTag.toNat).val := by
@@ -5280,63 +5521,72 @@ theorem blind_vc_commit_binding_reduces_to_sponge12_collision :
       decide
     exact hNeVal hValEq
 
-/-- **`#tooth` (`tooth_unframed_trailing_zero_collision`, `[P0-01].4`)**:
-    Without fixed-arity length framing, `[] ≠ [Goldilocks.zero]` map to the **exact same**
-    12-limb state `vcCommitState12` (`rfl` — zero `sponge12` collision needed!), whereas
-    `computeVcPoseidon2Commit` deterministically rejects the trailing-zero forgery (`= none`)! -/
-theorem tooth_unframed_trailing_zero_collision :
-    ([] : List Goldilocks) ≠ [Goldilocks.zero] ∧
-    (∀ (sid : UInt64) (blind : Lane4) (tag : UInt64),
-      vcCommitState12 sid [] blind tag = vcCommitState12 sid [Goldilocks.zero] blind tag) ∧
-    (∀ (sid : UInt64) (blind : Lane4) (tag : UInt64),
-      computeVcPoseidon2Commit ⟨sid, 0, by decide⟩ [Goldilocks.zero] blind tag = none) :=
-  ⟨(fun h => by cases h), (fun _ _ _ => rfl), (fun _ _ _ => rfl)⟩
+/-- **`#tooth` (`tooth_unframed_trailing_zero_collision`, `C0-3`)**:
+    Omitting `schema.arity` from chunk `c2` makes `(arity = 1, [x])` and `(arity = 2, [x, 0])`
+    absorb **identical** sponge blocks (`rfl` — zero permutation collision needed!), whereas
+    `vcCommitChunks` strictly separates `(s₁, [x])` from `(s₂, [x, 0])` and `computeVcPoseidon2Commit`
+    deterministically rejects wrong-arity `[x, 0]` (`= none`)! -/
+theorem tooth_unframed_trailing_zero_collision (sid : UInt64) (x : Goldilocks) (blind : Lane4) (tag : UInt64) :
+    let s₁ : VcSchema := ⟨sid, 1, by decide, by decide⟩
+    let s₂ : VcSchema := ⟨sid, 2, by decide, by decide⟩
+    let unframedChunks (attrs : List Goldilocks) : Lane6 × Lane6 × Lane6 :=
+      (⟨vcAttrAt attrs 0, vcAttrAt attrs 1, vcAttrAt attrs 2,
+        vcAttrAt attrs 3, vcAttrAt attrs 4, vcAttrAt attrs 5⟩,
+       ⟨blind.x0, blind.x1, blind.x2, blind.x3, vcSchemaLo sid, vcSchemaHiWithTag sid tag⟩,
+       ⟨Goldilocks.one, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩)
+    [x] ≠ [x, Goldilocks.zero] ∧
+    unframedChunks [x] = unframedChunks [x, Goldilocks.zero] ∧
+    vcCommitChunks s₁ [x] blind tag ≠ vcCommitChunks s₂ [x, Goldilocks.zero] blind tag ∧
+    computeVcPoseidon2Commit s₁ [x, Goldilocks.zero] blind tag = none := by
+  refine ⟨by intro h; injection h with _ hNil; cases hNil, rfl, ?_, rfl⟩
+  intro hEq
+  obtain ⟨hS, _, _⟩ := vcCommitChunks_injective rfl rfl hEq
+  have hAr := congrArg VcSchema.arity hS
+  cases hAr
 
-/-! ### §4.2 Plaintext Scope Tag, Merkle Accumulator & Algebraic Boolean Gate Soundness -/
+/-! ### §4.2 6-Limb Scope Tag, Merkle Accumulator & Algebraic Boolean Gate Soundness -/
 
-/-- Scope-bound pseudonym/nullifier state (`blind_vc.rs:139-157`). -/
-def vcScopeState12 (sid : UInt64) (holderBlind scopeLimbs : Lane4) : Poseidon2State12 :=
-  ⟨holderBlind, scopeLimbs,
-   ⟨Goldilocks.zero, Goldilocks.zero, vcSchemaLo sid, vcSchemaHiWithTag sid vcScopeTagDom⟩⟩
+/-- 12-limb + `1` separator rate-6 chunks for `compute_vc_scope_tag` (`blind_vc.rs:145-169`). -/
+def vcScopeChunks (sid : UInt64) (holderBlind scopeLimbs : Lane4) : Lane6 × Lane6 × Lane6 :=
+  (⟨holderBlind.x0, holderBlind.x1, holderBlind.x2, holderBlind.x3, scopeLimbs.x0, scopeLimbs.x1⟩,
+   ⟨scopeLimbs.x2, scopeLimbs.x3, Goldilocks.zero, Goldilocks.zero,
+    vcSchemaLo sid, vcSchemaHiWithTag sid vcScopeTagDom⟩,
+   ⟨Goldilocks.one, Goldilocks.zero, Goldilocks.zero,
+    Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩)
 
-/-- Scope-bound pseudonym/nullifier `compute_vc_scope_tag` (`blind_vc.rs:139-162`). -/
-def computeVcScopeTag (sid : UInt64) (holderBlind scopeLimbs : Lane4) : Lane4 :=
-  (sponge12 (vcScopeState12 sid holderBlind scopeLimbs)).b0
+/-- 6-limb scope-bound pseudonym/nullifier `compute_vc_scope_tag` (`blind_vc.rs:145-170`). -/
+def computeVcScopeTag (sid : UInt64) (holderBlind scopeLimbs : Lane4) : Lane6 :=
+  let (c0, c1, c2) := vcScopeChunks sid holderBlind scopeLimbs
+  state12Rate6 (absorbRate6Sponge3 c0 c1 c2)
 
-/-- Domain-separated Merkle accumulator internal node state (`blind_vc.rs:171-185`). -/
-def vcMerkleState12 (left right : Lane4) (epoch : UInt64) (layer : Nat) : Poseidon2State12 :=
-  ⟨left, right,
+/-- 16-limb + `1` separator rate-6 chunks for `merkle_hash_pair` (`blind_vc.rs:175-199`). -/
+def vcMerkleChunks (left right : Lane6) (epoch : UInt64) (layer : Nat) : Lane6 × Lane6 × Lane6 :=
+  (left,
+   right,
    ⟨vcSchemaLo epoch, Goldilocks.ofNat layer,
-    Goldilocks.ofNat vcMerkleNodeTag.toNat,
-    vcSchemaHiWithTag epoch poseidon2ConstIV⟩⟩
+    Goldilocks.ofNat vcMerkleNodeTag.toNat, vcSchemaHiWithTag epoch poseidon2ConstIV,
+    Goldilocks.one, Goldilocks.zero⟩)
 
-/-- Domain-separated Merkle parent hash `merkle_hash_pair` (`blind_vc.rs:171-188`). -/
-def vcMerkleHashPair (left right : Lane4) (epoch : UInt64) (layer : Nat) : Lane4 :=
-  (sponge12 (vcMerkleState12 left right epoch layer)).b0
+/-- Domain-separated 6-limb Merkle parent hash `merkle_hash_pair` (`blind_vc.rs:175-200`). -/
+def vcMerkleHashPair (left right : Lane6) (epoch : UInt64) (layer : Nat) : Lane6 :=
+  let (c0, c1, c2) := vcMerkleChunks left right epoch layer
+  state12Rate6 (absorbRate6Sponge3 c0 c1 c2)
 
-def vcLane4Sub (a b : Lane4) : Lane4 :=
-  ⟨Goldilocks.sub a.x0 b.x0, Goldilocks.sub a.x1 b.x1,
-   Goldilocks.sub a.x2 b.x2, Goldilocks.sub a.x3 b.x3⟩
-
-def vcLane4Scale (c : Goldilocks) (a : Lane4) : Lane4 :=
-  ⟨Goldilocks.mul c a.x0, Goldilocks.mul c a.x1,
-   Goldilocks.mul c a.x2, Goldilocks.mul c a.x3⟩
-
-/-- Arithmetic Merkle branch selector (`blind_vc.rs:2000-2033`):
+/-- Arithmetic 6-limb Merkle branch selector (`blind_vc.rs:2000-2035`):
     `delta = b * (sib - cur)`, `left = cur + delta`, `right = sib - delta`. -/
-def vcMerkleStepArith (epoch : UInt64) (layer : Nat) (cur sib : Lane4) (b : Goldilocks) : Lane4 :=
-  let delta := vcLane4Scale b (vcLane4Sub sib cur)
-  let left := lane4Add cur delta
-  let right := vcLane4Sub sib delta
+def vcMerkleStepArith (epoch : UInt64) (layer : Nat) (cur sib : Lane6) (b : Goldilocks) : Lane6 :=
+  let delta := lane6Scale b (lane6Sub sib cur)
+  let left := lane6Add cur delta
+  let right := lane6Sub sib delta
   vcMerkleHashPair left right epoch layer
 
-def evalVcMerklePathFrom (epoch : UInt64) : Nat → Lane4 → List (Goldilocks × Lane4) → Lane4
+def evalVcMerklePathFrom (epoch : UInt64) : Nat → Lane6 → List (Goldilocks × Lane6) → Lane6
   | _, cur, [] => cur
   | layer, cur, (b, sib) :: rest =>
     evalVcMerklePathFrom epoch (layer + 1) (vcMerkleStepArith epoch layer cur sib b) rest
 
-/-- Boolean Merkle path specification (`false` => `cur` is left child, `true` => `cur` is right child). -/
-def evalVcMerklePathBool (epoch : UInt64) : Nat → Lane4 → List (Bool × Lane4) → Lane4
+/-- Boolean 6-limb Merkle path specification (`false` => `cur` is left child, `true` => `cur` is right child). -/
+def evalVcMerklePathBool (epoch : UInt64) : Nat → Lane6 → List (Bool × Lane6) → Lane6
   | _, cur, [] => cur
   | layer, cur, (false, sib) :: rest =>
     evalVcMerklePathBool epoch (layer + 1) (vcMerkleHashPair cur sib epoch layer) rest
@@ -5379,11 +5629,10 @@ theorem goldilocks_bool_gate_zero_or_one (b : Goldilocks)
     rw [hLhs, hRhs] at hAdd
     exact hAdd.symm
 
-private theorem vcMerkleStepArith_zero (epoch : UInt64) (layer : Nat) (cur sib : Lane4) :
+private theorem vcMerkleStepArith_zero (epoch : UInt64) (layer : Nat) (cur sib : Lane6) :
     vcMerkleStepArith epoch layer cur sib Goldilocks.zero = vcMerkleHashPair cur sib epoch layer := by
-  unfold vcMerkleStepArith vcLane4Scale vcLane4Sub
+  unfold vcMerkleStepArith lane6Scale lane6Sub lane6Add
   dsimp only
-  rw [lane4Add_eq]
   have hL : ∀ c s : Goldilocks, Goldilocks.add c (Goldilocks.mul Goldilocks.zero (Goldilocks.sub s c)) = c := by
     intro c s
     rw [← goldOfInt_nat c, ← goldOfInt_nat s, ← goldOfInt_nat Goldilocks.zero]
@@ -5396,11 +5645,10 @@ private theorem vcMerkleStepArith_zero (epoch : UInt64) (layer : Nat) (cur sib :
     congr 1; simp
   simp only [hL, hR]
 
-private theorem vcMerkleStepArith_one (epoch : UInt64) (layer : Nat) (cur sib : Lane4) :
+private theorem vcMerkleStepArith_one (epoch : UInt64) (layer : Nat) (cur sib : Lane6) :
     vcMerkleStepArith epoch layer cur sib Goldilocks.one = vcMerkleHashPair sib cur epoch layer := by
-  unfold vcMerkleStepArith vcLane4Scale vcLane4Sub
+  unfold vcMerkleStepArith lane6Scale lane6Sub lane6Add
   dsimp only
-  rw [lane4Add_eq]
   have hL : ∀ c s : Goldilocks, Goldilocks.add c (Goldilocks.mul Goldilocks.one (Goldilocks.sub s c)) = s := by
     intro c s
     rw [← goldOfInt_nat c, ← goldOfInt_nat s, ← goldOfInt_nat Goldilocks.one]
@@ -5414,9 +5662,9 @@ private theorem vcMerkleStepArith_one (epoch : UInt64) (layer : Nat) (cur sib : 
   simp only [hL, hR]
 
 theorem evalVcMerklePathFrom_eq_bool (epoch : UInt64) :
-    ∀ (layer : Nat) (cur : Lane4) (steps : List (Goldilocks × Lane4)),
+    ∀ (layer : Nat) (cur : Lane6) (steps : List (Goldilocks × Lane6)),
       (∀ p ∈ steps, p.1 = Goldilocks.zero ∨ p.1 = Goldilocks.one) →
-      ∃ boolSteps : List (Bool × Lane4),
+      ∃ boolSteps : List (Bool × Lane6),
         boolSteps.length = steps.length ∧
         evalVcMerklePathFrom epoch layer cur steps =
           evalVcMerklePathBool epoch layer cur boolSteps
@@ -5437,2547 +5685,3 @@ theorem evalVcMerklePathFrom_eq_bool (epoch : UInt64) :
       dsimp only [evalVcMerklePathFrom, evalVcMerklePathBool]
       rw [vcMerkleStepArith_one, hEq]
 
-/-! ### §4.3 3-Party ZKBoo `sponge12` + Boolean Merkle Verifier (`ZkBooVerifierTape`, `blind_vc.rs:351-424, 1850-2102`) -/
-
-abbrev VcWire3 := Fin 3 → Goldilocks
-abbrev VcLane4_3 := Fin 3 → Lane4
-abbrev VcState12_3 := Fin 3 → Poseidon2State12
-
-/-- Cyclic adjacent ZKBoo party `(e + 1) % 3` (`blind_vc.rs:334, 1916`). -/
-def vcNextParty3 : Fin 3 → Fin 3
-  | ⟨0, _⟩ => 1
-  | ⟨1, _⟩ => 2
-  | ⟨2, _⟩ => 0
-
-def vcSum3 (w : VcWire3) : Goldilocks :=
-  Goldilocks.add (Goldilocks.add (w 0) (w 1)) (w 2)
-
-def vcSumLane4_3 (w : VcLane4_3) : Lane4 :=
-  lane4Add (lane4Add (w 0) (w 1)) (w 2)
-
-def vcSumState12_3 (st : VcState12_3) : Poseidon2State12 :=
-  state12Add (state12Add (st 0) (st 1)) (st 2)
-
-private theorem vcSumLane4_3_eq (w : VcLane4_3) :
-    vcSumLane4_3 w =
-      ⟨vcSum3 (fun i => (w i).x0), vcSum3 (fun i => (w i).x1),
-       vcSum3 (fun i => (w i).x2), vcSum3 (fun i => (w i).x3)⟩ := by
-  unfold vcSumLane4_3 vcSum3
-  simp only [lane4Add_eq]
-
-private theorem vcSumState12_3_lanes (st : VcState12_3) :
-    vcSumState12_3 st =
-      ⟨vcSumLane4_3 (fun i => (st i).b0),
-       vcSumLane4_3 (fun i => (st i).b1),
-       vcSumLane4_3 (fun i => (st i).b2)⟩ := by
-  unfold vcSumState12_3 vcSumLane4_3
-  simp only [state12Add_eq, lane4Add_eq]
-
-/-- Opened 2-party wire projection `(w e, w ((e + 1) % 3))`. -/
-def vcPairAt (w : VcWire3) (e : Fin 3) : Goldilocks × Goldilocks :=
-  (w e, w (vcNextParty3 e))
-
-def vcPairAtLane4 (w : VcLane4_3) (e : Fin 3) : Lane4 × Lane4 :=
-  (w e, w (vcNextParty3 e))
-
-def vcPairAtState12 (st : VcState12_3) (e : Fin 3) : Poseidon2State12 × Poseidon2State12 :=
-  (st e, st (vcNextParty3 e))
-
-/-- 2-party public constant addition `ZkBooVerifierTape::add_const` (`blind_vc.rs:352-359`). -/
-def vcPairAddConst (e : Fin 3) (x : Goldilocks × Goldilocks) (c : Goldilocks) :
-    Goldilocks × Goldilocks :=
-  if e = 0 then (Goldilocks.add x.1 c, x.2)
-  else if vcNextParty3 e = 0 then (x.1, Goldilocks.add x.2 c)
-  else x
-
-def vcWireAddConst3 (w : VcWire3) (c : Goldilocks) : VcWire3 :=
-  fun i => if i = 0 then Goldilocks.add (w 0) c else w i
-
-def vcConstWire3 (c : Goldilocks) : VcWire3 :=
-  fun i => if i = 0 then c else Goldilocks.zero
-
-private theorem vcPairAddConst_spec (w : VcWire3) (c : Goldilocks) (e : Fin 3) :
-    vcPairAddConst e (vcPairAt w e) c = vcPairAt (vcWireAddConst3 w c) e := by
-  rcases e with ⟨ev, hev⟩
-  have hCases : ev = 0 ∨ ev = 1 ∨ ev = 2 := by omega
-  rcases hCases with rfl | rfl | rfl <;> rfl
-
-private theorem vcSum3_addConst (w : VcWire3) (c : Goldilocks) :
-    vcSum3 (vcWireAddConst3 w c) = Goldilocks.add (vcSum3 w) c := by
-  unfold vcSum3 vcWireAddConst3
-  have h1 : (1 : Fin 3) ≠ 0 := by decide
-  have h2 : (2 : Fin 3) ≠ 0 := by decide
-  simp only [↓reduceIte, h1, h2]
-  rw [← goldOfInt_nat (w 0), ← goldOfInt_nat (w 1), ← goldOfInt_nat (w 2), ← goldOfInt_nat c]
-  simp only [goldOfInt_add]; congr 1; omega
-
-private theorem vcSum3_constWire (c : Goldilocks) :
-    vcSum3 (vcConstWire3 c) = c := by
-  unfold vcSum3 vcConstWire3
-  have h1 : (1 : Fin 3) ≠ 0 := by decide
-  have h2 : (2 : Fin 3) ≠ 0 := by decide
-  simp only [↓reduceIte, h1, h2]
-  rw [← goldOfInt_nat c, ← goldOfInt_nat Goldilocks.zero]
-  simp only [Goldilocks.zero_val, goldOfInt_add]; congr 1
-
-/-- Expected ZKBoo multiplication share `x_e * y_e + x_e * y_{e+1} + x_{e+1} * y_e + r_e - r_{e+1}`
-    (`blind_vc.rs:368-373`). -/
-def vcMulExpectedPair (xe xe1 ye ye1 re re1 : Goldilocks) : Goldilocks :=
-  let cross := Goldilocks.add (Goldilocks.mul xe ye)
-    (Goldilocks.add (Goldilocks.mul xe ye1) (Goldilocks.mul xe1 ye))
-  Goldilocks.sub (Goldilocks.add cross re) re1
-
-def vcMulGate3 (a b r : VcWire3) : VcWire3 :=
-  fun i => vcMulExpectedPair (a i) (a (vcNextParty3 i)) (b i) (b (vcNextParty3 i)) (r i) (r (vcNextParty3 i))
-
-theorem vcMulGate3_sum (a b r : VcWire3) :
-    vcSum3 (vcMulGate3 a b r) = Goldilocks.mul (vcSum3 a) (vcSum3 b) := by
-  unfold vcSum3 vcMulGate3 vcMulExpectedPair vcNextParty3
-  dsimp only
-  rw [← goldOfInt_nat (a 0), ← goldOfInt_nat (a 1), ← goldOfInt_nat (a 2),
-      ← goldOfInt_nat (b 0), ← goldOfInt_nat (b 1), ← goldOfInt_nat (b 2),
-      ← goldOfInt_nat (r 0), ← goldOfInt_nat (r 1), ← goldOfInt_nat (r 2)]
-  simp only [goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
-  congr 1
-  simp only [Int.add_mul, Int.mul_add]
-  omega
-
-/-- Single party's view at one nonlinear multiplication gate (`r_e` tape coin + `out_e` gate share). -/
-structure PartyMulView where
-  r : Goldilocks
-  out : Goldilocks
-  deriving DecidableEq, Repr
-
-/-- Verify one multiplication gate on an opened adjacent pair `(gE, gE1)` (`blind_vc.rs:362-380`). -/
-def pairCheckMul (x y : Goldilocks × Goldilocks) (gE gE1 : PartyMulView) :
-    Option (Goldilocks × Goldilocks) :=
-  if gE.out = vcMulExpectedPair x.1 x.2 y.1 y.2 gE.r gE1.r then
-    some (gE.out, gE1.out)
-  else
-    none
-
-def honestMulView3 (a b r : VcWire3) : Fin 3 → PartyMulView :=
-  fun i => { r := r i, out := vcMulGate3 a b r i }
-
-private theorem pairCheckMul_step {wx wy : VcWire3} {g : Fin 3 → PartyMulView} {e : Fin 3}
-    {outP : Goldilocks × Goldilocks}
-    (hOk : pairCheckMul (vcPairAt wx e) (vcPairAt wy e) (g e) (g (vcNextParty3 e)) = some outP) :
-    outP = vcPairAt (fun i => (g i).out) e ∧
-    (g e).out = vcMulGate3 wx wy (fun i => (g i).r) e := by
-  unfold pairCheckMul vcPairAt at hOk
-  dsimp only at hOk
-  if hEq : (g e).out = vcMulExpectedPair (wx e) (wx (vcNextParty3 e)) (wy e) (wy (vcNextParty3 e))
-      (g e).r (g (vcNextParty3 e)).r then
-    rw [ite_true_of hEq] at hOk
-    injection hOk with hPair
-    exact ⟨hPair.symm, hEq⟩
-  else
-    rw [ite_false_of hEq] at hOk; cases hOk
-
-private theorem pairCheckMul_honest (wx wy r : VcWire3) (e : Fin 3) :
-    pairCheckMul (vcPairAt wx e) (vcPairAt wy e)
-      (honestMulView3 wx wy r e) (honestMulView3 wx wy r (vcNextParty3 e)) =
-      some (vcPairAt (vcMulGate3 wx wy r) e) := by
-  unfold pairCheckMul honestMulView3 vcPairAt vcMulGate3
-  dsimp only
-  simp only [↓reduceIte]
-
-private theorem fin3_all {P : Fin 3 → Prop} (h0 : P 0) (h1 : P 1) (h2 : P 2) : ∀ i, P i := by
-  intro ⟨iv, hiv⟩
-  have hc : iv = 0 ∨ iv = 1 ∨ iv = 2 := by omega
-  rcases hc with rfl | rfl | rfl
-  · exact h0
-  · exact h1
-  · exact h2
-
-private theorem pairCheckMul_extract3 {wx wy : VcWire3} {g : Fin 3 → PartyMulView}
-    {o0 o1 o2 : Goldilocks × Goldilocks}
-    (h0 : pairCheckMul (vcPairAt wx 0) (vcPairAt wy 0) (g 0) (g 1) = some o0)
-    (h1 : pairCheckMul (vcPairAt wx 1) (vcPairAt wy 1) (g 1) (g 2) = some o1)
-    (h2 : pairCheckMul (vcPairAt wx 2) (vcPairAt wy 2) (g 2) (g 0) = some o2) :
-    vcSum3 (fun i => (g i).out) = Goldilocks.mul (vcSum3 wx) (vcSum3 wy) := by
-  have hFun : (fun i => (g i).out) = vcMulGate3 wx wy (fun i => (g i).r) :=
-    funext (fin3_all (pairCheckMul_step h0).2 (pairCheckMul_step h1).2 (pairCheckMul_step h2).2)
-  rw [hFun, vcMulGate3_sum]
-
-/-- Single party's view at one degree-7 S-box (`x^2, x^3, x^4, x^7`, `blind_vc.rs:383-388`). -/
-structure PartySboxView where
-  g1 : PartyMulView
-  g2 : PartyMulView
-  g3 : PartyMulView
-  g4 : PartyMulView
-  deriving DecidableEq, Repr
-
-def pairCheckSbox (x : Goldilocks × Goldilocks) (sE sE1 : PartySboxView) :
-    Option (Goldilocks × Goldilocks) :=
-  match pairCheckMul x x sE.g1 sE1.g1 with
-  | none => none
-  | some x2 =>
-    match pairCheckMul x2 x sE.g2 sE1.g2 with
-    | none => none
-    | some x3 =>
-      match pairCheckMul x2 x2 sE.g3 sE1.g3 with
-      | none => none
-      | some x4 => pairCheckMul x4 x3 sE.g4 sE1.g4
-
-def honestSboxView3 (wx : VcWire3) : (Fin 3 → PartySboxView) × VcWire3 :=
-  let z : VcWire3 := fun _ => Goldilocks.zero
-  let g1 := honestMulView3 wx wx z
-  let w2 := vcMulGate3 wx wx z
-  let g2 := honestMulView3 w2 wx z
-  let w3 := vcMulGate3 w2 wx z
-  let g3 := honestMulView3 w2 w2 z
-  let w4 := vcMulGate3 w2 w2 z
-  let g4 := honestMulView3 w4 w3 z
-  let w7 := vcMulGate3 w4 w3 z
-  (fun i => ⟨g1 i, g2 i, g3 i, g4 i⟩, w7)
-
-private theorem pairCheckSbox_honest (wx : VcWire3) (e : Fin 3) :
-    pairCheckSbox (vcPairAt wx e) ((honestSboxView3 wx).1 e) ((honestSboxView3 wx).1 (vcNextParty3 e)) =
-      some (vcPairAt (honestSboxView3 wx).2 e) := by
-  unfold pairCheckSbox honestSboxView3
-  dsimp only
-  rw [pairCheckMul_honest]; dsimp only
-  rw [pairCheckMul_honest]; dsimp only
-  rw [pairCheckMul_honest]; dsimp only
-  rw [pairCheckMul_honest]
-
-private theorem pairCheckSbox_step {wx : VcWire3} {sv : Fin 3 → PartySboxView} {e : Fin 3}
-    {outP : Goldilocks × Goldilocks}
-    (hOk : pairCheckSbox (vcPairAt wx e) (sv e) (sv (vcNextParty3 e)) = some outP) :
-    outP = vcPairAt (fun i => (sv i).g4.out) e ∧
-    pairCheckMul (vcPairAt wx e) (vcPairAt wx e) (sv e).g1 (sv (vcNextParty3 e)).g1 =
-      some (vcPairAt (fun i => (sv i).g1.out) e) ∧
-    pairCheckMul (vcPairAt (fun i => (sv i).g1.out) e) (vcPairAt wx e) (sv e).g2 (sv (vcNextParty3 e)).g2 =
-      some (vcPairAt (fun i => (sv i).g2.out) e) ∧
-    pairCheckMul (vcPairAt (fun i => (sv i).g1.out) e) (vcPairAt (fun i => (sv i).g1.out) e)
-      (sv e).g3 (sv (vcNextParty3 e)).g3 = some (vcPairAt (fun i => (sv i).g3.out) e) ∧
-    pairCheckMul (vcPairAt (fun i => (sv i).g3.out) e) (vcPairAt (fun i => (sv i).g2.out) e)
-      (sv e).g4 (sv (vcNextParty3 e)).g4 = some (vcPairAt (fun i => (sv i).g4.out) e) := by
-  unfold pairCheckSbox at hOk
-  cases hm1 : pairCheckMul (vcPairAt wx e) (vcPairAt wx e) (sv e).g1 (sv (vcNextParty3 e)).g1 with
-  | none => rw [hm1] at hOk; cases hOk
-  | some x2 =>
-    rw [hm1] at hOk; dsimp only at hOk
-    obtain ⟨hx2, _⟩ := pairCheckMul_step (g := fun i => (sv i).g1) hm1
-    subst hx2
-    cases hm2 : pairCheckMul (vcPairAt (fun i => (sv i).g1.out) e) (vcPairAt wx e)
-        (sv e).g2 (sv (vcNextParty3 e)).g2 with
-    | none => rw [hm2] at hOk; cases hOk
-    | some x3 =>
-      rw [hm2] at hOk; dsimp only at hOk
-      obtain ⟨hx3, _⟩ := pairCheckMul_step (g := fun i => (sv i).g2) hm2
-      subst hx3
-      cases hm3 : pairCheckMul (vcPairAt (fun i => (sv i).g1.out) e) (vcPairAt (fun i => (sv i).g1.out) e)
-          (sv e).g3 (sv (vcNextParty3 e)).g3 with
-      | none => rw [hm3] at hOk; cases hOk
-      | some x4 =>
-        rw [hm3] at hOk; dsimp only at hOk
-        obtain ⟨hx4, _⟩ := pairCheckMul_step (g := fun i => (sv i).g3) hm3
-        subst hx4
-        obtain ⟨hx7, _⟩ := pairCheckMul_step (g := fun i => (sv i).g4) hOk
-        subst hx7
-        exact ⟨rfl, rfl, rfl, rfl, hOk⟩
-
-private theorem pairCheckSbox_extract3 {wx : VcWire3} {sv : Fin 3 → PartySboxView}
-    {o0 o1 o2 : Goldilocks × Goldilocks}
-    (h0 : pairCheckSbox (vcPairAt wx 0) (sv 0) (sv 1) = some o0)
-    (h1 : pairCheckSbox (vcPairAt wx 1) (sv 1) (sv 2) = some o1)
-    (h2 : pairCheckSbox (vcPairAt wx 2) (sv 2) (sv 0) = some o2) :
-    vcSum3 (fun i => (sv i).g4.out) = sbox7 (vcSum3 wx) := by
-  obtain ⟨_, m10, m20, m30, m40⟩ := pairCheckSbox_step h0
-  obtain ⟨_, m11, m21, m31, m41⟩ := pairCheckSbox_step h1
-  obtain ⟨_, m12, m22, m32, m42⟩ := pairCheckSbox_step h2
-  dsimp only [vcNextParty3] at m10 m20 m30 m40 m11 m21 m31 m41 m12 m22 m32 m42
-  have s1 := pairCheckMul_extract3 (g := fun i => (sv i).g1) m10 m11 m12
-  have s2 := pairCheckMul_extract3 (g := fun i => (sv i).g2) m20 m21 m22
-  have s3 := pairCheckMul_extract3 (g := fun i => (sv i).g3) m30 m31 m32
-  have s4 := pairCheckMul_extract3 (g := fun i => (sv i).g4) m40 m41 m42
-  unfold sbox7
-  rw [s4, s3, s2, s1]
-  have hComm : ∀ u v : Goldilocks, Goldilocks.mul u v = Goldilocks.mul v u := fun u v => by
-    rw [← goldOfInt_nat u, ← goldOfInt_nat v]
-    simp only [goldOfInt_mul]; congr 1; exact Int.mul_comm _ _
-  exact hComm _ _
-
-/-- Single party's view for a full-width 12-lane external `Poseidon2` round (`blind_vc.rs:404-410`). -/
-structure PartyExtRoundView where
-  s0 : PartySboxView
-  s1 : PartySboxView
-  s2 : PartySboxView
-  s3 : PartySboxView
-  s4 : PartySboxView
-  s5 : PartySboxView
-  s6 : PartySboxView
-  s7 : PartySboxView
-  s8 : PartySboxView
-  s9 : PartySboxView
-  s10 : PartySboxView
-  s11 : PartySboxView
-  deriving DecidableEq, Repr
-
-def pairCheckExtRound (e : Fin 3) (rc : Poseidon2State12)
-    (vE vE1 : PartyExtRoundView) (st : Poseidon2State12 × Poseidon2State12) :
-    Option (Poseidon2State12 × Poseidon2State12) :=
-  let chk (f : Poseidon2State12 → Goldilocks) (sE sE1 : PartySboxView) :=
-    pairCheckSbox (vcPairAddConst e (f st.1, f st.2) (f rc)) sE sE1
-  match chk (·.b0.x0) vE.s0 vE1.s0, chk (·.b0.x1) vE.s1 vE1.s1,
-        chk (·.b0.x2) vE.s2 vE1.s2, chk (·.b0.x3) vE.s3 vE1.s3,
-        chk (·.b1.x0) vE.s4 vE1.s4, chk (·.b1.x1) vE.s5 vE1.s5,
-        chk (·.b1.x2) vE.s6 vE1.s6, chk (·.b1.x3) vE.s7 vE1.s7,
-        chk (·.b2.x0) vE.s8 vE1.s8, chk (·.b2.x1) vE.s9 vE1.s9,
-        chk (·.b2.x2) vE.s10 vE1.s10, chk (·.b2.x3) vE.s11 vE1.s11 with
-  | some y0, some y1, some y2, some y3, some y4, some y5,
-    some y6, some y7, some y8, some y9, some y10, some y11 =>
-    some (applyME ⟨⟨y0.1, y1.1, y2.1, y3.1⟩, ⟨y4.1, y5.1, y6.1, y7.1⟩, ⟨y8.1, y9.1, y10.1, y11.1⟩⟩,
-          applyME ⟨⟨y0.2, y1.2, y2.2, y3.2⟩, ⟨y4.2, y5.2, y6.2, y7.2⟩, ⟨y8.2, y9.2, y10.2, y11.2⟩⟩)
-  | _, _, _, _, _, _, _, _, _, _, _, _ => none
-
-def vcExtRoundOut3 (rv : Fin 3 → PartyExtRoundView) : VcState12_3 :=
-  fun i =>
-    applyME ⟨⟨(rv i).s0.g4.out, (rv i).s1.g4.out, (rv i).s2.g4.out, (rv i).s3.g4.out⟩,
-             ⟨(rv i).s4.g4.out, (rv i).s5.g4.out, (rv i).s6.g4.out, (rv i).s7.g4.out⟩,
-             ⟨(rv i).s8.g4.out, (rv i).s9.g4.out, (rv i).s10.g4.out, (rv i).s11.g4.out⟩⟩
-
-def honestExtRound3 (rc : Poseidon2State12) (st : VcState12_3) :
-    (Fin 3 → PartyExtRoundView) × VcState12_3 :=
-  let mk (f : Poseidon2State12 → Goldilocks) :=
-    honestSboxView3 (vcWireAddConst3 (fun i => f (st i)) (f rc))
-  let r0 := mk (·.b0.x0); let r1 := mk (·.b0.x1); let r2 := mk (·.b0.x2); let r3 := mk (·.b0.x3)
-  let r4 := mk (·.b1.x0); let r5 := mk (·.b1.x1); let r6 := mk (·.b1.x2); let r7 := mk (·.b1.x3)
-  let r8 := mk (·.b2.x0); let r9 := mk (·.b2.x1); let r10 := mk (·.b2.x2); let r11 := mk (·.b2.x3)
-  let rv : Fin 3 → PartyExtRoundView := fun i =>
-    ⟨r0.1 i, r1.1 i, r2.1 i, r3.1 i, r4.1 i, r5.1 i,
-     r6.1 i, r7.1 i, r8.1 i, r9.1 i, r10.1 i, r11.1 i⟩
-  (rv, vcExtRoundOut3 rv)
-
-private theorem pairCheckExtRound_honest (rc : Poseidon2State12) (st : VcState12_3) (e : Fin 3) :
-    pairCheckExtRound e rc ((honestExtRound3 rc st).1 e) ((honestExtRound3 rc st).1 (vcNextParty3 e))
-      (vcPairAtState12 st e) = some (vcPairAtState12 (honestExtRound3 rc st).2 e) := by
-  unfold pairCheckExtRound honestExtRound3 vcPairAtState12 vcExtRoundOut3
-  dsimp only
-  have hAt : ∀ f : Poseidon2State12 → Goldilocks,
-      vcPairAddConst e (f (st e), f (st (vcNextParty3 e))) (f rc) =
-        vcPairAt (vcWireAddConst3 (fun i => f (st i)) (f rc)) e :=
-    fun f => vcPairAddConst_spec (fun i => f (st i)) (f rc) e
-  rw [hAt (·.b0.x0), hAt (·.b0.x1), hAt (·.b0.x2), hAt (·.b0.x3),
-      hAt (·.b1.x0), hAt (·.b1.x1), hAt (·.b1.x2), hAt (·.b1.x3),
-      hAt (·.b2.x0), hAt (·.b2.x1), hAt (·.b2.x2), hAt (·.b2.x3),
-      pairCheckSbox_honest, pairCheckSbox_honest, pairCheckSbox_honest, pairCheckSbox_honest,
-      pairCheckSbox_honest, pairCheckSbox_honest, pairCheckSbox_honest, pairCheckSbox_honest,
-      pairCheckSbox_honest, pairCheckSbox_honest, pairCheckSbox_honest, pairCheckSbox_honest]
-  rfl
-
-private theorem pairCheckExtRound_step {rc : Poseidon2State12} {st : VcState12_3}
-    {rv : Fin 3 → PartyExtRoundView} {e : Fin 3} {outSt : Poseidon2State12 × Poseidon2State12}
-    (hOk : pairCheckExtRound e rc (rv e) (rv (vcNextParty3 e)) (vcPairAtState12 st e) = some outSt) :
-    outSt = vcPairAtState12 (vcExtRoundOut3 rv) e ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x0) rc.b0.x0) e) (rv e).s0 (rv (vcNextParty3 e)).s0 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x1) rc.b0.x1) e) (rv e).s1 (rv (vcNextParty3 e)).s1 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x2) rc.b0.x2) e) (rv e).s2 (rv (vcNextParty3 e)).s2 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x3) rc.b0.x3) e) (rv e).s3 (rv (vcNextParty3 e)).s3 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b1.x0) rc.b1.x0) e) (rv e).s4 (rv (vcNextParty3 e)).s4 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b1.x1) rc.b1.x1) e) (rv e).s5 (rv (vcNextParty3 e)).s5 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b1.x2) rc.b1.x2) e) (rv e).s6 (rv (vcNextParty3 e)).s6 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b1.x3) rc.b1.x3) e) (rv e).s7 (rv (vcNextParty3 e)).s7 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b2.x0) rc.b2.x0) e) (rv e).s8 (rv (vcNextParty3 e)).s8 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b2.x1) rc.b2.x1) e) (rv e).s9 (rv (vcNextParty3 e)).s9 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b2.x2) rc.b2.x2) e) (rv e).s10 (rv (vcNextParty3 e)).s10 = some o) ∧
-    (∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b2.x3) rc.b2.x3) e) (rv e).s11 (rv (vcNextParty3 e)).s11 = some o) := by
-  unfold pairCheckExtRound vcPairAtState12 at hOk
-  dsimp only at hOk
-  have hAt : ∀ f : Poseidon2State12 → Goldilocks,
-      vcPairAddConst e (f (st e), f (st (vcNextParty3 e))) (f rc) =
-        vcPairAt (vcWireAddConst3 (fun i => f (st i)) (f rc)) e :=
-    fun f => vcPairAddConst_spec (fun i => f (st i)) (f rc) e
-  rw [hAt (·.b0.x0), hAt (·.b0.x1), hAt (·.b0.x2), hAt (·.b0.x3),
-      hAt (·.b1.x0), hAt (·.b1.x1), hAt (·.b1.x2), hAt (·.b1.x3),
-      hAt (·.b2.x0), hAt (·.b2.x1), hAt (·.b2.x2), hAt (·.b2.x3)] at hOk
-  cases hs0 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x0) rc.b0.x0) e) (rv e).s0 (rv (vcNextParty3 e)).s0 with
-  | none => rw [hs0] at hOk; cases hOk
-  | some y0 =>
-  cases hs1 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x1) rc.b0.x1) e) (rv e).s1 (rv (vcNextParty3 e)).s1 with
-  | none => rw [hs0, hs1] at hOk; cases hOk
-  | some y1 =>
-  cases hs2 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x2) rc.b0.x2) e) (rv e).s2 (rv (vcNextParty3 e)).s2 with
-  | none => rw [hs0, hs1, hs2] at hOk; cases hOk
-  | some y2 =>
-  cases hs3 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x3) rc.b0.x3) e) (rv e).s3 (rv (vcNextParty3 e)).s3 with
-  | none => rw [hs0, hs1, hs2, hs3] at hOk; cases hOk
-  | some y3 =>
-  cases hs4 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b1.x0) rc.b1.x0) e) (rv e).s4 (rv (vcNextParty3 e)).s4 with
-  | none => rw [hs0, hs1, hs2, hs3, hs4] at hOk; cases hOk
-  | some y4 =>
-  cases hs5 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b1.x1) rc.b1.x1) e) (rv e).s5 (rv (vcNextParty3 e)).s5 with
-  | none => rw [hs0, hs1, hs2, hs3, hs4, hs5] at hOk; cases hOk
-  | some y5 =>
-  cases hs6 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b1.x2) rc.b1.x2) e) (rv e).s6 (rv (vcNextParty3 e)).s6 with
-  | none => rw [hs0, hs1, hs2, hs3, hs4, hs5, hs6] at hOk; cases hOk
-  | some y6 =>
-  cases hs7 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b1.x3) rc.b1.x3) e) (rv e).s7 (rv (vcNextParty3 e)).s7 with
-  | none => rw [hs0, hs1, hs2, hs3, hs4, hs5, hs6, hs7] at hOk; cases hOk
-  | some y7 =>
-  cases hs8 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b2.x0) rc.b2.x0) e) (rv e).s8 (rv (vcNextParty3 e)).s8 with
-  | none => rw [hs0, hs1, hs2, hs3, hs4, hs5, hs6, hs7, hs8] at hOk; cases hOk
-  | some y8 =>
-  cases hs9 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b2.x1) rc.b2.x1) e) (rv e).s9 (rv (vcNextParty3 e)).s9 with
-  | none => rw [hs0, hs1, hs2, hs3, hs4, hs5, hs6, hs7, hs8, hs9] at hOk; cases hOk
-  | some y9 =>
-  cases hs10 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b2.x2) rc.b2.x2) e) (rv e).s10 (rv (vcNextParty3 e)).s10 with
-  | none => rw [hs0, hs1, hs2, hs3, hs4, hs5, hs6, hs7, hs8, hs9, hs10] at hOk; cases hOk
-  | some y10 =>
-  cases hs11 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b2.x3) rc.b2.x3) e) (rv e).s11 (rv (vcNextParty3 e)).s11 with
-  | none => rw [hs0, hs1, hs2, hs3, hs4, hs5, hs6, hs7, hs8, hs9, hs10, hs11] at hOk; cases hOk
-  | some y11 =>
-    rw [hs0, hs1, hs2, hs3, hs4, hs5, hs6, hs7, hs8, hs9, hs10, hs11] at hOk
-    injection hOk with hPair
-    rw [(pairCheckSbox_step (sv := fun i => (rv i).s0) hs0).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s1) hs1).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s2) hs2).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s3) hs3).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s4) hs4).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s5) hs5).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s6) hs6).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s7) hs7).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s8) hs8).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s9) hs9).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s10) hs10).1,
-        (pairCheckSbox_step (sv := fun i => (rv i).s11) hs11).1] at hPair
-    exact ⟨hPair.symm, ⟨y0, rfl⟩, ⟨y1, rfl⟩, ⟨y2, rfl⟩, ⟨y3, rfl⟩, ⟨y4, rfl⟩, ⟨y5, rfl⟩,
-      ⟨y6, rfl⟩, ⟨y7, rfl⟩, ⟨y8, rfl⟩, ⟨y9, rfl⟩, ⟨y10, rfl⟩, ⟨y11, rfl⟩⟩
-
-private theorem vcSumState12_3_applyME (f : VcState12_3) :
-    vcSumState12_3 (fun i => applyME (f i)) = applyME (vcSumState12_3 f) := by
-  unfold vcSumState12_3
-  rw [← applyME_add, ← applyME_add]
-
-private theorem vcSumState12_3_applyMI (f : VcState12_3) :
-    vcSumState12_3 (fun i => applyMI (f i)) = applyMI (vcSumState12_3 f) := by
-  unfold vcSumState12_3
-  rw [← applyMI_add, ← applyMI_add]
-
-private theorem pairCheckExtRound_extract3 {rc : Poseidon2State12} {st : VcState12_3}
-    {rv : Fin 3 → PartyExtRoundView} {o0 o1 o2 : Poseidon2State12 × Poseidon2State12}
-    (h0 : pairCheckExtRound 0 rc (rv 0) (rv 1) (vcPairAtState12 st 0) = some o0)
-    (h1 : pairCheckExtRound 1 rc (rv 1) (rv 2) (vcPairAtState12 st 1) = some o1)
-    (h2 : pairCheckExtRound 2 rc (rv 2) (rv 0) (vcPairAtState12 st 2) = some o2) :
-    vcSumState12_3 (vcExtRoundOut3 rv) = externalRound rc (vcSumState12_3 st) := by
-  obtain ⟨_, ⟨_, a0⟩, ⟨_, a1⟩, ⟨_, a2⟩, ⟨_, a3⟩, ⟨_, a4⟩, ⟨_, a5⟩,
-             ⟨_, a6⟩, ⟨_, a7⟩, ⟨_, a8⟩, ⟨_, a9⟩, ⟨_, a10⟩, ⟨_, a11⟩⟩ := pairCheckExtRound_step h0
-  obtain ⟨_, ⟨_, b0⟩, ⟨_, b1⟩, ⟨_, b2⟩, ⟨_, b3⟩, ⟨_, b4⟩, ⟨_, b5⟩,
-             ⟨_, b6⟩, ⟨_, b7⟩, ⟨_, b8⟩, ⟨_, b9⟩, ⟨_, b10⟩, ⟨_, b11⟩⟩ := pairCheckExtRound_step h1
-  obtain ⟨_, ⟨_, c0⟩, ⟨_, c1⟩, ⟨_, c2⟩, ⟨_, c3⟩, ⟨_, c4⟩, ⟨_, c5⟩,
-             ⟨_, c6⟩, ⟨_, c7⟩, ⟨_, c8⟩, ⟨_, c9⟩, ⟨_, c10⟩, ⟨_, c11⟩⟩ := pairCheckExtRound_step h2
-  dsimp only [vcNextParty3] at a0 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11
-  dsimp only [vcNextParty3] at b0 b1 b2 b3 b4 b5 b6 b7 b8 b9 b10 b11
-  dsimp only [vcNextParty3] at c0 c1 c2 c3 c4 c5 c6 c7 c8 c9 c10 c11
-  unfold vcExtRoundOut3
-  rw [vcSumState12_3_applyME, externalRound_eq]
-  congr 1
-  rw [vcSumState12_3_lanes, sboxState12_eq, state12Add_eq, vcSumState12_3_lanes]
-  simp only [vcSumLane4_3_eq, lane4Add_eq]
-  rw [pairCheckSbox_extract3 (sv := fun i => (rv i).s0) a0 b0 c0,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s1) a1 b1 c1,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s2) a2 b2 c2,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s3) a3 b3 c3,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s4) a4 b4 c4,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s5) a5 b5 c5,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s6) a6 b6 c6,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s7) a7 b7 c7,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s8) a8 b8 c8,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s9) a9 b9 c9,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s10) a10 b10 c10,
-      pairCheckSbox_extract3 (sv := fun i => (rv i).s11) a11 b11 c11]
-  simp only [vcSum3_addConst]
-
-/-- Verify one internal lane-0 S-box + `applyMI` round (`blind_vc.rs:411-415`). -/
-def pairCheckIntRound (e : Fin 3) (rc : Goldilocks)
-    (vE vE1 : PartySboxView) (st : Poseidon2State12 × Poseidon2State12) :
-    Option (Poseidon2State12 × Poseidon2State12) :=
-  match pairCheckSbox (vcPairAddConst e (st.1.b0.x0, st.2.b0.x0) rc) vE vE1 with
-  | none => none
-  | some y0 =>
-    some (applyMI ⟨⟨y0.1, st.1.b0.x1, st.1.b0.x2, st.1.b0.x3⟩, st.1.b1, st.1.b2⟩,
-          applyMI ⟨⟨y0.2, st.2.b0.x1, st.2.b0.x2, st.2.b0.x3⟩, st.2.b1, st.2.b2⟩)
-
-def vcIntRoundOut3 (st : VcState12_3) (sv : Fin 3 → PartySboxView) : VcState12_3 :=
-  fun i => applyMI ⟨⟨(sv i).g4.out, (st i).b0.x1, (st i).b0.x2, (st i).b0.x3⟩, (st i).b1, (st i).b2⟩
-
-def honestIntRound3 (rc : Goldilocks) (st : VcState12_3) :
-    (Fin 3 → PartySboxView) × VcState12_3 :=
-  let r0 := honestSboxView3 (vcWireAddConst3 (fun i => (st i).b0.x0) rc)
-  (r0.1, vcIntRoundOut3 st r0.1)
-
-private theorem pairCheckIntRound_honest (rc : Goldilocks) (st : VcState12_3) (e : Fin 3) :
-    pairCheckIntRound e rc ((honestIntRound3 rc st).1 e) ((honestIntRound3 rc st).1 (vcNextParty3 e))
-      (vcPairAtState12 st e) = some (vcPairAtState12 (honestIntRound3 rc st).2 e) := by
-  unfold pairCheckIntRound honestIntRound3 vcPairAtState12 vcIntRoundOut3
-  dsimp only
-  have hAdd : vcPairAddConst e ((st e).b0.x0, (st (vcNextParty3 e)).b0.x0) rc =
-      vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x0) rc) e :=
-    vcPairAddConst_spec (fun i => (st i).b0.x0) rc e
-  rw [hAdd, pairCheckSbox_honest]
-  rfl
-
-private theorem pairCheckIntRound_step {rc : Goldilocks} {st : VcState12_3}
-    {sv : Fin 3 → PartySboxView} {e : Fin 3} {outSt : Poseidon2State12 × Poseidon2State12}
-    (hOk : pairCheckIntRound e rc (sv e) (sv (vcNextParty3 e)) (vcPairAtState12 st e) = some outSt) :
-    outSt = vcPairAtState12 (vcIntRoundOut3 st sv) e ∧
-    ∃ o, pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x0) rc) e) (sv e) (sv (vcNextParty3 e)) = some o := by
-  unfold pairCheckIntRound vcPairAtState12 at hOk
-  dsimp only at hOk
-  have hAdd : vcPairAddConst e ((st e).b0.x0, (st (vcNextParty3 e)).b0.x0) rc =
-      vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x0) rc) e :=
-    vcPairAddConst_spec (fun i => (st i).b0.x0) rc e
-  rw [hAdd] at hOk
-  cases hs0 : pairCheckSbox (vcPairAt (vcWireAddConst3 (fun i => (st i).b0.x0) rc) e) (sv e) (sv (vcNextParty3 e)) with
-  | none => rw [hs0] at hOk; cases hOk
-  | some y0 =>
-    rw [hs0] at hOk
-    injection hOk with hPair
-    rw [(pairCheckSbox_step hs0).1] at hPair
-    exact ⟨hPair.symm, ⟨y0, rfl⟩⟩
-
-private theorem pairCheckIntRound_extract3 {rc : Goldilocks} {st : VcState12_3}
-    {sv : Fin 3 → PartySboxView} {o0 o1 o2 : Poseidon2State12 × Poseidon2State12}
-    (h0 : pairCheckIntRound 0 rc (sv 0) (sv 1) (vcPairAtState12 st 0) = some o0)
-    (h1 : pairCheckIntRound 1 rc (sv 1) (sv 2) (vcPairAtState12 st 1) = some o1)
-    (h2 : pairCheckIntRound 2 rc (sv 2) (sv 0) (vcPairAtState12 st 2) = some o2) :
-    vcSumState12_3 (vcIntRoundOut3 st sv) = internalRound rc (vcSumState12_3 st) := by
-  obtain ⟨_, ⟨_, a0⟩⟩ := pairCheckIntRound_step h0
-  obtain ⟨_, ⟨_, b0⟩⟩ := pairCheckIntRound_step h1
-  obtain ⟨_, ⟨_, c0⟩⟩ := pairCheckIntRound_step h2
-  dsimp only [vcNextParty3] at a0 b0 c0
-  unfold vcIntRoundOut3
-  rw [vcSumState12_3_applyMI, internalRound_eq]
-  congr 1
-  rw [vcSumState12_3_lanes, vcSumState12_3_lanes]
-  simp only [vcSumLane4_3_eq]
-  rw [pairCheckSbox_extract3 a0 b0 c0, vcSum3_addConst]
-
-def pairCheckExtRounds (e : Fin 3) :
-    List Poseidon2State12 → List PartyExtRoundView → List PartyExtRoundView →
-    Poseidon2State12 × Poseidon2State12 → Option (Poseidon2State12 × Poseidon2State12)
-  | [], [], [], st => some st
-  | rc :: rcs, vE :: vsE, vE1 :: vsE1, st =>
-    match pairCheckExtRound e rc vE vE1 st with
-    | none => none
-    | some st' => pairCheckExtRounds e rcs vsE vsE1 st'
-  | _, _, _, _ => none
-
-def pairCheckIntRounds (e : Fin 3) :
-    List Goldilocks → List PartySboxView → List PartySboxView →
-    Poseidon2State12 × Poseidon2State12 → Option (Poseidon2State12 × Poseidon2State12)
-  | [], [], [], st => some st
-  | rc :: rcs, vE :: vsE, vE1 :: vsE1, st =>
-    match pairCheckIntRound e rc vE vE1 st with
-    | none => none
-    | some st' => pairCheckIntRounds e rcs vsE vsE1 st'
-  | _, _, _, _ => none
-
-def honestExtRounds3 :
-    List Poseidon2State12 → VcState12_3 → (Fin 3 → List PartyExtRoundView) × VcState12_3
-  | [], st => (fun _ => [], st)
-  | rc :: rcs, st =>
-    let rHead := honestExtRound3 rc st
-    let rTail := honestExtRounds3 rcs rHead.2
-    (fun i => rHead.1 i :: rTail.1 i, rTail.2)
-
-def honestIntRounds3 :
-    List Goldilocks → VcState12_3 → (Fin 3 → List PartySboxView) × VcState12_3
-  | [], st => (fun _ => [], st)
-  | rc :: rcs, st =>
-    let rHead := honestIntRound3 rc st
-    let rTail := honestIntRounds3 rcs rHead.2
-    (fun i => rHead.1 i :: rTail.1 i, rTail.2)
-
-private theorem pairCheckExtRounds_honest :
-    ∀ (rcs : List Poseidon2State12) (st : VcState12_3) (e : Fin 3),
-      pairCheckExtRounds e rcs ((honestExtRounds3 rcs st).1 e)
-        ((honestExtRounds3 rcs st).1 (vcNextParty3 e)) (vcPairAtState12 st e) =
-        some (vcPairAtState12 (honestExtRounds3 rcs st).2 e)
-  | [], _, _ => rfl
-  | rc :: rcs, st, e => by
-    dsimp only [honestExtRounds3, pairCheckExtRounds]
-    rw [pairCheckExtRound_honest]
-    exact pairCheckExtRounds_honest rcs (honestExtRound3 rc st).2 e
-
-private theorem pairCheckIntRounds_honest :
-    ∀ (rcs : List Goldilocks) (st : VcState12_3) (e : Fin 3),
-      pairCheckIntRounds e rcs ((honestIntRounds3 rcs st).1 e)
-        ((honestIntRounds3 rcs st).1 (vcNextParty3 e)) (vcPairAtState12 st e) =
-        some (vcPairAtState12 (honestIntRounds3 rcs st).2 e)
-  | [], _, _ => rfl
-  | rc :: rcs, st, e => by
-    dsimp only [honestIntRounds3, pairCheckIntRounds]
-    rw [pairCheckIntRound_honest]
-    exact pairCheckIntRounds_honest rcs (honestIntRound3 rc st).2 e
-
-private theorem pairCheckExtRounds_extract3 :
-    ∀ (rcs : List Poseidon2State12) (st : VcState12_3) (vs : Fin 3 → List PartyExtRoundView)
-      {o0 o1 o2 : Poseidon2State12 × Poseidon2State12},
-      pairCheckExtRounds 0 rcs (vs 0) (vs 1) (vcPairAtState12 st 0) = some o0 →
-      pairCheckExtRounds 1 rcs (vs 1) (vs 2) (vcPairAtState12 st 1) = some o1 →
-      pairCheckExtRounds 2 rcs (vs 2) (vs 0) (vcPairAtState12 st 2) = some o2 →
-      ∃ stOut : VcState12_3,
-        o0 = vcPairAtState12 stOut 0 ∧
-        o1 = vcPairAtState12 stOut 1 ∧
-        o2 = vcPairAtState12 stOut 2 ∧
-        vcSumState12_3 stOut = runRounds externalRound rcs (vcSumState12_3 st)
-  | [], st, vs, o0, o1, o2, h0, h1, h2 => by
-    cases hv0 : vs 0 with
-    | cons _ _ => rw [hv0] at h0; cases h0
-    | nil =>
-      cases hv1 : vs 1 with
-      | cons _ _ => rw [hv0, hv1] at h0; cases h0
-      | nil =>
-        cases hv2 : vs 2 with
-        | cons _ _ => rw [hv1, hv2] at h1; cases h1
-        | nil =>
-          rw [hv0, hv1] at h0
-          rw [hv1, hv2] at h1
-          rw [hv2, hv0] at h2
-          dsimp only [pairCheckExtRounds] at h0 h1 h2
-          injection h0 with ho0
-          injection h1 with ho1
-          injection h2 with ho2
-          rw [runRounds_nil]
-          exact ⟨st, ho0.symm, ho1.symm, ho2.symm, rfl⟩
-  | rc :: rcs, st, vs, o0, o1, o2, h0, h1, h2 => by
-    cases hv0 : vs 0 with
-    | nil => rw [hv0] at h0; cases h0
-    | cons r0 rs0 =>
-      cases hv1 : vs 1 with
-      | nil => rw [hv0, hv1] at h0; cases h0
-      | cons r1 rs1 =>
-        cases hv2 : vs 2 with
-        | nil => rw [hv1, hv2] at h1; cases h1
-        | cons r2 rs2 =>
-          rw [hv0, hv1] at h0
-          rw [hv1, hv2] at h1
-          rw [hv2, hv0] at h2
-          dsimp only [pairCheckExtRounds] at h0 h1 h2
-          let rv : Fin 3 → PartyExtRoundView := fun
-            | ⟨0, _⟩ => r0
-            | ⟨1, _⟩ => r1
-            | ⟨2, _⟩ => r2
-          let rs : Fin 3 → List PartyExtRoundView := fun
-            | ⟨0, _⟩ => rs0
-            | ⟨1, _⟩ => rs1
-            | ⟨2, _⟩ => rs2
-          cases hm0 : pairCheckExtRound 0 rc (rv 0) (rv 1) (vcPairAtState12 st 0) with
-          | none => change (match pairCheckExtRound 0 rc (rv 0) (rv 1) (vcPairAtState12 st 0) with | none => none | some st' => _) = some o0 at h0; rw [hm0] at h0; cases h0
-          | some m0 =>
-            cases hm1 : pairCheckExtRound 1 rc (rv 1) (rv 2) (vcPairAtState12 st 1) with
-            | none => change (match pairCheckExtRound 1 rc (rv 1) (rv 2) (vcPairAtState12 st 1) with | none => none | some st' => _) = some o1 at h1; rw [hm1] at h1; cases h1
-            | some m1 =>
-              cases hm2 : pairCheckExtRound 2 rc (rv 2) (rv 0) (vcPairAtState12 st 2) with
-              | none => change (match pairCheckExtRound 2 rc (rv 2) (rv 0) (vcPairAtState12 st 2) with | none => none | some st' => _) = some o2 at h2; rw [hm2] at h2; cases h2
-              | some m2 =>
-                change (match pairCheckExtRound 0 rc (rv 0) (rv 1) (vcPairAtState12 st 0) with | none => none | some st' => pairCheckExtRounds 0 rcs (rs 0) (rs 1) st') = some o0 at h0
-                change (match pairCheckExtRound 1 rc (rv 1) (rv 2) (vcPairAtState12 st 1) with | none => none | some st' => pairCheckExtRounds 1 rcs (rs 1) (rs 2) st') = some o1 at h1
-                change (match pairCheckExtRound 2 rc (rv 2) (rv 0) (vcPairAtState12 st 2) with | none => none | some st' => pairCheckExtRounds 2 rcs (rs 2) (rs 0) st') = some o2 at h2
-                rw [hm0] at h0
-                rw [hm1] at h1
-                rw [hm2] at h2
-                rw [(pairCheckExtRound_step hm0).1] at h0
-                rw [(pairCheckExtRound_step hm1).1] at h1
-                rw [(pairCheckExtRound_step hm2).1] at h2
-                obtain ⟨stOut, e0, e1, e2, hSum⟩ :=
-                  pairCheckExtRounds_extract3 rcs (vcExtRoundOut3 rv) rs h0 h1 h2
-                rw [runRounds_cons, ← pairCheckExtRound_extract3 hm0 hm1 hm2]
-                exact ⟨stOut, e0, e1, e2, hSum⟩
-
-private theorem pairCheckIntRounds_extract3 :
-    ∀ (rcs : List Goldilocks) (st : VcState12_3) (vs : Fin 3 → List PartySboxView)
-      {o0 o1 o2 : Poseidon2State12 × Poseidon2State12},
-      pairCheckIntRounds 0 rcs (vs 0) (vs 1) (vcPairAtState12 st 0) = some o0 →
-      pairCheckIntRounds 1 rcs (vs 1) (vs 2) (vcPairAtState12 st 1) = some o1 →
-      pairCheckIntRounds 2 rcs (vs 2) (vs 0) (vcPairAtState12 st 2) = some o2 →
-      ∃ stOut : VcState12_3,
-        o0 = vcPairAtState12 stOut 0 ∧
-        o1 = vcPairAtState12 stOut 1 ∧
-        o2 = vcPairAtState12 stOut 2 ∧
-        vcSumState12_3 stOut = runRounds internalRound rcs (vcSumState12_3 st)
-  | [], st, vs, o0, o1, o2, h0, h1, h2 => by
-    cases hv0 : vs 0 with
-    | cons _ _ => rw [hv0] at h0; cases h0
-    | nil =>
-      cases hv1 : vs 1 with
-      | cons _ _ => rw [hv0, hv1] at h0; cases h0
-      | nil =>
-        cases hv2 : vs 2 with
-        | cons _ _ => rw [hv1, hv2] at h1; cases h1
-        | nil =>
-          rw [hv0, hv1] at h0
-          rw [hv1, hv2] at h1
-          rw [hv2, hv0] at h2
-          dsimp only [pairCheckIntRounds] at h0 h1 h2
-          injection h0 with ho0
-          injection h1 with ho1
-          injection h2 with ho2
-          rw [runRounds_nil]
-          exact ⟨st, ho0.symm, ho1.symm, ho2.symm, rfl⟩
-  | rc :: rcs, st, vs, o0, o1, o2, h0, h1, h2 => by
-    cases hv0 : vs 0 with
-    | nil => rw [hv0] at h0; cases h0
-    | cons r0 rs0 =>
-      cases hv1 : vs 1 with
-      | nil => rw [hv0, hv1] at h0; cases h0
-      | cons r1 rs1 =>
-        cases hv2 : vs 2 with
-        | nil => rw [hv1, hv2] at h1; cases h1
-        | cons r2 rs2 =>
-          rw [hv0, hv1] at h0
-          rw [hv1, hv2] at h1
-          rw [hv2, hv0] at h2
-          dsimp only [pairCheckIntRounds] at h0 h1 h2
-          let rv : Fin 3 → PartySboxView := fun
-            | ⟨0, _⟩ => r0
-            | ⟨1, _⟩ => r1
-            | ⟨2, _⟩ => r2
-          let rs : Fin 3 → List PartySboxView := fun
-            | ⟨0, _⟩ => rs0
-            | ⟨1, _⟩ => rs1
-            | ⟨2, _⟩ => rs2
-          cases hm0 : pairCheckIntRound 0 rc (rv 0) (rv 1) (vcPairAtState12 st 0) with
-          | none => change (match pairCheckIntRound 0 rc (rv 0) (rv 1) (vcPairAtState12 st 0) with | none => none | some st' => _) = some o0 at h0; rw [hm0] at h0; cases h0
-          | some m0 =>
-            cases hm1 : pairCheckIntRound 1 rc (rv 1) (rv 2) (vcPairAtState12 st 1) with
-            | none => change (match pairCheckIntRound 1 rc (rv 1) (rv 2) (vcPairAtState12 st 1) with | none => none | some st' => _) = some o1 at h1; rw [hm1] at h1; cases h1
-            | some m1 =>
-              cases hm2 : pairCheckIntRound 2 rc (rv 2) (rv 0) (vcPairAtState12 st 2) with
-              | none => change (match pairCheckIntRound 2 rc (rv 2) (rv 0) (vcPairAtState12 st 2) with | none => none | some st' => _) = some o2 at h2; rw [hm2] at h2; cases h2
-              | some m2 =>
-                change (match pairCheckIntRound 0 rc (rv 0) (rv 1) (vcPairAtState12 st 0) with | none => none | some st' => pairCheckIntRounds 0 rcs (rs 0) (rs 1) st') = some o0 at h0
-                change (match pairCheckIntRound 1 rc (rv 1) (rv 2) (vcPairAtState12 st 1) with | none => none | some st' => pairCheckIntRounds 1 rcs (rs 1) (rs 2) st') = some o1 at h1
-                change (match pairCheckIntRound 2 rc (rv 2) (rv 0) (vcPairAtState12 st 2) with | none => none | some st' => pairCheckIntRounds 2 rcs (rs 2) (rs 0) st') = some o2 at h2
-                rw [hm0] at h0
-                rw [hm1] at h1
-                rw [hm2] at h2
-                rw [(pairCheckIntRound_step hm0).1] at h0
-                rw [(pairCheckIntRound_step hm1).1] at h1
-                rw [(pairCheckIntRound_step hm2).1] at h2
-                obtain ⟨stOut, e0, e1, e2, hSum⟩ :=
-                  pairCheckIntRounds_extract3 rcs (vcIntRoundOut3 st rv) rs h0 h1 h2
-                rw [runRounds_cons, ← pairCheckIntRound_extract3 hm0 hm1 hm2]
-                exact ⟨stOut, e0, e1, e2, hSum⟩
-
-/-- Single party's view for a 30-round `Poseidon2` permutation (`ZkBooVerifierTape::raw_perm12`, `blind_vc.rs:402-423`). -/
-structure PartyPerm12View where
-  initExt : List PartyExtRoundView
-  internal : List PartySboxView
-  termExt : List PartyExtRoundView
-  deriving DecidableEq, Repr
-
-def pairCheckRawPerm12 (e : Fin 3) (vE vE1 : PartyPerm12View)
-    (st : Poseidon2State12 × Poseidon2State12) : Option (Poseidon2State12 × Poseidon2State12) :=
-  let s0 := (applyME st.1, applyME st.2)
-  match pairCheckExtRounds e poseidon2InitialExtConsts vE.initExt vE1.initExt s0 with
-  | none => none
-  | some s1 =>
-    match pairCheckIntRounds e poseidon2InternalConsts vE.internal vE1.internal s1 with
-    | none => none
-    | some s2 => pairCheckExtRounds e poseidon2TerminalExtConsts vE.termExt vE1.termExt s2
-
-def honestRawPerm12_3 (st : VcState12_3) : (Fin 3 → PartyPerm12View) × VcState12_3 :=
-  let s0 : VcState12_3 := fun i => applyME (st i)
-  let r1 := honestExtRounds3 poseidon2InitialExtConsts s0
-  let r2 := honestIntRounds3 poseidon2InternalConsts r1.2
-  let r3 := honestExtRounds3 poseidon2TerminalExtConsts r2.2
-  (fun i => ⟨r1.1 i, r2.1 i, r3.1 i⟩, r3.2)
-
-private theorem pairCheckRawPerm12_honest (st : VcState12_3) (e : Fin 3) :
-    pairCheckRawPerm12 e ((honestRawPerm12_3 st).1 e) ((honestRawPerm12_3 st).1 (vcNextParty3 e))
-      (vcPairAtState12 st e) = some (vcPairAtState12 (honestRawPerm12_3 st).2 e) := by
-  unfold pairCheckRawPerm12 honestRawPerm12_3
-  dsimp only
-  have hs0 : (applyME (vcPairAtState12 st e).1, applyME (vcPairAtState12 st e).2) =
-      vcPairAtState12 (fun i => applyME (st i)) e := rfl
-  rw [hs0, pairCheckExtRounds_honest]; dsimp only
-  rw [pairCheckIntRounds_honest]; dsimp only
-  rw [pairCheckExtRounds_honest]
-
-private theorem pairCheckRawPerm12_extract3 {st : VcState12_3} {pv : Fin 3 → PartyPerm12View}
-    {o0 o1 o2 : Poseidon2State12 × Poseidon2State12}
-    (h0 : pairCheckRawPerm12 0 (pv 0) (pv 1) (vcPairAtState12 st 0) = some o0)
-    (h1 : pairCheckRawPerm12 1 (pv 1) (pv 2) (vcPairAtState12 st 1) = some o1)
-    (h2 : pairCheckRawPerm12 2 (pv 2) (pv 0) (vcPairAtState12 st 2) = some o2) :
-    ∃ stOut : VcState12_3,
-      o0 = vcPairAtState12 stOut 0 ∧
-      o1 = vcPairAtState12 stOut 1 ∧
-      o2 = vcPairAtState12 stOut 2 ∧
-      vcSumState12_3 stOut = poseidon2Perm12 (vcSumState12_3 st) := by
-  unfold pairCheckRawPerm12 at h0 h1 h2
-  let s0 : VcState12_3 := fun i => applyME (st i)
-  change (match pairCheckExtRounds 0 poseidon2InitialExtConsts (pv 0).initExt (pv 1).initExt (vcPairAtState12 s0 0) with | none => none | some s1 => _) = some o0 at h0
-  change (match pairCheckExtRounds 1 poseidon2InitialExtConsts (pv 1).initExt (pv 2).initExt (vcPairAtState12 s0 1) with | none => none | some s1 => _) = some o1 at h1
-  change (match pairCheckExtRounds 2 poseidon2InitialExtConsts (pv 2).initExt (pv 0).initExt (vcPairAtState12 s0 2) with | none => none | some s1 => _) = some o2 at h2
-  cases a0 : pairCheckExtRounds 0 poseidon2InitialExtConsts (pv 0).initExt (pv 1).initExt (vcPairAtState12 s0 0) with
-  | none => rw [a0] at h0; cases h0
-  | some u0 =>
-  cases a1 : pairCheckExtRounds 1 poseidon2InitialExtConsts (pv 1).initExt (pv 2).initExt (vcPairAtState12 s0 1) with
-  | none => rw [a1] at h1; cases h1
-  | some u1 =>
-  cases a2 : pairCheckExtRounds 2 poseidon2InitialExtConsts (pv 2).initExt (pv 0).initExt (vcPairAtState12 s0 2) with
-  | none => rw [a2] at h2; cases h2
-  | some u2 =>
-    rw [a0] at h0; rw [a1] at h1; rw [a2] at h2
-    obtain ⟨st1, hu0, hu1, hu2, hSum1⟩ :=
-      pairCheckExtRounds_extract3 poseidon2InitialExtConsts s0 (fun i => (pv i).initExt) a0 a1 a2
-    rw [hu0] at h0; rw [hu1] at h1; rw [hu2] at h2
-    dsimp only at h0 h1 h2
-    cases b0 : pairCheckIntRounds 0 poseidon2InternalConsts (pv 0).internal (pv 1).internal (vcPairAtState12 st1 0) with
-    | none => rw [b0] at h0; cases h0
-    | some v0 =>
-    cases b1 : pairCheckIntRounds 1 poseidon2InternalConsts (pv 1).internal (pv 2).internal (vcPairAtState12 st1 1) with
-    | none => rw [b1] at h1; cases h1
-    | some v1 =>
-    cases b2 : pairCheckIntRounds 2 poseidon2InternalConsts (pv 2).internal (pv 0).internal (vcPairAtState12 st1 2) with
-    | none => rw [b2] at h2; cases h2
-    | some v2 =>
-      rw [b0] at h0; rw [b1] at h1; rw [b2] at h2
-      obtain ⟨st2, hv0, hv1, hv2, hSum2⟩ :=
-        pairCheckIntRounds_extract3 poseidon2InternalConsts st1 (fun i => (pv i).internal) b0 b1 b2
-      rw [hv0] at h0; rw [hv1] at h1; rw [hv2] at h2
-      dsimp only at h0 h1 h2
-      obtain ⟨st3, hw0, hw1, hw2, hSum3⟩ :=
-        pairCheckExtRounds_extract3 poseidon2TerminalExtConsts st2 (fun i => (pv i).termExt) h0 h1 h2
-      refine ⟨st3, hw0, hw1, hw2, ?_⟩
-      unfold poseidon2Perm12
-      dsimp only
-      rw [hSum3, hSum2, hSum1, vcSumState12_3_applyME]
-
-/-- Single party's view for 2-permutation `sponge12` (`ZkBooVerifierTape::perm12`, `blind_vc.rs:390-401`). -/
-structure PartySponge12View where
-  perm1 : PartyPerm12View
-  perm2 : PartyPerm12View
-  deriving DecidableEq, Repr
-
-def pairCheckSponge12 (e : Fin 3) (vE vE1 : PartySponge12View)
-    (st : Poseidon2State12 × Poseidon2State12) : Option (Poseidon2State12 × Poseidon2State12) :=
-  let tail1 := st.1.b2
-  let tail2 := st.2.b2
-  let init0 := (⟨st.1.b0, st.1.b1, lane4Zero⟩, ⟨st.2.b0, st.2.b1, lane4Zero⟩)
-  match pairCheckRawPerm12 e vE.perm1 vE1.perm1 init0 with
-  | none => none
-  | some p1 =>
-    let b1x0 := vcPairAddConst e (p1.1.b1.x0, p1.2.b1.x0) Goldilocks.one
-    let mid1 : Poseidon2State12 :=
-      ⟨lane4Add p1.1.b0 tail1, ⟨b1x0.1, p1.1.b1.x1, p1.1.b1.x2, p1.1.b1.x3⟩, p1.1.b2⟩
-    let mid2 : Poseidon2State12 :=
-      ⟨lane4Add p1.2.b0 tail2, ⟨b1x0.2, p1.2.b1.x1, p1.2.b1.x2, p1.2.b1.x3⟩, p1.2.b2⟩
-    pairCheckRawPerm12 e vE.perm2 vE1.perm2 (mid1, mid2)
-
-def honestSponge12_3 (st : VcState12_3) : (Fin 3 → PartySponge12View) × VcState12_3 :=
-  let st0 : VcState12_3 := fun i => ⟨(st i).b0, (st i).b1, lane4Zero⟩
-  let r1 := honestRawPerm12_3 st0
-  let b1x0 := vcWireAddConst3 (fun i => (r1.2 i).b1.x0) Goldilocks.one
-  let mid : VcState12_3 := fun i =>
-    ⟨lane4Add (r1.2 i).b0 (st i).b2,
-     ⟨b1x0 i, (r1.2 i).b1.x1, (r1.2 i).b1.x2, (r1.2 i).b1.x3⟩,
-     (r1.2 i).b2⟩
-  let r2 := honestRawPerm12_3 mid
-  (fun i => ⟨r1.1 i, r2.1 i⟩, r2.2)
-
-private theorem pairCheckSponge12_honest (st : VcState12_3) (e : Fin 3) :
-    pairCheckSponge12 e ((honestSponge12_3 st).1 e) ((honestSponge12_3 st).1 (vcNextParty3 e))
-      (vcPairAtState12 st e) = some (vcPairAtState12 (honestSponge12_3 st).2 e) := by
-  unfold pairCheckSponge12 honestSponge12_3
-  dsimp only
-  have hInit : (⟨(vcPairAtState12 st e).1.b0, (vcPairAtState12 st e).1.b1, lane4Zero⟩,
-                ⟨(vcPairAtState12 st e).2.b0, (vcPairAtState12 st e).2.b1, lane4Zero⟩) =
-      vcPairAtState12 (fun i => ⟨(st i).b0, (st i).b1, lane4Zero⟩) e := rfl
-  rw [hInit, pairCheckRawPerm12_honest]
-  dsimp only
-  let p1 := (honestRawPerm12_3 (fun i => ⟨(st i).b0, (st i).b1, lane4Zero⟩)).2
-  have hb1 : vcPairAddConst e ((vcPairAtState12 p1 e).1.b1.x0, (vcPairAtState12 p1 e).2.b1.x0) Goldilocks.one =
-      vcPairAt (vcWireAddConst3 (fun i => (p1 i).b1.x0) Goldilocks.one) e :=
-    vcPairAddConst_spec (fun i => (p1 i).b1.x0) Goldilocks.one e
-  rw [hb1]
-  exact pairCheckRawPerm12_honest _ e
-
-private theorem pairCheckSponge12_extract3 {st : VcState12_3} {sv : Fin 3 → PartySponge12View}
-    {o0 o1 o2 : Poseidon2State12 × Poseidon2State12}
-    (h0 : pairCheckSponge12 0 (sv 0) (sv 1) (vcPairAtState12 st 0) = some o0)
-    (h1 : pairCheckSponge12 1 (sv 1) (sv 2) (vcPairAtState12 st 1) = some o1)
-    (h2 : pairCheckSponge12 2 (sv 2) (sv 0) (vcPairAtState12 st 2) = some o2) :
-    ∃ stOut : VcState12_3,
-      o0 = vcPairAtState12 stOut 0 ∧
-      o1 = vcPairAtState12 stOut 1 ∧
-      o2 = vcPairAtState12 stOut 2 ∧
-      vcSumState12_3 stOut = sponge12 (vcSumState12_3 st) := by
-  unfold pairCheckSponge12 at h0 h1 h2
-  let st0 : VcState12_3 := fun i => ⟨(st i).b0, (st i).b1, lane4Zero⟩
-  change (match pairCheckRawPerm12 0 (sv 0).perm1 (sv 1).perm1 (vcPairAtState12 st0 0) with | none => none | some p1 => _) = some o0 at h0
-  change (match pairCheckRawPerm12 1 (sv 1).perm1 (sv 2).perm1 (vcPairAtState12 st0 1) with | none => none | some p1 => _) = some o1 at h1
-  change (match pairCheckRawPerm12 2 (sv 2).perm1 (sv 0).perm1 (vcPairAtState12 st0 2) with | none => none | some p1 => _) = some o2 at h2
-  cases a0 : pairCheckRawPerm12 0 (sv 0).perm1 (sv 1).perm1 (vcPairAtState12 st0 0) with
-  | none => rw [a0] at h0; cases h0
-  | some u0 =>
-  cases a1 : pairCheckRawPerm12 1 (sv 1).perm1 (sv 2).perm1 (vcPairAtState12 st0 1) with
-  | none => rw [a1] at h1; cases h1
-  | some u1 =>
-  cases a2 : pairCheckRawPerm12 2 (sv 2).perm1 (sv 0).perm1 (vcPairAtState12 st0 2) with
-  | none => rw [a2] at h2; cases h2
-  | some u2 =>
-    rw [a0] at h0; rw [a1] at h1; rw [a2] at h2
-    obtain ⟨p1, hu0, hu1, hu2, hSum1⟩ :=
-      pairCheckRawPerm12_extract3 (pv := fun i => (sv i).perm1) a0 a1 a2
-    rw [hu0] at h0; rw [hu1] at h1; rw [hu2] at h2
-    dsimp only at h0 h1 h2
-    have hb1_0 : vcPairAddConst 0 ((vcPairAtState12 p1 0).1.b1.x0, (vcPairAtState12 p1 0).2.b1.x0) Goldilocks.one =
-        vcPairAt (vcWireAddConst3 (fun k => (p1 k).b1.x0) Goldilocks.one) 0 :=
-      vcPairAddConst_spec (fun k => (p1 k).b1.x0) Goldilocks.one 0
-    have hb1_1 : vcPairAddConst 1 ((vcPairAtState12 p1 1).1.b1.x0, (vcPairAtState12 p1 1).2.b1.x0) Goldilocks.one =
-        vcPairAt (vcWireAddConst3 (fun k => (p1 k).b1.x0) Goldilocks.one) 1 :=
-      vcPairAddConst_spec (fun k => (p1 k).b1.x0) Goldilocks.one 1
-    have hb1_2 : vcPairAddConst 2 ((vcPairAtState12 p1 2).1.b1.x0, (vcPairAtState12 p1 2).2.b1.x0) Goldilocks.one =
-        vcPairAt (vcWireAddConst3 (fun k => (p1 k).b1.x0) Goldilocks.one) 2 :=
-      vcPairAddConst_spec (fun k => (p1 k).b1.x0) Goldilocks.one 2
-    rw [hb1_0] at h0; rw [hb1_1] at h1; rw [hb1_2] at h2
-    let mid : VcState12_3 := fun i =>
-      ⟨lane4Add (p1 i).b0 (st i).b2,
-       ⟨vcWireAddConst3 (fun k => (p1 k).b1.x0) Goldilocks.one i, (p1 i).b1.x1, (p1 i).b1.x2, (p1 i).b1.x3⟩,
-       (p1 i).b2⟩
-    have hm0 : pairCheckRawPerm12 0 (sv 0).perm2 (sv 1).perm2 (vcPairAtState12 mid 0) = some o0 := h0
-    have hm1 : pairCheckRawPerm12 1 (sv 1).perm2 (sv 2).perm2 (vcPairAtState12 mid 1) = some o1 := h1
-    have hm2 : pairCheckRawPerm12 2 (sv 2).perm2 (sv 0).perm2 (vcPairAtState12 mid 2) = some o2 := h2
-    obtain ⟨stOut, hw0, hw1, hw2, hSum2⟩ :=
-      pairCheckRawPerm12_extract3 (pv := fun i => (sv i).perm2) hm0 hm1 hm2
-    refine ⟨stOut, hw0, hw1, hw2, ?_⟩
-    rw [hSum2]
-    unfold sponge12
-    dsimp only
-    have hSt0Sum : vcSumState12_3 st0 = ⟨(vcSumState12_3 st).b0, (vcSumState12_3 st).b1, lane4Zero⟩ := by
-      rw [vcSumState12_3_lanes, vcSumState12_3_lanes]
-      dsimp only [st0]
-      congr 1
-      rw [vcSumLane4_3_eq, lane4Zero_eq]
-      unfold vcSum3
-      have hz0 : Goldilocks.add (Goldilocks.add Goldilocks.zero Goldilocks.zero) Goldilocks.zero = Goldilocks.zero := by
-        rw [← goldOfInt_nat Goldilocks.zero]
-        simp only [Goldilocks.zero_val, goldOfInt_add]; congr 1
-      simp only [hz0]
-    rw [hSt0Sum] at hSum1
-    congr 1
-    rw [vcSumState12_3_lanes, vcSumState12_3_lanes] at hSum1 ⊢
-    dsimp only [mid]
-    have hb0Eq : vcSumLane4_3 (fun i => lane4Add (p1 i).b0 (st i).b2) =
-        lane4Add (vcSumLane4_3 (fun i => (p1 i).b0)) (vcSumLane4_3 (fun i => (st i).b2)) := by
-      simp only [vcSumLane4_3_eq, lane4Add_eq, vcSum3]
-      have hAssoc : ∀ a0 b0 a1 b1 a2 b2 : Goldilocks,
-          Goldilocks.add (Goldilocks.add (Goldilocks.add a0 b0) (Goldilocks.add a1 b1)) (Goldilocks.add a2 b2) =
-            Goldilocks.add (Goldilocks.add (Goldilocks.add a0 a1) a2) (Goldilocks.add (Goldilocks.add b0 b1) b2) := by
-        intro a0 b0 a1 b1 a2 b2
-        rw [← goldOfInt_nat a0, ← goldOfInt_nat b0, ← goldOfInt_nat a1,
-            ← goldOfInt_nat b1, ← goldOfInt_nat a2, ← goldOfInt_nat b2]
-        simp only [goldOfInt_add]; congr 1; omega
-      simp only [hAssoc]
-    rw [hb0Eq]
-    rw [vcSumLane4_3_eq (fun i => (⟨vcWireAddConst3 (fun k => (p1 k).b1.x0) Goldilocks.one i,
-      (p1 i).b1.x1, (p1 i).b1.x2, (p1 i).b1.x3⟩ : Lane4))]
-    dsimp only
-    rw [vcSum3_addConst]
-    have hp1_0 : vcSumLane4_3 (fun i => (p1 i).b0) =
-        (poseidon2Perm12 ⟨vcSumLane4_3 (fun i => (st i).b0), vcSumLane4_3 (fun i => (st i).b1), lane4Zero⟩).b0 :=
-      congrArg Poseidon2State12.b0 hSum1
-    have hp1_1 : vcSumLane4_3 (fun i => (p1 i).b1) =
-        (poseidon2Perm12 ⟨vcSumLane4_3 (fun i => (st i).b0), vcSumLane4_3 (fun i => (st i).b1), lane4Zero⟩).b1 :=
-      congrArg Poseidon2State12.b1 hSum1
-    have hp1_2 : vcSumLane4_3 (fun i => (p1 i).b2) =
-        (poseidon2Perm12 ⟨vcSumLane4_3 (fun i => (st i).b0), vcSumLane4_3 (fun i => (st i).b1), lane4Zero⟩).b2 :=
-      congrArg Poseidon2State12.b2 hSum1
-    rw [vcSumLane4_3_eq] at hp1_1
-    have hx0 : vcSum3 (fun i => (p1 i).b1.x0) =
-        (poseidon2Perm12 ⟨vcSumLane4_3 (fun i => (st i).b0), vcSumLane4_3 (fun i => (st i).b1), lane4Zero⟩).b1.x0 :=
-      congrArg Lane4.x0 hp1_1
-    have hx1 : vcSum3 (fun i => (p1 i).b1.x1) =
-        (poseidon2Perm12 ⟨vcSumLane4_3 (fun i => (st i).b0), vcSumLane4_3 (fun i => (st i).b1), lane4Zero⟩).b1.x1 :=
-      congrArg Lane4.x1 hp1_1
-    have hx2 : vcSum3 (fun i => (p1 i).b1.x2) =
-        (poseidon2Perm12 ⟨vcSumLane4_3 (fun i => (st i).b0), vcSumLane4_3 (fun i => (st i).b1), lane4Zero⟩).b1.x2 :=
-      congrArg Lane4.x2 hp1_1
-    have hx3 : vcSum3 (fun i => (p1 i).b1.x3) =
-        (poseidon2Perm12 ⟨vcSumLane4_3 (fun i => (st i).b0), vcSumLane4_3 (fun i => (st i).b1), lane4Zero⟩).b1.x3 :=
-      congrArg Lane4.x3 hp1_1
-    rw [hp1_0, hp1_2, hx0, hx1, hx2, hx3]
-
-/-- Single party's view for one Merkle accumulator level (`blind_vc.rs:1993-2033`):
-    secret direction share `bitShare`, 4-limb `sibShare`, Boolean gate `b * (1 - b)`,
-    4 branch-selector multiplication gates `delta_0..3`, and `sponge12` parent hash. -/
-structure PartyMerkleLevelView where
-  bitShare : Goldilocks
-  sibShare : Lane4
-  boolGate : PartyMulView
-  sel0 : PartyMulView
-  sel1 : PartyMulView
-  sel2 : PartyMulView
-  sel3 : PartyMulView
-  hashView : PartySponge12View
-  deriving DecidableEq, Repr
-
-def pairSubGold (a b : Goldilocks × Goldilocks) : Goldilocks × Goldilocks :=
-  (Goldilocks.sub a.1 b.1, Goldilocks.sub a.2 b.2)
-
-def pairAddGold (a b : Goldilocks × Goldilocks) : Goldilocks × Goldilocks :=
-  (Goldilocks.add a.1 b.1, Goldilocks.add a.2 b.2)
-
-def vcConstPair (e : Fin 3) (c : Goldilocks) : Goldilocks × Goldilocks :=
-  vcPairAddConst e (Goldilocks.zero, Goldilocks.zero) c
-
-private theorem vcConstPair_spec (c : Goldilocks) (e : Fin 3) :
-    vcConstPair e c = vcPairAt (vcConstWire3 c) e := by
-  have hz : Goldilocks.add Goldilocks.zero c = c := by
-    rw [← goldOfInt_nat Goldilocks.zero, ← goldOfInt_nat c]
-    simp only [Goldilocks.zero_val, goldOfInt_add]; congr 1; omega
-  have he : e = 0 ∨ e = 1 ∨ e = 2 := by revert e; decide
-  have h10 : (1 : Fin 3) ≠ 0 := by decide
-  have h20 : (2 : Fin 3) ≠ 0 := by decide
-  rcases he with rfl | rfl | rfl
-  · simp only [vcConstPair, vcPairAddConst, vcPairAt, vcConstWire3, vcNextParty3, ↓reduceIte, h10, hz]
-  · simp only [vcConstPair, vcPairAddConst, vcPairAt, vcConstWire3, vcNextParty3, ↓reduceIte, h10, h20]
-  · simp only [vcConstPair, vcPairAddConst, vcPairAt, vcConstWire3, vcNextParty3, ↓reduceIte, h20, hz]
-
-/-- Verify one Merkle level at challenge `e`, returning `(nextCurNodePair, boolZeroPair)` (`blind_vc.rs:1993-2033`). -/
-def pairCheckMerkleLevel (e : Fin 3) (epoch : UInt64) (layer : Nat)
-    (cur : Lane4 × Lane4) (lvE lvE1 : PartyMerkleLevelView) :
-    Option ((Lane4 × Lane4) × (Goldilocks × Goldilocks)) :=
-  let b := (lvE.bitShare, lvE1.bitShare)
-  let oneWire := vcConstPair e Goldilocks.one
-  let oneMinusB := pairSubGold oneWire b
-  match pairCheckMul b oneMinusB lvE.boolGate lvE1.boolGate with
-  | none => none
-  | some boolZero =>
-    let d0 := pairSubGold (lvE.sibShare.x0, lvE1.sibShare.x0) (cur.1.x0, cur.2.x0)
-    let d1 := pairSubGold (lvE.sibShare.x1, lvE1.sibShare.x1) (cur.1.x1, cur.2.x1)
-    let d2 := pairSubGold (lvE.sibShare.x2, lvE1.sibShare.x2) (cur.1.x2, cur.2.x2)
-    let d3 := pairSubGold (lvE.sibShare.x3, lvE1.sibShare.x3) (cur.1.x3, cur.2.x3)
-    match pairCheckMul b d0 lvE.sel0 lvE1.sel0,
-          pairCheckMul b d1 lvE.sel1 lvE1.sel1,
-          pairCheckMul b d2 lvE.sel2 lvE1.sel2,
-          pairCheckMul b d3 lvE.sel3 lvE1.sel3 with
-    | some del0, some del1, some del2, some del3 =>
-      let l0 := pairAddGold (cur.1.x0, cur.2.x0) del0
-      let l1 := pairAddGold (cur.1.x1, cur.2.x1) del1
-      let l2 := pairAddGold (cur.1.x2, cur.2.x2) del2
-      let l3 := pairAddGold (cur.1.x3, cur.2.x3) del3
-      let r0 := pairSubGold (lvE.sibShare.x0, lvE1.sibShare.x0) del0
-      let r1 := pairSubGold (lvE.sibShare.x1, lvE1.sibShare.x1) del1
-      let r2 := pairSubGold (lvE.sibShare.x2, lvE1.sibShare.x2) del2
-      let r3 := pairSubGold (lvE.sibShare.x3, lvE1.sibShare.x3) del3
-      let c8 := vcConstPair e (vcSchemaLo epoch)
-      let c9 := vcConstPair e (Goldilocks.ofNat layer)
-      let c10 := vcConstPair e (Goldilocks.ofNat vcMerkleNodeTag.toNat)
-      let c11 := vcConstPair e (vcSchemaHiWithTag epoch poseidon2ConstIV)
-      let stE : Poseidon2State12 :=
-        ⟨⟨l0.1, l1.1, l2.1, l3.1⟩, ⟨r0.1, r1.1, r2.1, r3.1⟩, ⟨c8.1, c9.1, c10.1, c11.1⟩⟩
-      let stE1 : Poseidon2State12 :=
-        ⟨⟨l0.2, l1.2, l2.2, l3.2⟩, ⟨r0.2, r1.2, r2.2, r3.2⟩, ⟨c8.2, c9.2, c10.2, c11.2⟩⟩
-      match pairCheckSponge12 e lvE.hashView lvE1.hashView (stE, stE1) with
-      | none => none
-      | some outSt => some ((outSt.1.b0, outSt.2.b0), boolZero)
-    | _, _, _, _ => none
-
-def honestMerkleLevel3 (epoch : UInt64) (layer : Nat) (cur : VcLane4_3)
-    (b : VcWire3) (sib : VcLane4_3) :
-    (Fin 3 → PartyMerkleLevelView) × VcLane4_3 × VcWire3 :=
-  let z : VcWire3 := fun _ => Goldilocks.zero
-  let oneMinusB : VcWire3 := fun i => Goldilocks.sub (vcConstWire3 Goldilocks.one i) (b i)
-  let bg := honestMulView3 b oneMinusB z
-  let bz := vcMulGate3 b oneMinusB z
-  let d0 : VcWire3 := fun i => Goldilocks.sub (sib i).x0 (cur i).x0
-  let d1 : VcWire3 := fun i => Goldilocks.sub (sib i).x1 (cur i).x1
-  let d2 : VcWire3 := fun i => Goldilocks.sub (sib i).x2 (cur i).x2
-  let d3 : VcWire3 := fun i => Goldilocks.sub (sib i).x3 (cur i).x3
-  let s0 := honestMulView3 b d0 z; let del0 := vcMulGate3 b d0 z
-  let s1 := honestMulView3 b d1 z; let del1 := vcMulGate3 b d1 z
-  let s2 := honestMulView3 b d2 z; let del2 := vcMulGate3 b d2 z
-  let s3 := honestMulView3 b d3 z; let del3 := vcMulGate3 b d3 z
-  let stIn : VcState12_3 := fun i =>
-    ⟨⟨Goldilocks.add (cur i).x0 (del0 i), Goldilocks.add (cur i).x1 (del1 i),
-      Goldilocks.add (cur i).x2 (del2 i), Goldilocks.add (cur i).x3 (del3 i)⟩,
-     ⟨Goldilocks.sub (sib i).x0 (del0 i), Goldilocks.sub (sib i).x1 (del1 i),
-      Goldilocks.sub (sib i).x2 (del2 i), Goldilocks.sub (sib i).x3 (del3 i)⟩,
-     ⟨vcConstWire3 (vcSchemaLo epoch) i,
-      vcConstWire3 (Goldilocks.ofNat layer) i,
-      vcConstWire3 (Goldilocks.ofNat vcMerkleNodeTag.toNat) i,
-      vcConstWire3 (vcSchemaHiWithTag epoch poseidon2ConstIV) i⟩⟩
-  let sp := honestSponge12_3 stIn
-  (fun i => ⟨b i, sib i, bg i, s0 i, s1 i, s2 i, s3 i, sp.1 i⟩,
-   fun i => (sp.2 i).b0,
-   bz)
-
-private theorem pairCheckMerkleLevel_honest (epoch : UInt64) (layer : Nat)
-    (cur : VcLane4_3) (b : VcWire3) (sib : VcLane4_3) (e : Fin 3) :
-    pairCheckMerkleLevel e epoch layer (vcPairAtLane4 cur e)
-      ((honestMerkleLevel3 epoch layer cur b sib).1 e)
-      ((honestMerkleLevel3 epoch layer cur b sib).1 (vcNextParty3 e)) =
-      some (vcPairAtLane4 (honestMerkleLevel3 epoch layer cur b sib).2.1 e,
-            vcPairAt (honestMerkleLevel3 epoch layer cur b sib).2.2 e) := by
-  unfold pairCheckMerkleLevel honestMerkleLevel3 vcPairAtLane4
-  dsimp only
-  rw [vcConstPair_spec Goldilocks.one e,
-      vcConstPair_spec (vcSchemaLo epoch) e,
-      vcConstPair_spec (Goldilocks.ofNat layer) e,
-      vcConstPair_spec (Goldilocks.ofNat vcMerkleNodeTag.toNat) e,
-      vcConstPair_spec (vcSchemaHiWithTag epoch poseidon2ConstIV) e]
-  have hOneSub : pairSubGold (vcPairAt (vcConstWire3 Goldilocks.one) e) (b e, b (vcNextParty3 e)) =
-      vcPairAt (fun i => Goldilocks.sub (vcConstWire3 Goldilocks.one i) (b i)) e := rfl
-  have hbPair : (b e, b (vcNextParty3 e)) = vcPairAt b e := rfl
-  have hd0 : pairSubGold ((sib e).x0, (sib (vcNextParty3 e)).x0) ((cur e).x0, (cur (vcNextParty3 e)).x0) =
-      vcPairAt (fun i => Goldilocks.sub (sib i).x0 (cur i).x0) e := rfl
-  have hd1 : pairSubGold ((sib e).x1, (sib (vcNextParty3 e)).x1) ((cur e).x1, (cur (vcNextParty3 e)).x1) =
-      vcPairAt (fun i => Goldilocks.sub (sib i).x1 (cur i).x1) e := rfl
-  have hd2 : pairSubGold ((sib e).x2, (sib (vcNextParty3 e)).x2) ((cur e).x2, (cur (vcNextParty3 e)).x2) =
-      vcPairAt (fun i => Goldilocks.sub (sib i).x2 (cur i).x2) e := rfl
-  have hd3 : pairSubGold ((sib e).x3, (sib (vcNextParty3 e)).x3) ((cur e).x3, (cur (vcNextParty3 e)).x3) =
-      vcPairAt (fun i => Goldilocks.sub (sib i).x3 (cur i).x3) e := rfl
-  rw [hOneSub, hbPair, pairCheckMul_honest, hd0, hd1, hd2, hd3,
-      pairCheckMul_honest, pairCheckMul_honest, pairCheckMul_honest, pairCheckMul_honest]
-  dsimp only
-  have hsp := pairCheckSponge12_honest (fun i =>
-    ⟨⟨Goldilocks.add (cur i).x0 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x0 (cur k).x0) (fun _ => Goldilocks.zero) i),
-      Goldilocks.add (cur i).x1 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x1 (cur k).x1) (fun _ => Goldilocks.zero) i),
-      Goldilocks.add (cur i).x2 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x2 (cur k).x2) (fun _ => Goldilocks.zero) i),
-      Goldilocks.add (cur i).x3 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x3 (cur k).x3) (fun _ => Goldilocks.zero) i)⟩,
-     ⟨Goldilocks.sub (sib i).x0 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x0 (cur k).x0) (fun _ => Goldilocks.zero) i),
-      Goldilocks.sub (sib i).x1 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x1 (cur k).x1) (fun _ => Goldilocks.zero) i),
-      Goldilocks.sub (sib i).x2 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x2 (cur k).x2) (fun _ => Goldilocks.zero) i),
-      Goldilocks.sub (sib i).x3 (vcMulGate3 b (fun k => Goldilocks.sub (sib k).x3 (cur k).x3) (fun _ => Goldilocks.zero) i)⟩,
-     ⟨vcConstWire3 (vcSchemaLo epoch) i,
-      vcConstWire3 (Goldilocks.ofNat layer) i,
-      vcConstWire3 (Goldilocks.ofNat vcMerkleNodeTag.toNat) i,
-      vcConstWire3 (vcSchemaHiWithTag epoch poseidon2ConstIV) i⟩⟩) e
-  dsimp only [vcPairAtState12, pairAddGold, pairSubGold, vcPairAt] at hsp ⊢
-  rw [hsp]
-
-private theorem vcSum3_sub (a b : VcWire3) :
-    vcSum3 (fun i => Goldilocks.sub (a i) (b i)) = Goldilocks.sub (vcSum3 a) (vcSum3 b) := by
-  unfold vcSum3
-  dsimp only
-  rw [← goldOfInt_nat (a 0), ← goldOfInt_nat (b 0), ← goldOfInt_nat (a 1),
-      ← goldOfInt_nat (b 1), ← goldOfInt_nat (a 2), ← goldOfInt_nat (b 2)]
-  simp only [goldOfInt_add, goldOfInt_sub]; congr 1; omega
-
-private theorem vcSum3_add (a b : VcWire3) :
-    vcSum3 (fun i => Goldilocks.add (a i) (b i)) = Goldilocks.add (vcSum3 a) (vcSum3 b) := by
-  unfold vcSum3
-  dsimp only
-  rw [← goldOfInt_nat (a 0), ← goldOfInt_nat (b 0), ← goldOfInt_nat (a 1),
-      ← goldOfInt_nat (b 1), ← goldOfInt_nat (a 2), ← goldOfInt_nat (b 2)]
-  simp only [goldOfInt_add]; congr 1; omega
-
-private theorem pairCheckMerkleLevel_extract3 {epoch : UInt64} {layer : Nat}
-    {cur : VcLane4_3} {lv : Fin 3 → PartyMerkleLevelView}
-    {o0 o1 o2 : (Lane4 × Lane4) × (Goldilocks × Goldilocks)}
-    (h0 : pairCheckMerkleLevel 0 epoch layer (vcPairAtLane4 cur 0) (lv 0) (lv 1) = some o0)
-    (h1 : pairCheckMerkleLevel 1 epoch layer (vcPairAtLane4 cur 1) (lv 1) (lv 2) = some o1)
-    (h2 : pairCheckMerkleLevel 2 epoch layer (vcPairAtLane4 cur 2) (lv 2) (lv 0) = some o2) :
-    ∃ (nextCur : VcLane4_3) (bz : VcWire3),
-      o0 = (vcPairAtLane4 nextCur 0, vcPairAt bz 0) ∧
-      o1 = (vcPairAtLane4 nextCur 1, vcPairAt bz 1) ∧
-      o2 = (vcPairAtLane4 nextCur 2, vcPairAt bz 2) ∧
-      vcSum3 bz = Goldilocks.mul (vcSum3 (fun i => (lv i).bitShare))
-        (Goldilocks.sub Goldilocks.one (vcSum3 (fun i => (lv i).bitShare))) ∧
-      vcSumLane4_3 nextCur =
-        vcMerkleStepArith epoch layer (vcSumLane4_3 cur)
-          (vcSumLane4_3 (fun i => (lv i).sibShare)) (vcSum3 (fun i => (lv i).bitShare)) := by
-  unfold pairCheckMerkleLevel at h0 h1 h2
-  rw [vcConstPair_spec Goldilocks.one 0, vcConstPair_spec (vcSchemaLo epoch) 0,
-      vcConstPair_spec (Goldilocks.ofNat layer) 0, vcConstPair_spec (Goldilocks.ofNat vcMerkleNodeTag.toNat) 0,
-      vcConstPair_spec (vcSchemaHiWithTag epoch poseidon2ConstIV) 0] at h0
-  rw [vcConstPair_spec Goldilocks.one 1, vcConstPair_spec (vcSchemaLo epoch) 1,
-      vcConstPair_spec (Goldilocks.ofNat layer) 1, vcConstPair_spec (Goldilocks.ofNat vcMerkleNodeTag.toNat) 1,
-      vcConstPair_spec (vcSchemaHiWithTag epoch poseidon2ConstIV) 1] at h1
-  rw [vcConstPair_spec Goldilocks.one 2, vcConstPair_spec (vcSchemaLo epoch) 2,
-      vcConstPair_spec (Goldilocks.ofNat layer) 2, vcConstPair_spec (Goldilocks.ofNat vcMerkleNodeTag.toNat) 2,
-      vcConstPair_spec (vcSchemaHiWithTag epoch poseidon2ConstIV) 2] at h2
-  let bw : VcWire3 := fun i => (lv i).bitShare
-  let omb : VcWire3 := fun i => Goldilocks.sub (vcConstWire3 Goldilocks.one i) (bw i)
-  dsimp only [vcPairAtLane4, vcPairAt, vcNextParty3, pairSubGold, pairAddGold] at h0 h1 h2
-  cases hb0 : pairCheckMul (vcPairAt bw 0) (vcPairAt omb 0) (lv 0).boolGate (lv 1).boolGate with
-  | none =>
-    have hb0' := hb0; dsimp only [bw, omb, vcPairAt, vcNextParty3] at hb0'
-    rw [hb0'] at h0; cases h0
-  | some bz0 =>
-  cases hb1 : pairCheckMul (vcPairAt bw 1) (vcPairAt omb 1) (lv 1).boolGate (lv 2).boolGate with
-  | none =>
-    have hb1' := hb1; dsimp only [bw, omb, vcPairAt, vcNextParty3] at hb1'
-    rw [hb1'] at h1; cases h1
-  | some bz1 =>
-  cases hb2 : pairCheckMul (vcPairAt bw 2) (vcPairAt omb 2) (lv 2).boolGate (lv 0).boolGate with
-  | none =>
-    have hb2' := hb2; dsimp only [bw, omb, vcPairAt, vcNextParty3] at hb2'
-    rw [hb2'] at h2; cases h2
-  | some bz2 =>
-    have hb0' := hb0; dsimp only [bw, omb, vcPairAt, vcNextParty3] at hb0'
-    have hb1' := hb1; dsimp only [bw, omb, vcPairAt, vcNextParty3] at hb1'
-    have hb2' := hb2; dsimp only [bw, omb, vcPairAt, vcNextParty3] at hb2'
-    rw [hb0'] at h0; rw [hb1'] at h1; rw [hb2'] at h2
-    dsimp only at h0 h1 h2
-    let dw0 : VcWire3 := fun i => Goldilocks.sub (lv i).sibShare.x0 (cur i).x0
-    let dw1 : VcWire3 := fun i => Goldilocks.sub (lv i).sibShare.x1 (cur i).x1
-    let dw2 : VcWire3 := fun i => Goldilocks.sub (lv i).sibShare.x2 (cur i).x2
-    let dw3 : VcWire3 := fun i => Goldilocks.sub (lv i).sibShare.x3 (cur i).x3
-    cases s00 : pairCheckMul (vcPairAt bw 0) (vcPairAt dw0 0) (lv 0).sel0 (lv 1).sel0 with
-    | none => have s00' := s00; dsimp only [bw, dw0, vcPairAt, vcNextParty3] at s00'; rw [s00'] at h0; cases h0
-    | some q00 =>
-    have s00' := s00; dsimp only [bw, dw0, vcPairAt, vcNextParty3] at s00'; rw [s00'] at h0
-    cases s10 : pairCheckMul (vcPairAt bw 0) (vcPairAt dw1 0) (lv 0).sel1 (lv 1).sel1 with
-    | none => have s10' := s10; dsimp only [bw, dw1, vcPairAt, vcNextParty3] at s10'; rw [s10'] at h0; cases h0
-    | some q10 =>
-    have s10' := s10; dsimp only [bw, dw1, vcPairAt, vcNextParty3] at s10'; rw [s10'] at h0
-    cases s20 : pairCheckMul (vcPairAt bw 0) (vcPairAt dw2 0) (lv 0).sel2 (lv 1).sel2 with
-    | none => have s20' := s20; dsimp only [bw, dw2, vcPairAt, vcNextParty3] at s20'; rw [s20'] at h0; cases h0
-    | some q20 =>
-    have s20' := s20; dsimp only [bw, dw2, vcPairAt, vcNextParty3] at s20'; rw [s20'] at h0
-    cases s30 : pairCheckMul (vcPairAt bw 0) (vcPairAt dw3 0) (lv 0).sel3 (lv 1).sel3 with
-    | none => have s30' := s30; dsimp only [bw, dw3, vcPairAt, vcNextParty3] at s30'; rw [s30'] at h0; cases h0
-    | some q30 =>
-    have s30' := s30; dsimp only [bw, dw3, vcPairAt, vcNextParty3] at s30'; rw [s30'] at h0
-    cases s01 : pairCheckMul (vcPairAt bw 1) (vcPairAt dw0 1) (lv 1).sel0 (lv 2).sel0 with
-    | none => have s01' := s01; dsimp only [bw, dw0, vcPairAt, vcNextParty3] at s01'; rw [s01'] at h1; cases h1
-    | some q01 =>
-    have s01' := s01; dsimp only [bw, dw0, vcPairAt, vcNextParty3] at s01'; rw [s01'] at h1
-    cases s11 : pairCheckMul (vcPairAt bw 1) (vcPairAt dw1 1) (lv 1).sel1 (lv 2).sel1 with
-    | none => have s11' := s11; dsimp only [bw, dw1, vcPairAt, vcNextParty3] at s11'; rw [s11'] at h1; cases h1
-    | some q11 =>
-    have s11' := s11; dsimp only [bw, dw1, vcPairAt, vcNextParty3] at s11'; rw [s11'] at h1
-    cases s21 : pairCheckMul (vcPairAt bw 1) (vcPairAt dw2 1) (lv 1).sel2 (lv 2).sel2 with
-    | none => have s21' := s21; dsimp only [bw, dw2, vcPairAt, vcNextParty3] at s21'; rw [s21'] at h1; cases h1
-    | some q21 =>
-    have s21' := s21; dsimp only [bw, dw2, vcPairAt, vcNextParty3] at s21'; rw [s21'] at h1
-    cases s31 : pairCheckMul (vcPairAt bw 1) (vcPairAt dw3 1) (lv 1).sel3 (lv 2).sel3 with
-    | none => have s31' := s31; dsimp only [bw, dw3, vcPairAt, vcNextParty3] at s31'; rw [s31'] at h1; cases h1
-    | some q31 =>
-    have s31' := s31; dsimp only [bw, dw3, vcPairAt, vcNextParty3] at s31'; rw [s31'] at h1
-    cases s02 : pairCheckMul (vcPairAt bw 2) (vcPairAt dw0 2) (lv 2).sel0 (lv 0).sel0 with
-    | none => have s02' := s02; dsimp only [bw, dw0, vcPairAt, vcNextParty3] at s02'; rw [s02'] at h2; cases h2
-    | some q02 =>
-    have s02' := s02; dsimp only [bw, dw0, vcPairAt, vcNextParty3] at s02'; rw [s02'] at h2
-    cases s12 : pairCheckMul (vcPairAt bw 2) (vcPairAt dw1 2) (lv 2).sel1 (lv 0).sel1 with
-    | none => have s12' := s12; dsimp only [bw, dw1, vcPairAt, vcNextParty3] at s12'; rw [s12'] at h2; cases h2
-    | some q12 =>
-    have s12' := s12; dsimp only [bw, dw1, vcPairAt, vcNextParty3] at s12'; rw [s12'] at h2
-    cases s22 : pairCheckMul (vcPairAt bw 2) (vcPairAt dw2 2) (lv 2).sel2 (lv 0).sel2 with
-    | none => have s22' := s22; dsimp only [bw, dw2, vcPairAt, vcNextParty3] at s22'; rw [s22'] at h2; cases h2
-    | some q22 =>
-    have s22' := s22; dsimp only [bw, dw2, vcPairAt, vcNextParty3] at s22'; rw [s22'] at h2
-    cases s32 : pairCheckMul (vcPairAt bw 2) (vcPairAt dw3 2) (lv 2).sel3 (lv 0).sel3 with
-    | none => have s32' := s32; dsimp only [bw, dw3, vcPairAt, vcNextParty3] at s32'; rw [s32'] at h2; cases h2
-    | some q32 =>
-      have s32' := s32; dsimp only [bw, dw3, vcPairAt, vcNextParty3] at s32'; rw [s32'] at h2
-      dsimp only at h0 h1 h2
-      rw [(pairCheckMul_step (g := fun i => (lv i).boolGate) (e := 0) hb0).1] at h0
-      rw [(pairCheckMul_step (g := fun i => (lv i).boolGate) (e := 1) hb1).1] at h1
-      rw [(pairCheckMul_step (g := fun i => (lv i).boolGate) (e := 2) hb2).1] at h2
-      rw [(pairCheckMul_step (g := fun i => (lv i).sel0) (e := 0) s00).1,
-          (pairCheckMul_step (g := fun i => (lv i).sel1) (e := 0) s10).1,
-          (pairCheckMul_step (g := fun i => (lv i).sel2) (e := 0) s20).1,
-          (pairCheckMul_step (g := fun i => (lv i).sel3) (e := 0) s30).1] at h0
-      rw [(pairCheckMul_step (g := fun i => (lv i).sel0) (e := 1) s01).1,
-          (pairCheckMul_step (g := fun i => (lv i).sel1) (e := 1) s11).1,
-          (pairCheckMul_step (g := fun i => (lv i).sel2) (e := 1) s21).1,
-          (pairCheckMul_step (g := fun i => (lv i).sel3) (e := 1) s31).1] at h1
-      rw [(pairCheckMul_step (g := fun i => (lv i).sel0) (e := 2) s02).1,
-          (pairCheckMul_step (g := fun i => (lv i).sel1) (e := 2) s12).1,
-          (pairCheckMul_step (g := fun i => (lv i).sel2) (e := 2) s22).1,
-          (pairCheckMul_step (g := fun i => (lv i).sel3) (e := 2) s32).1] at h2
-      dsimp only [vcPairAt, vcNextParty3] at h0 h1 h2
-      let stIn : VcState12_3 := fun i =>
-        ⟨⟨Goldilocks.add (cur i).x0 (lv i).sel0.out, Goldilocks.add (cur i).x1 (lv i).sel1.out,
-          Goldilocks.add (cur i).x2 (lv i).sel2.out, Goldilocks.add (cur i).x3 (lv i).sel3.out⟩,
-         ⟨Goldilocks.sub (lv i).sibShare.x0 (lv i).sel0.out, Goldilocks.sub (lv i).sibShare.x1 (lv i).sel1.out,
-          Goldilocks.sub (lv i).sibShare.x2 (lv i).sel2.out, Goldilocks.sub (lv i).sibShare.x3 (lv i).sel3.out⟩,
-         ⟨vcConstWire3 (vcSchemaLo epoch) i,
-          vcConstWire3 (Goldilocks.ofNat layer) i,
-          vcConstWire3 (Goldilocks.ofNat vcMerkleNodeTag.toNat) i,
-          vcConstWire3 (vcSchemaHiWithTag epoch poseidon2ConstIV) i⟩⟩
-      cases sp0 : pairCheckSponge12 0 (lv 0).hashView (lv 1).hashView (vcPairAtState12 stIn 0) with
-      | none => have sp0' := sp0; dsimp only [stIn, vcPairAtState12, vcNextParty3] at sp0'; rw [sp0'] at h0; cases h0
-      | some u0 =>
-      cases sp1 : pairCheckSponge12 1 (lv 1).hashView (lv 2).hashView (vcPairAtState12 stIn 1) with
-      | none => have sp1' := sp1; dsimp only [stIn, vcPairAtState12, vcNextParty3] at sp1'; rw [sp1'] at h1; cases h1
-      | some u1 =>
-      cases sp2 : pairCheckSponge12 2 (lv 2).hashView (lv 0).hashView (vcPairAtState12 stIn 2) with
-      | none => have sp2' := sp2; dsimp only [stIn, vcPairAtState12, vcNextParty3] at sp2'; rw [sp2'] at h2; cases h2
-      | some u2 =>
-        have sp0' := sp0; dsimp only [stIn, vcPairAtState12, vcNextParty3] at sp0'
-        have sp1' := sp1; dsimp only [stIn, vcPairAtState12, vcNextParty3] at sp1'
-        have sp2' := sp2; dsimp only [stIn, vcPairAtState12, vcNextParty3] at sp2'
-        rw [sp0'] at h0; rw [sp1'] at h1; rw [sp2'] at h2
-        dsimp only at h0 h1 h2
-        obtain ⟨stOut, hu0, hu1, hu2, hSpSum⟩ :=
-          pairCheckSponge12_extract3 (sv := fun i => (lv i).hashView) sp0 sp1 sp2
-        rw [hu0] at h0; rw [hu1] at h1; rw [hu2] at h2
-        injection h0 with ho0
-        injection h1 with ho1
-        injection h2 with ho2
-        have ho0' : o0 = (vcPairAtLane4 (fun i => (stOut i).b0) 0, vcPairAt (fun i => (lv i).boolGate.out) 0) := ho0.symm
-        have ho1' : o1 = (vcPairAtLane4 (fun i => (stOut i).b0) 1, vcPairAt (fun i => (lv i).boolGate.out) 1) := ho1.symm
-        have ho2' : o2 = (vcPairAtLane4 (fun i => (stOut i).b0) 2, vcPairAt (fun i => (lv i).boolGate.out) 2) := ho2.symm
-        refine ⟨fun i => (stOut i).b0, fun i => (lv i).boolGate.out, ho0', ho1', ho2', ?_, ?_⟩
-        · have hBz := pairCheckMul_extract3 (g := fun i => (lv i).boolGate) hb0 hb1 hb2
-          rw [hBz]
-          congr 1
-          dsimp only [omb]
-          rw [vcSum3_sub, vcSum3_constWire]
-        · have hOutB0 : vcSumLane4_3 (fun i => (stOut i).b0) = (sponge12 (vcSumState12_3 stIn)).b0 := by
-            rw [← hSpSum, vcSumState12_3_lanes]
-          rw [hOutB0]
-          unfold vcMerkleStepArith vcMerkleHashPair vcMerkleState12 vcLane4Scale vcLane4Sub
-          dsimp only
-          rw [lane4Add_eq]
-          congr 2
-          rw [vcSumState12_3_lanes]
-          simp only [vcSumLane4_3_eq]
-          dsimp only [stIn]
-          simp only [vcSum3_add, vcSum3_sub, vcSum3_constWire]
-          rw [pairCheckMul_extract3 (g := fun i => (lv i).sel0) s00 s01 s02,
-              pairCheckMul_extract3 (g := fun i => (lv i).sel1) s10 s11 s12,
-              pairCheckMul_extract3 (g := fun i => (lv i).sel2) s20 s21 s22,
-              pairCheckMul_extract3 (g := fun i => (lv i).sel3) s30 s31 s32]
-          dsimp only [bw, dw0, dw1, dw2, dw3]
-          simp only [vcSum3_sub]
-
-def pairCheckMerklePath (e : Fin 3) (epoch : UInt64) :
-    Nat → (Lane4 × Lane4) → List PartyMerkleLevelView → List PartyMerkleLevelView →
-    Option ((Lane4 × Lane4) × List (Goldilocks × Goldilocks))
-  | _, cur, [], [] => some (cur, [])
-  | layer, cur, lvE :: restE, lvE1 :: restE1 =>
-    match pairCheckMerkleLevel e epoch layer cur lvE lvE1 with
-    | none => none
-    | some (nextCur, bz) =>
-      match pairCheckMerklePath e epoch (layer + 1) nextCur restE restE1 with
-      | none => none
-      | some (rootPair, bzs) => some (rootPair, bz :: bzs)
-  | _, _, _, _ => none
-
-def honestMerklePath3 (epoch : UInt64) :
-    Nat → VcLane4_3 → List (VcWire3 × VcLane4_3) →
-    (Fin 3 → List PartyMerkleLevelView) × VcLane4_3 × List VcWire3
-  | _, cur, [] => (fun _ => [], cur, [])
-  | layer, cur, (b, sib) :: rest =>
-    let step := honestMerkleLevel3 epoch layer cur b sib
-    let tail := honestMerklePath3 epoch (layer + 1) step.2.1 rest
-    (fun i => step.1 i :: tail.1 i, tail.2.1, step.2.2 :: tail.2.2)
-
-private theorem pairCheckMerklePath_honest (epoch : UInt64) :
-    ∀ (layer : Nat) (cur : VcLane4_3) (steps : List (VcWire3 × VcLane4_3)) (e : Fin 3),
-      pairCheckMerklePath e epoch layer (vcPairAtLane4 cur e)
-        ((honestMerklePath3 epoch layer cur steps).1 e)
-        ((honestMerklePath3 epoch layer cur steps).1 (vcNextParty3 e)) =
-        some (vcPairAtLane4 (honestMerklePath3 epoch layer cur steps).2.1 e,
-              (honestMerklePath3 epoch layer cur steps).2.2.map (fun w => vcPairAt w e))
-  | _, _, [], _ => rfl
-  | layer, cur, (b, sib) :: rest, e => by
-    dsimp only [honestMerklePath3, pairCheckMerklePath, List.map]
-    rw [pairCheckMerkleLevel_honest]; dsimp only
-    rw [pairCheckMerklePath_honest epoch (layer + 1) (honestMerkleLevel3 epoch layer cur b sib).2.1 rest e]
-
-private theorem pairCheckMerklePath_extract3 (epoch : UInt64) :
-    ∀ (depth layer : Nat) (cur : VcLane4_3) (lvs : Fin 3 → List PartyMerkleLevelView)
-      {o0 o1 o2 : (Lane4 × Lane4) × List (Goldilocks × Goldilocks)},
-      (lvs 0).length = depth →
-      pairCheckMerklePath 0 epoch layer (vcPairAtLane4 cur 0) (lvs 0) (lvs 1) = some o0 →
-      pairCheckMerklePath 1 epoch layer (vcPairAtLane4 cur 1) (lvs 1) (lvs 2) = some o1 →
-      pairCheckMerklePath 2 epoch layer (vcPairAtLane4 cur 2) (lvs 2) (lvs 0) = some o2 →
-      ∃ (root3 : VcLane4_3) (bzs3 : List VcWire3) (steps : List (Goldilocks × Lane4)),
-        steps.length = depth ∧
-        o0 = (vcPairAtLane4 root3 0, bzs3.map (fun w => vcPairAt w 0)) ∧
-        o1 = (vcPairAtLane4 root3 1, bzs3.map (fun w => vcPairAt w 1)) ∧
-        o2 = (vcPairAtLane4 root3 2, bzs3.map (fun w => vcPairAt w 2)) ∧
-        ((∀ z ∈ bzs3, vcSum3 z = Goldilocks.zero) →
-          ∀ p ∈ steps, p.1 = Goldilocks.zero ∨ p.1 = Goldilocks.one) ∧
-        vcSumLane4_3 root3 = evalVcMerklePathFrom epoch layer (vcSumLane4_3 cur) steps
-  | 0, layer, cur, lvs, o0, o1, o2, hLen0, h0, h1, h2 => by
-    cases hv0 : lvs 0 with
-    | cons _ _ => rw [hv0] at hLen0; cases hLen0
-    | nil =>
-      cases hv1 : lvs 1 with
-      | cons _ _ => rw [hv0, hv1] at h0; cases h0
-      | nil =>
-        cases hv2 : lvs 2 with
-        | cons _ _ => rw [hv1, hv2] at h1; cases h1
-        | nil =>
-          rw [hv0, hv1] at h0; rw [hv1, hv2] at h1; rw [hv2, hv0] at h2
-          dsimp only [pairCheckMerklePath] at h0 h1 h2
-          injection h0 with ho0
-          injection h1 with ho1
-          injection h2 with ho2
-          exact ⟨cur, [], [], rfl, ho0.symm, ho1.symm, ho2.symm,
-            (fun _ _ hp => nomatch hp), rfl⟩
-  | depth + 1, layer, cur, lvs, o0, o1, o2, hLen0, h0, h1, h2 => by
-    cases hv0 : lvs 0 with
-    | nil => rw [hv0] at hLen0; cases hLen0
-    | cons r0 rs0 =>
-      rw [hv0] at hLen0
-      simp only [List.length_cons] at hLen0
-      cases hv1 : lvs 1 with
-      | nil => rw [hv0, hv1] at h0; cases h0
-      | cons r1 rs1 =>
-        cases hv2 : lvs 2 with
-        | nil => rw [hv1, hv2] at h1; cases h1
-        | cons r2 rs2 =>
-          rw [hv0, hv1] at h0; rw [hv1, hv2] at h1; rw [hv2, hv0] at h2
-          dsimp only [pairCheckMerklePath] at h0 h1 h2
-          let lv : Fin 3 → PartyMerkleLevelView := fun | ⟨0, _⟩ => r0 | ⟨1, _⟩ => r1 | ⟨2, _⟩ => r2
-          let rs : Fin 3 → List PartyMerkleLevelView := fun | ⟨0, _⟩ => rs0 | ⟨1, _⟩ => rs1 | ⟨2, _⟩ => rs2
-          cases m0 : pairCheckMerkleLevel 0 epoch layer (vcPairAtLane4 cur 0) (lv 0) (lv 1) with
-          | none => have m0' := m0; dsimp only [lv] at m0'; rw [m0'] at h0; cases h0
-          | some p0 =>
-          cases m1 : pairCheckMerkleLevel 1 epoch layer (vcPairAtLane4 cur 1) (lv 1) (lv 2) with
-          | none => have m1' := m1; dsimp only [lv] at m1'; rw [m1'] at h1; cases h1
-          | some p1 =>
-          cases m2 : pairCheckMerkleLevel 2 epoch layer (vcPairAtLane4 cur 2) (lv 2) (lv 0) with
-          | none => have m2' := m2; dsimp only [lv] at m2'; rw [m2'] at h2; cases h2
-          | some p2 =>
-            have m0' := m0; dsimp only [lv] at m0'
-            have m1' := m1; dsimp only [lv] at m1'
-            have m2' := m2; dsimp only [lv] at m2'
-            rw [m0'] at h0; rw [m1'] at h1; rw [m2'] at h2
-            obtain ⟨nextCur, bz, ep0, ep1, ep2, hBzEq, hNextEq⟩ := pairCheckMerkleLevel_extract3 m0 m1 m2
-            rw [ep0] at h0; rw [ep1] at h1; rw [ep2] at h2
-            dsimp only at h0 h1 h2
-            cases t0 : pairCheckMerklePath 0 epoch (layer + 1) (vcPairAtLane4 nextCur 0) (rs 0) (rs 1) with
-            | none => have t0' := t0; dsimp only [rs] at t0'; rw [t0'] at h0; cases h0
-            | some q0 =>
-            cases t1 : pairCheckMerklePath 1 epoch (layer + 1) (vcPairAtLane4 nextCur 1) (rs 1) (rs 2) with
-            | none => have t1' := t1; dsimp only [rs] at t1'; rw [t1'] at h1; cases h1
-            | some q1 =>
-            cases t2 : pairCheckMerklePath 2 epoch (layer + 1) (vcPairAtLane4 nextCur 2) (rs 2) (rs 0) with
-            | none => have t2' := t2; dsimp only [rs] at t2'; rw [t2'] at h2; cases h2
-            | some q2 =>
-              have t0' := t0; dsimp only [rs] at t0'
-              have t1' := t1; dsimp only [rs] at t1'
-              have t2' := t2; dsimp only [rs] at t2'
-              rw [t0'] at h0; rw [t1'] at h1; rw [t2'] at h2
-              obtain ⟨root3, bzs3, stepsRest, hSLen, eq0, eq1, eq2, hBoolRest, hRootSum⟩ :=
-                pairCheckMerklePath_extract3 epoch depth (layer + 1) nextCur rs (by dsimp [rs]; omega) t0 t1 t2
-              rw [eq0] at h0; rw [eq1] at h1; rw [eq2] at h2
-              dsimp only at h0 h1 h2
-              injection h0 with ho0
-              injection h1 with ho1
-              injection h2 with ho2
-              let bVal := vcSum3 (fun i => (lv i).bitShare)
-              let sibVal := vcSumLane4_3 (fun i => (lv i).sibShare)
-              refine ⟨root3, bz :: bzs3, (bVal, sibVal) :: stepsRest,
-                by simp [hSLen], ho0.symm, ho1.symm, ho2.symm, ?_, ?_⟩
-              · intro hAllZ p hp
-                rcases List.mem_cons.mp hp with rfl | hpRest
-                · have h0Bz : vcSum3 bz = Goldilocks.zero := hAllZ bz (.head bzs3)
-                  rw [hBzEq] at h0Bz
-                  exact goldilocks_bool_gate_zero_or_one bVal h0Bz
-                · exact hBoolRest (fun z hz => hAllZ z (.tail bz hz)) p hpRest
-              · dsimp only [evalVcMerklePathFrom]
-                rw [← hNextEq]
-                exact hRootSum
-
-/-! ### §4.4 Full Selective-Disclosure Verifier (`verifyBlindVcPresentation`), Extraction & Multi-Rep Hiding -/
-
-/-- Single party's complete repetition view (`blind_vc.rs:758-771, 1939-2075`):
-    holds ONLY party `i`'s shares of the 6 attributes, `holder_blind`, `pres_blind`,
-    Merkle path levels, and `sponge12` gate views for `attr_commit`, `pres_commit`, and `scope_tag`. -/
-structure PartyVcRepView where
-  attrShares : List Goldilocks
-  holderBlindShare : Lane4
-  presBlindShare : Lane4
-  attrSponge : PartySponge12View
-  merkleLevels : List PartyMerkleLevelView
-  presSponge : PartySponge12View
-  scopeSponge : PartySponge12View
-  deriving DecidableEq, Repr
-
-/-- Claimed 3-party final output shares `final_outs_all3` (`blind_vc.rs:769, 2084-2101`). -/
-structure VcRepFinalOuts3 where
-  rootShares : Fin 3 → Lane4
-  presShares : Fin 3 → Lane4
-  scopeShares : Fin 3 → Lane4
-  boolZeroShares : List (Fin 3 → Goldilocks)
-
-/-- Opened 2-of-3 ZKBoo repetition `OpenedZkBooRepetition` (`blind_vc.rs:758-771`):
-    contains challenge `e`, ONLY the 2 adjacent party views `(viewE, viewE1)`, the unopened
-    3rd party commitment digest `unopenedCommit`, and `finalOuts`. -/
-structure OpenedBlindVcRep where
-  e : Fin 3
-  viewE : PartyVcRepView
-  viewE1 : PartyVcRepView
-  unopenedCommit : List UInt8
-  finalOuts : VcRepFinalOuts3
-
-/-- Pre-challenge committed 3-party repetition triple (`BlindVcRepTriple`). -/
-structure BlindVcRepTriple where
-  parties : Fin 3 → PartyVcRepView
-  partyCommits : Fin 3 → List UInt8
-  finalOuts : VcRepFinalOuts3
-
-def vcUnopenedParty3 : Fin 3 → Fin 3
-  | ⟨0, _⟩ => 2
-  | ⟨1, _⟩ => 0
-  | ⟨2, _⟩ => 1
-
-def openBlindVcRep (rep : BlindVcRepTriple) (e : Fin 3) : OpenedBlindVcRep :=
-  { e := e
-    viewE := rep.parties e
-    viewE1 := rep.parties (vcNextParty3 e)
-    unopenedCommit := rep.partyCommits (vcUnopenedParty3 e)
-    finalOuts := rep.finalOuts }
-
-/-- Selective-disclosure presentation `BlindVcPresentation` (`blind_vc.rs:1840-1898`). -/
-structure BlindVcPresentation where
-  presentationNonce : List UInt8
-  issuerEpoch : UInt64
-  schemaId : UInt64
-  accumulatorRoot : Lane4
-  verifierScopeLimbs : Lane4
-  boundVerifierChallenge : List UInt8
-  disclosedAttrs : List (Nat × Goldilocks)
-  presCommit : Lane4
-  scopeTag : Lane4
-  openedReps : List OpenedBlindVcRep
-
-def vcLookupDisclosed (disclosed : List (Nat × Goldilocks)) (idx : Nat) : Option Goldilocks :=
-  match disclosed.find? (fun p => p.1 == idx) with
-  | some (_, v) => some v
-  | none => none
-
-/-- Check that every disclosed slot `(idx, val)` has `idx < arity` (`blind_vc.rs:1866-1873`). -/
-def vcCheckDisclosedBounds (arity : Nat) (disclosed : List (Nat × Goldilocks)) : Bool :=
-  disclosed.all (fun p => decide (p.1 < arity))
-
-/-- Effective 2-party attribute wire at slot `idx` (`blind_vc.rs:1941-1948`):
-    uses public constant `pubVal` if `idx` is disclosed, or `(vE.attrShares[idx], vE1.attrShares[idx])` otherwise! -/
-def vcAttrPairWire (e : Fin 3) (arity : Nat) (disclosed : List (Nat × Goldilocks))
-    (vE vE1 : PartyVcRepView) (idx : Nat) : Goldilocks × Goldilocks :=
-  if idx < arity then
-    match vcLookupDisclosed disclosed idx with
-    | some pubVal => vcConstPair e pubVal
-    | none => (vcAttrAt vE.attrShares idx, vcAttrAt vE1.attrShares idx)
-  else
-    (Goldilocks.zero, Goldilocks.zero)
-
-def vcCheckBoolZerosPair (e : Fin 3) :
-    List (Goldilocks × Goldilocks) → List (Fin 3 → Goldilocks) → Bool
-  | [], [] => true
-  | p :: ps, f :: fs =>
-    decide (p = (f e, f (vcNextParty3 e))) &&
-    decide (vcSum3 f = Goldilocks.zero) &&
-    vcCheckBoolZerosPair e ps fs
-  | _, _ => false
-
-/-- Verify a single opened 2-of-3 repetition against expected challenge `expectedChal` (`blind_vc.rs:1907-2102`).
-    Takes ONLY the opened 2-party views `(o.viewE, o.viewE1)` — the unopened 3rd party's secret view is absent! -/
-def verifyOpenedBlindVcRep (schema : VcSchema) (treeDepth : Nat)
-    (epoch : UInt64) (accRoot scopeLimbs presCommit scopeTag : Lane4)
-    (disclosed : List (Nat × Goldilocks))
-    (expectedChal : Fin 3) (o : OpenedBlindVcRep) : Bool :=
-  if o.e = expectedChal &&
-     decide (o.viewE.attrShares.length = schema.arity) &&
-     decide (o.viewE1.attrShares.length = schema.arity) &&
-     decide (o.viewE.merkleLevels.length = treeDepth) &&
-     decide (o.viewE1.merkleLevels.length = treeDepth) then
-    let e := o.e
-    let a0 := vcAttrPairWire e schema.arity disclosed o.viewE o.viewE1 0
-    let a1 := vcAttrPairWire e schema.arity disclosed o.viewE o.viewE1 1
-    let a2 := vcAttrPairWire e schema.arity disclosed o.viewE o.viewE1 2
-    let a3 := vcAttrPairWire e schema.arity disclosed o.viewE o.viewE1 3
-    let a4 := vcAttrPairWire e schema.arity disclosed o.viewE o.viewE1 4
-    let a5 := vcAttrPairWire e schema.arity disclosed o.viewE o.viewE1 5
-    let hb0 := (o.viewE.holderBlindShare.x0, o.viewE1.holderBlindShare.x0)
-    let hb1 := (o.viewE.holderBlindShare.x1, o.viewE1.holderBlindShare.x1)
-    let hb2 := (o.viewE.holderBlindShare.x2, o.viewE1.holderBlindShare.x2)
-    let hb3 := (o.viewE.holderBlindShare.x3, o.viewE1.holderBlindShare.x3)
-    let pb0 := (o.viewE.presBlindShare.x0, o.viewE1.presBlindShare.x0)
-    let pb1 := (o.viewE.presBlindShare.x1, o.viewE1.presBlindShare.x1)
-    let pb2 := (o.viewE.presBlindShare.x2, o.viewE1.presBlindShare.x2)
-    let pb3 := (o.viewE.presBlindShare.x3, o.viewE1.presBlindShare.x3)
-    let sidLo := vcConstPair e (vcSchemaLo schema.schemaId)
-    let sidAttrHi := vcConstPair e (vcSchemaHiWithTag schema.schemaId vcAttrCommitTag)
-    let sidPresHi := vcConstPair e (vcSchemaHiWithTag schema.schemaId vcPresCommitTag)
-    let sidScopeHi := vcConstPair e (vcSchemaHiWithTag schema.schemaId vcScopeTagDom)
-    let stAttrE : Poseidon2State12 :=
-      ⟨⟨a0.1, a1.1, a2.1, a3.1⟩, ⟨a4.1, a5.1, hb0.1, hb1.1⟩, ⟨hb2.1, hb3.1, sidLo.1, sidAttrHi.1⟩⟩
-    let stAttrE1 : Poseidon2State12 :=
-      ⟨⟨a0.2, a1.2, a2.2, a3.2⟩, ⟨a4.2, a5.2, hb0.2, hb1.2⟩, ⟨hb2.2, hb3.2, sidLo.2, sidAttrHi.2⟩⟩
-    let stPresE : Poseidon2State12 :=
-      ⟨⟨a0.1, a1.1, a2.1, a3.1⟩, ⟨a4.1, a5.1, pb0.1, pb1.1⟩, ⟨pb2.1, pb3.1, sidLo.1, sidPresHi.1⟩⟩
-    let stPresE1 : Poseidon2State12 :=
-      ⟨⟨a0.2, a1.2, a2.2, a3.2⟩, ⟨a4.2, a5.2, pb0.2, pb1.2⟩, ⟨pb2.2, pb3.2, sidLo.2, sidPresHi.2⟩⟩
-    let sc0 := vcConstPair e scopeLimbs.x0
-    let sc1 := vcConstPair e scopeLimbs.x1
-    let sc2 := vcConstPair e scopeLimbs.x2
-    let sc3 := vcConstPair e scopeLimbs.x3
-    let stScE : Poseidon2State12 :=
-      ⟨⟨hb0.1, hb1.1, hb2.1, hb3.1⟩, ⟨sc0.1, sc1.1, sc2.1, sc3.1⟩,
-       ⟨Goldilocks.zero, Goldilocks.zero, sidLo.1, sidScopeHi.1⟩⟩
-    let stScE1 : Poseidon2State12 :=
-      ⟨⟨hb0.2, hb1.2, hb2.2, hb3.2⟩, ⟨sc0.2, sc1.2, sc2.2, sc3.2⟩,
-       ⟨Goldilocks.zero, Goldilocks.zero, sidLo.2, sidScopeHi.2⟩⟩
-    match pairCheckSponge12 e o.viewE.attrSponge o.viewE1.attrSponge (stAttrE, stAttrE1),
-          pairCheckSponge12 e o.viewE.presSponge o.viewE1.presSponge (stPresE, stPresE1),
-          pairCheckSponge12 e o.viewE.scopeSponge o.viewE1.scopeSponge (stScE, stScE1) with
-    | some attrOut, some presOut, some scOut =>
-      match pairCheckMerklePath e epoch 0 (attrOut.1.b0, attrOut.2.b0)
-              o.viewE.merkleLevels o.viewE1.merkleLevels with
-      | none => false
-      | some (rootPair, bzPairs) =>
-        let e1 := vcNextParty3 e
-        decide (rootPair = (o.finalOuts.rootShares e, o.finalOuts.rootShares e1)) &&
-        decide ((presOut.1.b0, presOut.2.b0) = (o.finalOuts.presShares e, o.finalOuts.presShares e1)) &&
-        decide ((scOut.1.b0, scOut.2.b0) = (o.finalOuts.scopeShares e, o.finalOuts.scopeShares e1)) &&
-        decide (vcSumLane4_3 o.finalOuts.rootShares = accRoot) &&
-        decide (vcSumLane4_3 o.finalOuts.presShares = presCommit) &&
-        decide (vcSumLane4_3 o.finalOuts.scopeShares = scopeTag) &&
-        vcCheckBoolZerosPair e bzPairs o.finalOuts.boolZeroShares
-    | _, _, _ => false
-  else
-    false
-
-def verifyAllBlindVcReps (schema : VcSchema) (treeDepth : Nat)
-    (epoch : UInt64) (accRoot scopeLimbs presCommit scopeTag : Lane4)
-    (disclosed : List (Nat × Goldilocks))
-    (chalAt : Nat → Fin 3) : Nat → List OpenedBlindVcRep → Bool
-  | _, [] => true
-  | repIdx, o :: os =>
-    verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag
-      disclosed (chalAt repIdx) o &&
-    verifyAllBlindVcReps schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag
-      disclosed chalAt (repIdx + 1) os
-
-/-- Full `verify_blind_vc_presentation` (`blind_vc.rs:1840-2102`):
-    pins `expectedSchema`, `expectedEpoch`, `expectedAccumulatorRoot`, `expectedVerifierScopeLimbs`,
-    `verifierChallenge`, `expectedReps`, `treeDepth`, disclosed slot bounds, and all ZKBoo repetitions. -/
-@[expose] def verifyBlindVcPresentation
-    (expectedSchema : VcSchema)
-    (expectedEpoch : UInt64)
-    (expectedAccumulatorRoot : Lane4)
-    (expectedVerifierScopeLimbs : Lane4)
-    (verifierChallenge : List UInt8)
-    (expectedReps treeDepth : Nat)
-    (chalOracle : BlindVcPresentation → List UInt8 → Nat → Fin 3)
-    (pres : BlindVcPresentation) : Bool :=
-  decide (pres.schemaId = expectedSchema.schemaId) &&
-  decide (pres.issuerEpoch = expectedEpoch) &&
-  decide (pres.accumulatorRoot = expectedAccumulatorRoot) &&
-  decide (pres.verifierScopeLimbs = expectedVerifierScopeLimbs) &&
-  decide (pres.boundVerifierChallenge = verifierChallenge) &&
-  decide (pres.openedReps.length = expectedReps) &&
-  vcCheckDisclosedBounds expectedSchema.arity pres.disclosedAttrs &&
-  verifyAllBlindVcReps expectedSchema treeDepth expectedEpoch expectedAccumulatorRoot
-    expectedVerifierScopeLimbs pres.presCommit pres.scopeTag pres.disclosedAttrs
-    (chalOracle pres verifierChallenge) 0 pres.openedReps
-
-/-- Disclosed attribute agreement predicate: every `(idx, pubVal) ∈ disclosed` matches `attrs[idx]? = some pubVal`. -/
-def vcDisclosedMatches (attrs : List Goldilocks) (disclosed : List (Nat × Goldilocks)) : Prop :=
-  ∀ p ∈ disclosed, attrs[p.1]? = some p.2
-
-def vcEffectiveAttrWire3 (arity : Nat) (disclosed : List (Nat × Goldilocks))
-    (parties : Fin 3 → PartyVcRepView) (idx : Nat) : VcWire3 :=
-  if idx < arity then
-    match vcLookupDisclosed disclosed idx with
-    | some pubVal => vcConstWire3 pubVal
-    | none => fun i => vcAttrAt (parties i).attrShares idx
-  else
-    fun _ => Goldilocks.zero
-
-private theorem vcAttrPairWire_spec (arity : Nat) (disclosed : List (Nat × Goldilocks))
-    (parties : Fin 3 → PartyVcRepView) (idx : Nat) (e : Fin 3) :
-    vcAttrPairWire e arity disclosed (parties e) (parties (vcNextParty3 e)) idx =
-      vcPairAt (vcEffectiveAttrWire3 arity disclosed parties idx) e := by
-  unfold vcAttrPairWire vcEffectiveAttrWire3
-  if hLt : idx < arity then
-    rw [ite_true_of hLt, ite_true_of hLt]
-    cases vcLookupDisclosed disclosed idx with
-    | some pubVal => exact vcConstPair_spec pubVal e
-    | none => rfl
-  else
-    rw [ite_false_of hLt, ite_false_of hLt]
-    rfl
-
-def vcExtractedAttrs (arity : Nat) (disclosed : List (Nat × Goldilocks))
-    (parties : Fin 3 → PartyVcRepView) : List Goldilocks :=
-  (List.range arity).map (fun idx => vcSum3 (vcEffectiveAttrWire3 arity disclosed parties idx))
-
-private theorem vcExtractedAttrs_length (arity : Nat) (disclosed : List (Nat × Goldilocks))
-    (parties : Fin 3 → PartyVcRepView) :
-    (vcExtractedAttrs arity disclosed parties).length = arity := by
-  unfold vcExtractedAttrs
-  rw [List.length_map, List.length_range]
-
-private theorem vcExtractedAttrs_at (arity : Nat)
-    (disclosed : List (Nat × Goldilocks)) (parties : Fin 3 → PartyVcRepView) (idx : Nat) :
-    vcAttrAt (vcExtractedAttrs arity disclosed parties) idx =
-      vcSum3 (vcEffectiveAttrWire3 arity disclosed parties idx) := by
-  unfold vcAttrAt vcExtractedAttrs
-  if hLt : idx < arity then
-    have hLen : idx < ((List.range arity).map (fun j => vcSum3 (vcEffectiveAttrWire3 arity disclosed parties j))).length := by
-      rw [List.length_map, List.length_range]; exact hLt
-    rw [List.getElem?_eq_getElem hLen]
-    dsimp only [Option.getD]
-    rw [List.getElem_map, List.getElem_range]
-  else
-    have hGe : ((List.range arity).map (fun j => vcSum3 (vcEffectiveAttrWire3 arity disclosed parties j))).length ≤ idx := by
-      rw [List.length_map, List.length_range]; omega
-    rw [List.getElem?_eq_none hGe]
-    dsimp only [Option.getD]
-    unfold vcEffectiveAttrWire3
-    rw [ite_false_of hLt]
-    unfold vcSum3
-    rw [← goldOfInt_nat Goldilocks.zero]
-    simp only [Goldilocks.zero_val, goldOfInt_add]; congr 1
-
-private theorem vcLookupDisclosed_of_nodup_mem :
-    ∀ {disclosed : List (Nat × Goldilocks)} {p : Nat × Goldilocks},
-      (disclosed.map Prod.fst).Nodup →
-      p ∈ disclosed →
-      vcLookupDisclosed disclosed p.1 = some p.2
-  | [], _, _, hm => nomatch hm
-  | q :: qs, p, hNd, hm => by
-    rw [List.map_cons, List.Nodup, List.pairwise_cons] at hNd
-    rcases hNd with ⟨hNotMem, hNdTail⟩
-    unfold vcLookupDisclosed
-    dsimp only [List.find?]
-    rcases List.mem_cons.mp hm with rfl | hTail
-    · simp only [beq_self_eq_true]
-    · have hNe : (q.1 == p.1) = false := by
-        cases hBeq : (q.1 == p.1) with
-        | false => rfl
-        | true =>
-          have hEq : q.1 = p.1 := Nat.eq_of_beq_eq_true hBeq
-          exact False.elim (hNotMem p.1 (List.mem_map_of_mem hTail) hEq)
-      rw [hNe]
-      exact vcLookupDisclosed_of_nodup_mem hNdTail hTail
-
-private theorem vcCheckBoolZerosPair_extract :
-    ∀ {e : Fin 3} {pairs : List (Goldilocks × Goldilocks)} {fs : List (Fin 3 → Goldilocks)},
-      vcCheckBoolZerosPair e pairs fs = true →
-      ∀ f ∈ fs, vcSum3 f = Goldilocks.zero
-  | _, [], [], _ => fun _ hm => nomatch hm
-  | _, [], _ :: _, h => by cases h
-  | _, _ :: _, [], h => by cases h
-  | e, p :: ps, f :: fs, h => by
-    unfold vcCheckBoolZerosPair at h
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at h
-    intro g hg
-    rcases List.mem_cons.mp hg with rfl | hRest
-    · exact h.1.2
-    · exact vcCheckBoolZerosPair_extract h.2 g hRest
-
-private theorem vcCheckBoolZerosPair_eq_map :
-    ∀ {bzs3 fs : List VcWire3},
-      vcCheckBoolZerosPair 0 (bzs3.map (fun w => vcPairAt w 0)) fs = true →
-      vcCheckBoolZerosPair 1 (bzs3.map (fun w => vcPairAt w 1)) fs = true →
-      vcCheckBoolZerosPair 2 (bzs3.map (fun w => vcPairAt w 2)) fs = true →
-      ∀ z ∈ bzs3, vcSum3 z = Goldilocks.zero
-  | [], [], _, _, _ => fun _ hm => nomatch hm
-  | [], _ :: _, h0, _, _ => by cases h0
-  | _ :: _, [], h0, _, _ => by cases h0
-  | w :: ws, f :: fs, h0, h1, h2 => by
-    dsimp only [List.map, vcCheckBoolZerosPair] at h0 h1 h2
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at h0 h1 h2
-    have hwEqF : w = f := by
-      apply funext
-      refine fin3_all ?_ ?_ ?_
-      · exact (congrArg Prod.fst h0.1.1)
-      · exact (congrArg Prod.fst h1.1.1)
-      · exact (congrArg Prod.fst h2.1.1)
-    intro z hz
-    rcases List.mem_cons.mp hz with rfl | hRest
-    · rw [hwEqF]; exact h0.1.2
-    · exact vcCheckBoolZerosPair_eq_map h0.2 h1.2 h2.2 z hRest
-
-private theorem verifyOpenedBlindVcRep_extract3
-    (schema : VcSchema) (treeDepth : Nat)
-    (epoch : UInt64) (accRoot scopeLimbs presCommit scopeTag : Lane4)
-    (disclosed : List (Nat × Goldilocks))
-    (hBounds : vcCheckDisclosedBounds schema.arity disclosed = true)
-    (hNd : (disclosed.map Prod.fst).Nodup)
-    (rep : BlindVcRepTriple)
-    (h0 : verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed 0 (openBlindVcRep rep 0) = true)
-    (h1 : verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed 1 (openBlindVcRep rep 1) = true)
-    (h2 : verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed 2 (openBlindVcRep rep 2) = true) :
-    let attrs := vcExtractedAttrs schema.arity disclosed rep.parties
-    let holderBlind := vcSumLane4_3 (fun i => (rep.parties i).holderBlindShare)
-    let presBlind := vcSumLane4_3 (fun i => (rep.parties i).presBlindShare)
-    attrs.length = schema.arity ∧
-    vcDisclosedMatches attrs disclosed ∧
-    computeVcPoseidon2Commit schema attrs presBlind vcPresCommitTag = some presCommit ∧
-    computeVcScopeTag schema.schemaId holderBlind scopeLimbs = scopeTag ∧
-    ∃ (attrCommit : Lane4) (boolSteps : List (Bool × Lane4)),
-      computeVcPoseidon2Commit schema attrs holderBlind vcAttrCommitTag = some attrCommit ∧
-      boolSteps.length = treeDepth ∧
-      evalVcMerklePathBool epoch 0 attrCommit boolSteps = accRoot := by
-  unfold verifyOpenedBlindVcRep openBlindVcRep at h0 h1 h2
-  dsimp only at h0 h1 h2
-  cases hg0 : (decide (0 = (0 : Fin 3)) &&
-      decide ((rep.parties 0).attrShares.length = schema.arity) &&
-      decide ((rep.parties (vcNextParty3 0)).attrShares.length = schema.arity) &&
-      decide ((rep.parties 0).merkleLevels.length = treeDepth) &&
-      decide ((rep.parties (vcNextParty3 0)).merkleLevels.length = treeDepth)) with
-  | false => rw [hg0] at h0; cases h0
-  | true =>
-  cases hg1 : (decide (1 = (1 : Fin 3)) &&
-      decide ((rep.parties 1).attrShares.length = schema.arity) &&
-      decide ((rep.parties (vcNextParty3 1)).attrShares.length = schema.arity) &&
-      decide ((rep.parties 1).merkleLevels.length = treeDepth) &&
-      decide ((rep.parties (vcNextParty3 1)).merkleLevels.length = treeDepth)) with
-  | false => rw [hg1] at h1; cases h1
-  | true =>
-  cases hg2 : (decide (2 = (2 : Fin 3)) &&
-      decide ((rep.parties 2).attrShares.length = schema.arity) &&
-      decide ((rep.parties (vcNextParty3 2)).attrShares.length = schema.arity) &&
-      decide ((rep.parties 2).merkleLevels.length = treeDepth) &&
-      decide ((rep.parties (vcNextParty3 2)).merkleLevels.length = treeDepth)) with
-  | false => rw [hg2] at h2; cases h2
-  | true =>
-    rw [hg0] at h0; rw [hg1] at h1; rw [hg2] at h2
-    rw [ite_true_of rfl] at h0; rw [ite_true_of rfl] at h1; rw [ite_true_of rfl] at h2
-    have hDepth0 : (rep.parties 0).merkleLevels.length = treeDepth := by
-      simp only [Bool.and_eq_true, decide_eq_true_eq] at hg0; exact hg0.1.2
-    let aw := vcEffectiveAttrWire3 schema.arity disclosed rep.parties
-    let stAttr3 : VcState12_3 := fun i =>
-      ⟨⟨aw 0 i, aw 1 i, aw 2 i, aw 3 i⟩,
-       ⟨aw 4 i, aw 5 i, (rep.parties i).holderBlindShare.x0, (rep.parties i).holderBlindShare.x1⟩,
-       ⟨(rep.parties i).holderBlindShare.x2, (rep.parties i).holderBlindShare.x3,
-        vcConstWire3 (vcSchemaLo schema.schemaId) i,
-        vcConstWire3 (vcSchemaHiWithTag schema.schemaId vcAttrCommitTag) i⟩⟩
-    let stPres3 : VcState12_3 := fun i =>
-      ⟨⟨aw 0 i, aw 1 i, aw 2 i, aw 3 i⟩,
-       ⟨aw 4 i, aw 5 i, (rep.parties i).presBlindShare.x0, (rep.parties i).presBlindShare.x1⟩,
-       ⟨(rep.parties i).presBlindShare.x2, (rep.parties i).presBlindShare.x3,
-        vcConstWire3 (vcSchemaLo schema.schemaId) i,
-        vcConstWire3 (vcSchemaHiWithTag schema.schemaId vcPresCommitTag) i⟩⟩
-    let stSc3 : VcState12_3 := fun i =>
-      ⟨(rep.parties i).holderBlindShare,
-       ⟨vcConstWire3 scopeLimbs.x0 i, vcConstWire3 scopeLimbs.x1 i,
-        vcConstWire3 scopeLimbs.x2 i, vcConstWire3 scopeLimbs.x3 i⟩,
-       ⟨Goldilocks.zero, Goldilocks.zero,
-        vcConstWire3 (vcSchemaLo schema.schemaId) i,
-        vcConstWire3 (vcSchemaHiWithTag schema.schemaId vcScopeTagDom) i⟩⟩
-    rw [vcAttrPairWire_spec, vcAttrPairWire_spec, vcAttrPairWire_spec,
-        vcAttrPairWire_spec, vcAttrPairWire_spec, vcAttrPairWire_spec,
-        vcConstPair_spec, vcConstPair_spec, vcConstPair_spec, vcConstPair_spec,
-        vcConstPair_spec, vcConstPair_spec, vcConstPair_spec, vcConstPair_spec] at h0
-    rw [vcAttrPairWire_spec, vcAttrPairWire_spec, vcAttrPairWire_spec,
-        vcAttrPairWire_spec, vcAttrPairWire_spec, vcAttrPairWire_spec,
-        vcConstPair_spec, vcConstPair_spec, vcConstPair_spec, vcConstPair_spec,
-        vcConstPair_spec, vcConstPair_spec, vcConstPair_spec, vcConstPair_spec] at h1
-    rw [vcAttrPairWire_spec, vcAttrPairWire_spec, vcAttrPairWire_spec,
-        vcAttrPairWire_spec, vcAttrPairWire_spec, vcAttrPairWire_spec,
-        vcConstPair_spec, vcConstPair_spec, vcConstPair_spec, vcConstPair_spec,
-        vcConstPair_spec, vcConstPair_spec, vcConstPair_spec, vcConstPair_spec] at h2
-    dsimp only [vcPairAt, vcNextParty3] at h0 h1 h2
-    cases a0 : pairCheckSponge12 0 (rep.parties 0).attrSponge (rep.parties 1).attrSponge (vcPairAtState12 stAttr3 0) with
-    | none => have a0' := a0; dsimp only [stAttr3, aw, vcPairAtState12, vcNextParty3] at a0'; rw [a0'] at h0; cases h0
-    | some ao0 =>
-    have a0' := a0; dsimp only [stAttr3, aw, vcPairAtState12, vcNextParty3] at a0'; rw [a0'] at h0
-    cases p0 : pairCheckSponge12 0 (rep.parties 0).presSponge (rep.parties 1).presSponge (vcPairAtState12 stPres3 0) with
-    | none => have p0' := p0; dsimp only [stPres3, aw, vcPairAtState12, vcNextParty3] at p0'; rw [p0'] at h0; cases h0
-    | some po0 =>
-    have p0' := p0; dsimp only [stPres3, aw, vcPairAtState12, vcNextParty3] at p0'; rw [p0'] at h0
-    cases s0 : pairCheckSponge12 0 (rep.parties 0).scopeSponge (rep.parties 1).scopeSponge (vcPairAtState12 stSc3 0) with
-    | none => have s0' := s0; dsimp only [stSc3, vcPairAtState12, vcNextParty3] at s0'; rw [s0'] at h0; cases h0
-    | some so0 =>
-    have s0' := s0; dsimp only [stSc3, vcPairAtState12, vcNextParty3] at s0'; rw [s0'] at h0
-    cases a1 : pairCheckSponge12 1 (rep.parties 1).attrSponge (rep.parties 2).attrSponge (vcPairAtState12 stAttr3 1) with
-    | none => have a1' := a1; dsimp only [stAttr3, aw, vcPairAtState12, vcNextParty3] at a1'; rw [a1'] at h1; cases h1
-    | some ao1 =>
-    have a1' := a1; dsimp only [stAttr3, aw, vcPairAtState12, vcNextParty3] at a1'; rw [a1'] at h1
-    cases p1 : pairCheckSponge12 1 (rep.parties 1).presSponge (rep.parties 2).presSponge (vcPairAtState12 stPres3 1) with
-    | none => have p1' := p1; dsimp only [stPres3, aw, vcPairAtState12, vcNextParty3] at p1'; rw [p1'] at h1; cases h1
-    | some po1 =>
-    have p1' := p1; dsimp only [stPres3, aw, vcPairAtState12, vcNextParty3] at p1'; rw [p1'] at h1
-    cases s1 : pairCheckSponge12 1 (rep.parties 1).scopeSponge (rep.parties 2).scopeSponge (vcPairAtState12 stSc3 1) with
-    | none => have s1' := s1; dsimp only [stSc3, vcPairAtState12, vcNextParty3] at s1'; rw [s1'] at h1; cases h1
-    | some so1 =>
-    have s1' := s1; dsimp only [stSc3, vcPairAtState12, vcNextParty3] at s1'; rw [s1'] at h1
-    cases a2 : pairCheckSponge12 2 (rep.parties 2).attrSponge (rep.parties 0).attrSponge (vcPairAtState12 stAttr3 2) with
-    | none => have a2' := a2; dsimp only [stAttr3, aw, vcPairAtState12, vcNextParty3] at a2'; rw [a2'] at h2; cases h2
-    | some ao2 =>
-    have a2' := a2; dsimp only [stAttr3, aw, vcPairAtState12, vcNextParty3] at a2'; rw [a2'] at h2
-    cases p2 : pairCheckSponge12 2 (rep.parties 2).presSponge (rep.parties 0).presSponge (vcPairAtState12 stPres3 2) with
-    | none => have p2' := p2; dsimp only [stPres3, aw, vcPairAtState12, vcNextParty3] at p2'; rw [p2'] at h2; cases h2
-    | some po2 =>
-    have p2' := p2; dsimp only [stPres3, aw, vcPairAtState12, vcNextParty3] at p2'; rw [p2'] at h2
-    cases s2 : pairCheckSponge12 2 (rep.parties 2).scopeSponge (rep.parties 0).scopeSponge (vcPairAtState12 stSc3 2) with
-    | none => have s2' := s2; dsimp only [stSc3, vcPairAtState12, vcNextParty3] at s2'; rw [s2'] at h2; cases h2
-    | some so2 =>
-      have s2' := s2; dsimp only [stSc3, vcPairAtState12, vcNextParty3] at s2'; rw [s2'] at h2
-      dsimp only at h0 h1 h2
-      obtain ⟨attrOut3, hao0, hao1, hao2, hAttrSum⟩ :=
-        pairCheckSponge12_extract3 (sv := fun i => (rep.parties i).attrSponge) a0 a1 a2
-      obtain ⟨presOut3, hpo0, hpo1, hpo2, hPresSum⟩ :=
-        pairCheckSponge12_extract3 (sv := fun i => (rep.parties i).presSponge) p0 p1 p2
-      obtain ⟨scOut3, hso0, hso1, hso2, hScSum⟩ :=
-        pairCheckSponge12_extract3 (sv := fun i => (rep.parties i).scopeSponge) s0 s1 s2
-      rw [hao0, hpo0, hso0] at h0
-      rw [hao1, hpo1, hso1] at h1
-      rw [hao2, hpo2, hso2] at h2
-      dsimp only [vcPairAtState12, vcNextParty3] at h0 h1 h2
-      let attrLeaf3 : VcLane4_3 := fun i => (attrOut3 i).b0
-      cases mk0 : pairCheckMerklePath 0 epoch 0 (vcPairAtLane4 attrLeaf3 0) (rep.parties 0).merkleLevels (rep.parties 1).merkleLevels with
-      | none => have mk0' := mk0; dsimp only [attrLeaf3, vcPairAtLane4, vcNextParty3] at mk0'; rw [mk0'] at h0; cases h0
-      | some mko0 =>
-      cases mk1 : pairCheckMerklePath 1 epoch 0 (vcPairAtLane4 attrLeaf3 1) (rep.parties 1).merkleLevels (rep.parties 2).merkleLevels with
-      | none => have mk1' := mk1; dsimp only [attrLeaf3, vcPairAtLane4, vcNextParty3] at mk1'; rw [mk1'] at h1; cases h1
-      | some mko1 =>
-      cases mk2 : pairCheckMerklePath 2 epoch 0 (vcPairAtLane4 attrLeaf3 2) (rep.parties 2).merkleLevels (rep.parties 0).merkleLevels with
-      | none => have mk2' := mk2; dsimp only [attrLeaf3, vcPairAtLane4, vcNextParty3] at mk2'; rw [mk2'] at h2; cases h2
-      | some mko2 =>
-        have mk0' := mk0; dsimp only [attrLeaf3, vcPairAtLane4, vcNextParty3] at mk0'
-        have mk1' := mk1; dsimp only [attrLeaf3, vcPairAtLane4, vcNextParty3] at mk1'
-        have mk2' := mk2; dsimp only [attrLeaf3, vcPairAtLane4, vcNextParty3] at mk2'
-        rw [mk0'] at h0; rw [mk1'] at h1; rw [mk2'] at h2
-        dsimp only at h0 h1 h2
-        obtain ⟨root3, bzs3, steps, hStepsLen, em0, em1, em2, hBoolImp, hRootEval⟩ :=
-          pairCheckMerklePath_extract3 epoch treeDepth 0 attrLeaf3 (fun i => (rep.parties i).merkleLevels) hDepth0 mk0 mk1 mk2
-        rw [em0] at h0; rw [em1] at h1; rw [em2] at h2
-        dsimp only at h0 h1 h2
-        simp only [Bool.and_eq_true, decide_eq_true_eq] at h0 h1 h2
-        rcases h0 with ⟨⟨⟨⟨⟨⟨hr0, hp0Eq⟩, hs0Eq⟩, hRootTarget⟩, hPresTarget⟩, hScTarget⟩, hBz0⟩
-        rcases h1 with ⟨⟨⟨⟨⟨⟨hr1, hp1Eq⟩, hs1Eq⟩, _⟩, _⟩, _⟩, hBz1⟩
-        rcases h2 with ⟨⟨⟨⟨⟨⟨hr2, hp2Eq⟩, hs2Eq⟩, _⟩, _⟩, _⟩, hBz2⟩
-        have hRootFun : root3 = rep.finalOuts.rootShares := by
-          apply funext
-          refine fin3_all ?_ ?_ ?_
-          · exact congrArg Prod.fst (of_decide_eq_true hr0)
-          · exact congrArg Prod.fst (of_decide_eq_true hr1)
-          · exact congrArg Prod.fst (of_decide_eq_true hr2)
-        have hPresFun : (fun i => (presOut3 i).b0) = rep.finalOuts.presShares := by
-          apply funext
-          refine fin3_all ?_ ?_ ?_
-          · exact congrArg Prod.fst (of_decide_eq_true hp0Eq)
-          · exact congrArg Prod.fst (of_decide_eq_true hp1Eq)
-          · exact congrArg Prod.fst (of_decide_eq_true hp2Eq)
-        have hScFun : (fun i => (scOut3 i).b0) = rep.finalOuts.scopeShares := by
-          apply funext
-          refine fin3_all ?_ ?_ ?_
-          · exact congrArg Prod.fst (of_decide_eq_true hs0Eq)
-          · exact congrArg Prod.fst (of_decide_eq_true hs1Eq)
-          · exact congrArg Prod.fst (of_decide_eq_true hs2Eq)
-        let attrs := vcExtractedAttrs schema.arity disclosed rep.parties
-        let holderBlind := vcSumLane4_3 (fun i => (rep.parties i).holderBlindShare)
-        let presBlind := vcSumLane4_3 (fun i => (rep.parties i).presBlindShare)
-        have hAttrsLen : attrs.length = schema.arity :=
-          vcExtractedAttrs_length schema.arity disclosed rep.parties
-        have hStAttrSum : vcSumState12_3 stAttr3 = vcCommitState12 schema.schemaId attrs holderBlind vcAttrCommitTag := by
-          rw [vcSumState12_3_lanes]
-          dsimp only [attrs, holderBlind, vcCommitState12]
-          simp only [vcSumLane4_3_eq]
-          dsimp only [stAttr3]
-          rw [vcExtractedAttrs_at schema.arity disclosed rep.parties 0,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 1,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 2,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 3,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 4,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 5,
-              vcSum3_constWire, vcSum3_constWire]
-        have hStPresSum : vcSumState12_3 stPres3 = vcCommitState12 schema.schemaId attrs presBlind vcPresCommitTag := by
-          rw [vcSumState12_3_lanes]
-          dsimp only [attrs, presBlind, vcCommitState12]
-          simp only [vcSumLane4_3_eq]
-          dsimp only [stPres3]
-          rw [vcExtractedAttrs_at schema.arity disclosed rep.parties 0,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 1,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 2,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 3,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 4,
-              vcExtractedAttrs_at schema.arity disclosed rep.parties 5,
-              vcSum3_constWire, vcSum3_constWire]
-        have hStScSum : vcSumState12_3 stSc3 = vcScopeState12 schema.schemaId holderBlind scopeLimbs := by
-          rw [vcSumState12_3_lanes]
-          simp only [vcSumLane4_3_eq]
-          dsimp only [stSc3, holderBlind, vcScopeState12]
-          have hzSum : vcSum3 (fun _ => Goldilocks.zero) = Goldilocks.zero := by
-            unfold vcSum3
-            rw [← goldOfInt_nat Goldilocks.zero]
-            simp only [Goldilocks.zero_val, goldOfInt_add]; congr 1
-          simp only [vcSum3_constWire, hzSum]
-          rw [← vcSumLane4_3_eq (fun i => (rep.parties i).holderBlindShare)]
-        refine ⟨hAttrsLen, ?_, ?_, ?_, ?_⟩
-        · intro p hp
-          unfold vcCheckDisclosedBounds at hBounds
-          rw [List.all_eq_true] at hBounds
-          have hpLt : p.1 < schema.arity := of_decide_eq_true (hBounds p hp)
-          have hLenAttrs : p.1 < attrs.length := by rw [hAttrsLen]; exact hpLt
-          have hSome : attrs[p.1]? = some (attrs[p.1]'hLenAttrs) := List.getElem?_eq_getElem hLenAttrs
-          have hAt' : attrs[p.1]'hLenAttrs =
-              vcSum3 (vcEffectiveAttrWire3 schema.arity disclosed rep.parties p.1) := by
-            have hAt := vcExtractedAttrs_at schema.arity disclosed rep.parties p.1
-            unfold vcAttrAt at hAt
-            rw [show (vcExtractedAttrs schema.arity disclosed rep.parties)[p.1]? =
-              some (attrs[p.1]'hLenAttrs) from hSome] at hAt
-            exact hAt
-          rw [hSome, hAt']
-          apply congrArg some
-          unfold vcEffectiveAttrWire3
-          rw [ite_true_of hpLt, vcLookupDisclosed_of_nodup_mem hNd hp]
-          dsimp only
-          rw [vcSum3_constWire]
-        · unfold computeVcPoseidon2Commit
-          rw [ite_true_of hAttrsLen]
-          apply congrArg some
-          rw [← hStPresSum, ← hPresSum, vcSumState12_3_lanes]
-          dsimp only
-          rw [hPresFun, hPresTarget]
-        · unfold computeVcScopeTag
-          rw [← hStScSum, ← hScSum, vcSumState12_3_lanes]
-          dsimp only
-          rw [hScFun, hScTarget]
-        · have hAllBool := hBoolImp (vcCheckBoolZerosPair_eq_map hBz0 hBz1 hBz2)
-          obtain ⟨boolSteps, hBoolLen, hBoolPath⟩ := evalVcMerklePathFrom_eq_bool epoch 0 (vcSumLane4_3 attrLeaf3) steps hAllBool
-          refine ⟨vcSumLane4_3 attrLeaf3, boolSteps, ?_, hBoolLen.trans hStepsLen, ?_⟩
-          · unfold computeVcPoseidon2Commit
-            rw [ite_true_of hAttrsLen]
-            apply congrArg some
-            rw [← hStAttrSum, ← hAttrSum, vcSumState12_3_lanes]
-          · rw [← hBoolPath, ← hRootEval, hRootFun, hRootTarget]
-
-private theorem bool_and5_eq_true {a b c d e : Bool}
-    (ha : a = true) (hb : b = true) (hc : c = true) (hd : d = true) (he : e = true) :
-    (a && b && c && d && e) = true := by
-  subst ha hb hc hd he; rfl
-
-private theorem bool_and7_eq_true {a b c d e f g : Bool}
-    (ha : a = true) (hb : b = true) (hc : c = true) (hd : d = true) (he : e = true)
-    (hf : f = true) (hg : g = true) :
-    (a && b && c && d && e && f && g) = true := by
-  subst ha hb hc hd he hf hg; rfl
-
-/-- Verifier completeness for one opened repetition: if the two opened parties' sponge and Merkle
-    transcripts replay to the committed output shares, `verifyOpenedBlindVcRep` accepts against the
-    reconstructed public outputs. -/
-private theorem verifyOpenedBlindVcRep_complete
-    (schema : VcSchema) (treeDepth : Nat) (epoch : UInt64) (scopeLimbs : Lane4)
-    (disclosed : List (Nat × Goldilocks)) (rep : BlindVcRepTriple) (e : Fin 3)
-    (attrOut presOut scOut : VcState12_3) (bzs : List VcWire3)
-    (hLenE : (rep.parties e).attrShares.length = schema.arity)
-    (hLenE1 : (rep.parties (vcNextParty3 e)).attrShares.length = schema.arity)
-    (hDepE : (rep.parties e).merkleLevels.length = treeDepth)
-    (hDepE1 : (rep.parties (vcNextParty3 e)).merkleLevels.length = treeDepth)
-    (hAttr : pairCheckSponge12 e (rep.parties e).attrSponge (rep.parties (vcNextParty3 e)).attrSponge
-        (vcPairAtState12 (fun i =>
-          ⟨⟨vcEffectiveAttrWire3 schema.arity disclosed rep.parties 0 i, vcEffectiveAttrWire3 schema.arity disclosed rep.parties 1 i,
-            vcEffectiveAttrWire3 schema.arity disclosed rep.parties 2 i, vcEffectiveAttrWire3 schema.arity disclosed rep.parties 3 i⟩,
-           ⟨vcEffectiveAttrWire3 schema.arity disclosed rep.parties 4 i, vcEffectiveAttrWire3 schema.arity disclosed rep.parties 5 i,
-            (rep.parties i).holderBlindShare.x0, (rep.parties i).holderBlindShare.x1⟩,
-           ⟨(rep.parties i).holderBlindShare.x2, (rep.parties i).holderBlindShare.x3,
-            vcConstWire3 (vcSchemaLo schema.schemaId) i,
-            vcConstWire3 (vcSchemaHiWithTag schema.schemaId vcAttrCommitTag) i⟩⟩) e) =
-          some (vcPairAtState12 attrOut e))
-    (hPres : pairCheckSponge12 e (rep.parties e).presSponge (rep.parties (vcNextParty3 e)).presSponge
-        (vcPairAtState12 (fun i =>
-          ⟨⟨vcEffectiveAttrWire3 schema.arity disclosed rep.parties 0 i, vcEffectiveAttrWire3 schema.arity disclosed rep.parties 1 i,
-            vcEffectiveAttrWire3 schema.arity disclosed rep.parties 2 i, vcEffectiveAttrWire3 schema.arity disclosed rep.parties 3 i⟩,
-           ⟨vcEffectiveAttrWire3 schema.arity disclosed rep.parties 4 i, vcEffectiveAttrWire3 schema.arity disclosed rep.parties 5 i,
-            (rep.parties i).presBlindShare.x0, (rep.parties i).presBlindShare.x1⟩,
-           ⟨(rep.parties i).presBlindShare.x2, (rep.parties i).presBlindShare.x3,
-            vcConstWire3 (vcSchemaLo schema.schemaId) i,
-            vcConstWire3 (vcSchemaHiWithTag schema.schemaId vcPresCommitTag) i⟩⟩) e) =
-          some (vcPairAtState12 presOut e))
-    (hSc : pairCheckSponge12 e (rep.parties e).scopeSponge (rep.parties (vcNextParty3 e)).scopeSponge
-        (vcPairAtState12 (fun i =>
-          ⟨(rep.parties i).holderBlindShare,
-           ⟨vcConstWire3 scopeLimbs.x0 i, vcConstWire3 scopeLimbs.x1 i,
-            vcConstWire3 scopeLimbs.x2 i, vcConstWire3 scopeLimbs.x3 i⟩,
-           ⟨Goldilocks.zero, Goldilocks.zero,
-            vcConstWire3 (vcSchemaLo schema.schemaId) i,
-            vcConstWire3 (vcSchemaHiWithTag schema.schemaId vcScopeTagDom) i⟩⟩) e) =
-          some (vcPairAtState12 scOut e))
-    (hMk : pairCheckMerklePath e epoch 0 (vcPairAtLane4 (fun i => (attrOut i).b0) e)
-        (rep.parties e).merkleLevels (rep.parties (vcNextParty3 e)).merkleLevels =
-          some (vcPairAtLane4 rep.finalOuts.rootShares e, bzs.map (fun w => vcPairAt w e)))
-    (hPresOut : ∀ i, (presOut i).b0 = rep.finalOuts.presShares i)
-    (hScOut : ∀ i, (scOut i).b0 = rep.finalOuts.scopeShares i)
-    (hBz : vcCheckBoolZerosPair e (bzs.map (fun w => vcPairAt w e)) rep.finalOuts.boolZeroShares = true) :
-    verifyOpenedBlindVcRep schema treeDepth epoch (vcSumLane4_3 rep.finalOuts.rootShares) scopeLimbs
-      (vcSumLane4_3 rep.finalOuts.presShares) (vcSumLane4_3 rep.finalOuts.scopeShares)
-      disclosed e (openBlindVcRep rep e) = true := by
-  unfold verifyOpenedBlindVcRep openBlindVcRep
-  dsimp only
-  refine (ite_true_of ?hGuard _ _).trans ?hBody
-  case hGuard =>
-    exact bool_and5_eq_true (decide_eq_true rfl) (decide_eq_true hLenE) (decide_eq_true hLenE1)
-      (decide_eq_true hDepE) (decide_eq_true hDepE1)
-  rw [vcAttrPairWire_spec, vcAttrPairWire_spec, vcAttrPairWire_spec,
-      vcAttrPairWire_spec, vcAttrPairWire_spec, vcAttrPairWire_spec,
-      vcConstPair_spec, vcConstPair_spec, vcConstPair_spec, vcConstPair_spec,
-      vcConstPair_spec, vcConstPair_spec, vcConstPair_spec, vcConstPair_spec]
-  dsimp only [vcPairAt]
-  dsimp only [vcPairAtState12] at hAttr hPres hSc
-  rw [hAttr, hPres, hSc]
-  dsimp only
-  dsimp only [vcPairAtLane4] at hMk
-  rw [hMk]
-  dsimp only
-  have hPresPair : ((presOut e).b0, (presOut (vcNextParty3 e)).b0) =
-      (rep.finalOuts.presShares e, rep.finalOuts.presShares (vcNextParty3 e)) := by
-    rw [hPresOut e, hPresOut (vcNextParty3 e)]
-  have hScPair : ((scOut e).b0, (scOut (vcNextParty3 e)).b0) =
-      (rep.finalOuts.scopeShares e, rep.finalOuts.scopeShares (vcNextParty3 e)) := by
-    rw [hScOut e, hScOut (vcNextParty3 e)]
-  exact bool_and7_eq_true (decide_eq_true rfl) (decide_eq_true hPresPair) (decide_eq_true hScPair)
-    (decide_eq_true rfl) (decide_eq_true rfl) (decide_eq_true rfl) hBz
-
-/-- 3-party additive wire sharing from 2 uniform coins `coins = (r0, r1)` (`blind_vc.rs:469-472`). -/
-def zkShareWire3 (val : Goldilocks) (coins : Goldilocks × Goldilocks) : VcWire3
-  | ⟨0, _⟩ => coins.1
-  | ⟨1, _⟩ => coins.2
-  | ⟨2, _⟩ => Goldilocks.sub (Goldilocks.sub val coins.1) coins.2
-
-def zkCoinsFromOpenedPair3 (e : Fin 3) (val : Goldilocks) (view : Goldilocks × Goldilocks) :
-    Goldilocks × Goldilocks :=
-  match e with
-  | ⟨0, _⟩ => view
-  | ⟨1, _⟩ => (Goldilocks.sub (Goldilocks.sub val view.1) view.2, view.1)
-  | ⟨2, _⟩ => (view.2, Goldilocks.sub (Goldilocks.sub val view.1) view.2)
-
-/-- Constructive single-wire coin-to-opened-pair bijection (`0 Classical.choice`). -/
-def zkOpenedPairEquiv3 (e : Fin 3) (val : Goldilocks) :
-    SimpleEquiv (Goldilocks × Goldilocks) (Goldilocks × Goldilocks) where
-  toFun := fun coins => vcPairAt (zkShareWire3 val coins) e
-  invFun := zkCoinsFromOpenedPair3 e val
-  left_inv := fun ⟨r0, r1⟩ => by
-    have hc1 : Goldilocks.sub (Goldilocks.sub val r1) (Goldilocks.sub (Goldilocks.sub val r0) r1) = r0 := by
-      rw [← goldOfInt_nat val, ← goldOfInt_nat r0, ← goldOfInt_nat r1]
-      simp only [goldOfInt_sub]; congr 1; omega
-    have hc2 : Goldilocks.sub (Goldilocks.sub val (Goldilocks.sub (Goldilocks.sub val r0) r1)) r0 = r1 := by
-      rw [← goldOfInt_nat val, ← goldOfInt_nat r0, ← goldOfInt_nat r1]
-      simp only [goldOfInt_sub]; congr 1; omega
-    rcases e with ⟨ev, hev⟩
-    have hc : ev = 0 ∨ ev = 1 ∨ ev = 2 := by omega
-    rcases hc with rfl | rfl | rfl
-    · rfl
-    · dsimp only [vcPairAt, zkShareWire3, zkCoinsFromOpenedPair3, vcNextParty3]; rw [hc1]
-    · dsimp only [vcPairAt, zkShareWire3, zkCoinsFromOpenedPair3, vcNextParty3]; rw [hc2]
-  right_inv := fun ⟨v0, v1⟩ => by
-    have hd1 : Goldilocks.sub (Goldilocks.sub val (Goldilocks.sub (Goldilocks.sub val v0) v1)) v0 = v1 := by
-      rw [← goldOfInt_nat val, ← goldOfInt_nat v0, ← goldOfInt_nat v1]
-      simp only [goldOfInt_sub]; congr 1; omega
-    have hd2 : Goldilocks.sub (Goldilocks.sub val v1) (Goldilocks.sub (Goldilocks.sub val v0) v1) = v0 := by
-      rw [← goldOfInt_nat val, ← goldOfInt_nat v0, ← goldOfInt_nat v1]
-      simp only [goldOfInt_sub]; congr 1; omega
-    rcases e with ⟨ev, hev⟩
-    have hc : ev = 0 ∨ ev = 1 ∨ ev = 2 := by omega
-    rcases hc with rfl | rfl | rfl
-    · rfl
-    · dsimp only [vcPairAt, zkShareWire3, zkCoinsFromOpenedPair3, vcNextParty3]; rw [hd1]
-    · dsimp only [vcPairAt, zkShareWire3, zkCoinsFromOpenedPair3, vcNextParty3]; rw [hd2]
-
-/-- Multi-repetition (`R = 219`), multi-wire (`U` undisclosed secret slots + `holder_blind` + `pres_blind`)
-    joint view bijection (`0 Classical.choice`). -/
-def zkMultiRepViewEquiv {R U : Nat} (chals : Fin R → Fin 3) (secrets : Fin U → Goldilocks) :
-    SimpleEquiv (Fin R → Fin U → (Goldilocks × Goldilocks))
-                (Fin R → Fin U → (Goldilocks × Goldilocks)) where
-  toFun := fun coins rep u => (zkOpenedPairEquiv3 (chals rep) (secrets u)).toFun (coins rep u)
-  invFun := fun views rep u => (zkOpenedPairEquiv3 (chals rep) (secrets u)).invFun (views rep u)
-  left_inv := fun coins => by
-    funext rep u
-    exact (zkOpenedPairEquiv3 (chals rep) (secrets u)).left_inv (coins rep u)
-  right_inv := fun views => by
-    funext rep u
-    exact (zkOpenedPairEquiv3 (chals rep) (secrets u)).right_inv (views rep u)
-
-/-- **Flagship §4.4 Theorem — `BlindVC` Selective-Disclosure Soundness, External-Pinning Refusal &
-    Multi-Repetition Undisclosed-Attribute Hiding (`blind_vc_zkboo_selective_disclosure_sound_and_hiding`, `P1-10`)**:
-    1. **External Parameter & Challenge Pinning (`#tooth` refusal)**: Any mismatch in `schemaId`,
-       `issuerEpoch`, `accumulatorRoot`, `verifierScopeLimbs`, `boundVerifierChallenge`, `openedReps.length`,
-       or out-of-bounds disclosed attribute index forces `verifyBlindVcPresentation = false`;
-    2. **3-Challenge Special Soundness & Authentic Witness Extraction**: Accepting challenges `0, 1, 2`
-       on any committed `BlindVcRepTriple` extracts `(attrs, holderBlind, presBlind, attrCommit, boolSteps)`
-       satisfying `attrs.length = schema.arity`, `vcDisclosedMatches attrs disclosed`, valid `presCommit`,
-       valid `scopeTag`, AND a genuine binary (`Bool`) Merkle path of length `treeDepth` from
-       `computeVcPoseidon2Commit schema attrs holderBlind vcAttrCommitTag = some attrCommit` to `accRoot`!
-    3. **Per-Repetition Rejection & 219-Repetition `< 2^{-128}` Soundness**: Every invalid repetition has
-       at least 1 rejecting challenge `chal ∈ {0, 1, 2}` (`≤ 2/3` accept probability) AND
-       `ratLe (2 ^ vcZkBooReps, 3 ^ vcZkBooReps) (1, 2 ^ 128)` (`(2/3)^219 < 2^{-128}`);
-    4. **Multi-Repetition Undisclosed-Attribute & `holder_blind` View Hiding (`0 Classical.choice`)**:
-       For ANY number of repetitions `R` (including `R = 219`), ANY challenge schedule `chals : Fin R → Fin 3`,
-       and ANY two undisclosed secret assignments `secA, secB : Fin U → Goldilocks`, there is an explicit
-       `SimpleEquiv` coin-space bijection mapping `secA`'s coins to `secB`'s coins with **identical**
-       2-party opened views across all `R` repetitions, plus per-gate unopened-tape masking `SimpleEquiv`! -/
-theorem blind_vc_zkboo_selective_disclosure_sound_and_hiding :
-    -- (1) External pinning refusal (`schemaId`, `epoch`, `accRoot`, `scopeLimbs`, `challenge`, `reps`, `bounds`):
-    (∀ (expectedSchema : VcSchema) (expectedEpoch : UInt64) (expectedRoot expectedScope : Lane4)
-       (verifierChallenge : List UInt8) (expectedReps treeDepth : Nat)
-       (chalOracle : BlindVcPresentation → List UInt8 → Nat → Fin 3) (pres : BlindVcPresentation),
-      verifyBlindVcPresentation expectedSchema expectedEpoch expectedRoot expectedScope
-        verifierChallenge expectedReps treeDepth chalOracle pres = true →
-      pres.schemaId = expectedSchema.schemaId ∧
-      pres.issuerEpoch = expectedEpoch ∧
-      pres.accumulatorRoot = expectedRoot ∧
-      pres.verifierScopeLimbs = expectedScope ∧
-      pres.boundVerifierChallenge = verifierChallenge ∧
-      pres.openedReps.length = expectedReps ∧
-      (∀ p ∈ pres.disclosedAttrs, p.1 < expectedSchema.arity)) ∧
-    -- (2) 3-challenge witness extraction across `sponge12` + Boolean Merkle path + `presCommit` + `scopeTag`:
-    (∀ (schema : VcSchema) (treeDepth : Nat) (epoch : UInt64)
-       (accRoot scopeLimbs presCommit scopeTag : Lane4)
-       (disclosed : List (Nat × Goldilocks)) (rep : BlindVcRepTriple),
-      vcCheckDisclosedBounds schema.arity disclosed = true →
-      (disclosed.map Prod.fst).Nodup →
-      verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed 0 (openBlindVcRep rep 0) = true →
-      verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed 1 (openBlindVcRep rep 1) = true →
-      verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed 2 (openBlindVcRep rep 2) = true →
-      ∃ (attrs : List Goldilocks) (holderBlind presBlind attrCommit : Lane4) (boolSteps : List (Bool × Lane4)),
-        attrs.length = schema.arity ∧
-        vcDisclosedMatches attrs disclosed ∧
-        computeVcPoseidon2Commit schema attrs holderBlind vcAttrCommitTag = some attrCommit ∧
-        computeVcPoseidon2Commit schema attrs presBlind vcPresCommitTag = some presCommit ∧
-        computeVcScopeTag schema.schemaId holderBlind scopeLimbs = scopeTag ∧
-        boolSteps.length = treeDepth ∧
-        evalVcMerklePathBool epoch 0 attrCommit boolSteps = accRoot) ∧
-    -- (3) Invalid repetition rejection (`≤ 2/3`) & deployed 219-repetition `< 2^{-128}` soundness bound:
-    ((∀ (schema : VcSchema) (treeDepth : Nat) (epoch : UInt64)
-        (accRoot scopeLimbs presCommit scopeTag : Lane4)
-        (disclosed : List (Nat × Goldilocks)) (rep : BlindVcRepTriple),
-      vcCheckDisclosedBounds schema.arity disclosed = true →
-      (disclosed.map Prod.fst).Nodup →
-      (¬ ∃ (attrs : List Goldilocks) (holderBlind presBlind attrCommit : Lane4) (boolSteps : List (Bool × Lane4)),
-          attrs.length = schema.arity ∧
-          vcDisclosedMatches attrs disclosed ∧
-          computeVcPoseidon2Commit schema attrs holderBlind vcAttrCommitTag = some attrCommit ∧
-          computeVcPoseidon2Commit schema attrs presBlind vcPresCommitTag = some presCommit ∧
-          computeVcScopeTag schema.schemaId holderBlind scopeLimbs = scopeTag ∧
-          boolSteps.length = treeDepth ∧
-          evalVcMerklePathBool epoch 0 attrCommit boolSteps = accRoot) →
-      ∃ chal : Fin 3,
-        verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag
-          disclosed chal (openBlindVcRep rep chal) = false) ∧
-     ratLe (2 ^ vcZkBooReps, 3 ^ vcZkBooReps) (1, 2 ^ 128)) ∧
-    -- (4) Multi-repetition undisclosed-attribute / `holder_blind` view hiding (`0 Classical.choice`):
-    (∀ (R U : Nat) (chals : Fin R → Fin 3) (secA secB : Fin U → Goldilocks),
-      (∀ val coins, vcSum3 (zkShareWire3 val coins) = val) ∧
-      ∃ shiftEquiv : SimpleEquiv (Fin R → Fin U → (Goldilocks × Goldilocks))
-                                 (Fin R → Fin U → (Goldilocks × Goldilocks)),
-        ∀ coinsA : Fin R → Fin U → (Goldilocks × Goldilocks),
-          (fun rep u => vcPairAt (zkShareWire3 (secB u) (shiftEquiv.toFun coinsA rep u)) (chals rep)) =
-            (fun rep u => vcPairAt (zkShareWire3 (secA u) (coinsA rep u)) (chals rep))) ∧
-    -- (5) Per-gate unopened-party (`r_{e+2}`) masking bijection on `out_{e+1}`:
-    (∀ (crossAndR1 : Goldilocks),
-      ∃ gateEquiv : SimpleEquiv Goldilocks Goldilocks,
-        ∀ rUnopened : Goldilocks, gateEquiv.toFun rUnopened = Goldilocks.sub crossAndR1 rUnopened) := by
-  refine ⟨?_, ?_, ⟨?_, ?_⟩, ?_, ?_⟩
-  · intro expectedSchema expectedEpoch expectedRoot expectedScope verifierChallenge expectedReps treeDepth chalOracle pres hVer
-    unfold verifyBlindVcPresentation at hVer
-    simp only [Bool.and_eq_true, decide_eq_true_eq] at hVer
-    rcases hVer with ⟨⟨⟨⟨⟨⟨⟨hSid, hEp⟩, hRoot⟩, hScope⟩, hChal⟩, hReps⟩, hBnds⟩, _⟩
-    unfold vcCheckDisclosedBounds at hBnds
-    rw [List.all_eq_true] at hBnds
-    exact ⟨hSid, hEp, hRoot, hScope, hChal, hReps, fun p hp => of_decide_eq_true (hBnds p hp)⟩
-  · intro schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed rep hBnds hNd h0 h1 h2
-    obtain ⟨hLen, hDisc, hPres, hScope, attrCommit, boolSteps, hAttr, hBLen, hBPath⟩ :=
-      verifyOpenedBlindVcRep_extract3 schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag
-        disclosed hBnds hNd rep h0 h1 h2
-    exact ⟨_, _, _, attrCommit, boolSteps, hLen, hDisc, hAttr, hPres, hScope, hBLen, hBPath⟩
-  · intro schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed rep hBnds hNd hNoWit
-    cases h0 : verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed 0 (openBlindVcRep rep 0) with
-    | false => exact ⟨0, h0⟩
-    | true =>
-      cases h1 : verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed 1 (openBlindVcRep rep 1) with
-      | false => exact ⟨1, h1⟩
-      | true =>
-        cases h2 : verifyOpenedBlindVcRep schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag disclosed 2 (openBlindVcRep rep 2) with
-        | false => exact ⟨2, h2⟩
-        | true =>
-          exfalso
-          obtain ⟨hLen, hDisc, hPres, hScope, attrCommit, boolSteps, hAttr, hBLen, hBPath⟩ :=
-            verifyOpenedBlindVcRep_extract3 schema treeDepth epoch accRoot scopeLimbs presCommit scopeTag
-              disclosed hBnds hNd rep h0 h1 h2
-          exact hNoWit ⟨_, _, _, attrCommit, boolSteps, hLen, hDisc, hAttr, hPres, hScope, hBLen, hBPath⟩
-  · unfold ratLe vcZkBooReps
-    decide
-  · intro R U chals secA secB
-    refine ⟨?_, ?_⟩
-    · intro val ⟨r0, r1⟩
-      unfold vcSum3 zkShareWire3
-      dsimp only
-      rw [← goldOfInt_nat val, ← goldOfInt_nat r0, ← goldOfInt_nat r1]
-      simp only [goldOfInt_add, goldOfInt_sub]; congr 1; omega
-    · let eqA := zkMultiRepViewEquiv chals secA
-      let eqB := zkMultiRepViewEquiv chals secB
-      refine ⟨{
-        toFun := fun c => eqB.invFun (eqA.toFun c)
-        invFun := fun c => eqA.invFun (eqB.toFun c)
-        left_inv := fun c => by rw [eqB.right_inv, eqA.left_inv]
-        right_inv := fun c => by rw [eqA.right_inv, eqB.left_inv]
-      }, fun coinsA => ?_⟩
-      change eqB.toFun (eqB.invFun (eqA.toFun coinsA)) = eqA.toFun coinsA
-      exact eqB.right_inv (eqA.toFun coinsA)
-  · intro crossAndR1
-    refine ⟨{
-      toFun := fun r => Goldilocks.sub crossAndR1 r
-      invFun := fun v => Goldilocks.sub crossAndR1 v
-      left_inv := fun r => gold_sub_sub_self crossAndR1 r
-      right_inv := fun v => gold_sub_sub_self crossAndR1 v
-    }, fun _ => rfl⟩
-
-/-- Construct an honest 3-party repetition triple for any valid credential witness and Merkle path. -/
-def honestBlindVcRepTriple (schema : VcSchema) (epoch : UInt64) (scopeLimbs : Lane4)
-    (attrs : List Goldilocks) (holderBlind presBlind : Lane4)
-    (disclosed : List (Nat × Goldilocks))
-    (merkleSteps : List (Bool × Lane4)) : BlindVcRepTriple :=
-  let attrShares : Fin 3 → List Goldilocks := fun i =>
-    if i = 0 then attrs else List.replicate attrs.length Goldilocks.zero
-  let hb3 : VcLane4_3 := fun i => if i = 0 then holderBlind else lane4Zero
-  let pb3 : VcLane4_3 := fun i => if i = 0 then presBlind else lane4Zero
-  let aw (idx : Nat) : VcWire3 :=
-    if idx < schema.arity then
-      match vcLookupDisclosed disclosed idx with
-      | some pubVal => vcConstWire3 pubVal
-      | none => fun i => vcAttrAt (attrShares i) idx
-    else
-      fun _ => Goldilocks.zero
-  let stAttr : VcState12_3 := fun i =>
-    ⟨⟨aw 0 i, aw 1 i, aw 2 i, aw 3 i⟩,
-     ⟨aw 4 i, aw 5 i, (hb3 i).x0, (hb3 i).x1⟩,
-     ⟨(hb3 i).x2, (hb3 i).x3,
-      vcConstWire3 (vcSchemaLo schema.schemaId) i,
-      vcConstWire3 (vcSchemaHiWithTag schema.schemaId vcAttrCommitTag) i⟩⟩
-  let stPres : VcState12_3 := fun i =>
-    ⟨⟨aw 0 i, aw 1 i, aw 2 i, aw 3 i⟩,
-     ⟨aw 4 i, aw 5 i, (pb3 i).x0, (pb3 i).x1⟩,
-     ⟨(pb3 i).x2, (pb3 i).x3,
-      vcConstWire3 (vcSchemaLo schema.schemaId) i,
-      vcConstWire3 (vcSchemaHiWithTag schema.schemaId vcPresCommitTag) i⟩⟩
-  let stSc : VcState12_3 := fun i =>
-    ⟨hb3 i,
-     ⟨vcConstWire3 scopeLimbs.x0 i, vcConstWire3 scopeLimbs.x1 i,
-      vcConstWire3 scopeLimbs.x2 i, vcConstWire3 scopeLimbs.x3 i⟩,
-     ⟨Goldilocks.zero, Goldilocks.zero,
-      vcConstWire3 (vcSchemaLo schema.schemaId) i,
-      vcConstWire3 (vcSchemaHiWithTag schema.schemaId vcScopeTagDom) i⟩⟩
-  let attrSp := honestSponge12_3 stAttr
-  let presSp := honestSponge12_3 stPres
-  let scSp := honestSponge12_3 stSc
-  let mkSteps3 : List (VcWire3 × VcLane4_3) :=
-    merkleSteps.map (fun (b, sib) =>
-      (vcConstWire3 (if b then Goldilocks.one else Goldilocks.zero),
-       fun i => if i = 0 then sib else lane4Zero))
-  let mkRes := honestMerklePath3 epoch 0 (fun i => (attrSp.2 i).b0) mkSteps3
-  { parties := fun i =>
-      { attrShares := attrShares i
-        holderBlindShare := hb3 i
-        presBlindShare := pb3 i
-        attrSponge := attrSp.1 i
-        merkleLevels := mkRes.1 i
-        presSponge := presSp.1 i
-        scopeSponge := scSp.1 i }
-    partyCommits := fun _ => [0xAA]
-    finalOuts :=
-      { rootShares := mkRes.2.1
-        presShares := fun i => (presSp.2 i).b0
-        scopeShares := fun i => (scSp.2 i).b0
-        boolZeroShares := mkRes.2.2 } }
-
-private theorem honestMerklePath3_length (epoch : UInt64) :
-    ∀ (layer : Nat) (cur : VcLane4_3) (steps : List (VcWire3 × VcLane4_3)) (i : Fin 3),
-      ((honestMerklePath3 epoch layer cur steps).1 i).length = steps.length
-  | _, _, [], _ => rfl
-  | layer, cur, (_, _) :: rest, i => by
-    dsimp only [honestMerklePath3, List.length_cons]
-    rw [honestMerklePath3_length epoch (layer + 1) _ rest i]
-
-private theorem honestMerklePath3_sum_and_zeros (epoch : UInt64) :
-    ∀ (layer : Nat) (cur : VcLane4_3) (merkleSteps : List (Bool × Lane4)),
-      let mkSteps3 : List (VcWire3 × VcLane4_3) :=
-        merkleSteps.map (fun (b, sib) =>
-          (vcConstWire3 (if b then Goldilocks.one else Goldilocks.zero),
-           fun i => if i = 0 then sib else lane4Zero))
-      let res := honestMerklePath3 epoch layer cur mkSteps3
-      vcSumLane4_3 res.2.1 = evalVcMerklePathBool epoch layer (vcSumLane4_3 cur) merkleSteps ∧
-      (∀ e : Fin 3, vcCheckBoolZerosPair e (res.2.2.map (fun w => vcPairAt w e)) res.2.2 = true)
-  | _, cur, [] => ⟨rfl, fun _ => rfl⟩
-  | layer, cur, (b, sib) :: rest => by
-    dsimp only [List.map, honestMerklePath3]
-    let bw := vcConstWire3 (if b then Goldilocks.one else Goldilocks.zero)
-    let sw : VcLane4_3 := fun i => if i = 0 then sib else lane4Zero
-    let step := honestMerkleLevel3 epoch layer cur bw sw
-    obtain ⟨hTailRoot, hTailZeros⟩ := honestMerklePath3_sum_and_zeros epoch (layer + 1) step.2.1 rest
-    have hm0 := pairCheckMerkleLevel_honest epoch layer cur bw sw 0
-    have hm1 := pairCheckMerkleLevel_honest epoch layer cur bw sw 1
-    have hm2 := pairCheckMerkleLevel_honest epoch layer cur bw sw 2
-    obtain ⟨nextCur, bz, ep0, ep1, _, hBzSum, hStepSum⟩ := pairCheckMerkleLevel_extract3 hm0 hm1 hm2
-    have hNextEq : step.2.1 = nextCur := by
-      apply funext
-      refine fin3_all ?_ ?_ ?_
-      · exact congrArg (fun p => p.1.1) ep0
-      · exact congrArg (fun p => p.1.2) ep0
-      · exact congrArg (fun p => p.1.2) ep1
-    have hBzEq : step.2.2 = bz := by
-      apply funext
-      refine fin3_all ?_ ?_ ?_
-      · exact congrArg (fun p => p.2.1) ep0
-      · exact congrArg (fun p => p.2.2) ep0
-      · exact congrArg (fun p => p.2.2) ep1
-    have hSibSum : vcSumLane4_3 sw = sib := by
-      rw [vcSumLane4_3_eq]
-      dsimp only [sw]
-      have h1 : (1 : Fin 3) ≠ 0 := by decide
-      have h2 : (2 : Fin 3) ≠ 0 := by decide
-      simp only [↓reduceIte, h1, h2, lane4Zero_eq, vcSum3]
-      have hz : ∀ x : Goldilocks, Goldilocks.add (Goldilocks.add x Goldilocks.zero) Goldilocks.zero = x := by
-        intro x; rw [← goldOfInt_nat x, ← goldOfInt_nat Goldilocks.zero]
-        simp only [Goldilocks.zero_val, goldOfInt_add]; congr 1
-      simp only [hz]
-    have hBwSum : vcSum3 bw = (if b then Goldilocks.one else Goldilocks.zero) := vcSum3_constWire _
-    have hSib : (fun i => ((honestMerkleLevel3 epoch layer cur bw sw).1 i).sibShare) = sw := rfl
-    have hBit : (fun i => ((honestMerkleLevel3 epoch layer cur bw sw).1 i).bitShare) = bw := rfl
-    refine ⟨?_, ?_⟩
-    · rw [hTailRoot, hNextEq, hStepSum, hSib, hBit, hSibSum, hBwSum]
-      cases b with
-      | false =>
-        dsimp only [evalVcMerklePathBool]
-        rw [ite_false_of (by decide), vcMerkleStepArith_zero]
-      | true =>
-        dsimp only [evalVcMerklePathBool]
-        rw [ite_true_of rfl, vcMerkleStepArith_one]
-    · intro e
-      dsimp only [List.map, vcCheckBoolZerosPair]
-      rw [Bool.and_eq_true, Bool.and_eq_true, decide_eq_true_eq, decide_eq_true_eq]
-      refine ⟨⟨rfl, ?_⟩, hTailZeros e⟩
-      rw [hBzEq, hBzSum, hBit, hBwSum]
-      cases b with
-      | false =>
-        rw [ite_false_of (by decide)]
-        rw [← goldOfInt_nat Goldilocks.zero, ← goldOfInt_nat Goldilocks.one]
-        simp only [Goldilocks.zero_val, Goldilocks.one_val, goldOfInt_sub, goldOfInt_mul]
-        congr 1
-      | true =>
-        rw [ite_true_of rfl]
-        rw [← goldOfInt_nat Goldilocks.zero, ← goldOfInt_nat Goldilocks.one]
-        simp only [Goldilocks.zero_val, Goldilocks.one_val, goldOfInt_sub, goldOfInt_mul]
-        congr 1
-
-/-- **`#tooth` (`tooth_blind_vc_wrong_schema_or_challenge_rejected`)**:
-    Even when all 219 ZKBoo repetitions are valid, mutating `schemaId` OR `boundVerifierChallenge`
-    causes `verifyBlindVcPresentation` to deterministically reject (`= false`)! -/
-theorem tooth_blind_vc_wrong_schema_or_challenge_rejected
-    (expectedSchema : VcSchema) (expectedEpoch : UInt64) (expectedRoot expectedScope : Lane4)
-    (verifierChallenge : List UInt8) (expectedReps treeDepth : Nat)
-    (chalOracle : BlindVcPresentation → List UInt8 → Nat → Fin 3)
-    (pres : BlindVcPresentation) :
-    (pres.schemaId ≠ expectedSchema.schemaId →
-      verifyBlindVcPresentation expectedSchema expectedEpoch expectedRoot expectedScope
-        verifierChallenge expectedReps treeDepth chalOracle pres = false) ∧
-    (pres.boundVerifierChallenge ≠ verifierChallenge →
-      verifyBlindVcPresentation expectedSchema expectedEpoch expectedRoot expectedScope
-        verifierChallenge expectedReps treeDepth chalOracle pres = false) := by
-  refine ⟨?_, ?_⟩
-  · intro hNe
-    cases hv : verifyBlindVcPresentation expectedSchema expectedEpoch expectedRoot expectedScope
-        verifierChallenge expectedReps treeDepth chalOracle pres with
-    | false => rfl
-    | true =>
-      exact False.elim (hNe (blind_vc_zkboo_selective_disclosure_sound_and_hiding.1
-        expectedSchema expectedEpoch expectedRoot expectedScope verifierChallenge
-        expectedReps treeDepth chalOracle pres hv).1)
-  · intro hNe
-    cases hv : verifyBlindVcPresentation expectedSchema expectedEpoch expectedRoot expectedScope
-        verifierChallenge expectedReps treeDepth chalOracle pres with
-    | false => rfl
-    | true =>
-      exact False.elim (hNe (blind_vc_zkboo_selective_disclosure_sound_and_hiding.1
-        expectedSchema expectedEpoch expectedRoot expectedScope verifierChallenge
-        expectedReps treeDepth chalOracle pres hv).2.2.2.2.1)
-
-/-- The honest prover's repetition triple is accepted at every challenge `e`, against its own
-    reconstructed root / presentation commitment / scope tag. -/
-private theorem honestBlindVcRepTriple_verifies
-    (schema : VcSchema) (epoch : UInt64) (scopeLimbs : Lane4)
-    (attrs : List Goldilocks) (holderBlind presBlind : Lane4)
-    (disclosed : List (Nat × Goldilocks)) (merkleSteps : List (Bool × Lane4)) (treeDepth : Nat)
-    (hAttrs : attrs.length = schema.arity) (hDepth : merkleSteps.length = treeDepth) (e : Fin 3) :
-    verifyOpenedBlindVcRep schema treeDepth epoch
-      (vcSumLane4_3 (honestBlindVcRepTriple schema epoch scopeLimbs attrs holderBlind presBlind disclosed merkleSteps).finalOuts.rootShares) scopeLimbs
-      (vcSumLane4_3 (honestBlindVcRepTriple schema epoch scopeLimbs attrs holderBlind presBlind disclosed merkleSteps).finalOuts.presShares)
-      (vcSumLane4_3 (honestBlindVcRepTriple schema epoch scopeLimbs attrs holderBlind presBlind disclosed merkleSteps).finalOuts.scopeShares)
-      disclosed e
-      (openBlindVcRep (honestBlindVcRepTriple schema epoch scopeLimbs attrs holderBlind presBlind disclosed merkleSteps) e) = true := by
-  have hLenAll : ∀ i : Fin 3,
-      (if i = 0 then attrs else List.replicate attrs.length Goldilocks.zero).length = schema.arity := by
-    intro i
-    split
-    · exact hAttrs
-    · rw [List.length_replicate]; exact hAttrs
-  have hMkLen : ∀ (leaf : VcLane4_3) (f : Bool × Lane4 → VcWire3 × VcLane4_3) (i : Fin 3),
-      ((honestMerklePath3 epoch 0 leaf (merkleSteps.map f)).1 i).length = treeDepth := by
-    intro leaf f i
-    rw [honestMerklePath3_length, List.length_map]; exact hDepth
-  refine verifyOpenedBlindVcRep_complete schema treeDepth epoch scopeLimbs disclosed
-    (honestBlindVcRepTriple schema epoch scopeLimbs attrs holderBlind presBlind disclosed merkleSteps) e
-    ?attrOut ?presOut ?scOut ?bzs ?hLenE ?hLenE1 ?hDepE ?hDepE1 ?hAttr ?hPres ?hSc ?hMk
-    ?hPresOut ?hScOut ?hBz
-  case hLenE => exact hLenAll e
-  case hLenE1 => exact hLenAll (vcNextParty3 e)
-  case hDepE => exact hMkLen _ _ e
-  case hDepE1 => exact hMkLen _ _ (vcNextParty3 e)
-  case hAttr => exact pairCheckSponge12_honest _ e
-  case hPres => exact pairCheckSponge12_honest _ e
-  case hSc => exact pairCheckSponge12_honest _ e
-  case hMk => exact pairCheckMerklePath_honest epoch 0 _ _ e
-  case hPresOut => exact fun _ => rfl
-  case hScOut => exact fun _ => rfl
-  case hBz => exact (honestMerklePath3_sum_and_zeros epoch 0 _ merkleSteps).2 e
-
-/-- Non-vacuous inhabitedness witness at **exact deployed parameters** (`vcAccumulatorDepth = 20`,
-    `vcZkBooReps = 219`, disclosing slot `0` while hiding slots `1, 2`), accepted (`= true`) by
-    `verifyBlindVcPresentation`! -/
-theorem blind_vc_presentation_inhabited :
-    ∃ (schema : VcSchema) (epoch : UInt64) (accRoot scopeLimbs : Lane4)
-      (challenge : List UInt8)
-      (chalOracle : BlindVcPresentation → List UInt8 → Nat → Fin 3)
-      (pres : BlindVcPresentation),
-      pres.disclosedAttrs = [(0, Goldilocks.one)] ∧
-      pres.openedReps.length = vcZkBooReps ∧
-      verifyBlindVcPresentation schema epoch accRoot scopeLimbs challenge
-        vcZkBooReps vcAccumulatorDepth chalOracle pres = true := by
-  let schema : VcSchema := { schemaId := 42, arity := 3, hArity := by decide }
-  let epoch : UInt64 := 7
-  let attrs : List Goldilocks := [Goldilocks.one, Goldilocks.zero, Goldilocks.one]
-  let hb : Lane4 := lane4Zero
-  let pb : Lane4 := lane4Zero
-  let scopeLimbs : Lane4 := lane4Zero
-  let disclosed : List (Nat × Goldilocks) := [(0, Goldilocks.one)]
-  let merkleSteps : List (Bool × Lane4) := List.replicate vcAccumulatorDepth (false, lane4Zero)
-  let repTriple := honestBlindVcRepTriple schema epoch scopeLimbs attrs hb pb disclosed merkleSteps
-  let accRoot := vcSumLane4_3 repTriple.finalOuts.rootShares
-  let presCommit := vcSumLane4_3 repTriple.finalOuts.presShares
-  let scopeTag := vcSumLane4_3 repTriple.finalOuts.scopeShares
-  let chalOracle : BlindVcPresentation → List UInt8 → Nat → Fin 3 := fun _ _ _ => 0
-  let pres : BlindVcPresentation := {
-    presentationNonce := [0x01]
-    issuerEpoch := epoch
-    schemaId := schema.schemaId
-    accumulatorRoot := accRoot
-    verifierScopeLimbs := scopeLimbs
-    boundVerifierChallenge := [0x99]
-    disclosedAttrs := disclosed
-    presCommit := presCommit
-    scopeTag := scopeTag
-    openedReps := List.replicate vcZkBooReps (openBlindVcRep repTriple 0)
-  }
-  have hSingleOk : verifyOpenedBlindVcRep schema vcAccumulatorDepth epoch accRoot scopeLimbs
-      presCommit scopeTag disclosed 0 (openBlindVcRep repTriple 0) = true := by
-    exact honestBlindVcRepTriple_verifies schema epoch scopeLimbs attrs hb pb disclosed merkleSteps
-      vcAccumulatorDepth rfl List.length_replicate 0
-  have hAllOk : ∀ (k idx : Nat),
-      verifyAllBlindVcReps schema vcAccumulatorDepth epoch accRoot scopeLimbs
-        presCommit scopeTag disclosed (fun _ => 0) idx
-        (List.replicate k (openBlindVcRep repTriple 0)) = true := by
-    intro k
-    induction k with
-    | zero => intro _; rfl
-    | succ k ih =>
-      intro idx
-      dsimp only [List.replicate_succ, verifyAllBlindVcReps]
-      rw [hSingleOk, Bool.true_and]
-      exact ih (idx + 1)
-  refine ⟨schema, epoch, accRoot, scopeLimbs, [0x99], chalOracle, pres, rfl, List.length_replicate, ?_⟩
-  unfold verifyBlindVcPresentation
-  dsimp only [pres, chalOracle]
-  have hBnds : vcCheckDisclosedBounds schema.arity disclosed = true := by decide
-  simp [hBnds, hAllOk vcZkBooReps 0]
-
-end Qsag

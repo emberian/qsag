@@ -7,13 +7,13 @@
 //! 1. Exact hypercube-to-monomial Möbius basis transform ($O(\ell 2^\ell)$),
 //! 2. Multi-stage WHIR **rate escalation** (`whir_stage_schedule`): instead of folding an initial
 //!    high-rate codeword passively at fixed rate across every round, each intermediate stage
-//!    re-encodes the folded multilinear witness at an **escalating Reed–Solomon blowup**
+//!    re-encodes the folded monomial witness at an **escalating Reed–Solomon blowup**
 //!    (e.g. $B = (4, 16, 64)$, i.e. $\rho_0 = 1/4 \to \rho_1 = 1/16 \to \rho_2 = 1/64$ at
 //!    $\ell = 20$), keeping intermediate evaluation domains bounded ($D_1 = 2^{19}, D_2 = 2^{18} \le 2^{20}$)
 //!    with default conjectural QROM query counts $q = (128, 64, 43)$,
 //! 3. **Out-of-Domain (OOD) List-Pinning & Shift-Query Accumulation:** every committed oracle
-//!    $f^{(k)}$ is pinned at a fresh $\mathbb{F}_{p^4}$ Kronecker point $\text{pow2}(z_{\text{ood},k})$
-//!    before sumcheck challenges are squeezed, and stage-$k$ fiber openings fold into shift claims
+//!    $f^{(k)}$ is pinned at two independent $\mathbb{F}_{p^4}$ Kronecker point $\text{pow2}(z_{\text{ood},k})$
+//!    before affine fold challenges are squeezed, and stage-$k$ fiber openings fold into shift claims
 //!    $W^{(k+1)}(\text{pow2}(z_u)) = v_{\text{shift},u}$ batched into stage $k+1$'s sumcheck with
 //!    independent $\mathbb{F}_{p^4}$ challenges,
 //! 4. **Precomputed `CANOPY_MIDSTATE` + 4-Way SIMD `keccak_f1600_x4` Merkle-Canopy Trees** with
@@ -32,16 +32,19 @@
 //! [`whir_commit_batch_owned`] commits $S \le$ [`MAX_BATCH_POLYS`] polynomials of equal size under
 //! ONE Merkle-Canopy tree: Round-0 leaf $g$ holds coset fiber $g$ of every codeword.
 //! [`whir_open_batch`] proves $W_i(p_i) = e_i$ for all $i \in [0, S)$ with one point-reduction
-//! sumcheck over $\mathbb{F}_{p^4}$ followed by a single `Hem` WHIR opening of $\sum_i \mu^i W_i$.
+//! sumcheck over $\mathbb{F}_{p^4}$ followed by an asymmetric affine cascade [CWYZ26].
+
+mod affine;
+use affine::*;
 
 use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::field::{
-    Goldilocks, GoldilocksExt4, build_eq_table_base, build_eq_table_ext4, encode_rs_coset_ext4,
-    encode_rs_coset_goldilocks, eq_poly_base_ext4, eq_poly_ext4, eval_univariate_ext4,
-    eval_univariate_ext4_at_base, fold_first_var_in_place_ext4, pow2_point_base, pow2_point_ext4,
+    Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
+    encode_rs_coset_goldilocks, eq_poly_ext4, eval_univariate_ext4, eval_univariate_ext4_at_base,
+    fold_first_var_in_place_ext4, pow2_point_ext4,
 };
 use crate::sponge::{
     CANOPY_MIDSTATE, FiatShamirTranscript, InstanceBound, POW_MIDSTATE,
@@ -156,7 +159,7 @@ impl WhirSecurityRegime {
             Self::Habr24Interactive128 => 128usize.div_ceil(log_b),
             Self::BciksJohnsonClassical128 => 256usize.div_ceil(log_b) + 1,
             Self::Habr24Qrom128 => 256usize.div_ceil(log_b),
-            Self::BciksJohnsonQrom128 => 512usize.div_ceil(log_b) + 1,
+            Self::BciksJohnsonQrom128 => 512usize.div_ceil(log_b) + 2,
         }
     }
 
@@ -173,7 +176,7 @@ impl WhirSecurityRegime {
 /// Default HABR24 QROM schedule: ceil(256/log2(B)) queries plus 16-bit PoW.
 /// This budgets 272 classical or 136 Grover round-search bits, leaving eight
 /// quantum bits for multi-round union slack. HABR24 agreement is conjectural.
-/// Johnson QROM uses ceil(512/log2(B)) + 1 queries for unconditional Johnson
+/// Johnson QROM uses ceil(512/log2(B)) + 2 queries for unconditional Johnson
 /// proximity below 2^-256, with positive proximity slack, without HABR24.
 /// Neither per-round budget alone proves total PCS/QROM security.
 pub fn whir_stage_schedule(num_vars: usize) -> WhirSchedule {
@@ -184,7 +187,7 @@ pub fn whir_stage_schedule(num_vars: usize) -> WhirSchedule {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WhirSchedule {
     pub regime: WhirSecurityRegime,
-    /// Remaining multilinear variables sent explicitly as `final_hypercube_evals` (`1..=8`).
+    /// Remaining multilinear variables sent explicitly as `final_coeffs` (`1..=8`).
     pub early_stop_vars: usize,
     /// Ordered WHIR stages `0..M` (`1 <= M <= 4`), satisfying
     /// `early_stop_vars + sum_i stages[i].step_vars == num_vars`.
@@ -349,6 +352,7 @@ fn absorb_whir_schedule(
     transcript: &mut FiatShamirTranscript<InstanceBound>,
     sched: &WhirSchedule,
 ) {
+    transcript.absorb(b"WHIR_PROTOCOL", b"AFFINE_MONOMIAL_V1");
     transcript.absorb(b"WHIR_SCHEDULE", &sched.to_bytes());
 }
 
@@ -1145,12 +1149,12 @@ impl HemWhirProverState {
 }
 
 /// Re-encoded intermediate WHIR stage oracle (`stage_idx` in `1..M`): carries the stage's
-/// escalated-rate Merkle commitment, out-of-domain `Ext4` evaluation, 16-bit stage PoW nonce,
+/// escalated-rate Merkle commitment, two independent OOD evaluations, 16-bit stage PoW nonce,
 /// opened coset fibers, and Steiner-deduplicated Merkle multi-proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WhirStageProof {
     pub commitment: CanopyCommitment,
-    pub ood_eval: GoldilocksExt4,
+    pub stage_ood_evals: [GoldilocksExt4; 2],
     pub pow_nonce: u64,
     /// `arity` `GoldilocksExt4` values per queried fiber, in strictly ascending fiber order.
     pub opened_vals: Vec<GoldilocksExt4>,
@@ -1163,17 +1167,17 @@ pub type FoldedOracleProof = WhirStageProof;
 /// Complete `Hem` WHIR rate-escalated opening proof over `GoldilocksExt4` against one commitment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HemWhirOpeningProof {
-    /// Out-of-domain evaluation $W^{(0)}(\text{pow2}(z_{\text{ood},0}))$ of the Stage-0 polynomial.
-    pub stage0_ood_eval: GoldilocksExt4,
-    /// Wire-compressed degree-2 sumcheck polynomials `[c_0, c_2]` (`c_1 = claim - 2*c_0 - c_2`
-    /// reconstructed algebraically) for every folded variable across all WHIR stages.
-    pub fold_sumcheck_polys: Vec<[GoldilocksExt4; 2]>,
+    /// Two independent out-of-domain evaluations of the Stage-0 polynomial.
+    pub stage0_ood_evals: [GoldilocksExt4; 2],
+    /// Affine bridge scalars `[sigma_even, tau_01, tau_10, c_F, c_G]` per fold.
+    /// Cross terms precede phi; shifted claims precede theta, alpha, and beta.
+    pub fold_sumcheck_polys: Vec<[GoldilocksExt4; 5]>,
     /// Re-encoded escalated-rate WHIR stages `1..M`, each committed strictly before its stage's
     /// sumcheck challenges and Stage `k-1` shift queries are squeezed.
     pub folded_layers: Vec<WhirStageProof>,
-    /// Explicit boolean-hypercube evaluations ($2^{\text{early\_stop}}$ `Ext4` elements) of the
-    /// terminal multilinear polynomial.
-    pub final_hypercube_evals: Vec<GoldilocksExt4>,
+    /// Terminal monomial coefficients: exactly `2^early_stop + 2` elements,
+    /// including the two degree-overflow slots.
+    pub final_coeffs: Vec<GoldilocksExt4>,
     /// 16-bit transcript Proof-of-Work nonce for Stage 0's fiber queries.
     pub pow_nonce: u64,
     /// 16-byte blinding salt of each queried Stage-0 leaf, in ascending leaf order.
@@ -1207,40 +1211,47 @@ fn read_ext4(bytes: &[u8], pos: &mut usize) -> Option<GoldilocksExt4> {
     GoldilocksExt4::from_le_bytes_canonical(arr)
 }
 
-fn read_sumcheck_wire_polys(
+fn read_sumcheck_wire_polys<const N: usize>(
     bytes: &[u8],
     pos: &mut usize,
     max_rounds: usize,
-) -> Option<Vec<[GoldilocksExt4; 2]>> {
+) -> Option<Vec<[GoldilocksExt4; N]>> {
     let n = read_u32(bytes, pos)? as usize;
     if n > max_rounds {
         return None;
     }
     let mut polys = Vec::with_capacity(n);
     for _ in 0..n {
-        let c0 = read_ext4(bytes, pos)?;
-        let c2 = read_ext4(bytes, pos)?;
-        polys.push([c0, c2]);
+        let mut wire = [GoldilocksExt4::ZERO; N];
+        for v in &mut wire {
+            *v = read_ext4(bytes, pos)?;
+        }
+        polys.push(wire);
     }
     Some(polys)
 }
 
-fn push_sumcheck_wire_polys(polys: &[[GoldilocksExt4; 2]], out: &mut Vec<u8>) {
+fn push_sumcheck_wire_polys<const N: usize>(polys: &[[GoldilocksExt4; N]], out: &mut Vec<u8>) {
     out.extend_from_slice(&(polys.len() as u32).to_le_bytes());
     for poly in polys {
-        out.extend_from_slice(&poly[0].to_le_bytes());
-        out.extend_from_slice(&poly[1].to_le_bytes());
+        for v in poly {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
     }
 }
 
 impl HemWhirOpeningProof {
     pub fn push_bytes(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.stage0_ood_eval.to_le_bytes());
+        for v in self.stage0_ood_evals {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
         push_sumcheck_wire_polys(&self.fold_sumcheck_polys, out);
         out.extend_from_slice(&(self.folded_layers.len() as u32).to_le_bytes());
         for layer in &self.folded_layers {
             out.extend_from_slice(&layer.commitment.to_bytes());
-            out.extend_from_slice(&layer.ood_eval.to_le_bytes());
+            for v in layer.stage_ood_evals {
+                out.extend_from_slice(&v.to_le_bytes());
+            }
             out.extend_from_slice(&layer.pow_nonce.to_le_bytes());
             out.extend_from_slice(&(layer.opened_vals.len() as u32).to_le_bytes());
             for v in &layer.opened_vals {
@@ -1248,8 +1259,8 @@ impl HemWhirOpeningProof {
             }
             layer.multiproof.push_bytes(out);
         }
-        out.extend_from_slice(&(self.final_hypercube_evals.len() as u32).to_le_bytes());
-        for v in &self.final_hypercube_evals {
+        out.extend_from_slice(&(self.final_coeffs.len() as u32).to_le_bytes());
+        for v in &self.final_coeffs {
             out.extend_from_slice(&v.to_le_bytes());
         }
         out.extend_from_slice(&self.pow_nonce.to_le_bytes());
@@ -1266,7 +1277,7 @@ impl HemWhirOpeningProof {
 
     pub fn from_bytes_canonical(bytes: &[u8]) -> Option<(Self, usize)> {
         let mut pos = 0usize;
-        let stage0_ood_eval = read_ext4(bytes, &mut pos)?;
+        let stage0_ood_evals = [read_ext4(bytes, &mut pos)?, read_ext4(bytes, &mut pos)?];
         let fold_sumcheck_polys = read_sumcheck_wire_polys(bytes, &mut pos, MAX_PCS_NUM_VARS)?;
 
         let n_layers = read_u32(bytes, &mut pos)? as usize;
@@ -1277,7 +1288,7 @@ impl HemWhirOpeningProof {
         for _ in 0..n_layers {
             let (commitment, used_c) = CanopyCommitment::from_bytes_canonical(bytes.get(pos..)?)?;
             pos += used_c;
-            let ood_eval = read_ext4(bytes, &mut pos)?;
+            let stage_ood_evals = [read_ext4(bytes, &mut pos)?, read_ext4(bytes, &mut pos)?];
             let layer_pow_nonce = read_u64(bytes, &mut pos)?;
             let n_vals = read_u32(bytes, &mut pos)? as usize;
             if n_vals == 0 || n_vals > NUM_PCS_QUERIES * MAX_FIBER_ARITY || (n_vals & 1) != 0 {
@@ -1291,7 +1302,7 @@ impl HemWhirOpeningProof {
             pos += used_mp;
             folded_layers.push(WhirStageProof {
                 commitment,
-                ood_eval,
+                stage_ood_evals,
                 pow_nonce: layer_pow_nonce,
                 opened_vals,
                 multiproof,
@@ -1299,12 +1310,14 @@ impl HemWhirOpeningProof {
         }
 
         let n_final = read_u32(bytes, &mut pos)? as usize;
-        if !n_final.is_power_of_two() || !(2..=(1usize << EARLY_STOP_VARS)).contains(&n_final) {
+        if !(4..=((1usize << EARLY_STOP_VARS) + 2)).contains(&n_final)
+            || !(n_final - 2).is_power_of_two()
+        {
             return None;
         }
-        let mut final_hypercube_evals = Vec::with_capacity(n_final);
+        let mut final_coeffs = Vec::with_capacity(n_final);
         for _ in 0..n_final {
-            final_hypercube_evals.push(read_ext4(bytes, &mut pos)?);
+            final_coeffs.push(read_ext4(bytes, &mut pos)?);
         }
 
         let pow_nonce = read_u64(bytes, &mut pos)?;
@@ -1343,10 +1356,10 @@ impl HemWhirOpeningProof {
 
         Some((
             Self {
-                stage0_ood_eval,
+                stage0_ood_evals,
                 fold_sumcheck_polys,
                 folded_layers,
-                final_hypercube_evals,
+                final_coeffs,
                 pow_nonce,
                 round0_salts,
                 round0_vals,
@@ -1366,7 +1379,9 @@ pub struct HemWhirBatchOpeningProof {
     pub point_sumcheck_polys: Vec<[GoldilocksExt4; 2]>,
     /// Claimed evaluations $W_i(\rho)$ at the common `Ext4` point $\rho$. Empty when $S = 1$.
     pub common_point_evals: Vec<GoldilocksExt4>,
-    /// Single `Hem` WHIR opening of $\sum_i \mu^i W_i$ at $\rho$.
+    /// Shifted monomial functional claims, absorbed before affine batching.
+    pub shifted_evals: Vec<GoldilocksExt4>,
+    /// Single opening of the degree-preserving asymmetric affine cascade.
     pub opening: HemWhirOpeningProof,
 }
 
@@ -1375,6 +1390,9 @@ impl HemWhirBatchOpeningProof {
         push_sumcheck_wire_polys(&self.point_sumcheck_polys, out);
         out.extend_from_slice(&(self.common_point_evals.len() as u32).to_le_bytes());
         for v in &self.common_point_evals {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in &self.shifted_evals {
             out.extend_from_slice(&v.to_le_bytes());
         }
         self.opening.push_bytes(out);
@@ -1391,12 +1409,17 @@ impl HemWhirBatchOpeningProof {
         for _ in 0..n_evals {
             common_point_evals.push(read_ext4(bytes, &mut pos)?);
         }
+        let mut shifted_evals = Vec::with_capacity(n_evals);
+        for _ in 0..n_evals {
+            shifted_evals.push(read_ext4(bytes, &mut pos)?);
+        }
         let (opening, used) = HemWhirOpeningProof::from_bytes_canonical(bytes.get(pos..)?)?;
         pos += used;
         Some((
             Self {
                 point_sumcheck_polys,
                 common_point_evals,
+                shifted_evals,
                 opening,
             },
             pos,
@@ -1584,16 +1607,20 @@ fn collect_coset_group_ext4(
 }
 
 #[inline]
-fn fold_duet_ext4(
+#[allow(clippy::too_many_arguments)]
+fn fold_duet_affine_ext4(
     v0: GoldilocksExt4,
     v1: GoldilocksExt4,
-    inv_two_y0: Goldilocks,
+    inv_two_xk: Goldilocks,
     inv_two: Goldilocks,
-    r: GoldilocksExt4,
+    xk_sq: Goldilocks,
+    theta: GoldilocksExt4,
+    alpha: GoldilocksExt4,
+    beta: GoldilocksExt4,
 ) -> GoldilocksExt4 {
     let even = (v0 + v1).mul_base(inv_two);
-    let odd = (v0 - v1).mul_base(inv_two_y0);
-    even + r * odd
+    let odd = (v0 - v1).mul_base(inv_two_xk);
+    odd + (alpha + beta.mul_base(xk_sq)) * (even + theta * odd)
 }
 
 /// Fold a coset fiber `vals` of size $A = 2^s \in \{2, 4, 8, 16, 32, 64\}$ at points
@@ -1604,7 +1631,7 @@ fn fold_coset_group_ext4(
     mut inv_y0: Goldilocks,
     inv_two: Goldilocks,
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
-    chals: &[GoldilocksExt4],
+    chals: &[[GoldilocksExt4; 3]],
 ) -> GoldilocksExt4 {
     let step = chals.len();
     debug_assert!((1..=MAX_FOLD_STEP_VARS).contains(&step) && vals.len() == (1usize << step));
@@ -1612,16 +1639,31 @@ fn fold_coset_group_ext4(
     buf[..vals.len()].copy_from_slice(vals);
     let mut cur_len = vals.len();
     let mut inv_zeta = inv_zetas[step];
-    for &r in chals {
+    let mut y0 = inv_y0.inv();
+    let mut zeta = inv_zeta.inv();
+    for &[theta, alpha, beta] in chals {
         let half = cur_len / 2;
         let mut inv_two_xk = inv_two * inv_y0;
+        let mut xk = y0;
         for k in 0..half {
-            buf[k] = fold_duet_ext4(buf[k], buf[k + half], inv_two_xk, inv_two, r);
+            buf[k] = fold_duet_affine_ext4(
+                buf[k],
+                buf[k + half],
+                inv_two_xk,
+                inv_two,
+                xk.square(),
+                theta,
+                alpha,
+                beta,
+            );
+            xk *= zeta;
             inv_two_xk *= inv_zeta;
         }
         cur_len = half;
         inv_y0 = inv_y0.square();
         inv_zeta = inv_zeta.square();
+        y0 = y0.square();
+        zeta = zeta.square();
     }
     buf[0]
 }
@@ -1743,8 +1785,13 @@ fn dot_ext4_fast(a: &[GoldilocksExt4], b: &[GoldilocksExt4]) -> GoldilocksExt4 {
         return std::thread::scope(|scope| {
             let handles: Vec<_> = (0..THREADS)
                 .map(|t_idx| {
-                    let a_sub = &a[t_idx * chunk..(t_idx + 1) * chunk];
-                    let b_sub = &b[t_idx * chunk..(t_idx + 1) * chunk];
+                    let end = if t_idx + 1 == THREADS {
+                        a.len()
+                    } else {
+                        (t_idx + 1) * chunk
+                    };
+                    let a_sub = &a[t_idx * chunk..end];
+                    let b_sub = &b[t_idx * chunk..end];
                     scope.spawn(move || {
                         let mut acc = GoldilocksExt4::ZERO;
                         for (&x, &y) in a_sub.iter().zip(b_sub.iter()) {
@@ -1936,10 +1983,10 @@ pub fn whir_open(
         transcript.absorb_ext4(b"PCS_POINT_COORD", c);
     }
     transcript.absorb_ext4(b"PCS_CLAIMED_EVAL", claimed_eval);
-    let kernel_table = build_eq_table_ext4_fast(point);
+    let kernel_table = monomial_table(point);
     whir_open_core(
         state,
-        &[GoldilocksExt4::ONE],
+        &[[GoldilocksExt4::ONE, GoldilocksExt4::ZERO]],
         kernel_table,
         claimed_eval,
         transcript,
@@ -1981,11 +2028,18 @@ pub fn whir_open_batch(
     absorb_batch_statement(transcript, num_vars, &state.commitment(), points, evals);
 
     if num_polys == 1 {
-        let kernel = build_eq_table_ext4_fast(points[0]);
-        let opening = whir_open_core(state, &[GoldilocksExt4::ONE], kernel, evals[0], transcript);
+        let kernel = monomial_table(points[0]);
+        let opening = whir_open_core(
+            state,
+            &[[GoldilocksExt4::ONE, GoldilocksExt4::ZERO]],
+            kernel,
+            evals[0],
+            transcript,
+        );
         return HemWhirBatchOpeningProof {
             point_sumcheck_polys: Vec::new(),
             common_point_evals: Vec::new(),
+            shifted_evals: Vec::new(),
             opening,
         };
     }
@@ -2048,17 +2102,25 @@ pub fn whir_open_batch(
         transcript.absorb_ext4(b"PCS_BATCH_COMMON_EVAL", e);
     }
 
-    let mu = transcript.squeeze_ext4(b"PCS_BATCH_MU");
-    let weights = powers_of_ext4(mu, num_polys);
-    let mut combined_claim = GoldilocksExt4::ZERO;
-    for (&w, &e) in weights.iter().zip(&common_point_evals) {
-        combined_claim += w * e;
+    let kernel = monomial_table(&rho);
+    let shifted_evals: Vec<_> = state
+        .hypercube_evals
+        .iter()
+        .map(|w| {
+            let c = hypercube_to_monomial_coeffs(w);
+            dot_base_ext4_fast(&c, &kernel[1..1 + c.len()])
+        })
+        .collect();
+    for &e in &shifted_evals {
+        transcript.absorb_ext4(b"PCS_BATCH_SHIFT", e);
     }
-    let kernel = build_eq_table_ext4_fast(&rho);
+    let weights = cascade_weights(num_polys, transcript);
+    let combined_claim = combine_claims(&weights, &common_point_evals, &shifted_evals);
     let opening = whir_open_core(state, &weights, kernel, combined_claim, transcript);
     HemWhirBatchOpeningProof {
         point_sumcheck_polys,
         common_point_evals,
+        shifted_evals,
         opening,
     }
 }
@@ -2122,7 +2184,7 @@ where
 /// Core multi-stage `Hem` WHIR rate-escalated opening over `GoldilocksExt4`.
 fn whir_open_core(
     state: &HemWhirProverState,
-    weights: &[GoldilocksExt4],
+    weights: &[[GoldilocksExt4; 2]],
     mut cur_k: Vec<GoldilocksExt4>,
     mut cur_sum_claim: GoldilocksExt4,
     transcript: &mut FiatShamirTranscript<InstanceBound>,
@@ -2130,46 +2192,29 @@ fn whir_open_core(
     let num_polys = state.num_polys();
     assert_eq!(weights.len(), num_polys);
     let single = num_polys == 1;
-    debug_assert!(!single || weights[0] == GoldilocksExt4::ONE);
-
     let sched = &state.schedule;
     let num_stages = sched.stages.len();
     let early_stop = sched.early_stop_vars;
     let fold_vars = state.num_vars - early_stop;
-
-    // Bind WHIR stage schedule into the transcript.
     absorb_whir_schedule(transcript, sched);
-
-    // For a multi-polynomial commitment, materialize `cur_w = sum_i weights[i] * W_i` up front;
-    // for a single polynomial, Round 0 reads `state.hypercube_evals[0]` in the base field (`8x`
-    // lower memory bandwidth and base-scalar muls!).
-    let mut cur_w: Vec<GoldilocksExt4> = Vec::new();
-    if !single {
-        cur_w = vec![GoldilocksExt4::ZERO; 1usize << state.num_vars];
-        let polys = &state.hypercube_evals;
-        fill_indexed(&mut cur_w, |j| {
-            let mut acc = GoldilocksExt4::ZERO;
-            for (w, poly) in weights.iter().zip(polys) {
-                acc += w.mul_base(poly[j]);
-            }
-            acc
-        });
+    let mut cur_coeffs = vec![GoldilocksExt4::ZERO; (1usize << state.num_vars) + 2];
+    for (w, table) in weights.iter().zip(&state.hypercube_evals) {
+        let c = hypercube_to_monomial_coeffs(table);
+        for (i, &v) in c.iter().enumerate() {
+            cur_coeffs[i] += w[0].mul_base(v);
+            cur_coeffs[i + 1] += w[1].mul_base(v);
+        }
     }
-
-    // Stage-0 Out-of-Domain (OOD) list-pinning (`comm_0` is ALREADY absorbed!):
-    let z_ood_0 = transcript.squeeze_ext4(b"WHIR_OOD_CHAL");
-    let ood_pt_0 = pow2_point_ext4(z_ood_0, state.num_vars);
-    let eq_ood_0 = build_eq_table_ext4_fast(&ood_pt_0);
-    let stage0_ood_eval = if single {
-        dot_base_ext4_fast(&state.hypercube_evals[0], &eq_ood_0)
-    } else {
-        dot_ext4_fast(&cur_w, &eq_ood_0)
-    };
-    transcript.absorb_ext4(b"WHIR_OOD_EVAL", stage0_ood_eval);
-    let xi_0 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
-    axpy_ext4_fast(&mut cur_k, xi_0, &eq_ood_0);
-    drop(eq_ood_0);
-    cur_sum_claim += xi_0 * stage0_ood_eval;
+    let z_ood_0 = core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
+    let stage0_ood_evals = z_ood_0.map(|z| eval_univariate_ext4(&cur_coeffs, z));
+    for e in stage0_ood_evals {
+        transcript.absorb_ext4(b"WHIR_OOD_EVAL", e);
+    }
+    for (z, e) in z_ood_0.into_iter().zip(stage0_ood_evals) {
+        let xi = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+        axpy_ext4_fast(&mut cur_k, xi, &geometric(z, cur_coeffs.len()));
+        cur_sum_claim += xi * e;
+    }
 
     let inv_two = Goldilocks::TWO.inv();
     let inv_shift = Goldilocks::NON_RESIDUE.inv();
@@ -2185,50 +2230,33 @@ fn whir_open_core(
     };
 
     // Staged `Ext4` oracle currently active for `stage_idx >= 1`: `(cw, tree, ood_eval)`.
-    let mut active_stage_oracle: Option<(Vec<GoldilocksExt4>, MerkleCanopyTree, GoldilocksExt4)> =
-        None;
+    let mut active_stage_oracle: Option<(
+        Vec<GoldilocksExt4>,
+        MerkleCanopyTree,
+        [GoldilocksExt4; 2],
+    )> = None;
     let mut folded_layers: Vec<WhirStageProof> = Vec::with_capacity(num_stages.saturating_sub(1));
 
     for (stage_idx, st) in sched.stages.iter().enumerate() {
         let arity = 1usize << st.step_vars;
 
-        // 1. Run `st.step_vars` degree-2 sumcheck rounds over `GoldilocksExt4`.
-        let mut stage_chals = [GoldilocksExt4::ZERO; MAX_FOLD_STEP_VARS];
-        for (s, slot_chal) in stage_chals.iter_mut().enumerate().take(st.step_vars) {
-            let from_base = single && stage_idx == 0 && s == 0;
-            let (ev0, ev2) = if from_base {
-                sumcheck_round_evals_ext4(&state.hypercube_evals[0], &cur_k, |k, w| k.mul_base(w))
-            } else {
-                sumcheck_round_evals_ext4(&cur_w, &cur_k, |k, w| k * w)
-            };
-            let ev1 = cur_sum_claim - ev0;
-            let wire = pack_quadratic_wire(ev0, ev1, ev2);
-            transcript.absorb_ext4(b"WHIR_SC_C0", wire[0]);
-            transcript.absorb_ext4(b"WHIR_SC_C2", wire[1]);
+        let mut stage_chals = [[GoldilocksExt4::ZERO; 3]; MAX_FOLD_STEP_VARS];
+        for slot in stage_chals.iter_mut().take(st.step_vars) {
+            let (wire, chals) = prove_fold(&mut cur_coeffs, &mut cur_k, &mut cur_sum_claim, transcript);
             fold_sumcheck_polys.push(wire);
-
-            let alpha = transcript.squeeze_ext4(b"WHIR_FOLD_CHAL");
-            cur_sum_claim = eval_quadratic_wire(&wire, cur_sum_claim, alpha);
-            if from_base {
-                cur_w = fold_base_first_var_ext4(&state.hypercube_evals[0], alpha);
-            } else {
-                fold_first_var_ext4_fast(&mut cur_w, alpha);
-            }
-            fold_first_var_ext4_fast(&mut cur_k, alpha);
-            *slot_chal = alpha;
+            *slot = chals;
         }
         rem_vars -= st.step_vars;
         let chals_slice = &stage_chals[..st.step_vars];
 
         if stage_idx + 1 < num_stages {
             // 2A. Intermediate WHIR Rate-Escalation Transition (`stage_idx -> stage_idx + 1`):
-            //     Re-encode `cur_w` (`2^{rem_vars}` `Ext4` elements) at `stages[stage_idx + 1].blowup`
+            //     Re-encode `cur_coeffs` (`2^{rem_vars}` `Ext4` elements) at `stages[stage_idx + 1].blowup`
             //     and absorb `comm_next` + `ood_eval_next` BEFORE grinding/squeezing Stage `stage_idx`'s
             //     spot-check fiber queries!
             let next_spec = sched.stages[stage_idx + 1];
             let next_arity = 1usize << next_spec.step_vars;
-            let coeffs_next = hypercube_to_monomial_coeffs_ext4(&cur_w);
-            let cw_next = encode_rs_coset_ext4(&coeffs_next, next_spec.blowup);
+            let cw_next = encode_overflow(&cur_coeffs, next_spec.blowup);
             let num_groups_next = cw_next.len() / next_arity;
             let next_stage_u8 = (stage_idx + 1) as u8;
             let tree_next = MerkleCanopyTree::build_from_fn_x4(num_groups_next, |base_g| {
@@ -2237,10 +2265,12 @@ fn whir_open_core(
             let comm_next = tree_next.commitment();
             transcript.absorb(b"WHIR_NEXT_COMMIT", &comm_next.to_bytes());
 
-            let z_ood_next = transcript.squeeze_ext4(b"WHIR_OOD_CHAL");
-            let ood_eval_next = eval_univariate_ext4(&coeffs_next, z_ood_next);
-            drop(coeffs_next);
-            transcript.absorb_ext4(b"WHIR_OOD_EVAL", ood_eval_next);
+            let z_ood_next =
+                core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
+            let ood_eval_next = z_ood_next.map(|z| eval_univariate_ext4(&cur_coeffs, z));
+            for e in ood_eval_next {
+                transcript.absorb_ext4(b"WHIR_OOD_EVAL", e);
+            }
 
             // Grind Stage `stage_idx`'s 16-bit PoW nonce and squeeze Stage `stage_idx`'s fiber queries!
             let pow_nonce = grind_pcs_pow(transcript);
@@ -2273,7 +2303,9 @@ fn whir_open_core(
                             for k in 0..arity {
                                 let v = cw[g + k * num_groups_0];
                                 round0_vals.push(v);
-                                fiber[k] += w.mul_base(v);
+                                let x = Goldilocks::NON_RESIDUE
+                                    * omega_0.pow((g + k * num_groups_0) as u64);
+                                fiber[k] += (w[0] + w[1].mul_base(x)).mul_base(v);
                             }
                         }
                     }
@@ -2330,7 +2362,7 @@ fn whir_open_core(
                 });
                 folded_layers.push(WhirStageProof {
                     commitment: prev_tree.commitment(),
-                    ood_eval: prev_ood,
+                    stage_ood_evals: prev_ood,
                     pow_nonce,
                     opened_vals,
                     multiproof,
@@ -2345,17 +2377,12 @@ fn whir_open_core(
             transcript.absorb(b"WHIR_SHIFT_VALS", &shift_bytes);
 
             // Squeeze OOD & shift batching challenges and fold all new claims into `(cur_k, cur_sum_claim)`.
-            let xi_next = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
-            let gamma_shift = transcript.squeeze_ext4(b"WHIR_SHIFT_GAMMA");
-
-            let ood_pt_next = pow2_point_ext4(z_ood_next, rem_vars);
-            let eq_ood_next = build_eq_table_ext4_fast(&ood_pt_next);
-            #[cfg(debug_assertions)]
-            if rem_vars <= 10 {
-                debug_assert_eq!(ood_eval_next, dot_ext4_fast(&cur_w, &eq_ood_next));
+            for (z, e) in z_ood_next.into_iter().zip(ood_eval_next) {
+                let xi = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+                axpy_ext4_fast(&mut cur_k, xi, &geometric(z, cur_coeffs.len()));
+                cur_sum_claim += xi * e;
             }
-            axpy_ext4_fast(&mut cur_k, xi_next, &eq_ood_next);
-            cur_sum_claim += xi_next * ood_eval_next;
+            let gamma_shift = transcript.squeeze_ext4(b"WHIR_SHIFT_GAMMA");
 
             accumulate_shift_claims_into_kernel(
                 &mut cur_k,
@@ -2369,10 +2396,10 @@ fn whir_open_core(
         } else {
             // 2B. Final WHIR Stage (`stage_idx + 1 == num_stages`, `rem_vars == early_stop`):
             debug_assert_eq!(rem_vars, early_stop);
-            debug_assert_eq!(cur_w.len(), 1usize << early_stop);
+            debug_assert_eq!(cur_coeffs.len(), (1usize << early_stop) + 2);
 
-            let mut final_bytes = Vec::with_capacity(32 * cur_w.len());
-            for &v in &cur_w {
+            let mut final_bytes = Vec::with_capacity(32 * cur_coeffs.len());
+            for &v in &cur_coeffs {
                 final_bytes.extend_from_slice(&v.to_le_bytes());
             }
             transcript.absorb(b"WHIR_FINAL_POLY", &final_bytes);
@@ -2381,7 +2408,7 @@ fn whir_open_core(
             transcript.absorb(b"WHIR_FINAL_POW", &pow_nonce.to_le_bytes());
 
             #[cfg(debug_assertions)]
-            let final_coeffs_dbg = hypercube_to_monomial_coeffs_ext4(&cur_w);
+            let final_coeffs_dbg = &cur_coeffs;
 
             if stage_idx == 0 {
                 stage_pow_nonce_0 = pow_nonce;
@@ -2408,7 +2435,9 @@ fn whir_open_core(
                             for k in 0..arity {
                                 let v = cw[g + k * num_groups_0];
                                 round0_vals.push(v);
-                                fiber[k] += w.mul_base(v);
+                                let x = Goldilocks::NON_RESIDUE
+                                    * omega_0.pow((g + k * num_groups_0) as u64);
+                                fiber[k] += (w[0] + w[1].mul_base(x)).mul_base(v);
                             }
                         }
                     }
@@ -2426,7 +2455,7 @@ fn whir_open_core(
                         let z_u = pow2_iter_base(y0, st.step_vars);
                         debug_assert_eq!(
                             v_shift,
-                            eval_univariate_ext4_at_base(&final_coeffs_dbg, z_u)
+                            eval_univariate_ext4_at_base(final_coeffs_dbg, z_u)
                         );
                     }
                     #[cfg(not(debug_assertions))]
@@ -2465,7 +2494,7 @@ fn whir_open_core(
                         let z_u = pow2_iter_base(y0, st.step_vars);
                         debug_assert_eq!(
                             v_shift,
-                            eval_univariate_ext4_at_base(&final_coeffs_dbg, z_u)
+                            eval_univariate_ext4_at_base(final_coeffs_dbg, z_u)
                         );
                     }
                     #[cfg(not(debug_assertions))]
@@ -2478,7 +2507,7 @@ fn whir_open_core(
                 });
                 folded_layers.push(WhirStageProof {
                     commitment: prev_tree.commitment(),
-                    ood_eval: prev_ood,
+                    stage_ood_evals: prev_ood,
                     pow_nonce,
                     opened_vals,
                     multiproof,
@@ -2488,10 +2517,10 @@ fn whir_open_core(
     }
 
     HemWhirOpeningProof {
-        stage0_ood_eval,
+        stage0_ood_evals,
         fold_sumcheck_polys,
         folded_layers,
-        final_hypercube_evals: cur_w,
+        final_coeffs: cur_coeffs,
         pow_nonce: stage_pow_nonce_0,
         round0_salts,
         round0_vals,
@@ -2508,41 +2537,16 @@ fn accumulate_shift_claims_into_kernel(
     gamma_shift: GoldilocksExt4,
     shift_claims: &[(Goldilocks, GoldilocksExt4)],
 ) {
-    let mut weighted_pts: Vec<(GoldilocksExt4, Vec<Goldilocks>)> =
-        Vec::with_capacity(shift_claims.len());
-    let mut w_shift = gamma_shift;
-    for &(z_u, v_shift) in shift_claims {
-        *cur_sum_claim += w_shift * v_shift;
-        let pt_base = pow2_point_base(z_u, rem_vars);
-        weighted_pts.push((w_shift, build_eq_table_base(&pt_base)));
-        w_shift *= gamma_shift;
-    }
-
-    #[cfg(feature = "std")]
-    if cur_k.len() >= 4_096 && weighted_pts.len() >= 4 {
-        const THREADS: usize = 16;
-        let chunk = cur_k.len() / THREADS;
-        let wp_ref = &weighted_pts;
-        std::thread::scope(|scope| {
-            for (t_idx, dst_sub) in cur_k.chunks_mut(chunk).enumerate() {
-                let base_idx = t_idx * chunk;
-                scope.spawn(move || {
-                    for &(w, ref eq_b) in wp_ref.iter() {
-                        let src_sub = &eq_b[base_idx..base_idx + dst_sub.len()];
-                        for (d, &b) in dst_sub.iter_mut().zip(src_sub.iter()) {
-                            *d += w.mul_base(b);
-                        }
-                    }
-                });
-            }
-        });
-        return;
-    }
-
-    for (w, eq_b) in &weighted_pts {
-        for (d, &b) in cur_k.iter_mut().zip(eq_b.iter()) {
-            *d += w.mul_base(b);
+    debug_assert_eq!(cur_k.len(), (1usize << rem_vars) + 2);
+    let mut w = gamma_shift;
+    for &(z, e) in shift_claims {
+        *cur_sum_claim += w * e;
+        let mut power = Goldilocks::ONE;
+        for k in cur_k.iter_mut() {
+            *k += w.mul_base(power);
+            power *= z;
         }
+        w *= gamma_shift;
     }
 }
 
@@ -2597,7 +2601,7 @@ pub fn whir_verify_with_schedule(
 
     whir_verify_core(
         comm_0,
-        &[GoldilocksExt4::ONE],
+        &[[GoldilocksExt4::ONE, GoldilocksExt4::ZERO]],
         point,
         claimed_eval,
         proof,
@@ -2646,12 +2650,15 @@ pub fn whir_verify_batch_with_schedule(
     absorb_batch_statement(transcript, num_vars, comm_0, points, evals);
 
     if num_polys == 1 {
-        if !proof.point_sumcheck_polys.is_empty() || !proof.common_point_evals.is_empty() {
+        if !proof.point_sumcheck_polys.is_empty()
+            || !proof.common_point_evals.is_empty()
+            || !proof.shifted_evals.is_empty()
+        {
             return false;
         }
         return whir_verify_core(
             comm_0,
-            &[GoldilocksExt4::ONE],
+            &[[GoldilocksExt4::ONE, GoldilocksExt4::ZERO]],
             points[0],
             evals[0],
             &proof.opening,
@@ -2659,7 +2666,10 @@ pub fn whir_verify_batch_with_schedule(
             schedule,
         );
     }
-    if proof.point_sumcheck_polys.len() != num_vars || proof.common_point_evals.len() != num_polys {
+    if proof.point_sumcheck_polys.len() != num_vars
+        || proof.common_point_evals.len() != num_polys
+        || proof.shifted_evals.len() != num_polys
+    {
         return false;
     }
 
@@ -2694,12 +2704,11 @@ pub fn whir_verify_batch_with_schedule(
         transcript.absorb_ext4(b"PCS_BATCH_COMMON_EVAL", e);
     }
 
-    let mu = transcript.squeeze_ext4(b"PCS_BATCH_MU");
-    let weights = powers_of_ext4(mu, num_polys);
-    let mut combined_claim = GoldilocksExt4::ZERO;
-    for (&w, &e) in weights.iter().zip(&proof.common_point_evals) {
-        combined_claim += w * e;
+    for &e in &proof.shifted_evals {
+        transcript.absorb_ext4(b"PCS_BATCH_SHIFT", e);
     }
+    let weights = cascade_weights(num_polys, transcript);
+    let combined_claim = combine_claims(&weights, &proof.common_point_evals, &proof.shifted_evals);
     whir_verify_core(
         comm_0,
         &weights,
@@ -2715,7 +2724,7 @@ pub fn whir_verify_batch_with_schedule(
 /// against `comm_0`.
 fn whir_verify_core(
     comm_0: &CanopyCommitment,
-    weights: &[GoldilocksExt4],
+    weights: &[[GoldilocksExt4; 2]],
     init_point: &[GoldilocksExt4],
     init_sum_claim: GoldilocksExt4,
     proof: &HemWhirOpeningProof,
@@ -2742,7 +2751,7 @@ fn whir_verify_core(
 
     if proof.fold_sumcheck_polys.len() != fold_vars
         || proof.folded_layers.len() + 1 != num_stages
-        || proof.final_hypercube_evals.len() != (1usize << early_stop)
+        || proof.final_coeffs.len() != (1usize << early_stop) + 2
     {
         return false;
     }
@@ -2758,27 +2767,29 @@ fn whir_verify_core(
     // Bind WHIR schedule into transcript.
     absorb_whir_schedule(transcript, sched);
 
-    // Accumulate deferred kernel claims `(var_off, weight, point)` so the verifier ONLY evaluates
-    // tiny `2^{early_stop}` suffix tables at the end (`O(q * 2^{early_stop})` instead of `O(2^n)`!).
-    let mut ext_kernel_claims: Vec<(usize, GoldilocksExt4, Vec<GoldilocksExt4>)> =
-        Vec::with_capacity(1 + num_stages);
-    let mut base_kernel_claims: Vec<(usize, GoldilocksExt4, Vec<Goldilocks>)> = Vec::new();
-
-    ext_kernel_claims.push((0, GoldilocksExt4::ONE, init_point.to_vec()));
+    let mut kernel_claims = vec![KernelClaim {
+        offset: 0,
+        weight: GoldilocksExt4::ONE,
+        point: init_point.to_vec(),
+        overflow: [GoldilocksExt4::ZERO; 2],
+    }];
     let mut cur_sum_claim = init_sum_claim;
-
-    // Stage-0 OOD evaluation claim:
-    let z_ood_0 = transcript.squeeze_ext4(b"WHIR_OOD_CHAL");
-    transcript.absorb_ext4(b"WHIR_OOD_EVAL", proof.stage0_ood_eval);
-    let xi_0 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
-    ext_kernel_claims.push((0, xi_0, pow2_point_ext4(z_ood_0, num_vars)));
-    cur_sum_claim += xi_0 * proof.stage0_ood_eval;
+    let z_ood_0 = core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
+    for e in proof.stage0_ood_evals {
+        transcript.absorb_ext4(b"WHIR_OOD_EVAL", e);
+    }
+    for (z, e) in z_ood_0.into_iter().zip(proof.stage0_ood_evals) {
+        let xi = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+        kernel_claims.push(KernelClaim::evaluation(0, xi, z, num_vars));
+        cur_sum_claim += xi * e;
+    }
 
     let inv_two = Goldilocks::TWO.inv();
     let inv_shift = Goldilocks::NON_RESIDUE.inv();
     let inv_zetas = build_inv_zetas();
 
     let mut alphas = Vec::with_capacity(fold_vars);
+    let mut phis = Vec::with_capacity(fold_vars);
     let mut sc_cursor = 0usize;
     let mut var_off = 0usize;
     let mut rem_vars = num_vars;
@@ -2787,16 +2798,14 @@ fn whir_verify_core(
         let arity = 1usize << st.step_vars;
         let stage_alpha_start = alphas.len();
 
-        // 1. Replay `st.step_vars` degree-2 sumcheck rounds (`g(0) + g(1) == cur_sum_claim` enforced
-        //    algebraically by `eval_quadratic_wire`).
         for _ in 0..st.step_vars {
             let wire = proof.fold_sumcheck_polys[sc_cursor];
             sc_cursor += 1;
-            transcript.absorb_ext4(b"WHIR_SC_C0", wire[0]);
-            transcript.absorb_ext4(b"WHIR_SC_C2", wire[1]);
-            let alpha = transcript.squeeze_ext4(b"WHIR_FOLD_CHAL");
-            cur_sum_claim = eval_quadratic_wire(&wire, cur_sum_claim, alpha);
-            alphas.push(alpha);
+            let phi = bridge_prefix(&wire, transcript);
+            let (next, chals) = bridge_finish(&wire, cur_sum_claim, phi, transcript);
+            cur_sum_claim = next;
+            phis.push(phi);
+            alphas.push(chals);
         }
         var_off += st.step_vars;
         rem_vars -= st.step_vars;
@@ -2810,12 +2819,16 @@ fn whir_verify_core(
             let num_groups_next = domain_next / next_arity;
 
             let next_layer = &proof.folded_layers[stage_idx];
-            if (1usize << (next_layer.commitment.log_leaves as usize)) != num_groups_next {
+            if next_layer.commitment.log_leaves > 28
+                || (1usize << (next_layer.commitment.log_leaves as usize)) != num_groups_next {
                 return false;
             }
             transcript.absorb(b"WHIR_NEXT_COMMIT", &next_layer.commitment.to_bytes());
-            let z_ood_next = transcript.squeeze_ext4(b"WHIR_OOD_CHAL");
-            transcript.absorb_ext4(b"WHIR_OOD_EVAL", next_layer.ood_eval);
+            let z_ood_next =
+                core::array::from_fn::<_, 2, _>(|_| transcript.squeeze_ext4(b"WHIR_OOD_CHAL"));
+            for e in next_layer.stage_ood_evals {
+                transcript.absorb_ext4(b"WHIR_OOD_EVAL", e);
+            }
 
             let stage_pow_nonce = if stage_idx == 0 {
                 proof.pow_nonce
@@ -2868,17 +2881,21 @@ fn whir_verify_core(
             }
             transcript.absorb(b"WHIR_SHIFT_VALS", &shift_bytes);
 
-            let xi_next = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+            for (z, e) in z_ood_next.into_iter().zip(next_layer.stage_ood_evals) {
+                let xi = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+                kernel_claims.push(KernelClaim::evaluation(var_off, xi, z, rem_vars));
+                cur_sum_claim += xi * e;
+            }
             let gamma_shift = transcript.squeeze_ext4(b"WHIR_SHIFT_GAMMA");
-
-            ext_kernel_claims.push((var_off, xi_next, pow2_point_ext4(z_ood_next, rem_vars)));
-            cur_sum_claim += xi_next * next_layer.ood_eval;
-
             let mut w_shift = gamma_shift;
-            base_kernel_claims.reserve(shift_claims.len());
             for &(z_u, v_shift) in &shift_claims {
                 cur_sum_claim += w_shift * v_shift;
-                base_kernel_claims.push((var_off, w_shift, pow2_point_base(z_u, rem_vars)));
+                kernel_claims.push(KernelClaim::evaluation(
+                    var_off,
+                    w_shift,
+                    GoldilocksExt4::from_base(z_u),
+                    rem_vars,
+                ));
                 w_shift *= gamma_shift;
             }
         } else {
@@ -2887,21 +2904,15 @@ fn whir_verify_core(
                 return false;
             }
 
-            let mut final_bytes = Vec::with_capacity(32 * proof.final_hypercube_evals.len());
-            for &v in &proof.final_hypercube_evals {
+            let mut final_bytes = Vec::with_capacity(32 * proof.final_coeffs.len());
+            for &v in &proof.final_coeffs {
                 final_bytes.extend_from_slice(&v.to_le_bytes());
             }
             transcript.absorb(b"WHIR_FINAL_POLY", &final_bytes);
 
             // Mandatory terminal sumcheck check across all accumulated evaluation, OOD, and shift claims!
-            let expected_terminal = eval_accumulated_terminal_sum(
-                fold_vars,
-                early_stop,
-                &alphas,
-                &ext_kernel_claims,
-                &base_kernel_claims,
-                &proof.final_hypercube_evals,
-            );
+            let expected_terminal =
+                terminal_sum(&phis, early_stop, &kernel_claims, &proof.final_coeffs);
             if cur_sum_claim != expected_terminal {
                 return false;
             }
@@ -2951,9 +2962,9 @@ fn whir_verify_core(
                 return false;
             };
 
-            let final_coeffs = hypercube_to_monomial_coeffs_ext4(&proof.final_hypercube_evals);
+            let final_coeffs = &proof.final_coeffs;
             for &(z_u, v_shift) in &final_claims {
-                if eval_univariate_ext4_at_base(&final_coeffs, z_u) != v_shift {
+                if eval_univariate_ext4_at_base(final_coeffs, z_u) != v_shift {
                     return false;
                 }
             }
@@ -2967,11 +2978,11 @@ fn whir_verify_core(
 fn verify_and_fold_stage0_fibers(
     comm_0: &CanopyCommitment,
     num_polys: usize,
-    weights: &[GoldilocksExt4],
+    weights: &[[GoldilocksExt4; 2]],
     domain_0: usize,
     arity_0: usize,
     num_queries: usize,
-    stage_chals: &[GoldilocksExt4],
+    stage_chals: &[[GoldilocksExt4; 3]],
     inv_shift: Goldilocks,
     inv_two: Goldilocks,
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
@@ -3009,8 +3020,9 @@ fn verify_and_fold_stage0_fibers(
             }
         } else {
             for (w, poly_vals) in weights.iter().zip(vals.chunks_exact(arity_0)) {
-                for (slot, &v) in ext_vals.iter_mut().zip(poly_vals) {
-                    *slot += w.mul_base(v);
+                for (k, (slot, &v)) in ext_vals.iter_mut().zip(poly_vals).enumerate() {
+                    let x = Goldilocks::NON_RESIDUE * omega_0.pow((g + k * num_groups_0) as u64);
+                    *slot += (w[0] + w[1].mul_base(x)).mul_base(v);
                 }
             }
         }
@@ -3041,14 +3053,15 @@ fn verify_and_fold_ext4_stage_fibers(
     domain_cur: usize,
     arity: usize,
     num_queries: usize,
-    stage_chals: &[GoldilocksExt4],
+    stage_chals: &[[GoldilocksExt4; 3]],
     inv_shift: Goldilocks,
     inv_two: Goldilocks,
     inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
     transcript: &mut FiatShamirTranscript<InstanceBound>,
 ) -> Option<Vec<(Goldilocks, GoldilocksExt4)>> {
     let num_groups_cur = domain_cur / arity;
-    if (1usize << (layer.commitment.log_leaves as usize)) != num_groups_cur {
+    if layer.commitment.log_leaves > 28
+        || (1usize << (layer.commitment.log_leaves as usize)) != num_groups_cur {
         return None;
     }
     let q_indices = sample_stage_queries(transcript, stage_idx, num_groups_cur, num_queries);
@@ -3078,43 +3091,6 @@ fn verify_and_fold_ext4_stage_fibers(
         return None;
     }
     Some(claims)
-}
-
-/// Evaluate $\langle W_{\text{final}}, K_{\text{terminal}} \rangle$ across all initial, OOD, and
-/// shift evaluation claims in $O(q \cdot 2^{\text{early\_stop}})$ operations.
-fn eval_accumulated_terminal_sum(
-    fold_vars: usize,
-    early_stop: usize,
-    alphas: &[GoldilocksExt4],
-    ext_claims: &[(usize, GoldilocksExt4, Vec<GoldilocksExt4>)],
-    base_claims: &[(usize, GoldilocksExt4, Vec<Goldilocks>)],
-    final_evals: &[GoldilocksExt4],
-) -> GoldilocksExt4 {
-    let mut terminal_k = vec![GoldilocksExt4::ZERO; 1usize << early_stop];
-
-    for &(var_off, weight, ref pt) in ext_claims {
-        let prefix_len = fold_vars - var_off;
-        let scale = weight * eq_poly_ext4(&pt[..prefix_len], &alphas[var_off..fold_vars]);
-        let suffix_tbl = build_eq_table_ext4(&pt[prefix_len..]);
-        for (dst, &ke) in terminal_k.iter_mut().zip(suffix_tbl.iter()) {
-            *dst += scale * ke;
-        }
-    }
-
-    for &(var_off, weight, ref pt_base) in base_claims {
-        let prefix_len = fold_vars - var_off;
-        let scale = weight * eq_poly_base_ext4(&pt_base[..prefix_len], &alphas[var_off..fold_vars]);
-        let suffix_tbl = build_eq_table_base(&pt_base[prefix_len..]);
-        for (dst, &kb) in terminal_k.iter_mut().zip(suffix_tbl.iter()) {
-            *dst += scale.mul_base(kb);
-        }
-    }
-
-    let mut acc = GoldilocksExt4::ZERO;
-    for (&w, &k) in final_evals.iter().zip(terminal_k.iter()) {
-        acc += w * k;
-    }
-    acc
 }
 
 // ============================================================================
@@ -3208,20 +3184,31 @@ mod pcs_unit_tests {
 
     #[test]
     fn exact_regime_ladder() {
-        assert_eq!(WhirSecurityRegime::default(), WhirSecurityRegime::Habr24Qrom128);
+        assert_eq!(
+            WhirSecurityRegime::default(),
+            WhirSecurityRegime::Habr24Qrom128
+        );
         for (tag, counts, bits) in [
             (0, [56, 28, 19, 14], 128),
             (1, [64, 32, 22, 16], 144),
             (2, [129, 65, 44, 33], 144),
             (3, [128, 64, 43, 32], 272),
-            (4, [257, 129, 87, 65], 272),
+            (4, [258, 130, 88, 66], 272),
         ] {
             let regime = WhirSecurityRegime::from_u8(tag).unwrap();
             assert_eq!(regime as u8, tag);
             assert_eq!(regime.classical_fs_round_bits(), bits);
             assert_eq!(regime.qrom_grover_round_bits(), bits / 2);
             assert_eq!(regime.meets_qrom_128_floor(), tag >= 3);
-            assert_eq!(regime.schedule(24).stages.iter().map(|s| s.num_queries).collect::<Vec<_>>(), counts);
+            assert_eq!(
+                regime
+                    .schedule(24)
+                    .stages
+                    .iter()
+                    .map(|s| s.num_queries)
+                    .collect::<Vec<_>>(),
+                counts
+            );
             let mut excessive = regime.schedule(24);
             excessive.stages[0].num_queries = NUM_PCS_QUERIES + 1;
             assert!(!excessive.validate(24));
@@ -3341,7 +3328,7 @@ mod pcs_unit_tests {
                 &wrong
             ));
             let mut forged = proof.clone();
-            forged.final_hypercube_evals[0] += GoldilocksExt4::ONE;
+            forged.final_coeffs[0] += GoldilocksExt4::ONE;
             assert!(!whir_verify_with_schedule(
                 &comm,
                 nv,

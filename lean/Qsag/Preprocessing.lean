@@ -2093,57 +2093,75 @@ theorem extract384To128_two_universal
     intro ⟨c1, c2⟩ _
     dsimp only [p]
     rw [← hxJoin, ← hxJoin', extract384To128_towerCombinerMatrix_join, extract384To128_towerCombinerMatrix_join]
-    simp only [decide_eq_decide]
-    exact ⟨packTower_injective 7 _ _, congrArg (packTower 7)⟩
+    if hEq : linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c1 c2 x0' x1' x2' then
+      rw [decide_eq_true (congrArg (packTower 7) hEq), decide_eq_true hEq]
+    else
+      rw [decide_eq_false (fun hp => hEq (packTower_injective 7 _ _ hp)), decide_eq_false hEq]
   have hCountLe : ((cartesianPairs S1 S2).filter p).length ≤ Nat.max S1.length S2.length := by
-    if hx1 : x1 ≠ x1' then
+    if he1 : x1 = x1' then
+      if he2 : x2 = x2' then
+        have hx0 : x0 ≠ x0' := by
+          intro he0
+          have hb0 : b0 = b0' := by
+            have h0 := congrArg (packTower 7) he0
+            dsimp only [x0, x0'] at h0
+            rw [packTower_unpackTower, packTower_unpackTower] at h0
+            exact h0
+          have hb1 : b1 = b1' := by
+            have h1 := congrArg (packTower 7) he1
+            dsimp only [x1, x1'] at h1
+            rw [packTower_unpackTower, packTower_unpackTower] at h1
+            exact h1
+          have hb2 : b2 = b2' := by
+            have h2 := congrArg (packTower 7) he2
+            dsimp only [x2, x2'] at h2
+            rw [packTower_unpackTower, packTower_unpackTower] at h2
+            exact h2
+          rw [← hxJoin, ← hxJoin', hb0, hb1, hb2] at hDiff
+          exact hDiff rfl
+        have hRow0 : ((cartesianPairs S1 S2).filter p).length ≤ S1.length * 0 := by
+          refine cartesianPairs_filter_row_le p 0 S1 S2 (fun c1 _ => ?_)
+          have hNoMatch : ∀ c2, p (c1, c2) = false := by
+            intro c2
+            dsimp only [p]
+            apply decide_eq_false
+            simp only [linearCombiner3to1, he1, he2]
+            intro hEqAdd
+            rw [LawfulCommRing.add_comm x0 _, LawfulCommRing.add_comm x0' _] at hEqAdd
+            exact hx0 (LawfulCommRing.add_left_cancel hEqAdd)
+          have hEmpty : ∀ (L : List Tower128), L.filter (fun c2 => p (c1, c2)) = [] := by
+            intro L
+            induction L with
+            | nil => rfl
+            | cons c2 tl ih =>
+              simp only [List.filter_cons, hNoMatch c2, Bool.false_eq_true, ↓reduceIte, ih]
+          rw [hEmpty S2]
+          exact Nat.le_refl 0
+        exact Nat.le_trans (by omega) (Nat.zero_le _)
+      else
+        have hSwap : ∀ (c1 c2 : Tower128),
+            linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c2 c1 x0 x2 x1 ∧
+            linearCombiner3to1 c1 c2 x0' x1' x2' = linearCombiner3to1 c2 c1 x0' x2' x1' := by
+          intro c1 c2
+          unfold linearCombiner3to1
+          exact ⟨congrArg (CommRingOps.add x0) (LawfulCommRing.add_comm _ _),
+                 congrArg (CommRingOps.add x0') (LawfulCommRing.add_comm _ _)⟩
+        have hRow : ((cartesianPairs S1 S2).filter p).length ≤ S1.length * 1 := by
+          refine cartesianPairs_filter_row_le p 1 S1 S2 (fun c1 _ => ?_)
+          have hF2 : S2.filter (fun c2 => p (c1, c2)) =
+              S2.filter (fun c2 => decide (linearCombiner3to1 c2 c1 x0 x2 x1 = linearCombiner3to1 c2 c1 x0' x2' x1')) := by
+            apply List.filter_congr
+            intro c2 _
+            obtain ⟨hs1, hs2⟩ := hSwap c1 c2
+            simp only [p, hs1, hs2]
+          rw [hF2]
+          exact linearCombiner3to1_universal_c1 c1 x0 x2 x1 x0' x2' x1' S2 hNodup2 he2
+        exact Nat.le_trans (by omega) (Nat.le_max_left _ _)
+    else
       have hCol : ((cartesianPairs S1 S2).filter p).length ≤ 1 * S2.length :=
         cartesianPairs_filter_col_le p 1 S1 S2 (fun c2 _ =>
-          linearCombiner3to1_universal_c1 c2 x0 x1 x2 x0' x1' x2' S1 hNodup1 hx1)
+          linearCombiner3to1_universal_c1 c2 x0 x1 x2 x0' x1' x2' S1 hNodup1 he1)
       exact Nat.le_trans (by omega) (Nat.le_max_right _ _)
-    else if hx2 : x2 ≠ x2' then
-      have hSwap : ∀ (c1 c2 : Tower128),
-          linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c2 c1 x0 x2 x1 ∧
-          linearCombiner3to1 c1 c2 x0' x1' x2' = linearCombiner3to1 c2 c1 x0' x2' x1' := by
-        intro c1 c2
-        unfold linearCombiner3to1
-        exact ⟨congrArg (CommRingOps.add x0) (LawfulCommRing.add_comm _ _),
-               congrArg (CommRingOps.add x0') (LawfulCommRing.add_comm _ _)⟩
-      have hRow : ((cartesianPairs S1 S2).filter p).length ≤ S1.length * 1 := by
-        refine cartesianPairs_filter_row_le p 1 S1 S2 (fun c1 _ => ?_)
-        have hF2 : S2.filter (fun c2 => p (c1, c2)) =
-            S2.filter (fun c2 => decide (linearCombiner3to1 c2 c1 x0 x2 x1 = linearCombiner3to1 c2 c1 x0' x2' x1')) := by
-          apply List.filter_congr
-          intro c2 _
-          obtain ⟨hs1, hs2⟩ := hSwap c1 c2
-          simp only [p, hs1, hs2]
-        rw [hF2]
-        exact linearCombiner3to1_universal_c1 c1 x0 x2 x1 x0' x2' x1' S2 hNodup2 hx2
-      exact Nat.le_trans (by omega) (Nat.le_max_left _ _)
-    else
-      have he1 : x1 = x1' := Decidable.of_not_not hx1
-      have he2 : x2 = x2' := Decidable.of_not_not hx2
-      have hx0 : x0 ≠ x0' := by
-        intro he0
-        have hb0 : b0 = b0' := by
-          have := congrArg (packTower 7) he0; simpa [x0, x0'] using this
-        have hb1 : b1 = b1' := by
-          have := congrArg (packTower 7) he1; simpa [x1, x1'] using this
-        have hb2 : b2 = b2' := by
-          have := congrArg (packTower 7) he2; simpa [x2, x2'] using this
-        rw [← hxJoin, ← hxJoin', hb0, hb1, hb2] at hDiff
-        exact hDiff rfl
-      have hRow0 : ((cartesianPairs S1 S2).filter p).length ≤ S1.length * 0 := by
-        refine cartesianPairs_filter_row_le p 0 S1 S2 (fun c1 _ => ?_)
-        have hEmpty : S2.filter (fun c2 => p (c1, c2)) = [] := by
-          apply List.filter_eq_nil_iff.mpr
-          intro c2 _
-          simp only [p, decide_eq_true_eq, linearCombiner3to1, he1, he2]
-          intro hEqAdd
-          rw [LawfulCommRing.add_comm x0 _, LawfulCommRing.add_comm x0' _] at hEqAdd
-          exact hx0 (LawfulCommRing.add_left_cancel hEqAdd)
-        simp [hEmpty]
-      exact Nat.le_trans (by omega) (Nat.zero_le _)
   rw [hFiltEq]
   have hMaxLe : Nat.max S1.length S2.length ≤ 2 ^ 128 := Nat.max_le.mpr ⟨hLen1, hLen2⟩
   have hLe128 : ((cartesianPairs S1 S2).filter p).length ≤ 2 ^ 128 := Nat.le_trans hCountLe hMaxLe
@@ -2313,7 +2331,13 @@ theorem tooth_kos_prechallenge_two_column_cancellation (chi : Tower128) :
     unpackTower 7 (packTower 7 (towerOne 7) &&& allOnes) ≠ towerZero 7 ∧
     kosBatchedPolyResidual 7 deltaUs allOnes (towerZero 7) chi = towerZero 7 := by
   intro allOnes deltaUs
-  have hAndOne : ∀ v : TowerBitVec 7, v &&& allOnes = v := fun v => BitVec.and_allOnes
+  have hOnes : ∀ (idx : Fin 128), (BitVec.allOnes 128).getLsbD idx.1 = true := by decide +kernel
+  have hAndOne : ∀ v : TowerBitVec 7, v &&& allOnes = v := by
+    intro v
+    apply BitVec.eq_of_getLsbD_eq
+    intro i hi
+    change (v &&& BitVec.allOnes 128).getLsbD i = v.getLsbD i
+    rw [BitVec.getLsbD_and, hOnes ⟨i, hi⟩, Bool.and_true]
   refine ⟨?_, ?_⟩
   · rw [hAndOne, unpackTower_packTower]
     exact towerOne_ne_zero 7
