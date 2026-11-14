@@ -4,8 +4,8 @@
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
 use qsag_policy::{
-    PolicyViolation, QuorumTierRule, SigningPayloadBinding, TransactionIntent, TransactionPolicy,
-    trusted_dealer_setup_for_testing,
+    FsPolicyDurableLedger, FsPolicyGenerationFence, PolicyViolation, QuorumTierRule,
+    SigningPayloadBinding, TransactionIntent, TransactionPolicy, trusted_dealer_setup_for_testing,
 };
 
 use crate::cli::{Args, CliError, exit};
@@ -237,19 +237,103 @@ fn mint_release_tokens(
         states4.push(state);
         sigma_opens.push(open);
     }
-    let mut minted = 0;
-    for (state, guard) in states4.into_iter().zip(&mut guards) {
-        let token = state.finalize(guard, &sigma_opens).map_err(barrier)?;
-        let bound = token.matches_signing(&key_id(), signing_bytes, CONTEXT, &intent.quorum_ids)
-            && !token.matches_signing(&key_id(), b"another message", CONTEXT, &intent.quorum_ids);
-        if !bound {
-            return Err(CliError::verify(
-                "release token is not bound to the approved signing request",
-            ));
+    let work_dir = std::env::temp_dir().join(format!(
+        "qsag-policy-demo-ledger-{}-{}",
+        std::process::id(),
+        crate::codec::to_hex(&crate::cli::os_random_32()?)
+    ));
+    std::fs::create_dir_all(work_dir.join("ledgers"))
+        .map_err(|e| CliError::io("creating policy ledger directory", e))?;
+    std::fs::create_dir_all(work_dir.join("fences"))
+        .map_err(|e| CliError::io("creating policy fence directory", e))?;
+
+    let persist_result = (|| -> Result<usize, CliError> {
+        let mut ledgers = Vec::with_capacity(guards.len());
+        let mut fences = Vec::with_capacity(guards.len());
+        for guard in &guards {
+            let ledger_key = cshake256_framed_32(
+                b"QSAG.CLI.POLICY.LEDGER.KEY.V1",
+                &[&key_id(), &guard.party_id.to_be_bytes()],
+            );
+            let fence_key = cshake256_framed_32(
+                b"QSAG.CLI.POLICY.FENCE.KEY.V1",
+                &[&key_id(), &guard.party_id.to_be_bytes()],
+            );
+            let ledger = FsPolicyDurableLedger::create_new(
+                work_dir.join("ledgers").join(format!("party-{}", guard.party_id)),
+                ledger_key,
+                guard,
+            )
+            .map_err(|e| CliError::io("creating policy ledger", e))?;
+            let fence = FsPolicyGenerationFence::create_new(
+                work_dir.join("fences").join(format!("party-{}", guard.party_id)),
+                fence_key,
+                ledger.generation(),
+            )
+            .map_err(|e| CliError::io("creating policy generation fence", e))?;
+            ledgers.push(ledger);
+            fences.push(fence);
         }
-        minted += 1;
-    }
-    Ok(minted)
+
+        let mut minted = 0;
+        for (((state, guard), ledger), fence) in states4
+            .into_iter()
+            .zip(&mut guards)
+            .zip(&mut ledgers)
+            .zip(&mut fences)
+        {
+            let token = state.finalize(guard, &sigma_opens).map_err(barrier)?;
+            // Persist the updated policy ledger AND ratchet the independent generation fence
+            // BEFORE releasing or accepting the minted release token.
+            ledger
+                .sync_persist(guard)
+                .map_err(|e| CliError::io("persisting policy checkpoint", e))?;
+            fence
+                .ratchet_to(ledger.generation())
+                .map_err(|e| CliError::io("ratcheting policy generation fence", e))?;
+            let bound = token.matches_signing(&key_id(), signing_bytes, CONTEXT, &intent.quorum_ids)
+                && !token.matches_signing(
+                    &key_id(),
+                    b"another message",
+                    CONTEXT,
+                    &intent.quorum_ids,
+                );
+            if !bound {
+                return Err(CliError::verify(
+                    "release token is not bound to the approved signing request",
+                ));
+            }
+            minted += 1;
+        }
+        drop(ledgers);
+
+        // Verify reload from the retained generation fence reproduces all burned nonces/sessions.
+        let mut reloaded_guards: Vec<_> =
+            trusted_dealer_setup_for_testing([0x99; 32], &[10, 20, 30, 40, 50])
+                .into_iter()
+                .filter(|g| intent.quorum_ids.contains(&g.party_id))
+                .collect();
+        for (guard, fence) in reloaded_guards.iter_mut().zip(&fences) {
+            let ledger_key = cshake256_framed_32(
+                b"QSAG.CLI.POLICY.LEDGER.KEY.V1",
+                &[&key_id(), &guard.party_id.to_be_bytes()],
+            );
+            let _recovered = FsPolicyDurableLedger::open_existing(
+                work_dir.join("ledgers").join(format!("party-{}", guard.party_id)),
+                ledger_key,
+                guard,
+                fence.generation(),
+            )
+            .map_err(|e| CliError::io("verifying fenced policy checkpoint", e))?;
+            if !guard.is_nonce_burned(&intent.intent_nonce) || !guard.is_session_burned(&SESSION) {
+                return Err(CliError::verify("fenced policy checkpoint lost burned state"));
+            }
+        }
+        Ok(minted)
+    })();
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+    persist_result
 }
 
 fn outcome(violation: &Option<PolicyViolation>) -> String {

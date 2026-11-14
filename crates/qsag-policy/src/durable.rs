@@ -312,6 +312,109 @@ impl FsPolicyDurableLedger {
     }
 }
 
+/// Independent monotonic generation fence for [`FsPolicyDurableLedger`], stored in a
+/// separate [`qsag_asm::durable::LockedRecord`] domain so rolling back the policy checkpoint
+/// file is caught on [`Self::open_and_verify_ledger`].
+#[cfg(feature = "std")]
+pub struct FsPolicyGenerationFence {
+    path: std::path::PathBuf,
+    record: qsag_asm::durable::LockedRecord,
+    key: qsag_accel::ct::RedactedSecret<32>,
+    generation: u64,
+}
+
+#[cfg(feature = "std")]
+impl FsPolicyGenerationFence {
+    const DOMAIN: &[u8] = b"QSAG.POLICY.GEN.FENCE.V1";
+
+    pub fn create_new(
+        path: impl Into<std::path::PathBuf>,
+        mut key: [u8; 32],
+        initial_generation: u64,
+    ) -> std::io::Result<Self> {
+        let path = path.into();
+        let record = qsag_asm::durable::LockedRecord::create_new(&path)?;
+        let derived = cshake256_framed_32(Self::DOMAIN, &[&key, &record.lock_seal()]);
+        ct_zeroize_bytes(&mut key);
+        let fence = Self {
+            path,
+            record,
+            key: qsag_accel::ct::RedactedSecret::new(derived),
+            generation: initial_generation,
+        };
+        fence.record.replace(&fence.encode(initial_generation))?;
+        Ok(fence)
+    }
+
+    pub fn open_existing(
+        path: impl Into<std::path::PathBuf>,
+        mut key: [u8; 32],
+    ) -> std::io::Result<Self> {
+        let path = path.into();
+        let record = qsag_asm::durable::LockedRecord::open_existing(&path)?;
+        let derived = cshake256_framed_32(Self::DOMAIN, &[&key, &record.lock_seal()]);
+        ct_zeroize_bytes(&mut key);
+        let key = qsag_accel::ct::RedactedSecret::new(derived);
+        let raw = record.read()?;
+        let generation = Self::decode(key.expose(), &record.lock_seal(), &raw)?;
+        Ok(Self {
+            path,
+            record,
+            key,
+            generation,
+        })
+    }
+
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn ratchet_to(&mut self, next_generation: u64) -> std::io::Result<()> {
+        let meta = std::fs::symlink_metadata(&self.path)?;
+        if !meta.is_file() {
+            return Err(std::io::Error::other("policy fence path is not a regular file"));
+        }
+        let disk_gen = Self::decode(
+            self.key.expose(),
+            &self.record.lock_seal(),
+            &self.record.read()?,
+        )?;
+        if disk_gen != self.generation || next_generation < self.generation {
+            return Err(std::io::Error::other("policy generation fence rollback"));
+        }
+        if next_generation > self.generation {
+            self.record.replace(&self.encode(next_generation))?;
+            self.generation = next_generation;
+        }
+        Ok(())
+    }
+
+    fn encode(&self, generation: u64) -> Vec<u8> {
+        let gen_be = generation.to_be_bytes();
+        let tag = cshake256_framed_32(
+            Self::DOMAIN,
+            &[self.key.expose(), &self.record.lock_seal(), &gen_be],
+        );
+        let mut out = Vec::with_capacity(40);
+        out.extend_from_slice(&gen_be);
+        out.extend_from_slice(&tag);
+        out
+    }
+
+    fn decode(key: &[u8; 32], lock_seal: &[u8; 8], raw: &[u8]) -> std::io::Result<u64> {
+        if raw.len() != 40 {
+            return Err(std::io::Error::other("invalid policy fence length"));
+        }
+        let expected = cshake256_framed_32(Self::DOMAIN, &[key, lock_seal, &raw[..8]]);
+        if !ct_eq_bytes(&expected, &raw[8..40]) {
+            return Err(std::io::Error::other("invalid policy fence MAC"));
+        }
+        let mut gen_be = [0u8; 8];
+        gen_be.copy_from_slice(&raw[..8]);
+        Ok(u64::from_be_bytes(gen_be))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
