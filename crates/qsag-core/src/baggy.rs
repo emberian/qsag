@@ -146,31 +146,95 @@ impl BaggyParams {
         max_grind: 1 << 26,
     };
 
+    pub const fn total_height_checked(&self) -> Option<usize> {
+        self.subtree_height.checked_mul(self.num_layers)
+    }
+
     pub const fn total_height(&self) -> usize {
-        self.subtree_height * self.num_layers
+        match self.total_height_checked() {
+            Some(h) => h,
+            None => panic!("BaggyParams::total_height overflow"),
+        }
+    }
+
+    pub const fn signed_fors_trees_checked(&self) -> Option<usize> {
+        self.fors_trees.checked_sub(1)
     }
 
     pub const fn is_well_formed(&self) -> bool {
-        self.wots.is_well_formed()
-            && self.subtree_height >= 1
-            && self.subtree_height <= 8
-            && self.num_layers >= 1
-            && self.total_height() <= 62
-            && self.fors_trees >= 2
-            && self.fors_height >= 1
-            && self.fors_height <= 16
-            && self.fors_trees * self.fors_height + self.total_height() <= 256
+        if !self.wots.is_well_formed()
+            || self.subtree_height < 1
+            || self.subtree_height > 8
+            || self.num_layers < 1
+            || self.num_layers > 62
+            || self.fors_trees < 2
+            || self.fors_trees > 256
+            || self.fors_height < 1
+            || self.fors_height > 16
+        {
+            return false;
+        }
+        let Some(total_h) = self.total_height_checked() else {
+            return false;
+        };
+        if total_h > 62 {
+            return false;
+        }
+        let Some(fors_bits) = self.fors_trees.checked_mul(self.fors_height) else {
+            return false;
+        };
+        let Some(total_bits) = fors_bits.checked_add(total_h) else {
+            return false;
+        };
+        total_bits <= 256 && self.sig_bytes_checked().is_some()
     }
 
     /// FORS trees that appear in a signature.
     pub const fn signed_fors_trees(&self) -> usize {
-        self.fors_trees - 1
+        match self.signed_fors_trees_checked() {
+            Some(k) => k,
+            None => panic!("BaggyParams::signed_fors_trees underflow"),
+        }
+    }
+
+    pub const fn sig_bytes_checked(&self) -> Option<usize> {
+        let Some(signed_fors) = self.signed_fors_trees_checked() else {
+            return None;
+        };
+        let Some(fors_auth_bytes) = 32usize.checked_mul(self.fors_height) else {
+            return None;
+        };
+        let Some(per_fors) = 32usize.checked_add(fors_auth_bytes) else {
+            return None;
+        };
+        let Some(fors_bytes) = signed_fors.checked_mul(per_fors) else {
+            return None;
+        };
+        let Some(wots_bytes) = 32usize.checked_mul(self.wots.chains) else {
+            return None;
+        };
+        let Some(sub_auth_bytes) = 32usize.checked_mul(self.subtree_height) else {
+            return None;
+        };
+        let Some(layer_inner) = 4usize
+            .checked_add(wots_bytes)
+            .and_then(|v| v.checked_add(sub_auth_bytes))
+        else {
+            return None;
+        };
+        let Some(layers_bytes) = self.num_layers.checked_mul(layer_inner) else {
+            return None;
+        };
+        36usize
+            .checked_add(fors_bytes)
+            .and_then(|v| v.checked_add(layers_bytes))
     }
 
     pub const fn sig_bytes(&self) -> usize {
-        32 + 4
-            + self.signed_fors_trees() * (32 + 32 * self.fors_height)
-            + self.num_layers * (4 + 32 * self.wots.chains + 32 * self.subtree_height)
+        match self.sig_bytes_checked() {
+            Some(len) => len,
+            None => panic!("BaggyParams::sig_bytes overflow"),
+        }
     }
 
     /// Domain-separated digest of every field. Two parameter sets that differ anywhere,
@@ -383,15 +447,17 @@ impl FirstSignedLedger for MemoryFirstSigned {
             self.fail_next = false;
             return Err(FirstSignedError::Io);
         }
-        if records
-            .iter()
-            .any(|r| self.records.get(&r.key).is_some_and(|d| *d != r.digits))
-        {
-            return Err(FirstSignedError::Conflict);
-        }
+        let mut staged = self.records.clone();
         for r in records {
-            self.records.insert(r.key, r.digits.clone());
+            if let Some(existing) = staged.get(&r.key) {
+                if *existing != r.digits {
+                    return Err(FirstSignedError::Conflict);
+                }
+            } else {
+                staged.insert(r.key, r.digits.clone());
+            }
         }
+        self.records = staged;
         self.syncs += 1;
         Ok(())
     }
@@ -742,6 +808,7 @@ fn verified_path(
 
 /// Single-party reference: public key from the top subtree.
 pub fn baggy_reference_keygen(params: &BaggyParams, sk: &PqSecretKey) -> BaggyPublicKey {
+    assert!(params.is_well_formed(), "BaggyParams must be well-formed");
     let top = (params.num_layers - 1) as u32;
     let leaves: Vec<[u8; 32]> = (0..params.subtree_leaves() as u32)
         .map(|kp| wots_c_reference_leaf(&params.wots, sk, top, 0, kp))
@@ -760,29 +827,35 @@ pub fn baggy_reference_sign(
     pk: &BaggyPublicKey,
     msg: &[u8],
 ) -> Option<BaggySig> {
+    if !params.is_well_formed() {
+        return None;
+    }
     let mu = baggy_msg_digest(pk, msg);
-    let opt_rand = th_call_secret(
+    let opt_rand = crate::wipe::SecretBuffer(th_call_secret(
         Cshake256Suite,
         TAG_BAGGY_OPT_RAND,
         &[],
         &HashAdrs::ZERO,
         &[&sk.sk_prf, &mu],
-    );
+    ));
     let r = th_call_secret(
         Cshake256Suite,
         TAG_BAGGY_R,
         &[],
         &HashAdrs::ZERO,
-        &[&opt_rand, &mu],
+        &[&*opt_rand, &mu],
     );
+    drop(opt_rand);
     let (msg_ctr, idxs, leaf_idx) = grind_hmsg(params, pk, &r, &mu)?;
     let (kp0, tree0) = params.path_at(leaf_idx, 0);
     let mut fors = Vec::with_capacity(idxs.len());
     let mut roots = Vec::with_capacity(idxs.len());
     for (j, idx) in idxs.iter().enumerate() {
-        let secrets: Vec<[u8; 32]> = (0..1u32 << params.fors_height)
-            .map(|leaf| fors_secret_leaf(Cshake256Suite, sk, tree0, kp0, j as u32, leaf))
-            .collect();
+        let secrets = crate::wipe::SecretBuffer(
+            (0..1u32 << params.fors_height)
+                .map(|leaf| fors_secret_leaf(Cshake256Suite, sk, tree0, kp0, j as u32, leaf))
+                .collect::<Vec<[u8; 32]>>(),
+        );
         let leaves: Vec<[u8; 32]> = secrets
             .iter()
             .enumerate()
@@ -2187,5 +2260,41 @@ mod tests {
             ),
             Err(BaggyError::Engine(Rss256Error::CoinOpeningRejected { party: 2 }))
         );
+    }
+
+    #[test]
+    fn baggy_params_overflow_and_intra_batch_conflict_rejected() {
+        let mut bad = BaggyParams::TEST_SMALL;
+        bad.subtree_height = 2;
+        bad.num_layers = (1usize << (usize::BITS - 1)) + 1;
+        assert!(!bad.is_well_formed());
+        assert_eq!(bad.total_height_checked(), None);
+
+        let mut bad_fors = BaggyParams::TEST_SMALL;
+        bad_fors.fors_trees = usize::MAX;
+        bad_fors.fors_height = 2;
+        assert!(!bad_fors.is_well_formed());
+        assert_eq!(bad_fors.sig_bytes_checked(), None);
+
+        let mut ledger = MemoryFirstSigned::new();
+        let key = StaticKeyId {
+            layer: 1,
+            tree: 0,
+            keypair: 2,
+        };
+        let r1 = FirstSignedRecord {
+            key,
+            digits: alloc::vec![1u8, 2, 3],
+        };
+        let r2 = FirstSignedRecord {
+            key,
+            digits: alloc::vec![1u8, 2, 4],
+        };
+        assert_eq!(
+            ledger.sync_record(&[r1.clone(), r2]),
+            Err(FirstSignedError::Conflict)
+        );
+        assert!(ledger.is_empty());
+        assert_eq!(ledger.sync_record(&[r1.clone(), r1]), Ok(()));
     }
 }
