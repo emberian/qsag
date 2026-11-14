@@ -127,6 +127,25 @@ theorem verify_affine_duet_fold_step_coset_sound
       claimed = extAdd odd (extMul alpha even) := by
   rw [verify_affine_duet_fold_step_sound, duet_fold_algebraic_sound alpha he ho hit hiy]
 
+/-- The production-named fold computes the exact asymmetric affine expression. -/
+theorem fold_duet_affine_ext4_spec
+    (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta : Ext4) :
+    fold_duet_affine_ext4 v0 v1 iy it yy theta alpha beta =
+      .ok (cwyzValue v0 v1 iy it yy theta alpha beta) := by
+  exact cwyz_duet_refines v0 v1 iy it yy theta alpha beta
+
+/-- Recover the even/odd coset components and apply the three affine challenges. -/
+theorem fold_duet_affine_ext4_coset_sound
+    {even odd : Ext4} {y0 iy it : U64} (theta alpha beta : Ext4)
+    (he : IsCanonicalExt4 even) (ho : IsCanonicalExt4 odd)
+    (hit : fieldMul 2#u64 it = 1#u64)
+    (hiy : fieldMul (fieldMul 2#u64 y0) iy = 1#u64) :
+    fold_duet_affine_ext4 (extAdd even (extScale odd y0)) (extSub even (extScale odd y0))
+        iy it (fieldMul y0 y0) theta alpha beta =
+      .ok (extAdd odd (extMul (extAdd alpha (extScale beta (fieldMul y0 y0)))
+        (extAdd even (extMul theta odd)))) := by
+  rw [fold_duet_affine_ext4_spec, cwyz_duet_fold_algebraic_sound theta alpha beta he ho hit hiy]
+
 theorem verify_cwyz_duet_fold_step_spec
     (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta claimed : Ext4) :
     verify_cwyz_duet_fold_step v0 v1 iy it yy theta alpha beta claimed =
@@ -254,6 +273,16 @@ theorem eval_ext4_univariate_at_base_spec (coeffs : Slice Ext4) (z : U64) :
     extZero (Slice.len coeffs) (Slice.len_val coeffs)
   rw [List.take_length] at hloop
   exact loop_ok_of_loopFuel hfuel hloop
+
+/-- The production-named entry point returns the complete ascending-degree polynomial. -/
+theorem eval_univariate_ext4_at_base_spec (coeffs : Slice Ext4) (z : U64) :
+    eval_univariate_ext4_at_base coeffs z = .ok (hornerSpec coeffs.val z extZero) := by
+  exact eval_ext4_univariate_at_base_spec coeffs z
+
+theorem eval_univariate_ext4_at_base_ascending_sound (coeffs : Slice Ext4) (z : U64)
+    (hcan : ∀ c ∈ coeffs.val, IsCanonicalExt4 c) :
+    eval_univariate_ext4_at_base coeffs z = .ok (evalPolyAscending coeffs.val z) := by
+  rw [eval_univariate_ext4_at_base_spec, hornerSpec_eq_evalPolyAscending coeffs.val z hcan]
 
 theorem verify_ext4_univariate_at_base_pin_spec
     (coeffs : Slice Ext4) (z : U64) (expected : Ext4) :

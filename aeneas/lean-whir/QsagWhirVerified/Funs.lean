@@ -226,8 +226,18 @@ def cwyz_duet_fold
   let e4 ← ext_add alpha e3
   affine_combine mixed odd e4
 
+/-- [qsag_whir_verified::fold_duet_affine_ext4]:
+    Source: 'src/lib.rs', lines 189:0-200:1
+    Visibility: public -/
+def fold_duet_affine_ext4
+  (v0 : Ext4) (v1 : Ext4) (inv_two_xk : Std.U64) (inv_two : Std.U64)
+  (xk_sq : Std.U64) (theta : Ext4) (alpha : Ext4) (beta : Ext4) :
+  Result Ext4
+  := do
+  cwyz_duet_fold v0 v1 inv_two_xk inv_two xk_sq theta alpha beta
+
 /-- [qsag_whir_verified::verify_cwyz_duet_fold_step]:
-    Source: 'src/lib.rs', lines 187:0-202:1
+    Source: 'src/lib.rs', lines 204:0-219:1
     Visibility: public -/
 def verify_cwyz_duet_fold_step
   (v0 : Ext4) (v1 : Ext4) (inv_two_y0 : Std.U64) (inv_two : Std.U64)
@@ -239,7 +249,7 @@ def verify_cwyz_duet_fold_step
   ext_eq e claimed_folded
 
 /-- [qsag_whir_verified::cwyz_bridge_claim_step]:
-    Source: 'src/lib.rs', lines 208:0-249:1
+    Source: 'src/lib.rs', lines 225:0-266:1
     Visibility: public -/
 def cwyz_bridge_claim_step
   (w0 : Ext4) (w1 : Ext4) (w2 : Ext4) (w3 : Ext4) (w4 : Ext4) (claim : Ext4)
@@ -261,7 +271,7 @@ def cwyz_bridge_claim_step
   ext_add core_term shift_term
 
 /-- [qsag_whir_verified::verify_cwyz_bridge_claim_step]:
-    Source: 'src/lib.rs', lines 253:0-270:1
+    Source: 'src/lib.rs', lines 270:0-287:1
     Visibility: public -/
 def verify_cwyz_bridge_claim_step
   (w0 : Ext4) (w1 : Ext4) (w2 : Ext4) (w3 : Ext4) (w4 : Ext4) (claim : Ext4)
@@ -273,7 +283,7 @@ def verify_cwyz_bridge_claim_step
   ext_eq e claimed_next
 
 /-- [qsag_whir_verified::eval_quadratic_sumcheck_wire]:
-    Source: 'src/lib.rs', lines 274:0-302:1
+    Source: 'src/lib.rs', lines 291:0-319:1
     Visibility: public -/
 def eval_quadratic_sumcheck_wire
   (c0 : Ext4) (c2 : Ext4) (sum_claim : Ext4) (r : Ext4) : Result Ext4 := do
@@ -286,7 +296,7 @@ def eval_quadratic_sumcheck_wire
   ext_add e3 c0
 
 /-- [qsag_whir_verified::affine_cascade_claim_step]:
-    Source: 'src/lib.rs', lines 305:0-316:1
+    Source: 'src/lib.rs', lines 322:0-333:1
     Visibility: public -/
 def affine_cascade_claim_step
   (acc : Ext4) (w0 : Ext4) (w1 : Ext4) (eval_at_point : Ext4)
@@ -299,7 +309,7 @@ def affine_cascade_claim_step
   ext_add e1 e2
 
 /-- [qsag_whir_verified::eval_ext4_univariate_at_base]: loop body 0:
-    Source: 'src/lib.rs', lines 327:4-339:5
+    Source: 'src/lib.rs', lines 344:4-356:5
     Visibility: public -/
 @[rust_loop_body]
 def eval_ext4_univariate_at_base_loop.body
@@ -316,7 +326,7 @@ def eval_ext4_univariate_at_base_loop.body
   else ok (done acc)
 
 /-- [qsag_whir_verified::eval_ext4_univariate_at_base]: loop 0:
-    Source: 'src/lib.rs', lines 327:4-339:5
+    Source: 'src/lib.rs', lines 344:4-356:5
     Visibility: public -/
 @[rust_loop]
 def eval_ext4_univariate_at_base_loop
@@ -329,7 +339,7 @@ def eval_ext4_univariate_at_base_loop
     (acc, rem)
 
 /-- [qsag_whir_verified::eval_ext4_univariate_at_base]:
-    Source: 'src/lib.rs', lines 319:0-341:1
+    Source: 'src/lib.rs', lines 336:0-358:1
     Visibility: public -/
 def eval_ext4_univariate_at_base
   (coeffs : Slice Ext4) (z : Std.U64) : Result Ext4 := do
@@ -337,8 +347,15 @@ def eval_ext4_univariate_at_base
   eval_ext4_univariate_at_base_loop coeffs z
     { a := 0#u64, b := 0#u64, c := 0#u64, d := 0#u64 } rem
 
+/-- [qsag_whir_verified::eval_univariate_ext4_at_base]:
+    Source: 'src/lib.rs', lines 363:0-365:1
+    Visibility: public -/
+def eval_univariate_ext4_at_base
+  (coeffs : Slice Ext4) (z : Std.U64) : Result Ext4 := do
+  eval_ext4_univariate_at_base coeffs z
+
 /-- [qsag_whir_verified::verify_ext4_univariate_at_base_pin]:
-    Source: 'src/lib.rs', lines 344:0-346:1
+    Source: 'src/lib.rs', lines 368:0-370:1
     Visibility: public -/
 def verify_ext4_univariate_at_base_pin
   (coeffs : Slice Ext4) (z : Std.U64) (expected : Ext4) : Result Bool := do
@@ -346,7 +363,7 @@ def verify_ext4_univariate_at_base_pin
   ext_eq e expected
 
 /-- [qsag_whir_verified::verify_stage_pow_mask]:
-    Source: 'src/lib.rs', lines 349:0-354:1
+    Source: 'src/lib.rs', lines 373:0-378:1
     Visibility: public -/
 def verify_stage_pow_mask
   (word : Std.U64) (pow_bits : Std.U32) : Result Bool := do
@@ -359,7 +376,7 @@ def verify_stage_pow_mask
     ok (i2 = 0#u64)
 
 /-- [qsag_whir_verified::verify_ood_pin_eq]: loop body 0:
-    Source: 'src/lib.rs', lines 362:4-369:1
+    Source: 'src/lib.rs', lines 386:4-393:1
     Visibility: public -/
 @[rust_loop_body]
 def verify_ood_pin_eq_loop.body
@@ -378,7 +395,7 @@ def verify_ood_pin_eq_loop.body
   else ok (done true)
 
 /-- [qsag_whir_verified::verify_ood_pin_eq]: loop 0:
-    Source: 'src/lib.rs', lines 362:4-369:1
+    Source: 'src/lib.rs', lines 386:4-393:1
     Visibility: public -/
 @[rust_loop]
 def verify_ood_pin_eq_loop
@@ -390,7 +407,7 @@ def verify_ood_pin_eq_loop
     i
 
 /-- [qsag_whir_verified::verify_ood_pin_eq]:
-    Source: 'src/lib.rs', lines 357:0-369:1
+    Source: 'src/lib.rs', lines 381:0-393:1
     Visibility: public -/
 def verify_ood_pin_eq
   (expected : Slice Std.U64) (supplied : Slice Std.U64) : Result Bool := do
@@ -401,7 +418,7 @@ def verify_ood_pin_eq
   else verify_ood_pin_eq_loop expected supplied 0#usize
 
 /-- [qsag_whir_verified::canonical_query_group_idx]:
-    Source: 'src/lib.rs', lines 372:0-378:1
+    Source: 'src/lib.rs', lines 396:0-402:1
     Visibility: public -/
 def canonical_query_group_idx
   (raw_idx : Std.U64) (groups : Std.U64) : Result (Option Std.U64) := do
@@ -411,7 +428,7 @@ def canonical_query_group_idx
        ok (some i)
 
 /-- [qsag_whir_verified::step_merkle_pair_order]:
-    Source: 'src/lib.rs', lines 387:0-409:1
+    Source: 'src/lib.rs', lines 411:0-433:1
     Visibility: public -/
 def step_merkle_pair_order
   (idx : Std.U64) (level : Std.U32) (node : Array Std.U8 32#usize)
@@ -432,7 +449,7 @@ def step_merkle_pair_order
         { tag := TAG_CANOPY_MERKLE_INTERNAL, left := sibling, right := node })
 
 /-- [qsag_whir_verified::checked_quorum_sum]: loop body 0:
-    Source: 'src/lib.rs', lines 1:0-443:1
+    Source: 'src/lib.rs', lines 1:0-467:1
     Visibility: public -/
 @[rust_loop_body]
 def checked_quorum_sum_loop.body
@@ -470,7 +487,7 @@ def checked_quorum_sum_loop.body
     else ok (done (some total))
 
 /-- [qsag_whir_verified::checked_quorum_sum]: loop 0:
-    Source: 'src/lib.rs', lines 1:0-443:1
+    Source: 'src/lib.rs', lines 1:0-467:1
     Visibility: public -/
 @[rust_loop]
 def checked_quorum_sum_loop
@@ -485,7 +502,7 @@ def checked_quorum_sum_loop
     (total, min_total, i)
 
 /-- [qsag_whir_verified::checked_quorum_sum]:
-    Source: 'src/lib.rs', lines 415:0-443:1
+    Source: 'src/lib.rs', lines 439:0-467:1
     Visibility: public -/
 def checked_quorum_sum
   (counts : Slice Std.U64) (minimums : Slice Std.U64)
