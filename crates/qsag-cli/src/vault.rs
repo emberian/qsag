@@ -107,14 +107,9 @@ impl Vault {
         }
     }
 
-    pub fn set_key_material(&mut self, opened: &Json) -> Result<(), CliError> {
-        let material = opened
-            .get("seed")
-            .or_else(|| opened.get("secret_key"))
-            .and_then(Json::as_str)
-            .ok_or_else(corrupt)?;
-        self.key_material = Some(ZeroizingBuf(material.as_bytes().to_vec()));
-        Ok(())
+    /// Key the state MAC with the opened secret, so a sealed file's MAC needs its passphrase.
+    pub fn set_key_material(&mut self, opened: &crate::envelope::OpenedSecret) {
+        self.key_material = Some(opened.vault_key_material());
     }
 
     pub fn bind(&self, secret: &mut Json) -> Result<(), CliError> {
@@ -159,21 +154,18 @@ impl Vault {
 
     pub fn prepare(&self, secret: &mut Json) -> Result<(), CliError> {
         self.check_path()?;
-        set(
-            secret,
-            "state_mac",
-            Json::hex(&tag(secret, self.key_material.as_deref())?),
-        );
+        let mac = crate::cli::Secret32(tag(secret, self.key_material.as_deref())?);
+        set(secret, "state_mac", Json::hex(&mac.0));
         Ok(())
     }
 
     pub fn seal(&mut self, secret: &mut Json) -> Result<(), CliError> {
         self.check_path()?;
-        let mac = tag(secret, self.key_material.as_deref())?;
-        set(secret, "state_mac", Json::hex(&mac));
+        let mac = crate::cli::Secret32(tag(secret, self.key_material.as_deref())?);
+        set(secret, "state_mac", Json::hex(&mac.0));
         self.file
             .seek(SeekFrom::Start(0))
-            .and_then(|_| self.file.write_all(&mac))
+            .and_then(|_| self.file.write_all(&mac.0))
             .and_then(|_| self.file.sync_all())
             .map_err(|e| CliError::io("syncing vault state", e))?;
         self.check_path()
@@ -208,14 +200,39 @@ pub fn record_ledger_checkpoint(secret: &mut Json, ckpt: qsag_core::LedgerCheckp
 }
 
 pub fn read_ledger_checkpoint(secret: &Json) -> Result<qsag_core::LedgerCheckpoint, CliError> {
-    let generation = secret
-        .field_u64("ledger_checkpoint_gen")
-        .map_err(|_| corrupt())?;
-    let tag_str = secret
-        .field_str("ledger_checkpoint_tag")
-        .map_err(|_| corrupt())?;
-    let tag: [u8; 32] =
-        crate::codec::from_hex_exact(tag_str, "ledger_checkpoint_tag").map_err(|_| corrupt())?;
+    read_named_checkpoint(secret, "ledger_checkpoint_gen", "ledger_checkpoint_tag")
+}
+
+pub fn record_ceremony_checkpoint(secret: &mut Json, ckpt: qsag_core::LedgerCheckpoint) {
+    set(
+        secret,
+        "ceremony_checkpoint_gen",
+        Json::num(ckpt.generation),
+    );
+    set(secret, "ceremony_checkpoint_tag", Json::hex(&ckpt.tag));
+}
+
+pub fn read_ceremony_checkpoint(secret: &Json) -> Result<qsag_core::LedgerCheckpoint, CliError> {
+    read_named_checkpoint(secret, "ceremony_checkpoint_gen", "ceremony_checkpoint_tag")
+}
+
+pub fn record_belt_checkpoint(secret: &mut Json, ckpt: qsag_core::LedgerCheckpoint) {
+    set(secret, "belt_checkpoint_gen", Json::num(ckpt.generation));
+    set(secret, "belt_checkpoint_tag", Json::hex(&ckpt.tag));
+}
+
+pub fn read_belt_checkpoint(secret: &Json) -> Result<qsag_core::LedgerCheckpoint, CliError> {
+    read_named_checkpoint(secret, "belt_checkpoint_gen", "belt_checkpoint_tag")
+}
+
+fn read_named_checkpoint(
+    secret: &Json,
+    gen_field: &str,
+    tag_field: &str,
+) -> Result<qsag_core::LedgerCheckpoint, CliError> {
+    let generation = secret.field_u64(gen_field).map_err(|_| corrupt())?;
+    let tag_str = secret.field_str(tag_field).map_err(|_| corrupt())?;
+    let tag: [u8; 32] = crate::codec::from_hex_exact(tag_str, tag_field).map_err(|_| corrupt())?;
     Ok(qsag_core::LedgerCheckpoint { generation, tag })
 }
 

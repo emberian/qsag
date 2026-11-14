@@ -731,3 +731,838 @@ impl AnchorInner {
 /// Production filesystem-backed [`ExternalMonotoneAnchor`] with `O_NOFOLLOW` `0600` locking,
 /// 24-byte `lock_identity_seal` MAC binding, rollback refusal, and single-use ticket fencing.
 #[derive(Clone)]
+pub struct FsExternalMountAnchor {
+    inner: Arc<AnchorInner>,
+}
+
+fn sanitize_domain_prefix(domain: &str) -> String {
+    let mut prefix: String = domain
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .take(24)
+        .collect();
+    if prefix.is_empty() {
+        prefix.push_str("slot");
+    }
+    prefix
+}
+
+fn anchor_record_path(anchor_dir: &str, domain: &str, key_id: &[u8; 32]) -> PathBuf {
+    let slot_digest = cshake256_framed_32(b"QSAG.CLI.ANCHOR.SLOT.V1", &[domain.as_bytes(), key_id]);
+    let filename = format!(
+        "{}-{}.anchor",
+        sanitize_domain_prefix(domain),
+        to_hex(&slot_digest)
+    );
+    Path::new(anchor_dir).join(filename)
+}
+
+impl FsExternalMountAnchor {
+    /// Provision a brand-new external anchor slot inside `--anchor-dir` (`load()` initially `None`).
+    pub fn provision_fresh(
+        config: &AnchorConfig,
+        custody_files: &[&str],
+        explicit_dirs: &[&str],
+        domain: &str,
+        key_id: [u8; 32],
+        mac_key: [u8; 32],
+    ) -> Result<Self, CliError> {
+        config.validate_isolation(custody_files, explicit_dirs, true)?;
+        let path = anchor_record_path(&config.anchor_dir, domain, &key_id);
+        let record = AnchorLockedRecord::acquire(path, true)
+            .map_err(|e| CliError::state(format!("enrolling external anchor ({domain}): {e}")))?;
+        let domain_hash = cshake256_framed_32(b"QSAG.CLI.ANCHOR.DOMAIN.V1", &[domain.as_bytes()]);
+        Ok(Self {
+            inner: Arc::new(AnchorInner {
+                record,
+                domain_hash,
+                key_id,
+                mac_key,
+                state: Mutex::new(None),
+                written: AtomicBool::new(false),
+            }),
+        })
+    }
+
+    /// Open and authenticate an existing external anchor slot inside `--anchor-dir`.
+    pub fn open_existing(
+        config: &AnchorConfig,
+        custody_files: &[&str],
+        explicit_dirs: &[&str],
+        domain: &str,
+        key_id: [u8; 32],
+        mac_key: [u8; 32],
+    ) -> Result<Self, CliError> {
+        config.validate_isolation(custody_files, explicit_dirs, false)?;
+        let path = anchor_record_path(&config.anchor_dir, domain, &key_id);
+        let record = AnchorLockedRecord::acquire(path, false).map_err(|e| {
+            CliError::state(format!(
+                "ExternalAnchorUnavailableOrCorrupt ({domain}): {e}"
+            ))
+        })?;
+        let domain_hash = cshake256_framed_32(b"QSAG.CLI.ANCHOR.DOMAIN.V1", &[domain.as_bytes()]);
+        let inner = Arc::new(AnchorInner {
+            record,
+            domain_hash,
+            key_id,
+            mac_key,
+            state: Mutex::new(None),
+            written: AtomicBool::new(true),
+        });
+        let loaded = inner
+            .read_verified_disk_state()
+            .map_err(|e| {
+                CliError::state(format!(
+                    "ExternalAnchorUnavailableOrCorrupt ({domain}): {e}"
+                ))
+            })?
+            .ok_or_else(|| {
+                CliError::state(format!(
+                    "ExternalAnchorUnavailableOrCorrupt ({domain}): missing state"
+                ))
+            })?;
+        *inner
+            .state
+            .lock()
+            .map_err(|_| CliError::state("external anchor mutex poisoned"))? = Some(loaded);
+        Ok(Self { inner })
+    }
+
+    /// 24-byte `dev_le64 || ino_le64 || seal8` lock identity authenticated by this anchor.
+    pub fn lock_identity_seal(&self) -> [u8; 24] {
+        self.inner.record.lock_identity_seal()
+    }
+
+    /// Verify that this anchor's 24-byte `.lock` identity seal matches the seal pinned in `secret`.
+    pub fn verify_expected_seal(&self, secret: &Json, field: &str) -> Result<(), CliError> {
+        let expected: [u8; 24] = from_hex_exact(
+            secret
+                .field_str(field)
+                .map_err(|_| CliError::state("MissingExternalAnchorIdentitySeal"))?,
+            field,
+        )
+        .map_err(|_| CliError::state("CorruptExternalAnchorIdentitySeal"))?;
+        if !ct_eq_bytes(&self.lock_identity_seal(), &expected) {
+            return Err(CliError::state("ExternalAnchorIdentitySealMismatch"));
+        }
+        Ok(())
+    }
+
+    /// Atomically consume the single-use ceremony ticket at `expected.generation`.
+    /// Rejects replay if `consumed_generation >= expected.generation` (post-issuance clone fence).
+    pub fn consume_ceremony_ticket(
+        &self,
+        expected: LedgerCheckpoint,
+        ceremony_id: &[u8; 32],
+    ) -> io::Result<()> {
+        let mut guard = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("external anchor mutex poisoned"))?;
+        let disk = self
+            .inner
+            .read_verified_disk_state()?
+            .ok_or_else(|| invalid_anchor("external anchor uninitialized on consume"))?;
+        if let Some(mem) = *guard
+            && mem != disk
+        {
+            return self
+                .inner
+                .record
+                .poison(invalid_anchor("external anchor disk diverged from memory"));
+        }
+        if disk.checkpoint.generation != expected.generation
+            || !ct_eq_bytes(&disk.checkpoint.tag, &expected.tag)
+        {
+            return self.inner.record.poison(invalid_anchor(
+                "external anchor checkpoint mismatch on ticket consume",
+            ));
+        }
+        if let Some((consumed_gen, _)) = disk.consumed
+            && consumed_gen >= expected.generation
+        {
+            return self.inner.record.poison(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "CeremonyTicketAlreadyConsumed",
+            ));
+        }
+        let next = AnchorRecordState {
+            checkpoint: disk.checkpoint,
+            consumed: Some((expected.generation, *ceremony_id)),
+        };
+        self.inner.write_state(&next)?;
+        *guard = Some(next);
+        Ok(())
+    }
+
+    /// Verify that a monotonic integer floor has not regressed below the externally anchored value.
+    pub fn verify_floor_at_least(
+        &self,
+        domain: &[u8],
+        observed_floor: u64,
+    ) -> Result<(), CliError> {
+        let current = self
+            .load()
+            .map_err(|e| CliError::state(format!("ExternalAnchorRollbackOrCorrupt: {e}")))?
+            .ok_or_else(|| CliError::state("ExternalAnchorMissingFloorState"))?;
+        let min_floor = current
+            .generation
+            .checked_sub(1)
+            .ok_or_else(|| CliError::state("ExternalAnchorInvalidFloorGeneration"))?;
+        if observed_floor < min_floor {
+            return Err(CliError::state("ExternalAnchorDetectedRollback"));
+        }
+        if observed_floor == min_floor {
+            let expected = floor_checkpoint(domain, &self.inner.key_id, min_floor);
+            if !ct_eq_bytes(&current.tag, &expected.tag) {
+                return Err(CliError::state("ExternalAnchorFloorTagMismatch"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Ratchet a monotonic integer floor forward on the external anchor.
+    pub fn advance_floor(&self, domain: &[u8], next_floor: u64) -> Result<(), CliError> {
+        let ckpt = floor_checkpoint(domain, &self.inner.key_id, next_floor);
+        self.advance(ckpt)
+            .map_err(|e| CliError::state(format!("ExternalAnchorAdvanceFailed: {e}")))
+    }
+}
+
+impl ExternalMonotoneAnchor for FsExternalMountAnchor {
+    fn load(&self) -> io::Result<Option<LedgerCheckpoint>> {
+        let mut guard = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("external anchor mutex poisoned"))?;
+        let disk = self.inner.read_verified_disk_state()?;
+        if let (Some(mem), Some(on_disk)) = (*guard, disk)
+            && (on_disk.checkpoint.generation < mem.checkpoint.generation
+                || (on_disk.checkpoint.generation == mem.checkpoint.generation
+                    && !ct_eq_bytes(&on_disk.checkpoint.tag, &mem.checkpoint.tag)))
+        {
+            return self.inner.record.poison(io::Error::other(
+                "external anchor rolled back underneath live handle",
+            ));
+        }
+        *guard = disk;
+        Ok(disk.map(|s| s.checkpoint))
+    }
+
+    fn advance(&self, checkpoint: LedgerCheckpoint) -> io::Result<()> {
+        let mut guard = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("external anchor mutex poisoned"))?;
+        let disk = self.inner.read_verified_disk_state()?;
+        if let Some(prev) = disk {
+            if checkpoint.generation < prev.checkpoint.generation {
+                return self.inner.record.poison(io::Error::other(
+                    "external anchor rejects rolled-back generation",
+                ));
+            }
+            if checkpoint.generation == prev.checkpoint.generation {
+                if !ct_eq_bytes(&checkpoint.tag, &prev.checkpoint.tag) {
+                    return self.inner.record.poison(io::Error::other(
+                        "external anchor rejects mismatched tag at equal generation",
+                    ));
+                }
+                *guard = Some(prev);
+                return Ok(());
+            }
+        }
+        let next = AnchorRecordState {
+            checkpoint,
+            consumed: disk.and_then(|d| d.consumed),
+        };
+        self.inner.write_state(&next)?;
+        *guard = Some(next);
+        Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn temp_root(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-anchor-{label}-{}",
+            to_hex(&os_random_32().unwrap()[..16])
+        ));
+        private_dir(dir.to_str().unwrap(), true).unwrap();
+        dir
+    }
+
+    #[test]
+    fn rejects_same_inode_nested_dirs_and_unapproved_single_disk() {
+        let root = temp_root("isolation");
+        let vault = root.join("vault");
+        let anchor = root.join("anchor");
+        private_dir(vault.to_str().unwrap(), true).unwrap();
+        private_dir(anchor.to_str().unwrap(), true).unwrap();
+        let sk = vault.join("sk");
+
+        // 1. Same directory/inode is refused EVEN when allow_single_disk is true.
+        let same_cfg = AnchorConfig {
+            anchor_dir: vault.to_str().unwrap().to_owned(),
+            vault_dir: Some(vault.to_str().unwrap().to_owned()),
+            allow_single_disk: true,
+        };
+        assert!(
+            same_cfg
+                .validate_isolation(&[sk.to_str().unwrap()], &[], true)
+                .is_err()
+        );
+
+        // 2. Alias via `vault/.` or symlink to `vault` is also refused unconditionally.
+        let dot_cfg = AnchorConfig {
+            anchor_dir: vault.join(".").to_str().unwrap().to_owned(),
+            vault_dir: None,
+            allow_single_disk: true,
+        };
+        assert!(
+            dot_cfg
+                .validate_isolation(&[sk.to_str().unwrap()], &[], false)
+                .is_err()
+        );
+        let link = root.join("anchor-link");
+        std::os::unix::fs::symlink(&anchor, &link).unwrap();
+        let link_cfg = AnchorConfig {
+            anchor_dir: link.to_str().unwrap().to_owned(),
+            vault_dir: Some(vault.to_str().unwrap().to_owned()),
+            allow_single_disk: true,
+        };
+        assert!(
+            link_cfg
+                .validate_isolation(&[sk.to_str().unwrap()], &[], false)
+                .is_err()
+        );
+
+        // 3. Nested anchor inside `--vault-dir` is refused even with allow_single_disk.
+        let nested = vault.join("nested-anchor");
+        let nested_cfg = AnchorConfig {
+            anchor_dir: nested.to_str().unwrap().to_owned(),
+            vault_dir: Some(vault.to_str().unwrap().to_owned()),
+            allow_single_disk: true,
+        };
+        assert!(
+            nested_cfg
+                .validate_isolation(&[sk.to_str().unwrap()], &[], true)
+                .is_err()
+        );
+
+        // 4. Decoy `--vault-dir` while `sk` lives outside it is refused.
+        let outside_sk = root.join("outside.sk");
+        let decoy_cfg = AnchorConfig {
+            anchor_dir: anchor.to_str().unwrap().to_owned(),
+            vault_dir: Some(vault.to_str().unwrap().to_owned()),
+            allow_single_disk: true,
+        };
+        assert!(
+            decoy_cfg
+                .validate_isolation(&[outside_sk.to_str().unwrap()], &[], false)
+                .is_err()
+        );
+
+        // 5. Same filesystem device without `allow_single_disk` is refused; with it, accepted.
+        let strict_cfg = AnchorConfig {
+            anchor_dir: anchor.to_str().unwrap().to_owned(),
+            vault_dir: Some(vault.to_str().unwrap().to_owned()),
+            allow_single_disk: false,
+        };
+        assert!(
+            strict_cfg
+                .validate_isolation(&[sk.to_str().unwrap()], &[], false)
+                .is_err()
+        );
+        let single_disk_cfg = AnchorConfig {
+            anchor_dir: anchor.to_str().unwrap().to_owned(),
+            vault_dir: Some(vault.to_str().unwrap().to_owned()),
+            allow_single_disk: true,
+        };
+        single_disk_cfg
+            .validate_isolation(&[sk.to_str().unwrap()], &[], false)
+            .unwrap();
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn monotone_advance_lock_identity_seal_and_single_use_ticket_fence() {
+        let root = temp_root("ops");
+        let vault = root.join("vault");
+        let anchor_dir = root.join("anchor");
+        private_dir(vault.to_str().unwrap(), true).unwrap();
+        let sk_path = vault.join("sk");
+        let cfg = AnchorConfig {
+            anchor_dir: anchor_dir.to_str().unwrap().to_owned(),
+            vault_dir: Some(vault.to_str().unwrap().to_owned()),
+            allow_single_disk: true,
+        };
+        let key_id = [0x11; 32];
+        let mac_key = [0x22; 32];
+
+        let anchor = FsExternalMountAnchor::provision_fresh(
+            &cfg,
+            &[sk_path.to_str().unwrap()],
+            &[],
+            "ceremony",
+            key_id,
+            mac_key,
+        )
+        .unwrap();
+        assert_ne!(anchor.lock_identity_seal(), [0u8; 24]);
+        assert_eq!(anchor.load().unwrap(), None);
+
+        let ckpt1 = LedgerCheckpoint {
+            generation: 1,
+            tag: [0xAA; 32],
+        };
+        let ckpt2 = LedgerCheckpoint {
+            generation: 2,
+            tag: [0xBB; 32],
+        };
+        anchor.advance(ckpt1).unwrap();
+        assert_eq!(anchor.load().unwrap(), Some(ckpt1));
+        // Idempotent at equal generation + equal tag.
+        anchor.advance(ckpt1).unwrap();
+        anchor.advance(ckpt2).unwrap();
+        assert_eq!(anchor.load().unwrap(), Some(ckpt2));
+
+        // Single-use ceremony ticket consumption succeeds once and refuses replay.
+        anchor.consume_ceremony_ticket(ckpt2, &[0x99; 32]).unwrap();
+        assert!(anchor.consume_ceremony_ticket(ckpt2, &[0x99; 32]).is_err());
+
+        // Reopening from disk recovers state; advancing to generation 3 allows a fresh ticket.
+        drop(anchor);
+        let reopened = FsExternalMountAnchor::open_existing(
+            &cfg,
+            &[sk_path.to_str().unwrap()],
+            &[],
+            "ceremony",
+            key_id,
+            mac_key,
+        )
+        .unwrap();
+        assert_eq!(reopened.load().unwrap(), Some(ckpt2));
+        // Replay at generation 2 is still refused across process restarts!
+        assert!(
+            reopened
+                .consume_ceremony_ticket(ckpt2, &[0x99; 32])
+                .is_err()
+        );
+        drop(reopened);
+
+        let reopened = FsExternalMountAnchor::open_existing(
+            &cfg,
+            &[sk_path.to_str().unwrap()],
+            &[],
+            "ceremony",
+            key_id,
+            mac_key,
+        )
+        .unwrap();
+        let ckpt3 = LedgerCheckpoint {
+            generation: 3,
+            tag: [0xCC; 32],
+        };
+        reopened.advance(ckpt3).unwrap();
+        reopened
+            .consume_ceremony_ticket(ckpt3, &[0x77; 32])
+            .unwrap();
+
+        // Older generation rollback is rejected and poisons the handle.
+        assert!(reopened.advance(ckpt2).is_err());
+        assert!(reopened.load().is_err());
+        drop(reopened);
+
+        // Replacing the `.anchor.lock` sidecar with a copy at a new inode fails `lock_identity_seal`!
+        let rec_path = anchor_record_path(cfg.anchor_dir.as_str(), "ceremony", &key_id);
+        let lock_path = side_path(&rec_path, ".lock");
+        let saved_lock = std::fs::read(&lock_path).unwrap();
+        let _keep_old_ino = File::open(&lock_path).unwrap();
+        std::fs::remove_file(&lock_path).unwrap();
+        let mut recreated = OpenOptions::new();
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            recreated.write(true).create_new(true).mode(0o600);
+        }
+        recreated
+            .open(&lock_path)
+            .unwrap()
+            .write_all(&saved_lock)
+            .unwrap();
+        assert!(
+            FsExternalMountAnchor::open_existing(
+                &cfg,
+                &[sk_path.to_str().unwrap()],
+                &[],
+                "ceremony",
+                key_id,
+                mac_key,
+            )
+            .is_err()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    struct Slot {
+        root: PathBuf,
+        cfg: AnchorConfig,
+        sk: String,
+    }
+
+    impl Slot {
+        fn new(label: &str) -> Self {
+            let root = temp_root(label);
+            let vault = root.join("vault");
+            private_dir(vault.to_str().unwrap(), true).unwrap();
+            Self {
+                cfg: AnchorConfig {
+                    anchor_dir: root.join("anchor").to_str().unwrap().to_owned(),
+                    vault_dir: Some(vault.to_str().unwrap().to_owned()),
+                    allow_single_disk: true,
+                },
+                sk: vault.join("sk").to_str().unwrap().to_owned(),
+                root,
+            }
+        }
+        fn provision(&self, domain: &str, key_id: [u8; 32]) -> FsExternalMountAnchor {
+            FsExternalMountAnchor::provision_fresh(
+                &self.cfg,
+                &[&self.sk],
+                &[],
+                domain,
+                key_id,
+                [0x22; 32],
+            )
+            .unwrap()
+        }
+        fn open(&self, domain: &str, key_id: [u8; 32]) -> Result<FsExternalMountAnchor, CliError> {
+            FsExternalMountAnchor::open_existing(
+                &self.cfg,
+                &[&self.sk],
+                &[],
+                domain,
+                key_id,
+                [0x22; 32],
+            )
+        }
+        fn record(&self, domain: &str, key_id: &[u8; 32]) -> PathBuf {
+            anchor_record_path(&self.cfg.anchor_dir, domain, key_id)
+        }
+    }
+
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn ckpt(generation: u64, fill: u8) -> LedgerCheckpoint {
+        LedgerCheckpoint {
+            generation,
+            tag: [fill; 32],
+        }
+    }
+
+    #[test]
+    fn anchor_nested_in_the_custody_directory_is_refused_without_vault_dir() {
+        let root = temp_root("nested-custody");
+        let custody = root.join("custody");
+        private_dir(custody.to_str().unwrap(), true).unwrap();
+        let sk = custody.join("sk");
+        for anchor in [custody.join("anchor"), root.clone()] {
+            let cfg = AnchorConfig {
+                anchor_dir: anchor.to_str().unwrap().to_owned(),
+                vault_dir: None,
+                allow_single_disk: true,
+            };
+            let err = cfg
+                .validate_isolation(&[sk.to_str().unwrap()], &[], true)
+                .err()
+                .unwrap();
+            assert!(err.message.contains("overlap or nest"), "{}", err.message);
+        }
+        let sibling = AnchorConfig {
+            anchor_dir: root.join("anchor").to_str().unwrap().to_owned(),
+            vault_dir: None,
+            allow_single_disk: true,
+        };
+        sibling
+            .validate_isolation(&[sk.to_str().unwrap()], &[], true)
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn truncated_corrupt_and_foreign_records_fail_closed() {
+        let slot = Slot::new("corrupt");
+        let key_id = [0x11; 32];
+        let other_id = [0x12; 32];
+        let anchor = slot.provision("ceremony", key_id);
+        anchor.advance(ckpt(1, 0xAA)).unwrap();
+        anchor.advance(ckpt(2, 0xBB)).unwrap();
+        drop(anchor);
+        let other = slot.provision("ceremony", other_id);
+        other.advance(ckpt(9, 0xCC)).unwrap();
+        drop(other);
+        let seedburn = slot.provision("seedburn", key_id);
+        seedburn.advance(ckpt(9, 0xCC)).unwrap();
+        drop(seedburn);
+
+        let path = slot.record("ceremony", &key_id);
+        let good = std::fs::read(&path).unwrap();
+        assert_eq!(good.len(), ANCHOR_RECORD_LEN);
+        let refused = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            let err = slot.open("ceremony", key_id).err().unwrap();
+            assert_eq!(
+                err.code,
+                crate::cli::exit::STATE_CONFLICT,
+                "{}",
+                err.message
+            );
+        };
+        // Truncated at every length, extended, and empty.
+        for len in [0, 1, 8, ANCHOR_PAYLOAD_LEN, ANCHOR_RECORD_LEN - 1] {
+            refused(&good[..len]);
+        }
+        refused(&[&good[..], &[0u8]].concat());
+        // One flipped bit in every field: magic, domain, key, generation, tag, consumed
+        // flag, consumed generation, ceremony id, MAC.
+        for at in [
+            0,
+            8,
+            40,
+            79,
+            80,
+            112,
+            120,
+            121,
+            ANCHOR_PAYLOAD_LEN,
+            ANCHOR_RECORD_LEN - 1,
+        ] {
+            let mut bytes = good.clone();
+            bytes[at] ^= 1;
+            refused(&bytes);
+        }
+        // A higher-generation record of another key, and of another domain of the same key:
+        // each carries a valid MAC for its own slot only.
+        refused(&std::fs::read(slot.record("ceremony", &other_id)).unwrap());
+        refused(&std::fs::read(slot.record("seedburn", &key_id)).unwrap());
+        // The wrong MAC key.
+        std::fs::write(&path, &good).unwrap();
+        assert!(
+            FsExternalMountAnchor::open_existing(
+                &slot.cfg,
+                &[&slot.sk],
+                &[],
+                "ceremony",
+                key_id,
+                [0x23; 32],
+            )
+            .is_err()
+        );
+        assert_eq!(
+            slot.open("ceremony", key_id).unwrap().load().unwrap(),
+            Some(ckpt(2, 0xBB))
+        );
+
+        // A truncated or foreign lock sidecar.
+        let lock = side_path(&path, ".lock");
+        let header = std::fs::read(&lock).unwrap();
+        std::fs::write(&lock, &header[..31]).unwrap();
+        assert!(slot.open("ceremony", key_id).is_err());
+        let mut altered = header.clone();
+        altered[9] ^= 1;
+        std::fs::write(&lock, &altered).unwrap();
+        assert!(slot.open("ceremony", key_id).is_err());
+        std::fs::write(&lock, &header).unwrap();
+        slot.open("ceremony", key_id).unwrap();
+    }
+
+    #[test]
+    fn symlinked_record_and_lock_are_not_followed() {
+        let slot = Slot::new("symlink");
+        let key_id = [0x31; 32];
+        let anchor = slot.provision("ceremony", key_id);
+        anchor.advance(ckpt(1, 0xAA)).unwrap();
+        drop(anchor);
+        let path = slot.record("ceremony", &key_id);
+        let lock = side_path(&path, ".lock");
+        for target in [&path, &lock] {
+            let aside = side_path(target, ".aside");
+            std::fs::rename(target, &aside).unwrap();
+            std::os::unix::fs::symlink(&aside, target).unwrap();
+            assert!(slot.open("ceremony", key_id).is_err());
+            std::fs::remove_file(target).unwrap();
+            std::fs::rename(&aside, target).unwrap();
+            slot.open("ceremony", key_id).unwrap();
+        }
+        // Enrollment does not follow a planted lock symlink either, and leaves its target alone.
+        let fresh_id = [0x32; 32];
+        let fresh_lock = side_path(&slot.record("ceremony", &fresh_id), ".lock");
+        let decoy = slot.root.join("decoy");
+        std::fs::write(&decoy, b"untouched").unwrap();
+        std::os::unix::fs::symlink(&decoy, &fresh_lock).unwrap();
+        assert!(
+            FsExternalMountAnchor::provision_fresh(
+                &slot.cfg,
+                &[&slot.sk],
+                &[],
+                "ceremony",
+                fresh_id,
+                [0x22; 32],
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"untouched");
+    }
+
+    /// Write an owner-only record file, replacing whatever is at `path`.
+    fn put_back(path: &Path, bytes: &[u8]) {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::remove_file(path);
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    #[test]
+    fn vanished_or_rewound_record_under_a_live_handle_poisons_it() {
+        let slot = Slot::new("vanish");
+        let key_id = [0x41; 32];
+        let path = slot.record("ceremony", &key_id);
+
+        // A fresh slot has no record until its first write; after that, absence is a rollback.
+        let anchor = slot.provision("ceremony", key_id);
+        assert_eq!(anchor.load().unwrap(), None);
+        anchor.advance(ckpt(1, 0xAA)).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        anchor.advance(ckpt(2, 0xBB)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(anchor.load().is_err());
+        // Poisoning is sticky: restoring the record does not revive the handle.
+        put_back(&path, &first);
+        assert!(anchor.load().is_err());
+        assert!(anchor.advance(ckpt(3, 0xCC)).is_err());
+        drop(anchor);
+
+        // An enrolled slot whose record is deleted mid-session can not be re-created at a
+        // generation of the caller's choosing.
+        put_back(&path, &first);
+        let anchor = slot.open("ceremony", key_id).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(anchor.advance(ckpt(1, 0xAA)).is_err());
+        assert!(!path.exists());
+        assert!(
+            anchor
+                .consume_ceremony_ticket(ckpt(1, 0xAA), &[7; 32])
+                .is_err()
+        );
+        drop(anchor);
+        // A record put back with permissions wider than its owner's is refused as well.
+        put_back(&path, &first);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        }
+        let err = slot.open("ceremony", key_id).err().unwrap();
+        assert!(err.message.contains("permissions"), "{}", err.message);
+        std::fs::remove_file(&path).unwrap();
+        // With the record gone the slot does not open at all.
+        assert!(slot.open("ceremony", key_id).is_err());
+
+        // A record rewound underneath a live handle is refused by every operation.
+        put_back(&path, &first);
+        let anchor = slot.open("ceremony", key_id).unwrap();
+        anchor.advance(ckpt(2, 0xBB)).unwrap();
+        put_back(&path, &first);
+        assert!(anchor.load().is_err());
+        assert!(anchor.advance(ckpt(3, 0xCC)).is_err());
+    }
+
+    #[test]
+    fn ticket_is_single_use_per_generation_and_bound_to_the_checkpoint() {
+        let slot = Slot::new("ticket");
+        let key_id = [0x51; 32];
+        let anchor = slot.provision("ceremony", key_id);
+        // No ticket exists before the first checkpoint.
+        assert!(
+            anchor
+                .consume_ceremony_ticket(ckpt(1, 0xAA), &[1; 32])
+                .is_err()
+        );
+        anchor.advance(ckpt(2, 0xBB)).unwrap();
+        drop(anchor);
+        // A ticket names the exact checkpoint on disk; a refusal poisons the handle.
+        for wrong in [ckpt(1, 0xBB), ckpt(3, 0xBB), ckpt(2, 0xBC)] {
+            let anchor = slot.open("ceremony", key_id).unwrap();
+            assert!(anchor.consume_ceremony_ticket(wrong, &[1; 32]).is_err());
+            assert!(anchor.load().is_err());
+        }
+        let anchor = slot.open("ceremony", key_id).unwrap();
+        anchor
+            .consume_ceremony_ticket(ckpt(2, 0xBB), &[1; 32])
+            .unwrap();
+        drop(anchor);
+        // Replay under the same or another ceremony id, from a new handle, is refused.
+        for id in [[1u8; 32], [2u8; 32]] {
+            let anchor = slot.open("ceremony", key_id).unwrap();
+            assert!(anchor.consume_ceremony_ticket(ckpt(2, 0xBB), &id).is_err());
+        }
+        // A new generation issues exactly one new ticket and voids the earlier one.
+        let anchor = slot.open("ceremony", key_id).unwrap();
+        anchor.advance(ckpt(3, 0xCC)).unwrap();
+        anchor
+            .consume_ceremony_ticket(ckpt(3, 0xCC), &[3; 32])
+            .unwrap();
+        assert!(
+            anchor
+                .consume_ceremony_ticket(ckpt(3, 0xCC), &[3; 32])
+                .is_err()
+        );
+        drop(anchor);
+        let anchor = slot.open("ceremony", key_id).unwrap();
+        assert!(
+            anchor
+                .consume_ceremony_ticket(ckpt(2, 0xBB), &[4; 32])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn interrupted_write_leftovers_are_removed_on_the_next_open() {
+        let slot = Slot::new("leftover");
+        let key_id = [0x61; 32];
+        let anchor = slot.provision("ceremony", key_id);
+        anchor.advance(ckpt(1, 0xAA)).unwrap();
+        drop(anchor);
+        let path = slot.record("ceremony", &key_id);
+        let leftover = side_path(&path, &format!(".{}.tmp", "ab".repeat(16)));
+        let unrelated = side_path(&path, ".note.tmp");
+        std::fs::write(&leftover, b"half a record").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+        let anchor = slot.open("ceremony", key_id).unwrap();
+        assert!(!leftover.exists());
+        assert!(unrelated.exists());
+        assert_eq!(anchor.load().unwrap(), Some(ckpt(1, 0xAA)));
+    }
+}
