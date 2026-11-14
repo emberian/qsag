@@ -35,6 +35,8 @@
 //! sumcheck over $\mathbb{F}_{p^4}$ followed by an asymmetric affine cascade [CWYZ26].
 
 mod affine;
+#[cfg(test)]
+mod affine_schedule;
 use affine::*;
 
 use alloc::collections::BTreeSet;
@@ -2242,7 +2244,8 @@ fn whir_open_core(
 
         let mut stage_chals = [[GoldilocksExt4::ZERO; 3]; MAX_FOLD_STEP_VARS];
         for slot in stage_chals.iter_mut().take(st.step_vars) {
-            let (wire, chals) = prove_fold(&mut cur_coeffs, &mut cur_k, &mut cur_sum_claim, transcript);
+            let (wire, chals) =
+                prove_fold(&mut cur_coeffs, &mut cur_k, &mut cur_sum_claim, transcript);
             fold_sumcheck_polys.push(wire);
             *slot = chals;
         }
@@ -2820,7 +2823,8 @@ fn whir_verify_core(
 
             let next_layer = &proof.folded_layers[stage_idx];
             if next_layer.commitment.log_leaves > 28
-                || (1usize << (next_layer.commitment.log_leaves as usize)) != num_groups_next {
+                || (1usize << (next_layer.commitment.log_leaves as usize)) != num_groups_next
+            {
                 return false;
             }
             transcript.absorb(b"WHIR_NEXT_COMMIT", &next_layer.commitment.to_bytes());
@@ -3061,7 +3065,8 @@ fn verify_and_fold_ext4_stage_fibers(
 ) -> Option<Vec<(Goldilocks, GoldilocksExt4)>> {
     let num_groups_cur = domain_cur / arity;
     if layer.commitment.log_leaves > 28
-        || (1usize << (layer.commitment.log_leaves as usize)) != num_groups_cur {
+        || (1usize << (layer.commitment.log_leaves as usize)) != num_groups_cur
+    {
         return None;
     }
     let q_indices = sample_stage_queries(transcript, stage_idx, num_groups_cur, num_queries);
