@@ -1,75 +1,196 @@
 module
 import Qsag
+import all Qsag.ActiveMigrationZeroTest
 import all Qsag.AdvancedMpcAndCreds
+import all Qsag.AffineProximityGaps
 import all Qsag.Aggregation
+import all Qsag.Apex
+import all Qsag.BaggyAndRss256Security
 import all Qsag.BinaryTower
+import all Qsag.CeremonyAtomicityAndAbort
 import all Qsag.CompiledRlibFixtures
-import all Qsag.Constructive
+import all Qsag.ConcreteSecurityBudget
 import all Qsag.ConstantTimeIsa
+import all Qsag.Constructive
+import all Qsag.CustodySuiteFull
 import all Qsag.ElfBinaryVerify
 import all Qsag.ElfFixtureSlices
 import all Qsag.ElfFixtureVerify
 import all Qsag.ElfInvCerts
 import all Qsag.ElfParse
+import all Qsag.FaultAndSpeculativeSafety
 import all Qsag.Fips205
 import all Qsag.Goldilocks
 import all Qsag.HashSigs
+import all Qsag.HdToprfAndMigrationSecurity
 import all Qsag.HypertreeEufCma
 import all Qsag.IdealTsig
+import all Qsag.InteractiveUcEngine
+import all Qsag.IsaCosim
+import all Qsag.JortsBeltLatchAndQuorumSwitching
 import all Qsag.Keccak
+import all Qsag.LatticePreprocessingFull
 import all Qsag.MaliciousSecurity
 import all Qsag.McRefine
-import all Qsag.Apex
+import all Qsag.MirSpecBridge
+import all Qsag.MultiRoundFsQrom
 import all Qsag.Poseidon2
+import all Qsag.Poseidon2AlgebraicAndRecursiveHem
+import all Qsag.PosixCrashWal
 import all Qsag.Preprocessing
+import all Qsag.RlweCyclotomicExtraction
+import all Qsag.RssSlhFullSecurity
+import all Qsag.SimdBinaryEquiv
+import all Qsag.SimulationSpine
+import all Qsag.SpecOracle
+import all Qsag.SpirvSimtGpuEquiv
+import all Qsag.SuccinctAggregationIop
+import all Qsag.SydTvTranslationValidation
 import all Qsag.ThresholdApproval
+import all Qsag.ThresholdMlDsaAndToprf
 import all Qsag.ThresholdMpc
 import all Qsag.UcGames
-import all Qsag.SimulationSpine
-import all Qsag.LatticePreprocessingFull
-import all Qsag.CustodySuiteFull
-import all Qsag.ThresholdMlDsaAndToprf
-import all Qsag.InteractiveUcEngine
-import all Qsag.RssSlhFullSecurity
-import all Qsag.SuccinctAggregationIop
-import all Qsag.MirSpecBridge
+import Qsag.Tactic.AssuranceKit
 import Lean
+
+/-!
+# Constructive Kernel Axiom Gate (`AuditAxioms`)
+
+Verifies that **every** declaration (both `public` and `.olean.private` via `import all` +
+`setExporting false`) across the complete `Qsag` proof-module manifest depends strictly on a
+subset of `{propext, Quot.sound}`:
+1. **Zero Exclusions (`0` excluded modules):** Every proof module in `Qsag/` is held to the exact
+   same constructive allowlist with zero diagnostic or exemption buckets.
+2. **Negative Control:** Confirms `Lean.collectAxioms ``Classical.choice` is actively rejected.
+3. **Manifest, `import all`, & Disk-Inventory Coverage:** Explicitly distinguishes meta/tactic
+   infrastructure (`Qsag.Tactic.AssuranceKit`) from proof modules, verifies every manifest proof
+   module is directly imported with `import all`, checks that no `Qsag/*.lean` file on disk or in
+   the transitive import closure escapes the manifest, and verifies every proof module contributes
+   `> 0` audited declarations.
+-/
 
 open Lean Elab Command in
 run_cmd do
-  -- Negative control: the allowlist must reject a known transitive axiom root.
+  let allow (ax : Name) : Bool := ax == ``propext || ax == ``Quot.sound
+
+  -- 1. Negative control: the allowlist must reject `Classical.choice`.
   let negative ← Lean.collectAxioms ``Classical.choice
-  if (negative.filter fun ax => ax != ``propext && ax != ``Quot.sound).isEmpty then
+  if (negative.filter (!allow ·)).isEmpty then
     throwError "Axiom audit negative control unexpectedly passed"
-  let env ← getEnv
+
+  -- 2. Explicit proof-module vs meta-infrastructure manifest (all Qsag/*.lean modules).
+  let infrastructureModules : Array Name := #[
+    `Qsag.Tactic.AssuranceKit
+  ]
+  let auditedProofModules : Array Name := #[
+    `Qsag.ActiveMigrationZeroTest,
+    `Qsag.AdvancedMpcAndCreds,
+    `Qsag.AffineProximityGaps,
+    `Qsag.Aggregation,
+    `Qsag.Apex,
+    `Qsag.BaggyAndRss256Security,
+    `Qsag.BinaryTower,
+    `Qsag.CeremonyAtomicityAndAbort,
+    `Qsag.CompiledRlibFixtures,
+    `Qsag.ConcreteSecurityBudget,
+    `Qsag.ConstantTimeIsa,
+    `Qsag.Constructive,
+    `Qsag.CustodySuiteFull,
+    `Qsag.ElfBinaryVerify,
+    `Qsag.ElfFixtureSlices,
+    `Qsag.ElfFixtureVerify,
+    `Qsag.ElfInvCerts,
+    `Qsag.ElfParse,
+    `Qsag.FaultAndSpeculativeSafety,
+    `Qsag.Fips205,
+    `Qsag.Goldilocks,
+    `Qsag.HashSigs,
+    `Qsag.HdToprfAndMigrationSecurity,
+    `Qsag.HypertreeEufCma,
+    `Qsag.IdealTsig,
+    `Qsag.InteractiveUcEngine,
+    `Qsag.IsaCosim,
+    `Qsag.JortsBeltLatchAndQuorumSwitching,
+    `Qsag.Keccak,
+    `Qsag.LatticePreprocessingFull,
+    `Qsag.MaliciousSecurity,
+    `Qsag.McRefine,
+    `Qsag.MirSpecBridge,
+    `Qsag.MultiRoundFsQrom,
+    `Qsag.Poseidon2,
+    `Qsag.Poseidon2AlgebraicAndRecursiveHem,
+    `Qsag.PosixCrashWal,
+    `Qsag.Preprocessing,
+    `Qsag.RlweCyclotomicExtraction,
+    `Qsag.RssSlhFullSecurity,
+    `Qsag.SimdBinaryEquiv,
+    `Qsag.SimulationSpine,
+    `Qsag.SpecOracle,
+    `Qsag.SpirvSimtGpuEquiv,
+    `Qsag.SuccinctAggregationIop,
+    `Qsag.SydTvTranslationValidation,
+    `Qsag.ThresholdApproval,
+    `Qsag.ThresholdMlDsaAndToprf,
+    `Qsag.ThresholdMpc,
+    `Qsag.UcGames
+  ]
+
+  let privEnv := (← getEnv).setExporting false
+  let importedNames := privEnv.header.moduleNames
+  let directImports := privEnv.header.imports
+  for infraMod in infrastructureModules do
+    unless importedNames.contains infraMod do
+      throwError "Infrastructure module missing from import closure: {infraMod}"
+  for modName in auditedProofModules do
+    unless importedNames.contains modName do
+      throwError "Manifest proof module missing from import closure: {modName}"
+    unless directImports.any (fun imp => imp.module == modName && imp.importAll) do
+      throwError "Manifest proof module must be directly imported with `import all`: {modName}"
+  for importedMod in importedNames do
+    if importedMod.toString.startsWith "Qsag." then
+      unless auditedProofModules.contains importedMod || infrastructureModules.contains importedMod do
+        throwError "Transitive Qsag module missing from explicit audit manifest: {importedMod}"
+
+  -- 3. Dynamic filesystem check: zero Qsag/*.lean modules on disk may escape the manifest.
+  let qsagDir : System.FilePath :=
+    if ← (System.FilePath.mk "Qsag").pathExists then System.FilePath.mk "Qsag"
+    else System.FilePath.mk "lean/Qsag"
+  unless ← qsagDir.pathExists do
+    throwError "Cannot locate Qsag source directory for inventory check"
+  if ← qsagDir.pathExists then
+    for entry in (← qsagDir.readDir) do
+      if entry.path.extension == some "lean" then
+        if let some stem := entry.path.fileStem then
+          let diskMod := (`Qsag).str stem
+          unless auditedProofModules.contains diskMod do
+            throwError "Unregistered Qsag/*.lean module on disk missing from AuditAxioms: {diskMod}"
+
+  let mut perModuleCounts : Array Nat := Array.replicate auditedProofModules.size 0
   let mut checked : Nat := 0
   let mut rejected : Nat := 0
   let mut examples : Array Name := #[]
-  let excluded := #[`Qsag.HashSigs, `Qsag.Fips205, `Qsag.HypertreeEufCma, `Qsag.Aggregation]
-  let mut excludedCounts : Array Nat := #[0, 0, 0, 0]
-  let mut inScope : Nat := 0
-  for (name, _) in env.constants.toList do
-    let spelling := name.toString
-    if spelling.startsWith "Qsag." || spelling.startsWith "_private.Qsag." then
-      checked := checked + 1
-      let axioms ← Lean.collectAxioms name
-      let forbidden := axioms.filter fun ax => ax != ``propext && ax != ``Quot.sound
-      if !forbidden.isEmpty then
-        rejected := rejected + 1
-        let some idx := env.getModuleIdxFor? name
-          | throwError "Missing owner for audited declaration {name}"
-        let owner := env.header.moduleNames[idx.toNat]!
-        if let some i := excluded.findIdx? (· == owner) then
-          excludedCounts := excludedCounts.modify i (· + 1)
-        else
-          inScope := inScope + 1
-        examples := examples.push name
-        logInfo m!"REJECT {name}: {forbidden}"
+
+  for (name, _) in privEnv.constants.toList do
+    if let some idx := privEnv.getModuleIdxFor? name then
+      let owner := importedNames[idx.toNat]!
+      -- Select by owning module, including private and non-Qsag-namespaced declarations.
+      if let some mPos := auditedProofModules.findIdx? (· == owner) then
+        checked := checked + 1
+        perModuleCounts := perModuleCounts.modify mPos (· + 1)
+        let axioms ← withEnv privEnv <| Lean.collectAxioms name
+        let forbidden := axioms.filter (!allow ·)
+        if !forbidden.isEmpty then
+          rejected := rejected + 1
+          examples := examples.push name
+          logInfo m!"REJECT {name} ({owner}): {forbidden}"
+
   if checked == 0 then
     throwError "No project declarations found; audit coverage is empty"
-  logInfo m!"Axiom inventory: {checked} declarations, {rejected} rejected"
-  logInfo m!"In-scope rejected: {inScope}"
-  for i in [:excluded.size] do
-    logInfo m!"Excluded module {excluded[i]!}: {excludedCounts[i]!} rejected"
+
+  for i in [:auditedProofModules.size] do
+    if perModuleCounts[i]! == 0 then
+      throwError "Manifest proof module contributed 0 audited declarations: {auditedProofModules[i]!}"
+
+  logInfo m!"Axiom inventory: {checked} declarations across {auditedProofModules.size} proof modules (0 excluded), {rejected} rejected"
   if rejected > 0 then
     throwError "Axiom policy failed for {rejected} of {checked} declarations. Examples: {examples}"
