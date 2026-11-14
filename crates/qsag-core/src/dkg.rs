@@ -28,8 +28,8 @@
 //!      written via `.tmp` `write_all` + `File::sync_all()` + atomic `fs::rename` + parent-directory
 //!      `sync_all()` strictly *before* returning `Ok(epoch)` (`[P0-04]`).
 
-use alloc::vec;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -48,7 +48,9 @@ use crate::preprocessing::{
     spdz_authenticate_goldilocks_batch_ext2, spdz_setup_alpha_gf256, spdz_setup_alpha_goldilocks,
     validate_all_eval_points_gf256, validate_all_eval_points_goldilocks,
 };
-use crate::sponge::keccak::{Cshake256Xof, cshake256_32 as cshake256_hash32, cshake256_32_multi_frame};
+use crate::sponge::keccak::{
+    Cshake256Xof, cshake256_32 as cshake256_hash32, cshake256_32_multi_frame,
+};
 use crate::tsw_baggy::{
     EpochLatchError as StatefulLatchError, MonotonicEpochLatch, StatefulEpochLatch,
 };
@@ -102,7 +104,11 @@ impl fmt::Display for DkgError {
                 write!(f, "custody share for party {} is invalidated", party_id)
             }
             Self::DealerDisqualified { dealer_idx } => {
-                write!(f, "dealer {} disqualified during DKG verification", dealer_idx)
+                write!(
+                    f,
+                    "dealer {} disqualified during DKG verification",
+                    dealer_idx
+                )
             }
             Self::PrivatePacketVerificationFailed {
                 dealer_idx,
@@ -113,7 +119,11 @@ impl fmt::Display for DkgError {
                 dealer_idx, recv_idx
             ),
             Self::ZeroConstantCheckFailed { dealer_idx } => {
-                write!(f, "proactive refresh zero-constant check failed for dealer {}", dealer_idx)
+                write!(
+                    f,
+                    "proactive refresh zero-constant check failed for dealer {}",
+                    dealer_idx
+                )
             }
             Self::NonBooleanSeedBitDetected { bit_idx } => {
                 write!(f, "non-Boolean dealt seed bit detected at bit {}", bit_idx)
@@ -131,9 +141,7 @@ impl From<PreprocessError> for DkgError {
     fn from(e: PreprocessError) -> Self {
         match e {
             PreprocessError::DuplicateOrZeroEvalPoint => Self::InvalidEvaluationPoints,
-            PreprocessError::NonBooleanBitDetected { .. } => {
-                Self::NonBooleanSeedDetected
-            }
+            PreprocessError::NonBooleanBitDetected { .. } => Self::NonBooleanSeedDetected,
             other => Self::PreprocessingFailed(other),
         }
     }
@@ -208,8 +216,12 @@ impl ShamirSeedShare256 {
     }
 
     pub fn from_custody_bytes(bytes: &[u8; 270]) -> Self {
-        let party_id = u32::from_le_bytes(core::array::from_fn(|array_index| (bytes[0..4])[array_index])) as usize;
-        let generation = u64::from_le_bytes(core::array::from_fn(|array_index| (bytes[4..12])[array_index]));
+        let party_id = u32::from_le_bytes(core::array::from_fn(|array_index| {
+            (bytes[0..4])[array_index]
+        })) as usize;
+        let generation = u64::from_le_bytes(core::array::from_fn(|array_index| {
+            (bytes[4..12])[array_index]
+        }));
         let eval_point = TowerGf256(bytes[12]);
         let invalidated = bytes[13] != 0;
         let mut bit_shares = [TowerGf256::ZERO; 256];
@@ -335,24 +347,34 @@ impl ShamirPoseidonSeedShare {
     }
 
     pub fn from_custody_bytes(bytes: &[u8; 2325]) -> Option<Self> {
-        let party_id = u32::from_le_bytes(core::array::from_fn(|array_index| (bytes[0..4])[array_index])) as usize;
-        let generation = u64::from_le_bytes(core::array::from_fn(|array_index| (bytes[4..12])[array_index]));
-        let eval_point =
-            Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| (bytes[12..20])[array_index])).ok()?;
+        let party_id = u32::from_le_bytes(core::array::from_fn(|array_index| {
+            (bytes[0..4])[array_index]
+        })) as usize;
+        let generation = u64::from_le_bytes(core::array::from_fn(|array_index| {
+            (bytes[4..12])[array_index]
+        }));
+        let eval_point = Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| {
+            (bytes[12..20])[array_index]
+        }))
+        .ok()?;
         let invalidated = bytes[20] != 0;
         let mut bit_shares = [Goldilocks::ZERO; 256];
         for (i, bit_shares_i_item) in bit_shares[..256].iter_mut().enumerate() {
             let off = 21 + 8 * i;
             *bit_shares_i_item =
-                Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| (bytes[off..off + 8])[array_index]))
-                    .ok()?;
+                Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| {
+                    (bytes[off..off + 8])[array_index]
+                }))
+                .ok()?;
         }
         let mut byte_shares = [Goldilocks::ZERO; 32];
         for (i, byte_shares_i_item) in byte_shares[..32].iter_mut().enumerate() {
             let off = 21 + 2048 + 8 * i;
             *byte_shares_i_item =
-                Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| (bytes[off..off + 8])[array_index]))
-                    .ok()?;
+                Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| {
+                    (bytes[off..off + 8])[array_index]
+                }))
+                .ok()?;
         }
         Some(Self {
             party_id,
@@ -472,66 +494,6 @@ pub fn eval_poly_tower128_at_gf256(coeffs: &[Tower128], x: TowerGf256) -> Tower1
         acc = acc.mul(xb).add(c);
     }
     acc
-}
-
-/// Public `Π_deg` Reed–Solomon degree-`< t` consistency check over `Goldilocks` across ALL `pts[0..n]`.
-pub fn check_reed_solomon_deg_lt_t_goldilocks(
-    t: usize,
-    pts: &[Goldilocks],
-    coeffs: &[Goldilocks],
-    evals: &[Goldilocks],
-) -> bool {
-    if t == 0
-        || coeffs.len() > t
-        || pts.len() != evals.len()
-        || validate_all_eval_points_goldilocks(pts).is_err()
-    {
-        return false;
-    }
-    pts.iter()
-        .zip(evals.iter())
-        .all(|(&x, &y)| eval_poly_goldilocks(coeffs, x) == y)
-}
-
-/// Public `Π_deg` Reed–Solomon degree-`< t` consistency check over `TowerGf256` across ALL `pts[0..n]`.
-pub fn check_reed_solomon_deg_lt_t_gf256(
-    t: usize,
-    pts: &[TowerGf256],
-    coeffs: &[TowerGf256],
-    evals: &[TowerGf256],
-) -> bool {
-    if t == 0
-        || coeffs.len() > t
-        || pts.len() != evals.len()
-        || validate_all_eval_points_gf256(pts).is_err()
-    {
-        return false;
-    }
-    pts.iter()
-        .zip(evals.iter())
-        .all(|(&x, &y)| eval_poly_gf256(coeffs, x) == y)
-}
-
-/// Public `Π_deg0` zero-constant proactive refresh check over `Goldilocks` (`p(0) == 0`).
-pub fn check_zero_constant_refresh_goldilocks(
-    t: usize,
-    pts: &[Goldilocks],
-    refresh_coeffs: &[Goldilocks],
-    refresh_shares: &[Goldilocks],
-) -> bool {
-    check_reed_solomon_deg_lt_t_goldilocks(t, pts, refresh_coeffs, refresh_shares)
-        && eval_poly_goldilocks(refresh_coeffs, Goldilocks::ZERO) == Goldilocks::ZERO
-}
-
-/// Public `Π_deg0` zero-constant proactive refresh check over `TowerGf256` (`p(0) == 0`).
-pub fn check_zero_constant_refresh_gf256(
-    t: usize,
-    pts: &[TowerGf256],
-    refresh_coeffs: &[TowerGf256],
-    refresh_shares: &[TowerGf256],
-) -> bool {
-    check_reed_solomon_deg_lt_t_gf256(t, pts, refresh_coeffs, refresh_shares)
-        && eval_poly_gf256(refresh_coeffs, TowerGf256::ZERO) == TowerGf256::ZERO
 }
 
 // ============================================================================
@@ -674,9 +636,14 @@ pub fn derive_dkg_transcript_challenge_goldilocks(
     xof.absorb(&(dealer_idx as u64).to_be_bytes());
     let mut digest = [0u8; 32];
     xof.squeeze(&mut digest);
-    let c0 = Goldilocks::from_u128_reduced(u128::from_be_bytes(core::array::from_fn(|array_index| (digest[0..16])[array_index])));
+    let c0 =
+        Goldilocks::from_u128_reduced(u128::from_be_bytes(core::array::from_fn(|array_index| {
+            (digest[0..16])[array_index]
+        })));
     let mut c1 =
-        Goldilocks::from_u128_reduced(u128::from_be_bytes(core::array::from_fn(|array_index| (digest[16..32])[array_index])));
+        Goldilocks::from_u128_reduced(u128::from_be_bytes(core::array::from_fn(|array_index| {
+            (digest[16..32])[array_index]
+        })));
     if c0 == Goldilocks::ZERO && c1 == Goldilocks::ZERO {
         c1 = Goldilocks::ONE;
     }
@@ -684,7 +651,10 @@ pub fn derive_dkg_transcript_challenge_goldilocks(
 }
 
 impl GoldilocksDealerRound1Commit {
-    #[expect(clippy::too_many_arguments, reason = "Preserve the explicit statement, role, witness and randomness bindings in this protocol API")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the explicit statement, role, witness and randomness bindings in this protocol API"
+    )]
     pub fn commit_round1(
         session_id: &[u8; 32],
         dealer_idx: usize,
@@ -792,7 +762,9 @@ pub fn verify_dkg_private_packet_goldilocks(
     r2: &GoldilocksDealerRound2Open,
     packet: &DkgPrivateSharePacket,
 ) -> bool {
-    if t == 0 || t > pts.len() || r2.masked_poly_coeffs.len() > t
+    if t == 0
+        || t > pts.len()
+        || r2.masked_poly_coeffs.len() > t
         || r1.dealer_idx != r2.dealer_idx
         || packet.recv_idx >= pts.len()
         || r1.share_commitments.len() != pts.len()
@@ -846,8 +818,12 @@ pub fn verify_and_qualify_dkg_dealer_goldilocks(
     {
         return false;
     }
-    let expected_pk_comm =
-        dkg_commit_pk_seed(session_id, r1.dealer_idx, &r2.pk_seed_salt, &r2.pk_seed_contrib);
+    let expected_pk_comm = dkg_commit_pk_seed(
+        session_id,
+        r1.dealer_idx,
+        &r2.pk_seed_salt,
+        &r2.pk_seed_contrib,
+    );
     if !ct_eq_bytes32(&expected_pk_comm, &r1.pk_seed_commitment) {
         return false;
     }
@@ -886,19 +862,23 @@ pub fn verify_and_qualify_dkg_dealer_goldilocks(
         if comp.dealer_opened_share_bytes.len() != 24 {
             return false;
         }
-        let Ok(f_open) = Goldilocks::from_be_bytes_canonical(
-            core::array::from_fn(|array_index| (comp.dealer_opened_share_bytes[0..8])[array_index]),
-        ) else {
+        let Ok(f_open) = Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| {
+            (comp.dealer_opened_share_bytes[0..8])[array_index]
+        })) else {
             return false;
         };
-        let Ok(m0_open) = Goldilocks::from_be_bytes_canonical(
-            core::array::from_fn(|array_index| (comp.dealer_opened_share_bytes[8..16])[array_index]),
-        ) else {
+        let Ok(m0_open) =
+            Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| {
+                (comp.dealer_opened_share_bytes[8..16])[array_index]
+            }))
+        else {
             return false;
         };
-        let Ok(m1_open) = Goldilocks::from_be_bytes_canonical(
-            core::array::from_fn(|array_index| (comp.dealer_opened_share_bytes[16..24])[array_index]),
-        ) else {
+        let Ok(m1_open) =
+            Goldilocks::from_be_bytes_canonical(core::array::from_fn(|array_index| {
+                (comp.dealer_opened_share_bytes[16..24])[array_index]
+            }))
+        else {
             return false;
         };
         let m_open = GoldilocksExt2::new(m0_open, m1_open);
@@ -1187,7 +1167,10 @@ impl Gf256SeedDealerPendingSecret {
 
 /// Verify both the public `(Gf256SeedDealerRound1Commit, Gf256SeedDealerRound2Open)` pair and
 /// recipient `recv_idx`'s own private `Gf256SeedPrivatePacket`.
-#[expect(clippy::too_many_arguments, reason = "Keep commitment, opening, private packet and session/quorum bindings explicit")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep commitment, opening, private packet and session/quorum bindings explicit"
+)]
 pub fn verify_gf256_seed_dealing(
     session_id: &[u8; 32],
     t: usize,
@@ -1212,8 +1195,12 @@ pub fn verify_gf256_seed_dealing(
             dealer_idx: r1.dealer_idx,
         });
     }
-    let pk_comm =
-        dkg_commit_pk_seed(session_id, r1.dealer_idx, &r2.pk_seed_salt, &r2.pk_seed_contrib);
+    let pk_comm = dkg_commit_pk_seed(
+        session_id,
+        r1.dealer_idx,
+        &r2.pk_seed_salt,
+        &r2.pk_seed_contrib,
+    );
     if !ct_eq_bytes32(&pk_comm, &r1.pk_seed_commitment) {
         return Err(DkgError::DealerDisqualified {
             dealer_idx: r1.dealer_idx,
@@ -1435,8 +1422,7 @@ pub fn run_dealerless_dkg_seed32_gf256(
         }
     }
 
-    let joint_r1_digest =
-        compute_gf256_round1_transcript(&session_id, t, eval_points, &r1_commits);
+    let joint_r1_digest = compute_gf256_round1_transcript(&session_id, t, eval_points, &r1_commits);
 
     // Round 2: Open against `joint_r1_digest`
     let r2_opens: Vec<Gf256SeedDealerRound2Open> = pending_dealers
@@ -1475,14 +1461,7 @@ pub fn run_dealerless_dkg_seed32_gf256(
     }
 
     // Interactive SPDZ-MAC-authenticated Booleanity & global `0..n` degree-`< t` verification
-    spdz_verify_seed256_boolean_gf256(
-        &session_id,
-        t,
-        eval_points,
-        ot_mesh,
-        &agg_bits,
-        party_rngs,
-    )?;
+    spdz_verify_seed256_boolean_gf256(&session_id, t, eval_points, ot_mesh, &agg_bits, party_rngs)?;
 
     let mut shares = Vec::with_capacity(n);
     for p in 0..n {
@@ -1537,8 +1516,7 @@ pub fn run_dealerless_refresh_seed32_gf256(
         }
     }
 
-    let joint_r1_digest =
-        compute_gf256_round1_transcript(&session_id, t, eval_points, &r1_commits);
+    let joint_r1_digest = compute_gf256_round1_transcript(&session_id, t, eval_points, &r1_commits);
     let r2_opens: Vec<Gf256SeedDealerRound2Open> = pending
         .into_iter()
         .map(|pend| pend.open_round2(&session_id, eval_points, &joint_r1_digest))
@@ -1575,7 +1553,8 @@ pub fn run_dealerless_refresh_seed32_gf256(
             *m_coeffs_k_item = (*party_rngs_i_item).next_tower128();
         }
         for p in 0..n {
-            mask_shares[p] = mask_shares[p].add(eval_poly_tower128_at_gf256(&m_coeffs, eval_points[p]));
+            mask_shares[p] =
+                mask_shares[p].add(eval_poly_tower128_at_gf256(&m_coeffs, eval_points[p]));
         }
     }
     let coin = run_commit_and_open_coin(
@@ -1645,7 +1624,10 @@ fn finish_reshare<T>(
 ///   supplies its suite-specific MPC root computation, bound to the enrolled
 ///   public parameters; it must not reconstruct the secret in production.
 ///   A constant or unverified callback defeats this check and is forbidden.
-#[expect(clippy::too_many_arguments, reason = "Old/new committees and the enrolled-root verifier are separate trust-boundary inputs")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Old/new committees and the enrolled-root verifier are separate trust-boundary inputs"
+)]
 pub fn run_dealerless_reshare_seed32_gf256(
     session_id: [u8; 32],
     old_t: usize,
@@ -1731,9 +1713,11 @@ pub fn run_dealerless_reshare_seed32_gf256(
     let mut new_bits = SecretBuffer(vec![[TowerGf256::ZERO; 256]; new_n]);
     for j in 0..new_n {
         for slot in 0..old_t {
-            let pkt = inboxes[j][slot].as_ref().ok_or(DkgError::DealerDisqualified {
-                dealer_idx: old_quorum_indices[slot],
-            })?;
+            let pkt = inboxes[j][slot]
+                .as_ref()
+                .ok_or(DkgError::DealerDisqualified {
+                    dealer_idx: old_quorum_indices[slot],
+                })?;
             verify_gf256_seed_dealing(
                 &session_id,
                 new_t,
@@ -1764,10 +1748,20 @@ pub fn run_dealerless_reshare_seed32_gf256(
     for j in 0..new_n {
         let bits = new_bits[j];
         wipe_gf256_slice(&mut new_bits[j]);
-        out.push(ShamirSeedShare256::new(j, next_gen, new_eval_points[j], bits));
+        out.push(ShamirSeedShare256::new(
+            j,
+            next_gen,
+            new_eval_points[j],
+            bits,
+        ));
     }
-    finish_reshare(old_shares, out, enrolled_root, recompute_public_root,
-        ShamirSeedShare256::wipe_and_invalidate)
+    finish_reshare(
+        old_shares,
+        out,
+        enrolled_root,
+        recompute_public_root,
+        ShamirSeedShare256::wipe_and_invalidate,
+    )
 }
 
 // ============================================================================
@@ -2011,7 +2005,10 @@ impl GoldilocksSeedDealerPendingSecret {
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "Keep commitment, opening, private packet and session/quorum bindings explicit")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep commitment, opening, private packet and session/quorum bindings explicit"
+)]
 pub fn verify_goldilocks_seed_dealing(
     session_id: &[u8; 32],
     t: usize,
@@ -2128,7 +2125,9 @@ pub fn spdz_verify_seed256_boolean_goldilocks(
             u_add[q][m] = lambdas_0[q] * bit_shares_per_party[q][m];
         }
     }
-    let bsq_add = SecretBuffer(pairwise_gilboa_ole_goldilocks(ot_mesh, &u_add, &u_add, party_rngs)?);
+    let bsq_add = SecretBuffer(pairwise_gilboa_ole_goldilocks(
+        ot_mesh, &u_add, &u_add, party_rngs,
+    )?);
     let mut comp_u0 = SecretBuffer(vec![vec![Goldilocks::ZERO; 256]; n]);
     let mut comp_u1 = SecretBuffer(vec![vec![Goldilocks::ZERO; 256]; n]);
     for i in 0..n {
@@ -2137,8 +2136,12 @@ pub fn spdz_verify_seed256_boolean_goldilocks(
             comp_u1[i][m] = party_rngs[i].next_goldilocks();
         }
     }
-    let comp_w0 = SecretBuffer(pairwise_gilboa_ole_goldilocks(ot_mesh, &comp_u0, &u_add, party_rngs)?);
-    let comp_w1 = SecretBuffer(pairwise_gilboa_ole_goldilocks(ot_mesh, &comp_u1, &u_add, party_rngs)?);
+    let comp_w0 = SecretBuffer(pairwise_gilboa_ole_goldilocks(
+        ot_mesh, &comp_u0, &u_add, party_rngs,
+    )?);
+    let comp_w1 = SecretBuffer(pairwise_gilboa_ole_goldilocks(
+        ot_mesh, &comp_u1, &u_add, party_rngs,
+    )?);
     drop(u_add);
 
     // Re-share `bsq, comp_u0, comp_u1, comp_w0, comp_w1` at degree `< t` across `0..n`
@@ -2211,8 +2214,14 @@ pub fn spdz_verify_seed256_boolean_goldilocks(
     // Step A: SPDZ-MAC-authenticated MASCOT companion sacrifice proving `bsq_m == b_m^2`!
     let sac_coin = run_commit_and_open_coin(&auth_sid, b"GL_DKG_BOOL_SAC", session_id, party_rngs)?;
     let rho = GoldilocksExt2::new(
-        Goldilocks::from_u128_reduced(u128::from_be_bytes(core::array::from_fn(|array_index| (sac_coin[0..16])[array_index])) | 1),
-        Goldilocks::from_u128_reduced(u128::from_be_bytes(core::array::from_fn(|array_index| (sac_coin[16..32])[array_index]))),
+        Goldilocks::from_u128_reduced(
+            u128::from_be_bytes(core::array::from_fn(|array_index| {
+                (sac_coin[0..16])[array_index]
+            })) | 1,
+        ),
+        Goldilocks::from_u128_reduced(u128::from_be_bytes(core::array::from_fn(|array_index| {
+            (sac_coin[16..32])[array_index]
+        }))),
     );
     let mut u_c0_batch = SecretBuffer(vec![vec![Goldilocks::ZERO; 512]; n]);
     let mut u_c0_macs = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; 512]; n]);
@@ -2585,7 +2594,10 @@ pub fn run_dealerless_refresh_seed32_goldilocks(
 /// `recompute_public_root` must run the suite-specific MPC root computation with
 /// the enrolled public parameters, without reconstructing the secret. Returning
 /// a constant or trusting a participant's claimed root defeats this check.
-#[expect(clippy::too_many_arguments, reason = "Old/new committees and the enrolled-root verifier are separate trust-boundary inputs")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Old/new committees and the enrolled-root verifier are separate trust-boundary inputs"
+)]
 pub fn run_dealerless_reshare_seed32_goldilocks(
     session_id: [u8; 32],
     old_t: usize,
@@ -2669,9 +2681,11 @@ pub fn run_dealerless_reshare_seed32_goldilocks(
     let mut new_bits = SecretBuffer(vec![[Goldilocks::ZERO; 256]; new_n]);
     for j in 0..new_n {
         for slot in 0..old_t {
-            let pkt = inboxes[j][slot].as_ref().ok_or(DkgError::DealerDisqualified {
-                dealer_idx: old_quorum_indices[slot],
-            })?;
+            let pkt = inboxes[j][slot]
+                .as_ref()
+                .ok_or(DkgError::DealerDisqualified {
+                    dealer_idx: old_quorum_indices[slot],
+                })?;
             verify_goldilocks_seed_dealing(
                 &session_id,
                 new_t,
@@ -2709,8 +2723,13 @@ pub fn run_dealerless_reshare_seed32_goldilocks(
             bits,
         ));
     }
-    finish_reshare(old_shares, out, enrolled_root, recompute_public_root,
-        ShamirPoseidonSeedShare::wipe_and_invalidate)
+    finish_reshare(
+        old_shares,
+        out,
+        enrolled_root,
+        recompute_public_root,
+        ShamirPoseidonSeedShare::wipe_and_invalidate,
+    )
 }
 
 // ============================================================================
@@ -2766,7 +2785,9 @@ const FS_WAL_MAGIC: &[u8; 8] = b"QSAGWAL1";
 const FS_WAL_MAGIC_V2: &[u8; 8] = b"QSAGWAL2";
 
 impl EpochLatchState {
-    pub const fn high_water(&self) -> Option<(u64, [u8; 32])> { self.high_water }
+    pub const fn high_water(&self) -> Option<(u64, [u8; 32])> {
+        self.high_water
+    }
 
     pub const fn new() -> Self {
         Self { high_water: None }
@@ -2841,7 +2862,9 @@ impl EpochLatchState {
         if bytes[8] == 0 {
             Ok(Self { high_water: None })
         } else {
-            let ep = u64::from_be_bytes(core::array::from_fn(|array_index| (bytes[9..17])[array_index]));
+            let ep = u64::from_be_bytes(core::array::from_fn(|array_index| {
+                (bytes[9..17])[array_index]
+            }));
             let mut mu = [0u8; 32];
             mu.copy_from_slice(&bytes[17..49]);
             Ok(Self {
@@ -2943,11 +2966,15 @@ pub fn decode_authenticated_wal_record(
     if !ct_eq_bytes32(&expected_tag, &actual_tag) {
         return Err(StatefulLatchError::PersistenceFailure);
     }
-    let next_epoch = u64::from_be_bytes(core::array::from_fn(|array_index| (bytes[8..16])[array_index]));
+    let next_epoch = u64::from_be_bytes(core::array::from_fn(|array_index| {
+        (bytes[8..16])[array_index]
+    }));
     let in_flight = if bytes[16] == 0 {
         None
     } else {
-        let ep = u64::from_be_bytes(core::array::from_fn(|array_index| (bytes[17..25])[array_index]));
+        let ep = u64::from_be_bytes(core::array::from_fn(|array_index| {
+            (bytes[17..25])[array_index]
+        }));
         if ep >= next_epoch {
             return Err(StatefulLatchError::PersistenceFailure);
         }
@@ -3008,21 +3035,24 @@ fn decode_fs_wal_record_v2(
     if !ct_eq_bytes32(&expected_tag, &actual_tag) {
         return Err(StatefulLatchError::PersistenceFailure);
     }
-    let generation =
-        u64::from_be_bytes(core::array::from_fn(|array_index| (bytes[8..16])[array_index]));
+    let generation = u64::from_be_bytes(core::array::from_fn(|array_index| {
+        (bytes[8..16])[array_index]
+    }));
     if generation == 0 {
         return Err(StatefulLatchError::PersistenceFailure);
     }
-    let next_epoch =
-        u64::from_be_bytes(core::array::from_fn(|array_index| (bytes[16..24])[array_index]));
+    let next_epoch = u64::from_be_bytes(core::array::from_fn(|array_index| {
+        (bytes[16..24])[array_index]
+    }));
     let in_flight = if bytes[24] == 0 {
         if bytes[25..65] != [0u8; 40] {
             return Err(StatefulLatchError::PersistenceFailure);
         }
         None
     } else {
-        let ep =
-            u64::from_be_bytes(core::array::from_fn(|array_index| (bytes[25..33])[array_index]));
+        let ep = u64::from_be_bytes(core::array::from_fn(|array_index| {
+            (bytes[25..33])[array_index]
+        }));
         if ep >= next_epoch {
             return Err(StatefulLatchError::PersistenceFailure);
         }
@@ -3156,8 +3186,7 @@ impl FsWalEpochLatch {
         if create {
             let inner = MonotonicEpochLatch::new(0);
             let seal = record.lock_seal();
-            let (mut rec, checkpoint) =
-                encode_fs_wal_record_v2(&inner, 1, &seal, &latch_mac_key);
+            let (mut rec, checkpoint) = encode_fs_wal_record_v2(&inner, 1, &seal, &latch_mac_key);
             let write_res = record.replace(&rec);
             wipe_bytes(&mut rec);
             write_res.map_err(|_| StatefulLatchError::PersistenceFailure)?;
@@ -3267,7 +3296,10 @@ impl StatefulEpochLatch for FsWalEpochLatch {
         max_sigs_log2: usize,
         mu: &[u8; 32],
     ) -> Result<(), StatefulLatchError> {
-        if self.inner.check_reserve_epoch_at(epoch, max_sigs_log2, mu)? {
+        if self
+            .inner
+            .check_reserve_epoch_at(epoch, max_sigs_log2, mu)?
+        {
             return Ok(());
         }
         let mut staged = self.inner.stage_copy();
@@ -3458,8 +3490,12 @@ impl EpochLatchCertificate {
     /// Verify against the authority pinned in enrolled key custody, never one taken
     /// from the same untrusted signing request as this certificate.
     pub fn verify_against(
-        &self, authority: &EpochLatchAuthorityPublic, n: usize, t: usize,
-        epoch: u64, binding: &[u8; 32],
+        &self,
+        authority: &EpochLatchAuthorityPublic,
+        n: usize,
+        t: usize,
+        epoch: u64,
+        binding: &[u8; 32],
     ) -> Result<(), EpochLatchError> {
         authority.verify_certificate(self, n, t, epoch, binding)
     }
@@ -3474,8 +3510,8 @@ impl EpochLatchCertificate {
         epoch: u64,
         binding: &[u8; 32],
     ) -> Result<(), EpochLatchError> {
-        let distinct_members = self.acks.windows(2).all(|w| w[0] < w[1])
-            && self.acks.last().is_none_or(|&p| p < n);
+        let distinct_members =
+            self.acks.windows(2).all(|w| w[0] < w[1]) && self.acks.last().is_none_or(|&p| p < n);
         if t == 0 || self.n != n || self.t != t || !distinct_members {
             return Err(EpochLatchError::CertificateCommitteeMismatch);
         }
@@ -3486,15 +3522,25 @@ impl EpochLatchCertificate {
                 required_latch_quorum: (n.saturating_add(f) / 2).saturating_add(1),
             });
         }
-        if self.authority.0.len() != n || self.tags.len() != self.acks.len()
-            || self.signer_mask.len() != n.div_ceil(8) { return Err(EpochLatchError::CertificateCommitteeMismatch); }
+        if self.authority.0.len() != n
+            || self.tags.len() != self.acks.len()
+            || self.signer_mask.len() != n.div_ceil(8)
+        {
+            return Err(EpochLatchError::CertificateCommitteeMismatch);
+        }
         let mut expected_mask = vec![0u8; n.div_ceil(8)];
         let mut valid_acks = 0;
         for (&party, tag) in self.acks.iter().zip(&self.tags) {
             expected_mask[party / 8] |= 1 << (party % 8);
-            valid_acks += usize::from(ct_eq_bytes32(tag, &self.authority.tag(party, n, t, self.epoch, &self.binding, &self.signer_mask)));
+            valid_acks += usize::from(ct_eq_bytes32(
+                tag,
+                &self
+                    .authority
+                    .tag(party, n, t, self.epoch, &self.binding, &self.signer_mask),
+            ));
         }
-        if expected_mask != self.signer_mask || !latch_quorum_intersects_honestly(valid_acks, n, t) {
+        if expected_mask != self.signer_mask || !latch_quorum_intersects_honestly(valid_acks, n, t)
+        {
             return Err(EpochLatchError::CertificateCommitteeMismatch);
         }
         if self.epoch != epoch {
@@ -3540,10 +3586,18 @@ pub struct QuorumEpochLatchCluster {
 }
 
 impl QuorumEpochLatchCluster {
-    pub const fn committee_size(&self) -> usize { self.n }
-    pub const fn max_faulty(&self) -> usize { self.max_faulty }
-    pub const fn latch_quorum(&self) -> usize { self.latch_quorum }
-    pub fn signer_latches(&self) -> &[EpochLatchState] { &self.signer_latches }
+    pub const fn committee_size(&self) -> usize {
+        self.n
+    }
+    pub const fn max_faulty(&self) -> usize {
+        self.max_faulty
+    }
+    pub const fn latch_quorum(&self) -> usize {
+        self.latch_quorum
+    }
+    pub fn signer_latches(&self) -> &[EpochLatchState] {
+        &self.signer_latches
+    }
 
     /// Pinned authority handle to enroll on the committee's authenticated signing shares.
     pub fn authority(&self) -> EpochLatchAuthorityPublic {
@@ -3604,25 +3658,57 @@ impl QuorumEpochLatchCluster {
     /// Production enrollment/recovery. Each custodian owns a locked, authenticated WAL.
     /// MAC keys must be independently provisioned secrets, stable across recovery.
     #[cfg(feature = "std")]
-    pub fn from_durable_latches(max_faulty: usize, latches: Vec<FsWalEpochLatch>, mac_keys: Vec<[u8; 32]>) -> Option<Self> {
+    pub fn from_durable_latches(
+        max_faulty: usize,
+        latches: Vec<FsWalEpochLatch>,
+        mac_keys: Vec<[u8; 32]>,
+    ) -> Option<Self> {
         let authority = Arc::new(LatchMacAuthority(mac_keys));
         let n = latches.len();
         let sum = n.checked_add(max_faulty)?;
         let latch_quorum = sum.checked_div(2)?.checked_add(1)?;
-        if n == 0 || latch_quorum > n || authority.0.len() != n { return None; }
+        if n == 0 || latch_quorum > n || authority.0.len() != n {
+            return None;
+        }
         for p in 0..n {
             if ct_eq_bytes32(&authority.0[p], &[0; 32])
-                || authority.0[..p].iter().any(|k| ct_eq_bytes32(k, &authority.0[p])) { return None; }
+                || authority.0[..p]
+                    .iter()
+                    .any(|k| ct_eq_bytes32(k, &authority.0[p]))
+            {
+                return None;
+            }
         }
-        let signer_latches = latches.iter().map(|latch| EpochLatchState { high_water: latch.in_flight() }).collect();
-        Some(Self { n, max_faulty, latch_quorum, signer_latches,
-            authority, durable_latches: Some(latches) })
+        let signer_latches = latches
+            .iter()
+            .map(|latch| EpochLatchState {
+                high_water: latch.in_flight(),
+            })
+            .collect();
+        Some(Self {
+            n,
+            max_faulty,
+            latch_quorum,
+            signer_latches,
+            authority,
+            durable_latches: Some(latches),
+        })
     }
 
     /// Authenticate a certificate using this cluster's provisioned custodian keys.
-    pub fn verify_certificate(&self, certificate: &EpochLatchCertificate, epoch: u64, binding: &[u8; 32]) -> Result<(), EpochLatchError> {
-        self.authority()
-            .verify_certificate(certificate, self.n, self.max_faulty + 1, epoch, binding)
+    pub fn verify_certificate(
+        &self,
+        certificate: &EpochLatchCertificate,
+        epoch: u64,
+        binding: &[u8; 32],
+    ) -> Result<(), EpochLatchError> {
+        self.authority().verify_certificate(
+            certificate,
+            self.n,
+            self.max_faulty + 1,
+            epoch,
+            binding,
+        )
     }
 
     /// The lowest epoch no member has reserved yet: the epoch to propose for the next signature.
@@ -3681,7 +3767,9 @@ impl QuorumEpochLatchCluster {
             #[cfg(feature = "std")]
             if let Some(wals) = &mut self.durable_latches {
                 for &p in &accepted {
-                    wals[p].reserve_epoch_at(epoch, 62, &mu).map_err(|_| EpochLatchError::PersistenceFailure)?;
+                    wals[p]
+                        .reserve_epoch_at(epoch, 62, &mu)
+                        .map_err(|_| EpochLatchError::PersistenceFailure)?;
                     self.signer_latches[p] = staged[p].stage_copy();
                 }
             }
@@ -3731,20 +3819,30 @@ impl QuorumEpochLatchCluster {
         let required = self.latch_quorum.max((sum / 2).saturating_add(1));
         let acks = self.reserve_quorum(participating_signers, epoch, binding, required)?;
         let mut signer_mask = vec![0u8; self.n.div_ceil(8)];
-        for &party in &acks { signer_mask[party / 8] |= 1 << (party % 8); }
-        let tags = acks.iter().map(|&p| self.authority.tag(p, self.n, t, epoch, &binding, &signer_mask)).collect();
+        for &party in &acks {
+            signer_mask[party / 8] |= 1 << (party % 8);
+        }
+        let tags = acks
+            .iter()
+            .map(|&p| {
+                self.authority
+                    .tag(p, self.n, t, epoch, &binding, &signer_mask)
+            })
+            .collect();
         let cert = EpochLatchCertificate {
             n: self.n,
             t,
             epoch,
             binding,
-            acks, signer_mask, tags, authority: Arc::clone(&self.authority),
+            acks,
+            signer_mask,
+            tags,
+            authority: Arc::clone(&self.authority),
         };
         cert.verify_for(self.n, t, epoch, &binding)?;
         Ok(cert)
     }
 }
-
 
 impl core::error::Error for DkgError {}
 
@@ -3763,41 +3861,88 @@ mod tests {
     #[test]
     fn scalar_dkg_checks_received_evaluations_and_degree_bound() {
         let sid = [7; 32];
-        let pts = [Goldilocks::ONE, Goldilocks::TWO, Goldilocks::from_u64_reduced(3)];
+        let pts = [
+            Goldilocks::ONE,
+            Goldilocks::TWO,
+            Goldilocks::from_u64_reduced(3),
+        ];
         let (mut r1, pending, mut packets) = GoldilocksDealerRound1Commit::commit_round1(
-            &sid, 0, 2, &pts, vec![Goldilocks::ONE, Goldilocks::TWO],
-            vec![GoldilocksExt2::ONE], &[[8; 32]; 3], [9; 32], [10; 32]).unwrap();
+            &sid,
+            0,
+            2,
+            &pts,
+            vec![Goldilocks::ONE, Goldilocks::TWO],
+            vec![GoldilocksExt2::ONE],
+            &[[8; 32]; 3],
+            [9; 32],
+            [10; 32],
+        )
+        .unwrap();
         let digest = compute_goldilocks_round1_transcript(&sid, 2, &pts, &[r1.clone()]);
         let mut r2 = pending.open_round2(&sid, 2, &pts, &digest);
         for packet in &packets {
-            assert!(verify_dkg_private_packet_goldilocks(&sid, 2, &pts, &digest, &r1, &r2, packet));
+            assert!(verify_dkg_private_packet_goldilocks(
+                &sid, 2, &pts, &digest, &r1, &r2, packet
+            ));
         }
         // Even a commitment-consistent packet must satisfy the independently published polynomial.
         packets[2].f_share += Goldilocks::ONE;
         let bytes = crate::wipe::SecretBuffer(packets[2].encode_share_bytes());
         r1.share_commitments[2] = dkg_commit_share(0, 2, &packets[2].salt, &bytes[..]);
-        assert!(!verify_dkg_private_packet_goldilocks(&sid, 2, &pts, &digest, &r1, &r2, &packets[2]));
+        assert!(!verify_dkg_private_packet_goldilocks(
+            &sid,
+            2,
+            &pts,
+            &digest,
+            &r1,
+            &r2,
+            &packets[2]
+        ));
         r2.masked_poly_coeffs.push(GoldilocksExt2::ONE);
-        assert!(!verify_dkg_private_packet_goldilocks(&sid, 2, &pts, &digest, &r1, &r2, &packets[0]));
+        assert!(!verify_dkg_private_packet_goldilocks(
+            &sid,
+            2,
+            &pts,
+            &digest,
+            &r1,
+            &r2,
+            &packets[0]
+        ));
     }
 
     #[cfg(feature = "std")]
     #[test]
     fn durable_cluster_recovery_and_mac_corruption() {
-        let dir = std::env::temp_dir().join(format!("qsag-latch-cluster-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-latch-cluster-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&dir).unwrap();
-        let wals = (0..3).map(|p| FsWalEpochLatch::create_new_for_fresh_key(dir.join(p.to_string()), [p+1; 32]).unwrap()).collect();
+        let wals = (0..3)
+            .map(|p| {
+                FsWalEpochLatch::create_new_for_fresh_key(dir.join(p.to_string()), [p + 1; 32])
+                    .unwrap()
+            })
+            .collect();
         let keys = vec![[0x11; 32], [0x22; 32], [0x33; 32]];
-        let mut cluster = QuorumEpochLatchCluster::from_durable_latches(1, wals, keys.clone()).unwrap();
+        let mut cluster =
+            QuorumEpochLatchCluster::from_durable_latches(1, wals, keys.clone()).unwrap();
         let cert = cluster.certify_epoch(&[0, 1, 2], 5, [8; 32]).unwrap();
         cluster.verify_certificate(&cert, 5, &[8; 32]).unwrap();
-        let mut bad = cert.clone(); bad.tags[0][0] ^= 1;
+        let mut bad = cert.clone();
+        bad.tags[0][0] ^= 1;
         assert!(cluster.verify_certificate(&bad, 5, &[8; 32]).is_err());
-        let mut bad = cert.clone(); bad.signer_mask[0] ^= 1;
+        let mut bad = cert.clone();
+        bad.signer_mask[0] ^= 1;
         assert!(cluster.verify_certificate(&bad, 5, &[8; 32]).is_err());
         drop(cluster);
-        let wals = (0..3).map(|p| FsWalEpochLatch::open_existing(dir.join(p.to_string()), [p+1; 32]).unwrap()).collect();
+        let wals = (0..3)
+            .map(|p| FsWalEpochLatch::open_existing(dir.join(p.to_string()), [p + 1; 32]).unwrap())
+            .collect();
         let mut cluster = QuorumEpochLatchCluster::from_durable_latches(1, wals, keys).unwrap();
         assert_eq!(cluster.next_unreserved_epoch(), Some(6));
         cluster.verify_certificate(&cert, 5, &[8; 32]).unwrap();
@@ -3838,8 +3983,14 @@ mod tests {
         let mut bad_pts = old_pts.clone();
         bad_pts[old_n - 1] = TowerGf256::ZERO;
         assert_eq!(
-            run_dealerless_dkg_seed32_gf256(sid, old_t.min(old_n - 1), &bad_pts, &mut old_mesh, &mut rngs)
-                .unwrap_err(),
+            run_dealerless_dkg_seed32_gf256(
+                sid,
+                old_t.min(old_n - 1),
+                &bad_pts,
+                &mut old_mesh,
+                &mut rngs
+            )
+            .unwrap_err(),
             DkgError::InvalidEvaluationPoints
         );
 
@@ -3857,7 +4008,8 @@ mod tests {
         let mut beta_coeffs = [TowerGf256(0x02), TowerGf256(0x55), TowerGf256(0xAA)];
         for p in 0..old_n {
             bad_bits[p].copy_from_slice(&old_shares[p].bit_shares);
-            bad_bits[p][137] = bad_bits[p][137].add(eval_poly_gf256(&beta_coeffs[..old_t], old_pts[p]));
+            bad_bits[p][137] =
+                bad_bits[p][137].add(eval_poly_gf256(&beta_coeffs[..old_t], old_pts[p]));
         }
         wipe_gf256_slice(&mut beta_coeffs);
         assert_eq!(
@@ -3885,9 +4037,10 @@ mod tests {
         .unwrap();
         assert_ne!(old_shares[0].bit_shares, before_p0);
         assert_eq!(old_shares[0].generation, 1);
-        let secret_after_refresh =
-            shamir_reconstruct_seed32_gf256(&old_shares.iter().rev().take(old_t).collect::<Vec<_>>())
-                .unwrap();
+        let secret_after_refresh = shamir_reconstruct_seed32_gf256(
+            &old_shares.iter().rev().take(old_t).collect::<Vec<_>>(),
+        )
+        .unwrap();
         assert_eq!(secret_after_refresh, secret_initial);
 
         // Reshare to a larger dishonest-majority threshold.
@@ -3906,8 +4059,10 @@ mod tests {
             &mut reshare_rngs,
             &mut new_rngs,
             &secret_initial,
-            |shares| shamir_reconstruct_seed32_gf256(&shares[..new_t].iter().collect::<Vec<_>>())
-                .ok_or(DkgError::PublicRootMismatch),
+            |shares| {
+                shamir_reconstruct_seed32_gf256(&shares[..new_t].iter().collect::<Vec<_>>())
+                    .ok_or(DkgError::PublicRootMismatch)
+            },
         )
         .unwrap();
 
@@ -3916,7 +4071,9 @@ mod tests {
             assert_eq!(sh.bit_shares, [TowerGf256::ZERO; 256]);
         }
 
-        let reshared_secret = shamir_reconstruct_seed32_gf256(&new_shares.iter().rev().take(new_t).collect::<Vec<_>>())
+        let reshared_secret = shamir_reconstruct_seed32_gf256(
+            &new_shares.iter().rev().take(new_t).collect::<Vec<_>>(),
+        )
         .unwrap();
         assert_eq!(reshared_secret, secret_initial);
     }
@@ -3935,7 +4092,9 @@ mod tests {
     fn check_goldilocks_dkg(old_t: usize, old_n: usize, new_t: usize, new_n: usize) {
         let sid = [0x44; 32];
         // Both default and soak profiles retain dishonest-majority thresholds.
-        let old_pts: Vec<Goldilocks> = (1..=old_n as u64).map(Goldilocks::from_u64_reduced).collect();
+        let old_pts: Vec<Goldilocks> = (1..=old_n as u64)
+            .map(Goldilocks::from_u64_reduced)
+            .collect();
         let mut rngs = make_rngs(old_n, 0x50);
         let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
 
@@ -3943,15 +4102,23 @@ mod tests {
         let mut bad_pts = old_pts.clone();
         bad_pts[old_n - 1] = Goldilocks::ZERO;
         assert_eq!(
-            run_dealerless_dkg_seed32_goldilocks(sid, old_t.min(old_n - 1), &bad_pts, &mut mesh, &mut rngs)
-                .unwrap_err(),
+            run_dealerless_dkg_seed32_goldilocks(
+                sid,
+                old_t.min(old_n - 1),
+                &bad_pts,
+                &mut mesh,
+                &mut rngs
+            )
+            .unwrap_err(),
             DkgError::InvalidEvaluationPoints
         );
 
         let (mut old_shares, _pk_seed) =
             run_dealerless_dkg_seed32_goldilocks(sid, old_t, &old_pts, &mut mesh, &mut rngs)
                 .unwrap();
-        let secret_initial = shamir_reconstruct_seed32_goldilocks(&old_shares.iter().take(old_t).collect::<Vec<_>>())
+        let secret_initial = shamir_reconstruct_seed32_goldilocks(
+            &old_shares.iter().take(old_t).collect::<Vec<_>>(),
+        )
         .unwrap();
 
         // Non-Boolean share injection (`bit 77` shifted by `2`) MUST fail SPDZ Booleanity check!
@@ -3989,12 +4156,16 @@ mod tests {
         )
         .unwrap();
         assert_ne!(old_shares[0].byte_shares, p0_before);
-        let secret_refreshed = shamir_reconstruct_seed32_goldilocks(&old_shares.iter().rev().take(old_t).collect::<Vec<_>>())
+        let secret_refreshed = shamir_reconstruct_seed32_goldilocks(
+            &old_shares.iter().rev().take(old_t).collect::<Vec<_>>(),
+        )
         .unwrap();
         assert_eq!(secret_refreshed, secret_initial);
 
         // Reshare to a larger dishonest-majority threshold.
-        let new_pts: Vec<Goldilocks> = (1..=new_n as u64).map(Goldilocks::from_u64_reduced).collect();
+        let new_pts: Vec<Goldilocks> = (1..=new_n as u64)
+            .map(Goldilocks::from_u64_reduced)
+            .collect();
         let mut reshare_rngs = make_rngs(old_t, 0x60);
         let mut new_rngs = make_rngs(new_n, 0x61);
         let mut new_mesh = OtMesh::establish_ideal_for_test([0x47; 32], &mut new_rngs);
@@ -4009,14 +4180,18 @@ mod tests {
             &mut reshare_rngs,
             &mut new_rngs,
             &secret_initial,
-            |shares| shamir_reconstruct_seed32_goldilocks(&shares[..new_t].iter().collect::<Vec<_>>())
-                .ok_or(DkgError::PublicRootMismatch),
+            |shares| {
+                shamir_reconstruct_seed32_goldilocks(&shares[..new_t].iter().collect::<Vec<_>>())
+                    .ok_or(DkgError::PublicRootMismatch)
+            },
         )
         .unwrap();
         for sh in &old_shares {
             assert!(!sh.is_valid());
         }
-        let reshared_secret = shamir_reconstruct_seed32_goldilocks(&new_shares.iter().rev().take(new_t).collect::<Vec<_>>())
+        let reshared_secret = shamir_reconstruct_seed32_goldilocks(
+            &new_shares.iter().rev().take(new_t).collect::<Vec<_>>(),
+        )
         .unwrap();
         assert_eq!(reshared_secret, secret_initial);
     }
@@ -4026,7 +4201,12 @@ mod tests {
     #[test]
     fn test_quorum_epoch_latch_certificate_quorum_and_binding_rules() {
         // Latch quorum per (t, n, f = t - 1), and whether n - f responders can reach it.
-        for (t, n, quorum, live) in [(2usize, 3usize, 3usize, false), (3, 5, 4, false), (3, 7, 5, true), (2, 2, 2, false)] {
+        for (t, n, quorum, live) in [
+            (2usize, 3usize, 3usize, false),
+            (3, 5, 4, false),
+            (3, 7, 5, true),
+            (2, 2, 2, false),
+        ] {
             let cluster = QuorumEpochLatchCluster::new(n, t - 1).unwrap();
             assert_eq!(cluster.latch_quorum, quorum);
             assert!(latch_quorum_intersects_honestly(quorum, n, t));
@@ -4056,7 +4236,12 @@ mod tests {
                 required_latch_quorum: 4
             })
         );
-        assert!(cluster.signer_latches.iter().all(|l| l.high_water.is_none()));
+        assert!(
+            cluster
+                .signer_latches
+                .iter()
+                .all(|l| l.high_water.is_none())
+        );
         assert_eq!(
             cluster.certify_epoch(&[0, 0, 3, 4], 4, bind_a),
             Err(EpochLatchError::DuplicateParticipant { party: 0 })
@@ -4071,12 +4256,18 @@ mod tests {
 
         let cert = cluster.certify_epoch(&[4, 0, 3, 2], 4, bind_a).unwrap();
         assert_eq!(cert.acknowledging_parties(), &[0, 2, 3, 4]);
-        assert_eq!((cert.committee_size(), cert.threshold(), cert.epoch()), (5, 3, 4));
+        assert_eq!(
+            (cert.committee_size(), cert.threshold(), cert.epoch()),
+            (5, 3, 4)
+        );
         assert_eq!(cert.binding(), &bind_a);
         assert_eq!(cluster.next_unreserved_epoch(), Some(5));
         assert_eq!(cert.verify_for(5, 3, 4, &bind_a), Ok(()));
         // Asking again for the same reservation returns the same certificate.
-        assert_eq!(cluster.certify_epoch(&[0, 2, 3, 4], 4, bind_a), Ok(cert.clone()));
+        assert_eq!(
+            cluster.certify_epoch(&[0, 2, 3, 4], 4, bind_a),
+            Ok(cert.clone())
+        );
 
         // (t, n) = (3, 5) with P3 and P4 corrupt: they acknowledged (4, A) and now discard that
         // state to acknowledge (4, B) together with P1, which was absent. Three acknowledgements
@@ -4165,7 +4356,12 @@ mod tests {
                 required_latch_quorum: 3
             })
         );
-        assert!(lowered.signer_latches.iter().all(|l| l.high_water.is_none()));
+        assert!(
+            lowered
+                .signer_latches
+                .iter()
+                .all(|l| l.high_water.is_none())
+        );
     }
 
     /// `reserve_epoch_at` on the per-member latch types: skip forward, idempotent on the
@@ -4186,8 +4382,14 @@ mod tests {
                 latch.reserve_epoch_at(5, 4, &mu_b),
                 Err(StatefulLatchError::EquivocationRefused)
             );
-            assert_eq!(latch.reserve_epoch_at(3, 4, &mu_b), Err(StatefulLatchError::StaleEpoch));
-            assert_eq!(latch.reserve_epoch_at(16, 4, &mu_b), Err(StatefulLatchError::Exhausted));
+            assert_eq!(
+                latch.reserve_epoch_at(3, 4, &mu_b),
+                Err(StatefulLatchError::StaleEpoch)
+            );
+            assert_eq!(
+                latch.reserve_epoch_at(16, 4, &mu_b),
+                Err(StatefulLatchError::Exhausted)
+            );
             assert_eq!(
                 latch.reserve_epoch_at(7, 0, &mu_b),
                 Err(StatefulLatchError::InvalidCapacity)
@@ -4202,7 +4404,10 @@ mod tests {
         #[cfg(feature = "std")]
         {
             let mut dir = std::env::temp_dir();
-            dir.push(alloc::format!("qsag_reserve_at_test_{}", std::process::id()));
+            dir.push(alloc::format!(
+                "qsag_reserve_at_test_{}",
+                std::process::id()
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let wal_path = dir.join("signer0.wal");
@@ -4289,7 +4494,8 @@ mod tests {
         let ep0_bytes = std::fs::read(&wal_path).unwrap();
         std::fs::write(&wal_path, &genesis_snapshot).unwrap();
         assert_eq!(
-            FsWalEpochLatch::open_existing_at_least(&wal_path, mac_key, ckpt_after_ep0).unwrap_err(),
+            FsWalEpochLatch::open_existing_at_least(&wal_path, mac_key, ckpt_after_ep0)
+                .unwrap_err(),
             StatefulLatchError::PersistenceFailure
         );
         std::fs::write(&wal_path, &ep0_bytes).unwrap();
@@ -4332,30 +4538,60 @@ mod pre_dkg_regressions {
 
     #[test]
     fn unindexed_booleanity_error_does_not_invent_bit_zero() {
-        assert_eq!(DkgError::from(PreprocessError::NonBooleanBitDetected {
-            phase: "regression",
-        }), DkgError::NonBooleanSeedDetected);
+        assert_eq!(
+            DkgError::from(PreprocessError::NonBooleanBitDetected {
+                phase: "regression",
+            }),
+            DkgError::NonBooleanSeedDetected
+        );
     }
 
     #[test]
     fn reshare_root_failure_preserves_old_custody_in_both_fields() {
-        let mut old = vec![ShamirSeedShare256::new(0, 0, TowerGf256::ONE,
-            [TowerGf256::ONE; 256])];
-        let result = finish_reshare(&mut old, Vec::new(), &[1; 32], |_| Ok([2; 32]),
-            ShamirSeedShare256::wipe_and_invalidate);
+        let mut old = vec![ShamirSeedShare256::new(
+            0,
+            0,
+            TowerGf256::ONE,
+            [TowerGf256::ONE; 256],
+        )];
+        let result = finish_reshare(
+            &mut old,
+            Vec::new(),
+            &[1; 32],
+            |_| Ok([2; 32]),
+            ShamirSeedShare256::wipe_and_invalidate,
+        );
         assert!(matches!(result, Err(DkgError::PublicRootMismatch)));
         assert!(old[0].is_valid());
         assert_eq!(old[0].bit_shares, [TowerGf256::ONE; 256]);
-        let mut old = vec![ShamirPoseidonSeedShare::from_bit_shares(0, 0, Goldilocks::ONE,
-            [Goldilocks::ONE; 256])];
+        let mut old = vec![ShamirPoseidonSeedShare::from_bit_shares(
+            0,
+            0,
+            Goldilocks::ONE,
+            [Goldilocks::ONE; 256],
+        )];
         for root in [Ok([2; 32]), Err(DkgError::NonBooleanSeedDetected)] {
-            assert!(finish_reshare(&mut old, Vec::new(), &[1; 32], |_| root,
-                ShamirPoseidonSeedShare::wipe_and_invalidate).is_err());
+            assert!(
+                finish_reshare(
+                    &mut old,
+                    Vec::new(),
+                    &[1; 32],
+                    |_| root,
+                    ShamirPoseidonSeedShare::wipe_and_invalidate
+                )
+                .is_err()
+            );
             assert!(old[0].is_valid());
             assert_eq!(old[0].bit_shares, [Goldilocks::ONE; 256]);
         }
-        finish_reshare(&mut old, Vec::new(), &[1; 32], |_| Ok([1; 32]),
-            ShamirPoseidonSeedShare::wipe_and_invalidate).unwrap();
+        finish_reshare(
+            &mut old,
+            Vec::new(),
+            &[1; 32],
+            |_| Ok([1; 32]),
+            ShamirPoseidonSeedShare::wipe_and_invalidate,
+        )
+        .unwrap();
         assert!(!old[0].is_valid());
         assert_eq!(old[0].bit_shares, [Goldilocks::ZERO; 256]);
     }
@@ -4366,9 +4602,17 @@ mod pre_dkg_regressions {
         let joint = [0x52; 32];
         let pts = [Goldilocks::ONE, Goldilocks::from_u64_reduced(2)];
         let (mut r1, pending, packets) = GoldilocksDealerRound1Commit::commit_round1(
-            &sid, 0, 1, &pts, vec![Goldilocks::ONE], vec![GoldilocksExt2::ONE],
-            &[[0x53; 32], [0x54; 32]], [0x55; 32], [0x56; 32],
-        ).unwrap();
+            &sid,
+            0,
+            1,
+            &pts,
+            vec![Goldilocks::ONE],
+            vec![GoldilocksExt2::ONE],
+            &[[0x53; 32], [0x54; 32]],
+            [0x55; 32],
+            [0x56; 32],
+        )
+        .unwrap();
         let r2 = pending.open_round2(&sid, 1, &pts, &joint);
         let honest = DkgShareComplaint {
             recv_idx: 0,
@@ -4386,15 +4630,40 @@ mod pre_dkg_regressions {
         false_digest.committed_digest[0] ^= 1;
         let mut malformed = honest.clone();
         malformed.dealer_opened_share_bytes.clear();
-        for complaint in [honest, false_share.clone(), false_salt, false_index, false_digest, malformed] {
-            assert!(verify_and_qualify_dkg_dealer_goldilocks(&sid, 1, &pts, &joint,
-                &r1, &r2, &[complaint]));
+        for complaint in [
+            honest,
+            false_share.clone(),
+            false_salt,
+            false_index,
+            false_digest,
+            malformed,
+        ] {
+            assert!(verify_and_qualify_dkg_dealer_goldilocks(
+                &sid,
+                1,
+                &pts,
+                &joint,
+                &r1,
+                &r2,
+                &[complaint]
+            ));
         }
         // Once the dealer itself commits to the inconsistent value, the same
         // opening becomes evidence and must disqualify it.
-        r1.share_commitments[0] = dkg_commit_share(0, 0,
-            &false_share.dealer_opened_salt, &false_share.dealer_opened_share_bytes);
-        assert!(!verify_and_qualify_dkg_dealer_goldilocks(&sid, 1, &pts, &joint,
-            &r1, &r2, &[false_share]));
+        r1.share_commitments[0] = dkg_commit_share(
+            0,
+            0,
+            &false_share.dealer_opened_salt,
+            &false_share.dealer_opened_share_bytes,
+        );
+        assert!(!verify_and_qualify_dkg_dealer_goldilocks(
+            &sid,
+            1,
+            &pts,
+            &joint,
+            &r1,
+            &r2,
+            &[false_share]
+        ));
     }
 }
