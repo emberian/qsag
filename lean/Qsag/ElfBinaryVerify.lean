@@ -4662,3 +4662,998 @@ private theorem runX86_invariant_sound {c : FuncContract}
     3. **`ABI & Epilogue Zeroization`:** If execution halts (`ret`), both states halt together and
        satisfy `X86ExitHygiene c s₁ s₂ s₁f s₂f` (`rsp` & `rbx, rbp, r12..r15` preserved,
        `ymmDirty = false` via `vzeroupper`, scratch `ymm` secrets wiped, scratch GPRs wiped). -/
+theorem checkX86ThreeWayNI_sound {code : List UInt8} {c : FuncContract}
+    (hCheck : checkX86ThreeWayNI code c = true)
+    {s₁ s₂ : X86State} (hInit : X86ContractInit c s₁ s₂) (fuel : Nat) :
+    ∃ prog : List (DecodedInstr X86Instr),
+      decodeX86Stream code = some prog ∧
+      let (s₁f, tr₁) := runX86 prog fuel s₁
+      let (s₂f, tr₂) := runX86 prog fuel s₂
+      tr₁ = tr₂ ∧
+      (∀ obs ∈ tr₁, obs.isDoitSafe = true) ∧
+      ((s₁f.halted = true ∧ s₂f.halted = true ∧ X86ExitHygiene c s₁ s₂ s₁f s₂f) ∨
+       (s₁f.halted = false ∧ s₂f.halted = false)) := by
+  unfold checkX86ThreeWayNI at hCheck
+  cases hDec : decodeX86Stream code with
+  | none => simp [hDec] at hCheck
+  | some prog =>
+    simp only [hDec] at hCheck
+    cases prog with
+    | nil => simp at hCheck
+    | cons d0 ds =>
+      cases hInf : inferX86Invariant (d0 :: ds) c with
+      | none => simp [hInf] at hCheck
+      | some inv =>
+        simp only [hInf, verifyX86Invariant, Bool.and_eq_true] at hCheck
+        rcases hCheck with ⟨hEntry, hAll⟩
+        cases hInv0 : inv.get 0 with
+        | none => simp [hInv0] at hEntry
+        | some st0 =>
+          simp only [hInv0] at hEntry
+          have hRel0 := RelX86_mono (RelX86_init hInit) hEntry
+          have hInvS1 : inv.get s₁.pc = some st0 := hInit.1 ▸ hInv0
+          exact ⟨d0 :: ds, rfl, runX86_invariant_sound hInit hAll fuel hInvS1 hRel0⟩
+
+
+/-! #### Inductive Relational Invariant & Step Soundness for `AArch64` -/
+
+private def RelArmGpr (s₁₀ s₂₀ : Arm64State) (orig : ArmRegOrigin) (v₁ v₂ : UInt64) : Prop :=
+  match orig with
+  | .initSame r => r < 31 ∧ v₁ = s₁₀.gpr.get r ∧ v₂ = s₂₀.gpr.get r ∧ v₁ = v₂
+  | .initOwn r => r < 31 ∧ v₁ = s₁₀.gpr.get r ∧ v₂ = s₂₀.gpr.get r
+  | .zeroConst => v₁ = 0 ∧ v₂ = 0
+  | .pubVal => v₁ = v₂
+  | .secretVal => True
+
+private theorem RelArmGpr_public_eq {s₁₀ s₂₀ : Arm64State} {orig : ArmRegOrigin} {v₁ v₂ : UInt64}
+    (hRel : RelArmGpr s₁₀ s₂₀ orig v₁ v₂) (hPub : orig.isPublic = true) :
+    v₁ = v₂ := by
+  cases orig with
+  | initSame _ => exact hRel.2.2.2
+  | initOwn _ => cases hPub
+  | zeroConst => exact hRel.1.trans hRel.2.symm
+  | pubVal => exact hRel
+  | secretVal => cases hPub
+
+private theorem RelArmGpr_mono {s₁₀ s₂₀ : Arm64State} {a b : ArmRegOrigin} {v₁ v₂ : UInt64}
+    (hRel : RelArmGpr s₁₀ s₂₀ a v₁ v₂) (hle : a.le b = true) :
+    RelArmGpr s₁₀ s₂₀ b v₁ v₂ := by
+  unfold ArmRegOrigin.le at hle
+  simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hle
+  rcases hle with (rfl | rfl) | ⟨rfl, hPub⟩
+  · exact hRel
+  · trivial
+  · exact RelArmGpr_public_eq hRel hPub
+
+private def RelArmVec (s₁₀ s₂₀ : Arm64State) (vo : VecOrigin) (v₁ v₂ : Vec128) : Prop :=
+  match vo with
+  | .initVec r => r < 32 ∧ v₁ = s₁₀.vec.get r ∧ v₂ = s₂₀.vec.get r
+  | .zeroConst => v₁ = Vec128.zero ∧ v₂ = Vec128.zero
+  | .pubVal => v₁ = v₂
+  | .secretVal => True
+
+private theorem RelArmVec_public_eq {s₁₀ s₂₀ : Arm64State} {vo : VecOrigin} {v₁ v₂ : Vec128}
+    (hRel : RelArmVec s₁₀ s₂₀ vo v₁ v₂) (hPub : vo.isPublic = true) :
+    v₁ = v₂ := by
+  cases vo <;> simp [VecOrigin.isPublic, RelArmVec] at hPub hRel
+  · rw [hRel.1, hRel.2]
+  · exact hRel
+
+private theorem RelArmVec_mono {s₁₀ s₂₀ : Arm64State} {a b : VecOrigin} {v₁ v₂ : Vec128}
+    (hRel : RelArmVec s₁₀ s₂₀ a v₁ v₂) (hle : a.le b = true) :
+    RelArmVec s₁₀ s₂₀ b v₁ v₂ := by
+  unfold VecOrigin.le at hle
+  simp only [Bool.or_eq_true, Bool.and_eq_true, beq_iff_eq] at hle
+  rcases hle with (rfl | rfl) | ⟨rfl, hPub⟩
+  · exact hRel
+  · trivial
+  · exact RelArmVec_public_eq hRel hPub
+
+private def RelArm64 (s₁₀ s₂₀ : Arm64State) (st : Arm64AbsState) (s₁ s₂ : Arm64State) : Prop :=
+  s₁.pc = s₂.pc ∧
+  s₁.halted = false ∧ s₂.halted = false ∧
+  s₁.dit = st.dit ∧ s₂.dit = st.dit ∧
+  (∀ r : Nat, r < 31 → RelArmGpr s₁₀ s₂₀ (st.gpr.get r) (s₁.gpr.get r) (s₂.gpr.get r)) ∧
+  (∀ v : Nat, v < 32 → RelArmVec s₁₀ s₂₀ (st.vec.get v) (s₁.vec.get v) (s₂.vec.get v)) ∧
+  (st.cfPub = true → s₁.cf = s₂.cf) ∧
+  (st.zfPub = true → s₁.zf = s₂.zf)
+
+private theorem RelArm64_mono {s₁₀ s₂₀ s₁ s₂ : Arm64State} {a b : Arm64AbsState}
+    (hRel : RelArm64 s₁₀ s₂₀ a s₁ s₂) (hle : a.le b = true) :
+    RelArm64 s₁₀ s₂₀ b s₁ s₂ := by
+  unfold Arm64AbsState.le at hle
+  simp only [Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true'] at hle
+  rcases hle with ⟨⟨⟨⟨hDit, hGpr⟩, hVec⟩, hCf⟩, hZf⟩
+  rcases hRel with ⟨hPc, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
+  refine ⟨hPc, hH1, hH2, rDit1.trans (beq_iff_eq.mp hDit), rDit2.trans (beq_iff_eq.mp hDit), ?_, ?_, ?_, ?_⟩
+  · intro r hr; exact RelArmGpr_mono (rGpr r hr) (Bank32.allIdx_get hGpr (by omega))
+  · intro v hv; exact RelArmVec_mono (rVec v hv) (Bank32.allIdx_get hVec hv)
+  · intro hb; exact hCf.elim (fun hbf => nomatch hbf.symm.trans hb) (fun ha => rCf ha)
+  · intro hb; exact hZf.elim (fun hbf => nomatch hbf.symm.trans hb) (fun ha => rZf ha)
+
+private theorem RelArm64_init {c : FuncContract} {s₁ s₂ : Arm64State}
+    (hInit : Arm64ContractInit c s₁ s₂) :
+    RelArm64 s₁ s₂ (initArm64AbsState c) s₁ s₂ := by
+  rcases hInit with ⟨hpc1, hpc2, hh1, hh2, hd1, hd2, hPubGprs⟩
+  refine ⟨by omega, hh1, hh2, hd1, hd2, ?_, ?_, (fun h => nomatch h), (fun h => nomatch h)⟩
+  · intro r hr
+    unfold initArm64AbsState
+    rw [Bank32.get_ofFn _ (by omega)]
+    have hne31 : (r == 31) = false := beq_false_of_ne (by omega)
+    simp only [hne31, Bool.false_eq_true, ↓reduceIte]
+    split
+    · rename_i hMem
+      exact ⟨hr, rfl, rfl, (hPubGprs r hMem).2⟩
+    · split
+      · exact ⟨hr, rfl, rfl⟩
+      · trivial
+  · intro v hv
+    unfold initArm64AbsState
+    rw [Bank32.get_ofFn _ hv]
+    exact ⟨hv, rfl, rfl⟩
+
+private theorem getArmGpr_rel {s₁₀ s₂₀ s₁ s₂ : Arm64State} {st : Arm64AbsState} {r : Nat}
+    (hr : r < 32)
+    (rGpr : ∀ i < 31, RelArmGpr s₁₀ s₂₀ (st.gpr.get i) (s₁.gpr.get i) (s₂.gpr.get i)) :
+    RelArmGpr s₁₀ s₂₀ (getArmAbsGpr st r) (getArmGpr s₁ r) (getArmGpr s₂ r) := by
+  unfold getArmAbsGpr getArmGpr
+  by_cases h31 : r == 31
+  · simp [h31, RelArmGpr]
+  · simp only [h31, Bool.false_eq_true, ↓reduceIte]
+    have hne : r ≠ 31 := fun h => h31 (beq_iff_eq.mpr h)
+    exact rGpr r (by omega)
+
+private theorem setArmGpr_rel {s₁₀ s₂₀ s₁ s₂ : Arm64State} {st : Arm64AbsState}
+    {rd : Nat} {orig : ArmRegOrigin} {v₁ v₂ : UInt64}
+    (_hrd : rd < 32)
+    (rGpr : ∀ i < 31, RelArmGpr s₁₀ s₂₀ (st.gpr.get i) (s₁.gpr.get i) (s₂.gpr.get i))
+    (hNew : RelArmGpr s₁₀ s₂₀ orig v₁ v₂) :
+    ∀ i < 31, RelArmGpr s₁₀ s₂₀ ((setArmAbsGpr st rd orig).get i)
+      ((setArmGpr s₁ rd v₁).get i) ((setArmGpr s₂ rd v₂).get i) := by
+  intro i hi
+  unfold setArmAbsGpr setArmGpr
+  by_cases h31 : rd == 31
+  · simp only [h31, ↓reduceIte]; exact rGpr i hi
+  · simp only [h31, Bool.false_eq_true, ↓reduceIte]
+    have hrd31 : rd < 31 := by
+      have hne : rd ≠ 31 := fun h => h31 (beq_iff_eq.mpr h)
+      omega
+    by_cases heq : i = rd
+    · subst heq; simp only [Bank32.get_set_eq]; exact hNew
+    · rw [Bank32.get_set_ne _ _ (by omega) (by omega) (Ne.symm heq),
+          Bank32.get_set_ne _ _ (by omega) (by omega) (Ne.symm heq),
+          Bank32.get_set_ne _ _ (by omega) (by omega) (Ne.symm heq)]
+      exact rGpr i hi
+
+private theorem RelArmVec_set {s₁₀ s₂₀ : Arm64State} {vc : Bank32 VecOrigin} {b₁ b₂ : Bank32 Vec128}
+    {vd : Nat} {vo : VecOrigin} {v₁ v₂ : Vec128}
+    (hvd : vd < 32)
+    (hOld : ∀ i < 32, RelArmVec s₁₀ s₂₀ (vc.get i) (b₁.get i) (b₂.get i))
+    (hNew : RelArmVec s₁₀ s₂₀ vo v₁ v₂) :
+    ∀ i < 32, RelArmVec s₁₀ s₂₀ ((vc.set vd vo).get i) ((b₁.set vd v₁).get i) ((b₂.set vd v₂).get i) := by
+  intro i hi
+  by_cases heq : i = vd
+  · subst heq; simp only [Bank32.get_set_eq]; exact hNew
+  · rw [Bank32.get_set_ne _ _ hvd hi (Ne.symm heq),
+        Bank32.get_set_ne _ _ hvd hi (Ne.symm heq),
+        Bank32.get_set_ne _ _ hvd hi (Ne.symm heq)]
+    exact hOld i hi
+
+private theorem evalArmCond_public_eq {st : Arm64AbsState} {s₁ s₂ : Arm64State} {cond : Nat}
+    (hPub : armCondIsPublic cond st = true)
+    (rCf : st.cfPub = true → s₁.cf = s₂.cf)
+    (rZf : st.zfPub = true → s₁.zf = s₂.zf) :
+    evalArmCond cond s₁ = evalArmCond cond s₂ := by
+  unfold armCondIsPublic at hPub
+  unfold evalArmCond
+  by_cases c0 : cond == 0
+  · simp [c0] at hPub ⊢; exact rZf hPub
+  · by_cases c1 : cond == 1
+    · simp [c0, c1] at hPub ⊢; exact rZf hPub
+    · by_cases c2 : cond == 2
+      · simp [c0, c1, c2] at hPub ⊢; exact rCf hPub
+      · by_cases c3 : cond == 3
+        · simp [c0, c1, c2, c3] at hPub ⊢; exact rCf hPub
+        · simp [c0, c1, c2, c3] at hPub ⊢; exact rCf hPub
+
+private theorem arm_eor_self_zero (is64 : Bool) (v : UInt64) (sk : Nat) (cf zf : Bool) :
+    evalArmAlu .eor is64 v (applyArmShift is64 v sk 0) cf zf = (0, cf, zf) := by
+  unfold applyArmShift evalArmAlu maskGprWidth
+  cases is64
+  · simp only [Bool.false_eq_true, ↓reduceIte, show 0 % 32 = 0 from rfl, beq_self_eq_true]
+    have hz : (v ^^^ (v &&& 0xFFFFFFFF)) &&& 0xFFFFFFFF = 0 := by
+      apply UInt64.eq_of_toBitVec_eq
+      rw [UInt64.toBitVec_and, UInt64.toBitVec_xor, UInt64.toBitVec_and]
+      apply BitVec.eq_of_getLsbD_eq; intro i _hi
+      simp only [BitVec.getLsbD_and, BitVec.getLsbD_xor]
+      rw [show (0 : UInt64).toBitVec = 0#64 from rfl, BitVec.getLsbD_zero]
+      cases v.toBitVec.getLsbD i <;>
+        cases (0xFFFFFFFF : UInt64).toBitVec.getLsbD i <;> rfl
+    simp [hz]
+  · simp only [↓reduceIte, show 0 % 64 = 0 from rfl, beq_self_eq_true]
+    have hz : v ^^^ v = 0 := by apply UInt64.eq_of_toBitVec_eq; simp
+    simp [hz]
+
+private theorem evalArmAlu_res_flags {op : Arm64AluOp} {is64 : Bool}
+    {a₁ b₁ : UInt64} {cf₁ zf₁ : Bool} :
+    (evalArmAlu op is64 a₁ b₁ cf₁ zf₁).2 =
+      (if op == .adds || op == .subs then
+         ((evalArmAlu op is64 a₁ b₁ cf₁ zf₁).2.1, (evalArmAlu op is64 a₁ b₁ cf₁ zf₁).2.2)
+       else (cf₁, zf₁)) := by
+  cases op <;> rfl
+
+private theorem evalArmAlu_pub_congr (op : Arm64AluOp) (is64 : Bool)
+    {a₁ a₂ b₁ b₂ : UInt64} {cf₁ cf₂ zf₁ zf₂ : Bool}
+    (ha : a₁ = a₂) (hb : b₁ = b₂)
+    (hcf : (if op == .adc || op == .sbc then true else false) = true → cf₁ = cf₂) :
+    (evalArmAlu op is64 a₁ b₁ cf₁ zf₁).1 = (evalArmAlu op is64 a₂ b₂ cf₂ zf₂).1 ∧
+    ((op == .adds || op == .subs) = true →
+      (evalArmAlu op is64 a₁ b₁ cf₁ zf₁).2.1 = (evalArmAlu op is64 a₂ b₂ cf₂ zf₂).2.1 ∧
+      (evalArmAlu op is64 a₁ b₁ cf₁ zf₁).2.2 = (evalArmAlu op is64 a₂ b₂ cf₂ zf₂).2.2) := by
+  subst ha hb
+  cases op <;> simp_all [evalArmAlu]
+
+private theorem transferArm64Instr_step_sound {c : FuncContract}
+    {s₁₀ s₂₀ s₁ s₂ : Arm64State} {d : DecodedInstr Arm64Instr}
+    {st : Arm64AbsState} {succs : List (Nat × Arm64AbsState)}
+    (hRel : RelArm64 s₁₀ s₂₀ st s₁ s₂)
+    (_hPcEq : s₁.pc = d.offset)
+    (hTr : transferArm64Instr c d st = some succs) :
+    let (s₁', obs₁) := stepArm64 d s₁
+    let (s₂', obs₂) := stepArm64 d s₂
+    obs₁ = obs₂ ∧
+    obs₁.isDoitSafe = true ∧
+    ((s₁'.halted = true ∧ s₂'.halted = true ∧ Arm64ExitHygiene c s₁₀ s₂₀ s₁' s₂') ∨
+     (∃ nst : Arm64AbsState, (s₁'.pc, nst) ∈ succs ∧ RelArm64 s₁₀ s₂₀ nst s₁' s₂')) := by
+  by_cases hGate : (armRequiresDit d.instr && !st.dit) = true
+  · simp [transferArm64Instr, hGate] at hTr
+  have hAllowed : armRequiresDit d.instr = true → st.dit = true := by
+    intro h
+    cases hd : st.dit
+    · simp [h, hd] at hGate
+    · rfl
+  cases hValid : arm64InstrRegsValid d.instr
+  · unfold transferArm64Instr at hTr; simp [hGate, hValid] at hTr
+  · rcases hRel with ⟨hPc12, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
+    cases hIns : d.instr <;>
+      unfold transferArm64Instr at hTr <;>
+      simp only [hGate, Bool.false_eq_true, ↓reduceIte] at hTr <;>
+      rw [hIns] at hTr hValid <;>
+      simp only [hValid, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr <;>
+      simp only [arm64InstrRegsValid, Bool.and_eq_true, decide_eq_true_eq] at hValid
+    case nop =>
+      injection hTr with hS; subst hS; simp only [stepArm64, hIns, true_and]
+      exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
+    case msrDit imm =>
+      injection hTr with hS; subst hS; simp only [stepArm64, hIns, true_and]
+      exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rfl, rfl, rGpr, rVec, rCf, rZf⟩
+    case isb =>
+      injection hTr with hS; subst hS; simp only [stepArm64, hIns, true_and]
+      exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
+    case dmbIsh =>
+      injection hTr with hS; subst hS; simp only [stepArm64, hIns, true_and]
+      exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
+    case ret =>
+      by_cases hRetOk : (([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30].all (fun r =>
+            st.gpr.get r == .initOwn r || st.gpr.get r == .initSame r)) &&
+          ([8, 9, 10, 11, 12, 13, 14, 15].all (fun v => st.vec.get v == .initVec v)) &&
+          st.vec.allIdx (fun _ vo => vo != .secretVal && vo != .pubVal) &&
+          c.wipedScratchGprs.all (fun r => decide (r < 32) && getArmAbsGpr st r == .zeroConst)) = true
+      · simp only [Bool.and_eq_true, Bool.or_eq_true, beq_iff_eq, decide_eq_true_eq,
+          List.all_eq_true] at hRetOk
+        rcases hRetOk with ⟨⟨⟨hCalleeGpr, hCalleeVec⟩, hVecWiped⟩, hGprWiped⟩
+        simp only [stepArm64, hIns, true_and]
+        left
+        refine ⟨?_, ?_, ?_, ?_⟩
+        · intro r hr
+          have hcr := hCalleeGpr r hr
+          have hr31 : r < 31 := by simp at hr; omega
+          have rr := rGpr r hr31
+          rcases hcr with hOwn | hSame
+          · rw [hOwn] at rr; exact rr.2
+          · rw [hSame] at rr; exact ⟨rr.2.1, rr.2.2.1⟩
+        · intro v hv
+          have hcv := hCalleeVec v hv
+          have hv32 : v < 32 := by simp at hv; omega
+          have rv := rVec v hv32
+          rw [hcv] at rv
+          exact rv.2
+        · intro v hv
+          have hNotSec := Bank32.allIdx_get hVecWiped hv
+          simp only [Bool.and_eq_true, bne_iff_ne] at hNotSec
+          have rv := rVec v hv
+          cases hVo : st.vec.get v <;> rw [hVo] at rv hNotSec
+          · exact Or.inr ⟨_, rv.1, rv.2⟩
+          · exact Or.inl rv
+          · exact absurd rfl hNotSec.2
+          · exact absurd rfl hNotSec.1
+        · intro r hr
+          rcases hGprWiped r hr with ⟨hr32, hZ⟩
+          have rr := getArmGpr_rel hr32 rGpr
+          rw [hZ] at rr
+          exact rr
+      · have hF : (([19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30].all (fun r =>
+              st.gpr.get r == .initOwn r || st.gpr.get r == .initSame r)) &&
+            ([8, 9, 10, 11, 12, 13, 14, 15].all (fun v => st.vec.get v == .initVec v)) &&
+            st.vec.allIdx (fun _ vo => vo != .secretVal && vo != .pubVal) &&
+            c.wipedScratchGprs.all (fun r => decide (r < 32) && getArmAbsGpr st r == .zeroConst)) = false :=
+          Bool.eq_false_iff.mpr hRetOk
+        simp only [hF, Bool.false_eq_true, ↓reduceIte] at hTr; cases hTr
+    case aluReg op is64 rd rn rm sk sa =>
+      rcases hValid with ⟨⟨hd32, hn32⟩, hm32⟩
+      by_cases hEorSelf : (op == .eor && rn == rm && sa == 0) = true
+      · simp only [hEorSelf, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        simp only [Bool.and_eq_true, beq_iff_eq] at hEorSelf
+        rcases hEorSelf with ⟨⟨rfl, rfl⟩, rfl⟩
+        simp only [stepArm64, hIns, arm_eor_self_zero, true_and]
+        exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2,
+          setArmGpr_rel hd32 rGpr ⟨rfl, rfl⟩, rVec, rCf, rZf⟩
+      · simp only [hEorSelf, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        simp only [stepArm64, hIns, true_and]
+        have hCongr : ((getArmAbsGpr st rn).isPublic && (getArmAbsGpr st rm).isPublic &&
+            (if op == .adc || op == .sbc then st.cfPub else true)) = true →
+            (evalArmAlu op is64 (getArmGpr s₁ rn) (applyArmShift is64 (getArmGpr s₁ rm) sk sa) s₁.cf s₁.zf).1 =
+            (evalArmAlu op is64 (getArmGpr s₂ rn) (applyArmShift is64 (getArmGpr s₂ rm) sk sa) s₂.cf s₂.zf).1 ∧
+            ((op == .adds || op == .subs) = true →
+              (evalArmAlu op is64 (getArmGpr s₁ rn) (applyArmShift is64 (getArmGpr s₁ rm) sk sa) s₁.cf s₁.zf).2.1 =
+              (evalArmAlu op is64 (getArmGpr s₂ rn) (applyArmShift is64 (getArmGpr s₂ rm) sk sa) s₂.cf s₂.zf).2.1 ∧
+              (evalArmAlu op is64 (getArmGpr s₁ rn) (applyArmShift is64 (getArmGpr s₁ rm) sk sa) s₁.cf s₁.zf).2.2 =
+              (evalArmAlu op is64 (getArmGpr s₂ rn) (applyArmShift is64 (getArmGpr s₂ rm) sk sa) s₂.cf s₂.zf).2.2) := by
+          intro hp; simp only [Bool.and_eq_true] at hp
+          have en := RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hp.1.1
+          have em := RelArmGpr_public_eq (getArmGpr_rel hm32 rGpr) hp.1.2
+          exact evalArmAlu_pub_congr op is64 en (congrArg (fun x => applyArmShift is64 x sk sa) em)
+            (fun hNeed => rCf (by
+              by_cases hc : (op == .adc || op == .sbc) = true
+              · simpa [hc] using hp.2
+              · simp [hc] at hNeed))
+        refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, ?_, rVec, ?_, ?_⟩
+        · apply setArmGpr_rel hd32 rGpr
+          by_cases hp : ((getArmAbsGpr st rn).isPublic && (getArmAbsGpr st rm).isPublic &&
+              (if op == .adc || op == .sbc then st.cfPub else true)) = true
+          · simp only [hp, ↓reduceIte, RelArmGpr]; exact (hCongr hp).1
+          · simp only [hp, Bool.false_eq_true, ↓reduceIte, RelArmGpr]
+        · by_cases hSf : (op == .adds || op == .subs) = true
+          · simp only [hSf, ↓reduceIte]; intro hp; exact ((hCongr hp).2 hSf).1
+          · simp only [hSf, Bool.false_eq_true, ↓reduceIte]
+            intro hCfB
+            have hKeep1 := @evalArmAlu_res_flags op is64 (getArmGpr s₁ rn)
+              (applyArmShift is64 (getArmGpr s₁ rm) sk sa) s₁.cf s₁.zf
+            have hKeep2 := @evalArmAlu_res_flags op is64 (getArmGpr s₂ rn)
+              (applyArmShift is64 (getArmGpr s₂ rm) sk sa) s₂.cf s₂.zf
+            simp only [hSf, Bool.false_eq_true, ↓reduceIte] at hKeep1 hKeep2
+            rw [congrArg Prod.fst hKeep1, congrArg Prod.fst hKeep2, rCf hCfB]
+        · by_cases hSf : (op == .adds || op == .subs) = true
+          · simp only [hSf, ↓reduceIte]; intro hp; exact ((hCongr hp).2 hSf).2
+          · simp only [hSf, Bool.false_eq_true, ↓reduceIte]
+            intro hZfB
+            have hKeep1 := @evalArmAlu_res_flags op is64 (getArmGpr s₁ rn)
+              (applyArmShift is64 (getArmGpr s₁ rm) sk sa) s₁.cf s₁.zf
+            have hKeep2 := @evalArmAlu_res_flags op is64 (getArmGpr s₂ rn)
+              (applyArmShift is64 (getArmGpr s₂ rm) sk sa) s₂.cf s₂.zf
+            simp only [hSf, Bool.false_eq_true, ↓reduceIte] at hKeep1 hKeep2
+            rw [congrArg Prod.snd hKeep1, congrArg Prod.snd hKeep2, rZf hZfB]
+    case aluImm op is64 rd rn imm =>
+      rcases hValid with ⟨hd32, hn32⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      have hCongr : ((getArmAbsGpr st rn).isPublic &&
+          (if op == .adc || op == .sbc then st.cfPub else true)) = true →
+          (evalArmAlu op is64 (getArmGpr s₁ rn) imm s₁.cf s₁.zf).1 =
+          (evalArmAlu op is64 (getArmGpr s₂ rn) imm s₂.cf s₂.zf).1 ∧
+          ((op == .adds || op == .subs) = true →
+            (evalArmAlu op is64 (getArmGpr s₁ rn) imm s₁.cf s₁.zf).2.1 =
+            (evalArmAlu op is64 (getArmGpr s₂ rn) imm s₂.cf s₂.zf).2.1 ∧
+            (evalArmAlu op is64 (getArmGpr s₁ rn) imm s₁.cf s₁.zf).2.2 =
+            (evalArmAlu op is64 (getArmGpr s₂ rn) imm s₂.cf s₂.zf).2.2) := by
+        intro hp; simp only [Bool.and_eq_true] at hp
+        exact evalArmAlu_pub_congr op is64 (RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hp.1) rfl
+          (fun hNeed => rCf (by
+            by_cases hc : (op == .adc || op == .sbc) = true
+            · simpa [hc] using hp.2
+            · simp [hc] at hNeed))
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, ?_, rVec, ?_, ?_⟩
+      · apply setArmGpr_rel hd32 rGpr
+        by_cases hp : ((getArmAbsGpr st rn).isPublic &&
+            (if op == .adc || op == .sbc then st.cfPub else true)) = true
+        · simp only [hp, ↓reduceIte, RelArmGpr]; exact (hCongr hp).1
+        · simp only [hp, Bool.false_eq_true, ↓reduceIte, RelArmGpr]
+      · by_cases hSf : (op == .adds || op == .subs) = true
+        · simp only [hSf, ↓reduceIte]; intro hp; exact ((hCongr hp).2 hSf).1
+        · simp only [hSf, Bool.false_eq_true, ↓reduceIte]
+          intro hCfB
+          have hKeep1 := @evalArmAlu_res_flags op is64 (getArmGpr s₁ rn) imm s₁.cf s₁.zf
+          have hKeep2 := @evalArmAlu_res_flags op is64 (getArmGpr s₂ rn) imm s₂.cf s₂.zf
+          simp only [hSf, Bool.false_eq_true, ↓reduceIte] at hKeep1 hKeep2
+          rw [congrArg Prod.fst hKeep1, congrArg Prod.fst hKeep2, rCf hCfB]
+      · by_cases hSf : (op == .adds || op == .subs) = true
+        · simp only [hSf, ↓reduceIte]; intro hp; exact ((hCongr hp).2 hSf).2
+        · simp only [hSf, Bool.false_eq_true, ↓reduceIte]
+          intro hZfB
+          have hKeep1 := @evalArmAlu_res_flags op is64 (getArmGpr s₁ rn) imm s₁.cf s₁.zf
+          have hKeep2 := @evalArmAlu_res_flags op is64 (getArmGpr s₂ rn) imm s₂.cf s₂.zf
+          simp only [hSf, Bool.false_eq_true, ↓reduceIte] at hKeep1 hKeep2
+          rw [congrArg Prod.snd hKeep1, congrArg Prod.snd hKeep2, rZf hZfB]
+    case movWide isMovn is64 rd imm16 sh =>
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, ?_, rVec, rCf, rZf⟩
+      apply setArmGpr_rel hValid rGpr
+      by_cases hz : (!isMovn && imm16 == 0) = true
+      · simp only [hz, ↓reduceIte, RelArmGpr]
+        simp only [Bool.and_eq_true, Bool.not_eq_true', beq_iff_eq] at hz
+        rcases hz with ⟨rfl, rfl⟩
+        have hSh0 : (0 : UInt64) <<< UInt64.ofNat sh = 0 := by apply UInt64.eq_of_toBitVec_eq; simp
+        have hm0 : maskGprWidth is64 0 = 0 := by cases is64 <;> rfl
+        simp [hSh0, hm0]
+      · simp [hz, RelArmGpr]
+    case ubfm is64 rd rn immr imms =>
+      rcases hValid with ⟨hd32, hn32⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, ?_, rVec, rCf, rZf⟩
+      apply setArmGpr_rel hd32 rGpr
+      by_cases hp : (getArmAbsGpr st rn).isPublic = true
+      · simp only [hp, ↓reduceIte, RelArmGpr]; rw [RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hp]
+      · simp [hp, RelArmGpr]
+    case mulOp isUmulh rd rn rm =>
+      have hd : st.dit = true := hAllowed (by simp [hIns, armRequiresDit])
+      rcases hValid with ⟨⟨hd32, hn32⟩, hm32⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, rDit1, rDit2, hd, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rfl, rfl, ?_, rVec, rCf, rZf⟩
+      apply setArmGpr_rel hd32 rGpr
+      by_cases hp : ((getArmAbsGpr st rn).isPublic && (getArmAbsGpr st rm).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmGpr]
+        simp only [Bool.and_eq_true] at hp
+        rw [RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hp.1,
+            RelArmGpr_public_eq (getArmGpr_rel hm32 rGpr) hp.2]
+      · simp [hp, RelArmGpr]
+    case csel cond isInv rd rn rm =>
+      have hd : st.dit = true := hAllowed (by simp [hIns, armRequiresDit])
+      rcases hValid with ⟨⟨hd32, hn32⟩, hm32⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, rDit1, rDit2, hd, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rfl, rfl, ?_, rVec, rCf, rZf⟩
+      apply setArmGpr_rel hd32 rGpr
+      by_cases hp : (armCondIsPublic cond st && (getArmAbsGpr st rn).isPublic && (getArmAbsGpr st rm).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmGpr]
+        simp only [Bool.and_eq_true] at hp
+        rw [evalArmCond_public_eq hp.1.1 rCf rZf,
+            RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hp.1.2,
+            RelArmGpr_public_eq (getArmGpr_rel hm32 rGpr) hp.2]
+      · simp [hp, RelArmGpr]
+    case ldp64 rt1 rt2 rn off =>
+      rcases hValid with ⟨⟨ht1, ht2⟩, hn32⟩
+      cases hPub : (getArmAbsGpr st rn).isPublic
+      · simp [hPub] at hTr
+      · simp only [hPub, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have hRnEq := RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hPub
+        simp only [stepArm64, hIns, hRnEq, true_and]
+        refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, ?_, rVec, rCf, rZf⟩
+        have r1 := setArmGpr_rel ht1 rGpr (orig := .secretVal)
+          (v₁ := readMem64 s₁.mem (getArmGpr s₂ rn + off))
+          (v₂ := readMem64 s₂.mem (getArmGpr s₂ rn + off)) trivial
+        exact setArmGpr_rel (st := { st with gpr := setArmAbsGpr st rt1 .secretVal })
+          (s₁ := { s₁ with gpr := setArmGpr s₁ rt1 (readMem64 s₁.mem (getArmGpr s₂ rn + off)) })
+          (s₂ := { s₂ with gpr := setArmGpr s₂ rt1 (readMem64 s₂.mem (getArmGpr s₂ rn + off)) })
+          ht2 r1 trivial
+    case stp64 rt1 rt2 rn off =>
+      rcases hValid with ⟨⟨_, _⟩, hn32⟩
+      cases hPub : (getArmAbsGpr st rn).isPublic
+      · simp [hPub] at hTr
+      · simp only [hPub, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have hRnEq := RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hPub
+        simp only [stepArm64, hIns, hRnEq, true_and]
+        exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
+    case strbPost rt rn postOff =>
+      rcases hValid with ⟨_, hn32⟩
+      cases hPub : (getArmAbsGpr st rn).isPublic
+      · simp [hPub] at hTr
+      · simp only [hPub, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have hRnEq := RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hPub
+        simp only [stepArm64, hIns, hRnEq, true_and]
+        exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, setArmGpr_rel hn32 rGpr rfl, rVec, rCf, rZf⟩
+    case ldrQ rt rn off =>
+      rcases hValid with ⟨ht32, hn32⟩
+      cases hPub : (getArmAbsGpr st rn).isPublic
+      · simp [hPub] at hTr
+      · simp only [hPub, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have hRnEq := RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hPub
+        simp only [stepArm64, hIns, hRnEq, true_and]
+        exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, RelArmVec_set ht32 rVec trivial, rCf, rZf⟩
+    case strQ rt rn off =>
+      rcases hValid with ⟨_, hn32⟩
+      cases hPub : (getArmAbsGpr st rn).isPublic
+      · simp [hPub] at hTr
+      · simp only [hPub, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have hRnEq := RelArmGpr_public_eq (getArmGpr_rel hn32 rGpr) hPub
+        simp only [stepArm64, hIns, hRnEq, true_and]
+        exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
+    case fmovDFromX vd xn =>
+      rcases hValid with ⟨hvd, hxn⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hz : (getArmAbsGpr st xn == .zeroConst) = true
+      · simp only [hz, ↓reduceIte, RelArmVec]
+        have rx := getArmGpr_rel hxn rGpr
+        rw [beq_iff_eq.mp hz] at rx
+        rcases rx with ⟨x1, x2⟩
+        simp [x1, x2, Vec128.zero]
+      · simp only [hz, Bool.false_eq_true, ↓reduceIte]
+        by_cases hp : (getArmAbsGpr st xn).isPublic = true
+        · simp only [hp, ↓reduceIte, RelArmVec]
+          rw [RelArmGpr_public_eq (getArmGpr_rel hxn rGpr) hp]
+        · simp [hp, RelArmVec]
+    case veor16b vd vn vm =>
+      rcases hValid with ⟨⟨hvd, hvn⟩, hvm⟩
+      by_cases hSelf : (vn == vm) = true
+      · simp only [hSelf, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        have hEq := beq_iff_eq.mp hSelf; subst hEq
+        have hx (w : UInt64) : w ^^^ w = 0 := by apply UInt64.eq_of_toBitVec_eq; simp
+        simp only [stepArm64, hIns, hx, true_and]
+        exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr,
+          RelArmVec_set hvd rVec ⟨rfl, rfl⟩, rCf, rZf⟩
+      · simp only [hSelf, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        simp only [stepArm64, hIns, true_and]
+        refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+        apply RelArmVec_set hvd rVec
+        by_cases hp : ((st.vec.get vn).isPublic && (st.vec.get vm).isPublic) = true
+        · simp only [hp, ↓reduceIte, RelArmVec]
+          simp only [Bool.and_eq_true] at hp
+          rw [RelArmVec_public_eq (rVec vn hvn) hp.1, RelArmVec_public_eq (rVec vm hvm) hp.2]
+        · simp [hp, RelArmVec]
+    case vbcax16b vd vn vm va =>
+      rcases hValid with ⟨⟨⟨hvd, hvn⟩, hvm⟩, hva⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hp : ((st.vec.get vn).isPublic && (st.vec.get vm).isPublic && (st.vec.get va).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmVec]
+        simp only [Bool.and_eq_true] at hp
+        rw [RelArmVec_public_eq (rVec vn hvn) hp.1.1,
+            RelArmVec_public_eq (rVec vm hvm) hp.1.2,
+            RelArmVec_public_eq (rVec va hva) hp.2]
+      · simp [hp, RelArmVec]
+    case veor3_16b vd vn vm va =>
+      rcases hValid with ⟨⟨⟨hvd, hvn⟩, hvm⟩, hva⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hp : ((st.vec.get vn).isPublic && (st.vec.get vm).isPublic && (st.vec.get va).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmVec]
+        simp only [Bool.and_eq_true] at hp
+        rw [RelArmVec_public_eq (rVec vn hvn) hp.1.1,
+            RelArmVec_public_eq (rVec vm hvm) hp.1.2,
+            RelArmVec_public_eq (rVec va hva) hp.2]
+      · simp [hp, RelArmVec]
+    case vrax1_2d vd vn vm =>
+      rcases hValid with ⟨⟨hvd, hvn⟩, hvm⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hp : ((st.vec.get vn).isPublic && (st.vec.get vm).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmVec]
+        simp only [Bool.and_eq_true] at hp
+        rw [RelArmVec_public_eq (rVec vn hvn) hp.1, RelArmVec_public_eq (rVec vm hvm) hp.2]
+      · simp [hp, RelArmVec]
+    case vxar_2d vd vn vm imm6 =>
+      rcases hValid with ⟨⟨hvd, hvn⟩, hvm⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hp : ((st.vec.get vn).isPublic && (st.vec.get vm).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmVec]
+        simp only [Bool.and_eq_true] at hp
+        rw [RelArmVec_public_eq (rVec vn hvn) hp.1, RelArmVec_public_eq (rVec vm hvm) hp.2]
+      · simp [hp, RelArmVec]
+    case vpmull isHigh vd vn vm =>
+      have hd : st.dit = true := hAllowed (by simp [hIns, armRequiresDit])
+      rcases hValid with ⟨⟨hvd, hvn⟩, hvm⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, rDit1, rDit2, hd, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rfl, rfl, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hp : ((st.vec.get vn).isPublic && (st.vec.get vm).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmVec]
+        simp only [Bool.and_eq_true] at hp
+        rw [RelArmVec_public_eq (rVec vn hvn) hp.1, RelArmVec_public_eq (rVec vm hvm) hp.2]
+      · simp [hp, RelArmVec]
+    case vtrn is128 second elementBytes vd vn vm =>
+      rcases hValid with ⟨⟨hvd, hvn⟩, hvm⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hp : ((st.vec.get vn).isPublic && (st.vec.get vm).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmVec]
+        simp only [Bool.and_eq_true] at hp
+        rw [RelArmVec_public_eq (rVec vn hvn) hp.1, RelArmVec_public_eq (rVec vm hvm) hp.2]
+      · simp [hp, RelArmVec]
+    case vext16b vd vn vm imm4 =>
+      rcases hValid with ⟨⟨hvd, hvn⟩, hvm⟩
+      injection hTr with hS; subst hS
+      simp only [stepArm64, hIns, true_and]
+      refine Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, ?_, rCf, rZf⟩
+      apply RelArmVec_set hvd rVec
+      by_cases hp : ((st.vec.get vn).isPublic && (st.vec.get vm).isPublic) = true
+      · simp only [hp, ↓reduceIte, RelArmVec]
+        simp only [Bool.and_eq_true] at hp
+        rw [RelArmVec_public_eq (rVec vn hvn) hp.1, RelArmVec_public_eq (rVec vm hvm) hp.2]
+      · simp [hp, RelArmVec]
+    case bCond cond targetPc =>
+      by_cases hBad : (!armCondIsPublic cond st || decide (targetPc < 0) || decide (targetPc.toNat ≥ 4096)) = true
+      · simp [hBad] at hTr
+      · simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hTr
+        injection hTr with hS; subst hS
+        simp only [Bool.or_eq_true, Bool.not_eq_true', decide_eq_true_eq, not_or, Bool.not_eq_false] at hBad
+        rcases hBad with ⟨⟨hCondPub, hNotNeg⟩, _⟩
+        have hGe0 : targetPc ≥ 0 := by omega
+        have hCondEq := evalArmCond_public_eq hCondPub rCf rZf
+        simp only [stepArm64, hIns, decide_eq_true hGe0, Bool.and_true, true_and]
+        by_cases hTaken : evalArmCond cond s₁ = true
+        · have hTaken2 : evalArmCond cond s₂ = true := hCondEq ▸ hTaken
+          simp only [hTaken, hTaken2, ↓reduceIte]
+          exact Or.inr ⟨_, List.Mem.head _, rfl, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
+        · have hTakenF1 : evalArmCond cond s₁ = false := Bool.eq_false_iff.mpr hTaken
+          have hTakenF2 : evalArmCond cond s₂ = false := hCondEq ▸ hTakenF1
+          simp only [hTakenF1, hTakenF2, Bool.false_eq_true, ↓reduceIte]
+          exact Or.inr ⟨_, List.Mem.tail _ (List.Mem.head _), rfl, hH1, hH2, rDit1, rDit2, rGpr, rVec, rCf, rZf⟩
+    case cbzOrTbz _ => cases hTr
+    case udivOrSdiv _ => cases hTr
+    case varShiftReg _ => cases hTr
+    case regOffsetMem _ => cases hTr
+
+private theorem runArm64_of_halted (prog : List (DecodedInstr Arm64Instr)) (fuel : Nat)
+    {s : Arm64State} (hHalt : s.halted = true) :
+    runArm64 prog fuel s = (s, []) := by
+  cases fuel with
+  | zero => rfl
+  | succ k => simp [runArm64, hHalt]
+
+private theorem runArm64_invariant_sound {c : FuncContract}
+    {prog : List (DecodedInstr Arm64Instr)} {inv : PcMap Arm64AbsState}
+    {s₁₀ s₂₀ : Arm64State}
+    (hAll : inv.all (fun pc st =>
+      match (buildProgMap prog).get pc with
+      | none => false
+      | some d =>
+        match transferArm64Instr c d st with
+        | none => false
+        | some succs =>
+          succs.all (fun (npc, nst) =>
+            match inv.get npc with
+            | none => false
+            | some dstSt => nst.le dstSt)) = true) :
+    ∀ (fuel : Nat) {s₁ s₂ : Arm64State} {st : Arm64AbsState},
+      inv.get s₁.pc = some st →
+      RelArm64 s₁₀ s₂₀ st s₁ s₂ →
+      let (s₁f, tr₁) := runArm64 prog fuel s₁
+      let (s₂f, tr₂) := runArm64 prog fuel s₂
+      tr₁ = tr₂ ∧
+      (∀ obs ∈ tr₁, obs.isDoitSafe = true) ∧
+      ((s₁f.halted = true ∧ s₂f.halted = true ∧ Arm64ExitHygiene c s₁₀ s₂₀ s₁f s₂f) ∨
+       (s₁f.halted = false ∧ s₂f.halted = false))
+  | 0, s₁, s₂, st, _, hRel =>
+    ⟨rfl, (fun _ h => nomatch h), Or.inr ⟨hRel.2.1, hRel.2.2.1⟩⟩
+  | fuel + 1, s₁, s₂, st, hInvPc, hRel => by
+    have hPcLt : s₁.pc < 4096 := PcMap.get_some_lt hInvPc
+    have hPred := PcMap.all_get hAll hInvPc
+    rw [buildProgMap_get_eq prog hPcLt] at hPred
+    cases hFind : findInstrAtPc s₁.pc prog with
+    | none => simp [hFind] at hPred
+    | some d =>
+      simp only [hFind] at hPred
+      cases hTr : transferArm64Instr c d st with
+      | none => simp [hTr] at hPred
+      | some succs =>
+        simp only [hTr, List.all_eq_true] at hPred
+        have hFind2 : findInstrAtPc s₂.pc prog = some d := hRel.1 ▸ hFind
+        have hOffEq : s₁.pc = d.offset := (findInstrAtPc_offset hFind).symm
+        have hStep := transferArm64Instr_step_sound hRel hOffEq hTr
+        rcases stp1 : stepArm64 d s₁ with ⟨s₁', obs₁⟩
+        rcases stp2 : stepArm64 d s₂ with ⟨s₂', obs₂⟩
+        simp only [stp1, stp2] at hStep
+        rcases hStep with ⟨hObsEq, hDoit, hExitOrCont⟩
+        simp only [runArm64, hRel.2.1, hRel.2.2.1, Bool.false_eq_true, ↓reduceIte, hFind, hFind2, stp1, stp2]
+        rcases hExitOrCont with ⟨hh1', hh2', hHyg⟩ | ⟨nst, hMemSucc, hRel'⟩
+        · rw [runArm64_of_halted prog fuel hh1', runArm64_of_halted prog fuel hh2']
+          refine ⟨congrArg (· :: []) hObsEq, ?_, Or.inl ⟨hh1', hh2', hHyg⟩⟩
+          intro o ho; simp at ho; subst ho; exact hDoit
+        · have hSuccOk := hPred (s₁'.pc, nst) hMemSucc
+          cases hInvNext : inv.get s₁'.pc with
+          | none => simp [hInvNext] at hSuccOk
+          | some dstSt =>
+            simp only [hInvNext] at hSuccOk
+            have hRelDst := RelArm64_mono hRel' hSuccOk
+            have ih := runArm64_invariant_sound hAll fuel hInvNext hRelDst
+            rcases hr1 : runArm64 prog fuel s₁' with ⟨s₁f, tr₁⟩
+            rcases hr2 : runArm64 prog fuel s₂' with ⟨s₂f, tr₂⟩
+            simp only [hr1, hr2] at ih
+            rcases ih with ⟨hTrEq, hTrDoit, hPost⟩
+            refine ⟨by rw [hObsEq, hTrEq], ?_, hPost⟩
+            intro o ho
+            rcases List.mem_cons.mp ho with rfl | hRest
+            · exact hDoit
+            · exact hTrDoit o hRest
+
+/-- **3-Way Hardware Constant-Time Noninterference + AAPCS64 ABI Hygiene Soundness (`AArch64`):**
+    Whenever `checkArm64ThreeWayNI code c = true`, for ANY two initial machine states `(s₁, s₂)`
+    satisfying `Arm64ContractInit c s₁ s₂` and ANY execution fuel `fuel`:
+    1. **`PC-NI` & `Mem-NI`:** `tr₁ = tr₂` (every executed PC and `(addr, width)` memory access matches),
+    2. **`DOIT-NI`:** Every executed instruction has `obs.isDoitSafe = true`,
+    3. **`ABI & Epilogue Zeroization`:** If execution halts (`ret`), both states halt together and
+       satisfy `Arm64ExitHygiene c s₁ s₂ s₁f s₂f` (`x19..x30` & `v8..v15` preserved, scratch NEON
+       `v0..v7, v16..v31` secret registers wiped, scratch GPRs wiped). -/
+theorem checkArm64ThreeWayNI_sound {code : List UInt8} {c : FuncContract}
+    (hCheck : checkArm64ThreeWayNI code c = true)
+    {s₁ s₂ : Arm64State} (hInit : Arm64ContractInit c s₁ s₂) (fuel : Nat) :
+    ∃ prog : List (DecodedInstr Arm64Instr),
+      decodeArm64Stream code = some prog ∧
+      let (s₁f, tr₁) := runArm64 prog fuel s₁
+      let (s₂f, tr₂) := runArm64 prog fuel s₂
+      tr₁ = tr₂ ∧
+      (∀ obs ∈ tr₁, obs.isDoitSafe = true) ∧
+      ((s₁f.halted = true ∧ s₂f.halted = true ∧ Arm64ExitHygiene c s₁ s₂ s₁f s₂f) ∨
+       (s₁f.halted = false ∧ s₂f.halted = false)) := by
+  unfold checkArm64ThreeWayNI at hCheck
+  cases hDec : decodeArm64Stream code with
+  | none => simp [hDec] at hCheck
+  | some prog =>
+    simp only [hDec] at hCheck
+    cases prog with
+    | nil => simp at hCheck
+    | cons d0 ds =>
+      cases hInf : inferArm64Invariant (d0 :: ds) c with
+      | none => simp [hInf] at hCheck
+      | some inv =>
+        simp only [hInf, verifyArm64Invariant, Bool.and_eq_true] at hCheck
+        rcases hCheck with ⟨hEntry, hAll⟩
+        cases hInv0 : inv.get 0 with
+        | none => simp [hInv0] at hEntry
+        | some st0 =>
+          simp only [hInv0] at hEntry
+          have hRel0 := RelArm64_mono (RelArm64_init hInit) hEntry
+          have hInvS1 : inv.get s₁.pc = some st0 := hInit.1 ▸ hInv0
+          exact ⟨d0 :: ds, rfl, runArm64_invariant_sound hAll fuel hInvS1 hRel0⟩
+
+/-- Unified 3-Way Constant-Time NI + ABI Hygiene semantic postcondition for an `ELF64` `.text` slice. -/
+def ElfSliceThreeWayNISafe (slice : ElfFuncSlice) (c : FuncContract) : Prop :=
+  (slice.machine = elfMachineX86_64 ∧
+   ∀ (s₁ s₂ : X86State), X86ContractInit c s₁ s₂ → ∀ (fuel : Nat),
+     ∃ prog : List (DecodedInstr X86Instr),
+       decodeX86Stream slice.code = some prog ∧
+       let (s₁f, tr₁) := runX86 prog fuel s₁
+       let (s₂f, tr₂) := runX86 prog fuel s₂
+       tr₁ = tr₂ ∧
+       (∀ obs ∈ tr₁, obs.isDoitSafe = true) ∧
+       ((s₁f.halted = true ∧ s₂f.halted = true ∧ X86ExitHygiene c s₁ s₂ s₁f s₂f) ∨
+        (s₁f.halted = false ∧ s₂f.halted = false))) ∨
+  (slice.machine = elfMachineAArch64 ∧
+   ∀ (s₁ s₂ : Arm64State), Arm64ContractInit c s₁ s₂ → ∀ (fuel : Nat),
+     ∃ prog : List (DecodedInstr Arm64Instr),
+       decodeArm64Stream slice.code = some prog ∧
+       let (s₁f, tr₁) := runArm64 prog fuel s₁
+       let (s₂f, tr₂) := runArm64 prog fuel s₂
+       tr₁ = tr₂ ∧
+       (∀ obs ∈ tr₁, obs.isDoitSafe = true) ∧
+       ((s₁f.halted = true ∧ s₂f.halted = true ∧ Arm64ExitHygiene c s₁ s₂ s₁f s₂f) ∨
+        (s₁f.halted = false ∧ s₂f.halted = false)))
+
+theorem checkElfSliceThreeWayNI_sound {slice : ElfFuncSlice} {c : FuncContract}
+    (hCheck : checkElfSliceThreeWayNI slice c = true) :
+    ElfSliceThreeWayNISafe slice c := by
+  unfold checkElfSliceThreeWayNI at hCheck
+  by_cases hx : slice.machine == elfMachineX86_64
+  · simp only [hx, ↓reduceIte] at hCheck
+    exact Or.inl ⟨beq_iff_eq.mp hx, fun _ _ hInit fuel => checkX86ThreeWayNI_sound hCheck hInit fuel⟩
+  · simp only [hx, Bool.false_eq_true, ↓reduceIte] at hCheck
+    by_cases ha : slice.machine == elfMachineAArch64
+    · simp only [ha, ↓reduceIte] at hCheck
+      exact Or.inr ⟨beq_iff_eq.mp ha, fun _ _ hInit fuel => checkArm64ThreeWayNI_sound hCheck hInit fuel⟩
+    · simp [ha] at hCheck
+
+/-- **Master `ELF64` Binary 3-Way Constant-Time NI + ABI Hygiene Soundness Theorem (`§5`):**
+    If `checkElfFuncThreeWayNI elfBytes symName c = true`, then `symName` resolves inside `elfBytes`
+    to a valid `.text` subslice `slice` (`extractElfFuncBytes_in_text_section`) whose decoded
+    machine-code semantics satisfies `PC-NI`, `Mem-NI`, `DOIT-NI`, callee-saved preservation, and
+    epilogue scratch register zeroization (`ElfSliceThreeWayNISafe slice c`)! -/
+theorem checkElfFuncThreeWayNI_sound {elfBytes : Bytes} {symName : String} {c : FuncContract}
+    (hCheck : checkElfFuncThreeWayNI elfBytes symName c = true) :
+    ∃ slice : ElfFuncSlice,
+      extractElfFuncBytes elfBytes symName = some slice ∧
+      ElfSliceOk elfBytes slice ∧
+      ElfSliceThreeWayNISafe slice c := by
+  unfold checkElfFuncThreeWayNI at hCheck
+  cases hExt : extractElfFuncBytes elfBytes symName with
+  | none => simp [hExt] at hCheck
+  | some slice =>
+    simp only [hExt] at hCheck
+    exact ⟨slice, rfl, extractElfFuncBytes_in_text_section elfBytes symName slice hExt,
+      checkElfSliceThreeWayNI_sound hCheck⟩
+
+/-! ### Certificate-checked verification: the invariant is supplied, never inferred in the kernel -/
+
+/-- `x86_64` check against a supplied invariant: decode, then verify inductiveness. Inference is
+    not on the trusted path; `verifyX86Invariant` alone carries soundness. -/
+def checkX86WithInv (code : List UInt8) (c : FuncContract) (inv : PcMap X86AbsState) : Bool :=
+  match decodeX86Stream code with
+  | none => false
+  | some prog =>
+    match prog with
+    | [] => false
+    | _ :: _ => verifyX86Invariant prog c inv
+
+/-- `AArch64` check against a supplied invariant. -/
+def checkArm64WithInv (code : List UInt8) (c : FuncContract) (inv : PcMap Arm64AbsState) : Bool :=
+  match decodeArm64Stream code with
+  | none => false
+  | some prog =>
+    match prog with
+    | [] => false
+    | _ :: _ => verifyArm64Invariant prog c inv
+
+theorem checkX86WithInv_sound {code : List UInt8} {c : FuncContract} {inv : PcMap X86AbsState}
+    (hCheck : checkX86WithInv code c inv = true)
+    {s₁ s₂ : X86State} (hInit : X86ContractInit c s₁ s₂) (fuel : Nat) :
+    ∃ prog : List (DecodedInstr X86Instr),
+      decodeX86Stream code = some prog ∧
+      let (s₁f, tr₁) := runX86 prog fuel s₁
+      let (s₂f, tr₂) := runX86 prog fuel s₂
+      tr₁ = tr₂ ∧
+      (∀ obs ∈ tr₁, obs.isDoitSafe = true) ∧
+      ((s₁f.halted = true ∧ s₂f.halted = true ∧ X86ExitHygiene c s₁ s₂ s₁f s₂f) ∨
+       (s₁f.halted = false ∧ s₂f.halted = false)) := by
+  unfold checkX86WithInv at hCheck
+  cases hDec : decodeX86Stream code with
+  | none => simp [hDec] at hCheck
+  | some prog =>
+    simp only [hDec] at hCheck
+    cases prog with
+    | nil => simp at hCheck
+    | cons d0 ds =>
+      simp only [verifyX86Invariant, Bool.and_eq_true] at hCheck
+      rcases hCheck with ⟨hEntry, hAll⟩
+      cases hInv0 : inv.get 0 with
+      | none => simp [hInv0] at hEntry
+      | some st0 =>
+        simp only [hInv0] at hEntry
+        have hRel0 := RelX86_mono (RelX86_init hInit) hEntry
+        have hInvS1 : inv.get s₁.pc = some st0 := hInit.1 ▸ hInv0
+        exact ⟨d0 :: ds, rfl, runX86_invariant_sound hInit hAll fuel hInvS1 hRel0⟩
+
+theorem checkArm64WithInv_sound {code : List UInt8} {c : FuncContract} {inv : PcMap Arm64AbsState}
+    (hCheck : checkArm64WithInv code c inv = true)
+    {s₁ s₂ : Arm64State} (hInit : Arm64ContractInit c s₁ s₂) (fuel : Nat) :
+    ∃ prog : List (DecodedInstr Arm64Instr),
+      decodeArm64Stream code = some prog ∧
+      let (s₁f, tr₁) := runArm64 prog fuel s₁
+      let (s₂f, tr₂) := runArm64 prog fuel s₂
+      tr₁ = tr₂ ∧
+      (∀ obs ∈ tr₁, obs.isDoitSafe = true) ∧
+      ((s₁f.halted = true ∧ s₂f.halted = true ∧ Arm64ExitHygiene c s₁ s₂ s₁f s₂f) ∨
+       (s₁f.halted = false ∧ s₂f.halted = false)) := by
+  unfold checkArm64WithInv at hCheck
+  cases hDec : decodeArm64Stream code with
+  | none => simp [hDec] at hCheck
+  | some prog =>
+    simp only [hDec] at hCheck
+    cases prog with
+    | nil => simp at hCheck
+    | cons d0 ds =>
+      simp only [verifyArm64Invariant, Bool.and_eq_true] at hCheck
+      rcases hCheck with ⟨hEntry, hAll⟩
+      cases hInv0 : inv.get 0 with
+      | none => simp [hInv0] at hEntry
+      | some st0 =>
+        simp only [hInv0] at hEntry
+        have hRel0 := RelArm64_mono (RelArm64_init hInit) hEntry
+        have hInvS1 : inv.get s₁.pc = some st0 := hInit.1 ▸ hInv0
+        exact ⟨d0 :: ds, rfl, runArm64_invariant_sound hAll fuel hInvS1 hRel0⟩
+
+/-- An invariant certificate for one symbol. -/
+inductive InvCert where
+  | x86 (inv : PcMap X86AbsState)
+  | arm (inv : PcMap Arm64AbsState)
+
+/-- Architecture-dispatching certificate check for one slice. -/
+def checkElfSliceWithCert (slice : ElfFuncSlice) (c : FuncContract) : InvCert → Bool
+  | .x86 inv => slice.machine == elfMachineX86_64 && checkX86WithInv slice.code c inv
+  | .arm inv => slice.machine == elfMachineAArch64 && checkArm64WithInv slice.code c inv
+
+theorem checkElfSliceWithCert_sound {slice : ElfFuncSlice} {c : FuncContract} {cert : InvCert}
+    (hCheck : checkElfSliceWithCert slice c cert = true) :
+    ElfSliceThreeWayNISafe slice c := by
+  cases cert with
+  | x86 inv =>
+    simp only [checkElfSliceWithCert, Bool.and_eq_true, beq_iff_eq] at hCheck
+    exact Or.inl ⟨hCheck.1, fun _ _ hInit fuel => checkX86WithInv_sound hCheck.2 hInit fuel⟩
+  | arm inv =>
+    simp only [checkElfSliceWithCert, Bool.and_eq_true, beq_iff_eq] at hCheck
+    exact Or.inr ⟨hCheck.1, fun _ _ hInit fuel => checkArm64WithInv_sound hCheck.2 hInit fuel⟩
+
+/-- The check for the `i`-th slice against the `i`-th contract and the `i`-th certificate. -/
+def certSliceAt (slices : List ElfFuncSlice) (contracts : List FuncContract)
+    (certs : List InvCert) (i : Nat) : Bool :=
+  match slices[i]?, contracts[i]?, certs[i]? with
+  | some s, some c, some k => (s.name == c.symName) && checkElfSliceWithCert s c k
+  | _, _, _ => false
+
+/-- Per-index certificate checks give the name match and the semantic postcondition at every index. -/
+theorem certSliceAt_sound {slices : List ElfFuncSlice} {contracts : List FuncContract}
+    {certs : List InvCert}
+    (hAt : ∀ i, i < slices.length → certSliceAt slices contracts certs i = true)
+    (i : Nat) (hs : i < slices.length) (hc : i < contracts.length) :
+    slices[i].name = contracts[i].symName ∧ ElfSliceThreeWayNISafe slices[i] contracts[i] := by
+  have h := hAt i hs
+  unfold certSliceAt at h
+  rw [List.getElem?_eq_getElem hs, List.getElem?_eq_getElem hc] at h
+  cases hk : certs[i]? with
+  | none => rw [hk] at h; cases h
+  | some k =>
+    rw [hk] at h
+    simp only [Bool.and_eq_true, beq_iff_eq] at h
+    exact ⟨h.1, checkElfSliceWithCert_sound h.2⟩
+
+/-- An empty certificate proves nothing: the entry state is missing. -/
+theorem empty_certificate_rejected (code : List UInt8) (c : FuncContract) :
+    checkX86WithInv code c PcMap.empty = false := by
+  unfold checkX86WithInv
+  cases decodeX86Stream code with
+  | none => rfl
+  | some prog =>
+    cases prog with
+    | nil => rfl
+    | cons d ds => rfl
+
+/-! Semantic anchors. The baseless address distinction follows `Ea.base` /
+`Ea.index` in jyh/x86lean (`X86/Syntax.lean`, Apache-2.0). UBFM's
+nonwrapping extraction and wrapping insertion follow the ASL-derived
+`exec_bitfield` in leanprover/LNSym (`Arm/Insts/DPI/Bitfield.lean`,
+Amazon.com, Inc. or its affiliates, Apache-2.0). These are local anchors,
+not a claim that either upstream repository was imported or proved equivalent.
+-/
+theorem tooth_sib_absolute_decode :
+    decodeX86ModRM [0x04, 0x25, 0xff, 0xff, 0xff, 0xff] 0 0 0 =
+      some (0, .mem (.absDisp 0xffffffffffffffff), 6) := by decide +kernel
+
+theorem tooth_sib_absolute_independent (s t : X86State) (pc : Nat) (d : UInt32) :
+    evalX86Addr s pc (.absDisp (signExt32To64 d)) = signExt32To64 d ∧
+    evalX86Addr s pc (.absDisp (signExt32To64 d)) =
+      evalX86Addr t pc (.absDisp (signExt32To64 d)) := ⟨rfl, rfl⟩
+
+theorem tooth_ubfm_extract (s : Arm64State) :
+    (stepArm64 ⟨0, 4, .ubfm true 0 1 4 7⟩ s).1.gpr.get 0 =
+      ((s.gpr.get 1 >>> 4) &&& 15) := by rfl
+
+theorem tooth_ubfm_insert (s : Arm64State) :
+    (stepArm64 ⟨0, 4, .ubfm true 0 1 12 3⟩ s).1.gpr.get 0 =
+      ((s.gpr.get 1 &&& 15) <<< 52) := by rfl
+
+theorem tooth_ubfm_illegal_n : decodeArm64Word 0 0xD3001C20 = none := by decide +kernel
+
+theorem tooth_dit_sensitive_mul (s : Arm64State) :
+    (stepArm64 ⟨0, 4, .mulOp false 2 0 1⟩ s).2.isDoitSafe = s.dit := by rfl
+
+theorem tooth_msr_dit_clears (s : Arm64State) :
+    (stepArm64 ⟨0, 4, .msrDit 0⟩ s).1.dit = false := by rfl
+
+theorem tooth_dit_disabled_rejected (c : FuncContract) (st : Arm64AbsState) :
+    transferArm64Instr c ⟨0, 4, .mulOp false 2 0 1⟩ { st with dit := false } = none := by rfl
+
+end Qsag

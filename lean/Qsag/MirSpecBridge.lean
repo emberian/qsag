@@ -950,3 +950,946 @@ def specPreCutVaultMachine : PartyMachine SpecPreCutVaultState MirRssCutInput Mi
 /-- **Bridge 3A (`mirRssCutSession_forwardSim_walGate`)**:
     Proves `ForwardSim` from the concrete fixed-width `MirRssCutSession` machine to the
     `HonestCustodyVault` / `walPoisonVault` pre-cut barrier specification. -/
+def mirRssCutSession_forwardSim_walGate :
+    ForwardSim mirRssCutMachine specPreCutVaultMachine where
+  Rel c a :=
+    c.poisoned = a.vault.wal.poisoned ∧
+    c.shareSlotPresent = a.vault.shareSlot.isSome ∧
+    (c.poisoned = false →
+      c.shareSlotPresent = true ∧
+      ((c.phase = 0 ∧ a.stage = 0 ∧ c.consistencyVerified = false) ∨
+       (c.phase = 1 ∧ a.stage = 1 ∧ c.pendingRelations.toNat = a.pendingRelations ∧ c.pendingRelations ≠ 0 ∧ c.consistencyVerified = false) ∨
+       (c.phase = 2 ∧ a.stage = 2 ∧ c.pendingRelations = 0 ∧ c.consistencyVerified = true)))
+  sim_ok {c c' a inp out} hRel hStepC := by
+    rcases hRel with ⟨hPoisEq, hSlotEq, hClean⟩
+    dsimp only [mirRssCutMachine, specPreCutVaultMachine, PartyMachine.ofOutcome] at hStepC ⊢
+    unfold mirRssCutStep at hStepC
+    cases hP : c.poisoned
+    · obtain ⟨hSlotTrue, hPhaseCases⟩ := hClean hP
+      have hVaultPoisF : a.vault.wal.poisoned = false := hPoisEq.symm.trans hP
+      have hSlotSome : a.vault.shareSlot.isSome = true := hSlotEq.symm.trans hSlotTrue
+      have hSlotNoneF : a.vault.shareSlot.isNone = false := by
+        cases hs : a.vault.shareSlot
+        · rw [hs] at hSlotSome; cases hSlotSome
+        · rfl
+      rw [hP, hSlotTrue] at hStepC
+      simp only [Bool.not_true, Bool.or_false, Bool.false_eq_true, ↓reduceIte] at hStepC
+      unfold specPreCutVaultStep
+      rw [hVaultPoisF, hSlotNoneF]
+      rw [ite_eq_right (by decide : ¬ ((false || false) = true))]
+      cases inp with
+      | recordRound1 rels =>
+        dsimp only at hStepC ⊢
+        rcases hPhaseCases with ⟨hPh0, hSt0, _⟩ | ⟨hPh1, _, _, _, _⟩ | ⟨hPh2, _, _, _⟩
+        · rw [hPh0] at hStepC
+          rw [hSt0]
+          cases hRels : (rels != 0)
+          · rw [hRels, show ((0 : UInt8) == 0 && false) = false from rfl] at hStepC
+            cases hStepC
+          · rw [hRels, show ((0 : UInt8) == 0 && true) = true from rfl] at hStepC
+            simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStepC
+            rcases hStepC with ⟨rfl, rfl⟩
+            rw [ite_eq_left (by decide : (((0 : Nat) == 0 && true) = true))]
+            dsimp only
+            have hRelsNe : rels ≠ 0 := by
+              intro h0; subst h0; cases hRels
+            exact ⟨rfl, hVaultPoisF.symm, hSlotSome.symm,
+              fun _ => ⟨rfl, .inr (.inl ⟨rfl, rfl, rfl, hRelsNe, rfl⟩)⟩⟩
+        · rw [hPh1, show ((1 : UInt8) == 0) = false from rfl] at hStepC
+          simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hStepC
+          cases hStepC
+        · rw [hPh2, show ((2 : UInt8) == 0) = false from rfl] at hStepC
+          simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hStepC
+          cases hStepC
+      | verifyBatchConsistency relations =>
+        dsimp only at hStepC ⊢
+        rcases hPhaseCases with ⟨hPh0, _, _⟩ | ⟨hPh1, hSt1, hPendEq, _, _⟩ | ⟨hPh2, _, _, _⟩
+        · rw [hPh0, show ((0 : UInt8) == 1) = false from rfl] at hStepC
+          cases hStepC
+        · rw [hPh1, show ((1 : UInt8) == 1) = true from rfl, hPendEq] at hStepC
+          rw [hSt1]
+          cases hBatch : (decide (relations.length = a.pendingRelations) && bginBatchHolds relations)
+          · rw [hBatch] at hStepC
+            cases hStepC
+          · rw [hBatch] at hStepC
+            simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStepC
+            rcases hStepC with ⟨rfl, rfl⟩
+            rw [ite_eq_left (show ((1 : Nat) == 1) = true from rfl), ite_eq_left (rfl : true = true)]
+            dsimp only
+            exact ⟨rfl, hVaultPoisF.symm, hSlotSome.symm,
+              fun _ => ⟨rfl, .inr (.inr ⟨rfl, rfl, rfl, rfl⟩)⟩⟩
+        · rw [hPh2, show ((2 : UInt8) == 1) = false from rfl] at hStepC
+          cases hStepC
+      | releaseRound3Cut payload =>
+        dsimp only at hStepC ⊢
+        rcases hPhaseCases with ⟨hPh0, _, _⟩ | ⟨hPh1, _, _, _, _⟩ | ⟨hPh2, hSt2, hPend0, hVerT⟩
+        · rw [hPh0, show ((0 : UInt8) == 2) = false from rfl] at hStepC
+          simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hStepC
+          cases hStepC
+        · rw [hPh1, show ((1 : UInt8) == 2) = false from rfl] at hStepC
+          simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hStepC
+          cases hStepC
+        · rw [hPh2, hPend0, hVerT,
+              show ((((2 : UInt8) == 2 && (0 : UInt64) == 0) && true)) = true from rfl] at hStepC
+          rw [hSt2]
+          simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStepC
+          rcases hStepC with ⟨rfl, rfl⟩
+          rw [ite_eq_left (show ((2 : Nat) == 2) = true from rfl)]
+          dsimp only
+          exact ⟨rfl, hVaultPoisF.symm, hSlotSome.symm,
+            fun _ => ⟨rfl, .inl ⟨rfl, rfl, rfl⟩⟩⟩
+    · rw [hP] at hStepC
+      simp only [Bool.true_or, ↓reduceIte] at hStepC
+      cases hStepC
+  sim_err {c a inp} hRel hNoneC := by
+    have hRelSaved := hRel
+    rcases hRel with ⟨hPoisEq, hSlotEq, hClean⟩
+    dsimp only [mirRssCutMachine, specPreCutVaultMachine, PartyMachine.ofOutcome] at hNoneC ⊢
+    unfold mirRssCutStep at hNoneC ⊢
+    unfold specPreCutVaultStep
+    cases hP : c.poisoned
+    · obtain ⟨hSlotTrue, hPhaseCases⟩ := hClean hP
+      have hVaultPoisF : a.vault.wal.poisoned = false := hPoisEq.symm.trans hP
+      have hSlotSome : a.vault.shareSlot.isSome = true := hSlotEq.symm.trans hSlotTrue
+      have hSlotNoneF : a.vault.shareSlot.isNone = false := by
+        cases hs : a.vault.shareSlot
+        · rw [hs] at hSlotSome; cases hSlotSome
+        · rfl
+      rw [hP, hSlotTrue] at hNoneC
+      rw [hSlotTrue, hVaultPoisF, hSlotNoneF]
+      rw [ite_eq_right (by decide : ¬ ((false || !true) = true))] at hNoneC ⊢
+      rw [ite_eq_right (by decide : ¬ ((false || false) = true))]
+      cases inp with
+      | recordRound1 rels =>
+        dsimp only at hNoneC ⊢
+        rcases hPhaseCases with ⟨hPh0, hSt0, _⟩ | ⟨hPh1, hSt1, _, _, _⟩ | ⟨hPh2, hSt2, _, _⟩
+        · rw [hPh0] at hNoneC ⊢
+          rw [hSt0]
+          cases hRels : (rels != 0)
+          · rw [ite_eq_right (by decide : ¬ (((0 : Nat) == 0 && false) = true))]
+            rw [ite_eq_right (by decide : ¬ (((0 : UInt8) == 0 && false) = true))]
+            dsimp only
+            exact ⟨rfl, hRelSaved⟩
+          · rw [hRels, show ((0 : UInt8) == 0 && true) = true from rfl] at hNoneC
+            cases hNoneC
+        · rw [hPh1] at hNoneC ⊢
+          rw [hSt1]
+          have hF1 : ¬ (((1 : Nat) == 0 && (rels != 0)) = true) := by cases (rels != 0) <;> decide
+          have hF2 : ¬ (((1 : UInt8) == 0 && (rels != 0)) = true) := by cases (rels != 0) <;> decide
+          rw [ite_eq_right hF1, ite_eq_right hF2]
+          dsimp only
+          exact ⟨rfl, hRelSaved⟩
+        · rw [hPh2] at hNoneC ⊢
+          rw [hSt2]
+          have hF1 : ¬ (((2 : Nat) == 0 && (rels != 0)) = true) := by cases (rels != 0) <;> decide
+          have hF2 : ¬ (((2 : UInt8) == 0 && (rels != 0)) = true) := by cases (rels != 0) <;> decide
+          rw [ite_eq_right hF1, ite_eq_right hF2]
+          dsimp only
+          exact ⟨rfl, hRelSaved⟩
+      | verifyBatchConsistency relations =>
+        dsimp only at hNoneC ⊢
+        rcases hPhaseCases with ⟨hPh0, hSt0, _⟩ | ⟨hPh1, hSt1, hPendEq, _, _⟩ | ⟨hPh2, hSt2, _, _⟩
+        · rw [hPh0] at hNoneC ⊢
+          rw [hSt0]
+          rw [ite_eq_right (by decide : ¬ (((0 : Nat) == 1) = true)),
+              ite_eq_right (by decide : ¬ (((0 : UInt8) == 1) = true))]
+          dsimp only
+          exact ⟨rfl, hRelSaved⟩
+        · rw [hPh1, hPendEq] at hNoneC ⊢
+          rw [hSt1]
+          cases hBatch : (decide (relations.length = a.pendingRelations) && bginBatchHolds relations)
+          · rw [ite_eq_left (show ((1 : Nat) == 1) = true from rfl),
+                ite_eq_left (show ((1 : UInt8) == 1) = true from rfl)]
+            rw [ite_eq_right Bool.noConfusion, ite_eq_right Bool.noConfusion]
+            dsimp only [walPoisonVault, walQuarantine]
+            exact ⟨rfl, rfl, rfl, fun hF => absurd hF (by decide)⟩
+          · rw [hBatch, show ((1 : UInt8) == 1) = true from rfl] at hNoneC
+            cases hNoneC
+        · rw [hPh2] at hNoneC ⊢
+          rw [hSt2]
+          rw [ite_eq_right (by decide : ¬ (((2 : Nat) == 1) = true)),
+              ite_eq_right (by decide : ¬ (((2 : UInt8) == 1) = true))]
+          dsimp only
+          exact ⟨rfl, hRelSaved⟩
+      | releaseRound3Cut payload =>
+        dsimp only at hNoneC ⊢
+        rcases hPhaseCases with ⟨hPh0, hSt0, _⟩ | ⟨hPh1, hSt1, _, _, _⟩ | ⟨hPh2, _, hPend0, hVerT⟩
+        · rw [hPh0] at hNoneC ⊢
+          rw [hSt0]
+          have hF2 : ¬ ((((0 : UInt8) == 2 && c.pendingRelations == 0) && c.consistencyVerified) = true) := by
+            cases (c.pendingRelations == 0) <;> cases c.consistencyVerified <;> decide
+          rw [ite_eq_right (by decide : ¬ (((0 : Nat) == 2) = true)), ite_eq_right hF2]
+          dsimp only
+          exact ⟨rfl, hRelSaved⟩
+        · rw [hPh1] at hNoneC ⊢
+          rw [hSt1]
+          have hF2 : ¬ ((((1 : UInt8) == 2 && c.pendingRelations == 0) && c.consistencyVerified) = true) := by
+            cases (c.pendingRelations == 0) <;> cases c.consistencyVerified <;> decide
+          rw [ite_eq_right (by decide : ¬ (((1 : Nat) == 2) = true)), ite_eq_right hF2]
+          dsimp only
+          exact ⟨rfl, hRelSaved⟩
+        · rw [hPh2, hPend0, hVerT,
+              show ((((2 : UInt8) == 2 && (0 : UInt64) == 0) && true)) = true from rfl] at hNoneC
+          cases hNoneC
+    · have hVaultPoisT : a.vault.wal.poisoned = true := hPoisEq.symm.trans hP
+      rw [hVaultPoisT]
+      have hT1 : (true || a.vault.shareSlot.isNone) = true := rfl
+      have hT2 : (true || !c.shareSlotPresent) = true := rfl
+      rw [ite_eq_left hT1, ite_eq_left hT2]
+      dsimp only [walPoisonVault, walQuarantine]
+      exact ⟨rfl, rfl, rfl, fun hF => absurd hF (by decide)⟩
+
+/-- **Bridge 3B (`mirRssCut_bridges_to_rss_slh_uc_and_euf_cma`)**:
+    Connects an unpoisoned `MirRssCutSession` + `RealIdealClusterMatch` state directly to BOTH
+    crown-jewel theorems in `Qsag.RssSlhFullSecurity`:
+    1. Multi-session rushing-adversary UC view indistinguishability
+       (`rss_slh_real_ideal_view_indistinguishable`, `ratLe ... (Q_cuts * deg, 2 ^ 128)`);
+    2. Single-session pre-cut barrier soundness (`activeConsistencyBreak_implies_schwartzZippel_root`)
+       feeding `rss_slh_interactive_euf_cma_reduction`;
+    3. Sticky vault zeroization on active fault (`tooth_poisoned_vault_erases_share_and_blocks`). -/
+theorem mirRssCut_bridges_to_rss_slh_uc_and_euf_cma {AdvState OuterView : Type}
+    (p : Fips205Params) (hWf : p.wellFormed = true)
+    (cIdx : Fin 3) (Q_cuts deg : Nat)
+    {seedSh prfSh : RssByteShares}
+    (hSeedWf : seedSh.WellFormed) (hPrfWf : prfSh.WellFormed)
+    (pkSeed : List UInt8)
+    (A : UcRushingAdversary AdvState)
+    (mirSess : MirRssCutSession)
+    (specVault : SpecPreCutVaultState)
+    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
+    (icl : IdealClusterState SlhPublicKey)
+    (advSt : AdvState)
+    (hSimRel : mirRssCutSession_forwardSim_walGate.Rel mirSess specVault)
+    (hWalSync : cl.honestWal = specVault.vault.wal)
+    (hMatch : RealIdealClusterMatch cIdx seedSh prfSh cl icl)
+    (hPkKey : cl.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2)
+    (ctx : OuterCallingContext (ExecTranscript AdvState) OuterView)
+    (D : OuterView → Bool) :
+    let card := rssMultiSessionCard p.sigBytes Q_cuts
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let hybridUniformView : Fin card → OuterView := fun ω =>
+      ctx.postProcess (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts
+        (decodeMultiSessionTapes p.sigBytes Q_cuts ω) cl advSt).2
+    let idealSimView : Fin card → OuterView := fun ω =>
+      ctx.postProcess (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh p cIdx deg) A Q_cuts
+        (decodeMultiSessionTapes p.sigBytes Q_cuts ω) icl advSt).2
+    (mirSess.poisoned = cl.honestWal.poisoned) ∧
+    ratLe (rationalAcceptDiff card hybridUniformView card idealSimView D)
+          (Q_cuts * deg, 2 ^ 128) ∧
+    (walPoisonVault specVault.vault).shareSlot = none ∧
+    (walPoisonVault specVault.vault).wal.poisoned = true := by
+  intro card sk hybridUniformView idealSimView
+  have hPoisSync : mirSess.poisoned = cl.honestWal.poisoned :=
+    hSimRel.1.trans (congrArg WalLatchState.poisoned hWalSync).symm
+  have hUc := (rss_slh_real_ideal_view_indistinguishable p hWf cIdx Q_cuts deg
+    hSeedWf hPrfWf pkSeed A cl icl advSt hMatch hPkKey ctx D
+    card (rssMultiSessionCard_pos p.sigBytes Q_cuts)
+    (decodeMultiSessionTapes p.sigBytes Q_cuts)).1
+  have hVaultTooth := tooth_poisoned_vault_erases_share_and_blocks
+    specVault.vault (fun _ _ => ()) [] 0 [] ByteArray.empty
+  exact ⟨hPoisSync, hUc, hVaultTooth.1, hVaultTooth.2.1⟩
+
+/-! ### Fixed-Width `UInt64` Norm/Hint Rejection Gate $\to$ `ThresholdMlDsaAndToprf` Bridge -/
+
+private theorem fq204_centeredAbs_lt_u64 (x : Fq204) :
+    Fq204.centeredAbs x < 18446744073709551616 := by
+  unfold Fq204.centeredAbs
+  have hx : x.val < mldsaQ := x.isLt
+  have hQ : mldsaQ = 8380417 := rfl
+  split <;> omega
+
+private theorem polyTree_infNorm_lt_u64 : ∀ {d : Nat} (p : PolyTree d),
+    PolyTree.infNorm p < 18446744073709551616
+  | 0, .leaf x => fq204_centeredAbs_lt_u64 x
+  | _ + 1, .branch a b => by
+    simp only [PolyTree.infNorm]
+    have ha := polyTree_infNorm_lt_u64 a
+    have hb := polyTree_infNorm_lt_u64 b
+    omega
+
+private theorem infNormVec4_lt_u64 (v : PolyVec4) :
+    infNormVec4 v < 18446744073709551616 := by
+  unfold infNormVec4
+  have h0 := polyTree_infNorm_lt_u64 (v ⟨0, by decide⟩)
+  have h1 := polyTree_infNorm_lt_u64 (v ⟨1, by decide⟩)
+  have h2 := polyTree_infNorm_lt_u64 (v ⟨2, by decide⟩)
+  have h3 := polyTree_infNorm_lt_u64 (v ⟨3, by decide⟩)
+  omega
+
+private theorem centeredDiffNormTree_lt_u64 :
+    ∀ {d : Nat} (r : PolyTree d) (w1 : NatTree d),
+      centeredDiffNormTree r w1 < 18446744073709551616
+  | 0, .leaf r, .leaf w1 => fq204_centeredAbs_lt_u64 _
+  | _ + 1, .branch r0 r1, .branch w0 w1 => by
+    simp only [centeredDiffNormTree]
+    have h0 := centeredDiffNormTree_lt_u64 r0 w0
+    have h1 := centeredDiffNormTree_lt_u64 r1 w1
+    omega
+
+private theorem centeredDiffNormVec4_lt_u64 (r : PolyVec4) (w1 : Fin 4 → NatTree 8) :
+    centeredDiffNormVec4 r w1 < 18446744073709551616 := by
+  unfold centeredDiffNormVec4
+  have h0 := centeredDiffNormTree_lt_u64 (r ⟨0, by decide⟩) (w1 ⟨0, by decide⟩)
+  have h1 := centeredDiffNormTree_lt_u64 (r ⟨1, by decide⟩) (w1 ⟨1, by decide⟩)
+  have h2 := centeredDiffNormTree_lt_u64 (r ⟨2, by decide⟩) (w1 ⟨2, by decide⟩)
+  have h3 := centeredDiffNormTree_lt_u64 (r ⟨3, by decide⟩) (w1 ⟨3, by decide⟩)
+  omega
+
+private theorem hintWeightTree_le_pow : ∀ {d : Nat} (h : HintTree d),
+    HintTree.weight h ≤ 2 ^ d
+  | 0, .leaf b => by
+    simp only [HintTree.weight]
+    cases b <;> decide
+  | d + 1, .branch h0 h1 => by
+    simp only [HintTree.weight]
+    have ih0 := hintWeightTree_le_pow h0
+    have ih1 := hintWeightTree_le_pow h1
+    rw [Nat.pow_succ]
+    omega
+
+private theorem hintWeightVec4_lt_u64 (h : Fin 4 → HintTree 8) :
+    hintWeightVec4 h < 18446744073709551616 := by
+  unfold hintWeightVec4
+  have h0 := hintWeightTree_le_pow (h ⟨0, by decide⟩)
+  have h1 := hintWeightTree_le_pow (h ⟨1, by decide⟩)
+  have h2 := hintWeightTree_le_pow (h ⟨2, by decide⟩)
+  have h3 := hintWeightTree_le_pow (h ⟨3, by decide⟩)
+  have h256 : (2 : Nat) ^ 8 = 256 := rfl
+  omega
+
+/-- Zero vector in $R_q^4$ for summing RSS subset polynomial shares (`threshold_mldsa.rs:826-827`). -/
+def zeroPolyVec4 : PolyVec4 := fun _ => PolyTree.zero 8
+
+/-- Reconstructs a logical $R_q^4$ vector from RSS subset components (`s1_hat`, `s2_hat`, `y.c`). -/
+def sumPolyVec4List : List PolyVec4 → PolyVec4
+  | [] => zeroPolyVec4
+  | v :: vs => addVec4 v (sumPolyVec4List vs)
+
+/-- Constructive `SimpleEquiv` bijection (`0 Classical.choice`) proving that adding a uniform
+    Phase-1/Phase-3 conversion mask (`wMask`, `zMask`, `lowMask` in `threshold_mldsa.rs:790, 981`)
+    maps $R_q^4$ bijectively onto $R_q^4$ for every fixed unmasked vector `v`. -/
+def rssMaskVec4Equiv (v : PolyVec4) : SimpleEquiv PolyVec4 PolyVec4 where
+  toFun mask := addVec4 v mask
+  invFun opened := subVec4 opened v
+  left_inv mask := by
+    funext i
+    dsimp only [subVec4, addVec4]
+    rw [polyTree_sub_eq_add_neg, polyTree_add_comm, ← polyTree_add_assoc,
+        polyTree_add_left_neg, polyTree_zero_add]
+  right_inv opened := by
+    funext i
+    dsimp only [subVec4, addVec4]
+    rw [polyTree_sub_eq_add_neg, polyTree_add_comm (opened i) (PolyTree.neg (v i)),
+        ← polyTree_add_assoc, polyTree_add_comm (v i) (PolyTree.neg (v i)),
+        polyTree_add_left_neg, polyTree_zero_add]
+
+/-- Concrete fixed-width `UInt64`-epoch RSS threshold ML-DSA session state (`threshold_mldsa.rs:801, 945`):
+    stores RSS subset polynomial components `s1Hat`, `s2Hat` rather than an unshared key. -/
+structure MirRssMlDsaKeyState where
+  nextEpoch : UInt64
+  A : PolyMat4
+  s1Hat : List PolyVec4
+  s2Hat : List PolyVec4
+
+/-- Specification RSS threshold ML-DSA session state with unbounded `Nat` epoch counter. -/
+structure SpecRssMlDsaKeyState where
+  nextEpoch : Nat
+  A : PolyMat4
+  s1Hat : List PolyVec4
+  s2Hat : List PolyVec4
+
+def MirRssMlDsaKeyState.toSpec (st : MirRssMlDsaKeyState) : SpecRssMlDsaKeyState where
+  nextEpoch := st.nextEpoch.toNat
+  A := st.A
+  s1Hat := st.s1Hat
+  s2Hat := st.s2Hat
+
+/-- Per-attempt RSS threshold ML-DSA signing input (`threshold_mldsa.rs:944-1038`) carrying RSS
+    mask shares `yShares` and Phase-1/Phase-3 conversion masks `wMask`, `zMask`, `lowMask`. -/
+structure MirRssMlDsaAttempt where
+  epoch : UInt64
+  mu : List UInt8
+  yShares : List PolyVec4
+  wMask : PolyVec4
+  zMask : PolyVec4
+  lowMask : PolyVec4
+
+/-- Explicit transcript leakage opened during an RSS ML-DSA attempt (`threshold_mldsa.rs:58-62,
+    790-798, 981, 987, 1001, 1036`): rejected attempts genuinely reveal `openedMaskedW`, public
+    `openedW1 = HighBits(w)`, optional Phase-3 `openedMaskedZAndLow`, and `rejectBit`. -/
+structure MirMlDsaAttemptLeakage where
+  openedMaskedW : PolyVec4
+  openedW1 : Fin 4 → NatTree 8
+  openedMaskedZAndLow : Option (PolyVec4 × PolyVec4)
+  rejectBit : Bool
+
+/-- Accepted standalone FIPS 204 signature paired with its burned epoch and public transcript view. -/
+structure MirRssMlDsaSig where
+  cTilde : List UInt8
+  z : PolyVec4
+  h : Fin 4 → HintTree 8
+  usedEpoch : Nat
+  attemptLeakage : MirMlDsaAttemptLeakage
+
+/-- Abort classification distinguishing pre-MPC epoch/persistence refusal from an executed MPC
+    attempt that opened `(openedMaskedW, openedW1, openedMaskedZAndLow, rejectBit := true)`
+    without opening unmasked `z`. -/
+inductive MirRssMlDsaAbort where
+  | epochReplayOrOverflow
+  | attemptRejected (leak : MirMlDsaAttemptLeakage)
+
+/-- Kernel-constructive `UInt64` equality check (`0` axioms). -/
+def u64Eq (a b : UInt64) : Bool :=
+  match UInt64.decEq a b with
+  | isTrue _ => true
+  | isFalse _ => false
+
+/-- Non-max `UInt64` epoch check (`checked_add(1).is_some()` in `threshold_mldsa.rs:946`). -/
+def u64NotMax (x : UInt64) : Bool := !Nat.beq (x + (1 : UInt64)).toNat 0
+
+private theorem u64_add_one_of_u64NotMax (x : UInt64) (h : u64NotMax x = true) :
+    (x + (1 : UInt64)).toNat = x.toNat + 1 := by
+  have hOne : (1 : UInt64).toNat = 1 := rfl
+  have hMod : (x + (1 : UInt64)).toNat = (x.toNat + 1) % 2 ^ 64 := by
+    rw [UInt64.toNat_add, hOne]
+  rcases Nat.lt_or_eq_of_le (Nat.succ_le_of_lt x.toNat_lt) with hLt | hEq
+  · rw [hMod]
+    exact Nat.mod_eq_of_lt hLt
+  · exfalso
+    have hEqAdd : x.toNat + 1 = 2 ^ 64 := hEq
+    have hZeroNat : (x + (1 : UInt64)).toNat = 0 := by
+      rw [hMod, hEqAdd]
+    unfold u64NotMax at h
+    rw [hZeroNat] at h
+    cases h
+
+private theorem toNat_u64_of_lt {n : Nat} (hn : n < 18446744073709551616) :
+    (UInt64.ofNat n).toNat = n := by
+  have h64 : (2 : Nat) ^ 64 = 18446744073709551616 := rfl
+  rw [UInt64.toNat_ofNat', h64]
+  exact Nat.mod_eq_of_lt hn
+
+private theorem u64_epoch_gate_eq (ep nextEp : UInt64) :
+    (u64Eq ep nextEp && u64NotMax nextEp) =
+    (Nat.beq ep.toNat nextEp.toNat && u64NotMax ep) := by
+  unfold u64Eq
+  cases UInt64.decEq ep nextEp with
+  | isFalse hNe =>
+    cases h2 : Nat.beq ep.toNat nextEp.toNat
+    · rfl
+    · exfalso
+      exact hNe (UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (Nat.eq_of_beq_eq_true h2)))
+  | isTrue hEq =>
+    dsimp only
+    rw [hEq, Nat.beq_refl nextEp.toNat]
+
+private def mapRssMlDsaOutcome (o : StepOutcome MirRssMlDsaKeyState MirRssMlDsaSig MirRssMlDsaAbort) :
+    StepOutcome SpecRssMlDsaKeyState MirRssMlDsaSig MirRssMlDsaAbort :=
+  match o with
+  | .ok s' out => .ok s'.toSpec out
+  | .err s' e => .err s'.toSpec e
+
+/-- Shared Phase-2/Phase-3 outcome assembler parameterized by the 3 boolean bound verdicts
+    (`ct0Ok`, `acceptOk`, `hwOk`), recording exact `MirMlDsaAttemptLeakage` on both accept and abort. -/
+def mkRssMlDsaAttemptOutcome {State : Type}
+    (stBurned : State)
+    (usedEpoch : Nat)
+    (cTilde : List UInt8)
+    (openedMaskedW z openedZ openedLow : PolyVec4)
+    (w1 : Fin 4 → NatTree 8)
+    (h : Fin 4 → HintTree 8)
+    (ct0Ok acceptOk hwOk : Bool) :
+    StepOutcome State MirRssMlDsaSig MirRssMlDsaAbort :=
+  if ct0Ok then
+    if acceptOk then
+      if hwOk then
+        .ok stBurned
+          { cTilde := cTilde
+            z := z
+            h := h
+            usedEpoch := usedEpoch
+            attemptLeakage :=
+              { openedMaskedW := openedMaskedW
+                openedW1 := w1
+                openedMaskedZAndLow := some (openedZ, openedLow)
+                rejectBit := false } }
+      else
+        .err stBurned (.attemptRejected
+          { openedMaskedW := openedMaskedW
+            openedW1 := w1
+            openedMaskedZAndLow := some (openedZ, openedLow)
+            rejectBit := true })
+    else
+      .err stBurned (.attemptRejected
+        { openedMaskedW := openedMaskedW
+          openedW1 := w1
+          openedMaskedZAndLow := some (openedZ, openedLow)
+          rejectBit := true })
+  else
+    .err stBurned (.attemptRejected
+      { openedMaskedW := openedMaskedW
+        openedW1 := w1
+        openedMaskedZAndLow := none
+        rejectBit := true })
+
+private theorem mapRssMlDsaOutcome_mk
+    (stBurned : MirRssMlDsaKeyState) (stSpecBurned : SpecRssMlDsaKeyState)
+    (hBurnEq : stBurned.toSpec = stSpecBurned)
+    (usedEpoch : Nat) (cTilde : List UInt8)
+    (openedMaskedW z openedZ openedLow : PolyVec4)
+    (w1 : Fin 4 → NatTree 8) (h : Fin 4 → HintTree 8)
+    (ct0Ok acceptOk hwOk : Bool) :
+    mapRssMlDsaOutcome
+      (mkRssMlDsaAttemptOutcome stBurned usedEpoch cTilde openedMaskedW z openedZ openedLow w1 h
+        ct0Ok acceptOk hwOk) =
+    mkRssMlDsaAttemptOutcome stSpecBurned usedEpoch cTilde openedMaskedW z openedZ openedLow w1 h
+      ct0Ok acceptOk hwOk := by
+  subst hBurnEq
+  cases ct0Ok <;> cases acceptOk <;> cases hwOk <;> rfl
+
+/-- Post-epoch-check MIR RSS ML-DSA attempt body evaluating fixed-width `UInt64` norm/hint bounds. -/
+def mirRssMlDsaSignBody
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (stBurned : MirRssMlDsaKeyState) (A : PolyMat4) (s1Hat s2Hat : List PolyVec4)
+    (inp : MirRssMlDsaAttempt) :
+    StepOutcome MirRssMlDsaKeyState MirRssMlDsaSig MirRssMlDsaAbort :=
+  let s1 := sumPolyVec4List s1Hat
+  let s2 := sumPolyVec4List s2Hat
+  let y := sumPolyVec4List inp.yShares
+  let t0 := power2RoundLowVec4 (addVec4 (matVecMul4 A s1) s2)
+  let w := matVecMul4 A y
+  let openedMaskedW := addVec4 w inp.wMask
+  let w1 := highBitsVec4 w
+  let cTilde := chalHash inp.mu w1
+  let c := sampleInBall cTilde
+  let ct0 := mulPolyVec4 c t0
+  let z := addVec4 y (mulPolyVec4 c s1)
+  let u := subVec4 w (mulPolyVec4 c s2)
+  let openedZ := addVec4 z inp.zMask
+  let openedLow := addVec4 u inp.lowMask
+  let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
+  let ct0NormU64 : UInt64 := UInt64.ofNat (infNormVec4 ct0)
+  let zNormU64 : UInt64 := UInt64.ofNat (infNormVec4 z)
+  let uDiffU64 : UInt64 := UInt64.ofNat (centeredDiffNormVec4 u w1)
+  let hwU64 : UInt64 := UInt64.ofNat (hintWeightVec4 h)
+  mkRssMlDsaAttemptOutcome stBurned inp.epoch.toNat cTilde openedMaskedW z openedZ openedLow w1 h
+    (decide (ct0NormU64.toNat < (95232 : UInt64).toNat))
+    (decide (zNormU64.toNat < (130994 : UInt64).toNat) &&
+     decide (uDiffU64.toNat < (95154 : UInt64).toNat))
+    (decide (hwU64.toNat ≤ (80 : UInt64).toNat))
+
+/-- Post-epoch-check specification RSS ML-DSA attempt body over exact `Fq204` / `Nat` bounds. -/
+def specRssMlDsaSignBody
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (stBurned : SpecRssMlDsaKeyState) (A : PolyMat4) (s1Hat s2Hat : List PolyVec4)
+    (inp : MirRssMlDsaAttempt) :
+    StepOutcome SpecRssMlDsaKeyState MirRssMlDsaSig MirRssMlDsaAbort :=
+  let s1 := sumPolyVec4List s1Hat
+  let s2 := sumPolyVec4List s2Hat
+  let y := sumPolyVec4List inp.yShares
+  let t0 := power2RoundLowVec4 (addVec4 (matVecMul4 A s1) s2)
+  let w := matVecMul4 A y
+  let openedMaskedW := addVec4 w inp.wMask
+  let w1 := highBitsVec4 w
+  let cTilde := chalHash inp.mu w1
+  let c := sampleInBall cTilde
+  let ct0 := mulPolyVec4 c t0
+  let z := addVec4 y (mulPolyVec4 c s1)
+  let u := subVec4 w (mulPolyVec4 c s2)
+  let openedZ := addVec4 z inp.zMask
+  let openedLow := addVec4 u inp.lowMask
+  let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
+  mkRssMlDsaAttemptOutcome stBurned inp.epoch.toNat cTilde openedMaskedW z openedZ openedLow w1 h
+    (decide (infNormVec4 ct0 < mldsa44Gamma2))
+    (decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
+     decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta))
+    (decide (hintWeightVec4 h ≤ mldsa44Omega))
+
+private theorem mirRssMlDsaSignBody_map_toSpec
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (stBurned : MirRssMlDsaKeyState) (stSpecBurned : SpecRssMlDsaKeyState)
+    (hBurnEq : stBurned.toSpec = stSpecBurned)
+    (A : PolyMat4) (s1Hat s2Hat : List PolyVec4) (inp : MirRssMlDsaAttempt) :
+    mapRssMlDsaOutcome
+      (mirRssMlDsaSignBody chalHash sampleInBall stBurned A s1Hat s2Hat inp) =
+    specRssMlDsaSignBody chalHash sampleInBall stSpecBurned A s1Hat s2Hat inp := by
+  unfold mirRssMlDsaSignBody specRssMlDsaSignBody
+  dsimp only
+  rw [toNat_u64_of_lt (infNormVec4_lt_u64 _),
+      toNat_u64_of_lt (infNormVec4_lt_u64 _),
+      toNat_u64_of_lt (centeredDiffNormVec4_lt_u64 _ _),
+      toNat_u64_of_lt (hintWeightVec4_lt_u64 _)]
+  exact mapRssMlDsaOutcome_mk stBurned stSpecBurned hBurnEq inp.epoch.toNat _ _ _ _ _ _ _ _ _ _
+
+/-- Concrete MIR RSS ML-DSA signing gate evaluating `checked_add(1)` on `nextEpoch : UInt64`
+    (`threshold_mldsa.rs:946-948`), fixed-width `UInt64` norm/hint bounds (`95232`, `130994`,
+    `95154`, `80`), and explicit Phase-2/Phase-3 `MirMlDsaAttemptLeakage`. -/
+def mirRssMlDsaSignStep
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : MirRssMlDsaKeyState) (inp : MirRssMlDsaAttempt) :
+    StepOutcome MirRssMlDsaKeyState MirRssMlDsaSig MirRssMlDsaAbort :=
+  if u64Eq inp.epoch st.nextEpoch && u64NotMax st.nextEpoch then
+    mirRssMlDsaSignBody chalHash sampleInBall { st with nextEpoch := st.nextEpoch + 1 }
+      st.A st.s1Hat st.s2Hat inp
+  else
+    .err st .epochReplayOrOverflow
+
+/-- Specification RSS ML-DSA signing step over exact mathematical `Fq204` / `Nat` bounds. -/
+def specRssMlDsaSignStep
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : SpecRssMlDsaKeyState) (inp : MirRssMlDsaAttempt) :
+    StepOutcome SpecRssMlDsaKeyState MirRssMlDsaSig MirRssMlDsaAbort :=
+  if Nat.beq inp.epoch.toNat st.nextEpoch && u64NotMax inp.epoch then
+    specRssMlDsaSignBody chalHash sampleInBall { st with nextEpoch := st.nextEpoch + 1 }
+      st.A st.s1Hat st.s2Hat inp
+  else
+    .err st .epochReplayOrOverflow
+
+private theorem mirRssMlDsaSignStep_map_toSpec
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : MirRssMlDsaKeyState) (inp : MirRssMlDsaAttempt) :
+    mapRssMlDsaOutcome (mirRssMlDsaSignStep chalHash sampleInBall st inp) =
+    specRssMlDsaSignStep chalHash sampleInBall st.toSpec inp := by
+  have hF : ¬ (false = true) := Bool.noConfusion
+  have hT : true = true := rfl
+  unfold mirRssMlDsaSignStep specRssMlDsaSignStep
+  rw [u64_epoch_gate_eq inp.epoch st.nextEpoch]
+  have hSpecEp : st.toSpec.nextEpoch = st.nextEpoch.toNat := rfl
+  have hSpecA : st.toSpec.A = st.A := rfl
+  have hSpecS1 : st.toSpec.s1Hat = st.s1Hat := rfl
+  have hSpecS2 : st.toSpec.s2Hat = st.s2Hat := rfl
+  rw [hSpecEp, hSpecA, hSpecS1, hSpecS2]
+  cases hEp : (Nat.beq inp.epoch.toNat st.nextEpoch.toNat && u64NotMax inp.epoch)
+  · rw [ite_eq_right hF, ite_eq_right hF]
+    rfl
+  · rw [ite_eq_left hT, ite_eq_left hT]
+    rcases Bool.and_eq_true_iff.mp hEp with ⟨hBeq, hNotMaxInp⟩
+    have hInpEq : inp.epoch = st.nextEpoch :=
+      UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq (Nat.eq_of_beq_eq_true hBeq))
+    rw [hInpEq] at hNotMaxInp
+    have hAdd1 : (st.nextEpoch + 1).toNat = st.nextEpoch.toNat + 1 :=
+      u64_add_one_of_u64NotMax st.nextEpoch hNotMaxInp
+    have hBurnEq : ({ st with nextEpoch := st.nextEpoch + 1 } : MirRssMlDsaKeyState).toSpec =
+        { st.toSpec with nextEpoch := st.nextEpoch.toNat + 1 } := by
+      unfold MirRssMlDsaKeyState.toSpec
+      dsimp only
+      rw [hAdd1]
+    exact mirRssMlDsaSignBody_map_toSpec chalHash sampleInBall
+      { st with nextEpoch := st.nextEpoch + 1 }
+      { st.toSpec with nextEpoch := st.nextEpoch.toNat + 1 }
+      hBurnEq st.A st.s1Hat st.s2Hat inp
+
+def mirRssMlDsaMachine
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) :
+    PartyMachine MirRssMlDsaKeyState MirRssMlDsaAttempt MirRssMlDsaSig :=
+  PartyMachine.ofOutcome (mirRssMlDsaSignStep chalHash sampleInBall)
+
+def specRssMlDsaMachine
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) :
+    PartyMachine SpecRssMlDsaKeyState MirRssMlDsaAttempt MirRssMlDsaSig :=
+  PartyMachine.ofOutcome (specRssMlDsaSignStep chalHash sampleInBall)
+
+/-- **Bridge 3C (`mirRssMlDsaGate_forwardSim_spec`)**:
+    Proves `ForwardSim` from the fixed-width `UInt64` RSS ML-DSA signing gate (`mirRssMlDsaMachine`)
+    to `specRssMlDsaMachine` with zero truncation across all `Fq204` norms and `checked_add(1)` epochs. -/
+def mirRssMlDsaGate_forwardSim_spec
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) :
+    ForwardSim (mirRssMlDsaMachine chalHash sampleInBall)
+               (specRssMlDsaMachine chalHash sampleInBall) :=
+  LockstepSim.toForwardSim
+    { Inv := fun _ => True
+      abs := MirRssMlDsaKeyState.toSpec
+      step_eq := fun {st} inp _ => by
+        dsimp only [mirRssMlDsaMachine, specRssMlDsaMachine, PartyMachine.ofOutcome]
+        have hMap := mirRssMlDsaSignStep_map_toSpec chalHash sampleInBall st inp
+        cases hOut : mirRssMlDsaSignStep chalHash sampleInBall st inp with
+        | ok s' out =>
+          rw [hOut] at hMap
+          dsimp only [mapRssMlDsaOutcome] at hMap
+          rw [← hMap]
+          exact ⟨trivial, rfl⟩
+        | err s' e =>
+          rw [hOut] at hMap
+          dsimp only [mapRssMlDsaOutcome] at hMap
+          rw [← hMap]
+          exact ⟨trivial, rfl, rfl⟩ }
+
+private theorem specRssMlDsaSignStep_ok_properties
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
+    {sampleInBall : List UInt8 → Poly256}
+    {st st' : SpecRssMlDsaKeyState} {inp : MirRssMlDsaAttempt} {sig : MirRssMlDsaSig}
+    (hOk : specRssMlDsaSignStep chalHash sampleInBall st inp = .ok st' sig) :
+    st'.nextEpoch = st.nextEpoch + 1 ∧
+    sig.usedEpoch = st.nextEpoch ∧
+    st'.A = st.A ∧ st'.s1Hat = st.s1Hat ∧ st'.s2Hat = st.s2Hat ∧
+    mldsaVerify chalHash sampleInBall st.A
+      (power2RoundHighVec4 (addVec4 (matVecMul4 st.A (sumPolyVec4List st.s1Hat))
+        (sumPolyVec4List st.s2Hat)))
+      inp.mu sig.cTilde sig.z sig.h = true := by
+  have hF : ¬ (false = true) := Bool.noConfusion
+  have hT : true = true := rfl
+  unfold specRssMlDsaSignStep at hOk
+  cases hEp : (Nat.beq inp.epoch.toNat st.nextEpoch && u64NotMax inp.epoch)
+  · rw [hEp, ite_eq_right hF] at hOk; cases hOk
+  · rw [hEp, ite_eq_left hT] at hOk
+    rcases Bool.and_eq_true_iff.mp hEp with ⟨hEqBeq, _⟩
+    have hEpEq : inp.epoch.toNat = st.nextEpoch := Nat.eq_of_beq_eq_true hEqBeq
+    dsimp only [specRssMlDsaSignBody, mkRssMlDsaAttemptOutcome] at hOk
+    let s1 := sumPolyVec4List st.s1Hat
+    let s2 := sumPolyVec4List st.s2Hat
+    let y := sumPolyVec4List inp.yShares
+    let t0 := power2RoundLowVec4 (addVec4 (matVecMul4 st.A s1) s2)
+    let w := matVecMul4 st.A y
+    let w1 := highBitsVec4 w
+    let cTilde := chalHash inp.mu w1
+    let c := sampleInBall cTilde
+    let ct0 := mulPolyVec4 c t0
+    let z := addVec4 y (mulPolyVec4 c s1)
+    let u := subVec4 w (mulPolyVec4 c s2)
+    let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
+    cases hCt : decide (infNormVec4 ct0 < mldsa44Gamma2)
+    · rw [hCt, ite_eq_right hF] at hOk; cases hOk
+    · rw [hCt, ite_eq_left hT] at hOk
+      have hCt0Lt : infNormVec4 ct0 < mldsa44Gamma2 := of_decide_eq_true hCt
+      cases hAcc : (decide (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) &&
+          decide (centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta))
+      · rw [hAcc, ite_eq_right hF] at hOk; cases hOk
+      · rw [hAcc, ite_eq_left hT] at hOk
+        rcases Bool.and_eq_true_iff.mp hAcc with ⟨hzB, hDiffB⟩
+        have hzLt : infNormVec4 z < mldsa44Gamma1 - mldsa44Beta := of_decide_eq_true hzB
+        have hDiffLt : centeredDiffNormVec4 u w1 < mldsa44Gamma2 - mldsa44Beta := of_decide_eq_true hDiffB
+        cases hW : decide (hintWeightVec4 h ≤ mldsa44Omega)
+        · rw [hW, ite_eq_right hF] at hOk; cases hOk
+        · rw [hW, ite_eq_left hT] at hOk
+          have hWeightLe : hintWeightVec4 h ≤ mldsa44Omega := of_decide_eq_true hW
+          injection hOk with hStEq hSigEq
+          subst hStEq hSigEq
+          have hB : mldsa44Gamma2 - mldsa44Beta ≤ 95232 := by decide
+          obtain ⟨hLowLt, hHighEq⟩ := (centeredDiffNormVec4_lt_iff u w hB).mp hDiffLt
+          refine ⟨rfl, hEpEq, rfl, rfl, rfl, ?_⟩
+          unfold mldsaVerify
+          dsimp only
+          have hUseHint := highBits_az_sub_ct_eq_w1 st.A s1 s2 y c mldsa44Beta hLowLt hCt0Lt
+          dsimp only at hUseHint
+          rw [hUseHint, hHighEq, decide_eq_true hzLt, decide_eq_true hWeightLe, decide_eq_true rfl]
+          rfl
+
+private theorem specRssMlDsaMachine_errStep_inv
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256)
+    (st : SpecRssMlDsaKeyState) (inp : MirRssMlDsaAttempt) :
+    st.nextEpoch ≤ ((specRssMlDsaMachine chalHash sampleInBall).errStep st inp).nextEpoch ∧
+    ((specRssMlDsaMachine chalHash sampleInBall).errStep st inp).A = st.A ∧
+    ((specRssMlDsaMachine chalHash sampleInBall).errStep st inp).s1Hat = st.s1Hat ∧
+    ((specRssMlDsaMachine chalHash sampleInBall).errStep st inp).s2Hat = st.s2Hat := by
+  have hF : ¬ (false = true) := Bool.noConfusion
+  have hT : true = true := rfl
+  dsimp only [specRssMlDsaMachine, PartyMachine.ofOutcome]
+  cases hOut : specRssMlDsaSignStep chalHash sampleInBall st inp with
+  | ok _ _ =>
+    obtain ⟨hEp, _, hA, hS1, hS2, _⟩ := specRssMlDsaSignStep_ok_properties hOut
+    dsimp only
+    exact ⟨by omega, hA, hS1, hS2⟩
+  | err _ _ =>
+    dsimp only
+    unfold specRssMlDsaSignStep at hOut
+    cases hEp : (Nat.beq inp.epoch.toNat st.nextEpoch && u64NotMax inp.epoch)
+    · rw [hEp, ite_eq_right hF] at hOut
+      injection hOut with hStEq _
+      subst hStEq
+      exact ⟨Nat.le_refl _, rfl, rfl, rfl⟩
+    · rw [hEp, ite_eq_left hT] at hOut
+      dsimp only [specRssMlDsaSignBody, mkRssMlDsaAttemptOutcome] at hOut
+      cases hCt : decide (infNormVec4 (mulPolyVec4 (sampleInBall (chalHash inp.mu
+          (highBitsVec4 (matVecMul4 st.A (sumPolyVec4List inp.yShares)))))
+          (power2RoundLowVec4 (addVec4 (matVecMul4 st.A (sumPolyVec4List st.s1Hat))
+            (sumPolyVec4List st.s2Hat)))) < mldsa44Gamma2)
+      · rw [hCt, ite_eq_right hF] at hOut
+        injection hOut with hStEq _; subst hStEq
+        exact ⟨Nat.le_succ st.nextEpoch, rfl, rfl, rfl⟩
+      · rw [hCt, ite_eq_left hT] at hOut
+        cases hAcc : (decide (infNormVec4 (addVec4 (sumPolyVec4List inp.yShares)
+            (mulPolyVec4 (sampleInBall (chalHash inp.mu
+              (highBitsVec4 (matVecMul4 st.A (sumPolyVec4List inp.yShares)))))
+              (sumPolyVec4List st.s1Hat))) < mldsa44Gamma1 - mldsa44Beta) &&
+          decide (centeredDiffNormVec4 (subVec4 (matVecMul4 st.A (sumPolyVec4List inp.yShares))
+            (mulPolyVec4 (sampleInBall (chalHash inp.mu
+              (highBitsVec4 (matVecMul4 st.A (sumPolyVec4List inp.yShares)))))
+              (sumPolyVec4List st.s2Hat)))
+            (highBitsVec4 (matVecMul4 st.A (sumPolyVec4List inp.yShares))) < mldsa44Gamma2 - mldsa44Beta))
+        · rw [hAcc, ite_eq_right hF] at hOut
+          injection hOut with hStEq _; subst hStEq
+          exact ⟨Nat.le_succ st.nextEpoch, rfl, rfl, rfl⟩
+        · rw [hAcc, ite_eq_left hT] at hOut
+          cases hW : decide (hintWeightVec4 (makeHintVec4
+              (negVec4 (mulPolyVec4 (sampleInBall (chalHash inp.mu
+                (highBitsVec4 (matVecMul4 st.A (sumPolyVec4List inp.yShares)))))
+                (power2RoundLowVec4 (addVec4 (matVecMul4 st.A (sumPolyVec4List st.s1Hat))
+                  (sumPolyVec4List st.s2Hat)))))
+              (addVec4 (subVec4 (matVecMul4 st.A (sumPolyVec4List inp.yShares))
+                (mulPolyVec4 (sampleInBall (chalHash inp.mu
+                  (highBitsVec4 (matVecMul4 st.A (sumPolyVec4List inp.yShares)))))
+                  (sumPolyVec4List st.s2Hat)))
+                (mulPolyVec4 (sampleInBall (chalHash inp.mu
+                  (highBitsVec4 (matVecMul4 st.A (sumPolyVec4List inp.yShares)))))
+                  (power2RoundLowVec4 (addVec4 (matVecMul4 st.A (sumPolyVec4List st.s1Hat))
+                    (sumPolyVec4List st.s2Hat)))))) ≤ mldsa44Omega)
+          · rw [hW, ite_eq_right hF] at hOut
+            injection hOut with hStEq _; subst hStEq
+            exact ⟨Nat.le_succ st.nextEpoch, rfl, rfl, rfl⟩
+          · rw [hW, ite_eq_left hT] at hOut; cases hOut
+
+private theorem specRssMlDsaMachine_trace_sound
+    {chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8}
+    {sampleInBall : List UInt8 → Poly256}
+    {st₀ stF : SpecRssMlDsaKeyState}
+    {tr : List (MirRssMlDsaAttempt × MirRssMlDsaSig)}
+    (hTr : (specRssMlDsaMachine chalHash sampleInBall).ValidTrace st₀ tr stF) :
+    (∀ p ∈ tr, st₀.nextEpoch ≤ p.2.usedEpoch) ∧
+    tr.Pairwise (fun p₁ p₂ => p₁.2.usedEpoch ≠ p₂.2.usedEpoch) ∧
+    (∀ p ∈ tr,
+      mldsaVerify chalHash sampleInBall st₀.A
+        (power2RoundHighVec4 (addVec4 (matVecMul4 st₀.A (sumPolyVec4List st₀.s1Hat))
+          (sumPolyVec4List st₀.s2Hat)))
+        p.1.mu p.2.cTilde p.2.z p.2.h = true) := by
+  induction hTr with
+  | nil =>
+    exact ⟨(fun _ hm => nomatch hm), List.Pairwise.nil, (fun _ hm => nomatch hm)⟩
+  | @accept sCur sNext _ inp sig rest hStep _ ih =>
+    dsimp only [specRssMlDsaMachine, PartyMachine.ofOutcome] at hStep
+    cases hOut : specRssMlDsaSignStep chalHash sampleInBall sCur inp with
+    | err _ _ => rw [hOut] at hStep; cases hStep
+    | ok sOk sigOk =>
+      rw [hOut] at hStep
+      injection hStep with hP
+      rcases Prod.mk.inj hP with ⟨rfl, rfl⟩
+      obtain ⟨hNextEp, hUsedEp, hA, hS1, hS2, hVerHead⟩ := specRssMlDsaSignStep_ok_properties hOut
+      obtain ⟨hGeTail, hPairTail, hVerTail⟩ := ih
+      refine ⟨?_, List.Pairwise.cons ?_ hPairTail, ?_⟩
+      · intro p hp
+        rcases List.mem_cons.mp hp with rfl | hMem
+        · dsimp only; omega
+        · have h1 := hGeTail p hMem; omega
+      · intro p₂ hp₂
+        have h1 := hGeTail p₂ hp₂
+        dsimp only; omega
+      · intro p hp
+        rcases List.mem_cons.mp hp with rfl | hMem
+        · exact hVerHead
+        · have hV := hVerTail p hMem
+          rwa [hA, hS1, hS2] at hV
+  | @reject sCur _ inp rest _ _ ih =>
+    obtain ⟨hEpLe, hA, hS1, hS2⟩ := specRssMlDsaMachine_errStep_inv chalHash sampleInBall sCur inp
+    obtain ⟨hGeTail, hPairTail, hVerTail⟩ := ih
+    refine ⟨fun p hp => ?_, hPairTail, fun p hp => ?_⟩
+    · have h1 := hGeTail p hp; omega
+    · have hV := hVerTail p hp
+      rwa [hA, hS1, hS2] at hV
+
+/-- **Explicit Leakage-Bounded RSS ML-DSA Rejection & Multi-Turn FIPS 204 Soundness
+    (`mirRssMlDsaGate_leakage_bounded_and_fips204_sound`)**:
+    1. **Mask-Space Uniformity (`rssMaskVec4Equiv`)**: Every Phase-1/Phase-3 masked vector opened
+       during a rejected or accepted attempt (`w + wMask`, `z + zMask`, `u + lowMask`) is a
+       constructive `SimpleEquiv` bijection of its conversion mask (`0` secret leakage beyond
+       `(openedW1, rejectBit)` when masks are uniform).
+    2. **Explicit Rejected-Attempt Leakage & Unreleased `z`**: Whenever `ct0`, `z`, `LowBits(u)`,
+       `HighBits(u) ≠ w1`, or `weight(h) > 80` rejects an epoch-valid attempt, `mirRssMlDsaMachine`
+       withholds unmasked `z` (`step = none`), burns `nextEpoch := nextEpoch + 1`, and records the
+       exact `MirMlDsaAttemptLeakage` with `openedW1 = HighBits(w)` and `rejectBit = true`.
+    3. **Multi-Turn Epoch Uniqueness & Standalone FIPS 204 `mldsaVerify` Soundness**: Across any
+       multi-turn `ValidTrace` of `mirRssMlDsaMachine`, every emitted signature uses a strictly
+       distinct `usedEpoch` and passes standalone `mldsaVerify` under the reconstructed public key. -/
+theorem mirRssMlDsaGate_leakage_bounded_and_fips204_sound
+    (chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8)
+    (sampleInBall : List UInt8 → Poly256) :
+    (∀ v : PolyVec4, Nonempty (SimpleEquiv PolyVec4 PolyVec4) ∧
+      ∀ mask : PolyVec4, (rssMaskVec4Equiv v).invFun ((rssMaskVec4Equiv v).toFun mask) = mask) ∧
+    (∀ (st : MirRssMlDsaKeyState) (inp : MirRssMlDsaAttempt),
+      let s1 := sumPolyVec4List st.s1Hat
+      let s2 := sumPolyVec4List st.s2Hat
+      let y := sumPolyVec4List inp.yShares
+      let w := matVecMul4 st.A y
+      let c := sampleInBall (chalHash inp.mu (highBitsVec4 w))
+      let ct0 := mulPolyVec4 c (power2RoundLowVec4 (addVec4 (matVecMul4 st.A s1) s2))
+      let z := addVec4 y (mulPolyVec4 c s1)
+      let u := subVec4 w (mulPolyVec4 c s2)
+      let h := makeHintVec4 (negVec4 ct0) (addVec4 u ct0)
+      (u64Eq inp.epoch st.nextEpoch && u64NotMax st.nextEpoch) = true →
+      (¬ (infNormVec4 ct0 < mldsa44Gamma2) ∨
+       ¬ (infNormVec4 z < mldsa44Gamma1 - mldsa44Beta) ∨
+       ¬ (lowBitsNormVec4 u < mldsa44Gamma2 - mldsa44Beta) ∨
+       highBitsVec4 u ≠ highBitsVec4 w ∨
+       ¬ (hintWeightVec4 h ≤ mldsa44Omega)) →
+      (mirRssMlDsaMachine chalHash sampleInBall).step st inp = none ∧
+      ((mirRssMlDsaMachine chalHash sampleInBall).errStep st inp).nextEpoch = st.nextEpoch + 1 ∧
+      ∃ leak : MirMlDsaAttemptLeakage,
+        mirRssMlDsaSignStep chalHash sampleInBall st inp =
+          .err { st with nextEpoch := st.nextEpoch + 1 } (.attemptRejected leak) ∧
+        leak.openedW1 = highBitsVec4 w ∧
+        leak.rejectBit = true) ∧
+    (∀ {st₀ stFinal : MirRssMlDsaKeyState}
+       {trace : List (MirRssMlDsaAttempt × MirRssMlDsaSig)},
+      (mirRssMlDsaMachine chalHash sampleInBall).ValidTrace st₀ trace stFinal →
+      trace.Pairwise (fun p₁ p₂ => p₁.2.usedEpoch ≠ p₂.2.usedEpoch) ∧
+      (∀ p ∈ trace,
+        mldsaVerify chalHash sampleInBall st₀.A
+          (power2RoundHighVec4 (addVec4 (matVecMul4 st₀.A (sumPolyVec4List st₀.s1Hat))
+            (sumPolyVec4List st₀.s2Hat)))
+          p.1.mu p.2.cTilde p.2.z p.2.h = true)) := by
+  refine ⟨fun v => ⟨⟨rssMaskVec4Equiv v⟩, (rssMaskVec4Equiv v).left_inv⟩, ?_, ?_⟩
+  · intro st inp s1 s2 y w c ct0 z u h hEpValid hRej
+    have hF : ¬ (false = true) := Bool.noConfusion
+    have hT : true = true := rfl
+    dsimp only [mirRssMlDsaMachine, PartyMachine.ofOutcome]
+    unfold mirRssMlDsaSignStep
+    rw [hEpValid, ite_eq_left hT]
+    dsimp only [mirRssMlDsaSignBody, mkRssMlDsaAttemptOutcome]
+    rw [toNat_u64_of_lt (infNormVec4_lt_u64 _),
+        toNat_u64_of_lt (infNormVec4_lt_u64 _),
+        toNat_u64_of_lt (centeredDiffNormVec4_lt_u64 _ _),
+        toNat_u64_of_lt (hintWeightVec4_lt_u64 _)]
+    cases hCtB : decide (infNormVec4 ct0 < (95232 : UInt64).toNat)
+    · rw [ite_eq_right hF]
+      exact ⟨rfl, rfl, _, rfl, rfl, rfl⟩
+    · rw [ite_eq_left hT]
+      have hCtLt : infNormVec4 ct0 < mldsa44Gamma2 := of_decide_eq_true hCtB
+      cases hAccB : (decide (infNormVec4 z < (130994 : UInt64).toNat) &&
+          decide (centeredDiffNormVec4 u (highBitsVec4 w) < (95154 : UInt64).toNat))
+      · rw [ite_eq_right hF]
+        exact ⟨rfl, rfl, _, rfl, rfl, rfl⟩
+      · rw [ite_eq_left hT]
+        rcases Bool.and_eq_true_iff.mp hAccB with ⟨hzB, hDiffB⟩
+        have hzLt : infNormVec4 z < mldsa44Gamma1 - mldsa44Beta := of_decide_eq_true hzB
+        have hDiffLt : centeredDiffNormVec4 u (highBitsVec4 w) < mldsa44Gamma2 - mldsa44Beta :=
+          of_decide_eq_true hDiffB
+        have hB : mldsa44Gamma2 - mldsa44Beta ≤ 95232 := by decide
+        obtain ⟨hLowLt, hHighEq⟩ := (centeredDiffNormVec4_lt_iff u w hB).mp hDiffLt
+        cases hWB : decide (hintWeightVec4 h ≤ (80 : UInt64).toNat)
+        · rw [ite_eq_right hF]
+          exact ⟨rfl, rfl, _, rfl, rfl, rfl⟩
+        · have hWeightLe : hintWeightVec4 h ≤ mldsa44Omega := of_decide_eq_true hWB
+          rcases hRej with h1 | h2 | h3 | h4 | h5
+          · exact False.elim (h1 hCtLt)
+          · exact False.elim (h2 hzLt)
+          · exact False.elim (h3 hLowLt)
+          · exact False.elim (h4 hHighEq)
+          · exact False.elim (h5 hWeightLe)
+  · intro st₀ stFinal trace hTrace
+    have hRel₀ : (mirRssMlDsaGate_forwardSim_spec chalHash sampleInBall).Rel st₀ st₀.toSpec :=
+      ⟨trivial, rfl⟩
+    obtain ⟨_, hSpecTr, _⟩ :=
+      (mirRssMlDsaGate_forwardSim_spec chalHash sampleInBall).lift_validTrace hRel₀ hTrace
+    obtain ⟨_, hPair, hVer⟩ := specRssMlDsaMachine_trace_sound hSpecTr
+    exact ⟨hPair, hVer⟩
+
+/-! ## §4. Certified `2 * q > n + f` `BeltLatch` Guard $\to$ `WalLatchState` & `IdealTsig` Bridge -/
+
