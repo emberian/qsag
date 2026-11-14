@@ -22,7 +22,7 @@ public def main : IO UInt32 := do
     for (name, _) in env.constants.toList do
       if let some idx := env.getModuleIdxFor? name then
         let owner := env.header.moduleNames[idx.toNat]!.toString
-        if owner == "QsagCustodyWeld" || owner == "QsagSpecWeld" || owner == "QsagMirProofs" || owner == "QsagVerified" ||
+        if owner == "Aeneas" || owner.startsWith "Aeneas." || owner == "QsagCustodyWeld" || owner == "QsagSpecWeld" || owner == "QsagMirProofs" || owner == "QsagVerified" ||
             owner.startsWith "QsagVerified." then
           checked := checked + 1
           if let some (.thmInfo _) := env.find? name then theorems := theorems + 1
