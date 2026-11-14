@@ -5406,3 +5406,2718 @@ def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreMarkerCopy :
 /-- [qsag_verified::pants_and_quorum_guards::{impl core::fmt::Debug for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}::fmt]:
     Source: 'src/pants_and_quorum_guards.rs', lines 621:22-621:27
     Visibility: public -/
+def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreFmtDebug.fmt
+  (self : pants_and_quorum_guards.RssLatchStepOutput) (f : core.fmt.Formatter)
+  :
+  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
+  := do
+  match self with
+  | pants_and_quorum_guards.RssLatchStepOutput.RelationsStaged __self_0 =>
+    let __self_01 := Dyn.mk _ (core.fmt.DebugShared core.fmt.DebugU64) __self_0
+    core.fmt.Formatter.debug_tuple_field1_finish f (toStr "RelationsStaged")
+      __self_01
+  | pants_and_quorum_guards.RssLatchStepOutput.CheckVerified =>
+    core.fmt.Formatter.write_str f (toStr "CheckVerified")
+  | pants_and_quorum_guards.RssLatchStepOutput.OpenAuthorized __self_0 =>
+    let __self_01 :=
+      Dyn.mk _ (core.fmt.DebugShared
+        pants_and_quorum_guards.RssOpenPermit.Insts.CoreFmtDebug) __self_0
+    core.fmt.Formatter.debug_tuple_field1_finish f (toStr "OpenAuthorized")
+      __self_01
+
+/-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::fmt::Debug for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}]
+    Source: 'src/pants_and_quorum_guards.rs', lines 621:22-621:27 -/
+@[reducible]
+def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreFmtDebug :
+  core.fmt.Debug pants_and_quorum_guards.RssLatchStepOutput := {
+  fmt := pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreFmtDebug.fmt
+}
+
+/-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::marker::StructuralPartialEq for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}]
+    Source: 'src/pants_and_quorum_guards.rs', lines 621:29-621:38 -/
+@[reducible]
+def
+  pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreMarkerStructuralPartialEq
+  : core.marker.StructuralPartialEq pants_and_quorum_guards.RssLatchStepOutput
+  := {
+}
+
+/-- [qsag_verified::pants_and_quorum_guards::{impl core::cmp::PartialEq<qsag_verified::pants_and_quorum_guards::RssLatchStepOutput> for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}::eq]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 621:29-621:38
+    Visibility: public -/
+def
+  pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpPartialEqRssLatchStepOutput.eq
+  (self : pants_and_quorum_guards.RssLatchStepOutput)
+  (other : pants_and_quorum_guards.RssLatchStepOutput) :
+  Result Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  if self1 = other1
+  then
+    match self with
+    | pants_and_quorum_guards.RssLatchStepOutput.RelationsStaged __self_0 =>
+      match other with
+      | pants_and_quorum_guards.RssLatchStepOutput.RelationsStaged __arg1_0 =>
+        lift (core.cmp.impls.PartialEqU64.eq __self_0 __arg1_0)
+      | pants_and_quorum_guards.RssLatchStepOutput.CheckVerified => ok true
+      | pants_and_quorum_guards.RssLatchStepOutput.OpenAuthorized _ => ok true
+    | pants_and_quorum_guards.RssLatchStepOutput.CheckVerified => ok true
+    | pants_and_quorum_guards.RssLatchStepOutput.OpenAuthorized __self_0 =>
+      match other with
+      | pants_and_quorum_guards.RssLatchStepOutput.RelationsStaged _ => ok true
+      | pants_and_quorum_guards.RssLatchStepOutput.CheckVerified => ok true
+      | pants_and_quorum_guards.RssLatchStepOutput.OpenAuthorized __arg1_0 =>
+        pants_and_quorum_guards.RssOpenPermit.Insts.CoreCmpPartialEqRssOpenPermit.eq
+          __self_0 __arg1_0
+  else ok false
+
+/-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::cmp::PartialEq<qsag_verified::pants_and_quorum_guards::RssLatchStepOutput> for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}]
+    Source: 'src/pants_and_quorum_guards.rs', lines 621:29-621:38 -/
+@[reducible]
+def
+  pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpPartialEqRssLatchStepOutput
+  : core.cmp.PartialEq pants_and_quorum_guards.RssLatchStepOutput
+  pants_and_quorum_guards.RssLatchStepOutput := {
+  eq :=
+    pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpPartialEqRssLatchStepOutput.eq
+}
+
+/-- [qsag_verified::pants_and_quorum_guards::{impl core::cmp::Eq for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}::assert_fields_are_eq]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 621:40-621:42
+    Visibility: public -/
+def
+  pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpEq.assert_fields_are_eq
+  (self : pants_and_quorum_guards.RssLatchStepOutput) : Result Unit := do
+  ok ()
+
+/-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::cmp::Eq for qsag_verified::pants_and_quorum_guards::RssLatchStepOutput}]
+    Source: 'src/pants_and_quorum_guards.rs', lines 621:40-621:42 -/
+@[reducible]
+def pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpEq : core.cmp.Eq
+  pants_and_quorum_guards.RssLatchStepOutput := {
+  partialEqInst :=
+    pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpPartialEqRssLatchStepOutput
+  assert_fields_are_eq :=
+    pants_and_quorum_guards.RssLatchStepOutput.Insts.CoreCmpEq.assert_fields_are_eq
+}
+
+/-- [qsag_verified::pants_and_quorum_guards::poison_rss_latch]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 638:0-644:1 -/
+def pants_and_quorum_guards.poison_rss_latch
+  : Result pants_and_quorum_guards.VerifiedRssPoisonLatch := do
+  ok { pending_relations := 0#u64, unverified := true, poisoned := true }
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::new_clean]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 649:4-655:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedRssPoisonLatch.new_clean
+  : Result pants_and_quorum_guards.VerifiedRssPoisonLatch := do
+  ok { pending_relations := 0#u64, unverified := false, poisoned := false }
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::pending_relations]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 658:4-660:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedRssPoisonLatch.impl.pending_relations
+  (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) :
+  Result Std.U64
+  := do
+  ok self.pending_relations
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::is_unverified]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 663:4-665:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedRssPoisonLatch.is_unverified
+  (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) : Result Bool := do
+  ok self.unverified
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::is_poisoned]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 668:4-670:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedRssPoisonLatch.is_poisoned
+  (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) : Result Bool := do
+  ok self.poisoned
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::stage_relations]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 673:4-696:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations
+  (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) (count : Std.U64) :
+  Result (pants_and_quorum_guards.VerifiedRssPoisonLatch × (core.result.Result
+    Std.U64 pants_and_quorum_guards.PantsGuardError))
+  := do
+  if self.poisoned
+  then
+    let vrpl ← pants_and_quorum_guards.poison_rss_latch
+    ok (vrpl, core.result.Result.Err
+      pants_and_quorum_guards.PantsGuardError.RssEnginePoisoned)
+  else
+    if count = 0#u64
+    then
+      ok (self, core.result.Result.Err
+        pants_and_quorum_guards.PantsGuardError.ZeroRelationBatch)
+    else
+      let i ← core.num.U64.MAX - self.pending_relations
+      if count > i
+      then
+        let vrpl ← pants_and_quorum_guards.poison_rss_latch
+        ok (vrpl, core.result.Result.Err
+          pants_and_quorum_guards.PantsGuardError.RelationCounterOverflow)
+      else
+        let next_pending ← self.pending_relations + count
+        ok
+          ({
+             pending_relations := next_pending,
+             unverified := true,
+             poisoned := false
+           }, core.result.Result.Ok next_pending)
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::record_check_result]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 703:4-723:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result
+  (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) (check_ok : Bool) :
+  Result (pants_and_quorum_guards.VerifiedRssPoisonLatch × (core.result.Result
+    Unit pants_and_quorum_guards.PantsGuardError))
+  := do
+  if self.poisoned
+  then
+    let vrpl ← pants_and_quorum_guards.poison_rss_latch
+    ok (vrpl, core.result.Result.Err
+      pants_and_quorum_guards.PantsGuardError.RssEnginePoisoned)
+  else
+    if check_ok
+    then
+      ok
+        ({ pending_relations := 0#u64, unverified := false, poisoned := false },
+        core.result.Result.Ok ())
+    else
+      ok ({ pending_relations := 0#u64, unverified := true, poisoned := true },
+        core.result.Result.Err
+        pants_and_quorum_guards.PantsGuardError.RssVerificationCheckFailed)
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::authorize_open]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 726:4-734:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open
+  (self : pants_and_quorum_guards.VerifiedRssPoisonLatch) :
+  Result (pants_and_quorum_guards.VerifiedRssPoisonLatch × (core.result.Result
+    pants_and_quorum_guards.RssOpenPermit
+    pants_and_quorum_guards.PantsGuardError))
+  := do
+  if self.poisoned
+  then
+    let vrpl ← pants_and_quorum_guards.poison_rss_latch
+    ok (vrpl, core.result.Result.Err
+      pants_and_quorum_guards.PantsGuardError.RssEnginePoisoned)
+  else
+    if self.unverified
+    then
+      ok (self, core.result.Result.Err
+        pants_and_quorum_guards.PantsGuardError.RssOpenBeforeCheck)
+    else
+      if self.pending_relations != 0#u64
+      then
+        ok (self, core.result.Result.Err
+          pants_and_quorum_guards.PantsGuardError.RssOpenBeforeCheck)
+      else ok (self, core.result.Result.Ok { verified_clean := true })
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch}::step]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 737:4-764:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedRssPoisonLatch.step
+  (self : pants_and_quorum_guards.VerifiedRssPoisonLatch)
+  (input : pants_and_quorum_guards.RssLatchStepInput) :
+  Result (pants_and_quorum_guards.VerifiedRssPoisonLatch × (core.result.Result
+    pants_and_quorum_guards.RssLatchStepOutput
+    pants_and_quorum_guards.PantsGuardError))
+  := do
+  match input with
+  | pants_and_quorum_guards.RssLatchStepInput.StageRelations count =>
+    let (next, res) ←
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.stage_relations self count
+    match res with
+    | core.result.Result.Ok n =>
+      ok (next, core.result.Result.Ok
+        (pants_and_quorum_guards.RssLatchStepOutput.RelationsStaged n))
+    | core.result.Result.Err e => ok (next, core.result.Result.Err e)
+  | pants_and_quorum_guards.RssLatchStepInput.RecordCheckResult check_ok =>
+    let (next, res) ←
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.record_check_result self
+        check_ok
+    match res with
+    | core.result.Result.Ok _ =>
+      ok (next, core.result.Result.Ok
+        pants_and_quorum_guards.RssLatchStepOutput.CheckVerified)
+    | core.result.Result.Err e => ok (next, core.result.Result.Err e)
+  | pants_and_quorum_guards.RssLatchStepInput.AuthorizeOpen =>
+    let (next, res) ←
+      pants_and_quorum_guards.VerifiedRssPoisonLatch.authorize_open self
+    match res with
+    | core.result.Result.Ok p =>
+      ok (next, core.result.Result.Ok
+        (pants_and_quorum_guards.RssLatchStepOutput.OpenAuthorized p))
+    | core.result.Result.Err e => ok (next, core.result.Result.Err e)
+
+/-- [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::WaistbandDerivationRequest}::clone]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 772:9-772:14
+    Visibility: public -/
+def
+  pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreCloneClone.clone
+  (self : pants_and_quorum_guards.WaistbandDerivationRequest) :
+  Result pants_and_quorum_guards.WaistbandDerivationRequest
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::WaistbandDerivationRequest}]
+    Source: 'src/pants_and_quorum_guards.rs', lines 772:9-772:14 -/
+@[reducible]
+def pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreCloneClone :
+  core.clone.Clone pants_and_quorum_guards.WaistbandDerivationRequest := {
+  clone :=
+    pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::marker::Copy for qsag_verified::pants_and_quorum_guards::WaistbandDerivationRequest}]
+    Source: 'src/pants_and_quorum_guards.rs', lines 772:16-772:20 -/
+@[reducible]
+def pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreMarkerCopy :
+  core.marker.Copy pants_and_quorum_guards.WaistbandDerivationRequest := {
+  cloneInst :=
+    pants_and_quorum_guards.WaistbandDerivationRequest.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::WaistbandAncestorPermit}::clone]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 785:9-785:14
+    Visibility: public -/
+def pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreCloneClone.clone
+  (self : pants_and_quorum_guards.WaistbandAncestorPermit) :
+  Result pants_and_quorum_guards.WaistbandAncestorPermit
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::clone::Clone for qsag_verified::pants_and_quorum_guards::WaistbandAncestorPermit}]
+    Source: 'src/pants_and_quorum_guards.rs', lines 785:9-785:14 -/
+@[reducible]
+def pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreCloneClone :
+  core.clone.Clone pants_and_quorum_guards.WaistbandAncestorPermit := {
+  clone :=
+    pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::pants_and_quorum_guards::{impl core::marker::Copy for qsag_verified::pants_and_quorum_guards::WaistbandAncestorPermit}]
+    Source: 'src/pants_and_quorum_guards.rs', lines 785:16-785:20 -/
+@[reducible]
+def pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreMarkerCopy :
+  core.marker.Copy pants_and_quorum_guards.WaistbandAncestorPermit := {
+  cloneInst :=
+    pants_and_quorum_guards.WaistbandAncestorPermit.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::pants_and_quorum_guards::poison_waistband_guard]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 808:0-820:1 -/
+def pants_and_quorum_guards.poison_waistband_guard
+  (st : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result pants_and_quorum_guards.VerifiedWaistbandRootGuard
+  := do
+  ok { st with poisoned := true }
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::new_enrolled]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 826:4-845:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedWaistbandRootGuard.new_enrolled
+  (key_pk_tag : Array Std.U8 32#usize) (key_params_tag : Array Std.U8 32#usize)
+  (ancestor_layer : Std.U32) (ancestor_tree : Std.U64) (ancestor_kp : Std.U32)
+  (expected_static_child_root : Array Std.U8 32#usize) :
+  Result pants_and_quorum_guards.VerifiedWaistbandRootGuard
+  := do
+  let a := Array.repeat 32#usize 0#u8
+  ok
+    {
+      key_pk_tag,
+      key_params_tag,
+      ancestor_layer,
+      ancestor_tree,
+      ancestor_kp,
+      expected_static_child_root,
+      has_locked_codeword := false,
+      locked_ancestor_codeword_tag := a,
+      poisoned := false
+    }
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::key_pk_tag]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 848:4-850:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.key_pk_tag
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result (Array Std.U8 32#usize)
+  := do
+  ok self.key_pk_tag
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::key_params_tag]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 853:4-855:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.key_params_tag
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result (Array Std.U8 32#usize)
+  := do
+  ok self.key_params_tag
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::ancestor_layer]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 858:4-860:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_layer
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result Std.U32
+  := do
+  ok self.ancestor_layer
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::ancestor_tree]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 863:4-865:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_tree
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result Std.U64
+  := do
+  ok self.ancestor_tree
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::ancestor_kp]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 868:4-870:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.ancestor_kp
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result Std.U32
+  := do
+  ok self.ancestor_kp
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::expected_static_child_root]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 873:4-875:5
+    Visibility: public -/
+def
+  pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.expected_static_child_root
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result (Array Std.U8 32#usize)
+  := do
+  ok self.expected_static_child_root
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::has_locked_codeword]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 878:4-880:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.has_locked_codeword
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result Bool
+  := do
+  ok self.has_locked_codeword
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::locked_ancestor_codeword_tag]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 883:4-885:5
+    Visibility: public -/
+def
+  pants_and_quorum_guards.VerifiedWaistbandRootGuard.impl.locked_ancestor_codeword_tag
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result (Array Std.U8 32#usize)
+  := do
+  ok self.locked_ancestor_codeword_tag
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::is_poisoned]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 888:4-890:5
+    Visibility: public -/
+def pants_and_quorum_guards.VerifiedWaistbandRootGuard.is_poisoned
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard) :
+  Result Bool
+  := do
+  ok self.poisoned
+
+/-- [qsag_verified::pants_and_quorum_guards::{qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard}::authorize_ancestor_derivation]:
+    Source: 'src/pants_and_quorum_guards.rs', lines 896:4-966:5
+    Visibility: public -/
+def
+  pants_and_quorum_guards.VerifiedWaistbandRootGuard.authorize_ancestor_derivation
+  (self : pants_and_quorum_guards.VerifiedWaistbandRootGuard)
+  (req : pants_and_quorum_guards.WaistbandDerivationRequest) :
+  Result (pants_and_quorum_guards.VerifiedWaistbandRootGuard ×
+    (core.result.Result pants_and_quorum_guards.WaistbandAncestorPermit
+    pants_and_quorum_guards.PantsGuardError))
+  := do
+  if self.poisoned
+  then
+    let vwrg ← pants_and_quorum_guards.poison_waistband_guard self
+    ok (vwrg, core.result.Result.Err
+      pants_and_quorum_guards.PantsGuardError.WaistbandGuardPoisoned)
+  else
+    if req.req_layer != self.ancestor_layer
+    then
+      let vwrg ← pants_and_quorum_guards.poison_waistband_guard self
+      ok (vwrg, core.result.Result.Err
+        pants_and_quorum_guards.PantsGuardError.WaistbandAddressMismatch)
+    else
+      if req.req_tree != self.ancestor_tree
+      then
+        let vwrg ← pants_and_quorum_guards.poison_waistband_guard self
+        ok (vwrg, core.result.Result.Err
+          pants_and_quorum_guards.PantsGuardError.WaistbandAddressMismatch)
+      else
+        if req.req_kp != self.ancestor_kp
+        then
+          let vwrg ← pants_and_quorum_guards.poison_waistband_guard self
+          ok (vwrg, core.result.Result.Err
+            pants_and_quorum_guards.PantsGuardError.WaistbandAddressMismatch)
+        else
+          let b ← tower.ct_eq_bytes32 req.cache_pk_tag self.key_pk_tag
+          if b
+          then
+            let b1 ←
+              tower.ct_eq_bytes32 req.cache_params_tag self.key_params_tag
+            if b1
+            then
+              let b2 ←
+                tower.ct_eq_bytes32 req.recomputed_child_root
+                  self.expected_static_child_root
+              if b2
+              then
+                if self.has_locked_codeword
+                then
+                  let b3 ←
+                    tower.ct_eq_bytes32 req.candidate_ancestor_codeword_tag
+                      self.locked_ancestor_codeword_tag
+                  if b3
+                  then
+                    ok
+                      ({
+                         self
+                           with
+                           locked_ancestor_codeword_tag :=
+                             req.candidate_ancestor_codeword_tag
+                       }, core.result.Result.Ok
+                      {
+                        layer := self.ancestor_layer,
+                        tree := self.ancestor_tree,
+                        kp := self.ancestor_kp,
+                        verified_child_root := self.expected_static_child_root,
+                        authorized_codeword_tag :=
+                          req.candidate_ancestor_codeword_tag
+                      })
+                  else
+                    let vwrg ←
+                      pants_and_quorum_guards.poison_waistband_guard self
+                    ok (vwrg, core.result.Result.Err
+                      pants_and_quorum_guards.PantsGuardError.WaistbandCodewordEquivocation)
+                else
+                  ok
+                    ({
+                       self
+                         with
+                         has_locked_codeword := true,
+                         locked_ancestor_codeword_tag :=
+                           req.candidate_ancestor_codeword_tag
+                     }, core.result.Result.Ok
+                    {
+                      layer := self.ancestor_layer,
+                      tree := self.ancestor_tree,
+                      kp := self.ancestor_kp,
+                      verified_child_root := self.expected_static_child_root,
+                      authorized_codeword_tag :=
+                        req.candidate_ancestor_codeword_tag
+                    })
+              else
+                let vwrg ←
+                  pants_and_quorum_guards.poison_waistband_guard self
+                ok (vwrg, core.result.Result.Err
+                  pants_and_quorum_guards.PantsGuardError.WaistbandChildRootMismatch)
+            else
+              let vwrg ← pants_and_quorum_guards.poison_waistband_guard self
+              ok (vwrg, core.result.Result.Err
+                pants_and_quorum_guards.PantsGuardError.WaistbandCacheParamsMismatch)
+          else
+            let vwrg ← pants_and_quorum_guards.poison_waistband_guard self
+            ok (vwrg, core.result.Result.Err
+              pants_and_quorum_guards.PantsGuardError.WaistbandCachePkMismatch)
+
+/-- [qsag_verified::policy_and_addr::INTENT_V1_MAGIC]
+    Source: 'src/policy_and_addr.rs', lines 16:0-16:45
+    Visibility: public -/
+@[global_simps, irreducible]
+def policy_and_addr.INTENT_V1_MAGIC : Std.U32 := 1364412721#u32
+
+/-- [qsag_verified::policy_and_addr::SUITE_HYBRID_ED25519_MLDSA65]
+    Source: 'src/policy_and_addr.rs', lines 19:0-19:53
+    Visibility: public -/
+@[global_simps, irreducible]
+def policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65 : Std.U16 := 1281#u16
+
+/-- [qsag_verified::policy_and_addr::SUITE_HYBRID_SECP256K1_SLHDSA]
+    Source: 'src/policy_and_addr.rs', lines 22:0-22:54
+    Visibility: public -/
+@[global_simps, irreducible]
+def policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA : Std.U16 := 1282#u16
+
+/-- [qsag_verified::policy_and_addr::MAX_VELOCITY_U128]
+    Source: 'src/policy_and_addr.rs', lines 25:0-25:78
+    Visibility: public -/
+@[global_simps, irreducible]
+def policy_and_addr.MAX_VELOCITY_U128 : Std.U128 :=
+  340282366920938463463374607431768211455#u128
+
+/-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::PolicyAddrError}::clone]:
+    Source: 'src/policy_and_addr.rs', lines 28:9-28:14
+    Visibility: public -/
+def policy_and_addr.PolicyAddrError.Insts.CoreCloneClone.clone
+  (self : policy_and_addr.PolicyAddrError) :
+  Result policy_and_addr.PolicyAddrError
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::PolicyAddrError}]
+    Source: 'src/policy_and_addr.rs', lines 28:9-28:14 -/
+@[reducible]
+def policy_and_addr.PolicyAddrError.Insts.CoreCloneClone : core.clone.Clone
+  policy_and_addr.PolicyAddrError := {
+  clone := policy_and_addr.PolicyAddrError.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::PolicyAddrError}]
+    Source: 'src/policy_and_addr.rs', lines 28:16-28:20 -/
+@[reducible]
+def policy_and_addr.PolicyAddrError.Insts.CoreMarkerCopy : core.marker.Copy
+  policy_and_addr.PolicyAddrError := {
+  cloneInst := policy_and_addr.PolicyAddrError.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::PolicyAddrError}::fmt]:
+    Source: 'src/policy_and_addr.rs', lines 28:22-28:27
+    Visibility: public -/
+def policy_and_addr.PolicyAddrError.Insts.CoreFmtDebug.fmt
+  (self : policy_and_addr.PolicyAddrError) (f : core.fmt.Formatter) :
+  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
+  := do
+  match self with
+  | policy_and_addr.PolicyAddrError.PolicyPinMismatch =>
+    core.fmt.Formatter.write_str f (toStr "PolicyPinMismatch")
+  | policy_and_addr.PolicyAddrError.AuthorityPinMismatch =>
+    core.fmt.Formatter.write_str f (toStr "AuthorityPinMismatch")
+  | policy_and_addr.PolicyAddrError.WindowIdMismatch =>
+    core.fmt.Formatter.write_str f (toStr "WindowIdMismatch")
+  | policy_and_addr.PolicyAddrError.NonMonotonicNonce =>
+    core.fmt.Formatter.write_str f (toStr "NonMonotonicNonce")
+  | policy_and_addr.PolicyAddrError.VelocityArithmeticOverflow =>
+    core.fmt.Formatter.write_str f (toStr "VelocityArithmeticOverflow")
+  | policy_and_addr.PolicyAddrError.VelocityCapExceeded =>
+    core.fmt.Formatter.write_str f (toStr "VelocityCapExceeded")
+  | policy_and_addr.PolicyAddrError.InvalidWindowRotation =>
+    core.fmt.Formatter.write_str f (toStr "InvalidWindowRotation")
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::PolicyAddrError}]
+    Source: 'src/policy_and_addr.rs', lines 28:22-28:27 -/
+@[reducible]
+def policy_and_addr.PolicyAddrError.Insts.CoreFmtDebug : core.fmt.Debug
+  policy_and_addr.PolicyAddrError := {
+  fmt := policy_and_addr.PolicyAddrError.Insts.CoreFmtDebug.fmt
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::StructuralPartialEq for qsag_verified::policy_and_addr::PolicyAddrError}]
+    Source: 'src/policy_and_addr.rs', lines 28:29-28:38 -/
+@[reducible]
+def policy_and_addr.PolicyAddrError.Insts.CoreMarkerStructuralPartialEq :
+  core.marker.StructuralPartialEq policy_and_addr.PolicyAddrError := {
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::PolicyAddrError> for qsag_verified::policy_and_addr::PolicyAddrError}::eq]:
+    Source: 'src/policy_and_addr.rs', lines 28:29-28:38
+    Visibility: public -/
+def policy_and_addr.PolicyAddrError.Insts.CoreCmpPartialEqPolicyAddrError.eq
+  (self : policy_and_addr.PolicyAddrError)
+  (other : policy_and_addr.PolicyAddrError) :
+  Result Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (self1 = other1)
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::PolicyAddrError> for qsag_verified::policy_and_addr::PolicyAddrError}]
+    Source: 'src/policy_and_addr.rs', lines 28:29-28:38 -/
+@[reducible]
+def policy_and_addr.PolicyAddrError.Insts.CoreCmpPartialEqPolicyAddrError :
+  core.cmp.PartialEq policy_and_addr.PolicyAddrError
+  policy_and_addr.PolicyAddrError := {
+  eq :=
+    policy_and_addr.PolicyAddrError.Insts.CoreCmpPartialEqPolicyAddrError.eq
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::Eq for qsag_verified::policy_and_addr::PolicyAddrError}]
+    Source: 'src/policy_and_addr.rs', lines 28:40-28:42 -/
+@[reducible]
+impl_def policy_and_addr.PolicyAddrError.Insts.CoreCmpEq : core.cmp.Eq
+  policy_and_addr.PolicyAddrError := {
+  partialEqInst :=
+    policy_and_addr.PolicyAddrError.Insts.CoreCmpPartialEqPolicyAddrError
+  assert_fields_are_eq := core.cmp.Eq.assert_fields_are_eq.default
+    policy_and_addr.PolicyAddrError.Insts.CoreCmpEq
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::VelocitySpendRequest}::clone]:
+    Source: 'src/policy_and_addr.rs', lines 40:9-40:14
+    Visibility: public -/
+def policy_and_addr.VelocitySpendRequest.Insts.CoreCloneClone.clone
+  (self : policy_and_addr.VelocitySpendRequest) :
+  Result policy_and_addr.VelocitySpendRequest
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::VelocitySpendRequest}]
+    Source: 'src/policy_and_addr.rs', lines 40:9-40:14 -/
+@[reducible]
+def policy_and_addr.VelocitySpendRequest.Insts.CoreCloneClone :
+  core.clone.Clone policy_and_addr.VelocitySpendRequest := {
+  clone := policy_and_addr.VelocitySpendRequest.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::VelocitySpendRequest}]
+    Source: 'src/policy_and_addr.rs', lines 40:16-40:20 -/
+@[reducible]
+def policy_and_addr.VelocitySpendRequest.Insts.CoreMarkerCopy :
+  core.marker.Copy policy_and_addr.VelocitySpendRequest := {
+  cloneInst := policy_and_addr.VelocitySpendRequest.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::StatefulVelocityGuard}::window_id]:
+    Source: 'src/policy_and_addr.rs', lines 69:4-69:59
+    Visibility: public -/
+def policy_and_addr.StatefulVelocityGuard.impl.window_id
+  (self : policy_and_addr.StatefulVelocityGuard) : Result Std.U64 := do
+  ok self.window_id
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::StatefulVelocityGuard}::spent_units]:
+    Source: 'src/policy_and_addr.rs', lines 72:4-72:64
+    Visibility: public -/
+def policy_and_addr.StatefulVelocityGuard.impl.spent_units
+  (self : policy_and_addr.StatefulVelocityGuard) : Result Std.U128 := do
+  ok self.spent_units
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::StatefulVelocityGuard}::cap_units]:
+    Source: 'src/policy_and_addr.rs', lines 75:4-75:60
+    Visibility: public -/
+def policy_and_addr.StatefulVelocityGuard.impl.cap_units
+  (self : policy_and_addr.StatefulVelocityGuard) : Result Std.U128 := do
+  ok self.cap_units
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::StatefulVelocityGuard}::policy_pin]:
+    Source: 'src/policy_and_addr.rs', lines 78:4-78:66
+    Visibility: public -/
+def policy_and_addr.StatefulVelocityGuard.impl.policy_pin
+  (self : policy_and_addr.StatefulVelocityGuard) :
+  Result (Array Std.U8 32#usize)
+  := do
+  ok self.policy_pin
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::StatefulVelocityGuard}::authority_pin]:
+    Source: 'src/policy_and_addr.rs', lines 81:4-81:72
+    Visibility: public -/
+def policy_and_addr.StatefulVelocityGuard.impl.authority_pin
+  (self : policy_and_addr.StatefulVelocityGuard) :
+  Result (Array Std.U8 32#usize)
+  := do
+  ok self.authority_pin
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::StatefulVelocityGuard}::last_nonce]:
+    Source: 'src/policy_and_addr.rs', lines 84:4-84:61
+    Visibility: public -/
+def policy_and_addr.StatefulVelocityGuard.impl.last_nonce
+  (self : policy_and_addr.StatefulVelocityGuard) : Result Std.U64 := do
+  ok self.last_nonce
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::StatefulVelocityGuard}::new_window]:
+    Source: 'src/policy_and_addr.rs', lines 89:4-103:5
+    Visibility: public -/
+def policy_and_addr.StatefulVelocityGuard.new_window
+  (window_id : Std.U64) (cap_units : Std.U128)
+  (policy_pin : Array Std.U8 32#usize) (authority_pin : Array Std.U8 32#usize)
+  :
+  Result policy_and_addr.StatefulVelocityGuard
+  := do
+  ok
+    {
+      window_id,
+      spent_units := 0#u128,
+      cap_units,
+      policy_pin,
+      authority_pin,
+      last_nonce := 0#u64
+    }
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::StatefulVelocityGuard}::authorize_spend]:
+    Source: 'src/policy_and_addr.rs', lines 112:4-144:5
+    Visibility: public -/
+def policy_and_addr.StatefulVelocityGuard.authorize_spend
+  (self : policy_and_addr.StatefulVelocityGuard)
+  (req : policy_and_addr.VelocitySpendRequest) :
+  Result (policy_and_addr.StatefulVelocityGuard × (core.result.Result Std.U128
+    policy_and_addr.PolicyAddrError))
+  := do
+  let b ← tower.ct_eq_bytes32 self.policy_pin req.policy_pin
+  if b
+  then
+    let b1 ← tower.ct_eq_bytes32 self.authority_pin req.authority_pin
+    if b1
+    then
+      if req.window_id != self.window_id
+      then
+        ok (self, core.result.Result.Err
+          policy_and_addr.PolicyAddrError.WindowIdMismatch)
+      else
+        if req.nonce <= self.last_nonce
+        then
+          ok (self, core.result.Result.Err
+            policy_and_addr.PolicyAddrError.NonMonotonicNonce)
+        else
+          let i ← policy_and_addr.MAX_VELOCITY_U128 - self.spent_units
+          if req.amount_units > i
+          then
+            ok (self, core.result.Result.Err
+              policy_and_addr.PolicyAddrError.VelocityArithmeticOverflow)
+          else
+            let new_spent ← self.spent_units + req.amount_units
+            if new_spent > self.cap_units
+            then
+              ok (self, core.result.Result.Err
+                policy_and_addr.PolicyAddrError.VelocityCapExceeded)
+            else
+              ok
+                ({ self with spent_units := new_spent, last_nonce := req.nonce
+                 }, core.result.Result.Ok req.amount_units)
+    else
+      ok (self, core.result.Result.Err
+        policy_and_addr.PolicyAddrError.AuthorityPinMismatch)
+  else
+    ok (self, core.result.Result.Err
+      policy_and_addr.PolicyAddrError.PolicyPinMismatch)
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::StatefulVelocityGuard}::rotate_window]:
+    Source: 'src/policy_and_addr.rs', lines 148:4-172:5
+    Visibility: public -/
+def policy_and_addr.StatefulVelocityGuard.rotate_window
+  (self : policy_and_addr.StatefulVelocityGuard) (next_window_id : Std.U64)
+  (req_policy_pin : Array Std.U8 32#usize)
+  (req_authority_pin : Array Std.U8 32#usize) :
+  Result (policy_and_addr.StatefulVelocityGuard × (core.result.Result Unit
+    policy_and_addr.PolicyAddrError))
+  := do
+  let b ← tower.ct_eq_bytes32 self.policy_pin req_policy_pin
+  if b
+  then
+    let b1 ← tower.ct_eq_bytes32 self.authority_pin req_authority_pin
+    if b1
+    then
+      if next_window_id <= self.window_id
+      then
+        ok (self, core.result.Result.Err
+          policy_and_addr.PolicyAddrError.InvalidWindowRotation)
+      else
+        ok ({ self with window_id := next_window_id, spent_units := 0#u128 },
+          core.result.Result.Ok ())
+    else
+      ok (self, core.result.Result.Err
+        policy_and_addr.PolicyAddrError.AuthorityPinMismatch)
+  else
+    ok (self, core.result.Result.Err
+      policy_and_addr.PolicyAddrError.PolicyPinMismatch)
+
+/-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentAddressVersion}::clone]:
+    Source: 'src/policy_and_addr.rs', lines 176:9-176:14
+    Visibility: public -/
+def policy_and_addr.IntentAddressVersion.Insts.CoreCloneClone.clone
+  (self : policy_and_addr.IntentAddressVersion) :
+  Result policy_and_addr.IntentAddressVersion
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentAddressVersion}]
+    Source: 'src/policy_and_addr.rs', lines 176:9-176:14 -/
+@[reducible]
+def policy_and_addr.IntentAddressVersion.Insts.CoreCloneClone :
+  core.clone.Clone policy_and_addr.IntentAddressVersion := {
+  clone := policy_and_addr.IntentAddressVersion.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::IntentAddressVersion}]
+    Source: 'src/policy_and_addr.rs', lines 176:16-176:20 -/
+@[reducible]
+def policy_and_addr.IntentAddressVersion.Insts.CoreMarkerCopy :
+  core.marker.Copy policy_and_addr.IntentAddressVersion := {
+  cloneInst := policy_and_addr.IntentAddressVersion.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentAddressVersion}::fmt]:
+    Source: 'src/policy_and_addr.rs', lines 176:22-176:27
+    Visibility: public -/
+def policy_and_addr.IntentAddressVersion.Insts.CoreFmtDebug.fmt
+  (self : policy_and_addr.IntentAddressVersion) (f : core.fmt.Formatter) :
+  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
+  := do
+  match self with
+  | policy_and_addr.IntentAddressVersion.V1 =>
+    core.fmt.Formatter.write_str f (toStr "V1")
+  | policy_and_addr.IntentAddressVersion.V2 =>
+    core.fmt.Formatter.write_str f (toStr "V2")
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentAddressVersion}]
+    Source: 'src/policy_and_addr.rs', lines 176:22-176:27 -/
+@[reducible]
+def policy_and_addr.IntentAddressVersion.Insts.CoreFmtDebug : core.fmt.Debug
+  policy_and_addr.IntentAddressVersion := {
+  fmt := policy_and_addr.IntentAddressVersion.Insts.CoreFmtDebug.fmt
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::StructuralPartialEq for qsag_verified::policy_and_addr::IntentAddressVersion}]
+    Source: 'src/policy_and_addr.rs', lines 176:29-176:38 -/
+@[reducible]
+def policy_and_addr.IntentAddressVersion.Insts.CoreMarkerStructuralPartialEq :
+  core.marker.StructuralPartialEq policy_and_addr.IntentAddressVersion := {
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentAddressVersion> for qsag_verified::policy_and_addr::IntentAddressVersion}::eq]:
+    Source: 'src/policy_and_addr.rs', lines 176:29-176:38
+    Visibility: public -/
+def
+  policy_and_addr.IntentAddressVersion.Insts.CoreCmpPartialEqIntentAddressVersion.eq
+  (self : policy_and_addr.IntentAddressVersion)
+  (other : policy_and_addr.IntentAddressVersion) :
+  Result Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (self1 = other1)
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentAddressVersion> for qsag_verified::policy_and_addr::IntentAddressVersion}]
+    Source: 'src/policy_and_addr.rs', lines 176:29-176:38 -/
+@[reducible]
+def
+  policy_and_addr.IntentAddressVersion.Insts.CoreCmpPartialEqIntentAddressVersion
+  : core.cmp.PartialEq policy_and_addr.IntentAddressVersion
+  policy_and_addr.IntentAddressVersion := {
+  eq :=
+    policy_and_addr.IntentAddressVersion.Insts.CoreCmpPartialEqIntentAddressVersion.eq
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::Eq for qsag_verified::policy_and_addr::IntentAddressVersion}]
+    Source: 'src/policy_and_addr.rs', lines 176:40-176:42 -/
+@[reducible]
+impl_def policy_and_addr.IntentAddressVersion.Insts.CoreCmpEq : core.cmp.Eq
+  policy_and_addr.IntentAddressVersion := {
+  partialEqInst :=
+    policy_and_addr.IntentAddressVersion.Insts.CoreCmpPartialEqIntentAddressVersion
+  assert_fields_are_eq := core.cmp.Eq.assert_fields_are_eq.default
+    policy_and_addr.IntentAddressVersion.Insts.CoreCmpEq
+}
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentAddressVersion}::to_u8]:
+    Source: 'src/policy_and_addr.rs', lines 184:4-189:5
+    Visibility: public -/
+def policy_and_addr.IntentAddressVersion.to_u8
+  (self : policy_and_addr.IntentAddressVersion) : Result Std.U8 := do
+  match self with
+  | policy_and_addr.IntentAddressVersion.V1 => ok 1#u8
+  | policy_and_addr.IntentAddressVersion.V2 => ok 2#u8
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentAddressVersion}::from_u8]:
+    Source: 'src/policy_and_addr.rs', lines 192:4-198:5
+    Visibility: public -/
+def policy_and_addr.IntentAddressVersion.from_u8
+  (v : Std.U8) : Result (Option policy_and_addr.IntentAddressVersion) := do
+  match v with
+  | 1#uscalar => ok (some policy_and_addr.IntentAddressVersion.V1)
+  | 2#uscalar => ok (some policy_and_addr.IntentAddressVersion.V2)
+  | _ => ok none
+
+/-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentIdentityKind}::clone]:
+    Source: 'src/policy_and_addr.rs', lines 202:9-202:14
+    Visibility: public -/
+def policy_and_addr.IntentIdentityKind.Insts.CoreCloneClone.clone
+  (self : policy_and_addr.IntentIdentityKind) :
+  Result policy_and_addr.IntentIdentityKind
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentIdentityKind}]
+    Source: 'src/policy_and_addr.rs', lines 202:9-202:14 -/
+@[reducible]
+def policy_and_addr.IntentIdentityKind.Insts.CoreCloneClone : core.clone.Clone
+  policy_and_addr.IntentIdentityKind := {
+  clone := policy_and_addr.IntentIdentityKind.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::IntentIdentityKind}]
+    Source: 'src/policy_and_addr.rs', lines 202:16-202:20 -/
+@[reducible]
+def policy_and_addr.IntentIdentityKind.Insts.CoreMarkerCopy : core.marker.Copy
+  policy_and_addr.IntentIdentityKind := {
+  cloneInst := policy_and_addr.IntentIdentityKind.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentIdentityKind}::fmt]:
+    Source: 'src/policy_and_addr.rs', lines 202:22-202:27
+    Visibility: public -/
+def policy_and_addr.IntentIdentityKind.Insts.CoreFmtDebug.fmt
+  (self : policy_and_addr.IntentIdentityKind) (f : core.fmt.Formatter) :
+  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
+  := do
+  match self with
+  | policy_and_addr.IntentIdentityKind.SingleKey =>
+    core.fmt.Formatter.write_str f (toStr "SingleKey")
+  | policy_and_addr.IntentIdentityKind.ThresholdCommittee =>
+    core.fmt.Formatter.write_str f (toStr "ThresholdCommittee")
+  | policy_and_addr.IntentIdentityKind.PolicyBound =>
+    core.fmt.Formatter.write_str f (toStr "PolicyBound")
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentIdentityKind}]
+    Source: 'src/policy_and_addr.rs', lines 202:22-202:27 -/
+@[reducible]
+def policy_and_addr.IntentIdentityKind.Insts.CoreFmtDebug : core.fmt.Debug
+  policy_and_addr.IntentIdentityKind := {
+  fmt := policy_and_addr.IntentIdentityKind.Insts.CoreFmtDebug.fmt
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::StructuralPartialEq for qsag_verified::policy_and_addr::IntentIdentityKind}]
+    Source: 'src/policy_and_addr.rs', lines 202:29-202:38 -/
+@[reducible]
+def policy_and_addr.IntentIdentityKind.Insts.CoreMarkerStructuralPartialEq :
+  core.marker.StructuralPartialEq policy_and_addr.IntentIdentityKind := {
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentIdentityKind> for qsag_verified::policy_and_addr::IntentIdentityKind}::eq]:
+    Source: 'src/policy_and_addr.rs', lines 202:29-202:38
+    Visibility: public -/
+def
+  policy_and_addr.IntentIdentityKind.Insts.CoreCmpPartialEqIntentIdentityKind.eq
+  (self : policy_and_addr.IntentIdentityKind)
+  (other : policy_and_addr.IntentIdentityKind) :
+  Result Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (self1 = other1)
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentIdentityKind> for qsag_verified::policy_and_addr::IntentIdentityKind}]
+    Source: 'src/policy_and_addr.rs', lines 202:29-202:38 -/
+@[reducible]
+def policy_and_addr.IntentIdentityKind.Insts.CoreCmpPartialEqIntentIdentityKind
+  : core.cmp.PartialEq policy_and_addr.IntentIdentityKind
+  policy_and_addr.IntentIdentityKind := {
+  eq :=
+    policy_and_addr.IntentIdentityKind.Insts.CoreCmpPartialEqIntentIdentityKind.eq
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::Eq for qsag_verified::policy_and_addr::IntentIdentityKind}]
+    Source: 'src/policy_and_addr.rs', lines 202:40-202:42 -/
+@[reducible]
+impl_def policy_and_addr.IntentIdentityKind.Insts.CoreCmpEq : core.cmp.Eq
+  policy_and_addr.IntentIdentityKind := {
+  partialEqInst :=
+    policy_and_addr.IntentIdentityKind.Insts.CoreCmpPartialEqIntentIdentityKind
+  assert_fields_are_eq := core.cmp.Eq.assert_fields_are_eq.default
+    policy_and_addr.IntentIdentityKind.Insts.CoreCmpEq
+}
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentIdentityKind}::to_u8]:
+    Source: 'src/policy_and_addr.rs', lines 211:4-217:5
+    Visibility: public -/
+def policy_and_addr.IntentIdentityKind.to_u8
+  (self : policy_and_addr.IntentIdentityKind) : Result Std.U8 := do
+  match self with
+  | policy_and_addr.IntentIdentityKind.SingleKey => ok 1#u8
+  | policy_and_addr.IntentIdentityKind.ThresholdCommittee => ok 2#u8
+  | policy_and_addr.IntentIdentityKind.PolicyBound => ok 3#u8
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentIdentityKind}::from_u8]:
+    Source: 'src/policy_and_addr.rs', lines 220:4-227:5
+    Visibility: public -/
+def policy_and_addr.IntentIdentityKind.from_u8
+  (v : Std.U8) : Result (Option policy_and_addr.IntentIdentityKind) := do
+  match v with
+  | 1#uscalar => ok (some policy_and_addr.IntentIdentityKind.SingleKey)
+  | 2#uscalar =>
+    ok (some policy_and_addr.IntentIdentityKind.ThresholdCommittee)
+  | 3#uscalar => ok (some policy_and_addr.IntentIdentityKind.PolicyBound)
+  | _ => ok none
+
+/-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentSuiteTag}::clone]:
+    Source: 'src/policy_and_addr.rs', lines 231:9-231:14
+    Visibility: public -/
+def policy_and_addr.IntentSuiteTag.Insts.CoreCloneClone.clone
+  (self : policy_and_addr.IntentSuiteTag) :
+  Result policy_and_addr.IntentSuiteTag
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentSuiteTag}]
+    Source: 'src/policy_and_addr.rs', lines 231:9-231:14 -/
+@[reducible]
+def policy_and_addr.IntentSuiteTag.Insts.CoreCloneClone : core.clone.Clone
+  policy_and_addr.IntentSuiteTag := {
+  clone := policy_and_addr.IntentSuiteTag.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::IntentSuiteTag}]
+    Source: 'src/policy_and_addr.rs', lines 231:16-231:20 -/
+@[reducible]
+def policy_and_addr.IntentSuiteTag.Insts.CoreMarkerCopy : core.marker.Copy
+  policy_and_addr.IntentSuiteTag := {
+  cloneInst := policy_and_addr.IntentSuiteTag.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentSuiteTag}::fmt]:
+    Source: 'src/policy_and_addr.rs', lines 231:22-231:27
+    Visibility: public -/
+def policy_and_addr.IntentSuiteTag.Insts.CoreFmtDebug.fmt
+  (self : policy_and_addr.IntentSuiteTag) (f : core.fmt.Formatter) :
+  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
+  := do
+  match self with
+  | policy_and_addr.IntentSuiteTag.JortsPoseidon2 =>
+    core.fmt.Formatter.write_str f (toStr "JortsPoseidon2")
+  | policy_and_addr.IntentSuiteTag.SlhDsaShake128f =>
+    core.fmt.Formatter.write_str f (toStr "SlhDsaShake128f")
+  | policy_and_addr.IntentSuiteTag.ThresholdMlDsa65 =>
+    core.fmt.Formatter.write_str f (toStr "ThresholdMlDsa65")
+  | policy_and_addr.IntentSuiteTag.HybridEd25519MlDsa65 =>
+    core.fmt.Formatter.write_str f (toStr "HybridEd25519MlDsa65")
+  | policy_and_addr.IntentSuiteTag.HybridSecp256k1SlhDsa =>
+    core.fmt.Formatter.write_str f (toStr "HybridSecp256k1SlhDsa")
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::IntentSuiteTag}]
+    Source: 'src/policy_and_addr.rs', lines 231:22-231:27 -/
+@[reducible]
+def policy_and_addr.IntentSuiteTag.Insts.CoreFmtDebug : core.fmt.Debug
+  policy_and_addr.IntentSuiteTag := {
+  fmt := policy_and_addr.IntentSuiteTag.Insts.CoreFmtDebug.fmt
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::StructuralPartialEq for qsag_verified::policy_and_addr::IntentSuiteTag}]
+    Source: 'src/policy_and_addr.rs', lines 231:29-231:38 -/
+@[reducible]
+def policy_and_addr.IntentSuiteTag.Insts.CoreMarkerStructuralPartialEq :
+  core.marker.StructuralPartialEq policy_and_addr.IntentSuiteTag := {
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentSuiteTag> for qsag_verified::policy_and_addr::IntentSuiteTag}::eq]:
+    Source: 'src/policy_and_addr.rs', lines 231:29-231:38
+    Visibility: public -/
+def policy_and_addr.IntentSuiteTag.Insts.CoreCmpPartialEqIntentSuiteTag.eq
+  (self : policy_and_addr.IntentSuiteTag)
+  (other : policy_and_addr.IntentSuiteTag) :
+  Result Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (self1 = other1)
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::IntentSuiteTag> for qsag_verified::policy_and_addr::IntentSuiteTag}]
+    Source: 'src/policy_and_addr.rs', lines 231:29-231:38 -/
+@[reducible]
+def policy_and_addr.IntentSuiteTag.Insts.CoreCmpPartialEqIntentSuiteTag :
+  core.cmp.PartialEq policy_and_addr.IntentSuiteTag
+  policy_and_addr.IntentSuiteTag := {
+  eq := policy_and_addr.IntentSuiteTag.Insts.CoreCmpPartialEqIntentSuiteTag.eq
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::Eq for qsag_verified::policy_and_addr::IntentSuiteTag}]
+    Source: 'src/policy_and_addr.rs', lines 231:40-231:42 -/
+@[reducible]
+impl_def policy_and_addr.IntentSuiteTag.Insts.CoreCmpEq : core.cmp.Eq
+  policy_and_addr.IntentSuiteTag := {
+  partialEqInst :=
+    policy_and_addr.IntentSuiteTag.Insts.CoreCmpPartialEqIntentSuiteTag
+  assert_fields_are_eq := core.cmp.Eq.assert_fields_are_eq.default
+    policy_and_addr.IntentSuiteTag.Insts.CoreCmpEq
+}
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentSuiteTag}::to_u16]:
+    Source: 'src/policy_and_addr.rs', lines 242:4-250:5
+    Visibility: public -/
+def policy_and_addr.IntentSuiteTag.to_u16
+  (self : policy_and_addr.IntentSuiteTag) : Result Std.U16 := do
+  match self with
+  | policy_and_addr.IntentSuiteTag.JortsPoseidon2 => ok 257#u16
+  | policy_and_addr.IntentSuiteTag.SlhDsaShake128f => ok 513#u16
+  | policy_and_addr.IntentSuiteTag.ThresholdMlDsa65 => ok 770#u16
+  | policy_and_addr.IntentSuiteTag.HybridEd25519MlDsa65 =>
+    ok policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
+  | policy_and_addr.IntentSuiteTag.HybridSecp256k1SlhDsa =>
+    ok policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::IntentSuiteTag}::from_u16]:
+    Source: 'src/policy_and_addr.rs', lines 253:4-262:5
+    Visibility: public -/
+def policy_and_addr.IntentSuiteTag.from_u16
+  (v : Std.U16) : Result (Option policy_and_addr.IntentSuiteTag) := do
+  match v with
+  | 257#uscalar => ok (some policy_and_addr.IntentSuiteTag.JortsPoseidon2)
+  | 513#uscalar => ok (some policy_and_addr.IntentSuiteTag.SlhDsaShake128f)
+  | 770#uscalar => ok (some policy_and_addr.IntentSuiteTag.ThresholdMlDsa65)
+  | 1281#uscalar =>
+    ok (some policy_and_addr.IntentSuiteTag.HybridEd25519MlDsa65)
+  | 1282#uscalar =>
+    ok (some policy_and_addr.IntentSuiteTag.HybridSecp256k1SlhDsa)
+  | _ => ok none
+
+/-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::CanonicalIntent128}::clone]:
+    Source: 'src/policy_and_addr.rs', lines 278:9-278:14
+    Visibility: public -/
+def policy_and_addr.CanonicalIntent128.Insts.CoreCloneClone.clone
+  (self : policy_and_addr.CanonicalIntent128) :
+  Result policy_and_addr.CanonicalIntent128
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::CanonicalIntent128}]
+    Source: 'src/policy_and_addr.rs', lines 278:9-278:14 -/
+@[reducible]
+def policy_and_addr.CanonicalIntent128.Insts.CoreCloneClone : core.clone.Clone
+  policy_and_addr.CanonicalIntent128 := {
+  clone := policy_and_addr.CanonicalIntent128.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::CanonicalIntent128}]
+    Source: 'src/policy_and_addr.rs', lines 278:16-278:20 -/
+@[reducible]
+def policy_and_addr.CanonicalIntent128.Insts.CoreMarkerCopy : core.marker.Copy
+  policy_and_addr.CanonicalIntent128 := {
+  cloneInst := policy_and_addr.CanonicalIntent128.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentHeaderFields}::clone]:
+    Source: 'src/policy_and_addr.rs', lines 292:9-292:14
+    Visibility: public -/
+def policy_and_addr.IntentHeaderFields.Insts.CoreCloneClone.clone
+  (self : policy_and_addr.IntentHeaderFields) :
+  Result policy_and_addr.IntentHeaderFields
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::IntentHeaderFields}]
+    Source: 'src/policy_and_addr.rs', lines 292:9-292:14 -/
+@[reducible]
+def policy_and_addr.IntentHeaderFields.Insts.CoreCloneClone : core.clone.Clone
+  policy_and_addr.IntentHeaderFields := {
+  clone := policy_and_addr.IntentHeaderFields.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::IntentHeaderFields}]
+    Source: 'src/policy_and_addr.rs', lines 292:16-292:20 -/
+@[reducible]
+def policy_and_addr.IntentHeaderFields.Insts.CoreMarkerCopy : core.marker.Copy
+  policy_and_addr.IntentHeaderFields := {
+  cloneInst := policy_and_addr.IntentHeaderFields.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::policy_and_addr::be_u16_read]:
+    Source: 'src/policy_and_addr.rs', lines 303:0-305:1 -/
+def policy_and_addr.be_u16_read
+  (b0 : Std.U8) (b1 : Std.U8) : Result Std.U16 := do
+  let i ← lift (UScalar.cast .U16 b0)
+  let i1 ← i <<< 8#i32
+  let i2 ← lift (UScalar.cast .U16 b1)
+  ok (i1 ||| i2)
+
+/-- [qsag_verified::policy_and_addr::be_u32_read]:
+    Source: 'src/policy_and_addr.rs', lines 308:0-310:1 -/
+def policy_and_addr.be_u32_read
+  (b0 : Std.U8) (b1 : Std.U8) (b2 : Std.U8) (b3 : Std.U8) :
+  Result Std.U32
+  := do
+  let i ← lift (UScalar.cast .U32 b0)
+  let i1 ← i <<< 24#i32
+  let i2 ← lift (UScalar.cast .U32 b1)
+  let i3 ← i2 <<< 16#i32
+  let i4 ← lift (i1 ||| i3)
+  let i5 ← lift (UScalar.cast .U32 b2)
+  let i6 ← i5 <<< 8#i32
+  let i7 ← lift (i4 ||| i6)
+  let i8 ← lift (UScalar.cast .U32 b3)
+  ok (i7 ||| i8)
+
+/-- [qsag_verified::policy_and_addr::be_u64_read]:
+    Source: 'src/policy_and_addr.rs', lines 313:0-331:1 -/
+def policy_and_addr.be_u64_read
+  (b0 : Std.U8) (b1 : Std.U8) (b2 : Std.U8) (b3 : Std.U8) (b4 : Std.U8)
+  (b5 : Std.U8) (b6 : Std.U8) (b7 : Std.U8) :
+  Result Std.U64
+  := do
+  let i ← lift (UScalar.cast .U64 b0)
+  let i1 ← i <<< 56#i32
+  let i2 ← lift (UScalar.cast .U64 b1)
+  let i3 ← i2 <<< 48#i32
+  let i4 ← lift (i1 ||| i3)
+  let i5 ← lift (UScalar.cast .U64 b2)
+  let i6 ← i5 <<< 40#i32
+  let i7 ← lift (i4 ||| i6)
+  let i8 ← lift (UScalar.cast .U64 b3)
+  let i9 ← i8 <<< 32#i32
+  let i10 ← lift (i7 ||| i9)
+  let i11 ← lift (UScalar.cast .U64 b4)
+  let i12 ← i11 <<< 24#i32
+  let i13 ← lift (i10 ||| i12)
+  let i14 ← lift (UScalar.cast .U64 b5)
+  let i15 ← i14 <<< 16#i32
+  let i16 ← lift (i13 ||| i15)
+  let i17 ← lift (UScalar.cast .U64 b6)
+  let i18 ← i17 <<< 8#i32
+  let i19 ← lift (i16 ||| i18)
+  let i20 ← lift (UScalar.cast .U64 b7)
+  ok (i19 ||| i20)
+
+/-- [qsag_verified::policy_and_addr::pack_u128_from_u64_be]:
+    Source: 'src/policy_and_addr.rs', lines 334:0-336:1 -/
+def policy_and_addr.pack_u128_from_u64_be
+  (hi : Std.U64) (lo : Std.U64) : Result Std.U128 := do
+  let i ← lift (UScalar.cast .U128 hi)
+  let i1 ← i <<< 64#i32
+  let i2 ← lift (UScalar.cast .U128 lo)
+  ok (i1 ||| i2)
+
+/-- [qsag_verified::policy_and_addr::unpack_u128_hi]:
+    Source: 'src/policy_and_addr.rs', lines 339:0-341:1 -/
+def policy_and_addr.unpack_u128_hi (v : Std.U128) : Result Std.U64 := do
+  let i ← v >>> 64#i32
+  let i1 ← lift (i &&& 18446744073709551615#u128)
+  ok (UScalar.cast .U64 i1)
+
+/-- [qsag_verified::policy_and_addr::unpack_u128_lo]:
+    Source: 'src/policy_and_addr.rs', lines 344:0-346:1 -/
+def policy_and_addr.unpack_u128_lo (v : Std.U128) : Result Std.U64 := do
+  let i ← lift (v &&& 18446744073709551615#u128)
+  ok (UScalar.cast .U64 i)
+
+/-- [qsag_verified::policy_and_addr::encode_intent_header32]:
+    Source: 'src/policy_and_addr.rs', lines 348:0-390:1 -/
+def policy_and_addr.encode_intent_header32
+  (intent : policy_and_addr.CanonicalIntent128) :
+  Result (Array Std.U8 32#usize)
+  := do
+  let st ← policy_and_addr.IntentSuiteTag.to_u16 intent.suite_tag
+  let av ← policy_and_addr.IntentAddressVersion.to_u8 intent.address_version
+  let ik ← policy_and_addr.IntentIdentityKind.to_u8 intent.identity_kind
+  let i ← policy_and_addr.INTENT_V1_MAGIC >>> 24#i32
+  let i1 ← lift (i &&& 255#u32)
+  let i2 ← lift (UScalar.cast .U8 i1)
+  let i3 ← policy_and_addr.INTENT_V1_MAGIC >>> 16#i32
+  let i4 ← lift (i3 &&& 255#u32)
+  let i5 ← lift (UScalar.cast .U8 i4)
+  let i6 ← policy_and_addr.INTENT_V1_MAGIC >>> 8#i32
+  let i7 ← lift (i6 &&& 255#u32)
+  let i8 ← lift (UScalar.cast .U8 i7)
+  let i9 ← lift (policy_and_addr.INTENT_V1_MAGIC &&& 255#u32)
+  let i10 ← lift (UScalar.cast .U8 i9)
+  let i11 ← st >>> 8#i32
+  let i12 ← lift (i11 &&& 255#u16)
+  let i13 ← lift (UScalar.cast .U8 i12)
+  let i14 ← lift (st &&& 255#u16)
+  let i15 ← lift (UScalar.cast .U8 i14)
+  let i16 ← intent.chain_id >>> 56#i32
+  let i17 ← lift (i16 &&& 255#u64)
+  let i18 ← lift (UScalar.cast .U8 i17)
+  let i19 ← intent.chain_id >>> 48#i32
+  let i20 ← lift (i19 &&& 255#u64)
+  let i21 ← lift (UScalar.cast .U8 i20)
+  let i22 ← intent.chain_id >>> 40#i32
+  let i23 ← lift (i22 &&& 255#u64)
+  let i24 ← lift (UScalar.cast .U8 i23)
+  let i25 ← intent.chain_id >>> 32#i32
+  let i26 ← lift (i25 &&& 255#u64)
+  let i27 ← lift (UScalar.cast .U8 i26)
+  let i28 ← intent.chain_id >>> 24#i32
+  let i29 ← lift (i28 &&& 255#u64)
+  let i30 ← lift (UScalar.cast .U8 i29)
+  let i31 ← intent.chain_id >>> 16#i32
+  let i32 ← lift (i31 &&& 255#u64)
+  let i33 ← lift (UScalar.cast .U8 i32)
+  let i34 ← intent.chain_id >>> 8#i32
+  let i35 ← lift (i34 &&& 255#u64)
+  let i36 ← lift (UScalar.cast .U8 i35)
+  let i37 ← lift (intent.chain_id &&& 255#u64)
+  let i38 ← lift (UScalar.cast .U8 i37)
+  let i39 ← intent.nonce >>> 56#i32
+  let i40 ← lift (i39 &&& 255#u64)
+  let i41 ← lift (UScalar.cast .U8 i40)
+  let i42 ← intent.nonce >>> 48#i32
+  let i43 ← lift (i42 &&& 255#u64)
+  let i44 ← lift (UScalar.cast .U8 i43)
+  let i45 ← intent.nonce >>> 40#i32
+  let i46 ← lift (i45 &&& 255#u64)
+  let i47 ← lift (UScalar.cast .U8 i46)
+  let i48 ← intent.nonce >>> 32#i32
+  let i49 ← lift (i48 &&& 255#u64)
+  let i50 ← lift (UScalar.cast .U8 i49)
+  let i51 ← intent.nonce >>> 24#i32
+  let i52 ← lift (i51 &&& 255#u64)
+  let i53 ← lift (UScalar.cast .U8 i52)
+  let i54 ← intent.nonce >>> 16#i32
+  let i55 ← lift (i54 &&& 255#u64)
+  let i56 ← lift (UScalar.cast .U8 i55)
+  let i57 ← intent.nonce >>> 8#i32
+  let i58 ← lift (i57 &&& 255#u64)
+  let i59 ← lift (UScalar.cast .U8 i58)
+  let i60 ← lift (intent.nonce &&& 255#u64)
+  let i61 ← lift (UScalar.cast .U8 i60)
+  let i62 ← intent.timestamp_secs >>> 56#i32
+  let i63 ← lift (i62 &&& 255#u64)
+  let i64 ← lift (UScalar.cast .U8 i63)
+  let i65 ← intent.timestamp_secs >>> 48#i32
+  let i66 ← lift (i65 &&& 255#u64)
+  let i67 ← lift (UScalar.cast .U8 i66)
+  let i68 ← intent.timestamp_secs >>> 40#i32
+  let i69 ← lift (i68 &&& 255#u64)
+  let i70 ← lift (UScalar.cast .U8 i69)
+  let i71 ← intent.timestamp_secs >>> 32#i32
+  let i72 ← lift (i71 &&& 255#u64)
+  let i73 ← lift (UScalar.cast .U8 i72)
+  let i74 ← intent.timestamp_secs >>> 24#i32
+  let i75 ← lift (i74 &&& 255#u64)
+  let i76 ← lift (UScalar.cast .U8 i75)
+  let i77 ← intent.timestamp_secs >>> 16#i32
+  let i78 ← lift (i77 &&& 255#u64)
+  let i79 ← lift (UScalar.cast .U8 i78)
+  let i80 ← intent.timestamp_secs >>> 8#i32
+  let i81 ← lift (i80 &&& 255#u64)
+  let i82 ← lift (UScalar.cast .U8 i81)
+  let i83 ← lift (intent.timestamp_secs &&& 255#u64)
+  let i84 ← lift (UScalar.cast .U8 i83)
+  ok
+    (Array.make 32#usize [
+      i2, i5, i8, i10, i13, i15, av, ik, i18, i21, i24, i27, i30, i33, i36,
+      i38, i41, i44, i47, i50, i53, i56, i59, i61, i64, i67, i70, i73, i76,
+      i79, i82, i84
+      ])
+
+/-- [qsag_verified::policy_and_addr::decode_intent_header32]:
+    Source: 'src/policy_and_addr.rs', lines 392:0-421:1 -/
+def policy_and_addr.decode_intent_header32
+  (b : Array Std.U8 32#usize) :
+  Result (Option policy_and_addr.IntentHeaderFields)
+  := do
+  let i ← Array.index_usize b 0#usize
+  let i1 ← Array.index_usize b 1#usize
+  let i2 ← Array.index_usize b 2#usize
+  let i3 ← Array.index_usize b 3#usize
+  let magic ← policy_and_addr.be_u32_read i i1 i2 i3
+  if magic != policy_and_addr.INTENT_V1_MAGIC
+  then ok none
+  else
+    let i4 ← Array.index_usize b 4#usize
+    let i5 ← Array.index_usize b 5#usize
+    let st_raw ← policy_and_addr.be_u16_read i4 i5
+    let o ← policy_and_addr.IntentSuiteTag.from_u16 st_raw
+    match o with
+    | none => ok none
+    | some t =>
+      let i6 ← Array.index_usize b 6#usize
+      let o1 ← policy_and_addr.IntentAddressVersion.from_u8 i6
+      match o1 with
+      | none => ok none
+      | some v =>
+        let i7 ← Array.index_usize b 7#usize
+        let o2 ← policy_and_addr.IntentIdentityKind.from_u8 i7
+        match o2 with
+        | none => ok none
+        | some k =>
+          let i8 ← Array.index_usize b 8#usize
+          let i9 ← Array.index_usize b 9#usize
+          let i10 ← Array.index_usize b 10#usize
+          let i11 ← Array.index_usize b 11#usize
+          let i12 ← Array.index_usize b 12#usize
+          let i13 ← Array.index_usize b 13#usize
+          let i14 ← Array.index_usize b 14#usize
+          let i15 ← Array.index_usize b 15#usize
+          let chain_id ←
+            policy_and_addr.be_u64_read i8 i9 i10 i11 i12 i13 i14 i15
+          let i16 ← Array.index_usize b 16#usize
+          let i17 ← Array.index_usize b 17#usize
+          let i18 ← Array.index_usize b 18#usize
+          let i19 ← Array.index_usize b 19#usize
+          let i20 ← Array.index_usize b 20#usize
+          let i21 ← Array.index_usize b 21#usize
+          let i22 ← Array.index_usize b 22#usize
+          let i23 ← Array.index_usize b 23#usize
+          let nonce ←
+            policy_and_addr.be_u64_read i16 i17 i18 i19 i20 i21 i22 i23
+          let i24 ← Array.index_usize b 24#usize
+          let i25 ← Array.index_usize b 25#usize
+          let i26 ← Array.index_usize b 26#usize
+          let i27 ← Array.index_usize b 27#usize
+          let i28 ← Array.index_usize b 28#usize
+          let i29 ← Array.index_usize b 29#usize
+          let i30 ← Array.index_usize b 30#usize
+          let i31 ← Array.index_usize b 31#usize
+          let timestamp_secs ←
+            policy_and_addr.be_u64_read i24 i25 i26 i27 i28 i29 i30 i31
+          ok (some
+            {
+              suite_tag := t,
+              address_version := v,
+              identity_kind := k,
+              chain_id,
+              nonce,
+              timestamp_secs
+            })
+
+/-- [qsag_verified::policy_and_addr::encode_intent_amounts32]:
+    Source: 'src/policy_and_addr.rs', lines 423:0-462:1 -/
+def policy_and_addr.encode_intent_amounts32
+  (amount_units : Std.U128) (spent_units : Std.U128) :
+  Result (Array Std.U8 32#usize)
+  := do
+  let a_hi ← policy_and_addr.unpack_u128_hi amount_units
+  let a_lo ← policy_and_addr.unpack_u128_lo amount_units
+  let s_hi ← policy_and_addr.unpack_u128_hi spent_units
+  let s_lo ← policy_and_addr.unpack_u128_lo spent_units
+  let i ← a_hi >>> 56#i32
+  let i1 ← lift (i &&& 255#u64)
+  let i2 ← lift (UScalar.cast .U8 i1)
+  let i3 ← a_hi >>> 48#i32
+  let i4 ← lift (i3 &&& 255#u64)
+  let i5 ← lift (UScalar.cast .U8 i4)
+  let i6 ← a_hi >>> 40#i32
+  let i7 ← lift (i6 &&& 255#u64)
+  let i8 ← lift (UScalar.cast .U8 i7)
+  let i9 ← a_hi >>> 32#i32
+  let i10 ← lift (i9 &&& 255#u64)
+  let i11 ← lift (UScalar.cast .U8 i10)
+  let i12 ← a_hi >>> 24#i32
+  let i13 ← lift (i12 &&& 255#u64)
+  let i14 ← lift (UScalar.cast .U8 i13)
+  let i15 ← a_hi >>> 16#i32
+  let i16 ← lift (i15 &&& 255#u64)
+  let i17 ← lift (UScalar.cast .U8 i16)
+  let i18 ← a_hi >>> 8#i32
+  let i19 ← lift (i18 &&& 255#u64)
+  let i20 ← lift (UScalar.cast .U8 i19)
+  let i21 ← lift (a_hi &&& 255#u64)
+  let i22 ← lift (UScalar.cast .U8 i21)
+  let i23 ← a_lo >>> 56#i32
+  let i24 ← lift (i23 &&& 255#u64)
+  let i25 ← lift (UScalar.cast .U8 i24)
+  let i26 ← a_lo >>> 48#i32
+  let i27 ← lift (i26 &&& 255#u64)
+  let i28 ← lift (UScalar.cast .U8 i27)
+  let i29 ← a_lo >>> 40#i32
+  let i30 ← lift (i29 &&& 255#u64)
+  let i31 ← lift (UScalar.cast .U8 i30)
+  let i32 ← a_lo >>> 32#i32
+  let i33 ← lift (i32 &&& 255#u64)
+  let i34 ← lift (UScalar.cast .U8 i33)
+  let i35 ← a_lo >>> 24#i32
+  let i36 ← lift (i35 &&& 255#u64)
+  let i37 ← lift (UScalar.cast .U8 i36)
+  let i38 ← a_lo >>> 16#i32
+  let i39 ← lift (i38 &&& 255#u64)
+  let i40 ← lift (UScalar.cast .U8 i39)
+  let i41 ← a_lo >>> 8#i32
+  let i42 ← lift (i41 &&& 255#u64)
+  let i43 ← lift (UScalar.cast .U8 i42)
+  let i44 ← lift (a_lo &&& 255#u64)
+  let i45 ← lift (UScalar.cast .U8 i44)
+  let i46 ← s_hi >>> 56#i32
+  let i47 ← lift (i46 &&& 255#u64)
+  let i48 ← lift (UScalar.cast .U8 i47)
+  let i49 ← s_hi >>> 48#i32
+  let i50 ← lift (i49 &&& 255#u64)
+  let i51 ← lift (UScalar.cast .U8 i50)
+  let i52 ← s_hi >>> 40#i32
+  let i53 ← lift (i52 &&& 255#u64)
+  let i54 ← lift (UScalar.cast .U8 i53)
+  let i55 ← s_hi >>> 32#i32
+  let i56 ← lift (i55 &&& 255#u64)
+  let i57 ← lift (UScalar.cast .U8 i56)
+  let i58 ← s_hi >>> 24#i32
+  let i59 ← lift (i58 &&& 255#u64)
+  let i60 ← lift (UScalar.cast .U8 i59)
+  let i61 ← s_hi >>> 16#i32
+  let i62 ← lift (i61 &&& 255#u64)
+  let i63 ← lift (UScalar.cast .U8 i62)
+  let i64 ← s_hi >>> 8#i32
+  let i65 ← lift (i64 &&& 255#u64)
+  let i66 ← lift (UScalar.cast .U8 i65)
+  let i67 ← lift (s_hi &&& 255#u64)
+  let i68 ← lift (UScalar.cast .U8 i67)
+  let i69 ← s_lo >>> 56#i32
+  let i70 ← lift (i69 &&& 255#u64)
+  let i71 ← lift (UScalar.cast .U8 i70)
+  let i72 ← s_lo >>> 48#i32
+  let i73 ← lift (i72 &&& 255#u64)
+  let i74 ← lift (UScalar.cast .U8 i73)
+  let i75 ← s_lo >>> 40#i32
+  let i76 ← lift (i75 &&& 255#u64)
+  let i77 ← lift (UScalar.cast .U8 i76)
+  let i78 ← s_lo >>> 32#i32
+  let i79 ← lift (i78 &&& 255#u64)
+  let i80 ← lift (UScalar.cast .U8 i79)
+  let i81 ← s_lo >>> 24#i32
+  let i82 ← lift (i81 &&& 255#u64)
+  let i83 ← lift (UScalar.cast .U8 i82)
+  let i84 ← s_lo >>> 16#i32
+  let i85 ← lift (i84 &&& 255#u64)
+  let i86 ← lift (UScalar.cast .U8 i85)
+  let i87 ← s_lo >>> 8#i32
+  let i88 ← lift (i87 &&& 255#u64)
+  let i89 ← lift (UScalar.cast .U8 i88)
+  let i90 ← lift (s_lo &&& 255#u64)
+  let i91 ← lift (UScalar.cast .U8 i90)
+  ok
+    (Array.make 32#usize [
+      i2, i5, i8, i11, i14, i17, i20, i22, i25, i28, i31, i34, i37, i40, i43,
+      i45, i48, i51, i54, i57, i60, i63, i66, i68, i71, i74, i77, i80, i83,
+      i86, i89, i91
+      ])
+
+/-- [qsag_verified::policy_and_addr::decode_intent_amounts32]:
+    Source: 'src/policy_and_addr.rs', lines 464:0-473:1 -/
+def policy_and_addr.decode_intent_amounts32
+  (b : Array Std.U8 32#usize) : Result (Std.U128 × Std.U128) := do
+  let i ← Array.index_usize b 0#usize
+  let i1 ← Array.index_usize b 1#usize
+  let i2 ← Array.index_usize b 2#usize
+  let i3 ← Array.index_usize b 3#usize
+  let i4 ← Array.index_usize b 4#usize
+  let i5 ← Array.index_usize b 5#usize
+  let i6 ← Array.index_usize b 6#usize
+  let i7 ← Array.index_usize b 7#usize
+  let a_hi ← policy_and_addr.be_u64_read i i1 i2 i3 i4 i5 i6 i7
+  let i8 ← Array.index_usize b 8#usize
+  let i9 ← Array.index_usize b 9#usize
+  let i10 ← Array.index_usize b 10#usize
+  let i11 ← Array.index_usize b 11#usize
+  let i12 ← Array.index_usize b 12#usize
+  let i13 ← Array.index_usize b 13#usize
+  let i14 ← Array.index_usize b 14#usize
+  let i15 ← Array.index_usize b 15#usize
+  let a_lo ← policy_and_addr.be_u64_read i8 i9 i10 i11 i12 i13 i14 i15
+  let i16 ← Array.index_usize b 16#usize
+  let i17 ← Array.index_usize b 17#usize
+  let i18 ← Array.index_usize b 18#usize
+  let i19 ← Array.index_usize b 19#usize
+  let i20 ← Array.index_usize b 20#usize
+  let i21 ← Array.index_usize b 21#usize
+  let i22 ← Array.index_usize b 22#usize
+  let i23 ← Array.index_usize b 23#usize
+  let s_hi ← policy_and_addr.be_u64_read i16 i17 i18 i19 i20 i21 i22 i23
+  let i24 ← Array.index_usize b 24#usize
+  let i25 ← Array.index_usize b 25#usize
+  let i26 ← Array.index_usize b 26#usize
+  let i27 ← Array.index_usize b 27#usize
+  let i28 ← Array.index_usize b 28#usize
+  let i29 ← Array.index_usize b 29#usize
+  let i30 ← Array.index_usize b 30#usize
+  let i31 ← Array.index_usize b 31#usize
+  let s_lo ← policy_and_addr.be_u64_read i24 i25 i26 i27 i28 i29 i30 i31
+  let i32 ← policy_and_addr.pack_u128_from_u64_be a_hi a_lo
+  let i33 ← policy_and_addr.pack_u128_from_u64_be s_hi s_lo
+  ok (i32, i33)
+
+/-- [qsag_verified::policy_and_addr::unpack_block32]:
+    Source: 'src/policy_and_addr.rs', lines 475:0-510:1 -/
+def policy_and_addr.unpack_block32
+  (buf : Array Std.U8 128#usize) (base : Std.Usize) :
+  Result (Array Std.U8 32#usize)
+  := do
+  let i ← Array.index_usize buf base
+  let i1 ← base + 1#usize
+  let i2 ← Array.index_usize buf i1
+  let i3 ← base + 2#usize
+  let i4 ← Array.index_usize buf i3
+  let i5 ← base + 3#usize
+  let i6 ← Array.index_usize buf i5
+  let i7 ← base + 4#usize
+  let i8 ← Array.index_usize buf i7
+  let i9 ← base + 5#usize
+  let i10 ← Array.index_usize buf i9
+  let i11 ← base + 6#usize
+  let i12 ← Array.index_usize buf i11
+  let i13 ← base + 7#usize
+  let i14 ← Array.index_usize buf i13
+  let i15 ← base + 8#usize
+  let i16 ← Array.index_usize buf i15
+  let i17 ← base + 9#usize
+  let i18 ← Array.index_usize buf i17
+  let i19 ← base + 10#usize
+  let i20 ← Array.index_usize buf i19
+  let i21 ← base + 11#usize
+  let i22 ← Array.index_usize buf i21
+  let i23 ← base + 12#usize
+  let i24 ← Array.index_usize buf i23
+  let i25 ← base + 13#usize
+  let i26 ← Array.index_usize buf i25
+  let i27 ← base + 14#usize
+  let i28 ← Array.index_usize buf i27
+  let i29 ← base + 15#usize
+  let i30 ← Array.index_usize buf i29
+  let i31 ← base + 16#usize
+  let i32 ← Array.index_usize buf i31
+  let i33 ← base + 17#usize
+  let i34 ← Array.index_usize buf i33
+  let i35 ← base + 18#usize
+  let i36 ← Array.index_usize buf i35
+  let i37 ← base + 19#usize
+  let i38 ← Array.index_usize buf i37
+  let i39 ← base + 20#usize
+  let i40 ← Array.index_usize buf i39
+  let i41 ← base + 21#usize
+  let i42 ← Array.index_usize buf i41
+  let i43 ← base + 22#usize
+  let i44 ← Array.index_usize buf i43
+  let i45 ← base + 23#usize
+  let i46 ← Array.index_usize buf i45
+  let i47 ← base + 24#usize
+  let i48 ← Array.index_usize buf i47
+  let i49 ← base + 25#usize
+  let i50 ← Array.index_usize buf i49
+  let i51 ← base + 26#usize
+  let i52 ← Array.index_usize buf i51
+  let i53 ← base + 27#usize
+  let i54 ← Array.index_usize buf i53
+  let i55 ← base + 28#usize
+  let i56 ← Array.index_usize buf i55
+  let i57 ← base + 29#usize
+  let i58 ← Array.index_usize buf i57
+  let i59 ← base + 30#usize
+  let i60 ← Array.index_usize buf i59
+  let i61 ← base + 31#usize
+  let i62 ← Array.index_usize buf i61
+  ok
+    (Array.make 32#usize [
+      i, i2, i4, i6, i8, i10, i12, i14, i16, i18, i20, i22, i24, i26, i28, i30,
+      i32, i34, i36, i38, i40, i42, i44, i46, i48, i50, i52, i54, i56, i58,
+      i60, i62
+      ])
+
+/-- [qsag_verified::policy_and_addr::pack_4x32]:
+    Source: 'src/policy_and_addr.rs', lines 512:0-532:1 -/
+def policy_and_addr.pack_4x32
+  (b0 : Array Std.U8 32#usize) (b1 : Array Std.U8 32#usize)
+  (b2 : Array Std.U8 32#usize) (b3 : Array Std.U8 32#usize) :
+  Result (Array Std.U8 128#usize)
+  := do
+  let i ← Array.index_usize b0 0#usize
+  let i1 ← Array.index_usize b0 1#usize
+  let i2 ← Array.index_usize b0 2#usize
+  let i3 ← Array.index_usize b0 3#usize
+  let i4 ← Array.index_usize b0 4#usize
+  let i5 ← Array.index_usize b0 5#usize
+  let i6 ← Array.index_usize b0 6#usize
+  let i7 ← Array.index_usize b0 7#usize
+  let i8 ← Array.index_usize b0 8#usize
+  let i9 ← Array.index_usize b0 9#usize
+  let i10 ← Array.index_usize b0 10#usize
+  let i11 ← Array.index_usize b0 11#usize
+  let i12 ← Array.index_usize b0 12#usize
+  let i13 ← Array.index_usize b0 13#usize
+  let i14 ← Array.index_usize b0 14#usize
+  let i15 ← Array.index_usize b0 15#usize
+  let i16 ← Array.index_usize b0 16#usize
+  let i17 ← Array.index_usize b0 17#usize
+  let i18 ← Array.index_usize b0 18#usize
+  let i19 ← Array.index_usize b0 19#usize
+  let i20 ← Array.index_usize b0 20#usize
+  let i21 ← Array.index_usize b0 21#usize
+  let i22 ← Array.index_usize b0 22#usize
+  let i23 ← Array.index_usize b0 23#usize
+  let i24 ← Array.index_usize b0 24#usize
+  let i25 ← Array.index_usize b0 25#usize
+  let i26 ← Array.index_usize b0 26#usize
+  let i27 ← Array.index_usize b0 27#usize
+  let i28 ← Array.index_usize b0 28#usize
+  let i29 ← Array.index_usize b0 29#usize
+  let i30 ← Array.index_usize b0 30#usize
+  let i31 ← Array.index_usize b0 31#usize
+  let i32 ← Array.index_usize b1 0#usize
+  let i33 ← Array.index_usize b1 1#usize
+  let i34 ← Array.index_usize b1 2#usize
+  let i35 ← Array.index_usize b1 3#usize
+  let i36 ← Array.index_usize b1 4#usize
+  let i37 ← Array.index_usize b1 5#usize
+  let i38 ← Array.index_usize b1 6#usize
+  let i39 ← Array.index_usize b1 7#usize
+  let i40 ← Array.index_usize b1 8#usize
+  let i41 ← Array.index_usize b1 9#usize
+  let i42 ← Array.index_usize b1 10#usize
+  let i43 ← Array.index_usize b1 11#usize
+  let i44 ← Array.index_usize b1 12#usize
+  let i45 ← Array.index_usize b1 13#usize
+  let i46 ← Array.index_usize b1 14#usize
+  let i47 ← Array.index_usize b1 15#usize
+  let i48 ← Array.index_usize b1 16#usize
+  let i49 ← Array.index_usize b1 17#usize
+  let i50 ← Array.index_usize b1 18#usize
+  let i51 ← Array.index_usize b1 19#usize
+  let i52 ← Array.index_usize b1 20#usize
+  let i53 ← Array.index_usize b1 21#usize
+  let i54 ← Array.index_usize b1 22#usize
+  let i55 ← Array.index_usize b1 23#usize
+  let i56 ← Array.index_usize b1 24#usize
+  let i57 ← Array.index_usize b1 25#usize
+  let i58 ← Array.index_usize b1 26#usize
+  let i59 ← Array.index_usize b1 27#usize
+  let i60 ← Array.index_usize b1 28#usize
+  let i61 ← Array.index_usize b1 29#usize
+  let i62 ← Array.index_usize b1 30#usize
+  let i63 ← Array.index_usize b1 31#usize
+  let i64 ← Array.index_usize b2 0#usize
+  let i65 ← Array.index_usize b2 1#usize
+  let i66 ← Array.index_usize b2 2#usize
+  let i67 ← Array.index_usize b2 3#usize
+  let i68 ← Array.index_usize b2 4#usize
+  let i69 ← Array.index_usize b2 5#usize
+  let i70 ← Array.index_usize b2 6#usize
+  let i71 ← Array.index_usize b2 7#usize
+  let i72 ← Array.index_usize b2 8#usize
+  let i73 ← Array.index_usize b2 9#usize
+  let i74 ← Array.index_usize b2 10#usize
+  let i75 ← Array.index_usize b2 11#usize
+  let i76 ← Array.index_usize b2 12#usize
+  let i77 ← Array.index_usize b2 13#usize
+  let i78 ← Array.index_usize b2 14#usize
+  let i79 ← Array.index_usize b2 15#usize
+  let i80 ← Array.index_usize b2 16#usize
+  let i81 ← Array.index_usize b2 17#usize
+  let i82 ← Array.index_usize b2 18#usize
+  let i83 ← Array.index_usize b2 19#usize
+  let i84 ← Array.index_usize b2 20#usize
+  let i85 ← Array.index_usize b2 21#usize
+  let i86 ← Array.index_usize b2 22#usize
+  let i87 ← Array.index_usize b2 23#usize
+  let i88 ← Array.index_usize b2 24#usize
+  let i89 ← Array.index_usize b2 25#usize
+  let i90 ← Array.index_usize b2 26#usize
+  let i91 ← Array.index_usize b2 27#usize
+  let i92 ← Array.index_usize b2 28#usize
+  let i93 ← Array.index_usize b2 29#usize
+  let i94 ← Array.index_usize b2 30#usize
+  let i95 ← Array.index_usize b2 31#usize
+  let i96 ← Array.index_usize b3 0#usize
+  let i97 ← Array.index_usize b3 1#usize
+  let i98 ← Array.index_usize b3 2#usize
+  let i99 ← Array.index_usize b3 3#usize
+  let i100 ← Array.index_usize b3 4#usize
+  let i101 ← Array.index_usize b3 5#usize
+  let i102 ← Array.index_usize b3 6#usize
+  let i103 ← Array.index_usize b3 7#usize
+  let i104 ← Array.index_usize b3 8#usize
+  let i105 ← Array.index_usize b3 9#usize
+  let i106 ← Array.index_usize b3 10#usize
+  let i107 ← Array.index_usize b3 11#usize
+  let i108 ← Array.index_usize b3 12#usize
+  let i109 ← Array.index_usize b3 13#usize
+  let i110 ← Array.index_usize b3 14#usize
+  let i111 ← Array.index_usize b3 15#usize
+  let i112 ← Array.index_usize b3 16#usize
+  let i113 ← Array.index_usize b3 17#usize
+  let i114 ← Array.index_usize b3 18#usize
+  let i115 ← Array.index_usize b3 19#usize
+  let i116 ← Array.index_usize b3 20#usize
+  let i117 ← Array.index_usize b3 21#usize
+  let i118 ← Array.index_usize b3 22#usize
+  let i119 ← Array.index_usize b3 23#usize
+  let i120 ← Array.index_usize b3 24#usize
+  let i121 ← Array.index_usize b3 25#usize
+  let i122 ← Array.index_usize b3 26#usize
+  let i123 ← Array.index_usize b3 27#usize
+  let i124 ← Array.index_usize b3 28#usize
+  let i125 ← Array.index_usize b3 29#usize
+  let i126 ← Array.index_usize b3 30#usize
+  let i127 ← Array.index_usize b3 31#usize
+  ok
+    (Array.make 128#usize [
+      i, i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12, i13, i14, i15, i16,
+      i17, i18, i19, i20, i21, i22, i23, i24, i25, i26, i27, i28, i29, i30,
+      i31, i32, i33, i34, i35, i36, i37, i38, i39, i40, i41, i42, i43, i44,
+      i45, i46, i47, i48, i49, i50, i51, i52, i53, i54, i55, i56, i57, i58,
+      i59, i60, i61, i62, i63, i64, i65, i66, i67, i68, i69, i70, i71, i72,
+      i73, i74, i75, i76, i77, i78, i79, i80, i81, i82, i83, i84, i85, i86,
+      i87, i88, i89, i90, i91, i92, i93, i94, i95, i96, i97, i98, i99, i100,
+      i101, i102, i103, i104, i105, i106, i107, i108, i109, i110, i111, i112,
+      i113, i114, i115, i116, i117, i118, i119, i120, i121, i122, i123, i124,
+      i125, i126, i127
+      ])
+
+/-- [qsag_verified::policy_and_addr::encode_intent_128]:
+    Source: 'src/policy_and_addr.rs', lines 535:0-544:1
+    Visibility: public -/
+def policy_and_addr.encode_intent_128
+  (intent : policy_and_addr.CanonicalIntent128) :
+  Result (Array Std.U8 128#usize)
+  := do
+  let b0 ← policy_and_addr.encode_intent_header32 intent
+  let b1 ←
+    policy_and_addr.encode_intent_amounts32 intent.amount_units
+      intent.rolling_window_spent
+  policy_and_addr.pack_4x32 b0 b1 intent.recipient_commitment
+    intent.payload_digest
+
+/-- [qsag_verified::policy_and_addr::decode_intent_128]:
+    Source: 'src/policy_and_addr.rs', lines 547:0-569:1
+    Visibility: public -/
+def policy_and_addr.decode_intent_128
+  (bytes : Array Std.U8 128#usize) :
+  Result (Option policy_and_addr.CanonicalIntent128)
+  := do
+  let b0 ← policy_and_addr.unpack_block32 bytes 0#usize
+  let b1 ← policy_and_addr.unpack_block32 bytes 32#usize
+  let recipient_commitment ← policy_and_addr.unpack_block32 bytes 64#usize
+  let payload_digest ← policy_and_addr.unpack_block32 bytes 96#usize
+  let o ← policy_and_addr.decode_intent_header32 b0
+  match o with
+  | none => ok none
+  | some h =>
+    let (amount_units, rolling_window_spent) ←
+      policy_and_addr.decode_intent_amounts32 b1
+    ok (some
+      {
+        suite_tag := h.suite_tag,
+        address_version := h.address_version,
+        identity_kind := h.identity_kind,
+        chain_id := h.chain_id,
+        nonce := h.nonce,
+        timestamp_secs := h.timestamp_secs,
+        amount_units,
+        rolling_window_spent,
+        recipient_commitment,
+        payload_digest
+      })
+
+/-- [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::HybridRoleTag}::clone]:
+    Source: 'src/policy_and_addr.rs', lines 572:9-572:14
+    Visibility: public -/
+def policy_and_addr.HybridRoleTag.Insts.CoreCloneClone.clone
+  (self : policy_and_addr.HybridRoleTag) :
+  Result policy_and_addr.HybridRoleTag
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::clone::Clone for qsag_verified::policy_and_addr::HybridRoleTag}]
+    Source: 'src/policy_and_addr.rs', lines 572:9-572:14 -/
+@[reducible]
+def policy_and_addr.HybridRoleTag.Insts.CoreCloneClone : core.clone.Clone
+  policy_and_addr.HybridRoleTag := {
+  clone := policy_and_addr.HybridRoleTag.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::Copy for qsag_verified::policy_and_addr::HybridRoleTag}]
+    Source: 'src/policy_and_addr.rs', lines 572:16-572:20 -/
+@[reducible]
+def policy_and_addr.HybridRoleTag.Insts.CoreMarkerCopy : core.marker.Copy
+  policy_and_addr.HybridRoleTag := {
+  cloneInst := policy_and_addr.HybridRoleTag.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::HybridRoleTag}::fmt]:
+    Source: 'src/policy_and_addr.rs', lines 572:22-572:27
+    Visibility: public -/
+def policy_and_addr.HybridRoleTag.Insts.CoreFmtDebug.fmt
+  (self : policy_and_addr.HybridRoleTag) (f : core.fmt.Formatter) :
+  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
+  := do
+  match self with
+  | policy_and_addr.HybridRoleTag.Classical =>
+    core.fmt.Formatter.write_str f (toStr "Classical")
+  | policy_and_addr.HybridRoleTag.PostQuantum =>
+    core.fmt.Formatter.write_str f (toStr "PostQuantum")
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::fmt::Debug for qsag_verified::policy_and_addr::HybridRoleTag}]
+    Source: 'src/policy_and_addr.rs', lines 572:22-572:27 -/
+@[reducible]
+def policy_and_addr.HybridRoleTag.Insts.CoreFmtDebug : core.fmt.Debug
+  policy_and_addr.HybridRoleTag := {
+  fmt := policy_and_addr.HybridRoleTag.Insts.CoreFmtDebug.fmt
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::marker::StructuralPartialEq for qsag_verified::policy_and_addr::HybridRoleTag}]
+    Source: 'src/policy_and_addr.rs', lines 572:29-572:38 -/
+@[reducible]
+def policy_and_addr.HybridRoleTag.Insts.CoreMarkerStructuralPartialEq :
+  core.marker.StructuralPartialEq policy_and_addr.HybridRoleTag := {
+}
+
+/-- [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::HybridRoleTag> for qsag_verified::policy_and_addr::HybridRoleTag}::eq]:
+    Source: 'src/policy_and_addr.rs', lines 572:29-572:38
+    Visibility: public -/
+def policy_and_addr.HybridRoleTag.Insts.CoreCmpPartialEqHybridRoleTag.eq
+  (self : policy_and_addr.HybridRoleTag)
+  (other : policy_and_addr.HybridRoleTag) :
+  Result Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (self1 = other1)
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::PartialEq<qsag_verified::policy_and_addr::HybridRoleTag> for qsag_verified::policy_and_addr::HybridRoleTag}]
+    Source: 'src/policy_and_addr.rs', lines 572:29-572:38 -/
+@[reducible]
+def policy_and_addr.HybridRoleTag.Insts.CoreCmpPartialEqHybridRoleTag :
+  core.cmp.PartialEq policy_and_addr.HybridRoleTag
+  policy_and_addr.HybridRoleTag := {
+  eq := policy_and_addr.HybridRoleTag.Insts.CoreCmpPartialEqHybridRoleTag.eq
+}
+
+/-- Trait implementation: [qsag_verified::policy_and_addr::{impl core::cmp::Eq for qsag_verified::policy_and_addr::HybridRoleTag}]
+    Source: 'src/policy_and_addr.rs', lines 572:40-572:42 -/
+@[reducible]
+impl_def policy_and_addr.HybridRoleTag.Insts.CoreCmpEq : core.cmp.Eq
+  policy_and_addr.HybridRoleTag := {
+  partialEqInst :=
+    policy_and_addr.HybridRoleTag.Insts.CoreCmpPartialEqHybridRoleTag
+  assert_fields_are_eq := core.cmp.Eq.assert_fields_are_eq.default
+    policy_and_addr.HybridRoleTag.Insts.CoreCmpEq
+}
+
+/-- [qsag_verified::policy_and_addr::{qsag_verified::policy_and_addr::HybridRoleTag}::to_u8]:
+    Source: 'src/policy_and_addr.rs', lines 580:4-585:5
+    Visibility: public -/
+def policy_and_addr.HybridRoleTag.to_u8
+  (self : policy_and_addr.HybridRoleTag) : Result Std.U8 := do
+  match self with
+  | policy_and_addr.HybridRoleTag.Classical => ok 1#u8
+  | policy_and_addr.HybridRoleTag.PostQuantum => ok 2#u8
+
+/-- [qsag_verified::policy_and_addr::check_hybrid_domain_framing]:
+    Source: 'src/policy_and_addr.rs', lines 590:0-629:1
+    Visibility: public -/
+def policy_and_addr.check_hybrid_domain_framing
+  (magic14 : Array Std.U8 14#usize) (wire_role_byte : Std.U8)
+  (expected_role : policy_and_addr.HybridRoleTag) (suite_code : Std.U16)
+  (expected_id_commit : Array Std.U8 32#usize)
+  (wire_id_commit : Array Std.U8 32#usize) :
+  Result Bool
+  := do
+  let i ← Array.index_usize magic14 0#usize
+  let i1 ← lift (i ^^^ 81#u8)
+  let i2 ← Array.index_usize magic14 1#usize
+  let i3 ← lift (i2 ^^^ 83#u8)
+  let i4 ← lift (i1 ||| i3)
+  let i5 ← Array.index_usize magic14 2#usize
+  let i6 ← lift (i5 ^^^ 65#u8)
+  let i7 ← lift (i4 ||| i6)
+  let i8 ← Array.index_usize magic14 3#usize
+  let i9 ← lift (i8 ^^^ 71#u8)
+  let i10 ← lift (i7 ||| i9)
+  let i11 ← Array.index_usize magic14 4#usize
+  let i12 ← lift (i11 ^^^ 46#u8)
+  let i13 ← lift (i10 ||| i12)
+  let i14 ← Array.index_usize magic14 5#usize
+  let i15 ← lift (i14 ^^^ 72#u8)
+  let i16 ← lift (i13 ||| i15)
+  let i17 ← Array.index_usize magic14 6#usize
+  let i18 ← lift (i17 ^^^ 89#u8)
+  let i19 ← lift (i16 ||| i18)
+  let i20 ← Array.index_usize magic14 7#usize
+  let i21 ← lift (i20 ^^^ 66#u8)
+  let i22 ← lift (i19 ||| i21)
+  let i23 ← Array.index_usize magic14 8#usize
+  let i24 ← lift (i23 ^^^ 82#u8)
+  let i25 ← lift (i22 ||| i24)
+  let i26 ← Array.index_usize magic14 9#usize
+  let i27 ← lift (i26 ^^^ 73#u8)
+  let i28 ← lift (i25 ||| i27)
+  let i29 ← Array.index_usize magic14 10#usize
+  let i30 ← lift (i29 ^^^ 68#u8)
+  let i31 ← lift (i28 ||| i30)
+  let i32 ← Array.index_usize magic14 11#usize
+  let i33 ← lift (i32 ^^^ 46#u8)
+  let i34 ← lift (i31 ||| i33)
+  let i35 ← Array.index_usize magic14 12#usize
+  let i36 ← lift (i35 ^^^ 86#u8)
+  let i37 ← lift (i34 ||| i36)
+  let i38 ← Array.index_usize magic14 13#usize
+  let i39 ← lift (i38 ^^^ 50#u8)
+  let diff ← lift (i37 ||| i39)
+  if diff != 0#u8
+  then ok false
+  else
+    let suite_valid ←
+      if suite_code = policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
+      then ok true
+      else
+        if suite_code = policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
+        then ok true
+        else ok false
+    if suite_valid
+    then
+      let i40 ← policy_and_addr.HybridRoleTag.to_u8 expected_role
+      if wire_role_byte != i40
+      then ok false
+      else tower.ct_eq_bytes32 expected_id_commit wire_id_commit
+    else ok false
+
+/-- [qsag_verified::policy_and_addr::derive_hybrid_transcript_digest]:
+    Source: 'src/policy_and_addr.rs', lines 632:0-658:1
+    Visibility: public -/
+def policy_and_addr.derive_hybrid_transcript_digest
+  (role : policy_and_addr.HybridRoleTag) (suite_code : Std.U16)
+  (id_commit : Array Std.U8 32#usize) (message_digest : Array Std.U8 32#usize)
+  :
+  Result (Option (Array Std.U8 32#usize))
+  := do
+  if suite_code != policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
+  then
+    if suite_code != policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
+    then ok none
+    else
+      let i ← policy_and_addr.HybridRoleTag.to_u8 role
+      let i1 ← suite_code >>> 8#i32
+      let i2 ← lift (i1 &&& 255#u16)
+      let i3 ← lift (UScalar.cast .U8 i2)
+      let i4 ← lift (suite_code &&& 255#u16)
+      let i5 ← lift (UScalar.cast .U8 i4)
+      let sp ← keccak.Shake256Sponge.new_shake256
+      let s ←
+        lift (Array.to_slice
+          (Array.make 14#usize [
+            81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 72#u8, 89#u8, 66#u8, 82#u8,
+            73#u8, 68#u8, 46#u8, 86#u8, 50#u8
+            ]))
+      let sp1 ← keccak.Shake256Sponge.absorb sp s
+      let s1 ← lift (Array.to_slice (Array.make 3#usize [ i, i3, i5 ]))
+      let sp2 ← keccak.Shake256Sponge.absorb sp1 s1
+      let s2 ← lift (Array.to_slice id_commit)
+      let sp3 ← keccak.Shake256Sponge.absorb sp2 s2
+      let s3 ← lift (Array.to_slice message_digest)
+      let sp4 ← keccak.Shake256Sponge.absorb sp3 s3
+      let out := Array.repeat 32#usize 0#u8
+      let (s4, to_slice_mut_back) ← lift (Array.to_slice_mut out)
+      let (_, s5) ← keccak.Shake256Sponge.squeeze sp4 s4
+      let out1 := to_slice_mut_back s5
+      ok (some out1)
+  else
+    let i ← policy_and_addr.HybridRoleTag.to_u8 role
+    let i1 ← suite_code >>> 8#i32
+    let i2 ← lift (i1 &&& 255#u16)
+    let i3 ← lift (UScalar.cast .U8 i2)
+    let i4 ← lift (suite_code &&& 255#u16)
+    let i5 ← lift (UScalar.cast .U8 i4)
+    let sp ← keccak.Shake256Sponge.new_shake256
+    let s ←
+      lift (Array.to_slice
+        (Array.make 14#usize [
+          81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 72#u8, 89#u8, 66#u8, 82#u8, 73#u8,
+          68#u8, 46#u8, 86#u8, 50#u8
+          ]))
+    let sp1 ← keccak.Shake256Sponge.absorb sp s
+    let s1 ← lift (Array.to_slice (Array.make 3#usize [ i, i3, i5 ]))
+    let sp2 ← keccak.Shake256Sponge.absorb sp1 s1
+    let s2 ← lift (Array.to_slice id_commit)
+    let sp3 ← keccak.Shake256Sponge.absorb sp2 s2
+    let s3 ← lift (Array.to_slice message_digest)
+    let sp4 ← keccak.Shake256Sponge.absorb sp3 s3
+    let out := Array.repeat 32#usize 0#u8
+    let (s4, to_slice_mut_back) ← lift (Array.to_slice_mut out)
+    let (_, s5) ← keccak.Shake256Sponge.squeeze sp4 s4
+    let out1 := to_slice_mut_back s5
+    ok (some out1)
+
+/-- [qsag_verified::rss_cut_session::{impl core::clone::Clone for qsag_verified::rss_cut_session::RssCutPhase}::clone]:
+    Source: 'src/rss_cut_session.rs', lines 14:9-14:14
+    Visibility: public -/
+def rss_cut_session.RssCutPhase.Insts.CoreCloneClone.clone
+  (self : rss_cut_session.RssCutPhase) :
+  Result rss_cut_session.RssCutPhase
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::clone::Clone for qsag_verified::rss_cut_session::RssCutPhase}]
+    Source: 'src/rss_cut_session.rs', lines 14:9-14:14 -/
+@[reducible]
+def rss_cut_session.RssCutPhase.Insts.CoreCloneClone : core.clone.Clone
+  rss_cut_session.RssCutPhase := {
+  clone := rss_cut_session.RssCutPhase.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::marker::Copy for qsag_verified::rss_cut_session::RssCutPhase}]
+    Source: 'src/rss_cut_session.rs', lines 14:16-14:20 -/
+@[reducible]
+def rss_cut_session.RssCutPhase.Insts.CoreMarkerCopy : core.marker.Copy
+  rss_cut_session.RssCutPhase := {
+  cloneInst := rss_cut_session.RssCutPhase.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::rss_cut_session::{impl core::fmt::Debug for qsag_verified::rss_cut_session::RssCutPhase}::fmt]:
+    Source: 'src/rss_cut_session.rs', lines 14:22-14:27
+    Visibility: public -/
+def rss_cut_session.RssCutPhase.Insts.CoreFmtDebug.fmt
+  (self : rss_cut_session.RssCutPhase) (f : core.fmt.Formatter) :
+  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
+  := do
+  match self with
+  | rss_cut_session.RssCutPhase.Round1MaskCommitted =>
+    core.fmt.Formatter.write_str f (toStr "Round1MaskCommitted")
+  | rss_cut_session.RssCutPhase.Round2ChiEvaluated =>
+    core.fmt.Formatter.write_str f (toStr "Round2ChiEvaluated")
+  | rss_cut_session.RssCutPhase.Round3ConsistencyVerified =>
+    core.fmt.Formatter.write_str f (toStr "Round3ConsistencyVerified")
+  | rss_cut_session.RssCutPhase.CutOpened =>
+    core.fmt.Formatter.write_str f (toStr "CutOpened")
+  | rss_cut_session.RssCutPhase.Poisoned =>
+    core.fmt.Formatter.write_str f (toStr "Poisoned")
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::fmt::Debug for qsag_verified::rss_cut_session::RssCutPhase}]
+    Source: 'src/rss_cut_session.rs', lines 14:22-14:27 -/
+@[reducible]
+def rss_cut_session.RssCutPhase.Insts.CoreFmtDebug : core.fmt.Debug
+  rss_cut_session.RssCutPhase := {
+  fmt := rss_cut_session.RssCutPhase.Insts.CoreFmtDebug.fmt
+}
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::marker::StructuralPartialEq for qsag_verified::rss_cut_session::RssCutPhase}]
+    Source: 'src/rss_cut_session.rs', lines 14:29-14:38 -/
+@[reducible]
+def rss_cut_session.RssCutPhase.Insts.CoreMarkerStructuralPartialEq :
+  core.marker.StructuralPartialEq rss_cut_session.RssCutPhase := {
+}
+
+/-- [qsag_verified::rss_cut_session::{impl core::cmp::PartialEq<qsag_verified::rss_cut_session::RssCutPhase> for qsag_verified::rss_cut_session::RssCutPhase}::eq]:
+    Source: 'src/rss_cut_session.rs', lines 14:29-14:38
+    Visibility: public -/
+def rss_cut_session.RssCutPhase.Insts.CoreCmpPartialEqRssCutPhase.eq
+  (self : rss_cut_session.RssCutPhase) (other : rss_cut_session.RssCutPhase) :
+  Result Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (self1 = other1)
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::cmp::PartialEq<qsag_verified::rss_cut_session::RssCutPhase> for qsag_verified::rss_cut_session::RssCutPhase}]
+    Source: 'src/rss_cut_session.rs', lines 14:29-14:38 -/
+@[reducible]
+def rss_cut_session.RssCutPhase.Insts.CoreCmpPartialEqRssCutPhase :
+  core.cmp.PartialEq rss_cut_session.RssCutPhase rss_cut_session.RssCutPhase
+  := {
+  eq := rss_cut_session.RssCutPhase.Insts.CoreCmpPartialEqRssCutPhase.eq
+}
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::cmp::Eq for qsag_verified::rss_cut_session::RssCutPhase}]
+    Source: 'src/rss_cut_session.rs', lines 14:40-14:42 -/
+@[reducible]
+impl_def rss_cut_session.RssCutPhase.Insts.CoreCmpEq : core.cmp.Eq
+  rss_cut_session.RssCutPhase := {
+  partialEqInst :=
+    rss_cut_session.RssCutPhase.Insts.CoreCmpPartialEqRssCutPhase
+  assert_fields_are_eq := core.cmp.Eq.assert_fields_are_eq.default
+    rss_cut_session.RssCutPhase.Insts.CoreCmpEq
+}
+
+/-- [qsag_verified::rss_cut_session::{impl core::clone::Clone for qsag_verified::rss_cut_session::RssCutError}::clone]:
+    Source: 'src/rss_cut_session.rs', lines 24:9-24:14
+    Visibility: public -/
+def rss_cut_session.RssCutError.Insts.CoreCloneClone.clone
+  (self : rss_cut_session.RssCutError) :
+  Result rss_cut_session.RssCutError
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::clone::Clone for qsag_verified::rss_cut_session::RssCutError}]
+    Source: 'src/rss_cut_session.rs', lines 24:9-24:14 -/
+@[reducible]
+def rss_cut_session.RssCutError.Insts.CoreCloneClone : core.clone.Clone
+  rss_cut_session.RssCutError := {
+  clone := rss_cut_session.RssCutError.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::marker::Copy for qsag_verified::rss_cut_session::RssCutError}]
+    Source: 'src/rss_cut_session.rs', lines 24:16-24:20 -/
+@[reducible]
+def rss_cut_session.RssCutError.Insts.CoreMarkerCopy : core.marker.Copy
+  rss_cut_session.RssCutError := {
+  cloneInst := rss_cut_session.RssCutError.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::rss_cut_session::{impl core::fmt::Debug for qsag_verified::rss_cut_session::RssCutError}::fmt]:
+    Source: 'src/rss_cut_session.rs', lines 24:22-24:27
+    Visibility: public -/
+def rss_cut_session.RssCutError.Insts.CoreFmtDebug.fmt
+  (self : rss_cut_session.RssCutError) (f : core.fmt.Formatter) :
+  Result ((core.result.Result Unit core.fmt.Error) × core.fmt.Formatter)
+  := do
+  match self with
+  | rss_cut_session.RssCutError.SessionPoisoned =>
+    core.fmt.Formatter.write_str f (toStr "SessionPoisoned")
+  | rss_cut_session.RssCutError.SessionIdMismatch =>
+    core.fmt.Formatter.write_str f (toStr "SessionIdMismatch")
+  | rss_cut_session.RssCutError.InvalidPhaseTransition =>
+    core.fmt.Formatter.write_str f (toStr "InvalidPhaseTransition")
+  | rss_cut_session.RssCutError.MaskCommitmentMismatch =>
+    core.fmt.Formatter.write_str f (toStr "MaskCommitmentMismatch")
+  | rss_cut_session.RssCutError.ConsistencyCheckFailed =>
+    core.fmt.Formatter.write_str f (toStr "ConsistencyCheckFailed")
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::fmt::Debug for qsag_verified::rss_cut_session::RssCutError}]
+    Source: 'src/rss_cut_session.rs', lines 24:22-24:27 -/
+@[reducible]
+def rss_cut_session.RssCutError.Insts.CoreFmtDebug : core.fmt.Debug
+  rss_cut_session.RssCutError := {
+  fmt := rss_cut_session.RssCutError.Insts.CoreFmtDebug.fmt
+}
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::marker::StructuralPartialEq for qsag_verified::rss_cut_session::RssCutError}]
+    Source: 'src/rss_cut_session.rs', lines 24:29-24:38 -/
+@[reducible]
+def rss_cut_session.RssCutError.Insts.CoreMarkerStructuralPartialEq :
+  core.marker.StructuralPartialEq rss_cut_session.RssCutError := {
+}
+
+/-- [qsag_verified::rss_cut_session::{impl core::cmp::PartialEq<qsag_verified::rss_cut_session::RssCutError> for qsag_verified::rss_cut_session::RssCutError}::eq]:
+    Source: 'src/rss_cut_session.rs', lines 24:29-24:38
+    Visibility: public -/
+def rss_cut_session.RssCutError.Insts.CoreCmpPartialEqRssCutError.eq
+  (self : rss_cut_session.RssCutError) (other : rss_cut_session.RssCutError) :
+  Result Bool
+  := do
+  let self1 := read_discriminant self
+  let other1 := read_discriminant other
+  ok (self1 = other1)
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::cmp::PartialEq<qsag_verified::rss_cut_session::RssCutError> for qsag_verified::rss_cut_session::RssCutError}]
+    Source: 'src/rss_cut_session.rs', lines 24:29-24:38 -/
+@[reducible]
+def rss_cut_session.RssCutError.Insts.CoreCmpPartialEqRssCutError :
+  core.cmp.PartialEq rss_cut_session.RssCutError rss_cut_session.RssCutError
+  := {
+  eq := rss_cut_session.RssCutError.Insts.CoreCmpPartialEqRssCutError.eq
+}
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::cmp::Eq for qsag_verified::rss_cut_session::RssCutError}]
+    Source: 'src/rss_cut_session.rs', lines 24:40-24:42 -/
+@[reducible]
+impl_def rss_cut_session.RssCutError.Insts.CoreCmpEq : core.cmp.Eq
+  rss_cut_session.RssCutError := {
+  partialEqInst :=
+    rss_cut_session.RssCutError.Insts.CoreCmpPartialEqRssCutError
+  assert_fields_are_eq := core.cmp.Eq.assert_fields_are_eq.default
+    rss_cut_session.RssCutError.Insts.CoreCmpEq
+}
+
+/-- [qsag_verified::rss_cut_session::{impl core::clone::Clone for qsag_verified::rss_cut_session::RssCutStepInput}::clone]:
+    Source: 'src/rss_cut_session.rs', lines 34:9-34:14
+    Visibility: public -/
+def rss_cut_session.RssCutStepInput.Insts.CoreCloneClone.clone
+  (self : rss_cut_session.RssCutStepInput) :
+  Result rss_cut_session.RssCutStepInput
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::clone::Clone for qsag_verified::rss_cut_session::RssCutStepInput}]
+    Source: 'src/rss_cut_session.rs', lines 34:9-34:14 -/
+@[reducible]
+def rss_cut_session.RssCutStepInput.Insts.CoreCloneClone : core.clone.Clone
+  rss_cut_session.RssCutStepInput := {
+  clone := rss_cut_session.RssCutStepInput.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::marker::Copy for qsag_verified::rss_cut_session::RssCutStepInput}]
+    Source: 'src/rss_cut_session.rs', lines 34:16-34:20 -/
+@[reducible]
+def rss_cut_session.RssCutStepInput.Insts.CoreMarkerCopy : core.marker.Copy
+  rss_cut_session.RssCutStepInput := {
+  cloneInst := rss_cut_session.RssCutStepInput.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::rss_cut_session::{impl core::clone::Clone for qsag_verified::rss_cut_session::RssCutStepOutput}::clone]:
+    Source: 'src/rss_cut_session.rs', lines 53:9-53:14
+    Visibility: public -/
+def rss_cut_session.RssCutStepOutput.Insts.CoreCloneClone.clone
+  (self : rss_cut_session.RssCutStepOutput) :
+  Result rss_cut_session.RssCutStepOutput
+  := do
+  ok self
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::clone::Clone for qsag_verified::rss_cut_session::RssCutStepOutput}]
+    Source: 'src/rss_cut_session.rs', lines 53:9-53:14 -/
+@[reducible]
+def rss_cut_session.RssCutStepOutput.Insts.CoreCloneClone : core.clone.Clone
+  rss_cut_session.RssCutStepOutput := {
+  clone := rss_cut_session.RssCutStepOutput.Insts.CoreCloneClone.clone
+}
+
+/-- Trait implementation: [qsag_verified::rss_cut_session::{impl core::marker::Copy for qsag_verified::rss_cut_session::RssCutStepOutput}]
+    Source: 'src/rss_cut_session.rs', lines 53:16-53:20 -/
+@[reducible]
+def rss_cut_session.RssCutStepOutput.Insts.CoreMarkerCopy : core.marker.Copy
+  rss_cut_session.RssCutStepOutput := {
+  cloneInst := rss_cut_session.RssCutStepOutput.Insts.CoreCloneClone
+}
+
+/-- [qsag_verified::rss_cut_session::compute_rss_mask_commitment]:
+    Source: 'src/rss_cut_session.rs', lines 84:0-104:1
+    Visibility: public -/
+def rss_cut_session.compute_rss_mask_commitment
+  (session_id : Array Std.U8 32#usize) (party_id : Std.U8)
+  (mask_bytes : Array Std.U8 32#usize) (salt_nonce : Array Std.U8 32#usize) :
+  Result (Array Std.U8 32#usize)
+  := do
+  let sp ← keccak.Shake256Sponge.new_shake256
+  let s ←
+    lift (Array.to_slice
+      (Array.make 16#usize [
+        81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 82#u8, 83#u8, 83#u8, 67#u8, 85#u8,
+        84#u8, 46#u8, 77#u8, 83#u8, 75#u8, 49#u8
+        ]))
+  let sp1 ← keccak.Shake256Sponge.absorb sp s
+  let s1 ← lift (Array.to_slice session_id)
+  let sp2 ← keccak.Shake256Sponge.absorb sp1 s1
+  let s2 ← lift (Array.to_slice (Array.make 1#usize [ party_id ]))
+  let sp3 ← keccak.Shake256Sponge.absorb sp2 s2
+  let s3 ← lift (Array.to_slice mask_bytes)
+  let sp4 ← keccak.Shake256Sponge.absorb sp3 s3
+  let s4 ← lift (Array.to_slice salt_nonce)
+  let sp5 ← keccak.Shake256Sponge.absorb sp4 s4
+  let out := Array.repeat 32#usize 0#u8
+  let (s5, to_slice_mut_back) ← lift (Array.to_slice_mut out)
+  let (_, s6) ← keccak.Shake256Sponge.squeeze sp5 s5
+  ok (to_slice_mut_back s6)
+
+/-- [qsag_verified::rss_cut_session::poison_rss_cut_session]:
+    Source: 'src/rss_cut_session.rs', lines 107:0-119:1 -/
+def rss_cut_session.poison_rss_cut_session
+  (session_id : Array Std.U8 32#usize)
+  (mask_commitment : Array Std.U8 32#usize) :
+  Result rss_cut_session.RssCutGateSession
+  := do
+  let a := Array.repeat 32#usize 0#u8
+  ok
+    {
+      session_id,
+      phase := rss_cut_session.RssCutPhase.Poisoned,
+      mask_commitment,
+      candidate_cut_bytes := a,
+      consistency_verified := false,
+      poisoned := true
+    }
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::session_id]:
+    Source: 'src/rss_cut_session.rs', lines 123:4-123:66
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.impl.session_id
+  (self : rss_cut_session.RssCutGateSession) :
+  Result (Array Std.U8 32#usize)
+  := do
+  ok self.session_id
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::mask_commitment]:
+    Source: 'src/rss_cut_session.rs', lines 126:4-126:76
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.impl.mask_commitment
+  (self : rss_cut_session.RssCutGateSession) :
+  Result (Array Std.U8 32#usize)
+  := do
+  ok self.mask_commitment
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::new_round1_committed]:
+    Source: 'src/rss_cut_session.rs', lines 131:4-143:5
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.new_round1_committed
+  (session_id : Array Std.U8 32#usize)
+  (mask_commitment : Array Std.U8 32#usize) :
+  Result rss_cut_session.RssCutGateSession
+  := do
+  let a := Array.repeat 32#usize 0#u8
+  ok
+    {
+      session_id,
+      phase := rss_cut_session.RssCutPhase.Round1MaskCommitted,
+      mask_commitment,
+      candidate_cut_bytes := a,
+      consistency_verified := false,
+      poisoned := false
+    }
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::is_poisoned]:
+    Source: 'src/rss_cut_session.rs', lines 147:4-149:5
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.is_poisoned
+  (self : rss_cut_session.RssCutGateSession) : Result Bool := do
+  ok self.poisoned
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::phase]:
+    Source: 'src/rss_cut_session.rs', lines 153:4-155:5
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.impl.phase
+  (self : rss_cut_session.RssCutGateSession) :
+  Result rss_cut_session.RssCutPhase
+  := do
+  ok self.phase
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::is_consistency_verified]:
+    Source: 'src/rss_cut_session.rs', lines 159:4-161:5
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.is_consistency_verified
+  (self : rss_cut_session.RssCutGateSession) : Result Bool := do
+  ok self.consistency_verified
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::advance_round2_chi]:
+    Source: 'src/rss_cut_session.rs', lines 165:4-207:5
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.advance_round2_chi
+  (self : rss_cut_session.RssCutGateSession)
+  (req_session_id : Array Std.U8 32#usize)
+  (recomputed_mask_commitment : Array Std.U8 32#usize)
+  (chi_cut_candidate : Array Std.U8 32#usize) :
+  Result (rss_cut_session.RssCutGateSession × (core.result.Result Unit
+    rss_cut_session.RssCutError))
+  := do
+  if self.poisoned
+  then
+    let rcgs ←
+      rss_cut_session.poison_rss_cut_session self.session_id
+        self.mask_commitment
+    ok (rcgs, core.result.Result.Err
+      rss_cut_session.RssCutError.SessionPoisoned)
+  else
+    let b ← tower.ct_eq_bytes32 self.session_id req_session_id
+    if b
+    then
+      match self.phase with
+      | rss_cut_session.RssCutPhase.Round1MaskCommitted =>
+        let b1 ←
+          tower.ct_eq_bytes32 self.mask_commitment recomputed_mask_commitment
+        if b1
+        then
+          ok
+            ({
+               self
+                 with
+                 phase := rss_cut_session.RssCutPhase.Round2ChiEvaluated,
+                 candidate_cut_bytes := chi_cut_candidate,
+                 consistency_verified := false
+             }, core.result.Result.Ok ())
+        else
+          let rcgs ←
+            rss_cut_session.poison_rss_cut_session self.session_id
+              self.mask_commitment
+          ok (rcgs, core.result.Result.Err
+            rss_cut_session.RssCutError.MaskCommitmentMismatch)
+      | rss_cut_session.RssCutPhase.Round2ChiEvaluated =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+      | rss_cut_session.RssCutPhase.Round3ConsistencyVerified =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+      | rss_cut_session.RssCutPhase.CutOpened =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+      | rss_cut_session.RssCutPhase.Poisoned =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+    else
+      let rcgs ←
+        rss_cut_session.poison_rss_cut_session self.session_id
+          self.mask_commitment
+      ok (rcgs, core.result.Result.Err
+        rss_cut_session.RssCutError.SessionIdMismatch)
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::advance_round3_verify_consistency]:
+    Source: 'src/rss_cut_session.rs', lines 212:4-255:5
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.advance_round3_verify_consistency
+  (self : rss_cut_session.RssCutGateSession)
+  (req_session_id : Array Std.U8 32#usize) (spdz_mac_residual_lo : Std.U128)
+  (spdz_mac_residual_hi : Std.U128) (bbcggi_dzk_residual : Std.U64) :
+  Result (rss_cut_session.RssCutGateSession × (core.result.Result Unit
+    rss_cut_session.RssCutError))
+  := do
+  if self.poisoned
+  then
+    let rcgs ←
+      rss_cut_session.poison_rss_cut_session self.session_id
+        self.mask_commitment
+    ok (rcgs, core.result.Result.Err
+      rss_cut_session.RssCutError.SessionPoisoned)
+  else
+    let b ← tower.ct_eq_bytes32 self.session_id req_session_id
+    if b
+    then
+      match self.phase with
+      | rss_cut_session.RssCutPhase.Round1MaskCommitted =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+      | rss_cut_session.RssCutPhase.Round2ChiEvaluated =>
+        if spdz_mac_residual_lo != 0#u128
+        then
+          let rcgs ←
+            rss_cut_session.poison_rss_cut_session self.session_id
+              self.mask_commitment
+          ok (rcgs, core.result.Result.Err
+            rss_cut_session.RssCutError.ConsistencyCheckFailed)
+        else
+          if spdz_mac_residual_hi != 0#u128
+          then
+            let rcgs ←
+              rss_cut_session.poison_rss_cut_session self.session_id
+                self.mask_commitment
+            ok (rcgs, core.result.Result.Err
+              rss_cut_session.RssCutError.ConsistencyCheckFailed)
+          else
+            if bbcggi_dzk_residual != 0#u64
+            then
+              let rcgs ←
+                rss_cut_session.poison_rss_cut_session self.session_id
+                  self.mask_commitment
+              ok (rcgs, core.result.Result.Err
+                rss_cut_session.RssCutError.ConsistencyCheckFailed)
+            else
+              ok
+                ({
+                   self
+                     with
+                     phase :=
+                       rss_cut_session.RssCutPhase.Round3ConsistencyVerified,
+                     consistency_verified := true
+                 }, core.result.Result.Ok ())
+      | rss_cut_session.RssCutPhase.Round3ConsistencyVerified =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+      | rss_cut_session.RssCutPhase.CutOpened =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+      | rss_cut_session.RssCutPhase.Poisoned =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+    else
+      let rcgs ←
+        rss_cut_session.poison_rss_cut_session self.session_id
+          self.mask_commitment
+      ok (rcgs, core.result.Result.Err
+        rss_cut_session.RssCutError.SessionIdMismatch)
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::open_verified_cut]:
+    Source: 'src/rss_cut_session.rs', lines 259:4-300:5
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.open_verified_cut
+  (self : rss_cut_session.RssCutGateSession)
+  (req_session_id : Array Std.U8 32#usize) :
+  Result (rss_cut_session.RssCutGateSession × (core.result.Result (Array
+    Std.U8 32#usize) rss_cut_session.RssCutError))
+  := do
+  if self.poisoned
+  then
+    let rcgs ←
+      rss_cut_session.poison_rss_cut_session self.session_id
+        self.mask_commitment
+    ok (rcgs, core.result.Result.Err
+      rss_cut_session.RssCutError.SessionPoisoned)
+  else
+    let b ← tower.ct_eq_bytes32 self.session_id req_session_id
+    if b
+    then
+      match self.phase with
+      | rss_cut_session.RssCutPhase.Round1MaskCommitted =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+      | rss_cut_session.RssCutPhase.Round2ChiEvaluated =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+      | rss_cut_session.RssCutPhase.Round3ConsistencyVerified =>
+        if self.consistency_verified
+        then
+          let a := Array.repeat 32#usize 0#u8
+          ok
+            ({
+               self
+                 with
+                 phase := rss_cut_session.RssCutPhase.CutOpened,
+                 candidate_cut_bytes := a
+             }, core.result.Result.Ok self.candidate_cut_bytes)
+        else
+          let rcgs ←
+            rss_cut_session.poison_rss_cut_session self.session_id
+              self.mask_commitment
+          ok (rcgs, core.result.Result.Err
+            rss_cut_session.RssCutError.ConsistencyCheckFailed)
+      | rss_cut_session.RssCutPhase.CutOpened =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+      | rss_cut_session.RssCutPhase.Poisoned =>
+        let rcgs ←
+          rss_cut_session.poison_rss_cut_session self.session_id
+            self.mask_commitment
+        ok (rcgs, core.result.Result.Err
+          rss_cut_session.RssCutError.InvalidPhaseTransition)
+    else
+      let rcgs ←
+        rss_cut_session.poison_rss_cut_session self.session_id
+          self.mask_commitment
+      ok (rcgs, core.result.Result.Err
+        rss_cut_session.RssCutError.SessionIdMismatch)
+
+/-- [qsag_verified::rss_cut_session::{qsag_verified::rss_cut_session::RssCutGateSession}::step]:
+    Source: 'src/rss_cut_session.rs', lines 303:4-348:5
+    Visibility: public -/
+def rss_cut_session.RssCutGateSession.step
+  (self : rss_cut_session.RssCutGateSession)
+  (input : rss_cut_session.RssCutStepInput) :
+  Result (rss_cut_session.RssCutGateSession × (core.result.Result
+    rss_cut_session.RssCutStepOutput rss_cut_session.RssCutError))
+  := do
+  match input with
+  | rss_cut_session.RssCutStepInput.AdvanceRound2Chi req_session_id
+    recomputed_mask_commitment chi_cut_candidate =>
+    let (next, res) ←
+      rss_cut_session.RssCutGateSession.advance_round2_chi self req_session_id
+        recomputed_mask_commitment chi_cut_candidate
+    match res with
+    | core.result.Result.Ok _ =>
+      ok (next, core.result.Result.Ok
+        rss_cut_session.RssCutStepOutput.Round2Ready)
+    | core.result.Result.Err e => ok (next, core.result.Result.Err e)
+  | rss_cut_session.RssCutStepInput.AdvanceRound3VerifyConsistency
+    req_session_id spdz_mac_residual_lo spdz_mac_residual_hi
+    bbcggi_dzk_residual =>
+    let (next, res) ←
+      rss_cut_session.RssCutGateSession.advance_round3_verify_consistency self
+        req_session_id spdz_mac_residual_lo spdz_mac_residual_hi
+        bbcggi_dzk_residual
+    match res with
+    | core.result.Result.Ok _ =>
+      ok (next, core.result.Result.Ok
+        rss_cut_session.RssCutStepOutput.Round3Verified)
+    | core.result.Result.Err e => ok (next, core.result.Result.Err e)
+  | rss_cut_session.RssCutStepInput.OpenVerifiedCut req_session_id =>
+    let (next, res) ←
+      rss_cut_session.RssCutGateSession.open_verified_cut self req_session_id
+    match res with
+    | core.result.Result.Ok cut =>
+      ok (next, core.result.Result.Ok
+        (rss_cut_session.RssCutStepOutput.CutReleased cut))
+    | core.result.Result.Err e => ok (next, core.result.Result.Err e)
+
+/-- [qsag_verified::threshold::shamir_validate_points_gf256]: loop body 1:
+    Source: 'src/threshold.rs', lines 38:8-43:9
+    Visibility: public -/
+@[rust_loop_body]
