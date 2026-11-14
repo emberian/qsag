@@ -2247,5 +2247,55 @@ def generatedFrobenius_sound (k d : Nat)
     (ringListSum alphaShares) (ringListSum deltas) _ _ hSumOne hX hA hB hC
     (generatedFrobeniusSigmas_sum _ _ _ alphaShares deltas hD) hAccept
 
+/-- Publicly checkable evidence extraction; unsigned accusations and a single
+invalid private MAC never produce a slashing receipt. -/
+def extractSignedEquivocation (scheme : CutSignatureScheme)
+    (first second : SignedCutCommitment) : Option (SignedEquivocationReceipt scheme) :=
+  if h : first.verifies scheme = true ∧ second.verifies scheme = true ∧
+      first.sender = second.sender ∧ first.context = second.context ∧
+      first.commitment ≠ second.commitment then
+    some ⟨first, second, h.1, h.2.1, h.2.2.1, h.2.2.2.1, h.2.2.2.2⟩
+  else none
+
+theorem context_cut_other_session_rejected (keys : ContextBdozKeys) (ctx : CutMacContext)
+    (t : ContextCutOpening) (h : t.context.sessionNonce ≠ ctx.sessionNonce) :
+    verifyContextCut keys ctx t = false := by
+  have hn : t.context ≠ ctx := fun he => h (congrArg CutMacContext.sessionNonce he)
+  simp [verifyContextCut, hn]
+
+/-- Successful execution supplies roster/length facts and the MAC equation to
+ the extractor. Only the interpolation normalization is an external algebraic
+ premise; the verifier itself checks every vector length. -/
+def evalGeneratedDkgFrobenius_sound (k d : Nat)
+    (lambdas xSh : List (TowerElem k)) (tr : SharedBeaverTriple (TowerElem k))
+    (yOpened : TowerElem k) (alphaShares deltas : List (TowerElem (k+d)))
+    (frobSh : List (TowerElem k))
+    (hSumOne : ringListSum lambdas = towerOne k)
+    (hAccept : evalGeneratedDkgFrobenius k d lambdas xSh tr yOpened alphaShares deltas = some frobSh) :
+    PSum (ringDot lambdas xSh = towerZero k ∨ ringDot lambdas xSh = towerOne k)
+      (PSum (ringDot lambdas tr.cShares ≠
+        towerMul k (ringDot lambdas tr.aShares) (ringDot lambdas tr.bShares))
+        (MacKeyRecoveryWitness (k+d) (ringListSum alphaShares)
+          (towerAdd (k+d) (embedTowerChain k d yOpened)
+            (embedTowerChain k d (ringDot lambdas frobSh))) (ringListSum deltas))) := by
+  unfold evalGeneratedDkgFrobenius at hAccept
+  split at hAccept
+  next hShape =>
+    have hs := of_decide_eq_true hShape
+    dsimp only at hAccept
+    have hFrob : shareZipSub (evalSharedBeaverMul lambdas xSh xSh tr).1 xSh = frobSh := by
+      have hc := hAccept
+      unfold evalSharedDkgFrobenius at hc
+      dsimp only at hc
+      split at hc
+      · exact Option.some.inj hc
+      · cases hc
+    rw [hFrob] at hAccept
+    exact verifySharedDkgFrobenius_sound k d lambdas xSh tr yOpened
+      (ringListSum alphaShares) (ringListSum deltas) _ frobSh hSumOne
+      hs.2.1 hs.2.2.1 hs.2.2.2.1 hs.2.2.2.2.1
+      (generatedFrobeniusSigmas_sum _ _ _ alphaShares deltas hs.2.2.2.2.2.2) hAccept
+  next => cases hAccept
+
 end Qsag
 end

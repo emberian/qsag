@@ -302,13 +302,18 @@ impl WhirSchedule {
             if stage.num_queries < min_q {
                 return false;
             }
-            let Some(domain) = 1usize
+            let Some(domain_u64) = 1u64
                 .checked_shl(remaining as u32)
-                .and_then(|n| n.checked_mul(stage.blowup))
+                .and_then(|n| n.checked_mul(stage.blowup as u64))
             else {
                 return false;
             };
-            if domain.trailing_zeros() > 32 {
+            // Bound stage domain to <= 2^31 so schedule validity is 100% deterministic across
+            // 32-bit/wasm32 and 64-bit targets and stays within Goldilocks 2^32 two-adicity.
+            if domain_u64 > (1u64 << 31)
+                || usize::try_from(domain_u64).is_err()
+                || domain_u64.trailing_zeros() > 32
+            {
                 return false;
             }
             remaining -= stage.step_vars;
@@ -3708,5 +3713,37 @@ mod pcs_unit_tests {
         let mp = t_x4.open_multi_with_leaf_fn(&q, leaf_scalar);
         let leaves: Vec<(usize, [u8; 32])> = q.iter().map(|&i| (i, leaf_scalar(i))).collect();
         assert!(verify_canopy_multiproof(&t_x4.commitment(), &leaves, &mp));
+    }
+
+    #[test]
+    fn whir_schedule_validate_rejects_32bit_domain_overflow() {
+        // Reproducer from Focus-03 #2: 2^24 * 256 = 2^32 overflows 32-bit/wasm32 `usize`.
+        let bad_sched = WhirSchedule {
+            regime: WhirSecurityRegime::Habr24Qrom128,
+            early_stop_vars: 8,
+            stages: vec![
+                WhirStageSpec {
+                    blowup: 256,
+                    step_vars: 6,
+                    num_queries: 32,
+                },
+                WhirStageSpec {
+                    blowup: 4,
+                    step_vars: 6,
+                    num_queries: 128,
+                },
+                WhirStageSpec {
+                    blowup: 4,
+                    step_vars: 3,
+                    num_queries: 128,
+                },
+                WhirStageSpec {
+                    blowup: 4,
+                    step_vars: 1,
+                    num_queries: 128,
+                },
+            ],
+        };
+        assert!(!bad_sched.validate(24));
     }
 }

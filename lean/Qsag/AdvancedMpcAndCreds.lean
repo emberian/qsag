@@ -1,7 +1,7 @@
 module
 /-
 # Advanced MPC and credentials
-Complete constructive kernel proofs with zero trust bypasses.
+Constructive arithmetic models and explicit protocol boundaries.
 LAW-M1: public statements with a bounded exposed interface.
 The models below describe arithmetic circuits and immutable committed views;
 implementation refinement and cryptographic binding are separate obligations.
@@ -11,6 +11,8 @@ public import Qsag.Goldilocks
 public import Qsag.BinaryTower
 public import Qsag.Poseidon2
 public import Qsag.Constructive
+public import Qsag.Keccak
+public import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -650,7 +652,7 @@ def singleSubstErrorVec (n pos : Nat) (delta : BitVec 5) : List (BitVec 5) :=
   List.replicate pos 0#5 ++ (delta :: List.replicate (n - 1 - pos) 0#5)
 
 private theorem bech32PolymodFrom_singleSubstError_ne_zero
-    {n pos : Nat} (hpos : pos < n) {delta : BitVec 5} (hdelta : delta ≠ 0#5) :
+    {n pos : Nat} {delta : BitVec 5} (hdelta : delta ≠ 0#5) :
     bech32PolymodFrom 0#30 (singleSubstErrorVec n pos delta) ≠ 0#30 := by
   unfold singleSubstErrorVec
   have hSplit : ∀ (pre suf : List (BitVec 5)) (c : BitVec 30),
@@ -678,7 +680,6 @@ private theorem bech32PolymodFrom_singleSubstError_ne_zero
     have hi30 : i < 30 := by omega
     simp [hi30, hi] at hbi ⊢
     exact hbi
-  let _ := hpos
   exact bech32PolymodFrom_zeros_ne_zero (n - 1 - pos) hNz
 
 /-- **Theorem 3 (`bech32m_rejects_bech32_and_detects_single_subst`)**:
@@ -718,7 +719,7 @@ theorem bech32m_rejects_bech32_and_detects_single_subst :
       have hSelf0 : BECH32M_CONST ^^^ BECH32M_CONST = 0#30 := by decide
       rw [hSelf, hSelf0] at h1
       exact h1
-    exact bech32PolymodFrom_singleSubstError_ne_zero hPos hDelta hSynZero
+    exact bech32PolymodFrom_singleSubstError_ne_zero hDelta hSynZero
 
 /-! ## 4. `PiBlindVc` Unlinkable Blinding Bijection & Selective-Disclosure Soundness -/
 
@@ -841,7 +842,7 @@ private theorem zkBooMulShare_sum (a b tape : Fin 3 → Goldilocks) :
     LawfulCommRing.right_distrib]
   simp only [LawfulCommRing.add_assoc, LawfulCommRing.add_comm, gl_add_left_comm]
 
-/-- Constructive (`0 Classical.choice`) explicit bijection carrier for hiding/unlinkability proofs. -/
+/-- Constructive (constructive) explicit bijection carrier for hiding/unlinkability proofs. -/
 structure CredBijection (α β : Type) where
   toFun : α → β
   invFun : β → α
@@ -958,7 +959,7 @@ private theorem reconBlind_limb (t : ZkBooCredTriple) (j : Fin 4) :
   by_cases h0 : j.val = 0 <;> by_cases h1 : j.val = 1 <;>
     by_cases h2 : j.val = 2 <;> simp [blindLimb, reconBlind, h0, h1, h2]
 
-/-- Computable (`0 Classical.choice`, `0 noncomputable`) gate-by-gate verifier for party `i`
+/-- Computable (constructive) gate-by-gate verifier for party `i`
     using only party `i` and `nextParty i`'s views and deterministic PRG tape expansion. -/
 def checkCredView (expandTape : List UInt8 → Nat → Goldilocks)
     (t : ZkBooCredTriple) : CredCircuit t.attrCount → Fin 3 → Bool
@@ -1189,7 +1190,7 @@ private theorem checkCredView6_reconstruct
     rw [he]
     exact checkCredView_reconstruct expandTape t cs.c5 (fun i => (hUnpackView i).2.2.2.2.2)
 
-/-- 3-special soundness for a committed ZKBoo triple: accepting all 3 challenges extracts a valid
+/-- Fixed-triple reconstruction: accepting all 3 challenges of the SAME triple extracts a valid
     witness `(reconAttrs t, reconBlind t)` matching all 6 commitment limbs, all 6 scope-tag limbs,
     disclosed attributes,issuer slots, and all 3 party view commitments. -/
 theorem zkBooCred_extract
@@ -1253,8 +1254,9 @@ theorem zkBooCred_extract
   · intro p hp; exact hslots p (List.mem_append.mpr (Or.inl hp))
   · intro p hp; exact hslots p (List.mem_append.mpr (Or.inr hp))
 
-/-- Constructive (`0 Classical.choice`) per-repetition soundness bound: any invalid committed triple
-    is rejected by at least 1 of the 3 ternary challenges (`≤ 2/3` soundness error per repetition). -/
+/-- Constructive (constructive) per-repetition soundness bound: any invalid committed triple
+    is rejected by at least 1 of the 3 ternary challenges. A probability interpretation
+    requires an independent uniform challenge; this is not a Fiat–Shamir theorem. -/
 theorem zkBooCred_invalid_rejected
     (commitView : (n : Nat) → Fin 3 → PartyCredView n → List UInt8)
     (expandTape : List UInt8 → Nat → Goldilocks)
@@ -1325,7 +1327,7 @@ private theorem gl_sub_sub_comm_local (s a b : Goldilocks) :
   simp only [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc]
   rw [LawfulCommRing.add_comm (CommRingOps.neg a) (CommRingOps.neg b)]
 
-/-- Constructive (`0 Classical.choice`) bijection between uniform sharing coins `(r0, r1)` and ANY
+/-- Constructive (constructive) bijection between uniform sharing coins `(r0, r1)` and ANY
     opened 2-party adjacent wire view `(w_e, w_{e+1})`: proves perfect 2-of-3 hiding of every
     undisclosed attribute and blinding limb! -/
 def credSharePairBijection (chal : Fin 3) (secret : Goldilocks) :
@@ -1353,8 +1355,8 @@ def credSharePairBijection (chal : Fin 3) (secret : Goldilocks) :
     · dsimp only [credSharePairView, credSharePairInv, credShareWire3, nextParty]
       exact Prod.ext (gl_sub_sub_cancel_r1 secret v1 v0) rfl
 
-/-- Constructive (`0 Classical.choice`) 4-limb re-blinding bijection proving statistical
-    cross-presentation unlinkability of `presBlind = vcReblind holderBlind delta`. -/
+/-- Translation bijection for the blind alone. This does not establish privacy of
+    commitments, scope tags, issuer observations, or complete presentations. -/
 def vcReblindBijection (holderBlind : VcBlind4) : CredBijection VcBlind4 VcBlind4 where
   toFun := vcReblind holderBlind
   invFun := fun y => vcUnreblind y holderBlind
@@ -1437,16 +1439,9 @@ theorem tooth_uncommitted_views_allow_adaptive_equivocation :
             trivialCommit, zeroTape,
             ← hz, LawfulCommRing.add_zero, LawfulCommRing.zero_add]
 
-/-- **Flagship §4 Theorem (`blind_vc_selective_disclosure_sound_and_unlinkable`)**:
-    1. **Cross-Presentation Re-Blinding Unlinkability**: `vcReblindBijection holderBlind` is an exact
-       4-limb bijection over `Goldilocks^4`;
-    2. **2-of-3 Undisclosed Witness Hiding (`0 Classical.choice`)**: For EVERY challenge `chal : Fin 3`
-       and ANY two undisclosed secrets `secretA, secretB : Goldilocks`, composing
-       `credSharePairBijection chal secretB` and `credSharePairBijection chal secretA` yields an explicit
-       constructive coin bijection producing identical opened 2-party wire views `(w_e, w_{e+1})`;
-    3. **Lossless 64-Bit Schema/Epoch Encoding**: `encodeU64Limbs2` is strictly injective;
-    4. **Full 6-Limb Committed-View Special Soundness**: Accepting all 3 challenges extracts a valid
-       witness matching all 6 commitment limbs, all 6 scope-tag limbs, disclosed slots, and issuer slots. -/
+/-- Local reblinding and single-wire hiding, plus fixed-triple arithmetic reconstruction.
+The historical name is retained for source compatibility. No distribution of complete
+presentations or Fiat–Shamir/QROM adversary is modeled by this theorem. -/
 theorem blind_vc_selective_disclosure_sound_and_unlinkable :
     (∀ b : VcBlind4,
       (∀ delta : VcBlind4, (vcReblindBijection b).invFun ((vcReblindBijection b).toFun delta) = delta) ∧
@@ -1528,7 +1523,7 @@ theorem rssSubsetResponses_sum {R : Type} [LawfulCommRing R] (c : R)
 /-- Centered modulo-`q` infinity-norm check (`threshold_mldsa.rs:660-682, 873-883`):
     every coefficient `v < q` satisfies centered `|v|_± < bound` iff `v < bound ∨ q - bound < v`. -/
 def checkCenteredInfNorm (q bound : Nat) (coeffs : List Nat) : Bool :=
-  coeffs.all (fun v => decide (v < bound) || decide (q < v + bound))
+  coeffs.all (fun v => decide (v < q) && (decide (v < bound) || decide (q < v + bound)))
 
 /-- Durable 46-byte + 32-byte key-bound attempt record matching `FsNonceBurnStore`
     (`crates/qsag-cred/src/threshold_mldsa.rs:153-213`):
@@ -1966,7 +1961,8 @@ theorem hornerEval_eq_even_add_mul_odd {R : Type} [LawfulCommRing R] :
         LawfulCommRing.add_comm (CommRingOps.mul xx E) (CommRingOps.mul x c1),
         LawfulCommRing.add_assoc (CommRingOps.mul x c1) (CommRingOps.mul xx E) _]
 
-/-- `Spec` NTT kernel: direct textbook `hornerEval` at each twiddle point `ω` (scaled by `1` or `-1` on `inv`). -/
+/-- Legacy point-evaluation helper. `inv` negates evaluation points; it is NOT an
+    inverse NTT. The name is retained for callers of the accelerator model. -/
 def goldilocksNttSpec (buf twiddles : List Goldilocks) (inv : Bool) : List Goldilocks :=
   twiddles.map (fun w =>
     let pt := if inv then Goldilocks.neg w else w
@@ -2447,7 +2443,8 @@ def merkleLayerSchedule (treeDepth : Nat) : List Nat := List.range treeDepth
 theorem merkleLayerSchedule_bounds (d layer : Nat) :
     layer ∈ merkleLayerSchedule d ↔ layer < d := List.mem_range
 
-/-- End-to-end `BaseFold` NTT + Coset LDE + `Poseidon2` Merkle commitment pipeline over `AcceleratorBackendSpec`. -/
+/-- Legacy composition of point-evaluation and Merkle helpers. This is not a
+    verified BaseFold encoder: interpolation and multiplicative domains are absent. -/
 def evalBaseFoldCommitPipeline
     (backend : AcceleratorBackendSpec)
     (polyBuf twiddles : List Goldilocks)
@@ -2488,11 +2485,9 @@ theorem cosetShift_merkle_refines
   simp only [hornerEval_cosetShift_eq]
   exact evalMerkleTreeLayers_simulates hSim pkSeed d _
 
-/-- **Theorem 6 (`accelerator_backend_simulation_sound`)**:
-    Unconditionally establishes concrete `Spec ↔ Exec` refinement `AcceleratorSimulates simdExecBackend cpuSpecBackend`
-    (Cooley-Tukey butterfly + 128-to-64 shift-mask NTT, 3-mul Karatsuba `Ext2` coset LDE, packed `BitVec 128`
-    Karatsuba `GF(2^128)` inner product, and iterative Merkle/`Keccak`/`Poseidon2` batching) AND proves end-to-end
-    `BaseFold` commitment pipeline agreement and collision equivalence! -/
+/-- Agreement of the two executable arithmetic helper backends and their composition.
+This establishes neither an inverse NTT nor BaseFold encoding nor collision resistance.
+The last clause transports equality; its historical distinctness argument is redundant. -/
 theorem accelerator_backend_simulation_sound :
     AcceleratorSimulates simdExecBackend cpuSpecBackend ∧
     (∀ (buf tw : List Goldilocks) (inv : Bool),
@@ -2523,6 +2518,439 @@ theorem accelerator_backend_simulation_sound :
   intro p1 p2 tw blowup d shift pkSeed _ hCol
   rw [← hPipe p1, ← hPipe p2]
   exact hCol
+
+
+/-! ## BlindVC wire boundary
+
+These definitions follow `blind_vc.rs` and `keccak.rs`, rather than the historical
+function-valued `PartyCredView`. Hash computations use the concrete Keccak module.
+Signature verification remains an explicit cryptographic interface: pinning a key
+is not a proof of ML-DSA unforgeability. Likewise, no claim of statistical hiding
+is made for a deterministic Poseidon sponge with arbitrary secret attributes.
+-/
+namespace BlindVcWire
+
+abbrev Bytes := List UInt8
+abbrev Bytes32 := { bs : Bytes // bs.length = 32 }
+
+def ascii (s : String) : Bytes := s.toUTF8.toList
+
+def le (width n : Nat) : Bytes := (be width n).reverse
+
+def words (xs : List Goldilocks) : Bytes := xs.flatMap (fun x => le 8 x.val)
+
+def framed (frames : List Bytes) : Bytes :=
+  le 8 frames.length ++ frames.flatMap (fun f => le 8 f.length ++ f)
+
+def hashFrames (domain : String) (frames : List Bytes) : Bytes32 :=
+  ⟨cshake256Bytes (ascii domain) (framed frames), cshake256Bytes_length _ _⟩
+
+/-- Finite flat wire view. Counts cannot silently truncate to u32. Salt is a
+separate commitment frame, not part of the SHAKE party-view digest. -/
+structure PartyView where
+  seed : Bytes32
+  inputs : List Goldilocks
+  gates : List Goldilocks
+  outputs : List Goldilocks
+  inputsBound : inputs.length < 2^32
+  gatesBound : gates.length < 2^32
+  outputsBound : outputs.length < 2^32
+
+/-- Exact bytes absorbed by Rust `digest_party_view`, before SHAKE finalization. -/
+def viewBytes (v : PartyView) : Bytes :=
+  ascii "QSAG.VC.VIEW_COM.V1" ++ v.seed.val ++
+  le 4 v.inputs.length ++ words v.inputs ++
+  le 4 v.gates.length ++ words v.gates ++
+  le 4 v.outputs.length ++ words v.outputs
+
+def viewDigest (v : PartyView) : Bytes32 :=
+  ⟨shake256Xof 32 (viewBytes v), shake256Xof_length _ _⟩
+
+def commitmentFrames (sid : Bytes32) (round : UInt32) (party : Fin 3)
+    (digest salt : Bytes32) : List Bytes :=
+  [sid.val, le 4 round.toNat, le 2 party.val, digest.val, salt.val]
+
+def commit (sid : Bytes32) (round : UInt32) (party : Fin 3)
+    (v : PartyView) (salt : Bytes32) : Bytes32 :=
+  hashFrames "QSAG.COMMIT.V1" (commitmentFrames sid round party (viewDigest v) salt)
+
+/-- Bounded, flat DAG: every operand refers to an earlier wire. Multiplication
+mask IDs are the gate positions themselves, so separate gates cannot alias. -/
+inductive Gate (available : Nat) where
+  | constant : Goldilocks → Gate available
+  | add : Fin available → Fin available → Gate available
+  | mul : Fin available → Fin available → Gate available
+
+structure Circuit (inputs gates outputs : Nat) where
+  gate : (i : Fin gates) → Gate (inputs + i.val)
+  output : Fin outputs → Fin (inputs + gates)
+
+def maskId {gates : Nat} (i : Fin gates) : Nat := i.val
+
+theorem maskId_injective {gates : Nat} (a b : Fin gates)
+    (h : maskId a = maskId b) : a = b := Fin.ext h
+
+/-- Commitment and scope circuits share one allocation. The second allocation
+starts after ALL gates in the first, including linear gates. -/
+theorem maskDomains_disjoint (commitGates scopeGates : Nat)
+    (a : Fin commitGates) (b : Fin scopeGates) :
+    a.val ≠ commitGates + b.val := by have := a.isLt; omega
+
+def shapeOK (inputs gates outputs : Nat) (v : PartyView) : Bool :=
+  decide (v.inputs.length = inputs ∧ v.gates.length = gates ∧ v.outputs.length = outputs)
+
+/-- The wire object is bounded even before a circuit-specific shape check. -/
+theorem viewSizeBound (v : PartyView) :
+    v.inputs.length + v.gates.length + v.outputs.length < 3 * 2^32 := by
+  have := v.inputsBound; have := v.gatesBound; have := v.outputsBound
+  omega
+
+structure Transcript where
+  chain : Bytes32
+  round : UInt64
+  absorbed : Bool
+
+def init (protocol : String) (instanceBytes : Bytes) : Transcript :=
+  ⟨hashFrames "QSAG.FS.INIT.V1" [ascii protocol, instanceBytes], 0, true⟩
+
+/-- Rust's labeled absorb transition, including the payload. -/
+def absorbMessage (tr : Transcript) (label : String) (payload : Bytes) : Transcript :=
+  { tr with chain := hashFrames "QSAG.FS.ABSORB.V1"
+      [tr.chain.val, le 8 tr.round.toNat, ascii label, payload], absorbed := true }
+
+/-- Reject overflow instead of permitting a wrapped round identifier. -/
+def squeeze (tr : Transcript) (label : String) (count : Nat) :
+    Option (Bytes × Transcript) :=
+  if tr.absorbed && decide (tr.round.toNat + 1 < 2^64) then
+    let fs := [tr.chain.val, le 8 tr.round.toNat, ascii label]
+    some (cshake256Xof count (ascii "QSAG.FS.SQUEEZE.V1") (framed fs),
+      ⟨hashFrames "QSAG.FS.RATCHET.V1" fs, tr.round + 1, false⟩)
+  else none
+
+theorem squeeze_requires_absorb (tr : Transcript) (label : String) (count : Nat)
+    (h : tr.absorbed = false) : squeeze tr label count = none := by
+  simp [squeeze, h]
+
+def fiveTrits (b : UInt8) : List (Fin 3) :=
+  if b.toNat < 243 then
+    (List.range 5).map (fun i => ⟨(b.toNat / 3^i) % 3, Nat.mod_lt _ (by decide)⟩)
+  else []
+
+/-- Fuel counts extension blocks. Exhaustion is explicit; it never returns a
+short challenge vector or reduces a rejected byte modulo three. -/
+def extendTrits : Nat → Transcript → UInt32 → Nat → List (Fin 3) →
+    Option (List (Fin 3) × Transcript)
+  | 0, tr, _, count, acc =>
+    if acc.length ≥ count then some (acc.take count, tr) else none
+  | fuel + 1, tr, extra, count, acc =>
+    if acc.length ≥ count then some (acc.take count, tr) else
+    if extra.toNat + 1 < 2^32 then do
+      let (raw, next) ← squeeze
+        (absorbMessage tr "VC_TRIT_EXTEND" (le 4 extra.toNat))
+        "VC_ZKBOO_OPEN_TRITS_MORE" 64
+      extendTrits fuel next (extra + 1) count (acc ++ raw.flatMap fiveTrits)
+    else none
+
+def challenges (fuel : Nat) (tr : Transcript) (count : Nat) :
+    Option (List (Fin 3) × Transcript) := do
+  let (raw, next) ← squeeze tr "VC_ZKBOO_OPEN_TRITS" 64
+  extendTrits fuel next 0 count (raw.flatMap fiveTrits)
+
+/-- Each position of the accepted 243-byte alphabet has exactly 81 preimages
+for each trit. This is a finite counting fact, not a randomness claim about SHAKE. -/
+theorem accepted_trit_fibers :
+    ∀ i ∈ List.range 5, ∀ t ∈ List.range 3,
+      ((List.range 243).filter (fun b => (b / 3^i) % 3 == t)).length = 81 := by
+  decide
+
+/-- Accepted bytes have unique five-digit ternary expansions. -/
+theorem accepted_five_trits_injective (a b : Nat) (ha : a < 243) (hb : b < 243)
+    (h0 : a % 3 = b % 3) (h1 : (a / 3) % 3 = (b / 3) % 3)
+    (h2 : (a / 9) % 3 = (b / 9) % 3)
+    (h3 : (a / 27) % 3 = (b / 27) % 3)
+    (h4 : (a / 81) % 3 = (b / 81) % 3) : a = b := by
+  omega
+
+/-- Rejection sampling, as in `sample_canonical_gl_vec`. -/
+def fieldCandidate (w : UInt64) : Option Goldilocks :=
+  if h : w.toNat < goldilocksPrime then some ⟨w.toNat, h⟩ else none
+
+theorem fieldCandidate_exact (w : UInt64) (x : Goldilocks) :
+    fieldCandidate w = some x ↔ w.toNat = x.val := by
+  unfold fieldCandidate
+  split
+  next h =>
+    constructor
+    · intro he; cases he; rfl
+    · intro he; congr 1; exact Goldilocks.ext he
+  next h =>
+    constructor
+    · intro he; cases he
+    · intro he; exact False.elim (h (by rw [he]; exact x.isLt))
+
+/-- Exactly one accepted 64-bit word for every field value. Together with
+independent uniform raw words this supplies the uniform rejection-sampling law. -/
+def fieldAcceptedBijection :
+    CredBijection { w : UInt64 // w.toNat < goldilocksPrime } Goldilocks where
+  toFun := fun w => ⟨w.val.toNat, w.property⟩
+  invFun := fun x => ⟨UInt64.ofNat x.val, by
+    simpa [UInt64.toNat_ofNat, Nat.mod_eq_of_lt (Goldilocks.val_lt_two_pow_64 x)] using x.isLt⟩
+  left_inv := by
+    intro w
+    apply Subtype.ext
+    apply UInt64.toNat_inj.mp
+    simp [UInt64.toNat_ofNat, Nat.mod_eq_of_lt w.val.toNat_lt]
+  right_inv := by
+    intro x
+    apply Goldilocks.ext
+    simp [UInt64.toNat_ofNat, Nat.mod_eq_of_lt (Goldilocks.val_lt_two_pow_64 x)]
+
+structure IssuerContext where
+  oprfKeyDigest : Bytes32
+  epoch : UInt64
+  root : Fin 6 → Goldilocks
+  rootTag : Bytes32
+
+/-- Fields signed by the issuer, in Rust order. The public ML-DSA key is pinned
+by the caller, not accepted from the presentation. -/
+def rootMessage (ctx : IssuerContext) : Bytes :=
+  ascii "QSAG.VC.ROOT_ATTEST.V1" ++ ctx.oprfKeyDigest.val ++ le 8 ctx.epoch.toNat ++
+    words (List.ofFn ctx.root) ++ ctx.rootTag.val
+
+def rootTag (ctx : IssuerContext) : Bytes32 :=
+  hashFrames "QSAG.VC.ACC_ROOT_TAG.V1"
+    [ctx.oprfKeyDigest.val, le 8 ctx.epoch.toNat, words (List.ofFn ctx.root)]
+
+structure Attestation where
+  context : IssuerContext
+  mldsaKey : Bytes
+  signature : Bytes
+
+/-- The signature primitive has the argument order key, message, context, signature. -/
+def verifyAttestation (verifySig : Bytes → Bytes → Bytes → Bytes → Bool)
+    (expectedKey : Bytes) (expectedOprf : Bytes32) (a : Attestation) : Bool :=
+  decide (a.mldsaKey = expectedKey) &&
+  decide (a.context.oprfKeyDigest.val = expectedOprf.val) &&
+  decide (a.context.rootTag.val = (rootTag a.context).val) &&
+  verifySig expectedKey (rootMessage a.context) (ascii "QSAG.VC.ROOT_ATTEST.CTX.V1") a.signature
+
+theorem substituted_key_rejected (verifySig : Bytes → Bytes → Bytes → Bytes → Bool)
+    (key : Bytes) (oprf : Bytes32) (a : Attestation) (h : a.mldsaKey ≠ key) :
+    verifyAttestation verifySig key oprf a = false := by
+  simp [verifyAttestation, h]
+
+theorem attestation_uses_expected_key
+    (verifySig : Bytes → Bytes → Bytes → Bytes → Bool)
+    (key : Bytes) (oprf : Bytes32) (a : Attestation)
+    (h : verifyAttestation verifySig key oprf a = true) :
+    a.mldsaKey = key ∧ a.context.oprfKeyDigest.val = oprf.val ∧
+    verifySig key (rootMessage a.context) (ascii "QSAG.VC.ROOT_ATTEST.CTX.V1") a.signature = true := by
+  simp only [verifyAttestation, Bool.and_eq_true, decide_eq_true_eq] at h
+  exact ⟨h.1.1.1, h.1.1.2, h.2⟩
+
+/-- Public policy includes all stable leakage. Equality is deliberately checked
+before invoking the relation verifier. The latter must check membership against
+this expected root; the legacy `checkOpenedPair` has no membership circuit. -/
+structure Policy where
+  issuerKey : Bytes
+  oprfDigest : Bytes
+  epoch : UInt64
+  root : List Goldilocks
+  tag : Bytes
+  schema : UInt64
+  arity : Fin 7
+  scope : Bytes
+  challenge : Bytes
+  scopedId : Option Bytes
+  disclosed : List (Nat × Goldilocks)
+  deriving DecidableEq
+
+def verifyPresentation {Proof : Type} (expected supplied : Policy)
+    (verifyRelation : Policy → Proof → Bool) (proof : Proof) : Bool :=
+  decide (supplied = expected) && verifyRelation expected proof
+
+def PolicyAccepted {Proof : Type} (expected supplied : Policy)
+    (verifyRelation : Policy → Proof → Bool) (proof : Proof) : Prop :=
+  verifyPresentation expected supplied verifyRelation proof = true
+
+theorem presentation_context_authenticated {Proof : Type} (expected supplied : Policy)
+    (verifyRelation : Policy → Proof → Bool) (proof : Proof)
+    (h : PolicyAccepted expected supplied verifyRelation proof) : supplied = expected := by
+  exact of_decide_eq_true (Bool.and_eq_true.mp h).1
+
+theorem tooth_substituted_context_rejected {Proof : Type} (expected supplied : Policy)
+    (verifyRelation : Policy → Proof → Bool) (proof : Proof) (h : supplied ≠ expected) :
+    verifyPresentation expected supplied verifyRelation proof = false := by
+  simp [verifyPresentation, h]
+
+/-- Nonzero epoch/schema and disclosed value; an interface witness, not a FIPS
+signature test vector or production credential proof. -/
+def examplePolicy : Policy :=
+  ⟨[1], [2], 7, [Goldilocks.one], [3], 11, ⟨1, by decide⟩,
+    [4], [5], none, [(0, Goldilocks.one)]⟩
+
+theorem authenticated_boundary_inhabited :
+    ∃ expected supplied : Policy,
+      PolicyAccepted expected supplied (fun (_ : Policy) (_ : Unit) => true) () ∧
+      expected.epoch ≠ 0 := by
+  exact ⟨examplePolicy, examplePolicy, by simp [PolicyAccepted, verifyPresentation], by decide⟩
+
+#tooth_pair presentation_context_authenticated vs tooth_substituted_context_rejected
+#verify_inhabited presentation_context_authenticated authenticated_boundary_inhabited
+
+/-- Compose signature verification, trusted root matching, and the presentation
+policy guard. The proof relation is invoked with the trusted policy only. -/
+def verifyCredentialPresentation {Proof : Type}
+    (verifySig : Bytes → Bytes → Bytes → Bytes → Bool)
+    (expectedOprf : Bytes32) (trusted : Attestation) (expected supplied : Policy)
+    (verifyRelation : Policy → Proof → Bool) (proof : Proof) : Bool :=
+  verifyAttestation verifySig expected.issuerKey expectedOprf trusted &&
+  decide (expected.oprfDigest = expectedOprf.val ∧
+    expected.epoch = trusted.context.epoch ∧
+    expected.root = List.ofFn trusted.context.root ∧
+    expected.tag = trusted.context.rootTag.val) &&
+  verifyPresentation expected supplied verifyRelation proof
+
+theorem credential_acceptance_authenticates {Proof : Type}
+    (verifySig : Bytes → Bytes → Bytes → Bytes → Bool)
+    (expectedOprf : Bytes32) (trusted : Attestation) (expected supplied : Policy)
+    (verifyRelation : Policy → Proof → Bool) (proof : Proof)
+    (h : verifyCredentialPresentation verifySig expectedOprf trusted expected supplied
+      verifyRelation proof = true) :
+    supplied = expected ∧
+    verifySig expected.issuerKey (rootMessage trusted.context)
+      (ascii "QSAG.VC.ROOT_ATTEST.CTX.V1") trusted.signature = true ∧
+    expected.root = List.ofFn trusted.context.root := by
+  simp only [verifyCredentialPresentation, Bool.and_eq_true, decide_eq_true_eq] at h
+  exact ⟨presentation_context_authenticated _ _ _ _ h.2,
+    (attestation_uses_expected_key _ _ _ _ h.1.1).2.2, h.1.2.2.2.1⟩
+
+theorem tooth_forged_issuer_context {Proof : Type}
+    (verifySig : Bytes → Bytes → Bytes → Bytes → Bool)
+    (expectedOprf : Bytes32) (trusted : Attestation) (expected supplied : Policy)
+    (verifyRelation : Policy → Proof → Bool) (proof : Proof)
+    (h : trusted.mldsaKey ≠ expected.issuerKey) :
+    verifyCredentialPresentation verifySig expectedOprf trusted expected supplied
+      verifyRelation proof = false := by
+  simp [verifyCredentialPresentation, substituted_key_rejected _ _ _ _ h]
+
+#tooth_pair credential_acceptance_authenticates vs tooth_forged_issuer_context
+
+/-- Fixed-length public statement fields, in `serialize_sd_instance` order. -/
+structure SdInstance where
+  arity : Fin 7
+  nonce : Bytes32
+  epoch : UInt64
+  schema : UInt64
+  issuerTag : Bytes32
+  root : Fin 6 → Goldilocks
+  scope : Fin 4 → Goldilocks
+  presCommit : Fin 6 → Goldilocks
+  scopeTag : Fin 6 → Goldilocks
+  disclosed : List (UInt32 × Goldilocks)
+  disclosedBound : disclosed.length ≤ 6
+
+def sdBytes (s : SdInstance) : Bytes :=
+  le 8 s.arity.val ++ s.nonce.val ++ le 8 s.epoch.toNat ++ le 8 s.schema.toNat ++
+  s.issuerTag.val ++ words (List.ofFn s.root ++ List.ofFn s.scope ++
+    List.ofFn s.presCommit ++ List.ofFn s.scopeTag) ++
+  le 4 s.disclosed.length ++ s.disclosed.flatMap (fun p => le 4 p.1.toNat ++ le 8 p.2.val)
+
+inductive Profile where
+  | classical219
+  | grinding438
+  deriving DecidableEq
+
+def Profile.repetitions : Profile → Nat
+  | .classical219 => 219
+  | .grinding438 => 438
+
+/-- The 438 profile name is a grinding parameter, not a QROM security theorem. -/
+def sdTranscript (s : SdInstance) (challenge : Bytes32) (profile : Profile) : Transcript :=
+  let instanceBytes := sdBytes s ++ challenge.val ++
+    if profile = .grinding438 then ascii "QSAG.VC.PROFILE.Quantum128:438" else []
+  let tr := init "QSAG.BLIND_VC.SD_ZK.V1" instanceBytes
+  if profile = .grinding438 then
+    absorbMessage tr "VC_SOUNDNESS_PROFILE" (ascii "Quantum128:438") else tr
+
+structure RoundOne where
+  commits : Fin 3 → Bytes32
+  outputs : Fin 38 → Fin 3 → Goldilocks
+
+/-- Rust writes commitments party-major, then output words output-major. -/
+def roundOneBytes (r : RoundOne) : Bytes :=
+  (List.ofFn r.commits).flatMap Subtype.val ++
+    (List.ofFn r.outputs).flatMap (fun row => words (List.ofFn row))
+
+def presentationChallenges (fuel : Nat) (s : SdInstance) (challenge : Bytes32)
+    (profile : Profile) (rounds : Fin profile.repetitions → RoundOne) :=
+  challenges fuel (absorbMessage (sdTranscript s challenge profile) "VC_SD_R1_COMMITS"
+    ((List.ofFn rounds).flatMap roundOneBytes)) profile.repetitions
+
+/-- Width mutation witnesses exercise the actual commitment frame constructor. -/
+theorem commitment_widths (sid digest salt : Bytes32) (r : UInt32) (p : Fin 3) :
+    (commitmentFrames sid r p digest salt).map List.length = [32, 4, 2, 32, 32] := by
+  simp [commitmentFrames, le, sid.property, digest.property, salt.property]
+
+theorem tooth_wrong_party_width : le 2 1 ≠ le 1 1 := by decide
+
+theorem tooth_rejected_byte : fiveTrits 243 = [] := by decide
+
+theorem tooth_modulo_trits_biased :
+    ((List.range 256).filter (fun b => b % 3 == 0)).length = 86 ∧
+    ((List.range 256).filter (fun b => b % 3 == 1)).length = 85 := by decide
+
+#tooth_pair accepted_trit_fibers vs tooth_modulo_trits_biased
+
+/-- Collision extraction retains the actual complete, domain-framed preimages.
+It never promotes equality of arbitrary permutation output halves to a sponge collision. -/
+structure FramedCollision (H : Bytes → Bytes) (domain : Bytes) where
+  left : Bytes
+  right : Bytes
+  distinct : left ≠ right
+  sameDigest : H (domain ++ left) = H (domain ++ right)
+
+theorem committed_openings_equal_or_collision (H : Bytes → Bytes) (domain x y : Bytes)
+    (h : H (domain ++ x) = H (domain ++ y)) :
+    x = y ∨ Nonempty (FramedCollision H domain) := by
+  by_cases he : x = y
+  · exact Or.inl he
+  · exact Or.inr ⟨⟨x, y, he, h⟩⟩
+
+/-- Two independent openings of one commitment: either their serialized views
+agree, or those precise views give a collision. No assumed global hash injectivity. -/
+theorem rewound_openings_bound (H : Bytes → Bytes) (domain digest x y : Bytes)
+    (hx : H (domain ++ x) = digest) (hy : H (domain ++ y) = digest) :
+    x = y ∨ Nonempty (FramedCollision H domain) :=
+  committed_openings_equal_or_collision H domain x y (hx.trans hy.symm)
+
+/-- Scoped mode's equality distinguisher: fresh coins do not remove a stable tag. -/
+theorem tooth_scoped_tags_link (tag : Nat → Nat) (a b : Nat) (h : tag a ≠ tag b) :
+    (tag a, tag a) ≠ (tag a, tag b) := by
+  intro he
+  exact h (congrArg Prod.snd he)
+
+/-- A revealing commitment remains revealing for every fresh uniform blind.
+Fresh randomness by itself cannot establish the requested general hiding claim. -/
+theorem tooth_fresh_blinds_do_not_hide_arbitrary_commitments
+    (a b : Goldilocks) (h : a ≠ b) :
+    ∀ r s : VcBlind4, (fun x (_ : VcBlind4) => x) a r ≠
+      (fun x (_ : VcBlind4) => x) b s := by
+  intro _ _
+  exact h
+
+/-- An adaptive oracle can select an accepting challenge at every repetition.
+The fixed-transcript two-of-three count alone gives no oracle-security bound. -/
+theorem tooth_adaptive_challenge_oracle (rounds : Nat) :
+    (∀ i : Fin rounds, (fun c : Fin 3 => c.val < 2) (0 : Fin 3)) ∧
+    ¬ (∀ c : Fin 3, c.val < 2) := by
+  exact ⟨fun _ => by decide, fun h => by have := h 2; omega⟩
+
+end BlindVcWire
+
+/-- Canonical coefficients are necessary even when the centered residue is zero. -/
+theorem tooth_norm_rejects_modulus :
+    checkCenteredInfNorm 8380417 1 [8380417] = false := by decide
 
 end Qsag
 end

@@ -1147,6 +1147,44 @@ mod tests {
             "fc3c9ce4073822b1cc20a0c4ad065ac386d7cbcbe256fb23ac97bd00e8c924eb"
         );
         assert!(kat_json.contains(&h_cshake));
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    fn merge_tree_verification_respects_global_worker_budget() {
+        use std::sync::atomic::Ordering;
+
+        let msg = b"bounded-worker-merge-tree-test";
+        let mode = SigningMode::SharedMessage(msg);
+        let n = 16usize;
+        let (pks, sigs) = bench_keys_and_sigs(AggSigProfile::JortsPoseidon2, n, msg);
+
+        // Build 8 disjoint 2-signer leaves and fold them into a balanced 3-level merge tree.
+        let mut level: Vec<QsagAggregateProof> = (0..8)
+            .map(|leaf_idx| {
+                let idxs = [2 * leaf_idx, 2 * leaf_idx + 1];
+                let bm = SignerBitmap::from_active_indices(n as u32, &idxs).unwrap();
+                aggregate_signatures(
+                    &pks,
+                    &bm,
+                    &mode,
+                    &sigs[2 * leaf_idx..2 * leaf_idx + 2],
+                    make_seed(200 + leaf_idx as u64),
+                )
+                .unwrap()
+            })
+            .collect();
+        while level.len() > 1 {
+            let mut next = Vec::with_capacity(level.len() / 2);
+            for pair in level.chunks(2) {
+                next.push(merge_aggregates(&pks, &mode, &pair[0], &pair[1]).unwrap());
+            }
+            level = next;
+        }
+        let merged = level.pop().unwrap();
+        assert!(verify_aggregate(&pks, &mode, &merged));
+        assert_eq!(ACTIVE_EXTRA_WORKERS.load(Ordering::Acquire), 0);
+    }
 
         assert_eq!(crate::field::GOLDILOCKS_PRIME, 18446744069414584321);
         let ga = Goldilocks::from_u64_reduced(0xFFFF_FFFF_0000_0000);

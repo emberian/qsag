@@ -1745,4 +1745,16 @@ mod ext4_tests {
             x *= omega;
         }
     }
+
+    #[test]
+    #[should_panic(expected = "RS domain size overflow")]
+    fn encode_rs_coset_goldilocks_rejects_domain_overflow() {
+        let _ = encode_rs_coset_goldilocks(&[Goldilocks::ONE; 4], 1usize << 62);
+    }
+
+    #[test]
+    #[should_panic(expected = "RS domain exceeds Goldilocks two-adicity")]
+    fn encode_rs_coset_ext4_rejects_excessive_two_adicity() {
+        let _ = encode_rs_coset_ext4(&[GoldilocksExt4::ONE; 4], 1usize << 31);
+    }
 }

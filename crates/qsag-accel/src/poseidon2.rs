@@ -407,12 +407,13 @@ mod internal_matrix_tests {
                 det = gl_neg(det);
             }
             det = gl_mul(det, rows[rank][col]);
-            let inv = gl_inv_or_zero(rows[rank][col]);
-            for r in rank + 1..T {
-                let factor = gl_mul(rows[r][col], inv);
+            let pivot_row = rows[rank];
+            let inv = gl_inv_or_zero(pivot_row[col]);
+            for row in rows.iter_mut().take(T).skip(rank + 1) {
+                let factor = gl_mul(row[col], inv);
                 if factor != 0 {
-                    for c in col..T {
-                        rows[r][c] = gl_sub(rows[r][c], gl_mul(factor, rows[rank][c]));
+                    for (cell, &piv) in row[col..T].iter_mut().zip(&pivot_row[col..T]) {
+                        *cell = gl_sub(*cell, gl_mul(factor, piv));
                     }
                 }
             }

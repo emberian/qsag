@@ -2,6 +2,7 @@ module
 public import QsagVerified.Proofs.CredAndHdGuards
 public import QsagVerified.Proofs.FtsSpnGuard
 public import QsagVerified.Proofs.RssCutSession
+public import QsagVerified.Proofs.MultiTurnMediationAndReachability
 
 /-!
 # Caller-computed predicates at the MIR boundary
@@ -93,4 +94,91 @@ theorem rss_release_under_caller_contract
   obtain ⟨_, _, hm⟩ :=
     (rss_cut_session_never_releases_unverified_cut sid comm s t turns hn ht).2.1 inp cut hp
   exact hc _ hm rfl rfl rfl
+
+/-- An explicit three-call MIR transcript, indexed by the exact candidate. -/
+def rssConcreteTurns (sid comm cut : Array Std.U8 32#usize) :
+    List (MirTurn rss_cut_session.RssCutStepInput
+      rss_cut_session.RssCutStepOutput rss_cut_session.RssCutError) :=
+  [.accepted (.AdvanceRound2Chi sid comm cut) .Round2Ready,
+   .accepted (.AdvanceRound3VerifyConsistency sid 0#u128 0#u128 0#u64) .Round3Verified,
+   .accepted (.OpenVerifiedCut sid) (.CutReleased cut)]
+
+/-- Concrete composition discharges the guard's phase, session and candidate-flow
+obligations. It works for every candidate: zero residual inputs alone cannot establish
+an external MAC relation on that candidate. -/
+theorem rss_concrete_three_step_mir (sid comm cut : Array Std.U8 32#usize) :
+    ∃ s t,
+      rss_cut_session.RssCutGateSession.new_round1_committed sid comm = .ok s ∧
+      MirTrace (adaptStateResult rss_cut_session.RssCutGateSession.step)
+        s (rssConcreteTurns sid comm cut) t ∧
+      t.phase = .CutOpened ∧ t.poisoned = false ∧
+      t.candidate_cut_bytes = Array.repeat 32#usize 0#u8 := by
+  let s : rss_cut_session.RssCutGateSession :=
+    { session_id := sid, phase := .Round1MaskCommitted, mask_commitment := comm,
+      candidate_cut_bytes := Array.repeat 32#usize 0#u8,
+      consistency_verified := false, poisoned := false }
+  let s1 := { s with phase := rss_cut_session.RssCutPhase.Round2ChiEvaluated,
+    candidate_cut_bytes := cut, consistency_verified := false }
+  let s2 := { s1 with phase := rss_cut_session.RssCutPhase.Round3ConsistencyVerified,
+    consistency_verified := true }
+  let s3 := { s2 with phase := rss_cut_session.RssCutPhase.CutOpened,
+    candidate_cut_bytes := Array.repeat 32#usize 0#u8 }
+  have h1 := rss_step_round2_accepts s cut rfl rfl
+  have h2 := rss_step_round3_accepts s1 rfl rfl
+  have h3 := rss_step_open_accepts s2 rfl rfl rfl
+  refine ⟨s, s3, rfl, ?_, rfl, rfl, rfl⟩
+  exact MirTrace.accept (by simpa only [adaptStateResult, h1, result_bind_ok])
+    (MirTrace.accept (by simpa only [adaptStateResult, h2, result_bind_ok])
+    (MirTrace.accept (by simpa only [adaptStateResult, h3, result_bind_ok]) (.nil s3)))
+
+/-- A concrete caller contract that the available MIR really can discharge: the
+successful residual-check input names the same session as the candidate transcript.
+No assumption about accepted inputs is required. -/
+theorem rss_concrete_session_contract (sid comm cut : Array Std.U8 32#usize) :
+    ∀ p ∈ mirAcceptedPairs (rssConcreteTurns sid comm cut),
+      RssResidualContract (fun checkedSid => checkedSid = sid) p.1 := by
+  intro p hp
+  simp only [rssConcreteTurns, mirAcceptedPairs, List.mem_cons, List.not_mem_nil,
+    or_false] at hp
+  rcases hp with rfl | rfl | rfl
+  · trivial
+  · exact fun _ _ _ => rfl
+  · trivial
+
+/-- Instantiate the generic release API on an actual three-step MIR execution, with
+its session-binding contract proved above rather than supplied by the caller. This
+only discharges session binding; external consistency still needs extracted producers. -/
+theorem rss_concrete_release_contract_instantiated (sid comm cut : Array Std.U8 32#usize) :
+    ∃ s t,
+      rss_cut_session.RssCutGateSession.new_round1_committed sid comm = .ok s ∧
+      MirTrace (adaptStateResult rss_cut_session.RssCutGateSession.step)
+        s (rssConcreteTurns sid comm cut) t ∧
+      ∀ inp out, (inp, .CutReleased out) ∈
+        mirAcceptedPairs (rssConcreteTurns sid comm cut) → inp = .OpenVerifiedCut sid ∧ out = cut := by
+  obtain ⟨s, t, hn, ht, _⟩ := rss_concrete_three_step_mir sid comm cut
+  have hsession := rss_release_under_caller_contract (fun checkedSid => checkedSid = sid)
+    sid comm s t (rssConcreteTurns sid comm cut) hn ht
+    (rss_concrete_session_contract sid comm cut)
+  refine ⟨s, t, hn, ht, ?_⟩
+  intro inp out hp
+  have _ := hsession inp out hp
+  simpa [rssConcreteTurns, mirAcceptedPairs] using hp
+
+/-- The existing semantic contract cannot be erased: an actual accepted multi-step
+execution exists while the contract for an arbitrary external predicate is false.
+This rules out replacing the missing producer proof with unconditional flag trust. -/
+theorem rss_concrete_mir_does_not_establish_arbitrary_semantics
+    (sid comm cut : Array Std.U8 32#usize) :
+    ∃ s t,
+      rss_cut_session.RssCutGateSession.new_round1_committed sid comm = .ok s ∧
+      MirTrace (adaptStateResult rss_cut_session.RssCutGateSession.step)
+        s (rssConcreteTurns sid comm cut) t ∧
+      ¬ (∀ p ∈ mirAcceptedPairs (rssConcreteTurns sid comm cut),
+        RssResidualContract (fun _ => False) p.1) := by
+  obtain ⟨s, t, hn, ht, _⟩ := rss_concrete_three_step_mir sid comm cut
+  refine ⟨s, t, hn, ht, ?_⟩
+  intro hc
+  exact hc (.AdvanceRound3VerifyConsistency sid 0#u128 0#u128 0#u64, .Round3Verified)
+    (by simp [rssConcreteTurns, mirAcceptedPairs]) rfl rfl rfl
+
 end qsag_verified.proofs

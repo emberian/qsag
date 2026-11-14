@@ -19,7 +19,7 @@ use qsag_agg::{
     ValidatorKeypair, ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime,
     aggregate_signatures_with_config, verify_aggregate_with_regime,
 };
-use qsag_core::belt_latch::MemoryWal;
+use qsag_core::belt_latch::{BeltLatchRecord, BeltLatchState, DurableWal, WalError};
 use qsag_fts::{
     FrontierDpTable, FrontierFtsProfile, FrontierFtsPublicKey, FrontierFtsSignature,
     FrontierFtsSigningKey, verify_frontier_fts,
@@ -29,6 +29,31 @@ use qsag_quorum::quorum_jorts::{
     CommitteeCustodian, quorum_jorts_verify, stage_committee_partitioned,
 };
 use qsag_quorum::wire_channel::InMemoryWireMesh;
+
+#[derive(Clone, Debug, Default)]
+struct BenchBeltWal {
+    stored: Option<Vec<u8>>,
+}
+
+impl DurableWal for BenchBeltWal {
+    fn authorize_open(&self, _record: &BeltLatchRecord) -> Result<(), WalError> {
+        Ok(())
+    }
+
+    fn sync_persist(&mut self, state: &BeltLatchState) -> Result<(), WalError> {
+        self.stored = Some(state.to_bytes());
+        Ok(())
+    }
+
+    fn load(&self) -> Result<Option<BeltLatchState>, WalError> {
+        match &self.stored {
+            None => Ok(None),
+            Some(raw) => BeltLatchState::from_bytes(raw)
+                .map(Some)
+                .ok_or(WalError::Corrupt),
+        }
+    }
+}
 
 #[derive(Default)]
 struct BenchEpochWal {
@@ -187,12 +212,14 @@ fn bench_alpenglow_qsa_dvt_hot_path() {
     let tree = staged.tree.clone();
 
     let (endpoints, stats) = InMemoryWireMesh::connect(5, seed32(0x88, 1));
-    let mut custodians: Vec<Option<IsolatedJortsParty<_, MemoryWal>>> = staged
+    let mut custodians: Vec<Option<IsolatedJortsParty<_, BenchBeltWal>>> = staged
         .parties
         .into_iter()
         .zip(endpoints)
         .map(|(mat, ep)| {
-            let wals = (0..mat.stores.len()).map(|_| MemoryWal::default()).collect();
+            let wals = (0..mat.stores.len())
+                .map(|_| BenchBeltWal::default())
+                .collect();
             let cust = CommitteeCustodian::new(layout.clone(), tree.clone(), mat, wals)
                 .expect("build CommitteeCustodian");
             Some(IsolatedJortsParty::new(cust, ep).expect("build IsolatedJortsParty"))
@@ -319,7 +346,6 @@ fn bench_alpenglow_hem_checkpoint(num_signers: usize, workers: usize) {
         let t_ver = Instant::now();
         let ok = verify_aggregate_with_regime(
             &pks,
-            &bitmap,
             &SigningMode::SharedMessage(msg),
             &proof,
             regime,

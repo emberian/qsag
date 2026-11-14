@@ -359,6 +359,7 @@ pub struct MacSealedWireChannel<T: WireTransport> {
     sequencer: FrameSequencer,
     keys: Vec<[u8; 32]>,
     recv_keys: Vec<[u8; 32]>,
+    failed_links: Vec<bool>,
     encrypted: bool,
 }
 
@@ -395,6 +396,7 @@ impl<T: WireTransport> MacSealedWireChannel<T> {
             sequencer,
             keys: send_keys,
             recv_keys,
+            failed_links: vec![false; parties],
             encrypted: false,
         })
     }
@@ -505,12 +507,40 @@ impl<T: WireTransport> WireTransport for MacSealedWireChannel<T> {
         round: u32,
         payload: &[u8],
     ) -> Result<(), TransportError> {
+        if self.failed_links.get(peer) == Some(&true) {
+            return Err(TransportError::Closed { peer });
+        }
         let raw = self.seal(peer, round, payload)?;
-        self.transport.send_frame(peer, round, &raw)
+        if let Err(err) = self.transport.send_frame(peer, round, &raw) {
+            if let Some(failed) = self.failed_links.get_mut(peer) {
+                *failed = true;
+            }
+            return Err(err);
+        }
+        Ok(())
     }
     fn recv_frame(&mut self, peer: usize, round: u32) -> Result<Vec<u8>, TransportError> {
-        let raw = self.transport.recv_frame(peer, round)?;
-        self.open(peer, round, &raw)
+        if self.failed_links.get(peer) == Some(&true) {
+            return Err(TransportError::Closed { peer });
+        }
+        let raw = match self.transport.recv_frame(peer, round) {
+            Ok(raw) => raw,
+            Err(err) => {
+                if let Some(failed) = self.failed_links.get_mut(peer) {
+                    *failed = true;
+                }
+                return Err(err);
+            }
+        };
+        match self.open(peer, round, &raw) {
+            Ok(payload) => Ok(payload),
+            Err(err) => {
+                if let Some(failed) = self.failed_links.get_mut(peer) {
+                    *failed = true;
+                }
+                Err(err)
+            }
+        }
     }
 }
 
@@ -589,8 +619,15 @@ impl<T: WireTransport> WireTransport for ConfidentialWireChannel<T> {
         if self.failed_links.get(peer) == Some(&true) {
             return Err(TransportError::Closed { peer });
         }
-        let raw = self.inner.transport.recv_frame(peer, round)?;
-        self.inner.open(peer, round, &raw)
+        match self.inner.recv_frame(peer, round) {
+            Ok(payload) => Ok(payload),
+            Err(err) => {
+                if let Some(failed) = self.failed_links.get_mut(peer) {
+                    *failed = true;
+                }
+                Err(err)
+            }
+        }
     }
 }
 
