@@ -829,4 +829,34 @@ theorem currentAarch64_bitslice_provenance (slice : ElfFuncSlice)
   rw [currentAarch64_rlib_extracted_slices]
   exact List.mem_of_mem_drop h
 
+
+/-- Every fresh symbol is an in-bounds slice of an actual archive member. -/
+theorem currentX86_all_symbols_provenance (slice : ElfFuncSlice)
+    (h : slice ∈ currentX86ExtractedSlices) :
+    ∃ m ∈ parseArArchive currentX86RlibArchiveBytes,
+      m.payloadOffset + m.payloadSize ≤ currentX86RlibArchiveBytes.len ∧
+      slice.symSize > 0 ∧
+      slice.symValue + slice.symSize ≤ slice.textSize ∧
+      slice.textFileOffset + slice.textSize ≤ m.payloadSize ∧
+      slice.code = currentX86RlibArchiveBytes.slice
+        (m.payloadOffset + (slice.textFileOffset + slice.symValue)) slice.symSize := by
+  apply extractAllRlibFuncs_provenance
+  rw [currentX86_rlib_extracted_slices]
+  exact h
+
+
+/-- Every fresh symbol is an in-bounds slice of an actual archive member. -/
+theorem currentAarch64_all_symbols_provenance (slice : ElfFuncSlice)
+    (h : slice ∈ currentAarch64ExtractedSlices) :
+    ∃ m ∈ parseArArchive currentAarch64RlibArchiveBytes,
+      m.payloadOffset + m.payloadSize ≤ currentAarch64RlibArchiveBytes.len ∧
+      slice.symSize > 0 ∧
+      slice.symValue + slice.symSize ≤ slice.textSize ∧
+      slice.textFileOffset + slice.textSize ≤ m.payloadSize ∧
+      slice.code = currentAarch64RlibArchiveBytes.slice
+        (m.payloadOffset + (slice.textFileOffset + slice.symValue)) slice.symSize := by
+  apply extractAllRlibFuncs_provenance
+  rw [currentAarch64_rlib_extracted_slices]
+  exact h
+
 end Qsag
