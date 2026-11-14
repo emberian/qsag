@@ -1312,3 +1312,39 @@ fn durable_nonce_restart_recovers_epoch_and_rejects_both_replay_keys() {
     raw.clear();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn verified_response_gate_enforces_every_barrier_and_context() {
+    let context = [37; 32];
+    let good = MlDsaBarrierChecks {
+        req_session_id: context,
+        req_attempt: 9,
+        z_norm_ok: true,
+        r0_norm_ok: true,
+        w1_match: true,
+        u_com_bound: true,
+    };
+    let response = || Sh {
+        c: vec![vec![1, 2, 3]],
+    };
+    let released = PendingResponse::new(response(), context, 9)
+        .release(good)
+        .unwrap();
+    assert_eq!(released.c, vec![vec![1, 2, 3]]);
+    for mutation in 0..6 {
+        let mut checks = good;
+        match mutation {
+            0 => checks.z_norm_ok = false,
+            1 => checks.r0_norm_ok = false,
+            2 => checks.w1_match = false,
+            3 => checks.u_com_bound = false,
+            4 => checks.req_session_id[0] ^= 1,
+            _ => checks.req_attempt += 1,
+        }
+        assert!(
+            PendingResponse::new(response(), context, 9)
+                .release(checks)
+                .is_err()
+        );
+    }
+}

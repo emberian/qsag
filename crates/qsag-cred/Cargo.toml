@@ -7,6 +7,7 @@ rust-version = "1.89"
 description = "Threshold PQ Verifiable Credentials, 2-Round Lattice VOPRF, Unlinkable Selective Disclosure, & Dealerless Standard-Verifier FIPS 204 Threshold ML-DSA"
 
 [dependencies]
+qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }
 qsag-accel = { path = "../qsag-accel", default-features = false, features = ["alloc"] }
 qsag-addr = { path = "../qsag-addr" }
