@@ -17,7 +17,9 @@ DKG, resharing, and Simplex quorum safety live in `Qsag.MaliciousSecurity`):
 4. Checked stateless threshold path equal to `evalStatelessCheckedSign`
    (`thresholdStatelessCheckedSign_eq_evalStatelessCheckedSign`).
 5. Threshold FIPS 205 output equal to the single-signer output for every correct run
-   (`threshold_sig_perfectly_indistinguishable_from_single_signer`): share-level `Keccak`/`SHAKE256`
+   (`threshold_sig_deterministic_and_matches_single_signer`; a functional-correctness and
+   determinism statement about runs that carry a proof of oracle correctness, with no adversary
+   and no probability space): share-level `Keccak`/`SHAKE256`
    for 2-of-3 RSS (`SlhThresholdRun.ofRss`), and quorum-recombination `SlhMpcOracles` interface for
    `(t, n)` Shamir FIPS 205 (`SlhThresholdRun.ofShamir`, while `(t, n)` Shamir share-level `Poseidon2`
    signing is realized end-to-end by `mkShamirPoseidon2MpcOracles` in Section 3).
@@ -521,7 +523,20 @@ structure RssWord64 where
 @[expose] def reconstructRssWord (w : RssWord64) : UInt64 :=
   w.x0 ^^^ w.x1 ^^^ w.x2
 
-/-- Pairwise 64-bit PRF randomness words `(r0, r1, r2)` where Party $i$ holds `(r_i, r_{i+1})`. -/
+/-- Pairwise 64-bit PRF randomness words `(r0, r1, r2)` where Party $i$ holds `(r_i, r_{i+1})`.
+
+    "PrfZero" names the zero-sharing the parties derive from these words, not a constraint on the
+    words: party `i` masks its product share with `r_i ^^^ r_{i+1}` (`mask0`, `mask1`, `mask2`),
+    and those three masks XOR to zero for every value of `(r0, r1, r2)`
+    (`RssPrfZeroSeeds.masks_xor_eq_zero`). The words themselves carry no invariant, and the
+    predicate `r0 ^^^ r1 ^^^ r2 = 0` (`SeedsXorZero`) must not be imposed on them: under it each
+    party could compute the word it does not hold
+    (`tooth_rssPrfZeroSeeds_seedsXorZero_reveals_third_word`).
+
+    How the words are produced (pairwise PRF keys, their expansion, the preprocessing that
+    distributes them) is not modelled. Every theorem over this structure, and over the tapes
+    `Nat → Nat → Nat → Nat → RssPrfZeroSeeds`, quantifies over arbitrary values; such theorems are
+    correctness statements and say nothing about the distribution of the words. -/
 structure RssPrfZeroSeeds where
   r0 : UInt64
   r1 : UInt64
@@ -529,6 +544,51 @@ structure RssPrfZeroSeeds where
   deriving DecidableEq, Repr
 
 def zeroRssSeeds : RssPrfZeroSeeds := ⟨0, 0, 0⟩
+
+/-- Party 0's zero-share word `r0 ^^^ r1`. -/
+def RssPrfZeroSeeds.mask0 (s : RssPrfZeroSeeds) : UInt64 := s.r0 ^^^ s.r1
+
+/-- Party 1's zero-share word `r1 ^^^ r2`. -/
+def RssPrfZeroSeeds.mask1 (s : RssPrfZeroSeeds) : UInt64 := s.r1 ^^^ s.r2
+
+/-- Party 2's zero-share word `r2 ^^^ r0`. -/
+def RssPrfZeroSeeds.mask2 (s : RssPrfZeroSeeds) : UInt64 := s.r2 ^^^ s.r0
+
+/-- The predicate `r0 ^^^ r1 ^^^ r2 = 0` on the words themselves. It is not an invariant of
+    `RssPrfZeroSeeds` and no theorem in this module assumes it; it is named so that the teeth
+    below can state why. -/
+def RssPrfZeroSeeds.SeedsXorZero (s : RssPrfZeroSeeds) : Prop := s.r0 ^^^ s.r1 ^^^ s.r2 = 0
+
+/-- **Zero-sum invariant of the derived masks.** For every `(r0, r1, r2)` the three per-party
+    masks XOR to zero. This is the zero-sharing the name refers to; it holds by construction and
+    needs no hypothesis on the words. -/
+theorem RssPrfZeroSeeds.masks_xor_eq_zero (s : RssPrfZeroSeeds) :
+    s.mask0 ^^^ s.mask1 ^^^ s.mask2 = 0 := by
+  unfold RssPrfZeroSeeds.mask0 RssPrfZeroSeeds.mask1 RssPrfZeroSeeds.mask2
+  apply UInt64.eq_of_toBitVec_eq
+  apply BitVec.eq_of_getLsbD_eq
+  intro i _
+  simp only [UInt64.toBitVec_xor, BitVec.getLsbD_xor, UInt64.toBitVec_zero, BitVec.getLsbD_zero]
+  cases s.r0.toBitVec.getLsbD i <;> cases s.r1.toBitVec.getLsbD i <;>
+    cases s.r2.toBitVec.getLsbD i <;> rfl
+
+/-- **`#tooth` (`tooth_rssPrfZeroSeeds_seedsXorZero_reveals_third_word`)**: if the words
+    themselves XORed to zero, party 0, which holds `(r0, r1)`, could compute `r2`. The pairwise
+    words are therefore left unconstrained. -/
+theorem tooth_rssPrfZeroSeeds_seedsXorZero_reveals_third_word (s : RssPrfZeroSeeds)
+    (h : s.SeedsXorZero) : s.r2 = s.r0 ^^^ s.r1 :=
+  (UInt64.xor_eq_zero_iff.mp h).symm
+
+/-- **`#tooth` (`tooth_rssPrfZeroSeeds_masks_zero_without_seedsXorZero`)**: the words `(1, 0, 0)`
+    violate `SeedsXorZero`, and their masks still XOR to zero. The mask invariant does not depend
+    on the word-level predicate. -/
+theorem tooth_rssPrfZeroSeeds_masks_zero_without_seedsXorZero :
+    ¬ (⟨1, 0, 0⟩ : RssPrfZeroSeeds).SeedsXorZero ∧
+    (⟨1, 0, 0⟩ : RssPrfZeroSeeds).mask0 ^^^ (⟨1, 0, 0⟩ : RssPrfZeroSeeds).mask1 ^^^
+      (⟨1, 0, 0⟩ : RssPrfZeroSeeds).mask2 = 0 := by
+  refine ⟨?_, RssPrfZeroSeeds.masks_xor_eq_zero _⟩
+  show ¬ ((1 : UInt64) ^^^ 0 ^^^ 0 = 0)
+  decide
 
 /-- Local 1-party 64-bit bitsliced AND step: accesses ONLY Party $i$'s 2-of-3 view `(ax_i, ax_next)`. -/
 @[inline] def rssPartyAndLocal (ax_i ax_next bx_i bx_next r_i r_next : UInt64) : UInt64 :=
@@ -539,6 +599,17 @@ def zeroRssSeeds : RssPrfZeroSeeds := ⟨0, 0, 0⟩
    rssPartyAndLocal a.x1 a.x2 b.x1 b.x2 seeds.r1 seeds.r2,
    rssPartyAndLocal a.x2 a.x0 b.x2 b.x0 seeds.r2 seeds.r0⟩
 
+/-- The three output shares of `rssWordAnd` are the local product terms masked by `mask0`,
+    `mask1`, `mask2`: the masks of `RssPrfZeroSeeds.masks_xor_eq_zero` are the ones the protocol
+    step applies. -/
+theorem rssWordAnd_eq_masked_products (a b : RssWord64) (seeds : RssPrfZeroSeeds) :
+    rssWordAnd a b seeds =
+      ⟨(a.x0 &&& b.x0) ^^^ (a.x0 &&& b.x1) ^^^ (a.x1 &&& b.x0) ^^^ seeds.mask0,
+       (a.x1 &&& b.x1) ^^^ (a.x1 &&& b.x2) ^^^ (a.x2 &&& b.x1) ^^^ seeds.mask1,
+       (a.x2 &&& b.x2) ^^^ (a.x2 &&& b.x0) ^^^ (a.x0 &&& b.x2) ^^^ seeds.mask2⟩ := by
+  simp only [rssWordAnd, rssPartyAndLocal, RssPrfZeroSeeds.mask0, RssPrfZeroSeeds.mask1,
+    RssPrfZeroSeeds.mask2]
+
 theorem reconstructRssWord_rssWordAnd (a b : RssWord64) (seeds : RssPrfZeroSeeds) :
     reconstructRssWord (rssWordAnd a b seeds) = (reconstructRssWord a &&& reconstructRssWord b) := by
   apply UInt64.eq_of_toBitVec_eq
@@ -547,6 +618,21 @@ theorem reconstructRssWord_rssWordAnd (a b : RssWord64) (seeds : RssPrfZeroSeeds
   simp only [reconstructRssWord, rssWordAnd, rssPartyAndLocal,
     UInt64.toBitVec_xor, UInt64.toBitVec_and, BitVec.getLsbD_xor, BitVec.getLsbD_and]
   exact rssBoolAnd_identity _ _ _ _ _ _ _ _ _
+
+
+/-- Every pair of mask words occurs: zero-sum constrains only the third mask, not the first two.
+    This algebraic range statement does not assume or assert a randomness distribution. -/
+theorem RssPrfZeroSeeds.masks_pair_surjective (m0 m1 : UInt64) :
+    ∃ s : RssPrfZeroSeeds, s.mask0 = m0 ∧ s.mask1 = m1 ∧ s.mask2 = m0 ^^^ m1 := by
+  refine ⟨⟨0, m0, m0 ^^^ m1⟩, ?_, ?_, ?_⟩ <;>
+    simp [RssPrfZeroSeeds.mask0, RssPrfZeroSeeds.mask1, RssPrfZeroSeeds.mask2,
+      ← UInt64.xor_assoc]
+
+/-- Changing the masking tape changes shares but never the reconstructed AND result. -/
+theorem rssWordAnd_reconstruction_seed_independent (a b : RssWord64)
+    (s t : RssPrfZeroSeeds) :
+    reconstructRssWord (rssWordAnd a b s) = reconstructRssWord (rssWordAnd a b t) := by
+  rw [reconstructRssWord_rssWordAnd, reconstructRssWord_rssWordAnd]
 
 /-- Local 1-party Keccak $\chi$ lane computation `a_i ^ (((~b)_i & c_i) ...)` for each of the 3 parties:
     note `(~~~b)` negates `b0` only (`(~~~b0) ^^^ b1 ^^^ b2 = ~~~(b0 ^^^ b1 ^^^ b2)`), so:
@@ -3388,7 +3474,12 @@ theorem shamirReconstructBytes_quorum {R : Type} [LawfulCommRing R] (decode : R 
 
 /-- A correct threshold signing run for the key `(skSeed, skPrf, pkSeed)`: cut-boundary oracles
     together with the proof that they evaluate that key. Constructors below build runs from the
-    RSS share-level protocol and from a Shamir quorum. -/
+    RSS share-level protocol and from a Shamir quorum.
+
+    The field `matchesKey` is a correctness proof carried inside the run. A value of this type is
+    therefore an honest run by construction: theorems quantified over `SlhThresholdRun` range over
+    correct executions only, and say nothing about parties that deviate, about aborts, or about
+    any distribution over runs. -/
 structure SlhThresholdRun (p : Fips205Params) (skSeed skPrf pkSeed : List UInt8) where
   oracles : SlhMpcOracles
   matchesKey : oracles.MatchesKey p skSeed skPrf pkSeed
@@ -3425,12 +3516,18 @@ def SlhThresholdRun.ofShamir {R : Type} [LawfulCommRing R] (p : Fips205Params)
         ← shamirReconstructBytes_quorum decode t Q prfPolys hPrfDeg]
     exact hO
 
-/-- **Threshold output is the single-signer FIPS 205 output.** For any two correct runs for the
+/-- **Threshold output is the single-signer FIPS 205 output
+    (`threshold_sig_deterministic_and_matches_single_signer`).** For any two correct runs for the
     same key (arbitrary and possibly different thresholds, party counts, quorums, share values and
     protocol randomness, all hidden inside the runs), the signature bytes on `(msgPrime, optRand)`
     are bit-identical to each other and to `slh_sign_internal` under that key, and verify.
-    `optRand := pkSeed` is the deterministic variant; any other value is the hedged variant. -/
-theorem threshold_sig_perfectly_indistinguishable_from_single_signer
+    `optRand := pkSeed` is the deterministic variant; any other value is the hedged variant.
+
+    This is functional correctness plus determinism of correct runs. Both runs carry
+    `matchesKey`, so no adversary, abort event or probability distribution appears in the
+    statement, and it is not an indistinguishability result about an execution with corrupted
+    parties. -/
+theorem threshold_sig_deterministic_and_matches_single_signer
     (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
     (r₁ r₂ : SlhThresholdRun p skSeed skPrf pkSeed) (msgPrime optRand : List UInt8) :
     r₁.signBytes msgPrime optRand =
@@ -3458,11 +3555,33 @@ theorem threshold_sig_perfectly_indistinguishable_from_single_signer
   rw [hPk₁]
   exact hV₁
 
-/-- **Hedged variant, statistical distance zero.** Index the joint randomness (sharing randomness,
-    quorum choice, protocol tapes and the shared hedging value) by `Fin N`. For every Boolean test
-    on signature bytes, the number of coins on which the threshold output is accepted equals the
-    number on which the single-signer output with the same hedging value is accepted. -/
-theorem threshold_sig_hedged_statistical_distance_zero
+/-- Earlier name of `threshold_sig_deterministic_and_matches_single_signer`, kept because the
+    challenge roster refers to it. The statement is the same determinism-and-correctness
+    statement about correct runs; despite the name it is not an indistinguishability result. -/
+theorem threshold_sig_perfectly_indistinguishable_from_single_signer
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (r₁ r₂ : SlhThresholdRun p skSeed skPrf pkSeed) (msgPrime optRand : List UInt8) :
+    r₁.signBytes msgPrime optRand =
+      encodeSlhSig (slhSignInternal p msgPrime (slhKeygenInternal p skSeed skPrf pkSeed).1 optRand) ∧
+    r₁.signBytes msgPrime optRand = r₂.signBytes msgPrime optRand ∧
+    slhKeygenMpc p r₁.oracles pkSeed = (slhKeygenInternal p skSeed skPrf pkSeed).2 ∧
+    slhVerifyInternal p msgPrime
+      (slhSignMpc p r₁.oracles msgPrime (slhKeygenMpc p r₁.oracles pkSeed) optRand)
+      (slhKeygenInternal p skSeed skPrf pkSeed).2 = true :=
+  threshold_sig_deterministic_and_matches_single_signer p hWf r₁ r₂ msgPrime optRand
+
+/-- **Hedged variant, output equality (`threshold_sig_hedged_output_equality`).** Index the
+    joint randomness (sharing randomness, quorum choice, protocol tapes and the shared hedging
+    value) by `Fin N`. For every Boolean test on signature bytes, the number of indices on which
+    the threshold output is accepted equals the number on which the single-signer output with the
+    same hedging value is accepted.
+
+    The two counted quantities are pointwise equal (each run's bytes equal the single-signer
+    bytes by `threshold_sig_deterministic_and_matches_single_signer`), so the difference is zero
+    for every `hedge : Fin N → List UInt8`, including constant ones. `hedge` is a parameter, not a
+    sampled value: the theorem does not compare two output laws and is not a statistical-distance
+    bound for a hedging distribution. -/
+theorem threshold_sig_hedged_output_equality
     (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
     (N : Nat) (run : Fin N → SlhThresholdRun p skSeed skPrf pkSeed)
     (hedge : Fin N → List UInt8) (msgPrime : List UInt8) (D : List UInt8 → Bool) :
@@ -3476,7 +3595,7 @@ theorem threshold_sig_hedged_statistical_distance_zero
       (slhKeygenInternal p skSeed skPrf pkSeed).1 (hedge i))))
     (fun _ => false)
     (fun i _ => by
-      rw [(threshold_sig_perfectly_indistinguishable_from_single_signer p hWf (run i) (run i)
+      rw [(threshold_sig_deterministic_and_matches_single_signer p hWf (run i) (run i)
         msgPrime (hedge i)).1])
   have hZero : finSum N (fun _ : Fin N => if (false : Bool) = true then 1 else 0) = 0 := by
     have h := finSum_const N 0
@@ -3485,9 +3604,23 @@ theorem threshold_sig_hedged_statistical_distance_zero
   rw [hZero] at hLe
   exact Nat.eq_zero_of_le_zero hLe
 
+/-- Earlier name of `threshold_sig_hedged_output_equality`, kept because the challenge roster
+    refers to it. The statement is the same pointwise output equality; despite the name it does
+    not bound a statistical distance between output distributions. -/
+theorem threshold_sig_hedged_statistical_distance_zero
+    (p : Fips205Params) (hWf : p.wellFormed = true) {skSeed skPrf pkSeed : List UInt8}
+    (N : Nat) (run : Fin N → SlhThresholdRun p skSeed skPrf pkSeed)
+    (hedge : Fin N → List UInt8) (msgPrime : List UInt8) (D : List UInt8 → Bool) :
+    natAbsDiff
+      (finSum N (fun i => if D ((run i).signBytes msgPrime (hedge i)) then 1 else 0))
+      (finSum N (fun i => if D (encodeSlhSig (slhSignInternal p msgPrime
+        (slhKeygenInternal p skSeed skPrf pkSeed).1 (hedge i))) then 1 else 0)) = 0 :=
+  threshold_sig_hedged_output_equality p hWf N run hedge msgPrime D
+
 /-- **2-of-3 RSS, concrete protocol.** Any two-party quorum, any well-formed sharing and any
-    zero-sharing tape give the single-signer signature; two runs that share only the reconstructed
-    key give identical bytes. -/
+    word tape (an arbitrary function into `RssPrfZeroSeeds`; its PRF expansion is not modelled)
+    give the single-signer signature; two runs that share only the reconstructed key give
+    identical bytes. -/
 theorem rss_threshold_sig_independent_of_quorum_and_sharing
     (p : Fips205Params) (hWf : p.wellFormed = true) (q₁ q₂ : RssQuorum)
     {seed₁ prf₁ seed₂ prf₂ : RssByteShares}
@@ -3501,10 +3634,10 @@ theorem rss_threshold_sig_independent_of_quorum_and_sharing
         (slhKeygenInternal p (reconstructRssBytes seed₁) (reconstructRssBytes prf₁) pkSeed).1 optRand) ∧
     rssQuorumSlhSignBytes p q₁ (q₁.views seed₁) (q₁.views prf₁) pkSeed tape₁ msgPrime optRand =
       rssQuorumSlhSignBytes p q₂ (q₂.views seed₂) (q₂.views prf₂) pkSeed tape₂ msgPrime optRand := by
-  have h₁ := (threshold_sig_perfectly_indistinguishable_from_single_signer p hWf
+  have h₁ := (threshold_sig_deterministic_and_matches_single_signer p hWf
     (SlhThresholdRun.ofRss p q₁ hS₁ hP₁ pkSeed tape₁) (SlhThresholdRun.ofRss p q₁ hS₁ hP₁ pkSeed tape₁)
     msgPrime optRand).1
-  have h₂ := (threshold_sig_perfectly_indistinguishable_from_single_signer p hWf
+  have h₂ := (threshold_sig_deterministic_and_matches_single_signer p hWf
     (SlhThresholdRun.ofRss p q₂ hS₂ hP₂ pkSeed tape₂) (SlhThresholdRun.ofRss p q₂ hS₂ hP₂ pkSeed tape₂)
     msgPrime optRand).1
   have e : encodeSlhSig (slhSignInternal p msgPrime
@@ -3541,11 +3674,11 @@ theorem shamir_threshold_sig_independent_of_threshold_quorum_and_sharing
           (shamirSecretBytes decode₁ prfPolys₁) pkSeed).1 optRand) ∧
     thresholdSlhSignBytes p o₁ msgPrime (slhKeygenMpc p o₁ pkSeed) optRand =
       thresholdSlhSignBytes p o₂ msgPrime (slhKeygenMpc p o₂ pkSeed) optRand := by
-  have h₁ := (threshold_sig_perfectly_indistinguishable_from_single_signer p hWf
+  have h₁ := (threshold_sig_deterministic_and_matches_single_signer p hWf
     (SlhThresholdRun.ofShamir p decode₁ t₁ Q₁ seedPolys₁ prfPolys₁ hSD₁ hPD₁ pkSeed o₁ hO₁)
     (SlhThresholdRun.ofShamir p decode₁ t₁ Q₁ seedPolys₁ prfPolys₁ hSD₁ hPD₁ pkSeed o₁ hO₁)
     msgPrime optRand).1
-  have h₂ := (threshold_sig_perfectly_indistinguishable_from_single_signer p hWf
+  have h₂ := (threshold_sig_deterministic_and_matches_single_signer p hWf
     (SlhThresholdRun.ofShamir p decode₂ t₂ Q₂ seedPolys₂ prfPolys₂ hSD₂ hPD₂ pkSeed o₂ hO₂)
     (SlhThresholdRun.ofShamir p decode₂ t₂ Q₂ seedPolys₂ prfPolys₂ hSD₂ hPD₂ pkSeed o₂ hO₂)
     msgPrime optRand).1

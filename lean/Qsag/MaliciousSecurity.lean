@@ -374,16 +374,70 @@ def demoTower3BeaverSq : SharedBeaverTriple (TowerElem 3) :=
              towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)]
   { aShares := s1, bShares := s1, cShares := s1 }
 
+/-- Acceptance of `evalSharedDkgFrobenius` on a zero opening is decided by the lifted zero-sum MAC
+    check alone; the Beaver squaring output is never inspected by the acceptance predicate. -/
+theorem evalSharedDkgFrobenius_isSome_of_mac (k d : Nat)
+    (lambdas xSh : List (TowerElem k))
+    (sqTriple : SharedBeaverTriple (TowerElem k))
+    (sigmas : List (TowerElem (k + d)))
+    (hMac : verifyTowerZeroSumMac (k + d) sigmas = true) :
+    (evalSharedDkgFrobenius k d lambdas xSh sqTriple (towerZero k) sigmas).isSome = true := by
+  unfold evalSharedDkgFrobenius
+  rcases evalSharedBeaverMul lambdas xSh xSh sqTriple with ⟨sqSh, delta, eps⟩
+  simp [hMac]
+
+private theorem demoTower7_macKey_nonzero :
+    towerAdd 7 ((towerZero 6, towerOne 6) : TowerElem 7) (towerOne 6, towerZero 6) ≠ towerZero 7 := by
+  decide +kernel
+
+private theorem demoTower3_shares_open_to_one :
+    ringDot demoTower3Lambdas2
+      [towerAdd 3 (towerOne 3) demoTower3Pt2,
+       towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)] = towerOne 3 := by
+  decide +kernel
+
+private theorem demoTower3_frobenius_residual_zero :
+    ringDot demoTower3Lambdas2
+      (shareZipSub
+        (evalSharedBeaverMul demoTower3Lambdas2
+          [towerAdd 3 (towerOne 3) demoTower3Pt2,
+           towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)]
+          [towerAdd 3 (towerOne 3) demoTower3Pt2,
+           towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)]
+          demoTower3BeaverSq).1
+        [towerAdd 3 (towerOne 3) demoTower3Pt2,
+         towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)]) = towerZero 3 := by
+  decide +kernel
+
 /-- **Inhabitedness Witness (`shared_dkg_frobenius_inhabited`)**:
     Degree-1 Shamir shares of boolean $x = 1 \in \mathcal{T}_3$ pass `evalSharedDkgFrobenius`
-    over $\mathcal{T}_3 \hookrightarrow \mathcal{T}_7$ (`k = 3, d = 4`). -/
+    over $\mathcal{T}_3 \hookrightarrow \mathcal{T}_7$ (`k = 3, d = 4`) under a **non-zero** global MAC key
+    $\alpha = \alpha_0 \oplus \alpha_1$, with the shares opening to `1` and the true Frobenius residual
+    $x^2 \oplus x$ equal to the announced `0`. The $\mathcal{T}_7$ MAC leg is discharged algebraically by
+    `verifyTowerZeroSumMac_complete`; only $\mathcal{T}_3$ arithmetic is evaluated by the kernel. -/
 theorem shared_dkg_frobenius_inhabited :
     let xSh := [towerAdd 3 (towerOne 3) demoTower3Pt2,
                 towerAdd 3 (towerOne 3) (towerMul 3 demoTower3Pt2 demoTower3Pt2)]
+    let alpha0 : TowerElem 7 := (towerZero 6, towerOne 6)
+    let alpha1 : TowerElem 7 := (towerOne 6, towerZero 6)
     let mask7 : TowerElem 7 := (towerOne 6, towerOne 6)
-    let sigmas := computeTowerMacSigmas 7 (towerZero 7) [mask7, mask7] [towerOne 7, towerOne 7] [mask7, mask7]
+    let sigmas := computeTowerMacSigmas 7 (towerZero 7) [mask7, mask7] [alpha0, alpha1] [mask7, mask7]
+    let frobSh := shareZipSub (evalSharedBeaverMul demoTower3Lambdas2 xSh xSh demoTower3BeaverSq).1 xSh
+    towerAdd 7 alpha0 alpha1 ≠ towerZero 7 ∧
+    ringDot demoTower3Lambdas2 xSh = towerOne 3 ∧
+    ringDot demoTower3Lambdas2 frobSh = towerZero 3 ∧
     (evalSharedDkgFrobenius 3 4 demoTower3Lambdas2 xSh demoTower3BeaverSq (towerZero 3) sigmas).isSome = true := by
-  decide +kernel
+  intro xSh alpha0 alpha1 mask7 sigmas frobSh
+  have hSelf : ringListSum [mask7, mask7] = towerZero 7 := by
+    show towerAdd 7 mask7 (towerAdd 7 mask7 (towerZero 7)) = towerZero 7
+    rw [towerAdd_zero, towerAdd_self_zero]
+  have hMac : verifyTowerZeroSumMac 7 sigmas = true :=
+    verifyTowerZeroSumMac_complete 7 (towerZero 7) (towerZero 7)
+      [mask7, mask7] [alpha0, alpha1] [mask7, mask7] rfl rfl
+      (hSelf.trans (towerMul_zero 7 _).symm) hSelf rfl
+  exact ⟨demoTower7_macKey_nonzero, demoTower3_shares_open_to_one,
+    demoTower3_frobenius_residual_zero,
+    evalSharedDkgFrobenius_isSome_of_mac 3 4 demoTower3Lambdas2 xSh demoTower3BeaverSq sigmas hMac⟩
 
 /-- **`#tooth` Non-Binary Shares Rejected by `evalSharedDkgFrobenius`
     (`tooth_shared_dkg_frobenius_rejects_nonbinary_shares`)**:

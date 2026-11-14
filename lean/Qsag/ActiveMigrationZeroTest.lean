@@ -324,21 +324,20 @@ def canonicalTaprootProjection : TaprootCurveProjection (BitVec 256) where
     distinct canonical scalars sharing the identical `x`-coordinate! -/
 theorem tooth_taproot_xonly_not_injective_without_y_parity
     {XCoord : Type} (proj : TaprootCurveProjection XCoord) :
-    ¬ Function.Injective proj.xOf ∧
-    (let s1 : BitVec 256 := 1#256
-     let s2 : BitVec 256 := secpNegScalar s1
-     requireCanonicalScalar .Secp256k1 s1 = true ∧
-     requireCanonicalScalar .Secp256k1 s2 = true ∧
-     s1 ≠ s2 ∧
-     taprootXOnlySameX s1 s2 ∧
-     proj.xOf s1 = proj.xOf s2) := by
+    ∃ s1 s2 : BitVec 256,
+      requireCanonicalScalar .Secp256k1 s1 = true ∧
+      requireCanonicalScalar .Secp256k1 s2 = true ∧
+      s1 ≠ s2 ∧
+      taprootXOnlySameX s1 s2 ∧
+      proj.xOf s1 = proj.xOf s2 ∧
+      ¬ Function.Injective proj.xOf := by
   have h1Canon : requireCanonicalScalar .Secp256k1 1#256 = true := by
     unfold requireCanonicalScalar ScalarGroup.orderNat SECP256K1_ORDER_N
     decide
   obtain ⟨_, h2Canon, _, hNe, hSameX⟩ := secpNegScalar_props h1Canon
   have hXEq : proj.xOf 1#256 = proj.xOf (secpNegScalar 1#256) :=
     (proj.sameX_iff 1#256 (secpNegScalar 1#256) h1Canon h2Canon).mpr hSameX
-  refine ⟨fun hInj => hNe (hInj hXEq), h1Canon, h2Canon, hNe, hSameX, hXEq⟩
+  exact ⟨1#256, secpNegScalar 1#256, h1Canon, h2Canon, hNe, hSameX, hXEq, fun hInj => hNe (hInj hXEq)⟩
 
 /-- Normalize any canonical `secp256k1` scalar to its even-`y` Taproot representative (`legacy.rs:299-301, 319-321`). -/
 def normalizeTaprootEvenY {XCoord : Type} (proj : TaprootCurveProjection XCoord)
@@ -544,19 +543,18 @@ theorem slip0010_ed25519_clamped_canonical_nonzero (raw : BitVec 256) :
        **same** canonical scalar modulo `ED_ORDER`, proving `reduceEd25519Order`,
        `clampEd25519Bytes32`, and `normalizeSlip0010Ed25519Scalar` are all non-injective! -/
 theorem tooth_ed25519_clamped_wraps_mod_order_non_injective :
-    (∀ raw : BitVec 256,
-      ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat ∧
-      requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false ∧
-      reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw) ∧
-    (let x1 : BitVec 256 := clampEd25519Bytes32 0#256
-     let x2 : BitVec 256 := BitVec.ofNat 256 (x1.toNat - ED25519_ORDER_L)
-     ED25519_ORDER_L ≤ x1.toNat ∧
-     ED25519_ORDER_L ≤ x2.toNat ∧
-     x1 ≠ x2 ∧
-     reduceEd25519Order x1 = reduceEd25519Order x2) ∧
-    ¬ Function.Injective clampEd25519Bytes32 ∧
-    ¬ Function.Injective reduceEd25519Order ∧
-    ¬ Function.Injective normalizeSlip0010Ed25519Scalar := by
+    ∃ x1 x2 : BitVec 256,
+      (∀ raw : BitVec 256,
+        ED25519_ORDER_L < (clampEd25519Bytes32 raw).toNat ∧
+        requireCanonicalScalar .Ed25519 (clampEd25519Bytes32 raw) = false ∧
+        reduceEd25519Order (clampEd25519Bytes32 raw) ≠ clampEd25519Bytes32 raw) ∧
+      ED25519_ORDER_L ≤ x1.toNat ∧
+      ED25519_ORDER_L ≤ x2.toNat ∧
+      x1 ≠ x2 ∧
+      reduceEd25519Order x1 = reduceEd25519Order x2 ∧
+      ¬ Function.Injective clampEd25519Bytes32 ∧
+      ¬ Function.Injective reduceEd25519Order ∧
+      ¬ Function.Injective normalizeSlip0010Ed25519Scalar := by
   have hOrd := curve_orders_match_le_limbs_and_bounds
   have hOrdLt253 : ED25519_ORDER_L < 2 ^ 253 := hOrd.2.2.2.2.2.2.1
   have h253_254 : (2 : Nat) ^ 254 = 2 * (2 ^ 253) := by decide
@@ -610,7 +608,7 @@ theorem tooth_ed25519_clamped_wraps_mod_order_non_injective :
     have h1Mod : 1 % (2 ^ 254) = 1 := Nat.mod_eq_of_lt (by decide)
     rw [h1Mod]
   have h0Ne1 : (0#256 : BitVec 256) ≠ 1#256 := by decide
-  refine ⟨hAllWrap, ⟨hx1Ge, hx2Ge, hx1NeX2, hRedEq⟩,
+  exact ⟨x1, x2, hAllWrap, hx1Ge, hx2Ge, hx1NeX2, hRedEq,
     fun hInj => h0Ne1 (hInj hClamp01),
     fun hInj => hx1NeX2 (hInj hRedEq),
     fun hInj => h0Ne1 (hInj (congrArg reduceEd25519Order hClamp01))⟩
@@ -1039,14 +1037,23 @@ def ShorVulnerablePreMigration (group : ScalarGroup) : Prop :=
     with `0` custodian MPC queries — proving why migration security after settlement relies on the
     PQ destination key + Poseidon2 `NULLIFIER_DOMAIN` binding rather than legacy curve hiding. -/
 theorem tooth_shor_crqc_breaks_legacy_pk_pre_migration (group : ScalarGroup) :
-    ShorVulnerablePreMigration group := by
+    ∃ shorDlog : Fin group.orderNat → BitVec 256,
+      ShorVulnerablePreMigration group ∧
+      ∀ s : BitVec 256,
+        requireCanonicalScalar group s = true →
+        shorDlog (scalarMulKey (canonicalSubgroupHom group) s) = s := by
   obtain ⟨_, hLt256, _⟩ := scalarGroup_order_props group
-  refine ⟨fun pt => BitVec.ofNatLT pt.val (Nat.lt_trans pt.isLt hLt256), ?_⟩
-  intro s hCanon
-  obtain ⟨_, hLtOrd⟩ := (requireCanonicalScalar_iff group s).mp hCanon
-  apply BitVec.eq_of_toNat_eq
-  change (scalarMulKey (canonicalSubgroupHom group) s).val = s.toNat
-  rw [canonicalSubgroupHom_scalarMulKey_val, Nat.mod_eq_of_lt hLtOrd]
+  let shorDlog : Fin group.orderNat → BitVec 256 :=
+    fun pt => BitVec.ofNatLT pt.val (Nat.lt_trans pt.isLt hLt256)
+  have hInv : ∀ s : BitVec 256,
+      requireCanonicalScalar group s = true →
+      shorDlog (scalarMulKey (canonicalSubgroupHom group) s) = s := by
+    intro s hCanon
+    obtain ⟨_, hLtOrd⟩ := (requireCanonicalScalar_iff group s).mp hCanon
+    apply BitVec.eq_of_toNat_eq
+    change (scalarMulKey (canonicalSubgroupHom group) s).val = s.toNat
+    rw [canonicalSubgroupHom_scalarMulKey_val, Nat.mod_eq_of_lt hLtOrd]
+  exact ⟨shorDlog, ⟨shorDlog, hInv⟩, hInv⟩
 
 /-- Lossless 56-bit 5-limb Goldilocks packing of a 256-bit value (`5 * 56 = 280 > 256`, `scalar.rs:89, 92`). -/
 def pack256ToLimbs56 (x : BitVec 256) : Fin 5 → Goldilocks :=
@@ -1207,11 +1214,10 @@ structure RssWord64Shares3 where
   deriving Repr, DecidableEq
 
 /-- Replicated share pair `(s_i, s_{(i+1)%3})` visible to custodian `i : Fin 3` (`outer_mpc.rs:1703-1707`). -/
-def RssWord64Shares3.partyView (sh : RssWord64Shares3) : Fin 3 → RssBit64
-  | ⟨0, _⟩ => ⟨sh.w0, sh.w1⟩
-  | ⟨1, _⟩ => ⟨sh.w1, sh.w2⟩
-  | ⟨2, _⟩ => ⟨sh.w2, sh.w0⟩
-  | ⟨_ + 3, h⟩ => False.elim (by omega)
+def RssWord64Shares3.partyView (sh : RssWord64Shares3) (i : Fin 3) : RssBit64 :=
+  if i.val == 0 then ⟨sh.w0, sh.w1⟩
+  else if i.val == 1 then ⟨sh.w1, sh.w2⟩
+  else ⟨sh.w2, sh.w0⟩
 
 /-- Reconstructed 64-lane word `(w0 ^^^ w1) ^^^ w2`. -/
 def RssWord64Shares3.reconstruct (sh : RssWord64Shares3) : UInt64 :=
@@ -1226,8 +1232,10 @@ theorem openRawBitsConsistent_honest (sh : RssWord64Shares3) :
       (sh.partyView ⟨0, by decide⟩)
       (sh.partyView ⟨1, by decide⟩)
       (sh.partyView ⟨2, by decide⟩) = true := by
-  unfold openRawBitsConsistent RssWord64Shares3.partyView
-  simp
+  have hRefl : ∀ x : UInt64, (x == x) = true := fun x => decide_eq_true (rfl : x = x)
+  change ((sh.w1 == sh.w1) && (sh.w2 == sh.w2) && (sh.w0 == sh.w0)) = true
+  rw [hRefl sh.w1, hRefl sh.w2, hRefl sh.w0]
+  rfl
 
 /-- 3-of-3 custodian shares of the normalized 256-bit spending scalar (`co_zk_mpc.rs:29-39`). -/
 structure RssKeyShares3 where
@@ -1376,14 +1384,14 @@ theorem shareUniformLanesCheck_implies_uniform_witness_across_lanes :
     mask (`1 : UInt64` on bit `0`, flipping lane `0` only while leaving lane `1` untouched):
     `shareUniformLanesCheck` catches it (`= false`), whereas without the check lane `0` evaluates
     `ks.secret ^^^ oneBitMask 256 0` while lane `1` evaluates `ks.secret` (`≠`)! -/
-theorem tooth_non_uniform_lanes_split_witness_across_reps (ks : RssKeyShares3) :
-    let mixedFault : Fin 256 → UInt64 := fun j => if j.val == 0 then 1 else 0
-    let wl := buildWitnessLanes3 ks mixedFault
-    shareUniformLanesCheck wl = false ∧
-    extractRepetitionWitness wl 0 = ks.secret ^^^ oneBitMask 256 0 ∧
-    extractRepetitionWitness wl 1 = ks.secret ∧
-    extractRepetitionWitness wl 0 ≠ extractRepetitionWitness wl 1 := by
-  intro mixedFault wl
+theorem tooth_non_uniform_lanes_split_witness_across_reps_witness (ks : RssKeyShares3) :
+    ∃ wl : RssWitnessLanes3,
+      extractRepetitionWitness wl 0 ≠ extractRepetitionWitness wl 1 ∧
+      shareUniformLanesCheck wl = false ∧
+      extractRepetitionWitness wl 0 = ks.secret ^^^ oneBitMask 256 0 ∧
+      extractRepetitionWitness wl 1 = ks.secret := by
+  let mixedFault : Fin 256 → UInt64 := fun j => if j.val == 0 then 1 else 0
+  let wl := buildWitnessLanes3 ks mixedFault
   have hCheckFalse : shareUniformLanesCheck wl = false := by
     cases h : shareUniformLanesCheck wl
     · rfl
@@ -1440,7 +1448,17 @@ theorem tooth_non_uniform_lanes_split_witness_across_reps (ks : RssKeyShares3) :
     have hDec0 : decide (0 = (0 : Nat)) = true := rfl
     rw [BitVec.getLsbD_xor, oneBitMask_getLsbD 256 0 0 (by decide), hDec0] at hBit0
     cases hb : ks.secret.getLsbD 0 <;> rw [hb] at hBit0 <;> cases hBit0
-  exact ⟨hCheckFalse, hLane0, hLane1, hNe⟩
+  exact ⟨wl, hNe, hCheckFalse, hLane0, hLane1⟩
+
+theorem tooth_non_uniform_lanes_split_witness_across_reps (ks : RssKeyShares3) :
+    ¬ (∀ wl : RssWitnessLanes3,
+        shareUniformLanesCheck wl = true ∨
+        extractRepetitionWitness wl 0 = extractRepetitionWitness wl 1) := by
+  intro hAll
+  obtain ⟨wl, hNe, hCheckFalse, _, _⟩ := tooth_non_uniform_lanes_split_witness_across_reps_witness ks
+  rcases hAll wl with hTrue | hEq
+  · rw [hCheckFalse] at hTrue; cases hTrue
+  · exact hNe hEq
 
 #tooth_pair
   Qsag.shareUniformLanesCheck_implies_uniform_witness_across_lanes
@@ -1495,13 +1513,18 @@ theorem tooth_premature_residual_open_recovers_spending_key
     (G : ScalarPointHom w pWidth PubKey)
     (zkCommit : BitVec w → ZkView)
     (s0 s1 s2 : BitVec w) :
-    let secret := (s0 ^^^ s1) ^^^ s2
-    let pk := scalarMulKey G secret
-    let runBitQuery := fun i =>
-      brokenPrematureOpenCeremony (scalarMulKey G) G.encodePk zkCommit pk s0 s1 s2 (oneBitMask w i)
-    recoverKeyFromPrematureOpens G pk (fun i => (runBitQuery i).1) = secret ∧
-    (∀ i, i < w → (runBitQuery i).2 = .error .invalidProof) := by
-  intro secret pk runBitQuery
+    ∃ recovered : BitVec w,
+      recovered = recoverKeyFromPrematureOpens G (scalarMulKey G ((s0 ^^^ s1) ^^^ s2))
+        (fun i => (brokenPrematureOpenCeremony (scalarMulKey G) G.encodePk zkCommit
+          (scalarMulKey G ((s0 ^^^ s1) ^^^ s2)) s0 s1 s2 (oneBitMask w i)).1) ∧
+      recovered = (s0 ^^^ s1) ^^^ s2 ∧
+      (∀ i, i < w →
+        (brokenPrematureOpenCeremony (scalarMulKey G) G.encodePk zkCommit
+          (scalarMulKey G ((s0 ^^^ s1) ^^^ s2)) s0 s1 s2 (oneBitMask w i)).2 = .error .invalidProof) := by
+  let secret := (s0 ^^^ s1) ^^^ s2
+  let pk := scalarMulKey G secret
+  let runBitQuery := fun i =>
+    brokenPrematureOpenCeremony (scalarMulKey G) G.encodePk zkCommit pk s0 s1 s2 (oneBitMask w i)
   have hEncInj := G.encodePk_injective
   have hShift : ∀ d : BitVec w, ((s0 ^^^ d) ^^^ s1) ^^^ s2 = secret ^^^ d := by
     intro d; dsimp only [secret]; bv_xor_cancel
@@ -1545,12 +1568,13 @@ theorem tooth_premature_residual_open_recovers_spending_key
         exact fun hEq => hGenNeZero.2 (hEncInj hEq)
       rw [bne_iff_ne.mpr hNeEnc, hResTrue]
       exact ⟨rfl, rfl⟩
-  refine ⟨?_, fun i hi => (hBitExact i hi).2⟩
-  apply bv_eq_of_getLsbD_eq
-  intro i hi
-  unfold recoverKeyFromPrematureOpens
-  rw [packBits_getLsbD _ _ i hi]
-  exact (hBitExact i hi).1
+  have hRec : recoverKeyFromPrematureOpens G pk (fun i => (runBitQuery i).1) = secret := by
+    apply bv_eq_of_getLsbD_eq
+    intro i hi
+    unfold recoverKeyFromPrematureOpens
+    rw [packBits_getLsbD _ _ i hi]
+    exact (hBitExact i hi).1
+  exact ⟨secret, hRec.symm, rfl, fun i hi => (hBitExact i hi).2⟩
 
 /-- Concrete instantiation of `tooth_premature_residual_open_recovers_spending_key` over canonical
     `< group.orderNat` scalars for **both** `ScalarGroup.Secp256k1` (`SECP_N`) and
@@ -1567,9 +1591,9 @@ theorem tooth_premature_residual_open_recovers_canonical_spending_key
     recoverKeyFromPrematureOpens G pk (fun i => (runBitQuery i).1) = ks.secret ∧
     (∀ i, i < 256 → (runBitQuery i).2 = .error .invalidProof) := by
   obtain ⟨hPos, hLt⟩ := (requireCanonicalScalar_iff group ks.secret).mp hCanon
-  have hMain := tooth_premature_residual_open_recovers_spending_key
+  obtain ⟨_, hRecEq, hSecEq, hErr⟩ := tooth_premature_residual_open_recovers_spending_key
     (canonicalSubgroupHom group) zkCommit ks.s0 ks.s1 ks.s2
-  exact ⟨hPos, hLt, hMain.1, hMain.2⟩
+  exact ⟨hPos, hLt, hRecEq.symm.trans hSecEq, hErr⟩
 
 /-! ## 5. Algebraic `GF(2^128)` (`Tower128`) BBCGGI19 Sacrifice & Coin-Permuted Triple Bucketing -/
 
@@ -1785,19 +1809,19 @@ theorem bbcggi19_gf2128_soundness_bound
     true inputs `(0, 0)`) forces `all_outputs_zero` to reconstruct to `true` on an invalid witness,
     whereas `verifyAllPendingGf2128` rejects the forged triple on every nonzero challenge `chi ≠ 0`! -/
 theorem tooth_unverified_mul_forges_all_outputs_zero :
-    let honestZeroMask : Gf2128MulTriple := ⟨towerZero 7, towerZero 7, towerZero 7⟩
-    let forgedFinalAnd : Gf2128MulTriple := ⟨towerZero 7, towerZero 7, towerOne 7⟩
-    forgedFinalAnd.z ≠ towerMul 7 forgedFinalAnd.x forgedFinalAnd.y ∧
-    tripleMulError forgedFinalAnd ≠ towerZero 7 ∧
-    (∀ chi : Tower128, chi ≠ towerZero 7 →
-      verifyAllPendingGf2128 honestZeroMask [forgedFinalAnd] chi = false) := by
-  intro honestZeroMask forgedFinalAnd
+    ∃ honestZeroMask forgedFinalAnd : Gf2128MulTriple,
+      forgedFinalAnd.z ≠ towerMul 7 forgedFinalAnd.x forgedFinalAnd.y ∧
+      tripleMulError forgedFinalAnd ≠ towerZero 7 ∧
+      (∀ chi : Tower128, chi ≠ towerZero 7 →
+        verifyAllPendingGf2128 honestZeroMask [forgedFinalAnd] chi = false) := by
+  let honestZeroMask : Gf2128MulTriple := ⟨towerZero 7, towerZero 7, towerZero 7⟩
+  let forgedFinalAnd : Gf2128MulTriple := ⟨towerZero 7, towerZero 7, towerOne 7⟩
   have hErrEq : tripleMulError forgedFinalAnd = towerOne 7 := by
     unfold tripleMulError
     dsimp only [forgedFinalAnd]
     rw [towerMul_zero, towerAdd_zero]
   have hOneNe0 : towerOne 7 ≠ towerZero 7 := towerOne_ne_zero 7
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨honestZeroMask, forgedFinalAnd, ?_, ?_, ?_⟩
   · dsimp only [forgedFinalAnd]
     rw [towerMul_zero]
     exact hOneNe0
@@ -1970,21 +1994,24 @@ private theorem fixedBucketDoubleFaultSurvivesGf2128_fin4_eq
 theorem tooth_fixed_bucket_selective_abort_leaks_wire_bit
     {chi u0L aL deltaL u0R aR deltaR : Tower128}
     (hChi : chi ≠ towerZero 7) (hDL : deltaL ≠ towerZero 7) (hDR : deltaR ≠ towerZero 7) :
-    let survivalCount := finSum 4 (fun i =>
-      if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun i)
-      then 1 else 0)
-    survivalCount = 1 ∧
-    ratLe (1, 4) (survivalCount, 4) ∧
-    (∀ (sample : Bool × Bool) (y : Bool),
-      fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR sample = true →
-      onlineBeaverOpenBit y (combineBucketBit sample.1 sample.2) = y) ∧
-    (∀ (sample : Bool × Bool),
-      fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR sample = true →
-      onlineBeaverOpenBit false (combineBucketBit sample.1 sample.2) ≠
-        onlineBeaverOpenBit true (combineBucketBit sample.1 sample.2)) := by
-  intro survivalCount
+    ∃ survivalCount : Nat,
+      survivalCount = finSum 4 (fun i =>
+        if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun i)
+        then 1 else 0) ∧
+      survivalCount = 1 ∧
+      ratLe (1, 4) (survivalCount, 4) ∧
+      (∀ (sample : Bool × Bool) (y : Bool),
+        fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR sample = true →
+        onlineBeaverOpenBit y (combineBucketBit sample.1 sample.2) = y) ∧
+      (∀ (sample : Bool × Bool),
+        fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR sample = true →
+        onlineBeaverOpenBit false (combineBucketBit sample.1 sample.2) ≠
+          onlineBeaverOpenBit true (combineBucketBit sample.1 sample.2)) := by
+  let survivalCount := finSum 4 (fun i =>
+    if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun i)
+    then 1 else 0)
   have hCount : survivalCount = 1 := fixedBucketDoubleFaultSurvivesGf2128_fin4_eq hChi hDL hDR
-  refine ⟨hCount, ?_, ?_, ?_⟩
+  refine ⟨survivalCount, rfl, hCount, ?_, ?_, ?_⟩
   · rw [hCount]
     exact ⟨by omega, by omega, Nat.le_refl 4⟩
   · intro ⟨b1, b2⟩ y hSurv
@@ -2518,21 +2545,21 @@ def buggyUpfrontTapeAndWitnessCheck {ZkView : Type}
     bits in `1` query! -/
 theorem tooth_premature_witness_range_in_invalid_tape_leaks_secret_bit
     {ZkView : Type} (zkCommit : MigrationKey256 → ZkView) :
-    let sLow : MigrationKey256 := BitVec.ofNat 256 (SECP256K1_ORDER_N - 2 ^ 255)
-    let sHigh : MigrationKey256 := BitVec.ofNat 256 (2 ^ 255 + 1)
-    let ksLow : RssKeyShares3 := ⟨0#256, sLow, 0#256⟩
-    let ksHigh : RssKeyShares3 := ⟨0#256, sHigh, 0#256⟩
-    let delta : MigrationKey256 := BitVec.ofNat 256 (2 ^ 255)
-    ksLow.s0 = ksHigh.s0 ∧
-    requireCanonicalScalar .Secp256k1 ksLow.secret = true ∧
-    requireCanonicalScalar .Secp256k1 ksHigh.secret = true ∧
-    buggyUpfrontTapeAndWitnessCheck .Secp256k1 (fun _ => true) zkCommit ksLow delta 0#256 0#256 0#256 =
-      .error .invalidTape ∧
-    buggyUpfrontTapeAndWitnessCheck .Secp256k1 (fun _ => true) zkCommit ksHigh delta 0#256 0#256 0#256 =
-      .error .invalidProof ∧
-    buggyUpfrontTapeAndWitnessCheck .Secp256k1 (fun _ => true) zkCommit ksLow delta 0#256 0#256 0#256 ≠
-      buggyUpfrontTapeAndWitnessCheck .Secp256k1 (fun _ => true) zkCommit ksHigh delta 0#256 0#256 0#256 := by
-  intro sLow sHigh ksLow ksHigh delta
+    ∃ (ksLow ksHigh : RssKeyShares3) (delta : MigrationKey256),
+      ksLow.s0 = ksHigh.s0 ∧
+      requireCanonicalScalar .Secp256k1 ksLow.secret = true ∧
+      requireCanonicalScalar .Secp256k1 ksHigh.secret = true ∧
+      buggyUpfrontTapeAndWitnessCheck .Secp256k1 (fun _ => true) zkCommit ksLow delta 0#256 0#256 0#256 =
+        .error .invalidTape ∧
+      buggyUpfrontTapeAndWitnessCheck .Secp256k1 (fun _ => true) zkCommit ksHigh delta 0#256 0#256 0#256 =
+        .error .invalidProof ∧
+      buggyUpfrontTapeAndWitnessCheck .Secp256k1 (fun _ => true) zkCommit ksLow delta 0#256 0#256 0#256 ≠
+        buggyUpfrontTapeAndWitnessCheck .Secp256k1 (fun _ => true) zkCommit ksHigh delta 0#256 0#256 0#256 := by
+  let sLow : MigrationKey256 := BitVec.ofNat 256 (SECP256K1_ORDER_N - 2 ^ 255)
+  let sHigh : MigrationKey256 := BitVec.ofNat 256 (2 ^ 255 + 1)
+  let ksLow : RssKeyShares3 := ⟨0#256, sLow, 0#256⟩
+  let ksHigh : RssKeyShares3 := ⟨0#256, sHigh, 0#256⟩
+  let delta : MigrationKey256 := BitVec.ofNat 256 (2 ^ 255)
   have hSecLow : ksLow.secret = sLow := by dsimp [ksLow, RssKeyShares3.secret]; bv_xor_cancel
   have hSecHigh : ksHigh.secret = sHigh := by dsimp [ksHigh, RssKeyShares3.secret]; bv_xor_cancel
   have hCanonLow : requireCanonicalScalar .Secp256k1 sLow = true := by
@@ -2586,7 +2613,7 @@ theorem tooth_premature_witness_range_in_invalid_tape_leaks_secret_bit
     dsimp only [ksHigh]
     rw [hHighCandCanon, hHighResNe]
     rfl
-  refine ⟨rfl, by rw [hSecLow]; exact hCanonLow, by rw [hSecHigh]; exact hCanonHigh,
+  refine ⟨ksLow, ksHigh, delta, rfl, by rw [hSecLow]; exact hCanonLow, by rw [hSecHigh]; exact hCanonHigh,
     hEvalLow, hEvalHigh, ?_⟩
   rw [hEvalLow, hEvalHigh]
   intro hEq
@@ -2951,8 +2978,9 @@ theorem inhabited_migration_256_zero_test_and_tooth :
     · rfl
     · exfalso
       exact hDeltaNe ((circuitAllOutputsZero_iff_zero_fault .Secp256k1 ksSecp hSecpCanon delta).mp h)
-  exact ⟨hSecpCanon, hEdCanon, hDeltaNe, hZeroTestFalse,
-    (tooth_premature_residual_open_recovers_spending_key GSecp id ksSecp.s0 ksSecp.s1 ksSecp.s2).1⟩
+  obtain ⟨_, hRecEq, hSecEq, _⟩ :=
+    tooth_premature_residual_open_recovers_spending_key GSecp id ksSecp.s0 ksSecp.s1 ksSecp.s2
+  exact ⟨hSecpCanon, hEdCanon, hDeltaNe, hZeroTestFalse, hRecEq.symm.trans hSecEq⟩
 
 /-- Concrete inhabitedness witness for `Tower128` BBCGGI19 + coin-permuted triple bucketing at `N = 2`. -/
 theorem inhabited_coin_permuted_bucketing_witness :
