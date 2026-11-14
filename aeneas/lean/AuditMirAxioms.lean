@@ -1,5 +1,6 @@
 module
 import Lean
+import all QsagVerified.Proofs.AuthenticatedBeltAndRealSpecWeld
 import all QsagMirProofs
 import all QsagVerified.Funs
 import all QsagVerified.Proofs
@@ -35,6 +36,16 @@ import all QsagVerified.Proofs.Tsw
 import all QsagVerified.Proofs.Wots
 import all QsagVerified.Types
 
+import all QsagVerified.Proofs.BeltAckProvenance
+import all QsagVerified.Proofs.CallerContracts
+import all QsagVerified.Proofs.MultiTurnMediationAndReachability
+import all QsagVerified.Proofs.RealSpecBeltWeld
+import all QsagVerified.Proofs.RealSpecFieldWeld
+import all QsagVerified.Proofs.RealSpecHashWeld
+import all QsagVerified.Proofs.RealSpecKeccakWeld
+import all QsagVerified.Proofs.RealSpecTowerWeld
+import all QsagSpecWeld
+
 open Lean Elab Command in
 run_cmd do
   let negative ← Lean.collectAxioms ``Classical.choice
@@ -46,7 +57,7 @@ run_cmd do
   for (name, _) in env.constants.toList do
     if let some idx := env.getModuleIdxFor? name then
       let owner := env.header.moduleNames[idx.toNat]!.toString
-      if owner == "QsagMirProofs" || owner == "QsagVerified" ||
+      if owner == "QsagSpecWeld" || owner == "QsagMirProofs" || owner == "QsagVerified" ||
           owner.startsWith "QsagVerified." then
         checked := checked + 1
         let axioms ← Lean.collectAxioms name

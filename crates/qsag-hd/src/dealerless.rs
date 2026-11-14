@@ -333,6 +333,7 @@ struct Lineage {
     family_id: Option<[u8; 32]>,
     #[cfg(feature = "std")]
     poison_journal: Option<Arc<dyn crate::poison::HdPoisonJournal>>,
+    testing_poison_journal: bool,
     poisoned: Arc<AtomicBool>,
     evaluation_queries: Arc<AtomicUsize>,
     #[cfg(feature = "std")]
@@ -374,10 +375,16 @@ struct Core {
     zero_shares: Vec<u32>,
     zero_salt: [u8; 32],
     zero_commits: Vec<RekeyZeroCommit>,
+    complete: bool,
 }
 
 impl Drop for Core {
     fn drop(&mut self) {
+        if !self.complete && self.parent.is_some() {
+            self.lineage.poisoned.store(true, Ordering::Release);
+            #[cfg(feature = "std")]
+            if let Some(journal) = &self.lineage.poison_journal { let _ = journal.poison(); }
+        }
         ct_zeroize_bytes(&mut self.coin_seed);
         ct_zeroize_bytes(&mut self.coin_salt);
         ct_zeroize_bytes(&mut self.zero_salt);
@@ -456,7 +463,7 @@ impl<'a> RekeyRound1<'a> {
         private_entropy: [u8; 32],
         chain_code_seed: &'a [u8; 32],
     ) -> Result<(Self, RekeyHello), HdError> {
-        if max_depth == 0 {
+        if max_depth == 0 || max_depth > MAX_NON_HARDENED_DERIVATION_DEPTH {
             return Err(HdError::InvalidThresholdParameters);
         }
         Self::begin(
@@ -510,6 +517,7 @@ impl<'a> RekeyRound1<'a> {
                         family_id: None,
                         #[cfg(feature = "std")]
                         poison_journal: None,
+                        testing_poison_journal: false,
                         poisoned: Arc::new(AtomicBool::new(false)),
                         evaluation_queries: Arc::new(AtomicUsize::new(0)),
                         #[cfg(feature = "std")]
@@ -525,6 +533,7 @@ impl<'a> RekeyRound1<'a> {
                 )
             }
             Some((share, expected)) => {
+                share.require_poison_journal()?;
                 let valid_scheme = matches!(
                     share.scheme,
                     ShareScheme::Shamir { threshold, eval_point }
@@ -578,6 +587,7 @@ impl<'a> RekeyRound1<'a> {
                         family_id: Some(share.family_id),
                         #[cfg(feature = "std")]
                         poison_journal: share.poison_journal.clone(),
+                        testing_poison_journal: share.testing_poison_journal,
                         poisoned: Arc::clone(&share.poisoned),
                         evaluation_queries: Arc::clone(&share.evaluation_queries),
                         #[cfg(feature = "std")]
@@ -730,6 +740,7 @@ impl<'a> RekeyRound1<'a> {
             zero_shares: Vec::new(),
             zero_salt: secret(b"QSAG.HD.REKEY.ZERO_SALT.V1"),
             zero_commits: Vec::new(),
+            complete: false,
         };
         Ok((
             Self {
@@ -990,11 +1001,11 @@ impl RekeyRound4 {
         }
         let mut zero_shares = Vec::with_capacity(core.zero_count());
         for lane in 0..SPDZ_LANES {
-            for k in 0..REPS {
+            for (k, &opened) in rho.iter().take(REPS).enumerate() {
                 let check = core.macs[CHILD_PRODUCTS + lane * REPS + k];
                 zero_shares.push(mod_q_sub(
                     mod_q_sub(core.combined_macs[lane * REPS + k], check),
-                    mod_q_mul(rho[k], core.alpha[lane]),
+                    mod_q_mul(opened, core.alpha[lane]),
                 ));
             }
         }
@@ -1027,6 +1038,10 @@ impl RekeyRound5 {
         let mut core = self.0;
         ordered(&core.members, commits, |commit| commit.party_id)?;
         core.zero_commits = commits.to_vec();
+        #[cfg(feature = "std")]
+        if let Some(journal) = &core.lineage.poison_journal {
+            journal.begin_disclosure(core.session).map_err(|_| HdError::MacCheckFailed)?;
+        }
         let opening = RekeyZeroOpening {
             party_id: core.party_id,
             values: core.zero_shares.clone(),
@@ -1037,9 +1052,31 @@ impl RekeyRound5 {
 }
 
 impl RekeyRound6 {
+    /// Public identity for provisioning the mandatory family journal before completion.
+    pub fn family_id(&self) -> Result<[u8; 32], HdError> {
+        self.0.lineage.family_id.map(Ok).unwrap_or_else(|| {
+            self.0.child_t.as_ref().map(|t| hash_t_vec(&self.0.lineage.seed_a, t))
+                .ok_or(HdError::InvalidThresholdParameters)
+        })
+    }
+
     /// Releases the authenticated share and its public descriptor only when
     /// every zero-test opens to zero on a consistent degree `t - 1` sharing.
-    pub fn finish(
+    /// Complete provisioning with a durable journal bound to the resulting family.
+    #[cfg(feature = "std")]
+    pub fn finish(self, openings: &[RekeyZeroOpening], journal: Arc<dyn crate::poison::HdPoisonJournal>) -> Result<(LinearModuleXPub, LinearModulePartyShare), HdError> {
+        let (public, mut share) = self.finish_inner(openings)?;
+        if share.poison_journal.is_none() { share.attach_poison_journal(journal)?; }
+        else if journal.family_id() != share.family_id || journal.is_poisoned().unwrap_or(true) { return Err(HdError::MacCheckFailed); }
+        share.require_poison_journal()?;
+        Ok((public, share))
+    }
+    /// Explicit nonpersistent completion for pure protocol tests.
+    pub fn finish_with_in_memory_poison_journal_for_testing(self, openings: &[RekeyZeroOpening]) -> Result<(LinearModuleXPub, LinearModulePartyShare), HdError> {
+        let (public, share) = self.finish_inner(openings)?;
+        Ok((public, share.in_memory_poison_journal_for_testing()))
+    }
+    fn finish_inner(
         self,
         openings: &[RekeyZeroOpening],
     ) -> Result<(LinearModuleXPub, LinearModulePartyShare), HdError> {
@@ -1118,11 +1155,17 @@ impl RekeyRound6 {
             budget: lineage.budget.clone(),
             #[cfg(feature = "std")]
             poison_journal: lineage.poison_journal.clone(),
+            testing_poison_journal: lineage.testing_poison_journal,
             poisoned: Arc::clone(&lineage.poisoned),
             evaluation_queries: Arc::clone(&lineage.evaluation_queries),
             depth_used: lineage.depth_used,
             max_depth: lineage.max_depth,
         };
+        #[cfg(feature = "std")]
+        if let Some(journal) = &core.lineage.poison_journal {
+            journal.complete_disclosure(core.session).map_err(|_| HdError::MacCheckFailed)?;
+        }
+        core.complete = true;
         Ok((public, share))
     }
 }
@@ -1290,7 +1333,7 @@ pub(crate) mod harness {
         tamper(Stage::ZeroCommits(&mut commits));
         let (states, mut openings) = step(states, |s| s.open_zero_test(&commits))?;
         tamper(Stage::ZeroOpenings(&mut openings));
-        let results: Vec<_> = states.into_iter().map(|s| s.finish(&openings)).collect();
+        let results: Vec<_> = states.into_iter().map(|s| s.finish_with_in_memory_poison_journal_for_testing(&openings)).collect();
         if results.iter().any(Result::is_err) {
             return Err(results.into_iter().map(Result::err).collect());
         }
@@ -1513,14 +1556,14 @@ mod tests {
     fn every_protocol_stage_rejects_a_fault() {
         let config = committee(2, 3);
         let seeds = run_seed_ceremony(&config, 0x44);
-        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
-        let parents = Some((root.as_slice(), &root_pk));
         let bump = |v: &mut u32| *v = mod_q_add(*v, 1);
 
         // Bad multiplication share: an additive error on one child MAC product.
         // With n = 2t - 1 it passes interpolation and only the sacrifice sees it.
         for index in [0, CHILD_PRODUCTS - 1, 3 * COEFFS + 77] {
-            let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
+            let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
+        let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
                 if let Stage::Products(messages) = stage {
                     bump(&mut messages[1].values[index]);
                 }
@@ -1528,6 +1571,8 @@ mod tests {
             all_fail(outcome, None, RekeyFault::SacrificeNonZero);
         }
         // The same error on the sacrifice product itself.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Products(messages) = stage {
                 bump(&mut messages[2].values[CHILD_PRODUCTS + 9]);
@@ -1536,6 +1581,8 @@ mod tests {
         all_fail(outcome, None, RekeyFault::SacrificeNonZero);
         // A blind attempt to cancel: error on a MAC product and on all seven of
         // its lane's sacrifice products. Cancelling needs the unopened coin.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Products(messages) = stage {
                 bump(&mut messages[0].values[0]);
@@ -1546,6 +1593,8 @@ mod tests {
         });
         all_fail(outcome, None, RekeyFault::SacrificeNonZero);
         // An error on the parent-authentication product.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Products(messages) = stage {
                 bump(&mut messages[1].values[CHILD_PRODUCTS + CHECK_PRODUCTS]);
@@ -1553,12 +1602,16 @@ mod tests {
         });
         all_fail(outcome, None, RekeyFault::ParentAuthenticationFailed);
         // Non-canonical and truncated product messages.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Products(messages) = stage {
                 messages[1].values[4] = MODULE_Q;
             }
         });
         all_fail(outcome, None, RekeyFault::MalformedMessage);
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Products(messages) = stage {
                 messages[1].values.pop();
@@ -1567,6 +1620,8 @@ mod tests {
         all_fail(outcome, None, RekeyFault::MalformedMessage);
 
         // Bad coin opening: a different seed than the one committed in round 1.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Coins(coins) = stage {
                 coins[2].seed[0] ^= 1;
@@ -1575,6 +1630,8 @@ mod tests {
         all_fail(outcome, None, RekeyFault::CommitmentMismatch);
 
         // Bad masked opening: one share off the degree t-1 polynomial.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Masked(messages) = stage {
                 bump(&mut messages[0].values[3]);
@@ -1583,6 +1640,8 @@ mod tests {
         all_fail(outcome, None, RekeyFault::InconsistentDegree);
 
         // Bad sacrifice opening: a zero-test share changed after commitment.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::ZeroOpenings(openings) = stage {
                 bump(&mut openings[1].values[0]);
@@ -1590,6 +1649,8 @@ mod tests {
         });
         all_fail(outcome, None, RekeyFault::CommitmentMismatch);
         // Bad commitment opening: the commitment itself replaced.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::ZeroCommits(commits) = stage {
                 commits[1].digest[0] ^= 1;
@@ -1600,6 +1661,8 @@ mod tests {
         // the polynomial fixed by the honest custodians.
         let mut session = [0u8; 32];
         let mut forged = None;
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| match stage {
             Stage::Hello(hellos) => {
                 let mut transcript = init_cshake256(b"", b"QSAG.HD.REKEY.SESSION.V1");
@@ -1661,12 +1724,16 @@ mod tests {
         assert_eq!(errors[0], Some(HdError::RekeyAborted(RekeyFault::PublicShareMismatch)));
         assert_eq!(errors[2], Some(HdError::RekeyAborted(RekeyFault::PublicShareMismatch)));
         // Reordered or missing senders.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Hello(hellos) = stage {
                 hellos.swap(0, 1);
             }
         });
         all_fail(outcome, None, RekeyFault::MalformedMessage);
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Masked(messages) = stage {
                 messages.pop();
@@ -1674,6 +1741,8 @@ mod tests {
         });
         all_fail(outcome, None, RekeyFault::MalformedMessage);
         // A public tweak image on a non-hardened rekey is refused.
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let parents = Some((root.as_slice(), &root_pk));
         let outcome = run(&seeds, parents, 5, false, 2, &mut |stage| {
             if let Stage::Hello(hellos) = stage {
                 let image = core::array::from_fn(|_| RingPoly::zero());
@@ -1682,9 +1751,11 @@ mod tests {
         });
         all_fail(outcome, None, RekeyFault::MalformedMessage);
 
-        // None of the aborts retired the family, and the parent still rekeys.
-        assert!(root.iter().all(|share| !share.is_poisoned()));
-        let (child_pk, child) = honest(&seeds, parents, 5, false, 6);
+        // An aborted child protocol quarantines the parent family.
+        assert!(root.iter().all(LinearModulePartyShare::is_poisoned));
+        assert!(run(&seeds, parents, 5, false, 6, &mut |_| {}).is_err());
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
+        let (child_pk, child) = honest(&seeds, Some((&root, &root_pk)), 5, false, 6);
         reconstruct_for_recovery_or_test(&child[..2], &child_pk).unwrap();
     }
 
@@ -1711,21 +1782,22 @@ mod tests {
         root[1].spdz_macs[4][2].0.coeffs[9] = mod_q_add(root[1].spdz_macs[4][2].0.coeffs[9], 1);
         let outcome = run(&seeds, Some((&root, &root_pk)), 2, true, 2, &mut |_| {});
         all_fail(outcome, None, RekeyFault::InconsistentDegree);
-        root[1].spdz_macs[4][2].0.coeffs[9] = mod_q_sub(root[1].spdz_macs[4][2].0.coeffs[9], 1);
+        assert!(root.iter().all(LinearModulePartyShare::is_poisoned));
+        let (root_pk, mut root) = honest(&seeds, None, 0, false, 1);
         // Every custodian holds a consistent sharing of a wrong MAC value.
         for share in &mut root {
             share.spdz_macs[4][2].0.coeffs[9] = mod_q_add(share.spdz_macs[4][2].0.coeffs[9], 1);
         }
         let outcome = run(&seeds, Some((&root, &root_pk)), 2, true, 2, &mut |_| {});
         all_fail(outcome, None, RekeyFault::ParentAuthenticationFailed);
-        for share in &mut root {
-            share.spdz_macs[4][2].0.coeffs[9] = mod_q_sub(share.spdz_macs[4][2].0.coeffs[9], 1);
-        }
+        assert!(root.iter().all(LinearModulePartyShare::is_poisoned));
+        let (root_pk, mut root) = honest(&seeds, None, 0, false, 1);
         // A wrong parent secret share is off the degree t-1 polynomial.
         root[2].s_shares[7].0.coeffs[255] = mod_q_add(root[2].s_shares[7].0.coeffs[255], 1);
         let outcome = run(&seeds, Some((&root, &root_pk)), 2, true, 2, &mut |_| {});
         all_fail(outcome, None, RekeyFault::InconsistentDegree);
-        root[2].s_shares[7].0.coeffs[255] = mod_q_sub(root[2].s_shares[7].0.coeffs[255], 1);
+        assert!(root.iter().all(LinearModulePartyShare::is_poisoned));
+        let (root_pk, root) = honest(&seeds, None, 0, false, 1);
         // A poisoned or foreign parent handle cannot start a rekey.
         let (other_pk, _) = honest(&seeds, None, 1, false, 3);
         assert_eq!(
@@ -1740,7 +1812,7 @@ mod tests {
                 .err(),
             Some(HdError::InvalidThresholdParameters)
         );
-        // The restored state rekeys successfully.
+        // A newly provisioned test family rekeys successfully.
         honest(&seeds, Some((&root, &root_pk)), 2, true, 4);
     }
 

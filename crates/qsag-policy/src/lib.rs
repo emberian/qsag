@@ -199,13 +199,9 @@ impl TransactionPolicy {
         if intent.amount_units > self.max_single_tx_amount {
             return Err(PolicyViolation::SingleTxCapExceeded);
         }
-        let cumulative = intent
-            .rolling_window_spent
-            .checked_add(intent.amount_units)
-            .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
-        if cumulative > self.velocity_window_cap {
-            return Err(PolicyViolation::VelocityCapOverflowOrExceeded);
-        }
+        qsag_verified::policy_and_addr::checked_velocity_spend(
+            intent.rolling_window_spent, intent.amount_units, self.velocity_window_cap,
+        ).ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
 
         // Validate distinctness of approvers + anti-self-approval rule!
         for (i, &p_i) in intent.approver_parties.iter().enumerate() {
@@ -687,13 +683,33 @@ impl PolicySignerGuardShare {
             .accumulated_window_spend
             .max(intent.rolling_window_spent)
             .max(external_floor);
-        let projected = effective_prior
-            .checked_add(intent.amount_units)
-            .ok_or(PolicyViolation::VelocityCapOverflowOrExceeded)?;
-        if projected > velocity_window_cap {
+        let guard = qsag_verified::StatefulVelocityGuard::new_window(
+            self.current_window_id,
+            velocity_window_cap,
+            self.durable_key_id,
+            *session_id,
+        );
+        let (guard, prior_res) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
+            window_id: intent.window_id,
+            nonce: 1,
+            amount_units: effective_prior,
+            policy_pin: self.durable_key_id,
+            authority_pin: *session_id,
+        });
+        if prior_res.is_err() {
             return Err(PolicyViolation::VelocityCapOverflowOrExceeded);
         }
-        Ok(projected)
+        let (guard, tx_res) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
+            window_id: intent.window_id,
+            nonce: 2,
+            amount_units: intent.amount_units,
+            policy_pin: self.durable_key_id,
+            authority_pin: *session_id,
+        });
+        match tx_res {
+            Ok(_) => Ok(guard.spent_units()),
+            Err(_) => Err(PolicyViolation::VelocityCapOverflowOrExceeded),
+        }
     }
 
     fn record_approved_intent(
@@ -1610,7 +1626,7 @@ impl PolicyGuardDkgRound1 {
         for (c, peer) in commits.iter().zip(peers) {
             if c.sender != peer
                 || c.recipient != self.guard.party_id
-                || c.setup_digest != self.digest
+                || !ct_eq_bytes(&c.setup_digest, &self.digest)
             {
                 return Err(PolicyViolation::IntentBindingMismatch);
             }
@@ -1644,7 +1660,7 @@ pub fn finalize_distributed_policy_guard<O: PolicyAuthenticatedOt>(
     for (c, o) in state.peer_commits.iter().zip(&opens) {
         if c.sender != o.sender
             || c.recipient != o.recipient
-            || c.setup_digest != o.setup_digest
+            || !ct_eq_bytes(&c.setup_digest, &o.setup_digest)
             || !ct_eq_bytes(&c.commitment, &policy_seed_commit(o))
         {
             return Err(PolicyViolation::BarrierCommitmentMismatch { party_id: c.sender });

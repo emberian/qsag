@@ -32,9 +32,10 @@ pub use inventory::{
 };
 pub use linear_module::{
     AuthorizedHdProjection, DEFAULT_MAX_DERIVATION_DEPTH, LinearModulePartyShare, LinearModuleXPub,
-    MODULE_K, MODULE_L, MODULE_MAC_LANES, MODULE_N, MODULE_Q, MODULE_SECRET_L, OpeningMask,
-    REKEY_BROADCAST_ROUNDS, REKEY_SACRIFICE_REPS, RekeyRound1, RingPoly, SecretRingPoly,
-    ShareScheme, dealerless_opening_mask, expand_matrix_a, validate_shamir_eval_points,
+    MAX_NON_HARDENED_DERIVATION_DEPTH, MODULE_K, MODULE_L, MODULE_MAC_LANES, MODULE_N, MODULE_Q,
+    MODULE_SECRET_L, OpeningMask, REKEY_BROADCAST_ROUNDS, REKEY_SACRIFICE_REPS, RekeyRound1,
+    RingPoly, SecretRingPoly, ShareScheme, dealerless_opening_mask, expand_matrix_a,
+    max_cbd2_linf_norm_after_depth, validate_shamir_eval_points,
 };
 pub use seeds::{
     CommitteeConfig, CustodianSeeds, MAX_CUSTODIANS, SeedCeremonyRound1, SeedConfirmation,

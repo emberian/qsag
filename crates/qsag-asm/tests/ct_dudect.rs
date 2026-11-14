@@ -513,3 +513,59 @@ fn dudect_constant_time_statistical_gate() {
         );
     }
 }
+
+/// Fixed versus random operands for each exported x86 bitslice kernel, including
+/// both multiplication implementations even when dispatch would prefer VPCLMUL.
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn dudect_bitslice_exported_kernels() {
+    unsafe extern "C" {
+        fn qsag_asm_transpose64x256_avx2(rows: *mut u8);
+        fn qsag_asm_gf2_128_mul_acc_pclmul(acc: *mut u8, a: *const u8, b: *const u8, n: usize);
+        fn qsag_asm_gf2_128_mul_acc_vpclmul(acc: *mut u8, a: *const u8, b: *const u8, pairs: usize);
+    }
+    // Reference the crate so the assembly object is linked even with LTO.
+    black_box(qsag_asm::detect_backend());
+    let samples = configured_samples();
+    let mut stats = Vec::new();
+    if std::is_x86_feature_detected!("avx2") {
+        let mut rows = vec![[[0u64; 4]; 64]; CHUNK];
+        stats.push(measure_dudect("transpose64x256_avx2", samples, &mut rows,
+            |rows, rng, classes| {
+                for (row, class) in rows.iter_mut().zip(classes) {
+                    let mask = 0u64.wrapping_sub(*class as u64);
+                    for word in row.iter_mut().flatten() { *word = rng.next_u64() & mask; }
+                }
+            },
+            |rows, i| {
+                // SAFETY: AVX2 checked above; exactly 64 contiguous 256-bit rows.
+                unsafe { qsag_asm_transpose64x256_avx2(black_box(rows[i].as_mut_ptr().cast())); }
+                black_box(rows[i][0][0])
+            }));
+    }
+    for vector in [false, true] {
+        if !std::is_x86_feature_detected!("pclmulqdq") ||
+            (vector && !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("vpclmulqdq"))) { continue; }
+        let mut operands = vec![([[0u64; 2]; 16], [[0u64; 2]; 16], [0u64; 2]); CHUNK];
+        stats.push(measure_dudect(if vector { "gf2_128_mul_acc_vpclmul" } else { "gf2_128_mul_acc_pclmul" }, samples, &mut operands,
+            |ops, rng, classes| {
+                for ((a, b, acc), class) in ops.iter_mut().zip(classes) {
+                    let mask = 0u64.wrapping_sub(*class as u64);
+                    for word in a.iter_mut().chain(b.iter_mut()).flatten().chain(acc.iter_mut()) { *word = rng.next_u64() & mask; }
+                }
+            },
+            |ops, i| {
+                let (a, b, acc) = &mut ops[i];
+                // SAFETY: CPU features checked; buffers hold sixteen 128-bit operands.
+                unsafe {
+                    if vector { qsag_asm_gf2_128_mul_acc_vpclmul(black_box(acc.as_mut_ptr().cast()), black_box(a.as_ptr().cast()), black_box(b.as_ptr().cast()), 8); }
+                    else { qsag_asm_gf2_128_mul_acc_pclmul(black_box(acc.as_mut_ptr().cast()), black_box(a.as_ptr().cast()), black_box(b.as_ptr().cast()), 16); }
+                }
+                black_box(acc[0])
+            }));
+    }
+    for stat in stats {
+        eprintln!("{}: raw t={:+.3}, cropped max |t|={:.3}", stat.name, stat.t_raw, stat.t_cropped_max);
+        assert!(stat.max_abs_t < 4.5, "{}: max |t|={} >= 4.5", stat.name, stat.max_abs_t);
+    }
+}

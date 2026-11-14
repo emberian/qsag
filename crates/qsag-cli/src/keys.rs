@@ -1,21 +1,23 @@
 //! `keygen`, `sign`, and `verify`.
 
 use qsag_accel::CpuReferenceBackend;
-use qsag_accel::keccak::cshake256_framed_32;
+use qsag_accel::keccak::{cshake256_framed_32, cshake256_framed_xof};
 use qsag_addr::{KeyIdentityKind, QsagAddress};
-use qsag_core::fips205::{SlhPublicKey, SlhSecretKey, slh_keygen_from_seed, slh_sign, slh_verify};
+use qsag_core::fips205::{
+    Fips205Params, SlhPublicKey, SlhSecretKey, slh_keygen_from_seed, slh_sign, slh_verify,
+};
 use qsag_fts::{
-    FrontierDpTable, FrontierFtsError, FrontierFtsPublicKey, FrontierFtsSignature,
-    FrontierFtsSigningKey, FsWalFtsEpochLatch, ParallelSeededError, ParallelSeededPublicKey,
-    ParallelSeededSignature, ParallelSeededThresholdSetup, verify_frontier_fts,
-    verify_parallel_seeded_fts,
+    FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
+    FrontierFtsSignature, FrontierFtsSigningKey, FsWalFtsEpochLatch, ParallelSeededError,
+    ParallelSeededPublicKey, ParallelSeededSignature, ParallelSeededThresholdSetup,
+    verify_frontier_fts, verify_parallel_seeded_fts,
 };
 
 use crate::cli::{
     Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, ZeroizingBuf, os_random_32,
     read_bounded_file, read_input, write_new,
 };
-use crate::codec::{Json, from_hex_exact};
+use crate::codec::{Json, from_hex_exact, from_hex_secret32};
 use crate::schemes::{Scheme, THRESHOLD_FTS_PARAMS};
 
 pub const SECRET_FORMAT: &str = "qsag-secret-key-v1";
@@ -97,6 +99,9 @@ qsag keygen --scheme <name> --secret-out <path> --public-out <path> [options]
 Generate a key pair. Output files are created new unless --force-overwrite is supplied.
 The secret file is created with owner-only permissions.
 
+  --passphrase-env <VAR> / --passphrase-file <PATH>  seal secret material (file bytes used verbatim)
+                        omission preserves legacy unencrypted key files for existing scripts
+  --accept-trusted-dealer-demo  acknowledge local single-seed threshold demo custody
   --scheme <name>       one of the schemes listed by `qsag info`
   --seed-file <path>    file holding 32 bytes of hex to derive the key from (default: OS entropy)
   --deterministic-test-only  allow reproducible stateful seed enrollment (UNSAFE for custody)
@@ -122,8 +127,10 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             "parties",
             "validators",
             "wal-dir",
+            "passphrase-env",
+            "passphrase-file",
         ],
-        &["json", "help", "deterministic-test-only", "force-overwrite", "fast-demo"],
+        &["json", "help", "deterministic-test-only", "force-overwrite", "fast-demo", "accept-trusted-dealer-demo"],
     )?;
     if args.flag("help") {
         print!("{KEYGEN_HELP}");
@@ -131,6 +138,11 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     }
     args.no_positionals()?;
     let scheme = Scheme::by_name(args.require("scheme")?)?;
+    require_dealer_acceptance(scheme, &args)?;
+    let passphrase = crate::envelope::passphrase(&args)?;
+    if matches!(scheme, Scheme::AggCommittee) && passphrase.is_some() {
+        return Err(CliError::usage("committee envelope support is unavailable"));
+    }
     let secret_out = args.require("secret-out")?;
     let public_out = args.require("public-out")?;
     let force = args.flag("force-overwrite");
@@ -144,6 +156,8 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     let mut vault = crate::vault::Vault::acquire(secret_out, !(force && existing))?;
     if force && existing {
         let old = load_json(secret_out, SECRET_FORMAT)?;
+        let opened = crate::envelope::open(&old, passphrase.as_deref())?;
+        vault.set_key_material(&opened)?;
         vault.authenticate(&old)?;
         if !matches!(scheme_of(&old)?, Scheme::Slh(_)) {
             return Err(CliError::state("stateful vault overwrite refused"));
@@ -270,13 +284,17 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     }
     let public = Json::object(public);
     let mut secret = Json::object(secret);
+    vault.set_key_material(&secret)?;
+    if let Some(pass) = &passphrase { crate::envelope::seal(&mut secret, pass)?; }
     vault.bind(&mut secret)?;
-    vault.seal(&mut secret)?;
+    vault.prepare(&mut secret)?;
     let encoded = ZeroizingBuf(secret.to_pretty().into_bytes());
     if force && existing {
-        crate::cli::replace_secret(secret_out, &encoded.0)?;
         crate::cli::replace_secret(public_out, public.to_pretty().as_bytes())?;
+        vault.seal(&mut secret)?;
+        crate::cli::replace_secret(secret_out, &encoded.0)?;
     } else {
+        vault.seal(&mut secret)?;
         write_new(secret_out, &encoded.0, true)?;
         write_new(public_out, public.to_pretty().as_bytes(), false)?;
     }
@@ -297,14 +315,75 @@ Stateful schemes persist their advanced state before the signature is written.
   --ctx-hex <hex>     SLH-DSA context string, at most 255 bytes (default: empty)
   --epoch <n>         fts-threshold: the one-time epoch to spend (required for that scheme)
   --deterministic     use no fresh randomness: the same inputs give the same signature
+  --passphrase-env <VAR> / --passphrase-file <PATH>  unlock sealed secret material
+  --accept-trusted-dealer-demo  acknowledge local single-seed threshold demo custody
   --json              print the signature file contents to standard output as well
 ";
 
+fn verify_slh_before_release(
+    params: &Fips205Params,
+    sk: &SlhSecretKey,
+    message: &[u8],
+    ctx: &[u8],
+    candidate: &[u8],
+    reference: &[u8],
+) -> Result<(), CliError> {
+    if !qsag_accel::ct::ct_eq_bytes(candidate, reference)
+        || !slh_verify(params, message, candidate, ctx, &sk.public_key())
+    {
+        return Err(CliError::verify(
+            "verify-before-release aborted faulted SLH-DSA signature",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_frontier_bytes_before_release(
+    pk: &FrontierFtsPublicKey,
+    dp: &FrontierDpTable,
+    profile: FrontierFtsProfile,
+    message: &[u8],
+    bytes: &[u8],
+) -> Result<(), CliError> {
+    let parsed = FrontierFtsSignature::from_bytes(profile, bytes).map_err(|_| {
+        CliError::verify("verify-before-release aborted malformed Frontier signature")
+    })?;
+    if verify_frontier_fts(pk, dp, message, &parsed).is_err() {
+        return Err(CliError::verify(
+            "verify-before-release aborted faulted Frontier signature",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_threshold_fts_bytes_before_release(
+    pk: &ParallelSeededPublicKey,
+    expected_epoch: u32,
+    message: &[u8],
+    bytes: &[u8],
+) -> Result<(), CliError> {
+    let parsed = ParallelSeededSignature::from_bytes_canonical(&pk.params, bytes).map_err(|_| {
+        CliError::verify("verify-before-release aborted malformed threshold signature")
+    })?;
+    if parsed.epoch != expected_epoch
+        || verify_parallel_seeded_fts(pk, message, &parsed, &CpuReferenceBackend).is_err()
+    {
+        return Err(CliError::verify(
+            "verify-before-release aborted faulted threshold signature",
+        ));
+    }
+    Ok(())
+}
+
 pub fn sign(raw: &[String]) -> Result<(), CliError> {
+    sign_inner(raw, None)
+}
+
+fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), CliError> {
     let args = Args::parse(
         raw,
-        &["secret", "in", "out", "ctx-hex", "epoch"],
-        &["deterministic", "json", "help"],
+        &["secret", "in", "out", "ctx-hex", "epoch", "passphrase-env", "passphrase-file"],
+        &["deterministic", "json", "help", "accept-trusted-dealer-demo"],
     )?;
     if args.flag("help") {
         print!("{SIGN_HELP}");
@@ -316,8 +395,12 @@ pub fn sign(raw: &[String]) -> Result<(), CliError> {
     let message = read_input(args.require("in")?)?;
     let mut vault = crate::vault::Vault::acquire(secret_path, false)?;
     let mut secret = load_json(secret_path, SECRET_FORMAT)?;
-    vault.authenticate(&secret)?;
     let scheme = scheme_of(&secret)?;
+    require_dealer_acceptance(scheme, &args)?;
+    let passphrase = crate::envelope::passphrase(&args)?;
+    let opened = crate::envelope::open(&secret, passphrase.as_deref())?;
+    vault.set_key_material(&opened)?;
+    vault.authenticate(&secret)?;
     let ctx = crate::codec::from_hex(args.get("ctx-hex").unwrap_or(""))?;
     if !matches!(scheme, Scheme::Slh(_)) && !ctx.is_empty() {
         return Err(CliError::usage("--ctx-hex applies only to SLH-DSA schemes"));
@@ -325,26 +408,45 @@ pub fn sign(raw: &[String]) -> Result<(), CliError> {
     let fresh = if args.flag("deterministic") {
         None
     } else {
-        Some(os_random_32()?)
+        Some(Secret32(os_random_32()?))
     };
     let mut extra: Vec<(&str, Json)> = Vec::new();
 
     let signature: Vec<u8> = match scheme {
         Scheme::Slh(params) => {
-            let raw_key = ZeroizingBuf(secret.field_hex("secret_key")?);
+            let raw_key = opened.field_hex("secret_key")?;
             let sk = SlhSecretKey::from_bytes_for_params(&params, &raw_key.0)
                 .map_err(|e| CliError::input(format!("secret key: {e}")))?;
-            slh_sign(
-                &params,
-                &message,
-                &ctx,
-                &sk,
-                fresh.as_ref().map(|r| &r[..params.n]),
-            )
-            .map_err(|e| CliError::usage(format!("signing failed: {e}")))?
+            let hedged = fresh.as_ref().map(|entropy| {
+                let mut out = Secret32([0u8; 32]);
+                cshake256_framed_xof(
+                    b"QSAG.CLI.SLH.HEDGE.V1",
+                    &[
+                        &entropy.0,
+                        sk.sk_prf_slice(),
+                        sk.pk_seed_slice(),
+                        &ctx,
+                        &message,
+                    ],
+                    &mut out.0,
+                );
+                out
+            });
+            let opt_rand = hedged.as_ref().map(|h| &h.0[..params.n]);
+            let mut candidate = slh_sign(&params, &message, &ctx, &sk, opt_rand)
+                .map_err(|e| CliError::usage(format!("signing failed: {e}")))?;
+            if let Some((idx, mask)) = fault_byte
+                && let Some(slot) = candidate.get_mut(idx)
+            {
+                *slot ^= mask;
+            }
+            let reference = slh_sign(&params, &message, &ctx, &sk, opt_rand)
+                .map_err(|e| CliError::usage(format!("signing failed: {e}")))?;
+            verify_slh_before_release(&params, &sk, &message, &ctx, &candidate, &reference)?;
+            candidate
         }
         Scheme::Frontier(profile) => {
-            let seed = Secret32(from_hex_exact(secret.field_str("seed")?, "seed")?);
+            let seed = from_hex_secret32(opened.field_str("seed")?, "seed")?;
             let used = u8::try_from(secret.field_u64("uses_completed")?)
                 .map_err(|_| CliError::input("uses_completed out of range"))?;
             let exhausted =
@@ -357,18 +459,35 @@ pub fn sign(raw: &[String]) -> Result<(), CliError> {
             }
             // Persist the advanced counter before any signature material exists.
             vault.reserve(secret_path, &mut secret)?;
-            let wal = FsWalFtsEpochLatch::open(burn_journal_path(secret_path), key.wal_key(), derive(&seed, b"burn journal mac"))
-                .map_err(|e| CliError::io("recovering frontier use journal", e))?;
+            let wal = FsWalFtsEpochLatch::open(
+                burn_journal_path(secret_path),
+                key.wal_key(),
+                derive(&seed, b"burn journal mac"),
+            )
+            .map_err(|e| CliError::io("recovering frontier use journal", e))?;
             key = key.attach_wal(Box::new(wal)).map_err(exhausted)?;
+            let mut hedged = Secret32([0u8; 32]);
+            if let Some(entropy) = &fresh {
+                cshake256_framed_xof(
+                    b"QSAG.CLI.FRONTIER.HEDGE.V1",
+                    &[&entropy.0, &seed.0, &[used], &message],
+                    &mut hedged.0,
+                );
+            }
             let dp = FrontierDpTable::build(profile);
-            let sig = key
-                .sign(&dp, &message, &fresh.unwrap_or([0u8; 32]))
-                .map_err(exhausted)?;
+            let sig = key.sign(&dp, &message, &hedged.0).map_err(exhausted)?;
             extra.push(("uses_remaining", Json::num(key.uses_remaining())));
-            sig.to_bytes(profile)
+            let mut bytes = sig.to_bytes(profile);
+            if let Some((idx, mask)) = fault_byte
+                && let Some(slot) = bytes.get_mut(idx)
+            {
+                *slot ^= mask;
+            }
+            verify_frontier_bytes_before_release(&key.pk, &dp, profile, &message, &bytes)?;
+            bytes
         }
         Scheme::ThresholdFts => {
-            let seed = Secret32(from_hex_exact(secret.field_str("seed")?, "seed")?);
+            let seed = from_hex_secret32(opened.field_str("seed")?, "seed")?;
             let epoch = args
                 .get_u64("epoch")?
                 .ok_or_else(|| CliError::usage("fts-threshold requires --epoch"))?;
@@ -387,17 +506,25 @@ pub fn sign(raw: &[String]) -> Result<(), CliError> {
             )
             .map_err(|e| CliError::state(format!("epoch burn journal unavailable: {e}")))?;
             vault.reserve(secret_path, &mut secret)?;
-            let session = fresh.unwrap_or_else(|| {
-                cshake256_framed_32(
-                    b"QSAG.CLI.SESSION.V1",
-                    &[&seed[..], &epoch.to_be_bytes(), &message],
-                )
-            });
+            let mut session = Secret32([0u8; 32]);
+            match &fresh {
+                Some(entropy) => cshake256_framed_xof(
+                    b"QSAG.CLI.SESSION.HEDGE.V1",
+                    &[&entropy.0, &seed.0, &epoch.to_be_bytes(), &message],
+                    &mut session.0,
+                ),
+                None => {
+                    session.0 = cshake256_framed_32(
+                        b"QSAG.CLI.SESSION.V1",
+                        &[&seed.0, &epoch.to_be_bytes(), &message],
+                    );
+                }
+            }
             let sig = setup
                 .threshold_sign(
                     epoch as u32,
                     &message,
-                    session,
+                    session.0,
                     &mut journal,
                     &CpuReferenceBackend,
                 )
@@ -409,7 +536,14 @@ pub fn sign(raw: &[String]) -> Result<(), CliError> {
                     other => CliError::usage(format!("threshold signing failed: {other:?}")),
                 })?;
             extra.push(("epoch", Json::num(epoch)));
-            sig.to_bytes()
+            let mut bytes = sig.to_bytes();
+            if let Some((idx, mask)) = fault_byte
+                && let Some(slot) = bytes.get_mut(idx)
+            {
+                *slot ^= mask;
+            }
+            verify_threshold_fts_bytes_before_release(&setup.pk, epoch as u32, &message, &bytes)?;
+            bytes
         }
         Scheme::AggCommittee => {
             return Err(CliError::usage(
@@ -547,7 +681,7 @@ pub fn verify(raw: &[String]) -> Result<(), CliError> {
 /// Public key bytes and scheme of a public key file, for the address subcommand.
 pub fn public_key_of(path: &str) -> Result<(Scheme, Vec<u8>), CliError> {
     let public = load_json(path, PUBLIC_FORMAT)?;
-    Ok((scheme_of(&public)?, public.field_hex("public_key")?))
+    Ok((scheme_of(&public)?, public.field_hex("public_key")?.to_vec()))
 }
 
 #[cfg(test)]
@@ -645,6 +779,200 @@ mod vault_tests {
         });
         outcomes.sort();
         assert_eq!(outcomes, [0, 4, 4, 4]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+fn require_dealer_acceptance(scheme: Scheme, args: &Args) -> Result<(), CliError> {
+    if matches!(scheme, Scheme::ThresholdFts) && !args.flag("accept-trusted-dealer-demo") {
+        return Err(CliError::usage("fts-threshold requires --accept-trusted-dealer-demo: one local seed holds all shares; this is not distributed DKG custody"));
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod custody_tests {
+    use super::*;
+    #[test]
+    fn sealed_frontier_roundtrip_preserves_ciphertext_on_reservation() {
+        let dir = std::env::temp_dir().join(format!("qsag-sealed-{}", crate::codec::to_hex(&os_random_32().unwrap())));
+        std::fs::create_dir(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+        std::fs::write(path("pass"), b"a test passphrase").unwrap();
+        std::fs::write(path("msg"), b"sealed custody").unwrap();
+        keygen(&["--scheme".into(), "fts-frontier-514".into(), "--secret-out".into(), path("sk"), "--public-out".into(), path("pk"), "--passphrase-file".into(), path("pass")]).unwrap();
+        let before = load_json(&path("sk"), SECRET_FORMAT).unwrap();
+        let command = ["--secret".into(), path("sk"), "--in".into(), path("msg"), "--out".into(), path("sig"), "--passphrase-file".into(), path("pass")];
+        std::fs::write(path("pass"), b"wrong passphrase").unwrap();
+        assert!(sign(&command).is_err());
+        assert_eq!(load_json(&path("sk"), SECRET_FORMAT).unwrap().field_u64("uses_completed").unwrap(), 0);
+        std::fs::write(path("pass"), b"a test passphrase").unwrap();
+        sign(&command).unwrap();
+        let after = load_json(&path("sk"), SECRET_FORMAT).unwrap();
+        assert_eq!(before.field_str("seed").unwrap(), after.field_str("seed").unwrap());
+        assert_eq!(after.field_u64("uses_completed").unwrap(), 1);
+        verify(&["--public".into(), path("pk"), "--in".into(), path("msg"), "--sig".into(), path("sig")]).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn public_replace_failure_preserves_old_secret_and_vault() {
+        let dir = std::env::temp_dir().join(format!("qsag-overwrite-{}", crate::codec::to_hex(&os_random_32().unwrap())));
+        std::fs::create_dir(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+        let mut args = vec!["--scheme".into(), "slh-dsa-shake-128s".into(), "--secret-out".into(), path("sk"), "--public-out".into(), path("pk")];
+        keygen(&args).unwrap();
+        let original = std::fs::read(path("sk")).unwrap();
+        std::fs::remove_file(path("pk")).unwrap();
+        std::fs::create_dir(path("pk")).unwrap();
+        args.push("--force-overwrite".into());
+        assert!(keygen(&args).is_err());
+        assert_eq!(original, std::fs::read(path("sk")).unwrap());
+        let mut vault = crate::vault::Vault::acquire(&path("sk"), false).unwrap();
+        vault.authenticate(&load_json(&path("sk"), SECRET_FORMAT).unwrap()).unwrap();
+        drop(vault);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn accepted_threshold_demo_signs_and_rejects_epoch_reuse() {
+        let dir = std::env::temp_dir().join(format!("qsag-threshold-demo-{}", crate::codec::to_hex(&os_random_32().unwrap())));
+        std::fs::create_dir(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+        std::fs::write(path("msg"), b"explicit demo").unwrap();
+        keygen(&["--scheme".into(), "fts-threshold".into(), "--accept-trusted-dealer-demo".into(), "--fast-demo".into(), "--secret-out".into(), path("sk"), "--public-out".into(), path("pk")]).unwrap();
+        let mut args = vec!["--secret".into(), path("sk"), "--in".into(), path("msg"), "--out".into(), path("sig"), "--epoch".into(), "5".into()];
+        assert!(sign(&args).is_err());
+        args.push("--accept-trusted-dealer-demo".into());
+        sign(&args).unwrap();
+        verify(&["--public".into(), path("pk"), "--in".into(), path("msg"), "--sig".into(), path("sig")]).unwrap();
+        assert_eq!(sign(&args).unwrap_err().code, 4);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn threshold_requires_explicit_acceptance() {
+        let args = Args::parse(&[], &[], &["accept-trusted-dealer-demo"]).unwrap();
+        assert!(require_dealer_acceptance(Scheme::ThresholdFts, &args).is_err());
+        let args = Args::parse(&["--accept-trusted-dealer-demo".into()], &[], &["accept-trusted-dealer-demo"]).unwrap();
+        assert!(require_dealer_acceptance(Scheme::ThresholdFts, &args).is_ok());
+    }
+
+    #[test]
+    fn verify_before_release_blocks_bitflips_and_consistent_grafts_across_all_schemes() {
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-vbr-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+        std::fs::write(path("msg"), b"castelnovi-martinelli-prest guard").unwrap();
+
+        // 1. SLH-DSA: blocks both signature bit-flips and self-consistent randomizer/subtree grafts.
+        keygen(&[
+            "--scheme".into(),
+            "slh-dsa-shake-128f".into(),
+            "--secret-out".into(),
+            path("slh.sk"),
+            "--public-out".into(),
+            path("slh.pk"),
+        ])
+        .unwrap();
+        let slh_err = sign_inner(
+            &[
+                "--secret".into(),
+                path("slh.sk"),
+                "--in".into(),
+                path("msg"),
+                "--out".into(),
+                path("slh.sig"),
+            ],
+            Some((64, 0x01)),
+        )
+        .unwrap_err();
+        assert_eq!(slh_err.code, 2);
+        assert!(!dir.join("slh.sig").exists());
+
+        let slh_secret = load_json(&path("slh.sk"), SECRET_FORMAT).unwrap();
+        let params = match Scheme::by_name("slh-dsa-shake-128f").unwrap() {
+            Scheme::Slh(p) => p,
+            _ => unreachable!(),
+        };
+        let sk = SlhSecretKey::from_bytes_for_params(
+            &params,
+            &slh_secret.field_hex("secret_key").unwrap().0,
+        )
+        .unwrap();
+        let ref_sig = slh_sign(&params, b"msg", b"", &sk, Some(&[0x11; 16])).unwrap();
+        let grafted_valid_sig = slh_sign(&params, b"msg", b"", &sk, Some(&[0x22; 16])).unwrap();
+        assert!(slh_verify(
+            &params,
+            b"msg",
+            &grafted_valid_sig,
+            b"",
+            &sk.public_key()
+        ));
+        assert!(
+            verify_slh_before_release(&params, &sk, b"msg", b"", &grafted_valid_sig, &ref_sig)
+                .is_err()
+        );
+
+        // 2. Frontier FTS: faulted signature never touches disk, while the use slot stays burned.
+        keygen(&[
+            "--scheme".into(),
+            "fts-frontier-514".into(),
+            "--secret-out".into(),
+            path("fr.sk"),
+            "--public-out".into(),
+            path("fr.pk"),
+        ])
+        .unwrap();
+        let fr_err = sign_inner(
+            &[
+                "--secret".into(),
+                path("fr.sk"),
+                "--in".into(),
+                path("msg"),
+                "--out".into(),
+                path("fr.sig"),
+            ],
+            Some((24, 0x04)),
+        )
+        .unwrap_err();
+        assert_eq!(fr_err.code, 2);
+        assert!(!dir.join("fr.sig").exists());
+        assert_eq!(
+            load_json(&path("fr.sk"), SECRET_FORMAT)
+                .unwrap()
+                .field_u64("uses_completed")
+                .unwrap(),
+            1
+        );
+
+        // 3. Threshold FTS: faulted signature never touches disk, while the epoch stays burned.
+        keygen(&[
+            "--scheme".into(),
+            "fts-threshold".into(),
+            "--accept-trusted-dealer-demo".into(),
+            "--fast-demo".into(),
+            "--secret-out".into(),
+            path("th.sk"),
+            "--public-out".into(),
+            path("th.pk"),
+        ])
+        .unwrap();
+        let th_args = [
+            "--secret".into(),
+            path("th.sk"),
+            "--in".into(),
+            path("msg"),
+            "--out".into(),
+            path("th.sig"),
+            "--epoch".into(),
+            "2".into(),
+            "--accept-trusted-dealer-demo".into(),
+        ];
+        let th_err = sign_inner(&th_args, Some((40, 0x80))).unwrap_err();
+        assert_eq!(th_err.code, 2);
+        assert!(!dir.join("th.sig").exists());
+        assert_eq!(sign(&th_args).unwrap_err().code, 4);
+
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -158,6 +158,10 @@ pub trait Transport {
 /// Atomic durable reservation: reject counter <= the stored high-water mark,
 /// and enforce the enrolled quota (charged by `items`). Never roll back on abort.
 pub trait CounterStore {
+    /// Read the durable watermark for this enrolled key and party. Each store
+    /// instance must be bound to that same custody identity used by `reserve`.
+    /// Read failures must fail closed, never be treated as an empty store.
+    fn high_water(&self) -> Result<Option<u64>, Error>;
     fn reserve(
         &mut self,
         key: &[u8; 32],
@@ -557,7 +561,7 @@ impl Server {
         transport: &mut T,
     ) -> Result<Output, Error> {
         if request.party != self.party
-            || request.context.key != self.key.commitment
+            || !qsag_accel::ct::ct_eq_bytes(&request.context.key, &self.key.commitment)
             || request.context.items != request.inputs.len()
             || request.inputs.is_empty()
             || request.inputs.len() > MAX_BATCH
@@ -570,14 +574,14 @@ impl Server {
         if request.context.counter == u64::MAX {
             return Err(Error::Counter);
         }
+        // Recover before applying the window, including the first request after
+        // custody reload. Retain local burns even if a faulty store regresses.
+        self.last_counter = self.last_counter.max(store.high_water()?);
         match self.last_counter {
-            Some(last) => {
-                if request.context.counter <= last
-                    || request.context.counter - last > MAX_COUNTER_WINDOW
-                {
-                    return Err(Error::Counter);
-                }
-            }
+            Some(last) => match request.context.counter.checked_sub(last) {
+                Some(delta) if (1..=MAX_COUNTER_WINDOW).contains(&delta) => {}
+                _ => return Err(Error::Counter),
+            },
             None => {
                 if request.context.counter >= MAX_COUNTER_WINDOW {
                     return Err(Error::Counter);
@@ -622,7 +626,10 @@ impl Server {
             }
             verified_commitments.extend_from_slice(expected.ok_or(Error::InconsistentShares)?);
         }
-        if hash(b"QSAG.TOPRF.REQUEST.V1", &[&verified_commitments]) != request.context.request {
+        if !qsag_accel::ct::ct_eq_bytes(
+            &hash(b"QSAG.TOPRF.REQUEST.V1", &[&verified_commitments]),
+            &request.context.request,
+        ) {
             return Err(Error::Context);
         }
         let mut states = Zeroizing(vec![[[0; 5]; 12]; request.inputs.len()]);
@@ -657,23 +664,156 @@ pub struct Evaluation {
     pub faulty_servers: Vec<usize>,
     key: [u8; 32],
     input_digests: Vec<[u8; 32]>,
+    context: Context,
+    receipt_tags: Vec<[u8; 32]>,
+}
+/// Issuer-only receipt authentication secret, provisioned independently of the
+/// public TOPRF key. Share only with the issuer's authenticated channel adapter.
+/// The adapter must authenticate server identities before finalizing outputs.
+pub struct IssuanceReceiptKey([u8; 32]);
+impl IssuanceReceiptKey {
+    /// Import 32 bytes from the issuer's cryptographic key generator or vault.
+    pub fn new(secret: [u8; 32]) -> Self {
+        Self(secret)
+    }
+    fn tag(
+        &self,
+        key_commitment: &[u8; 32],
+        context: &Context,
+        input: &[u8; 32],
+        output: &[u8; 32],
+    ) -> [u8; 32] {
+        hash(
+            b"QSAG.TOPRF.ISSUANCE.RECEIPT.V2",
+            &[
+                &self.0,
+                key_commitment,
+                &context.digest(),
+                &context.key,
+                &context.session,
+                &context.counter.to_be_bytes(),
+                &(context.items as u64).to_be_bytes(),
+                &context.request,
+                input,
+                output,
+            ],
+        )
+    }
+}
+impl Drop for IssuanceReceiptKey {
+    fn drop(&mut self) {
+        ct_zeroize_bytes(&mut self.0);
+    }
 }
 impl Evaluation {
+    pub fn context(&self) -> &Context {
+        &self.context
+    }
+
+    /// Authenticate the context, canonical input binding and output before use
+    /// as an issuance capability. Plain client finalization is insufficient.
+    pub fn authenticated_value_for(
+        &self,
+        key: &PublicKey,
+        input: &[u8],
+        receipt_key: &IssuanceReceiptKey,
+    ) -> Option<[u8; 32]> {
+        if !qsag_accel::ct::ct_eq_bytes(&self.key, &key.commitment)
+            || !qsag_accel::ct_eq_bytes(&self.context.key, &key.commitment)
+            || self.values.len() != self.input_digests.len()
+            || self.receipt_tags.len() != self.input_digests.len()
+        {
+            return None;
+        }
+        let digest = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]);
+        let mut found = 0u64;
+        let mut matched_output = [0u8; 32];
+        let mut matched_tag = [0u8; 32];
+        for ((cand_digest, cand_out), cand_tag) in self
+            .input_digests
+            .iter()
+            .zip(&self.values)
+            .zip(&self.receipt_tags)
+        {
+            let hit = u64::from(qsag_accel::ct::ct_eq_bytes(cand_digest, &digest))
+                .wrapping_neg();
+            let _ = qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_output, cand_out);
+            let _ = qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_tag, cand_tag);
+            found |= hit;
+        }
+        if found == 0 {
+            return None;
+        }
+        let expected = receipt_key.tag(&key.commitment, &self.context, &digest, &matched_output);
+        if qsag_accel::ct::ct_eq_bytes(&matched_tag, &expected) {
+            Some(matched_output)
+        } else {
+            ct_zeroize_bytes(&mut matched_output);
+            None
+        }
+    }
+
+    /// Authenticate an evaluation capability while additionally pinning the exact
+    /// TOPRF [`Context`] (session, counter, item count, and request commitment).
+    pub fn authenticated_value_for_context(
+        &self,
+        key: &PublicKey,
+        expected_context: &Context,
+        input: &[u8],
+        receipt_key: &IssuanceReceiptKey,
+    ) -> Option<[u8; 32]> {
+        if !qsag_accel::ct::ct_eq_bytes(&self.context.digest(), &expected_context.digest())
+            || !qsag_accel::ct::ct_eq_bytes(&self.context.session, &expected_context.session)
+            || !qsag_accel::ct::ct_eq_bytes(&self.context.key, &expected_context.key)
+            || self.context.counter != expected_context.counter
+            || self.context.items != expected_context.items
+            || !qsag_accel::ct::ct_eq_bytes(&self.context.request, &expected_context.request)
+        {
+            return None;
+        }
+        self.authenticated_value_for(key, input, receipt_key)
+    }
+
     pub fn values(&self) -> &[[u8; 32]] {
         &self.values
     }
     pub fn value_for(&self, key: &PublicKey, input: &[u8]) -> Option<[u8; 32]> {
-        if self.key != key.commitment {
+        if !qsag_accel::ct::ct_eq_bytes(&self.key, &key.commitment)
+            || self.values.len() != self.input_digests.len()
+        {
             return None;
         }
         let digest = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[input]);
-        self.input_digests
-            .iter()
-            .position(|d| *d == digest)
-            .map(|i| self.values[i])
+        let mut found = 0u64;
+        let mut matched_output = [0u8; 32];
+        for (cand_digest, cand_out) in self.input_digests.iter().zip(&self.values) {
+            let hit = u64::from(qsag_accel::ct::ct_eq_bytes(cand_digest, &digest))
+                .wrapping_neg();
+            let _ = qsag_accel::ct::ct_conditional_assign_bytes(hit, &mut matched_output, cand_out);
+            found |= hit;
+        }
+        (found != 0).then_some(matched_output)
     }
 }
 impl Client {
+    /// Issuer channel adapter entry point. Never expose the receipt key to a
+    /// holder or sign outputs received without authenticated server identities.
+    pub fn finalize_for_issuance(
+        self,
+        outputs: [Option<Output>; 5],
+        receipt_key: &IssuanceReceiptKey,
+    ) -> Result<Evaluation, Error> {
+        let mut evaluation = self.finalize(outputs)?;
+        evaluation.receipt_tags = evaluation
+            .input_digests
+            .iter()
+            .zip(&evaluation.values)
+            .map(|(input, output)| {
+                receipt_key.tag(&evaluation.key, &evaluation.context, input, output)
+            })
+            .collect();
+        Ok(evaluation)
+    }
     /// Array indices MUST come from authenticated channel identities. Up to one
     /// bad/missing output is corrected; evidence names a channel, not a public
     /// signature that can be used as a transferable slashing receipt.
@@ -723,6 +863,8 @@ impl Client {
             faulty_servers: faulty,
             key: self.context.key,
             input_digests: self.input_digests,
+            context: self.context,
+            receipt_tags: Vec::new(),
         })
     }
 }
@@ -881,10 +1023,258 @@ mod tests {
     }
     struct Store;
     impl CounterStore for Store {
+        fn high_water(&self) -> Result<Option<u64>, Error> {
+            Ok(None)
+        }
         fn reserve(&mut self, _: &[u8; 32], _: usize, _: u64, _: usize) -> Result<(), Error> {
             Ok(())
         }
     }
+    #[test]
+    fn fabricated_evaluation_cannot_authorize_issuance() {
+        use crate::blind_vc::*;
+        let key = PublicKey::test_key();
+        let (req, _) =
+            holder_prepare_blind_issuance(42, &[1], key.commitment(), 7, [4; 32], [5; 32]).unwrap();
+        let receipt_key = IssuanceReceiptKey::new([99; 32]);
+        let mut accumulator = IssuerCredentialAccumulator::new(key.clone(), 7);
+        let root = accumulator.root();
+        let mut forged = Evaluation {
+            values: vec![[8; 32]],
+            faulty_servers: Vec::new(),
+            key: key.commitment(),
+            input_digests: vec![hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[&issuance_input(&req)])],
+            context: Context::new(key.commitment(), [7; 32], 0, 1, [6; 32]),
+            receipt_tags: Vec::new(),
+        };
+        for tags in [
+            Vec::new(),
+            vec![[0; 32]],
+            vec![IssuanceReceiptKey::new([1; 32]).tag(
+                &forged.key,
+                &forged.context,
+                &forged.input_digests[0],
+                &forged.values[0],
+            )],
+        ] {
+            forged.receipt_tags = tags;
+            assert_eq!(
+                threshold_issue_blind_vc(&mut accumulator, &req, &[1], &forged, &receipt_key, 42)
+                    .unwrap_err(),
+                BlindVcError::InvalidOprfEvaluation
+            );
+            assert_eq!(accumulator.root(), root);
+        }
+        forged.receipt_tags = vec![receipt_key.tag(
+            &forged.key,
+            &forged.context,
+            &forged.input_digests[0],
+            &forged.values[0],
+        )];
+        assert!(
+            forged
+                .authenticated_value_for(&key, &issuance_input(&req), &receipt_key)
+                .is_some()
+        );
+        for field in 0..3 {
+            let original = [
+                forged.context.session,
+                forged.input_digests[0],
+                forged.values[0],
+            ];
+            match field {
+                0 => forged.context.session[0] ^= 1,
+                1 => forged.input_digests[0][0] ^= 1,
+                _ => forged.values[0][0] ^= 1,
+            }
+            assert_eq!(
+                threshold_issue_blind_vc(&mut accumulator, &req, &[1], &forged, &receipt_key, 42)
+                    .unwrap_err(),
+                BlindVcError::InvalidOprfEvaluation
+            );
+            forged.context.session = original[0];
+            forged.input_digests[0] = original[1];
+            forged.values[0] = original[2];
+        }
+        assert_eq!(accumulator.root(), root);
+        assert!(
+            threshold_issue_blind_vc(&mut accumulator, &req, &[1], &forged, &receipt_key, 42)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn receipt_authentication_blocks_cross_pk_cross_context_and_duplicate_replay() {
+        use crate::blind_vc::*;
+        let pk1 = PublicKey::test_key();
+        let pk2 = PublicKey {
+            commitment: hash(b"QSAG.TOPRF.KEY.V1", &[b"issuer-2"]),
+        };
+        let receipt_key = IssuanceReceiptKey::new([0x5A; 32]);
+        let (req_a, _) =
+            holder_prepare_blind_issuance(42, &[10], pk1.commitment(), 7, [0x11; 32], [0x22; 32])
+                .unwrap();
+        let (req_b_diff_session, _) =
+            holder_prepare_blind_issuance(42, &[10], pk1.commitment(), 7, [0x11; 32], [0x33; 32])
+                .unwrap();
+        let (req_pk2, _) =
+            holder_prepare_blind_issuance(42, &[10], pk2.commitment(), 7, [0x11; 32], [0x22; 32])
+                .unwrap();
+
+        let ctx_a = Context::new(pk1.commitment(), [0x44; 32], 1, 1, [0x55; 32]);
+        let ctx_b = Context::new(pk1.commitment(), [0x66; 32], 1, 1, [0x55; 32]);
+        let digest_a = hash(b"QSAG.TOPRF.INPUT.BIND.V1", &[&issuance_input(&req_a)]);
+        let val_a = [0x77; 32];
+        let eval_a = Evaluation {
+            values: vec![val_a],
+            faulty_servers: Vec::new(),
+            key: pk1.commitment(),
+            input_digests: vec![digest_a],
+            context: ctx_a.clone(),
+            receipt_tags: vec![receipt_key.tag(&pk1.commitment(), &ctx_a, &digest_a, &val_a)],
+        };
+
+        // 1. Cross-context replay rejected when caller pins expected TOPRF context.
+        assert_eq!(
+            eval_a.authenticated_value_for_context(
+                &pk1,
+                &ctx_a,
+                &issuance_input(&req_a),
+                &receipt_key,
+            ),
+            Some(val_a)
+        );
+        assert_eq!(
+            eval_a.authenticated_value_for_context(
+                &pk1,
+                &ctx_b,
+                &issuance_input(&req_a),
+                &receipt_key,
+            ),
+            None
+        );
+
+        // 2. Cross-session replay (`req_b_diff_session` with same attribute commit & PK) rejected.
+        let mut acc1 = IssuerCredentialAccumulator::new(pk1.clone(), 7);
+        assert_eq!(
+            threshold_issue_blind_vc(
+                &mut acc1,
+                &req_b_diff_session,
+                &[10],
+                &eval_a,
+                &receipt_key,
+                42,
+            )
+            .unwrap_err(),
+            BlindVcError::InvalidOprfEvaluation
+        );
+
+        // 3. Cross-PK replay (`pk1` evaluation transplanted to `pk2` accumulator/request) rejected
+        // even if an attacker rewrites the unverified outer `eval.key` and `eval.context.key`!
+        let mut acc2 = IssuerCredentialAccumulator::new(pk2.clone(), 7);
+        let mut transplanted = eval_a.clone();
+        transplanted.key = pk2.commitment();
+        transplanted.context.key = pk2.commitment();
+        assert_eq!(
+            transplanted.authenticated_value_for(&pk2, &issuance_input(&req_a), &receipt_key),
+            None
+        );
+        assert_eq!(
+            threshold_issue_blind_vc(
+                &mut acc2,
+                &req_pk2,
+                &[10],
+                &transplanted,
+                &receipt_key,
+                42,
+            )
+            .unwrap_err(),
+            BlindVcError::InvalidOprfEvaluation
+        );
+
+        // 4. Legitimate issuance succeeds once, then duplicate replay of the same `(req_a, eval_a)`
+        // is rejected by the accumulator without mutating the Merkle root.
+        assert!(
+            threshold_issue_blind_vc(&mut acc1, &req_a, &[10], &eval_a, &receipt_key, 42).is_ok()
+        );
+        let committed_root = acc1.root();
+        assert_eq!(
+            threshold_issue_blind_vc(&mut acc1, &req_a, &[10], &eval_a, &receipt_key, 42)
+                .unwrap_err(),
+            BlindVcError::DuplicateCredentialReplay
+        );
+        assert_eq!(acc1.root(), committed_root);
+    }
+
+    #[test]
+    fn counter_store_high_water_boundary_and_u64_max_fail_closed() {
+        struct FixedWaterStore(Option<u64>);
+        impl CounterStore for FixedWaterStore {
+            fn high_water(&self) -> Result<Option<u64>, Error> {
+                Ok(self.0)
+            }
+            fn reserve(&mut self, _: &[u8; 32], _: usize, _: u64, _: usize) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let key = PublicKey::test_key();
+        let run_with_water = |water: Option<u64>, last: Option<u64>, counter: u64| -> Error {
+            let mut server = Server {
+                party: 0,
+                key: key.clone(),
+                seeds: [[3; 32]; 25],
+                key_share: [[4; 5]; 4],
+                last_counter: last,
+            };
+            let (_, requests) = blind(&key, &[b"item"], [9; 32], counter, [10; 32]).unwrap();
+            let req = requests.into_iter().next().unwrap();
+            let mut store = FixedWaterStore(water);
+            server.evaluate(req, &mut store, &mut AbortTransport).unwrap_err()
+        };
+
+        // `high_water == None` vs `high_water == Some(0)` MUST be strictly distinguished:
+        // counter 0 is valid only before any burn (`None`), and rejected once 0 is burned (`Some(0)`).
+        assert_eq!(run_with_water(None, None, 0), Error::Transport);
+        assert_eq!(
+            run_with_water(None, None, MAX_COUNTER_WINDOW - 1),
+            Error::Transport
+        );
+        assert_eq!(
+            run_with_water(None, None, MAX_COUNTER_WINDOW),
+            Error::Counter
+        );
+
+        assert_eq!(run_with_water(Some(0), None, 0), Error::Counter);
+        assert_eq!(run_with_water(Some(0), None, 1), Error::Transport);
+        assert_eq!(
+            run_with_water(Some(0), None, MAX_COUNTER_WINDOW),
+            Error::Transport
+        );
+        assert_eq!(
+            run_with_water(Some(0), None, MAX_COUNTER_WINDOW + 1),
+            Error::Counter
+        );
+
+        // Store regression cannot roll back in-memory `last_counter`.
+        assert_eq!(run_with_water(None, Some(0), 0), Error::Counter);
+        assert_eq!(run_with_water(Some(3), Some(10), 10), Error::Counter);
+        assert_eq!(run_with_water(Some(3), Some(10), 11), Error::Transport);
+
+        // `u64::MAX - 1` and `u64::MAX` high-water marks fail closed on ALL candidate counters
+        // without wrapping around to `0` or overflowing window arithmetic.
+        for counter in [0, 1, u64::MAX - 2, u64::MAX - 1, u64::MAX] {
+            assert_eq!(
+                run_with_water(Some(u64::MAX - 1), None, counter),
+                Error::Counter
+            );
+            assert_eq!(
+                run_with_water(Some(u64::MAX), None, counter),
+                Error::Counter
+            );
+        }
+    }
+
     #[test]
     fn aborts_drop_secret_owners() {
         assert_eq!(

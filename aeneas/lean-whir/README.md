@@ -1,0 +1,13 @@
+# Hem MIR verification
+
+Run `AENEAS_TOOLS_DIR=<tool-directory> ./aeneas/extract_whir.sh` from the repository root on Linux. The script runs the standalone Rust tests, invokes Charon on Rust MIR, invokes Aeneas on the resulting LLBC, normalizes generated module headers, builds with Lean 4.35, executes the kernel dependency audit, and checks production linkage, hierarchy tests, Clippy, and no_std compilation. Generated `Types.lean` and `Funs.lean` are checked in; regenerate them instead of editing their bodies.
+
+The standalone crate has no external dependencies. Production Hem calls its canonical decoder, affine arithmetic, work-factor guard, query reduction, terminal accumulated OOD-claim equality, and Merkle sibling ordering. Ext4 uses polynomial order `[1,u,u²,u³]`; the production adapter explicitly maps the tower order `[1,u²,u,u³]`.
+
+`Proofs.lean` checks canonical rejection, exact mathematical duet-expression acceptance, query range, and the low-bit PoW mask. Its mutation witness establishes that reducing both zero and the modulus admits distinct encodings of field zero. `Arithmetic.lean` proves successful evaluation and modular arithmetic against natural-number specifications, then composes these results into the simple duet and full theta/beta affine expressions. The audit traverses generated declarations and proof dependencies, allowing only propositional extensionality and quotient soundness.
+
+These are verifier-core refinements, not a proof of the complete WHIR cryptographic security reduction. Hash collision resistance, challenge unpredictability, and the authenticated quorum registry remain protocol assumptions. The copied prelude is the project's constructive checked-integer and bounded-loop model; it is included in transitive kernel dependency checking.
+
+The standalone Merkle ordering tuple carries tag `0x01`. Production uses its ordering fields inside the existing indexed CANOPY framing, whose internal-node tag is `0x00` and root tag is `0x01`. The shared ordering helper does not change that wire protocol or claim to prove the hash implementation.
+
+Hierarchical aggregation verifies every regional Hem proof and commits the ordered summaries and child proof digests. It does not compress the child verifiers into a recursive circuit. Registry quorum keys must already represent authorized threshold quorums; one accepted signature contributes one quorum. The registry must be independently supplied, strictly ordered by shard ID, and disjoint in shard IDs, custodian clusters, and public keys. Application epochs and message digests are signed context, separate from stateful leaf counters.

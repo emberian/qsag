@@ -137,7 +137,7 @@ pub const fn validate_belt_quorum_config(
     if two_q <= n_plus_f {
         return false;
     }
-    if require_global_liveness && q > n - f {
+    if require_global_liveness && ((n as u64) < 3 * (f as u64) + 1 || q > n - f) {
         return false;
     }
     true

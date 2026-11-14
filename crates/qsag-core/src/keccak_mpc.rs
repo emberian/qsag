@@ -697,50 +697,6 @@ impl Drop for RssPendingDzkTriples {
     }
 }
 
-/// Bits of a 64-bit operand at positions congruent to `r` modulo 5.
-const RSS_CLMUL_IN_MASKS: [u64; 5] = {
-    let mut masks = [0u64; 5];
-    let mut bit = 0;
-    while bit < 64 {
-        masks[bit % 5] |= 1u64 << bit;
-        bit += 1;
-    }
-    masks
-};
-
-/// Bits of a 128-bit product at positions congruent to `k` modulo 5.
-const RSS_CLMUL_OUT_MASKS: [u128; 5] = {
-    let mut masks = [0u128; 5];
-    let mut bit = 0;
-    while bit < 128 {
-        masks[bit % 5] |= 1u128 << bit;
-        bit += 1;
-    }
-    masks
-};
-
-// Carryless 64x64 multiplication from integer multiplications. Each residue class modulo 5
-// holds at most 13 operand bits, so in an integer product of two classes every coefficient
-// is at most 13 < 32 and stays inside its own 5-bit field. The low bit of each field is the
-// carryless coefficient; XOR combines the class pairs with the same residue sum.
-#[inline]
-fn rss_clmul_classes(v: u64) -> [u64; 5] {
-    RSS_CLMUL_IN_MASKS.map(|m| v & m)
-}
-
-#[inline]
-fn rss_clmul64_classes(am: &[u64; 5], bm: &[u64; 5]) -> u128 {
-    let mut out = 0u128;
-    for k in 0..5 {
-        let mut z = 0u128;
-        for r in 0..5 {
-            z ^= u128::from(am[r]) * u128::from(bm[(k + 5 - r) % 5]);
-        }
-        out |= z & RSS_CLMUL_OUT_MASKS[k];
-    }
-    out
-}
-
 // The proof only embeds Boolean values, so it can use the polynomial field
 // GF(2)[t]/(t^128 + t^7 + t^2 + t + 1) directly. No conversion of Keccak shares or
 // FIPS 205 outputs is involved.
@@ -796,48 +752,22 @@ impl RssProofField {
     }
 }
 
-/// One operand of a field multiplication, split once into the residue classes used by
-/// [`rss_clmul64_classes`] so that it can multiply many elements.
-struct RssFieldMultiplier {
-    lo: [u64; 5],
-    hi: [u64; 5],
-    mid: [u64; 5],
-}
+/// Fixed operand in the polynomial field used by the active RSS proof.
+/// Share the hardware-dispatched arithmetic with the 256-bit RSS engine.
+struct RssFieldMultiplier { operand: [u64; 2] }
 
 impl RssFieldMultiplier {
     #[inline]
     fn new(v: RssProofField) -> Self {
-        let b0 = v.0 as u64;
-        let b1 = (v.0 >> 64) as u64;
-        Self {
-            lo: rss_clmul_classes(b0),
-            hi: rss_clmul_classes(b1),
-            mid: rss_clmul_classes(b0 ^ b1),
-        }
+        Self { operand: [v.0 as u64, (v.0 >> 64) as u64] }
     }
 
     #[inline]
     fn mul(&self, x: RssProofField) -> RssProofField {
-        let a0 = x.0 as u64;
-        let a1 = (x.0 >> 64) as u64;
-        let p0 = rss_clmul64_classes(&rss_clmul_classes(a0), &self.lo);
-        let p2 = rss_clmul64_classes(&rss_clmul_classes(a1), &self.hi);
-        let p1 = rss_clmul64_classes(&rss_clmul_classes(a0 ^ a1), &self.mid) ^ p0 ^ p2;
-        let lo = p0 ^ (p1 << 64);
-        let hi = p2 ^ (p1 >> 64);
-        // Reduce hi * t^128 using t^128 = t^7 + t^2 + t + 1. The
-        // overflow has degree at most six, so the second fold cannot overflow.
-        let carry = (hi >> 127) ^ (hi >> 126) ^ (hi >> 121);
-        RssProofField(
-            lo ^ hi
-                ^ (hi << 1)
-                ^ (hi << 2)
-                ^ (hi << 7)
-                ^ carry
-                ^ (carry << 1)
-                ^ (carry << 2)
-                ^ (carry << 7),
-        )
+        let mut out = [0; 2];
+        qsag_asm::gf2_128_mul_acc_batch(&mut out,
+            &[[x.0 as u64, (x.0 >> 64) as u64]], &[self.operand]);
+        RssProofField(u128::from(out[0]) | (u128::from(out[1]) << 64))
     }
 }
 
@@ -1059,14 +989,14 @@ fn rss_dzk_fold_round(
                 filled += 2;
             }
             if let Some(w) = weights {
-                let out = qsag_asm::tower128_bdoz_2lane_poly_mac(&lhs[..filled], &rhs[..filled]);
+                let out = rss_poly_dot(&lhs[..filled], &rhs[..filled]);
                 l_acc = l_acc.add(w[g].mul(RssProofField(out[0])));
                 r_acc = r_acc.add(w[g].mul(RssProofField(out[1])));
                 filled = 0;
             }
         }
         if weights.is_none() {
-            let out = qsag_asm::tower128_bdoz_2lane_poly_mac(&lhs[..filled], &rhs[..filled]);
+            let out = rss_poly_dot(&lhs[..filled], &rhs[..filled]);
             l_acc = RssProofField(out[0]);
             r_acc = RssProofField(out[1]);
         }
@@ -1094,6 +1024,30 @@ fn rss_dzk_fold_round(
     Ok(())
 }
 
+// Keep polynomial-field operands in the batch kernel's native word layout.
+// Chunking bounds scratch space and amortizes dispatch over 256 products.
+fn rss_poly_dot(lhs: &[[u128; 2]], rhs: &[[u128; 2]]) -> [u128; 2] {
+    assert_eq!(lhs.len(), rhs.len());
+    let mut a = [[0u64; 2]; 256];
+    let mut b = [[0u64; 2]; 256];
+    let mut out = [0u128; 2];
+    for (lane, value) in out.iter_mut().enumerate() {
+        let mut acc = [0u64; 2];
+        for (lc, rc) in lhs.chunks(256).zip(rhs.chunks(256)) {
+            for ((dst, src), (other, rsrc)) in a.iter_mut().zip(lc).zip(b.iter_mut().zip(rc)) {
+                *dst = [src[lane] as u64, (src[lane] >> 64) as u64];
+                *other = [rsrc[lane] as u64, (rsrc[lane] >> 64) as u64];
+            }
+            qsag_asm::gf2_128_mul_acc_batch(&mut acc, &a[..lc.len()], &b[..lc.len()]);
+        }
+        *value = u128::from(acc[0]) | (u128::from(acc[1]) << 64);
+        wipe_u64s(&mut acc);
+    }
+    qsag_asm::volatile_fill(&mut a, [0; 2]);
+    qsag_asm::volatile_fill(&mut b, [0; 2]);
+    out
+}
+
 /// Per-party additive shares of the packed sumcheck tables for both passes.
 ///
 /// For every group `g` and every point `e in {0, 1, slope}^6`, the 64 words of the group are
@@ -1107,6 +1061,39 @@ fn rss_dzk_tensor_tables(
     groups: usize,
     nu_pairs: &[[u128; 2]],
 ) -> [Vec<[u128; 2]>; 3] {
+    #[cfg(feature = "std")]
+    if groups >= 128 {
+        let workers = std::thread::available_parallelism().map_or(1, usize::from).min(8);
+        let chunk = groups.div_ceil(workers);
+        return std::thread::scope(|scope| {
+            let handles: Vec<_> = nu_pairs.chunks(chunk).enumerate().map(|(i, weights)| {
+                scope.spawn(move || rss_dzk_tensor_tables_range(pending, i * chunk, weights))
+            }).collect();
+            let mut total: [Vec<[u128; 2]>; 3] =
+                core::array::from_fn(|_| vec![[0; 2]; RSS_DZK_TERNARY]);
+            for handle in handles {
+                let mut part = handle.join().expect("RSS tensor worker failed");
+                for (dst, src) in total.iter_mut().zip(&mut part) {
+                    for (dst, src) in dst.iter_mut().zip(src.iter()) {
+                        dst[0] ^= src[0];
+                        dst[1] ^= src[1];
+                    }
+                    qsag_asm::volatile_fill(src, [0; 2]);
+                }
+            }
+            total
+        });
+    }
+    debug_assert_eq!(groups, nu_pairs.len());
+    rss_dzk_tensor_tables_range(pending, 0, nu_pairs)
+}
+
+fn rss_dzk_tensor_tables_range(
+    pending: &RssPendingDzkTriples,
+    first_group: usize,
+    nu_pairs: &[[u128; 2]],
+) -> [Vec<[u128; 2]>; 3] {
+    let groups = nu_pairs.len();
     /// Points gathered per sweep over the group-major product table.
     const POINT_BLOCK: usize = 27;
     let mut tabs = [
@@ -1119,7 +1106,7 @@ fn rss_dzk_tensor_tables(
     let mut ea = [[0u64; RSS_DZK_TERNARY]; 3];
     let mut eb = [[0u64; RSS_DZK_TERNARY]; 3];
     for g in 0..groups {
-        let w0 = g * RSS_DZK_GROUP_WORDS;
+        let w0 = (first_group + g) * RSS_DZK_GROUP_WORDS;
         for s in 0..3 {
             rss_ternary_expand(&pending.a[s][w0..], &mut ea[s]);
             rss_ternary_expand(&pending.b[s][w0..], &mut eb[s]);
@@ -1144,7 +1131,7 @@ fn rss_dzk_tensor_tables(
                 }
             }
             for j in 0..POINT_BLOCK {
-                tabs[p][e0 + j] = qsag_asm::tower128_bdoz_2lane_poly_mac(
+                tabs[p][e0 + j] = rss_poly_dot(
                     &lhs[j * groups..(j + 1) * groups],
                     nu_pairs,
                 );
@@ -1181,7 +1168,7 @@ fn rss_dzk_initial_claims(
             for (g, pair) in lhs.iter_mut().enumerate() {
                 *pair = [u128::from(words[g * RSS_DZK_GROUP_WORDS + u]); 2];
             }
-            let out = qsag_asm::tower128_bdoz_2lane_poly_mac(&lhs, nu_pairs);
+            let out = rss_poly_dot(&lhs, nu_pairs);
             for pass in 0..2 {
                 claims[pass][s] =
                     claims[pass][s].add(mu_tab[pass][u].mul(RssProofField(out[pass])));
@@ -1287,29 +1274,40 @@ fn rss_dzk_pass(
         lhs: Vec::new(),
         rhs: Vec::new(),
     };
-    let mut planes = [[0u64; 64]; 2];
+    // Groups are independent linear maps under public coefficients. Partition only
+    // this arithmetic; challenges, proof messages and verification stay in order.
     for s in 0..3 {
-        for g in 0..groups {
-            let words = g * RSS_DZK_GROUP_WORDS..(g + 1) * RSS_DZK_GROUP_WORDS;
-            let lanes = g * RSS_DZK_LANES..(g + 1) * RSS_DZK_LANES;
-            rss_bind_group(
-                &pending.a[s][words.clone()],
-                &pattern,
-                &mut planes,
-                &mut tables.x[s][lanes.clone()],
-            );
-            for (lane, value) in tables.x[s][lanes.clone()].iter_mut().enumerate() {
-                *value = RssProofField(*value).mul_t_pow(lane as u32).0;
+        let bind = |start: usize, x: &mut [u128], y: &mut [u128]| {
+            let mut planes = [[0u64; 64]; 2];
+            for (g, (x, y)) in x.chunks_mut(RSS_DZK_LANES)
+                .zip(y.chunks_mut(RSS_DZK_LANES)).enumerate()
+            {
+                let offset = (start + g) * RSS_DZK_GROUP_WORDS;
+                rss_bind_group(&pending.a[s][offset..], &pattern, &mut planes, x);
+                for (lane, value) in x.iter_mut().enumerate() {
+                    *value = RssProofField(*value).mul_t_pow(lane as u32).0;
+                }
+                rss_bind_group(&pending.b[s][offset..], &pattern, &mut planes, y);
             }
-            rss_bind_group(
-                &pending.b[s][words],
-                &pattern,
-                &mut planes,
-                &mut tables.y[s][lanes],
-            );
+            qsag_asm::volatile_fill(&mut planes, [0; 64]);
+        };
+        #[cfg(feature = "std")]
+        {
+            let workers = std::thread::available_parallelism().map_or(1, usize::from)
+                .min(8).min(groups.div_ceil(64)).max(1);
+            let chunk_groups = groups.div_ceil(workers);
+            std::thread::scope(|scope| {
+                for (chunk, (x, y)) in tables.x[s].chunks_mut(chunk_groups * RSS_DZK_LANES)
+                    .zip(tables.y[s].chunks_mut(chunk_groups * RSS_DZK_LANES)).enumerate()
+                {
+                    let bind = &bind;
+                    scope.spawn(move || bind(chunk * chunk_groups, x, y));
+                }
+            });
         }
+        #[cfg(not(feature = "std"))]
+        bind(0, &mut tables.x[s], &mut tables.y[s]);
     }
-    qsag_asm::volatile_fill(&mut planes, [0; 64]);
 
     // Halve the group index under the public weights `bound_weight * nu[g]`.
     let block_weights: Vec<RssProofField> =
@@ -5292,6 +5290,39 @@ mod tests {
             Err(KeccakMpcError::Poisoned)
         );
         assert_eq!(pending.len_words(), 0);
+    }
+
+    #[test]
+    fn rss_tensor_partition_preserves_every_sum() {
+        let groups = 131;
+        let mut pending = RssPendingDzkTriples::new();
+        let mut rng = PartyPrivateRng::from_seed([0x98; 32], b"rss-tensor-partition");
+        for slot in 0..3 {
+            pending.a[slot] = (0..groups * RSS_DZK_GROUP_WORDS).map(|_| rng.next_u64()).collect();
+            pending.b[slot] = (0..groups * RSS_DZK_GROUP_WORDS).map(|_| rng.next_u64()).collect();
+        }
+        let weights: Vec<_> = (0..groups).map(|_| [rng.next_u128(), rng.next_u128()]).collect();
+        let reference = rss_dzk_tensor_tables_range(&pending, 0, &weights);
+        assert_eq!(rss_dzk_tensor_tables(&pending, groups, &weights), reference);
+        let mut partitioned = rss_dzk_tensor_tables_range(&pending, 0, &weights[..63]);
+        let tail = rss_dzk_tensor_tables_range(&pending, 63, &weights[63..]);
+        for (dst, src) in partitioned.iter_mut().zip(tail) {
+            for (dst, src) in dst.iter_mut().zip(src) {
+                dst[0] ^= src[0]; dst[1] ^= src[1];
+            }
+        }
+        assert_eq!(partitioned, reference);
+    }
+
+    #[test]
+    fn rss_batched_poly_dot_matches_two_lane_reference() {
+        let mut rng = PartyPrivateRng::from_seed([0x97; 32], b"rss-dot-parity");
+        for len in [0, 1, 15, 16, 17, 255, 256, 257, 1024] {
+            let lhs: Vec<_> = (0..len).map(|_| [rng.next_u128(), rng.next_u128()]).collect();
+            let rhs: Vec<_> = (0..len).map(|_| [rng.next_u128(), rng.next_u128()]).collect();
+            assert_eq!(rss_poly_dot(&lhs, &rhs),
+                qsag_asm::tower128_bdoz_2lane_poly_mac(&lhs, &rhs));
+        }
     }
 
     #[test]

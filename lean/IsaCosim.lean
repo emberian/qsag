@@ -105,6 +105,13 @@ def condition (cc : Nat) (f : Flags) : Except String Bool := do
 /-- Adapter corrections are intentionally local: this executable is a differential
 oracle, not an extension of the shared proof theorems. -/
 def step (d : DecodedInstr X86Instr) (st : X86State) (f : Flags) : Except String (X86State × Flags) := do
+  match d.instr with
+  | .aluRegReg op _ _ _ | .aluImm op _ _ _ | .aluLoad64 op _ _ =>
+    if (op == .adc || op == .sbb) && f.valid &&& 1 == 0 then
+      throw "arithmetic consumes undefined CF"
+  | .adcx .. => if f.valid &&& 1 == 0 then throw "ADCX consumes undefined CF"
+  | .adox .. => if f.valid &&& 2048 == 0 then throw "ADOX consumes undefined OF"
+  | _ => pure ()
   let mut out := (stepX86 d st).1
   let mut flags := f
   match d.instr with
@@ -115,6 +122,7 @@ def step (d : DecodedInstr X86Instr) (st : X86State) (f : Flags) : Except String
   | .negReg wide dst => flags := aluFlags f .sub wide 0 (st.gpr.get dst)
   | .incDec inc wide dst =>
     flags := putFlags (aluFlags f (if inc then .add else .sub) wide (st.gpr.get dst) 1) 1 f.value
+    flags := { flags with valid := (flags.valid &&& 0xfffffffffffffffe) ||| (f.valid &&& 1) }
   | .mulOneOp sg wide src =>
     let w := if wide then 64 else 32
     let a := (st.gpr.get 0).toNat % 2^w
@@ -186,6 +194,22 @@ def extra (bs : List UInt8) (st : X86State) (f : Flags) : Option (Except String 
     let a := (st.gpr.get dst).toNat
     let r := (List.range n).foldl (fun v i => v*256 + ((a >>> (8*i)) &&& 255)) 0
     return some (.ok ({ st with pc := st.pc+p+2, gpr := st.gpr.set dst (UInt64.ofNat r) }, f, p+2))
+  if op == 0xd1 && op2 ≥ 0xc0 && bs.length ≥ p+2 then
+    let dst := op2%8+(rex%2)*8
+    let digit := (op2/8)%8
+    if digit == 7 then
+      let w := if wide then 64 else 32
+      let a := (st.gpr.get dst).toNat % 2^w
+      let r := ((signed a w / 2) % (2^w : Nat)).toNat
+      let f1 := undefFlags (putFlags f 0xc5 (szp r w + if bit a 0 then 1 else 0)) 16
+      let flags := putFlags f1 2048 0
+      return some (.ok ({ st with pc := st.pc+p+2, gpr := st.gpr.set dst (UInt64.ofNat r), cf := bit flags.value 0, zf := bit flags.value 6, ofFlag := false }, flags, p+2))
+    let sk? : Option X86ShiftKind := match digit with
+      | 0 => some .rol | 1 => some .ror | 4 => some .shl | 5 => some .shr | _ => none
+    if let some sk := sk? then
+      return some do
+        let (out, flags) ← step ⟨st.pc, p+2, .shiftImm sk wide dst 1⟩ st f
+        return (out, flags, p+2)
   if op == 0xc1 && op2 / 8 == 31 && bs.length ≥ p+3 then
     let dst := op2%8+(rex%2)*8
     let w := if wide then 64 else 32
@@ -251,9 +275,110 @@ def evaluate (j : Json) : Except String Json := do
     ("stack_mem", toJson (String.join ((List.range mem.size).map fun i =>
       hexNat 2 (out.mem (UInt64.ofNat (base+i))).toNat)))]
 
+/-- Architectural RFLAGS and GPR edge-case vectors covering `count = 0`, `count = 1`
+(`0xC1` and `0xD1`), `count > 1`, `count = 32`, `count = 64`, `count = 65`, `0 * x`,
+unsigned vs signed `(-1) * (-1)`, and `MIN_INT * (-1)`. -/
+structure EdgeVector where
+  name : String
+  code : List UInt8
+  rax : UInt64 := 0
+  rcx : UInt64 := 0
+  rdx : UInt64 := 0
+  initFlags : Nat := 0x202
+  expRax : UInt64
+  expRcx : UInt64 := 0
+  expRdx : UInt64 := 0
+  expValidMask : Nat
+  expFlags : Nat
+
+def edgeCaseVectors : List EdgeVector := [
+  ⟨"mul64_zero_lhs", [0x48, 0xf7, 0xe1], 0, 0xdeadbeefcafebabe, 0x1122334455667788, 0xad7,
+    0, 0xdeadbeefcafebabe, 0, 0xffffffffffffff2b, 0x202⟩,
+  ⟨"mul64_zero_rhs", [0x48, 0xf7, 0xe1], 0xffffffffffffffff, 0, 0x99, 0xad7,
+    0, 0, 0, 0xffffffffffffff2b, 0x202⟩,
+  ⟨"mul64_neg1_neg1_unsigned", [0x48, 0xf7, 0xe1], 0xffffffffffffffff, 0xffffffffffffffff, 0, 0x202,
+    1, 0xffffffffffffffff, 0xfffffffffffffffe, 0xffffffffffffff2b, 0xa03⟩,
+  ⟨"imul64_1op_neg1_neg1_signed", [0x48, 0xf7, 0xe9], 0xffffffffffffffff, 0xffffffffffffffff, 0x7777, 0xad7,
+    1, 0xffffffffffffffff, 0, 0xffffffffffffff2b, 0x202⟩,
+  ⟨"imul64_2op_neg1_neg1_signed", [0x48, 0x0f, 0xaf, 0xc1], 0xffffffffffffffff, 0xffffffffffffffff, 0x123456789abcdef0, 0xad7,
+    1, 0xffffffffffffffff, 0x123456789abcdef0, 0xffffffffffffff2b, 0x202⟩,
+  ⟨"imul64_2op_zero_neg1", [0x48, 0x0f, 0xaf, 0xc1], 0, 0xffffffffffffffff, 0x42, 0xad7,
+    0, 0xffffffffffffffff, 0x42, 0xffffffffffffff2b, 0x202⟩,
+  ⟨"imul64_1op_min_neg1_overflow", [0x48, 0xf7, 0xe9], 0x8000000000000000, 0xffffffffffffffff, 0, 0x202,
+    0x8000000000000000, 0xffffffffffffffff, 0, 0xffffffffffffff2b, 0xa03⟩,
+  ⟨"mul32_neg1_neg1_unsigned", [0xf7, 0xe1], 0xdeadbeefffffffff, 0xcafebabeffffffff, 0xffffffff00000000, 0x202,
+    1, 0xcafebabeffffffff, 0xfffffffe, 0xffffffffffffff2b, 0xa03⟩,
+  ⟨"imul32_1op_neg1_neg1_signed", [0xf7, 0xe9], 0xdeadbeefffffffff, 0xcafebabeffffffff, 0xffffffff00000000, 0xad7,
+    1, 0xcafebabeffffffff, 0, 0xffffffffffffff2b, 0x202⟩,
+  ⟨"shl64_c1_cnt1_of1", [0x48, 0xc1, 0xe0, 0x01], 0x4000000000000000, 0, 0, 0x202,
+    0x8000000000000000, 0, 0, 0xffffffffffffffef, 0xa86⟩,
+  ⟨"shl64_d1_cnt1_of1", [0x48, 0xd1, 0xe0], 0x4000000000000000, 0, 0, 0x202,
+    0x8000000000000000, 0, 0, 0xffffffffffffffef, 0xa86⟩,
+  ⟨"shl64_d1_cnt1_cf1_of0", [0x48, 0xd1, 0xe0], 0xc000000000000000, 0, 0, 0xad7,
+    0x8000000000000000, 0, 0, 0xffffffffffffffef, 0x287⟩,
+  ⟨"shr64_c1_cnt1_cf1_of1", [0x48, 0xc1, 0xe8, 0x01], 0x8000000000000001, 0, 0, 0x202,
+    0x4000000000000000, 0, 0, 0xffffffffffffffef, 0xa07⟩,
+  ⟨"shr64_d1_cnt1_cf1_of1", [0x48, 0xd1, 0xe8], 0x8000000000000001, 0, 0, 0x202,
+    0x4000000000000000, 0, 0, 0xffffffffffffffef, 0xa07⟩,
+  ⟨"ror64_c1_cnt1_preserves_szpaf", [0x48, 0xc1, 0xc8, 0x01], 1, 0, 0, 0x2d6,
+    0x8000000000000000, 0, 0, 0xffffffffffffffff, 0xad7⟩,
+  ⟨"ror64_d1_cnt1_preserves_szpaf", [0x48, 0xd1, 0xc8], 1, 0, 0, 0x2d6,
+    0x8000000000000000, 0, 0, 0xffffffffffffffff, 0xad7⟩,
+  ⟨"rol64_d1_cnt1_cf1_of1", [0x48, 0xd1, 0xc0], 0x8000000000000000, 0, 0, 0x2d6,
+    1, 0, 0, 0xffffffffffffffff, 0xad7⟩,
+  ⟨"sar64_c1_cnt1_of0", [0x48, 0xc1, 0xf8, 0x01], 0x8000000000000001, 0, 0, 0xad7,
+    0xc000000000000000, 0, 0, 0xffffffffffffffef, 0x287⟩,
+  ⟨"sar64_d1_cnt1_of0", [0x48, 0xd1, 0xf8], 0x8000000000000001, 0, 0, 0xad7,
+    0xc000000000000000, 0, 0, 0xffffffffffffffef, 0x287⟩,
+  ⟨"shl64_cnt2_undef_of", [0x48, 0xc1, 0xe0, 0x02], 0x6000000000000000, 0, 0, 0x202,
+    0x8000000000000000, 0, 0, 0xfffffffffffff7ef, 0x287⟩,
+  ⟨"shr64_cnt63_undef_of", [0x48, 0xc1, 0xe8, 0x3f], 0xc000000000000000, 0, 0, 0xad7,
+    1, 0, 0, 0xfffffffffffff7ef, 0x203⟩,
+  ⟨"ror64_cnt13_undef_of_preserves_szpaf", [0x48, 0xc1, 0xc8, 0x0d], 0x0000000000001000, 0, 0, 0x2d6,
+    0x8000000000000000, 0, 0, 0xfffffffffffff7ff, 0x2d7⟩,
+  ⟨"shl64_cnt0_noop", [0x48, 0xc1, 0xe0, 0x00], 0x8000000000000001, 0, 0, 0xad7,
+    0x8000000000000001, 0, 0, 0xffffffffffffffff, 0xad7⟩,
+  ⟨"shl64_cnt64_masks_to_zero", [0x48, 0xc1, 0xe0, 0x40], 0x8000000000000001, 0, 0, 0xad7,
+    0x8000000000000001, 0, 0, 0xffffffffffffffff, 0xad7⟩,
+  ⟨"ror64_cnt64_masks_to_zero", [0x48, 0xc1, 0xc8, 0x40], 0xfeedfacecafebabe, 0, 0, 0x202,
+    0xfeedfacecafebabe, 0, 0, 0xffffffffffffffff, 0x202⟩,
+  ⟨"shl32_cnt32_masks_to_zero_zext", [0xc1, 0xe0, 0x20], 0xdeadbeef12345678, 0, 0, 0xad7,
+    0x0000000012345678, 0, 0, 0xffffffffffffffff, 0xad7⟩,
+  ⟨"shl64_cnt32_shifts_by_32", [0x48, 0xc1, 0xe0, 0x20], 0x0000000180000000, 0, 0, 0x202,
+    0x8000000000000000, 0, 0, 0xfffffffffffff7ef, 0x287⟩,
+  ⟨"shl64_cnt65_masks_to_one_defines_of", [0x48, 0xc1, 0xe0, 0x41], 0x4000000000000000, 0, 0, 0x202,
+    0x8000000000000000, 0, 0, 0xffffffffffffffef, 0xa86⟩
+]
+
+def checkEdgeVector (v : EdgeVector) : Bool :=
+  let gpr := ((Bank16.ofFn fun _ => (0 : UInt64)).set 0 v.rax).set 1 v.rcx |>.set 2 v.rdx
+  let st : X86State := {
+    pc := 0, gpr := gpr, ymm := Bank16.ofFn fun _ => Vec256.zero,
+    cf := v.initFlags &&& 1 != 0, ofFlag := v.initFlags &&& 2048 != 0,
+    zf := v.initFlags &&& 64 != 0, ymmDirty := false, halted := false,
+    mem := fun _ => 0 }
+  match run 4 v.code st { value := v.initFlags } with
+  | .error _ => false
+  | .ok (out, flags, steps) =>
+    steps == 1 &&
+    out.gpr.get 0 == v.expRax &&
+    out.gpr.get 1 == v.expRcx &&
+    out.gpr.get 2 == v.expRdx &&
+    flags.valid == v.expValidMask &&
+    (flags.value &&& flags.valid) == (v.expFlags &&& v.expValidMask)
+
+theorem rflags_edge_vectors_verified :
+    edgeCaseVectors.all checkEdgeVector = true := by decide +kernel
+
 end IsaCosim
 
 def main (args : List String) : IO UInt32 := do
+  if args == ["--self-test"] then
+    for v in IsaCosim.edgeCaseVectors do
+      if !IsaCosim.checkEdgeVector v then
+        throw (IO.userError s!"edge-case vector failed: {v.name}")
+    IO.println s!"isa-cosim self-test ok ({IsaCosim.edgeCaseVectors.length} RFLAGS edge vectors)"
+    return 0
   if let ["--elf", path] := args then
     let data ← IO.FS.readBinFile path
     let source : Bytes := ⟨data.size, fun i => data[i]!⟩

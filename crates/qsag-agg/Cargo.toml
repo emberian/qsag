@@ -11,6 +11,7 @@ default = ["std"]
 std = ["qsag-asm/std"]
 
 [dependencies]
+qsag-whir-verified = { path = "../../aeneas/qsag-whir-verified", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }
 
 [dev-dependencies]

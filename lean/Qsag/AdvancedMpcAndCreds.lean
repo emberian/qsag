@@ -1501,21 +1501,29 @@ def rssSubsetResponses {R : Type} [CommRingOps R] (c : R) : List R → List R �
   | y :: ys, s :: ss => mldsaLinearResponse y c s :: rssSubsetResponses c ys ss
   | _, _ => []
 
-theorem rssSubsetResponses_sum {R : Type} [LawfulCommRing R] (c : R) :
-    ∀ (yShares s1Shares : List R),
+theorem rssSubsetResponses_sum {R : Type} [LawfulCommRing R] (c : R)
+    (yShares : List R) :
+    ∀ (s1Shares : List R),
       yShares.length = s1Shares.length →
       ringSumList (rssSubsetResponses c yShares s1Shares) =
-        mldsaLinearResponse (ringSumList yShares) c (ringSumList s1Shares)
-  | [], [], _ => by
-    simp [rssSubsetResponses, ringSumList, mldsaLinearResponse,
-      LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
-  | _ :: _, [], hLen => by simp at hLen
-  | [], _ :: _, hLen => by simp at hLen
-  | y :: ys, s :: ss, hLen => by
-    have hTail : ys.length = ss.length := Nat.succ.inj hLen
-    simp only [rssSubsetResponses, ringSumList, rssSubsetResponses_sum c ys ss hTail,
-      mldsaLinearResponse, LawfulCommRing.left_distrib]
-    rw [LawfulCommRing.add_add_add_comm]
+        mldsaLinearResponse (ringSumList yShares) c (ringSumList s1Shares) := by
+  induction yShares with
+  | nil =>
+    intro s1Shares hLen
+    cases s1Shares with
+    | nil =>
+      simp only [rssSubsetResponses, ringSumList, mldsaLinearResponse,
+        LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    | cons _ _ => cases hLen
+  | cons y ys ih =>
+    intro s1Shares hLen
+    cases s1Shares with
+    | nil => cases hLen
+    | cons s ss =>
+      have hTail : ys.length = ss.length := Nat.succ.inj hLen
+      simp only [rssSubsetResponses, ringSumList, ih ss hTail,
+        mldsaLinearResponse, LawfulCommRing.left_distrib]
+      rw [LawfulCommRing.add_add_add_comm]
 
 /-- Centered modulo-`q` infinity-norm check (`threshold_mldsa.rs:660-682, 873-883`):
     every coefficient `v < q` satisfies centered `|v|_± < bound` iff `v < bound ∨ q - bound < v`. -/

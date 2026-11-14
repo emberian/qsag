@@ -252,4 +252,19 @@ theorem certificate_not_transferable :
     certSliceAt x86ExtractedSlices x86SymbolContracts (x86InvCerts.drop 1) 0 = false := by
   decide +kernel
 
+/-- All five bitslice symbols are pinned as exact, nonempty parser-produced slices.
+    The legacy CT certificates above do not cover these new source-build symbols. -/
+theorem current_bitslice_exports_pinned :
+    ((extractAllRlibFuncs currentX86RlibArchiveBytes).drop 16).map
+      (fun s => (s.name, s.code.length)) =
+      [("qsag_asm_transpose64x256_avx2", 3809),
+       ("qsag_asm_gf2_128_mul_acc_pclmul", 212),
+       ("qsag_asm_gf2_128_mul_acc_vpclmul", 242)] ∧
+    ((extractAllRlibFuncs currentAarch64RlibArchiveBytes).drop 7).map
+      (fun s => (s.name, s.code.length)) =
+      [("qsag_asm_transpose64x256_neon", 4264),
+       ("qsag_asm_gf2_128_mul_acc_pmull", 216)] := by
+  rw [currentX86_rlib_extracted_slices, currentAarch64_rlib_extracted_slices]
+  decide +kernel
+
 end Qsag

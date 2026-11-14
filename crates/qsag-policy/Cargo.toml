@@ -13,6 +13,7 @@ test-dealer = []
 std = ["qsag-asm/std", "alloc", "qsag-accel/std", "qsag-addr/std"]
 
 [dependencies]
+qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
 qsag-fts = { path = "../qsag-fts", default-features = false }
 qsag-asm = { path = "../qsag-asm", default-features = false }
 qsag-accel = { path = "../qsag-accel", default-features = false }

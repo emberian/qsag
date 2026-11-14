@@ -63,6 +63,8 @@ impl WotsCParams {
 
     pub const fn is_well_formed(&self) -> bool {
         self.chains >= 1
+            && self.chains <= WOTS_DIGEST_DIGITS
+            && self.zero_digits <= WOTS_DIGEST_DIGITS
             && self.chains + self.zero_digits == WOTS_DIGEST_DIGITS
             && self.target_sum <= WOTS_STEPS * self.chains
     }
@@ -71,7 +73,12 @@ impl WotsCParams {
     /// bits `7 - 2 (i % 4)` and `6 - 2 (i % 4)` of byte `i / 4`, the base-4 reading of
     /// [`crate::tsw_baggy::extract_base_w_digits_checked`]. Nothing is allocated for an invalid digest.
     pub fn digits(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
-        let digit = |i: usize| (hash[i / 4] >> (6 - 2 * (i % 4))) & 3;
+        if !self.is_well_formed() { return None; }
+        if *self == Self::V128 {
+            return qsag_verified::verified_wotsc256_verify_sum(hash)
+                .then(|| qsag_verified::verified_wotsc256_extract_digits(hash).to_vec());
+        }
+        let digit = |i: usize| qsag_verified::wotsc256_extract_digit(hash, i);
         if (self.chains..WOTS_DIGEST_DIGITS).any(|i| digit(i) != 0) {
             return None;
         }
@@ -512,6 +519,18 @@ mod tests {
         build_merkle_from_leaves_topdown, extract_base_w_digits_checked,
         fors_leaf_hash_from_secret, fors_secret_leaf, th_call, walk_merkle_auth_path,
     };
+
+    #[test]
+    fn malformed_digit_parameters_refuse_without_overflow() {
+        for params in [
+            WotsCParams { chains: usize::MAX, zero_digits: 1, target_sum: 0 },
+            WotsCParams { chains: 1, zero_digits: usize::MAX, target_sum: 0 },
+            WotsCParams { chains: 0, zero_digits: 128, target_sum: 0 },
+        ] {
+            assert!(!params.is_well_formed());
+            assert!(params.digits(&[0; 32]).is_none());
+        }
+    }
 
     pub(crate) fn test_engine(tag: u8) -> (Rss256Engine, PqSecretKey) {
         let sid = [tag; 32];

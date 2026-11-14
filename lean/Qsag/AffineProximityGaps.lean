@@ -29,10 +29,16 @@ Chiesa–Weissenberg–Yogev–Zheng, IACR ePrint `2026/2863`):
    - 3-way $\deg \tilde{Q}_1$ split proving `welch_berlekamp_affine_proximity_gap`:
      `badPairs.length ≤ Nat.max S.length (D.length * (D.length - 1) / 2)` whenever `2 * D.length < 3 * A - d - 1`.
 
-4. **§5. Finite `Theorem 4.8 + Theorem 5.1` Witness Verifier for `Hem` WHIR (`nv = 20` & `nv = 24`)**:
-   - `WhirAffineWitness`, `checkWhirAffineWitness` (verifying `M ≥ 1`, exact Equation `(4.5)` interpolation
-     dimension inequality, `B^2 > n_f * (d_f + 1)`, `(A - 1)^2 > n_f * d_f`, and $s_i$-loss query target bits),
-     and `whirAffineEqualDegreeCommitFoldNum` certified by kernel `decide` across all stages of `nv = 20` and `nv = 24`.
+4. **§5. Finite `Theorem 4.8 + Theorem 5.1` Witness Verifier Bound to the Deployed `Hem` WHIR Schedule**:
+   - `hemStageGeometry` / `hemJohnsonMinQueries` mirror `pcs.rs::stage_geometry` and
+     `WhirSecurityRegime::minimum_queries`; `hemJohnsonQromWitnessTable` is the verbatim
+     `affine_schedule.rs::WITNESSES` table (`B = A - 1`).
+   - `checkWhirAffineWitness` checks the paper's side conditions (`m, D ≥ 1`,
+     `M = min {D, ⌊(mA - D - 1)/d⌋} ≥ 1`, exact Equation `(4.5)`, `B^2 > n (d + 1)`,
+     `(A - 1)^2 > n d`) and the exact distinct-fiber query bound
+     `fallingFactorial (A + s_i) q_i * 2^bits < fallingFactorial n q_i`.
+   - `hem_johnson_qrom_witnesses_cover_every_canonical_stage` kernel-decides the Rust coverage test
+     for every `num_vars ∈ 2..=24`.
 -/
 
 public import Qsag.Constructive
@@ -744,8 +750,10 @@ private theorem vanishingPoly_last_one
   | [] => rfl
   | c :: cs => by
     have hcsLen : (vanishingPoly cs).length = cs.length + 1 := vanishingPoly_length cs
-    have h0Last : (CommRingOps.zero :: vanishingPoly cs).getD (cs.length + 1) CommRingOps.zero =
+    have h0Last : (CommRingOps.zero :: vanishingPoly cs).getD
+        ((CommRingOps.zero :: vanishingPoly cs).length - 1) CommRingOps.zero =
         CommRingOps.one := by
+      simp only [List.length_cons, Nat.add_sub_cancel, hcsLen]
       simpa [List.getD] using vanishingPoly_last_one cs
     have hmapLt : ((vanishingPoly cs).map (CommRingOps.mul c)).length <
         (CommRingOps.zero :: vanishingPoly cs).length := by simp [hcsLen]
@@ -777,13 +785,13 @@ private theorem exists_nonroot_of_monic_len
     simp [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
     exact LawfulField.one_ne_zero
   | 0, [], _, hlen, _, _, _ => by cases hlen
-  | 0, _ :: _ :: _, _, hlen, _, _, _ => by simp at hlen
-  | k + 1, p, [], _, _, _, hU => by simp at hU
+  | 0, _ :: _ :: _, _, hlen, _, _, _ => by cases hlen
+  | k + 1, p, [], _, _, _, hU => by cases hU
   | k + 1, p, u :: us, hlen, hlast, .cons hnot hnd, hU => by
     if hev : RoundPoly.evalCoeffs p u = CommRingOps.zero then
       let q := RoundPoly.quotLinear p u
       have hqLen : q.length = k + 1 := by
-        dsimp [q]; rw [RoundPoly.quotLinear_length, hlen]; omega
+        dsimp [q]; rw [RoundPoly.quotLinear_length, hlen]; rfl
       have hqLast : q.getD k CommRingOps.zero = CommRingOps.one := by
         have aux : ∀ (m : Nat) (xs : List F),
             xs.length = m + 2 →
@@ -792,16 +800,20 @@ private theorem exists_nonroot_of_monic_len
           intro m xs hxs
           induction m generalizing xs with
           | zero =>
-            rcases xs with _ | ⟨a, _ | ⟨b, _ | _⟩⟩ <;> simp at hxs
-            simp [RoundPoly.quotLinear, RoundPoly.evalCoeffs,
-                  LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+            rcases xs with _ | ⟨a, _ | ⟨b, _ | _⟩⟩
+            · cases hxs
+            · cases hxs
+            · simp [RoundPoly.quotLinear, RoundPoly.evalCoeffs,
+                    LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+            · cases hxs
           | succ m' ihm =>
-            rcases xs with _ | ⟨a, _ | ⟨b, tl⟩⟩ <;> simp at hxs
-            have htl : (b :: tl).length = m' + 2 := by simp; omega
-            have r := ihm (b :: tl) htl
-            simpa [RoundPoly.quotLinear] using r
+            rcases xs with _ | ⟨a, _ | ⟨b, tl⟩⟩
+            · cases hxs
+            · cases hxs
+            · have htl : (b :: tl).length = m' + 2 := Nat.succ.inj hxs
+              simpa [RoundPoly.quotLinear] using ihm (b :: tl) htl
         rw [aux k p hlen, hlast]
-      have hUsLen : k + 1 ≤ us.length := by simp at hU; omega
+      have hUsLen : k + 1 ≤ us.length := Nat.le_of_succ_le_succ hU
       rcases exists_nonroot_of_monic_len k q us hqLen hqLast hnd hUsLen with ⟨x₁, hx₁Mem, hx₁Ne⟩
       refine ⟨x₁, .tail _ hx₁Mem, ?_⟩
       rw [RoundPoly.evalCoeffs_eq_mul_quotLinear_add p u x₁, hev, LawfulCommRing.add_zero]
@@ -814,6 +826,7 @@ private theorem exists_nonroot_of_monic_len
       · exact hx₁Ne h2
     else
       exact ⟨u, .head _, hev⟩
+  termination_by structural k => k
 
 /-- Lookup index of `x` in `D` (`none` if absent). -/
 private def indexOf? {α : Type} [DecidableEq α] (x : α) : List α → Option Nat
@@ -851,12 +864,31 @@ def scalarFloorWords
           CommRingOps.zero
   (fFn, gFn)
 
+private theorem getElem_inj_of_nodup {α : Type} :
+    ∀ {xs : List α}, xs.Nodup → ∀ (i j : Nat) (hi : i < xs.length) (hj : j < xs.length),
+      xs[i] = xs[j] → i = j
+  | [], _, _, _, hi, _, _ => by simp at hi
+  | _ :: _, _, 0, 0, _, _, _ => rfl
+  | _ :: xs, .cons hnot _, 0, j + 1, _, hj, heq => by
+    simp only [List.getElem_cons_zero, List.getElem_cons_succ] at heq
+    have hj' : j < xs.length := by simp at hj; omega
+    exact False.elim (hnot (xs[j]'hj') (List.getElem_mem hj') heq)
+  | _ :: xs, .cons hnot _, i + 1, 0, hi, _, heq => by
+    simp only [List.getElem_cons_zero, List.getElem_cons_succ] at heq
+    have hi' : i < xs.length := by simp at hi; omega
+    exact False.elim (hnot (xs[i]'hi') (List.getElem_mem hi') heq.symm)
+  | _ :: xs, .cons _ hnd, i + 1, j + 1, hi, hj, heq => by
+    simp only [List.getElem_cons_succ] at heq
+    exact congrArg (· + 1) (getElem_inj_of_nodup hnd i j
+      (by simp at hi; omega) (by simp at hj; omega) heq)
+
 /-- **`#tooth` Proposition 6.1 (`tooth_scalar_combiner_linear_n_over_q_floor`)**:
     For ANY degree `d`, loss `s`, threshold `A` (`d + s + 1 < A`, `A ≤ D.length`), and ANY list
     `gammas` of `1 + (D.length - A) / (s + 1)` distinct non-zero challenges in `S`:
-    every `γ ∈ gammas` makes `f + γ g` vanish on **at least `A` points of `D`** (`P = 0`), yet
-    **NO polynomial `G_poly` of degree `≤ d`** agrees with `g` on `≥ A - s` of those points —
-    proving scalar combiners incur `≥ (1 + ⌊(n - A)/(s + 1)⌋) / |S| = Ω(n/q)` error even for `s ≥ 1`! -/
+    every `γ ∈ gammas` is a pairwise-distinct non-zero challenge making `f + γ g` vanish on
+    **at least `A` points of `D`** (`P = 0`), yet **NO polynomial `G_poly` of degree `≤ d`** agrees
+    with `g` on `≥ A - s` of those points — proving scalar combiners incur
+    `≥ (1 + ⌊(n - A)/(s + 1)⌋) / |S| = Ω(n/q)` error even for `s ≥ 1`! -/
 theorem tooth_scalar_combiner_linear_n_over_q_floor
     {F : Type} [LawfulField F] [DecidableEq F]
     (D gammas : List F) (d s A : Nat)
@@ -867,14 +899,17 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
     (hA_hi : A ≤ D.length)
     (hGammasLen : gammas.length = 1 + (D.length - A) / (s + 1)) :
     let (f, g) := scalarFloorWords D gammas A s
+    (∀ i j : Fin gammas.length, i ≠ j → gammas[i] ≠ gammas[j]) ∧
     ∀ r : Fin gammas.length,
       let γ := gammas[r]
       let S_γ := D.filter (fun z =>
         decide (CommRingOps.add (f z) (CommRingOps.mul γ (g z)) = CommRingOps.zero))
+      γ ≠ CommRingOps.zero ∧
       A ≤ S_γ.length ∧
       ∀ G_poly : List F, G_poly.length ≤ d + 1 →
         (S_γ.filter (fun z => decide (RoundPoly.evalCoeffs G_poly z = g z))).length < A - s := by
   dsimp only
+  refine ⟨fun i j hij heq => hij (Fin.ext (getElem_inj_of_nodup hGammas i.1 j.1 i.2 j.2 heq)), ?_⟩
   intro r
   let cLen := A - s - 1
   have hcLen : cLen = A - s - 1 := rfl
@@ -956,7 +991,7 @@ theorem tooth_scalar_combiner_linear_n_over_q_floor
   have hLenCT : (C ++ T).length = A := by
     rw [List.length_append, hLenC, hLenT]
     omega
-  constructor
+  refine ⟨hGammasNz gammas[r] (List.getElem_mem r.2), ?_, ?_⟩
   · have hle := nodup_length_le_of_subset hndCT hSubCT
     rw [hLenCT] at hle
     exact hle
@@ -1043,7 +1078,7 @@ private theorem zeroLossRow_nodup
     rw [List.mem_map] at hq
     rcases hq with ⟨b', hb', rfl⟩
     have hbEq : b = b' := (Prod.mk.inj heq).2
-    exact hnb b' hb' hbEq.symm
+    exact hnb b' hb' hbEq
 
 private theorem zeroLossBadPairs_nodup
     {F : Type} [LawfulField F] [DecidableEq F]
@@ -1317,20 +1352,18 @@ private theorem dropIdx_length {α : Type} :
 private theorem subVec_length {F : Type} [CommRingOps F] :
     ∀ (a b : List F), a.length = b.length → (subVec a b).length = a.length
   | [], [], _ => rfl
-  | _ :: as, _ :: bs, h => by
-    simp only [List.length_cons] at h
-    simp [subVec, subVec_length as bs (by omega)]
-  | [], _ :: _, h => by simp at h
-  | _ :: _, [], h => by simp at h
+  | _ :: as, _ :: bs, h => congrArg Nat.succ (subVec_length as bs (Nat.succ.inj h))
+  | [], _ :: _, h => by cases h
+  | _ :: _, [], h => by cases h
+  termination_by structural a => a
 
 private theorem insertIdxVal_length {α : Type} :
     ∀ (p : Nat) (val : α) (xs : List α), p ≤ xs.length →
       (insertIdxVal p val xs).length = xs.length + 1
-  | 0, _, xs, _ => by simp [insertIdxVal]
-  | p + 1, val, [], h => by simp at h
-  | p + 1, val, x :: xs, h => by
-    simp only [List.length_cons] at h
-    simp [insertIdxVal, insertIdxVal_length p val xs (by omega)]
+  | 0, _, _, _ => rfl
+  | _ + 1, _, [], h => by cases h
+  | p + 1, val, _ :: xs, h =>
+    congrArg Nat.succ (insertIdxVal_length p val xs (Nat.le_of_succ_le_succ h))
 
 private theorem mem_insertIdxVal_of_mem {α : Type} :
     ∀ (p : Nat) (val : α) {z : α} {xs : List α}, z ∈ xs → z ∈ insertIdxVal p val xs
@@ -1392,12 +1425,10 @@ private theorem dotVec_scaleVec {F : Type} [LawfulCommRing F] (c : F) :
 private theorem dotVec_subVec {F : Type} [LawfulCommRing F] :
     ∀ (a b v : List F), a.length = b.length →
       dotVec (subVec a b) v = CommRingOps.sub (dotVec a v) (dotVec b v)
-  | [], [], _ => by simp [subVec, dotVec, LawfulCommRing.sub_self]
-  | _ :: _, _ :: _, [] => by simp [subVec, dotVec, LawfulCommRing.sub_self]
+  | [], [], _ => fun _ => by simp [subVec, dotVec, LawfulCommRing.sub_self]
+  | _ :: _, _ :: _, [] => fun _ => by simp [subVec, dotVec, LawfulCommRing.sub_self]
   | a :: as, b :: bs, x :: xs => fun hlen => by
-    simp only [List.length_cons] at hlen
-    simp only [subVec, dotVec, dotVec_subVec as bs xs (by omega), LawfulCommRing.sub_mul]
-    -- `(a*x - b*x) + (dotA - dotB) = (a*x + dotA) - (b*x + dotB)`
+    simp only [subVec, dotVec, dotVec_subVec as bs xs (Nat.succ.inj hlen), LawfulCommRing.sub_mul]
     apply LawfulCommRing.add_left_cancel
       (a := CommRingOps.add (CommRingOps.mul b x) (dotVec bs xs))
     rw [LawfulCommRing.add_sub_cancel_left,
@@ -1408,8 +1439,9 @@ private theorem dotVec_subVec {F : Type} [LawfulCommRing F] :
         LawfulCommRing.add_sub_cancel_left,
         LawfulCommRing.add_assoc,
         LawfulCommRing.add_sub_cancel_left]
-  | [], _ :: _, _ => fun h => by simp at h
-  | _ :: _, [], _ => fun h => by simp at h
+  | [], _ :: _, _ => fun h => by cases h
+  | _ :: _, [], _ => fun h => by cases h
+  termination_by structural a => a
 
 private theorem dotVec_insertIdxVal {F : Type} [LawfulCommRing F] :
     ∀ (p : Nat) (row v : List F) (vp : F),
@@ -1418,21 +1450,23 @@ private theorem dotVec_insertIdxVal {F : Type} [LawfulCommRing F] :
       dotVec row (insertIdxVal p vp v) =
         CommRingOps.add (CommRingOps.mul (row.getD p CommRingOps.zero) vp)
           (dotVec (dropIdx p row) v)
-  | 0, [], _, _, _, hp => by simp at hp
+  | 0, [], _, _, _, hp => by cases hp
   | 0, r0 :: rs, v, vp, _, _ => by
     simp [insertIdxVal, dropIdx, dotVec, List.getD]
-  | p + 1, [], _, _, _, hp => by simp at hp
+  | _ + 1, [], _, _, _, hp => by cases hp
   | p + 1, _ :: tl, [], _, hlen, hp => by
-    cases tl <;> simp at hlen hp
+    cases tl with
+    | nil => exact False.elim (Nat.not_lt_zero p (Nat.lt_of_succ_lt_succ hp))
+    | cons _ _ => cases hlen
   | p + 1, r0 :: rs, w0 :: ws, vp, hlen, hp => by
-    simp only [List.length_cons] at hlen hp
-    have ih := dotVec_insertIdxVal p rs ws vp (by omega) (by omega)
+    have ih := dotVec_insertIdxVal p rs ws vp (Nat.succ.inj hlen) (Nat.lt_of_succ_lt_succ hp)
     simp only [insertIdxVal, dropIdx, dotVec, ih]
     have hget : (r0 :: rs).getD (p + 1) CommRingOps.zero = rs.getD p CommRingOps.zero := by
       simp [List.getD]
     rw [hget, ← LawfulCommRing.add_assoc,
         LawfulCommRing.add_comm (CommRingOps.mul r0 w0) _,
         LawfulCommRing.add_assoc]
+  termination_by structural p => p
 
 private theorem any_true_of_mem {α : Type} {pred : α → Bool} :
     ∀ {xs : List α} {z : α}, z ∈ xs → pred z = true → xs.any pred = true
@@ -1466,7 +1500,7 @@ theorem gauss_nullspace_witness
       v.length = N ∧
       (v.any (fun x => !(decide (x = CommRingOps.zero)))) = true ∧
       ∀ row ∈ rows, dotVec row v = CommRingOps.zero
-  | 0, _, hlt, _ => by omega
+  | 0, _, hlt, _ => by cases hlt
   | n + 1, [], _, _ => by
     dsimp [solveHomogeneous]
     refine ⟨by simp, ?_, by intro _ h; cases h⟩
@@ -1480,15 +1514,17 @@ theorem gauss_nullspace_witness
     | none =>
       dsimp only
       let rsTail := rs.map List.tail
-      have hTailLt : rsTail.length < n := by simp [rsTail]; omega
+      have hTailLt : rsTail.length < n := by
+        rw [List.length_map]
+        exact Nat.lt_of_succ_lt_succ hlt
       have hTailLen : ∀ row' ∈ rsTail, row'.length = n := by
         intro row' hmem
         rw [List.mem_map] at hmem
         rcases hmem with ⟨row, hrow, rfl⟩
         have hl := hrsLen row hrow
         cases row with
-        | nil => simp at hl
-        | cons _ tl => simp at hl ⊢; exact hl
+        | nil => cases hl
+        | cons _ tl => exact Nat.succ.inj hl
       rcases gauss_nullspace_witness n rsTail hTailLt hTailLen with ⟨hvLen, hvAny, hvZero⟩
       dsimp only [rsTail] at hvLen hvAny hvZero
       refine ⟨by simp [hvLen], ?_, ?_⟩
@@ -1500,7 +1536,7 @@ theorem gauss_nullspace_witness
         | tail _ hm =>
           have hl := hrsLen row hm
           cases row with
-          | nil => simp at hl
+          | nil => cases hl
           | cons c cs =>
             simp only [dotVec, LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
             exact hvZero cs (List.mem_map.mpr ⟨c :: cs, hm, rfl⟩)
@@ -1513,19 +1549,24 @@ theorem gauss_nullspace_witness
       have hrDropLen : rDrop.length = n := by
         dsimp only [rDrop]
         have h := dropIdx_length p r hpLt
-        omega
+        rw [hrLen] at h
+        exact Nat.succ.inj h
       let elimRow := fun (row : List F) =>
         subVec (dropIdx p row) (scaleVec (CommRingOps.mul (row.getD p CommRingOps.zero) invRp) rDrop)
       let rs' := rs.map elimRow
-      have hrs'Lt : rs'.length < n := by simp [rs']; omega
+      have hrs'Lt : rs'.length < n := by
+        rw [List.length_map]
+        exact Nat.lt_of_succ_lt_succ hlt
       have hrs'Len : ∀ row' ∈ rs', row'.length = n := by
         intro row' hmem
         rw [List.mem_map] at hmem
         rcases hmem with ⟨row, hrow, rfl⟩
         have hl := hrsLen row hrow
+        have hpRow : p < row.length := by rw [hl, ← hrLen]; exact hpLt
         have hd : (dropIdx p row).length = n := by
-          have h := dropIdx_length p row (by omega)
-          omega
+          have h := dropIdx_length p row hpRow
+          rw [hl] at h
+          exact Nat.succ.inj h
         dsimp [elimRow]
         rw [subVec_length]
         · exact hd
@@ -1534,14 +1575,18 @@ theorem gauss_nullspace_witness
       let v' := solveHomogeneous n rs'
       have hv'Len : v'.length = n := hvLen
       let vp := CommRingOps.neg (CommRingOps.mul invRp (dotVec rDrop v'))
-      have hpLe : p ≤ v'.length := by omega
+      have hpLe : p ≤ v'.length := by
+        have hpSucc : p < n + 1 := by rw [← hrLen]; exact hpLt
+        rw [hv'Len]
+        exact Nat.le_of_lt_succ hpSucc
       refine ⟨?_, ?_, ?_⟩
       · rw [insertIdxVal_length p vp v' hpLe, hv'Len]
       · rcases mem_of_any_true hvAny with ⟨z, hzMem, hzPred⟩
         exact any_true_of_mem (mem_insertIdxVal_of_mem p vp hzMem) hzPred
       · intro row hrow
         have hrowLen : row.length = n + 1 := hlen row hrow
-        rw [dotVec_insertIdxVal p row v' vp (by omega) (by omega)]
+        have hpRow : p < row.length := by rw [hrowLen, ← hrLen]; exact hpLt
+        rw [dotVec_insertIdxVal p row v' vp (by rw [hrowLen, hv'Len]) hpRow]
         cases hrow with
         | head =>
           -- Pivot row `r`: `rp * (-invRp * dot(rDrop, v')) + dot(rDrop, v') = 0`
@@ -1555,8 +1600,9 @@ theorem gauss_nullspace_witness
           have hElimZero : dotVec (elimRow row) v' = CommRingOps.zero :=
             hvZero (elimRow row) (List.mem_map.mpr ⟨row, hm, rfl⟩)
           have hdLen : (dropIdx p row).length = n := by
-            have h := dropIdx_length p row (by omega)
-            omega
+            have h := dropIdx_length p row hpRow
+            rw [hrowLen] at h
+            exact Nat.succ.inj h
           dsimp [elimRow] at hElimZero
           rw [dotVec_subVec _ _ v' (by simp [scaleVec, hdLen, hrDropLen]),
               dotVec_scaleVec] at hElimZero
@@ -1568,6 +1614,7 @@ theorem gauss_nullspace_witness
           dsimp [vp]
           rw [LawfulCommRing.mul_neg, LawfulCommRing.mul_assoc,
               LawfulCommRing.add_left_neg]
+  termination_by structural N => N
 
 /-- Geometric power vector `[1, z, z^2, ..., z^(m-1)]` connecting `dotVec` directly to `evalCoeffs`. -/
 def geomVec {F : Type} [CommRingOps F] (z : F) : Nat → List F
@@ -1584,27 +1631,27 @@ theorem dotVec_geomVec_eq_evalCoeffs {F : Type} [LawfulCommRing F] (z : F) :
       coeffs.length = m →
       dotVec (geomVec z m) coeffs = RoundPoly.evalCoeffs coeffs z
   | 0, [], _ => rfl
-  | 0, _ :: _, h => by simp at h
-  | _ + 1, [], h => by simp at h
+  | 0, _ :: _, h => by cases h
+  | _ + 1, [], h => by cases h
   | k + 1, c :: cs, h => by
-    simp only [List.length_cons] at h
-    have hcs : cs.length = k := by omega
+    have hcs : cs.length = k := Nat.succ.inj h
     have hscale : dotVec ((geomVec z k).map (CommRingOps.mul z)) cs =
         CommRingOps.mul z (dotVec (geomVec z k) cs) :=
       dotVec_scaleVec z (geomVec z k) cs
     simp only [geomVec, dotVec, LawfulCommRing.one_mul, hscale,
                dotVec_geomVec_eq_evalCoeffs z k cs hcs, RoundPoly.evalCoeffs]
+  termination_by structural m => m
 
 theorem dotVec_append_eq {F : Type} [LawfulCommRing F] :
     ∀ (a b x y : List F), a.length = x.length →
       dotVec (a ++ b) (x ++ y) = CommRingOps.add (dotVec a x) (dotVec b y)
   | [], b, [], y, _ => by simp [dotVec, LawfulCommRing.zero_add]
   | a0 :: as, b, x0 :: xs, y, h => by
-    simp only [List.length_cons] at h
-    simp only [List.cons_append, dotVec, dotVec_append_eq as b xs y (by omega),
+    simp only [List.cons_append, dotVec, dotVec_append_eq as b xs y (Nat.succ.inj h),
                LawfulCommRing.add_assoc]
-  | [], _, _ :: _, _, h => by simp at h
-  | _ :: _, _, [], _, h => by simp at h
+  | [], _, _ :: _, _, h => by cases h
+  | _ :: _, _, [], _, h => by cases h
+  termination_by structural a => a
 
 theorem dotVec_replicate_zero {F : Type} [LawfulCommRing F] :
     ∀ (m : Nat) (v : List F), dotVec (List.replicate m CommRingOps.zero) v = CommRingOps.zero
@@ -1983,7 +2030,7 @@ private theorem coeffAt_rawMul_high {F : Type} [LawfulCommRing F] (b : List F) (
     simp [rawMul, coeffAt_nil, LawfulCommRing.zero_mul]
   | 0, a0 :: as, ha => by
     have has0 : ∀ i, coeffAt as i = CommRingOps.zero := fun i => by
-      simpa [coeffAt_cons_succ] using ha (i + 1) (by omega)
+      simpa [coeffAt_cons_succ] using ha (i + 1) (Nat.zero_lt_succ i)
     have htail : ∀ k, coeffAt (CommRingOps.zero :: rawMul as b) k = CommRingOps.zero := by
       intro k
       cases k with
@@ -1991,27 +2038,31 @@ private theorem coeffAt_rawMul_high {F : Type} [LawfulCommRing F] (b : List F) (
       | succ k' => exact coeffAt_rawMul_zero_left b as has0 k'
     refine ⟨fun k hk => ?_, ?_⟩
     · simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, htail k, LawfulCommRing.add_zero]
-      rw [hb k (by omega), LawfulCommRing.mul_zero]
-    · simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, htail db, LawfulCommRing.add_zero,
-                 coeffAt_cons_zero]
+      rw [hb k (by simpa [Nat.zero_add] using hk), LawfulCommRing.mul_zero]
+    · simp only [Nat.zero_add, rawMul, coeffAt_addCoeffs, coeffAt_map_mul, htail db,
+                 LawfulCommRing.add_zero, coeffAt_cons_zero]
   | da + 1, [], _ => by
     refine ⟨fun k _ => by simp [rawMul, coeffAt_nil], ?_⟩
     simp [rawMul, coeffAt_nil, LawfulCommRing.zero_mul]
   | da + 1, a0 :: as, ha => by
     have has : ∀ i, da < i → coeffAt as i = CommRingOps.zero := fun i hi => by
-      simpa [coeffAt_cons_succ] using ha (i + 1) (by omega)
+      simpa [coeffAt_cons_succ] using ha (i + 1) (Nat.succ_lt_succ hi)
     rcases coeffAt_rawMul_high b db hb da as has with ⟨ihHigh, ihTop⟩
     refine ⟨fun k hk => ?_, ?_⟩
     · cases k with
-      | zero => omega
+      | zero => cases hk
       | succ k' =>
         simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_cons_succ]
-        rw [hb (k' + 1) (by omega), ihHigh k' (by omega),
+        have hk1 : db < k' + 1 := Nat.lt_of_le_of_lt (Nat.le_add_left db (da + 1)) hk
+        have hk2 : da + db < k' := Nat.lt_of_succ_lt_succ (by rwa [Nat.succ_add] at hk)
+        rw [hb (k' + 1) hk1, ihHigh k' hk2,
             LawfulCommRing.mul_zero, LawfulCommRing.zero_add]
-    · have hidx : da + 1 + db = (da + db) + 1 := by omega
+    · have hidx : da + 1 + db = (da + db) + 1 := Nat.succ_add da db
       rw [hidx]
       simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_cons_succ]
-      rw [hb ((da + db) + 1) (by omega), LawfulCommRing.mul_zero, LawfulCommRing.zero_add, ihTop]
+      have htopLt : db < (da + db) + 1 := Nat.lt_succ_of_le (Nat.le_add_left db da)
+      rw [hb ((da + db) + 1) htopLt, LawfulCommRing.mul_zero, LawfulCommRing.zero_add, ihTop]
+  termination_by structural da => da
 
 private theorem coeffAt_rawMul_add_left {F : Type} [LawfulCommRing F] (b : List F) :
     ∀ (a1 a2 : List F) (k : Nat),
@@ -2376,11 +2427,19 @@ theorem pMul_length_le {F : Type} [LawfulField F] [DecidableEq F] (a b : List F)
 private theorem coeffAt_monomial {F : Type} [CommRingOps F] :
     ∀ (deg k : Nat) (c : F),
       coeffAt (monomial deg c) k = if k = deg then c else CommRingOps.zero
-  | 0, 0, c => by simp [monomial, coeffAt]
-  | 0, _ + 1, _ => by simp [monomial, coeffAt]
-  | _ + 1, 0, _ => by simp [monomial, List.replicate, coeffAt]
+  | 0, 0, _ => rfl
+  | 0, k + 1, _ => by
+    have hne : k + 1 ≠ 0 := Nat.succ_ne_zero k
+    simp only [hne, ↓reduceIte]; rfl
+  | deg + 1, 0, _ => by
+    have hne : (0 : Nat) ≠ deg + 1 := (Nat.succ_ne_zero deg).symm
+    simp only [hne, ↓reduceIte]; rfl
   | deg + 1, k + 1, c => by
-    simp [monomial, List.replicate, coeffAt_cons_succ, coeffAt_monomial deg k c]
+    have hcons : monomial (deg + 1) c = CommRingOps.zero :: monomial deg c := rfl
+    have heq : (k + 1 = deg + 1) ↔ (k = deg) := ⟨Nat.succ.inj, congrArg Nat.succ⟩
+    rw [hcons, coeffAt_cons_succ, coeffAt_monomial deg k c]
+    simp only [heq]
+  termination_by structural deg => deg
 
 /-- Fuel-bounded constructive Euclidean polynomial division (`0` `WellFounded.fix`, `0` choice). -/
 def polyDivModFuel {F : Type} [LawfulField F] [DecidableEq F] :
@@ -2445,7 +2504,7 @@ private theorem polyDivModFuel_spec
         cases h : b' with
         | nil => exact False.elim (hbNe h)
         | cons _ _ => simp
-      have haPos : 1 ≤ a'.length := by omega
+      have haPos : 1 ≤ a'.length := by dsimp only [a', b'] at hbPos ⊢; omega
       let da := a'.length - 1
       let db := b'.length - 1
       have hlbNe : coeffAt b' db ≠ CommRingOps.zero := by
@@ -2454,7 +2513,6 @@ private theorem polyDivModFuel_spec
       let coef := CommRingOps.mul (coeffAt a' da) (LawfulField.inv (coeffAt b' db))
       let stepQ := monomial (da - db) coef
       let rem1 := pSub a' (pMul stepQ b')
-      -- Show `rem1.length ≤ da ≤ fuel` because the `X^da` leading term cancels!
       have hStepHigh : ∀ i, da - db < i → coeffAt stepQ i = CommRingOps.zero := by
         intro i hi
         rw [coeffAt_monomial]
@@ -2462,12 +2520,12 @@ private theorem polyDivModFuel_spec
       have hbHigh : ∀ j, db < j → coeffAt b' j = CommRingOps.zero :=
         fun j hj => coeffAt_eq_zero_of_ge b' j (by omega)
       rcases coeffAt_rawMul_high b' db hbHigh (da - db) stepQ hStepHigh with ⟨hMulHigh, hMulTop⟩
-      have hdaEq : da - db + db = da := by omega
+      have hdaEq : da - db + db = da := by dsimp only [a', b', da, db]; omega
       rw [hdaEq] at hMulHigh hMulTop
       have hRemLen : rem1.length ≤ da := by
         apply length_trimPoly_le_of_coeffAt_zero _ da
         intro k hk
-        rw [coeffAt_subCoeffs, coeffAt_trimPoly]
+        rw [coeffAt_subCoeffs, pMul, coeffAt_trimPoly (rawMul stepQ b') k]
         if hkEq : k = da then
           subst hkEq
           rw [hMulTop, coeffAt_monomial]
@@ -2476,16 +2534,20 @@ private theorem polyDivModFuel_spec
           rw [LawfulCommRing.mul_assoc, LawfulField.inv_mul_cancel hlbNe,
               LawfulCommRing.mul_one, LawfulCommRing.sub_self]
         else
-          rw [coeffAt_eq_zero_of_ge a' k (by omega), hMulHigh k (by omega),
+          rw [coeffAt_eq_zero_of_ge a' k (by dsimp only [da] at hk hkEq; omega),
+              hMulHigh k (by omega),
               LawfulCommRing.sub_self]
       have hRemTrim : IsTrimmed rem1 := trimPoly_idem _
       have hRemFuel : (trimPoly rem1).length ≤ fuel := by
-        rw [hRemTrim]; omega
+        rw [hRemTrim]
+        dsimp only [a', da] at hRemLen
+        omega
       have hb'Ne : trimPoly b' ≠ [] := by rwa [trimPoly_idem]
       have ih := polyDivModFuel_spec fuel rem1 b' hb'Ne hRemFuel
       let qr := polyDivModFuel fuel rem1 b'
       rcases ih with ⟨hqTrim, hrTrim, hRemDecomp, hrLt⟩
-      rw [hRemTrim, trimPoly_idem] at hRemDecomp hrLt
+      rw [hRemTrim] at hRemDecomp
+      rw [trimPoly_idem] at hrLt
       refine ⟨trimPoly_idem _, hrTrim, ?_, hrLt⟩
       -- `a' = pMul stepQ b' + rem1 = pMul stepQ b + (pMul qr.1 b + qr.2) = pMul (stepQ + qr.1) b + qr.2`
       rw [pMul_pAdd_left, ← pMul_trimPoly_right stepQ b, ← pMul_trimPoly_right qr.1 b,
@@ -2493,6 +2555,7 @@ private theorem polyDivModFuel_spec
       have hcancel := pAdd_pSub_cancel a' (pMul stepQ b')
       rw [trimPoly_idem] at hcancel
       exact hcancel.symm
+  termination_by structural fuel => fuel
 
 /-- **Constructive Euclidean Division Specification (`polyDivMod_spec`)**:
     For any `a, b : List F` with `trimPoly b ≠ []`, `polyDivMod a b = (q, r)` produces canonical
@@ -2533,13 +2596,14 @@ theorem exactDiv_of_dvdTrim
     (a g : List F) (hgNe : trimPoly g ≠ []) (hdvd : DvdTrim g a) :
     let (q, r) := polyDivMod a g
     IsTrimmed q ∧ r = [] ∧ trimPoly a = pMul g q := by
-  rcases polyDivMod_spec a g hgNe with ⟨hqTrim, hrTrim, hDecomp, hrLt⟩
+  have hspec := polyDivMod_spec a g hgNe
+  dsimp only at hspec ⊢
+  rcases hspec with ⟨hqTrim, hrTrim, hDecomp, hrLt⟩
   rcases hdvd with ⟨k, hk⟩
-  -- `r = a - q*g = g*k - g*q = g*(k - q)`, and `r.length < (trimPoly g).length` forces `r = []`!
   have hrEq : trimPoly (polyDivMod a g).2 = pMul (trimPoly g) (pSub k (polyDivMod a g).1) := by
     have h1 := pSub_pAdd_cancel_left (pMul (polyDivMod a g).1 g) (polyDivMod a g).2
     rw [← hDecomp, hk, pMul_comm (polyDivMod a g).1 g, ← pMul_pSub_right,
-        pMul_trimPoly_left] at h1
+        ← pMul_trimPoly_left g] at h1
     exact h1.symm
   rw [hrTrim] at hrEq
   have hrNil : (polyDivMod a g).2 = [] := by
@@ -2586,13 +2650,14 @@ private theorem polyGcdFuel_spec
       IsTrimmed g ∧
       DvdTrim g a ∧ DvdTrim g b ∧
       (∀ d : List F, DvdTrim d a → DvdTrim d b → DvdTrim d g)
-  | 0, _, _, hlt => by omega
+  | 0, _, _, hlt => by cases hlt
   | fuel + 1, a, b, hlt => by
     dsimp only [polyGcdFuel]
     if hb0 : trimPoly b = [] then
       simp only [hb0, ↓reduceIte]
       refine ⟨trimPoly_idem a, ?_, ?_, ?_⟩
-      · exact ⟨[CommRingOps.one], (pMul_one_right (trimPoly a)).symm.trans (by simp [pMul, trimPoly_idem])⟩
+      · refine ⟨[CommRingOps.one], ?_⟩
+        rw [pMul_one_right, trimPoly_idem]
       · exact ⟨[], by rw [hb0, (pMul_eq_nil_iff _ []).mpr (.inr rfl)]⟩
       · intro d hda _
         rcases hda with ⟨k, hk⟩
@@ -2600,11 +2665,17 @@ private theorem polyGcdFuel_spec
     else
       simp only [hb0, ↓reduceIte]
       have hb'Ne : trimPoly (trimPoly b) ≠ [] := by rwa [trimPoly_idem]
-      rcases polyDivMod_spec (trimPoly a) (trimPoly b) hb'Ne with ⟨hqT, hrT, hDecomp, hrLt⟩
-      rw [trimPoly_idem, trimPoly_idem] at hDecomp hrLt
+      have hdivSpec := polyDivMod_spec (trimPoly a) (trimPoly b) hb'Ne
+      dsimp only at hdivSpec
+      rcases hdivSpec with ⟨hqT, hrT, hDecomp, hrLt⟩
+      rw [trimPoly_idem] at hDecomp
+      rw [trimPoly_idem] at hrLt
       let q := (polyDivMod (trimPoly a) (trimPoly b)).1
       let r := (polyDivMod (trimPoly a) (trimPoly b)).2
-      have hrFuel : (trimPoly r).length < fuel := by rw [hrT]; omega
+      change trimPoly a = pAdd (pMul q (trimPoly b)) r at hDecomp
+      have hrFuel : (trimPoly r).length < fuel := by
+        rw [hrT]
+        exact Nat.lt_of_lt_of_le hrLt (Nat.le_of_lt_succ hlt)
       rcases polyGcdFuel_spec fuel (trimPoly b) r hrFuel with ⟨hgT, hgb, hgr, hgUniv⟩
       let g := polyGcdFuel fuel (trimPoly b) r
       refine ⟨hgT, ?_, ?_, ?_⟩
@@ -2613,8 +2684,16 @@ private theorem polyGcdFuel_spec
         rcases hgr with ⟨kr, hkr⟩
         rw [trimPoly_idem] at hkb
         rw [hrT] at hkr
+        change trimPoly b = pMul g kb at hkb
+        change r = pMul g kr at hkr
         refine ⟨pAdd (pMul kb q) kr, ?_⟩
-        rw [hDecomp, pMul_comm q (trimPoly b), hkb, pMul_assoc, ← pMul_pAdd_right]
+        calc trimPoly a
+            = pAdd (pMul q (trimPoly b)) r := hDecomp
+          _ = pAdd (pMul (trimPoly b) q) r := by rw [pMul_comm q (trimPoly b)]
+          _ = pAdd (pMul (pMul g kb) q) r := congrArg (fun x => pAdd (pMul x q) r) hkb
+          _ = pAdd (pMul (pMul g kb) q) (pMul g kr) := congrArg (pAdd (pMul (pMul g kb) q)) hkr
+          _ = pAdd (pMul g (pMul kb q)) (pMul g kr) := by rw [pMul_assoc]
+          _ = pMul g (pAdd (pMul kb q) kr) := (pMul_pAdd_right g _ _).symm
       · rcases hgb with ⟨kb, hkb⟩
         rw [trimPoly_idem] at hkb
         exact ⟨kb, hkb⟩
@@ -2629,6 +2708,7 @@ private theorem polyGcdFuel_spec
           rw [← hDecomp, hka, pMul_comm q (trimPoly b), hkb,
               pMul_assoc, ← pMul_pSub_right] at hrSub
           exact ⟨pSub ka (pMul kb q), hrSub.symm⟩
+  termination_by structural fuel => fuel
 
 /-- **Constructive Polynomial GCD Specification (`polyGcd_spec`)**. -/
 theorem polyGcd_spec
@@ -2698,10 +2778,17 @@ theorem welch_berlekamp_affine_proximity_gap
     List.replicate N₀ CommRingOps.zero ++ geomVec z N₁ ++ (geomVec z N₂).map (CommRingOps.mul (g z))
   let rows := D.flatMap (fun z => [rowF z, rowG z])
   have hRowsLen : rows.length = 2 * D.length := by
-    dsimp [rows]
-    induction D with
-    | nil => rfl
-    | cons _ tl ih => simp [List.flatMap_cons, ih]; omega
+    have aux : ∀ xs : List F, (xs.flatMap (fun z => [rowF z, rowG z])).length = 2 * xs.length := by
+      intro xs
+      induction xs with
+      | nil => rfl
+      | cons x tl ih =>
+        have hcons : (x :: tl).flatMap (fun z => [rowF z, rowG z]) =
+            [rowF x, rowG x] ++ tl.flatMap (fun z => [rowF z, rowG z]) := List.flatMap_cons
+        rw [hcons, List.length_append, ih]
+        simp
+        omega
+    exact aux D
   have hRowsLt : rows.length < N := by
     rw [hRowsLen]; dsimp [N, N₀, N₁, N₂]; omega
   have hRowWidth : ∀ row ∈ rows, row.length = N := by
@@ -2711,24 +2798,36 @@ theorem welch_berlekamp_affine_proximity_gap
     rcases hmem with ⟨z, _, hr⟩
     simp only [List.mem_cons, List.not_mem_nil, or_false] at hr
     rcases hr with rfl | rfl <;>
-      simp [rowF, rowG, List.length_append, geomVec_length]
+      · simp [rowF, rowG, List.length_append, geomVec_length, N]
+        omega
   rcases gauss_nullspace_witness N rows hRowsLt hRowWidth with ⟨hvLen, hvAny, hvZero⟩
   let v := solveHomogeneous N rows
+  have hvLen' : v.length = N₀ + N₁ + N₂ := hvLen
   let u₀ := v.take N₀
   let u₁ := (v.drop N₀).take N₁
   let Q₁ := v.drop (N₀ + N₁)
-  have hu₀Len : u₀.length = N₀ := by dsimp [u₀]; rw [List.length_take]; omega
-  have hu₁Len : u₁.length = N₁ := by dsimp [u₁]; rw [List.length_take, List.length_drop]; omega
-  have hQ₁Len : Q₁.length = N₂ := by dsimp [Q₁]; rw [List.length_drop]; omega
+  have hu₀Len : u₀.length = N₀ := by
+    dsimp only [u₀]
+    exact List.length_take_of_le (by dsimp only [N₀, N₁, N₂] at hvLen' ⊢; omega)
+  have hu₁Len : u₁.length = N₁ := by
+    dsimp only [u₁]
+    apply List.length_take_of_le
+    rw [List.length_drop]
+    dsimp only [N₀, N₁, N₂] at hvLen' ⊢
+    omega
+  have hQ₁Len : Q₁.length = N₂ := by
+    dsimp only [Q₁]
+    rw [List.length_drop]
+    dsimp only [N₀, N₁, N₂] at hvLen' ⊢
+    omega
   have hvSplit : v = (u₀ ++ u₁) ++ Q₁ := by
     have h1 : v = v.take N₀ ++ v.drop N₀ := (List.take_append_drop N₀ v).symm
     have h2 : v.drop N₀ = (v.drop N₀).take N₁ ++ (v.drop N₀).drop N₁ :=
       (List.take_append_drop N₁ (v.drop N₀)).symm
-    rw [List.drop_drop, Nat.add_comm N₁ N₀] at h2
+    rw [List.drop_drop] at h2
     calc v = u₀ ++ v.drop N₀ := h1
       _ = u₀ ++ (u₁ ++ Q₁) := congrArg (u₀ ++ ·) h2
       _ = (u₀ ++ u₁) ++ Q₁ := (List.append_assoc u₀ u₁ Q₁).symm
-  -- Evaluate `rowF z` and `rowG z` on `v` for every `z ∈ D`:
   have hInterpF : ∀ z ∈ D,
       CommRingOps.add (RoundPoly.evalCoeffs u₀ z)
         (CommRingOps.mul (f z) (RoundPoly.evalCoeffs Q₁ z)) = CommRingOps.zero := by
@@ -2742,6 +2841,7 @@ theorem welch_berlekamp_affine_proximity_gap
         dotVec_append_eq _ _ u₀ u₁ (by simp [geomVec_length, hu₀Len]),
         dotVec_geomVec_eq_evalCoeffs z N₀ u₀ hu₀Len,
         dotVec_replicate_zero, LawfulCommRing.add_zero,
+        show List.map (CommRingOps.mul (f z)) (geomVec z N₂) = scaleVec (f z) (geomVec z N₂) from rfl,
         dotVec_scaleVec (f z),
         dotVec_geomVec_eq_evalCoeffs z N₂ Q₁ hQ₁Len] at h0
     exact h0
@@ -2758,10 +2858,10 @@ theorem welch_berlekamp_affine_proximity_gap
         dotVec_append_eq _ _ u₀ u₁ (by simp [hu₀Len]),
         dotVec_replicate_zero, LawfulCommRing.zero_add,
         dotVec_geomVec_eq_evalCoeffs z N₁ u₁ hu₁Len,
+        show List.map (CommRingOps.mul (g z)) (geomVec z N₂) = scaleVec (g z) (geomVec z N₂) from rfl,
         dotVec_scaleVec (g z),
         dotVec_geomVec_eq_evalCoeffs z N₂ Q₁ hQ₁Len] at h0
     exact h0
-  -- 2. Prove `trimPoly Q₁ ≠ []`:
   have hQ₁Ne : trimPoly Q₁ ≠ [] := by
     intro hQ0
     have hQEval0 : ∀ z, RoundPoly.evalCoeffs Q₁ z = CommRingOps.zero := by
@@ -2779,7 +2879,7 @@ theorem welch_berlekamp_affine_proximity_gap
       if hu1 : trimPoly u₁ = [] then exact hu1
       else
         rcases exists_nonroot_of_trim_ne_nil (trimPoly_idem u₁) hu1 hD
-          (Nat.le_trans (trimPoly_length_le u₁) (by rw [hu₁Len]; omega)) with ⟨z, hzD, hzNe⟩
+          (Nat.le_trans (trimPoly_length_le u₁) (by rw [hu₁Len]; dsimp only [N₁]; omega)) with ⟨z, hzD, hzNe⟩
         rw [evalCoeffs_trimPoly] at hzNe
         have hg := hInterpG z hzD
         rw [hQEval0 z, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hg
@@ -2790,6 +2890,7 @@ theorem welch_berlekamp_affine_proximity_gap
       have hc := (trimPoly_eq_nil_iff w).mp hw idx
       simpa [coeffAt, List.getD, hidx] using hc
     rcases mem_of_any_true hvAny with ⟨x, hxMem, hxPred⟩
+    change x ∈ v at hxMem
     rw [hvSplit, List.mem_append, List.mem_append] at hxMem
     have hx0 : x = CommRingOps.zero := by
       rcases hxMem with (hx0 | hx1) | hx2
@@ -2797,32 +2898,41 @@ theorem welch_berlekamp_affine_proximity_gap
       · exact hallZero u₁ hu₁Nil x hx1
       · exact hallZero Q₁ hQ0 x hx2
     simp [hx0] at hxPred
-  -- 3. Factor out `gcdPoly := polyGcd u₀ (polyGcd u₁ Q₁)` (`≠ []`):
   let g12 := polyGcd u₁ Q₁
   let gcdPoly := polyGcd u₀ g12
-  rcases polyGcd_spec u₁ Q₁ with ⟨hg12Trim, hg12Dvd1, hg12DvdQ, hg12Univ⟩
-  rcases polyGcd_spec u₀ g12 with ⟨hgcdTrim, hgcdDvd0, hgcdDvd12, hgcdUniv⟩
+  have hg12Spec := polyGcd_spec u₁ Q₁
+  dsimp only at hg12Spec
+  rcases hg12Spec with ⟨hg12Trim, hg12Dvd1, hg12DvdQ, hg12Univ⟩
+  have hgcdSpec := polyGcd_spec u₀ g12
+  dsimp only at hgcdSpec
+  rcases hgcdSpec with ⟨hgcdTrim, hgcdDvd0, hgcdDvd12, hgcdUniv⟩
+  change IsTrimmed gcdPoly at hgcdTrim
   have hgcdDvd1 : DvdTrim gcdPoly u₁ := dvdTrim_trans hgcdDvd12 hg12Dvd1
   have hgcdDvdQ : DvdTrim gcdPoly Q₁ := dvdTrim_trans hgcdDvd12 hg12DvdQ
   have hgcdNe : trimPoly gcdPoly ≠ [] := by
     rw [hgcdTrim]
     intro h0
+    change gcdPoly = [] at h0
     rcases hgcdDvdQ with ⟨k, hk⟩
     rw [h0, (pMul_eq_nil_iff [] k).mpr (.inl rfl)] at hk
     exact hQ₁Ne hk
-  rcases exactDiv_of_dvdTrim u₀ gcdPoly hgcdNe hgcdDvd0 with ⟨hũ₀Trim, _, hu₀Fact⟩
-  rcases exactDiv_of_dvdTrim u₁ gcdPoly hgcdNe hgcdDvd1 with ⟨hũ₁Trim, _, hu₁Fact⟩
-  rcases exactDiv_of_dvdTrim Q₁ gcdPoly hgcdNe hgcdDvdQ with ⟨hQ̃₁Trim, _, hQ₁Fact⟩
-  let ũ₀ := (polyDivMod u₀ gcdPoly).1
-  let ũ₁ := (polyDivMod u₁ gcdPoly).1
-  let Q̃₁ := (polyDivMod Q₁ gcdPoly).1
-  have hQ̃₁Ne : Q̃₁ ≠ [] := by
+  have hex0 := exactDiv_of_dvdTrim u₀ gcdPoly hgcdNe hgcdDvd0
+  have hex1 := exactDiv_of_dvdTrim u₁ gcdPoly hgcdNe hgcdDvd1
+  have hexQ := exactDiv_of_dvdTrim Q₁ gcdPoly hgcdNe hgcdDvdQ
+  dsimp only at hex0 hex1 hexQ
+  rcases hex0 with ⟨hu0RedTrim, _, hu₀Fact⟩
+  rcases hex1 with ⟨hu1RedTrim, _, hu₁Fact⟩
+  rcases hexQ with ⟨hQ1RedTrim, _, hQ₁Fact⟩
+  let u0Red := (polyDivMod u₀ gcdPoly).1
+  let u1Red := (polyDivMod u₁ gcdPoly).1
+  let Q1Red := (polyDivMod Q₁ gcdPoly).1
+  have hQ1RedNe : Q1Red ≠ [] := by
     intro h0
+    change (polyDivMod Q₁ gcdPoly).1 = [] at h0
     rw [h0, (pMul_eq_nil_iff gcdPoly []).mpr (.inr rfl)] at hQ₁Fact
     exact hQ₁Ne hQ₁Fact
-  -- Coprimality: any trimmed `h` dividing `(ũ₀, ũ₁, Q̃₁)` has `h.length ≤ 1`:
   have hCoprime : ∀ h : List F, IsTrimmed h →
-      DvdTrim h ũ₀ → DvdTrim h ũ₁ → DvdTrim h Q̃₁ → h.length ≤ 1 := by
+      DvdTrim h u0Red → DvdTrim h u1Red → DvdTrim h Q1Red → h.length ≤ 1 := by
     intro h hhTrim hd0 hd1 hdQ
     if hhNil : h = [] then
       rw [hhNil]; simp
@@ -2830,31 +2940,39 @@ theorem welch_berlekamp_affine_proximity_gap
       rcases hd0 with ⟨k0, hk0⟩
       rcases hd1 with ⟨k1, hk1⟩
       rcases hdQ with ⟨kQ, hkQ⟩
-      rw [hũ₀Trim] at hk0; rw [hũ₁Trim] at hk1; rw [hQ̃₁Trim] at hkQ
+      rw [hu0RedTrim] at hk0; rw [hu1RedTrim] at hk1; rw [hQ1RedTrim] at hkQ
       have hdvd0 : DvdTrim (pMul gcdPoly h) u₀ :=
-        ⟨k0, by rw [hu₀Fact, hk0, pMul_assoc]⟩
+        ⟨k0, by rw [hu₀Fact]; change _ = _; rw [hk0, pMul_assoc]⟩
       have hdvd1 : DvdTrim (pMul gcdPoly h) u₁ :=
-        ⟨k1, by rw [hu₁Fact, hk1, pMul_assoc]⟩
+        ⟨k1, by rw [hu₁Fact]; change _ = _; rw [hk1, pMul_assoc]⟩
       have hdvdQ : DvdTrim (pMul gcdPoly h) Q₁ :=
-        ⟨kQ, by rw [hQ₁Fact, hkQ, pMul_assoc]⟩
+        ⟨kQ, by rw [hQ₁Fact]; change _ = _; rw [hkQ, pMul_assoc]⟩
       have hdvdGcd : DvdTrim (pMul gcdPoly h) gcdPoly :=
         hgcdUniv _ hdvd0 (hg12Univ _ hdvd1 hdvdQ)
       rcases hdvdGcd with ⟨m, hm⟩
+      change trimPoly gcdPoly = pMul (pMul gcdPoly h) m at hm
       rw [hgcdTrim, pMul_assoc] at hm
       have hhmNe : trimPoly (pMul h m) ≠ [] := by
-        rw [trimPoly_idem]
         intro h0
-        rw [h0, (pMul_eq_nil_iff gcdPoly []).mpr (.inr rfl)] at hm
-        exact hgcdNe (by rwa [hgcdTrim])
+        have h1 : pMul h m = [] := by
+          have ht : trimPoly (pMul h m) = pMul h m := trimPoly_idem _
+          rwa [ht] at h0
+        rw [h1, (pMul_eq_nil_iff gcdPoly []).mpr (.inr rfl)] at hm
+        exact hgcdNe (by rw [hgcdTrim]; exact hm)
       have hgNeRaw : gcdPoly ≠ [] := by rwa [hgcdTrim] at hgcdNe
+      have hgPos : 1 ≤ gcdPoly.length := by
+        cases hgEq : gcdPoly with
+        | nil => exact False.elim (hgNeRaw hgEq)
+        | cons _ _ => simp
       have hlen1 := (pMul_length_of_trimmed_ne_nil hgcdTrim (trimPoly_idem _) hgNeRaw
         (by simpa [trimPoly_idem] using hhmNe)).1
-      rw [← hm] at hlen1
+      rw [pMul_trimPoly_right, ← hm] at hlen1
+      have hptHm : trimPoly (pMul h m) = pMul h m := trimPoly_idem _
+      rw [hptHm] at hlen1
       have hmNe : trimPoly m ≠ [] := by
         intro hm0
         rw [(pMul_eq_nil_iff h m).mpr (.inr hm0)] at hhmNe
         exact hhmNe rfl
-      rw [← pMul_trimPoly_right h m] at hlen1
       have hlen2 := (pMul_length_of_trimmed_ne_nil hhTrim (trimPoly_idem m) hhNil hmNe).1
       rw [pMul_trimPoly_right] at hlen2
       have hmPos : 1 ≤ (trimPoly m).length := by
@@ -2862,20 +2980,33 @@ theorem welch_berlekamp_affine_proximity_gap
         | nil => exact False.elim (hmNe hmEq)
         | cons _ _ => simp
       omega
-  -- 4. Reduced identity `ũ₀ + (α + β X) ũ₁ + Q̃₁ · P_of p = []` for every `p = (α, β) ∈ badPairs`:
+  have hNegAdd : ∀ (x y : F),
+      CommRingOps.add (CommRingOps.neg x) (CommRingOps.neg y) =
+        CommRingOps.neg (CommRingOps.add x y) := by
+    intro x y
+    apply LawfulCommRing.add_left_cancel (a := CommRingOps.add x y)
+    rw [LawfulCommRing.add_right_neg,
+        LawfulCommRing.add_assoc x y _,
+        ← LawfulCommRing.add_assoc y (CommRingOps.neg x) (CommRingOps.neg y),
+        LawfulCommRing.add_comm y (CommRingOps.neg x),
+        LawfulCommRing.add_assoc (CommRingOps.neg x) y (CommRingOps.neg y),
+        LawfulCommRing.add_right_neg, LawfulCommRing.add_zero,
+        LawfulCommRing.add_right_neg]
   have hReduced : ∀ p ∈ badPairs,
-      pAdd (pAdd ũ₀ (pMul [p.1, p.2] ũ₁)) (pMul Q̃₁ (P_of p)) = [] := by
+      pAdd (pAdd u0Red (pMul [p.1, p.2] u1Red)) (pMul Q1Red (P_of p)) = [] := by
     intro p hpMem
     let R := pAdd (pAdd u₀ (pMul [p.1, p.2] u₁)) (pMul Q₁ (P_of p))
     have hRLen : R.length ≤ A := by
       have hL1 : (pMul [p.1, p.2] u₁).length ≤ A := by
-        have h := pMul_length_le [p.1, p.2] u₁ 1 (A - 2) (by simp) (by rw [hu₁Len]; omega)
+        have h := pMul_length_le [p.1, p.2] u₁ 1 (A - 2) (by simp)
+          (by rw [hu₁Len]; dsimp only [N₁]; omega)
         omega
       have hL2 : (pMul Q₁ (P_of p)).length ≤ A := by
-        have h := pMul_length_le Q₁ (P_of p) (A - d - 1) d (by rw [hQ₁Len]; omega) (hBadDeg p hpMem)
+        have h := pMul_length_le Q₁ (P_of p) (A - d - 1) d
+          (by rw [hQ₁Len]; dsimp only [N₂]; omega) (hBadDeg p hpMem)
         omega
       exact pAdd_length_le _ _ A
-        (pAdd_length_le _ _ A (by rw [hu₀Len]) hL1) hL2
+        (pAdd_length_le _ _ A (by rw [hu₀Len]; exact Nat.le_refl A) hL1) hL2
     let S_p := D.filter (fun z =>
       decide (RoundPoly.evalCoeffs (P_of p) z =
         CommRingOps.add (f z)
@@ -2918,93 +3049,101 @@ theorem welch_berlekamp_affine_proximity_gap
         (CommRingOps.mul qVal (CommRingOps.add (f z) (CommRingOps.mul lineVal (g z)))) =
         CommRingOps.zero
       rw [LawfulCommRing.mul_neg, ← LawfulCommRing.mul_assoc lineVal (g z) qVal,
-          ← LawfulCommRing.neg_add, LawfulCommRing.left_distrib,
+          hNegAdd, LawfulCommRing.left_distrib,
           LawfulCommRing.mul_comm qVal (f z), LawfulCommRing.mul_comm qVal _,
           LawfulCommRing.add_left_neg]
     have hRNil : R = [] := by
       if hRNe : R = [] then exact hRNe
       else
-        rcases exists_nonroot_of_trim_ne_nil (trimPoly_idem _) hRNe hSpNd (by omega) with
+        have hRT : IsTrimmed R := trimPoly_idem _
+        rcases exists_nonroot_of_trim_ne_nil hRT hRNe hSpNd (Nat.le_trans hRLen hSpLen) with
           ⟨z, hzSp, hzNe⟩
         exact False.elim (hzNe (hRZeroOnSp z hzSp))
-    -- Factor `gcdPoly` out of `R`:
-    have hRFact : R = pMul gcdPoly (pAdd (pAdd ũ₀ (pMul [p.1, p.2] ũ₁)) (pMul Q̃₁ (P_of p))) := by
-      dsimp [R]
+    have hRFact : R = pMul gcdPoly (pAdd (pAdd u0Red (pMul [p.1, p.2] u1Red)) (pMul Q1Red (P_of p))) := by
+      dsimp [R, u0Red, u1Red, Q1Red]
       rw [← pAdd_trimPoly_left u₀, hu₀Fact,
           ← pMul_trimPoly_right [p.1, p.2] u₁, hu₁Fact,
-          pMul_comm [p.1, p.2] (pMul gcdPoly ũ₁), pMul_assoc, pMul_comm ũ₁ [p.1, p.2],
+          pMul_comm [p.1, p.2] (pMul gcdPoly (polyDivMod u₁ gcdPoly).1),
+          pMul_assoc, pMul_comm (polyDivMod u₁ gcdPoly).1 [p.1, p.2],
           ← pMul_pAdd_right,
           ← pMul_trimPoly_left Q₁, hQ₁Fact, pMul_assoc,
-          pAdd_trimPoly_left, ← pMul_pAdd_right]
+          ← pMul_pAdd_right]
     rw [hRNil] at hRFact
     rcases (pMul_eq_nil_iff gcdPoly _).mp hRFact.symm with hg0 | hRed0
     · exact False.elim (hgcdNe hg0)
-    · rwa [trimPoly_idem] at hRed0
-  -- Helper identity `pMul [α, β] w = pAdd (pScale α w) (pScale β (0 :: w))`:
+    · have hRedT : IsTrimmed (pAdd (pAdd u0Red (pMul [p.1, p.2] u1Red)) (pMul Q1Red (P_of p))) :=
+        trimPoly_idem _
+      rwa [hRedT] at hRed0
   have hLinearMul : ∀ (α β : F) (w : List F),
       pMul [α, β] w = pAdd (pScale α w) (pScale β (CommRingOps.zero :: w)) := by
     intro α β w
+    have hz1 : ∀ m, coeffAt ([CommRingOps.zero] : List F) m = CommRingOps.zero := by
+      intro m; cases m <;> rfl
     unfold pMul pAdd pScale
     rw [trimPoly_eq_iff_coeffAt]
     intro k
     rw [coeffAt_addCoeffs, coeffAt_trimPoly, coeffAt_trimPoly, coeffAt_map_mul, coeffAt_map_mul]
     simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul]
     cases k with
-    | zero => simp [coeffAt, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    | zero => simp only [coeffAt_cons_zero, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
     | succ k' =>
-      simp [coeffAt_cons_succ, coeffAt_addCoeffs, coeffAt_map_mul, coeffAt_nil,
-            LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
-  -- 5. Branch constructively on `Q̃₁.length`:
-  have hQ̃₁Pos : 1 ≤ Q̃₁.length := by
-    cases Q̃₁ with | nil => contradiction | cons _ _ => simp
-  if hQ̃₁One : Q̃₁.length = 1 then
-    -- Case A: `Q̃₁ = [c]` (`c ≠ 0`), so `P_of p = F_poly + (α + β X) G_poly` identically!
-    have hQ̃₁Form : ∃ c : F, Q̃₁ = [c] ∧ c ≠ CommRingOps.zero := by
-      rcases Q̃₁ with _ | ⟨c, _ | _⟩ <;> simp at hQ̃₁One
-      refine ⟨c, rfl, ?_⟩
-      intro hc0; subst hc0
-      simp [IsTrimmed, trimPoly] at hQ̃₁Trim
-    rcases hQ̃₁Form with ⟨c, hQ̃₁Eq, hcNe⟩
+      simp only [coeffAt_cons_succ, coeffAt_addCoeffs, coeffAt_map_mul, hz1,
+                 LawfulCommRing.add_zero]
+  have hQ1RedPos : 1 ≤ Q1Red.length := by
+    cases hEq : Q1Red with
+    | nil => exact False.elim (hQ1RedNe hEq)
+    | cons _ _ => simp
+  if hQ1RedOne : Q1Red.length = 1 then
+    have hQ1RedForm : ∃ c : F, Q1Red = [c] ∧ c ≠ CommRingOps.zero := by
+      rcases hEqQ : Q1Red with _ | ⟨c, _ | _⟩
+      · rw [hEqQ] at hQ1RedOne; cases hQ1RedOne
+      · refine ⟨c, rfl, ?_⟩
+        intro hc0; subst hc0
+        have ht : IsTrimmed Q1Red := hQ1RedTrim
+        rw [hEqQ] at ht
+        simp [IsTrimmed, trimPoly] at ht
+      · rw [hEqQ] at hQ1RedOne; cases hQ1RedOne
+    rcases hQ1RedForm with ⟨c, hQ1RedEq, hcNe⟩
     let negInvC := CommRingOps.neg (LawfulField.inv c)
-    let F_poly := pScale negInvC ũ₀
-    let G_poly := pScale negInvC ũ₁
+    let F_poly := pScale negInvC u0Red
+    let G_poly := pScale negInvC u1Red
     have hFT : IsTrimmed F_poly := trimPoly_idem _
     have hGT : IsTrimmed G_poly := trimPoly_idem _
     have hPEq : ∀ p ∈ badPairs, trimPoly (P_of p) = pAdd F_poly (pMul [p.1, p.2] G_poly) := by
       intro p hpMem
       have hRed := hReduced p hpMem
-      -- Multiply `ũ₀ + [α,β] ũ₁ + [c] P = []` by `inv c`:
       have hScaleC : ∀ w, pMul [c] w = pScale c w := by
         intro w; unfold pMul pScale; rw [trimPoly_eq_iff_coeffAt]; intro k
-        simp [rawMul, coeffAt_addCoeffs, coeffAt_map_mul]
-        cases k <;> simp [coeffAt, LawfulCommRing.add_zero]
-      rw [hQ̃₁Eq, hScaleC] at hRed
+        simp only [rawMul, coeffAt_addCoeffs, coeffAt_map_mul]
+        cases k with
+        | zero => simp only [coeffAt_cons_zero, LawfulCommRing.add_zero]
+        | succ _ => simp only [coeffAt_cons_succ, coeffAt_nil, LawfulCommRing.add_zero]
+      rw [hQ1RedEq, hScaleC] at hRed
       apply eq_of_isTrimmed_coeffAt _ _ (trimPoly_idem _) (trimPoly_idem _)
       intro k
-      have hc0 := (trimPoly_eq_nil_iff _).mp (by rw [trimPoly_idem]; exact hRed) k
+      have hc0 : coeffAt (pAdd (pAdd u0Red (pMul [p.1, p.2] u1Red)) (pScale c (P_of p))) k =
+          CommRingOps.zero := by
+        rw [hRed, coeffAt_nil]
       rw [coeffAt_pAdd, coeffAt_pAdd, coeffAt_pScale] at hc0
-      -- `coeffAt ũ₀ k + coeffAt ([α,β]*ũ₁) k + c * coeffAt P k = 0`
       have hmul := congrArg (CommRingOps.mul (LawfulField.inv c)) hc0
       rw [LawfulCommRing.mul_zero, LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
           ← LawfulCommRing.mul_assoc (LawfulField.inv c) c _,
           LawfulField.inv_mul_cancel hcNe, LawfulCommRing.one_mul] at hmul
       have hPval : coeffAt (P_of p) k =
           CommRingOps.add
-            (CommRingOps.mul negInvC (coeffAt ũ₀ k))
-            (CommRingOps.mul negInvC (coeffAt (pMul [p.1, p.2] ũ₁) k)) := by
+            (CommRingOps.mul negInvC (coeffAt u0Red k))
+            (CommRingOps.mul negInvC (coeffAt (pMul [p.1, p.2] u1Red) k)) := by
         dsimp [negInvC]
-        rw [LawfulCommRing.neg_mul, LawfulCommRing.neg_mul, ← LawfulCommRing.neg_add]
+        rw [LawfulCommRing.neg_mul, LawfulCommRing.neg_mul, hNegAdd]
         apply LawfulCommRing.add_left_cancel
-          (a := CommRingOps.add (CommRingOps.mul (LawfulField.inv c) (coeffAt ũ₀ k))
-                  (CommRingOps.mul (LawfulField.inv c) (coeffAt (pMul [p.1, p.2] ũ₁) k)))
+          (a := CommRingOps.add (CommRingOps.mul (LawfulField.inv c) (coeffAt u0Red k))
+                  (CommRingOps.mul (LawfulField.inv c) (coeffAt (pMul [p.1, p.2] u1Red) k)))
         rw [LawfulCommRing.add_right_neg, hmul]
-      rw [coeffAt_trimPoly, hPval, coeffAt_pAdd,
-          pMul_pScale_right negInvC [p.1, p.2] ũ₁, coeffAt_pScale]
-      dsimp [F_poly]
-      rw [coeffAt_pScale]
+      rw [coeffAt_trimPoly, hPval]
+      change _ = coeffAt (pAdd F_poly (pMul [p.1, p.2] G_poly)) k
+      rw [coeffAt_pAdd,
+          pMul_pScale_right negInvC [p.1, p.2] u1Red, coeffAt_pScale, coeffAt_pScale]
     if hDegFG : F_poly.length ≤ d + 1 ∧ G_poly.length ≤ d then
-      -- Subcase A1: `(F_poly, G_poly)` has admissible degree `(≤ d, ≤ d - 1)`, so every `p ∈ badPairs`
-      -- has at least `2` accidental agreements with `(F_poly, G_poly)` on `D`!
       have hSubBad : ∀ p ∈ badPairs,
           p ∈ (prodPool S).filter (fun q =>
             decide (2 ≤ (D.filter (isAccidentalAgreement F_poly G_poly f g q.1 q.2)).length)) := by
@@ -3030,7 +3169,7 @@ theorem welch_berlekamp_affine_proximity_gap
           if hle1 : dis.length ≤ 1 then
             exact False.elim (hBadExc p hpMem ⟨F_poly, G_poly, hDegFG.1, hDegFG.2, hPolyEq, hle1⟩)
           else
-            omega
+            exact Nat.lt_of_not_ge hle1
         have hDisNd : dis.Nodup := List.Pairwise.filter _ (List.Pairwise.filter _ hD)
         have hDisSub : ∀ z ∈ dis, z ∈ D.filter (isAccidentalAgreement F_poly G_poly f g p.1 p.2) := by
           intro z hz
@@ -3048,10 +3187,17 @@ theorem welch_berlekamp_affine_proximity_gap
         (committed_polynomial_pair_bad_lines_le_choose2 F_poly G_poly f g D S hD hS)
       exact Nat.le_trans hle (Nat.le_max_right _ _)
     else
-      -- Subcase A2: `max (F_poly.length - 1) G_poly.length ≥ d + 1` gives a non-trivial affine duet!
       let mTop := Nat.max (F_poly.length - 1) G_poly.length
-      have hmTopGe : d + 1 ≤ mTop := by dsimp [mTop]; omega
-      have hmTopPos : 1 ≤ mTop := by omega
+      have hmTopGe : d + 1 ≤ mTop := by
+        if h1 : F_poly.length ≤ d + 1 then
+          if h2 : G_poly.length ≤ d then
+            exact False.elim (hDegFG ⟨h1, h2⟩)
+          else
+            exact Nat.le_trans (Nat.lt_of_not_ge h2) (Nat.le_max_right _ _)
+        else
+          have h2 : d + 1 ≤ F_poly.length - 1 := Nat.sub_le_sub_right (Nat.lt_of_not_ge h1) 1
+          exact Nat.le_trans h2 (Nat.le_max_left _ _)
+      have hmTopPos : 1 ≤ mTop := Nat.le_trans (Nat.le_add_left 1 d) hmTopGe
       let Δ₀ := coeffAt F_poly mTop
       let Δ₁ := coeffAt G_poly mTop
       let Δ₂ := coeffAt G_poly (mTop - 1)
@@ -3059,17 +3205,19 @@ theorem welch_berlekamp_affine_proximity_gap
         if hFG : G_poly.length ≤ F_poly.length - 1 then
           have hmEq : mTop = F_poly.length - 1 := Nat.max_eq_left hFG
           have hFNe : F_poly ≠ [] := by
-            intro h0; rw [h0] at hmEq; simp at hmEq; omega
+            intro h0; rw [h0] at hmEq; rw [hmEq] at hmTopPos; cases hmTopPos
           have hLead := leadCoeff_ne_zero_of_trimPoly_ne_nil F_poly (by rwa [hFT])
           rw [hFT, ← hmEq] at hLead
           exact .inl hLead
         else
-          have hmEq : mTop = G_poly.length := Nat.max_eq_right (by omega)
+          have hmEq : mTop = G_poly.length :=
+            Nat.max_eq_right (Nat.le_of_lt (Nat.lt_of_not_ge hFG))
           have hGNe : G_poly ≠ [] := by
-            intro h0; rw [h0] at hmEq; omega
+            intro h0; rw [h0] at hmEq; rw [hmEq] at hmTopPos; cases hmTopPos
           have hLead := leadCoeff_ne_zero_of_trimPoly_ne_nil G_poly (by rwa [hGT])
-          rw [hGT, ← hmEq] at hLead
-          exact .inr (.inr hLead)
+          rw [hGT] at hLead
+          have hm1 : mTop - 1 = G_poly.length - 1 := congrArg (· - 1) hmEq
+          exact .inr (.inr (by dsimp only [Δ₂]; rwa [hm1]))
       have hSubDuet : ∀ p ∈ badPairs,
           p ∈ (prodPool S).filter (fun q =>
             decide (evalAffineDuet Δ₀ Δ₁ Δ₂ q.1 q.2 = CommRingOps.zero)) := by
@@ -3080,10 +3228,10 @@ theorem welch_berlekamp_affine_proximity_gap
           rw [coeffAt_trimPoly]
           exact coeffAt_eq_zero_of_ge (P_of p) mTop (Nat.le_trans (hBadDeg p hpMem) hmTopGe)
         rw [hPEq p hpMem, hLinearMul, coeffAt_pAdd, coeffAt_pAdd,
-            coeffAt_pScale, coeffAt_pScale] at h0
+            coeffAt_pScale p.1 G_poly, coeffAt_pScale p.2 (CommRingOps.zero :: G_poly)] at h0
         have hShift : coeffAt (CommRingOps.zero :: G_poly) mTop = coeffAt G_poly (mTop - 1) := by
           cases hm : mTop with
-          | zero => omega
+          | zero => rw [hm] at hmTopPos; cases hmTopPos
           | succ m' => simp [coeffAt_cons_succ]
         rw [hShift] at h0
         simpa [evalAffineDuet, Δ₀, Δ₁, Δ₂] using h0
@@ -3092,30 +3240,55 @@ theorem welch_berlekamp_affine_proximity_gap
         (affine_duet_roots_le_card Δ₀ Δ₁ Δ₂ S hS hΔNz)
       exact Nat.le_trans hle (Nat.le_max_left _ _)
   else
-    -- Case B: `Q̃₁.length ≥ 2` (`deg Q̃₁ ≥ 1`). Reduce `(ũ₀, ũ₁, X ũ₁)` modulo `Q̃₁`!
-    have hQ̃₁Ge2 : 2 ≤ Q̃₁.length := by omega
-    have hQ̃₁TrimNe : trimPoly Q̃₁ ≠ [] := by rwa [hQ̃₁Trim]
-    rcases polyDivMod_spec ũ₀ Q̃₁ hQ̃₁TrimNe with ⟨_, hr₀T, hDiv0, hr₀Lt⟩
-    rcases polyDivMod_spec ũ₁ Q̃₁ hQ̃₁TrimNe with ⟨_, hr₁T, hDiv1, hr₁Lt⟩
-    rcases polyDivMod_spec (CommRingOps.zero :: ũ₁) Q̃₁ hQ̃₁TrimNe with ⟨_, hr₂T, hDiv2, hr₂Lt⟩
-    rw [hũ₀Trim, hQ̃₁Trim] at hDiv0 hr₀Lt
-    rw [hũ₁Trim, hQ̃₁Trim] at hDiv1 hr₁Lt
-    rw [hQ̃₁Trim] at hr₂Lt
-    let q₀ := (polyDivMod ũ₀ Q̃₁).1
-    let r₀ := (polyDivMod ũ₀ Q̃₁).2
-    let q₁ := (polyDivMod ũ₁ Q̃₁).1
-    let r₁ := (polyDivMod ũ₁ Q̃₁).2
-    let q₂ := (polyDivMod (CommRingOps.zero :: ũ₁) Q̃₁).1
-    let r₂ := (polyDivMod (CommRingOps.zero :: ũ₁) Q̃₁).2
+    have hQ1RedGe2 : 2 ≤ Q1Red.length := by
+      if hle1 : Q1Red.length ≤ 1 then
+        exact False.elim (hQ1RedOne (Nat.le_antisymm hle1 hQ1RedPos))
+      else
+        exact Nat.lt_of_not_ge hle1
+    have hQ1RedTrimNe : trimPoly Q1Red ≠ [] := by rwa [hQ1RedTrim]
+    have hSp0 := polyDivMod_spec u0Red Q1Red hQ1RedTrimNe
+    have hSp1 := polyDivMod_spec u1Red Q1Red hQ1RedTrimNe
+    have hSp2 := polyDivMod_spec (CommRingOps.zero :: u1Red) Q1Red hQ1RedTrimNe
+    dsimp only at hSp0 hSp1 hSp2
+    rcases hSp0 with ⟨_, hr₀T, hDiv0, hr₀Lt⟩
+    rcases hSp1 with ⟨_, hr₁T, hDiv1, hr₁Lt⟩
+    rcases hSp2 with ⟨_, hr₂T, hDiv2, hr₂Lt⟩
+    let q₀ := (polyDivMod u0Red Q1Red).1
+    let r₀ := (polyDivMod u0Red Q1Red).2
+    let q₁ := (polyDivMod u1Red Q1Red).1
+    let r₁ := (polyDivMod u1Red Q1Red).2
+    let q₂ := (polyDivMod (CommRingOps.zero :: u1Red) Q1Red).1
+    let r₂ := (polyDivMod (CommRingOps.zero :: u1Red) Q1Red).2
+    change IsTrimmed r₀ at hr₀T
+    change IsTrimmed r₁ at hr₁T
+    change IsTrimmed r₂ at hr₂T
+    change trimPoly u0Red = pAdd (pMul q₀ Q1Red) r₀ at hDiv0
+    change trimPoly u1Red = pAdd (pMul q₁ Q1Red) r₁ at hDiv1
+    change trimPoly (CommRingOps.zero :: u1Red) = pAdd (pMul q₂ Q1Red) r₂ at hDiv2
+    change r₀.length < (trimPoly Q1Red).length at hr₀Lt
+    change r₁.length < (trimPoly Q1Red).length at hr₁Lt
+    change r₂.length < (trimPoly Q1Red).length at hr₂Lt
+    change IsTrimmed u0Red at hu0RedTrim
+    change IsTrimmed u1Red at hu1RedTrim
+    change IsTrimmed Q1Red at hQ1RedTrim
+    rw [hu0RedTrim] at hDiv0
+    rw [hu1RedTrim] at hDiv1
+    rw [hQ1RedTrim] at hr₀Lt hr₁Lt hr₂Lt
     have hNotBothNil : ¬ (r₀ = [] ∧ r₁ = []) := by
       rintro ⟨hr0, hr1⟩
-      have hd0 : DvdTrim Q̃₁ ũ₀ := by
-        rw [hr0, pAdd_nil_right, pMul_comm] at hDiv0
-        exact ⟨q₀, by rw [hũ₀Trim, hDiv0]; simp [pMul, trimPoly_idem]⟩
-      have hd1 : DvdTrim Q̃₁ ũ₁ := by
-        rw [hr1, pAdd_nil_right, pMul_comm] at hDiv1
-        exact ⟨q₁, by rw [hũ₁Trim, hDiv1]; simp [pMul, trimPoly_idem]⟩
-      have hle1 := hCoprime Q̃₁ hQ̃₁Trim hd0 hd1 (dvdTrim_refl Q̃₁)
+      have hd0 : DvdTrim Q1Red u0Red := by
+        have h := hDiv0
+        rw [hr0, pAdd_nil_right, pMul_comm] at h
+        have hpt : trimPoly (pMul Q1Red q₀) = pMul Q1Red q₀ := trimPoly_idem _
+        rw [hpt] at h
+        exact ⟨q₀, by rw [hu0RedTrim]; exact h⟩
+      have hd1 : DvdTrim Q1Red u1Red := by
+        have h := hDiv1
+        rw [hr1, pAdd_nil_right, pMul_comm] at h
+        have hpt : trimPoly (pMul Q1Red q₁) = pMul Q1Red q₁ := trimPoly_idem _
+        rw [hpt] at h
+        exact ⟨q₁, by rw [hu1RedTrim]; exact h⟩
+      have hle1 := hCoprime Q1Red hQ1RedTrim hd0 hd1 (dvdTrim_refl Q1Red)
       omega
     let jIdx := if r₀ = [] then r₁.length - 1 else r₀.length - 1
     let Δ₀ := coeffAt r₀ jIdx
@@ -3141,13 +3314,14 @@ theorem welch_berlekamp_affine_proximity_gap
       rw [hLinearMul] at hRed
       let rComb := pAdd (pAdd r₀ (pScale p.1 r₁)) (pScale p.2 r₂)
       let qComb := pAdd (pAdd (pAdd q₀ (pScale p.1 q₁)) (pScale p.2 q₂)) (P_of p)
-      have hCombLen : rComb.length ≤ Q̃₁.length - 1 := by
-        have h1 : (pScale p.1 r₁).length ≤ Q̃₁.length - 1 :=
-          Nat.le_trans (trimPoly_length_le _) (by simp; omega)
-        have h2 : (pScale p.2 r₂).length ≤ Q̃₁.length - 1 :=
-          Nat.le_trans (trimPoly_length_le _) (by simp; omega)
-        exact pAdd_length_le _ _ (Q̃₁.length - 1)
-          (pAdd_length_le _ _ (Q̃₁.length - 1) (by omega) h1) h2
+      have hCombLen : rComb.length ≤ Q1Red.length - 1 := by
+        have h0L : r₀.length ≤ Q1Red.length - 1 := by omega
+        have h1 : (pScale p.1 r₁).length ≤ Q1Red.length - 1 :=
+          Nat.le_trans (trimPoly_length_le _) (by rw [List.length_map]; omega)
+        have h2 : (pScale p.2 r₂).length ≤ Q1Red.length - 1 :=
+          Nat.le_trans (trimPoly_length_le _) (by rw [List.length_map]; omega)
+        exact pAdd_length_le _ _ (Q1Red.length - 1)
+          (pAdd_length_le _ _ (Q1Red.length - 1) h0L h1) h2
       have hScaleAdd : ∀ (c : F) (x y : List F), pScale c (pAdd x y) = pAdd (pScale c x) (pScale c y) := by
         intro c x y
         unfold pScale pAdd; rw [trimPoly_eq_iff_coeffAt]; intro k
@@ -3158,43 +3332,39 @@ theorem welch_berlekamp_affine_proximity_gap
         simp [coeffAt_map_mul, coeffAt_trimPoly]
       have hScaleMulLeft : ∀ (c : F) (x y : List F), pScale c (pMul x y) = pMul (pScale c x) y := by
         intro c x y
-        rw [pMul_comm, pMul_pScale_right, pMul_comm]
-      -- Rewrite `hRed` into `pAdd (pMul Q̃₁ qComb) rComb = []`:
-      have hSum0 : pAdd (pMul Q̃₁ qComb) rComb = [] := by
-        have hLHS : pAdd (pAdd ũ₀ (pAdd (pScale p.1 ũ₁) (pScale p.2 (CommRingOps.zero :: ũ₁))))
-            (pMul Q̃₁ (P_of p)) = pAdd (pMul Q̃₁ qComb) rComb := by
-          rw [← hScaleTrim p.2 (CommRingOps.zero :: ũ₁), hDiv2,
+        rw [pMul_comm x y, ← pMul_pScale_right, pMul_comm y (pScale c x)]
+      have hSum0 : pAdd (pMul Q1Red qComb) rComb = [] := by
+        have hLHS : pAdd (pAdd u0Red (pAdd (pScale p.1 u1Red) (pScale p.2 (CommRingOps.zero :: u1Red))))
+            (pMul Q1Red (P_of p)) = pAdd (pMul Q1Red qComb) rComb := by
+          rw [← hScaleTrim p.2 (CommRingOps.zero :: u1Red), hDiv2,
               hDiv0, hDiv1, hScaleAdd, hScaleAdd,
               hScaleMulLeft, hScaleMulLeft]
           unfold pAdd
           rw [trimPoly_eq_iff_coeffAt]
           intro k
           simp only [coeffAt_addCoeffs, coeffAt_trimPoly, qComb, rComb, pAdd]
-          -- By `pMul_pAdd_right` and commutativity/associativity of `CommRingOps.add`:
-          have hqExpand : coeffAt (pMul Q̃₁ (trimPoly (rawAddCoeffs
+          have hqExpand : coeffAt (pMul Q1Red (trimPoly (rawAddCoeffs
               (trimPoly (rawAddCoeffs
                 (trimPoly (rawAddCoeffs q₀ (pScale p.1 q₁))) (pScale p.2 q₂)))
               (P_of p)))) k =
               CommRingOps.add
                 (CommRingOps.add
-                  (CommRingOps.add (coeffAt (pMul q₀ Q̃₁) k) (coeffAt (pMul (pScale p.1 q₁) Q̃₁) k))
-                  (coeffAt (pMul (pScale p.2 q₂) Q̃₁) k))
-                (coeffAt (pMul Q̃₁ (P_of p)) k) := by
-            change coeffAt (pMul Q̃₁ qComb) k = _
+                  (CommRingOps.add (coeffAt (pMul q₀ Q1Red) k) (coeffAt (pMul (pScale p.1 q₁) Q1Red) k))
+                  (coeffAt (pMul (pScale p.2 q₂) Q1Red) k))
+                (coeffAt (pMul Q1Red (P_of p)) k) := by
+            change coeffAt (pMul Q1Red qComb) k = _
             dsimp [qComb]
             rw [pMul_pAdd_right, pMul_pAdd_right, pMul_pAdd_right,
                 coeffAt_pAdd, coeffAt_pAdd, coeffAt_pAdd,
-                pMul_comm Q̃₁ q₀, pMul_comm Q̃₁ (pScale p.1 q₁), pMul_comm Q̃₁ (pScale p.2 q₂)]
+                pMul_comm Q1Red q₀, pMul_comm Q1Red (pScale p.1 q₁), pMul_comm Q1Red (pScale p.2 q₂)]
           rw [hqExpand]
-          simp only [coeffAt_trimPoly, coeffAt_addCoeffs]
-          -- Rearrange `(A0 + R0) + ((A1 + R1) + (A2 + R2)) + A3 = (((A0 + A1) + A2) + A3) + ((R0 + R1) + R2)`
-          let A0 := coeffAt (pMul q₀ Q̃₁) k
+          let A0 := coeffAt (pMul q₀ Q1Red) k
           let R0 := coeffAt r₀ k
-          let A1 := coeffAt (pMul (pScale p.1 q₁) Q̃₁) k
+          let A1 := coeffAt (pMul (pScale p.1 q₁) Q1Red) k
           let R1 := coeffAt (pScale p.1 r₁) k
-          let A2 := coeffAt (pMul (pScale p.2 q₂) Q̃₁) k
+          let A2 := coeffAt (pMul (pScale p.2 q₂) Q1Red) k
           let R2 := coeffAt (pScale p.2 r₂) k
-          let A3 := coeffAt (pMul Q̃₁ (P_of p)) k
+          let A3 := coeffAt (pMul Q1Red (P_of p)) k
           change CommRingOps.add (CommRingOps.add (CommRingOps.add A0 R0)
               (CommRingOps.add (CommRingOps.add A1 R1) (CommRingOps.add A2 R2))) A3 =
             CommRingOps.add (CommRingOps.add (CommRingOps.add (CommRingOps.add A0 A1) A2) A3)
@@ -3222,20 +3392,21 @@ theorem welch_berlekamp_affine_proximity_gap
               LawfulCommRing.add_comm (CommRingOps.add (CommRingOps.add R0 R1) R2) A3,
               ← LawfulCommRing.add_assoc]
         rw [← hLHS, hRed]
-      -- Since `rComb = -Q̃₁ * qComb` and `rComb.length < Q̃₁.length`, `rComb = []`!
-      have hrCombEq : rComb = pMul Q̃₁ (pNeg qComb) := by
-        have hsub := pSub_pAdd_cancel_left (pMul Q̃₁ qComb) rComb
-        rw [hSum0, trimPoly_idem] at hsub
-        rw [← hsub, pSub_eq_pAdd_pNeg, pAdd_nil_left, trimPoly_idem, pMul_pNeg_right]
+      have hrCombEq : rComb = pMul Q1Red (pNeg qComb) := by
+        have hsub := pSub_pAdd_cancel_left (pMul Q1Red qComb) rComb
+        have hrt : trimPoly rComb = rComb := trimPoly_idem _
+        rw [hSum0, hrt] at hsub
+        have hpt : trimPoly (pNeg (pMul Q1Red qComb)) = pNeg (pMul Q1Red qComb) := trimPoly_idem _
+        rw [← hsub, pSub_eq_pAdd_pNeg, pAdd_nil_left, hpt, ← pMul_pNeg_right]
       have hrCombNil : rComb = [] := by
         if hrNe : rComb = [] then exact hrNe
         else
           have hqNe : trimPoly (pNeg qComb) ≠ [] := by
             intro h0
-            rw [← pMul_trimPoly_right Q̃₁, h0, (pMul_eq_nil_iff Q̃₁ []).mpr (.inr rfl)] at hrCombEq
+            rw [← pMul_trimPoly_right Q1Red, h0, (pMul_eq_nil_iff Q1Red []).mpr (.inr rfl)] at hrCombEq
             exact hrNe hrCombEq
-          rw [← pMul_trimPoly_right Q̃₁] at hrCombEq
-          have hlen := (pMul_length_of_trimmed_ne_nil hQ̃₁Trim (trimPoly_idem _) hQ̃₁Ne hqNe).1
+          rw [← pMul_trimPoly_right Q1Red] at hrCombEq
+          have hlen := (pMul_length_of_trimmed_ne_nil hQ1RedTrim (trimPoly_idem _) hQ1RedNe hqNe).1
           rw [← hrCombEq] at hlen
           have hpos : 1 ≤ (trimPoly (pNeg qComb)).length := by
             cases h : trimPoly (pNeg qComb) with
@@ -3244,8 +3415,9 @@ theorem welch_berlekamp_affine_proximity_gap
           omega
       have hc0 : coeffAt rComb jIdx = CommRingOps.zero := by rw [hrCombNil, coeffAt_nil]
       dsimp [rComb] at hc0
-      rw [coeffAt_pAdd, coeffAt_pAdd, coeffAt_pScale, coeffAt_pScale] at hc0
-      simpa [evalAffineDuet, Δ₀, Δ₁, Δ₂] using hc0
+      rw [coeffAt_pAdd, coeffAt_pAdd, coeffAt_pScale p.1 r₁, coeffAt_pScale p.2 r₂,
+          LawfulCommRing.add_assoc] at hc0
+      exact hc0
     have hle := Nat.le_trans
       (nodup_length_le_of_subset hBadNd hSubDuet)
       (affine_duet_roots_le_card Δ₀ Δ₁ Δ₂ S hS hΔNz)
@@ -3258,30 +3430,43 @@ theorem welch_berlekamp_affine_proximity_gap
     agreements at `z = 4` (`f(4) = -4, g(4) = 1`) and `z = 5` (`f(5) = -5, g(5) = 1`) genuinely
     defeat every `s = 1` witness (`¬ HasAffineWitnessS1`) while satisfying the proximity-gap bound! -/
 theorem inhabited_affine_proximity_gaps :
-    let D : List Goldilocks := [0, 1, 2, 3, 4, 5]
-    let S : List Goldilocks := [0, 1, 2, 3, 4, 5, 6]
+    let g0 := Goldilocks.ofNat 0
+    let g1 := Goldilocks.ofNat 1
+    let g2 := Goldilocks.ofNat 2
+    let g3 := Goldilocks.ofNat 3
+    let g4 := Goldilocks.ofNat 4
+    let g5 := Goldilocks.ofNat 5
+    let g6 := Goldilocks.ofNat 6
+    let D : List Goldilocks := [g0, g1, g2, g3, g4, g5]
+    let S : List Goldilocks := [g0, g1, g2, g3, g4, g5, g6]
     let f : Goldilocks → Goldilocks := fun z =>
-      if z = 4 then CommRingOps.neg 4
-      else if z = 5 then CommRingOps.neg 5
-      else 0
+      if z = g4 then CommRingOps.neg g4
+      else if z = g5 then CommRingOps.neg g5
+      else g0
     let g : Goldilocks → Goldilocks := fun z =>
-      if z = 4 ∨ z = 5 then 1 else 0
-    let badPairs : List (Goldilocks × Goldilocks) := [(0, 1)]
+      if z = g4 ∨ z = g5 then g1 else g0
+    let badPairs : List (Goldilocks × Goldilocks) := [(g0, g1)]
     0 < badPairs.length ∧
     (∀ p ∈ badPairs, ¬ HasAffineWitnessS1 1 f g D p.1 p.2 []) ∧
     badPairs.length ≤ Nat.max S.length (D.length * (D.length - 1) / 2) := by
   dsimp only
-  let D : List Goldilocks := [0, 1, 2, 3, 4, 5]
-  let S : List Goldilocks := [0, 1, 2, 3, 4, 5, 6]
+  let g0 := Goldilocks.ofNat 0
+  let g1 := Goldilocks.ofNat 1
+  let g2 := Goldilocks.ofNat 2
+  let g3 := Goldilocks.ofNat 3
+  let g4 := Goldilocks.ofNat 4
+  let g5 := Goldilocks.ofNat 5
+  let g6 := Goldilocks.ofNat 6
+  let D : List Goldilocks := [g0, g1, g2, g3, g4, g5]
+  let S : List Goldilocks := [g0, g1, g2, g3, g4, g5, g6]
   let f : Goldilocks → Goldilocks := fun z =>
-    if z = 4 then CommRingOps.neg 4
-    else if z = 5 then CommRingOps.neg 5
-    else 0
+    if z = g4 then CommRingOps.neg g4
+    else if z = g5 then CommRingOps.neg g5
+    else g0
   let g : Goldilocks → Goldilocks := fun z =>
-    if z = 4 ∨ z = 5 then 1 else 0
-  have hExc01 : ¬ HasAffineWitnessS1 1 f g D 0 1 [] := by
+    if z = g4 ∨ z = g5 then g1 else g0
+  have hExc01 : ¬ HasAffineWitnessS1 1 f g D g0 g1 [] := by
     rintro ⟨F_poly, G_poly, _, hGLen, _, hLoss⟩
-    -- `G_poly` has `length ≤ 1`, so `evalCoeffs G_poly z` is a constant `c` independent of `z`:
     have hGConst : ∀ x y : Goldilocks,
         RoundPoly.evalCoeffs G_poly x = RoundPoly.evalCoeffs G_poly y := by
       rcases G_poly with _ | ⟨c, _ | _⟩
@@ -3291,18 +3476,16 @@ theorem inhabited_affine_proximity_gaps :
     have hSpEq : D.filter (fun z =>
         decide (RoundPoly.evalCoeffs ([] : List Goldilocks) z =
           CommRingOps.add (f z)
-            (CommRingOps.mul (CommRingOps.add (0 : Goldilocks) (CommRingOps.mul 1 z)) (g z)))) = D := by
+            (CommRingOps.mul (CommRingOps.add g0 (CommRingOps.mul g1 z)) (g z)))) = D := by
       decide
     rw [hSpEq] at hLoss
-    -- Either `G_poly(0) = 0` (so `z = 4` and `z = 5` both fail, `loss ≥ 2`) or `G_poly(0) ≠ 0`
-    -- (so `z = 0` and `z = 1` both fail, `loss ≥ 2`):
-    if hc0 : RoundPoly.evalCoeffs G_poly 0 = 0 then
-      have h4 : RoundPoly.evalCoeffs G_poly 4 = 0 := (hGConst 4 0).trans hc0
-      have h5 : RoundPoly.evalCoeffs G_poly 5 = 0 := (hGConst 5 0).trans hc0
-      have hg4 : g 4 = 1 := by decide
-      have hg5 : g 5 = 1 := by decide
-      have h10 : (0 : Goldilocks) ≠ 1 := by decide
-      have hSub : ∀ z ∈ ([4, 5] : List Goldilocks),
+    if hc0 : RoundPoly.evalCoeffs G_poly g0 = g0 then
+      have h4 : RoundPoly.evalCoeffs G_poly g4 = g0 := (hGConst g4 g0).trans hc0
+      have h5 : RoundPoly.evalCoeffs G_poly g5 = g0 := (hGConst g5 g0).trans hc0
+      have hg4 : g g4 = g1 := by decide
+      have hg5 : g g5 = g1 := by decide
+      have h10 : g0 ≠ g1 := by decide
+      have hSub : ∀ z ∈ ([g4, g5] : List Goldilocks),
           z ∈ D.filter (fun w =>
             !(decide (RoundPoly.evalCoeffs F_poly w = f w) &&
               decide (RoundPoly.evalCoeffs G_poly w = g w))) := by
@@ -3311,13 +3494,13 @@ theorem inhabited_affine_proximity_gaps :
         rcases hz with rfl | rfl
         · rw [List.mem_filter]; refine ⟨by decide, ?_⟩; simp [h4, hg4, h10]
         · rw [List.mem_filter]; refine ⟨by decide, ?_⟩; simp [h5, hg5, h10]
-      have hge2 := nodup_length_le_of_subset (L := ([4, 5] : List Goldilocks)) (by decide) hSub
-      simp at hge2; omega
+      have hge2 := nodup_length_le_of_subset (L := ([g4, g5] : List Goldilocks)) (by decide) hSub
+      simp only [List.length_cons, List.length_nil] at hge2; omega
     else
-      have h1 : RoundPoly.evalCoeffs G_poly 1 = RoundPoly.evalCoeffs G_poly 0 := hGConst 1 0
-      have hg0 : g 0 = 0 := by decide
-      have hg1 : g 1 = 0 := by decide
-      have hSub : ∀ z ∈ ([0, 1] : List Goldilocks),
+      have h1 : RoundPoly.evalCoeffs G_poly g1 = RoundPoly.evalCoeffs G_poly g0 := hGConst g1 g0
+      have hg0 : g g0 = g0 := by decide
+      have hg1 : g g1 = g0 := by decide
+      have hSub : ∀ z ∈ ([g0, g1] : List Goldilocks),
           z ∈ D.filter (fun w =>
             !(decide (RoundPoly.evalCoeffs F_poly w = f w) &&
               decide (RoundPoly.evalCoeffs G_poly w = g w))) := by
@@ -3326,16 +3509,16 @@ theorem inhabited_affine_proximity_gaps :
         rcases hz with rfl | rfl
         · rw [List.mem_filter]; refine ⟨by decide, ?_⟩; simp [hg0, hc0]
         · rw [List.mem_filter]; refine ⟨by decide, ?_⟩; simp [hg1, h1, hc0]
-      have hge2 := nodup_length_le_of_subset (L := ([0, 1] : List Goldilocks)) (by decide) hSub
-      simp at hge2; omega
-  have hExcAll : ∀ p ∈ ([(0, 1)] : List (Goldilocks × Goldilocks)),
+      have hge2 := nodup_length_le_of_subset (L := ([g0, g1] : List Goldilocks)) (by decide) hSub
+      simp only [List.length_cons, List.length_nil] at hge2; omega
+  have hExcAll : ∀ p ∈ ([(g0, g1)] : List (Goldilocks × Goldilocks)),
       ¬ HasAffineWitnessS1 1 f g D p.1 p.2 [] := by
     intro p hp
     simp only [List.mem_cons, List.not_mem_nil, or_false] at hp
     subst hp
     exact hExc01
   refine ⟨by decide, hExcAll, ?_⟩
-  exact welch_berlekamp_affine_proximity_gap f g D S 1 5 [(0, 1)] (fun _ => [])
+  exact welch_berlekamp_affine_proximity_gap f g D S 1 5 [(g0, g1)] (fun _ => [])
     (by decide) (by decide) (by decide) (by decide) (by decide)
     (by intro p hp; simp at hp; subst hp; decide)
     (by intro _ _; simp)
@@ -3343,26 +3526,27 @@ theorem inhabited_affine_proximity_gaps :
     hExcAll
 
 
-/-! ## §5. Finite `Theorem 4.8 + Theorem 5.1` Witness Verifier for `Hem` WHIR (`nv = 20` & `nv = 24`) -/
+/-! ## §5. Finite `Theorem 4.8 + Theorem 5.1` Witness Verifier Bound to the Deployed `Hem` WHIR Schedule -/
 
 /-- Explicit finite witness for `[CWYZ26]` Theorem 4.8 (finite MCA bound) + Theorem 5.1 (`Eq. 5.7`
     equal-degree affine folding with linear evaluation claims across `sFolds` binary folds). -/
 structure WhirAffineWitness where
-  /-- Half-domain evaluation block length `n_f = |D_i| / 2` at fold step 0 of the WHIR stage. -/
+  /-- Number of coset fibers of the stage oracle (`n = blowup * 2^rem`, the folded evaluation
+      domain the proximity gap is applied on; `rem` = variables left after the stage's folds). -/
   n : Nat
-  /-- Folded univariate degree bound `d_f = 2^(ℓ - 1) + 1` (carrying the `+2` overflow monomials). -/
+  /-- Folded univariate degree bound `d = n / blowup + 2` (carrying the `+2` overflow monomials). -/
   d : Nat
-  /-- Number of binary affine folds `s_i` executed in this WHIR stage. -/
+  /-- Number of binary affine folds `s_i` executed in this WHIR stage (= agreement loss). -/
   sFolds : Nat
   /-- Agreement threshold `A` (`|S_{θ,α,β}(P)| ≥ A`). -/
   A : Nat
   /-- Intermediate persistent-agreement threshold `B` (`n * (d + 1) < B^2`, `B < A`). -/
   B : Nat
-  /-- Multiplicity parameter `m ≥ 3` in `[CWYZ26]` Lemma 4.2 / Theorem 4.8. -/
+  /-- Multiplicity parameter `m ≥ 1` in `[CWYZ26]` Lemma 4.2 / Theorem 4.8. -/
   m : Nat
   /-- Total `(Y, Z)`-degree bound `D ≥ 1` of the explainer polynomial `Q(X, Y, Z)`. -/
   D : Nat
-  /-- Stage query count `q_i`. -/
+  /-- Stage query count `q_i` (distinct fibers, sampled without replacement). -/
   queries : Nat
   /-- Pure query soundness target bits (`128` classical, `256` QROM Grover pre-square-root). -/
   queryTargetBits : Nat
@@ -3370,24 +3554,67 @@ structure WhirAffineWitness where
 
 /-- Primitive-recursive accumulator for the unknown count `∑_{j=0}^M (m A - D - d j) (D - j + 1)`
     in `[CWYZ26]` Equation `(4.5)` (`0` `WellFounded.fix`). -/
-@[expose] def interpUnknownsAux (mA_sub_D d D : Nat) : Nat → Nat
+def interpUnknownsAux (mA_sub_D d D : Nat) : Nat → Nat
   | 0 => mA_sub_D * (D + 1)
   | j + 1 => interpUnknownsAux mA_sub_D d D j + (mA_sub_D - d * (j + 1)) * (D - (j + 1) + 1)
 
 /-- Primitive-recursive accumulator for the per-point equation count
     `∑_{s=0}^K (m - s) (D - s + 1)` in `[CWYZ26]` Equation `(4.2)` / `(4.5)`. -/
-@[expose] def interpEquationsAux (m D : Nat) : Nat → Nat
+def interpEquationsAux (m D : Nat) : Nat → Nat
   | 0 => m * (D + 1)
   | s + 1 => interpEquationsAux m D s + (m - (s + 1)) * (D - (s + 1) + 1)
 
 /-- Exact ceiling `⌈a / b⌉` for `b > 0`. -/
-@[expose] def natCeilDiv (a b : Nat) : Nat :=
+def natCeilDiv (a b : Nat) : Nat :=
   (a + b - 1) / b
+
+/-- Exact falling factorial `a (a - 1) ⋯ (a - k + 1)`: `fallingFactorial A q / fallingFactorial n q`
+    is the exact probability that `q` DISTINCT uniformly sampled fibers (the `BTreeSet` sampling of
+    `pcs.rs::sample_stage_queries`) all land inside a fixed set of `A` out of `n` fibers. -/
+def fallingFactorial (a : Nat) : Nat → Nat
+  | 0 => 1
+  | k + 1 => (a - k) * fallingFactorial a k
+
+theorem fallingFactorial_pos (a : Nat) : ∀ k : Nat, k ≤ a → 0 < fallingFactorial a k
+  | 0, _ => Nat.zero_lt_one
+  | k + 1, h => by
+    show 0 < (a - k) * fallingFactorial a k
+    exact Nat.mul_pos (by omega) (fallingFactorial_pos a k (by omega))
+
+/-- Sampling without replacement never hits a fixed set more often than sampling with replacement:
+    `fallingFactorial a k * n^k ≤ a^k * fallingFactorial n k` whenever `a ≤ n`. -/
+theorem fallingFactorial_mul_pow_le (a n : Nat) (han : a ≤ n) :
+    ∀ k : Nat, fallingFactorial a k * n ^ k ≤ a ^ k * fallingFactorial n k
+  | 0 => Nat.le_refl _
+  | k + 1 => by
+    show (a - k) * fallingFactorial a k * n ^ (k + 1) ≤ a ^ (k + 1) * ((n - k) * fallingFactorial n k)
+    have ih := fallingFactorial_mul_pow_le a n han k
+    have hCross : (a - k) * n ≤ a * (n - k) := by
+      if hk : k ≤ a then
+        have e1 : (a - k) * n = a * n - k * n := Nat.sub_mul a k n
+        have e2 : a * (n - k) = a * n - a * k := Nat.mul_sub a n k
+        have h3 : a * k ≤ k * n := by
+          rw [Nat.mul_comm a k]; exact Nat.mul_le_mul_left k han
+        rw [e1, e2]
+        exact Nat.sub_le_sub_left h3 (a * n)
+      else
+        have h0 : a - k = 0 := by omega
+        rw [h0, Nat.zero_mul]
+        exact Nat.zero_le _
+    have hL : (a - k) * fallingFactorial a k * n ^ (k + 1) =
+        ((a - k) * n) * (fallingFactorial a k * n ^ k) := by
+      rw [Nat.pow_succ, Nat.mul_comm (n ^ k) n, Nat.mul_mul_mul_comm]
+    have hR : a ^ (k + 1) * ((n - k) * fallingFactorial n k) =
+        (a * (n - k)) * (a ^ k * fallingFactorial n k) := by
+      rw [Nat.pow_succ, Nat.mul_comm (a ^ k) a, Nat.mul_mul_mul_comm]
+    rw [hL, hR]
+    exact Nat.mul_le_mul hCross ih
 
 /-- Conservative `1/q`-scaled numerator `s_i * (ℓ + 2 ℓ₀ + 1)` for `[CWYZ26]` Theorem 4.8 + Theorem 5.1
     (`Eq. 5.7`, equal-degree affine folding **with linear claims** across `s_i` binary folds), valid
-    whenever `checkWhirAffineWitness w q = true` (`nonpersCeil ≤ q` and `n(n-1)/2 ≤ q`). -/
-@[expose] def whirAffineStageSimpleNum (w : WhirAffineWitness) : Nat :=
+    whenever `checkWhirAffineWitness w q = true` (`nonpersCeil ≤ q` and `n(n-1)/2 ≤ q`). This is the
+    quantity `loss * (list + 2 * list0 + 1)` of `affine_schedule.rs`. -/
+def whirAffineStageSimpleNum (w : WhirAffineWitness) : Nat :=
   let ell := (w.n * (w.B - w.d - 1)) / (w.B * w.B - w.n * (w.d + 1))
   let ell0 := (w.n * (w.A - 1 - w.d)) / ((w.A - 1) * (w.A - 1) - w.n * w.d)
   w.sFolds * (ell + 2 * ell0 + 1)
@@ -3405,17 +3632,22 @@ def whirAffineStageExactNumQ2 (w : WhirAffineWitness) (q : Nat) : Nat :=
   w.sFolds * (ell * maxQChoose + 2 * ell0 * q + nonpersCeil)
 
 /-- Decidable verifier checking **every** side condition of `[CWYZ26]` Theorem 4.8 + Theorem 5.1
-    plus `s_i`-loss proximity query soundness `(A + s_i)^q_i * 2^targetBits < n^q_i`:
-    1. `sFolds ≥ 1`, `n ≥ 2`, `d ≥ 1`, `d + 2 ≤ B < A ≤ n`, `A + sFolds ≤ n`, `m ≥ 3`, `D ≥ 1`,
-    2. `D + 1 + d ≤ m * A` and `(m * A - D - 1) / d ≤ D` (so `M = (m * A - D - 1) / d ≥ 1` and
-       every term `m * A - D - d * j ≥ 1`, `D - j + 1 ≥ 1` has zero unsigned `Nat` underflow!),
+    exactly as stated in the paper (`m, D ≥ 1`, `M = min {D, ⌊(mA - D - 1)/d⌋} ≥ 1`) and as
+    asserted by `affine_schedule.rs::finite_johnson_witnesses_cover_every_canonical_stage`, plus
+    the exact `s_i`-loss distinct-fiber query soundness:
+    1. `sFolds ≥ 1`, `n ≥ 2`, `d ≥ 1`, `d + 2 ≤ B < A`, `A + sFolds ≤ n`, `m ≥ 1`, `D ≥ 1`,
+    2. `D + 1 + d ≤ m * A` and `M ≥ 1` (every term `m * A - D - d * j ≥ 1`, `D - j + 1 ≥ 1`
+       for `j ≤ M`, so the truncated `Nat` sums equal the integer sums of Equation `(4.5)`),
     3. Exact Equation `(4.5)` interpolation dimension inequality `unknowns > n * equations`,
     4. Johnson denominator positivity `B^2 > n * (d + 1)` and `(A - 1)^2 > n * d`,
     5. Field-size domination `n * (n - 1) / 2 ≤ q` and `nonpersCeil ≤ q`,
-    6. Pure `s_i`-loss query soundness `(A + sFolds)^queries * 2^queryTargetBits < n^queries`. -/
-@[expose] def checkWhirAffineWitness (w : WhirAffineWitness) (q : Nat) : Bool :=
+    6. `queries ≤ n` and the EXACT hypergeometric bound
+       `fallingFactorial (A + sFolds) queries * 2^queryTargetBits < fallingFactorial n queries`
+       (implied by the upward-rounded dyadic check `query_error_below_2pow_minus256`; the
+       with-replacement bound `((A + s)/n)^q` is strictly weaker and REJECTS the deployed table). -/
+def checkWhirAffineWitness (w : WhirAffineWitness) (q : Nat) : Bool :=
   let mA := w.m * w.A
-  let M := (mA - w.D - 1) / w.d
+  let M := Nat.min w.D ((mA - w.D - 1) / w.d)
   let K := Nat.min (w.m - 1) M
   let unknowns := interpUnknownsAux (mA - w.D) w.d w.D M
   let eqsPerPoint := interpEquationsAux w.m w.D K
@@ -3429,17 +3661,18 @@ def whirAffineStageExactNumQ2 (w : WhirAffineWitness) (q : Nat) : Nat :=
     w.d + 2 ≤ w.B ∧
     w.B < w.A ∧
     w.A + w.sFolds ≤ w.n ∧
-    3 ≤ w.m ∧
+    1 ≤ w.m ∧
     1 ≤ w.D ∧
     w.D + 1 + w.d ≤ mA ∧
     1 ≤ M ∧
-    M ≤ w.D ∧
     w.n * eqsPerPoint < unknowns ∧
     w.n * (w.d + 1) < w.B * w.B ∧
     w.n * w.d < (w.A - 1) * (w.A - 1) ∧
     w.n * (w.n - 1) / 2 ≤ q ∧
     nonpersCeil ≤ q ∧
-    (w.A + w.sFolds) ^ w.queries * 2 ^ w.queryTargetBits < w.n ^ w.queries
+    w.queries ≤ w.n ∧
+    fallingFactorial (w.A + w.sFolds) w.queries * 2 ^ w.queryTargetBits <
+      fallingFactorial w.n w.queries
   )
 
 /-- **Exact-to-Simple Bound Reduction (`whirAffineStageExactNumQ2_le_simple_mul_q`)**:
@@ -3451,63 +3684,292 @@ theorem whirAffineStageExactNumQ2_le_simple_mul_q (w : WhirAffineWitness) (q : N
     whirAffineStageExactNumQ2 w q ≤ whirAffineStageSimpleNum w * q := by
   unfold checkWhirAffineWitness at hok
   have hProps := of_decide_eq_true hok
-  rcases hProps with ⟨_, _, _, _, _, _, _, _, _, _, hMD, _, _, _, hChooseQ, hNonpersQ, _⟩
+  rcases hProps with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, hChooseQ, hNonpersQ, _, _⟩
   unfold whirAffineStageExactNumQ2 whirAffineStageSimpleNum
   dsimp only
-  have hMinEq : Nat.min w.D ((w.m * w.A - w.D - 1) / w.d) = (w.m * w.A - w.D - 1) / w.d :=
-    Nat.min_eq_right hMD
   have hMaxEq : Nat.max q (w.n * (w.n - 1) / 2) = q :=
     Nat.max_eq_left hChooseQ
-  rw [hMinEq, hMaxEq, Nat.mul_assoc]
+  rw [hMaxEq, Nat.mul_assoc w.sFolds _ q]
   apply Nat.mul_le_mul_left
   rw [Nat.add_mul, Nat.add_mul, Nat.one_mul]
   exact Nat.add_le_add_left hNonpersQ _
 
-/-- Complete explicit `[CWYZ26]` Theorem 4.8 + Theorem 5.1 stage witnesses for `Hem` WHIR
-    at `nv = 20` (`3` stages: `q = (129, 65, 44)` classical, `q = (258, 130, 88)` QROM) and
-    `nv = 24` (`4` stages: `q = (129, 65, 44, 33)` classical, `q = (258, 130, 88, 66)` QROM). -/
-@[expose] def whirAffineStageWitnesses (nv : Nat) (isQrom : Bool) : List WhirAffineWitness :=
-  let tBits := if isQrom then 256 else 128
-  if nv = 20 then
-    let q0 := if isQrom then 258 else 129
-    let q1 := if isQrom then 130 else 65
-    let q2 := if isQrom then 88 else 44
-    [ { n := 131072, d := 32770, sFolds := 5, A := 65884, B := 65798,
-        m := 122, D := 12150, queries := q0, queryTargetBits := tBits },
-      { n := 65536,  d := 4098,  sFolds := 3, A := 16734, B := 16648,
-        m := 48,  D := 3072,  queries := q1, queryTargetBits := tBits },
-      { n := 16384,  d := 258,   sFolds := 4, A := 2177,  B := 2148,
-        m := 64,  D := 3072,  queries := q2, queryTargetBits := tBits } ]
+/-! ### §5.1 Mirror of the Deployed Folding Geometry (`pcs.rs::stage_geometry`) -/
+
+/-- Mirror of `pcs.rs::stage_geometry`: `(log₂ blowup, step_vars)` of every WHIR stage. -/
+def hemStageGeometry (nv : Nat) : List (Nat × Nat) :=
+  if nv ≤ 6 then
+    let es := if nv ≤ 3 then 1 else 2
+    [(4, nv - es)]
+  else if nv ≤ 11 then
+    let es := if nv ≤ 8 then 3 else 4
+    let rem := nv - es
+    let s0 := (rem + 1) / 2
+    [(2, s0), (4, rem - s0)]
+  else if nv ≤ 16 then
+    let es := if nv ≤ 13 then 4 else if nv ≤ 15 then 5 else 6
+    let rem := nv - es
+    let s0 := Nat.min 4 (rem - 4)
+    let s1 := (rem - s0) / 2
+    [(2, s0), (4, s1), (6, rem - s0 - s1)]
+  else if nv ≤ 20 then [(2, 5), (4, 3), (6, 4)]
+  else if nv = 21 then [(2, 6), (4, 3), (6, 4)]
+  else if nv = 22 then [(2, 6), (4, 4), (6, 4)]
+  else [(2, 6), (4, 4), (6, 3), (8, 3)]
+
+/-- Mirror of the `early_stop_vars` field produced by `pcs.rs::stage_geometry`. -/
+def hemEarlyStopVars (nv : Nat) : Nat :=
+  if nv ≤ 3 then 1 else if nv ≤ 6 then 2 else if nv ≤ 8 then 3 else if nv ≤ 13 then 4
+  else if nv ≤ 15 then 5 else if nv ≤ 16 then 6 else if nv ≤ 20 then nv - 12
+  else if nv = 23 then 7 else 8
+
+/-- Mirror of `WhirSecurityRegime::minimum_queries` for the two unconditional Johnson regimes:
+    `BciksJohnsonQrom128` uses `⌈512 / log₂ B⌉ + 2`, `BciksJohnsonClassical128` uses
+    `⌈256 / log₂ B⌉ + 1`. -/
+def hemJohnsonMinQueries (isQrom : Bool) (logBlowup : Nat) : Nat :=
+  if isQrom then natCeilDiv 512 logBlowup + 2 else natCeilDiv 256 logBlowup + 1
+
+/-- Resolved per-stage geometry: `n = blowup * 2^rem` coset fibers and folded degree bound
+    `d = 2^rem + 2`, where `rem` counts the variables left AFTER this stage's `stepVars` folds
+    (exactly the `n`, `d` computed inside `affine_schedule.rs`). -/
+structure HemStageGeom where
+  stageIdx : Nat
+  logBlowup : Nat
+  stepVars : Nat
+  n : Nat
+  d : Nat
+  deriving Repr, DecidableEq
+
+def hemStageGeomsAux : Nat → Nat → List (Nat × Nat) → List HemStageGeom
+  | _, _, [] => []
+  | idx, rem, (lb, sv) :: rest =>
+    { stageIdx := idx, logBlowup := lb, stepVars := sv,
+      n := 2 ^ lb * 2 ^ (rem - sv), d := 2 ^ (rem - sv) + 2 } ::
+      hemStageGeomsAux (idx + 1) (rem - sv) rest
+
+def hemStageGeoms (nv : Nat) : List HemStageGeom :=
+  hemStageGeomsAux 0 nv (hemStageGeometry nv)
+
+/-- Mirror of `WhirSchedule::validate` on the canonical geometry: at most `4` stages, blowups in
+    `{4, 16, 64, 256}`, every stage folds `1..6` variables and strictly fewer than remain, and
+    `early_stop_vars + ∑ step_vars = num_vars` with `1 ≤ early_stop_vars ≤ 8`. -/
+def hemStageGeometryValid (nv : Nat) : Bool :=
+  let g := hemStageGeometry nv
+  decide (1 ≤ g.length ∧ g.length ≤ 4) &&
+  g.all (fun p => (p.1 == 2 || p.1 == 4 || p.1 == 6 || p.1 == 8) &&
+    decide (1 ≤ p.2 ∧ p.2 ≤ 6)) &&
+  decide (hemEarlyStopVars nv + (g.map (·.2)).sum = nv) &&
+  decide (1 ≤ hemEarlyStopVars nv ∧ hemEarlyStopVars nv ≤ 8)
+
+/-- Every supported `num_vars ∈ 2..=24` has a schedule accepted by the `validate` mirror, and
+    every stage's Johnson QROM query count fits the wire cap `NUM_PCS_QUERIES = 512`. -/
+theorem hemStageGeometry_valid_and_under_query_cap :
+    ∀ nv : Nat, 2 ≤ nv → nv ≤ 24 →
+      hemStageGeometryValid nv = true ∧
+      ∀ p ∈ hemStageGeometry nv, hemJohnsonMinQueries true p.1 ≤ 512 := by
+  have hAll : ((List.range 23).all fun i =>
+      hemStageGeometryValid (i + 2) &&
+      (hemStageGeometry (i + 2)).all (fun p => decide (hemJohnsonMinQueries true p.1 ≤ 512))) = true := by
+    decide +kernel
+  intro nv h2 h24
+  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have hEq : nv - 2 + 2 = nv := by omega
+  rw [hEq, Bool.and_eq_true] at h1
+  refine ⟨h1.1, fun p hp => ?_⟩
+  exact of_decide_eq_true (List.all_eq_true.mp h1.2 p hp)
+
+/-! ### §5.2 The Deployed Witness Table (`affine_schedule.rs::WITNESSES`, Verbatim) -/
+
+/-- VERBATIM copy of `crates/qsag-agg/src/pcs/affine_schedule.rs::WITNESSES`:
+    `(num_vars, stage, A, m, D)` with `B = A - 1`, for the canonical `BciksJohnsonQrom128`
+    schedule. Stages whose query count reaches the fiber count are exhaustively queried and carry
+    no row. -/
+def hemJohnsonQromWitnessTable : List (Nat × Nat × Nat × Nat × Nat) :=
+  [ (9, 1, 127, 1, 20),
+    (10, 0, 329, 1, 14),
+    (10, 1, 126, 1, 20),
+    (11, 0, 328, 1, 14),
+    (11, 1, 126, 1, 20),
+    (12, 0, 579, 4, 75),
+    (12, 1, 310, 4, 59),
+    (12, 2, 174, 8, 139),
+    (13, 0, 1091, 8, 143),
+    (13, 1, 570, 16, 351),
+    (13, 2, 173, 8, 135),
+    (14, 0, 2119, 32, 863),
+    (14, 1, 1092, 32, 860),
+    (14, 2, 308, 32, 706),
+    (15, 0, 4178, 64, 2079),
+    (15, 1, 1091, 32, 844),
+    (15, 2, 308, 32, 706),
+    (16, 0, 8296, 128, 5567),
+    (16, 1, 2137, 64, 2392),
+    (16, 2, 580, 64, 1921),
+    (17, 0, 8295, 128, 5503),
+    (17, 1, 2137, 64, 2392),
+    (17, 2, 307, 32, 691),
+    (18, 0, 16531, 128, 7295),
+    (18, 1, 4229, 64, 3418),
+    (18, 2, 579, 64, 1890),
+    (19, 0, 33003, 128, 10879),
+    (19, 1, 8413, 64, 5471),
+    (19, 2, 1124, 32, 1305),
+    (20, 0, 65948, 128, 18111),
+    (20, 1, 16782, 32, 3286),
+    (20, 2, 2215, 32, 2149),
+    (21, 0, 65947, 128, 18047),
+    (21, 1, 16782, 32, 3286),
+    (21, 2, 2215, 32, 2149),
+    (22, 0, 131836, 128, 32511),
+    (22, 1, 16781, 32, 3270),
+    (22, 2, 2215, 32, 2149),
+    (23, 0, 263614, 64, 14494),
+    (23, 1, 33518, 32, 5870),
+    (23, 2, 8759, 16, 2733),
+    (23, 3, 2254, 32, 2672),
+    (24, 0, 527170, 64, 27164),
+    (24, 1, 66992, 32, 11069),
+    (24, 2, 17484, 16, 5228),
+    (24, 3, 4482, 16, 2067) ]
+
+def hemJohnsonQromTableRow (nv stage : Nat) : Option (Nat × Nat × Nat × Nat × Nat) :=
+  hemJohnsonQromWitnessTable.find? (fun r => r.1 == nv && r.2.1 == stage)
+
+/-- Stage is exhaustively queried (`num_queries ≥ n`): every fiber is opened, no proximity
+    witness is needed (`if spec.num_queries as u128 >= n { continue; }`). -/
+def hemJohnsonQromStageExhaustive (g : HemStageGeom) : Bool :=
+  decide (g.n ≤ hemJohnsonMinQueries true g.logBlowup)
+
+/-- The deployed stage witness: geometry from `hemStageGeoms`, `(A, m, D)` from the table row,
+    `B = A - 1`, and the deployed QROM query count. -/
+def hemJohnsonQromStageWitness (nv : Nat) (g : HemStageGeom) : Option WhirAffineWitness :=
+  (hemJohnsonQromTableRow nv g.stageIdx).map (fun r =>
+    { n := g.n, d := g.d, sFolds := g.stepVars, A := r.2.2.1, B := r.2.2.1 - 1,
+      m := r.2.2.2.1, D := r.2.2.2.2,
+      queries := hemJohnsonMinQueries true g.logBlowup, queryTargetBits := 256 })
+
+/-- Per-stage coverage check mirroring one loop iteration of
+    `finite_johnson_witnesses_cover_every_canonical_stage`: an exhaustive stage must carry no
+    row; every other stage must carry a row passing `checkWhirAffineWitness` with
+    `loss * (list + 2 * list0 + 1) + 1 < 2000`. -/
+def hemJohnsonQromStageCovered (q nv : Nat) (g : HemStageGeom) : Bool :=
+  if hemJohnsonQromStageExhaustive g = true then
+    (hemJohnsonQromTableRow nv g.stageIdx).isNone
   else
-    let q0 := if isQrom then 258 else 129
-    let q1 := if isQrom then 130 else 65
-    let q2 := if isQrom then 88 else 44
-    let q3 := if isQrom then 66 else 33
+    match hemJohnsonQromStageWitness nv g with
+    | none => false
+    | some w => checkWhirAffineWitness w q && decide (whirAffineStageSimpleNum w + 1 < 2000)
+
+/-- Number of non-exhaustive canonical stages across `num_vars ∈ 2..=24` (the Rust `seen`). -/
+def hemJohnsonQromSeenCount : Nat :=
+  ((List.range 23).map (fun i =>
+    ((hemStageGeoms (i + 2)).filter (fun g => !hemJohnsonQromStageExhaustive g)).length)).sum
+
+/-- **Deployed-Table Coverage Certificate (`hem_johnson_qrom_witnesses_cover_every_canonical_stage`)**:
+    Lean mirror of the Rust test `finite_johnson_witnesses_cover_every_canonical_stage`, decided
+    by the kernel over `GoldilocksExt4` (`q = p^4`) on the VERBATIM deployed table:
+    1. for every `num_vars ∈ 2..=24` and every stage of the canonical `BciksJohnsonQrom128`
+       schedule, the stage is either exhaustively queried or carries a table row satisfying every
+       `[CWYZ26]` Theorem 4.8 + Theorem 5.1 side condition, the exact distinct-fiber `< 2^-256`
+       query bound, and folding numerator `+ 1 < 2000`;
+    2. the number of non-exhaustive stages equals the table length (`seen == WITNESSES.len()`),
+       so the table has no dead rows. -/
+theorem hem_johnson_qrom_witnesses_cover_every_canonical_stage :
+    (∀ nv : Nat, 2 ≤ nv → nv ≤ 24 → ∀ g ∈ hemStageGeoms nv,
+      hemJohnsonQromStageCovered (goldilocksPrime ^ 4) nv g = true) ∧
+    hemJohnsonQromSeenCount = hemJohnsonQromWitnessTable.length := by
+  have hAll : ((List.range 23).all fun i =>
+      (hemStageGeoms (i + 2)).all
+        (hemJohnsonQromStageCovered (goldilocksPrime ^ 4) (i + 2))) = true := by
+    decide +kernel
+  refine ⟨?_, by decide +kernel⟩
+  intro nv h2 h24 g hg
+  have h1 := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have hEq : nv - 2 + 2 = nv := by omega
+  rw [hEq] at h1
+  exact List.all_eq_true.mp h1 g hg
+
+/-- Stage witnesses for `Hem` WHIR at `num_vars = nv`.
+    * `isQrom = true` (`BciksJohnsonQrom128`): EXACTLY the deployed rows of
+      `hemJohnsonQromWitnessTable` on the deployed geometry, for every `nv`.
+    * `isQrom = false` (`BciksJohnsonClassical128`, `q = (129, 65, 44, 33)`): Lean-side witnesses
+      at `nv = 20` and `nv = 24` only. The Rust tree ships NO classical-regime table (the QROM rows
+      do not meet the `2^-128` target at half the queries), so these rows have no Rust twin. -/
+def whirAffineStageWitnesses (nv : Nat) (isQrom : Bool) : List WhirAffineWitness :=
+  if isQrom then
+    (hemStageGeoms nv).filterMap (fun g =>
+      if hemJohnsonQromStageExhaustive g = true then none else hemJohnsonQromStageWitness nv g)
+  else if nv = 20 then
+    [ { n := 131072, d := 32770, sFolds := 5, A := 65884, B := 65798,
+        m := 122, D := 12150, queries := 129, queryTargetBits := 128 },
+      { n := 65536,  d := 4098,  sFolds := 3, A := 16734, B := 16648,
+        m := 48,  D := 3072,  queries := 65, queryTargetBits := 128 },
+      { n := 16384,  d := 258,   sFolds := 4, A := 2177,  B := 2148,
+        m := 64,  D := 3072,  queries := 44, queryTargetBits := 128 } ]
+  else if nv = 24 then
     [ { n := 1048576, d := 262146, sFolds := 6, A := 527106, B := 526403,
-        m := 64,  D := 11007, queries := q0, queryTargetBits := tBits },
+        m := 64,  D := 11007, queries := 129, queryTargetBits := 128 },
       { n := 262144,  d := 16386,  sFolds := 4, A := 66944,  B := 66594,
-        m := 24,  D := 3200,  queries := q1, queryTargetBits := tBits },
+        m := 24,  D := 3200,  queries := 65, queryTargetBits := 128 },
       { n := 131072,  d := 2050,   sFolds := 3, A := 17446,  B := 17184,
-        m := 12,  D := 768,   queries := q2, queryTargetBits := tBits },
+        m := 12,  D := 768,   queries := 44, queryTargetBits := 128 },
       { n := 65536,   d := 258,    sFolds := 3, A := 4452,   B := 4369,
-        m := 16,  D := 1536,  queries := q3, queryTargetBits := tBits } ]
+        m := 16,  D := 1536,  queries := 33, queryTargetBits := 128 } ]
+  else []
+
+/-- The `nv = 20` and `nv = 24` QROM witness lists ARE the deployed `(A, B = A - 1, m, D)` rows
+    on the deployed `(n, d, s_i, q_i)` geometry (`q = (258, 130, 88, 66)`). -/
+theorem whirAffineStageWitnesses_qrom_eq_deployed :
+    whirAffineStageWitnesses 20 true =
+      [ { n := 131072, d := 32770, sFolds := 5, A := 65948, B := 65947,
+          m := 128, D := 18111, queries := 258, queryTargetBits := 256 },
+        { n := 65536, d := 4098, sFolds := 3, A := 16782, B := 16781,
+          m := 32, D := 3286, queries := 130, queryTargetBits := 256 },
+        { n := 16384, d := 258, sFolds := 4, A := 2215, B := 2214,
+          m := 32, D := 2149, queries := 88, queryTargetBits := 256 } ] ∧
+    whirAffineStageWitnesses 24 true =
+      [ { n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
+          m := 64, D := 27164, queries := 258, queryTargetBits := 256 },
+        { n := 262144, d := 16386, sFolds := 4, A := 66992, B := 66991,
+          m := 32, D := 11069, queries := 130, queryTargetBits := 256 },
+        { n := 131072, d := 2050, sFolds := 3, A := 17484, B := 17483,
+          m := 16, D := 5228, queries := 88, queryTargetBits := 256 },
+        { n := 65536, d := 258, sFolds := 3, A := 4482, B := 4481,
+          m := 16, D := 2067, queries := 66, queryTargetBits := 256 } ] := by
+  constructor <;> decide +kernel
 
 /-- **Kernel-Decided `Theorem 4.8 + Theorem 5.1` Soundness Certificate (`cwyz26_whir_nv20_and_nv24_all_stages_valid`)**:
-    Certifies by exact kernel arithmetic (`decide`, `0` floating point, `0` trust) that ALL 14 stage
-    witnesses across `nv = 20` (`3` stages) and `nv = 24` (`4` stages) for both `BciksJohnsonClassical128`
-    (`q = (129, 65, 44, 33)`) and `BciksJohnsonQrom128` (`q = (258, 130, 88, 66)`) over `GoldilocksExt4`
-    (`q = Goldilocks.PRIME ^ 4`) satisfy `checkWhirAffineWitness` AND have commit-folding numerator
-    **`< 2048`** (`> 245` bits of unconditional folding soundness per stage!). -/
+    Certifies by exact kernel arithmetic (`0` floating point, `0` trust) that ALL 14 stage
+    witnesses across `nv = 20` (`3` stages) and `nv = 24` (`4` stages) for both
+    `BciksJohnsonClassical128` (`q = (129, 65, 44, 33)`, Lean-side rows) and `BciksJohnsonQrom128`
+    (`q = (258, 130, 88, 66)`, the DEPLOYED rows) over `GoldilocksExt4` (`q = goldilocksPrime ^ 4`)
+    satisfy `checkWhirAffineWitness` AND have commit-folding numerator **`< 1900`**
+    (`> 245` bits of unconditional folding soundness per stage!). -/
 theorem cwyz26_whir_nv20_and_nv24_all_stages_valid :
-    let q := Goldilocks.PRIME ^ 4
+    let q := goldilocksPrime ^ 4
     (∀ w ∈ whirAffineStageWitnesses 20 false,
-      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 2048) ∧
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 1900) ∧
     (∀ w ∈ whirAffineStageWitnesses 20 true,
-      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 2048) ∧
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 1900) ∧
     (∀ w ∈ whirAffineStageWitnesses 24 false,
-      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 2048) ∧
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 1900) ∧
     (∀ w ∈ whirAffineStageWitnesses 24 true,
-      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 2048) := by
-  decide
+      checkWhirAffineWitness w q = true ∧ whirAffineStageSimpleNum w < 1900) := by
+  decide +kernel
+
+/-- **`#tooth`: the checker is sensitive to the deployed table and to the sampling model.**
+    1. Raising the deployed `nv = 24` stage-0 agreement threshold by ONE (`A = 527171`) breaks the
+       exact `2^-256` distinct-fiber query bound;
+    2. the superseded Lean-only row (`A = 527106, B = 526403, m = 64, D = 11007`) at the deployed
+       `258` queries is NOT what Rust ships, and the deployed row fails the weaker
+       with-replacement bound `((A + s)/n)^q < 2^-256` that the previous checker demanded. -/
+theorem tooth_checkWhirAffineWitness_rejects_perturbed_rows :
+    checkWhirAffineWitness
+      { n := 1048576, d := 262146, sFolds := 6, A := 527171, B := 527170,
+        m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
+      (goldilocksPrime ^ 4) = false ∧
+    ¬ ((527170 + 6) ^ 258 * 2 ^ 256 < 1048576 ^ 258) ∧
+    fallingFactorial (527170 + 6) 258 * 2 ^ 256 < fallingFactorial 1048576 258 := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
 
 end Qsag

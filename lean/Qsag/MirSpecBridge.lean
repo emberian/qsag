@@ -17,70 +17,73 @@ import all Qsag.Goldilocks
 import all Qsag.Poseidon2
 import all Qsag.SimulationSpine
 import all Qsag.InteractiveUcEngine
+import all Qsag.RssSlhFullSecurity
 import all Qsag.CustodySuiteFull
 import all Qsag.ElfBinaryVerify
 import all Qsag.ElfParse
 import all Qsag.ThresholdMlDsaAndToprf
 
 /-!
-# Qsag.MirSpecBridge — Compositional ISA-to-MIR-to-Protocol-to-Ideal Specification Bridge
+# Qsag.MirSpecBridge — fixed-width guard models and their composition into the protocol specs
 
-Constructive Lean 4.35 refinement and composition bridge (`0` proof gaps, `0` custom axioms,
-`0 Classical.choice`, `≤ 12` `@[expose]` declarations) closing the specification-alignment boundary
-between concrete fixed-width Rust/ELF guards and protocol-level security theorems:
+## What this file is and is not
 
-1. **§1. Compiled `.rlib` 9-Kernel Equivalence Bundle & Protocol Field/Equality Bridges**:
-   - Packages all 9 machine-code refinement theorems from `Qsag.McRefine`
-     (`compiled_rlib_nine_kernels_verified`) over decoded x86-64 and AArch64 object slices.
-   - Bridges `qsag_asm_ct_eq_32_{x86_64,aarch64}` directly to 32-byte digest list equality
-     (`mc_ct_eq_32_refines_digest_equality`), `qsag_asm_ct_memzero_{x86_64,aarch64}` to physical
-     secret-share byte wipe (`mc_ct_memzero_wipes_secret_share_window`), and
-     `qsag_asm_goldilocks_{add,sub,mul}_ct` directly to canonical `Goldilocks` ring arithmetic and
-     `ThresholdMlDsaAndToprf.toprf_2of5_corrects_one_malicious_server`
-     (`mc_goldilocks_kernels_refine_field_and_toprf`).
+Every `Mir*` structure and machine in this file is a **hand-written Lean model**. The `qsag`
+package does not import the Aeneas extraction (`aeneas/lean`, package `qsag_aeneas`), so no
+declaration here mentions `QsagVerified.Funs`, and no theorem here is about extracted Rust MIR.
+The dependency runs the other way: `qsag_aeneas` requires `qsag`, and
+`aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean` imports both the
+extraction and this module and proves the links that exist. Per model:
 
-2. **§2. Fixed-Width `UInt64` Policy Guard $\to$ `CustodySuiteFull` Multi-Turn Velocity Bridge**:
-   - Models concrete fixed-width `UInt64` `MirPolicyGuardState` (`windowId`, `velocityWindowCap`,
-     `accumulatedSpend`, `perTxCap : UInt64`, `burnedNonces : List UInt64`) ignoring untrusted
-     caller-echoed spend fields and checking overflow-safe remaining budget
-     `req.amountUnits ≤ m.velocityWindowCap - m.accumulatedSpend`.
-   - Proves `LockstepSim` and `ForwardSim` (`mirPolicyGuard_forwardSim_custodyPolicy`) to
-     `CustodySuiteFull.policyGuardStep` and lifts multi-turn traces directly into
-     `CustodySuiteFull.policy_multiturn_velocity_and_intent_binding`
-     (`mirPolicyGuard_implies_multiturn_velocity_and_intent_binding`).
+| Model here | Linked to the Aeneas extraction? |
+|---|---|
+| `MirRssCutSession` / `mirRssCutMachine` (§3) | Yes: `extractedRssCut_forwardSim_mirRssCut`, a lockstep forward simulation from the extracted `rss_cut_session.RssCutGateSession.step`. |
+| `MirPolicyGuardState` (§2) | No. It is a `UInt64` burned-nonce design; the extracted `StatefulVelocityGuard` is a `u128` monotonic-nonce design and production `crates/qsag-policy` is a third. |
+| `MirRssMlDsaKeyState` and the ML-DSA gate (§3) | No. The extracted `MlDsaReleaseGate` takes four caller booleans; this model computes norms. |
+| `MirBeltLatchState` (§4) | No. Field-for-field `WalLatchState`; the extracted guard is `VerifiedBeltQuorumGuard`. |
+| `Layer1ElfState`, `Layer2MirState` and the four-layer chain (§5) | Layer 1 runs decoded machine code through `McRefine`. Layer 2 is a model that evaluates the pre-cut transcript predicate itself and is not extracted. |
 
-3. **§3. Sticky-Poison `MirRssCutSession` & `UInt64` `MirMlDsaGate` $\to$ Protocol Security Bridges**:
-   - Models `MirRssCutSession` setting sticky `poisoned := true` and wiping `shareSlotPresent`
-     *before* clearing `pendingRelations := 0` on any Round-1/Round-2 check failure, paired with
-     `#tooth` (`tooth_non_sticky_pending_clear_releases_corrupted_cut`), `ForwardSim`
-     (`mirRssCutSession_forwardSim_walGate`), and direct composition into
-     `RssSlhFullSecurity.rss_slh_real_ideal_view_indistinguishable` and
-     `RssSlhFullSecurity.rss_slh_interactive_euf_cma_reduction`.
-   - Proves `ForwardSim` (`mirRssMlDsaGate_forwardSim_spec`) from fixed-width `UInt64` norm, hint,
-     and `checked_add(1)` epoch checks over RSS subset-shared keys (`MirRssMlDsaKeyState`) to
-     `specRssMlDsaMachine`, paired with explicit Phase-2/3 rejected-attempt leakage characterization
-     (`MirMlDsaAttemptLeakage`: `(openedMaskedW, openedW1, openedMaskedZAndLow, rejectBit)`),
-     constructive `SimpleEquiv` mask bijection (`rssMaskVec4Equiv`), multi-turn epoch uniqueness,
-     and standalone FIPS 204 `mldsaVerify` soundness (`mirRssMlDsaGate_leakage_bounded_and_fips204_sound`).
+Names keep their `Mir` prefix because other modules and documents refer to them; read it as
+"model at MIR granularity", not "derived from MIR".
 
-4. **§4. Certified `2 * q > n + f` `BeltLatch` Guard $\to$ `WalLatchState` & `IdealTsig` Bridge**:
-   - Constructively extracts (`0 Classical.choice`) an honest validator `p ∈ Q₁ ∩ Q₂ \ corrupt`
-     for any two `q`-quorums under `2 * q > n + f` (`beltLatch_quorum_intersection_honest_witness`),
-     paired with `#tooth` (`tooth_subthreshold_beltLatch_quorum_allows_split_brain`), proving
-     `ForwardSim` (`mirBeltLatch_forwardSim_walLatch`) to `WalLatchState` and discharging
-     `IdealTsig.thresholdApproval_requires_honest_party`.
+## Contents
 
-5. **§5. Unified End-to-End 4-Layer Transitive Simulation Chain (`isa_to_mir_to_protocol_to_ideal_sim`)**:
-   - Instantiates `ForwardSim.trans` across:
-     `(1) Compiled ELF ISA Slice` (`runX86` on `qsag_asm_ct_eq_32_x86_64` & `qsag_asm_ct_memzero_x86_64`)
-     $\to$ `(2) Fixed-Width MIR Guarded State Machine`
-     $\to$ `(3) Multi-Party 3-Round Interactive Wire Protocol` (`RealClusterState` + secret shares)
-     $\to$ `(4) sk-Free Ideal Functionality F_tsig` (`IdealClusterState` + `approvedMsgs`).
-   - Paired with multi-turn safety preservation (`isa_to_ideal_preserves_multiturn_safety`),
-     non-vacuous multi-turn execution witness (`inhabited_four_layer_chain`), and `#tooth`
-     refutation (`tooth_stateless_policy_link_breaks_four_layer_ideal_safety`) proving that
-     replacing Link 2's authoritative spend ledger with caller-echoed spend breaks end-to-end
-     ideal-functionality safety and refutes `ForwardSim`.
+1. **§1. Compiled `.rlib` kernel bundle.** Packages the nine machine-code refinement theorems of
+   `Qsag.McRefine` (`compiled_rlib_nine_kernels_verified`) over decoded x86-64 and AArch64 object
+   slices, and restates `ct_eq_32`, `ct_memzero` and the Goldilocks kernels against digest
+   equality, share wipe and `Goldilocks` ring arithmetic.
+
+2. **§2. `UInt64` policy guard model.** `MirPolicyGuardState` with `LockstepSim` / `ForwardSim` to
+   `CustodySuiteFull.policyGuardStep`, lifted to the multi-turn velocity and intent-binding
+   theorem. The no-wrap invariant is an explicit premise.
+
+3. **§3. Residual-gated cut session and ML-DSA gate model.**
+   - `MirRssCutSession` mirrors `aeneas/qsag-verified/src/rss_cut_session.rs`: five phases,
+     session-id and mask-commitment binding, and a Round-3 check that compares three
+     caller-supplied residual scalars with zero. It evaluates no MAC relation.
+   - `ResidualSound` / `ResidualContract` state the caller obligation that gives those scalars
+     meaning. `guardedCut_released_cut_backed_by_witness` (multi-turn, composed with
+     `HonestCustodyVault`) and `guardedCut_forwardSim_specPreCut` (forward simulation to a barrier
+     spec that evaluates the relation) both take it as a hypothesis.
+   - `mirRssCut_release_implies_barrier_and_deviation_root` instantiates the relation with the
+     accumulator test of `RssSlhFullSecurity.sharedPreCutBarrier`
+     (`sharedPreCutBarrier_pass_implies_preCutBarrierHolds` proves it is that test);
+     `honestRound3Input_meets_contract` shows the contract is met by the honestly computed
+     residual.
+   - `mirRssMlDsaGate_forwardSim_spec` and the leakage characterisation for the ML-DSA model.
+
+4. **§4. Quorum intersection and the belt latch model.** Constructive honest-intersection witness
+   under `2 * q > n + f`; `mirBeltLatch_forwardSim_walLatch`, whose relation carries
+   `WalLatchState.WellFormed`; an authenticated, deduplicated certificate gate
+   (`beltCertAuthenticated`) with `beltCert_authenticated_quorums_share_honest_signer`.
+
+5. **§5. Four-layer chain (`isa_to_mir_to_protocol_to_ideal_sim`).** `ForwardSim.trans` across
+   decoded ELF slice, the Layer-2 guard model, the three-round interactive protocol and the ideal
+   functionality, with a multi-turn safety lift, an inhabited execution witness and a `#tooth`
+   showing that a stateless policy link breaks ideal safety. "MIR" in the theorem name refers to
+   the Layer-2 model.
+
+Constructive throughout: no proof gaps, no custom axioms, no `Classical.choice`.
 -/
 
 public section
@@ -507,7 +510,7 @@ private theorem u64MemBool_map_toNat {x : UInt64} {ys : List UInt64} :
       · exact .inl rfl
       · exact .inr hRest
 
-/-- Fixed-width Rust/MIR transaction intent request carrying `UInt64` numeric fields plus an
+/-- Fixed-width model of a transaction intent request carrying `UInt64` numeric fields plus an
     untrusted `callerEchoedSpent : UInt64` field (which the authoritative guard must ignore). -/
 structure MirTxIntent where
   recipient : List UInt8
@@ -528,7 +531,9 @@ def MirTxIntent.toTransactionIntent (req : MirTxIntent) : TransactionIntent wher
   authority_digest := req.authorityDigest
   nonce := req.nonce.toNat
 
-/-- Concrete fixed-width `UInt64` policy guard state mirroring `crates/qsag-policy`. -/
+/-- Fixed-width `UInt64` policy guard model. It is not extracted from Rust and differs from both
+    the extracted `StatefulVelocityGuard` (`u128`, monotonic nonce) and production
+    `crates/qsag-policy` (`u128` caps, 32-byte nonces, authenticated peers). -/
 structure MirPolicyGuardState where
   windowId : UInt64
   velocityWindowCap : UInt64
@@ -778,11 +783,11 @@ theorem mirPolicyGuard_implies_multiturn_velocity_and_intent_binding
   obtain ⟨_, hw, hp, ha, hr, hpt, hc⟩ := hProps e he
   exact ⟨hw, hp, ha, hr, hpt, hc⟩
 
-/-! ## §3. Sticky-Poison `MirRssCutSession` & `UInt64` `MirMlDsaGate` $\to$ Protocol Security Bridges -/
+/-! ## §3. Residual-gated cut session model, ML-DSA gate model, and their protocol bridges -/
 
 /-- Concrete `BGIN19` `GF(2^128)` (`Tower128`) Round-2 wire-MAC relation check:
-    verifies `alpha * xWire + keyOffset = macShare` directly over `GF(2^128)` field elements
-    (`0` caller-reported booleans!). -/
+    `alpha * xWire + keyOffset = macShare` over `GF(2^128)` field elements. This is a
+    protocol-level relation; no guard model in this file evaluates it on its own. -/
 structure BginWireRelation where
   xWire : Tower128
   macShare : Tower128
@@ -798,396 +803,709 @@ def bginRelationHolds (r : BginWireRelation) : Bool :=
 def bginBatchHolds (rels : List BginWireRelation) : Bool :=
   !rels.isEmpty && rels.all bginRelationHolds
 
-/-- Concrete fixed-width Rust/MIR `RssCutSession` state (`crates/qsag-core/src/fips205.rs` and
-    `aeneas/qsag-verified/src/rss_cut_session.rs`):
-    - `phase : UInt8` (`0` = `Init`, `1` = `Round1Committed`, `2` = `Round2Checked`, `0xFF` = `Poisoned`),
-    - `pendingRelations : UInt64`,
-    - `consistencyVerified : Bool`,
-    - `poisoned : Bool` (sticky quarantine flag set *before* `pendingRelations` is cleared),
-    - `shareSlotPresent : Bool`. -/
-structure MirRssCutSession where
-  phase : UInt8
-  pendingRelations : UInt64
-  consistencyVerified : Bool
-  poisoned : Bool
-  shareSlotPresent : Bool
+/-! ### Residual-gated `MirRssCutSession`
+
+Hand-written fixed-width model of `RssCutGateSession` in
+`aeneas/qsag-verified/src/rss_cut_session.rs`, kept field-for-field and branch-for-branch equal to
+that Rust. This package does not import the Aeneas extraction, so nothing in this file relates the
+model to MIR; that link is the forward simulation
+`qsag_verified.proofs.extractedRssCut_forwardSim_mirRssCut` in
+`aeneas/lean/QsagVerified/Proofs/AuthenticatedBeltAndRealSpecWeld.lean`, which imports both
+`QsagVerified.Funs` and this module.
+
+The guard evaluates no MAC and no zero-knowledge relation. Round 3 compares three caller-supplied
+residual scalars with zero and nothing else. What those scalars summarise is an obligation on the
+caller, stated below as `ResidualSound` / `ResidualContract`; every theorem here that speaks about
+a protocol relation takes that obligation as an explicit hypothesis. The Rust error variants are
+collapsed to `Unit`: every rejection poisons the session whatever its cause. -/
+
+/-- Fixed-width 32-byte value: the model of a Rust `[u8; 32]`. -/
+abbrev Bytes32 := Vector UInt8 32
+
+/-- The wiped cut buffer `[0u8; 32]`. -/
+def zeroBytes32 : Bytes32 := Vector.replicate 32 0
+
+theorem zeroBytes32_eq : zeroBytes32 = Vector.replicate 32 0 := by rfl
+
+/-- The five phases of `RssCutPhase`, in declaration order. -/
+inductive MirRssCutPhase where
+  | round1MaskCommitted
+  | round2ChiEvaluated
+  | round3ConsistencyVerified
+  | cutOpened
+  | poisoned
   deriving DecidableEq, Repr
 
-/-- Operations on a threshold cut session across Rounds 1, 2, and 3, carrying concrete `GF(2^128)`
-    `BginWireRelation` batches rather than caller-reported booleans. -/
+/-- Model of the six private fields of `RssCutGateSession`. -/
+structure MirRssCutSession where
+  sessionId : Bytes32
+  phase : MirRssCutPhase
+  maskCommitment : Bytes32
+  candidateCutBytes : Bytes32
+  consistencyVerified : Bool
+  poisoned : Bool
+  deriving DecidableEq
+
+/-- Model of `RssCutStepInput`. The Round-3 residuals are opaque scalars (`u128`, `u128`, `u64`)
+    computed outside the guard. -/
 inductive MirRssCutInput where
-  | recordRound1 (relationCount : UInt64)
-  | verifyBatchConsistency (relations : List BginWireRelation)
-  | releaseRound3Cut (cutPayload : ByteArray)
+  | advanceRound2Chi (reqSessionId recomputedMaskCommitment chiCutCandidate : Bytes32)
+  | advanceRound3VerifyConsistency (reqSessionId : Bytes32)
+      (spdzMacResidualLo spdzMacResidualHi : BitVec 128) (bbcggiDzkResidual : UInt64)
+  | openVerifiedCut (reqSessionId : Bytes32)
   deriving DecidableEq
 
-/-- Output events emitted by `MirRssCutSession`. -/
+/-- Model of `RssCutStepOutput`. -/
 inductive MirRssCutOutput where
-  | round1Recorded (relationCount : UInt64)
-  | batchVerified
-  | cutReleased (cutPayload : ByteArray)
+  | round2Ready
+  | round3Verified
+  | cutReleased (cut : Bytes32)
   deriving DecidableEq
 
-/-- Authoritative sticky-poison `MirRssCutSession` step:
-    verifies both exact batch cardinality (`relations.length = s.pendingRelations.toNat`) and every
-    `GF(2^128)` `BGIN19` equation (`bginBatchHolds relations`), latching `poisoned := true`,
-    `phase := 0xFF`, and `shareSlotPresent := false` **before** clearing `pendingRelations := 0`
-    whenever any relation fails! -/
-def mirRssCutStep (s : MirRssCutSession) (inp : MirRssCutInput) :
-    StepOutcome MirRssCutSession MirRssCutOutput Unit :=
-  if s.poisoned || !s.shareSlotPresent then
-    .err { s with phase := 0xFF, pendingRelations := 0, consistencyVerified := false,
-                  poisoned := true, shareSlotPresent := false } ()
-  else
-    match inp with
-    | .recordRound1 rels =>
-      if s.phase == 0 && rels != 0 then
-        .ok { s with phase := 1, pendingRelations := rels, consistencyVerified := false }
-            (.round1Recorded rels)
-      else
-        .err s ()
-    | .verifyBatchConsistency relations =>
-      if s.phase == 1 then
-        if decide (relations.length = s.pendingRelations.toNat) && bginBatchHolds relations then
-          .ok { s with phase := 2, pendingRelations := 0, consistencyVerified := true }
-              .batchVerified
-        else
-          -- Sticky poison + share wipe BEFORE clearing `pendingRelations := 0`!
-          .err { phase := 0xFF, pendingRelations := 0, consistencyVerified := false,
-                 poisoned := true, shareSlotPresent := false } ()
-      else
-        .err s ()
-    | .releaseRound3Cut payload =>
-      if s.phase == 2 && s.pendingRelations == 0 && s.consistencyVerified then
-        .ok { s with phase := 0, consistencyVerified := false } (.cutReleased payload)
-      else
-        .err s ()
+/-- `RssCutGateSession::new_round1_committed`. -/
+def MirRssCutSession.round1Committed (sessionId maskCommitment : Bytes32) : MirRssCutSession :=
+  { sessionId := sessionId, phase := .round1MaskCommitted, maskCommitment := maskCommitment,
+    candidateCutBytes := zeroBytes32, consistencyVerified := false, poisoned := false }
 
-/-- Canonical `PartyMachine` for `MirRssCutSession`. -/
-@[expose]
-def mirRssCutMachine : PartyMachine MirRssCutSession MirRssCutInput MirRssCutOutput :=
-  PartyMachine.ofOutcome mirRssCutStep
+theorem MirRssCutSession.round1Committed_eq (sessionId maskCommitment : Bytes32) :
+    MirRssCutSession.round1Committed sessionId maskCommitment =
+      { sessionId := sessionId, phase := .round1MaskCommitted, maskCommitment := maskCommitment,
+        candidateCutBytes := zeroBytes32, consistencyVerified := false, poisoned := false } := by rfl
 
-/-- Buggy non-sticky variant that clears `pendingRelations := 0` on a failed `GF(2^128)` `BGIN19`
-    batch check without latching `poisoned := true`, allowing a subsequent empty `[]` call to pass
-    `[].all bginRelationHolds = true` vacuously and open the Round-3 cut! -/
-def buggyNonStickyRssCutStep (s : MirRssCutSession) (inp : MirRssCutInput) :
-    StepOutcome MirRssCutSession MirRssCutOutput Unit :=
-  match inp with
-  | .recordRound1 rels =>
-    .ok { s with phase := 1, pendingRelations := rels, consistencyVerified := false }
-        (.round1Recorded rels)
-  | .verifyBatchConsistency relations =>
-    if decide (relations.length = s.pendingRelations.toNat) && relations.all bginRelationHolds then
-      .ok { s with phase := 2, pendingRelations := 0, consistencyVerified := true } .batchVerified
-    else
-      -- BUG: clears `pendingRelations := 0` without setting `poisoned := true`!
-      .err { s with pendingRelations := 0, consistencyVerified := false } ()
-  | .releaseRound3Cut payload =>
-    if !s.poisoned && s.phase == 2 && s.pendingRelations == 0 && s.consistencyVerified then
-      .ok { s with phase := 0, consistencyVerified := false } (.cutReleased payload)
-    else
-      .err s ()
+/-- `poison_rss_cut_session`: sticky poison, wiped cut buffer, verification flag cleared. -/
+def mirRssCutPoison (s : MirRssCutSession) : MirRssCutSession :=
+  { sessionId := s.sessionId, phase := .poisoned, maskCommitment := s.maskCommitment,
+    candidateCutBytes := zeroBytes32, consistencyVerified := false, poisoned := true }
 
-/-- **`#tooth` (`tooth_non_sticky_pending_clear_releases_corrupted_cut`)**:
-    Submitting a forged `GF(2^128)` `BGIN19` relation (`0 * 1 + 0 = 0 ≠ 1`) on `verifyBatchConsistency`
-    causes `buggyNonStickyRssCutStep` to clear `pendingRelations := 0` without setting `poisoned := true`,
-    so a subsequent `verifyBatchConsistency []` call passes vacuously on the cleared queue and releases
-    `cutReleased`; the authoritative `mirRssCutMachine` permanently poisons and blocks both `[]` and
-    any subsequent valid `GF(2^128)` relation forever. -/
-theorem tooth_non_sticky_pending_clear_releases_corrupted_cut (payload : ByteArray) :
-    let init : MirRssCutSession := ⟨0, 0, false, false, true⟩
-    let forgedRel : BginWireRelation := ⟨towerOne 7, towerOne 7, towerZero 7, towerZero 7⟩
-    let validRel : BginWireRelation := ⟨towerOne 7, towerOne 7, towerZero 7, towerOne 7⟩
-    let buggyM := PartyMachine.ofOutcome buggyNonStickyRssCutStep
-    let s1 := (buggyM.runStep init (.recordRound1 1)).1
-    let s2 := (buggyM.runStep s1 (.verifyBatchConsistency [forgedRel])).1
-    let s3 := (buggyM.runStep s2 (.verifyBatchConsistency [])).1
-    (buggyM.runStep s3 (.releaseRound3Cut payload)).2 = some (.cutReleased payload) ∧
-    (let g1 := (mirRssCutMachine.runStep init (.recordRound1 1)).1
-     let g2 := (mirRssCutMachine.runStep g1 (.verifyBatchConsistency [forgedRel])).1
-     let g3 := (mirRssCutMachine.runStep g2 (.verifyBatchConsistency [])).1
-     g2.poisoned = true ∧
-     g2.shareSlotPresent = false ∧
-     (mirRssCutMachine.runStep g2 (.verifyBatchConsistency [validRel])).2 = none ∧
-     (mirRssCutMachine.runStep g3 (.releaseRound3Cut payload)).2 = none) := by
-  refine ⟨rfl, rfl, rfl, rfl, rfl⟩
+theorem mirRssCutPoison_eq (s : MirRssCutSession) :
+    mirRssCutPoison s =
+      { sessionId := s.sessionId, phase := .poisoned, maskCommitment := s.maskCommitment,
+        candidateCutBytes := zeroBytes32, consistencyVerified := false, poisoned := true } := by rfl
 
-/-- Protocol-level pre-cut barrier & `HonestCustodyVault` specification state. -/
-structure SpecPreCutVaultState where
-  stage : Nat
-  pendingRelations : Nat
-  vault : HonestCustodyVault Unit
+/-- The whole of the guard's Round-3 consistency check: three scalar comparisons with zero. -/
+def residualsZero (lo hi : BitVec 128) (dzk : UInt64) : Bool :=
+  decide (lo = 0) && decide (hi = 0) && decide (dzk = 0)
 
-def specPreCutVaultStep (st : SpecPreCutVaultState) (inp : MirRssCutInput) :
-    StepOutcome SpecPreCutVaultState MirRssCutOutput Unit :=
-  if st.vault.wal.poisoned || st.vault.shareSlot.isNone then
-    .err { stage := 255, pendingRelations := 0, vault := walPoisonVault st.vault } ()
-  else
-    match inp with
-    | .recordRound1 rels =>
-      if st.stage == 0 && rels != 0 then
-        .ok { st with stage := 1, pendingRelations := rels.toNat } (.round1Recorded rels)
-      else
-        .err st ()
-    | .verifyBatchConsistency relations =>
-      if st.stage == 1 then
-        if decide (relations.length = st.pendingRelations) && bginBatchHolds relations then
-          .ok { st with stage := 2, pendingRelations := 0 } .batchVerified
-        else
-          .err { stage := 255, pendingRelations := 0, vault := walPoisonVault st.vault } ()
-      else
-        .err st ()
-    | .releaseRound3Cut payload =>
-      if st.stage == 2 then
-        .ok { st with stage := 0, pendingRelations := 0 } (.cutReleased payload)
-      else
-        .err st ()
+theorem residualsZero_eq (lo hi : BitVec 128) (dzk : UInt64) :
+    residualsZero lo hi dzk = (decide (lo = 0) && decide (hi = 0) && decide (dzk = 0)) := by rfl
 
-def specPreCutVaultMachine : PartyMachine SpecPreCutVaultState MirRssCutInput MirRssCutOutput :=
-  PartyMachine.ofOutcome specPreCutVaultStep
+/-- Acceptance condition of each transition on an unpoisoned session. -/
+def mirRssCutAccepts (s : MirRssCutSession) : MirRssCutInput → Bool
+  | .advanceRound2Chi reqSid recomputed _ =>
+    decide (s.sessionId = reqSid) && decide (s.phase = .round1MaskCommitted) &&
+      decide (s.maskCommitment = recomputed)
+  | .advanceRound3VerifyConsistency reqSid lo hi dzk =>
+    decide (s.sessionId = reqSid) && decide (s.phase = .round2ChiEvaluated) &&
+      residualsZero lo hi dzk
+  | .openVerifiedCut reqSid =>
+    decide (s.sessionId = reqSid) && decide (s.phase = .round3ConsistencyVerified) &&
+      s.consistencyVerified
 
-/-- **Bridge 3A (`mirRssCutSession_forwardSim_walGate`)**:
-    Proves `ForwardSim` from the concrete fixed-width `MirRssCutSession` machine to the
-    `HonestCustodyVault` / `walPoisonVault` pre-cut barrier specification. -/
-def mirRssCutSession_forwardSim_walGate :
-    ForwardSim mirRssCutMachine specPreCutVaultMachine where
-  Rel c a :=
-    c.poisoned = a.vault.wal.poisoned ∧
-    c.shareSlotPresent = a.vault.shareSlot.isSome ∧
-    (c.poisoned = false →
-      c.shareSlotPresent = true ∧
-      ((c.phase = 0 ∧ a.stage = 0 ∧ c.consistencyVerified = false) ∨
-       (c.phase = 1 ∧ a.stage = 1 ∧ c.pendingRelations.toNat = a.pendingRelations ∧ c.pendingRelations ≠ 0 ∧ c.consistencyVerified = false) ∨
-       (c.phase = 2 ∧ a.stage = 2 ∧ c.pendingRelations = 0 ∧ c.consistencyVerified = true)))
+theorem mirRssCutAccepts_round2 (s : MirRssCutSession) (reqSid recomputed cand : Bytes32) :
+    mirRssCutAccepts s (.advanceRound2Chi reqSid recomputed cand) =
+      (decide (s.sessionId = reqSid) && decide (s.phase = .round1MaskCommitted) &&
+        decide (s.maskCommitment = recomputed)) := by rfl
+
+theorem mirRssCutAccepts_round3 (s : MirRssCutSession) (reqSid : Bytes32)
+    (lo hi : BitVec 128) (dzk : UInt64) :
+    mirRssCutAccepts s (.advanceRound3VerifyConsistency reqSid lo hi dzk) =
+      (decide (s.sessionId = reqSid) && decide (s.phase = .round2ChiEvaluated) &&
+        residualsZero lo hi dzk) := by rfl
+
+theorem mirRssCutAccepts_open (s : MirRssCutSession) (reqSid : Bytes32) :
+    mirRssCutAccepts s (.openVerifiedCut reqSid) =
+      (decide (s.sessionId = reqSid) && decide (s.phase = .round3ConsistencyVerified) &&
+        s.consistencyVerified) := by rfl
+
+/-- Successor state and output of each accepted transition. -/
+def mirRssCutNext (s : MirRssCutSession) : MirRssCutInput → MirRssCutSession × MirRssCutOutput
+  | .advanceRound2Chi _ _ cand =>
+    ({ s with phase := .round2ChiEvaluated, candidateCutBytes := cand,
+              consistencyVerified := false }, .round2Ready)
+  | .advanceRound3VerifyConsistency _ _ _ _ =>
+    ({ s with phase := .round3ConsistencyVerified, consistencyVerified := true }, .round3Verified)
+  | .openVerifiedCut _ =>
+    ({ s with phase := .cutOpened, candidateCutBytes := zeroBytes32 },
+      .cutReleased s.candidateCutBytes)
+
+theorem mirRssCutNext_round2 (s : MirRssCutSession) (reqSid recomputed cand : Bytes32) :
+    mirRssCutNext s (.advanceRound2Chi reqSid recomputed cand) =
+      ({ s with phase := .round2ChiEvaluated, candidateCutBytes := cand,
+                consistencyVerified := false }, .round2Ready) := by rfl
+
+theorem mirRssCutNext_round3 (s : MirRssCutSession) (reqSid : Bytes32)
+    (lo hi : BitVec 128) (dzk : UInt64) :
+    mirRssCutNext s (.advanceRound3VerifyConsistency reqSid lo hi dzk) =
+      ({ s with phase := .round3ConsistencyVerified, consistencyVerified := true },
+        .round3Verified) := by rfl
+
+theorem mirRssCutNext_open (s : MirRssCutSession) (reqSid : Bytes32) :
+    mirRssCutNext s (.openVerifiedCut reqSid) =
+      ({ s with phase := .cutOpened, candidateCutBytes := zeroBytes32 },
+        .cutReleased s.candidateCutBytes) := by rfl
+
+/-- The residual-gated cut session as a `PartyMachine`. Every rejection, whatever its cause,
+    lands in `mirRssCutPoison`. -/
+def mirRssCutMachine : PartyMachine MirRssCutSession MirRssCutInput MirRssCutOutput where
+  step s inp :=
+    if !s.poisoned && mirRssCutAccepts s inp then
+      some ((mirRssCutNext s inp).1, (mirRssCutNext s inp).2)
+    else none
+  errStep s _ := mirRssCutPoison s
+
+theorem mirRssCutMachine_step_eq (s : MirRssCutSession) (inp : MirRssCutInput) :
+    mirRssCutMachine.step s inp =
+      if !s.poisoned && mirRssCutAccepts s inp then
+        some ((mirRssCutNext s inp).1, (mirRssCutNext s inp).2)
+      else none := by rfl
+
+theorem mirRssCutMachine_errStep_eq (s : MirRssCutSession) (inp : MirRssCutInput) :
+    mirRssCutMachine.errStep s inp = mirRssCutPoison s := by rfl
+
+/-- Mutant guard that returns to `round2ChiEvaluated` after a failed residual check instead of
+    poisoning. -/
+def nonStickyRssCutMachine : PartyMachine MirRssCutSession MirRssCutInput MirRssCutOutput where
+  step s inp :=
+    if !s.poisoned && mirRssCutAccepts s inp then
+      some ((mirRssCutNext s inp).1, (mirRssCutNext s inp).2)
+    else none
+  errStep s _ := s
+
+/-- **`#tooth` (`tooth_non_sticky_cut_session_releases_after_failed_residual`)**:
+    after a Round-3 call with a non-zero residual, the non-sticky mutant accepts a retry with zero
+    residuals and releases the candidate cut; the real guard has wiped the candidate, is poisoned,
+    and rejects the same retry and the open. -/
+theorem tooth_non_sticky_cut_session_releases_after_failed_residual
+    (sid comm cand : Bytes32) :
+    let init := MirRssCutSession.round1Committed sid comm
+    let bad : MirRssCutInput := .advanceRound3VerifyConsistency sid 1 0 0
+    let good : MirRssCutInput := .advanceRound3VerifyConsistency sid 0 0 0
+    let m1 := (nonStickyRssCutMachine.runStep init (.advanceRound2Chi sid comm cand)).1
+    let m2 := (nonStickyRssCutMachine.runStep m1 bad).1
+    let m3 := (nonStickyRssCutMachine.runStep m2 good).1
+    let g1 := (mirRssCutMachine.runStep init (.advanceRound2Chi sid comm cand)).1
+    let g2 := (mirRssCutMachine.runStep g1 bad).1
+    (nonStickyRssCutMachine.runStep m3 (.openVerifiedCut sid)).2 = some (.cutReleased cand) ∧
+    g2.poisoned = true ∧
+    g2.candidateCutBytes = zeroBytes32 ∧
+    (mirRssCutMachine.runStep g2 good).2 = none ∧
+    (mirRssCutMachine.runStep g2 (.openVerifiedCut sid)).2 = none := by
+  simp [PartyMachine.runStep, nonStickyRssCutMachine, mirRssCutMachine, mirRssCutAccepts,
+    mirRssCutNext, mirRssCutPoison, residualsZero, MirRssCutSession.round1Committed]
+
+/-! ### Caller residual contract and the composed guard-plus-vault execution -/
+
+/-- A guard input paired with the protocol-level witness the caller claims its Round-3 residual
+    scalars summarise. The guard never reads `witness`. -/
+structure AttestedCutInput (W : Type) where
+  input : MirRssCutInput
+  witness : W
+
+/-- **Caller residual soundness.** If the residual scalars handed to Round 3 are all zero then the
+    protocol relation `Holds` is true of the caller's witness. This is the only direction the
+    release theorem needs, and it is an assumption about code outside the guard. -/
+def ResidualSound {W : Type} (Holds : W → Bool) (a : AttestedCutInput W) : Prop :=
+  ∀ reqSid lo hi dzk, a.input = .advanceRound3VerifyConsistency reqSid lo hi dzk →
+    residualsZero lo hi dzk = true → Holds a.witness = true
+
+/-- **Caller residual contract**: soundness and completeness together, i.e. the residuals are zero
+    exactly when the relation holds. The forward simulation needs both directions because a spec
+    that evaluates `Holds` must reject exactly when the guard does. -/
+def ResidualContract {W : Type} (Holds : W → Bool) (a : AttestedCutInput W) : Prop :=
+  ∀ reqSid lo hi dzk, a.input = .advanceRound3VerifyConsistency reqSid lo hi dzk →
+    residualsZero lo hi dzk = Holds a.witness
+
+theorem ResidualContract.sound {W : Type} {Holds : W → Bool} {a : AttestedCutInput W}
+    (h : ResidualContract Holds a) : ResidualSound Holds a :=
+  fun reqSid lo hi dzk hIn hZero => (h reqSid lo hi dzk hIn).symm.trans hZero
+
+/-- Guard composed with the honest custody vault. The vault's share stays in memory only while the
+    guard accepts; the released Round-3 cut is whatever the guard releases. -/
+structure GuardedCutVaultState (ShareT : Type) where
+  session : MirRssCutSession
+  vault : HonestCustodyVault ShareT
+
+/-- Quarantine of the composed state: poison the guard and erase the vault share. -/
+def guardedCutPoison {ShareT : Type} (c : GuardedCutVaultState ShareT) :
+    GuardedCutVaultState ShareT :=
+  { session := mirRssCutPoison c.session, vault := walPoisonVault c.vault }
+
+/-- The composed step is accepted when the vault is live and the guard accepts. -/
+def guardedCutCond {ShareT : Type} (c : GuardedCutVaultState ShareT) (i : MirRssCutInput) : Bool :=
+  !(c.vault.wal.poisoned || c.vault.shareSlot.isNone) &&
+    (!c.session.poisoned && mirRssCutAccepts c.session i)
+
+/-- **Composed execution.** Runs `mirRssCutMachine` on the session; any rejection quarantines the
+    vault as well. The witness component of the input is ignored. -/
+def guardedCutVaultMachine {W ShareT : Type} :
+    PartyMachine (GuardedCutVaultState ShareT) (AttestedCutInput W) MirRssCutOutput where
+  step c a :=
+    if guardedCutCond c a.input then
+      some ({ session := (mirRssCutNext c.session a.input).1, vault := c.vault },
+            (mirRssCutNext c.session a.input).2)
+    else none
+  errStep c _ := guardedCutPoison c
+
+/-- Every accepted composed step is an accepted step of the standalone guard with the same
+    output, and leaves the vault untouched. -/
+theorem guardedCutVaultMachine_ok_runs_guard {W ShareT : Type}
+    {c c' : GuardedCutVaultState ShareT} {a : AttestedCutInput W} {out : MirRssCutOutput}
+    (h : (guardedCutVaultMachine (W := W)).step c a = some (c', out)) :
+    mirRssCutMachine.step c.session a.input = some (c'.session, out) ∧ c'.vault = c.vault := by
+  dsimp only [guardedCutVaultMachine] at h
+  cases hc : guardedCutCond c a.input
+  · simp [hc] at h
+  · simp only [hc, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    unfold guardedCutCond at hc
+    simp only [Bool.and_eq_true] at hc
+    refine ⟨?_, rfl⟩
+    rw [mirRssCutMachine_step_eq, hc.2.1, hc.2.2]
+    rfl
+
+/-- Any rejected composed step erases the vault share, poisons the WAL and the guard, and wipes
+    the candidate cut. -/
+theorem guardedCutVaultMachine_reject_wipes {W ShareT : Type}
+    (c : GuardedCutVaultState ShareT) (a : AttestedCutInput W) :
+    let c' := (guardedCutVaultMachine (W := W)).errStep c a
+    c'.vault.shareSlot = none ∧ c'.vault.wal.poisoned = true ∧
+    c'.session.poisoned = true ∧ c'.session.candidateCutBytes = zeroBytes32 := by
+  intro c'
+  exact ⟨rfl, rfl, rfl, rfl⟩
+
+/-- A quarantined composed state accepts nothing. -/
+theorem guardedCutVaultMachine_quarantined_rejects {W ShareT : Type}
+    (c : GuardedCutVaultState ShareT) (a : AttestedCutInput W)
+    (hQ : (c.vault.wal.poisoned || c.vault.shareSlot.isNone) = true) :
+    (guardedCutVaultMachine (W := W)).step c a = none := by
+  dsimp only [guardedCutVaultMachine]
+  unfold guardedCutCond
+  rw [hQ]
+  rfl
+
+/-- Trace predicate: each accepted Round 3 carries a witness for which `Holds` is true, and each
+    released cut is backed by the most recent such witness with no Round 2 in between. -/
+def CutReleasesBacked {W : Type} (Holds : W → Bool) :
+    Option W → List (AttestedCutInput W × MirRssCutOutput) → Prop
+  | _, [] => True
+  | _, (_, .round2Ready) :: rest => CutReleasesBacked Holds none rest
+  | _, (a, .round3Verified) :: rest =>
+    Holds a.witness = true ∧ CutReleasesBacked Holds (some a.witness) rest
+  | cur, (_, .cutReleased _) :: rest =>
+    (∃ w, cur = some w ∧ Holds w = true) ∧ CutReleasesBacked Holds none rest
+
+private theorem guardedCutCond_round3 {ShareT : Type} {c : GuardedCutVaultState ShareT}
+    {reqSid : Bytes32} {lo hi : BitVec 128} {dzk : UInt64}
+    (h : guardedCutCond c (.advanceRound3VerifyConsistency reqSid lo hi dzk) = true) :
+    residualsZero lo hi dzk = true := by
+  unfold guardedCutCond at h
+  rw [mirRssCutAccepts_round3] at h
+  simp only [Bool.and_eq_true] at h
+  exact h.2.2.2
+
+private theorem guardedCutCond_open {ShareT : Type} {c : GuardedCutVaultState ShareT}
+    {reqSid : Bytes32} (h : guardedCutCond c (.openVerifiedCut reqSid) = true) :
+    c.session.phase = .round3ConsistencyVerified := by
+  unfold guardedCutCond at h
+  rw [mirRssCutAccepts_open] at h
+  simp only [Bool.and_eq_true] at h
+  exact of_decide_eq_true h.2.2.1.2
+
+/-- Generalised induction behind `guardedCut_released_cut_backed_by_witness`. -/
+private theorem guardedCut_trace_backed {W ShareT : Type} (Holds : W → Bool) :
+    ∀ {c c_f : GuardedCutVaultState ShareT}
+      {tr : List (AttestedCutInput W × MirRssCutOutput)} {cur : Option W},
+      (guardedCutVaultMachine (W := W)).ValidTrace c tr c_f →
+      (∀ p ∈ tr, ResidualSound Holds p.1) →
+      (c.session.phase = .round3ConsistencyVerified → ∃ w, cur = some w ∧ Holds w = true) →
+      CutReleasesBacked Holds cur tr := by
+  intro c c_f tr cur hTr
+  induction hTr generalizing cur with
+  | nil _ => intro _ _; trivial
+  | @accept s s' s_f inp out rest hStep _ ih =>
+    intro hSound hInv
+    have hSoundRest : ∀ p ∈ rest, ResidualSound Holds p.1 :=
+      fun p hp => hSound p (List.mem_cons_of_mem _ hp)
+    have hSoundHead : ResidualSound Holds inp := hSound (inp, out) List.mem_cons_self
+    dsimp only [guardedCutVaultMachine] at hStep
+    cases hc : guardedCutCond s inp.input
+    · simp [hc] at hStep
+    · simp only [hc, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStep
+      obtain ⟨hS', hOut⟩ := hStep
+      subst hS'
+      subst hOut
+      cases hIn : inp.input with
+      | advanceRound2Chi reqSid recomputed cand =>
+        show CutReleasesBacked Holds none rest
+        exact ih hSoundRest (fun h => by
+          rw [hIn] at h
+          exact absurd (show MirRssCutPhase.round2ChiEvaluated =
+            MirRssCutPhase.round3ConsistencyVerified from h) (by decide))
+      | advanceRound3VerifyConsistency reqSid lo hi dzk =>
+        rw [hIn] at hc
+        have hHolds : Holds inp.witness = true :=
+          hSoundHead reqSid lo hi dzk hIn (guardedCutCond_round3 hc)
+        show Holds inp.witness = true ∧ CutReleasesBacked Holds (some inp.witness) rest
+        exact ⟨hHolds, ih hSoundRest (fun _ => ⟨inp.witness, rfl, hHolds⟩)⟩
+      | openVerifiedCut reqSid =>
+        rw [hIn] at hc
+        show (∃ w, cur = some w ∧ Holds w = true) ∧ CutReleasesBacked Holds none rest
+        exact ⟨hInv (guardedCutCond_open hc),
+          ih hSoundRest (fun h => by
+            rw [hIn] at h
+            exact absurd (show MirRssCutPhase.cutOpened =
+            MirRssCutPhase.round3ConsistencyVerified from h) (by decide))⟩
+  | @reject s s_f inp rest _ _ ih =>
+    intro hSound _
+    exact ih hSound (fun h => absurd (show MirRssCutPhase.poisoned =
+            MirRssCutPhase.round3ConsistencyVerified from h) (by decide))
+
+/-- **Release theorem (`guardedCut_released_cut_backed_by_witness`).**
+    Start the composed guard-plus-vault execution in Round 1. Along any multi-turn trace whose
+    accepted Round-3 inputs satisfy the caller obligation `ResidualSound Holds`, every accepted
+    Round 3 has a witness for which `Holds` is true, and every released cut is backed by the most
+    recent such witness. Without the hypothesis the guard guarantees only that three scalars were
+    zero. -/
+theorem guardedCut_released_cut_backed_by_witness {W ShareT : Type} (Holds : W → Bool)
+    (sessionId maskCommitment : Bytes32) (vault : HonestCustodyVault ShareT)
+    {c_f : GuardedCutVaultState ShareT}
+    {trace : List (AttestedCutInput W × MirRssCutOutput)}
+    (hTrace : (guardedCutVaultMachine (W := W)).ValidTrace
+      { session := MirRssCutSession.round1Committed sessionId maskCommitment, vault := vault }
+      trace c_f)
+    (hResidual : ∀ p ∈ trace, ResidualSound Holds p.1) :
+    CutReleasesBacked Holds none trace :=
+  guardedCut_trace_backed Holds hTrace hResidual (fun h =>
+    absurd (show MirRssCutPhase.round1MaskCommitted =
+            MirRssCutPhase.round3ConsistencyVerified from h) (by decide))
+
+/-- Corollary for `BGIN19` wire-MAC batches: under the caller obligation
+    `residualsZero lo hi dzk = true → bginBatchHolds relations = true`, every released cut is
+    backed by a batch all of whose `GF(2^128)` relations hold. -/
+theorem mirRssCut_released_cut_backed_by_bginBatch {ShareT : Type}
+    (sessionId maskCommitment : Bytes32) (vault : HonestCustodyVault ShareT)
+    {c_f : GuardedCutVaultState ShareT}
+    {trace : List (AttestedCutInput (List BginWireRelation) × MirRssCutOutput)}
+    (hTrace : (guardedCutVaultMachine (W := List BginWireRelation)).ValidTrace
+      { session := MirRssCutSession.round1Committed sessionId maskCommitment, vault := vault }
+      trace c_f)
+    (hResidual : ∀ p ∈ trace, ResidualSound bginBatchHolds p.1) :
+    CutReleasesBacked bginBatchHolds none trace :=
+  guardedCut_released_cut_backed_by_witness bginBatchHolds sessionId maskCommitment vault
+    hTrace hResidual
+
+/-! ### Protocol-level pre-cut barrier specification and the forward simulation -/
+
+/-- Protocol-level pre-cut barrier state over an `HonestCustodyVault`. It has no residual scalars
+    and no verification flag: Round 3 evaluates the relation `Holds` on the witness itself. -/
+structure SpecPreCutVaultState (ShareT : Type) where
+  sessionId : Bytes32
+  maskCommitment : Bytes32
+  stage : MirRssCutPhase
+  candidate : Bytes32
+  vault : HonestCustodyVault ShareT
+
+def specPreCutPoison {ShareT : Type} (st : SpecPreCutVaultState ShareT) :
+    SpecPreCutVaultState ShareT :=
+  { st with stage := .poisoned, candidate := zeroBytes32, vault := walPoisonVault st.vault }
+
+def specPreCutAccepts {W ShareT : Type} (Holds : W → Bool) (st : SpecPreCutVaultState ShareT)
+    (w : W) : MirRssCutInput → Bool
+  | .advanceRound2Chi reqSid recomputed _ =>
+    decide (st.sessionId = reqSid) && decide (st.stage = .round1MaskCommitted) &&
+      decide (st.maskCommitment = recomputed)
+  | .advanceRound3VerifyConsistency reqSid _ _ _ =>
+    decide (st.sessionId = reqSid) && decide (st.stage = .round2ChiEvaluated) && Holds w
+  | .openVerifiedCut reqSid =>
+    decide (st.sessionId = reqSid) && decide (st.stage = .round3ConsistencyVerified)
+
+def specPreCutNext {ShareT : Type} (st : SpecPreCutVaultState ShareT) :
+    MirRssCutInput → SpecPreCutVaultState ShareT × MirRssCutOutput
+  | .advanceRound2Chi _ _ cand =>
+    ({ st with stage := .round2ChiEvaluated, candidate := cand }, .round2Ready)
+  | .advanceRound3VerifyConsistency _ _ _ _ =>
+    ({ st with stage := .round3ConsistencyVerified }, .round3Verified)
+  | .openVerifiedCut _ =>
+    ({ st with stage := .cutOpened, candidate := zeroBytes32 }, .cutReleased st.candidate)
+
+def specPreCutCond {W ShareT : Type} (Holds : W → Bool) (st : SpecPreCutVaultState ShareT)
+    (a : AttestedCutInput W) : Bool :=
+  !(st.vault.wal.poisoned || st.vault.shareSlot.isNone) &&
+    specPreCutAccepts Holds st a.witness a.input
+
+/-- Protocol-level pre-cut barrier machine. -/
+def specPreCutVaultMachine {W ShareT : Type} (Holds : W → Bool) :
+    PartyMachine (SpecPreCutVaultState ShareT) (AttestedCutInput W) MirRssCutOutput where
+  step st a :=
+    if specPreCutCond Holds st a then
+      some ((specPreCutNext st a.input).1, (specPreCutNext st a.input).2)
+    else none
+  errStep st _ := specPreCutPoison st
+
+/-- Restrict a machine to a subtype of its inputs. -/
+def PartyMachine.restrictInputs {S In Out : Type} (M : PartyMachine S In Out) (P : In → Prop) :
+    PartyMachine S { i : In // P i } Out where
+  step s i := M.step s i.1
+  errStep s i := M.errStep s i.1
+
+/-- Simulation relation between the composed guard-plus-vault state and the barrier spec. -/
+def CutVaultRel {ShareT : Type} (c : GuardedCutVaultState ShareT)
+    (a : SpecPreCutVaultState ShareT) : Prop :=
+  a.vault = c.vault ∧ a.sessionId = c.session.sessionId ∧
+  a.maskCommitment = c.session.maskCommitment ∧
+  ((c.vault.wal.poisoned || c.vault.shareSlot.isNone) = false →
+    c.session.poisoned = false ∧ a.stage = c.session.phase ∧
+    a.candidate = c.session.candidateCutBytes ∧
+    (c.session.phase = .round3ConsistencyVerified → c.session.consistencyVerified = true))
+
+private theorem cutVault_cond_agree {W ShareT : Type} (Holds : W → Bool)
+    {c : GuardedCutVaultState ShareT} {a : SpecPreCutVaultState ShareT}
+    (inp : AttestedCutInput W) (hC : ResidualContract Holds inp) (hRel : CutVaultRel c a) :
+    specPreCutCond Holds a inp = guardedCutCond c inp.input := by
+  obtain ⟨hVault, hSid, hComm, hClean⟩ := hRel
+  unfold specPreCutCond guardedCutCond
+  rw [hVault]
+  cases hQ : (c.vault.wal.poisoned || c.vault.shareSlot.isNone)
+  · obtain ⟨hPois, hStage, _, hCv⟩ := hClean hQ
+    rw [hPois]
+    show specPreCutAccepts Holds a inp.witness inp.input = mirRssCutAccepts c.session inp.input
+    cases hIn : inp.input with
+    | advanceRound2Chi reqSid recomputed cand =>
+      show (decide (a.sessionId = reqSid) && decide (a.stage = .round1MaskCommitted) &&
+        decide (a.maskCommitment = recomputed)) = _
+      rw [hSid, hComm, hStage]
+      rfl
+    | advanceRound3VerifyConsistency reqSid lo hi dzk =>
+      show (decide (a.sessionId = reqSid) && decide (a.stage = .round2ChiEvaluated) &&
+        Holds inp.witness) = _
+      rw [hSid, hStage, ← hC reqSid lo hi dzk hIn]
+      rfl
+    | openVerifiedCut reqSid =>
+      show (decide (a.sessionId = reqSid) && decide (a.stage = .round3ConsistencyVerified)) =
+        (decide (c.session.sessionId = reqSid) &&
+          decide (c.session.phase = .round3ConsistencyVerified) && c.session.consistencyVerified)
+      rw [hSid, hStage]
+      cases hPh : decide (c.session.phase = .round3ConsistencyVerified)
+      · simp only [Bool.and_false, Bool.false_and]
+      · rw [hCv (of_decide_eq_true hPh)]
+        simp only [Bool.and_true]
+  · rfl
+
+private theorem cutVault_next_rel {ShareT : Type}
+    {c : GuardedCutVaultState ShareT} {a : SpecPreCutVaultState ShareT}
+    (i : MirRssCutInput) (hRel : CutVaultRel c a)
+    (hQ : (c.vault.wal.poisoned || c.vault.shareSlot.isNone) = false) :
+    (specPreCutNext a i).2 = (mirRssCutNext c.session i).2 ∧
+    CutVaultRel { session := (mirRssCutNext c.session i).1, vault := c.vault }
+      (specPreCutNext a i).1 := by
+  obtain ⟨hVault, hSid, hComm, hClean⟩ := hRel
+  obtain ⟨hPois, hStage, hCand, _⟩ := hClean hQ
+  cases i with
+  | advanceRound2Chi reqSid recomputed cand =>
+    exact ⟨rfl, hVault, hSid, hComm, fun _ => ⟨hPois, rfl, rfl, fun h =>
+      absurd (show MirRssCutPhase.round2ChiEvaluated =
+            MirRssCutPhase.round3ConsistencyVerified from h) (by decide)⟩⟩
+  | advanceRound3VerifyConsistency reqSid lo hi dzk =>
+    exact ⟨rfl, hVault, hSid, hComm, fun _ => ⟨hPois, rfl, hCand, fun _ => rfl⟩⟩
+  | openVerifiedCut reqSid =>
+    exact ⟨congrArg MirRssCutOutput.cutReleased hCand, hVault, hSid, hComm,
+      fun _ => ⟨hPois, rfl, rfl, fun h =>
+        absurd (show MirRssCutPhase.cutOpened =
+            MirRssCutPhase.round3ConsistencyVerified from h) (by decide)⟩⟩
+
+private theorem cutVault_poison_rel {ShareT : Type}
+    {c : GuardedCutVaultState ShareT} {a : SpecPreCutVaultState ShareT}
+    (hRel : CutVaultRel c a) : CutVaultRel (guardedCutPoison c) (specPreCutPoison a) := by
+  obtain ⟨hVault, hSid, hComm, _⟩ := hRel
+  refine ⟨congrArg walPoisonVault hVault, hSid, hComm, fun h => ?_⟩
+  exact absurd (show true = false from h) (by decide)
+
+/-- **Bridge 3A (`guardedCut_forwardSim_specPreCut`).**
+    On inputs that satisfy `ResidualContract Holds`, the composed residual-gated guard-plus-vault
+    execution forward-simulates the protocol-level barrier that evaluates `Holds` directly:
+    identical outputs, identical accept/reject decisions, and quarantine (vault share erased, WAL
+    poisoned) in lockstep. The contract is carried by the input type; nothing is proved for inputs
+    outside it. -/
+def guardedCut_forwardSim_specPreCut {W ShareT : Type} (Holds : W → Bool) :
+    ForwardSim
+      ((guardedCutVaultMachine (W := W) (ShareT := ShareT)).restrictInputs (ResidualContract Holds))
+      ((specPreCutVaultMachine (ShareT := ShareT) Holds).restrictInputs (ResidualContract Holds)) where
+  Rel := CutVaultRel
   sim_ok {c c' a inp out} hRel hStepC := by
-    rcases hRel with ⟨hPoisEq, hSlotEq, hClean⟩
-    dsimp only [mirRssCutMachine, specPreCutVaultMachine, PartyMachine.ofOutcome] at hStepC ⊢
-    unfold mirRssCutStep at hStepC
-    cases hP : c.poisoned
-    · obtain ⟨hSlotTrue, hPhaseCases⟩ := hClean hP
-      have hVaultPoisF : a.vault.wal.poisoned = false := hPoisEq.symm.trans hP
-      have hSlotSome : a.vault.shareSlot.isSome = true := hSlotEq.symm.trans hSlotTrue
-      have hSlotNoneF : a.vault.shareSlot.isNone = false := by
-        cases hs : a.vault.shareSlot
-        · rw [hs] at hSlotSome; cases hSlotSome
-        · rfl
-      rw [hP, hSlotTrue] at hStepC
-      simp only [Bool.not_true, Bool.or_false, Bool.false_eq_true, ↓reduceIte] at hStepC
-      unfold specPreCutVaultStep
-      rw [hVaultPoisF, hSlotNoneF]
-      rw [ite_eq_right (by decide : ¬ ((false || false) = true))]
-      cases inp with
-      | recordRound1 rels =>
-        dsimp only at hStepC ⊢
-        rcases hPhaseCases with ⟨hPh0, hSt0, _⟩ | ⟨hPh1, _, _, _, _⟩ | ⟨hPh2, _, _, _⟩
-        · rw [hPh0] at hStepC
-          rw [hSt0]
-          cases hRels : (rels != 0)
-          · rw [hRels, show ((0 : UInt8) == 0 && false) = false from rfl] at hStepC
-            cases hStepC
-          · rw [hRels, show ((0 : UInt8) == 0 && true) = true from rfl] at hStepC
-            simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStepC
-            rcases hStepC with ⟨rfl, rfl⟩
-            rw [ite_eq_left (by decide : (((0 : Nat) == 0 && true) = true))]
-            dsimp only
-            have hRelsNe : rels ≠ 0 := by
-              intro h0; subst h0; cases hRels
-            exact ⟨rfl, hVaultPoisF.symm, hSlotSome.symm,
-              fun _ => ⟨rfl, .inr (.inl ⟨rfl, rfl, rfl, hRelsNe, rfl⟩)⟩⟩
-        · rw [hPh1, show ((1 : UInt8) == 0) = false from rfl] at hStepC
-          simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hStepC
-          cases hStepC
-        · rw [hPh2, show ((2 : UInt8) == 0) = false from rfl] at hStepC
-          simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hStepC
-          cases hStepC
-      | verifyBatchConsistency relations =>
-        dsimp only at hStepC ⊢
-        rcases hPhaseCases with ⟨hPh0, _, _⟩ | ⟨hPh1, hSt1, hPendEq, _, _⟩ | ⟨hPh2, _, _, _⟩
-        · rw [hPh0, show ((0 : UInt8) == 1) = false from rfl] at hStepC
-          cases hStepC
-        · rw [hPh1, show ((1 : UInt8) == 1) = true from rfl, hPendEq] at hStepC
-          rw [hSt1]
-          cases hBatch : (decide (relations.length = a.pendingRelations) && bginBatchHolds relations)
-          · rw [hBatch] at hStepC
-            cases hStepC
-          · rw [hBatch] at hStepC
-            simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStepC
-            rcases hStepC with ⟨rfl, rfl⟩
-            rw [ite_eq_left (show ((1 : Nat) == 1) = true from rfl), ite_eq_left (rfl : true = true)]
-            dsimp only
-            exact ⟨rfl, hVaultPoisF.symm, hSlotSome.symm,
-              fun _ => ⟨rfl, .inr (.inr ⟨rfl, rfl, rfl, rfl⟩)⟩⟩
-        · rw [hPh2, show ((2 : UInt8) == 1) = false from rfl] at hStepC
-          cases hStepC
-      | releaseRound3Cut payload =>
-        dsimp only at hStepC ⊢
-        rcases hPhaseCases with ⟨hPh0, _, _⟩ | ⟨hPh1, _, _, _, _⟩ | ⟨hPh2, hSt2, hPend0, hVerT⟩
-        · rw [hPh0, show ((0 : UInt8) == 2) = false from rfl] at hStepC
-          simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hStepC
-          cases hStepC
-        · rw [hPh1, show ((1 : UInt8) == 2) = false from rfl] at hStepC
-          simp only [Bool.false_and, Bool.false_eq_true, ↓reduceIte] at hStepC
-          cases hStepC
-        · rw [hPh2, hPend0, hVerT,
-              show ((((2 : UInt8) == 2 && (0 : UInt64) == 0) && true)) = true from rfl] at hStepC
-          rw [hSt2]
-          simp only [↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStepC
-          rcases hStepC with ⟨rfl, rfl⟩
-          rw [ite_eq_left (show ((2 : Nat) == 2) = true from rfl)]
-          dsimp only
-          exact ⟨rfl, hVaultPoisF.symm, hSlotSome.symm,
-            fun _ => ⟨rfl, .inl ⟨rfl, rfl, rfl⟩⟩⟩
-    · rw [hP] at hStepC
-      simp only [Bool.true_or, ↓reduceIte] at hStepC
-      cases hStepC
+    have hAgree := cutVault_cond_agree Holds inp.1 inp.2 hRel
+    dsimp only [PartyMachine.restrictInputs, guardedCutVaultMachine, specPreCutVaultMachine]
+      at hStepC ⊢
+    rw [hAgree]
+    cases hc : guardedCutCond c inp.1.input
+    · simp [hc] at hStepC
+    · simp only [hc, ↓reduceIte, Option.some.injEq, Prod.mk.injEq] at hStepC
+      obtain ⟨hC', hOut⟩ := hStepC
+      subst hC'
+      subst hOut
+      have hQ : (c.vault.wal.poisoned || c.vault.shareSlot.isNone) = false := by
+        unfold guardedCutCond at hc
+        simp only [Bool.and_eq_true, Bool.not_eq_true'] at hc
+        exact hc.1
+      exact cutVault_next_rel inp.1.input hRel hQ
   sim_err {c a inp} hRel hNoneC := by
-    have hRelSaved := hRel
-    rcases hRel with ⟨hPoisEq, hSlotEq, hClean⟩
-    dsimp only [mirRssCutMachine, specPreCutVaultMachine, PartyMachine.ofOutcome] at hNoneC ⊢
-    unfold mirRssCutStep at hNoneC ⊢
-    unfold specPreCutVaultStep
-    cases hP : c.poisoned
-    · obtain ⟨hSlotTrue, hPhaseCases⟩ := hClean hP
-      have hVaultPoisF : a.vault.wal.poisoned = false := hPoisEq.symm.trans hP
-      have hSlotSome : a.vault.shareSlot.isSome = true := hSlotEq.symm.trans hSlotTrue
-      have hSlotNoneF : a.vault.shareSlot.isNone = false := by
-        cases hs : a.vault.shareSlot
-        · rw [hs] at hSlotSome; cases hSlotSome
-        · rfl
-      rw [hP, hSlotTrue] at hNoneC
-      rw [hSlotTrue, hVaultPoisF, hSlotNoneF]
-      rw [ite_eq_right (by decide : ¬ ((false || !true) = true))] at hNoneC ⊢
-      rw [ite_eq_right (by decide : ¬ ((false || false) = true))]
-      cases inp with
-      | recordRound1 rels =>
-        dsimp only at hNoneC ⊢
-        rcases hPhaseCases with ⟨hPh0, hSt0, _⟩ | ⟨hPh1, hSt1, _, _, _⟩ | ⟨hPh2, hSt2, _, _⟩
-        · rw [hPh0] at hNoneC ⊢
-          rw [hSt0]
-          cases hRels : (rels != 0)
-          · rw [ite_eq_right (by decide : ¬ (((0 : Nat) == 0 && false) = true))]
-            rw [ite_eq_right (by decide : ¬ (((0 : UInt8) == 0 && false) = true))]
-            dsimp only
-            exact ⟨rfl, hRelSaved⟩
-          · rw [hRels, show ((0 : UInt8) == 0 && true) = true from rfl] at hNoneC
-            cases hNoneC
-        · rw [hPh1] at hNoneC ⊢
-          rw [hSt1]
-          have hF1 : ¬ (((1 : Nat) == 0 && (rels != 0)) = true) := by cases (rels != 0) <;> decide
-          have hF2 : ¬ (((1 : UInt8) == 0 && (rels != 0)) = true) := by cases (rels != 0) <;> decide
-          rw [ite_eq_right hF1, ite_eq_right hF2]
-          dsimp only
-          exact ⟨rfl, hRelSaved⟩
-        · rw [hPh2] at hNoneC ⊢
-          rw [hSt2]
-          have hF1 : ¬ (((2 : Nat) == 0 && (rels != 0)) = true) := by cases (rels != 0) <;> decide
-          have hF2 : ¬ (((2 : UInt8) == 0 && (rels != 0)) = true) := by cases (rels != 0) <;> decide
-          rw [ite_eq_right hF1, ite_eq_right hF2]
-          dsimp only
-          exact ⟨rfl, hRelSaved⟩
-      | verifyBatchConsistency relations =>
-        dsimp only at hNoneC ⊢
-        rcases hPhaseCases with ⟨hPh0, hSt0, _⟩ | ⟨hPh1, hSt1, hPendEq, _, _⟩ | ⟨hPh2, hSt2, _, _⟩
-        · rw [hPh0] at hNoneC ⊢
-          rw [hSt0]
-          rw [ite_eq_right (by decide : ¬ (((0 : Nat) == 1) = true)),
-              ite_eq_right (by decide : ¬ (((0 : UInt8) == 1) = true))]
-          dsimp only
-          exact ⟨rfl, hRelSaved⟩
-        · rw [hPh1, hPendEq] at hNoneC ⊢
-          rw [hSt1]
-          cases hBatch : (decide (relations.length = a.pendingRelations) && bginBatchHolds relations)
-          · rw [ite_eq_left (show ((1 : Nat) == 1) = true from rfl),
-                ite_eq_left (show ((1 : UInt8) == 1) = true from rfl)]
-            rw [ite_eq_right Bool.noConfusion, ite_eq_right Bool.noConfusion]
-            dsimp only [walPoisonVault, walQuarantine]
-            exact ⟨rfl, rfl, rfl, fun hF => absurd hF (by decide)⟩
-          · rw [hBatch, show ((1 : UInt8) == 1) = true from rfl] at hNoneC
-            cases hNoneC
-        · rw [hPh2] at hNoneC ⊢
-          rw [hSt2]
-          rw [ite_eq_right (by decide : ¬ (((2 : Nat) == 1) = true)),
-              ite_eq_right (by decide : ¬ (((2 : UInt8) == 1) = true))]
-          dsimp only
-          exact ⟨rfl, hRelSaved⟩
-      | releaseRound3Cut payload =>
-        dsimp only at hNoneC ⊢
-        rcases hPhaseCases with ⟨hPh0, hSt0, _⟩ | ⟨hPh1, hSt1, _, _, _⟩ | ⟨hPh2, _, hPend0, hVerT⟩
-        · rw [hPh0] at hNoneC ⊢
-          rw [hSt0]
-          have hF2 : ¬ ((((0 : UInt8) == 2 && c.pendingRelations == 0) && c.consistencyVerified) = true) := by
-            cases (c.pendingRelations == 0) <;> cases c.consistencyVerified <;> decide
-          rw [ite_eq_right (by decide : ¬ (((0 : Nat) == 2) = true)), ite_eq_right hF2]
-          dsimp only
-          exact ⟨rfl, hRelSaved⟩
-        · rw [hPh1] at hNoneC ⊢
-          rw [hSt1]
-          have hF2 : ¬ ((((1 : UInt8) == 2 && c.pendingRelations == 0) && c.consistencyVerified) = true) := by
-            cases (c.pendingRelations == 0) <;> cases c.consistencyVerified <;> decide
-          rw [ite_eq_right (by decide : ¬ (((1 : Nat) == 2) = true)), ite_eq_right hF2]
-          dsimp only
-          exact ⟨rfl, hRelSaved⟩
-        · rw [hPh2, hPend0, hVerT,
-              show ((((2 : UInt8) == 2 && (0 : UInt64) == 0) && true)) = true from rfl] at hNoneC
-          cases hNoneC
-    · have hVaultPoisT : a.vault.wal.poisoned = true := hPoisEq.symm.trans hP
-      rw [hVaultPoisT]
-      have hT1 : (true || a.vault.shareSlot.isNone) = true := rfl
-      have hT2 : (true || !c.shareSlotPresent) = true := rfl
-      rw [ite_eq_left hT1, ite_eq_left hT2]
-      dsimp only [walPoisonVault, walQuarantine]
-      exact ⟨rfl, rfl, rfl, fun hF => absurd hF (by decide)⟩
+    have hAgree := cutVault_cond_agree Holds inp.1 inp.2 hRel
+    dsimp only [PartyMachine.restrictInputs, guardedCutVaultMachine, specPreCutVaultMachine]
+      at hNoneC ⊢
+    rw [hAgree]
+    cases hc : guardedCutCond c inp.1.input
+    · exact ⟨rfl, cutVault_poison_rel hRel⟩
+    · simp [hc] at hNoneC
 
-/-- **Bridge 3B (`mirRssCut_bridges_to_rss_slh_uc_and_euf_cma`)**:
-    Connects an unpoisoned `MirRssCutSession` + `RealIdealClusterMatch` state directly to BOTH
-    crown-jewel theorems in `Qsag.RssSlhFullSecurity`:
-    1. Multi-session rushing-adversary UC view indistinguishability
-       (`rss_slh_real_ideal_view_indistinguishable`, `ratLe ... (Q_cuts * deg, 2 ^ 128)`);
-    2. Single-session pre-cut barrier soundness (`activeConsistencyBreak_implies_schwartzZippel_root`)
-       feeding `rss_slh_interactive_euf_cma_reduction`;
-    3. Sticky vault zeroization on active fault (`tooth_poisoned_vault_erases_share_and_blocks`). -/
-theorem mirRssCut_bridges_to_rss_slh_uc_and_euf_cma {AdvState OuterView : Type}
-    (p : Fips205Params) (hWf : p.wellFormed = true)
-    (cIdx : Fin 3) (Q_cuts deg : Nat)
-    {seedSh prfSh : RssByteShares}
-    (hSeedWf : seedSh.WellFormed) (hPrfWf : prfSh.WellFormed)
-    (pkSeed : List UInt8)
-    (A : UcRushingAdversary AdvState)
-    (mirSess : MirRssCutSession)
-    (specVault : SpecPreCutVaultState)
-    (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
-    (icl : IdealClusterState SlhPublicKey)
-    (advSt : AdvState)
-    (hSimRel : mirRssCutSession_forwardSim_walGate.Rel mirSess specVault)
-    (hWalSync : cl.honestWal = specVault.vault.wal)
-    (hMatch : RealIdealClusterMatch cIdx seedSh prfSh cl icl)
-    (hPkKey : cl.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2)
-    (ctx : OuterCallingContext (ExecTranscript AdvState) OuterView)
-    (D : OuterView → Bool) :
-    let card := rssMultiSessionCard p.sigBytes Q_cuts
-    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
-    let hybridUniformView : Fin card → OuterView := fun ω =>
-      ctx.postProcess (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts
-        (decodeMultiSessionTapes p.sigBytes Q_cuts ω) cl advSt).2
-    let idealSimView : Fin card → OuterView := fun ω =>
-      ctx.postProcess (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh p cIdx deg) A Q_cuts
-        (decodeMultiSessionTapes p.sigBytes Q_cuts ω) icl advSt).2
-    (mirSess.poisoned = cl.honestWal.poisoned) ∧
-    ratLe (rationalAcceptDiff card hybridUniformView card idealSimView D)
-          (Q_cuts * deg, 2 ^ 128) ∧
-    (walPoisonVault specVault.vault).shareSlot = none ∧
-    (walPoisonVault specVault.vault).wal.poisoned = true := by
-  intro card sk hybridUniformView idealSimView
-  have hPoisSync : mirSess.poisoned = cl.honestWal.poisoned :=
-    hSimRel.1.trans (congrArg WalLatchState.poisoned hWalSync).symm
-  have hUc := (rss_slh_real_ideal_view_indistinguishable p hWf cIdx Q_cuts deg
-    hSeedWf hPrfWf pkSeed A cl icl advSt hMatch hPkKey ctx D
-    card (rssMultiSessionCard_pos p.sigBytes Q_cuts)
-    (decodeMultiSessionTapes p.sigBytes Q_cuts)).1
-  have hVaultTooth := tooth_poisoned_vault_erases_share_and_blocks
-    specVault.vault (fun _ _ => ()) [] 0 [] ByteArray.empty
-  exact ⟨hPoisSync, hUc, hVaultTooth.1, hVaultTooth.2.1⟩
+/-- The Round-1 composed state and the Round-1 barrier spec state are related. -/
+theorem cutVaultRel_round1 {ShareT : Type} (sessionId maskCommitment : Bytes32)
+    (vault : HonestCustodyVault ShareT) :
+    CutVaultRel
+      { session := MirRssCutSession.round1Committed sessionId maskCommitment, vault := vault }
+      { sessionId := sessionId, maskCommitment := maskCommitment, stage := .round1MaskCommitted,
+        candidate := zeroBytes32, vault := vault } :=
+  ⟨rfl, rfl, rfl, fun _ => ⟨rfl, rfl, rfl, fun h =>
+    absurd (show MirRssCutPhase.round1MaskCommitted =
+            MirRssCutPhase.round3ConsistencyVerified from h) (by decide)⟩⟩
+
+/-! ### Instance: the `BBCGGI19` accumulator check of `sharedPreCutBarrier` -/
+
+/-- The wires and challenge of one pre-cut consistency check. -/
+structure RssCutRound3Witness where
+  sentWires : List Tower128
+  expectedWires : List Tower128
+  gamma : Tower128
+
+/-- The algebraic acceptance test that `RssSlhFullSecurity.sharedPreCutBarrier` applies before
+    Round 3: equality of the two `GF(2^128)` Horner accumulators at the challenge. -/
+def preCutBarrierHolds (w : RssCutRound3Witness) : Bool :=
+  bbcggiWireAccumulator w.sentWires w.gamma == bbcggiWireAccumulator w.expectedWires w.gamma
+
+/-- Residual an honest caller derives from the witness: the packed 128-bit difference of the two
+    accumulators in the low lane, zero in the other two. -/
+def honestRound3Input (reqSid : Bytes32) (w : RssCutRound3Witness) :
+    AttestedCutInput RssCutRound3Witness :=
+  { input := .advanceRound3VerifyConsistency reqSid
+      (packTower 7 (towerAdd 7 (bbcggiWireAccumulator w.sentWires w.gamma)
+        (bbcggiWireAccumulator w.expectedWires w.gamma))) 0 0
+    witness := w }
+
+/-- The contract is satisfiable and deterministic: the honestly computed residual is zero exactly
+    when the accumulators agree. -/
+theorem honestRound3Input_meets_contract (reqSid : Bytes32) (w : RssCutRound3Witness) :
+    ResidualContract preCutBarrierHolds (honestRound3Input reqSid w) := by
+  intro reqSid' lo hi dzk hIn
+  have hIn' : MirRssCutInput.advanceRound3VerifyConsistency reqSid
+      (packTower 7 (towerAdd 7 (bbcggiWireAccumulator w.sentWires w.gamma)
+        (bbcggiWireAccumulator w.expectedWires w.gamma))) 0 0 =
+      MirRssCutInput.advanceRound3VerifyConsistency reqSid' lo hi dzk := hIn
+  injection hIn' with _ hLo hHi hDzk
+  subst hLo
+  subst hHi
+  subst hDzk
+  show residualsZero _ 0 0 = (bbcggiWireAccumulator w.sentWires w.gamma ==
+    bbcggiWireAccumulator w.expectedWires w.gamma)
+  unfold residualsZero
+  simp only [decide_true, Bool.and_true]
+  by_cases hEq : bbcggiWireAccumulator w.sentWires w.gamma =
+      bbcggiWireAccumulator w.expectedWires w.gamma
+  · rw [hEq, towerAdd_self_zero, packTower_zero, beq_self_eq_true]
+    exact decide_eq_true rfl
+  · rw [beq_false_of_ne hEq]
+    refine decide_eq_false (fun hZero => hEq ?_)
+    have hAdd : towerAdd 7 (bbcggiWireAccumulator w.sentWires w.gamma)
+        (bbcggiWireAccumulator w.expectedWires w.gamma) = towerZero 7 :=
+      packTower_injective 7 _ _ (hZero.trans (packTower_zero 7).symm)
+    have hCancel := congrArg (towerAdd 7 (bbcggiWireAccumulator w.sentWires w.gamma)) hAdd
+    rw [towerAdd_cancel, towerAdd_zero] at hCancel
+    exact hCancel.symm
+
+/-- `preCutBarrierHolds` is the test the protocol applies, by proof rather than by reading:
+    whenever `RssSlhFullSecurity.sharedPreCutBarrier` lets a session proceed to Round 3, the wires
+    it hands on and the session challenge `unpackTower 7 r2St.gammaBits` pass
+    `preCutBarrierHolds`. -/
+theorem sharedPreCutBarrier_pass_implies_preCutBarrierHolds (cIdx : Fin 3) (deg : Nat)
+    (pk : SlhPublicKey) (req : SessionScheduleReq) (r2St : RssRound2State)
+    (corrR2 : List (Nat × ByteArray)) (r3Init : RssRound3State)
+    (hBar : sharedPreCutBarrier cIdx deg pk req r2St corrR2 = .inr r3Init) :
+    preCutBarrierHolds
+      ⟨r3Init.sentWires, r3Init.expectedWires, unpackTower 7 r2St.gammaBits⟩ = true := by
+  obtain ⟨_, hBatch, hLen⟩ :=
+    sharedPreCutBarrier_extract_eq cIdx deg pk req r2St corrR2 r3Init hBar
+  show (bbcggiWireAccumulator r3Init.sentWires (unpackTower 7 r2St.gammaBits) ==
+    bbcggiWireAccumulator r3Init.expectedWires (unpackTower 7 r2St.gammaBits)) = true
+  rw [bbcggiWireAccumulator_eq_iff_batchDeviationPoly hLen]
+  exact hBatch
+
+/-- **Bridge 3B (`mirRssCut_release_implies_barrier_and_deviation_root`).**
+    Composed bad-event statement for the accumulator instance. Along any trace of the composed
+    guard-plus-vault execution whose accepted Round-3 inputs satisfy the caller obligation for
+    `preCutBarrierHolds`:
+    1. every released cut is backed by a witness that passes the accumulator test of
+       `sharedPreCutBarrier`;
+    2. for any such witness with equal wire counts, the challenge is a root of the batch deviation
+       polynomial of `sentWires ⊕ expectedWires`. So a cut released over inconsistent wires puts
+       `gamma` among the roots of a non-zero polynomial, which is the event bounded by
+       `RssSlhFullSecurity.activeConsistencyBreak_implies_schwartzZippel_root`.
+    This theorem does not mention `EUF-CMA` or the `UC` game; it is the gate those arguments
+    assume. -/
+theorem mirRssCut_release_implies_barrier_and_deviation_root {ShareT : Type}
+    (sessionId maskCommitment : Bytes32) (vault : HonestCustodyVault ShareT)
+    {c_f : GuardedCutVaultState ShareT}
+    {trace : List (AttestedCutInput RssCutRound3Witness × MirRssCutOutput)}
+    (hTrace : (guardedCutVaultMachine (W := RssCutRound3Witness)).ValidTrace
+      { session := MirRssCutSession.round1Committed sessionId maskCommitment, vault := vault }
+      trace c_f)
+    (hResidual : ∀ p ∈ trace, ResidualSound preCutBarrierHolds p.1) :
+    CutReleasesBacked preCutBarrierHolds none trace ∧
+    (∀ w : RssCutRound3Witness, preCutBarrierHolds w = true →
+      w.sentWires.length = w.expectedWires.length →
+      (batchDeviationPoly (zipXorTower 7 w.sentWires w.expectedWires) w.gamma ==
+        towerZero 7) = true) :=
+  ⟨guardedCut_released_cut_backed_by_witness preCutBarrierHolds sessionId maskCommitment vault
+      hTrace hResidual,
+    fun w hHolds hLen =>
+      (bbcggiWireAccumulator_eq_iff_batchDeviationPoly hLen w.gamma).symm.trans hHolds⟩
+
+/-- Non-vacuity of the release theorem: an honest three-step run (Round 2, honest Round 3 over
+    agreeing wires, open) is a valid composed trace that releases the candidate cut, and its
+    Round-3 input meets the contract. -/
+theorem inhabited_guardedCut_honest_release {ShareT : Type}
+    (sid comm cand : Bytes32) (vault : HonestCustodyVault ShareT)
+    (hPois : vault.wal.poisoned = false) (hShare : vault.shareSlot ≠ none)
+    (wires : List Tower128) (gamma : Tower128) :
+    let w : RssCutRound3Witness := ⟨wires, wires, gamma⟩
+    let r2 : AttestedCutInput RssCutRound3Witness := ⟨.advanceRound2Chi sid comm cand, w⟩
+    let r3 := honestRound3Input sid w
+    let op : AttestedCutInput RssCutRound3Witness := ⟨.openVerifiedCut sid, w⟩
+    ResidualContract preCutBarrierHolds r3 ∧
+    ∃ c_f, (guardedCutVaultMachine (W := RssCutRound3Witness)).ValidTrace
+      { session := MirRssCutSession.round1Committed sid comm, vault := vault }
+      [(r2, .round2Ready), (r3, .round3Verified), (op, .cutReleased cand)] c_f := by
+  intro w r2 r3 op
+  refine ⟨honestRound3Input_meets_contract sid w, ?_⟩
+  let s1 : MirRssCutSession :=
+    { sessionId := sid, phase := .round2ChiEvaluated, maskCommitment := comm,
+      candidateCutBytes := cand, consistencyVerified := false, poisoned := false }
+  let s2 : MirRssCutSession :=
+    { sessionId := sid, phase := .round3ConsistencyVerified, maskCommitment := comm,
+      candidateCutBytes := cand, consistencyVerified := true, poisoned := false }
+  let s3 : MirRssCutSession :=
+    { sessionId := sid, phase := .cutOpened, maskCommitment := comm,
+      candidateCutBytes := zeroBytes32, consistencyVerified := true, poisoned := false }
+  have h1 : (guardedCutVaultMachine (W := RssCutRound3Witness)).step
+      ⟨MirRssCutSession.round1Committed sid comm, vault⟩ r2 =
+      some (⟨s1, vault⟩, .round2Ready) := by
+    simp [guardedCutVaultMachine, guardedCutCond, hPois, hShare, mirRssCutAccepts, mirRssCutNext,
+      MirRssCutSession.round1Committed, r2, s1]
+  have h2 : (guardedCutVaultMachine (W := RssCutRound3Witness)).step ⟨s1, vault⟩ r3 =
+      some (⟨s2, vault⟩, .round3Verified) := by
+    simp [guardedCutVaultMachine, guardedCutCond, hPois, hShare, mirRssCutAccepts, mirRssCutNext,
+      honestRound3Input, residualsZero, r3, w, s1, s2, towerAdd_self_zero, packTower_zero]
+  have h3 : (guardedCutVaultMachine (W := RssCutRound3Witness)).step ⟨s2, vault⟩ op =
+      some (⟨s3, vault⟩, .cutReleased cand) := by
+    simp [guardedCutVaultMachine, guardedCutCond, hPois, hShare, mirRssCutAccepts, mirRssCutNext,
+      op, s2, s3]
+  exact ⟨_, .accept h1 (.accept h2 (.accept h3 (.nil _)))⟩
 
 /-! ### Fixed-Width `UInt64` Norm/Hint Rejection Gate $\to$ `ThresholdMlDsaAndToprf` Bridge -/
 
@@ -2132,9 +2450,11 @@ theorem tooth_subthreshold_beltLatch_quorum_allows_split_brain :
     findHonestQuorumIntersector corrupt Q₁ Q₂ = none := by
   refine ⟨by decide, by decide, by decide, by decide, by decide, by decide, rfl⟩
 
-/-- Concrete distributed `MirBeltLatchState` (`crates/qsag-core/src/belt_latch.rs`) tracking fixed-width
-    `nextEpoch : UInt64`, enrolled 32-byte `pkDigest`, cached `(epoch, msgDigest, sig)`, and sticky
-    `poisoned : Bool` gated by a `q`-of-`n` quorum certificate (`2 * q > n + f`). -/
+/-- Hand-written model of a `q`-of-`n` belt latch: exactly the fields of `WalLatchState`, gated by
+    an authenticated quorum certificate. It is not extracted from Rust, and it is not the
+    production `crates/qsag-core/src/belt_latch.rs` (a fixed 2-of-3 latch with pairwise echo
+    MACs). The MIR-extracted `q`-of-`n` guard is `authenticated_belt.VerifiedBeltQuorumGuard`;
+    its theorems live in `aeneas/lean/QsagVerified/Proofs/PantsAndQuorumGuards.lean`. -/
 structure MirBeltLatchState where
   enrolledPkDigest : List UInt8
   nextEpoch : Nat
@@ -2142,66 +2462,167 @@ structure MirBeltLatchState where
   poisoned : Bool
   deriving DecidableEq
 
-/-- Certified epoch-commit request presented to `MirBeltLatchState`. -/
+/-- Field-for-field reading of a `MirBeltLatchState` as a `WalLatchState`. -/
+def MirBeltLatchState.toWal (st : MirBeltLatchState) : WalLatchState :=
+  ⟨st.enrolledPkDigest, st.nextEpoch, st.latchedRecord, st.poisoned⟩
+
+/-- Epoch-commit request carrying an authenticated quorum certificate: one `(custodian, ackTag)`
+    entry per acknowledging custodian. -/
 structure BeltLatchCommitReq (n : Nat) where
   pkDigest : List UInt8
   reqEpoch : Nat
   msgDigest : List UInt8
   freshSig : ByteArray
-  quorumCert : List (Fin n)
+  quorumCert : List (Fin n × List UInt8)
   deriving DecidableEq
 
-/-- Concrete `MirBeltLatchState` transition requiring a valid duplicate-free `q`-quorum certificate
-    before advancing `walCommitBeforeRelease`. -/
-def mirBeltLatchStep {n : Nat} (q : Nat) (st : MirBeltLatchState) (req : BeltLatchCommitReq n) :
+/-- Custodians named by a certificate, in order. -/
+def BeltLatchCommitReq.signers {n : Nat} (req : BeltLatchCommitReq n) : List (Fin n) :=
+  req.quorumCert.map Prod.fst
+
+/-- Certificate gate. `verifyAck p epoch msgDigest tag` is the per-custodian acknowledgment
+    verifier (a MAC check under custodian `p`'s enrolled key); it is a parameter of the model, not
+    something this file computes. The gate requires every entry to verify for this request's
+    `(reqEpoch, msgDigest)`, the named custodians to be pairwise distinct, and at least `q`
+    entries. -/
+def beltCertAuthenticated {n : Nat} (verifyAck : Fin n → Nat → List UInt8 → List UInt8 → Bool)
+    (q : Nat) (req : BeltLatchCommitReq n) : Bool :=
+  req.quorumCert.all (fun e => verifyAck e.1 req.reqEpoch req.msgDigest e.2) &&
+    decide req.signers.Nodup && decide (q ≤ req.quorumCert.length)
+
+/-- `MirBeltLatchState` transition: check the authenticated certificate, then run
+    `walCommitBeforeRelease`. A rejected request leaves the state unchanged. -/
+def mirBeltLatchStep {n : Nat} (verifyAck : Fin n → Nat → List UInt8 → List UInt8 → Bool)
+    (q : Nat) (st : MirBeltLatchState) (req : BeltLatchCommitReq n) :
     StepOutcome MirBeltLatchState ByteArray Unit :=
-  if !(decide req.quorumCert.Nodup && decide (q ≤ req.quorumCert.length)) then
+  if !beltCertAuthenticated verifyAck q req then
     .err st ()
   else
-    let wal : WalLatchState :=
-      ⟨st.enrolledPkDigest, st.nextEpoch, st.latchedRecord, st.poisoned⟩
-    match walCommitBeforeRelease wal req.pkDigest req.reqEpoch req.msgDigest req.freshSig with
-    | .err wal' _ =>
-      .err ⟨wal'.enrolledPkDigest, wal'.nextEpoch, wal'.latchedRecord, wal'.poisoned⟩ ()
+    match walCommitBeforeRelease st.toWal req.pkDigest req.reqEpoch req.msgDigest req.freshSig with
+    | .err _ _ => .err st ()
     | .ok wal' sig =>
       .ok ⟨wal'.enrolledPkDigest, wal'.nextEpoch, wal'.latchedRecord, wal'.poisoned⟩ sig
 
-/-- Canonical `PartyMachine` for `MirBeltLatchState`. -/
+/-- `PartyMachine` for `MirBeltLatchState`. -/
 @[expose]
-def mirBeltLatchMachine (n q : Nat) :
-    PartyMachine MirBeltLatchState (BeltLatchCommitReq n) ByteArray :=
-  PartyMachine.ofOutcome (mirBeltLatchStep q)
+def mirBeltLatchMachine {n : Nat} (verifyAck : Fin n → Nat → List UInt8 → List UInt8 → Bool)
+    (q : Nat) : PartyMachine MirBeltLatchState (BeltLatchCommitReq n) ByteArray :=
+  PartyMachine.ofOutcome (mirBeltLatchStep verifyAck q)
 
-/-- Protocol-level `WalLatchState` specification machine gated on `q`-quorum certification. -/
-def specWalLatchMachine (n q : Nat) :
-    PartyMachine WalLatchState (BeltLatchCommitReq n) ByteArray :=
+/-- Protocol-level `WalLatchState` machine behind the same authenticated certificate gate. -/
+def specWalLatchMachine {n : Nat} (verifyAck : Fin n → Nat → List UInt8 → List UInt8 → Bool)
+    (q : Nat) : PartyMachine WalLatchState (BeltLatchCommitReq n) ByteArray :=
   PartyMachine.ofOutcome fun wal req =>
-    if !(decide req.quorumCert.Nodup && decide (q ≤ req.quorumCert.length)) then
+    if !beltCertAuthenticated verifyAck q req then
       .err wal ()
     else
       match walCommitBeforeRelease wal req.pkDigest req.reqEpoch req.msgDigest req.freshSig with
-      | .err wal' _ => .err wal' ()
+      | .err _ _ => .err wal ()
       | .ok wal' sig => .ok wal' sig
 
-/-- **Bridge 4B (`mirBeltLatch_forwardSim_walLatch`)**:
-    Proves `ForwardSim` from `mirBeltLatchMachine n q` to `InteractiveUcEngine`'s `WalLatchState`,
-    preserving `WalLatchState.WellFormed` and anti-equivocation across all certified epochs. -/
-def mirBeltLatch_forwardSim_walLatch (n q : Nat) :
-    ForwardSim (mirBeltLatchMachine n q) (specWalLatchMachine n q) :=
+/-- **Bridge 4B (`mirBeltLatch_forwardSim_walLatch`).**
+    The abstraction map is the field-for-field `MirBeltLatchState.toWal`, so the simulation of
+    transitions is definitional. What this proves beyond that is the invariant: the simulation
+    relation is `st.toWal.WellFormed ∧ st.toWal = wal`, and `WalLatchState.WellFormed` (32-byte
+    enrolled digest, latched epoch strictly below `nextEpoch`) is shown preserved by every accepted
+    and every rejected step via `walCommitBeforeRelease_preserves_wellFormed`. -/
+def mirBeltLatch_forwardSim_walLatch {n : Nat}
+    (verifyAck : Fin n → Nat → List UInt8 → List UInt8 → Bool) (q : Nat) :
+    ForwardSim (mirBeltLatchMachine verifyAck q) (specWalLatchMachine verifyAck q) :=
   LockstepSim.toForwardSim
-    { Inv := fun _ => True
-      abs := fun st => ⟨st.enrolledPkDigest, st.nextEpoch, st.latchedRecord, st.poisoned⟩
-      step_eq := fun {st} req _ => by
+    { Inv := fun st => st.toWal.WellFormed
+      abs := MirBeltLatchState.toWal
+      step_eq := fun {st} req hWf => by
         dsimp only [mirBeltLatchMachine, specWalLatchMachine, PartyMachine.ofOutcome]
         unfold mirBeltLatchStep
-        cases (decide req.quorumCert.Nodup && decide (q ≤ req.quorumCert.length))
-        · exact ⟨trivial, rfl, rfl⟩
+        cases hCert : beltCertAuthenticated verifyAck q req
+        · exact ⟨hWf, rfl, rfl⟩
         · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-          cases walCommitBeforeRelease
-              ⟨st.enrolledPkDigest, st.nextEpoch, st.latchedRecord, st.poisoned⟩
-              req.pkDigest req.reqEpoch req.msgDigest req.freshSig with
-          | err _ _ => exact ⟨trivial, rfl, rfl⟩
-          | ok _ _ => exact ⟨trivial, rfl⟩ }
+          cases hCommit : walCommitBeforeRelease st.toWal req.pkDigest req.reqEpoch
+              req.msgDigest req.freshSig with
+          | err _ _ => exact ⟨hWf, rfl, rfl⟩
+          | ok wal' sig =>
+            exact ⟨(walCommitBeforeRelease_preserves_wellFormed hWf hCommit).1, rfl⟩ }
+
+/-- Along any multi-turn trace of `mirBeltLatchMachine` from a well-formed state, the final state
+    is well-formed. -/
+theorem mirBeltLatch_trace_preserves_wellFormed {n : Nat}
+    (verifyAck : Fin n → Nat → List UInt8 → List UInt8 → Bool) (q : Nat)
+    {st st_f : MirBeltLatchState} {trace : List (BeltLatchCommitReq n × ByteArray)}
+    (hWf : st.toWal.WellFormed)
+    (hTrace : (mirBeltLatchMachine verifyAck q).ValidTrace st trace st_f) :
+    st_f.toWal.WellFormed := by
+  obtain ⟨_, _, hRel⟩ :=
+    (mirBeltLatch_forwardSim_walLatch verifyAck q).lift_validTrace
+      (a₀ := st.toWal) ⟨hWf, rfl⟩ hTrace
+  exact hRel.1
+
+/-- **Authenticated quorum intersection.** Two certificates that both pass
+    `beltCertAuthenticated` under `2 * q > n + f` share a custodian outside the corrupt set whose
+    acknowledgment tag verifies in each: an honest custodian acknowledged both requests. -/
+theorem beltCert_authenticated_quorums_share_honest_signer {n q f : Nat}
+    (verifyAck : Fin n → Nat → List UInt8 → List UInt8 → Bool)
+    (corrupt : List (Fin n)) (req₁ req₂ : BeltLatchCommitReq n)
+    (hBound : n + f < 2 * q) (hCorruptLe : corrupt.length ≤ f)
+    (h₁ : beltCertAuthenticated verifyAck q req₁ = true)
+    (h₂ : beltCertAuthenticated verifyAck q req₂ = true) :
+    ∃ (p : Fin n) (tag₁ tag₂ : List UInt8), p ∉ corrupt ∧
+      (p, tag₁) ∈ req₁.quorumCert ∧ (p, tag₂) ∈ req₂.quorumCert ∧
+      verifyAck p req₁.reqEpoch req₁.msgDigest tag₁ = true ∧
+      verifyAck p req₂.reqEpoch req₂.msgDigest tag₂ = true := by
+  simp only [beltCertAuthenticated, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true]
+    at h₁ h₂
+  obtain ⟨⟨hAll₁, hNd₁⟩, hLen₁⟩ := h₁
+  obtain ⟨⟨hAll₂, hNd₂⟩, hLen₂⟩ := h₂
+  have hL₁ : q ≤ req₁.signers.length := by
+    unfold BeltLatchCommitReq.signers
+    rw [List.length_map]
+    exact hLen₁
+  have hL₂ : q ≤ req₂.signers.length := by
+    unfold BeltLatchCommitReq.signers
+    rw [List.length_map]
+    exact hLen₂
+  obtain ⟨p, _, hp₁, hp₂, hpC⟩ :=
+    beltLatch_quorum_intersection_honest_witness corrupt req₁.signers req₂.signers
+      hBound hCorruptLe hNd₁ hNd₂ hL₁ hL₂
+  unfold BeltLatchCommitReq.signers at hp₁ hp₂
+  obtain ⟨e₁, he₁, hEq₁⟩ := List.mem_map.mp hp₁
+  obtain ⟨e₂, he₂, hEq₂⟩ := List.mem_map.mp hp₂
+  subst hEq₁
+  refine ⟨e₁.1, e₁.2, e₂.2, hpC, he₁, ?_, hAll₁ e₁ he₁, ?_⟩
+  · rw [← hEq₂]
+    exact he₂
+  · rw [← hEq₂]
+    exact hAll₂ e₂ he₂
+
+/-- **`#tooth`**: a certificate containing a tag that fails verification is rejected, however many
+    entries it has. -/
+theorem tooth_beltCert_forged_tag_rejected {n : Nat}
+    (verifyAck : Fin n → Nat → List UInt8 → List UInt8 → Bool) (q : Nat)
+    (req : BeltLatchCommitReq n) (e : Fin n × List UInt8) (he : e ∈ req.quorumCert)
+    (hForged : verifyAck e.1 req.reqEpoch req.msgDigest e.2 = false) :
+    beltCertAuthenticated verifyAck q req = false := by
+  cases h : beltCertAuthenticated verifyAck q req
+  · rfl
+  · simp only [beltCertAuthenticated, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at h
+    exact absurd (h.1.1 e he) (by rw [hForged]; decide)
+
+/-- **`#tooth`**: a certificate naming the same custodian twice is rejected even when both tags
+    verify, so one custodian cannot be counted twice toward `q`. -/
+theorem tooth_beltCert_duplicate_signer_rejected {n : Nat}
+    (verifyAck : Fin n → Nat → List UInt8 → List UInt8 → Bool) (q : Nat)
+    (req : BeltLatchCommitReq n) (p : Fin n) (t₁ t₂ : List UInt8)
+    (rest : List (Fin n × List UInt8))
+    (hCert : req.quorumCert = (p, t₁) :: (p, t₂) :: rest) :
+    beltCertAuthenticated verifyAck q req = false := by
+  cases h : beltCertAuthenticated verifyAck q req
+  · rfl
+  · simp only [beltCertAuthenticated, Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at h
+    have hNd := h.1.2
+    unfold BeltLatchCommitReq.signers at hNd
+    rw [hCert] at hNd
+    simp only [List.map_cons] at hNd
+    exact absurd List.mem_cons_self (List.nodup_cons.mp hNd).1
 
 /-- Connects a `2 * q > n + f`-certified `BeltLatch` quorum directly to `IdealTsig`'s
     `validThresholdApproval = true` and `thresholdApproval_requires_honest_party`! -/
@@ -2214,6 +2635,7 @@ theorem mirBeltLatch_quorum_discharges_idealTsig_approval {PK Msg : Type}
     (hTh : st.threshold = q)
     (hQPos : 0 < q) (hQLeN : q ≤ n)
     (hCorruptEq : st.corruptParties = corrupt.map Fin.val)
+    (hNoCheaters : st.identifiedCheaters = [])
     (hCorruptNd : corrupt.Nodup)
     (hCorruptLe : corrupt.length ≤ f)
     (hBound : n + f < 2 * q)
@@ -2236,7 +2658,9 @@ theorem mirBeltLatch_quorum_discharges_idealTsig_approval {PK Msg : Type}
       exact hxNot (hFinValInj hyEq ▸ hyMem)
   have hValid : validThresholdApproval st honestApprovers = true := by
     unfold validThresholdApproval
-    rw [hNP, hTh, hCorruptEq]
+    rw [hNP, hTh, hCorruptEq, hNoCheaters]
+    simp only [List.not_mem_nil, not_false_eq_true, decide_true, Bool.and_true]
+    rw [List.filter_eq_self.mpr (fun _ _ => rfl)]
     have hThOk : 0 < q ∧ q ≤ n := ⟨hQPos, hQLeN⟩
     have hCNd : (corrupt.map Fin.val).Nodup := hMapNodup hCorruptNd
     have hCRange : (corrupt.map Fin.val).all (fun c => decide (c < n)) = true := by
@@ -2275,6 +2699,11 @@ theorem mirBeltLatch_quorum_discharges_idealTsig_approval {PK Msg : Type}
       omega
     rw [decide_eq_true hThOk, decide_eq_true hCNd, hCRange,
         decide_eq_true hHonNd, hHonAll, decide_eq_true hSumGe]
+    have hCLt : (corrupt.map Fin.val).length < q := by
+      rw [List.length_map]
+      omega
+    have hHonPos : 0 < honestApprovers.length := by omega
+    rw [decide_eq_true hCLt, decide_eq_true hHonPos]
     rfl
   have hDishonestBound : st.corruptParties.length + 1 ≤ st.threshold := by
     rw [hCorruptEq, List.length_map, hTh]
@@ -2308,7 +2737,8 @@ def verifyRound1Opening (op : Round1Opening) : Bool :=
   decide (op.committedB0 = computeRound1CommitB0 op.nonceLimb op.maskLimb op.sessionTag op.partyId)
 
 /-- Verify the complete pre-cut transcript: non-empty recomputed `Poseidon2` Round-1 openings AND
-    non-empty `GF(2^128)` `BGIN19` Round-2 wire-MAC relations (`0` caller-reported booleans!). -/
+    non-empty `GF(2^128)` `BGIN19` Round-2 wire-MAC relations. The Layer-1 and Layer-2 models
+    evaluate this predicate themselves; the extracted cut-session guard does not (see §3). -/
 def verifyPreCutTranscript (openings : List Round1Opening) (bginRels : List BginWireRelation) : Bool :=
   !openings.isEmpty && openings.all verifyRound1Opening && bginBatchHolds bginRels
 
@@ -2326,7 +2756,7 @@ def poseidon2TagBytes (sh msg : List UInt8) : ByteArray :=
             UInt8.ofNat (out.x2.val % 256), UInt8.ofNat (out.x3.val % 256)]
 
 /-- Unified end-to-end signing request traversing all 4 layers:
-    `(1) Compiled ELF ISA Slice -> (2) Fixed-Width MIR Guard -> (3) Interactive Protocol -> (4) Ideal F_tsig`. -/
+    `(1) Compiled ELF ISA Slice -> (2) Fixed-Width Guard Model -> (3) Interactive Protocol -> (4) Ideal F_tsig`. -/
 structure FourLayerReq (n : Nat) where
   tx : MirTxIntent
   reqEpoch : Nat
@@ -2540,7 +2970,8 @@ def layer1CompiledElfMachine {n : Nat} (q : Nat) (pkDigest : List UInt8)
 
 /-- **Layer 2 Machine (`layer2MirGuardedMachine`)**:
     Composes concrete fixed-width `UInt64` `mirPolicyStep`, `q`-quorum `MirBeltLatchState`, and
-    sticky-poison `MirRssCutSession` (`mirRssCutStep`). -/
+    a `MirRssCutSession` used only as a sticky poison latch (`mirRssCutPoison`). The pre-cut
+    transcript predicate is evaluated by this model directly, not through residual scalars. -/
 @[expose]
 def layer2MirGuardedMachine {n : Nat} (q : Nat) (pkDigest : List UInt8)
     (signFromShare : List UInt8 → List UInt8 → ByteArray) :
@@ -2548,8 +2979,7 @@ def layer2MirGuardedMachine {n : Nat} (q : Nat) (pkDigest : List UInt8)
   PartyMachine.ofOutcome fun s req =>
     if s.cut.poisoned || s.belt.poisoned || s.shareBytes.isNone then
       .err { s with belt := { s.belt with poisoned := true },
-                    cut := { phase := 0xFF, pendingRelations := 0, consistencyVerified := false,
-                             poisoned := true, shareSlotPresent := false },
+                    cut := mirRssCutPoison s.cut,
                     shareBytes := none } ()
     else
       match mirPolicyStep s.policy req.tx with
@@ -2560,8 +2990,7 @@ def layer2MirGuardedMachine {n : Nat} (q : Nat) (pkDigest : List UInt8)
           .err s ()
         else if !verifyPreCutTranscript req.round1Openings req.round2Relations then
           .err { s with belt := { s.belt with poisoned := true },
-                        cut := { phase := 0xFF, pendingRelations := 0, consistencyVerified := false,
-                                 poisoned := true, shareSlotPresent := false },
+                        cut := mirRssCutPoison s.cut,
                         shareBytes := none } ()
         else
           match s.shareBytes with
@@ -2573,8 +3002,7 @@ def layer2MirGuardedMachine {n : Nat} (q : Nat) (pkDigest : List UInt8)
                 nextEpoch := req.reqEpoch + 1
                 latchedRecord := some (req.reqEpoch, env.canonicalBytes, sigBytes) }
             let cut' : MirRssCutSession :=
-              { phase := 0, pendingRelations := 0, consistencyVerified := false,
-                poisoned := false, shareSlotPresent := true }
+              MirRssCutSession.round1Committed s.cut.sessionId s.cut.maskCommitment
             .ok { policy := pol', belt := belt', cut := cut', shareBytes := some sh }
                 { envelope := env, committedEpoch := req.reqEpoch, sigBytes := sigBytes }
 
@@ -2951,7 +3379,8 @@ def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
     s3.cluster.tsig.pk = pk ∧
     s3.cluster.tsig.numParties = n ∧
     s3.cluster.tsig.threshold = q ∧
-    s3.cluster.tsig.corruptParties = corrupt.map Fin.val ∧
+    (s3.cluster.tsig.corruptParties = corrupt.map Fin.val ∧
+      s3.cluster.tsig.identifiedCheaters = []) ∧
     s2.belt.enrolledPkDigest = s3.cluster.honestWal.enrolledPkDigest ∧
     s2.belt.nextEpoch = s3.cluster.honestWal.nextEpoch ∧
     s2.belt.latchedRecord = s3.cluster.honestWal.latchedRecord ∧
@@ -2995,7 +3424,7 @@ def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
             have hQNd : req.quorum.Nodup := of_decide_eq_true hQNdB
             have hQLen : q ≤ req.quorum.length := of_decide_eq_true hQLenB
             have hValApp := (mirBeltLatch_quorum_discharges_idealTsig_approval
-              corrupt req.quorum s3.cluster.tsig hNP hTh _hQPos _hQLeN hCorr
+              corrupt req.quorum s3.cluster.tsig hNP hTh _hQPos _hQLeN hCorr.1 hCorr.2
               _hCorruptNd _hCorruptLe _hBound hQNd hQLen).1
             rw [hTh]
             simp only [hQNdB, hQLenB, hValApp, Bool.and_self, Bool.not_true, Bool.false_eq_true,
@@ -3038,7 +3467,7 @@ def sim_layer2_to_layer3 {PK : Type} {n q f : Nat}
         · simp
         · simp only [Bool.true_and]
           exact (mirBeltLatch_quorum_discharges_idealTsig_approval
-            corrupt req.quorum s3.cluster.tsig hNP hTh _hQPos _hQLeN hCorr
+            corrupt req.quorum s3.cluster.tsig hNP hTh _hQPos _hQLeN hCorr.1 hCorr.2
             _hCorruptNd _hCorruptLe _hBound (of_decide_eq_true hNdB) (of_decide_eq_true hLenB)).1
     cases hP3 : s3.cluster.honestWal.poisoned
     · obtain ⟨hSomeSh, hDealt⟩ := hIntact hP3
@@ -3187,7 +3616,7 @@ def sim_layer3_to_layer4 {PK : Type} {n : Nat}
 
 /-- **Crown-Jewel Compositional Theorem (`isa_to_mir_to_protocol_to_ideal_sim`)**:
     Unified 4-layer transitive `ForwardSim` instantiating `ForwardSim.trans` across:
-    `(1) Compiled ELF ISA Slice` $\to$ `(2) Fixed-Width MIR State Machine` $\to$
+    `(1) Compiled ELF ISA Slice` $\to$ `(2) Fixed-Width Guard Model` $\to$
     `(3) Multi-Party Interactive Wire Protocol` $\to$ `(4) sk-Free Ideal Functionality F_tsig`. -/
 @[expose]
 def isa_to_mir_to_protocol_to_ideal_sim {PK : Type} {n q f : Nat}
@@ -3426,7 +3855,7 @@ theorem isa_to_ideal_preserves_multiturn_safety {PK : Type} {n q f : Nat}
     exact h23₀.1
   have hCorr₀ : s4₀.ideal.tsig.corruptParties = corrupt.map Fin.val := by
     rw [← h34₀.2.1]
-    exact h23₀.2.2.2.2.2.1
+    exact h23₀.2.2.2.2.2.1.1
   have hDishonest₀ : s4₀.ideal.tsig.corruptParties.length + 1 ≤ s4₀.ideal.tsig.threshold := by
     rw [hCorr₀, List.length_map, ← h34₀.2.1, h23₀.2.2.2.2.1]
     omega
@@ -3545,7 +3974,7 @@ theorem inhabited_four_layer_chain :
   let s2₀ : Layer2MirState :=
     { policy := pol2₀
       belt := belt0
-      cut := ⟨0, 0, false, false, true⟩
+      cut := MirRssCutSession.round1Committed zeroBytes32 zeroBytes32
       shareBytes := some sampleSecretShare }
   let tsig₀ : IdealTsigState (List UInt8) (List UInt8) :=
     ⟨samplePkPin, 3, 4, [0], [], []⟩
@@ -3565,7 +3994,7 @@ theorem inhabited_four_layer_chain :
         corrupt id samplePkPin dealt sampleSecretShare signFn assembleFn
         (by decide) (by decide) (by decide) (by decide) (by decide)
         (fun _ => by dsimp only [assembleFn, dealt, signFn]; rfl)).Rel s2₀ s3₀ :=
-    ⟨by decide, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, fun _ => ⟨rfl, rfl⟩⟩
+    ⟨by decide, rfl, rfl, rfl, rfl, ⟨rfl, rfl⟩, rfl, rfl, rfl, rfl, rfl, fun _ => ⟨rfl, rfl⟩⟩
   have hRel34 :
       (sim_layer3_to_layer4 corrupt id dealt assembleFn oracleFn
         (fun _ => by dsimp only [assembleFn, dealt, oracleFn]; rfl)).Rel s3₀ s4₀ :=
@@ -3614,7 +4043,7 @@ theorem inhabited_four_layer_chain :
   let s2₁ : Layer2MirState :=
     { policy := pol2₁
       belt := { belt0 with nextEpoch := 1, latchedRecord := some (0, msg1, sig1) }
-      cut := ⟨0, 0, false, false, true⟩
+      cut := MirRssCutSession.round1Committed zeroBytes32 zeroBytes32
       shareBytes := some sampleSecretShare }
   have hPol1 : mirPolicyStep pol2₀ req1.tx = some (pol2₁, ⟨intent1, msg1⟩) := by
     dsimp only [mirPolicyStep, pol2₀, req1, pol2₁, intent1, msg1]
@@ -3627,7 +4056,7 @@ theorem inhabited_four_layer_chain :
     rw [ite_eq_right (show ¬ (u64MemBool 10 [] = true) by decide)]
     rfl
   have hStep2_1 : M2.step s2₀ req1 = some (s2₁, out1) := by
-    dsimp only [M2, layer2MirGuardedMachine, PartyMachine.ofOutcome, s2₀, req1, belt0]
+    dsimp only [M2, layer2MirGuardedMachine, PartyMachine.ofOutcome, MirRssCutSession.round1Committed, s2₀, req1, belt0]
     rw [ite_eq_right (show ¬ ((false || false || (some sampleSecretShare).isNone) = true) by decide)]
     rw [hPol1]
     dsimp only
@@ -3636,6 +4065,7 @@ theorem inhabited_four_layer_chain :
     rw [decide_eq_true (rfl : samplePkPin = samplePkPin)]
     rw [ite_eq_right (show ¬ ((!(true && ((0 : Nat) == 0))) = true) by decide)]
     rw [ite_eq_right hPreCut1]
+    rfl
   let intent2 := req2.tx.toTransactionIntent
   let msg2 := encodeTransactionIntent intent2
   let sig2 := signFn sampleSecretShare msg2
@@ -3647,7 +4077,7 @@ theorem inhabited_four_layer_chain :
   let s2₂ : Layer2MirState :=
     { policy := pol2₂
       belt := { s2₁.belt with nextEpoch := 2, latchedRecord := some (1, msg2, sig2) }
-      cut := ⟨0, 0, false, false, true⟩
+      cut := MirRssCutSession.round1Committed zeroBytes32 zeroBytes32
       shareBytes := some sampleSecretShare }
   have hPol2 : mirPolicyStep pol2₁ req2.tx = some (pol2₂, ⟨intent2, msg2⟩) := by
     dsimp only [mirPolicyStep, pol2₁, pol2₀, req2, pol2₂, intent2, msg2]
@@ -3660,7 +4090,7 @@ theorem inhabited_four_layer_chain :
     rw [ite_eq_right (show ¬ (u64MemBool 11 [10] = true) by decide)]
     rfl
   have hStep2_2 : M2.step s2₁ req2 = some (s2₂, out2) := by
-    dsimp only [M2, layer2MirGuardedMachine, PartyMachine.ofOutcome, s2₁, req2, belt0]
+    dsimp only [M2, layer2MirGuardedMachine, PartyMachine.ofOutcome, MirRssCutSession.round1Committed, s2₁, req2, belt0]
     rw [ite_eq_right (show ¬ ((false || false || (some sampleSecretShare).isNone) = true) by decide)]
     rw [hPol2]
     dsimp only
@@ -3669,6 +4099,7 @@ theorem inhabited_four_layer_chain :
     rw [decide_eq_true (rfl : samplePkPin = samplePkPin)]
     rw [ite_eq_right (show ¬ ((!(true && ((1 : Nat) == 1))) = true) by decide)]
     rw [ite_eq_right hPreCut2]
+    rfl
   have hStep1_1 : ∃ s1₁, M1.step s1₀ req1 = some (s1₁, out1) ∧
       (sim_layer1_to_layer2 (n := 4) 3 samplePkPin signFn).Rel s1₁ s2₁ := by
     cases hS1 : M1.step s1₀ req1 with

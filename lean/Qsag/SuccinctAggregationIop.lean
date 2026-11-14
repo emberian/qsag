@@ -10000,6 +10000,8 @@ inductive WhirSecurityRegime where
   | habr24Classical128
   | habr24PostQuantum128
   | bciksJohnson128
+  | habr24Qrom128
+  | bciksJohnsonQrom128
   deriving DecidableEq, Repr
 
 /-- `pcs.rs:WhirSchedule`. -/
@@ -10049,19 +10051,22 @@ def whirLogBlowup : Nat → Nat
   | 256 => 8
   | _ => 0
 
-/-- Query-exponent target of a regime in bits of `blowup ^ numQueries`: `112`, `128`, and `256`
+/-- Query-exponent target of a regime in bits of `blowup ^ numQueries`: `112`, `128`, `256`, or `512`
     (agreement `sqrt ρ` per query needs twice the exponent for `128` bits). -/
 def WhirSecurityRegime.queryExponentBits : WhirSecurityRegime → Nat
   | .habr24Classical128 => 112
   | .habr24PostQuantum128 => 128
   | .bciksJohnson128 => 256
+  | .habr24Qrom128 => 256
+  | .bciksJohnsonQrom128 => 512
 
 /-- Per-stage query count of `pcs.rs:WhirSecurityRegime::schedule`:
-    `ceil(bits / log2 blowup)`, plus one extra query in the Johnson regime. -/
+    `ceil(bits / log2 blowup)`, plus one classical or two QROM Johnson queries. -/
 def WhirSecurityRegime.numQueries (r : WhirSecurityRegime) (blowup : Nat) : Nat :=
   let q := (r.queryExponentBits + whirLogBlowup blowup - 1) / whirLogBlowup blowup
   match r with
   | .bciksJohnson128 => q + 1
+  | .bciksJohnsonQrom128 => q + 2
   | _ => q
 
 /-- `pcs.rs:WhirSecurityRegime::schedule`: the legacy geometry with the regime's query counts. -/
@@ -10089,6 +10094,9 @@ def whirBlowupsEscalate : List Nat → Bool
   | a :: b :: tl => (b == 4 * a) && whirBlowupsEscalate (b :: tl)
   | _ => true
 
+/-- Production maximum number of sampled fibers per stage. -/
+def whirMaxQueryCap : Nat := 512
+
 /-- Structural and accounting checks on `r.schedule numVars` (the conditions of
     `pcs.rs:WhirSchedule::validate` together with the regime's query-exponent target). -/
 def whirScheduleWellFormed (r : WhirSecurityRegime) (numVars : Nat) : Bool :=
@@ -10098,12 +10106,12 @@ def whirScheduleWellFormed (r : WhirSecurityRegime) (numVars : Nat) : Bool :=
   decide (1 ≤ s.stages.length) && decide (s.stages.length ≤ 4) &&
   whirBlowupsEscalate (s.stages.map (·.blowup)) &&
   s.stages.all (fun st =>
-    decide (1 ≤ st.stepVars) && decide (st.stepVars ≤ 6) && decide (st.numQueries ≤ 256) &&
+    decide (1 ≤ st.stepVars) && decide (st.stepVars ≤ 6) && decide (st.numQueries ≤ whirMaxQueryCap) &&
     decide (2 ^ r.queryExponentBits ≤ st.queryErrorDenominator))
 
 /-- For every regime and every supported variable count the schedule consumes exactly `numVars`
     variables, has `1..4` stages of `1..6` folded variables, stops with `1..8` variables,
-    escalates the rate by `4` per stage, opens at most `256` fibers per stage, and every stage
+    escalates the rate by `4` per stage, opens at most `512` fibers per stage, and every stage
     reaches the regime's query-exponent target `ρ_i^{-q_i} ≥ 2^bits`. -/
 theorem whirSchedule_wellFormed (r : WhirSecurityRegime) (numVars : Nat)
     (h2 : 2 ≤ numVars) (h24 : numVars ≤ 24) : whirScheduleWellFormed r numVars = true := by
@@ -10119,6 +10127,18 @@ theorem whir_regime_query_counts :
     [4, 16, 64, 256].map WhirSecurityRegime.habr24PostQuantum128.numQueries = [64, 32, 22, 16] ∧
     [4, 16, 64, 256].map WhirSecurityRegime.bciksJohnson128.numQueries = [129, 65, 44, 33] := by
   decide
+
+/-- QROM profiles of the production schedule, including the two-query Johnson slack. -/
+theorem whir_qrom_regime_query_counts :
+    [4, 16, 64, 256].map WhirSecurityRegime.habr24Qrom128.numQueries = [128, 64, 43, 32] ∧
+    [4, 16, 64, 256].map WhirSecurityRegime.bciksJohnsonQrom128.numQueries = [258, 130, 88, 66] := by
+  decide
+
+/-- Deployed Johnson-QROM geometry at 24 variables. -/
+theorem whir_johnson_qrom_schedule_deployed :
+    WhirSecurityRegime.bciksJohnsonQrom128.schedule 24 =
+      ⟨.bciksJohnsonQrom128, 8,
+        [⟨4, 6, 258⟩, ⟨16, 4, 130⟩, ⟨64, 3, 88⟩, ⟨256, 3, 66⟩]⟩ := by decide
 
 /-- The default schedule at `numVars = 20` (the `K = 8` shard): `ρ = 1/4 → 1/16 → 1/64`,
     `q = (64, 32, 22)`, eight variables sent in the clear. -/

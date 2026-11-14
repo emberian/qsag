@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["aeneas/qsag-verified", "aeneas/qsag-whir-verified"]
 members = [
     "crates/qsag-core",
     "crates/qsag-asm",

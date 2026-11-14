@@ -122,6 +122,8 @@ pub enum QuorumError {
     CertificateBindingMismatch,
     /// Fewer than `t` openings.
     NotEnoughShares { have: usize, need: usize },
+    /// Mandatory sign-then-verify or write-once codeword consistency failed before release.
+    SignatureVerifyFailed,
 }
 
 impl From<BeltLatchError> for QuorumError {
@@ -167,6 +169,9 @@ impl fmt::Display for QuorumError {
                 f.write_str("latch certificate is for another record")
             }
             Self::NotEnoughShares { have, need } => write!(f, "{have} openings, {need} needed"),
+            Self::SignatureVerifyFailed => {
+                f.write_str("signature failed verify-before-release consistency check")
+            }
         }
     }
 }
@@ -286,19 +291,12 @@ pub fn message_hash(pk: &QuorumPublicKey, leaf: u64, msg: &[u8]) -> Node {
 }
 
 /// The 128 base-4 digits selected by `counter`, or `None` if they do not sum to
-/// [`WOTS_TARGET_SUM`].
+/// [`WOTS_TARGET_SUM`]. Delegates codeword validation to `qsag_verified::VerifiedWotsC256Guard`.
 pub fn digits_at(msg_hash: &Node, counter: u32) -> Option<Vec<u8>> {
     let digest = h32(TAG_DIGEST, &[msg_hash, &counter.to_be_bytes()]);
-    let mut digits = Vec::with_capacity(WOTS_CHAINS);
-    let mut sum = 0u32;
-    for byte in digest {
-        for shift in [6u8, 4, 2, 0] {
-            let digit = (byte >> shift) & 3;
-            sum += u32::from(digit);
-            digits.push(digit);
-        }
-    }
-    (sum == WOTS_TARGET_SUM).then_some(digits)
+    qsag_verified::VerifiedWotsC256Guard::from_digest_verified(digest)
+        .ok()
+        .map(|guard| guard.digits().to_vec())
 }
 
 /// Smallest counter whose digits reach the target sum. The counter is public and the search
@@ -393,7 +391,10 @@ pub fn quorum_jorts_verify(pk: &QuorumPublicKey, msg: &[u8], sig: &QuorumJortsSi
         })
         .collect();
     let leaf_node = leaf_hash(&pk.pk_seed, sig.leaf, &ends);
-    root_from_path(&pk.pk_seed, sig.leaf, &leaf_node, &sig.auth_path) == pk.root
+    qsag_verified::ct_eq_bytes32(
+        &root_from_path(&pk.pk_seed, sig.leaf, &leaf_node, &sig.auth_path),
+        &pk.root,
+    )
 }
 
 /// The public part of a staged key: the tree and the chain ends of every assigned leaf.
@@ -451,17 +452,41 @@ impl QuorumTree {
             .collect()
     }
 
-    /// Check reconstructed chain nodes against the public chain ends and assemble the
+    /// Check reconstructed chain nodes against the public chain ends, enforce canonical
+    /// minimal grinding counter and full Merkle-root `Sign-Then-Verify`, and assemble the
     /// signature. A node that does not reach its chain end names the failing chain.
     fn finish_signature(
         &self,
         record: &LeafRecord,
         nodes: Vec<Node>,
     ) -> Result<QuorumJortsSig, QuorumError> {
+        let height = usize::from(self.pk.height);
+        if height == 0
+            || height > 62
+            || record.leaf >= (1u64 << height)
+            || nodes.len() != WOTS_CHAINS
+            || record.digits.len() != WOTS_CHAINS
+            || self.levels.len() != height + 1
+        {
+            return Err(QuorumError::SignatureVerifyFailed);
+        }
         let ends = self
             .chain_ends(record.leaf)
             .ok_or(QuorumError::InvalidConfig("leaf is not assigned"))?;
+        if ends.len() != WOTS_CHAINS {
+            return Err(QuorumError::SignatureVerifyFailed);
+        }
+        // Canonical minimal counter & codeword verification: blocks faulted grinding counters
+        // `ctr' != ctr` that would otherwise pass public verification on the same `msg_hash`.
+        let (canonical_ctr, canonical_digits) =
+            grind(&record.msg_hash).ok_or(QuorumError::GrindFailed)?;
+        if record.counter != canonical_ctr || record.digits != canonical_digits {
+            return Err(QuorumError::SignatureVerifyFailed);
+        }
         for (chain, (node, &digit)) in nodes.iter().zip(&record.digits).enumerate() {
+            if usize::from(digit) > WOTS_STEPS {
+                return Err(QuorumError::SignatureVerifyFailed);
+            }
             let end = chain_walk(
                 &self.pk.pk_seed,
                 record.leaf,
@@ -470,15 +495,29 @@ impl QuorumTree {
                 WOTS_STEPS,
                 node,
             );
-            if end != ends[chain] {
+            if !qsag_verified::ct_eq_bytes32(&end, &ends[chain]) {
                 return Err(QuorumError::ChainVerifyFailed { chain });
             }
+        }
+        let mut index = record.leaf as usize;
+        let mut auth_path = Vec::with_capacity(height);
+        for level in &self.levels[..height] {
+            let sibling = *level
+                .get(index ^ 1)
+                .ok_or(QuorumError::SignatureVerifyFailed)?;
+            auth_path.push(sibling);
+            index >>= 1;
+        }
+        let leaf_node = leaf_hash(&self.pk.pk_seed, record.leaf, ends);
+        let recomputed_root = root_from_path(&self.pk.pk_seed, record.leaf, &leaf_node, &auth_path);
+        if !qsag_verified::ct_eq_bytes32(&recomputed_root, &self.pk.root) {
+            return Err(QuorumError::SignatureVerifyFailed);
         }
         Ok(QuorumJortsSig {
             leaf: record.leaf,
             counter: record.counter,
             nodes,
-            auth_path: self.auth_path(record.leaf),
+            auth_path,
         })
     }
 }
@@ -1100,6 +1139,7 @@ pub struct CommitteePartitionedJorts<W: DurableWal> {
     pub layout: CommitteeLayout,
     pub tree: Arc<QuorumTree>,
     pub custodians: Vec<CommitteeCustodian<W>>,
+    ots_release_cache: BTreeMap<u64, (Node, u32)>,
 }
 
 impl CommitteePartitionedJorts<MemoryWal> {
@@ -1118,6 +1158,7 @@ impl CommitteePartitionedJorts<MemoryWal> {
             layout: staged.layout,
             tree: staged.tree,
             custodians,
+            ots_release_cache: BTreeMap::new(),
         })
     }
 }
@@ -1170,7 +1211,19 @@ impl<W: DurableWal> CommitteePartitionedJorts<W> {
             let permit = self.custodians[member].verify_echoes(committee, &echoes)?;
             openings.push(self.custodians[member].open(&permit)?);
         }
-        combine_additive(&self.tree, &record, &members, &openings)
+        let sig = combine_additive(&self.tree, &record, &members, &openings)?;
+        if let Some((prev_hash, prev_ctr)) = self.ots_release_cache.get(&sig.leaf)
+            && (!qsag_verified::ct_eq_bytes32(prev_hash, &record.msg_hash)
+                || *prev_ctr != sig.counter)
+        {
+            return Err(QuorumError::SignatureVerifyFailed);
+        }
+        if !quorum_jorts_verify(self.public_key(), msg, &sig) {
+            return Err(QuorumError::SignatureVerifyFailed);
+        }
+        self.ots_release_cache
+            .insert(sig.leaf, (record.msg_hash, sig.counter));
+        Ok(sig)
     }
 }
 
@@ -1213,26 +1266,12 @@ impl QuorumConfig {
         if n == 0 || n > MAX_QUORUM_PARTIES || t == 0 || t > n || f >= n || q > n {
             return Err(QuorumError::InvalidConfig("need 1 <= t and 1 <= n <= 255"));
         }
-        if f >= t {
-            return Err(QuorumError::InvalidConfig(
-                "need f < t: f shares must not reconstruct",
-            ));
-        }
-        if n < 3 * f + 1 {
-            return Err(QuorumError::InvalidConfig("need n >= 3f + 1"));
-        }
-        if t > n - f {
-            return Err(QuorumError::InvalidConfig(
-                "need t <= n - f: honest custodians must reconstruct",
-            ));
-        }
-        if 2 * q <= n + f {
-            return Err(QuorumError::QuorumTooSmall { q, n, f });
-        }
-        if q > n - f {
-            return Err(QuorumError::InvalidConfig(
-                "need q <= n - f: honest custodians must certify",
-            ));
+        // Production uses global BFT liveness, not the safety-only committee mode.
+        if !qsag_verified::validate_belt_quorum_config(n as u32, t as u32, f as u32, q as u32, true) {
+            if 2 * q <= n + f {
+                return Err(QuorumError::QuorumTooSmall { q, n, f });
+            }
+            return Err(QuorumError::InvalidConfig("invalid global BFT quorum configuration"));
         }
         Ok(Self { t, n, f, q })
     }
@@ -1674,6 +1713,7 @@ pub struct BftShamirJorts<W: DurableWal> {
     pub cfg: QuorumConfig,
     pub tree: Arc<QuorumTree>,
     pub custodians: Vec<ShamirCustodian<W>>,
+    ots_release_cache: BTreeMap<u64, (Node, u32)>,
 }
 
 impl BftShamirJorts<MemoryWal> {
@@ -1691,6 +1731,7 @@ impl BftShamirJorts<MemoryWal> {
             cfg,
             tree: staged.tree,
             custodians,
+            ots_release_cache: BTreeMap::new(),
         })
     }
 }
@@ -1753,7 +1794,19 @@ impl<W: DurableWal> BftShamirJorts<W> {
             .iter()
             .map(|&p| self.custodians[p].open(leaf, msg, &cert))
             .collect::<Result<Vec<_>, _>>()?;
-        combine_shamir(&self.cfg, &self.tree, &record, &openings)
+        let sig = combine_shamir(&self.cfg, &self.tree, &record, &openings)?;
+        if let Some((prev_hash, prev_ctr)) = self.ots_release_cache.get(&sig.leaf)
+            && (!qsag_verified::ct_eq_bytes32(prev_hash, &record.msg_hash)
+                || *prev_ctr != sig.counter)
+        {
+            return Err(QuorumError::SignatureVerifyFailed);
+        }
+        if !quorum_jorts_verify(self.public_key(), msg, &sig) {
+            return Err(QuorumError::SignatureVerifyFailed);
+        }
+        self.ots_release_cache
+            .insert(sig.leaf, (record.msg_hash, sig.counter));
+        Ok(sig)
     }
 }
 
@@ -2668,6 +2721,84 @@ mod bounds_tests {
         assert_eq!(
             CommitteeLayout::new(2, 45, 30).unwrap().committees().len(),
             990
+        );
+    }
+}
+
+#[cfg(test)]
+mod verified_config_parity {
+    use super::*;
+    #[test]
+    fn global_bft_validator_parity() {
+        for n in 0..=16 {
+            for t in 0..=17 {
+                for f in 0..=17 {
+                    for q in 0..=17 {
+                        assert_eq!(QuorumConfig::with_quorum(t, n, f, q).is_ok(),
+                            qsag_verified::validate_belt_quorum_config(n as u32, t as u32, f as u32, q as u32, true));
+                    }
+                }
+            }
+        }
+        // The extracted safety-only mode permits a unanimous committee without global liveness.
+        assert!(qsag_verified::validate_belt_quorum_config(3, 2, 1, 3, false));
+        assert!(QuorumConfig::with_quorum(2, 3, 1, 3).is_err());
+        assert!(QuorumConfig::with_quorum(4, 7, 0, 4).is_ok());
+        assert!(QuorumConfig::with_quorum(5, 7, 0, 4).is_err());
+    }
+
+    #[test]
+    fn verify_before_release_blocks_tree_sibling_grind_counter_and_ots_cache_faults() {
+        let mut jorts = CommitteePartitionedJorts::stage(2, 3, 3, &[0x44; 32]).unwrap();
+        let valid = jorts.sign(&[0, 1], b"honest-0").unwrap();
+        assert!(quorum_jorts_verify(jorts.public_key(), b"honest-0", &valid));
+
+        // 1. Non-minimal grinding counter `ctr' > ctr` that ALSO sums to 192 is rejected
+        //    by `finish_signature` before any signature can be released.
+        let leaf = valid.leaf;
+        let msg_hash = message_hash(jorts.public_key(), leaf, b"honest-0");
+        let second_valid = ((valid.counter + 1)..MAX_GRIND)
+            .find_map(|c| digits_at(&msg_hash, c).map(|d| (c, d)))
+            .expect("second valid counter exists within 65536");
+        let non_minimal_record = LeafRecord {
+            leaf,
+            msg_hash,
+            counter: second_valid.0,
+            digits: second_valid.1,
+        };
+        assert_eq!(
+            jorts
+                .tree
+                .finish_signature(&non_minimal_record, valid.nodes.clone()),
+            Err(QuorumError::SignatureVerifyFailed)
+        );
+
+        // 2. Transient RAM bit-flip in a Merkle sibling node inside `QuorumTree::levels`
+        //    deterministically aborts `finish_signature` instead of releasing a broken path.
+        let canonical_record = LeafRecord {
+            leaf,
+            msg_hash,
+            counter: valid.counter,
+            digits: digits_at(&msg_hash, valid.counter).unwrap(),
+        };
+        let mut corrupted_tree = (*jorts.tree).clone();
+        corrupted_tree.levels[0][(leaf as usize) ^ 1][0] ^= 0x01;
+        assert_eq!(
+            corrupted_tree.finish_signature(&canonical_record, valid.nodes.clone()),
+            Err(QuorumError::SignatureVerifyFailed)
+        );
+
+        // 3. Write-once `ots_release_cache` blocks releasing a second `(msg_hash, ctr)` on a leaf.
+        let next_leaf = jorts
+            .layout
+            .leaf_of(0, 1)
+            .expect("epoch 1 leaf exists for committee 0");
+        jorts
+            .ots_release_cache
+            .insert(next_leaf, ([0xEE; 32], 9999));
+        assert_eq!(
+            jorts.sign_at(0, 1, b"conflict"),
+            Err(QuorumError::SignatureVerifyFailed)
         );
     }
 }

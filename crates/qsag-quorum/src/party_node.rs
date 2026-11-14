@@ -57,7 +57,7 @@ use crate::hash::{SeedRng, h32, mac32, mac32_verify};
 use crate::quorum_jorts::{
     CommitteeCustodian, LatchAck, LatchCertificate, LatchEcho, Node, QuorumError, QuorumJortsSig,
     SHARE_OPENING_WIRE_BYTES, ShamirCustodian, ShareOpening, WOTS_CHAINS, combine_additive,
-    combine_shamir_robust,
+    combine_shamir_robust, quorum_jorts_verify,
 };
 use crate::wire_channel::{TransportError, WireTransport};
 
@@ -362,12 +362,16 @@ impl<T: WireTransport, W: DurableWal> IsolatedJortsParty<T, W> {
                 })?,
             );
         }
-        Ok(combine_additive(
+        let sig = combine_additive(
             self.custodian.tree(),
             &record,
             members,
             &openings,
-        )?)
+        )?;
+        if !quorum_jorts_verify(self.custodian.tree().public_key(), msg, &sig) {
+            return Err(NodeError::Quorum(QuorumError::SignatureVerifyFailed));
+        }
+        Ok(sig)
     }
 }
 
@@ -504,6 +508,9 @@ impl<T: WireTransport, W: DurableWal> IsolatedQuorumParty<T, W> {
             &record,
             &openings,
         )?;
+        if !quorum_jorts_verify(self.custodian.tree().public_key(), msg, &signature) {
+            return Err(NodeError::Quorum(QuorumError::SignatureVerifyFailed));
+        }
         Ok(QuorumSignOutcome {
             signature,
             certified_by,
@@ -734,6 +741,7 @@ pub struct IsolatedRss256Party<T: WireTransport, J: PoisonJournal> {
     wave: u64,
     barrier: u64,
     record: GateRecord,
+    verified_latch: Option<qsag_verified::VerifiedRssPoisonLatch>,
     unverified: bool,
     poisoned: bool,
     journal_failed: bool,
@@ -770,6 +778,13 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             return Err(NodeError::InvalidParameters);
         }
         let poisoned = journal.is_poisoned(&session_id);
+        let verified_latch = if poisoned {
+            qsag_verified::VerifiedRssPoisonLatch::new_clean()
+                .record_check_result(false)
+                .0
+        } else {
+            qsag_verified::VerifiedRssPoisonLatch::new_clean()
+        };
         Ok(Self {
             party: keys.party,
             session_id,
@@ -782,6 +797,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             wave: 0,
             barrier: 0,
             record: GateRecord::default(),
+            verified_latch: Some(verified_latch),
             unverified: false,
             poisoned,
             journal_failed: false,
@@ -796,11 +812,19 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
 
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
+            || self
+                .verified_latch
+                .as_ref()
+                .is_none_or(qsag_verified::VerifiedRssPoisonLatch::is_poisoned)
     }
 
     /// True while gates exist that no barrier has accepted.
     pub fn has_unverified_gates(&self) -> bool {
         self.unverified
+            || self
+                .verified_latch
+                .as_ref()
+                .is_none_or(qsag_verified::VerifiedRssPoisonLatch::is_unverified)
     }
 
     pub fn state_count(&self) -> usize {
@@ -843,6 +867,9 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
 
     fn poison(&mut self) -> Result<(), NodeError> {
         self.poisoned = true;
+        if let Some(latch) = self.verified_latch.take() {
+            self.verified_latch = Some(latch.record_check_result(false).0);
+        }
         let persisted = self.journal.mark_poisoned(&self.session_id);
         self.journal_failed |= persisted.is_err();
         let peers = [self.succ(), self.pred()];
@@ -857,7 +884,7 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         if self.journal_failed {
             return Err(NodeError::Journal);
         }
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(NodeError::Poisoned);
         }
         let result = body(self);
@@ -877,11 +904,22 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         if self.wave > MAX_WAVE {
             return Err(NodeError::WaveCounterOverflow);
         }
+        let n = self.states.len();
+        let latch = self.verified_latch.take().ok_or(NodeError::Poisoned)?;
+        let (next_latch, stage_res) = latch.stage_relations((24 * 25 * n.max(1)) as u64);
+        self.verified_latch = Some(next_latch);
+        if let Err(err) = stage_res {
+            return Err(match err {
+                qsag_verified::PantsGuardError::RelationCounterOverflow => {
+                    NodeError::WaveCounterOverflow
+                }
+                _ => NodeError::Poisoned,
+            });
+        }
         let domain = (PURPOSE_CHI_PAD << 56) | self.wave;
         self.wave += 1;
         let mut pad_mine = Shake256Prg256::new(&self.slot_keys[0], &self.session_id, domain);
         let mut pad_next = Shake256Prg256::new(&self.slot_keys[1], &self.session_id, domain);
-        let n = self.states.len();
         let (succ, pred) = (self.succ(), self.pred());
         self.unverified = true;
         let mut lin_mine = vec![[0u64; 25]; n];
@@ -1281,6 +1319,10 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         self.record.wipe();
         self.barrier += 1;
         self.unverified = false;
+        let latch = self.verified_latch.take().ok_or(NodeError::Poisoned)?;
+        let (next_latch, check_res) = latch.record_check_result(true);
+        self.verified_latch = Some(next_latch);
+        check_res.map_err(|_| NodeError::Poisoned)?;
         Ok(())
     }
 
@@ -1291,19 +1333,33 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         if self.journal_failed {
             return Err(NodeError::Journal);
         }
-        if self.poisoned {
+        if self.is_poisoned() {
             return Err(NodeError::Poisoned);
         }
+        let latch = self.verified_latch.take().ok_or(NodeError::Poisoned)?;
+        let (next_latch, permit_res) = latch.authorize_open();
+        self.verified_latch = Some(next_latch);
+        let permit = match permit_res {
+            Ok(p) => p,
+            Err(qsag_verified::PantsGuardError::RssOpenBeforeCheck) => {
+                return Err(NodeError::OpenBeforeCheck);
+            }
+            Err(_) => return Err(NodeError::Poisoned),
+        };
         if self.unverified {
             return Err(NodeError::OpenBeforeCheck);
         }
         if words == 0 || words > 25 {
             return Err(NodeError::InvalidParameters);
         }
-        self.guarded(|party| party.open_inner(words))
+        self.guarded(|party| party.open_inner(words, permit))
     }
 
-    fn open_inner(&mut self, words: usize) -> Result<Vec<Vec<u64>>, NodeError> {
+    fn open_inner(
+        &mut self,
+        words: usize,
+        _permit: qsag_verified::RssOpenPermit,
+    ) -> Result<Vec<Vec<u64>>, NodeError> {
         let (succ, pred) = (self.succ(), self.pred());
         let mine: Vec<u64> = self
             .states
@@ -1934,7 +1990,7 @@ mod tests {
 
     #[test]
     fn committee_signing_composes_with_encrypted_tcp() {
-        use crate::wire_channel::{MacSealedWireChannel, TcpWireMesh};
+        use crate::wire_channel::{ConfidentialWireChannel, TcpWireMesh};
         let staged = stage_committee_partitioned(2, 2, 2, &SEED).unwrap();
         let pk = *staged.tree.public_key();
         let (endpoints, _) = TcpWireMesh::loopback(2, SESSION).unwrap();
@@ -1944,7 +2000,7 @@ mod tests {
                 let custodian = CommitteeCustodian::new(
                     staged.layout.clone(), staged.tree.clone(), material, wals,
                 ).unwrap();
-                let wire = MacSealedWireChannel::new_encrypted(
+                let wire = ConfidentialWireChannel::new(
                     endpoint, SESSION, vec![[0xA7; 32]; 2],
                 ).unwrap();
                 IsolatedJortsParty::new(custodian, wire).unwrap()

@@ -4,12 +4,12 @@ module
 
 Self-contained Lean 4.35 formalization of the 100% dealerless active-security preprocessing stack
 backing `crates/qsag-core/src/preprocessing.rs` (`0` trusted dealers, `0` cleartext trapdoors):
-1. **Ring-LWE Base OT Exact Decryption & FO Ciphertext Cut-and-Choose (`rlwe_ot_decrypt_exact`,
+1. **Ring-LWE Base OT Exact Decryption & FO Selective-Failure Count (`rlwe_ot_decrypt_exact`,
    `rlwe1024_ot_decrypt_exact`, `rlwe_fo_cut_and_choose_sound`)**:
    Over $R_q = \mathbb{Z}_{12289}[X]/(X^{N} + 1)$ ($N \in \{512, 1024\}$) with $\eta = 1$ noise,
    worst-case decryption noise is strictly $< \lfloor q / 4 \rfloor = 3072$, guaranteeing zero
-   decryption error on every valid RLWE branch and $2^{-k}$ FO cut-and-choose survival on $k$
-   malformed RLWE ciphertexts.
+   decryption error on every valid RLWE branch and $2^{-k}$ selective-failure survival of a sender
+   corrupting one ciphertext in each of $k$ base OTs.
 2. **Pairwise OLE / OT Cross-Term Telescopy & `(t, n)` Shamir Beaver Bridge
    (`ole_pairwise_cross_sum_eq_mul`, `shamirBeaverFromPairwiseOle_valid`)**:
    Connects local pairwise OLE cross-terms $s_{i,j}^{(u)} + s_{j,i}^{(v)} = (\lambda_i a_i)(\lambda_j b_j)$
@@ -1296,10 +1296,14 @@ theorem tooth_shared_spdz_sacrifice_rejects_corrupted_triple :
 
 end SharedSpdzSacrifice
 
-/-! ## 6. FO Cut-and-Choose, Universal LHL Combiner, Interactive KOS & Silent-OT PCG (`[P1-07]`) -/
+/-! ## 6. FO Selective Failure, Universal Combiner, Interactive KOS & Silent-OT PCG (`[P1-07]`) -/
 
-/-- Recursive FO cut-and-choose branch-check survival test across `k` corrupted Base-OT branches:
-    the malicious sender survives iff every branch-check challenge bit `(mask >>> j) & 1` equals `0`. -/
+/-- Survival test for a sender that corrupts one ciphertext in each of `k` base OTs. The receiver's
+    FO re-encryption check inspects only the ciphertext of its own choice bit, so the sender survives
+    iff every receiver choice bit `(mask >>> j) & 1` avoids the corrupted branch (encoded as bit `0`).
+    There is no cut-and-choose in `preprocessing.rs`: `mask` is the receiver's secret choice vector, and
+    survival is the selective-failure event. The per-OT fact for the polynomial FO machine is
+    `Qsag.fo_corrupted_branch_rejected_iff_chosen` in `Qsag.LatticePreprocessingFull`. -/
 def foSurvivesBranchChecks : Nat → Nat → Bool
   | 0, _ => true
   | k + 1, mask => (mask % 2 == 0) && foSurvivesBranchChecks k (mask / 2)
@@ -1320,11 +1324,12 @@ theorem foSurvivesBranchChecks_iff_zero :
     · rintro ⟨hMod, hDiv⟩; omega
     · intro hZero; subst hZero; exact ⟨rfl, rfl⟩
 
-/-- **FO Branch-Check Cut-and-Choose Selective-Failure Bound (`fo_cut_and_choose_selective_failure_bound`)**:
-    If a malicious Base-OT sender corrupts `k ≥ 1` Ring-LWE ciphertexts, then over the `2 ^ k`
-    uniform challenge sub-assignments `cTilde : Fin (2 ^ k)` on those `k` branches, **exact count `1`**
-    (`cTilde = 0`) misses all `k` corrupted branches (`2 ^ k - 1` challenges catch the sender!),
-    yielding selective-failure survival probability `1 / 2^k` (and `2^{-128}` at `k = 128`). -/
+/-- **FO Selective-Failure Count (`fo_cut_and_choose_selective_failure_bound`)**:
+    If a malicious Base-OT sender corrupts one Ring-LWE ciphertext in each of `k` base OTs, then over
+    the `2 ^ k` receiver choice sub-vectors `cTilde : Fin (2 ^ k)` on those OTs, **exact count `1`**
+    (`cTilde = 0`) avoids all `k` corrupted branches. The sender survives with probability `1 / 2^k`
+    and, when it survives, has learned those `k` choice bits; this leakage is what the `128 × 384`
+    extractor removes. -/
 theorem fo_cut_and_choose_selective_failure_bound (k : Nat) :
     let surviveCount := finSum (2 ^ k) (fun c => if foSurvivesBranchChecks k c.1 then 1 else 0)
     let caughtCount := finSum (2 ^ k) (fun c => if !foSurvivesBranchChecks k c.1 then 1 else 0)
@@ -1372,14 +1377,16 @@ structure RlweOtBranchSample where
   claimedCt : Nat
   deriving DecidableEq, Repr
 
-/-- FO cut-and-choose branch verifier: checks worst-case noise bound `eMag ≤ 2N + 1 = 2049`
-    and deterministic ciphertext consistency `claimedCt = rlweNoisyEncode bit eSign eMag`. -/
+/-- Coefficient-level stand-in for the FO check of one branch: worst-case noise bound
+    `eMag ≤ 2N + 1 = 2049` and deterministic ciphertext consistency
+    `claimedCt = rlweNoisyEncode bit eSign eMag`. The polynomial re-encryption check itself is
+    `Qsag.rlweFoReceiverMachine`. -/
 def verifyRlweOtBranch (br : RlweOtBranchSample) : Bool :=
   decide (br.eMag ≤ 2 * rlwe1024DimN + 1) &&
   decide (br.claimedCt = rlweNoisyEncode br.bit br.eSign br.eMag)
 
-/-- Verify a batch of RLWE Base-OT branches under cut-and-choose challenge bitmask `mask`
-    (bit `1` opens and audits the branch; bit `0` retains it for OT correlation extraction). -/
+/-- Check a batch of base-OT branches under the receiver's choice bitmask `mask`: bit `1` means the
+    receiver chose (and therefore re-encrypts and checks) this branch; bit `0` means it never looks. -/
 def verifyRlweFoBatch : List RlweOtBranchSample → Nat → Bool
   | [], _ => true
   | br :: brs, mask =>
@@ -1400,11 +1407,11 @@ theorem verifyRlweFoBatch_corrupted_eq_survives :
     · simp [hm0]
     · simp [hm1]
 
-/-- **Ring-LWE FO Ciphertext Cut-and-Choose Soundness (`rlwe_fo_cut_and_choose_sound`)**:
+/-- **Ring-LWE FO Selective-Failure Soundness (`rlwe_fo_cut_and_choose_sound`)**:
     1. Every valid RLWE branch (`verifyRlweOtBranch br = true`) decrypts with **zero** bit error
        (`rlweDecodeBit br.claimedCt = br.bit`).
     2. Across any `k` malformed RLWE ciphertexts (`verifyRlweOtBranch br = false`), `verifyRlweFoBatch`
-       accepts on exact count `1` out of `2 ^ k` challenge masks (`ratLe (survive, 2^k) (1, 2^k)`). -/
+       accepts on exact count `1` out of `2 ^ k` receiver choice masks (`ratLe (survive, 2^k) (1, 2^k)`). -/
 theorem rlwe_fo_cut_and_choose_sound
     (branches : List RlweOtBranchSample)
     (hAllCorrupted : ∀ br ∈ branches, verifyRlweOtBranch br = false) :
@@ -1524,24 +1531,24 @@ theorem linearCombiner3to1_universal_c1 [DecidableEq R] [NoZeroDivisors R]
   rw [hFilt]
   exact RoundPoly.roots_nodup_length_le 1 [constTerm, dx1] S hNodup (by simp) hWitnessNz
 
-/-- **Leftover Hash Lemma Collision-Excess Bound (`lhl_combiner_384_to_128_stat_dist`)**:
-    Combining `linearCombiner3to1_universal_c1` over `Tower128` (`|𝔽_{2^128}| = 2^128`) with a
-    384-bit source of min-entropy `H_∞ ≥ 256` bits mapped to `ℓ = 128` bits yields universal
-    collision probability `≤ 1 / 2^128` and LHL collision excess `2^ℓ / 2^{H_∞} ≤ 1 / 2^128`. -/
-theorem lhl_combiner_384_to_128_stat_dist
+/-- **Collision probability of the 3-to-1 field combiner (`linearCombiner3to1_collision_probability_le`)**:
+    over `Tower128`, two inputs differing in the `x₁` block collide for at most one seed `c₁` of any
+    duplicate-free seed list, i.e. with probability at most `1 / 2^128` over a uniform `c₁`.
+    This is a 2-universality statement only. The statistical-distance conclusion for a source with
+    leakage is the Leftover Hash Lemma `Qsag.lhl_security_of_two_universal`, instantiated for the
+    production binary `128 × 384` extractor in `Qsag.kos_combiner_128x384_lhl_security`
+    (`Qsag.LatticePreprocessingFull`); no min-entropy hypothesis appears here. -/
+theorem linearCombiner3to1_collision_probability_le
     (c2 x0 x1 x2 x0' x1' x2' : Tower128) (S : List Tower128)
     (hNodup : S.Nodup) (hDiff1 : x1 ≠ x1') :
     let bad := (S.filter (fun c1 => decide (linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c1 c2 x0' x1' x2'))).length
     bad ≤ 1 ∧
-    ratLe (bad, 2 ^ 128) (1, 2 ^ 128) ∧
-    ratLe (2 ^ 128, 2 ^ 256) (1, 2 ^ 128) := by
+    ratLe (bad, 2 ^ 128) (1, 2 ^ 128) := by
   intro bad
   have hBad : bad ≤ 1 := linearCombiner3to1_universal_c1 c2 x0 x1 x2 x0' x1' x2' S hNodup hDiff1
-  refine ⟨hBad, ?_, ?_⟩
-  · unfold ratLe; dsimp only
-    exact ⟨Nat.two_pow_pos 128, Nat.two_pow_pos 128, Nat.mul_le_mul_right _ hBad⟩
-  · unfold ratLe; dsimp only
-    exact ⟨Nat.two_pow_pos 256, Nat.two_pow_pos 128, by decide⟩
+  refine ⟨hBad, ?_⟩
+  unfold ratLe; dsimp only
+  exact ⟨Nat.two_pow_pos 128, Nat.two_pow_pos 128, Nat.mul_le_mul_right _ hBad⟩
 
 def fieldProductResidual (deltaU_ell secretDelta senderOffset chi_ell : R) : R :=
   sub (mul (mul chi_ell deltaU_ell) secretDelta) senderOffset

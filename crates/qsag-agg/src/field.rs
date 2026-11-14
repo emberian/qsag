@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 /// Goldilocks prime $p = 2^{64} - 2^{32} + 1$.
-pub const GOLDILOCKS_PRIME: u64 = 0xFFFF_FFFF_0000_0001;
+pub const GOLDILOCKS_PRIME: u64 = qsag_whir_verified::GOLDILOCKS_P;
 
 /// $\epsilon = 2^{32} - 1$ such that $2^{64} \equiv \epsilon \pmod p$.
 const EPSILON: u64 = 0xFFFF_FFFF;
@@ -29,10 +29,9 @@ impl Goldilocks {
     /// Strict canonical constructor: returns `None` if `v >= GOLDILOCKS_PRIME`.
     #[inline]
     pub const fn from_canonical_u64(v: u64) -> Option<Self> {
-        if v < GOLDILOCKS_PRIME {
-            Some(Self(v))
-        } else {
-            None
+        match qsag_whir_verified::decode_canonical_u64(v) {
+            Some(x) => Some(Self(x)),
+            None => None,
         }
     }
 
@@ -558,17 +557,20 @@ pub fn ntt_goldilocks(a: &mut [Goldilocks]) {
     }
 
     #[cfg(feature = "std")]
-    if n >= 32_768 {
-        bit_reverse_permute(a);
-        ntt_goldilocks_parallel_stages(a, 16);
-        return;
+    if n >= 16_384 {
+        let threads = crate::parallel_pow2_workers(n / 2);
+        if threads > 1 {
+            bit_reverse_permute(a);
+            ntt_goldilocks_parallel_stages(a, threads, false);
+            return;
+        }
     }
 
     ntt_goldilocks_serial(a);
 }
 
 #[cfg(feature = "std")]
-fn ntt_goldilocks_parallel_stages(a: &mut [Goldilocks], threads: usize) {
+fn ntt_goldilocks_parallel_stages(a: &mut [Goldilocks], threads: usize, inverse: bool) {
     debug_assert!(threads.is_power_of_two() && a.len() >= threads * 2);
     let n = a.len();
     let chunk_n = n / threads;
@@ -579,7 +581,8 @@ fn ntt_goldilocks_parallel_stages(a: &mut [Goldilocks], threads: usize) {
                 let mut len = 2;
                 let mut stage = 1;
                 while stage <= chunk_stages {
-                    let w_len = Goldilocks::two_adic_generator(stage);
+                    let g = Goldilocks::two_adic_generator(stage);
+                    let w_len = if inverse { g.inv() } else { g };
                     let half = len / 2;
                     for block in sub.chunks_exact_mut(len) {
                         let (lo, hi) = block.split_at_mut(half);
@@ -596,7 +599,8 @@ fn ntt_goldilocks_parallel_stages(a: &mut [Goldilocks], threads: usize) {
     for stage in (chunk_stages + 1)..=log_n {
         let len = 1usize << stage;
         let half = len / 2;
-        let w_len = Goldilocks::two_adic_generator(stage);
+        let g = Goldilocks::two_adic_generator(stage);
+        let w_len = if inverse { g.inv() } else { g };
         for block in a.chunks_mut(len) {
             let (lo, hi) = block.split_at_mut(half);
             let sub_j = (half / threads).max(1);
@@ -622,6 +626,25 @@ pub fn intt_goldilocks(a: &mut [Goldilocks]) {
         return;
     }
     bit_reverse_permute(a);
+    #[cfg(feature = "std")]
+    if n >= 16_384 {
+        let threads = crate::parallel_pow2_workers(n / 2);
+        if threads > 1 {
+            ntt_goldilocks_parallel_stages(a, threads, true);
+            let n_inv = Goldilocks::from_u64_reduced(n as u64).inv();
+            let chunk = (n / threads).max(1);
+            std::thread::scope(|scope| {
+                for sub in a.chunks_mut(chunk) {
+                    scope.spawn(move || {
+                        for x in sub.iter_mut() {
+                            *x *= n_inv;
+                        }
+                    });
+                }
+            });
+            return;
+        }
+    }
     let mut len = 2;
     let mut stage = 1;
     while len <= n {
@@ -651,15 +674,16 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
     // Coset decomposition: `B = blowup` independent size-`N` shifted NTTs (`out[q * B + r] = NTT_N(c_i * (g * w_D^r)^i)[q]`),
     // keeping each sub-NTT L2/L3-cache resident with zero cross-coset synchronization.
     #[cfg(feature = "std")]
-    if domain_len >= 65_536 && n_c >= 64 && blowup >= 4 {
+    if domain_len >= 32_768 && n_c >= 64 && blowup >= 4 {
+        let workers = crate::parallel_pow2_workers(domain_len / 64);
         let log_d = domain_len.trailing_zeros() as usize;
         let log_c = n_c.trailing_zeros() as usize;
         let rev_shift_c = usize::BITS as usize - log_c;
         let omega_d = Goldilocks::two_adic_generator(log_d);
 
         let mut cosets = vec![Goldilocks::ZERO; domain_len];
-        if blowup >= 16 {
-            let outer_threads = 16usize.min(blowup);
+        if blowup >= workers {
+            let outer_threads = workers.min(blowup);
             let r_per_thread = blowup / outer_threads;
             std::thread::scope(|scope| {
                 for (t_idx, coset_chunk) in cosets.chunks_mut(r_per_thread * n_c).enumerate() {
@@ -691,7 +715,7 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
                 }
             });
         } else {
-            let inner_threads = (16 / blowup).max(1);
+            let inner_threads = (workers / blowup).max(1).min(n_c / 2).max(1);
             std::thread::scope(|scope| {
                 for (r, row) in cosets.chunks_exact_mut(n_c).enumerate() {
                     let s_r = Goldilocks::NON_RESIDUE * omega_d.pow(r as u64);
@@ -724,7 +748,7 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
                         });
                         drop(shifted);
                         if inner_threads > 1 && n_c >= inner_threads * 2 {
-                            ntt_goldilocks_parallel_stages(row, inner_threads);
+                            ntt_goldilocks_parallel_stages(row, inner_threads, false);
                         } else {
                             let mut len = 2;
                             let mut stage = 1;
@@ -745,8 +769,8 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
         }
 
         let mut out = vec![Goldilocks::ZERO; domain_len];
-        const T_THREADS: usize = 16;
-        let q_chunk = (n_c / T_THREADS).max(1);
+        let t_threads = crate::parallel_pow2_workers(n_c);
+        let q_chunk = (n_c / t_threads).max(1);
         let cosets_ref = &cosets;
         std::thread::scope(|scope| {
             for (ti, out_sub) in out.chunks_mut(q_chunk * blowup).enumerate() {
@@ -868,13 +892,26 @@ impl GoldilocksExt4 {
 
     #[inline]
     pub fn from_le_bytes_canonical(bytes: [u8; 32]) -> Option<Self> {
-        let mut lo = [0u8; 16];
-        let mut hi = [0u8; 16];
-        lo.copy_from_slice(&bytes[0..16]);
-        hi.copy_from_slice(&bytes[16..32]);
-        let c0 = GoldilocksExt2::from_le_bytes_canonical(lo)?;
-        let c1 = GoldilocksExt2::from_le_bytes_canonical(hi)?;
-        Some(Self { c0, c1 })
+        let mut b0 = [0u8; 8];
+        let mut b1 = [0u8; 8];
+        let mut b2 = [0u8; 8];
+        let mut b3 = [0u8; 8];
+        b0.copy_from_slice(&bytes[0..8]);
+        b1.copy_from_slice(&bytes[8..16]);
+        b2.copy_from_slice(&bytes[16..24]);
+        b3.copy_from_slice(&bytes[24..32]);
+        let ext = qsag_whir_verified::decode_canonical_ext4(
+            u64::from_le_bytes(b0),
+            u64::from_le_bytes(b2),
+            u64::from_le_bytes(b1),
+            u64::from_le_bytes(b3),
+        )?;
+        Some(Self::from_limbs([
+            Goldilocks(ext.a),
+            Goldilocks(ext.c),
+            Goldilocks(ext.b),
+            Goldilocks(ext.d),
+        ]))
     }
 
     #[inline(always)]
@@ -1130,8 +1167,11 @@ pub fn ntt_ext4(a: &mut [GoldilocksExt4]) {
 
     #[cfg(feature = "std")]
     if n >= 8_192 {
-        ntt_ext4_parallel_stages(a, 16);
-        return;
+        let threads = crate::parallel_pow2_workers(n / 2);
+        if threads > 1 {
+            ntt_ext4_parallel_stages(a, threads);
+            return;
+        }
     }
 
     let mut len = 2;
@@ -1202,17 +1242,18 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
     assert!(blowup.is_power_of_two() && blowup >= 2);
     let domain_len = n_c * blowup;
 
-    // Coset decomposition across 16 threads: `blowup` independent L1/L2-resident size-`n_c` NTTs!
+    // Coset decomposition across hardware worker threads: `blowup` independent L1/L2-resident size-`n_c` NTTs!
     #[cfg(feature = "std")]
     if domain_len >= 8_192 && n_c >= 32 && blowup >= 4 {
+        let workers = crate::parallel_pow2_workers(domain_len / 32);
         let log_d = domain_len.trailing_zeros() as usize;
         let log_c = n_c.trailing_zeros() as usize;
         let rev_shift_c = usize::BITS as usize - log_c;
         let omega_d = Goldilocks::two_adic_generator(log_d);
 
         let mut cosets = vec![GoldilocksExt4::ZERO; domain_len];
-        if blowup >= 16 {
-            let outer_threads = 16usize.min(blowup);
+        if blowup >= workers {
+            let outer_threads = workers.min(blowup);
             let r_per_thread = blowup / outer_threads;
             std::thread::scope(|scope| {
                 for (t_idx, coset_chunk) in cosets.chunks_mut(r_per_thread * n_c).enumerate() {
@@ -1244,7 +1285,7 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
                 }
             });
         } else {
-            let inner_threads = (16 / blowup).max(1);
+            let inner_threads = (workers / blowup).max(1).min(n_c / 2).max(1);
             std::thread::scope(|scope| {
                 for (r, row) in cosets.chunks_exact_mut(n_c).enumerate() {
                     let s_r = Goldilocks::NON_RESIDUE * omega_d.pow(r as u64);
@@ -1298,8 +1339,8 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
         }
 
         let mut out = vec![GoldilocksExt4::ZERO; domain_len];
-        const T_THREADS: usize = 16;
-        let q_chunk = (n_c / T_THREADS).max(1);
+        let t_threads = crate::parallel_pow2_workers(n_c);
+        let q_chunk = (n_c / t_threads).max(1);
         let cosets_ref = &cosets;
         std::thread::scope(|scope| {
             for (ti, out_sub) in out.chunks_mut(q_chunk * blowup).enumerate() {
@@ -1536,8 +1577,10 @@ mod ext4_tests {
     fn sample_ext4(seed: u64) -> GoldilocksExt4 {
         let m = |k: u64| {
             Goldilocks::from_u64_reduced(
-                seed.wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.wrapping_add(k * 6364136223846793005))
-                    .wrapping_add(0xD1B5_4A32_D192_ED03_u64 ^ (k << 19)),
+                seed.wrapping_mul(
+                    0x9E37_79B9_7F4A_7C15_u64.wrapping_add(k.wrapping_mul(6364136223846793005)),
+                )
+                .wrapping_add(0xD1B5_4A32_D192_ED03_u64 ^ (k << 19)),
             )
         };
         GoldilocksExt4::from_limbs([m(1), m(2), m(3), m(4)])

@@ -31,8 +31,23 @@ pub const MODULE_SECRET_L: usize = MODULE_L + MODULE_K;
 /// This is the per-attempt algebraic forgery bound; hash and sampling errors are additional.
 pub const SPDZ_LANES: usize = 7;
 pub const MODULE_MAC_LANES: usize = SPDZ_LANES;
-/// Default maximum non-hardened derivation depth $D_{\max} = 1024$.
-pub const DEFAULT_MAX_DERIVATION_DEPTH: u16 = 1024;
+/// Default maximum derivation depth $D_{\max} = 8$.
+/// Each non-hardened child step adds an independent public $\text{CBD}_2$ vector
+/// ($\|\Delta s_i\|_\infty \le 2$) to $(s_1, s_2)$, so after depth $D$ from a $\text{CBD}_2$
+/// root the secret's worst-case $\ell_\infty$ norm grows to $2(D + 1)$ (`18` at $D = 8$).
+/// Keeping $D_{\max} \le 8$ by default (and hard-capping `max_depth <= 16`) prevents unbounded
+/// norm accumulation if callers compose derived shares with fixed-$\beta$ lattice protocols.
+pub const DEFAULT_MAX_DERIVATION_DEPTH: u16 = 8;
+/// Hard upper cap on `max_depth` accepted during linear-module provisioning (`||s||_inf <= 34`
+/// for non-hardened $\text{CBD}_2$ chains from a single $\text{CBD}_2$ secret).
+pub const MAX_NON_HARDENED_DERIVATION_DEPTH: u16 = 16;
+
+/// Worst-case $\ell_\infty$ coefficient bound $2 \cdot (d + 1)$ after `depth` non-hardened
+/// $\text{CBD}_2$ derivation steps from a $\text{CBD}_2$ root secret.
+#[inline]
+pub const fn max_cbd2_linf_norm_after_depth(depth: u16) -> u32 {
+    (depth as u32 + 1) * 2
+}
 
 /// Barrett reduction for every u64 input. With mu=floor(2^64/q), the
 /// quotient estimate is at most one below floor(x/q), so r is below 2q.
@@ -327,6 +342,7 @@ pub struct LinearModulePartyShare {
     budget: Option<Arc<std::sync::Mutex<crate::budget::DurableQueryBudget>>>,
     #[cfg(feature = "std")]
     poison_journal: Option<Arc<dyn crate::poison::HdPoisonJournal>>,
+    testing_poison_journal: bool,
     poisoned: Arc<AtomicBool>,
     evaluation_queries: Arc<AtomicUsize>,
     pub depth_used: u16,
@@ -353,10 +369,24 @@ impl Drop for LinearModulePartyShare {
     }
 }
 impl LinearModulePartyShare {
+    /// Explicit opt-in for isolated tests without persistent custody.
+    pub fn in_memory_poison_journal_for_testing(mut self) -> Self {
+        self.testing_poison_journal = true;
+        self
+    }
+    fn require_poison_journal(&self) -> Result<(), HdError> {
+        if self.testing_poison_journal { return Ok(()); }
+        #[cfg(feature = "std")]
+        if self.poison_journal.is_some() && !self.is_poisoned() { return Ok(()); }
+        Err(HdError::MacCheckFailed)
+    }
     #[cfg(feature = "std")]
     pub fn attach_poison_journal(&mut self, journal: Arc<dyn crate::poison::HdPoisonJournal>) -> Result<(), HdError> {
         if journal.family_id() != self.family_id || journal.is_poisoned().unwrap_or(true) {
             self.poison();
+            return Err(HdError::MacCheckFailed);
+        }
+        if self.poison_journal.is_some() || self.poisoned.load(Ordering::Acquire) {
             return Err(HdError::MacCheckFailed);
         }
         self.poison_journal = Some(journal);
@@ -585,6 +615,7 @@ pub(crate) fn setup_shamir_linear_module(
         || usize::from(threshold) > eval_points.len()
         || eval_points.len() > usize::from(u16::MAX)
         || max_depth == 0
+        || max_depth > MAX_NON_HARDENED_DERIVATION_DEPTH
     {
         return Err(HdError::InvalidThresholdParameters);
     }
@@ -679,11 +710,12 @@ pub(crate) fn setup_shamir_linear_module(
                 .collect(),
             #[cfg(feature = "std")]
             poison_journal: None,
+            testing_poison_journal: false,
             poisoned: Arc::new(AtomicBool::new(false)),
             evaluation_queries: Arc::new(AtomicUsize::new(0)),
             depth_used: 0,
             max_depth,
-        })
+        }.in_memory_poison_journal_for_testing())
         .collect();
     for coeffs in &mut alpha_coeffs {
         ct_zeroize_u32s(coeffs);
@@ -1124,6 +1156,7 @@ pub(crate) fn trusted_dealer_rekey_child(
         child.depth_used = pk.depth_used;
         child.matrix = Arc::clone(&parent.matrix);
         child.family_id = parent.family_id;
+        child.testing_poison_journal = parent.testing_poison_journal;
         child.poisoned = Arc::clone(&parent.poisoned);
         child.evaluation_queries = Arc::clone(&parent.evaluation_queries);
         #[cfg(feature = "std")]

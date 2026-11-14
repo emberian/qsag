@@ -229,9 +229,10 @@ impl Builder {
             .iter()
             .zip(b)
             .map(|(&x, &y)| {
-                let xy = self.add(x, y);
-                let s = self.add(xy, c);
-                c = self.add(self.mul(x, y), self.mul(xy, c));
+                let xc = self.add(x, c);
+                let yc = self.add(y, c);
+                let s = self.add(xc, y);
+                c = self.add(c, self.mul(xc, yc));
                 s
             })
             .collect();

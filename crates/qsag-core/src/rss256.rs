@@ -996,7 +996,7 @@ fn linear_terms(
     let mut half = [FE_ZERO; GROUP_PLANES];
     let mut sums: [[Vec<Fe>; 2]; 2] =
         core::array::from_fn(|_| core::array::from_fn(|_| vec![FE_ZERO; 2 * groups]));
-    for s in 0..3 {
+    for (s, a_slot) in pending.a.iter().enumerate() {
         for pass in &mut sums {
             for term in pass.iter_mut() {
                 term.fill(FE_ZERO);
@@ -1007,7 +1007,7 @@ fn linear_terms(
             for h in 0..2 {
                 for (u, cell) in half.iter_mut().enumerate() {
                     let (m, r) = (&pending.msg[s][base + u], &pending.pad[s][base + u]);
-                    let (a, b) = (&pending.a[s][base + u], &pending.b[s][base + u]);
+                    let (a, b) = (&a_slot[base + u], &pending.b[s][base + u]);
                     *cell = core::array::from_fn(|w| {
                         m[2 * h + w] ^ r[2 * h + w] ^ (a[2 * h + w] & b[2 * h + w])
                     });
@@ -1344,7 +1344,7 @@ pub struct Rss256Engine {
     barrier_index: u64,
     unverified: bool,
     /// Set by the first failed barrier, coin flip or opening comparison; never cleared.
-    poisoned: bool,
+    poison_latch: qsag_verified::VerifiedRssPoisonLatch,
     staging: bool,
     wave_index: u64,
     bank: BeaverBank256,
@@ -1381,7 +1381,7 @@ impl Rss256Engine {
             last_seed: [0u8; 32],
             barrier_index: 0,
             unverified: false,
-            poisoned: false,
+            poison_latch: qsag_verified::VerifiedRssPoisonLatch::new_clean(),
             staging: false,
             wave_index: 0,
             bank: BeaverBank256::empty(),
@@ -1439,12 +1439,12 @@ impl Rss256Engine {
 
     /// True once a barrier, coin flip or opening comparison has failed. Permanent.
     pub fn is_poisoned(&self) -> bool {
-        self.poisoned
+        self.poison_latch.is_poisoned()
     }
 
     #[inline]
     fn guard(&self) -> Result<(), Rss256Error> {
-        if self.poisoned {
+        if self.poison_latch.is_poisoned() {
             Err(Rss256Error::Poisoned)
         } else {
             Ok(())
@@ -1453,7 +1453,9 @@ impl Rss256Engine {
 
     /// Latch the poison flag, then drop everything that was awaiting verification.
     fn poison<T>(&mut self, error: Rss256Error) -> Result<T, Rss256Error> {
-        self.poisoned = true;
+        let latch = core::mem::replace(&mut self.poison_latch,
+            qsag_verified::VerifiedRssPoisonLatch::new_clean());
+        self.poison_latch = latch.record_check_result(false).0;
         self.cluster.poison();
         self.pending.clear_and_wipe();
         self.opened.clear();

@@ -1,0 +1,12 @@
+name = "qsag_whir_aeneas"
+version = "0.1.0"
+defaultTargets = ["QsagWhirVerified"]
+[leanOptions]
+autoImplicit = false
+[[lean_lib]]
+name = "Aeneas"
+[[lean_lib]]
+name = "QsagWhirVerified"
+[[lean_exe]]
+name = "audit-whir-mir-axioms"
+root = "AuditWhirMirAxioms"

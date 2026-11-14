@@ -1264,6 +1264,7 @@ impl ParallelSeededThresholdSetup {
             merkle_siblings,
         };
         verify_parallel_seeded_fts(&self.pk, msg, &sig, accel)?;
+        verify_canonical_minimal_grind_counter(&self.pk, msg, &sig)?;
         Ok(sig)
     }
 
@@ -1423,6 +1424,29 @@ impl ParallelSeededThresholdSetup {
         tilde_vals.truncate(output_count);
         Ok(tilde_vals)
     }
+}
+
+pub(crate) fn verify_canonical_minimal_grind_counter(
+    pk: &ParallelSeededPublicKey,
+    msg: &[u8],
+    sig: &ParallelSeededSignature,
+) -> Result<(), ParallelSeededError> {
+    for ctr in 0..sig.grind_counter {
+        if derive_sum_constrained_offsets(
+            &pk.params,
+            &pk.pk_seed_bytes,
+            &pk.merkle_root,
+            sig.epoch,
+            &sig.randomizer,
+            msg,
+            ctr,
+        )
+        .is_some()
+        {
+            return Err(ParallelSeededError::SignatureVerificationFailed);
+        }
+    }
+    Ok(())
 }
 
 /// Verify a `ParallelSeededSignature` against `pk` and `msg` using `AcceleratorBackend`.

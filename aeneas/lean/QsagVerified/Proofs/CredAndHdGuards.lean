@@ -282,6 +282,52 @@ private theorem mldsa_sealed_spec_trace_safe
     rw [hRestNil]
     exact ⟨Nat.zero_le 1, fun _ hm => False.elim (List.not_mem_nil hm)⟩
 
+/-- Every rejected turn in the actual trace wipes the share and seals its suffix. -/
+theorem mldsa_rejected_turn_wipes_and_seals
+    {st st_final : cred_and_hd_guards.MlDsaReleaseGate}
+    {turns : List (MirTurn cred_and_hd_guards.MlDsaBarrierChecks
+      (Array Std.U8 32#usize) cred_and_hd_guards.CredHdGuardError)}
+    (htrace : MirTrace (adaptStateResult cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share)
+      st turns st_final) :
+    ∀ pre c err post, turns = pre ++ .rejected c err :: post →
+      ∃ before after,
+        MirTrace (adaptStateResult cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share)
+          st pre before ∧
+        adaptStateResult cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share before c =
+          .ok (.rejected after err) ∧
+        after.aborted = true ∧ after.z_share_masked = Array.repeat 32#usize 0#u8 ∧
+        MirTrace (adaptStateResult cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share)
+          after post st_final ∧ mirAcceptedPairs post = [] := by
+  induction htrace with
+  | nil _ =>
+    intro pre c err post heq
+    cases pre <;> simp at heq
+  | @accept m m' mf inp out rest hstep htail ih =>
+    intro pre c err post heq
+    cases pre with
+    | nil => simp at heq
+    | cons turn pre =>
+      simp only [List.cons_append, List.cons.injEq] at heq
+      obtain ⟨before, after, hp, hs, ha, hz, ht, hn⟩ := ih pre c err post heq.2
+      exact ⟨before, after, heq.1 ▸ MirTrace.accept hstep hp, hs, ha, hz, ht, hn⟩
+  | @reject m m' mf inp e rest hstep htail ih =>
+    intro pre c err post heq
+    cases pre with
+    | nil =>
+      simp only [List.nil_append, List.cons.injEq, MirTurn.rejected.injEq] at heq
+      rcases heq with ⟨⟨rfl, rfl⟩, rfl⟩
+      obtain ⟨_, hrel⟩ := mldsa_gate_step_sim.err_preserves (s := m) rfl rfl hstep
+      subst m'
+      obtain ⟨hspec, _⟩ := mldsa_gate_step_sim.lift_trace_safety_abs
+        (Safe := fun pairs => pairs = [])
+        (fun ht => mldsa_done_no_more_accepts (Or.inl rfl) ht) rfl htail
+      rw [map_id_pair] at hspec
+      exact ⟨m, _, .nil m, hstep, rfl, rfl, htail, hspec⟩
+    | cons turn pre =>
+      simp only [List.cons_append, List.cons.injEq] at heq
+      obtain ⟨before, after, hp, hs, ha, hz, ht, hn⟩ := ih pre c err post heq.2
+      exact ⟨before, after, heq.1 ▸ MirTrace.reject hstep hp, hs, ha, hz, ht, hn⟩
+
 theorem mldsa_gate_blocks_z_on_rejection_mir
     (sid : Array Std.U8 32#usize) (attempt : Std.U32) (z_masked : Array Std.U8 32#usize)
     (st0 st_final : cred_and_hd_guards.MlDsaReleaseGate)
@@ -290,12 +336,15 @@ theorem mldsa_gate_blocks_z_on_rejection_mir
     (hnew : cred_and_hd_guards.MlDsaReleaseGate.new_sealed sid attempt z_masked = .ok st0)
     (htrace : MirTrace (adaptStateResult cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share)
       st0 turns st_final) :
-    (∀ st c,
-      (!(c.z_norm_ok && c.r0_norm_ok && c.w1_match && c.u_com_bound)) = true →
-      ∃ err, cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share st c =
-        .ok ({ session_id := st.session_id, attempt := st.attempt,
-               z_share_masked := Array.repeat 32#usize 0#u8,
-               released := false, aborted := true }, .Err err)) ∧
+    (∀ pre c err post, turns = pre ++ .rejected c err :: post →
+      ∃ before after,
+        MirTrace (adaptStateResult cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share)
+          st0 pre before ∧
+        adaptStateResult cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share before c =
+          .ok (.rejected after err) ∧
+        after.aborted = true ∧ after.z_share_masked = Array.repeat 32#usize 0#u8 ∧
+        MirTrace (adaptStateResult cred_and_hd_guards.MlDsaReleaseGate.try_release_z_share)
+          after post st_final ∧ mirAcceptedPairs post = []) ∧
     ((mirAcceptedPairs turns).length ≤ 1 ∧
       ∀ p ∈ mirAcceptedPairs turns,
         p.1.req_session_id = sid ∧ p.1.req_attempt = attempt ∧
@@ -303,13 +352,7 @@ theorem mldsa_gate_blocks_z_on_rejection_mir
         p.1.w1_match = true ∧ p.1.u_com_bound = true ∧
         p.2 = z_masked) := by
   constructor
-  · intro st c hReject
-    obtain ⟨_, hFail⟩ := mldsa_gate_try_release_exact st c
-    apply hFail
-    unfold mlDsaBarrierPassBool
-    cases hz : c.z_norm_ok <;> cases hr0 : c.r0_norm_ok <;>
-      cases hw1 : c.w1_match <;> cases hu : c.u_com_bound
-    all_goals simp_all
+  · exact mldsa_rejected_turn_wipes_and_seals htrace
   · unfold cred_and_hd_guards.MlDsaReleaseGate.new_sealed at hnew
     injection hnew with hst0
     obtain ⟨hSafe, _⟩ :=

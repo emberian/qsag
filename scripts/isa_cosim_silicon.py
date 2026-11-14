@@ -420,6 +420,9 @@ def main():
         edge = [0, 2**64-1, 2**63, 0xffffffff00000000, 0xffffffff00000001, 1,
                 2**63-1, 0x7fffffff, 0x80000000, 0xffffffff, 2**64-2]
         coverage = {}
+        instructions_executed = 0
+        flag_checks = {name: 0 for name in ('CF', 'PF', 'AF', 'ZF', 'SF', 'OF')}
+        flag_bits = dict(zip(flag_checks, (0, 2, 4, 6, 7, 11)))
         mismatches = []
         with subprocess.Popen([str(args.oracle)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                               text=True, bufsize=1) as oracle:
@@ -434,6 +437,8 @@ def main():
                                            ('setcc', bytes([0x0f, 0x90+cc, 0xc0]))):
                             scheduled.append((f'conditions/{kind}/{cc}/{status}', code, 1))
                 if args.kernel_elf:
+                    if 'vpclmulqdq' not in flags and (not args.kernel_symbol or 'qsag_asm_gf2_128_mul_acc_vpclmul' in args.kernel_symbol):
+                        raise RuntimeError('selected 256-bit VPCLMUL kernel requires CPUID vpclmulqdq; select supported kernels explicitly')
                     scheduled += kernel_cases(args.kernel_elf, args.kernel_symbol) * args.kernel_rounds
                 for i, (name, code, steps) in enumerate(scheduled):
                     g = [edge[(i//len(suite)+j) % len(edge)] if i < len(suite)*len(edge) else rng.getrandbits(64) for j in range(16)]
@@ -479,7 +484,10 @@ def main():
                     actual = dict(gprs=[f'{v:016x}' for v in gs],
                                   ymms=[f'{int.from_bytes(bytes(ym[j*32:j*32+32]), "little"):064x}' for j in range(16)],
                                   rflags=f'{fs.value:016x}', stack_mem=ctypes.string_at(base,len(memory)).hex())
+                    instructions_executed += steps
                     mask = int(expected['modeled_rflags_mask'], 16)
+                    for flag, bit in flag_bits.items():
+                        flag_checks[flag] += bool(mask & (1 << bit))
                     differences = [key for key in actual if key != 'rflags' and actual[key] != expected[key]]
                     if (fs.value ^ int(expected['rflags'], 16)) & mask:
                         differences.append('rflags')
@@ -492,6 +500,7 @@ def main():
                 oracle.wait(timeout=10)
         print(json.dumps(dict(vectors=len(scheduled), mismatches=len(mismatches), seed=args.seed,
                               coverage=coverage, skipped_rflags_cases=0,
+                              instructions_executed=instructions_executed, flag_checks=flag_checks,
                               seconds=round(time.monotonic()-started, 3),
                               host=platform.node(), hypervisor='hypervisor' in flags), indent=2))
         if mismatches:

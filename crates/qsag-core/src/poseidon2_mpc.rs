@@ -2374,7 +2374,7 @@ mod tests {
         let n = 2usize;
         let pts: Vec<Goldilocks> = (1..=2).map(Goldilocks::from_u64_reduced).collect();
         let mut rngs = make_rngs(n, 0x10);
-        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
 
         let (alpha_c, alpha_sh) = spdz_setup_alpha_goldilocks(&sid, t, &pts, &mut rngs).unwrap();
         let mut vaults = run_dealerless_pi_pow7_with_alpha(
@@ -2535,7 +2535,7 @@ mod tests {
         let sid = [0x52; 32];
         let pts: Vec<Goldilocks> = (1..=n as u64).map(Goldilocks::from_u64_reduced).collect();
         let mut rngs = make_rngs(n, 0x30);
-        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
 
         let dkg_seed =
             run_dealerless_dkg_seed32_goldilocks([0x61; 32], t, &pts, &mut mesh, &mut rngs)

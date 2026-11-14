@@ -45,6 +45,15 @@ extern crate std;
 pub mod arithmetize;
 pub mod field;
 pub mod pcs;
+pub mod recursive;
+pub use recursive::{
+    HIERARCHICAL_HEM_WIRE_MAGIC, HierarchicalHemAggregate, MAX_HIERARCHY_SHARDS, ShardHemBatch,
+    ShardHemPolicy, ShardHemWitness, checked_sum_usize, compute_framed_message_digest,
+    compute_policy_registry_root, encode_policy_registry, hierarchical_hem_message,
+    hierarchical_hem_registry_bound_message, prove_hierarchical_hem,
+    prove_hierarchical_hem_registry_bound, verify_hierarchical_hem,
+    verify_hierarchical_hem_registry_bound,
+};
 pub mod sig;
 pub mod sponge;
 pub mod trace;
@@ -59,6 +68,27 @@ fn join_worker<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
         Ok(value) => value,
         Err(payload) => std::panic::resume_unwind(payload),
     }
+}
+
+/// Cached logical hardware worker count (`1..=64`) for `std::thread::scope` kernels.
+#[cfg(feature = "std")]
+#[inline]
+pub(crate) fn parallel_workers() -> usize {
+    static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WORKERS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .clamp(1, 64)
+    })
+}
+
+/// Largest power-of-two worker count `<= parallel_workers().min(max_units.max(1))`.
+#[cfg(feature = "std")]
+#[inline]
+pub(crate) fn parallel_pow2_workers(max_units: usize) -> usize {
+    let cap = parallel_workers().min(max_units.max(1));
+    1usize << cap.ilog2()
 }
 
 pub use arithmetize::{
@@ -491,10 +521,20 @@ impl AggStatement<'_> {
                 left,
                 right,
             } => {
-                rem_depth > 0
-                    && MergeNode::canonical_union(left, right).as_ref() == Some(bitmap)
-                    && self.verify_node(left, rem_depth - 1)
-                    && self.verify_node(right, rem_depth - 1)
+                if rem_depth == 0
+                    || MergeNode::canonical_union(left, right).as_ref() != Some(bitmap)
+                {
+                    return false;
+                }
+                #[cfg(feature = "std")]
+                if parallel_workers() > 1 {
+                    return std::thread::scope(|scope| {
+                        let right_h = scope.spawn(|| self.verify_node(right, rem_depth - 1));
+                        let left_ok = self.verify_node(left, rem_depth - 1);
+                        left_ok && join_worker(right_h)
+                    });
+                }
+                self.verify_node(left, rem_depth - 1) && self.verify_node(right, rem_depth - 1)
             }
         }
     }
@@ -594,7 +634,7 @@ pub fn aggregate_signatures_with_config(
         }
     }
 
-    let mut leaves = Vec::with_capacity(batches.len());
+    let mut batch_jobs = Vec::with_capacity(batches.len());
     let mut start = 0usize;
     for (batch_idx, shard_signer_counts) in batches.iter().enumerate() {
         let end = start
@@ -608,31 +648,68 @@ pub fn aggregate_signatures_with_config(
         seed_in[0..32].copy_from_slice(&cfg.blinding_seed);
         seed_in[32..40].copy_from_slice(&(batch_idx as u64).to_le_bytes());
         let batch_seed = sponge::cshake256_32(b"QSAG.BATCH.BLIND/v4", &seed_in);
+        batch_jobs.push((start, end, shard_signer_counts.as_slice(), batch_bitmap, batch_seed));
+        start = end;
+    }
 
+    let prove_one = |(b_start, b_end, shard_signer_counts, ref batch_bitmap, batch_seed): &(
+        usize,
+        usize,
+        &[u32],
+        SignerBitmap,
+        [u8; 32],
+    )|
+     -> Result<MergeNode, HemAggError> {
         let batch_msgs;
         let batch_mode = match mode {
             SigningMode::SharedMessage(msg) => SigningMode::SharedMessage(msg),
             SigningMode::PerSignerMessages(ms) => {
-                batch_msgs = &ms[start..end];
+                batch_msgs = &ms[*b_start..*b_end];
                 SigningMode::PerSignerMessages(batch_msgs)
             }
         };
         let leaf = arithmetize::prove_shard_batch_with_config(
             pks,
             &committee_root,
-            &batch_bitmap,
+            batch_bitmap,
             shard_signer_counts,
             &batch_mode,
-            &sigs[start..end],
+            &sigs[*b_start..*b_end],
             &HemAggConfig {
-                blinding_seed: batch_seed,
+                blinding_seed: *batch_seed,
                 ..cfg.clone()
             },
         )
         .ok_or(HemAggError::InvalidIndividualSignature)?;
-        leaves.push(MergeNode::Leaf(Box::new(leaf)));
-        start = end;
-    }
+        Ok(MergeNode::Leaf(Box::new(leaf)))
+    };
+
+    #[cfg(feature = "std")]
+    let leaves: Vec<MergeNode> = if batch_jobs.len() > 1 && parallel_workers() > 1 {
+        let workers = parallel_workers().min(batch_jobs.len());
+        let chunk = batch_jobs.len().div_ceil(workers);
+        let prove_ref = &prove_one;
+        let groups: Vec<Result<Vec<MergeNode>, HemAggError>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = batch_jobs
+                .chunks(chunk)
+                .map(|sub| scope.spawn(move || sub.iter().map(prove_ref).collect()))
+                .collect();
+            handles.into_iter().map(join_worker).collect()
+        });
+        let mut flat_leaves = Vec::with_capacity(batch_jobs.len());
+        for group in groups {
+            flat_leaves.extend(group?);
+        }
+        flat_leaves
+    } else {
+        batch_jobs.iter().map(prove_one).collect::<Result<Vec<_>, _>>()?
+    };
+
+    #[cfg(not(feature = "std"))]
+    let leaves: Vec<MergeNode> = batch_jobs
+        .iter()
+        .map(prove_one)
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(HemAggregatedProof {
         profile,

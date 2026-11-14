@@ -811,7 +811,11 @@ pub fn verify_dkg_private_packet_goldilocks(
     (chal.mul_base(packet.f_share) + packet.m_share).ct_eq(expected)
 }
 
-/// Publicly qualify or disqualify a dealer in 2-round PQ dealerless DKG (`Π_deg`) over `Goldilocks`.
+/// Public complaint adjudication in 2-round PQ dealerless DKG (`Π_deg`) over `Goldilocks`.
+/// Every recipient must first validate its committed packet with
+/// [`verify_dkg_private_share_goldilocks`] and submit any binding inconsistent opening.
+/// With no complaints this checks only the public degree bound and seed opening;
+/// it cannot certify private shares that no recipient has checked.
 pub fn verify_and_qualify_dkg_dealer_goldilocks(
     session_id: &[u8; 32],
     t: usize,
@@ -837,21 +841,11 @@ pub fn verify_and_qualify_dkg_dealer_goldilocks(
         return false;
     }
 
-    let c0_coeffs: Vec<Goldilocks> = r2.masked_poly_coeffs.iter().map(|c| c.c0).collect();
-    let c1_coeffs: Vec<Goldilocks> = r2.masked_poly_coeffs.iter().map(|c| c.c1).collect();
-    let c0_evals: Vec<Goldilocks> = pts
-        .iter()
-        .map(|&x| eval_poly_goldilocks(&c0_coeffs, x))
-        .collect();
-    let c1_evals: Vec<Goldilocks> = pts
-        .iter()
-        .map(|&x| eval_poly_goldilocks(&c1_coeffs, x))
-        .collect();
-    if !check_reed_solomon_deg_lt_t_goldilocks(t, pts, &c0_coeffs, &c0_evals)
-        || !check_reed_solomon_deg_lt_t_goldilocks(t, pts, &c1_coeffs, &c1_evals)
-    {
-        return false;
-    }
+    // The coefficient-length bound above establishes the advertised degree.
+    // Consistency with independently committed private evaluations is checked by
+    // verify_dkg_private_share_goldilocks and the authenticated complaints below.
+    // Evaluating these same coefficients and checking them against themselves
+    // adds no evidence about the dealer's committed shares.
 
     let chal = derive_dkg_transcript_challenge_goldilocks(
         session_id,
@@ -897,7 +891,7 @@ pub fn verify_and_qualify_dkg_dealer_goldilocks(
             return false;
         };
         let m_open = GoldilocksExt2::new(m0_open, m1_open);
-        let expected_eval = GoldilocksExt2::new(c0_evals[comp.recv_idx], c1_evals[comp.recv_idx]);
+        let expected_eval = eval_poly_ext2_at_base(&r2.masked_poly_coeffs, pts[comp.recv_idx]);
         if !(chal.mul_base(f_open) + m_open).ct_eq(expected_eval) {
             return false;
         }
@@ -1475,8 +1469,8 @@ pub fn run_dealerless_dkg_seed32_gf256(
                 pkt,
                 false,
             )?;
-            for b in 0..256 {
-                agg_bits[j][b] = agg_bits[j][b].add(pkt.f_shares[b]);
+            for (out, value) in agg_bits[j].iter_mut().zip(&pkt.f_shares) {
+                *out = out.add(*value);
             }
         }
     }
@@ -1574,8 +1568,8 @@ pub fn run_dealerless_refresh_seed32_gf256(
                 pkt,
                 true,
             )?;
-            for b in 0..256 {
-                delta_bits[j][b] = delta_bits[j][b].add(pkt.f_shares[b]);
+            for (out, value) in delta_bits[j].iter_mut().zip(&pkt.f_shares) {
+                *out = out.add(*value);
             }
         }
     }
@@ -1624,8 +1618,8 @@ pub fn run_dealerless_refresh_seed32_gf256(
     }
 
     for j in 0..n {
-        for b in 0..256 {
-            shares[j].bit_shares[b] = shares[j].bit_shares[b].add(delta_bits[j][b]);
+        for (out, delta) in shares[j].bit_shares.iter_mut().zip(&delta_bits[j]) {
+            *out = out.add(*delta);
         }
         wipe_gf256_slice(&mut delta_bits[j]);
         shares[j].generation = shares[j].generation.saturating_add(1);
@@ -1760,8 +1754,8 @@ pub fn run_dealerless_reshare_seed32_gf256(
                 pkt,
                 false,
             )?;
-            for b in 0..256 {
-                new_bits[j][b] = new_bits[j][b].add(pkt.f_shares[b]);
+            for (out, value) in new_bits[j].iter_mut().zip(&pkt.f_shares) {
+                *out = out.add(*value);
             }
         }
     }
@@ -2458,8 +2452,8 @@ pub fn run_dealerless_dkg_seed32_goldilocks(
                 pkt,
                 false,
             )?;
-            for m in 0..256 {
-                b_shamir[j][m] += pkt.f_shares[m];
+            for (out, value) in b_shamir[j].iter_mut().zip(&pkt.f_shares) {
+                *out += *value;
             }
         }
     }
@@ -2549,8 +2543,8 @@ pub fn run_dealerless_refresh_seed32_goldilocks(
                 pkt,
                 true,
             )?;
-            for m in 0..256 {
-                delta_bits[j][m] += pkt.f_shares[m];
+            for (out, value) in delta_bits[j].iter_mut().zip(&pkt.f_shares) {
+                *out += *value;
             }
         }
     }
@@ -2599,8 +2593,8 @@ pub fn run_dealerless_refresh_seed32_goldilocks(
     }
 
     for j in 0..n {
-        for m in 0..256 {
-            shares[j].bit_shares[m] += delta_bits[j][m];
+        for (out, delta) in shares[j].bit_shares.iter_mut().zip(&delta_bits[j]) {
+            *out += *delta;
         }
         let delta_bytes = pack_goldilocks_bits_to_bytes(&delta_bits[j]);
         for (k, delta_bytes_k_item) in delta_bytes[..32].iter().enumerate() {
@@ -2717,8 +2711,8 @@ pub fn run_dealerless_reshare_seed32_goldilocks(
                 pkt,
                 false,
             )?;
-            for m in 0..256 {
-                new_bits[j][m] += pkt.f_shares[m];
+            for (out, value) in new_bits[j].iter_mut().zip(&pkt.f_shares) {
+                *out += *value;
             }
         }
     }
@@ -3566,7 +3560,7 @@ mod tests {
         // Both default and soak profiles retain dishonest-majority thresholds.
         let old_pts: Vec<TowerGf256> = (1..=old_n as u8).map(TowerGf256).collect();
         let mut rngs = make_rngs(old_n, 0x20);
-        let mut old_mesh = OtMesh::establish(sid, &mut rngs);
+        let mut old_mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
 
         // `[P0-10]` regression guard: `eval_points` zero or duplicate at index `>= t` MUST fail!
         let mut bad_pts = old_pts.clone();
@@ -3590,9 +3584,7 @@ mod tests {
         let mut bad_bits = vec![[TowerGf256::ZERO; 256]; old_n];
         let mut beta_coeffs = [TowerGf256(0x02), TowerGf256(0x55), TowerGf256(0xAA)];
         for p in 0..old_n {
-            for b in 0..256 {
-                bad_bits[p][b] = old_shares[p].bit_shares[b];
-            }
+            bad_bits[p].copy_from_slice(&old_shares[p].bit_shares);
             bad_bits[p][137] = bad_bits[p][137].add(eval_poly_gf256(&beta_coeffs[..old_t], old_pts[p]));
         }
         wipe_gf256_slice(&mut beta_coeffs);
@@ -3630,7 +3622,7 @@ mod tests {
         let new_pts: Vec<TowerGf256> = (1..=new_n as u8).map(TowerGf256).collect();
         let mut reshare_rngs = make_rngs(old_t, 0x30);
         let mut new_rngs = make_rngs(new_n, 0x31);
-        let mut new_mesh = OtMesh::establish([0x13; 32], &mut new_rngs);
+        let mut new_mesh = OtMesh::establish_ideal_for_test([0x13; 32], &mut new_rngs);
         let new_shares = run_dealerless_reshare_seed32_gf256(
             [0x14; 32],
             old_t,
@@ -3673,7 +3665,7 @@ mod tests {
         // Both default and soak profiles retain dishonest-majority thresholds.
         let old_pts: Vec<Goldilocks> = (1..=old_n as u64).map(Goldilocks::from_u64_reduced).collect();
         let mut rngs = make_rngs(old_n, 0x50);
-        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
 
         // `[P0-10]` regression guard on `eval_points[t..n]` (including an index outside the threshold)!
         let mut bad_pts = old_pts.clone();
@@ -3733,7 +3725,7 @@ mod tests {
         let new_pts: Vec<Goldilocks> = (1..=new_n as u64).map(Goldilocks::from_u64_reduced).collect();
         let mut reshare_rngs = make_rngs(old_t, 0x60);
         let mut new_rngs = make_rngs(new_n, 0x61);
-        let mut new_mesh = OtMesh::establish([0x47; 32], &mut new_rngs);
+        let mut new_mesh = OtMesh::establish_ideal_for_test([0x47; 32], &mut new_rngs);
         let new_shares = run_dealerless_reshare_seed32_goldilocks(
             [0x48; 32],
             old_t,

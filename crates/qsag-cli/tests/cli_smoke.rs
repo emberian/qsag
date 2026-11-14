@@ -338,24 +338,71 @@ fn few_time_key_enforces_its_use_budget_across_invocations() {
 #[test]
 fn threshold_few_time_signature_burns_each_epoch_once() {
     let dir = Workdir::new("threshold");
-    keygen(&dir, "fts-threshold", &["--parties", "3", "--fast-demo"]);
-    let (sk, pk, msg, other, sig) = (
-        dir.path("sk"),
-        dir.path("pk"),
-        dir.path("msg"),
-        dir.path("other"),
-        dir.path("sig"),
+    let (sk, pk, seed) = (dir.path("sk"), dir.path("pk"), dir.path("seed"));
+    expect(
+        &[
+            "keygen",
+            "--scheme",
+            "fts-threshold",
+            "--seed-file",
+            &seed,
+            "--secret-out",
+            &sk,
+            "--public-out",
+            &pk,
+            "--parties",
+            "3",
+            "--fast-demo",
+        ],
+        1,
     );
+    keygen(
+        &dir,
+        "fts-threshold",
+        &["--parties", "3", "--fast-demo", "--accept-trusted-dealer-demo"],
+    );
+    let (msg, other, sig) = (dir.path("msg"), dir.path("other"), dir.path("sig"));
     expect(&["sign", "--secret", &sk, "--in", &msg, "--out", &sig], 1);
     expect(
         &[
-            "sign", "--secret", &sk, "--in", &msg, "--out", &sig, "--epoch", "8",
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &msg,
+            "--out",
+            &sig,
+            "--accept-trusted-dealer-demo",
         ],
         1,
     );
     expect(
         &[
-            "sign", "--secret", &sk, "--in", &msg, "--out", &sig, "--epoch", "5",
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &msg,
+            "--out",
+            &sig,
+            "--epoch",
+            "8",
+            "--accept-trusted-dealer-demo",
+        ],
+        1,
+    );
+    expect(
+        &[
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &msg,
+            "--out",
+            &sig,
+            "--epoch",
+            "5",
+            "--accept-trusted-dealer-demo",
         ],
         0,
     );
@@ -368,7 +415,16 @@ fn threshold_few_time_signature_burns_each_epoch_once() {
     let again = dir.path("again");
     expect(
         &[
-            "sign", "--secret", &sk, "--in", &other, "--out", &again, "--epoch", "5",
+            "sign",
+            "--secret",
+            &sk,
+            "--in",
+            &other,
+            "--out",
+            &again,
+            "--epoch",
+            "5",
+            "--accept-trusted-dealer-demo",
         ],
         4,
     );

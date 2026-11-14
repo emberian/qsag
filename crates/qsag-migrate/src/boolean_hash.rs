@@ -68,13 +68,48 @@ fn shr(c: &Builder, a: Word, n: usize) -> Word {
     })
 }
 fn add(c: &Builder, a: Word, b: Word) -> Word {
-    c.add_bits(&a, &b, c.small(Domain::Bit, 0))
-        .0
-        .try_into()
-        .unwrap()
+    let mut carry = c.small(Domain::Bit, 0);
+    core::array::from_fn(|i| {
+        let xc = c.add(a[i], carry);
+        let s = c.add(xc, b[i]);
+        if i < 31 {
+            let yc = c.add(b[i], carry);
+            carry = c.add(carry, c.mul(xc, yc));
+        }
+        s
+    })
+}
+fn csa(c: &Builder, x: Word, y: Word, z: Word) -> (Word, Word) {
+    let xy = xor(c, x, y);
+    let s = xor(c, xy, z);
+    let xz = xor(c, x, z);
+    let zero = c.small(Domain::Bit, 0);
+    let carry = core::array::from_fn(|i| {
+        if i == 0 {
+            zero
+        } else {
+            c.add(x[i - 1], c.mul(xy[i - 1], xz[i - 1]))
+        }
+    });
+    (s, carry)
 }
 fn sum(c: &Builder, words: &[Word]) -> Word {
-    words.iter().copied().reduce(|a, b| add(c, a, b)).unwrap()
+    let mut rows = words.to_vec();
+    while rows.len() > 2 {
+        let mut next = Vec::with_capacity((rows.len() / 3) * 2 + (rows.len() % 3));
+        for triple in rows.chunks_exact(3) {
+            let (s, carry) = csa(c, triple[0], triple[1], triple[2]);
+            next.push(s);
+            next.push(carry);
+        }
+        next.extend_from_slice(&rows[(rows.len() / 3) * 3..]);
+        rows = next;
+    }
+    if rows.len() == 1 {
+        rows[0]
+    } else {
+        add(c, rows[0], rows[1])
+    }
 }
 pub(crate) fn bytes(c: &Builder, bs: &[u8]) -> Vec<Wire> {
     bs.iter()

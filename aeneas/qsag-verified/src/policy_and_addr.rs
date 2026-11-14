@@ -656,3 +656,10 @@ pub fn derive_hybrid_transcript_digest(
     sp.squeeze(&mut out);
     Some(out)
 }
+
+/// Checked cumulative velocity shared by production admission and durable guards.
+pub const fn checked_velocity_spend(prior: u128, amount: u128, cap: u128) -> Option<u128> {
+    if amount > u128::MAX - prior { return None; }
+    let total = prior + amount;
+    if total > cap { None } else { Some(total) }
+}

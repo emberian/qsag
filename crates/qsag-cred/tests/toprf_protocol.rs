@@ -80,6 +80,9 @@ struct Store {
     charged: usize,
 }
 impl CounterStore for Store {
+    fn high_water(&self) -> Result<Option<u64>, Error> {
+        Ok(self.last)
+    }
     fn reserve(&mut self, _: &[u8; 32], _: usize, counter: u64, items: usize) -> Result<(), Error> {
         if self.last.is_some_and(|v| counter <= v) {
             return Err(Error::Counter);
@@ -138,11 +141,11 @@ fn setup() -> (Vec<Server>, [Endpoint; 5], Arc<Network>) {
     let (servers, channels): (Vec<_>, Vec<_>) = endpoints.into_iter().unzip();
     (servers, channels.try_into().ok().unwrap(), net)
 }
-fn evaluate(
+fn evaluate<S: CounterStore + Send>(
     servers: &mut [Server],
     endpoints: &mut [Endpoint; 5],
     requests: [Request; 5],
-    stores: &mut [Store; 5],
+    stores: &mut [S; 5],
 ) -> [Option<Output>; 5] {
     std::thread::scope(|scope| {
         let handles: Vec<_> = servers
@@ -369,20 +372,34 @@ fn blind_vc_uses_the_oprf_and_pins_schema() {
     assert!(!verify_blind_issuance_request(&req, &[840, 1994, 3], 43));
     let input = issuance_input(&req);
     let (client, requests) = blind(&public, &[&input], [24; 32], 0, [25; 32]).unwrap();
+    let receipt_key = IssuanceReceiptKey::new([93; 32]);
     let evaluation = client
-        .finalize(evaluate(
-            &mut servers,
-            &mut endpoints,
-            requests,
-            &mut stores,
-        ))
+        .finalize_for_issuance(
+            evaluate(&mut servers, &mut endpoints, requests, &mut stores),
+            &receipt_key,
+        )
         .unwrap();
     let mut accumulator = IssuerCredentialAccumulator::new(public, 7);
     assert!(
-        threshold_issue_blind_vc(&mut accumulator, &req, &[840, 1994, 3], &evaluation, 43).is_err()
+        threshold_issue_blind_vc(
+            &mut accumulator,
+            &req,
+            &[840, 1994, 3],
+            &evaluation,
+            &receipt_key,
+            43
+        )
+        .is_err()
     );
-    let cred =
-        threshold_issue_blind_vc(&mut accumulator, &req, &[840, 1994, 3], &evaluation, 42).unwrap();
+    let cred = threshold_issue_blind_vc(
+        &mut accumulator,
+        &req,
+        &[840, 1994, 3],
+        &evaluation,
+        &receipt_key,
+        42,
+    )
+    .unwrap();
 
     // Tampering `cred.issuance_token` after issuance is rejected by `prove_selective_disclosure`!
     let mut bad_cred = cred.clone();
@@ -515,4 +532,103 @@ fn counter_u64_max_and_unbounded_jump_rejected_without_bricking_servers() {
         .unwrap();
     assert_eq!(eval1.values()[0], plaintext(&key, b"honest-1"));
     assert!(stores.iter().all(|s| s.last == Some(1) && s.charged == 2));
+}
+
+/// File-backed, identity-bound test store. Reservations are synced before the
+/// evaluator can emit an output; reopening reads the persisted watermark.
+struct DurableStore {
+    path: std::path::PathBuf,
+    key: [u8; 32],
+    party: usize,
+}
+impl CounterStore for DurableStore {
+    fn high_water(&self) -> Result<Option<u64>, Error> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => Ok(Some(u64::from_le_bytes(
+                bytes.try_into().map_err(|_| Error::Counter)?,
+            ))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(Error::Counter),
+        }
+    }
+    fn reserve(
+        &mut self,
+        key: &[u8; 32],
+        party: usize,
+        counter: u64,
+        _: usize,
+    ) -> Result<(), Error> {
+        use std::io::Write;
+        if key != &self.key
+            || party != self.party
+            || self.high_water()?.is_some_and(|last| counter <= last)
+        {
+            return Err(Error::Counter);
+        }
+        let mut file = std::fs::File::create(&self.path).map_err(|_| Error::Counter)?;
+        file.write_all(&counter.to_le_bytes())
+            .map_err(|_| Error::Counter)?;
+        file.sync_all().map_err(|_| Error::Counter)
+    }
+}
+
+#[test]
+fn toprf_server_recovers_after_100_batches_restart() {
+    let (mut servers, mut endpoints, _) = setup();
+    let key = servers[0].public_key().clone();
+    let dir = std::env::temp_dir().join(format!("toprf-restart-{}", std::process::id()));
+    std::fs::create_dir(&dir).unwrap();
+    let open_stores = || {
+        core::array::from_fn(|party| DurableStore {
+            path: dir.join(party.to_string()),
+            key: key.commitment(),
+            party,
+        })
+    };
+    let mut stores: [DurableStore; 5] = open_stores();
+    for counter in 1..=100 {
+        let (client, requests) = blind(&key, &[b"restart"], [9; 32], counter, [10; 32]).unwrap();
+        client
+            .finalize(evaluate(
+                &mut servers,
+                &mut endpoints,
+                requests,
+                &mut stores,
+            ))
+            .unwrap();
+    }
+    drop(servers);
+    drop(stores);
+    // Deterministically reload the same test custody with empty RAM counters.
+    let (mut servers, mut endpoints, _) = setup();
+    assert_eq!(servers[0].public_key(), &key);
+    let mut stores: [DurableStore; 5] = open_stores();
+    for counter in (0..=100).chain([100 + MAX_COUNTER_WINDOW + 1, u64::MAX]) {
+        let (_, requests) = blind(&key, &[b"restart"], [9; 32], counter, [10; 32]).unwrap();
+        for (((server, endpoint), store), request) in servers
+            .iter_mut()
+            .zip(&mut endpoints)
+            .zip(&mut stores)
+            .zip(requests)
+        {
+            assert_eq!(
+                server.evaluate(request, store, endpoint).unwrap_err(),
+                Error::Counter
+            );
+            assert_eq!(store.high_water().unwrap(), Some(100));
+        }
+    }
+    let (client, requests) = blind(&key, &[b"restart"], [9; 32], 101, [10; 32]).unwrap();
+    client
+        .finalize(evaluate(
+            &mut servers,
+            &mut endpoints,
+            requests,
+            &mut stores,
+        ))
+        .unwrap();
+    for store in &stores {
+        assert_eq!(store.high_water().unwrap(), Some(101));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
 }

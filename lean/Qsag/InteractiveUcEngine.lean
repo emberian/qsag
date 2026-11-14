@@ -21,6 +21,15 @@ Self-contained Lean 4.35 interactive Universal Composability execution engine (`
    - `hybrid_multi_session_le`: Heterogeneous and homogeneous `Q_s`-session hybrid telescope.
    - `uc_transitive_composition`: Exact cross-cardinality rational statistical distance triangle
      inequality (`rationalAcceptDiff` / `ratAdd`) + contextual calling-protocol UC composition.
+   - `forgery_count_transfer`: `Pr[win in real] ≤ Pr[win in ideal] + eps` for any Boolean event.
+4. **Signing-Oracle Locality (`IdealFunctionalityExec_oracle_congr`)**: for every simulator with a
+   non-empty Round-3 message list, the ideal result is determined by the oracle's values on the
+   requests of the sessions that reached Round 3.
+5. **Hypertree Weld (`uc_emulation_forgery_to_hypertree_hash_game`)**: for the ideal functionality
+   instantiated with the checked stateless hypertree signer, any protocol within `eps` of it for the
+   forgery event transfers real forgeries to ideal ones, and every ideal forgery yields a
+   `HypertreeForgeryBreak` through `checked_stateless_hypertree_euf_cma_extract`. The `eps` bound is
+   a premise: no concrete threshold protocol for that signer is proved in this module.
 -/
 
 public import Qsag.Constructive
@@ -514,25 +523,60 @@ def execRealSession {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
           let advStF := A.observeOutcome advSt3 out
           (clPoisoned, advStF, ⟨req, honR1, corrR1, honR2, corrR2, [], [], out⟩)
         | .inr r3Init =>
+          -- Approval is recorded before any opening becomes visible to the adversary.
+          -- A later cut-finalization failure must not make this signing query fresh again.
+          let clApproved := { clAfterCursor with
+            tsig := { cl.tsig with approvedMsgs := req.msg :: cl.tsig.approvedMsgs } }
           let (honR3, r3St) :=
             proto.honestRound3 cl.tsig.pk cl.tsig.corruptParties req r3Init cl.honestShares tape
           let (corrR3Fn, advSt4) := A.rushRound3 advSt3 honR3
           let corrR3 := cl.tsig.corruptParties.map (fun c => (c, corrR3Fn c))
           match proto.finalizeCutOpen cl.tsig.pk req r3St honR3 corrR3 with
           | .inl cutErr =>
-            let clPoisoned := poisonRealCluster clAfterCursor
+            let clPoisoned := poisonRealCluster clApproved
             let out := SessionOutcome.abort cutErr
             let advStF := A.observeOutcome advSt4 out
             (clPoisoned, advStF, ⟨req, honR1, corrR1, honR2, corrR2, honR3, corrR3, out⟩)
           | .inr sigBytes =>
-            -- ATOMIC WAL COMMIT BEFORE SIGNATURE RELEASE + `IdealTsig.approvedMsgs` log update!
+            -- Commit the successful result before releasing SignOk; approval is already recorded.
             let committedWal := walCommitAuthorized wal' req.reqEpoch msgDig sigBytes
-            let tsigNext := { cl.tsig with approvedMsgs := req.msg :: cl.tsig.approvedMsgs }
             let clOk : RealClusterState PK ShareT :=
-              { clAfterCursor with tsig := tsigNext, honestWal := committedWal }
+              { clApproved with honestWal := committedWal }
             let out := SessionOutcome.signOk sigBytes
             let advStF := A.observeOutcome advSt4 out
             (clOk, advStF, ⟨req, honR1, corrR1, honR2, corrR2, honR3, corrR3, out⟩)
+
+/-- Any session exposing honest Round-3 bytes records the approved message, even if
+    the corrupt party makes finalization abort after receiving those bytes. -/
+theorem execRealSession_opening_records_approval
+    {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (A : UcRushingAdversary AdvState) (cl : RealClusterState PK ShareT)
+    (advSt : AdvState) (tape : SessionTape)
+    (hOpen : (execRealSession proto A cl advSt tape).2.2.honestRound3 ≠ []) :
+    (execRealSession proto A cl advSt tape).2.2.request.msg ∈
+      (execRealSession proto A cl advSt tape).1.tsig.approvedMsgs := by
+  unfold execRealSession at hOpen ⊢
+  dsimp only at hOpen ⊢
+  cases validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · exact False.elim (hOpen rfl)
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hOpen ⊢
+    cases walPreSignStep cl.honestWal _ _ _ with
+    | err _ _ => exact False.elim (hOpen rfl)
+    | ok _ auth =>
+      cases auth with
+      | replayCached _ => exact False.elim (hOpen rfl)
+      | authorizedFresh _ =>
+        dsimp only at hOpen ⊢
+        cases proto.verifyRound1 _ _ _ _ _ with
+        | inl _ => exact False.elim (hOpen rfl)
+        | inr _ =>
+          dsimp only at hOpen ⊢
+          cases proto.preCutBarrier _ _ _ _ _ with
+          | inl _ => exact False.elim (hOpen rfl)
+          | inr _ =>
+            dsimp only at hOpen ⊢
+            cases proto.finalizeCutOpen _ _ _ _ _ <;> exact List.mem_cons_self
 
 /-- Run `Q_s` adaptively scheduled interactive rushing sessions of `RealProtocolExec`. -/
 def RealProtocolExec {PK ShareT SessionTape R1St R2St R3St AdvState : Type}
@@ -646,8 +690,10 @@ def execIdealSession {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
           (iclPoisoned, advStF, ⟨req, honR1, corrR1, honR2, corrR2, [], [], out⟩)
         | .inr sR3Init =>
           -- Pre-cut barrier succeeded under valid `t`-quorum approval: `IdealTsig` hands
-          -- `idealSigBytes ← idealSignOracle req` to `sim.simRound3`, and commits both
-          -- `approvedMsgs` and `walCommitAuthorized` ONLY upon Round-3 cut finalization!
+          -- `idealSigBytes ← idealSignOracle req` to `sim.simRound3`. Record this query
+          -- before releasing openings, including when the adversary subsequently aborts.
+          let iclApproved := { iclAfterCursor with
+            tsig := { icl.tsig with approvedMsgs := req.msg :: icl.tsig.approvedMsgs } }
           let idealSigBytes := idealSignOracle req
           let (honR3, sR3) :=
             sim.simRound3 icl.tsig.pk icl.tsig.corruptParties req sR3Init idealSigBytes tape
@@ -655,15 +701,14 @@ def execIdealSession {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
           let corrR3 := icl.tsig.corruptParties.map (fun c => (c, corrR3Fn c))
           match sim.simFinalizeCut icl.tsig.pk req sR3 idealSigBytes honR3 corrR3 with
           | .inl cutErr =>
-            let iclPoisoned := poisonIdealCluster iclAfterCursor
+            let iclPoisoned := poisonIdealCluster iclApproved
             let out := SessionOutcome.abort cutErr
             let advStF := A.observeOutcome advSt4 out
             (iclPoisoned, advStF, ⟨req, honR1, corrR1, honR2, corrR2, honR3, corrR3, out⟩)
           | .inr outSigBytes =>
             let committedWal := walCommitAuthorized wal' req.reqEpoch msgDig outSigBytes
-            let tsigNext := { icl.tsig with approvedMsgs := req.msg :: icl.tsig.approvedMsgs }
             let iclOk : IdealClusterState PK :=
-              { iclAfterCursor with tsig := tsigNext, honestWal := committedWal }
+              { iclApproved with honestWal := committedWal }
             let out := SessionOutcome.signOk outSigBytes
             let advStF := A.observeOutcome advSt4 out
             (iclOk, advStF, ⟨req, honR1, corrR1, honR2, corrR2, honR3, corrR3, out⟩)
@@ -778,10 +823,8 @@ theorem realProtocolExec_approvedMsgs_provenance
               | inl _ => exact ⟨rfl, rfl, rfl, rfl, fun _ hm => .inl hm⟩
               | inr r3Init =>
                 dsimp only
-                cases proto.finalizeCutOpen _ _ _ _ _ with
-                | inl _ => exact ⟨rfl, rfl, rfl, rfl, fun _ hm => .inl hm⟩
-                | inr sigBytes =>
-                  refine ⟨rfl, rfl, rfl, rfl, ?_⟩
+                cases proto.finalizeCutOpen _ _ _ _ _ <;> refine ⟨rfl, rfl, rfl, rfl, ?_⟩
+                all_goals
                   intro m hm
                   rcases List.mem_cons.mp hm with rfl | hOld
                   · exact .inr ⟨rfl, hQuorum⟩
@@ -1153,6 +1196,307 @@ theorem inhabited_interactive_uc_combinators :
     omega
   rw [hBadCount] at hMain
   exact ⟨bij, realE, idealE, bad, hNe0, hAgree, hMain⟩
+
+/-! ## 5. Signing-Oracle Locality of the Ideal World & Forgery-Count Transfer -/
+
+theorem IdealFunctionalityExec_succ_eq {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState) (s : Nat) (tapes : Nat → SimTape)
+    (icl : IdealClusterState PK) (advSt : AdvState) :
+    IdealFunctionalityExec idealSignOracle sim A (s + 1) tapes icl advSt =
+      ((IdealFunctionalityExec idealSignOracle sim A s (fun i => tapes (i + 1))
+          (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).1
+          (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).2.1).1,
+       ⟨(IdealFunctionalityExec idealSignOracle sim A s (fun i => tapes (i + 1))
+          (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).1
+          (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).2.1).2.finalAdvState,
+        (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).2.2 ::
+          (IdealFunctionalityExec idealSignOracle sim A s (fun i => tapes (i + 1))
+            (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).1
+            (execIdealSession idealSignOracle sim A icl advSt (tapes 0)).2.1).2.sessions⟩) := by
+  rfl
+
+/-- The wire record of an ideal session always carries the request the adversary scheduled. -/
+theorem execIdealSession_request {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (idealSignOracle : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (A : UcRushingAdversary AdvState)
+    (icl : IdealClusterState PK) (advSt : AdvState) (tape : SimTape) :
+    (execIdealSession idealSignOracle sim A icl advSt tape).2.2.request =
+      (A.scheduleSession advSt).1 := by
+  unfold execIdealSession
+  dsimp only
+  cases validThresholdApproval icl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · rfl
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases walPreSignStep icl.honestWal _ _ _ with
+    | err _ _ => rfl
+    | ok _ resOut =>
+      cases resOut with
+      | replayCached _ => rfl
+      | authorizedFresh _ =>
+        dsimp only
+        cases sim.simVerifyRound1 _ _ _ _ _ with
+        | inl p1 => rcases p1 with ⟨_, b⟩; cases b <;> rfl
+        | inr _ =>
+          dsimp only
+          cases sim.simPreCutBarrier _ _ _ _ _ with
+          | inl _ => rfl
+          | inr _ =>
+            dsimp only
+            cases sim.simFinalizeCut _ _ _ _ _ _ <;> rfl
+
+/-- **Single-Session Signing-Oracle Locality (`execIdealSession_oracle_congr`)**:
+    an ideal session reads `idealSignOracle` at most at its own scheduled request, and only when the
+    session reaches Round 3. Two oracles that agree there produce the same cluster state, adversary
+    state and wire record, for every simulator whose Round-3 message list is never empty. -/
+theorem execIdealSession_oracle_congr {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (O O' : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (hR3 : ∀ pk corr req s3 sigB tape, (sim.simRound3 pk corr req s3 sigB tape).1 ≠ [])
+    (A : UcRushingAdversary AdvState)
+    (icl : IdealClusterState PK) (advSt : AdvState) (tape : SimTape)
+    (hAgree : (execIdealSession O sim A icl advSt tape).2.2.honestRound3 ≠ [] →
+      O' (A.scheduleSession advSt).1 = O (A.scheduleSession advSt).1) :
+    execIdealSession O' sim A icl advSt tape = execIdealSession O sim A icl advSt tape := by
+  revert hAgree
+  unfold execIdealSession
+  dsimp only
+  cases validThresholdApproval icl.tsig (A.scheduleSession advSt).1.honestApprovers
+  · intro _; rfl
+  · simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
+    cases walPreSignStep icl.honestWal _ _ _ with
+    | err _ _ => intro _; rfl
+    | ok _ resOut =>
+      cases resOut with
+      | replayCached _ => intro _; rfl
+      | authorizedFresh _ =>
+        dsimp only
+        cases sim.simVerifyRound1 _ _ _ _ _ with
+        | inl p1 => intro _; rfl
+        | inr _ =>
+          dsimp only
+          cases sim.simPreCutBarrier _ _ _ _ _ with
+          | inl _ => intro _; rfl
+          | inr _ =>
+            dsimp only
+            intro hAgree
+            have hEq : O' (A.scheduleSession advSt).1 = O (A.scheduleSession advSt).1 := by
+              apply hAgree
+              cases sim.simFinalizeCut _ _ _ _ _ _ <;> exact hR3 _ _ _ _ _ _
+            rw [hEq]
+
+/-- **Multi-Session Signing-Oracle Locality (`IdealFunctionalityExec_oracle_congr`)**:
+    across any number of adaptively scheduled sessions, the whole ideal-world result (final cluster
+    state and complete transcript) is determined by the values of the signing oracle on the requests
+    of the sessions that reached Round 3. Nothing else about the signing key can influence what the
+    adversary sees. -/
+theorem IdealFunctionalityExec_oracle_congr {PK SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (O O' : SessionScheduleReq → ByteArray)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (hR3 : ∀ pk corr req s3 sigB tape, (sim.simRound3 pk corr req s3 sigB tape).1 ≠ [])
+    (A : UcRushingAdversary AdvState) :
+    ∀ (s : Nat) (tapes : Nat → SimTape) (icl : IdealClusterState PK) (advSt : AdvState),
+      (∀ rec ∈ (IdealFunctionalityExec O sim A s tapes icl advSt).2.sessions,
+        rec.honestRound3 ≠ [] → O' rec.request = O rec.request) →
+      IdealFunctionalityExec O' sim A s tapes icl advSt =
+        IdealFunctionalityExec O sim A s tapes icl advSt
+  | 0, _, _, _, _ => rfl
+  | s + 1, tapes, icl, advSt, hAgree => by
+    rw [IdealFunctionalityExec_succ_eq O sim A s tapes icl advSt] at hAgree
+    rw [IdealFunctionalityExec_succ_eq O' sim A s tapes icl advSt,
+        IdealFunctionalityExec_succ_eq O sim A s tapes icl advSt]
+    have hHead : execIdealSession O' sim A icl advSt (tapes 0) =
+        execIdealSession O sim A icl advSt (tapes 0) := by
+      apply execIdealSession_oracle_congr O O' sim hR3
+      intro hNe
+      have h := hAgree _ (List.Mem.head _) hNe
+      rwa [execIdealSession_request] at h
+    rw [hHead]
+    have hTail := IdealFunctionalityExec_oracle_congr O O' sim hR3 A s (fun i => tapes (i + 1))
+      (execIdealSession O sim A icl advSt (tapes 0)).1
+      (execIdealSession O sim A icl advSt (tapes 0)).2.1
+      (fun rec hMem hNe => hAgree rec (List.Mem.tail _ hMem) hNe)
+    rw [hTail]
+
+private theorem nat_count_transfer (R I c e1 e2 : Nat) (hc : 0 < c)
+    (h : natAbsDiff (R * c) (I * c) * e2 ≤ e1 * (c * c)) :
+    R * e2 ≤ I * e2 + e1 * c := by
+  rw [natAbsDiff_mul_right] at h
+  have hL : natAbsDiff R I * c * e2 = natAbsDiff R I * e2 * c := by ac_rfl
+  have hR : e1 * (c * c) = e1 * c * c := by ac_rfl
+  rw [hL, hR] at h
+  have h3 : natAbsDiff R I * e2 ≤ e1 * c := Nat.le_of_mul_le_mul_right h hc
+  have h4 : R ≤ I + natAbsDiff R I := by
+    unfold natAbsDiff
+    split <;> omega
+  have h5 : R * e2 ≤ (I + natAbsDiff R I) * e2 := Nat.mul_le_mul_right e2 h4
+  rw [Nat.add_mul] at h5
+  exact Nat.le_trans h5 (Nat.add_le_add_left h3 _)
+
+/-- **Combinator 4: Forgery-Count Transfer (`forgery_count_transfer`)**:
+    if two executions over the same tape space are within `eps` for the Boolean event `win`, then
+    `Pr[win in real] ≤ Pr[win in ideal] + eps`, stated as an exact cross-multiplied count inequality. -/
+theorem forgery_count_transfer {View : Type} (card : Nat)
+    (realExec idealExec : Fin card → View) (win : View → Bool) (eps : Nat × Nat)
+    (hUc : ratLe (rationalAcceptDiff card realExec card idealExec win) eps) :
+    distAcceptCount card realExec win * eps.2 ≤
+      distAcceptCount card idealExec win * eps.2 + eps.1 * card := by
+  obtain ⟨hDen, _, hLe⟩ := hUc
+  have hCard : 0 < card := by
+    rcases Nat.eq_zero_or_pos card with h0 | hPos
+    · have hDen' : 0 < card * card := hDen
+      rw [h0] at hDen'
+      exact absurd hDen' (by decide)
+    · exact hPos
+  exact nat_count_transfer _ _ card eps.1 eps.2 hCard hLe
+
+/-- If no tape lets the ideal execution win, the real winning count is bounded by `eps` alone. -/
+theorem forgery_count_le_of_ideal_never_wins {View : Type} (card : Nat)
+    (realExec idealExec : Fin card → View) (win : View → Bool) (eps : Nat × Nat)
+    (hUc : ratLe (rationalAcceptDiff card realExec card idealExec win) eps)
+    (hNever : ∀ ω : Fin card, win (idealExec ω) = false) :
+    distAcceptCount card realExec win * eps.2 ≤ eps.1 * card := by
+  have hT := forgery_count_transfer card realExec idealExec win eps hUc
+  have hZero : distAcceptCount card idealExec win = 0 := by
+    unfold distAcceptCount
+    have hC : finSum card (fun ω => if win (idealExec ω) then 1 else 0) = finSum card (fun _ => 0) :=
+      finSum_congr (fun ω => by rw [hNever ω]; rfl)
+    rw [hC, finSum_const, Nat.mul_zero]
+  rw [hZero, Nat.zero_mul, Nat.zero_add] at hT
+  exact hT
+
+/-! ## 6. `F_tsig` over the Checked Stateless Hypertree Signer: UC Emulation ⇒ Concrete Hash-Game Witness -/
+
+/-- Signing oracle of the ideal functionality instantiated with the checked stateless hypertree
+    signer. `ser` is an arbitrary wire encoding of the (possibly failed) signing result. -/
+def hypertreeIdealSignOracle (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray) : SessionScheduleReq → ByteArray :=
+  fun req => ser (evalStatelessCheckedSign suite params sk req.msg req.optRand grindLimit)
+
+/-- Signing queries visible in a transcript: exactly the requests of sessions that reached Round 3. -/
+def transcriptHypertreeQueries {AdvState : Type} (grindLimit : Nat)
+    (tr : ExecTranscript AdvState) : List CheckedStatelessQuery :=
+  (tr.sessions.filter (fun rec => !rec.honestRound3.isEmpty)).map
+    (fun rec => ⟨rec.request.msg, rec.request.optRand, grindLimit⟩)
+
+/-- EUF-CMA winning predicate on a transcript: the forger's output verifies under the checked
+    stateless verifier and its message was never the request of a session that reached Round 3. -/
+def hypertreeForgeryWins {AdvState : Type} (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (tr : ExecTranscript AdvState) : Bool :=
+  verifyStatelessChecked suite params pk (forgeOut tr).1 (forgeOut tr).2 &&
+  tr.sessions.all (fun rec => rec.honestRound3.isEmpty || decide (rec.request.msg ≠ (forgeOut tr).1))
+
+private theorem list_isEmpty_false_of_ne_nil {α : Type} : ∀ {l : List α}, l ≠ [] → l.isEmpty = false
+  | [], h => absurd rfl h
+  | _ :: _, _ => rfl
+
+private theorem list_ne_nil_of_isEmpty_false {α : Type} : ∀ {l : List α}, l.isEmpty = false → l ≠ []
+  | [], h => by cases h
+  | _ :: _, _ => fun hNil => by cases hNil
+
+/-- Constructive extraction of a `HypertreeForgeryBreak` from any transcript on which
+    `hypertreeForgeryWins` holds. The query log is read off the transcript, and no upper-layer oracle
+    premise is left to the caller. -/
+def hypertreeForgeryBreak_of_wins {AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey) (grindLimit : Nat)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hLayers : params.numLayers ≤ 2 ^ 32)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (tr : ExecTranscript AdvState)
+    (hWin : hypertreeForgeryWins suite params (derivePublicKey suite params sk) forgeOut tr = true) :
+    HypertreeForgeryBreak suite params sk (forgeOut tr).1 (forgeOut tr).2
+      ((signingOracleLog suite params sk
+          (toLegacyStatelessQueries suite params sk (transcriptHypertreeQueries grindLimit tr))).flatMap fun e =>
+        (List.range params.forsTrees).map fun j =>
+          (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ params.subtreeHeight),
+           e.2.leafGlobalIdx % 2 ^ params.subtreeHeight,
+           sigForsLeafIdx suite params (derivePublicKey suite params sk) e.1 e.2 j)) :=
+  checked_stateless_hypertree_euf_cma_extract_of_fresh_queries suite params sk
+    (transcriptHypertreeQueries grindLimit tr) (forgeOut tr).1 (forgeOut tr).2 hGeom hLayers
+    (fun q hq => by
+      unfold hypertreeForgeryWins at hWin
+      have hAll := (Bool.and_eq_true_iff.mp hWin).2
+      unfold transcriptHypertreeQueries at hq
+      obtain ⟨rec, hRecF, hQEq⟩ := List.mem_map.mp hq
+      obtain ⟨hRecMem, hR3⟩ := List.mem_filter.mp hRecF
+      have hRecOk := List.all_eq_true.mp hAll rec hRecMem
+      have hNotEmpty : rec.honestRound3.isEmpty = false := by
+        cases hE : rec.honestRound3.isEmpty
+        · rfl
+        · rw [hE] at hR3; cases hR3
+      rw [hNotEmpty, Bool.false_or] at hRecOk
+      rw [← hQEq]
+      exact of_decide_eq_true hRecOk)
+    (Bool.and_eq_true_iff.mp (by unfold hypertreeForgeryWins at hWin; exact hWin)).1
+
+/-- **UC Emulation of `F_tsig[hypertree]` ⇒ Concrete Hash-Game Witness
+    (`uc_emulation_forgery_to_hypertree_hash_game`)**:
+    Let `proto` be ANY 3-round interactive threshold protocol, `sim` ANY black-box simulator with a
+    non-empty Round-3 message list, and `A` ANY rushing adversary scheduling `Q_s` sessions. Suppose
+    the real execution and the ideal execution (ideal functionality instantiated with the checked
+    stateless hypertree signer) are within `eps` for the forgery event `hypertreeForgeryWins`
+    (premise `hUc`, the UC-emulation bound of the protocol at hand). Then:
+    1. `Pr[A forges in the real protocol] ≤ Pr[A forges in the ideal world] + eps`
+       (exact cross-multiplied count inequality);
+    2. every tape on which the forger wins in the ideal world yields a `HypertreeForgeryBreak`
+       (WOTS backward inversion, FORS preimage, raw-hash collision, or FORS subset cover) whose
+       revealed-FORS index list is computed from the transcript's own Round-3 requests; and
+    3. the ideal transcript is unchanged by replacing the signing oracle with any oracle that agrees
+       on the Round-3 requests of that transcript, so the forger's input depends on the signing key
+       only through those signing queries.
+    No upper-layer oracle premise and no abstract EUF-CMA hypothesis appears. -/
+theorem uc_emulation_forgery_to_hypertree_hash_game
+    {PK ShareT SessionTape R1St R2St R3St SimTape SimR1 SimR2 SimR3 AdvState : Type}
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (grindLimit : Nat) (ser : Option PqHashSig → ByteArray)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hLayers : params.numLayers ≤ 2 ^ 32)
+    (proto : InteractiveThresholdProtocol PK ShareT SessionTape R1St R2St R3St)
+    (sim : BlackBoxUcSimulator PK SimTape SimR1 SimR2 SimR3)
+    (hR3 : ∀ pk corr req s3 sigB tape, (sim.simRound3 pk corr req s3 sigB tape).1 ≠ [])
+    (A : UcRushingAdversary AdvState) (Q_s card : Nat)
+    (realTapes : Fin card → Nat → SessionTape) (simTapes : Fin card → Nat → SimTape)
+    (cl : RealClusterState PK ShareT) (icl : IdealClusterState PK) (advSt : AdvState)
+    (forgeOut : ExecTranscript AdvState → List UInt8 × PqHashSig)
+    (eps : Nat × Nat)
+    (hUc : ratLe
+      (rationalAcceptDiff card
+        (fun ω => (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2)
+        card
+        (fun ω => (IdealFunctionalityExec (hypertreeIdealSignOracle suite params sk grindLimit ser)
+          sim A Q_s (simTapes ω) icl advSt).2)
+        (hypertreeForgeryWins suite params (derivePublicKey suite params sk) forgeOut)) eps) :
+    let O := hypertreeIdealSignOracle suite params sk grindLimit ser
+    let win := hypertreeForgeryWins suite params (derivePublicKey suite params sk) forgeOut
+    let realView : Fin card → ExecTranscript AdvState := fun ω =>
+      (RealProtocolExec proto A Q_s (realTapes ω) cl advSt).2
+    let idealView : Fin card → ExecTranscript AdvState := fun ω =>
+      (IdealFunctionalityExec O sim A Q_s (simTapes ω) icl advSt).2
+    distAcceptCount card realView win * eps.2 ≤
+      distAcceptCount card idealView win * eps.2 + eps.1 * card ∧
+    (∀ ω : Fin card, win (idealView ω) = true →
+      Nonempty (HypertreeForgeryBreak suite params sk (forgeOut (idealView ω)).1 (forgeOut (idealView ω)).2
+        ((signingOracleLog suite params sk
+            (toLegacyStatelessQueries suite params sk
+              (transcriptHypertreeQueries grindLimit (idealView ω)))).flatMap fun e =>
+          (List.range params.forsTrees).map fun j =>
+            (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ params.subtreeHeight),
+             e.2.leafGlobalIdx % 2 ^ params.subtreeHeight,
+             sigForsLeafIdx suite params (derivePublicKey suite params sk) e.1 e.2 j)))) ∧
+    (∀ (ω : Fin card) (O' : SessionScheduleReq → ByteArray),
+      (∀ rec ∈ (idealView ω).sessions, rec.honestRound3 ≠ [] → O' rec.request = O rec.request) →
+      (IdealFunctionalityExec O' sim A Q_s (simTapes ω) icl advSt).2 = idealView ω) := by
+  intro O win realView idealView
+  refine ⟨forgery_count_transfer card realView idealView win eps hUc, ?_, ?_⟩
+  · intro ω hWin
+    exact ⟨hypertreeForgeryBreak_of_wins suite params sk grindLimit hGeom hLayers forgeOut
+      (idealView ω) hWin⟩
+  · intro ω O' hAgree
+    exact congrArg Prod.snd
+      (IdealFunctionalityExec_oracle_congr O O' sim hR3 A Q_s (simTapes ω) icl advSt hAgree)
 
 end Qsag
 end

@@ -3840,7 +3840,7 @@ private theorem watermark_consumed_preserved_and_marks
               exact Or.inl hBelowNew
             else
               rcases hn with hLtOld | hBitOld
-              · omega
+              · exfalso; omega
               · apply Or.inr
                 have hOldLtW : n - g.minNonceWatermark < g.slidingWindowWidth := by
                   if hLt' : n - g.minNonceWatermark < g.slidingWindowWidth then exact hLt'

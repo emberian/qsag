@@ -2688,7 +2688,7 @@ mod tests {
     fn real_ot_parity_masks_bind_the_checked_correlation() {
         let sid = [0x72; 32];
         let mut rngs = make_party_rngs(2, 0x71);
-        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
         let alpha = Tower128(0x123456789abcdef1);
         let mask = run_lhl_vole128_mask(&sid, 0, 1, 0, alpha, &mut mesh, &mut rngs).unwrap();
         assert_eq!(mask.mac_receiver.add(mask.key_sender), mask.x_receiver.mul(alpha));
@@ -2769,7 +2769,7 @@ mod tests {
         let session_id = [0x91u8; 32];
         let depth = PcgTreeDepth::TestDepth8;
         let mut rngs = make_party_rngs(2, 0x92);
-        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let mut ot_mesh = OtMesh::establish_ideal_for_test(session_id, &mut rngs);
         let mut seeds = setup_dense_pcg_seeds(session_id, depth, &mut ot_mesh, &mut rngs)
             .expect("honest setup");
         let _seed1 = seeds.pop().expect("party 1");
@@ -2872,7 +2872,7 @@ mod tests {
     fn serialized_seed_expands_once_and_burn_failure_blocks_expansion() {
         let session_id = [0xA7u8; 32];
         let mut rngs = make_party_rngs(2, 0xA8);
-        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let mut ot_mesh = OtMesh::establish_ideal_for_test(session_id, &mut rngs);
         let seeds =
             setup_dense_pcg_seeds(session_id, PcgTreeDepth::TestDepth8, &mut ot_mesh, &mut rngs)
                 .expect("honest setup");
@@ -2929,7 +2929,7 @@ mod tests {
     fn edited_copy_of_burned_seed_fails_closed_as_already_burned() {
         let session_id = [0xB3u8; 32];
         let mut rngs = make_party_rngs(2, 0xB4);
-        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let mut ot_mesh = OtMesh::establish_ideal_for_test(session_id, &mut rngs);
         let seeds =
             setup_dense_pcg_seeds(session_id, PcgTreeDepth::TestDepth8, &mut ot_mesh, &mut rngs)
                 .expect("2-party setup");
@@ -2976,7 +2976,7 @@ mod tests {
     fn obsolete_wire_magic_is_refused_by_name() {
         let session_id = [0xB5u8; 32];
         let mut rngs = make_party_rngs(2, 0xB6);
-        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let mut ot_mesh = OtMesh::establish_ideal_for_test(session_id, &mut rngs);
         let seeds =
             setup_dense_pcg_seeds(session_id, PcgTreeDepth::TestDepth8, &mut ot_mesh, &mut rngs)
                 .expect("setup");
@@ -3027,7 +3027,7 @@ mod tests {
             let mut session_id = [0u8; 32];
             session_id[0] = 0x10 + (idx as u8);
             let mut rngs = make_party_rngs(2, 0x20 + (idx as u8));
-            let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+            let mut ot_mesh = OtMesh::establish_ideal_for_test(session_id, &mut rngs);
 
             let seeds = setup_dense_pcg_seeds(session_id, depth, &mut ot_mesh, &mut rngs)
                 .expect("honest dense PCG setup must succeed");
@@ -3169,7 +3169,7 @@ mod tests {
     fn dense_pcg_three_party_beaver_and_vole_exactness() {
         let session_id = [0x33u8; 32];
         let mut rngs = make_party_rngs(3, 0x44);
-        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let mut ot_mesh = OtMesh::establish_ideal_for_test(session_id, &mut rngs);
 
         let seeds =
             setup_dense_pcg_seeds(session_id, PcgTreeDepth::Depth14, &mut ot_mesh, &mut rngs)
@@ -3200,7 +3200,7 @@ mod tests {
         // 1. Interactive fault injection: corrupted Sender GGM copath sibling at internal level 5.
         {
             let mut rngs = make_party_rngs(2, 0x61);
-            let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+            let mut ot_mesh = OtMesh::establish_ideal_for_test(session_id, &mut rngs);
             let mut mask = [0u8; 16];
             mask[7] = 0x80;
             let res = setup_dense_pcg_seeds_with_fault_hook(
@@ -3228,7 +3228,7 @@ mod tests {
         // 2. Interactive fault injection: corrupted Sender SPCOT correlation offset `c_corr`.
         {
             let mut rngs = make_party_rngs(2, 0x62);
-            let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+            let mut ot_mesh = OtMesh::establish_ideal_for_test(session_id, &mut rngs);
             let res = setup_dense_pcg_seeds_with_fault_hook(
                 session_id,
                 PcgTreeDepth::TestDepth8,
@@ -3252,7 +3252,7 @@ mod tests {
 
         // 3. Post-serialization / local-expansion tamper rejection on BOTH copath sibling AND `c_corr`.
         let mut rngs = make_party_rngs(2, 0x63);
-        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let mut ot_mesh = OtMesh::establish_ideal_for_test(session_id, &mut rngs);
         let mut seeds =
             setup_dense_pcg_seeds(session_id, PcgTreeDepth::TestDepth8, &mut ot_mesh, &mut rngs)
                 .expect("honest setup");
