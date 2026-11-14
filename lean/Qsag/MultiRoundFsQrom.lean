@@ -51,9 +51,14 @@ Constructive Lean 4.35 development for the multi-round QROM Fiat–Shamir reduct
    oracle-dependent form `qrom_adaptive_oracle_dependent_rbr_step`, and the `k`-round union
    `qrom_multiRound_measure_reprogram_union` (`(2 Q + 1)^2 ∑_r badCard_r / 2^w`, for a FIXED
    background oracle), with uniform-oracle resampling and the averaged round bound
-   `qrom_uniform_oracle_round_bound`. The concrete budget
-   `multiRoundFsQrom_soundness_bound` instantiates round bounds DERIVED from the deployed
-   `whirAffineStageWitnesses 24 true` rows (`hemV6FiveRoundRbrBounds_eq_deployed`).
+   `qrom_uniform_oracle_round_bound`. The numerical budget `multiRoundFsQrom_budget_bound`
+   instantiates round AND query bounds derived from the deployed
+   `whirAffineStageWitnesses 24 true` rows, charges query rounds under Fiat–Shamir search with
+   no proof-of-work credit, and charges commitment extraction with a collision term
+   (`qromMerkleOnlineExtractBound`; classical binding is `merkle_collision_or_unique_opening`,
+   the quantum extraction reduction is not mechanized). The collision term limits the budget
+   to `Q + 1 ≤ 2^40`. The budget is arithmetic: it is not yet connected to verifier acceptance
+   (item 3).
 
 5. **Fiat–Shamir transcript-ordering `#tooth` (`tooth_unabsorbed_shifted_claim_breaks_rbr`)**:
    squeezing `(α, β)` before absorbing the shifted functional claim admits a forgery on every
@@ -2810,15 +2815,85 @@ theorem qrom_uniform_oracle_success_bound {cardX w cardAnc Q k : Nat}
 @[expose] def dfmRoundScale (Q : Nat) (b : RatBound) : RatBound :=
   RatBound.scale ((2 * Q + 1) ^ 2) b
 
-/-- Position-tweaked online Merkle commitment recording/extraction bound (`O(Q^2 / 2^sec)` per
-    committed Merkle root: `numRoots * 8 * (Q + 1)^2 / 2^secBits`). -/
-@[expose] def qromMerkleOnlineExtractBound (numRoots secBits Q : Nat) : RatBound :=
-  RatBound.scale numRoots (quantumGroverSingleTargetBound secBits Q)
+/-- Recompute a position-tweaked Merkle root from a node digest and its authentication path.
+    `H lvl node` compresses the two children of node `node` at level `lvl`; `idx` is the index
+    of the current node and its parity selects the child slot. -/
+def merkleRootFromPath {D : Type} (H : Nat → Nat → D → D → D) : Nat → Nat → D → List D → D
+  | _, _, cur, [] => cur
+  | lvl, idx, cur, sib :: rest =>
+    merkleRootFromPath H (lvl + 1) (idx / 2)
+      (if idx % 2 = 0 then H lvl (idx / 2) cur sib else H lvl (idx / 2) sib cur) rest
 
-/-- Multi-round QROM Fiat–Shamir RBR compiler bound (`[DFMS19]` / `[CMS19]`):
-    couples `k` reprogrammed RBR challenge rounds (`∑_{r < k} (2 * Q + 1)^2 * rbrBounds[r]`),
-    online Merkle commitment extraction (`numRoots * 8 * (Q + 1)^2 / 2^secBits`), and non-rewound
-    coset query rounds (`∑_j queryBounds[j]`). -/
+/-- A collision of the tweaked compression function at ONE tree position: two different child
+    pairs with the same digest under the same `(lvl, node)` tweak. -/
+def MerkleTweakCollision {D : Type} (H : Nat → Nat → D → D → D) : Prop :=
+  ∃ (lvl node : Nat) (a b a' b' : D), (a ≠ a' ∨ b ≠ b') ∧ H lvl node a b = H lvl node a' b'
+
+/-- **Collision-or-unique-opening.** Two openings of the same position to the same root either
+    coincide (same leaf digest, same authentication path) or exhibit a same-position collision
+    of the tweaked compression function. This is the classical binding reduction behind the
+    collision term of `qromMerkleOnlineExtractBound`; it is a statement about fixed openings
+    and not the quantum online-extraction game. -/
+theorem merkle_collision_or_unique_opening {D : Type} [DecidableEq D]
+    (H : Nat → Nat → D → D → D) :
+    ∀ (path path' : List D) (lvl idx : Nat) (leaf leaf' : D),
+      path.length = path'.length →
+      merkleRootFromPath H lvl idx leaf path = merkleRootFromPath H lvl idx leaf' path' →
+      (leaf = leaf' ∧ path = path') ∨ MerkleTweakCollision H
+  | [], [], _, _, _, _, _, h => .inl ⟨h, rfl⟩
+  | [], _ :: _, _, _, _, _, hl, _ => absurd hl.symm (Nat.succ_ne_zero _)
+  | _ :: _, [], _, _, _, _, hl, _ => absurd hl (Nat.succ_ne_zero _)
+  | sib :: rest, sib' :: rest', lvl, idx, leaf, leaf', hl, h => by
+    have h' : merkleRootFromPath H (lvl + 1) (idx / 2)
+          (if idx % 2 = 0 then H lvl (idx / 2) leaf sib else H lvl (idx / 2) sib leaf) rest =
+        merkleRootFromPath H (lvl + 1) (idx / 2)
+          (if idx % 2 = 0 then H lvl (idx / 2) leaf' sib' else H lvl (idx / 2) sib' leaf')
+          rest' := h
+    cases merkle_collision_or_unique_opening H rest rest' (lvl + 1) (idx / 2) _ _
+        (Nat.succ.inj hl) h' with
+    | inr hc => exact .inr hc
+    | inl hp =>
+      obtain ⟨hpar, hrest⟩ := hp
+      if hEq : leaf = leaf' ∧ sib = sib' then
+        exact .inl ⟨hEq.1, by rw [hEq.2, hrest]⟩
+      else
+        if hpar0 : idx % 2 = 0 then
+          rw [if_pos hpar0, if_pos hpar0] at hpar
+          exact .inr ⟨lvl, idx / 2, leaf, sib, leaf', sib',
+            if hl1 : leaf = leaf' then .inr (fun hs => hEq ⟨hl1, hs⟩) else .inl hl1, hpar⟩
+        else
+          rw [if_neg hpar0, if_neg hpar0] at hpar
+          exact .inr ⟨lvl, idx / 2, sib, leaf, sib', leaf',
+            if hl1 : leaf = leaf' then .inl (fun hs => hEq ⟨hl1, hs⟩) else .inr hl1, hpar⟩
+
+/-- `#tooth`: a compression function that forgets its right child is not binding, and the
+    theorem's collision branch is the one that fires. -/
+theorem tooth_merkle_right_blind_compression_collides :
+    merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [1] =
+      merkleRootFromPath (fun _ _ (a : Nat) _ => a) 0 0 7 [2] ∧
+    MerkleTweakCollision (fun _ _ (a : Nat) _ => a) :=
+  ⟨rfl, 0, 0, 7, 1, 7, 2, .inr (by decide), rfl⟩
+
+/-- Commitment-extraction CHARGE per committed Merkle root over `secBits`-bit digests:
+    the single-target Grover term `8 (Q + 1)^2 / 2^secBits` plus the generic quantum collision
+    term `8 (Q + 1)^3 / 2^secBits` (`quantumBhtCollisionBound`). Position tweaks confine a
+    collision to one tree position (`merkle_collision_or_unique_opening`) but the adversary still
+    chooses both preimages, so the cubic term cannot be dropped. This is a budget term in the
+    shape of `[DFMS21]` / `[CMS19]`; the quantum online-extraction reduction for the deployed
+    tree is NOT mechanized here. At `secBits = 256` the cubic term limits `128`-bit budgets to
+    `Q + 1 ≤ 2^40`. -/
+@[expose] def qromMerkleOnlineExtractBound (numRoots secBits Q : Nat) : RatBound :=
+  RatBound.scale numRoots
+    (RatBound.add (quantumGroverSingleTargetBound secBits Q) (quantumBhtCollisionBound secBits Q))
+
+/-- Multi-round QROM Fiat–Shamir budget in the shape of `[DFMS19]` / `[CMS19]`:
+    1. `k` reprogrammed RBR challenge rounds, `∑_r (2 Q + 1)^2 * rbrBounds[r]`;
+    2. commitment extraction, `qromMerkleOnlineExtractBound`;
+    3. query rounds under Fiat–Shamir search, `∑_j 8 (Q + 1)^2 * queryBounds[j]`
+       (`quantumGroverGrindingBound`): the prover picks the grinding nonce before the queries are
+       derived, so query soundness is a search bound in the oracle budget. `queryBounds` are
+       PURE per-stage query errors; no proof-of-work density is credited on top of the search
+       factor. -/
 @[expose] def multiRoundFsQromCompilerBound
     (Q numRoots secBits : Nat)
     (rbrChallengeBounds : List RatBound)
@@ -2827,7 +2902,7 @@ theorem qrom_uniform_oracle_success_bound {cardX w cardAnc Q k : Nat}
     (RatBound.sumList (rbrChallengeBounds.map (dfmRoundScale Q)))
     (RatBound.add
       (qromMerkleOnlineExtractBound numRoots secBits Q)
-      (RatBound.sumList queryStageBounds))
+      (RatBound.sumList (queryStageBounds.map (quantumGroverGrindingBound Q))))
 
 /-- **Constructive `k`-Round QROM RBR Induction Theorem (`rbr_multiRound_qrom_induction`)**:
     Starting from a doomed initial state (`liveAt 0 ≤ 0`), if each round `idx` satisfies
@@ -2938,52 +3013,64 @@ theorem hemV6FiveRoundRbrBounds_eq_deployed :
       [4182, 1644, 824, 489, 792].map (fun n => (n, goldilocksExt4Card)) := by
   decide +kernel
 
-/-- Concrete 4-stage `Hem` v6 coset query + 16-bit PoW error bounds under `Habr24Qrom128`. -/
+/-- Pure 4-stage `Hem` v6 coset-query error bounds under the conjectural `Habr24Qrom128` regime
+    (`(1 / B_i)^{q_i}`, no proof-of-work density). -/
 def hemV6Habr24QueryBounds : List RatBound :=
-  (whirSchedule4Stage .habr24Qrom128).map (fun st => whirConjecturalHabr24StageBound st 16)
+  (whirSchedule4Stage .habr24Qrom128).map (fun st => whirConjecturalHabr24StageBound st 0)
 
-/-- Concrete 4-stage `Hem` v6 unconditional positive-slack coset query + 16-bit PoW error bounds
-    under `BciksJohnsonQrom128` (`etaScale = 256`). -/
+/-- Pure 4-stage `Hem` v6 coset-query error bounds under `BciksJohnsonQrom128`, DERIVED from the
+    same deployed `whirAffineStageWitnesses 24 true` rows as the fold bounds: the exact
+    distinct-fiber bound `(A + s_i)_{q_i} / (n)_{q_i}` at each row's own agreement threshold
+    (`whirAffine_deployed_pure_query_bounds`), with no proof-of-work density. -/
 def hemV6BciksJohnsonQueryBounds : List RatBound :=
-  (whirSchedule4Stage .bciksJohnsonQrom128).map
-    (fun st => whirPositiveEtaJohnsonStageBound st 256 (by decide) 16)
+  (whirAffineStageWitnesses 24 true).map whirAffinePureQueryBoundOrOne
 
-/-- **Master Multi-Round Fiat–Shamir QROM Budget Theorem (`multiRoundFsQrom_soundness_bound`)**:
-    1. **`5` aggregated RBR entries**: `hemV6FiveRoundRbrBounds.length = 5` (`Round 0 Cascade` +
-       `4` `[CWYZ26]` Affine WHIR stages, each stage entry summing its `s_i` fold rounds, all derived
-       from the deployed `nv = 24` witnesses), coupled with `5` position-tweaked Merkle commitment roots
-       (`O(Q^2 / 2^256)` online extraction, zero rewinding on coset queries!) and `4` coset-query stages.
-    2. **`Habr24Qrom128` Concrete `> 128`-Bit Adaptive Multi-Round QROM Soundness**:
-       For ALL quantum oracle budgets `Q + 1 ≤ 2 ^ 56`, the complete `k = 5` Measure-and-Reprogram
-       + online Merkle extraction + 4-stage query bound achieves **`strictlyMoreThanBits 128`**
-       (and **`atLeastBits 128`**)!
-    3. **`BciksJohnsonQrom128` Concrete `> 128`-Bit Unconditional Adaptive Multi-Round QROM Soundness**:
-       For ALL quantum oracle budgets `Q + 1 ≤ 2 ^ 56`, the complete `k = 5` unconditional
-       `[CWYZ26]` + positive-`η` Johnson multi-round QROM bound achieves **`strictlyMoreThanBits 128`**
-       (and **`atLeastBits 128`**) with zero `[HABR24]` conjecture! -/
-theorem multiRoundFsQrom_soundness_bound :
+/-- **Multi-round Fiat–Shamir QROM numerical budget (`multiRoundFsQrom_budget_bound`)**.
+    For every oracle budget `Q + 1 ≤ 2^40`, `multiRoundFsQromCompilerBound` at the deployed
+    `num_vars = 24` parameters (five aggregated RBR entries derived from the deployed witness
+    rows, five committed Merkle roots over `256`-bit digests, four query stages) is strictly
+    below `2^-128`, for both the conjectural `Habr24Qrom128` query bounds and the
+    witness-derived `BciksJohnsonQrom128` query bounds.
+
+    The range is forced by the collision term of commitment extraction: at `Q + 1 = 2^41` the
+    same expression exceeds `2^-128` (`tooth_multiRoundFsQrom_budget_fails_at_2pow41`).
+
+    This is arithmetic about the budget expression. It becomes an acceptance-probability bound
+    for the deployed verifier only together with (a) an `RbrStateFunction` for the `Hem`
+    transcript whose flip bounds are the listed round bounds, which needs `[CWYZ26]`
+    Theorem 4.8 at the Johnson radius, and (b) a quantum extraction reduction for the
+    commitment charge. Neither is proved in this module. -/
+theorem multiRoundFsQrom_budget_bound :
     hemV6FiveRoundRbrBounds.length = 5 ∧
-    (∀ Q : Nat, Q + 1 ≤ 2 ^ 56 →
+    (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
       strictlyMoreThanBits 128
         (multiRoundFsQromCompilerBound Q 5 256
           hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) ∧
       atLeastBits 128
         (multiRoundFsQromCompilerBound Q 5 256
           hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)) ∧
-    (∀ Q : Nat, Q + 1 ≤ 2 ^ 56 →
+    (∀ Q : Nat, Q + 1 ≤ 2 ^ 40 →
       strictlyMoreThanBits 128
         (multiRoundFsQromCompilerBound Q 5 256
           hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) ∧
       atLeastBits 128
         (multiRoundFsQromCompilerBound Q 5 256
           hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)) := by
-  let QMax : Nat := 2 ^ 56 - 1
+  let QMax : Nat := 2 ^ 40 - 1
   have hMonoScale : ∀ {a b : Nat} (hab : a ≤ b) (r : RatBound),
       RatBound.le (RatBound.scale a r) (RatBound.scale b r) := by
     intro a b hab r
     unfold RatBound.le RatBound.scale
     dsimp only
     exact Nat.mul_le_mul_right r.den (Nat.mul_le_mul_right r.num hab)
+  have hScaleMono : ∀ (k : Nat) {a b : RatBound},
+      RatBound.le a b → RatBound.le (RatBound.scale k a) (RatBound.scale k b) := by
+    intro k a b h
+    unfold RatBound.le at h
+    unfold RatBound.le RatBound.scale
+    dsimp only
+    rw [Nat.mul_assoc, Nat.mul_assoc]
+    exact Nat.mul_le_mul_left k h
   have hMonoSum : ∀ (xs ys : List RatBound) (hLen : xs.length = ys.length),
       (∀ i : Fin xs.length, RatBound.le (xs.get i) (ys.get ⟨i.1, Nat.lt_of_lt_of_eq i.2 hLen⟩)) →
       RatBound.le (RatBound.sumList xs) (RatBound.sumList ys) := by
@@ -3043,134 +3130,47 @@ theorem multiRoundFsQrom_soundness_bound :
       intro i
       simp only [List.get_eq_getElem, List.getElem_map]
       exact hMonoScale hSqLe _
+    have hGrindLe : 8 * (Q + 1) ^ 2 ≤ 8 * (QMax + 1) ^ 2 :=
+      Nat.mul_le_mul_left 8 (Nat.pow_le_pow_left (by omega) 2)
+    have hQueryLe :
+        RatBound.le
+          (RatBound.sumList (qBounds.map (quantumGroverGrindingBound Q)))
+          (RatBound.sumList (qBounds.map (quantumGroverGrindingBound QMax))) := by
+      apply hMonoSum _ _ (by simp only [List.length_map])
+      intro i
+      simp only [List.get_eq_getElem, List.getElem_map]
+      exact hMonoScale hGrindLe _
     have hMerkleLe :
         RatBound.le (qromMerkleOnlineExtractBound 5 256 Q)
           (qromMerkleOnlineExtractBound 5 256 QMax) := by
-      unfold RatBound.le qromMerkleOnlineExtractBound RatBound.scale
-        quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
-      dsimp only
-      have hQ1Sq : (Q + 1) ^ 2 ≤ (QMax + 1) ^ 2 := Nat.pow_le_pow_left (by omega) 2
-      apply Nat.mul_le_mul_right
-      apply Nat.mul_le_mul_left 5
-      exact Nat.mul_le_mul_left 8 hQ1Sq
-    exact RatBound.add_le_add hRbrLe (RatBound.add_le_add hMerkleLe (RatBound.le_refl _))
-  have hAddThreeQuarters : ∀ {A B : RatBound},
-      RatBound.le A ⟨3, 4 * 2 ^ 128, by decide⟩ →
-      strictlyMoreThanBits 130 B →
-      strictlyMoreThanBits 128 (RatBound.add A B) := by
-    intro A B hA hB
-    unfold RatBound.le at hA
-    unfold strictlyMoreThanBits at hB
-    unfold strictlyMoreThanBits RatBound.add
-    dsimp only at hA ⊢
-    have hB4 : B.num * (4 * 2 ^ 128) < B.den := by
-      have he : (2 : Nat) ^ 130 = 4 * 2 ^ 128 := by decide
-      rwa [he] at hB
-    have h4L : 4 * ((A.num * B.den + B.num * A.den) * 2 ^ 128) =
-        A.num * (4 * 2 ^ 128) * B.den + B.num * (4 * 2 ^ 128) * A.den := by
-      rw [Nat.mul_comm 4, Nat.mul_assoc _ (2 ^ 128) 4, Nat.mul_comm (2 ^ 128) 4,
-          Nat.add_mul]
-      congr 1
-      · rw [Nat.mul_right_comm A.num B.den (4 * 2 ^ 128)]
-      · rw [Nat.mul_right_comm B.num A.den (4 * 2 ^ 128)]
-    have hTerm1 : A.num * (4 * 2 ^ 128) * B.den ≤ 3 * A.den * B.den :=
-      Nat.mul_le_mul_right B.den hA
-    have hTerm2 : B.num * (4 * 2 ^ 128) * A.den < B.den * A.den :=
-      Nat.mul_lt_mul_of_pos_right hB4 A.h_pos
-    have hSumLt : 4 * ((A.num * B.den + B.num * A.den) * 2 ^ 128) < 4 * (A.den * B.den) := by
-      rw [h4L]
-      have hR : 3 * A.den * B.den + B.den * A.den = 4 * (A.den * B.den) := by
-        rw [Nat.mul_comm B.den A.den, Nat.mul_assoc 3 A.den B.den]
-        omega
-      rw [← hR]
-      exact Nat.add_lt_add_of_le_of_lt hTerm1 hTerm2
-    if hLt4 : (A.num * B.den + B.num * A.den) * 2 ^ 128 < A.den * B.den then
-      exact hLt4
-    else
-      exact absurd hSumLt (Nat.not_lt.mpr (Nat.mul_le_mul_left 4 (Nat.le_of_not_lt hLt4)))
-  have hRbrThreeQuarters :
-      RatBound.le
-        (RatBound.sumList (hemV6FiveRoundRbrBounds.map (dfmRoundScale QMax)))
-        ⟨3, 4 * 2 ^ 128, by decide⟩ := by
-    show RatBound.le
-      (RatBound.sumList (hemV6FiveRoundRbrBounds.map (dfmRoundScale (2 ^ 56 - 1))))
-      ⟨3, 4 * 2 ^ 128, by decide⟩
-    decide +kernel
-  have hMerkle132 : atLeastBits 132 (qromMerkleOnlineExtractBound 5 256 QMax) := by
-    unfold atLeastBits qromMerkleOnlineExtractBound RatBound.scale
-      quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
-    dsimp only [QMax]
-    decide
-  have hHabrQuery132 : atLeastBits 132 (RatBound.sumList hemV6Habr24QueryBounds) := by
-    apply atLeastBits_antitone_bits (by decide : 132 ≤ 270)
-    apply atLeastBits_sumList_union_loss (loss := 2)
-      (by simp only [hemV6Habr24QueryBounds, List.length_map]; decide)
-    intro b hb
-    unfold hemV6Habr24QueryBounds at hb
-    rw [List.mem_map] at hb
-    rcases hb with ⟨st, hMem, rfl⟩
-    unfold whirSchedule4Stage at hMem
-    cases hMem with
-    | head => unfold atLeastBits whirConjecturalHabr24StageBound; decide
-    | tail _ h1 =>
-      cases h1 with
-      | head => unfold atLeastBits whirConjecturalHabr24StageBound; decide
-      | tail _ h2 =>
-        cases h2 with
-        | head => unfold atLeastBits whirConjecturalHabr24StageBound; decide
-        | tail _ h3 =>
-          cases h3 with
-          | head => unfold atLeastBits whirConjecturalHabr24StageBound; decide
-          | tail _ h4 => cases h4
-  have hBciksQuery132 : atLeastBits 132 (RatBound.sumList hemV6BciksJohnsonQueryBounds) := by
-    apply atLeastBits_antitone_bits (by decide : 132 ≤ 270)
-    apply atLeastBits_sumList_union_loss (loss := 2)
-      (by simp only [hemV6BciksJohnsonQueryBounds, List.length_map]; decide)
-    intro b hb
-    unfold hemV6BciksJohnsonQueryBounds at hb
-    rw [List.mem_map] at hb
-    rcases hb with ⟨st, hMem, rfl⟩
-    have hPure := Nat.le_of_lt (bciks_johnson_positive_eta_slack_and_commit_costs.2 st hMem).1
-    unfold strictlyMoreThanBits whirPositiveEtaPureQueryBound at hPure
-    unfold atLeastBits whirPositiveEtaJohnsonStageBound
-    dsimp only at hPure ⊢
-    have hMul := Nat.mul_le_mul_right (2 ^ 16) hPure
-    have hPow : (2 * 256 + 1) ^ st.numQueries * 2 ^ 256 * 2 ^ 16 =
-        (2 * 256 + 1) ^ st.numQueries * 2 ^ 272 := by
-      simp only [Nat.mul_assoc, ← Nat.pow_add]
-    rwa [hPow] at hMul
-  have hStrict130OfAtLeast131 : ∀ {X : RatBound}, atLeastBits 131 X → strictlyMoreThanBits 130 X := by
-    intro X hX
-    unfold atLeastBits at hX
-    unfold strictlyMoreThanBits
-    if hNum0 : X.num = 0 then
-      rw [hNum0, Nat.zero_mul]
-      exact X.h_pos
-    else
-      have hLt : X.num * 2 ^ 130 < X.num * 2 ^ 131 := by
-        have hPow : (2 : Nat) ^ 130 < 2 ^ 131 := by decide
-        exact Nat.mul_lt_mul_of_pos_left hPow (Nat.pos_of_ne_zero hNum0)
-      exact Nat.lt_of_lt_of_le hLt hX
-  have hTailHabr130 :
-      strictlyMoreThanBits 130
-        (RatBound.add (qromMerkleOnlineExtractBound 5 256 QMax)
-          (RatBound.sumList hemV6Habr24QueryBounds)) :=
-    hStrict130OfAtLeast131 (atLeastBits_add_union_loss hMerkle132 hHabrQuery132)
-  have hTailBciks130 :
-      strictlyMoreThanBits 130
-        (RatBound.add (qromMerkleOnlineExtractBound 5 256 QMax)
-          (RatBound.sumList hemV6BciksJohnsonQueryBounds)) :=
-    hStrict130OfAtLeast131 (atLeastBits_add_union_loss hMerkle132 hBciksQuery132)
+      unfold qromMerkleOnlineExtractBound
+      apply hScaleMono
+      apply RatBound.add_le_add
+      · unfold RatBound.le quantumGroverSingleTargetBound quantumZhandryMultiTargetBound
+        dsimp only
+        exact Nat.mul_le_mul_right _
+          (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 2))
+      · unfold RatBound.le quantumBhtCollisionBound
+        dsimp only
+        exact Nat.mul_le_mul_right _
+          (Nat.mul_le_mul_left _ (Nat.pow_le_pow_left (by omega) 3))
+    exact RatBound.add_le_add hRbrLe (RatBound.add_le_add hMerkleLe hQueryLe)
   have hHabrMax :
       strictlyMoreThanBits 128
         (multiRoundFsQromCompilerBound QMax 5 256
-          hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) :=
-    hAddThreeQuarters hRbrThreeQuarters hTailHabr130
+          hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds) := by
+    show strictlyMoreThanBits 128
+      (multiRoundFsQromCompilerBound (2 ^ 40 - 1) 5 256
+        hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds)
+    decide +kernel
   have hBciksMax :
       strictlyMoreThanBits 128
         (multiRoundFsQromCompilerBound QMax 5 256
-          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) :=
-    hAddThreeQuarters hRbrThreeQuarters hTailBciks130
+          hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+    show strictlyMoreThanBits 128
+      (multiRoundFsQromCompilerBound (2 ^ 40 - 1) 5 256
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds)
+    decide +kernel
   refine ⟨by decide +kernel, ?_, ?_⟩
   · intro Q hQ1
     have hQ : Q ≤ QMax := by dsimp [QMax]; omega
@@ -3180,6 +3180,15 @@ theorem multiRoundFsQrom_soundness_bound :
     have hQ : Q ≤ QMax := by dsimp [QMax]; omega
     have hStrict := hStrictOfLe (hCompilerMono hQ hemV6BciksJohnsonQueryBounds) hBciksMax
     exact ⟨hStrict, Nat.le_of_lt hStrict⟩
+
+/-- `#tooth`: the oracle-budget range of `multiRoundFsQrom_budget_bound` is not slack. One more
+    bit of budget (`Q + 1 = 2^41`) pushes the same expression above `2^-128`, through the
+    `8 (Q + 1)^3 / 2^256` collision term of commitment extraction. -/
+theorem tooth_multiRoundFsQrom_budget_fails_at_2pow41 :
+    ¬ atLeastBits 128
+      (multiRoundFsQromCompilerBound (2 ^ 41 - 1) 5 256
+        hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds) := by
+  decide +kernel
 
 
 /-! ## §4. Fiat–Shamir Ordering `#tooth` Witness (`tooth_unabsorbed_shifted_claim_breaks_rbr`) -/
@@ -3418,12 +3427,12 @@ theorem tooth_unabsorbed_shifted_claim_breaks_rbr :
 
 /-- **Non-Vacuity & Inhabitedness Certificate (`inhabited_multi_round_fs_qrom`)**:
     Certifies that all concrete schedules, unitary quantum superposition adversaries (`hadamardQuery2`),
-    honest `HemWhirInstance` transcripts, and `multiRoundFsQrom_soundness_bound` budgets are
+    honest `HemWhirInstance` transcripts, and `multiRoundFsQrom_budget_bound` budgets are
     strictly inhabited with positive numerators and non-trivial quantum/field witnesses! -/
 theorem inhabited_multi_round_fs_qrom :
-    0 < (multiRoundFsQromCompilerBound (2 ^ 55) 5 256
+    0 < (multiRoundFsQromCompilerBound (2 ^ 39) 5 256
            hemV6FiveRoundRbrBounds hemV6BciksJohnsonQueryBounds).num ∧
-    0 < (multiRoundFsQromCompilerBound (2 ^ 55) 5 256
+    0 < (multiRoundFsQromCompilerBound (2 ^ 39) 5 256
            hemV6FiveRoundRbrBounds hemV6Habr24QueryBounds).num ∧
     (∃ (A : QuantumAdv 2 2 1 1) (H : Fin 2 → BitVec 2),
       0 < QVec.stateNormSq (runQuantumAdv A H) ∧
