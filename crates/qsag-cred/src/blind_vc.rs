@@ -1578,3 +1578,1150 @@ pub fn prove_selective_disclosure(
 
 /// Use an explicit verifier-selected soundness budget.
 #[allow(clippy::too_many_arguments)]
+pub fn prove_selective_disclosure_with_profile(
+    cred: &BlindVerifiableCredential,
+    holder_secret: &HolderCredentialSecret,
+    membership: &CredentialMembershipWitness,
+    disclosed_indices: &[usize],
+    request: PresentationRequest<'_>,
+    presentation_entropy: [u8; 32],
+    profile: ZkSoundnessProfile,
+) -> Result<SelectiveDisclosurePresentation, BlindVcError> {
+    let PresentationRequest {
+        verifier_scope,
+        verifier_challenge,
+        mode,
+    } = request;
+    let mut sorted_idx = disclosed_indices.to_vec();
+    sorted_idx.sort_unstable();
+    for (pos, &idx) in sorted_idx.iter().enumerate() {
+        if idx >= holder_secret.arity {
+            return Err(BlindVcError::InvalidDisclosedAttributeIndex { index: idx });
+        }
+        if pos > 0 && sorted_idx[pos - 1] == idx {
+            return Err(BlindVcError::DuplicateDisclosedAttributeIndex { index: idx });
+        }
+    }
+
+    if cred.issuer_epoch != membership.issuer_epoch || cred.schema_id != holder_secret.schema_id {
+        return Err(BlindVcError::CredentialBindingMismatch);
+    }
+    let expected_attr_commit = compute_vc_poseidon2_commit(
+        holder_secret.schema_id,
+        &holder_secret.attrs[..holder_secret.arity],
+        &holder_secret.holder_blind,
+        VC_ATTR_COMMIT_TAG,
+    )?;
+    if cred.attr_commit != expected_attr_commit
+        || membership.leaf_index != cred.accumulator_leaf_index
+        || membership.leaf_index >= IssuerCredentialAccumulator::CAPACITY
+    {
+        return Err(BlindVcError::CredentialBindingMismatch);
+    }
+    if let Some(expected_tok) = &membership.issuance_token
+        && !ct_eq_bytes(&cred.issuance_token, expected_tok)
+    {
+        return Err(BlindVcError::CredentialBindingMismatch);
+    }
+
+    let siblings = membership.siblings;
+    let accumulator_root = membership.accumulator_root;
+    if siblings
+        .iter()
+        .flatten()
+        .chain(accumulator_root.iter())
+        .any(|&v| !gl_is_canonical(v))
+    {
+        return Err(BlindVcError::CredentialBindingMismatch);
+    }
+    let mut node = cred.attr_commit;
+    for (level, sibling) in siblings.iter().enumerate() {
+        node = if (membership.leaf_index >> level) & 1 == 0 {
+            merkle_hash_pair(&node, sibling, cred.issuer_epoch, level as u32)
+        } else {
+            merkle_hash_pair(sibling, &node, cred.issuer_epoch, level as u32)
+        };
+    }
+    if node != accumulator_root {
+        return Err(BlindVcError::CredentialBindingMismatch);
+    }
+    let issuer_root_tag = compute_accumulator_root_tag(
+        &membership.issuer_pk_digest,
+        cred.issuer_epoch,
+        &accumulator_root,
+    );
+
+    let mut ent = presentation_entropy;
+    let mut nonce_bind = Vec::with_capacity(64 + sorted_idx.len() * 12);
+    nonce_bind.extend_from_slice(&cred.issuer_epoch.to_le_bytes());
+    nonce_bind.extend_from_slice(&cred.schema_id.to_le_bytes());
+    nonce_bind.extend_from_slice(&issuer_root_tag);
+    match mode {
+        PresentationMode::UnlinkableFresh => nonce_bind.push(0),
+        PresentationMode::ScopedPseudonym(id) => {
+            nonce_bind.push(1);
+            nonce_bind.extend_from_slice(&id);
+        }
+    }
+    nonce_bind.extend_from_slice(&(sorted_idx.len() as u32).to_le_bytes());
+    for &idx in &sorted_idx {
+        nonce_bind.extend_from_slice(&(idx as u32).to_le_bytes());
+        nonce_bind.extend_from_slice(&holder_secret.attrs[idx].to_le_bytes());
+    }
+    let presentation_nonce = cshake256_framed_32(
+        b"QSAG.VC.PRES_NONCE.V1",
+        &[&ent, verifier_scope, verifier_challenge, &nonce_bind],
+    );
+    let verifier_scope_limbs = presentation_scope(
+        verifier_scope,
+        verifier_challenge,
+        &presentation_nonce,
+        mode,
+    );
+    let pres_blind_vec =
+        sample_canonical_gl_vec(b"QSAG.VC.PRES_BLIND.V1", &ent, &presentation_nonce, 4);
+    let pres_blind = [
+        pres_blind_vec[0],
+        pres_blind_vec[1],
+        pres_blind_vec[2],
+        pres_blind_vec[3],
+    ];
+
+    let pres_commit = compute_vc_poseidon2_commit(
+        cred.schema_id,
+        &holder_secret.attrs[..holder_secret.arity],
+        &pres_blind,
+        VC_PRES_COMMIT_TAG,
+    )?;
+    let scope_tag = compute_vc_scope_tag(
+        cred.schema_id,
+        &holder_secret.holder_blind,
+        &verifier_scope_limbs,
+    );
+
+    let disclosed_attrs: Vec<(usize, u64)> = sorted_idx
+        .iter()
+        .map(|&idx| (idx, holder_secret.attrs[idx]))
+        .collect();
+
+    // Secret witness layout:
+    // - Undisclosed attribute values (arity minus disclosed count).
+    // - `holder_blind[0..4]` (`4`)
+    // - `pres_blind[0..4]` (`4`)
+    // - One Boolean leaf-index bit per Merkle level.
+    // - Six sibling limbs per Merkle level.
+    let mut secret_vals = Vec::with_capacity(MAX_VC_ATTRS + 8 + 7 * VC_ACCUMULATOR_DEPTH);
+    for (attr_i, &attr_val) in holder_secret.attrs[..holder_secret.arity]
+        .iter()
+        .enumerate()
+    {
+        if !sorted_idx.contains(&attr_i) {
+            secret_vals.push(attr_val);
+        }
+    }
+    secret_vals.extend_from_slice(&holder_secret.holder_blind);
+    secret_vals.extend_from_slice(&pres_blind);
+    for lvl in 0..VC_ACCUMULATOR_DEPTH {
+        secret_vals.push(((cred.accumulator_leaf_index >> lvl) & 1) as u64);
+    }
+    for sib in &siblings {
+        secret_vals.extend_from_slice(sib);
+    }
+    let num_secret_wires = secret_vals.len();
+
+    let mut inst_bytes = serialize_sd_instance(&SdInstance {
+        arity: holder_secret.arity,
+        presentation_nonce: &presentation_nonce,
+        issuer_epoch: cred.issuer_epoch,
+        schema_id: cred.schema_id,
+        accumulator_root: &accumulator_root,
+        issuer_root_tag: &issuer_root_tag,
+        verifier_scope_limbs: &verifier_scope_limbs,
+        disclosed_attrs: &disclosed_attrs,
+        pres_commit: &pres_commit,
+        scope_tag: &scope_tag,
+    });
+    inst_bytes.extend_from_slice(verifier_challenge);
+    if profile == ZkSoundnessProfile::Quantum128 {
+        inst_bytes.extend_from_slice(b"QSAG.VC.PROFILE.Quantum128:438");
+    }
+    let statement_digest = cshake256_framed_32(b"QSAG.VC.SD_STMT_DIGEST.V1", &[&inst_bytes]);
+    let mut hedged_zk_seed =
+        cshake256_framed_32(b"QSAG.VC.SD_ZK_SEED.V1", &[&statement_digest, &ent]);
+    let mut tr = InterleavedTranscript::new(b"QSAG.BLIND_VC.SD_ZK.V1", &inst_bytes);
+    if profile == ZkSoundnessProfile::Quantum128 {
+        tr.absorb(b"VC_SOUNDNESS_PROFILE", b"Quantum128:438");
+    }
+
+    struct SdRep {
+        commits: [[u8; 32]; 3],
+        salts: [[u8; 32]; 3],
+        in_shares: [Vec<u64>; 3],
+        tape_seeds: [[u8; 32]; 3],
+        gate_outs: [Vec<u64>; 3],
+        final_outs: [[u64; 3]; VC_FINAL_OUTPUTS],
+    }
+    impl Drop for SdRep {
+        fn drop(&mut self) {
+            for row in &mut self.in_shares {
+                ct_zeroize_u64s(row);
+            }
+            for row in &mut self.gate_outs {
+                ct_zeroize_u64s(row);
+            }
+            for row in &mut self.tape_seeds {
+                ct_zeroize_bytes(row);
+            }
+            for row in &mut self.salts {
+                ct_zeroize_bytes(row);
+            }
+            for row in &mut self.final_outs {
+                ct_zeroize_u64s(row);
+            }
+        }
+    }
+
+    let mut reps = Vec::with_capacity(profile.repetitions());
+    let mut round1_bundle = Vec::with_capacity(profile.repetitions() * 480);
+
+    for rep in 0..profile.repetitions() {
+        let rep_be = (rep as u32).to_be_bytes();
+        let mut share_ctx = [0u8; 36];
+        share_ctx[..32].copy_from_slice(&statement_digest);
+        share_ctx[32..].copy_from_slice(&rep_be);
+        let rand_in = sample_canonical_gl_vec(
+            b"QSAG.VC.SD_IN_SH.V1",
+            &hedged_zk_seed,
+            &share_ctx,
+            2 * num_secret_wires,
+        );
+        let mut in0 = Vec::with_capacity(num_secret_wires);
+        let mut in1 = Vec::with_capacity(num_secret_wires);
+        let mut in2 = Vec::with_capacity(num_secret_wires);
+        let mut sec_wires = Vec::with_capacity(num_secret_wires);
+        for (value, random) in secret_vals.iter().zip(rand_in.as_chunks::<2>().0.iter()) {
+            let s = split_secret_3(*value, random[0], random[1]);
+            sec_wires.push(s);
+            in0.push(s[0]);
+            in1.push(s[1]);
+            in2.push(s[2]);
+        }
+
+        let tape_seeds: [[u8; 32]; 3] = core::array::from_fn(|m| {
+            cshake256_framed_32(
+                b"QSAG.VC.SD_TAPE.V1",
+                &[
+                    &statement_digest,
+                    &hedged_zk_seed,
+                    &presentation_nonce,
+                    &rep_be,
+                    &[m as u8],
+                ],
+            )
+        });
+        let salts: [[u8; 32]; 3] = core::array::from_fn(|m| {
+            cshake256_framed_32(
+                b"QSAG.VC.SD_SALT.V1",
+                &[
+                    &statement_digest,
+                    &hedged_zk_seed,
+                    &presentation_nonce,
+                    &rep_be,
+                    &[m as u8],
+                ],
+            )
+        });
+
+        let mut prover = ZkBooProverTape::new(&tape_seeds, SD_TOTAL_GATES);
+        let mut cursor = 0usize;
+
+        // Reassemble `attr_wires[0..6]` from public disclosed constants + secret undisclosed shares!
+        let mut attr_wires = [[0u64; 3]; MAX_VC_ATTRS];
+        for (i, slot_w) in attr_wires.iter_mut().enumerate() {
+            if i >= holder_secret.arity {
+                *slot_w = [0; 3];
+            } else if let Some(&(_, pub_val)) = disclosed_attrs.iter().find(|&&(idx, _)| idx == i) {
+                *slot_w = [pub_val, 0, 0];
+            } else {
+                *slot_w = sec_wires[cursor];
+                cursor += 1;
+            }
+        }
+        let hb_wires: [[u64; 3]; 4] = core::array::from_fn(|_| {
+            let v = sec_wires[cursor];
+            cursor += 1;
+            v
+        });
+        let pb_wires: [[u64; 3]; 4] = core::array::from_fn(|_| {
+            let v = sec_wires[cursor];
+            cursor += 1;
+            v
+        });
+        let bit_wires: [[u64; 3]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+            let v = sec_wires[cursor];
+            cursor += 1;
+            v
+        });
+        let sib_wires: [[[u64; 3]; 6]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+            core::array::from_fn(|_| {
+                let v = sec_wires[cursor];
+                cursor += 1;
+                v
+            })
+        });
+        debug_assert_eq!(cursor, num_secret_wires);
+
+        // 1. Compute hidden `attr_commit`:
+        let mut st_attr: [[u64; 3]; 13] = [
+            attr_wires[0],
+            attr_wires[1],
+            attr_wires[2],
+            attr_wires[3],
+            attr_wires[4],
+            attr_wires[5],
+            hb_wires[0],
+            hb_wires[1],
+            hb_wires[2],
+            hb_wires[3],
+            [(cred.schema_id & 0xffff_ffff), 0, 0],
+            [
+                gl_add(cred.schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
+                0,
+                0,
+            ],
+            [holder_secret.arity as u64, 0, 0],
+        ];
+        prover.perm12(&mut st_attr);
+        let mut cur_node: [[u64; 3]; 6] = core::array::from_fn(|j| st_attr[j]);
+
+        // 2. Traverse hidden Merkle path up to `accumulator_root`:
+        let mut bool_zeros = [[0u64; 3]; VC_ACCUMULATOR_DEPTH];
+        for (lvl, (zero, &b)) in bool_zeros.iter_mut().zip(&bit_wires).enumerate() {
+            // `b * (1 - b) == 0`:
+            let one_minus_b = [gl_sub(1, b[0]), gl_neg(b[1]), gl_neg(b[2])];
+            *zero = prover.mul_gate(b, one_minus_b);
+
+            let mut left = [[0u64; 3]; 6];
+            let mut right = [[0u64; 3]; 6];
+            for (j, (left_slot, right_slot)) in left.iter_mut().zip(&mut right).enumerate() {
+                let sib_j = sib_wires[lvl][j];
+                // `diff = sib - cur`; `delta = b * diff`; `left = cur + delta`, `right = sib - delta`:
+                let diff: [u64; 3] = core::array::from_fn(|m| gl_sub(sib_j[m], cur_node[j][m]));
+                let delta = prover.mul_gate(b, diff);
+                *left_slot = core::array::from_fn(|m| gl_add(cur_node[j][m], delta[m]));
+                *right_slot = core::array::from_fn(|m| gl_sub(sib_j[m], delta[m]));
+            }
+
+            let mut st_mk: [[u64; 3]; 16] = [
+                left[0],
+                left[1],
+                left[2],
+                left[3],
+                left[4],
+                left[5],
+                right[0],
+                right[1],
+                right[2],
+                right[3],
+                right[4],
+                right[5],
+                [(cred.issuer_epoch & 0xffff_ffff), 0, 0],
+                [lvl as u64, 0, 0],
+                [gl_reduce_u64(VC_MERKLE_NODE_TAG), 0, 0],
+                [
+                    gl_add(cred.issuer_epoch >> 32, gl_reduce_u64(POSEIDON2_CONST_IV)),
+                    0,
+                    0,
+                ],
+            ];
+            prover.perm12(&mut st_mk);
+            cur_node = core::array::from_fn(|j| st_mk[j]);
+        }
+
+        // 3. Fresh rerandomized `pres_commit`:
+        let mut st_pres: [[u64; 3]; 13] = [
+            attr_wires[0],
+            attr_wires[1],
+            attr_wires[2],
+            attr_wires[3],
+            attr_wires[4],
+            attr_wires[5],
+            pb_wires[0],
+            pb_wires[1],
+            pb_wires[2],
+            pb_wires[3],
+            [(cred.schema_id & 0xffff_ffff), 0, 0],
+            [
+                gl_add(cred.schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG)),
+                0,
+                0,
+            ],
+            [holder_secret.arity as u64, 0, 0],
+        ];
+        prover.perm12(&mut st_pres);
+
+        // 4. Scope-bound `scope_tag`:
+        let mut st_sc: [[u64; 3]; 12] = [
+            hb_wires[0],
+            hb_wires[1],
+            hb_wires[2],
+            hb_wires[3],
+            [verifier_scope_limbs[0], 0, 0],
+            [verifier_scope_limbs[1], 0, 0],
+            [verifier_scope_limbs[2], 0, 0],
+            [verifier_scope_limbs[3], 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+            [(cred.schema_id & 0xffff_ffff), 0, 0],
+            [
+                gl_add(cred.schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM)),
+                0,
+                0,
+            ],
+        ];
+        prover.perm12(&mut st_sc);
+        debug_assert_eq!(prover.gate_cursor, SD_TOTAL_GATES);
+
+        // Six limbs each for root, presentation and scope, plus path-bit constraints.
+        let mut final_outs = [[0u64; 3]; VC_FINAL_OUTPUTS];
+        final_outs[0..6].copy_from_slice(&cur_node);
+        final_outs[6..12].copy_from_slice(&st_pres[0..6]);
+        final_outs[12..18].copy_from_slice(&st_sc[0..6]);
+        final_outs[18..VC_FINAL_OUTPUTS].copy_from_slice(&bool_zeros);
+
+        let in_shares = [in0, in1, in2];
+        let commits: [[u8; 32]; 3] = core::array::from_fn(|m| {
+            let f_m: [u64; VC_FINAL_OUTPUTS] = core::array::from_fn(|j| final_outs[j][m]);
+            let d = digest_party_view(&in_shares[m], &tape_seeds[m], &prover.out[m], &f_m);
+            commit_mpc_broadcast(&presentation_nonce, rep as u32, m as u16, &d, &salts[m])
+        });
+
+        for c in &commits {
+            round1_bundle.extend_from_slice(c);
+        }
+        for o16 in &final_outs {
+            for &v in o16 {
+                round1_bundle.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+
+        reps.push(SdRep {
+            commits,
+            salts,
+            in_shares,
+            tape_seeds,
+            gate_outs: core::mem::take(&mut prover.out),
+            final_outs,
+        });
+    }
+
+    tr.absorb(b"VC_SD_R1_COMMITS", &round1_bundle);
+    let open_trits = squeeze_ternary_challenges(&mut tr, profile.repetitions());
+    ct_zeroize_bytes(&mut hedged_zk_seed);
+    ct_zeroize_bytes(&mut ent);
+    ct_zeroize_u64s(&mut secret_vals);
+
+    let mut opened_reps = Vec::with_capacity(profile.repetitions());
+    for (rep_d, e) in reps.into_iter().zip(open_trits) {
+        let e1 = (e + 1) % 3;
+        let e2 = (e + 2) % 3;
+        opened_reps.push(OpenedZkBooRepetition {
+            e: e as u8,
+            unopened_commitment: rep_d.commits[e2],
+            salt_e: rep_d.salts[e],
+            salt_e1: rep_d.salts[e1],
+            in_shares_e: rep_d.in_shares[e].clone(),
+            in_shares_e1: rep_d.in_shares[e1].clone(),
+            tape_seed_e: rep_d.tape_seeds[e],
+            tape_seed_e1: rep_d.tape_seeds[e1],
+            gate_outs_e: rep_d.gate_outs[e].clone(),
+            gate_outs_e1: rep_d.gate_outs[e1].clone(),
+            final_outs_all3: rep_d.final_outs,
+            num_active_final_outs: VC_FINAL_OUTPUTS,
+        });
+    }
+
+    Ok(SelectiveDisclosurePresentation {
+        arity: holder_secret.arity,
+        verifier_challenge: *verifier_challenge,
+        mode,
+        presentation_nonce,
+        issuer_epoch: cred.issuer_epoch,
+        schema_id: cred.schema_id,
+        accumulator_root,
+        issuer_root_tag,
+        verifier_scope_limbs,
+        disclosed_attrs,
+        pres_commit,
+        scope_tag,
+        opened_reps,
+    })
+}
+
+/// Verify an unlinkable [`SelectiveDisclosurePresentation`] against an issuer-signed
+/// [`IssuerRootAttestation`] (`trusted_root`), `expected_issuer_mldsa_pk`, `expected_oprf_pk`,
+/// and `verifier_scope`.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_presentation(
+    pres: &SelectiveDisclosurePresentation,
+    trusted_root: &IssuerRootAttestation,
+    expected_issuer_mldsa_pk: &[u8],
+    expected_oprf_pk: &PublicKey,
+    verifier_scope: &[u8],
+    verifier_challenge: &[u8; 32],
+    mode: PresentationMode,
+    expected_schema_id: u64,
+    expected_arity: usize,
+) -> bool {
+    verify_presentation_with_profile(
+        pres,
+        trusted_root,
+        expected_issuer_mldsa_pk,
+        expected_oprf_pk,
+        verifier_scope,
+        verifier_challenge,
+        mode,
+        expected_schema_id,
+        expected_arity,
+        ZkSoundnessProfile::Quantum128,
+    )
+}
+
+/// Use an explicit verifier-selected soundness budget.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_presentation_with_profile(
+    pres: &SelectiveDisclosurePresentation,
+    trusted_root: &IssuerRootAttestation,
+    expected_issuer_mldsa_pk: &[u8],
+    expected_oprf_pk: &PublicKey,
+    verifier_scope: &[u8],
+    verifier_challenge: &[u8; 32],
+    mode: PresentationMode,
+    expected_schema_id: u64,
+    expected_arity: usize,
+    profile: ZkSoundnessProfile,
+) -> bool {
+    if !trusted_root.verify(expected_issuer_mldsa_pk, expected_oprf_pk) {
+        return false;
+    }
+    if !(1..=MAX_VC_ATTRS).contains(&expected_arity)
+        || pres.arity != expected_arity
+        || pres.schema_id != expected_schema_id
+        || pres.verifier_challenge != *verifier_challenge
+        || pres.mode != mode
+        || pres.issuer_epoch != trusted_root.issuer_epoch
+        || pres.accumulator_root != trusted_root.accumulator_root
+        || !ct_eq_bytes(&pres.issuer_root_tag, &trusted_root.root_tag)
+    {
+        return false;
+    }
+    let expected_scope_limbs = presentation_scope(
+        verifier_scope,
+        verifier_challenge,
+        &pres.presentation_nonce,
+        mode,
+    );
+    if pres.verifier_scope_limbs != expected_scope_limbs {
+        return false;
+    }
+    if pres.opened_reps.len() != profile.repetitions()
+        || pres.disclosed_attrs.len() > expected_arity
+    {
+        return false;
+    }
+    for (pos, &(idx, val)) in pres.disclosed_attrs.iter().enumerate() {
+        if idx >= expected_arity || !gl_is_canonical(val) {
+            return false;
+        }
+        if pos > 0 && pres.disclosed_attrs[pos - 1].0 >= idx {
+            return false;
+        }
+    }
+    for &x in pres.pres_commit.iter().chain(pres.scope_tag.iter()) {
+        if !gl_is_canonical(x) {
+            return false;
+        }
+    }
+
+    let expected_num_secret_wires = (expected_arity - pres.disclosed_attrs.len())
+        + 4
+        + 4
+        + VC_ACCUMULATOR_DEPTH
+        + 6 * VC_ACCUMULATOR_DEPTH;
+
+    let mut inst_bytes = serialize_sd_instance(&SdInstance {
+        arity: expected_arity,
+        presentation_nonce: &pres.presentation_nonce,
+        issuer_epoch: pres.issuer_epoch,
+        schema_id: pres.schema_id,
+        accumulator_root: &pres.accumulator_root,
+        issuer_root_tag: &pres.issuer_root_tag,
+        verifier_scope_limbs: &pres.verifier_scope_limbs,
+        disclosed_attrs: &pres.disclosed_attrs,
+        pres_commit: &pres.pres_commit,
+        scope_tag: &pres.scope_tag,
+    });
+    inst_bytes.extend_from_slice(verifier_challenge);
+    if profile == ZkSoundnessProfile::Quantum128 {
+        inst_bytes.extend_from_slice(b"QSAG.VC.PROFILE.Quantum128:438");
+    }
+    let mut tr = InterleavedTranscript::new(b"QSAG.BLIND_VC.SD_ZK.V1", &inst_bytes);
+    if profile == ZkSoundnessProfile::Quantum128 {
+        tr.absorb(b"VC_SOUNDNESS_PROFILE", b"Quantum128:438");
+    }
+
+    let mut expected_16 = [0u64; VC_FINAL_OUTPUTS];
+    expected_16[..6].copy_from_slice(&pres.accumulator_root);
+    expected_16[6..12].copy_from_slice(&pres.pres_commit);
+    expected_16[12..18].copy_from_slice(&pres.scope_tag);
+
+    let mut round1_bundle = Vec::with_capacity(profile.repetitions() * 480);
+
+    for (rep, o) in pres.opened_reps.iter().enumerate() {
+        let e = o.e as usize;
+        if e >= 3
+            || o.num_active_final_outs != VC_FINAL_OUTPUTS
+            || o.in_shares_e.len() != expected_num_secret_wires
+            || o.in_shares_e1.len() != expected_num_secret_wires
+        {
+            return false;
+        }
+        let e1 = (e + 1) % 3;
+        let e2 = (e + 2) % 3;
+
+        for &x in o.in_shares_e.iter().chain(o.in_shares_e1.iter()) {
+            if !gl_is_canonical(x) {
+                return false;
+            }
+        }
+        for &x in o.gate_outs_e.iter().chain(o.gate_outs_e1.iter()) {
+            if !gl_is_canonical(x) {
+                return false;
+            }
+        }
+
+        let mut verifier = ZkBooVerifierTape::new(
+            e,
+            &o.tape_seed_e,
+            &o.tape_seed_e1,
+            &o.gate_outs_e,
+            &o.gate_outs_e1,
+            SD_TOTAL_GATES,
+        );
+
+        let mut cursor = 0usize;
+        let mut attr_wires = [[0u64; 2]; MAX_VC_ATTRS];
+        for (i, slot_w) in attr_wires.iter_mut().enumerate() {
+            if i >= expected_arity {
+                *slot_w = [0; 2];
+            } else if let Some(&(_, pub_val)) =
+                pres.disclosed_attrs.iter().find(|&&(idx, _)| idx == i)
+            {
+                *slot_w = verifier.add_const([0, 0], pub_val);
+            } else {
+                *slot_w = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
+                cursor += 1;
+            }
+        }
+        let hb_wires: [[u64; 2]; 4] = core::array::from_fn(|_| {
+            let v = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
+            cursor += 1;
+            v
+        });
+        let pb_wires: [[u64; 2]; 4] = core::array::from_fn(|_| {
+            let v = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
+            cursor += 1;
+            v
+        });
+        let bit_wires: [[u64; 2]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+            let v = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
+            cursor += 1;
+            v
+        });
+        let sib_wires: [[[u64; 2]; 6]; VC_ACCUMULATOR_DEPTH] = core::array::from_fn(|_| {
+            core::array::from_fn(|_| {
+                let v = [o.in_shares_e[cursor], o.in_shares_e1[cursor]];
+                cursor += 1;
+                v
+            })
+        });
+
+        let mut st_attr: [[u64; 2]; 13] = [
+            attr_wires[0],
+            attr_wires[1],
+            attr_wires[2],
+            attr_wires[3],
+            attr_wires[4],
+            attr_wires[5],
+            hb_wires[0],
+            hb_wires[1],
+            hb_wires[2],
+            hb_wires[3],
+            verifier.add_const([0, 0], pres.schema_id & 0xffff_ffff),
+            verifier.add_const(
+                [0, 0],
+                gl_add(pres.schema_id >> 32, gl_reduce_u64(VC_ATTR_COMMIT_TAG)),
+            ),
+            verifier.add_const([0, 0], expected_arity as u64),
+        ];
+        verifier.perm12(&mut st_attr);
+        let mut cur_node: [[u64; 2]; 6] = core::array::from_fn(|j| st_attr[j]);
+
+        let mut bool_zeros = [[0u64; 2]; VC_ACCUMULATOR_DEPTH];
+        for (lvl, (zero, &b)) in bool_zeros.iter_mut().zip(&bit_wires).enumerate() {
+            let one_wire = verifier.add_const([0, 0], 1);
+            let one_minus_b = [gl_sub(one_wire[0], b[0]), gl_sub(one_wire[1], b[1])];
+            *zero = verifier.mul_gate(b, one_minus_b);
+
+            let mut left = [[0u64; 2]; 6];
+            let mut right = [[0u64; 2]; 6];
+            for (j, (left_slot, right_slot)) in left.iter_mut().zip(&mut right).enumerate() {
+                let sib_j = sib_wires[lvl][j];
+                let diff = [
+                    gl_sub(sib_j[0], cur_node[j][0]),
+                    gl_sub(sib_j[1], cur_node[j][1]),
+                ];
+                let delta = verifier.mul_gate(b, diff);
+                *left_slot = [
+                    gl_add(cur_node[j][0], delta[0]),
+                    gl_add(cur_node[j][1], delta[1]),
+                ];
+                *right_slot = [gl_sub(sib_j[0], delta[0]), gl_sub(sib_j[1], delta[1])];
+            }
+
+            let mut st_mk: [[u64; 2]; 16] = [
+                left[0],
+                left[1],
+                left[2],
+                left[3],
+                left[4],
+                left[5],
+                right[0],
+                right[1],
+                right[2],
+                right[3],
+                right[4],
+                right[5],
+                verifier.add_const([0, 0], pres.issuer_epoch & 0xffff_ffff),
+                verifier.add_const([0, 0], lvl as u64),
+                verifier.add_const([0, 0], gl_reduce_u64(VC_MERKLE_NODE_TAG)),
+                verifier.add_const(
+                    [0, 0],
+                    gl_add(pres.issuer_epoch >> 32, gl_reduce_u64(POSEIDON2_CONST_IV)),
+                ),
+            ];
+            verifier.perm12(&mut st_mk);
+            cur_node = core::array::from_fn(|j| st_mk[j]);
+        }
+
+        let mut st_pres: [[u64; 2]; 13] = [
+            attr_wires[0],
+            attr_wires[1],
+            attr_wires[2],
+            attr_wires[3],
+            attr_wires[4],
+            attr_wires[5],
+            pb_wires[0],
+            pb_wires[1],
+            pb_wires[2],
+            pb_wires[3],
+            verifier.add_const([0, 0], pres.schema_id & 0xffff_ffff),
+            verifier.add_const(
+                [0, 0],
+                gl_add(pres.schema_id >> 32, gl_reduce_u64(VC_PRES_COMMIT_TAG)),
+            ),
+            verifier.add_const([0, 0], expected_arity as u64),
+        ];
+        verifier.perm12(&mut st_pres);
+
+        let mut st_sc: [[u64; 2]; 12] = [
+            hb_wires[0],
+            hb_wires[1],
+            hb_wires[2],
+            hb_wires[3],
+            verifier.add_const([0, 0], pres.verifier_scope_limbs[0]),
+            verifier.add_const([0, 0], pres.verifier_scope_limbs[1]),
+            verifier.add_const([0, 0], pres.verifier_scope_limbs[2]),
+            verifier.add_const([0, 0], pres.verifier_scope_limbs[3]),
+            [0, 0],
+            [0, 0],
+            verifier.add_const([0, 0], pres.schema_id & 0xffff_ffff),
+            verifier.add_const(
+                [0, 0],
+                gl_add(pres.schema_id >> 32, gl_reduce_u64(VC_SCOPE_TAG_DOM)),
+            ),
+        ];
+        verifier.perm12(&mut st_sc);
+
+        if !verifier.ok || verifier.gate_cursor != SD_TOTAL_GATES {
+            return false;
+        }
+
+        let mut replayed_16 = [[0u64; 2]; VC_FINAL_OUTPUTS];
+        replayed_16[..6].copy_from_slice(&cur_node);
+        replayed_16[6..12].copy_from_slice(&st_pres[..6]);
+        replayed_16[12..18].copy_from_slice(&st_sc[..6]);
+        replayed_16[18..].copy_from_slice(&bool_zeros);
+
+        for (j, replayed) in replayed_16.iter().enumerate() {
+            for &s_val in &o.final_outs_all3[j] {
+                if !gl_is_canonical(s_val) {
+                    return false;
+                }
+            }
+            if replayed[0] != o.final_outs_all3[j][e] || replayed[1] != o.final_outs_all3[j][e1] {
+                return false;
+            }
+            let recon = gl_add(
+                o.final_outs_all3[j][0],
+                gl_add(o.final_outs_all3[j][1], o.final_outs_all3[j][2]),
+            );
+            if recon != expected_16[j] {
+                return false;
+            }
+        }
+
+        let f_e: [u64; VC_FINAL_OUTPUTS] = core::array::from_fn(|j| o.final_outs_all3[j][e]);
+        let f_e1: [u64; VC_FINAL_OUTPUTS] = core::array::from_fn(|j| o.final_outs_all3[j][e1]);
+        let d_e = digest_party_view(&o.in_shares_e, &o.tape_seed_e, &o.gate_outs_e, &f_e);
+        let d_e1 = digest_party_view(&o.in_shares_e1, &o.tape_seed_e1, &o.gate_outs_e1, &f_e1);
+        let com_e = commit_mpc_broadcast(
+            &pres.presentation_nonce,
+            rep as u32,
+            e as u16,
+            &d_e,
+            &o.salt_e,
+        );
+        let com_e1 = commit_mpc_broadcast(
+            &pres.presentation_nonce,
+            rep as u32,
+            e1 as u16,
+            &d_e1,
+            &o.salt_e1,
+        );
+
+        let mut commits = [[0u8; 32]; 3];
+        commits[e] = com_e;
+        commits[e1] = com_e1;
+        commits[e2] = o.unopened_commitment;
+        for c in &commits {
+            round1_bundle.extend_from_slice(c);
+        }
+        for o16 in &o.final_outs_all3 {
+            for &v in o16 {
+                round1_bundle.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+
+    tr.absorb(b"VC_SD_R1_COMMITS", &round1_bundle);
+    let expected_trits = squeeze_ternary_challenges(&mut tr, profile.repetitions());
+    for (o, exp_e) in pres.opened_reps.iter().zip(expected_trits) {
+        if (o.e as usize) != exp_e {
+            return false;
+        }
+    }
+    true
+}
+
+impl core::fmt::Display for BlindVcError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl core::error::Error for BlindVcError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arity_commitment_distinguishes_trailing_zero() {
+        let blind = [17, 18, 19, 20];
+        let one = compute_vc_poseidon2_commit(42, &[7], &blind, VC_ATTR_COMMIT_TAG).unwrap();
+        let two = compute_vc_poseidon2_commit(42, &[7, 0], &blind, VC_ATTR_COMMIT_TAG).unwrap();
+        assert_ne!(one, two);
+        assert!(compute_vc_poseidon2_commit(42, &[], &blind, VC_ATTR_COMMIT_TAG).is_err());
+        assert!(compute_vc_poseidon2_commit(42, &[0; 7], &blind, VC_ATTR_COMMIT_TAG).is_err());
+    }
+
+    #[test]
+    fn quantum_issuance_roundtrip_and_downgrade_rejection() {
+        let (mut req, _) = holder_prepare_blind_issuance_with_profile(
+            42,
+            &[1, 2],
+            [3; 32],
+            7,
+            [4; 32],
+            [5; 32],
+            ZkSoundnessProfile::Quantum128,
+        )
+        .unwrap();
+        assert_eq!(req.opened_reps.len(), 438);
+        let (classical, _) = holder_prepare_blind_issuance_with_profile(
+            42,
+            &[1, 2],
+            [3; 32],
+            7,
+            [4; 32],
+            [5; 32],
+            ZkSoundnessProfile::Classical128,
+        )
+        .unwrap();
+        assert_ne!(
+            classical.opened_reps[0].tape_seed_e,
+            req.opened_reps[0].tape_seed_e
+        );
+        assert_ne!(
+            classical.opened_reps[0].in_shares_e,
+            req.opened_reps[0].in_shares_e
+        );
+        assert!(!verify_blind_issuance_request_with_profile(
+            &classical,
+            &[1, 2],
+            42,
+            ZkSoundnessProfile::Quantum128
+        ));
+
+        assert!(verify_blind_issuance_request_with_profile(
+            &req,
+            &[1, 2],
+            42,
+            ZkSoundnessProfile::Quantum128
+        ));
+        assert!(verify_blind_issuance_request(&req, &[1, 2], 42));
+        req.opened_reps[0].gate_outs_e[0] = gl_add(req.opened_reps[0].gate_outs_e[0], 1);
+        assert!(!verify_blind_issuance_request_with_profile(
+            &req,
+            &[1, 2],
+            42,
+            ZkSoundnessProfile::Quantum128
+        ));
+    }
+
+    #[test]
+    fn selective_disclosure_rejects_round_and_gate_tampering() {
+        for profile in [
+            ZkSoundnessProfile::Classical128,
+            ZkSoundnessProfile::Quantum128,
+        ] {
+            selective_disclosure_profile(profile);
+        }
+    }
+    fn selective_disclosure_profile(profile: ZkSoundnessProfile) {
+        let holder = HolderCredentialSecret {
+            schema_id: 42,
+            arity: 5,
+            attrs: [840, 1994, 3, 9910, 2030, 0],
+            holder_blind: [17, 18, 19, 20],
+        };
+        let commitment = compute_vc_poseidon2_commit(
+            holder.schema_id,
+            &holder.attrs[..holder.arity],
+            &holder.holder_blind,
+            VC_ATTR_COMMIT_TAG,
+        )
+        .unwrap();
+        let oprf_pk = PublicKey::test_key();
+        let mut accumulator = IssuerCredentialAccumulator::new(oprf_pk.clone(), 7);
+        let index = accumulator.enroll(commitment).unwrap();
+        let cred = BlindVerifiableCredential {
+            issuer_epoch: 7,
+            schema_id: 42,
+            attr_commit: commitment,
+            issuance_token: [0; 32],
+            accumulator_leaf_index: index,
+        };
+        let (issuer_mldsa_pk, issuer_mldsa_sk) =
+            crate::fips204_ntt::ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[0x41; 32]);
+        let root_attestation = accumulator
+            .attest_root_deterministic(
+                MlDsaLevel::MlDsa44,
+                &issuer_mldsa_sk,
+                issuer_mldsa_pk.clone(),
+            )
+            .unwrap();
+        let mode = PresentationMode::UnlinkableFresh;
+        let mut presentation = prove_selective_disclosure_with_profile(
+            &cred,
+            &holder,
+            &accumulator.membership_witness(index).unwrap(),
+            &[0, 2],
+            PresentationRequest {
+                verifier_scope: b"verifier",
+                verifier_challenge: &[73; 32],
+                mode,
+            },
+            [72; 32],
+            profile,
+        )
+        .unwrap();
+        assert!(verify_presentation_with_profile(
+            &presentation,
+            &root_attestation,
+            &issuer_mldsa_pk,
+            &oprf_pk,
+            b"verifier",
+            &[73; 32],
+            mode,
+            42,
+            holder.arity,
+            profile
+        ));
+
+        assert!(!verify_presentation_with_profile(
+            &presentation,
+            &root_attestation,
+            &issuer_mldsa_pk,
+            &oprf_pk,
+            b"verifier",
+            &[73; 32],
+            mode,
+            42,
+            6,
+            profile,
+        ));
+        presentation.arity = 6;
+        assert!(!verify_presentation_with_profile(
+            &presentation,
+            &root_attestation,
+            &issuer_mldsa_pk,
+            &oprf_pk,
+            b"verifier",
+            &[73; 32],
+            mode,
+            42,
+            6,
+            profile,
+        ));
+        presentation.arity = holder.arity;
+
+        // Tampering the issuer's attested epoch, signature, or root tag must be rejected!
+        let mut wrong_epoch_att = root_attestation.clone();
+        wrong_epoch_att.issuer_epoch = 8;
+        assert!(!verify_presentation_with_profile(
+            &presentation,
+            &wrong_epoch_att,
+            &issuer_mldsa_pk,
+            &oprf_pk,
+            b"verifier",
+            &[73; 32],
+            mode,
+            42,
+            holder.arity,
+            profile
+        ));
+        let (rogue_pk, rogue_sk) =
+            crate::fips204_ntt::ml_dsa_keygen_from_seed(MlDsaLevel::MlDsa44, &[0x99; 32]);
+        let rogue_att = accumulator
+            .attest_root_deterministic(MlDsaLevel::MlDsa44, &rogue_sk, rogue_pk)
+            .unwrap();
+        assert!(!verify_presentation_with_profile(
+            &presentation,
+            &rogue_att,
+            &issuer_mldsa_pk,
+            &oprf_pk,
+            b"verifier",
+            &[73; 32],
+            mode,
+            42,
+            holder.arity,
+            profile
+        ));
+
+        presentation.opened_reps[0].gate_outs_e[0] =
+            gl_add(presentation.opened_reps[0].gate_outs_e[0], 1);
+        assert!(!verify_presentation_with_profile(
+            &presentation,
+            &root_attestation,
+            &issuer_mldsa_pk,
+            &oprf_pk,
+            b"verifier",
+            &[73; 32],
+            mode,
+            42,
+            holder.arity,
+            profile
+        ));
+    }
+
+    #[test]
+    fn repeated_entropy_across_distinct_statements_produces_independent_zkboo_shares() {
+        let holder = HolderCredentialSecret {
+            schema_id: 42,
+            arity: 6,
+            attrs: [840, 1994, 3, 9910, 2030, 777],
+            holder_blind: [17, 18, 19, 20],
+        };
+        let commitment = compute_vc_poseidon2_commit(
+            holder.schema_id,
+            &holder.attrs[..holder.arity],
+            &holder.holder_blind,
+            VC_ATTR_COMMIT_TAG,
+        )
+        .unwrap();
+        let oprf_pk = PublicKey::test_key();
+        let mut accumulator = IssuerCredentialAccumulator::new(oprf_pk, 7);
+        let index = accumulator.enroll(commitment).unwrap();
+        let cred = BlindVerifiableCredential {
+            issuer_epoch: 7,
+            schema_id: 42,
+            attr_commit: commitment,
+            issuance_token: [0; 32],
+            accumulator_leaf_index: index,
+        };
+        // Intentionally pass the EXACT SAME `presentation_entropy` across two distinct challenges:
+        let reused_entropy = [0xAAu8; 32];
+        let pres1 = prove_selective_disclosure(
+            &cred,
+            &holder,
+            &accumulator.membership_witness(index).unwrap(),
+            &[0],
+            PresentationRequest {
+                verifier_scope: b"scope-alpha",
+                verifier_challenge: &[0x11; 32],
+                mode: PresentationMode::UnlinkableFresh,
+            },
+            reused_entropy,
+        )
+        .unwrap();
+        let pres2 = prove_selective_disclosure(
+            &cred,
+            &holder,
+            &accumulator.membership_witness(index).unwrap(),
+            &[0],
+            PresentationRequest {
+                verifier_scope: b"scope-alpha",
+                verifier_challenge: &[0x22; 32],
+                mode: PresentationMode::UnlinkableFresh,
+            },
+            reused_entropy,
+        )
+        .unwrap();
+
+        // Even when repetition `rep` opens `e = 0` (`in_shares[0], in_shares[1]`) in `pres1` and
+        // `e = 1` (`in_shares[1], in_shares[2]`) in `pres2`, combining `pres1`'s share 0 with
+        // `pres2`'s shares 1 & 2 MUST NOT reconstruct secret attribute `attrs[1] = 1994`!
+        let mut found_cross_trit = false;
+        for (r1, r2) in pres1.opened_reps.iter().zip(&pres2.opened_reps) {
+            assert_ne!(r1.in_shares_e, r2.in_shares_e);
+            assert_ne!(r1.tape_seed_e, r2.tape_seed_e);
+            if r1.e == 0 && r2.e == 1 {
+                found_cross_trit = true;
+                // Under the old unhedged code, `r1.in_shares_e[0] + r2.in_shares_e[0] + r2.in_shares_e1[0]`
+                // equaled `holder.attrs[1]` (`1994`) with probability 1!
+                let naive_sum = gl_add(
+                    r1.in_shares_e[0],
+                    gl_add(r2.in_shares_e[0], r2.in_shares_e1[0]),
+                );
+                assert_ne!(naive_sum, holder.attrs[1]);
+                assert_eq!(r1.in_shares_e1[0], r1.in_shares_e1[0]);
+                assert_ne!(r1.in_shares_e1[0], r2.in_shares_e[0]);
+            }
+        }
+        assert!(
+            found_cross_trit,
+            "Repetitions must exercise cross-trit (e=0, e=1) openings"
+        );
+    }
+}
