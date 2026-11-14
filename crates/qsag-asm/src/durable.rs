@@ -39,7 +39,11 @@ pub struct LockedRecord {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Sidecar { CreateOrOpen, MustCreate, MustExist }
+enum Sidecar {
+    CreateOrOpen,
+    MustCreate,
+    MustExist,
+}
 
 fn side_path(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
@@ -48,7 +52,10 @@ fn side_path(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn invalid() -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, "invalid durable record or lock sidecar")
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        "invalid durable record or lock sidecar",
+    )
 }
 
 fn regular_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {
@@ -65,20 +72,57 @@ fn options() -> io::Result<OpenOptions> {
     // Linux UAPI asm/fcntl.h overrides asm-generic on ARM; Darwin uses sys/fcntl.h.
     #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
     let flags = 0x8000 | 0x800; // O_NOFOLLOW | O_NONBLOCK (reject FIFOs without blocking).
-    #[cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "x86", target_arch = "riscv64", target_arch = "riscv32")))]
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "x86",
+            target_arch = "riscv64",
+            target_arch = "riscv32"
+        )
+    ))]
     let flags = 0x20000 | 0x800;
     #[cfg(target_os = "macos")]
     let flags = 0x100 | 0x4;
-    #[cfg(any(target_os = "macos", all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm", target_arch = "x86_64", target_arch = "x86", target_arch = "riscv64", target_arch = "riscv32"))))]
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(
+                target_arch = "aarch64",
+                target_arch = "arm",
+                target_arch = "x86_64",
+                target_arch = "x86",
+                target_arch = "riscv64",
+                target_arch = "riscv32"
+            )
+        )
+    ))]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600).custom_flags(flags);
         Ok(options)
     }
-    #[cfg(not(any(target_os = "macos", all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm", target_arch = "x86_64", target_arch = "x86", target_arch = "riscv64", target_arch = "riscv32")))))]
+    #[cfg(not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(
+                target_arch = "aarch64",
+                target_arch = "arm",
+                target_arch = "x86_64",
+                target_arch = "x86",
+                target_arch = "riscv64",
+                target_arch = "riscv32"
+            )
+        )
+    )))]
     {
         let _ = &mut options;
-        Err(io::Error::new(io::ErrorKind::Unsupported, "no-follow locking unavailable on this target"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no-follow locking unavailable on this target",
+        ))
     }
 }
 
@@ -107,11 +151,16 @@ fn verify_path(file: &File, path: &Path) -> io::Result<fs::Metadata> {
 // file length so Vec growth cannot abandon an unwiped secret allocation.
 struct ReadBuffer(std::vec::Vec<u8>);
 impl Drop for ReadBuffer {
-    fn drop(&mut self) { crate::ct_memzero(&mut self.0); }
+    fn drop(&mut self) {
+        crate::ct_memzero(&mut self.0);
+    }
 }
 
 fn sync_parent(path: &Path) -> io::Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     File::open(parent)?.sync_all()
 }
 
@@ -136,41 +185,69 @@ impl LockedRecord {
     fn acquire_with(path: PathBuf, sidecar: Sidecar) -> io::Result<Self> {
         if sidecar == Sidecar::MustCreate {
             match fs::symlink_metadata(&path) {
-                Ok(_) => return Err(io::Error::new(io::ErrorKind::AlreadyExists, "record already provisioned")),
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "record already provisioned",
+                    ));
+                }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e),
             }
         }
         let present = regular_metadata(&path)?.is_some();
         if sidecar == Sidecar::MustExist && !present {
-            return Err(io::Error::new(io::ErrorKind::NotFound, "provisioned record is missing"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "provisioned record is missing",
+            ));
         }
         let name = side_path(&path, ".lock");
         regular_metadata(&name)?;
         // A record without its sidecar is damage, not absence: keep `NotFound` for the record.
         let open_present = || {
             options()?.read(true).write(true).open(&name).map_err(|e| {
-                if present && e.kind() == io::ErrorKind::NotFound { invalid() } else { e }
+                if present && e.kind() == io::ErrorKind::NotFound {
+                    invalid()
+                } else {
+                    e
+                }
             })
         };
         let (mut lock, fresh) = match sidecar {
             Sidecar::MustExist => (open_present()?, false),
             Sidecar::CreateOrOpen if present => (open_present()?, false),
             Sidecar::MustCreate | Sidecar::CreateOrOpen => {
-                match options()?.read(true).write(true).create_new(true).open(&name) {
+                match options()?
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .open(&name)
+                {
                     Ok(file) => (file, true),
-                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists && sidecar == Sidecar::CreateOrOpen => (open_present()?, false),
+                    Err(e)
+                        if e.kind() == io::ErrorKind::AlreadyExists
+                            && sidecar == Sidecar::CreateOrOpen =>
+                    {
+                        (open_present()?, false)
+                    }
                     Err(e) => return Err(e),
                 }
             }
         };
-        if !lock.metadata()?.is_file() { return Err(invalid()); }
+        if !lock.metadata()?.is_file() {
+            return Err(invalid());
+        }
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
-            unsafe extern "C" { fn flock(fd: core::ffi::c_int, operation: core::ffi::c_int) -> core::ffi::c_int; }
+            unsafe extern "C" {
+                fn flock(fd: core::ffi::c_int, operation: core::ffi::c_int) -> core::ffi::c_int;
+            }
             // SAFETY: valid owned descriptor; LOCK_EX | LOCK_NB does not access Rust memory.
-            if unsafe { flock(lock.as_raw_fd(), 2 | 4) } != 0 { return Err(io::Error::last_os_error()); }
+            if unsafe { flock(lock.as_raw_fd(), 2 | 4) } != 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
         let mut header = [0u8; 32];
         let id = identity(&verify_path(&lock, &name)?);
@@ -189,25 +266,44 @@ impl LockedRecord {
         }
         let present = regular_metadata(&path)?.is_some();
         match sidecar {
-            Sidecar::MustCreate if present => return Err(io::Error::new(io::ErrorKind::AlreadyExists, "record already provisioned")),
-            Sidecar::MustExist if !present => return Err(io::Error::new(io::ErrorKind::NotFound, "provisioned record is missing")),
+            Sidecar::MustCreate if present => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "record already provisioned",
+                ));
+            }
+            Sidecar::MustExist if !present => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "provisioned record is missing",
+                ));
+            }
             _ => {}
         }
         let record = Self {
-            path, _lock: lock, fresh, seal: header[8..16].try_into().expect("eight-byte seal"),
-            inode: id, poisoned: AtomicBool::new(false), operations: Mutex::new(()),
+            path,
+            _lock: lock,
+            fresh,
+            seal: header[8..16].try_into().expect("eight-byte seal"),
+            inode: id,
+            poisoned: AtomicBool::new(false),
+            operations: Mutex::new(()),
         };
         record.check_lock()?;
         Ok(record)
     }
 
     /// False after the first creation, even if the record itself was deleted.
-    pub fn is_fresh(&self) -> bool { self.fresh }
+    pub fn is_fresh(&self) -> bool {
+        self.fresh
+    }
 
     /// Legacy creation nonce. Retained byte-for-byte for existing WAL formats.
     /// This alone does not bind device/inode identity; new authenticated formats
     /// must use [`Self::lock_identity_seal`] instead.
-    pub fn lock_seal(&self) -> [u8; 8] { self.seal }
+    pub fn lock_seal(&self) -> [u8; 8] {
+        self.seal
+    }
 
     /// Canonical `dev_le64 || ino_le64 || nonce8` identity for a caller's MAC/KDF.
     ///
@@ -227,12 +323,20 @@ impl LockedRecord {
     /// An identity mismatch permanently invalidates this handle. The expected
     /// value must come from authenticated custody, not an unauthenticated header.
     pub fn verify_lock_identity(&self, expected: &[u8; 24]) -> io::Result<()> {
-        let _operation = self.operations.lock().map_err(|_| io::Error::other("record mutex poisoned"))?;
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| io::Error::other("record mutex poisoned"))?;
         let result = self.check_lock().and_then(|()| {
-            if crate::ct_eq_bytes(&self.lock_identity_seal(), expected) { Ok(()) }
-            else { Err(invalid()) }
+            if crate::ct_eq_bytes(&self.lock_identity_seal(), expected) {
+                Ok(())
+            } else {
+                Err(invalid())
+            }
         });
-        if result.is_err() { self.poisoned.store(true, Ordering::SeqCst); }
+        if result.is_err() {
+            self.poisoned.store(true, Ordering::SeqCst);
+        }
         result
     }
 
@@ -241,7 +345,9 @@ impl LockedRecord {
             return Err(io::Error::other("durable record handle is poisoned"));
         }
         let name = side_path(&self.path, ".lock");
-        if identity(&verify_path(&self._lock, &name)?) != self.inode { return Err(invalid()); }
+        if identity(&verify_path(&self._lock, &name)?) != self.inode {
+            return Err(invalid());
+        }
         // Read from the locked descriptor itself: reopening the pathname can
         // select a different inode between lstat and open. Positional I/O also
         // leaves the descriptor offset unchanged across successive operations.
@@ -252,16 +358,25 @@ impl LockedRecord {
             self._lock.read_exact_at(&mut header, 0)?;
         }
         #[cfg(not(unix))]
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "positional lock reads unavailable"));
-        if verify_path(&self._lock, &name)?.len() != 32 || &header[..8] != LOCK_MAGIC
-            || header[8..16] != self.seal || header[16..] != self.inode {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "positional lock reads unavailable",
+        ));
+        if verify_path(&self._lock, &name)?.len() != 32
+            || &header[..8] != LOCK_MAGIC
+            || header[8..16] != self.seal
+            || header[16..] != self.inode
+        {
             return Err(invalid());
         }
         Ok(())
     }
 
     pub fn read(&self) -> io::Result<std::vec::Vec<u8>> {
-        let _operation = self.operations.lock().map_err(|_| io::Error::other("record mutex poisoned"))?;
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| io::Error::other("record mutex poisoned"))?;
         (|| {
             self.check_lock()?;
             regular_metadata(&self.path)?;
@@ -271,12 +386,16 @@ impl LockedRecord {
                 .map_err(|_| invalid())?;
             let mut header = [0u8; 16];
             file.read_exact(&mut header)?;
-            if &header[..8] != RECORD_MAGIC || header[8..] != self.seal { return Err(invalid()); }
+            if &header[..8] != RECORD_MAGIC || header[8..] != self.seal {
+                return Err(invalid());
+            }
             let mut bytes = ReadBuffer(std::vec::Vec::new());
             bytes.0.try_reserve_exact(len).map_err(io::Error::other)?;
             bytes.0.resize(len, 0);
             file.read_exact(&mut bytes.0)?;
-            if verify_path(&file, &self.path)?.len() != meta.len() { return Err(invalid()); }
+            if verify_path(&file, &self.path)?.len() != meta.len() {
+                return Err(invalid());
+            }
             self.check_lock()?;
             Ok(core::mem::take(&mut bytes.0))
         })()
@@ -285,12 +404,17 @@ impl LockedRecord {
     /// Atomically replace and sync the record. Any failure permanently poisons this handle;
     /// callers must recover using a new handle and validate their WAL before continuing.
     pub fn replace(&self, bytes: &[u8]) -> io::Result<()> {
-        let _operation = self.operations.lock().map_err(|_| io::Error::other("record mutex poisoned"))?;
+        let _operation = self
+            .operations
+            .lock()
+            .map_err(|_| io::Error::other("record mutex poisoned"))?;
         let result = (|| {
             self.check_lock()?;
             regular_metadata(&self.path)?;
             let name = side_path(&self.path, ".tmp");
-            if regular_metadata(&name)?.is_some() { fs::remove_file(&name)?; }
+            if regular_metadata(&name)?.is_some() {
+                fs::remove_file(&name)?;
+            }
             let mut file = options()?.write(true).create_new(true).open(&name)?;
             file.write_all(RECORD_MAGIC)?;
             file.write_all(&self.lock_seal())?;
@@ -304,7 +428,9 @@ impl LockedRecord {
             sync_parent(&self.path)?;
             self.check_lock()
         })();
-        if result.is_err() { self.poisoned.store(true, Ordering::SeqCst); }
+        if result.is_err() {
+            self.poisoned.store(true, Ordering::SeqCst);
+        }
         result
     }
 }
@@ -319,14 +445,22 @@ mod tests {
     impl Temp {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(std::format!("qsag-record-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let path = std::env::temp_dir().join(std::format!(
+                "qsag-record-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
             fs::create_dir(&path).unwrap();
             Self(path)
         }
-        fn record(&self) -> PathBuf { self.0.join("record") }
+        fn record(&self) -> PathBuf {
+            self.0.join("record")
+        }
     }
     impl Drop for Temp {
-        fn drop(&mut self) { fs::remove_dir_all(&self.0).unwrap(); }
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
     }
 
     #[test]
@@ -350,7 +484,10 @@ mod tests {
         let temp = Temp::new();
         let path = temp.record();
         for _ in 0..2 {
-            assert_eq!(LockedRecord::open_existing(&path).err().unwrap().kind(), io::ErrorKind::NotFound);
+            assert_eq!(
+                LockedRecord::open_existing(&path).err().unwrap().kind(),
+                io::ErrorKind::NotFound
+            );
             assert!(!side_path(&path, ".lock").exists());
         }
         let record = LockedRecord::create_new(&path).unwrap();
@@ -439,10 +576,19 @@ mod tests {
         first.replace(b"committed").unwrap();
         let lock = side_path(&path, ".lock");
         fs::remove_file(&lock).unwrap();
-        assert_eq!(LockedRecord::create_new(&path).err().unwrap().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            LockedRecord::create_new(&path).err().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
         assert!(!lock.exists());
-        assert_eq!(LockedRecord::open_existing(&path).err().unwrap().kind(), io::ErrorKind::InvalidData);
-        assert_eq!(LockedRecord::acquire(&path).err().unwrap().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            LockedRecord::open_existing(&path).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            LockedRecord::acquire(&path).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
         assert!(!lock.exists());
         assert!(first.read().is_err());
         assert!(first.replace(b"split").is_err());
@@ -489,7 +635,9 @@ mod tests {
             } else {
                 let record = LockedRecord::create_new(&path).unwrap();
                 symlink(&target, side_path(&path, suffix)).unwrap();
-                if suffix.is_empty() { assert!(record.read().is_err()); }
+                if suffix.is_empty() {
+                    assert!(record.read().is_err());
+                }
                 assert!(record.replace(b"bad").is_err());
             }
             assert_eq!(fs::read(&target).unwrap(), b"untouched");
@@ -497,7 +645,10 @@ mod tests {
         let temp = Temp::new();
         let path = temp.record();
         symlink(temp.0.join("absent"), &path).unwrap();
-        assert_eq!(LockedRecord::create_new(&path).err().unwrap().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            LockedRecord::create_new(&path).err().unwrap().kind(),
+            io::ErrorKind::AlreadyExists
+        );
         assert!(!side_path(&path, ".lock").exists());
     }
 
@@ -515,6 +666,9 @@ mod tests {
         assert!(record.read().is_err());
         assert!(record.replace(b"retry").is_err());
         drop(record);
-        assert_eq!(LockedRecord::open_existing(path).unwrap().read().unwrap(), b"committed");
+        assert_eq!(
+            LockedRecord::open_existing(path).unwrap().read().unwrap(),
+            b"committed"
+        );
     }
 }

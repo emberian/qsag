@@ -112,8 +112,8 @@ Mapping the tower generators $(1, x_0, x_1, x_0 x_1, x_2, x_0 x_2, x_1 x_2, x_0 
 - $\phi(x_2) = \text{0x63}$ ($\phi(x_2)^2 \oplus \phi(x_1)\phi(x_2) = 1$).
 
 yields the exact `VGF2P8AFFINEQB` $8\times 8$ bit-matrices (packed MSB-first per `VGF2P8AFFINEQB` lane semantics):
-- `GFNI_TOWER_TO_POLY_MAT = 0x71500A8A86BE78CE` ($\phi : \mathcal{T}_3 \xrightarrow{\sim} \mathbb{F}_2[z]/(z^8 + z^4 + z^3 + z + 1)$)
-- `GFNI_POLY_TO_TOWER_MAT = 0xA1E4F8E072A2700C` ($\phi^{-1} : \mathbb{F}_2[z]/(z^8 + z^4 + z^3 + z + 1) \xrightarrow{\sim} \mathcal{T}_3$)
+- tower-to-polynomial immediate `0x71500A8A86BE78CE` ($\phi : \mathcal{T}_3 \xrightarrow{\sim} \mathbb{F}_2[z]/(z^8 + z^4 + z^3 + z + 1)$)
+- polynomial-to-tower immediate ` 0xA1E4F8E072A2700C` ($\phi^{-1} : \mathbb{F}_2[z]/(z^8 + z^4 + z^3 + z + 1) \xrightarrow{\sim} \mathcal{T}_3$)
 
 `qsag_asm_gf256_shamir_mul_gfni` and `qsag_asm_gf256_shamir_mac_gfni` evaluate **32 parallel $\mathcal{T}_3$ multiplications per `YMM` vector** via $\phi^{-1}(\phi(a) \cdot_{\text{0x11B}} \phi(b))$ (with $\phi$ lifted out of the inner loop in `mac_gfni`), achieving **505.2×** (`mul`) and **517.0×** (`mac`) throughput speedups over constant-time portable code on `Intel Core i9-12900 (Alder Lake)`. On CPUs without GFNI (AMD EPYC-Milan (Zen 3)), `qsag_asm_gf256_shamir_mul_avx2` and `qsag_asm_gf256_shamir_mac_avx2` use constant-time register-resident `vpshufb` nibble tables over $\phi(a), \phi(b)$, achieving **51.3×** (`mul`) and **365.0×** (`mac`) speedups with **100% bit-exact parity across all $2^{16} = 65,536$ input byte pairs**.
 
