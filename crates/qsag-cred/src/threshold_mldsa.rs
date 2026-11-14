@@ -161,22 +161,62 @@ pub trait NonceBurnPersistence {
     }
 }
 
-/// Key-bound, exclusively locked, crash-atomic attempt ledger. Provision once
-/// with `create`; after restart use `open` and recover the signer's epoch.
+/// Key-bound, MAC-authenticated, exclusively locked, crash-atomic attempt ledger.
+/// Provision once with [`Self::create`]; after restart use [`Self::open`] or
+/// [`Self::open_at_least`] (supplying an externally retained monotonic generation floor)
+/// and recover the signer's epoch.
 #[cfg(feature = "std")]
 pub struct FsNonceBurnStore {
+    path: std::path::PathBuf,
+    lock_id: [u8; 16],
     record: qsag_asm::durable::LockedRecord,
     key_id: [u8; 32],
+    mac_key: qsag_accel::ct::RedactedSecret<32>,
+    generation: u64,
     burns: Vec<(u16, u64, [u8; 32], u32)>,
     poisoned: bool,
 }
 
 #[cfg(feature = "std")]
+fn mldsa_burn_lock_inode(path: &std::path::Path) -> std::io::Result<[u8; 16]> {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".lock");
+    let meta = std::fs::symlink_metadata(std::path::PathBuf::from(os))?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid nonce ledger lock sidecar",
+        ));
+    }
+    let mut id = [0u8; 16];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        id[..8].copy_from_slice(&meta.dev().to_le_bytes());
+        id[8..].copy_from_slice(&meta.ino().to_le_bytes());
+    }
+    Ok(id)
+}
+
+#[cfg(feature = "std")]
 impl FsNonceBurnStore {
-    pub fn create(path: impl Into<std::path::PathBuf>, key_id: [u8; 32]) -> std::io::Result<Self> {
+    pub fn create(
+        path: impl Into<std::path::PathBuf>,
+        key_id: [u8; 32],
+        mut storage_mac_key: [u8; 32],
+    ) -> std::io::Result<Self> {
+        let path = path.into();
+        let record = qsag_asm::durable::LockedRecord::create_new(&path)?;
+        let lock_id = mldsa_burn_lock_inode(&path)?;
+        let mac_key = qsag_accel::ct::RedactedSecret::new(storage_mac_key);
+        qsag_accel::ct::ct_zeroize_bytes(&mut storage_mac_key);
         let store = Self {
-            record: qsag_asm::durable::LockedRecord::create_new(path)?,
+            path,
+            lock_id,
+            record,
             key_id,
+            mac_key,
+            generation: 0,
             burns: Vec::new(),
             poisoned: false,
         };
@@ -184,29 +224,65 @@ impl FsNonceBurnStore {
         Ok(store)
     }
 
-    pub fn open(path: impl Into<std::path::PathBuf>, key_id: [u8; 32]) -> std::io::Result<Self> {
-        let record = qsag_asm::durable::LockedRecord::open_existing(path)?;
+    pub fn open(
+        path: impl Into<std::path::PathBuf>,
+        key_id: [u8; 32],
+        storage_mac_key: [u8; 32],
+    ) -> std::io::Result<Self> {
+        Self::open_at_least(path, key_id, storage_mac_key, 0)
+    }
+
+    pub fn open_at_least(
+        path: impl Into<std::path::PathBuf>,
+        key_id: [u8; 32],
+        mut storage_mac_key: [u8; 32],
+        min_expected_generation: u64,
+    ) -> std::io::Result<Self> {
+        let path = path.into();
+        let record = qsag_asm::durable::LockedRecord::open_existing(&path)?;
+        let lock_id = mldsa_burn_lock_inode(&path)?;
+        let mac_key = qsag_accel::ct::RedactedSecret::new(storage_mac_key);
+        qsag_accel::ct::ct_zeroize_bytes(&mut storage_mac_key);
         let bytes = record.read()?;
         let invalid =
             || std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid nonce ledger");
-        if bytes.len() < 56
-            || &bytes[..8] != b"QSCBURN1"
-            || bytes[8..16] != record.lock_seal()
-            || bytes[16..48] != key_id
+        if bytes.len() < 96 {
+            return Err(invalid());
+        }
+        let (body, tag) = bytes.split_at(bytes.len() - 32);
+        let expected_tag = cshake256_framed_32(
+            b"QSAG.MLDSA.NONCE_BURN.V2",
+            &[mac_key.expose(), &lock_id, body],
+        );
+        if !qsag_accel::ct::ct_eq_bytes(&expected_tag, tag) {
+            return Err(invalid());
+        }
+        if &body[..8] != b"QSCBURN2"
+            || body[8..16] != record.lock_seal()
+            || !qsag_accel::ct::ct_eq_bytes(&body[16..48], &key_id)
         {
             return Err(invalid());
         }
-        let count = u64::from_le_bytes(bytes[48..56].try_into().map_err(|_| invalid())?);
-        if !((bytes.len() - 56).is_multiple_of(46)) || count != ((bytes.len() - 56) / 46) as u64 {
+        let generation = u64::from_le_bytes(body[48..56].try_into().map_err(|_| invalid())?);
+        let count = u64::from_le_bytes(body[56..64].try_into().map_err(|_| invalid())?);
+        if generation < min_expected_generation
+            || !(body.len() - 64).is_multiple_of(46)
+            || count != ((body.len() - 64) / 46) as u64
+            || generation < count
+        {
             return Err(invalid());
         }
         let mut store = Self {
+            path,
+            lock_id,
             record,
             key_id,
+            mac_key,
+            generation,
             burns: Vec::new(),
             poisoned: false,
         };
-        for row in bytes[56..].as_chunks::<46>().0 {
+        for row in body[64..].as_chunks::<46>().0 {
             let party = u16::from_le_bytes(row[..2].try_into().map_err(|_| invalid())?);
             let epoch = u64::from_le_bytes(row[2..10].try_into().map_err(|_| invalid())?);
             let session = row[10..42].try_into().map_err(|_| invalid())?;
@@ -219,11 +295,16 @@ impl FsNonceBurnStore {
         Ok(store)
     }
 
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
     fn encode(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(56 + self.burns.len() * 46);
-        bytes.extend_from_slice(b"QSCBURN1");
+        let mut bytes = Vec::with_capacity(96 + self.burns.len() * 46);
+        bytes.extend_from_slice(b"QSCBURN2");
         bytes.extend_from_slice(&self.record.lock_seal());
         bytes.extend_from_slice(&self.key_id);
+        bytes.extend_from_slice(&self.generation.to_le_bytes());
         bytes.extend_from_slice(&(self.burns.len() as u64).to_le_bytes());
         for (party, epoch, session, attempt) in &self.burns {
             bytes.extend_from_slice(&party.to_le_bytes());
@@ -231,6 +312,11 @@ impl FsNonceBurnStore {
             bytes.extend_from_slice(session);
             bytes.extend_from_slice(&attempt.to_le_bytes());
         }
+        let tag = cshake256_framed_32(
+            b"QSAG.MLDSA.NONCE_BURN.V2",
+            &[self.mac_key.expose(), &self.lock_id, &bytes],
+        );
+        bytes.extend_from_slice(&tag);
         bytes
     }
 
@@ -249,6 +335,15 @@ impl NonceBurnPersistence for FsNonceBurnStore {
         if !self.available(party_id, epoch, session_id, attempt) {
             return false;
         }
+        if mldsa_burn_lock_inode(&self.path).ok() != Some(self.lock_id) {
+            self.poisoned = true;
+            return false;
+        }
+        let Some(next_gen) = self.generation.checked_add(1) else {
+            self.poisoned = true;
+            return false;
+        };
+        self.generation = next_gen;
         self.burns.push((party_id, epoch, *session_id, attempt));
         if self.record.replace(&self.encode()).is_err() {
             self.poisoned = true;
@@ -258,12 +353,14 @@ impl NonceBurnPersistence for FsNonceBurnStore {
     }
 
     fn next_epoch(&self, key_id: &[u8; 32], party_id: u16) -> Result<u64, ThresholdMlDsaError> {
+        let expected = self.encode();
         if self.poisoned
-            || *key_id != self.key_id
+            || !qsag_accel::ct::ct_eq_bytes(key_id, &self.key_id)
+            || mldsa_burn_lock_inode(&self.path).ok() != Some(self.lock_id)
             || self
                 .record
                 .read()
-                .map_or(true, |bytes| bytes != self.encode())
+                .map_or(true, |bytes| !qsag_accel::ct::ct_eq_bytes(&bytes, &expected))
         {
             return Err(ThresholdMlDsaError::NoncePersistenceFailed);
         }

@@ -47,6 +47,23 @@ fn derive_subkey(master_key: &[u8; 32], key_id: &[u8; 32], purpose: &[u8]) -> [u
     mac32(master_key, KEY_DERIVE_DOMAIN, &[key_id, purpose])
 }
 
+fn anchor_lock_inode(path: &Path) -> io::Result<[u8; 16]> {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".lock");
+    let meta = std::fs::symlink_metadata(PathBuf::from(os))?;
+    if !meta.is_file() || meta.file_type().is_symlink() {
+        return Err(invalid_anchor("invalid checkpoint anchor lock sidecar"));
+    }
+    let mut id = [0u8; 16];
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        id[..8].copy_from_slice(&meta.dev().to_le_bytes());
+        id[8..].copy_from_slice(&meta.ino().to_le_bytes());
+    }
+    Ok(id)
+}
+
 /// Independent OS-locked, MAC-authenticated monotonic [`LedgerCheckpoint`] anchor.
 ///
 /// Place `path` in an independent directory / mount or hardware-backed filesystem from the
@@ -54,6 +71,7 @@ fn derive_subkey(master_key: &[u8; 32], key_id: &[u8; 32], purpose: &[u8]) -> [u
 /// [`AnchoredSeedBurnTracker::open_existing`] and [`AnchoredFirstSignedCustody::open_existing`].
 pub struct FsLedgerCheckpointAnchor {
     path: PathBuf,
+    lock_id: [u8; 16],
     record: LockedRecord,
     key: [u8; 32],
     domain: &'static [u8],
@@ -77,10 +95,12 @@ impl FsLedgerCheckpointAnchor {
     ) -> io::Result<Self> {
         let path = path.into();
         let record = LockedRecord::create_new(&path)?;
-        let derived = mac32(&key, ANCHOR_MAC_DOMAIN, &[&record.lock_seal(), domain]);
+        let lock_id = anchor_lock_inode(&path)?;
+        let derived = mac32(&key, ANCHOR_MAC_DOMAIN, &[&lock_id, &record.lock_seal(), domain]);
         wipe_bytes32(&mut key);
         let anchor = Self {
             path,
+            lock_id,
             record,
             key: derived,
             domain,
@@ -99,10 +119,12 @@ impl FsLedgerCheckpointAnchor {
     ) -> io::Result<Self> {
         let path = path.into();
         let record = LockedRecord::open_existing(&path)?;
-        let derived = mac32(&key, ANCHOR_MAC_DOMAIN, &[&record.lock_seal(), domain]);
+        let lock_id = anchor_lock_inode(&path)?;
+        let derived = mac32(&key, ANCHOR_MAC_DOMAIN, &[&lock_id, &record.lock_seal(), domain]);
         wipe_bytes32(&mut key);
         let mut anchor = Self {
             path,
+            lock_id,
             record,
             key: derived,
             domain,
@@ -129,6 +151,10 @@ impl FsLedgerCheckpointAnchor {
     pub fn ratchet_to(&mut self, next: LedgerCheckpoint) -> io::Result<()> {
         if self.poisoned {
             return Err(io::Error::other("checkpoint anchor handle is poisoned"));
+        }
+        if anchor_lock_inode(&self.path).ok() != Some(self.lock_id) {
+            self.poisoned = true;
+            return Err(invalid_anchor("checkpoint anchor lock sidecar replaced"));
         }
         let meta = std::fs::symlink_metadata(&self.path)?;
         if meta.file_type().is_symlink() || !meta.is_file() {
