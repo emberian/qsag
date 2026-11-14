@@ -1,0 +1,44 @@
+module
+public import Lean
+import all Qsag.CompiledRlibFixtures
+import all Qsag.ElfFixtureSlices
+import all Qsag.ElfInvCerts
+import all Qsag.ElfParse
+import all Qsag.McRefine
+import all Qsag.ElfBinaryVerify
+import all Qsag.ElfFixtureVerify
+import all Qsag.ElfFunctionalEquiv
+import all Qsag.ConstantTimeIsa
+import all Qsag.SydTvTranslationValidation
+import all Qsag.IsaCosim
+import all Qsag.SimdBinaryEquiv
+import all Qsag.SpirvSimtGpuEquiv
+open Lean Elab Command
+elab "#auditVertical" : command => do
+  let env := (← getEnv).setExporting false
+  let targets : List Name := [`Qsag.CompiledRlibFixtures, `Qsag.ElfFixtureSlices, `Qsag.ElfInvCerts, `Qsag.ElfParse, `Qsag.McRefine, `Qsag.ElfBinaryVerify, `Qsag.ElfFixtureVerify, `Qsag.ElfFunctionalEquiv, `Qsag.ConstantTimeIsa, `Qsag.SydTvTranslationValidation, `Qsag.IsaCosim, `Qsag.SimdBinaryEquiv, `Qsag.SpirvSimtGpuEquiv]
+  let negative ← withEnv env <| Lean.collectAxioms ``Classical.choice
+  unless negative.contains ``Classical.choice do
+    throwError "Axiom audit negative control failed"
+  let mut total := 0
+  let mut theorems := 0
+  let mut rejected := 0
+  for target in targets do
+    let mut count := 0
+    for (name, ci) in env.constants.toList do
+      if let some idx := env.getModuleIdxFor? name then
+        if env.header.moduleNames[idx.toNat]! == target then
+          count := count + 1
+          total := total + 1
+          if ci matches .thmInfo _ then theorems := theorems + 1
+          let axioms ← withEnv env <| Lean.collectAxioms name
+          let bad := axioms.filter fun ax => ax != ``propext && ax != ``Quot.sound
+          unless bad.isEmpty do
+            rejected := rejected + 1
+            logError m!"REJECT {name}: {bad}"
+    unless count > 0 do throwError "Empty audit module: {target}"
+    logInfo m!"{target}: {count} declarations"
+  logInfo m!"Vertical audit: {total} declarations, {theorems} theorems, {targets.length} modules; {rejected} rejected"
+  unless rejected == 0 do throwError "Vertical axiom audit failed"
+#auditVertical
+
