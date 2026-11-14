@@ -12,8 +12,8 @@ use qsag_accel::goldilocks::{
 use qsag_accel::spirv_kernels::{shader_source_filename, spirv_kernel_bytes};
 use qsag_accel::vulkan::{
     batch_keccak_f1600_with_receipt, batch_poseidon2_perm12_with_receipt,
-    bdoz_gf2_128_batch_dot_with_receipt, coset_lde_ext2_with_receipt,
-    goldilocks_ntt_with_receipt, merkle_layer_poseidon2_with_receipt,
+    bdoz_gf2_128_batch_dot_with_receipt, coset_lde_ext2_with_receipt, goldilocks_ntt_input_digest,
+    goldilocks_ntt_output_digest, goldilocks_ntt_with_receipt, merkle_layer_poseidon2_with_receipt,
 };
 use qsag_accel::{
     AccelError, AcceleratorBackend, BackendAttestationKey, CertifiedBackend, CertifiedKernelPin,
@@ -426,4 +426,68 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
         assert_eq!(r_bdoz_gpu.output_digest, r_bdoz_cpu.output_digest);
         assert_eq!(registry.verify_keyed_receipt(&r_bdoz_gpu, &gpu_key), Ok(()));
     }
+
+    // -------------------------------------------------------------------------
+    // Regression checks on live hardware:
+    // 1. Authenticated NTT receipts bind twiddles (`NTT_IN.V2`) and separate `[1, ω]` vs `[1, ω⁻¹]`.
+    // 2. Merkle position framing rejects out-of-range `> u32::MAX` indices on both GPU and CPU,
+    //    and matches bit-for-bit at the `u32::MAX` boundary.
+    // -------------------------------------------------------------------------
+    let omega: u64 = 281_474_976_710_656; // 2^48, primitive 4th root of unity mod p
+    let omega_inv = qsag_accel::goldilocks::gl_inv_or_zero(omega);
+    let tw_a = [1u64, omega];
+    let tw_b = [1u64, omega_inv];
+    let orig4 = [0u64, 1, 0, 0];
+    let mut g_buf_a = orig4;
+    let mut g_buf_b = orig4;
+    let r_ntt_a =
+        goldilocks_ntt_with_receipt(&certified_gpu, &gpu_key, &mut g_buf_a, &tw_a, false, anchor)
+            .unwrap();
+    let r_ntt_b =
+        goldilocks_ntt_with_receipt(&certified_gpu, &gpu_key, &mut g_buf_b, &tw_b, false, anchor)
+            .unwrap();
+    assert_eq!(g_buf_a, [1, omega, GOLDILOCKS_PRIME - 1, omega_inv]);
+    assert_eq!(g_buf_b, [1, omega_inv, GOLDILOCKS_PRIME - 1, omega]);
+    assert_eq!(r_ntt_a.input_digest, goldilocks_ntt_input_digest(&orig4, &tw_a));
+    assert_eq!(r_ntt_b.input_digest, goldilocks_ntt_input_digest(&orig4, &tw_b));
+    assert_ne!(r_ntt_a.input_digest, r_ntt_b.input_digest);
+    assert_eq!(r_ntt_a.output_digest, goldilocks_ntt_output_digest(&g_buf_a));
+
+    let pair_children = [[11u64, 22, 33, 44], [55u64, 66, 77, 88]];
+    let mut g_parent = [[0u64; 4]; 1];
+    let mut c_parent = [[0u64; 4]; 1];
+    for bad_idx in [
+        0xb3ad_a0b1_b0bb_bacfu64,
+        0xb3ad_a0b0_b0bb_bad0u64,
+        (u32::MAX as u64) + 1,
+    ] {
+        assert_eq!(
+            certified_gpu.try_merkle_layer_poseidon2_at(
+                &pair_children,
+                &pk_seed,
+                0,
+                bad_idx,
+                &mut g_parent
+            ),
+            Err(AccelError::LengthOverflow)
+        );
+    }
+    certified_gpu
+        .try_merkle_layer_poseidon2_at(
+            &pair_children,
+            &pk_seed,
+            0,
+            u32::MAX as u64,
+            &mut g_parent,
+        )
+        .unwrap();
+    cpu.try_merkle_layer_poseidon2_at(
+        &pair_children,
+        &pk_seed,
+        0,
+        u32::MAX as u64,
+        &mut c_parent,
+    )
+    .unwrap();
+    assert_eq!(g_parent, c_parent);
 }

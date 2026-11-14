@@ -402,12 +402,51 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         }
     }
 
+    fn try_batch_keccak_f1600_pinned(
+        &self,
+        states: &mut [[u64; 25]],
+    ) -> Result<CertifiedKernelPin, AccelError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.try_batch_keccak_f1600(states).map_err(|e| match e {
+                VulkanError::Accel(ae) => ae,
+                _ => AccelError::LengthOverflow,
+            })?;
+            Ok(self.pins[KernelSlot::BatchKeccakF1600 as usize])
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = states;
+            match self._uninhabited {}
+        }
+    }
+
     fn batch_poseidon2_perm12(&self, states: &mut [[u64; 12]]) {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
             if self.try_batch_poseidon2_perm12(states).is_err() {
                 CpuReferenceBackend.batch_poseidon2_perm12(states);
             }
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            let _ = states;
+            match self._uninhabited {}
+        }
+    }
+
+    fn try_batch_poseidon2_perm12_pinned(
+        &self,
+        states: &mut [[u64; 12]],
+    ) -> Result<CertifiedKernelPin, AccelError> {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.try_batch_poseidon2_perm12(states)
+                .map_err(|e| match e {
+                    VulkanError::Accel(ae) => ae,
+                    _ => AccelError::LengthOverflow,
+                })?;
+            Ok(self.pins[KernelSlot::BatchPoseidon2Perm12 as usize])
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
         {
@@ -518,6 +557,16 @@ impl AcceleratorBackend for VulkanSpirvBackend {
                 actual: children.len(),
             });
         }
+        let max_parent_idx = if out_parents.is_empty() {
+            start_parent_idx
+        } else {
+            start_parent_idx
+                .checked_add((out_parents.len() - 1) as u64)
+                .ok_or(AccelError::LengthOverflow)?
+        };
+        if max_parent_idx > u32::MAX as u64 {
+            return Err(AccelError::LengthOverflow);
+        }
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
             if out_parents.is_empty() {
@@ -599,10 +648,29 @@ fn hash_u64_rows<const W: usize>(cust: &[u8], rows: &[[u64; W]]) -> [u8; 32] {
     out
 }
 
-fn hash_u64_slice(cust: &[u8], words: &[u64]) -> [u8; 32] {
-    let mut sp = init_cshake256(b"", cust);
-    sp.absorb(&(words.len() as u64).to_le_bytes());
-    for &w in words {
+/// Versioned input digest for authenticated Goldilocks NTT receipts, binding **both** `buf` and
+/// `twiddles` (`QSAG.ACCEL.NTT_IN.V2 || len(buf) || buf || len(twiddles) || twiddles`).
+pub fn goldilocks_ntt_input_digest(buf: &[u64], twiddles: &[u64]) -> [u8; 32] {
+    let mut sp = init_cshake256(b"", b"QSAG.ACCEL.NTT_IN.V2");
+    sp.absorb(&(buf.len() as u64).to_le_bytes());
+    for &w in buf {
+        sp.absorb(&w.to_le_bytes());
+    }
+    sp.absorb(&(twiddles.len() as u64).to_le_bytes());
+    for &tw in twiddles {
+        sp.absorb(&tw.to_le_bytes());
+    }
+    finalize_cshake256(&mut sp, true);
+    let mut out = [0u8; 32];
+    sp.squeeze(&mut out);
+    out
+}
+
+/// Output digest for authenticated Goldilocks NTT receipts (`QSAG.ACCEL.NTT_OUT.V1 || len || buf`).
+pub fn goldilocks_ntt_output_digest(buf: &[u64]) -> [u8; 32] {
+    let mut sp = init_cshake256(b"", b"QSAG.ACCEL.NTT_OUT.V1");
+    sp.absorb(&(buf.len() as u64).to_le_bytes());
+    for &w in buf {
         sp.absorb(&w.to_le_bytes());
     }
     finalize_cshake256(&mut sp, true);
@@ -626,7 +694,9 @@ fn hash_bdoz_inputs(shares: &[(u128, u128)], weights: &[(u128, u128)]) -> [u8; 3
     out
 }
 
-/// Execute `batch_keccak_f1600` on `backend` and issue a keyed [`ExecutionReceipt`].
+/// Execute `batch_keccak_f1600` on `backend` via [`AcceleratorBackend::try_batch_keccak_f1600_pinned`]
+/// (failing closed on hardware execution error rather than stamping a hardware pin onto a CPU
+/// fallback) and issue a keyed [`ExecutionReceipt`].
 pub fn batch_keccak_f1600_with_receipt<B: AcceleratorBackend>(
     backend: &B,
     key: &BackendAttestationKey,
@@ -634,9 +704,8 @@ pub fn batch_keccak_f1600_with_receipt<B: AcceleratorBackend>(
     transcript_anchor: [u8; 32],
 ) -> Result<ExecutionReceipt, AccelError> {
     let input_digest = hash_u64_rows(b"QSAG.ACCEL.KECCAK_IN.V1", states);
-    backend.batch_keccak_f1600(states);
+    let pin = backend.try_batch_keccak_f1600_pinned(states)?;
     let output_digest = hash_u64_rows(b"QSAG.ACCEL.KECCAK_OUT.V1", states);
-    let pin = backend.kernel_pin(KernelSlot::BatchKeccakF1600);
     let desc = BatchJobDescriptor::KeccakF1600 {
         num_states: states.len(),
     };
@@ -650,7 +719,10 @@ pub fn batch_keccak_f1600_with_receipt<B: AcceleratorBackend>(
     )
 }
 
-/// Execute `batch_poseidon2_perm12` on `backend` and issue a keyed [`ExecutionReceipt`].
+/// Execute `batch_poseidon2_perm12` on `backend` via
+/// [`AcceleratorBackend::try_batch_poseidon2_perm12_pinned`] (failing closed on hardware execution
+/// error rather than stamping a hardware pin onto a CPU fallback) and issue a keyed
+/// [`ExecutionReceipt`].
 pub fn batch_poseidon2_perm12_with_receipt<B: AcceleratorBackend>(
     backend: &B,
     key: &BackendAttestationKey,
@@ -658,9 +730,8 @@ pub fn batch_poseidon2_perm12_with_receipt<B: AcceleratorBackend>(
     transcript_anchor: [u8; 32],
 ) -> Result<ExecutionReceipt, AccelError> {
     let input_digest = hash_u64_rows(b"QSAG.ACCEL.P2_PERM_IN.V1", states);
-    backend.batch_poseidon2_perm12(states);
+    let pin = backend.try_batch_poseidon2_perm12_pinned(states)?;
     let output_digest = hash_u64_rows(b"QSAG.ACCEL.P2_PERM_OUT.V1", states);
-    let pin = backend.kernel_pin(KernelSlot::BatchPoseidon2Perm12);
     let desc = BatchJobDescriptor::Poseidon2Perm12 {
         num_states: states.len(),
     };
@@ -674,7 +745,8 @@ pub fn batch_poseidon2_perm12_with_receipt<B: AcceleratorBackend>(
     )
 }
 
-/// Execute `goldilocks_ntt_inplace` on `backend` and issue a keyed [`ExecutionReceipt`].
+/// Execute `goldilocks_ntt_inplace` on `backend` and issue a keyed [`ExecutionReceipt`] whose
+/// `input_digest` commits to **both** `buf` and `twiddles` via [`goldilocks_ntt_input_digest`].
 pub fn goldilocks_ntt_with_receipt<B: AcceleratorBackend>(
     backend: &B,
     key: &BackendAttestationKey,
@@ -683,9 +755,9 @@ pub fn goldilocks_ntt_with_receipt<B: AcceleratorBackend>(
     inverse: bool,
     transcript_anchor: [u8; 32],
 ) -> Result<ExecutionReceipt, AccelError> {
-    let input_digest = hash_u64_slice(b"QSAG.ACCEL.NTT_IN.V1", buf);
+    let input_digest = goldilocks_ntt_input_digest(buf, twiddles);
     backend.goldilocks_ntt_inplace(buf, twiddles, inverse)?;
-    let output_digest = hash_u64_slice(b"QSAG.ACCEL.NTT_OUT.V1", buf);
+    let output_digest = goldilocks_ntt_output_digest(buf);
     let pin = backend.kernel_pin(KernelSlot::GoldilocksNtt);
     let desc = BatchJobDescriptor::GoldilocksNtt {
         length: buf.len(),
@@ -824,6 +896,161 @@ mod tests {
                 Err(KernelRegistryError::PinMismatch { slot })
             );
         }
+    }
+
+    #[test]
+    fn ntt_receipt_binds_twiddle_table_and_separates_primitive_roots() {
+        use crate::goldilocks::{GOLDILOCKS_PRIME, gl_inv_or_zero};
+
+        let key = BackendAttestationKey::derive(&[0x5Au8; 32], b"cpu-ntt-test");
+        let anchor = [0xA5u8; 32];
+        let omega: u64 = 281_474_976_710_656; // 2^48, primitive 4th root of unity mod p
+        let omega_inv = gl_inv_or_zero(omega);
+        let tw1 = [1u64, omega];
+        let tw2 = [1u64, omega_inv];
+        let orig = [0u64, 1, 0, 0];
+
+        let mut buf1 = orig;
+        let mut buf2 = orig;
+        let rec1 =
+            goldilocks_ntt_with_receipt(&CpuReferenceBackend, &key, &mut buf1, &tw1, false, anchor)
+                .expect("ntt receipt 1");
+        let rec2 =
+            goldilocks_ntt_with_receipt(&CpuReferenceBackend, &key, &mut buf2, &tw2, false, anchor)
+                .expect("ntt receipt 2");
+
+        assert_eq!(buf1, [1, omega, GOLDILOCKS_PRIME - 1, omega_inv]);
+        assert_eq!(buf2, [1, omega_inv, GOLDILOCKS_PRIME - 1, omega]);
+        assert_ne!(rec1.input_digest, rec2.input_digest);
+        assert_ne!(
+            goldilocks_ntt_input_digest(&orig, &tw1),
+            goldilocks_ntt_input_digest(&orig, &tw2)
+        );
+        // Cross-verifying rec2 against tw1's input digest must fail.
+        assert_eq!(rec2.input_digest, goldilocks_ntt_input_digest(&orig, &tw2));
+        assert_ne!(rec2.input_digest, goldilocks_ntt_input_digest(&orig, &tw1));
+    }
+
+    #[test]
+    fn merkle_position_framing_rejects_out_of_range_u64_indices() {
+        let seed = [1u64, 2, 3, 4];
+        let children = [[7u64; 4]; 2];
+        let mut out = [[0u64; 4]; 1];
+
+        // Exact colliding indices modulo p above 2^32 must be rejected cleanly.
+        for bad_idx in [
+            0xb3ad_a0b1_b0bb_bacfu64,
+            0xb3ad_a0b0_b0bb_bad0u64,
+            (u32::MAX as u64) + 1,
+            u64::MAX,
+        ] {
+            assert_eq!(
+                CpuReferenceBackend.try_merkle_layer_poseidon2_at(
+                    &children, &seed, 0, bad_idx, &mut out
+                ),
+                Err(AccelError::LengthOverflow)
+            );
+        }
+        // Boundary `u32::MAX` for 1 parent succeeds, while 2 parents starting at `u32::MAX` overflows `u32`.
+        assert_eq!(
+            CpuReferenceBackend.try_merkle_layer_poseidon2_at(
+                &children,
+                &seed,
+                0,
+                u32::MAX as u64,
+                &mut out
+            ),
+            Ok(())
+        );
+        let children4 = [[7u64; 4]; 4];
+        let mut out2 = [[0u64; 4]; 2];
+        assert_eq!(
+            CpuReferenceBackend.try_merkle_layer_poseidon2_at(
+                &children4,
+                &seed,
+                0,
+                u32::MAX as u64,
+                &mut out2
+            ),
+            Err(AccelError::LengthOverflow)
+        );
+    }
+
+    #[test]
+    fn failed_hardware_dispatch_never_stamps_spirv_pin_on_cpu_fallback() {
+        struct FailingGpuMock;
+        impl AcceleratorBackend for FailingGpuMock {
+            fn target_arch(&self) -> KernelTargetArch {
+                KernelTargetArch::SpirV16
+            }
+            fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
+                VulkanSpirvBackend::canonical_pin(slot)
+            }
+            fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]) {
+                CpuReferenceBackend.batch_keccak_f1600(states);
+            }
+            fn try_batch_keccak_f1600_pinned(
+                &self,
+                _states: &mut [[u64; 25]],
+            ) -> Result<CertifiedKernelPin, AccelError> {
+                Err(AccelError::LengthOverflow)
+            }
+            fn batch_poseidon2_perm12(&self, states: &mut [[u64; 12]]) {
+                CpuReferenceBackend.batch_poseidon2_perm12(states);
+            }
+            fn try_batch_poseidon2_perm12_pinned(
+                &self,
+                _states: &mut [[u64; 12]],
+            ) -> Result<CertifiedKernelPin, AccelError> {
+                Err(AccelError::LengthOverflow)
+            }
+            fn goldilocks_ntt_inplace(
+                &self,
+                _buf: &mut [u64],
+                _twiddles: &[u64],
+                _inverse: bool,
+            ) -> Result<(), AccelError> {
+                Err(AccelError::LengthOverflow)
+            }
+            fn coset_lde_ext2(
+                &self,
+                _evals: &[[u64; 2]],
+                _blowup: usize,
+                _shift: u64,
+                _out: &mut [[u64; 2]],
+            ) -> Result<(), AccelError> {
+                Err(AccelError::LengthOverflow)
+            }
+            fn try_merkle_layer_poseidon2_at(
+                &self,
+                _children: &[[u64; 4]],
+                _pk_seed: &[u64; 4],
+                _layer: u32,
+                _start_parent_idx: u64,
+                _out_parents: &mut [[u64; 4]],
+            ) -> Result<(), AccelError> {
+                Err(AccelError::LengthOverflow)
+            }
+            fn bdoz_gf2_128_batch_dot(
+                &self,
+                _shares: &[(u128, u128)],
+                _weights: &[(u128, u128)],
+            ) -> Result<(u128, u128), AccelError> {
+                Err(AccelError::LengthOverflow)
+            }
+        }
+
+        let key = BackendAttestationKey::derive(&[0x33u8; 32], b"mock-gpu-test");
+        let mut k_states = [[0u64; 25]; 2];
+        let mut p_states = [[0u64; 12]; 2];
+        assert_eq!(
+            batch_keccak_f1600_with_receipt(&FailingGpuMock, &key, &mut k_states, [0u8; 32]),
+            Err(AccelError::LengthOverflow)
+        );
+        assert_eq!(
+            batch_poseidon2_perm12_with_receipt(&FailingGpuMock, &key, &mut p_states, [0u8; 32]),
+            Err(AccelError::LengthOverflow)
+        );
     }
 
     #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]

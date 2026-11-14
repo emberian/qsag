@@ -272,6 +272,10 @@ pub fn merkle_layer_poseidon2_cpu(
 /// Batch tree build passes `start_parent_idx = 0`, while 1-node sibling path verification at
 /// child index `idx` passes `start_parent_idx = (idx >> 1) as u64`, guaranteeing exact equivalence
 /// AND FIPS-205-grade intra-layer node position separation.
+///
+/// Supported parent indices lie in `0..=u32::MAX` (`<= 2^32 - 1`), over which
+/// `0x4C52_5F4E_4F44_4531 + idx < GOLDILOCKS_PRIME` is strictly injective without `u64` or modular
+/// wrap; larger indices return [`AccelError::LengthOverflow`].
 pub fn merkle_layer_poseidon2_at_cpu(
     children: &[[u64; 4]],
     pk_seed: &[u64; 4],
@@ -289,6 +293,16 @@ pub fn merkle_layer_poseidon2_at_cpu(
             expected: expected_children,
             actual: children.len(),
         });
+    }
+    let max_parent_idx = if out_parents.is_empty() {
+        start_parent_idx
+    } else {
+        start_parent_idx
+            .checked_add((out_parents.len() - 1) as u64)
+            .ok_or(AccelError::LengthOverflow)?
+    };
+    if max_parent_idx > u32::MAX as u64 {
+        return Err(AccelError::LengthOverflow);
     }
     let s0 = gl_reduce_u64(pk_seed[0]);
     let s1 = gl_reduce_u64(pk_seed[1]);
