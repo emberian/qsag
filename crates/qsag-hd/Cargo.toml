@@ -9,7 +9,10 @@ description = "Signature-key inventory and dealerless linear-module HD custody."
 [features]
 default = ["alloc"]
 alloc = ["qsag-accel/alloc", "qsag-addr/alloc"]
-std = ["qsag-asm/std", "alloc", "qsag-accel/std", "qsag-addr/std"]
+std = ["qsag-core/std", "qsag-asm/std", "alloc", "qsag-accel/std", "qsag-addr/std"]
+# Nonpersistent custody shortcuts (in-memory poison journal, unchecked child-seed
+# reconstruction) for protocol tests. Never enable in a custody build.
+testing-ephemeral = []
 
 [dependencies]
 qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }

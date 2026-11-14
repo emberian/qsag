@@ -330,7 +330,6 @@ struct Lineage {
     seed_a: [u8; 32],
     matrix: Arc<ExpandedHdMatrix>,
     family_id: Option<[u8; 32]>,
-    #[cfg(feature = "std")]
     poison_journal: Option<Arc<dyn crate::poison::HdPoisonJournal>>,
     testing_poison_journal: bool,
     poisoned: Arc<AtomicBool>,
@@ -372,6 +371,7 @@ struct Core {
     combined_macs: Vec<u32>,
     combined_parent_macs: Vec<u32>,
     zero_shares: Vec<u32>,
+    zero_gates: Option<crate::zero_gate::CommittedZeroGates>,
     zero_salt: [u8; 32],
     zero_commits: Vec<RekeyZeroCommit>,
     complete: bool,
@@ -381,7 +381,6 @@ impl Drop for Core {
     fn drop(&mut self) {
         if !self.complete && self.parent.is_some() {
             self.lineage.poisoned.store(true, Ordering::Release);
-            #[cfg(feature = "std")]
             if let Some(journal) = &self.lineage.poison_journal {
                 let _ = journal.poison();
             }
@@ -533,7 +532,6 @@ impl<'a> RekeyRound1<'a> {
                         seed_a,
                         matrix: Arc::new(ExpandedHdMatrix::new(seed_a)),
                         family_id: None,
-                        #[cfg(feature = "std")]
                         poison_journal: None,
                         testing_poison_journal: false,
                         poisoned: Arc::new(AtomicBool::new(false)),
@@ -603,7 +601,6 @@ impl<'a> RekeyRound1<'a> {
                         seed_a: share.seed_a,
                         matrix: Arc::clone(&share.matrix),
                         family_id: Some(share.family_id),
-                        #[cfg(feature = "std")]
                         poison_journal: share.poison_journal.clone(),
                         testing_poison_journal: share.testing_poison_journal,
                         poisoned: Arc::clone(&share.poisoned),
@@ -771,6 +768,7 @@ impl<'a> RekeyRound1<'a> {
             combined_macs: Vec::new(),
             combined_parent_macs: Vec::new(),
             zero_shares: Vec::new(),
+            zero_gates: None,
             zero_salt: secret(b"QSAG.HD.REKEY.ZERO_SALT.V1"),
             zero_commits: Vec::new(),
             complete: false,
@@ -1062,6 +1060,10 @@ impl RekeyRound4 {
             }
         }
         core.zero_shares = zero_shares;
+        let plan = OpenPlan::new(&core.xs(), usize::from(core.threshold) - 1);
+        let weight = plan.to_zero.get(core.position).copied().unwrap_or(0);
+        let mut residuals: Vec<u32> = core.zero_shares.iter().map(|&v| mod_q_mul(weight, v)).collect();
+        core.zero_gates = Some(crate::zero_gate::CommittedZeroGates::hold(core.session, MODULE_Q, &mut residuals));
         let commit = RekeyZeroCommit {
             party_id: core.party_id,
             digest: core.zero_commitment(core.party_id, &core.zero_shares, &core.zero_salt),
@@ -1079,7 +1081,11 @@ impl RekeyRound5 {
         let mut core = self.0;
         ordered(&core.members, commits, |commit| commit.party_id)?;
         core.zero_commits = commits.to_vec();
-        #[cfg(feature = "std")]
+        let peers = crate::zero_gate::peer_transcript(&core.session, core.party_id,
+            commits.iter().map(|c| (c.party_id, c.digest)));
+        let gates = core.zero_gates.as_mut().ok_or(HdError::MacCheckFailed)?;
+        gates.freeze(peers)?;
+        gates.open()?;
         if let Some(journal) = &core.lineage.poison_journal {
             journal
                 .begin_disclosure(core.session)
@@ -1109,7 +1115,6 @@ impl RekeyRound6 {
     /// Releases the authenticated share and its public descriptor only when
     /// every zero-test opens to zero on a consistent degree `t - 1` sharing.
     /// Complete provisioning with a durable journal bound to the resulting family.
-    #[cfg(feature = "std")]
     pub fn finish(
         self,
         openings: &[RekeyZeroOpening],
@@ -1124,7 +1129,10 @@ impl RekeyRound6 {
         share.require_poison_journal()?;
         Ok((public, share))
     }
-    /// Explicit nonpersistent completion for pure protocol tests.
+    /// Explicit nonpersistent completion for pure protocol tests. Absent from builds
+    /// without `cfg(test)` or the `testing-ephemeral` feature (regression on
+    /// [`DEALER_FREE_PUBLIC_API`]).
+    #[cfg(any(test, feature = "testing-ephemeral"))]
     pub fn finish_with_in_memory_poison_journal_for_testing(
         self,
         openings: &[RekeyZeroOpening],
@@ -1160,12 +1168,19 @@ impl RekeyRound6 {
                 });
             }
         }
-        #[cfg(feature = "std")]
+        let peers = crate::zero_gate::peer_transcript(&core.session, core.party_id,
+            core.zero_commits.iter().map(|c| (c.party_id, c.digest)));
+        let peer_sums: Vec<u32> = (0..count).map(|index| {
+            openings.iter().enumerate().filter(|(position, _)| *position != core.position)
+                .fold(0, |sum, (position, opening)| mod_q_add(sum,
+                    mod_q_mul(plan.to_zero.get(position).copied().unwrap_or(0), opening.values[index])))
+        }).collect();
+        core.zero_gates.as_mut().ok_or(HdError::MacCheckFailed)?.verify(peers, &peer_sums)?;
         if core
             .lineage
             .poison_journal
             .as_ref()
-            .is_some_and(|j| j.is_poisoned().unwrap_or(true))
+            .is_some_and(|j| !j.disclosure_active(core.session).unwrap_or(false))
         {
             return Err(HdError::MacCheckFailed);
         }
@@ -1214,7 +1229,6 @@ impl RekeyRound6 {
             matrix: Arc::clone(&lineage.matrix),
             #[cfg(feature = "std")]
             budget: lineage.budget.clone(),
-            #[cfg(feature = "std")]
             poison_journal: lineage.poison_journal.clone(),
             testing_poison_journal: lineage.testing_poison_journal,
             poisoned: Arc::clone(&lineage.poisoned),
@@ -1222,7 +1236,6 @@ impl RekeyRound6 {
             depth_used: lineage.depth_used,
             max_depth: lineage.max_depth,
         };
-        #[cfg(feature = "std")]
         if let Some(journal) = &core.lineage.poison_journal {
             journal
                 .complete_disclosure(core.session)
@@ -1311,6 +1324,33 @@ impl LinearModulePartyShare {
 /// ```
 /// use qsag_hd::linear_module::REKEY_SACRIFICE_REPS;
 /// assert_eq!(REKEY_SACRIFICE_REPS, 7);
+/// ```
+/// The nonpersistent custody shortcuts are absent too, unless the
+/// `testing-ephemeral` feature is enabled: no in-memory poison journal, no
+/// journal-free completion, no unchecked child-seed reconstruction.
+/// ```compile_fail
+/// fn bypass(share: qsag_hd::LinearModulePartyShare) -> qsag_hd::LinearModulePartyShare {
+///     share.in_memory_poison_journal_for_testing()
+/// }
+/// ```
+/// ```compile_fail
+/// fn bypass(round: qsag_hd::linear_module::RekeyRound6) {
+///     let _ = round.finish_with_in_memory_poison_journal_for_testing(&[]);
+/// }
+/// ```
+/// ```compile_fail
+/// use qsag_hd::recover_child_signing_seed_unchecked;
+/// ```
+/// ```compile_fail
+/// use qsag_hd::inventory::recover_child_signing_seed_unchecked;
+/// ```
+/// Positive control for the four checks above: the same receivers and paths resolve.
+/// ```
+/// use qsag_hd::inventory::{enroll_child_signing_seed_quorum, recover_child_signing_seed};
+/// fn family(round: &qsag_hd::linear_module::RekeyRound6) {
+///     let _ = round.family_id();
+/// }
+/// fn custody(share: &qsag_hd::LinearModulePartyShare) -> bool { share.is_poisoned() }
 /// ```
 pub const DEALER_FREE_PUBLIC_API: () = ();
 
