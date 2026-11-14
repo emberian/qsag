@@ -3,6 +3,13 @@ public import QsagVerified.Proofs.TowerBdoz
 public import Qsag.BinaryTower
 import all Qsag.BinaryTower
 
+/-!
+Canonical multiplication coverage currently reaches GF(256). Addition below reaches
+Tower128 and Tower256. The independent wider multiplication expressions in TowerBdoz
+are not yet canonical multiplication welds, and none of these statements certifies
+that a separately compiled production implementation executes the extracted function.
+-/
+
 public section
 namespace qsag_verified.proofs
 open Aeneas Aeneas.Std Result
@@ -43,4 +50,40 @@ theorem gf256_mul_refines_qsag (a b : Std.U8) :
   have h := Qsag.mulExec_refines 3 (Qsag.unpackTower 3 a.bv) (Qsag.unpackTower 3 b.bv)
   rw [Qsag.packTower_unpackTower, Qsag.packTower_unpackTower] at h
   rw [h, Qsag.unpackTower_packTower]
+/-- Packed XOR is canonical tower addition at every level. -/
+theorem unpackTower_xor (k : Nat) (a b : Qsag.TowerBitVec k) :
+    Qsag.unpackTower k (a ^^^ b) =
+      Qsag.towerAdd k (Qsag.unpackTower k a) (Qsag.unpackTower k b) := by
+  have h := Qsag.packTower_add k (Qsag.unpackTower k a) (Qsag.unpackTower k b)
+  rw [Qsag.packTower_unpackTower, Qsag.packTower_unpackTower] at h
+  rw [← h, Qsag.unpackTower_packTower]
+
+/-- Extracted GF(256) addition in the same coordinates as the multiplication weld. -/
+theorem gf256_add_refines_qsag (a b : Std.U8) :
+    ∃ y, tower.gf256_add a b = .ok y ∧
+      Qsag.unpackTower 3 y.bv =
+        Qsag.towerAdd 3 (Qsag.unpackTower 3 a.bv) (Qsag.unpackTower 3 b.bv) :=
+  ⟨a ^^^ b, rfl, unpackTower_xor 3 a.bv b.bv⟩
+
+/-- Extracted 128-bit addition refines the canonical level-seven operation. -/
+theorem tower128_add_refines_qsag (a b : Std.U128) :
+    ∃ y, tower.tower128_add a b = .ok y ∧
+      Qsag.unpackTower 7 y.bv =
+        Qsag.towerAdd 7 (Qsag.unpackTower 7 a.bv) (Qsag.unpackTower 7 b.bv) :=
+  ⟨a ^^^ b, rfl, unpackTower_xor 7 a.bv b.bv⟩
+
+/-- Production-order low/high coordinates of an extracted 256-bit tower element. -/
+def tower256Abs (a : tower.Tower256) : Qsag.TowerElem 8 :=
+  (Qsag.unpackTower 7 a.lo.bv, Qsag.unpackTower 7 a.hi.bv)
+
+/-- Extracted 256-bit addition refines the canonical level-eight operation. -/
+theorem tower256_add_refines_qsag (a b : tower.Tower256) :
+    ∃ y, tower.tower256_add a b = .ok y ∧
+      tower256Abs y = Qsag.towerAdd 8 (tower256Abs a) (tower256Abs b) := by
+  refine ⟨⟨a.lo ^^^ b.lo, a.hi ^^^ b.hi⟩, rfl, ?_⟩
+  change (Qsag.unpackTower 7 (a.lo.bv ^^^ b.lo.bv),
+      Qsag.unpackTower 7 (a.hi.bv ^^^ b.hi.bv)) = _
+  exact congrArg₂ Prod.mk (unpackTower_xor 7 a.lo.bv b.lo.bv)
+    (unpackTower_xor 7 a.hi.bv b.hi.bv)
+
 end qsag_verified.proofs
