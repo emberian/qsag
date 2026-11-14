@@ -402,7 +402,10 @@ fn anchored_ledger_checkpoint_bench(durable_root: &Path) {
 
 /// Single-thread cost of the public parts: counter grinding and signature verification.
 fn primitives() {
-    let mut jorts = CommitteePartitionedJorts::stage(2, 3, 7, &SEED).expect("staging");
+    let mut jorts = CommitteePartitionedJorts::stage_durable(2, 3, 7, &SEED, |_party, count| {
+        vec![MemoryWal::new(); count]
+    })
+    .expect("staging");
     let pk = *jorts.public_key();
     const SAMPLES: u32 = 2000;
     let begin = Instant::now();
