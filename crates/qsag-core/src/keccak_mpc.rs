@@ -50,7 +50,7 @@ use crate::tsw_baggy::{
 };
 use crate::wipe::{
     SecretBuffer, ct_eq_bytes, ct_eq_bytes32, ct_eq_u64, secret_vec_extend_from_slice,
-    secret_vec_push, wipe_bytes, wipe_bytes32, wipe_u64s,
+    secret_vec_push, wipe_bytes, wipe_bytes32, wipe_u64s, wipe_u128s,
 };
 
 /// Overflow-safe active-lane bitmask for 64-way bitsliced batches (`batch_len == 64 -> u64::MAX`,
@@ -918,12 +918,10 @@ fn rss_cross_pairs(
 }
 
 /// Proof tables of one pass: slot shares of the bound `a` (weighted by `t^lane`) and `b`
-/// vectors, plus dot-product operand scratch. Wiped on `Drop`.
+/// vectors. Wiped on `Drop`.
 struct RssDzkTables {
     x: [Vec<u128>; 3],
     y: [Vec<u128>; 3],
-    lhs: Vec<[u128; 2]>,
-    rhs: Vec<[u128; 2]>,
 }
 
 impl Drop for RssDzkTables {
@@ -932,8 +930,128 @@ impl Drop for RssDzkTables {
             qsag_asm::volatile_fill(&mut self.x[s], 0);
             qsag_asm::volatile_fill(&mut self.y[s], 0);
         }
-        qsag_asm::volatile_fill(&mut self.lhs, [0; 2]);
-        qsag_asm::volatile_fill(&mut self.rhs, [0; 2]);
+    }
+}
+
+/// Elements gathered per dot-product call in a halving round; bounds a worker's operand
+/// scratch at 128 KiB.
+const RSS_DZK_FOLD_BLOCK: usize = 1024;
+/// Lower-half length from which a halving round is split across threads. Every partial
+/// result is combined by XOR, so the split changes no message and no challenge.
+#[cfg(feature = "std")]
+const RSS_DZK_FOLD_PAR_MIN: usize = 1 << 14;
+
+#[cfg(feature = "std")]
+fn rss_dzk_workers() -> usize {
+    std::thread::available_parallelism().map_or(1, usize::from).min(16)
+}
+
+/// `(lower half, upper half)` of one slot's table in a halving round, equal lengths.
+type RssFoldHalves<'a> = (&'a [u128], &'a [u128]);
+
+/// Party `p`'s additive shares of `L = <x_lo, y_hi>` (lane 0) and `R = <x_hi, y_lo>` (lane 1)
+/// over one index range, from the slot-`p` and slot-`q = p + 1` halves of that range.
+fn rss_fold_cross_dot(
+    xp: RssFoldHalves<'_>,
+    xq: RssFoldHalves<'_>,
+    yp: RssFoldHalves<'_>,
+    yq: RssFoldHalves<'_>,
+) -> [u128; 2] {
+    let mut lhs = [[0u128; 2]; 2 * RSS_DZK_FOLD_BLOCK];
+    let mut rhs = [[0u128; 2]; 2 * RSS_DZK_FOLD_BLOCK];
+    let mut out = [0u128; 2];
+    let n = xp.0.len();
+    let mut start = 0usize;
+    while start < n {
+        let len = (n - start).min(RSS_DZK_FOLD_BLOCK);
+        for j in 0..len {
+            let i = start + j;
+            rss_cross_pairs(
+                &mut lhs[2 * j..2 * j + 2],
+                &mut rhs[2 * j..2 * j + 2],
+                [(xp.0[i], xp.1[i]), (xq.0[i], xq.1[i])],
+                [(yp.1[i], yp.0[i]), (yq.1[i], yq.0[i])],
+            );
+        }
+        let mut part = rss_poly_dot(&lhs[..2 * len], &rhs[..2 * len]);
+        out[0] ^= part[0];
+        out[1] ^= part[1];
+        wipe_u128s(&mut part);
+        start += len;
+    }
+    qsag_asm::volatile_fill(&mut lhs, [0; 2]);
+    qsag_asm::volatile_fill(&mut rhs, [0; 2]);
+    out
+}
+
+/// All three parties' `(L, R)` shares of one halving round.
+fn rss_fold_cross_dots<'a>(
+    xs: &[RssFoldHalves<'a>; 3],
+    ys: &[RssFoldHalves<'a>; 3],
+) -> [[u128; 2]; 3] {
+    let n = xs[0].0.len();
+    let range_dot = |p: usize, start: usize, end: usize| {
+        let q = (p + 1) % 3;
+        let cut = |h: RssFoldHalves<'a>| -> RssFoldHalves<'a> { (&h.0[start..end], &h.1[start..end]) };
+        rss_fold_cross_dot(cut(xs[p]), cut(xs[q]), cut(ys[p]), cut(ys[q]))
+    };
+    #[cfg(feature = "std")]
+    if n >= RSS_DZK_FOLD_PAR_MIN {
+        let chunk = n.div_ceil(rss_dzk_workers().div_ceil(3));
+        let range_dot = &range_dot;
+        return std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..3)
+                .flat_map(|p| (0..n).step_by(chunk).map(move |start| (p, start)))
+                .map(|(p, start)| {
+                    scope.spawn(move || (p, range_dot(p, start, (start + chunk).min(n))))
+                })
+                .collect();
+            let mut out = [[0u128; 2]; 3];
+            for handle in handles {
+                let (p, mut part) = handle.join().expect("RSS fold worker failed");
+                out[p][0] ^= part[0];
+                out[p][1] ^= part[1];
+                wipe_u128s(&mut part);
+            }
+            out
+        });
+    }
+    core::array::from_fn(|p| range_dot(p, 0, n))
+}
+
+/// The first `len` elements below and from `upper` of every slot's table.
+fn rss_fold_halves(table: &[Vec<u128>; 3], upper: usize, len: usize) -> [RssFoldHalves<'_>; 3] {
+    core::array::from_fn(|s| {
+        let (lo, hi) = table[s].split_at(upper);
+        (&lo[..len], &hi[..len])
+    })
+}
+
+/// `lo[i] ^= scale * hi[i]` for each `(lo, hi, scale)` job, with public scales.
+fn rss_fold_scale_xor(jobs: &mut [(&mut [u128], &[u128], RssProofField)]) {
+    let apply = |lo: &mut [u128], hi: &[u128], scale: RssProofField| {
+        let mul = RssFieldMultiplier::new(scale);
+        for (dst, src) in lo.iter_mut().zip(hi) {
+            *dst ^= mul.mul(RssProofField(*src)).0;
+        }
+    };
+    #[cfg(feature = "std")]
+    if jobs.first().is_some_and(|job| job.0.len() >= RSS_DZK_FOLD_PAR_MIN) {
+        let per_job = rss_dzk_workers().div_ceil(jobs.len());
+        let apply = &apply;
+        std::thread::scope(|scope| {
+            for (lo, hi, scale) in jobs.iter_mut() {
+                let chunk = lo.len().div_ceil(per_job);
+                let scale = *scale;
+                for (lo, hi) in lo.chunks_mut(chunk).zip(hi.chunks(chunk)) {
+                    scope.spawn(move || apply(lo, hi, scale));
+                }
+            }
+        });
+        return;
+    }
+    for (lo, hi, scale) in jobs.iter_mut() {
+        apply(lo, hi, *scale);
     }
 }
 
@@ -961,50 +1079,39 @@ fn rss_dzk_fold_round(
 ) -> Result<(), KeccakMpcError> {
     let mut l_msg = SecretBuffer(streams.zero_share());
     let mut r_msg = SecretBuffer(streams.zero_share());
-    let RssDzkTables { x, y, lhs, rhs } = tables;
-    let need = 2 * unit * hi_groups;
-    if lhs.len() < need {
-        lhs.resize(need, [0; 2]);
-        rhs.resize(need, [0; 2]);
-    }
-    for p in 0..3 {
-        let q = (p + 1) % 3;
-        let mut filled = 0usize;
-        for g in 0..hi_groups {
-            for j in 0..unit {
-                let lo = g * unit + j;
-                let hi = (g + half) * unit + j;
-                // Lane 0 accumulates <x_lo, y_hi>, lane 1 accumulates <x_hi, y_lo>.
-                rss_cross_pairs(
-                    &mut lhs[filled..filled + 2],
-                    &mut rhs[filled..filled + 2],
-                    [(x[p][lo], x[p][hi]), (x[q][lo], x[q][hi])],
-                    [(y[p][hi], y[p][lo]), (y[q][hi], y[q][lo])],
-                );
-                filled += 2;
-            }
+    let RssDzkTables { x, y } = tables;
+    let len = hi_groups * unit;
+    let upper = half * unit;
+    {
+        // Lane 0 accumulates <x_lo, y_hi>, lane 1 accumulates <x_hi, y_lo>.
+        let mut dots = rss_fold_cross_dots(
+            &rss_fold_halves(x, upper, len),
+            &rss_fold_halves(y, upper, len),
+        );
+        for p in 0..3 {
+            l_msg[p] = l_msg[p].add(RssProofField(dots[p][0]));
+            r_msg[p] = r_msg[p].add(RssProofField(dots[p][1]));
         }
-        let out = rss_poly_dot(&lhs[..filled], &rhs[..filled]);
-        l_msg[p] = l_msg[p].add(RssProofField(out[0]));
-        r_msg[p] = r_msg[p].add(RssProofField(out[1]));
+        wipe_u128s(dots.as_flattened_mut());
     }
 
     let gamma = ctx
         .coin(b"RSS_DZK_POLY_FOLD_COIN/v3", pass, step, party_rngs)?
         .nonzero();
     let gamma_inv = gamma.inv_public();
-    let scale_x = RssFieldMultiplier::new(gamma);
-    let scale_y = RssFieldMultiplier::new(gamma_inv);
     for s in 0..3 {
         claim[s] = claim[s]
             .add(gamma_inv.mul(l_msg[s]))
             .add(gamma.mul(r_msg[s]));
-        for idx in 0..hi_groups * unit {
-            let hi = idx + half * unit;
-            x[s][idx] ^= scale_x.mul(RssProofField(x[s][hi])).0;
-            y[s][idx] ^= scale_y.mul(RssProofField(y[s][hi])).0;
+    }
+    let mut jobs: Vec<(&mut [u128], &[u128], RssProofField)> = Vec::with_capacity(6);
+    for (table, scale) in [(x, gamma), (y, gamma_inv)] {
+        for slot in table.iter_mut() {
+            let (lo, hi) = slot.split_at_mut(upper);
+            jobs.push((&mut lo[..len], &hi[..len], scale));
         }
     }
+    rss_fold_scale_xor(&mut jobs);
     Ok(())
 }
 
@@ -1146,21 +1253,53 @@ fn rss_dzk_initial_claims(
                 mu_tab[pass][u & (u - 1)].mul(weights[pass].mu[u.trailing_zeros() as usize]);
         }
     }
-    let mut claims = [[RssProofField::ZERO; 3]; 2];
-    let mut lhs = vec![[0u128; 2]; groups];
-    for (s, words) in pending.c.iter().enumerate() {
-        for u in 0..RSS_DZK_GROUP_WORDS {
+    // Slot `s`'s share of both claims over the word offsets `offsets` of every group.
+    let slot_claims = |s: usize, offsets: core::ops::Range<usize>| -> [RssProofField; 2] {
+        let words = &pending.c[s];
+        let mut lhs = vec![[0u128; 2]; groups];
+        let mut part = [RssProofField::ZERO; 2];
+        for u in offsets {
             for (g, pair) in lhs.iter_mut().enumerate() {
                 *pair = [u128::from(words[g * RSS_DZK_GROUP_WORDS + u]); 2];
             }
             let out = rss_poly_dot(&lhs, nu_pairs);
             for pass in 0..2 {
-                claims[pass][s] =
-                    claims[pass][s].add(mu_tab[pass][u].mul(RssProofField(out[pass])));
+                part[pass] = part[pass].add(mu_tab[pass][u].mul(RssProofField(out[pass])));
             }
         }
+        qsag_asm::volatile_fill(&mut lhs, [0; 2]);
+        part
+    };
+    let mut claims = [[RssProofField::ZERO; 3]; 2];
+    let mut add_part = |s: usize, mut part: [RssProofField; 2]| {
+        for (claim, share) in claims.iter_mut().zip(part) {
+            claim[s] = claim[s].add(share);
+        }
+        wipe_rss_proof_field(&mut part);
+    };
+    #[cfg(feature = "std")]
+    if groups >= 128 {
+        let step = RSS_DZK_GROUP_WORDS.div_ceil(rss_dzk_workers().div_ceil(3));
+        let slot_claims = &slot_claims;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..3)
+                .flat_map(|s| (0..RSS_DZK_GROUP_WORDS).step_by(step).map(move |u| (s, u)))
+                .map(|(s, u)| {
+                    scope.spawn(move || {
+                        (s, slot_claims(s, u..(u + step).min(RSS_DZK_GROUP_WORDS)))
+                    })
+                })
+                .collect();
+            for handle in handles {
+                let (s, part) = handle.join().expect("RSS claim worker failed");
+                add_part(s, part);
+            }
+        });
+        return claims;
     }
-    qsag_asm::volatile_fill(&mut lhs, [0; 2]);
+    for s in 0..3 {
+        add_part(s, slot_claims(s, 0..RSS_DZK_GROUP_WORDS));
+    }
     claims
 }
 
@@ -1258,8 +1397,6 @@ fn rss_dzk_pass(
     let mut tables = RssDzkTables {
         x: [vec![0u128; total], vec![0u128; total], vec![0u128; total]],
         y: [vec![0u128; total], vec![0u128; total], vec![0u128; total]],
-        lhs: Vec::new(),
-        rhs: Vec::new(),
     };
     // Groups are independent linear maps under public coefficients. Partition only
     // this arithmetic and absorb `block_weights[g]` directly into `x`; challenges,
@@ -2944,7 +3081,7 @@ fn verify_pending_spdz_mac_batch(
             let mut macs: [[u128; 2]; 64] = core::array::from_fn(|bit| [pending_macs[q][w][0][bit].0, pending_macs[q][w][1][bit].0]);
             let mut folded = qsag_asm::tower128_bdoz_2lane_mac(&chis, &macs);
             for lane in 0..2 { m_folded[q][lane] = m_folded[q][lane].add(Tower128(folded[lane])); }
-            crate::wipe::wipe_u128s(macs.as_flattened_mut());
+            wipe_u128s(macs.as_flattened_mut());
             crate::wipe::wipe_u128s(&mut folded);
         }
     }
@@ -5654,6 +5791,73 @@ mod tests {
             assert_eq!(v.mul_t_pow(shift).0, v.mul(mono).0);
         }
         assert_eq!(v.mul(v.inv_public()).0, 1);
+    }
+
+    /// A halving round split across workers and scratch blocks gives the scalar-field sums.
+    /// The length is above the threading threshold and not a multiple of any block size.
+    #[test]
+    fn rss_fold_round_split_matches_scalar_reference() {
+        let n = (1usize << 14) + 37;
+        let mut xof = Cshake256Xof::new(b"RSS.FOLD.FIXTURE");
+        let mut next = || {
+            let mut bytes = [0u8; 16];
+            xof.squeeze(&mut bytes);
+            u128::from_le_bytes(bytes)
+        };
+        let mut table = || -> [Vec<u128>; 3] {
+            core::array::from_fn(|_| (0..2 * n + 5).map(|_| next()).collect())
+        };
+        let (mut x, y) = (table(), table());
+        let upper = n + 5;
+        let f = RssProofField;
+        let dots = rss_fold_cross_dots(&rss_fold_halves(&x, upper, n), &rss_fold_halves(&y, upper, n));
+        for p in 0..3 {
+            let q = (p + 1) % 3;
+            let (mut l, mut r) = (RssProofField::ZERO, RssProofField::ZERO);
+            for i in 0..n {
+                let hi = upper + i;
+                l = l.add(f(x[p][i]).mul(f(y[p][hi] ^ y[q][hi]))).add(f(x[q][i]).mul(f(y[p][hi])));
+                r = r.add(f(x[p][hi]).mul(f(y[p][i] ^ y[q][i]))).add(f(x[q][hi]).mul(f(y[p][i])));
+            }
+            assert_eq!(dots[p], [l.0, r.0]);
+        }
+
+        let before = x.clone();
+        let scales = [f(next()), f(next()), f(next())];
+        let mut jobs: Vec<(&mut [u128], &[u128], RssProofField)> = Vec::new();
+        for (slot, scale) in x.iter_mut().zip(scales) {
+            let (lo, hi) = slot.split_at_mut(upper);
+            jobs.push((&mut lo[..n], &hi[..n], scale));
+        }
+        rss_fold_scale_xor(&mut jobs);
+        for s in 0..3 {
+            for i in 0..n {
+                assert_eq!(x[s][i], before[s][i] ^ scales[s].mul(f(before[s][upper + i])).0);
+            }
+            assert_eq!(x[s][n..], before[s][n..]);
+        }
+    }
+
+    /// One full Keccak batch (600 groups): its halving rounds cross the threading threshold.
+    #[test]
+    fn rss_proof_at_keccak_batch_size_accepts_honest_and_rejects_one_flipped_product() {
+        let sid = [0x98; 32];
+        let mut rngs = make_rngs3(0x3a);
+        let (keys, _) = run_dealerless_rss_dkg_2of3(sid, 16, &mut rngs).unwrap();
+        let mask = RssMaskSession::derive(&sid, &keys, &mut rngs).unwrap();
+        let words = 24 * 1600;
+        let honest = random_relations(b"keccak-batch", words, u64::MAX);
+        let mut pending = clone_relations(&honest);
+        verify_rss_boolean_triples_bbcggi19(&sid, 0, &mut pending, &mask, &mut rngs).unwrap();
+        // Corrupt one product bit in the lower and in the upper half of the group index.
+        for (ctr, word) in [(1u64, 17usize), (2, words - 3)] {
+            let mut bad = clone_relations(&honest);
+            bad.c[word % 3][word] ^= 1u64 << (word % 64);
+            assert!(matches!(
+                verify_rss_boolean_triples_bbcggi19(&sid, ctr, &mut bad, &mask, &mut rngs),
+                Err(KeccakMpcError::RssSacrificeFailed)
+            ));
+        }
     }
 
     #[test]

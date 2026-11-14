@@ -62,6 +62,8 @@ import all Qsag.UcGames
 import all Qsag.Preprocessing
 import all Qsag.ThresholdMpc
 
+import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -2368,7 +2370,7 @@ theorem canonical_context_trace_poisoned_absorbs
     simpa only [runCanonicalMacBeforeOpenTrace, stepCanonicalMacBeforeOpenSignTurn, hp, ↓reduceIte]
       using ih { st with abortedCount := st.abortedCount + 1 } hp
 
-private def CanonicalContextTraceInv (keys : ContextBdozKeys)
+def CanonicalContextTraceInv (keys : ContextBdozKeys)
     (nonce digest : BitVec 256) (cutIndex initialEpoch : Nat)
     (turnsSeen : List ContextCutOpening) (st : MaliciousSignerState) : Prop :=
   initialEpoch ≤ st.nextEpoch ∧
@@ -2811,7 +2813,7 @@ private theorem stepTwoPhaseJortsNode_preserves_wellFormed {PartyId ShareVal : T
                 rw [hHw] at hSome; injection hSome with hPair; injection hPair with e1 e2
                 dsimp only [newVote] at hSameSlot
                 rcases hOrd with hLt | ⟨hEqS, hEqM⟩
-                · omega
+                · exact False.elim (by omega)
                 · have hM2 : v₂.msg = msg := by rw [hEqM, ← e2, hMsgEq]
                   have hS2 : v₂.slot = slot := hSameSlot.symm
                   have hU2 : v₂ = newVote := hVoteEqOfSlotMsg v₂ hV2 hS2 hM2 hSh2 hTag2
@@ -2821,7 +2823,7 @@ private theorem stepTwoPhaseJortsNode_preserves_wellFormed {PartyId ShareVal : T
                 rw [hHw] at hSome; injection hSome with hPair; injection hPair with e1 e2
                 dsimp only [newVote] at hSameSlot
                 rcases hOrd with hLt | ⟨hEqS, hEqM⟩
-                · omega
+                · exact False.elim (by omega)
                 · have hM1 : v₁.msg = msg := by rw [hEqM, ← e2, hMsgEq]
                   have hU1 : v₁ = newVote := hVoteEqOfSlotMsg v₁ hV1 hSameSlot hM1 hSh1 hTag1
                   exact ⟨hM1, hU1⟩
@@ -2928,9 +2930,9 @@ structure ThresholdJortsVoteForgeryWitness {PartyId ShareVal : Type}
 
 private def findVoteByParty {PartyId ShareVal : Type} [DecidableEq PartyId]
     (p : PartyId) :
-    ∀ (vs : List (ThresholdJortsPartialVote PartyId ShareVal)),
-      p ∈ vs.map (·.voter) →
-      { v : ThresholdJortsPartialVote PartyId ShareVal // v ∈ vs ∧ v.voter = p }
+    ∀ (votes : List (ThresholdJortsPartialVote PartyId ShareVal)),
+      p ∈ votes.map (·.voter) →
+      { v : ThresholdJortsPartialVote PartyId ShareVal // v ∈ votes ∧ v.voter = p }
   | [], hMem => False.elim (by cases hMem)
   | v :: rest, hMem =>
     if hEq : v.voter = p then
@@ -3084,6 +3086,24 @@ theorem tooth_static_key_share_quorum_exposes_master_secret
     let slot0EmittedShares := SQ.pts.map (fun pt => RoundPoly.evalCoeffs skPoly pt)
     lagrangeCombine SQ.lambdas slot0EmittedShares = RoundPoly.evalCoeffs skPoly (towerZero 7) :=
   lagrangeAtZero_evalCoeffs SQ.lambdas SQ.pts skPoly (2 * f + 1) hDeg SQ.sum_one SQ.kills_higher
+
+
+/-- Reachable initial invariant for the context-bound cut transition. -/
+private theorem inhabited_canonical_context_initial (keys : ContextBdozKeys)
+    (nonce digest : BitVec 256) (cutIndex epoch : Nat) :
+    ∃ st, CanonicalContextTraceInv keys nonce digest cutIndex epoch [] st :=
+  ⟨⟨epoch, [], 0, false⟩, Nat.le_refl epoch, .nil, fun _ _ h => False.elim (by cases h)⟩
+
+theorem tooth_context_replay_cannot_accept (keys : ContextBdozKeys)
+    (nonce digest : BitVec 256) (op : BdozPairOpening) :
+    ¬ verifyContextCut keys ⟨nonce, 1, 0, digest⟩ ⟨⟨nonce, 0, 0, digest⟩, op⟩ = true := by
+  rw [tooth_context_cut_epoch_replay]
+  decide
+
+#verify_constructive stepTwoPhaseJortsNode_preserves_wellFormed
+  twoPhaseJorts_trace_no_equivocation_across_crashes
+#verify_inhabited stepCanonicalContextTrace_preserves_inv inhabited_canonical_context_initial
+#tooth_pair canonical_context_trace_no_epoch_replay_and_origin vs tooth_context_replay_cannot_accept
 
 end Qsag
 end

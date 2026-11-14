@@ -2858,13 +2858,13 @@ theorem merkle_collision_or_unique_opening {D : Type} [DecidableEq D]
         exact .inl ⟨hEq.1, by rw [hEq.2, hrest]⟩
       else
         if hpar0 : idx % 2 = 0 then
-          rw [if_pos hpar0, if_pos hpar0] at hpar
+          rw [ite_eq_left hpar0, ite_eq_left hpar0] at hpar
           refine .inr ?_
           unfold MerkleTweakCollision
           exact ⟨lvl, idx / 2, leaf, sib, leaf', sib',
             if hl1 : leaf = leaf' then .inr (fun hs => hEq ⟨hl1, hs⟩) else .inl hl1, hpar⟩
         else
-          rw [if_neg hpar0, if_neg hpar0] at hpar
+          rw [ite_eq_right hpar0, ite_eq_right hpar0] at hpar
           refine .inr ?_
           unfold MerkleTweakCollision
           exact ⟨lvl, idx / 2, sib, leaf, sib', leaf',

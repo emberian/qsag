@@ -96,12 +96,20 @@ where
     let worker_job = std::sync::Arc::clone(&job);
     match std::thread::Builder::new().spawn_scoped(scope, move || {
         let _permit = permit;
-        let f = worker_job.lock().expect("worker job lock").take().expect("worker job");
+        let f = worker_job
+            .lock()
+            .expect("worker job lock")
+            .take()
+            .expect("worker job");
         f()
     }) {
         Ok(handle) => ScopedWorker::Spawned(handle),
         Err(_) => {
-            let f = job.lock().expect("worker job lock").take().expect("worker job");
+            let f = job
+                .lock()
+                .expect("worker job lock")
+                .take()
+                .expect("worker job");
             ScopedWorker::Inline(f())
         }
     }
@@ -189,9 +197,10 @@ where
     let slices: Vec<&'a [T]> = items.chunks(chunk).collect();
     let f_ref = &f;
     std::thread::scope(|scope| {
-        let tails: Vec<_> = slices[1..].iter().map(|&sub| {
-            spawn_bounded(scope, move || f_ref(sub))
-        }).collect();
+        let tails: Vec<_> = slices[1..]
+            .iter()
+            .map(|&sub| spawn_bounded(scope, move || f_ref(sub)))
+            .collect();
         let mut out = Vec::with_capacity(slices.len());
         out.push(f_ref(slices[0]));
         out.extend(tails.into_iter().map(join_worker));
@@ -776,7 +785,13 @@ pub fn aggregate_signatures_with_config(
         seed_in[0..32].copy_from_slice(&cfg.blinding_seed);
         seed_in[32..40].copy_from_slice(&(batch_idx as u64).to_le_bytes());
         let batch_seed = sponge::cshake256_32(b"QSAG.BATCH.BLIND/v4", &seed_in);
-        batch_jobs.push((start, end, shard_signer_counts.as_slice(), batch_bitmap, batch_seed));
+        batch_jobs.push((
+            start,
+            end,
+            shard_signer_counts.as_slice(),
+            batch_bitmap,
+            batch_seed,
+        ));
         start = end;
     }
 
@@ -822,7 +837,10 @@ pub fn aggregate_signatures_with_config(
         }
         flat_leaves
     } else {
-        batch_jobs.iter().map(prove_one).collect::<Result<Vec<_>, _>>()?
+        batch_jobs
+            .iter()
+            .map(prove_one)
+            .collect::<Result<Vec<_>, _>>()?
     };
 
     #[cfg(not(feature = "std"))]
@@ -1286,9 +1304,11 @@ mod tests {
         });
         drop(permits);
         let inputs: Vec<usize> = (0..257).collect();
-        let output: Vec<usize> = map_chunks_bounded(&inputs, |xs| {
-            xs.iter().map(|x| x * x).collect::<Vec<_>>()
-        }).into_iter().flatten().collect();
+        let output: Vec<usize> =
+            map_chunks_bounded(&inputs, |xs| xs.iter().map(|x| x * x).collect::<Vec<_>>())
+                .into_iter()
+                .flatten()
+                .collect();
         assert_eq!(output, inputs.iter().map(|x| x * x).collect::<Vec<_>>());
     }
 
@@ -1324,7 +1344,6 @@ mod tests {
         }
         let merged = level.pop().unwrap();
         assert!(verify_aggregate(&pks, &mode, &merged));
-
     }
 
     #[test]

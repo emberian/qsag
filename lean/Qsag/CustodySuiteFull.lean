@@ -28,6 +28,8 @@ public import Qsag.Keccak
 public import Qsag.UcGames
 public import Qsag.MaliciousSecurity
 
+import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -4104,7 +4106,7 @@ def bech32StepBv (chk : BitVec 32) (v : BitVec 8) : BitVec 32 :=
 /-- Folded `Bech32` / `Bech32m` polymod accumulator starting from an arbitrary 32-bit state. -/
 def bech32FoldBv : BitVec 32 → List UInt8 → BitVec 32
   | chk, [] => chk
-  | chk, v :: vs => bech32FoldBv (bech32StepBv chk v.toBitVec) vs
+  | chk, v :: vals => bech32FoldBv (bech32StepBv chk v.toBitVec) vals
 
 /-- Canonical `Bech32m` polymod function (`chk₀ = 1`). -/
 @[expose] def bech32Polymod (values : List UInt8) : UInt32 :=
@@ -4217,13 +4219,13 @@ private theorem bech32StepBv_high_bits_zero (c : BitVec 32) (v : BitVec 8) :
     all_goals decide
 
 private theorem bech32FoldBv_high_bits_zero :
-    ∀ (c : BitVec 32) (vs : List UInt8),
+    ∀ (c : BitVec 32) (vals : List UInt8),
       c.getLsbD 30 = false → c.getLsbD 31 = false →
-      (bech32FoldBv c vs).getLsbD 30 = false ∧ (bech32FoldBv c vs).getLsbD 31 = false
+      (bech32FoldBv c vals).getLsbD 30 = false ∧ (bech32FoldBv c vals).getLsbD 31 = false
   | _, [], h30, h31 => ⟨h30, h31⟩
-  | c, v :: vs, _, _ =>
+  | c, v :: vals, _, _ =>
     let ⟨n30, n31⟩ := bech32StepBv_high_bits_zero c v.toBitVec
-    bech32FoldBv_high_bits_zero _ vs n30 n31
+    bech32FoldBv_high_bits_zero _ vals n30 n31
 
 private theorem bech32StepBv_no_top (c : BitVec 32) (v : BitVec 8)
     (h25 : c.getLsbD 25 = false) (h26 : c.getLsbD 26 = false)
@@ -6165,8 +6167,8 @@ theorem policyAdmission_wire_and_burns {g : AuthenticatedPolicyState} {tx : Tran
   simp only [Bool.and_eq_true, decide_eq_true_eq] at hDom hTs hWinPol hRecCap hProj
   simp only [Bool.not_eq_true'] at hNb hSb
   exact ⟨hDom.1, hDom.2.1, hTs.1, hTs.2.1, hTs.2.2, hWinPol.1, hRecCap.2, hProj.1,
-         fun hc => by rw [hc] at hNb; cases hNb,
-         fun hc => by rw [hc] at hSb; cases hSb,
+         (fun hc => Bool.noConfusion (hc.symm.trans hNb)),
+         (fun hc => Bool.noConfusion (hc.symm.trans hSb)),
          hAuth⟩
 
 inductive AuthenticatedPolicyInput where
@@ -6238,7 +6240,7 @@ theorem policy_authorized_rotation_preserves_replay (g g' : AuthenticatedPolicyS
   unfold policyWatermarkGuardStep at h
   if hc : g.rules.window_id < a.newWindow ∧ a.newWindow < 256 ^ 8 ∧
           a.mac = policyWindowTag g a.newWindow then
-    rw [if_pos (decide_eq_true hc)] at h
+    simp only [hc] at h
     rcases CustodyStepOutcome.accepted.inj h with ⟨rfl, _⟩
     exact ⟨hc.1, hc.2.2, rfl, rfl⟩
   else
@@ -6316,7 +6318,7 @@ private theorem policy_operational_burned_not_in_future
       unfold policyWatermarkGuardStep at hStep
       if hc : st.rules.window_id < auth.newWindow ∧ auth.newWindow < 256 ^ 8 ∧
               auth.mac = policyWindowTag st auth.newWindow then
-        rw [if_pos (decide_eq_true hc)] at hStep
+        simp only [hc] at hStep
         rcases CustodyStepOutcome.accepted.inj hStep with ⟨rfl, rfl⟩
         simp only [traceApprovedOutputs_cons_some, watermarkApprovedIntents]
         exact ih
@@ -6374,7 +6376,7 @@ theorem policy_operational_multiturn_sound
       unfold policyWatermarkGuardStep at hStep
       if hc : st.rules.window_id < auth.newWindow ∧ auth.newWindow < 256 ^ 8 ∧
               auth.mac = policyWindowTag st auth.newWindow then
-        rw [if_pos (decide_eq_true hc)] at hStep
+        simp only [hc] at hStep
         rcases CustodyStepOutcome.accepted.inj hStep with ⟨rfl, rfl⟩
         simp only [traceApprovedOutputs_cons_some, watermarkApprovedIntents]
         exact ih
@@ -6436,12 +6438,12 @@ def policy_authentication_or_produced_forgery (g : AuthenticatedPolicyState)
       unfold policyAuthenticatedInitiator at accepted
       have hNeBool : (tx.initiator_party == g.party) = false :=
         beq_false_of_ne remote
-      rw [hNeBool, if_neg Bool.noConfusion] at accepted
+      simp only [hNeBool, Bool.false_eq_true, ↓reduceIte] at accepted
       cases hk : g.pairwiseKeys.find? (fun p => p.1 == tx.initiator_party) with
       | none => rw [hk] at accepted; cases accepted
       | some pair =>
         rcases pair with ⟨party, key⟩
-        have hp : party = tx.initiator_party := eq_of_beq (List.find?_some hk)
+        have hp : party = tx.initiator_party := eq_of_beq (show (party == tx.initiator_party) = true from List.find?_some (p := fun p : Nat × List UInt8 => p.1 == tx.initiator_party) hk)
         subst party
         rw [hk] at accepted
         dsimp only at accepted
@@ -6945,27 +6947,47 @@ theorem tooth_uncoordinated_quorum_switching_bypasses_spend_cap :
     dsimp only [c0, pA, key, winKey, demoQuorumCustodian, demoQuorumSignedIntent, demoQuorumBaseIntent]
     simp [policyCheckAdmission, policyCheckWireDomain, txFitsWireWidths, txScalarsFitWire,
       txSlicesFitU64, policyProjectedSpend, policyIsBurned, encodeInitiatorTags, policyInsertTag,
-      policyAuthenticatedInitiator, hTagEq, policyInitiatorTag_length, policyCanonicalApprovers, be, toLE, ofLE]
+      policyAuthenticatedInitiator, policyInitiatorTag_length, policyCanonicalApprovers, be, ofLE]
+    rfl
   have hAdm1 : policyCheckAdmission c1 pA.1 pA.2 1000 = true := by
     dsimp only [c1, pA, key, winKey, demoQuorumCustodian, demoQuorumSignedIntent, demoQuorumBaseIntent]
     simp [policyCheckAdmission, policyCheckWireDomain, txFitsWireWidths, txScalarsFitWire,
       txSlicesFitU64, policyProjectedSpend, policyIsBurned, encodeInitiatorTags, policyInsertTag,
-      policyAuthenticatedInitiator, hTagEq, policyInitiatorTag_length, policyCanonicalApprovers, be, toLE, ofLE]
+      policyAuthenticatedInitiator, policyInitiatorTag_length, policyCanonicalApprovers, be, ofLE]
+    rfl
   have hAdm2 : policyCheckAdmission c2 pB.1 pB.2 1000 = true := by
     dsimp only [c2, pB, key, winKey, demoQuorumCustodian, demoQuorumSignedIntent, demoQuorumBaseIntent]
     simp [policyCheckAdmission, policyCheckWireDomain, txFitsWireWidths, txScalarsFitWire,
       txSlicesFitU64, policyProjectedSpend, policyIsBurned, encodeInitiatorTags, policyInsertTag,
-      policyAuthenticatedInitiator, hTagEq, policyInitiatorTag_length, policyCanonicalApprovers, be, toLE, ofLE]
+      policyAuthenticatedInitiator, policyInitiatorTag_length, policyCanonicalApprovers, be, ofLE]
+    rfl
   have hAdm3 : policyCheckAdmission c3 pB.1 pB.2 1000 = true := by
     dsimp only [c3, pB, key, winKey, demoQuorumCustodian, demoQuorumSignedIntent, demoQuorumBaseIntent]
     simp [policyCheckAdmission, policyCheckWireDomain, txFitsWireWidths, txScalarsFitWire,
       txSlicesFitU64, policyProjectedSpend, policyIsBurned, encodeInitiatorTags, policyInsertTag,
-      policyAuthenticatedInitiator, hTagEq, policyInitiatorTag_length, policyCanonicalApprovers, be, toLE, ofLE]
-  refine ⟨⟨_, _, _, _, ?_, ?_, ?_, ?_, by decide⟩, ?_⟩
-  · unfold authenticatedPolicyGuardStep; rw [hAdm0]; simp
-  · unfold authenticatedPolicyGuardStep; rw [hAdm1]; simp
-  · unfold authenticatedPolicyGuardStep; rw [hAdm2]; simp
-  · unfold authenticatedPolicyGuardStep; rw [hAdm3]; simp
+      policyAuthenticatedInitiator, policyInitiatorTag_length, policyCanonicalApprovers, be, ofLE]
+    rfl
+  let n0 : AuthenticatedPolicyState := { c0 with
+    rules := { c0.rules with accumulated_spend := policyProjectedSpend c0 pA.1 }
+    nonceBurns := policyBurn c0.burnCapacity c0.nonceBurns pA.1.nonce
+    sessionBurns := policyBurn c0.burnCapacity c0.sessionBurns (ofLE pA.1.session_id.reverse) }
+  let n1 : AuthenticatedPolicyState := { c1 with
+    rules := { c1.rules with accumulated_spend := policyProjectedSpend c1 pA.1 }
+    nonceBurns := policyBurn c1.burnCapacity c1.nonceBurns pA.1.nonce
+    sessionBurns := policyBurn c1.burnCapacity c1.sessionBurns (ofLE pA.1.session_id.reverse) }
+  let n2 : AuthenticatedPolicyState := { c2 with
+    rules := { c2.rules with accumulated_spend := policyProjectedSpend c2 pB.1 }
+    nonceBurns := policyBurn c2.burnCapacity c2.nonceBurns pB.1.nonce
+    sessionBurns := policyBurn c2.burnCapacity c2.sessionBurns (ofLE pB.1.session_id.reverse) }
+  let n3 : AuthenticatedPolicyState := { c3 with
+    rules := { c3.rules with accumulated_spend := policyProjectedSpend c3 pB.1 }
+    nonceBurns := policyBurn c3.burnCapacity c3.nonceBurns pB.1.nonce
+    sessionBurns := policyBurn c3.burnCapacity c3.sessionBurns (ofLE pB.1.session_id.reverse) }
+  refine ⟨⟨n0, n1, n2, n3, ?_, ?_, ?_, ?_, by decide⟩, ?_⟩
+  · unfold authenticatedPolicyGuardStep; rw [hAdm0]; simp only [↓reduceIte]; rfl
+  · unfold authenticatedPolicyGuardStep; rw [hAdm1]; simp only [↓reduceIte]; rfl
+  · unfold authenticatedPolicyGuardStep; rw [hAdm2]; simp only [↓reduceIte]; rfl
+  · unfold authenticatedPolicyGuardStep; rw [hAdm3]; simp only [↓reduceIte]; rfl
   · have hStep0 : authenticatedPolicyGuardStep c0 pA.1 pA.2 1000 =
         .accepted { c0 with
           rules := { c0.rules with accumulated_spend := policyProjectedSpend c0 pA.1 }
@@ -7014,10 +7036,21 @@ theorem tooth_uncoordinated_quorum_switching_bypasses_spend_cap :
           c2, c3] }
     refine ⟨cl1, ?_, ?_, ?_⟩
     · unfold policyQuorumClusterStep
-      have hnd : ([0, 1] : List Nat).Nodup := by decide
-      have hnb : policyIsBurned cl0.ledger.nonceBurns pA.1.nonce = false := rfl
-      have hsb : policyIsBurned cl0.ledger.sessionBurns (ofLE pA.1.session_id.reverse) = false := rfl
-      simp [cl0, pA, demoQuorumSignedIntent, demoQuorumBaseIntent, hnd, hnb, hsb, hUpdA, cl1]
+      dsimp only
+      split
+      next bad => exact False.elim (bad (by decide))
+      next =>
+        split
+        next bad => exact False.elim (bad (by decide))
+        next =>
+          split
+          next bad => exact False.elim (bad (by decide))
+          next =>
+            have hnb : policyIsBurned cl0.ledger.nonceBurns pA.1.nonce = false := rfl
+            have hsb : policyIsBurned cl0.ledger.sessionBurns (ofLE pA.1.session_id.reverse) = false := rfl
+            simp only [hnb, hsb, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+            rw [show cl0.custodians = [c0, c1, c2, c3] from rfl, hUpdA]
+            rfl
     · unfold policyQuorumClusterStep
       have hnd : ([2, 3] : List Nat).Nodup := by decide
       simp [cl1, cl0, pB, demoQuorumSignedIntent, demoQuorumBaseIntent, hnd]
@@ -7519,6 +7552,7 @@ theorem cozk_multiturn_operational_ceremony_sound (H : Hash)
     simp only [traceApprovedOutputs_cons_none, hTerm.1]
     exact ⟨Nat.zero_le _, fun r d e v0 v1 hc hm => False.elim (hTerm.2 r d e v0 v1 hc hm)⟩
 
+set_option maxHeartbeats 800000 in
 /-- Inhabitedness witness for `cozkPreOpenCeremonyStep` executing an honest 1-gate `Tower128`
     circuit (`0 * 0 = 0`) under any hash `H` (e.g. `cshake256Bytes []`), committing 3 ZKBoo head views
     before challenge disclosure, passing the sacrifice barrier, and releasing the challenged 2-of-3 head views. -/
@@ -7531,46 +7565,49 @@ theorem inhabited_cozk_operational_ceremony_trace (H : Hash) :
         verifierCoin1 := towerZero 7
         verifierCoin2 := towerOne 7
         zkbooChallenge := ⟨1, by decide⟩ }
-    let hv : Fin 3 → List UInt8 := fun j => [UInt8.ofNat (0xA0 + j.val)]
-    let hs : Fin 3 → List UInt8 := fun j => [UInt8.ofNat (0xB0 + j.val)]
-    let rssZero : RssActiveOpenMsg := ⟨0, 0, 0, 0, 0, 0⟩
+    let _hv : Fin 3 → List UInt8 := fun j => [UInt8.ofNat (0xA0 + j.val)]
+    let _hs : Fin 3 → List UInt8 := fun j => [UInt8.ofNat (0xB0 + j.val)]
+    let _rssZero : RssActiveOpenMsg := ⟨0, 0, 0, 0, 0, 0⟩
     ∃ tr sf root digest hcHidden,
       ValidCustodyTrace (cozkPreOpenCeremonyStep H) s₀ tr sf ∧
       .released root digest ⟨1, by decide⟩ [0xA1] [0xA2] hcHidden ∈ traceApprovedOutputs tr := by
-  intro s₀ hv hs rssZero
+  intro s₀ _hv _hs _rssZero
   have hRec : cozkRecordExecution s₀.circuit [towerZero 7] s₀.initialWires =
       some ⟨[towerZero 7, towerZero 7, towerZero 7], [towerZero 7]⟩ := by
     have hMul0 : towerMul 7 (towerZero 7) (towerZero 7) = towerZero 7 := by decide
     have hAdd0 : towerAdd 7 (towerZero 7) (towerZero 7) = towerZero 7 := by decide
-    simp [cozkRecordExecution, s₀, hMul0, hAdd0]
+    simp [cozkRecordExecution, s₀, hMul0]
   let ex : CoZkExecution := ⟨[towerZero 7, towerZero 7, towerZero 7], [towerZero 7]⟩
-  let f := cozkFreezeExecution H s₀ ex hv hs [0x99]
+  let f := cozkFreezeExecution H s₀ ex _hv _hs [0x99]
   let s1 := { s₀ with phase := .committed f }
   let s2 := { s1 with phase := .challenged f s₀.verifierCoin1 s₀.verifierCoin2 s₀.zkbooChallenge }
   let s3 := { s2 with phase := .verified f s₀.zkbooChallenge }
   let s4 := { s3 with phase := .completed }
-  have hStep1 : cozkPreOpenCeremonyStep H s₀ (.freezeWires [towerZero 7] hv hs [0x99]) =
+  have hStep1 : cozkPreOpenCeremonyStep H s₀ (.freezeWires [towerZero 7] _hv _hs [0x99]) =
       .accepted s1 (.committed f.root) := by
-    dsimp only [cozkPreOpenCeremonyStep]
+    simp only [cozkPreOpenCeremonyStep, s₀] at *
     rw [hRec]
   have hStep2 : cozkPreOpenCeremonyStep H s1 .challenge =
       .accepted s2 (.challenge f.root s₀.verifierCoin1 s₀.verifierCoin2 s₀.zkbooChallenge) := rfl
-  have hStep3 : cozkPreOpenCeremonyStep H s2 (.verify rssZero) =
+  have hStep3 : cozkPreOpenCeremonyStep H s2 (.verify _rssZero) =
       .accepted s3 (.verified f.root) := by
     have hfErr : f.execution.errors = [towerZero 7] := rfl
-    have hRss : verifyRssActiveOpen rssZero = some 0 := by decide
+    have hRss : verifyRssActiveOpen _rssZero = some 0 := by decide
     have hB1 : batchDeviationPoly [towerZero 7] (towerZero 7) = towerZero 7 := by decide
     have hB2 : batchDeviationPoly [towerZero 7] (towerOne 7) = towerZero 7 := by decide
     unfold cozkPreOpenCeremonyStep
     dsimp only [s2, s1]
     rw [hfErr]
-    rw [if_pos ⟨hRss, by simpa [s₀] using hB1, by simpa [s₀] using hB2⟩]
+    rw [ite_eq_left ⟨hRss, by simpa [s₀] using hB1, by simpa [s₀] using hB2⟩]
   have hStep4 : cozkPreOpenCeremonyStep H s3 .release =
       .accepted s4 (.released f.root f.headsDigest ⟨1, by decide⟩ [0xA1] [0xA2]
-        (f.headCommits ⟨0, by decide⟩)) := rfl
-  refine ⟨[(.freezeWires [towerZero 7] hv hs [0x99], some (.committed f.root)),
+        (f.headCommits ⟨0, by decide⟩)) := by
+    simp only [cozkPreOpenCeremonyStep, s3, s2, s1, s₀, f, cozkFreezeExecution, _hv,
+      cozkNextParty, cozkHiddenParty]
+    rfl
+  refine ⟨[(.freezeWires [towerZero 7] _hv _hs [0x99], some (.committed f.root)),
            (.challenge, some (.challenge f.root s₀.verifierCoin1 s₀.verifierCoin2 s₀.zkbooChallenge)),
-           (.verify rssZero, some (.verified f.root)),
+           (.verify _rssZero, some (.verified f.root)),
            (.release, some (.released f.root f.headsDigest ⟨1, by decide⟩ [0xA1] [0xA2]
              (f.headCommits ⟨0, by decide⟩)))],
           s4, f.root, f.headsDigest, f.headCommits ⟨0, by decide⟩,
@@ -7915,12 +7952,12 @@ theorem fts_wire_release_requires_final_mac (H : Hash) (s s' : FtsWireState)
   case macOpen.macOpen salt =>
     if hc : s.finalResidual = ftsZeroResidual ∧
             ftsWireCommit H s.epoch s.signingContext 3 (ftsFinalResidualBytes s.finalResidual) salt = s.commitment then
-      rw [if_pos hc] at h
+      rw [ite_eq_left hc] at h
       rcases CustodyStepOutcome.accepted.inj h with ⟨rfl, hEv⟩
       rcases FtsSpnEvent.releasedRound48Signature.inj hEv with ⟨rfl, rfl⟩
       exact ⟨rfl, hc.1, rfl, rfl⟩
     else
-      rw [if_neg hc] at h
+      rw [ite_eq_right hc] at h
       cases h
   all_goals first | cases h | (split at h <;> cases h)
 
@@ -7932,11 +7969,11 @@ private theorem ftsSpnStep_release_completed (H : Hash) {s s' : FtsWireState}
   case macOpen.macOpen salt =>
     if hc : s.finalResidual = ftsZeroResidual ∧
             ftsWireCommit H s.epoch s.signingContext 3 (ftsFinalResidualBytes s.finalResidual) salt = s.commitment then
-      rw [if_pos hc] at h
+      rw [ite_eq_left hc] at h
       rcases CustodyStepOutcome.accepted.inj h with ⟨rfl, _⟩
       rfl
     else
-      rw [if_neg hc] at h
+      rw [ite_eq_right hc] at h
       cases h
   all_goals first | cases h | (split at h <;> cases h)
 
@@ -8104,7 +8141,7 @@ private theorem ftsSpnStep_preserves_epoch (H : Hash) {w w' : FtsWireState}
   all_goals first
     | cases h
     | (split at h <;> try cases h)
-  all_goals (rcases h with ⟨rfl, _⟩; rfl)
+  all_goals first | rfl | (rcases h with ⟨rfl, _⟩; rfl)
 
 private theorem ftsOperational_burned_not_released (H : Hash)
     {s sf : FtsOperationalGuard} {tr : List (FtsOperationalInput × Option FtsSpnEvent)}
@@ -8148,7 +8185,7 @@ private theorem ftsOperational_burned_not_released (H : Hash)
             simp only [hWs, CustodyStepOutcome.accepted.injEq] at hs
             rcases hs with ⟨rfl, rfl⟩
             have hwEp := ftsSpnStep_preserves_epoch H hWs
-            have hwNe : w.epoch ≠ x := hNotAct w rfl
+            have hwNe : w.epoch ≠ x := hNotAct w hA
             cases wEv with
             | phaseAdvanced _ _ =>
               simp only [traceApprovedOutputs_cons_some, ftsOperationalReleasedEpochs]
@@ -8166,10 +8203,10 @@ private theorem ftsOperational_burned_not_released (H : Hash)
               have hComp : wNext.phase = .completed := by
                 cases hp : w.phase <;> cases winp <;> simp only [ftsSpnStep, hp] at hWs
                 all_goals first | cases hWs | (split at hWs <;> try cases hWs)
-                rcases hWs with ⟨rfl, _⟩; rfl
+                all_goals first | rfl | (rcases hWs with ⟨rfl, _⟩; rfl)
               simp only [traceApprovedOutputs_cons_some, ftsOperationalReleasedEpochs, List.mem_cons]
               rintro (hEq | hTail)
-              · exact hwNe (hRel.2.2.1.symm.trans hEq)
+              · exact hwNe (hRel.2.2.1.symm.trans hEq.symm)
               · exact ih (fun w' hw' => by simp [hComp] at hw') x hx
                   (fun w' hw' => by simp [hComp] at hw') hTail
   | @consRejected st st' _ inp err rest hs _ ih =>
@@ -8255,7 +8292,7 @@ theorem fts_operational_multiepoch_sound (H : Hash)
                 have hComp : wNext.phase = .completed := by
                   cases hp : w.phase <;> cases winp <;> simp only [ftsSpnStep, hp] at hWs
                   all_goals first | cases hWs | (split at hWs <;> try cases hWs)
-                  rcases hWs with ⟨rfl, _⟩; rfl
+                  all_goals first | rfl | (rcases hWs with ⟨rfl, _⟩; rfl)
                 have hNotInRest : epOut ∉ ftsOperationalReleasedEpochs (traceApprovedOutputs rest) := by
                   have hBurned : epOut ∈ st.burnedEpochs := hRel.2.2.1 ▸ hAct w hA
                   exact ftsOperational_burned_not_released H
@@ -8273,14 +8310,22 @@ theorem fts_operational_multiepoch_sound (H : Hash)
         simp only [hq, Bool.false_eq_true, ↓reduceIte] at hs
         cases hA : st.active with
         | none =>
-          cases inp <;> simp [hA] at hs
-          · split at hs <;> simp at hs; rcases hs with ⟨rfl, _⟩; exact ih hAct
+          cases inp <;> try simp only [hA] at hs
+          · split at hs <;> try simp only [CustodyStepOutcome.rejected.injEq] at hs
+            all_goals first | (rcases hs with ⟨rfl, _⟩; exact ih hAct) | (cases hs)
           · rcases hs with ⟨rfl, _⟩; exact ih hAct
         | some w =>
-          cases inp <;> simp [hA] at hs
-          · rcases hs with ⟨rfl, _⟩; exact ih hAct
-          · cases hWs : ftsSpnStep H w _ <;> simp [hWs] at hs
-            rcases hs with ⟨rfl, _⟩; exact ih (fun _ hw => by cases hw)
+          cases inp with
+          | beginEpoch _ _ _ _ _ =>
+            simp only [hA, CustodyStepOutcome.rejected.injEq] at hs
+            rcases hs with ⟨rfl, _⟩; exact ih hAct
+          | session winp =>
+            simp only [hA] at hs
+            cases hWs : ftsSpnStep H w winp with
+            | accepted next event => simp [hWs] at hs
+            | rejected next err =>
+              simp only [hWs, CustodyStepOutcome.rejected.injEq] at hs
+              rcases hs with ⟨rfl, _⟩; exact ih (fun _ hw => by cases hw)
   refine ⟨hCore (fun w hw => by rw [hIdle] at hw; cases hw) hTr, ?_⟩
   intro ep hMem hIn0
   exact ftsOperational_burned_not_released H
@@ -8420,7 +8465,7 @@ private theorem hdOperational_queries_ge_floor (H : Hash) (n d1 d2 Q : Nat)
           simp only [hp] at hs
           split at hs
           · rcases hs with ⟨rfl, rfl⟩
-            have hNe : f.query ≠ x := hNoP f rfl
+            have hNe : f.query ≠ x := hNoP f hp
             simp only [traceApprovedOutputs_cons_some, hdOperationalReleasedQueries, List.mem_cons]
             rintro (hEq | hTail)
             · exact hNe hEq.symm
@@ -8482,9 +8527,8 @@ theorem hd_operational_multiturn_sound (H : Hash) (n d1 d2 Q : Nat)
           if hLt : st.used < Q then
             simp only [hLt, ↓reduceDIte, CustodyStepOutcome.accepted.injEq] at hs
             rcases hs with ⟨rfl, rfl⟩
-            have hInv' : HdOperationalInv st' :=
+            obtain ⟨hUsedF, hNdRest, hPropsRest⟩ := ih
               ⟨Nat.succ_le_of_lt hLt, ⟨hLt, Nat.lt_succ_self _, rfl⟩⟩
-            obtain ⟨hUsedF, hNdRest, hPropsRest⟩ := ih hInv'
             simp only [traceApprovedOutputs_cons_some, hdOperationalReleasedQueries]
             refine ⟨hUsedF, hNdRest, ?_⟩
             intro q hard val hm
@@ -8505,8 +8549,7 @@ theorem hd_operational_multiturn_sound (H : Hash) (n d1 d2 Q : Nat)
             rw [hp] at hPendInv
             obtain ⟨hfLtQ, hfLtUsed, hfTrue⟩ := hPendInv
             have hCandEq := hd_masked_release_sound n d1 d2 Q st f res hChk.2.1 hChk.2.2
-            have hInv' : HdOperationalInv { st with pending := none } := ⟨hInv₀.1, trivial⟩
-            obtain ⟨hUsedF, hNdRest, hPropsRest⟩ := ih hInv'
+            obtain ⟨hUsedF, hNdRest, hPropsRest⟩ := ih ⟨hInv₀.1, trivial⟩
             have hNotInRest : f.query ∉ hdOperationalReleasedQueries (traceApprovedOutputs rest) :=
               hdOperational_queries_ge_floor H n d1 d2 Q hr f.query hfLtUsed
                 (fun _ hf => by cases hf)
@@ -8629,12 +8672,14 @@ def hd_general_witness_wire_trace_mask_equiv (H : Hash) (n d1 d2 Q : Nat)
     apply Subtype.ext
     funext q
     dsimp only [hdMaskedObservation]
+    change CommRingOps.sub (CommRingOps.add _ (CommRingOps.sub (CommRingOps.add _ _) _)) _ = _
     rw [LawfulCommRing.add_sub_cancel_left (R := HdFq204)]
     exact hdFq204_add_sub_self_left _ _
   right_inv := fun ⟨m₂, _⟩ => by
     apply Subtype.ext
     funext q
     dsimp only [hdMaskedObservation]
+    change CommRingOps.sub (CommRingOps.add _ (CommRingOps.sub (CommRingOps.add _ _) _)) _ = _
     rw [LawfulCommRing.add_sub_cancel_left (R := HdFq204)]
     exact hdFq204_add_sub_self_left _ _
 
@@ -8669,7 +8714,7 @@ private theorem evalLinearForm_zero_matrix :
 def hdShortVecWitness (d1 d2 : Nat) (coords : Fin d1 → Fin 5) :
     ShortMlweWitness hdCbdEta d1 d2 (fun _ _ => HdFq204.zero) (fun _ => HdFq204.zero) :=
   ⟨(fun i => hdFiveDigit (coords i), fun _ => HdFq204.zero), by
-    refine ⟨fun i => hdFiveDigit_short (coords i), fun _ => by decide, ?_⟩
+    refine ⟨fun i => hdFiveDigit_short (coords i), fun _ => by change HdFq204.zero.centeredAbs ≤ hdCbdEta; decide, ?_⟩
     funext r
     simp only [mlwePublicRelation, evalLinearForm_zero_matrix, HdFq204.add_zero]⟩
 
@@ -8781,7 +8826,7 @@ def hdRadix5Nat : (d : Nat) → (Fin d → Fin 5) → Nat
       5 * hdRadix5Nat d (fun i => x ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
 
 private theorem hdRadix5Nat_lt_pow : ∀ (d : Nat) (x : Fin d → Fin 5), hdRadix5Nat d x < 5 ^ d
-  | 0, _ => by decide
+  | 0, _ => by change 0 < 1; decide
   | d + 1, x => by
     unfold hdRadix5Nat
     have h0 := (x ⟨0, Nat.zero_lt_succ d⟩).isLt
@@ -8842,11 +8887,11 @@ private theorem evalLinearForm_scale_left :
 
 private theorem hdFq204_ofNat_add (a b : Nat) :
     HdFq204.add (HdFq204.ofNat a) (HdFq204.ofNat b) = HdFq204.ofNat (a + b) :=
-  HdFq204.ext <| by rw [HdFq204.add_val, HdFq204.ofNat_val, HdFq204.ofNat_val, HdFq204.ofNat_val, Nat.mod_add_mod]
+  HdFq204.ext <| by rw [HdFq204.add_val, HdFq204.ofNat_val, HdFq204.ofNat_val, HdFq204.ofNat_val, Nat.mod_add_mod, Nat.add_mod_mod]
 
 private theorem hdFq204_ofNat_mul (a b : Nat) :
     HdFq204.mul (HdFq204.ofNat a) (HdFq204.ofNat b) = HdFq204.ofNat (a * b) :=
-  HdFq204.ext <| by rw [HdFq204.mul_val, HdFq204.ofNat_val, HdFq204.ofNat_val, HdFq204.ofNat_val, Nat.mod_mul_mod]
+  HdFq204.ext <| by rw [HdFq204.mul_val, HdFq204.ofNat_val, HdFq204.ofNat_val, HdFq204.ofNat_val, Nat.mod_mul_mod, Nat.mul_mod_mod]
 
 private theorem evalLinearForm_radix5_ofNat :
     ∀ (d : Nat) (x : Fin d → Fin 5),
@@ -9049,6 +9094,30 @@ def policyQuorumClusterPartyMachine :
 def cozkCeremonyPartyMachine (H : Hash) :
     PartyMachine CoZkCommittedState CoZkCommittedInput CoZkPublicEvent :=
   PartyMachine.ofCustodyStep (cozkPreOpenCeremonyStep H)
+
+
+/-- Replacing committed wires after challenge disclosure can never be an accepted transition. -/
+theorem tooth_cozk_substitution_cannot_accept (H : Hash)
+    (s : CoZkCommittedState) (f : CoZkFrozenExecution) (a b : Tower128) (e : Fin 3)
+    (outputs : List Tower128) (hv hs : Fin 3 → List UInt8) (salt : List UInt8) :
+    ¬ ∃ next ev, cozkPreOpenCeremonyStep H { s with phase := .challenged f a b e }
+      (.freezeWires outputs hv hs salt) = .accepted next ev := by
+  rw [tooth_cozk_postchallenge_wire_substitution_rejected]
+  rintro ⟨next, ev, h⟩
+  cases h
+
+/-- An actual four-transition ceremony reaches a release from the initial phase. -/
+theorem inhabited_cozk_reachable_release (H : Hash) :
+    ∃ (s₀ : CoZkCommittedState), ∃ tr sf root digest hcHidden,
+      s₀.phase = .awaiting ∧
+      ValidCustodyTrace (cozkPreOpenCeremonyStep H) s₀ tr sf ∧
+      .released root digest ⟨1, by decide⟩ [0xA1] [0xA2] hcHidden ∈ traceApprovedOutputs tr := by
+  obtain ⟨tr, sf, root, digest, hcHidden, hTr, hRelease⟩ :=
+    inhabited_cozk_operational_ceremony_trace H
+  exact ⟨_, tr, sf, root, digest, hcHidden, rfl, hTr, hRelease⟩
+
+#verify_inhabited cozk_multiturn_operational_ceremony_sound inhabited_cozk_reachable_release
+#tooth_pair cozk_multiturn_operational_ceremony_sound vs tooth_cozk_substitution_cannot_accept
 
 end Qsag
 end

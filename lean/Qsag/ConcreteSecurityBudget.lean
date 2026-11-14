@@ -4548,4 +4548,17 @@ theorem inhabited_concrete_security_budget_roster :
       · exact ⟨ratBound_add_num_pos_left (by decide), ratBound_add_num_pos_left (by decide)⟩
     exact ⟨hPos.1, hPos.2, hBits.1, hBits.2⟩
 
+/-- Cardinality of the joint 13-repetition, 11-bit signed-monomial RLWE challenge.
+    This is challenge-space arithmetic, not an RLWE hardness or extraction theorem. -/
+def rlweJointSignedMonomialChallengeCard : Nat := (2 ^ 11) ^ 13
+
+/-- The deployed joint challenge has 143 bits, not 260 bits. Its squared search-space
+    threshold lies strictly between the squares of `2^71` and `2^72`; it alone cannot
+    supply a 128-bit quantum search budget. -/
+theorem rlwe_joint_signed_monomial_challenge_143_bits :
+    rlweJointSignedMonomialChallengeCard = 2 ^ 143 ∧
+    (2 ^ 71) ^ 2 < rlweJointSignedMonomialChallengeCard ∧
+    rlweJointSignedMonomialChallengeCard < (2 ^ 72) ^ 2 := by
+  decide +kernel
+
 end Qsag

@@ -5056,9 +5056,9 @@ private theorem eraseFirst_nodup {α : Type} [DecidableEq α] (x : α) :
       exact hnot y (mem_of_mem_eraseFirst hz) rfl
 
 /-- Ordered `k`-tuples of pairwise-distinct elements drawn without replacement from `U`. -/
-def distinctTuples {α : Type} [DecidableEq α] : Nat → List α → List (List α)
+def affineDistinctTuples {α : Type} [DecidableEq α] : Nat → List α → List (List α)
   | 0, _ => [[]]
-  | k + 1, U => U.flatMap (fun x => (distinctTuples k (eraseFirst x U)).map (x :: ·))
+  | k + 1, U => U.flatMap (fun x => (affineDistinctTuples k (eraseFirst x U)).map (x :: ·))
 
 private theorem flatMap_const_length {α β : Type} (c : Nat) (f : α → List β) :
     ∀ (xs : List α), (∀ x ∈ xs, (f x).length = c) → (xs.flatMap f).length = xs.length * c
@@ -5068,36 +5068,36 @@ private theorem flatMap_const_length {α β : Type} (c : Nat) (f : α → List �
     rw [h x (.head _), flatMap_const_length c f xs (fun y hy => h y (.tail _ hy)),
         Nat.add_mul, Nat.one_mul, Nat.add_comm]
 
-/-- For duplicate-free `U`, `distinctTuples k U` has exact size `affineFallingFactorial U.length k`. -/
-theorem distinctTuples_length {α : Type} [DecidableEq α] :
+/-- For duplicate-free `U`, `affineDistinctTuples k U` has exact size `affineFallingFactorial U.length k`. -/
+theorem affineDistinctTuples_length {α : Type} [DecidableEq α] :
     ∀ (k : Nat) {U : List α}, U.Nodup →
-      (distinctTuples k U).length = affineFallingFactorial U.length k
+      (affineDistinctTuples k U).length = affineFallingFactorial U.length k
   | 0, _, _ => rfl
   | k + 1, U, hU => by
-    unfold distinctTuples
+    unfold affineDistinctTuples
     rw [flatMap_const_length (affineFallingFactorial (U.length - 1) k)]
     · exact mul_affineFallingFactorial_pred U.length k
     · intro x hx
-      rw [List.length_map, distinctTuples_length k (eraseFirst_nodup x hU)]
+      rw [List.length_map, affineDistinctTuples_length k (eraseFirst_nodup x hU)]
       have hlen := eraseFirst_length_of_mem hx
       have heq : (eraseFirst x U).length = U.length - 1 := by omega
       rw [heq]
 
-theorem mem_distinctTuples_props {α : Type} [DecidableEq α] :
+theorem mem_affineDistinctTuples_props {α : Type} [DecidableEq α] :
     ∀ (k : Nat) {U : List α} {t : List α},
-      U.Nodup → t ∈ distinctTuples k U →
+      U.Nodup → t ∈ affineDistinctTuples k U →
       t.length = k ∧ t.Nodup ∧ ∀ x ∈ t, x ∈ U
   | 0, _, t, _, ht => by
-    simp only [distinctTuples, List.mem_singleton] at ht
+    simp only [affineDistinctTuples, List.mem_singleton] at ht
     subst ht
     exact ⟨rfl, .nil, fun _ h => by cases h⟩
   | k + 1, U, t, hU, ht => by
-    unfold distinctTuples at ht
+    unfold affineDistinctTuples at ht
     rw [List.mem_flatMap] at ht
     rcases ht with ⟨x, hxU, htMap⟩
     rw [List.mem_map] at htMap
     rcases htMap with ⟨ts, htsMem, rfl⟩
-    rcases mem_distinctTuples_props k (eraseFirst_nodup x hU) htsMem with ⟨hlen, hnd, hsub⟩
+    rcases mem_affineDistinctTuples_props k (eraseFirst_nodup x hU) htsMem with ⟨hlen, hnd, hsub⟩
     refine ⟨congrArg Nat.succ hlen, .cons ?_ hnd, ?_⟩
     · intro y hy heq
       subst heq
@@ -5124,32 +5124,32 @@ theorem mem_distinctTuples_props {α : Type} [DecidableEq α] :
       | head => exact hxU
       | tail _ hm => exact mem_of_mem_eraseFirst (hsub y hm)
 
-theorem mem_distinctTuples_of_subset {α : Type} [DecidableEq α] :
+theorem mem_affineDistinctTuples_of_subset {α : Type} [DecidableEq α] :
     ∀ (k : Nat) {U t : List α},
-      t.length = k → t.Nodup → (∀ x ∈ t, x ∈ U) → t ∈ distinctTuples k U
+      t.length = k → t.Nodup → (∀ x ∈ t, x ∈ U) → t ∈ affineDistinctTuples k U
   | 0, _, t, hlen, _, _ => by
     have ht : t = [] := List.eq_nil_of_length_eq_zero hlen
     subst ht
     exact .head _
   | k + 1, U, [], hlen, _, _ => by cases hlen
   | k + 1, U, x :: ts, hlen, .cons hnot hnd, hsub => by
-    unfold distinctTuples
+    unfold affineDistinctTuples
     rw [List.mem_flatMap]
     refine ⟨x, hsub x (.head _), List.mem_map.mpr ⟨ts, ?_, rfl⟩⟩
-    refine mem_distinctTuples_of_subset k (Nat.succ.inj hlen) hnd ?_
+    refine mem_affineDistinctTuples_of_subset k (Nat.succ.inj hlen) hnd ?_
     intro y hy
     exact mem_eraseFirst_of_ne (fun heq => hnot y hy heq.symm) (hsub y (.tail _ hy))
 
-theorem distinctTuples_nodup {α : Type} [DecidableEq α] :
-    ∀ (k : Nat) {U : List α}, U.Nodup → (distinctTuples k U).Nodup
+theorem affineDistinctTuples_nodup {α : Type} [DecidableEq α] :
+    ∀ (k : Nat) {U : List α}, U.Nodup → (affineDistinctTuples k U).Nodup
   | 0, _, _ => .cons (by simp) .nil
   | k + 1, U, hU => by
-    unfold distinctTuples
+    unfold affineDistinctTuples
     apply List.pairwise_flatMap.mpr
     refine ⟨?_, ?_⟩
     · intro x _
       apply List.pairwise_map.mpr
-      exact (distinctTuples_nodup k (eraseFirst_nodup x hU)).imp
+      exact (affineDistinctTuples_nodup k (eraseFirst_nodup x hU)).imp
         (fun hne heq => hne (List.cons.inj heq).2)
     · refine hU.imp ?_
       intro x y hxy t₁ ht₁ t₂ ht₂ heq
@@ -5157,30 +5157,30 @@ theorem distinctTuples_nodup {α : Type} [DecidableEq α] :
       rcases List.mem_map.mp ht₂ with ⟨_, _, rfl⟩
       exact hxy (List.cons.inj heq).1
 
-/-- **Constructive Hypergeometric Distinct-Fiber Sampling Bound (`distinctTuples_all_good_le`)**:
+/-- **Constructive Hypergeometric Distinct-Fiber Sampling Bound (`affineDistinctTuples_all_good_le`)**:
     For ANY duplicate-free fiber domain `U` and ANY predicate `good : α → Bool` satisfied by at most
     `B` elements of `U`, at most `affineFallingFactorial B k` out of all
-    `affineFallingFactorial U.length k` distinct `k`-tuples in `distinctTuples k U` satisfy
+    `affineFallingFactorial U.length k` distinct `k`-tuples in `affineDistinctTuples k U` satisfy
     `t.all good = true`! -/
-theorem distinctTuples_all_good_le {α : Type} [DecidableEq α]
+theorem affineDistinctTuples_all_good_le {α : Type} [DecidableEq α]
     (k B : Nat) (U : List α) (good : α → Bool)
     (hU : U.Nodup) (hGoodLe : (U.filter good).length ≤ B) :
-    ((distinctTuples k U).filter (fun t => t.all good)).length ≤
+    ((affineDistinctTuples k U).filter (fun t => t.all good)).length ≤
       affineFallingFactorial B k := by
   let G := U.filter good
   have hGNd : G.Nodup := List.Pairwise.filter _ hU
-  have hFiltNd : ((distinctTuples k U).filter (fun t => t.all good)).Nodup :=
-    List.Pairwise.filter _ (distinctTuples_nodup k hU)
-  have hSub : ∀ t ∈ (distinctTuples k U).filter (fun t => t.all good),
-      t ∈ distinctTuples k G := by
+  have hFiltNd : ((affineDistinctTuples k U).filter (fun t => t.all good)).Nodup :=
+    List.Pairwise.filter _ (affineDistinctTuples_nodup k hU)
+  have hSub : ∀ t ∈ (affineDistinctTuples k U).filter (fun t => t.all good),
+      t ∈ affineDistinctTuples k G := by
     intro t ht
     rcases List.mem_filter.mp ht with ⟨htMem, htGood⟩
-    rcases mem_distinctTuples_props k hU htMem with ⟨hlen, hnd, hsubU⟩
-    exact mem_distinctTuples_of_subset k hlen hnd
+    rcases mem_affineDistinctTuples_props k hU htMem with ⟨hlen, hnd, hsubU⟩
+    exact mem_affineDistinctTuples_of_subset k hlen hnd
       (fun x hx => List.mem_filter.mpr ⟨hsubU x hx, List.all_eq_true.mp htGood x hx⟩)
-  calc ((distinctTuples k U).filter (fun t => t.all good)).length
-      ≤ (distinctTuples k G).length := nodup_length_le_of_subset hFiltNd hSub
-    _ = affineFallingFactorial G.length k := distinctTuples_length k hGNd
+  calc ((affineDistinctTuples k U).filter (fun t => t.all good)).length
+      ≤ (affineDistinctTuples k G).length := nodup_length_le_of_subset hFiltNd hSub
+    _ = affineFallingFactorial G.length k := affineDistinctTuples_length k hGNd
     _ ≤ affineFallingFactorial B k := affineFallingFactorial_mono hGoodLe k
 
 

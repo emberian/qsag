@@ -1044,8 +1044,16 @@ impl FsWalEpochSink {
             }
             Err(_) => return Err(SigError::WalPersistenceFailed),
         }
-        let next = u32::from_le_bytes(current[40..44].try_into().map_err(|_| SigError::WalPersistenceFailed)?);
-        let epoch = u32::from_le_bytes(current[44..48].try_into().map_err(|_| SigError::WalPersistenceFailed)?);
+        let next = u32::from_le_bytes(
+            current[40..44]
+                .try_into()
+                .map_err(|_| SigError::WalPersistenceFailed)?,
+        );
+        let epoch = u32::from_le_bytes(
+            current[44..48]
+                .try_into()
+                .map_err(|_| SigError::WalPersistenceFailed)?,
+        );
         let mut mu = [0; 32];
         mu.copy_from_slice(&current[48..80]);
         let recovered = if next == 0 {
@@ -1083,9 +1091,19 @@ impl EpochWalSink for FsWalEpochSink {
         {
             return Err(SigError::WalPersistenceFailed);
         }
-        let next = u32::from_le_bytes(self.current[40..44].try_into().map_err(|_| SigError::WalPersistenceFailed)?);
-        let epoch = u32::from_le_bytes(self.current[44..48].try_into().map_err(|_| SigError::WalPersistenceFailed)?);
-        let mu = self.current[48..80].try_into().map_err(|_| SigError::WalPersistenceFailed)?;
+        let next = u32::from_le_bytes(
+            self.current[40..44]
+                .try_into()
+                .map_err(|_| SigError::WalPersistenceFailed)?,
+        );
+        let epoch = u32::from_le_bytes(
+            self.current[44..48]
+                .try_into()
+                .map_err(|_| SigError::WalPersistenceFailed)?,
+        );
+        let mu = self.current[48..80]
+            .try_into()
+            .map_err(|_| SigError::WalPersistenceFailed)?;
         Ok((next != 0).then_some((next, epoch, mu)))
     }
 
@@ -1096,13 +1114,21 @@ impl EpochWalSink for FsWalEpochSink {
         epoch: u32,
         mu: &[u8; 32],
     ) -> Result<(), SigError> {
-        let old_next = u32::from_le_bytes(self.current[40..44].try_into().map_err(|_| SigError::WalPersistenceFailed)?);
+        let old_next = u32::from_le_bytes(
+            self.current[40..44]
+                .try_into()
+                .map_err(|_| SigError::WalPersistenceFailed)?,
+        );
         if &self.current[8..40] != pk_root
             || epoch.checked_add(1) != Some(next)
             || next < old_next
             || (next == old_next
                 && (&self.current[48..80] != mu
-                    || u32::from_le_bytes(self.current[44..48].try_into().map_err(|_| SigError::WalPersistenceFailed)?) != epoch))
+                    || u32::from_le_bytes(
+                        self.current[44..48]
+                            .try_into()
+                            .map_err(|_| SigError::WalPersistenceFailed)?,
+                    ) != epoch))
             || self
                 .record
                 .read()
@@ -1563,7 +1589,9 @@ impl ValidatorKeypair {
                     break d;
                 }
             }
-            tsw_ctr = tsw_ctr.checked_add(1).ok_or(SigError::SigningCounterExhausted)?;
+            tsw_ctr = tsw_ctr
+                .checked_add(1)
+                .ok_or(SigError::SigningCounterExhausted)?;
         };
 
         let mut wots_chains = Vec::with_capacity(WOTS_CHAINS);
@@ -1781,7 +1809,9 @@ impl ValidatorKeypair {
                         break d;
                     }
                 }
-                tsw_ctr = tsw_ctr.checked_add(1).ok_or(SigError::SigningCounterExhausted)?;
+                tsw_ctr = tsw_ctr
+                    .checked_add(1)
+                    .ok_or(SigError::SigningCounterExhausted)?;
             };
 
             let mut wots_chains = Vec::with_capacity(WOTS_CHAINS);

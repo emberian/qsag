@@ -308,10 +308,7 @@ fn valid_policies(policies: &[ShardHemPolicy]) -> bool {
     usize::try_from(total_cap).is_ok()
 }
 
-fn root_commitment(
-    policy_registry_root: &[u8; 32],
-    shards: &[ShardHemBatch],
-) -> [u8; 32] {
+fn root_commitment(policy_registry_root: &[u8; 32], shards: &[ShardHemBatch]) -> [u8; 32] {
     let shard_frames: Vec<Vec<u8>> = shards
         .iter()
         .map(|s| {
@@ -388,48 +385,56 @@ fn prove_hierarchical_hem_inner(
         return Err(HemAggError::InvalidShardConfig);
     }
 
-    let prove_shard = |(p, w): (&ShardHemPolicy, &ShardHemWitness<'_>)| -> Result<ShardHemBatch, HemAggError> {
-        let shard_profile = p.profile().ok_or(HemAggError::InvalidShardConfig)?;
-        let region_msg = if bind_registry_in_sig {
-            hierarchical_hem_registry_bound_message(&policy_registry_root, p, epoch_floor, message)
-        } else {
-            hierarchical_hem_message(p, epoch_floor, message)
+    let prove_shard =
+        |(p, w): (&ShardHemPolicy, &ShardHemWitness<'_>)| -> Result<ShardHemBatch, HemAggError> {
+            let shard_profile = p.profile().ok_or(HemAggError::InvalidShardConfig)?;
+            let region_msg = if bind_registry_in_sig {
+                hierarchical_hem_registry_bound_message(
+                    &policy_registry_root,
+                    p,
+                    epoch_floor,
+                    message,
+                )
+            } else {
+                hierarchical_hem_message(p, epoch_floor, message)
+            };
+            let mut cfg = config.clone();
+            cfg.max_signers_per_shard = cfg
+                .max_signers_per_shard
+                .min(max_shard_signers(shard_profile));
+            let shard_id_bytes = p.shard_id.to_le_bytes();
+            cfg.blinding_seed = poseidon2_hash32(&encode_multi_frame(&[
+                b"QSAG.HEM.BLIND/v2",
+                &config.blinding_seed,
+                &policy_registry_root,
+                &shard_id_bytes,
+                &region_msg,
+            ]));
+            let proof = aggregate_signatures_with_config(
+                &p.quorum_keys,
+                w.bitmap,
+                &SigningMode::SharedMessage(&region_msg),
+                w.signatures,
+                &cfg,
+            )?;
+            Ok(ShardHemBatch {
+                shard_id: p.shard_id,
+                custodian_cluster: p.custodian_cluster,
+                shard_quorum_set_root: compute_committee_root(&p.quorum_keys),
+                minimum_quorums: p.minimum_quorums as u64,
+                epoch_floor,
+                message_digest,
+                proof,
+            })
         };
-        let mut cfg = config.clone();
-        cfg.max_signers_per_shard = cfg
-            .max_signers_per_shard
-            .min(max_shard_signers(shard_profile));
-        let shard_id_bytes = p.shard_id.to_le_bytes();
-        cfg.blinding_seed = poseidon2_hash32(&encode_multi_frame(&[
-            b"QSAG.HEM.BLIND/v2",
-            &config.blinding_seed,
-            &policy_registry_root,
-            &shard_id_bytes,
-            &region_msg,
-        ]));
-        let proof = aggregate_signatures_with_config(
-            &p.quorum_keys,
-            w.bitmap,
-            &SigningMode::SharedMessage(&region_msg),
-            w.signatures,
-            &cfg,
-        )?;
-        Ok(ShardHemBatch {
-            shard_id: p.shard_id,
-            custodian_cluster: p.custodian_cluster,
-            shard_quorum_set_root: compute_committee_root(&p.quorum_keys),
-            minimum_quorums: p.minimum_quorums as u64,
-            epoch_floor,
-            message_digest,
-            proof,
-        })
-    };
 
     #[cfg(feature = "std")]
     let shards: Vec<ShardHemBatch> = if policies.len() > 1 && crate::parallel_workers() > 1 {
         let pairs: Vec<_> = policies.iter().zip(witnesses).collect();
         let groups: Vec<Result<Vec<ShardHemBatch>, HemAggError>> =
-            crate::map_chunks_bounded(&pairs, |sub| sub.iter().copied().map(&prove_shard).collect());
+            crate::map_chunks_bounded(&pairs, |sub| {
+                sub.iter().copied().map(&prove_shard).collect()
+            });
         let mut out = Vec::with_capacity(policies.len());
         for g in groups {
             out.extend(g?);
@@ -869,7 +874,11 @@ mod tests {
         //    with strict registry-bound quorum signatures, plus cross-registry shard-splicing rejection!
         let mut jorts_keys: Vec<_> = (0..4)
             .map(|i| {
-                ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &[0x11; 32], i)
+                ValidatorKeypair::keygen_deterministic(
+                    AggSigProfile::JortsPoseidon2,
+                    &[0x11; 32],
+                    i,
+                )
             })
             .collect();
         let mut cord_keys_a: Vec<_> = (0..2)

@@ -4,16 +4,21 @@
 No solver result is a certificate. --emit-lean writes a declaration whose proof
 must be checked by Lean. Certificate emission supports the scalar x86 and AArch64 memzero kernels. Unknown
 instructions, relocations, malformed ELF and unsupported certificate shapes fail
-closed. Run on the Linux build host, e.g. python3 scripts/sydtv_driver.py --self-test.
+closed. Run on the Linux build host, e.g.
+python3 scripts/sydtv_driver.py --self-test --require-z3 --check-lean
+(--check-lean elaborates the emitted proposals with lake; --require-z3 refuses the
+arithmetic fallback).
 """
 from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import re
 import shutil
 import struct
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -298,9 +303,11 @@ or the back-edge/exit condition. These are proposals; Lean checks the proof.
     return '\n'.join(lines)+'\n'
 
 
-def check_induction(cfg, loop, smt, use_z3=True):
-    if use_z3 and shutil.which('z3'):
-        run = subprocess.run(['z3', '-in'], input=smt, text=True, capture_output=True, timeout=20)
+def check_induction(cfg, loop, smt, use_z3=True, require_z3=False):
+    z3 = find_z3() if use_z3 else None
+    require(z3 is not None or not (use_z3 and require_z3), 'z3 not found but --require-z3 was given')
+    if z3:
+        run = subprocess.run([z3, '-in'], input=smt, text=True, capture_output=True, timeout=20)
         require(run.returncode == 0 and run.stdout.strip() == 'unsat', 'SMT obligation not discharged')
         return 'z3 unsat (untrusted)'
     # Exit arithmetic: under visit<len, 0 <= len-visit-1 < 2^64;
@@ -316,40 +323,69 @@ def check_induction(cfg, loop, smt, use_z3=True):
 
 
 def emit_lean(machine, code):
+    """Proof proposal against the current `Qsag.SydTv` certificate API.
+
+    The proposal is untrusted text: `--check-lean` elaborates it with the project toolchain,
+    and only that elaboration says anything about it.
+    """
     require((machine, code) in ((62, X86_ZERO), (183, ARM_ZERO)),
             'no proved certificate template for these bytes')
     literal = ', '.join(f'0x{x:02x}' for x in code)
-    proposal = f'''module
+    header = f'''module
 public import Qsag.SydTvTranslationValidation
 public section
 namespace Qsag.SydTv.Generated
 -- Proposed by untrusted Python; every proof is checked by the Lean kernel.
-theorem extracted_bytes : ({literal_brackets(literal)} : List UInt8) = Qsag.SydTv.zeroCode := by decide
-def certificate (base rsp : Qsag.SydTv.Word) (saved : Nat → Qsag.SydTv.Word)
-    (mem : Qsag.SydTv.Memory) (n : Nat) (positive : 0 < n) :
-    Qsag.SydTv.LoopRelationCert Qsag.SydTv.ZeroState Qsag.SydTv.MirZero n
-      Qsag.SydTv.asmBody Qsag.SydTv.mirBody
-      (Qsag.SydTv.headState (Qsag.SydTv.initial base rsp saved mem n))
-      ⟨base, n, mem⟩ (Qsag.SydTv.ZeroPost rsp saved) :=
-  Qsag.SydTv.memzeroCert base rsp saved mem n positive
-end Qsag.SydTv.Generated
 '''
-    if machine == 183:
-        proposal = (proposal.replace('Qsag.SydTv.zeroCode', 'Qsag.SydTv.armZeroCode')
-                    .replace('Qsag.SydTv.asmBody', 'Qsag.SydTv.armBody')
-                    .replace('Qsag.SydTv.mirBody', 'Qsag.SydTv.armMirBody')
-                    .replace('(Qsag.SydTv.headState (Qsag.SydTv.initial base rsp saved mem n))',
-                             '(Qsag.SydTv.armInitial base rsp saved mem n)')
-                    .replace('Qsag.SydTv.ZeroPost', 'Qsag.SydTv.ArmPost')
-                    .replace('Qsag.SydTv.memzeroCert', 'Qsag.SydTv.armMemzeroCert'))
-    return proposal
+    if machine == 62:
+        body = f'''theorem extracted_bytes : ({literal_brackets(literal)} : List UInt8) = Qsag.SydTv.zeroCode := by decide
+def certificate (s₀ : Qsag.X86State) (n : Nat) (positive : 0 < n) (bound : n < 2 ^ 64) :
+    Qsag.SydTv.LoopRelationCert Qsag.X86State Qsag.SydTv.MirMemzero n
+      Qsag.SydTv.memzeroX86BodyStep Qsag.SydTv.mirMemzeroX86BodyStep
+      ⟨5, (s₀.gpr.set 0 0 |>.set 1 (UInt64.ofNat n)), s₀.ymm, false, false, true, s₀.ymmDirty, false, s₀.mem⟩
+      ⟨s₀.gpr.get 7, n, s₀.mem⟩ (Qsag.SydTv.MemzeroX86LoopPost s₀ n) :=
+  Qsag.SydTv.ctMemzeroX86PosCert s₀ n positive bound
+'''
+    else:
+        body = f'''theorem extracted_bytes : ({literal_brackets(literal)} : List UInt8) = Qsag.SydTv.armZeroCode := by decide
+def certificate (s₀ : Qsag.Arm64State) (n : Nat) (positive : 0 < n) (bound : n < 2 ^ 64)
+    (count : Qsag.armGet s₀.gpr 1 = UInt64.ofNat n) (entry : s₀.pc = 0) (running : s₀.halted = false) :
+    Qsag.SydTv.LoopRelationCert Qsag.Arm64State Qsag.SydTv.MirMemzero n
+      Qsag.SydTv.memzeroArmBodyStep Qsag.SydTv.mirMemzeroArmBodyStep
+      s₀ ⟨Qsag.armGet s₀.gpr 0, n, s₀.mem⟩ (Qsag.SydTv.MemzeroArmLoopPost s₀ n) :=
+  Qsag.SydTv.ctMemzeroArmPosCert s₀ n positive bound count entry running
+'''
+    return header + body + 'end Qsag.SydTv.Generated\n'
+
+
+def check_lean(proposals):
+    """Elaborate emitted proposals with `lake env lean` from `lean/` (Linux build host only)."""
+    import tempfile
+    require(sys.platform.startswith('linux'), '--check-lean runs on the Linux build host only')
+    require(shutil.which('lake') is not None, 'lake not found')
+    with tempfile.TemporaryDirectory() as scratch:
+        for name, text in proposals:
+            path = Path(scratch)/f'SydTvGenerated_{name}.lean'
+            path.write_text(text)
+            wrapper = ['swarm-build'] if shutil.which('swarm-build') else []
+            run = subprocess.run(wrapper + ['lake', 'env', 'lean', str(path)], cwd=ROOT/'lean',
+                                 text=True, capture_output=True, timeout=540)
+            output = run.stdout + run.stderr
+            require(run.returncode == 0 and 'error' not in output and 'warning' not in output,
+                    f'emitted proposal for {name} does not elaborate:\n{output}')
+            print(f'check-lean: {name}: elaborated, no errors or warnings')
+
+
+def find_z3():
+    return shutil.which('z3') or next(
+        (str(c) for c in [Path.home()/'.local/bin/z3'] if c.is_file() and os.access(c, os.X_OK)), None)
 
 
 def literal_brackets(s):
     return '['+s+']'
 
 
-def self_test():
+def self_test(require_z3=False):
     fs = fixtures()
     x = fs['qsag_asm_ct_memzero_x86_64']
     a = fs['qsag_asm_ct_memzero_aarch64']
@@ -361,8 +397,19 @@ def self_test():
         rel = affine_relations(cfg, loops[0])
         require(rel['ptr']['stride'] == 1 and rel['rem']['stride'] == -1, 'bad relation synthesis')
         smt = flatten_cut_smt(cfg, loops[0])
-        check_induction(cfg, loops[0], smt)
+        solver = check_induction(cfg, loops[0], smt, require_z3=require_z3)
         check_induction(cfg, loops[0], smt, use_z3=False)
+        print(f'self-test: machine {machine}: induction cut: {solver}')
+        if find_z3():
+            # Without the trip-count bound the exit relation is false, so the solver must say sat.
+            weakened = smt.replace('(assert (bvult visit len))\n', '')
+            require(weakened != smt, 'trip-count bound missing from the cut')
+            try:
+                check_induction(cfg, loops[0], weakened, require_z3=True)
+            except Rejected:
+                print(f'self-test: machine {machine}: cut without the trip-count bound: z3 sat, rejected')
+            else:
+                raise AssertionError('z3 accepted a cut without its trip-count bound')
     require(all('LoopRelationCert' in emit_lean(*item) for item in (x, a)), 'certificate missing')
     for mutant in [X86_ZERO[:13]+b'\x76'+X86_ZERO[14:], X86_ZERO[:-1], bytes([0x90])+X86_ZERO[1:]]:
         try:
@@ -392,9 +439,19 @@ def main():
     p.add_argument('--symbol', default='qsag_asm_ct_memzero_x86_64')
     p.add_argument('--emit-lean', action='store_true', help='write proof proposal to stdout')
     p.add_argument('--smt', action='store_true', help='write DAG-cut SMT-LIB2 to stdout')
+    p.add_argument('--require-z3', action='store_true',
+                   help='fail if z3 is unavailable instead of using the arithmetic fallback')
+    p.add_argument('--check-lean', action='store_true',
+                   help='elaborate both emitted certificate proposals with lake (Linux build host)')
     args = p.parse_args()
     if args.self_test:
-        self_test()
+        self_test(args.require_z3)
+        if not args.check_lean:
+            return
+    if args.check_lean:
+        fs = fixtures()
+        check_lean([(name, emit_lean(*fs[name]))
+                    for name in ('qsag_asm_ct_memzero_x86_64', 'qsag_asm_ct_memzero_aarch64')])
         return
     fs = archive_functions(args.elf.read_bytes()) if args.elf else fixtures()
     require(args.symbol in fs, 'symbol not found')
@@ -411,7 +468,8 @@ def main():
                           'cfg': [dataclasses.asdict(i) for i in cfg.values()],
                           'loops': [dict(loop, relations=affine_relations(cfg, loop),
                                          constants=head_constants(cfg, loop),
-                                         check=check_induction(cfg, loop, flatten_cut_smt(cfg, loop)))
+                                         check=check_induction(cfg, loop, flatten_cut_smt(cfg, loop),
+                                                               require_z3=args.require_z3))
                                     for loop in loops]}, indent=2))
 
 

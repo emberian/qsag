@@ -33,8 +33,7 @@ const BIT_CHECK_DEGREE: usize =
 /// Numerator of the prime-field check per flush: 1 for the random linear
 /// combination, 2 per binary fold over at most `MAX_PENDING_FIELD_WORDS * 64`
 /// lane products, and 2 for the base sacrifice.
-const FIELD_CHECK_NUMERATOR: usize =
-    1 + 2 * (MAX_PENDING_FIELD_WORDS * 64).ilog2() as usize + 2;
+const FIELD_CHECK_NUMERATOR: usize = 1 + 2 * (MAX_PENDING_FIELD_WORDS * 64).ilog2() as usize + 2;
 const _: () = assert!(
     BIT_CHECK_DEGREE == 90
         && FIELD_CHECK_NUMERATOR == 35

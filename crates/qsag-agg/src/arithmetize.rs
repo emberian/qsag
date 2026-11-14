@@ -1190,10 +1190,7 @@ fn prove_shard_rows(
                         };
                         handles.push(crate::spawn_bounded(scope, move || eval_ref(s_idx, e_idx)));
                     }
-                    handles
-                        .into_iter()
-                        .map(crate::join_worker)
-                        .collect()
+                    handles.into_iter().map(crate::join_worker).collect()
                 });
             let mut tot = [GoldilocksExt4::ZERO; ROW_SUMCHECK_COEFFS];
             for part in partials {
@@ -1501,10 +1498,7 @@ pub fn prove_shard_batch_with_config(
         let handles: Vec<_> = (0..shard_ranges.len())
             .map(|shard_idx| crate::spawn_bounded(scope, move || build_ref(shard_idx)))
             .collect();
-        handles
-            .into_iter()
-            .map(crate::join_worker)
-            .collect()
+        handles.into_iter().map(crate::join_worker).collect()
     });
     #[cfg(not(feature = "std"))]
     let witnesses: Vec<Vec<Goldilocks>> = (0..shard_ranges.len()).map(build_witness).collect();

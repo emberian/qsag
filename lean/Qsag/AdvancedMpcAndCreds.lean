@@ -3,9 +3,13 @@ module
 # Advanced MPC, Accelerated Proof Kernels, and Anonymous Credentials
 Constructive arithmetic models, hardware-refining proof kernels, MAC-authenticated
 durable threshold ML-DSA nonce journals, and credential arithmetic and wire models.
-The finite wire boundary authenticates the supplied issuer context. Full-presentation
-hiding, fresh-mode unlinkability, and ROM/QROM reductions remain separate obligations;
-local masking bijections and repetition counts do not establish those properties.
+The finite wire boundary authenticates the supplied issuer context. `PresentationView`
+proves that one repetition's opened view (both opened parties' wires and tapes, and the
+third output shares) is perfectly simulated from the public outputs when tapes are uniform
+and every multiplication has its own mask index. The seed-to-tape PRG step, hiding of the
+unopened view's commitment, Fiat-Shamir challenge derivation, composition across
+repetitions, hiding of the public outputs themselves (fresh-mode unlinkability), and
+ROM/QROM reductions remain separate obligations; repetition counts do not establish them.
 LAW-M1: public statements with a bounded exposed interface (`<= 12` `@[expose]`).
 -/
 
@@ -4145,6 +4149,701 @@ theorem tooth_adaptive_challenge_oracle (rounds : Nat) :
   exact ⟨fun _ => by decide, fun h => by have := h 2; omega⟩
 
 end BlindVcWire
+
+/-! ## Opened-view simulation for one presentation repetition
+
+One ZKBoo repetition over a straight-line Goldilocks circuit, with the gate
+engine of `blind_vc.rs` (`mul_gate`: `z_m = cross_m + r_m[g] - r_{m+1}[g]`,
+mask index `g` is the gate position). The verifier's whole view of that
+repetition is modelled: every wire of both opened parties, both opened tapes,
+and the third party's output shares. For uniform tapes this view is a function
+of the opened input shares, the public outputs and fresh coins, through an
+explicit coin bijection.
+
+What this does not cover: tapes here are uniform field elements, not the
+SHAKE expansion of 32-byte seeds; the commitment to the unopened view, the
+Fiat-Shamir challenge derivation and composition across repetitions are not
+modelled; and the public outputs themselves (commitment digest, scope tag,
+disclosed attributes) are leakage by definition. -/
+namespace PresentationView
+
+abbrev Share3 := Fin 3 → Goldilocks
+abbrev GateCoin := Goldilocks × Goldilocks × Goldilocks
+abbrev OpenPair := Goldilocks × Goldilocks
+
+/-- Operands index earlier wires. A multiplication's mask index is its position
+    in the gate list, so two gates never share a tape entry. -/
+inductive Gate where
+  | constant (c : Goldilocks)
+  | add (l r : Nat)
+  | mul (l r : Nat)
+  deriving DecidableEq
+
+def zeroShare : Share3 := fun _ => CommRingOps.zero
+
+def wire (ws : List Share3) (i : Nat) : Share3 := ws.getD i zeroShare
+
+/-- Tape entries of one gate by role: opened party `e`, its opened neighbour,
+    and the unopened party. -/
+def tapeOf (e : Fin 3) (c : GateCoin) : Share3 :=
+  fun p => if p = e then c.1 else if p = nextParty e then c.2.1 else c.2.2
+
+private theorem nextParty_ne (e : Fin 3) : nextParty e ≠ e := by
+  revert e; decide
+
+private theorem nextParty2_ne (e : Fin 3) : nextParty (nextParty e) ≠ e := by
+  revert e; decide
+
+private theorem nextParty2_ne_next (e : Fin 3) : nextParty (nextParty e) ≠ nextParty e := by
+  revert e; decide
+
+theorem tapeOf_self (e : Fin 3) (c : GateCoin) : tapeOf e c e = c.1 := by
+  simp only [tapeOf, ↓reduceIte]
+
+theorem tapeOf_next (e : Fin 3) (c : GateCoin) : tapeOf e c (nextParty e) = c.2.1 := by
+  simp only [tapeOf, nextParty_ne e, ↓reduceIte]
+
+theorem tapeOf_next2 (e : Fin 3) (c : GateCoin) :
+    tapeOf e c (nextParty (nextParty e)) = c.2.2 := by
+  simp only [tapeOf, nextParty2_ne e, nextParty2_ne_next e, ↓reduceIte]
+
+def crossAt (a b : Share3) (i : Fin 3) : Goldilocks :=
+  CommRingOps.add (CommRingOps.mul (a i) (b i))
+    (CommRingOps.add (CommRingOps.mul (a i) (b (nextParty i)))
+      (CommRingOps.mul (a (nextParty i)) (b i)))
+
+private theorem zkBooMulShare_eq_cross (a b tape : Share3) (i : Fin 3) :
+    zkBooMulShare a b tape i =
+      CommRingOps.add (crossAt a b i) (CommRingOps.sub (tape i) (tape (nextParty i))) := rfl
+
+/-- The prover's gate step on all three parties. -/
+def realGate (g : Gate) (tape : Share3) (ws : List Share3) : Share3 :=
+  match g with
+  | .constant c => fun p => if p.val = 0 then c else CommRingOps.zero
+  | .add l r => fun p => CommRingOps.add (wire ws l p) (wire ws r p)
+  | .mul l r => zkBooMulShare (wire ws l) (wire ws r) tape
+
+/-- Real coin to simulator coin: the unopened tape entry is traded for the
+    neighbour's output share at a multiplication. -/
+def simCoin (e : Fin 3) (g : Gate) (ws : List Share3) (c : GateCoin) : GateCoin :=
+  match g with
+  | .mul l r => (c.1, c.2.1, zkBooMulShare (wire ws l) (wire ws r) (tapeOf e c) (nextParty e))
+  | _ => c
+
+def realCoin (e : Fin 3) (g : Gate) (ws : List Share3) (c : GateCoin) : GateCoin :=
+  match g with
+  | .mul l r =>
+    (c.1, c.2.1,
+      CommRingOps.sub
+        (CommRingOps.add (crossAt (wire ws l) (wire ws r) (nextParty e)) c.2.1) c.2.2)
+  | _ => c
+
+private theorem gl_mask_roundtrip (X b c : Goldilocks) :
+    CommRingOps.sub (CommRingOps.add X b) (CommRingOps.add X (CommRingOps.sub b c)) = c := by
+  have h : CommRingOps.add X b =
+      CommRingOps.add (CommRingOps.add X (CommRingOps.sub b c)) c := by
+    rw [LawfulCommRing.add_assoc, LawfulCommRing.add_comm (CommRingOps.sub b c) c,
+      LawfulCommRing.add_sub_cancel_left]
+  rw [h]
+  exact gl_sub_add_cancel_left _ _
+
+private theorem gl_mask_roundtrip' (X b z : Goldilocks) :
+    CommRingOps.add X (CommRingOps.sub b (CommRingOps.sub (CommRingOps.add X b) z)) = z := by
+  have hv : CommRingOps.add z (CommRingOps.sub (CommRingOps.add X b) z) = CommRingOps.add X b :=
+    LawfulCommRing.add_sub_cancel_left z _
+  generalize CommRingOps.sub (CommRingOps.add X b) z = v at hv ⊢
+  rw [LawfulCommRing.sub_eq_add_neg, ← LawfulCommRing.add_assoc, ← hv,
+    LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+
+theorem realCoin_simCoin (e : Fin 3) (g : Gate) (ws : List Share3) (c : GateCoin) :
+    realCoin e g ws (simCoin e g ws c) = c := by
+  cases g with
+  | constant k => rfl
+  | add l r => rfl
+  | mul l r =>
+    obtain ⟨tA, tB, tC⟩ := c
+    simp only [realCoin, simCoin, zkBooMulShare_eq_cross, tapeOf_next, tapeOf_next2,
+      gl_mask_roundtrip]
+
+theorem simCoin_realCoin (e : Fin 3) (g : Gate) (ws : List Share3) (c : GateCoin) :
+    simCoin e g ws (realCoin e g ws c) = c := by
+  cases g with
+  | constant k => rfl
+  | add l r => rfl
+  | mul l r =>
+    obtain ⟨tA, tB, z⟩ := c
+    simp only [realCoin, simCoin, zkBooMulShare_eq_cross, tapeOf_next, tapeOf_next2,
+      gl_mask_roundtrip']
+
+/-- The prover's run: one coin triple per gate, wires appended in order. -/
+def realRun (e : Fin 3) : List Gate → List Share3 → List GateCoin → List Share3
+  | g :: gs, ws, c :: cs => realRun e gs (ws ++ [realGate g (tapeOf e c) ws]) cs
+  | _, ws, _ => ws
+
+def toSim (e : Fin 3) : List Gate → List Share3 → List GateCoin → List GateCoin
+  | g :: gs, ws, c :: cs =>
+    simCoin e g ws c :: toSim e gs (ws ++ [realGate g (tapeOf e c) ws]) cs
+  | _, _, cs => cs
+
+def toReal (e : Fin 3) : List Gate → List Share3 → List GateCoin → List GateCoin
+  | g :: gs, ws, c :: cs =>
+    realCoin e g ws c ::
+      toReal e gs (ws ++ [realGate g (tapeOf e (realCoin e g ws c)) ws]) cs
+  | _, _, cs => cs
+
+theorem toReal_toSim (e : Fin 3) : ∀ (gates : List Gate) (ws : List Share3)
+    (cs : List GateCoin), toReal e gates ws (toSim e gates ws cs) = cs := by
+  intro gates
+  induction gates with
+  | nil => intro ws cs; rfl
+  | cons g gs ih =>
+    intro ws cs
+    cases cs with
+    | nil => rfl
+    | cons c cs =>
+      show realCoin e g ws (simCoin e g ws c) ::
+          toReal e gs (ws ++ [realGate g (tapeOf e (realCoin e g ws (simCoin e g ws c))) ws])
+            (toSim e gs (ws ++ [realGate g (tapeOf e c) ws]) cs) = c :: cs
+      rw [realCoin_simCoin, ih]
+
+theorem toSim_toReal (e : Fin 3) : ∀ (gates : List Gate) (ws : List Share3)
+    (cs : List GateCoin), toSim e gates ws (toReal e gates ws cs) = cs := by
+  intro gates
+  induction gates with
+  | nil => intro ws cs; rfl
+  | cons g gs ih =>
+    intro ws cs
+    cases cs with
+    | nil => rfl
+    | cons c cs =>
+      show simCoin e g ws (realCoin e g ws c) ::
+          toSim e gs (ws ++ [realGate g (tapeOf e (realCoin e g ws c)) ws])
+            (toReal e gs (ws ++ [realGate g (tapeOf e (realCoin e g ws c)) ws]) cs) = c :: cs
+      rw [simCoin_realCoin, ih]
+
+theorem toSim_length (e : Fin 3) : ∀ (gates : List Gate) (ws : List Share3)
+    (cs : List GateCoin), (toSim e gates ws cs).length = cs.length := by
+  intro gates
+  induction gates with
+  | nil => intro ws cs; rfl
+  | cons g gs ih =>
+    intro ws cs
+    cases cs with
+    | nil => rfl
+    | cons c cs =>
+      show (simCoin e g ws c :: toSim e gs (ws ++ [realGate g (tapeOf e c) ws]) cs).length =
+        (c :: cs).length
+      rw [List.length_cons, List.length_cons, ih]
+
+theorem toReal_length (e : Fin 3) : ∀ (gates : List Gate) (ws : List Share3)
+    (cs : List GateCoin), (toReal e gates ws cs).length = cs.length := by
+  intro gates
+  induction gates with
+  | nil => intro ws cs; rfl
+  | cons g gs ih =>
+    intro ws cs
+    cases cs with
+    | nil => rfl
+    | cons c cs =>
+      show (realCoin e g ws c ::
+          toReal e gs (ws ++ [realGate g (tapeOf e (realCoin e g ws c)) ws]) cs).length =
+        (c :: cs).length
+      rw [List.length_cons, List.length_cons, ih]
+
+def tapePair (c : GateCoin) : OpenPair := (c.1, c.2.1)
+
+theorem toSim_tapePairs (e : Fin 3) : ∀ (gates : List Gate) (ws : List Share3)
+    (cs : List GateCoin), (toSim e gates ws cs).map tapePair = cs.map tapePair := by
+  intro gates
+  induction gates with
+  | nil => intro ws cs; rfl
+  | cons g gs ih =>
+    intro ws cs
+    cases cs with
+    | nil => rfl
+    | cons c cs =>
+      have hc : tapePair (simCoin e g ws c) = tapePair c := by cases g <;> rfl
+      show tapePair (simCoin e g ws c) ::
+          (toSim e gs (ws ++ [realGate g (tapeOf e c) ws]) cs).map tapePair =
+        tapePair c :: cs.map tapePair
+      rw [hc, ih]
+
+def openPair (e : Fin 3) (w : Share3) : OpenPair := (w e, w (nextParty e))
+
+def pairWire (ps : List OpenPair) (i : Nat) : OpenPair :=
+  ps.getD i (CommRingOps.zero, CommRingOps.zero)
+
+def crossPair (x y : OpenPair) : Goldilocks :=
+  CommRingOps.add (CommRingOps.mul x.1 y.1)
+    (CommRingOps.add (CommRingOps.mul x.1 y.2) (CommRingOps.mul x.2 y.1))
+
+/-- The simulator's gate step: it sees only the two opened parties. At a
+    multiplication the neighbour's output is the fresh coin `c.2.2`. -/
+def simGate (e : Fin 3) (g : Gate) (c : GateCoin) (ps : List OpenPair) : OpenPair :=
+  match g with
+  | .constant k =>
+    (if e.val = 0 then k else CommRingOps.zero,
+     if (nextParty e).val = 0 then k else CommRingOps.zero)
+  | .add l r =>
+    (CommRingOps.add (pairWire ps l).1 (pairWire ps r).1,
+     CommRingOps.add (pairWire ps l).2 (pairWire ps r).2)
+  | .mul l r =>
+    (CommRingOps.add (crossPair (pairWire ps l) (pairWire ps r)) (CommRingOps.sub c.1 c.2.1),
+     c.2.2)
+
+def simRun (e : Fin 3) : List Gate → List OpenPair → List GateCoin → List OpenPair
+  | g :: gs, ps, c :: cs => simRun e gs (ps ++ [simGate e g c ps]) cs
+  | _, ps, _ => ps
+
+theorem pairWire_map (e : Fin 3) : ∀ (ws : List Share3) (i : Nat),
+    pairWire (ws.map (openPair e)) i = openPair e (wire ws i)
+  | [], _ => rfl
+  | _ :: _, 0 => rfl
+  | _ :: ws, i + 1 => pairWire_map e ws i
+
+theorem openPair_realGate (e : Fin 3) (g : Gate) (ws : List Share3) (c : GateCoin) :
+    openPair e (realGate g (tapeOf e c) ws) =
+      simGate e g (simCoin e g ws c) (ws.map (openPair e)) := by
+  cases g with
+  | constant k => rfl
+  | add l r =>
+    show (CommRingOps.add (wire ws l e) (wire ws r e),
+        CommRingOps.add (wire ws l (nextParty e)) (wire ws r (nextParty e))) =
+      (CommRingOps.add (pairWire (ws.map (openPair e)) l).1 (pairWire (ws.map (openPair e)) r).1,
+       CommRingOps.add (pairWire (ws.map (openPair e)) l).2 (pairWire (ws.map (openPair e)) r).2)
+    rw [pairWire_map, pairWire_map]
+    rfl
+  | mul l r =>
+    show (zkBooMulShare (wire ws l) (wire ws r) (tapeOf e c) e,
+        zkBooMulShare (wire ws l) (wire ws r) (tapeOf e c) (nextParty e)) =
+      (CommRingOps.add (crossPair (pairWire (ws.map (openPair e)) l)
+          (pairWire (ws.map (openPair e)) r)) (CommRingOps.sub c.1 c.2.1),
+       zkBooMulShare (wire ws l) (wire ws r) (tapeOf e c) (nextParty e))
+    rw [pairWire_map, pairWire_map,
+      zkBooMulShare_eq_cross (wire ws l) (wire ws r) (tapeOf e c) e, tapeOf_self, tapeOf_next]
+    rfl
+
+theorem realRun_openPairs (e : Fin 3) : ∀ (gates : List Gate) (ws : List Share3)
+    (cs : List GateCoin),
+    (realRun e gates ws cs).map (openPair e) =
+      simRun e gates (ws.map (openPair e)) (toSim e gates ws cs) := by
+  intro gates
+  induction gates with
+  | nil => intro ws cs; rfl
+  | cons g gs ih =>
+    intro ws cs
+    cases cs with
+    | nil => rfl
+    | cons c cs =>
+      show (realRun e gs (ws ++ [realGate g (tapeOf e c) ws]) cs).map (openPair e) =
+        simRun e gs (ws.map (openPair e) ++
+            [simGate e g (simCoin e g ws c) (ws.map (openPair e))])
+          (toSim e gs (ws ++ [realGate g (tapeOf e c) ws]) cs)
+      rw [ih, List.map_append, List.map_cons, List.map_nil, openPair_realGate]
+
+def plainGate (g : Gate) (xs : List Goldilocks) : Goldilocks :=
+  match g with
+  | .constant c => c
+  | .add l r => CommRingOps.add (xs.getD l CommRingOps.zero) (xs.getD r CommRingOps.zero)
+  | .mul l r => CommRingOps.mul (xs.getD l CommRingOps.zero) (xs.getD r CommRingOps.zero)
+
+/-- The circuit on plain values. -/
+def plainRun : List Gate → List Goldilocks → List Goldilocks
+  | [], xs => xs
+  | g :: gs, xs => plainRun gs (xs ++ [plainGate g xs])
+
+theorem sumShares3_wire : ∀ (ws : List Share3) (i : Nat),
+    sumShares3 (wire ws i) = (ws.map sumShares3).getD i CommRingOps.zero
+  | [], _ => by
+    show CommRingOps.add (CommRingOps.zero : Goldilocks)
+      (CommRingOps.add CommRingOps.zero CommRingOps.zero) = CommRingOps.zero
+    rw [LawfulCommRing.add_zero, LawfulCommRing.add_zero]
+  | _ :: _, 0 => rfl
+  | _ :: ws, i + 1 => sumShares3_wire ws i
+
+theorem sumShares3_realGate (g : Gate) (tape : Share3) (ws : List Share3) :
+    sumShares3 (realGate g tape ws) = plainGate g (ws.map sumShares3) := by
+  cases g with
+  | constant k =>
+    show CommRingOps.add k (CommRingOps.add CommRingOps.zero CommRingOps.zero) = k
+    rw [LawfulCommRing.add_zero, LawfulCommRing.add_zero]
+  | add l r =>
+    exact (sumShares3_add (wire ws l) (wire ws r)).trans
+      (by rw [sumShares3_wire, sumShares3_wire]; rfl)
+  | mul l r =>
+    show sumShares3 (zkBooMulShare (wire ws l) (wire ws r) tape) = _
+    rw [zkBooMulShare_sum, sumShares3_wire, sumShares3_wire]
+    rfl
+
+/-- Reconstruction of every wire equals the plain circuit, for any coins. -/
+theorem realRun_sum (e : Fin 3) : ∀ (gates : List Gate) (ws : List Share3)
+    (cs : List GateCoin), gates.length ≤ cs.length →
+    (realRun e gates ws cs).map sumShares3 = plainRun gates (ws.map sumShares3) := by
+  intro gates
+  induction gates with
+  | nil => intro ws cs _; rfl
+  | cons g gs ih =>
+    intro ws cs h
+    cases cs with
+    | nil => exact absurd h (Nat.not_succ_le_zero _)
+    | cons c cs =>
+      show (realRun e gs (ws ++ [realGate g (tapeOf e c) ws]) cs).map sumShares3 =
+        plainRun gs (ws.map sumShares3 ++ [plainGate g (ws.map sumShares3)])
+      rw [ih _ _ (Nat.le_of_succ_le_succ h), List.map_append, List.map_cons, List.map_nil,
+        sumShares3_realGate]
+
+/-- What the verifier receives for one repetition with challenge `e`: all wires
+    of the two opened parties, their tapes, and the third output shares. -/
+def realView (e : Fin 3) (gates : List Gate) (outs : List Nat) (ins : List Share3)
+    (coins : List GateCoin) : List OpenPair × List OpenPair × List Goldilocks :=
+  ((realRun e gates ins coins).map (openPair e),
+   coins.map tapePair,
+   outs.map (fun o => wire (realRun e gates ins coins) o (nextParty (nextParty e))))
+
+/-- The values of the designated output wires: the statement's public part. -/
+def publicOutputs (gates : List Gate) (outs : List Nat) (xs : List Goldilocks) :
+    List Goldilocks :=
+  outs.map (fun o => (plainRun gates xs).getD o CommRingOps.zero)
+
+def thirdShares (ps : List OpenPair) : List Nat → List Goldilocks → List Goldilocks
+  | o :: os, y :: ys =>
+    CommRingOps.sub (CommRingOps.sub y (pairWire ps o).1) (pairWire ps o).2 ::
+      thirdShares ps os ys
+  | _, _ => []
+
+/-- The simulator: opened input shares, public outputs and coins only. -/
+def simView (e : Fin 3) (gates : List Gate) (outs : List Nat) (inPairs : List OpenPair)
+    (ys : List Goldilocks) (simCoins : List GateCoin) :
+    List OpenPair × List OpenPair × List Goldilocks :=
+  (simRun e gates inPairs simCoins,
+   simCoins.map tapePair,
+   thirdShares (simRun e gates inPairs simCoins) outs ys)
+
+private theorem third_share_eq (w : Share3) : ∀ e : Fin 3,
+    CommRingOps.sub (CommRingOps.sub (sumShares3 w) (w e)) (w (nextParty e)) =
+      w (nextParty (nextParty e)) := by
+  apply three_parties
+  · show CommRingOps.sub (CommRingOps.sub
+        (CommRingOps.add (w 0) (CommRingOps.add (w 1) (w 2))) (w 0)) (w 1) = w 2
+    rw [show CommRingOps.sub (CommRingOps.add (w 0) (CommRingOps.add (w 1) (w 2))) (w 0) =
+        CommRingOps.add (w 1) (w 2) from gl_sub_add_cancel_left _ _]
+    exact gl_sub_add_cancel_left _ _
+  · show CommRingOps.sub (CommRingOps.sub
+        (CommRingOps.add (w 0) (CommRingOps.add (w 1) (w 2))) (w 1)) (w 2) = w 0
+    rw [gl_add_left_comm (w 0) (w 1) (w 2), LawfulCommRing.add_comm (w 0) (w 2),
+      show CommRingOps.sub (CommRingOps.add (w 1) (CommRingOps.add (w 2) (w 0))) (w 1) =
+        CommRingOps.add (w 2) (w 0) from gl_sub_add_cancel_left _ _]
+    exact gl_sub_add_cancel_left _ _
+  · show CommRingOps.sub (CommRingOps.sub
+        (CommRingOps.add (w 0) (CommRingOps.add (w 1) (w 2))) (w 2)) (w 0) = w 1
+    rw [LawfulCommRing.add_comm (w 1) (w 2), gl_add_left_comm (w 0) (w 2) (w 1),
+      show CommRingOps.sub (CommRingOps.add (w 2) (CommRingOps.add (w 0) (w 1))) (w 2) =
+        CommRingOps.add (w 0) (w 1) from gl_sub_add_cancel_left _ _]
+    exact gl_sub_add_cancel_left _ _
+
+theorem thirdShares_real (e : Fin 3) (ws : List Share3) : ∀ outs : List Nat,
+    outs.map (fun o => wire ws o (nextParty (nextParty e))) =
+      thirdShares (ws.map (openPair e)) outs
+        (outs.map (fun o => (ws.map sumShares3).getD o CommRingOps.zero)) := by
+  intro outs
+  induction outs with
+  | nil => rfl
+  | cons o os ih =>
+    show wire ws o (nextParty (nextParty e)) ::
+        os.map (fun o => wire ws o (nextParty (nextParty e))) =
+      CommRingOps.sub (CommRingOps.sub ((ws.map sumShares3).getD o CommRingOps.zero)
+          (pairWire (ws.map (openPair e)) o).1) (pairWire (ws.map (openPair e)) o).2 ::
+        thirdShares (ws.map (openPair e)) os
+          (os.map (fun o => (ws.map sumShares3).getD o CommRingOps.zero))
+    rw [← ih, pairWire_map, ← sumShares3_wire]
+    show _ = CommRingOps.sub (CommRingOps.sub (sumShares3 (wire ws o)) (wire ws o e))
+        (wire ws o (nextParty e)) :: _
+    rw [third_share_eq]
+
+/-- **Perfect simulation of the opened view.** The real view equals the
+    simulator's output on the translated coins, and the simulator reads the
+    witness only through the opened input shares and the public outputs. -/
+theorem opened_view_perfectly_simulated (e : Fin 3) (gates : List Gate) (outs : List Nat)
+    (ins : List Share3) (coins : List GateCoin) (hLen : gates.length ≤ coins.length) :
+    realView e gates outs ins coins =
+      simView e gates outs (ins.map (openPair e))
+        (publicOutputs gates outs (ins.map sumShares3)) (toSim e gates ins coins) := by
+  have h1 := realRun_openPairs e gates ins coins
+  have h2 := toSim_tapePairs e gates ins coins
+  have h3 := thirdShares_real e (realRun e gates ins coins) outs
+  rw [realRun_sum e gates ins coins hLen] at h3
+  unfold realView simView publicOutputs
+  rw [← h1, h2, ← h3]
+
+/-- Coin translation between two input sharings; a bijection with no side
+    condition, preserving the number of coins. -/
+def viewCoinBijection (e : Fin 3) (gates : List Gate) (ins ins' : List Share3) :
+    CredBijection (List GateCoin) (List GateCoin) where
+  toFun cs := toReal e gates ins' (toSim e gates ins cs)
+  invFun cs := toReal e gates ins (toSim e gates ins' cs)
+  left_inv cs := by
+    show toReal e gates ins (toSim e gates ins' (toReal e gates ins' (toSim e gates ins cs))) = cs
+    rw [toSim_toReal, toReal_toSim]
+  right_inv cs := by
+    show toReal e gates ins' (toSim e gates ins (toReal e gates ins (toSim e gates ins' cs))) = cs
+    rw [toSim_toReal, toReal_toSim]
+
+theorem viewCoinBijection_length (e : Fin 3) (gates : List Gate) (ins ins' : List Share3)
+    (cs : List GateCoin) : ((viewCoinBijection e gates ins ins').toFun cs).length = cs.length := by
+  show (toReal e gates ins' (toSim e gates ins cs)).length = cs.length
+  rw [toReal_length, toSim_length]
+
+/-- Two sharings with the same opened input shares and the same public outputs
+    give the same view once coins are translated: the views are identically
+    distributed for uniform coins. -/
+theorem opened_views_coincide_given_equal_leakage (e : Fin 3) (gates : List Gate)
+    (outs : List Nat) (ins ins' : List Share3) (coins : List GateCoin)
+    (hOpen : ins.map (openPair e) = ins'.map (openPair e))
+    (hLeak : publicOutputs gates outs (ins.map sumShares3) =
+      publicOutputs gates outs (ins'.map sumShares3))
+    (hLen : gates.length ≤ coins.length) :
+    realView e gates outs ins coins =
+      realView e gates outs ins' ((viewCoinBijection e gates ins ins').toFun coins) := by
+  have hLen' : gates.length ≤ ((viewCoinBijection e gates ins ins').toFun coins).length := by
+    rw [viewCoinBijection_length]
+    exact hLen
+  rw [opened_view_perfectly_simulated e gates outs ins coins hLen,
+    opened_view_perfectly_simulated e gates outs ins' _ hLen', hOpen, hLeak]
+  show _ = simView e gates outs (ins'.map (openPair e))
+    (publicOutputs gates outs (ins'.map sumShares3))
+    (toSim e gates ins' (toReal e gates ins' (toSim e gates ins coins)))
+  rw [toSim_toReal]
+
+/-- Additive sharing of each witness value from two coins per input. -/
+def shareInputs : List Goldilocks → List (Goldilocks × Goldilocks) → List Share3
+  | x :: xs, r :: rs => credShareWire3 x r.1 r.2 :: shareInputs xs rs
+  | _, _ => []
+
+/-- Input-coin translation from witness `xs` to witness `xs'`. -/
+def recoin (e : Fin 3) :
+    List Goldilocks → List Goldilocks → List (Goldilocks × Goldilocks) →
+      List (Goldilocks × Goldilocks)
+  | x :: xs, x' :: xs', r :: rs =>
+    (credSharePairBijection e x').invFun ((credSharePairBijection e x).toFun r) ::
+      recoin e xs xs' rs
+  | _, _, rs => rs
+
+theorem recoin_recoin (e : Fin 3) : ∀ (xs xs' : List Goldilocks)
+    (rs : List (Goldilocks × Goldilocks)), recoin e xs' xs (recoin e xs xs' rs) = rs := by
+  intro xs
+  induction xs with
+  | nil => intro xs' rs; cases xs' <;> rfl
+  | cons x xs ih =>
+    intro xs' rs
+    cases xs' with
+    | nil => rfl
+    | cons x' xs' =>
+      cases rs with
+      | nil => rfl
+      | cons r rs =>
+        show (credSharePairBijection e x).invFun ((credSharePairBijection e x').toFun
+            ((credSharePairBijection e x').invFun ((credSharePairBijection e x).toFun r))) ::
+          recoin e xs' xs (recoin e xs xs' rs) = r :: rs
+        rw [(credSharePairBijection e x').right_inv, (credSharePairBijection e x).left_inv, ih]
+
+theorem recoin_length (e : Fin 3) : ∀ (xs xs' : List Goldilocks)
+    (rs : List (Goldilocks × Goldilocks)), (recoin e xs xs' rs).length = rs.length := by
+  intro xs
+  induction xs with
+  | nil => intro xs' rs; rfl
+  | cons x xs ih =>
+    intro xs' rs
+    cases xs' with
+    | nil => rfl
+    | cons x' xs' =>
+      cases rs with
+      | nil => rfl
+      | cons r rs =>
+        show (_ :: recoin e xs xs' rs).length = (r :: rs).length
+        rw [List.length_cons, List.length_cons, ih]
+
+def inputCoinBijection (e : Fin 3) (xs xs' : List Goldilocks) :
+    CredBijection (List (Goldilocks × Goldilocks)) (List (Goldilocks × Goldilocks)) where
+  toFun := recoin e xs xs'
+  invFun := recoin e xs' xs
+  left_inv := recoin_recoin e xs xs'
+  right_inv := recoin_recoin e xs' xs
+
+theorem shareInputs_sum : ∀ (xs : List Goldilocks) (rs : List (Goldilocks × Goldilocks)),
+    rs.length = xs.length → (shareInputs xs rs).map sumShares3 = xs := by
+  intro xs
+  induction xs with
+  | nil => intro rs _; rfl
+  | cons x xs ih =>
+    intro rs h
+    cases rs with
+    | nil => exact absurd h.symm (Nat.succ_ne_zero _)
+    | cons r rs =>
+      show sumShares3 (credShareWire3 x r.1 r.2) :: (shareInputs xs rs).map sumShares3 = x :: xs
+      rw [credShareWire3_sum, ih rs (Nat.succ.inj h)]
+
+theorem shareInputs_open (e : Fin 3) : ∀ (xs xs' : List Goldilocks)
+    (rs : List (Goldilocks × Goldilocks)), xs.length = xs'.length → rs.length = xs.length →
+    (shareInputs xs rs).map (openPair e) =
+      (shareInputs xs' (recoin e xs xs' rs)).map (openPair e) := by
+  intro xs
+  induction xs with
+  | nil =>
+    intro xs' rs hx _
+    cases xs' with
+    | nil => rfl
+    | cons _ _ => exact absurd hx.symm (Nat.succ_ne_zero _)
+  | cons x xs ih =>
+    intro xs' rs hx hr
+    cases xs' with
+    | nil => exact absurd hx (Nat.succ_ne_zero _)
+    | cons x' xs' =>
+      cases rs with
+      | nil => exact absurd hr.symm (Nat.succ_ne_zero _)
+      | cons r rs =>
+        show (credSharePairBijection e x).toFun r :: (shareInputs xs rs).map (openPair e) =
+          (credSharePairBijection e x').toFun
+              ((credSharePairBijection e x').invFun ((credSharePairBijection e x).toFun r)) ::
+            (shareInputs xs' (recoin e xs xs' rs)).map (openPair e)
+        rw [(credSharePairBijection e x').right_inv,
+          ih xs' rs (Nat.succ.inj hx) (Nat.succ.inj hr)]
+
+/-- **One repetition's view hides the witness given the public outputs.** For
+    two witnesses with equal public outputs, translating the input coins and
+    then the gate coins by explicit bijections turns one prover's opened view
+    into the other's. With uniform coins the two views are identically
+    distributed; nothing but the public outputs can link them. -/
+theorem presentation_view_depends_only_on_public_outputs
+    (e : Fin 3) (gates : List Gate) (outs : List Nat) (xs xs' : List Goldilocks)
+    (hLenX : xs.length = xs'.length)
+    (hLeak : publicOutputs gates outs xs = publicOutputs gates outs xs')
+    (rs : List (Goldilocks × Goldilocks)) (cs : List GateCoin)
+    (hRs : rs.length = xs.length) (hCs : gates.length ≤ cs.length) :
+    realView e gates outs (shareInputs xs rs) cs =
+      realView e gates outs
+        (shareInputs xs' ((inputCoinBijection e xs xs').toFun rs))
+        ((viewCoinBijection e gates (shareInputs xs rs)
+          (shareInputs xs' ((inputCoinBijection e xs xs').toFun rs))).toFun cs) := by
+  have hRs' : (recoin e xs xs' rs).length = xs'.length := by
+    rw [recoin_length, hRs, hLenX]
+  apply opened_views_coincide_given_equal_leakage e gates outs _ _ cs
+  · exact shareInputs_open e xs xs' rs hLenX hRs
+  · show publicOutputs gates outs ((shareInputs xs rs).map sumShares3) =
+      publicOutputs gates outs ((shareInputs xs' (recoin e xs xs' rs)).map sumShares3)
+    rw [shareInputs_sum xs rs hRs, shareInputs_sum xs' _ hRs', hLeak]
+  · exact hCs
+
+/-- Outputs recomputed from a view alone. -/
+def reconOutputs (ps : List OpenPair) : List Nat → List Goldilocks → List Goldilocks
+  | o :: os, t :: ts =>
+    CommRingOps.add (CommRingOps.add (pairWire ps o).1 (pairWire ps o).2) t ::
+      reconOutputs ps os ts
+  | _, _ => []
+
+private theorem sum_by_role (w : Share3) : ∀ e : Fin 3,
+    CommRingOps.add (CommRingOps.add (w e) (w (nextParty e))) (w (nextParty (nextParty e))) =
+      sumShares3 w := by
+  apply three_parties
+  · show CommRingOps.add (CommRingOps.add (w 0) (w 1)) (w 2) =
+      CommRingOps.add (w 0) (CommRingOps.add (w 1) (w 2))
+    rw [LawfulCommRing.add_assoc]
+  · show CommRingOps.add (CommRingOps.add (w 1) (w 2)) (w 0) =
+      CommRingOps.add (w 0) (CommRingOps.add (w 1) (w 2))
+    rw [LawfulCommRing.add_comm]
+  · show CommRingOps.add (CommRingOps.add (w 2) (w 0)) (w 1) =
+      CommRingOps.add (w 0) (CommRingOps.add (w 1) (w 2))
+    rw [LawfulCommRing.add_comm (w 2) (w 0), LawfulCommRing.add_assoc,
+      LawfulCommRing.add_comm (w 2) (w 1)]
+
+theorem reconOutputs_real (e : Fin 3) (ws : List Share3) : ∀ outs : List Nat,
+    reconOutputs (ws.map (openPair e)) outs
+        (outs.map (fun o => wire ws o (nextParty (nextParty e)))) =
+      outs.map (fun o => (ws.map sumShares3).getD o CommRingOps.zero) := by
+  intro outs
+  induction outs with
+  | nil => rfl
+  | cons o os ih =>
+    show CommRingOps.add (CommRingOps.add (pairWire (ws.map (openPair e)) o).1
+          (pairWire (ws.map (openPair e)) o).2) (wire ws o (nextParty (nextParty e))) ::
+        reconOutputs (ws.map (openPair e)) os
+          (os.map (fun o => wire ws o (nextParty (nextParty e)))) =
+      (ws.map sumShares3).getD o CommRingOps.zero ::
+        os.map (fun o => (ws.map sumShares3).getD o CommRingOps.zero)
+    rw [ih, pairWire_map, ← sumShares3_wire]
+    show CommRingOps.add (CommRingOps.add (wire ws o e) (wire ws o (nextParty e)))
+        (wire ws o (nextParty (nextParty e))) :: _ = _
+    rw [sum_by_role]
+
+/-- The public outputs are leakage: two presentations whose public outputs
+    differ (a stable scope tag against a different holder's tag) are told apart
+    on every pair of coin choices. -/
+theorem tooth_distinct_public_outputs_distinguish (e : Fin 3) (gates : List Gate)
+    (outs : List Nat) (ins ins' : List Share3) (cs cs' : List GateCoin)
+    (hCs : gates.length ≤ cs.length) (hCs' : gates.length ≤ cs'.length)
+    (hNe : publicOutputs gates outs (ins.map sumShares3) ≠
+      publicOutputs gates outs (ins'.map sumShares3)) :
+    realView e gates outs ins cs ≠ realView e gates outs ins' cs' := by
+  intro hEq
+  apply hNe
+  have hR := congrArg (fun v : List OpenPair × List OpenPair × List Goldilocks =>
+    reconOutputs v.1 outs v.2.2) hEq
+  have hL := reconOutputs_real e (realRun e gates ins cs) outs
+  have hL' := reconOutputs_real e (realRun e gates ins' cs') outs
+  rw [realRun_sum e gates ins cs hCs] at hL
+  rw [realRun_sum e gates ins' cs' hCs'] at hL'
+  exact hL.symm.trans (hR.trans hL')
+
+#tooth_pair Qsag.PresentationView.presentation_view_depends_only_on_public_outputs vs
+  Qsag.PresentationView.tooth_distinct_public_outputs_distinguish
+
+/-- The mutant in which every gate reuses one tape entry. -/
+def realRunAliased (e : Fin 3) (c : GateCoin) : List Gate → List Share3 → List Share3
+  | [], ws => ws
+  | g :: gs, ws => realRunAliased e c gs (ws ++ [realGate g (tapeOf e c) ws])
+
+/-- Mask indices must be distinct. With one tape entry shared by two
+    multiplications, two sharings with identical opened inputs (and no outputs
+    at all) have opened wires that differ for every choice of coins: the
+    difference of the neighbour's two gate outputs exposes the hidden share. -/
+theorem tooth_aliased_mask_index_leaks_hidden_share :
+    ∃ (gates : List Gate) (ins ins' : List Share3),
+      ins.map (openPair 0) = ins'.map (openPair 0) ∧
+      ∀ c c' : GateCoin,
+        (realRunAliased 0 c gates ins).map (openPair 0) ≠
+          (realRunAliased 0 c' gates ins').map (openPair 0) := by
+  let u : Share3 := fun p => if p.val = 1 then CommRingOps.one else CommRingOps.zero
+  let v' : Share3 := fun p => if p.val = 2 then CommRingOps.one else CommRingOps.zero
+  refine ⟨[.mul 0 1, .mul 2 2], [u, zeroShare, zeroShare], [u, v', zeroShare], rfl, ?_⟩
+  intro c c' h
+  have h3 := congrArg (fun l : List OpenPair =>
+    (l.getD 3 (CommRingOps.zero, CommRingOps.zero)).2) h
+  have h4 := congrArg (fun l : List OpenPair =>
+    (l.getD 4 (CommRingOps.zero, CommRingOps.zero)).2) h
+  change CommRingOps.add (crossAt u zeroShare 1) (CommRingOps.sub c.2.1 c.2.2) =
+    CommRingOps.add (crossAt u v' 1) (CommRingOps.sub c'.2.1 c'.2.2) at h3
+  change CommRingOps.add (crossAt zeroShare zeroShare 1) (CommRingOps.sub c.2.1 c.2.2) =
+    CommRingOps.add (crossAt zeroShare zeroShare 1) (CommRingOps.sub c'.2.1 c'.2.2) at h4
+  have hm := LawfulCommRing.add_left_cancel h4
+  rw [hm, LawfulCommRing.add_comm (crossAt u zeroShare 1),
+    LawfulCommRing.add_comm (crossAt u v' 1)] at h3
+  have hx := LawfulCommRing.add_left_cancel h3
+  change CommRingOps.add (CommRingOps.mul (CommRingOps.one : Goldilocks) CommRingOps.zero)
+      (CommRingOps.add (CommRingOps.mul CommRingOps.one CommRingOps.zero)
+        (CommRingOps.mul CommRingOps.zero CommRingOps.zero)) =
+    CommRingOps.add (CommRingOps.mul (CommRingOps.one : Goldilocks) CommRingOps.zero)
+      (CommRingOps.add (CommRingOps.mul CommRingOps.one CommRingOps.one)
+        (CommRingOps.mul CommRingOps.zero CommRingOps.zero)) at hx
+  rw [LawfulCommRing.mul_zero, LawfulCommRing.mul_zero, LawfulCommRing.mul_one,
+    LawfulCommRing.add_zero, LawfulCommRing.add_zero, LawfulCommRing.add_zero,
+    LawfulCommRing.zero_add] at hx
+  have hv := congrArg Goldilocks.val hx
+  change (0 : Nat) = 1 at hv
+  omega
+
+#tooth_pair Qsag.PresentationView.opened_view_perfectly_simulated vs
+  Qsag.PresentationView.tooth_aliased_mask_index_leaks_hidden_share
+
+end PresentationView
 
 /-- Canonical coefficients are necessary even when the centered residue is zero. -/
 theorem tooth_norm_rejects_modulus :

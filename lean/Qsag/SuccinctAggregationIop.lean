@@ -8271,6 +8271,37 @@ def stepOp256TableOk (profile : AggSigProfile) (slots : List StepOpSlot)
   allZeroGoldilocks (stepOp256IntraResidualsFrom profile slots 0 rows) &&
   allZeroGoldilocks (stepOp256ShiftResiduals rows)
 
+/-- Project an intra-row constraint block from the flat residual stream. -/
+theorem stepOp256IntraResidualsFrom_row_at (profile : AggSigProfile) (slots : List StepOpSlot) :
+    ∀ (rows : List StepOpRow) (g i : Nat) (row : StepOpRow),
+      rows[i]? = some row →
+      allZeroGoldilocks (stepOp256IntraResidualsFrom profile slots g rows) = true →
+      allZeroGoldilocks (stepOp256RowResiduals profile
+        (slots.getD ((g + i) / stepOpRowsPerSigner profile) none)
+        ((g + i) % stepOpRowsPerSigner profile) row) = true
+  | [], _, _, _, h, _ => by simp at h
+  | r :: rs, g, 0, row, h, hz => by
+    simp only [List.getElem?_cons_zero, Option.some.injEq] at h
+    subst row
+    rw [stepOp256IntraResidualsFrom, allZeroGoldilocks_append, Bool.and_eq_true] at hz
+    simpa only [Nat.add_zero] using hz.1
+  | r :: rs, g, i + 1, row, h, hz => by
+    rw [stepOp256IntraResidualsFrom, allZeroGoldilocks_append, Bool.and_eq_true] at hz
+    have hr := stepOp256IntraResidualsFrom_row_at profile slots rs (g + 1) i row h hz.2
+    simpa only [Nat.add_right_comm g 1 i, Nat.add_assoc] using hr
+
+/-- Every row of a valid table satisfies its actual scheduled constraint block. -/
+theorem stepOp256TableOk_row_at (profile : AggSigProfile) (slots : List StepOpSlot)
+    (rows : List StepOpRow) (i : Nat) (row : StepOpRow)
+    (h : stepOp256TableOk profile slots rows = true) (hi : rows[i]? = some row) :
+    allZeroGoldilocks (stepOp256RowResiduals profile
+      (slots.getD (i / stepOpRowsPerSigner profile) none)
+      (i % stepOpRowsPerSigner profile) row) = true := by
+  unfold stepOp256TableOk at h
+  simp only [Bool.and_eq_true] at h
+  simpa only [Nat.zero_add] using
+    stepOp256IntraResidualsFrom_row_at profile slots rows 0 i row hi h.1.2
+
 /-- The shift constraints between two rows vanish exactly when the state is handed over. -/
 theorem stepOp256_shift_iff (r r' : StepOpRow) :
     allZeroGoldilocks (stepOpShiftResiduals r r') = true ↔
