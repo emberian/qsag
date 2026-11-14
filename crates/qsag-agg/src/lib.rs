@@ -61,7 +61,6 @@ fn join_worker<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
     }
 }
 
-
 pub use arithmetize::{
     ShardBatchProof, ShardRowProof, compute_signing_mode_digest, max_shard_signers,
     prove_shard_batch, verify_shard_batch,
@@ -79,25 +78,24 @@ pub use pcs::{
     whir_commit_with_schedule, whir_verify_batch_with_schedule, whir_verify_with_schedule,
 };
 pub use sig::{
-    AggSigProfile, Digest4, Digest5, EpochWalSink, SigError, SignerBitmap, SigningMode,
-    StatefulEpochLatch, StatelessBudgetWalSink, CORDUROY_MAX_STATELESS_SIGS_PER_KEY,
-    ValidatorKeypair, ValidatorPublicKey, ValidatorSignature, bytes32_to_limbs56,
-    compute_committee_root, limbs56_to_bytes32_canonical, validate_unique_active_committee,
-    verify_individual_signature, verify_signature_batch,
+    AggSigProfile, CORDUROY_MAX_STATELESS_SIGS_PER_KEY, Digest4, Digest5, EpochWalSink, SigError,
+    SignerBitmap, SigningMode, StatefulEpochLatch, StatelessBudgetWalSink, ValidatorKeypair,
+    ValidatorPublicKey, ValidatorSignature, bytes32_to_limbs56, compute_committee_root,
+    limbs56_to_bytes32_canonical, validate_unique_active_committee, verify_individual_signature,
+    verify_signature_batch,
 };
 #[cfg(feature = "std")]
 pub use sig::{FsStatelessBudgetWal, FsWalEpochSink};
 pub use sponge::{FiatShamirTranscript, InstanceBound, RelationBound, Unbound};
 
-/// Canonical 8-byte wire header for [`HemAggregatedProof`] (`v5`: regime/schedule-bound `GoldilocksExt4` WHIR).
-pub const AGG_WIRE_MAGIC: &[u8; 8] = b"QSAGAGG\x05";
+/// Canonical 8-byte wire header for [`HemAggregatedProof`] (`v6`: affine monomial `GoldilocksExt4` WHIR).
+pub const AGG_WIRE_MAGIC: &[u8; 8] = b"QSAGAGG\x06";
 
 /// Hard upper bound on merge tree depth (`2^16 = 65,536` shard batches).
 pub const MAX_MERGE_TREE_DEPTH: usize = 16;
 
 /// Default (and maximum) active signers per `JortsPoseidon2` shard.
-pub const DEFAULT_MAX_SHARD_SIGNERS_JORTS: usize =
-    max_shard_signers(AggSigProfile::JortsPoseidon2);
+pub const DEFAULT_MAX_SHARD_SIGNERS_JORTS: usize = max_shard_signers(AggSigProfile::JortsPoseidon2);
 
 /// Default (and maximum) active signers per `CorduroyPoseidon2` shard.
 pub const DEFAULT_MAX_SHARD_SIGNERS_CORDUROY: usize =
@@ -218,7 +216,8 @@ impl MergeNode {
 
     /// Join two subtrees over disjoint signer sets in canonical order.
     fn branch(a: MergeNode, b: MergeNode) -> Result<Self, HemAggError> {
-        let regime = a.homogeneous_regime(MAX_MERGE_TREE_DEPTH)
+        let regime = a
+            .homogeneous_regime(MAX_MERGE_TREE_DEPTH)
             .ok_or(HemAggError::RegimeMismatch)?;
         if b.homogeneous_regime(MAX_MERGE_TREE_DEPTH) != Some(regime) {
             return Err(HemAggError::RegimeMismatch);
@@ -679,7 +678,9 @@ fn check_mergeable(
     proof_a: &HemAggregatedProof,
     proof_b: &HemAggregatedProof,
 ) -> Result<[u8; 32], HemAggError> {
-    let regime = proof_a.root.homogeneous_regime(MAX_MERGE_TREE_DEPTH)
+    let regime = proof_a
+        .root
+        .homogeneous_regime(MAX_MERGE_TREE_DEPTH)
         .ok_or(HemAggError::RegimeMismatch)?;
     if proof_b.root.homogeneous_regime(MAX_MERGE_TREE_DEPTH) != Some(regime) {
         return Err(HemAggError::RegimeMismatch);
@@ -798,11 +799,7 @@ mod tests {
     }
 
     fn gen_jorts_kp(tag: u64, idx: u32) -> ValidatorKeypair {
-        ValidatorKeypair::keygen_deterministic(
-            AggSigProfile::JortsPoseidon2,
-            &make_seed(tag),
-            idx,
-        )
+        ValidatorKeypair::keygen_deterministic(AggSigProfile::JortsPoseidon2, &make_seed(tag), idx)
     }
 
     fn ext4_sample(a: u64, b: u64, c: u64, d: u64) -> GoldilocksExt4 {
@@ -1263,8 +1260,7 @@ mod tests {
             WhirSecurityRegime::Habr24Qrom128,
             WhirSecurityRegime::BciksJohnsonQrom128,
         ] {
-            let mut cfg =
-                HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(710));
+            let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(710));
             cfg.regime = regime;
             let start = std::time::Instant::now();
             let proof =
@@ -1284,8 +1280,14 @@ mod tests {
                 wire.len(),
                 start.elapsed()
             );
-            assert_eq!(HemAggregator::verify(&pks, &mode, &proof), regime.meets_qrom_128_floor());
-            assert_eq!(verify_aggregate(&pks, &mode, &proof), regime.meets_qrom_128_floor());
+            assert_eq!(
+                HemAggregator::verify(&pks, &mode, &proof),
+                regime.meets_qrom_128_floor()
+            );
+            assert_eq!(
+                verify_aggregate(&pks, &mode, &proof),
+                regime.meets_qrom_128_floor()
+            );
             let wrong = if regime == WhirSecurityRegime::Habr24Qrom128 {
                 WhirSecurityRegime::BciksJohnsonQrom128
             } else {
@@ -1304,36 +1306,73 @@ mod tests {
         let pks: Vec<_> = keys.iter().map(|k| k.pk).collect();
         let msg = b"mixed regimes";
         let mode = SigningMode::SharedMessage(msg);
-        let sigs: Vec<_> = keys.iter_mut()
-            .map(|k| k.sign_stateful_for_unit_test(msg, 0).unwrap()).collect();
+        let sigs: Vec<_> = keys
+            .iter_mut()
+            .map(|k| k.sign_stateful_for_unit_test(msg, 0).unwrap())
+            .collect();
         let make = |index, regime| {
             let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(712));
             cfg.regime = regime;
-            HemAggregator::aggregate_with_config(&pks,
-                &SignerBitmap::from_active_indices(2, &[index]).unwrap(), &mode,
-                &sigs[index..index + 1], &cfg).unwrap()
+            HemAggregator::aggregate_with_config(
+                &pks,
+                &SignerBitmap::from_active_indices(2, &[index]).unwrap(),
+                &mode,
+                &sigs[index..index + 1],
+                &cfg,
+            )
+            .unwrap()
         };
         let a = make(0, WhirSecurityRegime::Habr24Qrom128);
-        for regime in [WhirSecurityRegime::BciksJohnsonQrom128, WhirSecurityRegime::Habr24Classical128] {
+        for regime in [
+            WhirSecurityRegime::BciksJohnsonQrom128,
+            WhirSecurityRegime::Habr24Classical128,
+        ] {
             let b = make(1, regime);
-            assert_eq!(HemAggregator::merge(&pks, &mode, &a, &b), Err(HemAggError::RegimeMismatch));
-            assert_eq!(HemAggregator::merge_owned(&pks, &mode, a.clone(), b.clone()), Err(HemAggError::RegimeMismatch));
+            assert_eq!(
+                HemAggregator::merge(&pks, &mode, &a, &b),
+                Err(HemAggError::RegimeMismatch)
+            );
+            assert_eq!(
+                HemAggregator::merge_owned(&pks, &mode, a.clone(), b.clone()),
+                Err(HemAggError::RegimeMismatch)
+            );
             let mixed = HemAggregatedProof {
-                profile: a.profile, committee_root: a.committee_root,
+                profile: a.profile,
+                committee_root: a.committee_root,
                 root: MergeNode::Branch {
                     bitmap: a.bitmap().union_disjoint(b.bitmap()).unwrap(),
-                    left: Box::new(a.root.clone()), right: Box::new(b.root),
+                    left: Box::new(a.root.clone()),
+                    right: Box::new(b.root),
                 },
             };
             assert!(!HemAggregator::verify(&pks, &mode, &mixed));
-            assert!(!HemAggregator::verify_with_regime(&pks, &mode, &mixed, regime));
-            assert!(!HemAggregator::verify_with_regime(&pks, &mode, &mixed, WhirSecurityRegime::Habr24Qrom128));
-            assert_eq!(HemAggregatedProof::from_bytes_canonical(&mixed.to_bytes()), Err(HemAggError::MalformedWireBytes));
+            assert!(!HemAggregator::verify_with_regime(
+                &pks, &mode, &mixed, regime
+            ));
+            assert!(!HemAggregator::verify_with_regime(
+                &pks,
+                &mode,
+                &mixed,
+                WhirSecurityRegime::Habr24Qrom128
+            ));
+            assert_eq!(
+                HemAggregatedProof::from_bytes_canonical(&mixed.to_bytes()),
+                Err(HemAggError::MalformedWireBytes)
+            );
         }
-        for regime in [WhirSecurityRegime::Habr24Classical128, WhirSecurityRegime::BciksJohnsonQrom128] {
-            let merged = HemAggregator::merge_owned(&pks, &mode, make(0, regime), make(1, regime)).unwrap();
-            assert!(HemAggregator::verify_with_regime(&pks, &mode, &merged, regime));
-            assert_eq!(HemAggregator::verify(&pks, &mode, &merged), regime.meets_qrom_128_floor());
+        for regime in [
+            WhirSecurityRegime::Habr24Classical128,
+            WhirSecurityRegime::BciksJohnsonQrom128,
+        ] {
+            let merged =
+                HemAggregator::merge_owned(&pks, &mode, make(0, regime), make(1, regime)).unwrap();
+            assert!(HemAggregator::verify_with_regime(
+                &pks, &mode, &merged, regime
+            ));
+            assert_eq!(
+                HemAggregator::verify(&pks, &mode, &merged),
+                regime.meets_qrom_128_floor()
+            );
         }
     }
 
@@ -1379,11 +1418,11 @@ mod tests {
 
         // 1. Corrupted Ext4 Stage-0 and intermediate WHIR OOD claims:
         assert!(rejects(
-            &|l| l.pcs_opening.opening.stage0_ood_eval += GoldilocksExt4::V
+            &|l| l.pcs_opening.opening.stage0_ood_evals[0] += GoldilocksExt4::V
         ));
         for st_idx in 0..leaf.pcs_opening.opening.folded_layers.len() {
             assert!(rejects(&|l| {
-                l.pcs_opening.opening.folded_layers[st_idx].ood_eval += GoldilocksExt4::V;
+                l.pcs_opening.opening.folded_layers[st_idx].stage_ood_evals[0] += GoldilocksExt4::V;
             }));
         }
 
@@ -1404,7 +1443,7 @@ mod tests {
 
         // 3. Corrupted terminal early-stop Ext4 polynomial evaluation:
         assert!(rejects(&|l| {
-            l.pcs_opening.opening.final_hypercube_evals[7] += GoldilocksExt4::V;
+            l.pcs_opening.opening.final_coeffs[7] += GoldilocksExt4::V;
         }));
 
         // 4. Bad per-stage PoW nonces (Stage 0, Stage 1, and Final Stage 2):
@@ -2159,6 +2198,43 @@ mod tests {
             k * SLH_DSA_128F_BYTES
         );
         proof
+    }
+
+    /// Release measurements include aggregation, serialization, and independent verification.
+    #[test]
+    #[ignore]
+    #[cfg(feature = "std")]
+    fn bench_affine_regimes() {
+        let msg = b"affine-regime-benchmark";
+        let mode = SigningMode::SharedMessage(msg);
+        for profile in [
+            AggSigProfile::JortsPoseidon2,
+            AggSigProfile::CorduroyPoseidon2,
+        ] {
+            let (pks, sigs) = bench_keys_and_sigs(profile, 8, msg);
+            let bm = SignerBitmap::from_active_indices(8, &[0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+            for regime in [
+                WhirSecurityRegime::Habr24Qrom128,
+                WhirSecurityRegime::BciksJohnsonQrom128,
+            ] {
+                let mut cfg = AggConfig::default_for(profile, make_seed(909));
+                cfg.regime = regime;
+                let start = std::time::Instant::now();
+                let proof =
+                    aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &cfg).unwrap();
+                let prove_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let wire = proof.to_bytes();
+                let verify_ms = median_verify_ms(&pks, &mode, &proof);
+                assert_eq!(
+                    QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+                    proof
+                );
+                std::println!(
+                    "AFFINE {profile:?} {regime:?} K=8 bytes={} prove_ms={prove_ms:.3} verify_median3_ms={verify_ms:.3}",
+                    wire.len()
+                );
+            }
+        }
     }
 
     #[test]
