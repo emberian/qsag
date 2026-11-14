@@ -91,6 +91,19 @@ impl Goldilocks {
         Self::from_u64_reduced(s2)
     }
 
+    /// Multiply canonical `self` (`self.0 < p`) by $2^S$ (`1 <= S <= 31`) using pure 64-bit
+    /// shifts and Goldilocks $\epsilon = 2^{32} - 1$ folding (`0` multiplications).
+    #[inline(always)]
+    pub const fn shl_small<const S: u32>(self) -> Self {
+        const { assert!(S >= 1 && S <= 31) };
+        let lo = self.0 << S;
+        let hi = self.0 >> (64 - S);
+        let adj = (hi << 32).wrapping_sub(hi);
+        let (s, c) = lo.overflowing_add(adj);
+        let s2 = s.wrapping_add((0u64.wrapping_sub(c as u64)) & EPSILON);
+        Self::from_u64_reduced(s2)
+    }
+
     #[inline(always)]
     pub const fn to_canonical_u64(self) -> u64 {
         self.0
@@ -376,6 +389,14 @@ impl GoldilocksExt2 {
         Self {
             c0: self.c0.const_neg(),
             c1: self.c1.const_neg(),
+        }
+    }
+
+    #[inline(always)]
+    pub const fn shl_small<const S: u32>(self) -> Self {
+        Self {
+            c0: self.c0.shl_small::<S>(),
+            c1: self.c1.shl_small::<S>(),
         }
     }
 
@@ -669,7 +690,11 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
     let n_c = coeffs.len();
     assert!(n_c.is_power_of_two());
     assert!(blowup.is_power_of_two() && blowup >= 2);
-    let domain_len = n_c * blowup;
+    let domain_len = n_c.checked_mul(blowup).expect("RS domain size overflow");
+    assert!(
+        domain_len.trailing_zeros() <= 32,
+        "RS domain exceeds Goldilocks two-adicity"
+    );
 
     // Coset decomposition: `B = blowup` independent size-`N` shifted NTTs (`out[q * B + r] = NTT_N(c_i * (g * w_D^r)^i)[q]`),
     // keeping each sub-NTT L2/L3-cache resident with zero cross-coset synchronization.
@@ -951,6 +976,14 @@ impl GoldilocksExt4 {
         Self {
             c0: self.c0.const_neg(),
             c1: self.c1.const_neg(),
+        }
+    }
+
+    #[inline(always)]
+    pub const fn shl_small<const S: u32>(self) -> Self {
+        Self {
+            c0: self.c0.shl_small::<S>(),
+            c1: self.c1.shl_small::<S>(),
         }
     }
 
@@ -1240,7 +1273,11 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
     let n_c = coeffs.len();
     assert!(n_c.is_power_of_two());
     assert!(blowup.is_power_of_two() && blowup >= 2);
-    let domain_len = n_c * blowup;
+    let domain_len = n_c.checked_mul(blowup).expect("RS domain size overflow");
+    assert!(
+        domain_len.trailing_zeros() <= 32,
+        "RS domain exceeds Goldilocks two-adicity"
+    );
 
     // Coset decomposition across hardware worker threads: `blowup` independent L1/L2-resident size-`n_c` NTTs!
     #[cfg(feature = "std")]

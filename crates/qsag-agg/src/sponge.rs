@@ -545,14 +545,19 @@ pub const fn poseidon2_sbox7(x: Goldilocks) -> Goldilocks {
     x3.const_mul(x4)
 }
 
+/// Unrolled 4-lane butterfly for `M_4 = circ(2, 3, 1, 1)` over `Goldilocks` (`9` adds, `0` muls).
 #[inline(always)]
 fn apply_m4_base(b: [Goldilocks; 4]) -> [Goldilocks; 4] {
-    let s = (b[0] + b[1]) + (b[2] + b[3]);
+    let t01 = b[0] + b[1];
+    let t23 = b[2] + b[3];
+    let t0123 = t01 + t23;
+    let t01123 = t0123 + b[1];
+    let t01233 = t0123 + b[3];
     [
-        s + (b[0] + Goldilocks::TWO * b[1]),
-        s + (b[1] + Goldilocks::TWO * b[2]),
-        s + (b[2] + Goldilocks::TWO * b[3]),
-        s + (b[3] + Goldilocks::TWO * b[0]),
+        t01123 + t01,
+        t01123 + b[2].shl_small::<1>(),
+        t01233 + t23,
+        t01233 + b[0].shl_small::<1>(),
     ]
 }
 
@@ -561,27 +566,42 @@ pub fn poseidon2_apply_me(st: &mut [Goldilocks; 12]) {
     let y0 = apply_m4_base([st[0], st[1], st[2], st[3]]);
     let y1 = apply_m4_base([st[4], st[5], st[6], st[7]]);
     let y2 = apply_m4_base([st[8], st[9], st[10], st[11]]);
-    for i in 0..4 {
-        let s = (y0[i] + y1[i]) + y2[i];
-        st[i] = y0[i] + s;
-        st[4 + i] = y1[i] + s;
-        st[8 + i] = y2[i] + s;
-    }
+    let s0 = (y0[0] + y1[0]) + y2[0];
+    let s1 = (y0[1] + y1[1]) + y2[1];
+    let s2 = (y0[2] + y1[2]) + y2[2];
+    let s3 = (y0[3] + y1[3]) + y2[3];
+    st[0] = y0[0] + s0;
+    st[1] = y0[1] + s1;
+    st[2] = y0[2] + s2;
+    st[3] = y0[3] + s3;
+    st[4] = y1[0] + s0;
+    st[5] = y1[1] + s1;
+    st[6] = y1[2] + s2;
+    st[7] = y1[3] + s3;
+    st[8] = y2[0] + s0;
+    st[9] = y2[1] + s1;
+    st[10] = y2[2] + s2;
+    st[11] = y2[3] + s3;
 }
 
+/// Unrolled internal diffusion `M_I = I + diag(-3, 0, 1, 3, ..., 1023) + 1*1^T` (`0` muls:
+/// diagonal entries on lanes `0..12` are `-2, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024`).
 #[inline(always)]
 pub fn poseidon2_apply_mi(st: &mut [Goldilocks; 12]) {
-    let mut s = Goldilocks::ZERO;
-    for x in st.iter() {
-        s += *x;
-    }
-    st[0] = (Goldilocks::TWO * st[0]).const_neg() + s;
+    let s = (((st[0] + st[1]) + (st[2] + st[3])) + ((st[4] + st[5]) + (st[6] + st[7])))
+        + ((st[8] + st[9]) + (st[10] + st[11]));
+    st[0] = s - st[0].shl_small::<1>();
     st[1] += s;
-    let mut d = Goldilocks::TWO;
-    for x in st.iter_mut().skip(2) {
-        *x = d * *x + s;
-        d = d + d;
-    }
+    st[2] = st[2].shl_small::<1>() + s;
+    st[3] = st[3].shl_small::<2>() + s;
+    st[4] = st[4].shl_small::<3>() + s;
+    st[5] = st[5].shl_small::<4>() + s;
+    st[6] = st[6].shl_small::<5>() + s;
+    st[7] = st[7].shl_small::<6>() + s;
+    st[8] = st[8].shl_small::<7>() + s;
+    st[9] = st[9].shl_small::<8>() + s;
+    st[10] = st[10].shl_small::<9>() + s;
+    st[11] = st[11].shl_small::<10>() + s;
 }
 
 #[inline(always)]
@@ -592,14 +612,19 @@ pub const fn poseidon2_sbox7_ext4(x: GoldilocksExt4) -> GoldilocksExt4 {
     x3.const_mul(x4)
 }
 
+/// Unrolled 4-lane butterfly for `M_4 = circ(2, 3, 1, 1)` over `GoldilocksExt4` (`0` muls).
 #[inline(always)]
 fn apply_m4_ext4(b: [GoldilocksExt4; 4]) -> [GoldilocksExt4; 4] {
-    let s = (b[0] + b[1]) + (b[2] + b[3]);
+    let t01 = b[0] + b[1];
+    let t23 = b[2] + b[3];
+    let t0123 = t01 + t23;
+    let t01123 = t0123 + b[1];
+    let t01233 = t0123 + b[3];
     [
-        s + (b[0] + b[1] + b[1]),
-        s + (b[1] + b[2] + b[2]),
-        s + (b[2] + b[3] + b[3]),
-        s + (b[3] + b[0] + b[0]),
+        t01123 + t01,
+        t01123 + b[2].shl_small::<1>(),
+        t01233 + t23,
+        t01233 + b[0].shl_small::<1>(),
     ]
 }
 
@@ -608,27 +633,41 @@ pub fn poseidon2_apply_me_ext4(st: &mut [GoldilocksExt4; 12]) {
     let y0 = apply_m4_ext4([st[0], st[1], st[2], st[3]]);
     let y1 = apply_m4_ext4([st[4], st[5], st[6], st[7]]);
     let y2 = apply_m4_ext4([st[8], st[9], st[10], st[11]]);
-    for i in 0..4 {
-        let s = (y0[i] + y1[i]) + y2[i];
-        st[i] = y0[i] + s;
-        st[4 + i] = y1[i] + s;
-        st[8 + i] = y2[i] + s;
-    }
+    let s0 = (y0[0] + y1[0]) + y2[0];
+    let s1 = (y0[1] + y1[1]) + y2[1];
+    let s2 = (y0[2] + y1[2]) + y2[2];
+    let s3 = (y0[3] + y1[3]) + y2[3];
+    st[0] = y0[0] + s0;
+    st[1] = y0[1] + s1;
+    st[2] = y0[2] + s2;
+    st[3] = y0[3] + s3;
+    st[4] = y1[0] + s0;
+    st[5] = y1[1] + s1;
+    st[6] = y1[2] + s2;
+    st[7] = y1[3] + s3;
+    st[8] = y2[0] + s0;
+    st[9] = y2[1] + s1;
+    st[10] = y2[2] + s2;
+    st[11] = y2[3] + s3;
 }
 
+/// Unrolled internal diffusion over `GoldilocksExt4` (`0` muls: shift/add power-of-two diagonal).
 #[inline(always)]
 pub fn poseidon2_apply_mi_ext4(st: &mut [GoldilocksExt4; 12]) {
-    let mut s = GoldilocksExt4::ZERO;
-    for x in st.iter() {
-        s += *x;
-    }
-    st[0] = -(st[0] + st[0]) + s;
+    let s = (((st[0] + st[1]) + (st[2] + st[3])) + ((st[4] + st[5]) + (st[6] + st[7])))
+        + ((st[8] + st[9]) + (st[10] + st[11]));
+    st[0] = s - st[0].shl_small::<1>();
     st[1] += s;
-    let mut d = Goldilocks::TWO;
-    for x in st.iter_mut().skip(2) {
-        *x = x.mul_base(d) + s;
-        d = d + d;
-    }
+    st[2] = st[2].shl_small::<1>() + s;
+    st[3] = st[3].shl_small::<2>() + s;
+    st[4] = st[4].shl_small::<3>() + s;
+    st[5] = st[5].shl_small::<4>() + s;
+    st[6] = st[6].shl_small::<5>() + s;
+    st[7] = st[7].shl_small::<6>() + s;
+    st[8] = st[8].shl_small::<7>() + s;
+    st[9] = st[9].shl_small::<8>() + s;
+    st[10] = st[10].shl_small::<9>() + s;
+    st[11] = st[11].shl_small::<10>() + s;
 }
 
 /// Full 30-round Width-12 `Poseidon2` permutation (`4` ext + `22` int + `4` ext),
