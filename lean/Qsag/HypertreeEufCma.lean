@@ -1399,12 +1399,11 @@ def extractBoundedHypertreeLayersBreak
                 omega
               have hDivLt : treeIdxNat < 2 ^ ((r0 :: rs).length * params.subtreeHeight) := by
                 dsimp only [treeIdxNat, subLeaves]
-                apply Nat.div_lt_of_lt_mul
-                rw [← Nat.pow_add]
-                have hMulEq : params.subtreeHeight + (r0 :: rs).length * params.subtreeHeight =
+                rw [Nat.div_lt_iff_lt_mul (Nat.two_pow_pos _), ← Nat.pow_add]
+                have hMulEq : (r0 :: rs).length * params.subtreeHeight + params.subtreeHeight =
                     (lsig :: r0 :: rs).length * params.subtreeHeight := by
                   simp only [List.length_cons]
-                  rw [Nat.succ_mul (rs.length + 1), Nat.add_comm]
+                  exact (Nat.succ_mul (rs.length + 1) params.subtreeHeight).symm
                 rwa [hMulEq]
               have hRestVer :
                   verifyHypertreeLayers suite params sk.pkSeed pkRoot [] (layerIdx + 1) treeIdxNat nextSubtreeRoot (r0 :: rs) =
@@ -4670,7 +4669,7 @@ private def statefulLayerDivergence_extract (suite : TweakableHashSuite) (params
                      layer0_digest := hLayer0Cur
                      forgedDigit := digF.getD r 0
                      forgedDigit_eq := by rw [hDigF, hLs]
-                     digit_lt := by omega
+                     digit_lt := Nat.lt_of_lt_of_le hBounds.2.1 (Nat.le_sub_one_of_lt hBounds.2.2)
                      invertsHonest := hInv r hBounds.1
                      unrevealedInLog := fun e' he' i'' hi'' hAddr' => by
                        have hAddrE : wotsPosAddr params e.2.2.leafGlobalIdx i = wotsPosAddr params sigStar.leafGlobalIdx i := by
@@ -5158,6 +5157,55 @@ def checked_stateless_hypertree_euf_cma_extract
     hGeom hSound.2.1 hLayers
     (by rwa [← checkedStatelessOracleLog_eq_signingOracleLog])
     hSound.2.2.1
+
+/-- Every entry of `checkedStatelessOracleLog` is the answer to one of the listed queries. -/
+theorem checkedStatelessOracleLog_mem_query (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) :
+    ∀ (qs : List CheckedStatelessQuery) (e : List UInt8 × PqHashSig),
+      e ∈ checkedStatelessOracleLog suite params sk qs →
+      ∃ q ∈ qs, q.message = e.1 ∧
+        evalStatelessCheckedSign suite params sk q.message q.randomness q.grindLimit = some e.2
+  | [], _, h => by
+    unfold checkedStatelessOracleLog at h
+    cases h
+  | q :: qs, e, h => by
+    unfold checkedStatelessOracleLog at h
+    cases hE : evalStatelessCheckedSign suite params sk q.message q.randomness q.grindLimit with
+    | none =>
+      simp only [hE] at h
+      obtain ⟨q', hq', hRest⟩ := checkedStatelessOracleLog_mem_query suite params sk qs e h
+      exact ⟨q', .tail _ hq', hRest⟩
+    | some sig =>
+      simp only [hE] at h
+      rcases List.mem_cons.mp h with hHead | hTl
+      · subst hHead
+        exact ⟨q, .head _, rfl, hE⟩
+      · obtain ⟨q', hq', hRest⟩ := checkedStatelessOracleLog_mem_query suite params sk qs e hTl
+        exact ⟨q', .tail _ hq', hRest⟩
+
+/-- `checked_stateless_hypertree_euf_cma_extract` with freshness stated on the query list itself: a
+    message that was never submitted to the signing oracle cannot appear in the oracle log, so no
+    log-level freshness premise and no upper-layer oracle premise remain for the caller. -/
+def checked_stateless_hypertree_euf_cma_extract_of_fresh_queries
+    (suite : TweakableHashSuite) (params : PqHashParams) (sk : PqSecretKey)
+    (queries : List CheckedStatelessQuery)
+    (msgStar : List UInt8) (sigStar : PqHashSig)
+    (hGeom : (params.w = 4 ∧ params.ell1 = 128) ∨ (params.w = 16 ∧ params.ell1 = 64))
+    (hLayers : params.numLayers ≤ 2 ^ 32)
+    (hFreshQueries : ∀ q ∈ queries, q.message ≠ msgStar)
+    (hAccept : verifyStatelessChecked suite params (derivePublicKey suite params sk) msgStar sigStar = true) :
+    HypertreeForgeryBreak suite params sk msgStar sigStar
+      ((signingOracleLog suite params sk (toLegacyStatelessQueries suite params sk queries)).flatMap fun e =>
+        (List.range params.forsTrees).map fun j =>
+          (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ params.subtreeHeight),
+           e.2.leafGlobalIdx % 2 ^ params.subtreeHeight,
+           sigForsLeafIdx suite params (derivePublicKey suite params sk) e.1 e.2 j)) :=
+  checked_stateless_hypertree_euf_cma_extract suite params sk queries msgStar sigStar hGeom hLayers
+    (fun hMem => by
+      obtain ⟨e, he, hFst⟩ := List.mem_map.mp hMem
+      obtain ⟨q, hq, hMsg, _⟩ := checkedStatelessOracleLog_mem_query suite params sk queries e he
+      exact hFreshQueries q hq (hMsg.trans hFst))
+    hAccept
 
 /-- Transcript-indexed `Prop` EUF-CMA break theorem for `evalStatelessCheckedSign` / `verifyStatelessChecked`. -/
 theorem checked_stateless_hypertree_euf_cma_break

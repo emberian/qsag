@@ -45,7 +45,9 @@ public import Qsag.SimulationSpine
 public import Qsag.Goldilocks
 public import Qsag.BinaryTower
 public import Qsag.UcGames
+public import Qsag.BaggyAndRss256Security
 public import Qsag.CustodySuiteFull
+import all Qsag.BaggyAndRss256Security
 
 public section
 namespace Qsag
@@ -596,18 +598,6 @@ private theorem list4_eq_iff {α : Type} {a₁ b₁ c₁ d₁ a₂ b₂ c₂ d�
   have h4 := List.cons.inj h3.2
   exact ⟨h1.1, h2.1, h3.1, h4.1⟩
 
-private theorem forall_mem_list4 {α : Type} {P : α → Prop} {a b c d : α}
-    (ha : P a) (hb : P b) (hc : P c) (hd : P d) :
-    ∀ x ∈ [a, b, c, d], P x := by
-  intro x hx
-  rcases List.mem_cons.mp hx with rfl | hx1
-  · exact ha
-  · rcases List.mem_cons.mp hx1 with rfl | hx2
-    · exact hb
-    · rcases List.mem_cons.mp hx2 with rfl | hx3
-      · exact hc
-      · rcases List.mem_singleton.mp hx3 with rfl; exact hd
-
 /-- Unconditional constructive injectivity of `encodeBeltLatchRecord` (`0 Classical.choice`). -/
 theorem encodeBeltLatchRecord_injective {r₁ r₂ : BeltLatchRecord}
     (hEq : encodeBeltLatchRecord r₁ = encodeBeltLatchRecord r₂) : r₁ = r₂ := by
@@ -901,6 +891,24 @@ private theorem quorumLeafRecord_ext {r₁ r₂ : QuorumLeafRecord}
   subst h1 h2 h3 h4
   rfl
 
+private theorem quorumEncodeFramed4_injective
+    (domain : ByteArray) (hd : domain.data.toList.length < 256 ^ 8)
+    {a₁ b₁ c₁ d₁ a₂ b₂ c₂ d₂ : List UInt8}
+    (ha₁ : a₁.length < 256 ^ 8) (hb₁ : b₁.length < 256 ^ 8)
+    (hc₁ : c₁.length < 256 ^ 8) (hd₁ : d₁.length < 256 ^ 8)
+    (ha₂ : a₂.length < 256 ^ 8) (hb₂ : b₂.length < 256 ^ 8)
+    (hc₂ : c₂.length < 256 ^ 8) (hd₂ : d₂.length < 256 ^ 8)
+    (hEq : quorumEncodeFramed domain [a₁, b₁, c₁, d₁] =
+           quorumEncodeFramed domain [a₂, b₂, c₂, d₂]) :
+    a₁ = a₂ ∧ b₁ = b₂ ∧ c₁ = c₂ ∧ d₁ = d₂ := by
+  simp only [quorumEncodeFramed, quorumFrameFields] at hEq
+  obtain ⟨_, r1⟩ := quorumFrameField_prefix_inj hd hd hEq
+  obtain ⟨ea, r2⟩ := quorumFrameField_prefix_inj ha₁ ha₂ r1
+  obtain ⟨eb, r3⟩ := quorumFrameField_prefix_inj hb₁ hb₂ r2
+  obtain ⟨ec, r4⟩ := quorumFrameField_prefix_inj hc₁ hc₂ r3
+  obtain ⟨ed, _⟩ := quorumFrameField_prefix_inj hd₁ hd₂ r4
+  exact ⟨ea, eb, ec, ed⟩
+
 /-- Canonical framed byte preimage of `QuorumLeafRecord` under `"QSAG.QUORUM.BINDING/v1"` (`quorum_jorts.rs:333-343`). -/
 def encodeQuorumLeafRecord (rec : QuorumLeafRecord) : List UInt8 :=
   quorumEncodeFramed quorumBindingTag
@@ -923,15 +931,11 @@ theorem encodeQuorumLeafRecord_injective {r₁ r₂ : QuorumLeafRecord}
   have hLen32 : ∀ d, (encodeDigest256 d).length < 256 ^ 8 := fun d => by
     rw [encodeDigest256_length]
     exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64
-  have hBx := forall_mem_list4 (hLen8 r₁.leaf.toNat) (hLen32 r₁.msgHash) (hLen4 r₁.counter.toNat) hDig₁
-  have hBy := forall_mem_list4 (hLen8 r₂.leaf.toNat) (hLen32 r₂.msgHash) (hLen4 r₂.counter.toNat) hDig₂
-  have hParts := @quorumEncodeFramed_same_arity_injective quorumBindingTag hTagLt
-    [encodeNatBeBytes 8 r₁.leaf.toNat, encodeDigest256 r₁.msgHash,
-     encodeNatBeBytes 4 r₁.counter.toNat, r₁.digits]
-    [encodeNatBeBytes 8 r₂.leaf.toNat, encodeDigest256 r₂.msgHash,
-     encodeNatBeBytes 4 r₂.counter.toNat, r₂.digits]
-    rfl hBx hBy hEq
-  obtain ⟨hLeaf, hMh, hCtr, hDig⟩ := list4_eq_iff hParts
+  obtain ⟨hLeaf, hMh, hCtr, hDig⟩ :=
+    quorumEncodeFramed4_injective quorumBindingTag hTagLt
+      (hLen8 r₁.leaf.toNat) (hLen32 r₁.msgHash) (hLen4 r₁.counter.toNat) hDig₁
+      (hLen8 r₂.leaf.toNat) (hLen32 r₂.msgHash) (hLen4 r₂.counter.toNat) hDig₂
+      hEq
   have hLeafEq : r₁.leaf = r₂.leaf :=
     UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
       (encodeNatBeBytes_injective
@@ -4759,14 +4763,113 @@ def quorumWotsChains : Nat := 128
 /-- Balanced 256-bit `WOTS+C` target digit sum `S = 128 * 3 / 2 = 192` of `quorum_jorts.rs:71`. -/
 def quorumWotsTargetSum : Nat := 192
 
-/-- Extract `v = 128` base-4 digits from a 256-bit grinding digest (`quorum_jorts.rs:265-275`). -/
+/-- Bit offset of chain digit `i` inside the digest: byte `i / 4` (byte zero occupies the low
+    eight bits), and within that byte the shifts `6, 4, 2, 0` in that order. -/
+def quorumDibitShift (i : Nat) : Nat := 8 * (i / 4) + (6 - 2 * (i % 4))
+
+/-- Chain digit `i` of a 256-bit grinding digest, most-significant dibit first within each byte:
+    `(digest[i / 4] >> (6 - 2 * (i % 4))) & 3`, as in `digits_at` of `quorum_jorts.rs`. -/
+def quorumDigitAt (dig : Digest256) (i : Nat) : Fin 4 :=
+  ⟨((dig >>> quorumDibitShift i).toNat) % 4, Nat.mod_lt _ (by decide)⟩
+
+/-- Extract `v = 128` base-4 digits from a 256-bit grinding digest in the order of `digits_at`
+    (`quorum_jorts.rs`): bytes in order, and the four dibits of each byte from the top down. -/
 def quorumDigitsFromDigest (dig : Digest256) : List (Fin 4) :=
-  (List.range quorumWotsChains).map (fun i =>
-    ⟨((dig >>> (2 * i)).toNat) % 4, Nat.mod_lt _ (by decide)⟩)
+  (List.range quorumWotsChains).map (quorumDigitAt dig)
+
+/-- `quorumDigitAt` is the byte-level expression `(byte >> shift) & 3`, where the byte is
+    `digest[i / 4]` and the shift is `6 - 2 * (i % 4)`. -/
+theorem quorumDigitAt_eq_byte_shift (dig : Digest256) (i : Nat) :
+    (quorumDigitAt dig i).val =
+      (((dig >>> (8 * (i / 4))).toNat % 256) >>> (6 - 2 * (i % 4))) % 4 := by
+  have h : i % 4 < 4 := Nat.mod_lt _ (by decide)
+  show (dig >>> (8 * (i / 4) + (6 - 2 * (i % 4)))).toNat % 4 = _
+  rw [BitVec.toNat_ushiftRight, BitVec.toNat_ushiftRight, Nat.shiftRight_add]
+  simp only [Nat.shiftRight_eq_div_pow]
+  generalize dig.toNat / 2 ^ (8 * (i / 4)) = m
+  generalize i % 4 = r at h
+  have hr : r = 0 ∨ r = 1 ∨ r = 2 ∨ r = 3 := by omega
+  rcases hr with rfl | rfl | rfl | rfl <;>
+    simp only [Nat.reduceMul, Nat.reduceSub, Nat.reducePow] <;> omega
+
+/-- `quorumDigitAt` as a two-bit field of the digest at `quorumDibitShift i`. The right-hand side
+    is the expression `wotsCDibits128_byte_shift` proves for the `WOTS+C` extractor
+    `wotsCDibits128`, so the two extractors read the same dibit for every chain index. -/
+theorem quorumDigitAt_eq_extractLsb' (dig : Digest256) (i : Nat) :
+    (quorumDigitAt dig i).val =
+      (dig.extractLsb' (8 * (i / 4) + (6 - 2 * (i % 4))) 2).toNat := by
+  show (dig >>> quorumDibitShift i).toNat % 4 = (dig.toNat >>> quorumDibitShift i) % 2 ^ 2
+  rfl
+
+/-- Sanity vector: the first byte `0xE4 = 0b11_10_01_00` decodes as `[3, 2, 1, 0]`, as in the
+    signer. -/
+theorem quorumDigitsFromDigest_msb_sanity :
+    ((quorumDigitsFromDigest 0xE4#256).take 4).map Fin.val = [3, 2, 1, 0] := by
+  decide +kernel
+
+/-- `#tooth` Dibit Order (`tooth_quorumDigits_not_lsb_first`): reading the dibits of `0xE4` from
+    the low end of the digest gives `[0, 1, 2, 3]`, which is not what `quorumDigitsFromDigest`
+    returns. -/
+theorem tooth_quorumDigits_not_lsb_first :
+    (List.range 4).map (fun i => ((0xE4#256 : Digest256) >>> (2 * i)).toNat % 4) = [0, 1, 2, 3] ∧
+    ((quorumDigitsFromDigest 0xE4#256).take 4).map Fin.val ≠ [0, 1, 2, 3] := by
+  decide +kernel
 
 theorem quorumDigitsFromDigest_length (dig : Digest256) :
     (quorumDigitsFromDigest dig).length = 128 := by
   simp [quorumDigitsFromDigest, quorumWotsChains]
+
+
+/-- The quorum schedule is exactly the WOTS+C production schedule, at every chain. -/
+theorem quorumDigitAt_eq_wotsCDibits128 (dig : Digest256) (i : Fin 128) :
+    quorumDigitAt dig i.val = wotsCDibits128 dig i := by
+  apply Fin.ext
+  rw [quorumDigitAt_eq_extractLsb', wotsCDibits128_byte_shift]
+  rfl
+
+/-- The list passed to the quorum signer uses the WOTS+C chain order. -/
+theorem quorumDigitsFromDigest_get (dig : Digest256) (i : Fin 128) :
+    (quorumDigitsFromDigest dig)[i.val]'(by rw [quorumDigitsFromDigest_length]; exact i.isLt) =
+      wotsCDibits128 dig i := by
+  simp only [quorumDigitsFromDigest, List.getElem_map, List.getElem_range]
+  exact quorumDigitAt_eq_wotsCDibits128 dig i
+
+/-- Message-bound quorum signing entry: the counter digest must pass the WOTS+C target sum
+    check before the existing reference signer receives its extracted chain schedule. -/
+def quorumJortsSignMessage (H : List UInt8 → Digest256) (masterSeed : Digest256)
+    (pk : QuorumPublicKey) (leaf : UInt64) (counter : UInt32)
+    (msg : List UInt8) (authPath : List Digest256) : Option QuorumJortsSig :=
+  let dig := quorumCounterDigest H (quorumMessageHash H pk leaf msg) counter
+  match wotsC256DecodeValidDigest dig with
+  | none => none
+  | some _ => some (quorumJortsReferenceSign H masterSeed leaf counter
+      (quorumDigitsFromDigest dig) authPath)
+
+/-- Accepted digest decoding connects the actual signer list to the validated WOTS+C digits. -/
+theorem quorumJortsSignMessage_schedule (H : List UInt8 → Digest256) (masterSeed : Digest256)
+    (pk : QuorumPublicKey) (leaf : UInt64) (counter : UInt32)
+    (msg : List UInt8) (authPath : List Digest256) (d : WotsC256Digits)
+    (h : wotsC256DecodeValidDigest
+      (quorumCounterDigest H (quorumMessageHash H pk leaf msg) counter) = some d) :
+    quorumJortsSignMessage H masterSeed pk leaf counter msg authPath =
+      some (quorumJortsReferenceSign H masterSeed leaf counter
+        (quorumDigitsFromDigest (quorumCounterDigest H (quorumMessageHash H pk leaf msg) counter))
+        authPath) ∧
+    ∀ i : Fin 128, quorumDigitAt
+      (quorumCounterDigest H (quorumMessageHash H pk leaf msg) counter) i.val = d.digits i := by
+  refine ⟨by simp only [quorumJortsSignMessage, h], ?_⟩
+  intro i
+  rw [wotsC256DecodeValidDigest_some_digits h]
+  exact quorumDigitAt_eq_wotsCDibits128 _ i
+
+/-- Rejected target sums never reach chain signing. -/
+theorem quorumJortsSignMessage_rejects (H : List UInt8 → Digest256) (masterSeed : Digest256)
+    (pk : QuorumPublicKey) (leaf : UInt64) (counter : UInt32)
+    (msg : List UInt8) (authPath : List Digest256)
+    (h : wotsC256DecodeValidDigest
+      (quorumCounterDigest H (quorumMessageHash H pk leaf msg) counter) = none) :
+    quorumJortsSignMessage H masterSeed pk leaf counter msg authPath = none := by
+  simp only [quorumJortsSignMessage, h]
 
 private theorem foldr_add_replicate_acc : ∀ (n val acc : Nat),
     (List.replicate n val).foldr (· + ·) acc = n * val + acc
@@ -4840,8 +4943,8 @@ theorem tooth_impossible_wots128_target_sum_385_vs_valid_192 :
 
 /-- **`#tooth` `WOTS+C` Parameter Sanity (`tooth_impossible_wots4_target_sum_215_vs_valid_87`)**:
     For `L = 58` chains in base `w = 4` (`d_i ∈ {0, 1, 2, 3}`), the maximum possible digit sum is
-    `58 * 3 = 174`, so target sum `215` is **strictly uninhabited**, whereas `S = 87`
-    (`WotsCParams::V58`) is inhabited! -/
+    `58 * 3 = 174`, so target sum `215` is **strictly uninhabited**, whereas the balanced
+    target `S = 58 * 3 / 2 = 87` is inhabited. -/
 theorem tooth_impossible_wots4_target_sum_215_vs_valid_87 :
     (∀ d : List Nat, validWotsCsCodeword 58 4 215 d → False) ∧
     validWotsCsCodeword 58 4 87 (List.replicate 29 3 ++ List.replicate 29 0) := by
@@ -5303,7 +5406,7 @@ theorem lagrange2WeightsTower_eval (k : Nat) {x₀ x₁ : TowerElem k} (hNe : x�
   | nil => cases hLen
   | cons c₁ rest =>
     cases rest with
-    | cons _ _ => simp at hLen
+    | cons _ _ => cases Nat.succ.inj hLen
     | nil =>
       have hSumNz : towerAdd k x₀ x₁ ≠ towerZero k := by
         intro hZ
@@ -5321,20 +5424,24 @@ theorem lagrange2WeightsTower_eval (k : Nat) {x₀ x₁ : TowerElem k} (hNe : x�
       have hSlopeCancel :
           towerMul k (towerMul k x₁ denom) (towerMul k x₀ c₁) =
           towerMul k (towerMul k x₀ denom) (towerMul k x₁ c₁) := by
-        simp only [towerMul_comm, towerMul_left_comm_of_assoc k (towerMul_assoc k)]
-      have hRearr :
-          towerAdd k
-            (towerAdd k (towerMul k (towerMul k x₁ denom) c₀)
-                        (towerMul k (towerMul k x₁ denom) (towerMul k x₀ c₁)))
-            (towerAdd k (towerMul k (towerMul k x₀ denom) c₀)
-                        (towerMul k (towerMul k x₀ denom) (towerMul k x₁ c₁))) =
-          towerAdd k
-            (towerAdd k (towerMul k (towerMul k x₁ denom) c₀)
-                        (towerMul k (towerMul k x₀ denom) c₀))
-            (towerAdd k (towerMul k (towerMul k x₁ denom) (towerMul k x₀ c₁))
-                        (towerMul k (towerMul k x₀ denom) (towerMul k x₁ c₁))) := by
-        simp only [towerAdd_assoc, towerAdd_comm, towerAdd_left_comm]
-      rw [hRearr, hSlopeCancel, towerAdd_self_zero, towerAdd_zero]
+        calc towerMul k (towerMul k x₁ denom) (towerMul k x₀ c₁)
+            = towerMul k (towerMul k denom x₁) (towerMul k x₀ c₁) := by rw [towerMul_comm k x₁ denom]
+          _ = towerMul k denom (towerMul k x₁ (towerMul k x₀ c₁)) := towerMul_assoc k denom x₁ _
+          _ = towerMul k denom (towerMul k (towerMul k x₁ x₀) c₁) := by rw [← towerMul_assoc k x₁ x₀ c₁]
+          _ = towerMul k denom (towerMul k (towerMul k x₀ x₁) c₁) := by rw [towerMul_comm k x₁ x₀]
+          _ = towerMul k denom (towerMul k x₀ (towerMul k x₁ c₁)) := by rw [towerMul_assoc k x₀ x₁ c₁]
+          _ = towerMul k (towerMul k denom x₀) (towerMul k x₁ c₁) := (towerMul_assoc k denom x₀ _).symm
+          _ = towerMul k (towerMul k x₀ denom) (towerMul k x₁ c₁) := by rw [towerMul_comm k denom x₀]
+      have h4 : ∀ (a b c d : TowerElem k),
+          towerAdd k (towerAdd k a b) (towerAdd k c d) =
+          towerAdd k (towerAdd k a c) (towerAdd k b d) := fun a b c d => by
+        calc towerAdd k (towerAdd k a b) (towerAdd k c d)
+            = towerAdd k a (towerAdd k b (towerAdd k c d)) := towerAdd_assoc k a b _
+          _ = towerAdd k a (towerAdd k (towerAdd k b c) d) := by rw [← towerAdd_assoc k b c d]
+          _ = towerAdd k a (towerAdd k (towerAdd k c b) d) := by rw [towerAdd_comm k b c]
+          _ = towerAdd k a (towerAdd k c (towerAdd k b d)) := by rw [towerAdd_assoc k c b d]
+          _ = towerAdd k (towerAdd k a c) (towerAdd k b d) := (towerAdd_assoc k a c _).symm
+      rw [h4, hSlopeCancel, towerAdd_self_zero, towerAdd_zero]
       calc towerAdd k (towerMul k (towerMul k x₁ denom) c₀) (towerMul k (towerMul k x₀ denom) c₀)
           = towerMul k (towerAdd k (towerMul k x₁ denom) (towerMul k x₀ denom)) c₀ :=
               (towerAdd_mul_distrib k _ _ c₀).symm
@@ -5847,12 +5954,19 @@ theorem inhabited_preStepped_shamir_wots_self_verify :
     intro F pk sub cand hSome
     unfold preSteppedDigest256ReconstructAndSelfVerify at hSome
     dsimp only at hSome
-    split at hSome
-    · injection hSome with hCandEq
+    by_cases hAll :
+        ((List.finRange 128).all (fun i =>
+          decide (wotsChainIter F i.val (digits i).val (3 - (digits i).val)
+            (if (digits i).val < 3 then
+               joinTower128Digest256 (ringDot lambdas (sub i).1, ringDot lambdas (sub i).2)
+             else pk i) = pk i))) = true
+    · simp only [hAll, ↓reduceIte] at hSome
+      injection hSome with hCandEq
       rw [← hCandEq]
       have hd0 : (digits i0).val < 3 := by decide
-      simp [hd0]
-    · cases hSome
+      simp only [hd0, ↓reduceIte]
+    · simp only [hAll] at hSome
+      cases hSome
   refine ⟨towerX7_not_in_gf2_64, hCodeword, hHonShake, ?_, hHonPerm, ?_⟩
   · cases hRes : preSteppedDigest256ReconstructAndSelfVerify F_shake pkShake lambdas digits corruptSubShake with
     | none => exact .inl rfl
