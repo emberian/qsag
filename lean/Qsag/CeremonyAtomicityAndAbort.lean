@@ -986,3 +986,1072 @@ inductive MultiLedgerEvent where
 /-- Deterministic Monotone Burn-Before-Release transitions of an OPERATIONAL host over the 5
     ledgers. `EmitNetworkShare` additionally requires `ledgersCheckpointSaved`: reserved material
     is released only after the external checkpoints of all three burn ledgers are persisted. -/
+def stepOperationalHost (host : MultiLedgerHostState) (ev : MultiLedgerEvent) :
+    Option MultiLedgerHostState :=
+  match ev with
+  | .ObserveCleanPoisonLatch cid =>
+    if (lookupVolatilePhase cid host.volatileCeremonies).isNone &&
+       ((activeWalPayload host.poisonLatch).status == .clean) &&
+       host.poisonLatch.volatileStage.isNone then
+      some { host with
+        volatileCeremonies := upsertVolatilePhase cid (.cleanObserved (activeWalGen host.poisonLatch)) host.volatileCeremonies }
+    else
+      none
+  | .StagePolicySpend cid amount intentDigest =>
+    match lookupVolatilePhase cid host.volatileCeremonies with
+    | some (.cleanObserved pGen) =>
+      let pol := activeWalPayload host.policyWindowLedger
+      if ((activeWalPayload host.poisonLatch).status == .clean) &&
+         host.poisonLatch.volatileStage.isNone &&
+         host.policyWindowLedger.volatileStage.isNone &&
+         decide (∀ e ∈ pol.committedSpends, e.ceremonyId ≠ cid ∧ e.intentDigest ≠ intentDigest) &&
+         decide (windowCommittedSpend pol.currentWindow pol.committedSpends + amount ≤ pol.policyCap) then
+        let newEntry : PolicySpendEntry :=
+          { ceremonyId := cid, windowId := pol.currentWindow, amount := amount, intentDigest := intentDigest }
+        let nextPol : PolicyWindowLedger :=
+          { pol with committedSpends := newEntry :: pol.committedSpends }
+        some { host with
+          policyWindowLedger := stageTwoSlotWal host.policyWindowLedger nextPol
+          volatileCeremonies := upsertVolatilePhase cid
+            (.policyStaged pGen pol.currentWindow amount intentDigest) host.volatileCeremonies }
+      else
+        none
+    | _ => none
+  | .FlushPolicyWal cid =>
+    match lookupVolatilePhase cid host.volatileCeremonies with
+    | some (.policyStaged pGen win amount intentDigest) =>
+      if host.policyWindowLedger.volatileStage.isSome then
+        let flushed := flushTwoSlotWal host.policyWindowLedger
+        if decide (PolicySpendEntry.mk cid win amount intentDigest ∈ (activeWalPayload flushed).committedSpends) then
+          some { host with
+            policyWindowLedger := flushed
+            volatileCeremonies := upsertVolatilePhase cid
+              (.policyCommitted pGen (activeWalGen flushed) win amount intentDigest) host.volatileCeremonies }
+        else
+          none
+      else
+        none
+    | _ => none
+  | .StagePreprocBurn cid batchIdx =>
+    match lookupVolatilePhase cid host.volatileCeremonies with
+    | some (.policyCommitted pGen polGen win amount intentDigest) =>
+      let pre := activeWalPayload host.preprocCursorLedger
+      if ((activeWalPayload host.poisonLatch).status == .clean) &&
+         host.poisonLatch.volatileStage.isNone &&
+         host.preprocCursorLedger.volatileStage.isNone &&
+         decide (PolicySpendEntry.mk cid win amount intentDigest ∈
+           (activeWalPayload host.policyWindowLedger).committedSpends) &&
+         decide (pre.nextBatchCursor ≤ batchIdx) &&
+         decide (∀ e ∈ pre.burnedBatches, e.ceremonyId ≠ cid ∧ e.batchIdx ≠ batchIdx) then
+        let newBurn : PreprocBurnEntry := { ceremonyId := cid, batchIdx := batchIdx }
+        let nextPre : PreprocCursorLedger :=
+          { nextBatchCursor := batchIdx + 1, burnedBatches := newBurn :: pre.burnedBatches }
+        some { host with
+          preprocCursorLedger := stageTwoSlotWal host.preprocCursorLedger nextPre
+          volatileCeremonies := upsertVolatilePhase cid
+            (.preprocStaged pGen polGen win amount intentDigest batchIdx) host.volatileCeremonies }
+      else
+        none
+    | _ => none
+  | .FlushPreprocWal cid =>
+    match lookupVolatilePhase cid host.volatileCeremonies with
+    | some (.preprocStaged pGen polGen win amount intentDigest batchIdx) =>
+      if host.preprocCursorLedger.volatileStage.isSome then
+        let flushed := flushTwoSlotWal host.preprocCursorLedger
+        if decide (PreprocBurnEntry.mk cid batchIdx ∈ (activeWalPayload flushed).burnedBatches) then
+          some { host with
+            preprocCursorLedger := flushed
+            volatileCeremonies := upsertVolatilePhase cid
+              (.preprocBurned pGen polGen (activeWalGen flushed) win amount intentDigest batchIdx)
+              host.volatileCeremonies }
+        else
+          none
+      else
+        none
+    | _ => none
+  | .StageLeafOrFtsReserve cid epochOrIndex msgDigest =>
+    match lookupVolatilePhase cid host.volatileCeremonies with
+    | some (.preprocBurned pGen polGen preGen win amount intentDigest batchIdx) =>
+      let lf := activeWalPayload host.leafOrFtsBurnLedger
+      if ((activeWalPayload host.poisonLatch).status == .clean) &&
+         host.poisonLatch.volatileStage.isNone &&
+         host.leafOrFtsBurnLedger.volatileStage.isNone &&
+         decide (PolicySpendEntry.mk cid win amount intentDigest ∈
+           (activeWalPayload host.policyWindowLedger).committedSpends) &&
+         decide (PreprocBurnEntry.mk cid batchIdx ∈
+           (activeWalPayload host.preprocCursorLedger).burnedBatches) &&
+         decide (lf.nextEpochCursor ≤ epochOrIndex) &&
+         decide (∀ e ∈ lf.reservedLeaves, e.ceremonyId ≠ cid ∧ e.epochOrIndex ≠ epochOrIndex) then
+        let newLeaf : LeafBurnEntry :=
+          { ceremonyId := cid, epochOrIndex := epochOrIndex, msgDigest := msgDigest }
+        let nextLf : LeafOrFtsBurnLedger :=
+          { nextEpochCursor := epochOrIndex + 1, reservedLeaves := newLeaf :: lf.reservedLeaves }
+        some { host with
+          leafOrFtsBurnLedger := stageTwoSlotWal host.leafOrFtsBurnLedger nextLf
+          volatileCeremonies := upsertVolatilePhase cid
+            (.leafStaged pGen polGen preGen win amount intentDigest batchIdx epochOrIndex msgDigest)
+            host.volatileCeremonies }
+      else
+        none
+    | _ => none
+  | .FlushLeafWal cid =>
+    match lookupVolatilePhase cid host.volatileCeremonies with
+    | some (.leafStaged pGen polGen preGen win amount intentDigest batchIdx epochOrIndex msgDigest) =>
+      if host.leafOrFtsBurnLedger.volatileStage.isSome then
+        let flushed := flushTwoSlotWal host.leafOrFtsBurnLedger
+        if decide (LeafBurnEntry.mk cid epochOrIndex msgDigest ∈ (activeWalPayload flushed).reservedLeaves) then
+          let rcpt : CeremonyReceipt := {
+            ceremonyId := cid
+            poisonCleanGen := pGen
+            policyCommitGen := polGen
+            preprocBurnGen := preGen
+            leafReserveGen := activeWalGen flushed
+            windowId := win
+            amount := amount
+            intentDigest := intentDigest
+            batchIdx := batchIdx
+            epochOrIndex := epochOrIndex
+            msgDigest := msgDigest
+          }
+          some { host with
+            leafOrFtsBurnLedger := flushed
+            volatileCeremonies := upsertVolatilePhase cid (.receiptIssued rcpt) host.volatileCeremonies }
+        else
+          none
+      else
+        none
+    | _ => none
+  | .AdvancePolicyWindow nextWin =>
+    let pol := activeWalPayload host.policyWindowLedger
+    if host.policyWindowLedger.volatileStage.isNone && decide (pol.currentWindow < nextWin) then
+      let nextPol : PolicyWindowLedger := { pol with currentWindow := nextWin }
+      some { host with policyWindowLedger := flushTwoSlotWal (stageTwoSlotWal host.policyWindowLedger nextPol) }
+    else
+      none
+  | .LatchPoisonFault reasonCode =>
+    if host.poisonLatch.volatileStage.isNone then
+      let cur := activeWalPayload host.poisonLatch
+      let nextPoison : PoisonLatch := { status := .poisoned reasonCode, faultCount := cur.faultCount + 1 }
+      some { host with poisonLatch := stageTwoSlotWal host.poisonLatch nextPoison }
+    else
+      none
+  | .FlushPoisonWal =>
+    if host.poisonLatch.volatileStage.isSome then
+      some { host with poisonLatch := flushTwoSlotWal host.poisonLatch }
+    else
+      none
+  | .EmitNetworkShare cid party share =>
+    match lookupVolatilePhase cid host.volatileCeremonies with
+    | some (.receiptIssued ceremonyReceipt) =>
+      if ceremonyReceiptDurableValid host cid ceremonyReceipt &&
+         ledgersCheckpointSaved host &&
+         decide (∀ w ∈ host.outboundWire, ¬ (w.ceremonyId = cid ∧ w.party = party)) then
+        let emitted : WireEmission := {
+          ceremonyId := cid
+          windowId := ceremonyReceipt.windowId
+          amount := ceremonyReceipt.amount
+          batchIdx := ceremonyReceipt.batchIdx
+          epochOrIndex := ceremonyReceipt.epochOrIndex
+          msgDigest := ceremonyReceipt.msgDigest
+          party := party
+          share := share
+        }
+        some { host with outboundWire := host.outboundWire ++ [emitted] }
+      else
+        none
+    | _ => none
+  | .SaveCheckpoint ledger =>
+    match ledger with
+    | .poison =>
+      if host.poisonLatch.volatileStage.isNone then
+        some { host with poisonLatch := saveWalCheckpoint host.poisonLatch }
+      else
+        none
+    | .policy =>
+      if host.policyWindowLedger.volatileStage.isNone then
+        some { host with policyWindowLedger := saveWalCheckpoint host.policyWindowLedger }
+      else
+        none
+    | .preproc =>
+      if host.preprocCursorLedger.volatileStage.isNone then
+        some { host with preprocCursorLedger := saveWalCheckpoint host.preprocCursorLedger }
+      else
+        none
+    | .leaf =>
+      if host.leafOrFtsBurnLedger.volatileStage.isNone then
+        some { host with leafOrFtsBurnLedger := saveWalCheckpoint host.leafOrFtsBurnLedger }
+      else
+        none
+  | .PowerLossCrash _ _ _ _ => none
+
+/-- Host state after a `PowerLossCrash`: every ledger file recovers on its own, under its own
+    crash mode, and all volatile RAM ceremony progress is gone. -/
+def crashHostState (host : MultiLedgerHostState)
+    (cPoison cPolicy cPreproc cLeaf : WalCrashBehavior) : MultiLedgerHostState where
+  poisonLatch := crashRecoverWal cPoison host.poisonLatch
+  policyWindowLedger := crashRecoverWal cPolicy host.policyWindowLedger
+  preprocCursorLedger := crashRecoverWal cPreproc host.preprocCursorLedger
+  leafOrFtsBurnLedger := crashRecoverWal cLeaf host.leafOrFtsBurnLedger
+  volatileCeremonies := []
+  outboundWire := host.outboundWire
+
+/-- Host transition function. A `PowerLossCrash` can strike in ANY state, between any two
+    individual ledger writes, with an independent crash mode per ledger file. Every other event is
+    refused once some ledger no longer opens (fail closed). -/
+def stepMultiLedgerHost (host : MultiLedgerHostState) (ev : MultiLedgerEvent) :
+    Option MultiLedgerHostState :=
+  match ev with
+  | .PowerLossCrash cPoison cPolicy cPreproc cLeaf =>
+    some (crashHostState host cPoison cPolicy cPreproc cLeaf)
+  | _ => if hostOperational host then stepOperationalHost host ev else none
+
+/-- Inductive multi-crash, multi-ceremony execution trace over `stepMultiLedgerHost`. -/
+inductive ValidMultiLedgerTrace :
+    MultiLedgerHostState → List MultiLedgerEvent → MultiLedgerHostState → Prop where
+  | nil (s : MultiLedgerHostState) : ValidMultiLedgerTrace s [] s
+  | cons {s₁ s₂ s₃ : MultiLedgerHostState} {ev : MultiLedgerEvent} {rest : List MultiLedgerEvent} :
+      stepMultiLedgerHost s₁ ev = some s₂ →
+      ValidMultiLedgerTrace s₂ rest s₃ →
+      ValidMultiLedgerTrace s₁ (ev :: rest) s₃
+
+/-- Canonical `PartyMachine` packaging of `stepMultiLedgerHost` on `SimulationSpine`. -/
+def ceremonyHostMachine : PartyMachine MultiLedgerHostState MultiLedgerEvent OutboundNetworkWire :=
+  PartyMachine.ofOption (fun s ev =>
+    match stepMultiLedgerHost s ev with
+    | some s' => some (s', s'.outboundWire)
+    | none => none)
+
+/-! ### Monotone Lattice Relations & Inductive Safety Invariants Across Crashes -/
+
+private def poisonRel (a b : PoisonLatch) : Prop :=
+  (a.status ≠ .clean → b.status ≠ .clean) ∧ a.faultCount ≤ b.faultCount
+
+private def poisonInv (_ : PoisonLatch) : Prop := True
+
+private def policyRel (a b : PolicyWindowLedger) : Prop :=
+  b.policyCap = a.policyCap ∧
+  a.currentWindow ≤ b.currentWindow ∧
+  (∀ e ∈ a.committedSpends, e ∈ b.committedSpends)
+
+private def policyInv (p : PolicyWindowLedger) : Prop :=
+  (p.committedSpends.map (·.ceremonyId)).Nodup ∧
+  (∀ win : Nat, windowCommittedSpend win p.committedSpends ≤ p.policyCap)
+
+private def preprocRel (a b : PreprocCursorLedger) : Prop :=
+  a.nextBatchCursor ≤ b.nextBatchCursor ∧
+  (∀ e ∈ a.burnedBatches, e ∈ b.burnedBatches)
+
+private def preprocInv (p : PreprocCursorLedger) : Prop :=
+  (∀ e ∈ p.burnedBatches, e.batchIdx < p.nextBatchCursor) ∧
+  (∀ a ∈ p.burnedBatches, ∀ b ∈ p.burnedBatches, a.ceremonyId ≠ b.ceremonyId → a.batchIdx ≠ b.batchIdx)
+
+private def leafRel (a b : LeafOrFtsBurnLedger) : Prop :=
+  a.nextEpochCursor ≤ b.nextEpochCursor ∧
+  (∀ e ∈ a.reservedLeaves, e ∈ b.reservedLeaves)
+
+private def leafInv (l : LeafOrFtsBurnLedger) : Prop :=
+  (∀ e ∈ l.reservedLeaves, e.epochOrIndex < l.nextEpochCursor) ∧
+  (∀ a ∈ l.reservedLeaves, ∀ b ∈ l.reservedLeaves,
+    a.epochOrIndex = b.epochOrIndex → a = b)
+
+private def WireBackedByDurableLedgers
+    (pol : PolicyWindowLedger) (pre : PreprocCursorLedger) (lf : LeafOrFtsBurnLedger)
+    (w : WireEmission) : Prop :=
+  (∃ intent : Digest256,
+    PolicySpendEntry.mk w.ceremonyId w.windowId w.amount intent ∈ pol.committedSpends) ∧
+  PreprocBurnEntry.mk w.ceremonyId w.batchIdx ∈ pre.burnedBatches ∧
+  LeafBurnEntry.mk w.ceremonyId w.epochOrIndex w.msgDigest ∈ lf.reservedLeaves
+
+private structure HostGlobalInvariant (policyCap : Nat) (host : MultiLedgerHostState) : Prop where
+  poison_wal : TwoSlotWalInv poisonRel poisonInv host.poisonLatch
+  policy_wal : TwoSlotWalInv policyRel policyInv host.policyWindowLedger
+  preproc_wal : TwoSlotWalInv preprocRel preprocInv host.preprocCursorLedger
+  leaf_wal : TwoSlotWalInv leafRel leafInv host.leafOrFtsBurnLedger
+  cap_fixed : (checkpointedWalPayload host.policyWindowLedger).policyCap = policyCap
+  wire_backed : ∀ w ∈ host.outboundWire,
+    WireBackedByDurableLedgers
+      (checkpointedWalPayload host.policyWindowLedger)
+      (checkpointedWalPayload host.preprocCursorLedger)
+      (checkpointedWalPayload host.leafOrFtsBurnLedger) w
+
+private theorem poisonRel_refl (x : PoisonLatch) : poisonRel x x :=
+  ⟨fun h => h, Nat.le_refl _⟩
+
+private theorem policyRel_refl (x : PolicyWindowLedger) : policyRel x x :=
+  ⟨rfl, Nat.le_refl _, fun _ h => h⟩
+
+private theorem preprocRel_refl (x : PreprocCursorLedger) : preprocRel x x :=
+  ⟨Nat.le_refl _, fun _ h => h⟩
+
+private theorem leafRel_refl (x : LeafOrFtsBurnLedger) : leafRel x x :=
+  ⟨Nat.le_refl _, fun _ h => h⟩
+
+private theorem wireBacked_mono
+    {pol₁ pol₂ : PolicyWindowLedger} {pre₁ pre₂ : PreprocCursorLedger} {lf₁ lf₂ : LeafOrFtsBurnLedger}
+    (hPol : policyRel pol₁ pol₂) (hPre : preprocRel pre₁ pre₂) (hLf : leafRel lf₁ lf₂)
+    {w : WireEmission} (hw : WireBackedByDurableLedgers pol₁ pre₁ lf₁ w) :
+    WireBackedByDurableLedgers pol₂ pre₂ lf₂ w := by
+  rcases hw with ⟨⟨intent, hP⟩, hB, hL⟩
+  exact ⟨⟨intent, hPol.2.2 _ hP⟩, hPre.2 _ hB, hLf.2 _ hL⟩
+
+private theorem initMultiLedgerHostState_inv (policyCap : Nat) :
+    HostGlobalInvariant policyCap (initMultiLedgerHostState policyCap) := by
+  refine ⟨?_, ?_, ?_, ?_, rfl, ?_⟩
+  · exact initTwoSlotWal_inv poisonRel trivial
+  · apply initTwoSlotWal_inv policyRel
+    refine ⟨List.Pairwise.nil, fun win => ?_⟩
+    simp [windowCommittedSpend]
+  · apply initTwoSlotWal_inv preprocRel
+    exact ⟨(fun _ h => nomatch h), (fun _ h _ _ _ => nomatch h)⟩
+  · apply initTwoSlotWal_inv leafRel
+    exact ⟨(fun _ h => nomatch h), (fun _ h _ _ _ => nomatch h)⟩
+  · intro _ h; nomatch h
+
+private theorem stepOperationalHost_preserves_inv {policyCap : Nat}
+    {s s' : MultiLedgerHostState} {ev : MultiLedgerEvent}
+    (hInv : HostGlobalInvariant policyCap s)
+    (hStep : stepOperationalHost s ev = some s') :
+    HostGlobalInvariant policyCap s' := by
+  cases ev with
+  | ObserveCleanPoisonLatch cid =>
+    simp only [stepOperationalHost] at hStep
+    split at hStep
+    · injection hStep with hEq; subst hEq
+      exact ⟨hInv.poison_wal, hInv.policy_wal, hInv.preproc_wal, hInv.leaf_wal, hInv.cap_fixed, hInv.wire_backed⟩
+    · cases hStep
+  | StagePolicySpend cid amount intentDigest =>
+    simp only [stepOperationalHost] at hStep
+    cases hPh : lookupVolatilePhase cid s.volatileCeremonies <;> simp only [hPh] at hStep
+    · cases hStep
+    · rename_i ph
+      cases ph <;> simp only at hStep <;> try cases hStep
+      rename_i pGen
+      split at hStep
+      · rename_i hCond
+        injection hStep with hEq; subst hEq
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hCond
+        rcases hCond with ⟨⟨⟨⟨_, _⟩, _⟩, hFresh⟩, hBudget⟩
+        let pol := activeWalPayload s.policyWindowLedger
+        let newEntry : PolicySpendEntry :=
+          { ceremonyId := cid, windowId := pol.currentWindow, amount := amount, intentDigest := intentDigest }
+        let nextPol : PolicyWindowLedger := { pol with committedSpends := newEntry :: pol.committedSpends }
+        have hPolRel : policyRel pol nextPol := ⟨rfl, Nat.le_refl _, fun _ hm => .tail _ hm⟩
+        have hNextPolInv : policyInv nextPol := by
+          obtain ⟨hNodup, hAllWins⟩ := walInv_active hInv.policy_wal
+          refine ⟨?_, ?_⟩
+          · simp only [nextPol, List.map_cons, List.nodup_cons]
+            refine ⟨?_, hNodup⟩
+            intro hIn
+            rcases List.mem_map.mp hIn with ⟨e, heMem, heCid⟩
+            exact (hFresh e heMem).1 heCid
+          · intro win
+            simp only [nextPol, newEntry, windowCommittedSpend]
+            by_cases hWin : pol.currentWindow == win
+            · have hWinEq : pol.currentWindow = win := eq_of_beq hWin
+              subst hWinEq
+              simp only [hWin, ↓reduceIte]
+              dsimp only [pol]
+              omega
+            · simp only [hWin, Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+              exact hAllWins win
+        obtain ⟨hStInv, hPayEq⟩ := stageTwoSlotWal_inv hInv.policy_wal hPolRel hNextPolInv
+        refine ⟨hInv.poison_wal, hStInv, hInv.preproc_wal, hInv.leaf_wal, ?_, ?_⟩
+        · dsimp only; rw [hPayEq]; exact hInv.cap_fixed
+        · intro w hw
+          dsimp only
+          rw [hPayEq]
+          exact hInv.wire_backed w hw
+      · cases hStep
+  | FlushPolicyWal cid =>
+    simp only [stepOperationalHost] at hStep
+    cases hPh : lookupVolatilePhase cid s.volatileCeremonies <;> simp only [hPh] at hStep
+    · cases hStep
+    · rename_i ph
+      cases ph <;> simp only at hStep <;> try cases hStep
+      split at hStep
+      · split at hStep
+        · injection hStep with hEq; subst hEq
+          obtain ⟨hFlInv, _, hPolRel⟩ := flushTwoSlotWal_inv policyRel_refl hInv.policy_wal
+          refine ⟨hInv.poison_wal, hFlInv, hInv.preproc_wal, hInv.leaf_wal, ?_, ?_⟩
+          · exact hPolRel.1.trans hInv.cap_fixed
+          · intro w hw
+            exact wireBacked_mono hPolRel (preprocRel_refl _) (leafRel_refl _) (hInv.wire_backed w hw)
+        · cases hStep
+      · cases hStep
+  | StagePreprocBurn cid batchIdx =>
+    simp only [stepOperationalHost] at hStep
+    cases hPh : lookupVolatilePhase cid s.volatileCeremonies <;> simp only [hPh] at hStep
+    · cases hStep
+    · rename_i ph
+      cases ph <;> simp only at hStep <;> try cases hStep
+      split at hStep
+      · rename_i hCond
+        injection hStep with hEq; subst hEq
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hCond
+        rcases hCond with ⟨⟨⟨⟨⟨_, _⟩, _⟩, _⟩, hCursorLe⟩, hDisj⟩
+        let pre := activeWalPayload s.preprocCursorLedger
+        let newBurn : PreprocBurnEntry := { ceremonyId := cid, batchIdx := batchIdx }
+        let nextPre : PreprocCursorLedger :=
+          { nextBatchCursor := batchIdx + 1, burnedBatches := newBurn :: pre.burnedBatches }
+        have hPreRel : preprocRel pre nextPre := by
+          dsimp only [preprocRel, pre, nextPre]
+          exact ⟨by omega, fun _ hm => .tail _ hm⟩
+        have hNextPreInv : preprocInv nextPre := by
+          obtain ⟨hLt, hPairDisj⟩ := walInv_active hInv.preproc_wal
+          refine ⟨?_, ?_⟩
+          · intro e he
+            rcases List.mem_cons.mp he with rfl | hOld
+            · dsimp only [newBurn, nextPre]; omega
+            · have := hLt e hOld; dsimp only [nextPre]; omega
+          · intro a ha b hb hCidNe
+            rcases List.mem_cons.mp ha with rfl | haOld
+            · rcases List.mem_cons.mp hb with rfl | hbOld
+              · exact False.elim (hCidNe rfl)
+              · exact fun hB => (hDisj b hbOld).2 hB.symm
+            · rcases List.mem_cons.mp hb with rfl | hbOld
+              · exact (hDisj a haOld).2
+              · exact hPairDisj a haOld b hbOld hCidNe
+        obtain ⟨hStInv, hPayEq⟩ := stageTwoSlotWal_inv hInv.preproc_wal hPreRel hNextPreInv
+        refine ⟨hInv.poison_wal, hInv.policy_wal, hStInv, hInv.leaf_wal, hInv.cap_fixed, ?_⟩
+        intro w hw
+        dsimp only
+        rw [hPayEq]
+        exact hInv.wire_backed w hw
+      · cases hStep
+  | FlushPreprocWal cid =>
+    simp only [stepOperationalHost] at hStep
+    cases hPh : lookupVolatilePhase cid s.volatileCeremonies <;> simp only [hPh] at hStep
+    · cases hStep
+    · rename_i ph
+      cases ph <;> simp only at hStep <;> try cases hStep
+      split at hStep
+      · split at hStep
+        · injection hStep with hEq; subst hEq
+          obtain ⟨hFlInv, _, hPreRel⟩ := flushTwoSlotWal_inv preprocRel_refl hInv.preproc_wal
+          refine ⟨hInv.poison_wal, hInv.policy_wal, hFlInv, hInv.leaf_wal, hInv.cap_fixed, ?_⟩
+          intro w hw
+          exact wireBacked_mono (policyRel_refl _) hPreRel (leafRel_refl _) (hInv.wire_backed w hw)
+        · cases hStep
+      · cases hStep
+  | StageLeafOrFtsReserve cid epochOrIndex msgDigest =>
+    simp only [stepOperationalHost] at hStep
+    cases hPh : lookupVolatilePhase cid s.volatileCeremonies <;> simp only [hPh] at hStep
+    · cases hStep
+    · rename_i ph
+      cases ph <;> simp only at hStep <;> try cases hStep
+      split at hStep
+      · rename_i hCond
+        injection hStep with hEq; subst hEq
+        simp only [Bool.and_eq_true, decide_eq_true_eq] at hCond
+        rcases hCond with ⟨⟨⟨⟨⟨⟨_, _⟩, _⟩, _⟩, _⟩, hEpochLe⟩, hLeafDisj⟩
+        let lf := activeWalPayload s.leafOrFtsBurnLedger
+        let newLeaf : LeafBurnEntry :=
+          { ceremonyId := cid, epochOrIndex := epochOrIndex, msgDigest := msgDigest }
+        let nextLf : LeafOrFtsBurnLedger :=
+          { nextEpochCursor := epochOrIndex + 1, reservedLeaves := newLeaf :: lf.reservedLeaves }
+        have hLfRel : leafRel lf nextLf := by
+          dsimp only [leafRel, lf, nextLf]
+          exact ⟨by omega, fun _ hm => .tail _ hm⟩
+        have hNextLfInv : leafInv nextLf := by
+          obtain ⟨hLt, hUniq⟩ := walInv_active hInv.leaf_wal
+          refine ⟨?_, ?_⟩
+          · intro e he
+            rcases List.mem_cons.mp he with rfl | hOld
+            · dsimp only [newLeaf, nextLf]; omega
+            · have := hLt e hOld; dsimp only [nextLf]; omega
+          · intro a ha b hb hEpEq
+            rcases List.mem_cons.mp ha with rfl | haOld
+            · rcases List.mem_cons.mp hb with rfl | hbOld
+              · rfl
+              · exact False.elim ((hLeafDisj b hbOld).2 hEpEq.symm)
+            · rcases List.mem_cons.mp hb with rfl | hbOld
+              · exact False.elim ((hLeafDisj a haOld).2 hEpEq)
+              · exact hUniq a haOld b hbOld hEpEq
+        obtain ⟨hStInv, hPayEq⟩ := stageTwoSlotWal_inv hInv.leaf_wal hLfRel hNextLfInv
+        refine ⟨hInv.poison_wal, hInv.policy_wal, hInv.preproc_wal, hStInv, hInv.cap_fixed, ?_⟩
+        intro w hw
+        dsimp only
+        rw [hPayEq]
+        exact hInv.wire_backed w hw
+      · cases hStep
+  | FlushLeafWal cid =>
+    simp only [stepOperationalHost] at hStep
+    cases hPh : lookupVolatilePhase cid s.volatileCeremonies <;> simp only [hPh] at hStep
+    · cases hStep
+    · rename_i ph
+      cases ph <;> simp only at hStep <;> try cases hStep
+      split at hStep
+      · split at hStep
+        · injection hStep with hEq; subst hEq
+          obtain ⟨hFlInv, _, hLfRel⟩ := flushTwoSlotWal_inv leafRel_refl hInv.leaf_wal
+          refine ⟨hInv.poison_wal, hInv.policy_wal, hInv.preproc_wal, hFlInv, hInv.cap_fixed, ?_⟩
+          intro w hw
+          exact wireBacked_mono (policyRel_refl _) (preprocRel_refl _) hLfRel (hInv.wire_backed w hw)
+        · cases hStep
+      · cases hStep
+  | AdvancePolicyWindow nextWin =>
+    simp only [stepOperationalHost] at hStep
+    split at hStep
+    · rename_i hCond
+      injection hStep with hEq; subst hEq
+      simp only [Bool.and_eq_true, decide_eq_true_eq] at hCond
+      let pol := activeWalPayload s.policyWindowLedger
+      let nextPol : PolicyWindowLedger := { pol with currentWindow := nextWin }
+      have hPolRel : policyRel pol nextPol := ⟨rfl, Nat.le_of_lt hCond.2, fun _ hm => hm⟩
+      have hNextInv : policyInv nextPol := walInv_active hInv.policy_wal
+      obtain ⟨hStInv, hPaySt⟩ := stageTwoSlotWal_inv hInv.policy_wal hPolRel hNextInv
+      obtain ⟨hFlInv, _, hFlRel⟩ := flushTwoSlotWal_inv policyRel_refl hStInv
+      rw [hPaySt] at hFlRel
+      refine ⟨hInv.poison_wal, hFlInv, hInv.preproc_wal, hInv.leaf_wal, ?_, ?_⟩
+      · exact hFlRel.1.trans hInv.cap_fixed
+      · intro w hw
+        exact wireBacked_mono hFlRel (preprocRel_refl _) (leafRel_refl _) (hInv.wire_backed w hw)
+    · cases hStep
+  | LatchPoisonFault reasonCode =>
+    simp only [stepOperationalHost] at hStep
+    split at hStep
+    · injection hStep with hEq; subst hEq
+      let cur := activeWalPayload s.poisonLatch
+      let nextPoison : PoisonLatch := { status := .poisoned reasonCode, faultCount := cur.faultCount + 1 }
+      have hPRel : poisonRel cur nextPoison := ⟨fun _ => by simp [nextPoison], by simp [nextPoison]⟩
+      obtain ⟨hStInv, _⟩ := stageTwoSlotWal_inv hInv.poison_wal hPRel trivial
+      exact ⟨hStInv, hInv.policy_wal, hInv.preproc_wal, hInv.leaf_wal, hInv.cap_fixed, hInv.wire_backed⟩
+    · cases hStep
+  | FlushPoisonWal =>
+    simp only [stepOperationalHost] at hStep
+    split at hStep
+    · injection hStep with hEq; subst hEq
+      obtain ⟨hFlInv, _, _⟩ := flushTwoSlotWal_inv poisonRel_refl hInv.poison_wal
+      exact ⟨hFlInv, hInv.policy_wal, hInv.preproc_wal, hInv.leaf_wal, hInv.cap_fixed, hInv.wire_backed⟩
+    · cases hStep
+  | SaveCheckpoint ledger =>
+    cases ledger with
+    | poison =>
+      simp only [stepOperationalHost] at hStep
+      split at hStep
+      · rename_i hIdle
+        injection hStep with hEq; subst hEq
+        obtain ⟨hSv, _⟩ := saveWalCheckpoint_inv poisonRel_refl hInv.poison_wal
+          (Option.isNone_iff_eq_none.mp hIdle)
+        exact ⟨hSv, hInv.policy_wal, hInv.preproc_wal, hInv.leaf_wal, hInv.cap_fixed, hInv.wire_backed⟩
+      · cases hStep
+    | policy =>
+      simp only [stepOperationalHost] at hStep
+      split at hStep
+      · rename_i hIdle
+        injection hStep with hEq; subst hEq
+        obtain ⟨hSv, hRel⟩ := saveWalCheckpoint_inv policyRel_refl hInv.policy_wal
+          (Option.isNone_iff_eq_none.mp hIdle)
+        exact ⟨hInv.poison_wal, hSv, hInv.preproc_wal, hInv.leaf_wal, hRel.1.trans hInv.cap_fixed,
+          fun w hw => wireBacked_mono hRel (preprocRel_refl _) (leafRel_refl _) (hInv.wire_backed w hw)⟩
+      · cases hStep
+    | preproc =>
+      simp only [stepOperationalHost] at hStep
+      split at hStep
+      · rename_i hIdle
+        injection hStep with hEq; subst hEq
+        obtain ⟨hSv, hRel⟩ := saveWalCheckpoint_inv preprocRel_refl hInv.preproc_wal
+          (Option.isNone_iff_eq_none.mp hIdle)
+        exact ⟨hInv.poison_wal, hInv.policy_wal, hSv, hInv.leaf_wal, hInv.cap_fixed,
+          fun w hw => wireBacked_mono (policyRel_refl _) hRel (leafRel_refl _) (hInv.wire_backed w hw)⟩
+      · cases hStep
+    | leaf =>
+      simp only [stepOperationalHost] at hStep
+      split at hStep
+      · rename_i hIdle
+        injection hStep with hEq; subst hEq
+        obtain ⟨hSv, hRel⟩ := saveWalCheckpoint_inv leafRel_refl hInv.leaf_wal
+          (Option.isNone_iff_eq_none.mp hIdle)
+        exact ⟨hInv.poison_wal, hInv.policy_wal, hInv.preproc_wal, hSv, hInv.cap_fixed,
+          fun w hw => wireBacked_mono (policyRel_refl _) (preprocRel_refl _) hRel (hInv.wire_backed w hw)⟩
+      · cases hStep
+  | EmitNetworkShare cid party share =>
+    simp only [stepOperationalHost] at hStep
+    cases hPh : lookupVolatilePhase cid s.volatileCeremonies <;> simp only [hPh] at hStep
+    · cases hStep
+    · rename_i ph
+      cases ph <;> simp only at hStep <;> try cases hStep
+      rename_i rcpt
+      split at hStep
+      · rename_i hCond
+        injection hStep with hEq; subst hEq
+        simp only [Bool.and_eq_true, ceremonyReceiptDurableValid, ledgersCheckpointSaved,
+          decide_eq_true_eq] at hCond
+        rcases hCond with
+          ⟨⟨⟨⟨⟨⟨⟨_, _⟩, _⟩, hPolMem⟩, hPreMem⟩, hLfMem⟩, ⟨⟨hPolSaved, hPreSaved⟩, hLfSaved⟩⟩, _⟩
+        rw [← walInv_saved_floor hInv.policy_wal hPolSaved] at hPolMem
+        rw [← walInv_saved_floor hInv.preproc_wal hPreSaved] at hPreMem
+        rw [← walInv_saved_floor hInv.leaf_wal hLfSaved] at hLfMem
+        refine ⟨hInv.poison_wal, hInv.policy_wal, hInv.preproc_wal, hInv.leaf_wal, hInv.cap_fixed, ?_⟩
+        intro w hw
+        rcases List.mem_append.mp hw with hOld | hNew
+        · exact hInv.wire_backed w hOld
+        · rcases List.mem_singleton.mp hNew with rfl
+          exact ⟨⟨rcpt.intentDigest, hPolMem⟩, hPreMem, hLfMem⟩
+      · cases hStep
+  | PowerLossCrash cPoison cPolicy cPreproc cLeaf =>
+    simp [stepOperationalHost] at hStep
+
+/-! ### Constructive Deduplicated Spend Accounting Lemmas -/
+
+private def findSpendEntryByCid (cid : Nat) : List PolicySpendEntry → Option PolicySpendEntry
+  | [] => none
+  | e :: rest => if e.ceremonyId == cid then some e else findSpendEntryByCid cid rest
+
+private theorem findSpendEntryByCid_of_mem_nodup {cid win amt : Nat} {intent : Digest256}
+    {entries : List PolicySpendEntry}
+    (hNodup : (entries.map (·.ceremonyId)).Nodup)
+    (hMem : PolicySpendEntry.mk cid win amt intent ∈ entries) :
+    findSpendEntryByCid cid entries = some (PolicySpendEntry.mk cid win amt intent) := by
+  induction entries with
+  | nil => cases hMem
+  | cons hd tl ih =>
+    simp only [List.map_cons, List.nodup_cons] at hNodup
+    rcases hNodup with ⟨hNotInTl, hTlNodup⟩
+    rcases List.mem_cons.mp hMem with rfl | hInTl
+    · simp [findSpendEntryByCid]
+    · have hNe : (hd.ceremonyId == cid) = false := by
+        cases hEq : hd.ceremonyId == cid
+        · rfl
+        · exfalso
+          have hCidEq : hd.ceremonyId = cid := eq_of_beq hEq
+          apply hNotInTl
+          rw [hCidEq]
+          exact List.mem_map.mpr ⟨PolicySpendEntry.mk cid win amt intent, hInTl, rfl⟩
+      simp only [findSpendEntryByCid, hNe, Bool.false_eq_true, ↓reduceIte]
+      exact ih hTlNodup hInTl
+
+private def eraseSpendByCid (cid : Nat) : List PolicySpendEntry → List PolicySpendEntry
+  | [] => []
+  | e :: rest => if e.ceremonyId == cid then rest else e :: eraseSpendByCid cid rest
+
+private theorem mem_of_mem_eraseSpendByCid {cid : Nat} {x : PolicySpendEntry} :
+    ∀ {entries : List PolicySpendEntry}, x ∈ eraseSpendByCid cid entries → x ∈ entries
+  | [], h => nomatch h
+  | e :: rest, h => by
+    simp only [eraseSpendByCid] at h
+    by_cases he : e.ceremonyId == cid
+    · simp only [he, ↓reduceIte] at h
+      exact .tail _ h
+    · simp only [he, Bool.false_eq_true, ↓reduceIte, List.mem_cons] at h
+      rcases h with rfl | hMore
+      · exact .head _
+      · exact .tail _ (mem_of_mem_eraseSpendByCid hMore)
+
+private theorem eraseSpendByCid_nodup (cid : Nat) :
+    ∀ {entries : List PolicySpendEntry},
+      (entries.map (·.ceremonyId)).Nodup →
+      ((eraseSpendByCid cid entries).map (·.ceremonyId)).Nodup
+  | [], _ => List.Pairwise.nil
+  | e :: rest, hNd => by
+    simp only [List.map_cons, List.nodup_cons] at hNd
+    rcases hNd with ⟨hNotIn, hRestNd⟩
+    simp only [eraseSpendByCid]
+    by_cases hEq : e.ceremonyId == cid
+    · simp only [hEq, ↓reduceIte]; exact hRestNd
+    · simp only [hEq, Bool.false_eq_true, ↓reduceIte, List.map_cons, List.nodup_cons]
+      refine ⟨?_, eraseSpendByCid_nodup cid hRestNd⟩
+      intro hInSub
+      rcases List.mem_map.mp hInSub with ⟨x, hxSub, hxCid⟩
+      exact hNotIn (List.mem_map.mpr ⟨x, mem_of_mem_eraseSpendByCid hxSub, hxCid⟩)
+
+private theorem mem_eraseSpendByCid_of_ne {cid : Nat} {x : PolicySpendEntry}
+    (hNe : x.ceremonyId ≠ cid) :
+    ∀ {entries : List PolicySpendEntry}, x ∈ entries → x ∈ eraseSpendByCid cid entries
+  | [], h => nomatch h
+  | e :: rest, h => by
+    simp only [eraseSpendByCid]
+    rcases List.mem_cons.mp h with rfl | hRest
+    · have hFalse : (x.ceremonyId == cid) = false := beq_false_of_ne hNe
+      simp [hFalse]
+    · by_cases he : e.ceremonyId == cid
+      · simp [he, hRest]
+      · simp [he, mem_eraseSpendByCid_of_ne hNe hRest]
+
+private theorem windowCommittedSpend_split_found {cid win : Nat} {pe : PolicySpendEntry} :
+    ∀ {entries : List PolicySpendEntry},
+      findSpendEntryByCid cid entries = some pe →
+      pe.windowId = win →
+      pe.amount + windowCommittedSpend win (eraseSpendByCid cid entries) =
+        windowCommittedSpend win entries
+  | [], hFind, _ => nomatch hFind
+  | e :: rest, hFind, hWin => by
+    simp only [findSpendEntryByCid] at hFind
+    simp only [eraseSpendByCid, windowCommittedSpend]
+    by_cases hEq : e.ceremonyId == cid
+    · simp only [hEq, ↓reduceIte] at hFind ⊢
+      injection hFind with hPe; subst hPe
+      simp [hWin]
+    · simp only [hEq, Bool.false_eq_true, ↓reduceIte] at hFind ⊢
+      have ih := windowCommittedSpend_split_found hFind hWin
+      simp only [windowCommittedSpend]
+      omega
+
+private theorem dedupWireByCidAux_props (seen : List Nat) (wire : OutboundNetworkWire) :
+    (∀ w ∈ dedupWireByCidAux seen wire, w ∈ wire ∧ w.ceremonyId ∉ seen) ∧
+    ((dedupWireByCidAux seen wire).map (·.ceremonyId)).Nodup := by
+  induction wire generalizing seen with
+  | nil =>
+    exact ⟨(fun _ h => nomatch h), List.Pairwise.nil⟩
+  | cons e rest ih =>
+    simp only [dedupWireByCidAux]
+    by_cases hIn : e.ceremonyId ∈ seen
+    · simp only [hIn, ↓reduceIte]
+      obtain ⟨hSub, hNd⟩ := ih seen
+      exact ⟨fun w hw => ⟨.tail _ (hSub w hw).1, (hSub w hw).2⟩, hNd⟩
+    · simp only [hIn, ↓reduceIte]
+      obtain ⟨hSub, hNd⟩ := ih (e.ceremonyId :: seen)
+      refine ⟨?_, ?_⟩
+      · intro w hw
+        rcases List.mem_cons.mp hw with rfl | hTail
+        · exact ⟨.head _, hIn⟩
+        · obtain ⟨hMemRest, hNotInCons⟩ := hSub w hTail
+          exact ⟨.tail _ hMemRest, fun hs => hNotInCons (.tail _ hs)⟩
+      · simp only [List.map_cons, List.nodup_cons]
+        refine ⟨?_, hNd⟩
+        intro hDup
+        rcases List.mem_map.mp hDup with ⟨w, hwTail, hwCid⟩
+        exact (hSub w hwTail).2 (by rw [hwCid]; exact .head _)
+
+private theorem sum_dedup_wire_le_committed (win : Nat) :
+    ∀ (L : OutboundNetworkWire) (entries : List PolicySpendEntry),
+      (L.map (·.ceremonyId)).Nodup →
+      (entries.map (·.ceremonyId)).Nodup →
+      (∀ w ∈ L, w.windowId = win ∧
+        ∃ intent : Digest256, PolicySpendEntry.mk w.ceremonyId w.windowId w.amount intent ∈ entries) →
+      L.foldr (fun e acc => e.amount + acc) 0 ≤ windowCommittedSpend win entries
+  | [], _, _, _, _ => Nat.zero_le _
+  | w :: rest, entries, hLNd, hENd, hBacked => by
+    simp only [List.map_cons, List.nodup_cons] at hLNd
+    rcases hLNd with ⟨hWNotInRest, hRestNd⟩
+    obtain ⟨hWWin, ⟨intent0, hWMem⟩⟩ := hBacked w (.head _)
+    have hFound := findSpendEntryByCid_of_mem_nodup hENd hWMem
+    have hSplit := windowCommittedSpend_split_found (win := win) hFound hWWin
+    dsimp only at hSplit
+    have hSubENd := eraseSpendByCid_nodup w.ceremonyId hENd
+    have hRestBacked : ∀ u ∈ rest, u.windowId = win ∧
+        ∃ intent : Digest256,
+          PolicySpendEntry.mk u.ceremonyId u.windowId u.amount intent ∈ eraseSpendByCid w.ceremonyId entries := by
+      intro u hu
+      obtain ⟨huWin, ⟨iu, huMem⟩⟩ := hBacked u (.tail _ hu)
+      have hNeCid : u.ceremonyId ≠ w.ceremonyId := by
+        intro hEq
+        apply hWNotInRest
+        exact List.mem_map.mpr ⟨u, hu, hEq⟩
+      exact ⟨huWin, ⟨iu, mem_eraseSpendByCid_of_ne hNeCid huMem⟩⟩
+    have ih := sum_dedup_wire_le_committed win rest (eraseSpendByCid w.ceremonyId entries)
+      hRestNd hSubENd hRestBacked
+    simp only [List.foldr_cons]
+    omega
+
+
+/-! ### Crash-Closed Safety Invariant: Live Ledgers or Fail-Closed Host -/
+
+/-- The three wire-level safety facts, stated on `OutboundNetworkWire` alone. -/
+private structure WireSafe (policyCap : Nat) (wire : OutboundNetworkWire) : Prop where
+  batch_disjoint : ∀ e₁ ∈ wire, ∀ e₂ ∈ wire,
+    e₁.ceremonyId ≠ e₂.ceremonyId → e₁.batchIdx ≠ e₂.batchIdx
+  leaf_unique : ∀ e₁ ∈ wire, ∀ e₂ ∈ wire,
+    e₁.epochOrIndex = e₂.epochOrIndex →
+    e₁.msgDigest = e₂.msgDigest ∧ e₁.ceremonyId = e₂.ceremonyId
+  spend_le : ∀ win : Nat, wireWindowSpend win wire ≤ policyCap
+
+private theorem wireSpend_le_checkpointed {policyCap : Nat} {host : MultiLedgerHostState}
+    (hInv : HostGlobalInvariant policyCap host) (win : Nat) :
+    wireWindowSpend win host.outboundWire ≤
+      windowCommittedSpend win (checkpointedWalPayload host.policyWindowLedger).committedSpends := by
+  let relList := releasedCeremoniesInWindow win host.outboundWire
+  obtain ⟨hSub, hRelNd⟩ :=
+    dedupWireByCidAux_props [] (host.outboundWire.filter (fun e => e.windowId == win))
+  obtain ⟨hPolNd, _⟩ := (walInv_facts policyRel_refl hInv.policy_wal).2.2.1
+  apply sum_dedup_wire_le_committed win relList
+    (checkpointedWalPayload host.policyWindowLedger).committedSpends hRelNd hPolNd
+  intro w hw
+  have hwFilt : w ∈ host.outboundWire.filter (fun e => e.windowId == win) := (hSub w hw).1
+  obtain ⟨hwWire, hwWinB⟩ := List.mem_filter.mp hwFilt
+  exact ⟨eq_of_beq hwWinB, (hInv.wire_backed w hwWire).1⟩
+
+private theorem wireSafe_of_globalInv {policyCap : Nat} {host : MultiLedgerHostState}
+    (hInv : HostGlobalInvariant policyCap host) : WireSafe policyCap host.outboundWire := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro e₁ he₁ e₂ he₂ hCidNe
+    have hb₁ := (hInv.wire_backed e₁ he₁).2.1
+    have hb₂ := (hInv.wire_backed e₂ he₂).2.1
+    exact (walInv_facts preprocRel_refl hInv.preproc_wal).2.2.1.2 _ hb₁ _ hb₂ hCidNe
+  · intro e₁ he₁ e₂ he₂ hEpEq
+    have hl₁ := (hInv.wire_backed e₁ he₁).2.2
+    have hl₂ := (hInv.wire_backed e₂ he₂).2.2
+    have hEntryEq := (walInv_facts leafRel_refl hInv.leaf_wal).2.2.1.2 _ hl₁ _ hl₂ hEpEq
+    injection hEntryEq with hCid hEp hMsg
+    exact ⟨hMsg, hCid⟩
+  · intro win
+    obtain ⟨_, hCapAll⟩ := (walInv_facts policyRel_refl hInv.policy_wal).2.2.1
+    have hCapBound := hCapAll win
+    rw [hInv.cap_fixed] at hCapBound
+    exact Nat.le_trans (wireSpend_le_checkpointed hInv win) hCapBound
+
+/-- Every accepted step is a crash, or an operational transition of a host whose ledgers all open. -/
+private theorem stepMultiLedgerHost_cases {s s' : MultiLedgerHostState} {ev : MultiLedgerEvent}
+    (hStep : stepMultiLedgerHost s ev = some s') :
+    (∃ a b c d, ev = .PowerLossCrash a b c d ∧ s' = crashHostState s a b c d) ∨
+    (hostOperational s = true ∧ stepOperationalHost s ev = some s') := by
+  cases ev with
+  | PowerLossCrash a b c d =>
+    left
+    simp only [stepMultiLedgerHost] at hStep
+    injection hStep with hEq
+    exact ⟨a, b, c, d, rfl, hEq.symm⟩
+  | _ =>
+    right
+    simp only [stepMultiLedgerHost] at hStep
+    split at hStep
+    · rename_i hOp
+      exact ⟨hOp, hStep⟩
+    · cases hStep
+
+/-- A crash of a healthy host leaves every ledger healthy, or the host fails closed. -/
+private theorem crashHostState_inv {policyCap : Nat} {s : MultiLedgerHostState}
+    (hInv : HostGlobalInvariant policyCap s) (a b c d : WalCrashBehavior) :
+    HostGlobalInvariant policyCap (crashHostState s a b c d) ∨
+    HostFailedClosed (crashHostState s a b c d) := by
+  have hDeadOf : hostOperational (crashHostState s a b c d) = false →
+      HostFailedClosed (crashHostState s a b c d) := fun h =>
+    ⟨h, crashRecoverWal_stage_none _ _, crashRecoverWal_stage_none _ _,
+      crashRecoverWal_stage_none _ _, crashRecoverWal_stage_none _ _⟩
+  rcases crashRecoverWal_inv poisonRel_refl hInv.poison_wal a with hD | ⟨hPo, _⟩
+  · exact Or.inr (hDeadOf (by simp [hostOperational, crashHostState, hD]))
+  rcases crashRecoverWal_inv policyRel_refl hInv.policy_wal b with hD | ⟨hPl, hPlRel⟩
+  · exact Or.inr (hDeadOf (by simp [hostOperational, crashHostState, hD]))
+  rcases crashRecoverWal_inv preprocRel_refl hInv.preproc_wal c with hD | ⟨hPr, hPrRel⟩
+  · exact Or.inr (hDeadOf (by simp [hostOperational, crashHostState, hD]))
+  rcases crashRecoverWal_inv leafRel_refl hInv.leaf_wal d with hD | ⟨hLf, hLfRel⟩
+  · exact Or.inr (hDeadOf (by simp [hostOperational, crashHostState, hD]))
+  exact Or.inl ⟨hPo, hPl, hPr, hLf, hPlRel.1.trans hInv.cap_fixed,
+    fun w hw => wireBacked_mono hPlRel hPrRel hLfRel (hInv.wire_backed w hw)⟩
+
+/-- A fail-closed host stays fail-closed across every further crash. -/
+private theorem crashHostState_failedClosed {s : MultiLedgerHostState}
+    (hDead : HostFailedClosed s) (a b c d : WalCrashBehavior) :
+    HostFailedClosed (crashHostState s a b c d) := by
+  refine ⟨?_, crashRecoverWal_stage_none _ _, crashRecoverWal_stage_none _ _,
+    crashRecoverWal_stage_none _ _, crashRecoverWal_stage_none _ _⟩
+  have hOp := hDead.notOperational
+  unfold hostOperational at hOp
+  cases hP : walRecoverable s.poisonLatch with
+  | false =>
+    have h := crashRecoverWal_dead_stays_dead a _ hP hDead.poisonIdle
+    simp [hostOperational, crashHostState, h]
+  | true =>
+    cases hQ : walRecoverable s.policyWindowLedger with
+    | false =>
+      have h := crashRecoverWal_dead_stays_dead b _ hQ hDead.policyIdle
+      simp [hostOperational, crashHostState, h]
+    | true =>
+      cases hR : walRecoverable s.preprocCursorLedger with
+      | false =>
+        have h := crashRecoverWal_dead_stays_dead c _ hR hDead.preprocIdle
+        simp [hostOperational, crashHostState, h]
+      | true =>
+        cases hS : walRecoverable s.leafOrFtsBurnLedger with
+        | false =>
+          have h := crashRecoverWal_dead_stays_dead d _ hS hDead.leafIdle
+          simp [hostOperational, crashHostState, h]
+        | true =>
+          rw [hP, hQ, hR, hS] at hOp
+          simp at hOp
+
+/-- Inductive safety invariant across arbitrary crashes: the wire facts hold, and the host is
+    either healthy on all four ledgers or has failed closed. -/
+private structure HostCrashInvariant (policyCap : Nat) (host : MultiLedgerHostState) : Prop where
+  wire_safe : WireSafe policyCap host.outboundWire
+  live_or_dead : HostGlobalInvariant policyCap host ∨ HostFailedClosed host
+
+private theorem initMultiLedgerHostState_crashInv (policyCap : Nat) :
+    HostCrashInvariant policyCap (initMultiLedgerHostState policyCap) :=
+  ⟨wireSafe_of_globalInv (initMultiLedgerHostState_inv policyCap),
+    Or.inl (initMultiLedgerHostState_inv policyCap)⟩
+
+private theorem stepMultiLedgerHost_preserves_crashInv {policyCap : Nat}
+    {s s' : MultiLedgerHostState} {ev : MultiLedgerEvent}
+    (hInv : HostCrashInvariant policyCap s)
+    (hStep : stepMultiLedgerHost s ev = some s') :
+    HostCrashInvariant policyCap s' := by
+  rcases stepMultiLedgerHost_cases hStep with ⟨a, b, c, d, _, rfl⟩ | ⟨hOp, hStep'⟩
+  · refine ⟨hInv.wire_safe, ?_⟩
+    rcases hInv.live_or_dead with hG | hD
+    · exact crashHostState_inv hG a b c d
+    · exact Or.inr (crashHostState_failedClosed hD a b c d)
+  · rcases hInv.live_or_dead with hG | hD
+    · have hG' := stepOperationalHost_preserves_inv hG hStep'
+      exact ⟨wireSafe_of_globalInv hG', Or.inl hG'⟩
+    · rw [hD.notOperational] at hOp
+      cases hOp
+
+private theorem validMultiLedgerTrace_preserves_crashInv {policyCap : Nat}
+    {s₁ s₂ : MultiLedgerHostState} {trace : List MultiLedgerEvent}
+    (hInv : HostCrashInvariant policyCap s₁)
+    (hTrace : ValidMultiLedgerTrace s₁ trace s₂) :
+    HostCrashInvariant policyCap s₂ := by
+  induction hTrace with
+  | nil _ => exact hInv
+  | cons hStep _ ih => exact ih (stepMultiLedgerHost_preserves_crashInv hInv hStep)
+
+/-! ### Flagship Theorems for Section 1 -/
+
+/-- **Zero One-Time Pad / Beaver / SPCOT Reuse (`no_preproc_batch_reused_on_wire`)**:
+    Across arbitrary interleaved multi-ceremony steps and arbitrary independent non-2PC
+    `PowerLossCrash` events (including loss of an ACTIVE ledger slot), distinct emitted network
+    ceremonies NEVER consume overlapping preprocessing `batchIdx`. -/
+theorem no_preproc_batch_reused_on_wire
+    (policyCap : Nat) (trace : List MultiLedgerEvent) (finalState : MultiLedgerHostState)
+    (hTrace : ValidMultiLedgerTrace (initMultiLedgerHostState policyCap) trace finalState) :
+    ∀ e₁ ∈ finalState.outboundWire, ∀ e₂ ∈ finalState.outboundWire,
+      e₁.ceremonyId ≠ e₂.ceremonyId → e₁.batchIdx ≠ e₂.batchIdx :=
+  (validMultiLedgerTrace_preserves_crashInv
+    (initMultiLedgerHostState_crashInv policyCap) hTrace).wire_safe.batch_disjoint
+
+/-- **Zero Stateful Leaf / FTS Antichain Reuse (`no_leaf_double_sign_on_wire`)**:
+    Across arbitrary interleaved ceremonies and mid-ceremony `PowerLossCrash` events (crashes
+    between `PolicySpendCommitted` and `LeafOrFtsReserved`, torn inactive writes, and loss of the
+    active leaf slot with rollback to the checkpointed snapshot), distinct messages NEVER appear on
+    `OutboundNetworkWire` under the same `epochOrIndex`. -/
+theorem no_leaf_double_sign_on_wire
+    (policyCap : Nat) (trace : List MultiLedgerEvent) (finalState : MultiLedgerHostState)
+    (hTrace : ValidMultiLedgerTrace (initMultiLedgerHostState policyCap) trace finalState) :
+    ∀ e₁ ∈ finalState.outboundWire, ∀ e₂ ∈ finalState.outboundWire,
+      e₁.epochOrIndex = e₂.epochOrIndex →
+      e₁.msgDigest = e₂.msgDigest ∧ e₁.ceremonyId = e₂.ceremonyId :=
+  (validMultiLedgerTrace_preserves_crashInv
+    (initMultiLedgerHostState_crashInv policyCap) hTrace).wire_safe.leaf_unique
+
+/-- **Monotone Spend-Cap Conservation (`wire_spend_le_policy_cap`)**:
+    In every policy window `win`, the total amount of all released ceremonies on
+    `OutboundNetworkWire` never exceeds `policyCap`; and while the host is operational it is
+    bounded by the CHECKPOINTED committed spend of `win`, the snapshot no crash can roll back
+    (crashed half-ceremonies burn budget conservatively and NEVER recycle or double-spend). -/
+theorem wire_spend_le_policy_cap
+    (policyCap : Nat) (trace : List MultiLedgerEvent) (finalState : MultiLedgerHostState)
+    (hTrace : ValidMultiLedgerTrace (initMultiLedgerHostState policyCap) trace finalState)
+    (win : Nat) :
+    wireWindowSpend win finalState.outboundWire ≤ policyCap ∧
+    (hostOperational finalState = true →
+      wireWindowSpend win finalState.outboundWire ≤
+        windowCommittedSpend win
+          (checkpointedWalPayload finalState.policyWindowLedger).committedSpends) := by
+  have hInv := validMultiLedgerTrace_preserves_crashInv
+    (initMultiLedgerHostState_crashInv policyCap) hTrace
+  refine ⟨hInv.wire_safe.spend_le win, fun hOp => ?_⟩
+  rcases hInv.live_or_dead with hG | hD
+  · exact wireSpend_le_checkpointed hG win
+  · rw [hD.notOperational] at hOp
+    cases hOp
+
+/-- **Multi-Ledger Burn-Before-Release Crash & Interleaving Composition
+    (`ceremony_multi_ledger_crash_interleaving_safe`)**:
+    Unifies zero preprocessing batch reuse, zero stateful leaf/FTS double-signing, monotone
+    per-window spend-cap conservation, and checkpointed poison-latch persistence across arbitrary
+    multi-ceremony interleavings and non-atomic per-file `PowerLossCrash` restarts. The poison
+    clause covers EVERY crash mode on every ledger: a checkpointed poison either is still read as
+    poisoned after the crash, or the host has failed closed. -/
+theorem ceremony_multi_ledger_crash_interleaving_safe
+    (policyCap : Nat) (trace : List MultiLedgerEvent) (finalState : MultiLedgerHostState)
+    (hTrace : ValidMultiLedgerTrace (initMultiLedgerHostState policyCap) trace finalState) :
+    (∀ e₁ ∈ finalState.outboundWire, ∀ e₂ ∈ finalState.outboundWire,
+      e₁.ceremonyId ≠ e₂.ceremonyId → e₁.batchIdx ≠ e₂.batchIdx) ∧
+    (∀ e₁ ∈ finalState.outboundWire, ∀ e₂ ∈ finalState.outboundWire,
+      e₁.epochOrIndex = e₂.epochOrIndex →
+      e₁.msgDigest = e₂.msgDigest ∧ e₁.ceremonyId = e₂.ceremonyId) ∧
+    (∀ win : Nat, wireWindowSpend win finalState.outboundWire ≤ policyCap) ∧
+    (hostOperational finalState = true →
+      (checkpointedWalPayload finalState.poisonLatch).status ≠ .clean →
+      ∀ cPoison cPolicy cPreproc cLeaf,
+        stepMultiLedgerHost finalState (.PowerLossCrash cPoison cPolicy cPreproc cLeaf) =
+          some (crashHostState finalState cPoison cPolicy cPreproc cLeaf) ∧
+        (hostOperational (crashHostState finalState cPoison cPolicy cPreproc cLeaf) = false ∨
+         (activeWalPayload
+            (crashHostState finalState cPoison cPolicy cPreproc cLeaf).poisonLatch).status ≠
+              .clean)) := by
+  have hInv := validMultiLedgerTrace_preserves_crashInv
+    (initMultiLedgerHostState_crashInv policyCap) hTrace
+  refine ⟨hInv.wire_safe.batch_disjoint, hInv.wire_safe.leaf_unique, hInv.wire_safe.spend_le, ?_⟩
+  intro hOp hPoisoned cPoison cPolicy cPreproc cLeaf
+  refine ⟨rfl, ?_⟩
+  rcases hInv.live_or_dead with hG | hD
+  · rcases crashRecoverWal_inv poisonRel_refl hG.poison_wal cPoison with hDead | ⟨hPo, hRel⟩
+    · exact Or.inl (by simp [hostOperational, crashHostState, hDead])
+    · exact Or.inr ((walInv_facts poisonRel_refl hPo).2.2.2.1 (hRel.1 hPoisoned))
+  · rw [hD.notOperational] at hOp
+    cases hOp
+
+/-- **Fail-Closed Is Absorbing (`failed_closed_host_stays_closed`)**:
+    Once some ledger no longer opens, NO continuation of the trace (any events, any further
+    crashes, any crash modes) reopens the host or adds a single emission to the wire. -/
+theorem failed_closed_host_stays_closed
+    {s s' : MultiLedgerHostState} {trace : List MultiLedgerEvent}
+    (hTrace : ValidMultiLedgerTrace s trace s') (hDead : HostFailedClosed s) :
+    HostFailedClosed s' ∧ s'.outboundWire = s.outboundWire := by
+  induction hTrace with
+  | nil _ => exact ⟨hDead, rfl⟩
+  | cons hStep _ ih =>
+    rcases stepMultiLedgerHost_cases hStep with ⟨a, b, c, d, _, rfl⟩ | ⟨hOp, _⟩
+    · exact ih (crashHostState_failedClosed hDead a b c d)
+    · rw [hDead.notOperational] at hOp
+      cases hOp
+
+/-! ### Buggy Release Machines & `#tooth` Counterexamples -/
+
+/-- Multi-step execution of an arbitrary host step function. -/
+def runTraceWith (step : MultiLedgerHostState → MultiLedgerEvent → Option MultiLedgerHostState) :
+    MultiLedgerHostState → List MultiLedgerEvent → Option MultiLedgerHostState
+  | s, [] => some s
+  | s, ev :: rest =>
+    match step s ev with
+    | none => none
+    | some s' => runTraceWith step s' rest
+
+/-- Broken variant of `stepMultiLedgerHost` that swaps step (4) (`FlushLeafWal`) AFTER
+    `EmitNetworkShare`, permitting share transmission as soon as `StageLeafOrFtsReserve` is
+    buffered in volatile RAM prior to durable disk flush. -/
+def stepBuggyReleaseBeforeLeafFlush (host : MultiLedgerHostState) (ev : MultiLedgerEvent) :
+    Option MultiLedgerHostState :=
+  match ev with
+  | .EmitNetworkShare cid party share =>
+    match lookupVolatilePhase cid host.volatileCeremonies with
+    | some (.leafStaged _ _ _ win amount _ batchIdx epochOrIndex msgDigest) =>
+      let emitted : WireEmission := {
+        ceremonyId := cid
+        windowId := win
+        amount := amount
+        batchIdx := batchIdx
+        epochOrIndex := epochOrIndex
+        msgDigest := msgDigest
+        party := party
+        share := share
+      }
+      some { host with outboundWire := host.outboundWire ++ [emitted] }
+    | _ => stepMultiLedgerHost host ev
+  | _ => stepMultiLedgerHost host ev
+
+private def buggyDoubleSignAttackTrace : List MultiLedgerEvent := [
+  .ObserveCleanPoisonLatch 1,
+  .StagePolicySpend 1 30 (BitVec.ofNat 256 0x1111),
+  .FlushPolicyWal 1,
+  .StagePreprocBurn 1 0,
+  .FlushPreprocWal 1,
+  .StageLeafOrFtsReserve 1 7 (BitVec.ofNat 256 0xAA01),
+  .EmitNetworkShare 1 0 (BitVec.ofNat 256 0x5001),
+  .PowerLossCrash .dropVolatile .dropVolatile .dropVolatile .tornInactiveWrite,
+  .ObserveCleanPoisonLatch 2,
+  .StagePolicySpend 2 40 (BitVec.ofNat 256 0x2222),
+  .FlushPolicyWal 2,
+  .StagePreprocBurn 2 1,
+  .FlushPreprocWal 2,
+  .StageLeafOrFtsReserve 2 7 (BitVec.ofNat 256 0xBB02),
+  .EmitNetworkShare 2 0 (BitVec.ofNat 256 0x5002)
+]
+
+/-- **`#tooth` Counterexample (`tooth_release_before_durable_burn_reuses_leaf`)**:
+    Swapping step (4) (`FlushLeafWal` / durable `LeafOrFtsReserved`) after `EmitNetworkShare`
+    allows a `PowerLossCrash` (dropping or tearing the uncommitted leaf-burn write while retaining
+    prior policy/preprocessing commits) followed by a post-reboot ceremony on a distinct message
+    `msg₂ ≠ msg₁` to sign on `OutboundNetworkWire` under the **exact same `epochOrIndex`**! -/

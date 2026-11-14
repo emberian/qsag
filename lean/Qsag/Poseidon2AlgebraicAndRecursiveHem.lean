@@ -2431,3 +2431,664 @@ private theorem m4_minor_0123_0123 (x : Lane4)
   exact he.trans (by decide)
 
 /-- Any nonzero input has input/output support sum at least five. -/
+theorem m4_mds_branch_lower (x : Lane4) (hne : x ≠ lane4Zero) :
+    5 ≤ laneWeight4 x + laneWeight4 (applyM4 x) := by
+  by_cases hx0 : x.x0 = Goldilocks.zero <;>
+    by_cases hx1 : x.x1 = Goldilocks.zero <;>
+    by_cases hx2 : x.x2 = Goldilocks.zero <;>
+    by_cases hx3 : x.x3 = Goldilocks.zero
+  · exact False.elim (hne (Lane4.ext hx0 hx1 hx2 hx3))
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx3 (m4_minor_3_0 x hx0 hx1 hx2 hy0))
+    · exact False.elim (hx3 (m4_minor_3_0 x hx0 hx1 hx2 hy0))
+    · exact False.elim (hx3 (m4_minor_3_0 x hx0 hx1 hx2 hy0))
+    · exact False.elim (hx3 (m4_minor_3_0 x hx0 hx1 hx2 hy0))
+    · exact False.elim (hx3 (m4_minor_3_0 x hx0 hx1 hx2 hy0))
+    · exact False.elim (hx3 (m4_minor_3_0 x hx0 hx1 hx2 hy0))
+    · exact False.elim (hx3 (m4_minor_3_0 x hx0 hx1 hx2 hy0))
+    · exact False.elim (hx3 (m4_minor_3_0 x hx0 hx1 hx2 hy0))
+    · exact False.elim (hx3 (m4_minor_3_1 x hx0 hx1 hx2 hy1))
+    · exact False.elim (hx3 (m4_minor_3_1 x hx0 hx1 hx2 hy1))
+    · exact False.elim (hx3 (m4_minor_3_1 x hx0 hx1 hx2 hy1))
+    · exact False.elim (hx3 (m4_minor_3_1 x hx0 hx1 hx2 hy1))
+    · exact False.elim (hx3 (m4_minor_3_2 x hx0 hx1 hx2 hy2))
+    · exact False.elim (hx3 (m4_minor_3_2 x hx0 hx1 hx2 hy2))
+    · exact False.elim (hx3 (m4_minor_3_3 x hx0 hx1 hx2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx2 (m4_minor_2_0 x hx0 hx1 hx3 hy0))
+    · exact False.elim (hx2 (m4_minor_2_0 x hx0 hx1 hx3 hy0))
+    · exact False.elim (hx2 (m4_minor_2_0 x hx0 hx1 hx3 hy0))
+    · exact False.elim (hx2 (m4_minor_2_0 x hx0 hx1 hx3 hy0))
+    · exact False.elim (hx2 (m4_minor_2_0 x hx0 hx1 hx3 hy0))
+    · exact False.elim (hx2 (m4_minor_2_0 x hx0 hx1 hx3 hy0))
+    · exact False.elim (hx2 (m4_minor_2_0 x hx0 hx1 hx3 hy0))
+    · exact False.elim (hx2 (m4_minor_2_0 x hx0 hx1 hx3 hy0))
+    · exact False.elim (hx2 (m4_minor_2_1 x hx0 hx1 hx3 hy1))
+    · exact False.elim (hx2 (m4_minor_2_1 x hx0 hx1 hx3 hy1))
+    · exact False.elim (hx2 (m4_minor_2_1 x hx0 hx1 hx3 hy1))
+    · exact False.elim (hx2 (m4_minor_2_1 x hx0 hx1 hx3 hy1))
+    · exact False.elim (hx2 (m4_minor_2_2 x hx0 hx1 hx3 hy2))
+    · exact False.elim (hx2 (m4_minor_2_2 x hx0 hx1 hx3 hy2))
+    · exact False.elim (hx2 (m4_minor_2_3 x hx0 hx1 hx3 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx2 (m4_minor_23_01 x hx0 hx1 hy0 hy1))
+    · exact False.elim (hx2 (m4_minor_23_01 x hx0 hx1 hy0 hy1))
+    · exact False.elim (hx2 (m4_minor_23_01 x hx0 hx1 hy0 hy1))
+    · exact False.elim (hx2 (m4_minor_23_01 x hx0 hx1 hy0 hy1))
+    · exact False.elim (hx2 (m4_minor_23_02 x hx0 hx1 hy0 hy2))
+    · exact False.elim (hx2 (m4_minor_23_02 x hx0 hx1 hy0 hy2))
+    · exact False.elim (hx2 (m4_minor_23_03 x hx0 hx1 hy0 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx2 (m4_minor_23_12 x hx0 hx1 hy1 hy2))
+    · exact False.elim (hx2 (m4_minor_23_12 x hx0 hx1 hy1 hy2))
+    · exact False.elim (hx2 (m4_minor_23_13 x hx0 hx1 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx2 (m4_minor_23_23 x hx0 hx1 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx1 (m4_minor_1_0 x hx0 hx2 hx3 hy0))
+    · exact False.elim (hx1 (m4_minor_1_0 x hx0 hx2 hx3 hy0))
+    · exact False.elim (hx1 (m4_minor_1_0 x hx0 hx2 hx3 hy0))
+    · exact False.elim (hx1 (m4_minor_1_0 x hx0 hx2 hx3 hy0))
+    · exact False.elim (hx1 (m4_minor_1_0 x hx0 hx2 hx3 hy0))
+    · exact False.elim (hx1 (m4_minor_1_0 x hx0 hx2 hx3 hy0))
+    · exact False.elim (hx1 (m4_minor_1_0 x hx0 hx2 hx3 hy0))
+    · exact False.elim (hx1 (m4_minor_1_0 x hx0 hx2 hx3 hy0))
+    · exact False.elim (hx1 (m4_minor_1_1 x hx0 hx2 hx3 hy1))
+    · exact False.elim (hx1 (m4_minor_1_1 x hx0 hx2 hx3 hy1))
+    · exact False.elim (hx1 (m4_minor_1_1 x hx0 hx2 hx3 hy1))
+    · exact False.elim (hx1 (m4_minor_1_1 x hx0 hx2 hx3 hy1))
+    · exact False.elim (hx1 (m4_minor_1_2 x hx0 hx2 hx3 hy2))
+    · exact False.elim (hx1 (m4_minor_1_2 x hx0 hx2 hx3 hy2))
+    · exact False.elim (hx1 (m4_minor_1_3 x hx0 hx2 hx3 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx1 (m4_minor_13_01 x hx0 hx2 hy0 hy1))
+    · exact False.elim (hx1 (m4_minor_13_01 x hx0 hx2 hy0 hy1))
+    · exact False.elim (hx1 (m4_minor_13_01 x hx0 hx2 hy0 hy1))
+    · exact False.elim (hx1 (m4_minor_13_01 x hx0 hx2 hy0 hy1))
+    · exact False.elim (hx1 (m4_minor_13_02 x hx0 hx2 hy0 hy2))
+    · exact False.elim (hx1 (m4_minor_13_02 x hx0 hx2 hy0 hy2))
+    · exact False.elim (hx1 (m4_minor_13_03 x hx0 hx2 hy0 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx1 (m4_minor_13_12 x hx0 hx2 hy1 hy2))
+    · exact False.elim (hx1 (m4_minor_13_12 x hx0 hx2 hy1 hy2))
+    · exact False.elim (hx1 (m4_minor_13_13 x hx0 hx2 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx1 (m4_minor_13_23 x hx0 hx2 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx1 (m4_minor_12_01 x hx0 hx3 hy0 hy1))
+    · exact False.elim (hx1 (m4_minor_12_01 x hx0 hx3 hy0 hy1))
+    · exact False.elim (hx1 (m4_minor_12_01 x hx0 hx3 hy0 hy1))
+    · exact False.elim (hx1 (m4_minor_12_01 x hx0 hx3 hy0 hy1))
+    · exact False.elim (hx1 (m4_minor_12_02 x hx0 hx3 hy0 hy2))
+    · exact False.elim (hx1 (m4_minor_12_02 x hx0 hx3 hy0 hy2))
+    · exact False.elim (hx1 (m4_minor_12_03 x hx0 hx3 hy0 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx1 (m4_minor_12_12 x hx0 hx3 hy1 hy2))
+    · exact False.elim (hx1 (m4_minor_12_12 x hx0 hx3 hy1 hy2))
+    · exact False.elim (hx1 (m4_minor_12_13 x hx0 hx3 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx1 (m4_minor_12_23 x hx0 hx3 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx1 (m4_minor_123_012 x hx0 hy0 hy1 hy2))
+    · exact False.elim (hx1 (m4_minor_123_012 x hx0 hy0 hy1 hy2))
+    · exact False.elim (hx1 (m4_minor_123_013 x hx0 hy0 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx1 (m4_minor_123_023 x hx0 hy0 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx1 (m4_minor_123_123 x hx0 hy1 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx0 (m4_minor_0_0 x hx1 hx2 hx3 hy0))
+    · exact False.elim (hx0 (m4_minor_0_0 x hx1 hx2 hx3 hy0))
+    · exact False.elim (hx0 (m4_minor_0_0 x hx1 hx2 hx3 hy0))
+    · exact False.elim (hx0 (m4_minor_0_0 x hx1 hx2 hx3 hy0))
+    · exact False.elim (hx0 (m4_minor_0_0 x hx1 hx2 hx3 hy0))
+    · exact False.elim (hx0 (m4_minor_0_0 x hx1 hx2 hx3 hy0))
+    · exact False.elim (hx0 (m4_minor_0_0 x hx1 hx2 hx3 hy0))
+    · exact False.elim (hx0 (m4_minor_0_0 x hx1 hx2 hx3 hy0))
+    · exact False.elim (hx0 (m4_minor_0_1 x hx1 hx2 hx3 hy1))
+    · exact False.elim (hx0 (m4_minor_0_1 x hx1 hx2 hx3 hy1))
+    · exact False.elim (hx0 (m4_minor_0_1 x hx1 hx2 hx3 hy1))
+    · exact False.elim (hx0 (m4_minor_0_1 x hx1 hx2 hx3 hy1))
+    · exact False.elim (hx0 (m4_minor_0_2 x hx1 hx2 hx3 hy2))
+    · exact False.elim (hx0 (m4_minor_0_2 x hx1 hx2 hx3 hy2))
+    · exact False.elim (hx0 (m4_minor_0_3 x hx1 hx2 hx3 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx0 (m4_minor_03_01 x hx1 hx2 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_03_01 x hx1 hx2 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_03_01 x hx1 hx2 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_03_01 x hx1 hx2 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_03_02 x hx1 hx2 hy0 hy2))
+    · exact False.elim (hx0 (m4_minor_03_02 x hx1 hx2 hy0 hy2))
+    · exact False.elim (hx0 (m4_minor_03_03 x hx1 hx2 hy0 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_03_12 x hx1 hx2 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_03_12 x hx1 hx2 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_03_13 x hx1 hx2 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_03_23 x hx1 hx2 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx0 (m4_minor_02_01 x hx1 hx3 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_02_01 x hx1 hx3 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_02_01 x hx1 hx3 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_02_01 x hx1 hx3 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_02_02 x hx1 hx3 hy0 hy2))
+    · exact False.elim (hx0 (m4_minor_02_02 x hx1 hx3 hy0 hy2))
+    · exact False.elim (hx0 (m4_minor_02_03 x hx1 hx3 hy0 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_02_12 x hx1 hx3 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_02_12 x hx1 hx3 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_02_13 x hx1 hx3 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_02_23 x hx1 hx3 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx0 (m4_minor_023_012 x hx1 hy0 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_023_012 x hx1 hy0 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_023_013 x hx1 hy0 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_023_023 x hx1 hy0 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_023_123 x hx1 hy1 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx0 (m4_minor_01_01 x hx2 hx3 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_01_01 x hx2 hx3 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_01_01 x hx2 hx3 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_01_01 x hx2 hx3 hy0 hy1))
+    · exact False.elim (hx0 (m4_minor_01_02 x hx2 hx3 hy0 hy2))
+    · exact False.elim (hx0 (m4_minor_01_02 x hx2 hx3 hy0 hy2))
+    · exact False.elim (hx0 (m4_minor_01_03 x hx2 hx3 hy0 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_01_12 x hx2 hx3 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_01_12 x hx2 hx3 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_01_13 x hx2 hx3 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_01_23 x hx2 hx3 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx0 (m4_minor_013_012 x hx2 hy0 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_013_012 x hx2 hy0 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_013_013 x hx2 hy0 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_013_023 x hx2 hy0 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_013_123 x hx2 hy1 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx0 (m4_minor_012_012 x hx3 hy0 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_012_012 x hx3 hy0 hy1 hy2))
+    · exact False.elim (hx0 (m4_minor_012_013 x hx3 hy0 hy1 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_012_023 x hx3 hy0 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · exact False.elim (hx0 (m4_minor_012_123 x hx3 hy1 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+  · by_cases hy0 : (applyM4 x).x0 = Goldilocks.zero <;>
+      by_cases hy1 : (applyM4 x).x1 = Goldilocks.zero <;>
+      by_cases hy2 : (applyM4 x).x2 = Goldilocks.zero <;>
+      by_cases hy3 : (applyM4 x).x3 = Goldilocks.zero
+    · exact False.elim (hx0 (m4_minor_0123_0123 x hy0 hy1 hy2 hy3))
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+    · simp [laneWeight4, hx0, hx1, hx2, hx3, hy0, hy1, hy2, hy3]
+
+def vectorLane4 (x : Fin 4 → Goldilocks) : Lane4 := ⟨x 0, x 1, x 2, x 3⟩
+
+def lane4Vector (x : Lane4) (i : Fin 4) : Goldilocks :=
+  if i.val = 0 then x.x0 else if i.val = 1 then x.x1 else if i.val = 2 then x.x2 else x.x3
+
+def hammingWeight4 (x : Fin 4 → Goldilocks) : Nat := laneWeight4 (vectorLane4 x)
+
+/-- Function-vector interface to the deployed four-lane matrix. -/
+def applyM4Vector (x : Fin 4 → Goldilocks) : Fin 4 → Goldilocks :=
+  lane4Vector (applyM4 (vectorLane4 x))
+
+private theorem vectorLane4_lane4Vector (x : Lane4) : vectorLane4 (lane4Vector x) = x := by
+  cases x
+  rfl
+
+/-- Exact branch number: universal lower bound and an attaining nonzero input. -/
+theorem m4_mds_branch_number_eq_five :
+    (∀ x : Fin 4 → Goldilocks, x ≠ (fun _ => Goldilocks.zero) →
+      5 ≤ hammingWeight4 x + hammingWeight4 (applyM4Vector x)) ∧
+    (∃ x : Fin 4 → Goldilocks, x ≠ (fun _ => Goldilocks.zero) ∧
+      hammingWeight4 x + hammingWeight4 (applyM4Vector x) = 5) := by
+  constructor
+  · intro x hx
+    have hn : vectorLane4 x ≠ lane4Zero := by
+      intro hz
+      apply hx
+      funext i
+      have hi : i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 := by
+        have := i.isLt
+        omega
+      rcases hi with rfl | rfl | rfl | rfl
+      · exact congrArg Lane4.x0 hz
+      · exact congrArg Lane4.x1 hz
+      · exact congrArg Lane4.x2 hz
+      · exact congrArg Lane4.x3 hz
+    simpa only [hammingWeight4, applyM4Vector, vectorLane4_lane4Vector] using
+      m4_mds_branch_lower (vectorLane4 x) hn
+  · refine ⟨lane4Vector ⟨Goldilocks.one, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩, ?_, ?_⟩
+    · intro h
+      have := congrFun h 0
+      contradiction
+    · decide
+
+
+/-! ## 6. Two-round differential activity for the deployed four-lane S-box/MDS component -/
+
+private theorem gold_sub_zero_iff (a b : Goldilocks) :
+    Goldilocks.sub a b = Goldilocks.zero ↔ a = b :=
+  LawfulCommRing.sub_eq_zero_iff
+
+private theorem sbox7_add_diff_zero_iff (a b c : Goldilocks) :
+    Goldilocks.sub (sbox7 (Goldilocks.add a c)) (sbox7 (Goldilocks.add b c)) =
+      Goldilocks.zero ↔ Goldilocks.sub a b = Goldilocks.zero := by
+  rw [gold_sub_zero_iff, (sbox7_bijective _ _).2.2.1, gold_sub_zero_iff]
+  constructor
+  · intro h
+    apply LawfulCommRing.add_left_cancel (a := c)
+    change Goldilocks.add c a = Goldilocks.add c b
+    simpa only [show ∀ u v : Goldilocks, Goldilocks.add u v = Goldilocks.add v u from
+      LawfulCommRing.add_comm] using h
+  · intro h
+    rw [h]
+
+/-- Bijection of the actual seventh-power S-box preserves differential support, also after
+    adding an arbitrary shared round constant. -/
+theorem sbox7_preserves_differential_activity (a b rc : Lane4) :
+    laneWeight4 (lane4Sub (sboxLane4 (lane4Add a rc)) (sboxLane4 (lane4Add b rc))) =
+      laneWeight4 (lane4Sub a b) := by
+  simp only [laneWeight4, lane4Sub, sboxLane4, lane4Add, sbox7_add_diff_zero_iff]
+  rfl
+
+private theorem applyM4_sub (a b : Lane4) :
+    lane4Sub (applyM4 a) (applyM4 b) = applyM4 (lane4Sub a b) := by
+  unfold applyM4 lane4Sub lane4Sum
+  apply Lane4.ext <;>
+    (dsimp only
+     rw [← goldOfInt_nat a.x0, ← goldOfInt_nat a.x1,
+       ← goldOfInt_nat a.x2, ← goldOfInt_nat a.x3,
+       ← goldOfInt_nat b.x0, ← goldOfInt_nat b.x1,
+       ← goldOfInt_nat b.x2, ← goldOfInt_nat b.x3]
+     simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_sub, goldOfInt_mul]
+     congr 1
+     omega)
+
+private theorem lane4Sub_eq_zero_iff (a b : Lane4) : lane4Sub a b = lane4Zero ↔ a = b := by
+  constructor
+  · intro h
+    apply Lane4.ext
+    · exact (gold_sub_zero_iff _ _).mp (congrArg Lane4.x0 h)
+    · exact (gold_sub_zero_iff _ _).mp (congrArg Lane4.x1 h)
+    · exact (gold_sub_zero_iff _ _).mp (congrArg Lane4.x2 h)
+    · exact (gold_sub_zero_iff _ _).mp (congrArg Lane4.x3 h)
+  · intro h
+    subst b
+    apply Lane4.ext <;> exact (gold_sub_zero_iff _ _).mpr rfl
+
+/-- One full round of the four-lane component: shared constant, actual S-box, actual M4. -/
+def poseidon2Round4 (rc x : Lane4) : Lane4 := applyM4 (sboxLane4 (lane4Add x rc))
+
+/-- At least five active S-boxes across two successive four-lane rounds. The first term counts
+    the first S-box inputs and the second counts the next round's S-box inputs. Arbitrary shared
+    round constants preserve these counts. This is a structural bound, not a probability claim
+    for the full twelve-lane permutation or for partial rounds. -/
+theorem poseidon2_two_round_active_sboxes_ge_five (a b rc : Lane4) (hne : a ≠ b) :
+    5 ≤ laneWeight4 (lane4Sub a b) +
+      laneWeight4 (lane4Sub (poseidon2Round4 rc a) (poseidon2Round4 rc b)) := by
+  let d := lane4Sub (sboxLane4 (lane4Add a rc)) (sboxLane4 (lane4Add b rc))
+  have hd : d ≠ lane4Zero := by
+    intro h
+    have hEq := (lane4Sub_eq_zero_iff _ _).mp h
+    apply hne
+    apply Lane4.ext
+    · exact (gold_sub_zero_iff _ _).mp ((sbox7_add_diff_zero_iff _ _ _).mp
+        ((gold_sub_zero_iff _ _).mpr (congrArg Lane4.x0 hEq)))
+    · exact (gold_sub_zero_iff _ _).mp ((sbox7_add_diff_zero_iff _ _ _).mp
+        ((gold_sub_zero_iff _ _).mpr (congrArg Lane4.x1 hEq)))
+    · exact (gold_sub_zero_iff _ _).mp ((sbox7_add_diff_zero_iff _ _ _).mp
+        ((gold_sub_zero_iff _ _).mpr (congrArg Lane4.x2 hEq)))
+    · exact (gold_sub_zero_iff _ _).mp ((sbox7_add_diff_zero_iff _ _ _).mp
+        ((gold_sub_zero_iff _ _).mpr (congrArg Lane4.x3 hEq)))
+  have hm := m4_mds_branch_lower d hd
+  rw [sbox7_preserves_differential_activity] at hm
+  simpa only [poseidon2Round4, applyM4_sub] using hm
+
+private theorem laneWeight4_le_four (x : Lane4) : laneWeight4 x ≤ 4 := by
+  unfold laneWeight4
+  split <;> split <;> split <;> split <;> decide
+
+private theorem poseidon2Round4_injective (rc : Lane4) (a b : Lane4)
+    (h : poseidon2Round4 rc a = poseidon2Round4 rc b) : a = b := by
+  if he : a = b then exact he else
+    have hm := poseidon2_two_round_active_sboxes_ge_five a b rc he
+    have hu := laneWeight4_le_four (lane4Sub a b)
+    have hz := (lane4Sub_eq_zero_iff _ _).mpr h
+    rw [hz] at hm
+    have hw : laneWeight4 lane4Zero = 0 := rfl
+    rw [hw] at hm
+    omega
+
+/-- Eight full four-lane rounds contain four disjoint two-round windows. This counts actual
+    differential supports in a supplied nonzero trajectory, rather than a nominal round floor. -/
+theorem poseidon2_eight_round_active_sboxes_ge_twenty
+    (a b : Nat → Lane4) (rc : Nat → Lane4)
+    (ha : ∀ i, a (i + 1) = poseidon2Round4 (rc i) (a i))
+    (hb : ∀ i, b (i + 1) = poseidon2Round4 (rc i) (b i))
+    (hInitial : a 0 ≠ b 0) :
+    20 ≤ (laneWeight4 (lane4Sub (a 0) (b 0)) + laneWeight4 (lane4Sub (a 1) (b 1))) +
+      (laneWeight4 (lane4Sub (a 2) (b 2)) + laneWeight4 (lane4Sub (a 3) (b 3))) +
+      (laneWeight4 (lane4Sub (a 4) (b 4)) + laneWeight4 (lane4Sub (a 5) (b 5))) +
+      (laneWeight4 (lane4Sub (a 6) (b 6)) + laneWeight4 (lane4Sub (a 7) (b 7))) := by
+  have hne : ∀ i, a i ≠ b i := by
+    intro i
+    induction i with
+    | zero => exact hInitial
+    | succ i ih =>
+      intro h
+      rw [ha i, hb i] at h
+      exact ih (poseidon2Round4_injective (rc i) (a i) (b i) h)
+  have h0 := poseidon2_two_round_active_sboxes_ge_five (a 0) (b 0) (rc 0) (hne 0)
+  have h2 := poseidon2_two_round_active_sboxes_ge_five (a 2) (b 2) (rc 2) (hne 2)
+  have h4 := poseidon2_two_round_active_sboxes_ge_five (a 4) (b 4) (rc 4) (hne 4)
+  have h6 := poseidon2_two_round_active_sboxes_ge_five (a 6) (b 6) (rc 6) (hne 6)
+  rw [← ha 0, ← hb 0] at h0
+  rw [← ha 2, ← hb 2] at h2
+  rw [← ha 4, ← hb 4] at h4
+  rw [← ha 6, ← hb 6] at h6
+  simp only [Nat.reduceAdd] at h0 h2 h4 h6
+  omega
+
+
+/-! ### Symbolic degree of actual four-lane rounds -/
+
+/-- Scalar polynomial syntax. Degree here is a syntactic upper bound; cancellations and
+    reduction modulo `X^p - X` may lower the degree of the induced field function. -/
+inductive PoseidonExpr where
+  | variable : Nat → PoseidonExpr
+  | constant : Goldilocks → PoseidonExpr
+  | add : PoseidonExpr → PoseidonExpr → PoseidonExpr
+  | mul : PoseidonExpr → PoseidonExpr → PoseidonExpr
+
+def PoseidonExpr.eval (v : Nat → Goldilocks) : PoseidonExpr → Goldilocks
+  | .variable i => v i
+  | .constant c => c
+  | .add a b => Goldilocks.add (a.eval v) (b.eval v)
+  | .mul a b => Goldilocks.mul (a.eval v) (b.eval v)
+
+def PoseidonExpr.degree : PoseidonExpr → Nat
+  | .variable _ => 1
+  | .constant _ => 0
+  | .add a b => max a.degree b.degree
+  | .mul a b => a.degree + b.degree
+
+/-- Exactly the multiplication circuit used by `sbox7`. -/
+def PoseidonExpr.seventh (x : PoseidonExpr) : PoseidonExpr :=
+  let x2 := .mul x x
+  let x3 := .mul x2 x
+  let x4 := .mul x2 x2
+  .mul x3 x4
+
+theorem symbolic_sbox7_eval (v : Nat → Goldilocks) (x : PoseidonExpr) :
+    x.seventh.eval v = sbox7 (x.eval v) := by
+  simp only [PoseidonExpr.seventh, PoseidonExpr.eval, sbox7]
+
+theorem symbolic_sbox7_degree (x : PoseidonExpr) : x.seventh.degree = 7 * x.degree := by
+  simp only [PoseidonExpr.seventh, PoseidonExpr.degree]
+  omega
+
+private def symbolicM4Lane (s a b : PoseidonExpr) : PoseidonExpr :=
+  .add s (.add a (.mul (.constant (Goldilocks.ofNat 2)) b))
+
+/-- The operational circuit of `applyM4`, lifted to polynomial expressions. -/
+def symbolicM4 (x : Fin 4 → PoseidonExpr) (i : Fin 4) : PoseidonExpr :=
+  let s := PoseidonExpr.add (.add (x 0) (x 1)) (.add (x 2) (x 3))
+  if i.val = 0 then symbolicM4Lane s (x 0) (x 1)
+  else if i.val = 1 then symbolicM4Lane s (x 1) (x 2)
+  else if i.val = 2 then symbolicM4Lane s (x 2) (x 3)
+  else symbolicM4Lane s (x 3) (x 0)
+
+private theorem fin4_cases (i : Fin 4) : i = 0 ∨ i = 1 ∨ i = 2 ∨ i = 3 := by
+  have := i.isLt
+  omega
+
+theorem symbolicM4_eval (v : Nat → Goldilocks) (x : Fin 4 → PoseidonExpr) :
+    (fun i => (symbolicM4 x i).eval v) = applyM4Vector (fun i => (x i).eval v) := by
+  funext i
+  rcases fin4_cases i with rfl | rfl | rfl | rfl <;> rfl
+
+theorem symbolicM4_degree_le (x : Fin 4 → PoseidonExpr) (k : Nat)
+    (hx : ∀ i, (x i).degree ≤ k) (i : Fin 4) : (symbolicM4 x i).degree ≤ k := by
+  have h0 := hx 0
+  have h1 := hx 1
+  have h2 := hx 2
+  have h3 := hx 3
+  rcases fin4_cases i with rfl | rfl | rfl | rfl <;>
+    (simp [symbolicM4, symbolicM4Lane, PoseidonExpr.degree, show (3 : Fin 4).val = 3 from rfl]
+     omega)
+
+/-- Shared round constants are degree zero; each round multiplies the degree bound by seven. -/
+def symbolicRound4 (rc : Lane4) (x : Fin 4 → PoseidonExpr) : Fin 4 → PoseidonExpr :=
+  symbolicM4 (fun i => (PoseidonExpr.add (x i) (.constant (lane4Vector rc i))).seventh)
+
+theorem symbolicRound4_eval (v : Nat → Goldilocks) (rc : Lane4)
+    (x : Fin 4 → PoseidonExpr) :
+    (fun i => (symbolicRound4 rc x i).eval v) =
+      lane4Vector (poseidon2Round4 rc (vectorLane4 (fun i => (x i).eval v))) := by
+  rw [symbolicRound4, symbolicM4_eval]
+  rfl
+
+theorem symbolicRound4_degree_le (rc : Lane4) (x : Fin 4 → PoseidonExpr) (k : Nat)
+    (hx : ∀ i, (x i).degree ≤ k) (i : Fin 4) : (symbolicRound4 rc x i).degree ≤ 7 * k := by
+  apply symbolicM4_degree_le
+  intro j
+  rw [symbolic_sbox7_degree]
+  simp only [PoseidonExpr.degree, Nat.max_zero]
+  exact Nat.mul_le_mul_left 7 (hx j)
+
+/-- Round-by-round symbolic bound for any sequence of actual four-lane rounds, starting with
+    coordinate variables. This gives `7^r` as an upper bound, never as a lower bound on security. -/
+theorem poseidon2_symbolic_round_degree_bound (x : Nat → Fin 4 → PoseidonExpr)
+    (rc : Nat → Lane4) (h0 : ∀ i, x 0 i = .variable i.val)
+    (hstep : ∀ r, x (r + 1) = symbolicRound4 (rc r) (x r)) :
+    ∀ r i, (x r i).degree ≤ 7 ^ r := by
+  intro r
+  induction r with
+  | zero => intro i; rw [h0]; exact Nat.le_refl 1
+  | succ r ih =>
+    intro i
+    rw [hstep]
+    have h := symbolicRound4_degree_le (rc r) (x r) (7 ^ r) ih i
+    simpa only [Nat.pow_succ, Nat.mul_comm] using h
+
+/-! ## 7. Concrete accepting hierarchical certificates -/
+
+/-- Two distinct singleton committees use the same relation `x^7 = 0`, represented by
+    `(seed, root) = (0, 0)` and `(1, 1)`. Both use the honest two-stage WHIR prover.
+    This is an inhabitedness example for the field-based signature suite, not a security
+    assertion about that suite. The threshold and the actual signer count are both one. -/
+def concreteHemShard (second : Bool) : HemShardProof :=
+  let seed := if second then Goldilocks.one else Goldilocks.zero
+  let sid : List UInt8 := [if second then 1 else 0]
+  let msg := shardBoundMessage sid [] []
+  let bundle := buildHonestSbox7WhirBundle seed Goldilocks.zero Goldilocks.one msg
+  { shardId := sid, threshold := 1, inst := rsSbox7Inst seed seed msg,
+    proof := bundle.1, fs := bundle.2.1 }
+
+def concreteHemArith : RowArithmetization := rsSbox7TraceArith Goldilocks.zero Goldilocks.zero
+
+def concreteHemRegistryDigest : List UInt8 :=
+  poseidon2Hash32 (encodeRegistry ([concreteHemShard false, concreteHemShard true].map
+    HemShardProof.registration))
+
+theorem concreteHemShard_accepts (second : Bool) :
+    verifyHemShard concreteHemArith rsSbox7WhirDomain [] [] (concreteHemShard second) = true := by
+  have hAcc := (honestSbox7WhirProof_accepts
+    (if second then Goldilocks.one else Goldilocks.zero)
+    Goldilocks.zero Goldilocks.one
+    (shardBoundMessage [if second then 1 else 0] [] [])).1
+  cases second <;>
+    (change true && true && _ = true
+     simpa only [Bool.true_and] using hAcc)
+
+/-- A root certificate with two distinct shard ids, two distinct public keys, and two active
+    signers. Its registry commitment is computed by the deployed Poseidon2 hash. -/
+theorem inhabited_verifyHierarchicalHem_two_shards :
+    verifyHierarchicalHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      concreteHemRegistryDigest [] [] [concreteHemShard false, concreteHemShard true] = true ∧
+    hierarchicalClaimedWeight [concreteHemShard false, concreteHemShard true] = 2 ∧
+    hierarchicalThresholdSum [concreteHemShard false, concreteHemShard true] = 2 := by
+  refine ⟨?_, rfl, rfl⟩
+  unfold verifyHierarchicalHem concreteHemRegistryDigest
+  have hIds : (hierarchicalShardIds [concreteHemShard false, concreteHemShard true]).Nodup := by
+    decide
+  have hKeys : (hierarchicalCommittee [concreteHemShard false, concreteHemShard true]).Nodup := by
+    decide
+  have hall : [concreteHemShard false, concreteHemShard true].all
+      (verifyHemShard concreteHemArith rsSbox7WhirDomain [] []) = true := by
+    simp only [List.all_cons, List.all_nil, concreteHemShard_accepts, Bool.and_self]
+  simp only [Bool.and_eq_true, decide_eq_true_eq]
+  exact ⟨⟨⟨rfl, hIds⟩, hKeys⟩, hall⟩
+
+/-- Unconditional replay: the same actual accepting one-signer certificate is counted twice
+    by the unscoped verifier, while the scoped root rejects it. No accepted-shard premise. -/
+theorem tooth_concrete_unscoped_shard_replay :
+    verifyHierarchicalHemUnscoped concreteHemArith rsSbox7WhirDomain
+      [concreteHemShard false, concreteHemShard false] = true ∧
+    hierarchicalClaimedWeight [concreteHemShard false, concreteHemShard false] = 2 ∧
+    bitmapPopcountSpec (concreteHemShard false).proof.agg.bitmap = 1 ∧
+    (∀ q ∈ hierarchicalActiveSlots [concreteHemShard false, concreteHemShard false],
+      q ∈ shardActiveSlots (concreteHemShard false)) ∧
+    verifyHierarchicalHem poseidon2Hash32 concreteHemArith rsSbox7WhirDomain
+      concreteHemRegistryDigest [] [] [concreteHemShard false, concreteHemShard false] = false := by
+  have h := tooth_unscoped_shard_id_allows_quorum_replay_multiplication
+    poseidon2Hash32 concreteHemArith rsSbox7WhirDomain concreteHemRegistryDigest [] []
+    (concreteHemShard false) 2 (by decide) (concreteHemShard_accepts false)
+  exact ⟨h.1, rfl, rfl, h.2.2.2.1, h.2.2.2.2⟩
+
+end Qsag
+
+/- Audit every declaration owned by this module, including private certificate helpers.
+    Imported proof dependencies are traversed transitively by the kernel axiom collector. -/
+open Lean Elab Command in
+run_cmd do
+  let env ← getEnv
+  let mut checked : Nat := 0
+  for (name, _) in env.constants.toList do
+    if !env.isImportedConst name then
+      let roots ← Lean.collectAxioms name
+      let rejected := roots.filter fun ax => ax != ``propext && ax != ``Quot.sound
+      unless rejected.isEmpty do
+        throwError "Rejected axioms in {name}: {rejected}"
+      checked := checked + 1
+  if checked == 0 then throwError "Empty module axiom audit"
+  logInfo m!"Module axiom audit: {checked} declarations; 0 rejected axioms"
