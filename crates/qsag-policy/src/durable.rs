@@ -137,7 +137,7 @@ impl PolicySignerGuardShare {
         if r.take::<29>()? != DOMAIN {
             return Err(PolicyGuardError::InvalidCheckpoint);
         }
-        if r.take::<32>()? != self.durable_key_id
+        if !ct_eq_bytes(&r.take::<32>()?, &self.durable_key_id)
             || u16::from_be_bytes(r.take()?) != self.enrolled_party_id
             || self.party_id != self.enrolled_party_id
         {
@@ -236,35 +236,78 @@ impl PolicySignerGuardShare {
 /// Whole-directory rollback still requires an external monotonic generation fence.
 #[cfg(feature = "std")]
 pub struct FsPolicyDurableLedger {
+    path: std::path::PathBuf,
     record: qsag_asm::durable::LockedRecord,
     key: qsag_accel::ct::RedactedSecret<32>,
     generation: u64,
+    initialized: bool,
 }
 #[cfg(feature = "std")]
 impl FsPolicyDurableLedger {
-    pub fn create_new(path: impl Into<std::path::PathBuf>, key: [u8; 32], guard: &PolicySignerGuardShare) -> std::io::Result<Self> {
-        let record = qsag_asm::durable::LockedRecord::create_new(path)?;
-        let key = qsag_accel::ct::RedactedSecret::new(cshake256_framed_32(
-            b"QSAG.POLICY.FS.SEAL.V1", &[&key, &record.lock_seal()]));
-        let mut ledger = Self { record, key, generation: guard.durable_generation.get() };
+    pub fn create_new(
+        path: impl Into<std::path::PathBuf>,
+        mut key: [u8; 32],
+        guard: &PolicySignerGuardShare,
+    ) -> std::io::Result<Self> {
+        let path = path.into();
+        let record = qsag_asm::durable::LockedRecord::create_new(&path)?;
+        let derived = cshake256_framed_32(b"QSAG.POLICY.FS.SEAL.V1", &[&key, &record.lock_seal()]);
+        ct_zeroize_bytes(&mut key);
+        let key = qsag_accel::ct::RedactedSecret::new(derived);
+        let mut ledger = Self {
+            path,
+            record,
+            key,
+            generation: guard.durable_generation.get(),
+            initialized: false,
+        };
         ledger.sync_persist(guard)?;
         Ok(ledger)
     }
-    pub fn open_existing(path: impl Into<std::path::PathBuf>, key: [u8; 32], guard: &mut PolicySignerGuardShare, min_generation: u64) -> std::io::Result<Self> {
-        let record = qsag_asm::durable::LockedRecord::open_existing(path)?;
-        let key = qsag_accel::ct::RedactedSecret::new(cshake256_framed_32(
-            b"QSAG.POLICY.FS.SEAL.V1", &[&key, &record.lock_seal()]));
-        let generation = guard.restore_from_durable_checkpoint(&record.read()?, key.expose(), min_generation)
+    pub fn open_existing(
+        path: impl Into<std::path::PathBuf>,
+        mut key: [u8; 32],
+        guard: &mut PolicySignerGuardShare,
+        min_generation: u64,
+    ) -> std::io::Result<Self> {
+        let path = path.into();
+        let record = qsag_asm::durable::LockedRecord::open_existing(&path)?;
+        let derived = cshake256_framed_32(b"QSAG.POLICY.FS.SEAL.V1", &[&key, &record.lock_seal()]);
+        ct_zeroize_bytes(&mut key);
+        let key = qsag_accel::ct::RedactedSecret::new(derived);
+        let generation = guard
+            .restore_from_durable_checkpoint(&record.read()?, key.expose(), min_generation)
             .map_err(|_| std::io::Error::other("invalid policy checkpoint"))?;
-        Ok(Self { record, key, generation })
+        Ok(Self {
+            path,
+            record,
+            key,
+            generation,
+            initialized: true,
+        })
     }
-    pub fn generation(&self) -> u64 { self.generation }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
     /// Call before releasing any authorized signature; failure is fail-closed.
     pub fn sync_persist(&mut self, guard: &PolicySignerGuardShare) -> std::io::Result<()> {
-        let generation = self.generation.max(guard.durable_generation.get()).checked_add(1)
+        if self.initialized {
+            let meta = std::fs::symlink_metadata(&self.path)?;
+            if !meta.is_file() {
+                return Err(std::io::Error::other(
+                    "policy checkpoint path is not a regular file",
+                ));
+            }
+        }
+        let generation = self
+            .generation
+            .max(guard.durable_generation.get())
+            .checked_add(1)
             .ok_or_else(|| std::io::Error::other("generation exhausted"))?;
-        self.record.replace(&guard.export_durable_checkpoint(self.key.expose(), generation))?;
+        self.record
+            .replace(&guard.export_durable_checkpoint(self.key.expose(), generation))?;
         self.generation = generation;
+        self.initialized = true;
         Ok(())
     }
 }

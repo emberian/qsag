@@ -33,6 +33,13 @@ fn main() {
         .unwrap_or_else(|| manifest_dir.join("../../crates/qsag-core/src"));
     let core_src = core_src.canonicalize().unwrap_or(core_src);
 
+    // The library must build when copied out of this repository for extraction.
+    // Differential tests need production source, but the no_std library does not.
+    if !core_src.join("wipe.rs").is_file() {
+        fs::write(out_dir.join("qsag_core_mods.rs"), "").expect("write standalone module stub");
+        return;
+    }
+
     let asm_candidates = [
         manifest_dir.join("../../crates/qsag-asm/src"),
         manifest_dir.join("../crates/qsag-asm/src"),
