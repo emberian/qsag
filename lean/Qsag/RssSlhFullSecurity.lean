@@ -8,17 +8,21 @@ over the multi-round rushing-adversary execution engine `Qsag.InteractiveUcEngin
 
 1. **Concrete 3-Round Interactive Wire Protocol (`rssSlhInteractiveProtocol`) & `sk`-Free UC Simulator (`Sim_RssSlh`)**:
    - **Round 1**: Honest parties consume monotonic `maskSessionCursor` and broadcast `SHAKE256`
-     hedged-nonce commitments bound to `(pkSeed, pkRoot, sessionId, reqEpoch, msg, cursor, partyId)`.
+     hedged-nonce commitments over injectively length-framed `encodeMultiFrame`/`leb128` preimages
+     (`round1NonceCommit_binding_or_collision`, `slhPkDigest_binding_or_collision`,
+     `slhReqDigest_injective_on_epoch_optRand_msg`; `0` `UInt8.ofNat` truncation).
    - **Round 2**: Honest parties open Round-1 nonces and broadcast 64-way bitsliced Keccak `χ`-row
      shares (`mpcChiParty0/1/2` / `rssChiLane0/1/2`) masked by fresh session pads `(chiMaskA, chiMaskB)`
      (plus `t`-of-`n` SPDZ Shamir masked openings via `shamir_rebalanceEquiv`); rushing adversary `A`
-     sees all honest Round-2 `ByteArray`s before choosing corrupt wire messages & `GF(2^128)` (`Tower128`)
-     consistency payload.
+     sees all honest Round-2 `ByteArray`s before transmitting raw `GF(2^128)` (`Tower128`) gate wires.
    - **Mandatory Pre-Cut Consistency Barrier (`preCutBarrier`)**: Verifies Round-1 commitment openings
-     and `batchDeviationPoly deltas gamma == towerZero 7` strictly before Round 3; any mismatch aborts
-     with `.activeConsistencyFailed` and irreversibly poisons `WalLatchState` + erases secret key shares.
-   - **Round 3 (`honestRound3` & `finalizeCutOpen`)**: Honest parties broadcast replicated `FLNW17`
-     cut-opening shares (`verifyRssActiveOpenBytes`), assemble and verify the NIST `FIPS 205` signature
+     and the algebraic `BBCGGI19` / `BDOZ` inner-product equation
+     `bbcggiWireAccumulator sentWires gamma == bbcggiWireAccumulator expectedWires gamma` strictly
+     before Round 3; any mismatch aborts with `.activeConsistencyFailed` and irreversibly poisons
+     `WalLatchState` + erases secret key shares.
+   - **Round 3 (`honestRound3` & `finalizeCutOpen`)**: Honest parties evaluate the replicated `FLNW17`
+     gate cross-byte (`evalReplicatedGateCrossByte`), broadcast cut-opening shares
+     (`verifyRssActiveOpenBytes`), assemble and verify the NIST `FIPS 205` signature
      (`decodeSlhSig` / `slhVerifyInternal`), and atomically commit `WalLatchState` before `SignOk(sigBytes)`.
    - **Black-Box UC Simulator (`Sim_RssSlh`)**: Receives **only** `pk : SlhPublicKey` and, upon
      `t`-quorum approval in `IdealTsig`, raw `idealSigBytes : ByteArray` from `IdealTsig` (`0` access
@@ -905,21 +909,21 @@ theorem decodeTower128Wire_encodeTower128Wire (x : Tower128) :
   rw [fixedBytesToBv_bvToFixedBytes 16]
   exact unpackTower_packTower 7 x
 
-/-- Parse up to `deg` 16-byte `Tower128` wire deviations following an 8-byte Round-1 nonce opening. -/
+/-- Parse up to `deg` raw 16-byte `Tower128` (`GF(2^128)`) gate wires following an 8-byte Round-1 nonce opening. -/
 def parseCorruptRound2Wire (deg : Nat) (wire : ByteArray) : Option (List UInt8 × List Tower128) :=
   let raw := unpackWireBytes wire
   if raw.length < 8 then none
   else
     let nonceC := raw.take 8
     let rem := raw.drop 8
-    let numDeltas := Nat.min deg (rem.length / 16)
-    let chunks := splitByteChunks 16 numDeltas rem
+    let numWires := Nat.min deg (rem.length / 16)
+    let chunks := splitByteChunks 16 numWires rem
     some (nonceC, chunks.map decodeTower128Wire)
 
 theorem parseCorruptRound2Wire_length_le (deg : Nat) (wire : ByteArray)
-    {nonceC : List UInt8} {deltas : List Tower128}
-    (hParse : parseCorruptRound2Wire deg wire = some (nonceC, deltas)) :
-    deltas.length ≤ deg := by
+    {nonceC : List UInt8} {sentWires : List Tower128}
+    (hParse : parseCorruptRound2Wire deg wire = some (nonceC, sentWires)) :
+    sentWires.length ≤ deg := by
   unfold parseCorruptRound2Wire at hParse
   dsimp only at hParse
   split at hParse
@@ -929,22 +933,308 @@ theorem parseCorruptRound2Wire_length_le (deg : Nat) (wire : ByteArray)
     simp only [List.length_map, splitByteChunks_length]
     exact Nat.min_le_left _ _
 
-/-- Domain-separated Round-1 `SHAKE256` hedged-nonce commitment (`32` bytes). -/
+private theorem leb128_inj {n₁ n₂ : Nat} (h : leb128 n₁ = leb128 n₂) : n₁ = n₂ := by
+  have hApp : leb128 n₁ ++ [] = leb128 n₂ ++ [] := by simpa using h
+  exact (leb128_prefix_inj hApp).1
+
+/-- Domain tag `"QSAG.RSS.R1.COMMIT/v1"` (`21` ASCII bytes). -/
+def round1CommitDomainTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x52, 0x53, 0x53, 0x2E, 0x52, 0x31, 0x2E,
+   0x43, 0x4F, 0x4D, 0x4D, 0x49, 0x54, 0x2F, 0x76, 0x31]
+
+/-- Domain tag `"QSAG.SLH.PK.DIGEST/v1"` (`21` ASCII bytes). -/
+def slhPkDomainTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x53, 0x4C, 0x48, 0x2E, 0x50, 0x4B, 0x2E,
+   0x44, 0x49, 0x47, 0x45, 0x53, 0x54, 0x2F, 0x76, 0x31]
+
+/-- Domain tag `"QSAG.SLH.REQ.DIGEST/v1"` (`22` ASCII bytes). -/
+def slhReqDomainTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x53, 0x4C, 0x48, 0x2E, 0x52, 0x45, 0x51,
+   0x2E, 0x44, 0x49, 0x47, 0x45, 0x53, 0x54, 0x2F, 0x76, 0x31]
+
+/-- Domain tag `"QSAG.RSS.GATE.WIRE/v1"` (`21` ASCII bytes). -/
+def rssGateWireDomainTag : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2E, 0x52, 0x53, 0x53, 0x2E, 0x47, 0x41, 0x54,
+   0x45, 0x2E, 0x57, 0x49, 0x52, 0x45, 0x2F, 0x76, 0x31]
+
+/-- Canonical injective multi-frame preimage for Round-1 hedged-nonce commitments (`0` `UInt8.ofNat` truncation). -/
+def encodeRound1NoncePreimage (pk : SlhPublicKey) (req : SessionScheduleReq) (cursor : Nat)
+    (partyId : Nat) (nonceBytes : List UInt8) : List UInt8 :=
+  encodeMultiFrame
+    [round1CommitDomainTag, leb128 partyId, leb128 req.sessionId, leb128 req.reqEpoch,
+     leb128 cursor, pk.pkSeed, pk.pkRoot, req.msg, req.optRand, nonceBytes]
+
+theorem encodeRound1NoncePreimage_injective
+    {pk₁ pk₂ : SlhPublicKey} {req₁ req₂ : SessionScheduleReq}
+    {cur₁ cur₂ pid₁ pid₂ : Nat} {n₁ n₂ : List UInt8}
+    (h : encodeRound1NoncePreimage pk₁ req₁ cur₁ pid₁ n₁ =
+         encodeRound1NoncePreimage pk₂ req₂ cur₂ pid₂ n₂) :
+    pk₁ = pk₂ ∧ req₁.sessionId = req₂.sessionId ∧ req₁.reqEpoch = req₂.reqEpoch ∧
+    req₁.msg = req₂.msg ∧ req₁.optRand = req₂.optRand ∧
+    cur₁ = cur₂ ∧ pid₁ = pid₂ ∧ n₁ = n₂ := by
+  have hF := encodeMultiFrame_injective h
+  simp only [List.cons.injEq] at hF
+  rcases pk₁ with ⟨s1, r1⟩
+  rcases pk₂ with ⟨s2, r2⟩
+  exact ⟨congrArg₂ SlhPublicKey.mk hF.2.2.2.2.2.1 hF.2.2.2.2.2.2.1,
+         leb128_inj hF.2.2.1, leb128_inj hF.2.2.2.1,
+         hF.2.2.2.2.2.2.2.1, hF.2.2.2.2.2.2.2.2.1,
+         leb128_inj hF.2.2.2.2.1, leb128_inj hF.2.1,
+         hF.2.2.2.2.2.2.2.2.2.1⟩
+
+/-- Domain-separated Round-1 `SHAKE256` hedged-nonce commitment (`32` bytes) over injective `encodeMultiFrame`. -/
 def round1NonceCommit (pk : SlhPublicKey) (req : SessionScheduleReq) (cursor : Nat)
     (partyId : Nat) (nonceBytes : List UInt8) : ByteArray :=
-  let hdr : List UInt8 :=
-    (0xA1 : UInt8) :: UInt8.ofNat partyId :: UInt8.ofNat req.sessionId ::
-      UInt8.ofNat req.reqEpoch :: UInt8.ofNat cursor ::
-      (pk.pkSeed ++ pk.pkRoot ++ req.msg ++ req.optRand ++ nonceBytes)
-  packWireBytes (shake256Xof 32 hdr)
+  packWireBytes (shake256Xof 32 (encodeRound1NoncePreimage pk req cursor partyId nonceBytes))
+
+theorem round1NonceCommit_binding_or_collision
+    {pk₁ pk₂ : SlhPublicKey} {req₁ req₂ : SessionScheduleReq}
+    {cur₁ cur₂ pid₁ pid₂ : Nat} {n₁ n₂ : List UInt8}
+    (hEq : round1NonceCommit pk₁ req₁ cur₁ pid₁ n₁ =
+           round1NonceCommit pk₂ req₂ cur₂ pid₂ n₂) :
+    (pk₁ = pk₂ ∧ req₁.sessionId = req₂.sessionId ∧ req₁.reqEpoch = req₂.reqEpoch ∧
+     req₁.msg = req₂.msg ∧ req₁.optRand = req₂.optRand ∧
+     cur₁ = cur₂ ∧ pid₁ = pid₂ ∧ n₁ = n₂) ∨
+    Nonempty (Fips205ShakeCollision 32) := by
+  have hBytes : shake256Xof 32 (encodeRound1NoncePreimage pk₁ req₁ cur₁ pid₁ n₁) =
+                shake256Xof 32 (encodeRound1NoncePreimage pk₂ req₂ cur₂ pid₂ n₂) := by
+    have hUnpack := congrArg unpackWireBytes hEq
+    simpa only [round1NonceCommit, unpackWireBytes_packWireBytes] using hUnpack
+  by_cases hPre : encodeRound1NoncePreimage pk₁ req₁ cur₁ pid₁ n₁ =
+                  encodeRound1NoncePreimage pk₂ req₂ cur₂ pid₂ n₂
+  · exact .inl (encodeRound1NoncePreimage_injective hPre)
+  · exact .inr ⟨{ in1 := encodeRound1NoncePreimage pk₁ req₁ cur₁ pid₁ n₁
+                  in2 := encodeRound1NoncePreimage pk₂ req₂ cur₂ pid₂ n₂
+                  hNe := hPre
+                  hEq := hBytes }⟩
+
+/-- Canonical injective multi-frame preimage for `SlhPublicKey` digests. -/
+def encodeSlhPkPreimage (pk : SlhPublicKey) : List UInt8 :=
+  encodeMultiFrame [slhPkDomainTag, pk.pkSeed, pk.pkRoot]
+
+theorem encodeSlhPkPreimage_injective {pk₁ pk₂ : SlhPublicKey}
+    (h : encodeSlhPkPreimage pk₁ = encodeSlhPkPreimage pk₂) : pk₁ = pk₂ := by
+  have hF := encodeMultiFrame_injective h
+  simp only [List.cons.injEq] at hF
+  rcases pk₁ with ⟨s1, r1⟩
+  rcases pk₂ with ⟨s2, r2⟩
+  exact congrArg₂ SlhPublicKey.mk hF.2.1 hF.2.2.1
 
 /-- Canonical digests bound in `WalLatchState` for public key `pk` and scheduled request `req`. -/
 def slhPkDigest (pk : SlhPublicKey) : List UInt8 :=
-  shake256Xof 32 ((0xD0 : UInt8) :: (pk.pkSeed ++ pk.pkRoot))
+  shake256Xof 32 (encodeSlhPkPreimage pk)
+
+theorem slhPkDigest_binding_or_collision {pk₁ pk₂ : SlhPublicKey}
+    (hEq : slhPkDigest pk₁ = slhPkDigest pk₂) :
+    pk₁ = pk₂ ∨ Nonempty (Fips205ShakeCollision 32) := by
+  by_cases hPre : encodeSlhPkPreimage pk₁ = encodeSlhPkPreimage pk₂
+  · exact .inl (encodeSlhPkPreimage_injective hPre)
+  · exact .inr ⟨{ in1 := encodeSlhPkPreimage pk₁
+                  in2 := encodeSlhPkPreimage pk₂
+                  hNe := hPre
+                  hEq := hEq }⟩
+
+def encodeSlhReqPreimage (req : SessionScheduleReq) : List UInt8 :=
+  encodeMultiFrame [slhReqDomainTag, leb128 req.reqEpoch, req.optRand, req.msg]
 
 def slhReqDigest (req : SessionScheduleReq) : List UInt8 :=
-  let framed := (0xD1 : UInt8) :: UInt8.ofNat req.optRand.length :: (req.optRand ++ req.msg)
-  framed ++ shake256Xof 32 framed
+  let framed := encodeSlhReqPreimage req
+  shake256Xof 32 framed ++ framed
+
+theorem slhReqDigest_injective_on_epoch_optRand_msg {req₁ req₂ : SessionScheduleReq}
+    (h : slhReqDigest req₁ = slhReqDigest req₂) :
+    req₁.reqEpoch = req₂.reqEpoch ∧ req₁.optRand = req₂.optRand ∧ req₁.msg = req₂.msg := by
+  unfold slhReqDigest at h
+  dsimp only at h
+  have hLenEq : (shake256Xof 32 (encodeSlhReqPreimage req₁)).length =
+                (shake256Xof 32 (encodeSlhReqPreimage req₂)).length := by
+    rw [shake256Xof_length, shake256Xof_length]
+  obtain ⟨_, hFramed⟩ := List.append_inj h hLenEq
+  have hF := encodeMultiFrame_injective hFramed
+  simp only [List.cons.injEq] at hF
+  exact ⟨leb128_inj hF.2.1, hF.2.2.1, hF.2.2.2.1⟩
+
+/-- Public transcript-derived expected `GF(2^128)` (`Tower128`) gate wire at index `idx`
+    from `(pk, req, cursor, partyId, nonceC, idx)` over injective `encodeMultiFrame`. -/
+def deriveExpectedGateWire (pk : SlhPublicKey) (req : SessionScheduleReq)
+    (cursor partyId : Nat) (nonceC : List UInt8) (idx : Nat) : Tower128 :=
+  let pre := encodeMultiFrame
+    [rssGateWireDomainTag, leb128 partyId, leb128 req.sessionId, leb128 req.reqEpoch,
+     leb128 cursor, leb128 idx, pk.pkSeed, pk.pkRoot, req.msg, req.optRand, nonceC]
+  decodeTower128Wire (shake256Xof 16 pre)
+
+def deriveExpectedGateWires (pk : SlhPublicKey) (req : SessionScheduleReq)
+    (cursor partyId : Nat) (nonceC : List UInt8) (count : Nat) : List Tower128 :=
+  (List.range count).map (deriveExpectedGateWire pk req cursor partyId nonceC)
+
+private theorem deriveExpectedGateWires_length (pk : SlhPublicKey) (req : SessionScheduleReq)
+    (cursor partyId : Nat) (nonceC : List UInt8) (count : Nat) :
+    (deriveExpectedGateWires pk req cursor partyId nonceC count).length = count := by
+  simp [deriveExpectedGateWires]
+
+private theorem deriveExpectedGateWires_zero (pk : SlhPublicKey) (req : SessionScheduleReq)
+    (cursor partyId : Nat) (nonceC : List UInt8) :
+    deriveExpectedGateWires pk req cursor partyId nonceC 0 = [] := by
+  simp [deriveExpectedGateWires]
+
+private theorem deriveExpectedGateWires_one (pk : SlhPublicKey) (req : SessionScheduleReq)
+    (cursor partyId : Nat) (nonceC : List UInt8) :
+    deriveExpectedGateWires pk req cursor partyId nonceC 1 =
+      [deriveExpectedGateWire pk req cursor partyId nonceC 0] := by
+  simp [deriveExpectedGateWires]
+
+/-- Componentwise `GF(2^{2^k})` (`TowerElem k`) difference `sentWires ⊕ expectedWires`. -/
+def zipXorTower (k : Nat) : List (TowerElem k) → List (TowerElem k) → List (TowerElem k)
+  | [], _ => []
+  | _, [] => []
+  | x :: xs, y :: ys => towerAdd k x y :: zipXorTower k xs ys
+
+private theorem zipXorTower_length_le_left (k : Nat) :
+    ∀ (xs ys : List (TowerElem k)), (zipXorTower k xs ys).length ≤ xs.length
+  | [], _ => Nat.le_refl 0
+  | _ :: _, [] => Nat.zero_le _
+  | _ :: xs, _ :: ys => Nat.succ_le_succ (zipXorTower_length_le_left k xs ys)
+
+private theorem tower_eq_of_add_eq_zero (k : Nat) {a b : TowerElem k}
+    (h : towerAdd k a b = towerZero k) : a = b := by
+  have h1 := congrArg (towerAdd k a) h
+  rw [towerAdd_cancel, towerAdd_zero] at h1
+  exact h1.symm
+
+private theorem eq_of_zipXorTower_any_false (k : Nat) :
+    ∀ {xs ys : List (TowerElem k)},
+      xs.length = ys.length →
+      (zipXorTower k xs ys).any (fun d => decide (d ≠ towerZero k)) = false →
+      xs = ys
+  | [], [], _, _ => rfl
+  | _ :: _, [], hL, _ => by cases hL
+  | [], _ :: _, hL, _ => by cases hL
+  | x :: xs, y :: ys, hL, hAny => by
+    simp only [zipXorTower, List.any_cons, Bool.or_eq_false_iff] at hAny
+    have hxy : towerAdd k x y = towerZero k := by
+      by_cases hEq : towerAdd k x y = towerZero k
+      · exact hEq
+      · exact False.elim (Bool.noConfusion ((decide_eq_true hEq).symm.trans hAny.1))
+    exact congrArg₂ List.cons
+      (tower_eq_of_add_eq_zero k hxy)
+      (eq_of_zipXorTower_any_false k (Nat.succ.inj hL) hAny.2)
+
+private theorem evalCoeffs_zipXorTower (k : Nat) (gamma : TowerElem k) :
+    ∀ {xs ys : List (TowerElem k)},
+      xs.length = ys.length →
+      RoundPoly.evalCoeffs (zipXorTower k xs ys) gamma =
+        towerAdd k (RoundPoly.evalCoeffs xs gamma) (RoundPoly.evalCoeffs ys gamma)
+  | [], [], _ => (towerAdd_self_zero k (towerZero k)).symm
+  | _ :: _, [], hL => by cases hL
+  | [], _ :: _, hL => by cases hL
+  | x :: xs, y :: ys, hL => by
+    simp only [zipXorTower, RoundPoly.evalCoeffs]
+    change towerAdd k (towerAdd k x y) (towerMul k gamma (RoundPoly.evalCoeffs (zipXorTower k xs ys) gamma)) =
+      towerAdd k (towerAdd k x (towerMul k gamma (RoundPoly.evalCoeffs xs gamma)))
+                 (towerAdd k y (towerMul k gamma (RoundPoly.evalCoeffs ys gamma)))
+    rw [evalCoeffs_zipXorTower k gamma (Nat.succ.inj hL), towerMul_add_distrib,
+        towerAdd_assoc k x y, towerAdd_assoc k x, towerAdd_left_comm k y]
+
+/-- Algebraic `BBCGGI19` / `BDOZ` Horner wire accumulator $\sum_{j=0}^{m-1} w_j \cdot \gamma^{j+1}$ over `TowerElem k`. -/
+def bbcggiWireAccumulatorGen (k : Nat) (wires : List (TowerElem k)) (gamma : TowerElem k) : TowerElem k :=
+  RoundPoly.evalCoeffs (towerZero k :: wires) gamma
+
+abbrev bbcggiWireAccumulator (wires : List Tower128) (gamma : Tower128) : Tower128 :=
+  bbcggiWireAccumulatorGen 7 wires gamma
+
+private theorem batchDeviationPoly_zipXorTower_eq (k : Nat)
+    {sentWires expectedWires : List (TowerElem k)}
+    (hLen : sentWires.length = expectedWires.length) (gamma : TowerElem k) :
+    batchDeviationPoly (zipXorTower k sentWires expectedWires) gamma =
+      towerAdd k (bbcggiWireAccumulatorGen k sentWires gamma)
+                 (bbcggiWireAccumulatorGen k expectedWires gamma) := by
+  unfold batchDeviationPoly bbcggiWireAccumulatorGen
+  change RoundPoly.evalCoeffs (towerZero k :: zipXorTower k sentWires expectedWires) gamma = _
+  have hZeroCons :
+      towerZero k :: zipXorTower k sentWires expectedWires =
+        zipXorTower k (towerZero k :: sentWires) (towerZero k :: expectedWires) := by
+    simp only [zipXorTower, towerAdd_self_zero]
+  rw [hZeroCons]
+  exact evalCoeffs_zipXorTower k gamma (congrArg Nat.succ hLen)
+
+theorem bbcggiWireAccumulator_eq_iff_batchDeviationPoly
+    {sentWires expectedWires : List Tower128}
+    (hLen : sentWires.length = expectedWires.length) (gamma : Tower128) :
+    (bbcggiWireAccumulator sentWires gamma == bbcggiWireAccumulator expectedWires gamma) =
+      (batchDeviationPoly (zipXorTower 7 sentWires expectedWires) gamma == towerZero 7) := by
+  rw [batchDeviationPoly_zipXorTower_eq 7 hLen gamma]
+  by_cases hEq : bbcggiWireAccumulator sentWires gamma = bbcggiWireAccumulator expectedWires gamma
+  · rw [hEq, towerAdd_self_zero, beq_self_eq_true, beq_self_eq_true]
+  · have hLhs : (bbcggiWireAccumulator sentWires gamma == bbcggiWireAccumulator expectedWires gamma) = false :=
+      beq_false_of_ne hEq
+    have hRhs : (towerAdd 7 (bbcggiWireAccumulator sentWires gamma)
+                            (bbcggiWireAccumulator expectedWires gamma) == towerZero 7) = false :=
+      beq_false_of_ne (fun hZ => hEq (tower_eq_of_add_eq_zero 7 hZ))
+    rw [hLhs, hRhs]
+
+/-- Project a `Tower128` (`GF(2^128)`) gate wire onto its embedded `Tower8` (`GF(2^8)`) byte coordinate. -/
+def towerLowByte (x : Tower128) : UInt8 :=
+  let b : Tower8 := x.1.1.1.1
+  let bit (f : Bool) (s : UInt8) : UInt8 := if f then (1 : UInt8) <<< s else 0
+  bit b.1.1.1 0 ||| bit b.1.1.2 1 ||| bit b.1.2.1 2 ||| bit b.1.2.2 3 |||
+  bit b.2.1.1 4 ||| bit b.2.1.2 5 ||| bit b.2.2.1 6 ||| bit b.2.2.2 7
+
+/-- Replicated `FLNW17` / `BDOZ` bilinear gate cross-byte evaluated by the honest quorum from
+    local key-share bytes `shareBytes` and Round-2 `GF(2^128)` gate wires `(sentWires, expectedWires)`. -/
+def evalReplicatedGateCrossByte : List UInt8 → List Tower128 → List Tower128 → UInt8
+  | [], _, _ => 0
+  | _, [], _ => 0
+  | _, _, [] => 0
+  | b :: bs, sw :: sws, ew :: ews =>
+    (b &&& towerLowByte (towerAdd 7 sw ew)) ^^^ evalReplicatedGateCrossByte bs sws ews
+
+private theorem evalReplicatedGateCrossByte_self :
+    ∀ (bs : List UInt8) (ws : List Tower128),
+      evalReplicatedGateCrossByte bs ws ws = 0
+  | [], _ => rfl
+  | _ :: _, [] => rfl
+  | b :: bs, w :: ws => by
+    simp only [evalReplicatedGateCrossByte, towerAdd_self_zero]
+    have hZ : towerLowByte (towerZero 7) = 0 := rfl
+    rw [hZ, evalReplicatedGateCrossByte_self bs ws]
+    have hAnd0 : (b &&& 0) = 0 := by apply UInt8.eq_of_toBitVec_eq; simp
+    rw [hAnd0]
+    rfl
+
+private theorem evalReplicatedGateCrossByte_nil_wires (bs : List UInt8) :
+    evalReplicatedGateCrossByte bs [] [] = 0 := by
+  cases bs <;> rfl
+
+private theorem evalReplicatedGateCrossByte_one_headD (bs : List UInt8) (exp0 : Tower128) :
+    evalReplicatedGateCrossByte bs [towerAdd 7 exp0 (towerOne 7)] [exp0] =
+      (bs.headD 0 &&& 1) := by
+  cases bs with
+  | nil => rfl
+  | cons b rest =>
+    simp only [evalReplicatedGateCrossByte, List.headD_cons]
+    have hShift : towerAdd 7 (towerAdd 7 exp0 (towerOne 7)) exp0 = towerOne 7 := by
+      rw [towerAdd_comm 7 _ exp0, towerAdd_cancel]
+    have hOne : towerLowByte (towerOne 7) = 1 := rfl
+    rw [hShift, hOne, evalReplicatedGateCrossByte_nil_wires rest, uint8_xor_zero]
+
+private theorem xorByteStream_replicate_zero :
+    ∀ (xs : List UInt8), xorByteStream xs (List.replicate xs.length 0) = xs
+  | [] => rfl
+  | x :: xs => by
+    simp only [List.length_cons, List.replicate_succ, xorByteStream,
+               List.zipWith_cons_cons, uint8_xor_zero]
+    exact congrArg (List.cons x) (xorByteStream_replicate_zero xs)
+
+private theorem xorByteStream_zero_head_replicate {xs : List UInt8} {L : Nat}
+    (hLen : xs.length = L) :
+    xorByteStream xs ((0 : UInt8) :: List.replicate (L - 1) 0) = xs := by
+  subst hLen
+  cases xs with
+  | nil => rfl
+  | cons x rest =>
+    simp only [List.length_cons, Nat.add_sub_cancel, xorByteStream,
+               List.zipWith_cons_cons, uint8_xor_zero]
+    exact congrArg (List.cons x) (xorByteStream_replicate_zero rest)
 
 private theorem byteArray_bne_self (b : ByteArray) : (b != b) = false := by
   unfold bne
@@ -1000,9 +1290,14 @@ structure RssRound2State where
 
 /-- Intermediate Round-3 state carried after `preCutBarrier` succeeds. -/
 structure RssRound3State where
-  deltas    : List Tower128
-  cutShares : RssByteShares
+  sentWires     : List Tower128
+  expectedWires : List Tower128
+  cutShares     : RssByteShares
   deriving DecidableEq
+
+/-- Derived `GF(2^128)` (`Tower128`) gate-wire differences `sentWires ⊕ expectedWires`. -/
+def RssRound3State.deltas (st : RssRound3State) : List Tower128 :=
+  zipXorTower 7 st.sentWires st.expectedWires
 
 /-- Deterministic zero-seed tape for `mkRssSlhMpcOracles` (internal shares re-masked at cut boundary by `cutMask0, cutMask1`). -/
 def constZeroRssSeedTape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds :=
@@ -1049,13 +1344,6 @@ def checkRound3ActiveOpen (L : Nat) (cIdx : Fin 3) (cutSh : RssByteShares)
     else
       verifyRssActiveOpenBytes L cutSh.b0 cutSh.b1 cutSh.b1 cutSh.b2 cFirst cSecond
 
-/-- Flip the first byte by `0x01` when an active wire deviation `∃ d ∈ deltas, d ≠ 0` slips past `preCutBarrier`. -/
-def injectCutFaultIfNonzero (L : Nat) (deltas : List Tower128) (bs : List UInt8) : List UInt8 :=
-  if deltas.any (fun d => decide (d ≠ towerZero 7)) then
-    xorByteStream bs ((0x01 : UInt8) :: List.replicate (L - 1) 0)
-  else
-    bs
-
 /-- Shared Round-1 commitment check used identically by `rssSlhInteractiveProtocol` and `Sim_RssSlh`. -/
 def sharedVerifyRound1 (cIdx : Fin 3) (r1St : RssRound1State)
     (corrR1 : List (Nat × ByteArray)) : PSum (AbortReason × Bool) RssRound2State :=
@@ -1067,8 +1355,9 @@ def sharedVerifyRound1 (cIdx : Fin 3) (r1St : RssRound1State)
                 nonceA := r1St.nonceA, nonceB := r1St.nonceB, gammaBits := 0#128 }
 
 /-- **Mandatory Pre-Cut Consistency Barrier (`sharedPreCutBarrier`)**:
-    Verifies Round-1 commitment binding AND `GF(2^128)` (`Tower128`) batch consistency polynomial
-    `batchDeviationPoly deltas gamma == towerZero 7` strictly BEFORE Round-3 cut openings can run! -/
+    Verifies Round-1 commitment binding AND the algebraic `BBCGGI19` / `BDOZ` inner-product equation
+    `bbcggiWireAccumulator sentWires gamma == bbcggiWireAccumulator expectedWires gamma` over raw
+    `GF(2^128)` (`Tower128`) gate wires strictly BEFORE Round-3 cut openings can run! -/
 def sharedPreCutBarrier (cIdx : Fin 3) (deg : Nat) (pk : SlhPublicKey)
     (req : SessionScheduleReq) (r2St : RssRound2State)
     (corrR2 : List (Nat × ByteArray)) : PSum AbortReason RssRound3State :=
@@ -1077,13 +1366,17 @@ def sharedPreCutBarrier (cIdx : Fin 3) (deg : Nat) (pk : SlhPublicKey)
   | some (_, cWire2) =>
     match parseCorruptRound2Wire deg cWire2 with
     | none => .inl (.round1CommitMismatch cIdx.val)
-    | some (nonceC, deltas) =>
+    | some (nonceC, sentWires) =>
       if round1NonceCommit pk req r2St.cursor cIdx.val nonceC != r2St.corrR1Commit then
         .inl (.round1CommitMismatch cIdx.val)
-      else if !(batchDeviationPoly deltas (unpackTower 7 r2St.gammaBits) == towerZero 7) then
-        .inl .activeConsistencyFailed
       else
-        .inr { deltas := deltas, cutShares := ⟨[], [], []⟩ }
+        let expectedWires :=
+          deriveExpectedGateWires pk req r2St.cursor cIdx.val nonceC sentWires.length
+        let gamma := unpackTower 7 r2St.gammaBits
+        if !(bbcggiWireAccumulator sentWires gamma == bbcggiWireAccumulator expectedWires gamma) then
+          .inl .activeConsistencyFailed
+        else
+          .inr { sentWires := sentWires, expectedWires := expectedWires, cutShares := ⟨[], [], []⟩ }
 
 /-- Shared Round-3 `FLNW17` cross-check + NIST FIPS 205 signature assembly & verification gate. -/
 def sharedFinalizeCutOpen (p : Fips205Params) (cIdx : Fin 3)
@@ -1135,10 +1428,13 @@ def sharedFinalizeCutOpen (p : Fips205Params) (cIdx : Fin 3)
     | some (seedViews, prfViews, rawTag0, rawTag1) =>
       let trueSigBytes := rssQuorumSlhSignBytes p q seedViews prfViews pk.pkSeed
                             constZeroRssSeedTape req.msg req.optRand
-      let faultedBytes := injectCutFaultIfNonzero p.sigBytes r3Init.deltas trueSigBytes
+      let crossByte :=
+        evalReplicatedGateCrossByte seedViews.1.1 r3Init.sentWires r3Init.expectedWires
+      let preCutBytes :=
+        xorByteStream trueSigBytes (crossByte :: List.replicate (p.sigBytes - 1) 0)
       let cutB0 := bvToFixedBytes p.sigBytes (rawTag0 ^^^ tape.cutMask0)
       let cutB1 := bvToFixedBytes p.sigBytes (rawTag1 ^^^ tape.cutMask1)
-      let cutB2 := xorByteStream faultedBytes (xorByteStream cutB0 cutB1)
+      let cutB2 := xorByteStream preCutBytes (xorByteStream cutB0 cutB1)
       let cutSh : RssByteShares := ⟨cutB0, cutB1, cutB2⟩
       (buildHonestRound3Msgs cIdx cutSh, { r3Init with cutShares := cutSh })
   finalizeCutOpen := fun pk req r3St _honR3 corrR3 =>
@@ -1273,6 +1569,7 @@ structure RealIdealClusterMatch (cIdx : Fin 3) (seedSh prfSh : RssByteShares)
   th_eq         : cl.tsig.threshold = icl.tsig.threshold
   np_eq         : cl.tsig.numParties = icl.tsig.numParties
   corr_eq       : cl.tsig.corruptParties = icl.tsig.corruptParties
+  cheat_eq      : cl.tsig.identifiedCheaters = icl.tsig.identifiedCheaters
   wal_eq        : cl.honestWal = icl.honestWal
   cursor_eq     : cl.maskSessionCursor = icl.maskSessionCursor
   shares_intact : cl.honestWal.poisoned = false →
@@ -1291,9 +1588,9 @@ private theorem extractHonestQuorumViews_deal (L : Nat) (cIdx : Fin 3)
   · rfl
   · exact False.elim (Nat.not_lt_zero n (Nat.lt_of_add_lt_add_right hv))
 
-/-- Extract the adversary's non-zero Round-2 wire deviation batch `deltas` (`deltas.length ≤ deg`
-    and `∃ d ∈ deltas, d ≠ 0`) when Round-1/quorum/WAL gates pass — notice this depends **ONLY on
-    `padIdx : Fin (rssPadSessionCard p.sigBytes)`** and is completely independent of `gIdx : Fin (2 ^ 128)`! -/
+/-- Extract the adversary's non-zero Round-2 wire deviation batch `deltas = sentWires ⊕ expectedWires`
+    (`deltas.length ≤ deg` and `∃ d ∈ deltas, d ≠ 0`) when Round-1/quorum/WAL gates pass — notice this
+    depends **ONLY on `padIdx : Fin (rssPadSessionCard p.sigBytes)`** and is completely independent of `gIdx : Fin (2 ^ 128)`! -/
 def extractSessionNonzeroDeltas {AdvState : Type}
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (A : UcRushingAdversary AdvState)
@@ -1327,13 +1624,17 @@ def extractSessionNonzeroDeltas {AdvState : Type}
         | some (_, cWire2) =>
           match parseCorruptRound2Wire deg cWire2 with
           | none => none
-          | some (nonceC, deltas) =>
+          | some (nonceC, sentWires) =>
             if round1NonceCommit cl.tsig.pk req r2St0.cursor cIdx.val nonceC != r2St0.corrR1Commit then
               none
-            else if deltas.any (fun d => decide (d ≠ towerZero 7)) then
-              some deltas
             else
-              none
+              let expectedWires :=
+                deriveExpectedGateWires cl.tsig.pk req r2St0.cursor cIdx.val nonceC sentWires.length
+              let deltas := zipXorTower 7 sentWires expectedWires
+              if deltas.any (fun d => decide (d ≠ towerZero 7)) then
+                some deltas
+              else
+                none
 
 private theorem extractSessionNonzeroDeltas_props {AdvState : Type}
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
@@ -1388,20 +1689,26 @@ private theorem extractSessionNonzeroDeltas_props {AdvState : Type}
             cases hParse : parseCorruptRound2Wire deg cWire2 with
             | none => rw [hParse] at hSome; cases hSome
             | some nd =>
-              rcases nd with ⟨nonceC, ds⟩
+              rcases nd with ⟨nonceC, sws⟩
               rw [hParse] at hSome
               dsimp only at hSome
               cases hCmt : (round1NonceCommit cl.tsig.pk (A.scheduleSession advSt).1
                   r2Out.2.cursor cIdx.val nonceC != r2Out.2.corrR1Commit)
               · rw [hCmt] at hSome
                 simp only [Bool.false_eq_true, ↓reduceIte] at hSome
+                let ews := deriveExpectedGateWires cl.tsig.pk (A.scheduleSession advSt).1
+                  r2Out.2.cursor cIdx.val nonceC sws.length
+                let ds := zipXorTower 7 sws ews
                 cases hAny : ds.any (fun d => decide (d ≠ towerZero 7))
-                · rw [hAny] at hSome; simp at hSome
-                · rw [hAny] at hSome
+                · change (if ds.any (fun d => decide (d ≠ towerZero 7)) then some ds else none) = some deltas at hSome
+                  rw [hAny] at hSome; simp at hSome
+                · change (if ds.any (fun d => decide (d ≠ towerZero 7)) then some ds else none) = some deltas at hSome
+                  rw [hAny] at hSome
                   simp only [↓reduceIte, Option.some.injEq] at hSome
                   subst hSome
                   obtain ⟨d, hdMem, hdDec⟩ := List.any_eq_true.mp hAny
-                  exact ⟨parseCorruptRound2Wire_length_le deg cWire2 hParse,
+                  exact ⟨Nat.le_trans (zipXorTower_length_le_left 7 sws ews)
+                           (parseCorruptRound2Wire_length_le deg cWire2 hParse),
                          d, hdMem, of_decide_eq_true hdDec⟩
               · rw [hCmt] at hSome; simp at hSome
 
@@ -1539,12 +1846,17 @@ private theorem sharedPreCutBarrier_extract_eq (cIdx : Fin 3) (deg : Nat) (pk : 
      | some (_, cWire2) =>
        match parseCorruptRound2Wire deg cWire2 with
        | none => none
-       | some (nonceC, deltas) =>
+       | some (nonceC, sentWires) =>
          if round1NonceCommit pk req r2St.cursor cIdx.val nonceC != r2St.corrR1Commit then none
-         else if deltas.any (fun d => decide (d ≠ towerZero 7)) then some deltas
-         else none) =
+         else
+           let expectedWires :=
+             deriveExpectedGateWires pk req r2St.cursor cIdx.val nonceC sentWires.length
+           let deltas := zipXorTower 7 sentWires expectedWires
+           if deltas.any (fun d => decide (d ≠ towerZero 7)) then some deltas
+           else none) =
       (if r3Init.deltas.any (fun d => decide (d ≠ towerZero 7)) then some r3Init.deltas else none) ∧
-    (batchDeviationPoly r3Init.deltas (unpackTower 7 r2St.gammaBits) == towerZero 7) = true := by
+    (batchDeviationPoly r3Init.deltas (unpackTower 7 r2St.gammaBits) == towerZero 7) = true ∧
+    r3Init.sentWires.length = r3Init.expectedWires.length := by
   unfold sharedPreCutBarrier at hBar
   cases hFind : corrR2.find? (fun pr => pr.1 == cIdx.val) with
   | none => rw [hFind] at hBar; cases hBar
@@ -1555,20 +1867,43 @@ private theorem sharedPreCutBarrier_extract_eq (cIdx : Fin 3) (deg : Nat) (pk : 
     cases hParse : parseCorruptRound2Wire deg cWire2 with
     | none => rw [hParse] at hBar; cases hBar
     | some nd =>
-      rcases nd with ⟨nonceC, ds⟩
+      rcases nd with ⟨nonceC, sws⟩
       rw [hParse] at hBar
       dsimp only at hBar ⊢
       cases hCmt : (round1NonceCommit pk req r2St.cursor cIdx.val nonceC != r2St.corrR1Commit)
       · rw [hCmt] at hBar
         simp only [Bool.false_eq_true, ↓reduceIte] at hBar ⊢
-        cases hBatch : (batchDeviationPoly ds (unpackTower 7 r2St.gammaBits) == towerZero 7)
-        · rw [hBatch] at hBar; simp at hBar
-        · rw [hBatch] at hBar
+        let ews := deriveExpectedGateWires pk req r2St.cursor cIdx.val nonceC sws.length
+        have hLenEq : sws.length = ews.length :=
+          (deriveExpectedGateWires_length pk req r2St.cursor cIdx.val nonceC sws.length).symm
+        cases hAcc : (bbcggiWireAccumulator sws (unpackTower 7 r2St.gammaBits) ==
+                      bbcggiWireAccumulator ews (unpackTower 7 r2St.gammaBits))
+        · change (if !(bbcggiWireAccumulator sws (unpackTower 7 r2St.gammaBits) ==
+                       bbcggiWireAccumulator ews (unpackTower 7 r2St.gammaBits))
+                  then PSum.inl AbortReason.activeConsistencyFailed
+                  else PSum.inr { sentWires := sws, expectedWires := ews, cutShares := ⟨[], [], []⟩ }) =
+                 PSum.inr r3Init at hBar
+          rw [hAcc] at hBar; simp at hBar
+        · change (if !(bbcggiWireAccumulator sws (unpackTower 7 r2St.gammaBits) ==
+                       bbcggiWireAccumulator ews (unpackTower 7 r2St.gammaBits))
+                  then PSum.inl AbortReason.activeConsistencyFailed
+                  else PSum.inr { sentWires := sws, expectedWires := ews, cutShares := ⟨[], [], []⟩ }) =
+                 PSum.inr r3Init at hBar
+          rw [hAcc] at hBar
           simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hBar
           injection hBar with hEq
-          have hDs : ds = r3Init.deltas := congrArg RssRound3State.deltas hEq
-          subst hDs
-          exact ⟨rfl, hBatch⟩
+          have hSw : sws = r3Init.sentWires := congrArg RssRound3State.sentWires hEq
+          have hEw : ews = r3Init.expectedWires := congrArg RssRound3State.expectedWires hEq
+          have hDs : zipXorTower 7 sws ews = r3Init.deltas := by
+            unfold RssRound3State.deltas
+            rw [← hSw, ← hEw]
+          have hBatch : (batchDeviationPoly r3Init.deltas (unpackTower 7 r2St.gammaBits) == towerZero 7) = true := by
+            rw [← hDs, ← bbcggiWireAccumulator_eq_iff_batchDeviationPoly hLenEq]
+            exact hAcc
+          refine ⟨?_, hBatch, by rw [← hSw, ← hEw]; exact hLenEq⟩
+          change (if (zipXorTower 7 sws ews).any (fun d => decide (d ≠ towerZero 7))
+                  then some (zipXorTower 7 sws ews) else none) = _
+          rw [hDs]
       · rw [hCmt] at hBar; simp at hBar
 
 /-- **Core Single-Session Lockstep Equivalence (`execRealSession_eq_execIdealSession_unless_bad`)**:
@@ -1604,18 +1939,18 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
     resR.2.2 = resI.2.2 ∧
     resR.1.tsig.pk = cl.tsig.pk ∧
     RealIdealClusterMatch cIdx seedSh prfSh resR.1 resI.1 := by
-  rcases hMatch with ⟨hPkEq, hThEq, hNpEq, hCorrEq, hWalEq, hCurEq, hSharesIntact⟩
+  rcases hMatch with ⟨hPkEq, hThEq, hNpEq, hCorrEq, hCheatEq, hWalEq, hCurEq, hSharesIntact⟩
   have hQuorumEq : ∀ apps, validThresholdApproval cl.tsig apps = validThresholdApproval icl.tsig apps := by
     intro apps
     unfold validThresholdApproval
-    rw [hThEq, hNpEq, hCorrEq]
+    rw [hThEq, hNpEq, hCorrEq, hCheatEq]
   intro sk tapeReal tapeSim resR resI
   dsimp only [resR, resI]
   unfold execRealSession execIdealSession
   dsimp only
   rw [← hQuorumEq]
   cases hQuorum : validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
-  · exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hWalEq, hCurEq, hSharesIntact⟩⟩
+  · exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hCheatEq, hWalEq, hCurEq, hSharesIntact⟩⟩
   · rw [ite_eq_right (by decide : ¬ ((!true) = true)),
         ite_eq_right (by decide : ¬ ((!true) = true))]
     have hPkDigR : (rssSlhInteractiveProtocol p cIdx deg).pkDigestOf = slhPkDigest := rfl
@@ -1627,7 +1962,7 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
                        (A.scheduleSession advSt).1.reqEpoch (slhReqDigest (A.scheduleSession advSt).1) with
     | err wal' rej =>
       dsimp only
-      refine ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, hCurEq, ?_⟩⟩
+      refine ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hCheatEq, rfl, hCurEq, ?_⟩⟩
       intro hp'
       have hUnfold := hWalStep
       unfold walPreSignStep at hUnfold
@@ -1641,7 +1976,7 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
       cases walAuth with
       | replayCached cachedSig =>
         dsimp only
-        refine ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, hCurEq, ?_⟩⟩
+        refine ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hCheatEq, rfl, hCurEq, ?_⟩⟩
         intro hp'
         unfold walPreSignStep at hWalStep
         cases hp0 : cl.honestWal.poisoned
@@ -1674,16 +2009,18 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
           rcases p1 with ⟨r1Err, doPoison⟩
           cases doPoison
           · dsimp only
-            exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, rfl, fun _ => hShares⟩⟩
+            exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hCheatEq, rfl, rfl, fun _ => hShares⟩⟩
           · dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
-            exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, rfl, fun hp => by cases hp⟩⟩
+            exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hCheatEq, rfl, rfl, fun hp => by cases hp⟩⟩
         | inr r2Init =>
           dsimp only
           cases hBar : sharedPreCutBarrier cIdx deg cl.tsig.pk _ _ _ with
           | inl barrierErr =>
             dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
-            exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, rfl, rfl, fun hp => by cases hp⟩⟩
+            exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hCheatEq, rfl, rfl, fun hp => by cases hp⟩⟩
           | inr r3Init =>
+            obtain ⟨hExtEq, hBatchTrue, hSwLenEq⟩ :=
+              sharedPreCutBarrier_extract_eq cIdx deg cl.tsig.pk _ _ _ r3Init hBar
             have hDeltasZero : r3Init.deltas.any (fun d => decide (d ≠ towerZero 7)) = false := by
               by_cases hAny : r3Init.deltas.any (fun d => decide (d ≠ towerZero 7)) = true
               · exfalso
@@ -1697,14 +2034,14 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
                 dsimp only at hBadUnf
                 rw [hDummy.1, hDummy.2.1, hDummy.2.2.1, hDummy.2.2.2.1] at hBadUnf
                 rw [hVR1] at hBadUnf
-                dsimp only at hBadUnf
-                obtain ⟨hExtEq, hBatchTrue⟩ := sharedPreCutBarrier_extract_eq cIdx deg cl.tsig.pk _ _ _ r3Init hBar
-                dsimp only at hExtEq hBatchTrue
+                dsimp only at hBadUnf hExtEq hBatchTrue
                 rw [hExtEq, hAny] at hBadUnf
                 simp only [↓reduceIte] at hBadUnf
                 rw [← hDummy.2.2.2.2, hBatchTrue] at hBadUnf
                 cases hBadUnf
               · exact Bool.eq_false_iff.mpr hAny
+            have hSentEqExp : r3Init.sentWires = r3Init.expectedWires :=
+              eq_of_zipXorTower_any_false 7 hSwLenEq hDeltasZero
             dsimp only
             rw [hShares]
             have hQuorumV := extractHonestQuorumViews_deal p.sigBytes cIdx seedSh prfSh req
@@ -1723,23 +2060,29 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
                 hSeedWf hPrfWf hSeedWf hPrfWf rfl rfl pkSeed
                 constZeroRssSeedTape constZeroRssSeedTape
                 (A.scheduleSession advSt).1.msg (A.scheduleSession advSt).1.optRand).1
-            have hNoFault :
-                injectCutFaultIfNonzero p.sigBytes r3Init.deltas
+            have hCrossZero :
+                evalReplicatedGateCrossByte (q.views seedSh).1.1 r3Init.sentWires r3Init.expectedWires = 0 := by
+              rw [hSentEqExp]
+              exact evalReplicatedGateCrossByte_self _ _
+            have hPreCutEq :
+                xorByteStream
                   (rssQuorumSlhSignBytes p q (q.views seedSh) (q.views prfSh) cl.tsig.pk.pkSeed
-                    constZeroRssSeedTape (A.scheduleSession advSt).1.msg (A.scheduleSession advSt).1.optRand) =
+                    constZeroRssSeedTape (A.scheduleSession advSt).1.msg (A.scheduleSession advSt).1.optRand)
+                  (evalReplicatedGateCrossByte (q.views seedSh).1.1 r3Init.sentWires r3Init.expectedWires ::
+                    List.replicate (p.sigBytes - 1) 0) =
                 encodeSlhSig (slhSignInternal p (A.scheduleSession advSt).1.msg sk (A.scheduleSession advSt).1.optRand) := by
-              unfold injectCutFaultIfNonzero
-              rw [hDeltasZero]
-              simp only [Bool.false_eq_true, ↓reduceIte]
-              exact hTrueSigEq
-            rw [hNoFault, unpackWireBytes_packWireBytes]
+              rw [hCrossZero, hTrueSigEq]
+              exact xorByteStream_zero_head_replicate
+                (encodeSlhSig_length (slhSignInternal_wellTyped p
+                  (A.scheduleSession advSt).1.msg sk (A.scheduleSession advSt).1.optRand))
+            rw [hPreCutEq, unpackWireBytes_packWireBytes]
             cases sharedFinalizeCutOpen p cIdx cl.tsig.pk _ _ _ with
             | inl cutErr =>
               dsimp only [poisonRealCluster, poisonIdealCluster, walQuarantine]
-              exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, rfl, rfl, fun hp => by cases hp⟩⟩
+              exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, hCheatEq, rfl, rfl, fun hp => by cases hp⟩⟩
             | inr outSigBytes =>
               dsimp only
-              exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, rfl, rfl, fun _ => rfl⟩⟩
+              exact ⟨rfl, rfl, rfl, ⟨rfl, hThEq, hNpEq, rfl, hCheatEq, rfl, rfl, fun _ => rfl⟩⟩
 
 /-- Multi-session adaptive XOR bijection over `Fin (rssMultiSessionCard p.sigBytes s)` built via
     `depProdFinEquiv`: session `0` shifts by `(cl, advSt)`, and sessions `1..s-1` shift by the
@@ -2214,7 +2557,7 @@ theorem inhabited_rss_slh_real_ideal_uc :
   have hS : seedSh.WellFormed := ⟨rfl, rfl⟩
   have hP : prfSh.WellFormed := ⟨rfl, rfl⟩
   have hMatch : RealIdealClusterMatch ⟨0, by decide⟩ seedSh prfSh cl icl :=
-    ⟨rfl, rfl, rfl, rfl, rfl, rfl, fun _ => rfl⟩
+    ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl, fun _ => rfl⟩
   have hVal : validThresholdApproval cl.tsig [1, 2] = true := by decide +kernel
   exact ⟨cl, icl, seedSh, prfSh, pkSeed, hS, hP, hMatch, rfl, hVal⟩
 
@@ -2232,21 +2575,25 @@ def honestSlhWotsMsg (p : Fips205Params) (skSeed pkSeed : List UInt8)
   | l + 1 => fipsXmssNode p skSeed pkSeed l (tree * (2 ^ p.hp) + leaf) p.hp 0
 
 /-- **1. `ActiveConsistencySoundnessBreak`**:
-    Explicit transcript-bound witness that in some session `rec ∈ tr.sessions`, the rushing corrupt
-    party `cIdx` transmitted a non-zero `GF(2^128)` (`Tower128`) wire deviation batch `deltas` of
-    degree `≤ deg` in Round 2 AND slipped past `preCutBarrier` into Round 3 (`rec.honestRound3 ≠ []`). -/
+    Explicit transcript-bound witness that in some session `sessRec ∈ tr.sessions` at `sessionCursor`,
+    the rushing corrupt party `cIdx` transmitted raw `GF(2^128)` (`Tower128`) gate wires `sentWires`
+    differing from `deriveExpectedGateWires pk sessRec.request sessionCursor cIdx.val nonceC sentWires.length`
+    (`deltas.length ≤ deg`, `∃ devElem ∈ deltas, devElem ≠ 0`) AND slipped past `preCutBarrier` into Round 3. -/
 structure ActiveConsistencySoundnessBreak {AdvState : Type}
-    (cIdx : Fin 3) (deg : Nat) (tr : ExecTranscript AdvState) where
+    (pk : SlhPublicKey) (cIdx : Fin 3) (deg : Nat) (tr : ExecTranscript AdvState) where
   sessRec        : SessionWireRecord
   hMem           : sessRec ∈ tr.sessions
+  sessionCursor  : Nat
   cWire2         : ByteArray
   hWireMem       : (cIdx.val, cWire2) ∈ sessRec.corruptRound2
   nonceC         : List UInt8
-  deltas         : List Tower128
-  hParse         : parseCorruptRound2Wire deg cWire2 = some (nonceC, deltas)
-  hDeg           : deltas.length ≤ deg
+  sentWires      : List Tower128
+  hParse         : parseCorruptRound2Wire deg cWire2 = some (nonceC, sentWires)
+  hDeg           : (zipXorTower 7 sentWires
+                     (deriveExpectedGateWires pk sessRec.request sessionCursor cIdx.val nonceC sentWires.length)).length ≤ deg
   devElem        : Tower128
-  hDevMem        : devElem ∈ deltas
+  hDevMem        : devElem ∈ zipXorTower 7 sentWires
+                     (deriveExpectedGateWires pk sessRec.request sessionCursor cIdx.val nonceC sentWires.length)
   hDevNonzero    : devElem ≠ towerZero 7
   hPassedBarrier : sessRec.honestRound3 ≠ []
 
@@ -2335,7 +2682,7 @@ inductive RssSlhInteractiveSecurityBreak {AdvState : Type}
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat) (sk : SlhSecretKey)
     (clInit : RealClusterState SlhPublicKey RssPartyKeyShare)
     (tr : ExecTranscript AdvState) (mStar : List UInt8) (sigStar : SlhSignature) : Type where
-  | activeConsistency (w : ActiveConsistencySoundnessBreak cIdx deg tr)
+  | activeConsistency (w : ActiveConsistencySoundnessBreak clInit.tsig.pk cIdx deg tr)
   | forsItsr          (w : Fips205ForsItsrBreak p sk clInit tr mStar sigStar)
   | wotsChainSmTcr    (w : WotsChainSmTcrBreak p sk)
   | xmssMerkleTcr     (w : XmssMerkleTcrBreak p ⟨sk.pkSeed, sk.pkRoot⟩)
@@ -2630,53 +2977,77 @@ private def findDecidableElem {α : Type} (P : α → Prop) [∀ x, Decidable (P
           · exact hPx
           · exact hNone z hTl⟩
 
+/-- Advance monotonic session cursor across a `SessionWireRecord` (`+1` iff Round 1 executed). -/
+def advanceSessionCursor (cur : Nat) (rec : SessionWireRecord) : Nat :=
+  if rec.honestRound1.isEmpty then cur else cur + 1
+
+private def scanActiveConsistencyWires {AdvState : Type}
+    (pk : SlhPublicKey) (cIdx : Fin 3) (deg : Nat)
+    (tr : ExecTranscript AdvState) (rec : SessionWireRecord)
+    (hRecMem : rec ∈ tr.sessions) (hR3 : rec.honestRound3 ≠ []) (cur : Nat) :
+    (ws : List (Nat × ByteArray)) →
+    (∀ w ∈ ws, w ∈ rec.corruptRound2) →
+    Option (ActiveConsistencySoundnessBreak pk cIdx deg tr)
+  | [], _ => none
+  | (pid, cWire2) :: wRest, hWSub =>
+    if hPid : pid = cIdx.val then
+      match hParse : parseCorruptRound2Wire deg cWire2 with
+      | none => scanActiveConsistencyWires pk cIdx deg tr rec hRecMem hR3 cur wRest
+                  (fun w hw => hWSub w (.tail _ hw))
+      | some (nonceC, sentWires) =>
+        let expectedWires :=
+          deriveExpectedGateWires pk rec.request cur cIdx.val nonceC sentWires.length
+        let deltas := zipXorTower 7 sentWires expectedWires
+        match findDecidableElem (fun d => d ≠ towerZero 7) deltas with
+        | .inl ⟨d, hdMem, hdNe⟩ =>
+          some
+            { sessRec := rec
+              hMem := hRecMem
+              sessionCursor := cur
+              cWire2 := cWire2
+              hWireMem := by
+                have hM := hWSub (pid, cWire2) (.head _)
+                rwa [hPid] at hM
+              nonceC := nonceC
+              sentWires := sentWires
+              hParse := hParse
+              hDeg := Nat.le_trans (zipXorTower_length_le_left 7 sentWires expectedWires)
+                        (parseCorruptRound2Wire_length_le deg cWire2 hParse)
+              devElem := d
+              hDevMem := hdMem
+              hDevNonzero := hdNe
+              hPassedBarrier := hR3 }
+        | .inr _ => scanActiveConsistencyWires pk cIdx deg tr rec hRecMem hR3 cur wRest
+                      (fun w hw => hWSub w (.tail _ hw))
+    else
+      scanActiveConsistencyWires pk cIdx deg tr rec hRecMem hR3 cur wRest
+        (fun w hw => hWSub w (.tail _ hw))
+
+private def scanActiveConsistencyAux {AdvState : Type}
+    (pk : SlhPublicKey) (cIdx : Fin 3) (deg : Nat)
+    (tr : ExecTranscript AdvState) :
+    (rem : List SessionWireRecord) →
+    (cur : Nat) →
+    (∀ r ∈ rem, r ∈ tr.sessions) →
+    Option (ActiveConsistencySoundnessBreak pk cIdx deg tr)
+  | [], _, _ => none
+  | rec :: rest, cur, hSub =>
+    let nextCur := advanceSessionCursor cur rec
+    if hR3 : rec.honestRound3 = [] then
+      scanActiveConsistencyAux pk cIdx deg tr rest nextCur (fun r hr => hSub r (.tail _ hr))
+    else
+      match scanActiveConsistencyWires pk cIdx deg tr rec (hSub rec (.head _)) hR3 cur
+              rec.corruptRound2 (fun _ hw => hw) with
+      | some brk => some brk
+      | none => scanActiveConsistencyAux pk cIdx deg tr rest nextCur (fun r hr => hSub r (.tail _ hr))
+
 /-- Constructive scanner over `tr.sessions` (`0 Classical.choice`) checking if ANY session triggered
     an `ActiveConsistencySoundnessBreak`! -/
 private def scanActiveConsistencyBreak {AdvState : Type}
-    (cIdx : Fin 3) (deg : Nat) (tr : ExecTranscript AdvState) :
-    Option (ActiveConsistencySoundnessBreak cIdx deg tr) :=
-  let rec go (rem : List SessionWireRecord) (hSub : ∀ r ∈ rem, r ∈ tr.sessions) :
-      Option (ActiveConsistencySoundnessBreak cIdx deg tr) :=
-    match rem with
-    | [] => none
-    | rec :: rest =>
-      if hR3 : rec.honestRound3 = [] then
-        go rest (fun r hr => hSub r (.tail _ hr))
-      else
-        let rec scanWires (ws : List (Nat × ByteArray))
-            (hWSub : ∀ w ∈ ws, w ∈ rec.corruptRound2) :
-            Option (ActiveConsistencySoundnessBreak cIdx deg tr) :=
-          match ws with
-          | [] => none
-          | (pid, cWire2) :: wRest =>
-            if hPid : pid = cIdx.val then
-              match hParse : parseCorruptRound2Wire deg cWire2 with
-              | none => scanWires wRest (fun w hw => hWSub w (.tail _ hw))
-              | some (nonceC, deltas) =>
-                match findDecidableElem (fun d => d ≠ towerZero 7) deltas with
-                | .inl ⟨d, hdMem, hdNe⟩ =>
-                  some
-                    { sessRec := rec
-                      hMem := hSub rec (.head _)
-                      cWire2 := cWire2
-                      hWireMem := by
-                        have hM := hWSub (pid, cWire2) (.head _)
-                        rwa [hPid] at hM
-                      nonceC := nonceC
-                      deltas := deltas
-                      hParse := hParse
-                      hDeg := parseCorruptRound2Wire_length_le deg cWire2 hParse
-                      devElem := d
-                      hDevMem := hdMem
-                      hDevNonzero := hdNe
-                      hPassedBarrier := hR3 }
-                | .inr _ => scanWires wRest (fun w hw => hWSub w (.tail _ hw))
-            else
-              scanWires wRest (fun w hw => hWSub w (.tail _ hw))
-        match scanWires rec.corruptRound2 (fun _ hw => hw) with
-        | some brk => some brk
-        | none => go rest (fun r hr => hSub r (.tail _ hr))
-  go tr.sessions (fun _ hr => hr)
+    (pk : SlhPublicKey) (startCursor : Nat) (cIdx : Fin 3) (deg : Nat)
+    (tr : ExecTranscript AdvState) :
+    Option (ActiveConsistencySoundnessBreak pk cIdx deg tr) :=
+  scanActiveConsistencyAux pk cIdx deg tr tr.sessions startCursor (fun _ hr => hr)
 
 private theorem map_eq_on_mem {α β : Type} {f g : α → β} :
     ∀ {xs : List α}, xs.map f = xs.map g → ∀ x ∈ xs, f x = g x
@@ -2842,7 +3213,7 @@ def extractInteractiveSlhBreak {AdvState : Type}
     RssSlhInteractiveSecurityBreak p cIdx deg
       (slhKeygenInternal p skSeed skPrf pkSeed).1 clInit tr mStar sigStar :=
   let sk := (slhKeygenInternal p skSeed skPrf pkSeed).1
-  match scanActiveConsistencyBreak cIdx deg tr with
+  match scanActiveConsistencyBreak clInit.tsig.pk clInit.maskSessionCursor cIdx deg tr with
   | some activeBrk => .activeConsistency activeBrk
   | none =>
     let hWfP := wellFormed_props hWf
@@ -2968,11 +3339,26 @@ def extractInteractiveSlhBreak {AdvState : Type}
       | .inl wotsBrk => .wotsChainSmTcr wotsBrk
       | .inr xmssBrk => .xmssMerkleTcr xmssBrk
 
+private theorem sharedVerifyRound1_cursor (cIdx : Fin 3) (r1St : RssRound1State)
+    (corrR1 : List (Nat × ByteArray)) {r2Init : RssRound2State}
+    (h : sharedVerifyRound1 cIdx r1St corrR1 = .inr r2Init) :
+    r2Init.cursor = r1St.cursor := by
+  unfold sharedVerifyRound1 at h
+  cases corrR1.find? (fun pr => pr.1 == cIdx.val) with
+  | none => simp at h
+  | some pr =>
+    rcases pr with ⟨_, cWire⟩
+    dsimp only at h
+    split at h
+    · cases h
+    · injection h with hEq; rw [← hEq]
+
 /-- **Honesty Link (`activeConsistencyBreak_implies_schwartzZippel_root`)**:
     Whenever a single session `rec = (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tape).2.2`
     witnesses `rec.honestRound3 ≠ []` with corrupt party `cIdx` (`cl.tsig.corruptParties = [cIdx.val]`),
-    its Round-2 wire `cWire2` parsed to `(nonceC, deltas)` **necessarily satisfied**
-    `batchDeviationPoly deltas (unpackTower 7 tape.gammaBits) = towerZero 7`!
+    its Round-2 wire `cWire2` parsed to `(nonceC, sentWires)` **necessarily satisfied** BOTH:
+    1. `bbcggiWireAccumulator sentWires gamma = bbcggiWireAccumulator expectedWires gamma`, AND
+    2. `batchDeviationPoly (zipXorTower 7 sentWires expectedWires) gamma = towerZero 7`!
     Thus `ActiveConsistencySoundnessBreak` is NEVER an unconstrained label — in `RealProtocolExec`,
     it forces a genuine non-zero degree-`≤ deg` polynomial root hit in `GF(2^128)`. -/
 theorem activeConsistencyBreak_implies_schwartzZippel_root {AdvState : Type}
@@ -2981,11 +3367,18 @@ theorem activeConsistencyBreak_implies_schwartzZippel_root {AdvState : Type}
     (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
     (advSt : AdvState) (tape : RssSlhSessionTape p.sigBytes)
     (hSingleCorrupt : cl.tsig.corruptParties = [cIdx.val])
-    {cWire2 : ByteArray} {nonceC : List UInt8} {deltas : List Tower128}
+    {cWire2 : ByteArray} {nonceC : List UInt8} {sentWires : List Tower128}
     (hR3Nonempty : (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tape).2.2.honestRound3 ≠ [])
     (hWireMem : (cIdx.val, cWire2) ∈ (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tape).2.2.corruptRound2)
-    (hParse : parseCorruptRound2Wire deg cWire2 = some (nonceC, deltas)) :
-    batchDeviationPoly deltas (unpackTower 7 tape.gammaBits) = towerZero 7 := by
+    (hParse : parseCorruptRound2Wire deg cWire2 = some (nonceC, sentWires)) :
+    let expectedWires :=
+      deriveExpectedGateWires cl.tsig.pk (A.scheduleSession advSt).1 cl.maskSessionCursor
+        cIdx.val nonceC sentWires.length
+    let gamma := unpackTower 7 tape.gammaBits
+    bbcggiWireAccumulator sentWires gamma = bbcggiWireAccumulator expectedWires gamma ∧
+    batchDeviationPoly (zipXorTower 7 sentWires expectedWires) gamma = towerZero 7 := by
+  intro expectedWires gamma
+  dsimp only [expectedWires, gamma]
   unfold execRealSession rssSlhInteractiveProtocol at hR3Nonempty hWireMem
   dsimp only at hR3Nonempty hWireMem
   cases hQ : validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
@@ -3003,6 +3396,8 @@ theorem activeConsistencyBreak_implies_schwartzZippel_root {AdvState : Type}
         cases hVR1 : sharedVerifyRound1 cIdx _ _ with
         | inl _ => rw [hVR1] at hR3Nonempty; simp at hR3Nonempty
         | inr r2Init =>
+          have hCurEq : r2Init.cursor = cl.maskSessionCursor :=
+            sharedVerifyRound1_cursor cIdx _ _ hVR1
           rw [hVR1] at hR3Nonempty hWireMem
           dsimp only at hR3Nonempty hWireMem
           cases hBar : sharedPreCutBarrier cIdx deg cl.tsig.pk _ _ _ with
@@ -3012,38 +3407,68 @@ theorem activeConsistencyBreak_implies_schwartzZippel_root {AdvState : Type}
             dsimp only at hWireMem
             unfold sharedPreCutBarrier at hBar
             rw [hSingleCorrupt] at hBar hWireMem
+            have hEwsLen : sentWires.length =
+                (deriveExpectedGateWires cl.tsig.pk (A.scheduleSession advSt).1 cl.maskSessionCursor
+                  cIdx.val nonceC sentWires.length).length :=
+              (deriveExpectedGateWires_length _ _ _ _ _ _).symm
             cases hFin : sharedFinalizeCutOpen p cIdx cl.tsig.pk _ _ _ <;>
               rw [hFin] at hWireMem <;>
               dsimp only at hWireMem
             · simp only [List.map, List.mem_singleton, Prod.mk.injEq] at hWireMem
               rcases hWireMem with ⟨_, hWireEq⟩
               subst hWireEq
-              simp only [List.map, List.find?, beq_self_eq_true, hParse] at hBar
-              cases hCmt : (round1NonceCommit cl.tsig.pk _ r2Init.cursor cIdx.val nonceC != r2Init.corrR1Commit)
+              simp only [List.map, List.find?, beq_self_eq_true, hParse, hCurEq] at hBar
+              cases hCmt : (round1NonceCommit cl.tsig.pk _ cl.maskSessionCursor cIdx.val nonceC != r2Init.corrR1Commit)
               · rw [hCmt] at hBar
                 simp only [Bool.false_eq_true, ↓reduceIte] at hBar
-                cases hBatch : (batchDeviationPoly deltas (unpackTower 7 tape.gammaBits) == towerZero 7)
-                · rw [hBatch] at hBar; simp at hBar
-                · exact of_decide_eq_true (by simpa [beq_iff_eq] using hBatch)
+                let ews := deriveExpectedGateWires cl.tsig.pk (A.scheduleSession advSt).1
+                  cl.maskSessionCursor cIdx.val nonceC sentWires.length
+                cases hAcc : (bbcggiWireAccumulator sentWires (unpackTower 7 tape.gammaBits) ==
+                              bbcggiWireAccumulator ews (unpackTower 7 tape.gammaBits))
+                · change (if !(bbcggiWireAccumulator sentWires (unpackTower 7 tape.gammaBits) ==
+                               bbcggiWireAccumulator ews (unpackTower 7 tape.gammaBits))
+                          then PSum.inl AbortReason.activeConsistencyFailed
+                          else PSum.inr { sentWires := sentWires, expectedWires := ews, cutShares := ⟨[], [], []⟩ }) =
+                         PSum.inr r3Init at hBar
+                  rw [hAcc] at hBar; simp at hBar
+                · have hAccEq : bbcggiWireAccumulator sentWires (unpackTower 7 tape.gammaBits) =
+                      bbcggiWireAccumulator ews (unpackTower 7 tape.gammaBits) :=
+                    of_decide_eq_true (by simpa [beq_iff_eq] using hAcc)
+                  have hBatchBool := (bbcggiWireAccumulator_eq_iff_batchDeviationPoly hEwsLen
+                    (unpackTower 7 tape.gammaBits)).symm.trans hAcc
+                  exact ⟨hAccEq, of_decide_eq_true (by simpa [beq_iff_eq] using hBatchBool)⟩
               · rw [hCmt] at hBar; simp at hBar
             · simp only [List.map, List.mem_singleton, Prod.mk.injEq] at hWireMem
               rcases hWireMem with ⟨_, hWireEq⟩
               subst hWireEq
-              simp only [List.map, List.find?, beq_self_eq_true, hParse] at hBar
-              cases hCmt : (round1NonceCommit cl.tsig.pk _ r2Init.cursor cIdx.val nonceC != r2Init.corrR1Commit)
+              simp only [List.map, List.find?, beq_self_eq_true, hParse, hCurEq] at hBar
+              cases hCmt : (round1NonceCommit cl.tsig.pk _ cl.maskSessionCursor cIdx.val nonceC != r2Init.corrR1Commit)
               · rw [hCmt] at hBar
                 simp only [Bool.false_eq_true, ↓reduceIte] at hBar
-                cases hBatch : (batchDeviationPoly deltas (unpackTower 7 tape.gammaBits) == towerZero 7)
-                · rw [hBatch] at hBar; simp at hBar
-                · exact of_decide_eq_true (by simpa [beq_iff_eq] using hBatch)
+                let ews := deriveExpectedGateWires cl.tsig.pk (A.scheduleSession advSt).1
+                  cl.maskSessionCursor cIdx.val nonceC sentWires.length
+                cases hAcc : (bbcggiWireAccumulator sentWires (unpackTower 7 tape.gammaBits) ==
+                              bbcggiWireAccumulator ews (unpackTower 7 tape.gammaBits))
+                · change (if !(bbcggiWireAccumulator sentWires (unpackTower 7 tape.gammaBits) ==
+                               bbcggiWireAccumulator ews (unpackTower 7 tape.gammaBits))
+                          then PSum.inl AbortReason.activeConsistencyFailed
+                          else PSum.inr { sentWires := sentWires, expectedWires := ews, cutShares := ⟨[], [], []⟩ }) =
+                         PSum.inr r3Init at hBar
+                  rw [hAcc] at hBar; simp at hBar
+                · have hAccEq : bbcggiWireAccumulator sentWires (unpackTower 7 tape.gammaBits) =
+                      bbcggiWireAccumulator ews (unpackTower 7 tape.gammaBits) :=
+                    of_decide_eq_true (by simpa [beq_iff_eq] using hAcc)
+                  have hBatchBool := (bbcggiWireAccumulator_eq_iff_batchDeviationPoly hEwsLen
+                    (unpackTower 7 tape.gammaBits)).symm.trans hAcc
+                  exact ⟨hAccEq, of_decide_eq_true (by simpa [beq_iff_eq] using hBatchBool)⟩
               · rw [hCmt] at hBar; simp at hBar
 
 /-- **Non-Cosplay Witness Guard (`no_trivial_break_on_empty_transcript`)**:
     Neither `ActiveConsistencySoundnessBreak` nor `Fips205ForsItsrBreak.forsInterleavedSubsetCover` can
     ever be inhabited on an empty session transcript (`tr.sessions = []`). -/
 theorem no_trivial_break_on_empty_transcript {AdvState : Type}
-    (cIdx : Fin 3) (deg : Nat) (advSt : AdvState) :
-    (ActiveConsistencySoundnessBreak cIdx deg (⟨advSt, []⟩ : ExecTranscript AdvState) → False) ∧
+    (pk : SlhPublicKey) (cIdx : Fin 3) (deg : Nat) (advSt : AdvState) :
+    (ActiveConsistencySoundnessBreak pk cIdx deg (⟨advSt, []⟩ : ExecTranscript AdvState) → False) ∧
     (∀ (p : Fips205Params) (_hK : 0 < p.k)
        (P : Nat → SessionWireRecord → Prop),
        (∀ j : Nat, j < p.k → ∃ rec ∈ ([] : List SessionWireRecord), P j rec) → False) := by
@@ -3092,7 +3517,7 @@ theorem rss_slh_interactive_euf_cma_reduction {AdvState : Type}
         rec.request.msg ≠ (forgeOut tr).1) :
     let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0
     let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
-    Nonempty (ActiveConsistencySoundnessBreak cIdx deg tr) ∨
+    Nonempty (ActiveConsistencySoundnessBreak clInit.tsig.pk cIdx deg tr) ∨
     Nonempty (Fips205ForsItsrBreak p sk clInit tr (forgeOut tr).1 sigStar) ∨
     Nonempty (WotsChainSmTcrBreak p sk) ∨
     Nonempty (XmssMerkleTcrBreak p ⟨sk.pkSeed, sk.pkRoot⟩) ∨

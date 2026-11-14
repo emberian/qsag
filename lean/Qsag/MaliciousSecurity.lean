@@ -58,8 +58,10 @@ public import Qsag.HashSigs
 public import Qsag.HypertreeEufCma
 public import Qsag.ThresholdMpc
 
+import all Qsag.Goldilocks
 import all Qsag.UcGames
 import all Qsag.Preprocessing
+import all Qsag.ThresholdMpc
 
 public section
 namespace Qsag
@@ -180,18 +182,16 @@ theorem verifyTowerZeroSumMac_complete (m : Nat)
     (trueVal openedVal : TowerElem m)
     (macShares alphaShares zeroMasks : List (TowerElem m))
     (hMacLen : macShares.length = alphaShares.length)
-    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (_hMaskLen : zeroMasks.length = alphaShares.length)
     (hMacSum : ringListSum macShares = towerMul m (ringListSum alphaShares) trueVal)
     (hZeroMask : ringListSum zeroMasks = towerZero m)
     (hEq : openedVal = trueVal) :
     verifyTowerZeroSumMac m (computeTowerMacSigmas m openedVal macShares alphaShares zeroMasks) = true := by
   have hScaleLen : (shareScale openedVal alphaShares).length = alphaShares.length :=
     shareScale_length openedVal alphaShares
-  have hSubLen : (shareZipSub macShares (shareScale openedVal alphaShares)).length = zeroMasks.length := by
-    rw [shareZipSub_length_of_eq (hMacLen.trans hScaleLen.symm), hMacLen, hMaskLen]
   have hSum : ringListSum (computeTowerMacSigmas m openedVal macShares alphaShares zeroMasks) = towerZero m := by
     unfold computeTowerMacSigmas
-    rw [ringListSum_zipAdd hSubLen, ringListSum_zipSub (hMacLen.trans hScaleLen.symm), ringListSum_scale]
+    rw [ringListSum_zipAdd, ringListSum_zipSub (hMacLen.trans hScaleLen.symm), ringListSum_scale]
     change towerAdd m (towerAdd m (ringListSum macShares) (towerMul m openedVal (ringListSum alphaShares)))
       (ringListSum zeroMasks) = towerZero m
     rw [hZeroMask, towerAdd_zero, hEq, hMacSum, towerMul_comm m trueVal (ringListSum alphaShares),
@@ -273,7 +273,7 @@ theorem verifySharedDkgFrobenius_complete (k d : Nat)
     evalSharedBeaverMul_correct lambdas xSh xSh sqTriple hSumOne hXLen hXLen hTr
   let frobSh := shareZipSub (evalSharedBeaverMul lambdas xSh xSh sqTriple).1 xSh
   have hFrobEq : ringDot lambdas frobSh = towerFrobeniusPoly k (ringDot lambdas xSh) := by
-    dsimp only [frobSh]
+    dsimp only [frobSh, evalSharedBeaverMul]
     rw [ringDot_zipSub (hSqLen.trans hXLen.symm), hSqDot]
     rfl
   have hY0 : ringDot lambdas frobSh = towerZero k :=
@@ -344,7 +344,9 @@ def verifySharedDkgFrobenius_sound (k d : Nat)
         have hY0 : yOpened = towerZero k := of_decide_eq_true (Bool.and_eq_true_iff.mp hCondAndEq.1).1
         have hFrobDot : yTrue = towerFrobeniusPoly k (ringDot lambdas xSh) := by
           dsimp only [yTrue]
-          rw [← hCondAndEq.2, ringDot_zipSub (hSqLen.trans hXLen.symm), hSqDot]
+          rw [← hCondAndEq.2]
+          dsimp only [evalSharedBeaverMul]
+          rw [ringDot_zipSub (hSqLen.trans hXLen.symm), hSqDot]
           rfl
         exact (towerFrobenius_eq_zero_iff_bit k (ringDot lambdas xSh)).mp
           (hFrobDot.symm.trans (hOpenEq.symm.trans hY0)))
@@ -353,7 +355,7 @@ def verifySharedDkgFrobenius_sound (k d : Nat)
         have hMacOk : verifyTowerZeroSumMac (k + d) sigmas = true :=
           (Bool.and_eq_true_iff.mp hCondAndEq.1).2
         have hEmbNe : embedTowerChain k d yOpened ≠ embedTowerChain k d yTrue :=
-          fun hEmb => hOpenNe (embedTowerChain_injective k d yOpened yTrue hEmb)
+          fun hEmb => hOpenEq (embedTowerChain_injective k d yOpened yTrue hEmb)
         exact verifyTowerZeroSumMac_forged_pins_key (k + d) alpha
           (embedTowerChain k d yTrue) (embedTowerChain k d yOpened) deltaSigma sigmas
           hEmbNe hMacSum hMacOk))
@@ -1256,13 +1258,43 @@ theorem canonical_mac_before_open_blocks_faulted_cut_leakage
   rcases released_canonical_cut_origin vk turns ⟨initialEpoch, [], 0, false⟩ pair h with hOld | ⟨t, ht, heq, hcb, hMac⟩
   · cases hOld
   · refine ⟨t, ht, heq, hcb, hMac, ?_⟩
-    by_cases hEq : t.candidateBytes = encodeCutShareBytes (honestOpening t).shareX
-    · exact .inl hEq
-    · have hShareNe : (honestOpening t).shareX ≠ t.opening.shareX := by
+    cases hEqB : (t.candidateBytes == encodeCutShareBytes (honestOpening t).shareX) with
+    | true => exact .inl (eq_of_beq hEqB)
+    | false =>
+      have hShareNe : (honestOpening t).shareX ≠ t.opening.shareX := by
         intro hSame
-        exact hEq (hcb.trans (congrArg encodeCutShareBytes hSame.symm))
+        have hEq : t.candidateBytes = encodeCutShareBytes (honestOpening t).shareX :=
+          hcb.trans (congrArg encodeCutShareBytes hSame.symm)
+        rw [hEq, beq_self_eq_true] at hEqB
+        cases hEqB
       exact .inr (bdoz_pair_key_recovery vk (honestOpening t) t.opening
         (hParty t ht) hShareNe (hHonest t ht) hMac)
+
+private theorem bdozHonestOpening_verifies (vk : BdozVerifierKeys) (j : Nat) (x : Tower128) :
+    verifyBdozPairMac vk (bdozHonestOpening vk j x) = true := by
+  simp [verifyBdozPairMac, bdozHonestOpening]
+
+private theorem stepCanonical_rejects_mismatched (vk : BdozVerifierKeys)
+    (ep : Nat) (trueB candB : List UInt8) (op : BdozPairOpening)
+    (hMismatch : candB ≠ encodeCutShareBytes op.shareX) :
+    stepCanonicalMacBeforeOpenSignTurn vk ⟨ep, [], 0, false⟩ ⟨ep, trueB, candB, op⟩ =
+      ⟨ep, [], 1, true⟩ := by
+  have hBeqF : (candB == encodeCutShareBytes op.shareX) = false := beq_false_of_ne hMismatch
+  unfold stepCanonicalMacBeforeOpenSignTurn
+  dsimp only
+  rw [beq_self_eq_true ep, hBeqF]
+  rfl
+
+private theorem stepCanonical_accepts_canonical (vk : BdozVerifierKeys)
+    (ep : Nat) (honX : Tower128) (op : BdozPairOpening)
+    (hMac : verifyBdozPairMac vk op = true) :
+    stepCanonicalMacBeforeOpenSignTurn vk ⟨ep, [], 0, false⟩
+        (mkCanonicalCutCandidateOpening ep honX op) =
+      ⟨ep + 1, [(ep, encodeCutShareBytes op.shareX)], 0, false⟩ := by
+  unfold stepCanonicalMacBeforeOpenSignTurn mkCanonicalCutCandidateOpening
+  dsimp only
+  rw [beq_self_eq_true ep, beq_self_eq_true (encodeCutShareBytes op.shareX), hMac]
+  rfl
 
 /-- **`#tooth` Mismatched `candidateBytes` Rejected Even Under Valid BDOZ MAC
     (`tooth_canonical_cut_rejects_mismatched_bytes`)**:
@@ -1272,14 +1304,26 @@ theorem canonical_mac_before_open_blocks_faulted_cut_leakage
 theorem tooth_canonical_cut_rejects_mismatched_bytes :
     let vk : BdozVerifierKeys := ⟨towerOne 7, towerOne 7, fun _ => (towerZero 7, towerZero 7)⟩
     let honOp := bdozHonestOpening vk 0 (towerOne 7)
-    let badTurn : CutCandidateOpening := ⟨0, encodeCutShareBytes (towerOne 7), List.replicate 16 0xFF, honOp⟩
+    let badTurn : CutCandidateOpening :=
+      ⟨0, encodeCutShareBytes (towerOne 7), encodeCutShareBytes (towerZero 7), honOp⟩
     let goodTurn := mkCanonicalCutCandidateOpening 0 (towerOne 7) honOp
     verifyBdozPairMac vk badTurn.opening = true ∧
     (stepCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩ badTurn).releasedHistory = [] ∧
     (stepCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩ badTurn).poisoned = true ∧
     (stepCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩ goodTurn).releasedHistory =
       [(0, encodeCutShareBytes (towerOne 7))] := by
-  decide +kernel
+  intro vk honOp badTurn goodTurn
+  have hMac : verifyBdozPairMac vk honOp = true := bdozHonestOpening_verifies vk 0 (towerOne 7)
+  have hMismatch : encodeCutShareBytes (towerZero 7) ≠ encodeCutShareBytes (towerOne 7) :=
+    fun h => towerOne_ne_zero 7 (encodeCutShareBytes_injective h).symm
+  have hBad := stepCanonical_rejects_mismatched vk 0 (encodeCutShareBytes (towerOne 7))
+    (encodeCutShareBytes (towerZero 7)) honOp hMismatch
+  have hGood := stepCanonical_accepts_canonical vk 0 (towerOne 7) honOp hMac
+  have hShare : honOp.shareX = towerOne 7 := rfl
+  refine ⟨hMac, ?_, ?_, ?_⟩
+  · dsimp only [badTurn]; rw [hBad]
+  · dsimp only [badTurn]; rw [hBad]
+  · dsimp only [goodTurn]; rw [hGood, hShare]
 
 /-! ## 5. Dynamic `(t, n) → (t', n')` Quorum Resharing `Π_reshare` & Proactive Refresh -/
 
@@ -1387,7 +1431,8 @@ def eraseOldShareAfterReshare {R : Type} (v : OldPartyReshareView R) : OldPartyR
   { v with heldShare := none }
 
 theorem eraseOldShareAfterReshare_wipes {R : Type} (v : OldPartyReshareView R) :
-    (eraseOldShareAfterReshare v).heldShare = none := rfl
+    (eraseOldShareAfterReshare v).heldShare = none := by
+  rfl
 
 private theorem dealReshareSubPolys_deg {R : Type} [CommRingOps R] (tPrime : Nat) :
     ∀ (ls ss : List R) (tls : List (List R)),
@@ -1763,17 +1808,24 @@ private theorem stepWalJortsNode_preserves_wellFormed
         · exact False.elim (hEmpty sl m₁ sh₁ hOld1)
     | some pair =>
       rcases pair with ⟨hwSlot, hwMsg⟩
-      by_cases hRetry : (slot == hwSlot && decide (msg = hwMsg)) = true
-      · simp only [hRetry, ↓reduceIte]
-        rcases Bool.and_eq_true_iff.mp hRetry with ⟨hSlB, hMsgB⟩
+      dsimp only
+      generalize hRetryEq : (slot == hwSlot && decide (msg = hwMsg)) = retryB
+      cases retryB with
+      | true =>
+        simp only [↓reduceIte]
+        rcases Bool.and_eq_true_iff.mp hRetryEq with ⟨hSlB, hMsgB⟩
         have hSlEq : slot = hwSlot := eq_of_beq hSlB
         have hMsgEq : msg = hwMsg := of_decide_eq_true hMsgB
         refine ⟨?_, ?_⟩
         · intro sl m sh hMem
           rcases List.mem_cons.mp hMem with hEq | hOld
           · injection hEq with h1 hR; injection hR with h2 _
-            exact ⟨hwSlot, hwMsg, hHw, Or.inr ⟨h1.trans hSlEq, h2.trans hMsgEq⟩⟩
-          · exact hBound sl m sh hOld
+            exact ⟨hwSlot, hwMsg, rfl, Or.inr ⟨h1.trans hSlEq, h2.trans hMsgEq⟩⟩
+          · obtain ⟨hwS', hwM', hSome, hOrd⟩ := hBound sl m sh hOld
+            rw [hHw] at hSome; injection hSome with hPair
+            injection hPair with hE1 hE2
+            subst hE1; subst hE2
+            exact ⟨hwSlot, hwMsg, rfl, hOrd⟩
         · intro sl m₁ sh₁ m₂ sh₂ hMem1 hMem2
           rcases List.mem_cons.mp hMem1 with hEq1 | hOld1
           · injection hEq1 with hS1 hR1; injection hR1 with hM1 _
@@ -1795,12 +1847,13 @@ private theorem stepWalJortsNode_preserves_wellFormed
               · omega
               · rw [hM2, hMsgEq, hEqM, hE2]
             · exact hNoEq sl m₁ sh₁ m₂ sh₂ hOld1 hOld2
-      · have hRetryF : (slot == hwSlot && decide (msg = hwMsg)) = false :=
-          Bool.eq_false_iff.mpr hRetry
-        simp only [hRetryF, Bool.false_eq_true, ↓reduceIte]
-        by_cases hAdv : decide (hwSlot < slot) = true
-        · simp only [hAdv, ↓reduceIte]
-          have hLtSlot : hwSlot < slot := of_decide_eq_true hAdv
+      | false =>
+        simp only [Bool.false_eq_true, ↓reduceIte]
+        generalize hAdvEq : decide (hwSlot < slot) = advB
+        cases advB with
+        | true =>
+          simp only [↓reduceIte]
+          have hLtSlot : hwSlot < slot := of_decide_eq_true hAdvEq
           refine ⟨?_, ?_⟩
           · intro sl m sh hMem
             rcases List.mem_cons.mp hMem with hEq | hOld
@@ -1830,8 +1883,8 @@ private theorem stepWalJortsNode_preserves_wellFormed
                 exfalso
                 rcases hOrd with hLt | ⟨hEqS, _⟩ <;> omega
               · exact hNoEq sl m₁ sh₁ m₂ sh₂ hOld1 hOld2
-        · have hAdvF : decide (hwSlot < slot) = false := Bool.eq_false_iff.mpr hAdv
-          simp only [hAdvF, Bool.false_eq_true, ↓reduceIte]
+        | false =>
+          simp only [Bool.false_eq_true, ↓reduceIte]
           exact ⟨hBound, hNoEq⟩
 
 /-- **Crash-Resilient Disk WAL Node Non-Equivocation (`walJortsNode_no_equivocation_across_crashes`)**:
@@ -1851,8 +1904,10 @@ theorem walJortsNode_no_equivocation_across_crashes
     | cons e rest ih =>
       intro st hWf
       exact ih (stepWalJortsNode myShare st e) (stepWalJortsNode_preserves_wellFormed myShare st e hWf)
-  have hInitWf : initWalJortsState.WellFormed :=
-    ⟨fun _ _ _ h => by cases h, fun _ _ _ _ _ h => by cases h⟩
+  have hInitWf : initWalJortsState.WellFormed := by
+    refine ⟨?_, ?_⟩
+    · intro _ _ _ h; dsimp only [initWalJortsState] at h; cases h
+    · intro _ _ _ _ _ h _; dsimp only [initWalJortsState] at h; cases h
   exact (hPres evs initWalJortsState hInitWf).2 slot m₁ sh₁ m₂ sh₂ h1 h2
 
 /-- **Shared-Key Threshold `Jorts` Quorum + Crash-Resilient WAL Safety
