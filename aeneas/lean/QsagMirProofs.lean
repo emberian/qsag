@@ -1,6 +1,8 @@
 module
+import all QsagVerified.Funs
 
 public import QsagVerified.Proofs
+public import QsagVerified.Proofs.CustodyMediation
 public import QsagSpecWeld
 public import QsagVerified.Proofs.SpongeConformance
 public import QsagVerified.Proofs.SpongeFraming
@@ -18,6 +20,10 @@ and the Linux validation requirements for each revision.
 namespace QsagMirProofs
 
 export qsag_verified.proofs (
+  sponge_squeeze_prefix
+  sponge_squeeze32_refines
+  shake256_32_refines
+  cshake256_32_refines_of_prefix
   GoldilocksP
   bdoz_authenticate_open_total
   bdoz_authenticate_open_spec
