@@ -697,3 +697,682 @@ private theorem applyMI_makeMIInvRaw_helper (y : Poseidon2State12) (s : Goldiloc
     · exact mi_lane_forward 512 2 rfl y.b2.x2 s
     · exact mi_lane_forward 1024 1 rfl y.b2.x3 s
 
+theorem applyMI_applyMIInv (y : Poseidon2State12) : applyMI (applyMIInv y) = y := by
+  have hs2559 : Goldilocks.mul (Goldilocks.ofNat 2559) (Goldilocks.mul inv2559G (weightedSumMI y)) =
+      weightedSumMI y :=
+    mul_inv2559G_cancel (weightedSumMI y)
+  have hSumEq : state12Sum (makeMIInvRaw y inv1024G (Goldilocks.mul inv2559G (weightedSumMI y))) =
+      Goldilocks.mul inv2559G (weightedSumMI y) := by
+    rw [state12Sum_makeMIInvRaw]
+    conv => lhs; arg 2; arg 1; rw [← hs2559]
+    rw [mi_2559_sub_1535, inv1024G_mul_cancel]
+  exact applyMI_makeMIInvRaw_helper y (Goldilocks.mul inv2559G (weightedSumMI y)) hSumEq
+
+/-! ## 3. Full Width-12 `Poseidon2` Permutation ($R_F = 8, R_P = 22$) & `poseidon2Perm12_bijective` -/
+
+def state12Zero : Poseidon2State12 :=
+  ⟨lane4Zero, lane4Zero, lane4Zero⟩
+
+def state12Add (a b : Poseidon2State12) : Poseidon2State12 :=
+  ⟨lane4Add a.b0 b.b0, lane4Add a.b1 b.b1, lane4Add a.b2 b.b2⟩
+
+def state12Sub (a b : Poseidon2State12) : Poseidon2State12 :=
+  ⟨lane4Sub a.b0 b.b0, lane4Sub a.b1 b.b1, lane4Sub a.b2 b.b2⟩
+
+def state12Scale (c : Goldilocks) (a : Poseidon2State12) : Poseidon2State12 :=
+  ⟨lane4Scale c a.b0, lane4Scale c a.b1, lane4Scale c a.b2⟩
+
+theorem state12Zero_eq : state12Zero = ⟨lane4Zero, lane4Zero, lane4Zero⟩ := by rfl
+theorem lane4Zero_eq : lane4Zero = ⟨Goldilocks.zero, Goldilocks.zero, Goldilocks.zero, Goldilocks.zero⟩ := by rfl
+theorem state12Add_eq (a b : Poseidon2State12) :
+    state12Add a b = ⟨lane4Add a.b0 b.b0, lane4Add a.b1 b.b1, lane4Add a.b2 b.b2⟩ := by rfl
+theorem state12Scale_eq (c : Goldilocks) (a : Poseidon2State12) :
+    state12Scale c a = ⟨lane4Scale c a.b0, lane4Scale c a.b1, lane4Scale c a.b2⟩ := by rfl
+theorem lane4Add_eq (a b : Lane4) :
+    lane4Add a b = ⟨Goldilocks.add a.x0 b.x0, Goldilocks.add a.x1 b.x1, Goldilocks.add a.x2 b.x2, Goldilocks.add a.x3 b.x3⟩ := by rfl
+theorem lane4Scale_eq (c : Goldilocks) (a : Lane4) :
+    lane4Scale c a = ⟨Goldilocks.mul c a.x0, Goldilocks.mul c a.x1, Goldilocks.mul c a.x2, Goldilocks.mul c a.x3⟩ := by rfl
+
+private theorem goldilocks_add_add_add_comm (a b c d : Goldilocks) :
+    Goldilocks.add (Goldilocks.add a b) (Goldilocks.add c d) =
+    Goldilocks.add (Goldilocks.add a c) (Goldilocks.add b d) := by
+  apply Goldilocks.ext
+  simp only [Goldilocks.add_val, Nat.add_mod_mod, Nat.mod_add_mod]
+  exact congrArg (· % goldilocksPrime) (by omega)
+
+private theorem goldilocks_mul_add (c a b : Goldilocks) :
+    Goldilocks.mul c (Goldilocks.add a b) =
+    Goldilocks.add (Goldilocks.mul c a) (Goldilocks.mul c b) := by
+  apply Goldilocks.ext
+  simp only [Goldilocks.mul_val, Goldilocks.add_val]
+  rw [Nat.mul_mod_mod, Nat.add_mod_mod, Nat.mod_add_mod, ← Nat.left_distrib]
+
+private theorem lane4Add_add_add_comm (a b c d : Lane4) :
+    lane4Add (lane4Add a b) (lane4Add c d) = lane4Add (lane4Add a c) (lane4Add b d) := by
+  unfold lane4Add
+  exact Lane4.ext
+    (goldilocks_add_add_add_comm _ _ _ _)
+    (goldilocks_add_add_add_comm _ _ _ _)
+    (goldilocks_add_add_add_comm _ _ _ _)
+    (goldilocks_add_add_add_comm _ _ _ _)
+
+private theorem applyM4_add (a b : Lane4) :
+    applyM4 (lane4Add a b) = lane4Add (applyM4 a) (applyM4 b) := by
+  unfold applyM4 lane4Add lane4Sum
+  dsimp only
+  apply Lane4.ext <;>
+    (rw [← goldOfInt_nat a.x0, ← goldOfInt_nat a.x1, ← goldOfInt_nat a.x2, ← goldOfInt_nat a.x3,
+         ← goldOfInt_nat b.x0, ← goldOfInt_nat b.x1, ← goldOfInt_nat b.x2, ← goldOfInt_nat b.x3];
+     simp only [ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul];
+     congr 1; omega)
+
+theorem applyME_zero : applyME state12Zero = state12Zero := by
+  unfold applyME state12Zero applyM4 lane4Zero lane4Add lane4Sum
+  dsimp only
+  have hz : Goldilocks.zero = goldOfInt 0 := rfl
+  apply Poseidon2State12.ext <;> apply Lane4.ext <;>
+    (simp only [hz, ofNat_eq_goldOfInt, goldOfInt_add, goldOfInt_mul]; congr 1)
+
+theorem applyME_add (a b : Poseidon2State12) :
+    applyME (state12Add a b) = state12Add (applyME a) (applyME b) := by
+  unfold applyME state12Add
+  dsimp only
+  rw [applyM4_add, applyM4_add, applyM4_add]
+  have hs :
+      lane4Add (lane4Add (lane4Add (applyM4 a.b0) (applyM4 b.b0))
+                         (lane4Add (applyM4 a.b1) (applyM4 b.b1)))
+               (lane4Add (applyM4 a.b2) (applyM4 b.b2)) =
+      lane4Add (lane4Add (lane4Add (applyM4 a.b0) (applyM4 a.b1)) (applyM4 a.b2))
+               (lane4Add (lane4Add (applyM4 b.b0) (applyM4 b.b1)) (applyM4 b.b2)) := by
+    rw [lane4Add_add_add_comm (applyM4 a.b0) (applyM4 b.b0) (applyM4 a.b1) (applyM4 b.b1),
+        lane4Add_add_add_comm]
+  rw [hs]
+  exact Poseidon2State12.ext
+    (lane4Add_add_add_comm _ _ _ _).symm
+    (lane4Add_add_add_comm _ _ _ _).symm
+    (lane4Add_add_add_comm _ _ _ _).symm
+
+theorem applyME_scale (c : Goldilocks) (a : Poseidon2State12) :
+    applyME (state12Scale c a) = state12Scale c (applyME a) := by
+  unfold applyME state12Scale
+  dsimp only
+  rw [applyM4_scale, applyM4_scale, applyM4_scale]
+  unfold lane4Add lane4Scale
+  dsimp only
+  apply Poseidon2State12.ext <;> apply Lane4.ext <;>
+    simp only [goldilocks_mul_add]
+
+theorem applyMI_zero : applyMI state12Zero = state12Zero := by
+  unfold applyMI state12Zero state12Sum lane4Zero lane4Sum
+  dsimp only
+  have hz : Goldilocks.zero = goldOfInt 0 := rfl
+  apply Poseidon2State12.ext <;> apply Lane4.ext <;>
+    (simp only [hz, goldOfInt_add, goldOfInt_mul]; congr 1)
+
+theorem applyMI_add (a b : Poseidon2State12) :
+    applyMI (state12Add a b) = state12Add (applyMI a) (applyMI b) := by
+  have hLane : ∀ (d u v sa sb : Goldilocks),
+      Goldilocks.add (Goldilocks.mul d (Goldilocks.add u v)) (Goldilocks.add sa sb) =
+      Goldilocks.add (Goldilocks.add (Goldilocks.mul d u) sa) (Goldilocks.add (Goldilocks.mul d v) sb) :=
+    fun d u v sa sb => by
+      rw [goldilocks_mul_add d u v]
+      exact goldilocks_add_add_add_comm _ _ _ _
+  have hSum : state12Sum (state12Add a b) = Goldilocks.add (state12Sum a) (state12Sum b) := by
+    unfold state12Sum state12Add lane4Sum lane4Add
+    dsimp only
+    apply Goldilocks.ext
+    simp only [Goldilocks.add_val, Nat.add_mod_mod, Nat.mod_add_mod]
+    exact congrArg (· % goldilocksPrime) (by omega)
+  unfold applyMI
+  rw [hSum]
+  unfold state12Add lane4Add
+  dsimp only
+  exact Poseidon2State12.ext
+    (Lane4.ext (hLane _ _ _ _ _) (goldilocks_add_add_add_comm _ _ _ _) (hLane _ _ _ _ _) (hLane _ _ _ _ _))
+    (Lane4.ext (hLane _ _ _ _ _) (hLane _ _ _ _ _) (hLane _ _ _ _ _) (hLane _ _ _ _ _))
+    (Lane4.ext (hLane _ _ _ _ _) (hLane _ _ _ _ _) (hLane _ _ _ _ _) (hLane _ _ _ _ _))
+
+theorem applyMI_scale (c : Goldilocks) (a : Poseidon2State12) :
+    applyMI (state12Scale c a) = state12Scale c (applyMI a) := by
+  have hLane : ∀ (d x s : Goldilocks),
+      Goldilocks.add (Goldilocks.mul d (Goldilocks.mul c x)) (Goldilocks.mul c s) =
+      Goldilocks.mul c (Goldilocks.add (Goldilocks.mul d x) s) := fun d x s => by
+    have hComm : Goldilocks.mul d (Goldilocks.mul c x) = Goldilocks.mul c (Goldilocks.mul d x) := by
+      apply Goldilocks.ext
+      simp only [Goldilocks.mul_val]
+      rw [Nat.mul_mod_mod, ← Nat.mul_assoc, Nat.mul_comm d.val c.val, Nat.mul_assoc, ← Nat.mul_mod_mod]
+    rw [hComm, ← goldilocks_mul_add]
+  have hSum : state12Sum (state12Scale c a) = Goldilocks.mul c (state12Sum a) := by
+    unfold state12Sum state12Scale lane4Sum lane4Scale
+    dsimp only
+    simp only [goldilocks_mul_add]
+  unfold applyMI
+  rw [hSum]
+  unfold state12Scale lane4Scale
+  dsimp only
+  exact Poseidon2State12.ext
+    (Lane4.ext (hLane _ _ _) (goldilocks_mul_add _ _ _).symm (hLane _ _ _) (hLane _ _ _))
+    (Lane4.ext (hLane _ _ _) (hLane _ _ _) (hLane _ _ _) (hLane _ _ _))
+    (Lane4.ext (hLane _ _ _) (hLane _ _ _) (hLane _ _ _) (hLane _ _ _))
+
+private theorem state12Sub_add_right (a c : Poseidon2State12) : state12Sub (state12Add a c) c = a := by
+  unfold state12Sub state12Add
+  exact Poseidon2State12.ext (lane4Sub_add_right _ _) (lane4Sub_add_right _ _) (lane4Sub_add_right _ _)
+
+private theorem state12Add_sub_right (a c : Poseidon2State12) : state12Add (state12Sub a c) c = a := by
+  have h4 : ∀ x y : Lane4, lane4Add (lane4Sub x y) y = x := fun x y => by
+    unfold lane4Add lane4Sub
+    apply Lane4.ext <;>
+      (change CommRingOps.add (CommRingOps.sub _ _) _ = _;
+       rw [LawfulCommRing.add_comm, LawfulCommRing.add_sub_cancel_left])
+  unfold state12Add state12Sub
+  exact Poseidon2State12.ext (h4 _ _) (h4 _ _) (h4 _ _)
+
+def sboxLane4 (b : Lane4) : Lane4 :=
+  ⟨sbox7 b.x0, sbox7 b.x1, sbox7 b.x2, sbox7 b.x3⟩
+
+def sboxLane4Inv (b : Lane4) : Lane4 :=
+  ⟨sbox7Inv b.x0, sbox7Inv b.x1, sbox7Inv b.x2, sbox7Inv b.x3⟩
+
+def sboxState12 (st : Poseidon2State12) : Poseidon2State12 :=
+  ⟨sboxLane4 st.b0, sboxLane4 st.b1, sboxLane4 st.b2⟩
+
+def sboxState12Inv (st : Poseidon2State12) : Poseidon2State12 :=
+  ⟨sboxLane4Inv st.b0, sboxLane4Inv st.b1, sboxLane4Inv st.b2⟩
+
+private theorem sboxState12Inv_sboxState12 (st : Poseidon2State12) :
+    sboxState12Inv (sboxState12 st) = st := by
+  unfold sboxState12Inv sboxState12 sboxLane4Inv sboxLane4
+  apply Poseidon2State12.ext <;> apply Lane4.ext <;> exact sbox7Inv_sbox7 _
+
+private theorem sboxState12_sboxState12Inv (st : Poseidon2State12) :
+    sboxState12 (sboxState12Inv st) = st := by
+  unfold sboxState12 sboxState12Inv sboxLane4 sboxLane4Inv
+  apply Poseidon2State12.ext <;> apply Lane4.ext <;> exact sbox7_sbox7Inv _
+
+def externalRound (rc : Poseidon2State12) (st : Poseidon2State12) : Poseidon2State12 :=
+  applyME (sboxState12 (state12Add st rc))
+
+def externalRoundInv (rc : Poseidon2State12) (st : Poseidon2State12) : Poseidon2State12 :=
+  state12Sub (sboxState12Inv (applyMEInv st)) rc
+
+private theorem externalRoundInv_externalRound (rc st : Poseidon2State12) :
+    externalRoundInv rc (externalRound rc st) = st := by
+  unfold externalRoundInv externalRound
+  rw [applyMEInv_applyME, sboxState12Inv_sboxState12, state12Sub_add_right]
+
+private theorem externalRound_externalRoundInv (rc st : Poseidon2State12) :
+    externalRound rc (externalRoundInv rc st) = st := by
+  unfold externalRound externalRoundInv
+  rw [state12Add_sub_right, sboxState12_sboxState12Inv, applyME_applyMEInv]
+
+def internalRound (rc : Goldilocks) (st : Poseidon2State12) : Poseidon2State12 :=
+  let x0' := sbox7 (Goldilocks.add st.b0.x0 rc)
+  applyMI ⟨⟨x0', st.b0.x1, st.b0.x2, st.b0.x3⟩, st.b1, st.b2⟩
+
+def internalRoundInv (rc : Goldilocks) (st : Poseidon2State12) : Poseidon2State12 :=
+  let u := applyMIInv st
+  let x0 := Goldilocks.sub (sbox7Inv u.b0.x0) rc
+  ⟨⟨x0, u.b0.x1, u.b0.x2, u.b0.x3⟩, u.b1, u.b2⟩
+
+private theorem internalRoundInv_internalRound (rc : Goldilocks) (st : Poseidon2State12) :
+    internalRoundInv rc (internalRound rc st) = st := by
+  unfold internalRoundInv internalRound
+  rw [applyMIInv_applyMI]
+  dsimp only
+  rw [sbox7Inv_sbox7]
+  have hSub : Goldilocks.sub (Goldilocks.add st.b0.x0 rc) rc = st.b0.x0 := by
+    change CommRingOps.sub (CommRingOps.add st.b0.x0 rc) rc = st.b0.x0
+    rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+        LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+  rw [hSub]
+
+private theorem internalRound_step_cancel (rc : Goldilocks) (u : Poseidon2State12) :
+    internalRound rc ⟨⟨Goldilocks.sub (sbox7Inv u.b0.x0) rc, u.b0.x1, u.b0.x2, u.b0.x3⟩, u.b1, u.b2⟩ =
+      applyMI u := by
+  cases u with | mk b0 b1 b2 =>
+    cases b0 with | mk x0 x1 x2 x3 =>
+      unfold internalRound
+      dsimp only
+      have hAdd : Goldilocks.add (Goldilocks.sub (sbox7Inv x0) rc) rc = sbox7Inv x0 := by
+        change CommRingOps.add (CommRingOps.sub (sbox7Inv x0) rc) rc = sbox7Inv x0
+        rw [LawfulCommRing.add_comm, LawfulCommRing.add_sub_cancel_left]
+      rw [hAdd, sbox7_sbox7Inv]
+
+private theorem internalRound_internalRoundInv (rc : Goldilocks) (st : Poseidon2State12) :
+    internalRound rc (internalRoundInv rc st) = st := by
+  change internalRound rc
+    ⟨⟨Goldilocks.sub (sbox7Inv (applyMIInv st).b0.x0) rc,
+      (applyMIInv st).b0.x1, (applyMIInv st).b0.x2, (applyMIInv st).b0.x3⟩,
+     (applyMIInv st).b1, (applyMIInv st).b2⟩ = st
+  rw [internalRound_step_cancel rc (applyMIInv st), applyMI_applyMIInv]
+
+def splitMix64Mix (x : UInt64) : UInt64 :=
+  let z0 := x + 0x9E3779B97F4A7C15
+  let z1 := (z0 ^^^ (z0 >>> 30)) * 0xBF58476D1CE4E5B9
+  let z2 := (z1 ^^^ (z1 >>> 27)) * 0x94D049BB133111EB
+  z2 ^^^ (z2 >>> 31)
+
+def poseidon2ConstIV : UInt64 := 0x504F53325F474C31
+
+def poseidon2ConstWord (tag round lane : Nat) : UInt64 :=
+  splitMix64Mix (splitMix64Mix (splitMix64Mix (poseidon2ConstIV ^^^ UInt64.ofNat tag) ^^^ UInt64.ofNat round) ^^^
+    UInt64.ofNat lane)
+
+def poseidon2ConstAt (tag round lane : Nat) : Goldilocks :=
+  Goldilocks.ofNat (poseidon2ConstWord tag round lane).toNat
+
+/-- Non-affinity of the round-constant generator across rounds. -/
+theorem poseidon2ConstAt_not_affine (a b : Goldilocks) :
+    ¬ ∀ r : Nat, poseidon2ConstAt 1 r 0 = Goldilocks.add a (Goldilocks.mul b (Goldilocks.ofNat r)) := by
+  intro h
+  have key : ((poseidon2ConstAt 1 0 0).val + (poseidon2ConstAt 1 2 0).val) % goldilocksPrime ≠
+      (2 * (poseidon2ConstAt 1 1 0).val) % goldilocksPrime := by decide +kernel
+  have h0 := congrArg Goldilocks.val (h 0)
+  have h1 := congrArg Goldilocks.val (h 1)
+  have h2 := congrArg Goldilocks.val (h 2)
+  rw [Goldilocks.add_val, Goldilocks.mul_val] at h0 h1 h2
+  have o0 : (Goldilocks.ofNat 0).val = 0 := by decide
+  have o1 : (Goldilocks.ofNat 1).val = 1 := by decide
+  have o2 : (Goldilocks.ofNat 2).val = 2 := by decide
+  rw [o0] at h0; rw [o1] at h1; rw [o2] at h2
+  apply key; rw [h0, h1, h2]
+  have ha := a.isLt
+  have hb := b.isLt
+  simp only [goldilocksPrime] at *
+  omega
+
+def poseidon2ExtRoundConst (tag round : Nat) : Poseidon2State12 :=
+  ⟨⟨poseidon2ConstAt tag round 0, poseidon2ConstAt tag round 1,
+    poseidon2ConstAt tag round 2, poseidon2ConstAt tag round 3⟩,
+   ⟨poseidon2ConstAt tag round 4, poseidon2ConstAt tag round 5,
+    poseidon2ConstAt tag round 6, poseidon2ConstAt tag round 7⟩,
+   ⟨poseidon2ConstAt tag round 8, poseidon2ConstAt tag round 9,
+    poseidon2ConstAt tag round 10, poseidon2ConstAt tag round 11⟩⟩
+
+def poseidon2InitialExtConsts : List Poseidon2State12 :=
+  (List.range 4).map (poseidon2ExtRoundConst 0)
+
+def poseidon2InternalConsts : List Goldilocks :=
+  (List.range 22).map (fun r => poseidon2ConstAt 1 r 0)
+
+def poseidon2TerminalExtConsts : List Poseidon2State12 :=
+  (List.range 4).map (poseidon2ExtRoundConst 2)
+
+def runRounds {α σ : Type} (step : α → σ → σ) : List α → σ → σ
+  | [], s => s
+  | c :: cs, s => runRounds step cs (step c s)
+
+theorem sboxState12_eq (st : Poseidon2State12) :
+    sboxState12 st =
+      ⟨⟨sbox7 st.b0.x0, sbox7 st.b0.x1, sbox7 st.b0.x2, sbox7 st.b0.x3⟩,
+       ⟨sbox7 st.b1.x0, sbox7 st.b1.x1, sbox7 st.b1.x2, sbox7 st.b1.x3⟩,
+       ⟨sbox7 st.b2.x0, sbox7 st.b2.x1, sbox7 st.b2.x2, sbox7 st.b2.x3⟩⟩ := by rfl
+
+theorem externalRound_eq (rc st : Poseidon2State12) :
+    externalRound rc st = applyME (sboxState12 (state12Add st rc)) := by rfl
+
+theorem internalRound_eq (rc : Goldilocks) (st : Poseidon2State12) :
+    internalRound rc st =
+      applyMI ⟨⟨sbox7 (Goldilocks.add st.b0.x0 rc), st.b0.x1, st.b0.x2, st.b0.x3⟩, st.b1, st.b2⟩ := by rfl
+
+theorem runRounds_nil {α σ : Type} (step : α → σ → σ) (s : σ) :
+    runRounds step [] s = s := by rfl
+
+theorem runRounds_cons {α σ : Type} (step : α → σ → σ) (c : α) (cs : List α) (s : σ) :
+    runRounds step (c :: cs) s = runRounds step cs (step c s) := by rfl
+
+def runRoundsInv {α σ : Type} (stepInv : α → σ → σ) : List α → σ → σ
+  | [], s => s
+  | c :: cs, s => stepInv c (runRoundsInv stepInv cs s)
+
+private theorem runRoundsInv_runRounds {α σ : Type} (step stepInv : α → σ → σ)
+    (hInv : ∀ c s, stepInv c (step c s) = s) (cs : List α) :
+    ∀ (s : σ), runRoundsInv stepInv cs (runRounds step cs s) = s := by
+  induction cs with
+  | nil => intro s; rfl
+  | cons c cs ih =>
+    intro s
+    simp only [runRounds, runRoundsInv, ih (step c s), hInv]
+
+private theorem runRounds_runRoundsInv {α σ : Type} (step stepInv : α → σ → σ)
+    (hInv : ∀ c s, step c (stepInv c s) = s) (cs : List α) :
+    ∀ (s : σ), runRounds step cs (runRoundsInv stepInv cs s) = s := by
+  induction cs with
+  | nil => intro s; rfl
+  | cons c cs ih =>
+    intro s
+    simp only [runRoundsInv, runRounds, hInv, ih s]
+
+/-- **Full Width-12 `Poseidon2` Permutation (`poseidon2Perm12`, $R_F = 8, R_P = 22$)**. -/
+@[expose] def poseidon2Perm12 (st : Poseidon2State12) : Poseidon2State12 :=
+  let s0 := applyME st
+  let s1 := runRounds externalRound poseidon2InitialExtConsts s0
+  let s2 := runRounds internalRound poseidon2InternalConsts s1
+  runRounds externalRound poseidon2TerminalExtConsts s2
+
+@[expose] def poseidon2Perm12Inv (st : Poseidon2State12) : Poseidon2State12 :=
+  let s2 := runRoundsInv externalRoundInv poseidon2TerminalExtConsts st
+  let s1 := runRoundsInv internalRoundInv poseidon2InternalConsts s2
+  let s0 := runRoundsInv externalRoundInv poseidon2InitialExtConsts s1
+  applyMEInv s0
+
+theorem poseidon2Perm12Inv_left_inv (st : Poseidon2State12) :
+    poseidon2Perm12Inv (poseidon2Perm12 st) = st := by
+  unfold poseidon2Perm12Inv poseidon2Perm12
+  dsimp only
+  rw [runRoundsInv_runRounds externalRound externalRoundInv externalRoundInv_externalRound,
+      runRoundsInv_runRounds internalRound internalRoundInv internalRoundInv_internalRound,
+      runRoundsInv_runRounds externalRound externalRoundInv externalRoundInv_externalRound,
+      applyMEInv_applyME]
+
+theorem poseidon2Perm12Inv_right_inv (st : Poseidon2State12) :
+    poseidon2Perm12 (poseidon2Perm12Inv st) = st := by
+  unfold poseidon2Perm12 poseidon2Perm12Inv
+  dsimp only
+  rw [applyME_applyMEInv,
+      runRounds_runRoundsInv externalRound externalRoundInv externalRound_externalRoundInv,
+      runRounds_runRoundsInv internalRound internalRoundInv internalRound_internalRoundInv,
+      runRounds_runRoundsInv externalRound externalRoundInv externalRound_externalRoundInv]
+
+/-- **Width-12 Goldilocks `Poseidon2` Permutation Bijection Theorem (`poseidon2Perm12_bijective`)**. -/
+theorem poseidon2Perm12_bijective (s t : Poseidon2State12) :
+    poseidon2Perm12Inv (poseidon2Perm12 s) = s ∧
+    poseidon2Perm12 (poseidon2Perm12Inv t) = t ∧
+    (poseidon2Perm12 s = poseidon2Perm12 t ↔ s = t) ∧
+    (∃ pre : Poseidon2State12, poseidon2Perm12 pre = t) := by
+  refine ⟨poseidon2Perm12Inv_left_inv s, poseidon2Perm12Inv_right_inv t, ?_,
+          ⟨poseidon2Perm12Inv t, poseidon2Perm12Inv_right_inv t⟩⟩
+  constructor
+  · intro h
+    have hInv := congrArg poseidon2Perm12Inv h
+    rwa [poseidon2Perm12Inv_left_inv, poseidon2Perm12Inv_left_inv] at hInv
+  · intro h
+    subst h
+    rfl
+
+/-! ## 4. Canonical `< 2^56` Limb Framing, Injective `10*1` Sponge Padding & `poseidon2Hash32` -/
+
+private theorem pad7_length (bs : List UInt8) :
+    ((bs ++ List.replicate (7 - bs.length) (0 : UInt8)).take 7).length = 7 := by
+  rw [List.length_take, List.length_append, List.length_replicate]
+  omega
+
+def pack7BytesLimb (bs : List UInt8) : Goldilocks :=
+  let chunk : List UInt8 := (bs ++ List.replicate (7 - bs.length) (0 : UInt8)).take 7
+  have hLt256 : ofBE chunk < 256 ^ 7 := pad7_length bs ▸ ofBE_lt chunk
+  have hLtP : ofBE chunk < goldilocksPrime :=
+    Nat.lt_trans hLt256 (by decide)
+  ⟨ofBE chunk, hLtP⟩
+
+theorem pack7BytesLimb_lt_two_pow_56 (bs : List UInt8) :
+    (pack7BytesLimb bs).val < 2 ^ 56 := by
+  unfold pack7BytesLimb
+  dsimp only
+  let chunk : List UInt8 := (bs ++ List.replicate (7 - bs.length) (0 : UInt8)).take 7
+  have hLt : ofBE chunk < 256 ^ 7 := pad7_length bs ▸ ofBE_lt chunk
+  have hPow : (256 : Nat) ^ 7 = 2 ^ 56 := rfl
+  exact hPow ▸ hLt
+
+private theorem be_foldl_acc :
+    ∀ (bs : List UInt8) (w acc : Nat),
+      be (w + bs.length) (bs.foldl (fun a b => a * 256 + b.toNat) acc) = be w acc ++ bs
+  | [], w, acc => by simp
+  | b :: rest, w, acc => by
+    have hLen : w + (b :: rest).length = (w + 1) + rest.length := by simp; omega
+    rw [List.foldl_cons, hLen, be_foldl_acc rest (w + 1) (acc * 256 + b.toNat)]
+    have hb : b.toNat < 256 := b.toNat_lt
+    have hDiv : (acc * 256 + b.toNat) / 256 = acc := by omega
+    have hMod : UInt8.ofNat ((acc * 256 + b.toNat) % 256) = b := by
+      apply UInt8.toNat_inj.mp
+      rw [UInt8.toNat_ofNat']
+      have h8 : (2 : Nat) ^ 8 = 256 := rfl
+      rw [h8]; omega
+    simp only [be, hDiv, hMod, List.append_assoc, List.singleton_append]
+
+theorem be7_pack7BytesLimb_of_length_eq {bs : List UInt8} (hLen : bs.length = 7) :
+    be 7 (pack7BytesLimb bs).val = bs := by
+  unfold pack7BytesLimb
+  dsimp only
+  have hChunk : (bs ++ List.replicate (7 - bs.length) (0 : UInt8)).take 7 = bs := by
+    rw [hLen]
+    simp only [Nat.sub_self, List.replicate_zero, List.append_nil]
+    exact List.take_of_length_le (Nat.le_of_eq hLen)
+  rw [hChunk, ← hLen]
+  simpa [ofBE, be] using be_foldl_acc bs 0 0
+
+def chunk7Exact : List UInt8 → List Goldilocks
+  | b0 :: b1 :: b2 :: b3 :: b4 :: b5 :: b6 :: rest =>
+    pack7BytesLimb [b0, b1, b2, b3, b4, b5, b6] :: chunk7Exact rest
+  | _ => []
+
+def unchunk7Exact : List Goldilocks → List UInt8
+  | [] => []
+  | x :: xs => be 7 x.val ++ unchunk7Exact xs
+
+private theorem unchunk7Exact_chunk7Exact :
+    ∀ (bs : List UInt8), bs.length % 7 = 0 → unchunk7Exact (chunk7Exact bs) = bs
+  | [], _ => rfl
+  | b0 :: b1 :: b2 :: b3 :: b4 :: b5 :: b6 :: rest, hMod => by
+    have hRest : rest.length % 7 = 0 := by
+      simp only [List.length_cons] at hMod
+      omega
+    simp only [chunk7Exact, unchunk7Exact,
+      be7_pack7BytesLimb_of_length_eq (bs := [b0, b1, b2, b3, b4, b5, b6]) rfl,
+      unchunk7Exact_chunk7Exact rest hRest]
+    rfl
+  | [_], h | [_, _], h | [_, _, _], h | [_, _, _, _], h
+  | [_, _, _, _, _], h | [_, _, _, _, _, _], h => by simp at h
+
+private theorem chunk7Exact_lt_two_pow_56 :
+    ∀ (bs : List UInt8) (x : Goldilocks), x ∈ chunk7Exact bs → x.val < 2 ^ 56
+  | b0 :: b1 :: b2 :: b3 :: b4 :: b5 :: b6 :: rest, x, hx => by
+    simp only [chunk7Exact, List.mem_cons] at hx
+    rcases hx with rfl | hmem
+    · exact pack7BytesLimb_lt_two_pow_56 _
+    · exact chunk7Exact_lt_two_pow_56 rest x hmem
+  | [], _, hx => by cases hx
+  | [_], _, hx | [_, _], _, hx | [_, _, _], _, hx | [_, _, _, _], _, hx
+  | [_, _, _, _, _], _, hx | [_, _, _, _, _, _], _, hx => by simp [chunk7Exact] at hx
+
+def bytesToLimbs56 (msg : List UInt8) : List Goldilocks :=
+  let marked := msg ++ [(0x01 : UInt8)]
+  let padLen := (7 - marked.length % 7) % 7
+  chunk7Exact (marked ++ List.replicate padLen (0x00 : UInt8))
+
+theorem bytesToLimbs56_lt_two_pow_56 (msg : List UInt8) (x : Goldilocks)
+    (hx : x ∈ bytesToLimbs56 msg) : x.val < 2 ^ 56 :=
+  chunk7Exact_lt_two_pow_56 _ x hx
+
+private def stripLeadingZeroBytes : List UInt8 → List UInt8
+  | [] => []
+  | b :: bs => if b == (0x00 : UInt8) then stripLeadingZeroBytes bs else b :: bs
+
+private theorem stripLeadingZeroBytes_replicate (k : Nat) (b : UInt8) (rest : List UInt8)
+    (hb : b ≠ 0x00) :
+    stripLeadingZeroBytes (List.replicate k (0x00 : UInt8) ++ (b :: rest)) = b :: rest := by
+  induction k with
+  | zero =>
+    have hne : (b == (0x00 : UInt8)) = false := beq_false_of_ne hb
+    simp only [List.replicate_zero, List.nil_append, stripLeadingZeroBytes, hne, Bool.false_eq_true, ↓reduceIte]
+  | succ k ih =>
+    simpa only [List.replicate_succ, List.cons_append, stripLeadingZeroBytes,
+      show ((0 : UInt8) == 0) = true from rfl, ↓reduceIte] using ih
+
+def limbs56ToBytes (limbs : List Goldilocks) : List UInt8 :=
+  match stripLeadingZeroBytes (unchunk7Exact limbs).reverse with
+  | _ :: revMsg => revMsg.reverse
+  | [] => []
+
+theorem limbs56ToBytes_bytesToLimbs56 (msg : List UInt8) :
+    limbs56ToBytes (bytesToLimbs56 msg) = msg := by
+  unfold bytesToLimbs56 limbs56ToBytes
+  let marked := msg ++ [(0x01 : UInt8)]
+  let padLen := (7 - marked.length % 7) % 7
+  have hMod : (marked ++ List.replicate padLen (0x00 : UInt8)).length % 7 = 0 := by
+    simp only [List.length_append, List.length_replicate, padLen]
+    omega
+  rw [unchunk7Exact_chunk7Exact _ hMod]
+  have hRev : (marked ++ List.replicate padLen (0x00 : UInt8)).reverse =
+      List.replicate padLen (0x00 : UInt8) ++ ((0x01 : UInt8) :: msg.reverse) := by
+    simp [marked, List.reverse_append, List.reverse_replicate]
+  rw [hRev, stripLeadingZeroBytes_replicate padLen 0x01 msg.reverse (by decide)]
+  exact List.reverse_reverse msg
+
+theorem bytesToLimbs56_injective {m₁ m₂ : List UInt8}
+    (h : bytesToLimbs56 m₁ = bytesToLimbs56 m₂) : m₁ = m₂ := by
+  have hInv := congrArg limbs56ToBytes h
+  rwa [limbs56ToBytes_bytesToLimbs56, limbs56ToBytes_bytesToLimbs56] at hInv
+
+def padEndMarker : Goldilocks := ⟨2 ^ 56, by decide⟩
+def padBothMarker : Goldilocks := ⟨2 ^ 56 + 1, by decide⟩
+
+def pad101Suffix : Nat → List Goldilocks
+  | 0 => [padBothMarker]
+  | k + 1 => [Goldilocks.one] ++ List.replicate k Goldilocks.zero ++ [padEndMarker]
+
+@[expose] def poseidon2Pad (xs : List Goldilocks) : List Goldilocks :=
+  let z := (8 - (xs.length + 1) % 8) % 8
+  xs ++ pad101Suffix z
+
+theorem poseidon2Pad_length_mod (xs : List Goldilocks) :
+    0 < (poseidon2Pad xs).length ∧ (poseidon2Pad xs).length % 8 = 0 := by
+  unfold poseidon2Pad
+  let z := (8 - (xs.length + 1) % 8) % 8
+  have hSuffixLen : (pad101Suffix z).length = z + 1 := by
+    cases z <;> simp [pad101Suffix]
+  rw [List.length_append, hSuffixLen]
+  refine ⟨by omega, ?_⟩
+  dsimp only [z]
+  omega
+
+private def stripLeadingZeroLimbs : List Goldilocks → List Goldilocks
+  | [] => []
+  | x :: xs => if x == Goldilocks.zero then stripLeadingZeroLimbs xs else x :: xs
+
+private theorem stripLeadingZeroLimbs_replicate (k : Nat) (rest : List Goldilocks) :
+    stripLeadingZeroLimbs (List.replicate k Goldilocks.zero ++ (Goldilocks.one :: rest)) =
+      Goldilocks.one :: rest := by
+  induction k with
+  | zero =>
+    have hne : (Goldilocks.one == Goldilocks.zero) = false :=
+      beq_eq_false_iff_ne.2 fun h => by
+        have hv := congrArg Goldilocks.val h
+        dsimp only [Goldilocks.one, Goldilocks.zero] at hv
+        omega
+    simp [stripLeadingZeroLimbs, hne]
+  | succ k ih =>
+    simp [List.replicate_succ, stripLeadingZeroLimbs, ih]
+
+def poseidon2Unpad (ys : List Goldilocks) : List Goldilocks :=
+  match ys.reverse with
+  | last :: revInit =>
+    if last == padBothMarker then
+      revInit.reverse
+    else
+      match stripLeadingZeroLimbs revInit with
+      | _ :: revMsg => revMsg.reverse
+      | [] => []
+  | [] => []
+
+theorem poseidon2Unpad_poseidon2Pad (xs : List Goldilocks) :
+    poseidon2Unpad (poseidon2Pad xs) = xs := by
+  unfold poseidon2Pad poseidon2Unpad
+  let z := (8 - (xs.length + 1) % 8) % 8
+  change (match (xs ++ pad101Suffix z).reverse with
+    | last :: revInit =>
+      if last == padBothMarker then revInit.reverse
+      else match stripLeadingZeroLimbs revInit with
+      | _ :: revMsg => revMsg.reverse
+      | [] => []
+    | [] => []) = xs
+  cases z with
+  | zero =>
+    have hRev : (xs ++ pad101Suffix 0).reverse = padBothMarker :: xs.reverse := by
+      simp [pad101Suffix]
+    rw [hRev]
+    simp [List.reverse_reverse]
+  | succ k =>
+    have hRev : (xs ++ pad101Suffix (k + 1)).reverse =
+        padEndMarker :: (List.replicate k Goldilocks.zero ++ (Goldilocks.one :: xs.reverse)) := by
+      simp [pad101Suffix, List.reverse_append, List.reverse_replicate, List.append_assoc]
+    have hNe : (padEndMarker == padBothMarker) = false :=
+      beq_eq_false_iff_ne.2 fun h => by
+        have hv := congrArg Goldilocks.val h
+        dsimp only [padEndMarker, padBothMarker] at hv
+        omega
+    rw [hRev]
+    simp [hNe, stripLeadingZeroLimbs_replicate, List.reverse_reverse]
+
+theorem poseidon2Pad_injective {xs ys : List Goldilocks}
+    (h : poseidon2Pad xs = poseidon2Pad ys) : xs = ys := by
+  have hInv := congrArg poseidon2Unpad h
+  rwa [poseidon2Unpad_poseidon2Pad, poseidon2Unpad_poseidon2Pad] at hInv
+
+def poseidon2PadBytes (msg : List UInt8) : List Goldilocks :=
+  poseidon2Pad (bytesToLimbs56 msg)
+
+theorem poseidon2PadBytes_injective {m₁ m₂ : List UInt8}
+    (h : poseidon2PadBytes m₁ = poseidon2PadBytes m₂) : m₁ = m₂ :=
+  bytesToLimbs56_injective (poseidon2Pad_injective h)
+
+def poseidon2InitState : Poseidon2State12 :=
+  ⟨lane4Zero,
+   lane4Zero,
+   ⟨Goldilocks.ofNat 8, Goldilocks.ofNat 4,
+    Goldilocks.ofNat 32, Goldilocks.ofNat 0x504F53325F474C31⟩⟩
+
+def absorbRate8Block (st : Poseidon2State12) (r0 r1 : Lane4) : Poseidon2State12 :=
+  poseidon2Perm12 ⟨lane4Add st.b0 r0, lane4Add st.b1 r1, st.b2⟩
+
+def absorbLimbStream (st : Poseidon2State12) : List Goldilocks → Poseidon2State12
+  | m0 :: m1 :: m2 :: m3 :: m4 :: m5 :: m6 :: m7 :: rest =>
+    let st' := absorbRate8Block st ⟨m0, m1, m2, m3⟩ ⟨m4, m5, m6, m7⟩
+    absorbLimbStream st' rest
+  | _ => st
+
+def squeeze32Bytes (st : Poseidon2State12) : List UInt8 :=
+  be 8 st.b0.x0.val ++ be 8 st.b0.x1.val ++ be 8 st.b0.x2.val ++ be 8 st.b0.x3.val
+
+theorem squeeze32Bytes_b0_injective {s₁ s₂ : Poseidon2State12}
+    (h : squeeze32Bytes s₁ = squeeze32Bytes s₂) : s₁.b0 = s₂.b0 := by
+  unfold squeeze32Bytes at h
+  simp only [List.append_assoc] at h
+  obtain ⟨hx0, hrest1⟩ := List.append_inj h (by simp)
+  obtain ⟨hx1, hrest2⟩ := List.append_inj hrest1 (by simp)
+  obtain ⟨hx2, hx3⟩ := List.append_inj hrest2 (by simp)
+  have hPow : (2 : Nat) ^ 64 = 256 ^ 8 := rfl
+  exact Lane4.ext
+    (Goldilocks.ext (be_injective (hPow ▸ Goldilocks.val_lt_two_pow_64 _) (hPow ▸ Goldilocks.val_lt_two_pow_64 _) hx0))
+    (Goldilocks.ext (be_injective (hPow ▸ Goldilocks.val_lt_two_pow_64 _) (hPow ▸ Goldilocks.val_lt_two_pow_64 _) hx1))
+    (Goldilocks.ext (be_injective (hPow ▸ Goldilocks.val_lt_two_pow_64 _) (hPow ▸ Goldilocks.val_lt_two_pow_64 _) hx2))
+    (Goldilocks.ext (be_injective (hPow ▸ Goldilocks.val_lt_two_pow_64 _) (hPow ▸ Goldilocks.val_lt_two_pow_64 _) hx3))
+
+/-- **256-Bit Algebraic Goldilocks `Poseidon2` Sponge Hash (`poseidon2Hash32`)**. -/
+@[expose] def poseidon2Hash32 : Hash := fun msg =>
+  let finalSt := absorbLimbStream poseidon2InitState (poseidon2PadBytes msg)
+  squeeze32Bytes finalSt
+
+theorem poseidon2Hash32_length (msg : List UInt8) :
+    (poseidon2Hash32 msg).length = 32 := by
+  unfold poseidon2Hash32 squeeze32Bytes
+  simp [length_be]
+
+/-! ## 5. Build-Time Conformance Vectors Matching `poseidon2.rs` -/
+
+example : (poseidon2Perm12 ⟨lane4Zero, lane4Zero, lane4Zero⟩).toList.map (·.val) =
+    [444626622888223479, 10486189390627733761, 5399253379101132897, 5052010181030417489, 6267397916963039069,
+     9245911245446346418, 9661705423445490201, 787089484585814203, 14953692268052641311, 11458212182116269477,
+     16934754160153525625, 6948793053817514326] := by decide +kernel
+example : poseidon2Hash32 [] =
+    [138, 190, 114, 201, 171, 117, 245, 165, 115, 111, 42, 219, 119, 171, 10, 76, 186, 173, 182, 128, 209, 69, 108,
+     220, 169, 239, 117, 130, 81, 43, 90, 65] := by decide +kernel
+example : poseidon2Hash32 [0x00] =
+    [233, 139, 182, 115, 89, 72, 21, 126, 245, 149, 62, 120, 26, 254, 106, 209, 111, 96, 153, 251, 141, 207, 186,
+     100, 74, 174, 87, 99, 85, 43, 117, 48] := by decide +kernel
+example : poseidon2Hash32 [0x01, 0x02, 0x03] =
+    [196, 180, 177, 170, 216, 21, 133, 248, 62, 149, 42, 39, 133, 17, 81, 112, 144, 59, 209, 93, 95, 26, 110, 112,
+     237, 219, 50, 120, 128, 103, 142, 202] := by decide +kernel
+
+end Qsag
+end
