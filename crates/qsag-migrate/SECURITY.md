@@ -194,18 +194,18 @@ is transmitted:
    transcript agreement and commitment openings in constant time, and derives
    public coins via `QSAG.OUTER.COIN.DERIVE.V1`. No single rushing custodian can
    bias challenges after sending multiplication shares.
-2. **64-lane Boolean `AND` verification (`< 2^-127.99` per flush):** Up to `262,144`
+2. **64-lane Boolean `AND` verification (`< 2^-127.99` per flush):** Up to `65,536`
    bitsliced 64-lane `AND` triples per flush are embedded into
-   `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`32`-gate blocks, `128`
+   `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`16`-gate blocks, `128`
    gates per super-block via constant-time butterfly transpose and
    `VPCLMULQDQ`/`PCLMULQDQ` accumulation under a uniform `GF(2^128)` super-block
-   combiner, packed `128` gates per `Bs256` quad) and checked by **two independent
+   combiner, packed `64` gates per `Bs256` quad) and checked by **two independent
    lockstep** Arity-2 BBCGGI19 inner-product instances plus PRSS-masked non-zero
    base-case sacrifice (`r_b in GF(2^128)^*`). Per-flush false-acceptance
-   probability is `< 2^-128 + (90 / (2^128 - 1))^2 < 2^-127.99`: `2^-128` for
-   the super-block combiner, and `90 / (2^128 - 1)` for each of the two
-   instances. The degree budget is `62 + 2*13 + 2 = 90`: the initial polynomial,
-   thirteen binary folds over at most `8,192` blocks, and base sacrifice
+   probability is `< 2^-128 + (56 / (2^128 - 1))^2 < 2^-127.99`: `2^-128` for
+   the super-block combiner, and `56 / (2^128 - 1)` for each of the two
+   instances. The degree budget is `30 + 2*12 + 2 = 56`: the initial polynomial,
+   twelve binary folds over at most `4,096` blocks, and base sacrifice
    (`BIT_CHECK_DEGREE`, asserted at compile time).
    Byte tables contain shares but are indexed only by public challenge masks;
    their storage is wiped with the rest of the verification scratch.
@@ -240,28 +240,41 @@ aborts immediately with
 `Err(Error::InvalidProof)` before any output share, view commitment, or view
 opens.
 
-### Formal witness-independence of upfront `Error::InvalidTape` (`C0-5`)
+### Witness-independent canonical tape sampling (`C0-5`)
 
-Tape expansion uses a fixed, data-oblivious schedule (`QSAG.MIGRATE.TAPE.V3`)
+Tape expansion first tries the fixed schedule (`QSAG.MIGRATE.TAPE.V3`),
 followed by an upfront batched range check (`less_than_modulus_many` and
-`fold_valid_bits` in `evaluate_inner`). Opening the resulting `valid` mask
-has **identically zero mutual information with the witness scalar**:
+`fold_valid_bits` in `evaluate_inner`). A noncanonical candidate triggers
+canonical rejection sampling instead of an honest `Error::InvalidTape` abort.
+The repair path conditionally removes rejected words from each lane's unread
+stream using shared masks. Previously cached Boolean bits are preserved, and
+all subsequent field draws and Boolean refills move with the unread suffix.
+This matches the native `Tape::sample` stream, including the Edwards high-bit
+mask and the full byte width consumed by each draw.
+
+Repair starts with two attempts per draw. If any draw remains unresolved, the
+original PRG stream is extended and replayed with a doubled budget. There is no
+fixed rejection limit for honest PRG draws; malformed finite buffers, invalid
+schedules, and size overflow return `InvalidTape`. Every scratch buffer remains
+wipe-on-drop. Only the same aggregate per-head, per-lane validity masks as the
+initial range check are opened, after multiplication verification; individual
+candidate values and per-draw rejection masks are never opened.
+
+Conditioned on the public statement, the sampling control flow depends on fresh
+seed entropy, not on the private witness:
 
 1. Every custodian's seed contribution is derived via `QSAG.OUTER.SEED.V1`
-   exclusively from `(self.entropy, self.session,
-   statement_bytes, batch * 64 + lane, head)` — `self.witness_share` is never an
-   input to seed derivation.
-2. In `evaluate_inner`, `tape_sponges` absorb only `"QSAG.MIGRATE.TAPE.V3"` and
-   `seeds`, squeeze candidate tape bits, evaluate `less_than_modulus_many`, fold
-   `valid`, run `verify_all_pending()`, and open `valid` **strictly prior to
-   Step 5 (`Op::Input`)**, before `witness` is read by any gate or conversion.
-3. Consequently, the joint distribution of `(seeds, valid, Error::InvalidTape)`
-   is statistically independent of `witness` (`I(InvalidTape; witness) = 0`).
-   On `Err(Error::InvalidTape)`, `raw_draw_words` is wiped and no proof or wire
-   opening occurs. Any retry **must** allocate a fresh `session` and fresh
-   `entropy` because `CoZkCustodianShare` is single-use and the pairwise PRSS
-   streams (`QSAG.OUTER.PADS.V1`) and MAC keys (`QSAG.OUTER.MESSAGE.V1`) forbid
-   session reuse.
+   exclusively from `(self.entropy, self.session, statement_bytes,
+   batch * 64 + lane, head)`; the witness share is not a seed input.
+2. Tape generation and repair use only these seeds and the public schedule,
+   strictly before witness inputs or conversions are evaluated.
+3. The aggregate validity masks and repair budgets therefore reveal no additional
+   witness information under the independent-entropy assumption. They do reveal
+   tape-dependent sampling information, just as the previous upfront check did.
+
+A failed ceremony still requires fresh session and entropy: the custody state
+is single-use. Internal sampling repair continues the original PRG stream and
+is not a new ceremony or reuse of consumed custody state.
 
 ### Deterministic zeroization (`P3`) and ceremony freeze
 
@@ -360,4 +373,10 @@ Cancellation only returns an error: it cannot bypass multiplication verification
 or the ceremony-wide precommit barrier. The initiating rejection is retained
 in preference to cancellation's transport error, and outbound share buffers are
 wiped on cancellation. Public byte tables are reused for both initial challenge
-projections; single-use fold multiplications retain smaller nibble tables.
+projections. After projection, Boolean-check vectors are transposed once into
+field limbs and kept in that representation throughout binary folding. Batched
+hardware field scale-XOR replaces repeated public-matrix evaluation and bit
+transposes. The two independent instances, challenge domains, sacrifice, and pre-open
+verification barrier are retained. Sixteen-gate initial blocks and 65,536-gate
+flushes reduce the degree bound to 56 and bound per-engine scratch memory. Limb storage retains the same
+high-water-mark wiping; conversion scratch is owned and wiped on drop.
