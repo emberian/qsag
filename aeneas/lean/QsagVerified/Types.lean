@@ -151,7 +151,7 @@ structure authenticated_belt.VerifiedBeltQuorumGuard where
   ack_bitmap : Std.U64
 
 /-- [qsag_verified::belt_latch_kernel::BeltLatchDigits]
-    Source: 'src/belt_latch_kernel.rs', lines 35:0-41:1
+    Source: 'src/belt_latch_kernel.rs', lines 36:0-42:1
     Visibility: public -/
 structure belt_latch_kernel.BeltLatchDigits where
   len : Std.U8
@@ -161,7 +161,7 @@ structure belt_latch_kernel.BeltLatchDigits where
   row3 : Array Std.U8 32#usize
 
 /-- [qsag_verified::belt_latch_kernel::BeltLatchKernelRecord]
-    Source: 'src/belt_latch_kernel.rs', lines 63:0-68:1
+    Source: 'src/belt_latch_kernel.rs', lines 64:0-69:1
     Visibility: public -/
 structure belt_latch_kernel.BeltLatchKernelRecord where
   epoch : Std.U64
@@ -170,7 +170,7 @@ structure belt_latch_kernel.BeltLatchKernelRecord where
   digits : belt_latch_kernel.BeltLatchDigits
 
 /-- [qsag_verified::belt_latch_kernel::BeltLatchKernelError]
-    Source: 'src/belt_latch_kernel.rs', lines 72:0-92:1
+    Source: 'src/belt_latch_kernel.rs', lines 73:0-93:1
     Visibility: public -/
 @[discriminant isize]
 inductive belt_latch_kernel.BeltLatchKernelError where
@@ -185,7 +185,7 @@ inductive belt_latch_kernel.BeltLatchKernelError where
 | WalPersistFailed : belt_latch_kernel.BeltLatchKernelError
 
 /-- [qsag_verified::belt_latch_kernel::BeltLatchBindOutcome]
-    Source: 'src/belt_latch_kernel.rs', lines 96:0-101:1
+    Source: 'src/belt_latch_kernel.rs', lines 97:0-102:1
     Visibility: public -/
 @[discriminant isize]
 inductive belt_latch_kernel.BeltLatchBindOutcome where
@@ -193,7 +193,7 @@ inductive belt_latch_kernel.BeltLatchBindOutcome where
 | Replay : belt_latch_kernel.BeltLatchBindOutcome
 
 /-- [qsag_verified::belt_latch_kernel::BeltLatchBindRequest]
-    Source: 'src/belt_latch_kernel.rs', lines 105:0-113:1
+    Source: 'src/belt_latch_kernel.rs', lines 106:0-114:1
     Visibility: public -/
 structure belt_latch_kernel.BeltLatchBindRequest where
   epoch : Std.U64
@@ -203,7 +203,7 @@ structure belt_latch_kernel.BeltLatchBindRequest where
   persist_ok : Bool
 
 /-- [qsag_verified::belt_latch_kernel::BeltLatchKernel]
-    Source: 'src/belt_latch_kernel.rs', lines 116:0-122:1
+    Source: 'src/belt_latch_kernel.rs', lines 117:0-123:1
     Visibility: public -/
 structure belt_latch_kernel.BeltLatchKernel where
   capacity_limit : Std.U64
@@ -753,5 +753,14 @@ structure tower.Tower256 where
 structure tower.BdozVerifierSession2Lane where
   alpha_lanes : Array tower.Tower128 2#usize
   burned : Bool
+
+/-- [qsag_verified::tower::BdozOpeningGuard2Lane]
+    Source: 'src/tower.rs', lines 503:0-508:1
+    Visibility: public -/
+structure tower.BdozOpeningGuard2Lane where
+  alpha_lanes : Array tower.Tower128 2#usize
+  session_id : Array Std.U8 32#usize
+  round_id : Std.U64
+  consumed : Bool
 
 end qsag_verified

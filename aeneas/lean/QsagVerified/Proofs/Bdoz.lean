@@ -218,7 +218,7 @@ private theorem bind_total_step {α β : Type} {r : Result α} {f : α → Resul
   obtain ⟨out, h⟩ := hf
   exact ⟨out, bind_ok_step hr h⟩
 
-private theorem bdoz_verify_total (alphas : Std.Array tower.Tower128 2#usize)
+theorem bdoz_verify_total (alphas : Std.Array tower.Tower128 2#usize)
     (batch : tower.BdozCommittedBatchOpening2Lane) (openings : Slice tower.BdozWireOpening2Lane) :
     ∃ accepted, tower.verify_mac_2lane alphas batch openings = .ok accepted := by
   obtain ⟨mk0, hmk0⟩ := array_index_total batch.mask_key_lanes 0#usize (by decide)

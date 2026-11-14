@@ -96,8 +96,14 @@ PY_HEADERS
 echo "[4/4] Verifying Aeneas prelude, extracted MIR functions, and 0-sorry refinement theorems via Lake..."
 (
   cd "${LEAN_DIR}"
-  lake build
-  lake build QsagVerifiedChallenge AuditMirAxioms
+  python3 check_audit_coverage.py
+  # Extraction, proofs, primitive welds and their axiom census. These need only the primitive
+  # `Qsag` specifications.
+  lake build --wfail Aeneas QsagVerified QsagMirProofs QsagSpecWeld AuditMirAxioms
+  # Comparator challenge statements; their bodies are placeholders by design.
+  lake build QsagVerifiedChallenge
+  # Protocol-level welds; these need the whole `Qsag.MirSpecBridge` import cone.
+  lake build --wfail QsagCustodyWeld
   test -s lake-manifest.json
 )
 

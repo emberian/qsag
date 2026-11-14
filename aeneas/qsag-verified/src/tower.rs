@@ -496,3 +496,42 @@ pub fn verify_mac_2lane_with_burn(
         )
     }
 }
+
+/// One opening attempt for a caller-provisioned session and round. This handle is
+/// neither Clone nor Copy; every attempt consumes its keys, including success.
+/// Provisioning unique handles and fresh masks remains the caller's obligation.
+pub struct BdozOpeningGuard2Lane {
+    alpha_lanes: [Tower128; 2],
+    session_id: [u8; 32],
+    round_id: u64,
+    consumed: bool,
+}
+
+impl BdozOpeningGuard2Lane {
+    pub const fn new(alpha_lanes: [Tower128; 2], session_id: [u8; 32], round_id: u64) -> Self {
+        Self { alpha_lanes, session_id, round_id, consumed: false }
+    }
+
+    pub const fn is_consumed(&self) -> bool { self.consumed }
+
+    /// Binds the opening to its provisioned context, checks the actual folded
+    /// MAC and commitment, and clears keys before returning the decision.
+    pub fn verify_once(
+        self,
+        batch: &BdozCommittedBatchOpening2Lane,
+        openings: &[BdozWireOpening2Lane],
+    ) -> (Self, bool) {
+        let spent = Self {
+            alpha_lanes: [Tower128(0), Tower128(0)],
+            session_id: self.session_id,
+            round_id: self.round_id,
+            consumed: true,
+        };
+        if self.consumed { return (spent, false); }
+        if !ct_eq_bytes32(&self.session_id, &batch.session_id) || self.round_id != batch.round_id {
+            return (spent, false);
+        }
+        let accepted = verify_mac_2lane(self.alpha_lanes, batch, openings);
+        (spent, accepted)
+    }
+}
