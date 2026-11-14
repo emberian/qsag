@@ -7,7 +7,12 @@
 //!   shift-and-mask butterfly stages, no branch, loop bound or address that depends on data.
 //! * [`gf2_128_mul_acc_batch`] computes `acc ^= sum_i a[i] * b[i]` in
 //!   `GF(2)[x] / (x^128 + x^7 + x^2 + x + 1)` with three carryless multiplications per
-//!   product (Karatsuba) and one reduction for the whole batch.
+//!   product (Karatsuba) and one reduction for the whole batch. [`gf2_128_dot`] is the same
+//!   sum over `u128` slices, read in place.
+//! * [`gf2_64x128_clmul_acc`] accumulates unreduced `64 x 128`-bit carryless products of
+//!   64-bit words with one fixed 128-bit scalar: two multiplications per word, no reduction.
+//! * [`gf2_xor_combine_planes`] forms 128 GF(2) combinations of 64 rows of four words,
+//!   selected by public coefficient nibbles (method of the four Russians).
 //!
 //! ### Kernel discipline
 //! The assembly kernels follow the rules that `scripts/audit_elf_ct.py` enforces: one
@@ -340,6 +345,266 @@ unsafe fn poly_scale_xor_x86(dst: &mut [u128], src: &[u128], scalar: &u128) {
             options(nostack),
         );
     }
+}
+
+/// `sum_i a[i] * b[i]` in `GF(2)[x] / (x^128 + x^7 + x^2 + x + 1)` over elements stored as
+/// `u128` (bit `k` is the coefficient of `x^k`), on the detected backend. Both operands may be
+/// secret. Panics if the slices differ in length.
+#[inline]
+pub fn gf2_128_dot(a: &[u128], b: &[u128]) -> u128 {
+    gf2_128_dot_with_backend(a, b, cpuid::detect_backend())
+}
+
+/// [`gf2_128_dot`] on an explicit backend. The operands are handed to the
+/// [`gf2_128_mul_acc_batch`] kernels where they lie, without a copy into limb pairs.
+pub fn gf2_128_dot_with_backend(a: &[u128], b: &[u128], backend: SimdBackend) -> u128 {
+    assert_eq!(a.len(), b.len());
+    let mut acc = [0u64; 2];
+    #[cfg(target_endian = "little")]
+    {
+        // SAFETY: a `u128` is 16 bytes without padding, aligned at least as strictly as
+        // `[u64; 2]`, and on a little-endian target its low limb comes first, which is the
+        // `[low, high]` element layout of the kernels. The views borrow `a` and `b` for
+        // exactly this block and are only read.
+        let (limbs_a, limbs_b) = unsafe {
+            (
+                core::slice::from_raw_parts(a.as_ptr().cast::<[u64; 2]>(), a.len()),
+                core::slice::from_raw_parts(b.as_ptr().cast::<[u64; 2]>(), b.len()),
+            )
+        };
+        gf2_128_mul_acc_batch_with_backend(&mut acc, limbs_a, limbs_b, backend);
+    }
+    #[cfg(not(target_endian = "little"))]
+    {
+        let _ = backend;
+        for (x, y) in a.iter().zip(b) {
+            gf2_128_mul_acc_batch_portable(
+                &mut acc,
+                &[[*x as u64, (*x >> 64) as u64]],
+                &[[*y as u64, (*y >> 64) as u64]],
+            );
+        }
+    }
+    let out = u128::from(acc[0]) | (u128::from(acc[1]) << 64);
+    crate::volatile_fill(&mut acc, 0);
+    out
+}
+
+/// Portable branch-free [`gf2_64x128_clmul_acc`]: one masked shift-and-add step per bit of the
+/// word, with immediate shift counts.
+pub fn gf2_64x128_clmul_acc_portable(acc: &mut [[u128; 2]], words: &[u64], scalar: u128) {
+    assert_eq!(acc.len(), words.len());
+    for (slot, word) in acc.iter_mut().zip(words) {
+        let mut w = *word;
+        let mut lo = scalar & u128::from(u64::MAX);
+        let mut hi = scalar >> 64;
+        let mut product = [0u128; 2];
+        for _ in 0..64 {
+            let take = 0u128.wrapping_sub(u128::from(w & 1));
+            w >>= 1;
+            product[0] ^= lo & take;
+            product[1] ^= hi & take;
+            lo <<= 1;
+            hi <<= 1;
+        }
+        slot[0] ^= product[0];
+        slot[1] ^= product[1];
+        crate::volatile_fill(&mut product, 0);
+        crate::volatile_fill(core::slice::from_mut(&mut w), 0);
+    }
+}
+
+/// Unreduced carryless multiply-accumulate of 64-bit words by one 128-bit scalar:
+/// `acc[i][0] ^= words[i] (x) low 64 bits of scalar` and
+/// `acc[i][1] ^= words[i] (x) high 64 bits of scalar`, each a polynomial of degree below 127.
+/// The product of `words[i]` and `scalar` is `acc[i][0] + x^64 * acc[i][1]`; the caller sums
+/// over as many calls as it likes and reduces once.
+///
+/// Every path is constant-time in both operands: `words` may be secret shares and `scalar`
+/// is a public weight in the callers, but nothing here relies on that. Panics if the slices
+/// differ in length.
+#[inline]
+pub fn gf2_64x128_clmul_acc(acc: &mut [[u128; 2]], words: &[u64], scalar: u128) {
+    gf2_64x128_clmul_acc_with_backend(acc, words, scalar, cpuid::detect_backend());
+}
+
+/// [`gf2_64x128_clmul_acc`] on an explicit backend; falls back to the portable code when
+/// the CPU lacks the backend's features.
+pub fn gf2_64x128_clmul_acc_with_backend(
+    acc: &mut [[u128; 2]],
+    words: &[u64],
+    scalar: u128,
+    backend: SimdBackend,
+) {
+    assert_eq!(acc.len(), words.len());
+    if words.is_empty() {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let caps = cpuid::probe_capabilities();
+        if matches!(
+            backend,
+            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+        ) && caps.avx2
+            && caps.pclmulqdq
+        {
+            // SAFETY: AVX OS state and PCLMUL are checked. The slices are nonempty, have
+            // equal lengths and cannot overlap; unaligned loads and stores are used.
+            unsafe {
+                clmul_64x128_acc_x86(acc, words, &scalar);
+            }
+            return;
+        }
+    }
+    let _ = backend;
+    gf2_64x128_clmul_acc_portable(acc, words, scalar);
+}
+
+/// One public-count loop, fixed-address stride, no stack scratch. Every touched
+/// vector register is cleared before returning, as in the dot-product kernels.
+#[cfg(target_arch = "x86_64")]
+unsafe fn clmul_64x128_acc_x86(acc: &mut [[u128; 2]], words: &[u64], scalar: &u128) {
+    // SAFETY: caller checks features, slice lengths, and nonemptiness.
+    unsafe {
+        core::arch::asm!(
+            "vmovdqu xmm5, xmmword ptr [{scalar}]",
+            "2:",
+            "vmovq xmm4, qword ptr [{words}]",
+            "vpclmulqdq xmm0, xmm4, xmm5, 0x00",
+            "vpclmulqdq xmm1, xmm4, xmm5, 0x10",
+            "vpxor xmm0, xmm0, xmmword ptr [{acc}]",
+            "vpxor xmm1, xmm1, xmmword ptr [{acc} + 16]",
+            "vmovdqu xmmword ptr [{acc}], xmm0",
+            "vmovdqu xmmword ptr [{acc} + 16], xmm1",
+            "add {words}, 8",
+            "add {acc}, 32",
+            "dec {count}",
+            "jnz 2b",
+            "vpxor xmm0, xmm0, xmm0",
+            "vpxor xmm1, xmm1, xmm1",
+            "vpxor xmm4, xmm4, xmm4",
+            "vpxor xmm5, xmm5, xmm5",
+            "vzeroupper",
+            words = inout(reg) words.as_ptr() => _,
+            acc = inout(reg) acc.as_mut_ptr() => _,
+            count = inout(reg) words.len() => _,
+            scalar = in(reg) scalar,
+            out("xmm0") _, out("xmm1") _, out("xmm4") _, out("xmm5") _,
+            options(nostack),
+        );
+    }
+}
+
+/// Coefficient bits per output of [`gf2_xor_combine_planes`].
+pub const XOR_COMBINE_PLANES: usize = 128;
+/// Four-row groups of [`gf2_xor_combine_planes`]; one public nibble selects within each.
+pub const XOR_COMBINE_NIBBLES: usize = 16;
+
+/// Public selection pattern of [`gf2_xor_combine_planes`]: bit `d` of `pattern[k][g]` says
+/// whether row `4 * g + d` enters combination `k`. Only the low four bits are read.
+pub type XorCombinePattern = [[u8; XOR_COMBINE_NIBBLES]; XOR_COMBINE_PLANES];
+
+/// Portable [`gf2_xor_combine_planes`].
+pub fn gf2_xor_combine_planes_portable(
+    rows: &[BitPlane256; 64],
+    pattern: &XorCombinePattern,
+    planes: &mut [[BitPlane256; 64]; 2],
+) {
+    let mut tables = [[[0u64; 4]; 16]; XOR_COMBINE_NIBBLES];
+    for (g, table) in tables.iter_mut().enumerate() {
+        for n in 1..16usize {
+            let prev = table[n & (n - 1)];
+            let row = &rows[4 * g + n.trailing_zeros() as usize];
+            for ((dst, a), b) in table[n].iter_mut().zip(prev).zip(row) {
+                *dst = a ^ b;
+            }
+        }
+    }
+    for (k, nibbles) in pattern.iter().enumerate() {
+        let mut acc = [0u64; 4];
+        for (table, nibble) in tables.iter().zip(nibbles) {
+            for (dst, src) in acc.iter_mut().zip(&table[usize::from(nibble & 15)]) {
+                *dst ^= src;
+            }
+        }
+        planes[k / 64][k % 64] = acc;
+    }
+    crate::volatile_fill(&mut tables, [[0; 4]; 16]);
+}
+
+/// `planes[k / 64][k % 64] = XOR of rows[4 * g + d]` over all `(g, d)` with bit `d` of
+/// `pattern[k][g]` set: 128 GF(2)-linear combinations of 64 rows, four independent 64-bit
+/// columns per row, on the detected backend.
+///
+/// `rows` may be secret. `pattern` is the public operand: its nibbles index the subset-XOR
+/// tables built from the rows, so memory addresses and the instruction trace depend on
+/// `pattern` only. The tables are wiped before returning.
+#[inline]
+pub fn gf2_xor_combine_planes(
+    rows: &[BitPlane256; 64],
+    pattern: &XorCombinePattern,
+    planes: &mut [[BitPlane256; 64]; 2],
+) {
+    gf2_xor_combine_planes_with_backend(rows, pattern, planes, cpuid::detect_backend());
+}
+
+/// [`gf2_xor_combine_planes`] on an explicit backend; falls back to the portable code when
+/// the CPU lacks the backend's features.
+pub fn gf2_xor_combine_planes_with_backend(
+    rows: &[BitPlane256; 64],
+    pattern: &XorCombinePattern,
+    planes: &mut [[BitPlane256; 64]; 2],
+    backend: SimdBackend,
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let caps = cpuid::probe_capabilities();
+        if matches!(
+            backend,
+            SimdBackend::X86Avx2Pclmul | SimdBackend::X86Avx2GfniVpclmul
+        ) && caps.avx2
+        {
+            // SAFETY: the CPU and the OS support AVX2.
+            unsafe { xor_combine_planes_avx2(rows, pattern, planes) };
+            return;
+        }
+    }
+    let _ = backend;
+    gf2_xor_combine_planes_portable(rows, pattern, planes);
+}
+
+/// One 256-bit register per row and per table entry: a combination costs sixteen
+/// `vpxor ymm, ymm, [table]` for all four columns together.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn xor_combine_planes_avx2(
+    rows: &[BitPlane256; 64],
+    pattern: &XorCombinePattern,
+    planes: &mut [[BitPlane256; 64]; 2],
+) {
+    use core::arch::x86_64::{
+        __m256i, _mm256_loadu_si256, _mm256_setzero_si256, _mm256_storeu_si256, _mm256_xor_si256,
+    };
+    let mut tables = [[_mm256_setzero_si256(); 16]; XOR_COMBINE_NIBBLES];
+    for (g, table) in tables.iter_mut().enumerate() {
+        for n in 1..16usize {
+            let row = &rows[4 * g + n.trailing_zeros() as usize];
+            // SAFETY: `row` is 32 readable bytes; the load is unaligned.
+            let row = unsafe { _mm256_loadu_si256(row.as_ptr().cast::<__m256i>()) };
+            table[n] = _mm256_xor_si256(table[n & (n - 1)], row);
+        }
+    }
+    for (k, nibbles) in pattern.iter().enumerate() {
+        let mut acc = _mm256_setzero_si256();
+        for (table, nibble) in tables.iter().zip(nibbles) {
+            acc = _mm256_xor_si256(acc, table[usize::from(nibble & 15)]);
+        }
+        let plane = &mut planes[k / 64][k % 64];
+        // SAFETY: `plane` is 32 writable bytes; the store is unaligned.
+        unsafe { _mm256_storeu_si256(plane.as_mut_ptr().cast::<__m256i>(), acc) };
+    }
+    crate::volatile_fill(&mut tables, [_mm256_setzero_si256(); 16]);
 }
 
 /// [`gf2_128_mul_acc_batch`] on an explicit backend; falls back to the portable code when
@@ -857,6 +1122,148 @@ mod tests {
                     );
                     assert_eq!(actual, expected, "{backend:?}, len={len}, scalar={scalar}");
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn gf2_128_dot_matches_schoolbook_reference_on_every_backend() {
+        let mut rng = TestStream(0x51ED_270B_9F3C_1A47);
+        let mut wide = || u128::from(rng.next_u64()) | (u128::from(rng.next_u64()) << 64);
+        let mut a: Vec<u128> = (0..67).map(|_| wide()).collect();
+        let mut b: Vec<u128> = (0..67).map(|_| wide()).collect();
+        a[..4].copy_from_slice(&[u128::MAX, 1 << 127, 2, 0]);
+        b[..4].copy_from_slice(&[u128::MAX, 1 << 127, 1 << 127, u128::MAX]);
+        let limbs = |v: u128| [v as u64, (v >> 64) as u64];
+        // Odd and even lengths, the two-element kernel stride and its tails, and offsets
+        // that put the slices at both 8- and 16-byte phases of the buffer.
+        for start in [0usize, 1, 2] {
+            for len in [0usize, 1, 2, 3, 4, 5, 16, 17, 31, 64, 65] {
+                let (x, y) = (&a[start..start + len], &b[start..start + len]);
+                let mut want = [0u64; 2];
+                for (p, q) in x.iter().zip(y) {
+                    let product = gf2_128_mul_reference(limbs(*p), limbs(*q));
+                    want[0] ^= product[0];
+                    want[1] ^= product[1];
+                }
+                let want = u128::from(want[0]) | (u128::from(want[1]) << 64);
+                for backend in BACKENDS {
+                    assert_eq!(
+                        gf2_128_dot_with_backend(x, y, backend),
+                        want,
+                        "{backend:?}, start={start}, len={len}"
+                    );
+                }
+            }
+        }
+        // x * x^127 = x^7 + x^2 + x + 1.
+        assert_eq!(gf2_128_dot(&[2], &[1 << 127]), 0x87);
+    }
+
+    #[test]
+    #[should_panic]
+    fn gf2_128_dot_rejects_mismatched_lengths() {
+        gf2_128_dot(&[0; 2], &[0]);
+    }
+
+    /// Bit-by-bit carryless product of a 64-bit word and a 64-bit limb.
+    fn clmul64_reference(word: u64, limb: u64) -> u128 {
+        let mut product = 0u128;
+        for i in 0..64 {
+            if (word >> i) & 1 == 1 {
+                product ^= u128::from(limb) << i;
+            }
+        }
+        product
+    }
+
+    #[test]
+    fn clmul_64x128_acc_matches_bit_reference_and_preserves_boundaries() {
+        let mut rng = TestStream(0x3C6E_F372_FE94_F82B);
+        let mut words: Vec<u64> = (0..37).map(|_| rng.next_u64()).collect();
+        words[..4].copy_from_slice(&[0, 1, 1 << 63, u64::MAX]);
+        let initial: Vec<[u128; 2]> = (0..39)
+            .map(|_| {
+                [
+                    u128::from(rng.next_u64()) | (u128::from(rng.next_u64()) << 64),
+                    u128::from(rng.next_u64()) | (u128::from(rng.next_u64()) << 64),
+                ]
+            })
+            .collect();
+        for scalar in [0, 1, 1 << 63, 1 << 64, 1 << 127, u128::MAX, initial[0][0]] {
+            for len in 0..=words.len() {
+                let mut expected = initial.clone();
+                for (slot, word) in expected[1..1 + len].iter_mut().zip(&words) {
+                    slot[0] ^= clmul64_reference(*word, scalar as u64);
+                    slot[1] ^= clmul64_reference(*word, (scalar >> 64) as u64);
+                }
+                for backend in BACKENDS {
+                    let mut actual = initial.clone();
+                    gf2_64x128_clmul_acc_with_backend(
+                        &mut actual[1..1 + len],
+                        &words[..len],
+                        scalar,
+                        backend,
+                    );
+                    assert_eq!(actual, expected, "{backend:?}, len={len}, scalar={scalar}");
+                }
+            }
+        }
+        // The two halves recombine to the field product after one reduction.
+        let (word, scalar) = (words[5], initial[1][1]);
+        let mut acc = [[0u128; 2]];
+        gf2_64x128_clmul_acc(&mut acc, &[word], scalar);
+        let low = acc[0][0] ^ (acc[0][1] << 64);
+        let high = acc[0][1] >> 64;
+        let reduced = low ^ high ^ (high << 1) ^ (high << 2) ^ (high << 7);
+        let want = gf2_128_mul_reference([word, 0], [scalar as u64, (scalar >> 64) as u64]);
+        assert_eq!(reduced, u128::from(want[0]) | (u128::from(want[1]) << 64));
+    }
+
+    #[test]
+    #[should_panic]
+    fn clmul_64x128_acc_rejects_mismatched_lengths() {
+        gf2_64x128_clmul_acc(&mut [[0; 2]; 2], &[0], 1);
+    }
+
+    #[test]
+    fn xor_combine_planes_match_row_by_row_reference_on_every_backend() {
+        let mut rng = TestStream(0xD1B5_4A32_D192_ED03);
+        for round in 0..6 {
+            let mut rows = [[0u64; 4]; 64];
+            for row in &mut rows {
+                for word in row.iter_mut() {
+                    *word = rng.next_u64();
+                }
+            }
+            let mut pattern = [[0u8; XOR_COMBINE_NIBBLES]; XOR_COMBINE_PLANES];
+            for nibbles in &mut pattern {
+                for nibble in nibbles.iter_mut() {
+                    // High bits are set in some rounds: only the low nibble may be read.
+                    let high = if round % 2 == 0 { 0 } else { 0xF0 };
+                    *nibble = (rng.next_u64() as u8 & 15) | high;
+                }
+            }
+            // Empty, full and single-row combinations.
+            pattern[0] = [0; XOR_COMBINE_NIBBLES];
+            pattern[1] = [15; XOR_COMBINE_NIBBLES];
+            pattern[127] = [0; XOR_COMBINE_NIBBLES];
+            pattern[127][15] = 8;
+            let mut want = [[[0u64; 4]; 64]; 2];
+            for (k, nibbles) in pattern.iter().enumerate() {
+                for (r, row) in rows.iter().enumerate() {
+                    if (nibbles[r / 4] >> (r % 4)) & 1 == 1 {
+                        for (dst, src) in want[k / 64][k % 64].iter_mut().zip(row) {
+                            *dst ^= src;
+                        }
+                    }
+                }
+            }
+            assert_eq!(want[1][63], rows[63]);
+            for backend in BACKENDS {
+                let mut planes = [[[u64::MAX; 4]; 64]; 2];
+                gf2_xor_combine_planes_with_backend(&rows, &pattern, &mut planes, backend);
+                assert_eq!(planes, want, "{backend:?}, round {round}");
             }
         }
     }

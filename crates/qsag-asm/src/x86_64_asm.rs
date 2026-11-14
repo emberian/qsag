@@ -1189,7 +1189,7 @@ global_asm!(
     sym_header!("qsag_asm_goldilocks_pow7_ct_x86_64"),
     "mov r11, rdi",
     "mov r10d, 0xffffffff",
-    // x2 = x * x mod p -> rsi
+    // x2 = x * x mod p -> rax
     "mov rdx, r11",
     "mulx rcx, rax, r11",
     "mov rdx, rcx",
@@ -1209,7 +1209,7 @@ global_asm!(
     "sbb rcx, rcx",
     "and rcx, r10",
     "add rax, rcx",
-    // x3 = x2 * x mod p -> rsi
+    // x3 = x2 * x mod p -> rax
     "mov rdx, rax",
     "mulx rcx, rax, r11",
     "mov rdx, rcx",

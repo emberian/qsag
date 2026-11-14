@@ -51,10 +51,12 @@ pub mod x86_64_asm;
 pub mod aarch64_asm;
 
 pub use bitslice::{
-    BITSLICE_LANES, BitPlane256, KECCAK_STATE_BITS, KECCAK_STATE_BYTES, gf2_128_mul_acc_batch,
-    gf2_128_mul_acc_batch_with_backend, gf2_128_mul_portable, pack_256x200_bitslice,
-    pack_256x200_bitslice_with_backend, transpose64x256, transpose64x256_with_backend,
-    unpack_256x200_bitslice, unpack_256x200_bitslice_with_backend,
+    BITSLICE_LANES, BitPlane256, KECCAK_STATE_BITS, KECCAK_STATE_BYTES, XorCombinePattern,
+    gf2_64x128_clmul_acc, gf2_64x128_clmul_acc_with_backend, gf2_128_dot,
+    gf2_128_dot_with_backend, gf2_128_mul_acc_batch, gf2_128_mul_acc_batch_with_backend,
+    gf2_128_mul_portable, gf2_xor_combine_planes, gf2_xor_combine_planes_with_backend,
+    pack_256x200_bitslice, pack_256x200_bitslice_with_backend, transpose64x256,
+    transpose64x256_with_backend, unpack_256x200_bitslice, unpack_256x200_bitslice_with_backend,
 };
 pub use cpuid::{
     CpuCapabilities, DitRequirement, HardwareDitGuard, HardwareDitStatus, HardwareDitUnavailable,
@@ -502,6 +504,83 @@ pub fn tower128_bdoz_2lane_poly_mac_with_backend(
     portable::tower128_bdoz_2lane_poly_mac_portable(lhs_pairs, rhs_pairs)
 }
 
+/// Below this many pairs per chunk the per-element basis change is cheaper than the batch one.
+const BITSLICED_BASIS_CHANGE_MIN_PAIRS: usize = 4;
+
+/// Nibble selectors of a 128x128 matrix over GF(2) given by its basis columns: `sel[g][i]`
+/// holds bit `i` of columns `4g..4g + 4`.
+const fn linear128_nibble_selectors(basis: &[u128; 128]) -> [[u8; 128]; 32] {
+    let mut sel = [[0u8; 128]; 32];
+    let mut g = 0;
+    while g < 32 {
+        let mut i = 0;
+        while i < 128 {
+            let mut b = 0;
+            while b < 4 {
+                sel[g][i] |= (((basis[4 * g + b] >> i) & 1) as u8) << b;
+                b += 1;
+            }
+            i += 1;
+        }
+        g += 1;
+    }
+    sel
+}
+
+static T7_TO_POLY_SELECTORS: [[u8; 128]; 32] = linear128_nibble_selectors(&T7_TO_POLY_BASIS);
+
+/// In-place transpose of a 64x64 bit matrix held as 64 row words.
+fn transpose64x64(rows: &mut [u64]) {
+    debug_assert_eq!(rows.len(), 64);
+    for stage in 0..6 {
+        let shift = 1usize << stage;
+        let mask = u64::MAX / ((1u64 << shift) + 1);
+        for base in (0..64).step_by(2 * shift) {
+            for offset in 0..shift {
+                let a = base + offset;
+                let b = a + shift;
+                let delta = ((rows[a] >> shift) ^ rows[b]) & mask;
+                rows[a] ^= delta << shift;
+                rows[b] ^= delta;
+            }
+        }
+    }
+}
+
+/// The basis map $\Psi : \mathcal{T}_7 \to \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$ of
+/// [`tower128_to_poly128_ct`] applied to 64 elements at once. The elements are bitsliced into
+/// 128 coefficient planes and every output plane is a XOR of input-plane combinations chosen by
+/// public selectors, so the running time and memory accesses do not depend on `vals`.
+pub fn tower128_to_poly128_x64_ct(vals: &mut [u128; 64]) {
+    let mut planes = [0u64; 128];
+    for (e, v) in vals.iter().enumerate() {
+        planes[e] = *v as u64;
+        planes[64 + e] = (*v >> 64) as u64;
+    }
+    let (lo, hi) = planes.split_at_mut(64);
+    transpose64x64(lo);
+    transpose64x64(hi);
+    let mut out = [0u64; 128];
+    let mut table = [0u64; 16];
+    for (g, selectors) in T7_TO_POLY_SELECTORS.iter().enumerate() {
+        for idx in 1..16usize {
+            table[idx] = table[idx & (idx - 1)] ^ planes[4 * g + idx.trailing_zeros() as usize];
+        }
+        for (dst, sel) in out.iter_mut().zip(selectors) {
+            *dst ^= table[*sel as usize];
+        }
+    }
+    let (lo, hi) = out.split_at_mut(64);
+    transpose64x64(lo);
+    transpose64x64(hi);
+    for (e, v) in vals.iter_mut().enumerate() {
+        *v = u128::from(out[e]) | (u128::from(out[64 + e]) << 64);
+    }
+    volatile_fill(&mut planes, 0);
+    volatile_fill(&mut out, 0);
+    volatile_fill(&mut table, 0);
+}
+
 /// 2-lane BDOZ MAC inner product in **exact Wiedemann $\mathcal{T}_7$ (`Tower128`) coordinates**,
 /// bit-for-bit identical to `qsag_core::field::tower::Tower128::mul` via the compile-time verified
 /// field isomorphism $\Psi : \mathcal{T}_7 \xrightarrow{\sim} \mathbb{F}_2[z]/(z^{128} + z^7 + z^2 + z + 1)$.
@@ -525,42 +604,44 @@ pub fn tower128_bdoz_2lane_mac_with_backend(
 
     let mut poly_acc0 = 0u128;
     let mut poly_acc1 = 0u128;
-    let mut conv_l = [[0u128; 2]; 16];
-    let mut conv_r = [[0u128; 2]; 16];
-    for (lc, rc) in lhs_pairs.chunks(16).zip(rhs_pairs.chunks(16)) {
+    let mut flat_l = [0u128; 64];
+    let mut flat_r = [0u128; 64];
+    let mut conv_l = [[0u128; 2]; 32];
+    let mut conv_r = [[0u128; 2]; 32];
+    for (lc, rc) in lhs_pairs.chunks(32).zip(rhs_pairs.chunks(32)) {
         let n = lc.len();
-        for i in 0..n {
-            conv_l[i] = [
-                tower128_to_poly128_ct(lc[i][0]),
-                tower128_to_poly128_ct(lc[i][1]),
-            ];
-            conv_r[i] = [
-                tower128_to_poly128_ct(rc[i][0]),
-                tower128_to_poly128_ct(rc[i][1]),
-            ];
+        if n < BITSLICED_BASIS_CHANGE_MIN_PAIRS {
+            for i in 0..n {
+                conv_l[i] = [
+                    tower128_to_poly128_ct(lc[i][0]),
+                    tower128_to_poly128_ct(lc[i][1]),
+                ];
+                conv_r[i] = [
+                    tower128_to_poly128_ct(rc[i][0]),
+                    tower128_to_poly128_ct(rc[i][1]),
+                ];
+            }
+        } else {
+            flat_l[2 * n..].fill(0);
+            flat_r[2 * n..].fill(0);
+            flat_l[..2 * n].copy_from_slice(lc.as_flattened());
+            flat_r[..2 * n].copy_from_slice(rc.as_flattened());
+            tower128_to_poly128_x64_ct(&mut flat_l);
+            tower128_to_poly128_x64_ct(&mut flat_r);
+            conv_l.as_flattened_mut()[..2 * n].copy_from_slice(&flat_l[..2 * n]);
+            conv_r.as_flattened_mut()[..2 * n].copy_from_slice(&flat_r[..2 * n]);
         }
         let mut chunk_poly =
             tower128_bdoz_2lane_poly_mac_with_backend(&conv_l[..n], &conv_r[..n], backend);
         poly_acc0 ^= chunk_poly[0];
         poly_acc1 ^= chunk_poly[1];
-        unsafe {
-            core::ptr::write_volatile(&mut chunk_poly[0], 0);
-            core::ptr::write_volatile(&mut chunk_poly[1], 0);
-        }
+        volatile_fill(&mut chunk_poly, 0);
     }
     // Zeroize stack-converted share buffers and polynomial-basis accumulators
-    for pair in &mut conv_l {
-        unsafe {
-            core::ptr::write_volatile(&mut pair[0], 0);
-            core::ptr::write_volatile(&mut pair[1], 0);
-        }
-    }
-    for pair in &mut conv_r {
-        unsafe {
-            core::ptr::write_volatile(&mut pair[0], 0);
-            core::ptr::write_volatile(&mut pair[1], 0);
-        }
-    }
+    volatile_fill(&mut flat_l, 0);
+    volatile_fill(&mut flat_r, 0);
+    volatile_fill(&mut conv_l, [0; 2]);
+    volatile_fill(&mut conv_r, [0; 2]);
     let out = [
         poly128_to_tower128_ct(poly_acc0),
         poly128_to_tower128_ct(poly_acc1),
@@ -610,6 +691,9 @@ pub fn goldilocks_add_ct(a: u64, b: u64) -> u64 {
             return unsafe { x86_64_asm::qsag_asm_goldilocks_add_ct_x86_64(a, b) };
         }
     }
+    // The portable carry/borrow sequence is data-independent on AArch64 only under DIT.
+    #[cfg(target_arch = "aarch64")]
+    let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     portable::goldilocks_add_ct_portable(a, b)
 }
 
@@ -622,6 +706,8 @@ pub fn goldilocks_sub_ct(a: u64, b: u64) -> u64 {
             return unsafe { x86_64_asm::qsag_asm_goldilocks_sub_ct_x86_64(a, b) };
         }
     }
+    #[cfg(target_arch = "aarch64")]
+    let _dit_guard = cpuid::ensure_aarch64_dit_enabled();
     portable::goldilocks_sub_ct_portable(a, b)
 }
 
@@ -738,6 +824,46 @@ pub fn ct_memzero(buf: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(all(target_arch = "aarch64", feature = "std"))]
+    fn goldilocks_add_and_sub_enter_dit_like_their_siblings() {
+        let taken = || cpuid::DIT_GUARDS_TAKEN.with(core::cell::Cell::get);
+        let p = 0xFFFF_FFFF_0000_0001u64;
+        let before = taken();
+        assert_eq!(goldilocks_add_ct(p - 1, 2), 1);
+        assert_eq!(taken(), before + 1);
+        assert_eq!(goldilocks_sub_ct(1, 2), p - 1);
+        assert_eq!(taken(), before + 2);
+    }
+
+    #[test]
+    fn bitsliced_basis_change_matches_scalar_and_tower_mac_matches_wiedemann_at_every_length() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            u128::from(state) | (u128::from(state.rotate_left(29) ^ 0xA5A5) << 64)
+        };
+        let mut vals: [u128; 64] = core::array::from_fn(|_| next());
+        vals[0] = 0;
+        vals[1] = u128::MAX;
+        vals[2] = 1;
+        vals[3] = 1u128 << 127;
+        let expected = vals.map(tower128_to_poly128_ct);
+        tower128_to_poly128_x64_ct(&mut vals);
+        assert_eq!(vals, expected);
+
+        // Chunk boundaries of the batch path (32 pairs), its small-chunk cutoff and odd tails.
+        for len in [0usize, 1, 3, 4, 5, 31, 32, 33, 35, 36, 64, 67, 100] {
+            let lhs: [[u128; 2]; 100] = core::array::from_fn(|_| [next(), next()]);
+            let rhs: [[u128; 2]; 100] = core::array::from_fn(|_| [next(), next()]);
+            let (lhs, rhs) = (&lhs[..len], &rhs[..len]);
+            let reference = tower128_bdoz_2lane_mac_with_backend(lhs, rhs, SimdBackend::Portable);
+            assert_eq!(tower128_bdoz_2lane_mac(lhs, rhs), reference, "length {len}");
+        }
+    }
 
     /// Deterministic test-vector sponge stream backed directly by FIPS 202 `keccak_f1600_4x_portable`.
     struct KeccakTestStream {

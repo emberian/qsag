@@ -1,5 +1,6 @@
 module
 
+import Qsag.Tactic.AssuranceKit
 public import Qsag.Constructive
 
 public section
@@ -34,7 +35,7 @@ maintenance and guarded positive dispatch; ARM paired loads expand into scalar l
      ARMv8.2-SHA3 `BCAX` equivalence + architectural YMM zeroization.
    - `gf256ShamirMulGfniProg`: Algebraic field isomorphism between Wiedemann tower `𝒯₃` (`GF(2^8)`)
      and Intel `GFNI` `𝔽₂[z]/(z⁸ + z⁴ + z³ + z + 1)` via `0x71500A8A86BE78CE` / `0xA1E4F8E072A2700C`
-     (proved via `𝔽₂`-bilinearity + basis evaluation with `0 native_decide`).
+     (proved via `𝔽₂`-bilinearity + basis evaluation by kernel reduction).
    - `tower128BdozVpclmulProg`: 2-lane 128-bit carryless `vpclmulqdq` inner-product MAC and
      2-step `0x87` (`z¹²⁸ + z⁷ + z² + z + 1`) degree-bounded polynomial reduction.
    - `goldilocksMulCtX86Prog` & `goldilocksMulCtArmProg`: Zero-branch canonical Goldilocks
@@ -528,14 +529,14 @@ def execX86Instr (ins : X86Instr) (pc : Nat) (st : X86State) : X86State × Leaka
     let ovf := hiVal != 0#64
     ({ ((st.setGpr .rax loVal).setGpr .rdx hiVal) with
        flags := { cf := ovf, of := ovf, zf := false } },
-     LeakageEvent.clean pc)
+     { (LeakageEvent.clean pc) with varLatencyOperands := if st.doitEnabled then [] else [st.gpr .rax, st.gpr src] })
   | .imul64 dst src =>
     let a := st.gpr dst
     let b := st.gpr src
     let v := a * b
     let ovf := !( @decide (a.toInt * b.toInt = v.toInt) (Int.decEq _ _) )
     ({ (st.setGpr dst v) with flags := { cf := ovf, of := ovf, zf := false } },
-     LeakageEvent.clean pc)
+     { (LeakageEvent.clean pc) with varLatencyOperands := if st.doitEnabled then [] else [st.gpr dst, st.gpr src] })
   | .neg64 dst =>
     let x := st.gpr dst
     let v := 0#64 - x
@@ -587,7 +588,7 @@ def execX86Instr (ins : X86Instr) (pc : Nat) (st : X86State) : X86State × Leaka
     let prod := (st.gpr .rdx).toNat * (st.gpr src).toNat
     let loVal := BitVec.ofNat 64 prod
     let hiVal := BitVec.ofNat 64 (prod / (2 ^ 64))
-    ((st.setGpr dstLo loVal).setGpr hi hiVal, LeakageEvent.clean pc)
+    ((st.setGpr dstLo loVal).setGpr hi hiVal, { (LeakageEvent.clean pc) with varLatencyOperands := if st.doitEnabled then [] else [st.gpr .rdx, st.gpr src] })
   | .load64 dst base disp =>
     let addr := st.gpr base + disp
     (st.setGpr dst (st.mem addr), LeakageEvent.clean pc [addr])
@@ -816,10 +817,10 @@ def checkX86Instr (secHeap : Bool) (τ : X86TaintState) (ins : X86Instr) :
     else some { (τ.setGpr dst l) with cf := l, of := if c == 1 then l else .sec }
   | .mul64 src =>
     let l := (τ.gpr .rax).join (τ.gpr src)
-    some { ((τ.setGpr .rax l).setGpr .rdx l) with cf := l, of := l, zf := .sec }
+    if τ.doitAssumed then some { ((τ.setGpr .rax l).setGpr .rdx l) with cf := l, of := l, zf := .sec } else none
   | .imul64 dst src =>
     let l := (τ.gpr dst).join (τ.gpr src)
-    some { (τ.setGpr dst l) with cf := l, of := l, zf := .sec }
+    if τ.doitAssumed then some { (τ.setGpr dst l) with cf := l, of := l, zf := .sec } else none
   | .neg64 dst =>
     let l := τ.gpr dst
     some { (τ.setGpr dst l) with cf := l, of := l, zf := l }
@@ -846,7 +847,7 @@ def checkX86Instr (secHeap : Bool) (τ : X86TaintState) (ins : X86Instr) :
     some { (τ.setGpr dst l) with of := l }
   | .mulx64 hi dstLo src =>
     let l := (τ.gpr .rdx).join (τ.gpr src)
-    some ((τ.setGpr dstLo l).setGpr hi l)
+    if τ.doitAssumed then some ((τ.setGpr dstLo l).setGpr hi l) else none
   | .load64 dst base _ =>
     if τ.gpr base == .pub then some (τ.setGpr dst .sec) else none
   | .store64 base _ src =>
@@ -1138,7 +1139,11 @@ theorem checkX86Instr_sound
           · simp [h1] at hl),
         hzOld, hm, hd, hdr, he, hc⟩
   | mul64 src =>
-    simp [checkX86Instr, execX86Instr] at hCheck ⊢; subst hCheck
+    have hD : τ.doitAssumed = true := by
+      cases h : τ.doitAssumed <;> simp_all [checkX86Instr]
+    have hD1 := hdoitReq hD
+    have hD2 : s₂.doitEnabled = true := hdoitEq.symm.trans hD1
+    simp [checkX86Instr, execX86Instr, hD, hD1, hD2] at hCheck ⊢; subst hCheck
     let l := (τ.gpr .rax).join (τ.gpr src)
     have hOps : l = .pub → s₁.gpr .rax = s₂.gpr .rax ∧ s₁.gpr src = s₂.gpr src := by
       intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
@@ -1157,7 +1162,11 @@ theorem checkX86Instr_sound
       (fun hl => by rcases hOps hl with ⟨e1, e2⟩; rw [e1, e2]),
       (by intro h; cases h), hm2, hd2, hdr2, hyEq2, hyCl2⟩
   | imul64 dst src =>
-    simp [checkX86Instr, execX86Instr] at hCheck ⊢; subst hCheck
+    have hD : τ.doitAssumed = true := by
+      cases h : τ.doitAssumed <;> simp_all [checkX86Instr]
+    have hD1 := hdoitReq hD
+    have hD2 : s₂.doitEnabled = true := hdoitEq.symm.trans hD1
+    simp [checkX86Instr, execX86Instr, hD, hD1, hD2] at hCheck ⊢; subst hCheck
     let l := (τ.gpr dst).join (τ.gpr src)
     have hOps : l = .pub → s₁.gpr dst = s₂.gpr dst ∧ s₁.gpr src = s₂.gpr src := by
       intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
@@ -1260,7 +1269,11 @@ theorem checkX86Instr_sound
     exact ⟨hg1, hy1, hc1, fun hl => by rcases hOps hl with ⟨e1, e2, eo⟩; rw [e1, e2, eo],
            hz1, hm1, hd1, hdr1, hyEq1, hyCl1⟩
   | mulx64 hi dstLo src =>
-    simp [checkX86Instr, execX86Instr] at hCheck ⊢; subst hCheck
+    have hD : τ.doitAssumed = true := by
+      cases h : τ.doitAssumed <;> simp_all [checkX86Instr]
+    have hD1 := hdoitReq hD
+    have hD2 : s₂.doitEnabled = true := hdoitEq.symm.trans hD1
+    simp [checkX86Instr, execX86Instr, hD, hD1, hD2] at hCheck ⊢; subst hCheck
     let l := (τ.gpr .rdx).join (τ.gpr src)
     have hOps : l = .pub → s₁.gpr .rdx = s₂.gpr .rdx ∧ s₁.gpr src = s₂.gpr src := by
       intro hl; rcases (SecLabel.join_eq_pub_iff _ _).mp hl with ⟨h1, h2⟩
@@ -3141,7 +3154,7 @@ theorem gfni_phi_right_inv (y : BitVec 8) : gfniPhi (gfniPhiInv y) = y := by
 /-- **Exact Algebraic Field Isomorphism (`𝒯₃ ≃ 𝔽₂[z]/(z⁸ + z⁴ + z³ + z + 1)`)**:
     For **all** 65,536 byte pairs `(a, b) : BitVec 8 × BitVec 8`, conjugating Intel `VGF2P8MULB`
     by `VGF2P8AFFINEQB` matrices `0x71500A8A86BE78CE` and `0xA1E4F8E072A2700C` is bit-identical
-    to Wiedemann tower `𝒯₃` multiplication (`towerGf256Mul`), proved with `0 native_decide`! -/
+    to Wiedemann tower `𝒯₃` multiplication (`towerGf256Mul`), proved by kernel reduction! -/
 theorem gfni_isomorphism_homomorphic (a b : BitVec 8) :
     gfniT3MulByte a b = towerGf256Mul a b := by
   have hT3ZeroL : towerGf256Mul 0#8 b = 0#8 := by
@@ -3562,7 +3575,7 @@ def glAllSecretX86Taint : X86TaintState :=
   { gpr := fun r => if r == .rsp then .pub else .sec
     ymm := fun _ => .pub
     cf := .sec, of := .sec, zf := .sec
-    doitAssumed := false, upperYmmClean := true }
+    doitAssumed := true, upperYmmClean := true }
 
 def glAllSecretArmTaint : ArmTaintState :=
   { gpr := fun r => if r == .sp then .pub else .sec
@@ -4111,38 +4124,330 @@ private theorem readMem256_writeMem256 (st : X86State) (a : BitVec 64) (v : Vec2
   simp only [BitVec.add_assoc, addr_eq_offset]
   rfl
 
+/-! ### 7.6 Slot-Memory Frame Lemmas & Multi-Block / Multi-Lane Functional Correctness -/
+
+/-- **Forward non-overlap of 32-byte blocks in the qword-slot memory**: no qword of the block
+    stored at `out + 32·k` is a qword of a block loaded from `inp + 32·j` on a strictly later
+    trip `j > k`. In-place operation (`out = inp`) satisfies it whenever the region does not
+    wrap; a store that runs ahead of a later load violates it. -/
+@[expose]
+def SlotBlocksForwardDisjoint (out inp : BitVec 64) (blocks : Nat) : Prop :=
+  ∀ k j a b : Nat, k < j → j < blocks → a < 4 → b < 4 →
+    out + BitVec.ofNat 64 (32 * k + 8 * a) ≠ inp + BitVec.ofNat 64 (32 * j + 8 * b)
+
+/-- Arithmetic sufficient condition: neither region wraps past `2^64`, and the input region
+    starts at or after the output region or lies entirely below it. -/
+theorem slotBlocksForwardDisjoint_of_bounds (out inp : BitVec 64) (blocks : Nat)
+    (hOut : out.toNat + 32 * blocks ≤ 2 ^ 64) (hInp : inp.toNat + 32 * blocks ≤ 2 ^ 64)
+    (hOrder : out.toNat ≤ inp.toNat ∨ inp.toNat + 32 * blocks ≤ out.toNat) :
+    SlotBlocksForwardDisjoint out inp blocks := by
+  intro k j a b hkj hj ha hb e
+  have h := congrArg BitVec.toNat e
+  simp only [BitVec.toNat_add, BitVec.toNat_ofNat] at h
+  omega
+
+/-- The four qword slots of the 256-bit block at `p` avoid the four slots of the block at `a`. -/
+private def Slots256Disjoint (p a : BitVec 64) : Prop :=
+  ∀ i j : Nat, i < 4 → j < 4 → p + BitVec.ofNat 64 (8 * i) ≠ a + BitVec.ofNat 64 (8 * j)
+
+private theorem addr_blk_zero (p : BitVec 64) (m : Nat) :
+    p + 0#64 + BitVec.ofNat 64 m = p + BitVec.ofNat 64 (32 * 0 + m) := by
+  rw [BitVec.add_zero, Nat.mul_zero, Nat.zero_add]
+
+private theorem addr_blk_succ (p : BitVec 64) (j m : Nat) :
+    p + 32#64 + BitVec.ofNat 64 (32 * j + m) = p + BitVec.ofNat 64 (32 * (j + 1) + m) := by
+  have hm : 32 * (j + 1) + m = 32 + (32 * j + m) := by omega
+  simp only [hm, BitVec.ofNat_add, BitVec.add_assoc]
+
+private theorem addr_blk_succ0 (p : BitVec 64) (j : Nat) :
+    p + 32#64 + BitVec.ofNat 64 (32 * j) = p + BitVec.ofNat 64 (32 * (j + 1)) := by
+  have hm : 32 * (j + 1) = 32 + 32 * j := by omega
+  simp only [hm, BitVec.ofNat_add, BitVec.add_assoc]
+
+private theorem addr_blk_split (p : BitVec 64) (k m : Nat) :
+    p + BitVec.ofNat 64 (32 * k) + BitVec.ofNat 64 m = p + BitVec.ofNat 64 (32 * k + m) := by
+  rw [BitVec.ofNat_add, BitVec.add_assoc]
+
+private theorem slots256Disjoint_of_forward {out inp : BitVec 64} {n : Nat}
+    (h : SlotBlocksForwardDisjoint out inp n) {k j : Nat} (hkj : k < j) (hj : j < n) :
+    Slots256Disjoint (inp + BitVec.ofNat 64 (32 * j)) (out + BitVec.ofNat 64 (32 * k)) := by
+  intro i i' hi hi' e
+  apply h k j i' i hkj hj hi' hi
+  rw [← addr_blk_split, ← addr_blk_split]
+  exact e.symm
+
+private theorem slots256Disjoint_offsets (a : BitVec 64) (c d : Nat)
+    (hc : c + 32 ≤ 2 ^ 64) (hd : d + 32 ≤ 2 ^ 64) (h : c + 32 ≤ d ∨ d + 32 ≤ c) :
+    Slots256Disjoint (a + BitVec.ofNat 64 c) (a + BitVec.ofNat 64 d) := by
+  intro i j hi hj e
+  have e' := congrArg BitVec.toNat e
+  simp only [BitVec.toNat_add, BitVec.toNat_ofNat] at e'
+  omega
+
+private theorem slotBlocksForwardDisjoint_shift {out inp : BitVec 64} {n : Nat}
+    (h : SlotBlocksForwardDisjoint out inp (n + 1)) :
+    SlotBlocksForwardDisjoint (out + 32#64) (inp + 32#64) n := by
+  intro k j a b hkj hj ha hb e
+  apply h (k + 1) (j + 1) a b (by omega) (by omega) ha hb
+  rw [← addr_blk_succ, ← addr_blk_succ]
+  exact e
+
+private theorem mem_writeMem256_of_ne (st : X86State) (a q : BitVec 64) (v : Vec256)
+    (h : ∀ j : Nat, j < 4 → q ≠ a + BitVec.ofNat 64 (8 * j)) :
+    (st.writeMem256 a v).mem q = st.mem q := by
+  have h0 : (q == a) = false :=
+    beq_false_of_ne (fun e => h 0 (by omega) (e.trans (BitVec.add_zero a).symm))
+  have h1 : (q == a + 8#64) = false := beq_false_of_ne (h 1 (by omega))
+  have h2 : (q == a + 16#64) = false := beq_false_of_ne (h 2 (by omega))
+  have h3 : (q == a + 24#64) = false := beq_false_of_ne (h 3 (by omega))
+  simp only [X86State.writeMem256, X86State.writeMem64, h0, h1, h2, h3, Bool.false_eq_true,
+    ↓reduceIte]
+
+private theorem readMem256_congr_mem {s t : X86State} (h : s.mem = t.mem) (a : BitVec 64) :
+    s.readMem256 a = t.readMem256 a := by
+  simp only [X86State.readMem256, h]
+
+private theorem readMem256_eq_of_mem (s t : X86State) (p : BitVec 64)
+    (h : ∀ b : Nat, b < 4 → s.mem (p + BitVec.ofNat 64 (8 * b)) = t.mem (p + BitVec.ofNat 64 (8 * b))) :
+    s.readMem256 p = t.readMem256 p := by
+  have e0 : s.mem p = t.mem p := by
+    have h0 := h 0 (by omega)
+    rwa [show BitVec.ofNat 64 (8 * 0) = 0#64 from rfl, BitVec.add_zero] at h0
+  have e1 : s.mem (p + 8#64) = t.mem (p + 8#64) := h 1 (by omega)
+  have e2 : s.mem (p + 16#64) = t.mem (p + 16#64) := h 2 (by omega)
+  have e3 : s.mem (p + 24#64) = t.mem (p + 24#64) := h 3 (by omega)
+  simp only [X86State.readMem256, e0, e1, e2, e3]
+
+private theorem readMem256_writeMem256_of_disjoint (st : X86State) (p a : BitVec 64) (v : Vec256)
+    (h : Slots256Disjoint p a) :
+    (st.writeMem256 a v).readMem256 p = st.readMem256 p :=
+  readMem256_eq_of_mem _ _ p (fun b hb =>
+    mem_writeMem256_of_ne st a _ v (fun j hj => h b j hb hj))
+
+/-- The ten-instruction loop body of `gf256ShamirMulGfniProg`. -/
+private def gfniLoopBody : List X86Instr :=
+  [ .vmovdquLoad .ymm0 .rsi 0#64
+  , .vmovdquLoad .ymm1 .rdx 0#64
+  , .vgf2p8affineqb0 .ymm0 .ymm0 .ymm14
+  , .vgf2p8affineqb0 .ymm1 .ymm1 .ymm14
+  , .vgf2p8mulb .ymm2 .ymm0 .ymm1
+  , .vgf2p8affineqb0 .ymm2 .ymm2 .ymm15
+  , .vmovdquStore .rdi 0#64 .ymm2
+  , .addImm64 .rsi 32#64
+  , .addImm64 .rdx 32#64
+  , .addImm64 .rdi 32#64 ]
+
+private def gfniBlockVec (mF mI va vb : Vec256) : Vec256 :=
+  Vec256.gfniAffine0 (Vec256.gfniMul (Vec256.gfniAffine0 va mF) (Vec256.gfniAffine0 vb mF)) mI
+
+private theorem execX86Loop_succ_fst (n : Nat) (body : List X86Instr) (pc : Nat) (s : X86State) :
+    (execX86Loop (n + 1) body pc s).1 =
+      (execX86Loop n body (pc + body.length) (execX86Block body pc s).1).1 := rfl
+
 set_option maxRecDepth 8192 in
-/-- Executing one guarded GFNI block writes all 32 tower-field products.
-    All inputs are loaded before the store, so this also holds for aliased buffers. -/
+private theorem gfniBody_step (pc : Nat) (s : X86State) :
+    (execX86Block gfniLoopBody pc s).1.mem =
+      (s.writeMem256 (s.gpr .rdi + 0#64)
+        (gfniBlockVec (s.ymm .ymm14) (s.ymm .ymm15)
+          (s.readMem256 (s.gpr .rsi + 0#64)) (s.readMem256 (s.gpr .rdx + 0#64)))).mem ∧
+    (execX86Block gfniLoopBody pc s).1.gpr .rdi = s.gpr .rdi + 32#64 ∧
+    (execX86Block gfniLoopBody pc s).1.gpr .rsi = s.gpr .rsi + 32#64 ∧
+    (execX86Block gfniLoopBody pc s).1.gpr .rdx = s.gpr .rdx + 32#64 ∧
+    (execX86Block gfniLoopBody pc s).1.ymm .ymm14 = s.ymm .ymm14 ∧
+    (execX86Block gfniLoopBody pc s).1.ymm .ymm15 = s.ymm .ymm15 :=
+  ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+/-- The loop only writes the qword slots of its own output blocks. -/
+private theorem gfniLoop_mem_frame (n : Nat) : ∀ (pc : Nat) (s : X86State) (q : BitVec 64),
+    (∀ j b : Nat, j < n → b < 4 → q ≠ s.gpr .rdi + BitVec.ofNat 64 (32 * j + 8 * b)) →
+    (execX86Loop n gfniLoopBody pc s).1.mem q = s.mem q := by
+  induction n with
+  | zero => intro pc s q _; rfl
+  | succ n ih =>
+    intro pc s q hq
+    obtain ⟨hMem, hRdi, -, -, -, -⟩ := gfniBody_step pc s
+    rw [execX86Loop_succ_fst, ih _ _ q, hMem]
+    · exact mem_writeMem256_of_ne s _ q _
+        (fun b hb e => hq 0 b (by omega) hb (e.trans (addr_blk_zero _ _)))
+    · intro j b hj hb e
+      rw [hRdi, addr_blk_succ] at e
+      exact hq (j + 1) b (by omega) hb e
+
+set_option maxRecDepth 16384 in
+private theorem gfniLoop_correct (n : Nat) : ∀ (pc : Nat) (s : X86State),
+    s.ymm .ymm14 = Vec256.broadcastQ gfniTowerToPolyMat →
+    s.ymm .ymm15 = Vec256.broadcastQ gfniPolyToTowerMat →
+    SlotBlocksForwardDisjoint (s.gpr .rdi) (s.gpr .rdi) n →
+    SlotBlocksForwardDisjoint (s.gpr .rdi) (s.gpr .rsi) n →
+    SlotBlocksForwardDisjoint (s.gpr .rdi) (s.gpr .rdx) n →
+    ∀ k : Nat, k < n →
+      (execX86Loop n gfniLoopBody pc s).1.readMem256 (s.gpr .rdi + BitVec.ofNat 64 (32 * k)) =
+        gfniBlockVec (Vec256.broadcastQ gfniTowerToPolyMat) (Vec256.broadcastQ gfniPolyToTowerMat)
+          (s.readMem256 (s.gpr .rsi + BitVec.ofNat 64 (32 * k)))
+          (s.readMem256 (s.gpr .rdx + BitVec.ofNat 64 (32 * k))) := by
+  induction n with
+  | zero => intro pc s _ _ _ _ _ k hk; omega
+  | succ n ih =>
+    intro pc s h14 h15 hOut hA hB k hk
+    obtain ⟨hMem, hRdi, hRsi, hRdx, h14', h15'⟩ := gfniBody_step pc s
+    rw [execX86Loop_succ_fst]
+    cases k with
+    | zero =>
+      have hFrame : (execX86Loop n gfniLoopBody (pc + gfniLoopBody.length)
+            (execX86Block gfniLoopBody pc s).1).1.readMem256
+            (s.gpr .rdi + BitVec.ofNat 64 (32 * 0)) =
+          (execX86Block gfniLoopBody pc s).1.readMem256
+            (s.gpr .rdi + BitVec.ofNat 64 (32 * 0)) := by
+        apply readMem256_eq_of_mem
+        intro b hb
+        apply gfniLoop_mem_frame
+        intro j b' hj hb' e
+        rw [hRdi, addr_blk_succ, addr_blk_split] at e
+        exact hOut 0 (j + 1) b b' (by omega) (by omega) hb hb' e
+      rw [hFrame, readMem256_congr_mem hMem]
+      have hSame := readMem256_writeMem256 s (s.gpr .rdi + 0#64)
+        (gfniBlockVec (s.ymm .ymm14) (s.ymm .ymm15)
+          (s.readMem256 (s.gpr .rsi + 0#64)) (s.readMem256 (s.gpr .rdx + 0#64)))
+      rw [h14, h15] at hSame
+      exact hSame
+    | succ k =>
+      have hk' : k < n := by omega
+      have hOut1 : SlotBlocksForwardDisjoint ((execX86Block gfniLoopBody pc s).1.gpr .rdi)
+          ((execX86Block gfniLoopBody pc s).1.gpr .rdi) n := by
+        rw [hRdi]; exact slotBlocksForwardDisjoint_shift hOut
+      have hA1 : SlotBlocksForwardDisjoint ((execX86Block gfniLoopBody pc s).1.gpr .rdi)
+          ((execX86Block gfniLoopBody pc s).1.gpr .rsi) n := by
+        rw [hRdi, hRsi]; exact slotBlocksForwardDisjoint_shift hA
+      have hB1 : SlotBlocksForwardDisjoint ((execX86Block gfniLoopBody pc s).1.gpr .rdi)
+          ((execX86Block gfniLoopBody pc s).1.gpr .rdx) n := by
+        rw [hRdi, hRdx]; exact slotBlocksForwardDisjoint_shift hB
+      have hIH := ih (pc + gfniLoopBody.length) (execX86Block gfniLoopBody pc s).1
+        (h14'.trans h14) (h15'.trans h15) hOut1 hA1 hB1 k hk'
+      rw [hRdi, hRsi, hRdx, addr_blk_succ0, addr_blk_succ0, addr_blk_succ0] at hIH
+      rw [hIH, readMem256_congr_mem hMem, readMem256_congr_mem hMem,
+        readMem256_writeMem256_of_disjoint s _ _ _
+          (slots256Disjoint_of_forward hA (k := 0) (j := k + 1) (by omega) hk),
+        readMem256_writeMem256_of_disjoint s _ _ _
+          (slots256Disjoint_of_forward hB (k := 0) (j := k + 1) (by omega) hk)]
+
+set_option maxRecDepth 8192 in
+private theorem gf256ShamirMulGfniProg_mem (blocks : Nat) (st : X86State) :
+    (execX86Prog (gf256ShamirMulGfniProg blocks) 0 st).1.mem =
+      (execX86Loop blocks gfniLoopBody 4
+        ((((st.setGpr .rax gfniTowerToPolyMat).setYmm .ymm14
+          (Vec256.broadcastQ gfniTowerToPolyMat)).setGpr .rax gfniPolyToTowerMat).setYmm .ymm15
+          (Vec256.broadcastQ gfniPolyToTowerMat))).1.mem := rfl
+
+/-- **Multi-block functional correctness of `qsag_asm_gf256_shamir_mul_gfni`**: after running
+    the kernel over `blocks` 32-byte blocks, every byte `idx` of every output block `k < blocks`
+    is the Wiedemann-tower product of the corresponding bytes of the two input blocks as they
+    were before execution. The three hypotheses are the aliasing contract: the output region
+    does not wrap onto itself, and no output block is stored over an input block that a later
+    trip still has to load. Exact in-place use (`rdi = rsi` or `rdi = rdx`) is permitted. -/
+theorem gf256ShamirMulGfni_exec_blocks_correct (blocks : Nat) (st : X86State)
+    (hOut : SlotBlocksForwardDisjoint (st.gpr .rdi) (st.gpr .rdi) blocks)
+    (hA : SlotBlocksForwardDisjoint (st.gpr .rdi) (st.gpr .rsi) blocks)
+    (hB : SlotBlocksForwardDisjoint (st.gpr .rdi) (st.gpr .rdx) blocks)
+    (k : Nat) (hk : k < blocks) (idx : Fin 32) :
+    ((execX86Prog (gf256ShamirMulGfniProg blocks) 0 st).1.readMem256
+        (st.gpr .rdi + BitVec.ofNat 64 (32 * k))).getByte idx =
+      towerGf256Mul
+        ((st.readMem256 (st.gpr .rsi + BitVec.ofNat 64 (32 * k))).getByte idx)
+        ((st.readMem256 (st.gpr .rdx + BitVec.ofNat 64 (32 * k))).getByte idx) := by
+  have hLoop := gfniLoop_correct blocks 4
+    ((((st.setGpr .rax gfniTowerToPolyMat).setYmm .ymm14
+      (Vec256.broadcastQ gfniTowerToPolyMat)).setGpr .rax gfniPolyToTowerMat).setYmm .ymm15
+      (Vec256.broadcastQ gfniPolyToTowerMat)) rfl rfl hOut hA hB k hk
+  rw [readMem256_congr_mem (gf256ShamirMulGfniProg_mem blocks st)]
+  exact (congrArg (fun v => Vec256.getByte v idx) hLoop).trans
+    (gf256ShamirMulGfni_32lane_correct
+      (st.readMem256 (st.gpr .rsi + BitVec.ofNat 64 (32 * k)))
+      (st.readMem256 (st.gpr .rdx + BitVec.ofNat 64 (32 * k))) idx)
+
+/-- Executing one guarded GFNI block writes all 32 tower-field products: the `blocks = 1`
+    instance of `gf256ShamirMulGfni_exec_blocks_correct`, whose aliasing contract is vacuous
+    because all inputs of the only block are loaded before its store. -/
 theorem gf256ShamirMulGfni_exec_1block_correct (st : X86State) (idx : Fin 32) :
     ((execX86Prog (gf256ShamirMulGfniProg 1) 0 st).1.readMem256 (st.gpr .rdi)).getByte idx =
       towerGf256Mul ((st.readMem256 (st.gpr .rsi)).getByte idx)
         ((st.readMem256 (st.gpr .rdx)).getByte idx) := by
-  let va := st.readMem256 (st.gpr .rsi)
-  let vb := st.readMem256 (st.gpr .rdx)
-  let result := Vec256.gfniAffine0
-      (Vec256.gfniMul (Vec256.gfniAffine0 va (Vec256.broadcastQ gfniTowerToPolyMat))
-        (Vec256.gfniAffine0 vb (Vec256.broadcastQ gfniTowerToPolyMat)))
-      (Vec256.broadcastQ gfniPolyToTowerMat)
-  have hm : (execX86Prog (gf256ShamirMulGfniProg 1) 0 st).1.mem =
-      (st.writeMem256 (st.gpr .rdi) result).mem := by
-    simp only [gf256ShamirMulGfniProg, execX86Prog, execX86Loop, execX86Block, execX86Instr,
-      X86State.setGpr, X86State.setYmm, X86State.writeMem256, X86State.writeMem64,
-      beq_self_eq_true, ↓reduceIte, BitVec.add_zero]
-    rfl
-  change (X86State.readMem256 _ _).getByte idx = _
-  have hr : (execX86Prog (gf256ShamirMulGfniProg 1) 0 st).1.readMem256 (st.gpr .rdi) = result := by
-    change (⟨_, _, _, _⟩ : Vec256) = _
-    simp only [hm]
-    exact readMem256_writeMem256 st (st.gpr .rdi) result
-  rw [hr]
-  exact gf256ShamirMulGfni_32lane_correct va vb idx
+  have h := gf256ShamirMulGfni_exec_blocks_correct 1 st
+    (fun k j _ _ hkj hj => absurd hkj (by omega))
+    (fun k j _ _ hkj hj => absurd hkj (by omega))
+    (fun k j _ _ hkj hj => absurd hkj (by omega)) 0 (by omega) idx
+  rw [show BitVec.ofNat 64 (32 * 0) = 0#64 from rfl] at h
+  simp only [BitVec.add_zero] at h
+  exact h
 
 /-- The 256-bit RSS share-lane expression computed by the AVX2 kernel. -/
 abbrev keccakChiMpcLane256 := keccakChiMpcShareVec256
 
-set_option maxRecDepth 16384 in
-set_option maxHeartbeats 2000000 in
+/-- RSS `χ` share for the Keccak lane at byte offset `ox` (neighbours at `ox1`, `ox2`), with the
+    correlated-randomness mask read from the memory of `cur`. -/
+private def keccakChiLaneAt (st cur : X86State) (ox ox1 ox2 : BitVec 64) : Vec256 :=
+  keccakChiMpcLane256
+    (st.readMem256 (st.gpr .rsi + ox))
+    (st.readMem256 (st.gpr .rsi + ox1))
+    (st.readMem256 (st.gpr .rsi + ox2))
+    (st.readMem256 (st.gpr .rdx + ox1))
+    (st.readMem256 (st.gpr .rdx + ox2))
+    (cur.readMem256 (st.gpr .rcx + ox))
+
+private def keccakChiStore (st cur : X86State) (ox ox1 ox2 : BitVec 64) : X86State :=
+  cur.writeMem256 (st.gpr .rdi + ox) (keccakChiLaneAt st cur ox ox1 ox2)
+
+set_option maxRecDepth 32768 in
+set_option maxHeartbeats 8000000 in
+/-- The kernel's final memory is five successive lane stores; each mask load sees the stores
+    that preceded it. -/
+private theorem keccakChiMpcAvx2Prog_mem (st : X86State) :
+    (execX86Prog keccakChiMpcAvx2Prog 0 st).1.mem =
+      (keccakChiStore st (keccakChiStore st (keccakChiStore st (keccakChiStore st
+        (keccakChiStore st st 0#64 32#64 64#64) 32#64 64#64 96#64) 64#64 96#64 128#64)
+        96#64 128#64 0#64) 128#64 0#64 32#64).mem := rfl
+
+/-- Read-back of each stored lane; no aliasing assumption is needed because the five output
+    blocks sit at distinct constant offsets from `rdi`. -/
+private theorem keccakChiMpcAvx2_exec_lanes_raw (st : X86State) :
+    let c1 := keccakChiStore st st 0#64 32#64 64#64
+    let c2 := keccakChiStore st c1 32#64 64#64 96#64
+    let c3 := keccakChiStore st c2 64#64 96#64 128#64
+    let c4 := keccakChiStore st c3 96#64 128#64 0#64
+    let out := (execX86Prog keccakChiMpcAvx2Prog 0 st).1
+    out.readMem256 (st.gpr .rdi + 0#64) = keccakChiLaneAt st st 0#64 32#64 64#64 ∧
+    out.readMem256 (st.gpr .rdi + 32#64) = keccakChiLaneAt st c1 32#64 64#64 96#64 ∧
+    out.readMem256 (st.gpr .rdi + 64#64) = keccakChiLaneAt st c2 64#64 96#64 128#64 ∧
+    out.readMem256 (st.gpr .rdi + 96#64) = keccakChiLaneAt st c3 96#64 128#64 0#64 ∧
+    out.readMem256 (st.gpr .rdi + 128#64) = keccakChiLaneAt st c4 128#64 0#64 32#64 := by
+  intro c1 c2 c3 c4 out
+  have hm : ∀ p, out.readMem256 p =
+      (keccakChiStore st c4 128#64 0#64 32#64).readMem256 p :=
+    fun p => readMem256_congr_mem (keccakChiMpcAvx2Prog_mem st) p
+  have dj (c d : Nat) (hc : c + 32 ≤ 2 ^ 64) (hd : d + 32 ≤ 2 ^ 64)
+      (h : c + 32 ≤ d ∨ d + 32 ≤ c) :=
+    slots256Disjoint_offsets (st.gpr .rdi) c d hc hd h
+  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  · rw [hm]
+    exact (readMem256_writeMem256_of_disjoint c4 _ _ _ (dj 0 128 (by decide) (by decide) (by decide))).trans
+      ((readMem256_writeMem256_of_disjoint c3 _ _ _ (dj 0 96 (by decide) (by decide) (by decide))).trans
+      ((readMem256_writeMem256_of_disjoint c2 _ _ _ (dj 0 64 (by decide) (by decide) (by decide))).trans
+      ((readMem256_writeMem256_of_disjoint c1 _ _ _ (dj 0 32 (by decide) (by decide) (by decide))).trans
+      (readMem256_writeMem256 st _ _))))
+  · rw [hm]
+    exact (readMem256_writeMem256_of_disjoint c4 _ _ _ (dj 32 128 (by decide) (by decide) (by decide))).trans
+      ((readMem256_writeMem256_of_disjoint c3 _ _ _ (dj 32 96 (by decide) (by decide) (by decide))).trans
+      ((readMem256_writeMem256_of_disjoint c2 _ _ _ (dj 32 64 (by decide) (by decide) (by decide))).trans
+      (readMem256_writeMem256 c1 _ _)))
+  · rw [hm]
+    exact (readMem256_writeMem256_of_disjoint c4 _ _ _ (dj 64 128 (by decide) (by decide) (by decide))).trans
+      ((readMem256_writeMem256_of_disjoint c3 _ _ _ (dj 64 96 (by decide) (by decide) (by decide))).trans
+      (readMem256_writeMem256 c2 _ _))
+  · rw [hm]
+    exact (readMem256_writeMem256_of_disjoint c4 _ _ _ (dj 96 128 (by decide) (by decide) (by decide))).trans
+      (readMem256_writeMem256 c3 _ _)
+  · rw [hm]
+    exact readMem256_writeMem256 c4 _ _
+
 /-- The actual program stores the RSS chi result in output lane zero.
     Later stores use distinct offsets even under wrapping address arithmetic;
     no disjointness assumption on input and output buffers is needed for this lane. -/
@@ -4155,29 +4460,55 @@ theorem keccakChiMpcAvx2_exec_lane0_correct (st : X86State) :
         (st.readMem256 (st.gpr .rdx + 32#64))
         (st.readMem256 (st.gpr .rdx + 64#64))
         (st.readMem256 (st.gpr .rcx)) := by
-  let a := st.gpr .rdi
-  let v0 := (execX86Prog (keccakChiMpcAvx2Prog.take 17) 0 st).1.ymm .ymm10
-  let v1 := (execX86Prog (keccakChiMpcAvx2Prog.take 25) 0 st).1.ymm .ymm10
-  let v2 := (execX86Prog (keccakChiMpcAvx2Prog.take 33) 0 st).1.ymm .ymm10
-  let v3 := (execX86Prog (keccakChiMpcAvx2Prog.take 41) 0 st).1.ymm .ymm10
-  let v4 := (execX86Prog (keccakChiMpcAvx2Prog.take 49) 0 st).1.ymm .ymm10
-  have hm : (execX86Prog keccakChiMpcAvx2Prog 0 st).1.mem =
-      (((((st.writeMem256 (a + 0#64) v0).writeMem256 (a + 32#64) v1).writeMem256
-        (a + 64#64) v2).writeMem256 (a + 96#64) v3).writeMem256 (a + 128#64) v4).mem := by
-    rfl
-  have frame (u0 u1 u2 u3 u4 : Vec256) :
-      (((((st.writeMem256 (a + 0#64) u0).writeMem256 (a + 32#64) u1).writeMem256
-        (a + 64#64) u2).writeMem256 (a + 96#64) u3).writeMem256 (a + 128#64) u4).readMem256 a = u0 := by
-    simp [X86State.readMem256, X86State.writeMem256, X86State.writeMem64,
-      BitVec.add_assoc, BitVec.self_eq_add_right]
-  have hr : (execX86Prog keccakChiMpcAvx2Prog 0 st).1.readMem256 a = v0 := by
-    change (⟨_, _, _, _⟩ : Vec256) = _
-    simp only [hm]
-    exact frame v0 v1 v2 v3 v4
-  rw [hr]
-  simp only [v0, keccakChiMpcAvx2Prog, List.take, execX86Prog, execX86Instr,
-    X86State.setYmm, beq_iff_eq, reduceCtorEq, ↓reduceIte, BitVec.add_zero]
-  rfl
+  have h := (keccakChiMpcAvx2_exec_lanes_raw st).1
+  simp only [keccakChiLaneAt, BitVec.add_zero] at h
+  exact h
+
+/-- **Full-row functional correctness of `qsag_asm_keccak_chi_mpc_avx2`**: for every Keccak lane
+    `x ∈ {0,…,4}` of the `χ` row, the complete 256-bit output block (all four 64-bit words) at
+    `rdi + 32·x` is the RSS `χ` share of the input lanes `x`, `x+1`, `x+2` (indices mod 5) of both
+    share vectors and mask lane `x`, all as they were before execution. The mask of lane `x` is
+    loaded after the stores of lanes `< x`, so those output blocks must not alias it. -/
+theorem keccakChiMpcAvx2_exec_correct (st : X86State)
+    (hMask : SlotBlocksForwardDisjoint (st.gpr .rdi) (st.gpr .rcx) 5) (x : Fin 5) :
+    (execX86Prog keccakChiMpcAvx2Prog 0 st).1.readMem256
+        (st.gpr .rdi + BitVec.ofNat 64 (32 * x.val)) =
+      keccakChiMpcLane256
+        (st.readMem256 (st.gpr .rsi + BitVec.ofNat 64 (32 * x.val)))
+        (st.readMem256 (st.gpr .rsi + BitVec.ofNat 64 (32 * ((x.val + 1) % 5))))
+        (st.readMem256 (st.gpr .rsi + BitVec.ofNat 64 (32 * ((x.val + 2) % 5))))
+        (st.readMem256 (st.gpr .rdx + BitVec.ofNat 64 (32 * ((x.val + 1) % 5))))
+        (st.readMem256 (st.gpr .rdx + BitVec.ofNat 64 (32 * ((x.val + 2) % 5))))
+        (st.readMem256 (st.gpr .rcx + BitVec.ofNat 64 (32 * x.val))) := by
+  obtain ⟨h0, h1, h2, h3, h4⟩ := keccakChiMpcAvx2_exec_lanes_raw st
+  have mk (c : X86State) (v : Vec256) (k j : Nat) (hkj : k < j) (hj : j < 5) :
+      (c.writeMem256 (st.gpr .rdi + BitVec.ofNat 64 (32 * k)) v).readMem256
+          (st.gpr .rcx + BitVec.ofNat 64 (32 * j)) =
+        c.readMem256 (st.gpr .rcx + BitVec.ofNat 64 (32 * j)) :=
+    readMem256_writeMem256_of_disjoint c _ _ v (slots256Disjoint_of_forward hMask hkj hj)
+  match x with
+  | ⟨0, _⟩ => exact h0
+  | ⟨1, _⟩ =>
+    refine h1.trans ?_
+    exact congrArg (keccakChiMpcLane256 _ _ _ _ _) (mk st _ 0 1 (by decide) (by decide))
+  | ⟨2, _⟩ =>
+    refine h2.trans ?_
+    exact congrArg (keccakChiMpcLane256 _ _ _ _ _)
+      ((mk _ _ 1 2 (by decide) (by decide)).trans (mk st _ 0 2 (by decide) (by decide)))
+  | ⟨3, _⟩ =>
+    simp only [keccakChiLaneAt, keccakChiStore] at h3 ⊢
+    refine h3.trans ?_
+    exact congrArg (keccakChiMpcLane256 _ _ _ _ _)
+      ((mk _ _ 2 3 (by decide) (by decide)).trans
+        ((mk _ _ 1 3 (by decide) (by decide)).trans (mk st _ 0 3 (by decide) (by decide))))
+  | ⟨4, _⟩ =>
+    simp only [keccakChiLaneAt, keccakChiStore] at h4 ⊢
+    refine h4.trans ?_
+    exact congrArg (keccakChiMpcLane256 _ _ _ _ _)
+      ((mk _ _ 3 4 (by decide) (by decide)).trans
+        ((mk _ _ 2 4 (by decide) (by decide)).trans
+          ((mk _ _ 1 4 (by decide) (by decide)).trans (mk st _ 0 4 (by decide) (by decide)))))
+  | ⟨n + 5, h⟩ => exact absurd h (by omega)
 
 /-! ### 8. Architectural Scalar `RFLAGS` Parity (`MUL`/`IMUL`/`SHL`/`SHR`/`ROR`/`SBB`) -/
 
@@ -4522,5 +4853,22 @@ theorem tooth_secret_rsp_ret_stack_pop_rejected :
     checkX86RetStackPop τSecRsp = none ∧
     (execX86RetStackPop 0 s₀).2 ≠ (execX86RetStackPop 0 s₁).2 := by
   exact ⟨rfl, by decide⟩
+
+/-- The Goldilocks entry contract has a concrete hardware-enabled witness. -/
+theorem goldilocks_doit_entry_inhabited :
+    ∃ a b : X86State, X86LowEq (fun _ => .sec) glAllSecretX86Taint a b := by
+  let s := { (defaultX86State 0#64) with doitEnabled := true }
+  exact ⟨s, s, by simp [X86LowEq, s, defaultX86State]⟩
+
+/-- Dropping the hardware precondition rejects all scalar multiply forms. -/
+theorem tooth_x86_multiply_without_doit_rejected :
+    checkX86Instr true {glAllSecretX86Taint with doitAssumed := false} (.mul64 .rsi) = none := by rfl
+
+theorem tooth_x86_mulx_without_doit_leaks :
+    (execX86Instr (.mulx64 .rax .rcx .rdi) 0 (defaultX86State 0#64)).2 ≠
+    (execX86Instr (.mulx64 .rax .rcx .rdi) 0 (defaultX86State 1#64)).2 := by decide
+
+#tooth_pair goldilocksMulCtX86_constant_time vs tooth_x86_mulx_without_doit_leaks
+#verify_inhabited goldilocksMulCtX86_constant_time goldilocks_doit_entry_inhabited
 
 end Qsag.ConstantTimeIsa

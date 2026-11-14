@@ -390,6 +390,8 @@ pub fn detect_backend() -> SimdBackend {
 #[cfg(target_arch = "aarch64")]
 #[inline]
 pub(crate) fn ensure_aarch64_dit_enabled() -> DitGuard {
+    #[cfg(all(test, feature = "std"))]
+    DIT_GUARDS_TAKEN.with(|n| n.set(n.get() + 1));
     let mut previous = None;
     if probe_capabilities().aarch64_dit {
         let saved: u64;
@@ -401,6 +403,12 @@ pub(crate) fn ensure_aarch64_dit_enabled() -> DitGuard {
         previous = Some(saved);
     }
     DitGuard(previous, core::marker::PhantomData)
+}
+
+#[cfg(all(test, feature = "std", target_arch = "aarch64"))]
+std::thread_local! {
+    /// Guards taken on this thread, so tests can see which entry points enter DIT.
+    pub(crate) static DIT_GUARDS_TAKEN: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
 }
 
 #[cfg(target_arch = "aarch64")]
