@@ -995,24 +995,18 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
                 // consistent and exactly this one gate is wrong.
                 message.0[lane] ^= 1 << bit;
             }
-            let mut wire_bytes = words_to_bytes(&message.0);
-            let send_res = self
-                .transport
-                .send_frame(pred, ROUND_GATE | round as u32, &wire_bytes);
-            wire_bytes.fill(0);
-            core::hint::black_box(wire_bytes.as_mut_slice());
-            send_res?;
-            let mut raw = recv_from(&mut self.transport, succ, ROUND_GATE | round as u32)?;
-            let mut received = ZeroizingWords(bytes_to_words(&raw, 25 * n).ok_or_else(|| {
-                raw.fill(0);
-                core::hint::black_box(raw.as_mut_slice());
+            let wire_bytes = words_to_bytes(&message.0);
+            self.transport
+                .send_frame(pred, ROUND_GATE | round as u32, &wire_bytes)?;
+            drop(wire_bytes);
+            let raw = recv_from(&mut self.transport, succ, ROUND_GATE | round as u32)?;
+            let mut received = ZeroizingWords(bytes_to_words(&raw, 25 * n).ok_or(
                 NodeError::MalformedMessage {
                     from: succ,
                     round: ROUND_GATE | round as u32,
-                }
-            })?);
-            raw.fill(0);
-            core::hint::black_box(raw.as_mut_slice());
+                },
+            )?);
+            drop(raw);
             for (s, state) in self.states.iter_mut().enumerate() {
                 for lane in 0..25 {
                     let (_, l2) = chi_operands(lane);

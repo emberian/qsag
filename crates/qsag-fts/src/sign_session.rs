@@ -881,18 +881,12 @@ mod release_barrier_tests {
             winternitz_w: 4,
             num_chains: 4,
             target_sum: 6,
-            seed_bytes: 32,
-            node_bytes: 32,
-            randomizer_bytes: 32,
-            max_grind_counter: 1 << 14,
-            bdoz_mac_lanes: 2,
         };
-        let mut setup = trusted_dealer_setup_for_testing(
+        let mut setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
             params,
-            &[1, 2],
+            2,
             [0x4A; 32],
             [0x5B; 32],
-            [0x6C; 32],
             &accel,
         )
         .unwrap();

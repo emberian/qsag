@@ -227,6 +227,7 @@ impl core::error::Error for Rss256Error {}
 pub struct Shake256Prg256 {
     base: [u64; 9],
     counter: u64,
+    exhausted: bool,
     buf: KeccakState4x,
     next: usize,
 }
@@ -251,16 +252,22 @@ impl Shake256Prg256 {
         Self {
             base,
             counter: 0,
+            exhausted: false,
             buf: KeccakState4x::default(),
             next: WORDS_PER_X4,
         }
     }
 
     fn refill(&mut self) {
+        assert!(!self.exhausted, "Shake256Prg256: 64-bit block counter exhausted");
+        if self.counter > u64::MAX - 3 {
+            self.exhausted = true;
+            panic!("Shake256Prg256: 64-bit block counter overflow");
+        }
         for (lane, row) in self.buf.0.iter_mut().enumerate() {
             *row = match lane {
                 0..=8 => [self.base[lane]; 4],
-                9 => core::array::from_fn(|i| self.counter.wrapping_add(i as u64)),
+                9 => core::array::from_fn(|i| self.counter + (i as u64)),
                 // SHAKE256 domain suffix after the 80 input bytes, and the final rate bit.
                 10 => [0x1F; 4],
                 16 => [1u64 << 63; 4],
@@ -268,7 +275,10 @@ impl Shake256Prg256 {
             };
         }
         qsag_asm::keccak_f1600_x4(&mut self.buf);
-        self.counter = self.counter.wrapping_add(4);
+        match self.counter.checked_add(4) {
+            Some(next) => self.counter = next,
+            None => self.exhausted = true,
+        }
         self.next = 0;
     }
 
@@ -421,16 +431,26 @@ impl SharedState256 {
     }
 
     /// Xor a shared 32-byte value into every lane at byte offset `byte_off`.
-    pub fn xor_shared_digest(&mut self, byte_off: usize, value: &SharedDigest256) {
-        debug_assert!(8 * byte_off + DIGEST_PLANES <= STATE_PLANES);
+    pub fn xor_shared_digest(
+        &mut self,
+        byte_off: usize,
+        value: &SharedDigest256,
+    ) -> Result<(), Rss256Error> {
+        if byte_off > (STATE_PLANES / 8) - 32 {
+            return Err(Rss256Error::InvalidParameters);
+        }
+        let bit_off = 8 * byte_off;
         for (dst, src) in self.slot.iter_mut().zip(&value.slot) {
-            for (d, s) in dst[8 * byte_off..8 * byte_off + DIGEST_PLANES].iter_mut().zip(&src[..])
+            for (d, s) in dst[bit_off..bit_off + DIGEST_PLANES]
+                .iter_mut()
+                .zip(&src[..])
             {
                 for (x, y) in d.iter_mut().zip(s) {
                     *x ^= *y;
                 }
             }
         }
+        Ok(())
     }
 
     /// Xor one replicated 32-byte key into the lanes selected by `lane_mask` at byte offset
@@ -441,7 +461,7 @@ impl SharedState256 {
         key_slots: [&[u8]; 3],
         lane_mask: &Plane,
     ) -> Result<(), Rss256Error> {
-        if key_slots.iter().any(|k| k.len() != 32) || byte_off + 32 > SHAKE256_RATE_BYTES {
+        if key_slots.iter().any(|k| k.len() != 32) || byte_off > SHAKE256_RATE_BYTES - 32 {
             return Err(Rss256Error::InvalidParameters);
         }
         for (dst, key) in self.slot.iter_mut().zip(key_slots) {
@@ -512,8 +532,10 @@ impl SharedDigest256 {
 }
 
 /// Convert opened digest planes into one 32-byte value per lane.
-pub fn digests_from_planes(planes: &[Plane], lanes: usize) -> Vec<[u8; 32]> {
-    debug_assert_eq!(planes.len(), DIGEST_PLANES);
+pub fn digests_from_planes(planes: &[Plane], lanes: usize) -> Result<Vec<[u8; 32]>, Rss256Error> {
+    if planes.len() != DIGEST_PLANES {
+        return Err(Rss256Error::InvalidParameters);
+    }
     let mut out = vec![[0u8; 32]; lanes.min(LANES)];
     for (lane, digest) in out.iter_mut().enumerate() {
         for (i, plane) in planes.iter().enumerate() {
@@ -521,7 +543,7 @@ pub fn digests_from_planes(planes: &[Plane], lanes: usize) -> Vec<[u8; 32]> {
             digest[i / 8] |= bit << (i % 8);
         }
     }
-    out
+    Ok(out)
 }
 
 /// AND-gate protocol of [`Rss256Engine::permute`].
@@ -971,6 +993,7 @@ impl PendingGates {
         let padded = self.len().div_ceil(GROUP_PLANES) * GROUP_PLANES;
         for s in 0..3 {
             for planes in [&mut self.a[s], &mut self.b[s], &mut self.msg[s], &mut self.pad[s]] {
+                secret_vec_reserve(planes, padded.saturating_sub(planes.len()));
                 planes.resize(padded, [0; 4]);
             }
         }

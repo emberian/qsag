@@ -1286,7 +1286,7 @@ mod authenticated_tests {
     #[test]
     fn confidential_wire_channel_blocks_reflection_u64_max_wraparound_and_nonce_reuse() {
         let (mut endpoints, _) = InMemoryWireMesh::connect(2, [4; 32]);
-        let bob_ep = endpoints.pop().unwrap();
+        let _bob_ep = endpoints.pop().unwrap();
         let alice_ep = endpoints.pop().unwrap();
         let shared = vec![[0x5C; 32]; 2];
 
@@ -1303,7 +1303,7 @@ mod authenticated_tests {
         );
 
         let (mut endpoints, _) = InMemoryWireMesh::connect(2, [4; 32]);
-        let bob_ep = endpoints.pop().unwrap();
+        let _bob_ep = endpoints.pop().unwrap();
         let alice_ep = endpoints.pop().unwrap();
         let mut alice = ConfidentialWireChannel::new(alice_ep, [6; 32], shared.clone()).unwrap();
         let mut bob = ConfidentialWireChannel::new(bob_ep, [6; 32], shared).unwrap();

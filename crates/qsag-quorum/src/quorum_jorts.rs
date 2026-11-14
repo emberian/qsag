@@ -47,7 +47,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
-use qsag_core::belt_latch::{BeltLatch, BeltLatchError, BeltLatchRecord, DurableWal, MemoryWal};
+use qsag_core::belt_latch::{BeltLatch, BeltLatchError, BeltLatchRecord, DurableWal};
+#[cfg(any(test, feature = "testing-ephemeral"))]
+use qsag_core::belt_latch::MemoryWal;
 use qsag_core::field::tower::{TowerGf256, lagrange_weights_zero_gf256};
 
 use crate::hash::{SeedRng, h32, mac32, mac32_verify};
@@ -2813,10 +2815,7 @@ mod verified_config_parity {
         );
 
         // 3. Write-once `ots_release_cache` blocks releasing a second `(msg_hash, ctr)` on a leaf.
-        let next_leaf = jorts
-            .layout
-            .leaf_of(0, 1)
-            .expect("epoch 1 leaf exists for committee 0");
+        let next_leaf = jorts.layout.leaf_of(0, 1);
         jorts
             .ots_release_cache
             .insert(next_leaf, ([0xEE; 32], 9999));
