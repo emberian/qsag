@@ -49,6 +49,8 @@ fn immutable_header_bytes(json: &Json, secret_field: &str) -> ZeroizingBuf {
                     | "vault_device"
                     | "vault_inode"
                     | "uses_completed"
+                    | "ledger_checkpoint_gen"
+                    | "ledger_checkpoint_tag"
                     | "state_mac"
             ) && name != secret_field
         });

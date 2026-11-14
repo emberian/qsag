@@ -3,9 +3,11 @@
 use qsag_accel::CpuReferenceBackend;
 use qsag_accel::keccak::{cshake256_framed_32, cshake256_framed_xof};
 use qsag_addr::{KeyIdentityKind, QsagAddress};
+use qsag_core::ceremony_journal::{CeremonyReservation, FsCeremonyJournal};
 use qsag_core::fips205::{
     Fips205Params, SlhPublicKey, SlhSecretKey, slh_keygen_from_seed, slh_sign, slh_verify,
 };
+use qsag_core::pcg_dense::{FsSeedBurnTracker, SeedBurnError, SeedBurnTracker};
 use qsag_fts::{
     FrontierDpTable, FrontierFtsError, FrontierFtsProfile, FrontierFtsPublicKey,
     FrontierFtsSignature, FrontierFtsSigningKey, FsWalFtsEpochLatch, ParallelSeededError,
@@ -91,6 +93,89 @@ fn threshold_public_bytes(pk: &ParallelSeededPublicKey) -> Vec<u8> {
 
 fn burn_journal_path(secret_path: &str) -> String {
     format!("{secret_path}.burn")
+}
+
+fn ceremony_journal_path(secret_path: &str) -> String {
+    format!("{secret_path}.ceremony")
+}
+
+fn seed_burn_ledger_path(secret_path: &str) -> String {
+    format!("{secret_path}.seedburn")
+}
+
+fn provision_stateful_seed_burn_ledger(
+    secret_path: &str,
+    key_id: [u8; 32],
+    seed: &[u8; 32],
+) -> Result<qsag_core::LedgerCheckpoint, CliError> {
+    FsCeremonyJournal::create_new(
+        ceremony_journal_path(secret_path),
+        key_id,
+        derive(seed, b"ceremony journal mac"),
+    )
+    .map_err(|e| CliError::io("creating ceremony reservation journal", e))?;
+    let seed_burns = FsSeedBurnTracker::provision_genesis(
+        seed_burn_ledger_path(secret_path),
+        derive(seed, b"seed burn ledger mac"),
+    )
+    .map_err(|_| CliError::state("creating seed burn ledger failed"))?;
+    Ok(seed_burns.checkpoint())
+}
+
+fn burn_stateful_ceremony_with_checkpoint(
+    secret_path: &str,
+    secret_json: &mut Json,
+    key_id: [u8; 32],
+    seed: &[u8; 32],
+    ceremony_id: [u8; 32],
+    seed_burn_id: [u8; 32],
+    already_burned_msg: impl FnOnce() -> String,
+) -> Result<(), CliError> {
+    let retained_ckpt = crate::vault::read_ledger_checkpoint(secret_json)?;
+    let mut ceremony_journal = FsCeremonyJournal::open_existing(
+        ceremony_journal_path(secret_path),
+        key_id,
+        derive(seed, b"ceremony journal mac"),
+    )
+    .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
+    let mut seed_burns = FsSeedBurnTracker::open_existing(
+        seed_burn_ledger_path(secret_path),
+        derive(seed, b"seed burn ledger mac"),
+        retained_ckpt,
+    )
+    .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+    if seed_burns
+        .is_burned(&seed_burn_id)
+        .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?
+    {
+        return Err(CliError::state(already_burned_msg()));
+    }
+    let cursor = seed_burns
+        .checkpoint()
+        .generation
+        .checked_add(1)
+        .ok_or_else(crate::vault::corrupt)?;
+    let permit = ceremony_journal
+        .persist_before_release(CeremonyReservation {
+            ceremony_id,
+            key_id,
+            epoch_or_codeword: seed_burn_id,
+            seed_burn_cursor: cursor,
+            hedge_generation: cursor,
+        })
+        .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
+    seed_burns
+        .authorize_release(&ceremony_journal, permit)
+        .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+    seed_burns
+        .begin_expansion(&ceremony_id, &seed_burn_id)
+        .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+    seed_burns.burn(&seed_burn_id).map_err(|e| match e {
+        SeedBurnError::AlreadyBurned => CliError::state(already_burned_msg()),
+        SeedBurnError::Io => CliError::state("CorruptOrRolledBackLedgerCheckpoint"),
+    })?;
+    crate::vault::record_ledger_checkpoint(secret_json, seed_burns.checkpoint());
+    Ok(())
 }
 
 const KEYGEN_HELP: &str = "\
@@ -215,6 +300,9 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             let key = frontier_key(profile, &seed);
             FsWalFtsEpochLatch::create(burn_journal_path(secret_out), key.wal_key(), derive(&seed, b"burn journal mac"))
                 .map_err(|e| CliError::io("creating frontier use journal", e))?;
+            let ckpt = provision_stateful_seed_burn_ledger(secret_out, key.wal_key(), &seed)?;
+            secret.push(("ledger_checkpoint_gen", Json::num(ckpt.generation)));
+            secret.push(("ledger_checkpoint_tag", Json::hex(&ckpt.tag)));
             secret.push(("seed", Json::hex(&seed[..])));
             [&key.pk.pk_seed[..], &key.pk.root].concat()
         }
@@ -241,6 +329,10 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
                 derive(&seed, b"burn journal mac"),
             )
             .map_err(|e| CliError::io("creating the epoch burn journal", e))?;
+            let ckpt =
+                provision_stateful_seed_burn_ledger(secret_out, setup.pk.pk_seed_bytes, &seed)?;
+            secret.push(("ledger_checkpoint_gen", Json::num(ckpt.generation)));
+            secret.push(("ledger_checkpoint_tag", Json::hex(&ckpt.tag)));
             secret.push(("seed", Json::hex(&seed[..])));
             secret.push(("parties", Json::num(parties)));
             public.push(("parties", Json::num(parties)));
@@ -457,15 +549,6 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             if key.uses_remaining() == 0 {
                 return Err(exhausted(FrontierFtsError::UseBudgetExhausted));
             }
-            // Persist the advanced counter before any signature material exists.
-            vault.reserve(secret_path, &mut secret)?;
-            let wal = FsWalFtsEpochLatch::open(
-                burn_journal_path(secret_path),
-                key.wal_key(),
-                derive(&seed, b"burn journal mac"),
-            )
-            .map_err(|e| CliError::io("recovering frontier use journal", e))?;
-            key = key.attach_wal(Box::new(wal)).map_err(exhausted)?;
             let mut hedged = Secret32([0u8; 32]);
             if let Some(entropy) = &fresh {
                 cshake256_framed_xof(
@@ -474,6 +557,33 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                     &mut hedged.0,
                 );
             }
+            let ceremony_id = cshake256_framed_32(
+                b"QSAG.CLI.FRONTIER.CEREMONY.V1",
+                &[&seed.0, &key.wal_key(), &[used], &hedged.0, &message],
+            );
+            let use_seed_id = cshake256_framed_32(
+                b"QSAG.CLI.FRONTIER.USE_SEED.V1",
+                &[&seed.0, &key.wal_key(), &[used]],
+            );
+            // Verify retained LedgerCheckpoint against durable_ledger, burn this use's seed,
+            // and seal the new LedgerCheckpoint + advanced counter into the vault BEFORE signing.
+            burn_stateful_ceremony_with_checkpoint(
+                secret_path,
+                &mut secret,
+                key.wal_key(),
+                &seed.0,
+                ceremony_id,
+                use_seed_id,
+                || format!("key can not sign again: {:?}", FrontierFtsError::UseBudgetExhausted),
+            )?;
+            vault.reserve(secret_path, &mut secret)?;
+            let wal = FsWalFtsEpochLatch::open(
+                burn_journal_path(secret_path),
+                key.wal_key(),
+                derive(&seed, b"burn journal mac"),
+            )
+            .map_err(|e| CliError::io("recovering frontier use journal", e))?;
+            key = key.attach_wal(Box::new(wal)).map_err(exhausted)?;
             let dp = FrontierDpTable::build(profile);
             let sig = key.sign(&dp, &message, &hedged.0).map_err(exhausted)?;
             extra.push(("uses_remaining", Json::num(key.uses_remaining())));
@@ -505,7 +615,6 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 derive(&seed, b"burn journal mac"),
             )
             .map_err(|e| CliError::state(format!("epoch burn journal unavailable: {e}")))?;
-            vault.reserve(secret_path, &mut secret)?;
             let mut session = Secret32([0u8; 32]);
             match &fresh {
                 Some(entropy) => cshake256_framed_xof(
@@ -520,6 +629,32 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                     );
                 }
             }
+            let ceremony_id = cshake256_framed_32(
+                b"QSAG.CLI.THRESHOLD.CEREMONY.V1",
+                &[
+                    &seed.0,
+                    &setup.pk.pk_seed_bytes,
+                    &epoch.to_be_bytes(),
+                    &session.0,
+                    &message,
+                ],
+            );
+            let epoch_seed_id = cshake256_framed_32(
+                b"QSAG.CLI.THRESHOLD.EPOCH_SEED.V1",
+                &[&seed.0, &setup.pk.pk_seed_bytes, &epoch.to_be_bytes()],
+            );
+            // Verify retained LedgerCheckpoint against durable_ledger, burn the epoch seed,
+            // and seal the ratcheted LedgerCheckpoint into the vault BEFORE threshold signing.
+            burn_stateful_ceremony_with_checkpoint(
+                secret_path,
+                &mut secret,
+                setup.pk.pk_seed_bytes,
+                &seed.0,
+                ceremony_id,
+                epoch_seed_id,
+                || format!("epoch {epoch} was already spent"),
+            )?;
+            vault.reserve(secret_path, &mut secret)?;
             let sig = setup
                 .threshold_sign(
                     epoch as u32,
@@ -972,6 +1107,82 @@ mod custody_tests {
         assert_eq!(th_err.code, 2);
         assert!(!dir.join("th.sig").exists());
         assert_eq!(sign(&th_args).unwrap_err().code, 4);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cli_retains_ledger_checkpoint_and_rejects_durable_ledger_slot_rollback() {
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-cli-ckpt-rollback-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+        std::fs::write(path("msg"), b"ledger checkpoint anti-rollback").unwrap();
+
+        keygen(&[
+            "--scheme".into(),
+            "fts-threshold".into(),
+            "--accept-trusted-dealer-demo".into(),
+            "--fast-demo".into(),
+            "--secret-out".into(),
+            path("th.sk"),
+            "--public-out".into(),
+            path("th.pk"),
+        ])
+        .unwrap();
+
+        let genesis_secret = load_json(&path("th.sk"), SECRET_FORMAT).unwrap();
+        assert_eq!(
+            genesis_secret.field_u64("ledger_checkpoint_gen").unwrap(),
+            0
+        );
+        let slot_a_gen0 = std::fs::read(path("th.sk.seedburn.slot_a")).unwrap();
+        let slot_b_gen0 = std::fs::read(path("th.sk.seedburn.slot_b")).unwrap();
+
+        // Spend epoch 1: ratchets `ledger_checkpoint_gen` to 1 inside `th.sk` + `th.sk.vault.lock`.
+        sign(&[
+            "--secret".into(),
+            path("th.sk"),
+            "--in".into(),
+            path("msg"),
+            "--out".into(),
+            path("sig1"),
+            "--epoch".into(),
+            "1",
+            "--accept-trusted-dealer-demo".into(),
+        ])
+        .unwrap();
+        let after_one = load_json(&path("th.sk"), SECRET_FORMAT).unwrap();
+        assert_eq!(after_one.field_u64("ledger_checkpoint_gen").unwrap(), 1);
+
+        // Adversarial rollback: overwrite both `.slot_a` and `.slot_b` of `th.sk.seedburn`
+        // with the pre-spend generation-0 snapshots while the vault retains generation 1.
+        std::fs::write(path("th.sk.seedburn.slot_a"), &slot_a_gen0).unwrap();
+        std::fs::write(path("th.sk.seedburn.slot_b"), &slot_b_gen0).unwrap();
+
+        // Attempting to sign (even at a fresh epoch 2!) MUST fail closed on checkpoint mismatch!
+        let rollback_err = sign(&[
+            "--secret".into(),
+            path("th.sk"),
+            "--in".into(),
+            path("msg"),
+            "--out".into(),
+            path("sig2"),
+            "--epoch".into(),
+            "2",
+            "--accept-trusted-dealer-demo".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(rollback_err.code, 4);
+        assert!(
+            rollback_err
+                .message
+                .contains("CorruptOrRolledBackLedgerCheckpoint"),
+            "{rollback_err}"
+        );
+        assert!(!dir.join("sig2").exists());
 
         std::fs::remove_dir_all(dir).unwrap();
     }
