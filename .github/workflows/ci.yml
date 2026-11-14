@@ -35,12 +35,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install the stable Rust toolchain
+      - name: Install the pinned Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          rustup default stable
+          rustup toolchain install 1.99.1 --profile minimal --component rustfmt --component clippy
+          rustup default 1.99.1
           rustc --version
           cargo --version
+
+      - name: Check shader source against embedded SPIR-V
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools spirv-tools
+          python3 crates/qsag-accel/tools/regenerate_spirv.py --check
 
       - name: The workspace has no registry dependencies
         run: |
@@ -94,14 +100,16 @@ jobs:
           set -e
           test "$code" -eq 2
 
-      - name: Every example builds and runs
+      - name: Example smoke runs and strict 25-second quickstart acceptance (known failing)
         run: |
           set -euo pipefail
           cargo build --release -p qsag-cli --examples
           for source in crates/qsag-cli/examples/*.rs; do
             name="$(basename "$source" .rs)"
             echo "::group::example $name"
-            timeout 120s "target/release/examples/$name"
+            limit=120s
+            if [ "$name" = threshold_slh_dsa_quickstart ]; then limit=25s; fi
+            timeout "$limit" "target/release/examples/$name"
             echo "::endgroup::"
           done
 
@@ -174,9 +182,25 @@ jobs:
           jq -e '.permitted_axioms | sort == ["Quot.sound", "propext"]' comparator.json
           jq -e '.theorem_names | length > 0' comparator.json
 
-      - name: lake build
+      - name: Lean source policy
+        if: matrix.workdir == 'lean'
+        run: |
+          python3 scripts/check_lean_policy.py
+          python3 aeneas/lean/check_audit_coverage.py
+          python3 scripts/check_extraction_provenance.py
+
+      - name: Build libraries with warnings as errors
         working-directory: ${{ matrix.workdir }}
-        run: lake build
+        run: |
+          if [ "${{ matrix.workdir }}" = lean ]; then
+            lake build --wfail Qsag AuditAxioms SpecOracle IsaCosim qsag-kat audit-axioms
+            lake build QsagChallenge
+          elif [ "${{ matrix.workdir }}" = aeneas/lean ]; then
+            lake build --wfail QsagVerified QsagSpecWeld QsagCustodyWeld AuditMirAxioms QsagMirProofs audit-mir-axioms
+            lake build QsagVerifiedChallenge
+          else
+            lake build --wfail
+          fi
 
       - name: Audit dependency closures (only propext and Quot.sound)
         if: matrix.audit_axioms
@@ -184,6 +208,17 @@ jobs:
         # Execute elaboration even if Lake has cached the module. Each audit throws
         # on every axiom outside its allowlist and on empty coverage.
         run: lake env lean -DwarningAsError=true ${{ matrix.audit_module }}.lean
+
+      - name: Runtime axiom censuses and classifier controls
+        working-directory: ${{ matrix.workdir }}
+        run: |
+          if [ "${{ matrix.workdir }}" = lean ]; then
+            .lake/build/bin/audit-axioms
+          elif [ "${{ matrix.workdir }}" = aeneas/lean ]; then
+            .lake/build/bin/audit-mir-axioms
+          else
+            lake exe audit-whir-mir-axioms
+          fi
 
       - name: Lean and Rust cross-KATs
         if: matrix.workdir == 'lean'
@@ -198,7 +233,12 @@ jobs:
       - name: lake comparator --paranoid (bubblewrap sandbox, six kernels)
         if: matrix.comparator
         working-directory: ${{ matrix.workdir }}
-        run: lake comparator --paranoid
+        run: |
+          if [ "${{ matrix.workdir }}" = "aeneas/lean" ]; then
+            python3 ../../scripts/run_mir_comparator.py
+          else
+            lake comparator --paranoid
+          fi
 
   aarch64-cross-and-elf:
     name: aarch64 no_std cross-check and constant-time ELF symbol audit
@@ -210,11 +250,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install the stable Rust toolchain with the aarch64 target
+      - name: Install the pinned Rust toolchain with the aarch64 target
         run: |
           set -euo pipefail
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install 1.99.1 --profile minimal
+          rustup default 1.99.1
           rustup target add aarch64-unknown-linux-gnu
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends llvm clang binutils python3
@@ -262,6 +302,6 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/audit_elf_ct.py \
-            --check-fixtures lean/Qsag/CompiledRlibFixtures.lean \
+            --fixture-binding kernel-bytes --check-fixtures lean/Qsag/CompiledRlibFixtures.lean \
             --fixture-x86-rlib target/ct-audit/release/libqsag_asm.rlib \
             --fixture-aarch64-rlib target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib

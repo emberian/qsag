@@ -1,5 +1,7 @@
 # Security invariants, specification tests and constant-time proofs
 
+Certificates cover historical pinned archives: the current build matches 0/16 certified x86-64 kernels and 6/7 AArch64 kernels; five current kernels lack certificates. This is a failed freshness gate, not production machine-code certification.
+
 **qsag — Quorum-Switching AGgregation / Quantum Succinct AGgregation** uses four
 complementary assurance pillars. The theorem source and its premises are the
 contract; neither a declaration count nor a passing test substitutes for a bridge
@@ -102,7 +104,7 @@ benchmarks do not certify this deployment boundary; MAC framing is not encryptio
 
 Migration now implements active pre-open Boolean and prime-field multiplication
 checks, including a cross-batch barrier, for three-custodian secp256k1/Taproot/
-Ed25519 ownership proofs. Its live ZKBoo default is 438 repetitions, giving interactive error `(2/3)^438 < 2^-256` and nominal generic Grover search exponent 128.1068. The large-prime pre-open multiplication checks use `<30/p<2^-249`; the cubic-Goldilocks checks use `<30/p^3<2^-186`. These are separate field-check errors, not a classical/quantum pair. Full FS/QROM extraction remains a separate reduction.
+Ed25519 ownership proofs. Its live ZKBoo default is 438 repetitions, giving interactive error `(2/3)^438 < 2^-256` and nominal generic Grover search exponent 128.1068. Per flush, the large-prime pre-open multiplication checks use `<=35/(p-1)<2^-249`; the cubic-Goldilocks checks use `<=35/(p^3-1)<2^-186`. These are separate field-check errors, not a classical/quantum pair. Full FS/QROM extraction remains a separate reduction.
 Threshold ML-DSA has a $2t-1$ active quorum and rejection-transcript assumptions;
 six-limb BlindVC's 438-repetition Quantum128 profile likewise needs its FS reduction.
 
@@ -176,4 +178,4 @@ Constructive Guruswami–Sudan interpolation produces nonzero Hasse-vanishing wi
 
 `SydTvTranslationValidation.lean` provides five looping-kernel functional certificates, including `tower128_bdoz_mac_vpclmul_sydtv_refines_all_n`. `SimdBinaryEquiv.lean` covers decoded PCLMUL/VPCLMUL and transpose noninterference. Pinned ELF fixtures contain 16 x86-64 symbols / 999 instructions and 7 AArch64 symbols / 299 instructions. Archive, ELF-member and deterministic-wrapper hashes are separate identifiers in `CompiledRlibFixtures.lean`. RFLAGS validity masks and edge-vector theorems supersede the historical fixed eight-mismatch description; a fresh silicon-run result must identify its artifact.
 
-`SpirvSimtGpuEquiv.lean` supplies modeled codec roundtrip/injectivity, race-conditioned multi-wave schedule confluence, bank-layout arithmetic and SIMT noninterference, with missing-barrier/wiping/leakage counterexamples. Runtime Vulkan shaders target SPIR-V 1.5; an enum named `SpirV16` does not establish exact shader-to-model equivalence. Driver-reported Wave32 and zero scratch, byte-output comparisons, keyed receipts and universal functional refinement are distinct evidence. See [the measurement ledger](../PROJECT.md#c-06-publication-evidence-and-follow-up).
+`SpirvSimtGpuEquiv.lean` supplies modeled codec roundtrip/injectivity, race-conditioned multi-wave schedule confluence, bank-layout arithmetic and SIMT noninterference, with missing-barrier/wiping/leakage counterexamples. Runtime Vulkan shaders target SPIR-V 1.5; an enum named `SpirV15` does not establish exact shader-to-model equivalence. Driver-reported Wave32 and zero scratch, byte-output comparisons, keyed receipts and universal functional refinement are distinct evidence. See [the measurement ledger](../PROJECT.md#c-06-publication-evidence-and-follow-up).

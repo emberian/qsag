@@ -1,15 +1,17 @@
 # Compiled Binary `.rlib` / `ELF64` Machine-Code Verification (`Qsag.ElfBinaryVerify`)
 
+The integrated main-library axiom audit checks **59,257 declarations, including 28,744 kernel theorem declarations, across 57 modules**, with **0 rejected axioms**. This includes private and compiler-generated declarations and 277 pure assurance-infrastructure declarations; 131 compile-time tactic declarations are excluded. Counts describe the checked definitions and premises, not complete production refinement. The combined extracted-MIR and custody audit checks **5,318 declarations / 2,093 theorems / 44 contributing modules**; the WHIR audit checks **1,558 / 718 / 7**. Both report **0 rejected axioms**. Sandboxed six-kernel challenge replay passes 107 main theorems and 65 MIR theorems plus 17 definitions.
+
 ## Artifact scope and active integration
 
-Validation on 2026-11-14 (host `bb2`, Lean 4.35.0, rustc/cargo 1.99.1, z3 5.4.1):
+Validation on 2026-11-14 (Linux x86-64, Lean 4.35.0, rustc/cargo 1.99.1, z3 5.4.1):
 
-- **Lean build and axioms.** `lake build --wfail` passes for `ElfBinaryVerify`, `ElfFixtureVerify`,
-  `McRefine`, `ConstantTimeIsa`, `SydTvTranslationValidation`, `IsaCosim`, `SimdBinaryEquiv`,
-  `SpirvSimtGpuEquiv` and the `IsaCosim` executable root. An `import all` / `setExporting false`
-  crawl of those eight modules covers 9,576 declarations (2,888 + 85 + 412 + 2,257 + 950 + 85 +
-  620 + 2,279); every one depends on no axiom other than `propext` and `Quot.sound`.
-  `ElfFunctionalEquiv` is reported separately below (EFE_STATUS).
+- **Integrated Lean coverage.** `ElfFunctionalEquiv` is now imported by the library root and
+  the all-module axiom gate, alongside `ElfBinaryVerify`, `ElfFixtureVerify`, `McRefine`,
+  `ConstantTimeIsa`, `SydTvTranslationValidation`, `IsaCosim`, `SimdBinaryEquiv` and
+  `SpirvSimtGpuEquiv`. It adds selected byte-pinned functional results, including GFNI tower
+  multiplication and AArch64 Keccak, over the historical fixtures. It does not repair freshness.
+  The final integrated census is recorded in [the convergence tracker](CONVERGENCE_STATUS.md).
 - **SyDTV.** `SydTvTranslationValidation` was migrated to the corrected `stepX86` flag semantics
   (architectural `OF` for `SUB`/`ADD`/`INC`/`DEC`, `CF`/`OF` for `SHR`). For each of the five loop
   kernels it now has a `*_sydtv_refines_pos` theorem stated on `runX86One` / `runArm64One` over
@@ -20,9 +22,13 @@ Validation on 2026-11-14 (host `bb2`, Lean 4.35.0, rustc/cargo 1.99.1, z3 5.4.1)
   `unsat` for both induction cuts and `sat` for the same cuts with the trip-count bound removed,
   and both emitted certificate proposals elaborate against the current certificate API. The
   driver covers the two memzero kernels only; no solver answer is used by a Lean proof.
-- **Native comparison (earlier run the same day, not repeated here).** 7,184 scalar/SIMD
-  instruction vectors with zero discrepancies; 512 batches per multiply kernel and 512 transpose
-  matrices. AArch64 bytes are extracted, not executed.
+- **Repeated native comparison.** 7,184 scalar/SIMD vectors, 7,753 executed instructions,
+  zero discrepancies and no skipped flag cases. The CPU run was in a Linux VM with native
+  instruction execution, not a bare-metal host measurement. SIMD tests covered 512 batches
+  per multiply kernel and 512 transpose matrices. AArch64 bytes were extracted, not executed.
+- **Instruction screens.** The integrated ELF auditor passed its 34 self-tests, current x86
+  archive scan, cross-assembled AArch64 bitslice scan, and linked ThinLTO executable scan.
+  This is an instruction screen, not an interprocedural constant-time proof.
 - **Fixture freshness: FAIL, measured per kernel.** The archives embedded in
   `CompiledRlibFixtures.lean` do not correspond to the current assembly source, and for x86_64
   they correspond to no committed revision:
@@ -39,7 +45,7 @@ Validation on 2026-11-14 (host `bb2`, Lean 4.35.0, rustc/cargo 1.99.1, z3 5.4.1)
   | | x86_64 | AArch64 |
   | :--- | :--- | :--- |
   | certified fixture | `fbe87faf1486cb90698fba4dfd7497b66f50032a70d69abb7cddeaf1ee332702` | `8ca2b4c1c28ee5d653803c2b4aa57681481179243f4addcc15eba797e3be8c7e` |
-  | working tree | `2761fb2d78e9222cee880ae63b8d384eccd035f5ab7fcc10f527b05a9b665e1d` | `9cf028bfc3026a4ab25df434b4e4b6cc6a7ecc518652a205431f13807e9f1ba5` |
+  | working tree | `c23eb2d7728f7d629d9ffeaacf9f09cb0e596f6b404f9bd7b619ebf4815a78f0` | `fd3064989d545714039f17c103f56bbea3dc74cb511858febcc52cabc98d3a7d` |
   | `b1cd91a` | `fea50f3ea24b7a390886cafbd9baca4bca727b661fe35f8d26df5bf1a02260dc` | `94dd899358232e5b02889d864987ffb28354ac0555bb8b1b08f555efaf7b9dfb` |
 
   The object digest also depends on the cargo invocation: the same working tree built with an
@@ -115,7 +121,7 @@ The table describes the embedded archives, which are historical (see the freshne
 
 ### Full 23-Symbol Inventory Verified by Kernel Reduction (`0 native_decide`)
 
-#### `x86_64` (`16` symbols, `999` instructions — `rlib_x86_all_16_three_way_ni`, `rlib_x86_every_symbol_three_way_ni_sound`)
+#### `x86_64` (`16` symbols, `999` instructions — `rlib_x86_every_symbol_three_way_ni_sound`)
 1. `qsag_asm_keccak_f1600_avx2_4x` (`0x0000..0x07f6`, 4-way AVX2 Keccak-$f[1600]$ with 32-byte aligned `0x340` stack frame, explicit 25-block `vmovdqa [rax], ymm0` stack scrub loop, `ymm0..ymm11` wipe, `vzeroupper`)
 2. `qsag_asm_keccak_chi_mpc_avx2` (`0x0800`-aligned MPC $\chi$ gate over AVX2 shares)
 3. `qsag_asm_gf256_shamir_mul_gfni` (`VGF2P8AFFINEQB` + `VGF2P8MULB` Wiedemann $\mathcal{T}_3$ multiplication, `ymm0..2, 14..15` wipe, `vzeroupper`)
@@ -133,7 +139,7 @@ The table describes the embedded archives, which are historical (see the freshne
 15. `qsag_asm_ct_eq_bytes_x86_64` (branchless arbitrary-length byte-slice equality check with `r8`, `r9` wipe)
 16. `qsag_asm_ct_memzero_x86_64` (looping byte wipe followed by `MFENCE` compiler/memory barrier)
 
-#### `aarch64` (`7` symbols, `299` instructions — `rlib_aarch64_all_7_three_way_ni`, `rlib_aarch64_every_symbol_three_way_ni_sound`)
+#### `aarch64` (`7` symbols, `299` instructions — `rlib_aarch64_every_symbol_three_way_ni_sound`)
 1. `qsag_asm_enable_dit_aarch64` (`MSR DIT, #1` + `ISB` hardware data-independent timing enablement)
 2. `qsag_asm_keccak_sha3_neon` (`ARMv8.4-A+SHA3` `EOR` + `BCAX` 5-lane SIMD Keccak $\chi$ row with `v0..v7, v16..v20` wipe)
 3. `qsag_asm_keccak_theta_rho_sha3_neon` (`EOR3` + `RAX1` + `XAR` Keccak $\theta + \rho$ step with `v0..v7, v16..v18` wipe)
@@ -179,7 +185,7 @@ premises rather than extrapolating from the fixture inventory.
 
 ## 4. `LAW-M1` Encapsulation & Fast Kernel Elaboration Design
 
-1. **Compact 32-Word `UInt64` Chunk Fixtures (`lean/Qsag/CompiledRlibFixtures.lean`, 11 `@[expose]` $\le 12$):** Raw `.rlib` and `.rcgu.o` binaries are stored as flat 32-word little-endian `UInt64` chunks decoded tail-recursively via `decodeU64WordChunks` (`0` nested `OfNat.ofNat UInt8` AST chains), elaborating in `< 1s`.
+1. **Pinned fixture representation (`lean/Qsag/CompiledRlibFixtures.lean`):** Historical archive and object bytes are encoded in the source. The byte-pinned proofs quantify over this representation; current-source freshness is a separate, currently failing gate.
 2. **Flat Register Banks & 3-Level Radix `PcMap` (`lean/Qsag/ElfBinaryVerify.lean`, `0` `@[expose]`):** `Bank16`, `Bank32`, and `PcMap` avoid `Array` bounds proof obligations and turn abstract-interpretation lookups into 3-step `O(1)` projections so kernel `decide +kernel` verifies all 1,298 instructions cleanly without `native_decide`.
 
 ---

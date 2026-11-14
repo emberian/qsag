@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import platform
 import select
+import shutil
 import random
 import subprocess
 import tempfile
@@ -127,11 +128,17 @@ fn subset(seed: &[u8;32], msg: &[u8], which: usize) -> String {
     "true".into()
 }
 fn latch_trace(events: &str) -> String {
-    use qsag_core::belt_latch::{BeltLatch,MemoryWal};
+    use qsag_core::belt_latch::{BeltLatch,MemoryWal,DurableWal};
     let mut latch=BeltLatch::recover(MemoryWal::new(),12).unwrap();
     let mut out=Vec::new();
     for event in events.split(',') {
-        if event=="crash" {latch=BeltLatch::recover(latch.into_wal(),12).unwrap();}
+        if event=="crash" {
+            // A process restart retains durable contents, not a pending test fault.
+            let old=latch.into_wal(); let snapshot=old.load().unwrap(); drop(old);
+            let mut restarted=MemoryWal::new();
+            if let Some(state)=snapshot {restarted.sync_persist(&state).unwrap();}
+            latch=BeltLatch::recover(restarted,12).unwrap();
+        }
         else if event=="fail" {latch.wal_mut().fail_next_persist();}
         else {let v:Vec<u64>=event.split(':').map(|x|x.parse().unwrap()).collect();
             out.push(latch.bind(v[0],&[v[1] as u8;32],&[v[2] as u8;32],&[v[3] as u8]).is_ok().to_string());
@@ -206,12 +213,18 @@ fn certificates(seed:&[u8;32],msg:&[u8])->String {
     "14".into()
 }
 fn latch(events: &str) -> String {
-    use qsag_core::belt_latch::{BeltLatch,MemoryWal};
+    use qsag_core::belt_latch::{BeltLatch,MemoryWal,DurableWal};
     let mut latch=BeltLatch::recover(MemoryWal::new(),12).unwrap();
     let mut seen=std::collections::BTreeMap::new();
     let mut high=0;
     for event in events.split(',') {
-        if event=="crash" {latch=BeltLatch::recover(latch.into_wal(),12).unwrap();}
+        if event=="crash" {
+            // A process restart retains durable contents, not a pending test fault.
+            let old=latch.into_wal(); let snapshot=old.load().unwrap(); drop(old);
+            let mut restarted=MemoryWal::new();
+            if let Some(state)=snapshot {restarted.sync_persist(&state).unwrap();}
+            latch=BeltLatch::recover(restarted,12).unwrap();
+        }
         else if event=="fail" {latch.wal_mut().fail_next_persist();}
         else {
             let v:Vec<_>=event.split(':').collect(); let epoch:u64=v[0].parse().unwrap();let m:u8=v[1].parse().unwrap();
@@ -314,13 +327,15 @@ QUORUM_MUTANTS = [
 def driver_source(root):
     source = RUST
     pcs = (root / "crates/qsag-agg/src/pcs.rs").read_text()
-    fold = rust_function(pcs, "fn fold_duet_affine_ext4(")
-    source += "\n" + fold.replace("GoldilocksExt4", "E").replace("Goldilocks", "G")
+    for function in ["fn to_verified_ext4(", "fn from_verified_ext4(",
+                     "fn fold_duet_affine_ext4("]:
+        extracted = rust_function(pcs, function)
+        source += "\n" + extracted.replace("GoldilocksExt4", "E").replace("Goldilocks", "G")
     belt = (root / "crates/qsag-core/src/belt_latch.rs").read_text()
     # Exclude unit tests, preserve production code verbatim except the named guard.
     belt = belt[:belt.index("#[cfg(test)]")]
     trace = rust_function(RUST, "fn latch_trace(").replace(
-        "use qsag_core::belt_latch::{BeltLatch,MemoryWal};", "")
+        "use qsag_core::belt_latch::{BeltLatch,MemoryWal,DurableWal};", "")
     arms = []
     for i, (name, old, new, _) in enumerate(LATCH_MUTANTS):
         if old not in belt:
@@ -378,10 +393,13 @@ def build_driver(root, directory):
     (directory / "src").mkdir()
     deps = "\n".join(f'{name} = {{ path = {json.dumps(str(root / "crates" / name))} }}'
                      for name in ["qsag-core", "qsag-agg", "qsag-cred", "qsag-policy", "qsag-quorum"])
+    # Volatile WALs are intentional test fixtures for schedule and mutation checks.
+    deps = deps.replace('qsag-quorum = {', 'qsag-quorum = { features = ["testing-ephemeral"],')
+    deps += '\nqsag-whir-verified = { path = ' + json.dumps(str(root / "aeneas/qsag-whir-verified")) + ' }'
     deps += '\nqsag-verified = { path = ' + json.dumps(str(root / "aeneas/qsag-verified")) + ' }'
-    (directory / "Cargo.toml").write_text('[workspace]\n[package]\nname="spec-driver"\nversion="0.0.0"\nedition="2024"\n[dependencies]\n' + deps.replace('qsag-core = {', 'qsag-core = { features = ["std"],') + '\n[profile.release]\nopt-level=2\n')
+    (directory / "Cargo.toml").write_text('[workspace]\n[package]\nname="spec-driver"\nversion="0.0.0"\nedition="2024"\n[features]\ndefault=["testing-ephemeral"]\ntesting-ephemeral=[]\n[dependencies]\n' + deps.replace('qsag-core = {', 'qsag-core = { features = ["std", "testing-ephemeral"],') + '\n[profile.release]\nopt-level=2\n')
     (directory / "src/main.rs").write_text(driver_source(root))
-    command = ["timeout", "--kill-after=10s", "600s", "swarm-build", "cargo", "build",
+    command = ["timeout", "--kill-after=10s", "600s", *(["swarm-build"] if shutil.which("swarm-build") else []), "cargo", "build",
                "--release", "--manifest-path", str(directory / "Cargo.toml"), "-j", "2"]
     subprocess.run(command, check=True, env={**os.environ, "SWARM_MEM_MAX": "8G",
                                                   "CARGO_TARGET_DIR": str((directory / "target").resolve())})
@@ -493,6 +511,8 @@ def boundary_requests():
     for n in [0,1,135,136,137,271,272]:
         for out in [0,1,135,136,137,272]:
             yield ["shake",out,bytes(i%256 for i in range(n)).hex()]
+    for trace in ["fail,crash,1:0:0:1", "1:0:0:1,fail,crash,2:0:0:1"]:
+        yield ["latchtrace",trace]
     for _, _, _, trace in LATCH_MUTANTS:
         yield ["latchtrace",trace]
 
@@ -547,12 +567,12 @@ def mutation_search(rust, lean=None):
             assert baseline == lean.ask(request), (name, baseline)
         mutant = rust.ask(["mutation", name, trace])
         assert mutant != baseline, (name, baseline, mutant)
-        found[name] = {"request": request, "baseline": baseline, "mutant": mutant}
+        found[name] = {"request": request, "baseline": baseline, "mutant": mutant, "lean_crosschecked": lean is not None}
     for name, _, values in QUORUM_MUTANTS:
         baseline = rust.ask(["quorum", *values])
         mutant = rust.ask(["mutation", name, *values])
         assert baseline == "false" and mutant == "true", (name,baseline,mutant)
-        found[name] = {"request": ["quorum", *values], "baseline": baseline, "mutant": mutant}
+        found[name] = {"request": ["quorum", *values], "baseline": baseline, "mutant": mutant, "lean_crosschecked": False}
     digest = "00" * 32
     baseline = rust.ask(["wots", digest])
     assert baseline.endswith(";false")
@@ -560,7 +580,7 @@ def mutation_search(rust, lean=None):
         assert baseline == lean.ask(["wots", digest])
     mutant = rust.ask(["mutation", "target_sum", digest])
     assert mutant == "true"
-    found["target_sum"] = {"request": ["wots", digest], "baseline": baseline, "mutant": mutant}
+    found["target_sum"] = {"request": ["wots", digest], "baseline": baseline, "mutant": mutant, "lean_crosschecked": lean is not None}
     generic_baseline = rust.ask(["wotsgeneric", digest])
     generic_mutant = rust.ask(["mutation", "generic_target_sum", digest])
     assert generic_baseline == "false" and generic_mutant == "true"
@@ -570,7 +590,7 @@ def mutation_search(rust, lean=None):
     elapsed = time.perf_counter() - start
     assert len(found) == 13 and elapsed < 5, (len(found), elapsed)
     return {"caught": len(found), "total": 13, "elapsed_ms": elapsed*1000,
-            "kind": "compiled production-source clause drops", "lean_crosschecked": lean is not None, "witnesses": found}
+            "kind": "compiled production-source clause drops", "lean_crosschecked_count": sum(bool(w.get("lean_crosschecked", lean is not None)) for w in found.values()), "witnesses": found}
 
 
 
@@ -614,8 +634,9 @@ def run(args, rust):
             assert rust.ask(["latch", ",".join(latch_events)]) == "true"
             counts["rust_latch_schedules"] += 1
             n = rng.randrange(2,10); f = rng.randrange(n); t = rng.randrange(1,n+1); q = rng.randrange(1,n+1)
-            expected = f < t and n >= 3*f+1 and t <= n-f and 2*q > n+f and q <= n-f
-            assert rust.ask(["quorum", t, n, f, q]) == str(expected).lower()
+            expected = f < t <= q and n >= 3*f+1 and 2*q > n+f and q <= n-f
+            actual = rust.ask(["quorum", t, n, f, q])
+            assert actual == str(expected).lower(), (t, n, f, q, expected, actual)
             counts["rust_quorum_guards"] += 1
         for iteration in range(args.metamorphic):
             assert rust.ask(["certificates",rng.randbytes(32).hex(),rng.randbytes(32).hex()]) == "14"

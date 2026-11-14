@@ -2,6 +2,10 @@
   <img src="assets/qsag-mascot.png" alt="QSAG Mascot" width="240" />
 </p>
 
+Certificates cover historical pinned archives: the current build matches 0/16 certified x86-64 kernels and 6/7 AArch64 kernels; five current kernels lack certificates. This is a failed freshness gate, not production machine-code certification.
+
+The integrated main-library axiom audit checks **59,257 declarations, including 28,744 kernel theorem declarations, across 57 modules**, with **0 rejected axioms**. This includes private and compiler-generated declarations and 277 pure assurance-infrastructure declarations; 131 compile-time tactic declarations are excluded. Counts describe the checked definitions and premises, not complete production refinement. The combined extracted-MIR and custody audit checks **5,318 declarations / 2,093 theorems / 44 contributing modules**; the WHIR audit checks **1,558 / 718 / 7**. Both report **0 rejected axioms**. Sandboxed six-kernel challenge replay passes 107 main theorems and 65 MIR theorems plus 17 definitions.
+
 <h1 align="center">qsag — Quorum-Switching AGgregation / Quantum Succinct AGgregation</h1>
 
 `qsag` is a post-quantum threshold signing, aggregation, and custody stack: NIST **FIPS 205 SLH-DSA-SHAKE** and **FIPS 204 ML-DSA-44** alongside the custom **Pants** pure-hash and algebraic suite. It combines Rust implementations with Lean protocol proofs, compiler-extracted MIR proofs, scoped machine-code verification, and executable specification tests.
@@ -23,7 +27,7 @@ The surrounding stack covers `FrontierSumFts` / `ParallelSeededFts`, secret-keye
 
 The exact parameter and theorem map is in [the security proof guide](docs/SECURITY_AND_CT_PROOFS.md#current-parameter-and-theorem-map). RLWE uses **13 × 11-bit signed monomials** (143 joint bits; nominal generic-search exponents 143 classical / 71.5 quantum). Migration uses **438 repetitions**. Johnson queries are **(258,130,88,66)** with +2 slack, 16-bit `QSAG.PCS.POW2/v1` work and `maxQueryCap = 512`.
 
-The RX 6750 XT backend executes six Vulkan kernels. A 2026-11-14 raw RADV run measured **39.45 ms** for a 2^20-leaf Poseidon2 Merkle tree (**359.5×** its CPU reference) and **22.11 ms** for 262,144 Poseidon2-12 permutations (**136.9×**). Later hardening changed these timings; see [the measurement ledger](PROJECT.md#c-06-publication-evidence-and-follow-up). Kernel speedups do not measure full Hem proving.
+The RX 6750 XT backend executes six Vulkan kernels. A 2026-11-14 raw RADV run measured **38.77 ms** for a 2^20-leaf Poseidon2 Merkle tree (**204.6×** its CPU reference) and **27.38 ms** for 262,144 Poseidon2-12 permutations (**78.1×**). These are the integrated run’s paired timings; see [the measurement ledger](PROJECT.md#c-06-publication-evidence-and-follow-up). Kernel speedups do not measure full Hem proving.
 
 ## Signature bytes and deployment boundaries
 
@@ -68,14 +72,13 @@ RAM and loopback benchmarks exercise protocol computation; simulated WAN adds a 
 | `qsag-accel` | `crates/qsag-accel` | CPU reference, Linux/std Vulkan and keyed receipts; portable `no_std` core |
 | `qsag-cli` | `crates/qsag-cli` | CLI and examples; `std` binary |
 | `qsag-verified` | `aeneas/qsag-verified` | Separate extraction workspace; `no_std` |
-
 | `qsag-whir-verified` | `aeneas/qsag-whir-verified` | Separate extraction workspace, called by Hem |
 
 Optional `std` features provide WAL storage and Linux Vulkan execution. Fresh extraction and complete release-path mediation are tracked separately from the existing Cargo linkage.
 
 ## Quickstart: CLI & Runnable Examples
 
-Run from the repository root on Linux with Rust 1.85+ and `/dev/urandom`. The temporary directory is new on each run because key/signature outputs refuse accidental overwrites. These are demonstration keys.
+Run from the repository root on Linux with the pinned Rust 1.99.1 toolchain (the declared 1.85 minimum is not verified by this run) and `/dev/urandom`. The temporary directory is new on each run because key/signature outputs refuse accidental overwrites. These are demonstration keys.
 
 ```bash
 umask 077
@@ -93,7 +96,7 @@ The CLI stores versioned JSON key/signature envelopes and reads message bytes fr
 
 ### Installed end-to-end examples
 
-Examples use fixed demonstration seeds or in-process custodians. The full threshold example includes RSS signing, SPDZ preprocessing, and dynamic reshare with public-root checks. In the bounded Linux documentation check, it completed RSS signing and stock verification, then timed out after 600 seconds during SPDZ preprocessing (exit 124). It is included below for completeness, but is not a passing bounded quickstart. Source optimization is required before that claim can be made.
+Examples use fixed demonstration seeds or in-process custodians. The full threshold example includes RSS signing, SPDZ preprocessing, and dynamic reshare with public-root checks. In the bounded Linux documentation check, it completed RSS signing and stock verification, then timed out after 600 seconds during SPDZ preprocessing (exit 124). It is included below for completeness, but is not a passing bounded quickstart. The integrated run also exceeded the stricter 25-second target (exit 124). Profiling identifies per-bit authenticated triple preprocessing as the dominant cost; meeting that target requires a protocol-level preprocessing redesign.
 
 ```bash
 cargo run --release -p qsag-cli --example slh_dsa_quickstart
@@ -114,7 +117,7 @@ All six examples other than `threshold_slh_dsa_quickstart` exited 0 in the bound
 | Protocol, UC, storage and QROM spine | `lean/Qsag/*.lean`: Goldilocks / GoldilocksExt4, binary towers, Keccak / Poseidon2, hypertrees, Baggy / Waistband / Jorts / BeltLatch, UC simulation, Hem / Canopy; `PosixCrashWal.lean` models POSIX crash/NVMe and `OpenDescriptionId` flock ownership; `ConcreteSecurityBudget.lean` supplies square-root-free unitary BBBV97/O2H and fiber-cardinality reductions | Theorems hold for their definitions and premises. Concrete profile instantiation, runtime event refinement must instantiate the multi-ledger crash/interleaving theorem in `CeremonyAtomicityAndAbort.lean`. |
 | Compiler-extracted Rust MIR | Charon + Aeneas, `aeneas/qsag-verified` → `QsagMirProofs`: field/tower arithmetic, sponges, WOTS+C, BDOZ, BeltLatch, Waistband and poison-latch guards; extraction discipline: `0 FunsExternal`, `0 Classical.choice` | Fresh extraction and proof coverage must match the exact source. Guard proofs do not mediate every production release unless secret ownership and caller paths enforce that boundary. |
 | CPU bytes and GPU models | `ConstantTimeIsa.lean`, `ElfBinaryVerify.lean`: decoded x86_64 AVX2/PCLMULQDQ/VPCLMULQDQ and aarch64 SHA3/PMULL, taint noninterference, scratch zero-on-exit and mutation witnesses; five SydTV loop refinements, decoded SIMD fixtures, and SPIR-V codec/race/leakage models | LNSym / x86lean / ELFSage grounding, linked ThinLTO coverage and physical semantics validation are active integration work. DOIT / PSTATE.DIT assumptions and caller/compiler leakage remain explicit. |
-| Executable ground-truth gates | Native `lake exe spec-oracle` Rust ↔ Lean differential and clause-drop mutation fuzzing; physical x86_64 `lake exe isa-cosim`; `ct_dudect`; six-kernel `comparator --paranoid` CI challenge replay | Executables and CI challenge configuration exist; complete required-gate linkage to fresh extraction and exact release bytes is still being integrated. Finite tests can refute a spec; they do not prove it universally correct. |
+| Executable ground-truth gates | Native `lake exe spec-oracle` Rust ↔ Lean differential and clause-drop mutation fuzzing; native x86_64 `lake exe isa-cosim` (virtualized Linux host); `ct_dudect`; six-kernel `comparator --paranoid` CI challenge replay | Executables and CI challenge configuration exist; complete required-gate linkage to fresh extraction and exact release bytes is still being integrated. Finite tests can refute a spec; they do not prove it universally correct. |
 
 The constructive proof policy is **0 sorry, 0 Classical.choice**, with permitted axioms `{propext, Quot.sound}`. Reported checked proofs and configured six-kernel challenges are scoped evidence, not a claim that every concurrent source edit has passed every gate. This documentation quickstart check does not rerun the formal assurance suite.
 
@@ -128,7 +131,7 @@ The constructive proof policy is **0 sorry, 0 Classical.choice**, with permitted
 - [Security and CT proofs](docs/SECURITY_AND_CT_PROOFS.md): protocol invariants and specification tests.
 - [Migration threat model](crates/qsag-migrate/SECURITY.md): crate-specific assumptions; consult live source for profile changes.
 - [Consensus scaling](docs/QUORUM_AND_CONSENSUS_SCALING.md): measured small batches, mock applications and conditional capacity models.
-- [Technical paper](paper/qsag.pdf) ([source](paper/qsag.typ)): construction details; the status documents govern current integration claims.
+- [Technical paper source](paper/qsag.typ): construction details; the status documents govern current integration claims.
 
 ## License
 
