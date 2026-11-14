@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 public import QsagVerified.Proofs.TowerBdoz
 public import Qsag.BinaryTower
 import all Qsag.BinaryTower
