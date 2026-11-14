@@ -7,7 +7,7 @@
 //! application-authorized threshold quorum keys; threshold key generation and custodian
 //! membership remain registry obligations.
 
-use crate::sponge::{encode_multi_frame, poseidon2_hash32};
+use crate::sponge::{cshake256_32, encode_multi_frame, poseidon2_hash32};
 use crate::{
     AggSigProfile, HemAggConfig, HemAggError, HemAggregatedProof, SignerBitmap, SigningMode,
     ValidatorPublicKey, ValidatorSignature, WhirSecurityRegime, aggregate_signatures_with_config,
@@ -15,8 +15,8 @@ use crate::{
 };
 use alloc::{collections::BTreeSet, vec::Vec};
 
-/// Canonical 8-byte wire magic for [`HierarchicalHemAggregate`].
-pub const HIERARCHICAL_HEM_WIRE_MAGIC: &[u8; 8] = b"QSAGHEM\x02";
+/// Canonical v3 wire magic (cSHAKE256 outer byte commitment) for [`HierarchicalHemAggregate`].
+pub const HIERARCHICAL_HEM_WIRE_MAGIC: &[u8; 8] = b"QSAGHEM\x03";
 
 /// Upper bound on regional shard count accepted during canonical wire decoding.
 pub const MAX_HIERARCHY_SHARDS: usize = 4_096;
@@ -309,32 +309,36 @@ fn valid_policies(policies: &[ShardHemPolicy]) -> bool {
 }
 
 fn root_commitment(policy_registry_root: &[u8; 32], shards: &[ShardHemBatch]) -> [u8; 32] {
-    let shard_frames: Vec<Vec<u8>> = shards
-        .iter()
-        .map(|s| {
-            let shard_id = s.shard_id.to_le_bytes();
-            let min_q = s.minimum_quorums.to_le_bytes();
-            let epoch = s.epoch_floor.to_le_bytes();
-            let proof_bytes = s.proof.to_bytes();
-            encode_multi_frame(&[
-                b"QSAG.HEM.HIERARCHY.SHARD/v2",
-                &shard_id,
-                &s.custodian_cluster,
-                &s.shard_quorum_set_root,
-                &min_q,
-                &epoch,
-                &s.message_digest,
-                &proof_bytes,
-            ])
-        })
-        .collect();
-    let mut fields: Vec<&[u8]> = Vec::with_capacity(2 + shard_frames.len());
-    fields.push(b"QSAG.HEM.HIERARCHY.ROOT/v2");
+    let _phase = crate::profile::span("hierarchy_root_commitment");
+    // A byte-hash tree avoids a serial algebraic sponge over the entire aggregate.
+    // Each child binds every prior field, including its full canonical proof bytes.
+    let hash_shard = |s: &ShardHemBatch| {
+        let frame = encode_multi_frame(&[
+            b"QSAG.HEM.HIERARCHY.SHARD/v3",
+            &s.shard_id.to_le_bytes(),
+            &s.custodian_cluster,
+            &s.shard_quorum_set_root,
+            &s.minimum_quorums.to_le_bytes(),
+            &s.epoch_floor.to_le_bytes(),
+            &s.message_digest,
+            &s.proof.to_bytes(),
+        ]);
+        cshake256_32(b"QSAG.HEM.HIERARCHY.SHARD/v3", &frame)
+    };
+    #[cfg(feature = "std")]
+    let digests: Vec<[u8; 32]> = crate::map_chunks_bounded(shards, |chunk| {
+        chunk.iter().map(&hash_shard).collect::<Vec<_>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect();
+    #[cfg(not(feature = "std"))]
+    let digests: Vec<[u8; 32]> = shards.iter().map(hash_shard).collect();
+    let mut fields: Vec<&[u8]> = Vec::with_capacity(2 + digests.len());
+    fields.push(b"QSAG.HEM.HIERARCHY.ROOT/v3");
     fields.push(policy_registry_root);
-    for sf in &shard_frames {
-        fields.push(sf.as_slice());
-    }
-    poseidon2_hash32(&encode_multi_frame(&fields))
+    fields.extend(digests.iter().map(|d| d.as_slice()));
+    cshake256_32(b"QSAG.HEM.HIERARCHY.ROOT/v3", &encode_multi_frame(&fields))
 }
 
 fn prove_hierarchical_hem_inner(
@@ -702,6 +706,12 @@ mod tests {
         let decoded = HierarchicalHemAggregate::from_bytes_canonical(&wire).unwrap();
         assert_eq!(decoded, proof);
         assert!(verify(&decoded));
+        let mut obsolete = wire.clone();
+        obsolete[7] = 2;
+        assert_eq!(
+            HierarchicalHemAggregate::from_bytes_canonical(&obsolete),
+            Err(HemAggError::MalformedWireBytes)
+        );
         let mut trailing = wire.clone();
         trailing.push(0);
         assert_eq!(

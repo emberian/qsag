@@ -359,6 +359,7 @@ fn bench_alpenglow_hem_checkpoint(num_signers: usize, workers: usize) {
     for regime in [
         WhirSecurityRegime::Habr24Classical128,
         WhirSecurityRegime::Habr24Qrom128,
+        WhirSecurityRegime::BciksJohnsonQrom128,
     ] {
         let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, seed32(0xAA, 7));
         cfg.regime = regime;
@@ -401,4 +402,10 @@ fn main() {
     bench_alpenglow_sub_mtu_rotor_votes(1_000, workers);
     bench_alpenglow_qsa_dvt_hot_path();
     bench_alpenglow_hem_checkpoint(64, workers);
+    #[cfg(feature = "vulkan")]
+    if let Some((submissions, receipts, fallbacks)) = qsag_agg::vulkan_execution_counts() {
+        println!(
+            "Vulkan totals: submissions={submissions} accepted_v4_receipts={receipts} cpu_fallbacks={fallbacks}"
+        );
+    }
 }
