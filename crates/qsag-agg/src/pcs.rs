@@ -2552,3 +2552,863 @@ fn pcs_num_vars_supported(num_vars: usize) -> bool {
 }
 
 /// Verify a single-point `Hem` WHIR opening proof over `GoldilocksExt4`.
+pub fn whir_verify(
+    comm_0: &CanopyCommitment,
+    num_vars: usize,
+    point: &[GoldilocksExt4],
+    claimed_eval: GoldilocksExt4,
+    proof: &HemWhirOpeningProof,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+) -> bool {
+    if !pcs_num_vars_supported(num_vars) {
+        return false;
+    }
+    let schedule = whir_stage_schedule(num_vars);
+    whir_verify_with_schedule(
+        comm_0,
+        num_vars,
+        point,
+        claimed_eval,
+        proof,
+        transcript,
+        &schedule,
+    )
+}
+
+pub fn whir_verify_with_schedule(
+    comm_0: &CanopyCommitment,
+    num_vars: usize,
+    point: &[GoldilocksExt4],
+    claimed_eval: GoldilocksExt4,
+    proof: &HemWhirOpeningProof,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+    schedule: &WhirSchedule,
+) -> bool {
+    absorb_whir_schedule(transcript, schedule);
+    if !pcs_num_vars_supported(num_vars) || point.len() != num_vars {
+        return false;
+    }
+    transcript.absorb(b"PCS_NUM_VARS", &(num_vars as u64).to_le_bytes());
+    transcript.absorb(b"PCS_COMM0", &comm_0.to_bytes());
+    for &c in point {
+        transcript.absorb_ext4(b"PCS_POINT_COORD", c);
+    }
+    transcript.absorb_ext4(b"PCS_CLAIMED_EVAL", claimed_eval);
+
+    whir_verify_core(
+        comm_0,
+        &[GoldilocksExt4::ONE],
+        point,
+        claimed_eval,
+        proof,
+        transcript,
+        schedule,
+    )
+}
+
+/// Verify a batched `Hem` WHIR opening proof: $W_i(\text{points}[i]) = \text{evals}[i]$ for all $i$.
+pub fn whir_verify_batch(
+    comm_0: &CanopyCommitment,
+    num_vars: usize,
+    points: &[&[GoldilocksExt4]],
+    evals: &[GoldilocksExt4],
+    proof: &HemWhirBatchOpeningProof,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+) -> bool {
+    if !pcs_num_vars_supported(num_vars) {
+        return false;
+    }
+    let schedule = whir_stage_schedule(num_vars);
+    whir_verify_batch_with_schedule(
+        comm_0, num_vars, points, evals, proof, transcript, &schedule,
+    )
+}
+
+pub fn whir_verify_batch_with_schedule(
+    comm_0: &CanopyCommitment,
+    num_vars: usize,
+    points: &[&[GoldilocksExt4]],
+    evals: &[GoldilocksExt4],
+    proof: &HemWhirBatchOpeningProof,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+    schedule: &WhirSchedule,
+) -> bool {
+    absorb_whir_schedule(transcript, schedule);
+    let num_polys = points.len();
+    if !pcs_num_vars_supported(num_vars)
+        || num_polys == 0
+        || num_polys > MAX_BATCH_POLYS
+        || evals.len() != num_polys
+        || points.iter().any(|p| p.len() != num_vars)
+    {
+        return false;
+    }
+    absorb_batch_statement(transcript, num_vars, comm_0, points, evals);
+
+    if num_polys == 1 {
+        if !proof.point_sumcheck_polys.is_empty() || !proof.common_point_evals.is_empty() {
+            return false;
+        }
+        return whir_verify_core(
+            comm_0,
+            &[GoldilocksExt4::ONE],
+            points[0],
+            evals[0],
+            &proof.opening,
+            transcript,
+            schedule,
+        );
+    }
+    if proof.point_sumcheck_polys.len() != num_vars || proof.common_point_evals.len() != num_polys {
+        return false;
+    }
+
+    // Verify point-reduction sumcheck (`c_1 = claim - 2*c_0 - c_2` enforces `g(0) + g(1) == claim`):
+    let lambda = transcript.squeeze_ext4(b"PCS_BATCH_LAMBDA");
+    let lambda_pows = powers_of_ext4(lambda, num_polys);
+    let mut claim = GoldilocksExt4::ZERO;
+    for (&w, &e) in lambda_pows.iter().zip(evals) {
+        claim += w * e;
+    }
+    let mut rho = Vec::with_capacity(num_vars);
+    for wire in &proof.point_sumcheck_polys {
+        transcript.absorb_ext4(b"PCS_BATCH_SC_C0", wire[0]);
+        transcript.absorb_ext4(b"PCS_BATCH_SC_C2", wire[1]);
+        let r = transcript.squeeze_ext4(b"PCS_BATCH_SC_CHAL");
+        claim = eval_quadratic_wire(wire, claim, r);
+        rho.push(r);
+    }
+
+    let mut expected = GoldilocksExt4::ZERO;
+    for ((&w, point), &e) in lambda_pows
+        .iter()
+        .zip(points)
+        .zip(&proof.common_point_evals)
+    {
+        expected += w * eq_poly_ext4(point, &rho) * e;
+    }
+    if claim != expected {
+        return false;
+    }
+    for &e in &proof.common_point_evals {
+        transcript.absorb_ext4(b"PCS_BATCH_COMMON_EVAL", e);
+    }
+
+    let mu = transcript.squeeze_ext4(b"PCS_BATCH_MU");
+    let weights = powers_of_ext4(mu, num_polys);
+    let mut combined_claim = GoldilocksExt4::ZERO;
+    for (&w, &e) in weights.iter().zip(&proof.common_point_evals) {
+        combined_claim += w * e;
+    }
+    whir_verify_core(
+        comm_0,
+        &weights,
+        &rho,
+        combined_claim,
+        &proof.opening,
+        transcript,
+        schedule,
+    )
+}
+
+/// Verify the multi-stage `Hem` WHIR opening of $\sum_i \text{weights}[i] \cdot W_i$ at `init_point`
+/// against `comm_0`.
+fn whir_verify_core(
+    comm_0: &CanopyCommitment,
+    weights: &[GoldilocksExt4],
+    init_point: &[GoldilocksExt4],
+    init_sum_claim: GoldilocksExt4,
+    proof: &HemWhirOpeningProof,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+    sched: &WhirSchedule,
+) -> bool {
+    let num_vars = init_point.len();
+    let num_polys = weights.len();
+    if !pcs_num_vars_supported(num_vars)
+        || num_polys == 0
+        || num_polys > MAX_BATCH_POLYS
+        || init_point.len() != num_vars
+        || comm_0.log_leaves > 28
+    {
+        return false;
+    }
+
+    if !sched.validate(num_vars) {
+        return false;
+    }
+    let num_stages = sched.stages.len();
+    let early_stop = sched.early_stop_vars;
+    let fold_vars = num_vars - early_stop;
+
+    if proof.fold_sumcheck_polys.len() != fold_vars
+        || proof.folded_layers.len() + 1 != num_stages
+        || proof.final_hypercube_evals.len() != (1usize << early_stop)
+    {
+        return false;
+    }
+
+    let st0 = sched.stages[0];
+    let arity_0 = 1usize << st0.step_vars;
+    let domain_0 = (1usize << num_vars) * st0.blowup;
+    let num_groups_0 = domain_0 / arity_0;
+    if (1usize << (comm_0.log_leaves as usize)) != num_groups_0 {
+        return false;
+    }
+
+    // Bind WHIR schedule into transcript.
+    absorb_whir_schedule(transcript, sched);
+
+    // Accumulate deferred kernel claims `(var_off, weight, point)` so the verifier ONLY evaluates
+    // tiny `2^{early_stop}` suffix tables at the end (`O(q * 2^{early_stop})` instead of `O(2^n)`!).
+    let mut ext_kernel_claims: Vec<(usize, GoldilocksExt4, Vec<GoldilocksExt4>)> =
+        Vec::with_capacity(1 + num_stages);
+    let mut base_kernel_claims: Vec<(usize, GoldilocksExt4, Vec<Goldilocks>)> = Vec::new();
+
+    ext_kernel_claims.push((0, GoldilocksExt4::ONE, init_point.to_vec()));
+    let mut cur_sum_claim = init_sum_claim;
+
+    // Stage-0 OOD evaluation claim:
+    let z_ood_0 = transcript.squeeze_ext4(b"WHIR_OOD_CHAL");
+    transcript.absorb_ext4(b"WHIR_OOD_EVAL", proof.stage0_ood_eval);
+    let xi_0 = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+    ext_kernel_claims.push((0, xi_0, pow2_point_ext4(z_ood_0, num_vars)));
+    cur_sum_claim += xi_0 * proof.stage0_ood_eval;
+
+    let inv_two = Goldilocks::TWO.inv();
+    let inv_shift = Goldilocks::NON_RESIDUE.inv();
+    let inv_zetas = build_inv_zetas();
+
+    let mut alphas = Vec::with_capacity(fold_vars);
+    let mut sc_cursor = 0usize;
+    let mut var_off = 0usize;
+    let mut rem_vars = num_vars;
+
+    for (stage_idx, st) in sched.stages.iter().enumerate() {
+        let arity = 1usize << st.step_vars;
+        let stage_alpha_start = alphas.len();
+
+        // 1. Replay `st.step_vars` degree-2 sumcheck rounds (`g(0) + g(1) == cur_sum_claim` enforced
+        //    algebraically by `eval_quadratic_wire`).
+        for _ in 0..st.step_vars {
+            let wire = proof.fold_sumcheck_polys[sc_cursor];
+            sc_cursor += 1;
+            transcript.absorb_ext4(b"WHIR_SC_C0", wire[0]);
+            transcript.absorb_ext4(b"WHIR_SC_C2", wire[1]);
+            let alpha = transcript.squeeze_ext4(b"WHIR_FOLD_CHAL");
+            cur_sum_claim = eval_quadratic_wire(&wire, cur_sum_claim, alpha);
+            alphas.push(alpha);
+        }
+        var_off += st.step_vars;
+        rem_vars -= st.step_vars;
+        let stage_chals = &alphas[stage_alpha_start..stage_alpha_start + st.step_vars];
+
+        if stage_idx + 1 < num_stages {
+            // 2A. Intermediate transition `stage_idx -> stage_idx + 1`:
+            let next_spec = sched.stages[stage_idx + 1];
+            let next_arity = 1usize << next_spec.step_vars;
+            let domain_next = (1usize << rem_vars) * next_spec.blowup;
+            let num_groups_next = domain_next / next_arity;
+
+            let next_layer = &proof.folded_layers[stage_idx];
+            if (1usize << (next_layer.commitment.log_leaves as usize)) != num_groups_next {
+                return false;
+            }
+            transcript.absorb(b"WHIR_NEXT_COMMIT", &next_layer.commitment.to_bytes());
+            let z_ood_next = transcript.squeeze_ext4(b"WHIR_OOD_CHAL");
+            transcript.absorb_ext4(b"WHIR_OOD_EVAL", next_layer.ood_eval);
+
+            let stage_pow_nonce = if stage_idx == 0 {
+                proof.pow_nonce
+            } else {
+                proof.folded_layers[stage_idx - 1].pow_nonce
+            };
+            if !verify_pcs_pow(transcript, stage_pow_nonce) {
+                return false;
+            }
+            transcript.absorb(b"WHIR_STAGE_POW", &stage_pow_nonce.to_le_bytes());
+
+            let shift_claims = if stage_idx == 0 {
+                verify_and_fold_stage0_fibers(
+                    comm_0,
+                    num_polys,
+                    weights,
+                    domain_0,
+                    arity_0,
+                    st.num_queries,
+                    stage_chals,
+                    inv_shift,
+                    inv_two,
+                    &inv_zetas,
+                    proof,
+                    transcript,
+                )
+            } else {
+                let cur_layer = &proof.folded_layers[stage_idx - 1];
+                let domain_cur = (1usize << (rem_vars + st.step_vars)) * st.blowup;
+                verify_and_fold_ext4_stage_fibers(
+                    stage_idx,
+                    cur_layer,
+                    domain_cur,
+                    arity,
+                    st.num_queries,
+                    stage_chals,
+                    inv_shift,
+                    inv_two,
+                    &inv_zetas,
+                    transcript,
+                )
+            };
+            let Some(shift_claims) = shift_claims else {
+                return false;
+            };
+
+            let mut shift_bytes = Vec::with_capacity(32 * shift_claims.len());
+            for &(_, v_shift) in &shift_claims {
+                shift_bytes.extend_from_slice(&v_shift.to_le_bytes());
+            }
+            transcript.absorb(b"WHIR_SHIFT_VALS", &shift_bytes);
+
+            let xi_next = transcript.squeeze_ext4(b"WHIR_OOD_WEIGHT");
+            let gamma_shift = transcript.squeeze_ext4(b"WHIR_SHIFT_GAMMA");
+
+            ext_kernel_claims.push((var_off, xi_next, pow2_point_ext4(z_ood_next, rem_vars)));
+            cur_sum_claim += xi_next * next_layer.ood_eval;
+
+            let mut w_shift = gamma_shift;
+            base_kernel_claims.reserve(shift_claims.len());
+            for &(z_u, v_shift) in &shift_claims {
+                cur_sum_claim += w_shift * v_shift;
+                base_kernel_claims.push((var_off, w_shift, pow2_point_base(z_u, rem_vars)));
+                w_shift *= gamma_shift;
+            }
+        } else {
+            // 2B. Final WHIR Stage (`stage_idx + 1 == num_stages`):
+            if rem_vars != early_stop || alphas.len() != fold_vars {
+                return false;
+            }
+
+            let mut final_bytes = Vec::with_capacity(32 * proof.final_hypercube_evals.len());
+            for &v in &proof.final_hypercube_evals {
+                final_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            transcript.absorb(b"WHIR_FINAL_POLY", &final_bytes);
+
+            // Mandatory terminal sumcheck check across all accumulated evaluation, OOD, and shift claims!
+            let expected_terminal = eval_accumulated_terminal_sum(
+                fold_vars,
+                early_stop,
+                &alphas,
+                &ext_kernel_claims,
+                &base_kernel_claims,
+                &proof.final_hypercube_evals,
+            );
+            if cur_sum_claim != expected_terminal {
+                return false;
+            }
+
+            let final_pow_nonce = if stage_idx == 0 {
+                proof.pow_nonce
+            } else {
+                proof.folded_layers[stage_idx - 1].pow_nonce
+            };
+            if !verify_pcs_pow(transcript, final_pow_nonce) {
+                return false;
+            }
+            transcript.absorb(b"WHIR_FINAL_POW", &final_pow_nonce.to_le_bytes());
+
+            let final_claims = if stage_idx == 0 {
+                verify_and_fold_stage0_fibers(
+                    comm_0,
+                    num_polys,
+                    weights,
+                    domain_0,
+                    arity_0,
+                    st.num_queries,
+                    stage_chals,
+                    inv_shift,
+                    inv_two,
+                    &inv_zetas,
+                    proof,
+                    transcript,
+                )
+            } else {
+                let cur_layer = &proof.folded_layers[stage_idx - 1];
+                let domain_cur = (1usize << (rem_vars + st.step_vars)) * st.blowup;
+                verify_and_fold_ext4_stage_fibers(
+                    stage_idx,
+                    cur_layer,
+                    domain_cur,
+                    arity,
+                    st.num_queries,
+                    stage_chals,
+                    inv_shift,
+                    inv_two,
+                    &inv_zetas,
+                    transcript,
+                )
+            };
+            let Some(final_claims) = final_claims else {
+                return false;
+            };
+
+            let final_coeffs = hypercube_to_monomial_coeffs_ext4(&proof.final_hypercube_evals);
+            for &(z_u, v_shift) in &final_claims {
+                if eval_univariate_ext4_at_base(&final_coeffs, z_u) != v_shift {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_and_fold_stage0_fibers(
+    comm_0: &CanopyCommitment,
+    num_polys: usize,
+    weights: &[GoldilocksExt4],
+    domain_0: usize,
+    arity_0: usize,
+    num_queries: usize,
+    stage_chals: &[GoldilocksExt4],
+    inv_shift: Goldilocks,
+    inv_two: Goldilocks,
+    inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
+    proof: &HemWhirOpeningProof,
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+) -> Option<Vec<(Goldilocks, GoldilocksExt4)>> {
+    let num_groups_0 = domain_0 / arity_0;
+    let q_indices = sample_stage_queries(transcript, 0, num_groups_0, num_queries);
+    let per_query = num_polys * arity_0;
+    if proof.round0_salts.len() != q_indices.len()
+        || proof.round0_vals.len() != q_indices.len() * per_query
+    {
+        return None;
+    }
+
+    let log_d0 = domain_0.trailing_zeros() as usize;
+    let omega_0 = Goldilocks::two_adic_generator(log_d0);
+    let inv_omega_0 = omega_0.inv();
+    let step_vars = stage_chals.len();
+
+    let mut sorted_leaves = Vec::with_capacity(q_indices.len());
+    let mut claims = Vec::with_capacity(q_indices.len());
+
+    for ((&g, salt), vals) in q_indices
+        .iter()
+        .zip(&proof.round0_salts)
+        .zip(proof.round0_vals.chunks_exact(per_query))
+    {
+        sorted_leaves.push((g, hash_round0_leaf(g as u32, salt, num_polys, vals)));
+
+        let mut ext_vals = [GoldilocksExt4::ZERO; MAX_FIBER_ARITY];
+        if num_polys == 1 {
+            for (slot, &v) in ext_vals.iter_mut().zip(vals) {
+                *slot = GoldilocksExt4::from_base(v);
+            }
+        } else {
+            for (w, poly_vals) in weights.iter().zip(vals.chunks_exact(arity_0)) {
+                for (slot, &v) in ext_vals.iter_mut().zip(poly_vals) {
+                    *slot += w.mul_base(v);
+                }
+            }
+        }
+
+        let y0 = Goldilocks::NON_RESIDUE * omega_0.pow(g as u64);
+        let inv_y0 = inv_shift * inv_omega_0.pow(g as u64);
+        let v_shift = fold_coset_group_ext4(
+            &ext_vals[..arity_0],
+            inv_y0,
+            inv_two,
+            inv_zetas,
+            stage_chals,
+        );
+        let z_u = pow2_iter_base(y0, step_vars);
+        claims.push((z_u, v_shift));
+    }
+
+    if !verify_canopy_multiproof(comm_0, &sorted_leaves, &proof.round0_multiproof) {
+        return None;
+    }
+    Some(claims)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_and_fold_ext4_stage_fibers(
+    stage_idx: usize,
+    layer: &WhirStageProof,
+    domain_cur: usize,
+    arity: usize,
+    num_queries: usize,
+    stage_chals: &[GoldilocksExt4],
+    inv_shift: Goldilocks,
+    inv_two: Goldilocks,
+    inv_zetas: &[Goldilocks; MAX_FOLD_STEP_VARS + 1],
+    transcript: &mut FiatShamirTranscript<InstanceBound>,
+) -> Option<Vec<(Goldilocks, GoldilocksExt4)>> {
+    let num_groups_cur = domain_cur / arity;
+    if (1usize << (layer.commitment.log_leaves as usize)) != num_groups_cur {
+        return None;
+    }
+    let q_indices = sample_stage_queries(transcript, stage_idx, num_groups_cur, num_queries);
+    if layer.opened_vals.len() != q_indices.len() * arity {
+        return None;
+    }
+
+    let log_d = domain_cur.trailing_zeros() as usize;
+    let omega = Goldilocks::two_adic_generator(log_d);
+    let inv_omega = omega.inv();
+    let step_vars = stage_chals.len();
+    let stage_u8 = stage_idx as u8;
+
+    let mut sorted_leaves = Vec::with_capacity(q_indices.len());
+    let mut claims = Vec::with_capacity(q_indices.len());
+
+    for (&g, vals) in q_indices.iter().zip(layer.opened_vals.chunks_exact(arity)) {
+        sorted_leaves.push((g, hash_ext4_group(stage_u8, g as u32, vals)));
+        let y0 = Goldilocks::NON_RESIDUE * omega.pow(g as u64);
+        let inv_y0 = inv_shift * inv_omega.pow(g as u64);
+        let v_shift = fold_coset_group_ext4(vals, inv_y0, inv_two, inv_zetas, stage_chals);
+        let z_u = pow2_iter_base(y0, step_vars);
+        claims.push((z_u, v_shift));
+    }
+
+    if !verify_canopy_multiproof(&layer.commitment, &sorted_leaves, &layer.multiproof) {
+        return None;
+    }
+    Some(claims)
+}
+
+/// Evaluate $\langle W_{\text{final}}, K_{\text{terminal}} \rangle$ across all initial, OOD, and
+/// shift evaluation claims in $O(q \cdot 2^{\text{early\_stop}})$ operations.
+fn eval_accumulated_terminal_sum(
+    fold_vars: usize,
+    early_stop: usize,
+    alphas: &[GoldilocksExt4],
+    ext_claims: &[(usize, GoldilocksExt4, Vec<GoldilocksExt4>)],
+    base_claims: &[(usize, GoldilocksExt4, Vec<Goldilocks>)],
+    final_evals: &[GoldilocksExt4],
+) -> GoldilocksExt4 {
+    let mut terminal_k = vec![GoldilocksExt4::ZERO; 1usize << early_stop];
+
+    for &(var_off, weight, ref pt) in ext_claims {
+        let prefix_len = fold_vars - var_off;
+        let scale = weight * eq_poly_ext4(&pt[..prefix_len], &alphas[var_off..fold_vars]);
+        let suffix_tbl = build_eq_table_ext4(&pt[prefix_len..]);
+        for (dst, &ke) in terminal_k.iter_mut().zip(suffix_tbl.iter()) {
+            *dst += scale * ke;
+        }
+    }
+
+    for &(var_off, weight, ref pt_base) in base_claims {
+        let prefix_len = fold_vars - var_off;
+        let scale = weight * eq_poly_base_ext4(&pt_base[..prefix_len], &alphas[var_off..fold_vars]);
+        let suffix_tbl = build_eq_table_base(&pt_base[prefix_len..]);
+        for (dst, &kb) in terminal_k.iter_mut().zip(suffix_tbl.iter()) {
+            *dst += scale.mul_base(kb);
+        }
+    }
+
+    let mut acc = GoldilocksExt4::ZERO;
+    for (&w, &k) in final_evals.iter().zip(terminal_k.iter()) {
+        acc += w * k;
+    }
+    acc
+}
+
+// ============================================================================
+// 6. Deterministic 4-Way SIMD Proof-of-Work (`POW_MIDSTATE`)
+// ============================================================================
+
+/// Deterministically find the minimum `nonce: u64` whose `POW_MIDSTATE` digest has at least
+/// `PCS_POW_BITS` low zero bits, scanning in 4-way SIMD (`cshake256_pow_u64_x4`) across 8 threads.
+fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
+    if PCS_POW_BITS == 0 {
+        return 0;
+    }
+    let chal = transcript.transcript_digest();
+    let mask = (1u64 << PCS_POW_BITS) - 1;
+
+    #[cfg(feature = "std")]
+    {
+        use core::sync::atomic::{AtomicU64, Ordering};
+        const THREADS: u64 = 16;
+        const PER_THREAD: u64 = 4_096; // 1,024 `x4` calls per thread; 65,536 nonces per window
+        const WINDOW: u64 = THREADS * PER_THREAD;
+
+        let mut win_base = 0u64;
+        loop {
+            let best = AtomicU64::new(u64::MAX);
+            let best_ref = &best;
+            std::thread::scope(|scope| {
+                for t in 0..THREADS {
+                    let start = win_base + t * PER_THREAD;
+
+                    scope.spawn(move || {
+                        for offset in (0..PER_THREAD).step_by(4) {
+                            let n = start + offset;
+                            if n >= best_ref.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let words = cshake256_pow_u64_x4(&POW_MIDSTATE, &chal, n);
+                            for (lane, &w) in words.iter().enumerate() {
+                                if (w & mask) == 0 {
+                                    let hit = n + lane as u64;
+                                    best_ref.fetch_min(hit, Ordering::Relaxed);
+                                    return;
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+            let found = best.load(Ordering::Relaxed);
+            if found != u64::MAX {
+                return found;
+            }
+            win_base = match win_base.checked_add(WINDOW) {
+                Some(next) => next,
+                None => panic!("PoW nonce space exhausted"),
+            };
+        }
+    }
+
+    #[cfg(not(feature = "std"))]
+    {
+        let mut n = 0u64;
+        loop {
+            let words = cshake256_pow_u64_x4(&POW_MIDSTATE, &chal, n);
+            for (lane, &w) in words.iter().enumerate() {
+                if (w & mask) == 0 {
+                    return n + lane as u64;
+                }
+            }
+            n = match n.checked_add(4) {
+                Some(next) => next,
+                None => panic!("PoW nonce space exhausted"),
+            };
+        }
+    }
+}
+
+#[inline]
+fn verify_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>, nonce: u64) -> bool {
+    if PCS_POW_BITS == 0 {
+        return true;
+    }
+    let chal = transcript.transcript_digest();
+    let word = cshake256_pow_u64_single(&POW_MIDSTATE, &chal, nonce);
+    (word & ((1u64 << PCS_POW_BITS) - 1)) == 0
+}
+
+#[cfg(test)]
+mod pcs_unit_tests {
+    use super::*;
+
+    #[test]
+    fn exact_regime_ladder() {
+        assert_eq!(WhirSecurityRegime::default(), WhirSecurityRegime::Habr24Qrom128);
+        for (tag, counts, bits) in [
+            (0, [56, 28, 19, 14], 128),
+            (1, [64, 32, 22, 16], 144),
+            (2, [129, 65, 44, 33], 144),
+            (3, [128, 64, 43, 32], 272),
+            (4, [257, 129, 87, 65], 272),
+        ] {
+            let regime = WhirSecurityRegime::from_u8(tag).unwrap();
+            assert_eq!(regime as u8, tag);
+            assert_eq!(regime.classical_fs_round_bits(), bits);
+            assert_eq!(regime.qrom_grover_round_bits(), bits / 2);
+            assert_eq!(regime.meets_qrom_128_floor(), tag >= 3);
+            assert_eq!(regime.schedule(24).stages.iter().map(|s| s.num_queries).collect::<Vec<_>>(), counts);
+            let mut excessive = regime.schedule(24);
+            excessive.stages[0].num_queries = NUM_PCS_QUERIES + 1;
+            assert!(!excessive.validate(24));
+            assert!(WhirSchedule::from_bytes_canonical(&excessive.to_bytes(), 24).is_none());
+        }
+        for tag in 5..=255 {
+            assert_eq!(WhirSecurityRegime::from_u8(tag), None);
+        }
+    }
+
+    #[test]
+    fn security_regimes_roundtrip_and_query_budgets() {
+        for regime in [
+            WhirSecurityRegime::Habr24Classical128,
+            WhirSecurityRegime::Habr24Interactive128,
+            WhirSecurityRegime::BciksJohnsonClassical128,
+            WhirSecurityRegime::Habr24Qrom128,
+            WhirSecurityRegime::BciksJohnsonQrom128,
+        ] {
+            for nv in 2..=MAX_PCS_NUM_VARS {
+                let schedule = regime.schedule(nv);
+                assert!(schedule.validate(nv));
+                let wire = schedule.to_bytes();
+                assert_eq!(
+                    WhirSchedule::from_bytes_canonical(&wire, nv),
+                    Some((schedule.clone(), wire.len()))
+                );
+                for stage in &schedule.stages {
+                    let log_b = stage.blowup.trailing_zeros() as usize;
+                    match regime {
+                        WhirSecurityRegime::Habr24Classical128 => {
+                            assert!(stage.num_queries * log_b + 16 >= 128)
+                        }
+                        WhirSecurityRegime::Habr24Interactive128 => {
+                            assert!(stage.num_queries * log_b >= 128)
+                        }
+                        WhirSecurityRegime::Habr24Qrom128 => {
+                            assert!(stage.num_queries * log_b >= 256)
+                        }
+                        WhirSecurityRegime::BciksJohnsonQrom128 => {
+                            assert!(stage.num_queries * log_b > 512)
+                        }
+                        WhirSecurityRegime::BciksJohnsonClassical128 => {
+                            assert!(stage.num_queries * log_b > 256)
+                        }
+                    }
+                }
+                let mut unknown_regime = wire.clone();
+                unknown_regime[0] = 5;
+                assert!(WhirSchedule::from_bytes_canonical(&unknown_regime, nv).is_none());
+                assert!(WhirSchedule::from_bytes_canonical(&wire[..wire.len() - 1], nv).is_none());
+                let mut custom = schedule.clone();
+                custom.stages[0].num_queries += 1;
+                assert!(custom.validate(nv));
+                assert_eq!(
+                    WhirSchedule::from_bytes_canonical(&custom.to_bytes(), nv)
+                        .unwrap()
+                        .0,
+                    custom
+                );
+                let mut bad = schedule;
+                bad.stages[0].num_queries = 1;
+                assert!(!bad.validate(nv));
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_security_regimes_end_to_end() {
+        let nv = 12;
+        let values: Vec<_> = (0..1u64 << nv).map(Goldilocks::from_u64_reduced).collect();
+        let point = vec![GoldilocksExt4::from_base(Goldilocks::TWO); nv];
+        let value = crate::field::mle_eval_base_at_ext4(&values, &point);
+        for regime in [
+            WhirSecurityRegime::Habr24Interactive128,
+            WhirSecurityRegime::BciksJohnsonClassical128,
+            WhirSecurityRegime::Habr24Qrom128,
+            WhirSecurityRegime::BciksJohnsonQrom128,
+        ] {
+            let schedule = regime.schedule(nv);
+            let transcript = || {
+                FiatShamirTranscript::new()
+                    .bind_relation(b"REGIME_TEST", b"", &schedule)
+                    .bind_instance(&[b"instance"])
+            };
+            let start = std::time::Instant::now();
+            let (comm, state) =
+                whir_commit_batch_owned_with_schedule(vec![values.clone()], &[7; 32], &schedule);
+            let proof = whir_open(&state, &point, value, &mut transcript());
+            let elapsed = start.elapsed();
+            let start = std::time::Instant::now();
+            assert!(whir_verify_with_schedule(
+                &comm,
+                nv,
+                &point,
+                value,
+                &proof,
+                &mut transcript(),
+                &schedule
+            ));
+            let mut proof_bytes = Vec::new();
+            proof.push_bytes(&mut proof_bytes);
+            std::eprintln!(
+                "{regime:?}: nv={nv}, bytes={}, prove={elapsed:?}, verify={:?}",
+                proof_bytes.len(),
+                start.elapsed()
+            );
+            let mut wrong = schedule.clone();
+            wrong.regime = WhirSecurityRegime::Habr24Classical128;
+            assert!(!whir_verify_with_schedule(
+                &comm,
+                nv,
+                &point,
+                value,
+                &proof,
+                &mut transcript(),
+                &wrong
+            ));
+            let mut forged = proof.clone();
+            forged.final_hypercube_evals[0] += GoldilocksExt4::ONE;
+            assert!(!whir_verify_with_schedule(
+                &comm,
+                nv,
+                &point,
+                value,
+                &forged,
+                &mut transcript(),
+                &schedule
+            ));
+        }
+    }
+
+    #[test]
+    fn whir_schedules_cover_all_supported_num_vars() {
+        for nv in 2..=MAX_PCS_NUM_VARS {
+            let sched = whir_stage_schedule(nv);
+            assert!((1..=EARLY_STOP_VARS).contains(&sched.early_stop_vars));
+            assert!((1..=MAX_WHIR_STAGES).contains(&sched.stages.len()));
+            let step_sum: usize = sched.stages.iter().map(|s| s.step_vars).sum();
+            assert_eq!(sched.early_stop_vars + step_sum, nv, "nv={nv}");
+            let mut rem = nv;
+            for st in &sched.stages {
+                assert!(st.blowup.is_power_of_two() && st.blowup >= 4);
+                assert!((1..=MAX_FOLD_STEP_VARS).contains(&st.step_vars));
+                assert!((1..=NUM_PCS_QUERIES).contains(&st.num_queries));
+                let domain = (1usize << rem) * st.blowup;
+                let arity = 1usize << st.step_vars;
+                assert!(domain / arity >= 8, "nv={nv} domain={domain} arity={arity}");
+                rem -= st.step_vars;
+            }
+            assert_eq!(rem, sched.early_stop_vars);
+        }
+    }
+
+    #[test]
+    fn canopy_x4_tree_and_parallel_eq_match_scalar_reference() {
+        let r: Vec<GoldilocksExt4> = (0..15u64)
+            .map(|k| {
+                GoldilocksExt4::from_limbs([
+                    Goldilocks::from_u64_reduced(k * 17 + 3),
+                    Goldilocks::from_u64_reduced(k * 31 + 5),
+                    Goldilocks::from_u64_reduced(k * 47 + 7),
+                    Goldilocks::from_u64_reduced(k * 61 + 11),
+                ])
+            })
+            .collect();
+        assert_eq!(build_eq_table_ext4_fast(&r), build_eq_table_ext4(&r));
+
+        let n = 512usize;
+        let leaf_scalar = |i: usize| hash_merkle_internal(i as u32, &[0x11; 32], &[0x22; 32]);
+        let t_x4 = MerkleCanopyTree::build_from_fn_x4(n, |bl| {
+            hash_merkle_internal_x4(bl as u32, [&[0x11; 32]; 4], [&[0x22; 32]; 4])
+        });
+        let mut ref_nodes = vec![[0u8; 32]; 2 * n];
+        for i in 0..n {
+            ref_nodes[n + i] = leaf_scalar(i);
+        }
+        for idx in (1..n).rev() {
+            ref_nodes[idx] =
+                hash_merkle_internal(idx as u32, &ref_nodes[2 * idx], &ref_nodes[2 * idx + 1]);
+        }
+        let ref_root = hash_tree_root(n.trailing_zeros() as u8, &ref_nodes[1]);
+        assert_eq!(t_x4.root, ref_root);
+
+        let q = [0usize, 1, 7, 64, 65, 255, 510, 511];
+        let mp = t_x4.open_multi_with_leaf_fn(&q, leaf_scalar);
+        let leaves: Vec<(usize, [u8; 32])> = q.iter().map(|&i| (i, leaf_scalar(i))).collect();
+        assert!(verify_canopy_multiproof(&t_x4.commitment(), &leaves, &mp));
+    }
+}

@@ -733,3 +733,1546 @@ pub fn verify_aggregate(
 }
 
 /// Verify every leaf under exactly the explicitly selected regime, including legacy budgets.
+pub fn verify_aggregate_with_regime(
+    pks: &[ValidatorPublicKey],
+    mode: &SigningMode<'_>,
+    proof: &HemAggregatedProof,
+    expected_regime: WhirSecurityRegime,
+) -> bool {
+    if proof.root.homogeneous_regime(MAX_MERGE_TREE_DEPTH) != Some(expected_regime) {
+        return false;
+    }
+    if pks.len() != proof.bitmap().num_validators() as usize {
+        return false;
+    }
+    if !validate_unique_active_committee(pks, proof.bitmap(), proof.profile) {
+        return false;
+    }
+    let committee_root = compute_committee_root(pks);
+    if proof.committee_root != committee_root {
+        return false;
+    }
+    let statement = AggStatement {
+        pks,
+        committee_root: &committee_root,
+        profile: proof.profile,
+        mode,
+        root_active: proof.bitmap().active_indices(),
+    };
+    statement.verify_node(&proof.root, MAX_MERGE_TREE_DEPTH)
+}
+
+impl core::fmt::Display for HemAggError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::error::Error for HemAggError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::arithmetize::{
+        ROW_SUMCHECK_COEFFS, build_shift_tables_ext4, eval_eq_not_last_ext4,
+        eval_shift_kernel_ext4, interpolate_deg8_from_evals_ext4,
+    };
+    use crate::field::{mle_eval_base_at_ext4, mle_eval_ext4};
+    use crate::pcs::{
+        whir_commit, whir_commit_batch_owned, whir_open, whir_open_batch, whir_verify,
+        whir_verify_batch,
+    };
+    use alloc::vec;
+
+    fn make_seed(tag: u64) -> [u8; 32] {
+        let mut s = [0u8; 32];
+        s[0..8].copy_from_slice(&tag.to_le_bytes());
+        s[8..16].copy_from_slice(&(tag.wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes());
+        s
+    }
+
+    fn fresh_test_transcript() -> FiatShamirTranscript<InstanceBound> {
+        FiatShamirTranscript::new()
+            .bind_relation(b"TEST.P0_01", b"v5", &whir_stage_schedule(12))
+            .bind_instance(&[b"inst"])
+    }
+
+    fn gen_jorts_kp(tag: u64, idx: u32) -> ValidatorKeypair {
+        ValidatorKeypair::keygen_deterministic(
+            AggSigProfile::JortsPoseidon2,
+            &make_seed(tag),
+            idx,
+        )
+    }
+
+    fn ext4_sample(a: u64, b: u64, c: u64, d: u64) -> GoldilocksExt4 {
+        GoldilocksExt4::from_limbs([
+            Goldilocks::from_u64_reduced(a),
+            Goldilocks::from_u64_reduced(b),
+            Goldilocks::from_u64_reduced(c),
+            Goldilocks::from_u64_reduced(d),
+        ])
+    }
+
+    #[test]
+    fn test_shift_kernel_mle_and_deg8_interpolation() {
+        let tau = [
+            ext4_sample(17, 42, 101, 203),
+            ext4_sample(99, 7, 307, 409),
+            ext4_sample(123456, 654321, 777777, 888888),
+            ext4_sample(5, 11, 13, 19),
+        ];
+        let rx = [
+            ext4_sample(31, 13, 29, 37),
+            ext4_sample(77, 88, 91, 97),
+            ext4_sample(9, 3, 27, 81),
+            ext4_sample(50, 60, 70, 80),
+        ];
+
+        let (_, not_last_tbl, shift_tbl) = build_shift_tables_ext4(&tau);
+        assert_eq!(
+            eval_eq_not_last_ext4(&tau, &rx),
+            mle_eval_ext4(&not_last_tbl, &rx)
+        );
+        assert_eq!(
+            eval_shift_kernel_ext4(&tau, &rx),
+            mle_eval_ext4(&shift_tbl, &rx)
+        );
+
+        let expected_coeffs: [GoldilocksExt4; ROW_SUMCHECK_COEFFS] = core::array::from_fn(|k| {
+            ext4_sample(
+                (k as u64 + 3) * 1009,
+                (k as u64 + 7) * 2027,
+                (k as u64 + 11) * 3037,
+                (k as u64 + 13) * 4049,
+            )
+        });
+        let poly = RoundPolyExt4 {
+            coeffs: expected_coeffs.to_vec(),
+        };
+        let evals: [GoldilocksExt4; ROW_SUMCHECK_COEFFS] =
+            core::array::from_fn(|t| poly.evaluate(GoldilocksExt4::from_u64(t as u64)));
+        let got_coeffs = interpolate_deg8_from_evals_ext4(&evals);
+        assert_eq!(got_coeffs, expected_coeffs);
+    }
+
+    #[test]
+    fn test_p0_01_whir_interleaved_soundness_and_forgery_rejection() {
+        let num_vars = 12usize;
+        let evals: Vec<Goldilocks> = (0..(1usize << num_vars))
+            .map(|i| Goldilocks::from_u64_reduced((i as u64).wrapping_mul(7919).wrapping_add(13)))
+            .collect();
+        let salt_seed = make_seed(101);
+        let (comm, state) = whir_commit(&evals, &salt_seed);
+
+        let point: Vec<GoldilocksExt4> = (0..num_vars)
+            .map(|k| {
+                ext4_sample(
+                    (k as u64 + 1) * 31337,
+                    (k as u64 + 5) * 4242,
+                    (k as u64 + 9) * 1717,
+                    (k as u64 + 13) * 9001,
+                )
+            })
+            .collect();
+        let honest_val = mle_eval_base_at_ext4(&evals, &point);
+
+        let mut tr_p = fresh_test_transcript();
+        let proof = whir_open(&state, &point, honest_val, &mut tr_p);
+
+        let mut tr_v = fresh_test_transcript();
+        assert!(whir_verify(
+            &comm, num_vars, &point, honest_val, &proof, &mut tr_v
+        ));
+
+        let mut wrong_comm0 = comm;
+        wrong_comm0.root[0] ^= 0x80;
+        let mut tr_wrong_c0 = fresh_test_transcript();
+        assert!(!whir_verify(
+            &wrong_comm0,
+            num_vars,
+            &point,
+            honest_val,
+            &proof,
+            &mut tr_wrong_c0
+        ));
+
+        let forged_val = honest_val + GoldilocksExt4::ONE;
+        let mut tr_bad = fresh_test_transcript();
+        assert!(!whir_verify(
+            &comm,
+            num_vars,
+            &point,
+            forged_val,
+            &proof,
+            &mut tr_bad
+        ));
+
+        let mut mutated_proof = proof.clone();
+        assert!(!mutated_proof.folded_layers.is_empty());
+        mutated_proof.folded_layers[0].commitment.root[0] ^= 0x01;
+        let mut tr_mut = fresh_test_transcript();
+        assert!(!whir_verify(
+            &comm,
+            num_vars,
+            &point,
+            honest_val,
+            &mutated_proof,
+            &mut tr_mut
+        ));
+    }
+
+    #[test]
+    fn test_lean_kat_vectors_conformance() {
+        use crate::sponge::{
+            cshake256_32, poseidon2_hash32, poseidon2_perm12, poseidon2_sbox7, shake256_into,
+        };
+
+        fn to_hex(bytes: &[u8]) -> alloc::string::String {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut s = alloc::string::String::with_capacity(bytes.len() * 2);
+            for &b in bytes {
+                s.push(HEX[(b >> 4) as usize] as char);
+                s.push(HEX[(b & 0x0F) as usize] as char);
+            }
+            s
+        }
+
+        let kat_json = include_str!("../../../tests/kat_vectors.json");
+        assert!(kat_json.contains("\"generator\": \"lean-4.35.0-Qsag\""));
+
+        let mut out32 = [0u8; 32];
+        shake256_into(&[], &mut out32);
+        let h_empty = to_hex(&out32);
+        assert_eq!(
+            h_empty,
+            "46b9dd2b0ba88d13233b3feb743eeb243fcd52ea62b81b82b50c27646ed5762f"
+        );
+        assert!(kat_json.contains(&h_empty));
+
+        shake256_into(b"abc", &mut out32);
+        let h_abc = to_hex(&out32);
+        assert_eq!(
+            h_abc,
+            "483366601360a8771c6863080cc4114d8db44530f8f1e1ee4f94ea37e78b5739"
+        );
+        assert!(kat_json.contains(&h_abc));
+
+        let seq64_in: Vec<u8> = (0..64u8).collect();
+        let mut out64 = [0u8; 64];
+        shake256_into(&seq64_in, &mut out64);
+        let h_seq64 = to_hex(&out64);
+        assert_eq!(
+            h_seq64,
+            "755e8863a2b2bc067f51c1637a71c819d524dc37c17ba7a29c6ee3767c996a49e39d3f402bd2452d01f3977dea88467ac2aff4207f8a70ca32a3c345123a5875"
+        );
+        assert!(kat_json.contains(&h_seq64));
+
+        let h_cshake = to_hex(&cshake256_32(
+            b"QSAG.KAT.v1",
+            b"quantum-signature-aggregation",
+        ));
+        assert_eq!(
+            h_cshake,
+            "fc3c9ce4073822b1cc20a0c4ad065ac386d7cbcbe256fb23ac97bd00e8c924eb"
+        );
+        assert!(kat_json.contains(&h_cshake));
+
+        assert_eq!(crate::field::GOLDILOCKS_PRIME, 18446744069414584321);
+        let ga = Goldilocks::from_u64_reduced(0xFFFF_FFFF_0000_0000);
+        let gb = Goldilocks::from_u64_reduced(0x1234_5678_9ABC_DEF0);
+        assert_eq!((ga + gb).to_canonical_u64(), 1311768467463790319);
+        assert_eq!((ga - gb).to_canonical_u64(), 17134975601950794000);
+        assert_eq!((ga * gb).to_canonical_u64(), 17134975601950794001);
+        assert_eq!(gb.inv().to_canonical_u64(), 14736413637906284881);
+        assert_eq!(poseidon2_sbox7(gb).to_canonical_u64(), 11853639751010147186);
+
+        let ea = GoldilocksExt2::new(
+            Goldilocks::from_u64_reduced(0xCAFE_BABE_1234_5678),
+            Goldilocks::from_u64_reduced(0x0FED_CBA9_8765_4321),
+        );
+        let eb = GoldilocksExt2::new(
+            Goldilocks::from_u64_reduced(0x1122_3344_5566_7788),
+            Goldilocks::from_u64_reduced(0x99AA_BBCC_DDEE_FF00),
+        );
+        let emul = ea * eb;
+        assert_eq!(emul.c0.to_canonical_u64(), 18303635595367899322);
+        assert_eq!(emul.c1.to_canonical_u64(), 878009080216790377);
+        let einv = ea.inv();
+        assert_eq!(einv.c0.to_canonical_u64(), 16277753096187779739);
+        assert_eq!(einv.c1.to_canonical_u64(), 5492336065856852107);
+
+        let mut p_zero = [Goldilocks::ZERO; 12];
+        poseidon2_perm12(&mut p_zero);
+        let expected_zero: [u64; 12] = [
+            444626622888223479,
+            10486189390627733761,
+            5399253379101132897,
+            5052010181030417489,
+            6267397916963039069,
+            9245911245446346418,
+            9661705423445490201,
+            787089484585814203,
+            14953692268052641311,
+            11458212182116269477,
+            16934754160153525625,
+            6948793053817514326,
+        ];
+        for i in 0..12 {
+            assert_eq!(p_zero[i].to_canonical_u64(), expected_zero[i]);
+            assert!(kat_json.contains(&alloc::format!("\"{}\"", expected_zero[i])));
+        }
+
+        let mut p_seq: [Goldilocks; 12] =
+            core::array::from_fn(|i| Goldilocks::from_u64_reduced(i as u64));
+        poseidon2_perm12(&mut p_seq);
+        let expected_seq: [u64; 12] = [
+            12427618818045938679,
+            15603055080602884714,
+            13440107678219667309,
+            8886947539732114456,
+            14710374340000099479,
+            10111918623281920586,
+            1604190142837255372,
+            14400339433171367428,
+            13181657164602338457,
+            12801330883977696413,
+            8886499513080244401,
+            2541968083255470153,
+        ];
+        for i in 0..12 {
+            assert_eq!(p_seq[i].to_canonical_u64(), expected_seq[i]);
+        }
+
+        assert_eq!(
+            to_hex(&poseidon2_hash32(&[])),
+            "8abe72c9ab75f5a5736f2adb77ab0a4cbaadb680d1456cdca9ef7582512b5a41"
+        );
+        assert_eq!(
+            to_hex(&poseidon2_hash32(&[0x00])),
+            "e98bb6735948157ef5953e781afe6ad16f6099fb8dcfba644aae5763552b7530"
+        );
+        assert_eq!(
+            to_hex(&poseidon2_hash32(&[0x01, 0x02, 0x03])),
+            "c4b4b1aad81585f83e952a2785115170903bd15d5f1a6e70eddb327880678eca"
+        );
+        assert_eq!(
+            to_hex(&poseidon2_hash32(b"qsag-poseidon2-kat")),
+            "b921262f79e02934abe3aa2fb8141a6ed0dc8cae6195540fcfb5b3e62d0dd457"
+        );
+
+        let mut abc_digest = [0u8; 32];
+        shake256_into(b"abc", &mut abc_digest);
+        let d5 = bytes32_to_limbs56(&abc_digest);
+        let expected_d5: [u64; 5] = [
+            47393432425345864,
+            55182325602327671,
+            69858870164278545,
+            15739046436200945,
+            962038759,
+        ];
+        for i in 0..5 {
+            assert_eq!(d5[i].to_canonical_u64(), expected_d5[i]);
+            assert!(kat_json.contains(&alloc::format!("\"{}\"", expected_d5[i])));
+        }
+    }
+
+    #[test]
+    fn test_p0_04_and_p1_02_epoch_latch_and_limbs56_bijection() {
+        let all_ff = [0xFFu8; 32];
+        let limbs = bytes32_to_limbs56(&all_ff);
+        let roundtrip = limbs56_to_bytes32_canonical(&limbs).expect("canonical 56-bit limbs");
+        assert_eq!(roundtrip, all_ff);
+
+        let mut kp = gen_jorts_kp(7, 0);
+        let dbg_str = alloc::format!("{:?}", kp);
+        assert!(dbg_str.contains("[REDACTED]"));
+
+        let sig1 = kp
+            .sign_stateful_for_unit_test(b"block-proposal-A", 0)
+            .expect("epoch 0 ok");
+        let sig1_retry = kp
+            .sign_stateful_for_unit_test(b"block-proposal-A", 0)
+            .expect("crash-retry on identical (epoch, msg) must be idempotent");
+        assert_eq!(sig1, sig1_retry);
+        assert_eq!(
+            kp.sign_stateful_for_unit_test(b"equivocating-block-B", 0),
+            Err(SigError::EpochReuseDifferentMessage)
+        );
+        let _sig2 = kp
+            .sign_stateful_for_unit_test(b"epoch-2", 2)
+            .expect("advance to epoch 2");
+        assert_eq!(
+            kp.sign_stateful_for_unit_test(b"rewind-to-epoch-1", 1),
+            Err(SigError::EpochMonotonicityViolation)
+        );
+
+        #[cfg(feature = "std")]
+        {
+            let wal_path = std::env::temp_dir().join(std::format!(
+                "qsag_agg_test_epoch_wal_{}.bin",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&wal_path);
+            let mut kp_wal = gen_jorts_kp(99, 0);
+            let pk_root_bytes = sig::digest4_to_bytes(&kp_wal.pk.pk_root);
+            let (mut sink, init_state) =
+                FsWalEpochSink::create_new_for_fresh_key(&wal_path, &pk_root_bytes, [0x57; 32])
+                    .unwrap();
+            assert!(init_state.is_none());
+            let sig_w = kp_wal
+                .sign_stateful_with_wal(b"wal-persisted-msg", 3, &mut sink)
+                .unwrap();
+
+            drop(sink);
+            let (mut sink2, recovered) =
+                FsWalEpochSink::open_or_recover(&wal_path, &pk_root_bytes, [0x57; 32]).unwrap();
+            let mut kp_restarted = ValidatorKeypair::from_master_seed_with_wal(
+                AggSigProfile::JortsPoseidon2,
+                &make_seed(99),
+                0,
+                &sink2,
+            )
+            .unwrap();
+            assert_eq!(kp_restarted.next_unused_epoch(), 4);
+            let (next_ep, latched_ep, mu_b) = recovered.expect("WAL must recover latched epoch");
+            kp_restarted
+                .restore_from_wal(next_ep, latched_ep, mu_b)
+                .unwrap();
+            assert!(
+                kp_restarted
+                    .restore_from_wal(next_ep - 1, latched_ep - 1, mu_b)
+                    .is_err()
+            );
+            assert!(
+                kp_restarted
+                    .restore_from_wal(next_ep, latched_ep, [0xff; 32])
+                    .is_err()
+            );
+            assert_eq!(
+                kp_restarted.sign_stateful_with_wal(b"equivocating-after-crash", 3, &mut sink2),
+                Err(SigError::EpochReuseDifferentMessage)
+            );
+            assert_eq!(
+                kp_restarted
+                    .sign_stateful_with_wal(b"wal-persisted-msg", 3, &mut sink2)
+                    .unwrap(),
+                sig_w
+            );
+            let _ = std::fs::remove_file(&wal_path);
+        }
+    }
+
+    #[test]
+    fn test_jorts_aggregate_merge_and_adversarial_tampering() {
+        let mut kps: Vec<ValidatorKeypair> = (0..8u32).map(|i| gen_jorts_kp(1000, i)).collect();
+        let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
+        let msg = b"consensus-slot-42-finality-vote";
+
+        let sigs_a = vec![
+            kps[0].sign_stateful_for_unit_test(msg, 0).unwrap(),
+            kps[1].sign_stateful_for_unit_test(msg, 1).unwrap(),
+        ];
+        let sigs_b = vec![
+            kps[2].sign_stateful_for_unit_test(msg, 0).unwrap(),
+            kps[3].sign_stateful_for_unit_test(msg, 2).unwrap(),
+        ];
+
+        let bm_a = SignerBitmap::from_active_indices(8, &[0, 1]).unwrap();
+        let bm_b = SignerBitmap::from_active_indices(8, &[2, 3]).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+
+        let proof_a =
+            aggregate_signatures(&pks, &bm_a, &mode, &sigs_a, make_seed(9001)).expect("agg A");
+        let proof_b =
+            aggregate_signatures(&pks, &bm_b, &mode, &sigs_b, make_seed(9002)).expect("agg B");
+
+        assert!(verify_aggregate(&pks, &mode, &proof_a));
+        assert!(verify_aggregate(&pks, &mode, &proof_b));
+
+        let merged = merge_aggregates(&pks, &mode, &proof_a, &proof_b).expect("disjoint merge");
+        assert_eq!(merged.num_signers(), 4);
+        assert!(verify_aggregate(&pks, &mode, &merged));
+
+        let wire = merged.to_bytes();
+        let parsed = QsagAggregateProof::from_bytes_canonical(&wire).expect("canonical wire");
+        assert_eq!(parsed, merged);
+        assert!(verify_aggregate(&pks, &mode, &parsed));
+
+        let mut trailing = wire.clone();
+        trailing.push(0x00);
+        assert_eq!(
+            QsagAggregateProof::from_bytes_canonical(&trailing),
+            Err(AggError::MalformedWireBytes)
+        );
+
+        assert!(!verify_aggregate(
+            &pks,
+            &SigningMode::SharedMessage(b"forged-slot-42"),
+            &merged
+        ));
+
+        let bm_overlap = SignerBitmap::from_active_indices(8, &[1, 2]).unwrap();
+        let sigs_ov = vec![sigs_a[1].clone(), sigs_b[0].clone()];
+        let proof_ov =
+            aggregate_signatures(&pks, &bm_overlap, &mode, &sigs_ov, make_seed(9003)).unwrap();
+        assert_eq!(
+            merge_aggregates(&pks, &mode, &proof_a, &proof_ov),
+            Err(AggError::OverlappingSigners)
+        );
+
+        let mut dup_pks = pks.clone();
+        dup_pks[1] = dup_pks[0];
+        assert_eq!(
+            aggregate_signatures(&dup_pks, &bm_a, &mode, &sigs_a, make_seed(9004)),
+            Err(AggError::DuplicateValidatorOrProfileMismatch)
+        );
+
+        if let MergeNode::Leaf(mut leaf_box) = proof_a.root.clone() {
+            leaf_box.shards[0].col_evals[0] += GoldilocksExt4::ONE;
+            let tampered = QsagAggregateProof {
+                profile: proof_a.profile,
+                committee_root: proof_a.committee_root,
+                root: MergeNode::Leaf(leaf_box),
+            };
+            assert!(!verify_aggregate(&pks, &mode, &tampered));
+        }
+    }
+
+    #[test]
+    fn test_aggregate_security_regimes_end_to_end() {
+        let mut keys: Vec<_> = (0..2).map(|i| gen_jorts_kp(709, i)).collect();
+        let pks: Vec<_> = keys.iter().map(|k| k.pk).collect();
+        let msg = b"regime integration";
+        let sigs: Vec<_> = keys
+            .iter_mut()
+            .map(|k| k.sign_stateful_for_unit_test(msg, 0).unwrap())
+            .collect();
+        for sig in &sigs {
+            assert_eq!(
+                ValidatorSignature::from_bytes_canonical(sig.profile, &sig.to_bytes()).unwrap(),
+                *sig
+            );
+        }
+        let bitmap = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+        for regime in [
+            WhirSecurityRegime::Habr24Classical128,
+            WhirSecurityRegime::Habr24Interactive128,
+            WhirSecurityRegime::BciksJohnsonClassical128,
+            WhirSecurityRegime::Habr24Qrom128,
+            WhirSecurityRegime::BciksJohnsonQrom128,
+        ] {
+            let mut cfg =
+                HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(710));
+            cfg.regime = regime;
+            let start = std::time::Instant::now();
+            let proof =
+                HemAggregator::aggregate_with_config(&pks, &bitmap, &mode, &sigs, &cfg).unwrap();
+            let prove = start.elapsed();
+            let wire = proof.to_bytes();
+            assert_eq!(
+                HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
+                proof
+            );
+            let start = std::time::Instant::now();
+            assert!(HemAggregator::verify_with_regime(
+                &pks, &mode, &proof, regime
+            ));
+            std::eprintln!(
+                "aggregate {regime:?}: K=2, bytes={}, prove={prove:?}, verify={:?}",
+                wire.len(),
+                start.elapsed()
+            );
+            assert_eq!(HemAggregator::verify(&pks, &mode, &proof), regime.meets_qrom_128_floor());
+            assert_eq!(verify_aggregate(&pks, &mode, &proof), regime.meets_qrom_128_floor());
+            let wrong = if regime == WhirSecurityRegime::Habr24Qrom128 {
+                WhirSecurityRegime::BciksJohnsonQrom128
+            } else {
+                WhirSecurityRegime::Habr24Qrom128
+            };
+            assert!(!verify_aggregate_with_regime(&pks, &mode, &proof, wrong));
+            let mut bad = leaf_of(&proof);
+            bad.schedule.stages[0].num_queries = 1;
+            assert!(!HemAggregator::verify(&pks, &mode, &with_leaf(&proof, bad)));
+        }
+    }
+
+    #[test]
+    fn mixed_regime_merges_are_rejected() {
+        let mut keys: Vec<_> = (0..2).map(|i| gen_jorts_kp(711, i)).collect();
+        let pks: Vec<_> = keys.iter().map(|k| k.pk).collect();
+        let msg = b"mixed regimes";
+        let mode = SigningMode::SharedMessage(msg);
+        let sigs: Vec<_> = keys.iter_mut()
+            .map(|k| k.sign_stateful_for_unit_test(msg, 0).unwrap()).collect();
+        let make = |index, regime| {
+            let mut cfg = HemAggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(712));
+            cfg.regime = regime;
+            HemAggregator::aggregate_with_config(&pks,
+                &SignerBitmap::from_active_indices(2, &[index]).unwrap(), &mode,
+                &sigs[index..index + 1], &cfg).unwrap()
+        };
+        let a = make(0, WhirSecurityRegime::Habr24Qrom128);
+        for regime in [WhirSecurityRegime::BciksJohnsonQrom128, WhirSecurityRegime::Habr24Classical128] {
+            let b = make(1, regime);
+            assert_eq!(HemAggregator::merge(&pks, &mode, &a, &b), Err(HemAggError::RegimeMismatch));
+            assert_eq!(HemAggregator::merge_owned(&pks, &mode, a.clone(), b.clone()), Err(HemAggError::RegimeMismatch));
+            let mixed = HemAggregatedProof {
+                profile: a.profile, committee_root: a.committee_root,
+                root: MergeNode::Branch {
+                    bitmap: a.bitmap().union_disjoint(b.bitmap()).unwrap(),
+                    left: Box::new(a.root.clone()), right: Box::new(b.root),
+                },
+            };
+            assert!(!HemAggregator::verify(&pks, &mode, &mixed));
+            assert!(!HemAggregator::verify_with_regime(&pks, &mode, &mixed, regime));
+            assert!(!HemAggregator::verify_with_regime(&pks, &mode, &mixed, WhirSecurityRegime::Habr24Qrom128));
+            assert_eq!(HemAggregatedProof::from_bytes_canonical(&mixed.to_bytes()), Err(HemAggError::MalformedWireBytes));
+        }
+        for regime in [WhirSecurityRegime::Habr24Classical128, WhirSecurityRegime::BciksJohnsonQrom128] {
+            let merged = HemAggregator::merge_owned(&pks, &mode, make(0, regime), make(1, regime)).unwrap();
+            assert!(HemAggregator::verify_with_regime(&pks, &mode, &merged, regime));
+            assert_eq!(HemAggregator::verify(&pks, &mode, &merged), regime.meets_qrom_128_floor());
+        }
+    }
+
+    #[test]
+    fn test_hem_aggregator_api_and_adversarial_whir_soundness() {
+        // Test the Pants-themed `HemAggregator` API at `K = 8` (`JortsPoseidon2`), checking
+        // proof size (`<= 170 KB`), OOD claims, Ext4 folding claims, per-stage PoW nonces, Steiner
+        // multiproofs, and truncated wire transcripts.
+        let mut kps: Vec<ValidatorKeypair> = (0..8u32).map(|i| gen_jorts_kp(7777, i)).collect();
+        let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
+        let msg = b"hem-whir-k8-soundness-gate";
+        let sigs: Vec<ValidatorSignature> = kps
+            .iter_mut()
+            .enumerate()
+            .map(|(i, kp)| kp.sign_stateful_for_unit_test(msg, i as u32).unwrap())
+            .collect();
+        let bm = SignerBitmap::from_active_indices(8, &[0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+
+        let proof = HemAggregator::aggregate(&pks, &bm, &mode, &sigs, make_seed(7778))
+            .expect("HemAggregator::aggregate K=8");
+        assert!(HemAggregator::verify(&pks, &mode, &proof));
+
+        let wire = proof.to_bytes();
+        assert!(
+            wire.len() <= 170_000,
+            "Hem QROM-128 K=8 proof must stay below 170 KB, got {} B",
+            wire.len()
+        );
+        assert_eq!(
+            HemAggregatedProof::from_bytes_canonical(&wire).unwrap(),
+            proof
+        );
+
+        let leaf = leaf_of(&proof);
+        assert_eq!(leaf.pcs_opening.opening.folded_layers.len(), 2);
+
+        let rejects = |mutate: &dyn Fn(&mut ShardBatchProof)| {
+            let mut bad = leaf.clone();
+            mutate(&mut bad);
+            !HemAggregator::verify(&pks, &mode, &with_leaf(&proof, bad))
+        };
+
+        // 1. Corrupted Ext4 Stage-0 and intermediate WHIR OOD claims:
+        assert!(rejects(
+            &|l| l.pcs_opening.opening.stage0_ood_eval += GoldilocksExt4::V
+        ));
+        for st_idx in 0..leaf.pcs_opening.opening.folded_layers.len() {
+            assert!(rejects(&|l| {
+                l.pcs_opening.opening.folded_layers[st_idx].ood_eval += GoldilocksExt4::V;
+            }));
+        }
+
+        // 2. Corrupted Ext4 WHIR sumcheck / folding polynomial coefficients (`c_0` and `c_2`):
+        for round in [
+            0usize,
+            5,
+            8,
+            leaf.pcs_opening.opening.fold_sumcheck_polys.len() - 1,
+        ] {
+            assert!(rejects(&|l| {
+                l.pcs_opening.opening.fold_sumcheck_polys[round][0] += GoldilocksExt4::ONE;
+            }));
+            assert!(rejects(&|l| {
+                l.pcs_opening.opening.fold_sumcheck_polys[round][1] += GoldilocksExt4::V;
+            }));
+        }
+
+        // 3. Corrupted terminal early-stop Ext4 polynomial evaluation:
+        assert!(rejects(&|l| {
+            l.pcs_opening.opening.final_hypercube_evals[7] += GoldilocksExt4::V;
+        }));
+
+        // 4. Bad per-stage PoW nonces (Stage 0, Stage 1, and Final Stage 2):
+        assert!(rejects(&|l| l.pcs_opening.opening.pow_nonce ^= 1));
+        assert!(rejects(
+            &|l| l.pcs_opening.opening.folded_layers[0].pow_nonce ^= 1
+        ));
+        assert!(rejects(
+            &|l| l.pcs_opening.opening.folded_layers[1].pow_nonce ^= 1
+        ));
+
+        // 5. Tampered Steiner multiproofs (flipped sibling digest, missing sibling, extra sibling)
+        //    across Round 0 and every escalated WHIR stage:
+        assert!(rejects(&|l| l
+            .pcs_opening
+            .opening
+            .round0_multiproof
+            .auth_siblings[0][0] ^= 0x01));
+        assert!(rejects(&|l| {
+            l.pcs_opening.opening.round0_multiproof.auth_siblings.pop();
+        }));
+        assert!(rejects(&|l| {
+            l.pcs_opening
+                .opening
+                .round0_multiproof
+                .auth_siblings
+                .push([0xAA; 32]);
+        }));
+        assert!(rejects(
+            &|l| l.pcs_opening.opening.round0_salts[0][0] ^= 0x01
+        ));
+        for st_idx in 0..2 {
+            assert!(rejects(&|l| {
+                l.pcs_opening.opening.folded_layers[st_idx]
+                    .multiproof
+                    .auth_siblings[0][15] ^= 0x80;
+            }));
+            assert!(rejects(&|l| {
+                l.pcs_opening.opening.folded_layers[st_idx]
+                    .multiproof
+                    .auth_siblings
+                    .pop();
+            }));
+            assert!(rejects(&|l| {
+                l.pcs_opening.opening.folded_layers[st_idx]
+                    .multiproof
+                    .auth_siblings
+                    .push([0x55; 32]);
+            }));
+            assert!(rejects(&|l| {
+                l.pcs_opening.opening.folded_layers[st_idx].opened_vals[0] += GoldilocksExt4::ONE;
+            }));
+        }
+
+        // 6. Truncated transcripts across every wire section must cleanly return `MalformedWireBytes`
+        //    with zero panics:
+        for cut in [
+            0usize,
+            1,
+            7,
+            8,
+            40,
+            41,
+            42,
+            64,
+            256,
+            4096,
+            wire.len() / 3,
+            wire.len() / 2,
+            wire.len() - 64,
+            wire.len() - 1,
+        ] {
+            assert_eq!(
+                HemAggregatedProof::from_bytes_canonical(&wire[..cut]),
+                Err(HemAggError::MalformedWireBytes),
+                "cut={cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_p0_03_stateless_corduroy_poseidon2_aggregate_end_to_end() {
+        let mut keys: Vec<_> = (0..8)
+            .map(|i| {
+                ValidatorKeypair::keygen_deterministic(
+                    AggSigProfile::CorduroyPoseidon2,
+                    &make_seed(501),
+                    i,
+                )
+            })
+            .collect();
+        let pks: Vec<_> = keys.iter().map(|k| k.pk).collect();
+        let msgs: [&[u8]; 8] = [
+            b"receipt-0",
+            b"receipt-1",
+            b"receipt-2",
+            b"receipt-3",
+            b"receipt-4",
+            b"receipt-5",
+            b"receipt-6",
+            b"receipt-7",
+        ];
+        let sigs: Vec<_> = keys
+            .iter_mut()
+            .zip(msgs)
+            .map(|(k, msg)| {
+                let sig = k.sign_stateless_for_unit_test(msg).unwrap();
+                assert!(verify_individual_signature(&k.pk, msg, &sig));
+                sig
+            })
+            .collect();
+        let bm = SignerBitmap::from_active_indices(8, &[0, 1, 2, 3, 4, 5, 6, 7]).unwrap();
+        let mode = SigningMode::PerSignerMessages(&msgs);
+        let agg = aggregate_signatures(&pks, &bm, &mode, &sigs, make_seed(700)).unwrap();
+        let wire = agg.to_bytes();
+        let raw_bytes = 8 * AggSigProfile::CorduroyPoseidon2.raw_signature_bytes();
+        assert!(
+            wire.len() < raw_bytes,
+            "aggregate {} bytes, raw {}",
+            wire.len(),
+            raw_bytes
+        );
+        assert!(verify_aggregate(&pks, &mode, &agg));
+    }
+
+    fn test_point(num_vars: usize, tag: u64) -> Vec<GoldilocksExt4> {
+        (0..num_vars)
+            .map(|k| {
+                ext4_sample(
+                    (k as u64 + 1) * 31337 + tag * 1_000_003,
+                    (k as u64 + 5) * 4242 + tag * 77_777,
+                    (k as u64 + 7) * 9191 + tag * 33_331,
+                    (k as u64 + 11) * 6161 + tag * 19_997,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_pcs_batch_opening_binds_every_claim() {
+        let num_vars = 12usize;
+        let polys: Vec<Vec<Goldilocks>> = (0..3u64)
+            .map(|p| {
+                (0..(1u64 << num_vars))
+                    .map(|i| {
+                        Goldilocks::from_u64_reduced(
+                            i.wrapping_mul(7919 + 2 * p).wrapping_add(13 + p),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let points: Vec<Vec<GoldilocksExt4>> = (0..3).map(|p| test_point(num_vars, p)).collect();
+        let evals: Vec<GoldilocksExt4> = polys
+            .iter()
+            .zip(&points)
+            .map(|(poly, point)| mle_eval_base_at_ext4(poly, point))
+            .collect();
+        let point_refs: Vec<&[GoldilocksExt4]> = points.iter().map(Vec::as_slice).collect();
+
+        let (comm, state) = whir_commit_batch_owned(polys.clone(), &make_seed(202));
+        let (single_comm, _) = whir_commit(&polys[0], &make_seed(202));
+        assert_ne!(comm, single_comm);
+
+        let mut tr_p = fresh_test_transcript();
+        let proof = whir_open_batch(&state, &point_refs, &evals, &mut tr_p);
+        assert_eq!(proof.point_sumcheck_polys.len(), num_vars);
+        assert_eq!(proof.common_point_evals.len(), 3);
+        let check = |points: &[&[GoldilocksExt4]],
+                     evals: &[GoldilocksExt4],
+                     proof: &HemWhirBatchOpeningProof| {
+            let mut tr_v = fresh_test_transcript();
+            whir_verify_batch(&comm, num_vars, points, evals, proof, &mut tr_v)
+        };
+        assert!(check(&point_refs, &evals, &proof));
+
+        let mut wire = Vec::new();
+        proof.push_bytes(&mut wire);
+        let (parsed, used) = HemWhirBatchOpeningProof::from_bytes_canonical(&wire).unwrap();
+        assert_eq!((parsed, used), (proof.clone(), wire.len()));
+
+        for bad in 0..3 {
+            let mut wrong = evals.clone();
+            wrong[bad] += GoldilocksExt4::ONE;
+            assert!(!check(&point_refs, &wrong, &proof));
+        }
+        let mut swapped_evals = evals.clone();
+        swapped_evals.swap(0, 2);
+        assert!(!check(&point_refs, &swapped_evals, &proof));
+        let mut swapped_points = point_refs.clone();
+        swapped_points.swap(0, 1);
+        assert!(!check(&swapped_points, &evals, &proof));
+
+        for bad in 0..3 {
+            let mut tampered = proof.clone();
+            tampered.common_point_evals[bad] += GoldilocksExt4::ONE;
+            assert!(!check(&point_refs, &evals, &tampered));
+        }
+        let mut tampered = proof.clone();
+        tampered.point_sumcheck_polys[num_vars - 1][1] += GoldilocksExt4::ONE;
+        assert!(!check(&point_refs, &evals, &tampered));
+
+        let mut tampered = proof.clone();
+        let last = tampered.opening.round0_vals.len() - 1;
+        tampered.opening.round0_vals[last] += Goldilocks::ONE;
+        assert!(!check(&point_refs, &evals, &tampered));
+
+        let mut tampered = proof.clone();
+        tampered.opening.round0_multiproof.auth_siblings[0][0] ^= 1;
+        assert!(!check(&point_refs, &evals, &tampered));
+        let mut tampered = proof.clone();
+        tampered.opening.round0_multiproof.auth_siblings.pop();
+        assert!(!check(&point_refs, &evals, &tampered));
+        let mut tampered = proof.clone();
+        tampered
+            .opening
+            .round0_multiproof
+            .auth_siblings
+            .push([0u8; 32]);
+        assert!(!check(&point_refs, &evals, &tampered));
+        let mut tampered = proof.clone();
+        tampered.opening.folded_layers[0].opened_vals[3] += GoldilocksExt4::ONE;
+        assert!(!check(&point_refs, &evals, &tampered));
+
+        let (other_comm, _) = whir_commit_batch_owned(polys, &make_seed(203));
+        let mut tr_v = fresh_test_transcript();
+        assert!(!whir_verify_batch(
+            &other_comm,
+            num_vars,
+            &point_refs,
+            &evals,
+            &proof,
+            &mut tr_v
+        ));
+    }
+
+    #[test]
+    fn test_shard_caps_match_pcs_limit() {
+        for profile in [
+            AggSigProfile::JortsPoseidon2,
+            AggSigProfile::CorduroyPoseidon2,
+        ] {
+            let rows = max_shard_signers(profile) * crate::trace::rows_per_signer(profile);
+            assert_eq!(
+                crate::trace::LOG_TRACE_COLS + rows.trailing_zeros() as usize,
+                MAX_PCS_NUM_VARS
+            );
+        }
+
+        let mut kps: Vec<ValidatorKeypair> = (0..2u32).map(|i| gen_jorts_kp(77, i)).collect();
+        let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
+        let msg = b"shard-config";
+        let sigs: Vec<ValidatorSignature> = kps
+            .iter_mut()
+            .map(|kp| kp.sign_stateful_for_unit_test(msg, 0).unwrap())
+            .collect();
+        let bm = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+        let default_cfg = AggConfig::default_for(AggSigProfile::JortsPoseidon2, make_seed(1));
+        for bad_cfg in [
+            AggConfig {
+                max_signers_per_shard: 0,
+                ..default_cfg.clone()
+            },
+            AggConfig {
+                max_signers_per_shard: max_shard_signers(AggSigProfile::JortsPoseidon2) + 1,
+                ..default_cfg.clone()
+            },
+            AggConfig {
+                max_shards_per_batch: 0,
+                ..default_cfg.clone()
+            },
+            AggConfig {
+                max_shards_per_batch: MAX_BATCH_POLYS + 1,
+                ..default_cfg.clone()
+            },
+        ] {
+            assert_eq!(
+                aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &bad_cfg),
+                Err(AggError::InvalidShardConfig)
+            );
+        }
+    }
+
+    fn leaf_of(proof: &QsagAggregateProof) -> ShardBatchProof {
+        match &proof.root {
+            MergeNode::Leaf(leaf) => (**leaf).clone(),
+            MergeNode::Branch { .. } => panic!("expected a single shard batch"),
+        }
+    }
+
+    fn with_leaf(proof: &QsagAggregateProof, leaf: ShardBatchProof) -> QsagAggregateProof {
+        QsagAggregateProof {
+            profile: proof.profile,
+            committee_root: proof.committee_root,
+            root: MergeNode::Leaf(Box::new(leaf)),
+        }
+    }
+
+    #[test]
+    fn test_shard_batch_accumulation_and_tampering() {
+        let mut kps: Vec<ValidatorKeypair> = (0..8u32).map(|i| gen_jorts_kp(2000, i)).collect();
+        let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
+        let msg = b"batched-shards";
+        let signer_ids = [0usize, 1, 3, 4, 6, 7];
+        let sigs: Vec<ValidatorSignature> = signer_ids
+            .iter()
+            .map(|&i| kps[i].sign_stateful_for_unit_test(msg, i as u32).unwrap())
+            .collect();
+        let bm = SignerBitmap::from_active_indices(8, &signer_ids).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+        let cfg = AggConfig {
+            regime: WhirSecurityRegime::default(),
+            whir_schedule: None,
+            max_signers_per_shard: 2,
+            max_shards_per_batch: 4,
+            blinding_seed: make_seed(41),
+        };
+        let proof = aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &cfg).unwrap();
+        assert_eq!((proof.num_shard_batches(), proof.num_leaf_shards()), (1, 3));
+        assert!(verify_aggregate(&pks, &mode, &proof));
+        assert!(!verify_aggregate(
+            &pks,
+            &SigningMode::SharedMessage(b"other"),
+            &proof
+        ));
+
+        let unbatched_cfg = AggConfig {
+            max_shards_per_batch: 1,
+            ..cfg.clone()
+        };
+        let unbatched =
+            aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &unbatched_cfg).unwrap();
+        assert_eq!(
+            (unbatched.num_shard_batches(), unbatched.num_leaf_shards()),
+            (3, 3)
+        );
+        assert!(verify_aggregate(&pks, &mode, &unbatched));
+        let (batched_len, unbatched_len) = (proof.to_bytes().len(), unbatched.to_bytes().len());
+        assert!(
+            batched_len < unbatched_len,
+            "batched {batched_len} B, unbatched {unbatched_len} B"
+        );
+
+        let leaf = leaf_of(&proof);
+        assert_eq!(leaf.pcs_opening.common_point_evals.len(), 3);
+        let rejects = |mutate: &dyn Fn(&mut ShardBatchProof)| {
+            let mut bad = leaf.clone();
+            mutate(&mut bad);
+            !verify_aggregate(&pks, &mode, &with_leaf(&proof, bad))
+        };
+        for shard in 0..3 {
+            assert!(rejects(
+                &|l| l.pcs_opening.common_point_evals[shard] += GoldilocksExt4::ONE
+            ));
+        }
+        assert!(rejects(
+            &|l| l.pcs_opening.point_sumcheck_polys[0][1] += GoldilocksExt4::ONE
+        ));
+        assert!(rejects(&|l| l.shards.swap(0, 1)));
+        assert!(rejects(&|l| l.shards.swap(1, 2)));
+        assert!(rejects(
+            &|l| l.shards[2].col_evals[17] += GoldilocksExt4::ONE
+        ));
+        assert!(rejects(
+            &|l| l.shards[1].row_sumcheck_polys[0][0] += GoldilocksExt4::ONE
+        ));
+        assert!(rejects(&|l| l.shard_signer_counts = vec![2, 3, 1]));
+        assert!(rejects(&|l| l.shard_signer_counts = vec![2, 2]));
+        assert!(rejects(&|l| {
+            l.bitmap = SignerBitmap::from_active_indices(8, &[0, 1, 2, 4, 6, 7]).unwrap()
+        }));
+        assert!(rejects(&|l| l.witness_comm.root[5] ^= 1));
+
+        let wire = proof.to_bytes();
+        assert_eq!(
+            QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+            proof
+        );
+        let malformed = |bytes: &[u8]| {
+            QsagAggregateProof::from_bytes_canonical(bytes) == Err(AggError::MalformedWireBytes)
+        };
+        let mut trailing = wire.clone();
+        trailing.push(0x00);
+        assert!(malformed(&trailing));
+        assert!(malformed(&wire[..wire.len() - 1]));
+        let mut old_magic = wire.clone();
+        old_magic[7] = 0x03;
+        assert!(malformed(&old_magic));
+        let needle = leaf.shards[0].col_evals[0].to_le_bytes();
+        let at = wire.windows(32).position(|w| w == needle).unwrap();
+        let mut non_canonical = wire.clone();
+        non_canonical[at..at + 8].copy_from_slice(&[0xFF; 8]);
+        assert!(malformed(&non_canonical));
+        let count_at = 41 + 1 + leaf.bitmap.to_bytes().len();
+        assert_eq!(wire[count_at], 3);
+        let mut bad_count = wire.clone();
+        bad_count[count_at] = 2;
+        assert!(malformed(&bad_count));
+    }
+
+    #[test]
+    fn test_merge_tree_structure_and_child_substitution() {
+        let mut kps: Vec<ValidatorKeypair> = (0..4u32).map(|i| gen_jorts_kp(3000, i)).collect();
+        let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
+        let msg = b"vote|slot=42";
+        let other_msg = b"vote|slot=43";
+        let mode = SigningMode::SharedMessage(msg);
+        let other_mode = SigningMode::SharedMessage(other_msg);
+        let bm_a = SignerBitmap::from_active_indices(4, &[0, 1]).unwrap();
+        let bm_b = SignerBitmap::from_active_indices(4, &[2, 3]).unwrap();
+        let sigs_a = vec![
+            kps[0].sign_stateful_for_unit_test(msg, 0).unwrap(),
+            kps[1].sign_stateful_for_unit_test(msg, 0).unwrap(),
+        ];
+        let sigs_b = vec![
+            kps[2].sign_stateful_for_unit_test(msg, 0).unwrap(),
+            kps[3].sign_stateful_for_unit_test(msg, 0).unwrap(),
+        ];
+        let sigs_b_other = vec![
+            kps[2].sign_stateful_for_unit_test(other_msg, 1).unwrap(),
+            kps[3].sign_stateful_for_unit_test(other_msg, 1).unwrap(),
+        ];
+        let proof_a = aggregate_signatures(&pks, &bm_a, &mode, &sigs_a, make_seed(51)).unwrap();
+        let proof_b = aggregate_signatures(&pks, &bm_b, &mode, &sigs_b, make_seed(52)).unwrap();
+        let proof_b_other =
+            aggregate_signatures(&pks, &bm_b, &other_mode, &sigs_b_other, make_seed(53)).unwrap();
+        assert!(verify_aggregate(&pks, &other_mode, &proof_b_other));
+
+        let merged = merge_aggregates(&pks, &mode, &proof_a, &proof_b).unwrap();
+        assert_eq!(
+            merge_aggregates(&pks, &mode, &proof_b, &proof_a).unwrap(),
+            merged
+        );
+        assert_eq!(
+            merge_aggregates_owned(&pks, &mode, proof_b.clone(), proof_a.clone()).unwrap(),
+            merged
+        );
+        assert!(verify_aggregate(&pks, &mode, &merged));
+        assert_eq!(merged.num_shard_batches(), 2);
+        assert_eq!(
+            merged.to_bytes().len(),
+            proof_a.to_bytes().len() + proof_b.to_bytes().len() - 41 + 1
+        );
+        let wire = merged.to_bytes();
+        assert_eq!(
+            QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+            merged
+        );
+
+        let branch =
+            |bitmap: &SignerBitmap, left: &MergeNode, right: &MergeNode| QsagAggregateProof {
+                profile: merged.profile,
+                committee_root: merged.committee_root,
+                root: MergeNode::Branch {
+                    bitmap: bitmap.clone(),
+                    left: Box::new(left.clone()),
+                    right: Box::new(right.clone()),
+                },
+            };
+        let swapped = branch(merged.bitmap(), &proof_b.root, &proof_a.root);
+        assert!(!verify_aggregate(&pks, &mode, &swapped));
+        assert_eq!(
+            QsagAggregateProof::from_bytes_canonical(&swapped.to_bytes()),
+            Err(AggError::MalformedWireBytes)
+        );
+        let substituted = branch(merged.bitmap(), &proof_a.root, &proof_b_other.root);
+        assert!(!verify_aggregate(&pks, &mode, &substituted));
+        assert!(!verify_aggregate(&pks, &other_mode, &substituted));
+        assert_eq!(
+            merge_aggregates(&pks, &mode, &proof_a, &proof_b_other),
+            Err(AggError::InvalidChildProof)
+        );
+        assert!(!verify_aggregate(
+            &pks,
+            &mode,
+            &branch(&bm_a, &proof_a.root, &proof_b.root)
+        ));
+        assert!(!verify_aggregate(
+            &pks,
+            &mode,
+            &branch(&bm_a, &proof_a.root, &proof_a.root)
+        ));
+        assert_eq!(
+            merge_aggregates(&pks, &mode, &proof_a, &proof_a),
+            Err(AggError::OverlappingSigners)
+        );
+
+        let per_msgs: [&[u8]; 4] = [b"m0", b"m1", b"m2", b"m3"];
+        let bm_even = SignerBitmap::from_active_indices(4, &[0, 2]).unwrap();
+        let bm_odd = SignerBitmap::from_active_indices(4, &[1, 3]).unwrap();
+        let mut kps2: Vec<ValidatorKeypair> = (0..4u32).map(|i| gen_jorts_kp(3000, i)).collect();
+        let sig_for = |kps: &mut Vec<ValidatorKeypair>, i: usize| {
+            kps[i].sign_stateful_for_unit_test(per_msgs[i], 0).unwrap()
+        };
+        let sigs_even = vec![sig_for(&mut kps2, 0), sig_for(&mut kps2, 2)];
+        let sigs_odd = vec![sig_for(&mut kps2, 1), sig_for(&mut kps2, 3)];
+        let even_msgs = [per_msgs[0], per_msgs[2]];
+        let odd_msgs = [per_msgs[1], per_msgs[3]];
+        let proof_even = aggregate_signatures(
+            &pks,
+            &bm_even,
+            &SigningMode::PerSignerMessages(&even_msgs),
+            &sigs_even,
+            make_seed(54),
+        )
+        .unwrap();
+        let proof_odd = aggregate_signatures(
+            &pks,
+            &bm_odd,
+            &SigningMode::PerSignerMessages(&odd_msgs),
+            &sigs_odd,
+            make_seed(55),
+        )
+        .unwrap();
+        let all_mode = SigningMode::PerSignerMessages(&per_msgs);
+        let interleaved = merge_aggregates(&pks, &all_mode, &proof_odd, &proof_even).unwrap();
+        assert!(verify_aggregate(&pks, &all_mode, &interleaved));
+        let shuffled: [&[u8]; 4] = [b"m1", b"m0", b"m2", b"m3"];
+        assert!(!verify_aggregate(
+            &pks,
+            &SigningMode::PerSignerMessages(&shuffled),
+            &interleaved
+        ));
+
+        let template = leaf_of(&proof_a);
+        let chain = |num_leaves: usize| {
+            let leaf_at = |j: usize| {
+                MergeNode::Leaf(Box::new(ShardBatchProof {
+                    bitmap: SignerBitmap::from_active_indices(64, &[2 * j, 2 * j + 1]).unwrap(),
+                    ..template.clone()
+                }))
+            };
+            let mut node = leaf_at(num_leaves - 1);
+            for j in (0..num_leaves - 1).rev() {
+                let left = leaf_at(j);
+                let bitmap = left.bitmap().union_disjoint(node.bitmap()).unwrap();
+                node = MergeNode::Branch {
+                    bitmap,
+                    left: Box::new(left),
+                    right: Box::new(node),
+                };
+            }
+            QsagAggregateProof {
+                profile: merged.profile,
+                committee_root: merged.committee_root,
+                root: node,
+            }
+        };
+        let deepest = chain(MAX_MERGE_TREE_DEPTH + 1);
+        assert_eq!(deepest.root.depth(), MAX_MERGE_TREE_DEPTH);
+        assert_eq!(
+            QsagAggregateProof::from_bytes_canonical(&deepest.to_bytes()).unwrap(),
+            deepest
+        );
+        let too_deep = chain(MAX_MERGE_TREE_DEPTH + 2);
+        assert_eq!(
+            QsagAggregateProof::from_bytes_canonical(&too_deep.to_bytes()),
+            Err(AggError::MalformedWireBytes)
+        );
+    }
+
+    fn hex32(bytes: &[u8; 32]) -> alloc::string::String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut s = alloc::string::String::with_capacity(64);
+        for &b in bytes {
+            s.push(HEX[(b >> 4) as usize] as char);
+            s.push(HEX[(b & 0x0F) as usize] as char);
+        }
+        s
+    }
+
+    /// Fixed-seed digests of (a) a standalone 12-variable `whir_open` proof and (b) a
+    /// two-shard `JortsPoseidon2` aggregate merged with a second aggregate.
+    fn fixed_seed_proof_digests() -> ([u8; 32], [u8; 32]) {
+        let num_vars = 12usize;
+        let evals: Vec<Goldilocks> = (0..(1usize << num_vars))
+            .map(|i| Goldilocks::from_u64_reduced((i as u64).wrapping_mul(7919).wrapping_add(13)))
+            .collect();
+        let (_, state) = whir_commit(&evals, &make_seed(101));
+        let point: Vec<GoldilocksExt4> = (0..num_vars)
+            .map(|k| {
+                ext4_sample(
+                    (k as u64 + 1) * 31337,
+                    (k as u64 + 5) * 4242,
+                    (k as u64 + 9) * 1717,
+                    (k as u64 + 13) * 9001,
+                )
+            })
+            .collect();
+        let val = mle_eval_base_at_ext4(&evals, &point);
+        let mut tr = fresh_test_transcript();
+        let pcs_proof = whir_open(&state, &point, val, &mut tr);
+        let mut pcs_bytes = Vec::new();
+        pcs_proof.push_bytes(&mut pcs_bytes);
+        let pcs_digest = crate::sponge::cshake256_32(b"TEST.FIXED.PCS", &pcs_bytes);
+
+        let mut kps: Vec<ValidatorKeypair> = (0..8u32).map(|i| gen_jorts_kp(4242, i)).collect();
+        let pks: Vec<ValidatorPublicKey> = kps.iter().map(|kp| kp.pk).collect();
+        let msg = b"fixed-seed-determinism-control";
+        let sigs_a = vec![
+            kps[0].sign_stateful_for_unit_test(msg, 0).unwrap(),
+            kps[1].sign_stateful_for_unit_test(msg, 1).unwrap(),
+            kps[2].sign_stateful_for_unit_test(msg, 0).unwrap(),
+        ];
+        let sigs_b = vec![
+            kps[5].sign_stateful_for_unit_test(msg, 3).unwrap(),
+            kps[7].sign_stateful_for_unit_test(msg, 2).unwrap(),
+        ];
+        let bm_a = SignerBitmap::from_active_indices(8, &[0, 1, 2]).unwrap();
+        let bm_b = SignerBitmap::from_active_indices(8, &[5, 7]).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+        let cfg_a = AggConfig {
+            regime: WhirSecurityRegime::default(),
+            whir_schedule: None,
+            max_signers_per_shard: 2,
+            max_shards_per_batch: 2,
+            blinding_seed: make_seed(31),
+        };
+        let proof_a =
+            aggregate_signatures_with_config(&pks, &bm_a, &mode, &sigs_a, &cfg_a).unwrap();
+        let proof_b = aggregate_signatures(&pks, &bm_b, &mode, &sigs_b, make_seed(32)).unwrap();
+        let merged = merge_aggregates(&pks, &mode, &proof_a, &proof_b).unwrap();
+        assert!(verify_aggregate(&pks, &mode, &merged));
+        let agg_digest = crate::sponge::cshake256_32(b"TEST.FIXED.AGG", &merged.to_bytes());
+        (pcs_digest, agg_digest)
+    }
+
+    #[test]
+    fn test_fixed_seed_proof_bytes_are_deterministic() {
+        let (pcs_digest_1, agg_digest_1) = fixed_seed_proof_digests();
+        let (pcs_digest_2, agg_digest_2) = fixed_seed_proof_digests();
+        assert_eq!(pcs_digest_1, pcs_digest_2);
+        assert_eq!(agg_digest_1, agg_digest_2);
+        assert_eq!(
+            (hex32(&pcs_digest_1).as_str(), hex32(&agg_digest_1).as_str()),
+            (
+                "2c4901da96a713c918ce4d2b1e3f8865f9d1c1bde7bb32adfce6f6b379c13589",
+                "b9d27636c3ad01e5283cfb274f26101ddee86913834220f6d3a0d6dbb032dd65"
+            )
+        );
+    }
+
+    #[cfg(feature = "std")]
+    fn bench_keys_and_sigs(
+        profile: AggSigProfile,
+        k: usize,
+        msg: &[u8],
+    ) -> (Vec<ValidatorPublicKey>, Vec<ValidatorSignature>) {
+        let pairs: Vec<(ValidatorPublicKey, ValidatorSignature)> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..k)
+                .map(|i| {
+                    s.spawn(move || {
+                        let mut kp = ValidatorKeypair::keygen_deterministic(
+                            profile,
+                            &make_seed(60_000 + k as u64),
+                            i as u32,
+                        );
+                        let sig = match profile {
+                            AggSigProfile::JortsPoseidon2 => kp
+                                .sign_stateful_for_unit_test(msg, (i % 64) as u32)
+                                .unwrap(),
+                            AggSigProfile::CorduroyPoseidon2 => {
+                                kp.sign_stateless_for_unit_test(msg).unwrap()
+                            }
+                        };
+                        (kp.pk, sig)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        pairs.into_iter().unzip()
+    }
+
+    #[cfg(feature = "std")]
+    fn median_verify_ms(
+        pks: &[ValidatorPublicKey],
+        mode: &SigningMode<'_>,
+        proof: &QsagAggregateProof,
+    ) -> f64 {
+        let mut times = Vec::with_capacity(3);
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            assert!(verify_aggregate(pks, mode, proof));
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        times[1]
+    }
+
+    #[cfg(feature = "std")]
+    const SLH_DSA_128S_BYTES: usize = 7_856;
+    #[cfg(feature = "std")]
+    const SLH_DSA_128F_BYTES: usize = 17_088;
+
+    #[cfg(feature = "std")]
+    fn bench_header(title: &str) {
+        std::println!("\n=== {title} ===");
+        std::println!(
+            "{:>3} | {:>6} | {:>7} | {:>12} | {:>10} | {:>11} | {:>12} | {:>12} | {:>12}",
+            "K",
+            "shards",
+            "batches",
+            "prove_ms",
+            "verify_ms",
+            "proof_B",
+            "K*own_sig_B",
+            "K*slh128s_B",
+            "K*slh128f_B"
+        );
+    }
+
+    #[cfg(feature = "std")]
+    fn bench_row(
+        profile: AggSigProfile,
+        k: usize,
+        shard_cap: Option<usize>,
+        shards_per_batch: Option<usize>,
+    ) -> QsagAggregateProof {
+        let msg = b"agg-bench-shared-message";
+        let (pks, sigs) = bench_keys_and_sigs(profile, k, msg);
+        let indices: Vec<usize> = (0..k).collect();
+        let bm = SignerBitmap::from_active_indices(k as u32, &indices).unwrap();
+        let mode = SigningMode::SharedMessage(msg);
+        let mut cfg = AggConfig::default_for(profile, make_seed(88_000 + k as u64));
+        if let Some(cap) = shard_cap {
+            cfg.max_signers_per_shard = cap;
+        }
+        if let Some(per_batch) = shards_per_batch {
+            cfg.max_shards_per_batch = per_batch;
+        }
+        let t0 = std::time::Instant::now();
+        let proof = aggregate_signatures_with_config(&pks, &bm, &mode, &sigs, &cfg).unwrap();
+        let prove_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let wire = proof.to_bytes();
+        let verify_ms = median_verify_ms(&pks, &mode, &proof);
+        assert_eq!(
+            QsagAggregateProof::from_bytes_canonical(&wire).unwrap(),
+            proof
+        );
+        std::println!(
+            "{:>3} | {:>6} | {:>7} | {:>12.1} | {:>10.2} | {:>11} | {:>12} | {:>12} | {:>12}",
+            k,
+            proof.num_leaf_shards(),
+            proof.num_shard_batches(),
+            prove_ms,
+            verify_ms,
+            wire.len(),
+            k * profile.raw_signature_bytes(),
+            k * SLH_DSA_128S_BYTES,
+            k * SLH_DSA_128F_BYTES
+        );
+        proof
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(feature = "std")]
+    fn bench_pcs_open_verify() {
+        for num_vars in [18usize, 20, 22] {
+            let evals: Vec<Goldilocks> = (0..(1usize << num_vars))
+                .map(|i| {
+                    Goldilocks::from_u64_reduced((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                })
+                .collect();
+            let t = std::time::Instant::now();
+            let (comm, state) = whir_commit(&evals, &make_seed(5));
+            let commit_ms = t.elapsed().as_secs_f64() * 1000.0;
+            let point: Vec<GoldilocksExt4> = (0..num_vars)
+                .map(|k| {
+                    ext4_sample(
+                        (k as u64 + 1) * 31337,
+                        (k as u64 + 5) * 4242,
+                        (k as u64 + 9) * 1717,
+                        (k as u64 + 13) * 9001,
+                    )
+                })
+                .collect();
+            let val = mle_eval_base_at_ext4(&evals, &point);
+            let mut open_ms = f64::MAX;
+            let mut proof = None;
+            for _ in 0..5 {
+                let mut tr = fresh_test_transcript();
+                let t = std::time::Instant::now();
+                let p = whir_open(&state, &point, val, &mut tr);
+                open_ms = open_ms.min(t.elapsed().as_secs_f64() * 1000.0);
+                proof = Some(p);
+            }
+            let proof = proof.unwrap();
+            let mut verify_ms = f64::MAX;
+            for _ in 0..50 {
+                let mut tr = fresh_test_transcript();
+                let t = std::time::Instant::now();
+                assert!(whir_verify(&comm, num_vars, &point, val, &proof, &mut tr));
+                verify_ms = verify_ms.min(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let mut bytes = Vec::new();
+            proof.push_bytes(&mut bytes);
+            std::println!(
+                "PCS num_vars={num_vars}: commit_ms={commit_ms:.1} open_ms(min of 5)={open_ms:.1} verify_ms(min of 50)={verify_ms:.3} proof_B={}",
+                bytes.len()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(feature = "std")]
+    fn bench_agg_jorts() {
+        let profile = AggSigProfile::JortsPoseidon2;
+        bench_header("JortsPoseidon2, default config (one shard)");
+        for k in [8usize, 16, 32] {
+            bench_row(profile, k, None, None);
+        }
+        bench_header("JortsPoseidon2, max_signers_per_shard = 4, one shard per batch");
+        for k in [8usize, 16, 32] {
+            bench_row(profile, k, Some(4), Some(1));
+        }
+        bench_header("JortsPoseidon2, max_signers_per_shard = 4, up to 8 shards per batch");
+        for k in [8usize, 16, 32] {
+            bench_row(profile, k, Some(4), Some(8));
+        }
+
+        let msg = b"agg-bench-shared-message";
+        let (pks, sigs) = bench_keys_and_sigs(profile, 16, msg);
+        let mode = SigningMode::SharedMessage(msg);
+        let idx_l: Vec<usize> = (0..8).collect();
+        let idx_r: Vec<usize> = (8..16).collect();
+        let bm_l = SignerBitmap::from_active_indices(16, &idx_l).unwrap();
+        let bm_r = SignerBitmap::from_active_indices(16, &idx_r).unwrap();
+        let pa = aggregate_signatures(&pks, &bm_l, &mode, &sigs[0..8], make_seed(1)).unwrap();
+        let pb = aggregate_signatures(&pks, &bm_r, &mode, &sigs[8..16], make_seed(2)).unwrap();
+        let tm = std::time::Instant::now();
+        let pm = merge_aggregates(&pks, &mode, &pa, &pb).unwrap();
+        let merge_ms = tm.elapsed().as_secs_f64() * 1000.0;
+        let verify_ms = median_verify_ms(&pks, &mode, &pm);
+        std::println!(
+            "\nmerge_aggregates(K=8, K=8): merge_ms={:.2} verify_ms={:.2} left_B={} right_B={} merged_B={}",
+            merge_ms,
+            verify_ms,
+            pa.to_bytes().len(),
+            pb.to_bytes().len(),
+            pm.to_bytes().len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(feature = "std")]
+    fn bench_agg_corduroy_k8() {
+        bench_header("CorduroyPoseidon2, default config (8 signers per shard, 2 shards per batch)");
+        bench_row(AggSigProfile::CorduroyPoseidon2, 8, None, None);
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(feature = "std")]
+    fn bench_agg_corduroy_k16() {
+        bench_header("CorduroyPoseidon2, default config (8 signers per shard, 2 shards per batch)");
+        bench_row(AggSigProfile::CorduroyPoseidon2, 16, None, None);
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(feature = "std")]
+    fn bench_agg_corduroy_k32() {
+        bench_header("CorduroyPoseidon2, default config (8 signers per shard, 2 shards per batch)");
+        bench_row(AggSigProfile::CorduroyPoseidon2, 32, None, None);
+    }
+}
