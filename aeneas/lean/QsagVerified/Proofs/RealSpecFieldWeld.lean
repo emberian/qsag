@@ -128,18 +128,17 @@ theorem goldilocks_inv_or_zero_refines_qsag (a : goldilocks.Goldilocks) :
       goldilocksAbs y = Qsag.Goldilocks.inv (goldilocksAbs a) ∧
       y.val < Qsag.goldilocksPrime := by
   obtain ⟨y, hy, hv, hlt, hz⟩ := goldilocks_inv_or_zero_spec a
-  refine ⟨y, hy, ?_, hlt⟩
-  apply Qsag.Goldilocks.ext
-  by_cases ha : a.val % GoldilocksP = 0
-  · have hy0 := hz ha
-    subst y
-    simp [goldilocksAbs, Qsag.Goldilocks.inv, Qsag.Goldilocks.ofNat,
-      Qsag.Goldilocks.zero, ← goldilocksP_eq, ha]
-  · change y.val % Qsag.goldilocksPrime = _
-    rw [Nat.mod_eq_of_lt hlt]
-    unfold Qsag.Goldilocks.inv
-    have hane : (goldilocksAbs a).val ≠ 0 := ha
-    rw [if_neg hane, Qsag.Goldilocks.ofNat_val,
+  rw [goldilocksP_eq] at hv hlt hz
+  refine ⟨y, hy, Qsag.Goldilocks.ext ?_, hlt⟩
+  show y.val % Qsag.goldilocksPrime = (Qsag.Goldilocks.inv (goldilocksAbs a)).val
+  rw [Nat.mod_eq_of_lt hlt]
+  unfold Qsag.Goldilocks.inv
+  by_cases ha : a.val % Qsag.goldilocksPrime = 0
+  · have hav : (goldilocksAbs a).val = 0 := ha
+    rw [ite_eq_left_of_eq_true _ _ (eq_true hav), hz ha]
+    rfl
+  · have hav : ¬ (goldilocksAbs a).val = 0 := ha
+    rw [ite_eq_right_of_eq_false _ _ (eq_false hav), Qsag.Goldilocks.ofNat_val,
       Qsag.modPowFuel_eq_pow_mod 64 _ _ _ (by decide), Nat.mod_mod]
     exact hv
 
