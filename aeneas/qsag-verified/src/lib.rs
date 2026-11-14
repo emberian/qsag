@@ -17,6 +17,12 @@
 
 pub mod authenticated_belt;
 pub use authenticated_belt::{VerifiedBeltQuorumGuard, BeltQuorumStepInput, BeltQuorumStepOutput, BeltAuthError, custodian_ack_tag, wal_receipt_tag};
+pub mod belt_latch_kernel;
+pub use belt_latch_kernel::{
+    belt_latch_digits_eq, BeltLatchBindOutcome, BeltLatchBindRequest, BeltLatchDigits,
+    BeltLatchKernel, BeltLatchKernelError, BeltLatchKernelRecord, BELT_LATCH_MAX_CAPACITY_LIMIT,
+    BELT_LATCH_MAX_DIGITS, BELT_LATCH_MAX_EPOCH_JUMP,
+};
 pub mod cred_and_hd_guards;
 pub mod fips205;
 pub mod fts_spn_guard;
