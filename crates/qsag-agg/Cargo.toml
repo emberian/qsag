@@ -1,0 +1,18 @@
+[package]
+name = "qsag-agg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Hem post-quantum K-to-1 hash signature aggregation over GoldilocksExt4: multilinear sumcheck with WHIR rate-escalated Steiner multiproofs"
+
+[features]
+default = ["std"]
+std = ["qsag-asm/std"]
+
+[dependencies]
+qsag-asm = { path = "../qsag-asm", default-features = false }
+
+[dev-dependencies]
+# Reference implementation whose internal matrix is analysed by its own unit tests.
+qsag-accel = { path = "../qsag-accel" }
