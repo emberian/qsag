@@ -119,6 +119,7 @@ namespace Qsag
 
 attribute [-instance] UInt8.instLawfulEqOrd UInt8.instLawfulOrderOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd BitVec.instTransOrd
 set_option autoImplicit false
+set_option maxHeartbeats 2000000
 
 /-! ## 1. Fixed-Width `BitVec ↔ Bytes` Bijections, Product Sums & `Tower128` Schwartz-Zippel Bound -/
 
@@ -4096,6 +4097,38 @@ theorem slhForgeryWins_rejects_queried_message {AdvState : Type}
 /-- **Inhabitedness of the winning predicate and of the extracted witness**: on `slhDsaShake128f`, a
     forger that outputs a genuine signature on a message no session carried into Round 3 satisfies
     `slhForgeryWins`, and `slhForgeryHashGameWitness_of_wins` returns a witness for it. -/
+private theorem inhabited_slhForgeryWins_for (p : Fips205Params) (hWf : p.wellFormed = true) :
+    let seedSh : RssByteShares := ⟨List.replicate 16 1, List.replicate 16 2, List.replicate 16 3⟩
+    let prfSh : RssByteShares := ⟨List.replicate 16 4, List.replicate 16 5, List.replicate 16 6⟩
+    let pkSeed : List UInt8 := List.replicate 16 7
+    let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
+    let pk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2
+    let clInit : RealClusterState SlhPublicKey RssPartyKeyShare :=
+      ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+       dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
+    let mStar : List UInt8 := [0x42, 0x99]
+    let forgeOut : ExecTranscript Unit → List UInt8 × ByteArray :=
+      fun _ => (mStar, packWireBytes (encodeSlhSig (slhSignInternal p mStar sk [])))
+    slhForgeryWins p pk forgeOut ⟨(), []⟩ = true ∧
+    Nonempty (SlhForgeryHashGameWitness p sk clInit forgeOut ⟨(), []⟩) := by
+  intro seedSh prfSh pkSeed sk pk clInit mStar forgeOut
+  have hDec : decodeSlhSig p (unpackWireBytes (forgeOut ⟨(), []⟩).2) =
+      some (slhSignInternal p mStar sk []) := by
+    show decodeSlhSig p (unpackWireBytes (packWireBytes (encodeSlhSig (slhSignInternal p mStar sk [])))) =
+      some (slhSignInternal p mStar sk [])
+    rw [unpackWireBytes_packWireBytes]
+    exact decodeSlhSig_encodeSlhSig (slhSignInternal_wellTyped p mStar sk [])
+  have hVer : slhVerifyInternal p mStar (slhSignInternal p mStar sk []) pk = true :=
+    slhVerifyInternal_slhSignInternal p hWf
+      (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed mStar []
+  have hWin : slhForgeryWins p pk forgeOut ⟨(), []⟩ = true := by
+    unfold slhForgeryWins
+    rw [hDec]
+    exact Bool.and_eq_true_iff.mpr ⟨hVer, rfl⟩
+  exact ⟨hWin, ⟨slhForgeryHashGameWitness_of_wins p hWf
+    (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed clInit forgeOut ⟨(), []⟩ hWin⟩⟩
+
+
 theorem inhabited_slhForgeryWins :
     let p := slhDsaShake128f
     let seedSh : RssByteShares := ⟨List.replicate 16 1, List.replicate 16 2, List.replicate 16 3⟩
@@ -4110,23 +4143,8 @@ theorem inhabited_slhForgeryWins :
     let forgeOut : ExecTranscript Unit → List UInt8 × ByteArray :=
       fun _ => (mStar, packWireBytes (encodeSlhSig (slhSignInternal p mStar sk [])))
     slhForgeryWins p pk forgeOut ⟨(), []⟩ = true ∧
-    Nonempty (SlhForgeryHashGameWitness p sk clInit forgeOut ⟨(), []⟩) := by
-  intro p seedSh prfSh pkSeed sk pk clInit mStar forgeOut
-  have hDec : decodeSlhSig p (unpackWireBytes (forgeOut ⟨(), []⟩).2) =
-      some (slhSignInternal p mStar sk []) := by
-    show decodeSlhSig p (unpackWireBytes (packWireBytes (encodeSlhSig (slhSignInternal p mStar sk [])))) =
-      some (slhSignInternal p mStar sk [])
-    rw [unpackWireBytes_packWireBytes]
-    exact decodeSlhSig_encodeSlhSig (slhSignInternal_wellTyped p mStar sk [])
-  have hVer : slhVerifyInternal p mStar (slhSignInternal p mStar sk []) pk = true :=
-    slhVerifyInternal_slhSignInternal p slhDsaShake128f_wellFormed
-      (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed mStar []
-  have hWin : slhForgeryWins p pk forgeOut ⟨(), []⟩ = true := by
-    unfold slhForgeryWins
-    rw [hDec]
-    exact Bool.and_eq_true_iff.mpr ⟨hVer, rfl⟩
-  exact ⟨hWin, ⟨slhForgeryHashGameWitness_of_wins p slhDsaShake128f_wellFormed
-    (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed clInit forgeOut ⟨(), []⟩ hWin⟩⟩
+    Nonempty (SlhForgeryHashGameWitness p sk clInit forgeOut ⟨(), []⟩) :=
+  inhabited_slhForgeryWins_for slhDsaShake128f slhDsaShake128f_wellFormed
 
 /-- Forgery-count transfer through the root-hit event, with the commitment-hop gap explicit. -/
 private theorem count_transfer_with_coin_gap {cR cI bR bD card num : Nat} (hCard : 0 < card)
@@ -4311,7 +4329,7 @@ private theorem reconstructRssBytes_masked_eq :
       b0.length = b1.length →
       reconstructRssBytes ⟨b0, b1, xorByteStream s (xorByteStream b0 b1)⟩ = s
   | [], [], [], _, _ => rfl
-  | x :: xs, u :: us, v :: vs, h1, h2 => by
+  | x :: xs, u :: us, v :: tailV, h1, h2 => by
     simp only [reconstructRssBytes, xorByteStream, List.zipWith_cons_cons, List.cons.injEq]
     refine ⟨?_, reconstructRssBytes_masked_eq (Nat.succ.inj h1) (Nat.succ.inj h2)⟩
     apply UInt8.eq_of_toBitVec_eq
@@ -4837,6 +4855,42 @@ theorem threshold_slh_output_perfect_quorum_privacy
     Exhibits two distinct 2-of-3 RSS quorums (`cIdx = 0` vs `cIdx = 2`, i.e., `.p12 ≠ .p01`) with
     distinct secret sharings AND two distinct 2-of-3 Goldilocks Shamir quorums (`{1, 2} ≠ {2, 3}`)
     with distinct share evaluations emitting bit-identical `slhDsaShake128f` wire `ByteArray`s! -/
+private theorem inhabited_threshold_slh_quorum_privacy_for
+    (p : Fips205Params) (hWf : p.wellFormed = true) :
+    let seed₁ : RssByteShares := ⟨List.replicate 16 1, List.replicate 16 2, List.replicate 16 3⟩
+    let seed₂ : RssByteShares := ⟨List.replicate 16 7, List.replicate 16 7, List.replicate 16 0⟩
+    let prf₁  : RssByteShares := ⟨List.replicate 16 5, List.replicate 16 0, List.replicate 16 0⟩
+    let prf₂  : RssByteShares := ⟨List.replicate 16 0, List.replicate 16 5, List.replicate 16 0⟩
+    seed₁ ≠ seed₂ ∧
+    reconstructRssBytes seed₁ = reconstructRssBytes seed₂ ∧
+    reconstructRssBytes prf₁ = reconstructRssBytes prf₂ ∧
+    shamirQuorumShares shamirGoldilocksQuorum12.pts [[Goldilocks.ofNat 5, Goldilocks.ofNat 7]] ≠
+      shamirQuorumShares shamirGoldilocksQuorum23.pts [[Goldilocks.ofNat 5, Goldilocks.ofNat 7]] ∧
+    (∀ (pkSeed msg optRand : List UInt8) (tape₁ tape₂ : RssSlhSessionTape p.sigBytes),
+      let pk := (slhKeygenInternal p (reconstructRssBytes seed₁) (reconstructRssBytes prf₁) pkSeed).2
+      let reqs₁ : Nat → SessionScheduleReq := fun _ => ⟨0, 0, msg, optRand, [1, 2]⟩
+      let reqs₂ : Nat → SessionScheduleReq := fun _ => ⟨0, 0, msg, optRand, [0, 1]⟩
+      let cl₁ : RealClusterState SlhPublicKey RssPartyKeyShare :=
+        ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+         dealHonestRssVault ⟨0, by decide⟩ seed₁ prf₁⟩
+      let cl₂ : RealClusterState SlhPublicKey RssPartyKeyShare :=
+        ⟨⟨pk, 2, 3, [2], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
+         dealHonestRssVault ⟨2, by decide⟩ seed₂ prf₂⟩
+      (execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4)
+        (passiveRushingAdv p pk reqs₁ 4) cl₁ 0 tape₁).2.2.outcome =
+      (execRealSession (rssSlhInteractiveProtocol p ⟨2, by decide⟩ 4)
+        (passiveRushingAdv p pk reqs₂ 4) cl₂ 0 tape₂).2.2.outcome) := by
+  intro seed₁ seed₂ prf₁ prf₂
+  have hSeedEq : reconstructRssBytes seed₁ = reconstructRssBytes seed₂ := by decide +kernel
+  have hPrfEq : reconstructRssBytes prf₁ = reconstructRssBytes prf₂ := by decide +kernel
+  refine ⟨by decide +kernel, hSeedEq, hPrfEq, by decide +kernel, ?_⟩
+  intro pkSeed msg optRand tape₁ tape₂ pk reqs₁ reqs₂ cl₁ cl₂
+  have hPriv := (threshold_slh_output_perfect_quorum_privacy (R₁ := Goldilocks) (R₂ := Goldilocks)
+    p hWf pkSeed msg optRand).2.1
+    ⟨0, by decide⟩ ⟨2, by decide⟩ 4 (by decide) ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ ⟨rfl, rfl⟩
+    rfl rfl hSeedEq.symm hPrfEq.symm tape₁ tape₂
+  exact hPriv.2
+
 theorem inhabited_threshold_slh_quorum_privacy :
     let p := slhDsaShake128f
     let seed₁ : RssByteShares := ⟨List.replicate 16 1, List.replicate 16 2, List.replicate 16 3⟩
@@ -4861,17 +4915,8 @@ theorem inhabited_threshold_slh_quorum_privacy :
       (execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4)
         (passiveRushingAdv p pk reqs₁ 4) cl₁ 0 tape₁).2.2.outcome =
       (execRealSession (rssSlhInteractiveProtocol p ⟨2, by decide⟩ 4)
-        (passiveRushingAdv p pk reqs₂ 4) cl₂ 0 tape₂).2.2.outcome) := by
-  intro p seed₁ seed₂ prf₁ prf₂
-  have hSeedEq : reconstructRssBytes seed₁ = reconstructRssBytes seed₂ := by decide +kernel
-  have hPrfEq : reconstructRssBytes prf₁ = reconstructRssBytes prf₂ := by decide +kernel
-  refine ⟨by decide +kernel, hSeedEq, hPrfEq, by decide +kernel, ?_⟩
-  intro pkSeed msg optRand tape₁ tape₂ pk reqs₁ reqs₂ cl₁ cl₂
-  have hPriv := (threshold_slh_output_perfect_quorum_privacy (R₁ := Goldilocks) (R₂ := Goldilocks)
-    p slhDsaShake128f_wellFormed pkSeed msg optRand).2.1
-    ⟨0, by decide⟩ ⟨2, by decide⟩ 4 (by decide) ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ ⟨rfl, rfl⟩ ⟨rfl, rfl⟩
-    rfl rfl hSeedEq.symm hPrfEq.symm tape₁ tape₂
-  exact hPriv.2
+        (passiveRushingAdv p pk reqs₂ 4) cl₂ 0 tape₂).2.2.outcome) :=
+  inhabited_threshold_slh_quorum_privacy_for slhDsaShake128f slhDsaShake128f_wellFormed
 
 /-! ## 6. Crown-Jewel Theorem 4: `#tooth` Mutation Refusals (Concrete Attacks When Guards Are Removed) -/
 
@@ -4978,6 +5023,10 @@ private theorem sharedPreCutBarrier_forged_one
   refine (ite_bne_self_false _ _ _).trans ?_
   dsimp only [deriveExpectedGateWires, List.range, List.range.loop, List.map]
   rfl
+
+-- Keep symbolic cryptographic operations opaque to unification in the large trace proofs.
+attribute [local irreducible] round1NonceCommit slhPkDigest slhReqDigest
+  deriveExpectedGateWire computeHonestChiWord
 
 /-- **`#tooth` Theorem 4a (`tooth_skipping_pre_cut_barrier_leaks_key_bit`)**:
     Proves the Mandatory Pre-Cut Consistency Barrier in `rssSlhInteractiveProtocol` is load-bearing:
@@ -6198,6 +6247,54 @@ theorem rss_active_malicious_threshold_sig_hedged_bound
     ((active_malicious_threshold_sig_abort_or_exact_hedged_dist p hWf run hornerTagScheme adv
       encode msgPrime).2.1 D)
     (rss_active_tag_forgery_count_le deg adv hDeg)
+
+/-! ### Production coin framing
+
+These are the byte-level commitments used by `run_commit_and_open_coin_with_hook` in
+`preprocessing.rs`. They are deliberately separate from the legacy 24-byte RSS shell above:
+that shell's hiding-game theorem does not yet reduce to this 32-byte production coin. -/
+
+structure ProductionCoinContext where
+  sessionId : BitVec 256
+  phaseLabel : List UInt8
+  transcriptDigest : BitVec 256
+
+def productionCoinCommitCustom : List UInt8 := [0x51, 0x53, 0x41, 0x47, 0x2e, 0x43, 0x4f, 0x49, 0x4e, 0x2e, 0x43, 0x4f, 0x4d, 0x4d, 0x49, 0x54, 0x2f, 0x76, 0x31]
+def productionCoinDeriveCustom : List UInt8 := [0x51, 0x53, 0x41, 0x47, 0x2e, 0x43, 0x4f, 0x49, 0x4e, 0x2e, 0x44, 0x45, 0x52, 0x49, 0x56, 0x45, 0x2f, 0x76, 0x31]
+
+def productionCoinCommitFrame (ctx : ProductionCoinContext) (party : UInt64)
+    (share : BitVec 256) : List UInt8 :=
+  encodeMultiFrame [bvToFixedBytes 32 ctx.sessionId, ctx.phaseLabel,
+    bvToFixedBytes 32 ctx.transcriptDigest, (bvToFixedBytes 8 party.toBitVec).reverse,
+    bvToFixedBytes 32 share]
+
+def productionCoinCommit (ctx : ProductionCoinContext) (party : UInt64)
+    (share : BitVec 256) : List UInt8 :=
+  cshake256Bytes productionCoinCommitCustom (productionCoinCommitFrame ctx party share)
+
+def productionCoinDerive (ctx : ProductionCoinContext) (combined : BitVec 256) : List UInt8 :=
+  cshake256Bytes productionCoinDeriveCustom
+    (encodeMultiFrame [bvToFixedBytes 32 ctx.sessionId, ctx.phaseLabel,
+      bvToFixedBytes 32 ctx.transcriptDigest, bvToFixedBytes 32 combined])
+
+/-- A changed accepted opening yields an explicit cSHAKE collision on framed inputs. -/
+def productionCoinCommit_binding_or_collision (ctx : ProductionCoinContext) (party : UInt64)
+    (a b : BitVec 256) (h : productionCoinCommit ctx party a = productionCoinCommit ctx party b) :
+    PSum (a = b) (HashCollisionWitness (cshake256Bytes productionCoinCommitCustom)) :=
+  if same : productionCoinCommitFrame ctx party a = productionCoinCommitFrame ctx party b then
+    .inl (by
+      have fields := encodeMultiFrame_injective same
+      have bytes : bvToFixedBytes 32 a = bvToFixedBytes 32 b := by
+        simpa only [List.cons.injEq, true_and, and_true] using fields
+      have recovered := congrArg (fixedBytesToBv 32) bytes
+      simpa only [fixedBytesToBv_bvToFixedBytes] using recovered)
+  else .inr ⟨productionCoinCommitFrame ctx party a, productionCoinCommitFrame ctx party b, same, h⟩
+
+/-- Commit and derive domains are distinct, independently of the byte framing. -/
+theorem tooth_production_coin_domains_distinct :
+    productionCoinCommitCustom ≠ productionCoinDeriveCustom := by
+  unfold productionCoinCommitCustom productionCoinDeriveCustom
+  decide +kernel
 
 end Qsag
 end

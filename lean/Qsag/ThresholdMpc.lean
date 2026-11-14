@@ -17,25 +17,23 @@ DKG, resharing, and Simplex quorum safety live in `Qsag.MaliciousSecurity`):
 4. Checked stateless & production Rust-exact threshold paths (`HashSigs` Section 6 weld:
    `thresholdStatelessCheckedSign_eq_evalStatelessCheckedSign`,
    `thresholdProductionStatelessSign_eq_evalProductionStatelessSign`,
-   `thresholdProductionStatefulSign_eq_evalProductionStatefulSign`,
-   `shamir_poseidon2_active_online_statelessSign_eq_evalProductionStatelessSign`) covering
+   `thresholdProductionStatefulSign_eq_evalProductionStatefulSign`) covering
    `H_INTERNAL` vs `H_MSG`, XOF-derived FORS indices, `(j, u)` FORS ADRS, `kp0` FORS Merkle
-   `keyPair`, and `Option`-propagating active SPDZ `MacCheck` abort in online Shamir signing
-   (`execActiveSharedPow7Round_sound_or_pins_key`).
+   `keyPair`. Separately, `execActiveSharedPow7Round_sound_or_pins_key` checks an active SPDZ
+   gate and propagates MAC failure as `none`; whole-signer active Shamir composition remains open.
 5. Threshold FIPS 205 output equal to the single-signer output for every correct run
    (`threshold_sig_deterministic_and_matches_single_signer`; a functional-correctness and
    determinism statement about runs that carry a proof of oracle correctness, with no adversary
    and no probability space): share-level `Keccak`/`SHAKE256`
    for 2-of-3 RSS (`SlhThresholdRun.ofRss`), and quorum-recombination `SlhMpcOracles` interface for
    `(t, n)` Shamir FIPS 205 (`SlhThresholdRun.ofShamir`, while `(t, n)` Shamir share-level `Poseidon2`
-   signing is realized end-to-end by `mkShamirPoseidon2MpcOracles` and
-   `mkActiveShamirProductionPoseidon2MpcOracles`).
+   honest signing is realized by `mkShamirPoseidon2MpcOracles`).
 6. One actively corrupt party in a hedged signing run
    (`active_malicious_threshold_sig_abort_or_exact_hedged_dist`): every run aborts, releases the
    exact single-signer signature on hedge `honestCoin ⊕ corruptCoin`, or is a counted tag forgery;
    the released law is the single-signer hedged law restricted to the corrupt party's release
-   set, and the abort pattern is independent of the key. Welded to interactive protocol transcripts
-   in `Qsag.RssSlhFullSecurity`.
+   set, and the abort pattern is independent of the key in that game. The strategy-to-interactive
+   transcript refinement is a separate obligation, not proved by this abstract game.
 -/
 
 public import Qsag.Goldilocks
@@ -1473,6 +1471,7 @@ private theorem mpcCshakeThChainSharedRss_simulates (pkSeed : List UInt8)
     refine ⟨ihWf, ?_⟩
     rw [ihRec, hNextRec, hFrameRec, thChainF_eq, thCall_eq]; rfl
 
+set_option maxHeartbeats 800000 in
 theorem mkRssCshakePqHashMpcOracles_matchesKey
     {skSeedSh skPrfSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (hPrfWf : skPrfSh.WellFormed)
     (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
@@ -2014,6 +2013,7 @@ theorem execActiveSharedPow7Round_sound_or_pins_key
       rw [← hdTrueEq]
       intro hEq
       have hEq' : CommRingOps.add dTrue deltaD = CommRingOps.add dTrue Goldilocks.zero := by
+        change CommRingOps.add dTrue deltaD = CommRingOps.add dTrue CommRingOps.zero
         rw [LawfulCommRing.add_zero]; exact hEq
       exact hZeroD (LawfulCommRing.add_left_cancel hEq')
     have hMacDLen : (shareZipSub macX macR).length = alphaShares.length := by
@@ -2023,6 +2023,7 @@ theorem execActiveSharedPow7Round_sound_or_pins_key
           (GoldilocksExt2.ofBase (Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh))) := by
       rw [ringListSum_zipSub (hMacXLen.trans hMacRLen.symm), hMacXSum, hMacRSum,
           ← LawfulCommRing.mul_sub, ← GoldilocksExt2.ofBase_sub]
+      rfl
     have hSubAddComm : ∀ (A B C : GoldilocksExt2),
         CommRingOps.add (CommRingOps.sub A B) C = CommRingOps.sub (CommRingOps.add A C) B := fun A B C => by
       rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.sub_eq_add_neg,
@@ -2048,7 +2049,8 @@ theorem execActiveSharedPow7Round_sound_or_pins_key
       rw [← hdTrueEq, ← GoldilocksExt2.ofBase_sub]
       congr 1
       change CommRingOps.sub (CommRingOps.add dTrue deltaD) dTrue = deltaD
-      rw [LawfulCommRing.add_comm dTrue deltaD, LawfulCommRing.add_sub_cancel_right]
+      rw [LawfulCommRing.add_comm dTrue deltaD, LawfulCommRing.sub_eq_add_neg,
+          LawfulCommRing.add_assoc, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
     rw [hDiffEq] at hPin
     exact ⟨hZeroD, hPin⟩
 
@@ -4426,6 +4428,252 @@ theorem rss_active_abort_pattern_depends_only_on_corrupt_view
     · cases tags.isHonest
         ((strategy (q.outsiderView seed₂) (q.outsiderView prf₂)).deviation (BitVec.ofFin honestCoin)) <;> rfl
   · rfl
+
+
+/-! ## Production HashSigs cut interface
+
+The extra FORS coordinate is essential: flattening `(j,u)` into one legacy
+coordinate changes the PRF domain. These routines consume only public data and
+cut outputs; a secret key appears only in their refinement propositions.
+-/
+structure ProductionPqHashMpcOracles extends PqHashMpcOracles where
+  evalIndexedForsReveal : UInt64 → Nat → Nat → Nat → List UInt8
+  evalIndexedForsLeafHash : UInt64 → Nat → Nat → Nat → List UInt8
+
+def ProductionPqHashMpcOracles.MatchesKey (o : ProductionPqHashMpcOracles)
+    (suite : TweakableHashSuite) (sk : PqSecretKey) : Prop :=
+  o.toPqHashMpcOracles.MatchesKey suite sk ∧
+  (∀ tree kp j u, o.evalIndexedForsReveal tree kp j u = forsIndexedSecretLeaf suite sk tree kp j u) ∧
+  (∀ tree kp j u, o.evalIndexedForsLeafHash tree kp j u = forsIndexedLeafFn suite sk tree kp j u)
+
+def mpcComputeProductionForsPk (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (tree0 : UInt64) (kp0 : Nat) : List UInt8 :=
+  let kpU32 := UInt32.ofNat kp0
+  let roots := (List.range params.forsTrees).map fun j =>
+    computeMerkleNodeKp suite pkSeed 0 tree0 .forsTree kpU32
+      (o.evalIndexedForsLeafHash tree0 kp0 j) params.forsHeight j 0
+  thTweakTl suite pkSeed ⟨0, tree0, .forsRoots, kpU32, 0, 0⟩ roots
+
+def mpcBuildProductionForsOpenings (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (tree0 : UInt64) (kp0 : Nat) (idxs : List Nat) : List ForsTreeOpening :=
+  let kpU32 := UInt32.ofNat kp0
+  (List.range params.forsTrees).map fun j =>
+    let idxJ := idxs.getD j 0
+    { secretVal := o.evalIndexedForsReveal tree0 kp0 j idxJ
+      authPath  := buildMerkleAuthPathKp suite pkSeed 0 tree0 .forsTree kpU32
+                     (o.evalIndexedForsLeafHash tree0 kp0 j) params.forsHeight j 0 idxJ }
+
+def mpcSignProductionHypertreeLayers (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (pkRoot rRand : List UInt8) (maxGrind : Nat) :
+    Nat → Nat → List UInt8 → Nat → Option (List LayerXmssSig)
+  | _, _, _, 0 => some []
+  | layerIdx, globalIdx, curRoot, rem + 1 =>
+    let subLeaves := 2 ^ params.subtreeHeight
+    let kpIdx := globalIdx % subLeaves
+    let kpU32 := UInt32.ofNat kpIdx
+    let treeIdxNat := globalIdx / subLeaves
+    let treeIdx := UInt64.ofNat treeIdxNat
+    let layerU32 := UInt32.ofNat layerIdx
+    let grindRes :=
+      if params.statefulJorts && decide (layerIdx = 0) then
+        grindTswLeafCounterAux suite params.w params.ell1 params.targetSum
+          rRand pkSeed pkRoot curRoot treeIdx kpU32 0 maxGrind
+      else
+        grindTswInternalCounterAux suite params.w params.ell1 params.targetSum
+          pkSeed pkRoot curRoot layerU32 treeIdx kpU32 0 maxGrind
+    match grindRes with
+    | none => none
+    | some (ctr, digits, _) =>
+      let wotsChains := (List.range params.ell1).map fun r =>
+        let dr := digits.getD r 0
+        o.evalWotsChainEnd layerU32 treeIdx kpIdx r dr
+      let authPath := buildMerkleAuthPathKp suite pkSeed layerU32 treeIdx .tree 0
+        (mpcComputeWotsPk suite params o.toPqHashMpcOracles pkSeed layerU32 treeIdx) params.subtreeHeight 0 0 kpIdx
+      let nextRoot := mpcComputeXmssSubtreeRoot suite params o.toPqHashMpcOracles pkSeed layerU32 treeIdx
+      match mpcSignProductionHypertreeLayers suite params o pkSeed pkRoot rRand maxGrind (layerIdx + 1) treeIdxNat nextRoot rem with
+      | none => none
+      | some restSigs =>
+        some ({ tswCtr := ctr, wotsChains := wotsChains, authPath := authPath } :: restSigs)
+
+def mpcSignProductionHypertreeCore (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (pk : PqPublicKey) (msg mu rRand : List UInt8)
+    (leafGlobalIdx : Nat) (forsIdxs : Option (List Nat)) (maxGrind : Nat) : Option PqHashSig :=
+  let subLeaves := 2 ^ params.subtreeHeight
+  match (if params.statefulJorts then some ([], mu)
+         else
+           match forsIdxs with
+           | none => none
+           | some idxs =>
+             let kp0 := leafGlobalIdx % subLeaves
+             let tree0 := UInt64.ofNat (leafGlobalIdx / subLeaves)
+             some (mpcBuildProductionForsOpenings suite params o pkSeed tree0 kp0 idxs,
+                   mpcComputeProductionForsPk suite params o pkSeed tree0 kp0)) with
+  | none => none
+  | some (forsOpenings, curRoot) =>
+    match mpcSignProductionHypertreeLayers suite params o pkSeed pk.pkRoot rRand maxGrind 0 leafGlobalIdx curRoot params.numLayers with
+    | none => none
+    | some layerSigs =>
+      let sig : PqHashSig :=
+        { rRand := rRand
+          msgTswCtr := 0
+          leafGlobalIdx := leafGlobalIdx
+          forsOpenings := forsOpenings
+          layerSigs := layerSigs }
+      if verifyProductionPqHashSig suite params pk msg sig then some sig else none
+
+def mpcEvalProductionStatelessSign (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (msg optRand : List UInt8) (maxGrind : Nat) : Option PqHashSig :=
+  if params.statefulJorts || !params.productionWellFormed then none
+  else
+    let pk := derivePublicKeyMpc suite params o.toPqHashMpcOracles pkSeed
+    let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
+    let rRand := o.evalPrfMsg optRand mu
+    match deriveProductionStatelessInputs suite params rRand pk.pkSeed pk.pkRoot mu with
+    | none => none
+    | some (leafGlobalIdx, forsIdxs) =>
+      mpcSignProductionHypertreeCore suite params o pkSeed pk msg mu rRand leafGlobalIdx (some forsIdxs) maxGrind
+
+def mpcEvalProductionStatefulSign (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (pkSeed : List UInt8) (msg optRand : List UInt8) (epoch maxGrind : Nat) : Option PqHashSig :=
+  if !params.statefulJorts || !params.productionWellFormed || !params.productionLeafIdxInRange epoch then none
+  else
+    let pk := derivePublicKeyMpc suite params o.toPqHashMpcOracles pkSeed
+    let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
+    let rRand := o.evalPrfMsg optRand mu
+    mpcSignProductionHypertreeCore suite params o pkSeed pk msg mu rRand epoch none maxGrind
+
+private theorem production_mpc_fors_refines
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (tree : UInt64) (kp : Nat) (idxs : List Nat) :
+    mpcComputeProductionForsPk suite params o sk.pkSeed tree kp =
+      computeProductionForsPk suite params sk tree kp ∧
+    mpcBuildProductionForsOpenings suite params o sk.pkSeed tree kp idxs =
+      buildProductionForsOpenings suite params sk tree kp idxs := by
+  have hl : o.evalIndexedForsLeafHash tree kp = forsIndexedLeafFn suite sk tree kp :=
+    funext fun j => funext fun u => hm.2.2 tree kp j u
+  have hs : o.evalIndexedForsReveal tree kp = forsIndexedSecretLeaf suite sk tree kp :=
+    funext fun j => funext fun u => hm.2.1 tree kp j u
+  constructor
+  · simp only [mpcComputeProductionForsPk, computeProductionForsPk, hl]
+  · simp only [mpcBuildProductionForsOpenings, buildProductionForsOpenings, hl, hs]
+
+private theorem production_mpc_layers_refines
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (pkRoot rRand : List UInt8) (maxGrind : Nat) :
+    ∀ rem layer idx root,
+    mpcSignProductionHypertreeLayers suite params o sk.pkSeed pkRoot rRand maxGrind layer idx root rem =
+      signProductionHypertreeLayers suite params sk pkRoot rRand maxGrind layer idx root rem := by
+  intro rem
+  induction rem with
+  | zero => intros; rfl
+  | succ rem ih =>
+    intro layer idx root
+    have hw : mpcComputeWotsPk suite params o.toPqHashMpcOracles sk.pkSeed =
+        computeWotsPk suite params sk :=
+      funext fun l => funext fun t => funext fun k =>
+        mpcComputeWotsPk_eq suite params o.toPqHashMpcOracles sk hm.1 l t k
+    simp only [mpcSignProductionHypertreeLayers, signProductionHypertreeLayers,
+      hm.1.2.1, hw, mpcComputeXmssSubtreeRoot_eq suite params o.toPqHashMpcOracles sk hm.1, ih]
+    rfl
+
+private theorem production_mpc_core_refines
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (pk : PqPublicKey) (msg mu rRand : List UInt8)
+    (leaf : Nat) (idxs : Option (List Nat)) (maxGrind : Nat) :
+    mpcSignProductionHypertreeCore suite params o sk.pkSeed pk msg mu rRand leaf idxs maxGrind =
+      signProductionHypertreeCore suite params sk pk msg mu rRand leaf idxs maxGrind := by
+  have hf := production_mpc_fors_refines suite params o sk hm
+  simp only [mpcSignProductionHypertreeCore, signProductionHypertreeCore,
+    (fun tree kp => (hf tree kp []).1), (hf _ _ _).2, production_mpc_layers_refines suite params o sk hm]
+  rfl
+
+theorem thresholdProductionStatelessSign_eq_evalProductionStatelessSign
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (msg optRand : List UInt8) (maxGrind : Nat) :
+    mpcEvalProductionStatelessSign suite params o sk.pkSeed msg optRand maxGrind =
+      evalProductionStatelessSign suite params sk msg optRand maxGrind := by
+  have hp : derivePublicKeyMpc suite params o.toPqHashMpcOracles sk.pkSeed =
+      derivePublicKey suite params sk := by
+    unfold derivePublicKeyMpc
+    dsimp only
+    rw [mpcComputeXmssSubtreeRoot_eq suite params o.toPqHashMpcOracles sk hm.1]
+    rfl
+  simp only [mpcEvalProductionStatelessSign, evalProductionStatelessSign, hp, hm.1.1,
+    production_mpc_core_refines suite params o sk hm]
+  rfl
+
+theorem thresholdProductionStatefulSign_eq_evalProductionStatefulSign
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (o : ProductionPqHashMpcOracles) (sk : PqSecretKey)
+    (hm : o.MatchesKey suite sk) (msg optRand : List UInt8) (epoch maxGrind : Nat) :
+    mpcEvalProductionStatefulSign suite params o sk.pkSeed msg optRand epoch maxGrind =
+      evalProductionStatefulSign suite params sk msg optRand epoch maxGrind := by
+  have hp : derivePublicKeyMpc suite params o.toPqHashMpcOracles sk.pkSeed =
+      derivePublicKey suite params sk := by
+    unfold derivePublicKeyMpc
+    dsimp only
+    rw [mpcComputeXmssSubtreeRoot_eq suite params o.toPqHashMpcOracles sk hm.1]
+    rfl
+  simp only [mpcEvalProductionStatefulSign, evalProductionStatefulSign, hp, hm.1.1,
+    production_mpc_core_refines suite params o sk hm]
+
+
+/-- RSS implementation of the production FORS addresses. Only cut outputs are reconstructed. -/
+def mkRssProductionPqHashMpcOracles (skSeedSh skPrfSh : RssByteShares)
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    ProductionPqHashMpcOracles where
+  toPqHashMpcOracles := mkRssCshakePqHashMpcOracles skSeedSh skPrfSh pkSeed tape
+  evalIndexedForsReveal tree0 kp0 j u :=
+    let adrs : HashAdrs := ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, UInt32.ofNat j, UInt32.ofNat u⟩
+    let secSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                   (rssFrameSingleSecretCall tagPrf pkSeed adrs skSeedSh) (tape 0)
+    reconstructRssBytes secSh
+  evalIndexedForsLeafHash tree0 kp0 j u :=
+    let prfAdrs : HashAdrs := ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, UInt32.ofNat j, UInt32.ofNat u⟩
+    let secSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                   (rssFrameSingleSecretCall tagPrf pkSeed prfAdrs skSeedSh) (tape 0)
+    let treeAdrs : HashAdrs := ⟨0, tree0, .forsTree, UInt32.ofNat kp0, UInt32.ofNat j, UInt32.ofNat u⟩
+    let hashSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                    (rssFrameSingleSecretCall tagThF pkSeed treeAdrs secSh) (tape 1)
+    reconstructRssBytes hashSh
+
+set_option maxHeartbeats 800000 in
+ theorem mkRssProductionPqHashMpcOracles_matchesKey
+    {skSeedSh skPrfSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (hPrfWf : skPrfSh.WellFormed)
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    (mkRssProductionPqHashMpcOracles skSeedSh skPrfSh pkSeed tape).MatchesKey cshake256Suite
+      ⟨reconstructRssBytes skSeedSh, reconstructRssBytes skPrfSh, pkSeed⟩ := by
+  refine ⟨mkRssCshakePqHashMpcOracles_matchesKey hSeedWf hPrfWf pkSeed tape, ?_, ?_⟩
+  · intro tree0 kp0 j u
+    dsimp only [mkRssProductionPqHashMpcOracles]
+    obtain ⟨hFWf, hFRec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagPrf pkSeed _ hSeedWf
+    rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hFWf (tape 0)).2,
+        hFRec]
+    rfl
+  · intro tree0 kp0 j u
+    dsimp only [mkRssProductionPqHashMpcOracles]
+    obtain ⟨hF1Wf, hF1Rec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagPrf pkSeed _ hSeedWf
+    obtain ⟨hSecWf, hSecRec⟩ := reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF1Wf (tape 0)
+    obtain ⟨hF2Wf, hF2Rec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagThF pkSeed _ hSecWf
+    rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF2Wf (tape 1)).2,
+        hF2Rec, hSecRec, hF1Rec]
+    rfl
+
+theorem rss_production_stateless_sign_refines
+    (params : PqHashParams) {seed prf : RssByteShares}
+    (hs : seed.WellFormed) (hp : prf.WellFormed)
+    (pkSeed msg rand : List UInt8) (maxGrind : Nat)
+    (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    mpcEvalProductionStatelessSign cshake256Suite params
+      (mkRssProductionPqHashMpcOracles seed prf pkSeed tape) pkSeed msg rand maxGrind =
+      evalProductionStatelessSign cshake256Suite params
+        ⟨reconstructRssBytes seed, reconstructRssBytes prf, pkSeed⟩ msg rand maxGrind :=
+  thresholdProductionStatelessSign_eq_evalProductionStatelessSign _ _ _ _
+    (mkRssProductionPqHashMpcOracles_matchesKey hs hp pkSeed tape) _ _ _
 
 end Qsag
 end
