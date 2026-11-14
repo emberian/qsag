@@ -24,6 +24,7 @@
 //! The recipient accepts a received vector only if it equals the other vector
 //! or matches that digest. Two of the three contributions are honest, so an
 //! accepted vector is the honest one unless the hash collides.
+use crate::secret_buffer::SecretBuffer;
 use crate::voprf::{Error, SERVERS, Transport};
 use alloc::{vec, vec::Vec};
 use qsag_accel::{
@@ -241,7 +242,7 @@ impl<T: Transport> Engine<'_, T> {
         }
         let gates = xs.len();
         let me = self.party;
-        let mut out = vec![[0; SERVERS]; gates];
+        let mut out = SecretBuffer(vec![[0; SERVERS]; gates]);
         for ((z, x), y) in out.iter_mut().zip(xs).zip(ys) {
             for (c, slot) in z.iter_mut().enumerate() {
                 if c != me {
@@ -258,8 +259,8 @@ impl<T: Transport> Engine<'_, T> {
                 if j == i {
                     continue;
                 }
-                let mut mask = self.masks(i, j, gates);
-                for (z, &r) in out.iter_mut().zip(&mask) {
+                let mut mask = SecretBuffer(self.masks(i, j, gates));
+                for (z, &r) in out.iter_mut().zip(mask.iter()) {
                     z[i] = gl_add(z[i], r);
                 }
                 if j != me {
@@ -277,7 +278,7 @@ impl<T: Transport> Engine<'_, T> {
                             &mask,
                         ));
                     } else {
-                        for &v in &mask {
+                        for &v in mask.iter() {
                             put(message, v)
                         }
                     }
@@ -291,26 +292,28 @@ impl<T: Transport> Engine<'_, T> {
         );
         let layer = self.layer;
         self.layer = self.layer.checked_add(1).ok_or(Error::Counter)?;
-        let incoming = self.transport.exchange(phase, messages)?;
+        let incoming = SecretBuffer(self.transport.exchange(phase, messages)?);
         for j in 0..SERVERS {
             if j == me {
                 continue;
             }
-            let mut masked = decode_group(&self.context, layer, me, j, gates, &incoming)?;
-            for (z, &v) in out.iter_mut().zip(&masked) {
+            let mut masked = SecretBuffer(decode_group(&self.context, layer, me, j, gates, &incoming)?);
+            for (z, &v) in out.iter_mut().zip(masked.iter()) {
                 z[j] = gl_add(z[j], v);
             }
             ct_zeroize_u64s(&mut masked);
         }
-        Ok(out)
+        Ok(out.into_inner())
     }
     fn sbox(&mut self, x: &[Wire]) -> Result<Vec<Wire>, Error> {
-        let x2 = self.multiply(x, x)?;
-        let mut a = x2.clone();
+        let x2 = SecretBuffer(self.multiply(x, x)?);
+        let mut a = SecretBuffer(Vec::with_capacity(2 * x.len()));
         a.extend_from_slice(&x2);
-        let mut b = x.to_vec();
+        a.extend_from_slice(&x2);
+        let mut b = SecretBuffer(Vec::with_capacity(2 * x.len()));
+        b.extend_from_slice(x);
         b.extend_from_slice(&x2);
-        let middle = self.multiply(&a, &b)?;
+        let middle = SecretBuffer(self.multiply(&a, &b)?);
         self.multiply(&middle[..x.len()], &middle[x.len()..])
     }
     pub fn permute(&mut self, states: &mut [[Wire; 12]]) -> Result<(), Error> {
@@ -320,7 +323,7 @@ impl<T: Transport> Engine<'_, T> {
         for (tag, rounds) in [(0, 4), (1, 22), (2, 4)] {
             for round in 0..rounds {
                 let width = if tag == 1 { 1 } else { 12 };
-                let mut inputs = Vec::new();
+                let mut inputs = SecretBuffer(Vec::with_capacity(states.len() * width));
                 for st in states.iter_mut() {
                     for (lane, wire) in st.iter_mut().enumerate().take(width) {
                         public(
@@ -331,7 +334,7 @@ impl<T: Transport> Engine<'_, T> {
                         inputs.push(*wire);
                     }
                 }
-                let outputs = self.sbox(&inputs)?;
+                let outputs = SecretBuffer(self.sbox(&inputs)?);
                 for (st, chunk) in states.iter_mut().zip(outputs.chunks_exact(width)) {
                     st[..width].copy_from_slice(chunk);
                     linear(st, tag != 1);

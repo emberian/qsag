@@ -658,7 +658,9 @@ impl Server {
         })
     }
 }
-#[derive(Debug, PartialEq, Eq)]
+/// Client-side TOPRF outputs. `Debug` names only the public context and the
+/// faulty-server evidence; the outputs and receipt tags are wiped on drop.
+#[derive(PartialEq, Eq)]
 #[cfg_attr(test, derive(Clone))]
 pub struct Evaluation {
     values: Vec<[u8; 32]>,
@@ -667,6 +669,24 @@ pub struct Evaluation {
     input_digests: Vec<[u8; 32]>,
     context: Context,
     receipt_tags: Vec<[u8; 32]>,
+}
+impl fmt::Debug for Evaluation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Evaluation")
+            .field("items", &self.values.len())
+            .field("faulty_servers", &self.faulty_servers)
+            .field("context", &self.context)
+            .field("values", &"<REDACTED>")
+            .field("receipt_tags", &"<REDACTED>")
+            .finish()
+    }
+}
+impl Drop for Evaluation {
+    fn drop(&mut self) {
+        for value in self.values.iter_mut().chain(&mut self.receipt_tags) {
+            ct_zeroize_bytes(value);
+        }
+    }
 }
 /// Issuer-only receipt authentication secret, provisioned independently of the
 /// public TOPRF key. Share only with the issuer's authenticated channel adapter.
@@ -1472,6 +1492,25 @@ mod tests {
                 )
             });
             assert_ne!(target, prediction);
+        }
+    }
+
+    #[test]
+    fn evaluation_debug_redacts_outputs_and_receipt_tags() {
+        let key = PublicKey::test_key();
+        let evaluation = Evaluation {
+            values: vec![[0xA7; 32]],
+            faulty_servers: vec![3],
+            key: key.commitment(),
+            input_digests: vec![[0x11; 32]],
+            context: Context::new(key.commitment(), [7; 32], 0, 1, [6; 32]),
+            receipt_tags: vec![[0xB9; 32]],
+        };
+        let shown = std::format!("{evaluation:?}");
+        assert!(shown.contains("<REDACTED>") && shown.contains("faulty_servers: [3]"));
+        // Neither the output nor the tag byte appears in any radix Debug uses.
+        for byte in ["167", "a7", "A7", "185", "b9", "B9"] {
+            assert!(!shown.contains(byte), "{byte} leaked in {shown}");
         }
     }
 }
