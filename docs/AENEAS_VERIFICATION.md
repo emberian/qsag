@@ -102,7 +102,12 @@ workspaces are machine-generated artifacts; Rust changes require regeneration.
   quadratic sumcheck hypercube sum, cascade, and ascending Horner equivalence;
   `QsagWhirVerified/Proofs.lean` discharges all `loopFuel` slice invariants,
   bidirectional `Result.ok ... ↔ spec` theorems, and 10 `#tooth` mutation-sensitivity
-  and premise-inhabitedness witnesses.
+  and premise-inhabitedness witnesses. Both `AuditWhirMirAxioms.lean` (83 anchored
+  theorems) and `scripts/check_lean_policy.py` mechanically enforce 100% non-`tooth_*`
+  theorem-statement coverage across all 37 `.defnInfo` declarations in
+  `QsagWhirVerified/Funs.lean` (31 extracted Rust items plus 6 split `_loop` /
+  `_loop.body` helpers) in both the proof library and the 57-theorem six-kernel
+  `comparator.json` replay manifest.
 
 Every hand-written Lean file over 80 lines avoids file-wide `@[expose] public section`
 and stays within at most 12 `@[expose]` attributes (`scripts/check_lean_policy.py`).

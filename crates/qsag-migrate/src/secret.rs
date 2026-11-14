@@ -20,6 +20,14 @@ impl Wipe for u64 {
         ct_zeroize_u64s(values);
     }
 }
+impl Wipe for u128 {
+    fn wipe(&mut self) {
+        qsag_asm::volatile_fill(core::slice::from_mut(self), 0);
+    }
+    fn wipe_slice(values: &mut [Self]) {
+        qsag_asm::volatile_fill(values, 0);
+    }
+}
 impl<T: Wipe, const N: usize> Wipe for [T; N] {
     fn wipe(&mut self) {
         T::wipe_slice(self);

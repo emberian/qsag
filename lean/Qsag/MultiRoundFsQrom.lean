@@ -31,7 +31,10 @@ Constructive Lean 4.35 development for the multi-round QROM Fiat–Shamir reduct
    an accepting full transcript is at most `∑_{t=1..T} (badCard(r_t) / challengeCard(r_t))`.
 
 2. **State functions instantiated from `Qsag.AffineProximityGaps` (§1.1)**:
-   `affineMcaRbr` (flip bound proved from `welch_berlekamp_affine_proximity_gap`) and
+   `affineMcaRbrOf` (flip bound from any mutual correlated agreement bound `AffineMcaBound`;
+   `hem_johnson_fold_state_restoration_of_mca` instantiates it at the deployed Johnson-radius
+   rows, where the bound is a hypothesis), `affineMcaRbr` (the same with the bound proved from
+   `welch_berlekamp_affine_proximity_gap`) and
    `affineCommittedRbr` (flip bound proved from `committed_polynomial_pair_bad_lines_le_choose2`),
    composed into `affine_mca_state_restoration_soundness` and
    `affine_committed_pair_state_restoration_soundness` for statements without correlated
@@ -41,11 +44,13 @@ Constructive Lean 4.35 development for the multi-round QROM Fiat–Shamir reduct
    asymmetric cascade, per-stage affine fold with the `affine.rs` five-wire dual bridge
    (`hemBridgeFoldClaim`, verifier-computed `hemKernelFold`, `hem_bridge_fold_claim_eq_dot`),
    dual OOD pinning (`dual_ood_list_collision_bound`), and coset-query survival
-   (`far_codeword_coset_queries_survive_bound`). This model carries doomed-init,
-   accept-implies-live and honest completeness; its stage liveness is witnessed by decoded
-   polynomials listed in the transcript and it is NOT packaged as an `RbrStateFunction`: a flip
-   bound at the deployed Johnson radius needs `[CWYZ26]` Theorem 4.8, which is checked here only
-   through its finite side conditions (`checkWhirAffineWitness`).
+   (`far_codeword_coset_queries_survive_bound`). The statement language `HemStatementValid` is
+   an existential over polynomial witnesses and does not depend on any candidate list. The
+   model carries doomed-init, accept-implies-live and honest completeness; its stage liveness
+   is witnessed by decoded polynomials listed in the transcript and it is NOT packaged as an
+   `RbrStateFunction`: `tooth_hem_zero_cascade_weights_accept_false_claim` exhibits a flip, and
+   a flip bound at the deployed Johnson radius needs `[CWYZ26]` Theorem 4.8, which is checked
+   here only through its finite side conditions (`checkWhirAffineWitness`).
 
 4. **Multi-round Fiat–Shamir QROM reduction via unitary Measure-and-Reprogram (§3)**:
    the exact `(2 * Q + 1)`-branch telescoping identity over `QVec` / `GaussInt`, the projected
@@ -649,53 +654,76 @@ private theorem affineMca_accept_implies_live (D S : List F) (hSpos : 0 < S.leng
   · exact Or.inr hVer
   · exact Bool.noConfusion hVer
 
-private theorem affineMca_round_flip_bound (D S : List F) (d A : Nat)
-    (hD : D.Nodup) (hS : S.Nodup) (hAD : A ≤ D.length) (hWB : 2 * D.length + d + 1 < 3 * A)
+/-- **Mutual correlated agreement bound** for the affine fold of words on `D` with challenges
+    `(α, β) ∈ S × S`, degree bound `d` and agreement threshold `A`: for every pair of words
+    WITHOUT correlated agreement `≥ A - 1`, at most `bad` challenges admit a degree-`≤ d`
+    polynomial `A`-close to the fold word. This is the statement a proximity-gap theorem
+    supplies: `affineMcaBound_welch_berlekamp` proves it in the unique-decoding regime, and
+    `[CWYZ26]` Theorem 4.8 asserts it up to the Johnson radius. -/
+def AffineMcaBound (D S : List F) (d A bad : Nat) : Prop :=
+  ∀ x : (F → F) × (F → F), ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D →
+    ∀ L : List (Fin (prodPool S).length), L.Nodup →
+      (∀ ch ∈ L, ¬¬ ∃ P : List F, affineMcaAccepts D S d A x ch.1 P = true) →
+      L.length ≤ bad
+
+/-- The bound is monotone in the number of exceptional challenges. -/
+theorem AffineMcaBound.mono {D S : List F} {d A bad bad' : Nat}
+    (h : AffineMcaBound D S d A bad) (hLe : bad ≤ bad') : AffineMcaBound D S d A bad' :=
+  fun x hFar L hNd hEx => Nat.le_trans (h x hFar L hNd hEx) hLe
+
+/-- **Welch–Berlekamp instance of the mutual correlated agreement bound**, proved from
+    `welch_berlekamp_affine_proximity_gap` in the regime `2 |D| + d + 1 < 3 A`. -/
+theorem affineMcaBound_welch_berlekamp (D S : List F) (d A : Nat)
+    (hD : D.Nodup) (hS : S.Nodup) (hAD : A ≤ D.length) (hWB : 2 * D.length + d + 1 < 3 * A) :
+    AffineMcaBound D S d A (Nat.max S.length (D.length * (D.length - 1) / 2)) := by
+  intro x hFar L hNd hEx
+  apply Decidable.byContradiction
+  intro hGt
+  refine not_not_forall_mem _ L hEx (fun hAll => hGt ?_)
+  have hPairs : ∀ p ∈ L.map (fun ch => (prodPool S).get ch), ∃ P : List F,
+      P.length ≤ d + 1 ∧
+      A ≤ (D.filter (fun z =>
+        decide (RoundPoly.evalCoeffs P z =
+          CommRingOps.add (x.1 z)
+            (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (x.2 z))))).length := by
+    intro p hp
+    rcases List.mem_map.mp hp with ⟨ch, hch, rfl⟩
+    rcases hAll ch hch with ⟨P, hP⟩
+    unfold affineMcaAccepts at hP
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+    rw [list_getD_eq_get (prodPool S) _ ch] at hP
+    exact ⟨P, hP.1.2, hP.2⟩
+  rcases list_finite_choice _ ([] : List F) _ hPairs with ⟨P_of, hP_of⟩
+  have hBound := welch_berlekamp_affine_proximity_gap x.1 x.2 D S d A
+    (L.map (fun ch => (prodPool S).get ch)) P_of hD hS hAD hWB
+    (List.Pairwise.map _
+      (fun a b hab hEq => hab (nodup_get_inj (prodPool_nodup hS) hEq)) hNd)
+    (fun p hp => by
+      rcases List.mem_map.mp hp with ⟨ch, _, rfl⟩
+      exact list_get_mem (prodPool S) ch)
+    (fun p hp => (hP_of p hp).1)
+    (fun p hp => (hP_of p hp).2)
+    (fun p hp hW => hFar (hasCorrelatedAgreement_of_affineWitnessS1 hW (hP_of p hp).2))
+  rw [List.length_map] at hBound
+  exact hBound
+
+private theorem affineMca_round_flip_bound (D S : List F) (d A bad : Nat)
+    (hB : AffineMcaBound D S d A bad)
     (x : (F → F) × (F → F)) (r : Fin 2) (pref : List (List F × Nat)) (m : List F)
     (hLen : pref.length = r.1)
     (hDoomed : ¬ affineMcaLive D S d A x pref)
     (L : List (Fin (prodPool S).length)) (hNd : L.Nodup)
     (hL : ∀ ch ∈ L, ¬¬ affineMcaLive D S d A x (pref ++ [(m, ch.1)])) :
     L.length ≤ (match r.1 with
-      | 0 => Nat.max S.length (D.length * (D.length - 1) / 2)
+      | 0 => bad
       | _ => 0) := by
   have hNotCA : ¬ HasCorrelatedAgreement d (A - 1) x.1 x.2 D := fun h => hDoomed (Or.inl h)
   rcases r with ⟨_ | _ | k, hr⟩
   · have hNil : pref = [] := List.eq_nil_of_length_eq_zero hLen
     subst hNil
-    show L.length ≤ Nat.max S.length (D.length * (D.length - 1) / 2)
-    apply Decidable.byContradiction
-    intro hGt
-    have hEx : ∀ ch ∈ L, ¬¬ ∃ P : List F, affineMcaAccepts D S d A x ch.1 P = true := by
-      intro ch hch hNo
-      exact hL ch hch (fun hLive => Or.elim hLive hNotCA hNo)
-    refine not_not_forall_mem _ L hEx (fun hAll => hGt ?_)
-    have hPairs : ∀ p ∈ L.map (fun ch => (prodPool S).get ch), ∃ P : List F,
-        P.length ≤ d + 1 ∧
-        A ≤ (D.filter (fun z =>
-          decide (RoundPoly.evalCoeffs P z =
-            CommRingOps.add (x.1 z)
-              (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (x.2 z))))).length := by
-      intro p hp
-      rcases List.mem_map.mp hp with ⟨ch, hch, rfl⟩
-      rcases hAll ch hch with ⟨P, hP⟩
-      unfold affineMcaAccepts at hP
-      simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
-      rw [list_getD_eq_get (prodPool S) _ ch] at hP
-      exact ⟨P, hP.1.2, hP.2⟩
-    rcases list_finite_choice _ ([] : List F) _ hPairs with ⟨P_of, hP_of⟩
-    have hBound := welch_berlekamp_affine_proximity_gap x.1 x.2 D S d A
-      (L.map (fun ch => (prodPool S).get ch)) P_of hD hS hAD hWB
-      (List.Pairwise.map _
-        (fun a b hab hEq => hab (nodup_get_inj (prodPool_nodup hS) hEq)) hNd)
-      (fun p hp => by
-        rcases List.mem_map.mp hp with ⟨ch, _, rfl⟩
-        exact list_get_mem (prodPool S) ch)
-      (fun p hp => (hP_of p hp).1)
-      (fun p hp => (hP_of p hp).2)
-      (fun p hp hW => hNotCA (hasCorrelatedAgreement_of_affineWitnessS1 hW (hP_of p hp).2))
-    rw [List.length_map] at hBound
-    exact hBound
+    show L.length ≤ bad
+    exact hB x hNotCA L hNd
+      (fun ch hch hNo => hL ch hch (fun hLive => Or.elim hLive hNotCA hNo))
   · rcases pref with _ | ⟨⟨m0, c⟩, _ | ⟨hd, tl⟩⟩
     · exact absurd hLen (Nat.succ_ne_zero 0).symm
     · show L.length ≤ 0
@@ -713,20 +741,44 @@ private theorem affineMca_round_flip_bound (D S : List F) (d A : Nat)
     · exact absurd (Nat.succ.inj hLen) (Nat.succ_ne_zero _)
   · exact absurd hr (by omega)
 
+/-- **`RbrStateFunction` of the affine-fold proximity IOP from a mutual correlated agreement
+    bound**: a statement without correlated agreement `≥ A - 1` turns live on at most `bad` of
+    the `|S|^2` challenges `(α, β)`, and never on the response round. The radius enters only
+    through the hypothesis `hB`. -/
+def affineMcaRbrOf (D S : List F) (hSpos : 0 < S.length) (d A bad : Nat)
+    (hB : AffineMcaBound D S d A bad) :
+    RbrStateFunction (affineMcaIop D S hSpos d A) where
+  Live := affineMcaLive D S d A
+  badCard := fun r => match r.1 with
+    | 0 => bad
+    | _ => 0
+  doomed_init := fun _ hNot hLive => Or.elim hLive hNot (fun h => h)
+  accept_implies_live := affineMca_accept_implies_live D S hSpos d A
+  round_flip_bound := affineMca_round_flip_bound D S d A bad hB
+
 /-- **`RbrStateFunction` of the affine-fold proximity IOP, flip bound PROVED from
     `welch_berlekamp_affine_proximity_gap`**: in the regime `2 |D| + d + 1 < 3 A`, a statement
     without correlated agreement `≥ A - 1` turns live on at most `max(|S|, |D|(|D|-1)/2)` of the
     `|S|^2` challenges `(α, β)`, and never on the response round. -/
 def affineMcaRbr (D S : List F) (hSpos : 0 < S.length) (d A : Nat)
     (hD : D.Nodup) (hS : S.Nodup) (hAD : A ≤ D.length) (hWB : 2 * D.length + d + 1 < 3 * A) :
-    RbrStateFunction (affineMcaIop D S hSpos d A) where
-  Live := affineMcaLive D S d A
-  badCard := fun r => match r.1 with
-    | 0 => Nat.max S.length (D.length * (D.length - 1) / 2)
-    | _ => 0
-  doomed_init := fun _ hNot hLive => Or.elim hLive hNot (fun h => h)
-  accept_implies_live := affineMca_accept_implies_live D S hSpos d A
-  round_flip_bound := affineMca_round_flip_bound D S d A hD hS hAD hWB
+    RbrStateFunction (affineMcaIop D S hSpos d A) :=
+  affineMcaRbrOf D S hSpos d A _ (affineMcaBound_welch_berlekamp D S d A hD hS hAD hWB)
+
+/-- **Fold state-restoration soundness at ANY radius, from a mutual correlated agreement
+    bound.** For words `(f, g)` without correlated agreement `≥ A - 1`, any rewind schedule and
+    any adaptive rewinding prover, the acceptance probability of the affine-fold proximity IOP
+    is at most `∑_t badCard(r_t) / |S|^2` with `badCard 0 = bad`, `badCard 1 = 0`. -/
+theorem affine_mca_state_restoration_of_bound
+    (D S : List F) (hSpos : 0 < S.length) (d A bad : Nat) (hB : AffineMcaBound D S d A bad)
+    (f g : F → F) (hFar : ¬ HasCorrelatedAgreement d (A - 1) f g D)
+    (sched : List (Fin 2)) (tree : SrScheduleTree (affineMcaIop D S hSpos d A) sched) :
+    RatBound.le (srTreeAcceptProb (affineMcaIop D S hSpos d A) tree (f, g))
+      (srScheduleErrorSum (affineMcaRbrOf D S hSpos d A bad hB) sched) ∧
+    (affineMcaRbrOf D S hSpos d A bad hB).badCard ⟨0, by decide⟩ = bad ∧
+    (affineMcaRbrOf D S hSpos d A bad hB).badCard ⟨1, by decide⟩ = 0 :=
+  ⟨rbr_implies_state_restoration_soundness (affineMcaRbrOf D S hSpos d A bad hB)
+    (f, g) hFar sched tree, rfl, rfl⟩
 
 /-- **Affine-Fold State-Restoration Soundness (`affine_mca_state_restoration_soundness`)**:
     `rbr_implies_state_restoration_soundness` composed with the flip bound proved from
@@ -947,6 +999,40 @@ theorem goldilocksExt4_affine_fold_state_restoration_soundness
      affine_committed_pair_state_restoration_soundness D S hSpos d A hD hS f g hFar sched tree,
    fun hAD hWB sched tree =>
      (affine_mca_state_restoration_soundness D S hSpos d A hD hS hAD hWB f g hFar sched tree).1⟩
+
+
+/-- **Deployed Johnson-radius fold rounds, reduced to one proximity-gap statement.** Every
+    deployed `BciksJohnsonQrom128` row `w` (`whirAffineStageWitnesses 24 true`) lies outside the
+    Welch–Berlekamp regime, so `affineMcaBound_welch_berlekamp` does not apply to it. Given the
+    mutual correlated agreement bound at the row's own degree and agreement threshold (the
+    conclusion of `[CWYZ26]` Theorem 4.8 for that row, with `bad` exceptional challenges), the
+    fold round over a domain of the row's size has state-restoration error at most
+    `∑_t badCard(r_t) / |S|^2`. The hypothesis `hB` is a proposition about Reed–Solomon codes; it
+    is not proved here beyond the Welch–Berlekamp regime. -/
+theorem hem_johnson_fold_state_restoration_of_mca
+    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses 24 true)
+    (D S : List QuarticGoldilocks) (hSpos : 0 < S.length) (hDn : D.length = w.n) (bad : Nat)
+    (hB : AffineMcaBound D S w.d w.A bad)
+    (f g : QuarticGoldilocks → QuarticGoldilocks)
+    (hFar : ¬ HasCorrelatedAgreement w.d (w.A - 1) f g D)
+    (sched : List (Fin 2)) (tree : SrScheduleTree (affineMcaIop D S hSpos w.d w.A) sched) :
+    ¬ (2 * D.length + w.d + 1 < 3 * w.A) ∧
+    RatBound.le (srTreeAcceptProb (affineMcaIop D S hSpos w.d w.A) tree (f, g))
+      (srScheduleErrorSum (affineMcaRbrOf D S hSpos w.d w.A bad hB) sched) := by
+  refine ⟨?_, (affine_mca_state_restoration_of_bound D S hSpos w.d w.A bad hB f g hFar
+    sched tree).1⟩
+  rw [hDn]
+  exact tooth_deployed_rows_exceed_welch_berlekamp_radius w hw
+
+/-- The mutual correlated agreement bound is inhabited with a nontrivial count: in the
+    Welch–Berlekamp regime over `QuarticGoldilocks` it holds with
+    `max(|S|, |D|(|D|-1)/2)` exceptional challenges out of `|S|^2`. -/
+theorem inhabited_affineMcaBound
+    (D S : List QuarticGoldilocks) (d A : Nat) (hD : D.Nodup) (hS : S.Nodup)
+    (hAD : A ≤ D.length) (hWB : 2 * D.length + d + 1 < 3 * A) :
+    ∃ bad : Nat, bad = Nat.max S.length (D.length * (D.length - 1) / 2) ∧
+      AffineMcaBound D S d A bad :=
+  ⟨_, rfl, affineMcaBound_welch_berlekamp D S d A hD hS hAD hWB⟩
 
 
 /-! ## §2. Concrete RBR State Function for `[CWYZ26]` Affine WHIR (`hemAffineWhirStateFunction`) -/
@@ -1490,7 +1576,6 @@ structure HemWhirStageSpec (F : Type := QuarticGoldilocks) where
 structure HemWhirInstance (F : Type := QuarticGoldilocks) where
   batchOracles : List (Nat → F)
   batchClaims : List F
-  batchCandidateLists : List (List (List F))
   initDomainPts : List F
   initDegBound : Nat
   initMinAgree : Nat
@@ -1512,20 +1597,25 @@ inductive HemTranscriptRound (F : Type := QuarticGoldilocks) where
   | finalQuery
       (finalCoeffs : List F)
 
-def checkBatchValidAux {F : Type} [CommRingOps F] [DecidableEq F]
+/-- Language of a `Hem` batch: every batch oracle has SOME polynomial of degree `≤ degBound`
+    that agrees with it on at least `minAgree` domain points and meets its linear-functional
+    claim. The polynomial is existentially quantified: it is not supplied with the instance. -/
+def HemBatchValid {F : Type} [CommRingOps F] [DecidableEq F]
     (domPts : List F) (minAgree degBound : Nat) (kernel : List F) :
-    List (Nat → F) → List F → List (List (List F)) → Bool
-  | [], [], [] => true
-  | O :: os, e :: es, cands :: cs =>
-    cands.any (polyWitnessValid domPts minAgree degBound O kernel e) &&
-      checkBatchValidAux domPts minAgree degBound kernel os es cs
-  | _, _, _ => false
+    List (Nat → F) → List F → Prop
+  | [], [] => True
+  | O :: os, e :: es =>
+    (∃ P : List F, polyWitnessValid domPts minAgree degBound O kernel e P = true) ∧
+      HemBatchValid domPts minAgree degBound kernel os es
+  | _, _ => False
 
-def validHemStatement {F : Type} [CommRingOps F] [DecidableEq F]
-    (inst : HemWhirInstance F) : Bool :=
-  decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) &&
-  checkBatchValidAux inst.initDomainPts inst.initMinAgree inst.initDegBound inst.initKernel
-    inst.batchOracles inst.batchClaims inst.batchCandidateLists
+/-- Language of the `Hem` v6 statement: between 1 and 16 batch oracles, each with a valid
+    polynomial witness. Membership depends on the oracles and claims alone. -/
+def HemStatementValid {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) : Prop :=
+  (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) ∧
+  HemBatchValid inst.initDomainPts inst.initMinAgree inst.initDegBound inst.initKernel
+    inst.batchOracles inst.batchClaims
 
 def checkQueriedCosets {F : Type} [CommRingOps F] [DecidableEq F]
     (domPts : List F) (oracleAt : Nat → F) (P : List F) : List Nat → Bool
@@ -1653,17 +1743,14 @@ def evalHemRbrPrefix {F : Type} [CommRingOps F] [DecidableEq F]
       (List.range (Nat.min curMinAgree curDom.length))
   | _, _ => false
 
-/-- **State predicate of the `Hem` v6 transcript model (`hemAffineWhirStateFunction`)** over
-    `QuarticGoldilocks` (`F = QuarticGoldilocks` by default): Round 0 asymmetric cascade
-    (`S_poly ≤ 16`), `S` stages of monomial-shift affine folding with the `affine.rs` five-wire
-    bridge (`hemBridgeFoldClaim`, verifier-computed `hemKernelFold`) + dual OOD pinning, and final
-    coefficients + coset checks. Every stage check is algebraic (degree bound, agreement count
-    with the stage oracle, linear-functional claim, OOD evaluations); the decoded polynomial
-    witnessing a live stage is read from the transcript's `stageDecoded` list. -/
-@[expose] def hemAffineWhirStateFunction {F : Type} [CommRingOps F] [DecidableEq F]
+/-- Boolean liveness of a nonempty transcript prefix of the `Hem` v6 model: Round 0 asymmetric
+    cascade (`S_poly ≤ 16`), `S` stages of monomial-shift affine folding with the `affine.rs`
+    five-wire bridge (`hemBridgeFoldClaim`, verifier-computed `hemKernelFold`) + dual OOD
+    pinning, and final coefficients + coset checks. Every stage check is algebraic; the decoded
+    polynomial witnessing a live stage is read from the transcript's decoded lists. -/
+def hemPrefixState {F : Type} [CommRingOps F] [DecidableEq F]
     (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Bool :=
   match tr with
-  | [] => validHemStatement inst
   | .cascade absorbedShifts weights cascadeDecoded :: restTr =>
     let okLengths :=
       decide (1 ≤ inst.batchOracles.length ∧ inst.batchOracles.length ≤ 16) &&
@@ -1680,6 +1767,17 @@ def evalHemRbrPrefix {F : Type} [CommRingOps F] [DecidableEq F]
         inst.initMinAgree inst.initKernel combClaim inst.stages restTr
     else false
   | _ => false
+
+/-- **State predicate of the `Hem` v6 transcript model (`hemAffineWhirStateFunction`)** over
+    `QuarticGoldilocks` (`F = QuarticGoldilocks` by default). The empty transcript is live
+    exactly when the statement is in the language `HemStatementValid` (an existential over
+    polynomial witnesses, independent of any prover-supplied candidate list); a nonempty
+    prefix is live when `hemPrefixState` holds. -/
+@[expose] def hemAffineWhirStateFunction {F : Type} [CommRingOps F] [DecidableEq F]
+    (inst : HemWhirInstance F) (tr : List (HemTranscriptRound F)) : Prop :=
+  match tr with
+  | [] => HemStatementValid inst
+  | _ :: _ => hemPrefixState inst tr = true
 
 def verifyHemStages {F : Type} [CommRingOps F] [DecidableEq F]
     (curOracle : Nat → F)
@@ -1756,7 +1854,6 @@ private theorem honest_cascade_completeness_poly {F : Type} [LawfulCommRing F] [
     let inst : HemWhirInstance F :=
       { batchOracles := [O]
         batchClaims := [e]
-        batchCandidateLists := [[W]]
         initDomainPts := domPts
         initDegBound := d₀
         initMinAgree := domPts.length
@@ -1765,7 +1862,7 @@ private theorem honest_cascade_completeness_poly {F : Type} [LawfulCommRing F] [
     let tr : List (HemTranscriptRound F) :=
       [ .cascade [s] [(α, β)] [P_comb],
         .finalQuery P_comb ]
-    validHemStatement inst = true ∧
+    HemStatementValid inst ∧
     verifyHemAffineWhir inst tr = true := by
   dsimp only
   let O : Nat → F := fun idx => RoundPoly.evalCoeffs W (domPts.getD idx CommRingOps.zero)
@@ -1843,26 +1940,26 @@ private theorem honest_cascade_completeness_poly {F : Type} [LawfulCommRing F] [
           ih (fun j hj => hLt j (.tail idx hj))]
     exact hRange (List.range domPts.length) (fun idx hMem => List.mem_range.mp hMem)
   have hValidInst :
-      validHemStatement
-        { batchOracles := [O]
-          batchClaims := [ringDot W kernel]
-          batchCandidateLists := [[W]]
-          initDomainPts := domPts
-          initDegBound := d₀
-          initMinAgree := domPts.length
-          initKernel := kernel
-          stages := [] } = true := by
-    unfold validHemStatement
-    dsimp only [checkBatchValidAux, polyWitnessValid, List.length_cons, List.length_nil,
-      List.any_cons, List.any_nil]
-    rw [hAgreeW]
-    simp only [hWLen, Nat.le_refl, decide_true, Bool.or_false, Bool.and_true]
-    decide
+      HemStatementValid
+        ({ batchOracles := [O]
+           batchClaims := [ringDot W kernel]
+           initDomainPts := domPts
+           initDegBound := d₀
+           initMinAgree := domPts.length
+           initKernel := kernel
+           stages := [] } : HemWhirInstance F) := by
+    have hW : polyWitnessValid domPts domPts.length d₀ O kernel (ringDot W kernel) W = true := by
+      unfold polyWitnessValid
+      rw [hAgreeW]
+      simp only [hWLen, Nat.le_refl, decide_true, eq_self, Bool.and_self]
+    show (1 ≤ [O].length ∧ [O].length ≤ 16) ∧
+      ((∃ P : List F,
+        polyWitnessValid domPts domPts.length d₀ O kernel (ringDot W kernel) P = true) ∧ True)
+    exact ⟨⟨Nat.le_refl 1, Nat.le_of_ble_eq_true rfl⟩, ⟨W, hW⟩, trivial⟩
   have hVerTr :
       verifyHemAffineWhir
         { batchOracles := [O]
           batchClaims := [ringDot W kernel]
-          batchCandidateLists := [[W]]
           initDomainPts := domPts
           initDegBound := d₀
           initMinAgree := domPts.length
@@ -1880,7 +1977,7 @@ private theorem honest_cascade_completeness_poly {F : Type} [LawfulCommRing F] [
 
 private theorem accept_implies_live_poly {F : Type} [CommRingOps F] [DecidableEq F]
     (inst : HemWhirInstance F) (fullTr : List (HemTranscriptRound F)) :
-    verifyHemAffineWhir inst fullTr = true → hemAffineWhirStateFunction inst fullTr = true := by
+    verifyHemAffineWhir inst fullTr = true → hemAffineWhirStateFunction inst fullTr := by
   cases fullTr with
   | nil => intro hVer; exact Bool.noConfusion hVer
   | cons hd restTr =>
@@ -1893,31 +1990,33 @@ private theorem accept_implies_live_poly {F : Type} [CommRingOps F] [DecidableEq
       dsimp only at hVer
       rcases (Bool.and_eq_true _ _).mp hVer with ⟨hOk, hRest⟩
       rcases (Bool.and_eq_true _ _).mp hRest with ⟨_, hStages⟩
-      unfold hemAffineWhirStateFunction
+      show hemPrefixState inst (.cascade absorbedShifts weights cascadeDecoded :: restTr) = true
+      unfold hemPrefixState
       dsimp only
       rw [hOk]
       simp only [↓reduceIte]
       exact verifyHemStages_implies_evalHemRbrPrefix _ _ _ _ _ _ _ inst.stages restTr hStages
 
-/-- **`Hem` v6 RBR Doomed-Init & Verifier-Rejection Completeness Theorem
-    (`hemAffineWhir_rbr_completeness_and_doomed_init`)**:
-    Over `QuarticGoldilocks` (`|𝔽| = p^4`):
-    1. **Invalid Witness $\implies$ Doomed Init**: if `validHemStatement inst = false`, then
-       `hemAffineWhirStateFunction inst [] = false`.
-    2. **Doomed Final $\implies$ Deterministic Verifier Rejects**: for ANY full transcript `fullTr`,
-       if `hemAffineWhirStateFunction inst fullTr = false`, then
-       `verifyHemAffineWhir inst fullTr = false` (and contrapositively
-       `verifyHemAffineWhir inst fullTr = true → hemAffineWhirStateFunction inst fullTr = true`).
-    3. **Honest Prover Completeness**: any valid `QuarticGoldilocks` polynomial witness `W` of
-       degree `≤ d₀` absorbing its shifted functional claim before challenge squeeze satisfies both
-       `hemAffineWhirStateFunction = true` and `verifyHemAffineWhir = true`! -/
+/-- **`Hem` v6 doomed-init, accept-implies-live and honest completeness
+    (`hemAffineWhir_rbr_completeness_and_doomed_init`)**, over `QuarticGoldilocks`:
+    1. a statement outside `HemStatementValid` is doomed on the empty transcript;
+    2. a doomed full transcript is rejected by the deterministic verifier;
+    3. an accepted full transcript is live;
+    4. any polynomial `W` of degree `≤ d₀`, with its shifted functional claim absorbed before
+       the challenge squeeze, gives a statement in the language and a live, accepted
+       transcript.
+    These are the first two laws of `RbrStateFunction` together with completeness. The third
+    law, a per-round flip bound, is NOT proved for this model:
+    `tooth_hem_zero_cascade_weights_accept_false_claim` exhibits a flip, and bounding the
+    number of flipping challenges at the deployed radius needs a mutual correlated agreement
+    bound for the 16-fold cascade and for each fold (`AffineMcaBound` at the Johnson radius). -/
 theorem hemAffineWhir_rbr_completeness_and_doomed_init :
     (∀ inst : HemWhirInstance QuarticGoldilocks,
-      validHemStatement inst = false → hemAffineWhirStateFunction inst [] = false) ∧
+      ¬ HemStatementValid inst → ¬ hemAffineWhirStateFunction inst []) ∧
     (∀ (inst : HemWhirInstance QuarticGoldilocks) (fullTr : List (HemTranscriptRound QuarticGoldilocks)),
-      hemAffineWhirStateFunction inst fullTr = false → verifyHemAffineWhir inst fullTr = false) ∧
+      ¬ hemAffineWhirStateFunction inst fullTr → verifyHemAffineWhir inst fullTr = false) ∧
     (∀ (inst : HemWhirInstance QuarticGoldilocks) (fullTr : List (HemTranscriptRound QuarticGoldilocks)),
-      verifyHemAffineWhir inst fullTr = true → hemAffineWhirStateFunction inst fullTr = true) ∧
+      verifyHemAffineWhir inst fullTr = true → hemAffineWhirStateFunction inst fullTr) ∧
     (∀ (W kernel domPts : List QuarticGoldilocks) (d₀ : Nat) (α β : QuarticGoldilocks),
       W.length ≤ d₀ + 1 →
       let O : Nat → QuarticGoldilocks := fun idx =>
@@ -1928,7 +2027,6 @@ theorem hemAffineWhir_rbr_completeness_and_doomed_init :
       let inst : HemWhirInstance QuarticGoldilocks :=
         { batchOracles := [O]
           batchClaims := [e]
-          batchCandidateLists := [[W]]
           initDomainPts := domPts
           initDegBound := d₀
           initMinAgree := domPts.length
@@ -1937,48 +2035,83 @@ theorem hemAffineWhir_rbr_completeness_and_doomed_init :
       let tr : List (HemTranscriptRound QuarticGoldilocks) :=
         [ .cascade [s] [(α, β)] [P_comb],
           .finalQuery P_comb ]
-      validHemStatement inst = true ∧
-      hemAffineWhirStateFunction inst tr = true ∧
+      HemStatementValid inst ∧
+      hemAffineWhirStateFunction inst tr ∧
       verifyHemAffineWhir inst tr = true) := by
   refine ⟨fun _ hInv => hInv, ?_, accept_implies_live_poly, ?_⟩
   · intro inst fullTr hDoomed
     cases hv : verifyHemAffineWhir inst fullTr
     · rfl
-    · have hLive := accept_implies_live_poly inst fullTr hv
-      rw [hDoomed] at hLive
-      exact Bool.noConfusion hLive
+    · exact absurd (accept_implies_live_poly inst fullTr hv) hDoomed
   · intro W kernel domPts d₀ α β hWLen
     rcases honest_cascade_completeness_poly W kernel domPts d₀ α β hWLen with ⟨hVal, hVer⟩
     exact ⟨hVal, accept_implies_live_poly _ _ hVer, hVer⟩
 
-/-- Removing the input candidate list makes the current Boolean language reject even an
-    honest nonzero polynomial, without changing transcript verification. Hence candidate
-    completeness is necessary before this state can support a nontrivial RBR theorem.
-    The counterexample works for every cascade weight, not only a zero challenge. -/
-theorem tooth_hem_missing_candidates_accepts
-    (α β : QuarticGoldilocks) :
-    let W : List QuarticGoldilocks := [CommRingOps.one]
-    let kernel : List QuarticGoldilocks := [CommRingOps.one]
-    let dom : List QuarticGoldilocks := [CommRingOps.one]
-    let inst : HemWhirInstance QuarticGoldilocks :=
-      { batchOracles := [fun idx => RoundPoly.evalCoeffs W (dom.getD idx CommRingOps.zero)]
-        batchClaims := [ringDot W kernel]
-        batchCandidateLists := [[]]
-        initDomainPts := dom
-        initDegBound := 0
-        initMinAgree := dom.length
-        initKernel := kernel
-        stages := [] }
-    let tr : List (HemTranscriptRound QuarticGoldilocks) :=
-      [.cascade [ringDot (shiftPoly W) kernel] [(α, β)] [evalCascadePolySum [W] [(α, β)]],
-       .finalQuery (evalCascadePolySum [W] [(α, β)])]
-    hemAffineWhirStateFunction inst [] = false ∧
-    verifyHemAffineWhir inst tr = true := by
-  dsimp only
-  refine ⟨rfl, ?_⟩
-  exact (honest_cascade_completeness_poly
-    ([CommRingOps.one] : List QuarticGoldilocks) [CommRingOps.one] [CommRingOps.one]
-    0 α β (Nat.le_refl _)).2
+/-- A false `Hem` statement: the zero oracle on the domain `{0, 1}` with the claim that its
+    degree-0 interpolant evaluates to `1` under the functional `[1]`. -/
+def hemFalseClaimInstance : HemWhirInstance QuarticGoldilocks :=
+  { batchOracles := [fun _ => CommRingOps.zero]
+    batchClaims := [CommRingOps.one]
+    initDomainPts := [CommRingOps.zero, CommRingOps.one]
+    initDegBound := 0
+    initMinAgree := 2
+    initKernel := [CommRingOps.one]
+    stages := [] }
+
+/-- No polynomial witnesses the false statement: a constant agreeing with the zero oracle on
+    both domain points is zero, and the zero polynomial does not meet the claim `1`. -/
+theorem hemFalseClaimInstance_invalid : ¬ HemStatementValid hemFalseClaimInstance := by
+  intro h
+  have h' : (1 ≤ 1 ∧ 1 ≤ 16) ∧
+      ((∃ P : List QuarticGoldilocks,
+        polyWitnessValid [CommRingOps.zero, CommRingOps.one] 2 0 (fun _ => CommRingOps.zero)
+          [CommRingOps.one] CommRingOps.one P = true) ∧ True) := h
+  obtain ⟨_, ⟨P, hP⟩, _⟩ := h'
+  unfold polyWitnessValid at hP
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hP
+  obtain ⟨⟨hLen, hAg⟩, hDot⟩ := hP
+  rcases P with _ | ⟨c, _ | ⟨c2, rest⟩⟩
+  · exact absurd hDot (by decide)
+  · have hc : c = CommRingOps.zero := by
+      apply Decidable.byContradiction
+      intro hne
+      have hne' : ¬ ((CommRingOps.zero : QuarticGoldilocks) =
+          RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks)) := by
+        intro h
+        apply hne
+        have e : RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks) = c := by
+          show CommRingOps.add c (CommRingOps.mul CommRingOps.zero CommRingOps.zero) = c
+          rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+        rw [e] at h
+        exact h.symm
+      change 2 ≤ (if (CommRingOps.zero : QuarticGoldilocks) =
+            RoundPoly.evalCoeffs [c] (CommRingOps.zero : QuarticGoldilocks) then 1 else 0) +
+          ((if (CommRingOps.zero : QuarticGoldilocks) =
+            RoundPoly.evalCoeffs [c] (CommRingOps.one : QuarticGoldilocks) then 1 else 0) + 0)
+        at hAg
+      simp only [hne', ↓reduceIte] at hAg
+      by_cases h1 : (CommRingOps.zero : QuarticGoldilocks) =
+          RoundPoly.evalCoeffs [c] (CommRingOps.one : QuarticGoldilocks)
+      · simp only [h1, ↓reduceIte] at hAg
+        exact absurd hAg (by decide)
+      · simp only [h1, ↓reduceIte] at hAg
+        exact absurd hAg (by decide)
+    subst hc
+    exact absurd hDot (by decide)
+  · simp only [List.length_cons] at hLen
+    omega
+
+/-- **A flip of the `Hem` v6 state exists.** The false statement `hemFalseClaimInstance` is
+    doomed on the empty transcript, yet the deterministic verifier accepts it when the cascade
+    challenge is `(α, β) = (0, 0)`: the combined oracle and the combined claim both vanish.
+    Hence every round-by-round flip bound for the cascade round counts at least this
+    challenge, and soundness of the model rests on bounding the number of such challenges. -/
+theorem tooth_hem_zero_cascade_weights_accept_false_claim :
+    ¬ hemAffineWhirStateFunction hemFalseClaimInstance [] ∧
+    verifyHemAffineWhir hemFalseClaimInstance
+      [.cascade [CommRingOps.zero] [(CommRingOps.zero, CommRingOps.zero)] [[]],
+       .finalQuery []] = true :=
+  ⟨hemFalseClaimInstance_invalid, by decide⟩
 
 
 /-! ## §3. Multi-Round Fiat–Shamir QROM Reduction via Measure-and-Reprogram & Online Merkle Extraction -/
@@ -3402,9 +3535,10 @@ private theorem absorbed_shift_preserves_soundness_poly
 
 /-- **`#tooth` Unabsorbed Shifted Claim Breaks RBR Soundness With Probability `1`
     (`tooth_unabsorbed_shifted_claim_breaks_rbr`)**:
-    1. **False Initial Witness is Doomed (`StateFunction = false`)**: committing the zero oracle
-       (`W = []`) over `QuarticGoldilocks` while claiming non-zero evaluation `σ = 1` starts in a
-       strictly `doomed` (`false`) RBR state (`hemAffineWhirStateFunction falseInst [] = false`).
+    1. **False Initial Statement is Doomed**: committing the zero oracle over
+       `QuarticGoldilocks` while claiming the non-zero evaluation `σ = 1` is outside the language
+       for EVERY polynomial witness (`hemFalseClaimInstance_invalid`), so the empty transcript is
+       doomed.
     2. **Buggy Squeeze-Before-Absorb Transcript Flips `false → true` With Exact Probability `1`**:
        When `(θ, α, β)` is squeezed BEFORE absorbing `(c_F, c_G)`, for EVERY challenge `(θ, α, β)`
        with `β ≠ 0` (`∀ β ∈ S_β, β ≠ 0`), `cheatUnabsorbedShiftClaim` flips `zeroPolyPostFoldStateLive`
@@ -3415,16 +3549,7 @@ private theorem absorbed_shift_preserves_soundness_poly
        `S`, at `(γ_F = 1, γ_G = 0)`, at most `S.length` out of `S.length ^ 2` pairs (`≤ 1 / S.length`)
        flip `zeroPolyPostFoldStateLive` to `true`! -/
 theorem tooth_unabsorbed_shifted_claim_breaks_rbr :
-    (let falseInst : HemWhirInstance QuarticGoldilocks :=
-       { batchOracles := [fun _ => CommRingOps.zero]
-         batchClaims := [CommRingOps.one]
-         batchCandidateLists := [[[]]]
-         initDomainPts := [CommRingOps.zero, CommRingOps.one]
-         initDegBound := 0
-         initMinAgree := 2
-         initKernel := [CommRingOps.one]
-         stages := [] }
-     hemAffineWhirStateFunction falseInst [] = false) ∧
+    (¬ hemAffineWhirStateFunction hemFalseClaimInstance []) ∧
     (∀ (γ_F γ_G : QuarticGoldilocks)
        (S_θ S_α S_β : List QuarticGoldilocks)
        (hθ : 0 < S_θ.length) (hα : 0 < S_α.length) (hβ : 0 < S_β.length),
@@ -3456,7 +3581,7 @@ theorem tooth_unabsorbed_shifted_claim_breaks_rbr :
       RatBound.le
         ⟨absorbedHits, S.length ^ 2, Nat.pow_pos hPos⟩
         ⟨1, S.length, hPos⟩) := by
-  refine ⟨by decide, ?_, ?_⟩
+  refine ⟨hemFalseClaimInstance_invalid, ?_, ?_⟩
   · intro γ_F γ_G S_θ S_α S_β hθ hα hβ hNz
     exact unabsorbed_shift_forgery_prob_one_poly
       QuarticGoldilocks.inv
@@ -3534,6 +3659,8 @@ theorem inhabited_multiRoundFsQrom_384 :
     (multiRoundFsQrom_budget_384_at_2pow56 (2 ^ 56) (Nat.le_refl _)).2.2⟩
 
 #tooth_pair multiRoundFsQrom_budget_384_at_2pow56 vs tooth_multiRoundFsQrom_256_at_2pow56
+#tooth_pair hemAffineWhir_rbr_completeness_and_doomed_init vs hemFalseClaimInstance_invalid
+#tooth_pair hem_johnson_fold_state_restoration_of_mca vs tooth_deployed_rows_exceed_welch_berlekamp_radius
 #verify_inhabited multiRoundFsQrom_budget_384_at_2pow56 inhabited_multiRoundFsQrom_384
 
 end Qsag

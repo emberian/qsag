@@ -70,11 +70,11 @@ Model boundary.
   expanded from the session's pairwise PRG seeds, but its gate messages are not on the modelled
   wire. The Round-2 honest message is still one 64-bit `χ` lane computed from the first eight
   bytes of each share and masked by a pad that is never used again; no later step consumes it.
-  A multi-wave `M`-gate stream on the wire is not modelled.
-* `deriveExpectedGateWires` is a public hash of `(pk, request, cursor, party, opening, index)`,
-  not the corrupt party's gate messages recomputed from its share view. The barrier therefore
-  checks that the corrupt party's wires equal publicly derivable values; it is not the gate-level
-  product proof that the production bitsliced engine runs.
+  The full gate transcript of the signature computation is not modelled.
+* The corrupt Round-2 frame carries a private `deg`-gate stream. The barrier recomputes it
+  from the corrupt party's replicated share windows held by the honest vault, checks its
+  length, and compares Horner accumulators. This replaces the public-hash wire check, but
+  does not yet identify that stream with every gate of the production signing circuit.
 * Coin toss. The challenge is `coinA ⊕ coinB ⊕ corruptCoin` read directly as a `GF(2^128)` point.
   The production engine commits with `cSHAKE256` to 32-byte shares bound to the wave transcript
   digest, hashes the XOR of the opened shares, and expands evaluation points from that hash;
@@ -113,6 +113,8 @@ import all Qsag.Fips205
 import all Qsag.ThresholdMpc
 import all Qsag.MaliciousSecurity
 import all Qsag.InteractiveUcEngine
+
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -1524,6 +1526,14 @@ def expandPairwiseSeedTape (seeds : BitVec 192) : Nat → Nat → Nat → Nat �
      pairwisePrgWord (seeds.extractLsb' 64 64) i j k l,
      pairwisePrgWord (seeds.extractLsb' 128 64) i j k l⟩
 
+/-- The decoy game hides the challenge by committing to zero. -/
+def committedCoin (commitCoins : Bool) (coin : BitVec 128) : BitVec 128 :=
+  match commitCoins with
+  | true => coin
+  | false => 0#128
+
+theorem committedCoin_true (coin : BitVec 128) : committedCoin true coin = coin := by rfl
+
 /-- Opening of a coin commitment: 16-byte coin share followed by the 8-byte blind. -/
 def coinOpeningBytes (coin : BitVec 128) (blind : BitVec 64) : List UInt8 :=
   bvToFixedBytes 16 coin ++ bvToFixedBytes 8 blind
@@ -1668,30 +1678,21 @@ structure RssCoinTag where
   cursor : Nat
   party  : Nat
 
-/-- **Three-Round 2-of-3 RSS `FIPS 205 SLH-DSA` protocol (`rssSlhInteractiveProtocol`).**
-    * Round 1: every party commits to a coin share under a blind, bound to the public key, the
-      request (session id, epoch, message, hedge), the mask cursor and the party id. The coin
-      commitment hash is a random oracle. An honest party's commitment is the oracle's value on
-      its own opening; in the programmed-oracle form used throughout this file that value is
-      `G tag` for the tag-indexed function `G` installed on the party's opening slice
-      (`rssCoinSliceOracle`, `honest_coin_openings_open_round1_commitments`), so the Round-1
-      message itself carries no function of the coin share. The corrupt party's commitment is
-      checked with `round1NonceCommit`.
-    * Round 2: honest parties send their masked `χ` words. The corrupt party, having seen them
-      but no honest coin share, sends its coin opening and its `deg` gate wires in one frame.
-    * Barrier (`sharedCoinTossBarrier`): the corrupt opening is checked against its Round-1
-      commitment and the wires are checked against the corrupt party's private stream at
-      `coinA ⊕ coinB ⊕ corruptCoin`.
-    * Round 3: honest parties evaluate the signature under the PRG-expanded zero-sharing tape,
-      send the cut openings and open their coin shares. -/
-@[expose] def rssSlhInteractiveProtocol (G : RssCoinTag → ByteArray) (p : Fips205Params) (cIdx : Fin 3) (deg : Nat) :
+/-- Three-round RSS execution with a private per-gate stream. The real game commits
+its honest coin shares; the decoy game commits zero and is used for the root count.
+The barrier always checks the private stream computed from the honest vault. -/
+@[expose] def rssSlhCoinProtocol (commitCoins : Bool) (p : Fips205Params) (cIdx : Fin 3) (deg : Nat) :
     InteractiveThresholdProtocol SlhPublicKey RssPartyKeyShare (RssSlhSessionTape p.sigBytes)
       RssRound1State RssRound2State RssRound3State where
   pkDigestOf := slhPkDigest
   msgDigestOf := slhReqDigest
-  honestRound1 := fun pk _corrupt req cursor _shares _tape =>
+  honestRound1 := fun pk _corrupt req cursor _shares tape =>
     let (hA, hB, _) := honestPairForCorrupt cIdx
-    ([(hA, G ⟨pk, req, cursor, hA⟩), (hB, G ⟨pk, req, cursor, hB⟩)], { cursor := cursor })
+    let mA := round1NonceCommit pk req cursor hA
+      (coinOpeningBytes (committedCoin commitCoins tape.gammaBits) tape.nonceA)
+    let mB := round1NonceCommit pk req cursor hB
+      (coinOpeningBytes (committedCoin commitCoins tape.coinB) tape.nonceB)
+    ([(hA, mA), (hB, mB)], { cursor := cursor })
   verifyRound1 := fun _pk _req r1St _honR1 corrR1 =>
     sharedVerifyRound1 cIdx r1St corrR1
   honestRound2 := fun _pk _corrupt req r2Init shares tape =>
@@ -1730,6 +1731,12 @@ structure RssCoinTag where
   finalizeCutOpen := fun pk req r3St _honR3 corrR3 =>
     sharedFinalizeCutOpen p cIdx pk req r3St.cutShares corrR3
 
+/-- Real execution commits to the coin shares opened in Round 3. -/
+@[expose] def rssSlhInteractiveProtocol (p : Fips205Params) (cIdx : Fin 3) (deg : Nat) :
+    InteractiveThresholdProtocol SlhPublicKey RssPartyKeyShare (RssSlhSessionTape p.sigBytes)
+      RssRound1State RssRound2State RssRound3State :=
+  rssSlhCoinProtocol true p cIdx deg
+
 /-- **Explicit Black-Box UC Simulator (`Sim_RssSlh`)**:
     Receives public parameters `(p, cIdx, deg)`, public key `pk : SlhPublicKey`, the corrupt
     party's own replicated share view `corrView` (what the adversary holds; two of the three
@@ -1737,14 +1744,18 @@ structure RssCoinTag where
     `preCutBarrier` pass in `IdealTsig`) the ideal signature `idealSigBytes : ByteArray`.
     `Sim_RssSlh` has no access to `SlhSecretKey`, `skSeed`, `skPrf`, or any honest party's share.
     It runs the coin toss exactly as the honest parties do (commit, barrier, open). -/
-@[expose] def Sim_RssSlh (G : RssCoinTag → ByteArray) (corrView : RssPartyKeyShare) (p : Fips205Params) (cIdx : Fin 3) (deg : Nat) :
+@[expose] def Sim_RssSlh (corrView : RssPartyKeyShare) (p : Fips205Params) (cIdx : Fin 3) (deg : Nat) :
     BlackBoxUcSimulator SlhPublicKey (RssSlhSessionTape p.sigBytes)
       RssRound1State RssRound2State RssRound3State where
   pkDigestOf := slhPkDigest
   msgDigestOf := slhReqDigest
-  simRound1 := fun pk _corrupt req cursor _tape =>
+  simRound1 := fun pk _corrupt req cursor tape =>
     let (hA, hB, _) := honestPairForCorrupt cIdx
-    ([(hA, G ⟨pk, req, cursor, hA⟩), (hB, G ⟨pk, req, cursor, hB⟩)], { cursor := cursor })
+    let mA := round1NonceCommit pk req cursor hA
+      (coinOpeningBytes tape.gammaBits tape.nonceA)
+    let mB := round1NonceCommit pk req cursor hB
+      (coinOpeningBytes tape.coinB tape.nonceB)
+    ([(hA, mA), (hB, mB)], { cursor := cursor })
   simVerifyRound1 := fun _pk _req r1St _honR1 corrR1 =>
     sharedVerifyRound1 cIdx r1St corrR1
   simRound2 := fun _pk _corrupt req r2Init tape =>
@@ -1896,13 +1907,13 @@ private theorem extractHonestQuorumViews_deal (L : Nat) (cIdx : Fin 3)
     (`deltas.length ≤ deg` and `∃ d ∈ deltas, d ≠ 0`) together with the coin share it opened, when
     the Round-1/quorum/WAL gates pass. This is the adversary's side of the barrier: everything it
     fixes before the honest coin shares are opened. -/
-def extractSessionNonzeroDeltas {AdvState : Type} (G : RssCoinTag → ByteArray)
+def extractSessionNonzeroDeltas {AdvState : Type} (commitCoins : Bool)
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (A : UcRushingAdversary AdvState)
     (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
     (advSt : AdvState)
     (tape : RssSlhSessionTape p.sigBytes) : Option (List Tower128 × BitVec 128) :=
-  let proto := rssSlhInteractiveProtocol G p cIdx deg
+  let proto := rssSlhCoinProtocol commitCoins p cIdx deg
   let (req, advSt1) := A.scheduleSession advSt
   if !(validThresholdApproval cl.tsig req.honestApprovers) then none
   else
@@ -1942,14 +1953,14 @@ def extractSessionNonzeroDeltas {AdvState : Type} (G : RssCoinTag → ByteArray)
                   none
         deviation.map (fun deltas => (deltas, corruptOpenedCoin cIdx deg corrR2))
 
-private theorem extractSessionNonzeroDeltas_props {AdvState : Type} (G : RssCoinTag → ByteArray)
+private theorem extractSessionNonzeroDeltas_props {AdvState : Type} (commitCoins : Bool)
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (A : UcRushingAdversary AdvState)
     (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
     (advSt : AdvState)
     (tape : RssSlhSessionTape p.sigBytes)
     {deltas : List Tower128} {cCoin : BitVec 128}
-    (hSome : extractSessionNonzeroDeltas G p cIdx deg A cl advSt tape = some (deltas, cCoin)) :
+    (hSome : extractSessionNonzeroDeltas commitCoins p cIdx deg A cl advSt tape = some (deltas, cCoin)) :
     deltas.length ≤ deg ∧ ∃ d ∈ deltas, d ≠ towerZero 7 := by
   unfold extractSessionNonzeroDeltas at hSome
   dsimp only at hSome
@@ -1958,9 +1969,9 @@ private theorem extractSessionNonzeroDeltas_props {AdvState : Type} (G : RssCoin
   · rw [hVal] at hSome
     simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hSome
     cases hWal : walPreSignStep cl.honestWal
-        ((rssSlhInteractiveProtocol G p cIdx deg).pkDigestOf cl.tsig.pk)
+        ((rssSlhCoinProtocol commitCoins p cIdx deg).pkDigestOf cl.tsig.pk)
         (A.scheduleSession advSt).1.reqEpoch
-        ((rssSlhInteractiveProtocol G p cIdx deg).msgDigestOf (A.scheduleSession advSt).1) with
+        ((rssSlhCoinProtocol commitCoins p cIdx deg).msgDigestOf (A.scheduleSession advSt).1) with
     | err _ _ => rw [hWal] at hSome; cases hSome
     | ok _ res =>
       rw [hWal] at hSome
@@ -1968,18 +1979,18 @@ private theorem extractSessionNonzeroDeltas_props {AdvState : Type} (G : RssCoin
       | replayCached _ => cases hSome
       | authorizedFresh _ =>
         dsimp only at hSome
-        let r1Out := (rssSlhInteractiveProtocol G p cIdx deg).honestRound1
+        let r1Out := (rssSlhCoinProtocol commitCoins p cIdx deg).honestRound1
           cl.tsig.pk cl.tsig.corruptParties (A.scheduleSession advSt).1
           cl.maskSessionCursor cl.honestShares tape
         let corrR1 := cl.tsig.corruptParties.map
           (fun c => (c, (A.rushRound1 (A.scheduleSession advSt).2 r1Out.1).1 c))
-        cases hVR1 : (rssSlhInteractiveProtocol G p cIdx deg).verifyRound1
+        cases hVR1 : (rssSlhCoinProtocol commitCoins p cIdx deg).verifyRound1
             cl.tsig.pk (A.scheduleSession advSt).1 r1Out.2 r1Out.1 corrR1 with
         | inl _ => rw [hVR1] at hSome; cases hSome
         | inr r2Init =>
           rw [hVR1] at hSome
           dsimp only at hSome
-          let r2Out := (rssSlhInteractiveProtocol G p cIdx deg).honestRound2
+          let r2Out := (rssSlhCoinProtocol commitCoins p cIdx deg).honestRound2
             cl.tsig.pk cl.tsig.corruptParties (A.scheduleSession advSt).1
             r2Init cl.honestShares tape
           let advSt2 := (A.rushRound1 (A.scheduleSession advSt).2 r1Out.1).2
@@ -2028,20 +2039,20 @@ private theorem extractSessionNonzeroDeltas_decoy_gamma_irrel {AdvState : Type}
     (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
     (advSt : AdvState)
     (tape : RssSlhSessionTape p.sigBytes) (g : BitVec 128) :
-    extractSessionNonzeroDeltas G p cIdx deg A cl advSt { tape with gammaBits := g } =
-    extractSessionNonzeroDeltas G p cIdx deg A cl advSt tape := rfl
+    extractSessionNonzeroDeltas false p cIdx deg A cl advSt { tape with gammaBits := g } =
+    extractSessionNonzeroDeltas false p cIdx deg A cl advSt tape := rfl
 
 /-- Single-session `GF(2^128)` (`Tower128`) root-hit indicator: `true` iff the rushing adversary
     submits a non-zero wire deviation `deltas` in Round 2 AND the joint coin
     `gammaBits ⊕ coinB ⊕ corruptCoin` is a root of `batchDeviationPoly deltas`. -/
-def sessionBadHit {AdvState : Type} (G : RssCoinTag → ByteArray)
+def sessionBadHit {AdvState : Type} (commitCoins : Bool)
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (A : UcRushingAdversary AdvState)
     (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
     (advSt : AdvState)
     (cur : Fin (rssFullSessionCard p.sigBytes)) : Bool :=
   let tape := decodeSingleFullTape p.sigBytes cur
-  match extractSessionNonzeroDeltas G p cIdx deg A cl advSt tape with
+  match extractSessionNonzeroDeltas commitCoins p cIdx deg A cl advSt tape with
   | none => false
   | some (deltas, cCoin) =>
     batchDeviationPoly deltas (unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ cCoin)) == towerZero 7
@@ -2056,7 +2067,7 @@ private theorem sessionBadHit_finSum_le {AdvState : Type}
     (cl : RealClusterState SlhPublicKey RssPartyKeyShare)
     (advSt : AdvState) :
     finSum (rssFullSessionCard p.sigBytes)
-      (fun cur => if sessionBadHit G p cIdx deg A cl advSt cur then 1 else 0) ≤
+      (fun cur => if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) ≤
     rssPadSessionCard p.sigBytes * deg := by
   unfold rssFullSessionCard
   rw [finSum_prod_eq (rssPadSessionCard p.sigBytes) (2 ^ 128)]
@@ -2067,9 +2078,9 @@ private theorem sessionBadHit_finSum_le {AdvState : Type}
     ⟨_, rfl⟩
   have hInner :
       finSum (2 ^ 128) (fun gIdx =>
-        if sessionBadHit G p cIdx deg A cl advSt (pairFin padIdx gIdx) then 1 else 0) =
+        if sessionBadHit false p cIdx deg A cl advSt (pairFin padIdx gIdx) then 1 else 0) =
       finSum (2 ^ 128) (fun gIdx =>
-        if (match extractSessionNonzeroDeltas G p cIdx deg A cl advSt tape0 with
+        if (match extractSessionNonzeroDeltas false p cIdx deg A cl advSt tape0 with
             | none => false
             | some (deltas, cCoin) =>
               batchDeviationPoly deltas
@@ -2077,8 +2088,8 @@ private theorem sessionBadHit_finSum_le {AdvState : Type}
         then 1 else 0) := by
     apply finSum_congr
     intro gIdx
-    have hB : sessionBadHit G p cIdx deg A cl advSt (pairFin padIdx gIdx) =
-        (match extractSessionNonzeroDeltas G p cIdx deg A cl advSt tape0 with
+    have hB : sessionBadHit false p cIdx deg A cl advSt (pairFin padIdx gIdx) =
+        (match extractSessionNonzeroDeltas false p cIdx deg A cl advSt tape0 with
          | none => false
          | some (deltas, cCoin) =>
            batchDeviationPoly deltas
@@ -2089,7 +2100,7 @@ private theorem sessionBadHit_finSum_le {AdvState : Type}
           decodeRssSessionTape_gamma p.sigBytes padIdx gIdx, hT0]
       dsimp only
       rw [extractSessionNonzeroDeltas_decoy_gamma_irrel p cIdx deg A cl advSt tape0 (BitVec.ofFin gIdx)]
-      cases extractSessionNonzeroDeltas G p cIdx deg A cl advSt tape0 with
+      cases extractSessionNonzeroDeltas false p cIdx deg A cl advSt tape0 with
       | none => rfl
       | some pr =>
         rcases pr with ⟨ds, cCoin⟩
@@ -2097,7 +2108,7 @@ private theorem sessionBadHit_finSum_le {AdvState : Type}
         rw [BitVec.xor_assoc]
     rw [hB]
   rw [hInner]
-  cases hExt : extractSessionNonzeroDeltas G p cIdx deg A cl advSt tape0 with
+  cases hExt : extractSessionNonzeroDeltas false p cIdx deg A cl advSt tape0 with
   | none =>
     simp only [Bool.false_eq_true, ↓reduceIte]
     have h0 : finSum (2 ^ 128) (fun _ => 0) = 0 := by rw [finSum_const, Nat.mul_zero]
@@ -2105,7 +2116,7 @@ private theorem sessionBadHit_finSum_le {AdvState : Type}
     exact Nat.zero_le deg
   | some pr =>
     rcases pr with ⟨deltas, cCoin⟩
-    obtain ⟨hLen, hNz⟩ := extractSessionNonzeroDeltas_props G p cIdx deg A cl advSt tape0 hExt
+    obtain ⟨hLen, hNz⟩ := extractSessionNonzeroDeltas_props false p cIdx deg A cl advSt tape0 hExt
     refine Nat.le_trans (Nat.le_of_eq ?_) (tower128_roots_finSum_le deg deltas hLen hNz)
     refine Eq.trans ?_ (finSum_equiv_eq (finBitVecXorEquiv 128 (tape0.coinB ^^^ cCoin)) _)
     exact finSum_congr (fun _ => rfl)
@@ -2251,15 +2262,15 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
     (hMatch : RealIdealClusterMatch cIdx seedSh prfSh cl icl)
     (hPkKey : cl.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2)
     (cur : Fin (rssFullSessionCard p.sigBytes))
-    (hNoBad : sessionBadHit G p cIdx deg A cl advSt cur = false) :
+    (hNoBad : sessionBadHit true p cIdx deg A cl advSt cur = false) :
     let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
     let tapeReal := decodeSingleFullTape p.sigBytes cur
     let tapeSim := decodeSingleFullTape p.sigBytes
                      ((adaptiveSingleSessionEquiv p cIdx A cl advSt).toFun cur)
     let resR :=
-      execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt tapeReal
+      execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tapeReal
     let resI :=
-      execIdealSession (slhIdealSignOracle p sk) (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg) A icl advSt tapeSim
+      execIdealSession (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A icl advSt tapeSim
     resR.2.1 = resI.2.1 ∧
     resR.2.2 = resI.2.2 ∧
     resR.1.tsig.pk = cl.tsig.pk ∧
@@ -2278,10 +2289,10 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
   · exact ⟨rfl, rfl, rfl, ⟨hPkEq, hThEq, hNpEq, hCorrEq, hCheatEq, hWalEq, hCurEq, hSharesIntact⟩⟩
   · rw [ite_eq_right (by decide : ¬ ((!true) = true)),
         ite_eq_right (by decide : ¬ ((!true) = true))]
-    have hPkDigR : (rssSlhInteractiveProtocol G p cIdx deg).pkDigestOf = slhPkDigest := rfl
-    have hPkDigS : (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg).pkDigestOf = slhPkDigest := rfl
-    have hMsgDigR : (rssSlhInteractiveProtocol G p cIdx deg).msgDigestOf = slhReqDigest := rfl
-    have hMsgDigS : (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg).msgDigestOf = slhReqDigest := rfl
+    have hPkDigR : (rssSlhInteractiveProtocol p cIdx deg).pkDigestOf = slhPkDigest := rfl
+    have hPkDigS : (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg).pkDigestOf = slhPkDigest := rfl
+    have hMsgDigR : (rssSlhInteractiveProtocol p cIdx deg).msgDigestOf = slhReqDigest := rfl
+    have hMsgDigS : (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg).msgDigestOf = slhReqDigest := rfl
     rw [hPkDigR, hPkDigS, hMsgDigR, hMsgDigS, ← hWalEq, ← hPkEq]
     cases hWalStep : walPreSignStep cl.honestWal (slhPkDigest cl.tsig.pk)
                        (A.scheduleSession advSt).1.reqEpoch (slhReqDigest (A.scheduleSession advSt).1) with
@@ -2329,8 +2340,8 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
         have hView : corruptViewOfVault cIdx cl.honestShares =
             some (corruptRssView cIdx seedSh prfSh) := by
           rw [hShares]; exact corruptViewOfVault_deal cIdx seedSh prfSh
-        unfold rssSlhInteractiveProtocol Sim_RssSlh slhIdealSignOracle
-          sharedCoinTossBarrier
+        unfold rssSlhInteractiveProtocol rssSlhCoinProtocol Sim_RssSlh slhIdealSignOracle
+          sharedCoinTossBarrier committedCoin
         dsimp only
         rw [← hCurEq, ← hCorrEq, hTapeSimEq]
         dsimp only [shifts]
@@ -2356,7 +2367,7 @@ theorem execRealSession_eq_execIdealSession_unless_bad {AdvState : Type}
               by_cases hAny : r3Init.deltas.any (fun d => decide (d ≠ towerZero 7)) = true
               · exfalso
                 have hBadUnf := hNoBad
-                unfold sessionBadHit extractSessionNonzeroDeltas rssSlhInteractiveProtocol at hBadUnf
+                unfold sessionBadHit extractSessionNonzeroDeltas rssSlhCoinProtocol committedCoin at hBadUnf
                 dsimp only at hBadUnf
                 rw [hQuorum] at hBadUnf
                 simp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hBadUnf
@@ -2432,14 +2443,14 @@ def multiSessionTapeEquiv {AdvState : Type}
       (adaptiveSingleSessionEquiv p cIdx A cl advSt)
       (fun cur =>
         let (cl1, advSt1, _) :=
-          execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt
+          execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt
             (decodeSingleFullTape p.sigBytes cur)
-        multiSessionTapeEquiv G p cIdx deg A s cl1 advSt1)
+        multiSessionTapeEquiv p cIdx deg A s cl1 advSt1)
 
 /-- Multi-session root-hit indicator across all `s` scheduled sessions of
     `rssSlhCoinProtocol commitCoins`: some session's joint coin is a root of that session's
     non-zero wire deviation. -/
-def multiSessionBadHit {AdvState : Type} (G : RssCoinTag → ByteArray)
+def multiSessionBadHit {AdvState : Type} (commitCoins : Bool)
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (A : UcRushingAdversary AdvState) :
     (s : Nat) →
@@ -2451,10 +2462,10 @@ def multiSessionBadHit {AdvState : Type} (G : RssCoinTag → ByteArray)
     let cur := splitFinLeft (rssMultiSessionCard_pos p.sigBytes s) ω
     let rest := splitFinRight (rssMultiSessionCard_pos p.sigBytes s) ω
     let (cl1, advSt1, _) :=
-      execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt
+      execRealSession (rssSlhCoinProtocol commitCoins p cIdx deg) A cl advSt
         (decodeSingleFullTape p.sigBytes cur)
-    sessionBadHit G p cIdx deg A cl advSt cur ||
-      multiSessionBadHit G p cIdx deg A s cl1 advSt1 rest
+    sessionBadHit commitCoins p cIdx deg A cl advSt cur ||
+      multiSessionBadHit commitCoins p cIdx deg A s cl1 advSt1 rest
 
 private theorem finSum_le_add_finSum : ∀ (n : Nat) (f g h : Fin n → Nat),
     (∀ i, f i ≤ g i + h i) → finSum n f ≤ finSum n g + finSum n h
@@ -2474,17 +2485,17 @@ private theorem finSum_mul_right_local : ∀ (n c : Nat) (f : Fin n → Nat),
   | 0, _, _ => by simp [finSum]
   | n + 1, c, f => by simp only [finSum, finSum_mul_right_local n c, Nat.add_mul]
 
-private theorem multiSessionBadHit_pairFin {AdvState : Type} (G : RssCoinTag → ByteArray)
+private theorem multiSessionBadHit_pairFin {AdvState : Type} (commitCoins : Bool)
     (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (A : UcRushingAdversary AdvState) (s : Nat)
     (cl : RealClusterState SlhPublicKey RssPartyKeyShare) (advSt : AdvState)
     (cur : Fin (rssFullSessionCard p.sigBytes))
     (rest : Fin (rssMultiSessionCard p.sigBytes s)) :
-    multiSessionBadHit G p cIdx deg A (s + 1) cl advSt (pairFin cur rest) =
-    (sessionBadHit G p cIdx deg A cl advSt cur ||
-      let next := execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt
+    multiSessionBadHit commitCoins p cIdx deg A (s + 1) cl advSt (pairFin cur rest) =
+    (sessionBadHit commitCoins p cIdx deg A cl advSt cur ||
+      let next := execRealSession (rssSlhCoinProtocol commitCoins p cIdx deg) A cl advSt
                     (decodeSingleFullTape p.sigBytes cur)
-      multiSessionBadHit G p cIdx deg A s next.1 next.2.1 rest) := by
+      multiSessionBadHit commitCoins p cIdx deg A s next.1 next.2.1 rest) := by
   simp only [multiSessionBadHit, splitFinLeft_pairFin, splitFinRight_pairFin]
 
 /-- **Multi-Session Schwartz-Zippel Root-Hit Bound, commitment-decoy game
@@ -2498,34 +2509,34 @@ theorem multiSessionBadHit_finSum_bound {AdvState : Type}
     (A : UcRushingAdversary AdvState) :
     ∀ (s : Nat) (cl : RealClusterState SlhPublicKey RssPartyKeyShare) (advSt : AdvState),
       finSum (rssMultiSessionCard p.sigBytes s)
-        (fun ω => if multiSessionBadHit G p cIdx deg A s cl advSt ω then 1 else 0) * (2 ^ 128) ≤
+        (fun ω => if multiSessionBadHit false p cIdx deg A s cl advSt ω then 1 else 0) * (2 ^ 128) ≤
       (s * deg) * rssMultiSessionCard p.sigBytes s
   | 0, _, _ => by simp [multiSessionBadHit, rssMultiSessionCard, finSum]
   | s + 1, cl, advSt => by
     let F := rssFullSessionCard p.sigBytes
     let M := rssMultiSessionCard p.sigBytes s
-    change finSum (F * M) (fun ω => if multiSessionBadHit G p cIdx deg A (s + 1) cl advSt ω then 1 else 0) * (2 ^ 128) ≤
+    change finSum (F * M) (fun ω => if multiSessionBadHit false p cIdx deg A (s + 1) cl advSt ω then 1 else 0) * (2 ^ 128) ≤
       ((s + 1) * deg) * (F * M)
     rw [finSum_prod_eq F M]
     have hSplitOr :
         finSum F (fun cur => finSum M (fun rest =>
-          if multiSessionBadHit G p cIdx deg A (s + 1) cl advSt (pairFin cur rest) then 1 else 0)) ≤
+          if multiSessionBadHit false p cIdx deg A (s + 1) cl advSt (pairFin cur rest) then 1 else 0)) ≤
         finSum F (fun cur => finSum M (fun _ =>
-          if sessionBadHit G p cIdx deg A cl advSt cur then 1 else 0)) +
+          if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0)) +
         finSum F (fun cur => finSum M (fun rest =>
           let (cl1, advSt1, _) :=
-            execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt
+            execRealSession (rssSlhCoinProtocol false p cIdx deg) A cl advSt
               (decodeSingleFullTape p.sigBytes cur)
-          if multiSessionBadHit G p cIdx deg A s cl1 advSt1 rest then 1 else 0)) := by
+          if multiSessionBadHit false p cIdx deg A s cl1 advSt1 rest then 1 else 0)) := by
       apply finSum_le_add_finSum
       intro cur
       apply finSum_le_add_finSum
       intro rest
-      rw [multiSessionBadHit_pairFin G p cIdx deg A s cl advSt cur rest]
-      let b1 := sessionBadHit G p cIdx deg A cl advSt cur
-      let next := execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt
+      rw [multiSessionBadHit_pairFin false p cIdx deg A s cl advSt cur rest]
+      let b1 := sessionBadHit false p cIdx deg A cl advSt cur
+      let next := execRealSession (rssSlhCoinProtocol false p cIdx deg) A cl advSt
                     (decodeSingleFullTape p.sigBytes cur)
-      let b2 := multiSessionBadHit G p cIdx deg A s next.1 next.2.1 rest
+      let b2 := multiSessionBadHit false p cIdx deg A s next.1 next.2.1 rest
       change (if (b1 || b2) = true then 1 else 0) ≤
              (if b1 = true then 1 else 0) + (if b2 = true then 1 else 0)
       cases b1 <;> cases b2 <;> decide
@@ -2533,20 +2544,20 @@ theorem multiSessionBadHit_finSum_bound {AdvState : Type}
     rw [Nat.add_mul] at hMulSplit
     have hTerm1 :
         finSum F (fun cur => finSum M (fun _ =>
-          if sessionBadHit G p cIdx deg A cl advSt cur then 1 else 0)) * (2 ^ 128) ≤
+          if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0)) * (2 ^ 128) ≤
         deg * (F * M) := by
       have hConstM :
           finSum F (fun cur => finSum M (fun _ =>
-            if sessionBadHit G p cIdx deg A cl advSt cur then 1 else 0)) =
-          finSum F (fun cur => (if sessionBadHit G p cIdx deg A cl advSt cur then 1 else 0) * M) := by
+            if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0)) =
+          finSum F (fun cur => (if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) * M) := by
         apply finSum_congr
         intro cur
         rw [finSum_const, Nat.mul_comm]
       rw [hConstM, finSum_mul_right_local]
       have hB1 := sessionBadHit_finSum_le p cIdx deg A cl advSt
       have hScaled := Nat.mul_le_mul_right (M * (2 ^ 128)) hB1
-      have hL : finSum F (fun cur => if sessionBadHit G p cIdx deg A cl advSt cur then 1 else 0) * M * (2 ^ 128) =
-          finSum F (fun cur => if sessionBadHit G p cIdx deg A cl advSt cur then 1 else 0) * (M * (2 ^ 128)) :=
+      have hL : finSum F (fun cur => if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) * M * (2 ^ 128) =
+          finSum F (fun cur => if sessionBadHit false p cIdx deg A cl advSt cur then 1 else 0) * (M * (2 ^ 128)) :=
         Nat.mul_assoc _ _ _
       have hR : rssPadSessionCard p.sigBytes * deg * (M * (2 ^ 128)) = deg * (F * M) := by
         dsimp only [F, rssFullSessionCard]
@@ -2556,18 +2567,18 @@ theorem multiSessionBadHit_finSum_bound {AdvState : Type}
     have hTerm2 :
         finSum F (fun cur => finSum M (fun rest =>
           let (cl1, advSt1, _) :=
-            execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt
+            execRealSession (rssSlhCoinProtocol false p cIdx deg) A cl advSt
               (decodeSingleFullTape p.sigBytes cur)
-          if multiSessionBadHit G p cIdx deg A s cl1 advSt1 rest then 1 else 0)) * (2 ^ 128) ≤
+          if multiSessionBadHit false p cIdx deg A s cl1 advSt1 rest then 1 else 0)) * (2 ^ 128) ≤
         (s * deg) * (F * M) := by
       rw [← finSum_mul_right_local]
       have hCap : finSum F (fun _ => (s * deg) * M) = F * ((s * deg) * M) := finSum_const F _
       have hLeCap :
           finSum F (fun cur => finSum M (fun rest =>
             let (cl1, advSt1, _) :=
-              execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt
+              execRealSession (rssSlhCoinProtocol false p cIdx deg) A cl advSt
                 (decodeSingleFullTape p.sigBytes cur)
-            if multiSessionBadHit G p cIdx deg A s cl1 advSt1 rest then 1 else 0) * (2 ^ 128)) ≤
+            if multiSessionBadHit false p cIdx deg A s cl1 advSt1 rest then 1 else 0) * (2 ^ 128)) ≤
           finSum F (fun _ => (s * deg) * M) := by
         apply finSum_le_finSum
         intro cur
@@ -2597,12 +2608,12 @@ theorem multiSession_real_eq_ideal_unless_bad {AdvState : Type}
       RealIdealClusterMatch cIdx seedSh prfSh cl icl →
       cl.tsig.pk = (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2 →
       ∀ (ω : Fin (rssMultiSessionCard p.sigBytes s)),
-        multiSessionBadHit G p cIdx deg A s cl advSt ω = false →
+        multiSessionBadHit true p cIdx deg A s cl advSt ω = false →
         let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
-        (RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A s
+        (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A s
           (decodeMultiSessionTapes p.sigBytes s ω) cl advSt).2 =
-        (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg) A s
-          (decodeMultiSessionTapes p.sigBytes s ((multiSessionTapeEquiv G p cIdx deg A s cl advSt).toFun ω))
+        (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A s
+          (decodeMultiSessionTapes p.sigBytes s ((multiSessionTapeEquiv p cIdx deg A s cl advSt).toFun ω))
           icl advSt).2
   | 0, _, _, _, _, _, _, _ => rfl
   | s + 1, cl, icl, advSt, hMatch, hPkKey, ω, hNoBad => by
@@ -2610,19 +2621,19 @@ theorem multiSession_real_eq_ideal_unless_bad {AdvState : Type}
     let cur := splitFinLeft hMPos ω
     let rest := splitFinRight hMPos ω
     have hOrFalse :
-        (sessionBadHit G p cIdx deg A cl advSt cur ||
-          multiSessionBadHit G p cIdx deg A s
-            (execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).1
-            (execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).2.1
+        (sessionBadHit true p cIdx deg A cl advSt cur ||
+          multiSessionBadHit true p cIdx deg A s
+            (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).1
+            (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).2.1
             rest) = false := hNoBad
-    have hCurFalse : sessionBadHit G p cIdx deg A cl advSt cur = false := by
-      cases hc : sessionBadHit G p cIdx deg A cl advSt cur
+    have hCurFalse : sessionBadHit true p cIdx deg A cl advSt cur = false := by
+      cases hc : sessionBadHit true p cIdx deg A cl advSt cur
       · rfl
       · rw [hc] at hOrFalse; simp at hOrFalse
     have hRestFalse :
-        multiSessionBadHit G p cIdx deg A s
-          (execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).1
-          (execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).2.1
+        multiSessionBadHit true p cIdx deg A s
+          (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).1
+          (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).2.1
           rest = false := by
       rw [hCurFalse, Bool.false_or] at hOrFalse
       exact hOrFalse
@@ -2630,7 +2641,7 @@ theorem multiSession_real_eq_ideal_unless_bad {AdvState : Type}
         decodeMultiSessionTapes p.sigBytes (s + 1) ω 0 = decodeSingleFullTape p.sigBytes cur := rfl
     have hHeadSim0 :
         decodeMultiSessionTapes p.sigBytes (s + 1)
-          ((multiSessionTapeEquiv G p cIdx deg A (s + 1) cl advSt).toFun ω) 0 =
+          ((multiSessionTapeEquiv p cIdx deg A (s + 1) cl advSt).toFun ω) 0 =
         decodeSingleFullTape p.sigBytes ((adaptiveSingleSessionEquiv p cIdx A cl advSt).toFun cur) := by
       simp only [multiSessionTapeEquiv, depProdFinEquiv, decodeMultiSessionTapes,
                  decodeSingleFullTape, splitFinLeft_pairFin]
@@ -2640,11 +2651,11 @@ theorem multiSession_real_eq_ideal_unless_bad {AdvState : Type}
         decodeMultiSessionTapes p.sigBytes s rest := rfl
     have hTailSim :
         (fun i => decodeMultiSessionTapes p.sigBytes (s + 1)
-          ((multiSessionTapeEquiv G p cIdx deg A (s + 1) cl advSt).toFun ω) (i + 1)) =
+          ((multiSessionTapeEquiv p cIdx deg A (s + 1) cl advSt).toFun ω) (i + 1)) =
         decodeMultiSessionTapes p.sigBytes s
-          ((multiSessionTapeEquiv G p cIdx deg A s
-            (execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).1
-            (execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).2.1).toFun rest) := by
+          ((multiSessionTapeEquiv p cIdx deg A s
+            (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).1
+            (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)).2.1).toFun rest) := by
       funext i
       simp only [multiSessionTapeEquiv, depProdFinEquiv, decodeMultiSessionTapes,
                  splitFinRight_pairFin]
@@ -2652,10 +2663,10 @@ theorem multiSession_real_eq_ideal_unless_bad {AdvState : Type}
     have hStep := execRealSession_eq_execIdealSession_unless_bad p hWf cIdx deg
       hSeedWf hPrfWf pkSeed A cl icl advSt hMatch hPkKey cur hCurFalse
     dsimp only at hStep
-    rcases hR1 : execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)
+    rcases hR1 : execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt (decodeSingleFullTape p.sigBytes cur)
       with ⟨cl1, advSt1, rec1⟩
     rcases hI1 : execIdealSession (slhIdealSignOracle p (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1)
-      (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg) A icl advSt
+      (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A icl advSt
       (decodeSingleFullTape p.sigBytes ((adaptiveSingleSessionEquiv p cIdx A cl advSt).toFun cur))
       with ⟨icl1, advStI1, recI1⟩
     rw [hR1, hI1] at hStep
@@ -2733,18 +2744,18 @@ theorem rss_slh_real_ideal_view_indistinguishable {AdvState OuterView : Type}
     let card := rssMultiSessionCard p.sigBytes Q_cuts
     let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
     let realPrfView : Fin prfCard → OuterView := fun κ =>
-      ctx.postProcess (RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_cuts
+      ctx.postProcess (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts
         (realPrfTapeGen κ) cl advSt).2
     let hybridUniformView : Fin card → OuterView := fun ω =>
-      ctx.postProcess (RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_cuts
+      ctx.postProcess (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts
         (decodeMultiSessionTapes p.sigBytes Q_cuts ω) cl advSt).2
     let idealSimView : Fin card → OuterView := fun ω =>
-      ctx.postProcess (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_cuts
+      ctx.postProcess (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_cuts
         (decodeMultiSessionTapes p.sigBytes Q_cuts ω) icl advSt).2
     let badReal := finSum card (fun ω =>
-      if multiSessionBadHit G p cIdx deg A Q_cuts cl advSt ω then 1 else 0)
+      if multiSessionBadHit true p cIdx deg A Q_cuts cl advSt ω then 1 else 0)
     let badDecoy := finSum card (fun ω =>
-      if multiSessionBadHit G p cIdx deg A Q_cuts cl advSt ω then 1 else 0)
+      if multiSessionBadHit false p cIdx deg A Q_cuts cl advSt ω then 1 else 0)
     let advCoinHide : Nat × Nat := (natAbsDiff badReal badDecoy, card)
     let advPrf := rationalAcceptDiff prfCard realPrfView card hybridUniformView D
     ratLe (rationalAcceptDiff card hybridUniformView card idealSimView D) (badReal, card) ∧
@@ -2755,8 +2766,8 @@ theorem rss_slh_real_ideal_view_indistinguishable {AdvState OuterView : Type}
           (ratAdd advPrf (ratAdd (Q_cuts * deg, 2 ^ 128) advCoinHide)) := by
   intro card sk realPrfView hybridUniformView idealSimView badReal badDecoy advCoinHide advPrf
   have hCardPos : 0 < card := rssMultiSessionCard_pos p.sigBytes Q_cuts
-  let bij := multiSessionTapeEquiv G p cIdx deg A Q_cuts cl advSt
-  let bad := multiSessionBadHit G p cIdx deg A Q_cuts cl advSt
+  let bij := multiSessionTapeEquiv p cIdx deg A Q_cuts cl advSt
+  let bad := multiSessionBadHit true p cIdx deg A Q_cuts cl advSt
   have hAgree : ∀ ω : Fin card, bad ω = false → hybridUniformView ω = idealSimView (bij.toFun ω) := by
     intro ω hBadF
     dsimp only [hybridUniformView, idealSimView]
@@ -2775,9 +2786,9 @@ theorem rss_slh_real_ideal_view_indistinguishable {AdvState OuterView : Type}
   have hPrfRefl : ratLe (rationalAcceptDiff prfCard realPrfView card hybridUniformView D) advPrf :=
     ⟨Nat.mul_pos hPrfPos hCardPos, Nat.mul_pos hPrfPos hCardPos, Nat.le_refl _⟩
   have hComp := uc_transitive_composition prfCard card card hPrfPos hCardPos hCardPos
-    (fun κ => (RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_cuts (realPrfTapeGen κ) cl advSt).2)
-    (fun ω => (RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_cuts (decodeMultiSessionTapes p.sigBytes Q_cuts ω) cl advSt).2)
-    (fun ω => (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_cuts (decodeMultiSessionTapes p.sigBytes Q_cuts ω) icl advSt).2)
+    (fun κ => (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts (realPrfTapeGen κ) cl advSt).2)
+    (fun ω => (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_cuts (decodeMultiSessionTapes p.sigBytes Q_cuts ω) cl advSt).2)
+    (fun ω => (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_cuts (decodeMultiSessionTapes p.sigBytes Q_cuts ω) icl advSt).2)
     ctx D advPrf (ratAdd (Q_cuts * deg, 2 ^ 128) advCoinHide) hPrfRefl hUniformBound
   exact ⟨hFund, hDecoyLe, hUniformBound, hComp⟩
 
@@ -3778,7 +3789,7 @@ private theorem sharedVerifyRound1_cursor (cIdx : Fin 3) (r1St : RssRound1State)
     · injection h with hEq; rw [← hEq]
 
 /-- **Honesty Link (`activeConsistencyBreak_implies_schwartzZippel_root`)**:
-    Whenever a single session `rec = (execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt tape).2.2`
+    Whenever a single session `rec = (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tape).2.2`
     witnesses `rec.honestRound3 ≠ []` with corrupt party `cIdx` (`cl.tsig.corruptParties = [cIdx.val]`),
     its Round-2 wire `cWire2` parsed to `(nonceC, sentWires)` **necessarily satisfied**, at the joint
     coin `gamma = coinA ⊕ coinB ⊕ openingCoin nonceC`, BOTH:
@@ -3795,8 +3806,8 @@ theorem activeConsistencyBreak_implies_schwartzZippel_root {AdvState : Type}
     (advSt : AdvState) (tape : RssSlhSessionTape p.sigBytes)
     (hSingleCorrupt : cl.tsig.corruptParties = [cIdx.val])
     {cWire2 : ByteArray} {nonceC : List UInt8} {sentWires : List Tower128}
-    (hR3Nonempty : (execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt tape).2.2.honestRound3 ≠ [])
-    (hWireMem : (cIdx.val, cWire2) ∈ (execRealSession (rssSlhInteractiveProtocol G p cIdx deg) A cl advSt tape).2.2.corruptRound2)
+    (hR3Nonempty : (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tape).2.2.honestRound3 ≠ [])
+    (hWireMem : (cIdx.val, cWire2) ∈ (execRealSession (rssSlhInteractiveProtocol p cIdx deg) A cl advSt tape).2.2.corruptRound2)
     (hParse : parseCorruptRound2Wire deg cWire2 = some (nonceC, sentWires)) :
     let expectedWires :=
       corruptExpectedChiStream cIdx deg (corruptViewOfVault cIdx cl.honestShares)
@@ -3807,7 +3818,7 @@ theorem activeConsistencyBreak_implies_schwartzZippel_root {AdvState : Type}
     batchDeviationPoly (zipXorTower 7 sentWires expectedWires) gamma = towerZero 7 := by
   intro expectedWires gamma
   dsimp only [expectedWires, gamma]
-  unfold execRealSession rssSlhInteractiveProtocol sharedCoinTossBarrier at hR3Nonempty hWireMem
+  unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol sharedCoinTossBarrier at hR3Nonempty hWireMem
   dsimp only at hR3Nonempty hWireMem
   cases hQ : validThresholdApproval cl.tsig (A.scheduleSession advSt).1.honestApprovers
   · rw [hQ] at hR3Nonempty; simp at hR3Nonempty
@@ -3900,18 +3911,18 @@ theorem rss_slh_interactive_euf_cma_reduction {AdvState : Type}
     (forgeOut : ExecTranscript AdvState → List UInt8 × ByteArray)
     {sigStar : SlhSignature}
     (hDecode :
-      let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_s tapes clInit advSt0
+      let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0
       decodeSlhSig p (unpackWireBytes (forgeOut tr).2) = some sigStar)
     (hVerify :
-      let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_s tapes clInit advSt0
+      let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0
       slhVerifyInternal p (forgeOut tr).1 sigStar clInit.tsig.pk = true)
     (hFreshMsg :
-      let (clF, tr) := RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_s tapes clInit advSt0
+      let (clF, tr) := RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0
       (forgeOut tr).1 ∉ clF.tsig.approvedMsgs ∧
       ∀ rec ∈ tr.sessions,
         validThresholdApproval clInit.tsig rec.request.honestApprovers = true →
         rec.request.msg ≠ (forgeOut tr).1) :
-    let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_s tapes clInit advSt0
+    let (_, tr) := RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0
     let sk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).1
     Nonempty (ActiveConsistencySoundnessBreak (corruptRssView cIdx seedSh prfSh) cIdx deg tr) ∨
     Nonempty (Fips205ForsItsrBreak p sk clInit tr (forgeOut tr).1 sigStar) ∨
@@ -3919,7 +3930,7 @@ theorem rss_slh_interactive_euf_cma_reduction {AdvState : Type}
     Nonempty (XmssMerkleTcrBreak p ⟨sk.pkSeed, sk.pkRoot⟩) ∨
     Nonempty (PrfMsgBreak p) := by
   dsimp only at hDecode hVerify hFreshMsg ⊢
-  let tr := (RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_s tapes clInit advSt0).2
+  let tr := (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s tapes clInit advSt0).2
   have hSigWt : sigStar.WellTyped p := decodeSlhSig_wellTyped hDecode
   have hVerKey : slhVerifyInternal p (forgeOut tr).1 sigStar
       (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2 = true := by
@@ -3990,7 +4001,7 @@ theorem buildHonestRound3Msgs_ne_nil (cIdx : Fin 3) (cutSh : RssByteShares) :
 theorem Sim_RssSlh_round3_ne_nil (corrView : RssPartyKeyShare) (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (pk : SlhPublicKey) (corr : List Nat) (req : SessionScheduleReq) (s3 : RssRound3State)
     (sigB : ByteArray) (tape : RssSlhSessionTape p.sigBytes) :
-    ((Sim_RssSlh G corrView p cIdx deg).simRound3 pk corr req s3 sigB tape).1 ≠ [] :=
+    ((Sim_RssSlh corrView p cIdx deg).simRound3 pk corr req s3 sigB tape).1 ≠ [] :=
   fun h => buildHonestRound3Msgs_ne_nil cIdx _ (List.append_eq_nil_iff.mp h).1
 
 /-- **EUF-CMA winning predicate on a transcript (`slhForgeryWins`)**: the forger's wire output decodes
@@ -4183,14 +4194,14 @@ theorem rss_slh_uc_forgery_to_hash_game {AdvState : Type}
     let O := slhIdealSignOracle p sk
     let win := slhForgeryWins p cl.tsig.pk forgeOut
     let realView : Fin card → ExecTranscript AdvState := fun ω =>
-      (RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_s
+      (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s
         (decodeMultiSessionTapes p.sigBytes Q_s ω) cl advSt).2
     let idealView : Fin card → ExecTranscript AdvState := fun ω =>
-      (IdealFunctionalityExec O (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
+      (IdealFunctionalityExec O (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
         (decodeMultiSessionTapes p.sigBytes Q_s ω) icl advSt).2
-    let bad := multiSessionBadHit G p cIdx deg A Q_s cl advSt
-    let badDecoy := multiSessionBadHit G p cIdx deg A Q_s cl advSt
-    let bij := multiSessionTapeEquiv G p cIdx deg A Q_s cl advSt
+    let bad := multiSessionBadHit true p cIdx deg A Q_s cl advSt
+    let badDecoy := multiSessionBadHit false p cIdx deg A Q_s cl advSt
+    let bij := multiSessionTapeEquiv p cIdx deg A Q_s cl advSt
     (∀ ω : Fin card, win (realView ω) = true →
       bad ω = true ∨
       (realView ω = idealView (bij.toFun ω) ∧
@@ -4204,7 +4215,7 @@ theorem rss_slh_uc_forgery_to_hash_game {AdvState : Type}
       Nonempty (SlhForgeryHashGameWitness p sk cl forgeOut (idealView ω))) ∧
     (∀ (ω : Fin card) (O' : SessionScheduleReq → ByteArray),
       (∀ rec ∈ (idealView ω).sessions, rec.honestRound3 ≠ [] → O' rec.request = O rec.request) →
-      (IdealFunctionalityExec O' (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
+      (IdealFunctionalityExec O' (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
         (decodeMultiSessionTapes p.sigBytes Q_s ω) icl advSt).2 = idealView ω) := by
   intro card sk O win realView idealView bad badDecoy bij
   have hIdealWit : ∀ ω : Fin card, win (idealView ω) = true →
@@ -4237,7 +4248,7 @@ theorem rss_slh_uc_forgery_to_hash_game {AdvState : Type}
     · exact .inl rfl
   · intro ω O' hAgree
     exact congrArg Prod.snd
-      (IdealFunctionalityExec_oracle_congr O O' (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg)
+      (IdealFunctionalityExec_oracle_congr O O' (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg)
         (Sim_RssSlh_round3_ne_nil (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
         (decodeMultiSessionTapes p.sigBytes Q_s ω) icl advSt hAgree)
 
@@ -4270,17 +4281,17 @@ theorem rss_slh_fresh_enrollment_euf_cma_bound {AdvState : Type}
       ⟨tsig, initWalLatchState (slhPkDigest tsig.pk), 0⟩
     let win := slhForgeryWins p tsig.pk forgeOut
     let realView : Fin card → ExecTranscript AdvState := fun ω =>
-      (RealProtocolExec (rssSlhInteractiveProtocol G p cIdx deg) A Q_s
+      (RealProtocolExec (rssSlhInteractiveProtocol p cIdx deg) A Q_s
         (decodeMultiSessionTapes p.sigBytes Q_s ω) cl advSt).2
     let idealView : Fin card → ExecTranscript AdvState := fun ω =>
-      (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh G (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
+      (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView cIdx seedSh prfSh) p cIdx deg) A Q_s
         (decodeMultiSessionTapes p.sigBytes Q_s ω) icl advSt).2
     (∀ ω : Fin card, ¬ Nonempty (SlhForgeryHashGameWitness p sk cl forgeOut (idealView ω))) →
     distAcceptCount card realView win * (2 ^ 128) ≤
       (Q_s * deg) * card +
         natAbsDiff
-          (finSum card (fun ω => if multiSessionBadHit G p cIdx deg A Q_s cl advSt ω then 1 else 0))
-          (finSum card (fun ω => if multiSessionBadHit G p cIdx deg A Q_s cl advSt ω then 1 else 0)) *
+          (finSum card (fun ω => if multiSessionBadHit true p cIdx deg A Q_s cl advSt ω then 1 else 0))
+          (finSum card (fun ω => if multiSessionBadHit false p cIdx deg A Q_s cl advSt ω then 1 else 0)) *
           (2 ^ 128) := by
   intro card sk cl icl win realView idealView hNoBreak
   have hMatch : RealIdealClusterMatch cIdx seedSh prfSh cl icl :=
@@ -4482,12 +4493,12 @@ private theorem sessionBadHit_passive
     (hCur : cl.maskSessionCursor = idx)
     (hView : corruptViewOfVault cIdx cl.honestShares = some corrView)
     (cur : Fin (rssFullSessionCard p.sigBytes)) :
-    sessionBadHit G p cIdx deg (passiveRushingAdv cIdx corrView p pk reqs deg) cl idx cur = false := by
+    sessionBadHit true p cIdx deg (passiveRushingAdv cIdx corrView p pk reqs deg) cl idx cur = false := by
   have hExtract : ∀ tape : RssSlhSessionTape p.sigBytes,
-      extractSessionNonzeroDeltas G p cIdx deg
+      extractSessionNonzeroDeltas true p cIdx deg
         (passiveRushingAdv cIdx corrView p pk reqs deg) cl idx tape = none := by
     intro tape
-    unfold extractSessionNonzeroDeltas rssSlhInteractiveProtocol passiveRushingAdv
+    unfold extractSessionNonzeroDeltas rssSlhCoinProtocol committedCoin passiveRushingAdv
     dsimp only
     split
     · rfl
@@ -4550,7 +4561,7 @@ theorem execRealSession_passiveRushingAdv_ok
     let pk := (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2
     let expSig := packWireBytes (encodeSlhSig (slhSignInternal p (reqs sIdx).msg sk (reqs sIdx).optRand))
     let runOut :=
-      execRealSession (rssSlhInteractiveProtocol G p cIdx deg)
+      execRealSession (rssSlhInteractiveProtocol p cIdx deg)
         (passiveRushingAdv cIdx (corruptRssView cIdx seedSh prfSh) p pk reqs deg) cl sIdx tape
     runOut.2.1 = sIdx + 1 ∧
     runOut.2.2.outcome = .signOk expSig ∧
@@ -4577,7 +4588,7 @@ theorem execRealSession_passiveRushingAdv_ok
         latchedRecord := some ((reqs sIdx).reqEpoch, slhReqDigest (reqs sIdx), expSig) } := by
   intro sk pk expSig runOut
   dsimp only [runOut]
-  unfold execRealSession rssSlhInteractiveProtocol sharedCoinTossBarrier passiveRushingAdv
+  unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol sharedCoinTossBarrier passiveRushingAdv
   dsimp only
   rw [hQuorum, ite_eq_right (by decide : ¬ ((!true) = true)), hWal]
   dsimp only
@@ -4726,9 +4737,9 @@ theorem threshold_slh_output_perfect_quorum_privacy
        let cl₂ : RealClusterState SlhPublicKey RssPartyKeyShare :=
          ⟨⟨pk, 2, 3, [cIdx₂.val], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
           dealHonestRssVault cIdx₂ seed₂ prf₂⟩
-       let out₁ := (execRealSession (rssSlhInteractiveProtocol G p cIdx₁ deg)
+       let out₁ := (execRealSession (rssSlhInteractiveProtocol p cIdx₁ deg)
                      (passiveRushingAdv cIdx₁ (corruptRssView cIdx₁ seed₁ prf₁) p pk reqs₁ deg) cl₁ 0 tape₁).2.2.outcome
-       let out₂ := (execRealSession (rssSlhInteractiveProtocol G p cIdx₂ deg)
+       let out₂ := (execRealSession (rssSlhInteractiveProtocol p cIdx₂ deg)
                      (passiveRushingAdv cIdx₂ (corruptRssView cIdx₂ seed₂ prf₂) p pk reqs₂ deg) cl₂ 0 tape₂).2.2.outcome
        out₁ = .signOk (standaloneWire optRand) ∧ out₁ = out₂) ∧
     -- (3) `t`-of-`n` Shamir cross-quorum / cross-sharing wire `ByteArray` identity:
@@ -4861,9 +4872,9 @@ private theorem inhabited_threshold_slh_quorum_privacy_for
       let cl₂ : RealClusterState SlhPublicKey RssPartyKeyShare :=
         ⟨⟨pk, 2, 3, [2], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
          dealHonestRssVault ⟨2, by decide⟩ seed₂ prf₂⟩
-      (execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 4)
+      (execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4)
         (passiveRushingAdv ⟨0, by decide⟩ (corruptRssView ⟨0, by decide⟩ seed₁ prf₁) p pk reqs₁ 4) cl₁ 0 tape₁).2.2.outcome =
-      (execRealSession (rssSlhInteractiveProtocol G p ⟨2, by decide⟩ 4)
+      (execRealSession (rssSlhInteractiveProtocol p ⟨2, by decide⟩ 4)
         (passiveRushingAdv ⟨2, by decide⟩ (corruptRssView ⟨2, by decide⟩ seed₂ prf₂) p pk reqs₂ 4) cl₂ 0 tape₂).2.2.outcome) := by
   intro seed₁ seed₂ prf₁ prf₂
   have hSeedEq : reconstructRssBytes seed₁ = reconstructRssBytes seed₂ := by decide +kernel
@@ -4897,9 +4908,9 @@ theorem inhabited_threshold_slh_quorum_privacy :
       let cl₂ : RealClusterState SlhPublicKey RssPartyKeyShare :=
         ⟨⟨pk, 2, 3, [2], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
          dealHonestRssVault ⟨2, by decide⟩ seed₂ prf₂⟩
-      (execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 4)
+      (execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4)
         (passiveRushingAdv ⟨0, by decide⟩ (corruptRssView ⟨0, by decide⟩ seed₁ prf₁) p pk reqs₁ 4) cl₁ 0 tape₁).2.2.outcome =
-      (execRealSession (rssSlhInteractiveProtocol G p ⟨2, by decide⟩ 4)
+      (execRealSession (rssSlhInteractiveProtocol p ⟨2, by decide⟩ 4)
         (passiveRushingAdv ⟨2, by decide⟩ (corruptRssView ⟨2, by decide⟩ seed₂ prf₂) p pk reqs₂ 4) cl₂ 0 tape₂).2.2.outcome) :=
   inhabited_threshold_slh_quorum_privacy_for slhDsaShake128f slhDsaShake128f_wellFormed
 
@@ -4937,7 +4948,7 @@ private theorem ratLe_lower_bound_of_full_vs_bounded {View : Type}
 def mutantSkipPreCutProtocol (p : Fips205Params) (cIdx : Fin 3) (deg : Nat) :
     InteractiveThresholdProtocol SlhPublicKey RssPartyKeyShare (RssSlhSessionTape p.sigBytes)
       RssRound1State RssRound2State RssRound3State :=
-  { rssSlhInteractiveProtocol G p cIdx deg with
+  { rssSlhInteractiveProtocol p cIdx deg with
     preCutBarrier := fun pk req r2St _honR2 corrR2 =>
       match corrR2.find? (fun pr => pr.1 == cIdx.val) with
       | none => .inl (.round1CommitMismatch cIdx.val)
@@ -5057,16 +5068,16 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       | rec :: _ => !(rec.honestRound3.isEmpty)
       | [] => false
     let mutView₀ := fun ω : Fin card =>
-      (RealProtocolExec (mutantSkipPreCutProtocol G p ⟨0, by decide⟩ 1) (A seedSh₀) 1
+      (RealProtocolExec (mutantSkipPreCutProtocol p ⟨0, by decide⟩ 1) (A seedSh₀) 1
         (decodeMultiSessionTapes p.sigBytes 1 ω) cl₀ ()).2
     let mutView₁ := fun ω : Fin card =>
-      (RealProtocolExec (mutantSkipPreCutProtocol G p ⟨0, by decide⟩ 1) (A seedSh₁) 1
+      (RealProtocolExec (mutantSkipPreCutProtocol p ⟨0, by decide⟩ 1) (A seedSh₁) 1
         (decodeMultiSessionTapes p.sigBytes 1 ω) cl₁ ()).2
     let realView₀ := fun ω : Fin card =>
-      (RealProtocolExec (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1) (A seedSh₀) 1
+      (RealProtocolExec (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) (A seedSh₀) 1
         (decodeMultiSessionTapes p.sigBytes 1 ω) cl₀ ()).2
     let idealView := fun ω : Fin card =>
-      (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh G (corruptRssView ⟨0, by decide⟩ seedSh₀ prfSh) p ⟨0, by decide⟩ 1) (A seedSh₀) 1
+      (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView ⟨0, by decide⟩ seedSh₀ prfSh) p ⟨0, by decide⟩ 1) (A seedSh₀) 1
         (decodeMultiSessionTapes p.sigBytes 1 ω) icl ()).2
     reconstructRssBytes seedSh₀ = reconstructRssBytes seedSh₁ ∧
     seedSh₀ ≠ seedSh₁ ∧
@@ -5077,7 +5088,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin (List.replicate 24 0)) ≠
         towerZero 7 →
       let runOut :=
-        execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1) (A seedSh₀) cl₀ () tape
+        execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) (A seedSh₀) cl₀ () tape
       runOut.2.2.honestRound3 = [] ∧
       runOut.2.2.outcome = .abort .activeConsistencyFailed ∧
       runOut.1.honestWal.poisoned = true) := by
@@ -5129,7 +5140,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       let clS : RealClusterState SlhPublicKey RssPartyKeyShare :=
         ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
          dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
-      let recOut := (execRealSession (mutantSkipPreCutProtocol G p ⟨0, by decide⟩ 1) (A seedSh) clS () tape).2.2
+      let recOut := (execRealSession (mutantSkipPreCutProtocol p ⟨0, by decide⟩ 1) (A seedSh) clS () tape).2.2
       recOut.honestRound3 ≠ [] ∧
       extractPublicRound3HeadByte p.sigBytes recOut.honestRound3 =
         some (bHon ^^^ (seedSh.b1.headD 0 &&& 1)) := by
@@ -5137,7 +5148,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
     let exp0 := expOf seedSh
     let forgedWire0 := towerAdd 7 exp0 (towerOne 7)
     dsimp only [recOut, A, clS]
-    unfold execRealSession mutantSkipPreCutProtocol rssSlhInteractiveProtocol activeFaultRushingAdv
+    unfold execRealSession mutantSkipPreCutProtocol rssSlhInteractiveProtocol rssSlhCoinProtocol activeFaultRushingAdv
     dsimp only
     rw [hQuorum, ite_eq_right (by decide : ¬ ((!true) = true)), hWal0]
     dsimp only
@@ -5238,7 +5249,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       have hD : D_leakBit (mutView₁ ω) = true := by
         dsimp only [mutView₁, D_leakBit]
         rw [RealProtocolExec_one]
-        rcases hRun : execRealSession (mutantSkipPreCutProtocol G p ⟨0, by decide⟩ 1) (A seedSh₁) cl₁ ()
+        rcases hRun : execRealSession (mutantSkipPreCutProtocol p ⟨0, by decide⟩ 1) (A seedSh₁) cl₁ ()
           (decodeMultiSessionTapes p.sigBytes 1 ω 0) with ⟨_, _, recS⟩
         rw [hRun] at hH
         dsimp only at hH ⊢
@@ -5263,7 +5274,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       have hD : D_leakBit (mutView₀ ω) = false := by
         dsimp only [mutView₀, D_leakBit]
         rw [RealProtocolExec_one]
-        rcases hRun : execRealSession (mutantSkipPreCutProtocol G p ⟨0, by decide⟩ 1) (A seedSh₀) cl₀ ()
+        rcases hRun : execRealSession (mutantSkipPreCutProtocol p ⟨0, by decide⟩ 1) (A seedSh₀) cl₀ ()
           (decodeMultiSessionTapes p.sigBytes 1 ω 0) with ⟨_, _, recS⟩
         rw [hRun] at hH
         dsimp only at hH ⊢
@@ -5283,7 +5294,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       have hD : D_hasR3 (mutView₀ ω) = true := by
         dsimp only [mutView₀, D_hasR3]
         rw [RealProtocolExec_one]
-        rcases hRun : execRealSession (mutantSkipPreCutProtocol G p ⟨0, by decide⟩ 1) (A seedSh₀) cl₀ ()
+        rcases hRun : execRealSession (mutantSkipPreCutProtocol p ⟨0, by decide⟩ 1) (A seedSh₀) cl₀ ()
           (decodeMultiSessionTapes p.sigBytes 1 ω 0) with ⟨_, _, recS⟩
         rw [hRun] at hNe
         dsimp only at hNe ⊢
@@ -5296,7 +5307,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
       (batchDeviationPoly [towerOne 7]
         (unpackTower 7 ((tape.gammaBits ^^^ tape.coinB) ^^^ openingCoin (List.replicate 24 0))) ==
           towerZero 7) = false →
-      (execIdealSession (slhIdealSignOracle p sk) (Sim_RssSlh G (corruptRssView ⟨0, by decide⟩ seedSh₀ prfSh) p ⟨0, by decide⟩ 1) (A seedSh₀) icl () tape).2.2.honestRound3 = [] := by
+      (execIdealSession (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView ⟨0, by decide⟩ seedSh₀ prfSh) p ⟨0, by decide⟩ 1) (A seedSh₀) icl () tape).2.2.honestRound3 = [] := by
     intro tape hBatchF
     let exp0 := expOf seedSh₀
     let forgedWire0 := towerAdd 7 exp0 (towerOne 7)
@@ -5375,7 +5386,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
           have hDF : D_hasR3 (idealView ωIdx) = false := by
             dsimp only [idealView, D_hasR3]
             rw [IdealFunctionalityExec_one, hTapeEq]
-            rcases hRunI : execIdealSession (slhIdealSignOracle p sk) (Sim_RssSlh G (corruptRssView ⟨0, by decide⟩ seedSh₀ prfSh) p ⟨0, by decide⟩ 1) (A seedSh₀) icl ()
+            rcases hRunI : execIdealSession (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView ⟨0, by decide⟩ seedSh₀ prfSh) p ⟨0, by decide⟩ 1) (A seedSh₀) icl ()
               (decodeRssSessionTape p.sigBytes padIdx gIdx) with ⟨_, _, recI⟩
             rw [hRunI] at hEmpty
             dsimp only at hEmpty ⊢
@@ -5401,15 +5412,15 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
   -- This adversary ignores every honest message, so the commitment-decoy game has the same
   -- root-hit event and the counted bound applies to the protocol itself.
   have hBadSame : ∀ ω : Fin card,
-      multiSessionBadHit G p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω =
-      multiSessionBadHit G p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω := fun _ => rfl
+      multiSessionBadHit true p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω =
+      multiSessionBadHit false p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω := fun _ => rfl
   have hCountSame :
-      finSum card (fun ω => if multiSessionBadHit G p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0) =
-      finSum card (fun ω => if multiSessionBadHit G p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0) :=
+      finSum card (fun ω => if multiSessionBadHit true p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0) =
+      finSum card (fun ω => if multiSessionBadHit false p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0) :=
     finSum_congr (fun ω => by rw [hBadSame ω])
   have hRealCount :
       ratLe (finSum card (fun ω =>
-        if multiSessionBadHit G p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0), card)
+        if multiSessionBadHit true p ⟨0, by decide⟩ 1 (A seedSh₀) 1 cl₀ () ω then 1 else 0), card)
         (1 * 1, 2 ^ 128) := by
     rw [hCountSame]
     exact hInd.2.1
@@ -5421,7 +5432,7 @@ theorem tooth_skipping_pre_cut_barrier_leaks_key_bit
   let exp0 := expOf seedSh₀
   let forgedWire0 := towerAdd 7 exp0 (towerOne 7)
   dsimp only [runOut, A, cl₀]
-  unfold execRealSession rssSlhInteractiveProtocol sharedCoinTossBarrier
+  unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol sharedCoinTossBarrier
     activeFaultRushingAdv poisonRealCluster
   dsimp only
   rw [hQuorum, ite_eq_right (by decide : ¬ ((!true) = true)), hWal0]
@@ -5479,7 +5490,7 @@ def reusedFirstSessionTapes (L s : Nat) (ω : Fin (rssMultiSessionCard L s)) :
 
 /-- **`#tooth` Theorem 4b (`tooth_reusing_session_mask_tape_breaks_simulation`)**:
     Proves fresh per-session monotonic mask tapes (`maskSessionCursor`) are load-bearing on
-    **unmodified `RealProtocolExec (rssSlhInteractiveProtocol G p ⟨0, _⟩ 1)`**:
+    **unmodified `RealProtocolExec (rssSlhInteractiveProtocol p ⟨0, _⟩ 1)`**:
     1. **Cross-Sharing Secret `skPrf` Bit Leakage (`ratLe (1, 1)`)**: Reusing Session 0's mask tape
        in Session 1 (`reusedFirstSessionTapes p.sigBytes 2`) on two valid sharings `prfSh_leak`,
        `prfSh_zero` of the **EXACT SAME `skPrf = replicate 16 0`** cancels `chiMaskA ^^^ chiMaskA = 0#64`
@@ -5513,16 +5524,16 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
       ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0⟩
     let card := rssMultiSessionCard p.sigBytes 2
     let reusedLeakView := fun ω : Fin card =>
-      (RealProtocolExec (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1) (A prfSh_leak) 2
+      (RealProtocolExec (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) (A prfSh_leak) 2
         (reusedFirstSessionTapes p.sigBytes 2 ω) cl_leak 0).2
     let reusedZeroView := fun ω : Fin card =>
-      (RealProtocolExec (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1) (A prfSh_zero) 2
+      (RealProtocolExec (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) (A prfSh_zero) 2
         (reusedFirstSessionTapes p.sigBytes 2 ω) cl_zero 0).2
     let freshLeakView := fun ω : Fin card =>
-      (RealProtocolExec (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1) (A prfSh_leak) 2
+      (RealProtocolExec (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) (A prfSh_leak) 2
         (decodeMultiSessionTapes p.sigBytes 2 ω) cl_leak 0).2
     let idealSimView := fun ω : Fin card =>
-      (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh G (corruptRssView ⟨0, by decide⟩ seedSh prfSh_leak) p ⟨0, by decide⟩ 1) (A prfSh_leak) 2
+      (IdealFunctionalityExec (slhIdealSignOracle p sk) (Sim_RssSlh (corruptRssView ⟨0, by decide⟩ seedSh prfSh_leak) p ⟨0, by decide⟩ 1) (A prfSh_leak) 2
         (decodeMultiSessionTapes p.sigBytes 2 ω) icl 0).2
     reconstructRssBytes prfSh_leak = reconstructRssBytes prfSh_zero ∧
     prfSh_leak ≠ prfSh_zero ∧
@@ -5545,7 +5556,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
       let cl : RealClusterState SlhPublicKey RssPartyKeyShare :=
         ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
           dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
-      multiSessionBadHit G p ⟨0, by decide⟩ 1 (A prfSh) 2 cl 0 ω = false := by
+      multiSessionBadHit true p ⟨0, by decide⟩ 1 (A prfSh) 2 cl 0 ω = false := by
     intro prfSh hPWf hSame ω cl
     let cur := splitFinLeft (rssMultiSessionCard_pos p.sigBytes 1) ω
     have hPk : cl.tsig.pk =
@@ -5559,16 +5570,16 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
       (decodeSingleFullTape p.sigBytes cur) hPk rfl rfl rfl hQuorum hWal0 (by decide)
     dsimp only at hS0
     rw [← hA] at hS0
-    rcases hRun : execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1) (A prfSh) cl 0
+    rcases hRun : execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) (A prfSh) cl 0
         (decodeSingleFullTape p.sigBytes cur) with ⟨cl1, adv1, rec1⟩
     rw [hRun] at hS0
     dsimp only at hS0
     obtain ⟨hAdv, _, _, hCur, hSh1, hPk1, hCorr, _⟩ := hS0
     rw [multiSessionBadHit]
-    change (match execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1) (A prfSh) cl 0
+    change (match execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) (A prfSh) cl 0
       (decodeSingleFullTape p.sigBytes cur) with
-      | (next, st, _) => sessionBadHit G p ⟨0, by decide⟩ 1 (A prfSh) cl 0 cur ||
-          multiSessionBadHit G p ⟨0, by decide⟩ 1 (A prfSh) 1 next st
+      | (next, st, _) => sessionBadHit true p ⟨0, by decide⟩ 1 (A prfSh) cl 0 cur ||
+          multiSessionBadHit true p ⟨0, by decide⟩ 1 (A prfSh) 1 next st
             (splitFinRight (rssMultiSessionCard_pos p.sigBytes 1) ω)) = false
     rw [hRun]
     dsimp only
@@ -5586,7 +5597,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
   have hCounts :
       distAcceptCount card freshLeakView reusedMaskWireDistinguisher =
       distAcceptCount card idealSimView reusedMaskWireDistinguisher := by
-    let bij := multiSessionTapeEquiv G p ⟨0, by decide⟩ 1 (A prfSh_leak) 2 cl_leak 0
+    let bij := multiSessionTapeEquiv p ⟨0, by decide⟩ 1 (A prfSh_leak) 2 cl_leak 0
     have hPk : cl_leak.tsig.pk =
         (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh_leak) pkSeed).2 := by
       dsimp only [cl_leak, pk]; rw [hPrfSame]
@@ -5608,7 +5619,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
       let clInit : RealClusterState SlhPublicKey RssPartyKeyShare :=
         ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
          dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
-      let tr := (RealProtocolExec (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1) (A prfSh) 2 tapes clInit 0).2
+      let tr := (RealProtocolExec (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1) (A prfSh) 2 tapes clInit 0).2
       let w0 := match dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh 1 with
                 | some sh1 => computeHonestChiWord 1 sh1 (reqs 0).msg
                 | none => 0#64
@@ -5627,7 +5638,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
     have hS0 := execRealSession_passiveRushingAdv_ok p hWf ⟨0, by decide⟩ 1 0 ⟨rfl, rfl⟩ hPWf pkSeed
       reqs clInit (initWalLatchState (slhPkDigest pk)) (tapes 0) hPkInit rfl rfl rfl hQuorum hWal0 (by decide)
     dsimp only at hS0
-    rcases hRun0 : execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1)
+    rcases hRun0 : execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1)
       (passiveRushingAdv ⟨0, by decide⟩ (corruptRssView ⟨0, by decide⟩ seedSh prfSh) p (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2 reqs 1)
       clInit 0 (tapes 0) with ⟨cl1, adv1, rec0⟩
     rw [hRun0] at hS0
@@ -5648,7 +5659,7 @@ theorem tooth_reusing_session_mask_tape_breaks_simulation
     have hS1 := execRealSession_passiveRushingAdv_ok p hWf ⟨0, by decide⟩ 1 1 ⟨rfl, rfl⟩ hPWf pkSeed
       reqs cl1 cl1.honestWal (tapes 1) hPk1 hCorr1 hCur1 hSh1 hQuorum1 hWal1Ok (by decide)
     dsimp only at hS1
-    rcases hRun1 : execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 1)
+    rcases hRun1 : execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 1)
       (passiveRushingAdv ⟨0, by decide⟩ (corruptRssView ⟨0, by decide⟩ seedSh prfSh) p (slhKeygenInternal p (reconstructRssBytes seedSh) (reconstructRssBytes prfSh) pkSeed).2 reqs 1)
       cl1 1 (tapes 1) with ⟨cl2, adv2, rec1⟩
     rw [hRun1] at hS1
@@ -5937,9 +5948,9 @@ theorem tooth_wal_rollback_enables_stateful_double_sign
       ⟨⟨pk, 2, 3, [0], [], []⟩, initWalLatchState (slhPkDigest pk), 0,
        dealHonestRssVault ⟨0, by decide⟩ seedSh prfSh⟩
     let mutPair :=
-      mutantRollbackWalTwoSessions (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 4) A tapes clInit 0
+      mutantRollbackWalTwoSessions (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4) A tapes clInit 0
     let honTr :=
-      (RealProtocolExec (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 4) A 2 tapes clInit 0).2
+      (RealProtocolExec (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4) A 2 tapes clInit 0).2
     msg₁ ≠ msg₂ ∧
     mutPair.1.request.reqEpoch = 0 ∧ mutPair.2.request.reqEpoch = 0 ∧
     (∃ (raw₁ raw₂ : ByteArray) (s₁ s₂ : SlhSignature),
@@ -5971,7 +5982,7 @@ theorem tooth_wal_rollback_enables_stateful_double_sign
   have hS0 := execRealSession_passiveRushingAdv_ok p hWf ⟨0, by decide⟩ 4 0 hSeedWf hPrfWf pkSeed
     reqs clInit (initWalLatchState (slhPkDigest pk)) (tapes 0) rfl rfl rfl rfl hQuorum hWal0 (by decide)
   dsimp only at hS0
-  rcases hRun0 : execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 4) A clInit 0 (tapes 0)
+  rcases hRun0 : execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4) A clInit 0 (tapes 0)
     with ⟨cl1, adv1, rec0⟩
   rw [hRun0] at hS0
   dsimp only at hS0 ⊢
@@ -5994,7 +6005,7 @@ theorem tooth_wal_rollback_enables_stateful_double_sign
     reqs { cl1 with honestWal := clInit.honestWal } (initWalLatchState (slhPkDigest pk)) (tapes 1)
     hPk1 hCorr1 hCur1 hSh1 hQuorumRb hWalRb (by decide)
   dsimp only at hMut1
-  rcases hRunMut1 : execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 4) A
+  rcases hRunMut1 : execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4) A
       { cl1 with honestWal := clInit.honestWal } 1 (tapes 1)
     with ⟨_, _, mutRec1⟩
   rw [hRunMut1] at hMut1
@@ -6008,7 +6019,7 @@ theorem tooth_wal_rollback_enables_stateful_double_sign
           (reqs 0).reqEpoch (slhReqDigest (reqs 0)) =
           .ok (initWalLatchState (slhPkDigest pk)) (.authorizedFresh 0) := hWal0
       dsimp only [A] at h
-      unfold execRealSession rssSlhInteractiveProtocol passiveRushingAdv at h
+      unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol passiveRushingAdv at h
       dsimp only at h
       rw [hQ0, ite_eq_right (by decide : ¬ ((!true) = true)), hW0] at h
       dsimp only at h
@@ -6026,7 +6037,7 @@ theorem tooth_wal_rollback_enables_stateful_double_sign
           (reqs 1).reqEpoch (slhReqDigest (reqs 1)) =
           .ok (initWalLatchState (slhPkDigest pk)) (.authorizedFresh 0) := hWalRb
       dsimp only [A] at h
-      unfold execRealSession rssSlhInteractiveProtocol passiveRushingAdv at h
+      unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol passiveRushingAdv at h
       dsimp only at h
       rw [hQ1, ite_eq_right (by decide : ¬ ((!true) = true)), hW1] at h
       dsimp only at h
@@ -6051,11 +6062,11 @@ theorem tooth_wal_rollback_enables_stateful_double_sign
     unfold walPreSignStep initWalLatchState
     simp [hDigNe]
   have hHon1 :
-      (execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 4) A cl1 1 (tapes 1)).2.2.honestRound1 = [] ∧
-      (execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 4) A cl1 1 (tapes 1)).2.2.outcome =
+      (execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4) A cl1 1 (tapes 1)).2.2.honestRound1 = [] ∧
+      (execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4) A cl1 1 (tapes 1)).2.2.outcome =
         .abort .walEpochRejected := by
     dsimp only [A]
-    unfold execRealSession rssSlhInteractiveProtocol passiveRushingAdv
+    unfold execRealSession rssSlhInteractiveProtocol rssSlhCoinProtocol passiveRushingAdv
     dsimp only
     rw [hQuorum1, ite_eq_right (by decide : ¬ ((!true) = true)), hWalReject]
     exact ⟨rfl, rfl⟩
@@ -6074,7 +6085,7 @@ theorem tooth_wal_rollback_enables_stateful_double_sign
         (reconstructRssBytes prfSh) pkSeed msg₁ []
     · exact slhVerifyInternal_slhSignInternal p hWf (reconstructRssBytes seedSh)
         (reconstructRssBytes prfSh) pkSeed msg₂ []
-  · refine ⟨rec0, (execRealSession (rssSlhInteractiveProtocol G p ⟨0, by decide⟩ 4) A cl1 1 (tapes 1)).2.2,
+  · refine ⟨rec0, (execRealSession (rssSlhInteractiveProtocol p ⟨0, by decide⟩ 4) A cl1 1 (tapes 1)).2.2,
             raw₁, rfl, hOut0, hHon1.1, hHon1.2⟩
 
 /-! ## 7. Commit-Then-Open Coin Toss: Honest Openings, Teeth, and the Horner Tag as a Tag Scheme -/
@@ -6085,7 +6096,7 @@ theorem tooth_wal_rollback_enables_stateful_double_sign
 theorem honest_coin_openings_open_round1_commitments (p : Fips205Params) (cIdx : Fin 3) (deg : Nat)
     (pk : SlhPublicKey) (corr : List Nat) (req : SessionScheduleReq) (cursor : Nat)
     (shares : Nat → Option RssPartyKeyShare) (tape : RssSlhSessionTape p.sigBytes) :
-    ((rssSlhInteractiveProtocol G p cIdx deg).honestRound1 pk corr req cursor shares tape).1 =
+    ((rssSlhInteractiveProtocol p cIdx deg).honestRound1 pk corr req cursor shares tape).1 =
       (honestCoinOpeningMsgs cIdx tape.gammaBits tape.nonceA tape.coinB tape.nonceB).map
         (fun m => (m.1, round1NonceCommit pk req cursor m.1 (unpackWireBytes m.2))) ∧
     (honestCoinOpeningMsgs cIdx tape.gammaBits tape.nonceA tape.coinB tape.nonceB).map
@@ -6243,7 +6254,7 @@ theorem rss_active_malicious_threshold_sig_hedged_bound
 
 /-! ### Production coin framing
 
-These are the byte-level commitments used by `run_commit_and_open_coin_with_hook` in
+These are the byte-level commitments used by the Rust run_commit_and_open_coin_with_hook function in
 `preprocessing.rs`. They are deliberately separate from the legacy 24-byte RSS shell above:
 that shell's hiding-game theorem does not yet reduce to this 32-byte production coin. -/
 
@@ -6364,6 +6375,21 @@ theorem production_coin_ro_query_hybrid_bound
   unfold ratLe
   dsimp only
   exact ⟨Nat.two_pow_pos 256, Nat.two_pow_pos 256, Nat.mul_le_mul_right (2 ^ 256) hb⟩
+
+
+/-- A two-gate private stream and an actual truncated transmission. -/
+theorem witness_private_stream_changed :
+    ∃ expected sent : List Tower128, sent ≠ expected ∧
+      verifyPrivateChiWires expected sent (towerOne 7) = false := by
+  refine ⟨[towerOne 7, towerOne 7], [towerOne 7], ?_, ?_⟩
+  · intro h
+    have hlen := congrArg List.length h
+    cases hlen
+  · apply tooth_verifyPrivateChiWires_rejects_truncation
+    decide +kernel
+
+#tooth_pair Qsag.verifyPrivateChiWires_any_changed_gate_count vs Qsag.tooth_verifyPrivateChiWires_rejects_truncation
+#verify_inhabited Qsag.verifyPrivateChiWires_any_changed_gate_count Qsag.witness_private_stream_changed
 
 end Qsag
 end

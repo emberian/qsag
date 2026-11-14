@@ -13,8 +13,8 @@ use qsag_asm::{
     transpose64x256_with_backend,
 };
 
-const MAX_PENDING_BITS: usize = 262_144;
-const D0_BITS: usize = 32;
+const MAX_PENDING_BITS: usize = 65_536;
+const D0_BITS: usize = 16;
 const SUPER_BLOCKS: usize = 128 / D0_BITS;
 const D0_CHUNKS: usize = D0_BITS / 16;
 const QUADS_PER_SUPER: usize = SUPER_BLOCKS / QUAD_BLOCKS;
@@ -24,7 +24,6 @@ const QUAD_BITS: usize = D0_BITS * QUAD_BLOCKS;
 const STEP0_PLANES: usize = 2 * D0_BITS;
 const STEP0_SLOTS: usize = STEP0_PLANES - 2;
 const STEP0_CHUNK: usize = 64;
-const STEP2_QUAD_CHUNK: usize = 16;
 const MAX_PENDING_FIELD_WORDS: usize = 1_024;
 /// Schwartz-Zippel numerator of one Boolean check instance per flush: the
 /// round-0 polynomial has degree `2 * D0_BITS - 2`, each binary fold over at most
@@ -36,7 +35,7 @@ const BIT_CHECK_DEGREE: usize =
 /// lane products, and 2 for the base sacrifice.
 const FIELD_CHECK_NUMERATOR: usize = 1 + 2 * (MAX_PENDING_FIELD_WORDS * 64).ilog2() as usize + 2;
 const _: () = assert!(
-    BIT_CHECK_DEGREE == 90
+    BIT_CHECK_DEGREE == 56
         && FIELD_CHECK_NUMERATOR == 35
         && (MAX_PENDING_BITS / D0_BITS).is_power_of_two()
         && (MAX_PENDING_FIELD_WORDS * 64).is_power_of_two()
@@ -430,6 +429,7 @@ fn xor_public_matrix_128x16_bs256(
 }
 
 #[inline(always)]
+#[cfg(test)]
 fn build_nibble_tab256(p: &[BitPlane256], tab: &mut [BitPlane256; 16]) {
     let p0 = p[0];
     let p1 = p[1];
@@ -456,6 +456,7 @@ fn build_nibble_tab256(p: &[BitPlane256], tab: &mut [BitPlane256; 16]) {
 }
 
 #[inline(always)]
+#[cfg(test)]
 fn build_nibble_tabs4_bs256(words16: &[BitPlane256; 16], tabs4: &mut [[BitPlane256; 16]; 4]) {
     for (nib, tab) in tabs4.iter_mut().enumerate() {
         build_nibble_tab256(&words16[nib * 4..nib * 4 + 4], tab);
@@ -464,6 +465,7 @@ fn build_nibble_tabs4_bs256(words16: &[BitPlane256; 16], tabs4: &mut [[BitPlane2
 
 /// Accumulate (`^=`) a public `128 x 16` bit-matrix across 256 lanes into `out`.
 #[inline(always)]
+#[cfg(test)]
 fn xor_public_matrix_128x16_nibble_bs256(
     row_masks: &[u16; 128],
     tabs4: &[[BitPlane256; 16]; 4],
@@ -481,6 +483,7 @@ fn xor_public_matrix_128x16_nibble_bs256(
 
 /// Precompute the eight `128 x 16` public multiplication sub-matrices for constant `c in GF(2^128)`.
 #[inline]
+#[cfg(test)]
 fn build_public_mul_masks_bs256(c: Gf128) -> [[u16; 128]; 8] {
     let mut cur = gf128_to_u128(c);
     let mut out = [[0u16; 128]; 8];
@@ -500,6 +503,7 @@ fn build_public_mul_masks_bs256(c: Gf128) -> [[u16; 128]; 8] {
 /// for each single-use fold costs more than the saved lookups; Step 1 reuses byte
 /// tables across both challenges.
 #[inline]
+#[cfg(test)]
 fn xor_mul_bs256_by_public(
     src: &Bs256,
     masks8: &[[u16; 128]; 8],
@@ -559,6 +563,23 @@ fn gf128_mul_hw(a: Gf128, b: Gf128, backend: SimdBackend) -> Gf128 {
     acc
 }
 
+fn gf128_dot_native(a: &[u128], b: &[u128], backend: SimdBackend) -> u128 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut left = Secret([[0u64; 2]; 128]);
+    let mut right = Secret([[0u64; 2]; 128]);
+    let mut acc = Secret([0u64; 2]);
+    for (a, b) in a.chunks(128).zip(b.chunks(128)) {
+        for (dst, &value) in left.iter_mut().zip(a) {
+            *dst = u128_to_gf128(value);
+        }
+        for (dst, &value) in right.iter_mut().zip(b) {
+            *dst = u128_to_gf128(value);
+        }
+        gf128_dot_acc(&mut acc, &left[..a.len()], &right[..b.len()], backend);
+    }
+    gf128_to_u128(*acc)
+}
+
 /// Convert two 64-lane bitsliced 128-bit planes into two 64-element `Gf128` arrays via
 /// hardware-accelerated 64x256 butterfly transpose using caller-owned wiped `rows`.
 #[inline]
@@ -604,6 +625,47 @@ fn transpose_bs256_to_quad_lanes(
         out[1][lane][1] = row[1];
         out[2][lane][1] = row[2];
         out[3][lane][1] = row[3];
+    }
+}
+
+// The folding phase stores field limbs in the existing wiped allocation:
+// row `2 * lane + limb`, column `sub`. No bit transpose is needed thereafter.
+#[cfg(test)]
+fn unpack_quad_lanes(packed: &Bs256, out: &mut [Gf128Lanes; 4]) {
+    for (sub, lanes) in out.iter_mut().enumerate() {
+        for (lane, value) in lanes.iter_mut().enumerate() {
+            *value = [packed[2 * lane][sub], packed[2 * lane + 1][sub]];
+        }
+    }
+}
+
+#[cfg(test)]
+fn fold_quad_lanes(dst: &mut Bs256, src: &Bs256, r: Gf128, scale_dst: bool, backend: SimdBackend) {
+    let mut left = Secret([0u128; 256]);
+    let mut right = Secret([0u128; 256]);
+    for lane in 0..64 {
+        for sub in 0..4 {
+            left[4 * lane + sub] = gf128_to_u128([dst[2 * lane][sub], dst[2 * lane + 1][sub]]);
+            right[4 * lane + sub] = gf128_to_u128([src[2 * lane][sub], src[2 * lane + 1][sub]]);
+        }
+    }
+    let (acc, input) = if scale_dst {
+        (&mut right, &left)
+    } else {
+        (&mut left, &right)
+    };
+    qsag_asm::bitslice::gf2_128_scale_xor_with_backend(
+        &mut acc[..],
+        &input[..],
+        gf128_to_u128(r),
+        backend,
+    );
+    for lane in 0..64 {
+        for sub in 0..4 {
+            let value = u128_to_gf128(acc[4 * lane + sub]);
+            dst[2 * lane][sub] = value[0];
+            dst[2 * lane + 1][sub] = value[1];
+        }
     }
 }
 
@@ -699,7 +761,6 @@ struct BitCheckScratch {
     a_bs: [[Vec<Bs256>; 2]; 2],
     b_bs: [[Vec<Bs256>; 2]; 2],
     hwm_bs: usize,
-    step2_lanes: Box<[[[Gf128; STEP2_QUAD_CHUNK * 4]; 64]; 8]>,
     tabs8: Box<[[BitPlane256; 256]; 2]>,
     tabs4: Box<[[BitPlane256; 16]; 4]>,
     quad_tmp: Box<[Gf128Lanes; 4]>,
@@ -725,7 +786,6 @@ impl BitCheckScratch {
             a_bs: [[Vec::new(), Vec::new()], [Vec::new(), Vec::new()]],
             b_bs: [[Vec::new(), Vec::new()], [Vec::new(), Vec::new()]],
             hwm_bs: 0,
-            step2_lanes: Box::new([[[[0u64; 2]; STEP2_QUAD_CHUNK * 4]; 64]; 8]),
             tabs8: Box::new([[[0u64; 4]; 256]; 2]),
             tabs4: Box::new([[[0u64; 4]; 16]; 4]),
             quad_tmp: Box::new([z_lanes; 4]),
@@ -789,11 +849,6 @@ impl BitCheckScratch {
         }
         self.hwm_bs = 0;
 
-        for arr in self.step2_lanes.iter_mut() {
-            for lane_slice in arr.iter_mut() {
-                zeroize_gf128_slice(lane_slice);
-            }
-        }
         for tab in self.tabs4.iter_mut() {
             for entry in tab.iter_mut() {
                 ct_zeroize_u64s(entry);
@@ -1475,11 +1530,11 @@ impl<T: Transport> Engine<T> {
         [s0, s1]
     }
 
-    /// Batch-verify up to `MAX_PENDING_BITS` (`262,144`) 64-lane Boolean `AND` triples over
+    /// Batch-verify up to `MAX_PENDING_BITS` (`65,536`) 64-lane Boolean `AND` triples over
     /// `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` via a uniform `GF(2^128)` super-block
     /// combiner + two independent lockstep Arity-2 BBCGGI19 inner-product instances +
     /// randomized base-case sacrifice. Per-flush false acceptance is
-    /// `< 2^-128 + (BIT_CHECK_DEGREE / (2^128 - 1))^2 = 2^-128 + (90 / (2^128 - 1))^2 < 2^-127.99`.
+    /// `< 2^-128 + (BIT_CHECK_DEGREE / (2^128 - 1))^2 = 2^-128 + (56 / (2^128 - 1))^2 < 2^-127.99`.
     fn verify_pending_bits_slice(&mut self, triples_raw: &[u64]) -> Result<(), Error> {
         debug_assert_eq!(triples_raw.len() % 6, 0);
         let n = triples_raw.len() / 6;
@@ -1505,8 +1560,8 @@ impl<T: Transport> Engine<T> {
             .unwrap_or_else(BitCheckScratch::new_boxed);
         scratch.prepare(num_quads);
 
-        // Step 0 + Round 0: pack four 32-gate blocks (`128` gates) per super-block
-        // into 64 bit-planes (`z_s0`, `z_s1`, and 62 off-diagonal `R^s` slots), transpose via
+        // Step 0 + Round 0: pack eight 16-gate blocks (`128` gates) per super-block
+        // into 32 bit-planes (`z_s0`, `z_s1`, and 30 off-diagonal `R^s` slots), transpose via
         // hardware AVX2 butterfly, and accumulate against `gammas` via `PCLMULQDQ`.
         let mut x0_blk = [0u64; D0_BITS];
         let mut x1_blk = [0u64; D0_BITS];
@@ -1722,121 +1777,75 @@ impl<T: Transport> Engine<T> {
             }
         }
 
-        // Step 2: In-place Arity-2 half-split BBCGGI19 inner-product folding on `Bs256` quads
-        // (`cur_quads -> ceil(cur_quads / 2) -> ... -> 1`), streaming cross-terms in L2-sized
-        // chunks into contiguous `PCLMULQDQ` dot products and folding vectors via 4-bit nibble
-        // public matrix evaluation (`0` `a_next`/`b_next` buffers).
-        let mut a4 = Secret([[[[[0u64; 2]; 64]; 4]; 2]; 2]);
-        let mut b4 = Secret([[[[[0u64; 2]; 64]; 4]; 2]; 2]);
-        let mut cur_quads = num_quads;
-
-        while cur_quads > 1 {
-            if cur_quads % 2 == 1 {
-                let padded = cur_quads + 1;
-                if padded > scratch.hwm_bs {
-                    scratch.hwm_bs = padded;
-                }
-                for t in 0..2 {
-                    for side in 0..2 {
-                        scratch.a_bs[t][side].push([[0u64; 4]; 128]);
-                        scratch.b_bs[t][side].push([[0u64; 4]; 128]);
-                    }
-                }
-                cur_quads = padded;
-            }
-            let half_q = cur_quads / 2;
-            scratch.h_fold.fill([[0u64; 2]; 64]);
-
-            for c0 in (0..half_q).step_by(STEP2_QUAD_CHUNK) {
-                let chunk_q = (half_q - c0).min(STEP2_QUAD_CHUNK);
-                let len = chunk_q * 4;
+        // Keep each repetition's field elements contiguous through every fold.
+        // Padding to a power of two adds only zero inner-product terms and keeps
+        // the same ceil(log2(m)) degree budget. Owned buffers wipe all old tails.
+        let stride = num_quads.next_power_of_two() * 4;
+        let mut a_native: [[SecretVec<u128>; 2]; 2] =
+            core::array::from_fn(|_| core::array::from_fn(|_| vec![0; stride * 64].into()));
+        let mut b_native = a_native.clone();
+        for t in 0..2 {
+            for side in 0..2 {
                 let sp = &mut *scratch;
-                for t in 0..2 {
-                    for q_rel in 0..chunk_q {
-                        let q_lo = c0 + q_rel;
-                        let q_hi = half_q + q_lo;
-                        let dst_off = q_rel * 4;
-
-                        // Transpose the 6 direct planes + 2 XORed `b_sum` planes into contiguous
-                        // per-lane slices (`step2_lanes[0..8][lane][dst_off..dst_off + 4]`).
-                        let direct: [(&Bs256, usize); 6] = [
-                            (&sp.a_bs[t][0][q_lo], 0),
-                            (&sp.a_bs[t][1][q_lo], 1),
-                            (&sp.a_bs[t][0][q_hi], 2),
-                            (&sp.a_bs[t][1][q_hi], 3),
-                            (&sp.b_bs[t][0][q_lo], 4),
-                            (&sp.b_bs[t][0][q_hi], 6),
-                        ];
-                        for (src_bs, slot_idx) in direct {
-                            transpose_bs256_to_quad_lanes(
-                                src_bs,
-                                &mut sp.quad_tmp,
-                                &mut sp.tr_rows,
-                                backend,
-                            );
-                            for (lane, lane_dst) in sp.step2_lanes[slot_idx].iter_mut().enumerate()
-                            {
-                                lane_dst[dst_off] = sp.quad_tmp[0][lane];
-                                lane_dst[dst_off + 1] = sp.quad_tmp[1][lane];
-                                lane_dst[dst_off + 2] = sp.quad_tmp[2][lane];
-                                lane_dst[dst_off + 3] = sp.quad_tmp[3][lane];
-                            }
-                        }
-
-                        for (q_src, slot_idx) in [(q_lo, 5usize), (q_hi, 7usize)] {
-                            for ((dst_r, &r0), &r1) in sp
-                                .bs256_buf
-                                .iter_mut()
-                                .zip(&sp.b_bs[t][0][q_src])
-                                .zip(&sp.b_bs[t][1][q_src])
-                            {
-                                *dst_r = xor_plane256(r0, r1);
-                            }
-                            transpose_bs256_to_quad_lanes(
-                                &sp.bs256_buf,
-                                &mut sp.quad_tmp,
-                                &mut sp.tr_rows,
-                                backend,
-                            );
-                            for (lane, lane_dst) in sp.step2_lanes[slot_idx].iter_mut().enumerate()
-                            {
-                                lane_dst[dst_off] = sp.quad_tmp[0][lane];
-                                lane_dst[dst_off + 1] = sp.quad_tmp[1][lane];
-                                lane_dst[dst_off + 2] = sp.quad_tmp[2][lane];
-                                lane_dst[dst_off + 3] = sp.quad_tmp[3][lane];
+                for (quads, native) in [
+                    (&mut sp.a_bs[t][side], &mut a_native[t][side]),
+                    (&mut sp.b_bs[t][side], &mut b_native[t][side]),
+                ] {
+                    for (q, quad) in quads.iter().enumerate() {
+                        transpose_bs256_to_quad_lanes(
+                            quad,
+                            &mut sp.quad_tmp,
+                            &mut sp.tr_rows,
+                            backend,
+                        );
+                        for (sub, lanes) in sp.quad_tmp.iter().enumerate() {
+                            for (lane, &value) in lanes.iter().enumerate() {
+                                native[lane * stride + 4 * q + sub] = gf128_to_u128(value);
                             }
                         }
                     }
-
-                    for lane in 0..64 {
-                        gf128_dot_acc(
-                            &mut sp.h_fold[2 * t][lane],
-                            &sp.step2_lanes[0][lane][..len],
-                            &sp.step2_lanes[7][lane][..len],
-                            backend,
-                        );
-                        gf128_dot_acc(
-                            &mut sp.h_fold[2 * t][lane],
-                            &sp.step2_lanes[1][lane][..len],
-                            &sp.step2_lanes[6][lane][..len],
-                            backend,
-                        );
-                        gf128_dot_acc(
-                            &mut sp.h_fold[2 * t + 1][lane],
-                            &sp.step2_lanes[2][lane][..len],
-                            &sp.step2_lanes[5][lane][..len],
-                            backend,
-                        );
-                        gf128_dot_acc(
-                            &mut sp.h_fold[2 * t + 1][lane],
-                            &sp.step2_lanes[3][lane][..len],
-                            &sp.step2_lanes[4][lane][..len],
-                            backend,
-                        );
-                    }
+                    zeroize_bs256_vec_hwm(quads, sp.hwm_bs);
+                    *quads = Vec::new();
                 }
             }
-
+        }
+        scratch.hwm_bs = 0;
+        let mut b_sum: SecretVec<u128> = vec![0; stride / 2].into();
+        let mut current = stride;
+        while current > 4 {
+            let half = current / 2;
+            scratch.h_fold.fill([[0; 2]; 64]);
+            for t in 0..2 {
+                for lane in 0..64 {
+                    let base = lane * stride;
+                    let lo = base..base + half;
+                    let hi = base + half..base + current;
+                    for (dst, (&b0, &b1)) in b_sum[..half].iter_mut().zip(
+                        b_native[t][0][hi.clone()]
+                            .iter()
+                            .zip(&b_native[t][1][hi.clone()]),
+                    ) {
+                        *dst = b0 ^ b1;
+                    }
+                    let h0 = gf128_dot_native(&a_native[t][0][lo.clone()], &b_sum[..half], backend)
+                        ^ gf128_dot_native(
+                            &a_native[t][1][lo.clone()],
+                            &b_native[t][0][hi.clone()],
+                            backend,
+                        );
+                    for (dst, (&b0, &b1)) in b_sum[..half].iter_mut().zip(
+                        b_native[t][0][lo.clone()]
+                            .iter()
+                            .zip(&b_native[t][1][lo.clone()]),
+                    ) {
+                        *dst = b0 ^ b1;
+                    }
+                    let h1 = gf128_dot_native(&a_native[t][0][hi.clone()], &b_sum[..half], backend)
+                        ^ gf128_dot_native(&a_native[t][1][hi], &b_native[t][0][lo], backend);
+                    scratch.h_fold[2 * t][lane] = u128_to_gf128(h0);
+                    scratch.h_fold[2 * t + 1][lane] = u128_to_gf128(h1);
+                }
+            }
             let reshared =
                 ZeroizeRepGf128LanesVec(self.reshare_gf128_lanes_many(&scratch.h_fold[..])?);
             let seed_rk = self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.FOLD.V1")?;
@@ -1845,71 +1854,53 @@ impl<T: Transport> Engine<T> {
                 u128_to_gf128(xof_rk.squeeze_u128()),
                 u128_to_gf128(xof_rk.squeeze_u128()),
             ];
-            let rk_sq = [
-                gf128_mul_hw(rk[0], rk[0], backend),
-                gf128_mul_hw(rk[1], rk[1], backend),
-            ];
-            let rk_masks = [
-                build_public_mul_masks_bs256(rk[0]),
-                build_public_mul_masks_bs256(rk[1]),
-            ];
-
-            let sp = &mut *scratch;
             for t in 0..2 {
-                let pows2 = [rk[t], rk_sq[t]];
+                let pows2 = [rk[t], gf128_mul_hw(rk[t], rk[t], backend)];
                 for side in 0..2 {
                     for lane in 0..64 {
                         let mut acc = reshared.0[2 * t][side][lane];
-                        let rhs2 = [sp.c_claim[t][side][lane], reshared.0[2 * t + 1][side][lane]];
+                        let rhs2 = [
+                            scratch.c_claim[t][side][lane],
+                            reshared.0[2 * t + 1][side][lane],
+                        ];
                         gf128_dot_acc(&mut acc, &rhs2, &pows2, backend);
-                        sp.c_claim[t][side][lane] = acc;
-                    }
-
-                    let (lo_a, hi_a) = sp.a_bs[t][side].split_at_mut(half_q);
-                    for (dst_a, src_a) in lo_a.iter_mut().zip(&*hi_a) {
-                        xor_mul_bs256_by_public(src_a, &rk_masks[t], &mut sp.tabs4, dst_a);
-                    }
-                    sp.a_bs[t][side].truncate(half_q);
-
-                    let (lo_b, hi_b) = sp.b_bs[t][side].split_at_mut(half_q);
-                    for (dst_b, src_b) in lo_b.iter_mut().zip(&*hi_b) {
-                        *sp.bs256_buf = *src_b;
-                        xor_mul_bs256_by_public(
-                            dst_b,
-                            &rk_masks[t],
-                            &mut sp.tabs4,
-                            &mut sp.bs256_buf,
+                        scratch.c_claim[t][side][lane] = acc;
+                        let base = lane * stride;
+                        let (lo, hi) = a_native[t][side][base..base + current].split_at_mut(half);
+                        qsag_asm::bitslice::gf2_128_scale_xor_with_backend(
+                            lo,
+                            hi,
+                            gf128_to_u128(rk[t]),
+                            backend,
                         );
-                        *dst_b = *sp.bs256_buf;
+                        let (lo, hi) = b_native[t][side][base..base + current].split_at_mut(half);
+                        qsag_asm::bitslice::gf2_128_scale_xor_with_backend(
+                            hi,
+                            lo,
+                            gf128_to_u128(rk[t]),
+                            backend,
+                        );
+                        lo.copy_from_slice(hi);
                     }
-                    sp.b_bs[t][side].truncate(half_q);
                 }
             }
-            drop(reshared);
-            cur_quads = half_q;
+            current = half;
         }
-        for lanes in scratch.quad_tmp.iter_mut() {
-            zeroize_gf128_slice(lanes);
-        }
-
-        // Transpose the single remaining `Bs256` quad (`4` blocks x `64` lanes) and complete
-        // the final `4 -> 2 -> 1` Arity-2 steps when `m > 1`.
+        let mut a4 = Secret([[[[[0; 2]; 64]; 4]; 2]; 2]);
+        let mut b4 = Secret([[[[[0; 2]; 64]; 4]; 2]; 2]);
         for t in 0..2 {
             for side in 0..2 {
-                transpose_bs256_to_quad_lanes(
-                    &scratch.a_bs[t][side][0],
-                    &mut a4[t][side],
-                    &mut scratch.tr_rows,
-                    backend,
-                );
-                transpose_bs256_to_quad_lanes(
-                    &scratch.b_bs[t][side][0],
-                    &mut b4[t][side],
-                    &mut scratch.tr_rows,
-                    backend,
-                );
+                for sub in 0..4 {
+                    for lane in 0..64 {
+                        a4[t][side][sub][lane] =
+                            u128_to_gf128(a_native[t][side][lane * stride + sub]);
+                        b4[t][side][sub][lane] =
+                            u128_to_gf128(b_native[t][side][lane * stride + sub]);
+                    }
+                }
             }
         }
+        drop((a_native, b_native, b_sum));
 
         if m > 1 {
             let mut len4 = 4usize;
@@ -3912,7 +3903,10 @@ pub(crate) mod tests {
     impl Transport for Network {
         // Two test ceremonies may run together, each with three custodians.
         fn max_parallel_batches(&self) -> usize {
-            if std::env::var("RUST_TEST_THREADS").as_deref() == Ok("1") {
+            if std::env::var("RUST_TEST_THREADS").as_deref() == Ok("1")
+                || std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24)
+            {
+                // Seven batches cover all 438 repetitions without a serial tail.
                 7
             } else {
                 4
@@ -4241,6 +4235,36 @@ pub(crate) mod tests {
                     gf2_128_mul_portable(quad_out[sub][lane], pub_c),
                     "xor_mul_bs256_by_public sub {sub} lane {lane}"
                 );
+            }
+        }
+
+        // The limb-layout fold must agree with the independent portable field
+        // operation for both A_lo + r*A_hi and B_hi + r*B_lo.
+        let mut packed = [[0; 4]; 128];
+        for (sub, lanes) in quad_out.iter().enumerate() {
+            for (lane, value) in lanes.iter().enumerate() {
+                packed[2 * lane][sub] = value[0];
+                packed[2 * lane + 1][sub] = value[1];
+            }
+        }
+        for scale_dst in [false, true] {
+            let mut dst =
+                core::array::from_fn(|row| core::array::from_fn(|sub| packed[row][sub] ^ 0x1234));
+            let original = dst;
+            fold_quad_lanes(&mut dst, &packed, pub_c, scale_dst, backend);
+            let mut actual = [[[0; 2]; 64]; 4];
+            unpack_quad_lanes(&dst, &mut actual);
+            for sub in 0..4 {
+                for lane in 0..64 {
+                    let a = [original[2 * lane][sub], original[2 * lane + 1][sub]];
+                    let b = quad_out[sub][lane];
+                    let expected = if scale_dst {
+                        xor_gf128(b, gf2_128_mul_portable(a, pub_c))
+                    } else {
+                        xor_gf128(a, gf2_128_mul_portable(b, pub_c))
+                    };
+                    assert_eq!(actual[sub][lane], expected);
+                }
             }
         }
 

@@ -24,7 +24,9 @@ DKG, resharing, and Simplex quorum safety live in `Qsag.MaliciousSecurity`):
    30-round permutation, propagates additive MAC shares, and preserves authentication on
    correct output. Zero-opening-deviation accepted runs refine the frozen passive permutation
    API at the party-share level. `execActiveShamirAbsorbRate8Block` additionally handles one
-   rate-8 block with authenticated message limbs. The recursive sponge, `decomp8`, chain,
+   rate-8 block with authenticated message limbs. `execActiveShamirBlocks` composes arbitrary
+   block streams with bounded gate fault witnesses and refines `shamirAbsorbLimbStream`.
+   The authenticated `decomp8`, chain,
    and oracle bundle are not yet threaded through this authenticated state; whole-signer active Shamir composition remains open.
 5. Threshold FIPS 205 output equal to the single-signer output for every correct run
    (`threshold_sig_deterministic_and_matches_single_signer`; a functional-correctness and
@@ -56,6 +58,8 @@ import all Qsag.Poseidon2
 import all Qsag.UcGames
 import all Qsag.HashSigs
 import all Qsag.Preprocessing
+
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -5846,7 +5850,11 @@ theorem demoActiveShamirPerm_valid :
 theorem execActiveSharedPoseidon2Perm_inhabited :
     (execActiveSharedPoseidon2Perm [Goldilocks.one] [GoldilocksExt2.one]
       demoActiveShamirPermPrep demoAuthShamirZeroState).isSome = true := by
-  decide +kernel
+  obtain ⟨out, he, _⟩ := execActiveSharedPoseidon2Perm_complete (by rfl)
+    demoActiveShamirPerm_valid.1 demoActiveShamirPerm_valid.2
+    (fun _ => rfl) (fun _ => rfl)
+  rw [he]
+  rfl
 
 /-- A nonzero first opening deviation, with honest sigma broadcasts, aborts the full permutation. -/
 theorem tooth_execActiveSharedPoseidon2Perm_aborts_on_forged_gate :
@@ -5854,6 +5862,234 @@ theorem tooth_execActiveSharedPoseidon2Perm_aborts_on_forged_gate :
       (fun j => if j.val = 0 then { demoActiveShamirPermPrep j with deltaD := Goldilocks.one }
         else demoActiveShamirPermPrep j) demoAuthShamirZeroState).isNone = true := by
   decide +kernel
+
+/-- Compose an active authenticated Shamir gate with its online continuation.
+Failure is propagated before the continuation can release anything. -/
+def continueActiveShamirGate {Output : Type}
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (finish : List Goldilocks → Option Output) : Option Output :=
+  (execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs).bind finish
+
+theorem continueActiveShamirGate_abort {Output : Type}
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (finish : List Goldilocks → Option Output)
+    (h : execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs = none) :
+    continueActiveShamirGate lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs finish = none := by
+  simp only [continueActiveShamirGate, h, Option.bind_none]
+
+/-- Any online continuation receives a correct Shamir result, or the active
+opening pins the global MAC key. The MAC residual is computed from party shares
+by `execActiveSharedPow7Round`, not supplied as an `hSum` assumption. This local
+composition theorem does not assume that the continuation is an honest signer. -/
+theorem continueActiveShamirGate_sound_or_pins_key {Output : Type}
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (deltaD : Goldilocks) (sigmaDevs : List GoldilocksExt2)
+    (finish : List Goldilocks → Option Output) (out : Output)
+    (hSumOne : ringListSum lambdas = Goldilocks.one)
+    (hXLen : xSh.length = lambdas.length) (hTup : tup.validAt lambdas)
+    (hMacXLen : macX.length = alphaShares.length)
+    (hMacRLen : macR.length = alphaShares.length)
+    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (hMacXSum : ringListSum macX = CommRingOps.mul (ringListSum alphaShares)
+      (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh)))
+    (hMacRSum : ringListSum macR = CommRingOps.mul (ringListSum alphaShares)
+      (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+    (hZeroMask : ringListSum zeroMasks = CommRingOps.zero)
+    (hAccept : continueActiveShamirGate lambdas xSh tup macX macR alphaShares zeroMasks
+      deltaD sigmaDevs finish = some out) :
+    (∃ ySh, finish ySh = some out ∧ ySh.length = lambdas.length ∧
+      lagrangeCombine lambdas ySh = sbox7 (lagrangeCombine lambdas xSh)) ∨
+    (deltaD ≠ Goldilocks.zero ∧ ringListSum alphaShares =
+      CommRingOps.mul (ringListSum sigmaDevs) (GoldilocksExt2.inv (GoldilocksExt2.ofBase deltaD))) := by
+  unfold continueActiveShamirGate at hAccept
+  cases he : execActiveSharedPow7Round lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs with
+  | none => rw [he] at hAccept; cases hAccept
+  | some y =>
+    rw [he] at hAccept
+    obtain hok | hpin := execActiveSharedPow7Round_sound_or_pins_key
+      lambdas xSh tup macX macR alphaShares zeroMasks deltaD sigmaDevs y
+      hSumOne hXLen hTup hMacXLen hMacRLen hMaskLen hMacXSum hMacRSum hZeroMask he
+    · exact .inl ⟨y, hAccept, hok.2⟩
+    · exact .inr hpin
+
+
+/-- A valid complete permutation execution supplies every premise of share refinement. -/
+theorem witness_active_shamir_permutation :
+    ∃ (ls : List Goldilocks) (keys : List GoldilocksExt2) (prep : ActiveShamirPermPrep)
+      (s out : AuthShamirState12),
+      ringListSum ls = Goldilocks.one ∧ s.Valid ls keys ∧
+      (∀ j, ActiveShamirPow7Prep.Valid ls keys (prep j)) ∧
+      (∀ j : Fin 118, (prep j).deltaD = Goldilocks.zero) ∧
+      execActiveSharedPoseidon2Perm ls keys prep s = some out := by
+  obtain ⟨out, he, _⟩ := execActiveSharedPoseidon2Perm_complete (by rfl)
+    demoActiveShamirPerm_valid.1 demoActiveShamirPerm_valid.2
+    (fun _ => rfl) (fun _ => rfl)
+  exact ⟨[Goldilocks.one], [GoldilocksExt2.one], demoActiveShamirPermPrep,
+    demoAuthShamirZeroState, out, rfl, demoActiveShamirPerm_valid.1,
+    demoActiveShamirPerm_valid.2, (fun _ => rfl), he⟩
+
+theorem tooth_active_shamir_no_forged_output (out : AuthShamirState12) :
+    execActiveSharedPoseidon2Perm [Goldilocks.one] [GoldilocksExt2.one]
+      (fun j => if j.val = 0 then { demoActiveShamirPermPrep j with deltaD := Goldilocks.one }
+        else demoActiveShamirPermPrep j) demoAuthShamirZeroState ≠ some out := by
+  intro h
+  have hn := tooth_execActiveSharedPoseidon2Perm_aborts_on_forged_gate
+  rw [h] at hn
+  cases hn
+
+#tooth_pair Qsag.execActiveSharedPoseidon2Perm_sound_or_pins_key vs Qsag.tooth_active_shamir_no_forged_output
+#verify_inhabited Qsag.execActiveSharedPoseidon2Perm_refines_online Qsag.witness_active_shamir_permutation
+
+/-- An authenticated rate-8 block contains eight authenticated message limbs. -/
+abbrev AuthShamirBlock := AuthShamirLane4 × AuthShamirLane4
+
+def AuthShamirBlock.Valid (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (b : AuthShamirBlock) : Prop := b.1.Valid ls keys ∧ b.2.Valid ls keys
+
+/-- Sequential active sponge execution. Each block consumes its own 118-gate preparation. -/
+def execActiveShamirBlocks (ls : List Goldilocks) (keys : List GoldilocksExt2)
+    (prep : Nat → ActiveShamirPermPrep) :
+    Nat → AuthShamirState12 → List AuthShamirBlock → Option AuthShamirState12
+  | _, s, [] => some s
+  | i, s, b :: bs =>
+    (execActiveShamirAbsorbRate8Block ls keys (prep i) s b.1 b.2).bind
+      (fun next => execActiveShamirBlocks ls keys prep (i + 1) next bs)
+
+/-- Clear permutation semantics used only in the proof, never by the executor. -/
+def activeShamirBlocksValue (ls : List Goldilocks) :
+    Poseidon2State12 → List AuthShamirBlock → Poseidon2State12
+  | s, [] => s
+  | s, b :: bs => activeShamirBlocksValue ls
+      (poseidon2Perm12 ⟨lane4Add s.b0 (b.1.value ls),
+        lane4Add s.b1 (b.2.value ls), s.b2⟩) bs
+
+/-- An accepted multi-block computation either preserves authentication and the exact
+sponge value, or identifies a gate in a consumed block that pins the MAC key. -/
+theorem execActiveShamirBlocks_sound_or_pins_key
+    {ls keys prep} (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ i j, ActiveShamirPow7Prep.Valid ls keys (prep i j)) :
+    ∀ (bs : List AuthShamirBlock) (i : Nat) (s out : AuthShamirState12),
+      s.Valid ls keys → (∀ b ∈ bs, b.Valid ls keys) →
+      execActiveShamirBlocks ls keys prep i s bs = some out →
+      (out.Valid ls keys ∧ out.value ls = activeShamirBlocksValue ls (s.value ls) bs) ∨
+      (∃ k j, i ≤ k ∧ k < i + bs.length ∧ (prep k j).Pins keys) := by
+  intro bs
+  induction bs with
+  | nil =>
+    intro i s out hs _ he
+    simp only [execActiveShamirBlocks, Option.some.injEq] at he
+    subst out
+    exact .inl ⟨hs, rfl⟩
+  | cons b bs ih =>
+    intro i s out hs hb he
+    have vb := hb b (by simp)
+    have vr : ∀ c ∈ bs, c.Valid ls keys := fun c hc => hb c (List.mem_cons_of_mem b hc)
+    unfold execActiveShamirBlocks at he
+    cases hm : execActiveShamirAbsorbRate8Block ls keys (prep i) s b.1 b.2 with
+    | none => simp only [hm, Option.bind_none] at he; cases he
+    | some mid =>
+      simp only [hm, Option.bind_some] at he
+      obtain good | bad := execActiveShamirAbsorbRate8Block_sound_or_pins_key
+        hOne hs vb.1 vb.2 (hp i) hm
+      · have hv : mid.value ls = poseidon2Perm12
+            ⟨lane4Add (s.value ls).b0 (b.1.value ls),
+             lane4Add (s.value ls).b1 (b.2.value ls), (s.value ls).b2⟩ := by
+          exact (AuthShamirState12.combine_shares good.1).symm.trans good.2
+        obtain tailGood | tailBad := ih (i + 1) mid out good.1 vr he
+        · have stepEq := congrArg (fun v => activeShamirBlocksValue ls v bs) hv
+          have result := tailGood.2.trans stepEq
+          left
+          refine ⟨tailGood.1, ?_⟩
+          rw [activeShamirBlocksValue]
+          exact result
+        · obtain ⟨k, j, hlo, hhi, hpin⟩ := tailBad
+          exact .inr ⟨k, j, by omega, by simp only [List.length_cons]; omega, hpin⟩
+      · obtain ⟨j, hpin⟩ := bad
+        exact .inr ⟨i, j, Nat.le_refl _, by simp [List.length_cons], hpin⟩
+
+/-- Continuations receive the authenticated final state only after every block accepts. -/
+def continueActiveShamirBlocks {Output : Type}
+    (ls : List Goldilocks) (keys : List GoldilocksExt2) (prep : Nat → ActiveShamirPermPrep)
+    (i : Nat) (s : AuthShamirState12) (bs : List AuthShamirBlock)
+    (finish : AuthShamirState12 → Option Output) : Option Output :=
+  (execActiveShamirBlocks ls keys prep i s bs).bind finish
+
+theorem continueActiveShamirBlocks_sound_or_pins_key {Output : Type}
+    {ls keys prep i s bs} (finish : AuthShamirState12 → Option Output) (out : Output)
+    (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ i j, ActiveShamirPow7Prep.Valid ls keys (prep i j))
+    (hs : AuthShamirState12.Valid ls keys s) (hb : ∀ b ∈ bs, AuthShamirBlock.Valid ls keys b)
+    (he : continueActiveShamirBlocks ls keys prep i s bs finish = some out) :
+    (∃ final, final.Valid ls keys ∧
+      final.value ls = activeShamirBlocksValue ls (s.value ls) bs ∧ finish final = some out) ∨
+    (∃ k j, i ≤ k ∧ k < i + bs.length ∧ (prep k j).Pins keys) := by
+  unfold continueActiveShamirBlocks at he
+  cases hx : execActiveShamirBlocks ls keys prep i s bs with
+  | none => simp only [hx, Option.bind_none] at he; cases he
+  | some final =>
+    simp only [hx, Option.bind_some] at he
+    obtain good | bad := execActiveShamirBlocks_sound_or_pins_key hOne hp bs i s final hs hb hx
+    · exact .inl ⟨final, good.1, good.2, he⟩
+    · exact .inr bad
+
+/-- Honest openings complete every block; no acceptance assumption is needed. -/
+theorem execActiveShamirBlocks_complete {ls keys prep}
+    (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ i j, ActiveShamirPow7Prep.Valid ls keys (prep i j))
+    (hz : ∀ i j, (prep i j).deltaD = Goldilocks.zero)
+    (hd : ∀ i j, ringListSum (prep i j).sigmaDevs = CommRingOps.zero) :
+    ∀ (bs : List AuthShamirBlock) (i : Nat) (s : AuthShamirState12),
+      s.Valid ls keys → (∀ b ∈ bs, b.Valid ls keys) →
+      ∃ out, execActiveShamirBlocks ls keys prep i s bs = some out ∧ out.Valid ls keys := by
+  intro bs
+  induction bs with
+  | nil => intro i s hs _; exact ⟨s, rfl, hs⟩
+  | cons b bs ih =>
+    intro i s hs hb
+    have vb := hb b (by simp)
+    obtain ⟨mid, hm, vm⟩ := execActiveSharedPoseidon2Perm_complete hOne
+      (authShamirAbsorbRate8_valid hs vb.1 vb.2) (hp i) (hz i) (hd i)
+    obtain ⟨out, ho, vo⟩ := ih (i + 1) mid vm (fun c hc => hb c (List.mem_cons_of_mem b hc))
+    exact ⟨out, by simp only [execActiveShamirBlocks, execActiveShamirAbsorbRate8Block,
+      hm, Option.bind_some, ho], vo⟩
+
+/-- Flatten authenticated blocks to the existing passive sponge's limb-share format. -/
+def authShamirBlocksLimbs : List AuthShamirBlock → List (List Goldilocks)
+  | [] => []
+  | b :: bs => b.1.x0.shares :: b.1.x1.shares :: b.1.x2.shares :: b.1.x3.shares ::
+      b.2.x0.shares :: b.2.x1.shares :: b.2.x2.shares :: b.2.x3.shares :: authShamirBlocksLimbs bs
+
+/-- Whole-stream share refinement to the sponge used by the threshold hash oracles. -/
+theorem execActiveShamirBlocks_honest_eq {ls keys prep}
+    (hOne : ringListSum ls = Goldilocks.one)
+    (hp : ∀ i j, ActiveShamirPow7Prep.Valid ls keys (prep i j))
+    (hz : ∀ i j, (prep i j).deltaD = Goldilocks.zero)
+    (hd : ∀ i j, ringListSum (prep i j).sigmaDevs = CommRingOps.zero) :
+    ∀ (bs : List AuthShamirBlock) (i : Nat) (s : AuthShamirState12),
+      s.Valid ls keys → (∀ b ∈ bs, b.Valid ls keys) →
+      (execActiveShamirBlocks ls keys prep i s bs).map AuthShamirState12.shares =
+        shamirAbsorbLimbStream ls s.shares (fun k => activeShamirPassiveCallPrep (prep k))
+          i (authShamirBlocksLimbs bs) := by
+  intro bs
+  induction bs with
+  | nil => intro i s _ _; rfl
+  | cons b bs ih =>
+    intro i s hs hb
+    have vb := hb b (by simp)
+    obtain ⟨mid, hm, vm⟩ := execActiveSharedPoseidon2Perm_complete hOne
+      (authShamirAbsorbRate8_valid hs vb.1 vb.2) (hp i) (hz i) (hd i)
+    have hm' : execActiveShamirAbsorbRate8Block ls keys (prep i) s b.1 b.2 = some mid := hm
+    have heq := execActiveShamirAbsorbRate8Block_honest_eq hOne hs vb.1 vb.2 (hp i) (hz i) (hd i)
+    rw [hm'] at heq
+    simp only [Option.map_some] at heq
+    simp only [execActiveShamirBlocks, hm', Option.bind_some,
+      authShamirBlocksLimbs, shamirAbsorbLimbStream, ← heq]
+    exact ih (i + 1) mid vm (fun c hc => hb c (List.mem_cons_of_mem b hc))
 
 end Qsag
 end

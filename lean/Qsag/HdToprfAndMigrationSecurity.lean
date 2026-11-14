@@ -27,6 +27,9 @@ production parameters and proved without choice axioms.
    additive sharing and decodes each component by a 3-of-4 majority (`toprf_engine.rs`); the
    early statements below concern degree-1 Reed-Solomon decoding at points `1..5`.
    The production section separately proves the actual replicated voter and access structure.
+   The two-of-three replicated variant (three components, two holders each) is decoded with
+   abort instead of correction: `rss3_toprf_single_byzantine_detected`,
+   `rss3_client_blind_perfect_privacy`.
    - `toprf_2of5_byzantine_unique_decoding`: with at least three correct responses and at most one
      wrong one, the honest line is the only line agreeing with three responses, and
      `extractUniqueToprfEval` returns its value at zero.
@@ -2069,6 +2072,206 @@ theorem tooth_cozk_two_pairs_witness :
   ⟨czkTightRep, tooth_cozk_single_corrupt_mul_passes_exactly_two_pairs.2,
     tooth_cozk_single_corrupt_mul_passes_exactly_two_pairs.1⟩
 
+/-! ## Two-of-three replicated TOPRF
+
+Three additive components; server `p` holds the two components other than `p`, so every
+component has exactly two holders. Two servers cover all components and one server
+misses its own. Two copies cannot outvote a liar, so unlike the five-server voter above
+this decoder gives security with abort: a single deviation is either harmless or
+detected, and never changes the output.
+-/
+
+abbrev rss3Holds (server component : Fin 3) : Prop := server ≠ component
+
+def rss3First (c : Fin 3) : Fin 3 := ⟨(c.val + 1) % 3, Nat.mod_lt _ (by decide)⟩
+def rss3Second (c : Fin 3) : Fin 3 := ⟨(c.val + 2) % 3, Nat.mod_lt _ (by decide)⟩
+
+theorem rss3_holders_distinct :
+    ∀ c : Fin 3, rss3First c ≠ c ∧ rss3Second c ≠ c ∧ rss3First c ≠ rss3Second c := by decide
+
+theorem rss3_holder_cases :
+    ∀ c p : Fin 3, p ≠ c → p = rss3First c ∨ p = rss3Second c := by decide
+
+theorem rss3_access_exact (coalition : Fin 3 → Prop) :
+    (∀ component, ∃ server, coalition server ∧ rss3Holds server component) ↔
+      ∃ a b, coalition a ∧ coalition b ∧ a ≠ b := by
+  constructor
+  · intro h
+    obtain ⟨a, ha, _⟩ := h 0
+    obtain ⟨b, hb, hba⟩ := h a
+    exact ⟨a, b, ha, hb, Ne.symm hba⟩
+  · rintro ⟨a, b, ha, hb, hab⟩ c
+    by_cases hac : a = c
+    · exact ⟨b, hb, by simpa [rss3Holds, ← hac] using Ne.symm hab⟩
+    · exact ⟨a, ha, hac⟩
+
+/-- Both holders of component `c` must answer, and their answers must agree. -/
+def rss3Vote {F : Type} [DecidableEq F] (c : Fin 3) (responses : Fin 3 → Option F) :
+    Option F :=
+  match responses (rss3First c), responses (rss3Second c) with
+  | some u, some v => if u = v then some u else none
+  | _, _ => none
+
+theorem rss3_vote_honest {F : Type} [DecidableEq F] (c : Fin 3)
+    (responses : Fin 3 → Option F) (honest : F)
+    (h : ∀ p, p ≠ c → responses p = some honest) :
+    rss3Vote c responses = some honest := by
+  obtain ⟨h1, h2, _⟩ := rss3_holders_distinct c
+  simp only [rss3Vote, h _ h1, h _ h2, ↓reduceIte]
+
+/-- With one deviating server, the vote for a component is the honest value or an abort. -/
+theorem rss3_vote_sound {F : Type} [DecidableEq F] (c liar : Fin 3)
+    (responses : Fin 3 → Option F) (honest : F)
+    (h : ∀ p, p ≠ c → p ≠ liar → responses p = some honest) :
+    rss3Vote c responses = some honest ∨ rss3Vote c responses = none := by
+  obtain ⟨h1, h2, h12⟩ := rss3_holders_distinct c
+  if hl : rss3First c = liar then
+    have hs := h _ h2 (fun e => h12 (hl.trans e.symm))
+    unfold rss3Vote
+    rw [hs]
+    cases responses (rss3First c) with
+    | none => exact .inr rfl
+    | some u =>
+      if hu : u = honest then
+        left
+        simp only [hu, ↓reduceIte]
+      else
+        right
+        simp only [hu, ↓reduceIte]
+  else
+    have hf := h _ h1 hl
+    unfold rss3Vote
+    rw [hf]
+    cases responses (rss3Second c) with
+    | none => exact .inr rfl
+    | some v =>
+      if hv : honest = v then
+        left
+        simp only [hv, ↓reduceIte]
+      else
+        right
+        simp only [hv, ↓reduceIte]
+
+section Rss3Ring
+variable {F : Type} [LawfulCommRing F]
+
+def sum3 (c : Fin 3 → F) : F := add (c 0) (add (c 1) (c 2))
+
+def reconstructRss3Toprf [DecidableEq F] (responses : Fin 3 → Fin 3 → Option F) :
+    Option F := do
+  let a ← rss3Vote 0 (fun p => responses p 0)
+  let b ← rss3Vote 1 (fun p => responses p 1)
+  let c ← rss3Vote 2 (fun p => responses p 2)
+  return add a (add b c)
+
+theorem rss3_toprf_honest [DecidableEq F] (shares : Fin 3 → F)
+    (responses : Fin 3 → Fin 3 → Option F)
+    (h : ∀ p c, p ≠ c → responses p c = some (shares c)) :
+    reconstructRss3Toprf responses = some (sum3 shares) := by
+  have hv : ∀ c, rss3Vote c (fun p => responses p c) = some (shares c) :=
+    fun c => rss3_vote_honest c _ _ (fun p hc => h p c hc)
+  simp [reconstructRss3Toprf, hv, sum3]
+
+/-- **Security with abort against one Byzantine server.** Whatever one server sends on
+the components it holds, the reconstruction is the correct output or an abort. -/
+theorem rss3_toprf_single_byzantine_detected [DecidableEq F] (shares : Fin 3 → F)
+    (liar : Fin 3) (responses : Fin 3 → Fin 3 → Option F)
+    (h : ∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) :
+    reconstructRss3Toprf responses = some (sum3 shares) ∨
+      reconstructRss3Toprf responses = none := by
+  have hv : ∀ c, rss3Vote c (fun p => responses p c) = some (shares c) ∨
+      rss3Vote c (fun p => responses p c) = none :=
+    fun c => rss3_vote_sound c liar _ _ (fun p hc hl => h p c hc hl)
+  rcases hv 0 with h0 | h0 <;> rcases hv 1 with h1 | h1 <;> rcases hv 2 with h2 | h2 <;>
+    simp [reconstructRss3Toprf, h0, h1, h2, sum3]
+
+/-- What server `p` receives of a request: both components it holds, its own as zero. -/
+def rss3ServerView (p : Fin 3) (c : Fin 3 → F) : Fin 3 → F :=
+  fun i => if i = p then zero else c i
+
+/-- Two servers together hold every component. -/
+theorem rss3_two_server_reconstruct (a b : Fin 3) (hab : a ≠ b) (shares : Fin 3 → F) :
+    (fun c => if c = a then rss3ServerView b shares c else rss3ServerView a shares c) =
+      shares := by
+  funext c
+  by_cases hc : c = a
+  · simp [hc, rss3ServerView, hab]
+  · simp [hc, rss3ServerView]
+
+theorem sum3_set : ∀ (p : Fin 3) (v : Fin 3 → F) (a : F), v p = zero →
+    sum3 (fun i => if i = p then a else v i) = add a (sum3 v)
+  | 0, v, a, h => by
+    simp only [sum3, h, Fin.reduceEq, ↓reduceIte, LawfulCommRing.zero_add]
+  | 1, v, a, h => by
+    simp only [sum3, h, Fin.reduceEq, ↓reduceIte, LawfulCommRing.zero_add]
+    exact CustodyAlgebra.add_left_comm _ _ _
+  | 2, v, a, h => by
+    simp only [sum3, h, Fin.reduceEq, ↓reduceIte, LawfulCommRing.add_zero]
+    rw [LawfulCommRing.add_comm (v 1) a, CustodyAlgebra.add_left_comm (v 0) a]
+
+theorem sum3_split (p : Fin 3) (c : Fin 3 → F) :
+    sum3 c = add (c p) (sum3 (rss3ServerView p c)) := by
+  have h := sum3_set p (rss3ServerView p c) (c p) (ite_eq_left rfl)
+  have e : (fun i => if i = p then c p else rss3ServerView p c i) = c := by
+    funext i
+    show (if i = p then c p else if i = p then zero else c i) = c i
+    refine if hi : i = p then ?_ else ?_
+    · rw [ite_eq_left hi, hi]
+    · rw [ite_eq_right hi, ite_eq_right hi]
+  rw [e] at h
+  exact h
+
+/-- **Client input obliviousness for one server.** For every server, every view it can
+receive and every candidate input, exactly one additive sharing of that input produces
+the view. -/
+theorem rss3_client_blind_perfect_privacy (p : Fin 3) (view : Fin 3 → F)
+    (hview : view p = zero) (x : F) :
+    ∃ c : Fin 3 → F, (sum3 c = x ∧ rss3ServerView p c = view) ∧
+      ∀ c' : Fin 3 → F, sum3 c' = x → rss3ServerView p c' = view → c' = c := by
+  refine ⟨fun i => if i = p then sub x (sum3 view) else view i, ⟨?_, ?_⟩, ?_⟩
+  · rw [sum3_set p view _ hview]
+    exact ring_sub_add_cancel_right x (sum3 view)
+  · funext i
+    show (if i = p then zero else if i = p then sub x (sum3 view) else view i) = view i
+    refine if hi : i = p then ?_ else ?_
+    · rw [ite_eq_left hi, hi, hview]
+    · rw [ite_eq_right hi, ite_eq_right hi]
+  · intro c' hs hv
+    funext i
+    show c' i = if i = p then sub x (sum3 view) else view i
+    refine if hi : i = p then ?_ else ?_
+    · rw [ite_eq_left hi, hi]
+      have h := sum3_split p c'
+      rw [hs, hv] at h
+      exact CustodyAlgebra.eq_sub_of_add_eq h.symm
+    · rw [ite_eq_right hi, ← hv]
+      show c' i = if i = p then zero else c' i
+      rw [ite_eq_right hi]
+
+end Rss3Ring
+
+/-- Two copies cannot correct: a silent server forces an abort although both other
+servers answer honestly. The five-server voter returns the output in the same situation
+(`replicated_toprf_any_single_byzantine`). -/
+theorem tooth_rss3_single_silent_server_aborts :
+    ∃ (shares : Fin 3 → Goldilocks) (liar : Fin 3)
+      (responses : Fin 3 → Fin 3 → Option Goldilocks),
+      (∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) ∧
+      reconstructRss3Toprf responses = none := by
+  refine ⟨fun _ => zero, 0, fun p _ => if p = 0 then none else some zero, ?_, ?_⟩
+  · intro p c _ hl
+    simp only [hl, ↓reduceIte]
+  · rfl
+
+theorem rss3_single_byzantine_inhabited :
+    ∃ (shares : Fin 3 → Goldilocks) (liar : Fin 3)
+      (responses : Fin 3 → Fin 3 → Option Goldilocks),
+      (∀ p c, p ≠ c → p ≠ liar → responses p c = some (shares c)) ∧
+      reconstructRss3Toprf responses = some (sum3 shares) := by
+  refine ⟨fun c => if c = 0 then one else zero, 0,
+    fun _ c => some (if c = 0 then one else zero), fun _ _ _ _ => rfl, ?_⟩
+  exact rss3_toprf_honest _ _ (fun _ _ _ => rfl)
+
 /-! ## Audits -/
 
 #tooth_pair
@@ -2418,6 +2621,23 @@ def toprfLayersExtract204 (H : List UInt8 → List UInt8) (bad : Fin 5) :
 
 theorem toprfRotation204_not_constant :
     (toprfGroupRoles204 0 1).2.2 ≠ (toprfHolders 0 1).getD 2 0 := by decide
+
+#tooth_pair
+  Qsag.rss3_toprf_single_byzantine_detected
+  vs
+  Qsag.tooth_rss3_single_silent_server_aborts
+
+#verify_inhabited
+  Qsag.rss3_toprf_single_byzantine_detected
+  Qsag.rss3_single_byzantine_inhabited
+
+#verify_constructive
+  Qsag.rss3_access_exact
+  Qsag.rss3_vote_sound
+  Qsag.rss3_toprf_honest
+  Qsag.rss3_toprf_single_byzantine_detected
+  Qsag.rss3_two_server_reconstruct
+  Qsag.rss3_client_blind_perfect_privacy
 
 end Qsag
 end

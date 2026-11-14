@@ -726,6 +726,13 @@ theorem step_merkle_pair_order_none_iff
   · simp [hge]
   · by_cases hb : (idx.val >>> level.val) % 2 = 0 <;> simp [hge, hb]
 
+theorem step_merkle_pair_order_tag_eq
+    (idx : U64) (level : U32) (node sibling : Array U8 32#usize) (pair : MerklePair)
+    (h : step_merkle_pair_order idx level node sibling = .ok (some pair)) :
+    pair.tag = TAG_CANOPY_MERKLE_INTERNAL := by
+  obtain ⟨_, htag, _⟩ := (step_merkle_pair_order_some_iff idx level node sibling pair).mp h
+  exact htag.trans tag_canopy_merkle_internal_eq.symm
+
 /-! ## 7. Overflow-Free Quorum Weight Summation (`checked_quorum_sum`) -/
 
 @[expose] def natSumU64 (xs : List U64) : Nat :=
@@ -1142,6 +1149,15 @@ theorem checked_quorum_sum_none_iff
     have hv := (checked_quorum_sum_sound counts minimums minimum_global v).mp hout
     intro hnot
     exact hnot ⟨v.val, hv⟩
+
+theorem checked_quorum_sum_le_max_u64_word
+    (counts minimums : Slice U64) (minimum_global total : U64)
+    (h : checked_quorum_sum counts minimums minimum_global = .ok (some total)) :
+    natSumU64 counts.val ≤ MAX_U64_WORD.val := by
+  obtain ⟨_, _, _, _, hsum, hle, _⟩ :=
+    (checked_quorum_sum_sound counts minimums minimum_global total).mp h
+  rw [max_u64_word_val, ← hsum]
+  exact hle
 
 /-! ## 8. `#tooth` Mutation-Sensitivity & Non-Vacuity Witnesses -/
 

@@ -63,15 +63,16 @@ aggregation engine (`crates/qsag-agg/src/`):
      from two accepted multi-proof transcripts (`extractHashCollisionFromCanopyTranscripts`
      for a byte-string hash, inhabited over the 32-byte digest `canopyPrefixHash`).
 
-Scope. Two row layouts appear and they are not yet connected. The row-committed layout of §4
-is one row per signer (14 boundary columns followed by a canonical cell stream of the
-structured witness block), and for it constraint vanishing is equivalent to signature validity.
-The 256-column `StepOp` table of §2 transcribes the deployed constraint system; for it this
-module proves the Group A, shift, batching and `#tooth` statements listed above, and
-completeness for inactive slots only. It does not prove that an honest signature yields a
-satisfying `StepOp` table for an active slot, nor that a satisfying `StepOp` table yields a
-signature accepted by `verifyAggNativeSig`: the simulation between the 44-limb step machine and
-the verifier is open. The equality and shift claims have constructive random-`tau` root bounds
+Scope. Two row layouts appear. The row-committed layout of §4 is one row per signer (14
+boundary columns followed by a canonical cell stream of the structured witness block), and for
+it constraint vanishing is equivalent to signature validity. The 256-column `StepOp` table of
+§2 transcribes the deployed constraint system; for it this module proves the Group A, shift,
+batching and `#tooth` statements listed above, and completeness for inactive slots. The
+simulation between the 44-limb step machine and `verifyAggNativeSig` is proved downstream, in
+`Qsag.CorduroyAndHemAirCompleteness`: a satisfying `StepOp` table yields an accepted native
+signature for every active slot of either profile (`stepOp256TableOk_xmss_extract`,
+`stepOp256TableOk_corduroy_extract`), and through it an accepted row-committed trace. The
+equality and shift claims have constructive random-`tau` root bounds
 of `ell * |S|^(ell - 1)` on `S^ell`, and fixed-order constraint-column batching has a separate
 `gamma` root bound. Instantiating that column list with the deployed unique-op offsets, the
 transcript binding of the opening, and the recursive merge tree (`lib.rs`) remain open. §4 accounts for error denominators and query counts; it does not prove a

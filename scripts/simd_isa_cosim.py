@@ -20,6 +20,7 @@ import platform
 import random
 import re
 import resource
+import shutil
 import struct
 import subprocess
 import sys
@@ -30,6 +31,10 @@ from extract_rlib_elf import parse_ar_archive, parse_elf64_object
 ROOT = Path(__file__).resolve().parents[1]
 LEAN = ROOT / 'lean/Qsag/SimdBinaryEquiv.lean'
 NAMES = ('gf2_128_mul_acc_pclmul', 'gf2_128_mul_acc_vpclmul', 'transpose64x256_avx2')
+EXTRA_NAMES = ('keccak_f1600_avx2_4x', 'keccak_chi_mpc_avx2',
+               'gf256_shamir_mul_gfni', 'gf256_shamir_mac_gfni',
+               'gf256_shamir_mul_avx2', 'gf256_shamir_mac_avx2',
+               'tower128_bdoz_mac_vpclmul', 'tower128_bdoz_mac_pclmul')
 MASK64 = (1 << 64) - 1
 MASK128 = (1 << 128) - 1
 
@@ -82,7 +87,7 @@ def extract(target: str) -> dict:
                     for i in range(shnum)]
         for symbol in obj.qsag_symbols:
             short = symbol.name.removeprefix('qsag_asm_')
-            if short not in NAMES + ('gf2_128_mul_acc_pmull', 'transpose64x256_neon'):
+            if short not in NAMES + EXTRA_NAMES + ('gf2_128_mul_acc_pmull', 'transpose64x256_neon'):
                 continue
             for sh in sections:
                 if sh[1] in (4, 9) and sh[7] == symbol.shndx and sh[5]:
@@ -93,7 +98,7 @@ def extract(target: str) -> dict:
                 raise RuntimeError(f'duplicate symbol {short}')
             result[short] = dict(code=symbol.code, sha256=hashlib.sha256(symbol.code).hexdigest(),
                                  object_sha256=obj.sha256, offset=symbol.value)
-    required = NAMES if target.startswith('x86_64') else ('gf2_128_mul_acc_pmull', 'transpose64x256_neon')
+    required = NAMES + EXTRA_NAMES if target.startswith('x86_64') else ('gf2_128_mul_acc_pmull', 'transpose64x256_neon')
     if set(result) != set(required):
         raise RuntimeError(f'missing or extra symbols: {set(result)}')
     return result
@@ -188,7 +193,7 @@ class Native:
         libc.mprotect.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
         if libc.mprotect(address, len(code), mmap.PROT_READ | mmap.PROT_EXEC):
             raise OSError(ctypes.get_errno(), 'mprotect')
-        types = [ctypes.c_void_p] * min(argc, 3) + ([ctypes.c_size_t] if argc == 4 else [])
+        types = [ctypes.c_void_p] * argc
         self.call = ctypes.CFUNCTYPE(None, *types)(address)
 
 
@@ -265,6 +270,202 @@ def test_transpose(code: bytes, cases: int):
     print(f'transpose64x256_avx2: {cases} native matrices, all 256 lanes agree', flush=True)
 
 
+def guarded_buffer(raw: bytes):
+    """32-byte aligned payload with checked prefix/suffix and stable allocation."""
+    storage = ctypes.create_string_buffer(len(raw) + 128)
+    address = (ctypes.addressof(storage) + 63) & ~31
+    ctypes.memset(address - 32, 0xa5, 32)
+    ctypes.memmove(address, raw, len(raw))
+    ctypes.memset(address + len(raw), 0x5a, 32)
+    def check(expected=raw):
+        assert ctypes.string_at(address - 32, 32) == b'\xa5' * 32
+        assert ctypes.string_at(address + len(raw), 32) == b'\x5a' * 32
+        assert ctypes.string_at(address, len(raw)) == expected
+    return storage, address, check
+
+
+def tower_scale(a, level):
+    if level == 0:
+        return a & 1
+    half = 1 << (level - 1)
+    lo, hi = a & ((1 << half) - 1), a >> half
+    return hi | ((lo ^ tower_scale(hi, level - 1)) << half)
+
+
+def tower_mul(a, b, level=3):
+    if level == 0:
+        return a & b & 1
+    half = 1 << (level - 1)
+    mask = (1 << half) - 1
+    al, ah, bl, bh = a & mask, a >> half, b & mask, b >> half
+    p, q = tower_mul(al, bl, level - 1), tower_mul(ah, bh, level - 1)
+    r = tower_mul(al ^ ah, bl ^ bh, level - 1)
+    return (p ^ q) | ((r ^ p ^ q ^ tower_scale(q, level - 1)) << half)
+
+
+def affine(byte, matrix):
+    return sum(((byte & (matrix >> (8 * (7 - i)) & 255)).bit_count() % 2) << i
+               for i in range(8))
+
+
+def test_extra(name, code, cases):
+    rng = random.Random(0x43544d)
+    is_avx_mul = name.startswith('gf256') and name.endswith('avx2')
+    native = Native(code, 5 if is_avx_mul else (2 if 'f1600' in name else 4))
+    tables = b''.join(bytes(affine(x << shift, matrix) for x in range(16)) * 2
+                      for matrix in (0x71500A8A86BE78CE, 0xA1E4F8E072A2700C)
+                      for shift in (0, 4)) + bytes(range(16)) + bytes(x << 4 for x in range(16))
+    lut = guarded_buffer(tables)
+    for case in range(cases):
+        count = 1 + case % 17
+        if name.startswith('gf256'):
+            a, b, seed = (rng.randbytes(32 * count) for _ in range(3))
+            scalar = rng.randrange(256)
+            mac = '_mac_' in name
+            expected = bytes((seed[i] ^ tower_mul(a[i], scalar)) if mac else tower_mul(a[i], b[i])
+                             for i in range(len(a)))
+            out, aa, bb = guarded_buffer(seed), guarded_buffer(a), guarded_buffer(b)
+            args = [out[1], aa[1], scalar if mac else bb[1], count]
+            if is_avx_mul:
+                args.append(lut[1])
+            native.call(*args)
+            out[2](expected); aa[2](); bb[2](); lut[2]()
+        elif name.startswith('tower128'):
+            a = [rng.getrandbits(128) for _ in range(2 * count)]
+            b = [rng.getrandbits(128) for _ in range(2 * count)]
+            expected = [0, 0]
+            for i, (x, y) in enumerate(zip(a, b)):
+                expected[i % 2] ^= remainder(clmul(x, y))
+            pack = lambda xs: b''.join(x.to_bytes(16, 'little') for x in xs)
+            out, aa, bb = guarded_buffer(rng.randbytes(32)), guarded_buffer(pack(a)), guarded_buffer(pack(b))
+            native.call(out[1], aa[1], bb[1], count)
+            out[2](pack(expected)); aa[2](); bb[2]()
+        elif 'chi' in name:
+            a, b, mask = ([rng.getrandbits(64) for _ in range(20)] for _ in range(3))
+            expected = []
+            for x in range(5):
+                for lane in range(4):
+                    j, k, i = 4 * ((x+1)%5) + lane, 4 * ((x+2)%5) + lane, 4*x + lane
+                    expected.append(a[i] ^ ((~a[j] & MASK64) & a[k]) ^
+                                    (a[j] & b[k]) ^ (b[j] & a[k]) ^ mask[i])
+            pack = lambda xs: struct.pack('<20Q', *xs)
+            out, aa, bb, mm = (guarded_buffer(pack(xs)) for xs in ([0]*20, a, b, mask))
+            native.call(out[1], aa[1], bb[1], mm[1])
+            out[2](pack(expected)); aa[2](); bb[2](); mm[2]()
+        else:
+            # Independent FIPS 202 permutation, applied to each of four interleaved states.
+            rc = [0x1,0x8082,0x800000000000808a,0x8000000080008000,0x808b,0x80000001,
+                  0x8000000080008081,0x8000000000008009,0x8a,0x88,0x80008009,0x8000000a,
+                  0x8000808b,0x800000000000008b,0x8000000000008089,0x8000000000008003,
+                  0x8000000000008002,0x8000000000000080,0x800a,0x800000008000000a,
+                  0x8000000080008081,0x8000000000008080,0x80000001,0x8000000080008008]
+            rho = [0,1,62,28,27,36,44,6,55,20,3,10,43,25,39,41,45,15,21,8,18,2,61,56,14]
+            rol = lambda x, n: ((x << n) | (x >> ((64-n)%64))) & MASK64
+            values = [rng.getrandbits(64) for _ in range(100)]
+            expected = values.copy()
+            for lane in range(4):
+                a = values[lane::4]
+                for r in rc:
+                    c = [a[x] ^ a[x+5] ^ a[x+10] ^ a[x+15] ^ a[x+20] for x in range(5)]
+                    d = [c[(x-1)%5] ^ rol(c[(x+1)%5], 1) for x in range(5)]
+                    b = [0]*25
+                    for y in range(5):
+                        for x in range(5):
+                            b[y + 5*((2*x+3*y)%5)] = rol(a[x+5*y] ^ d[x], rho[x+5*y])
+                    a = [b[x+5*y] ^ ((~b[(x+1)%5+5*y] & MASK64) & b[(x+2)%5+5*y])
+                         for y in range(5) for x in range(5)]
+                    a[0] ^= r
+                expected[lane::4] = a
+            out = guarded_buffer(struct.pack('<100Q', *values))
+            constants = guarded_buffer(struct.pack('<24Q', *rc))
+            native.call(out[1], constants[1])
+            out[2](struct.pack('<100Q', *expected)); constants[2]()
+    print(f'{name}: {cases} independent algebra comparisons; all canaries intact', flush=True)
+
+
+def test_aarch64(fixtures, cases):
+    emulator = shutil.which('qemu-aarch64')
+    compiler = shutil.which('aarch64-linux-gnu-gcc')
+    if not emulator or not compiler:
+        missing = ', '.join(name for name, found in (('qemu-aarch64', emulator),
+                           ('aarch64-linux-gnu-gcc', compiler)) if not found)
+        print(f'SKIP: AArch64 execution: unavailable {missing}; provenance checked separately')
+        return
+    # Cross-compiled transport only: Python supplies independent algebra and expected bytes.
+    harness = r"""
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <assert.h>
+static const unsigned char multiply_code[] = {MULTIPLY};
+static const unsigned char transpose_code[] = {TRANSPOSE};
+static void *executable(const void *bytes, size_t n) {
+    void *p = mmap(NULL, n, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, -1, 0);
+    assert(p != MAP_FAILED); memcpy(p, bytes, n);
+    __builtin___clear_cache(p, (char *)p+n);
+    assert(mprotect(p, n, PROT_READ|PROT_EXEC) == 0); return p;
+}
+int main(void) {
+    void (*mul)(void *, const void *, const void *, size_t) = executable(multiply_code, sizeof multiply_code);
+    void (*trans)(void *) = executable(transpose_code, sizeof transpose_code);
+    uint32_t header[2];
+    while (fread(header, sizeof header, 1, stdin) == 1) {
+        unsigned char a[2112] __attribute__((aligned(32)));
+        unsigned char b[2112] __attribute__((aligned(32)));
+        unsigned char out[96] __attribute__((aligned(32)));
+        unsigned char aa[2112], bb[2112], oo[96];
+        memset(a, 0xa5, sizeof a); memset(b, 0x5a, sizeof b); memset(out, 0xc3, sizeof out);
+        size_t n = header[0] == 0 ? header[1]*16 : 2048;
+        assert(n <= 2048 && header[0] <= 1 && header[1] > 0);
+        assert(fread(a+32, n, 1, stdin) == 1);
+        if (header[0] == 0) {
+            assert(fread(b+32, n, 1, stdin) == 1);
+            assert(fread(out+32, 16, 1, stdin) == 1);
+        }
+        memcpy(aa, a, sizeof a); memcpy(bb, b, sizeof b); memcpy(oo, out, sizeof out);
+        if (header[0] == 0) {
+            mul(out+32, a+32, b+32, header[1]);
+            assert(memcmp(a, aa, sizeof a) == 0 && memcmp(b, bb, sizeof b) == 0);
+            assert(memcmp(out, oo, 32) == 0 && memcmp(out+48, oo+48, 48) == 0);
+            assert(fwrite(out+32, 16, 1, stdout) == 1);
+        } else {
+            trans(a+32);
+            assert(memcmp(a, aa, 32) == 0 && memcmp(a+2080, aa+2080, 32) == 0);
+            assert(fwrite(a+32, 2048, 1, stdout) == 1);
+        }
+    }
+    return ferror(stdin) || ferror(stdout);
+}
+"""
+    harness = harness.replace('MULTIPLY', ','.join(map(str, fixtures['gf2_128_mul_acc_pmull']['code'])))
+    harness = harness.replace('TRANSPOSE', ','.join(map(str, fixtures['transpose64x256_neon']['code'])))
+    rng = random.Random(0xAA64)
+    requests, expected = bytearray(), bytearray()
+    for case in range(cases):
+        count = 1 + case % 17
+        a, b = ([rng.getrandbits(128) for _ in range(count)] for _ in range(2))
+        seed = rng.getrandbits(128)
+        result = seed
+        for x, y in zip(a, b):
+            result ^= remainder(clmul(x, y))
+        requests += struct.pack('<II', 0, count)
+        requests += b''.join(x.to_bytes(16, 'little') for x in a+b+[seed])
+        expected += result.to_bytes(16, 'little')
+        rows = [rng.getrandbits(64) for _ in range(256)]
+        requests += struct.pack('<II', 1, 1) + struct.pack('<256Q', *rows)
+        expected += struct.pack('<256Q', *transpose(rows))
+    with tempfile.TemporaryDirectory(prefix='simd-arm-', dir=ROOT/'target') as directory:
+        source, binary = Path(directory)/'runner.c', Path(directory)/'runner'
+        source.write_text(harness)
+        subprocess.run([compiler, '-O2', '-static', '-Wall', '-Wextra', '-Werror',
+                        str(source), '-o', str(binary)], check=True)
+        actual = subprocess.check_output([emulator, '-cpu', 'max', str(binary)], input=bytes(requests))
+    assert actual == expected, 'AArch64 polynomial/transpose discrepancy'
+    print(f'AArch64 PMULL and NEON transpose: {cases} cases each; all canaries intact')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pin', action='store_true')
@@ -281,7 +482,12 @@ def main():
     if 'aarch64-unknown-linux-gnu' not in installed:
         parser.error('required AArch64 target is not installed')
     fixtures.update(extract('aarch64-unknown-linux-gnu'))
-    pin_or_check(fixtures, args.pin)
+    provenance_error = None
+    try:
+        pin_or_check({k: v for k, v in fixtures.items() if k not in EXTRA_NAMES}, args.pin)
+    except RuntimeError as error:
+        provenance_error = error
+        print(f'FAIL: fixture provenance: {error}; continuing independent execution checks', flush=True)
     # This production Rust test calls the actual public wrapper for every backend
     # at lengths 0, 1, 2, 3, 16, 17, 40, 41. Raw assembly requires positive counts.
     subprocess.run(['cargo', 'test', '--release', '-p', 'qsag-asm', '--lib',
@@ -291,6 +497,16 @@ def main():
     for name in NAMES[:2]:
         isolated(name, lambda name=name: test_multiply(name, fixtures[name]['code'], args.cases))
     isolated(NAMES[2], lambda: test_transpose(fixtures[NAMES[2]]['code'], args.cases))
+    for name in EXTRA_NAMES:
+        isolated(name, lambda name=name: test_extra(name, fixtures[name]['code'], args.cases))
+    for test in ('gf256_every_simd_tail_matches_portable_and_preserves_sentinels',
+                 'tower128_bdoz_2lane_mac_vpclmul_pclmul_wiedemann_parity',
+                 'keccak_batch_tails_match_independent_portable_states'):
+        subprocess.run(['cargo', 'test', '--release', '-p', 'qsag-asm', '--lib',
+                        'tests::' + test, '--', '--exact'], cwd=ROOT, check=True)
+    test_aarch64(fixtures, args.cases)
+    if provenance_error is not None:
+        raise provenance_error
     print('PASS: release bytes pinned; all native differential comparisons passed')
 
 

@@ -567,6 +567,87 @@ struct FieldTapeDraw {
     domain: Domain,
 }
 
+// Replay a finite tape with a public per-draw attempt budget. Rejection masks
+// remain shared: each lane conditionally removes a rejected word from the entire
+// unread suffix, including future Boolean refill words. Previously cached bits
+// precede `start` and are never moved. A failed budget is retried from the original
+// stream, so an unresolved draw cannot discard a later draw's valid candidate.
+fn canonical_tape_attempt<T: Transport>(
+    e: &mut Engine<T>,
+    streams: &[Word],
+    draws: &[FieldTapeDraw],
+    counts: [usize; 3],
+    attempts: usize,
+) -> Result<Option<Vec<Word>>, Error> {
+    let required = tape_counts(draws, counts, attempts)?;
+    if streams.len() != 3 || streams.iter().zip(required).any(|(s, n)| s.len() < n) {
+        return Err(Error::InvalidTape);
+    }
+    let mut out: Vec<Word> = streams
+        .iter()
+        .zip(required)
+        .map(|(s, n)| s[..n].iter().copied().collect())
+        .collect();
+    let mut valid: [Word; 3] = core::array::from_fn(|_| Word::new());
+    for draw in draws {
+        let stream = &mut out[draw.head];
+        let width = draw.domain.width();
+        let consumed = width.div_ceil(8) * 8;
+        for attempt in 0..attempts {
+            let word = stream[draw.start..draw.start + width]
+                .iter()
+                .copied()
+                .collect();
+            let accepted = e.less_than_modulus_many(&[word], draw.domain)?[0];
+            if attempt + 1 == attempts {
+                valid[draw.head].push(accepted);
+            } else {
+                let end = stream.len() - consumed;
+                let reject = accepted ^ e.constant(u64::MAX);
+                let pairs: SecretVec<_> = (draw.start..end)
+                    .map(|i| (reject, stream[i] ^ stream[i + consumed]))
+                    .collect();
+                let changes = e.and(&pairs)?;
+                for (slot, change) in stream[draw.start..end].iter_mut().zip(changes.iter()) {
+                    *slot = *slot ^ *change;
+                }
+                stream.truncate(end);
+            }
+        }
+    }
+    let valid = fold_valid_bits(e, valid)?;
+    Ok(if e.open(&valid)?.iter().all(|&v| v == u64::MAX) {
+        Some(out)
+    } else {
+        None
+    })
+}
+
+fn tape_counts(
+    draws: &[FieldTapeDraw],
+    counts: [usize; 3],
+    attempts: usize,
+) -> Result<[usize; 3], Error> {
+    let extra = attempts.checked_sub(1).ok_or(Error::InvalidTape)?;
+    let mut required = counts;
+    let mut ends = [0; 3];
+    for draw in draws {
+        let width = draw.domain.width().div_ceil(8) * 8;
+        if draw.head >= 3 || draw.domain == Domain::Bit {
+            return Err(Error::InvalidTape);
+        }
+        let end = draw.start.checked_add(width).ok_or(Error::InvalidTape)?;
+        if draw.start < ends[draw.head] || end > counts[draw.head] {
+            return Err(Error::InvalidTape);
+        }
+        ends[draw.head] = end;
+        required[draw.head] = required[draw.head]
+            .checked_add(width.checked_mul(extra).ok_or(Error::InvalidTape)?)
+            .ok_or(Error::InvalidTape)?;
+    }
+    Ok(required)
+}
+
 fn fold_valid_bits<T: Transport>(
     e: &mut Engine<T>,
     mut groups: [Word; 3],
@@ -733,7 +814,7 @@ fn evaluate_inner<T: Transport>(
         let s2 = &mut rest2[0];
         e.permutations(&mut [&mut s0.state, &mut s1.state, &mut s2.state])?;
     }
-    let squeezed = outer_mpc::squeeze_sponges_lockstep(
+    let mut squeezed = outer_mpc::squeeze_sponges_lockstep(
         e,
         &mut tape_sponges,
         &[
@@ -773,7 +854,32 @@ fn evaluate_inner<T: Transport>(
     }
     let valid = fold_valid_bits(e, valid_groups)?;
     if e.open(&valid)?.iter().any(|&v| v != u64::MAX) {
-        return Err(Error::InvalidTape);
+        let counts = core::array::from_fn(|h| cursors[h].sponge_bits);
+        let mut attempts = 2usize;
+        loop {
+            let required = tape_counts(&field_draws, counts, attempts)?;
+            let additional: Vec<_> = required
+                .iter()
+                .zip(&squeezed)
+                .map(|(&n, s)| n - s.len())
+                .collect();
+            let more = outer_mpc::squeeze_sponges_lockstep(e, &mut tape_sponges, &additional)?;
+            for (stream, tail) in squeezed.iter_mut().zip(&more) {
+                stream.extend_from_slice(tail);
+            }
+            if let Some(repaired) =
+                canonical_tape_attempt(e, &squeezed, &field_draws, counts, attempts)?
+            {
+                squeezed = repaired;
+                break;
+            }
+            attempts = attempts.checked_mul(2).ok_or(Error::InvalidTape)?;
+        }
+        for (word, draw) in raw_draw_words.iter_mut().zip(&field_draws) {
+            word.copy_from_slice(
+                &squeezed[draw.head][draw.start..draw.start + draw.domain.width()],
+            );
+        }
     }
 
     // Only `NodeTape::InputField` draws are read again in Step 7; move all `MulField`
@@ -1457,6 +1563,108 @@ mod tests {
             }
         }
         engine.transport.audit_candidates(candidates);
+    }
+
+    #[test]
+    fn canonical_tapes_reject_boundary_words_without_aborting_or_losing_cached_bits() {
+        use qsag_accel::goldilocks::GOLDILOCKS_PRIME;
+        run(|p, n| {
+            let mut e = Engine::new(p, [0x61; 32], keys(p), n).unwrap();
+            let draws: Vec<_> = [64, 128, 256]
+                .into_iter()
+                .flat_map(|start| {
+                    (0..3).map(move |head| FieldTapeDraw {
+                        head,
+                        start,
+                        domain: Domain::Gold,
+                    })
+                })
+                .collect();
+            let counts = [320; 3];
+            let required = tape_counts(&draws, counts, 4).unwrap();
+            let value = |head: usize, lane: usize, word: usize| {
+                let rejects = (head + lane) % 4;
+                if word > 0 && word <= rejects {
+                    [GOLDILOCKS_PRIME, GOLDILOCKS_PRIME + 1, u64::MAX][word - 1]
+                } else if word == rejects + 1 {
+                    GOLDILOCKS_PRIME - 1
+                } else {
+                    (word + 100 * head + 1000 * lane) as u64
+                }
+            };
+            let streams: Vec<_> = (0..3)
+                .map(|head| {
+                    let words: Vec<_> = (0..required[head])
+                        .map(|bit| {
+                            if p != 0 {
+                                return 0;
+                            }
+                            (0..64).fold(0, |acc, lane| {
+                                acc | (((value(head, lane, bit / 64) >> (bit % 64)) & 1) << lane)
+                            })
+                        })
+                        .collect();
+                    e.share(&words).unwrap()
+                })
+                .collect();
+            // Two consecutive boundary words exceed this attempt budget, but are
+            // not an invalid tape: the caller extends the PRG and replays it.
+            assert!(
+                canonical_tape_attempt(&mut e, &streams, &draws, counts, 2)
+                    .unwrap()
+                    .is_none()
+            );
+            let repaired = canonical_tape_attempt(&mut e, &streams, &draws, counts, 4)
+                .unwrap()
+                .unwrap();
+            for (head, stream) in repaired.iter().enumerate() {
+                assert_eq!(stream.len(), counts[head]);
+                let opened = e.open(stream).unwrap();
+                for lane in 0..64 {
+                    let mut cursor = 1;
+                    let mut expected = vec![value(head, lane, 0)];
+                    for slot in 1..5 {
+                        loop {
+                            let v = value(head, lane, cursor);
+                            cursor += 1;
+                            if slot == 3 || v < GOLDILOCKS_PRIME {
+                                expected.push(v);
+                                break;
+                            }
+                        }
+                    }
+                    let bytes = outer_mpc::lane_bytes(&opened, lane);
+                    let actual: Vec<_> = bytes
+                        .chunks_exact(8)
+                        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
+                        .collect();
+                    assert_eq!(actual, expected, "head {head}, lane {lane}");
+                }
+            }
+            let short: Vec<Word> = streams
+                .iter()
+                .map(|s| s[..320].iter().copied().collect())
+                .collect();
+            assert!(matches!(
+                canonical_tape_attempt(&mut e, &short, &draws, counts, 4),
+                Err(Error::InvalidTape)
+            ));
+            assert!(matches!(
+                canonical_tape_attempt(&mut e, &streams[..2], &draws, counts, 4),
+                Err(Error::InvalidTape)
+            ));
+            assert_eq!(tape_counts(&draws, counts, 0), Err(Error::InvalidTape));
+            assert_eq!(
+                tape_counts(&draws, counts, usize::MAX),
+                Err(Error::InvalidTape)
+            );
+            let malformed = [FieldTapeDraw {
+                head: 3,
+                start: 0,
+                domain: Domain::Gold,
+            }];
+            assert_eq!(tape_counts(&malformed, counts, 2), Err(Error::InvalidTape));
+        });
     }
 
     #[test]

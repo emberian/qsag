@@ -37,7 +37,7 @@ Hashing.
   Specification definitions are explicitly pinned in `comparator.json`.
 - `SpongeConformance`: each squeeze step writes the exact little-endian rate byte;
   rate-boundary steps apply canonical `Qsag.keccakF1600` and reset the offset. These laws
-  apply to SHAKE and cSHAKE states. They do not establish absorb/padding/framing equivalence.
+  apply to SHAKE and cSHAKE states. Absorb and padding are established in `SpongeFraming`; the cSHAKE constructor boundary is listed below.
 - One Keccak round and the 24-round permutation refine `Qsag.keccakF1600` on every state.
 - The 128-chain base-4 WOTS+C digit check equals `Qsag.checkTargetSum 4 128 192`.
 
@@ -67,134 +67,60 @@ Guards (multi-turn, arbitrary request sequences including refusals).
   releases, and a concrete RSS execution showing those contracts are not derivable from the
   guard alone.
 
-## Gates
+## Custody implementation and verification, 2026-11-14
 
-Run on the Linux build host with `CARGO_BUILD_JOBS=4 SWARM_MEM_MAX=8G timeout --kill-after=10s 600s`:
+- ML-DSA binds the actual response coefficients to its consuming release gate, checks
+  distinct predicates, and validates the returned digest before release. Rejected attempts
+  reveal only the joint failure bit. Credential debug output redacts issuance tokens.
+- Policy approvals retain verified velocity state. A replay window retains all 256 admitted
+  random identifiers without lexicographic eviction; exhaustion requires authenticated window
+  rotation. Signer checkpoints use format V5. Generation fences latch persistence failures.
+- Directory monotone anchors use two authenticated, fsynced slots. Custody wrappers use
+  anchored ceremony recovery and recover the maximum committed/reserved burn cursor.
+  FTS WALs and HD query budgets provide anchored and minimum-checkpoint recovery APIs.
+  The anchor directory must live in an independent rollback domain; this is not hardware
+  monotonic storage or protection against snapshots containing both anchor and journal.
+- HD poison journals fail closed during disclosure and after I/O failures. Caller-injected
+  journals support no-std rekey completion. Committed rekey zero tests, FTS epoch permits,
+  and canonical grind verification are connected to production paths.
+- RSS and FTS permits have private fields and move-only consumption. Same-epoch quorum
+  authorization refuses a second grant. Hybrid transcript bytes match both production
+  hybrid suites in differential tests. Secret buffers and polynomial drops wipe on errors.
+- Extraction emits ordinary public sections and exposes only four scalar aliases in Types.
+  The axiom census includes Aeneas and custody modules. The comparator preserves the original
+  65 theorem and 17 definition entries and adds custody release and SHAKE byte-equality checks.
 
-    lake build --wfail QsagVerified QsagSpecWeld AuditMirAxioms QsagMirProofs
+## Sponge boundary
 
-Integrated result on 2026-11-14: warning-free QsagVerified, QsagSpecWeld,
-QsagCustodyWeld, AuditMirAxioms and QsagMirProofs build. Runtime census:
-5,318 declarations, 2,093 theorems, 44 contributing modules, zero rejected.
-The primitive compile-time census is 5,244 declarations. Both extraction crates'
-Rust tests pass (24 tests). Both extraction pipelines were rerun successfully after the review. Exact source,
-prelude and generated-output digests plus extractor binary hashes are recorded in
-the extraction-provenance manifests; CI checks them without rebuilding.
+`shake256_32_refines` proves byte equality with `Qsag.shake256Xof 32` for arbitrary input.
+`sponge_squeeze_prefix` identifies every written byte of a complete short squeeze;
+`sponge_squeeze32_refines` identifies those bytes with `Qsag.squeezeXofAux 32`.
+`cshake256_32_refines_of_prefix` composes the same output proof with cSHAKE absorb/padding.
+Its constructor premise remains open: `new_cshake256` must establish `customizationPrefix`,
+including `left_encode`, zero filling and the prefix flush. Unconditional cSHAKE equality
+is not claimed. Rust bit-length encoding now widens to u128 instead of saturating u64.
 
-The challenge builds with intentional statement placeholders. On the Linux primary host,
-`python3 ../../scripts/run_mir_comparator.py` passed all 65 theorem obligations
-and 17 definitions in the default sandbox with all six kernels. The runner
-bundles the local Lean dependency inside a disposable package snapshot.
+## Validation and remaining work
 
+Linux release tests: 301 passed across the standalone verified crate and five custody crates;
+the separately invoked production OT bootstrap test also passed. No-default-feature checks
+and strict no-dependency, all-target clippy checks pass. Primitive MIR targets build with
+warnings treated as errors. The full custody/audit build is blocked by errors in the current
+sibling-owned `Qsag.RssSlhFullSecurity` dependency (unresolved `G` identifiers).
+A full zero-rejected-axiom census is therefore not certified for this snapshot.
 
-## Custody work, 2026-11-14 — partial, not convergence closure
+The final repository source-policy scan passes: no forbidden proof escapes, with exposure
+limit 12. Earlier sibling documentation-reference failures have been corrected.
+The comparator passes 71 theorem and 25 definition checks through all six kernels. The
+import-all primitive census, including logical Aeneas support declarations, checks 6,415 declarations
+with zero rejected axioms. Compile-time elaborators and their generated implementation
+helpers are reported outside the logical census; emitted terms and their transitive proof
+dependencies are checked. The extraction manifest binds current source/output hashes and
+explicitly records the blocked full pipeline. Do not substitute this primitive census for
+the blocked full custody census.
 
-Implemented on hbox in `the isolated Linux build directory`:
-
-- Quorum isolated RSS traffic MAC keys are derived from provisioning keys and the
-  reserved session ID. The regression checks peer agreement and cross-session MAC
-  replay refusal. This does not establish the separate private M-gate Round-2 stream.
-- `SharedWindowSpendLedger` retains the extracted `StatefulVelocityGuard` across
-  approvals and rotations. Its generation supplies monotone request nonces; the
-  authenticated, policy-bound, rollback-checked recovery boundary reconstructs the
-  guard with the retained cap and spent amount. Release requires its acceptance.
-  Rotation, recovery, cumulative spend and direct over-cap refusal regressions pass.
-  Signer-local guards still reconstruct temporary verified guards and remain open.
-- `sponge_absorb_byte` proves the exact input-byte write and full-rate transition to
-  the canonical Keccak permutation. Arbitrary multi-block SHAKE/cSHAKE framing
-  equivalence remains open; the existing totality theorem is not that equivalence.
-
-Validation: the requested six-package no-default-feature check and clippy command
-exit successfully; the release suite has 241 passed, zero failed or ignored.
-The parity-test mirror emits four pre-existing `testing-ephemeral` cfg warnings.
-The warning-free MIR targets and runtime census pass: 5,320 declarations, 2,095
- theorem declarations, 44 modules, zero rejected axioms. Extraction provenance
-still passes for all 22 bound files; no extracted Rust source or generated MIR
-changed. The 65 theorem / 17 definition comparator roster is unchanged.
-
-Sandboxed replay was attempted but blocked before kernel execution:
-`bwrap: setting up uid map: Permission denied`. hbox has
-`kernel.apparmor_restrict_unprivileged_userns = 1`; no host security setting was
-changed and no unsandboxed fallback was used. `scan_badwords.py` is absent on both
-hosts; the repository CI scanner `scripts/check_lean_policy.py` passes 136 files
-with exposure limit 12. Commands/logs and fingerprints are in the prior verification logs.
-
-The "still outstanding" list that closed this section on its first writing is superseded by
-the next section.
-
-## Custody continuation, 2026-11-14 (second pass)
-
-What each item below establishes and what it does not.
-
-Sponge absorb and padding (`QsagVerified/Proofs/SpongeFraming.lean`).
-- `load_le_u64_refines`, `xor_rate_block_refines`: the extracted lane load and rate-block XOR
-  are `Qsag.loadLe64` / `Qsag.xorRate136` on every state and block.
-- `SpongeAbsorbed sp msg` (existential-free reading: `SpongeAbsorbed.canonical`).
-  `sponge_absorb_refines`: `absorb` appends its whole argument, for any length and any buffer
-  fill; `sponge_absorb_all_refines`: the result depends only on the concatenation, not on the
-  split into calls.
-- `sponge_finalize_refines`: `finalize` leaves `Qsag.absorbPadded (Qsag.padForRate msg suffix)`
-  for the sponge's own suffix, including the 135-pending-byte case where suffix and `0x80`
-  share a byte. `shake256_absorb_pad_refines` and `shake256_xof_from_extracted_state` compose
-  these from `new_shake256`: `Qsag.shake256Xof` squeezes from exactly the extracted state.
-- `cshake256_absorb_pad_refines`: the same for cSHAKE256, for a sponge that has absorbed
-  `Qsag.customizationPrefix` and carries suffix `0x04`.
-- Open: that `new_cshake256` establishes that hypothesis (the `left_encode` loops, `bytepad`
-  zero fill and prefix flush), and identification of squeezed bytes with
-  `Qsag.squeezeXofAux` (only the per-byte and rollover laws of `SpongeConformance` exist).
-  So `shake256_32` / `cshake256_32` are not yet equated with `Qsag.shake256Xof 32` /
-  `Qsag.cshake256Xof 32` as byte strings.
-
-Consuming opening guard (`qsag-verified/src/opening_guard.rs`, extracted;
-`QsagVerified/Proofs/ConsumingOpening.lean`, `CustodyMediation.lean`).
-- `ConsumingOpeningGuard2Lane` is bound to a session, round and transcript binding, folds
-  openings (commitment digest, recomputed digest, two GF(2^128) lanes under XOR) and decides
-  once. `OpeningReleasePermit` has private fields and no other constructor. The decision uses
-  addition only, so it is independent of the multiplication basis; this is why it fits the
-  polynomial-basis production protocol where the Tower128 handle did not.
-- `opening_verify_once_eq` (total closed form), `opening_verify_once_single_consumption`,
-  `opening_round_permit_sound` / `_complete` / `_refused` for construction, any sequence of
-  `absorb_opening` calls and one `verify_once`, `opening_round_single_release`.
-  `sigma_release_iff` and `plane_open_release_iff` state the two production call shapes.
-- Production: `qsag-policy` mints `AuthorizedSignReleaseToken` only through
-  `AuthorizedSignReleaseToken::mint`, which takes the permit of `release_sigma_round`, in both
-  the in-process barrier and the per-party phase machine. `qsag-quorum` reconstructs opened
-  lanes only in `reconstruct_opened`, which takes the permit of the opening round.
-- Not proved: that production constructs its outputs only from the permit (Rust privacy and
-  move semantics), and the commitment recomputation, which stays in production code and is
-  compared by the guard. The Tower128 `BdozOpeningGuard2Lane` remains unused by production.
-  `RssOpenPermit` in `pants_and_quorum_guards.rs` is still `Copy` with a public field.
-
-Signer-local verified velocity state (`qsag-policy`).
-- `PolicySignerGuardShare` retains one extracted `StatefulVelocityGuard` across approvals and
-  window rotations; approvals commit through `authorize_spend` with a monotone request nonce.
-  The guard is pinned to the policy cap on first use; a cap change or a restore rebuilds it by
-  replaying the recorded spend through the verified transition. Checkpoints are format V4 and
-  carry the request nonce and pinned cap; restore rebuilds the guard before mutating the
-  ledger. `policy_velocity_guard_multiturn_cap_sound` covers every such trace.
-- V3 checkpoints are not readable by this version.
-
-Raw-secret surfaces (`qsag-fts`, `qsag-cred`, `qsag-hd`): sealed fields, removed raw-share
-accessors and `Clone`, redacted `Debug`, wiping drops, and test-only gating of the in-memory
-poison journal and unchecked child-seed recovery, each pinned by a `compile_fail` doctest or
-unit test. Left open: `ParallelSeededDkgOutput.beaver_triples` / `pk_seed_bytes` stay public
-(a `qsag-cli` example reads them); a no-`std` `qsag-hd` build can no longer finish a rekey,
-because its only completion path was the in-memory journal; `BlindVerifiableCredential` stays
-publicly constructible and its `Debug` prints `issuance_token`.
-
-Validation on hbox (the prior verification logs): `cargo check --no-default-features` and
-`cargo clippy --all-targets -- -D warnings` over `qsag-verified` and the five custody crates
-exit 0 (the four `testing-ephemeral` cfg warnings of the parity-test mirror remain);
-`cargo check --workspace --all-targets` exits 0; `cargo test --release` over the six
-packages: 274 passed, 0 failed, 0 ignored; `qsag-policy --features std`: 23 passed.
-`lake build --wfail QsagVerified QsagSpecWeld QsagCustodyWeld AuditMirAxioms QsagMirProofs`
-succeeds; compile-time census 5,497 declarations, custody weld 85, runtime census 5,579
-declarations, 2,263 theorems, 47 modules, zero rejected. Extraction was rerun with the pinned
-Charon/Aeneas binaries; the diff to the generated files is additive and provenance passes for
-23 bound files. On bb2, `python3 scripts/run_mir_comparator.py` passed in the default sandbox
-with all six kernels; the 65 theorem / 17 definition roster, `QsagVerifiedChallenge.lean` and
-`comparator.json` are unchanged.
-
-Still open for C-02d / C-04a: the two sponge items above; a proof of the concurrent
-production scheduler; the separate private M-gate Round-2 stream; and the remaining public
-surfaces listed above. No convergence row is marked closed by this work.
+Still open: the cSHAKE constructor proof; concurrent production scheduler refinement;
+the private M-gate Round-2 stream; and workspace-wide adoption of anchored recovery APIs.
+Production output mediation relies on Rust privacy and move semantics plus verified guard
+transitions, not an extraction of the complete asynchronous scheduler. Public DKG containers
+remain for existing callers; their secret element fields are opaque and their drops wipe.

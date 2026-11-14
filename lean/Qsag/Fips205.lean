@@ -1246,6 +1246,22 @@ theorem FipsPreHashAlg.oidBytes_injective {a b : FipsPreHashAlg}
     (h : a.oidBytes = b.oidBytes) : a = b := by
   cases a <;> cases b <;> simp [FipsPreHashAlg.oidBytes] at h <;> rfl
 
+/-- Decode only the supported, exact DER encodings (no prefix acceptance). -/
+def FipsPreHashAlg.ofOidBytes (bytes : List UInt8) : Option FipsPreHashAlg :=
+  [.sha256, .sha3_256, .sha3_384, .sha3_512, .sha512, .shake128_256, .shake256_512].find?
+    (fun alg => alg.oidBytes == bytes)
+
+@[simp] theorem FipsPreHashAlg.ofOidBytes_roundtrip (alg : FipsPreHashAlg) :
+    ofOidBytes alg.oidBytes = some alg := by
+  cases alg <;> decide
+
+/-- Table 2 digest lengths equal the three separately rounded digest components. -/
+theorem fips205_table2_digest_lengths :
+    ∀ p ∈ [slhDsaShake128s, slhDsaShake128f, slhDsaShake192s,
+      slhDsaShake192f, slhDsaShake256s, slhDsaShake256f],
+      p.m = p.mdBytes + p.treeBytes + p.leafBytes := by
+  decide
+
 /-- NIST FIPS 205 §10.2 security-category gate: Category 3/5 (`n ∈ {24, 32}`) MUST reject
     Category-1 (`128`-bit collision) pre-hash functions (`sha256`, `shake128_256`). -/
 def preHashCompatible (p : Fips205Params) (alg : FipsPreHashAlg) : Bool :=

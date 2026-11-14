@@ -1428,6 +1428,28 @@ pub fn eval_univariate_ext4_at_base(coeffs: &[GoldilocksExt4], z: Goldilocks) ->
     acc
 }
 
+/// Four independent Horner chains expose instruction-level parallelism without changing
+/// coefficient order: lane `j` contains the coefficients of powers congruent to `j mod 4`.
+#[inline]
+fn horner_ext4_interleaved(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> GoldilocksExt4 {
+    if coeffs.len() < 32 {
+        return coeffs
+            .iter()
+            .rev()
+            .fold(GoldilocksExt4::ZERO, |acc, &c| acc * z + c);
+    }
+    let mut blocks = coeffs.chunks_exact(4);
+    let mut lanes = [GoldilocksExt4::ZERO; 4];
+    lanes[..blocks.remainder().len()].copy_from_slice(blocks.remainder());
+    let z4 = z.square().square();
+    for block in blocks.by_ref().rev() {
+        for lane in 0..4 {
+            lanes[lane] = lanes[lane] * z4 + block[lane];
+        }
+    }
+    ((lanes[3] * z + lanes[2]) * z + lanes[1]) * z + lanes[0]
+}
+
 /// Evaluate univariate polynomial $\sum_k c_k z^k$ (`coeffs` in ascending degree) at `z: GoldilocksExt4`.
 #[inline]
 pub fn eval_univariate_ext4(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> GoldilocksExt4 {
@@ -1441,11 +1463,7 @@ pub fn eval_univariate_ext4(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> Gol
                 .enumerate()
                 .map(|(i, sub)| {
                     crate::spawn_bounded(scope, move || {
-                        let mut acc = GoldilocksExt4::ZERO;
-                        for &c in sub.iter().rev() {
-                            acc = acc * z + c;
-                        }
-                        acc * z.pow((i * chunk) as u64)
+                        horner_ext4_interleaved(sub, z) * z.pow((i * chunk) as u64)
                     })
                 })
                 .collect();
@@ -1455,11 +1473,7 @@ pub fn eval_univariate_ext4(coeffs: &[GoldilocksExt4], z: GoldilocksExt4) -> Gol
                 .fold(GoldilocksExt4::ZERO, |a, b| a + b)
         });
     }
-    let mut acc = GoldilocksExt4::ZERO;
-    for &c in coeffs.iter().rev() {
-        acc = acc * z + c;
-    }
-    acc
+    horner_ext4_interleaved(coeffs, z)
 }
 
 /// Univariate polynomial over `GoldilocksExt4` in monomial basis $c_0 + c_1 X + \dots + c_d X^d$.
@@ -1645,6 +1659,28 @@ pub fn fold_first_var_in_place_ext4(table: &mut Vec<GoldilocksExt4>, r: Goldiloc
 
 #[cfg(test)]
 mod ext4_tests {
+    #[test]
+    fn interleaved_horner_matches_scalar() {
+        let coeffs: Vec<_> = (0..16_389)
+            .map(|i| {
+                GoldilocksExt4::from_limbs(core::array::from_fn(|j| {
+                    Goldilocks::from_u64_reduced(
+                        (i as u64 + 1).wrapping_mul(u64::MAX - 17 * j as u64),
+                    )
+                }))
+            })
+            .collect();
+        for z in [GoldilocksExt4::ZERO, GoldilocksExt4::ONE, coeffs[13]] {
+            for len in (0..20).chain([31, 32, 33, 63, 64, 65, 16_383, 16_384, 16_389]) {
+                let expected = coeffs[..len]
+                    .iter()
+                    .rev()
+                    .fold(GoldilocksExt4::ZERO, |acc, &c| acc * z + c);
+                assert_eq!(eval_univariate_ext4(&coeffs[..len], z), expected);
+            }
+        }
+    }
+
     use super::*;
 
     fn sample_ext4(seed: u64) -> GoldilocksExt4 {

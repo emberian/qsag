@@ -3200,6 +3200,16 @@ theorem short_monomial_witness_rRel_invertible {R nu q : Nat} [NeZero q]
   rw [hLin, w.short_relaxed_rlwe_mod_q, ← cycZqMul_assoc, hLeft,
       cycZqMul_one_left (Nat.two_pow_pos nu)]
 
+/-- Production fork extraction gives an exact modular witness after explicit inversion.
+    Shortness belongs to the isometric witness, not to this unrelaxed modular pair. -/
+theorem conditioned_production_fork_exact_relation
+    {stmt : RlweOrSigmaStatement 10 12289}
+    (w : ShortMonomialRelaxedRlweWitness 13 10 12289 stmt) :
+    cycZqAdd
+      (cycZqMul stmt.A (cycZqMul w.rRelInvZq (cycIntToZq 12289 w.sIso)))
+      (cycZqMul w.rRelInvZq (cycIntToZq 12289 w.eIso)) = stmt.branchU w.branch :=
+  (short_monomial_witness_rRel_invertible (by decide) (by decide) w).2.2
+
 /-- At production parameters $q = 12289, B_z = 3070$, $(s_{\mathrm{iso}}, e_{\mathrm{iso}})$ has
     $\ell_\infty \le 6140 < 6144 = \lfloor 12289 / 2 \rfloor$ and **zero modular wraparound** over $\mathbb{Z}$! -/
 theorem short_monomial_witness_zero_wraparound_production {R nu : Nat}

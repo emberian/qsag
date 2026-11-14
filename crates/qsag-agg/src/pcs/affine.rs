@@ -54,33 +54,43 @@ pub(super) fn geometric(z: E, len: usize) -> Vec<E> {
     powers_of_ext4(z, len)
 }
 
+/// Accumulate four independent geometric progressions to shorten the multiplication
+/// dependency chain. The tail continues lane zero at the next multiple of four.
+fn add_geometric_chunk(dst: &mut [E], initial: E, z: E) {
+    let z2 = z.square();
+    let z4 = z2.square();
+    let mut powers = [initial, initial * z, initial * z2, initial * z2 * z];
+    let mut chunks = dst.chunks_exact_mut(4);
+    for chunk in chunks.by_ref() {
+        for lane in 0..4 {
+            chunk[lane] += powers[lane];
+            powers[lane] *= z4;
+        }
+    }
+    for (slot, power) in chunks.into_remainder().iter_mut().zip(powers) {
+        *slot += power;
+    }
+}
+
 /// Zero-allocation streaming accumulation `dst[i] += xi * z^i` for `i in 0..dst.len()`.
 pub(super) fn add_geometric_scaled_in_place(dst: &mut [E], xi: E, z: E) {
+    let _phase = crate::profile::span("add_geometric_scaled");
     if dst.is_empty() {
         return;
     }
     #[cfg(feature = "std")]
     if dst.len() >= 8_192 {
-        let workers = crate::parallel_workers().min(dst.len());
+        let workers = crate::parallel_workers().min(dst.len().div_ceil(2_048));
         let chunk = dst.len().div_ceil(workers);
         std::thread::scope(|scope| {
             for (t_idx, sub) in dst.chunks_mut(chunk).enumerate() {
-                let mut cur = xi * z.pow((t_idx * chunk) as u64);
-                crate::spawn_bounded(scope, move || {
-                    for slot in sub.iter_mut() {
-                        *slot += cur;
-                        cur *= z;
-                    }
-                });
+                let initial = xi * z.pow((t_idx * chunk) as u64);
+                crate::spawn_bounded(scope, move || add_geometric_chunk(sub, initial, z));
             }
         });
         return;
     }
-    let mut cur = xi;
-    for slot in dst.iter_mut() {
-        *slot += cur;
-        cur *= z;
-    }
+    add_geometric_chunk(dst, xi, z);
 }
 
 /// Reusable-buffer dual fold (`pairs + 1` slots; trailing slot is zero so overflow never wraps).
@@ -102,14 +112,30 @@ pub(super) fn fold_coeffs_into(c: &[E], [theta, alpha, beta]: [E; 3], out: &mut 
     out.resize(m + 1, E::ZERO);
     let mix0 = c[0] + theta * c[1];
     out[0] = c[1] + alpha * mix0;
-    if m > 1 {
-        fill_indexed(&mut out[1..m], |off| {
-            let i = off + 1;
-            let prev_mix = c[2 * (i - 1)] + theta * c[2 * (i - 1) + 1];
+    let fill = |start: usize, dst: &mut [E]| {
+        let mut prev_mix = c[2 * (start - 1)] + theta * c[2 * (start - 1) + 1];
+        for (offset, slot) in dst.iter_mut().enumerate() {
+            let i = start + offset;
             let cur_mix = c[2 * i] + theta * c[2 * i + 1];
-            (beta * prev_mix) + (c[2 * i + 1] + alpha * cur_mix)
+            *slot = beta * prev_mix + (c[2 * i + 1] + alpha * cur_mix);
+            prev_mix = cur_mix;
+        }
+    };
+    #[cfg(feature = "std")]
+    if m >= 8_192 {
+        let workers = crate::parallel_workers().min(m.div_ceil(2_048));
+        let chunk = (m - 1).div_ceil(workers);
+        std::thread::scope(|scope| {
+            for (index, dst) in out[1..m].chunks_mut(chunk).enumerate() {
+                let fill = &fill;
+                crate::spawn_bounded(scope, move || fill(1 + index * chunk, dst));
+            }
         });
+    } else {
+        fill(1, &mut out[1..m]);
     }
+    #[cfg(not(feature = "std"))]
+    fill(1, &mut out[1..m]);
     let last_mix = c[2 * (m - 1)] + theta * c[2 * (m - 1) + 1];
     out[m] = beta * last_mix;
 }
@@ -163,6 +189,7 @@ pub(super) fn prove_fold_in_place(
     claim: &mut E,
     tr: &mut FiatShamirTranscript<InstanceBound>,
 ) -> ([E; 5], [E; 3]) {
+    let _phase = crate::profile::span("prove_affine_fold");
     let mut wire = [E::ZERO; 5];
     let pairs_ck = (c.len() / 2).min(k.len() / 2);
     let cross_range = |c_ref: &[E], k_ref: &[E], i0: usize, i1: usize| -> [E; 3] {
@@ -483,6 +510,36 @@ mod tests {
             Goldilocks::from_u64_reduced((i * 7919 + j * 313 + 17) as u64)
         }))
     }
+    #[test]
+    fn geometric_and_primal_chunks_match_scalar() {
+        for len in [0, 1, 2, 3, 4, 5, 17, 8191, 8192, 8193, 16386] {
+            let z = sample(11);
+            let xi = sample(23);
+            let mut got: Vec<_> = (0..len).map(sample).collect();
+            let mut expected = got.clone();
+            let mut power = xi;
+            for slot in &mut expected {
+                *slot += power;
+                power *= z;
+            }
+            add_geometric_scaled_in_place(&mut got, xi, z);
+            assert_eq!(got, expected);
+            if len < 2 {
+                continue;
+            }
+            let chals = [sample(31), sample(32), sample(33)];
+            let [theta, alpha, beta] = chals;
+            let m = got.len() / 2;
+            let mut expected = vec![E::ZERO; m + 1];
+            for i in 0..m {
+                let mix = got[2 * i] + theta * got[2 * i + 1];
+                expected[i] += got[2 * i + 1] + alpha * mix;
+                expected[i + 1] += beta * mix;
+            }
+            assert_eq!(fold_coeffs(&got, chals), expected);
+        }
+    }
+
     #[test]
     fn terminal_base_field_specialization_matches_generic_contraction() {
         let phis: Vec<_> = (1..5).map(sample).collect();

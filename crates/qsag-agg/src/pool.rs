@@ -3,7 +3,8 @@
 //! A `Hem` verification is a few milliseconds long and alternates sequential Fiat–Shamir work
 //! with bursts of independent per-query arithmetic. Spawning scoped OS threads per burst costs
 //! more than the burst itself, so verification submits index ranges to a lazily started pool of
-//! `parallel_workers() - 1` threads instead. The submitting thread always works on its own call
+//! `parallel_workers() - 1` threads by default (`QSAG_VERIFY_WORKERS` includes the caller).
+//! The submitting thread always works on its own call
 //! too, so a saturated or empty pool degrades to inline execution and can never deadlock.
 //!
 //! Jobs are `'static` (the crate forbids `unsafe`, so no lifetime erasure): callers move
@@ -31,7 +32,13 @@ struct Pool {
 fn pool() -> Option<&'static Arc<Pool>> {
     static POOL: OnceLock<Option<Arc<Pool>>> = OnceLock::new();
     POOL.get_or_init(|| {
-        let want = crate::parallel_workers().saturating_sub(1);
+        let workers = std::env::var("QSAG_VERIFY_WORKERS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&workers| workers > 0)
+            .unwrap_or_else(crate::parallel_workers)
+            .min(crate::parallel_workers());
+        let want = workers.saturating_sub(1);
         if want == 0 {
             return None;
         }
@@ -133,7 +140,10 @@ where
 {
     let chunk = chunk.max(1);
     let num_chunks = count.div_ceil(chunk);
-    let Some(pool) = pool().filter(|_| num_chunks > 1) else {
+    if num_chunks <= 1 {
+        return (0..count).map(f).collect();
+    }
+    let Some(pool) = pool() else {
         return (0..count).map(f).collect();
     };
     let call = Arc::new(Call {

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Check source policy; compiled dependency audits remain authoritative."""
+import json
 from pathlib import Path
 import re
 
@@ -55,6 +56,11 @@ files = sorted(
     for p in (root / base).rglob("*.lean")
     if ".lake" not in p.parts
 )
+rust_files = sorted(
+    p for base in ("crates", "aeneas")
+    for p in (root / base).rglob("*.rs")
+    if "target" not in p.parts
+)
 errors = []
 challenge_paths = {
     "lean/QsagChallenge.lean",
@@ -76,9 +82,17 @@ declaration_pattern = re.compile(
     r"(?:theorem|lemma|def|abbrev|opaque|constant|structure|inductive|class)\s+"
     r"([A-Za-z_][A-Za-z0-9_'.]*)"
 )
+rust_declaration_pattern = re.compile(
+    r"\b(?:fn|const|static|struct|enum|type|trait)\s+([A-Za-z_][A-Za-z0-9_]*)\b"
+)
+posix_flag_pattern = re.compile(
+    r"^(?:O|F|MAP|PROT|MADV|LOCK|AT|CLOCK|SEEK|MS)_[A-Z0-9_]+$"
+)
 citation_pattern = re.compile(
-    r"(?i)\b(?:theorem|lemma|proof|proved|proves|via|see|by)\s+"
-    r"(?:the\s+)?`([A-Za-z_][A-Za-z0-9_'.]*)`"
+    r"(?i)\b(?:"
+    r"(?:proved|proven|discharged|established|verified|certified|justified)\s+(?:in|by|via)|"
+    r"theorem|lemma|corollary|proof|proved|proven|proves|via|see(?:\s+also)?"
+    r")\s+(?:the\s+)?`([A-Za-z_][A-Za-z0-9_'.]*)`"
 )
 project_citation_prefixes = ("Qsag.", "Aeneas.", "qsag_verified.", "qsag_whir_verified.")
 declarations = {
@@ -87,25 +101,48 @@ declarations = {
     for match in declaration_pattern.finditer(code(path.read_text()))
 }
 declaration_leaves = {name.rsplit(".", 1)[-1] for name in declarations}
+rust_declarations = {
+    match[1]
+    for path in rust_files
+    for match in rust_declaration_pattern.finditer(path.read_text())
+}
 
 
 def ghost_citations(raw):
-    """Return cited project declarations absent from the source declaration index."""
+    """Return cited project declarations absent from the Lean/Rust declaration index."""
     ghosts = []
     for comment in re.finditer(r"/-(?:!|-)(.*?)-/", raw, re.S):
         for citation in citation_pattern.finditer(comment[1]):
             name = citation[1]
-            if name not in declarations and name.rsplit(".", 1)[-1] not in declaration_leaves:
+            leaf = name.rsplit(".", 1)[-1]
+            if (
+                name not in declarations
+                and leaf not in declaration_leaves
+                and leaf not in rust_declarations
+                and not ("." not in name and posix_flag_pattern.match(name))
+            ):
                 if "." not in name and "_" not in name:
                     continue
                 if "." not in name or name.startswith(project_citation_prefixes):
-                    line = raw[:comment.start()].count("\n") + comment[1][:citation.start()].count("\n") + 1
+                    line = (
+                        raw[: comment.start()].count("\n")
+                        + comment[1][: citation.start()].count("\n")
+                        + 1
+                    )
                     ghosts.append((line, name))
     return ghosts
 
 
-if ghost_citations("/-- See `citation_negative_control_missing`. -/") != [(1, "citation_negative_control_missing")]:
-    raise RuntimeError("docstring citation negative control unexpectedly passed")
+if ghost_citations("/-- See `citation_negative_control_missing`. -/") != [
+    (1, "citation_negative_control_missing")
+]:
+    raise RuntimeError("docstring citation negative control (See) unexpectedly passed")
+if ghost_citations("/-- Proved by `citation_negative_control_missing`. -/") != [
+    (1, "citation_negative_control_missing")
+]:
+    raise RuntimeError("docstring citation negative control (Proved by) unexpectedly passed")
+if ghost_citations("/-- Values tested by `z_ood` remain bounded. -/") != []:
+    raise RuntimeError("docstring citation passive-variable control unexpectedly failed")
 
 for path in files:
     raw = path.read_text()
@@ -173,9 +210,131 @@ for manifest, import_pattern, base_dir, prefix in (
     for missing in sorted(required - imported):
         errors.append(f"{manifest}: missing {missing}")
 
+
+# Mechanical 100% symbol-coverage gate for extracted `aeneas/lean-whir/QsagWhirVerified/Funs.lean`.
+funs_def_pattern = re.compile(
+    r"(?m)^(?:\s*@\[[^]]*\]\s*)*\s*def\s+([A-Za-z_][A-Za-z0-9_'.]*)\b(.*?)(?=^(?:\s*@\[[^]]*\]\s*)*\s*(?:def|end)\b|\Z)",
+    re.S,
+)
+theorem_stmt_pattern = re.compile(
+    r"(?m)^\s*(?:@\[[^]]*\]\s*)*(?:public\s+)?(?:protected\s+)?(?:theorem|lemma)\s+"
+    r"([A-Za-z_][A-Za-z0-9_'.]*)\b(.*?):=\s*(?:by\b|sorry\b|\S)",
+    re.S,
+)
+ident_token_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_'.]*")
+
+
+def extract_funs_defs(funs_source):
+    defs = {}
+    for match in funs_def_pattern.finditer(funs_source):
+        defs[match[1]] = set(ident_token_pattern.findall(match[2]))
+    return defs
+
+
+def extract_public_theorem_statements(lean_sources):
+    stmts = {}
+    for src in lean_sources:
+        for match in theorem_stmt_pattern.finditer(src):
+            name = match[1]
+            stmts[name] = set(ident_token_pattern.findall(match[2]))
+    return stmts
+
+
+def whir_uncovered_symbols(funs_defs, theorem_stmts, allowed_theorems=None):
+    mentioned = set()
+    for thm_name, used in theorem_stmts.items():
+        short_name = thm_name.rsplit(".", 1)[-1]
+        if short_name.startswith("tooth_"):
+            continue
+        if allowed_theorems is not None and short_name not in allowed_theorems:
+            continue
+        for tok in used:
+            cleaned = tok.removeprefix("qsag_whir_verified.")
+            for suffix in (".val", ".bv"):
+                if cleaned.endswith(suffix):
+                    cleaned = cleaned[: -len(suffix)]
+            mentioned.add(cleaned)
+    uncovered = []
+    for sym in sorted(funs_defs):
+        loop_name = sym[:-5] if sym.endswith(".body") else sym
+        if loop_name.endswith("_loop") and len(loop_name) > 5:
+            origin = loop_name[:-5]
+            covered = (
+                origin in funs_defs
+                and origin in mentioned
+                and loop_name in funs_defs[origin]
+                and (sym == loop_name or sym in funs_defs.get(loop_name, set()))
+            )
+        else:
+            covered = sym in mentioned
+        if not covered:
+            uncovered.append(sym)
+    return uncovered
+
+
+whir_funs_src = code((root / "aeneas/lean-whir/QsagWhirVerified/Funs.lean").read_text())
+whir_funs_defs = extract_funs_defs(whir_funs_src)
+whir_proof_stmts = extract_public_theorem_statements(
+    [
+        code((root / "aeneas/lean-whir/QsagWhirVerified/Arithmetic.lean").read_text()),
+        code((root / "aeneas/lean-whir/QsagWhirVerified/Proofs.lean").read_text()),
+    ]
+)
+whir_challenge_stmts = extract_public_theorem_statements(
+    [code((root / "aeneas/lean-whir/QsagWhirVerifiedChallenge.lean").read_text())]
+)
+whir_comparator = json.loads((root / "aeneas/lean-whir/comparator.json").read_text())
+whir_comparator_short = {
+    name.removeprefix("qsag_whir_verified.proofs.")
+    for name in whir_comparator["theorem_names"]
+}
+whir_audit_src = code((root / "aeneas/lean-whir/AuditWhirMirAxioms.lean").read_text())
+whir_anchored_short = set(
+    re.findall(r"``qsag_whir_verified\.proofs\.([A-Za-z0-9_'.]+)", whir_audit_src)
+)
+
+# Negative controls for the `Funs.lean` symbol-coverage gate.
+if not whir_funs_defs or whir_uncovered_symbols(whir_funs_defs, {}) != sorted(whir_funs_defs):
+    raise RuntimeError("WHIR Funs.lean empty-theorem coverage negative control unexpectedly passed")
+if "checked_quorum_sum" not in whir_uncovered_symbols(
+    whir_funs_defs,
+    {
+        k: v
+        for k, v in whir_proof_stmts.items()
+        if "checked_quorum_sum" not in v and "qsag_whir_verified.checked_quorum_sum" not in v
+    },
+):
+    raise RuntimeError("WHIR Funs.lean dropped-symbol negative control unexpectedly passed")
+
+for sym in whir_uncovered_symbols(whir_funs_defs, whir_proof_stmts):
+    errors.append(
+        f"aeneas/lean-whir/QsagWhirVerified/Funs.lean: symbol `{sym}` uncovered by non-tooth theorem in Arithmetic.lean/Proofs.lean"
+    )
+for sym in whir_uncovered_symbols(
+    whir_funs_defs, whir_challenge_stmts, allowed_theorems=whir_comparator_short & whir_anchored_short
+):
+    errors.append(
+        f"aeneas/lean-whir/QsagWhirVerifiedChallenge.lean: symbol `{sym}` uncovered by replayed & anchored non-tooth theorem"
+    )
+for missing_in_comparator in sorted(set(whir_challenge_stmts) - whir_comparator_short):
+    errors.append(
+        f"aeneas/lean-whir/comparator.json: missing challenge theorem `{missing_in_comparator}`"
+    )
+for missing_in_challenge in sorted(whir_comparator_short - set(whir_challenge_stmts)):
+    errors.append(
+        f"aeneas/lean-whir/QsagWhirVerifiedChallenge.lean: missing comparator theorem `{missing_in_challenge}`"
+    )
+for unanchored in sorted(whir_comparator_short - whir_anchored_short):
+    errors.append(
+        f"aeneas/lean-whir/AuditWhirMirAxioms.lean: comparator theorem `{unanchored}` missing from requiredWhirMirTheorems"
+    )
+
 print(
     "\n".join(errors)
     if errors
-    else f"PASS: {len(files)} library/support/challenge source files; no forbidden proof escapes; expose limit 12"
+    else (
+        f"PASS: {len(files)} library/support/challenge source files; no forbidden proof escapes; "
+        f"expose limit 12; {len(whir_funs_defs)}/{len(whir_funs_defs)} WHIR Funs.lean definitions covered"
+    )
 )
 raise SystemExit(bool(errors))
