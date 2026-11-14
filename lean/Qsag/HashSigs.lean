@@ -2334,20 +2334,16 @@ theorem PqHashParams.productionWellFormed_w_ell1 (p : PqHashParams)
     (p.w = 2 ∧ p.ell1 = 256) ∨ (p.w = 4 ∧ p.ell1 = 128) ∨
     (p.w = 16 ∧ p.ell1 = 64) ∨ (p.w = 256 ∧ p.ell1 = 32) := by
   rw [PqHashParams.productionWellFormed_eq] at h
-  simp only [Bool.and_eq_true, decide_eq_true_eq] at h
-  rcases h with ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨_, h2⟩, h256⟩, hPow⟩, hBits⟩, _⟩, _⟩, _⟩, _⟩, _⟩, _⟩, _⟩, _⟩
+  simp only [Bool.and_eq_true, decide_eq_true_eq, and_assoc] at h
+  rcases h with ⟨_, h2, h256, hPow, hBits, _, _, _, _, _, _, _, _⟩
   have hLgLe8 : Nat.log2 p.w ≤ 8 := by
     by_contra hGt
     have hGe9 : 9 ≤ Nat.log2 p.w := by omega
     have hPow9 : 2 ^ 9 ≤ 2 ^ Nat.log2 p.w := Nat.pow_le_pow_right (by decide) hGe9
     rw [hPow] at hPow9
     omega
-  have hLgGe1 : 1 ≤ Nat.log2 p.w := by
-    cases hLg : Nat.log2 p.w with
-    | zero => rw [hLg] at hPow; omega
-    | succ _ => omega
   match hLg : Nat.log2 p.w with
-  | 0 => omega
+  | 0 => rw [hLg] at hPow; omega
   | 1 => rw [hLg] at hPow; exact .inl ⟨hPow.symm, by omega⟩
   | 2 => rw [hLg] at hPow; exact .inr (.inl ⟨hPow.symm, by omega⟩)
   | 3 => omega
@@ -2368,10 +2364,10 @@ theorem PqHashParams.productionWellFormed_facts (p : PqHashParams)
     p.ell1 ≤ 32 * (8 / Nat.log2 p.w) ∧ p.numLayers ≤ 62 := by
   have hCases := p.productionWellFormed_w_ell1 h
   rw [PqHashParams.productionWellFormed_eq] at h
-  simp only [Bool.and_eq_true, decide_eq_true_eq] at h
-  rcases h with ⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨⟨hD, h2⟩, h256⟩, hPow⟩, hBits⟩, hSubPos⟩, hSubLe⟩, hForsLe⟩, hTotPos⟩, hTotLe⟩, hMaxPos⟩, hMaxLe⟩, _⟩
+  simp only [Bool.and_eq_true, decide_eq_true_eq, and_assoc] at h
+  rcases h with ⟨hD, h2, h256, hPow, hBits, hSubPos, hSubLe, hForsLe, hTotPos, hTotLe, hMaxPos, hMaxLe, _⟩
   have hEll32 : p.ell1 ≤ 32 * (8 / Nat.log2 p.w) := by
-    rcases hCases with ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ | ⟨rfl, rfl⟩ <;> decide
+    rcases hCases with ⟨hw, hell⟩ | ⟨hw, hell⟩ | ⟨hw, hell⟩ | ⟨hw, hell⟩ <;> (rw [hw, hell]; decide)
   have hDLe62 : p.numLayers ≤ 62 := by
     have hMul : p.numLayers * 1 ≤ p.numLayers * p.subtreeHeight :=
       Nat.mul_le_mul_left p.numLayers hSubPos
@@ -2787,7 +2783,7 @@ theorem recoverProductionForsPk_buildProductionForsOpenings
                      (forsIndexedLeafFn suite sk tree0 kp0 j) params.forsHeight j 0 idxJ : ForsTreeOpening }
   have hOpsLen : ops.length = params.forsTrees := by simp [ops]
   change (if ops.length ≠ params.forsTrees || idxs.length ≠ params.forsTrees then none else _) = _
-  simp only [hOpsLen, hLen, ne_eq, not_true_eq_false, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
+  simp only [hOpsLen, hLen, ne_eq, not_true_eq_false, Bool.or_self]
   have hCollect : ∀ (rem j : Nat), j + rem = params.forsTrees →
       recoverProductionForsTreeRoots suite params sk.pkSeed tree0 kp0 idxs ops j rem =
       some ((List.range rem).map fun off =>
@@ -3055,7 +3051,7 @@ private theorem grindRes_production_sound (suite : TweakableHashSuite) (params :
     simp only [hCond, ↓reduceIte]
     exact grindTswLeafCounterAux_sound h
   · rename_i hCond
-    simp only [hCond, ↓reduceIte]
+    simp only [hCond]
     exact grindTswInternalCounterAux_sound h
 
 theorem signProductionHypertreeLayers_sound
@@ -3094,7 +3090,6 @@ theorem signProductionHypertreeLayers_sound
       refine ⟨rfl, ?_⟩
       rw [verifyProductionHypertreeLayers_cons]
       simp only [hCtrLt, decide_true, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-      dsimp only
       rw [← hMsgEq, hExt]
       dsimp only
       have hChainsLen : ((List.range params.ell1).map fun r =>
@@ -3159,7 +3154,6 @@ theorem signProductionHypertreeLayers_sound
         refine ⟨by simp [hRestLen], ?_⟩
         rw [verifyProductionHypertreeLayers_cons]
         simp only [hCtrLt, decide_true, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-        dsimp only
         rw [← hMsgEq, hExt]
         dsimp only
         have hChainsLen : ((List.range params.ell1).map fun r =>
@@ -3329,43 +3323,72 @@ theorem evalProductionStatefulSign_eq (suite : TweakableHashSuite) (params : PqH
         let rRand := thPrfMsg suite sk.skPrf optRand mu
         signProductionHypertreeCore suite params sk pk msg mu rRand epoch none maxGrind := by rfl
 
+private theorem signProductionHypertreeCore_verifies
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (pk : PqPublicKey) (msg mu rRand : List UInt8)
+    (leafGlobalIdx : Nat) (forsIdxs : Option (List Nat)) (maxGrind : Nat) (sig : PqHashSig)
+    (h : signProductionHypertreeCore suite params sk pk msg mu rRand leafGlobalIdx forsIdxs maxGrind = some sig) :
+    verifyProductionPqHashSig suite params pk msg sig = true := by
+  unfold signProductionHypertreeCore at h
+  dsimp only at h
+  cases hInit : (if params.statefulJorts then some ([], mu)
+      else match forsIdxs with
+      | none => none
+      | some idxs =>
+        let kp0 := leafGlobalIdx % (2 ^ params.subtreeHeight)
+        let tree0 := UInt64.ofNat (leafGlobalIdx / (2 ^ params.subtreeHeight))
+        some (buildProductionForsOpenings suite params sk tree0 kp0 idxs,
+              computeProductionForsPk suite params sk tree0 kp0)) with
+  | none => rw [hInit] at h; cases h
+  | some pair =>
+    rcases pair with ⟨forsOpenings, curRoot⟩
+    rw [hInit] at h
+    dsimp only at h
+    cases hLayers : signProductionHypertreeLayers suite params sk pk.pkRoot rRand maxGrind 0 leafGlobalIdx curRoot params.numLayers with
+    | none => rw [hLayers] at h; cases h
+    | some layerSigs =>
+      rw [hLayers] at h
+      dsimp only at h
+      cases hVer : verifyProductionPqHashSig suite params pk msg
+          { rRand := rRand, msgTswCtr := 0, leafGlobalIdx := leafGlobalIdx,
+            forsOpenings := forsOpenings, layerSigs := layerSigs } with
+      | false => rw [hVer] at h; simp at h
+      | true =>
+        rw [hVer] at h
+        simp only [↓reduceIte, Option.some.injEq] at h
+        subst h
+        exact hVer
+
 theorem verifyProductionPqHashSig_evalProductionStatelessSign
     (suite : TweakableHashSuite) (params : PqHashParams)
     (sk : PqSecretKey) (msg optRand : List UInt8) (maxGrind : Nat) (sig : PqHashSig)
     (hSign : evalProductionStatelessSign suite params sk msg optRand maxGrind = some sig) :
     verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msg sig = true := by
-  unfold evalProductionStatelessSign signProductionHypertreeCore at hSign
-  split at hSign
-  · cases hSign
-  · split at hSign
-    · cases hSign
-    · dsimp only at hSign
-      split at hSign
-      · cases hSign
-      · split at hSign
-        · cases hSign
-        · rename_i hVer
-          simp only [Option.some.injEq] at hSign
-          subst hSign
-          exact hVer
+  rw [evalProductionStatelessSign_eq] at hSign
+  by_cases hBad : (params.statefulJorts || !params.productionWellFormed) = true
+  · simp [hBad] at hSign
+  · simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hSign
+    cases hD : deriveProductionStatelessInputs suite params
+        (thPrfMsg suite sk.skPrf optRand
+          (thPreHash suite (derivePublicKey suite params sk).pkSeed (derivePublicKey suite params sk).pkRoot msg))
+        (derivePublicKey suite params sk).pkSeed (derivePublicKey suite params sk).pkRoot
+        (thPreHash suite (derivePublicKey suite params sk).pkSeed (derivePublicKey suite params sk).pkRoot msg) with
+    | none => rw [hD] at hSign; cases hSign
+    | some pr =>
+      rcases pr with ⟨leafGlobalIdx, forsIdxs⟩
+      rw [hD] at hSign
+      exact signProductionHypertreeCore_verifies _ _ _ _ _ _ _ _ _ _ _ hSign
 
 theorem verifyProductionPqHashSig_evalProductionStatefulSign
     (suite : TweakableHashSuite) (params : PqHashParams)
     (sk : PqSecretKey) (msg optRand : List UInt8) (epoch maxGrind : Nat) (sig : PqHashSig)
     (hSign : evalProductionStatefulSign suite params sk msg optRand epoch maxGrind = some sig) :
     verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msg sig = true := by
-  unfold evalProductionStatefulSign signProductionHypertreeCore at hSign
-  split at hSign
-  · cases hSign
-  · dsimp only at hSign
-    split at hSign
-    · cases hSign
-    · split at hSign
-      · cases hSign
-      · rename_i hVer
-        simp only [Option.some.injEq] at hSign
-        subst hSign
-        exact hVer
+  rw [evalProductionStatefulSign_eq] at hSign
+  by_cases hBad : (!params.statefulJorts || !params.productionWellFormed || !params.productionLeafIdxInRange epoch) = true
+  · simp [hBad] at hSign
+  · simp only [hBad, Bool.false_eq_true, ↓reduceIte] at hSign
+    exact signProductionHypertreeCore_verifies _ _ _ _ _ _ _ _ _ _ _ hSign
 
 /-- Non-vacuity / constructive completeness of the production verifier on honest layer signatures
     (proves `signProductionHypertreeCore`'s self-check always succeeds whenever `signProductionHypertreeLayers`
@@ -3394,28 +3417,6 @@ theorem signProductionHypertreeCore_stateless_complete
   have hRange : params.productionLeafIdxInRange leaf = true := by
     rw [PqHashParams.productionLeafIdxInRange_eq]
     simp [hSt, hLeafLt]
-  have hIgnRand : ∀ (r1 r2 : List UInt8) (rem l g : Nat) (cur : List UInt8),
-      verifyProductionHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot r1 l g cur layerSigs =
-      verifyProductionHypertreeLayers suite params sk.pkSeed (derivePublicKey suite params sk).pkRoot r2 l g cur layerSigs := by
-    intro r1 r2 rem l g cur
-    clear hLayers
-    induction layerSigs generalizing l g cur with
-    | nil => rfl
-    | cons ls rest ih =>
-      simp only [verifyProductionHypertreeLayers_cons, productionLayerDigest_eq, hSt, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
-      cases decide (ls.tswCtr < 2 ^ 32)
-      · rfl
-      · dsimp only [Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-        cases extractBaseWDigitsChecked params.w params.ell1 _
-        · rfl
-        · dsimp only
-          split
-          · rfl
-          · split
-            · rfl
-            · cases walkMerkleAuthPathKp _ _ _ _ _ _ _ _ _ _ _
-              · rfl
-              · exact ih _ _ _
   obtain ⟨hLsLen, hLsVer⟩ := signProductionHypertreeLayers_sound suite params sk
     (derivePublicKey suite params sk).pkRoot
     (thPrfMsg suite sk.skPrf optRand
@@ -3427,7 +3428,6 @@ theorem signProductionHypertreeCore_stateless_complete
   unfold evalProductionStatelessSign signProductionHypertreeCore
   have hSeed : (derivePublicKey suite params sk).pkSeed = sk.pkSeed := rfl
   simp only [hSt, hWf, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte, hSeed, hD, hLayers]
-  dsimp only
   have hVer : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msg
       { rRand := thPrfMsg suite sk.skPrf optRand
           (thPreHash suite sk.pkSeed (derivePublicKey suite params sk).pkRoot msg)
@@ -3473,7 +3473,6 @@ theorem production_stateless_leaf_reuse_identical_wots_chains
       intro l g cur
       rw [signProductionHypertreeLayers_succ, signProductionHypertreeLayers_succ]
       simp only [hStateless, Bool.false_and, Bool.false_eq_true, ↓reduceIte]
-      dsimp only
       cases grindTswInternalCounterAux suite params.w params.ell1 params.targetSum sk.pkSeed pkRoot cur
           (UInt32.ofNat l) (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
           (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) 0 maxGrind with
@@ -3482,41 +3481,57 @@ theorem production_stateless_leaf_reuse_identical_wots_chains
         rcases tr with ⟨ctr, dg, hm⟩
         dsimp only
         rw [ih]
-  unfold evalProductionStatelessSign signProductionHypertreeCore at hSign₁ hSign₂
-  cases hWf : params.productionWellFormed
-  · simp [hStateless, hWf] at hSign₁
-  · simp only [hStateless, hWf, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at hSign₁ hSign₂
-    split at hSign₁
-    · cases hSign₁
-    · rename_i leaf1 idxs1 _
-      split at hSign₂
-      · cases hSign₂
-      · rename_i leaf2 idxs2 _
-        dsimp only at hSign₁ hSign₂
-        split at hSign₁
-        · cases hSign₁
-        · rename_i ls1 hLs1
-          split at hSign₁
-          · rename_i hV1
-            simp only [Option.some.injEq] at hSign₁
-            split at hSign₂
-            · cases hSign₂
-            · rename_i ls2 hLs2
-              split at hSign₂
-              · simp only [Option.some.injEq] at hSign₂
-                have hLeafEq : leaf1 = leaf2 := by
-                  have h1 : sig₁.leafGlobalIdx = leaf1 := by rw [← hSign₁]
-                  have h2 : sig₂.leafGlobalIdx = leaf2 := by rw [← hSign₂]
-                  omega
-                subst hLeafEq
-                rw [hNoRand _
-                    (thPrfMsg suite sk.skPrf optRand₂
-                      (thPreHash suite (derivePublicKey suite params sk).pkSeed
-                        (derivePublicKey suite params sk).pkRoot msg₂))] at hLs1
-                have hLsEq : ls1 = ls2 := Option.some.inj (hLs1.symm.trans hLs2)
-                rw [← hSign₁, ← hSign₂, hLsEq]
-              · cases hSign₂
-          · cases hSign₁
+  have hUnpack : ∀ (msg optRand : List UInt8) (sig : PqHashSig),
+      evalProductionStatelessSign suite params sk msg optRand maxGrind = some sig →
+      signProductionHypertreeLayers suite params sk (derivePublicKey suite params sk).pkRoot
+        (thPrfMsg suite sk.skPrf optRand
+          (thPreHash suite (derivePublicKey suite params sk).pkSeed (derivePublicKey suite params sk).pkRoot msg))
+        maxGrind 0 sig.leafGlobalIdx
+        (computeProductionForsPk suite params sk
+          (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ params.subtreeHeight))
+          (sig.leafGlobalIdx % 2 ^ params.subtreeHeight))
+        params.numLayers = some sig.layerSigs := by
+    intro msg optRand sig hS
+    rw [evalProductionStatelessSign_eq] at hS
+    cases hWf : params.productionWellFormed
+    · simp [hStateless, hWf] at hS
+    · simp only [hStateless, hWf, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at hS
+      cases hD : deriveProductionStatelessInputs suite params
+          (thPrfMsg suite sk.skPrf optRand
+            (thPreHash suite (derivePublicKey suite params sk).pkSeed (derivePublicKey suite params sk).pkRoot msg))
+          (derivePublicKey suite params sk).pkSeed (derivePublicKey suite params sk).pkRoot
+          (thPreHash suite (derivePublicKey suite params sk).pkSeed (derivePublicKey suite params sk).pkRoot msg) with
+      | none => rw [hD] at hS; cases hS
+      | some pr =>
+        rcases pr with ⟨leaf, idxs⟩
+        rw [hD] at hS
+        unfold signProductionHypertreeCore at hS
+        simp only [hStateless, Bool.false_eq_true, ↓reduceIte] at hS
+        cases hLs : signProductionHypertreeLayers suite params sk (derivePublicKey suite params sk).pkRoot
+            (thPrfMsg suite sk.skPrf optRand
+              (thPreHash suite (derivePublicKey suite params sk).pkSeed (derivePublicKey suite params sk).pkRoot msg))
+            maxGrind 0 leaf
+            (computeProductionForsPk suite params sk
+              (UInt64.ofNat (leaf / 2 ^ params.subtreeHeight)) (leaf % 2 ^ params.subtreeHeight))
+            params.numLayers with
+        | none => rw [hLs] at hS; cases hS
+        | some ls =>
+          rw [hLs] at hS
+          dsimp only at hS
+          cases hV : verifyProductionPqHashSig suite params (derivePublicKey suite params sk) msg _ with
+          | false => rw [hV] at hS; simp at hS
+          | true =>
+            rw [hV] at hS
+            simp only [↓reduceIte, Option.some.injEq] at hS
+            subst hS
+            exact hLs
+  have h1 := hUnpack msg₁ optRand₁ sig₁ hSign₁
+  have h2 := hUnpack msg₂ optRand₂ sig₂ hSign₂
+  rw [hSameLeaf, hNoRand _
+      (thPrfMsg suite sk.skPrf optRand₂
+        (thPreHash suite (derivePublicKey suite params sk).pkSeed
+          (derivePublicKey suite params sk).pkRoot msg₂))] at h1
+  exact Option.some.inj (h1.symm.trans h2)
 
 /-- `#tooth`: Relocating a stateless signature to a leaf other than the XOF-derived `derivedLeafIdx`
     is unconditionally rejected by `verifyProductionPqHashSig`. -/
@@ -3560,7 +3575,7 @@ theorem tooth_production_fors_merkle_binds_kp0
   have hAdrs := (thPreimage_injective hEq).2.2.1
   have hKpEq : (UInt32.ofNat kp₁).toNat = (UInt32.ofNat kp₂).toNat :=
     congrArg UInt32.toNat (congrArg HashAdrs.keyPair hAdrs)
-  rw [UInt32.toNat_ofNat_of_lt hKp1, UInt32.toNat_ofNat_of_lt hKp2] at hKpEq
+  simp only [UInt32.toNat_ofNat', Nat.mod_eq_of_lt hKp1, Nat.mod_eq_of_lt hKp2] at hKpEq
   exact hNe hKpEq
 
 /-! ### Production Fixed-Layout Wire Serialization (`PqHashSig::to_wire_bytes` / `from_wire_bytes`) -/
@@ -3703,14 +3718,14 @@ private theorem parseForsOpeningsWire_encode (forsHeight : Nat) :
       (∀ op ∈ ops, op.secretVal.length = 32 ∧ op.authPath.length = forsHeight ∧ ∀ s ∈ op.authPath, s.length = 32) →
       (encodeForsOpeningsWire ops).length = ops.length * (32 + forsHeight * 32) ∧
       parseForsOpeningsWire ops.length forsHeight (encodeForsOpeningsWire ops ++ tail) = some (ops, tail)
-  | [], tail, _ => ⟨rfl, rfl⟩
+  | [], tail, _ => ⟨by simp [encodeForsOpeningsWire], rfl⟩
   | op :: rest, tail, hAll => by
     obtain ⟨hSec, hPLen, hP32⟩ := hAll op List.mem_cons_self
     obtain ⟨hRestLen, hRestParse⟩ := parseForsOpeningsWire_encode forsHeight rest tail
       (fun x hx => hAll x (List.mem_cons_of_mem op hx))
     refine ⟨?_, ?_⟩
     · simp only [encodeForsOpeningsWire, List.length_append, hSec, flatten_chunks32_len op.authPath hP32,
-        hPLen, hRestLen, List.length_cons]
+        hPLen, hRestLen, List.length_cons, Nat.succ_mul]
       omega
     · simp only [List.length_cons, encodeForsOpeningsWire, List.append_assoc, parseForsOpeningsWire]
       have hNotLt : ¬ ((op.secretVal ++ (op.authPath.flatten ++ (encodeForsOpeningsWire rest ++ tail))).length < 32) := by
@@ -3726,7 +3741,7 @@ private theorem parseLayerSigsWire_encode (ell1 subtreeHeight : Nat) :
         ls.authPath.length = subtreeHeight ∧ (∀ s ∈ ls.authPath, s.length = 32)) →
       (encodeLayerSigsWire lsigs).length = lsigs.length * (4 + ell1 * 32 + subtreeHeight * 32) ∧
       parseLayerSigsWire lsigs.length ell1 subtreeHeight (encodeLayerSigsWire lsigs ++ tail) = some (lsigs, tail)
-  | [], tail, _ => ⟨rfl, rfl⟩
+  | [], tail, _ => ⟨by simp [encodeLayerSigsWire], rfl⟩
   | ls :: rest, tail, hAll => by
     obtain ⟨hCtr, hCLen, hC32, hPLen, hP32⟩ := hAll ls List.mem_cons_self
     obtain ⟨hRestLen, hRestParse⟩ := parseLayerSigsWire_encode ell1 subtreeHeight rest tail
@@ -3735,7 +3750,7 @@ private theorem parseLayerSigsWire_encode (ell1 subtreeHeight : Nat) :
     refine ⟨?_, ?_⟩
     · simp only [encodeLayerSigsWire, List.length_append, hBe4Len,
         flatten_chunks32_len ls.wotsChains hC32, hCLen,
-        flatten_chunks32_len ls.authPath hP32, hPLen, hRestLen, List.length_cons]
+        flatten_chunks32_len ls.authPath hP32, hPLen, hRestLen, List.length_cons, Nat.succ_mul]
       omega
     · simp only [List.length_cons, encodeLayerSigsWire, List.append_assoc, parseLayerSigsWire]
       have hNotLt : ¬ ((be 4 ls.tswCtr ++ (ls.wotsChains.flatten ++ (ls.authPath.flatten ++ (encodeLayerSigsWire rest ++ tail)))).length < 4) := by
@@ -3764,29 +3779,21 @@ theorem decodeProductionSigWire_encodeProductionSigWire
   · cases hRange : params.productionLeafIdxInRange sig.leafGlobalIdx
     · simp [hWf, hRange] at hEnc
     · simp only [hWf, hRange, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at hEnc
-      split at hEnc
-      · cases hEnc
-      · rename_i hLsLenNe
-        have hLsLen : sig.layerSigs.length = params.numLayers := Decidable.of_not_not hLsLenNe
-        split at hEnc
-        · cases hEnc
-        · rename_i hHdrBad
+      by_cases hLsLen : sig.layerSigs.length = params.numLayers
+      · simp only [hLsLen, ne_eq, not_true_eq_false, ↓reduceIte] at hEnc
+        by_cases hHdrBad : (decide (sig.rRand.length ≠ 32) || decide (sig.msgTswCtr ≠ 0)) = true
+        · simp [hHdrBad] at hEnc
+        · simp only [hHdrBad, Bool.false_eq_true, ↓reduceIte] at hEnc
           simp only [Bool.or_eq_true, decide_eq_true_eq, not_or, Decidable.not_not] at hHdrBad
           obtain ⟨hRLen, hCtr0⟩ := hHdrBad
-          split at hEnc
-          · cases hEnc
-          · rename_i hForsOkB
-            simp only [Bool.not_eq_true'] at hForsOkB
-            have hForsOk : (if params.statefulJorts then sig.forsOpenings.isEmpty
-                else decide (sig.forsOpenings.length = params.forsTrees) &&
-                     sig.forsOpenings.all (checkForsOpeningFraming params)) = true :=
-              Bool.not_eq_false.mp hForsOkB
-            split at hEnc
-            · cases hEnc
-            · rename_i hLayersOkB
-              have hLayersOk : (sig.layerSigs.all (fun ls => decide (ls.tswCtr < 2 ^ 32) && checkLayerSigFraming params ls)) = true :=
-                Bool.not_eq_false.mp hLayersOkB
-              simp only [Except.ok.injEq] at hEnc
+          cases hForsOk : (if params.statefulJorts then sig.forsOpenings.isEmpty
+              else decide (sig.forsOpenings.length = params.forsTrees) &&
+                   sig.forsOpenings.all (checkForsOpeningFraming params))
+          · simp [hForsOk] at hEnc
+          · simp only [hForsOk, Bool.not_true, Bool.false_eq_true, ↓reduceIte] at hEnc
+            cases hLayersOk : sig.layerSigs.all (fun ls => decide (ls.tswCtr < 2 ^ 32) && checkLayerSigFraming params ls)
+            · simp [hLayersOk] at hEnc
+            · simp only [hLayersOk, Bool.not_true, Bool.false_eq_true, ↓reduceIte, Except.ok.injEq] at hEnc
               subst hEnc
               have hForsProps :
                   sig.forsOpenings.length = (if params.statefulJorts then 0 else params.forsTrees) ∧
@@ -3887,6 +3894,7 @@ theorem decodeProductionSigWire_encodeProductionSigWire
               rw [← hLsLen, hLayerParse]
               simp only [List.isEmpty_nil, Bool.not_true, Bool.false_eq_true, ↓reduceIte, Except.ok.injEq]
               cases sig; dsimp only at hCtr0 ⊢; subst hCtr0; rfl
+      · simp [hLsLen] at hEnc
 
 end Qsag
 end

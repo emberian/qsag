@@ -3353,10 +3353,11 @@ theorem short_monomial_witness_recovers_secret_or_breaks_short_sis {R nu q : Nat
       have hx2 : X2 k = ModZq.ofInt q x2 := (ModZq.ofInt_natVal (X2 k)).symm
       have hy1 : Y1 k = ModZq.ofInt q y1 := (ModZq.ofInt_natVal (Y1 k)).symm
       have hy2 : Y2 k = ModZq.ofInt q y2 := (ModZq.ofInt_natVal (Y2 k)).symm
+      have hIntEq : (x1 - y1) + (x2 - y2) = (x1 + x2) - (y1 + y2) := by omega
       unfold cycZqAdd cycZqSub
       rw [hx1, hx2, hy1, hy2]
       simp only [← ModZq.ofInt_add, ← ModZq.ofInt_sub]
-      exact congrArg (ModZq.ofInt q) (by omega)
+      exact congrArg (ModZq.ofInt q) hIntEq
     rw [hSubReorder, w.short_relaxed_rlwe_mod_q, hAMul, ← cycZqMul_left_distrib,
         hKeyEq, cycZqSub_self]
   by_cases hBothZ : cycZqEq (cycIntToZq q sSis) cycZqZero = true ∧
@@ -4225,75 +4226,27 @@ theorem tooth_two_term_no_inverse_12289 (inv : CycPolyZq 10 12289) :
       (cycIntAdd (signedMonomial 10 false ⟨2, by decide⟩) (signedMonomial 10 false ⟨513, by decide⟩)))) inv ≠ cycZqOne :=
   tooth_two_term_challenge_difference_zero_divisor_12289.2.2 inv
 
-def sampleUnforkedChal13 : Fin 13 → SignedMonomialChal 10 :=
-  fun _ => ⟨false, ⟨0, by decide⟩⟩
-
-def sampleUnforkedTranscript13 : RlweOrSigmaTranscript 13 10 12289 :=
-  buildHonestRlweOrSigmaTranscript 13 10 12289 sampleRlweOrSigmaStmt1024 false
-    sampleCyc1024SecretS sampleCyc1024SecretE
-    (fun _ => sampleCyc1024MaskY) (fun _ => sampleCyc1024MaskY)
-    (fun _ => ⟨true, ⟨3, by decide⟩⟩)
-    (fun _ => sampleCyc1024MaskY) (fun _ => sampleCyc1024MaskY)
-    sampleUnforkedChal13
-
-theorem tooth_short_extractor_refuses_identical_challenges
-    (w : ShortMonomialRelaxedRlweWitness 13 10 12289 sampleRlweOrSigmaStmt1024) :
-    tryExtractShortMonomialOr13Witness sampleRlweOrSigmaStmt1024
-      sampleUnforkedChal13 sampleUnforkedChal13
-      sampleUnforkedTranscript13 sampleUnforkedTranscript13 ≠ PSum.inl w := by
-  have hSafe : ∀ _ : Fin 13, cycIntInfNorm sampleCyc1024MaskY + cycIntInfNorm sampleCyc1024SecretS ≤
-      sampleRlweOrSigmaStmt1024.Bz := by
-    intro _
-    have hY : cycIntInfNorm sampleCyc1024MaskY ≤ 1 := by
-      rw [cycIntInfNorm_le_iff]; intro k
-      unfold sampleCyc1024MaskY signedMonomial negacyclicSignedMonomial signBitToInt
-      split <;> decide
-    have hS : cycIntInfNorm sampleCyc1024SecretS ≤ 1 := by
-      rw [cycIntInfNorm_le_iff]; intro k
-      unfold sampleCyc1024SecretS signedMonomial negacyclicSignedMonomial signBitToInt
-      split <;> decide
-    dsimp [sampleRlweOrSigmaStmt1024, rlweProductionBz]; omega
-  have hSafeE : ∀ _ : Fin 13, cycIntInfNorm sampleCyc1024MaskY + cycIntInfNorm sampleCyc1024SecretE ≤
-      sampleRlweOrSigmaStmt1024.Bz := by
-    intro _
-    have hY : cycIntInfNorm sampleCyc1024MaskY ≤ 1 := by
-      rw [cycIntInfNorm_le_iff]; intro k
-      unfold sampleCyc1024MaskY signedMonomial negacyclicSignedMonomial signBitToInt
-      split <;> decide
-    have hE : cycIntInfNorm sampleCyc1024SecretE ≤ 1 := by
-      rw [cycIntInfNorm_le_iff]; intro k
-      unfold sampleCyc1024SecretE signedMonomial negacyclicSignedMonomial signBitToInt
-      split <;> decide
-    dsimp [sampleRlweOrSigmaStmt1024, rlweProductionBz]; omega
-  have hFake : ∀ _ : Fin 13, cycIntInfNorm sampleCyc1024MaskY ≤ sampleRlweOrSigmaStmt1024.Bz := by
-    intro _
-    have hY : cycIntInfNorm sampleCyc1024MaskY ≤ 1 := by
-      rw [cycIntInfNorm_le_iff]; intro k
-      unfold sampleCyc1024MaskY signedMonomial negacyclicSignedMonomial signBitToInt
-      split <;> decide
-    dsimp [sampleRlweOrSigmaStmt1024, rlweProductionBz]; omega
-  have hAcc : verifyRlweOrSigma 13 10 12289 sampleRlweOrSigmaStmt1024
-      sampleUnforkedChal13 sampleUnforkedTranscript13 = true :=
-    buildHonestRlweOrSigmaTranscript_accepts sampleRlweOrSigmaStmt1024 false
-      sampleCyc1024SecretS sampleCyc1024SecretE
-      (fun _ => sampleCyc1024MaskY) (fun _ => sampleCyc1024MaskY)
-      (fun _ => ⟨true, ⟨3, by decide⟩⟩)
-      (fun _ => sampleCyc1024MaskY) (fun _ => sampleCyc1024MaskY)
-      sampleUnforkedChal13 rfl hSafe hSafeE hFake hFake
-  have ht0Self : cycAllFin 13 (fun i => cycZqEq (sampleUnforkedTranscript13.t0 i) (sampleUnforkedTranscript13.t0 i)) = true := by
-    rw [cycAllFin_eq_true_iff]; intro i; exact (cycZqEq_iff _ _).mpr rfl
-  have ht1Self : cycAllFin 13 (fun i => cycZqEq (sampleUnforkedTranscript13.t1 i) (sampleUnforkedTranscript13.t1 i)) = true := by
-    rw [cycAllFin_eq_true_iff]; intro i; exact (cycZqEq_iff _ _).mpr rfl
-  have hcTrue : cycAllFin 13 (fun _ => true) = true := by decide
-  have hEq : tryExtractShortMonomialOr13Witness sampleRlweOrSigmaStmt1024
-      sampleUnforkedChal13 sampleUnforkedChal13
-      sampleUnforkedTranscript13 sampleUnforkedTranscript13 =
-      PSum.inr .identicalJointChallenges := by
-    unfold tryExtractShortMonomialOr13Witness
-    simp only [ht0Self, ht1Self, hAcc, decide_true, hcTrue, ↓reduceDIte]
-  rw [hEq]
-  intro hContra
-  cases hContra
+/-- **`#tooth` Unforked Challenge Vector Refused (`tooth_short_extractor_refuses_identical_challenges`)**:
+    Without a challenge fork (`c = c'`), `tryExtractShortMonomialOr13Witness` refuses to emit any
+    `ShortMonomialRelaxedRlweWitness` for every statement and transcript pair. -/
+theorem tooth_short_extractor_refuses_identical_challenges {nu q : Nat} [NeZero q]
+    (stmt : RlweOrSigmaStatement nu q)
+    (c : Fin 13 → SignedMonomialChal nu)
+    (tr tr' : RlweOrSigmaTranscript 13 nu q)
+    (w : ShortMonomialRelaxedRlweWitness 13 nu q stmt) :
+    tryExtractShortMonomialOr13Witness stmt c c tr tr' ≠ PSum.inl w := by
+  have hcEq : cycAllFin 13 (fun i => decide (c i = c i)) = true := by
+    rw [cycAllFin_eq_true_iff]; intro i; exact decide_eq_true rfl
+  unfold tryExtractShortMonomialOr13Witness
+  by_cases ht0 : cycAllFin 13 (fun i => cycZqEq (tr.t0 i) (tr'.t0 i)) = true
+  · by_cases ht1 : cycAllFin 13 (fun i => cycZqEq (tr.t1 i) (tr'.t1 i)) = true
+    · by_cases hAcc : verifyRlweOrSigma 13 nu q stmt c tr = true
+      · by_cases hAcc' : verifyRlweOrSigma 13 nu q stmt c tr' = true
+        · simp only [ht0, ht1, hAcc, hAcc', hcEq, ↓reduceDIte]; intro h; cases h
+        · simp only [ht0, ht1, hAcc, hAcc', ↓reduceDIte]; intro h; cases h
+      · simp only [ht0, ht1, hAcc, ↓reduceDIte]; intro h; cases h
+    · simp only [ht0, ht1, ↓reduceDIte]; intro h; cases h
+  · simp only [ht0, ↓reduceDIte]; intro h; cases h
 
 theorem witness_short_rlwe_key_relation_inhabited :
     ∃ (A u : CycPolyZq 10 12289) (sTrue eTrue : CycPolyInt 10),

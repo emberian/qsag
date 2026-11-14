@@ -20,7 +20,9 @@ Self-contained Lean 4.35 interactive Universal Composability execution engine (`
      random-tape bijections (`SimpleEquiv (Fin card) (Fin card)`).
    - `hybrid_multi_session_le`: Heterogeneous and homogeneous `Q_s`-session hybrid telescope.
    - `uc_transitive_composition`: Exact cross-cardinality rational statistical distance triangle
-     inequality (`rationalAcceptDiff` / `ratAdd`) + contextual calling-protocol UC composition.
+     inequality (`rationalAcceptDiff` / `ratAdd`) under a post-processing function of the
+     transcript. It is not an interactive composition theorem: sessions run sequentially to
+     completion and the outer context cannot interleave with them.
    - `forgery_count_transfer`: `Pr[win in real] ≤ Pr[win in ideal] + eps` for any Boolean event.
 4. **Signing-Oracle Locality (`IdealFunctionalityExec_oracle_congr`)**: for every simulator with a
    non-empty Round-3 message list, the ideal result is determined by the oracle's values on the
@@ -1117,17 +1119,19 @@ private theorem natAbsDiff_mul_right (x y k : Nat) :
       simp [hxy, hk0, hSub0]
     · simp [hxy, hEq, Nat.sub_mul]
 
-/-- Outer calling protocol context driving an inner interactive protocol execution and post-processing
-    its multi-session `ExecTranscript` into a higher-level view `OuterView`. -/
+/-- A post-processing function from the inner multi-session `ExecTranscript` to a higher-level
+    view `OuterView`. It reads a finished transcript; it cannot interact with a running execution
+    or interleave other sessions. -/
 structure OuterCallingContext (InnerView OuterView : Type) where
   postProcess : InnerView → OuterView
 
-/-- **Combinator 3: Transitive & Contextual UC Composition (`uc_transitive_composition`)**:
-    For ANY three interactive executions `(N₁, realExec)`, `(N₂, hybridExec)`, `(N₃, idealExec)`
-    (even over distinct finite random-tape cardinalities `N₁, N₂, N₃ > 0`!) and ANY outer calling
-    protocol `ctx : OuterCallingContext InnerView OuterView` and distinguisher `D : OuterView → Bool`:
+/-- **Combinator 3: triangle inequality under post-processing (`uc_transitive_composition`)**:
+    For any three executions `(N₁, realExec)`, `(N₂, hybridExec)`, `(N₃, idealExec)` (over possibly
+    distinct finite random-tape cardinalities `N₁, N₂, N₃ > 0`), any post-processing
+    `ctx : OuterCallingContext InnerView OuterView` and distinguisher `D : OuterView → Bool`:
     if `realExec ≈_{eps₁} hybridExec` and `hybridExec ≈_{eps₂} idealExec` under `D ∘ ctx.postProcess`,
-    then `realExec ≈_{ratAdd eps₁ eps₂} idealExec`! -/
+    then `realExec ≈_{ratAdd eps₁ eps₂} idealExec`. The name is historical; this is not a
+    composition theorem for interleaved protocol executions. -/
 theorem uc_transitive_composition {InnerView OuterView : Type}
     (N₁ N₂ N₃ : Nat) (hN₁ : 0 < N₁) (hN₂ : 0 < N₂) (hN₃ : 0 < N₃)
     (realExec : Fin N₁ → InnerView)

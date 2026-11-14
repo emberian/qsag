@@ -215,7 +215,8 @@ theorem stepX86_subImm32 (dst : Nat) (imm : UInt64) :
       ⟨off + len,
         g.set dst (maskGprWidth false (UInt64.ofNat (((maskGprWidth false (g.get dst)).toNat + 0x100000000 -
           (maskGprWidth false imm).toNat) % 0x100000000))), y,
-        decide ((maskGprWidth false (g.get dst)).toNat < (maskGprWidth false imm).toNat), o,
+        decide ((maskGprWidth false (g.get dst)).toNat < (maskGprWidth false imm).toNat),
+        evalX86AluOf .sub false (g.get dst) imm cf,
         maskGprWidth false (UInt64.ofNat (((maskGprWidth false (g.get dst)).toNat + 0x100000000 -
           (maskGprWidth false imm).toNat) % 0x100000000)) == 0, dy, false, m⟩ := by rfl
 
@@ -223,7 +224,8 @@ theorem stepX86_addRR64 (dst src : Nat) :
     (stepX86 ⟨off, len, .aluRegReg .add true dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
       ⟨off + len,
         g.set dst (UInt64.ofNat (((g.get dst).toNat + (g.get src).toNat) % 0x10000000000000000)), y,
-        decide ((g.get dst).toNat + (g.get src).toNat ≥ 0x10000000000000000), o,
+        decide ((g.get dst).toNat + (g.get src).toNat ≥ 0x10000000000000000),
+        evalX86AluOf .add true (g.get dst) (g.get src) cf,
         UInt64.ofNat (((g.get dst).toNat + (g.get src).toNat) % 0x10000000000000000) == 0,
         dy, false, m⟩ := by rfl
 
@@ -232,14 +234,16 @@ theorem stepX86_subRR64 (dst src : Nat) :
       ⟨off + len,
         g.set dst (UInt64.ofNat (((g.get dst).toNat + 0x10000000000000000 - (g.get src).toNat) %
           0x10000000000000000)), y,
-        decide ((g.get dst).toNat < (g.get src).toNat), o,
+        decide ((g.get dst).toNat < (g.get src).toNat),
+        evalX86AluOf .sub true (g.get dst) (g.get src) cf,
         UInt64.ofNat (((g.get dst).toNat + 0x10000000000000000 - (g.get src).toNat) %
           0x10000000000000000) == 0, dy, false, m⟩ := by rfl
 
 theorem stepX86_sbbRR (is64 : Bool) (dst src : Nat) :
     (stepX86 ⟨off, len, .aluRegReg .sbb is64 dst src⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
       ⟨off + len, g.set dst (evalX86Alu .sbb is64 (g.get dst) (g.get src) cf).1, y,
-        (evalX86Alu .sbb is64 (g.get dst) (g.get src) cf).2.1, o,
+        (evalX86Alu .sbb is64 (g.get dst) (g.get src) cf).2.1,
+        evalX86AluOf .sbb is64 (g.get dst) (g.get src) cf,
         (evalX86Alu .sbb is64 (g.get dst) (g.get src) cf).2.2, dy, false, m⟩ := by rfl
 
 theorem stepX86_andRR (is64 : Bool) (dst src : Nat) :
@@ -260,8 +264,10 @@ theorem stepX86_mulx (hiDst loDst src : Nat) :
 
 theorem stepX86_shl64 (dst cnt : Nat) :
     (stepX86 ⟨off, len, .shiftImm .shl true dst cnt⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨off + len, g.set dst (g.get dst <<< UInt64.ofNat (cnt % 64)), y, cf, o,
-        (if x86ShiftPreservesZf .shl true cnt then zf else g.get dst <<< UInt64.ofNat (cnt % 64) == 0),
+      ⟨off + len, g.set dst (evalX86Shift .shl true (g.get dst) cnt cf o zf).1, y,
+        (evalX86Shift .shl true (g.get dst) cnt cf o zf).2.1,
+        (evalX86Shift .shl true (g.get dst) cnt cf o zf).2.2.1,
+        (evalX86Shift .shl true (g.get dst) cnt cf o zf).2.2.2,
         dy, false, m⟩ := by rfl
 
 theorem stepX86_movRR (is64 : Bool) (dst src : Nat) :
@@ -271,31 +277,36 @@ theorem stepX86_movRR (is64 : Bool) (dst src : Nat) :
 theorem stepX86_neg (is64 : Bool) (dst : Nat) :
     (stepX86 ⟨off, len, .negReg is64 dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
       ⟨off + len, g.set dst (maskGprWidth is64 (0 - maskGprWidth is64 (g.get dst))), y,
-        maskGprWidth is64 (g.get dst) != 0, o,
+        maskGprWidth is64 (g.get dst) != 0,
+        maskGprWidth is64 (g.get dst) == (if is64 then 0x8000000000000000 else 0x80000000),
         maskGprWidth is64 (0 - maskGprWidth is64 (g.get dst)) == 0, dy, false, m⟩ := by rfl
 
 theorem stepX86_shr64 (dst cnt : Nat) :
     (stepX86 ⟨off, len, .shiftImm .shr true dst cnt⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨off + len, g.set dst (g.get dst >>> UInt64.ofNat (cnt % 64)), y, cf, o,
-        (if x86ShiftPreservesZf .shr true cnt then zf else g.get dst >>> UInt64.ofNat (cnt % 64) == 0),
+      ⟨off + len, g.set dst (evalX86Shift .shr true (g.get dst) cnt cf o zf).1, y,
+        (evalX86Shift .shr true (g.get dst) cnt cf o zf).2.1,
+        (evalX86Shift .shr true (g.get dst) cnt cf o zf).2.2.1,
+        (evalX86Shift .shr true (g.get dst) cnt cf o zf).2.2.2,
         dy, false, m⟩ := by rfl
 
 theorem stepX86_shr32 (dst cnt : Nat) :
     (stepX86 ⟨off, len, .shiftImm .shr false dst cnt⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨off + len,
-        g.set dst (maskGprWidth false (maskGprWidth false (g.get dst) >>> UInt64.ofNat (cnt % 32))), y, cf, o,
-        (if x86ShiftPreservesZf .shr false cnt then zf else
-          maskGprWidth false (maskGprWidth false (g.get dst) >>> UInt64.ofNat (cnt % 32)) == 0),
+      ⟨off + len, g.set dst (evalX86Shift .shr false (g.get dst) cnt cf o zf).1, y,
+        (evalX86Shift .shr false (g.get dst) cnt cf o zf).2.1,
+        (evalX86Shift .shr false (g.get dst) cnt cf o zf).2.2.1,
+        (evalX86Shift .shr false (g.get dst) cnt cf o zf).2.2.2,
         dy, false, m⟩ := by rfl
 
 theorem stepX86_inc (is64 : Bool) (dst : Nat) :
     (stepX86 ⟨off, len, .incDec true is64 dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨off + len, g.set dst (maskGprWidth is64 (maskGprWidth is64 (g.get dst) + 1)), y, cf, o,
+      ⟨off + len, g.set dst (maskGprWidth is64 (maskGprWidth is64 (g.get dst) + 1)), y, cf,
+        evalX86IncDecOf true is64 (g.get dst),
         maskGprWidth is64 (maskGprWidth is64 (g.get dst) + 1) == 0, dy, false, m⟩ := by rfl
 
 theorem stepX86_dec (is64 : Bool) (dst : Nat) :
     (stepX86 ⟨off, len, .incDec false is64 dst⟩ ⟨pc, g, y, cf, o, zf, dy, false, m⟩).1 =
-      ⟨off + len, g.set dst (maskGprWidth is64 (maskGprWidth is64 (g.get dst) + (0 - 1))), y, cf, o,
+      ⟨off + len, g.set dst (maskGprWidth is64 (maskGprWidth is64 (g.get dst) + (0 - 1))), y, cf,
+        evalX86IncDecOf false is64 (g.get dst),
         maskGprWidth is64 (maskGprWidth is64 (g.get dst) + (0 - 1)) == 0, dy, false, m⟩ := by rfl
 
 theorem stepX86_jnz (tgt : Int) :
@@ -975,46 +986,46 @@ theorem ctMemzeroX86_decodes :
   decide +kernel
 
 section MemzeroX86
-variable {r2 r3 r4 r5 r6 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64} {y : Bank16 Vec256} {cf o dy : Bool}
+variable {r2 r3 r4 r5 r6 r8 r9 r10 r11 r12 r13 r14 r15 : UInt64} {y : Bank16 Vec256} {cf dy : Bool}
 
 /-- One trip round the store loop (four instructions). -/
-theorem ctMemzeroX86_body (c p : UInt64) (zf : Bool) (m : UInt64 → UInt8) (fuel : Nat) :
+theorem ctMemzeroX86_body (c p : UInt64) (o zf : Bool) (m : UInt64 → UInt8) (fuel : Nat) :
     (runX86 ctMemzeroX86Prog (fuel + 4)
       ⟨5, ⟨0, c, r2, r3, r4, r5, r6, p, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
     (runX86 ctMemzeroX86Prog fuel
       ⟨jccPc (!(c - 1 == 0)) 5 15, ⟨0, c - 1, r2, r3, r4, r5, r6, p + 1, r8, r9, r10, r11, r12, r13, r14, r15⟩,
-        y, cf, o, c - 1 == 0, dy, false, writeMem8 m p 0⟩).1 := by
+        y, cf, evalX86IncDecOf false true c, c - 1 == 0, dy, false, writeMem8 m p 0⟩).1 := by
   iterate 4
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
     simp only [stepX86_store8, stepX86_inc, stepX86_dec, stepX86_jnz, maskGprWidth_true,
       u64_add_neg_one, u64_zero_toUInt8, UInt64.add_zero, b16get_0, b16get_1, b16get_7, b16set_1, b16set_7]
 
 /-- The whole loop, by induction on the remaining count. -/
-theorem ctMemzeroX86_loop (k : Nat) : ∀ (c p : UInt64) (zf : Bool) (m : UInt64 → UInt8) (fuel : Nat),
+theorem ctMemzeroX86_loop (k : Nat) : ∀ (c p : UInt64) (o zf : Bool) (m : UInt64 → UInt8) (fuel : Nat),
     c.toNat = k + 1 →
     (runX86 ctMemzeroX86Prog (4 * (k + 1) + fuel)
       ⟨5, ⟨0, c, r2, r3, r4, r5, r6, p, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
     (runX86 ctMemzeroX86Prog fuel
       ⟨15, ⟨0, 0, r2, r3, r4, r5, r6, p + UInt64.ofNat (k + 1), r8, r9, r10, r11, r12, r13, r14, r15⟩,
-        y, cf, o, true, dy, false, zeroRange (k + 1) m p⟩).1 := by
+        y, cf, false, true, dy, false, zeroRange (k + 1) m p⟩).1 := by
   induction k with
   | zero =>
-    intro c p zf m fuel hc
+    intro c p o zf m fuel hc
     have hc1 : c = 1 := u64_eq_of_toNat hc
     subst hc1
     rw [show 4 * (0 + 1) + fuel = fuel + 4 from by omega, ctMemzeroX86_body, u64_one_sub_one,
       u64_zero_beq_zero]
     try rfl
   | succ k ih =>
-    intro c p zf m fuel hc
+    intro c p o zf m fuel hc
     have hc' := u64_pred_toNat c k hc
     have hne := u64_ne_zero_of_toNat_succ (c - 1) k hc'
     rw [show 4 * (k + 1 + 1) + fuel = (4 * (k + 1) + fuel) + 4 from by omega, ctMemzeroX86_body,
       beq_false_of_ne hne, show jccPc (!false) 5 15 = 5 from rfl,
-      ih (c - 1) (p + 1) false (writeMem8 m p 0) fuel hc', addr_succ]
+      ih (c - 1) (p + 1) (evalX86IncDecOf false true c) false (writeMem8 m p 0) fuel hc', addr_succ]
     try rfl
 
-theorem ctMemzeroX86_run {r0 r1 r7 : UInt64} {zf : Bool} (m : UInt64 → UInt8) (k j : Nat)
+theorem ctMemzeroX86_run {r0 r1 r7 : UInt64} {o zf : Bool} (m : UInt64 → UInt8) (k j : Nat)
     (hn : r6.toNat = k + 1) :
     (runX86 ctMemzeroX86Prog (4 * (k + 1) + 4 + j)
       ⟨0, ⟨r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15⟩, y, cf, o, zf, dy, false, m⟩).1 =
@@ -1025,7 +1036,7 @@ theorem ctMemzeroX86_run {r0 r1 r7 : UInt64} {zf : Bool} (m : UInt64 → UInt8) 
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
     simp only [stepX86_movRR, stepX86_xorRR, maskGprWidth_true, mask32_xor_self, u64_zero_beq_zero,
       b16get_0, b16get_6, b16set_0, b16set_1]
-  rw [ctMemzeroX86_loop k r6 r7 true m (j + 2) hn]
+  rw [ctMemzeroX86_loop k r6 r7 false true m (j + 2) hn]
   iterate 2
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
     simp only [stepX86_mfence, stepX86_ret]
@@ -1331,7 +1342,7 @@ theorem ctEqBytesX86_body (c p q acc x8 x9 : UInt64) (cf o zf : Bool) (fuel : Na
       ⟨jccPc (!(c - 1 == 0)) 5 30,
         ⟨maskGprWidth false (acc ||| byteDiff (m p) (m q)), c - 1, r2, r3, r4, r5, q + 1, p + 1,
           byteDiff (m p) (m q), maskGprWidth false (m q).toUInt64, r10, r11, r12, r13, r14, r15⟩,
-        y, false, false, c - 1 == 0, dy, false, m⟩).1 := by
+        y, false, evalX86IncDecOf false true c, c - 1 == 0, dy, false, m⟩).1 := by
   iterate 8
     refine Eq.trans (runX86_step_fst _ _ _ _ rfl rfl) ?_
     simp only [stepX86_load8, stepX86_xorRR, stepX86_orRR, stepX86_inc, stepX86_dec, stepX86_jnz,
@@ -1362,7 +1373,7 @@ theorem ctEqBytesX86_loop (k : Nat) : ∀ (c p q acc x8 x9 : UInt64) (cf o zf : 
     have hc' := u64_pred_toNat c k hc
     have hne := u64_ne_zero_of_toNat_succ (c - 1) k hc'
     obtain ⟨x8', x9', h⟩ := ih (c - 1) (p + 1) (q + 1) (maskGprWidth false (acc ||| byteDiff (m p) (m q)))
-      (byteDiff (m p) (m q)) (maskGprWidth false (m q).toUInt64) false false false fuel hc'
+      (byteDiff (m p) (m q)) (maskGprWidth false (m q).toUInt64) false (evalX86IncDecOf false true c) false fuel hc'
     refine ⟨x8', x9', ?_⟩
     rw [show 8 * (k + 1 + 1) + fuel = (8 * (k + 1) + fuel) + 8 from by omega, ctEqBytesX86_body,
       beq_false_of_ne hne, show jccPc (!false) 5 30 = 5 from rfl, h, addr_succ, addr_succ]
