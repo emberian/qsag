@@ -1162,7 +1162,13 @@ impl WaistbandCache {
                     tree,
                     key_pair: kp,
                 };
-                admit_digits(ledger, key, digits.clone(), false, &mut records)?;
+                let wb_ctx = WaistbandGuardContext {
+                    binding,
+                    cache_bound: self.binding(),
+                    expected_child_root: child_root,
+                    recomputed_child_root: child_root,
+                };
+                admit_digits(ledger, &wb_ctx, key, digits.clone(), false, &mut records)?;
                 let lane0 = i * per_tree + kp as usize * chains;
                 node_picks.extend(digits.iter().enumerate().map(|(c, dg)| (lane0 + c, *dg)));
                 jobs.push((layer, tree, kp, ctr, child_root));
@@ -1236,26 +1242,114 @@ fn check_key_binding(
     }
 }
 
-/// Check `digits` against the first-signed record of `key`. An equal record admits them; a
+fn waistband_pk_tag(pk_seed: &[u8; 32], pk_root: &[u8; 32]) -> [u8; 32] {
+    cshake256_32(
+        b"QSAG.BAGGY.WAISTBAND.PK_TAG/v1",
+        &encode_multi_frame(&[pk_seed, pk_root]),
+    )
+}
+
+fn waistband_codeword_tag(digits: &[u8]) -> [u8; 32] {
+    cshake256_32(b"QSAG.BAGGY.WAISTBAND.CODEWORD_TAG/v1", digits)
+}
+
+struct WaistbandGuardContext<'a> {
+    binding: &'a BaggyKeyBinding,
+    cache_bound: Option<&'a BaggyKeyBinding>,
+    expected_child_root: [u8; 32],
+    recomputed_child_root: [u8; 32],
+}
+
+fn verify_waistband_derivation(
+    ctx: &WaistbandGuardContext<'_>,
+    key: StaticKeyId,
+    locked_digits: Option<&[u8]>,
+    candidate_digits: &[u8],
+) -> Result<qsag_verified::WaistbandAncestorPermit, BaggyError> {
+    let key_pk_tag = waistband_pk_tag(ctx.binding.pk_seed(), ctx.binding.pk_root());
+    let key_params_tag = *ctx.binding.params_digest();
+    let active_cache = ctx.cache_bound.unwrap_or(ctx.binding);
+    let cache_pk_tag = waistband_pk_tag(active_cache.pk_seed(), active_cache.pk_root());
+    let cache_params_tag = *active_cache.params_digest();
+    let mut guard = qsag_verified::VerifiedWaistbandRootGuard::new_enrolled(
+        key_pk_tag,
+        key_params_tag,
+        key.layer,
+        key.tree,
+        key.key_pair,
+        ctx.expected_child_root,
+    );
+    if let Some(locked) = locked_digits {
+        let lock_req = qsag_verified::WaistbandDerivationRequest {
+            req_layer: key.layer,
+            req_tree: key.tree,
+            req_kp: key.key_pair,
+            cache_pk_tag: key_pk_tag,
+            cache_params_tag: key_params_tag,
+            recomputed_child_root: ctx.expected_child_root,
+            candidate_ancestor_codeword_tag: waistband_codeword_tag(locked),
+        };
+        let (locked_guard, lock_res) = guard.authorize_ancestor_derivation(lock_req);
+        lock_res.map_err(|_| BaggyError::CacheEntryUnauthenticated)?;
+        guard = locked_guard;
+    }
+    let req = qsag_verified::WaistbandDerivationRequest {
+        req_layer: key.layer,
+        req_tree: key.tree,
+        req_kp: key.key_pair,
+        cache_pk_tag,
+        cache_params_tag,
+        recomputed_child_root: ctx.recomputed_child_root,
+        candidate_ancestor_codeword_tag: waistband_codeword_tag(candidate_digits),
+    };
+    let (_next, res) = guard.authorize_ancestor_derivation(req);
+    res.map_err(|err| match err {
+        qsag_verified::PantsGuardError::WaistbandCachePkMismatch
+        | qsag_verified::PantsGuardError::WaistbandCacheParamsMismatch => {
+            BaggyError::CacheIdentityMismatch
+        }
+        qsag_verified::PantsGuardError::WaistbandCodewordEquivocation => {
+            BaggyError::StaticKeyDigitsConflict {
+                layer: key.layer,
+                tree: key.tree,
+                key_pair: key.key_pair,
+            }
+        }
+        _ => BaggyError::CacheEntryUnauthenticated,
+    })
+}
+
+/// Check `digits` against the first-signed record of `key` and gate static ancestor derivation
+/// through `qsag_verified::VerifiedWaistbandRootGuard`. An equal record admits them; a
 /// different one refuses them; with no record they are queued in `records` for the write
 /// that precedes the opening round, unless `must_exist` (the message was vouched for by the
 /// cache alone), which refuses.
 fn admit_digits<L: FirstSignedLedger + ?Sized>(
     ledger: &L,
+    ctx: &WaistbandGuardContext<'_>,
     key: StaticKeyId,
     digits: Vec<u8>,
     must_exist: bool,
     records: &mut Vec<FirstSignedRecord>,
 ) -> Result<(), BaggyError> {
     match ledger.first_signed(&key)? {
-        Some(first) if first == digits => Ok(()),
-        Some(_) => Err(BaggyError::StaticKeyDigitsConflict {
-            layer: key.layer,
-            tree: key.tree,
-            key_pair: key.key_pair,
-        }),
+        Some(first) => {
+            let permit = verify_waistband_derivation(ctx, key, Some(&first), &digits)?;
+            if first != digits || permit.verified_child_root != ctx.expected_child_root {
+                return Err(BaggyError::StaticKeyDigitsConflict {
+                    layer: key.layer,
+                    tree: key.tree,
+                    key_pair: key.key_pair,
+                });
+            }
+            Ok(())
+        }
         None if must_exist => Err(BaggyError::CacheUnanchored),
         None => {
+            let permit = verify_waistband_derivation(ctx, key, None, &digits)?;
+            if permit.verified_child_root != ctx.expected_child_root {
+                return Err(BaggyError::CacheEntryUnauthenticated);
+            }
             records.push(FirstSignedRecord { key, digits });
             Ok(())
         }
@@ -1547,16 +1641,30 @@ pub fn baggy_sign_mpc<L: FirstSignedLedger + ?Sized>(
     let mut node_picks: Vec<(usize, u8)> = Vec::new();
     let mut fresh_leaves: Vec<(usize, u64, Vec<[u8; 32]>)> = Vec::new();
     let mut endpoint_cursor = 0usize;
+    let cache_bound_snapshot = cache.binding().copied();
     for (layer, plan) in plans.into_iter().enumerate() {
         let (kp, tree) = params.path_at(leaf_idx, layer);
         let (leaves, lane0, leaves_cached) = match plan {
             LayerPlan::Cached(entry) => {
-                // The entry verified against its stored roots before the sweep. It must
-                // also sign exactly the node below; the layer above then signs the stored
-                // root, not one recomputed from the entry.
-                if entry.child_root != node {
-                    return Err(BaggyError::CacheEntryUnauthenticated);
-                }
+                // The entry verified against its stored roots before the sweep. Gate its
+                // child-root binding and identity tags through `VerifiedWaistbandRootGuard`
+                // before allowing the layer above to sign its stored root.
+                let cached_digits = layer_grinder(&pk.pk_seed, layer, tree, kp, &entry.child_root)
+                    .digits_at(&params.wots, entry.sig.ctr)
+                    .ok_or(BaggyError::CacheEntryUnauthenticated)?;
+                let key = StaticKeyId {
+                    identity,
+                    layer: layer as u32,
+                    tree,
+                    key_pair: kp,
+                };
+                let wb_ctx = WaistbandGuardContext {
+                    binding,
+                    cache_bound: cache_bound_snapshot.as_ref(),
+                    expected_child_root: entry.child_root,
+                    recomputed_child_root: node,
+                };
+                verify_waistband_derivation(&wb_ctx, key, None, &cached_digits)?;
                 node = entry.layer_root;
                 node_from_cache = true;
                 path_nodes.push(node);
@@ -1595,7 +1703,13 @@ pub fn baggy_sign_mpc<L: FirstSignedLedger + ?Sized>(
             tree,
             key_pair: kp,
         };
-        admit_digits(ledger, key, digits, node_from_cache, &mut records)?;
+        let wb_ctx = WaistbandGuardContext {
+            binding,
+            cache_bound: cache_bound_snapshot.as_ref(),
+            expected_child_root: node,
+            recomputed_child_root: node,
+        };
+        admit_digits(ledger, &wb_ctx, key, digits, node_from_cache, &mut records)?;
         pending.push((layer, ctr, merkle_auth_path(&levels, kp as usize)));
         layers.push(None);
         node = levels[hp][0];

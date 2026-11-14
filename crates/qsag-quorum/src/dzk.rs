@@ -113,7 +113,7 @@ pub fn encode_elements(elements: &[Gf128]) -> Vec<u8> {
 
 /// Decode exactly `count` field elements, or `None` if the length is wrong.
 pub fn decode_elements(raw: &[u8], count: usize) -> Option<Vec<Gf128>> {
-    (raw.len() == 16 * count).then(|| elements_of(raw))
+    (count.checked_mul(16) == Some(raw.len())).then(|| elements_of(raw))
 }
 
 /// `count` pseudorandom field elements from `SHAKE256` over `domain` and `parts`.
@@ -121,8 +121,7 @@ pub fn expand_elements(domain: &[u8], parts: &[&[u8]], count: usize) -> Vec<Gf12
     let mut raw = vec![0u8; 16 * count];
     expand(domain, parts, &mut raw);
     let out = elements_of(&raw);
-    raw.fill(0);
-    core::hint::black_box(raw.as_mut_slice());
+    qsag_asm::ct_memzero(&mut raw);
     out
 }
 
@@ -444,6 +443,13 @@ pub fn row_product_sum(weights: &DzkWeights, f_at_r: &[Gf128], g_at_r: &[Gf128])
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hostile_element_count_cannot_wrap_to_a_valid_frame() {
+        assert!(decode_elements(&[], usize::MAX / 16 + 1).is_none());
+        assert!(decode_elements(&[0; 16], usize::MAX).is_none());
+        assert!(decode_elements(&[0; 15], 1).is_none());
+        assert_eq!(decode_elements(&[0; 16], 1), Some(vec![Gf128::ZERO]));
+    }
     use super::*;
     use crate::hash::SeedRng;
 
