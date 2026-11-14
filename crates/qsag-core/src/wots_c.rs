@@ -445,7 +445,7 @@ impl Sweep {
                     })
                     .collect();
                 let mut st = SharedState256::from_public_frames(&TSW_SUITE_MIDSTATE, &frames)?;
-                st.xor_shared_digest(TSW_F_SECRET_OFFSET, &pos[wave][usize::from(step)]);
+                st.xor_shared_digest(TSW_F_SECRET_OFFSET, &pos[wave][usize::from(step)])?;
                 engine.permute(&mut st, running)?;
                 pos[wave].push(st.digest());
             }

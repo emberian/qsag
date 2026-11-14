@@ -13,14 +13,14 @@ use qsag_asm::{
 };
 
 const MAX_PENDING_BITS: usize = 262_144;
-const D0_BITS: usize = 64;
-const SUPER_BLOCKS: usize = 2;
+const D0_BITS: usize = 32;
+const SUPER_BLOCKS: usize = 4;
 const SUPER_BITS: usize = D0_BITS * SUPER_BLOCKS;
 const QUAD_BLOCKS: usize = 4;
 const QUAD_BITS: usize = D0_BITS * QUAD_BLOCKS;
 const STEP0_PLANES: usize = 2 * D0_BITS;
 const STEP0_SLOTS: usize = STEP0_PLANES - 2;
-const STEP0_CHUNK: usize = 16;
+const STEP0_CHUNK: usize = 64;
 const STEP2_QUAD_CHUNK: usize = 16;
 const MAX_PENDING_FIELD_WORDS: usize = 1_024;
 const CONVERT_CHUNK_WORDS: usize = 512;

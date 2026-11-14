@@ -575,13 +575,13 @@ mod signature_tests {
         assert_ne!(table.child_pubkeys[0], placeholder);
         let (addr, mut proof) = table.derive_watch_only_child(0, "qsp").unwrap();
         let mut noncanon_master = table.master_pk.clone();
-        noncanon_master.merkle_root_limbs[0] = 0xFFFF_FFFF_0000_0001;
+        noncanon_master.poseidon2_root_limbs[0] = 0xFFFF_FFFF_0000_0001;
         assert_eq!(
             verify_inventory_child_proof(&noncanon_master, &proof, &addr, &accel).err(),
             Some(HdError::InvalidInventoryProof)
         );
         let mut noncanon_proof = proof.clone();
-        noncanon_proof.merkle_siblings[0][0] = 0xFFFF_FFFF_0000_0001;
+        noncanon_proof.poseidon2_siblings[0][0] = 0xFFFF_FFFF_0000_0001;
         assert_eq!(
             verify_inventory_child_proof(&table.master_pk, &noncanon_proof, &addr, &accel).err(),
             Some(HdError::InvalidInventoryProof)

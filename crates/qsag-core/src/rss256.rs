@@ -104,6 +104,17 @@ use crate::preprocessing::{PartyPrivateRng, PreprocessError, run_commit_and_open
 use crate::sponge::keccak::{
     Cshake256Xof, KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS, SHAKE256_RATE_BYTES,
 };
+use crate::wipe::{
+    SecretBuffer, secret_vec_extend_from_slice, secret_vec_push, secret_vec_reserve,
+};
+
+#[cfg(feature = "std")]
+#[inline]
+fn rss256_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().clamp(1, 16))
+        .unwrap_or(1)
+}
 
 /// One bit plane across the 256 lanes of a wave.
 pub type Plane = BitPlane256;
@@ -1006,6 +1017,57 @@ impl Drop for PendingGates {
     }
 }
 
+fn linear_terms_slot_range(
+    pending: &PendingGates,
+    s: usize,
+    g_range: core::ops::Range<usize>,
+    weights: &[PassWeights; 2],
+) -> [[Fe; 2]; 2] {
+    let mut slot_out = [[FE_ZERO; 2]; 2];
+    if g_range.is_empty() {
+        return slot_out;
+    }
+    let chunk_groups = g_range.len();
+    let mut half = SecretBuffer([FE_ZERO; GROUP_PLANES]);
+    let mut sums = SecretBuffer(core::array::from_fn::<[Vec<Fe>; 2], 2, _>(|_| {
+        core::array::from_fn(|_| vec![FE_ZERO; 2 * chunk_groups])
+    }));
+    let a_slot = &pending.a[s];
+    for (local_g, g) in g_range.clone().enumerate() {
+        let base = g * GROUP_PLANES;
+        for h in 0..2 {
+            for (u, cell) in half.iter_mut().enumerate() {
+                let (m, r) = (&pending.msg[s][base + u], &pending.pad[s][base + u]);
+                let (a, b) = (&a_slot[base + u], &pending.b[s][base + u]);
+                *cell = core::array::from_fn(|w| {
+                    m[2 * h + w] ^ r[2 * h + w] ^ (a[2 * h + w] & b[2 * h + w])
+                });
+            }
+            for (pass, w) in sums.iter_mut().zip(weights) {
+                qsag_asm::gf2_128_mul_acc_batch(&mut pass[0][2 * local_g + h], &*half, &w.plane);
+            }
+            for (u, cell) in half.iter_mut().enumerate() {
+                let r = &pending.pad[s][base + u];
+                *cell = [r[2 * h], r[2 * h + 1]];
+            }
+            for (pass, w) in sums.iter_mut().zip(weights) {
+                qsag_asm::gf2_128_mul_acc_batch(&mut pass[1][2 * local_g + h], &*half, &w.plane);
+            }
+        }
+    }
+    let blk_slice = (2 * g_range.start)..(2 * g_range.end);
+    for (k, (pass, w)) in sums.iter().zip(weights).enumerate() {
+        for (term, sum) in pass.iter().enumerate() {
+            qsag_asm::gf2_128_mul_acc_batch(
+                &mut slot_out[k][term],
+                sum,
+                &w.block[blk_slice.clone()],
+            );
+        }
+    }
+    slot_out
+}
+
 /// Weighted single-verifier terms of both passes: entry `[pass][slot]` is
 /// `[sum_J chi^J block_J(msg + pad + a & b), sum_J chi^J block_J(pad)]` over slot `slot`. The
 /// first is the initial claim share of `V1` in the proof of sender `slot`; the second is the
@@ -1016,83 +1078,89 @@ fn linear_terms(
     weights: &[PassWeights; 2],
 ) -> [[[Fe; 2]; 3]; 2] {
     let mut out = [[[FE_ZERO; 2]; 3]; 2];
-    let mut half = [FE_ZERO; GROUP_PLANES];
-    let mut sums: [[Vec<Fe>; 2]; 2] =
-        core::array::from_fn(|_| core::array::from_fn(|_| vec![FE_ZERO; 2 * groups]));
-    for (s, a_slot) in pending.a.iter().enumerate() {
-        for pass in &mut sums {
-            for term in pass.iter_mut() {
-                term.fill(FE_ZERO);
+    if groups == 0 {
+        return out;
+    }
+    #[cfg(feature = "std")]
+    {
+        let workers = rss256_worker_threads();
+        if workers > 1 && groups >= 16 {
+            let chunks_per_slot = (workers / 3).max(1).min(groups);
+            let chunk_size = groups.div_ceil(chunks_per_slot);
+            let partials: Vec<(usize, [[Fe; 2]; 2])> = std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(3 * chunks_per_slot);
+                for s in 0..3 {
+                    for c in 0..chunks_per_slot {
+                        let start = c * chunk_size;
+                        if start >= groups {
+                            break;
+                        }
+                        let end = (start + chunk_size).min(groups);
+                        handles.push(scope.spawn(move || {
+                            (s, linear_terms_slot_range(pending, s, start..end, weights))
+                        }));
+                    }
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("rss256 linear_terms worker panicked"))
+                    .collect()
+            });
+            let partials = SecretBuffer(partials);
+            for &(s, part) in partials.iter() {
+                for k in 0..2 {
+                    for term in 0..2 {
+                        out[k][s][term] = fe_add(out[k][s][term], part[k][term]);
+                    }
+                }
             }
-        }
-        for g in 0..groups {
-            let base = g * GROUP_PLANES;
-            for h in 0..2 {
-                for (u, cell) in half.iter_mut().enumerate() {
-                    let (m, r) = (&pending.msg[s][base + u], &pending.pad[s][base + u]);
-                    let (a, b) = (&a_slot[base + u], &pending.b[s][base + u]);
-                    *cell = core::array::from_fn(|w| {
-                        m[2 * h + w] ^ r[2 * h + w] ^ (a[2 * h + w] & b[2 * h + w])
-                    });
-                }
-                for (pass, w) in sums.iter_mut().zip(weights) {
-                    qsag_asm::gf2_128_mul_acc_batch(&mut pass[0][2 * g + h], &half, &w.plane);
-                }
-                for (u, cell) in half.iter_mut().enumerate() {
-                    let r = &pending.pad[s][base + u];
-                    *cell = [r[2 * h], r[2 * h + 1]];
-                }
-                for (pass, w) in sums.iter_mut().zip(weights) {
-                    qsag_asm::gf2_128_mul_acc_batch(&mut pass[1][2 * g + h], &half, &w.plane);
-                }
-            }
-        }
-        for (k, (pass, w)) in sums.iter().zip(weights).enumerate() {
-            for (term, sum) in pass.iter().enumerate() {
-                qsag_asm::gf2_128_mul_acc_batch(&mut out[k][s][term], sum, &w.block);
-            }
+            return out;
         }
     }
-    qsag_asm::volatile_fill(&mut half, FE_ZERO);
-    for pass in &mut sums {
-        for term in pass.iter_mut() {
-            qsag_asm::volatile_fill(term, FE_ZERO);
+    for s in 0..3 {
+        let part = linear_terms_slot_range(pending, s, 0..groups, weights);
+        for k in 0..2 {
+            out[k][s] = part[k];
         }
     }
     out
 }
 
-/// Tensor-round sums of every prover for both passes: entry `[pass][p][e]` is
-/// `sum_g (kappa^(2g) T_lo + kappa^(2g + 1) T_hi)` where `T = a_p,e & b_q,e ^ a_q,e & b_p,e`
-/// is the cross product of group `g` at point `e` (each operand is the GF(2) combination of
-/// the group's 128 planes selected by `e`) and `T_lo`, `T_hi` are its two 128-bit blocks read
-/// as field elements. Point `0` is left zero: it is never sent.
-///
-/// A group is expanded on its three high index bits once (27 rows of 16 planes). For each of
-/// those rows the 16 planes of every group of a batch are expanded together on the four low
-/// bits (81 points), the products are staged point by point, and one kernel call per point,
-/// prover and pass applies the block weights.
-fn tensor_tables(
+fn tensor_tables_batch_range(
     pending: &PendingGates,
     groups: usize,
+    batch_range: core::ops::Range<usize>,
     weights: &[PassWeights; 2],
 ) -> [[Vec<Fe>; 3]; 2] {
     const LOW_PLANES: usize = 1 << TENSOR_LOW_BITS;
     const HIGH_CELLS: usize = TENSOR_HIGH_POINTS * LOW_PLANES;
     let mut tabs: [[Vec<Fe>; 3]; 2] =
         core::array::from_fn(|_| core::array::from_fn(|_| vec![FE_ZERO; TENSOR_POINTS]));
-    let mut high_a: [Vec<Plane>; 3] =
-        core::array::from_fn(|_| vec![[0u64; 4]; TENSOR_BATCH * HIGH_CELLS]);
-    let mut high_b: [Vec<Plane>; 3] =
-        core::array::from_fn(|_| vec![[0u64; 4]; TENSOR_BATCH * HIGH_CELLS]);
-    // Low-bit expansions of one high point: row `j` holds point `j` of every group of the batch.
+    if batch_range.is_empty() {
+        return tabs;
+    }
+    let mut high_a = SecretBuffer(core::array::from_fn::<Vec<Plane>, 3, _>(|_| {
+        vec![[0u64; 4]; TENSOR_BATCH * HIGH_CELLS]
+    }));
+    let mut high_b = SecretBuffer(core::array::from_fn::<Vec<Plane>, 3, _>(|_| {
+        vec![[0u64; 4]; TENSOR_BATCH * HIGH_CELLS]
+    }));
     let low_cells = TENSOR_LOW_POINTS * TENSOR_BATCH;
-    let mut low_a: [Vec<Plane>; 3] = core::array::from_fn(|_| vec![[0u64; 4]; low_cells]);
-    let mut low_b: [Vec<Plane>; 3] = core::array::from_fn(|_| vec![[0u64; 4]; low_cells]);
+    let mut low_a = SecretBuffer(core::array::from_fn::<Vec<Plane>, 3, _>(|_| {
+        vec![[0u64; 4]; low_cells]
+    }));
+    let mut low_b = SecretBuffer(core::array::from_fn::<Vec<Plane>, 3, _>(|_| {
+        vec![[0u64; 4]; low_cells]
+    }));
     let row = 2 * TENSOR_BATCH;
-    let mut stage: [Vec<Fe>; 3] =
-        core::array::from_fn(|_| vec![FE_ZERO; TENSOR_LOW_POINTS * row]);
-    for g0 in (0..groups).step_by(TENSOR_BATCH) {
+    let mut stage = SecretBuffer(core::array::from_fn::<Vec<Fe>, 3, _>(|_| {
+        vec![FE_ZERO; TENSOR_LOW_POINTS * row]
+    }));
+    for bi in batch_range {
+        let g0 = bi * TENSOR_BATCH;
+        if g0 >= groups {
+            break;
+        }
         let count = TENSOR_BATCH.min(groups - g0);
         for gi in 0..count {
             let base = (g0 + gi) * GROUP_PLANES;
@@ -1147,39 +1215,69 @@ fn tensor_tables(
             }
         }
     }
-    for s in 0..3 {
-        qsag_asm::volatile_fill(&mut high_a[s], [0; 4]);
-        qsag_asm::volatile_fill(&mut high_b[s], [0; 4]);
-        qsag_asm::volatile_fill(&mut low_a[s], [0; 4]);
-        qsag_asm::volatile_fill(&mut low_b[s], [0; 4]);
-        qsag_asm::volatile_fill(&mut stage[s], FE_ZERO);
-    }
     tabs
 }
 
-/// Bind the plane index inside every group: element `256 g + lane` of `out` is
-/// `sum_u eq[u] * bit(planes[128 g + u], lane)`, times `x^(lane % 128)` when `lane_weights`.
-///
-/// The sum is a GF(2)-linear map of the 128 planes with a public matrix (the bits of `eq`),
-/// evaluated on all 256 lanes at once: output bit plane `t` is the XOR of the planes `u` with
-/// bit `t` of `eq[u]` set, taken four planes at a time from tables of their 16 combinations.
-/// Table indices and loop bounds depend only on `eq`.
-fn bind_planes(planes: &[Plane], eq: &[Fe], lane_weights: bool, out: &mut [Fe]) {
-    const NIBBLES: usize = GROUP_PLANES / 4;
-    debug_assert_eq!(eq.len(), GROUP_PLANES);
-    debug_assert_eq!(planes.len() / GROUP_PLANES * LANES, out.len());
-    // `pattern[t][n]`: which of planes `4n .. 4n + 4` enter output bit plane `t`.
-    let mut pattern = [[0u8; NIBBLES]; 128];
-    for (t, row) in pattern.iter_mut().enumerate() {
-        for (n, nibble) in row.iter_mut().enumerate() {
-            for d in 0..4 {
-                *nibble |= (((eq[4 * n + d][t / 64] >> (t % 64)) & 1) as u8) << d;
+/// Tensor-round sums of every prover for both passes: entry `[pass][p][e]` is
+/// `sum_g (kappa^(2g) T_lo + kappa^(2g + 1) T_hi)` where `T = a_p,e & b_q,e ^ a_q,e & b_p,e`
+/// is the cross product of group `g` at point `e` (each operand is the GF(2) combination of
+/// the group's 128 planes selected by `e`) and `T_lo`, `T_hi` are its two 128-bit blocks read
+/// as field elements. Point `0` is left zero: it is never sent.
+fn tensor_tables(
+    pending: &PendingGates,
+    groups: usize,
+    weights: &[PassWeights; 2],
+) -> [[Vec<Fe>; 3]; 2] {
+    let num_batches = groups.div_ceil(TENSOR_BATCH);
+    #[cfg(feature = "std")]
+    {
+        let workers = rss256_worker_threads().min(num_batches);
+        if workers > 1 {
+            let chunk_size = num_batches.div_ceil(workers);
+            let partials = SecretBuffer(std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(workers);
+                for w_idx in 0..workers {
+                    let start = w_idx * chunk_size;
+                    if start >= num_batches {
+                        break;
+                    }
+                    let end = (start + chunk_size).min(num_batches);
+                    handles.push(scope.spawn(move || {
+                        tensor_tables_batch_range(pending, groups, start..end, weights)
+                    }));
+                }
+                handles
+                    .into_iter()
+                    .map(|h| h.join().expect("rss256 tensor_tables worker panicked"))
+                    .collect::<Vec<[[Vec<Fe>; 3]; 2]>>()
+            }));
+            let mut tabs: [[Vec<Fe>; 3]; 2] =
+                core::array::from_fn(|_| core::array::from_fn(|_| vec![FE_ZERO; TENSOR_POINTS]));
+            for part in partials.iter() {
+                for pass in 0..2 {
+                    for p in 0..3 {
+                        for e in 1..TENSOR_POINTS {
+                            tabs[pass][p][e] = fe_add(tabs[pass][p][e], part[pass][p][e]);
+                        }
+                    }
+                }
             }
+            return tabs;
         }
     }
-    let mut tables = [[[0u64; 4]; 16]; NIBBLES];
-    let mut lo = [[0u64; 4]; 64];
-    let mut hi = [[0u64; 4]; 64];
+    tensor_tables_batch_range(pending, groups, 0..num_batches, weights)
+}
+
+fn bind_planes_chunk(
+    planes: &[Plane],
+    pattern: &[[u8; GROUP_PLANES / 4]; 128],
+    lane_weights: bool,
+    out: &mut [Fe],
+) {
+    const NIBBLES: usize = GROUP_PLANES / 4;
+    let mut tables = SecretBuffer([[[0u64; 4]; 16]; NIBBLES]);
+    let mut lo = SecretBuffer([[0u64; 4]; 64]);
+    let mut hi = SecretBuffer([[0u64; 4]; 64]);
     let groups = planes.as_chunks::<GROUP_PLANES>().0.iter();
     for (src, dst) in groups.zip(out.as_chunks_mut::<LANES>().0) {
         for (n, table) in tables.iter_mut().enumerate() {
@@ -1199,10 +1297,8 @@ fn bind_planes(planes: &[Plane], eq: &[Fe], lane_weights: bool, out: &mut [Fe]) 
                 hi[t - 64] = acc;
             }
         }
-        // Bit `r` of `lo[c][q]` becomes bit `c` of output plane `r`, word `q`: the low half
-        // of the element of lane `64 q + c`.
-        qsag_asm::transpose64x256(&mut lo);
-        qsag_asm::transpose64x256(&mut hi);
+        qsag_asm::transpose64x256(&mut *lo);
+        qsag_asm::transpose64x256(&mut *hi);
         for q in 0..4 {
             for c in 0..64 {
                 let lane = 64 * q + c;
@@ -1215,9 +1311,47 @@ fn bind_planes(planes: &[Plane], eq: &[Fe], lane_weights: bool, out: &mut [Fe]) 
             }
         }
     }
-    qsag_asm::volatile_fill(&mut tables, [[0; 4]; 16]);
-    qsag_asm::volatile_fill(&mut lo, [0; 4]);
-    qsag_asm::volatile_fill(&mut hi, [0; 4]);
+}
+
+/// Bind the plane index inside every group: element `256 g + lane` of `out` is
+/// `sum_u eq[u] * bit(planes[128 g + u], lane)`, times `x^(lane % 128)` when `lane_weights`.
+fn bind_planes(planes: &[Plane], eq: &[Fe], lane_weights: bool, out: &mut [Fe]) {
+    const NIBBLES: usize = GROUP_PLANES / 4;
+    debug_assert_eq!(eq.len(), GROUP_PLANES);
+    debug_assert_eq!(planes.len() / GROUP_PLANES * LANES, out.len());
+    let mut pattern = [[0u8; NIBBLES]; 128];
+    for (t, row) in pattern.iter_mut().enumerate() {
+        for (n, nibble) in row.iter_mut().enumerate() {
+            for d in 0..4 {
+                *nibble |= (((eq[4 * n + d][t / 64] >> (t % 64)) & 1) as u8) << d;
+            }
+        }
+    }
+    #[cfg(feature = "std")]
+    {
+        let num_groups = planes.len() / GROUP_PLANES;
+        let sub_workers = (rss256_worker_threads() / 3).max(1).min(num_groups);
+        if sub_workers > 1 && num_groups >= 32 {
+            let groups_per_worker = num_groups.div_ceil(sub_workers);
+            std::thread::scope(|scope| {
+                let mut rest_planes = planes;
+                let mut rest_out = out;
+                while !rest_planes.is_empty() {
+                    let take_g = groups_per_worker.min(rest_planes.len() / GROUP_PLANES);
+                    let (p_head, p_tail) = rest_planes.split_at(take_g * GROUP_PLANES);
+                    let (o_head, o_tail) = rest_out.split_at_mut(take_g * LANES);
+                    rest_planes = p_tail;
+                    rest_out = o_tail;
+                    let pat_ref = &pattern;
+                    scope.spawn(move || {
+                        bind_planes_chunk(p_head, pat_ref, lane_weights, o_head);
+                    });
+                }
+            });
+            return;
+        }
+    }
+    bind_planes_chunk(planes, &pattern, lane_weights, out);
 }
 
 /// Scratch of [`fold_round_sums`]: the expansions of both vectors of every slot.
@@ -1697,7 +1831,7 @@ impl Rss256Engine {
                 &mut self.pending.msg[s],
                 &mut self.pending.pad[s],
             ] {
-                planes.reserve(AND_PLANES_PER_PERM);
+                secret_vec_reserve(planes, AND_PLANES_PER_PERM);
             }
         }
 
@@ -1782,8 +1916,8 @@ impl Rss256Engine {
             if let Some(cap) = &mut self.captured_messages {
                 cap[s].extend_from_slice(&msg[s][..]);
             }
-            self.pending.msg[s].extend_from_slice(&msg[s][..]);
-            self.pending.pad[s].extend_from_slice(&pad[s][..]);
+            secret_vec_extend_from_slice(&mut self.pending.msg[s], &msg[s][..]);
+            secret_vec_extend_from_slice(&mut self.pending.pad[s], &pad[s][..]);
             for lane in 0..25 {
                 let row = 5 * (lane / 5);
                 let l1 = (row + (lane + 1) % 5) * 64;
@@ -1793,8 +1927,14 @@ impl Rss256Engine {
                     let a = &lin[s][l1 + z];
                     let b = &lin[s][l2 + z];
                     let t = &msg[s][l0 + z];
-                    self.pending.a[s].push(core::array::from_fn(|w| a[w] & active[w]));
-                    self.pending.b[s].push(core::array::from_fn(|w| b[w] & active[w]));
+                    secret_vec_push(
+                        &mut self.pending.a[s],
+                        core::array::from_fn(|w| a[w] & active[w]),
+                    );
+                    secret_vec_push(
+                        &mut self.pending.b[s],
+                        core::array::from_fn(|w| b[w] & active[w]),
+                    );
                     let out = &mut st.slot[s][l0 + z];
                     for w in 0..4 {
                         out[w] = lin[s][l0 + z][w] ^ b[w] ^ t[w];
@@ -1989,13 +2129,13 @@ impl Rss256Engine {
                     }
                     for s in 0..3 {
                         self.transcript[s].absorb_words(&msgs[s]);
-                        self.pending.a[s].push(ta[s][g]);
-                        self.pending.b[s].push(tb[s][g]);
-                        self.pending.msg[s].push(msgs[s]);
-                        self.pending.pad[s].push(pad[s][g]);
-                        self.bank.a[s].push(ta[s][g]);
-                        self.bank.b[s].push(tb[s][g]);
-                        self.bank.c[s].push(msgs[s]);
+                        secret_vec_push(&mut self.pending.a[s], ta[s][g]);
+                        secret_vec_push(&mut self.pending.b[s], tb[s][g]);
+                        secret_vec_push(&mut self.pending.msg[s], msgs[s]);
+                        secret_vec_push(&mut self.pending.pad[s], pad[s][g]);
+                        secret_vec_push(&mut self.bank.a[s], ta[s][g]);
+                        secret_vec_push(&mut self.bank.b[s], tb[s][g]);
+                        secret_vec_push(&mut self.bank.c[s], msgs[s]);
                     }
                 }
                 self.unverified = true;
@@ -2237,8 +2377,8 @@ impl Rss256Engine {
         let mut mask2_prg: [Shake256Prg256; 3] =
             core::array::from_fn(|p| self.pad_stream((p + 1) % 3, PURPOSE_PROOF_MASK_V2, ctr));
 
-        let linear = linear_terms(&self.pending, groups, &weights);
-        let mut tensor = tensor_tables(&self.pending, groups, &weights);
+        let linear = SecretBuffer(linear_terms(&self.pending, groups, &weights));
+        let tensor = SecretBuffer(tensor_tables(&self.pending, groups, &weights));
 
         let mut rounds = 0u64;
         let mut sums = 0u64;
@@ -2246,8 +2386,9 @@ impl Rss256Engine {
         for pass in 0..2 {
             let w = &weights[pass];
             // Claim shares of the two verifiers of every proof.
-            let mut claim1: [Fe; 3] = core::array::from_fn(|p| linear[pass][p][0]);
-            let mut claim2: [Fe; 3] = core::array::from_fn(|p| linear[pass][(p + 1) % 3][1]);
+            let mut claim1 = SecretBuffer(core::array::from_fn::<Fe, 3, _>(|p| linear[pass][p][0]));
+            let mut claim2 =
+                SecretBuffer(core::array::from_fn::<Fe, 3, _>(|p| linear[pass][(p + 1) % 3][1]));
             let mut round = 0u32;
             let challenges = |coin: &[u8; 32], count: usize| -> Vec<Fe> {
                 let mut xof = Cshake256Xof::new_shake256();
@@ -2258,9 +2399,9 @@ impl Rss256Engine {
             };
 
             // Tensor round: bind the plane index inside every group.
-            let shares: [(Vec<Fe>, Vec<Fe>); 3] = core::array::from_fn(|p| {
+            let shares = SecretBuffer(core::array::from_fn::<(Vec<Fe>, Vec<Fe>), 3, _>(|p| {
                 self.split_message(p, pass, round, &tensor[pass][p], &mut share_prg[p])
-            });
+            }));
             let gammas = challenges(&self.proof_coin(seed, pass, round)?, TENSOR_BITS);
             let coeff = round_coefficients(&gammas);
             let boolean = w.boolean_weights();
@@ -2268,6 +2409,7 @@ impl Rss256Engine {
                 claim1[p] = next_claim(claim1[p], &shares[p].0, &boolean, &coeff);
                 claim2[p] = next_claim(claim2[p], &shares[p].1, &boolean, &coeff);
             }
+            drop(shares);
             if pass == 0 {
                 sums += (TENSOR_POINTS - 1) as u64;
             }
@@ -2276,8 +2418,28 @@ impl Rss256Engine {
             // Bound vectors: `x` carries the lane weights, `y` does not. The block weights
             // are applied to the round sums of the first fold and to `x` after it.
             let eq = eq_table(&gammas);
-            let mut x: [Vec<Fe>; 3] = core::array::from_fn(|_| vec![FE_ZERO; elems]);
-            let mut y: [Vec<Fe>; 3] = core::array::from_fn(|_| vec![FE_ZERO; elems]);
+            let mut x = SecretBuffer(core::array::from_fn::<Vec<Fe>, 3, _>(|_| vec![FE_ZERO; elems]));
+            let mut y = SecretBuffer(core::array::from_fn::<Vec<Fe>, 3, _>(|_| vec![FE_ZERO; elems]));
+            #[cfg(feature = "std")]
+            if rss256_worker_threads() > 1 && groups >= 8 {
+                let pending_ref = &self.pending;
+                let eq_ref = &eq;
+                let ([x0, x1, x2], [y0, y1, y2]) = (&mut *x, &mut *y);
+                std::thread::scope(|scope| {
+                    scope.spawn(|| bind_planes(&pending_ref.a[0], eq_ref, true, x0));
+                    scope.spawn(|| bind_planes(&pending_ref.a[1], eq_ref, true, x1));
+                    scope.spawn(|| bind_planes(&pending_ref.a[2], eq_ref, true, x2));
+                    scope.spawn(|| bind_planes(&pending_ref.b[0], eq_ref, false, y0));
+                    scope.spawn(|| bind_planes(&pending_ref.b[1], eq_ref, false, y1));
+                    scope.spawn(|| bind_planes(&pending_ref.b[2], eq_ref, false, y2));
+                });
+            } else {
+                for s in 0..3 {
+                    bind_planes(&self.pending.a[s], &eq, true, &mut x[s]);
+                    bind_planes(&self.pending.b[s], &eq, false, &mut y[s]);
+                }
+            }
+            #[cfg(not(feature = "std"))]
             for s in 0..3 {
                 bind_planes(&self.pending.a[s], &eq, true, &mut x[s]);
                 bind_planes(&self.pending.b[s], &eq, false, &mut y[s]);
@@ -2297,10 +2459,10 @@ impl Rss256Engine {
                 } else {
                     FOLD_BITS.min((len - 1).ilog2() as usize + 1)
                 };
-                let tabs = if weighted {
+                let tabs = SecretBuffer(if weighted {
                     fold_round_sums(
-                        &x,
-                        &y,
+                        &*x,
+                        &*y,
                         len,
                         bits,
                         per_block >> bits,
@@ -2308,11 +2470,12 @@ impl Rss256Engine {
                         &mut scratch,
                     )
                 } else {
-                    fold_round_sums(&x, &y, len, bits, FOLD_BATCH_CHUNKS, None, &mut scratch)
-                };
-                let shares: [(Vec<Fe>, Vec<Fe>); 3] = core::array::from_fn(|p| {
-                    self.split_message(p, pass, round, &tabs[p], &mut share_prg[p])
+                    fold_round_sums(&*x, &*y, len, bits, FOLD_BATCH_CHUNKS, None, &mut scratch)
                 });
+                let shares = SecretBuffer(core::array::from_fn::<(Vec<Fe>, Vec<Fe>), 3, _>(|p| {
+                    self.split_message(p, pass, round, &tabs[p], &mut share_prg[p])
+                }));
+                drop(tabs);
                 let gammas = challenges(&self.proof_coin(seed, pass, round)?, bits);
                 let coeff = round_coefficients(&gammas);
                 let boolean: Vec<(usize, Fe)> = (1..1usize << bits)
@@ -2322,6 +2485,7 @@ impl Rss256Engine {
                     claim1[p] = next_claim(claim1[p], &shares[p].0, &boolean, &coeff);
                     claim2[p] = next_claim(claim2[p], &shares[p].1, &boolean, &coeff);
                 }
+                drop(shares);
                 let eq = eq_table(&gammas);
                 let mut next = len;
                 for s in 0..3 {
@@ -2332,7 +2496,7 @@ impl Rss256Engine {
                 if weighted {
                     per_block >>= bits;
                     if per_block <= WEIGHTED_BLOCK_ELEMS {
-                        for xs in &mut x {
+                        for xs in x.iter_mut() {
                             for (j, v) in xs[..len].iter_mut().enumerate() {
                                 *v = gf128_mul(block_weights[j / per_block], *v);
                             }
@@ -2350,11 +2514,12 @@ impl Rss256Engine {
 
             // Final check of `x_p y_q + x_q y_p == claim` for every proof `p`, with the
             // verifiers' elements masked by `r` values the other verifier does not hold.
-            let xf: [Fe; 3] = core::array::from_fn(|s| x[s][0]);
-            let yf: [Fe; 3] = core::array::from_fn(|s| y[s][0]);
-            let mut masks = [[FE_ZERO; 4]; 3];
-            let mut cross: [(Vec<Fe>, Vec<Fe>); 3] =
-                core::array::from_fn(|_| (Vec::new(), Vec::new()));
+            let xf = SecretBuffer(core::array::from_fn::<Fe, 3, _>(|s| x[s][0]));
+            let yf = SecretBuffer(core::array::from_fn::<Fe, 3, _>(|s| y[s][0]));
+            let mut masks = SecretBuffer([[FE_ZERO; 4]; 3]);
+            let mut cross = SecretBuffer(core::array::from_fn::<(Vec<Fe>, Vec<Fe>), 3, _>(|_| {
+                (Vec::new(), Vec::new())
+            }));
             for p in 0..3 {
                 let q = (p + 1) % 3;
                 mask1_prg[p].fill_words(masks[p][..2].as_flattened_mut());
@@ -2392,17 +2557,9 @@ impl Rss256Engine {
                 let rhs = fe_add(from_v1[2], from_v2[2]);
                 accepted &= (lhs[0] ^ rhs[0]) | (lhs[1] ^ rhs[1]) == 0;
             }
-            for s in 0..3 {
-                qsag_asm::volatile_fill(&mut x[s], FE_ZERO);
-                qsag_asm::volatile_fill(&mut y[s], FE_ZERO);
-            }
-            qsag_asm::volatile_fill(&mut masks, [FE_ZERO; 4]);
         }
-        for pass in &mut tensor {
-            for tab in pass.iter_mut() {
-                qsag_asm::volatile_fill(tab, FE_ZERO);
-            }
-        }
+        drop(tensor);
+        drop(linear);
         self.pending.clear_and_wipe();
         if !accepted {
             return Err(Rss256Error::MultiplicationCheckFailed);
@@ -2481,7 +2638,7 @@ impl Rss256Engine {
         let selected: u32 = lane_mask.iter().map(|w| w.count_ones()).sum();
         // This API accounts compact digest payloads, not the full-plane opening frame.
         self.stats.open_bytes = bytes_before + 32 * u64::from(selected);
-        Ok(digests_from_planes(&planes, lanes))
+        digests_from_planes(&planes, lanes)
     }
 }
 
@@ -2695,7 +2852,7 @@ mod tests {
         // Second wave: every lane absorbs the first wave's 32-byte output at offset 8.
         let frames2 = test_frames(lanes, 0x36);
         let mut st2 = SharedState256::from_public_frames(&TSW_SUITE_MIDSTATE, &frames2).unwrap();
-        st2.xor_shared_digest(8, &first);
+        st2.xor_shared_digest(8, &first).unwrap();
         e.permute(&mut st2, lanes).unwrap();
         e.check().unwrap();
         // Open only the odd lanes of the second output.
@@ -3422,5 +3579,30 @@ mod tests {
             }
             assert_eq!(horner_eval(&words, point), want, "n = {n}");
         }
+    }
+
+    #[test]
+    fn malformed_offsets_and_digest_planes_rejected() {
+        let frames = test_frames(4, 0x77);
+        let mut st = SharedState256::from_public_frames(&TSW_SUITE_MIDSTATE, &frames).unwrap();
+        let d = SharedDigest256::zeroed();
+        assert_eq!(
+            st.xor_shared_digest(169, &d),
+            Err(Rss256Error::InvalidParameters)
+        );
+        assert_eq!(
+            st.xor_shared_digest(usize::MAX, &d),
+            Err(Rss256Error::InvalidParameters)
+        );
+        let key = [0u8; 32];
+        assert_eq!(
+            st.xor_shared_key(usize::MAX - 10, [&key, &key, &key], &[1, 0, 0, 0]),
+            Err(Rss256Error::InvalidParameters)
+        );
+        let bad_planes = vec![[0u64; 4]; 257];
+        assert_eq!(
+            digests_from_planes(&bad_planes, 1),
+            Err(Rss256Error::InvalidParameters)
+        );
     }
 }
