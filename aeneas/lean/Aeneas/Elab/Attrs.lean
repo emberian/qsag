@@ -109,13 +109,21 @@ meta initialize
       | _ => throwUnsupportedSyntax
   }
 
-meta partial def replaceSelfRef (selfId : Name) (replacement : Syntax) (stx : Syntax) : Syntax :=
+meta partial def replaceSelfRef (selfId : Name) (stx : Syntax) : CommandElabM Syntax := do
+  -- This is the only erased self-reference: the upstream Eq marker ignores its
+  -- dictionary argument. Any recursive computation must fail rather than change meaning.
+  if let `(term| $fn:ident $arg) := stx then
+    if fn.getId == `core.cmp.Eq.assert_fields_are_eq.default &&
+        arg.raw.isIdent && arg.raw.getId == selfId then
+      return (← `($fn ())).raw
   match stx with
   | .ident _ _ val _ =>
-    if val == selfId then replacement else stx
+    if val == selfId then
+      throwError "impl_def: unsupported self-reference outside Eq.assert_fields_are_eq.default"
+    return stx
   | .node info kind args =>
-    .node info kind (args.map (replaceSelfRef selfId replacement))
-  | _ => stx
+    return .node info kind (← args.mapM (replaceSelfRef selfId))
+  | _ => return stx
 
 /-- Elaborates Aeneas `impl_def` trait-dictionary definitions by breaking vacuous
     default-method self-references (`core.cmp.Eq.assert_fields_are_eq.default <self>`). -/
@@ -124,7 +132,6 @@ elab mods:declModifiers "impl_def " id:declId sig:optDeclSig " := " body:term : 
     match id with
     | `(Parser.Command.declId| $n:ident $[.{$_us,*}]?) => n.getId
     | _ => Name.anonymous
-  let unitStx ← `(())
-  let cleanBody : Term := ⟨replaceSelfRef rawId unitStx.raw body.raw⟩
+  let cleanBody : Term := ⟨← replaceSelfRef rawId body.raw⟩
   let cmd ← `($mods:declModifiers def $id:declId $sig:optDeclSig := $cleanBody)
   elabCommand cmd

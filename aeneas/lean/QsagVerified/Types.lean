@@ -50,7 +50,7 @@ inductive pants_and_quorum_guards.PantsGuardError where
 | WaistbandCodewordEquivocation : pants_and_quorum_guards.PantsGuardError
 
 /-- [qsag_verified::authenticated_belt::BeltAuthError]
-    Source: 'src/authenticated_belt.rs', lines 9:0-14:1
+    Source: 'src/authenticated_belt.rs', lines 11:0-16:1
     Visibility: public -/
 @[discriminant isize]
 inductive authenticated_belt.BeltAuthError where
@@ -73,7 +73,7 @@ structure keccak.Shake256Sponge where
   squeeze_offset : Std.Usize
 
 /-- [qsag_verified::authenticated_belt::BeltQuorumStepInput]
-    Source: 'src/authenticated_belt.rs', lines 50:0-54:1
+    Source: 'src/authenticated_belt.rs', lines 70:0-87:1
     Visibility: public -/
 @[discriminant isize]
 inductive authenticated_belt.BeltQuorumStepInput where
@@ -103,7 +103,7 @@ structure pants_and_quorum_guards.BeltAuthorizationGrant where
   certified_acks : Std.U32
 
 /-- [qsag_verified::authenticated_belt::BeltQuorumStepOutput]
-    Source: 'src/authenticated_belt.rs', lines 55:0-59:1
+    Source: 'src/authenticated_belt.rs', lines 88:0-92:1
     Visibility: public -/
 @[discriminant isize]
 inductive authenticated_belt.BeltQuorumStepOutput where
@@ -141,7 +141,7 @@ structure pants_and_quorum_guards.BeltQuorumCore where
   poisoned : Bool
 
 /-- [qsag_verified::authenticated_belt::VerifiedBeltQuorumGuard]
-    Source: 'src/authenticated_belt.rs', lines 63:0-69:1
+    Source: 'src/authenticated_belt.rs', lines 96:0-102:1
     Visibility: public -/
 structure authenticated_belt.VerifiedBeltQuorumGuard where
   inner : pants_and_quorum_guards.BeltQuorumCore
@@ -249,7 +249,7 @@ structure cred_and_hd_guards.MlDsaReleaseGate where
   aborted : Bool
 
 /-- [qsag_verified::cred_and_hd_guards::HdZeroTestPhase]
-    Source: 'src/cred_and_hd_guards.rs', lines 249:0-255:1
+    Source: 'src/cred_and_hd_guards.rs', lines 256:0-262:1
     Visibility: public -/
 @[discriminant isize]
 inductive cred_and_hd_guards.HdZeroTestPhase where
@@ -260,7 +260,7 @@ inductive cred_and_hd_guards.HdZeroTestPhase where
 | FamilyQuarantined : cred_and_hd_guards.HdZeroTestPhase
 
 /-- [qsag_verified::cred_and_hd_guards::HdCommittedZeroTest]
-    Source: 'src/cred_and_hd_guards.rs', lines 260:0-267:1
+    Source: 'src/cred_and_hd_guards.rs', lines 267:0-274:1
     Visibility: public -/
 structure cred_and_hd_guards.HdCommittedZeroTest where
   session_id : Array Std.U8 32#usize
@@ -333,7 +333,7 @@ structure fts_spn_guard.FtsEpochGuard where
   poisoned : Bool
 
 /-- [qsag_verified::fts_spn_guard::FtsDeferredMacSession]
-    Source: 'src/fts_spn_guard.rs', lines 188:0-196:1
+    Source: 'src/fts_spn_guard.rs', lines 197:0-205:1
     Visibility: public -/
 structure fts_spn_guard.FtsDeferredMacSession where
   session_id : Array Std.U8 32#usize
@@ -392,7 +392,7 @@ inductive pants_and_quorum_guards.BeltQuorumCoreOutput where
   pants_and_quorum_guards.BeltQuorumCoreOutput
 
 /-- [qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard]
-    Source: 'src/pants_and_quorum_guards.rs', lines 555:0-559:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 563:0-567:1
     Visibility: public -/
 structure pants_and_quorum_guards.VerifiedWotsC256Guard where
   validated_digest : Array Std.U8 32#usize
@@ -400,13 +400,13 @@ structure pants_and_quorum_guards.VerifiedWotsC256Guard where
   verified_sum : Std.U32
 
 /-- [qsag_verified::pants_and_quorum_guards::RssOpenPermit]
-    Source: 'src/pants_and_quorum_guards.rs', lines 608:0-610:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 616:0-618:1
     Visibility: public -/
 structure pants_and_quorum_guards.RssOpenPermit where
   verified_clean : Bool
 
 /-- [qsag_verified::pants_and_quorum_guards::RssLatchStepInput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 614:0-618:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 622:0-626:1
     Visibility: public -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.RssLatchStepInput where
@@ -415,7 +415,7 @@ inductive pants_and_quorum_guards.RssLatchStepInput where
 | AuthorizeOpen : pants_and_quorum_guards.RssLatchStepInput
 
 /-- [qsag_verified::pants_and_quorum_guards::RssLatchStepOutput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 622:0-626:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 630:0-634:1
     Visibility: public -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.RssLatchStepOutput where
@@ -426,7 +426,7 @@ inductive pants_and_quorum_guards.RssLatchStepOutput where
   pants_and_quorum_guards.RssLatchStepOutput
 
 /-- [qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch]
-    Source: 'src/pants_and_quorum_guards.rs', lines 631:0-635:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 639:0-643:1
     Visibility: public -/
 structure pants_and_quorum_guards.VerifiedRssPoisonLatch where
   pending_relations : Std.U64
@@ -434,7 +434,7 @@ structure pants_and_quorum_guards.VerifiedRssPoisonLatch where
   poisoned : Bool
 
 /-- [qsag_verified::pants_and_quorum_guards::WaistbandDerivationRequest]
-    Source: 'src/pants_and_quorum_guards.rs', lines 773:0-781:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 794:0-802:1
     Visibility: public -/
 structure pants_and_quorum_guards.WaistbandDerivationRequest where
   req_layer : Std.U32
@@ -446,7 +446,7 @@ structure pants_and_quorum_guards.WaistbandDerivationRequest where
   candidate_ancestor_codeword_tag : Array Std.U8 32#usize
 
 /-- [qsag_verified::pants_and_quorum_guards::WaistbandAncestorPermit]
-    Source: 'src/pants_and_quorum_guards.rs', lines 786:0-792:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 807:0-813:1
     Visibility: public -/
 structure pants_and_quorum_guards.WaistbandAncestorPermit where
   layer : Std.U32
@@ -456,7 +456,7 @@ structure pants_and_quorum_guards.WaistbandAncestorPermit where
   authorized_codeword_tag : Array Std.U8 32#usize
 
 /-- [qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard]
-    Source: 'src/pants_and_quorum_guards.rs', lines 795:0-805:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 816:0-826:1
     Visibility: public -/
 structure pants_and_quorum_guards.VerifiedWaistbandRootGuard where
   key_pk_tag : Array Std.U8 32#usize
@@ -504,7 +504,7 @@ structure policy_and_addr.StatefulVelocityGuard where
   last_nonce : Std.U64
 
 /-- [qsag_verified::policy_and_addr::IntentAddressVersion]
-    Source: 'src/policy_and_addr.rs', lines 177:0-180:1
+    Source: 'src/policy_and_addr.rs', lines 188:0-191:1
     Visibility: public -/
 @[discriminant isize]
 inductive policy_and_addr.IntentAddressVersion where
@@ -512,7 +512,7 @@ inductive policy_and_addr.IntentAddressVersion where
 | V2 : policy_and_addr.IntentAddressVersion
 
 /-- [qsag_verified::policy_and_addr::IntentIdentityKind]
-    Source: 'src/policy_and_addr.rs', lines 203:0-207:1
+    Source: 'src/policy_and_addr.rs', lines 214:0-218:1
     Visibility: public -/
 @[discriminant isize]
 inductive policy_and_addr.IntentIdentityKind where
@@ -521,7 +521,7 @@ inductive policy_and_addr.IntentIdentityKind where
 | PolicyBound : policy_and_addr.IntentIdentityKind
 
 /-- [qsag_verified::policy_and_addr::IntentSuiteTag]
-    Source: 'src/policy_and_addr.rs', lines 232:0-238:1
+    Source: 'src/policy_and_addr.rs', lines 243:0-249:1
     Visibility: public -/
 @[discriminant isize]
 inductive policy_and_addr.IntentSuiteTag where
@@ -532,7 +532,7 @@ inductive policy_and_addr.IntentSuiteTag where
 | HybridSecp256k1SlhDsa : policy_and_addr.IntentSuiteTag
 
 /-- [qsag_verified::policy_and_addr::CanonicalIntent128]
-    Source: 'src/policy_and_addr.rs', lines 279:0-290:1
+    Source: 'src/policy_and_addr.rs', lines 290:0-301:1
     Visibility: public -/
 structure policy_and_addr.CanonicalIntent128 where
   suite_tag : policy_and_addr.IntentSuiteTag
@@ -547,7 +547,7 @@ structure policy_and_addr.CanonicalIntent128 where
   payload_digest : Array Std.U8 32#usize
 
 /-- [qsag_verified::policy_and_addr::IntentHeaderFields]
-    Source: 'src/policy_and_addr.rs', lines 293:0-300:1 -/
+    Source: 'src/policy_and_addr.rs', lines 304:0-311:1 -/
 structure policy_and_addr.IntentHeaderFields where
   suite_tag : policy_and_addr.IntentSuiteTag
   address_version : policy_and_addr.IntentAddressVersion
@@ -557,7 +557,7 @@ structure policy_and_addr.IntentHeaderFields where
   timestamp_secs : Std.U64
 
 /-- [qsag_verified::policy_and_addr::HybridRoleTag]
-    Source: 'src/policy_and_addr.rs', lines 573:0-576:1
+    Source: 'src/policy_and_addr.rs', lines 584:0-587:1
     Visibility: public -/
 @[discriminant isize]
 inductive policy_and_addr.HybridRoleTag where
@@ -657,7 +657,7 @@ structure tower.BdozWireOpening2Lane where
   key_lanes : Array tower.Tower128 2#usize
 
 /-- [qsag_verified::threshold::RssShare64]
-    Source: 'src/threshold.rs', lines 362:0-366:1
+    Source: 'src/threshold.rs', lines 349:0-353:1
     Visibility: public -/
 structure threshold.RssShare64 where
   x0 : Std.U64
@@ -665,7 +665,7 @@ structure threshold.RssShare64 where
   x2 : Std.U64
 
 /-- [qsag_verified::threshold::RssZeroSeeds64]
-    Source: 'src/threshold.rs', lines 371:0-375:1
+    Source: 'src/threshold.rs', lines 358:0-362:1
     Visibility: public -/
 structure threshold.RssZeroSeeds64 where
   r0 : Std.U64
@@ -673,7 +673,7 @@ structure threshold.RssZeroSeeds64 where
   r2 : Std.U64
 
 /-- [qsag_verified::threshold::BoundEpochRecord]
-    Source: 'src/threshold.rs', lines 459:0-463:1
+    Source: 'src/threshold.rs', lines 450:0-454:1
     Visibility: public -/
 structure threshold.BoundEpochRecord where
   epoch : Std.U64
@@ -681,7 +681,7 @@ structure threshold.BoundEpochRecord where
   r_rand : Array Std.U8 32#usize
 
 /-- [qsag_verified::threshold::LastBoundEpoch]
-    Source: 'src/threshold.rs', lines 469:0-472:1
+    Source: 'src/threshold.rs', lines 460:0-463:1
     Visibility: public -/
 @[discriminant isize]
 inductive threshold.LastBoundEpoch where
@@ -689,7 +689,7 @@ inductive threshold.LastBoundEpoch where
 | Bound : threshold.BoundEpochRecord → threshold.LastBoundEpoch
 
 /-- [qsag_verified::threshold::EpochLatch]
-    Source: 'src/threshold.rs', lines 484:0-489:1
+    Source: 'src/threshold.rs', lines 475:0-480:1
     Visibility: public -/
 structure threshold.EpochLatch where
   next_epoch : Std.U64
@@ -698,7 +698,7 @@ structure threshold.EpochLatch where
   last_bound : threshold.LastBoundEpoch
 
 /-- [qsag_verified::threshold::EpochSignRequest]
-    Source: 'src/threshold.rs', lines 494:0-499:1
+    Source: 'src/threshold.rs', lines 485:0-490:1
     Visibility: public -/
 structure threshold.EpochSignRequest where
   requested_epoch : Std.U64
@@ -707,7 +707,7 @@ structure threshold.EpochSignRequest where
   deterministic_r_rand : Array Std.U8 32#usize
 
 /-- [qsag_verified::threshold::EpochAuthGrant]
-    Source: 'src/threshold.rs', lines 503:0-508:1
+    Source: 'src/threshold.rs', lines 494:0-499:1
     Visibility: public -/
 structure threshold.EpochAuthGrant where
   authorized_epoch : Std.U64
@@ -716,14 +716,14 @@ structure threshold.EpochAuthGrant where
   is_idempotent_retry : Bool
 
 /-- [qsag_verified::threshold::EpochRequest]
-    Source: 'src/threshold.rs', lines 512:0-515:1
+    Source: 'src/threshold.rs', lines 503:0-506:1
     Visibility: public -/
 structure threshold.EpochRequest where
   requested_epoch : Std.U64
   key_epoch_id : Array Std.U8 32#usize
 
 /-- [qsag_verified::threshold::EpochLatchError]
-    Source: 'src/threshold.rs', lines 519:0-526:1
+    Source: 'src/threshold.rs', lines 510:0-517:1
     Visibility: public -/
 @[discriminant isize]
 inductive threshold.EpochLatchError where
@@ -755,7 +755,7 @@ structure tower.BdozVerifierSession2Lane where
   burned : Bool
 
 /-- [qsag_verified::tower::BdozOpeningGuard2Lane]
-    Source: 'src/tower.rs', lines 503:0-508:1
+    Source: 'src/tower.rs', lines 499:0-504:1
     Visibility: public -/
 structure tower.BdozOpeningGuard2Lane where
   alpha_lanes : Array tower.Tower128 2#usize
