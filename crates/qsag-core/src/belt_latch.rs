@@ -62,6 +62,10 @@ use crate::wipe::{ct_eq_bytes32, wipe_bytes32};
 /// Largest distance above the high-water mark at which a fresh epoch may be bound.
 pub const MAX_EPOCH_JUMP: u64 = 64;
 
+/// Longest digit vector a record may carry: the bound of the verified transition kernel,
+/// whose digit representation holds no more.
+pub const MAX_TARGET_SUM_DIGITS: usize = qsag_verified::BELT_LATCH_MAX_DIGITS as usize;
+
 const TAG_ECHO_KEY: &[u8] = b"QSAG.BELT.ECHO.KEY/v1";
 const TAG_ECHO_MAC: &[u8] = b"QSAG.BELT.ECHO.MAC/v1";
 #[cfg(feature = "std")]
@@ -143,7 +147,7 @@ impl BeltLatchState {
                 let msg_digest: [u8; 32] = rest[8..40].try_into().ok()?;
                 let retry_salt: [u8; 32] = rest[40..72].try_into().ok()?;
                 let len = u32::from_be_bytes(rest[72..76].try_into().ok()?) as usize;
-                if rest.len() != 76 + len {
+                if len > MAX_TARGET_SUM_DIGITS || rest.len() != 76 + len {
                     return None;
                 }
                 Some(BeltLatchRecord {
@@ -275,6 +279,10 @@ impl DurableWal for MemoryWal {
 /// * [`FsBeltWal::open_existing`] is for unanchored recovery. A missing log, a missing lock
 ///   sidecar, or a record that fails the MAC is an error; nothing here ever falls back to
 ///   epoch 0, so [`DurableWal::load`] never returns `Ok(None)` for this type.
+///
+/// A failed replacement or a refused anchor advance fails the handle permanently, including
+/// for a latch recovered from it through [`BeltLatch::into_wal`]: a log whose relation to its
+/// anchor is unknown must be reopened from disk against the anchor.
 #[cfg(feature = "std")]
 pub struct FsBeltWal {
     record: qsag_asm::durable::LockedRecord,
@@ -282,6 +290,7 @@ pub struct FsBeltWal {
     checkpoint: crate::durable_ledger::LedgerCheckpoint,
     anchor: Option<alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>>,
     release: core::cell::RefCell<Option<(crate::ceremony_journal::CeremonyReservation, u64)>>,
+    failed: core::cell::Cell<bool>,
 }
 
 #[cfg(feature = "std")]
@@ -306,17 +315,44 @@ impl FsBeltWal {
         self.checkpoint
     }
 
+    /// Whether an earlier write or anchor advance failed on this handle.
+    pub fn is_failed(&self) -> bool {
+        self.failed.get()
+    }
+
+    fn advance_anchor_or_fail(
+        &self,
+        checkpoint: crate::durable_ledger::LedgerCheckpoint,
+    ) -> Result<(), WalError> {
+        if let Some(anchor) = &self.anchor
+            && crate::durable_ledger::advance_anchor(&**anchor, checkpoint).is_err()
+        {
+            self.failed.set(true);
+            return Err(WalError::Io);
+        }
+        Ok(())
+    }
+
     /// Open under an independently durable anchor, catching up a committed successor
-    /// before returning. An unenrolled anchor is not accepted for recovery.
+    /// before returning. An unenrolled anchor adopts only an untouched genesis log, the state
+    /// [`Self::provision_genesis_anchored`] leaves when its anchor advance fails.
     pub fn open_existing_anchored(
         path: impl Into<std::path::PathBuf>,
         wal_key: [u8; 32],
         anchor: alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>,
     ) -> std::io::Result<Self> {
-        let minimum = anchor
-            .load()?
-            .ok_or_else(|| std::io::Error::other("missing belt anchor"))?;
-        let mut wal = Self::open_existing_at_least(path, wal_key, minimum)?;
+        let mut wal = match anchor.load()? {
+            Some(minimum) => Self::open_existing_at_least(path, wal_key, minimum)?,
+            None => {
+                let wal = Self::open_existing(path, wal_key)?;
+                let genesis = wal.checkpoint.generation == 1
+                    && wal.load().ok().flatten() == Some(BeltLatchState::default());
+                if !genesis {
+                    return Err(std::io::Error::other("missing belt anchor"));
+                }
+                wal
+            }
+        };
         crate::durable_ledger::advance_anchor(&*anchor, wal.checkpoint)?;
         wal.anchor = Some(anchor);
         Ok(wal)
@@ -345,7 +381,16 @@ impl FsBeltWal {
         permit: crate::ceremony_journal::CeremonyReleasePermit,
     ) -> std::io::Result<()> {
         *self.release.get_mut() = None;
-        *self.release.get_mut() = Some(journal.consume_belt_release(permit)?);
+        if self.failed.get() {
+            return Err(std::io::Error::other(
+                "belt latch log handle failed; reopen",
+            ));
+        }
+        *self.release.get_mut() = Some(
+            journal
+                .consume_belt_release(permit)
+                .inspect_err(|_| self.failed.set(true))?,
+        );
         Ok(())
     }
 
@@ -428,6 +473,7 @@ impl FsBeltWal {
             },
             anchor: None,
             release: core::cell::RefCell::new(None),
+            failed: core::cell::Cell::new(false),
         };
         let (encoded, ckpt) = wal.seal(1, &BeltLatchState::default());
         wal.record.replace(&encoded)?;
@@ -452,6 +498,7 @@ impl FsBeltWal {
             },
             anchor: None,
             release: core::cell::RefCell::new(None),
+            failed: core::cell::Cell::new(false),
         };
         let raw = wal.record.read()?;
         let Some((ckpt, _)) = wal.unseal(&raw) else {
@@ -495,10 +542,10 @@ impl FsBeltWal {
 #[cfg(feature = "std")]
 impl DurableWal for FsBeltWal {
     fn authorize_open(&self, record: &BeltLatchRecord) -> Result<(), WalError> {
-        if let Some(anchor) = &self.anchor {
-            crate::durable_ledger::advance_anchor(&**anchor, self.checkpoint)
-                .map_err(|_| WalError::Io)?;
+        if self.failed.get() {
+            return Err(WalError::Io);
         }
+        self.advance_anchor_or_fail(self.checkpoint)?;
         let (reservation, bound_epoch) = self.release.borrow_mut().take().ok_or(WalError::Io)?;
         if bound_epoch != record.epoch
             || !ct_eq_bytes32(&reservation.epoch_or_codeword, &record.binding())
@@ -509,11 +556,21 @@ impl DurableWal for FsBeltWal {
     }
 
     fn sync_persist(&mut self, state: &BeltLatchState) -> Result<(), WalError> {
-        let current_raw = self.record.read().map_err(|_| WalError::Io)?;
-        let (on_disk_ckpt, _) = self.unseal(&current_raw).ok_or(WalError::Corrupt)?;
+        if self.failed.get() {
+            return Err(WalError::Io);
+        }
+        let current_raw = self.record.read().map_err(|_| {
+            self.failed.set(true);
+            WalError::Io
+        })?;
+        let (on_disk_ckpt, _) = self.unseal(&current_raw).ok_or_else(|| {
+            self.failed.set(true);
+            WalError::Corrupt
+        })?;
         if on_disk_ckpt.generation != self.checkpoint.generation
             || !ct_eq_bytes32(&on_disk_ckpt.tag, &self.checkpoint.tag)
         {
+            self.failed.set(true);
             return Err(WalError::Corrupt);
         }
         let next_gen = self
@@ -522,19 +579,25 @@ impl DurableWal for FsBeltWal {
             .checked_add(1)
             .ok_or(WalError::Corrupt)?;
         let (encoded, next_ckpt) = self.seal(next_gen, state);
-        self.record.replace(&encoded).map_err(|_| WalError::Io)?;
-        self.checkpoint = next_ckpt;
-        if let Some(anchor) = &self.anchor {
-            crate::durable_ledger::advance_anchor(&**anchor, next_ckpt)
-                .map_err(|_| WalError::Io)?;
+        if self.record.replace(&encoded).is_err() {
+            self.failed.set(true);
+            return Err(WalError::Io);
         }
+        self.advance_anchor_or_fail(next_ckpt)?;
+        self.checkpoint = next_ckpt;
         Ok(())
     }
 
     fn load(&self) -> Result<Option<BeltLatchState>, WalError> {
-        match self.record.read() {
+        if self.failed.get() {
+            return Err(WalError::Io);
+        }
+        match self.record.read().inspect_err(|_| self.failed.set(true)) {
             Ok(raw) => {
-                let (ckpt, state) = self.unseal(&raw).ok_or(WalError::Corrupt)?;
+                let (ckpt, state) = self.unseal(&raw).ok_or_else(|| {
+                    self.failed.set(true);
+                    WalError::Corrupt
+                })?;
                 if ckpt.generation < self.checkpoint.generation
                     || (ckpt.generation == self.checkpoint.generation
                         && !ct_eq_bytes32(&ckpt.tag, &self.checkpoint.tag))
@@ -569,6 +632,8 @@ pub enum BeltLatchError {
     RetrySaltMismatch,
     /// The epoch is in flight with different digits.
     DigitsMismatch,
+    /// The digit vector is longer than [`MAX_TARGET_SUM_DIGITS`].
+    DigitsTooLong,
     /// The epoch was bound earlier and is no longer the in-flight record.
     EpochConsumed,
     /// No record is in flight (nothing was bound).
@@ -609,6 +674,7 @@ impl fmt::Display for BeltLatchError {
             Self::EpochAlreadyBound => f.write_str("epoch already bound to another message"),
             Self::RetrySaltMismatch => f.write_str("retry must replay the persisted salt"),
             Self::DigitsMismatch => f.write_str("retry must replay the persisted digits"),
+            Self::DigitsTooLong => f.write_str("digit vector exceeds the latch bound"),
             Self::EpochConsumed => f.write_str("epoch already consumed"),
             Self::NothingBound => f.write_str("no epoch is bound"),
             Self::RetrySaltUnavailable => {
@@ -934,26 +1000,78 @@ impl<W: DurableWal> BeltLatch<W> {
         retry_salt: &[u8; 32],
         target_sum_digits: &[u8],
     ) -> Result<BindOutcome, BeltLatchError> {
-        if let Some(salt) = self.latched_salt(epoch, msg_digest)? {
-            let rec = self
-                .state
-                .in_flight
-                .as_ref()
-                .ok_or(BeltLatchError::NothingBound)?;
-            if !ct_eq_bytes32(&salt, retry_salt) {
-                return Err(BeltLatchError::RetrySaltMismatch);
+        self.ensure_usable()?;
+        if target_sum_digits.len() > MAX_TARGET_SUM_DIGITS {
+            // Preserve replay error precedence without truncating the kernel's digit input.
+            if let Some(salt) = self.latched_salt(epoch, msg_digest)? {
+                return Err(if !ct_eq_bytes32(&salt, retry_salt) {
+                    BeltLatchError::RetrySaltMismatch
+                } else {
+                    BeltLatchError::DigitsMismatch
+                });
             }
-            if rec.target_sum_digits != target_sum_digits {
-                return Err(BeltLatchError::DigitsMismatch);
+            return Err(BeltLatchError::DigitsTooLong);
+        }
+        fn digits(bytes: &[u8]) -> qsag_verified::BeltLatchDigits {
+            let mut padded = [0u8; MAX_TARGET_SUM_DIGITS];
+            padded[..bytes.len()].copy_from_slice(bytes);
+            qsag_verified::BeltLatchDigits {
+                len: bytes.len() as u8,
+                row0: padded[0..32].try_into().unwrap(),
+                row1: padded[32..64].try_into().unwrap(),
+                row2: padded[64..96].try_into().unwrap(),
+                row3: padded[96..128].try_into().unwrap(),
             }
+        }
+        fn map_error(e: qsag_verified::BeltLatchKernelError) -> BeltLatchError {
+            use qsag_verified::BeltLatchKernelError as E;
+            match e {
+                E::InvalidCapacity => BeltLatchError::InvalidCapacity,
+                E::Exhausted => BeltLatchError::Exhausted,
+                E::EpochAlreadyBound => BeltLatchError::EpochAlreadyBound,
+                E::RetrySaltMismatch => BeltLatchError::RetrySaltMismatch,
+                E::DigitsMismatch => BeltLatchError::DigitsMismatch,
+                E::EpochConsumed => BeltLatchError::EpochConsumed,
+                E::EpochJumpTooLarge => BeltLatchError::EpochJumpTooLarge,
+                E::WalPoisoned | E::WalPersistFailed => BeltLatchError::WalPoisoned,
+            }
+        }
+        let current = self.state.in_flight.as_ref();
+        if current.is_some_and(|r| r.target_sum_digits.len() > MAX_TARGET_SUM_DIGITS) {
+            return Err(BeltLatchError::DigitsTooLong);
+        }
+        let record = qsag_verified::BeltLatchKernelRecord {
+            epoch: current.map_or(0, |r| r.epoch),
+            msg_digest: current.map_or([0; 32], |r| r.msg_digest),
+            retry_salt: current.map_or([0; 32], |r| r.retry_salt),
+            digits: digits(current.map_or(&[], |r| &r.target_sum_digits)),
+        };
+        let kernel = qsag_verified::BeltLatchKernel::recover(
+            1u64 << self.capacity_log2,
+            self.state.next_epoch,
+            current.is_some(),
+            record,
+        )
+        .map_err(map_error)?;
+        // Compute the success transition, but publish it only after durable persistence.
+        // A failed write instead poisons this handle and leaves its old state intact.
+        let (next_kernel, outcome) = kernel.bind(qsag_verified::BeltLatchBindRequest {
+            epoch,
+            msg_digest: *msg_digest,
+            retry_salt: *retry_salt,
+            digits: digits(target_sum_digits),
+            persist_ok: true,
+        });
+        if outcome.map_err(map_error)? == qsag_verified::BeltLatchBindOutcome::Replay {
             return Ok(BindOutcome::Replay);
         }
+        let accepted = next_kernel.in_flight();
         let next = BeltLatchState {
-            next_epoch: epoch + 1,
+            next_epoch: next_kernel.next_epoch(),
             in_flight: Some(BeltLatchRecord {
-                epoch,
-                msg_digest: *msg_digest,
-                retry_salt: *retry_salt,
+                epoch: accepted.epoch,
+                msg_digest: accepted.msg_digest,
+                retry_salt: accepted.retry_salt,
                 target_sum_digits: target_sum_digits.to_vec(),
             }),
         };
@@ -1120,6 +1238,44 @@ mod tests {
         let mut longer = raw;
         longer.push(0);
         assert_eq!(BeltLatchState::from_bytes(&longer), None);
+    }
+
+    #[test]
+    fn digit_vectors_beyond_the_kernel_bound_are_never_bound_or_decoded() {
+        let at_bound = [1u8; MAX_TARGET_SUM_DIGITS];
+        let over = [1u8; MAX_TARGET_SUM_DIGITS + 1];
+        let mut l = latch();
+        assert_eq!(
+            l.bind(0, &[1; 32], &[9; 32], &over),
+            Err(BeltLatchError::DigitsTooLong)
+        );
+        assert!(!l.is_wal_poisoned());
+        assert_eq!(l.wal_mut().persist_count(), 0);
+        assert_eq!((l.in_flight(), l.next_epoch()), (None, 0));
+        assert_eq!(
+            l.bind(0, &[1; 32], &[9; 32], &at_bound),
+            Ok(BindOutcome::Fresh)
+        );
+        // A replay with an over-long vector differs from the stored one.
+        assert_eq!(
+            l.bind(0, &[1; 32], &[9; 32], &over),
+            Err(BeltLatchError::DigitsMismatch)
+        );
+
+        let state = |digits: &[u8]| BeltLatchState {
+            next_epoch: 1,
+            in_flight: Some(BeltLatchRecord {
+                epoch: 0,
+                msg_digest: [1; 32],
+                retry_salt: [2; 32],
+                target_sum_digits: digits.to_vec(),
+            }),
+        };
+        assert_eq!(
+            BeltLatchState::from_bytes(&state(&at_bound).to_bytes()),
+            Some(state(&at_bound))
+        );
+        assert_eq!(BeltLatchState::from_bytes(&state(&over).to_bytes()), None);
     }
 
     #[test]

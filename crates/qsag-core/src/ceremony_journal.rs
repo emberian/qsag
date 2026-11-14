@@ -6,6 +6,7 @@
 use crate::LedgerCheckpoint;
 use crate::sponge::Cshake256Xof;
 use crate::wipe::{ct_eq_bytes32, wipe_bytes32};
+use core::sync::atomic::{AtomicBool, Ordering};
 use qsag_asm::durable::LockedRecord;
 use std::{io, path::PathBuf};
 
@@ -81,6 +82,20 @@ impl JournalEntry {
     }
 }
 
+/// The cursors and binding of the newest committed reservation. A caller recovering from a
+/// crash between [`FsCeremonyJournal::persist_before_release`] and its own ledger update
+/// derives its next cursors from these (they must strictly exceed both) and, when
+/// `epoch_or_codeword` is the identifier it is retrying, uses
+/// [`FsCeremonyJournal::commit_retry_attempt`] instead of a fresh reservation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommittedReservation {
+    pub epoch_or_codeword: [u8; 32],
+    pub seed_burn_cursor: u64,
+    pub hedge_generation: u64,
+    pub bound_epoch: Option<u64>,
+    pub is_retry: bool,
+}
+
 /// An owned, non-Clone authority. Only a successful durable transaction creates one.
 #[derive(Debug)]
 pub struct CeremonyReleasePermit {
@@ -93,6 +108,11 @@ pub struct CeremonyReleasePermit {
 }
 
 /// One exclusive authority per key; no mutable subordinate ledger escapes this object.
+///
+/// A failed replacement or a refused anchor advance leaves the disk, the anchor and this
+/// handle in an unknown relation, so it fails the handle permanently: every later commit
+/// and release check is refused, and only a fresh open (which re-verifies the record against
+/// the anchor) continues.
 pub struct FsCeremonyJournal {
     record: LockedRecord,
     key_id: [u8; 32],
@@ -100,6 +120,7 @@ pub struct FsCeremonyJournal {
     checkpoint: LedgerCheckpoint,
     entries: Vec<JournalEntry>,
     anchor: Option<Box<dyn crate::ExternalMonotoneAnchor>>,
+    failed: AtomicBool,
 }
 
 fn invalid() -> io::Error {
@@ -117,6 +138,45 @@ impl FsCeremonyJournal {
     /// before releasing secret-derived ceremony outputs.
     pub const fn checkpoint(&self) -> LedgerCheckpoint {
         self.checkpoint
+    }
+
+    /// The newest committed reservation, if any (see [`CommittedReservation`]).
+    pub fn last_committed(&self) -> Option<CommittedReservation> {
+        self.entries.last().map(|e| CommittedReservation {
+            epoch_or_codeword: e.epoch_or_codeword,
+            seed_burn_cursor: e.seed_burn_cursor,
+            hedge_generation: e.hedge_generation,
+            bound_epoch: e.bound_epoch,
+            is_retry: e.is_retry,
+        })
+    }
+
+    /// Whether an earlier write or anchor advance failed on this handle.
+    pub fn is_failed(&self) -> bool {
+        self.failed.load(Ordering::SeqCst)
+    }
+
+    fn ensure_usable(&self) -> io::Result<()> {
+        if self.is_failed() {
+            return Err(io::Error::other("ceremony journal handle failed; reopen"));
+        }
+        Ok(())
+    }
+
+    fn read_or_fail(&self) -> io::Result<Vec<u8>> {
+        self.record.read().inspect_err(|_| {
+            self.failed.store(true, Ordering::SeqCst);
+        })
+    }
+
+    fn advance_anchor_or_fail(&self, checkpoint: LedgerCheckpoint) -> io::Result<()> {
+        if let Some(anchor) = &self.anchor
+            && let Err(e) = crate::durable_ledger::advance_anchor(&**anchor, checkpoint)
+        {
+            self.failed.store(true, Ordering::SeqCst);
+            return Err(e);
+        }
+        Ok(())
     }
 
     pub fn create_new_anchored(
@@ -140,8 +200,18 @@ impl FsCeremonyJournal {
         mac_key: [u8; 32],
         anchor: Box<dyn crate::ExternalMonotoneAnchor>,
     ) -> io::Result<Self> {
-        let minimum = anchor.load()?.ok_or_else(invalid)?;
-        let mut journal = Self::open_existing_at_least(path, key_id, mac_key, minimum)?;
+        let mut journal = match anchor.load()? {
+            Some(minimum) => Self::open_existing_at_least(path, key_id, mac_key, minimum)?,
+            // `create_new_anchored` wrote genesis but its anchor advance failed. No permit can
+            // exist without an anchored commit, so only an empty genesis journal is adopted.
+            None => {
+                let journal = Self::open_existing(path, key_id, mac_key)?;
+                if journal.checkpoint.generation != 1 || !journal.entries.is_empty() {
+                    return Err(invalid());
+                }
+                journal
+            }
+        };
         crate::durable_ledger::advance_anchor(&*anchor, journal.checkpoint)?;
         journal.anchor = Some(anchor);
         Ok(journal)
@@ -162,6 +232,7 @@ impl FsCeremonyJournal {
             },
             entries: Vec::new(),
             anchor: None,
+            failed: AtomicBool::new(false),
         };
         let (encoded, checkpoint) = this.encode(1, None);
         this.record.replace(&encoded)?;
@@ -188,6 +259,7 @@ impl FsCeremonyJournal {
             },
             entries: Vec::new(),
             anchor: None,
+            failed: AtomicBool::new(false),
         };
         let bytes = this.record.read()?;
         if bytes.len() < HEADER_LEN + TAG_LEN
@@ -393,9 +465,11 @@ impl FsCeremonyJournal {
         is_retry: bool,
         context: CeremonyContext,
     ) -> io::Result<CeremonyReleasePermit> {
+        self.ensure_usable()?;
         self.validate(&r, bound_epoch, is_retry, context)?;
         let (expected_on_disk, expected_ckpt) = self.encode(self.checkpoint.generation, None);
-        if expected_ckpt != self.checkpoint || self.record.read()? != expected_on_disk {
+        if expected_ckpt != self.checkpoint || self.read_or_fail()? != expected_on_disk {
+            self.failed.store(true, Ordering::SeqCst);
             return Err(invalid());
         }
         let next_gen = self
@@ -405,12 +479,13 @@ impl FsCeremonyJournal {
             .ok_or_else(invalid)?;
         let entry = JournalEntry::from_reservation(&r, bound_epoch, is_retry, context);
         let (next_bytes, next_ckpt) = self.encode(next_gen, Some(&entry));
-        self.record.replace(&next_bytes)?;
+        if let Err(e) = self.record.replace(&next_bytes) {
+            self.failed.store(true, Ordering::SeqCst);
+            return Err(e);
+        }
+        self.advance_anchor_or_fail(next_ckpt)?;
         self.checkpoint = next_ckpt;
         self.entries.push(entry);
-        if let Some(anchor) = &self.anchor {
-            crate::durable_ledger::advance_anchor(&**anchor, self.checkpoint)?;
-        }
         Ok(CeremonyReleasePermit {
             reservation: r,
             bound_epoch,
@@ -486,9 +561,8 @@ impl FsCeremonyJournal {
     }
 
     fn verify_current_permit(&self, permit: &CeremonyReleasePermit) -> io::Result<()> {
-        if let Some(anchor) = &self.anchor {
-            crate::durable_ledger::advance_anchor(&**anchor, self.checkpoint)?;
-        }
+        self.ensure_usable()?;
+        self.advance_anchor_or_fail(self.checkpoint)?;
         if permit.seal != self.record.lock_seal()
             || permit.generation != self.checkpoint.generation
             || !ct_eq_bytes32(&permit.reservation.key_id, &self.key_id)
@@ -504,7 +578,8 @@ impl FsCeremonyJournal {
             return Err(invalid());
         }
         let (expected_on_disk, expected_ckpt) = self.encode(self.checkpoint.generation, None);
-        if expected_ckpt != self.checkpoint || self.record.read()? != expected_on_disk {
+        if expected_ckpt != self.checkpoint || self.read_or_fail()? != expected_on_disk {
+            self.failed.store(true, Ordering::SeqCst);
             return Err(invalid());
         }
         Ok(())
@@ -591,6 +666,215 @@ mod tests {
         drop(wal);
         std::fs::write(&path, snapshot).unwrap();
         assert!(FsBeltWal::open_existing_anchored(&path, [3; 32], Box::new(anchor)).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    fn reservation(n: u8) -> CeremonyReservation {
+        CeremonyReservation {
+            ceremony_id: [n; 32],
+            key_id: [1; 32],
+            epoch_or_codeword: [n; 32],
+            seed_burn_cursor: u64::from(n),
+            hedge_generation: u64::from(n),
+        }
+    }
+
+    #[test]
+    fn a_refused_anchor_advance_fails_the_journal_handle_for_good() {
+        let dir = scratch_dir("journal-sticky");
+        let path = dir.join("journal");
+        let anchor = TestAnchor::default();
+        let mut journal = FsCeremonyJournal::create_new_anchored(
+            &path,
+            [1; 32],
+            [2; 32],
+            Box::new(anchor.clone()),
+        )
+        .unwrap();
+        let held = journal.persist_before_release(reservation(1)).unwrap();
+        let before = journal.checkpoint();
+        let committed_before = journal.last_committed();
+        anchor.0.lock().unwrap().1 = true;
+        assert!(journal.persist_before_release(reservation(2)).is_err());
+        assert_eq!(journal.checkpoint(), before);
+        assert_eq!(journal.last_committed(), committed_before);
+        assert!(journal.is_failed());
+        anchor.0.lock().unwrap().1 = false;
+        // The anchor accepts again, but this handle's relation to it is unknown: it neither
+        // commits (and so cannot climb past the anchor) nor honours a permit.
+        assert!(journal.persist_before_release(reservation(3)).is_err());
+        assert!(journal.consume_release(held).is_err());
+        drop(journal);
+        let mut journal =
+            FsCeremonyJournal::open_existing_anchored(&path, [1; 32], [2; 32], Box::new(anchor))
+                .unwrap();
+        assert!(!journal.is_failed());
+        let permit = journal.persist_before_release(reservation(3)).unwrap();
+        assert_eq!(journal.consume_release(permit).unwrap(), reservation(3));
+        drop(journal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_refused_belt_anchor_advance_survives_latch_recovery_from_the_same_handle() {
+        use crate::belt_latch::{BeltLatch, BeltLatchError, DurableWal, FsBeltWal, WalError};
+        let dir = scratch_dir("belt-sticky");
+        let path = dir.join("belt");
+        let anchor = TestAnchor::default();
+        let wal = FsBeltWal::provision_genesis_anchored(&path, [3; 32], Box::new(anchor.clone()))
+            .unwrap();
+        let mut latch = BeltLatch::recover(wal, 20).unwrap();
+        anchor.0.lock().unwrap().1 = true;
+        assert_eq!(
+            latch.bind(0, &[1; 32], &[2; 32], &[1, 2]),
+            Err(BeltLatchError::Wal(WalError::Io))
+        );
+        anchor.0.lock().unwrap().1 = false;
+        let wal = latch.into_wal();
+        assert!(wal.is_failed());
+        assert!(BeltLatch::recover(wal, 20).is_err());
+        let wal =
+            FsBeltWal::open_existing_anchored(&path, [3; 32], Box::new(anchor.clone())).unwrap();
+        assert!(!wal.is_failed());
+        assert!(wal.load().unwrap().is_some());
+        assert_eq!(anchor.0.lock().unwrap().0, Some(wal.checkpoint()));
+        drop(wal);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_genesis_whose_anchor_advance_failed_is_adopted_and_nothing_later_is() {
+        use crate::belt_latch::{BeltLatchState, DurableWal, FsBeltWal};
+        let dir = scratch_dir("anchor-genesis");
+        let anchor = TestAnchor::default();
+        anchor.0.lock().unwrap().1 = true;
+        let jpath = dir.join("journal");
+        let bpath = dir.join("belt");
+        assert!(
+            FsCeremonyJournal::create_new_anchored(
+                &jpath,
+                [1; 32],
+                [2; 32],
+                Box::new(anchor.clone())
+            )
+            .is_err()
+        );
+        assert!(
+            FsBeltWal::provision_genesis_anchored(&bpath, [3; 32], Box::new(anchor.clone()))
+                .is_err()
+        );
+        anchor.0.lock().unwrap().1 = false;
+        let journal_anchor = TestAnchor::default();
+        let mut journal = FsCeremonyJournal::open_existing_anchored(
+            &jpath,
+            [1; 32],
+            [2; 32],
+            Box::new(journal_anchor.clone()),
+        )
+        .unwrap();
+        assert_eq!(journal.checkpoint().generation, 1);
+        assert_eq!(
+            journal_anchor.0.lock().unwrap().0,
+            Some(journal.checkpoint())
+        );
+        journal.persist_before_release(reservation(1)).unwrap();
+        drop(journal);
+        let mut wal =
+            FsBeltWal::open_existing_anchored(&bpath, [3; 32], Box::new(anchor.clone())).unwrap();
+        assert_eq!(anchor.0.lock().unwrap().0, Some(wal.checkpoint()));
+        wal.sync_persist(&BeltLatchState {
+            next_epoch: 1,
+            in_flight: None,
+        })
+        .unwrap();
+        drop(wal);
+        // Past genesis, an unenrolled anchor is a lost anchor, not a fresh one.
+        assert!(
+            FsCeremonyJournal::open_existing_anchored(
+                &jpath,
+                [1; 32],
+                [2; 32],
+                Box::new(TestAnchor::default())
+            )
+            .is_err()
+        );
+        assert!(
+            FsBeltWal::open_existing_anchored(&bpath, [3; 32], Box::new(TestAnchor::default()))
+                .is_err()
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_crash_after_the_reservation_is_recovered_through_the_committed_cursors() {
+        let dir = scratch_dir("journal-cursor");
+        let path = dir.join("journal");
+        let mut journal = FsCeremonyJournal::create_new(&path, [1; 32], [2; 32]).unwrap();
+        assert_eq!(journal.last_committed(), None);
+        // The caller's own burn ledger stands at generation 4 and reserves cursor 5 for seed
+        // `[9; 32]`; the process dies before that ledger advances.
+        let seed_id = [9; 32];
+        journal
+            .persist_before_release(CeremonyReservation {
+                ceremony_id: [1; 32],
+                key_id: [1; 32],
+                epoch_or_codeword: seed_id,
+                seed_burn_cursor: 5,
+                hedge_generation: 5,
+            })
+            .unwrap();
+        drop(journal);
+        let mut journal = FsCeremonyJournal::open_existing(&path, [1; 32], [2; 32]).unwrap();
+        // Recomputing the cursor from the stale burn ledger reuses 5 and is refused.
+        assert!(
+            journal
+                .persist_before_release(CeremonyReservation {
+                    ceremony_id: [2; 32],
+                    key_id: [1; 32],
+                    epoch_or_codeword: seed_id,
+                    seed_burn_cursor: 5,
+                    hedge_generation: 5,
+                })
+                .is_err()
+        );
+        let last = journal.last_committed().unwrap();
+        assert_eq!(
+            last,
+            CommittedReservation {
+                epoch_or_codeword: seed_id,
+                seed_burn_cursor: 5,
+                hedge_generation: 5,
+                bound_epoch: None,
+                is_retry: false,
+            }
+        );
+        let burn_ledger_next = 5;
+        let cursor = burn_ledger_next.max(last.seed_burn_cursor) + 1;
+        let hedge = last.hedge_generation + 1;
+        let retry = CeremonyReservation {
+            ceremony_id: [3; 32],
+            key_id: [1; 32],
+            epoch_or_codeword: seed_id,
+            seed_burn_cursor: cursor,
+            hedge_generation: hedge,
+        };
+        let permit = journal.commit_retry_attempt(retry).unwrap();
+        assert_eq!(journal.consume_release(permit).unwrap().seed_burn_cursor, 6);
+        assert!(journal.last_committed().unwrap().is_retry);
+        drop(journal);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

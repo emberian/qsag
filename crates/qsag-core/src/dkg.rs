@@ -1641,6 +1641,41 @@ pub fn run_dealerless_reshare_seed32_gf256(
     enrolled_root: &[u8; 32],
     recompute_public_root: impl FnOnce(&[ShamirSeedShare256]) -> Result<[u8; 32], DkgError>,
 ) -> Result<Vec<ShamirSeedShare256>, DkgError> {
+    run_dealerless_reshare_seed32_gf256_with_mesh_root(
+        session_id,
+        old_t,
+        old_quorum_indices,
+        old_shares,
+        new_t,
+        new_eval_points,
+        new_ot_mesh,
+        old_quorum_rngs,
+        new_party_rngs,
+        enrolled_root,
+        |shares, _mesh| recompute_public_root(shares),
+    )
+}
+
+/// Reshare with an MPC root callback that reuses the new committee's established OT mesh.
+/// The callback runs after the redistribution checks, so its extensions consume fresh
+/// channel counters without bootstrapping a second set of base OTs.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Committee and root verification inputs"
+)]
+pub fn run_dealerless_reshare_seed32_gf256_with_mesh_root(
+    session_id: [u8; 32],
+    old_t: usize,
+    old_quorum_indices: &[usize],
+    old_shares: &mut [ShamirSeedShare256],
+    new_t: usize,
+    new_eval_points: &[TowerGf256],
+    new_ot_mesh: &mut OtMesh,
+    old_quorum_rngs: &mut [PartyPrivateRng],
+    new_party_rngs: &mut [PartyPrivateRng],
+    enrolled_root: &[u8; 32],
+    recompute_public_root: impl FnOnce(&[ShamirSeedShare256], &mut OtMesh) -> Result<[u8; 32], DkgError>,
+) -> Result<Vec<ShamirSeedShare256>, DkgError> {
     let new_n = new_eval_points.len();
     if old_t == 0
         || old_quorum_indices.len() != old_t
@@ -1759,7 +1794,7 @@ pub fn run_dealerless_reshare_seed32_gf256(
         old_shares,
         out,
         enrolled_root,
-        recompute_public_root,
+        |shares| recompute_public_root(shares, new_ot_mesh),
         ShamirSeedShare256::wipe_and_invalidate,
     )
 }
@@ -3939,11 +3974,13 @@ mod tests {
         let mut bad = cert.clone();
         bad.signer_mask[0] ^= 1;
         assert!(cluster.verify_certificate(&bad, 5, &[8; 32]).is_err());
+        let retained = cluster.durable_checkpoints().unwrap();
         drop(cluster);
         let wals = (0..3)
             .map(|p| FsWalEpochLatch::open_existing(dir.join(p.to_string()), [p + 1; 32]).unwrap())
             .collect();
         let mut cluster = QuorumEpochLatchCluster::from_durable_latches(1, wals, keys).unwrap();
+        assert_eq!(cluster.durable_checkpoints().unwrap(), retained);
         assert_eq!(cluster.next_unreserved_epoch(), Some(6));
         cluster.verify_certificate(&cert, 5, &[8; 32]).unwrap();
         assert!(cluster.certify_epoch(&[0, 1, 2], 5, [9; 32]).is_err());
