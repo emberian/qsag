@@ -7228,7 +7228,7 @@ def cozkHeadShare (w : Tower128) (seeds : Fin 3 → List UInt8) (i : Nat)
 theorem cozk_heads_reconstruct_recorded_wire (w : Tower128) (seeds : Fin 3 → List UInt8) (i : Nat) :
     towerAdd 7 (towerAdd 7 (cozkHeadShare w seeds i ⟨0, by decide⟩)
       (cozkHeadShare w seeds i ⟨1, by decide⟩)) (cozkHeadShare w seeds i ⟨2, by decide⟩) = w := by
-  simp only [cozkHeadShare, ↓reduceIte]
+  dsimp [cozkHeadShare]
   rw [towerAdd_comm 7 w, ← towerAdd_assoc, towerAdd_self_zero, towerZero_add]
 
 def cozkExecutionHead (ex : CoZkExecution) (seeds : Fin 3 → List UInt8)
@@ -7917,7 +7917,9 @@ inductive FtsSpnEvent where
   deriving DecidableEq, Repr
 
 def ftsOpeningsBytes (ops : List FtsRecordedOpening) : List UInt8 :=
-  encodeMultiFrame (ops.map (fun op => ftsEncodeLanes op.maskedOpenings))
+  encodeMultiFrame (ops.map (fun op => encodeMultiFrame
+    [ftsEncodeLanes op.maskedOpenings, ftsEncodeLanes op.tagDeviationLeft,
+      ftsEncodeLanes op.tagDeviationRight]))
 
 def ftsResidualBytes (rs : List FtsLanes) : List UInt8 :=
   encodeMultiFrame (rs.map ftsEncodeLanes)
@@ -8090,6 +8092,27 @@ theorem fts_wire_trace_no_extra_secret_fields (xs ys : List FtsSpnEvent)
       cases z <;> simp only [List.map_cons, ftsPublicObservation, ftsPublicObservationInverse, ih]
   rw [← hId xs, ← hId ys, h]
 
+/-- Public parameters absorbed by the distributed FTS signing transcript. -/
+structure FtsDistributedContext where
+  roster : List UInt16
+  merkleRoot : List UInt64
+  treeHeight : Nat
+  winternitzW : Nat
+  numChains : Nat
+  targetSum : Nat
+  count : UInt8
+  leafMode : Bool
+  deriving DecidableEq
+
+def ftsDistributedSigningContextV4 (c : FtsDistributedContext)
+    (sid pkSeed : List UInt8) (epoch : Nat) (msg : List UInt8) : List UInt8 :=
+  let context := c.roster.flatMap (fun i => be 2 i.toNat) ++
+    c.merkleRoot.flatMap (fun x => le 8 x.toNat) ++
+    [c.treeHeight, c.winternitzW, c.numChains, c.targetSum].flatMap (be 8)
+  cshake256Bytes "QSAG.PSFTS.DISTRIBUTED.V4".toUTF8.data.toList
+    (encodeFramedU64Le [sid, pkSeed, be 4 epoch,
+      [c.count, if c.leafMode then 1 else 0], msg, context])
+
 structure FtsOperationalGuard where
   enrolledAlpha : FtsLanes
   alphaLeftNonzero : enrolledAlpha.1 ≠ 0#128
@@ -8097,6 +8120,7 @@ structure FtsOperationalGuard where
   pkSeed : List UInt8 := List.replicate 32 0
   enrolledInput : FtsLanes
   powerMaskTape : List FtsLanes
+  distributedContext : Option FtsDistributedContext := none
   burnedEpochs : List Nat := []
   active : Option FtsWireState := none
   quarantined : Bool := false
@@ -8107,8 +8131,8 @@ inductive FtsOperationalInput where
   | session (input : FtsWireInput)
   deriving DecidableEq
 
-/-- Epoch burn precedes every opening; keys and private input come from enrollment; signing context
-    uses domain-prefixed `ftsSigningContextV3`; any session rejection permanently quarantines the guard. -/
+/-- Epoch burn precedes every opening. MAC exposure permanently quarantines the
+long-term share; earlier protocol rejection burns the epoch and discards the session. -/
 def ftsSpnEpochStep (H : Hash) (s : FtsOperationalGuard) (i : FtsOperationalInput) :
     CustodyStepOutcome FtsOperationalGuard FtsSpnEvent FtsSpnErr :=
   if s.quarantined then
@@ -8119,7 +8143,9 @@ def ftsSpnEpochStep (H : Hash) (s : FtsOperationalGuard) (i : FtsOperationalInpu
       if ep ∈ s.burnedEpochs ∨ 2 ^ 32 ≤ ep ∨ s.powerMaskTape.length < 48 then
         .rejected s .epochAlreadyBurned
       else
-        let ctx := ftsSigningContextV3 sessSeed s.pkSeed ep 1 msg quorumBytes
+        let ctx := match s.distributedContext with
+          | none => ftsSigningContextV3 sessSeed s.pkSeed ep 1 msg quorumBytes
+          | some c => ftsDistributedSigningContextV4 c sessSeed s.pkSeed ep msg
         let activeState : FtsWireState :=
           { epoch := ep
             signingContext := ctx
@@ -8136,7 +8162,7 @@ def ftsSpnEpochStep (H : Hash) (s : FtsOperationalGuard) (i : FtsOperationalInpu
     | some active, .session inp =>
       match ftsSpnStep H active inp with
       | .rejected _ err =>
-        .rejected { s with active := none, quarantined := true } err
+        .rejected { s with active := none, quarantined := (active.macOpeningExposed || active.phase == .intermediateMacOpen || active.phase == .macOpen) } err
       | .accepted next event =>
         let nextActive := if next.phase == .completed then none else some next
         .accepted { s with active := nextActive } event
@@ -8421,6 +8447,30 @@ def hdMaskedEnroll (n d1 d2 Q : Nat)
     alpha := alpha
     alphaNonzero := ha
     hardened := hard }
+
+/-- A projection index addresses an already-public row of the flattened module
+relation. General arbitrary forms remain available for the abstract privacy theorem. -/
+structure AuthorizedHdProjection (d2 : Nat) where
+  publicRelationCoefficient : Fin d2
+
+def hdAuthorizedEnroll (n d1 d2 Q : Nat)
+    (A : Fin d2 → Fin d1 → HdFq204) (t : Fin d2 → HdFq204)
+    (secret : ShortMlweWitness hdCbdEta d1 d2 A t)
+    (projections : Fin Q → AuthorizedHdProjection d2) (masks : Fin Q → HdFq204)
+    (alpha : HdFq204) (ha : alpha ≠ HdFq204.zero) (parentHard requestedHard : Bool) :
+    Option (HdMaskedState n d1 d2 Q) :=
+  if parentHard && !requestedHard then none else
+    some (hdMaskedEnroll n d1 d2 Q A t secret
+      (fun q => A (projections q).publicRelationCoefficient) masks alpha ha requestedHard)
+
+theorem hd_hardened_parent_rejects_downgrade (n d1 d2 Q : Nat)
+    (A : Fin d2 → Fin d1 → HdFq204) (t : Fin d2 → HdFq204)
+    (secret : ShortMlweWitness hdCbdEta d1 d2 A t)
+    (projections : Fin Q → AuthorizedHdProjection d2) (masks : Fin Q → HdFq204)
+    (alpha : HdFq204) (ha : alpha ≠ HdFq204.zero) :
+    hdAuthorizedEnroll n d1 d2 Q A t secret projections masks alpha ha true false = none := by
+  unfold hdAuthorizedEnroll
+  rfl
 
 def hdZeroTestStep (H : Hash) (n d1 d2 Q : Nat)
     (s : HdMaskedState n d1 d2 Q) (i : HdMaskedInput n) :

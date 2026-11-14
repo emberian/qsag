@@ -55,6 +55,8 @@ public import Qsag.Goldilocks
 public import Qsag.UcGames
 public import Qsag.CustodySuiteFull
 public import Qsag.Tactic.AssuranceKit
+public import Qsag.ThresholdMlDsaAndToprf
+import all Qsag.ThresholdMlDsaAndToprf
 import all Qsag.Keccak
 import all Qsag.Goldilocks
 import all Qsag.CustodySuiteFull
@@ -2360,6 +2362,62 @@ run_cmd do
   if rejected != 0 then
     throwError m!"Module axiom audit rejected {rejected} dependencies"
   logInfo m!"Module axiom audit: {names.length} declarations, 0 rejected axioms"
+
+
+/-! ## Multi-gate TOPRF layer transport
+
+Each layer carries its own context, layer counter and honest gate vectors.
+The transport uses the Rust threshold and digest-holder rotation from the
+threshold module. The extractor stops with concrete hash preimages on failure.
+-/
+
+structure ToprfLayerTransport204 where
+  context : List UInt8
+  layer : UInt64
+  values : Fin 5 → Fin 5 → List Goldilocks
+  faultyValues : Fin 5 → Fin 5 → Option (List Goldilocks)
+  faultyDigest : Fin 5 → Fin 5 → Option (List UInt8)
+  contextBound : context.length < 2 ^ 20
+  valuesBound : ∀ i j, (values i j).length < 2 ^ 20
+
+def toprfLayerDecoded204 (H : List UInt8 → List UInt8) (bad : Fin 5)
+    (L : ToprfLayerTransport204) (i j : Fin 5) : Option (List Goldilocks) :=
+  toprfGroupTransport204 H L.context L.layer i j bad (L.values i j)
+    (L.faultyValues i j) (L.faultyDigest i j)
+
+/-- A complete layer: all groups are decoded correctly, or explicit collision
+bytes are returned. Group size can vary between pairs and between layers. -/
+def toprfLayerExtract204 (H : List UInt8 → List UInt8) (bad : Fin 5)
+    (L : ToprfLayerTransport204) :
+    PSum (∀ i j, i ≠ j → toprfLayerDecoded204 H bad L i j = some (L.values i j))
+      (ToprfCollisionWitness204 H) :=
+  finiteChecks204 (fun i => finiteChecks204 (fun j =>
+    if h : i = j then .inl (fun hn => False.elim (hn h))
+    else match toprfGroupTransport204_extract H L.context L.layer i j bad (L.values i j)
+      (L.faultyValues i j) (L.faultyDigest i j) L.contextBound (L.valuesBound i j) with
+      | .inr collision => .inr collision
+      | .inl he => .inl (fun _ => he)))
+
+/-- No global collision-freeness premise, and no fixed one-gate restriction. -/
+def toprfLayersExtract204 (H : List UInt8 → List UInt8) (bad : Fin 5) :
+    (layers : List ToprfLayerTransport204) →
+    PSum (∀ L ∈ layers, ∀ i j, i ≠ j → toprfLayerDecoded204 H bad L i j = some (L.values i j))
+      (ToprfCollisionWitness204 H)
+  | [] => .inl (by intro L h; cases h)
+  | L :: rest =>
+    match toprfLayerExtract204 H bad L with
+    | .inr collision => .inr collision
+    | .inl hL =>
+      match toprfLayersExtract204 H bad rest with
+      | .inr collision => .inr collision
+      | .inl hs => .inl (by
+          intro K hK i j hij
+          rcases List.mem_cons.mp hK with h | h
+          · subst K; exact hL i j hij
+          · exact hs K h i j hij)
+
+theorem toprfRotation204_not_constant :
+    (toprfGroupRoles204 0 1).2.2 ≠ (toprfHolders 0 1).getD 2 0 := by decide
 
 end Qsag
 end

@@ -304,6 +304,12 @@ registers or every compiler-generated copy. Destructors require normal scope
 exit or unwinding, rather than process abort. The storage tests cover growth,
 truncation, early iterator drop, error return, unwind, and allocation reuse.
 
+Parallel transports may bound active repetition batches with
+`Transport::max_parallel_batches`; batches remain in ascending order and all
+438 repetitions still pass the same checks before opening. A completed batch
+releases and wipes evaluation scratch while retaining its authenticated engine
+for the opening rounds. The default transport limit permits all batches.
+
 All 438 repetitions' view commitments and verified-zero output shares feed the
 ceremony-wide `QSAG.MIGRATE.ROOT.V3` Merkle/transcript root. Custodians execute
 both cross-batch pre-commit (`QSAG.OUTER.PRECOMMIT.V1`) and post-root freeze
@@ -322,6 +328,14 @@ also passed. This closes the earlier timed-out Bitcoin execution check; it does
 not establish the open production privacy or FS/QROM refinements. The unified
 proof census and remaining boundaries are tracked in
 [the convergence record](../../docs/CONVERGENCE_STATUS.md).
+
+The subsequent gadget-storage update adds two zeroization tests. All 41 unit
+tests and the doctest pass in separately bounded Linux runs; the complete
+Bitcoin and Ed25519 ceremonies take 321.00 s and 234.75 s respectively with
+host-native release compilation. These individual results do not establish a
+single-command 600-second suite result. Exact commands, resource measurements,
+and the final aggregate outcome are recorded in
+[the gadget-storage verification record](WAVE4U_VERIFICATION.md).
 
 Unit and adversarial integration tests verify:
 
