@@ -999,3 +999,1004 @@ fn shamir_share_planes(
             let mut acc = [0u64; 8];
             for c in coeffs.iter().rev() {
                 acc = bs_gf256_xor(&mat.scale_planes(&acc), c);
+            }
+            acc
+        })
+        .collect();
+    for c in &mut coeffs {
+        wipe_u64s(c);
+    }
+    out
+}
+
+/// Shamir value shares `[party][word]` and Shamir MAC shares `[party][word][lane][bit]`.
+pub(super) type ShamirAuthenticatedWords =
+    (Vec<Vec<BitslicedGf256x64>>, Vec<Vec<[[Tower128; 64]; 2]>>);
+
+/// Deal degree-`< t` shares of every party's XOR share `bit_words[party][word]` and of its
+/// additive MAC share `mac_bits[party][lane][64 * word + bit]`, then run the `Π_MAC`
+/// consistency and degree check over all `n` parties. `tamper` sees the dealt shares before
+/// the check.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Quorum, value shares, MAC shares and private randomness are separate protocol inputs"
+)]
+fn convert_to_shamir_and_check(
+    session_id: &[u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    alpha_shamir: &[[Tower128; 2]],
+    pool: &mut DeltaCotPool,
+    bit_words: &[Vec<u64>],
+    mac_bits: &[[Vec<u128>; 2]],
+    transcript: &[u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+    tamper: &mut ShamirTamper<'_>,
+) -> Result<ShamirAuthenticatedWords, PreprocessError> {
+    let n = eval_points.len();
+    let num_words = bit_words[0].len();
+    let eval_mats: Vec<PublicGf256Matrix> = eval_points
+        .iter()
+        .map(|&pt| PublicGf256Matrix::from_public_scalar(pt))
+        .collect();
+
+    // Disposable mask word of the check: 512 pool bits per party, read as 64 `GF(256)` lanes.
+    let chk_off = pool.alloc(512)?;
+    struct Dealer {
+        party: usize,
+        rng: PartyPrivateRng,
+        /// `[receiver][word]`, the mask word last.
+        dealt: SecretBuffer<Vec<Vec<BitslicedGf256x64>>>,
+        additive: SecretBuffer<Vec<[[u128; 64]; 2]>>,
+    }
+    let mut dealers: Vec<Dealer> = (0..n)
+        .map(|party| Dealer {
+            party,
+            rng: PartyPrivateRng::from_seed(
+                party_rngs[party].next_bytes32(),
+                b"QSAG.TRIPLE.F2.DEAL/v1",
+            ),
+            dealt: SecretBuffer(vec![vec![[0u64; 8]; num_words + 1]; n]),
+            additive: SecretBuffer(vec![[[0u128; 64]; 2]; num_words + 1]),
+        })
+        .collect();
+    {
+        let pool_ref = &*pool;
+        let eval_mats_ref = &eval_mats;
+        par_for_each(&mut dealers, |dealer| {
+            let p = dealer.party;
+            for (k, word) in bit_words[p].iter().enumerate() {
+                let dealt = SecretBuffer(shamir_share_bits64_gf256_mats(
+                    t,
+                    eval_mats_ref,
+                    *word,
+                    &mut dealer.rng,
+                ));
+                for q in 0..n {
+                    dealer.dealt[q][k] = dealt[q];
+                }
+                for lane in 0..2 {
+                    dealer.additive[k][lane]
+                        .copy_from_slice(&mac_bits[p][lane][64 * k..64 * k + 64]);
+                }
+            }
+            let mut planes: BitslicedGf256x64 =
+                core::array::from_fn(|pl| pool_ref.rho[p][chk_off / 64 + pl]);
+            let dealt = SecretBuffer(shamir_share_planes(
+                t,
+                eval_mats_ref,
+                &planes,
+                &mut dealer.rng,
+            ));
+            wipe_u64s(&mut planes);
+            for q in 0..n {
+                dealer.dealt[q][num_words] = dealt[q];
+            }
+            for lane in 0..2 {
+                for bit in 0..64 {
+                    let mut acc = Tower128::ZERO;
+                    for pl in 0..8 {
+                        let mac = pool_ref.mac_bit(p, chk_off + 64 * pl + bit, lane, 0);
+                        acc = acc.add(Tower128(mac).mul_gf256(TowerGf256(1u8 << pl)));
+                    }
+                    dealer.additive[num_words][lane][bit] = acc.0;
+                }
+            }
+        });
+    }
+    let mut words_sh = SecretBuffer(vec![vec![[0u64; 8]; num_words]; n]);
+    let mut r_chk_sh = SecretBuffer(vec![[0u64; 8]; n]);
+    for dealer in &dealers {
+        for q in 0..n {
+            for k in 0..num_words {
+                bs_gf256_xor_assign(&mut words_sh[q][k], &dealer.dealt[q][k]);
+            }
+            bs_gf256_xor_assign(&mut r_chk_sh[q], &dealer.dealt[q][num_words]);
+        }
+    }
+    let additive: Vec<SecretBuffer<Vec<[[u128; 64]; 2]>>> = dealers
+        .into_iter()
+        .map(|mut dealer| SecretBuffer(core::mem::take(&mut dealer.additive.0)))
+        .collect();
+
+    // Shamir-share every additive MAC word. Each block of words draws from per-party
+    // substreams keyed by the block index, so blocks are independent of scheduling.
+    let seeds: SecretBuffer<Vec<[u8; 32]>> =
+        SecretBuffer((0..n).map(|p| party_rngs[p].next_bytes32()).collect());
+    let mut macs_sh = vec![vec![[[Tower128::ZERO; 64]; 2]; num_words + 1]; n];
+    {
+        struct MacBlock<'a> {
+            index: usize,
+            dst: Vec<&'a mut [[[Tower128; 64]; 2]]>,
+        }
+        let mut iters: Vec<_> = macs_sh
+            .iter_mut()
+            .map(|v| v.chunks_mut(SHAMIR_BLOCK_WORDS))
+            .collect();
+        let mut blocks = Vec::new();
+        loop {
+            let dst: Vec<_> = iters.iter_mut().filter_map(Iterator::next).collect();
+            if dst.is_empty() {
+                break;
+            }
+            blocks.push(MacBlock {
+                index: blocks.len(),
+                dst,
+            });
+        }
+        let additive_ref = &additive;
+        let seeds_ref = &seeds;
+        let eval_mats_ref = &eval_mats;
+        par_for_each(&mut blocks, |block| {
+            let first = block.index * SHAMIR_BLOCK_WORDS;
+            let block_le = (block.index as u64).to_le_bytes();
+            for p in 0..n {
+                let mut rng = PartyPrivateRng::from_seed(seeds_ref[p], &block_le);
+                for k_off in 0..block.dst[0].len() {
+                    for lane in 0..2 {
+                        let dealt = SecretBuffer(shamir_share_tower128x64_mats(
+                            t,
+                            eval_mats_ref,
+                            &additive_ref[p][first + k_off][lane],
+                            &mut rng,
+                        ));
+                        for (q, dst_q) in block.dst.iter_mut().enumerate() {
+                            let mut unpacked = unpack_bs_gf256x16_to_u128x64(&dealt[q]);
+                            for bit in 0..64 {
+                                dst_q[k_off][lane][bit] =
+                                    dst_q[k_off][lane][bit].add(Tower128(unpacked[bit]));
+                            }
+                            wipe_u128s(&mut unpacked);
+                        }
+                    }
+                }
+            }
+        });
+    }
+    drop((additive, seeds));
+
+    tamper(&mut words_sh, &mut macs_sh);
+
+    let checked = spdz_pimac_check_bs_gf256_words(
+        session_id,
+        t,
+        eval_points,
+        alpha_shamir,
+        &words_sh,
+        &macs_sh,
+        &mut r_chk_sh,
+        transcript,
+        party_rngs,
+    );
+    for party in &mut macs_sh {
+        if let Some(mut chk) = party.pop() {
+            wipe_tower128(&mut chk[0]);
+            wipe_tower128(&mut chk[1]);
+        }
+    }
+    if let Err(e) = checked {
+        for party in &mut macs_sh {
+            for word in party.iter_mut() {
+                wipe_tower128(&mut word[0]);
+                wipe_tower128(&mut word[1]);
+            }
+        }
+        return Err(e);
+    }
+    Ok((core::mem::take(&mut words_sh.0), macs_sh))
+}
+
+/// Authenticate XOR-shared Boolean words under the two-lane SPDZ key and return consistent
+/// degree-`< t` Shamir shares of the bits and of their MACs.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Quorum, key shares, value shares and private randomness are separate protocol inputs"
+)]
+pub(super) fn authenticate_xor_shared_words(
+    session_id: &[u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    ot_mesh: &mut OtMesh,
+    alpha_contribs: &[[Tower128; 2]],
+    alpha_shamir: &[[Tower128; 2]],
+    bit_words: &[Vec<u64>],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<ShamirAuthenticatedWords, PreprocessError> {
+    let n = eval_points.len();
+    let num_words = bit_words[0].len();
+    let nbits = 64 * num_words;
+    let mut pool = DeltaCotPool::establish(
+        session_id,
+        ot_mesh,
+        alpha_contribs,
+        nbits + 512,
+        0,
+        party_rngs,
+    )?;
+    let off = pool.alloc(nbits)?;
+    let mut transcript = *session_id;
+    let mut d_total = vec![0u64; num_words];
+    for p in 0..n {
+        for (k, word) in bit_words[p].iter().enumerate() {
+            let d = *word ^ pool.rho[p][off / 64 + k];
+            absorb_transcript(&mut transcript, b"bits", &d.to_le_bytes());
+            d_total[k] ^= d;
+        }
+    }
+    let mac_bits: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
+        (0..n)
+            .map(|p| pool.mac_bits(p, off, nbits, &d_total))
+            .collect(),
+    );
+    convert_to_shamir_and_check(
+        session_id,
+        t,
+        eval_points,
+        alpha_shamir,
+        &mut pool,
+        bit_words,
+        &mac_bits,
+        &transcript,
+        party_rngs,
+        &mut |_, _| {},
+    )
+}
+
+// ---------------------------------------------------------------------------
+// The triple protocol.
+// ---------------------------------------------------------------------------
+
+/// Deviations a test can inject at each point where a party acts on its own shares.
+#[derive(Default)]
+pub(super) struct PiTripleF2Faults<'a> {
+    /// `(party, c words)`: the party's XOR share of the products, before it is authenticated.
+    pub(super) product_shares: Option<&'a mut ProductTamper<'a>>,
+    /// `(round, party, [instance][h0, h1])`: the party's cross-term shares of one fold round,
+    /// before they are authenticated.
+    pub(super) fold_shares: Option<&'a mut FoldTamper<'a>>,
+    /// `(party, a shares, c shares)`: the Shamir value shares the party ends up holding.
+    pub(super) shamir_shares: Option<&'a mut WordTamper<'a>>,
+    /// `(party, a MAC shares)`: the Shamir MAC shares the party ends up holding.
+    pub(super) mac_shares: Option<&'a mut MacTamper<'a>>,
+}
+
+fn split_even_odd(v: &[u128]) -> (Vec<u128>, Vec<u128>) {
+    let half = v.len().div_ceil(2);
+    let mut even = Vec::with_capacity(half);
+    let mut odd = Vec::with_capacity(half);
+    for pair in v.chunks(2) {
+        even.push(pair[0]);
+        odd.push(pair.get(1).copied().unwrap_or(0));
+    }
+    (even, odd)
+}
+
+/// The recursive inner-product sacrifice over the authenticated raw bits. Returns `Ok(())` only
+/// if both instances' final product openings pass their MAC checks and their product tests.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Shares, MAC shares, pads and randomness of one ceremony are separate protocol inputs"
+)]
+fn recursive_sacrifice(
+    session_id: &[u8; 32],
+    plan: &FoldPlan,
+    pool: &mut DeltaCotPool,
+    pads: &mut [PairPads],
+    bits: [&[Vec<u64>]; 3],
+    macs: [&[[Vec<u128>; 2]]; 3],
+    transcript: &mut [u8; 32],
+    party_rngs: &mut [PartyPrivateRng],
+    faults: &mut PiTripleF2Faults<'_>,
+) -> Result<(), PreprocessError> {
+    let n = pool.n;
+    let nbits = plan.nbits;
+    let [a_bits, b_bits, c_bits] = bits;
+    let [mac_a, mac_b, mac_c] = macs;
+
+    let chi_coin =
+        run_commit_and_open_coin(session_id, b"PI_TRIPLE_F2_CHI", transcript, party_rngs)?;
+    absorb_transcript(transcript, b"chi", &chi_coin);
+    let chi: [Vec<u128>; 2] = core::array::from_fn(|inst| {
+        let mut words = vec![0u64; 2 * nbits];
+        stream_words(&SACRIFICE_CHI_MID, &[&chi_coin, &[inst as u8]], &mut words);
+        words
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|w| gf_join([w[0], w[1]]))
+            .collect()
+    });
+
+    // Claim `<a_vec, b_vec> = c` per instance, as additive shares.
+    let mut a_vec: SecretBuffer<[Vec<Vec<u128>>; 2]> = SecretBuffer(core::array::from_fn(|inst| {
+        (0..n)
+            .map(|p| {
+                (0..nbits)
+                    .map(|k| chi[inst][k] & bit_mask(word_bit(&a_bits[p], k)))
+                    .collect()
+            })
+            .collect()
+    }));
+    let mut b_vec: SecretBuffer<[Vec<Vec<u128>>; 2]> = SecretBuffer(core::array::from_fn(|_| {
+        (0..n)
+            .map(|p| {
+                (0..nbits)
+                    .map(|k| u128::from(word_bit(&b_bits[p], k)))
+                    .collect()
+            })
+            .collect()
+    }));
+    let mut c_val = SecretBuffer([vec![0u128; n], vec![0u128; n]]);
+    let mut c_mac = SecretBuffer([vec![[0u128; 2]; n], vec![[0u128; 2]; n]]);
+    for inst in 0..2 {
+        for p in 0..n {
+            for k in 0..nbits {
+                c_val[inst][p] ^= chi[inst][k] & bit_mask(word_bit(&c_bits[p], k));
+            }
+            for lane in 0..2 {
+                c_mac[inst][p][lane] = gf_dot(&chi[inst], &mac_c[p][lane]);
+            }
+        }
+    }
+    // Public coefficients of each raw bit in the folded entries.
+    let mut tens_a: [Vec<u128>; 2] = [vec![1u128], vec![1u128]];
+    let mut tens_b: [Vec<u128>; 2] = [vec![1u128], vec![1u128]];
+    let mut product_domain = 1u64;
+
+    for round in 0..plan.rounds() {
+        let len = plan.lens[round];
+        let pairs = len / 2;
+        // `h[inst][party] = [h0, h1]` with `h0 = <a_even, b_odd>`, `h1 = <a_odd, b_even>`.
+        let mut h = SecretBuffer([vec![[0u128; 2]; n], vec![[0u128; 2]; n]]);
+        let mut halves: SecretBuffer<Vec<Vec<[Vec<u128>; 4]>>> =
+            SecretBuffer(vec![Vec::with_capacity(n), Vec::with_capacity(n)]);
+        for inst in 0..2 {
+            for p in 0..n {
+                let (a_even, a_odd) = split_even_odd(&a_vec[inst][p]);
+                let (b_even, b_odd) = split_even_odd(&b_vec[inst][p]);
+                h[inst][p][0] = gf_dot(&a_even[..pairs], &b_odd[..pairs]);
+                h[inst][p][1] = gf_dot(&a_odd[..pairs], &b_even[..pairs]);
+                halves[inst].push([a_even, a_odd, b_even, b_odd]);
+            }
+        }
+
+        if round < plan.structured {
+            let a_ref = &a_vec.0;
+            let tens_ref = &tens_b;
+            par_for_each(pads, |job| {
+                structured_round_pair(job, round, a_ref, tens_ref, &b_bits[job.owner]);
+            });
+            for job in pads.iter() {
+                for inst in 0..2 {
+                    // Bits of odd groups pair with even `a` entries (`h0`), and vice versa.
+                    for (slot, parity) in [(0usize, 1usize), (1, 0)] {
+                        h[inst][job.holder][slot] ^= job.send_sum[round][inst][parity];
+                        h[inst][job.owner][slot] ^=
+                            job.recv_sum[round][inst][parity] ^ job.round_recv[inst][parity];
+                    }
+                }
+            }
+        } else {
+            let mut blocks = Vec::with_capacity(4 * pairs);
+            let mut products = Vec::with_capacity(4 * pairs);
+            for inst in 0..2 {
+                for i in 0..pairs {
+                    for (slot, a_idx, b_idx) in [(0usize, 2 * i, 2 * i + 1), (1, 2 * i + 1, 2 * i)]
+                    {
+                        let y: SecretBuffer<Vec<u128>> =
+                            SecretBuffer((0..n).map(|p| b_vec[inst][p][b_idx]).collect());
+                        products.push(FieldProduct {
+                            block: blocks.len(),
+                            x: SecretBuffer((0..n).map(|p| a_vec[inst][p][a_idx]).collect()),
+                            out: 2 * inst + slot,
+                        });
+                        blocks.push(pool.choose_field(&y)?);
+                    }
+                }
+            }
+            let cross =
+                cot_field_products(session_id, pool, &mut product_domain, &blocks, &products, 4);
+            for inst in 0..2 {
+                for slot in 0..2 {
+                    for p in 0..n {
+                        h[inst][p][slot] ^= cross[2 * inst + slot][p];
+                    }
+                }
+            }
+        }
+
+        if let Some(hook) = faults.fold_shares.as_mut() {
+            for p in 0..n {
+                let mut mine = [h[0][p], h[1][p]];
+                hook(round, p, &mut mine);
+                h[0][p] = mine[0];
+                h[1][p] = mine[1];
+            }
+        }
+
+        // Authenticate both cross terms of both instances, then draw the round coin.
+        let mut handles = [[AuthValue { off: 0, d_total: 0 }; 2]; 2];
+        for inst in 0..2 {
+            for slot in 0..2 {
+                let shares: SecretBuffer<Vec<u128>> =
+                    SecretBuffer((0..n).map(|p| h[inst][p][slot]).collect());
+                handles[inst][slot] = pool.authenticate_field(&shares, transcript)?;
+            }
+        }
+        let coin =
+            run_commit_and_open_coin(session_id, b"PI_TRIPLE_F2_FOLD", transcript, party_rngs)?;
+        absorb_transcript(transcript, b"fold", &coin);
+        let r = lane_coins(&coin);
+
+        for inst in 0..2 {
+            let r_sq = gf_mul(r[inst], r[inst]);
+            for p in 0..n {
+                let [mut a_even, a_odd, b_even, mut b_odd] = core::mem::take(&mut halves[inst][p]);
+                gf_scale_xor(&mut a_even, &a_odd, r[inst]);
+                gf_scale_xor(&mut b_odd, &b_even, r[inst]);
+                wipe_u128s(&mut a_vec[inst][p]);
+                wipe_u128s(&mut b_vec[inst][p]);
+                a_vec[inst][p] = a_even;
+                b_vec[inst][p] = b_odd;
+                let (mut a_odd, mut b_even) = (a_odd, b_even);
+                wipe_u128s(&mut a_odd);
+                wipe_u128s(&mut b_even);
+
+                c_val[inst][p] =
+                    h[inst][p][0] ^ gf_mul(r[inst], c_val[inst][p]) ^ gf_mul(r_sq, h[inst][p][1]);
+                let mac_h0 = pool.mac_field(p, handles[inst][0].off, handles[inst][0].d_total);
+                let mac_h1 = pool.mac_field(p, handles[inst][1].off, handles[inst][1].d_total);
+                for lane in 0..2 {
+                    c_mac[inst][p][lane] = mac_h0[lane]
+                        ^ gf_mul(r[inst], c_mac[inst][p][lane])
+                        ^ gf_mul(r_sq, mac_h1[lane]);
+                }
+            }
+            // `a' = a_even + r a_odd`, `b' = r b_even + b_odd`.
+            let mut scaled_a = vec![0u128; tens_a[inst].len()];
+            gf_scale_xor(&mut scaled_a, &tens_a[inst], r[inst]);
+            tens_a[inst].extend_from_slice(&scaled_a);
+            let mut scaled_b = vec![0u128; tens_b[inst].len()];
+            gf_scale_xor(&mut scaled_b, &tens_b[inst], r[inst]);
+            scaled_b.extend_from_slice(&tens_b[inst]);
+            tens_b[inst] = scaled_b;
+        }
+    }
+
+    // Masked base case on the single remaining pair of each instance:
+    // open `a + rb u`, `b + rb v`, `c + rb d1 + rb^2 d2` with `d1 = a v + u b`, `d2 = u v`.
+    let mut blocks = Vec::with_capacity(4);
+    let mut products = Vec::with_capacity(6);
+    for inst in 0..2 {
+        let u = pool.random_field()?;
+        let v = pool.random_field()?;
+        let (u_idx, v_idx) = (blocks.len(), blocks.len() + 1);
+        products.push(FieldProduct {
+            block: v_idx,
+            x: SecretBuffer((0..n).map(|p| a_vec[inst][p][0]).collect()),
+            out: 2 * inst,
+        });
+        products.push(FieldProduct {
+            block: u_idx,
+            x: SecretBuffer((0..n).map(|p| b_vec[inst][p][0]).collect()),
+            out: 2 * inst,
+        });
+        products.push(FieldProduct {
+            block: v_idx,
+            x: SecretBuffer(u.y.to_vec()),
+            out: 2 * inst + 1,
+        });
+        blocks.push(u);
+        blocks.push(v);
+    }
+    let mut d = SecretBuffer(cot_field_products(
+        session_id,
+        pool,
+        &mut product_domain,
+        &blocks,
+        &products,
+        4,
+    ));
+    for inst in 0..2 {
+        let (u, v) = (&blocks[2 * inst], &blocks[2 * inst + 1]);
+        for p in 0..n {
+            d[2 * inst][p] ^= gf_mul(a_vec[inst][p][0], v.y[p]) ^ gf_mul(u.y[p], b_vec[inst][p][0]);
+            d[2 * inst + 1][p] ^= gf_mul(u.y[p], v.y[p]);
+        }
+    }
+    let mut d_handles = [AuthValue { off: 0, d_total: 0 }; 4];
+    for (slot, handle) in d_handles.iter_mut().enumerate() {
+        *handle = pool.authenticate_field(&d[slot], transcript)?;
+    }
+    let base_coin =
+        run_commit_and_open_coin(session_id, b"PI_TRIPLE_F2_BASE", transcript, party_rngs)?;
+    // A zero base coin would open the unmasked pair; it is replaced by one.
+    let rb = lane_coins(&base_coin).map(|c| if c == 0 { 1 } else { c });
+
+    let mut open_shares = SecretBuffer(vec![vec![0u128; 6]; n]);
+    let mut open_macs = SecretBuffer(vec![vec![[0u128; 2]; 6]; n]);
+    for inst in 0..2 {
+        let (u, v) = (&blocks[2 * inst], &blocks[2 * inst + 1]);
+        let rb_sq = gf_mul(rb[inst], rb[inst]);
+        let weights_a: Vec<u128> = (0..nbits)
+            .map(|k| gf_mul(chi[inst][k], tens_a[inst][k]))
+            .collect();
+        for p in 0..n {
+            open_shares[p][3 * inst] = a_vec[inst][p][0] ^ gf_mul(rb[inst], u.y[p]);
+            open_shares[p][3 * inst + 1] = b_vec[inst][p][0] ^ gf_mul(rb[inst], v.y[p]);
+            open_shares[p][3 * inst + 2] = c_val[inst][p]
+                ^ gf_mul(rb[inst], d[2 * inst][p])
+                ^ gf_mul(rb_sq, d[2 * inst + 1][p]);
+            let mac_u = pool.mac_field(p, u.off, 0);
+            let mac_v = pool.mac_field(p, v.off, 0);
+            let mac_d1 = pool.mac_field(p, d_handles[2 * inst].off, d_handles[2 * inst].d_total);
+            let mac_d2 = pool.mac_field(
+                p,
+                d_handles[2 * inst + 1].off,
+                d_handles[2 * inst + 1].d_total,
+            );
+            for lane in 0..2 {
+                open_macs[p][3 * inst][lane] =
+                    gf_dot(&weights_a, &mac_a[p][lane]) ^ gf_mul(rb[inst], mac_u[lane]);
+                open_macs[p][3 * inst + 1][lane] =
+                    gf_dot(&tens_b[inst][..nbits], &mac_b[p][lane]) ^ gf_mul(rb[inst], mac_v[lane]);
+                open_macs[p][3 * inst + 2][lane] = c_mac[inst][p][lane]
+                    ^ gf_mul(rb[inst], mac_d1[lane])
+                    ^ gf_mul(rb_sq, mac_d2[lane]);
+            }
+        }
+    }
+    let opened = open_additive_authenticated(
+        session_id,
+        "pi_triple_f2_sacrifice",
+        &open_shares,
+        &open_macs,
+        &pool.delta,
+        party_rngs,
+    )?;
+    for inst in 0..2 {
+        if opened[3 * inst + 2] != gf_mul(opened[3 * inst], opened[3 * inst + 1]) {
+            return Err(PreprocessError::SacrificeResidualNonZero {
+                phase: "pi_triple_f2",
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Runs `Π_triple_f2` and also returns the public bucket permutation it used: final triple `k`
+/// is combined from raw triples `perm[k]`, `perm[num_triples + k]`, `perm[2 * num_triples + k]`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Preserve the public preprocessing API used by other protocol modules"
+)]
+pub(super) fn run_pi_triple_f2(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    num_triples: usize,
+    alpha_contribs: &[[Tower128; 2]],
+    alpha_shamir: &[[Tower128; 2]],
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+    faults: &mut PiTripleF2Faults<'_>,
+) -> Result<(Vec<PreprocessedKeccakPartyVault>, Vec<u32>), PreprocessError> {
+    let n = eval_points.len();
+    let raw_triples = 3 * num_triples;
+    let nbits = 64 * raw_triples;
+    let plan = FoldPlan::new(nbits)?;
+    let mut pool = DeltaCotPool::establish(
+        &session_id,
+        ot_mesh,
+        alpha_contribs,
+        plan.pool_rows(),
+        plan.pair_rows(),
+        party_rngs,
+    )?;
+    let mut transcript = session_id;
+
+    // Raw `a` and `b` are the parties' pool bits themselves; `b` sits in the pair region.
+    let off_b = pool.alloc_pair(nbits)?;
+    let off_a = pool.alloc(nbits)?;
+    let off_c = pool.alloc(nbits)?;
+    let a_bits = SecretBuffer(
+        (0..n)
+            .map(|p| pool.rho_words(p, off_a, raw_triples))
+            .collect::<Vec<_>>(),
+    );
+    let b_bits = SecretBuffer(
+        (0..n)
+            .map(|p| pool.rho_words(p, off_b, raw_triples))
+            .collect::<Vec<_>>(),
+    );
+
+    // Hash every ordered pair's `b` rows once: AND cross terms now, fold pads for later.
+    let unit = (1usize << plan.structured).max(64);
+    let ranges_per_pair = (worker_count() / (n * (n - 1))).max(1);
+    let range_len = nbits.div_ceil(ranges_per_pair).div_ceil(unit) * unit;
+    let mut pads = Vec::new();
+    for holder in 0..n {
+        for owner in 0..n {
+            if holder == owner {
+                continue;
+            }
+            for start in (0..nbits).step_by(range_len) {
+                let len = range_len.min(nbits - start);
+                pads.push(PairPads {
+                    holder,
+                    owner,
+                    start,
+                    len,
+                    planes: vec![0u128; 2 * plan.structured * len],
+                    spent_rounds: 0,
+                    send_sum: SecretBuffer(vec![[[0u128; 2]; 2]; plan.structured]),
+                    recv_sum: SecretBuffer(vec![[[0u128; 2]; 2]; plan.structured]),
+                    and_send: SecretBuffer(vec![0u64; len / 64]),
+                    and_recv: SecretBuffer(vec![0u64; len / 64]),
+                    round_recv: [[0u128; 2]; 2],
+                });
+            }
+        }
+    }
+    {
+        let (pool_ref, plan_ref, a_ref, b_ref) = (&pool, &plan, &a_bits, &b_bits);
+        par_for_each(&mut pads, |job| {
+            let (holder, owner) = (job.holder, job.owner);
+            hash_pair_pads(
+                job,
+                &session_id,
+                pool_ref,
+                plan_ref,
+                &a_ref[holder],
+                &b_ref[owner],
+            );
+        });
+    }
+    let mut c_bits = SecretBuffer(
+        (0..n)
+            .map(|p| {
+                a_bits[p]
+                    .iter()
+                    .zip(&b_bits[p])
+                    .map(|(a, b)| a & b)
+                    .collect::<Vec<u64>>()
+            })
+            .collect::<Vec<_>>(),
+    );
+    for job in &pads {
+        for (i, (send, recv)) in job.and_send.iter().zip(job.and_recv.iter()).enumerate() {
+            c_bits[job.holder][job.start / 64 + i] ^= *send;
+            c_bits[job.owner][job.start / 64 + i] ^= *recv;
+        }
+    }
+    if let Some(hook) = faults.product_shares.as_mut() {
+        for p in 0..n {
+            hook(p, &mut c_bits[p]);
+        }
+    }
+
+    // Authenticate `c`: each party publishes its share XOR the reserved pool bits.
+    let mut d_c = vec![0u64; raw_triples];
+    for p in 0..n {
+        for (k, word) in c_bits[p].iter().enumerate() {
+            let d = *word ^ pool.rho[p][off_c / 64 + k];
+            absorb_transcript(&mut transcript, b"c", &d.to_le_bytes());
+            d_c[k] ^= d;
+        }
+    }
+    let zero = vec![0u64; raw_triples];
+    let mac_a: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
+        (0..n)
+            .map(|p| pool.mac_bits(p, off_a, nbits, &zero))
+            .collect(),
+    );
+    let mac_b: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
+        (0..n)
+            .map(|p| pool.mac_bits(p, off_b, nbits, &zero))
+            .collect(),
+    );
+    let mac_c: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
+        (0..n)
+            .map(|p| pool.mac_bits(p, off_c, nbits, &d_c))
+            .collect(),
+    );
+
+    recursive_sacrifice(
+        &session_id,
+        &plan,
+        &mut pool,
+        &mut pads,
+        [&a_bits, &b_bits, &c_bits],
+        [&mac_a, &mac_b, &mac_c],
+        &mut transcript,
+        party_rngs,
+        faults,
+    )?;
+    drop(pads);
+
+    // Degree-`< t` Shamir shares of all raw words and MACs, laid out `a | b | c`.
+    let all_bits = SecretBuffer(
+        (0..n)
+            .map(|p| [&a_bits[p][..], &b_bits[p][..], &c_bits[p][..]].concat())
+            .collect::<Vec<_>>(),
+    );
+    let all_macs: SecretBuffer<Vec<[Vec<u128>; 2]>> = SecretBuffer(
+        (0..n)
+            .map(|p| {
+                core::array::from_fn(|lane| {
+                    [
+                        &mac_a[p][lane][..],
+                        &mac_b[p][lane][..],
+                        &mac_c[p][lane][..],
+                    ]
+                    .concat()
+                })
+            })
+            .collect(),
+    );
+    drop((a_bits, b_bits, c_bits, mac_a, mac_b, mac_c));
+    let (words_sh, macs_sh) = convert_to_shamir_and_check(
+        &session_id,
+        t,
+        eval_points,
+        alpha_shamir,
+        &mut pool,
+        &all_bits,
+        &all_macs,
+        &transcript,
+        party_rngs,
+        &mut |words, macs| {
+            for p in 0..n {
+                if let Some(hook) = faults.shamir_shares.as_mut() {
+                    let (a_part, rest) = words[p].split_at_mut(raw_triples);
+                    hook(p, a_part, &mut rest[raw_triples..]);
+                }
+                if let Some(hook) = faults.mac_shares.as_mut() {
+                    hook(p, &mut macs[p][..raw_triples]);
+                }
+            }
+        },
+    )?;
+    drop((all_bits, all_macs, pool));
+
+    let mut a_sh = SecretBuffer(words_sh);
+    let mut b_sh = SecretBuffer(Vec::with_capacity(n));
+    let mut c_sh = SecretBuffer(Vec::with_capacity(n));
+    let mut a_mac = SecretBuffer(macs_sh);
+    let mut b_mac = SecretBuffer(Vec::with_capacity(n));
+    let mut c_mac = SecretBuffer(Vec::with_capacity(n));
+    for p in 0..n {
+        c_sh.push(a_sh[p].split_off(2 * raw_triples));
+        b_sh.push(a_sh[p].split_off(raw_triples));
+        c_mac.push(a_mac[p].split_off(2 * raw_triples));
+        b_mac.push(a_mac[p].split_off(raw_triples));
+    }
+
+    // Bucket assignment for the `3 -> 1` combine. Every raw share is authenticated and the
+    // sacrifice has finished, so no party can still deviate on a raw triple or on a transfer
+    // that depends on a raw bit. Only now is a joint coin drawn, bound to a digest of the locked
+    // shares, and expanded into a uniform permutation of the raw triple indices.
+    let lock_digest = pi_triple_f2_lock_digest(
+        &session_id,
+        raw_triples,
+        a_sh.as_slice(),
+        b_sh.as_slice(),
+        c_sh.as_slice(),
+        a_mac.as_slice(),
+        b_mac.as_slice(),
+        c_mac.as_slice(),
+        party_rngs,
+    );
+    let bucket_coin = run_commit_and_open_coin(
+        &session_id,
+        b"PI_TRIPLE_F2_BUCKET",
+        &lock_digest,
+        party_rngs,
+    )?;
+    let bucket_perm = derive_coin_permutation(&bucket_coin, b"PI_TRIPLE_F2_BUCKET", raw_triples);
+
+    // `3 -> 1` SPDZ-authenticated Beaver combine on both `a` and `b`. All `num_triples` bucket
+    // openings `d = b0 ^ b1` and `e = a0 ^ a1 ^ a2` go through two committed `MacCheck` batches.
+    let mut final_a = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut final_b = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut final_c = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut final_a_mac = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
+    let mut final_b_mac = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
+    let mut final_c_mac = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
+
+    let mut d_sh_batch = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut d_mac_batch = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
+    for k in 0..num_triples {
+        let k0 = bucket_perm[k] as usize;
+        let k1 = bucket_perm[num_triples + k] as usize;
+        for p in 0..n {
+            d_sh_batch[p][k] = bs_gf256_xor(&b_sh[p][k0], &b_sh[p][k1]);
+            for lane in 0..2 {
+                for bit in 0..64 {
+                    d_mac_batch[p][k][lane][bit] =
+                        b_mac[p][k0][lane][bit].add(b_mac[p][k1][lane][bit]);
+                }
+            }
+        }
+    }
+    let d_opened = commit_and_open_spdz_bs_gf256_batch_quorum(
+        &session_id,
+        "pi_triple_f2_comb_d",
+        t,
+        eval_points,
+        d_sh_batch.as_slice(),
+        d_mac_batch.as_slice(),
+        alpha_shamir,
+        party_rngs,
+    )?;
+    drop((d_sh_batch, d_mac_batch));
+
+    let mut e_sh_batch = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut e_mac_batch = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
+    for k in 0..num_triples {
+        let k0 = bucket_perm[k] as usize;
+        let k1 = bucket_perm[num_triples + k] as usize;
+        let k2 = bucket_perm[2 * num_triples + k] as usize;
+        for p in 0..n {
+            let a_mid_p = bs_gf256_xor(&a_sh[p][k0], &a_sh[p][k1]);
+            final_a[p][k] = a_mid_p;
+            e_sh_batch[p][k] = bs_gf256_xor(&a_mid_p, &a_sh[p][k2]);
+            for lane in 0..2 {
+                for bit in 0..64 {
+                    let a_mid_m = a_mac[p][k0][lane][bit].add(a_mac[p][k1][lane][bit]);
+                    final_a_mac[p][k][lane][bit] = a_mid_m;
+                    e_mac_batch[p][k][lane][bit] = a_mid_m.add(a_mac[p][k2][lane][bit]);
+                }
+            }
+        }
+    }
+    let e_opened = commit_and_open_spdz_bs_gf256_batch_quorum(
+        &session_id,
+        "pi_triple_f2_comb_e",
+        t,
+        eval_points,
+        e_sh_batch.as_slice(),
+        e_mac_batch.as_slice(),
+        alpha_shamir,
+        party_rngs,
+    )?;
+    drop((e_sh_batch, e_mac_batch));
+
+    for k in 0..num_triples {
+        let k0 = bucket_perm[k] as usize;
+        let k1 = bucket_perm[num_triples + k] as usize;
+        let k2 = bucket_perm[2 * num_triples + k] as usize;
+        let d_open = &d_opened[k];
+        let e_open = &e_opened[k];
+
+        for p in 0..n {
+            let da1 = bs_gf256_mul_planes_ct(d_open, &a_sh[p][k1]);
+            let mut c_mid = bs_gf256_xor(&bs_gf256_xor(&c_sh[p][k0], &c_sh[p][k1]), &da1);
+            final_b[p][k] = bs_gf256_xor(&b_sh[p][k0], &b_sh[p][k2]);
+            let eb2 = bs_gf256_mul_planes_ct(e_open, &b_sh[p][k2]);
+            final_c[p][k] = bs_gf256_xor(&bs_gf256_xor(&c_mid, &c_sh[p][k2]), &eb2);
+            wipe_u64s(&mut c_mid);
+
+            for bit in 0..64 {
+                let d_gf = bs_gf256_extract_lane(d_open, bit);
+                let e_gf = bs_gf256_extract_lane(e_open, bit);
+                for lane in 0..2 {
+                    final_b_mac[p][k][lane][bit] =
+                        b_mac[p][k0][lane][bit].add(b_mac[p][k2][lane][bit]);
+                    final_c_mac[p][k][lane][bit] = c_mac[p][k0][lane][bit]
+                        .add(c_mac[p][k1][lane][bit])
+                        .add(a_mac[p][k1][lane][bit].mul_gf256(d_gf))
+                        .add(c_mac[p][k2][lane][bit])
+                        .add(b_mac[p][k2][lane][bit].mul_gf256(e_gf));
+                }
+            }
+        }
+    }
+    drop((a_sh, b_sh, c_sh, a_mac, b_mac, c_mac));
+
+    let mut vaults = Vec::with_capacity(n);
+    for p in 0..n {
+        let mut triples = Vec::with_capacity(num_triples);
+        for k in 0..num_triples {
+            triples.push(KeccakBitTripleShare64 {
+                a: final_a[p][k],
+                b: final_b[p][k],
+                c: final_c[p][k],
+                a_mac: final_a_mac[p][k],
+                b_mac: final_b_mac[p][k],
+                c_mac: final_c_mac[p][k],
+            });
+        }
+        vaults.push(PreprocessedKeccakPartyVault {
+            party_id: p,
+            eval_point: eval_points[p],
+            mac_alpha_lanes: alpha_shamir[p],
+            triples,
+            cursor: 0,
+            poisoned: false,
+        });
+    }
+    Ok((vaults, bucket_perm))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_product_fold_mac_and_degree_corruption() {
+        for attack in 0..4 {
+            let sid = [0xb0 + attack; 32];
+            let mut rngs: Vec<_> = (0..3)
+                .map(|p| PartyPrivateRng::from_seed([p + 1; 32], b"fold-corruption"))
+                .collect();
+            let points = [TowerGf256(1), TowerGf256(2), TowerGf256(3)];
+            let mut mesh = OtMesh::establish_ideal_for_test(sid, &mut rngs);
+            let (alpha, shared) = spdz_setup_alpha_gf256(&sid, 2, &points, &mut rngs).unwrap();
+            let mut product = |p: usize, words: &mut [u64]| {
+                if p == 0 {
+                    words[0] ^= 1;
+                }
+            };
+            let mut fold = |round: usize, p: usize, terms: &mut [[u128; 2]; 2]| {
+                if round == 0 && p == 0 {
+                    terms[0][0] ^= 1;
+                    terms[1][0] ^= 1;
+                }
+            };
+            let mut mac = |p: usize, tags: &mut [[[Tower128; 64]; 2]]| {
+                if p == 0 {
+                    tags[0][0][0].0 ^= 1;
+                }
+            };
+            let mut degree =
+                |p: usize, a: &mut [BitslicedGf256x64], _: &mut [BitslicedGf256x64]| {
+                    if p == 2 {
+                        a[0][0] ^= 1;
+                    }
+                };
+            let mut faults = PiTripleF2Faults::default();
+            match attack {
+                0 => faults.product_shares = Some(&mut product),
+                1 => faults.fold_shares = Some(&mut fold),
+                2 => faults.mac_shares = Some(&mut mac),
+                _ => faults.shamir_shares = Some(&mut degree),
+            }
+            assert!(
+                run_pi_triple_f2(
+                    sid,
+                    2,
+                    &points,
+                    2,
+                    &alpha,
+                    &shared,
+                    &mut mesh,
+                    &mut rngs,
+                    &mut faults
+                )
+                .is_err(),
+                "accepted attack {attack}"
+            );
+        }
+    }
+}
