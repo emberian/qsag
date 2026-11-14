@@ -8,6 +8,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+/// Runtime-selected batched Keccak permutation, including four-way SIMD.
+pub use qsag_asm::keccak_f1600_batch;
+
 use crate::field::goldilocks::{Goldilocks, GoldilocksExt2};
 use crate::wipe::{wipe_bytes, wipe_bytes32, wipe_u64s};
 
