@@ -1,16 +1,19 @@
-//! `qsag`: key generation, signing, verification, succinct aggregation, addresses, a custody
-//! policy demonstration, and known-answer tests for the qsag workspace.
+//! `qsag`: key generation, signing, verification, succinct aggregation, addresses, a
+//! persistent custody policy ledger, and known-answer tests for the qsag workspace.
 
 #![forbid(unsafe_code)]
 
 mod addr;
 mod agg;
+mod anchor;
 mod cli;
 mod codec;
 mod envelope;
 mod kat;
 mod keys;
 mod policy;
+mod policy_ledger;
+mod quorum;
 mod schemes;
 mod vault;
 
@@ -29,9 +32,11 @@ commands:
   sign          sign a message file
   verify        verify a signature
   addr          encode or decode addresses; derive a hybrid classical + post-quantum identity
+  quorum        run dealerless 2-of-3 Jorts threshold signing ceremonies
   aggregate     aggregate committee signatures into one succinct proof, or merge two proofs
   verify-agg    verify an aggregate proof
-  policy-demo   evaluate a custody policy against transfer scenarios
+  policy        persistent custody policy ledger: init, propose, approve, status;
+                without a subcommand, a stateless evaluation of fixed transfer scenarios
   kat           run the built-in known-answer tests
 
 exit codes:
@@ -78,9 +83,10 @@ fn run(raw: &[String]) -> Result<(), CliError> {
         "sign" => keys::sign(rest),
         "verify" => keys::verify(rest),
         "addr" => addr::run(rest),
+        "quorum" => quorum::run(rest),
         "aggregate" => agg::aggregate(rest),
         "verify-agg" => agg::verify_agg(rest),
-        "policy-demo" => policy::run(rest),
+        "policy" | "policy-demo" => policy::run(rest),
         "kat" => kat::run(rest),
         other => Err(CliError::usage(format!(
             "unknown command '{other}' (try --help)"

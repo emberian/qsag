@@ -312,3 +312,794 @@ fn decode_jorts_sig(params: &JortsParams, bytes: &[u8]) -> Result<JortsSig, CliE
     })
 }
 
+pub fn run(raw: &[String]) -> Result<(), CliError> {
+    let Some((sub, rest)) = raw.split_first() else {
+        eprint!("{QUORUM_HELP}");
+        return Err(CliError::usage(
+            "quorum expects a subcommand (keygen, sign, verify)",
+        ));
+    };
+    match sub.as_str() {
+        "--help" | "-h" | "help" => {
+            print!("{QUORUM_HELP}");
+            Ok(())
+        }
+        "keygen" => keygen(rest),
+        "sign" => sign(rest),
+        "verify" => verify(rest),
+        other => Err(CliError::usage(format!(
+            "unknown quorum subcommand '{other}' (try 'qsag quorum --help')"
+        ))),
+    }
+}
+
+fn keygen(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &[
+            "vault-dir",
+            "public-out",
+            "tree-height",
+            "anchor-dir",
+            "passphrase-env",
+            "passphrase-file",
+            "policy-ledger-dir",
+            "policy-anchor-dir",
+            "policy-passphrase-env",
+            "policy-passphrase-file",
+        ],
+        &[
+            "allow-single-disk-anchor",
+            "policy-allow-single-disk-anchor",
+            "json",
+            "help",
+        ],
+    )?;
+    if args.flag("help") {
+        print!("{QUORUM_KEYGEN_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let policy_pin = crate::policy_ledger::key_pin_from_args(&args)?;
+    let vault_dir = args.require("vault-dir")?;
+    let public_out = args.require("public-out")?;
+    let height_u64 = args.get_u64("tree-height")?.unwrap_or(3);
+    if !(1..=MAX_CLI_TREE_HEIGHT).contains(&height_u64) {
+        return Err(CliError::usage(format!(
+            "--tree-height must be between 1 and {MAX_CLI_TREE_HEIGHT}"
+        )));
+    }
+    let height = height_u64 as usize;
+    let params = JortsParams::with_height(height);
+    let passphrase = crate::envelope::passphrase(&args)?;
+    let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+
+    ensure_absent(public_out)?;
+    private_dir(vault_dir, true)?;
+    let party_sk_paths: [String; 3] = std::array::from_fn(|p| party_secret_path(vault_dir, p));
+    let party_sk_refs: [&str; 3] = [
+        party_sk_paths[0].as_str(),
+        party_sk_paths[1].as_str(),
+        party_sk_paths[2].as_str(),
+    ];
+    let tree_file = tree_path(vault_dir);
+    for (p, sk_path) in party_sk_paths.iter().enumerate() {
+        ensure_absent(sk_path)?;
+        ensure_absent(&party_belt_path(vault_dir, p))?;
+        ensure_absent(&party_ceremony_path(vault_dir, p))?;
+    }
+    ensure_absent(&tree_file)?;
+
+    if let Some(cfg) = &anchor_cfg {
+        cfg.validate_isolation(&party_sk_refs, &[vault_dir], true)?;
+    }
+
+    let dkg_session_id = os_random_32()?;
+    let party_seeds: [Secret32; 3] = [
+        Secret32(os_random_32()?),
+        Secret32(os_random_32()?),
+        Secret32(os_random_32()?),
+    ];
+    let mut dkg_rngs: [PartyPrivateRng; 3] = std::array::from_fn(|p| {
+        PartyPrivateRng::from_seed(party_seeds[p].0, b"QSAG.CLI.QUORUM.DKG.RNG.V1")
+    });
+    let (shares, pk_seed) = run_dealerless_rss_dkg_2of3(dkg_session_id, 32, &mut dkg_rngs)
+        .map_err(|e| CliError::state(format!("dealerless 2-of-3 DKG failed: {e}")))?;
+
+    let keygen_engine_sid = os_random_32()?;
+    let keygen_rngs: [PartyPrivateRng; 3] = [
+        PartyPrivateRng::from_seed(os_random_32()?, b"QSAG.CLI.QUORUM.KEYGEN.RNG.V1"),
+        PartyPrivateRng::from_seed(os_random_32()?, b"QSAG.CLI.QUORUM.KEYGEN.RNG.V1"),
+        PartyPrivateRng::from_seed(os_random_32()?, b"QSAG.CLI.QUORUM.KEYGEN.RNG.V1"),
+    ];
+    let mut engine = Rss256Engine::new(keygen_engine_sid, shares, keygen_rngs)
+        .map_err(|e| CliError::state(format!("initializing 2-of-3 MPC engine failed: {e}")))?;
+    let key_material = jorts_keygen_mpc(&mut engine, &params)
+        .map_err(|e| CliError::state(format!("distributed Jorts keygen failed: {e}")))?;
+    debug_assert_eq!(key_material.pk.pk_seed, pk_seed);
+
+    let tree_digest = compute_tree_digest(height, &key_material);
+    let tree_json = encode_tree_json(height, &key_material);
+    write_new(&tree_file, tree_json.to_pretty().as_bytes(), false)?;
+
+    for (p, sk_path) in party_sk_paths.iter().enumerate() {
+        let mut vault = Vault::acquire(sk_path, true)?;
+        let party_key_id = derive_party_key_id(&key_material.pk, height, p);
+        let belt_mac = derive_party_secret(&party_seeds[p].0, p, b"belt_wal_mac");
+        let ceremony_mac = derive_party_secret(&party_seeds[p].0, p, b"ceremony_journal_mac");
+
+        let (belt_wal, belt_seal) = if let Some(cfg) = &anchor_cfg {
+            let belt_anchor_mac =
+                derive_party_secret(&party_seeds[p].0, p, b"external_belt_anchor_mac");
+            let belt_anchor = FsExternalMountAnchor::provision_fresh(
+                cfg,
+                &party_sk_refs,
+                &[vault_dir],
+                "quorum_belt",
+                party_key_id,
+                belt_anchor_mac.0,
+            )?;
+            let seal = belt_anchor.lock_identity_seal();
+            let w = FsBeltWal::provision_genesis_anchored(
+                party_belt_path(vault_dir, p),
+                belt_mac.0,
+                Box::new(belt_anchor),
+            )
+            .map_err(|e| CliError::io("provisioning anchored belt WAL", e))?;
+            (w, Some(seal))
+        } else {
+            let w = FsBeltWal::provision_genesis(party_belt_path(vault_dir, p), belt_mac.0)
+                .map_err(|e| CliError::io("provisioning belt WAL", e))?;
+            (w, None)
+        };
+        let belt_ckpt = belt_wal.checkpoint();
+
+        let (ceremony_journal, ceremony_seal) = if let Some(cfg) = &anchor_cfg {
+            let ceremony_anchor_mac =
+                derive_party_secret(&party_seeds[p].0, p, b"external_ceremony_anchor_mac");
+            let ceremony_anchor = FsExternalMountAnchor::provision_fresh(
+                cfg,
+                &party_sk_refs,
+                &[vault_dir],
+                "quorum_ceremony",
+                party_key_id,
+                ceremony_anchor_mac.0,
+            )?;
+            let seal = ceremony_anchor.lock_identity_seal();
+            let j = FsCeremonyJournal::create_new_anchored(
+                party_ceremony_path(vault_dir, p),
+                party_key_id,
+                ceremony_mac.0,
+                Box::new(ceremony_anchor),
+            )
+            .map_err(|e| CliError::io("provisioning anchored ceremony journal", e))?;
+            (j, Some(seal))
+        } else {
+            let j = FsCeremonyJournal::create_new(
+                party_ceremony_path(vault_dir, p),
+                party_key_id,
+                ceremony_mac.0,
+            )
+            .map_err(|e| CliError::io("provisioning ceremony journal", e))?;
+            (j, None)
+        };
+        let ceremony_ckpt = ceremony_journal.checkpoint();
+
+        let enrollment_nonce = os_random_32()?;
+        let mut fields = vec![
+            ("format", Json::str(PARTY_SECRET_FORMAT)),
+            ("scheme", Json::str(SCHEME_NAME)),
+            ("party_id", Json::num(p)),
+            ("tree_height", Json::num(height)),
+            ("dkg_session_id", Json::hex(&dkg_session_id)),
+            ("pk_seed", Json::hex(&key_material.pk.pk_seed)),
+            ("pk_root", Json::hex(&key_material.pk.pk_root)),
+            ("tree_digest", Json::hex(&tree_digest)),
+            ("enrollment_nonce", Json::hex(&enrollment_nonce[..16])),
+            ("uses_completed", Json::num(0)),
+            ("belt_checkpoint_gen", Json::num(belt_ckpt.generation)),
+            ("belt_checkpoint_tag", Json::hex(&belt_ckpt.tag)),
+            (
+                "ceremony_checkpoint_gen",
+                Json::num(ceremony_ckpt.generation),
+            ),
+            ("ceremony_checkpoint_tag", Json::hex(&ceremony_ckpt.tag)),
+            ("seed", Json::hex(&party_seeds[p].0)),
+        ];
+        if let (Some(b_seal), Some(c_seal)) = (belt_seal, ceremony_seal) {
+            fields.push(("anchor_required", Json::Bool(true)));
+            fields.push(("anchor_belt_seal", Json::hex(&b_seal)));
+            fields.push(("anchor_ceremony_seal", Json::hex(&c_seal)));
+        }
+        if let Some(ledger) = &policy_pin {
+            fields.push((crate::policy_ledger::KEY_PIN_FIELD, Json::hex(ledger)));
+        }
+        let mut secret = Json::object(fields);
+        vault.set_key_material(&crate::envelope::open(&secret, None)?);
+        if let Some(pass) = &passphrase {
+            crate::envelope::seal(&mut secret, pass)?;
+        }
+        vault.bind(&mut secret)?;
+        vault.prepare(&mut secret)?;
+        let encoded = ZeroizingBuf(secret.to_pretty().into_bytes());
+        vault.seal(&mut secret)?;
+        write_new(sk_path, &encoded.0, true)?;
+    }
+
+    let public = Json::object(vec![
+        ("format", Json::str(PUBLIC_FORMAT)),
+        ("scheme", Json::str(SCHEME_NAME)),
+        ("custody_model", Json::str("dealerless-2of3-rss-jorts")),
+        ("tree_height", Json::num(height)),
+        ("capacity", Json::num(params.capacity())),
+        ("pk_seed", Json::hex(&key_material.pk.pk_seed)),
+        ("pk_root", Json::hex(&key_material.pk.pk_root)),
+    ]);
+    write_new(public_out, public.to_pretty().as_bytes(), false)?;
+
+    if args.flag("json") {
+        print!("{}", public.to_pretty());
+    } else {
+        println!(
+            "enrolled 2-of-3 Jorts quorum (height {height}, capacity {}) in {vault_dir} -> {public_out}",
+            params.capacity()
+        );
+    }
+    Ok(())
+}
+
+struct QuorumHeaderMeta {
+    height: usize,
+    dkg_session_id: [u8; 32],
+    pk: JortsPublicKey,
+    tree_digest: [u8; 32],
+    anchor_required: bool,
+}
+
+struct LoadedParty {
+    vault: Vault,
+    sk_path: String,
+    secret_on_disk: Json,
+    seed: Secret32,
+    uses_completed: u64,
+    party_key_id: [u8; 32],
+}
+
+fn sign(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &[
+            "vault-dir",
+            "epoch",
+            "in",
+            "out",
+            "anchor-dir",
+            "policy-id-hex",
+            "spend-amount",
+            "passphrase-env",
+            "passphrase-file",
+            "policy-ledger-dir",
+            "policy-intent",
+            "policy-anchor-dir",
+            "policy-passphrase-env",
+            "policy-passphrase-file",
+        ],
+        &[
+            "allow-single-disk-anchor",
+            "policy-allow-single-disk-anchor",
+            "policy-retry",
+            "retry",
+            "deterministic",
+            "json",
+            "help",
+        ],
+    )?;
+    if args.flag("help") {
+        print!(
+            "{}",
+            QUORUM_SIGN_HELP.replace("{GATE}", crate::policy_ledger::GATE_HELP)
+        );
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let vault_dir = args.require("vault-dir")?;
+    let epoch = args
+        .get_u64("epoch")?
+        .ok_or_else(|| CliError::usage("missing required option --epoch"))?;
+    let out_path = args.require("out")?;
+    ensure_absent(out_path)?;
+    let message = read_input(args.require("in")?)?;
+    let is_retry = args.flag("retry");
+    let deterministic = args.flag("deterministic");
+    let has_context_flags =
+        args.get("policy-id-hex").is_some() || args.get("spend-amount").is_some();
+    let mut base_context = parse_ceremony_context(&args, 0)?;
+    let passphrase = crate::envelope::passphrase(&args)?;
+    let anchor_cfg = AnchorConfig::from_quorum_args(&args, vault_dir)?;
+    // The ledger lock is taken before any party's and held until the signature is written.
+    let mut gate = crate::policy_ledger::Gate::from_args(&args, true)?;
+    let policy_retry = args.flag("policy-retry");
+    if gate.is_none() && policy_retry {
+        return Err(CliError::usage(
+            "--policy-retry requires --policy-ledger-dir",
+        ));
+    }
+    if gate.is_some() && has_context_flags {
+        return Err(CliError::usage(
+            "--policy-id-hex and --spend-amount are taken from the released intent under --policy-ledger-dir",
+        ));
+    }
+    if let Some(gate) = &gate {
+        // The ceremony journal records a 64-bit spend; refuse a wider one up front.
+        crate::policy_ledger::ceremony_spend(gate.intent_amount()?)?;
+    }
+
+    private_dir(vault_dir, false)?;
+    let party_sk_paths: [String; 3] = std::array::from_fn(|p| party_secret_path(vault_dir, p));
+    let party_sk_refs: [&str; 3] = [
+        party_sk_paths[0].as_str(),
+        party_sk_paths[1].as_str(),
+        party_sk_paths[2].as_str(),
+    ];
+
+    let mut parties_vec: Vec<LoadedParty> = Vec::with_capacity(3);
+    let mut header_meta: Option<QuorumHeaderMeta> = None;
+
+    for (p, sk_path) in party_sk_paths.iter().enumerate() {
+        let mut vault = Vault::acquire(sk_path, false)?;
+        let raw_text = read_text(sk_path)?;
+        let secret_on_disk = Json::parse(&raw_text)?;
+        if secret_on_disk.field_str("format")? != PARTY_SECRET_FORMAT
+            || secret_on_disk.field_str("scheme")? != SCHEME_NAME
+            || secret_on_disk.field_u64("party_id")? != p as u64
+        {
+            return Err(corrupt());
+        }
+        let opened = crate::envelope::open(&secret_on_disk, passphrase.as_deref())?;
+        vault.set_key_material(&opened);
+        vault.authenticate(&secret_on_disk)?;
+        crate::policy_ledger::enforce_key_pin(&secret_on_disk, gate.as_ref())?;
+        let anchor_req = enforce_anchor_requirement(&secret_on_disk, anchor_cfg.as_ref())?;
+
+        let height_u64 = secret_on_disk.field_u64("tree_height")?;
+        if !(1..=MAX_CLI_TREE_HEIGHT).contains(&height_u64) {
+            return Err(corrupt());
+        }
+        let height = height_u64 as usize;
+        let dkg_sid: [u8; 32] = from_hex_exact(
+            secret_on_disk.field_str("dkg_session_id")?,
+            "dkg_session_id",
+        )?;
+        let pk_seed: [u8; 32] = from_hex_exact(secret_on_disk.field_str("pk_seed")?, "pk_seed")?;
+        let pk_root: [u8; 32] = from_hex_exact(secret_on_disk.field_str("pk_root")?, "pk_root")?;
+        let tree_digest: [u8; 32] =
+            from_hex_exact(secret_on_disk.field_str("tree_digest")?, "tree_digest")?;
+        let pk = JortsPublicKey { pk_seed, pk_root };
+
+        match &header_meta {
+            None => {
+                header_meta = Some(QuorumHeaderMeta {
+                    height,
+                    dkg_session_id: dkg_sid,
+                    pk,
+                    tree_digest,
+                    anchor_required: anchor_req,
+                })
+            }
+            Some(m0) => {
+                if m0.height != height
+                    || !ct_eq_bytes(&m0.dkg_session_id, &dkg_sid)
+                    || m0.pk != pk
+                    || !ct_eq_bytes(&m0.tree_digest, &tree_digest)
+                    || m0.anchor_required != anchor_req
+                {
+                    return Err(CliError::state("QuorumPartyMetadataMismatch"));
+                }
+            }
+        }
+
+        let seed = opened.seed()?;
+        let uses_completed = secret_on_disk.field_u64("uses_completed")?;
+        let party_key_id = derive_party_key_id(&pk, height, p);
+        parties_vec.push(LoadedParty {
+            vault,
+            sk_path: sk_path.clone(),
+            secret_on_disk,
+            seed,
+            uses_completed,
+            party_key_id,
+        });
+    }
+
+    let QuorumHeaderMeta {
+        height,
+        dkg_session_id,
+        pk,
+        tree_digest,
+        anchor_required: _,
+    } = header_meta.ok_or_else(corrupt)?;
+    let params = JortsParams::with_height(height);
+    if epoch >= params.capacity() {
+        return Err(CliError::state("epoch exceeds quorum tree capacity"));
+    }
+
+    if let Some(cfg) = &anchor_cfg {
+        cfg.validate_isolation(&party_sk_refs, &[vault_dir], false)?;
+    }
+
+    let key_material = decode_tree_json(&tree_path(vault_dir), height, &pk, &tree_digest)?;
+
+    let mut wals_vec: Vec<FsBeltWal> = Vec::with_capacity(3);
+    let mut journals_vec: Vec<FsCeremonyJournal> = Vec::with_capacity(3);
+    let mut ceremony_anchors: Vec<Option<FsExternalMountAnchor>> = Vec::with_capacity(3);
+
+    for (p, party) in parties_vec.iter().enumerate() {
+        let local_belt_ckpt = read_belt_checkpoint(&party.secret_on_disk)?;
+        let local_ceremony_ckpt = read_ceremony_checkpoint(&party.secret_on_disk)?;
+        let belt_mac = derive_party_secret(&party.seed.0, p, b"belt_wal_mac");
+        let ceremony_mac = derive_party_secret(&party.seed.0, p, b"ceremony_journal_mac");
+
+        let wal = if let Some(cfg) = &anchor_cfg {
+            let belt_anchor_mac =
+                derive_party_secret(&party.seed.0, p, b"external_belt_anchor_mac");
+            let belt_anchor = FsExternalMountAnchor::open_existing(
+                cfg,
+                &party_sk_refs,
+                &[vault_dir],
+                "quorum_belt",
+                party.party_key_id,
+                belt_anchor_mac.0,
+            )?;
+            belt_anchor.verify_expected_seal(&party.secret_on_disk, "anchor_belt_seal")?;
+            let w = FsBeltWal::open_existing_anchored(
+                party_belt_path(vault_dir, p),
+                belt_mac.0,
+                Box::new(belt_anchor),
+            )
+            .map_err(|_| CliError::state("CorruptOrRolledBackBeltWal"))?;
+            let w_ckpt = w.checkpoint();
+            if w_ckpt.generation < local_belt_ckpt.generation
+                || (w_ckpt.generation == local_belt_ckpt.generation
+                    && !ct_eq_bytes(&w_ckpt.tag, &local_belt_ckpt.tag))
+            {
+                return Err(CliError::state("CorruptOrRolledBackBeltWal"));
+            }
+            w
+        } else {
+            FsBeltWal::open_existing_at_least(
+                party_belt_path(vault_dir, p),
+                belt_mac.0,
+                local_belt_ckpt,
+            )
+            .map_err(|_| CliError::state("CorruptOrRolledBackBeltWal"))?
+        };
+        wals_vec.push(wal);
+
+        if let Some(cfg) = &anchor_cfg {
+            let ceremony_anchor_mac =
+                derive_party_secret(&party.seed.0, p, b"external_ceremony_anchor_mac");
+            let ceremony_anchor = FsExternalMountAnchor::open_existing(
+                cfg,
+                &party_sk_refs,
+                &[vault_dir],
+                "quorum_ceremony",
+                party.party_key_id,
+                ceremony_anchor_mac.0,
+            )?;
+            ceremony_anchor.verify_expected_seal(&party.secret_on_disk, "anchor_ceremony_seal")?;
+            let j = FsCeremonyJournal::open_existing_anchored(
+                party_ceremony_path(vault_dir, p),
+                party.party_key_id,
+                ceremony_mac.0,
+                Box::new(ceremony_anchor.clone()),
+            )
+            .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
+            let j_ckpt = j.checkpoint();
+            if j_ckpt.generation < local_ceremony_ckpt.generation
+                || (j_ckpt.generation == local_ceremony_ckpt.generation
+                    && !ct_eq_bytes(&j_ckpt.tag, &local_ceremony_ckpt.tag))
+            {
+                return Err(CliError::state("CorruptOrRolledBackCeremonyJournal"));
+            }
+            journals_vec.push(j);
+            ceremony_anchors.push(Some(ceremony_anchor));
+        } else {
+            let j = FsCeremonyJournal::open_existing_at_least(
+                party_ceremony_path(vault_dir, p),
+                party.party_key_id,
+                ceremony_mac.0,
+                local_ceremony_ckpt,
+            )
+            .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
+            journals_vec.push(j);
+            ceremony_anchors.push(None);
+        }
+    }
+
+    let wals: [FsBeltWal; 3] = wals_vec
+        .try_into()
+        .map_err(|_| CliError::state("internal quorum WAL count mismatch"))?;
+    let mut journals: [FsCeremonyJournal; 3] = journals_vec
+        .try_into()
+        .map_err(|_| CliError::state("internal quorum journal count mismatch"))?;
+
+    let party_seeds: [Secret32; 3] = [
+        Secret32(parties_vec[0].seed.0),
+        Secret32(parties_vec[1].seed.0),
+        Secret32(parties_vec[2].seed.0),
+    ];
+    let (shares, derived_pk_seed) =
+        reconstruct_dkg_shares(dkg_session_id, &party_seeds, &tree_digest)?;
+    if !ct_eq_bytes(&derived_pk_seed, &pk.pk_seed) {
+        return Err(CliError::state("QuorumDkgPublicSeedMismatch"));
+    }
+
+    let max_uses = parties_vec
+        .iter()
+        .map(|p| p.uses_completed)
+        .max()
+        .unwrap_or(0);
+    let max_journal_gen = journals
+        .iter()
+        .map(|j| j.checkpoint().generation)
+        .max()
+        .unwrap_or(1);
+    let next_cursor = max_uses
+        .max(max_journal_gen)
+        .checked_add(1)
+        .ok_or_else(|| CliError::state("quorum ceremony cursor exhausted"))?;
+
+    let msg_digest = jorts_msg_digest(&pk, &message);
+    let attempt_entropy = if deterministic {
+        Secret32([0u8; 32])
+    } else {
+        Secret32(os_random_32()?)
+    };
+    let online_session_id = cshake256_framed_32(
+        b"QSAG.CLI.QUORUM.ONLINE_SID.V1",
+        &[
+            &attempt_entropy.0,
+            &dkg_session_id,
+            &tree_digest,
+            &next_cursor.to_be_bytes(),
+            &epoch.to_be_bytes(),
+            &msg_digest,
+        ],
+    );
+    // Drawn up front so an entropy failure stops the ceremony instead of thinning a hedge.
+    let mut party_fresh = [
+        Secret32([0u8; 32]),
+        Secret32([0u8; 32]),
+        Secret32([0u8; 32]),
+    ];
+    if !deterministic {
+        for fresh in &mut party_fresh {
+            fresh.0 = os_random_32()?;
+        }
+    }
+    let online_rngs: [PartyPrivateRng; 3] = std::array::from_fn(|p| {
+        let hedge = Secret32(cshake256_framed_32(
+            b"QSAG.CLI.QUORUM.ONLINE_RNG.V1",
+            &[
+                &party_seeds[p].0,
+                &party_fresh[p].0,
+                &online_session_id,
+                &(p as u64).to_be_bytes(),
+                &next_cursor.to_be_bytes(),
+            ],
+        ));
+        PartyPrivateRng::from_seed(hedge.0, b"QSAG.CLI.QUORUM.ONLINE_RNG_STREAM.V1")
+    });
+
+    // Every check that needs no durable write has passed. Release the intent for exactly
+    // this quorum key and message before a belt latch, a journal or a share moves.
+    let mut policy_fields: Vec<(&str, Json)> = Vec::new();
+    if let Some(gate) = gate.as_mut() {
+        let granted = gate.authorize(
+            &crate::policy_ledger::signing_key_id(
+                SCHEME_NAME,
+                &[&pk.pk_seed[..], &pk.pk_root[..]].concat(),
+            ),
+            &message,
+            &[],
+            is_retry || policy_retry,
+        )?;
+        base_context.policy_id = granted.policy_digest;
+        base_context.spend_amount = crate::policy_ledger::ceremony_spend(granted.amount_units)?;
+        policy_fields.push(("policy_ledger_id", Json::hex(gate.ledger_id())));
+        policy_fields.push(("policy_digest", Json::hex(&granted.policy_digest)));
+        policy_fields.push(("policy_intent", Json::hex(&granted.intent_id)));
+        policy_fields.push(("spend_amount", Json::num(granted.amount_units)));
+    }
+
+    let mut engine = Rss256Engine::new(online_session_id, shares, online_rngs)
+        .map_err(|e| CliError::state(format!("initializing quorum signing engine failed: {e}")))?;
+    let mut signer = JortsSigner::new(params, key_material, wals, engine.keys())
+        .map_err(|e| CliError::state(format!("recovering quorum belt latches failed: {e}")))?;
+
+    let prepared = signer
+        .prepare_sign_mode3a(&mut engine, epoch, &message)
+        .map_err(|e| CliError::state(format!("quorum belt latch refused epoch {epoch}: {e}")))?;
+
+    let context = CeremonyContext {
+        policy_id: base_context.policy_id,
+        spend_amount: base_context.spend_amount,
+        mpc_nonce_epoch: next_cursor,
+    };
+
+    let mut ceremony_ids = [[0u8; 32]; 3];
+    let mut permits_opt: [Option<qsag_core::ceremony_journal::CeremonyReleasePermit>; 3] =
+        [None, None, None];
+    for p in 0..3 {
+        let cid = cshake256_framed_32(
+            b"QSAG.CLI.QUORUM.CEREMONY_ID.V1",
+            &[
+                &online_session_id,
+                &parties_vec[p].party_key_id,
+                &epoch.to_be_bytes(),
+                &next_cursor.to_be_bytes(),
+                &prepared.records()[p].binding(),
+            ],
+        );
+        ceremony_ids[p] = cid;
+        let permit = journals[p]
+            .persist_with_context(
+                CeremonyReservation {
+                    ceremony_id: cid,
+                    key_id: parties_vec[p].party_key_id,
+                    epoch_or_codeword: prepared.records()[p].binding(),
+                    seed_burn_cursor: next_cursor,
+                    hedge_generation: next_cursor,
+                },
+                Some(epoch),
+                is_retry,
+                context,
+            )
+            .map_err(|_| {
+                CliError::state(
+                    "CorruptOrConflictingCeremonyJournal (pass --retry to recover an in-flight epoch with identical context)",
+                )
+            })?;
+        permits_opt[p] = Some(permit);
+    }
+    let permits = [
+        permits_opt[0].take().unwrap(),
+        permits_opt[1].take().unwrap(),
+        permits_opt[2].take().unwrap(),
+    ];
+
+    signer
+        .install_ceremony_permits(
+            &prepared,
+            [&journals[0], &journals[1], &journals[2]],
+            permits,
+        )
+        .map_err(|e| CliError::state(format!("installing quorum ceremony permits failed: {e}")))?;
+
+    for p in 0..3 {
+        if let Some(anchor) = &ceremony_anchors[p] {
+            anchor
+                .consume_ceremony_ticket(journals[p].checkpoint(), &ceremony_ids[p])
+                .map_err(|_| CliError::state("CeremonyTicketAlreadyConsumedOrCorrupt"))?;
+        }
+    }
+
+    for (p, party) in parties_vec.iter_mut().enumerate() {
+        let belt_ckpt = signer.latches()[p].wal().checkpoint();
+        let ceremony_ckpt = journals[p].checkpoint();
+        record_belt_checkpoint(&mut party.secret_on_disk, belt_ckpt);
+        record_ceremony_checkpoint(&mut party.secret_on_disk, ceremony_ckpt);
+        set(
+            &mut party.secret_on_disk,
+            "uses_completed",
+            Json::num(next_cursor - 1),
+        );
+        party
+            .vault
+            .reserve(&party.sk_path, &mut party.secret_on_disk)?;
+    }
+
+    let sig = signer
+        .complete_sign_mode3a(&mut engine, prepared, &message)
+        .map_err(|e| CliError::state(format!("quorum Mode 3A signing failed: {e}")))?;
+    if !jorts_verify(&params, &pk, &message, &sig) {
+        return Err(CliError::verify(
+            "verify-before-release aborted faulted quorum signature",
+        ));
+    }
+
+    let sig_bytes = ZeroizingBuf(encode_jorts_sig(&params, &sig));
+    let mut sig_fields = vec![
+        ("format", Json::str(SIG_FORMAT)),
+        ("scheme", Json::str(SCHEME_NAME)),
+        ("tree_height", Json::num(height)),
+        ("epoch", Json::num(sig.epoch)),
+        ("pk_seed", Json::hex(&pk.pk_seed)),
+        ("pk_root", Json::hex(&pk.pk_root)),
+    ];
+    if has_context_flags {
+        sig_fields.push(("policy_id", Json::hex(&context.policy_id)));
+        sig_fields.push(("spend_amount", Json::num(context.spend_amount)));
+    }
+    sig_fields.extend(policy_fields);
+    sig_fields.push(("signature", Json::hex(&sig_bytes.0)));
+    let sig_json = Json::object(sig_fields);
+    write_new(out_path, sig_json.to_pretty().as_bytes(), false)?;
+
+    if args.flag("json") {
+        let report = Json::object(vec![
+            ("scheme", Json::str(SCHEME_NAME)),
+            ("epoch", Json::num(sig.epoch)),
+            ("signature_bytes", Json::num(sig_bytes.len())),
+            ("out", Json::str(out_path)),
+        ]);
+        print!("{}", report.to_pretty());
+    } else {
+        println!(
+            "signed quorum epoch {} ({} bytes) -> {out_path}",
+            sig.epoch,
+            sig_bytes.len()
+        );
+    }
+    Ok(())
+}
+
+fn verify(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(raw, &["public", "in", "sig"], &["json", "help"])?;
+    if args.flag("help") {
+        print!("{QUORUM_VERIFY_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let pub_path = args.require("public")?;
+    let sig_path = args.require("sig")?;
+    let message = read_input(args.require("in")?)?;
+
+    let pub_text = read_text(pub_path)?;
+    let pub_json = Json::parse(&pub_text)?;
+    if pub_json.field_str("format")? != PUBLIC_FORMAT
+        || pub_json.field_str("scheme")? != SCHEME_NAME
+    {
+        return Err(CliError::input("unexpected quorum public key format"));
+    }
+    let height_u64 = pub_json.field_u64("tree_height")?;
+    if !(1..=30).contains(&height_u64) {
+        return Err(CliError::input("unsupported quorum tree height"));
+    }
+    let params = JortsParams::with_height(height_u64 as usize);
+    let pk = JortsPublicKey {
+        pk_seed: from_hex_exact(pub_json.field_str("pk_seed")?, "pk_seed")?,
+        pk_root: from_hex_exact(pub_json.field_str("pk_root")?, "pk_root")?,
+    };
+
+    let sig_raw = read_bounded_file(sig_path, MAX_SIG_PROOF_BYTES)?;
+    let sig_str = std::str::from_utf8(&sig_raw.0)
+        .map_err(|_| CliError::input(format!("{sig_path} is not UTF-8 text")))?;
+    let sig_json = Json::parse(sig_str)?;
+    if sig_json.field_str("format")? != SIG_FORMAT || sig_json.field_str("scheme")? != SCHEME_NAME {
+        return Err(CliError::input("unexpected quorum signature format"));
+    }
+    if sig_json.field_u64("tree_height")? != height_u64 {
+        return Err(CliError::verify("quorum signature tree height mismatch"));
+    }
+    let sig_bytes = sig_json.field_hex("signature")?;
+    let sig = decode_jorts_sig(&params, &sig_bytes)?;
+    if sig.epoch != sig_json.field_u64("epoch")? {
+        return Err(CliError::verify("quorum signature epoch header mismatch"));
+    }
+    if !jorts_verify(&params, &pk, &message, &sig) {
+        return Err(CliError::verify("quorum signature verification failed"));
+    }
+
+    if args.flag("json") {
+        let report = Json::object(vec![
+            ("valid", Json::Bool(true)),
+            ("scheme", Json::str(SCHEME_NAME)),
+            ("epoch", Json::num(sig.epoch)),
+        ]);
+        print!("{}", report.to_pretty());
+    } else {
+        println!("VALID ({SCHEME_NAME}, epoch {})", sig.epoch);
+    }
+    Ok(())
+}

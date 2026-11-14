@@ -1270,3 +1270,1019 @@ impl IntentRecord {
 }
 
 /// What a released intent commits the signing ceremony to.
+pub struct Authorization {
+    pub policy_digest: [u8; 32],
+    pub intent_id: [u8; 32],
+    pub amount_units: u128,
+}
+
+/// The policy gate of one signing invocation. It holds the ledger's exclusive lock from the
+/// moment the options are parsed until the signature has been written.
+pub struct Gate {
+    ledger: OpenLedger,
+    intent: Option<[u8; 32]>,
+}
+
+impl Gate {
+    /// `None` when the invocation names no policy ledger.
+    pub fn from_args(args: &Args, needs_intent: bool) -> Result<Option<Self>, CliError> {
+        let Some(dir) = args.get("policy-ledger-dir") else {
+            let stray = GATE_VALUE_OPTIONS
+                .iter()
+                .find(|name| args.get(name).is_some())
+                .or_else(|| GATE_FLAG_OPTIONS.iter().find(|name| args.flag(name)));
+            return match stray {
+                Some(name) => Err(CliError::usage(format!(
+                    "--{name} requires --policy-ledger-dir"
+                ))),
+                None => Ok(None),
+            };
+        };
+        let intent = match (args.get("policy-intent"), needs_intent) {
+            (Some(hex), true) => Some(from_hex_exact(hex, "--policy-intent")?),
+            (None, true) => {
+                return Err(CliError::usage(
+                    "--policy-ledger-dir requires --policy-intent <id>",
+                ));
+            }
+            (Some(_), false) => {
+                return Err(CliError::usage("--policy-intent does not apply here"));
+            }
+            (None, false) => None,
+        };
+        let passphrase = crate::envelope::passphrase_named(
+            args,
+            "policy-passphrase-env",
+            "policy-passphrase-file",
+        )?;
+        let anchor_cfg = anchor_config(
+            args,
+            dir,
+            "policy-anchor-dir",
+            "policy-allow-single-disk-anchor",
+        )?;
+        let access = if needs_intent {
+            Access::Update
+        } else {
+            Access::Inspect
+        };
+        let ledger = OpenLedger::open(dir, passphrase.as_deref(), anchor_cfg.as_ref(), access)?;
+        Ok(Some(Self { ledger, intent }))
+    }
+
+    pub fn ledger_id(&self) -> &[u8; 32] {
+        self.ledger.id()
+    }
+
+    /// The amount the gated intent will commit, read before anything is released.
+    pub fn intent_amount(&self) -> Result<u128, CliError> {
+        let id = self
+            .intent
+            .ok_or_else(|| CliError::usage("no policy intent selected"))?;
+        Ok(self.ledger.load_record(&id)?.intent.amount_units)
+    }
+
+    /// Release the selected intent for this key, message and context, or refuse.
+    pub fn authorize(
+        &mut self,
+        key_id: &[u8; 32],
+        message: &[u8],
+        ctx: &[u8],
+        retry: bool,
+    ) -> Result<Authorization, CliError> {
+        let id = self
+            .intent
+            .ok_or_else(|| CliError::usage("no policy intent selected"))?;
+        self.ledger
+            .authorize(&id, key_id, message, ctx, retry, unix_now()?)
+    }
+}
+
+/// A key enrolled against a policy ledger signs only through that ledger's gate.
+pub fn enforce_key_pin(secret: &Json, gate: Option<&Gate>) -> Result<(), CliError> {
+    let pinned = match secret.get(KEY_PIN_FIELD) {
+        None => return Ok(()),
+        Some(value) => from_hex_exact::<32>(
+            value.as_str().ok_or_else(crate::vault::corrupt)?,
+            KEY_PIN_FIELD,
+        )
+        .map_err(|_| crate::vault::corrupt())?,
+    };
+    match gate {
+        None => Err(CliError::state(
+            "key is enrolled against a custody policy ledger; pass --policy-ledger-dir and --policy-intent",
+        )),
+        Some(gate) if !ct_eq_bytes(gate.ledger_id(), &pinned) => Err(CliError::state(
+            "key is enrolled against a different custody policy ledger",
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+/// The value to store under [`KEY_PIN_FIELD`] when a key generator is given a policy ledger.
+pub fn key_pin_from_args(args: &Args) -> Result<Option<[u8; 32]>, CliError> {
+    Ok(Gate::from_args(args, false)?.map(|gate| *gate.ledger_id()))
+}
+
+/// The policy identifier and spend a gated stateful ceremony commits into its journal.
+pub fn ceremony_spend(amount_units: u128) -> Result<u64, CliError> {
+    u64::try_from(amount_units).map_err(|_| {
+        CliError::usage(
+            "intent amount exceeds the 64-bit spend a stateful ceremony journal records",
+        )
+    })
+}
+
+fn public_key_id(path: &str) -> Result<[u8; 32], CliError> {
+    let text = read_text(path)?;
+    let json = Json::parse(&text)?;
+    let scheme = json.field_str("scheme")?;
+    match json.field_str("format")? {
+        crate::keys::PUBLIC_FORMAT => {
+            let key = json.field_hex("public_key").map_err(|_| {
+                CliError::usage("this public key has no single signing key to bind an intent to")
+            })?;
+            Ok(signing_key_id(scheme, &key))
+        }
+        crate::quorum::PUBLIC_FORMAT => {
+            let mut key = json.field_hex("pk_seed")?.0.clone();
+            key.extend_from_slice(&json.field_hex("pk_root")?);
+            Ok(signing_key_id(scheme, &key))
+        }
+        _ => Err(CliError::input(format!("{path} is not a public key file"))),
+    }
+}
+
+const INIT_HELP: &str = "\
+qsag policy init --ledger-dir <dir> --policy <policy.json> --accept-single-host-custody [options]
+
+Create a persistent custody policy ledger. <dir> must be absent or empty; it is created
+owner-only. The policy document (format qsag-policy-v1) fixes the chain, the pinned witness
+suite, the recipient allowlist, the single-transfer and rolling-window caps, the validity
+interval, the quorum tiers, the committee `parties`, and optionally `window_secs` (length of
+one velocity window; 0 or absent keeps one window for the ledger's life) and
+`intent_ttl_secs` (how long a proposed intent stays signable; default 86400).
+
+Every guard share is derived from one provisioning seed stored in <dir>/ledger.json, so the
+committee lives on this host: the ledger makes authorization durable, replay-proof and
+velocity-capped across invocations, and does not separate the approving parties from each
+other. One ledger authorizes at most 64 intents per approving party.
+
+  --anchor-dir <dir>            ratchet every guard generation in an external monotone anchor,
+                                so restoring an old copy of the ledger directory is refused
+  --allow-single-disk-anchor    permit --anchor-dir on the ledger's filesystem device
+  --passphrase-env <VAR> / --passphrase-file <PATH>  seal the provisioning seed
+  --json                        print the ledger identifier and policy digest as JSON
+";
+
+fn init(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &[
+            "ledger-dir",
+            "policy",
+            "anchor-dir",
+            "passphrase-env",
+            "passphrase-file",
+        ],
+        &[
+            "accept-single-host-custody",
+            "allow-single-disk-anchor",
+            "json",
+            "help",
+        ],
+    )?;
+    if args.flag("help") {
+        print!("{INIT_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let dir = args.require("ledger-dir")?;
+    if !args.flag("accept-single-host-custody") {
+        return Err(CliError::usage(
+            "policy init requires --accept-single-host-custody: one provisioning seed on this host derives every guard share",
+        ));
+    }
+    let policy_text = read_text(args.require("policy")?)?;
+    let (policy, committee) = policy_from_json(&Json::parse(&policy_text)?)?;
+    let passphrase = crate::envelope::passphrase(&args)?;
+    let anchor_cfg = anchor_config(&args, dir, "anchor-dir", "allow-single-disk-anchor")?;
+
+    private_dir(dir, true)?;
+    let occupied = std::fs::read_dir(dir)
+        .map_err(|e| CliError::io(format_args!("reading {dir}"), e))?
+        .next()
+        .is_some();
+    if occupied {
+        return Err(CliError::state(format!(
+            "{dir} is not empty; a policy ledger is created only in a fresh directory"
+        )));
+    }
+    let root = root_path(dir)?;
+    if let Some(cfg) = &anchor_cfg {
+        cfg.validate_isolation(&[&root], &[dir], true)?;
+    }
+    for sub in ["guards", "intents"] {
+        private_dir(&join(dir, &[sub])?, true)?;
+    }
+    let mut vault = Vault::acquire(&root, true)?;
+    let seed = Secret32(os_random_32()?);
+    let nonce = os_random_32()?;
+    let nonce = &nonce[..16];
+    let id = ledger_id(&seed, &policy, &committee, nonce);
+
+    let guards = provision_guards(&seed, &id, &committee.parties)?;
+    let generation = 1;
+    write_new(
+        &bundle_path(dir)?,
+        &write_bundle(&seed, &id, generation, &guards),
+        true,
+    )?;
+    FsPolicyGenerationFence::create_new(
+        fence_path(dir)?,
+        party_secret(&seed, b"fence key", 0).0,
+        generation,
+    )
+    .map_err(|e| CliError::io("creating policy generation fence", e))?;
+    let anchor_seal = match &anchor_cfg {
+        Some(cfg) => {
+            let anchor = FsExternalMountAnchor::provision_fresh(
+                cfg,
+                &[&root],
+                &[dir],
+                ANCHOR_DOMAIN,
+                id,
+                party_secret(&seed, b"fence anchor mac", 0).0,
+            )?;
+            anchor.advance_floor(ANCHOR_DOMAIN.as_bytes(), generation)?;
+            Some(anchor.lock_identity_seal())
+        }
+        None => None,
+    };
+
+    let mut file = Json::object(vec![
+        ("format", Json::str(ROOT_FORMAT)),
+        ("scheme", Json::str(ROOT_SCHEME)),
+        ("custody_model", Json::str(CUSTODY_MODEL)),
+        ("enrollment_nonce", Json::hex(nonce)),
+        ("ledger_id", Json::hex(&id)),
+        ("policy_digest", Json::hex(&policy.canonical_digest())),
+        ("policy", policy_to_json(&policy, &committee)),
+    ]);
+    if let Some(seal) = &anchor_seal {
+        set(&mut file, "anchor_required", Json::Bool(true));
+        set(&mut file, ANCHOR_SEAL_FIELD, Json::hex(seal));
+    }
+    set(&mut file, "seed", Json::hex(&seed.0));
+    vault.set_key_material(&crate::envelope::open(&file, None)?);
+    if let Some(pass) = &passphrase {
+        crate::envelope::seal(&mut file, pass)?;
+    }
+    vault.bind(&mut file)?;
+    vault.seal(&mut file)?;
+    let encoded = ZeroizingBuf(file.to_pretty().into_bytes());
+    // Written last: a directory without it was never a usable ledger.
+    write_new(&root, &encoded.0, true)?;
+
+    if args.flag("json") {
+        print!(
+            "{}",
+            Json::object(vec![
+                ("ledger_id", Json::hex(&id)),
+                ("policy_digest", Json::hex(&policy.canonical_digest())),
+                ("custody_model", Json::str(CUSTODY_MODEL)),
+                ("parties", party_json(&committee.parties)),
+                ("anchored", Json::Bool(anchor_cfg.is_some())),
+            ])
+            .to_pretty()
+        );
+    } else {
+        println!("created policy ledger {} in {dir}", to_hex(&id));
+    }
+    Ok(())
+}
+
+const LEDGER_OPTIONS: [&str; 4] = [
+    "ledger-dir",
+    "anchor-dir",
+    "passphrase-env",
+    "passphrase-file",
+];
+
+fn open_from_args(args: &Args, access: Access) -> Result<OpenLedger, CliError> {
+    let dir = args.require("ledger-dir")?;
+    let passphrase = crate::envelope::passphrase(args)?;
+    let anchor_cfg = anchor_config(args, dir, "anchor-dir", "allow-single-disk-anchor")?;
+    OpenLedger::open(dir, passphrase.as_deref(), anchor_cfg.as_ref(), access)
+}
+
+const LEDGER_HELP: &str = "\
+  --anchor-dir <dir>            the ledger's external monotone anchor (required if enrolled with one)
+  --allow-single-disk-anchor    permit --anchor-dir on the ledger's filesystem device
+  --passphrase-env <VAR> / --passphrase-file <PATH>  unlock a sealed ledger
+";
+
+const PROPOSE_HELP: &str = "\
+qsag policy propose --ledger-dir <dir> --public <key.json> --payload <file> --recipient <address>
+                    --amount <units> --initiator <party> --approvers <a,b,..> --message-out <path>
+
+Build a transfer intent, evaluate the ledger's policy on it against the current velocity
+window, authenticate it as the initiator, and record it. Exit code 3 means the policy
+refused it; nothing is recorded then. The file written to --message-out is the canonical
+intent envelope: it is the exact message `qsag sign` or `qsag quorum sign` must be given.
+
+  --public <key.json>   public key of the key that will sign (single-signer or quorum)
+  --payload <file>      application transaction bytes the intent commits to
+  --ctx-hex <hex>       SLH-DSA context string the signer will use (default: empty)
+  --json                print the intent as JSON
+";
+
+fn propose(raw: &[String]) -> Result<(), CliError> {
+    let mut options = LEDGER_OPTIONS.to_vec();
+    options.extend([
+        "public",
+        "payload",
+        "recipient",
+        "amount",
+        "initiator",
+        "approvers",
+        "message-out",
+        "ctx-hex",
+    ]);
+    let args = Args::parse(raw, &options, &["allow-single-disk-anchor", "json", "help"])?;
+    if args.flag("help") {
+        print!("{PROPOSE_HELP}{LEDGER_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let key_id = public_key_id(args.require("public")?)?;
+    let payload = read_input(args.require("payload")?)?;
+    let ctx = crate::codec::from_hex(args.get("ctx-hex").unwrap_or(""))?;
+    let recipient = QsagAddress::decode(args.require("recipient")?)
+        .map_err(|e| CliError::usage(format!("--recipient rejected: {e:?}")))?;
+    let amount_units: u128 = args
+        .require("amount")?
+        .parse()
+        .map_err(|_| CliError::usage("--amount must be a non-negative integer"))?;
+    let initiator: u16 = args
+        .require("initiator")?
+        .parse()
+        .map_err(|_| CliError::usage("--initiator must be a party id"))?;
+    let approvers = parse_party_csv(args.require("approvers")?, "--approvers")?;
+    let message_out = args.require("message-out")?;
+    if std::fs::symlink_metadata(message_out).is_ok() {
+        return Err(CliError::usage(format!("{message_out} already exists")));
+    }
+    let mut ledger = open_from_args(&args, Access::Update)?;
+    let (record, signing_bytes) = ledger.propose(
+        &Proposal {
+            key_id,
+            payload: &payload,
+            ctx: &ctx,
+            recipient,
+            amount_units,
+            initiator,
+            approvers: &approvers,
+        },
+        unix_now()?,
+    )?;
+    write_new(message_out, &signing_bytes, false)?;
+    report_record(&args, ledger.id(), &record, "proposed")
+}
+
+fn report_record(
+    args: &Args,
+    ledger: &[u8; 32],
+    record: &IntentRecord,
+    verb: &str,
+) -> Result<(), CliError> {
+    let id = record.intent.canonical_digest();
+    if args.flag("json") {
+        print!("{}", record.to_json(ledger)?.to_pretty());
+    } else {
+        println!(
+            "{verb} intent {} ({} of {} approvals recorded)",
+            to_hex(&id),
+            record.approvals.len(),
+            record.intent.approver_parties.len()
+        );
+    }
+    Ok(())
+}
+
+const APPROVE_HELP: &str = "\
+qsag policy approve --ledger-dir <dir> --intent <id> --party <party>
+
+Record one approver's approval of a proposed intent. An intent is signable only once every
+one of its approvers has a recorded approval. Exit code 3 means the party is not an approver
+of the intent, the intent was already released, or the policy no longer accepts it.
+
+  --json                print the intent as JSON
+";
+
+fn approve(raw: &[String]) -> Result<(), CliError> {
+    let mut options = LEDGER_OPTIONS.to_vec();
+    options.extend(["intent", "party"]);
+    let args = Args::parse(raw, &options, &["allow-single-disk-anchor", "json", "help"])?;
+    if args.flag("help") {
+        print!("{APPROVE_HELP}{LEDGER_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let id: [u8; 32] = from_hex_exact(args.require("intent")?, "--intent")?;
+    let party: u16 = args
+        .require("party")?
+        .parse()
+        .map_err(|_| CliError::usage("--party must be a party id"))?;
+    let mut ledger = open_from_args(&args, Access::Update)?;
+    let record = ledger.approve(&id, party)?;
+    report_record(&args, ledger.id(), &record, "approved")
+}
+
+const STATUS_HELP: &str = "\
+qsag policy status --ledger-dir <dir> [--json]
+
+Authenticate a policy ledger and report its identifier, policy digest, velocity window,
+per-party spend and checkpoint generation, and its recorded intents. Writes nothing.
+";
+
+fn status(raw: &[String]) -> Result<(), CliError> {
+    let args = Args::parse(
+        raw,
+        &LEDGER_OPTIONS,
+        &["allow-single-disk-anchor", "json", "help"],
+    )?;
+    if args.flag("help") {
+        print!("{STATUS_HELP}{LEDGER_HELP}");
+        return Ok(());
+    }
+    args.no_positionals()?;
+    let ledger = open_from_args(&args, Access::Inspect)?;
+    let mut records = Vec::new();
+    let intents_dir = join(&ledger.dir, &["intents"])?;
+    for entry in std::fs::read_dir(&intents_dir)
+        .map_err(|e| CliError::io(format_args!("reading {intents_dir}"), e))?
+    {
+        let name = entry
+            .map_err(|e| CliError::io(format_args!("reading {intents_dir}"), e))?
+            .file_name();
+        let Some(hex) = name.to_str().and_then(|n| n.strip_suffix(".json")) else {
+            continue;
+        };
+        let Ok(id) = from_hex_exact::<32>(hex, "intent id") else {
+            continue;
+        };
+        records.push(ledger.load_record(&id)?);
+    }
+    records.sort_by_key(|r| (r.intent.timestamp_secs, r.intent.canonical_digest()));
+    let state = |r: &IntentRecord| {
+        if ledger.is_burned(&r.intent) {
+            STATE_RELEASED
+        } else {
+            STATE_PROPOSED
+        }
+    };
+    let parties: Vec<Json> = ledger
+        .guards
+        .iter()
+        .map(|guard| {
+            let released = records
+                .iter()
+                .filter(|r| guard.is_nonce_burned(&r.intent.nonce))
+                .count();
+            Json::object(vec![
+                ("party", Json::num(guard.party_id)),
+                ("window_id", Json::num(guard.current_window_id())),
+                ("window_spend", Json::num(guard.accumulated_window_spend())),
+                ("intents_released", Json::num(released)),
+                ("release_capacity", Json::num(BDOZ_PREPROC_SLOTS)),
+            ])
+        })
+        .collect();
+    let intents: Vec<Json> = records
+        .iter()
+        .map(|r| {
+            Json::object(vec![
+                ("intent_id", Json::hex(&r.intent.canonical_digest())),
+                ("state", Json::str(state(r))),
+                ("amount_units", Json::num(r.intent.amount_units)),
+                ("approvals", party_json(&r.approvals)),
+                ("approver_parties", party_json(&r.intent.approver_parties)),
+            ])
+        })
+        .collect();
+    let report = Json::object(vec![
+        ("ledger_id", Json::hex(ledger.id())),
+        (
+            "policy_digest",
+            Json::hex(&ledger.policy.canonical_digest()),
+        ),
+        ("custody_model", Json::str(CUSTODY_MODEL)),
+        ("anchored", Json::Bool(ledger.anchor.is_some())),
+        ("checkpoint_generation", Json::num(ledger.generation)),
+        (
+            "velocity_window_cap",
+            Json::num(ledger.policy.velocity_window_cap),
+        ),
+        ("window_id", Json::num(ledger.current_window())),
+        (
+            "window_spend",
+            Json::num(ledger.window_spend(&ledger.committee.parties)?),
+        ),
+        ("parties", Json::Array(parties)),
+        ("intents", Json::Array(intents)),
+    ]);
+    if args.flag("json") {
+        print!("{}", report.to_pretty());
+    } else {
+        println!(
+            "ledger {} window {} spend {} of {}",
+            report.field_str("ledger_id")?,
+            ledger.current_window(),
+            ledger.window_spend(&ledger.committee.parties)?,
+            ledger.policy.velocity_window_cap
+        );
+        for r in &records {
+            println!(
+                "  {} {} amount {} approvals {}/{}",
+                to_hex(&r.intent.canonical_digest()),
+                state(r),
+                r.intent.amount_units,
+                r.approvals.len(),
+                r.intent.approver_parties.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `qsag policy <init|propose|approve|status>`; `None` if `verb` is not a ledger subcommand.
+pub fn run(verb: &str, rest: &[String]) -> Option<Result<(), CliError>> {
+    Some(match verb {
+        "init" => init(rest),
+        "propose" => propose(rest),
+        "approve" => approve(rest),
+        "status" => status(rest),
+        _ => return None,
+    })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use qsag_addr::KeyIdentityKind;
+
+    const NOW: u64 = 1_750_000_000;
+    const DAY: u64 = 86_400;
+
+    fn recipient() -> QsagAddress {
+        QsagAddress::from_pubkey_cshake256(
+            "qsp",
+            WitnessSuiteTag::SlhDsa128s,
+            KeyIdentityKind::SingleOrThreshold,
+            b"treasury cold wallet",
+        )
+        .unwrap()
+    }
+
+    fn policy_document(window_secs: u64) -> String {
+        Json::object(vec![
+            ("format", Json::str(POLICY_FORMAT)),
+            ("chain_id", Json::num(1)),
+            ("suite", Json::str("SlhDsa128s")),
+            (
+                "recipient_allowlist",
+                Json::Array(vec![Json::str(recipient().encode().unwrap())]),
+            ),
+            ("max_single_tx_amount", Json::num(1_000)),
+            ("velocity_window_cap", Json::num(1_500)),
+            ("valid_not_before_secs", Json::num(1_700_000_000u64)),
+            ("valid_not_after_secs", Json::num(1_800_000_000u64)),
+            ("forbid_initiator_self_approval", Json::Bool(true)),
+            ("hardware_guardian_party", Json::num(3)),
+            (
+                "quorum_tiers",
+                Json::Array(vec![Json::object(vec![
+                    ("max_amount_units", Json::num(1_000)),
+                    ("min_approvers", Json::num(2)),
+                    ("require_hardware_guardian", Json::Bool(true)),
+                ])]),
+            ),
+            ("parties", party_json(&[1, 2, 3])),
+            ("window_secs", Json::num(window_secs)),
+        ])
+        .to_pretty()
+    }
+
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "qsag-policy-ledger-{}",
+                to_hex(&os_random_32().unwrap())
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self, name: &str) -> String {
+            self.0.join(name).to_str().unwrap().to_owned()
+        }
+        fn create(&self, window_secs: u64) -> String {
+            std::fs::write(self.path("policy.json"), policy_document(window_secs)).unwrap();
+            let args: Vec<String> = [
+                "--ledger-dir",
+                &self.path("ledger"),
+                "--policy",
+                &self.path("policy.json"),
+                "--accept-single-host-custody",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            init(&args).unwrap();
+            self.path("ledger")
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn open(dir: &str) -> OpenLedger {
+        OpenLedger::open(dir, None, None, Access::Update).unwrap()
+    }
+
+    const KEY: [u8; 32] = [0x4B; 32];
+
+    /// Propose and fully approve one transfer in separate ledger sessions.
+    fn approved(dir: &str, amount: u128, now: u64) -> Result<([u8; 32], Vec<u8>), CliError> {
+        let (record, message) = open(dir).propose(
+            &Proposal {
+                key_id: KEY,
+                payload: b"wire transfer",
+                ctx: b"",
+                recipient: recipient(),
+                amount_units: amount,
+                initiator: 1,
+                approvers: &[2, 3],
+            },
+            now,
+        )?;
+        let id = record.intent.canonical_digest();
+        for party in [2, 3] {
+            open(dir).approve(&id, party)?;
+        }
+        Ok((id, message))
+    }
+
+    #[test]
+    fn spend_nonces_and_approvals_persist_across_sessions() {
+        let scratch = Scratch::new();
+        let dir = scratch.create(0);
+        let (record, message) = open(&dir)
+            .propose(
+                &Proposal {
+                    key_id: KEY,
+                    payload: b"wire transfer",
+                    ctx: b"",
+                    recipient: recipient(),
+                    amount_units: 800,
+                    initiator: 1,
+                    approvers: &[2, 3],
+                },
+                NOW,
+            )
+            .unwrap();
+        let id = record.intent.canonical_digest();
+
+        // Unapproved, then half approved: refused, and the checkpoint does not move.
+        let generations = |dir: &str| -> (u64, Vec<u8>) {
+            (
+                open(dir).generation,
+                std::fs::read(bundle_path(dir).unwrap()).unwrap(),
+            )
+        };
+        let before = generations(&dir);
+        for approver in [2, 3] {
+            let err = open(&dir)
+                .authorize(&id, &KEY, &message, b"", false, NOW)
+                .err()
+                .unwrap();
+            assert_eq!(err.code, exit::POLICY_DENIED, "{}", err.message);
+            assert!(err.message.contains("unapproved"), "{}", err.message);
+            open(&dir).approve(&id, approver).unwrap();
+        }
+        assert_eq!(generations(&dir), before);
+        // A party outside the intent's approvers cannot approve it.
+        assert_eq!(
+            open(&dir).approve(&id, 1).err().unwrap().code,
+            exit::POLICY_DENIED
+        );
+
+        // Wrong key, wrong message and wrong context are refused before release.
+        for (key, msg, ctx) in [
+            (&[0u8; 32], &message[..], &b""[..]),
+            (&KEY, &b"another message"[..], &b""[..]),
+            (&KEY, &message[..], &b"ctx"[..]),
+        ] {
+            let err = open(&dir)
+                .authorize(&id, key, msg, ctx, false, NOW)
+                .err()
+                .unwrap();
+            assert_eq!(err.code, exit::POLICY_DENIED);
+        }
+        assert_eq!(generations(&dir), before);
+
+        let granted = open(&dir)
+            .authorize(&id, &KEY, &message, b"", false, NOW)
+            .unwrap();
+        assert_eq!(granted.amount_units, 800);
+        let after = open(&dir);
+        assert_eq!(after.window_spend(&[2, 3]).unwrap(), 800);
+        assert!(after.guards[1].is_nonce_burned(&record.intent.nonce));
+        assert!(after.guards[2].is_session_burned(&record.intent.session_id));
+        // The initiator took no part in the barrier and accounts for no spend.
+        assert_eq!(after.guards[0].accumulated_window_spend(), 0);
+        assert!(!after.guards[0].is_nonce_burned(&record.intent.nonce));
+        assert_eq!(after.generation, before.0 + 1);
+        assert_eq!(after.fence.generation(), after.generation);
+        drop(after);
+
+        // Replay is refused; resuming the same ceremony is the one exception.
+        let replay = open(&dir)
+            .authorize(&id, &KEY, &message, b"", false, NOW)
+            .err()
+            .unwrap();
+        assert_eq!(replay.code, exit::POLICY_DENIED);
+        assert!(replay.message.contains("DuplicateIntentNonce"));
+        open(&dir)
+            .authorize(&id, &KEY, &message, b"", true, NOW)
+            .unwrap();
+        assert!(
+            open(&dir)
+                .authorize(&id, &KEY, b"other", b"", true, NOW)
+                .is_err()
+        );
+        assert_eq!(open(&dir).window_spend(&[2, 3]).unwrap(), 800);
+
+        // The record carries no release state to roll back: the guards burned the nonce.
+        assert_eq!(
+            open(&dir).approve(&id, 2).err().unwrap().code,
+            exit::POLICY_DENIED
+        );
+        let released = generations(&dir);
+        let err = open(&dir)
+            .authorize(&id, &KEY, &message, b"", false, NOW)
+            .err()
+            .unwrap();
+        assert!(
+            err.message.contains("DuplicateIntentNonce"),
+            "{}",
+            err.message
+        );
+        assert_eq!(generations(&dir), released);
+    }
+
+    #[test]
+    fn velocity_cap_holds_across_sessions_and_resets_only_with_the_window() {
+        let scratch = Scratch::new();
+        let dir = scratch.create(DAY);
+        // Two intents proposed against the same spend: only the first can be released.
+        let (first, first_msg) = approved(&dir, 800, NOW).unwrap();
+        let (second, second_msg) = approved(&dir, 700, NOW).unwrap();
+        open(&dir)
+            .authorize(&first, &KEY, &first_msg, b"", false, NOW)
+            .unwrap();
+        let stale = open(&dir)
+            .authorize(&second, &KEY, &second_msg, b"", false, NOW)
+            .err()
+            .unwrap();
+        assert_eq!(stale.code, exit::POLICY_DENIED);
+        assert_eq!(open(&dir).window_spend(&[2, 3]).unwrap(), 800);
+
+        // Proposed again against the recorded spend it fits exactly; one unit more does not.
+        let (third, third_msg) = approved(&dir, 700, NOW + 1).unwrap();
+        open(&dir)
+            .authorize(&third, &KEY, &third_msg, b"", false, NOW + 1)
+            .unwrap();
+        let over = approved(&dir, 1, NOW + 2).err().unwrap();
+        assert_eq!(over.code, exit::POLICY_DENIED);
+        assert!(over.message.contains("VelocityCap"), "{}", over.message);
+        let single = approved(&dir, 1_001, NOW + 2).err().unwrap();
+        assert!(single.message.contains("SingleTxCap"), "{}", single.message);
+
+        // The next window starts empty; an intent stamped in the old window is refused.
+        let (late, late_msg) = approved(&dir, 0, NOW + 3).unwrap();
+        let next = NOW + DAY;
+        let err = open(&dir)
+            .authorize(&late, &KEY, &late_msg, b"", false, next)
+            .err()
+            .unwrap();
+        assert!(err.message.contains("WindowIdMismatch"), "{}", err.message);
+        assert_eq!(open(&dir).window_spend(&[1, 2, 3]).unwrap(), 0);
+        let (fresh, fresh_msg) = approved(&dir, 1_000, next).unwrap();
+        open(&dir)
+            .authorize(&fresh, &KEY, &fresh_msg, b"", false, next)
+            .unwrap();
+        // A clock that steps back does not reopen the previous window.
+        let ledger = open(&dir);
+        assert_eq!(ledger.current_window(), next / DAY);
+        assert_eq!(ledger.window_spend(&[2, 3]).unwrap(), 1_000);
+        drop(ledger);
+        assert!(approved(&dir, 600, NOW).is_err());
+    }
+
+    #[test]
+    fn stale_and_future_intents_are_refused() {
+        let scratch = Scratch::new();
+        let dir = scratch.create(0);
+        let (id, message) = approved(&dir, 10, NOW).unwrap();
+        for now in [NOW - CLOCK_SKEW_SECS - 1, NOW + DEFAULT_INTENT_TTL_SECS + 1] {
+            let err = open(&dir)
+                .authorize(&id, &KEY, &message, b"", false, now)
+                .err()
+                .unwrap();
+            assert!(
+                err.message.contains("TimestampOutsideWindow"),
+                "{}",
+                err.message
+            );
+        }
+        open(&dir)
+            .authorize(
+                &id,
+                &KEY,
+                &message,
+                b"",
+                false,
+                NOW + DEFAULT_INTENT_TTL_SECS,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn rolled_back_or_damaged_state_fails_closed() {
+        let scratch = Scratch::new();
+        let dir = scratch.create(0);
+        let checkpoint = bundle_path(&dir).unwrap();
+        let old = std::fs::read(&checkpoint).unwrap();
+        let (id, message) = approved(&dir, 100, NOW).unwrap();
+        open(&dir)
+            .authorize(&id, &KEY, &message, b"", false, NOW)
+            .unwrap();
+        let current = std::fs::read(&checkpoint).unwrap();
+        assert_ne!(old, current);
+
+        let refused = |dir: &str| {
+            for access in [Access::Inspect, Access::Update] {
+                let err = OpenLedger::open(dir, None, None, access).err().unwrap();
+                assert_eq!(err.code, exit::STATE_CONFLICT, "{}", err.message);
+            }
+        };
+        // The pre-spend checkpoint under the advanced fence.
+        std::fs::write(&checkpoint, &old).unwrap();
+        refused(&dir);
+        // Truncated, extended, empty, and with one bit flipped in each region.
+        std::fs::write(&checkpoint, &current[..current.len() - 1]).unwrap();
+        refused(&dir);
+        std::fs::write(&checkpoint, [&current[..], &[0u8]].concat()).unwrap();
+        refused(&dir);
+        std::fs::write(&checkpoint, b"").unwrap();
+        refused(&dir);
+        for at in [0, 20, 44, 60, current.len() / 2, current.len() - 1] {
+            let mut flipped = current.clone();
+            flipped[at] ^= 1;
+            std::fs::write(&checkpoint, &flipped).unwrap();
+            refused(&dir);
+        }
+        // A symlink in place of the checkpoint is not followed.
+        let aside = scratch.path("aside.ckpt");
+        std::fs::write(&aside, &current).unwrap();
+        std::fs::remove_file(&checkpoint).unwrap();
+        std::os::unix::fs::symlink(&aside, &checkpoint).unwrap();
+        refused(&dir);
+        std::fs::remove_file(&checkpoint).unwrap();
+        std::fs::write(&checkpoint, &current).unwrap();
+        assert_eq!(open(&dir).window_spend(&[2, 3]).unwrap(), 100);
+
+        // A checkpoint that reached disk without its fence is adopted, never rolled past.
+        let mut ledger = open(&dir);
+        let generation = ledger.generation + 1;
+        let ahead = write_bundle(&ledger.seed, &ledger.id, generation, &ledger.guards);
+        drop(ledger);
+        std::fs::write(&checkpoint, &ahead).unwrap();
+        let inspected = OpenLedger::open(&dir, None, None, Access::Inspect).unwrap();
+        assert_eq!(inspected.fence.generation(), generation - 1);
+        drop(inspected);
+        ledger = open(&dir);
+        assert_eq!(ledger.fence.generation(), generation);
+        drop(ledger);
+        std::fs::write(&checkpoint, &current).unwrap();
+        refused(&dir);
+        std::fs::write(&checkpoint, &ahead).unwrap();
+
+        // A damaged intent record, and an edited root file.
+        let record = intent_path(&dir, &id).unwrap();
+        let text = std::fs::read_to_string(&record).unwrap();
+        std::fs::write(
+            &record,
+            text.replace("\"amount_units\": 100", "\"amount_units\": 1"),
+        )
+        .unwrap();
+        let err = open(&dir).load_record(&id).err().unwrap();
+        assert_eq!(err.code, exit::STATE_CONFLICT);
+        let root = root_path(&dir).unwrap();
+        let text = std::fs::read_to_string(&root).unwrap();
+        std::fs::write(
+            &root,
+            text.replace(
+                "\"velocity_window_cap\": 1500",
+                "\"velocity_window_cap\": 9999",
+            ),
+        )
+        .unwrap();
+        refused(&dir);
+    }
+
+    #[test]
+    fn committee_checkpoint_codec_rejects_noncanonical_input() {
+        let key = Secret32([9; 32]);
+        let ledger = [3u8; 32];
+        let parts = vec![(1u16, vec![1u8, 2, 3]), (2u16, Vec::new())];
+        let bytes = encode_bundle(&key, &ledger, 7, &parts);
+        assert_eq!(
+            decode_bundle(&key, &ledger, &bytes).unwrap(),
+            Bundle {
+                generation: 7,
+                checkpoints: vec![(1u16, &[1u8, 2, 3][..]), (2u16, &[][..])],
+            }
+        );
+        assert!(decode_bundle(&Secret32([8; 32]), &ledger, &bytes).is_err());
+        assert!(decode_bundle(&key, &[4u8; 32], &bytes).is_err());
+        // Authenticated but ill-formed bodies: a length running past the end, trailing bytes.
+        let retag = |body: &[u8]| {
+            let mut out = body.to_vec();
+            out.extend_from_slice(&cshake256_framed_32(BUNDLE_DOMAIN, &[&key.0, body]));
+            out
+        };
+        let body = &bytes[..bytes.len() - 32];
+        assert!(decode_bundle(&key, &ledger, &retag(body)).is_ok());
+        assert!(decode_bundle(&key, &ledger, &retag(&[body, &[0u8][..]].concat())).is_err());
+        assert!(decode_bundle(&key, &ledger, &retag(&body[..body.len() - 1])).is_err());
+        let mut long = body.to_vec();
+        long[8 + 32 + 8 + 2 + 2 + 3] = 0xFF;
+        assert!(decode_bundle(&key, &ledger, &retag(&long)).is_err());
+        for len in 0..40 {
+            assert!(decode_bundle(&key, &ledger, &bytes[..len]).is_err());
+        }
+    }
+
+    #[test]
+    fn key_pin_requires_the_enrolled_ledger() {
+        let scratch = Scratch::new();
+        let dir = scratch.create(0);
+        let gate = Gate {
+            ledger: open(&dir),
+            intent: None,
+        };
+        let pinned = Json::object(vec![(KEY_PIN_FIELD, Json::hex(gate.ledger_id()))]);
+        let other = Json::object(vec![(KEY_PIN_FIELD, Json::hex(&[7u8; 32]))]);
+        let unpinned = Json::object(vec![("scheme", Json::str("x"))]);
+        enforce_key_pin(&pinned, Some(&gate)).unwrap();
+        enforce_key_pin(&unpinned, Some(&gate)).unwrap();
+        enforce_key_pin(&unpinned, None).unwrap();
+        assert_eq!(
+            enforce_key_pin(&pinned, None).err().unwrap().code,
+            exit::STATE_CONFLICT
+        );
+        assert_eq!(
+            enforce_key_pin(&other, Some(&gate)).err().unwrap().code,
+            exit::STATE_CONFLICT
+        );
+    }
+
+    #[test]
+    fn policy_documents_are_validated() {
+        let good = Json::parse(&policy_document(0)).unwrap();
+        let (policy, committee) = policy_from_json(&good).unwrap();
+        let (restored, restored_committee) =
+            stored_policy(&policy_to_json(&policy, &committee)).unwrap();
+        assert_eq!(restored.canonical_digest(), policy.canonical_digest());
+        assert_eq!(restored_committee.parties, vec![1, 2, 3]);
+        for (field, value) in [
+            ("parties", party_json(&[1])),
+            ("parties", party_json(&[1, 1, 2])),
+            ("hardware_guardian_party", Json::num(9)),
+            ("suite", Json::str("NoSuchSuite")),
+            ("recipient_allowlist", Json::Array(Vec::new())),
+            ("quorum_tiers", Json::Array(Vec::new())),
+            ("intent_ttl_secs", Json::num(0)),
+            ("format", Json::str("other")),
+        ] {
+            let mut bad = good.clone();
+            set(&mut bad, field, value);
+            assert!(policy_from_json(&bad).is_err(), "{field}");
+        }
+    }
+}
