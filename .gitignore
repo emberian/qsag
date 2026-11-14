@@ -13,3 +13,4 @@
 *~
 
 paper/*.pdf
+__pycache__

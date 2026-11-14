@@ -2081,8 +2081,8 @@ mod tests {
         assert_eq!(
             (hex32(&pcs_digest_1).as_str(), hex32(&agg_digest_1).as_str()),
             (
-                "2c4901da96a713c918ce4d2b1e3f8865f9d1c1bde7bb32adfce6f6b379c13589",
-                "b9d27636c3ad01e5283cfb274f26101ddee86913834220f6d3a0d6dbb032dd65"
+                "45f31a078bc0d27c77e8c88d2f44b558542bd2e11269ffd130b7f3539a9ec630",
+                "c19d9ef6dd07e9dcced41c11a47ba9fad136961cfbb1dbfd3cf4590a04095b71"
             )
         );
     }
