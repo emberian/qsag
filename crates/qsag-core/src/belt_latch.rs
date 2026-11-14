@@ -609,3 +609,806 @@ pub fn permits_authorise(
 }
 
 /// One signer's latch (see the module documentation). Not `Clone`.
+pub struct BeltLatch<W: DurableWal> {
+    wal: W,
+    capacity_log2: usize,
+    state: BeltLatchState,
+    echo_keys: Option<EchoMacKeys>,
+    /// Set when a persist failed; never cleared.
+    wal_poisoned: bool,
+}
+
+impl<W: DurableWal> fmt::Debug for BeltLatch<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BeltLatch")
+            .field("next_epoch", &self.state.next_epoch)
+            .field("in_flight_epoch", &self.state.in_flight.as_ref().map(|r| r.epoch))
+            .field("party", &self.echo_keys.as_ref().map(EchoMacKeys::party))
+            .field("wal_poisoned", &self.wal_poisoned)
+            .finish()
+    }
+}
+
+impl<W: DurableWal> BeltLatch<W> {
+    /// Recover a latch without echo keys from `wal` (an unwritten log starts at epoch 0).
+    /// It binds and replays, but cannot send or check echoes.
+    pub fn recover(wal: W, capacity_log2: usize) -> Result<Self, BeltLatchError> {
+        Self::recover_inner(wal, capacity_log2, None)
+    }
+
+    /// Recover the latch of party `echo_keys.party()` from `wal`, able to exchange echoes.
+    pub fn recover_with_echo_keys(
+        wal: W,
+        capacity_log2: usize,
+        echo_keys: EchoMacKeys,
+    ) -> Result<Self, BeltLatchError> {
+        Self::recover_inner(wal, capacity_log2, Some(echo_keys))
+    }
+
+    fn recover_inner(
+        wal: W,
+        capacity_log2: usize,
+        echo_keys: Option<EchoMacKeys>,
+    ) -> Result<Self, BeltLatchError> {
+        if capacity_log2 == 0 || capacity_log2 > 62 {
+            return Err(BeltLatchError::InvalidCapacity);
+        }
+        let state = wal.load().map_err(BeltLatchError::Wal)?.unwrap_or_default();
+        Ok(Self {
+            wal,
+            capacity_log2,
+            state,
+            echo_keys,
+            wal_poisoned: false,
+        })
+    }
+
+    /// Whether a persist has failed on this latch (see the module documentation).
+    pub fn is_wal_poisoned(&self) -> bool {
+        self.wal_poisoned
+    }
+
+    fn ensure_usable(&self) -> Result<(), BeltLatchError> {
+        if self.wal_poisoned {
+            Err(BeltLatchError::WalPoisoned)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn next_epoch(&self) -> u64 {
+        self.state.next_epoch
+    }
+
+    pub fn in_flight(&self) -> Option<&BeltLatchRecord> {
+        self.state.in_flight.as_ref()
+    }
+
+    /// Give the log back (for a simulated restart in tests, or a controlled shutdown).
+    pub fn into_wal(self) -> W {
+        self.wal
+    }
+
+    pub fn wal_mut(&mut self) -> &mut W {
+        &mut self.wal
+    }
+
+    /// The salt a retry of `(epoch, msg_digest)` must replay, if this signer persisted one.
+    /// `Ok(None)` means the epoch was never bound here, lies inside the epoch window, and a
+    /// fresh salt may be drawn for it.
+    pub fn latched_salt(
+        &self,
+        epoch: u64,
+        msg_digest: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, BeltLatchError> {
+        self.ensure_usable()?;
+        if let Some(rec) = &self.state.in_flight
+            && rec.epoch == epoch
+        {
+            return if ct_eq_bytes32(&rec.msg_digest, msg_digest) {
+                Ok(Some(rec.retry_salt))
+            } else {
+                Err(BeltLatchError::EpochAlreadyBound)
+            };
+        }
+        if epoch < self.state.next_epoch {
+            return Err(BeltLatchError::EpochConsumed);
+        }
+        if epoch >= 1u64 << self.capacity_log2 {
+            return Err(BeltLatchError::Exhausted);
+        }
+        // `epoch >= next_epoch` here, and `next_epoch <= 2^62`, so the sum cannot overflow.
+        if epoch > self.state.next_epoch + MAX_EPOCH_JUMP {
+            return Err(BeltLatchError::EpochJumpTooLarge);
+        }
+        Ok(None)
+    }
+
+    /// Persist the binding of `epoch`, or confirm that the identical binding is in flight.
+    /// Epochs may be skipped (burned), at most [`MAX_EPOCH_JUMP`] at a time, but never
+    /// revisited. A failed persist poisons the latch.
+    pub fn bind(
+        &mut self,
+        epoch: u64,
+        msg_digest: &[u8; 32],
+        retry_salt: &[u8; 32],
+        target_sum_digits: &[u8],
+    ) -> Result<BindOutcome, BeltLatchError> {
+        if let Some(salt) = self.latched_salt(epoch, msg_digest)? {
+            let rec = self.state.in_flight.as_ref().ok_or(BeltLatchError::NothingBound)?;
+            if !ct_eq_bytes32(&salt, retry_salt) {
+                return Err(BeltLatchError::RetrySaltMismatch);
+            }
+            if rec.target_sum_digits != target_sum_digits {
+                return Err(BeltLatchError::DigitsMismatch);
+            }
+            return Ok(BindOutcome::Replay);
+        }
+        let next = BeltLatchState {
+            next_epoch: epoch + 1,
+            in_flight: Some(BeltLatchRecord {
+                epoch,
+                msg_digest: *msg_digest,
+                retry_salt: *retry_salt,
+                target_sum_digits: target_sum_digits.to_vec(),
+            }),
+        };
+        // Durable first; memory changes only after the log accepted the record. On failure
+        // the flag is set before the error leaves this function.
+        if let Err(e) = self.wal.sync_persist(&next) {
+            self.wal_poisoned = true;
+            return Err(BeltLatchError::Wal(e));
+        }
+        self.state = next;
+        Ok(BindOutcome::Fresh)
+    }
+
+    /// The echo of the in-flight record addressed to peer `receiver`, sent after
+    /// [`Self::bind`]. Each of the two peers gets its own echo.
+    pub fn echo_for(&self, receiver: usize) -> Result<BeltEcho, BeltLatchError> {
+        self.ensure_usable()?;
+        let keys = self
+            .echo_keys
+            .as_ref()
+            .ok_or(BeltLatchError::EchoKeysMissing)?;
+        let key = keys.key_for(receiver)?;
+        let rec = self
+            .state
+            .in_flight
+            .as_ref()
+            .ok_or(BeltLatchError::NothingBound)?;
+        let binding = rec.binding();
+        Ok(BeltEcho {
+            party: keys.party,
+            receiver,
+            epoch: rec.epoch,
+            msg_digest: rec.msg_digest,
+            retry_salt: rec.retry_salt,
+            binding,
+            tag: echo_tag(
+                key,
+                keys.party,
+                receiver,
+                rec.epoch,
+                &rec.msg_digest,
+                &rec.retry_salt,
+                &binding,
+            ),
+        })
+    }
+
+    /// Authenticate the echoes that both other signers addressed to this one, compare them
+    /// with the in-flight record and, if they all agree, return the permit that authorises
+    /// opening this epoch's chain shares. Echoes addressed to other receivers are ignored.
+    pub fn verify_peer_echoes(&self, echoes: &[BeltEcho]) -> Result<OpenPermit, BeltLatchError> {
+        self.ensure_usable()?;
+        let keys = self
+            .echo_keys
+            .as_ref()
+            .ok_or(BeltLatchError::EchoKeysMissing)?;
+        let own_party = keys.party;
+        let rec = self
+            .state
+            .in_flight
+            .as_ref()
+            .ok_or(BeltLatchError::NothingBound)?;
+        let binding = rec.binding();
+        for peer in (0..3).filter(|p| *p != own_party) {
+            let mut seen = echoes
+                .iter()
+                .filter(|e| e.party == peer && e.receiver == own_party);
+            let (Some(echo), None) = (seen.next(), seen.next()) else {
+                return Err(BeltLatchError::MissingEcho);
+            };
+            // Authenticate what the echo claims before comparing it with the local record,
+            // so a split view is only ever attributed to a party that vouched for it.
+            let want = echo_tag(
+                keys.key_for(peer)?,
+                peer,
+                own_party,
+                echo.epoch,
+                &echo.msg_digest,
+                &echo.retry_salt,
+                &echo.binding,
+            );
+            if !ct_eq_bytes32(&want, &echo.tag) {
+                return Err(BeltLatchError::EchoMacInvalid { party: peer });
+            }
+            let same = echo.epoch == rec.epoch
+                && ct_eq_bytes32(&echo.msg_digest, &rec.msg_digest)
+                && ct_eq_bytes32(&echo.retry_salt, &rec.retry_salt)
+                && ct_eq_bytes32(&echo.binding, &binding);
+            if !same {
+                return Err(BeltLatchError::SplitView { party: peer });
+            }
+        }
+        self.wal.authorize_open(rec).map_err(BeltLatchError::Wal)?;
+        Ok(OpenPermit {
+            party: own_party,
+            epoch: rec.epoch,
+            binding,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DIGITS_A: [u8; 4] = [3, 0, 2, 1];
+    const DIGITS_B: [u8; 4] = [1, 2, 0, 3];
+
+    fn latch() -> BeltLatch<MemoryWal> {
+        BeltLatch::recover(MemoryWal::new(), 20).unwrap()
+    }
+
+    /// Test key of the pair `{a, b}`; the three pairs get three different keys.
+    fn pair_key(a: usize, b: usize) -> [u8; 32] {
+        derive_echo_mac_key(b"belt-latch-tests", a, b, &[&[0x50 + (a + b) as u8; 32]])
+    }
+
+    fn keys_of(party: usize) -> EchoMacKeys {
+        EchoMacKeys::new(
+            party,
+            pair_key(party, (party + 1) % 3),
+            pair_key(party, (party + 2) % 3),
+        )
+        .unwrap()
+    }
+
+    fn latch_of(party: usize) -> BeltLatch<MemoryWal> {
+        BeltLatch::recover_with_echo_keys(MemoryWal::new(), 20, keys_of(party)).unwrap()
+    }
+
+    /// Every party's echo to each of its two peers.
+    fn all_echoes(latches: &[BeltLatch<MemoryWal>]) -> Vec<BeltEcho> {
+        let mut out = Vec::new();
+        for l in latches {
+            let own = l.echo_keys.as_ref().unwrap().party();
+            for receiver in (0..3).filter(|r| *r != own) {
+                out.push(l.echo_for(receiver).unwrap());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn state_encoding_round_trips_and_rejects_every_corruption() {
+        let state = BeltLatchState {
+            next_epoch: 8,
+            in_flight: Some(BeltLatchRecord {
+                epoch: 7,
+                msg_digest: [1; 32],
+                retry_salt: [2; 32],
+                target_sum_digits: DIGITS_A.to_vec(),
+            }),
+        };
+        let raw = state.to_bytes();
+        assert_eq!(BeltLatchState::from_bytes(&raw), Some(state));
+        let empty = BeltLatchState::default();
+        assert_eq!(BeltLatchState::from_bytes(&empty.to_bytes()), Some(empty));
+        for i in 0..raw.len() {
+            let mut bad = raw.clone();
+            bad[i] ^= 0x01;
+            assert_eq!(BeltLatchState::from_bytes(&bad), None, "byte {i}");
+        }
+        assert_eq!(BeltLatchState::from_bytes(&raw[..raw.len() - 1]), None);
+        let mut longer = raw;
+        longer.push(0);
+        assert_eq!(BeltLatchState::from_bytes(&longer), None);
+    }
+
+    #[test]
+    fn a_failed_persist_binds_nothing_and_poisons_the_latch_until_recovery() {
+        let mut l = latch_of(0);
+        assert_eq!(l.echo_for(1), Err(BeltLatchError::NothingBound));
+        l.wal_mut().fail_next_persist();
+        assert_eq!(
+            l.bind(0, &[1; 32], &[9; 32], &DIGITS_A),
+            Err(BeltLatchError::Wal(WalError::Io))
+        );
+        assert!(l.is_wal_poisoned());
+        assert_eq!(l.in_flight(), None);
+        assert_eq!(l.next_epoch(), 0);
+
+        // The log would accept the next write, but the latch no longer offers one: every
+        // method on the way to an opening is refused.
+        assert_eq!(
+            l.bind(0, &[1; 32], &[9; 32], &DIGITS_A),
+            Err(BeltLatchError::WalPoisoned)
+        );
+        assert_eq!(
+            l.bind(1, &[2; 32], &[8; 32], &DIGITS_B),
+            Err(BeltLatchError::WalPoisoned)
+        );
+        assert_eq!(l.latched_salt(0, &[1; 32]), Err(BeltLatchError::WalPoisoned));
+        assert_eq!(l.echo_for(1), Err(BeltLatchError::WalPoisoned));
+        assert_eq!(l.verify_peer_echoes(&[]), Err(BeltLatchError::WalPoisoned));
+        assert_eq!(l.wal_mut().persist_count(), 0);
+
+        // Recovery from the log: nothing was bound, and the new latch works.
+        let mut l = BeltLatch::recover_with_echo_keys(l.into_wal(), 20, keys_of(0)).unwrap();
+        assert!(!l.is_wal_poisoned());
+        assert_eq!(l.in_flight(), None);
+        assert_eq!(l.next_epoch(), 0);
+        assert_eq!(l.bind(0, &[1; 32], &[9; 32], &DIGITS_A), Ok(BindOutcome::Fresh));
+        assert_eq!(l.wal_mut().persist_count(), 1);
+        assert!(l.echo_for(1).is_ok());
+    }
+
+    /// A latch that already holds a record keeps it out of reach once a later persist fails.
+    #[test]
+    fn poison_also_blocks_the_record_that_was_already_in_flight() {
+        let mut latches = [latch_of(0), latch_of(1), latch_of(2)];
+        for l in &mut latches {
+            l.bind(0, &[1; 32], &[9; 32], &DIGITS_A).unwrap();
+        }
+        let echoes = all_echoes(&latches);
+        assert!(latches[0].verify_peer_echoes(&echoes).is_ok());
+        latches[0].wal_mut().fail_next_persist();
+        assert_eq!(
+            latches[0].bind(1, &[2; 32], &[8; 32], &DIGITS_B),
+            Err(BeltLatchError::Wal(WalError::Io))
+        );
+        assert_eq!(
+            latches[0].verify_peer_echoes(&echoes),
+            Err(BeltLatchError::WalPoisoned)
+        );
+        assert_eq!(latches[0].echo_for(1), Err(BeltLatchError::WalPoisoned));
+        assert_eq!(
+            latches[0].bind(0, &[1; 32], &[9; 32], &DIGITS_A),
+            Err(BeltLatchError::WalPoisoned)
+        );
+    }
+
+    #[test]
+    fn a_fresh_bind_is_limited_to_the_epoch_window() {
+        let mut l = latch();
+        let capacity = 1u64 << 20;
+        // One request for the last leaf of a fresh key is refused and consumes nothing.
+        assert_eq!(
+            l.bind(capacity - 1, &[1; 32], &[9; 32], &DIGITS_A),
+            Err(BeltLatchError::EpochJumpTooLarge)
+        );
+        assert_eq!(
+            l.latched_salt(capacity - 1, &[1; 32]),
+            Err(BeltLatchError::EpochJumpTooLarge)
+        );
+        assert_eq!(
+            l.bind(MAX_EPOCH_JUMP + 1, &[1; 32], &[9; 32], &DIGITS_A),
+            Err(BeltLatchError::EpochJumpTooLarge)
+        );
+        assert_eq!(l.next_epoch(), 0);
+        assert_eq!(l.in_flight(), None);
+        assert_eq!(l.wal_mut().persist_count(), 0);
+
+        // A jump of exactly the window is accepted, and the window moves with the mark.
+        assert_eq!(
+            l.bind(MAX_EPOCH_JUMP, &[1; 32], &[9; 32], &DIGITS_A),
+            Ok(BindOutcome::Fresh)
+        );
+        let next = l.next_epoch();
+        assert_eq!(next, MAX_EPOCH_JUMP + 1);
+        assert_eq!(
+            l.bind(next + MAX_EPOCH_JUMP + 1, &[2; 32], &[8; 32], &DIGITS_B),
+            Err(BeltLatchError::EpochJumpTooLarge)
+        );
+        assert_eq!(l.next_epoch(), next);
+        // The in-flight epoch still replays; the window applies to fresh epochs only.
+        assert_eq!(
+            l.bind(MAX_EPOCH_JUMP, &[1; 32], &[9; 32], &DIGITS_A),
+            Ok(BindOutcome::Replay)
+        );
+        assert_eq!(
+            l.bind(next + MAX_EPOCH_JUMP, &[2; 32], &[8; 32], &DIGITS_B),
+            Ok(BindOutcome::Fresh)
+        );
+    }
+
+    #[test]
+    fn crash_replay_is_idempotent_and_never_re_rolls_the_salt() {
+        let mut l = latch();
+        assert_eq!(l.bind(5, &[1; 32], &[9; 32], &DIGITS_A), Ok(BindOutcome::Fresh));
+        assert_eq!(l.next_epoch(), 6);
+
+        // Crash: only the log survives.
+        let wal = l.into_wal();
+        let mut l = BeltLatch::recover(wal, 20).unwrap();
+        assert_eq!(l.next_epoch(), 6);
+        assert_eq!(l.latched_salt(5, &[1; 32]), Ok(Some([9; 32])));
+
+        // Same request: replay, with no further write.
+        let before = l.wal_mut().persist_count();
+        assert_eq!(l.bind(5, &[1; 32], &[9; 32], &DIGITS_A), Ok(BindOutcome::Replay));
+        assert_eq!(l.wal_mut().persist_count(), before);
+
+        // Any change on the latched epoch is refused.
+        assert_eq!(
+            l.bind(5, &[2; 32], &[9; 32], &DIGITS_A),
+            Err(BeltLatchError::EpochAlreadyBound)
+        );
+        assert_eq!(l.latched_salt(5, &[2; 32]), Err(BeltLatchError::EpochAlreadyBound));
+        assert_eq!(
+            l.bind(5, &[1; 32], &[8; 32], &DIGITS_A),
+            Err(BeltLatchError::RetrySaltMismatch)
+        );
+        assert_eq!(
+            l.bind(5, &[1; 32], &[9; 32], &DIGITS_B),
+            Err(BeltLatchError::DigitsMismatch)
+        );
+
+        // Epochs below the high-water mark that are not in flight are gone for good,
+        // including the ones skipped on the way to epoch 5.
+        for burned in 0..5 {
+            assert_eq!(
+                l.bind(burned, &[1; 32], &[9; 32], &DIGITS_A),
+                Err(BeltLatchError::EpochConsumed)
+            );
+        }
+        // Moving on consumes epoch 5 as well, across another crash.
+        assert_eq!(l.bind(6, &[3; 32], &[7; 32], &DIGITS_B), Ok(BindOutcome::Fresh));
+        let mut l = BeltLatch::recover(l.into_wal(), 20).unwrap();
+        assert_eq!(
+            l.bind(5, &[1; 32], &[9; 32], &DIGITS_A),
+            Err(BeltLatchError::EpochConsumed)
+        );
+        assert_eq!(l.bind(6, &[3; 32], &[7; 32], &DIGITS_B), Ok(BindOutcome::Replay));
+    }
+
+    #[test]
+    fn capacity_is_enforced() {
+        assert_eq!(
+            BeltLatch::recover(MemoryWal::new(), 0).unwrap_err(),
+            BeltLatchError::InvalidCapacity
+        );
+        let mut l = BeltLatch::recover(MemoryWal::new(), 2).unwrap();
+        assert_eq!(l.bind(3, &[1; 32], &[9; 32], &DIGITS_A), Ok(BindOutcome::Fresh));
+        assert_eq!(l.bind(4, &[1; 32], &[9; 32], &DIGITS_A), Err(BeltLatchError::Exhausted));
+    }
+
+    #[test]
+    fn matching_echoes_from_both_peers_yield_permits_that_authorise_only_that_record() {
+        let mut latches = [latch_of(0), latch_of(1), latch_of(2)];
+        for l in &mut latches {
+            l.bind(2, &[1; 32], &[9; 32], &DIGITS_A).unwrap();
+        }
+        let echoes = all_echoes(&latches);
+        let permits: [OpenPermit; 3] =
+            core::array::from_fn(|p| latches[p].verify_peer_echoes(&echoes).unwrap());
+        let record = latches[0].in_flight().unwrap().clone();
+        assert_eq!(permits_authorise(&permits, &record), Ok(()));
+        let mut other = record.clone();
+        other.target_sum_digits = DIGITS_B.to_vec();
+        assert_eq!(permits_authorise(&permits, &other), Err(BeltLatchError::PermitMismatch));
+
+        // One echo is not enough, and neither is the same peer twice.
+        let to_0_from_1 = latches[1].echo_for(0).unwrap();
+        let to_0_from_2 = latches[2].echo_for(0).unwrap();
+        assert_eq!(
+            latches[0].verify_peer_echoes(&[to_0_from_1]),
+            Err(BeltLatchError::MissingEcho)
+        );
+        assert_eq!(
+            latches[0].verify_peer_echoes(&[to_0_from_1, to_0_from_1, to_0_from_2]),
+            Err(BeltLatchError::MissingEcho)
+        );
+        // An echo addressed to someone else does not count as one addressed to party 0.
+        assert_eq!(
+            latches[0].verify_peer_echoes(&[to_0_from_1, latches[2].echo_for(1).unwrap()]),
+            Err(BeltLatchError::MissingEcho)
+        );
+
+        // A latch without keys binds but takes no part in the echo exchange, and a party
+        // cannot address itself or an index outside the signer set.
+        let mut bare = latch();
+        bare.bind(2, &[1; 32], &[9; 32], &DIGITS_A).unwrap();
+        assert_eq!(bare.echo_for(1), Err(BeltLatchError::EchoKeysMissing));
+        assert_eq!(
+            bare.verify_peer_echoes(&echoes),
+            Err(BeltLatchError::EchoKeysMissing)
+        );
+        assert_eq!(latches[0].echo_for(0), Err(BeltLatchError::InvalidParty));
+        assert_eq!(latches[0].echo_for(3), Err(BeltLatchError::InvalidParty));
+        assert_eq!(
+            EchoMacKeys::new(3, [0; 32], [0; 32]).unwrap_err(),
+            BeltLatchError::InvalidParty
+        );
+    }
+
+    #[test]
+    fn pair_keys_are_symmetric_and_distinct_per_pair_and_context() {
+        let secret: &[&[u8]] = &[&[7u8; 16], &[8u8; 16]];
+        let k01 = derive_echo_mac_key(b"ctx", 0, 1, secret);
+        assert_eq!(k01, derive_echo_mac_key(b"ctx", 1, 0, secret));
+        assert_ne!(k01, derive_echo_mac_key(b"ctx", 0, 2, secret));
+        assert_ne!(k01, derive_echo_mac_key(b"other", 0, 1, secret));
+        assert_ne!(k01, derive_echo_mac_key(b"ctx", 0, 1, &[&[7u8; 16], &[9u8; 16]]));
+        // Field boundaries are part of the input.
+        assert_ne!(
+            derive_echo_mac_key(b"ctx", 0, 1, &[&[1, 2], &[3]]),
+            derive_echo_mac_key(b"ctx", 0, 1, &[&[1], &[2, 3]])
+        );
+    }
+
+    /// Parties 0 and 1 are honest and bound different records for one epoch; party 2 is
+    /// corrupted and relays between them. To get party 0 to open, party 2 needs an echo
+    /// "from party 1" that matches party 0's record. It knows every public field of that
+    /// echo and holds the keys of the pairs {2,0} and {1,2}, but not the key of {0,1}.
+    #[test]
+    fn a_forged_echo_in_an_honest_partys_name_is_rejected() {
+        let (md_a, md_b) = ([0xAA; 32], [0xBB; 32]);
+        let salt = [9; 32];
+        let mut p0 = latch_of(0);
+        let mut p1 = latch_of(1);
+        p0.bind(4, &md_a, &salt, &DIGITS_A).unwrap();
+        p1.bind(4, &md_b, &salt, &DIGITS_B).unwrap();
+        // Party 2 binds party 0's view, so its own echo to party 0 is genuine and matches.
+        let mut p2 = latch_of(2);
+        p2.bind(4, &md_a, &salt, &DIGITS_A).unwrap();
+        let from_2 = p2.echo_for(0).unwrap();
+        let rec = p0.in_flight().unwrap().clone();
+        let corrupt = keys_of(2);
+
+        let forge = |tag: [u8; 32]| BeltEcho {
+            party: 1,
+            receiver: 0,
+            epoch: rec.epoch,
+            msg_digest: rec.msg_digest,
+            retry_salt: rec.retry_salt,
+            binding: rec.binding(),
+            tag,
+        };
+        let tag_under = |key: &[u8; 32], sender: usize, receiver: usize| {
+            echo_tag(
+                key,
+                sender,
+                receiver,
+                rec.epoch,
+                &rec.msg_digest,
+                &rec.retry_salt,
+                &rec.binding(),
+            )
+        };
+        let attempts = [
+            // The right message under each key the corrupted party holds.
+            forge(tag_under(corrupt.key_for(0).unwrap(), 1, 0)),
+            forge(tag_under(corrupt.key_for(1).unwrap(), 1, 0)),
+            // Its own valid tag for party 0, relabelled as coming from party 1.
+            forge(from_2.tag),
+            // The tag party 0 itself would send to party 1 for this record, reflected.
+            forge(p0.echo_for(1).unwrap().tag),
+            forge([0; 32]),
+        ];
+        for (i, forged) in attempts.into_iter().enumerate() {
+            assert_eq!(
+                p0.verify_peer_echoes(&[forged, from_2]),
+                Err(BeltLatchError::EchoMacInvalid { party: 1 }),
+                "attempt {i}"
+            );
+        }
+        // Control: the same fields with the tag only the pair {0,1} can compute are accepted,
+        // so the rejections above are due to the tag and nothing else.
+        let genuine = forge(tag_under(&pair_key(0, 1), 1, 0));
+        assert!(p0.verify_peer_echoes(&[genuine, from_2]).is_ok());
+
+        // Party 1's real echo is authentic and exposes the split.
+        assert_eq!(
+            p0.verify_peer_echoes(&[p1.echo_for(0).unwrap(), from_2]),
+            Err(BeltLatchError::SplitView { party: 1 })
+        );
+        // A genuine echo redirected to another receiver, or with a field changed after it
+        // was tagged, fails authentication as well.
+        let mut q1 = latch_of(1);
+        q1.bind(4, &md_a, &salt, &DIGITS_A).unwrap();
+        let redirected = BeltEcho { receiver: 0, ..q1.echo_for(2).unwrap() };
+        assert_eq!(
+            p0.verify_peer_echoes(&[redirected, from_2]),
+            Err(BeltLatchError::EchoMacInvalid { party: 1 })
+        );
+        let honest = q1.echo_for(0).unwrap();
+        assert!(p0.verify_peer_echoes(&[honest, from_2]).is_ok());
+        for field in 0..4 {
+            let mut bent = honest;
+            match field {
+                0 => bent.epoch ^= 1,
+                1 => bent.msg_digest[0] ^= 1,
+                2 => bent.retry_salt[0] ^= 1,
+                _ => bent.binding[0] ^= 1,
+            }
+            assert_eq!(
+                p0.verify_peer_echoes(&[bent, from_2]),
+                Err(BeltLatchError::EchoMacInvalid { party: 1 }),
+                "field {field}"
+            );
+        }
+    }
+
+    /// Party 2 is corrupted and shows party 0 one message and party 1 another for the same
+    /// epoch. Each honest latch binds its own view, and the echo exchange between the two
+    /// honest parties stops both before a permit exists.
+    #[test]
+    fn split_view_equivocation_is_rejected_by_both_honest_parties() {
+        let (md_a, md_b) = ([0xAA; 32], [0xBB; 32]);
+        let salt = [9; 32];
+        let mut p0 = latch_of(0);
+        let mut p1 = latch_of(1);
+        assert_eq!(p0.bind(4, &md_a, &salt, &DIGITS_A), Ok(BindOutcome::Fresh));
+        assert_eq!(p1.bind(4, &md_b, &salt, &DIGITS_B), Ok(BindOutcome::Fresh));
+        // The corrupted party tells each honest party what it wants to hear, with valid tags:
+        // it holds a pair key with each of them.
+        let mut liar_a = latch_of(2);
+        let mut liar_b = latch_of(2);
+        liar_a.bind(4, &md_a, &salt, &DIGITS_A).unwrap();
+        liar_b.bind(4, &md_b, &salt, &DIGITS_B).unwrap();
+        let lie_to_0 = liar_a.echo_for(0).unwrap();
+        let lie_to_1 = liar_b.echo_for(1).unwrap();
+        assert_eq!(
+            p0.verify_peer_echoes(&[p1.echo_for(0).unwrap(), lie_to_0]),
+            Err(BeltLatchError::SplitView { party: 1 })
+        );
+        assert_eq!(
+            p1.verify_peer_echoes(&[p0.echo_for(1).unwrap(), lie_to_1]),
+            Err(BeltLatchError::SplitView { party: 0 })
+        );
+
+        // Same message but different salts (hence different digits) is a split view too.
+        let mut q0 = latch_of(0);
+        let mut q1 = latch_of(1);
+        let mut q2 = latch_of(2);
+        q0.bind(4, &md_a, &[1; 32], &DIGITS_A).unwrap();
+        q1.bind(4, &md_a, &[2; 32], &DIGITS_B).unwrap();
+        q2.bind(4, &md_a, &[1; 32], &DIGITS_A).unwrap();
+        assert_eq!(
+            q0.verify_peer_echoes(&[q1.echo_for(0).unwrap(), q2.echo_for(0).unwrap()]),
+            Err(BeltLatchError::SplitView { party: 1 })
+        );
+        // A peer that binds the same message and salt but other digits differs only in the
+        // binding, and is caught as well.
+        let mut r1 = latch_of(1);
+        r1.bind(4, &md_a, &[1; 32], &DIGITS_B).unwrap();
+        assert_eq!(
+            q0.verify_peer_echoes(&[r1.echo_for(0).unwrap(), q2.echo_for(0).unwrap()]),
+            Err(BeltLatchError::SplitView { party: 1 })
+        );
+        // The honest parties stay bound: neither can be talked into the other message.
+        assert_eq!(
+            p0.bind(4, &md_b, &salt, &DIGITS_B),
+            Err(BeltLatchError::EpochAlreadyBound)
+        );
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod fs_tests {
+    use super::*;
+
+    const KEY: [u8; 32] = [0x5a; 32];
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(std::format!(
+                "qsag-belt-wal-{}-{name}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+
+        fn wal(&self) -> std::path::PathBuf {
+            self.0.join("belt.wal")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn bind_one(wal: FsBeltWal, epoch: u64) -> FsBeltWal {
+        let mut latch = BeltLatch::recover(wal, 10).unwrap();
+        latch.bind(epoch, &[7; 32], &[9; 32], &[3, 0, 2, 1]).unwrap();
+        latch.into_wal()
+    }
+
+    #[test]
+    fn recovery_refuses_a_log_that_was_never_provisioned() {
+        let dir = Scratch::new("unprovisioned");
+        assert_eq!(
+            FsBeltWal::open_existing(dir.wal(), KEY).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        // The refused open left nothing behind that a later genesis would trip over.
+        drop(FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap());
+    }
+
+    #[test]
+    fn genesis_is_once_only_and_recovery_keeps_the_high_water_mark() {
+        let dir = Scratch::new("once");
+        let wal = FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap();
+        assert_eq!(wal.load().unwrap(), Some(BeltLatchState::default()));
+        drop(bind_one(wal, 5));
+
+        assert_eq!(
+            FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        let wal = FsBeltWal::open_existing(dir.wal(), KEY).unwrap();
+        let latch = BeltLatch::recover(wal, 10).unwrap();
+        assert_eq!(latch.next_epoch(), 6);
+        assert_eq!(latch.in_flight().unwrap().epoch, 5);
+    }
+
+    #[test]
+    fn a_deleted_log_is_rejected_instead_of_restarting_at_epoch_zero() {
+        let dir = Scratch::new("deleted");
+        drop(bind_one(FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap(), 5));
+        std::fs::remove_file(dir.wal()).unwrap();
+
+        assert_eq!(
+            FsBeltWal::open_existing(dir.wal(), KEY).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        // The lock sidecar outlives the log, so genesis cannot be replayed over it either.
+        assert_eq!(
+            FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap_err().kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn a_log_deleted_under_a_live_latch_fails_closed_on_load() {
+        let dir = Scratch::new("live");
+        let wal = FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap();
+        std::fs::remove_file(dir.wal()).unwrap();
+        assert_eq!(wal.load(), Err(WalError::Corrupt));
+        assert!(matches!(
+            BeltLatch::recover(wal, 10),
+            Err(BeltLatchError::Wal(WalError::Corrupt))
+        ));
+    }
+
+    #[test]
+    fn the_record_is_bound_to_the_wal_key() {
+        let dir = Scratch::new("keyed");
+        drop(bind_one(FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap(), 5));
+
+        // Wrong key.
+        assert_eq!(
+            FsBeltWal::open_existing(dir.wal(), [0x5b; 32]).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        // A well-formed epoch-0 state with a valid public digest but no MAC under the key:
+        // what an attacker with file access but not the key can write.
+        let mut forged = BeltLatchState::default().to_bytes();
+        forged.extend_from_slice(&[0u8; 32]);
+        std::fs::write(dir.wal(), &forged).unwrap();
+        assert_eq!(
+            FsBeltWal::open_existing(dir.wal(), KEY).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+    }
+}
