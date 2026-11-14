@@ -20,17 +20,22 @@ merge trees over the quartic Goldilocks extension field `Aggregation.GoldilocksE
    Exact `(4, 16, 64, 256)` rate-escalating schedules matching `crates/qsag-agg/src/pcs.rs` across
    all five `WhirSecurityRegime` profiles (`habr24Classical128`, `habr24Interactive128`,
    `bciksJohnsonClassical128`, default `habr24Qrom128`, and unconditional `bciksJohnsonQrom128`),
-   proving positive Johnson proximity slack (`+1` query -> `eta = 1/512` and `eta = 1/1024` with
-   explicit finite `[BCIKS20]` list bounds `L <= 256` and `L <= 512`) and `ProductionAggParams`.
+   proving positive Johnson proximity slack (`+1` query at classical-128 -> `eta = 1/512`, `+2`
+   queries at QROM-128 -> `eta = 1/1024`, with explicit finite `[BCIKS20]` list bounds `L <= 256`
+   and `L <= 512`) and `ProductionAggParams`.
 4. **Succinct Multi-Stage WHIR + OOD + PoW + Degree-8 Sumcheck Verifier (§6–§8):**
    Instance-bound Fiat–Shamir transcript, degree-8 row sumcheck over `GoldilocksExt4`, multi-stage
    WHIR verifier (`verifySuccinctAggregate`, `verifyAggregatedSignature`, `MergeNode`,
    `verifyMergeTree` — zero plaintext `List PqHashSig` openings), per-stage OOD list-pinning,
-   degree-2 shift/OOD sumcheck, 16-bit `cSHAKE256` Proof-of-Work (`verifyWhirStagePow`), distinct
+   degree-2 shift/OOD sumcheck, 16-bit `cSHAKE256` Proof-of-Work (`verifyWhirStagePow`, the deployed
+   `"QSAG.PCS.POW2/v1"` function over a 32-byte digest and little-endian nonce), distinct
    sorted fiber openings (`strictlyIncreasing`), constructive `0 Classical.choice` `PSum` knowledge
    soundness (`succinct_aggregation_knowledge_soundness`, `succinct_merge_tree_knowledge_soundness`),
    and end-to-end unforgeability reduction (`qsag_aggregate_unforgeability_reduction`) into
-   `extractFullHypertreeForgery`.
+   `extractReachableHypertreeForgery`, whose upper-layer oracle premise ranges only over
+   `ReachableUpperHypertreePos`, together with the premise-free signing-log instantiations
+   `qsag_aggregate_unforgeability_reduction_of_statelessLog` and
+   `qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog`.
 5. **Transcript-Bound Challenge & Query Soundness Counting (§9–§10):**
    Adaptive `challengeVectors` union bounds and `distinctTuples` falling-factorial query bounds over
    concrete `Nodup` `List Aggregation.GoldilocksExt4` domains across all 5 `WhirSecurityRegime`s.
@@ -350,15 +355,18 @@ instance : LawfulCommRing GoldilocksExt4 where
             (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)))
           (CommRingOps.add (CommRingOps.mul x.c0 z.c0)
             (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 z.c1)))
-      rw [LawfulCommRing.left_distrib, LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
-          LawfulCommRing.add_add_add_comm]
+      rw [LawfulCommRing.left_distrib x.c0 y.c0 z.c0,
+          LawfulCommRing.left_distrib x.c1 y.c1 z.c1,
+          LawfulCommRing.left_distrib nonResidue (CommRingOps.mul x.c1 y.c1) (CommRingOps.mul x.c1 z.c1),
+          LawfulCommRing.add_add_add_comm (CommRingOps.mul x.c0 y.c0) (CommRingOps.mul x.c0 z.c0)]
     · change CommRingOps.add (CommRingOps.mul x.c0 (CommRingOps.add y.c1 z.c1))
           (CommRingOps.mul x.c1 (CommRingOps.add y.c0 z.c0)) =
         CommRingOps.add
           (CommRingOps.add (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0))
           (CommRingOps.add (CommRingOps.mul x.c0 z.c1) (CommRingOps.mul x.c1 z.c0))
-      rw [LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
-          LawfulCommRing.add_add_add_comm]
+      rw [LawfulCommRing.left_distrib x.c0 y.c1 z.c1,
+          LawfulCommRing.left_distrib x.c1 y.c0 z.c0,
+          LawfulCommRing.add_add_add_comm (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c0 z.c1)]
   right_distrib x y z := by
     apply ext
     · change CommRingOps.add (CommRingOps.mul (CommRingOps.add x.c0 y.c0) z.c0)
@@ -368,15 +376,18 @@ instance : LawfulCommRing GoldilocksExt4 where
             (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 z.c1)))
           (CommRingOps.add (CommRingOps.mul y.c0 z.c0)
             (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1)))
-      rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib, LawfulCommRing.left_distrib,
-          LawfulCommRing.add_add_add_comm]
+      rw [LawfulCommRing.right_distrib x.c0 y.c0 z.c0,
+          LawfulCommRing.right_distrib x.c1 y.c1 z.c1,
+          LawfulCommRing.left_distrib nonResidue (CommRingOps.mul x.c1 z.c1) (CommRingOps.mul y.c1 z.c1),
+          LawfulCommRing.add_add_add_comm (CommRingOps.mul x.c0 z.c0) (CommRingOps.mul y.c0 z.c0)]
     · change CommRingOps.add (CommRingOps.mul (CommRingOps.add x.c0 y.c0) z.c1)
           (CommRingOps.mul (CommRingOps.add x.c1 y.c1) z.c0) =
         CommRingOps.add
           (CommRingOps.add (CommRingOps.mul x.c0 z.c1) (CommRingOps.mul x.c1 z.c0))
           (CommRingOps.add (CommRingOps.mul y.c0 z.c1) (CommRingOps.mul y.c1 z.c0))
-      rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib,
-          LawfulCommRing.add_add_add_comm]
+      rw [LawfulCommRing.right_distrib x.c0 y.c0 z.c1,
+          LawfulCommRing.right_distrib x.c1 y.c1 z.c0,
+          LawfulCommRing.add_add_add_comm (CommRingOps.mul x.c0 z.c1) (CommRingOps.mul y.c0 z.c1)]
   mul_assoc x y z := by
     apply ext
     · change CommRingOps.add
@@ -393,27 +404,41 @@ instance : LawfulCommRing GoldilocksExt4 where
           (CommRingOps.mul nonResidue
             (CommRingOps.mul x.c1
               (CommRingOps.add (CommRingOps.mul y.c0 z.c1) (CommRingOps.mul y.c1 z.c0))))
-      rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib,
-          LawfulCommRing.left_distrib, LawfulCommRing.left_distrib,
-          LawfulCommRing.left_distrib, LawfulCommRing.left_distrib]
+      rw [LawfulCommRing.right_distrib (CommRingOps.mul x.c0 y.c0)
+            (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)) z.c0,
+          LawfulCommRing.right_distrib (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0) z.c1,
+          LawfulCommRing.left_distrib nonResidue
+            (CommRingOps.mul (CommRingOps.mul x.c0 y.c1) z.c1)
+            (CommRingOps.mul (CommRingOps.mul x.c1 y.c0) z.c1),
+          LawfulCommRing.left_distrib x.c0 (CommRingOps.mul y.c0 z.c0)
+            (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1)),
+          LawfulCommRing.left_distrib x.c1 (CommRingOps.mul y.c0 z.c1) (CommRingOps.mul y.c1 z.c0),
+          LawfulCommRing.left_distrib nonResidue
+            (CommRingOps.mul x.c1 (CommRingOps.mul y.c0 z.c1))
+            (CommRingOps.mul x.c1 (CommRingOps.mul y.c1 z.c0))]
       have t1 : CommRingOps.mul (CommRingOps.mul x.c0 y.c0) z.c0 =
           CommRingOps.mul x.c0 (CommRingOps.mul y.c0 z.c0) :=
-        LawfulCommRing.mul_assoc _ _ _
+        LawfulCommRing.mul_assoc x.c0 y.c0 z.c0
       have t2 : CommRingOps.mul (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)) z.c0 =
           CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.mul y.c1 z.c0)) := by
-        rw [LawfulCommRing.mul_assoc, LawfulCommRing.mul_assoc]
+        rw [LawfulCommRing.mul_assoc nonResidue (CommRingOps.mul x.c1 y.c1) z.c0,
+            LawfulCommRing.mul_assoc x.c1 y.c1 z.c0]
       have t3 : CommRingOps.mul nonResidue (CommRingOps.mul (CommRingOps.mul x.c0 y.c1) z.c1) =
           CommRingOps.mul x.c0 (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1)) := by
         rw [LawfulCommRing.mul_assoc x.c0 y.c1 z.c1,
-            ← LawfulCommRing.mul_assoc nonResidue x.c0 _,
+            ← LawfulCommRing.mul_assoc nonResidue x.c0 (CommRingOps.mul y.c1 z.c1),
             LawfulCommRing.mul_comm nonResidue x.c0,
-            LawfulCommRing.mul_assoc]
+            LawfulCommRing.mul_assoc x.c0 nonResidue (CommRingOps.mul y.c1 z.c1)]
       have t4 : CommRingOps.mul nonResidue (CommRingOps.mul (CommRingOps.mul x.c1 y.c0) z.c1) =
           CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.mul y.c0 z.c1)) := by
-        rw [LawfulCommRing.mul_assoc]
-      rw [t1, t2, t3, t4, LawfulCommRing.add_add_add_comm]
-      congr 1
-      exact LawfulCommRing.add_comm _ _
+        rw [LawfulCommRing.mul_assoc x.c1 y.c0 z.c1]
+      rw [t1, t2, t3, t4,
+          LawfulCommRing.add_add_add_comm
+            (CommRingOps.mul x.c0 (CommRingOps.mul y.c0 z.c0))
+            (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.mul y.c1 z.c0))),
+          LawfulCommRing.add_comm
+            (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.mul y.c1 z.c0)))
+            (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 (CommRingOps.mul y.c0 z.c1)))]
     · change CommRingOps.add
           (CommRingOps.mul
             (CommRingOps.add (CommRingOps.mul x.c0 y.c0)
@@ -426,27 +451,39 @@ instance : LawfulCommRing GoldilocksExt4 where
           (CommRingOps.mul x.c1
             (CommRingOps.add (CommRingOps.mul y.c0 z.c0)
               (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1))))
-      rw [LawfulCommRing.right_distrib, LawfulCommRing.right_distrib,
-          LawfulCommRing.left_distrib, LawfulCommRing.left_distrib]
+      rw [LawfulCommRing.right_distrib (CommRingOps.mul x.c0 y.c0)
+            (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)) z.c1,
+          LawfulCommRing.right_distrib (CommRingOps.mul x.c0 y.c1) (CommRingOps.mul x.c1 y.c0) z.c0,
+          LawfulCommRing.left_distrib x.c0 (CommRingOps.mul y.c0 z.c1) (CommRingOps.mul y.c1 z.c0),
+          LawfulCommRing.left_distrib x.c1 (CommRingOps.mul y.c0 z.c0)
+            (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1))]
       have s1 : CommRingOps.mul (CommRingOps.mul x.c0 y.c0) z.c1 =
           CommRingOps.mul x.c0 (CommRingOps.mul y.c0 z.c1) :=
-        LawfulCommRing.mul_assoc _ _ _
+        LawfulCommRing.mul_assoc x.c0 y.c0 z.c1
       have s2 : CommRingOps.mul (CommRingOps.mul nonResidue (CommRingOps.mul x.c1 y.c1)) z.c1 =
           CommRingOps.mul x.c1 (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1)) := by
-        rw [LawfulCommRing.mul_assoc nonResidue _ z.c1,
+        rw [LawfulCommRing.mul_assoc nonResidue (CommRingOps.mul x.c1 y.c1) z.c1,
             LawfulCommRing.mul_assoc x.c1 y.c1 z.c1,
-            ← LawfulCommRing.mul_assoc nonResidue x.c1 _,
+            ← LawfulCommRing.mul_assoc nonResidue x.c1 (CommRingOps.mul y.c1 z.c1),
             LawfulCommRing.mul_comm nonResidue x.c1,
-            LawfulCommRing.mul_assoc]
+            LawfulCommRing.mul_assoc x.c1 nonResidue (CommRingOps.mul y.c1 z.c1)]
       have s3 : CommRingOps.mul (CommRingOps.mul x.c0 y.c1) z.c0 =
           CommRingOps.mul x.c0 (CommRingOps.mul y.c1 z.c0) :=
-        LawfulCommRing.mul_assoc _ _ _
+        LawfulCommRing.mul_assoc x.c0 y.c1 z.c0
       have s4 : CommRingOps.mul (CommRingOps.mul x.c1 y.c0) z.c0 =
           CommRingOps.mul x.c1 (CommRingOps.mul y.c0 z.c0) :=
-        LawfulCommRing.mul_assoc _ _ _
-      rw [s1, s2, s3, s4, LawfulCommRing.add_add_add_comm]
-      congr 1
-      exact LawfulCommRing.add_comm _ _
+        LawfulCommRing.mul_assoc x.c1 y.c0 z.c0
+      rw [s1, s2, s3, s4,
+          LawfulCommRing.add_add_add_comm
+            (CommRingOps.mul x.c0 (CommRingOps.mul y.c0 z.c1))
+            (CommRingOps.mul x.c1 (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1))),
+          LawfulCommRing.add_comm
+            (CommRingOps.mul x.c1 (CommRingOps.mul nonResidue (CommRingOps.mul y.c1 z.c1)))
+            (CommRingOps.mul x.c1 (CommRingOps.mul y.c0 z.c0))]
+
+theorem zero_eq_ringZero : zero = CommRingOps.zero := rfl
+
+theorem one_eq_ringOne : one = CommRingOps.one := rfl
 
 /-- Square root of `-1` in `Goldilocks` (`(2^48)^2 = 2^96 ≡ -1 (mod p)`). -/
 def sqrtNegOne : Goldilocks := ⟨2 ^ 48, by decide⟩
@@ -861,7 +898,8 @@ theorem terminal_check_ext4_omission_unsound (halfClaim : GoldilocksExt4) :
     - `habr24Interactive128`: `q = (64, 32, 22, 16)` (`2^-128` `[HABR24]`, `144`b classical FS)
     - `bciksJohnsonClassical128`: `q = (129, 65, 44, 33)` (`+1` Johnson slack -> unconditional `< 2^-128`)
     - `habr24Qrom128` (**DEFAULT**): `q = (128, 64, 43, 32)` (`2^-256` `[HABR24]` + `16`b PoW = `136` QROM bits)
-    - `bciksJohnsonQrom128`: `q = (257, 129, 86, 65)` (`+1` Johnson slack -> unconditional `< 2^-256` + `16`b PoW = `136` QROM bits without `[HABR24]`). -/
+    - `bciksJohnsonQrom128`: `q = (258, 130, 88, 66)` (`⌈512 / log₂ B⌉ + 2`, as in `minimum_queries`;
+      `+2` Johnson slack -> unconditional `< 2^-256` + `16`b PoW = `136` QROM bits without `[HABR24]`). -/
 inductive WhirSecurityRegime where
   | habr24Classical128
   | habr24Interactive128
@@ -903,7 +941,7 @@ def whirSchedule4Stage : WhirSecurityRegime → List WhirStageSpec
   | .habr24Qrom128 =>
     [ ⟨0, 4, 2, 128, 16⟩, ⟨1, 16, 4, 64, 16⟩, ⟨2, 64, 8, 43, 16⟩, ⟨3, 256, 16, 32, 16⟩ ]
   | .bciksJohnsonQrom128 =>
-    [ ⟨0, 4, 2, 257, 16⟩, ⟨1, 16, 4, 129, 16⟩, ⟨2, 64, 8, 86, 16⟩, ⟨3, 256, 16, 65, 16⟩ ]
+    [ ⟨0, 4, 2, 258, 16⟩, ⟨1, 16, 4, 130, 16⟩, ⟨2, 64, 8, 88, 16⟩, ⟨3, 256, 16, 66, 16⟩ ]
 
 /-- 3-stage `(4, 16, 64)` WHIR schedule at `num_vars = 20` (`K = 8` shard). -/
 def whirScheduleNv20 (r : WhirSecurityRegime) : List WhirStageSpec :=
@@ -944,7 +982,7 @@ theorem bciksJohnsonClassical128_positive_slack :
 
 /-- **Unconditional `[BCIKS20]` QROM-128 Positive Johnson Proximity Slack
     (`bciksJohnsonQrom128_positive_slack`)**:
-    With `+1` query (`q = (257, 129, 86, 65)`), EVERY stage satisfies `(1 / √B_s + η)^{q_s} < 2^-256`
+    With `+2` queries (`q = (258, 130, 88, 66)`), EVERY stage satisfies `(1 / √B_s + η)^{q_s} < 2^-256`
     at concrete positive proximity slack `η = 1 / 1024 > 0` (yielding explicit finite `[BCIKS20]`
     list-decoding bound `L ≤ 1 / (2η) = 512` and `136` QROM Grover round-search bits without
     `[HABR24]`). -/
@@ -953,6 +991,22 @@ theorem bciksJohnsonQrom128_positive_slack :
       2 ^ 256 < s.johnsonSqrtBlowup ^ s.numQueries ∧
       (1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * 2 ^ 256 < 1024 ^ s.numQueries := by
   decide +kernel
+
+/-- The Johnson schedules are the deployed `minimum_queries` formulas: `⌈256 / log₂ B⌉ + 1` at
+    classical-128 and `⌈512 / log₂ B⌉ + 2` at QROM-128, with `log₂ B = 2 * log₂ √B`. -/
+theorem bciksJohnson_schedules_eq_minimum_queries :
+    (whirSchedule4Stage .bciksJohnsonClassical128).map (·.numQueries) =
+      [2, 4, 6, 8].map (fun logB => (256 + logB - 1) / logB + 1) ∧
+    (whirSchedule4Stage .bciksJohnsonQrom128).map (·.numQueries) =
+      [2, 4, 6, 8].map (fun logB => (512 + logB - 1) / logB + 2) ∧
+    (whirSchedule4Stage .bciksJohnsonQrom128).map (·.blowup) = [2, 4, 6, 8].map (2 ^ ·) := by
+  decide
+
+/-- `#tooth`: the superseded `+1` QROM stage-0 count `257` is not a stage of the deployed
+    `bciksJohnsonQrom128` schedule. -/
+theorem tooth_bciksJohnsonQrom128_stage0_is_not_257 :
+    (⟨0, 4, 2, 257, 16⟩ : WhirStageSpec) ∉ whirSchedule4Stage .bciksJohnsonQrom128 := by
+  decide
 
 end Aggregation
 
@@ -963,6 +1017,7 @@ structure ProductionAggParams where
   logTraceCols : Nat
   maxPcsVars : Nat
   rsBlowup : Nat
+  /-- Wire/parser query cap (`NUM_PCS_QUERIES` in `pcs.rs`); active counts come from the schedule. -/
   maxQueryCap : Nat
   stageBlowups : List Nat
   defaultQromQueries : List Nat
@@ -981,10 +1036,10 @@ def productionAggParams : ProductionAggParams where
   logTraceCols := 8
   maxPcsVars := 24
   rsBlowup := 4
-  maxQueryCap := 257
+  maxQueryCap := 512
   stageBlowups := [4, 16, 64, 256]
   defaultQromQueries := [128, 64, 43, 32]
-  johnsonQromQueries := [257, 129, 86, 65]
+  johnsonQromQueries := [258, 130, 88, 66]
   earlyStopVars := 8
   maxFoldStepVars := 6
   pcsSumcheckDegree := 2
@@ -1005,6 +1060,25 @@ theorem productionAggParams_derived :
     productionAggParams.maxStage0Domain = 2 ^ 26 ∧
     productionAggParams.maxQueryGroups = 2 ^ 20 ∧
     2 ^ 255 < productionAggParams.fieldSize := by
+  decide
+
+/-- The production query lists are the `habr24Qrom128` and `bciksJohnsonQrom128` schedules, and
+    every scheduled query count in every regime fits under the wire cap `maxQueryCap = 512`. -/
+theorem productionAggParams_queries_match_schedule :
+    productionAggParams.defaultQromQueries =
+      (Aggregation.whirSchedule4Stage .habr24Qrom128).map (·.numQueries) ∧
+    productionAggParams.johnsonQromQueries =
+      (Aggregation.whirSchedule4Stage .bciksJohnsonQrom128).map (·.numQueries) ∧
+    (∀ r : Aggregation.WhirSecurityRegime, ∀ s ∈ Aggregation.whirSchedule4Stage r,
+      s.numQueries ≤ productionAggParams.maxQueryCap) := by
+  refine ⟨by decide, by decide, ?_⟩
+  intro r
+  cases r <;> decide
+
+/-- `#tooth`: the superseded cap `257` would reject the deployed `bciksJohnsonQrom128` stage-0
+    query count. -/
+theorem tooth_productionAggParams_cap_257_rejects_johnson_qrom :
+    ¬ (∀ s ∈ Aggregation.whirSchedule4Stage .bciksJohnsonQrom128, s.numQueries ≤ 257) := by
   decide
 
 namespace Aggregation
@@ -1443,27 +1517,152 @@ def merkleDepthFuel : Nat → Nat → Nat
 
 def merkleDepth (n : Nat) : Nat := merkleDepthFuel n n
 
-/-- **Per-Stage WHIR Transcript Proof-of-Work (`verifyWhirStagePow`, `POW_MIDSTATE`)**:
-    Absorbs `(seed, be 8 powNonce)` under `"QSAG.PCS.POW/v2"` and checks that the top `powBits`
-    bits of the 64-bit big-endian prefix are all `0` (`ofBE (digest.take 8) < 2^(64 - powBits)`). -/
-def verifyWhirStagePow (seed : List UInt8) (powNonce powBits : Nat) : Bool :=
+/-- Kernel-reducible witness seed `"QSAG.POW.WITNESS/v2"` avoiding `@[extern] String.toUTF8`
+    during kernel reduction of 16-bit PoW KAT proofs. -/
+def powWitnessSeedV2 : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x4f, 0x57, 0x2e, 0x57, 0x49, 0x54, 0x4e, 0x45,
+   0x53, 0x53, 0x2f, 0x76, 0x32]
+
+/-- The low `w` bytes of `n` in little-endian order (`u64::to_le_bytes` at `w = 8`). -/
+def leBytes : Nat → Nat → List UInt8
+  | 0, _ => []
+  | w + 1, n => UInt8.ofNat (n % 256) :: leBytes w (n / 256)
+
+/-- Little-endian byte list decoded as a natural number (`u64::from_le_bytes` on 8 bytes). -/
+def ofLeBytes : List UInt8 → Nat
+  | [] => 0
+  | b :: bs => b.toNat + 256 * ofLeBytes bs
+
+@[simp] theorem length_leBytes (w n : Nat) : (leBytes w n).length = w := by
+  induction w generalizing n with
+  | zero => rfl
+  | succ w ih => simp [leBytes, ih]
+
+theorem ofLeBytes_leBytes (w n : Nat) : ofLeBytes (leBytes w n) = n % 256 ^ w := by
+  induction w generalizing n with
+  | zero => simp only [leBytes, ofLeBytes, Nat.pow_zero, Nat.mod_one]
+  | succ w ih =>
+    have hb : (UInt8.ofNat (n % 256)).toNat = n % 256 := by
+      rw [UInt8.toNat_ofNat']
+      exact Nat.mod_eq_of_lt (Nat.mod_lt _ (by decide))
+    rw [leBytes, ofLeBytes, ih, hb, Nat.pow_succ, Nat.mul_comm (256 ^ w) 256]
+    let p := 256 ^ w
+    have hpPos : 0 < p := Nat.pow_pos (by decide : 0 < 256)
+    have hr0 : n % 256 < 256 := Nat.mod_lt n (by decide)
+    have hr1 : (n / 256) % p < p := Nat.mod_lt (n / 256) hpPos
+    have hBound : n % 256 + 256 * ((n / 256) % p) < 256 * p := by
+      have h1 : (n / 256) % p + 1 ≤ p := hr1
+      have h2 := Nat.mul_le_mul_left 256 h1
+      omega
+    have hDecomp : n = (n % 256 + 256 * ((n / 256) % p)) + (256 * p) * ((n / 256) / p) := by
+      have e0 := (Nat.div_add_mod n 256).symm
+      have e1 := (Nat.div_add_mod (n / 256) p).symm
+      calc
+        n = 256 * (n / 256) + n % 256 := e0
+        _ = 256 * (p * ((n / 256) / p) + (n / 256) % p) + n % 256 := by rw [← e1]
+        _ = (n % 256 + 256 * ((n / 256) % p)) + (256 * p) * ((n / 256) / p) := by
+          rw [Nat.mul_add, ← Nat.mul_assoc, Nat.add_comm _ (n % 256), Nat.add_assoc,
+              Nat.add_comm (256 * ((n / 256) % p))]
+    conv => rhs; rw [hDecomp]
+    rw [Nat.add_mul_mod_self_left, Nat.mod_eq_of_lt hBound]
+
+/-- Customization string `"QSAG.PCS.POW2/v1"` of the deployed per-stage grinding hash (`POW_CUSTOM`
+    in `crates/qsag-agg/src/sponge.rs`, whose `cSHAKE256` midstate is `POW_MIDSTATE`), written as
+    kernel-reducible UTF-8 bytes so `decide +kernel` reduces `verifyWhirStagePow` directly. -/
+def whirPowCustomization : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x50, 0x43, 0x53, 0x2e, 0x50, 0x4f, 0x57, 0x32, 0x2f, 0x76, 0x31]
+
+/-- The 64-bit grinding word of `cshake256_pow_u64_single` (`sponge.rs`): `cSHAKE256` under
+    `whirPowCustomization` of the 40-byte buffer `chal ++ nonce.to_le_bytes()`, with the first
+    eight output bytes read as a little-endian `u64`. -/
+def whirPowWord (chal : List UInt8) (powNonce : Nat) : Nat :=
+  ofLeBytes ((cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce)).take 8)
+
+/-- **Per-Stage WHIR Proof-of-Work (`verifyWhirStagePow`)**, the function of `verify_pcs_pow` in
+    `crates/qsag-agg/src/pcs.rs`: accept when `powBits = 0`; otherwise the challenge must be a
+    32-byte digest, the nonce a `u64`, and the low `powBits` bits of `whirPowWord chal powNonce`
+    must all be zero (`word & ((1 << powBits) - 1) == 0`).
+
+    Only this function is the deployed one. The 32-byte challenge the deployed verifier feeds it
+    is the running digest of its Fiat–Shamir transcript, which this module does not model;
+    `verifyOneWhirStage` feeds it `stagePowDigest` of this module's own transcript frame. -/
+def verifyWhirStagePow (chal : List UInt8) (powNonce powBits : Nat) : Bool :=
   if powBits = 0 then true
-  else if powBits ≤ 64 then
-    let digest := cshake256Bytes "QSAG.PCS.POW/v2".toUTF8.toList
-      (encodeMultiFrame [seed, be 8 powNonce])
-    decide (ofBE (digest.take 8) < 2 ^ (64 - powBits))
+  else if powBits ≤ 64 ∧ chal.length = 32 ∧ powNonce < 2 ^ 64 then
+    decide (whirPowWord chal powNonce % 2 ^ powBits = 0)
   else false
 
-/-- Concrete inhabitedness witness: genuine 16-bit `cSHAKE256` Proof-of-Work (`powBits = 16`,
-    nonce `28915`) verified directly by the Lean kernel. -/
+/-- Kernel-reducible UTF-8 bytes of `"QSAG.AGG.WHIR.POW_DIGEST/v2"`. -/
+def tagStagePowDigestV2 : List UInt8 :=
+  [0x51, 0x53, 0x41, 0x47, 0x2e, 0x41, 0x47, 0x47, 0x2e, 0x57, 0x48, 0x49, 0x52, 0x2e,
+   0x50, 0x4f, 0x57, 0x5f, 0x44, 0x49, 0x47, 0x45, 0x53, 0x54, 0x2f, 0x76, 0x32]
+
+/-- 32-byte digest of this module's stage transcript frame, the challenge handed to
+    `verifyWhirStagePow`. The label is local to this model: the deployed challenge is the
+    transcript's running chain digest, which has no counterpart here. -/
+def stagePowDigest (seed : List UInt8) : List UInt8 :=
+  cshake256Bytes tagStagePowDigestV2 seed
+
+@[simp] theorem stagePowDigest_length (seed : List UInt8) : (stagePowDigest seed).length = 32 :=
+  cshake256Bytes_length _ _
+
+/-- At `powBits = 16` acceptance is exactly "the first two digest bytes are zero", for every
+    32-byte challenge and `u64` nonce. -/
+theorem verifyWhirStagePow_16_iff (chal : List UInt8) (powNonce : Nat)
+    (hLen : chal.length = 32) (hNonce : powNonce < 2 ^ 64) :
+    verifyWhirStagePow chal powNonce 16 = true ↔
+      ((cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce)).take 2).all
+        (· == 0) = true := by
+  have hGuard : (16 ≤ 64 ∧ chal.length = 32 ∧ powNonce < 2 ^ 64) := ⟨by decide, hLen, hNonce⟩
+  unfold verifyWhirStagePow whirPowWord
+  have h16 : ¬ ((16 : Nat) = 0) := by decide
+  rw [ite_eq_right_of_eq_false _ _ (eq_false h16), ite_eq_left_of_eq_true _ _ (eq_true hGuard),
+    decide_eq_true_iff]
+  have hDigLen := cshake256Bytes_length whirPowCustomization (chal ++ leBytes 8 powNonce)
+  generalize cshake256Bytes whirPowCustomization (chal ++ leBytes 8 powNonce) = dig at hDigLen ⊢
+  rcases dig with _ | ⟨b0, _ | ⟨b1, rest⟩⟩
+  · simp at hDigLen
+  · simp at hDigLen
+  · show ofLeBytes (b0 :: b1 :: rest.take 6) % 2 ^ 16 = 0 ↔ [b0, b1].all (· == 0) = true
+    have h0 := b0.toNat_lt
+    have h1 := b1.toNat_lt
+    simp only [ofLeBytes, List.all_cons, List.all_nil, Bool.and_true, Bool.and_eq_true,
+      beq_iff_eq]
+    generalize ofLeBytes (rest.take 6) = r
+    constructor
+    · intro h
+      have hb0 : b0.toNat = 0 := by omega
+      have hb1 : b1.toNat = 0 := by omega
+      exact ⟨UInt8.toNat_inj.mp (hb0.trans UInt8.toNat_zero.symm),
+        UInt8.toNat_inj.mp (hb1.trans UInt8.toNat_zero.symm)⟩
+    · rintro ⟨hb0, hb1⟩
+      rw [hb0, hb1, UInt8.toNat_zero]
+      omega
+
+/-- Concrete inhabitedness witness: a genuine 16-bit `cSHAKE256` Proof-of-Work (`powBits = 16`,
+    nonce `5791`) on the digest of `powWitnessSeedV2`, checked by the Lean kernel. -/
 theorem inhabited_whir_stage_pow_16 :
-    verifyWhirStagePow "QSAG.POW.WITNESS/v2".toUTF8.toList 28915 16 = true := by
+    verifyWhirStagePow (stagePowDigest powWitnessSeedV2) 5791 16 = true := by
   decide +kernel
 
-/-- `#tooth` Invalid PoW Nonce Rejection (`powNonce = 0` fails 16-bit PoW on the witness seed). -/
+/-- `#tooth` Invalid PoW Nonce Rejection (`powNonce = 0` fails 16-bit PoW on the witness digest). -/
 theorem tooth_whir_pow16_nonce0_rejected :
-    verifyWhirStagePow "QSAG.POW.WITNESS/v2".toUTF8.toList 0 16 = false := by
+    verifyWhirStagePow (stagePowDigest powWitnessSeedV2) 0 16 = false := by
   decide +kernel
+
+/-- `#tooth`: a challenge that is not a 32-byte digest is rejected at every positive difficulty,
+    as is a nonce outside `u64`. -/
+theorem tooth_whir_pow_rejects_malformed_inputs (chal : List UInt8) (powNonce powBits : Nat)
+    (hBits : powBits ≠ 0) (hBad : chal.length ≠ 32 ∨ 2 ^ 64 ≤ powNonce) :
+    verifyWhirStagePow chal powNonce powBits = false := by
+  unfold verifyWhirStagePow
+  rw [ite_eq_right_of_eq_false _ _ (eq_false hBits)]
+  apply ite_eq_right_of_eq_false
+  apply eq_false
+  rintro ⟨_, hLen, hNonce⟩
+  rcases hBad with h | h
+  · exact h hLen
+  · exact Nat.lt_irrefl _ (Nat.lt_of_lt_of_le hNonce h)
 
 /-- Public domain parameters of a single WHIR rate-escalation stage `s`.
     When `bindRowChallenges = true`, intra-stage coset folding evaluates directly at the
@@ -1548,7 +1747,8 @@ def stageFoldTranscriptTail (prior : List UInt8) :
     stageFoldTranscriptTail (encodeMultiFrame [prior, root, encodePolyExt4 p]) roots ps
   | _, _ => prior
 
-/-- Seed feeding `verifyWhirStagePow` for stage `sp` (incorporates `finalWord` if final stage). -/
+/-- Transcript frame whose `stagePowDigest` feeds `verifyWhirStagePow` for stage `sp`
+    (incorporates `finalWord` if final stage). -/
 def stagePowSeed (prior : List UInt8) (sp : WhirStageProof)
     (nextRoot? : Option (List UInt8)) (finalWord : List GoldilocksExt4) : List UInt8 :=
   let foldTail := stageFoldTranscriptTail (stagePostOodTranscript prior sp)
@@ -1644,8 +1844,8 @@ theorem strictlyIncreasing_sortedInsertDistinct (x : Nat) :
   | y :: ys, h => by
     simp only [sortedInsertDistinct]
     if hlt : x < y then
-      simp only [hlt, ↓reduceIte, strictlyIncreasing]
-      exact Bool.and_eq_true_iff.mpr ⟨decide_eq_true hlt, h⟩
+      simp only [hlt, ↓reduceIte, strictlyIncreasing, decide_true, Bool.true_and]
+      exact h
     else if heq : x = y then
       subst heq
       simp only [Nat.lt_irrefl, ↓reduceIte]
@@ -1915,6 +2115,24 @@ theorem length_scanFillDistinct (target : Nat) :
         exact length_scanFillDistinct target xs acc' hInc' hNdXs
           (by omega) (by rw [hFiltEq, hLenSucc]; omega)
 
+private theorem pairwise_snoc {α : Type} {R : α → α → Prop} {l : List α} {a : α}
+    (hl : List.Pairwise R l) (ha : ∀ x ∈ l, R x a) : List.Pairwise R (l ++ [a]) := by
+  induction hl with
+  | nil => exact .cons (fun _ h => nomatch h) .nil
+  | cons hhd _ ih =>
+    exact .cons
+      (fun y hy => match List.mem_append.mp hy with
+        | .inl hyl => hhd y hyl
+        | .inr hya => List.mem_singleton.mp hya ▸ ha _ (.head _))
+      (ih (fun x hx => ha x (.tail _ hx)))
+
+private theorem nodup_range_constructive : ∀ (n : Nat), (List.range n).Nodup
+  | 0 => .nil
+  | n + 1 => by
+    rw [List.range_succ]
+    exact pairwise_snoc (nodup_range_constructive n)
+      (fun x hx hEq => Nat.ne_of_lt (List.mem_range.mp hx) hEq)
+
 theorem deriveStageQueryIndices_props (sdom : WhirStageDomain) (qSeed : List UInt8)
     (hGroups : 0 < sdom.groups0) :
     let qs := deriveStageQueryIndices sdom qSeed
@@ -1932,11 +2150,12 @@ theorem deriveStageQueryIndices_props (sdom : WhirStageDomain) (qSeed : List UIn
       (fun _ hm => by cases hm)
   have hLenS : sampled.length ≤ target :=
     length_sampleDistinctLoop_le _ target sdom.sampleFuel 0 [] (Nat.zero_le _)
-  have hRange := nodup_length_le_missing_add_acc (List.range sdom.groups0) List.nodup_range sampled
+  have hNdRange := nodup_range_constructive sdom.groups0
+  have hRange := nodup_length_le_missing_add_acc (List.range sdom.groups0) hNdRange sampled
   rw [List.length_range] at hRange
   have hTargetLe : target ≤ sdom.groups0 := Nat.min_le_right _ _
   refine ⟨strictlyIncreasing_scanFillDistinct target _ sampled hIncS,
-    length_scanFillDistinct target _ sampled hIncS List.nodup_range hLenS (by omega),
+    length_scanFillDistinct target _ sampled hIncS hNdRange hLenS (by omega),
     mem_scanFillDistinct_lt target _ sampled (fun _ hy => List.mem_range.mp hy) hLtS⟩
 
 def expectedSlotOk (expected : Option GoldilocksExt4) (slot : Nat)
@@ -2006,7 +2225,7 @@ def verifyOneWhirStage (rowChallenges : List GoldilocksExt4)
   decide (sp.foldChallenges = expectedFold) &&
   decide (sp.foldChallenges.length = sdom.foldLayers) &&
   verifyShiftSumcheckChain sp.shiftClaim sp.shiftPolys sp.shiftChallenges sp.shiftTerminalEval &&
-  verifyWhirStagePow pSeed sp.powNonce sdom.powBits &&
+  verifyWhirStagePow (stagePowDigest pSeed) sp.powNonce sdom.powBits &&
   decide (sp.queries.map (·.index) = deriveStageQueryIndices sdom qSeed) &&
   strictlyIncreasing (sp.queries.map (·.index)) &&
   decide (sp.queries.length = min sdom.numQueries sdom.groups0) &&
@@ -2184,22 +2403,25 @@ def StagesBound (authPath : Nat → Nat → Nat → List (List UInt8)) :
     StagesBound authPath sdoms restTables sps
   | _, _, _ => False
 
+def StageNextBound (authPath : Nat → Nat → Nat → List (List UInt8)) :
+    Option (WhirStageDomain × List UInt8) → Option (WhirStageDomain × List GoldilocksExt4) → Prop
+  | none, none => True
+  | some (nd, nr), some (nd', nt0) =>
+    nd = nd' ∧
+    (∀ g, g < nd.groups0 →
+      merklePathRoot pcsMerkleHash
+        (pcsMerkleHash (duetLeafFrame nd.stageIdx 0 g (nt0.getD g CommRingOps.zero)
+          (nt0.getD (g + nd.groups0) CommRingOps.zero))) g (authPath nd.stageIdx 0 g) = nr ∧
+      (authPath nd.stageIdx 0 g).length = merkleDepth nd.groups0)
+  | _, _ => False
+
 def stageTerminalSound (authPath : Nat → Nat → Nat → List (List UInt8))
     (nextStageInfo : Option (WhirStageDomain × List UInt8))
     (nextStageOpt : Option (WhirStageDomain × List GoldilocksExt4))
     (finalWord : List GoldilocksExt4) (idx : Nat) (expected : Option GoldilocksExt4)
     (bridgeOp : Option FoldLayerOpening)
     (hTerm : verifyStageTerminalTarget nextStageInfo finalWord idx expected bridgeOp = true)
-    (hNextBound : match nextStageInfo, nextStageOpt with
-      | none, none => True
-      | some (nd, nr), some (nd', nt0) =>
-        nd = nd' ∧
-        (∀ g, g < nd.groups0 →
-          merklePathRoot pcsMerkleHash
-            (pcsMerkleHash (duetLeafFrame nd.stageIdx 0 g (nt0.getD g CommRingOps.zero)
-              (nt0.getD (g + nd.groups0) CommRingOps.zero))) g (authPath nd.stageIdx 0 g) = nr ∧
-          (authPath nd.stageIdx 0 g).length = merkleDepth nd.groups0)
-      | _, _ => False) :
+    (hNextBound : StageNextBound authPath nextStageInfo nextStageOpt) :
     PSum (HashCollisionWitness pcsMerkleHash)
       (PLift (stageTerminalTableOk nextStageOpt finalWord idx expected = true)) :=
   match nextStageInfo, nextStageOpt, bridgeOp with
@@ -2253,16 +2475,7 @@ def stageTrajectorySound (sdom : WhirStageDomain)
       verifyStageTrajectory sdom nextStageInfo finalWord bridgeOp
         layer groups idx expected roots αs ops = true →
       StageLayersBound authPath sdom.stageIdx layer groups tables roots →
-      (match nextStageInfo, nextStageOpt with
-        | none, none => True
-        | some (nd, nr), some (nd', nt0) =>
-          nd = nd' ∧
-          (∀ g, g < nd.groups0 →
-            merklePathRoot pcsMerkleHash
-              (pcsMerkleHash (duetLeafFrame nd.stageIdx 0 g (nt0.getD g CommRingOps.zero)
-                (nt0.getD (g + nd.groups0) CommRingOps.zero))) g (authPath nd.stageIdx 0 g) = nr ∧
-            (authPath nd.stageIdx 0 g).length = merkleDepth nd.groups0)
-        | _, _ => False) →
+      StageNextBound authPath nextStageInfo nextStageOpt →
       PSum (HashCollisionWitness pcsMerkleHash)
         (PLift (stageTableTrajectoryOk sdom nextStageOpt finalWord
           layer groups idx expected tables αs = true)) :=
@@ -2341,16 +2554,7 @@ def stageQueriesSound (sdom : WhirStageDomain)
         verifyStageTrajectory sdom nextStageInfo finalWord q.nextStageBridge
           0 sdom.groups0 q.index none roots αs q.layers) = true →
       StageLayersBound authPath sdom.stageIdx 0 sdom.groups0 tables roots →
-      (match nextStageInfo, nextStageOpt with
-        | none, none => True
-        | some (nd, nr), some (nd', nt0) =>
-          nd = nd' ∧
-          (∀ g, g < nd.groups0 →
-            merklePathRoot pcsMerkleHash
-              (pcsMerkleHash (duetLeafFrame nd.stageIdx 0 g (nt0.getD g CommRingOps.zero)
-                (nt0.getD (g + nd.groups0) CommRingOps.zero))) g (authPath nd.stageIdx 0 g) = nr ∧
-            (authPath nd.stageIdx 0 g).length = merkleDepth nd.groups0)
-        | _, _ => False) →
+      StageNextBound authPath nextStageInfo nextStageOpt →
       PSum (HashCollisionWitness pcsMerkleHash)
         (PLift (∀ q ∈ qs, q.index < sdom.groups0 ∧
           stageTableTrajectoryOk sdom nextStageOpt finalWord
@@ -2808,8 +3012,16 @@ def succinct_aggregation_signer_extraction (arith : RowArithmetization) (dom : W
 /-- **End-to-End Succinct `GoldilocksExt4` WHIR Aggregation Unforgeability Reduction
     (`qsag_aggregate_unforgeability_reduction`, `0 Classical.choice`)**:
     Welds `verifySuccinctAggregate` + `succinct_aggregation_signer_extraction` directly into
-    `extractFullHypertreeForgery` (`Qsag.HypertreeEufCma`) with zero black-box `hHonestSound`
-    premise and zero plaintext signatures in the verifier. -/
+    `extractReachableHypertreeForgery` (`Qsag.HypertreeEufCma`) with zero black-box `hHonestSound`
+    premise and zero plaintext signatures in the verifier.
+
+    The upper-layer oracle premise `hUpperOracle` ranges only over
+    `ReachableUpperHypertreePos inst.params l g` (`0 < l < numLayers`, `g` inside the layer), the
+    positions a verification walk visits, so it is dischargeable from a finite signing log. The
+    two instantiations that discharge every oracle premise from an executed signing oracle are
+    `qsag_aggregate_unforgeability_reduction_of_statelessLog` and
+    `qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog`. Both production geometries
+    `(w, ℓ₁) ∈ {(4, 128), (16, 64)}` are covered. -/
 def qsag_aggregate_unforgeability_reduction
     (arith : RowArithmetization) (dom : WhirDomain)
     (inst : AggPublicInstance) (law : arith.Lawful dom inst)
@@ -2821,7 +3033,8 @@ def qsag_aggregate_unforgeability_reduction
     (queriedMsgs : List (List UInt8))
     (qOracle : QueriedWotsOracle)
     (revealedFors : List (UInt64 × Nat × Nat))
-    (hParams4_128 : inst.params.w = 4 ∧ inst.params.ell1 = 128)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
     (hFreshMsg : inst.message ∉ queriedMsgs)
     (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
     (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages)
@@ -2839,7 +3052,7 @@ def qsag_aggregate_unforgeability_reduction
         hRoot = computeForsPk inst.suite inst.params sk_i
           (UInt64.ofNat (sig.leafGlobalIdx / 2 ^ inst.params.subtreeHeight))
           (sig.leafGlobalIdx % 2 ^ inst.params.subtreeHeight))
-    (hUpperOracle : ∀ (l : Nat) (g : Nat), 0 < l →
+    (hUpperOracle : ∀ (l : Nat) (g : Nat), ReachableUpperHypertreePos inst.params l g →
       let hRoot0 := computeXmssSubtreeRoot inst.suite inst.params sk_i
         (UInt32.ofNat (l - 1)) (UInt64.ofNat g)
       (∀ hRand hCtr hChains,
@@ -2891,10 +3104,102 @@ def qsag_aggregate_unforgeability_reduction
     have hVerKey : verifyPqHashSig inst.suite inst.params
         (derivePublicKey inst.suite inst.params sk_i) inst.message sig_i = true := by
       rw [← hKey_i]; exact hVer_i
-    .inl ⟨sig_i, extractFullHypertreeForgery inst.suite inst.params sk_i inst.message sig_i
-      queriedMsgs qOracle revealedFors hParams4_128 hFreshMsg hVerKey
+    .inl ⟨sig_i, extractReachableHypertreeForgery inst.suite inst.params sk_i inst.message sig_i
+      queriedMsgs qOracle revealedFors hGeom hFreshMsg hVerKey
       (hStatefulLeaf0Msg sig_i) (hStatelessLayer0Root sig_i)
       hUpperOracle (hLayer0Valid sig_i)⟩
+
+/-- **Aggregation unforgeability against an executed stateless signing oracle
+    (`qsag_aggregate_unforgeability_reduction_of_statelessLog`, `0 Classical.choice`)**:
+    signer `i` answers the arbitrary query list `queries` through `signingOracleLog`. An accepted
+    succinct aggregate whose bitmap marks signer `i` active, on a message absent from that log,
+    yields a `HypertreeForgeryBreak` against signer `i` whose revealed FORS leaves are exactly
+    those the log opened, or one of the four proof-system break witnesses. There is no
+    caller-supplied oracle and no oracle premise: all of them are discharged from the log by
+    `extractReachableHypertreeForgery_of_statelessLog`. -/
+def qsag_aggregate_unforgeability_reduction_of_statelessLog
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List PqSigningQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hStateless : inst.params.statefulJorts = false)
+    (hLayers : inst.params.numLayers ≤ 2 ^ 32)
+    (hFreshMsg : inst.message ∉
+      (signingOracleLog inst.suite inst.params sk_i queries).map Prod.fst)
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    let table0 := (view.allTables.headD []).headD []
+    PSum (Sigma fun sig_i : PqHashSig =>
+            HypertreeForgeryBreak inst.suite inst.params sk_i inst.message sig_i
+              ((signingOracleLog inst.suite inst.params sk_i queries).flatMap fun e =>
+                (List.range inst.params.forsTrees).map fun j =>
+                  (UInt64.ofNat (e.2.leafGlobalIdx / 2 ^ inst.params.subtreeHeight),
+                   e.2.leafGlobalIdx % 2 ^ inst.params.subtreeHeight,
+                   sigForsLeafIdx inst.suite inst.params
+                     (derivePublicKey inst.suite inst.params sk_i) e.1 e.2 j)))
+      (PSum (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+          (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+          proof.agg.challenges)
+        (PSum (HashCollisionWitness pcsMerkleHash)
+          (PSum (WhirStageQueryMiss proof.finalWord dom view.allTables proof)
+            (WhirProximityHit arith dom proof.finalWord view.allTables proof)))) :=
+  match succinct_aggregation_signer_extraction arith dom inst law proof fs view
+          hAccept hBound i hPk hB hActive_i with
+  | .inr brk => .inr brk
+  | .inl ⟨sig_i, hVer_i⟩ =>
+    have hVerKey : verifyPqHashSig inst.suite inst.params
+        (derivePublicKey inst.suite inst.params sk_i) inst.message sig_i = true := by
+      rw [← hKey_i]; exact hVer_i
+    .inl ⟨sig_i, extractReachableHypertreeForgery_of_statelessLog inst.suite inst.params sk_i
+      queries inst.message sig_i hGeom hStateless hLayers hFreshMsg hVerKey⟩
+
+/-- **Aggregation unforgeability against an executed checked stateful signing oracle
+    (`qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog`, `0 Classical.choice`)**:
+    the stateful counterpart of `qsag_aggregate_unforgeability_reduction_of_statelessLog`. Signer
+    `i` runs `execCheckedStatefulOracle` from `initCheckedStatefulLatch` on the arbitrary query
+    list `queries`; freshness is stated against the log that run emitted, and every oracle
+    premise is discharged from it by `extractReachableHypertreeForgery_of_checkedStatefulLog`. -/
+def qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog
+    (arith : RowArithmetization) (dom : WhirDomain)
+    (inst : AggPublicInstance) (law : arith.Lawful dom inst)
+    (proof : SuccinctAggregateProof) (fs : List UInt8) (view : SuccinctExtractionView)
+    (i : Nat) (hPk : i < inst.committee.length) (hB : i < proof.agg.bitmap.length)
+    (sk_i : PqSecretKey)
+    (hKey_i : inst.committee[i]'hPk = derivePublicKey inst.suite inst.params sk_i)
+    (hActive_i : proof.agg.bitmap[i]'hB = true)
+    (queries : List CheckedStatefulQuery)
+    (hGeom : (inst.params.w = 4 ∧ inst.params.ell1 = 128) ∨
+      (inst.params.w = 16 ∧ inst.params.ell1 = 64))
+    (hValidParams : inst.params.checkedStatefulValid = true)
+    (hFreshMsg : inst.message ∉
+      ((execCheckedStatefulOracle inst.suite inst.params sk_i initCheckedStatefulLatch
+        queries).emittedLog.map fun e => e.2.1))
+    (hAccept : verifySuccinctAggregate arith dom inst proof fs = true)
+    (hBound : StagesBound view.authPath dom.stages view.allTables proof.stages) :
+    let table0 := (view.allTables.headD []).headD []
+    PSum (Sigma fun sig_i : PqHashSig =>
+            HypertreeForgeryBreak inst.suite inst.params sk_i inst.message sig_i [])
+      (PSum (SumcheckSchwartzZippelHit 8 proof.agg.roundPolys
+          (adaptivePolys (arith.honestRound table0) proof.agg.challenges)
+          proof.agg.challenges)
+        (PSum (HashCollisionWitness pcsMerkleHash)
+          (PSum (WhirStageQueryMiss proof.finalWord dom view.allTables proof)
+            (WhirProximityHit arith dom proof.finalWord view.allTables proof)))) :=
+  match succinct_aggregation_signer_extraction arith dom inst law proof fs view
+          hAccept hBound i hPk hB hActive_i with
+  | .inr brk => .inr brk
+  | .inl ⟨sig_i, hVer_i⟩ =>
+    have hVerKey : verifyPqHashSig inst.suite inst.params
+        (derivePublicKey inst.suite inst.params sk_i) inst.message sig_i = true := by
+      rw [← hKey_i]; exact hVer_i
+    .inl ⟨sig_i, extractReachableHypertreeForgery_of_checkedStatefulLog inst.suite inst.params
+      sk_i queries inst.message sig_i hGeom hValidParams hFreshMsg hVerKey⟩
 
 /-- Extraction view tree matching `MergeNode`. -/
 inductive SuccinctViewTree where
@@ -2968,13 +3273,15 @@ def succinct_merge_tree_knowledge_soundness (arith : RowArithmetization) (dom : 
       succinct_merge_tree_knowledge_soundness arith dom inst law budget left vl hU.1 hB.2.1,
       succinct_merge_tree_knowledge_soundness arith dom inst law budget right vr hU.2.1 hB.2.2)
 
+end Aggregation
+
 /-! ## 9. Adaptive Challenge-Vector & Falling-Factorial Query Counting Foundations -/
 
 private theorem filter_const_false {α : Type} : ∀ (l : List α), l.filter (fun _ => false) = []
   | [] => rfl
   | _ :: xs => filter_const_false xs
 
-private theorem filter_length_le_self {α : Type} (p : α → Bool) :
+theorem filter_length_le_self {α : Type} (p : α → Bool) :
     ∀ (l : List α), (l.filter p).length ≤ l.length
   | [] => Nat.le_refl _
   | x :: xs => by
@@ -2983,13 +3290,13 @@ private theorem filter_length_le_self {α : Type} (p : α → Bool) :
     · simp only [List.filter, hp, List.length_cons]; exact Nat.le_succ_of_le ih
     · simp only [List.filter, hp, List.length_cons]; exact Nat.succ_le_succ ih
 
-private theorem filter_flatMap_eq {α β : Type} (p : β → Bool) (f : α → List β) :
+theorem filter_flatMap_eq {α β : Type} (p : β → Bool) (f : α → List β) :
     ∀ (l : List α), (l.flatMap f).filter p = l.flatMap (fun x => (f x).filter p)
   | [] => rfl
   | x :: xs => by
     rw [List.flatMap_cons, List.flatMap_cons, List.filter_append, filter_flatMap_eq p f xs]
 
-private theorem filter_map_length {α β : Type} (p : β → Bool) (f : α → β) :
+theorem filter_map_length {α β : Type} (p : β → Bool) (f : α → β) :
     ∀ (l : List α), ((l.map f).filter p).length = (l.filter (fun x => p (f x))).length
   | [] => rfl
   | x :: xs => by
@@ -3007,7 +3314,7 @@ private theorem length_flatMap_const {α β : Type} (k : Nat) (f : α → List �
     rw [List.flatMap_cons, List.length_append, ih, hc, List.length_cons, Nat.add_mul, Nat.one_mul,
       Nat.add_comm]
 
-private theorem length_flatMap_le_split {α β : Type} (b : α → Bool) (T M : Nat) (f : α → List β) :
+theorem length_flatMap_le_split {α β : Type} (b : α → Bool) (T M : Nat) (f : α → List β) :
     ∀ (l : List α), (∀ c ∈ l, (f c).length ≤ if b c = true then T else M) →
       (l.flatMap f).length ≤ (l.filter b).length * T + l.length * M
   | [], _ => Nat.zero_le _
@@ -3313,6 +3620,8 @@ theorem whir_query_miss_bound {α : Type} (bad : α → Bool) (dom : List α) (q
 
 /-! ## 10. Transcript-Bound WHIR Proximity, OOD, Fold & Query Soundness (`GoldilocksExt4`) -/
 
+namespace Aggregation
+
 /-- Tracked committed coset duet over `GoldilocksExt4`. -/
 structure TrackedDuetExt4 where
   v0 : GoldilocksExt4
@@ -3463,14 +3772,14 @@ theorem whir_bciksJohnsonClassical128_query_miss_lt {α : Type}
     ((distinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
       2 ^ 128 < (distinctTuples s.numQueries dom).length := by
   have hSlack := (bciksJohnsonClassical128_positive_slack s hs).2
-  have hLe : 512 / s.johnsonSqrtBlowup + 1 ≤ 512 := by
-    decide +revert
+  have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonClassical128,
+      512 / st.johnsonSqrtBlowup + 1 ≤ 512 := by decide
   exact strict_query_miss_from_slack bad dom s.numQueries
-    (512 / s.johnsonSqrtBlowup + 1) 512 128 hdom hLe hfar hSlack
+    (512 / s.johnsonSqrtBlowup + 1) 512 128 hdom (hAllLe s hs) hfar hSlack
 
 /-- **Unconditional `[BCIKS20]` QROM-128 Per-Stage Query Bound
     (`whir_bciksJohnsonQrom128_query_miss_lt`)**:
-    For EVERY stage `s ∈ whirSchedule4Stage .bciksJohnsonQrom128` (`q = (257, 129, 86, 65)`),
+    For EVERY stage `s ∈ whirSchedule4Stage .bciksJohnsonQrom128` (`q = (258, 130, 88, 66)`),
     whenever `bad` has relative density `≥ 1 - (1 / √B_s + 1 / 1024)` (positive proximity slack
     `η = 1 / 1024 > 0`, finite Johnson list size `L ≤ 512`), fewer than a `2^-256` fraction of
     distinct query tuples miss `bad` (`+ 16`b PoW = `136` QROM Grover bits without `[HABR24]`). -/
@@ -3482,10 +3791,10 @@ theorem whir_bciksJohnsonQrom128_query_miss_lt {α : Type}
     ((distinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
       2 ^ 256 < (distinctTuples s.numQueries dom).length := by
   have hSlack := (bciksJohnsonQrom128_positive_slack s hs).2
-  have hLe : 1024 / s.johnsonSqrtBlowup + 1 ≤ 1024 := by
-    decide +revert
+  have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128,
+      1024 / st.johnsonSqrtBlowup + 1 ≤ 1024 := by decide
   exact strict_query_miss_from_slack bad dom s.numQueries
-    (1024 / s.johnsonSqrtBlowup + 1) 1024 256 hdom hLe hfar hSlack
+    (1024 / s.johnsonSqrtBlowup + 1) 1024 256 hdom (hAllLe s hs) hfar hSlack
 
 /-- **Default `Habr24Qrom128` Per-Stage Query Bound (`whir_habr24Qrom128_query_miss_le`)**:
     For EVERY stage `s ∈ whirSchedule4Stage .habr24Qrom128` (`q = (128, 64, 43, 32)`), under
@@ -3497,7 +3806,8 @@ theorem whir_habr24Qrom128_query_miss_le {α : Type}
     ((distinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
       2 ^ 256 ≤ (distinctTuples s.numQueries dom).length := by
   have hb := whir_query_miss_bound bad dom s.numQueries (s.blowup - 1) s.blowup hfar
-  have hPos : 1 ≤ s.blowup := by decide +revert
+  have hAllPos : ∀ st ∈ whirSchedule4Stage .habr24Qrom128, 1 ≤ st.blowup := by decide
+  have hPos : 1 ≤ s.blowup := hAllPos s hs
   have hSub : s.blowup - (s.blowup - 1) = 1 := by omega
   rw [hSub, Nat.one_pow, Nat.one_mul] at hb
   exact Nat.le_trans
@@ -3649,7 +3959,7 @@ theorem canonicalExt4Sample_length (k : Nat) : (canonicalExt4Sample k).length = 
 theorem canonicalExt4Sample_nodup {k : Nat} (hk : k ≤ goldilocksPrime) :
     (canonicalExt4Sample k).Nodup := by
   unfold canonicalExt4Sample
-  have hRange := List.nodup_range (n := k)
+  have hRange := nodup_range_constructive k
   have hInjOn : ∀ a b, a < k → b < k →
       GoldilocksExt4.embedBase (Goldilocks.ofNat a) =
       GoldilocksExt4.embedBase (Goldilocks.ofNat b) → a = b := by
@@ -3690,64 +4000,92 @@ theorem whir_bciksJohnson_hypotheses_satisfiable :
       countGood bad dom < dom.length := by
   refine ⟨canonicalExt4Sample 256, ⟨0, 4, 2, 129, 16⟩, List.range 512, fun i => decide (i < 255),
     canonicalExt4Sample_nodup (by decide), by simp [canonicalExt4Sample_length],
-    by decide, by decide, ?_, ?_⟩
-  · rw [countGood_lt_range, List.length_range]; decide
-  · rw [countGood_lt_range, List.length_range]; decide
+    by decide, by simp, ?_, ?_⟩
+  · rw [countGood_lt_range, List.length_range, Nat.min_eq_left (by omega : 255 ≤ 512)]
+    dsimp only
+    omega
+  · rw [countGood_lt_range, List.length_range, Nat.min_eq_left (by omega : 255 ≤ 512)]
+    omega
 
 /-! ## 11. Genuine Reed–Solomon + Degree-7 S-Box `RowArithmetization.Lawful` Instance -/
 
-private def decodeSmallFields : Nat → List UInt8 → Option (List (List UInt8))
+private def decodeLeb128 : List UInt8 → Option (Nat × List UInt8)
+  | [] => none
+  | b :: rest =>
+    if b.toNat < 128 then some (b.toNat, rest)
+    else
+      match decodeLeb128 rest with
+      | some (hi, tail) => some ((b.toNat - 128) + 128 * hi, tail)
+      | none => none
+
+private def decodeFields : Nat → List UInt8 → Option (List (List UInt8))
   | 0, [] => some []
   | 0, _ :: _ => none
-  | _ + 1, [] => none
-  | k + 1, lenByte :: rest =>
-    let n := lenByte.toNat
-    if n < 128 && n ≤ rest.length then
-      match decodeSmallFields k (rest.drop n) with
-      | some tl => some (rest.take n :: tl)
-      | none => none
-    else none
+  | k + 1, bs =>
+    match decodeLeb128 bs with
+    | none => none
+    | some (len, rest) =>
+      if len ≤ rest.length then
+        match decodeFields k (rest.drop len) with
+        | some tl => some (rest.take len :: tl)
+        | none => none
+      else none
 
-private def decodeSmallMultiFrame : List UInt8 → Option (List (List UInt8))
-  | [] => none
-  | cntByte :: rest =>
-    if cntByte.toNat < 128 then decodeSmallFields cntByte.toNat rest else none
+private def decodeMultiFrame (bs : List UInt8) : Option (List (List UInt8)) :=
+  match decodeLeb128 bs with
+  | none => none
+  | some (cnt, rest) => decodeFields cnt rest
 
-private theorem leb128_of_lt_128 {n : Nat} (hn : n < 128) : leb128 n = [UInt8.ofNat n] := by
-  unfold leb128
-  cases n with
-  | zero => rfl
-  | succ k => simp only [leb128Aux, hn, ↓reduceIte]
-
-private theorem uint8_toNat_of_lt_128 {n : Nat} (hn : n < 128) :
+private theorem uint8_toNat_of_lt_256 {n : Nat} (hn : n < 256) :
     (UInt8.ofNat n).toNat = n := by
   rw [UInt8.toNat_ofNat']
-  exact Nat.mod_eq_of_lt (by omega)
+  exact Nat.mod_eq_of_lt hn
 
-private theorem decodeSmallFields_encodeByteFields :
+private theorem decodeLeb128_leb128Aux :
+    ∀ (f n : Nat) (rest : List UInt8),
+      n ≤ f →
+      decodeLeb128 (leb128Aux f n ++ rest) = some (n, rest)
+  | 0, n, rest, hn => by
+    have hz : n = 0 := by omega
+    subst hz; rfl
+  | f + 1, n, rest, hn => by
+    unfold leb128Aux
+    by_cases hlt : n < 128
+    · simp only [hlt, ↓reduceIte, List.singleton_append, decodeLeb128,
+        uint8_toNat_of_lt_256 (by omega : n < 256)]
+    · have hb : (UInt8.ofNat (128 + n % 128)).toNat = 128 + n % 128 :=
+        uint8_toNat_of_lt_256 (by omega)
+      have hNotLt : ¬ (128 + n % 128 < 128) := by omega
+      have ih := decodeLeb128_leb128Aux f (n / 128) rest (by omega)
+      simp only [hlt, ↓reduceIte, List.cons_append, decodeLeb128, hb, hNotLt, ih]
+      congr 1; congr 1; omega
+
+private theorem decodeLeb128_leb128 (n : Nat) (rest : List UInt8) :
+    decodeLeb128 (leb128 n ++ rest) = some (n, rest) :=
+  decodeLeb128_leb128Aux n n rest (Nat.le_refl n)
+
+private theorem decodeFields_encodeByteFields :
     ∀ (fields : List (List UInt8)),
-      (∀ f ∈ fields, f.length < 128) →
-      decodeSmallFields fields.length (encodeByteFields fields) = some fields
-  | [], _ => rfl
-  | f :: fs, hSmall => by
-    have hf : f.length < 128 := hSmall f (.head _)
-    have hRest := decodeSmallFields_encodeByteFields fs (fun g hg => hSmall g (.tail _ hg))
-    simp only [List.length_cons, encodeByteFields, encodeListField, leb128_of_lt_128 hf,
-      List.singleton_append, List.cons_append, decodeSmallFields]
-    rw [uint8_toNat_of_lt_128 hf]
+      decodeFields fields.length (encodeByteFields fields) = some fields
+  | [] => by rw [encodeByteFields_nil]; rfl
+  | f :: fs => by
+    have hRest := decodeFields_encodeByteFields fs
+    rw [List.length_cons, encodeByteFields_cons, encodeListField_eq, List.append_assoc]
+    unfold decodeFields
+    rw [decodeLeb128_leb128]
+    dsimp only
     have hLe : f.length ≤ (f ++ encodeByteFields fs).length := by simp
     have hDrop : (f ++ encodeByteFields fs).drop f.length = encodeByteFields fs :=
       List.drop_left' rfl
     have hTake : (f ++ encodeByteFields fs).take f.length = f :=
       List.take_left' rfl
-    simp only [hf, hLe, decide_true, Bool.and_self, ↓reduceIte, hDrop, hRest, hTake]
+    simp only [hLe, ↓reduceIte, hDrop, hRest, hTake]
 
-private theorem decodeSmallMultiFrame_encodeMultiFrame (fields : List (List UInt8))
-    (hCnt : fields.length < 128) (hSmall : ∀ f ∈ fields, f.length < 128) :
-    decodeSmallMultiFrame (encodeMultiFrame fields) = some fields := by
-  simp only [encodeMultiFrame, leb128_of_lt_128 hCnt, List.singleton_append,
-    decodeSmallMultiFrame, uint8_toNat_of_lt_128 hCnt, hCnt, ↓reduceIte]
-  exact decodeSmallFields_encodeByteFields fields hSmall
+private theorem decodeMultiFrame_encodeMultiFrame (fields : List (List UInt8)) :
+    decodeMultiFrame (encodeMultiFrame fields) = some fields := by
+  unfold decodeMultiFrame encodeMultiFrame
+  rw [decodeLeb128_leb128]
+  exact decodeFields_encodeByteFields fields
 
 /-- Degree-7 Goldilocks S-box $x \mapsto x^7$ (`gcd(7, p - 1) = 1`). -/
 def pow7Goldilocks (x : Goldilocks) : Goldilocks :=
@@ -3770,7 +4108,7 @@ theorem embedBase_pow7 (x : Goldilocks) :
 /-- Algebraic degree-7 S-box `TweakableHashSuite` (`rawHash_len = 32`) whose 1-layer stateful WOTS
     chain computes `x_0^7 + seed` over `Goldilocks`. -/
 def sbox7RawHash (pre : List UInt8) : List UInt8 :=
-  match decodeSmallMultiFrame pre with
+  match decodeMultiFrame pre with
   | some [role, seedBytes, _adrsBytes, xBytes] =>
     if role == tagThF then
       let x := Goldilocks.ofNat (ofBE xBytes)
@@ -3817,124 +4155,58 @@ private theorem goldilocks_ofNat_ofBE_be32 (g : Goldilocks) :
   rw [ofBE_be (Nat.lt_trans g.isLt hb)]
   exact Goldilocks.ext (Nat.mod_eq_of_lt g.isLt)
 
+private theorem uint8_beq_self (x : UInt8) : (x == x) = true :=
+  Nat.beq_refl x.toBitVec.toNat
+
+private theorem list_uint8_beq_self : ∀ (xs : List UInt8), (xs == xs) = true
+  | [] => rfl
+  | x :: xs => by
+    change ((x == x) && (xs == xs)) = true
+    rw [uint8_beq_self x, list_uint8_beq_self xs]
+    rfl
+
 /-- Exact equivalence between `verifyPqHashSig` on `mkSbox7Sig x0` and the degree-7 field equation
     `x0^7 + seed = root` in `Goldilocks`! -/
 theorem verifyPqHashSig_sbox7_iff (seed root x0 : Goldilocks) (msg : List UInt8) :
     verifyPqHashSig sbox7FieldSuite sbox7Params (mkSbox7Pk seed root) msg (mkSbox7Sig x0) =
       decide (CommRingOps.add (pow7Goldilocks x0) seed = root) := by
-  have hWf : sbox7Params.wellFormed = true := by decide
   have hHmsg : ∀ (mu : List UInt8),
       let hmsg := thHashMsg sbox7FieldSuite [] (be 32 seed.val) (be 32 root.val) mu 0 0 0 0
       extractBaseWDigits 2 2 hmsg = [0, 1] := by
     intro mu
-    have hCall0 : thCall sbox7FieldSuite tagHMsg (be 32 seed.val)
-        ⟨0, 0, .wotsHash, 0, 0, 0⟩ [[], be 32 root.val, mu, be 4 0] = 0x40 :: be 31 0 := by
+    have hCallGen : ∀ (cIdx : UInt32), thCall sbox7FieldSuite tagHMsg (be 32 seed.val)
+        ⟨0, 0, .wotsHash, 0, cIdx, UInt32.ofNat 0⟩ [[], be 32 root.val, mu, be 4 0] =
+        0x40 :: be 31 0 := by
+      intro cIdx
       unfold thCall sbox7FieldSuite sbox7RawHash thPreimage
       dsimp only
-      cases hDec : decodeSmallMultiFrame
-        (encodeMultiFrame [tagHMsg, be 32 seed.val, encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩,
-          [], be 32 root.val, mu, be 4 0]) with
-      | none => rfl
-      | some fs =>
-        have hInj : fs.length = 7 := by
-          -- If decodeSmallMultiFrame succeeded on 7 fields, cntByte = 7, so fs.length = 7!
-          unfold encodeMultiFrame at hDec
-          have h7 : leb128 ([tagHMsg, be 32 seed.val, encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩,
-              [], be 32 root.val, mu, be 4 0].length) = [7] := rfl
-          rw [h7, List.singleton_append] at hDec
-          unfold decodeSmallMultiFrame at hDec
-          simp only [show (7 : UInt8).toNat = 7 from rfl, show 7 < 128 by decide, ↓reduceIte] at hDec
-          have hLenAux : ∀ (k : Nat) (bs : List UInt8) (out : List (List UInt8)),
-              decodeSmallFields k bs = some out → out.length = k := by
-            intro k
-            induction k with
-            | zero =>
-              intro bs out hd
-              cases bs <;> simp [decodeSmallFields] at hd
-              subst hd; rfl
-            | succ k ih =>
-              intro bs out hd
-              cases bs with
-              | nil => simp [decodeSmallFields] at hd
-              | cons b rest =>
-                simp only [decodeSmallFields] at hd
-                split at hd
-                · split at hd
-                  · rename_i tl htl
-                    simp only [Option.some.injEq] at hd
-                    rw [← hd, List.length_cons, ih _ _ htl]
-                  · cases hd
-                · cases hd
-          exact hLenAux 7 _ fs hDec
-        cases fs with
-        | nil => cases hInj
-        | cons f0 r1 => cases r1 with
-          | nil => cases hInj
-          | cons f1 r2 => cases r2 with
-            | nil => cases hInj
-            | cons f2 r3 => cases r3 with
-              | nil => cases hInj
-              | cons f3 r4 => cases r4 with
-                | nil => cases hInj
-                | cons f4 r5 => cases r5 with
-                  | nil => cases hInj
-                  | cons f5 r6 => simp at hInj; rfl
+      simp only [List.cons_append, List.nil_append]
+      rw [decodeMultiFrame_encodeMultiFrame]
     dsimp only
     unfold thHashMsg
-    show extractBaseWDigits 2 2
-      (thCall sbox7FieldSuite tagHMsg (be 32 seed.val) ⟨0, 0, .wotsHash, 0, 0, 0⟩
-        [[], be 32 root.val, mu, be 4 0] ++
-       thCall sbox7FieldSuite tagHMsg (be 32 seed.val) ⟨0, 0, .wotsHash, 0, 1, 0⟩
-        [[], be 32 root.val, mu, be 4 0]) = [0, 1]
-    rw [hCall0]
+    rw [hCallGen 0, hCallGen 1]
     decide
   have hChain : thChainF sbox7FieldSuite (be 32 seed.val) ⟨0, 0, .wotsHash, 0, 0, 0⟩
       (be 32 x0.val) = be 32 (CommRingOps.add (pow7Goldilocks x0) seed).val := by
     unfold thChainF thCall sbox7FieldSuite sbox7RawHash thPreimage
     dsimp only
-    have hFields := decodeSmallMultiFrame_encodeMultiFrame
-      [tagThF, be 32 seed.val, encodeAdrs ⟨0, 0, .wotsHash, 0, 0, 0⟩, be 32 x0.val]
-      (by decide)
-      (fun f hf => by
-        rcases List.mem_cons.mp hf with rfl | hf
-        · decide
-        · rcases List.mem_cons.mp hf with rfl | hf
-          · simp [length_be]
-          · rcases List.mem_cons.mp hf with rfl | hf
-            · rw [encodeAdrs_length]; decide
-            · rcases List.mem_cons.mp hf with rfl | hf
-              · simp [length_be]
-              · cases hf)
-    rw [hFields]
-    simp only [beq_self_eq_true, ↓reduceIte, goldilocks_ofNat_ofBE_be32]
+    simp only [List.cons_append, List.nil_append]
+    rw [decodeMultiFrame_encodeMultiFrame]
+    simp only [list_uint8_beq_self, ↓reduceIte, goldilocks_ofNat_ofBE_be32]
   let end0 := CommRingOps.add (pow7Goldilocks x0) seed
   have hTl : thTweakTl sbox7FieldSuite (be 32 seed.val) ⟨0, 0, .wotsPk, 0, 0, 0⟩
       [be 32 end0.val, be 32 0] = be 32 end0.val := by
     unfold thTweakTl thCall sbox7FieldSuite sbox7RawHash thPreimage
     dsimp only
-    have hFields := decodeSmallMultiFrame_encodeMultiFrame
-      [tagThTl, be 32 seed.val, encodeAdrs ⟨0, 0, .wotsPk, 0, 0, 0⟩, be 32 end0.val, be 32 0]
-      (by decide)
-      (fun f hf => by
-        rcases List.mem_cons.mp hf with rfl | hf
-        · decide
-        · rcases List.mem_cons.mp hf with rfl | hf
-          · simp [length_be]
-          · rcases List.mem_cons.mp hf with rfl | hf
-            · rw [encodeAdrs_length]; decide
-            · rcases List.mem_cons.mp hf with rfl | hf
-              · simp [length_be]
-              · rcases List.mem_cons.mp hf with rfl | hf
-                · simp [length_be]
-                · cases hf)
-    rw [hFields]
+    simp only [List.cons_append, List.nil_append]
+    rw [decodeMultiFrame_encodeMultiFrame]
     have hZero : Goldilocks.ofNat (ofBE (be 32 0)) = Goldilocks.zero := by
       simpa using goldilocks_ofNat_ofBE_be32 Goldilocks.zero
-    simp only [beq_self_eq_true, ↓reduceIte, goldilocks_ofNat_ofBE_be32, hZero]
-    rw [show CommRingOps.add end0 Goldilocks.zero = end0 from LawfulCommRing.add_zero end0]
+    simp only [list_uint8_beq_self, ↓reduceIte, goldilocks_ofNat_ofBE_be32, hZero]
+    exact congrArg (fun g : Goldilocks => be 32 g.val) (LawfulCommRing.add_zero end0)
   unfold verifyPqHashSig mkSbox7Pk mkSbox7Sig
-  simp only [hWf, Bool.not_true, ↓reduceIte, sbox7Params, ne_eq, not_true_eq_false,
-    Nat.mul_zero, Nat.pow_zero, Nat.lt_one_iff, List.isEmpty_nil, Bool.or_false]
+  simp only [Bool.not_true, ↓reduceIte, sbox7Params, ne_eq, not_true_eq_false,
+    Nat.mul_zero, Nat.pow_zero, Nat.lt_one_iff, List.isEmpty_nil]
   let mu := thPreHash sbox7FieldSuite (be 32 seed.val) (be 32 root.val) msg
   change (match verifyHypertreeLayers sbox7FieldSuite ⟨2, 2, 0, 1, 0, 0, 0, true⟩
       (be 32 seed.val) (be 32 root.val) [] 0 0 mu
@@ -3942,7 +4214,9 @@ theorem verifyPqHashSig_sbox7_iff (seed root x0 : Goldilocks) (msg : List UInt8)
     | some computedTopRoot => decide (computedTopRoot = be 32 root.val)
     | none => false) = decide (end0 = root)
   unfold verifyHypertreeLayers
-  simp only [Nat.pow_zero, Nat.mod_one, Nat.div_one, UInt32.ofNat_zero, UInt64.ofNat_zero]
+  have hU32 : UInt32.ofNat 0 = 0 := rfl
+  have hU64 : UInt64.ofNat 0 = 0 := rfl
+  simp only [Nat.pow_zero, Nat.mod_one, Nat.div_one, hU32, hU64]
   rw [hHmsg mu]
   have hTgt : checkTargetSum 2 2 (PqHashParams.targetSum ⟨2, 2, 0, 1, 0, 0, 0, true⟩) [0, 1] =
       true := by decide
@@ -3954,21 +4228,25 @@ theorem verifyPqHashSig_sbox7_iff (seed root x0 : Goldilocks) (msg : List UInt8)
     have hRange : List.range 2 = [0, 1] := rfl
     rw [hRange]
     simp only [List.map, List.getD_cons_zero, List.getD_cons_succ, Nat.sub_zero, Nat.sub_self,
-      wotsChainSteps]
+      wotsChainSteps, hU32]
     rw [hChain, hTl]
   rw [hRec]
-  simp only [walkMerkleAuthPath, verifyHypertreeLayers]
+  simp only [walkMerkleAuthPath, verifyHypertreeLayers, Bool.false_eq_true, ↓reduceIte]
   have hb : goldilocksPrime < 256 ^ 32 := by decide
-  by_cases hEq : end0 = root
-  · simp [hEq]
-  · have hNeBe : be 32 end0.val ≠ be 32 root.val := fun hBe =>
+  if hEq : end0 = root then
+    have hBeEq : be 32 end0.val = be 32 root.val := congrArg (fun g : Goldilocks => be 32 g.val) hEq
+    rw [decide_eq_true hBeEq, decide_eq_true hEq]
+  else
+    have hNeBe : be 32 end0.val ≠ be 32 root.val := fun hBe =>
       hEq (Goldilocks.ext (be_injective (Nat.lt_trans end0.isLt hb) (Nat.lt_trans root.isLt hb) hBe))
-    simp [hEq, hNeBe]
+    rw [decide_eq_false hNeBe, decide_eq_false hEq]
 
 /-- Primitive 8th root of unity in `Goldilocks` (`(2^24)^4 = 2^96 ≡ -1 (mod p)`). -/
 def omega8 : Goldilocks := ⟨2 ^ 24, by decide⟩
 
-def invTwoGold : Goldilocks := Goldilocks.inv (Goldilocks.ofNat 2)
+/-- Multiplicative inverse of `2` in `Goldilocks` (`(p + 1) / 2 = 2^63 - 2^31 + 1`), given as a
+    direct literal so WHNF never unfolds 64-step Fermat exponentiation. -/
+def invTwoGold : Goldilocks := ⟨9223372034707292161, by decide⟩
 
 def powGold (base : Goldilocks) : Nat → Goldilocks
   | 0 => Goldilocks.one
@@ -4006,7 +4284,7 @@ theorem omega8Domain_nodup : omega8Domain.Nodup := by
       obtain ⟨y, hy, rfl⟩ := List.mem_map.mp hb
       exact hrel y hy (omega8_pow_inj (hlt x (.head _)) (hlt y (.tail _ hy))
         (GoldilocksExt4.embedBase_injective heq))
-  exact hAux List.nodup_range (fun z hz => List.mem_range.mp hz)
+  exact hAux (nodup_range_constructive 8) (fun z hz => List.mem_range.mp hz)
 
 /-- Standard blowup-4 Reed–Solomon encoding of `P(Y) = a0 + a1 * Y` on `omega8Domain` (`8` points). -/
 def encodeLinearRs8 (a0 a1 : Goldilocks) : List GoldilocksExt4 :=
@@ -4026,16 +4304,16 @@ def recoverLinearCoeffs8 (table0 : List GoldilocksExt4) : GoldilocksExt4 × Gold
 def isLinearBaseRs8 (table0 : List GoldilocksExt4) : Bool :=
   (table0.length == 8) &&
   table0.all GoldilocksExt4.isBase &&
-  let (c0, c1) := recoverLinearCoeffs8 table0
+  let c := recoverLinearCoeffs8 table0
   (List.range 8).all (fun j =>
     table0.getD j GoldilocksExt4.zero ==
-      RoundPoly.evalCoeffs [c0, c1] (omega8Domain.getD j GoldilocksExt4.zero))
+      RoundPoly.evalCoeffs [c.1, c.2] (omega8Domain.getD j GoldilocksExt4.zero))
 
 theorem isLinearBaseRs8_eval_at {table0 : List GoldilocksExt4}
     (h : isLinearBaseRs8 table0 = true) {j : Nat} (hj : j < 8) :
-    let (c0, c1) := recoverLinearCoeffs8 table0
     table0.getD j GoldilocksExt4.zero =
-      RoundPoly.evalCoeffs [c0, c1] (omega8Domain.getD j GoldilocksExt4.zero) := by
+      RoundPoly.evalCoeffs [(recoverLinearCoeffs8 table0).1, (recoverLinearCoeffs8 table0).2]
+        (omega8Domain.getD j GoldilocksExt4.zero) := by
   unfold isLinearBaseRs8 at h
   rcases Bool.and_eq_true_iff.mp h with ⟨_, hAll⟩
   have hMem : j ∈ List.range 8 := List.mem_range.mpr hj
@@ -4045,11 +4323,11 @@ theorem isLinearBaseRs8_encodeLinearRs8 (a0 a1 : Goldilocks) :
     isLinearBaseRs8 (encodeLinearRs8 a0 a1) = true ∧
     recoverLinearCoeffs8 (encodeLinearRs8 a0 a1) =
       (GoldilocksExt4.embedBase a0, GoldilocksExt4.embedBase a1) := by
-  have hTwoInv : CommRingOps.mul (CommRingOps.add GoldilocksExt4.one GoldilocksExt4.one)
+  have hTwoInv : CommRingOps.mul (CommRingOps.add CommRingOps.one CommRingOps.one)
       (GoldilocksExt4.embedBase invTwoGold) = GoldilocksExt4.one := by decide +kernel
-  have hOmega0 : omega8Domain.getD 0 GoldilocksExt4.zero = GoldilocksExt4.one := by decide +kernel
+  have hOmega0 : omega8Domain.getD 0 GoldilocksExt4.zero = CommRingOps.one := by decide +kernel
   have hOmega4 : omega8Domain.getD 4 GoldilocksExt4.zero =
-      CommRingOps.neg GoldilocksExt4.one := by decide +kernel
+      CommRingOps.neg CommRingOps.one := by decide +kernel
   let c0 := GoldilocksExt4.embedBase a0
   let c1 := GoldilocksExt4.embedBase a1
   have hGet : ∀ j, j < 8 →
@@ -4057,13 +4335,12 @@ theorem isLinearBaseRs8_encodeLinearRs8 (a0 a1 : Goldilocks) :
         RoundPoly.evalCoeffs [c0, c1] (omega8Domain.getD j GoldilocksExt4.zero) := by
     intro j hj
     have hjDom : j < omega8Domain.length := by simpa [omega8Domain] using hj
-    have hjEnc : j < (encodeLinearRs8 a0 a1).length := by simpa [encodeLinearRs8] using hjDom
-    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjEnc, Option.getD_some,
-        List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjDom, Option.getD_some]
-    simp [encodeLinearRs8]
+    rw [List.getD_eq_getElem?_getD, encodeLinearRs8, List.getElem?_map,
+        List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjDom]
+    rfl
   have ht0 : (encodeLinearRs8 a0 a1).getD 0 GoldilocksExt4.zero = CommRingOps.add c0 c1 := by
     rw [hGet 0 (by decide), hOmega0]
-    simp [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+    simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
       LawfulCommRing.one_mul]
   have ht4 : (encodeLinearRs8 a0 a1).getD 4 GoldilocksExt4.zero = CommRingOps.sub c0 c1 := by
     rw [hGet 4 (by decide), hOmega4]
@@ -4074,39 +4351,45 @@ theorem isLinearBaseRs8_encodeLinearRs8 (a0 a1 : Goldilocks) :
     dsimp only
     rw [ht0, ht4]
     have hSum : CommRingOps.add (CommRingOps.add c0 c1) (CommRingOps.sub c0 c1) =
-        CommRingOps.mul c0 (CommRingOps.add GoldilocksExt4.one GoldilocksExt4.one) := by
+        CommRingOps.mul c0 (CommRingOps.add CommRingOps.one CommRingOps.one) := by
       rw [LawfulCommRing.left_distrib, LawfulCommRing.mul_one,
           LawfulCommRing.sub_eq_add_neg c0 c1, LawfulCommRing.add_add_add_comm,
           LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
     have hDiff : CommRingOps.sub (CommRingOps.add c0 c1) (CommRingOps.sub c0 c1) =
-        CommRingOps.mul c1 (CommRingOps.add GoldilocksExt4.one GoldilocksExt4.one) := by
+        CommRingOps.mul c1 (CommRingOps.add CommRingOps.one CommRingOps.one) := by
       apply LawfulCommRing.add_left_cancel (a := CommRingOps.sub c0 c1)
       rw [LawfulCommRing.add_sub_cancel_left, LawfulCommRing.left_distrib,
           LawfulCommRing.mul_one, LawfulCommRing.sub_eq_add_neg c0 c1,
-          LawfulCommRing.add_add_add_comm, LawfulCommRing.neg_add_cancel_left]
+          LawfulCommRing.add_assoc c0 (CommRingOps.neg c1) (CommRingOps.add c1 c1),
+          ← LawfulCommRing.add_assoc (CommRingOps.neg c1) c1 c1,
+          LawfulCommRing.add_left_neg, LawfulCommRing.zero_add]
     rw [hSum, hDiff, LawfulCommRing.mul_assoc c0, LawfulCommRing.mul_assoc c1,
-        hTwoInv, LawfulCommRing.mul_one, LawfulCommRing.mul_one]
+        hTwoInv, GoldilocksExt4.one_eq_ringOne, LawfulCommRing.mul_one, LawfulCommRing.mul_one]
   refine ⟨?_, hRec⟩
   unfold isLinearBaseRs8
   dsimp only
   rw [hRec]
-  dsimp only
+  dsimp only [c0, c1]
   have hLen : ((encodeLinearRs8 a0 a1).length == 8) = true := by simp [encodeLinearRs8, omega8Domain]
   have hBaseAll : (encodeLinearRs8 a0 a1).all GoldilocksExt4.isBase = true := by
     apply List.all_eq_true.mpr
     intro z hz
-    simp only [encodeLinearRs8, omega8Domain, List.mem_map, List.mem_range] at hz
-    obtain ⟨j, _, rfl⟩ := hz
+    unfold encodeLinearRs8 omega8Domain at hz
+    rw [List.map_map] at hz
+    obtain ⟨k, _, rfl⟩ := List.mem_map.mp hz
+    dsimp only [Function.comp_apply]
     simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
     rw [← GoldilocksExt4.embedBase_mul, ← GoldilocksExt4.embedBase_add]
     exact GoldilocksExt4.isBase_embedBase _
   have hEvalAll : (List.range 8).all (fun j =>
       (encodeLinearRs8 a0 a1).getD j GoldilocksExt4.zero ==
-        RoundPoly.evalCoeffs [c0, c1] (omega8Domain.getD j GoldilocksExt4.zero)) = true := by
+        RoundPoly.evalCoeffs [GoldilocksExt4.embedBase a0, GoldilocksExt4.embedBase a1]
+          (omega8Domain.getD j GoldilocksExt4.zero)) = true := by
     apply List.all_eq_true.mpr
     intro j hj
     exact beq_iff_eq.mpr (hGet j (List.mem_range.mp hj))
-  simp [hLen, hBaseAll, hEvalAll]
+  rw [hLen, hBaseAll, hEvalAll]
+  rfl
 
 private theorem getD_set_ne {α : Type} (l : List α) (idx j : Nat) (v dflt : α) (hne : j ≠ idx) :
     (l.set idx v).getD j dflt = l.getD j dflt := by
@@ -4116,6 +4399,17 @@ private theorem getD_set_ne {α : Type} (l : List α) (idx j : Nat) (v dflt : α
 private theorem getD_set_eq {α : Type} (l : List α) (idx : Nat) (v dflt : α)
     (hlt : idx < l.length) : (l.set idx v).getD idx dflt = v := by
   rw [List.getD_eq_getElem?_getD, List.getElem?_set_self hlt, Option.getD_some]
+
+private theorem degree1_unique_from_two_points (p1 p2 : List GoldilocksExt4)
+    (x1 x2 z : GoldilocksExt4)
+    (hxNe : x1 ≠ x2) (hp1 : p1.length ≤ 2) (hp2 : p2.length ≤ 2)
+    (h1 : RoundPoly.evalCoeffs p1 x1 = RoundPoly.evalCoeffs p2 x1)
+    (h2 : RoundPoly.evalCoeffs p1 x2 = RoundPoly.evalCoeffs p2 x2)
+    (hz : RoundPoly.evalCoeffs p1 z ≠ RoundPoly.evalCoeffs p2 z) : False := by
+  have hNd : [x1, x2].Nodup := by simp [hxNe]
+  have hRoots := ext4_poly_roots_le_degree 1 p1 p2 [x1, x2] hNd hp1 hp2 ⟨z, hz⟩
+  simp only [List.filter, h1, h2, decide_true, List.length_cons, List.length_nil] at hRoots
+  omega
 
 /-- **`#tooth` Minimum-Distance Corruption Rejection (`tooth_corrupted_round0_symbol_rejected`)**:
     Mutating ANY single symbol at ANY index `idx < 8` of ANY valid Round-0 codeword forces
@@ -4132,45 +4426,48 @@ theorem tooth_corrupted_round0_symbol_rejected (table0 : List GoldilocksExt4)
   have hLen8 : table0.length = 8 := by
     unfold isLinearBaseRs8 at hValid
     exact eq_of_beq (Bool.and_eq_true_iff.mp (Bool.and_eq_true_iff.mp hValid).1).1
-  let p1 := [ (recoverLinearCoeffs8 table0).1, (recoverLinearCoeffs8 table0).2 ]
-  let p2 := [ (recoverLinearCoeffs8 (table0.set idx v')).1,
-              (recoverLinearCoeffs8 (table0.set idx v')).2 ]
-  let j1 := if idx = 0 then 1 else 0
-  let j2 := if idx = 0 then 2 else if idx = 1 then 2 else 1
-  have hj1Lt : j1 < 8 := by dsimp [j1]; omega
-  have hj2Lt : j2 < 8 := by dsimp [j2]; omega
-  have hj1Ne : j1 ≠ idx := by dsimp [j1]; omega
-  have hj2Ne : j2 ≠ idx := by dsimp [j2]; omega
-  have hj12Ne : j1 ≠ j2 := by dsimp [j1, j2]; omega
-  let x1 := omega8Domain.getD j1 GoldilocksExt4.zero
-  let x2 := omega8Domain.getD j2 GoldilocksExt4.zero
-  have hxNe : x1 ≠ x2 := fun hEq =>
+  have hPair : ∃ j1 j2 : Nat, j1 < 8 ∧ j2 < 8 ∧ j1 ≠ idx ∧ j2 ≠ idx ∧ j1 ≠ j2 := by
+    rcases idx with _ | _ | idx
+    · exact ⟨1, 2, by decide, by decide, by decide, by decide, by decide⟩
+    · exact ⟨0, 2, by decide, by decide, by decide, by decide, by decide⟩
+    · exact ⟨0, 1, by decide, by decide, by omega, by omega, by decide⟩
+  obtain ⟨j1, j2, hj1Lt, hj2Lt, hj1Ne, hj2Ne, hj12Ne⟩ := hPair
+  have hxNe : omega8Domain.getD j1 GoldilocksExt4.zero ≠
+      omega8Domain.getD j2 GoldilocksExt4.zero := fun hEq =>
     hj12Ne (omega8Domain_getD_inj hj1Lt hj2Lt hEq)
-  have hNd2 : [x1, x2].Nodup := by simp [hxNe]
-  have hAgree1 : RoundPoly.evalCoeffs p1 x1 = RoundPoly.evalCoeffs p2 x1 := by
+  have hAgree1 : RoundPoly.evalCoeffs
+      [(recoverLinearCoeffs8 table0).1, (recoverLinearCoeffs8 table0).2]
+      (omega8Domain.getD j1 GoldilocksExt4.zero) =
+      RoundPoly.evalCoeffs
+        [(recoverLinearCoeffs8 (table0.set idx v')).1, (recoverLinearCoeffs8 (table0.set idx v')).2]
+        (omega8Domain.getD j1 GoldilocksExt4.zero) := by
     have e1 := isLinearBaseRs8_eval_at hValid hj1Lt
     have e2 := isLinearBaseRs8_eval_at hBad hj1Lt
-    dsimp only at e1 e2
     rw [getD_set_ne _ _ _ _ _ hj1Ne] at e2
     exact e1.symm.trans e2
-  have hAgree2 : RoundPoly.evalCoeffs p1 x2 = RoundPoly.evalCoeffs p2 x2 := by
+  have hAgree2 : RoundPoly.evalCoeffs
+      [(recoverLinearCoeffs8 table0).1, (recoverLinearCoeffs8 table0).2]
+      (omega8Domain.getD j2 GoldilocksExt4.zero) =
+      RoundPoly.evalCoeffs
+        [(recoverLinearCoeffs8 (table0.set idx v')).1, (recoverLinearCoeffs8 (table0.set idx v')).2]
+        (omega8Domain.getD j2 GoldilocksExt4.zero) := by
     have e1 := isLinearBaseRs8_eval_at hValid hj2Lt
     have e2 := isLinearBaseRs8_eval_at hBad hj2Lt
-    dsimp only at e1 e2
     rw [getD_set_ne _ _ _ _ _ hj2Ne] at e2
     exact e1.symm.trans e2
-  have hDisagreeIdx : RoundPoly.evalCoeffs p1 (omega8Domain.getD idx GoldilocksExt4.zero) ≠
-      RoundPoly.evalCoeffs p2 (omega8Domain.getD idx GoldilocksExt4.zero) := by
+  have hDisagreeIdx : RoundPoly.evalCoeffs
+      [(recoverLinearCoeffs8 table0).1, (recoverLinearCoeffs8 table0).2]
+      (omega8Domain.getD idx GoldilocksExt4.zero) ≠
+      RoundPoly.evalCoeffs
+        [(recoverLinearCoeffs8 (table0.set idx v')).1, (recoverLinearCoeffs8 (table0.set idx v')).2]
+        (omega8Domain.getD idx GoldilocksExt4.zero) := by
     have e1 := isLinearBaseRs8_eval_at hValid hIdx
     have e2 := isLinearBaseRs8_eval_at hBad hIdx
-    dsimp only at e1 e2
     rw [getD_set_eq table0 idx v' GoldilocksExt4.zero (hLen8 ▸ hIdx)] at e2
     rw [← e1, ← e2]
     exact fun hEq => hMut hEq.symm
-  have hRoots := ext4_poly_roots_le_degree 1 p1 p2 [x1, x2] hNd2 (by simp [p1]) (by simp [p2])
-    ⟨omega8Domain.getD idx GoldilocksExt4.zero, hDisagreeIdx⟩
-  simp only [List.filter, hAgree1, hAgree2, decide_true, List.length_cons, List.length_nil] at hRoots
-  omega
+  exact degree1_unique_from_two_points _ _ _ _ _ hxNe (by simp) (by simp)
+    hAgree1 hAgree2 hDisagreeIdx
 
 /-- Constant Reed–Solomon codeword predicate of exact length `expectedLen ≥ 2`. -/
 def isConstExt4Rs (expectedLen : Nat) (w : List GoldilocksExt4) : Bool :=
@@ -4240,7 +4537,7 @@ theorem evalCoeffs_polyScale (c : GoldilocksExt4) :
   | p :: ps, x => by
     simp only [polyScale, RoundPoly.evalCoeffs, evalCoeffs_polyScale c ps x]
     rw [LawfulCommRing.left_distrib, ← LawfulCommRing.mul_assoc,
-        LawfulCommRing.mul_comm c x, LawfulCommRing.mul_assoc]
+        LawfulCommRing.mul_comm x c, LawfulCommRing.mul_assoc]
 
 theorem evalCoeffs_polyMul :
     ∀ (ps qs : List GoldilocksExt4) (x : GoldilocksExt4),
@@ -4250,7 +4547,8 @@ theorem evalCoeffs_polyMul :
   | p :: ps, qs, x => by
     simp only [polyMul, evalCoeffs_polyAdd, evalCoeffs_polyScale,
       RoundPoly.evalCoeffs, evalCoeffs_polyMul ps qs x]
-    rw [LawfulCommRing.zero_add, LawfulCommRing.right_distrib, LawfulCommRing.mul_assoc]
+    rw [GoldilocksExt4.zero_eq_ringZero, LawfulCommRing.zero_add,
+        LawfulCommRing.right_distrib, LawfulCommRing.mul_assoc]
 
 theorem length_polyAdd :
     ∀ (ps qs : List GoldilocksExt4), (polyAdd ps qs).length = max ps.length qs.length
@@ -4280,22 +4578,28 @@ theorem length_polyMul_le :
     rw [length_polyAdd, length_polyScale, List.length_cons]
     exact Nat.max_le.mpr ⟨by omega, by omega⟩
 
-/-- Honest degree-8 row gate polynomial `(1 - Y) * ((c0 + c1 * Y)^7 + seed - root)` (`length ≤ 9`). -/
-def honestSbox7RoundPoly (seed root : Goldilocks) (table0 : List GoldilocksExt4) :
+/-- Honest degree-8 row gate polynomial `(1 - Y) * ((c0 + c1 * Y)^7 + delta)` (`length ≤ 9`),
+    factored through `delta = seed - root` so equal differences unify without unfolding `polyMul`. -/
+private def honestSbox7RoundPolyDelta (delta : Goldilocks) (table0 : List GoldilocksExt4) :
     List GoldilocksExt4 :=
-  let (c0, c1) := recoverLinearCoeffs8 table0
-  let lin := [c0, c1]
+  let c := recoverLinearCoeffs8 table0
+  let lin := [c.1, c.2]
   let lin2 := polyMul lin lin
   let lin4 := polyMul lin2 lin2
   let lin6 := polyMul lin4 lin2
   let lin7 := polyMul lin6 lin
-  let gate7 := polyAdd lin7 [GoldilocksExt4.embedBase (CommRingOps.sub seed root)]
+  let gate7 := polyAdd lin7 [GoldilocksExt4.embedBase delta]
   let sel0 := [GoldilocksExt4.one, CommRingOps.neg GoldilocksExt4.one]
   polyMul sel0 gate7
 
+/-- Honest degree-8 row gate polynomial `(1 - Y) * ((c0 + c1 * Y)^7 + seed - root)` (`length ≤ 9`). -/
+def honestSbox7RoundPoly (seed root : Goldilocks) (table0 : List GoldilocksExt4) :
+    List GoldilocksExt4 :=
+  honestSbox7RoundPolyDelta (CommRingOps.sub seed root) table0
+
 theorem honestSbox7RoundPoly_length_le_9 (seed root : Goldilocks) (table0 : List GoldilocksExt4) :
     (honestSbox7RoundPoly seed root table0).length ≤ 9 := by
-  unfold honestSbox7RoundPoly
+  unfold honestSbox7RoundPoly honestSbox7RoundPolyDelta
   dsimp only
   let lin := [ (recoverLinearCoeffs8 table0).1, (recoverLinearCoeffs8 table0).2 ]
   let lin2 := polyMul lin lin
@@ -4317,17 +4621,18 @@ theorem honestSbox7RoundPoly_length_le_9 (seed root : Goldilocks) (table0 : List
 
 theorem honestSbox7RoundPoly_eval (seed root : Goldilocks) (table0 : List GoldilocksExt4)
     (y : GoldilocksExt4) :
-    let (c0, c1) := recoverLinearCoeffs8 table0
-    let py := CommRingOps.add c0 (CommRingOps.mul y c1)
     RoundPoly.evalCoeffs (honestSbox7RoundPoly seed root table0) y =
       CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one y)
-        (CommRingOps.add (pow7Ext4 py)
+        (CommRingOps.add
+          (pow7Ext4 (CommRingOps.add (recoverLinearCoeffs8 table0).1
+            (CommRingOps.mul y (recoverLinearCoeffs8 table0).2)))
           (GoldilocksExt4.embedBase (CommRingOps.sub seed root))) := by
-  unfold honestSbox7RoundPoly
+  unfold honestSbox7RoundPoly honestSbox7RoundPolyDelta
   dsimp only
   simp only [evalCoeffs_polyMul, evalCoeffs_polyAdd, RoundPoly.evalCoeffs,
     LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
-  rw [LawfulCommRing.mul_neg, LawfulCommRing.mul_one, ← LawfulCommRing.sub_eq_add_neg]
+  rw [GoldilocksExt4.one_eq_ringOne, LawfulCommRing.mul_neg,
+      LawfulCommRing.mul_one, ← LawfulCommRing.sub_eq_add_neg]
   rfl
 
 /-- Genuine trace witness decoder: extracts `[mkSbox7Sig x0]` from the interpolated `Y = 0`
@@ -4348,6 +4653,10 @@ theorem decodeSbox7Sigs_nonconstant {x y b1 b2 : Goldilocks} (hne : x ≠ y) :
   have hb : goldilocksPrime < 256 ^ 32 := by decide
   exact hne (Goldilocks.ext (be_injective (Nat.lt_trans x.isLt hb) (Nat.lt_trans y.isLt hb) hChains))
 
+/-- Non-recursive inverse of `omega_8^g` via `omega_8^8 = 1` (`powGold omega8 ((8 - g % 8) % 8)`). -/
+def invOmega8Pow (g : Nat) : Goldilocks :=
+  powGold omega8 ((8 - g % 8) % 8)
+
 /-- 2-stage rate-escalating WHIR domain (`Stage 0: blowup = 4, groups0 = 4`;
     `Stage 1: blowup = 16, groups0 = 8`). -/
 def sbox7Stage0Dom : WhirStageDomain where
@@ -4358,7 +4667,7 @@ def sbox7Stage0Dom : WhirStageDomain where
   numQueries := 4
   powBits := 0
   invTwo := invTwoGold
-  invTwoY0 := fun _ g => CommRingOps.mul invTwoGold (Goldilocks.inv (powGold omega8 g))
+  invTwoY0 := fun _ g => CommRingOps.mul invTwoGold (invOmega8Pow g)
   sampleFuel := 16
   bindRowChallenges := true
 
@@ -4384,31 +4693,34 @@ def rsSbox7Inst (seed root : Goldilocks) (msg : List UInt8) : AggPublicInstance 
   committee := [mkSbox7Pk seed root]
   signingModeDigest := "QSAG.SBOX7.MODE/v2".toUTF8.toList
 
-def rsSbox7TraceArith (seed root : Goldilocks) : RowArithmetization where
+private def rsSbox7TraceArithDelta (delta : Goldilocks) : RowArithmetization where
   decodeSigs := decodeSbox7Sigs
   honestClaim := fun table0 =>
-    let p := honestSbox7RoundPoly seed root table0
+    let p := honestSbox7RoundPolyDelta delta table0
     CommRingOps.add (RoundPoly.evalCoeffs p GoldilocksExt4.zero)
                     (RoundPoly.evalCoeffs p GoldilocksExt4.one)
-  honestRound := fun table0 _ => honestSbox7RoundPoly seed root table0
+  honestRound := fun table0 _ => honestSbox7RoundPolyDelta delta table0
   terminal := fun finalWord rowChallenges _ =>
     let r0 := rowChallenges.headD GoldilocksExt4.zero
     let pr0 := finalWord.getD 0 GoldilocksExt4.zero
     CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one r0)
       (CommRingOps.add (pow7Ext4 pr0)
-        (GoldilocksExt4.embedBase (CommRingOps.sub seed root)))
+        (GoldilocksExt4.embedBase delta))
   isStageCodeword := fun pos w =>
     if pos = 0 then isLinearBaseRs8 w
     else isConstExt4Rs 16 w
   isFinalCodeword := isConstExt4Rs 8
 
+def rsSbox7TraceArith (seed root : Goldilocks) : RowArithmetization :=
+  rsSbox7TraceArithDelta (CommRingOps.sub seed root)
+
 private theorem foldDuetExt4_const (v : GoldilocksExt4) (twY : Goldilocks)
     (r : GoldilocksExt4) :
     foldDuetExt4 v v twY invTwoGold r = v := by
-  have hTwoInv : CommRingOps.mul (CommRingOps.add GoldilocksExt4.one GoldilocksExt4.one)
-      (GoldilocksExt4.embedBase invTwoGold) = GoldilocksExt4.one := by decide +kernel
+  have hTwoInv : CommRingOps.mul (CommRingOps.add CommRingOps.one CommRingOps.one)
+      (GoldilocksExt4.embedBase invTwoGold) = CommRingOps.one := by decide +kernel
   have hSum : CommRingOps.add v v =
-      CommRingOps.mul v (CommRingOps.add GoldilocksExt4.one GoldilocksExt4.one) := by
+      CommRingOps.mul v (CommRingOps.add CommRingOps.one CommRingOps.one) := by
     rw [LawfulCommRing.left_distrib, LawfulCommRing.mul_one]
   unfold foldDuetExt4
   dsimp only
@@ -4430,10 +4742,11 @@ theorem foldDuetExt4_encodeLinearRs8_all (a0 a1 : Goldilocks) (r : GoldilocksExt
         CommRingOps.add c0 (CommRingOps.mul (omega8Domain.getD j GoldilocksExt4.zero) c1) := by
     intro j hj
     have hjDom : j < omega8Domain.length := by simpa [omega8Domain] using hj
-    have hjEnc : j < (encodeLinearRs8 a0 a1).length := by simpa [encodeLinearRs8] using hjDom
-    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjEnc, Option.getD_some,
-        List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjDom, Option.getD_some]
-    simp [encodeLinearRs8, RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    rw [List.getD_eq_getElem?_getD, encodeLinearRs8, List.getElem?_map,
+        List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjDom]
+    simp only [Option.map_some, Option.getD_some, RoundPoly.evalCoeffs,
+      LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    rfl
   have hNeg : omega8Domain.getD (g + 4) GoldilocksExt4.zero = CommRingOps.neg wg := by
     dsimp only [wg]
     rcases g with _ | _ | _ | _ | g
@@ -4443,7 +4756,8 @@ theorem foldDuetExt4_encodeLinearRs8_all (a0 a1 : Goldilocks) (r : GoldilocksExt
     · decide +kernel
     · omega
   have hTw : CommRingOps.mul (CommRingOps.add wg wg)
-      (GoldilocksExt4.embedBase (sbox7Stage0Dom.invTwoY0 0 g)) = GoldilocksExt4.one := by
+      (GoldilocksExt4.embedBase (CommRingOps.mul invTwoGold (invOmega8Pow g))) =
+      CommRingOps.one := by
     dsimp only [wg]
     rcases g with _ | _ | _ | _ | g
     · decide +kernel
@@ -4451,12 +4765,12 @@ theorem foldDuetExt4_encodeLinearRs8_all (a0 a1 : Goldilocks) (r : GoldilocksExt
     · decide +kernel
     · decide +kernel
     · omega
-  have hTwoInv : CommRingOps.mul (CommRingOps.add GoldilocksExt4.one GoldilocksExt4.one)
-      (GoldilocksExt4.embedBase invTwoGold) = GoldilocksExt4.one := by decide +kernel
+  have hTwoInv : CommRingOps.mul (CommRingOps.add CommRingOps.one CommRingOps.one)
+      (GoldilocksExt4.embedBase invTwoGold) = CommRingOps.one := by decide +kernel
   rw [hGet g (by omega), hGet (g + 4) (by omega), hNeg]
   have hAdd : CommRingOps.add (CommRingOps.add c0 (CommRingOps.mul wg c1))
       (CommRingOps.add c0 (CommRingOps.mul (CommRingOps.neg wg) c1)) =
-      CommRingOps.mul c0 (CommRingOps.add GoldilocksExt4.one GoldilocksExt4.one) := by
+      CommRingOps.mul c0 (CommRingOps.add CommRingOps.one CommRingOps.one) := by
     rw [LawfulCommRing.neg_mul, LawfulCommRing.add_add_add_comm,
         LawfulCommRing.add_right_neg, LawfulCommRing.add_zero,
         LawfulCommRing.left_distrib, LawfulCommRing.mul_one]
@@ -4493,6 +4807,94 @@ private theorem unpack_stage_foldChallenges {rowChallenges finalWord : List Gold
   rcases Bool.and_eq_true_iff.mp h with ⟨_, c5⟩
   exact ⟨of_decide_eq_true c5, of_decide_eq_true c6⟩
 
+private theorem verifyWhirStages_length_eq {rc fw : List GoldilocksExt4} :
+    ∀ {prior : List UInt8} {ds : List WhirStageDomain} {ps : List WhirStageProof},
+      verifyWhirStages rc fw prior ds ps = true → ds.length = ps.length
+  | _, [], [], _ => rfl
+  | _, [_], [_], _ => rfl
+  | _, _ :: _ :: _, _ :: _ :: _, h => by
+    unfold verifyWhirStages at h
+    exact congrArg Nat.succ (verifyWhirStages_length_eq (Bool.and_eq_true_iff.mp h).2)
+  | _, [], _ :: _, h => Bool.noConfusion h
+  | _, [_], [], h => Bool.noConfusion h
+  | _, _ :: _ :: _, [], h => Bool.noConfusion h
+  | _, [_], _ :: _ :: _, h => Bool.noConfusion h
+  | _, _ :: _ :: _, [_], h => Bool.noConfusion h
+
+private theorem invTwoGold_mul_invOmega8Pow_zero :
+    CommRingOps.mul invTwoGold (invOmega8Pow 0) = invTwoGold := by
+  decide +kernel
+
+private theorem sbox7_sumcheck_step_complete (p : List GoldilocksExt4)
+    (r0 t : GoldilocksExt4) (hDeg : p.length ≤ 9) (hEv : RoundPoly.evalCoeffs p r0 = t) :
+    verifySumcheckChain (CommRingOps.add (RoundPoly.evalCoeffs p GoldilocksExt4.zero)
+      (RoundPoly.evalCoeffs p GoldilocksExt4.one)) [p] [r0] t = true := by
+  simp only [verifySumcheckChain, verifySumcheckChainDeg, hDeg, decide_true,
+    hEv, beq_self_eq_true, Bool.and_self]
+
+private theorem sbox7_sum_zero_sound (seed root x : Goldilocks) (c1 : GoldilocksExt4)
+    (hZero : CommRingOps.add
+      (CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one GoldilocksExt4.zero)
+        (CommRingOps.add
+          (pow7Ext4 (CommRingOps.add (GoldilocksExt4.embedBase x)
+            (CommRingOps.mul GoldilocksExt4.zero c1)))
+          (GoldilocksExt4.embedBase (CommRingOps.sub seed root))))
+      (CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one GoldilocksExt4.one)
+        (CommRingOps.add
+          (pow7Ext4 (CommRingOps.add (GoldilocksExt4.embedBase x)
+            (CommRingOps.mul GoldilocksExt4.one c1)))
+          (GoldilocksExt4.embedBase (CommRingOps.sub seed root)))) =
+      GoldilocksExt4.zero) :
+    CommRingOps.add (pow7Goldilocks x) seed = root := by
+  rw [GoldilocksExt4.zero_eq_ringZero, GoldilocksExt4.one_eq_ringOne,
+      LawfulCommRing.sub_self, LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
+      LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
+      LawfulCommRing.sub_zero, LawfulCommRing.one_mul,
+      ← embedBase_pow7, ← GoldilocksExt4.embedBase_add] at hZero
+  have hZero' : GoldilocksExt4.embedBase (CommRingOps.add (pow7Goldilocks x)
+      (CommRingOps.sub seed root)) = GoldilocksExt4.embedBase CommRingOps.zero := hZero
+  have hSubZero : CommRingOps.add (pow7Goldilocks x) (CommRingOps.sub seed root) =
+      CommRingOps.zero := GoldilocksExt4.embedBase_injective hZero'
+  apply LawfulCommRing.add_left_cancel (a := CommRingOps.neg root)
+  rw [LawfulCommRing.add_comm (CommRingOps.neg root) root,
+      LawfulCommRing.add_right_neg,
+      LawfulCommRing.add_comm (CommRingOps.neg root) _,
+      LawfulCommRing.add_assoc (pow7Goldilocks x) seed (CommRingOps.neg root),
+      ← LawfulCommRing.sub_eq_add_neg seed root]
+  exact hSubZero
+
+private theorem sbox7_sum_zero_complete (seed x0 : Goldilocks) (c1 : GoldilocksExt4) :
+    let root := CommRingOps.add (pow7Goldilocks x0) seed
+    CommRingOps.add
+      (CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one GoldilocksExt4.zero)
+        (CommRingOps.add
+          (pow7Ext4 (CommRingOps.add (GoldilocksExt4.embedBase x0)
+            (CommRingOps.mul GoldilocksExt4.zero c1)))
+          (GoldilocksExt4.embedBase (CommRingOps.sub seed root))))
+      (CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one GoldilocksExt4.one)
+        (CommRingOps.add
+          (pow7Ext4 (CommRingOps.add (GoldilocksExt4.embedBase x0)
+            (CommRingOps.mul GoldilocksExt4.one c1)))
+          (GoldilocksExt4.embedBase (CommRingOps.sub seed root)))) =
+      GoldilocksExt4.zero := by
+  intro root
+  rw [GoldilocksExt4.zero_eq_ringZero, GoldilocksExt4.one_eq_ringOne,
+      LawfulCommRing.sub_self, LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
+      LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
+      LawfulCommRing.sub_zero, LawfulCommRing.one_mul,
+      ← embedBase_pow7, ← GoldilocksExt4.embedBase_add]
+  have hBaseZero : CommRingOps.add (pow7Goldilocks x0) (CommRingOps.sub seed root) =
+      CommRingOps.zero := by
+    dsimp only [root]
+    apply LawfulCommRing.add_left_cancel (a := CommRingOps.add (pow7Goldilocks x0) seed)
+    rw [LawfulCommRing.add_zero,
+        LawfulCommRing.add_comm (pow7Goldilocks x0) (CommRingOps.sub seed _),
+        ← LawfulCommRing.add_assoc,
+        LawfulCommRing.add_sub_cancel_left,
+        LawfulCommRing.add_comm seed (pow7Goldilocks x0)]
+  rw [hBaseZero]
+  rfl
+
 /-- **Genuine Non-Trivial `RowArithmetization.Lawful` Instance (`rsSbox7TraceArith_lawful`)**:
     Proves `complete` and `sound` for the blowup-4 -> blowup-16 2-stage WHIR degree-7 S-box
     arithmetization with real Reed–Solomon codeword checks and real trace witness decoding. -/
@@ -4508,33 +4910,46 @@ theorem rsSbox7TraceArith_lawful (seed root : Goldilocks) (msg : List UInt8) :
         | cons st1 r2 =>
           cases r2 with
           | nil => exact ⟨st0, st1, rfl⟩
-          | cons _ _ => simp [rsSbox7WhirDomain] at hLen
+          | cons _ _ =>
+            exfalso
+            simp only [rsSbox7WhirDomain, List.length_cons, List.length_nil] at hLen
+            omega
     obtain ⟨st0, st1, rfl⟩ := hTblShape
+    have hLenP : rsSbox7WhirDomain.stages.length = proof.stages.length :=
+      verifyWhirStages_length_eq hVerWhir
     have hPrfShape : ∃ sp0 sp1, proof.stages = [sp0, sp1] := by
       cases hP : proof.stages with
-      | nil => rw [hP] at hVerWhir; simp [rsSbox7WhirDomain, verifyWhirStages] at hVerWhir
+      | nil => rw [hP] at hLenP; cases hLenP
       | cons sp0 r1 =>
         cases r1 with
-        | nil => rw [hP] at hVerWhir; simp [rsSbox7WhirDomain, verifyWhirStages] at hVerWhir
+        | nil => rw [hP] at hLenP; cases hLenP
         | cons sp1 r2 =>
           cases r2 with
           | nil => exact ⟨sp0, sp1, rfl⟩
           | cons _ _ =>
-            rw [hP] at hVerWhir; simp [rsSbox7WhirDomain, verifyWhirStages] at hVerWhir
+            exfalso
+            rw [hP] at hLenP
+            simp only [rsSbox7WhirDomain, List.length_cons, List.length_nil] at hLenP
+            omega
     obtain ⟨sp0, sp1, hStagesEq⟩ := hPrfShape
     rw [hStagesEq] at hVerWhir hAllCons
     simp only [rsSbox7WhirDomain, verifyWhirStages, Bool.and_eq_true] at hVerWhir
     have hFold0 := unpack_stage_foldChallenges hVerWhir.1
     have hFold1 := unpack_stage_foldChallenges hVerWhir.2
-    simp only [sbox7Stage0Dom] at hFold0
-    simp only [sbox7Stage1Dom] at hFold1
+    simp only [sbox7Stage0Dom, ↓reduceIte] at hFold0
+    simp only [sbox7Stage1Dom, Bool.false_eq_true, ↓reduceIte] at hFold1
     have hChallShape : ∃ r0, proof.agg.challenges = [r0] ∧ sp0.foldChallenges = [r0] := by
       cases hC : proof.agg.challenges with
       | nil => rw [hFold0.1, hC] at hFold0; cases hFold0.2
       | cons r0 rs =>
         cases rs with
         | nil => exact ⟨r0, rfl, by rw [hFold0.1, hC]⟩
-        | cons _ _ => rw [hFold0.1, hC] at hFold0; simp at hFold0
+        | cons _ _ =>
+          exfalso
+          have hL0 := hFold0.2
+          rw [hFold0.1, hC] at hL0
+          simp only [List.length_cons] at hL0
+          omega
     obtain ⟨r0, hChEq, hFold0Eq⟩ := hChallShape
     have hFold1Shape : ∃ α1, sp1.foldChallenges = [α1] := by
       cases hF1 : sp1.foldChallenges with
@@ -4542,7 +4957,12 @@ theorem rsSbox7TraceArith_lawful (seed root : Goldilocks) (msg : List UInt8) :
       | cons α1 αs =>
         cases αs with
         | nil => exact ⟨α1, rfl⟩
-        | cons _ _ => rw [hF1] at hFold1; simp at hFold1
+        | cons _ _ =>
+          exfalso
+          have hL1 := hFold1.2
+          rw [hF1] at hL1
+          simp only [List.length_cons] at hL1
+          omega
     obtain ⟨α1, hFold1Eq⟩ := hFold1Shape
     simp only [rsSbox7WhirDomain, AllStagesConsistent] at hAllCons
     have hCons0 := hAllCons.1 0 (by decide)
@@ -4572,45 +4992,63 @@ theorem rsSbox7TraceArith_lawful (seed root : Goldilocks) (msg : List UInt8) :
     simp only [sbox7Stage0Dom, stageTableTrajectoryOk, stageTerminalTableOk,
       expectedSlotOk, Nat.zero_mod, Nat.zero_div, Nat.zero_add, ↓reduceIte,
       Bool.and_eq_true, decide_eq_true_eq] at hCons0
-    have hTw0 : CommRingOps.mul invTwoGold (Goldilocks.inv (powGold omega8 0)) = invTwoGold := by
-      decide +kernel
-    rw [hTw0] at hCons0
-    have hT1_0 : table1.getD 0 GoldilocksExt4.zero =
+    rw [invTwoGold_mul_invOmega8Pow_zero] at hCons0
+    have hT1_0 : table1.getD 0 CommRingOps.zero =
         CommRingOps.add (recoverLinearCoeffs8 table0).1
           (CommRingOps.mul r0 (recoverLinearCoeffs8 table0).2) := hCons0.2.2
     have hCw1 : isConstExt4Rs 16 table1 = true := by
-      simpa [rsSbox7TraceArith, table1] using hAllCw 1 sbox7Stage1Dom [table1] rfl (by simp [hSt1Eq])
-    have hT1_8 : table1.getD 8 GoldilocksExt4.zero = table1.getD 0 GoldilocksExt4.zero :=
-      isConstExt4Rs_eq_head hCw1 (by decide)
+      simpa [rsSbox7TraceArith, rsSbox7TraceArithDelta, table1] using
+        hAllCw 1 sbox7Stage1Dom [table1] rfl (by simp [hSt1Eq])
+    have hT1_8 : table1.getD 8 CommRingOps.zero = table1.getD 0 CommRingOps.zero := by
+      rw [← GoldilocksExt4.zero_eq_ringZero]
+      exact isConstExt4Rs_eq_head hCw1 (by decide)
     simp only [sbox7Stage1Dom, stageTableTrajectoryOk, stageTerminalTableOk,
-      finalValueOk, expectedSlotOk, Nat.zero_mod, Nat.zero_div, Nat.zero_add,
+      finalValueOk, expectedSlotOk, Nat.zero_mod, Nat.zero_add,
       Bool.and_eq_true, decide_eq_true_eq] at hCons1
     rw [hT1_8, foldDuetExt4_const] at hCons1
     have hFinal0 : proof.finalWord.getD 0 GoldilocksExt4.zero =
         CommRingOps.add (recoverLinearCoeffs8 table0).1
           (CommRingOps.mul r0 (recoverLinearCoeffs8 table0).2) := by
-      rw [List.getD_eq_getElem?_getD, hCons1.2.2, Option.getD_some, hT1_0]
-    simp only [List.headD_cons, hSt0Eq, hChEq, adaptivePolys, adaptivePolysAux,
-      rsSbox7TraceArith, verifySumcheckChain, verifySumcheckChainDeg]
-    have hDeg := honestSbox7RoundPoly_length_le_9 seed root table0
-    have hEv := honestSbox7RoundPoly_eval seed root table0 r0
-    simp only [hDeg, decide_true, beq_self_eq_true, Bool.and_self, Bool.true_and, hFinal0]
-    exact beq_iff_eq.mpr hEv
+      rw [List.getD_eq_getElem?_getD, hCons1.2, Option.getD_some, hT1_0]
+    have hGoalEq :
+        verifySumcheckChain ((rsSbox7TraceArith seed root).honestClaim (([st0, st1].headD []).headD []))
+          (adaptivePolys ((rsSbox7TraceArith seed root).honestRound (([st0, st1].headD []).headD []))
+            proof.agg.challenges)
+          proof.agg.challenges
+          ((rsSbox7TraceArith seed root).terminal proof.finalWord proof.agg.challenges
+            (collectAllFoldChallenges proof)) =
+        verifySumcheckChain
+          (CommRingOps.add (RoundPoly.evalCoeffs (honestSbox7RoundPoly seed root table0) GoldilocksExt4.zero)
+            (RoundPoly.evalCoeffs (honestSbox7RoundPoly seed root table0) GoldilocksExt4.one))
+          [honestSbox7RoundPoly seed root table0] [r0]
+          (CommRingOps.mul (CommRingOps.sub GoldilocksExt4.one r0)
+            (CommRingOps.add (pow7Ext4 (proof.finalWord.getD 0 GoldilocksExt4.zero))
+              (GoldilocksExt4.embedBase (CommRingOps.sub seed root)))) := by
+      rw [hChEq, hSt0Eq]
+      rfl
+    rw [hGoalEq, hFinal0]
+    exact sbox7_sumcheck_step_complete (honestSbox7RoundPoly seed root table0) r0 _
+      (honestSbox7RoundPoly_length_le_9 seed root table0)
+      (honestSbox7RoundPoly_eval seed root table0 r0)
   sound table0 bitmap hCode0 hBmLen hSigsFalse := by
     cases bitmap with
-    | nil => simp [rsSbox7Inst] at hBmLen
+    | nil => cases hBmLen
     | cons b0 bs =>
       cases bs with
-      | cons _ _ => simp [rsSbox7Inst] at hBmLen
+      | cons _ _ =>
+        exfalso
+        simp only [rsSbox7Inst, List.length_cons, List.length_nil] at hBmLen
+        omega
       | nil =>
-        simp only [rsSbox7Inst, rsSbox7TraceArith, decodeSbox7Sigs,
+        simp only [rsSbox7Inst, rsSbox7TraceArith, rsSbox7TraceArithDelta, decodeSbox7Sigs,
           checkAllActiveSigners, Bool.and_true] at hSigsFalse
         cases b0 with
-        | false => simp at hSigsFalse
+        | false => nomatch hSigsFalse
         | true =>
           simp only [↓reduceIte, verifyPqHashSig_sbox7_iff, decide_eq_false_iff_not] at hSigsFalse
           have hBaseAll : table0.all GoldilocksExt4.isBase = true ∧ table0.length = 8 := by
-            simp only [RowArithmetization.isRound0Codeword, rsSbox7TraceArith, ↓reduceIte,
+            simp only [RowArithmetization.isRound0Codeword, rsSbox7TraceArith,
+              rsSbox7TraceArithDelta, ↓reduceIte,
               isLinearBaseRs8, Bool.and_eq_true, beq_iff_eq] at hCode0
             exact ⟨hCode0.1.2, hCode0.1.1⟩
           have ht0Base : GoldilocksExt4.isBase (table0.getD 0 GoldilocksExt4.zero) = true := by
@@ -4621,41 +5059,29 @@ theorem rsSbox7TraceArith_lawful (seed root : Goldilocks) (msg : List UInt8) :
             have h4Lt : 4 < table0.length := by omega
             rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem h4Lt, Option.getD_some]
             exact List.all_eq_true.mp hBaseAll.1 _ (List.getElem_mem h4Lt)
-          let c0 := (recoverLinearCoeffs8 table0).1
-          have hc0Base : c0 = GoldilocksExt4.embedBase c0.c0.c0 := by
+          have hc0Base : (recoverLinearCoeffs8 table0).1 =
+              GoldilocksExt4.embedBase (recoverLinearCoeffs8 table0).1.c0.c0 := by
             apply GoldilocksExt4.eq_embedBase_of_isBase
-            dsimp only [c0, recoverLinearCoeffs8]
+            dsimp only [recoverLinearCoeffs8]
             rw [GoldilocksExt4.eq_embedBase_of_isBase ht0Base,
                 GoldilocksExt4.eq_embedBase_of_isBase ht4Base,
                 ← GoldilocksExt4.embedBase_add, ← GoldilocksExt4.embedBase_mul]
             exact GoldilocksExt4.isBase_embedBase _
           intro hZero
-          simp only [rsSbox7TraceArith] at hZero
+          change CommRingOps.add
+            (RoundPoly.evalCoeffs (honestSbox7RoundPoly seed root table0) GoldilocksExt4.zero)
+            (RoundPoly.evalCoeffs (honestSbox7RoundPoly seed root table0) GoldilocksExt4.one) =
+            GoldilocksExt4.zero at hZero
           rw [honestSbox7RoundPoly_eval seed root table0 GoldilocksExt4.zero,
-              honestSbox7RoundPoly_eval seed root table0 GoldilocksExt4.one] at hZero
-          have hSub0 : CommRingOps.sub GoldilocksExt4.one GoldilocksExt4.zero =
-              GoldilocksExt4.one := by
-            rw [LawfulCommRing.sub_eq_add_neg]
-            decide +kernel
-          rw [LawfulCommRing.sub_self GoldilocksExt4.one,
-              LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
-              LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
-              hSub0, LawfulCommRing.one_mul] at hZero
-          change CommRingOps.add (pow7Ext4 c0)
-            (GoldilocksExt4.embedBase (CommRingOps.sub seed root)) =
-            GoldilocksExt4.embedBase Goldilocks.zero at hZero
-          rw [hc0Base, ← embedBase_pow7, ← GoldilocksExt4.embedBase_add] at hZero
-          have hBaseEq := GoldilocksExt4.embedBase_injective hZero
-          apply hSigsFalse
-          apply LawfulCommRing.add_left_cancel (a := CommRingOps.neg root)
-          rw [LawfulCommRing.add_comm (CommRingOps.neg root) root,
-              LawfulCommRing.add_right_neg,
-              LawfulCommRing.add_comm (CommRingOps.neg root) _,
-              ← LawfulCommRing.add_assoc (pow7Goldilocks c0.c0.c0) seed _,
-              ← LawfulCommRing.sub_eq_add_neg seed root]
-          exact hBaseEq
+              honestSbox7RoundPoly_eval seed root table0 GoldilocksExt4.one,
+              hc0Base] at hZero
+          exact hSigsFalse (sbox7_sum_zero_sound seed root
+            (recoverLinearCoeffs8 table0).1.c0.c0 (recoverLinearCoeffs8 table0).2 hZero)
 
 /-! ## 12. End-to-End 2-Stage WHIR Prover Witness & `#tooth` Regressions -/
+
+attribute [local irreducible] cshake256Bytes pcsMerkleHash squeezeExt4Challenge
+  deriveStageQueryIndices honestSbox7RoundPoly honestSbox7RoundPolyDelta pow7Ext4 pow7Goldilocks
 
 def hashPairLayer (H : Hash) (leafAt : Nat → List UInt8) : Nat → List UInt8 :=
   fun j => H (encodeMultiFrame [leafAt (2 * j), leafAt (2 * j + 1)])
@@ -4695,48 +5121,36 @@ theorem buildMerklePathByDepth_root (H : Hash) :
       unfold merkleNodeFrame hashPairLayer
       by_cases hPar : idx % 2 = 0
       · have e0 : 2 * (idx / 2) = idx := by omega
-        have e1 : 2 * (idx / 2) + 1 = idx + 1 := by omega
-        simp [hPar, e0, e1]
-      · have e0 : 2 * (idx / 2) = idx - 1 := by omega
-        have e1 : 2 * (idx / 2) + 1 = idx := by omega
-        simp [hPar, e0, e1]
+        simp only [hPar, ↓reduceIte, e0]
+      · have e1 : 2 * (idx / 2) + 1 = idx := by omega
+        have e0 : 2 * (idx / 2) = idx - 1 := by omega
+        simp only [hPar, ↓reduceIte]
+        rw [e1, e0]
     rw [hNode]
     exact buildMerklePathByDepth_root H d (hashPairLayer H leafAt) (idx / 2) hDiv
 
-/-- Constructive end-to-end 2-stage `GoldilocksExt4` WHIR prover for `rsSbox7TraceArith`. -/
-def buildHonestSbox7WhirBundle (seed x0 b1 : Goldilocks) (msg : List UInt8) :
-    SuccinctAggregateProof × List UInt8 × SuccinctExtractionView :=
-  let root := CommRingOps.add (pow7Goldilocks x0) seed
-  let inst := rsSbox7Inst seed root msg
+private theorem map_const_deriveStageShiftChallenges_one (prior r : List UInt8)
+    (p : List GoldilocksExt4) :
+    (deriveStageShiftChallenges prior [r] [p]).map (fun _ => [GoldilocksExt4.zero]) =
+      [[GoldilocksExt4.zero]] := rfl
+
+private theorem replicate8_getD_zero (v : GoldilocksExt4) :
+    (List.replicate 8 v).getD 0 GoldilocksExt4.zero = v := rfl
+
+private def sbox7Leaf0 (table0 : List GoldilocksExt4) (g : Nat) : List UInt8 :=
+  pcsMerkleHash (duetLeafFrame 0 0 g
+    (table0.getD g GoldilocksExt4.zero) (table0.getD (g + 4) GoldilocksExt4.zero))
+
+private def sbox7Leaf1 (table1 : List GoldilocksExt4) (g : Nat) : List UInt8 :=
+  pcsMerkleHash (duetLeafFrame 1 0 g
+    (table1.getD g GoldilocksExt4.zero) (table1.getD (g + 8) GoldilocksExt4.zero))
+
+private def sbox7Stage0Proof (x0 b1 : Goldilocks) (prior0 root1 : List UInt8)
+    (rowChalls : List GoldilocksExt4) (pr0 : GoldilocksExt4) : WhirStageProof :=
   let table0 := encodeLinearRs8 x0 b1
-  let leaf0 : Nat → List UInt8 := fun g =>
-    pcsMerkleHash (duetLeafFrame 0 0 g
-      (table0.getD g GoldilocksExt4.zero) (table0.getD (g + 4) GoldilocksExt4.zero))
+  let leaf0 := sbox7Leaf0 table0
   let root0 := buildMerkleRootByDepth pcsMerkleHash 2 leaf0
-  let pRow := honestSbox7RoundPoly seed root table0
-  let aggStub : AggregatedSignature :=
-    { suite := sbox7FieldSuite, params := sbox7Params, regime := .habr24Qrom128,
-      bitmap := [true], signerCount := 1, traceCommitment := root0,
-      claimedSum := GoldilocksExt4.zero, roundPolys := [], challenges := [],
-      terminalEval := GoldilocksExt4.zero, childrenCommitment := none }
-  let fs := aggregateInstanceFrame inst aggStub
-  let rowChalls := deriveRowSumcheckChallenges fs [pRow]
-  let r0 := rowChalls.headD GoldilocksExt4.zero
-  let pr0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
-    (CommRingOps.mul r0 (GoldilocksExt4.embedBase b1))
-  let termEval := RoundPoly.evalCoeffs pRow r0
-  let agg : AggregatedSignature :=
-    { suite := sbox7FieldSuite, params := sbox7Params, regime := .habr24Qrom128,
-      bitmap := [true], signerCount := 1, traceCommitment := root0,
-      claimedSum := GoldilocksExt4.zero, roundPolys := [pRow], challenges := rowChalls,
-      terminalEval := termEval, childrenCommitment := none }
-  let table1 := List.replicate 16 pr0
-  let leaf1 : Nat → List UInt8 := fun g =>
-    pcsMerkleHash (duetLeafFrame 1 0 g
-      (table1.getD g GoldilocksExt4.zero) (table1.getD (g + 8) GoldilocksExt4.zero))
-  let root1 := buildMerkleRootByDepth pcsMerkleHash 3 leaf1
   let finalWord := List.replicate 8 pr0
-  let prior0 := rowSumcheckTranscriptTail fs [pRow]
   let ood0 := deriveStageOodChallenge prior0 root0
   let oodEval0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
     (CommRingOps.mul ood0 (GoldilocksExt4.embedBase b1))
@@ -4750,18 +5164,23 @@ def buildHonestSbox7WhirBundle (seed x0 b1 : Goldilocks) (msg : List UInt8) :
   let pSeed0 := stagePowSeed prior0 sp0Pre (some root1) finalWord
   let qSeed0 := stageQuerySeed pSeed0 0
   let qIdx0 := deriveStageQueryIndices sbox7Stage0Dom qSeed0
+  let leaf1 := sbox7Leaf1 (List.replicate 16 pr0)
   let qs0 := qIdx0.map (fun idx =>
-    { index := idx
-      layers := [{ v0 := table0.getD idx GoldilocksExt4.zero
-                   v1 := table0.getD (idx + 4) GoldilocksExt4.zero
-                   path := buildMerklePathByDepth pcsMerkleHash 2 leaf0 idx }]
-      nextStageBridge := some
-        { v0 := pr0
-          v1 := pr0
-          path := buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx } })
-  let sp0 : WhirStageProof :=
-    { sp0Pre with shiftChallenges := shiftCh0, foldChallenges := rowChalls, queries := qs0 }
-  let prior1 := qSeed0
+    ({ index := idx
+       layers := [{ v0 := table0.getD idx GoldilocksExt4.zero
+                    v1 := table0.getD (idx + 4) GoldilocksExt4.zero
+                    path := buildMerklePathByDepth pcsMerkleHash 2 leaf0 idx }]
+       nextStageBridge := some
+         { v0 := pr0
+           v1 := pr0
+           path := buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx } } : StageQueryOpening))
+  { sp0Pre with shiftChallenges := shiftCh0, foldChallenges := rowChalls, queries := qs0 }
+
+private def sbox7Stage1Proof (prior1 : List UInt8) (pr0 : GoldilocksExt4) : WhirStageProof :=
+  let table1 := List.replicate 16 pr0
+  let leaf1 := sbox7Leaf1 table1
+  let root1 := buildMerkleRootByDepth pcsMerkleHash 3 leaf1
+  let finalWord := List.replicate 8 pr0
   let ood1 := deriveStageOodChallenge prior1 root1
   let sp1Pre : WhirStageProof :=
     { stageRoot := root1, oodChallenge := ood1, oodEval := pr0,
@@ -4774,13 +5193,300 @@ def buildHonestSbox7WhirBundle (seed x0 b1 : Goldilocks) (msg : List UInt8) :
   let qSeed1 := stageQuerySeed pSeed1 0
   let qIdx1 := deriveStageQueryIndices sbox7Stage1Dom qSeed1
   let qs1 := qIdx1.map (fun idx =>
-    { index := idx
-      layers := [{ v0 := pr0
-                   v1 := pr0
-                   path := buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx }]
-      nextStageBridge := none })
+    ({ index := idx
+       layers := [{ v0 := pr0
+                    v1 := pr0
+                    path := buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx }]
+       nextStageBridge := none } : StageQueryOpening))
+  { sp1Pre with shiftChallenges := shiftCh1, foldChallenges := shiftCh1, queries := qs1 }
+
+private theorem sbox7Stage0Proof_stageRoot (x0 b1 : Goldilocks) (prior0 root1 : List UInt8)
+    (rowChalls : List GoldilocksExt4) (pr0 : GoldilocksExt4) :
+    (sbox7Stage0Proof x0 b1 prior0 root1 rowChalls pr0).stageRoot =
+      buildMerkleRootByDepth pcsMerkleHash 2 (sbox7Leaf0 (encodeLinearRs8 x0 b1)) := rfl
+
+private theorem sbox7Stage0Proof_allRoots (x0 b1 : Goldilocks) (prior0 root1 : List UInt8)
+    (rowChalls : List GoldilocksExt4) (pr0 : GoldilocksExt4) :
+    stageAllRoots (sbox7Stage0Proof x0 b1 prior0 root1 rowChalls pr0) =
+      [buildMerkleRootByDepth pcsMerkleHash 2 (sbox7Leaf0 (encodeLinearRs8 x0 b1))] := rfl
+
+private theorem sbox7Stage1Proof_stageRoot (prior1 : List UInt8) (pr0 : GoldilocksExt4) :
+    (sbox7Stage1Proof prior1 pr0).stageRoot =
+      buildMerkleRootByDepth pcsMerkleHash 3 (sbox7Leaf1 (List.replicate 16 pr0)) := rfl
+
+private theorem sbox7Stage1Proof_allRoots (prior1 : List UInt8) (pr0 : GoldilocksExt4) :
+    stageAllRoots (sbox7Stage1Proof prior1 pr0) =
+      [buildMerkleRootByDepth pcsMerkleHash 3 (sbox7Leaf1 (List.replicate 16 pr0))] := rfl
+
+private theorem verifyOneWhirStage_sbox7Stage0Proof (x0 b1 : Goldilocks)
+    (prior0 : List UInt8) (rowChalls : List GoldilocksExt4) (r0 : GoldilocksExt4)
+    (hRowChallsEq : rowChalls = [r0]) :
+    let pr0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
+      (CommRingOps.mul r0 (GoldilocksExt4.embedBase b1))
+    let root1 := buildMerkleRootByDepth pcsMerkleHash 3 (sbox7Leaf1 (List.replicate 16 pr0))
+    verifyOneWhirStage rowChalls (List.replicate 8 pr0) prior0 sbox7Stage0Dom
+      (sbox7Stage0Proof x0 b1 prior0 root1 rowChalls pr0)
+      (some (sbox7Stage1Dom, root1)) = true := by
+  intro pr0 root1
+  let table0 := encodeLinearRs8 x0 b1
+  let leaf0 := sbox7Leaf0 table0
+  let root0 := buildMerkleRootByDepth pcsMerkleHash 2 leaf0
+  let finalWord := List.replicate 8 pr0
+  let ood0 := deriveStageOodChallenge prior0 root0
+  let oodEval0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
+    (CommRingOps.mul ood0 (GoldilocksExt4.embedBase b1))
+  let sp0Pre : WhirStageProof :=
+    { stageRoot := root0, oodChallenge := ood0, oodEval := oodEval0,
+      shiftClaim := GoldilocksExt4.zero, shiftPolys := [[GoldilocksExt4.zero]],
+      layerRoots := [], shiftChallenges := [], foldChallenges := [],
+      shiftTerminalEval := GoldilocksExt4.zero, powNonce := 0, queries := [] }
+  let shiftCh0 := deriveStageShiftChallenges (stagePostOodTranscript prior0 sp0Pre)
+    [root0] [[GoldilocksExt4.zero]]
+  let pSeed0 := stagePowSeed prior0 sp0Pre (some root1) finalWord
+  let qSeed0 := stageQuerySeed pSeed0 0
+  let qIdx0 := deriveStageQueryIndices sbox7Stage0Dom qSeed0
+  let table1 := List.replicate 16 pr0
+  let leaf1 := sbox7Leaf1 table1
+  let qs0 := qIdx0.map (fun idx =>
+    ({ index := idx
+       layers := [{ v0 := table0.getD idx GoldilocksExt4.zero
+                    v1 := table0.getD (idx + 4) GoldilocksExt4.zero
+                    path := buildMerklePathByDepth pcsMerkleHash 2 leaf0 idx }]
+       nextStageBridge := some
+         { v0 := pr0
+           v1 := pr0
+           path := buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx } } : StageQueryOpening))
+  let sp0 : WhirStageProof :=
+    { sp0Pre with shiftChallenges := shiftCh0, foldChallenges := rowChalls, queries := qs0 }
+  change verifyOneWhirStage rowChalls finalWord prior0 sbox7Stage0Dom sp0
+    (some (sbox7Stage1Dom, root1)) = true
+  have hTable1Get : ∀ j, j < 16 → table1.getD j GoldilocksExt4.zero = pr0 := by
+    intro j hj
+    have hjLt : j < table1.length := by simpa [table1] using hj
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjLt, Option.getD_some]
+    exact List.getElem_replicate hjLt
+  have hDepth4 : merkleDepth 4 = 2 := rfl
+  have hDepth8 : merkleDepth 8 = 3 := rfl
+  unfold verifyOneWhirStage
+  dsimp only [Option.map]
+  have hPowSeed0 : stagePowSeed prior0 sp0 (some root1) finalWord = pSeed0 := rfl
+  have hQSeed0 : stageQuerySeed pSeed0 sp0.powNonce = qSeed0 := rfl
+  have hOod0 : sp0.oodChallenge = deriveStageOodChallenge prior0 sp0.stageRoot := rfl
+  have hRootsLen0 : (stageAllRoots sp0).length = sbox7Stage0Dom.foldLayers := rfl
+  have hPolysLen0 : sp0.shiftPolys.length = sbox7Stage0Dom.foldLayers := rfl
+  have hShiftCh0 : sp0.shiftChallenges =
+      deriveStageShiftChallenges (stagePostOodTranscript prior0 sp0)
+        (stageAllRoots sp0) sp0.shiftPolys := rfl
+  have hFoldCh0 : sp0.foldChallenges =
+      (if sbox7Stage0Dom.bindRowChallenges then rowChalls else sp0.shiftChallenges) := rfl
+  have hFoldLen0 : sp0.foldChallenges.length = sbox7Stage0Dom.foldLayers := by
+    dsimp only [sp0, sbox7Stage0Dom]
+    rw [hRowChallsEq]
+    rfl
+  have hShiftOk0 : verifyShiftSumcheckChain sp0.shiftClaim sp0.shiftPolys
+      sp0.shiftChallenges sp0.shiftTerminalEval = true := by
+    dsimp only [sp0, sp0Pre]
+    rw [← map_const_deriveStageShiftChallenges_one (stagePostOodTranscript prior0 sp0Pre)
+      root0 [GoldilocksExt4.zero]]
+    exact verifySumcheckChainDeg_zeroPolys 2 shiftCh0
+  have hPowOk0 : verifyWhirStagePow (stagePowDigest pSeed0) sp0.powNonce
+      sbox7Stage0Dom.powBits = true := rfl
+  have hQp0 := deriveStageQueryIndices_props sbox7Stage0Dom qSeed0 (by decide)
+  have hMapIdx0 : sp0.queries.map (·.index) = qIdx0 := by
+    dsimp only [sp0, qs0]
+    rw [List.map_map]
+    exact List.map_id _
+  have hQIdx0Eq : qIdx0 = deriveStageQueryIndices sbox7Stage0Dom qSeed0 := rfl
+  have hLenQs0 : sp0.queries.length = min sbox7Stage0Dom.numQueries sbox7Stage0Dom.groups0 := by
+    dsimp only [sp0, qs0]
+    rw [List.length_map]
+    exact hQp0.2.1
+  rw [hPowSeed0, hQSeed0, decide_eq_true hOod0, decide_eq_true hRootsLen0,
+      decide_eq_true hPolysLen0, decide_eq_true hShiftCh0, decide_eq_true hFoldCh0,
+      decide_eq_true hFoldLen0, hShiftOk0, hPowOk0, hMapIdx0, decide_eq_true hQIdx0Eq,
+      hQp0.1, decide_eq_true hLenQs0]
+  simp only [Bool.true_and]
+  have hRoots0 : stageAllRoots sp0 = [root0] := rfl
+  have hFold0Eq : sp0.foldChallenges = [r0] := hRowChallsEq
+  rw [hRoots0, hFold0Eq]
+  dsimp only [sp0, qs0]
+  apply List.all_eq_true.mpr
+  intro q hq
+  obtain ⟨idx, hIdxMem, rfl⟩ := List.mem_map.mp hq
+  have hIdxLt : idx < 4 := hQp0.2.2 idx hIdxMem
+  have hMod4 : idx % 4 = idx := Nat.mod_eq_of_lt hIdxLt
+  have hMod8 : idx % 8 = idx := Nat.mod_eq_of_lt (by omega)
+  have hDiv8 : idx / 8 = 0 := Nat.div_eq_of_lt (by omega)
+  have hFoldIdx : foldDuetExt4 (table0.getD idx GoldilocksExt4.zero)
+      (table0.getD (idx + 4) GoldilocksExt4.zero)
+      (CommRingOps.mul invTwoGold (invOmega8Pow idx)) invTwoGold r0 = pr0 :=
+    foldDuetExt4_encodeLinearRs8_all x0 b1 r0 hIdxLt
+  have hRootPath0 : merklePathRoot pcsMerkleHash (leaf0 idx) idx
+      (buildMerklePathByDepth pcsMerkleHash 2 leaf0 idx) = root0 :=
+    buildMerklePathByDepth_root pcsMerkleHash 2 leaf0 idx hIdxLt
+  have hLenPath0 := buildMerklePathByDepth_length pcsMerkleHash 2 leaf0 idx
+  have hRootPath1 : merklePathRoot pcsMerkleHash (leaf1 idx) idx
+      (buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx) = root1 :=
+    buildMerklePathByDepth_root pcsMerkleHash 3 leaf1 idx (by omega)
+  have hLenPath1 := buildMerklePathByDepth_length pcsMerkleHash 3 leaf1 idx
+  have hLeaf0Eq : pcsMerkleHash (duetLeafFrame 0 0 idx (table0.getD idx GoldilocksExt4.zero)
+      (table0.getD (idx + 4) GoldilocksExt4.zero)) = leaf0 idx := rfl
+  have hLeaf1Eq : pcsMerkleHash (duetLeafFrame 1 0 idx pr0 pr0) = leaf1 idx := by
+    dsimp only [leaf1, sbox7Leaf1]
+    rw [hTable1Get idx (by omega), hTable1Get (idx + 8) (by omega)]
+  have h4Pos : (0 : Nat) < 4 := by decide
+  have h8Pos : (0 : Nat) < 8 := by decide
+  simp only [sbox7Stage0Dom, sbox7Stage1Dom, hIdxLt, h4Pos, h8Pos, decide_true, Bool.true_and,
+    verifyStageTrajectory, verifyStageTerminalTarget, expectedSlotOk,
+    hMod4, hMod8, hDiv8, hDepth4, hDepth8, hLenPath0, hLenPath1, ↓reduceIte]
+  rw [hLeaf0Eq, hRootPath0, hFoldIdx, hLeaf1Eq, hRootPath1]
+  simp
+
+private theorem verifyOneWhirStage_sbox7Stage1Proof (rowChalls : List GoldilocksExt4)
+    (prior1 : List UInt8) (pr0 : GoldilocksExt4) :
+    verifyOneWhirStage rowChalls (List.replicate 8 pr0) prior1 sbox7Stage1Dom
+      (sbox7Stage1Proof prior1 pr0) none = true := by
+  let table1 := List.replicate 16 pr0
+  let leaf1 := sbox7Leaf1 table1
+  let root1 := buildMerkleRootByDepth pcsMerkleHash 3 leaf1
+  let finalWord := List.replicate 8 pr0
+  let ood1 := deriveStageOodChallenge prior1 root1
+  let sp1Pre : WhirStageProof :=
+    { stageRoot := root1, oodChallenge := ood1, oodEval := pr0,
+      shiftClaim := GoldilocksExt4.zero, shiftPolys := [[GoldilocksExt4.zero]],
+      layerRoots := [], shiftChallenges := [], foldChallenges := [],
+      shiftTerminalEval := GoldilocksExt4.zero, powNonce := 0, queries := [] }
+  let shiftCh1 := deriveStageShiftChallenges (stagePostOodTranscript prior1 sp1Pre)
+    [root1] [[GoldilocksExt4.zero]]
+  let pSeed1 := stagePowSeed prior1 sp1Pre none finalWord
+  let qSeed1 := stageQuerySeed pSeed1 0
+  let qIdx1 := deriveStageQueryIndices sbox7Stage1Dom qSeed1
+  let qs1 := qIdx1.map (fun idx =>
+    ({ index := idx
+       layers := [{ v0 := pr0
+                    v1 := pr0
+                    path := buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx }]
+       nextStageBridge := none } : StageQueryOpening))
   let sp1 : WhirStageProof :=
     { sp1Pre with shiftChallenges := shiftCh1, foldChallenges := shiftCh1, queries := qs1 }
+  change verifyOneWhirStage rowChalls finalWord prior1 sbox7Stage1Dom sp1 none = true
+  have hTable1Get : ∀ j, j < 16 → table1.getD j GoldilocksExt4.zero = pr0 := by
+    intro j hj
+    have hjLt : j < table1.length := by simpa [table1] using hj
+    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjLt, Option.getD_some]
+    exact List.getElem_replicate hjLt
+  have hFinalGet : ∀ j, j < 8 → finalWord[j]? = some pr0 := by
+    intro j hj
+    have hjLt : j < finalWord.length := by simpa [finalWord] using hj
+    rw [List.getElem?_eq_getElem hjLt, List.getElem_replicate]
+  have hDepth8 : merkleDepth 8 = 3 := rfl
+  unfold verifyOneWhirStage
+  dsimp only [Option.map]
+  have hPowSeed1 : stagePowSeed prior1 sp1 none finalWord = pSeed1 := rfl
+  have hQSeed1 : stageQuerySeed pSeed1 sp1.powNonce = qSeed1 := rfl
+  have hOod1 : sp1.oodChallenge = deriveStageOodChallenge prior1 sp1.stageRoot := rfl
+  have hRootsLen1 : (stageAllRoots sp1).length = sbox7Stage1Dom.foldLayers := rfl
+  have hPolysLen1 : sp1.shiftPolys.length = sbox7Stage1Dom.foldLayers := rfl
+  have hShiftCh1 : sp1.shiftChallenges =
+      deriveStageShiftChallenges (stagePostOodTranscript prior1 sp1)
+        (stageAllRoots sp1) sp1.shiftPolys := rfl
+  have hFoldCh1 : sp1.foldChallenges =
+      (if sbox7Stage1Dom.bindRowChallenges then rowChalls else sp1.shiftChallenges) := rfl
+  have hFoldLen1 : sp1.foldChallenges.length = sbox7Stage1Dom.foldLayers := rfl
+  have hShiftOk1 : verifyShiftSumcheckChain sp1.shiftClaim sp1.shiftPolys
+      sp1.shiftChallenges sp1.shiftTerminalEval = true := by
+    dsimp only [sp1, sp1Pre]
+    rw [← map_const_deriveStageShiftChallenges_one (stagePostOodTranscript prior1 sp1Pre)
+      root1 [GoldilocksExt4.zero]]
+    exact verifySumcheckChainDeg_zeroPolys 2 shiftCh1
+  have hPowOk1 : verifyWhirStagePow (stagePowDigest pSeed1) sp1.powNonce
+      sbox7Stage1Dom.powBits = true := rfl
+  have hQp1 := deriveStageQueryIndices_props sbox7Stage1Dom qSeed1 (by decide)
+  have hMapIdx1 : sp1.queries.map (·.index) = qIdx1 := by
+    dsimp only [sp1, qs1]
+    rw [List.map_map]
+    exact List.map_id _
+  have hQIdx1Eq : qIdx1 = deriveStageQueryIndices sbox7Stage1Dom qSeed1 := rfl
+  have hLenQs1 : sp1.queries.length = min sbox7Stage1Dom.numQueries sbox7Stage1Dom.groups0 := by
+    dsimp only [sp1, qs1]
+    rw [List.length_map]
+    exact hQp1.2.1
+  rw [hPowSeed1, hQSeed1, decide_eq_true hOod1, decide_eq_true hRootsLen1,
+      decide_eq_true hPolysLen1, decide_eq_true hShiftCh1, decide_eq_true hFoldCh1,
+      decide_eq_true hFoldLen1, hShiftOk1, hPowOk1, hMapIdx1, decide_eq_true hQIdx1Eq,
+      hQp1.1, decide_eq_true hLenQs1]
+  simp only [Bool.true_and]
+  let α1 := shiftCh1.headD GoldilocksExt4.zero
+  have hRoots1 : stageAllRoots sp1 = [root1] := rfl
+  have hFold1Eq : sp1.foldChallenges = [α1] := rfl
+  rw [hRoots1, hFold1Eq]
+  dsimp only [sp1, qs1]
+  apply List.all_eq_true.mpr
+  intro q hq
+  obtain ⟨idx, hIdxMem, rfl⟩ := List.mem_map.mp hq
+  have hIdxLt : idx < 8 := hQp1.2.2 idx hIdxMem
+  have hMod8 : idx % 8 = idx := Nat.mod_eq_of_lt hIdxLt
+  have hRootPath1 : merklePathRoot pcsMerkleHash (leaf1 idx) idx
+      (buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx) = root1 :=
+    buildMerklePathByDepth_root pcsMerkleHash 3 leaf1 idx hIdxLt
+  have hLenPath1 := buildMerklePathByDepth_length pcsMerkleHash 3 leaf1 idx
+  have hLeaf1Eq : pcsMerkleHash (duetLeafFrame 1 0 idx pr0 pr0) = leaf1 idx := by
+    dsimp only [leaf1, sbox7Leaf1]
+    rw [hTable1Get idx (by omega), hTable1Get (idx + 8) (by omega)]
+  have h8Pos : (0 : Nat) < 8 := by decide
+  simp only [sbox7Stage1Dom, hIdxLt, h8Pos, decide_true, Bool.true_and, verifyStageTrajectory,
+    verifyStageTerminalTarget, finalValueOk, expectedSlotOk,
+    hMod8, hDepth8, hLenPath1, foldDuetExt4_const]
+  rw [hLeaf1Eq, hRootPath1, hFinalGet idx hIdxLt]
+  simp
+
+private theorem aggregateInstanceFrame_congr (inst : AggPublicInstance)
+    (a b : AggregatedSignature)
+    (h1 : a.bitmap = b.bitmap) (h2 : a.traceCommitment = b.traceCommitment)
+    (h3 : a.childrenCommitment = b.childrenCommitment) :
+    aggregateInstanceFrame inst a = aggregateInstanceFrame inst b := by
+  unfold aggregateInstanceFrame
+  rw [h1, h2, h3]
+
+attribute [local irreducible] sbox7Stage0Proof sbox7Stage1Proof
+  buildMerkleRootByDepth buildMerklePathByDepth encodeLinearRs8
+  aggregateInstanceFrame rowSumcheckTranscriptTail stagePowSeed stageQuerySeed
+  Goldilocks.add Goldilocks.mul Goldilocks.sub Goldilocks.neg
+  GoldilocksExt2.add GoldilocksExt2.mul GoldilocksExt2.sub GoldilocksExt2.neg
+  GoldilocksExt4.add GoldilocksExt4.mul GoldilocksExt4.sub GoldilocksExt4.neg
+
+/-- Constructive end-to-end 2-stage `GoldilocksExt4` WHIR prover for `rsSbox7TraceArith`. -/
+def buildHonestSbox7WhirBundle (seed x0 b1 : Goldilocks) (msg : List UInt8) :
+    SuccinctAggregateProof × List UInt8 × SuccinctExtractionView :=
+  let root := CommRingOps.add (pow7Goldilocks x0) seed
+  let inst := rsSbox7Inst seed root msg
+  let table0 := encodeLinearRs8 x0 b1
+  let leaf0 := sbox7Leaf0 table0
+  let root0 := buildMerkleRootByDepth pcsMerkleHash 2 leaf0
+  let pRow := honestSbox7RoundPoly seed root table0
+  let aggStub : AggregatedSignature :=
+    { suite := sbox7FieldSuite, params := sbox7Params, regime := .habr24Qrom128,
+      bitmap := [true], signerCount := 1, traceCommitment := root0,
+      claimedSum := GoldilocksExt4.zero, roundPolys := [], challenges := [],
+      terminalEval := GoldilocksExt4.zero, childrenCommitment := none }
+  let fs := aggregateInstanceFrame inst aggStub
+  let rowChalls := deriveRowSumcheckChallenges fs [pRow]
+  let r0 := rowChalls.headD GoldilocksExt4.zero
+  let pr0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
+    (CommRingOps.mul r0 (GoldilocksExt4.embedBase b1))
+  let agg : AggregatedSignature :=
+    { suite := sbox7FieldSuite, params := sbox7Params, regime := .habr24Qrom128,
+      bitmap := [true], signerCount := 1, traceCommitment := root0,
+      claimedSum := GoldilocksExt4.zero, roundPolys := [pRow], challenges := rowChalls,
+      terminalEval := RoundPoly.evalCoeffs pRow r0, childrenCommitment := none }
+  let table1 := List.replicate 16 pr0
+  let leaf1 := sbox7Leaf1 table1
+  let root1 := buildMerkleRootByDepth pcsMerkleHash 3 leaf1
+  let finalWord := List.replicate 8 pr0
+  let prior0 := rowSumcheckTranscriptTail fs [pRow]
+  let sp0 := sbox7Stage0Proof x0 b1 prior0 root1 rowChalls pr0
+  let prior1 := stageQuerySeed (stagePowSeed prior0 sp0 (some root1) finalWord) sp0.powNonce
+  let sp1 := sbox7Stage1Proof prior1 pr0
   let authPath : Nat → Nat → Nat → List (List UInt8) := fun stIdx _ g =>
     if stIdx = 0 then buildMerklePathByDepth pcsMerkleHash 2 leaf0 g
     else buildMerklePathByDepth pcsMerkleHash 3 leaf1 g
@@ -4794,17 +5500,14 @@ def buildHonestSbox7WhirBundle (seed x0 b1 : Goldilocks) (msg : List UInt8) :
     axioms or shortcuts. -/
 theorem honestSbox7WhirProof_accepts (seed x0 b1 : Goldilocks) (msg : List UInt8) :
     let root := CommRingOps.add (pow7Goldilocks x0) seed
-    let (proof, fs, view) := buildHonestSbox7WhirBundle seed x0 b1 msg
+    let bundle := buildHonestSbox7WhirBundle seed x0 b1 msg
     verifySuccinctAggregate (rsSbox7TraceArith seed root) rsSbox7WhirDomain
-      (rsSbox7Inst seed root msg) proof fs = true ∧
-    StagesBound view.authPath rsSbox7WhirDomain.stages view.allTables proof.stages := by
-  intro root
-  dsimp only [buildHonestSbox7WhirBundle]
+      (rsSbox7Inst seed root msg) bundle.1 bundle.2.1 = true ∧
+    StagesBound bundle.2.2.authPath rsSbox7WhirDomain.stages bundle.2.2.allTables bundle.1.stages := by
+  intro root bundle
   let inst := rsSbox7Inst seed root msg
   let table0 := encodeLinearRs8 x0 b1
-  let leaf0 : Nat → List UInt8 := fun g =>
-    pcsMerkleHash (duetLeafFrame 0 0 g
-      (table0.getD g GoldilocksExt4.zero) (table0.getD (g + 4) GoldilocksExt4.zero))
+  let leaf0 := sbox7Leaf0 table0
   let root0 := buildMerkleRootByDepth pcsMerkleHash 2 leaf0
   let pRow := honestSbox7RoundPoly seed root table0
   let aggStub : AggregatedSignature :=
@@ -4817,223 +5520,87 @@ theorem honestSbox7WhirProof_accepts (seed x0 b1 : Goldilocks) (msg : List UInt8
   let r0 := rowChalls.headD GoldilocksExt4.zero
   let pr0 := CommRingOps.add (GoldilocksExt4.embedBase x0)
     (CommRingOps.mul r0 (GoldilocksExt4.embedBase b1))
+  let agg : AggregatedSignature :=
+    { suite := sbox7FieldSuite, params := sbox7Params, regime := .habr24Qrom128,
+      bitmap := [true], signerCount := 1, traceCommitment := root0,
+      claimedSum := GoldilocksExt4.zero, roundPolys := [pRow], challenges := rowChalls,
+      terminalEval := RoundPoly.evalCoeffs pRow r0, childrenCommitment := none }
   let table1 := List.replicate 16 pr0
-  let leaf1 : Nat → List UInt8 := fun g =>
-    pcsMerkleHash (duetLeafFrame 1 0 g
-      (table1.getD g GoldilocksExt4.zero) (table1.getD (g + 8) GoldilocksExt4.zero))
+  let leaf1 := sbox7Leaf1 table1
   let root1 := buildMerkleRootByDepth pcsMerkleHash 3 leaf1
   let finalWord := List.replicate 8 pr0
+  let prior0 := rowSumcheckTranscriptTail fs [pRow]
+  let sp0 := sbox7Stage0Proof x0 b1 prior0 root1 rowChalls pr0
+  let prior1 := stageQuerySeed (stagePowSeed prior0 sp0 (some root1) finalWord) sp0.powNonce
+  let sp1 := sbox7Stage1Proof prior1 pr0
+  let authPath : Nat → Nat → Nat → List (List UInt8) := fun stIdx _ g =>
+    if stIdx = 0 then buildMerklePathByDepth pcsMerkleHash 2 leaf0 g
+    else buildMerklePathByDepth pcsMerkleHash 3 leaf1 g
+  change verifySuccinctAggregate (rsSbox7TraceArith seed root) rsSbox7WhirDomain
+      inst { agg := agg, stages := [sp0, sp1], finalWord := finalWord } fs = true ∧
+    StagesBound authPath rsSbox7WhirDomain.stages [[table0], [table1]] [sp0, sp1]
   have hRowChallsEq : rowChalls = [r0] := rfl
   have hRec0 := (isLinearBaseRs8_encodeLinearRs8 x0 b1).2
   have hSumZero : CommRingOps.add (RoundPoly.evalCoeffs pRow GoldilocksExt4.zero)
       (RoundPoly.evalCoeffs pRow GoldilocksExt4.one) = GoldilocksExt4.zero := by
-    dsimp only [pRow]
-    rw [honestSbox7RoundPoly_eval seed root table0 GoldilocksExt4.zero,
-        honestSbox7RoundPoly_eval seed root table0 GoldilocksExt4.one, hRec0]
-    have hSub0 : CommRingOps.sub GoldilocksExt4.one GoldilocksExt4.zero =
-        GoldilocksExt4.one := by
-      rw [LawfulCommRing.sub_eq_add_neg]; decide +kernel
-    rw [LawfulCommRing.sub_self GoldilocksExt4.one,
-        LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
-        LawfulCommRing.zero_mul, LawfulCommRing.add_zero,
-        hSub0, LawfulCommRing.one_mul, ← embedBase_pow7, ← GoldilocksExt4.embedBase_add]
-    have hBaseZero : CommRingOps.add (pow7Goldilocks x0) (CommRingOps.sub seed root) =
-        Goldilocks.zero := by
-      dsimp only [root]
-      apply LawfulCommRing.add_left_cancel (a := CommRingOps.add (pow7Goldilocks x0) seed)
-      rw [LawfulCommRing.add_zero,
-          LawfulCommRing.add_comm (pow7Goldilocks x0) (CommRingOps.sub seed _),
-          ← LawfulCommRing.add_assoc,
-          LawfulCommRing.add_comm (CommRingOps.add (pow7Goldilocks x0) seed) seed,
-          LawfulCommRing.add_sub_cancel_left,
-          LawfulCommRing.add_comm seed (pow7Goldilocks x0)]
-    rw [hBaseZero]
-    rfl
-  have hTermEq : RoundPoly.evalCoeffs pRow r0 =
-      (rsSbox7TraceArith seed root).terminal finalWord rowChalls
-        (rowChalls ++ [squeezeExt4Challenge "QSAG.AGG.WHIR.FOLD/v2".toUTF8.toList
-          (encodeMultiFrame [stagePostOodTranscript
-            (stageQuerySeed (stagePowSeed (rowSumcheckTranscriptTail fs [pRow])
-              { stageRoot := root0,
-                oodChallenge := deriveStageOodChallenge (rowSumcheckTranscriptTail fs [pRow]) root0,
-                oodEval := CommRingOps.add (GoldilocksExt4.embedBase x0)
-                  (CommRingOps.mul (deriveStageOodChallenge (rowSumcheckTranscriptTail fs [pRow]) root0)
-                    (GoldilocksExt4.embedBase b1)),
-                shiftClaim := GoldilocksExt4.zero, shiftPolys := [[GoldilocksExt4.zero]],
-                layerRoots := [], shiftChallenges := [], foldChallenges := [],
-                shiftTerminalEval := GoldilocksExt4.zero, powNonce := 0, queries := [] }
-              (some root1) finalWord) 0)
-            { stageRoot := root1,
-              oodChallenge := deriveStageOodChallenge
-                (stageQuerySeed (stagePowSeed (rowSumcheckTranscriptTail fs [pRow])
-                  { stageRoot := root0,
-                    oodChallenge := deriveStageOodChallenge (rowSumcheckTranscriptTail fs [pRow]) root0,
-                    oodEval := CommRingOps.add (GoldilocksExt4.embedBase x0)
-                      (CommRingOps.mul (deriveStageOodChallenge (rowSumcheckTranscriptTail fs [pRow]) root0)
-                        (GoldilocksExt4.embedBase b1)),
-                    shiftClaim := GoldilocksExt4.zero, shiftPolys := [[GoldilocksExt4.zero]],
-                    layerRoots := [], shiftChallenges := [], foldChallenges := [],
-                    shiftTerminalEval := GoldilocksExt4.zero, powNonce := 0, queries := [] }
-                  (some root1) finalWord) 0) root1,
-              oodEval := pr0, shiftClaim := GoldilocksExt4.zero,
-              shiftPolys := [[GoldilocksExt4.zero]], layerRoots := [], shiftChallenges := [],
-              foldChallenges := [], shiftTerminalEval := GoldilocksExt4.zero,
-              powNonce := 0, queries := [] },
-            root1, encodePolyExt4 [GoldilocksExt4.zero]])]) := by
-    dsimp only [pRow, rsSbox7TraceArith, finalWord]
-    rw [honestSbox7RoundPoly_eval seed root table0 r0, hRec0]
-    simp [List.replicate_succ]
-  have hTable1Get : ∀ j, j < 16 → table1.getD j GoldilocksExt4.zero = pr0 := by
-    intro j hj
-    have hjLt : j < table1.length := by simpa [table1] using hj
-    rw [List.getD_eq_getElem?_getD, List.getElem?_eq_getElem hjLt, Option.getD_some]
-    exact List.getElem_replicate hjLt
-  have hFinalGet : ∀ j, j < 8 → finalWord[j]? = some pr0 := by
-    intro j hj
-    have hjLt : j < finalWord.length := by simpa [finalWord] using hj
-    rw [List.getElem?_eq_getElem hjLt, List.getElem_replicate]
+    dsimp only [pRow, table0]
+    rw [honestSbox7RoundPoly_eval seed root (encodeLinearRs8 x0 b1) GoldilocksExt4.zero,
+        honestSbox7RoundPoly_eval seed root (encodeLinearRs8 x0 b1) GoldilocksExt4.one, hRec0]
+    exact sbox7_sum_zero_complete seed x0 (GoldilocksExt4.embedBase b1)
   have hDepth4 : merkleDepth 4 = 2 := rfl
   have hDepth8 : merkleDepth 8 = 3 := rfl
-  have hBound : StagesBound
-      (fun stIdx _ g =>
-        if stIdx = 0 then buildMerklePathByDepth pcsMerkleHash 2 leaf0 g
-        else buildMerklePathByDepth pcsMerkleHash 3 leaf1 g)
-      rsSbox7WhirDomain.stages [[table0], [table1]] _ := by
-    refine ⟨by simp, ⟨?_, trivial⟩, by simp, ⟨?_, trivial⟩, trivial⟩
+  have hBound : StagesBound authPath rsSbox7WhirDomain.stages [[table0], [table1]] [sp0, sp1] := by
+    simp only [StagesBound, rsSbox7WhirDomain, sp0, sp1]
+    rw [sbox7Stage0Proof_allRoots, sbox7Stage1Proof_allRoots]
+    refine ⟨List.cons_ne_nil _ _, ⟨?_, trivial⟩, List.cons_ne_nil _ _, ⟨?_, trivial⟩, trivial⟩
     · intro g hg
       have hg4 : g < 2 ^ 2 := hg
-      simp only [sbox7Stage0Dom, ↓reduceIte, hDepth4]
+      dsimp only [authPath, sbox7Stage0Dom]
+      simp only [↓reduceIte, hDepth4]
       exact ⟨buildMerklePathByDepth_root pcsMerkleHash 2 leaf0 g hg4,
         buildMerklePathByDepth_length pcsMerkleHash 2 leaf0 g⟩
     · intro g hg
       have hg8 : g < 2 ^ 3 := hg
-      simp only [sbox7Stage1Dom, Nat.one_ne_zero, ↓reduceIte, hDepth8]
+      dsimp only [authPath, sbox7Stage1Dom]
+      simp only [Nat.one_ne_zero, ↓reduceIte, hDepth8]
       exact ⟨buildMerklePathByDepth_root pcsMerkleHash 3 leaf1 g hg8,
         buildMerklePathByDepth_length pcsMerkleHash 3 leaf1 g⟩
   refine ⟨?_, hBound⟩
   unfold verifySuccinctAggregate
-  dsimp only [collectAllFoldChallenges, List.flatMap_cons, List.flatMap_nil, List.append_nil]
-  have hFs : fs = aggregateInstanceFrame inst _ := rfl
-  have hAlgOk : verifyAggregateAlgebra inst.committee _ = true := by
+  dsimp only
+  have hFs : fs = aggregateInstanceFrame inst agg :=
+    aggregateInstanceFrame_congr inst aggStub agg rfl rfl rfl
+  have hReg : agg.regime = inst.regime := rfl
+  have hRoot : sp0.stageRoot = agg.traceCommitment :=
+    sbox7Stage0Proof_stageRoot x0 b1 prior0 root1 rowChalls pr0
+  have hCh : agg.challenges = deriveRowSumcheckChallenges fs agg.roundPolys := rfl
+  have hScOk : verifySumcheckChain GoldilocksExt4.zero [pRow] rowChalls
+      (RoundPoly.evalCoeffs pRow r0) = true := by
+    rw [hRowChallsEq, ← hSumZero]
+    exact sbox7_sumcheck_step_complete pRow r0 (RoundPoly.evalCoeffs pRow r0)
+      (honestSbox7RoundPoly_length_le_9 seed root table0) rfl
+  have hAlgOk : verifyAggregateAlgebra inst.committee agg = true := by
     unfold verifyAggregateAlgebra
-    simp only [inst, rsSbox7Inst, bitmapPopcountSpec, List.length_cons, List.length_nil,
-      beq_self_eq_true, Nat.lt_one_iff, pos_iff_ne_zero, ne_eq, Nat.one_ne_zero,
-      not_false_eq_true, decide_true, Bool.and_self, Bool.true_and,
-      verifySumcheckChain, verifySumcheckChainDeg]
-    have hDeg := honestSbox7RoundPoly_length_le_9 seed root table0
-    simp [pRow, hRowChallsEq, hDeg, hSumZero]
+    dsimp only [inst, rsSbox7Inst, agg, List.length_cons, List.length_nil, bitmapPopcountSpec]
+    rw [hScOk, beq_self_eq_true]
+    rfl
+  have hTermEq : agg.terminalEval =
+      (rsSbox7TraceArith seed root).terminal finalWord agg.challenges
+        (collectAllFoldChallenges { agg := agg, stages := [sp0, sp1], finalWord := finalWord }) := by
+    dsimp only [agg, rsSbox7TraceArith, rsSbox7TraceArithDelta, finalWord]
+    rw [replicate8_getD_zero pr0]
+    dsimp only [pRow, table0, r0, pr0]
+    rw [honestSbox7RoundPoly_eval seed root (encodeLinearRs8 x0 b1)
+          (rowChalls.headD GoldilocksExt4.zero), hRec0]
   have hFinalCw : (rsSbox7TraceArith seed root).isFinalCodeword finalWord = true :=
     isConstExt4Rs_replicate 8 pr0
-  rw [decide_eq_true hFs, hAlgOk, decide_eq_true hTermEq.symm, hFinalCw]
-  simp only [inst, rsSbox7Inst, decide_true, Bool.true_and, rsSbox7WhirDomain, verifyWhirStages]
-  apply Bool.and_eq_true_iff.mpr
-  constructor
-  · -- Stage 0 verification
-    unfold verifyOneWhirStage
-    dsimp only [sbox7Stage0Dom, stageAllRoots, stagePowSeed, stagePostOodTranscript,
-      stageFoldTranscriptTail, Option.map]
-    let pSeed0 := encodeMultiFrame [encodeMultiFrame [encodeMultiFrame
-      [rowSumcheckTranscriptTail fs [pRow], root0,
-        GoldilocksExt4.encodeBytes32 (CommRingOps.add (GoldilocksExt4.embedBase x0)
-          (CommRingOps.mul (deriveStageOodChallenge (rowSumcheckTranscriptTail fs [pRow]) root0)
-            (GoldilocksExt4.embedBase b1))),
-        GoldilocksExt4.encodeBytes32 GoldilocksExt4.zero],
-      root0, encodePolyExt4 [GoldilocksExt4.zero]], root1]
-    let qSeed0 := stageQuerySeed pSeed0 0
-    have hQp0 := deriveStageQueryIndices_props sbox7Stage0Dom qSeed0 (by decide)
-    have hShift0 := verifySumcheckChainDeg_zeroPolys 2
-      (deriveStageShiftChallenges _ [root0] [[GoldilocksExt4.zero]])
-    simp only [deriveStageShiftChallenges, List.map] at hShift0 ⊢
-    have hMapIdx0 : (List.map (fun idx =>
-        ({ index := idx,
-           layers := [{ v0 := table0.getD idx GoldilocksExt4.zero,
-                        v1 := table0.getD (idx + 4) GoldilocksExt4.zero,
-                        path := buildMerklePathByDepth pcsMerkleHash 2 leaf0 idx }],
-           nextStageBridge := some
-             { v0 := pr0, v1 := pr0,
-               path := buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx } } : StageQueryOpening))
-        (deriveStageQueryIndices sbox7Stage0Dom qSeed0)).map (·.index) =
-        deriveStageQueryIndices sbox7Stage0Dom qSeed0 := by
-      rw [List.map_map]; exact List.map_id _
-    rw [hMapIdx0, hQp0.1]
-    have hLenQs0 : (List.map _ (deriveStageQueryIndices sbox7Stage0Dom qSeed0)).length =
-        min 4 4 := by
-      rw [List.length_map]; exact hQp0.2.1
-    rw [decide_eq_true hLenQs0]
-    simp only [hRowChallsEq, List.length_cons, List.length_nil, ↓reduceIte, decide_true,
-      hShift0, verifyWhirStagePow, Bool.true_and]
-    apply List.all_eq_true.mpr
-    intro q hq
-    obtain ⟨idx, hIdxMem, rfl⟩ := List.mem_map.mp hq
-    have hIdxLt : idx < 4 := hQp0.2.2 idx hIdxMem
-    have hMod4 : idx % 4 = idx := Nat.mod_eq_of_lt hIdxLt
-    have hMod8 : idx % 8 = idx := Nat.mod_eq_of_lt (by omega)
-    have hDiv8 : idx / 8 = 0 := Nat.div_eq_of_lt (by omega)
-    have hFoldIdx := foldDuetExt4_encodeLinearRs8_all x0 b1 r0 hIdxLt
-    have hRootPath0 := buildMerklePathByDepth_root pcsMerkleHash 2 leaf0 idx hIdxLt
-    have hLenPath0 := buildMerklePathByDepth_length pcsMerkleHash 2 leaf0 idx
-    have hRootPath1 := buildMerklePathByDepth_root pcsMerkleHash 3 leaf1 idx (by omega)
-    have hLenPath1 := buildMerklePathByDepth_length pcsMerkleHash 3 leaf1 idx
-    have hLeaf1Eq : pcsMerkleHash (duetLeafFrame 1 0 idx pr0 pr0) = leaf1 idx := by
-      dsimp only [leaf1]
-      rw [hTable1Get idx (by omega), hTable1Get (idx + 8) (by omega)]
-    simp only [hIdxLt, decide_true, Bool.true_and, verifyStageTrajectory,
-      verifyStageTerminalTarget, sbox7Stage0Dom, sbox7Stage1Dom, expectedSlotOk,
-      hMod4, hMod8, hDiv8, hDepth4, hDepth8, hLenPath0, hLenPath1, hRootPath0]
-    dsimp only [table0, pr0] at hFoldIdx ⊢
-    rw [hFoldIdx, hLeaf1Eq, hRootPath1]
-    decide
-  · -- Stage 1 verification
-    unfold verifyOneWhirStage
-    dsimp only [sbox7Stage1Dom, stageAllRoots, stagePowSeed, stagePostOodTranscript,
-      stageFoldTranscriptTail, Option.map]
-    let prior1 := stageQuerySeed
-      (encodeMultiFrame [encodeMultiFrame [encodeMultiFrame
-        [rowSumcheckTranscriptTail fs [pRow], root0,
-          GoldilocksExt4.encodeBytes32 (CommRingOps.add (GoldilocksExt4.embedBase x0)
-            (CommRingOps.mul (deriveStageOodChallenge (rowSumcheckTranscriptTail fs [pRow]) root0)
-              (GoldilocksExt4.embedBase b1))),
-          GoldilocksExt4.encodeBytes32 GoldilocksExt4.zero],
-        root0, encodePolyExt4 [GoldilocksExt4.zero]], root1]) 0
-    let pSeed1 := encodeMultiFrame [encodeMultiFrame [encodeMultiFrame
-      [prior1, root1, GoldilocksExt4.encodeBytes32 pr0,
-        GoldilocksExt4.encodeBytes32 GoldilocksExt4.zero],
-      root1, encodePolyExt4 [GoldilocksExt4.zero]], encodePolyExt4 finalWord]
-    let qSeed1 := stageQuerySeed pSeed1 0
-    have hQp1 := deriveStageQueryIndices_props sbox7Stage1Dom qSeed1 (by decide)
-    have hShift1 := verifySumcheckChainDeg_zeroPolys 2
-      (deriveStageShiftChallenges _ [root1] [[GoldilocksExt4.zero]])
-    simp only [deriveStageShiftChallenges, List.map] at hShift1 ⊢
-    have hMapIdx1 : (List.map (fun idx =>
-        ({ index := idx,
-           layers := [{ v0 := pr0, v1 := pr0,
-                        path := buildMerklePathByDepth pcsMerkleHash 3 leaf1 idx }],
-           nextStageBridge := none } : StageQueryOpening))
-        (deriveStageQueryIndices sbox7Stage1Dom qSeed1)).map (·.index) =
-        deriveStageQueryIndices sbox7Stage1Dom qSeed1 := by
-      rw [List.map_map]; exact List.map_id _
-    rw [hMapIdx1, hQp1.1]
-    have hLenQs1 : (List.map _ (deriveStageQueryIndices sbox7Stage1Dom qSeed1)).length =
-        min 4 8 := by
-      rw [List.length_map]; exact hQp1.2.1
-    rw [decide_eq_true hLenQs1]
-    simp only [List.length_cons, List.length_nil, Bool.false_eq_true, ↓reduceIte, decide_true,
-      hShift1, verifyWhirStagePow, Bool.true_and]
-    apply List.all_eq_true.mpr
-    intro q hq
-    obtain ⟨idx, hIdxMem, rfl⟩ := List.mem_map.mp hq
-    have hIdxLt : idx < 8 := hQp1.2.2 idx hIdxMem
-    have hMod8 : idx % 8 = idx := Nat.mod_eq_of_lt hIdxLt
-    have hRootPath1 := buildMerklePathByDepth_root pcsMerkleHash 3 leaf1 idx hIdxLt
-    have hLenPath1 := buildMerklePathByDepth_length pcsMerkleHash 3 leaf1 idx
-    have hLeaf1Eq : pcsMerkleHash (duetLeafFrame 1 0 idx pr0 pr0) = leaf1 idx := by
-      dsimp only [leaf1]
-      rw [hTable1Get idx (by omega), hTable1Get (idx + 8) (by omega)]
-    simp only [hIdxLt, decide_true, Bool.true_and, verifyStageTrajectory,
-      verifyStageTerminalTarget, finalValueOk, expectedSlotOk,
-      hMod8, hDepth8, hLenPath1, foldDuetExt4_const]
-    rw [hLeaf1Eq, hRootPath1, hFinalGet idx hIdxLt]
-    decide
+  rw [decide_eq_true hFs, decide_eq_true hReg, decide_eq_true hRoot, decide_eq_true hCh,
+      hAlgOk, decide_eq_true hTermEq, hFinalCw]
+  simp only [Bool.true_and, rsSbox7WhirDomain, verifyWhirStages]
+  rw [sbox7Stage1Proof_stageRoot prior1 pr0]
+  exact Bool.and_eq_true_iff.mpr
+    ⟨verifyOneWhirStage_sbox7Stage0Proof x0 b1 prior0 rowChalls r0 hRowChallsEq,
+     verifyOneWhirStage_sbox7Stage1Proof rowChalls prior1 pr0⟩
 
 /-- **Non-Vacuity of `succinct_aggregation_knowledge_soundness` & `succinct_merge_tree_knowledge_soundness`
     (`succinct_knowledge_soundness_hypotheses_satisfiable`)**:
@@ -5055,14 +5622,18 @@ theorem succinct_knowledge_soundness_hypotheses_satisfiable :
   let b1 := Goldilocks.ofNat 5
   let msg := "QSAG.AGG.WITNESS.MSG/v2".toUTF8.toList
   let root := CommRingOps.add (pow7Goldilocks x0) seed
-  let (proof, fs, view) := buildHonestSbox7WhirBundle seed x0 b1 msg
-  have hAcc := honestSbox7WhirProof_accepts seed x0 b1 msg
+  let bundle := buildHonestSbox7WhirBundle seed x0 b1 msg
+  have hAcc : verifySuccinctAggregate (rsSbox7TraceArith seed root) rsSbox7WhirDomain
+      (rsSbox7Inst seed root msg) bundle.1 bundle.2.1 = true ∧
+      StagesBound bundle.2.2.authPath rsSbox7WhirDomain.stages bundle.2.2.allTables bundle.1.stages :=
+    honestSbox7WhirProof_accepts seed x0 b1 msg
   refine ⟨rsSbox7TraceArith seed root, rsSbox7WhirDomain, rsSbox7Inst seed root msg,
-    rsSbox7TraceArith_lawful seed root msg, proof, fs, view,
+    rsSbox7TraceArith_lawful seed root msg, bundle.1, bundle.2.1, bundle.2.2,
     hAcc.1, hAcc.2, ?_, hAcc.2, ?_⟩
-  · simp [verifyMergeTree, proof, buildHonestSbox7WhirBundle, hAcc.1]
-  · dsimp only [rsSbox7Inst, rsSbox7TraceArith, proof, view, buildHonestSbox7WhirBundle,
-      List.headD_cons, checkAllActiveSigners, decodeSbox7Sigs]
+  · have hNone : bundle.1.agg.childrenCommitment.isNone = true := rfl
+    simp only [verifyMergeTree, hNone, hAcc.1, Bool.and_self]
+  · dsimp only [rsSbox7Inst, rsSbox7TraceArith, rsSbox7TraceArithDelta, bundle,
+      buildHonestSbox7WhirBundle, List.headD_cons, checkAllActiveSigners, decodeSbox7Sigs]
     rw [(isLinearBaseRs8_encodeLinearRs8 x0 b1).2]
     simp [GoldilocksExt4.embedBase_c0_c0, verifyPqHashSig_sbox7_iff, root]
 
@@ -5095,7 +5666,8 @@ theorem tooth_whir_wrong_ood_challenge_rejected (rowChalls finalWord : List Gold
 theorem tooth_whir_bad_pow_rejected (rowChalls finalWord : List GoldilocksExt4)
     (prior : List UInt8) (sdom : WhirStageDomain) (sp : WhirStageProof)
     (nextInfo : Option (WhirStageDomain × List UInt8))
-    (hBad : verifyWhirStagePow (stagePowSeed prior sp (nextInfo.map Prod.snd) finalWord)
+    (hBad : verifyWhirStagePow
+      (stagePowDigest (stagePowSeed prior sp (nextInfo.map Prod.snd) finalWord))
       sp.powNonce sdom.powBits = false) :
     verifyOneWhirStage rowChalls finalWord prior sdom sp nextInfo = false := by
   unfold verifyOneWhirStage
@@ -5174,8 +5746,8 @@ theorem trajectory_wrong_intermediate_fold_rejected (sdom nextDom : WhirStageDom
       foldDuetExt4 op.v0 op.v1 (sdom.invTwoY0 layer (idx % groups)) sdom.invTwo α) :
     verifyStageTrajectory sdom (some (nextDom, nextRoot)) finalWord (some br)
       layer groups idx expected [root] [α] [op] = false := by
-  simp [verifyStageTrajectory, verifyStageTerminalTarget, expectedSlotOk,
-    decide_eq_false hMismatch.symm]
+  simp only [verifyStageTrajectory, verifyStageTerminalTarget, expectedSlotOk,
+    decide_eq_false hMismatch, Bool.and_false, Bool.false_and]
 
 /-- `#tooth` `verifySuccinctAggregate` rejects wrong Fiat–Shamir transcript frame. -/
 theorem aggregate_wrong_instance_rejected (arith : RowArithmetization) (dom : WhirDomain)

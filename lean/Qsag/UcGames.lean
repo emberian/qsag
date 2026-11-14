@@ -11,10 +11,14 @@ Self-contained Lean 4.35 game-hopping, secret-sharing simulation, and UC signatu
 2. Polymorphic Shamir pad-space bijection (`shamir_rebalanceEquiv`,
    `pad_bijection_masked_openings_uniform`) over `Goldilocks`, `GoldilocksExt2`, and `TowerElem k`
    with characteristic-2 involution (`shamir_tower_rebalance_involutive`), collusion threshold teeth
-   (`full_collusion_breaks_hiding`, `unpadded_open_refutes_hiding`), and Vandermonde-at-zero
+   (`full_collusion_breaks_hiding`, `tooth_unpadded_open_refutes_hiding`), and Vandermonde-at-zero
    reconstruction (`lagrangeAtZero_evalCoeffs`).
-3. Canetti UC signature functionality `idealSig` (`ucRealizes_iff_eufCma`), multi-session hybrid
-   telescope (`multi_session_uc_realizes`), and universal composition (`uc_composition_theorem`).
+3. Signature functionality `idealSig` and one game hop against it
+   (`sigOracleGameHop_distinguisher_iff_forgery`): the ideal world is handed a signing oracle
+   `simSign` that is assumed to answer exactly as the real signer does, and the hop shows that a
+   real/ideal difference is a fresh forgery. No simulator without the signing key is constructed
+   in this module, so this is not a UC-realization theorem. Its per-session and per-caller
+   corollaries are `multi_session_uc_realizes` and `uc_composition_theorem`.
 -/
 
 public import Qsag.Goldilocks
@@ -779,6 +783,9 @@ theorem pad_bijection_goldilocks_and_tower (k t : Nat)
   ⟨pad_bijection_masked_openings_uniform Goldilocks.inv (fun _ hx => Goldilocks.mul_inv_cancel hx) t corrGl wGl hCardGl hNzGl PGl,
    pad_bijection_masked_openings_uniform (towerInv k) (towerMul_inv k) t corrTw wTw hCardTw hNzTw PTw⟩
 
+/-- **`#tooth` Collusion Threshold (`full_collusion_breaks_hiding`)**: with `t` distinct corrupt
+    points (one more than the pad bijection tolerates), equal corrupt shares force distinct
+    masked openings for distinct secrets, so the openings are no longer hiding. -/
 theorem full_collusion_breaks_hiding {R : Type} [LawfulCommRing R] [DecidableEq R] [NoZeroDivisors R]
     (t : Nat) (corruptPts : List R)
     (hFull : corruptPts.length = t) (hNodup : corruptPts.Nodup)
@@ -823,7 +830,9 @@ theorem full_collusion_breaks_hiding {R : Type} [LawfulCommRing R] [DecidableEq 
   rw [add_sub_cancel_right, add_sub_cancel_right] at hSub
   exact hDistinct hSub
 
-theorem unpadded_open_refutes_hiding {R : Type} [LawfulCommRing R]
+/-- **`#tooth` Zero Pad (`tooth_unpadded_open_refutes_hiding`)**: an opening masked by the zero
+    pad separates any two distinct secrets. -/
+theorem tooth_unpadded_open_refutes_hiding {R : Type} [LawfulCommRing R]
     (w₁ w₂ : R) (hDistinct : w₁ ≠ w₂) :
     add w₁ zero ≠ add w₂ zero := by
   rw [LawfulCommRing.add_zero, LawfulCommRing.add_zero]
@@ -949,10 +958,12 @@ theorem idealSig_unforgeable {PK SK Msg Sig : Type} [DecidableEq Msg]
     idealSigVerify S pk recorded m sig = false := by
   simp [idealSigVerify, hFresh]
 
-/-- **Canetti Ideal Signature Execution (`execIdealSig`) — Strictly `sk`-Free (`[P0-11]`)**.
-`F_SIG` stores only `(pk, recorded)` and invokes the ideal-world simulator's public string callback
-`simSign : Msg → Sig`; `sk : SK` does NOT appear anywhere in `execIdealSig`, `findEnvForgery`,
-or `signedBeforeForgery`! -/
+/-- **Ideal Signature Execution (`execIdealSig`)**.
+`F_SIG` stores only `(pk, recorded)` and answers signing requests through the callback
+`simSign : Msg → Sig`. `sk : SK` is not an argument of `execIdealSig`, `findEnvForgery`, or
+`signedBeforeForgery`; whether `simSign` itself depends on `sk` is decided by the caller. Every
+theorem below that relates this execution to `execRealSig` assumes
+`∀ m, simSign m = S.sign sk m`, that is, a signing oracle for the real key. -/
 def execIdealSig {PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (simSign : Msg → Sig)
     (recorded : List Msg) : UcSigEnv PK Msg Sig → Bool
@@ -1039,11 +1050,18 @@ theorem findEnvForgery_sound {PK SK Msg Sig : Type} [DecidableEq Msg]
     (Z : UcSigEnv PK Msg Sig) : Prop :=
   execRealSig S pk sk Z = execIdealSig S pk simSign [] Z
 
-/-- **Canetti UC Signature Equivalence (`ucRealizes_iff_eufCma`)**:
-For any EUF-CMA signing oracle / simulator callback `simSign : Msg → Sig` agreeing with `S.sign sk`
-on queried messages (without `execIdealSig` ever holding `sk`), distinguishing `Real` from `Ideal`
-constructively extracts a fresh EUF-CMA forgery `(mStar, sigStar)`. -/
-theorem ucRealizes_iff_eufCma {PK SK Msg Sig : Type} [DecidableEq Msg]
+/-- **Signing-oracle game hop (`sigOracleGameHop_distinguisher_iff_forgery`)**:
+assume `hSim : ∀ m, simSign m = S.sign sk m`, so the ideal execution is run with a signing oracle
+for the real key. Then (1) any environment on which the real and ideal executions differ contains
+a verification query that is a fresh valid forgery `(mStar, sigStar)`, found by `findEnvForgery`;
+and (2) conversely any valid pair, submitted as a single verification query, makes the two
+executions differ.
+
+This is the "real equals ideal-with-signing-oracle unless forgery" hop. It is not a
+UC-realization statement: the ideal side is given the real signer by hypothesis, and no simulator
+that lacks `sk` is built here. `tooth_sigOracleGameHop_needs_real_signing_oracle` shows the
+hypothesis cannot be dropped. -/
+theorem sigOracleGameHop_distinguisher_iff_forgery {PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (sk : SK) (simSign : Msg → Sig)
     (hSim : ∀ m, simSign m = S.sign sk m) :
     (∀ Z : UcSigEnv PK Msg Sig,
@@ -1084,47 +1102,81 @@ def execMultiIdealSig {PK SK Msg Sig : Type} [DecidableEq Msg]
   | [] => []
   | (pk, simSign, Z) :: rest => execIdealSig S_sig pk simSign [] Z :: execMultiIdealSig S_sig rest
 
+
+/-- Finite-family quantitative form of the signing-oracle hop. Verdict advantage is bounded
+    by the number of environments where the executed extractor finds a forgery. The oracle
+    agreement hypothesis is required at every message, including adaptive signing queries. -/
+theorem sigOracleGameHop_advantage_le_extracted_forgeries
+    {PK SK Msg Sig : Type} [DecidableEq Msg]
+    (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (sk : SK) (simSign : Msg → Sig)
+    (hSim : ∀ m, simSign m = S.sign sk m) (N : Nat)
+    (Z : Fin N → UcSigEnv PK Msg Sig) :
+    natAbsDiff
+      (finSum N (fun i => if execRealSig S pk sk (Z i) then 1 else 0))
+      (finSum N (fun i => if execIdealSig S pk simSign [] (Z i) then 1 else 0)) ≤
+      finSum N (fun i => if (findEnvForgery S pk simSign [] (Z i)).isSome then 1 else 0) := by
+  apply finSum_indicator_diff_le
+  intro i hNone
+  cases hFind : findEnvForgery S pk simSign [] (Z i) with
+  | none => exact execReal_eq_execIdeal_unless_forgery S pk sk simSign hSim [] (Z i) hFind
+  | some pair => simp [hFind] at hNone
+
+/-- Telescoping bound for `natAbsDiff`: if consecutive scores differ by at most `eps`, the first
+    and the `S`-th differ by at most `S * eps`. A statement about `Nat` sequences only; it mentions
+    no protocol. -/
+theorem natAbsDiff_telescope (S eps : Nat) (score : Nat → Nat)
+    (hStep : ∀ i, i < S → natAbsDiff (score i) (score (i + 1)) ≤ eps) :
+    natAbsDiff (score 0) (score S) ≤ S * eps := by
+  induction S with
+  | zero => simp [natAbsDiff]
+  | succ s ih =>
+    have ih' := ih (fun i hi => hStep i (Nat.lt_succ_of_lt hi))
+    have hLast := hStep s (Nat.lt_succ_self s)
+    have hTri := natAbsDiff_triangle (score 0) (score s) (score (s + 1))
+    have hLe := Nat.le_trans hTri (Nat.add_le_add ih' hLast)
+    rwa [Nat.succ_mul]
+
+/-- **Per-session signing-oracle game hop (`multi_session_uc_realizes`)**: for a list of
+    independent sessions, each run with a signing oracle for its own real key
+    (`∀ m, simSign m = S_sig.sign sk m`), either every session's real and ideal verdicts agree or
+    some session contains a fresh valid forgery. The sessions do not interact; this is
+    `sigOracleGameHop_distinguisher_iff_forgery` applied session by session, and inherits its
+    signing-oracle hypothesis. -/
 theorem multi_session_uc_realizes {PK SK Msg Sig : Type} [DecidableEq Msg]
-    (S_sig : AbstractSigScheme PK SK Msg Sig) :
-    (∀ (sessions : List (PK × SK × (Msg → Sig) × UcSigEnv PK Msg Sig)),
-      (∀ pk sk simSign Z, (pk, sk, simSign, Z) ∈ sessions → ∀ m, simSign m = S_sig.sign sk m) →
-      execMultiRealSig S_sig (sessions.map (fun (pk, sk, _, Z) => (pk, sk, Z))) =
-        execMultiIdealSig S_sig (sessions.map (fun (pk, _, simSign, Z) => (pk, simSign, Z))) ∨
-      ∃ pk sk simSign Z mStar sigStar,
-        (pk, sk, simSign, Z) ∈ sessions ∧
-        mStar ∉ signedBeforeForgery S_sig pk simSign [] Z ∧
-        S_sig.verify pk mStar sigStar = true) ∧
-    (∀ (S eps : Nat) (score : Nat → Nat),
-      (∀ i, i < S → natAbsDiff (score i) (score (i + 1)) ≤ eps) →
-      natAbsDiff (score 0) (score S) ≤ S * eps) := by
-  refine ⟨?_, ?_⟩
-  · intro sessions hAllSim
-    induction sessions with
-    | nil => exact .inl rfl
-    | cons hd rest ih =>
-      rcases hd with ⟨pk, sk, simSign, Z⟩
-      have hHeadSim : ∀ m, simSign m = S_sig.sign sk m := hAllSim pk sk simSign Z (.head _)
-      have hRestSim : ∀ pk' sk' sim' Z', (pk', sk', sim', Z') ∈ rest → ∀ m, sim' m = S_sig.sign sk' m :=
-        fun pk' sk' sim' Z' hm => hAllSim pk' sk' sim' Z' (.tail _ hm)
-      by_cases hHead : execRealSig S_sig pk sk Z = execIdealSig S_sig pk simSign [] Z
-      · rcases ih hRestSim with hRestEq | ⟨pk', sk', sim', Z', mStar, sigStar, hMem, hFresh, hVer⟩
-        · exact .inl (by simp [execMultiRealSig, execMultiIdealSig, hHead, hRestEq])
-        · exact .inr ⟨pk', sk', sim', Z', mStar, sigStar, .tail _ hMem, hFresh, hVer⟩
-      · obtain ⟨mStar, sigStar, _, hFresh, hVer⟩ := (ucRealizes_iff_eufCma S_sig pk sk simSign hHeadSim).1 Z hHead
-        exact .inr ⟨pk, sk, simSign, Z, mStar, sigStar, .head _, hFresh, hVer⟩
-  · intro S eps score hStep
-    induction S with
-    | zero => simp [natAbsDiff]
-    | succ s ih =>
-      have ih' := ih (fun i hi => hStep i (Nat.lt_succ_of_lt hi))
-      have hLast := hStep s (Nat.lt_succ_self s)
-      have hTri := natAbsDiff_triangle (score 0) (score s) (score (s + 1))
-      have hLe := Nat.le_trans hTri (Nat.add_le_add ih' hLast)
-      rwa [Nat.succ_mul]
+    (S_sig : AbstractSigScheme PK SK Msg Sig)
+    (sessions : List (PK × SK × (Msg → Sig) × UcSigEnv PK Msg Sig))
+    (hAllSim : ∀ pk sk simSign Z, (pk, sk, simSign, Z) ∈ sessions →
+      ∀ m, simSign m = S_sig.sign sk m) :
+    execMultiRealSig S_sig (sessions.map (fun (pk, sk, _, Z) => (pk, sk, Z))) =
+      execMultiIdealSig S_sig (sessions.map (fun (pk, _, simSign, Z) => (pk, simSign, Z))) ∨
+    ∃ pk sk simSign Z mStar sigStar,
+      (pk, sk, simSign, Z) ∈ sessions ∧
+      mStar ∉ signedBeforeForgery S_sig pk simSign [] Z ∧
+      S_sig.verify pk mStar sigStar = true := by
+  induction sessions with
+  | nil => exact .inl rfl
+  | cons hd rest ih =>
+    rcases hd with ⟨pk, sk, simSign, Z⟩
+    have hHeadSim : ∀ m, simSign m = S_sig.sign sk m := hAllSim pk sk simSign Z (.head _)
+    have hRestSim : ∀ pk' sk' sim' Z', (pk', sk', sim', Z') ∈ rest → ∀ m, sim' m = S_sig.sign sk' m :=
+      fun pk' sk' sim' Z' hm => hAllSim pk' sk' sim' Z' (.tail _ hm)
+    by_cases hHead : execRealSig S_sig pk sk Z = execIdealSig S_sig pk simSign [] Z
+    · rcases ih hRestSim with hRestEq | ⟨pk', sk', sim', Z', mStar, sigStar, hMem, hFresh, hVer⟩
+      · exact .inl (by simp [execMultiRealSig, execMultiIdealSig, hHead, hRestEq])
+      · exact .inr ⟨pk', sk', sim', Z', mStar, sigStar, .tail _ hMem, hFresh, hVer⟩
+    · obtain ⟨mStar, sigStar, _, hFresh, hVer⟩ :=
+        (sigOracleGameHop_distinguisher_iff_forgery S_sig pk sk simSign hHeadSim).1 Z hHead
+      exact .inr ⟨pk, sk, simSign, Z, mStar, sigStar, .head _, hFresh, hVer⟩
 
 structure CallingProtocol (HighIn HighOut PK Msg Sig : Type) where
   compileEnv : (HighIn → HighOut → Bool) → HighIn → UcSigEnv PK Msg Sig
 
+/-- **Game hop for one compiled caller (`uc_composition_theorem`)**: for the single environment
+    `ρ.compileEnv post inp` that a calling protocol compiles to, the real and ideal executions
+    agree or the environment contains a fresh valid forgery. This is
+    `sigOracleGameHop_distinguisher_iff_forgery` at that environment, under the same
+    signing-oracle hypothesis `hSim`; it contains no subroutine-substitution argument and is not
+    the universal composition theorem. -/
 theorem uc_composition_theorem {HighIn HighOut PK SK Msg Sig : Type} [DecidableEq Msg]
     (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (sk : SK) (simSign : Msg → Sig)
     (hSim : ∀ m, simSign m = S.sign sk m)
@@ -1138,8 +1190,63 @@ theorem uc_composition_theorem {HighIn HighOut PK SK Msg Sig : Type} [DecidableE
   intro Z
   by_cases hEq : execRealSig S pk sk Z = execIdealSig S pk simSign [] Z
   · exact .inl hEq
-  · obtain ⟨mStar, sigStar, _, hFresh, hVer⟩ := (ucRealizes_iff_eufCma S pk sk simSign hSim).1 Z hEq
+  · obtain ⟨mStar, sigStar, _, hFresh, hVer⟩ :=
+      (sigOracleGameHop_distinguisher_iff_forgery S pk sk simSign hSim).1 Z hEq
     exact .inr ⟨mStar, sigStar, hFresh, hVer⟩
+
+/-- Two-message scheme used by the teeth below: every signature is `true` and verification
+    returns the signature bit. -/
+def toothConstSigScheme : AbstractSigScheme Unit Unit Bool Bool where
+  sign := fun _ _ => true
+  verify := fun _ _ sig => sig
+  complete := fun _ _ => True
+  completeness := fun _ _ => rfl
+
+/-- Environment used by the teeth below: request one signature and output it as the verdict. -/
+def toothSignThenEchoEnv : UcSigEnv Unit Bool Bool := .stepSign false (fun sig => .halt sig)
+
+/-- **`#tooth` Signing-Oracle Hypothesis (`tooth_sigOracleGameHop_needs_real_signing_oracle`)**:
+    with a callback that does not answer as the real signer (`simSign = fun _ => false` against a
+    signer that always outputs `true`), the environment that requests one signature and outputs it
+    tells the real execution from the ideal one although it makes no verification query, so
+    `findEnvForgery` returns `none`. The conclusion of
+    `sigOracleGameHop_distinguisher_iff_forgery` fails without `hSim`. -/
+theorem tooth_sigOracleGameHop_needs_real_signing_oracle :
+    ¬ UcIndistinguishableOn toothConstSigScheme () () (fun _ => false) toothSignThenEchoEnv ∧
+    findEnvForgery toothConstSigScheme () (fun _ => false) [] toothSignThenEchoEnv = none := by
+  refine ⟨?_, ?_⟩
+  · intro h
+    have h' : execRealSig toothConstSigScheme () () toothSignThenEchoEnv =
+        execIdealSig toothConstSigScheme () (fun _ => false) [] toothSignThenEchoEnv := h
+    simp [execRealSig, execIdealSig, toothConstSigScheme, toothSignThenEchoEnv] at h'
+  · simp [findEnvForgery, toothSignThenEchoEnv]
+
+/-- **`#tooth` Recorded-Message Gate (`tooth_idealSig_accepts_valid_unsigned_only_in_real`)**:
+    a signature that verifies in the real world on a message never sent to the signer is refused
+    by the ideal functionality; the recorded-message check is what separates the two worlds. -/
+theorem tooth_idealSig_accepts_valid_unsigned_only_in_real {PK SK Msg Sig : Type} [DecidableEq Msg]
+    (S : AbstractSigScheme PK SK Msg Sig) (pk : PK) (sk : SK) (simSign : Msg → Sig)
+    (m : Msg) (sig : Sig) (hVer : S.verify pk m sig = true) :
+    execRealSig S pk sk (.stepVerify m sig (fun b => .halt b)) = true ∧
+    execIdealSig S pk simSign [] (.stepVerify m sig (fun b => .halt b)) = false := by
+  refine ⟨?_, ?_⟩
+  · simp [execRealSig, hVer]
+  · simp [execIdealSig, idealSigVerify]
+
+/-- Score sequence that jumps once, from `0` at index `0` to `5` afterwards. -/
+def toothJumpScore (i : Nat) : Nat := if i = 0 then 0 else 5
+
+/-- **`#tooth` Per-Step Bound (`tooth_natAbsDiff_telescope_needs_every_step`)**: one unbounded
+    step breaks the telescoped bound, so `natAbsDiff_telescope` needs its hypothesis at every
+    index. -/
+theorem tooth_natAbsDiff_telescope_needs_every_step :
+    (∀ i, 1 ≤ i → i < 2 → natAbsDiff (toothJumpScore i) (toothJumpScore (i + 1)) ≤ 1) ∧
+    ¬ (natAbsDiff (toothJumpScore 0) (toothJumpScore 2) ≤ 2 * 1) := by
+  refine ⟨?_, by decide⟩
+  intro i h1 h2
+  have hi : i = 1 := by omega
+  subst hi
+  decide
 
 /-! ## 4. Finite Sample Spaces: Fubini, Bijection Invariance, Preprocessing-Generator Games -/
 

@@ -58,6 +58,8 @@ public import Qsag.Goldilocks
 import all Qsag.Goldilocks
 public import Qsag.UcGames
 import all Qsag.UcGames
+public import Qsag.AffineProximityGaps
+import all Qsag.AffineProximityGaps
 
 public section
 namespace Qsag
@@ -3169,7 +3171,7 @@ theorem goldilocksExt2Card_pos : 0 < goldilocksExt2Card := by
     2. `habr24Interactive128`: `(64, 32, 22, 16)` (`128` pure interactive `[HABR24]` query bits / `144` classical FS bits, `~72` QROM round-search bits — classical regime, NOT `PQ128`),
     3. `bciksJohnsonClassical128`: `(129, 65, 44, 33)` (`⌈256 / log₂ B_i⌉ + 1`, `< 2⁻¹²⁸` unconditional `[BCIKS20]` Johnson query error with positive slack `η_i > 0`, `~72` QROM round-search bits — classical regime, NOT `PQ128`),
     4. `habr24Qrom128` (**DEFAULT**): `(128, 64, 43, 32)` (`2⁻²⁵⁶` `[HABR24]` query error + `16`b PoW = `272` classical FS bits / `136` QROM Grover round-search bits),
-    5. `bciksJohnsonQrom128`: `(257, 129, 86, 65)` (`⌈512 / log₂ B_i⌉ + 1`, `< 2⁻²⁵⁶` unconditional `[BCIKS20]` Johnson query error with positive slack `η_i > 0` + `16`b PoW = `> 272` classical FS bits / `136` QROM Grover round-search bits without `[HABR24]`). -/
+    5. `bciksJohnsonQrom128`: `(258, 130, 88, 66)` (`⌈512 / log₂ B_i⌉ + 2`, `pcs.rs::minimum_queries`, `< 2⁻²⁵⁶` unconditional `[BCIKS20]` Johnson query error with positive slack `η_i > 0` + `16`b PoW = `> 272` classical FS bits / `136` QROM Grover round-search bits without `[HABR24]`). -/
 inductive WhirBudgetRegime where
   | habr24Classical128
   | habr24Interactive128
@@ -3212,28 +3214,57 @@ structure WhirStageBudget where
   h_sqrt_pos : 0 < sqrtBlowup
   deriving DecidableEq, Repr
 
-/-- Canonical 4-stage `B = (4, 16, 64, 256)` (`sqrtBlowup = (2, 4, 8, 16)`, `step_vars = (5, 3, 4, 4)`,
-    `domainLog2 = (22, 19, 18, 16)`) WHIR query schedules for all 5 `WhirBudgetRegime` profiles. -/
+/-- Canonical 4-stage `B = (4, 16, 64, 256)` (`sqrtBlowup = (2, 4, 8, 16)`) WHIR query schedules
+    for all 5 `WhirBudgetRegime` profiles on the DEPLOYED `num_vars = 24` geometry of
+    `pcs.rs::stage_geometry`: `step_vars = (6, 4, 3, 3)` and committed-domain sizes
+    `|D_i| = 2^(26, 22, 20, 19)` (`= B_i * 2^(24, 18, 14, 11)`); see
+    `whirSchedule4Stage_matches_deployed_geometry`. -/
 def whirSchedule4Stage : WhirBudgetRegime → List WhirStageBudget
   | .habr24Classical128 =>
-      [ ⟨2, 5, 22, 56, by decide⟩, ⟨4, 3, 19, 28, by decide⟩,
-        ⟨8, 4, 18, 19, by decide⟩, ⟨16, 4, 16, 14, by decide⟩ ]
+      [ ⟨2, 6, 26, 56, by decide⟩, ⟨4, 4, 22, 28, by decide⟩,
+        ⟨8, 3, 20, 19, by decide⟩, ⟨16, 3, 19, 14, by decide⟩ ]
   | .habr24Interactive128 =>
-      [ ⟨2, 5, 22, 64, by decide⟩, ⟨4, 3, 19, 32, by decide⟩,
-        ⟨8, 4, 18, 22, by decide⟩, ⟨16, 4, 16, 16, by decide⟩ ]
+      [ ⟨2, 6, 26, 64, by decide⟩, ⟨4, 4, 22, 32, by decide⟩,
+        ⟨8, 3, 20, 22, by decide⟩, ⟨16, 3, 19, 16, by decide⟩ ]
   | .bciksJohnsonClassical128 =>
-      [ ⟨2, 5, 22, 129, by decide⟩, ⟨4, 3, 19, 65, by decide⟩,
-        ⟨8, 4, 18, 44, by decide⟩, ⟨16, 4, 16, 33, by decide⟩ ]
+      [ ⟨2, 6, 26, 129, by decide⟩, ⟨4, 4, 22, 65, by decide⟩,
+        ⟨8, 3, 20, 44, by decide⟩, ⟨16, 3, 19, 33, by decide⟩ ]
   | .habr24Qrom128 =>
-      [ ⟨2, 5, 22, 128, by decide⟩, ⟨4, 3, 19, 64, by decide⟩,
-        ⟨8, 4, 18, 43, by decide⟩, ⟨16, 4, 16, 32, by decide⟩ ]
+      [ ⟨2, 6, 26, 128, by decide⟩, ⟨4, 4, 22, 64, by decide⟩,
+        ⟨8, 3, 20, 43, by decide⟩, ⟨16, 3, 19, 32, by decide⟩ ]
   | .bciksJohnsonQrom128 =>
-      [ ⟨2, 5, 22, 257, by decide⟩, ⟨4, 3, 19, 129, by decide⟩,
-        ⟨8, 4, 18, 86, by decide⟩, ⟨16, 4, 16, 65, by decide⟩ ]
+      [ ⟨2, 6, 26, 258, by decide⟩, ⟨4, 4, 22, 130, by decide⟩,
+        ⟨8, 3, 20, 88, by decide⟩, ⟨16, 3, 19, 66, by decide⟩ ]
 
-/-- 3-stage `nv = 20` (`K = 8` shard, `early_stop_vars = 8`) prefix of `whirSchedule4Stage`. -/
+/-- 3-stage `nv = 20` (`K = 8` shard, `early_stop_vars = 8`) schedule on its own deployed geometry
+    `step_vars = (5, 3, 4)`, `|D_i| = 2^(22, 19, 18)` (query counts depend only on the blowup). -/
 def whirScheduleNv20 (r : WhirBudgetRegime) : List WhirStageBudget :=
-  (whirSchedule4Stage r).take 3
+  ((whirSchedule4Stage r).take 3).zipWith
+    (fun st g => ⟨st.sqrtBlowup, g.1, g.2, st.numQueries, st.h_sqrt_pos⟩)
+    [(5, 22), (3, 19), (4, 18)]
+
+/-- **Schedule ↔ Deployed-Geometry Weld**: the `(√B_i, step_vars, log₂|D_i|)` columns of
+    `whirSchedule4Stage` / `whirScheduleNv20` are exactly the `pcs.rs::stage_geometry` mirror
+    `hemStageGeoms 24` / `hemStageGeoms 20` (`|D_i| = n_i * 2^step_vars`), the two Johnson regimes
+    carry exactly `hemJohnsonMinQueries` (`pcs.rs::minimum_queries`), and every query count of
+    every regime fits the wire cap `NUM_PCS_QUERIES = 512`. -/
+theorem whirSchedule4Stage_matches_deployed_geometry :
+    (∀ r : WhirBudgetRegime,
+      (whirSchedule4Stage r).map (fun st => (st.sqrtBlowup ^ 2, st.stepVars, 2 ^ st.domainLog2)) =
+        (hemStageGeoms 24).map (fun g => (2 ^ g.logBlowup, g.stepVars, g.n * 2 ^ g.stepVars))) ∧
+    (∀ r : WhirBudgetRegime,
+      (whirScheduleNv20 r).map (fun st => (st.sqrtBlowup ^ 2, st.stepVars, 2 ^ st.domainLog2)) =
+        (hemStageGeoms 20).map (fun g => (2 ^ g.logBlowup, g.stepVars, g.n * 2 ^ g.stepVars))) ∧
+    (whirSchedule4Stage .bciksJohnsonQrom128).map (·.numQueries) =
+      (hemStageGeoms 24).map (fun g => hemJohnsonMinQueries true g.logBlowup) ∧
+    (whirSchedule4Stage .bciksJohnsonClassical128).map (·.numQueries) =
+      (hemStageGeoms 24).map (fun g => hemJohnsonMinQueries false g.logBlowup) ∧
+    (whirSchedule4Stage .bciksJohnsonQrom128).map (·.numQueries) = [258, 130, 88, 66] ∧
+    (∀ r : WhirBudgetRegime, ∀ st ∈ whirSchedule4Stage r, st.numQueries ≤ 512) := by
+  refine ⟨?_, ?_, by decide +kernel, by decide +kernel, by decide +kernel, ?_⟩
+  · intro r; cases r <;> decide +kernel
+  · intro r; cases r <;> decide +kernel
+  · intro r; cases r <;> decide +kernel
 
 /-- Conjectural `[HABR24]` Conjecture-1 (capacity `1 - ρ_i` list decoding) statistical query bound
     `(1 / B_i) ^ q_i = (1 / sqrtBlowup^2) ^ q_i` multiplied by `1 / 2 ^ powBits` PoW target density. -/
@@ -3277,25 +3308,27 @@ def whirPositiveEtaCommitFoldBound (st : WhirStageBudget) (etaScale : Nat) : Rat
   ⟨st.stepVars * (2 ^ st.domainLog2) ^ 2 * (whirJohnsonListSize st etaScale) ^ 7,
    goldilocksExt4Card, goldilocksExt4Card_pos⟩
 
-/-- **Positive-`η` `[BCIKS20]` Johnson Proximity Slack, Finite List Size & Commit-Phase Theorem**:
-    Thanks to the `+ 1` query slack (`⌈256 / log₂ B_i⌉ + 1` and `⌈512 / log₂ B_i⌉ + 1`),
+/-- **Positive-`η` `[BCIKS20]` Johnson Proximity Slack, Finite List Size & Commit-Phase Theorem**
+    (on the deployed `num_vars = 24` geometry `|D_i| = 2^(26, 22, 20, 19)`, `s_i = (6, 4, 3, 3)`):
+    Thanks to the query slack (`⌈256 / log₂ B_i⌉ + 1` and `⌈512 / log₂ B_i⌉ + 2`),
     1. `bciksJohnsonClassical128` (`q = (129, 65, 44, 33)`) at `etaScale = 128` (`η_i = 1 / (256 √B_i) > 0`,
        finite list sizes `L = (256, 512, 1024, 2048)`) achieves **`strictlyMoreThanBits 128`** PURE
-       proximity-query soundness BEFORE PoW, **`strictlyMoreThanBits 208`** OOD list-pinning, and
-       **`atLeastBits 144`** `[BCIKS20]` `(2η_i)⁻⁷` commit-phase soundness at every stage!
-    2. `bciksJohnsonQrom128` (`q = (257, 129, 86, 65)`) at `etaScale = 256` (`η_i = 1 / (512 √B_i) > 0`,
+       proximity-query soundness BEFORE PoW, **`strictlyMoreThanBits 213`** OOD list-pinning, and
+       **`atLeastBits 139`** `[BCIKS20]` `(2η_i)⁻⁷` commit-phase soundness at every stage
+       (stage 3, `|D_3| = 2^19`, `L_3 = 2048`, is the bottleneck);
+    2. `bciksJohnsonQrom128` (`q = (258, 130, 88, 66)`) at `etaScale = 256` (`η_i = 1 / (512 √B_i) > 0`,
        finite list sizes `L = (512, 1024, 2048, 4096)`) achieves **`strictlyMoreThanBits 256`** PURE
-       proximity-query soundness BEFORE PoW, **`strictlyMoreThanBits 206`** OOD list-pinning, and
-       **`atLeastBits 137`** `[BCIKS20]` `(2η_i)⁻⁷` commit-phase soundness at every stage! -/
+       proximity-query soundness BEFORE PoW, **`strictlyMoreThanBits 211`** OOD list-pinning, and
+       **`atLeastBits 132`** `[BCIKS20]` `(2η_i)⁻⁷` commit-phase soundness at every stage! -/
 theorem bciks_johnson_positive_eta_slack_and_commit_costs :
     (∀ st ∈ whirSchedule4Stage .bciksJohnsonClassical128,
       strictlyMoreThanBits 128 (whirPositiveEtaPureQueryBound st 128 (by decide)) ∧
-      strictlyMoreThanBits 208 (whirPositiveEtaOodListPinBound st 128) ∧
-      atLeastBits 144 (whirPositiveEtaCommitFoldBound st 128)) ∧
+      strictlyMoreThanBits 213 (whirPositiveEtaOodListPinBound st 128) ∧
+      atLeastBits 139 (whirPositiveEtaCommitFoldBound st 128)) ∧
     (∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128,
       strictlyMoreThanBits 256 (whirPositiveEtaPureQueryBound st 256 (by decide)) ∧
-      strictlyMoreThanBits 206 (whirPositiveEtaOodListPinBound st 256) ∧
-      atLeastBits 137 (whirPositiveEtaCommitFoldBound st 256)) := by
+      strictlyMoreThanBits 211 (whirPositiveEtaOodListPinBound st 256) ∧
+      atLeastBits 132 (whirPositiveEtaCommitFoldBound st 256)) := by
   constructor
   · intro st hMem
     simp only [whirSchedule4Stage, List.mem_cons, List.not_mem_nil, or_false] at hMem
@@ -3435,11 +3468,14 @@ def whirUnconditionalMultiStageTerms
        positive-`η` `bciksJohnsonQrom128` for ALL `qHash + 1 ≤ 2 ^ 66` (`137` per-stage bits
        minus `2` stage-union bits minus `7` session-union bits = `128` quantum bits!).
     3. **Full 13-Event Multi-Stage + Multi-Session Unconditional `[BCIKS20]` Union Bounds**:
-       - `bciksJohnsonClassical128` (`etaScale = 128`): summing ALL 13 multi-stage proximity +
-         OOD list-pinning + `(2η_i)⁻⁷` commit-folding + `Ext4` sumcheck bounds (`≤ 2^4` union loss)
-         across `S ≤ 2 ^ 12 = 4096` sessions preserves **`atLeastBits 128`** (`atLeastBits 140` per session),
-       - `bciksJohnsonQrom128` (`etaScale = 256`): summing ALL 13 unconditional multi-stage bounds
-         across `S ≤ 2 ^ 5 = 32` sessions preserves **`atLeastBits 128`** (`atLeastBits 133` per session)! -/
+       (exact 13-term rational sums on the deployed `num_vars = 24` geometry, kernel-decided)
+       - `bciksJohnsonClassical128` (`etaScale = 128`): the sum of ALL 13 multi-stage proximity +
+         OOD list-pinning + `(2η_i)⁻⁷` commit-folding + `Ext4` sumcheck bounds is
+         **`atLeastBits 139`** per session, hence **`atLeastBits 128`** across `S ≤ 2 ^ 11` sessions,
+       - `bciksJohnsonQrom128` (`etaScale = 256`): the sum of ALL 13 unconditional multi-stage bounds
+         is **`atLeastBits 132`** per session, hence **`atLeastBits 128`** across `S ≤ 2 ^ 4` sessions.
+       The `(2η_i)⁻⁷` commit-folding term of the last stage (`|D_3| = 2^19`, `L_3 = 4096`) is the
+       bottleneck; `[CWYZ26]` affine folding (§4.2) removes it. -/
 theorem whirBudgetRegime_multistage_union_and_session_bounds :
     (∀ r : WhirBudgetRegime, WhirBudgetRegime.fromU8? r.toU8 = some r) ∧
     (∀ r : WhirBudgetRegime,
@@ -3457,11 +3493,11 @@ theorem whirBudgetRegime_multistage_union_and_session_bounds :
             ((whirSchedule4Stage .bciksJohnsonQrom128).map
               (fun st => quantumGroverGrindingBound qHash
                 (whirPositiveEtaJohnsonStageBound st 256 (by decide) 16)))))) ∧
-    (∀ S : Nat, S ≤ 2 ^ 12 →
+    (∀ S : Nat, S ≤ 2 ^ 11 →
       atLeastBits 128
         (RatBound.scale S
           (RatBound.sumList (whirUnconditionalMultiStageTerms .bciksJohnsonClassical128 128 (by decide) 16)))) ∧
-    (∀ S : Nat, S ≤ 2 ^ 5 →
+    (∀ S : Nat, S ≤ 2 ^ 4 →
       atLeastBits 128
         (RatBound.scale S
           (RatBound.sumList (whirUnconditionalMultiStageTerms .bciksJohnsonQrom128 256 (by decide) 16)))) := by
@@ -3515,39 +3551,13 @@ theorem whirBudgetRegime_multistage_union_and_session_bounds :
     rw [hAssocL]
     exact Nat.le_trans hMul8 hP2
   · intro S hS
-    apply atLeastBits_scale_session_loss hS
-    apply atLeastBits_sumList_union_loss (loss := 4)
-      (by simp [whirUnconditionalMultiStageTerms, whirSchedule4Stage])
-    intro b hb
-    simp only [whirUnconditionalMultiStageTerms, List.mem_cons, List.mem_append, List.mem_map] at hb
-    rcases hb with rfl | ((⟨st, hMem, rfl⟩ | ⟨st, hMem, rfl⟩) | ⟨st, hMem, rfl⟩)
-    · unfold atLeastBits goldilocksExt4Card goldilocksPrime; decide
-    · exact Nat.le_of_lt (hem_ext4_algebraic_and_whir_regime_soundness.2.2.2.2.2.2.2.1 st hMem)
-    · exact atLeastBits_antitone_bits (by decide : 144 ≤ 208)
-        (Nat.le_of_lt (bciks_johnson_positive_eta_slack_and_commit_costs.1 st hMem).2.1)
-    · exact (bciks_johnson_positive_eta_slack_and_commit_costs.1 st hMem).2.2
+    apply atLeastBits_scale_session_loss (sLog := 11) hS
+    show atLeastBits 139 _
+    decide +kernel
   · intro S hS
-    apply atLeastBits_scale_session_loss hS
-    apply atLeastBits_sumList_union_loss (loss := 4)
-      (by simp [whirUnconditionalMultiStageTerms, whirSchedule4Stage])
-    intro b hb
-    simp only [whirUnconditionalMultiStageTerms, List.mem_cons, List.mem_append, List.mem_map] at hb
-    rcases hb with rfl | ((⟨st, hMem, rfl⟩ | ⟨st, hMem, rfl⟩) | ⟨st, hMem, rfl⟩)
-    · unfold atLeastBits goldilocksExt4Card goldilocksPrime; decide
-    · have hPure := Nat.le_of_lt (bciks_johnson_positive_eta_slack_and_commit_costs.2 st hMem).1
-      have hStage : atLeastBits 272 (whirPositiveEtaJohnsonStageBound st 256 (by decide) 16) := by
-        unfold strictlyMoreThanBits whirPositiveEtaPureQueryBound at hPure
-        unfold atLeastBits whirPositiveEtaJohnsonStageBound
-        dsimp only at hPure ⊢
-        have hMul := Nat.mul_le_mul_right (2 ^ 16) hPure
-        have hPow : (2 * 256 + 1) ^ st.numQueries * 2 ^ 256 * 2 ^ 16 =
-            (2 * 256 + 1) ^ st.numQueries * 2 ^ 272 := by
-          simp only [Nat.mul_assoc, ← Nat.pow_add]
-        rwa [hPow] at hMul
-      exact atLeastBits_antitone_bits (by decide : 137 ≤ 272) hStage
-    · exact atLeastBits_antitone_bits (by decide : 137 ≤ 206)
-        (Nat.le_of_lt (bciks_johnson_positive_eta_slack_and_commit_costs.2 st hMem).2.1)
-    · exact (bciks_johnson_positive_eta_slack_and_commit_costs.2 st hMem).2.2
+    apply atLeastBits_scale_session_loss (sLog := 4) hS
+    show atLeastBits 132 _
+    decide +kernel
 
 /-- **`#tooth` Legacy `GoldilocksExt2` Folding Bottleneck & `habr24Classical128` Grover Ceiling
     (`tooth_hem_ext2_folding_under_100bits`)**:
@@ -3555,7 +3565,7 @@ theorem whirBudgetRegime_multistage_union_and_session_bounds :
        falls strictly below 100 bits (`exceedsBitBudget 100`, ~84 bits before `(2η)^7` loss!),
     2. On `habr24Classical128` Stage 0 (`(1/4)^56 * 2^-16 = 2^-128`), offline quantum Grover grinding
        at `qHash = 2 ^ 64` breaks 128-bit quantum soundness (`exceedsBitBudget 0`), justifying why
-       `habr24Qrom128` (`q = 128, 64, 43, 32`) and `bciksJohnsonQrom128` (`q = 257, 129, 86, 65`) are
+       `habr24Qrom128` (`q = 128, 64, 43, 32`) and `bciksJohnsonQrom128` (`q = 258, 130, 88, 66`) are
        required for `136`-bit QROM round-search work! -/
 theorem tooth_hem_ext2_folding_under_100bits :
     exceedsBitBudget 100 ⟨(2 ^ 22) ^ 2, goldilocksExt2Card, goldilocksExt2Card_pos⟩ ∧
@@ -3969,6 +3979,186 @@ theorem tooth_hem_ext4_single_challenge_qrom_folding_ceiling :
     rw [ha]; exact Nat.le_trans hm hb
 
 
+/-! ### §4.2 `[CWYZ26]` Affine Combiner WHIR Upgrade & Dual-OOD List Pinning -/
+
+/-- Constructive `LawfulField` instance for `QuarticGoldilocks` (`𝔽_{p^4}`), discharging
+    every generic theorem in `Qsag.AffineProximityGaps` (`0` axioms, `0` classical choice). -/
+instance : LawfulField QuarticGoldilocks where
+  inv := QuarticGoldilocks.inv
+  zero_ne_one := by decide
+  mul_inv_cancel := QuarticGoldilocks.mul_inv_cancel
+
+/-- Concrete `QuarticGoldilocks` specialization of `committed_polynomial_pair_bad_lines_le_choose2`
+    (`[CWYZ26]` Claim 4.10 / Claim 4.13 Case (b)): for any candidate polynomial pair `(F_poly, G_poly)`,
+    at most `|D|(|D| - 1)/2` challenge pairs `(α, β) ∈ S × S` produce `≥ 2` accidental agreements on `D`. -/
+theorem goldilocksExt4_committed_pair_bad_lines_le_choose2
+    (F_poly G_poly : List QuarticGoldilocks)
+    (f g : QuarticGoldilocks → QuarticGoldilocks)
+    (D S : List QuarticGoldilocks)
+    (hD : D.Nodup) (hS : S.Nodup) :
+    ((prodPool S).filter (fun p =>
+      decide (2 ≤ (D.filter (isAccidentalAgreement F_poly G_poly f g p.1 p.2)).length))).length ≤
+      D.length * (D.length - 1) / 2 :=
+  committed_polynomial_pair_bad_lines_le_choose2 F_poly G_poly f g D S hD hS
+
+/-- Concrete `QuarticGoldilocks` specialization of `welch_berlekamp_affine_proximity_gap`
+    (`[CWYZ26]` Theorem 4.1 / Remark 4.16 at `m = 1, D = 1`): in the `2|D| + d + 1 < 3A` regime,
+    at most `max(|S|, |D|(|D|-1)/2)` challenge pairs `(α, β) ∈ S × S` fail `s = 1` persistent
+    agreement, collapsing scalar batching's `n/q` barrier to `1/q + n(n-1)/(2q^2)`! -/
+theorem goldilocksExt4_welch_berlekamp_affine_proximity_gap
+    (f g : QuarticGoldilocks → QuarticGoldilocks)
+    (D S : List QuarticGoldilocks)
+    (d A : Nat)
+    (badPairs : List (QuarticGoldilocks × QuarticGoldilocks))
+    (P_of : QuarticGoldilocks × QuarticGoldilocks → List QuarticGoldilocks)
+    (hD : D.Nodup) (hS : S.Nodup)
+    (hAD : A ≤ D.length) (hWB : 2 * D.length + d + 1 < 3 * A)
+    (hBadNd : badPairs.Nodup)
+    (hBadSub : ∀ p ∈ badPairs, p ∈ prodPool S)
+    (hBadDeg : ∀ p ∈ badPairs, (P_of p).length ≤ d + 1)
+    (hBadAgree : ∀ p ∈ badPairs, A ≤ (D.filter (fun z =>
+      decide (RoundPoly.evalCoeffs (P_of p) z =
+        CommRingOps.add (f z)
+          (CommRingOps.mul (CommRingOps.add p.1 (CommRingOps.mul p.2 z)) (g z))))).length)
+    (hBadExc : ∀ p ∈ badPairs, ¬ HasAffineWitnessS1 d f g D p.1 p.2 (P_of p)) :
+    badPairs.length ≤ Nat.max S.length (D.length * (D.length - 1) / 2) :=
+  welch_berlekamp_affine_proximity_gap f g D S d A badPairs P_of
+    hD hS hAD hWB hBadNd hBadSub hBadDeg hBadAgree hBadExc
+
+/-- `[CWYZ26]` Theorem 4.8 + Theorem 5.1 (`Eq. 5.7`) commit-phase equal-degree affine folding
+    error bound `whirAffineStageSimpleNum w / p^4` across `w.sFolds` binary folds over
+    `QuarticGoldilocks` (certified upper-bounding `whirAffineStageExactNumQ2 w (p^4) / (p^4)^2`
+    whenever `checkWhirAffineWitness w (goldilocksPrime ^ 4) = true`). -/
+def whirAffineEqualDegreeCommitFoldBound (w : WhirAffineWitness) : RatBound :=
+  ⟨whirAffineStageSimpleNum w, goldilocksExt4Card, goldilocksExt4Card_pos⟩
+
+/-- Exact pure `s_i`-loss proximity query bound for `[CWYZ26]` affine WHIR stage witness `w`
+    (before per-stage PoW): the probability `(A + s_i)_{q_i} / (n)_{q_i}` that `q_i` DISTINCT
+    uniformly sampled fibers all land in a set of `A + s_i` out of `n` fibers. -/
+def whirAffinePureQueryBound (w : WhirAffineWitness) (hq : w.queries ≤ w.n) : RatBound :=
+  ⟨fallingFactorial (w.A + w.sFolds) w.queries, fallingFactorial w.n w.queries,
+   fallingFactorial_pos w.n w.queries hq⟩
+
+/-- Composed `[CWYZ26]` affine WHIR stage query-plus-PoW bound
+    `(A + s_i)_{q_i} / ((n)_{q_i} * 2 ^ powBits)`. -/
+def whirAffineStageBound (w : WhirAffineWitness) (hq : w.queries ≤ w.n) (powBits : Nat) : RatBound :=
+  ⟨fallingFactorial (w.A + w.sFolds) w.queries,
+   fallingFactorial w.n w.queries * 2 ^ powBits,
+   Nat.mul_pos (fallingFactorial_pos w.n w.queries hq) (Nat.two_pow_pos powBits)⟩
+
+/-- A pure query bound strictly beyond `queryTargetBits` gives the PoW-ground stage bound
+    `queryTargetBits + powBits` bits. -/
+theorem whirAffineStageBound_atLeastBits (w : WhirAffineWitness) (hq : w.queries ≤ w.n)
+    (powBits : Nat)
+    (hPure : strictlyMoreThanBits w.queryTargetBits (whirAffinePureQueryBound w hq)) :
+    atLeastBits (w.queryTargetBits + powBits) (whirAffineStageBound w hq powBits) := by
+  unfold strictlyMoreThanBits whirAffinePureQueryBound at hPure
+  unfold atLeastBits whirAffineStageBound
+  dsimp only at hPure ⊢
+  rw [Nat.pow_add, ← Nat.mul_assoc]
+  exact Nat.mul_le_mul_right _ (Nat.le_of_lt hPure)
+
+/-- Dual-OOD (`m_OOD = 2`) list-pinning collision bound `L_i^2 * (|D_i| / p^4)^2` over
+    `QuarticGoldilocks`, replacing single-OOD `L_i^2 * |D_i| / p^4` (`≈ 2⁻²¹¹`) with `> 441` bits
+    of collision resistance so list-pinning never bottlenecks QROM grinding at `qHash ≤ 2^56`. -/
+def whirDualOodListPinBound (st : WhirStageBudget) (etaScale : Nat) : RatBound :=
+  ⟨(whirJohnsonListSize st etaScale) ^ 2 * (2 ^ st.domainLog2) ^ 2,
+   goldilocksExt4Card ^ 2,
+   Nat.pow_pos goldilocksExt4Card_pos⟩
+
+/-- Stage-0 `nv = 20` QROM `[CWYZ26]` affine WHIR witness: the DEPLOYED row
+    `(20, 0, A = 65948, m = 128, D = 18111)` of `affine_schedule.rs::WITNESSES` (`B = A - 1`) on
+    the deployed geometry (`n = 2^17`, `d = 2^15 + 2`, `s_0 = 5`, `q_0 = 258`,
+    `queryTargetBits = 256`, `whirAffineStageSimpleNum = 1210 < 1900`). -/
+def whirNv20QromStage0 : WhirAffineWitness :=
+  { n := 131072, d := 32770, sFolds := 5, A := 65948, B := 65947,
+    m := 128, D := 18111, queries := 258, queryTargetBits := 256 }
+
+/-- Soundness extractor turning a validated `WhirAffineWitness` (`checkWhirAffineWitness = true`,
+    `whirAffineStageSimpleNum < 1900`) into exact rational and QROM bit-security bounds. -/
+theorem whirAffineWitness_sound_of_valid (w : WhirAffineWitness)
+    (hok : checkWhirAffineWitness w (goldilocksPrime ^ 4) = true)
+    (hSimple : whirAffineStageSimpleNum w < 1900) :
+    ∃ hq : w.queries ≤ w.n,
+      whirAffineStageExactNumQ2 w goldilocksExt4Card ≤
+        whirAffineStageSimpleNum w * goldilocksExt4Card ∧
+      atLeastBits 244 (whirAffineEqualDegreeCommitFoldBound w) ∧
+      strictlyMoreThanBits w.queryTargetBits (whirAffinePureQueryBound w hq) ∧
+      (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 56 →
+        atLeastBits 130
+          (quantumGroverGrindingBound qHash (whirAffineEqualDegreeCommitFoldBound w))) := by
+  have hCardEq : goldilocksExt4Card = goldilocksPrime ^ 4 := rfl
+  have hExact := whirAffineStageExactNumQ2_le_simple_mul_q w (goldilocksPrime ^ 4) hok
+  rw [← hCardEq] at hExact
+  unfold checkWhirAffineWitness at hok
+  have hProps := of_decide_eq_true hok
+  rcases hProps with ⟨_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, hqn, hQuery⟩
+  refine ⟨hqn, hExact, ?_, hQuery, ?_⟩
+  · unfold atLeastBits whirAffineEqualDegreeCommitFoldBound
+    dsimp only
+    have h1 : whirAffineStageSimpleNum w * 2 ^ 244 ≤ 1900 * 2 ^ 244 :=
+      Nat.mul_le_mul_right _ (Nat.le_of_lt hSimple)
+    have h2 : 1900 * 2 ^ 244 ≤ goldilocksExt4Card := by
+      unfold goldilocksExt4Card goldilocksPrime; decide
+    exact Nat.le_trans h1 h2
+  · intro qHash hq
+    unfold atLeastBits quantumGroverGrindingBound whirAffineEqualDegreeCommitFoldBound RatBound.scale
+    dsimp only
+    have h8 : 8 * (qHash + 1) ^ 2 ≤ 2 ^ 115 := by
+      have p1 : (qHash + 1) ^ 2 ≤ (2 ^ 56) ^ 2 := Nat.pow_le_pow_left hq 2
+      have p2 : 8 * (2 ^ 56) ^ 2 = 2 ^ 115 := by decide
+      rw [← p2]; exact Nat.mul_le_mul_left 8 p1
+    have hm1 := Nat.mul_le_mul_right (whirAffineStageSimpleNum w * 2 ^ 130) h8
+    have hm2 : 2 ^ 115 * (whirAffineStageSimpleNum w * 2 ^ 130) ≤ 2 ^ 115 * (1900 * 2 ^ 130) :=
+      Nat.mul_le_mul_left _ (Nat.mul_le_mul_right _ (Nat.le_of_lt hSimple))
+    have ha : 8 * (qHash + 1) ^ 2 * whirAffineStageSimpleNum w * 2 ^ 130 =
+        8 * (qHash + 1) ^ 2 * (whirAffineStageSimpleNum w * 2 ^ 130) := by
+      simp only [Nat.mul_assoc]
+    have hb : 2 ^ 115 * (1900 * 2 ^ 130) ≤ goldilocksExt4Card := by
+      unfold goldilocksExt4Card goldilocksPrime; decide
+    rw [ha]
+    exact Nat.le_trans hm1 (Nat.le_trans hm2 hb)
+
+/-- **`[CWYZ26]` All-Stage `nv = 20` & `nv = 24` Affine WHIR + Dual-OOD Soundness Theorem
+    (`cwyz26_affine_whir_nv20_and_nv24_stage_soundness`)**:
+    1. Every stage witness across `nv = 20` (`3` stages) and `nv = 24` (`4` stages) for both
+       `BciksJohnsonClassical128` (`129, 65, 44, 33`) and `BciksJohnsonQrom128` (`258, 130, 88, 66`)
+       satisfies `whirAffineStageExactNumQ2 ≤ whirAffineStageSimpleNum * p^4`, achieves
+       **`atLeastBits 244`** commit-folding soundness (replacing `[BCIKS20]`'s `132–175` bits!),
+       achieves **`strictlyMoreThanBits queryTargetBits`** (`> 128` classical / `> 256` QROM) exact
+       distinct-fiber `s_i`-loss query soundness BEFORE PoW, and survives QROM Grover grinding at **`atLeastBits 130`**
+       for ALL `qHash + 1 ≤ 2 ^ 56`!
+    2. Dual-OOD (`m_OOD = 2`) list pinning achieves **`strictlyMoreThanBits 441`** across all 4
+       `bciksJohnsonQrom128` stages! -/
+theorem cwyz26_affine_whir_nv20_and_nv24_stage_soundness :
+    (∀ w ∈ whirAffineStageWitnesses 20 false ++ whirAffineStageWitnesses 20 true ++
+           whirAffineStageWitnesses 24 false ++ whirAffineStageWitnesses 24 true,
+      ∃ hq : w.queries ≤ w.n,
+        whirAffineStageExactNumQ2 w goldilocksExt4Card ≤
+          whirAffineStageSimpleNum w * goldilocksExt4Card ∧
+        atLeastBits 244 (whirAffineEqualDegreeCommitFoldBound w) ∧
+        strictlyMoreThanBits w.queryTargetBits (whirAffinePureQueryBound w hq) ∧
+        (∀ qHash : Nat, qHash + 1 ≤ 2 ^ 56 →
+          atLeastBits 130
+            (quantumGroverGrindingBound qHash (whirAffineEqualDegreeCommitFoldBound w)))) ∧
+    (∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128,
+      strictlyMoreThanBits 441 (whirDualOodListPinBound st 256)) := by
+  rcases cwyz26_whir_nv20_and_nv24_all_stages_valid with ⟨h20c, h20q, h24c, h24q⟩
+  refine ⟨?_, ?_⟩
+  · intro w hw
+    simp only [List.mem_append] at hw
+    rcases hw with ((hw | hw) | hw) | hw
+    · rcases h20c w hw with ⟨hok, hlt⟩; exact whirAffineWitness_sound_of_valid w hok hlt
+    · rcases h20q w hw with ⟨hok, hlt⟩; exact whirAffineWitness_sound_of_valid w hok hlt
+    · rcases h24c w hw with ⟨hok, hlt⟩; exact whirAffineWitness_sound_of_valid w hok hlt
+    · rcases h24q w hw with ⟨hok, hlt⟩; exact whirAffineWitness_sound_of_valid w hok hlt
+  · intro st hMem
+    simp only [whirSchedule4Stage, List.mem_cons, List.not_mem_nil, or_false] at hMem
+    rcases hMem with rfl | rfl | rfl | rfl <;>
+      (unfold strictlyMoreThanBits whirDualOodListPinBound whirJohnsonListSize
+         goldilocksExt4Card goldilocksPrime; decide)
+
+
 /-! ## §6. Master Composed `PQ128` Portfolio Theorem & Non-Vacuity Inhabitedness Witness -/
 
 /-- Enumeration of all 12 certified `PQ128` post-quantum profiles across the QSAG suite. -/
@@ -3998,9 +4188,11 @@ theorem mldsa44ChallengeLowerBound_pos : 0 < mldsa44ChallengeLowerBound := by
   unfold mldsa44ChallengeLowerBound; decide
 
 /-- Complete 12-profile parameterized `PQ128` concrete security roster evaluated at query budget `b`.
-    Note `.hemExt4WhirPq128` uses honest un-squared single-check `Ext4` algebraic bounds paired with
-    `bciksJohnsonQrom128` Stage 0 (`q_0 = 257`, positive proximity slack `η_0 = 1/1024`, `L_0 = 512`,
-    `16`-bit PoW). -/
+    Note `.hemExt4WhirPq128` uses `[CWYZ26]` equal-degree affine combiners (`f + (α + β X) g`,
+    `whirAffineEqualDegreeCommitFoldBound whirNv20QromStage0` with `whirAffineStageSimpleNum = 1210`),
+    dual-OOD list pinning (`m_OOD = 2`, `whirDualOodListPinBound`), and `q_0 = 258` `s_0`-loss
+    proximity queries (`whirAffineStageBound`, `16`-bit PoW), lifting the QROM portfolio ceiling
+    from `qHash ≤ 2^21` to `qHash + 1 ≤ 2^56` across ALL 12 profiles! -/
 def qsagPq128PortfolioRoster (b : QueryBudget) : List QsagPq128ProfileEntry :=
   [ { profileId := .baggySha3V128
       classicalBound := ⟨b.qHash + 1, 2 ^ 256, Nat.two_pow_pos 256⟩
@@ -4023,21 +4215,21 @@ def qsagPq128PortfolioRoster (b : QueryBudget) : List QsagPq128ProfileEntry :=
           [ classicalFiatShamirBound b.qHash
               ⟨72, goldilocksExt4Card, goldilocksExt4Card_pos⟩,
             classicalFiatShamirBound b.qHash
-              ⟨2 ^ 80, goldilocksExt4Card, goldilocksExt4Card_pos⟩,
+              (whirAffineEqualDegreeCommitFoldBound whirNv20QromStage0),
             classicalFiatShamirBound b.qHash
-              ⟨2 ^ 30, goldilocksExt4Card, goldilocksExt4Card_pos⟩,
+              (whirDualOodListPinBound ⟨2, 5, 22, 258, by decide⟩ 256),
             classicalFiatShamirBound b.qHash
-              (whirPositiveEtaJohnsonStageBound ⟨2, 5, 22, 257, by decide⟩ 256 (by decide) 16) ]
+              (whirAffineStageBound whirNv20QromStage0 (by decide) 16) ]
       quantumBound :=
         RatBound.sumList
           [ quantumGroverGrindingBound b.qHash
               ⟨72, goldilocksExt4Card, goldilocksExt4Card_pos⟩,
             quantumGroverGrindingBound b.qHash
-              ⟨2 ^ 80, goldilocksExt4Card, goldilocksExt4Card_pos⟩,
+              (whirAffineEqualDegreeCommitFoldBound whirNv20QromStage0),
             quantumGroverGrindingBound b.qHash
-              ⟨2 ^ 30, goldilocksExt4Card, goldilocksExt4Card_pos⟩,
+              (whirDualOodListPinBound ⟨2, 5, 22, 258, by decide⟩ 256),
             quantumGroverGrindingBound b.qHash
-              (whirPositiveEtaJohnsonStageBound ⟨2, 5, 22, 257, by decide⟩ 256 (by decide) 16) ] },
+              (whirAffineStageBound whirNv20QromStage0 (by decide) 16) ] },
     { profileId := .blindVcQuantum438
       classicalBound :=
         RatBound.add
@@ -4192,22 +4384,30 @@ theorem qsag_pq128_high_query_2pow56_non_folding_budget (b : QueryBudget)
            atLeastBits_add_union_loss hQromZkb438 (atLeastBits_antitone_bits (by decide) hQrom256)⟩
 
 /-- **Master Composed Portfolio Theorem (`qsag_pq128_portfolio_soundness_budget`)**:
-    For ANY `QueryBudget` `b` with `qHash + 1 ≤ 2 ^ 21` and `qOnlineSessions + 1 ≤ 2 ^ 20`,
-    ALL 12 post-quantum profiles in `qsagPq128PortfolioRoster b` — including honest un-squared
-    single-check `Ext4` `Hem` aggregation with `bciksJohnsonQrom128` positive-`η` proximity —
-    simultaneously achieve **`atLeastBits 128`** for BOTH their composed classical bound AND their
-    composed QROM quantum bound! -/
+    For ANY `QueryBudget` `b` with `qHash + 1 ≤ 2 ^ 56` and `qOnlineSessions + 1 ≤ 2 ^ 20`,
+    ALL 12 post-quantum profiles in `qsagPq128PortfolioRoster b` — including `[CWYZ26]` affine-folded
+    `Ext4` `Hem` aggregation with dual-OOD list pinning and `q_0 = 258` `bciksJohnsonQrom128`
+    `s_0`-loss proximity — simultaneously achieve **`atLeastBits 128`** for BOTH their composed
+    classical bound AND their composed QROM quantum bound! -/
 theorem qsag_pq128_portfolio_soundness_budget (b : QueryBudget)
-    (hqHash : b.qHash + 1 ≤ 2 ^ 21) (hqSess : b.qOnlineSessions + 1 ≤ 2 ^ 20) :
+    (hqHash : b.qHash + 1 ≤ 2 ^ 56) (hqSess : b.qOnlineSessions + 1 ≤ 2 ^ 20) :
     (qsagPq128PortfolioRoster b).length = 12 ∧
     (∀ entry ∈ qsagPq128PortfolioRoster b,
       atLeastBits 128 entry.classicalBound ∧ atLeastBits 128 entry.quantumBound) := by
-  have hq56 : b.qHash + 1 ≤ 2 ^ 56 := Nat.le_trans hqHash (by decide)
-  have hHi := qsag_pq128_high_query_2pow56_non_folding_budget b hq56 hqSess
-  have h8Sq21 : 8 * (b.qHash + 1) ^ 2 ≤ 2 ^ 45 := by
-    have p1 : (b.qHash + 1) ^ 2 ≤ (2 ^ 21) ^ 2 := Nat.pow_le_pow_left hqHash 2
-    have p2 : 8 * (2 ^ 21) ^ 2 = 2 ^ 45 := by decide
+  have hHi := qsag_pq128_high_query_2pow56_non_folding_budget b hqHash hqSess
+  have h8Sq : 8 * (b.qHash + 1) ^ 2 ≤ 2 ^ 115 := by
+    have p1 : (b.qHash + 1) ^ 2 ≤ (2 ^ 56) ^ 2 := Nat.pow_le_pow_left hqHash 2
+    have p2 : 8 * (2 ^ 56) ^ 2 = 2 ^ 115 := by decide
     rw [← p2]; exact Nat.mul_le_mul_left 8 p1
+  have hSt0Mem : whirNv20QromStage0 ∈ whirAffineStageWitnesses 20 true := by
+    rw [whirAffineStageWitnesses_qrom_eq_deployed.1]
+    exact .head _
+  rcases cwyz26_whir_nv20_and_nv24_all_stages_valid.2.1 whirNv20QromStage0 hSt0Mem with
+    ⟨hSt0Ok, hSt0Lt⟩
+  rcases whirAffineWitness_sound_of_valid whirNv20QromStage0 hSt0Ok hSt0Lt with
+    ⟨hSt0q, _, _, hSt0Pure, hSt0FoldQrom⟩
+  have hSt0Stage : atLeastBits (256 + 16) (whirAffineStageBound whirNv20QromStage0 hSt0q 16) :=
+    whirAffineStageBound_atLeastBits whirNv20QromStage0 hSt0q 16 hSt0Pure
   refine ⟨rfl, ?_⟩
   intro entry hMem
   by_cases hId : entry.profileId = .hemExt4WhirPq128
@@ -4228,86 +4428,58 @@ theorem qsag_pq128_portfolio_soundness_budget (b : QueryBudget)
           have hm := Nat.mul_le_mul_right (72 * 2 ^ 130) hqHash
           have ha : (b.qHash + 1) * 72 * 2 ^ 130 = (b.qHash + 1) * (72 * 2 ^ 130) := by
             simp only [Nat.mul_assoc]
-          have hb : 2 ^ 21 * (72 * 2 ^ 130) ≤ goldilocksExt4Card := by
+          have hb : 2 ^ 56 * (72 * 2 ^ 130) ≤ goldilocksExt4Card := by
             unfold goldilocksExt4Card goldilocksPrime; decide
           rw [ha]; exact Nat.le_trans hm hb
-        · unfold atLeastBits classicalFiatShamirBound RatBound.scale
+        · unfold atLeastBits classicalFiatShamirBound whirAffineEqualDegreeCommitFoldBound RatBound.scale
           dsimp only
-          have hm := Nat.mul_le_mul_right (2 ^ 80 * 2 ^ 130) hqHash
-          have ha : (b.qHash + 1) * 2 ^ 80 * 2 ^ 130 = (b.qHash + 1) * (2 ^ 80 * 2 ^ 130) := by
+          have hm1 := Nat.mul_le_mul_right (whirAffineStageSimpleNum whirNv20QromStage0 * 2 ^ 130) hqHash
+          have hm2 : 2 ^ 56 * (whirAffineStageSimpleNum whirNv20QromStage0 * 2 ^ 130) ≤
+              2 ^ 56 * (1900 * 2 ^ 130) :=
+            Nat.mul_le_mul_left _ (Nat.mul_le_mul_right _ (Nat.le_of_lt hSt0Lt))
+          have ha : (b.qHash + 1) * whirAffineStageSimpleNum whirNv20QromStage0 * 2 ^ 130 =
+              (b.qHash + 1) * (whirAffineStageSimpleNum whirNv20QromStage0 * 2 ^ 130) := by
             simp only [Nat.mul_assoc]
-          have hb : 2 ^ 21 * (2 ^ 80 * 2 ^ 130) ≤ goldilocksExt4Card := by
+          have hb : 2 ^ 56 * (1900 * 2 ^ 130) ≤ goldilocksExt4Card := by
             unfold goldilocksExt4Card goldilocksPrime; decide
-          rw [ha]; exact Nat.le_trans hm hb
-        · unfold atLeastBits classicalFiatShamirBound RatBound.scale
+          rw [ha]; exact Nat.le_trans hm1 (Nat.le_trans hm2 hb)
+        · unfold atLeastBits classicalFiatShamirBound whirDualOodListPinBound whirJohnsonListSize
+            RatBound.scale
           dsimp only
-          have hm := Nat.mul_le_mul_right (2 ^ 30 * 2 ^ 130) hqHash
-          have ha : (b.qHash + 1) * 2 ^ 30 * 2 ^ 130 = (b.qHash + 1) * (2 ^ 30 * 2 ^ 130) := by
+          have hm := Nat.mul_le_mul_right ((256 * 2) ^ 2 * (2 ^ 22) ^ 2 * 2 ^ 130) hqHash
+          have ha : (b.qHash + 1) * ((256 * 2) ^ 2 * (2 ^ 22) ^ 2) * 2 ^ 130 =
+              (b.qHash + 1) * ((256 * 2) ^ 2 * (2 ^ 22) ^ 2 * 2 ^ 130) := by
             simp only [Nat.mul_assoc]
-          have hb : 2 ^ 21 * (2 ^ 30 * 2 ^ 130) ≤ goldilocksExt4Card := by
+          have hb : 2 ^ 56 * ((256 * 2) ^ 2 * (2 ^ 22) ^ 2 * 2 ^ 130) ≤ goldilocksExt4Card ^ 2 := by
             unfold goldilocksExt4Card goldilocksPrime; decide
           rw [ha]; exact Nat.le_trans hm hb
-        · have hSt0 : (⟨2, 5, 22, 257, by decide⟩ : WhirStageBudget) ∈
-              whirSchedule4Stage .bciksJohnsonQrom128 := by
-            simp [whirSchedule4Stage]
-          have hPure := Nat.le_of_lt (bciks_johnson_positive_eta_slack_and_commit_costs.2 _ hSt0).1
-          unfold strictlyMoreThanBits whirPositiveEtaPureQueryBound at hPure
-          unfold atLeastBits classicalFiatShamirBound whirPositiveEtaJohnsonStageBound RatBound.scale
-          dsimp only at hPure ⊢
-          have hm := Nat.mul_le_mul_right ((2 * 256 + 1) ^ 257 * 2 ^ 130) hqHash
-          have ha : (b.qHash + 1) * (2 * 256 + 1) ^ 257 * 2 ^ 130 =
-              (b.qHash + 1) * ((2 * 256 + 1) ^ 257 * 2 ^ 130) := by simp only [Nat.mul_assoc]
-          have hb : 2 ^ 21 * ((2 * 256 + 1) ^ 257 * 2 ^ 130) ≤
-              (2 * 256 + 1) ^ 257 * 2 ^ 256 * 2 ^ 16 := by
-            have h1 : 2 ^ 21 * ((2 * 256 + 1) ^ 257 * 2 ^ 130) =
-                (2 * 256 + 1) ^ 257 * (2 ^ 21 * 2 ^ 130) := by
-              rw [Nat.mul_left_comm (2 ^ 21)]
-            have h2 : 2 ^ 21 * 2 ^ 130 ≤ 2 ^ 256 * 2 ^ 16 := by decide
-            rw [h1, Nat.mul_assoc]
-            exact Nat.mul_le_mul_left _ h2
-          rw [ha]
-          exact Nat.le_trans hm (Nat.le_trans hb (Nat.mul_le_mul_right (2 ^ 16) hPure))
+        · exact atLeastBits_scale_session_loss (sLog := 56) hqHash
+            (atLeastBits_antitone_bits (by decide : 128 + 2 + 56 ≤ 256 + 16) hSt0Stage)
       · apply atLeastBits_sumList_union_loss (loss := 2) (by simp)
         intro r hr
         simp only [List.mem_cons, List.not_mem_nil, or_false] at hr
         rcases hr with rfl | rfl | rfl | rfl
         · unfold atLeastBits quantumGroverGrindingBound RatBound.scale
           dsimp only
-          have hm := Nat.mul_le_mul_right (72 * 2 ^ 130) h8Sq21
+          have hm := Nat.mul_le_mul_right (72 * 2 ^ 130) h8Sq
           have ha : 8 * (b.qHash + 1) ^ 2 * 72 * 2 ^ 130 =
               8 * (b.qHash + 1) ^ 2 * (72 * 2 ^ 130) := by simp only [Nat.mul_assoc]
-          have hb : 2 ^ 45 * (72 * 2 ^ 130) ≤ goldilocksExt4Card := by
+          have hb : 2 ^ 115 * (72 * 2 ^ 130) ≤ goldilocksExt4Card := by
             unfold goldilocksExt4Card goldilocksPrime; decide
           rw [ha]; exact Nat.le_trans hm hb
-        · exact tooth_hem_ext4_single_challenge_qrom_folding_ceiling.1 b.qHash hqHash
-        · unfold atLeastBits quantumGroverGrindingBound RatBound.scale
+        · exact hSt0FoldQrom b.qHash hqHash
+        · unfold atLeastBits quantumGroverGrindingBound whirDualOodListPinBound whirJohnsonListSize
+            RatBound.scale
           dsimp only
-          have hm := Nat.mul_le_mul_right (2 ^ 30 * 2 ^ 130) h8Sq21
-          have ha : 8 * (b.qHash + 1) ^ 2 * 2 ^ 30 * 2 ^ 130 =
-              8 * (b.qHash + 1) ^ 2 * (2 ^ 30 * 2 ^ 130) := by simp only [Nat.mul_assoc]
-          have hb : 2 ^ 45 * (2 ^ 30 * 2 ^ 130) ≤ goldilocksExt4Card := by
+          have hm := Nat.mul_le_mul_right ((256 * 2) ^ 2 * (2 ^ 22) ^ 2 * 2 ^ 130) h8Sq
+          have ha : 8 * (b.qHash + 1) ^ 2 * ((256 * 2) ^ 2 * (2 ^ 22) ^ 2) * 2 ^ 130 =
+              8 * (b.qHash + 1) ^ 2 * ((256 * 2) ^ 2 * (2 ^ 22) ^ 2 * 2 ^ 130) := by
+            simp only [Nat.mul_assoc]
+          have hb : 2 ^ 115 * ((256 * 2) ^ 2 * (2 ^ 22) ^ 2 * 2 ^ 130) ≤ goldilocksExt4Card ^ 2 := by
             unfold goldilocksExt4Card goldilocksPrime; decide
           rw [ha]; exact Nat.le_trans hm hb
-        · have hSt0 : (⟨2, 5, 22, 257, by decide⟩ : WhirStageBudget) ∈
-              whirSchedule4Stage .bciksJohnsonQrom128 := by
-            simp [whirSchedule4Stage]
-          have hPure := Nat.le_of_lt (bciks_johnson_positive_eta_slack_and_commit_costs.2 _ hSt0).1
-          unfold strictlyMoreThanBits whirPositiveEtaPureQueryBound at hPure
-          unfold atLeastBits quantumGroverGrindingBound whirPositiveEtaJohnsonStageBound RatBound.scale
-          dsimp only at hPure ⊢
-          have hm := Nat.mul_le_mul_right ((2 * 256 + 1) ^ 257 * 2 ^ 130) h8Sq21
-          have ha : 8 * (b.qHash + 1) ^ 2 * (2 * 256 + 1) ^ 257 * 2 ^ 130 =
-              8 * (b.qHash + 1) ^ 2 * ((2 * 256 + 1) ^ 257 * 2 ^ 130) := by simp only [Nat.mul_assoc]
-          have hb : 2 ^ 45 * ((2 * 256 + 1) ^ 257 * 2 ^ 130) ≤
-              (2 * 256 + 1) ^ 257 * 2 ^ 256 * 2 ^ 16 := by
-            have h1 : 2 ^ 45 * ((2 * 256 + 1) ^ 257 * 2 ^ 130) =
-                (2 * 256 + 1) ^ 257 * (2 ^ 45 * 2 ^ 130) := by
-              rw [Nat.mul_left_comm (2 ^ 45)]
-            have h2 : 2 ^ 45 * 2 ^ 130 ≤ 2 ^ 256 * 2 ^ 16 := by decide
-            rw [h1, Nat.mul_assoc]
-            exact Nat.mul_le_mul_left _ h2
-          rw [ha]
-          exact Nat.le_trans hm (Nat.le_trans hb (Nat.mul_le_mul_right (2 ^ 16) hPure))
+        · exact atLeastBits_scale_session_loss (sLog := 115) h8Sq
+            (atLeastBits_antitone_bits (by decide : 128 + 2 + 115 ≤ 256 + 16) hSt0Stage)
     · cases hId
     · cases hId
     · cases hId
