@@ -1109,16 +1109,207 @@ impl PolicySignerGuardShare {
         }
         Ok(v[peer_slot])
     }
+
+    fn has_global_velocity_intersection(
+        &self,
+        policy: &TransactionPolicy,
+        quorum_ids: &[u16],
+    ) -> bool {
+        if policy.velocity_window_cap == u128::MAX {
+            return true;
+        }
+        let full_committee = quorum_ids.len() == 1 + self.pairwise_zero_seeds.len();
+        let fixed_guardian = policy
+            .hardware_guardian_party
+            .is_some_and(|hw| quorum_ids.contains(&hw));
+        full_committee || fixed_guardian
+    }
+}
+
+/// Committee-wide cumulative velocity-spend and replay ledger for guardian-less multi-quorum
+/// barriers (`evaluate_policy_committed_barrier_with_ledger`).
+///
+/// When non-intersecting signer subsets (such as `{1, 2}` and `{3, 4}` in a 2-of-4 committee
+/// without a fixed accounting `hardware_guardian_party`) can approve spends within the same
+/// velocity window, per-party guard ledgers alone cannot observe disjoint quorums. Passing a
+/// shared ledger enforces global cumulative window spend and nonce/session uniqueness across
+/// every quorum switch.
+pub struct SharedWindowSpendLedger {
+    policy_digest: [u8; 32],
+    current_window_id: u64,
+    accumulated_window_spend: u128,
+    burned_intent_nonces: Vec<[u8; 32]>,
+    min_nonce_watermark: Option<[u8; 32]>,
+    burned_sessions: Vec<[u8; 32]>,
+    min_session_watermark: Option<[u8; 32]>,
+    window_authority: Option<WindowAuthority>,
+}
+
+impl SharedWindowSpendLedger {
+    pub fn new(policy: &TransactionPolicy, initial_window_id: u64) -> Self {
+        Self {
+            policy_digest: policy.canonical_digest(),
+            current_window_id: initial_window_id,
+            accumulated_window_spend: 0,
+            burned_intent_nonces: Vec::new(),
+            min_nonce_watermark: None,
+            burned_sessions: Vec::new(),
+            min_session_watermark: None,
+            window_authority: None,
+        }
+    }
+
+    pub fn with_window_authority(
+        mut self,
+        policy_id: [u8; 32],
+        key: [u8; 32],
+    ) -> Result<Self, PolicyViolation> {
+        if self.window_authority.is_some() {
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        self.window_authority = Some(WindowAuthority { policy_id, key });
+        Ok(self)
+    }
+
+    pub const fn current_window_id(&self) -> u64 {
+        self.current_window_id
+    }
+
+    pub const fn accumulated_window_spend(&self) -> u128 {
+        self.accumulated_window_spend
+    }
+
+    pub fn is_nonce_burned(&self, nonce: &[u8; 32]) -> bool {
+        let mut hit = self.min_nonce_watermark.is_some_and(|floor| *nonce <= floor);
+        for b in &self.burned_intent_nonces {
+            hit |= ct_eq_bytes(b, nonce);
+        }
+        hit
+    }
+
+    pub fn is_session_burned(&self, session_id: &[u8; 32]) -> bool {
+        let mut hit = self
+            .min_session_watermark
+            .is_some_and(|floor| *session_id <= floor);
+        for b in &self.burned_sessions {
+            hit |= ct_eq_bytes(b, session_id);
+        }
+        hit
+    }
+
+    pub fn advance_velocity_window(
+        &mut self,
+        authorization: &WindowAdvanceAuthorization,
+    ) -> Result<(), PolicyViolation> {
+        let next_window_id = authorization.new_window_epoch;
+        if next_window_id <= self.current_window_id {
+            return Err(PolicyViolation::WindowIdMismatch);
+        }
+        let authority = self
+            .window_authority
+            .as_ref()
+            .ok_or(PolicyViolation::IntentBindingMismatch)?;
+        let expected = WindowAdvanceAuthorization::new(
+            &authority.key,
+            &authority.policy_id,
+            self.current_window_id,
+            next_window_id,
+        );
+        if !ct_eq_bytes(&expected.mac, &authorization.mac) {
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        self.current_window_id = next_window_id;
+        self.accumulated_window_spend = 0;
+        Ok(())
+    }
+
+    fn check_projected_spend(
+        &self,
+        policy: &TransactionPolicy,
+        intent: &TransactionIntent,
+        session_id: &[u8; 32],
+    ) -> Result<u128, PolicyViolation> {
+        if !ct_eq_bytes(&policy.canonical_digest(), &self.policy_digest) {
+            return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        if intent.window_id != self.current_window_id {
+            return Err(PolicyViolation::WindowIdMismatch);
+        }
+        if self.is_nonce_burned(&intent.nonce) || self.is_session_burned(session_id) {
+            return Err(PolicyViolation::DuplicateIntentNonce);
+        }
+        let effective_prior = self
+            .accumulated_window_spend
+            .max(intent.rolling_window_spent);
+        let guard = qsag_verified::StatefulVelocityGuard::new_window(
+            self.current_window_id,
+            policy.velocity_window_cap,
+            self.policy_digest,
+            *session_id,
+        );
+        let (guard, prior_res) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
+            window_id: intent.window_id,
+            nonce: 1,
+            amount_units: effective_prior,
+            policy_pin: self.policy_digest,
+            authority_pin: *session_id,
+        });
+        if prior_res.is_err() {
+            return Err(PolicyViolation::VelocityCapOverflowOrExceeded);
+        }
+        let (guard, tx_res) = guard.authorize_spend(qsag_verified::VelocitySpendRequest {
+            window_id: intent.window_id,
+            nonce: 2,
+            amount_units: intent.amount_units,
+            policy_pin: self.policy_digest,
+            authority_pin: *session_id,
+        });
+        match tx_res {
+            Ok(_) => Ok(guard.spent_units()),
+            Err(_) => Err(PolicyViolation::VelocityCapOverflowOrExceeded),
+        }
+    }
+
+    fn record_approved_intent(
+        &mut self,
+        projected_spend: u128,
+        nonce: [u8; 32],
+        session_id: [u8; 32],
+    ) {
+        self.accumulated_window_spend = projected_spend;
+        for (values, floor, value) in [
+            (
+                &mut self.burned_intent_nonces,
+                &mut self.min_nonce_watermark,
+                nonce,
+            ),
+            (
+                &mut self.burned_sessions,
+                &mut self.min_session_watermark,
+                session_id,
+            ),
+        ] {
+            values.push(value);
+            values.sort_unstable();
+            values.dedup();
+            if values.len() > MAX_BURNED_INTENT_NONCES {
+                *floor = Some(values.remove(0));
+            }
+        }
+    }
 }
 
 /// Evaluate `policy` across `quorum_guards` where each signer $i$ independently evaluates its own
 /// local `per_party_intents[i]` inside a 2-round **commit-then-open Eurocrypt-2011 pairwise BDOZ**
 /// barrier (`0` central MAC key reconstruction, private pairwise zero-shares!).
+#[allow(clippy::too_many_arguments)]
 fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
     policy: &TransactionPolicy,
     per_party_intents: &[TransactionIntent],
     session_id: [u8; 32],
+    current_timestamp: u64,
     quorum_guards: &mut [PolicySignerGuardShare],
+    mut shared_ledger: Option<&mut SharedWindowSpendLedger>,
     force_authenticated_initiator: bool,
     #[cfg(test)] injected_delta_fault: Option<(usize, (u128, u128))>,
     accel: &B,
@@ -1147,6 +1338,12 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
     let mut projected_spends = Vec::with_capacity(m);
     for (guard, intent) in quorum_guards.iter().zip(per_party_intents) {
         policy.evaluate(intent)?;
+        if current_timestamp < policy.valid_not_before_secs
+            || current_timestamp > policy.valid_not_after_secs
+            || current_timestamp != intent.timestamp_secs
+        {
+            return Err(PolicyViolation::TimestampOutsideWindow);
+        }
         if guard.poisoned {
             return Err(PolicyViolation::GuardPoisoned);
         }
@@ -1161,12 +1358,23 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         {
             return Err(PolicyViolation::IntentBindingMismatch);
         }
+        if shared_ledger.is_none() && !guard.has_global_velocity_intersection(policy, &quorum_ids) {
+            return Err(PolicyViolation::MissingHardwareGuardian);
+        }
         guard.verify_initiator_authentication(policy, intent, force_authenticated_initiator)?;
+        let external_floor = if let Some(ledger) = shared_ledger.as_deref() {
+            let _ = ledger.check_projected_spend(policy, intent, &session_id)?;
+            ledger
+                .accumulated_window_spend()
+                .max(intent.rolling_window_spent)
+        } else {
+            intent.rolling_window_spent
+        };
         let projected = guard.check_window_nonce_and_projected_spend(
             policy.velocity_window_cap,
             intent,
             &session_id,
-            intent.rolling_window_spent,
+            external_floor,
         )?;
         projected_spends.push(projected);
     }
@@ -1339,6 +1547,11 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
         return Err(err);
     }
 
+    let global_projected = projected_spends.iter().copied().max().unwrap_or(0);
+    if let Some(ledger) = shared_ledger.as_deref_mut() {
+        ledger.record_approved_intent(global_projected, per_party_intents[0].nonce, session_id);
+    }
+
     // Atomically advance accumulated window spend, burn intent nonces + session ID, and retire slots.
     for (idx, g) in quorum_guards.iter_mut().enumerate() {
         let peer_slots: Vec<(u16, usize)> = r1_states
@@ -1346,11 +1559,12 @@ fn evaluate_per_party_intents_barrier_inner<B: AcceleratorBackend>(
             .filter(|st| st.party_id != g.party_id)
             .map(|st| (st.party_id, st.slot))
             .collect();
-        g.record_approved_intent(
-            projected_spends[idx],
-            per_party_intents[idx].nonce,
-            session_id,
-        );
+        let recorded_spend = if shared_ledger.is_some() {
+            projected_spends[idx].max(global_projected)
+        } else {
+            projected_spends[idx]
+        };
+        g.record_approved_intent(recorded_spend, per_party_intents[idx].nonce, session_id);
         g.abort_session_slot(r1_states[idx].slot, &peer_slots);
     }
 
@@ -1368,6 +1582,7 @@ pub fn evaluate_per_party_intents_barrier<B: AcceleratorBackend>(
     policy: &TransactionPolicy,
     intents: &[TransactionIntent],
     session_id: [u8; 32],
+    current_timestamp: u64,
     guards: &mut [PolicySignerGuardShare],
     #[cfg(test)] fault: Option<(usize, (u128, u128))>,
     accel: &B,
@@ -1376,7 +1591,9 @@ pub fn evaluate_per_party_intents_barrier<B: AcceleratorBackend>(
         policy,
         intents,
         session_id,
+        current_timestamp,
         guards,
+        None,
         false,
         #[cfg(test)]
         fault,
@@ -1391,6 +1608,7 @@ pub fn evaluate_policy_committed_barrier<B: AcceleratorBackend>(
     policy: &TransactionPolicy,
     intent: &TransactionIntent,
     session_id: [u8; 32],
+    current_timestamp: u64,
     quorum_guards: &mut [PolicySignerGuardShare],
     accel: &B,
 ) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
@@ -1403,7 +1621,39 @@ pub fn evaluate_policy_committed_barrier<B: AcceleratorBackend>(
         policy,
         &intents,
         session_id,
+        current_timestamp,
         quorum_guards,
+        #[cfg(test)]
+        None,
+        accel,
+    )
+}
+
+/// Evaluate `policy` on `intent` across `quorum_guards` using a committee-wide
+/// [`SharedWindowSpendLedger`] so non-intersecting quorums in guardian-less multi-quorum setups
+/// enforce cumulative window velocity caps without quorum-switching bypass.
+pub fn evaluate_policy_committed_barrier_with_ledger<B: AcceleratorBackend>(
+    policy: &TransactionPolicy,
+    intent: &TransactionIntent,
+    session_id: [u8; 32],
+    current_timestamp: u64,
+    quorum_guards: &mut [PolicySignerGuardShare],
+    shared_ledger: &mut SharedWindowSpendLedger,
+    accel: &B,
+) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
+    if quorum_guards.len() < 2 {
+        return Err(PolicyViolation::EmptySignerBarrierSet);
+    }
+    let intents: Vec<TransactionIntent> =
+        (0..quorum_guards.len()).map(|_| intent.clone()).collect();
+    evaluate_per_party_intents_barrier_inner(
+        policy,
+        &intents,
+        session_id,
+        current_timestamp,
+        quorum_guards,
+        Some(shared_ledger),
+        false,
         #[cfg(test)]
         None,
         accel,
@@ -1416,6 +1666,7 @@ pub fn evaluate_policy_committed_barrier_authenticated<B: AcceleratorBackend>(
     policy: &TransactionPolicy,
     intent: &TransactionIntent,
     session_id: [u8; 32],
+    current_timestamp: u64,
     quorum_guards: &mut [PolicySignerGuardShare],
     accel: &B,
 ) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
@@ -1428,7 +1679,9 @@ pub fn evaluate_policy_committed_barrier_authenticated<B: AcceleratorBackend>(
         policy,
         &intents,
         session_id,
+        current_timestamp,
         quorum_guards,
+        None,
         true,
         #[cfg(test)]
         None,
@@ -1961,6 +2214,9 @@ impl PolicySignerGuardShare {
             || session_id != intent.session_id
         {
             return Err(PolicyViolation::IntentBindingMismatch);
+        }
+        if !self.has_global_velocity_intersection(policy, &ids) {
+            return Err(PolicyViolation::MissingHardwareGuardian);
         }
         let slot = self.next_slot.get();
         let r = *self
@@ -3148,6 +3404,7 @@ mod tests {
             &policy,
             &good_intent,
             [0x12; 32],
+            good_intent.timestamp_secs,
             &mut guards,
             &accel,
         )
@@ -3197,6 +3454,7 @@ mod tests {
                 &policy,
                 &good_intent,
                 [0x12; 32],
+                good_intent.timestamp_secs,
                 &mut colluding,
                 &accel
             )
@@ -3214,6 +3472,7 @@ mod tests {
                 &policy,
                 &conflicting,
                 [0x12; 32],
+                good_intent.timestamp_secs,
                 &mut even,
                 None,
                 &accel
@@ -3237,6 +3496,7 @@ mod tests {
                 &policy,
                 &intents3,
                 [0x12; 32],
+                good_intent.timestamp_secs,
                 &mut fault_guards,
                 Some((0, (1u128, 0u128))),
                 &accel,
@@ -3262,6 +3522,7 @@ mod tests {
                 &policy,
                 &equiv_intents,
                 [0x12; 32],
+                good_intent.timestamp_secs,
                 &mut guards,
                 None,
                 &accel,
@@ -3276,8 +3537,15 @@ mod tests {
         bad_dest.recipient = unallowed_dest;
         bad_dest.session_id = [0x13; 32];
         assert_eq!(
-            evaluate_policy_committed_barrier(&policy, &bad_dest, [0x13; 32], &mut guards, &accel)
-                .unwrap_err(),
+            evaluate_policy_committed_barrier(
+                &policy,
+                &bad_dest,
+                [0x13; 32],
+                bad_dest.timestamp_secs,
+                &mut guards,
+                &accel
+            )
+            .unwrap_err(),
             PolicyViolation::RecipientNotAllowlisted
         );
 
@@ -3286,8 +3554,15 @@ mod tests {
         bad_vel.amount_units = 450_000;
         bad_vel.session_id = [0x14; 32];
         assert_eq!(
-            evaluate_policy_committed_barrier(&policy, &bad_vel, [0x14; 32], &mut guards, &accel)
-                .unwrap_err(),
+            evaluate_policy_committed_barrier(
+                &policy,
+                &bad_vel,
+                [0x14; 32],
+                bad_vel.timestamp_secs,
+                &mut guards,
+                &accel
+            )
+            .unwrap_err(),
             PolicyViolation::VelocityCapOverflowOrExceeded
         );
 
@@ -3296,8 +3571,15 @@ mod tests {
         self_app.initiator_party = 1;
         self_app.session_id = [0x15; 32];
         assert_eq!(
-            evaluate_policy_committed_barrier(&policy, &self_app, [0x15; 32], &mut guards, &accel)
-                .unwrap_err(),
+            evaluate_policy_committed_barrier(
+                &policy,
+                &self_app,
+                [0x15; 32],
+                self_app.timestamp_secs,
+                &mut guards,
+                &accel
+            )
+            .unwrap_err(),
             PolicyViolation::InitiatorSelfApprovalForbidden
         );
 
@@ -3306,8 +3588,15 @@ mod tests {
         no_hw.approver_parties = vec![1, 2, 3];
         no_hw.session_id = [0x16; 32];
         assert_eq!(
-            evaluate_policy_committed_barrier(&policy, &no_hw, [0x16; 32], &mut guards, &accel)
-                .unwrap_err(),
+            evaluate_policy_committed_barrier(
+                &policy,
+                &no_hw,
+                [0x16; 32],
+                no_hw.timestamp_secs,
+                &mut guards,
+                &accel
+            )
+            .unwrap_err(),
             PolicyViolation::MissingHardwareGuardian
         );
     }
@@ -3506,6 +3795,7 @@ mod tests {
             &policy,
             &tx1,
             tx1.session_id,
+            tx1.timestamp_secs,
             &mut barrier_guards,
             &accel,
         )
@@ -3515,6 +3805,7 @@ mod tests {
                 &policy,
                 &tx2_over_cap,
                 tx2_over_cap.session_id,
+                tx2_over_cap.timestamp_secs,
                 &mut barrier_guards,
                 &accel,
             )
@@ -3601,6 +3892,7 @@ mod tests {
                 &policy,
                 &intent,
                 intent.session_id,
+                intent.timestamp_secs,
                 &mut all_guards,
                 &accel,
             )
@@ -3655,6 +3947,7 @@ mod tests {
             &policy,
             &intent,
             intent.session_id,
+            intent.timestamp_secs,
             &mut all_guards,
             &accel,
         )
@@ -3665,5 +3958,174 @@ mod tests {
             b"context",
             &approvers,
         ));
+    }
+
+    #[test]
+    fn quorum_switching_cannot_bypass_cumulative_velocity_cap_across_subsets() {
+        let accel = CpuReferenceBackend::new();
+        let (mut policy, base_intent) = phase_fixture(&[1, 2, 3, 4]);
+        policy.max_single_tx_amount = 100;
+        policy.velocity_window_cap = 100;
+        policy.hardware_guardian_party = None;
+        policy.quorum_tiers = vec![QuorumTierRule {
+            max_amount_units: 100,
+            min_approvers: 2,
+            require_hardware_guardian: false,
+        }];
+
+        let mut committee = raw_test_guards([0x71; 32], &[1, 2, 3, 4]);
+        let mut q1_intent = base_intent.clone();
+        q1_intent.amount_units = 60;
+        q1_intent.rolling_window_spent = 0;
+        q1_intent.nonce = [0xE1; 32];
+        q1_intent.session_id = [0xF1; 32];
+        q1_intent.approver_parties = vec![1, 2];
+        q1_intent.quorum_ids = vec![1, 2];
+
+        // 1. Disjoint 2-of-4 subset `{1, 2}` without a fixed accounting guardian or shared ledger
+        //    is refused on both batch and 4-round APIs so disjoint quorums cannot double-spend!
+        assert_eq!(
+            evaluate_policy_committed_barrier(
+                &policy,
+                &q1_intent,
+                q1_intent.session_id,
+                q1_intent.timestamp_secs,
+                &mut committee[0..2],
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::MissingHardwareGuardian
+        );
+        assert_eq!(
+            committee[0]
+                .round1_commit_intent(
+                    &policy,
+                    &q1_intent,
+                    q1_intent.session_id,
+                    q1_intent.timestamp_secs,
+                    0,
+                )
+                .err(),
+            Some(PolicyViolation::MissingHardwareGuardian)
+        );
+        assert!(committee.iter().all(|g| g.next_slot.get() == 0));
+
+        // 2. With `SharedWindowSpendLedger`, `{1, 2}` approves `60`, and switching to disjoint
+        //    quorum `{3, 4}` for a second `60` (even lying `rolling_window_spent = 0`) is rejected!
+        let mut shared_ledger = SharedWindowSpendLedger::new(&policy, 0);
+        evaluate_policy_committed_barrier_with_ledger(
+            &policy,
+            &q1_intent,
+            q1_intent.session_id,
+            q1_intent.timestamp_secs,
+            &mut committee[0..2],
+            &mut shared_ledger,
+            &accel,
+        )
+        .unwrap();
+        assert_eq!(shared_ledger.accumulated_window_spend(), 60);
+
+        let mut q2_intent = q1_intent.clone();
+        q2_intent.nonce = [0xE2; 32];
+        q2_intent.session_id = [0xF2; 32];
+        q2_intent.approver_parties = vec![3, 4];
+        q2_intent.quorum_ids = vec![3, 4];
+        assert_eq!(
+            evaluate_policy_committed_barrier_with_ledger(
+                &policy,
+                &q2_intent,
+                q2_intent.session_id,
+                q2_intent.timestamp_secs,
+                &mut committee[2..4],
+                &mut shared_ledger,
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::VelocityCapOverflowOrExceeded
+        );
+        assert_eq!(committee[2].next_slot.get(), 0);
+        assert_eq!(committee[3].next_slot.get(), 0);
+
+        // 3. With a fixed accounting guardian `Some(4)`, switching `{1, 4}` (`60`) then `{2, 4}` (`60`)
+        //    intersects at party `4` and rejects the second `60` even with dishonest `rolling_window_spent = 0`!
+        let mut hw_policy = policy;
+        hw_policy.hardware_guardian_party = Some(4);
+        let mut hw_committee = raw_test_guards([0x72; 32], &[1, 2, 4]);
+        let mut g1_intent = base_intent.clone();
+        g1_intent.amount_units = 60;
+        g1_intent.rolling_window_spent = 0;
+        g1_intent.nonce = [0xE3; 32];
+        g1_intent.session_id = [0xF3; 32];
+        g1_intent.approver_parties = vec![1, 4];
+        g1_intent.quorum_ids = vec![1, 4];
+        let g4 = hw_committee.pop().unwrap();
+        let g2 = hw_committee.pop().unwrap();
+        let g1 = hw_committee.pop().unwrap();
+        let mut pair_14 = vec![g1, g4];
+        evaluate_policy_committed_barrier(
+            &hw_policy,
+            &g1_intent,
+            g1_intent.session_id,
+            g1_intent.timestamp_secs,
+            &mut pair_14,
+            &accel,
+        )
+        .unwrap();
+        let g4_after = pair_14.pop().unwrap();
+        let mut pair_24 = vec![g2, g4_after];
+        let mut g2_intent = g1_intent;
+        g2_intent.nonce = [0xE4; 32];
+        g2_intent.session_id = [0xF4; 32];
+        g2_intent.approver_parties = vec![2, 4];
+        g2_intent.quorum_ids = vec![2, 4];
+        assert_eq!(
+            evaluate_policy_committed_barrier(
+                &hw_policy,
+                &g2_intent,
+                g2_intent.session_id,
+                g2_intent.timestamp_secs,
+                &mut pair_24,
+                &accel,
+            )
+            .unwrap_err(),
+            PolicyViolation::VelocityCapOverflowOrExceeded
+        );
+    }
+
+    #[test]
+    fn batch_barrier_enforces_authoritative_current_timestamp_before_consuming_slot() {
+        let accel = CpuReferenceBackend::new();
+        let (policy, intent) = phase_fixture(&[1, 2, 4]);
+        let mut guards = raw_test_guards([0x73; 32], &[1, 2, 4]);
+
+        // Expired wall-clock (`150 > valid_not_after_secs == 100`) and mismatched live clock (`51 != 50`)
+        // both fail closed with `TimestampOutsideWindow` without consuming any preprocessing slot!
+        for bad_now in [0u64, 51, 150] {
+            assert_eq!(
+                evaluate_policy_committed_barrier(
+                    &policy,
+                    &intent,
+                    intent.session_id,
+                    bad_now,
+                    &mut guards,
+                    &accel,
+                )
+                .unwrap_err(),
+                PolicyViolation::TimestampOutsideWindow
+            );
+            assert!(guards.iter().all(|g| g.next_slot.get() == 0 && !g.is_poisoned()));
+        }
+
+        // Exact authoritative clock (`50 == intent.timestamp_secs`) succeeds cleanly!
+        evaluate_policy_committed_barrier(
+            &policy,
+            &intent,
+            intent.session_id,
+            intent.timestamp_secs,
+            &mut guards,
+            &accel,
+        )
+        .unwrap();
+        assert!(guards.iter().all(|g| g.next_slot.get() == 1));
     }
 }
