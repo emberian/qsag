@@ -1968,3 +1968,988 @@ impl RawVulkanEngine {
                 size: byte_len,
             };
             (self.fns.cmd_copy_buffer)(self.cmd_buf, self.staging.buffer, self.vram_a.buffer, 1, &copy);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[slot as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+            (self.fns.cmd_bind_descriptor_sets)(
+                self.cmd_buf,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                kp.pipeline_layout,
+                0,
+                1,
+                &self.ds_1buf_a,
+                0,
+                null(),
+            );
+
+            let total_wg = (num_states as u64).div_ceil(64) as u32;
+            let mut wg_done = 0u32;
+            while wg_done < total_wg {
+                let wg_chunk = (total_wg - wg_done).min(self.max_wg_x);
+                let pc = BatchStatesPushConsts {
+                    num_states: num_states as u32,
+                    base_state: wg_done * 64,
+                    _pad0: 0,
+                    _pad1: 0,
+                };
+                (self.fns.cmd_push_constants)(
+                    self.cmd_buf,
+                    kp.pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<BatchStatesPushConsts>() as u32,
+                    (&pc as *const BatchStatesPushConsts).cast::<c_void>(),
+                );
+                (self.fns.cmd_dispatch)(self.cmd_buf, wg_chunk, 1, 1);
+                wg_done += wg_chunk;
+            }
+
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(self.cmd_buf, self.vram_a.buffer, self.staging.buffer, 1, &copy);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+
+            let flat_out =
+                core::slice::from_raw_parts_mut(states.as_mut_ptr().cast::<u64>(), total_words);
+            self.read_staging_u64s(0, flat_out);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exec_batch_keccak(
+        &mut self,
+        states: &mut [[u64; 25]],
+    ) -> Result<(), VulkanError> {
+        unsafe { self.exec_inplace_states(KernelSlot::BatchKeccakF1600, states) }
+    }
+
+    pub(crate) fn exec_batch_poseidon2(
+        &mut self,
+        states: &mut [[u64; 12]],
+    ) -> Result<(), VulkanError> {
+        unsafe { self.exec_inplace_states(KernelSlot::BatchPoseidon2Perm12, states) }
+    }
+
+    unsafe fn dispatch_ntt_mode(
+        &self,
+        pl: VkPipelineLayout,
+        total_wg: u32,
+        mut pc: NttPushConsts,
+    ) {
+        let mut wg_done = 0u32;
+        while wg_done < total_wg {
+            let chunk = (total_wg - wg_done).min(self.max_wg_x);
+            pc.base_wg = wg_done;
+            unsafe {
+                (self.fns.cmd_push_constants)(
+                    self.cmd_buf,
+                    pl,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<NttPushConsts>() as u32,
+                    (&pc as *const NttPushConsts).cast::<c_void>(),
+                );
+                (self.fns.cmd_dispatch)(self.cmd_buf, chunk, 1, 1);
+            }
+            wg_done += chunk;
+        }
+    }
+
+    pub(crate) fn exec_goldilocks_ntt(
+        &mut self,
+        buf: &mut [u64],
+        twiddles: &[u64],
+        inverse: bool,
+    ) -> Result<(), VulkanError> {
+        let n = buf.len();
+        let log2_n = n.trailing_zeros();
+        let byte_len = (n as u64) * 8;
+
+        unsafe {
+            self.ensure_staging(byte_len)?;
+            self.ensure_vram_buffers(byte_len, 0, 0)?;
+            self.write_staging_u64s(0, buf);
+
+            self.begin_cmd()?;
+            let copy = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: byte_len,
+            };
+            (self.fns.cmd_copy_buffer)(self.cmd_buf, self.staging.buffer, self.vram_a.buffer, 1, &copy);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[KernelSlot::GoldilocksNtt as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+            (self.fns.cmd_bind_descriptor_sets)(
+                self.cmd_buf,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                kp.pipeline_layout,
+                0,
+                1,
+                &self.ds_1buf_a,
+                0,
+                null(),
+            );
+
+            // Stage 0: in-place canonical reduction + bit-reversal permutation (`mode = 0`).
+            let wg_full = (n as u64).div_ceil(256) as u32;
+            self.dispatch_ntt_mode(
+                kp.pipeline_layout,
+                wg_full,
+                NttPushConsts {
+                    w_step: 0,
+                    n: n as u32,
+                    log2_n,
+                    stage: 0,
+                    mode: 0,
+                    base_wg: 0,
+                    _pad: 0,
+                },
+            );
+
+            if n > 1 {
+                let stage_root = |s: u32| -> u64 {
+                    if s == 1 {
+                        if !inverse {
+                            gl_reduce_u64(twiddles[0])
+                        } else {
+                            1u64
+                        }
+                    } else {
+                        let step = n >> s;
+                        if !inverse {
+                            gl_reduce_u64(twiddles[step])
+                        } else {
+                            gl_neg(gl_reduce_u64(twiddles[n / 2 - step]))
+                        }
+                    }
+                };
+
+                let can_fuse_9 = log2_n >= 9 && {
+                    let w9 = stage_root(9);
+                    gl_reduce_u64(twiddles[0]) == 1 && gl_pow_pub(w9, 256) == GOLDILOCKS_PRIME - 1
+                };
+
+                let start_stage = if can_fuse_9 {
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    let wg_blocks = (n >> 9) as u32;
+                    self.dispatch_ntt_mode(
+                        kp.pipeline_layout,
+                        wg_blocks,
+                        NttPushConsts {
+                            w_step: stage_root(9),
+                            n: n as u32,
+                            log2_n,
+                            stage: 9,
+                            mode: 1,
+                            base_wg: 0,
+                            _pad: 0,
+                        },
+                    );
+                    10u32
+                } else {
+                    1u32
+                };
+
+                let wg_half = ((n >> 1) as u64).div_ceil(256) as u32;
+                for s in start_stage..=log2_n {
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    self.dispatch_ntt_mode(
+                        kp.pipeline_layout,
+                        wg_half,
+                        NttPushConsts {
+                            w_step: stage_root(s),
+                            n: n as u32,
+                            log2_n,
+                            stage: s,
+                            mode: 2,
+                            base_wg: 0,
+                            _pad: 0,
+                        },
+                    );
+                }
+
+                if inverse {
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                    self.dispatch_ntt_mode(
+                        kp.pipeline_layout,
+                        wg_full,
+                        NttPushConsts {
+                            w_step: gl_inv_or_zero(n as u64),
+                            n: n as u32,
+                            log2_n,
+                            stage: 0,
+                            mode: 3,
+                            base_wg: 0,
+                            _pad: 0,
+                        },
+                    );
+                }
+            }
+
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(self.cmd_buf, self.vram_a.buffer, self.staging.buffer, 1, &copy);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+            self.read_staging_u64s(0, buf);
+        }
+        Ok(())
+    }
+
+    unsafe fn dispatch_lde_mode(
+        &self,
+        pl: VkPipelineLayout,
+        total_wg: u32,
+        mut pc: CosetLdePushConsts,
+    ) {
+        let mut wg_done = 0u32;
+        while wg_done < total_wg {
+            let chunk = (total_wg - wg_done).min(self.max_wg_x);
+            pc.base_wg = wg_done;
+            unsafe {
+                (self.fns.cmd_push_constants)(
+                    self.cmd_buf,
+                    pl,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<CosetLdePushConsts>() as u32,
+                    (&pc as *const CosetLdePushConsts).cast::<c_void>(),
+                );
+                (self.fns.cmd_dispatch)(self.cmd_buf, chunk, 1, 1);
+            }
+            wg_done += chunk;
+        }
+    }
+
+    unsafe fn record_ext2_ntt_stages(
+        &self,
+        pl: VkPipelineLayout,
+        len: usize,
+        inverse: bool,
+    ) -> Result<(), VulkanError> {
+        let log2_len = len.trailing_zeros();
+        let wg_full = (len as u64).div_ceil(256) as u32;
+        unsafe {
+            self.dispatch_lde_mode(
+                pl,
+                wg_full,
+                CosetLdePushConsts {
+                    w_step: 0,
+                    shift_c: 0,
+                    len: len as u32,
+                    aux_n: 0,
+                    log2_len,
+                    stage: 0,
+                    mode: 0,
+                    base_wg: 0,
+                },
+            );
+        }
+        if len <= 1 {
+            return Ok(());
+        }
+
+        let start_stage = if log2_len >= 9 {
+            let r9 = goldilocks_primitive_root(9).map_err(VulkanError::Accel)?;
+            let w9 = if inverse { gl_inv_or_zero(r9) } else { r9 };
+            unsafe {
+                self.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                self.dispatch_lde_mode(
+                    pl,
+                    (len >> 9) as u32,
+                    CosetLdePushConsts {
+                        w_step: w9,
+                        shift_c: 0,
+                        len: len as u32,
+                        aux_n: 0,
+                        log2_len,
+                        stage: 9,
+                        mode: 1,
+                        base_wg: 0,
+                    },
+                );
+            }
+            10u32
+        } else {
+            1u32
+        };
+
+        let wg_half = ((len >> 1) as u64).div_ceil(256) as u32;
+        for s in start_stage..=log2_len {
+            let root = goldilocks_primitive_root(s).map_err(VulkanError::Accel)?;
+            let w_step = if inverse { gl_inv_or_zero(root) } else { root };
+            unsafe {
+                self.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                self.dispatch_lde_mode(
+                    pl,
+                    wg_half,
+                    CosetLdePushConsts {
+                        w_step,
+                        shift_c: 0,
+                        len: len as u32,
+                        aux_n: 0,
+                        log2_len,
+                        stage: s,
+                        mode: 2,
+                        base_wg: 0,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exec_coset_lde_ext2(
+        &mut self,
+        evals: &[[u64; 2]],
+        blowup: usize,
+        shift: u64,
+        out: &mut [[u64; 2]],
+    ) -> Result<(), VulkanError> {
+        let n = evals.len();
+        let m = n * blowup;
+        let in_bytes = (n as u64) * 16;
+        let out_bytes = (m as u64) * 16;
+
+        unsafe {
+            self.ensure_staging(out_bytes)?;
+            self.ensure_vram_buffers(out_bytes, 0, 0)?;
+
+            let flat_in = core::slice::from_raw_parts(evals.as_ptr().cast::<u64>(), n * 2);
+            self.write_staging_u64s(0, flat_in);
+
+            self.begin_cmd()?;
+            let copy_in = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: in_bytes,
+            };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy_in,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[KernelSlot::CosetLdeExt2 as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+            (self.fns.cmd_bind_descriptor_sets)(
+                self.cmd_buf,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                kp.pipeline_layout,
+                0,
+                1,
+                &self.ds_1buf_a,
+                0,
+                null(),
+            );
+
+            // 1. Inverse NTT of length `n` on both coordinates in VRAM.
+            self.record_ext2_ntt_stages(kp.pipeline_layout, n, true)?;
+
+            // 2. Multiply `[0..n)` by `inv_n * shift^j` and zero-pad `[n..m)` in VRAM.
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+            let wg_m = (m as u64).div_ceil(256) as u32;
+            self.dispatch_lde_mode(
+                kp.pipeline_layout,
+                wg_m,
+                CosetLdePushConsts {
+                    w_step: gl_inv_or_zero(n as u64),
+                    shift_c: gl_reduce_u64(shift),
+                    len: m as u32,
+                    aux_n: n as u32,
+                    log2_len: m.trailing_zeros(),
+                    stage: 0,
+                    mode: 3,
+                    base_wg: 0,
+                },
+            );
+
+            // 3. Forward NTT of length `m` on both coordinates in VRAM.
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+            self.record_ext2_ntt_stages(kp.pipeline_layout, m, false)?;
+
+            let copy_out = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: out_bytes,
+            };
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.vram_a.buffer,
+                self.staging.buffer,
+                1,
+                &copy_out,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+
+            let flat_out = core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u64>(), m * 2);
+            self.read_staging_u64s(0, flat_out);
+        }
+        Ok(())
+    }
+
+    unsafe fn dispatch_merkle_layer_cmd(
+        &self,
+        pl: VkPipelineLayout,
+        ds: VkDescriptorSet,
+        pk_seed: &[u64; 4],
+        layer: u32,
+        start_parent_idx: u64,
+        num_parents: usize,
+    ) {
+        unsafe {
+            (self.fns.cmd_bind_descriptor_sets)(
+                self.cmd_buf,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                pl,
+                0,
+                1,
+                &ds,
+                0,
+                null(),
+            );
+        }
+        let total_wg = (num_parents as u64).div_ceil(64) as u32;
+        let mut wg_done = 0u32;
+        while wg_done < total_wg {
+            let chunk = (total_wg - wg_done).min(self.max_wg_x);
+            let pc = MerklePushConsts {
+                s0: pk_seed[0],
+                s1: pk_seed[1],
+                s2: pk_seed[2],
+                s3: pk_seed[3],
+                start_parent_idx,
+                num_parents: num_parents as u64,
+                in_offset_u64: 0,
+                out_offset_u64: 0,
+                layer,
+                base_parent: wg_done * 64,
+            };
+            unsafe {
+                (self.fns.cmd_push_constants)(
+                    self.cmd_buf,
+                    pl,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<MerklePushConsts>() as u32,
+                    (&pc as *const MerklePushConsts).cast::<c_void>(),
+                );
+                (self.fns.cmd_dispatch)(self.cmd_buf, chunk, 1, 1);
+            }
+            wg_done += chunk;
+        }
+    }
+
+    pub(crate) fn exec_merkle_layer(
+        &mut self,
+        children: &[[u64; 4]],
+        pk_seed: &[u64; 4],
+        layer: u32,
+        start_parent_idx: u64,
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), VulkanError> {
+        let num_parents = out_parents.len();
+        if num_parents == 0 {
+            return Ok(());
+        }
+        let in_bytes = (children.len() as u64) * 32;
+        let out_bytes = (num_parents as u64) * 32;
+
+        unsafe {
+            self.ensure_staging(in_bytes)?;
+            self.ensure_vram_buffers(in_bytes, out_bytes, 0)?;
+
+            let flat_in =
+                core::slice::from_raw_parts(children.as_ptr().cast::<u64>(), children.len() * 4);
+            self.write_staging_u64s(0, flat_in);
+
+            self.begin_cmd()?;
+            let copy_in = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: in_bytes,
+            };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy_in,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+            self.dispatch_merkle_layer_cmd(
+                kp.pipeline_layout,
+                self.ds_2buf_ab,
+                pk_seed,
+                layer,
+                start_parent_idx,
+                num_parents,
+            );
+
+            let copy_out = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: out_bytes,
+            };
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.vram_b.buffer,
+                self.staging.buffer,
+                1,
+                &copy_out,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+
+            let flat_out =
+                core::slice::from_raw_parts_mut(out_parents.as_mut_ptr().cast::<u64>(), num_parents * 4);
+            self.read_staging_u64s(0, flat_out);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn exec_merkle_full_tree(
+        &mut self,
+        leaves: &[[u64; 4]],
+        pk_seed: &[u64; 4],
+        base_layer: u32,
+    ) -> Result<[u64; 4], VulkanError> {
+        let num_leaves = leaves.len();
+        if num_leaves == 1 {
+            return Ok([
+                gl_reduce_u64(leaves[0][0]),
+                gl_reduce_u64(leaves[0][1]),
+                gl_reduce_u64(leaves[0][2]),
+                gl_reduce_u64(leaves[0][3]),
+            ]);
+        }
+        let height = num_leaves.trailing_zeros();
+        let leaf_bytes = (num_leaves as u64) * 32;
+        let half_bytes = leaf_bytes / 2;
+
+        unsafe {
+            self.ensure_staging(leaf_bytes)?;
+            self.ensure_vram_buffers(leaf_bytes, half_bytes, 0)?;
+
+            let flat_in =
+                core::slice::from_raw_parts(leaves.as_ptr().cast::<u64>(), num_leaves * 4);
+            self.write_staging_u64s(0, flat_in);
+
+            self.begin_cmd()?;
+            let copy_in = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: leaf_bytes,
+            };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy_in,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[KernelSlot::MerkleLayerPoseidon2 as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+
+            for lvl in 0..height {
+                if lvl > 0 {
+                    self.cmd_barrier(
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                    );
+                }
+                let ds = if lvl % 2 == 0 {
+                    self.ds_2buf_ab
+                } else {
+                    self.ds_2buf_ba
+                };
+                let cur_parents = num_leaves >> (lvl + 1);
+                self.dispatch_merkle_layer_cmd(
+                    kp.pipeline_layout,
+                    ds,
+                    pk_seed,
+                    base_layer.wrapping_add(lvl),
+                    0,
+                    cur_parents,
+                );
+            }
+
+            let root_buf = if (height - 1) % 2 == 0 {
+                self.vram_b.buffer
+            } else {
+                self.vram_a.buffer
+            };
+            let copy_root = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: 32,
+            };
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(self.cmd_buf, root_buf, self.staging.buffer, 1, &copy_root);
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+
+            let mut root = [0u64; 4];
+            self.read_staging_u64s(0, &mut root);
+            Ok(root)
+        }
+    }
+
+    pub(crate) fn exec_bdoz_gf2_128_dot(
+        &mut self,
+        shares: &[(u128, u128)],
+        weights: &[(u128, u128)],
+    ) -> Result<(u128, u128), VulkanError> {
+        let n = shares.len();
+        if n == 0 {
+            return Ok((0, 0));
+        }
+        let vec_bytes = (n as u64)
+            .checked_mul(32)
+            .ok_or(VulkanError::BufferExceedsMaxStorageRange {
+                requested: u64::MAX,
+                limit: self.max_storage_range,
+            })?;
+        let staging_bytes = vec_bytes
+            .checked_mul(2)
+            .ok_or(VulkanError::BufferExceedsMaxStorageRange {
+                requested: u64::MAX,
+                limit: self.max_storage_range,
+            })?;
+        let num_groups = n.div_ceil(256).min(1024) as u32;
+        let partials_bytes = (num_groups as u64) * 32;
+
+        unsafe {
+            self.ensure_staging(staging_bytes)?;
+            self.ensure_vram_buffers(vec_bytes, vec_bytes, partials_bytes)?;
+
+            // Pack `(s0, s1)` and `(w0, w1)` deterministically as `[lo64, hi64, lo64, hi64]`.
+            let dst_u64 =
+                core::slice::from_raw_parts_mut(self.staging.mapped.cast::<u64>(), n * 8);
+            for (i, &(s0, s1)) in shares.iter().enumerate() {
+                let b = i * 4;
+                dst_u64[b] = s0 as u64;
+                dst_u64[b + 1] = (s0 >> 64) as u64;
+                dst_u64[b + 2] = s1 as u64;
+                dst_u64[b + 3] = (s1 >> 64) as u64;
+            }
+            let w_off = n * 4;
+            for (i, &(w0, w1)) in weights.iter().enumerate() {
+                let b = w_off + i * 4;
+                dst_u64[b] = w0 as u64;
+                dst_u64[b + 1] = (w0 >> 64) as u64;
+                dst_u64[b + 2] = w1 as u64;
+                dst_u64[b + 3] = (w1 >> 64) as u64;
+            }
+
+            self.begin_cmd()?;
+            let copy_s = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: vec_bytes,
+            };
+            let copy_w = VkBufferCopy {
+                src_offset: vec_bytes,
+                dst_offset: 0,
+                size: vec_bytes,
+            };
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_a.buffer,
+                1,
+                &copy_s,
+            );
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.staging.buffer,
+                self.vram_b.buffer,
+                1,
+                &copy_w,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            );
+
+            let kp = self.pipelines[KernelSlot::BdozGf2128BatchDot as usize];
+            (self.fns.cmd_bind_pipeline)(self.cmd_buf, VK_PIPELINE_BIND_POINT_COMPUTE, kp.pipeline);
+            (self.fns.cmd_bind_descriptor_sets)(
+                self.cmd_buf,
+                VK_PIPELINE_BIND_POINT_COMPUTE,
+                kp.pipeline_layout,
+                0,
+                1,
+                &self.ds_3buf_abc,
+                0,
+                null(),
+            );
+
+            let pc0 = BdozDotPushConsts {
+                num_elements: n as u32,
+                num_groups,
+                mode: 0,
+                _pad: 0,
+            };
+            (self.fns.cmd_push_constants)(
+                self.cmd_buf,
+                kp.pipeline_layout,
+                VK_SHADER_STAGE_COMPUTE_BIT,
+                0,
+                size_of::<BdozDotPushConsts>() as u32,
+                (&pc0 as *const BdozDotPushConsts).cast::<c_void>(),
+            );
+            (self.fns.cmd_dispatch)(self.cmd_buf, num_groups, 1, 1);
+
+            if num_groups > 1 {
+                self.cmd_barrier(
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_SHADER_WRITE_BIT,
+                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                );
+                let pc1 = BdozDotPushConsts {
+                    num_elements: n as u32,
+                    num_groups,
+                    mode: 1,
+                    _pad: 0,
+                };
+                (self.fns.cmd_push_constants)(
+                    self.cmd_buf,
+                    kp.pipeline_layout,
+                    VK_SHADER_STAGE_COMPUTE_BIT,
+                    0,
+                    size_of::<BdozDotPushConsts>() as u32,
+                    (&pc1 as *const BdozDotPushConsts).cast::<c_void>(),
+                );
+                (self.fns.cmd_dispatch)(self.cmd_buf, 1, 1, 1);
+            }
+
+            let copy_out = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: 32,
+            };
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT,
+            );
+            (self.fns.cmd_copy_buffer)(
+                self.cmd_buf,
+                self.vram_c.buffer,
+                self.staging.buffer,
+                1,
+                &copy_out,
+            );
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            self.submit_and_wait()?;
+
+            let mut res = [0u64; 4];
+            self.read_staging_u64s(0, &mut res);
+            let lane0 = (res[0] as u128) | ((res[1] as u128) << 64);
+            let lane1 = (res[2] as u128) | ((res[3] as u128) << 64);
+            Ok((lane0, lane1))
+        }
+    }
+
+    unsafe fn teardown_device_only(&mut self) {
+        if !self.device.is_null() {
+            unsafe {
+                let _ = (self.fns.device_wait_idle)(self.device);
+                let mut st = core::mem::take(&mut self.staging);
+                let mut va = core::mem::take(&mut self.vram_a);
+                let mut vb = core::mem::take(&mut self.vram_b);
+                let mut vc = core::mem::take(&mut self.vram_c);
+                self.destroy_gpu_buffer(&mut st);
+                self.destroy_gpu_buffer(&mut va);
+                self.destroy_gpu_buffer(&mut vb);
+                self.destroy_gpu_buffer(&mut vc);
+
+                if self.fence != 0 {
+                    (self.fns.destroy_fence)(self.device, self.fence, null());
+                    self.fence = 0;
+                }
+                if self.desc_pool != 0 {
+                    (self.fns.destroy_descriptor_pool)(self.device, self.desc_pool, null());
+                    self.desc_pool = 0;
+                }
+                if self.cmd_pool != 0 {
+                    (self.fns.destroy_command_pool)(self.device, self.cmd_pool, null());
+                    self.cmd_pool = 0;
+                }
+                for kp in &mut self.pipelines {
+                    if kp.pipeline != 0 {
+                        (self.fns.destroy_pipeline)(self.device, kp.pipeline, null());
+                        kp.pipeline = 0;
+                    }
+                    if kp.pipeline_layout != 0 {
+                        (self.fns.destroy_pipeline_layout)(self.device, kp.pipeline_layout, null());
+                        kp.pipeline_layout = 0;
+                    }
+                    if kp.shader_module != 0 {
+                        (self.fns.destroy_shader_module)(self.device, kp.shader_module, null());
+                        kp.shader_module = 0;
+                    }
+                }
+                for dsl in [&mut self.dsl_1buf, &mut self.dsl_2buf, &mut self.dsl_3buf] {
+                    if *dsl != 0 {
+                        (self.fns.destroy_descriptor_set_layout)(self.device, *dsl, null());
+                        *dsl = 0;
+                    }
+                }
+                (self.fns.destroy_device)(self.device, null());
+                self.device = null_mut();
+            }
+        }
+    }
+}
+
+impl Drop for RawVulkanEngine {
+    fn drop(&mut self) {
+        unsafe {
+            self.teardown_device_only();
+            if !self.instance.is_null() {
+                (self.destroy_instance)(self.instance, null());
+                self.instance = null_mut();
+            }
+            if !self.lib_handle.is_null() {
+                let _ = dlclose(self.lib_handle);
+                self.lib_handle = null_mut();
+            }
+        }
+    }
+}
