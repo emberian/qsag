@@ -865,7 +865,10 @@ pub const fn bs_gf256_mul_planes_ct(
         let y_hi = [y[2], y[3]];
         let p = mul_t1(x_lo, y_lo);
         let q = mul_t1(x_hi, y_hi);
-        let r = mul_t1([x_lo[0] ^ x_hi[0], x_lo[1] ^ x_hi[1]], [y_lo[0] ^ y_hi[0], y_lo[1] ^ y_hi[1]]);
+        let r = mul_t1(
+            [x_lo[0] ^ x_hi[0], x_lo[1] ^ x_hi[1]],
+            [y_lo[0] ^ y_hi[0], y_lo[1] ^ y_hi[1]],
+        );
         let sq = scale_x1(q);
         [
             p[0] ^ q[0],

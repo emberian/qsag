@@ -44,33 +44,33 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use crate::dkg::{
-    epoch_latch_binding, latch_quorum_intersects_honestly, EpochLatchAuthorityPublic,
-    EpochLatchCertificate, EpochLatchError as QuorumLatchError, ShamirPoseidonSeedShare,
+    EpochLatchAuthorityPublic, EpochLatchCertificate, EpochLatchError as QuorumLatchError,
+    ShamirPoseidonSeedShare, epoch_latch_binding, latch_quorum_intersects_honestly,
 };
 use crate::field::goldilocks::{Goldilocks, GoldilocksExt2};
 use crate::keccak_mpc::DkgCachedSubtrees;
 use crate::preprocessing::{
+    OtMesh, PartyPrivateRng, PreprocessError, PreprocessedPoseidonPartyVault,
     commit_and_open_spdz_goldilocks_batch_quorum, open_and_check_degree_goldilocks,
     run_dealerless_pi_pow7_with_alpha, spdz_authenticate_goldilocks_batch_ext2,
-    spdz_setup_alpha_goldilocks, validate_all_eval_points_goldilocks, OtMesh, PartyPrivateRng,
-    PreprocessError, PreprocessedPoseidonPartyVault,
+    spdz_setup_alpha_goldilocks, validate_all_eval_points_goldilocks,
 };
-use crate::sponge::keccak::{cshake256_32};
+use crate::sponge::keccak::cshake256_32;
 use crate::sponge::poseidon2::{
-    bytes_to_limbs56, poseidon2_const_at, poseidon2_pad, POSEIDON2_HALF_EXTERNAL_ROUNDS,
-    POSEIDON2_INIT_STATE, POSEIDON2_INTERNAL_ROUNDS,
+    POSEIDON2_HALF_EXTERNAL_ROUNDS, POSEIDON2_INIT_STATE, POSEIDON2_INTERNAL_ROUNDS,
+    bytes_to_limbs56, poseidon2_const_at, poseidon2_pad,
 };
 use crate::tsw_baggy::{
+    AdrsKind, EpochLatchError, ForsTreeOpening, HashAdrs, LayerXmssSig, Poseidon2Suite,
+    PqHashParams, PqHashSig, PqPublicKey, StatefulEpochLatch, TAG_PRF, TAG_TH_F,
     build_merkle_from_leaves_topdown, build_prf_msg_template, build_single_secret32_template,
     build_stateful_det_opt_domain, build_stateless_det_opt_domain,
-    derive_stateless_leaf_and_fors_indices,
-    grind_tsw_internal_counter, grind_tsw_leaf_counter, th_pre_hash, th_tweak_tl, verify_pq_hash_sig,
-    AdrsKind, EpochLatchError, ForsTreeOpening, HashAdrs, LayerXmssSig, Poseidon2Suite, PqHashParams,
-    PqHashSig, PqPublicKey, StatefulEpochLatch, TAG_PRF, TAG_TH_F,
+    derive_stateless_leaf_and_fors_indices, grind_tsw_internal_counter, grind_tsw_leaf_counter,
+    th_pre_hash, th_tweak_tl, verify_pq_hash_sig,
 };
 use crate::wipe::{
-    ct_eq_bytes32, secret_vec_push, secret_vec_reserve, wipe_bytes32, wipe_ext2, wipe_goldilocks,
-    SecretBuffer, SecretWipe,
+    SecretBuffer, SecretWipe, ct_eq_bytes32, secret_vec_push, secret_vec_reserve, wipe_bytes32,
+    wipe_ext2, wipe_goldilocks,
 };
 
 /// Number of $x^7$ S-boxes in one Width-12 `poseidon2_perm12` (`4 * 12 + 22 * 1 + 4 * 12 = 118`).
@@ -89,8 +89,13 @@ const GOLDILOCKS_EPSILON: u64 = (1u64 << 32) - 1; // 2^64 - p = 2^32 - 1
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Poseidon2MpcError {
     InvalidParams,
-    InvalidQuorum { t: usize, n: usize },
-    KeySharePoisoned { party_id: usize },
+    InvalidQuorum {
+        t: usize,
+        n: usize,
+    },
+    KeySharePoisoned {
+        party_id: usize,
+    },
     PublicSeedMismatch,
     Preprocess(PreprocessError),
     EpochLatch(EpochLatchError),
@@ -103,7 +108,10 @@ pub enum Poseidon2MpcError {
     /// A stateful signature was requested from `signers < committee` members without a latch
     /// certificate. Local latches bind an epoch to a message only among the members present, so
     /// a different signing set could open the same one-time leaf for another message.
-    LatchCertificateRequired { signers: usize, committee: usize },
+    LatchCertificateRequired {
+        signers: usize,
+        committee: usize,
+    },
     /// The presented latch certificate does not authorise this `(committee, key, epoch, message)`.
     LatchCertificateRejected(QuorumLatchError),
     /// Signing was requested before the key shares were enrolled with a verified `(params, pk)` profile.
@@ -384,8 +392,13 @@ pub fn authenticate_poseidon_dkg_shares_and_preprocess(
     num_a2b_masks: usize,
     ot_mesh: &mut OtMesh,
     party_rngs: &mut [PartyPrivateRng],
-) -> Result<(Vec<Poseidon2SpdzAuthenticatedKeyShare>, Vec<PreprocessedPoseidonPartyVault>), Poseidon2MpcError>
-{
+) -> Result<
+    (
+        Vec<Poseidon2SpdzAuthenticatedKeyShare>,
+        Vec<PreprocessedPoseidonPartyVault>,
+    ),
+    Poseidon2MpcError,
+> {
     let n = eval_points.len();
     if t < 2
         || t > n
@@ -633,12 +646,15 @@ fn eval_spdz_poseidon2_perm12_batch(
             let alpha_p = vaults[p].mac_alpha_share;
             for st in &states_per_party[p][..batch] {
                 for (lane, wire) in st.iter().enumerate() {
-                    let rc = AuthGlWire::public_const(poseidon2_const_at(0, r, lane as u64), alpha_p);
+                    let rc =
+                        AuthGlWire::public_const(poseidon2_const_at(0, r, lane as u64), alpha_p);
                     sbox_in[p].push(wire.add(rc));
                 }
             }
         }
-        let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(t, quorum_pts, &sbox_in, vaults, pending)?);
+        let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(
+            t, quorum_pts, &sbox_in, vaults, pending,
+        )?);
         for p in 0..m {
             for b in 0..batch {
                 for lane in 0..12 {
@@ -659,7 +675,9 @@ fn eval_spdz_poseidon2_perm12_batch(
                 sbox_in[p].push(st[0].add(rc0));
             }
         }
-        let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(t, quorum_pts, &sbox_in, vaults, pending)?);
+        let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(
+            t, quorum_pts, &sbox_in, vaults, pending,
+        )?);
         for p in 0..m {
             for b in 0..batch {
                 states_per_party[p][b][0] = sbox_out[p][b];
@@ -675,12 +693,15 @@ fn eval_spdz_poseidon2_perm12_batch(
             let alpha_p = vaults[p].mac_alpha_share;
             for st in &states_per_party[p][..batch] {
                 for (lane, wire) in st.iter().enumerate() {
-                    let rc = AuthGlWire::public_const(poseidon2_const_at(2, r, lane as u64), alpha_p);
+                    let rc =
+                        AuthGlWire::public_const(poseidon2_const_at(2, r, lane as u64), alpha_p);
                     sbox_in[p].push(wire.add(rc));
                 }
             }
         }
-        let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(t, quorum_pts, &sbox_in, vaults, pending)?);
+        let sbox_out = SecretBuffer(eval_sbox7_batch_spdz(
+            t, quorum_pts, &sbox_in, vaults, pending,
+        )?);
         for p in 0..m {
             for b in 0..batch {
                 for lane in 0..12 {
@@ -862,10 +883,7 @@ fn eval_spdz_beaver_mul_batch(
                 mac: tr.c_mac,
             };
             let de_const = AuthGlWire::public_const(d * e, alpha_p);
-            let z = c_w
-                .add(b_w.scale(d))
-                .add(a_w.scale(e))
-                .add(de_const);
+            let z = c_w.add(b_w.scale(d)).add(a_w.scale(e)).add(de_const);
             out[p].push(z);
         }
     }
@@ -972,8 +990,9 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
                 mul_y[p].push(carry_b_p[p][idx]);
             }
         }
-        let prods =
-            SecretBuffer(eval_spdz_beaver_mul_batch(t, quorum_pts, &mul_x, &mul_y, vaults, pending)?);
+        let prods = SecretBuffer(eval_spdz_beaver_mul_batch(
+            t, quorum_pts, &mul_x, &mul_y, vaults, pending,
+        )?);
         for p in 0..m {
             let alpha_p = vaults[p].mac_alpha_share;
             let one_c = AuthGlWire::public_const(Goldilocks::ONE, alpha_p);
@@ -1019,8 +1038,9 @@ fn eval_spdz_canonical_a2b_state4_batch_to_bytes32(
             }
         }
     }
-    let mux_prods =
-        SecretBuffer(eval_spdz_beaver_mul_batch(t, quorum_pts, &mux_x, &mux_y, vaults, pending)?);
+    let mux_prods = SecretBuffer(eval_spdz_beaver_mul_batch(
+        t, quorum_pts, &mux_x, &mux_y, vaults, pending,
+    )?);
 
     // 4. Pack canonical big-endian bytes `to_be_bytes()` (`byte 0` = bits `56..64`, ..., `byte 7` = bits `0..8`)
     let mut out_bytes_p = SecretBuffer(vec![Vec::with_capacity(batch); m]);
@@ -1079,8 +1099,14 @@ fn flush_verify_and_open_cut_states4(
     // Intermediate openings must authenticate before any unmasked cut share is copied.
     let alpha = SecretBuffer(vaults.iter().map(|v| v.mac_alpha_share).collect::<Vec<_>>());
     let intermediate = commit_and_open_spdz_goldilocks_batch_quorum(
-        session_id, "pre_cut_intermediate_mac", t, quorum_pts,
-        &pending.shares_per_party, &pending.macs_per_party, &alpha, party_rngs,
+        session_id,
+        "pre_cut_intermediate_mac",
+        t,
+        quorum_pts,
+        &pending.shares_per_party,
+        &pending.macs_per_party,
+        &alpha,
+        party_rngs,
     );
     pending.clear_and_wipe();
     match intermediate {
@@ -1115,14 +1141,7 @@ fn flush_verify_and_open_cut_states4(
     pending.clear_and_wipe();
 
     let opened_res = commit_and_open_spdz_goldilocks_batch_quorum(
-        session_id,
-        phase,
-        t,
-        quorum_pts,
-        &all_sh,
-        &all_mac,
-        &alpha_sh,
-        party_rngs,
+        session_id, phase, t, quorum_pts, &all_sh, &all_mac, &alpha_sh, party_rngs,
     );
     drop(all_sh);
     drop(all_mac);
@@ -1178,7 +1197,11 @@ fn validate_quorum_slices(
     }
     let pk_seed = key_shares[0].pk_seed;
     let n = key_shares[0].committee_size;
-    if m > n || key_shares.iter().any(|ks| ks.committee_size != n || ks.party_id >= n) {
+    if m > n
+        || key_shares
+            .iter()
+            .any(|ks| ks.committee_size != n || ks.party_id >= n)
+    {
         return Err(Poseidon2MpcError::InvalidQuorum { t, n: m });
     }
     let mut pts = Vec::with_capacity(m);
@@ -1387,15 +1410,7 @@ fn compute_subtree_wots_pks_mpc(
         }
     }
     let endpoints = eval_wots_chains_mpc_cut(
-        session_id,
-        phase,
-        t,
-        quorum_pts,
-        pk_seed,
-        &targets,
-        key_shares,
-        vaults,
-        party_rngs,
+        session_id, phase, t, quorum_pts, pk_seed, &targets, key_shares, vaults, party_rngs,
     )?;
     let mut leaves = Vec::with_capacity(sub_leaves);
     for kp in 0..sub_leaves {
@@ -1467,7 +1482,10 @@ pub fn required_poseidon2_sign_preprocessing_budget_cached(
     sign_preprocessing_budget(params, true)
 }
 
-fn sign_preprocessing_budget(params: &PqHashParams, top_subtree_cached: bool) -> (usize, usize, usize) {
+fn sign_preprocessing_budget(
+    params: &PqHashParams,
+    top_subtree_cached: bool,
+) -> (usize, usize, usize) {
     let sub_leaves = 1usize << params.subtree_height;
     let steps_max = params.w.saturating_sub(1);
     let fors_leaves = if params.stateful {
@@ -1476,8 +1494,11 @@ fn sign_preprocessing_budget(params: &PqHashParams, top_subtree_cached: bool) ->
         params.fors_trees * (1usize << params.fors_height)
     };
     // With a top-subtree leaf cache the top layer evaluates only its `ell1` signing chains.
-    let mpc_subtrees = params.num_layers.saturating_sub(usize::from(top_subtree_cached));
-    let hypertree_chains = params.num_layers * params.ell1 + mpc_subtrees * sub_leaves * params.ell1;
+    let mpc_subtrees = params
+        .num_layers
+        .saturating_sub(usize::from(top_subtree_cached));
+    let hypertree_chains =
+        params.num_layers * params.ell1 + mpc_subtrees * sub_leaves * params.ell1;
     let (prf_perms, step_perms) = chain_template_permutations();
     let opt_domain = if params.stateful {
         build_stateful_det_opt_domain(0, &[0; 32])
@@ -1485,7 +1506,8 @@ fn sign_preprocessing_budget(params: &PqHashParams, top_subtree_cached: bool) ->
         build_stateless_det_opt_domain(&[0; 32])
     };
     let randomizer_perms = template_permutations(&build_prf_msg_template(&opt_domain, &[0; 32]));
-    let total_perms = randomizer_perms + fors_leaves * (prf_perms + step_perms)
+    let total_perms = randomizer_perms
+        + fors_leaves * (prf_perms + step_perms)
         + hypertree_chains * (prf_perms + steps_max * step_perms);
     let total_a2b_hashes = fors_leaves + hypertree_chains * steps_max;
     (
@@ -1665,7 +1687,11 @@ fn sign_hypertree_poseidon2_mpc_core(
                     chain_idx: j as u32,
                     hash_step: u as u32,
                 };
-                prf_tmpls.push(build_single_secret32_template(TAG_PRF, &pk.pk_seed, &prf_adrs));
+                prf_tmpls.push(build_single_secret32_template(
+                    TAG_PRF,
+                    &pk.pk_seed,
+                    &prf_adrs,
+                ));
                 let tree_adrs = HashAdrs {
                     layer: 0,
                     tree: tree0,
@@ -1744,7 +1770,10 @@ fn sign_hypertree_poseidon2_mpc_core(
         for p in 0..m {
             secret_vec_reserve(&mut cut_states[p], params.fors_trees);
             for (j, &idx_j) in idxs.iter().enumerate().take(params.fors_trees) {
-                secret_vec_push(&mut cut_states[p], sec_states[p][j * fors_leaf_count + idx_j]);
+                secret_vec_push(
+                    &mut cut_states[p],
+                    sec_states[p][j * fors_leaf_count + idx_j],
+                );
             }
         }
         let empty_extra = vec![Vec::new(); m];
@@ -2039,8 +2068,7 @@ fn check_committee_latch_authorisation(
         Some(cert) => {
             let binding = epoch_latch_binding(&pk.pk_seed, &pk.pk_root, epoch, mu);
             if let Some(authority) = pinned_authority {
-                cert
-                    .verify_against(authority, n, t, epoch, &binding)
+                cert.verify_against(authority, n, t, epoch, &binding)
                     .map_err(Poseidon2MpcError::LatchCertificateRejected)
             } else {
                 cert.verify_for(n, t, epoch, &binding)
@@ -2102,7 +2130,9 @@ fn reserve_authorised_epoch<L: StatefulEpochLatch>(
         mu,
     )?;
     if latch_cert.is_none() && latches.iter().any(|l| l.peek_next_epoch() != epoch) {
-        return Err(Poseidon2MpcError::EpochLatch(EpochLatchError::LatchesDisagree));
+        return Err(Poseidon2MpcError::EpochLatch(
+            EpochLatchError::LatchesDisagree,
+        ));
     }
     for l in latches.iter() {
         l.check_reserve_epoch_at(epoch, params.max_sigs_log2, mu)?;
@@ -2204,8 +2234,8 @@ pub fn sign_jorts_poseidon2_mpc_cached<L: StatefulEpochLatch>(
             &mu,
         )?
     };
-    let leaf_global_idx =
-        usize::try_from(ep0).map_err(|_| Poseidon2MpcError::EpochLatch(EpochLatchError::Exhausted))?;
+    let leaf_global_idx = usize::try_from(ep0)
+        .map_err(|_| Poseidon2MpcError::EpochLatch(EpochLatchError::Exhausted))?;
 
     let opt_domain = build_stateful_det_opt_domain(ep0, &pk.pk_seed);
     let r_rand = eval_prf_msg_mpc_cut(
@@ -2387,7 +2417,9 @@ fn eval_stateless_r_rand_mpc(
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<[u8; 32], Poseidon2MpcError> {
     let transcript = crate::sponge::keccak::encode_multi_frame(&[session_id, mu]);
-    for rng in party_rngs.iter_mut() { rng.hedge_transcript(&transcript); }
+    for rng in party_rngs.iter_mut() {
+        rng.hedge_transcript(&transcript);
+    }
     let opt_domain = build_stateless_det_opt_domain(&pk.pk_seed);
     eval_prf_msg_mpc_cut(
         session_id,
@@ -2508,42 +2540,84 @@ mod tests {
     #[test]
     fn intermediate_mac_failure_precedes_cut_access() {
         let points = [Goldilocks::ONE, Goldilocks::from_u64_reduced(2)];
-        let mut vaults: Vec<_> = points.iter().enumerate().map(|(p, &x)|
-            PreprocessedPoseidonPartyVault::empty_for_barrier_test(p, x)).collect();
-        let mut keys: Vec<_> = points.iter().enumerate().map(|(p, &x)|
-            Poseidon2SpdzAuthenticatedKeyShare { party_id: p, committee_size: 2, eval_point: x, pk_seed: [0;32],
-                mac_alpha_share: GoldilocksExt2::ONE, sk_seed_bytes: [Goldilocks::ZERO;32],
-                sk_seed_macs: [GoldilocksExt2::ZERO;32], sk_prf_bytes: [Goldilocks::ZERO;32],
-                sk_prf_macs: [GoldilocksExt2::ZERO;32], enrolled_profile: None,
-                enrolled_latch_authority: None, poisoned: false }).collect();
+        let mut vaults: Vec<_> = points
+            .iter()
+            .enumerate()
+            .map(|(p, &x)| PreprocessedPoseidonPartyVault::empty_for_barrier_test(p, x))
+            .collect();
+        let mut keys: Vec<_> = points
+            .iter()
+            .enumerate()
+            .map(|(p, &x)| Poseidon2SpdzAuthenticatedKeyShare {
+                party_id: p,
+                committee_size: 2,
+                eval_point: x,
+                pk_seed: [0; 32],
+                mac_alpha_share: GoldilocksExt2::ONE,
+                sk_seed_bytes: [Goldilocks::ZERO; 32],
+                sk_seed_macs: [GoldilocksExt2::ZERO; 32],
+                sk_prf_bytes: [Goldilocks::ZERO; 32],
+                sk_prf_macs: [GoldilocksExt2::ZERO; 32],
+                enrolled_profile: None,
+                enrolled_latch_authority: None,
+                poisoned: false,
+            })
+            .collect();
         let mut pending = SpdzGoldilocksPendingChecks::new(2);
-        pending.shares_per_party = vec![vec![Goldilocks::ONE];2];
-        pending.macs_per_party = vec![vec![GoldilocksExt2::ZERO];2];
+        pending.shares_per_party = vec![vec![Goldilocks::ONE]; 2];
+        pending.macs_per_party = vec![vec![GoldilocksExt2::ZERO]; 2];
         let mut rngs = make_rngs(2, 45);
-        let cut = vec![vec![[AuthGlWire { val: Goldilocks::ZERO, mac: GoldilocksExt2::ZERO };4]], vec![]];
+        let cut = vec![
+            vec![
+                [AuthGlWire {
+                    val: Goldilocks::ZERO,
+                    mac: GoldilocksExt2::ZERO,
+                }; 4],
+            ],
+            vec![],
+        ];
         // The malformed second cut would panic if the implementation reached it.
-        let result = flush_verify_and_open_cut_states4(&[42;32], "barrier", 2, &points,
-            &cut, &vec![vec![];2], &mut pending, &mut keys.iter_mut().collect::<Vec<_>>(),
-            &mut vaults.iter_mut().collect::<Vec<_>>(), &mut rngs);
-        assert!(matches!(result, Err(Poseidon2MpcError::Preprocess(PreprocessError::MacCheckFailed { accused_party: None, .. }))));
+        let result = flush_verify_and_open_cut_states4(
+            &[42; 32],
+            "barrier",
+            2,
+            &points,
+            &cut,
+            &vec![vec![]; 2],
+            &mut pending,
+            &mut keys.iter_mut().collect::<Vec<_>>(),
+            &mut vaults.iter_mut().collect::<Vec<_>>(),
+            &mut rngs,
+        );
+        assert!(matches!(
+            result,
+            Err(Poseidon2MpcError::Preprocess(
+                PreprocessError::MacCheckFailed {
+                    accused_party: None,
+                    ..
+                }
+            ))
+        ));
         assert!(vaults.iter().all(|v| v.is_poisoned()));
     }
 
-    use crate::field::goldilocks::GOLDILOCKS_PRIME;
     use super::*;
     use crate::dkg::{
-        run_dealerless_dkg_seed32_goldilocks, shamir_reconstruct_seed32_goldilocks,
-        QuorumEpochLatchCluster,
+        QuorumEpochLatchCluster, run_dealerless_dkg_seed32_goldilocks,
+        shamir_reconstruct_seed32_goldilocks,
     };
+    use crate::field::goldilocks::GOLDILOCKS_PRIME;
     use crate::sponge::poseidon2::poseidon2_hash32;
     use crate::tsw_baggy::{
-        compute_wots_pk, derive_public_key, derive_stateless_r_rand, eval_single_sign_stateful,
-        retry_single_sign_stateful, MonotonicEpochLatch, PqSecretKey,
+        MonotonicEpochLatch, PqSecretKey, compute_wots_pk, derive_public_key,
+        derive_stateless_r_rand, eval_single_sign_stateful, retry_single_sign_stateful,
     };
 
     fn make_rngs(n: usize, tag: u8) -> Vec<PartyPrivateRng> {
         (0..n)
-            .map(|p| PartyPrivateRng::from_seed([tag.wrapping_add(p as u8 + 1); 32], b"POS2_MPC_TEST"))
+            .map(|p| {
+                PartyPrivateRng::from_seed([tag.wrapping_add(p as u8 + 1); 32], b"POS2_MPC_TEST")
+            })
             .collect()
     }
 
@@ -2558,23 +2632,17 @@ mod tests {
 
         let (alpha_c, alpha_sh) = spdz_setup_alpha_goldilocks(&sid, t, &pts, &mut rngs).unwrap();
         let mut vaults = run_dealerless_pi_pow7_with_alpha(
-            sid,
-            t,
-            &pts,
-            0,
-            0,
-            0,
-            &alpha_c,
-            &alpha_sh,
-            &mut mesh,
-            &mut rngs,
+            sid, t, &pts, 0, 0, 0, &alpha_c, &alpha_sh, &mut mesh, &mut rngs,
         )
         .unwrap();
 
         // This test exercises the online canonical A2B circuit. Offline mask
         // generation/sacrifice has dedicated adversarial preprocessing tests.
         PreprocessedPoseidonPartyVault::fill_two_party_online_fixture(
-            &mut vaults, (0, 2 * POSEIDON2_BEAVER_PER_A2B_HASH32, 8), &mut rngs[0]);
+            &mut vaults,
+            (0, 2 * POSEIDON2_BEAVER_PER_A2B_HASH32, 8),
+            &mut rngs[0],
+        );
 
         // Test all critical Goldilocks edge cases: 0, 1, 2^32 - 1, 2^32, p - 2, p - 1, random!
         let s0 = [
@@ -2699,8 +2767,10 @@ mod tests {
         n: usize,
         budget: (usize, usize, usize),
     ) -> (
-        Vec<Poseidon2SpdzAuthenticatedKeyShare>, Vec<PreprocessedPoseidonPartyVault>,
-        Vec<PartyPrivateRng>, PqSecretKey,
+        Vec<Poseidon2SpdzAuthenticatedKeyShare>,
+        Vec<PreprocessedPoseidonPartyVault>,
+        Vec<PartyPrivateRng>,
+        PqSecretKey,
     ) {
         setup_poseidon2_committee_material(t, n, budget, false)
     }
@@ -2746,11 +2816,21 @@ mod tests {
         .unwrap();
 
         if online_fixture {
-            PreprocessedPoseidonPartyVault::fill_two_party_online_fixture(&mut vaults, budget, &mut rngs[0]);
+            PreprocessedPoseidonPartyVault::fill_two_party_online_fixture(
+                &mut vaults,
+                budget,
+                &mut rngs[0],
+            );
         }
         let ref_sk = PqSecretKey {
-            sk_seed: shamir_reconstruct_seed32_goldilocks(&dkg_seed.0[..t].iter().collect::<Vec<_>>()).unwrap(),
-            sk_prf: shamir_reconstruct_seed32_goldilocks(&dkg_prf.0[..t].iter().collect::<Vec<_>>()).unwrap(),
+            sk_seed: shamir_reconstruct_seed32_goldilocks(
+                &dkg_seed.0[..t].iter().collect::<Vec<_>>(),
+            )
+            .unwrap(),
+            sk_prf: shamir_reconstruct_seed32_goldilocks(
+                &dkg_prf.0[..t].iter().collect::<Vec<_>>(),
+            )
+            .unwrap(),
             pk_seed,
         };
         (key_shares, vaults, rngs, ref_sk)
@@ -2800,7 +2880,8 @@ mod tests {
         };
         assert!(params.is_well_formed() && stateless_params.is_well_formed());
         let t = 2usize;
-        let (mut key_shares, mut vaults, mut rngs, ref_sk) = setup_two_party_poseidon2_quorum((0, 0, 0));
+        let (mut key_shares, mut vaults, mut rngs, ref_sk) =
+            setup_two_party_poseidon2_quorum((0, 0, 0));
         let (ks0, ks1) = key_shares.split_at_mut(1);
         let (v0, v1) = vaults.split_at_mut(1);
         let mut ks_refs = [&mut ks0[0], &mut ks1[0]];
@@ -2808,7 +2889,10 @@ mod tests {
 
         // The true top-subtree leaves, derived in the clear from the harness-only reference key.
         let pk = derive_public_key(Poseidon2Suite, &params, &ref_sk);
-        assert_eq!(pk, derive_public_key(Poseidon2Suite, &stateless_params, &ref_sk));
+        assert_eq!(
+            pk,
+            derive_public_key(Poseidon2Suite, &stateless_params, &ref_sk)
+        );
         let cache = DkgCachedSubtrees {
             top_layer: 1,
             top_leaves: (0..2u32)
@@ -2816,7 +2900,10 @@ mod tests {
                 .collect(),
             pk,
         };
-        assert_eq!(validate_top_subtree_cache(&params, &pk, Some(&cache)), Ok(()));
+        assert_eq!(
+            validate_top_subtree_cache(&params, &pk, Some(&cache)),
+            Ok(())
+        );
         assert_eq!(validate_top_subtree_cache(&params, &pk, None), Ok(()));
 
         let msg = b"mismatched top subtree cache";
@@ -2912,11 +2999,16 @@ mod tests {
         assert_eq!((sg.0 - sgc.0, sg.1 - sgc.1, sg.2 - sgc.2), kg);
 
         // Keygen + one uncached signature + a cached signature and a cached retry.
-        let (mut key_shares, mut vaults, mut rngs, ref_sk) = setup_poseidon2_committee_material(2, 2, (
-            kg.0 + sg.0 + 2 * sgc.0,
-            kg.1 + sg.1 + 2 * sgc.1,
-            kg.2 + sg.2 + 2 * sgc.2,
-        ), true);
+        let (mut key_shares, mut vaults, mut rngs, ref_sk) = setup_poseidon2_committee_material(
+            2,
+            2,
+            (
+                kg.0 + sg.0 + 2 * sgc.0,
+                kg.1 + sg.1 + 2 * sgc.1,
+                kg.2 + sg.2 + 2 * sgc.2,
+            ),
+            true,
+        );
         let ref_pk = derive_public_key(Poseidon2Suite, &params, &ref_sk);
         let (ks0, ks1) = key_shares.split_at_mut(1);
         let (v0, v1) = vaults.split_at_mut(1);
@@ -3023,7 +3115,13 @@ mod tests {
         let spent_cached = spent(before, remaining_budget(v_refs[0]));
         assert_eq!(ep_cached, 1);
         assert_eq!(sig_cached.to_wire_bytes(&params).unwrap(), plain_bytes);
-        assert!(verify_pq_hash_sig(Poseidon2Suite, &params, &pk, msg, &sig_cached));
+        assert!(verify_pq_hash_sig(
+            Poseidon2Suite,
+            &params,
+            &pk,
+            msg,
+            &sig_cached
+        ));
         assert_eq!(spent(spent_plain, spent_cached), spent_keygen);
 
         // 5. Cached crash-retry of the epoch latched in step 2 reproduces the same bytes.
@@ -3062,7 +3160,8 @@ mod tests {
             pk_root: [0x22; 32],
         };
         let (mu_a, mu_b) = ([0xa1; 32], [0xb2; 32]);
-        let bind = |epoch: u64, mu: &[u8; 32]| epoch_latch_binding(&pk.pk_seed, &pk.pk_root, epoch, mu);
+        let bind =
+            |epoch: u64, mu: &[u8; 32]| epoch_latch_binding(&pk.pk_seed, &pk.pk_root, epoch, mu);
 
         // n == t == 2: both members attend, so their two latches are the whole committee.
         let (mut a0, mut a1) = (MonotonicEpochLatch::new(0), MonotonicEpochLatch::new(0));
@@ -3125,8 +3224,12 @@ mod tests {
         // A certified signature by {P0, P1} leaves P2's latch behind.
         let mut cluster = QuorumEpochLatchCluster::new(3, 1).unwrap();
         let auth = cluster.authority();
-        cluster.certify_epoch(&[0, 1, 2], 0, bind(0, &mu_a)).unwrap();
-        let cert1 = cluster.certify_epoch(&[0, 1, 2], 1, bind(1, &mu_a)).unwrap();
+        cluster
+            .certify_epoch(&[0, 1, 2], 0, bind(0, &mu_a))
+            .unwrap();
+        let cert1 = cluster
+            .certify_epoch(&[0, 1, 2], 1, bind(1, &mu_a))
+            .unwrap();
         // Without a pinned authority, a certificate is rejected even if structurally valid.
         assert_eq!(
             reserve_authorised_epoch(
@@ -3156,7 +3259,10 @@ mod tests {
             ),
             Ok(1)
         );
-        assert_eq!((l0.next_epoch(), l1.next_epoch(), l2.next_epoch()), (2, 2, 1));
+        assert_eq!(
+            (l0.next_epoch(), l1.next_epoch(), l2.next_epoch()),
+            (2, 2, 1)
+        );
 
         // Full attendance with the lagging latch and no certificate: refused, nothing advanced.
         assert_eq!(
@@ -3170,9 +3276,14 @@ mod tests {
                 &mut [&mut *l0, &mut *l1, &mut *l2],
                 &mu_b
             ),
-            Err(Poseidon2MpcError::EpochLatch(EpochLatchError::LatchesDisagree))
+            Err(Poseidon2MpcError::EpochLatch(
+                EpochLatchError::LatchesDisagree
+            ))
         );
-        assert_eq!((l0.next_epoch(), l1.next_epoch(), l2.next_epoch()), (2, 2, 1));
+        assert_eq!(
+            (l0.next_epoch(), l1.next_epoch(), l2.next_epoch()),
+            (2, 2, 1)
+        );
         assert_eq!(l0.in_flight(), Some((1, mu_a)));
 
         // A certificate minted by a distinct rogue cluster is rejected by the pinned authority.
@@ -3198,7 +3309,9 @@ mod tests {
         // P0 and P1 already hold for `mu_a` cannot be taken for `mu_b`, and two-phase latch
         // checking leaves `l2` untouched.
         let mut shared_second = cluster.new_with_shared_test_authority();
-        let shared_cert = shared_second.certify_epoch(&[0, 1, 2], 1, bind(1, &mu_b)).unwrap();
+        let shared_cert = shared_second
+            .certify_epoch(&[0, 1, 2], 1, bind(1, &mu_b))
+            .unwrap();
         assert_eq!(
             reserve_authorised_epoch(
                 &params,
@@ -3210,7 +3323,9 @@ mod tests {
                 &mut [&mut *l2, &mut *l1],
                 &mu_b
             ),
-            Err(Poseidon2MpcError::EpochLatch(EpochLatchError::EquivocationRefused))
+            Err(Poseidon2MpcError::EpochLatch(
+                EpochLatchError::EquivocationRefused
+            ))
         );
         // P2 was checked first and would have accepted; it must not have moved.
         assert_eq!(l2.next_epoch(), 1);
@@ -3219,7 +3334,9 @@ mod tests {
         // The certified next epoch resynchronises the lagging latch: P2 skips epoch 1, which it
         // never used, and all three hold epoch 2.
         assert_eq!(cluster.next_unreserved_epoch(), Some(2));
-        let cert2 = cluster.certify_epoch(&[0, 1, 2], 2, bind(2, &mu_b)).unwrap();
+        let cert2 = cluster
+            .certify_epoch(&[0, 1, 2], 2, bind(2, &mu_b))
+            .unwrap();
         assert_eq!(
             reserve_authorised_epoch(
                 &params,
@@ -3267,7 +3384,9 @@ mod tests {
         assert_eq!(l0.in_flight(), Some((1, mu_a)));
 
         // Epochs beyond the key's capacity are refused before any latch moves.
-        let cert8 = cluster.certify_epoch(&[0, 1, 2], 8, bind(8, &mu_b)).unwrap();
+        let cert8 = cluster
+            .certify_epoch(&[0, 1, 2], 8, bind(8, &mu_b))
+            .unwrap();
         assert_eq!(
             reserve_authorised_epoch(
                 &params,
@@ -3331,7 +3450,8 @@ mod tests {
         let msg_b = b"message B";
         let mu_a = th_pre_hash(Poseidon2Suite, &pk.pk_seed, &pk.pk_root, msg_a);
         let mu_b = th_pre_hash(Poseidon2Suite, &pk.pk_seed, &pk.pk_root, msg_b);
-        let bind = |epoch: u64, mu: &[u8; 32]| epoch_latch_binding(&pk.pk_seed, &pk.pk_root, epoch, mu);
+        let bind =
+            |epoch: u64, mu: &[u8; 32]| epoch_latch_binding(&pk.pk_seed, &pk.pk_root, epoch, mu);
 
         // The latch quorum of a (2, 3) committee with one corruption is all three members.
         let mut cluster = QuorumEpochLatchCluster::new(n, t - 1).unwrap();
@@ -3375,7 +3495,9 @@ mod tests {
 
         // 2. Two acknowledgements are not a latch quorum; three are.
         assert!(cluster.certify_epoch(&[0, 1], 0, bind(0, &mu_a)).is_err());
-        let cert_a = cluster.certify_epoch(&[0, 1, 2], 0, bind(0, &mu_a)).unwrap();
+        let cert_a = cluster
+            .certify_epoch(&[0, 1, 2], 0, bind(0, &mu_a))
+            .unwrap();
         assert_eq!(cert_a.acknowledging_parties(), &[0, 1, 2]);
 
         // 3. {P0, P1} reserve epoch 0 for A against the certificate, as their signature does.
@@ -3414,13 +3536,19 @@ mod tests {
             .unwrap();
         let mut other = QuorumEpochLatchCluster::new(n, t - 1).unwrap();
         let foreign_key = other
-            .certify_epoch(&[0, 1, 2], 0, epoch_latch_binding(&[0x5a; 32], &pk.pk_root, 0, &mu_b))
+            .certify_epoch(
+                &[0, 1, 2],
+                0,
+                epoch_latch_binding(&[0x5a; 32], &pk.pk_root, 0, &mu_b),
+            )
             .unwrap();
         let other_epoch = other.certify_epoch(&[0, 1, 2], 1, bind(1, &mu_b)).unwrap();
         // Bound to epoch 0 but reserved at epoch 2: the signer recomputes the binding per epoch.
         let rebound_epoch = other.certify_epoch(&[0, 1, 2], 2, bind(0, &mu_b)).unwrap();
         let mut two_member = QuorumEpochLatchCluster::new(2, t - 1).unwrap();
-        let other_committee = two_member.certify_epoch(&[0, 1], 0, bind(0, &mu_b)).unwrap();
+        let other_committee = two_member
+            .certify_epoch(&[0, 1], 0, bind(0, &mu_b))
+            .unwrap();
 
         let attempts: [(Option<&EpochLatchCertificate>, Poseidon2MpcError); 5] = [
             (
@@ -3552,8 +3680,12 @@ mod tests {
     #[test]
     fn test_stateless_poseidon2_mpc_randomiser_is_deterministic_per_key_and_message() {
         let t = 2usize;
-        let (mut key_shares, mut vaults, mut rngs, ref_sk) =
-            setup_poseidon2_committee_material(2, 2, (2 * 5 * POSEIDON2_SBOXES_PER_PERM, 0, 0), true);
+        let (mut key_shares, mut vaults, mut rngs, ref_sk) = setup_poseidon2_committee_material(
+            2,
+            2,
+            (2 * 5 * POSEIDON2_SBOXES_PER_PERM, 0, 0),
+            true,
+        );
         let pts: Vec<Goldilocks> = key_shares.iter().map(|ks| ks.eval_point).collect();
         let [k0, k1] = key_shares.as_mut_slice() else {
             panic!("two key shares");
@@ -3625,11 +3757,16 @@ mod tests {
         let (sg_pow7, sg_beaver, sg_a2b) = required_poseidon2_sign_preprocessing_budget(&params);
 
         // 1. Run real dealerless Goldilocks DKG for `SK.seed` and `SK.prf`
-        let (mut key_shares, mut vaults, mut rngs, ref_sk) = setup_poseidon2_committee_material(2, 2, (
-            kg_pow7 + 2 * sg_pow7,
-            kg_beaver + 2 * sg_beaver,
-            kg_a2b + 2 * sg_a2b,
-        ), true);
+        let (mut key_shares, mut vaults, mut rngs, ref_sk) = setup_poseidon2_committee_material(
+            2,
+            2,
+            (
+                kg_pow7 + 2 * sg_pow7,
+                kg_beaver + 2 * sg_beaver,
+                kg_a2b + 2 * sg_a2b,
+            ),
+            true,
+        );
         let ref_pk = derive_public_key(Poseidon2Suite, &params, &ref_sk);
 
         // 2. Build distributed public key in MPC and assert bit-for-bit equality with `derive_public_key`
@@ -3683,7 +3820,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mpc_sig, ref_sig);
-        assert!(verify_pq_hash_sig(Poseidon2Suite, &params, &mpc_pk, msg, &mpc_sig));
+        assert!(verify_pq_hash_sig(
+            Poseidon2Suite,
+            &params,
+            &mpc_pk,
+            msg,
+            &mpc_sig
+        ));
 
         // 4. Crash-retry on `(epoch = 0, same msg)` succeeds with bit-identical signature, while
         //    equivocating `(epoch = 0, different msg)` is strictly refused BEFORE any MPC wire opens!
@@ -3766,25 +3909,63 @@ mod tests {
 
     #[test]
     fn multilayer_corduroy_poseidon2_mpc_end_to_end() {
-        let params = PqHashParams { w: 4, ell1: 128, max_sigs_log2: 2, num_layers: 2,
-            subtree_height: 1, fors_trees: 1, fors_height: 1, stateful: false };
+        let params = PqHashParams {
+            w: 4,
+            ell1: 128,
+            max_sigs_log2: 2,
+            num_layers: 2,
+            subtree_height: 1,
+            fors_trees: 1,
+            fors_height: 1,
+            stateful: false,
+        };
         assert!(params.is_well_formed());
         let kg = required_poseidon2_keygen_preprocessing_budget(&params);
         let sg = required_poseidon2_sign_preprocessing_budget(&params);
         // Real DKG, authentication, and online MPC; offline correlations are a test fixture.
-        let (mut keys, mut vaults, mut rngs, sk) = setup_poseidon2_committee_material(2, 2,
-            (kg.0 + sg.0, kg.1 + sg.1, kg.2 + sg.2), true);
+        let (mut keys, mut vaults, mut rngs, sk) =
+            setup_poseidon2_committee_material(2, 2, (kg.0 + sg.0, kg.1 + sg.1, kg.2 + sg.2), true);
         let (ka, kb) = keys.split_at_mut(1);
         let (va, vb) = vaults.split_at_mut(1);
         let mut keys = [&mut ka[0], &mut kb[0]];
         let mut vaults = [&mut va[0], &mut vb[0]];
-        let pk = build_distributed_poseidon2_key([0xa1; 32], &params, 2, &mut keys, &mut vaults, &mut rngs).unwrap();
+        let pk = build_distributed_poseidon2_key(
+            [0xa1; 32],
+            &params,
+            2,
+            &mut keys,
+            &mut vaults,
+            &mut rngs,
+        )
+        .unwrap();
         assert_eq!(pk, derive_public_key(Poseidon2Suite, &params, &sk));
         let message = b"Corduroy two-layer online MPC";
-        let sig = sign_stateless_tsw_poseidon2_mpc([0xa2; 32], &params, &pk, 2, message,
-            100_000, &mut keys, &mut vaults, &mut rngs).unwrap();
-        assert!(verify_pq_hash_sig(Poseidon2Suite, &params, &pk, message, &sig));
-        assert!(!verify_pq_hash_sig(Poseidon2Suite, &params, &pk, b"different", &sig));
+        let sig = sign_stateless_tsw_poseidon2_mpc(
+            [0xa2; 32],
+            &params,
+            &pk,
+            2,
+            message,
+            100_000,
+            &mut keys,
+            &mut vaults,
+            &mut rngs,
+        )
+        .unwrap();
+        assert!(verify_pq_hash_sig(
+            Poseidon2Suite,
+            &params,
+            &pk,
+            message,
+            &sig
+        ));
+        assert!(!verify_pq_hash_sig(
+            Poseidon2Suite,
+            &params,
+            &pk,
+            b"different",
+            &sig
+        ));
     }
 
     /// Slippage U5: sign -> policy circuit -> verify for a multi-layer `Corduroy` key.
@@ -3806,27 +3987,51 @@ mod tests {
         };
 
         // Two-layer stateless hypertree, 2-of-2 signing committee (guard ids 1 and 2).
-        let params = PqHashParams { w: 4, ell1: 128, max_sigs_log2: 2, num_layers: 2,
-            subtree_height: 1, fors_trees: 1, fors_height: 1, stateful: false };
+        let params = PqHashParams {
+            w: 4,
+            ell1: 128,
+            max_sigs_log2: 2,
+            num_layers: 2,
+            subtree_height: 1,
+            fors_trees: 1,
+            fors_height: 1,
+            stateful: false,
+        };
         assert!(params.is_well_formed() && params.num_layers > 1);
         let kg = required_poseidon2_keygen_preprocessing_budget(&params);
         let sg = required_poseidon2_sign_preprocessing_budget(&params);
-        let (mut keys, mut vaults, mut rngs, sk) = setup_poseidon2_committee_material(2, 2,
-            (kg.0 + sg.0, kg.1 + sg.1, kg.2 + sg.2), true);
+        let (mut keys, mut vaults, mut rngs, sk) =
+            setup_poseidon2_committee_material(2, 2, (kg.0 + sg.0, kg.1 + sg.1, kg.2 + sg.2), true);
         let (ka, kb) = keys.split_at_mut(1);
         let (va, vb) = vaults.split_at_mut(1);
         let mut keys = [&mut ka[0], &mut kb[0]];
         let mut vaults = [&mut va[0], &mut vb[0]];
-        let pk = build_distributed_poseidon2_key([0xb1; 32], &params, 2, &mut keys, &mut vaults, &mut rngs).unwrap();
+        let pk = build_distributed_poseidon2_key(
+            [0xb1; 32],
+            &params,
+            2,
+            &mut keys,
+            &mut vaults,
+            &mut rngs,
+        )
+        .unwrap();
         assert_eq!(pk, derive_public_key(Poseidon2Suite, &params, &sk));
-        let key_id = cshake256_32(b"QSAG.TEST.CORDUROY.KEY_ID", &[pk.pk_seed, pk.pk_root].concat());
+        let key_id = cshake256_32(
+            b"QSAG.TEST.CORDUROY.KEY_ID",
+            &[pk.pk_seed, pk.pk_root].concat(),
+        );
 
         // Policy: one allowlisted recipient, a single-transaction cap, two approvers including
         // the hardware guardian (guard 2, whose presence in every quorum carries the velocity
         // window), and an initiator (guard 3) who may not approve their own request.
         let accel = CpuReferenceBackend::new();
-        let recipient = QsagAddress::from_pubkey_cshake256("qsp", WitnessSuiteTag::SlhDsa128f,
-            KeyIdentityKind::SingleOrThreshold, b"corduroy-cold-vault").unwrap();
+        let recipient = QsagAddress::from_pubkey_cshake256(
+            "qsp",
+            WitnessSuiteTag::SlhDsa128f,
+            KeyIdentityKind::SingleOrThreshold,
+            b"corduroy-cold-vault",
+        )
+        .unwrap();
         let policy = TransactionPolicy {
             chain_id: 7,
             pinned_suite: WitnessSuiteTag::SlhDsa128f,
@@ -3838,7 +4043,9 @@ mod tests {
             forbid_initiator_self_approval: true,
             hardware_guardian_party: Some(2),
             quorum_tiers: vec![QuorumTierRule {
-                max_amount_units: 1_000, min_approvers: 2, require_hardware_guardian: true,
+                max_amount_units: 1_000,
+                min_approvers: 2,
+                require_hardware_guardian: true,
             }],
         };
         let policy_digest = policy.canonical_digest();
@@ -3851,23 +4058,36 @@ mod tests {
             .collect();
         let initiator = guards.pop().unwrap();
 
-        let request = |amount: u128, session: u8| -> Result<(TransactionIntent, Vec<u8>), PolicyViolation> {
-            let (mut intent, _) = TransactionIntent::builder(7, WitnessSuiteTag::SlhDsa128f, recipient.clone(), amount)
+        let request =
+            |amount: u128, session: u8| -> Result<(TransactionIntent, Vec<u8>), PolicyViolation> {
+                let (mut intent, _) = TransactionIntent::builder(
+                    7,
+                    WitnessSuiteTag::SlhDsa128f,
+                    recipient.clone(),
+                    amount,
+                )
                 .timestamp_secs(500)
                 .initiator_and_approvers(3, &quorum)
-                .bind_signing_payload(&SigningPayloadBinding {
-                    key_id,
-                    payload: b"transfer to cold vault",
-                    ctx,
-                    session_id: [session; 32],
-                    policy_revision: 1,
-                    quorum: &quorum,
-                    authority_pk,
-                }, &policy)?;
-            let bytes = initiator.authenticate_initiated_intent(&policy, &mut intent)?;
-            Ok((intent, bytes))
-        };
-        let covers = |token: &AuthorizedSignReleaseToken, key: &[u8; 32], msg: &[u8], ctx: &[u8], quorum: &[u16]| {
+                .bind_signing_payload(
+                    &SigningPayloadBinding {
+                        key_id,
+                        payload: b"transfer to cold vault",
+                        ctx,
+                        session_id: [session; 32],
+                        policy_revision: 1,
+                        quorum: &quorum,
+                        authority_pk,
+                    },
+                    &policy,
+                )?;
+                let bytes = initiator.authenticate_initiated_intent(&policy, &mut intent)?;
+                Ok((intent, bytes))
+            };
+        let covers = |token: &AuthorizedSignReleaseToken,
+                      key: &[u8; 32],
+                      msg: &[u8],
+                      ctx: &[u8],
+                      quorum: &[u16]| {
             token.matches_signing_for_policy(key, msg, ctx, quorum, &policy_digest, &authority_pk)
         };
 
@@ -3877,8 +4097,14 @@ mod tests {
         // The approved request: both guards run the committed barrier and release a token.
         let (intent, approved) = request(250, 0xc1).unwrap();
         let token = evaluate_policy_committed_barrier_authenticated(
-            &policy, &intent, intent.session_id, intent.timestamp_secs, &mut guards, &accel,
-        ).unwrap();
+            &policy,
+            &intent,
+            intent.session_id,
+            intent.timestamp_secs,
+            &mut guards,
+            &accel,
+        )
+        .unwrap();
         assert!(covers(&token, &key_id, &approved, ctx, &quorum));
 
         // The token covers neither a different amount, key, context nor quorum.
@@ -3892,20 +4118,51 @@ mod tests {
 
         // An intent edited after the initiator authenticated it gets no token, and the same
         // approved intent cannot be replayed through the barrier for a second token.
-        assert!(evaluate_policy_committed_barrier_authenticated(
-            &policy, &inflated, inflated.session_id, inflated.timestamp_secs, &mut guards, &accel,
-        ).is_err());
-        assert!(evaluate_policy_committed_barrier_authenticated(
-            &policy, &intent, intent.session_id, intent.timestamp_secs, &mut guards, &accel,
-        ).is_err());
+        assert!(
+            evaluate_policy_committed_barrier_authenticated(
+                &policy,
+                &inflated,
+                inflated.session_id,
+                inflated.timestamp_secs,
+                &mut guards,
+                &accel,
+            )
+            .is_err()
+        );
+        assert!(
+            evaluate_policy_committed_barrier_authenticated(
+                &policy,
+                &intent,
+                intent.session_id,
+                intent.timestamp_secs,
+                &mut guards,
+                &accel,
+            )
+            .is_err()
+        );
 
         // Sign exactly the released bytes under MPC; the stock verifier accepts only them.
         assert!(covers(&token, &key_id, &approved, ctx, &quorum));
-        let sig = sign_stateless_tsw_poseidon2_mpc(*token.session_id(), &params, &pk, 2, &approved,
-            100_000, &mut keys, &mut vaults, &mut rngs).unwrap();
+        let sig = sign_stateless_tsw_poseidon2_mpc(
+            *token.session_id(),
+            &params,
+            &pk,
+            2,
+            &approved,
+            100_000,
+            &mut keys,
+            &mut vaults,
+            &mut rngs,
+        )
+        .unwrap();
         assert!(Corduroy::verify(&params, &pk, &approved, &sig));
         assert!(!Corduroy::verify(&params, &pk, &inflated_bytes, &sig));
-        assert!(!Corduroy::verify(&params, &pk, b"transfer to cold vault", &sig));
+        assert!(!Corduroy::verify(
+            &params,
+            &pk,
+            b"transfer to cold vault",
+            &sig
+        ));
     }
 
     #[test]
@@ -4039,9 +4296,21 @@ mod tests {
         forged_seed_pk.pk_seed[0] ^= 0x01;
 
         for (bad_params, bad_pk, exp_err) in [
-            (&stateful_params, &forged_root_pk, Poseidon2MpcError::KeyProfileMismatch),
-            (&stateful_params, &forged_seed_pk, Poseidon2MpcError::PublicSeedMismatch),
-            (&alt_stateful_params, &mpc_pk, Poseidon2MpcError::KeyProfileMismatch),
+            (
+                &stateful_params,
+                &forged_root_pk,
+                Poseidon2MpcError::KeyProfileMismatch,
+            ),
+            (
+                &stateful_params,
+                &forged_seed_pk,
+                Poseidon2MpcError::PublicSeedMismatch,
+            ),
+            (
+                &alt_stateful_params,
+                &mpc_pk,
+                Poseidon2MpcError::KeyProfileMismatch,
+            ),
         ] {
             assert_eq!(
                 sign_jorts_poseidon2_mpc(
@@ -4095,5 +4364,4 @@ mod tests {
         assert!(!ks_refs[0].poisoned && !ks_refs[1].poisoned);
         assert!(!v_refs[0].is_poisoned() && !v_refs[1].is_poisoned());
     }
-
 }

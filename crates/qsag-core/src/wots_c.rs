@@ -73,7 +73,9 @@ impl WotsCParams {
     /// bits `7 - 2 (i % 4)` and `6 - 2 (i % 4)` of byte `i / 4`, the base-4 reading of
     /// [`crate::tsw_baggy::extract_base_w_digits_checked`]. Nothing is allocated for an invalid digest.
     pub fn digits(&self, hash: &[u8; 32]) -> Option<Vec<u8>> {
-        if !self.is_well_formed() { return None; }
+        if !self.is_well_formed() {
+            return None;
+        }
         if *self == Self::V128 {
             return qsag_verified::verified_wotsc256_verify_sum(hash)
                 .then(|| qsag_verified::verified_wotsc256_extract_digits(hash).to_vec());
@@ -127,7 +129,10 @@ impl DigestGrinder {
         for (lane, row) in st.0.iter_mut().enumerate() {
             *row = [self.base[lane]; 4];
         }
-        for (i, counter) in core::array::from_fn::<_, 4, _>(|i| ctr.wrapping_add(i as u32)).iter().enumerate() {
+        for (i, counter) in core::array::from_fn::<_, 4, _>(|i| ctr.wrapping_add(i as u32))
+            .iter()
+            .enumerate()
+        {
             let step = counter.to_be_bytes();
             for (k, byte) in step.iter().enumerate() {
                 let pos = self.step_off + k;
@@ -267,8 +272,7 @@ pub fn wots_c_reference_leaf(
     tree: u64,
     key_pair: u32,
 ) -> [u8; 32] {
-    let ends =
-        wots_c_reference_nodes(params, sk, layer, tree, key_pair, &vec![3u8; params.chains]);
+    let ends = wots_c_reference_nodes(params, sk, layer, tree, key_pair, &vec![3u8; params.chains]);
     wots_c_leaf(&sk.pk_seed, layer, tree, key_pair, &ends)
 }
 
@@ -474,10 +478,7 @@ impl Sweep {
                 return Err(Rss256Error::InvalidParameters);
             }
             let in_wave = lane % LANES;
-            let slot = match groups
-                .iter()
-                .position(|g| g.0 == wave && g.1 == position)
-            {
+            let slot = match groups.iter().position(|g| g.0 == wave && g.1 == position) {
                 Some(idx) => idx,
                 None => {
                     groups.push((wave, position, [0u64; 4], Vec::new()));
@@ -523,9 +524,21 @@ mod tests {
     #[test]
     fn malformed_digit_parameters_refuse_without_overflow() {
         for params in [
-            WotsCParams { chains: usize::MAX, zero_digits: 1, target_sum: 0 },
-            WotsCParams { chains: 1, zero_digits: usize::MAX, target_sum: 0 },
-            WotsCParams { chains: 0, zero_digits: 128, target_sum: 0 },
+            WotsCParams {
+                chains: usize::MAX,
+                zero_digits: 1,
+                target_sum: 0,
+            },
+            WotsCParams {
+                chains: 1,
+                zero_digits: usize::MAX,
+                target_sum: 0,
+            },
+            WotsCParams {
+                chains: 0,
+                zero_digits: 128,
+                target_sum: 0,
+            },
         ] {
             assert!(!params.is_well_formed());
             assert!(params.digits(&[0; 32]).is_none());
@@ -567,7 +580,10 @@ mod tests {
                     hash_step: ctr.wrapping_add(i as u32),
                     ..adrs
                 };
-                assert_eq!(*digest, th_call(Cshake256Suite, tag, &pk_seed, &a, &[&value]));
+                assert_eq!(
+                    *digest,
+                    th_call(Cshake256Suite, tag, &pk_seed, &a, &[&value])
+                );
             }
         }
         // The allocation-free digit reader agrees with the generic base-w extractor.
@@ -716,10 +732,14 @@ mod tests {
             sweep.open_positions(&mut engine, &[(0, 3)]),
             Err(Rss256Error::InvalidParameters)
         );
-        let before = sweep.open_positions(&mut engine, &[(4, 2), (5, 2)]).unwrap();
+        let before = sweep
+            .open_positions(&mut engine, &[(4, 2), (5, 2)])
+            .unwrap();
         assert_ne!(before[0], [0u8; 32]);
         sweep.wipe_lanes(4..5);
-        let after = sweep.open_positions(&mut engine, &[(4, 2), (5, 2)]).unwrap();
+        let after = sweep
+            .open_positions(&mut engine, &[(4, 2), (5, 2)])
+            .unwrap();
         assert_eq!(after[0], [0u8; 32]);
         assert_eq!(after[1], before[1]);
     }
@@ -739,10 +759,51 @@ mod address_regression {
         assert_ne!(a[2][0], b[2][0]);
         for kp in [5, 6] {
             let levels = merkle_levels(&seed, 0, 13, AdrsKind::ForsTree, kp, &leaves, 2);
-            let (root, path) = build_merkle_from_leaves_topdown(Cshake256Suite, &seed, 0, 13, AdrsKind::ForsTree, kp, &leaves, 2, 2, 1);
+            let (root, path) = build_merkle_from_leaves_topdown(
+                Cshake256Suite,
+                &seed,
+                0,
+                13,
+                AdrsKind::ForsTree,
+                kp,
+                &leaves,
+                2,
+                2,
+                1,
+            );
             assert_eq!(root, levels[2][0]);
-            assert_eq!(walk_merkle_auth_path(Cshake256Suite, &seed, 0, 13, AdrsKind::ForsTree, kp, 2, 2, 1, leaves[1], &path), Some(root));
-            assert_ne!(walk_merkle_auth_path(Cshake256Suite, &seed, 0, 13, AdrsKind::ForsTree, kp + 1, 2, 2, 1, leaves[1], &path), Some(root));
+            assert_eq!(
+                walk_merkle_auth_path(
+                    Cshake256Suite,
+                    &seed,
+                    0,
+                    13,
+                    AdrsKind::ForsTree,
+                    kp,
+                    2,
+                    2,
+                    1,
+                    leaves[1],
+                    &path
+                ),
+                Some(root)
+            );
+            assert_ne!(
+                walk_merkle_auth_path(
+                    Cshake256Suite,
+                    &seed,
+                    0,
+                    13,
+                    AdrsKind::ForsTree,
+                    kp + 1,
+                    2,
+                    2,
+                    1,
+                    leaves[1],
+                    &path
+                ),
+                Some(root)
+            );
         }
     }
 }

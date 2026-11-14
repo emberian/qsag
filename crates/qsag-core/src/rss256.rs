@@ -270,7 +270,10 @@ impl Shake256Prg256 {
     }
 
     fn refill(&mut self) {
-        assert!(!self.exhausted, "Shake256Prg256: 64-bit block counter exhausted");
+        assert!(
+            !self.exhausted,
+            "Shake256Prg256: 64-bit block counter exhausted"
+        );
         if self.counter > u64::MAX - 3 {
             self.exhausted = true;
             panic!("Shake256Prg256: 64-bit block counter overflow");
@@ -374,7 +377,9 @@ impl TranscriptHasher4 {
         let mut xof = Cshake256Xof::new_shake256();
         xof.absorb(b"QSAG-WAVE-STREAM-v1");
         for lane in &self.st.0[..4] {
-            for word in lane { xof.absorb(&word.to_le_bytes()); }
+            for word in lane {
+                xof.absorb(&word.to_le_bytes());
+            }
         }
         let mut out = [0u8; 32];
         xof.squeeze(&mut out);
@@ -847,7 +852,12 @@ impl TensorCell for Fe {
 impl TensorCell for Plane {
     #[inline(always)]
     fn xor(self, other: Self) -> Self {
-        [self[0] ^ other[0], self[1] ^ other[1], self[2] ^ other[2], self[3] ^ other[3]]
+        [
+            self[0] ^ other[0],
+            self[1] ^ other[1],
+            self[2] ^ other[2],
+            self[3] ^ other[3],
+        ]
     }
 }
 
@@ -993,7 +1003,12 @@ impl PendingGates {
 
     fn clear_and_wipe(&mut self) {
         for s in 0..3 {
-            for planes in [&mut self.a[s], &mut self.b[s], &mut self.msg[s], &mut self.pad[s]] {
+            for planes in [
+                &mut self.a[s],
+                &mut self.b[s],
+                &mut self.msg[s],
+                &mut self.pad[s],
+            ] {
                 qsag_asm::volatile_fill(planes, [0; 4]);
                 planes.clear();
             }
@@ -1003,7 +1018,12 @@ impl PendingGates {
     fn pad_to_group(&mut self) {
         let padded = self.len().div_ceil(GROUP_PLANES) * GROUP_PLANES;
         for s in 0..3 {
-            for planes in [&mut self.a[s], &mut self.b[s], &mut self.msg[s], &mut self.pad[s]] {
+            for planes in [
+                &mut self.a[s],
+                &mut self.b[s],
+                &mut self.msg[s],
+                &mut self.pad[s],
+            ] {
                 secret_vec_reserve(planes, padded.saturating_sub(planes.len()));
                 planes.resize(padded, [0; 4]);
             }
@@ -1117,7 +1137,10 @@ fn linear_terms(
             return out;
         }
     }
-    #[expect(clippy::needless_range_loop, reason = "Transpose two proof terms into three party slots")]
+    #[expect(
+        clippy::needless_range_loop,
+        reason = "Transpose two proof terms into three party slots"
+    )]
     for s in 0..3 {
         let part = linear_terms_slot_range(pending, s, 0..groups, weights);
         for k in 0..2 {
@@ -1167,7 +1190,10 @@ fn tensor_tables_batch_range(
             let base = (g0 + gi) * GROUP_PLANES;
             let cells = gi * HIGH_CELLS..(gi + 1) * HIGH_CELLS;
             for s in 0..3 {
-                for (src, dst) in [(&pending.a[s], &mut high_a[s]), (&pending.b[s], &mut high_b[s])] {
+                for (src, dst) in [
+                    (&pending.a[s], &mut high_a[s]),
+                    (&pending.b[s], &mut high_b[s]),
+                ] {
                     let dst = &mut dst[cells.clone()];
                     dst[..GROUP_PLANES].copy_from_slice(&src[base..base + GROUP_PLANES]);
                     ternary_expand(dst, TENSOR_HIGH_BITS, LOW_PLANES);
@@ -1182,7 +1208,11 @@ fn tensor_tables_batch_range(
                             low[u * count + gi] = high[gi * HIGH_CELLS + h * LOW_PLANES + u];
                         }
                     }
-                    ternary_expand(&mut low[..TENSOR_LOW_POINTS * count], TENSOR_LOW_BITS, count);
+                    ternary_expand(
+                        &mut low[..TENSOR_LOW_POINTS * count],
+                        TENSOR_LOW_BITS,
+                        count,
+                    );
                 }
             }
             for (p, staged) in stage.iter_mut().enumerate() {
@@ -1192,7 +1222,8 @@ fn tensor_tables_batch_range(
                     let (ap, aq) = (&low_a[p][cells.clone()], &low_a[q][cells.clone()]);
                     let (bp, bq) = (&low_b[p][cells.clone()], &low_b[q][cells]);
                     let out = staged[j * row..j * row + 2 * count].as_chunks_mut::<2>().0;
-                    for ((((t, ap), aq), bp), bq) in out.iter_mut().zip(ap).zip(aq).zip(bp).zip(bq) {
+                    for ((((t, ap), aq), bp), bq) in out.iter_mut().zip(ap).zip(aq).zip(bp).zip(bq)
+                    {
                         let v: Plane = core::array::from_fn(|w| (ap[w] & bq[w]) ^ (aq[w] & bp[w]));
                         *t = [[v[0], v[1]], [v[2], v[3]]];
                     }
@@ -1427,7 +1458,11 @@ fn fold_round_sums(
             for e in 1..points {
                 let cells = e * row..(e + 1) * row;
                 let mut acc = FE_ZERO;
-                qsag_asm::gf2_128_mul_acc_batch(&mut acc, &ex[p][cells.clone()], &ey[q][cells.clone()]);
+                qsag_asm::gf2_128_mul_acc_batch(
+                    &mut acc,
+                    &ex[p][cells.clone()],
+                    &ey[q][cells.clone()],
+                );
                 qsag_asm::gf2_128_mul_acc_batch(&mut acc, &ex[q][cells.clone()], &ey[p][cells]);
                 if batch_weights.is_some() {
                     pending[(p * points + e) * WEIGHTED_FLUSH + slot] = acc;
@@ -1589,7 +1624,12 @@ impl Rss256Engine {
     /// that disagree are an error.
     pub fn key_identity(&self) -> Result<Option<[u8; 32]>, Rss256Error> {
         let first = self.cluster.keys[0].scheme_identity().copied();
-        if self.cluster.keys.iter().any(|k| k.scheme_identity().copied() != first) {
+        if self
+            .cluster
+            .keys
+            .iter()
+            .any(|k| k.scheme_identity().copied() != first)
+        {
             return Err(Rss256Error::Mpc(KeccakMpcError::KeyBindingMismatch));
         }
         Ok(first)
@@ -1611,8 +1651,10 @@ impl Rss256Engine {
 
     /// Latch the poison flag, then drop everything that was awaiting verification.
     fn poison<T>(&mut self, error: Rss256Error) -> Result<T, Rss256Error> {
-        let latch = core::mem::replace(&mut self.poison_latch,
-            qsag_verified::VerifiedRssPoisonLatch::new_clean());
+        let latch = core::mem::replace(
+            &mut self.poison_latch,
+            qsag_verified::VerifiedRssPoisonLatch::new_clean(),
+        );
         self.poison_latch = latch.record_check_result(false).0;
         self.cluster.poison();
         self.pending.clear_and_wipe();
@@ -1866,8 +1908,8 @@ impl Rss256Engine {
                         let fault = self.gate_fault(self.wave_index, round, l0 + z, p);
                         let out = &mut msg[p][l0 + z];
                         for w in 0..4 {
-                            let u = and_message(ap[w], aq[w], bp[w], bq[w], rp[w], rq[w])
-                                & active[w];
+                            let u =
+                                and_message(ap[w], aq[w], bp[w], bq[w], rp[w], rq[w]) & active[w];
                             #[cfg(test)]
                             let u = u ^ fault[w];
                             out[w] = u;
@@ -1994,7 +2036,10 @@ impl Rss256Engine {
                             [e[0], e[1]],
                             [e[2], e[3]],
                         ]);
-                        #[cfg_attr(not(test), expect(unused_mut, reason = "mutated by test faults"))]
+                        #[cfg_attr(
+                            not(test),
+                            expect(unused_mut, reason = "mutated by test faults")
+                        )]
                         let mut sent = d;
                         #[cfg(test)]
                         for f in &self.faults {
@@ -2291,7 +2336,12 @@ impl Rss256Engine {
     }
 
     /// Joint coin of one product-proof round, bound to the barrier seed and the round.
-    fn proof_coin(&mut self, seed: &[u8; 32], pass: usize, round: u32) -> Result<[u8; 32], Rss256Error> {
+    fn proof_coin(
+        &mut self,
+        seed: &[u8; 32],
+        pass: usize,
+        round: u32,
+    ) -> Result<[u8; 32], Rss256Error> {
         let mut xof = Cshake256Xof::new_shake256();
         xof.absorb(b"QSAG-WAVE-PRODUCT-ROUND-v2");
         xof.absorb(&(pass as u64).to_le_bytes());
@@ -2322,7 +2372,11 @@ impl Rss256Engine {
     ) -> (Vec<Fe>, Vec<Fe>) {
         let mut v1 = vec![FE_ZERO; values.len()];
         stream.fill_words(v1[1..].as_flattened_mut());
-        let mut v2: Vec<Fe> = values.iter().zip(&v1).map(|(v, m)| fe_add(*v, *m)).collect();
+        let mut v2: Vec<Fe> = values
+            .iter()
+            .zip(&v1)
+            .map(|(v, m)| fe_add(*v, *m))
+            .collect();
         v2[0] = FE_ZERO;
         #[cfg(test)]
         {
@@ -2388,8 +2442,9 @@ impl Rss256Engine {
             let w = &weights[pass];
             // Claim shares of the two verifiers of every proof.
             let mut claim1 = SecretBuffer(core::array::from_fn::<Fe, 3, _>(|p| linear[pass][p][0]));
-            let mut claim2 =
-                SecretBuffer(core::array::from_fn::<Fe, 3, _>(|p| linear[pass][(p + 1) % 3][1]));
+            let mut claim2 = SecretBuffer(core::array::from_fn::<Fe, 3, _>(|p| {
+                linear[pass][(p + 1) % 3][1]
+            }));
             let mut round = 0u32;
             let challenges = |coin: &[u8; 32], count: usize| -> Vec<Fe> {
                 let mut xof = Cshake256Xof::new_shake256();
@@ -2419,8 +2474,12 @@ impl Rss256Engine {
             // Bound vectors: `x` carries the lane weights, `y` does not. The block weights
             // are applied to the round sums of the first fold and to `x` after it.
             let eq = eq_table(&gammas);
-            let mut x = SecretBuffer(core::array::from_fn::<Vec<Fe>, 3, _>(|_| vec![FE_ZERO; elems]));
-            let mut y = SecretBuffer(core::array::from_fn::<Vec<Fe>, 3, _>(|_| vec![FE_ZERO; elems]));
+            let mut x = SecretBuffer(core::array::from_fn::<Vec<Fe>, 3, _>(|_| {
+                vec![FE_ZERO; elems]
+            }));
+            let mut y = SecretBuffer(core::array::from_fn::<Vec<Fe>, 3, _>(|_| {
+                vec![FE_ZERO; elems]
+            }));
             #[cfg(feature = "std")]
             if rss256_worker_threads() > 1 && groups >= 8 {
                 let pending_ref = &self.pending;
@@ -2544,8 +2603,16 @@ impl Rss256Engine {
                     fe_add(fe_add(c[1], gf128_mul(tau, c[2])), gf128_mul(tau_sq, claim))
                 };
                 // `V1` opens its slot-`p` elements and claim share, `V2` its slot-`q` ones.
-                let from_v1 = [open(r1x, xf[p]), open(r1y, yf[p]), masked_claim(&cross[p].0, claim1[p])];
-                let from_v2 = [open(r2x, xf[q]), open(r2y, yf[q]), masked_claim(&cross[p].1, claim2[p])];
+                let from_v1 = [
+                    open(r1x, xf[p]),
+                    open(r1y, yf[p]),
+                    masked_claim(&cross[p].0, claim1[p]),
+                ];
+                let from_v2 = [
+                    open(r2x, xf[q]),
+                    open(r2y, yf[q]),
+                    masked_claim(&cross[p].1, claim2[p]),
+                ];
                 #[cfg(test)]
                 if let Some(view) = &mut self.proof_view {
                     view.received[q].extend_from_slice(&from_v1);
@@ -2633,8 +2700,11 @@ impl Rss256Engine {
         let mut masked = SharedDigest256::zeroed();
         masked.xor_masked(value, lane_mask);
         let bytes_before = self.stats.open_bytes;
-        let planes =
-            self.open_planes([&masked.slot[0][..], &masked.slot[1][..], &masked.slot[2][..]])?;
+        let planes = self.open_planes([
+            &masked.slot[0][..],
+            &masked.slot[1][..],
+            &masked.slot[2][..],
+        ])?;
         // Only the selected lanes carry data, so charge those.
         let selected: u32 = lane_mask.iter().map(|w| w.count_ones()).sum();
         // This API accounts compact digest payloads, not the full-plane opening frame.
@@ -2692,7 +2762,9 @@ mod tests {
     use crate::sponge::keccak::{keccak_f1600, shake256_xof};
 
     fn rngs(tag: u8) -> [PartyPrivateRng; 3] {
-        core::array::from_fn(|p| PartyPrivateRng::from_seed([tag ^ ((p as u8) << 4); 32], b"rss256"))
+        core::array::from_fn(|p| {
+            PartyPrivateRng::from_seed([tag ^ ((p as u8) << 4); 32], b"rss256")
+        })
     }
 
     fn engine(tag: u8) -> Rss256Engine {
@@ -2736,7 +2808,11 @@ mod tests {
             .iter()
             .map(|frame| {
                 let mut bytes = [0u8; 200];
-                for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(&TSW_SUITE_MIDSTATE)
+                for (chunk, word) in bytes
+                    .as_chunks_mut::<8>()
+                    .0
+                    .iter_mut()
+                    .zip(&TSW_SUITE_MIDSTATE)
                 {
                     *chunk = word.to_le_bytes();
                 }
@@ -2764,7 +2840,8 @@ mod tests {
     fn load(engine: &Rss256Engine, frames: &[[u8; SHAKE256_RATE_BYTES]]) -> SharedState256 {
         let mut st = SharedState256::from_public_frames(&TSW_SUITE_MIDSTATE, frames).unwrap();
         let mask = active_lane_mask(frames.len());
-        st.xor_shared_key(40, engine.sk_seed_slots(), &mask).unwrap();
+        st.xor_shared_key(40, engine.sk_seed_slots(), &mask)
+            .unwrap();
         st
     }
 
@@ -2837,7 +2914,10 @@ mod tests {
             e.check().unwrap();
             let planes = open_all(&mut e, &st);
             assert_matches_reference(&planes, &reference_states(&frames, &key, 40));
-            assert_eq!(e.stats().and_bytes, (AND_PLANES_PER_PERM * lanes).div_ceil(8) as u64);
+            assert_eq!(
+                e.stats().and_bytes,
+                (AND_PLANES_PER_PERM * lanes).div_ceil(8) as u64
+            );
         }
     }
 
@@ -2876,7 +2956,10 @@ mod tests {
             if lane % 2 == 1 {
                 assert_eq!(opened[lane], d2, "lane {lane}");
             } else {
-                assert_eq!(opened[lane], [0u8; 32], "unselected lane {lane} must stay hidden");
+                assert_eq!(
+                    opened[lane], [0u8; 32],
+                    "unselected lane {lane} must stay hidden"
+                );
             }
         }
     }
@@ -2889,7 +2972,10 @@ mod tests {
         assert_eq!(e.bank().remaining_planes(), 2 * AND_PLANES_PER_PERM);
         assert_eq!(e.stats().and_bytes, 0);
         assert_eq!(e.stats().staged_lane_perms, 512);
-        assert_eq!(e.stats().staged_state_bytes, (2 * 2 * 3 * AND_PLANES_PER_PERM * 32) as u64);
+        assert_eq!(
+            e.stats().staged_state_bytes,
+            (2 * 2 * 3 * AND_PLANES_PER_PERM * 32) as u64
+        );
         e.set_mode(AndMode::BeaverBank).unwrap();
         let key = reconstruct_key(&e);
         for round in 0..2u8 {
@@ -2900,12 +2986,18 @@ mod tests {
             let planes = open_all(&mut e, &st);
             assert_matches_reference(&planes, &reference_states(&frames, &key, 40));
         }
-        assert_eq!(e.stats().and_bytes, 2 * 2 * (AND_PLANES_PER_PERM * lanes / 8) as u64);
+        assert_eq!(
+            e.stats().and_bytes,
+            2 * 2 * (AND_PLANES_PER_PERM * lanes / 8) as u64
+        );
         assert_eq!(e.bank().remaining_planes(), 0);
         // Consumed triples are gone; a third permutation must not reuse any.
         let frames = test_frames(lanes, 0x44);
         let mut st = load(&e, &frames);
-        assert_eq!(e.permute(&mut st, lanes), Err(Rss256Error::BeaverBankExhausted));
+        assert_eq!(
+            e.permute(&mut st, lanes),
+            Err(Rss256Error::BeaverBankExhausted)
+        );
     }
 
     #[test]
@@ -2931,7 +3023,10 @@ mod tests {
         let (seed_b, ok_b) = run(None, 0x61);
         assert!(ok_a.is_ok() && ok_b.is_ok());
         assert_eq!(seed_a, seed_a2);
-        assert_ne!(seed_a, seed_b, "fresh party randomness must change the seed");
+        assert_ne!(
+            seed_a, seed_b,
+            "fresh party randomness must change the seed"
+        );
         // One flipped message bit: the transcript digest, hence the seed, changes, and the
         // proof run under that seed rejects.
         let (seed_c, bad) = run(
@@ -3032,7 +3127,10 @@ mod tests {
         ));
         cases.push((
             "pair of flips in successive rounds of one lane",
-            vec![gate(0, 4, 10, 1, [1, 0, 0, 0]), gate(0, 5, 10, 1, [1, 0, 0, 0])],
+            vec![
+                gate(0, 4, 10, 1, [1, 0, 0, 0]),
+                gate(0, 5, 10, 1, [1, 0, 0, 0]),
+            ],
             Rss256Error::MultiplicationCheckFailed,
         ));
         // Coin flip and transcript deviations.
@@ -3063,7 +3161,10 @@ mod tests {
             assert_eq!(e.check(), Err(want), "case {idx}: {name}");
             // The barrier failed: the engine is poisoned and nothing can be opened, also
             // not after asking for the check again.
-            assert!(e.has_unverified_gates() && e.is_poisoned(), "case {idx}: {name}");
+            assert!(
+                e.has_unverified_gates() && e.is_poisoned(),
+                "case {idx}: {name}"
+            );
             assert_eq!(e.check(), Err(Rss256Error::Poisoned), "case {idx}: {name}");
             assert_eq!(
                 e.open_planes([&st.slot[0][..], &st.slot[1][..], &st.slot[2][..]]),
@@ -3103,7 +3204,10 @@ mod tests {
             let frames = test_frames(256, 0x82);
             let mut st = load(&e, &frames);
             e.permute(&mut st, 256).unwrap();
-            assert_eq!(e.check(), Err(Rss256Error::OpeningConsistencyFailed { slot }));
+            assert_eq!(
+                e.check(),
+                Err(Rss256Error::OpeningConsistencyFailed { slot })
+            );
             assert_eq!(e.check(), Err(Rss256Error::Poisoned));
             assert_eq!(
                 e.open_planes([&st.slot[0][..], &st.slot[1][..], &st.slot[2][..]]),
@@ -3227,7 +3331,11 @@ mod tests {
         let mut stream = Shake256Prg256::new(&[5; 32], &[6; 32], 7);
         for v in test_elems(&mut stream, 8) {
             for i in 0..128u32 {
-                let monomial = if i < 64 { [1u64 << i, 0] } else { [0, 1u64 << (i - 64)] };
+                let monomial = if i < 64 {
+                    [1u64 << i, 0]
+                } else {
+                    [0, 1u64 << (i - 64)]
+                };
                 assert_eq!(fe_mul_x_pow(v, i), gf128_mul(v, monomial), "x^{i}");
             }
         }
@@ -3295,15 +3403,16 @@ mod tests {
     #[test]
     fn a_folding_round_carries_the_claim_to_the_folded_vectors() {
         let mut stream = Shake256Prg256::new(&[11; 32], &[12; 32], 13);
-        let cross = |x: &[Vec<Fe>; 3], y: &[Vec<Fe>; 3], len: usize, p: usize, w: &dyn Fn(usize) -> Fe| {
-            let q = (p + 1) % 3;
-            let mut acc = FE_ZERO;
-            for j in 0..len {
-                let term = fe_add(gf128_mul(x[p][j], y[q][j]), gf128_mul(x[q][j], y[p][j]));
-                acc = fe_add(acc, gf128_mul(w(j), term));
-            }
-            acc
-        };
+        let cross =
+            |x: &[Vec<Fe>; 3], y: &[Vec<Fe>; 3], len: usize, p: usize, w: &dyn Fn(usize) -> Fe| {
+                let q = (p + 1) % 3;
+                let mut acc = FE_ZERO;
+                for j in 0..len {
+                    let term = fe_add(gf128_mul(x[p][j], y[q][j]), gf128_mul(x[q][j], y[p][j]));
+                    acc = fe_add(acc, gf128_mul(w(j), term));
+                }
+                acc
+            };
         for (len, bits, batch_chunks, weighted) in [
             (256usize, 4usize, 8usize, true),
             (512, 2, 32, true),
@@ -3337,8 +3446,9 @@ mod tests {
             );
             let gammas = test_elems(&mut stream, bits);
             let coeff = round_coefficients(&gammas);
-            let boolean: Vec<(usize, Fe)> =
-                (1..size).map(|u| (boolean_point(u, bits), FE_ONE)).collect();
+            let boolean: Vec<(usize, Fe)> = (1..size)
+                .map(|u| (boolean_point(u, bits), FE_ONE))
+                .collect();
             let claims: [Fe; 3] = core::array::from_fn(|p| cross(&x, &y, len, p, &weight_of));
             let eq = eq_table(&gammas);
             let mut folded = len;
@@ -3369,13 +3479,21 @@ mod tests {
         let groups = 3;
         let mut pending = PendingGates::new();
         for s in 0..3 {
-            for planes in [&mut pending.a[s], &mut pending.b[s], &mut pending.msg[s], &mut pending.pad[s]] {
+            for planes in [
+                &mut pending.a[s],
+                &mut pending.b[s],
+                &mut pending.msg[s],
+                &mut pending.pad[s],
+            ] {
                 planes.resize(groups * GROUP_PLANES, [0; 4]);
                 stream.fill_planes(planes, 4);
             }
         }
         let chi = test_elems(&mut stream, 2);
-        let weights = [PassWeights::new(chi[0], 2 * groups), PassWeights::new(chi[1], 2 * groups)];
+        let weights = [
+            PassWeights::new(chi[0], 2 * groups),
+            PassWeights::new(chi[1], 2 * groups),
+        ];
         let tabs = tensor_tables(&pending, groups, &weights);
         let linear = linear_terms(&pending, groups, &weights);
         // Weight of bit `i` of block `h` of plane `u` of group `g`.
@@ -3407,7 +3525,9 @@ mod tests {
                 // The single-verifier terms are the weighted sums of their definitions.
                 let v1 = block_sum(w, &|k| {
                     core::array::from_fn(|i| {
-                        pending.msg[p][k][i] ^ pending.pad[p][k][i] ^ (pending.a[p][k][i] & pending.b[p][k][i])
+                        pending.msg[p][k][i]
+                            ^ pending.pad[p][k][i]
+                            ^ (pending.a[p][k][i] & pending.b[p][k][i])
                     })
                 });
                 assert_eq!(linear[pass][p][0], v1);
@@ -3415,7 +3535,8 @@ mod tests {
                 // Weighted cross-product claim, then the round.
                 let claim = block_sum(w, &|k| {
                     core::array::from_fn(|i| {
-                        (pending.a[p][k][i] & pending.b[q][k][i]) ^ (pending.a[q][k][i] & pending.b[p][k][i])
+                        (pending.a[p][k][i] & pending.b[q][k][i])
+                            ^ (pending.a[q][k][i] & pending.b[p][k][i])
                     })
                 });
                 let next = next_claim(claim, &tabs[pass][p], &w.boolean_weights(), &coeff);
@@ -3438,9 +3559,15 @@ mod tests {
         for p in 0..3 {
             let (v1, v2) = ((p + 2) % 3, (p + 1) % 3);
             assert!(slots_held_by(p).contains(&p) && slots_held_by(v1).contains(&p));
-            assert!(!slots_held_by(v2).contains(&p), "V2 must not hold the share-stream key");
+            assert!(
+                !slots_held_by(v2).contains(&p),
+                "V2 must not hold the share-stream key"
+            );
             assert!(slots_held_by(p).contains(&v2) && slots_held_by(v2).contains(&v2));
-            assert!(!slots_held_by(v1).contains(&v2), "V1 must not hold V2's mask key");
+            assert!(
+                !slots_held_by(v1).contains(&v2),
+                "V1 must not hold V2's mask key"
+            );
         }
 
         // The value sent to `V2` is the prover value plus a stream word `V2` cannot compute:
@@ -3472,15 +3599,25 @@ mod tests {
             // Two passes: tensor sums, folding rounds of 8, 8, 80, 80, 80 and 2 sums (76,800
             // elements fold to 19,200, 4,800, 300, 19, 2, 1), two cross coefficients, and
             // three openings from each of the two proofs it verifies.
-            assert_eq!(received.len(), 2 * (TENSOR_POINTS - 1 + 2 * 8 + 3 * 80 + 2 + 2 + 6));
+            assert_eq!(
+                received.len(),
+                2 * (TENSOR_POINTS - 1 + 2 * 8 + 3 * 80 + 2 + 2 + 6)
+            );
             let bits = (128 * received.len()) as f64;
             let ones: u32 = received.iter().flatten().map(|w| w.count_ones()).sum();
             let dev = (f64::from(ones) - bits / 2.0).abs();
-            assert!(dev < 6.0 * (bits / 4.0).sqrt(), "party {party}: {ones} ones");
+            assert!(
+                dev < 6.0 * (bits / 4.0).sqrt(),
+                "party {party}: {ones} ones"
+            );
             let mut sorted = received.clone();
             sorted.sort_unstable();
             sorted.dedup();
-            assert_eq!(sorted.len(), received.len(), "party {party}: repeated value");
+            assert_eq!(
+                sorted.len(),
+                received.len(),
+                "party {party}: repeated value"
+            );
         }
     }
 
@@ -3560,7 +3697,10 @@ mod tests {
                 .map(|w| u64::from(w.count_ones()))
                 .sum();
             let dev = (ones as f64 - bits / 2.0).abs();
-            assert!(dev < 6.0 * (bits / 4.0).sqrt(), "sender {sender}: {ones} ones");
+            assert!(
+                dev < 6.0 * (bits / 4.0).sqrt(),
+                "sender {sender}: {ones} ones"
+            );
         }
     }
 

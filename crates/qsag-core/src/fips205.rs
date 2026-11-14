@@ -290,7 +290,12 @@ impl Fips205Adrs {
             None => unreachable!(),
         };
         qsag_verified::encode_fips205_adrs(qsag_verified::Fips205Adrs::from_tree_u96(
-            self.layer, self.tree, ty, self.key_pair, self.f5, self.f6,
+            self.layer,
+            self.tree,
+            ty,
+            self.key_pair,
+            self.f5,
+            self.f6,
         ))
     }
 
@@ -2198,7 +2203,11 @@ pub type ForsMpcOutput = (Vec<SlhBlock>, Vec<Vec<SlhBlock>>, CutBoundaryMacToken
 ///   unrepresentable in the type system!).
 pub trait SlhMpcOracles: sealed_mpc_oracles::Sealed {
     /// Bind the suite and public seed before the first secret-derived output.
-    fn bind_key_params(&mut self, params: &Fips205Params, pk_seed: &[u8]) -> Result<(), Fips205Error>;
+    fn bind_key_params(
+        &mut self,
+        params: &Fips205Params,
+        pk_seed: &[u8],
+    ) -> Result<(), Fips205Error>;
 
     /// Evaluate `R = PRF_msg([SK.prf], opt_rand, M')` in MPC, verify cut-boundary MACs BEFORE
     /// opening `R`, and return `(R, mac_token)`.

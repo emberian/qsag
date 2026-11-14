@@ -8,7 +8,7 @@
 //! constants and its S-box untouched.
 
 use crate::tsw_baggy::{
-    PqHashParams, PqHashSig, PqPublicKey, PqSecretKey, Poseidon2Suite, derive_public_key,
+    Poseidon2Suite, PqHashParams, PqHashSig, PqPublicKey, PqSecretKey, derive_public_key,
     verify_pq_hash_sig,
 };
 
@@ -66,11 +66,24 @@ mod tests {
             pk_seed: [0x33; 32],
         };
         let pk = Corduroy::reference_public_key(&params, &sk);
-        let sig = eval_single_sign_stateless(Poseidon2Suite, &params, &sk, &pk, b"m", &[7u8; 32], 1 << 20)
-            .expect("reference signature");
+        let sig = eval_single_sign_stateless(
+            Poseidon2Suite,
+            &params,
+            &sk,
+            &pk,
+            b"m",
+            &[7u8; 32],
+            1 << 20,
+        )
+        .expect("reference signature");
         assert!(Corduroy::verify(&params, &pk, b"m", &sig));
         assert!(!Corduroy::verify(&params, &pk, b"n", &sig));
         // A stateful parameter set is not a Corduroy parameter set.
-        assert!(!Corduroy::verify(&PqHashParams::COMPACT_JORTS, &pk, b"m", &sig));
+        assert!(!Corduroy::verify(
+            &PqHashParams::COMPACT_JORTS,
+            &pk,
+            b"m",
+            &sig
+        ));
     }
 }

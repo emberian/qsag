@@ -254,17 +254,15 @@ impl Goldilocks {
 
     /// Fixed-work inverse, mapping zero to zero without a secret-dependent branch.
     #[inline]
-    pub const fn inv(self) -> Self { self.inv_or_zero() }
+    pub const fn inv(self) -> Self {
+        self.inv_or_zero()
+    }
 
     /// Checked inverse for public validation (`None` iff `self == ZERO`).
     #[inline]
     pub const fn checked_inv(self) -> Option<Self> {
         let cand = self.inv_or_zero();
-        if self.0 == 0 {
-            None
-        } else {
-            Some(cand)
-        }
+        if self.0 == 0 { None } else { Some(cand) }
     }
 }
 
@@ -615,7 +613,6 @@ pub fn lagrange_weights_zero_goldilocks(pts: &[Goldilocks]) -> Option<Vec<Goldil
     Some(weights)
 }
 
-
 impl core::error::Error for CanonicalLiftError {}
 
 #[cfg(test)]
@@ -652,12 +649,18 @@ mod tests {
             }
             for &br in &vals {
                 let b = Goldilocks::from_canonical(br).unwrap();
-                assert_eq!((a + b).to_canonical_u64(), ((ar as u128 + br as u128) % p) as u64);
+                assert_eq!(
+                    (a + b).to_canonical_u64(),
+                    ((ar as u128 + br as u128) % p) as u64
+                );
                 assert_eq!(
                     (a - b).to_canonical_u64(),
                     ((ar as u128 + p - br as u128) % p) as u64
                 );
-                assert_eq!((a * b).to_canonical_u64(), ((ar as u128 * br as u128) % p) as u64);
+                assert_eq!(
+                    (a * b).to_canonical_u64(),
+                    ((ar as u128 * br as u128) % p) as u64
+                );
             }
         }
         let x = GoldilocksExt2::from_canonical_u64_pair(GOLDILOCKS_PRIME - 5, 123_456_789).unwrap();
