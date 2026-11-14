@@ -1965,9 +1965,9 @@ private theorem rss256BarrierStep_preserves_inv (st : Rss256BarrierState) (op : 
           · simp only [Bool.false_eq_true, ↓reduceIte]
             exact Or.inr (Or.inl rfl)
           · simp only [↓reduceIte]
-            exact ⟨Or.inl rfl, Or.inl rfl⟩
+            exact ⟨Or.inl rfl, Or.inl trivial⟩
         · simp only [↓reduceIte]
-          exact ⟨Or.inl rfl, Or.inl rfl⟩
+          exact ⟨Or.inl rfl, Or.inl trivial⟩
     | openPlanes =>
       cases hUnv : st.unverified
       · simp only [Bool.false_eq_true, ↓reduceIte]
@@ -1975,7 +1975,7 @@ private theorem rss256BarrierStep_preserves_inv (st : Rss256BarrierState) (op : 
         · exact ⟨hInv, hTaint0, trivial⟩
         · rw [hUnv] at hUnvTrue; cases hUnvTrue
       · simp only [↓reduceIte]
-        exact ⟨hInv, Or.inr rfl⟩
+        exact ⟨hInv, Or.inr trivial⟩
   · simp only [↓reduceIte]
     exact ⟨Or.inl hp, Or.inl hp⟩
 
@@ -2700,14 +2700,21 @@ private theorem baggyLayersVerifiedCacheAux_canonical
         exact ihRem (layer + 1) verifiedRoot (fun _ => by simp [tree, hVerRoot]) hRec r hr
     | none =>
       rw [hCanopy] at hAux
-      split at hAux
-      · cases hAux
-      next hAbsent =>
+      dsimp only at hAux
+      by_cases hPresent : (cache.cachedSig layer tree kp).isSome = true
+      · simp only [kp, tree, hPresent, ↓reduceIte] at hAux
+        cases hAux
+      · have hAbsent : (cache.cachedSig layer tree kp).isSome = false :=
+          Bool.eq_false_iff.mpr hPresent
+        simp only [kp, tree, hAbsent, Bool.false_eq_true, ↓reduceIte] at hAux
         cases hFresh : baggySignLayerFresh suite p sk layer tree kp node with
-        | none => rw [hFresh] at hAux; cases hAux
+        | none =>
+          have hFresh' : baggySignLayerFresh suite p sk layer (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1 node = none := hFresh
+          rw [hFresh'] at hAux; cases hAux
         | some freshRes =>
           rcases freshRes with ⟨sig, nextRoot, recOpt⟩
-          rw [hFresh] at hAux
+          have hFresh' : baggySignLayerFresh suite p sk layer (p.pathAt leafIdx layer).2 (p.pathAt leafIdx layer).1 node = some (sig, nextRoot, recOpt) := hFresh
+          rw [hFresh'] at hAux
           dsimp only at hAux
           obtain ⟨hNextTrue, _, hRecProps⟩ := baggySignLayerFresh_props suite p sk layer tree kp node hFresh
           cases hRec : baggySignLayersVerifiedCacheAux suite p sk pk cache leafIdx (layer + 1) rem nextRoot with
@@ -2715,6 +2722,7 @@ private theorem baggyLayersVerifiedCacheAux_canonical
           | some res =>
             rcases res with ⟨restSigs, topR, restRecs⟩
             rw [hRec] at hAux
+            dsimp only at hAux
             injection hAux with hEq
             rcases Prod.mk.inj hEq with ⟨_, hEq2⟩
             rcases Prod.mk.inj hEq2 with ⟨_, hRecsEq⟩
@@ -3953,12 +3961,17 @@ private theorem inhabited_cache2 :
   rw [inhabitedBaggy_recover]
   rfl
 
+private theorem inhabited_cachedSig0 : (inhabitedCache.cachedSig 0 0 0).isSome = false := rfl
+
+private theorem inhabited_cachedSig1 : (inhabitedCache.cachedSig 1 0 0).isSome = false := rfl
+
 private theorem inhabited_layers (node : BitVec 256) :
     baggySignLayersVerifiedCacheAux inhabitedBaggySuite toothBaggyParams inhabitedKey inhabitedPk
       inhabitedCache 0 0 3 node =
       some ([inhabitedLayerSig, inhabitedLayerSig, inhabitedLayerSig], 0#256, [inhabitedRecord]) := by
   simp only [baggySignLayersVerifiedCacheAux, Nat.reduceAdd, inhabited_path, inhabited_cache0,
-    inhabited_cache1, inhabited_cache2, inhabitedBaggy_fresh, inhabitedCache]
+    inhabited_cache1, inhabited_cache2, inhabited_cachedSig0, inhabited_cachedSig1,
+    inhabitedBaggy_fresh]
   rfl
 
 private theorem inhabited_verify (msg : BitVec 256) :
@@ -4228,9 +4241,15 @@ theorem rss256_product_residual_evaluation
     (towerMul 7 tau (towerAdd 7
       (towerAdd 7 (towerAdd 7 (towerMul 7 a0 b1) (towerMul 7 a1 b0)) c1)
       (towerMul 7 tau (towerAdd 7 (towerAdd 7 (towerMul 7 a1 b1) c2)
-        (towerMul 7 tau (towerZero 7)))))) = _
+        (towerMul 7 tau (towerZero 7)))))) =
+    towerAdd 7
+      (towerMul 7 (towerAdd 7 a0 (towerMul 7 tau a1))
+        (towerAdd 7 b0 (towerMul 7 tau b1)))
+      (towerAdd 7 c0
+        (towerMul 7 tau (towerAdd 7 c1
+          (towerMul 7 tau (towerAdd 7 c2 (towerMul 7 tau (towerZero 7)))))))
   simp only [towerMul_zero, towerAdd_zero, towerMul_add_distrib, towerAdd_mul_distrib]
-  simp only [towerMul_assoc, towerMul_comm, towerMul_left_comm_of_assoc 7 (towerMul_assoc 7),
+  simp only [towerMul_comm, towerMul_left_comm_of_assoc 7 (towerMul_assoc 7),
     towerAdd_assoc, towerAdd_comm, towerAdd_left_comm]
 
 /-- Check each recorded gate's left operand is the preceding gate's output.
@@ -4441,7 +4460,9 @@ theorem baggy_crash_preserves_reservations {identity : BaggyLedgerIdentity}
 
 theorem baggy_failed_verification_preserves_reservations {identity : BaggyLedgerIdentity}
     (st : BaggyReleaseState identity) :
-    (baggyReleaseStep st .verificationFailure).durable = st.durable := rfl
+    (baggyReleaseStep st .verificationFailure).durable = st.durable := by
+  unfold baggyReleaseStep
+  rfl
 
 theorem baggy_release_requires_sync {identity : BaggyLedgerIdentity}
     (st : BaggyReleaseState identity) (h : st.phase ≠ .synced) :
@@ -4456,6 +4477,7 @@ theorem baggy_release_has_durable_codeword {identity : BaggyLedgerIdentity}
     (hNew : r ∈ (baggyReleaseStep st .release).released) (hOld : r ∉ st.released) :
     lookupDurableDigits st.durable r.layer r.tree r.kp = some r.digits := by
   unfold baggyReleaseStep at hNew
+  dsimp only at hNew
   split at hNew
   next hGuard =>
     have hAll := (Bool.and_eq_true_iff.mp hGuard).2
@@ -4562,21 +4584,27 @@ theorem rss256_recorded_step_preserves_checked (st : Rss256EngineState)
     | .ok next _ => next.Checked
     | .err next _ => next.Checked := by
   unfold rss256StepHardened
-  split
-  · exact h
-  · cases op with
+  cases hp : st.poisoned
+  · simp only [Bool.false_eq_true, ↓reduceIte]
+    cases op with
     | permuteInline w => exact h
     | permuteBank w => exact h
-    | openPlanes => split <;> exact h
+    | openPlanes =>
+      cases hEmp : st.pending.isEmpty <;> simp only [Bool.false_eq_true, ↓reduceIte] <;> exact h
     | check a b =>
-      split
-      next ha =>
+      cases ha : st.pending.all (fun w => w.check a b)
+      · rw [ha]
+        simp only [Bool.false_eq_true, ↓reduceIte]
+        intro e he; cases he
+      · rw [ha]
+        simp only [↓reduceIte]
         intro e he
         rcases List.mem_append.mp he with ho | hn
         · exact h e ho
         · obtain ⟨w, hw, rfl⟩ := List.mem_map.mp hn
           exact List.all_eq_true.mp ha w hw
-      next => intro e he; cases he
+  · simp only [↓reduceIte]
+    exact h
 
 /-- Every emitted plane comes from the very transcript whose equations passed.
 Its semantic output is correct or that transcript is a concrete bad-challenge
@@ -4589,10 +4617,16 @@ theorem rss256_recorded_release_integrity (st next : Rss256EngineState)
       out = rss256GateOutput w.input w.gates ∧
       (out = rss256GateIdeal w.input w.gates ∨ (Rss256Wave.inlineWave w).BadChallenge a b) := by
   unfold rss256StepHardened at ho
-  split at ho
-  · cases ho
-  · split at ho
-    next =>
+  dsimp only at ho
+  cases hp : st.poisoned
+  · rw [hp] at ho
+    simp only [Bool.false_eq_true, ↓reduceIte] at ho
+    cases hEmp : st.pending.isEmpty
+    · rw [hEmp] at ho
+      simp only [Bool.false_eq_true, ↓reduceIte] at ho
+      cases ho
+    · rw [hEmp] at ho
+      simp only [↓reduceIte] at ho
       injection ho with _ hOutputs
       rw [← hOutputs] at hm
       obtain ⟨entry, he, hv⟩ := List.mem_filterMap.mp hm
@@ -4606,7 +4640,9 @@ theorem rss256_recorded_release_integrity (st next : Rss256EngineState)
         · exact .inl hi
         · right
           exact ⟨fun hc => hi (heq.symm.trans hc), h _ he⟩
-    next => cases ho
+  · rw [hp] at ho
+    simp only [↓reduceIte] at ho
+    cases ho
 
 /-- A present invalid signature cache entry cannot fall back to fresh signing. -/
 theorem baggy_invalid_cache_entry_rejects (suite : BaggySuite256) (p : BaggyTreeParams)

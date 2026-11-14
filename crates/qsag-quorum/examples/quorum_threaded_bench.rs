@@ -167,6 +167,7 @@ fn timed_rounds<P: Send>(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn committee_bench_with_wals<T: WireTransport + Send, W: DurableWal + Send>(
     label: &str,
     t: usize,

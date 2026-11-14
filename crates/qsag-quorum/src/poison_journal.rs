@@ -308,12 +308,12 @@ impl FsDurablePoisonAndSessionJournal {
                         generation == 0 && state == STATE_ALLOCATED
                     } else if generation == journal.generation {
                         id == journal.session
-                            && match (journal.state, state) {
+                            && matches!(
+                                (journal.state, state),
                                 (STATE_ALLOCATED, STATE_CONSUMED)
-                                | (STATE_ALLOCATED, STATE_POISONED)
-                                | (STATE_CONSUMED, STATE_POISONED) => true,
-                                _ => false,
-                            }
+                                    | (STATE_ALLOCATED, STATE_POISONED)
+                                    | (STATE_CONSUMED, STATE_POISONED)
+                            )
                     } else if journal.generation.checked_add(1) == Some(generation)
                         && state == STATE_ALLOCATED
                         && !seen_sessions.contains(&id)
@@ -483,9 +483,8 @@ impl PoisonJournal for FsDurablePoisonAndSessionJournal {
             return Err(NodeError::Journal);
         }
         if self.state == STATE_POISONED {
-            self.verify_live_files().map_err(|err| {
+            self.verify_live_files().inspect_err(|_| {
                 self.failed = true;
-                err
             })?;
             return Ok(());
         }
@@ -634,7 +633,7 @@ mod tests {
 
         // Process 2 recovers the clean journal after crash and attempts to construct a party
         // with the same `session_a`: MUST fail closed so wave-0 pads/coins never repeat!
-        let mut recovered = FsDurablePoisonAndSessionJournal::open(
+        let recovered = FsDurablePoisonAndSessionJournal::open(
             &path,
             key,
             session_a,

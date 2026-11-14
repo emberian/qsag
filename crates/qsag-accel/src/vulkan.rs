@@ -279,9 +279,15 @@ impl VulkanSpirvBackend {
     pub fn try_new_audited() -> Result<Self, VulkanError> {
         let backend = Self::try_new()?;
         let info = backend.device_info();
-        if !info.wave32_required || info.pipelines.iter().any(|stats|
-            stats.subgroup_size != Some(32) || stats.scratch_bytes != Some(0)) {
-            return Err(VulkanError::PipelineAuditFailed("Wave32/zero-scratch evidence unavailable"));
+        if !info.wave32_required
+            || info
+                .pipelines
+                .iter()
+                .any(|stats| stats.subgroup_size != Some(32) || stats.scratch_bytes != Some(0))
+        {
+            return Err(VulkanError::PipelineAuditFailed(
+                "Wave32/zero-scratch evidence unavailable",
+            ));
         }
         Ok(backend)
     }

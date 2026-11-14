@@ -119,6 +119,9 @@ pub fn bech32_polymod(values: &[u8]) -> u32 {
 }
 
 pub fn bech32m_create_checksum(hrp_lower: &[u8], data5: &[u8]) -> Result<[u8; 6], AddrError> {
+    if data5.iter().any(|&symbol| symbol >= 32) {
+        return Err(AddrError::InvalidCharacter);
+    }
     let mut values = bech32_hrp_expand(hrp_lower)?;
     values.extend_from_slice(data5);
     values.extend_from_slice(&[0u8; 6]);
@@ -144,8 +147,10 @@ pub fn convert_bits(
     let mut bits = 0u32;
     let maxv = (1u32 << to_bits) - 1;
     let max_acc = (1u32 << (from_bits + to_bits - 1)) - 1;
-    let mut ret =
-        Vec::with_capacity((data.len() * (from_bits as usize)).div_ceil(to_bits as usize));
+    let capacity = data.len().checked_mul(from_bits as usize)
+        .ok_or(AddrError::InvalidBitConversion)?
+        .div_ceil(to_bits as usize);
+    let mut ret = Vec::with_capacity(capacity);
 
     for &value in data {
         let v = value as u32;
@@ -197,11 +202,11 @@ pub fn bech32m_encode_5bit(hrp: &str, data5: &[u8]) -> Result<String, AddrError>
         return Err(AddrError::MixedCase);
     }
 
-    let total_len = hrp_lower.len() + 1 + data5.len() + 6;
-    if total_len > 90 {
+    if data5.len() > 90 - hrp_lower.len() - 7 {
         return Err(AddrError::StringTooLongOrTooShort);
     }
 
+    let total_len = hrp_lower.len() + 7 + data5.len();
     let checksum = bech32m_create_checksum(&hrp_lower, data5)?;
     let mut out = String::with_capacity(total_len);
     for &b in &hrp_lower {

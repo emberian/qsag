@@ -11931,10 +11931,10 @@ theorem rssDurableReserve204_burns {party : UInt16} {result : RssDiskOutcome204}
   unfold rssDurableReserve204 at h ⊢
   split
   · rename_i hc
-    rw [if_pos hc] at h
+    rw [ite_true_of hc] at h
     cases h
   · rename_i hc
-    rw [if_neg hc] at h
+    rw [ite_false_of hc] at h
     split
     · rfl
     · rename_i hm
@@ -11958,7 +11958,7 @@ theorem tooth_rssDurableReserve204_nonce_replay (party : UInt16) (result : RssDi
     (h : rssNonceMaterial204 inp ∈ st.disk.burnedNonces) :
     (rssDurableReserve204 party result st inp).1 = false := by
   unfold rssDurableReserve204
-  rw [if_pos (Or.inr (Or.inr (Or.inr (Or.inr h))))]
+  rw [ite_true_of (Or.inr (Or.inr (Or.inr (Or.inr h))))]
 
 /-- A failed durable write refuses the reservation, whatever the journal contained. -/
 theorem rssDurableReserve204_failed_write (party : UInt16)
@@ -12306,11 +12306,11 @@ theorem toprfActiveCross204_correct (bad : Fin 5) (fault : ToprfFault204) (gate 
   by_cases h0 : (toprfHolders i j).getD 0 0 = bad
   · have h1 : (toprfHolders i j).getD 1 0 ≠ bad := fun h => h01 (h0.trans h.symm)
     have h2 : (toprfHolders i j).getD 2 0 ≠ bad := fun h => h02 (h0.trans h.symm)
-    exact Or.inr (Or.inr ⟨if_neg h1, if_neg h2⟩)
+    exact Or.inr (Or.inr ⟨ite_false_of h1 _ _, ite_false_of h2 _ _⟩)
   · by_cases h1 : (toprfHolders i j).getD 1 0 = bad
     · have h2 : (toprfHolders i j).getD 2 0 ≠ bad := fun h => h12 (h1.trans h.symm)
-      exact Or.inr (Or.inl ⟨if_neg h0, if_neg h2⟩)
-    · exact Or.inl ⟨if_neg h0, if_neg h1⟩
+      exact Or.inr (Or.inl ⟨ite_false_of h0 _ _, ite_false_of h2 _ _⟩)
+    · exact Or.inl ⟨ite_false_of h0 _ _, ite_false_of h1 _ _⟩
 
 /-- `getD` is unreachable on a failed decoder under the one-fault model, as proved above.
     The decoded values themselves feed every multiplication output. -/
@@ -12411,7 +12411,7 @@ theorem toprfActiveClient204_correct (bad : Fin 5) (fault : ToprfFault204)
   unfold toprfActiveClient204
   rw [toprfActivePerm204_eq]
   exact (toprf_2of5_corrects_one_malicious_server id [] 0 0 1 (by decide) bad).2.2
-    masks keys inputs _ (fun p hp => if_neg hp)
+    masks keys inputs _ (fun p hp => ite_false_of hp _ _)
 
 private theorem gold_one_ne_zero204 : Goldilocks.one ≠ Goldilocks.zero := by
   intro h
@@ -12508,12 +12508,13 @@ theorem mldsaVerifyBytes204_bounds (budget : Nat) (pk msg ctx sig : List UInt8)
       | none => simp only [ha, hd] at h; cases h
       | some decoded =>
         rw [ha, hd] at h
+        dsimp only at h
         cases hc : sampleInBall204 budget decoded.challenge with
-        | none => rw [hc] at h; cases h
+        | none => simp [hc] at h
         | some c =>
           rw [hc] at h
           simp only [mldsaVerify, Bool.and_eq_true, decide_eq_true_eq] at h
-          exact ⟨decoded, hd, h.1.1, h.1.2⟩
+          exact ⟨decoded, rfl, h.1.1, h.1.2⟩
 
 -- Structural registrations. These are not claims that source mutants have been executed.
 #tooth_pair mldsaVerifyBytes204_bounds vs tooth_mldsaVerifyBytes204_bad_key_length

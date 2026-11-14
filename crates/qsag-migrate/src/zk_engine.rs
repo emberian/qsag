@@ -142,8 +142,7 @@ impl Drop for Tape {
     fn drop(&mut self) {
         // Shake256 erases its internal state through its own Drop implementation.
         qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_buf), 0);
-            qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_rem), 0);
-
+        qsag_asm::volatile_fill(core::slice::from_mut(&mut self.bit_rem), 0);
     }
 }
 impl Tape {
@@ -405,16 +404,22 @@ pub struct MigrationRequest {
     pub domain: [u8; 32],
 }
 /// Obtain fresh kernel entropy and hedge it with the witness and full statement.
-#[cfg(all(feature="std",unix))]
+#[cfg(all(feature = "std", unix))]
 pub fn prove_migration_in_domain_os_rng<B: AcceleratorBackend>(
-    witness:&LegacyOwnershipWitness,request:MigrationRequest,accel:&B,
-)->Result<(MigrationStatement,MigrationZkProof),MigrateError> {
+    witness: &LegacyOwnershipWitness,
+    request: MigrationRequest,
+    accel: &B,
+) -> Result<(MigrationStatement, MigrationZkProof), MigrateError> {
     use std::io::Read;
-    let mut entropy=[0;32];
-    let read=std::fs::File::open("/dev/urandom").and_then(|mut f|f.read_exact(&mut entropy));
-    if read.is_err(){ct_zeroize_bytes(&mut entropy);return Err(MigrateError::EntropyUnavailable);}
-    let result=prove_migration_in_domain(witness,request,entropy,accel);
-    ct_zeroize_bytes(&mut entropy);result
+    let mut entropy = [0; 32];
+    let read = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut entropy));
+    if read.is_err() {
+        ct_zeroize_bytes(&mut entropy);
+        return Err(MigrateError::EntropyUnavailable);
+    }
+    let result = prove_migration_in_domain(witness, request, entropy, accel);
+    ct_zeroize_bytes(&mut entropy);
+    result
 }
 pub fn prove_migration_in_domain<B: AcceleratorBackend>(
     witness: &LegacyOwnershipWitness,

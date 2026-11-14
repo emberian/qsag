@@ -2117,17 +2117,18 @@ def SignedMonomialChal.toBitVec {nu : Nat} (c : SignedMonomialChal nu) : BitVec 
 
 theorem SignedMonomialChal.ofBitVec_toBitVec {nu : Nat} (c : SignedMonomialChal nu) :
     SignedMonomialChal.ofBitVec c.toBitVec = c := by
-  unfold SignedMonomialChal.ofBitVec SignedMonomialChal.toBitVec
+  have hPow : 2 ^ (nu + 1) = 2 * 2 ^ nu := by rw [Nat.pow_succ]; omega
   have hLt : c.toFinIndex.val < 2 ^ (nu + 1) := by
-    have hPow : 2 ^ (nu + 1) = 2 * 2 ^ nu := by rw [Nat.pow_succ]; omega
     have hc := c.toFinIndex.isLt
     omega
-  have hMod : (BitVec.ofNat (nu + 1) c.toFinIndex.val).toNat = c.toFinIndex.val := by
+  have hIdxLt : c.toBitVec.toNat < 2 * 2 ^ nu := by
+    have hb := c.toBitVec.isLt
+    omega
+  have hFin : (⟨c.toBitVec.toNat, hIdxLt⟩ : Fin (2 * 2 ^ nu)) = c.toFinIndex := by
+    apply Fin.ext
+    dsimp only [SignedMonomialChal.toBitVec]
     rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hLt]
-  have hFin : (⟨(BitVec.ofNat (nu + 1) c.toFinIndex.val).toNat, _⟩ : Fin (2 * 2 ^ nu)) = c.toFinIndex :=
-    Fin.ext hMod
-  rw [hFin]
-  exact SignedMonomialChal.ofFinIndex_toFinIndex c
+  exact (congrArg SignedMonomialChal.ofFinIndex hFin).trans (SignedMonomialChal.ofFinIndex_toFinIndex c)
 
 theorem SignedMonomialChal.toBitVec_ofBitVec {nu : Nat} (u : BitVec (nu + 1)) :
     (SignedMonomialChal.ofBitVec u).toBitVec = u := by
@@ -2150,7 +2151,7 @@ theorem SignedMonomialChal.ofBitVec_injective {nu : Nat} {u u' : BitVec (nu + 1)
 private theorem bitvec_msb_eq_decide_ge {nu : Nat} (u : BitVec (nu + 1)) :
     u.getLsbD nu = decide (2 ^ nu ≤ u.toNat) := by
   change u.toNat.testBit nu = decide (2 ^ nu ≤ u.toNat)
-  rw [Nat.testBit, Nat.shiftRight_eq_div_pow, Nat.and_one_is_mod]
+  rw [Nat.testBit, Nat.shiftRight_eq_div_pow, Nat.and_comm 1, Nat.and_one_is_mod]
   have hu : u.toNat < 2 * 2 ^ nu := by
     have hPow : 2 ^ (nu + 1) = 2 * 2 ^ nu := by rw [Nat.pow_succ]; omega
     have h := u.isLt
@@ -3027,7 +3028,7 @@ private theorem negacyclicSignedMonomial_infNorm_eq_one {N : Nat} (s : Bool) (k 
   have hLe : cycIntInfNorm (negacyclicSignedMonomial s k) ≤ 1 := by
     rw [cycIntInfNorm_le_iff]; intro i; unfold negacyclicSignedMonomial
     split
-    · rw [signBitToInt_natAbs]
+    · rw [signBitToInt_natAbs]; exact Nat.le_refl 1
     · decide
   have hGe : 1 ≤ cycIntInfNorm (negacyclicSignedMonomial s k) := by
     have hk := cycCoeff_natAbs_le_infNorm (negacyclicSignedMonomial s k) k
@@ -3146,8 +3147,8 @@ def ShortMonomialRelaxedRlweWitness.ofForkDifference {R nu q : Nat} [NeZero q]
         cycZqMul (cycIntToZq q chal.invIntPoly) (cycZqMul stmt.A (cycIntToZq q dzs)) := by
       rw [← cycZqMul_assoc, cycZqMul_comm stmt.A (cycIntToZq q chal.invIntPoly), cycZqMul_assoc]
     rw [hSwap, ← cycZqMul_left_distrib, hDiffModQ, ← hChalMulR,
-        ← cycZqMul_assoc, ← cycIntToZq_mul, ← cycIntToZq_mul,
-        ← cycIntMul_assoc, chal.invIntPoly_mul, cycIntMul_one_left hN, cycIntToZq_mul]
+        ← cycZqMul_assoc, ← cycIntToZq_mul,
+        ← cycIntMul_assoc, chal.invIntPoly_mul, cycIntMul_one_left hN]
   { repIdx := i
     branch := b
     chal := chal
@@ -3319,6 +3320,7 @@ theorem short_monomial_witness_recovers_secret_or_breaks_short_sis {R nu q : Nat
   intro sSis eSis
   obtain ⟨hsTrue, heTrue, hKeyEq⟩ := hKey
   have hsSisNorm : cycIntInfNorm sSis ≤ 2 * stmt.Bz + 2 * Bsec := by
+    dsimp only [sSis]
     have hSub := cycIntInfNorm_sub_le w.sIso (cycIntMul w.rRel sTrue)
     have hMul := cycIntInfNorm_mul_le w.rRel sTrue
     have h1 := w.sIso_infNorm_le
@@ -3326,6 +3328,7 @@ theorem short_monomial_witness_recovers_secret_or_breaks_short_sis {R nu q : Nat
       Nat.mul_le_mul w.rRel_l1_le hsTrue
     omega
   have heSisNorm : cycIntInfNorm eSis ≤ 2 * stmt.Bz + 2 * Bsec := by
+    dsimp only [eSis]
     have hSub := cycIntInfNorm_sub_le w.eIso (cycIntMul w.rRel eTrue)
     have hMul := cycIntInfNorm_mul_le w.rRel eTrue
     have h1 := w.eIso_infNorm_le
@@ -3342,11 +3345,18 @@ theorem short_monomial_witness_recovers_secret_or_breaks_short_sis {R nu q : Nat
         cycZqAdd (cycZqSub X1 Y1) (cycZqSub X2 Y2) =
         cycZqSub (cycZqAdd X1 X2) (cycZqAdd Y1 Y2) := by
       intro X1 X2 Y1 Y2; funext k
+      let x1 : Int := (X1 k).val
+      let x2 : Int := (X2 k).val
+      let y1 : Int := (Y1 k).val
+      let y2 : Int := (Y2 k).val
+      have hx1 : X1 k = ModZq.ofInt q x1 := (ModZq.ofInt_natVal (X1 k)).symm
+      have hx2 : X2 k = ModZq.ofInt q x2 := (ModZq.ofInt_natVal (X2 k)).symm
+      have hy1 : Y1 k = ModZq.ofInt q y1 := (ModZq.ofInt_natVal (Y1 k)).symm
+      have hy2 : Y2 k = ModZq.ofInt q y2 := (ModZq.ofInt_natVal (Y2 k)).symm
       unfold cycZqAdd cycZqSub
-      rw [← ModZq.ofInt_natVal (X1 k), ← ModZq.ofInt_natVal (X2 k),
-          ← ModZq.ofInt_natVal (Y1 k), ← ModZq.ofInt_natVal (Y2 k)]
+      rw [hx1, hx2, hy1, hy2]
       simp only [← ModZq.ofInt_add, ← ModZq.ofInt_sub]
-      congr 1; omega
+      exact congrArg (ModZq.ofInt q) (by omega)
     rw [hSubReorder, w.short_relaxed_rlwe_mod_q, hAMul, ← cycZqMul_left_distrib,
         hKeyEq, cycZqSub_self]
   by_cases hBothZ : cycZqEq (cycIntToZq q sSis) cycZqZero = true ∧
@@ -4215,10 +4225,10 @@ theorem tooth_two_term_no_inverse_12289 (inv : CycPolyZq 10 12289) :
       (cycIntAdd (signedMonomial 10 false ⟨2, by decide⟩) (signedMonomial 10 false ⟨513, by decide⟩)))) inv ≠ cycZqOne :=
   tooth_two_term_challenge_difference_zero_divisor_12289.2.2 inv
 
-private def sampleUnforkedChal13 : Fin 13 → SignedMonomialChal 10 :=
+def sampleUnforkedChal13 : Fin 13 → SignedMonomialChal 10 :=
   fun _ => ⟨false, ⟨0, by decide⟩⟩
 
-private def sampleUnforkedTranscript13 : RlweOrSigmaTranscript 13 10 12289 :=
+def sampleUnforkedTranscript13 : RlweOrSigmaTranscript 13 10 12289 :=
   buildHonestRlweOrSigmaTranscript 13 10 12289 sampleRlweOrSigmaStmt1024 false
     sampleCyc1024SecretS sampleCyc1024SecretE
     (fun _ => sampleCyc1024MaskY) (fun _ => sampleCyc1024MaskY)
@@ -4226,11 +4236,11 @@ private def sampleUnforkedTranscript13 : RlweOrSigmaTranscript 13 10 12289 :=
     (fun _ => sampleCyc1024MaskY) (fun _ => sampleCyc1024MaskY)
     sampleUnforkedChal13
 
-theorem tooth_short_extractor_refuses_identical_challenges :
+theorem tooth_short_extractor_refuses_identical_challenges
+    (w : ShortMonomialRelaxedRlweWitness 13 10 12289 sampleRlweOrSigmaStmt1024) :
     tryExtractShortMonomialOr13Witness sampleRlweOrSigmaStmt1024
       sampleUnforkedChal13 sampleUnforkedChal13
-      sampleUnforkedTranscript13 sampleUnforkedTranscript13 =
-    PSum.inr .identicalJointChallenges := by
+      sampleUnforkedTranscript13 sampleUnforkedTranscript13 ≠ PSum.inl w := by
   have hSafe : ∀ _ : Fin 13, cycIntInfNorm sampleCyc1024MaskY + cycIntInfNorm sampleCyc1024SecretS ≤
       sampleRlweOrSigmaStmt1024.Bz := by
     intro _
@@ -4275,8 +4285,15 @@ theorem tooth_short_extractor_refuses_identical_challenges :
   have ht1Self : cycAllFin 13 (fun i => cycZqEq (sampleUnforkedTranscript13.t1 i) (sampleUnforkedTranscript13.t1 i)) = true := by
     rw [cycAllFin_eq_true_iff]; intro i; exact (cycZqEq_iff _ _).mpr rfl
   have hcTrue : cycAllFin 13 (fun _ => true) = true := by decide
-  unfold tryExtractShortMonomialOr13Witness
-  simp only [ht0Self, ht1Self, hAcc, decide_true, hcTrue, ↓reduceDIte]
+  have hEq : tryExtractShortMonomialOr13Witness sampleRlweOrSigmaStmt1024
+      sampleUnforkedChal13 sampleUnforkedChal13
+      sampleUnforkedTranscript13 sampleUnforkedTranscript13 =
+      PSum.inr .identicalJointChallenges := by
+    unfold tryExtractShortMonomialOr13Witness
+    simp only [ht0Self, ht1Self, hAcc, decide_true, hcTrue, ↓reduceDIte]
+  rw [hEq]
+  intro hContra
+  cases hContra
 
 theorem witness_short_rlwe_key_relation_inhabited :
     ∃ (A u : CycPolyZq 10 12289) (sTrue eTrue : CycPolyInt 10),

@@ -2346,15 +2346,17 @@ theorem PqHashParams.productionWellFormed_w_ell1 (p : PqHashParams)
     cases hLg : Nat.log2 p.w with
     | zero => rw [hLg] at hPow; omega
     | succ _ => omega
-  interval_cases hLg : Nat.log2 p.w
-  · rw [hLg] at hPow; exact .inl ⟨hPow.symm, by omega⟩
-  · rw [hLg] at hPow; exact .inr (.inl ⟨hPow.symm, by omega⟩)
-  · omega
-  · rw [hLg] at hPow; exact .inr (.inr (.inl ⟨hPow.symm, by omega⟩))
-  · omega
-  · omega
-  · omega
-  · rw [hLg] at hPow; exact .inr (.inr (.inr ⟨hPow.symm, by omega⟩))
+  match hLg : Nat.log2 p.w with
+  | 0 => omega
+  | 1 => rw [hLg] at hPow; exact .inl ⟨hPow.symm, by omega⟩
+  | 2 => rw [hLg] at hPow; exact .inr (.inl ⟨hPow.symm, by omega⟩)
+  | 3 => omega
+  | 4 => rw [hLg] at hPow; exact .inr (.inr (.inl ⟨hPow.symm, by omega⟩))
+  | 5 => omega
+  | 6 => omega
+  | 7 => omega
+  | 8 => rw [hLg] at hPow; exact .inr (.inr (.inr ⟨hPow.symm, by omega⟩))
+  | _ + 9 => omega
 
 theorem PqHashParams.productionWellFormed_facts (p : PqHashParams)
     (h : p.productionWellFormed = true) :

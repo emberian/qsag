@@ -3,6 +3,7 @@
 //! Strict `Bech32m` (`0x2bc830a3`) post-quantum address codec, domain-separated `cSHAKE256` &
 //! `Poseidon2` 256-bit script/pubkey commitments, and non-malleable `HybridPinnedEnvelope`.
 
+// The codec requires an allocator even with default features disabled; it never requires std.
 extern crate alloc;
 
 pub mod bech32m;
@@ -236,6 +237,7 @@ impl QsagAddress {
         if hrp_norm != self.hrp {
             return Err(AddrError::EmptyOrInvalidHrp);
         }
+        validate_commitment(self.version, &self.commitment_256)?;
         let mut prog = [0u8; 35];
         prog[0..2].copy_from_slice(&(self.suite_tag as u16).to_be_bytes());
         prog[2] = self.kind as u8;
@@ -261,6 +263,7 @@ impl QsagAddress {
 
     pub fn decode(encoded: &str) -> Result<Self, AddrError> {
         let (hrp, data5) = bech32m_decode_5bit(encoded)?;
+        normalize_hrp(&hrp)?;
         if data5.is_empty() {
             return Err(AddrError::InvalidPayloadLength);
         }
@@ -276,15 +279,7 @@ impl QsagAddress {
         let mut commitment_256 = [0u8; 32];
         commitment_256.copy_from_slice(&prog[3..35]);
 
-        if version == AddressVersion::V2Poseidon2 {
-            for i in 0..4 {
-                let limb =
-                    u64::from_le_bytes(commitment_256[i * 8..(i + 1) * 8].try_into().unwrap());
-                if !gl_is_canonical(limb) {
-                    return Err(AddrError::NonCanonicalPoseidonLimb);
-                }
-            }
-        }
+        validate_commitment(version, &commitment_256)?;
 
         Ok(Self {
             hrp,
@@ -294,6 +289,18 @@ impl QsagAddress {
             commitment_256,
         })
     }
+}
+
+fn validate_commitment(version: AddressVersion, commitment: &[u8; 32]) -> Result<(), AddrError> {
+    if version == AddressVersion::V2Poseidon2 {
+        for chunk in commitment.chunks_exact(8) {
+            let limb = u64::from_le_bytes(chunk.try_into().unwrap());
+            if !gl_is_canonical(limb) {
+                return Err(AddrError::NonCanonicalPoseidonLimb);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn normalize_hrp(hrp: &str) -> Result<String, AddrError> {
@@ -435,7 +442,9 @@ impl HybridSuiteSpec {
         })
     }
 
-    /// Exact length and encoding checks for both public keys.
+    /// Check public-key lengths and the compressed SEC1 prefix. Curve membership,
+    /// canonical point encodings, subgroup checks, and PQ decoding belong to the
+    /// algorithm-specific verifier callbacks.
     pub fn validate_public_keys(&self, pk_classical: &[u8], pk_pq: &[u8]) -> Result<(), AddrError> {
         let classical_ok = pk_classical.len() == self.classical.public_key_len()
             && match self.classical {
@@ -654,7 +663,7 @@ impl HybridPinnedEnvelope {
     /// Every check that needs no signature verification, in this order:
     ///
     /// 1. the suite tag names a hybrid pair, and both algorithm tags are that pair;
-    /// 2. both public keys have their exact length and encoding;
+    /// 2. both public keys have their exact length and the SEC1 prefix is valid;
     /// 3. both signatures have their exact length and canonical scalar ranges;
     /// 4. both carried digests are the digests of the carried keys, the carried `id_commit` is
     ///    their commitment, and it equals `expected_id_commit`.
@@ -729,7 +738,8 @@ impl HybridPinnedEnvelope {
     /// 2. `expected_address` has `KeyIdentityKind::HybridConjunctive` and `self.suite_tag`;
     /// 3. [`Self::validate_structure`] passes on `self.id_commit`;
     /// 4. recomputing [`Self::to_address`] under `(expected_address.hrp, expected_address.version)`
-    ///    reproduces `expected_address` byte-for-byte in constant time.
+    ///    reproduces its commitment using constant-time digest comparison. Metadata
+    ///    (HRP, version, suite, and kind) is public and compared normally.
     pub fn validate_for_address(
         &self,
         expected_address: &QsagAddress,
