@@ -19,8 +19,7 @@ use field::tower::{
 };
 use fips205::{
     Fips205Adrs as CoreAdrs, Fips205AdrsType as CoreAdrsType, SlhBlock,
-    fips205_chain as core_fips205_chain, fips205_f as core_fips205_f,
-    wots_base16_digits_and_csum,
+    fips205_chain as core_fips205_chain, fips205_f as core_fips205_f, wots_base16_digits_and_csum,
 };
 use qsag_verified::{Gf16, Gf256, Goldilocks, GoldilocksExt2, Tower128};
 use sponge::keccak::{
@@ -35,8 +34,7 @@ struct DetCshake256Stream {
 
 impl DetCshake256Stream {
     fn new(domain_seed: u64) -> Self {
-        let mut sponge =
-            qsag_verified::Shake256Sponge::new_cshake256(b"QSAG.PARITY.DET.XOF/v1");
+        let mut sponge = qsag_verified::Shake256Sponge::new_cshake256(b"QSAG.PARITY.DET.XOF/v1");
         sponge.absorb(&domain_seed.to_le_bytes());
         let mut stream = Self { sponge };
         let mut prefix = [0u8; 32];
@@ -318,7 +316,9 @@ fn parity_keccak_shake256_and_cshake256_against_qsag_core() {
         assert_eq!(st_ver, st_core);
     }
 
-    for len in [0usize, 1, 3, 31, 32, 64, 135, 136, 137, 200, 271, 272, 273, 409] {
+    for len in [
+        0usize, 1, 3, 31, 32, 64, 135, 136, 137, 200, 271, 272, 273, 409,
+    ] {
         let mut msg = vec![0u8; len];
         rng.fill_bytes(&mut msg);
         assert_eq!(qsag_verified::shake256_32(&msg), core_shake256_32(&msg));
@@ -341,13 +341,28 @@ fn parity_fips205_and_tsw_against_qsag_core() {
     let mut rng = DetCshake256Stream::new(0xF195_2050_AD25_0001);
 
     let types = [
-        (qsag_verified::Fips205AdrsType::WotsHash, CoreAdrsType::WotsHash),
+        (
+            qsag_verified::Fips205AdrsType::WotsHash,
+            CoreAdrsType::WotsHash,
+        ),
         (qsag_verified::Fips205AdrsType::WotsPk, CoreAdrsType::WotsPk),
         (qsag_verified::Fips205AdrsType::Tree, CoreAdrsType::Tree),
-        (qsag_verified::Fips205AdrsType::ForsTree, CoreAdrsType::ForsTree),
-        (qsag_verified::Fips205AdrsType::ForsRoots, CoreAdrsType::ForsRoots),
-        (qsag_verified::Fips205AdrsType::WotsPrf, CoreAdrsType::WotsPrf),
-        (qsag_verified::Fips205AdrsType::ForsPrf, CoreAdrsType::ForsPrf),
+        (
+            qsag_verified::Fips205AdrsType::ForsTree,
+            CoreAdrsType::ForsTree,
+        ),
+        (
+            qsag_verified::Fips205AdrsType::ForsRoots,
+            CoreAdrsType::ForsRoots,
+        ),
+        (
+            qsag_verified::Fips205AdrsType::WotsPrf,
+            CoreAdrsType::WotsPrf,
+        ),
+        (
+            qsag_verified::Fips205AdrsType::ForsPrf,
+            CoreAdrsType::ForsPrf,
+        ),
     ];
 
     for (ver_ty, core_ty) in types {
@@ -374,7 +389,10 @@ fn parity_fips205_and_tsw_against_qsag_core() {
             let ver_bytes = qsag_verified::encode_fips205_adrs(ver_adrs);
             let core_bytes = core_adrs.to_bytes();
             assert_eq!(ver_bytes, core_bytes);
-            assert_eq!(qsag_verified::decode_fips205_adrs(&core_bytes), Some(ver_adrs));
+            assert_eq!(
+                qsag_verified::decode_fips205_adrs(&core_bytes),
+                Some(ver_adrs)
+            );
             assert_eq!(CoreAdrs::from_bytes(&ver_bytes), Some(core_adrs));
         }
     }
@@ -574,7 +592,10 @@ fn parity_belt_latch_kernel_against_qsag_core() {
             }
         }
     }
-    assert!(seen[0] > 0 && seen[1] > 0, "fresh and replay must both occur: {seen:?}");
+    assert!(
+        seen[0] > 0 && seen[1] > 0,
+        "fresh and replay must both occur: {seen:?}"
+    );
 }
 
 /// `MemoryWal` keeps an armed failure until a persist consumes it. Re-persisting the state
@@ -582,7 +603,10 @@ fn parity_belt_latch_kernel_against_qsag_core() {
 fn disarm_pending_failure(wal: &mut belt_latch::MemoryWal) {
     use belt_latch::DurableWal;
     let state = wal.load().expect("load").unwrap_or_default();
-    assert!(wal.sync_persist(&state).is_err(), "a failure was expected to be pending");
+    assert!(
+        wal.sync_persist(&state).is_err(),
+        "a failure was expected to be pending"
+    );
 }
 
 #[inline]
