@@ -8653,3 +8653,2922 @@ impl Drop for PcgPartySeed {
 
 /// Locally expanded PCG correlation vault (`65,600` Boolean triples + `8` `Tower128` triples +
 /// sacrifice companion masks), produced by [`PcgPartySeed::expand_local`] with **zero** network I/O.
+pub struct PcgExpandedPartyVault {
+    pub session_id: [u8; 32],
+    pub party_id: usize,
+    pub num_parties: usize,
+    pub mac_alpha: [Tower128; 2],
+    pub bool_triple_words: Vec<PcgAuthBoolTripleWord64>,
+    pub tower_triples: Vec<PcgAuthTower128TripleShare>,
+    /// Sacrifice companion masks `[\tilde{A}_{lane, \ell}] \in \mathcal{T}_7` (`lane = 0, 1`, `\ell = 0..65,600`).
+    pub companion_a: [Vec<PcgAuthTower128Share>; 2],
+    pub companion_c_sums: [PcgAuthTower128Share; 2],
+}
+
+impl fmt::Debug for PcgExpandedPartyVault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PcgExpandedPartyVault")
+            .field("party_id", &self.party_id)
+            .field("num_parties", &self.num_parties)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for PcgExpandedPartyVault {
+    fn drop(&mut self) {
+        wipe_tower128(&mut self.mac_alpha);
+    }
+}
+
+impl PcgExpandedPartyVault {
+    /// Total number of authenticated Boolean Beaver triples in this expanded vault (`65,600`).
+    #[inline]
+    pub fn num_boolean_triples(&self) -> usize {
+        self.bool_triple_words.len() * 64
+    }
+}
+
+/// Single-block `SHAKE256` (`Keccak-f[1600]`) GGM internal node expansion:
+/// expands `node_seed: [u8; 16]` at `(domain_tag, tree_id, level)` into `(left: [u8; 16], right: [u8; 16])`.
+#[inline]
+fn ggm_expand_node_shake256(
+    session_id: &[u8; 32],
+    tree_tag: u8,
+    level: u8,
+    node_seed: &[u8; 16],
+) -> ([u8; 16], [u8; 16]) {
+    let mut state = [0u64; 25];
+    let mut blk = [0u8; 72];
+    blk[0..16].copy_from_slice(b"QSAG.PCG.GGM.ND1");
+    blk[16..48].copy_from_slice(session_id);
+    blk[48] = tree_tag;
+    blk[49] = level;
+    blk[50..66].copy_from_slice(node_seed);
+    blk[66] = 0x1F; // SHAKE256 pad start (`rate = 136` bytes = `17` u64 lanes)
+    for w in 0..9 {
+        state[w] = u64::from_le_bytes(core::array::from_fn(|array_index| (blk[8 * w..8 * (w + 1)])[array_index]));
+    }
+    state[16] ^= 0x80u64 << 56;
+    keccak_f1600(&mut state);
+
+    let mut left = [0u8; 16];
+    let mut right = [0u8; 16];
+    left[0..8].copy_from_slice(&state[0].to_le_bytes());
+    left[8..16].copy_from_slice(&state[1].to_le_bytes());
+    right[0..8].copy_from_slice(&state[2].to_le_bytes());
+    right[8..16].copy_from_slice(&state[3].to_le_bytes());
+    wipe_bytes(&mut blk);
+    wipe_u64s(&mut state);
+    (left, right)
+}
+
+/// Single-block `SHAKE256` (`Keccak-f[1600]`) GGM leaf expansion:
+/// expands `leaf_seed: [u8; 16]` into two 128-bit `Tower128` MAC/key tags `(lane0, lane1)`.
+#[inline]
+fn ggm_expand_leaf_tags_shake256(
+    session_id: &[u8; 32],
+    tree_tag: u8,
+    leaf_idx: u32,
+    leaf_seed: &[u8; 16],
+) -> [u128; 2] {
+    let mut state = [0u64; 25];
+    let mut blk = [0u8; 72];
+    blk[0..16].copy_from_slice(b"QSAG.PCG.GGM.LF1");
+    blk[16..48].copy_from_slice(session_id);
+    blk[48] = tree_tag;
+    blk[49..53].copy_from_slice(&leaf_idx.to_le_bytes());
+    blk[53..69].copy_from_slice(leaf_seed);
+    blk[69] = 0x1F;
+    for w in 0..9 {
+        state[w] = u64::from_le_bytes(core::array::from_fn(|array_index| (blk[8 * w..8 * (w + 1)])[array_index]));
+    }
+    state[16] ^= 0x80u64 << 56;
+    keccak_f1600(&mut state);
+
+    let lane0 = (state[0] as u128) | ((state[1] as u128) << 64);
+    let lane1 = (state[2] as u128) | ((state[3] as u128) << 64);
+    wipe_bytes(&mut blk);
+    wipe_u64s(&mut state);
+    [lane0, lane1]
+}
+
+/// Sender full-tree `SHAKE256` GGM evaluation: returns `(leaf_tags: Vec<[u128; 2]>, level_lr_xors: Vec<([u8; 16], [u8; 16])>)`.
+fn ggm_eval_sender_full(
+    session_id: &[u8; 32],
+    tree_tag: u8,
+    depth: usize,
+    root_seed: &[u8; 16],
+) -> SpcotPunctureOutput {
+    let mut cur_level = Vec::with_capacity(1);
+    cur_level.push(*root_seed);
+    let mut level_lr_xors = Vec::with_capacity(depth);
+
+    for lvl in 0..depth {
+        let mut next_level = Vec::with_capacity(cur_level.len() * 2);
+        let mut l_xor = [0u8; 16];
+        let mut r_xor = [0u8; 16];
+        for nodes in cur_level.chunks(4) {
+            let mut states = [[0u64; 25]; 4];
+            for (i, node) in nodes.iter().enumerate() {
+                let mut block = [0u8; 72];
+                block[..16].copy_from_slice(b"QSAG.PCG.GGM.ND1");
+                block[16..48].copy_from_slice(session_id);
+                block[48] = tree_tag;
+                block[49] = lvl as u8;
+                block[50..66].copy_from_slice(node);
+                block[66] = 0x1f;
+                #[expect(clippy::chunks_exact_to_as_chunks, reason = "Keep the workspace Rust 1.85 minimum; slice as_chunks requires a newer compiler")]
+                for (word, bytes) in states[i].iter_mut().zip(block.chunks_exact(8)) {
+                    *word = u64::from_le_bytes(core::array::from_fn(|array_index| (bytes)[array_index]));
+                }
+                states[i][16] = 0x80u64 << 56;
+                wipe_bytes(&mut block);
+            }
+            qsag_asm::keccak_f1600_batch(&mut states[..nodes.len()]);
+            for state in &mut states[..nodes.len()] {
+                let mut left = [0u8; 16];
+                let mut right = [0u8; 16];
+                left[..8].copy_from_slice(&state[0].to_le_bytes());
+                left[8..].copy_from_slice(&state[1].to_le_bytes());
+                right[..8].copy_from_slice(&state[2].to_le_bytes());
+                right[8..].copy_from_slice(&state[3].to_le_bytes());
+                for b in 0..16 { l_xor[b] ^= left[b]; r_xor[b] ^= right[b]; }
+                next_level.push(left); next_level.push(right);
+                wipe_bytes(&mut left); wipe_bytes(&mut right); wipe_u64s(state);
+            }
+        }
+        for node in &mut cur_level {
+            wipe_bytes(node);
+        }
+        cur_level = next_level;
+        level_lr_xors.push((l_xor, r_xor));
+    }
+
+    let num_leaves = 1usize << depth;
+    let mut leaf_tags = Vec::with_capacity(num_leaves);
+    for (u, cur_level_u_item) in cur_level[..num_leaves].iter_mut().enumerate() {
+        leaf_tags.push(ggm_expand_leaf_tags_shake256(
+            session_id,
+            tree_tag,
+            u as u32,
+            &*cur_level_u_item,
+        ));
+        wipe_bytes(&mut *cur_level_u_item);
+    }
+    (leaf_tags, level_lr_xors)
+}
+
+/// Receiver punctured-tree `SHAKE256` GGM evaluation from a compressed `depth * 16 B` copath:
+/// reconstructs exact leaf tags at every `u != punctured_idx`, and fills `punctured_idx` from the
+/// masked correlation so `mac_R[u] ^ key_S[u] == (u == p^*) * target_delta`.
+fn ggm_eval_receiver_punctured(
+    session_id: &[u8; 32],
+    tree_tag: u8,
+    depth: usize,
+    punctured_idx: usize,
+    copath: &[[u8; 16]],
+    punctured_mode_sum_or_direct: ([u128; 2], bool),
+) -> Vec<[u128; 2]> {
+    let mut cur_level = vec![[0u8; 16]; 1];
+    let mut missing_prefix = 0usize;
+
+    for (lvl, copath_lvl_item) in copath[..depth].iter().enumerate() {
+        let bit = (punctured_idx >> (depth - 1 - lvl)) & 1;
+        let mut next_level = vec![[0u8; 16]; cur_level.len() * 2];
+        let mut known_xor = [0u8; 16];
+
+        for (idx, node) in cur_level.iter().enumerate() {
+            if idx == missing_prefix {
+                continue;
+            }
+            let (left, right) = ggm_expand_node_shake256(session_id, tree_tag, lvl as u8, node);
+            if bit == 0 {
+                for b in 0..16 {
+                    known_xor[b] ^= right[b];
+                }
+            } else {
+                for b in 0..16 {
+                    known_xor[b] ^= left[b];
+                }
+            }
+            next_level[2 * idx] = left;
+            next_level[2 * idx + 1] = right;
+        }
+
+        let mut recovered_sibling = [0u8; 16];
+        for b in 0..16 {
+            recovered_sibling[b] = (*copath_lvl_item)[b] ^ known_xor[b];
+        }
+        let sibling_pos = (missing_prefix << 1) | (bit ^ 1);
+        next_level[sibling_pos] = recovered_sibling;
+        missing_prefix = (missing_prefix << 1) | bit;
+
+        for node in &mut cur_level {
+            wipe_bytes(node);
+        }
+        cur_level = next_level;
+    }
+
+    let num_leaves = 1usize << depth;
+    let mut leaf_tags = vec![[0u128; 2]; num_leaves];
+    let mut partial_xor = [0u128; 2];
+    for u in 0..num_leaves {
+        if u == punctured_idx {
+            continue;
+        }
+        let tags = ggm_expand_leaf_tags_shake256(session_id, tree_tag, u as u32, &cur_level[u]);
+        leaf_tags[u] = tags;
+        partial_xor[0] ^= tags[0];
+        partial_xor[1] ^= tags[1];
+        wipe_bytes(&mut cur_level[u]);
+    }
+
+    let (corr, xor_with_partial) = punctured_mode_sum_or_direct;
+    if xor_with_partial {
+        leaf_tags[punctured_idx] = [corr[0] ^ partial_xor[0], corr[1] ^ partial_xor[1]];
+    } else {
+        leaf_tags[punctured_idx] = corr;
+    }
+    leaf_tags
+}
+
+/// Deterministic Quasi-Cyclic LPN parity-check / generator schedule (`base`, odd `stride`) derived
+/// via `SHAKE256` from `(session_id, bundle_tag)` for `num_words` 64-bit blocks across `4` trees.
+struct QcLpnParitySchedule {
+    /// Flattened `[word * 12 + tree * 3 + tap] -> (base, odd_stride)` masked to `(1 << depth) - 1`.
+    base_and_stride: Vec<(u32, u32)>,
+    leaf_mask: usize,
+}
+
+impl QcLpnParitySchedule {
+    fn derive(session_id: &[u8; 32], bundle_tag: &[u8], depth: usize, num_words: usize) -> Self {
+        let leaf_mask = (1usize << depth) - 1;
+        let entries = num_words * PCG_TREES_PER_BUNDLE * PCG_TAPS_PER_TREE;
+        let mut xof = Shake256Xof::new_shake256();
+        xof.absorb(b"QSAG.PCG.QCLPN.SCHED/v1");
+        xof.absorb(session_id);
+        xof.absorb(bundle_tag);
+        xof.absorb(&(depth as u32).to_le_bytes());
+        let mut raw = vec![0u8; entries * 4];
+        xof.squeeze(&mut raw);
+
+        let mut base_and_stride = Vec::with_capacity(entries);
+        for e in 0..entries {
+            let b = (u16::from_le_bytes([raw[4 * e], raw[4 * e + 1]]) as usize) & leaf_mask;
+            let s = ((u16::from_le_bytes([raw[4 * e + 2], raw[4 * e + 3]]) as usize) | 1) & leaf_mask;
+            base_and_stride.push((b as u32, s as u32));
+        }
+        Self {
+            base_and_stride,
+            leaf_mask,
+        }
+    }
+
+    /// Compress `4` GGM leaf-tag vectors (`[tree][0..2^depth]`) into `num_words * 64` LPN output
+    /// tags AND compute the sparse noise bit-words `H * e` for `punctured_indices: Option<[usize; 4]>`.
+    fn compress_binary_bundle(
+        &self,
+        num_words: usize,
+        tree_leaf_tags: &[Vec<[u128; 2]>],
+        punctured_indices: Option<[usize; 4]>,
+    ) -> (Vec<u64>, Vec<[[u128; 2]; 64]>) {
+        let mut bit_words = vec![0u64; num_words];
+        let mut out_tags = vec![[[0u128; 2]; 64]; num_words];
+        let mask = self.leaf_mask;
+
+        for k in 0..num_words {
+            let mut w_bits = 0u64;
+            let row_tags = &mut out_tags[k];
+            for tree in 0..PCG_TREES_PER_BUNDLE {
+                let leaves = &tree_leaf_tags[tree];
+                let p_star = punctured_indices.map(|arr| arr[tree]).unwrap_or(usize::MAX);
+                for tap in 0..PCG_TAPS_PER_TREE {
+                    let (base, stride) =
+                        self.base_and_stride[(k * PCG_TREES_PER_BUNDLE + tree) * PCG_TAPS_PER_TREE + tap];
+                    let mut col = base as usize;
+                    let step = stride as usize;
+                    for (bit, row_tags_bit_item) in row_tags[..64].iter_mut().enumerate() {
+                        let t = leaves[col];
+                        (*row_tags_bit_item)[0] ^= t[0];
+                        (*row_tags_bit_item)[1] ^= t[1];
+                        if col == p_star {
+                            w_bits ^= 1u64 << bit;
+                        }
+                        col = (col + step) & mask;
+                    }
+                }
+            }
+            bit_words[k] = w_bits;
+        }
+        (bit_words, out_tags)
+    }
+
+    /// Compress `4` `Tower128` VOLE GGM trees into `num_words * 64` values + 2-lane tags.
+    fn compress_tower_bundle(
+        &self,
+        num_words: usize,
+        tree_leaf_tags: &[Vec<[u128; 2]>],
+        punctured: Option<[(usize, Tower128); 4]>,
+    ) -> (Vec<Tower128>, Vec<[u128; 2]>) {
+        let total = num_words * 64;
+        let mut vals = vec![Tower128::ZERO; total];
+        let mut tags = vec![[0u128; 2]; total];
+        let mask = self.leaf_mask;
+
+        for k in 0..num_words {
+            for tree in 0..PCG_TREES_PER_BUNDLE {
+                let leaves = &tree_leaf_tags[tree];
+                let (p_star, beta) = punctured
+                    .map(|arr| arr[tree])
+                    .unwrap_or((usize::MAX, Tower128::ZERO));
+                for tap in 0..PCG_TAPS_PER_TREE {
+                    let (base, stride) =
+                        self.base_and_stride[(k * PCG_TREES_PER_BUNDLE + tree) * PCG_TAPS_PER_TREE + tap];
+                    let mut col = base as usize;
+                    let step = stride as usize;
+                    for bit in 0..64 {
+                        let idx = 64 * k + bit;
+                        let t = leaves[col];
+                        tags[idx][0] ^= t[0];
+                        tags[idx][1] ^= t[1];
+                        if col == p_star {
+                            vals[idx] = vals[idx].add(beta);
+                        }
+                        col = (col + step) & mask;
+                    }
+                }
+            }
+        }
+        (vals, tags)
+    }
+}
+
+/// LHL-amplified (`4` uniform `Tower128` OT masks = `512` bits per element -> `< 2^{-192}`
+/// selective-failure advantage) pairwise 128-bit `Tower128` MASCOT OLE on `OtMesh`:
+/// computes additive shares `w[i][k]` of `(\bigoplus_i u[i][k]) * (\bigoplus_j v[j][k])` in $\mathcal{T}_7$
+/// with **zero** cleartext reconstruction of `u` or `v` and **zero** raw secret OT choice bits.
+fn pairwise_ole_tower128(
+    session_id: &[u8; 32],
+    ot_mesh: &mut OtMesh,
+    u_per_party: &[Vec<Tower128>],
+    v_per_party: &[Vec<Tower128>],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<Vec<Tower128>>, PreprocessError> {
+    let n = ot_mesh.n;
+    let count = u_per_party[0].len();
+    let mut w_per_party: Vec<Vec<Tower128>> = (0..n)
+        .map(|i| {
+            (0..count)
+                .map(|k| u_per_party[i][k].mul(v_per_party[i][k]))
+                .collect()
+        })
+        .collect();
+    if count == 0 {
+        return Ok(w_per_party);
+    }
+
+    // Each party `i` samples `4 * count` uniform `Tower128` OT masks (`8 * count` u64 choice words)
+    let mut r_masks = vec![vec![[Tower128::ZERO; 4]; count]; n];
+    let mut choice_words = vec![Vec::with_capacity(8 * count); n];
+    for i in 0..n {
+        #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+        for k in 0..count {
+            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+            for m in 0..4 {
+                let r = party_rngs[i].next_tower128();
+                r_masks[i][k][m] = r;
+                choice_words[i].push(r.0 as u64);
+                choice_words[i].push((r.0 >> 64) as u64);
+            }
+        }
+    }
+
+    let mut raw_s = vec![vec![vec![[Tower128::ZERO; 4]; count]; n]; n];
+    let mut raw_r = vec![vec![vec![[Tower128::ZERO; 4]; count]; n]; n];
+    for i in 0..n {
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            // Sender `j` inputs `u_j[k]`; Receiver `i` inputs uniform random `r_masks[i][k][0..4]`
+            let (send_pads, recv_pads) =
+                ot_mesh.run_correlated_ot_words(j, i, &choice_words[i], party_rngs)?;
+            for k in 0..count {
+                let uj = u_per_party[j][k];
+                for m in 0..4 {
+                    let rm_raw = black_box(r_masks[i][k][m].0);
+                    let mut s_sum = Tower128::ZERO;
+                    let mut r_sum = Tower128::ZERO;
+                    let base_off = (4 * k + m) * 128;
+                    for bit in 0..128 {
+                        let (p0, p1) = &send_pads[base_off + bit];
+                        let pad0 = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (p0[0..16])[array_index])));
+                        let pad1 = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (p1[0..16])[array_index])));
+                        let mask = party_rngs[j].next_tower128();
+                        s_sum = s_sum.add(mask);
+                        let basis = Tower128(1u128 << bit);
+                        let ct0 = mask.add(pad0);
+                        let ct1 = mask.add(uj.mul(basis)).add(pad1);
+
+                        let pad_c = Tower128(u128::from_le_bytes(
+                            core::array::from_fn(|array_index| (recv_pads[base_off + bit][0..16])[array_index]),
+                        ));
+                        let choice = ((rm_raw >> bit) & 1) == 1;
+                        let cmask = 0u128.wrapping_sub(black_box(choice as u128));
+                        let sel = Tower128(ct0.0 ^ (cmask & (ct0.0 ^ ct1.0)));
+                        r_sum = r_sum.add(sel.add(pad_c));
+                    }
+                    raw_s[j][i][k][m] = s_sum;
+                    raw_r[j][i][k][m] = r_sum;
+                }
+            }
+        }
+    }
+
+    // Post-OT `Π_coin` 2-universal LHL combiner (`512 -> 128` bits) + MASCOT input derandomization
+    let coin = run_commit_and_open_coin(session_id, b"PCG_OLE_T128_LHL", session_id, party_rngs)?;
+    let mut xof = Cshake256Xof::new(b"QSAG.PCG.OLE.T128.LHL/v1");
+    xof.absorb(&coin);
+    let mut g_weights = vec![[Tower128::ONE; 4]; count];
+    for g_weights_k_item in g_weights[..count].iter_mut() {
+        for m in 1..4 {
+            let mut gb = [0u8; 16];
+            xof.squeeze(&mut gb);
+            (*g_weights_k_item)[m] = Tower128(u128::from_le_bytes(gb) | 1);
+        }
+    }
+
+    let mut diffs = vec![vec![Tower128::ZERO; count]; n];
+    for i in 0..n {
+        for k in 0..count {
+            let mut r_comb = r_masks[i][k][0];
+            for m in 1..4 {
+                r_comb = r_comb.add(g_weights[k][m].mul(r_masks[i][k][m]));
+            }
+            diffs[i][k] = v_per_party[i][k].add(r_comb);
+            wipe_tower128(&mut r_masks[i][k]);
+        }
+        wipe_u64s(&mut choice_words[i]);
+    }
+
+    for i in 0..n {
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            for k in 0..count {
+                let mut s_comb = raw_s[j][i][k][0];
+                let mut r_comb = raw_r[j][i][k][0];
+                for m in 1..4 {
+                    let g = g_weights[k][m];
+                    s_comb = s_comb.add(g.mul(raw_s[j][i][k][m]));
+                    r_comb = r_comb.add(g.mul(raw_r[j][i][k][m]));
+                }
+                // `s_comb + r_comb == u_j * r_comb_i`; add `u_j * (v_i + r_comb_i)` to Sender `j`!
+                s_comb = s_comb.add(u_per_party[j][k].mul(diffs[i][k]));
+                w_per_party[j][k] = w_per_party[j][k].add(s_comb);
+                w_per_party[i][k] = w_per_party[i][k].add(r_comb);
+                wipe_tower128(&mut raw_s[j][i][k]);
+                wipe_tower128(&mut raw_r[j][i][k]);
+            }
+        }
+    }
+    Ok(w_per_party)
+}
+
+/// LHL-amplified (`4` uniform `Tower128` OT masks = `512` bits per element -> `< 2^{-192}`
+/// selective-failure advantage) 2-lane BDOZ authentication of `vals_per_party[party][k]` via `OtMesh`.
+fn authenticate_tower128_batch(
+    session_id: &[u8; 32],
+    ot_mesh: &mut OtMesh,
+    alphas: &[[Tower128; 2]],
+    vals_per_party: &[Vec<Tower128>],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<Vec<PcgAuthTower128Share>>, PreprocessError> {
+    let n = ot_mesh.n;
+    let count = vals_per_party[0].len();
+    let mut out: Vec<Vec<PcgAuthTower128Share>> = (0..n)
+        .map(|p| {
+            (0..count)
+                .map(|k| {
+                    let mut sh = PcgAuthTower128Share::zero(n);
+                    sh.value = vals_per_party[p][k];
+                    sh
+                })
+                .collect()
+        })
+        .collect();
+    if count == 0 {
+        return Ok(out);
+    }
+
+    let mut r_masks = vec![vec![[Tower128::ZERO; 4]; count]; n];
+    let mut choice_words = vec![Vec::with_capacity(8 * count); n];
+    for j in 0..n {
+        #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+        for k in 0..count {
+            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+            for m in 0..4 {
+                let r = party_rngs[j].next_tower128();
+                r_masks[j][k][m] = r;
+                choice_words[j].push(r.0 as u64);
+                choice_words[j].push((r.0 >> 64) as u64);
+            }
+        }
+    }
+
+    let mut raw_k = vec![vec![vec![[[Tower128::ZERO; 4]; 2]; count]; n]; n];
+    let mut raw_m = vec![vec![vec![[[Tower128::ZERO; 4]; 2]; count]; n]; n];
+
+    for i in 0..n {
+        for k in 0..count {
+            for lane in 0..2 {
+                let m = party_rngs[i].next_tower128();
+                out[i][k].keys[i][lane] = m;
+                out[i][k].macs[i][lane] = m.add(alphas[i][lane].mul(vals_per_party[i][k]));
+            }
+        }
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            let (send_pads, recv_pads) =
+                ot_mesh.run_correlated_ot_words(i, j, &choice_words[j], party_rngs)?;
+            for k in 0..count {
+                for m in 0..4 {
+                    let rj_raw = black_box(r_masks[j][k][m].0);
+                    let base_off = (4 * k + m) * 128;
+                    for lane in 0..2 {
+                        let alpha_il = alphas[i][lane];
+                        let mut k_sum = Tower128::ZERO;
+                        let mut m_sum = Tower128::ZERO;
+                        for bit in 0..128 {
+                            let (p0, p1) = &send_pads[base_off + bit];
+                            let pad0 = Tower128(u128::from_le_bytes(
+                                core::array::from_fn(|array_index| (p0[16 * lane..16 * (lane + 1)])[array_index]),
+                            ));
+                            let pad1 = Tower128(u128::from_le_bytes(
+                                core::array::from_fn(|array_index| (p1[16 * lane..16 * (lane + 1)])[array_index]),
+                            ));
+                            let mk = party_rngs[i].next_tower128();
+                            k_sum = k_sum.add(mk);
+                            let basis = Tower128(1u128 << bit);
+                            let ct0 = mk.add(pad0);
+                            let ct1 = mk.add(alpha_il.mul(basis)).add(pad1);
+
+                            let pad_c = Tower128(u128::from_le_bytes(
+                                core::array::from_fn(|array_index| (recv_pads[base_off + bit][16 * lane..16 * (lane + 1)])[array_index]),
+                            ));
+                            let choice = ((rj_raw >> bit) & 1) == 1;
+                            let cmask = 0u128.wrapping_sub(black_box(choice as u128));
+                            let sel = Tower128(ct0.0 ^ (cmask & (ct0.0 ^ ct1.0)));
+                            m_sum = m_sum.add(sel.add(pad_c));
+                        }
+                        raw_k[i][j][k][lane][m] = k_sum;
+                        raw_m[i][j][k][lane][m] = m_sum;
+                    }
+                }
+            }
+        }
+    }
+
+    let coin = run_commit_and_open_coin(session_id, b"PCG_AUTH_T128_LHL", session_id, party_rngs)?;
+    let mut xof = Cshake256Xof::new(b"QSAG.PCG.AUTH.T128.LHL/v1");
+    xof.absorb(&coin);
+    let mut g_weights = vec![[Tower128::ONE; 4]; count];
+    for g_weights_k_item in g_weights[..count].iter_mut() {
+        for m in 1..4 {
+            let mut gb = [0u8; 16];
+            xof.squeeze(&mut gb);
+            (*g_weights_k_item)[m] = Tower128(u128::from_le_bytes(gb) | 1);
+        }
+    }
+
+    let mut diffs = vec![vec![Tower128::ZERO; count]; n];
+    for j in 0..n {
+        for k in 0..count {
+            let mut r_comb = r_masks[j][k][0];
+            for m in 1..4 {
+                r_comb = r_comb.add(g_weights[k][m].mul(r_masks[j][k][m]));
+            }
+            diffs[j][k] = vals_per_party[j][k].add(r_comb);
+            wipe_tower128(&mut r_masks[j][k]);
+        }
+        wipe_u64s(&mut choice_words[j]);
+    }
+
+    for i in 0..n {
+        for j in 0..n {
+            if i == j {
+                continue;
+            }
+            for k in 0..count {
+                let d = diffs[j][k];
+                for lane in 0..2 {
+                    let mut k_comb = raw_k[i][j][k][lane][0];
+                    let mut m_comb = raw_m[i][j][k][lane][0];
+                    for m in 1..4 {
+                        let g = g_weights[k][m];
+                        k_comb = k_comb.add(g.mul(raw_k[i][j][k][lane][m]));
+                        m_comb = m_comb.add(g.mul(raw_m[i][j][k][lane][m]));
+                    }
+                    k_comb = k_comb.add(alphas[i][lane].mul(d));
+                    out[i][k].keys[j][lane] = k_comb;
+                    out[j][k].macs[i][lane] = m_comb;
+                    wipe_tower128(&mut raw_k[i][j][k][lane]);
+                    wipe_tower128(&mut raw_m[i][j][k][lane]);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Transfer `depth` compressed 16-byte GGM copath siblings from Sender `s` to Receiver `r` via `OtMesh`.
+fn transfer_ggm_copath_via_ot(
+    ot_mesh: &mut OtMesh,
+    s: usize,
+    r: usize,
+    depth: usize,
+    punctured_idx: usize,
+    level_lr_xors: &[([u8; 16], [u8; 16])],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<[u8; 16]>, PreprocessError> {
+    let mut choice_word = 0u64;
+    for lvl in 0..depth {
+        let path_bit = (punctured_idx >> (depth - 1 - lvl)) & 1;
+        // When `path_bit == 0` (puncture left), Receiver needs `R_xor` (`choice = 1`);
+        // when `path_bit == 1` (puncture right), Receiver needs `L_xor` (`choice = 0`).
+        let sib_choice = (path_bit ^ 1) as u64;
+        choice_word |= sib_choice << lvl;
+    }
+    let (send_pads, recv_pads) = ot_mesh.run_correlated_ot_words(s, r, &[choice_word], party_rngs)?;
+    let mut copath = Vec::with_capacity(depth);
+    for lvl in 0..depth {
+        let (p0, p1) = &send_pads[lvl];
+        let mut ct0 = [0u8; 16];
+        let mut ct1 = [0u8; 16];
+        for b in 0..16 {
+            ct0[b] = level_lr_xors[lvl].0[b] ^ p0[b];
+            ct1[b] = level_lr_xors[lvl].1[b] ^ p1[b];
+        }
+        let sib_choice = ((choice_word >> lvl) & 1) == 1;
+        let cmask = 0u8.wrapping_sub(black_box(sib_choice as u8));
+        let mut out = [0u8; 16];
+        for b in 0..16 {
+            let sel = ct0[b] ^ (cmask & (ct0[b] ^ ct1[b]));
+            out[b] = sel ^ recv_pads[lvl][b];
+        }
+        copath.push(out);
+    }
+    wipe_u64s(core::slice::from_mut(&mut choice_word));
+    Ok(copath)
+}
+
+/// Namespace for sublinear Silent-OT / `SHAKE256` GGM Puncturable-PRF + QC-LPN `PCG` seed setup,
+/// zero-I/O local expansion, and 2-lane `Tower128` BDOZ batch MAC sacrifice (`2^{-256}` soundness).
+pub struct PcgSeedExpansion;
+
+impl PcgSeedExpansion {
+    /// Interactive base-correlation setup generating compact `< 24 KB` [`PcgPartySeed`]s for
+    /// `n = party_rngs.len()` parties (`tree_depth \in 14..=16`).
+    pub fn setup_seeds(
+        session_id: [u8; 32],
+        tree_depth: usize,
+        ot_mesh: &mut OtMesh,
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<Vec<PcgPartySeed>, PreprocessError> {
+        Self::setup_seeds_with_fault(session_id, tree_depth, ot_mesh, party_rngs, |_, _| {})
+    }
+
+    /// Fault-injectable PCG seed setup for adversarial sacrifice unit testing.
+    pub fn setup_seeds_with_fault<F>(
+        session_id: [u8; 32],
+        tree_depth: usize,
+        ot_mesh: &mut OtMesh,
+        party_rngs: &mut [PartyPrivateRng],
+        mut fault_hook: F,
+    ) -> Result<Vec<PcgPartySeed>, PreprocessError>
+    where
+        F: FnMut(usize, &mut Vec<u64>),
+    {
+        if !cfg!(test) { return Err(PreprocessError::ExperimentalSparsePcg); }
+        if !(PCG_MIN_TREE_DEPTH..=PCG_MAX_TREE_DEPTH).contains(&tree_depth) {
+            return Err(PreprocessError::PcgDepthOutOfRange { depth: tree_depth });
+        }
+        let n = party_rngs.len();
+        if n < 2 || ot_mesh.n != n {
+            return Err(PreprocessError::InvalidThreshold { t: 2, n });
+        }
+
+        let leaf_mask = (1usize << tree_depth) - 1;
+        let tower_depth = PCG_MIN_TREE_DEPTH;
+        let tower_leaf_mask = (1usize << tower_depth) - 1;
+
+        let mut alphas = vec![[Tower128::ZERO; 2]; n];
+        let mut diag_seeds = vec![[0u8; 32]; n];
+        for i in 0..n {
+            alphas[i] = [party_rngs[i].next_tower128(), party_rngs[i].next_tower128()];
+            diag_seeds[i] = party_rngs[i].next_bytes32();
+        }
+
+        // Each party `r` chooses ONE sparse noise vector per bundle (`X, Y, Z` = 12 indices; `A0, A1` = 8 `(idx, beta)` pairs)
+        let mut bin_p_stars = vec![[0usize; 3 * PCG_TREES_PER_BUNDLE]; n];
+        let mut tow_p_stars = vec![[(0usize, Tower128::ZERO); 2 * PCG_TREES_PER_BUNDLE]; n];
+        for r in 0..n {
+            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+            for t_idx in 0..(3 * PCG_TREES_PER_BUNDLE) {
+                bin_p_stars[r][t_idx] = (party_rngs[r].next_u64() as usize) & leaf_mask;
+            }
+            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+            for t_idx in 0..(2 * PCG_TREES_PER_BUNDLE) {
+                let p_idx = (party_rngs[r].next_u64() as usize) & tower_leaf_mask;
+                let mut beta = party_rngs[r].next_tower128();
+                if beta.0 == 0 {
+                    beta = Tower128::ONE;
+                }
+                tow_p_stars[r][t_idx] = (p_idx, beta);
+            }
+        }
+
+        // Pre-authenticate `tow_p_stars[r][0..8].1` (`beta`) across all peers via LHL-amplified
+        // `authenticate_tower128_batch` (`< 2^{-192}` selective-failure immunity; `beta` never enters raw OT!)
+        let beta_vecs: Vec<Vec<Tower128>> = (0..n)
+            .map(|r| {
+                (0..(2 * PCG_TREES_PER_BUNDLE))
+                    .map(|t_idx| tow_p_stars[r][t_idx].1)
+                    .collect()
+            })
+            .collect();
+        let auth_betas =
+            authenticate_tower128_batch(&session_id, ot_mesh, &alphas, &beta_vecs, party_rngs)?;
+
+        let mut bin_send_trees: Vec<Vec<Vec<GgmSenderTreeSeed>>> =
+            (0..n).map(|_| (0..n).map(|_| Vec::new()).collect()).collect();
+        let mut bin_recv_trees: Vec<Vec<Vec<GgmReceiverBinaryTreeSeed>>> =
+            (0..n).map(|_| (0..n).map(|_| Vec::new()).collect()).collect();
+        let mut tow_send_trees: Vec<Vec<Vec<GgmSenderTreeSeed>>> =
+            (0..n).map(|_| (0..n).map(|_| Vec::new()).collect()).collect();
+        let mut tow_recv_trees: Vec<Vec<Vec<GgmReceiverTowerTreeSeed>>> =
+            (0..n).map(|_| (0..n).map(|_| Vec::new()).collect()).collect();
+
+        // Setup GGM copaths across all ordered pairs `(s, r)` (`s != r`)
+        for s in 0..n {
+            for r in 0..n {
+                if s == r {
+                    continue;
+                }
+                // 12 Binary Subfield-VOLE GGM trees
+                let mut s_btrees = Vec::with_capacity(3 * PCG_TREES_PER_BUNDLE);
+                let mut r_btrees = Vec::with_capacity(3 * PCG_TREES_PER_BUNDLE);
+                #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+                for t_idx in 0..(3 * PCG_TREES_PER_BUNDLE) {
+                    let mut root = [0u8; 16];
+                    party_rngs[s].fill_bytes(&mut root);
+                    let tree_tag = ((s * 16 + r) as u8).wrapping_mul(31).wrapping_add(t_idx as u8);
+                    let (leaf_tags, lr_xors) =
+                        ggm_eval_sender_full(&session_id, tree_tag, tree_depth, &root);
+                    let mut sum_s = [0u128; 2];
+                    for lt in &leaf_tags {
+                        sum_s[0] ^= lt[0];
+                        sum_s[1] ^= lt[1];
+                    }
+                    let p_star = bin_p_stars[r][t_idx];
+                    let copath = transfer_ggm_copath_via_ot(
+                        ot_mesh,
+                        s,
+                        r,
+                        tree_depth,
+                        p_star,
+                        &lr_xors,
+                        party_rngs,
+                    )?;
+                    let corr = [
+                        Tower128(sum_s[0] ^ alphas[s][0].0),
+                        Tower128(sum_s[1] ^ alphas[s][1].0),
+                    ];
+                    s_btrees.push(GgmSenderTreeSeed { root_seed: root });
+                    r_btrees.push(GgmReceiverBinaryTreeSeed {
+                        punctured_idx: p_star as u16,
+                        copath,
+                        punctured_mac_corr: corr,
+                    });
+                }
+                bin_send_trees[s][r] = s_btrees;
+                bin_recv_trees[r][s] = r_btrees;
+
+                // 8 Tower128 VOLE GGM trees (`depth = 14`): consume LHL-amplified `auth_betas` correlations
+                let mut s_ttrees = Vec::with_capacity(2 * PCG_TREES_PER_BUNDLE);
+                let mut r_ttrees = Vec::with_capacity(2 * PCG_TREES_PER_BUNDLE);
+
+                for t_idx in 0..(2 * PCG_TREES_PER_BUNDLE) {
+                    let mut root = [0u8; 16];
+                    party_rngs[s].fill_bytes(&mut root);
+                    let tree_tag = 0x80u8
+                        .wrapping_add(((s * 16 + r) as u8).wrapping_mul(17))
+                        .wrapping_add(t_idx as u8);
+                    let (leaf_tags, lr_xors) =
+                        ggm_eval_sender_full(&session_id, tree_tag, tower_depth, &root);
+                    let (p_star, beta) = tow_p_stars[r][t_idx];
+                    let copath = transfer_ggm_copath_via_ot(
+                        ot_mesh,
+                        s,
+                        r,
+                        tower_depth,
+                        p_star,
+                        &lr_xors,
+                        party_rngs,
+                    )?;
+
+                    // From `auth_betas`: `k_ole[lane] ^ m_ole[lane] == alphas[s][lane] * beta`
+                    let k_ole = [
+                        auth_betas[s][t_idx].keys[r][0].0,
+                        auth_betas[s][t_idx].keys[r][1].0,
+                    ];
+                    let m_ole = [
+                        auth_betas[r][t_idx].macs[s][0].0,
+                        auth_betas[r][t_idx].macs[s][1].0,
+                    ];
+
+                    // The full sender tree already contains the punctured leaf.
+                    let p_mac = [
+                        Tower128(leaf_tags[p_star][0] ^ k_ole[0] ^ m_ole[0]),
+                        Tower128(leaf_tags[p_star][1] ^ k_ole[1] ^ m_ole[1]),
+                    ];
+
+                    s_ttrees.push(GgmSenderTreeSeed { root_seed: root });
+                    r_ttrees.push(GgmReceiverTowerTreeSeed {
+                        punctured_idx: p_star as u16,
+                        punctured_beta: beta,
+                        copath,
+                        punctured_mac_val: p_mac,
+                    });
+                }
+                tow_send_trees[s][r] = s_ttrees;
+                tow_recv_trees[r][s] = r_ttrees;
+            }
+        }
+
+        // Compute each party's local LPN noise vectors `(x_i, y_i, z_i)` & companion `(at0_i, at1_i)`
+        // strictly from its own punctured indices `(bin_p_stars[i], tow_p_stars[i])` (`0` cross-party read!)
+        let sched_x = QcLpnParitySchedule::derive(&session_id, b"BIN_X", tree_depth, PCG_NUM_WORDS);
+        let sched_y = QcLpnParitySchedule::derive(&session_id, b"BIN_Y", tree_depth, PCG_NUM_WORDS);
+        let sched_z = QcLpnParitySchedule::derive(&session_id, b"BIN_Z", tree_depth, PCG_NUM_WORDS);
+        let sched_a0 =
+            QcLpnParitySchedule::derive(&session_id, b"TOW_A0", tower_depth, PCG_NUM_WORDS);
+        let sched_a1 =
+            QcLpnParitySchedule::derive(&session_id, b"TOW_A1", tower_depth, PCG_NUM_WORDS);
+
+        let zero_bin_leaves = vec![vec![[0u128; 2]; 1 << tree_depth]; PCG_TREES_PER_BUNDLE];
+        let zero_tow_leaves = vec![vec![[0u128; 2]; 1 << tower_depth]; PCG_TREES_PER_BUNDLE];
+
+        let mut x_per_party = Vec::with_capacity(n);
+        let mut y_per_party = Vec::with_capacity(n);
+        let mut z_per_party = Vec::with_capacity(n);
+        let mut at0_words = Vec::with_capacity(n);
+        let mut at1_words = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let px: [usize; 4] = core::array::from_fn(|array_index| (bin_p_stars[i][0..4])[array_index]);
+            let py: [usize; 4] = core::array::from_fn(|array_index| (bin_p_stars[i][4..8])[array_index]);
+            let pz: [usize; 4] = core::array::from_fn(|array_index| (bin_p_stars[i][8..12])[array_index]);
+            let (xi, _) = sched_x.compress_binary_bundle(PCG_NUM_WORDS, &zero_bin_leaves, Some(px));
+            let (yi, _) = sched_y.compress_binary_bundle(PCG_NUM_WORDS, &zero_bin_leaves, Some(py));
+            let (zi, _) = sched_z.compress_binary_bundle(PCG_NUM_WORDS, &zero_bin_leaves, Some(pz));
+            x_per_party.push(xi);
+            y_per_party.push(yi);
+            z_per_party.push(zi);
+
+            let pa0: [(usize, Tower128); 4] = core::array::from_fn(|array_index| (tow_p_stars[i][0..4])[array_index]);
+            let pa1: [(usize, Tower128); 4] = core::array::from_fn(|array_index| (tow_p_stars[i][4..8])[array_index]);
+            let (va0, _) =
+                sched_a0.compress_tower_bundle(PCG_NUM_WORDS, &zero_tow_leaves, Some(pa0));
+            let (va1, _) =
+                sched_a1.compress_tower_bundle(PCG_NUM_WORDS, &zero_tow_leaves, Some(pa1));
+            let mut w0 = vec![[0u128; 64]; PCG_NUM_WORDS];
+            let mut w1 = vec![[0u128; 64]; PCG_NUM_WORDS];
+            for k in 0..PCG_NUM_WORDS {
+                for bit in 0..64 {
+                    w0[k][bit] = va0[64 * k + bit].0;
+                    w1[k][bit] = va1[64 * k + bit].0;
+                }
+            }
+            at0_words.push(w0);
+            at1_words.push(w1);
+        }
+
+        // Dealerless pairwise OT computes:
+        // (1) `w_bool[i]` additive shares of `x & y` -> open `delta_words = \bigoplus_i (z_i ^ w_bool_i)` (`8,200 B`)
+        // (2) `ct0[i], ct1[i]` additive shares of `\tilde{A}_{L,\ell} * y_\ell` -> sum over `\ell` and authenticate (`2` scalars!)
+        let (mut w_bool, mut ct0, mut ct1) = pairwise_boolean_and_mascot_companions(
+            ot_mesh,
+            &x_per_party,
+            &y_per_party,
+            &at0_words,
+            &at1_words,
+            party_rngs,
+        )?;
+        let mut delta_words = vec![0u64; PCG_NUM_WORDS];
+        let mut csum_vals_per_party = vec![vec![Tower128::ZERO; 2]; n];
+        for i in 0..n {
+            let mut d_i: Vec<u64> = (0..PCG_NUM_WORDS)
+                .map(|k| z_per_party[i][k] ^ w_bool[i][k])
+                .collect();
+            fault_hook(i, &mut d_i);
+            for k in 0..PCG_NUM_WORDS {
+                delta_words[k] ^= d_i[k];
+                for bit in 0..64 {
+                    csum_vals_per_party[i][0].0 ^= ct0[i][k][bit];
+                    csum_vals_per_party[i][1].0 ^= ct1[i][k][bit];
+                }
+            }
+            wipe_u64s(&mut d_i);
+            wipe_u64s(&mut w_bool[i]);
+            wipe_u64s(&mut x_per_party[i]);
+            wipe_u64s(&mut y_per_party[i]);
+            wipe_u64s(&mut z_per_party[i]);
+            ct0[i].clear();
+            ct1[i].clear();
+        }
+        let auth_csums = authenticate_tower128_batch(
+            &session_id,
+            ot_mesh,
+            &alphas,
+            &csum_vals_per_party,
+            party_rngs,
+        )?;
+
+        // Also generate `PCG_NUM_TOWER_TRIPLES` (`8`) + `PCG_NUM_TOWER_TRIPLES` (`8` sacrifice companions)
+        // 128-bit `Tower128` Beaver triples via LHL-amplified dealerless `pairwise_ole_tower128` + sacrifice!
+        let tow_batch = PCG_NUM_TOWER_TRIPLES;
+        let mut ta_raw = vec![vec![Tower128::ZERO; 2 * tow_batch]; n];
+        let mut tb_raw = vec![vec![Tower128::ZERO; tow_batch]; n];
+        for i in 0..n {
+            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+            for k in 0..(2 * tow_batch) {
+                ta_raw[i][k] = party_rngs[i].next_tower128();
+            }
+            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+            for k in 0..tow_batch {
+                tb_raw[i][k] = party_rngs[i].next_tower128();
+            }
+        }
+        let mut tb_dup = Vec::with_capacity(n);
+        for tb_raw_i_item in tb_raw[..n].iter() {
+            let mut v = Vec::with_capacity(2 * tow_batch);
+            v.extend_from_slice(tb_raw_i_item);
+            v.extend_from_slice(tb_raw_i_item);
+            tb_dup.push(v);
+        }
+        let tc_raw = pairwise_ole_tower128(&session_id, ot_mesh, &ta_raw, &tb_dup, party_rngs)?;
+        let auth_ta =
+            authenticate_tower128_batch(&session_id, ot_mesh, &alphas, &ta_raw, party_rngs)?;
+        let auth_tb =
+            authenticate_tower128_batch(&session_id, ot_mesh, &alphas, &tb_raw, party_rngs)?;
+        let auth_tc =
+            authenticate_tower128_batch(&session_id, ot_mesh, &alphas, &tc_raw, party_rngs)?;
+
+        // Immediate committed sacrifice of the 8 companion `Tower128` triples `[tow_batch .. 2*tow_batch]`
+        let coin = run_commit_and_open_coin(
+            &session_id,
+            b"PCG_TOW_TRIPLE_SAC",
+            &[0x5A; 32],
+            party_rngs,
+        )?;
+        let rho_tow = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (coin[0..16])[array_index])) | 1);
+        for k in 0..tow_batch {
+            let u_shares: Vec<PcgAuthTower128Share> = (0..n)
+                .map(|p| {
+                    let mut s = auth_ta[p][k].scale(rho_tow);
+                    s.xor_assign(&auth_ta[p][tow_batch + k]);
+                    s
+                })
+                .collect();
+            let u_open = open_and_verify_pcg_tower128(
+                &session_id,
+                &alphas,
+                &u_shares,
+                "pcg_tow_u",
+                party_rngs,
+            )?;
+            let w_shares: Vec<PcgAuthTower128Share> = (0..n)
+                .map(|p| {
+                    let mut s = auth_tc[p][k].scale(rho_tow);
+                    s.xor_assign(&auth_tc[p][tow_batch + k]);
+                    s.xor_assign(&auth_tb[p][k].scale(u_open));
+                    s
+                })
+                .collect();
+            let w_open = open_and_verify_pcg_tower128(
+                &session_id,
+                &alphas,
+                &w_shares,
+                "pcg_tow_w",
+                party_rngs,
+            )?;
+            if !w_open.ct_eq(Tower128::ZERO) {
+                return Err(PreprocessError::SacrificeResidualNonZero {
+                    phase: "pcg_tower_triples",
+                });
+            }
+        }
+
+        // Package `< 24 KB` `PcgPartySeed` per party and assert wire budget
+        let mut seeds = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut peers = Vec::with_capacity(n - 1);
+            for j in 0..n {
+                if i == j {
+                    continue;
+                }
+                peers.push(PcgPeerSeedMaterial {
+                    peer_id: j as u16,
+                    bin_sender_trees: core::mem::take(&mut bin_send_trees[i][j]),
+                    bin_receiver_trees: core::mem::take(&mut bin_recv_trees[i][j]),
+                    tower_sender_trees: core::mem::take(&mut tow_send_trees[i][j]),
+                    tower_receiver_trees: core::mem::take(&mut tow_recv_trees[i][j]),
+                });
+            }
+            let tower_triples: Vec<PcgAuthTower128TripleShare> = (0..tow_batch)
+                .map(|k| PcgAuthTower128TripleShare {
+                    a: auth_ta[i][k].clone(),
+                    b: auth_tb[i][k].clone(),
+                    c: auth_tc[i][k].clone(),
+                })
+                .collect();
+            let seed = PcgPartySeed {
+                session_id,
+                party_id: i,
+                num_parties: n,
+                tree_depth,
+                mac_alpha: alphas[i],
+                diag_mask_seed: diag_seeds[i],
+                peers,
+                delta_words: delta_words.clone(),
+                tilde_c_sums: [auth_csums[i][0].clone(), auth_csums[i][1].clone()],
+                tower_triples,
+            };
+            seeds.push(seed);
+        }
+        Ok(seeds)
+    }
+
+    /// End-to-end committed 2-lane `Tower128` BDOZ batch MAC sacrifice (`2^{-256}` soundness) verifying
+    /// ALL `65,600` locally expanded Boolean Beaver triples + `8` `Tower128` triples with **zero**
+    /// leakage of surviving `(a_\ell, b_\ell, c_\ell)` triples!
+    pub fn verify_2lane_bdoz_sacrifice(
+        vaults: &[PcgExpandedPartyVault],
+        party_rngs: &mut [PartyPrivateRng],
+    ) -> Result<(), PreprocessError> {
+        let n = vaults.len();
+        if n < 2 || party_rngs.len() != n {
+            return Err(PreprocessError::InvalidThreshold { t: 2, n });
+        }
+        let session_id = vaults[0].session_id;
+        let alphas: Vec<[Tower128; 2]> = vaults.iter().map(|v| v.mac_alpha).collect();
+
+        // Joint commit-and-open public coin AFTER `PcgPartySeed` expansion
+        let coin = run_commit_and_open_coin(
+            &session_id,
+            b"PCG_BOOL_2LANE_SAC",
+            &[0xA5; 32],
+            party_rngs,
+        )?;
+        let mut xof = Shake256Xof::new_shake256();
+        xof.absorb(b"QSAG.PCG.SAC.RHOS/v1");
+        xof.absorb(&session_id);
+        xof.absorb(&coin);
+        let num_triples = vaults[0].num_boolean_triples();
+        let mut rho_bytes = vec![0u8; num_triples * 32];
+        xof.squeeze(&mut rho_bytes);
+
+        // Two independent sacrifice passes (`sac_lane = 0, 1`), each over `Tower128` (`2^{-128 * 2} = 2^{-256}`!)
+        for sac_lane in 0..2 {
+            // Step 1: Commit-before-open ALL `65,600` masked openings `U_{sac_lane, \ell}` per party,
+            // then verify BDOZ MACs on every individual `U_\ell` via committed random linear combination!
+            let mut u_shares_per_party = vec![vec![Tower128::ZERO; num_triples]; n];
+            let mut u_salts = Vec::with_capacity(n);
+            let mut u_coms = Vec::with_capacity(n);
+            for p in 0..n {
+                let mut u_hasher = Cshake256Xof::new(b"QSAG.PCG.SAC.U.OPEN.COM/v1");
+                u_hasher.absorb(&session_id);
+                u_hasher.absorb(&[sac_lane as u8]);
+                u_hasher.absorb(&(p as u64).to_be_bytes());
+                for k in 0..vaults[0].bool_triple_words.len() {
+                    let bw = &vaults[p].bool_triple_words[k];
+                    for bit in 0..64 {
+                        let ell = 64 * k + bit;
+                        let off = (ell * 2 + sac_lane) * 16;
+                        let mut rho = Tower128(u128::from_le_bytes(
+                            core::array::from_fn(|array_index| (rho_bytes[off..off + 16])[array_index]),
+                        ));
+                        if rho.0 == 0 {
+                            rho = Tower128::ONE;
+                        }
+                        let a_bit = ((bw.a_word >> bit) & 1) == 1;
+                        let a_val = if a_bit { rho } else { Tower128::ZERO };
+                        let u_p_val = a_val.add(vaults[p].companion_a[sac_lane][ell].value);
+                        u_shares_per_party[p][ell] = u_p_val;
+                        u_hasher.absorb(&u_p_val.0.to_le_bytes());
+                    }
+                }
+                let salt = party_rngs[p].next_bytes32();
+                u_hasher.absorb(&salt);
+                let mut com = [0u8; 32];
+                u_hasher.squeeze(&mut com);
+                u_salts.push(salt);
+                u_coms.push(com);
+            }
+
+            // Verify commitments on `u_shares_per_party` before opening & sampling `chi`!
+            let mut u_trans_xof = Cshake256Xof::new(b"QSAG.PCG.SAC.U.TRANS/v1");
+            for p in 0..n {
+                let mut u_hasher = Cshake256Xof::new(b"QSAG.PCG.SAC.U.OPEN.COM/v1");
+                u_hasher.absorb(&session_id);
+                u_hasher.absorb(&[sac_lane as u8]);
+                u_hasher.absorb(&(p as u64).to_be_bytes());
+                #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+                for ell in 0..num_triples {
+                    let b16 = u_shares_per_party[p][ell].0.to_le_bytes();
+                    u_hasher.absorb(&b16);
+                    u_trans_xof.absorb(&b16);
+                }
+                u_hasher.absorb(&u_salts[p]);
+                wipe_bytes32(&mut u_salts[p]);
+                let mut exp = [0u8; 32];
+                u_hasher.squeeze(&mut exp);
+                if !ct_eq_bytes32(&exp, &u_coms[p]) {
+                    return Err(PreprocessError::ShareCommitMismatch {
+                        phase: "pcg_bool_sac_u",
+                        party_id: p,
+                    });
+                }
+            }
+            let mut u_trans_digest = [0u8; 32];
+            u_trans_xof.squeeze(&mut u_trans_digest);
+
+            // Sample `chi` via `Π_coin` *after* all `u_shares_per_party` are committed & opened!
+            let chi_coin = run_commit_and_open_coin(
+                &session_id,
+                b"PCG_SAC_CHI_COIN",
+                &u_trans_digest,
+                party_rngs,
+            )?;
+            let mut chi_xof = Shake256Xof::new_shake256();
+            chi_xof.absorb(b"QSAG.PCG.SAC.MAC_BATCH/v1");
+            chi_xof.absorb(&chi_coin);
+            chi_xof.absorb(&[sac_lane as u8]);
+            let mut chi_bytes = vec![0u8; num_triples * 16];
+            chi_xof.squeeze(&mut chi_bytes);
+
+            let mut u_opened = vec![Tower128::ZERO; num_triples];
+            let mut mac_batch_sh: Vec<PcgAuthTower128Share> =
+                (0..n).map(|_| PcgAuthTower128Share::zero(n)).collect();
+
+            for k in 0..vaults[0].bool_triple_words.len() {
+                for bit in 0..64 {
+                    let ell = 64 * k + bit;
+                    let off = (ell * 2 + sac_lane) * 16;
+                    let mut rho = Tower128(u128::from_le_bytes(
+                        core::array::from_fn(|array_index| (rho_bytes[off..off + 16])[array_index]),
+                    ));
+                    if rho.0 == 0 {
+                        rho = Tower128::ONE;
+                    }
+                    let chi = Tower128(
+                        u128::from_le_bytes(
+                            core::array::from_fn(|array_index| (chi_bytes[16 * ell..16 * (ell + 1)])[array_index]),
+                        ) | 1,
+                    );
+
+                    let mut u_sum = Tower128::ZERO;
+                    for p in 0..n {
+                        let bw = &vaults[p].bool_triple_words[k];
+                        let comp = &vaults[p].companion_a[sac_lane][ell];
+                        let u_p_val = u_shares_per_party[p][ell];
+                        u_sum = u_sum.add(u_p_val);
+
+                        mac_batch_sh[p].value = mac_batch_sh[p].value.add(u_p_val.mul(chi));
+                        let scale_rho_chi = rho.mul(chi);
+                        for q in 0..n {
+                            for m_lane in 0..2 {
+                                let um = bw.a_macs[q][bit][m_lane]
+                                    .mul(scale_rho_chi)
+                                    .add(comp.macs[q][m_lane].mul(chi));
+                                let uk = bw.a_keys[q][bit][m_lane]
+                                    .mul(scale_rho_chi)
+                                    .add(comp.keys[q][m_lane].mul(chi));
+                                mac_batch_sh[p].macs[q][m_lane] =
+                                    mac_batch_sh[p].macs[q][m_lane].add(um);
+                                mac_batch_sh[p].keys[q][m_lane] =
+                                    mac_batch_sh[p].keys[q][m_lane].add(uk);
+                            }
+                        }
+                    }
+                    u_opened[ell] = u_sum;
+                }
+            }
+
+            // Verify 2-lane BDOZ MACs on the entire `U_{sac_lane, 0..65600}` vector before checking `W`
+            let u_batch_check = open_and_verify_pcg_tower128(
+                &session_id,
+                &alphas,
+                &mac_batch_sh,
+                "pcg_bool_sac_u",
+                party_rngs,
+            )?;
+            let mut expected_u_batch = Tower128::ZERO;
+            for ell in 0..num_triples {
+                let chi = Tower128(
+                    u128::from_le_bytes(core::array::from_fn(|array_index| (chi_bytes[16 * ell..16 * (ell + 1)])[array_index]))
+                        | 1,
+                );
+                expected_u_batch = expected_u_batch.add(u_opened[ell].mul(chi));
+            }
+            if !u_batch_check.ct_eq(expected_u_batch) {
+                return Err(PreprocessError::MacCheckFailed {
+                    phase: "pcg_bool_sac_u",
+                    accused_party: None,
+                });
+            }
+
+            // Step 2: Form authenticated zero-check share
+            // `[W_{sac_lane}] = \bigoplus_\ell \rho_{sac_lane,\ell} [c_\ell] \oplus [\tilde{C}_{sac_lane,sum}] \oplus \bigoplus_\ell U_{sac_lane,\ell} [b_\ell]`
+            // Commit-before-open `[W_{sac_lane}]` with full 2-lane BDOZ MAC verification and assert `W_{sac_lane} == 0`!
+            let mut w_shares: Vec<PcgAuthTower128Share> =
+                (0..n).map(|p| vaults[p].companion_c_sums[sac_lane].clone()).collect();
+            #[expect(clippy::needless_range_loop, reason = "One index selects matching shares from every party vault")]
+            for k in 0..vaults[0].bool_triple_words.len() {
+                for bit in 0..64 {
+                    let ell = 64 * k + bit;
+                    let off = (ell * 2 + sac_lane) * 16;
+                    let mut rho = Tower128(u128::from_le_bytes(
+                        core::array::from_fn(|array_index| (rho_bytes[off..off + 16])[array_index]),
+                    ));
+                    if rho.0 == 0 {
+                        rho = Tower128::ONE;
+                    }
+                    let u_ell = u_opened[ell];
+                    for p in 0..n {
+                        let bw = &vaults[p].bool_triple_words[k];
+                        let c_bit = ((bw.c_word >> bit) & 1) == 1;
+                        let b_bit = ((bw.b_word >> bit) & 1) == 1;
+                        let term = (if c_bit { rho } else { Tower128::ZERO })
+                            .add(if b_bit { u_ell } else { Tower128::ZERO });
+                        w_shares[p].value = w_shares[p].value.add(term);
+                        for q in 0..n {
+                            for m_lane in 0..2 {
+                                let wm = bw.c_macs[q][bit][m_lane]
+                                    .mul(rho)
+                                    .add(bw.b_macs[q][bit][m_lane].mul(u_ell));
+                                let wk = bw.c_keys[q][bit][m_lane]
+                                    .mul(rho)
+                                    .add(bw.b_keys[q][bit][m_lane].mul(u_ell));
+                                w_shares[p].macs[q][m_lane] = w_shares[p].macs[q][m_lane].add(wm);
+                                w_shares[p].keys[q][m_lane] = w_shares[p].keys[q][m_lane].add(wk);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let w_open = open_and_verify_pcg_tower128(
+                &session_id,
+                &alphas,
+                &w_shares,
+                "pcg_bool_sac_w",
+                party_rngs,
+            )?;
+            if !w_open.ct_eq(Tower128::ZERO) {
+                return Err(PreprocessError::SacrificeResidualNonZero {
+                    phase: "pcg_boolean_triples",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Commit-before-open a 2-lane `Tower128` BDOZ-authenticated share across `n` parties and verify
+/// EVERY pairwise MAC tag (`macs[q][lane] ^ keys[p][lane] == alphas[q][lane] * shares[p].value`).
+fn open_and_verify_pcg_tower128(
+    session_id: &[u8; 32],
+    alphas: &[[Tower128; 2]],
+    shares: &[PcgAuthTower128Share],
+    phase: &'static str,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Tower128, PreprocessError> {
+    let n = shares.len();
+    if party_rngs.len() != n || alphas.len() != n {
+        return Err(PreprocessError::InvalidThreshold { t: 2, n });
+    }
+    // Round 1: Commit to `(value, macs[0..n])` before opening (`0` rushing cancellation!)
+    let mut salts = Vec::with_capacity(n);
+    let mut coms = Vec::with_capacity(n);
+    for p in 0..n {
+        let salt = party_rngs[p].next_bytes32();
+        let mut xof = Cshake256Xof::new(b"QSAG.PCG.T128.OPEN.COM/v1");
+        xof.absorb(session_id);
+        xof.absorb(phase.as_bytes());
+        xof.absorb(&(p as u64).to_be_bytes());
+        xof.absorb(&shares[p].value.0.to_le_bytes());
+        for mac in shares[p].macs.iter().take(n) {
+            xof.absorb(&mac[0].0.to_le_bytes());
+            xof.absorb(&mac[1].0.to_le_bytes());
+        }
+        xof.absorb(&salt);
+        let mut com = [0u8; 32];
+        xof.squeeze(&mut com);
+        salts.push(salt);
+        coms.push(com);
+    }
+    // Round 2: Verify commitments, then verify every pairwise 2-lane BDOZ MAC
+    for p in 0..n {
+        let mut xof = Cshake256Xof::new(b"QSAG.PCG.T128.OPEN.COM/v1");
+        xof.absorb(session_id);
+        xof.absorb(phase.as_bytes());
+        xof.absorb(&(p as u64).to_be_bytes());
+        xof.absorb(&shares[p].value.0.to_le_bytes());
+        for mac in shares[p].macs.iter().take(n) {
+            xof.absorb(&mac[0].0.to_le_bytes());
+            xof.absorb(&mac[1].0.to_le_bytes());
+        }
+        xof.absorb(&salts[p]);
+        wipe_bytes32(&mut salts[p]);
+        let mut exp = [0u8; 32];
+        xof.squeeze(&mut exp);
+        if !ct_eq_bytes32(&exp, &coms[p]) {
+            return Err(PreprocessError::ShareCommitMismatch { phase, party_id: p });
+        }
+    }
+
+    let mut sum = Tower128::ZERO;
+    for p in 0..n {
+        sum = sum.add(shares[p].value);
+        for verifier_q in 0..n {
+            for lane in 0..2 {
+                let lhs = shares[p].macs[verifier_q][lane].add(shares[verifier_q].keys[p][lane]);
+                let rhs = alphas[verifier_q][lane].mul(shares[p].value);
+                if !lhs.ct_eq(rhs) {
+                    return Err(PreprocessError::MacCheckFailed {
+                        phase,
+                        accused_party: Some(p),
+                    });
+                }
+            }
+        }
+    }
+    Ok(sum)
+}
+
+fn write_auth_tower128_share(out: &mut Vec<u8>, sh: &PcgAuthTower128Share) {
+    out.extend_from_slice(&sh.value.0.to_le_bytes());
+    let n = sh.macs.len();
+    out.extend_from_slice(&(n as u16).to_le_bytes());
+    for q in 0..n {
+        out.extend_from_slice(&sh.macs[q][0].0.to_le_bytes());
+        out.extend_from_slice(&sh.macs[q][1].0.to_le_bytes());
+        out.extend_from_slice(&sh.keys[q][0].0.to_le_bytes());
+        out.extend_from_slice(&sh.keys[q][1].0.to_le_bytes());
+    }
+}
+
+fn read_auth_tower128_share(
+    bytes: &[u8],
+    cur: &mut usize,
+) -> Result<PcgAuthTower128Share, PreprocessError> {
+    if *cur + 18 > bytes.len() {
+        return Err(PreprocessError::PcgInvalidWireSeed);
+    }
+    let value = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[*cur..*cur + 16])[array_index])));
+    *cur += 16;
+    let n = u16::from_le_bytes([bytes[*cur], bytes[*cur + 1]]) as usize;
+    *cur += 2;
+    validate_frame_count(n, 64, bytes.len() - *cur)?;
+    let mut macs = vec![[Tower128::ZERO; 2]; n];
+    let mut keys = vec![[Tower128::ZERO; 2]; n];
+    for q in 0..n {
+        macs[q][0] = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[*cur..*cur + 16])[array_index])));
+        *cur += 16;
+        macs[q][1] = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[*cur..*cur + 16])[array_index])));
+        *cur += 16;
+        keys[q][0] = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[*cur..*cur + 16])[array_index])));
+        *cur += 16;
+        keys[q][1] = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[*cur..*cur + 16])[array_index])));
+        *cur += 16;
+    }
+    Ok(PcgAuthTower128Share { value, macs, keys })
+}
+
+impl PcgPartySeed {
+    /// Serialize this compact PCG seed to canonical wire bytes (`< 24 KB` for 2–3 parties).
+    pub fn to_wire_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(16 * 1024);
+        out.extend_from_slice(PCG_WIRE_MAGIC);
+        out.extend_from_slice(&self.session_id);
+        out.extend_from_slice(&(self.party_id as u16).to_le_bytes());
+        out.extend_from_slice(&(self.num_parties as u16).to_le_bytes());
+        out.push(self.tree_depth as u8);
+        out.extend_from_slice(&self.mac_alpha[0].0.to_le_bytes());
+        out.extend_from_slice(&self.mac_alpha[1].0.to_le_bytes());
+        out.extend_from_slice(&self.diag_mask_seed);
+
+        out.extend_from_slice(&(self.peers.len() as u16).to_le_bytes());
+        for peer in &self.peers {
+            out.extend_from_slice(&peer.peer_id.to_le_bytes());
+            for st in &peer.bin_sender_trees {
+                out.extend_from_slice(&st.root_seed);
+            }
+            for rt in &peer.bin_receiver_trees {
+                out.extend_from_slice(&rt.punctured_idx.to_le_bytes());
+                out.extend_from_slice(&rt.punctured_mac_corr[0].0.to_le_bytes());
+                out.extend_from_slice(&rt.punctured_mac_corr[1].0.to_le_bytes());
+                for node in &rt.copath {
+                    out.extend_from_slice(node);
+                }
+            }
+            for st in &peer.tower_sender_trees {
+                out.extend_from_slice(&st.root_seed);
+            }
+            for rt in &peer.tower_receiver_trees {
+                out.extend_from_slice(&rt.punctured_idx.to_le_bytes());
+                out.extend_from_slice(&rt.punctured_beta.0.to_le_bytes());
+                out.extend_from_slice(&rt.punctured_mac_val[0].0.to_le_bytes());
+                out.extend_from_slice(&rt.punctured_mac_val[1].0.to_le_bytes());
+                for node in &rt.copath {
+                    out.extend_from_slice(node);
+                }
+            }
+        }
+
+        out.extend_from_slice(&(self.delta_words.len() as u32).to_le_bytes());
+        for &dw in &self.delta_words {
+            out.extend_from_slice(&dw.to_le_bytes());
+        }
+        write_auth_tower128_share(&mut out, &self.tilde_c_sums[0]);
+        write_auth_tower128_share(&mut out, &self.tilde_c_sums[1]);
+        out.extend_from_slice(&(self.tower_triples.len() as u16).to_le_bytes());
+        for tr in &self.tower_triples {
+            write_auth_tower128_share(&mut out, &tr.a);
+            write_auth_tower128_share(&mut out, &tr.b);
+            write_auth_tower128_share(&mut out, &tr.c);
+        }
+        out
+    }
+
+    /// Deserialize a [`PcgPartySeed`] from canonical wire bytes.
+    pub fn from_wire_bytes(bytes: &[u8]) -> Result<Self, PreprocessError> {
+        if !cfg!(test) { return Err(PreprocessError::ExperimentalSparsePcg); }
+        if bytes.len() > MAX_FRAME_BUDGET || bytes.len() < 111 || &bytes[0..8] != PCG_WIRE_MAGIC {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        let mut session_id = [0u8; 32];
+        session_id.copy_from_slice(&bytes[8..40]);
+        let party_id = u16::from_le_bytes([bytes[40], bytes[41]]) as usize;
+        let num_parties = u16::from_le_bytes([bytes[42], bytes[43]]) as usize;
+        let tree_depth = bytes[44] as usize;
+        if !(PCG_MIN_TREE_DEPTH..=PCG_MAX_TREE_DEPTH).contains(&tree_depth)
+            || party_id >= num_parties
+            || num_parties < 2
+        {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        let alpha0 = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[45..61])[array_index])));
+        let alpha1 = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[61..77])[array_index])));
+        let mut diag_mask_seed = [0u8; 32];
+        diag_mask_seed.copy_from_slice(&bytes[77..109]);
+        let num_peers = u16::from_le_bytes([bytes[109], bytes[110]]) as usize;
+        if num_peers != num_parties - 1 {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        let mut cur = 111usize;
+        let tower_depth = PCG_MIN_TREE_DEPTH;
+
+        let peer_bytes = 2 + 3 * PCG_TREES_PER_BUNDLE * (16 + 2 + 32 + 16 * tree_depth)
+            + 2 * PCG_TREES_PER_BUNDLE * (16 + 2 + 16 + 32 + 16 * tower_depth);
+        validate_frame_count(num_peers, peer_bytes, bytes.len() - cur)?;
+        let mut peers = Vec::with_capacity(num_peers);
+        for _ in 0..num_peers {
+            if cur + 2 > bytes.len() {
+                return Err(PreprocessError::PcgInvalidWireSeed);
+            }
+            let peer_id = u16::from_le_bytes([bytes[cur], bytes[cur + 1]]);
+            cur += 2;
+
+            let mut bin_sender_trees = Vec::with_capacity(3 * PCG_TREES_PER_BUNDLE);
+            for _ in 0..(3 * PCG_TREES_PER_BUNDLE) {
+                if cur + 16 > bytes.len() {
+                    return Err(PreprocessError::PcgInvalidWireSeed);
+                }
+                let mut root_seed = [0u8; 16];
+                root_seed.copy_from_slice(&bytes[cur..cur + 16]);
+                cur += 16;
+                bin_sender_trees.push(GgmSenderTreeSeed { root_seed });
+            }
+
+            let mut bin_receiver_trees = Vec::with_capacity(3 * PCG_TREES_PER_BUNDLE);
+            for _ in 0..(3 * PCG_TREES_PER_BUNDLE) {
+                let need = 2 + 32 + 16 * tree_depth;
+                if cur + need > bytes.len() {
+                    return Err(PreprocessError::PcgInvalidWireSeed);
+                }
+                let punctured_idx = u16::from_le_bytes([bytes[cur], bytes[cur + 1]]);
+                cur += 2;
+                let c0 = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[cur..cur + 16])[array_index])));
+                cur += 16;
+                let c1 = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[cur..cur + 16])[array_index])));
+                cur += 16;
+                let mut copath = Vec::with_capacity(tree_depth);
+                for _ in 0..tree_depth {
+                    let mut node = [0u8; 16];
+                    node.copy_from_slice(&bytes[cur..cur + 16]);
+                    cur += 16;
+                    copath.push(node);
+                }
+                bin_receiver_trees.push(GgmReceiverBinaryTreeSeed {
+                    punctured_idx,
+                    copath,
+                    punctured_mac_corr: [c0, c1],
+                });
+            }
+
+            let mut tower_sender_trees = Vec::with_capacity(2 * PCG_TREES_PER_BUNDLE);
+            for _ in 0..(2 * PCG_TREES_PER_BUNDLE) {
+                if cur + 16 > bytes.len() {
+                    return Err(PreprocessError::PcgInvalidWireSeed);
+                }
+                let mut root_seed = [0u8; 16];
+                root_seed.copy_from_slice(&bytes[cur..cur + 16]);
+                cur += 16;
+                tower_sender_trees.push(GgmSenderTreeSeed { root_seed });
+            }
+
+            let mut tower_receiver_trees = Vec::with_capacity(2 * PCG_TREES_PER_BUNDLE);
+            for _ in 0..(2 * PCG_TREES_PER_BUNDLE) {
+                let need = 2 + 16 + 32 + 16 * tower_depth;
+                if cur + need > bytes.len() {
+                    return Err(PreprocessError::PcgInvalidWireSeed);
+                }
+                let punctured_idx = u16::from_le_bytes([bytes[cur], bytes[cur + 1]]);
+                cur += 2;
+                let punctured_beta =
+                    Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[cur..cur + 16])[array_index])));
+                cur += 16;
+                let m0 = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[cur..cur + 16])[array_index])));
+                cur += 16;
+                let m1 = Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (bytes[cur..cur + 16])[array_index])));
+                cur += 16;
+                let mut copath = Vec::with_capacity(tower_depth);
+                for _ in 0..tower_depth {
+                    let mut node = [0u8; 16];
+                    node.copy_from_slice(&bytes[cur..cur + 16]);
+                    cur += 16;
+                    copath.push(node);
+                }
+                tower_receiver_trees.push(GgmReceiverTowerTreeSeed {
+                    punctured_idx,
+                    punctured_beta,
+                    copath,
+                    punctured_mac_val: [m0, m1],
+                });
+            }
+
+            peers.push(PcgPeerSeedMaterial {
+                peer_id,
+                bin_sender_trees,
+                bin_receiver_trees,
+                tower_sender_trees,
+                tower_receiver_trees,
+            });
+        }
+
+        if cur + 4 > bytes.len() {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        let d_len = u32::from_le_bytes(core::array::from_fn(|array_index| (bytes[cur..cur + 4])[array_index])) as usize;
+        cur += 4;
+        if d_len != PCG_NUM_WORDS || cur + d_len * 8 > bytes.len() {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        let mut delta_words = Vec::with_capacity(d_len);
+        for _ in 0..d_len {
+            delta_words.push(u64::from_le_bytes(core::array::from_fn(|array_index| (bytes[cur..cur + 8])[array_index])));
+            cur += 8;
+        }
+        let csum0 = read_auth_tower128_share(bytes, &mut cur)?;
+        let csum1 = read_auth_tower128_share(bytes, &mut cur)?;
+        if cur + 2 > bytes.len() {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        let num_tow = u16::from_le_bytes([bytes[cur], bytes[cur + 1]]) as usize;
+        cur += 2;
+        validate_frame_count(num_tow, 3 * 18, bytes.len() - cur)?;
+        let mut tower_triples = Vec::with_capacity(num_tow);
+        for _ in 0..num_tow {
+            let a = read_auth_tower128_share(bytes, &mut cur)?;
+            let b = read_auth_tower128_share(bytes, &mut cur)?;
+            let c = read_auth_tower128_share(bytes, &mut cur)?;
+            tower_triples.push(PcgAuthTower128TripleShare { a, b, c });
+        }
+        if cur != bytes.len() {
+            return Err(PreprocessError::PcgInvalidWireSeed);
+        }
+        Ok(Self {
+            session_id,
+            party_id,
+            num_parties,
+            tree_depth,
+            mac_alpha: [alpha0, alpha1],
+            diag_mask_seed,
+            peers,
+            delta_words,
+            tilde_c_sums: [csum0, csum1],
+            tower_triples,
+        })
+    }
+
+    /// Expand this `< 24 KB` seed **locally with ZERO network I/O** (consuming the seed) into
+    /// `65,600` (`> 65,536`) 2-lane `Tower128` BDOZ-authenticated Boolean Beaver triples +
+    /// `8` authenticated 128-bit `Tower128` Beaver triples + sacrifice companion masks.
+    pub fn expand_local(self) -> PcgExpandedPartyVault {
+        let n = self.num_parties;
+        let me = self.party_id;
+        let tower_depth = PCG_MIN_TREE_DEPTH;
+
+        let sched_x =
+            QcLpnParitySchedule::derive(&self.session_id, b"BIN_X", self.tree_depth, PCG_NUM_WORDS);
+        let sched_y =
+            QcLpnParitySchedule::derive(&self.session_id, b"BIN_Y", self.tree_depth, PCG_NUM_WORDS);
+        let sched_z =
+            QcLpnParitySchedule::derive(&self.session_id, b"BIN_Z", self.tree_depth, PCG_NUM_WORDS);
+        let sched_a0 =
+            QcLpnParitySchedule::derive(&self.session_id, b"TOW_A0", tower_depth, PCG_NUM_WORDS);
+        let sched_a1 =
+            QcLpnParitySchedule::derive(&self.session_id, b"TOW_A1", tower_depth, PCG_NUM_WORDS);
+
+        let mut bool_triple_words: Vec<PcgAuthBoolTripleWord64> = (0..PCG_NUM_WORDS)
+            .map(|_| PcgAuthBoolTripleWord64 {
+                a_word: 0,
+                b_word: 0,
+                c_word: 0,
+                a_macs: vec![[[Tower128::ZERO; 2]; 64]; n],
+                a_keys: vec![[[Tower128::ZERO; 2]; 64]; n],
+                b_macs: vec![[[Tower128::ZERO; 2]; 64]; n],
+                b_keys: vec![[[Tower128::ZERO; 2]; 64]; n],
+                c_macs: vec![[[Tower128::ZERO; 2]; 64]; n],
+                c_keys: vec![[[Tower128::ZERO; 2]; 64]; n],
+            })
+            .collect();
+
+        let num_triples = PCG_NUM_BOOL_TRIPLES;
+        let mut companion_a: [Vec<PcgAuthTower128Share>; 2] = [
+            (0..num_triples)
+                .map(|_| PcgAuthTower128Share::zero(n))
+                .collect(),
+            (0..num_triples)
+                .map(|_| PcgAuthTower128Share::zero(n))
+                .collect(),
+        ];
+
+        let mut my_bits_populated = false;
+        for peer in &self.peers {
+            let q = peer.peer_id as usize;
+
+            // 1. Expand `me` as Sender (`keys[q]` authenticating peer `q`'s sparse vector under `me`'s `mac_alpha`)
+            let mut s_leaves = Vec::with_capacity(3 * PCG_TREES_PER_BUNDLE);
+            for (t_idx, tree) in peer.bin_sender_trees.iter().enumerate() {
+                let tree_tag = ((me * 16 + q) as u8).wrapping_mul(31).wrapping_add(t_idx as u8);
+                let (lt, _) = ggm_eval_sender_full(
+                    &self.session_id,
+                    tree_tag,
+                    self.tree_depth,
+                    &tree.root_seed,
+                );
+                s_leaves.push(lt);
+            }
+            let (_, kx) = sched_x.compress_binary_bundle(PCG_NUM_WORDS, &s_leaves[0..4], None);
+            let (_, ky) = sched_y.compress_binary_bundle(PCG_NUM_WORDS, &s_leaves[4..8], None);
+            let (_, kz) = sched_z.compress_binary_bundle(PCG_NUM_WORDS, &s_leaves[8..12], None);
+            for k in 0..PCG_NUM_WORDS {
+                for bit in 0..64 {
+                    for lane in 0..2 {
+                        bool_triple_words[k].a_keys[q][bit][lane] = Tower128(kx[k][bit][lane]);
+                        bool_triple_words[k].b_keys[q][bit][lane] = Tower128(ky[k][bit][lane]);
+                        bool_triple_words[k].c_keys[q][bit][lane] = Tower128(kz[k][bit][lane]);
+                    }
+                }
+            }
+
+            // 2. Expand `me` as Receiver (`macs[q]` authenticating `me`'s sparse vector under peer `q`'s `mac_alpha`)
+            let mut r_leaves = Vec::with_capacity(3 * PCG_TREES_PER_BUNDLE);
+            let mut p_indices = [0usize; 12];
+            for (t_idx, p_indices_t_idx_item) in p_indices[..(3 * PCG_TREES_PER_BUNDLE)].iter_mut().enumerate() {
+                let rt = &peer.bin_receiver_trees[t_idx];
+                let p_star = rt.punctured_idx as usize;
+                *p_indices_t_idx_item = p_star;
+                let tree_tag = ((q * 16 + me) as u8).wrapping_mul(31).wrapping_add(t_idx as u8);
+                let lt = ggm_eval_receiver_punctured(
+                    &self.session_id,
+                    tree_tag,
+                    self.tree_depth,
+                    p_star,
+                    &rt.copath,
+                    ([rt.punctured_mac_corr[0].0, rt.punctured_mac_corr[1].0], true),
+                );
+                r_leaves.push(lt);
+            }
+            let px: [usize; 4] = core::array::from_fn(|array_index| (p_indices[0..4])[array_index]);
+            let py: [usize; 4] = core::array::from_fn(|array_index| (p_indices[4..8])[array_index]);
+            let pz: [usize; 4] = core::array::from_fn(|array_index| (p_indices[8..12])[array_index]);
+            let (wx, mx) = sched_x.compress_binary_bundle(PCG_NUM_WORDS, &r_leaves[0..4], Some(px));
+            let (wy, my) = sched_y.compress_binary_bundle(PCG_NUM_WORDS, &r_leaves[4..8], Some(py));
+            let (wz, mz) = sched_z.compress_binary_bundle(PCG_NUM_WORDS, &r_leaves[8..12], Some(pz));
+
+            for k in 0..PCG_NUM_WORDS {
+                if !my_bits_populated {
+                    bool_triple_words[k].a_word = wx[k];
+                    bool_triple_words[k].b_word = wy[k];
+                    bool_triple_words[k].c_word = wz[k];
+                }
+                for bit in 0..64 {
+                    for lane in 0..2 {
+                        bool_triple_words[k].a_macs[q][bit][lane] = Tower128(mx[k][bit][lane]);
+                        bool_triple_words[k].b_macs[q][bit][lane] = Tower128(my[k][bit][lane]);
+                        bool_triple_words[k].c_macs[q][bit][lane] = Tower128(mz[k][bit][lane]);
+                    }
+                }
+            }
+
+            // 3. Expand Tower128 companion bundles (`A0`, `A1`) as Sender & Receiver
+            let mut ts_leaves = Vec::with_capacity(2 * PCG_TREES_PER_BUNDLE);
+            for (t_idx, tree) in peer.tower_sender_trees.iter().enumerate() {
+                let tree_tag = 0x80u8
+                    .wrapping_add(((me * 16 + q) as u8).wrapping_mul(17))
+                    .wrapping_add(t_idx as u8);
+                let (lt, _) = ggm_eval_sender_full(
+                    &self.session_id,
+                    tree_tag,
+                    tower_depth,
+                    &tree.root_seed,
+                );
+                ts_leaves.push(lt);
+            }
+            let (_, tk0) = sched_a0.compress_tower_bundle(PCG_NUM_WORDS, &ts_leaves[0..4], None);
+            let (_, tk1) = sched_a1.compress_tower_bundle(PCG_NUM_WORDS, &ts_leaves[4..8], None);
+
+            let mut tr_leaves = Vec::with_capacity(2 * PCG_TREES_PER_BUNDLE);
+            let mut tp_info = [(0usize, Tower128::ZERO); 8];
+            for (t_idx, tp_info_t_idx_item) in tp_info[..(2 * PCG_TREES_PER_BUNDLE)].iter_mut().enumerate() {
+                let rt = &peer.tower_receiver_trees[t_idx];
+                let p_star = rt.punctured_idx as usize;
+                *tp_info_t_idx_item = (p_star, rt.punctured_beta);
+                let tree_tag = 0x80u8
+                    .wrapping_add(((q * 16 + me) as u8).wrapping_mul(17))
+                    .wrapping_add(t_idx as u8);
+                let lt = ggm_eval_receiver_punctured(
+                    &self.session_id,
+                    tree_tag,
+                    tower_depth,
+                    p_star,
+                    &rt.copath,
+                    ([rt.punctured_mac_val[0].0, rt.punctured_mac_val[1].0], false),
+                );
+                tr_leaves.push(lt);
+            }
+            let pa0: [(usize, Tower128); 4] = core::array::from_fn(|array_index| (tp_info[0..4])[array_index]);
+            let pa1: [(usize, Tower128); 4] = core::array::from_fn(|array_index| (tp_info[4..8])[array_index]);
+            let (tv0, tm0) =
+                sched_a0.compress_tower_bundle(PCG_NUM_WORDS, &tr_leaves[0..4], Some(pa0));
+            let (tv1, tm1) =
+                sched_a1.compress_tower_bundle(PCG_NUM_WORDS, &tr_leaves[4..8], Some(pa1));
+
+            for ell in 0..num_triples {
+                if !my_bits_populated {
+                    companion_a[0][ell].value = tv0[ell];
+                    companion_a[1][ell].value = tv1[ell];
+                }
+                for lane in 0..2 {
+                    companion_a[0][ell].keys[q][lane] = Tower128(tk0[ell][lane]);
+                    companion_a[1][ell].keys[q][lane] = Tower128(tk1[ell][lane]);
+                    companion_a[0][ell].macs[q][lane] = Tower128(tm0[ell][lane]);
+                    companion_a[1][ell].macs[q][lane] = Tower128(tm1[ell][lane]);
+                }
+            }
+
+            my_bits_populated = true;
+        }
+
+        // 4. Populate diagonal self-MACs (`q == me`) from `diag_mask_seed` AND apply public `delta_words`
+        // affine shift (`[c_\ell] = [z_\ell] \oplus \delta_\ell`) preserving 2-lane `Tower128` BDOZ MACs!
+        let mut diag_rng = PartyPrivateRng::from_seed(self.diag_mask_seed, b"PCG_DIAG");
+        for (k, bool_triple_words_k_item) in bool_triple_words[..PCG_NUM_WORDS].iter_mut().enumerate() {
+            let dw = self.delta_words[k];
+            if me == 0 {
+                bool_triple_words_k_item.c_word ^= dw;
+            }
+            let aw = bool_triple_words_k_item.a_word;
+            let bw = bool_triple_words_k_item.b_word;
+            let cw = bool_triple_words_k_item.c_word;
+
+            for bit in 0..64 {
+                let a_bit = ((aw >> bit) & 1) == 1;
+                let b_bit = ((bw >> bit) & 1) == 1;
+                let c_bit = ((cw >> bit) & 1) == 1;
+                let d_bit = ((dw >> bit) & 1) == 1;
+
+                for lane in 0..2 {
+                    let alpha_l = self.mac_alpha[lane];
+                    let ka = diag_rng.next_tower128();
+                    let kb = diag_rng.next_tower128();
+                    let kc = diag_rng.next_tower128();
+                    bool_triple_words_k_item.a_keys[me][bit][lane] = ka;
+                    bool_triple_words_k_item.a_macs[me][bit][lane] =
+                        if a_bit { ka.add(alpha_l) } else { ka };
+                    bool_triple_words_k_item.b_keys[me][bit][lane] = kb;
+                    bool_triple_words_k_item.b_macs[me][bit][lane] =
+                        if b_bit { kb.add(alpha_l) } else { kb };
+                    bool_triple_words_k_item.c_keys[me][bit][lane] = kc;
+                    bool_triple_words_k_item.c_macs[me][bit][lane] =
+                        if c_bit { kc.add(alpha_l) } else { kc };
+
+                    if me != 0 && d_bit {
+                        bool_triple_words_k_item.c_keys[0][bit][lane] =
+                            bool_triple_words_k_item.c_keys[0][bit][lane].add(alpha_l);
+                    }
+                }
+            }
+        }
+
+        #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+        for sac_lane in 0..2 {
+            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+            for ell in 0..num_triples {
+                let v = companion_a[sac_lane][ell].value;
+                for lane in 0..2 {
+                    let kd = diag_rng.next_tower128();
+                    companion_a[sac_lane][ell].keys[me][lane] = kd;
+                    companion_a[sac_lane][ell].macs[me][lane] =
+                        kd.add(self.mac_alpha[lane].mul(v));
+                }
+            }
+        }
+
+        PcgExpandedPartyVault {
+            session_id: self.session_id,
+            party_id: me,
+            num_parties: n,
+            mac_alpha: self.mac_alpha,
+            bool_triple_words,
+            tower_triples: self.tower_triples.clone(),
+            companion_a,
+            companion_c_sums: self.tilde_c_sums.clone(),
+        }
+    }
+}
+
+/// Compatibility entry point using uniform KOS/MASCOT preprocessing.
+/// Compact sparse PCG correlations are not suitable as online Beaver masks.
+pub fn run_dealerless_pcg_keccak_vaults(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    tree_depth: usize,
+    num_triples_words: usize,
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
+    let n = eval_points.len();
+    if t == 0 || t > n || n < 2 || num_triples_words > PCG_NUM_WORDS - 10 || party_rngs.len() != n {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+
+    PcgTreeDepth::try_from(tree_depth)?;
+    run_dealerless_pi_triple_f2(session_id, t, eval_points, num_triples_words, ot_mesh, party_rngs)
+}
+
+/// Generate uniform authenticated masks in bounded KOS/MASCOT chunks under an existing MAC key.
+/// The returned vault owns all chunks; this API is not a streaming source.
+#[expect(clippy::too_many_arguments, reason = "Preserve the public preprocessing API used by other protocol modules")]
+pub fn run_dealerless_pcg_keccak_vaults_with_alpha(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    tree_depth: usize,
+    num_triples_words: usize,
+    alpha_contribs: &[[Tower128; 2]],
+    alpha_shamir: &[[Tower128; 2]],
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<Vec<PreprocessedKeccakPartyVault>, PreprocessError> {
+    let n = eval_points.len();
+    if t == 0
+        || t > n
+        || n < 2
+        || party_rngs.len() != n
+        || alpha_contribs.len() != n
+        || alpha_shamir.len() != n
+    {
+        return Err(PreprocessError::InvalidThreshold { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+    PcgTreeDepth::try_from(tree_depth)?;
+
+    let mut acc_triples: Vec<Vec<KeccakBitTripleShare64>> =
+        (0..n).map(|_| Vec::with_capacity(num_triples_words)).collect();
+    let mut chunk_idx = 0u64;
+    let mut remaining = num_triples_words;
+    // Reserve 10 words per `PCG_NUM_WORDS` (`1025`) batch for Shamir Booleanity (8) + Shamir sacrifice (2)!
+    const CHUNK_CAP: usize = PCG_NUM_WORDS - 10;
+
+    while remaining > 0 {
+        let take = remaining.min(CHUNK_CAP);
+        let mut chunk_sid = [0u8; 32];
+        let mut xof = Cshake256Xof::new(b"QSAG.PCG.SPDZ.CHUNK/v1");
+        xof.absorb(&session_id);
+        xof.absorb(&chunk_idx.to_be_bytes());
+        xof.squeeze(&mut chunk_sid);
+        chunk_idx += 1;
+
+        let mut chunk_vaults = run_dealerless_pi_triple_f2_with_alpha(
+            chunk_sid,
+            t,
+            eval_points,
+            take,
+            alpha_contribs,
+            alpha_shamir,
+            ot_mesh,
+            party_rngs,
+        )?;
+        for p in 0..n {
+            acc_triples[p].append(&mut chunk_vaults[p].triples);
+        }
+        remaining -= take;
+    }
+
+    Ok((0..n)
+        .map(|p| PreprocessedKeccakPartyVault {
+            party_id: p,
+            eval_point: eval_points[p],
+            mac_alpha_lanes: alpha_shamir[p],
+            triples: core::mem::take(&mut acc_triples[p]),
+            cursor: 0,
+            poisoned: false,
+        })
+        .collect())
+}
+
+impl core::error::Error for PreprocessError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sponge::poseidon2::poseidon2_sbox7;
+
+    fn make_party_rngs(n: usize, tag: u8) -> Vec<PartyPrivateRng> {
+        (0..n)
+            .map(|i| {
+                let mut seed = [0u8; 32];
+                seed[0] = tag;
+                seed[1] = (i + 1) as u8;
+                PartyPrivateRng::from_seed(seed, b"test")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn private_rng_batched_refill_matches_scalar_stream_and_rekey() {
+        fn scalar_stream(seed: &[u8; 32], counter: u64, blocks: usize) -> Vec<u8> {
+            let mut bytes = Vec::with_capacity(136 * blocks);
+            for block in 0..blocks {
+                let mut state = [0u64; 25];
+                state[0] = u64::from_le_bytes(*b"QSAG.PRG");
+                state[1] = u64::from_le_bytes(*b"NG.BLK\x01\x00");
+                for i in 0..4 {
+                    state[2 + i] = u64::from_le_bytes(core::array::from_fn(|j| seed[8 * i + j]));
+                }
+                state[6] = counter.wrapping_add(block as u64);
+                state[7] = 0x1f;
+                state[16] = 0x8000_0000_0000_0000;
+                keccak_f1600(&mut state);
+                for word in &state[..17] { bytes.extend_from_slice(&word.to_le_bytes()); }
+            }
+            bytes
+        }
+        for counter in [0, u64::MAX - 2] {
+            for chunk in [1, 8, 26, 135, 136, 137, 543, 544, 545, 1088] {
+                let mut rng = PartyPrivateRng::from_seed([0x93; 32], b"batch-stream-test");
+                rng.counter = counter;
+                let expected = scalar_stream(&rng.seed, counter, 12);
+                let mut actual = vec![0; expected.len()];
+                for part in actual.chunks_mut(chunk) { rng.fill_bytes(part); }
+                assert_eq!(actual, expected);
+            }
+        }
+        // A rekey must discard every prefetched block, even after a partial read.
+        for consumed in [0, 1, 135, 136, 513, 544] {
+            let mut rng = PartyPrivateRng::from_seed([0x93; 32], b"batch-stream-test");
+            let old = scalar_stream(&rng.seed, 0, 8);
+            let mut discard = vec![0; consumed];
+            rng.fill_bytes(&mut discard);
+            let mut seed = [0; 32];
+            HedgedTranscriptRng::derive(&rng.seed, 0, &old[consumed..consumed + 32], b"rekey", &mut seed);
+            rng.hedge_transcript(b"rekey");
+            let mut actual = vec![0; 1088];
+            rng.fill_bytes(&mut actual);
+            assert_eq!(actual, scalar_stream(&seed, 0, 8));
+        }
+    }
+
+    #[test]
+    fn kos_batched_inner_product_matches_scalar_including_tails() {
+        let mut rng = PartyPrivateRng::from_seed([0x73; 32], b"kos-dot");
+        let rows: Vec<_> = (0..257).map(|_| rng.next_u128()).collect();
+        let weights: Vec<_> = (0..257).map(|_| rng.next_tower128()).collect();
+        for n in [0, 1, 2, 63, 64, 127, 128, 129, 256, 257] {
+            let expected = rows[..n].iter().zip(&weights[..n]).fold(Tower128::ZERO,
+                |sum, (&x, &y)| sum.add(Tower128(x).mul(y)));
+            assert_eq!(kos_inner_product(&rows[..n], &weights[..n]), expected);
+        }
+    }
+
+    #[test]
+    fn dense_active_three_party_product() {
+        let sid = [0x19; 32];
+        let mut rngs: Vec<_> = (0..3).map(|i| PartyPrivateRng::from_seed([i+1; 32], b"dense-active-test")).collect();
+        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let a = vec![vec![0x123456789abcdef0], vec![0xdeadbeefcafebabe], vec![0x33335555ffff0000]];
+        let b = vec![vec![0x12340000ffff9876], vec![0x5555aaaa12344321], vec![0x777788889999aaaa]];
+        let c = checked_boolean_product(&sid, &a, &b, &mut mesh, &mut rngs).unwrap();
+        assert_eq!(c.iter().fold(0, |x, p| x ^ p[0]),
+            a.iter().fold(0, |x, p| x ^ p[0]) & b.iter().fold(0, |x, p| x ^ p[0]));
+        assert!(checked_boolean_product_with_hook(&sid, &a, &b, &mut mesh, &mut rngs,
+            |shares| shares[0][0][0] ^= 1).is_err());
+    }
+
+    #[test]
+    fn test_rlwe_crs_orsigma_fo_and_kos_regressions() {
+        // Worst-case ternary noise at `RLWE_N = 1024`: `|e| <= 1024 + 1024 + 1 = 2049 < 3072 = floor(q/4)`
+        for &mag in &[0u16, 1, 512, 1025, 2049, 3071] {
+            let f_pos = mag % RLWE_Q;
+            let f_neg = (RLWE_Q - (mag % RLWE_Q)) % RLWE_Q;
+            let t_pos = (RLWE_HALF_Q + mag) % RLWE_Q;
+            let t_neg = (RLWE_HALF_Q + RLWE_Q - mag) % RLWE_Q;
+            assert_eq!(rlwe_decode_bit_ct(f_pos), 0);
+            assert_eq!(rlwe_decode_bit_ct(f_neg), 0);
+            assert_eq!(rlwe_decode_bit_ct(t_pos), 1);
+            assert_eq!(rlwe_decode_bit_ct(t_neg), 1);
+        }
+
+        let mut rng_s = PartyPrivateRng::from_seed([0x11; 32], b"ot-s");
+        let mut rng_r = PartyPrivateRng::from_seed([0x22; 32], b"ot-r");
+        let sid = [0xAA; 32];
+        for idx in 0..2u32 {
+            let choice = (idx & 1) == 1;
+            let s0 = rng_s.next_bytes32();
+            let s1 = rng_s.next_bytes32();
+            let (sec, mut req) = rlwe_ot_choose(&sid, 0, 1, idx, choice, &mut rng_r);
+            let mut resp = try_rlwe_ot_transfer(&sid, 0, 1, idx, &req, &s0, &s1, &mut rng_s).unwrap();
+            let got = rlwe_ot_decrypt(&sec, &resp).unwrap();
+            assert_eq!(got, if choice { s1 } else { s0 });
+
+            // Forged Receiver OR-Sigma ZKPoK MUST abort at `try_rlwe_ot_transfer` (`[P0-11]`)!
+            req.pok.chal0[0] ^= 0x01;
+            assert_eq!(
+                try_rlwe_ot_transfer(&sid, 0, 1, idx, &req, &s0, &s1, &mut rng_s).unwrap_err(),
+                PreprocessError::BaseOtReceiverProofFailed {
+                    sender_id: 0,
+                    receiver_id: 1,
+                }
+            );
+
+            // Active Chou-Orlandi / selective-failure ciphertext tamper on Receiver's chosen branch
+            // (`b = 0` when `choice == false`, `b = 1` when `choice == true`) MUST abort via FO re-encryption!
+            if choice {
+                resp.u1.0[0] = (resp.u1.0[0] + 1) % RLWE_Q;
+            } else {
+                resp.u0.0[0] = (resp.u0.0[0] + 1) % RLWE_Q;
+            }
+            assert_eq!(
+                rlwe_ot_decrypt(&sec, &resp),
+                Err(PreprocessError::BaseOtFoCheckFailed {
+                    sender_id: 0,
+                    receiver_id: 1,
+                    ot_idx: idx,
+                })
+            );
+        }
+
+        // Verify isolated committed-CRS + OR-Sigma + 384-branch FO + 4-ciphertext combiner ceremony
+        let (crs_r0, crs_com) = BaseOtCrsReceiverRound0::commit(sid, 0, 1, &mut rng_r);
+        let (crs_s0, crs_sh) = BaseOtCrsSenderRound0::respond(sid, 0, 1, &crs_com, &mut rng_s);
+        let (r_crs_coin, mut bad_crs_open) = crs_r0.open_and_derive_crs_coin(&crs_sh);
+        let good_crs_open = bad_crs_open;
+        bad_crs_open.receiver_crs_share[0] ^= 0x80;
+        assert_eq!(
+            crs_s0.verify_and_derive_crs_coin(&bad_crs_open),
+            Err(PreprocessError::CoinCommitMismatch { party_id: 1 })
+        );
+        let (_, crs_s0_ok_sh) = BaseOtCrsSenderRound0::respond(sid, 0, 1, &crs_com, &mut rng_s);
+        let _ = crs_s0_ok_sh;
+        // Exercise KOS with ideal base OTs; the full bootstrap has a separate soak.
+        let (mut s_chan, mut r_chan) =
+            ideal_ot_ext_channel_for_test(sid, 0, 1, &mut rng_s, &mut rng_r);
+        let _ = (r_crs_coin, good_crs_open);
+
+        let choices = [0xCAFE_BABE_1234_5678u64];
+        let (pend_r, u_msg) = r_chan.round1_send_u_cols(&choices, &mut rng_r);
+        let (pend_s, chal_msg) = s_chan.round2_sample_challenge(&u_msg, &mut rng_s).unwrap();
+        let (proof_msg, r_pads) = r_chan.round3_prove_and_finish(pend_r, &chal_msg);
+        let s_pads = s_chan.round4_verify_and_finish(pend_s, &proof_msg).unwrap();
+        for b in 0..64 {
+            let bit = ((choices[0] >> b) & 1) == 1;
+            assert_eq!(r_pads[b], if bit { s_pads[b].1 } else { s_pads[b].0 });
+        }
+    }
+
+    #[test]
+    fn test_interactive_kos_ot_extension_kills_roy22_and_poisons_channel() {
+        let mut rng_s = PartyPrivateRng::from_seed([0x31; 32], b"kos-s");
+        let mut rng_r = PartyPrivateRng::from_seed([0x32; 32], b"kos-r");
+        let (mut s_chan, mut r_chan) =
+            establish_rlwe_ot_ext_channel([0x55; 32], 0, 1, &mut rng_s, &mut rng_r);
+        let choices = [0xDEAD_BEEF_CAFE_BABEu64, 0x0123_4567_89AB_CDEFu64];
+
+        let (pend_r, u_msg) = r_chan.round1_send_u_cols(&choices, &mut rng_r);
+        let (pend_s, chal_msg) = s_chan.round2_sample_challenge(&u_msg, &mut rng_s).unwrap();
+        let (proof_msg, recv_pads) = r_chan.round3_prove_and_finish(pend_r, &chal_msg);
+        let send_pads = s_chan.round4_verify_and_finish(pend_s, &proof_msg).unwrap();
+        for w in 0..choices.len() {
+            for b in 0..64 {
+                let bit = ((choices[w] >> b) & 1) == 1;
+                let exp = if bit {
+                    send_pads[64 * w + b].1
+                } else {
+                    send_pads[64 * w + b].0
+                };
+                assert_eq!(recv_pads[64 * w + b], exp);
+            }
+        }
+
+        // Corrupt 1 bit in column 127 (full 128-column KOS!) BEFORE seeing `chi_seed` -> rejects & poisons!
+        let (pend_r_bad, mut u_msg_bad) = r_chan.round1_send_u_cols(&choices, &mut rng_r);
+        u_msg_bad.u_cols[127][0] ^= 1;
+        let (pend_s_bad, chal_bad) = s_chan
+            .round2_sample_challenge(&u_msg_bad, &mut rng_s)
+            .unwrap();
+        let (proof_bad, _) = r_chan.round3_prove_and_finish(pend_r_bad, &chal_bad);
+        assert_eq!(
+            s_chan.round4_verify_and_finish(pend_s_bad, &proof_bad),
+            Err(PreprocessError::KosOtCheckFailed {
+                sender_id: 0,
+                receiver_id: 1
+            })
+        );
+
+        let (_, u_msg_after) = r_chan.round1_send_u_cols(&choices, &mut rng_r);
+        assert!(matches!(
+            s_chan.round2_sample_challenge(&u_msg_after, &mut rng_s),
+            Err(PreprocessError::ChannelPoisoned {
+                sender_id: 0,
+                receiver_id: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn test_pcg_seed_expansion_sub24kb_65600_triples_and_2lane_bdoz_sacrifice() {
+        let sid = [0x99; 32];
+        let n = 2usize;
+        let mut rngs = make_party_rngs(n, 0x71);
+        let mut mesh = OtMesh::establish(sid, &mut rngs);
+
+        let seeds = PcgSeedExpansion::setup_seeds(sid, 14, &mut mesh, &mut rngs).unwrap();
+        for s in &seeds {
+            let wire = s.to_wire_bytes();
+            assert!(
+                wire.len() < PCG_MAX_SEED_WIRE_BYTES,
+                "PCG wire seed {} bytes must be strictly < 24 KB ({})",
+                wire.len(),
+                PCG_MAX_SEED_WIRE_BYTES
+            );
+            let decoded = PcgPartySeed::from_wire_bytes(&wire).unwrap();
+            assert_eq!(decoded.to_wire_bytes(), wire);
+        }
+
+        let vaults: Vec<PcgExpandedPartyVault> = seeds.into_iter().map(|s| s.expand_local()).collect();
+        assert_eq!(vaults[0].num_boolean_triples(), 65_600);
+        assert!(vaults[0].num_boolean_triples() > 65_536);
+        assert_eq!(vaults[0].tower_triples.len(), PCG_NUM_TOWER_TRIPLES);
+
+        for k in 0..PCG_NUM_WORDS {
+            let a = vaults[0].bool_triple_words[k].a_word ^ vaults[1].bool_triple_words[k].a_word;
+            let b = vaults[0].bool_triple_words[k].b_word ^ vaults[1].bool_triple_words[k].b_word;
+            let c = vaults[0].bool_triple_words[k].c_word ^ vaults[1].bool_triple_words[k].c_word;
+            assert_eq!(c, a & b, "Boolean triple word {} mismatch", k);
+        }
+        for k in 0..PCG_NUM_TOWER_TRIPLES {
+            let a = vaults[0].tower_triples[k].a.value.add(vaults[1].tower_triples[k].a.value);
+            let b = vaults[0].tower_triples[k].b.value.add(vaults[1].tower_triples[k].b.value);
+            let c = vaults[0].tower_triples[k].c.value.add(vaults[1].tower_triples[k].c.value);
+            assert_eq!(c, a.mul(b));
+        }
+
+        PcgSeedExpansion::verify_2lane_bdoz_sacrifice(&vaults, &mut rngs).unwrap();
+
+        let bad_seeds = PcgSeedExpansion::setup_seeds_with_fault(
+            [0x9A; 32],
+            14,
+            &mut mesh,
+            &mut rngs,
+            |p, d_words| {
+                if p == 0 {
+                    d_words[512] ^= 1u64 << 37;
+                }
+            },
+        )
+        .unwrap();
+        let bad_vaults: Vec<PcgExpandedPartyVault> =
+            bad_seeds.into_iter().map(|s| s.expand_local()).collect();
+        assert_eq!(
+            PcgSeedExpansion::verify_2lane_bdoz_sacrifice(&bad_vaults, &mut rngs),
+            Err(PreprocessError::SacrificeResidualNonZero {
+                phase: "pcg_boolean_triples"
+            })
+        );
+    }
+
+    #[test]
+    fn test_dealerless_pi_triple_f2_dishonest_majority_booleanity_and_mac_abort() {
+        let sid = [0x77; 32];
+        // Dishonest majority 3-of-4 (`2t - 1 = 5 > 4`, up to `2` active corruptions)
+        let t = 3usize;
+        let n = 4usize;
+        let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
+        let mut rngs = make_party_rngs(n, 0x40);
+        let mut mesh = OtMesh::establish(sid, &mut rngs);
+
+        // `[P0-10]` regression guard: zero or duplicate `eval_point` at index `>= t` MUST be rejected!
+        let mut bad_pts_zero = pts.clone();
+        bad_pts_zero[3] = TowerGf256::ZERO;
+        assert_eq!(
+            run_dealerless_pi_triple_f2(sid, t, &bad_pts_zero, 1, &mut mesh, &mut rngs)
+                .unwrap_err(),
+            PreprocessError::DuplicateOrZeroEvalPoint
+        );
+        let mut bad_pts_dup = pts.clone();
+        bad_pts_dup[3] = bad_pts_dup[1];
+        assert_eq!(
+            run_dealerless_pi_triple_f2(sid, t, &bad_pts_dup, 1, &mut mesh, &mut rngs)
+                .unwrap_err(),
+            PreprocessError::DuplicateOrZeroEvalPoint
+        );
+
+        let mut vaults = run_dealerless_pi_triple_f2(sid, t, &pts, 2, &mut mesh, &mut rngs).unwrap();
+        for k in 0..2 {
+            let a_sh: Vec<BitslicedGf256x64> = (0..n).map(|p| vaults[p].triples[k].a).collect();
+            let b_sh: Vec<BitslicedGf256x64> = (0..n).map(|p| vaults[p].triples[k].b).collect();
+            let c_sh: Vec<BitslicedGf256x64> = (0..n).map(|p| vaults[p].triples[k].c).collect();
+            let a_macs: Vec<[[Tower128; 64]; 2]> =
+                (0..t).map(|q| vaults[q].triples[k].a_mac).collect();
+            let alpha_sh: Vec<[Tower128; 2]> =
+                (0..t).map(|q| vaults[q].mac_alpha_lanes).collect();
+
+            // Honest quorum SPDZ opening passes (`t=3` out of `n=4`)
+            let a = commit_and_open_spdz_bs_gf256_quorum(
+                &sid,
+                "test_spdz_open",
+                t,
+                &pts[..t],
+                &a_sh[..t],
+                &a_macs,
+                &alpha_sh,
+                &mut rngs[..t],
+            )
+            .unwrap();
+            let b = open_and_check_degree_bs_gf256(t, &pts, &b_sh, "test").unwrap();
+            let c = open_and_check_degree_bs_gf256(t, &pts, &c_sh, "test").unwrap();
+            assert_eq!(&a[1..], &[0u64; 7]);
+            assert_eq!(&b[1..], &[0u64; 7]);
+            assert_eq!(&c[1..], &[0u64; 7]);
+            assert_eq!(c[0], a[0] & b[0]);
+
+            // Dishonest-majority (`c = 2` corrupt parties in `0..t`) share forgery (`f(0)` flipped by `1`)
+            // MUST fail SPDZ `MacCheck`! (Note: on `[1, 2, 3]` in `GF(2^8)`, `lambda = [1, 1, 1]`, so
+            // flipping plane 0 at `p = 0` and cancelling plane 1 across `p = 0, 1` shifts `f(0)` by `1`!)
+            let mut forged_a = a_sh[..t].to_vec();
+            forged_a[0][0] ^= 1;
+            forged_a[0][1] ^= 1;
+            forged_a[1][1] ^= 1;
+            assert!(matches!(
+                commit_and_open_spdz_bs_gf256_quorum(
+                    &sid,
+                    "test_spdz_forge",
+                    t,
+                    &pts[..t],
+                    &forged_a,
+                    &a_macs,
+                    &alpha_sh,
+                    &mut rngs[..t],
+                ),
+                Err(PreprocessError::MacCheckFailed { .. })
+            ));
+        }
+
+        // Poisoning burns `mac_alpha_lanes` and blocks all future `pop_triple()` calls (`[P0-07]`)
+        vaults[0].poison_and_wipe();
+        assert_eq!(vaults[0].mac_alpha_lanes, [Tower128::ZERO; 2]);
+        assert_eq!(
+            vaults[0].pop_triple().unwrap_err(),
+            PreprocessError::VaultPoisoned {
+                kind: "Keccak triple"
+            }
+        );
+
+        // `[P0-06]` single-lane non-Boolean injection (`TowerGf256(2) \in GF(256) \ GF(2)` at bit `37`)
+        // MUST pass `0..n` degree check AND abort with `NonBooleanBitDetected` (`2^{-256}` soundness, 0 blind spots)!
+        let mut non_bool_planes = [[0u64; 8]; 4];
+        let nb_poly = [TowerGf256(2), TowerGf256(9), TowerGf256(17)];
+        for p in 0..n {
+            bs_gf256_insert_lane(&mut non_bool_planes[p], 37, eval_poly_gf256(&nb_poly, pts[p]));
+        }
+        let err_nb = run_dealerless_pi_triple_f2_with_fault(
+            [0x78; 32],
+            t,
+            &pts,
+            1,
+            &mut mesh,
+            &mut rngs,
+            |p, a_vec, _| {
+                bs_gf256_xor_assign(&mut a_vec[0], &non_bool_planes[p]);
+            },
+        )
+        .unwrap_err();
+        // This corruption also breaks the companion product. Either that
+        // earlier sacrifice or the dedicated Booleanity check must reject it.
+        assert!(matches!(err_nb,
+            PreprocessError::NonBooleanBitDetected { phase: "pi_triple_f2_bool_a" }
+            | PreprocessError::SacrificeResidualNonZero { phase: "pi_triple_f2" }
+        ));
+
+        // Corrupt `c_sh` with a consistent degree-`<t` Boolean offset -> SPDZ companion sacrifice MUST abort!
+        let bad_offset = shamir_share_bits64_gf256(t, &pts, 1u64, &mut rngs[0]);
+        let err = run_dealerless_pi_triple_f2_with_fault(
+            [0x79; 32],
+            t,
+            &pts,
+            1,
+            &mut mesh,
+            &mut rngs,
+            |p, _, c_vec| {
+                bs_gf256_xor_assign(&mut c_vec[0], &bad_offset[p]);
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            PreprocessError::SacrificeResidualNonZero {
+                phase: "pi_triple_f2"
+            }
+        );
+    }
+
+    type PiTripleF2Run = Result<(Vec<PreprocessedKeccakPartyVault>, Vec<u32>), PreprocessError>;
+
+    /// One `Π_triple_f2` run from party seeds `rng_tag`, returning the vaults and the public
+    /// bucket permutation.
+    fn run_pi_triple_f2_with_buckets<F>(
+        sid: [u8; 32],
+        t: usize,
+        pts: &[TowerGf256],
+        num_triples: usize,
+        rng_tag: u8,
+        fault_hook: F,
+    ) -> PiTripleF2Run
+    where
+        F: FnMut(usize, &mut [BitslicedGf256x64], &mut [BitslicedGf256x64]),
+    {
+        let mut rngs = make_party_rngs(pts.len(), rng_tag);
+        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let (alpha_contribs, alpha_shamir) = spdz_setup_alpha_gf256(&sid, t, pts, &mut rngs)?;
+        run_dealerless_pi_triple_f2_with_alpha_and_fault(
+            sid,
+            t,
+            pts,
+            num_triples,
+            &alpha_contribs,
+            &alpha_shamir,
+            &mut mesh,
+            &mut rngs,
+            fault_hook,
+        )
+    }
+
+    /// Raw indices sharing a bucket with raw index `raw` under `perm`.
+    fn bucket_members(perm: &[u32], num_triples: usize, raw: usize) -> [usize; 3] {
+        let pos = perm.iter().position(|&x| x as usize == raw).expect("raw index in permutation");
+        let bucket = pos % num_triples;
+        [
+            perm[bucket] as usize,
+            perm[num_triples + bucket] as usize,
+            perm[2 * num_triples + bucket] as usize,
+        ]
+    }
+
+    #[test]
+    fn test_coin_permutation_is_a_permutation_and_roughly_uniform() {
+        for len in [0usize, 1, 2, 3, 12, 97, 1000] {
+            let perm = derive_coin_permutation(&[0x42; 32], b"test", len);
+            let mut sorted = perm.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..len as u32).collect::<Vec<u32>>());
+        }
+        // Domain and coin both select the permutation.
+        let base = derive_coin_permutation(&[0x42; 32], b"test", 97);
+        assert_ne!(base, derive_coin_permutation(&[0x43; 32], b"test", 97));
+        assert_ne!(base, derive_coin_permutation(&[0x42; 32], b"other", 97));
+        assert_eq!(base, derive_coin_permutation(&[0x42; 32], b"test", 97));
+
+        // Every value lands on every position about equally often (expected 1200 of 6000
+        // each, standard deviation about 31; the bounds are more than 6 sigma wide).
+        let mut hits = [[0u32; 5]; 5];
+        for trial in 0u32..6000 {
+            let mut coin = [0u8; 32];
+            coin[0..4].copy_from_slice(&trial.to_le_bytes());
+            let perm = derive_coin_permutation(&coin, b"test", 5);
+            for (pos, &val) in perm.iter().enumerate() {
+                hits[pos][val as usize] += 1;
+            }
+        }
+        for row in &hits {
+            for &count in row {
+                assert!((1000..=1400).contains(&count), "position/value count {}", count);
+            }
+        }
+    }
+
+    #[test]
+    fn test_pi_triple_f2_random_buckets_honest_valid_and_coin_dependent() {
+        let sid = [0x7A; 32];
+        let t = 2usize;
+        let n = 2usize;
+        let num_triples = 4usize;
+        let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
+
+        let mut perms = Vec::new();
+        for rng_tag in [0x51u8, 0x52] {
+            let (vaults, perm) =
+                run_pi_triple_f2_with_buckets(sid, t, &pts, num_triples, rng_tag, |_, _, _| {})
+                    .expect("honest run");
+
+            // (a) Honest runs still produce Boolean triples with `c = a & b`.
+            for k in 0..num_triples {
+                let a_sh: Vec<BitslicedGf256x64> = (0..n).map(|p| vaults[p].triples[k].a).collect();
+                let b_sh: Vec<BitslicedGf256x64> = (0..n).map(|p| vaults[p].triples[k].b).collect();
+                let c_sh: Vec<BitslicedGf256x64> = (0..n).map(|p| vaults[p].triples[k].c).collect();
+                let a = open_and_check_degree_bs_gf256(t, &pts, &a_sh, "test").unwrap();
+                let b = open_and_check_degree_bs_gf256(t, &pts, &b_sh, "test").unwrap();
+                let c = open_and_check_degree_bs_gf256(t, &pts, &c_sh, "test").unwrap();
+                assert_eq!(&a[1..], &[0u64; 7]);
+                assert_eq!(&b[1..], &[0u64; 7]);
+                assert_eq!(&c[1..], &[0u64; 7]);
+                assert_eq!(c[0], a[0] & b[0]);
+            }
+
+            // The bucket assignment is a permutation of all `3 * num_triples` raw triples.
+            let mut sorted = perm.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..(3 * num_triples) as u32).collect::<Vec<u32>>());
+
+            // The fixed layout paired raw `k` with `k + N` and `k + 2N` for every `k`.
+            let fixed_layout = (0..num_triples).all(|k| {
+                let members = bucket_members(&perm, num_triples, k);
+                members.contains(&(k + num_triples)) && members.contains(&(k + 2 * num_triples))
+            });
+            assert!(!fixed_layout, "buckets must not follow the fixed k, k+N, k+2N layout");
+            perms.push(perm);
+        }
+
+        // (b) Different party coin randomness gives a different pairing.
+        assert_ne!(perms[0], perms[1]);
+        let partners_differ = (0..3 * num_triples).any(|raw| {
+            let mut m0 = bucket_members(&perms[0], num_triples, raw);
+            let mut m1 = bucket_members(&perms[1], num_triples, raw);
+            m0.sort_unstable();
+            m1.sort_unstable();
+            m0 != m1
+        });
+        assert!(partners_differ);
+    }
+
+    #[test]
+    fn test_pi_triple_f2_targeted_pair_deviation_is_detected_and_partner_not_fixed() {
+        let sid = [0x7B; 32];
+        let t = 2usize;
+        let n = 2usize;
+        let num_triples = 2usize;
+        let pts: Vec<TowerGf256> = (1..=n as u8).map(TowerGf256).collect();
+        let target = 1usize;
+        let old_partner = target + 2 * num_triples;
+
+        // The reviewed attack deviates on raw triple `k` and on `k + 2N`, the raw triple that
+        // the fixed layout combined it with. A deviation that changes the product (the case
+        // where the targeted receiver bit is 1) is a consistent offset on `c`; the companion
+        // sacrifice rejects it.
+        let mut offset_rng = PartyPrivateRng::from_seed([0x7C; 32], b"test");
+        let bad_offset = shamir_share_bits64_gf256(t, &pts, 1u64 << 17, &mut offset_rng);
+        let err = run_pi_triple_f2_with_buckets(sid, t, &pts, num_triples, 0x53, |p, _, c_vec| {
+            bs_gf256_xor_assign(&mut c_vec[target], &bad_offset[p]);
+            bs_gf256_xor_assign(&mut c_vec[old_partner], &bad_offset[p]);
+        })
+        .unwrap_err();
+        assert_eq!(
+            err,
+            PreprocessError::SacrificeResidualNonZero {
+                phase: "pi_triple_f2"
+            }
+        );
+
+        // The partner of `k` is decided by the coin, which is drawn after the shares (and so
+        // any deviation) are fixed. Over independent coins the old partner shares a bucket with
+        // `k` only at the chance rate `2 / (3N - 1)`, here 2/47: about 17 of 400, and 400 of 400
+        // under the fixed layout.
+        let wide = 16usize;
+        let wide_partner = target + 2 * wide;
+        let mut same_bucket = 0usize;
+        let mut distinct_partner_sets = alloc::collections::BTreeSet::new();
+        for trial in 0u32..400 {
+            let mut coin = [0x7Du8; 32];
+            coin[0..4].copy_from_slice(&trial.to_le_bytes());
+            let perm = derive_coin_permutation(&coin, b"PI_TRIPLE_F2_BUCKET", 3 * wide);
+            let mut members = bucket_members(&perm, wide, target);
+            if members.contains(&wide_partner) {
+                same_bucket += 1;
+            }
+            members.sort_unstable();
+            distinct_partner_sets.insert(members);
+        }
+        assert!(same_bucket <= 50, "old partner hit {} of 400 times", same_bucket);
+        assert!(distinct_partner_sets.len() >= 300);
+
+        // In full runs the pairing of `k` likewise varies with the parties' coin shares.
+        let mut partner_sets = alloc::collections::BTreeSet::new();
+        for rng_tag in [0x54u8, 0x55, 0x56] {
+            let (_, perm) =
+                run_pi_triple_f2_with_buckets(sid, t, &pts, num_triples, rng_tag, |_, _, _| {})
+                    .expect("honest run");
+            let mut members = bucket_members(&perm, num_triples, target);
+            members.sort_unstable();
+            partner_sets.insert(members);
+        }
+        assert!(partner_sets.len() >= 2, "bucket of raw triple {} never changed", target);
+    }
+
+    #[test]
+    fn test_dealerless_pi_pow7_and_canonical_a2b_masks() {
+        let sid = [0x88; 32];
+        // Dishonest majority 3-of-4 (`2t - 1 = 5 > 4`)
+        let t = 3usize;
+        let n = 4usize;
+        let pts: Vec<Goldilocks> = (1..=n as u64).map(Goldilocks::from_u64_reduced).collect();
+        let mut rngs = make_party_rngs(n, 0x60);
+        let mut mesh = OtMesh::establish(sid, &mut rngs);
+
+        let mut vaults =
+            run_dealerless_pi_pow7(sid, t, &pts, 2, 2, 1, &mut mesh, &mut rngs).unwrap();
+        let alpha_sh: Vec<GoldilocksExt2> = (0..n).map(|p| vaults[p].mac_alpha_share).collect();
+        let alpha_global = open_and_check_degree_ext2(t, &pts, &alpha_sh, "alpha").unwrap();
+
+        for k in 0..2 {
+            let mut pows = [Goldilocks::ZERO; 7];
+            for (d, pows_d_item) in pows[..7].iter_mut().enumerate() {
+                let sh: Vec<Goldilocks> =
+                    (0..n).map(|p| vaults[p].pow7_tuples[k].r_pows[d]).collect();
+                *pows_d_item = open_and_check_degree_goldilocks(t, &pts, &sh, "test").unwrap();
+                let mac_sh: Vec<GoldilocksExt2> =
+                    (0..n).map(|p| vaults[p].pow7_tuples[k].r_macs[d]).collect();
+                let mac = open_and_check_degree_ext2(t, &pts, &mac_sh, "mac").unwrap();
+                assert_eq!(mac, alpha_global.mul_base(*pows_d_item));
+            }
+            let r = pows[0];
+            assert_eq!(pows[1], r * r);
+            assert_eq!(pows[2], r * r * r);
+            assert_eq!(pows[6], poseidon2_sbox7(r));
+        }
+
+        // Verify A2B masks are Boolean, sum strictly `< p`, and carry valid SPDZ MACs
+        for m in 0..1 {
+            let mut acc_u128 = 0u128;
+            for bit in 0..64 {
+                let b_sh: Vec<Goldilocks> =
+                    (0..n).map(|p| vaults[p].a2b_masks[m].bit_shares[bit]).collect();
+                let b_mac: Vec<GoldilocksExt2> =
+                    (0..n).map(|p| vaults[p].a2b_masks[m].bit_macs[bit]).collect();
+                let b_f = commit_and_open_spdz_goldilocks_quorum(
+                    &sid,
+                    "a2b_bit_spdz",
+                    t,
+                    &pts[..t],
+                    &b_sh[..t],
+                    &b_mac[..t],
+                    &alpha_sh[..t],
+                    &mut rngs[..t],
+                )
+                .unwrap();
+                let b_val = b_f.to_canonical_u64();
+                assert!(b_val == 0 || b_val == 1);
+                acc_u128 |= (b_val as u128) << bit;
+            }
+            assert!(acc_u128 < (crate::field::goldilocks::GOLDILOCKS_PRIME as u128));
+            let f_sh: Vec<Goldilocks> =
+                (0..n).map(|p| vaults[p].a2b_masks[m].field_sum_share).collect();
+            let f_mac: Vec<GoldilocksExt2> =
+                (0..n).map(|p| vaults[p].a2b_masks[m].field_sum_mac).collect();
+            let f_val = commit_and_open_spdz_goldilocks_quorum(
+                &sid,
+                "a2b_sum_spdz",
+                t,
+                &pts[..t],
+                &f_sh[..t],
+                &f_mac[..t],
+                &alpha_sh[..t],
+                &mut rngs[..t],
+            )
+            .unwrap()
+            .to_canonical_u64();
+            assert_eq!(f_val as u128, acc_u128);
+        }
+
+        // Poisoning wipes `mac_alpha_share` and blocks vault pops
+        vaults[0].poison_and_wipe();
+        assert_eq!(vaults[0].mac_alpha_share, GoldilocksExt2::ZERO);
+        assert_eq!(
+            vaults[0].pop_pow7().unwrap_err(),
+            PreprocessError::VaultPoisoned { kind: "Poseidon2 pow7" }
+        );
+
+        let bad_off = shamir_share_goldilocks(t, &pts, Goldilocks::ONE, &mut rngs[0]);
+        let err = run_dealerless_pi_pow7_with_fault(
+            [0x89; 32],
+            t,
+            &pts,
+            1,
+            0,
+            0,
+            &mut mesh,
+            &mut rngs,
+            |p, c_vec| {
+                c_vec[0] += bad_off[p];
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            PreprocessError::SacrificeResidualNonZero { phase: "pi_pow7" }
+        );
+    }
+}
+
+#[cfg(test)]
+mod hardening_regressions {
+    #[test]
+    fn gaussian_witness_energy_rejects_overweight_and_nonternary_inputs() {
+        let s = RlwePoly([1; RLWE_N]);
+        let mut e = RlwePoly([0; RLWE_N]);
+        e.0[..RLWE_WITNESS_ENERGY_BOUND - RLWE_N].fill(RLWE_Q - 1);
+        assert!(bounded_ternary_witness(&s, &e));
+        e.0[RLWE_WITNESS_ENERGY_BOUND - RLWE_N] = 1;
+        assert!(!bounded_ternary_witness(&s, &e));
+        e.0.fill(0);
+        e.0[0] = 2;
+        assert!(!bounded_ternary_witness(&s, &e));
+    }
+
+    #[test]
+    fn gaussian_early_rejection_preserves_exact_samples() {
+        // Exhaust the mask domain, including the wider box endpoints.
+        for x in -3072i64..=3072 {
+            let exponent = (x * x) as u64;
+            let exact = gaussian_exp_probability::<24>(exponent);
+            let upper = gaussian_exp_upper_bound(exponent);
+            assert!(u128::from(exact[2]) < upper);
+            let rounded = gaussian_exp_probability::<24>(exponent & !0x3fff);
+            assert!(upper - u128::from(rounded[2]) <= 21);
+        }
+        for response in [false, true] {
+            let mut fast = PartyPrivateRng::from_seed([0x61; 32], b"gaussian-parity");
+            let mut reference = PartyPrivateRng::from_seed([0x61; 32], b"gaussian-parity");
+            let half = if response { RLWE_ZKPOK_Z_BOUND } else { RLWE_ZKPOK_Z_BOUND + 2 };
+            for _ in 0..8 {
+                let expected: [i16; RLWE_N] = core::array::from_fn(|_| loop {
+                    let mut coins = [0; 26];
+                    reference.fill_bytes(&mut coins);
+                    let proposal = u16::from_le_bytes([coins[0], coins[1]]) & 0x1fff;
+                    let valid = proposal < 2 * half as u16;
+                    let x = (proposal & 0u16.wrapping_sub(u16::from(valid))) as i16 - half;
+                    let probability = gaussian_exp_probability::<24>((i64::from(x) * i64::from(x)) as u64);
+                    let random = core::array::from_fn(|i| u64::from_le_bytes(
+                        core::array::from_fn(|j| coins[2 + 8*i + j])));
+                    if gaussian_fraction_lt(random, probability) & valid { break x; }
+                });
+                assert_eq!(sample_gaussian_box(&mut fast, response), expected);
+            }
+            assert_eq!(fast.next_bytes32(), reference.next_bytes32());
+        }
+    }
+
+    #[test]
+    fn gaussian_fixed_point_and_signed_encoding_regressions() {
+        let vectors = [
+            ([0x0000000000000000, 0x0000000000000000, 0x0000000000000000], [0x0000000000000000, 0x0000000000000000, 0x0000000000000000], [0x0000000000000000, 0x0000000000000000, 0x0000000000000000]),
+            ([0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff], [0xffffffffffffffff, 0xffffffffffffffff, 0xffffffffffffffff], [0xfffffffffffffffe, 0xffffffffffffffff, 0xffffffffffffffff]),
+            ([0x0000000000000000, 0x0000000000000000, 0x8000000000000000], [0x0000000000000000, 0x0000000000000000, 0x8000000000000000], [0x0000000000000000, 0x0000000000000000, 0x4000000000000000]),
+            ([0x6014507ff930c949, 0x2cf7b739274dff8c, 0x61bcb43777160001], [0x4ddb63c11326c96a, 0x928291a04d74bd65, 0x8bba6dff24ffe4a1], [0x994355c4fa1a380c, 0xb14c99d84fa1d3b4, 0x3558a2f3cfc8d489]),
+            ([0x6004fe755afeb7fa, 0x99589bc0a8523e54, 0x0057101def3c8efc], [0xb447956ab300c18e, 0xc381f70308d60d1b, 0x052d3beeac8875ef], [0x7362140f8fb0a529, 0x3932d5ccc26f171d, 0x0001c2b2ccd1cba4]),
+            ([0xf7ac7bbe142ae0fa, 0x7a177925c88483e4, 0x965179c14ec364d6], [0x463bb39b81c52669, 0x212422d54eb4541b, 0xfa5dd0c6b3c0c132], [0xa9bbc172d8257923, 0x196b76b6cf0df9e1, 0x9302a716e1a1cfa5]),
+            ([0x60e666f9bd0f7d26, 0xa92e05e46db888d2, 0x6f1e3fe1377d50b3], [0x1c0ad2df2abe85f1, 0x8fe7168433e8cb02, 0x5104d2d66fd6eb12], [0x2200f7fffb8fb5c7, 0x2ad933d245dcd267, 0x232aaa33264f114c]),
+            ([0xc15a4ede0be61b32, 0x6735231d6c88fce9, 0x60b24dcef7168b11], [0x7e500f7fe9114bf6, 0x5d9b4e6816a7c70c, 0xfbe4672753993448], [0x139ab51a5e768557, 0xca318cbaff11e1da, 0x5f25180dd0a2f7e9]),
+            ([0x2819bcd0144b1fc2, 0x5f54ab4b0224d706, 0xd4203e771187f9b0], [0xe333474131549297, 0x64664ddd53c99715, 0xd45d20e208af1cf2], [0xbee22b75ef5620e5, 0x09b7e53a38eb5adb, 0xaff7deb09f3e1c75]),
+            ([0xf661780090c57d30, 0x098bf69e15023400, 0x68d3f90b8e7a7768], [0xea3acbb94239efff, 0x7689678e497106b8, 0xebd2970f3d43d0f7], [0x4a723e06d370dadc, 0x8818cbfbb405c161, 0x6090d15b2cacfc2d]),
+            ([0x3cfb5b7151707404, 0x880087b562bae564, 0x580fa697214fefca], [0x74f4c085da2221ee, 0xeec40f38322beba1, 0x630354181ec6d6b8], [0xb429ae69f91bc144, 0xbd93ee97eb7edc3c, 0x220f3288d45ebe41]),
+            ([0x3447b2216365d2a5, 0xeec753bf6f2aba9f, 0xb61dd1ba35c4f4af], [0x09da5a75f2152d42, 0x0835ba039102776f, 0xda91eb0cf2b40702], [0xb9dc372a3f51b286, 0x7b65d46d3a16bb06, 0x9b7d32b2f1d63338]),
+            ([0x6343e36b763c134b, 0x6c60f7581a504718, 0x50d06ff03873a409], [0x9d9b71229ad2551c, 0x3142cea4b94b437c, 0xbd6b015a2504e0fe], [0xdb3b7bea22836b35, 0xe9776e8698395d5a, 0x3bcbaa30687bed92]),
+            ([0x0e0e6f9f27252c47, 0xed938ededc8401bb, 0x36687a9a96e81572], [0xec99e2ae26b8f518, 0xdfef2c778e994ec2, 0xd62d34da314b3891], [0x1574924fa47891f7, 0xdb8e74f4b6335435, 0x2d84f2165fac531e]),
+            ([0x0f5e9b4953bc2d90, 0x3e104c2896c2c2da, 0x80d4681b0bab50c5], [0xb6db9067f9169b21, 0x99eff90ea26a4d0d, 0xdc56a7499f155f11], [0x174ad8491040ed11, 0xbdcf93db986f2d37, 0x6ee22501d3a72736]),
+            ([0x480c438810f20565, 0x796d0c6bbbdf1b32, 0x9adf1a43a6c20ea6], [0xfa0958ff3f6761b9, 0x8daa6cf1ec56fcfb, 0xaa8de815d392bf58], [0x7824d1977bc289ee, 0xed89e5f505d1d778, 0x672e00b9c818d6ed]),
+            ([0xbd56cdf245df737d, 0xe43ee088dff86a9f, 0xe3518d8dc7adff5e], [0xb972e8e63c6cc1b5, 0xe1c645d9d5ea329a, 0x59ca12c7e7a908bb], [0x684ef1ec9ee10999, 0xb5b0891a9d998f13, 0x4fbac93d3a58bda6]),
+            ([0xdb5c5ca15e439cff, 0xcb0c0db7f3eee465, 0x9f3c2e4e18210981], [0xe3553d6c77956d75, 0xf1e6567405bd7735, 0x252fa2738eb1efcb], [0x288ce05b1548ca25, 0x9fd3fcfefed6b0e8, 0x172153c9bfeb7c3d]),
+            ([0xd6eeb05ab8bbf310, 0x11d333606941a5ce, 0x6190b31b084e4cdc], [0xdbd03ebcb6c9c24b, 0x61a8d6ae2982baec, 0x9f9c7ee38bbbfdb7], [0x1aaf2e5fc5b68b33, 0xd35b02a003d4809d, 0x3cd483c6df590726]),
+        ];
+        for (a, b, expected) in vectors {
+            assert_eq!(gaussian_fraction_mul(a, b), expected);
+            assert_eq!(gaussian_fraction_lt(a, b), a.iter().rev().cmp(b.iter().rev()).is_lt());
+        }
+        let mut rng = PartyPrivateRng::from_seed([0x79; 32], b"gaussian-test");
+        for _ in 0..8 {
+            let response = sample_gaussian_box(&mut rng, true);
+            assert!(response.iter().all(|x| (-RLWE_ZKPOK_Z_BOUND..RLWE_ZKPOK_Z_BOUND).contains(x)));
+        }
+        for value in [-12000, -6145, -1, 0, 6145, 12000] {
+            let encoded = signed_box_to_rlwe_poly(&[value; RLWE_N]);
+            assert!(encoded.0.iter().all(|&x| i32::from(x) == i32::from(value).rem_euclid(i32::from(RLWE_Q))));
+        }
+        // Even a large positive log ratio must not wrap the fixed-point
+        // exponent into an accepting probability.
+        assert!(!gaussian_accept(690_000_000, &mut rng));
+        assert!(!gaussian_accept(1 << 40, &mut rng));
+        assert!(gaussian_accept(-690_000_000, &mut rng));
+    }
+
+    #[test]
+    #[ignore = "Full 384-transfer bootstrap soak; proof, FO, CRS and KOS regressions run by default"]
+    fn full_base_ot_bootstrap_soak() {
+        let mut sender = PartyPrivateRng::from_seed([0x31; 32], b"bootstrap-soak");
+        let mut receiver = PartyPrivateRng::from_seed([0x32; 32], b"bootstrap-soak");
+        let (mut send, mut recv) = try_establish_rlwe_ot_ext_channel(
+            [0x33; 32], 0, 1, &mut sender, &mut receiver).unwrap();
+        let choices = [0x1234_5678_9abc_def0];
+        let (rp, u) = recv.round1_send_u_cols(&choices, &mut receiver);
+        let (sp, challenge) = send.round2_sample_challenge(&u, &mut sender).unwrap();
+        let (proof, received) = recv.round3_prove_and_finish(rp, &challenge);
+        let sent = send.round4_verify_and_finish(sp, &proof).unwrap();
+        for (bit, (&got, &(zero, one))) in received.iter().zip(&sent).enumerate() {
+            assert_eq!(got, if (choices[0] >> bit) & 1 == 0 { zero } else { one });
+        }
+    }
+
+    #[test]
+    fn joint_proof_ot_roundtrip_both_choices() {
+        let sid = [0xaa;32];
+        let mut receiver = PartyPrivateRng::from_seed([0x22;32], b"joint-proof");
+        let mut sender = PartyPrivateRng::from_seed([0x11;32], b"joint-proof");
+        for index in 0..2 {
+            let (secret, request) = rlwe_ot_choose(&sid, 0, 1, index, index == 1, &mut receiver);
+            let mut malformed = request.clone();
+            malformed.pok.chal0[0] |= 1 << 20;
+            assert!(try_rlwe_ot_transfer(&sid, 0, 1, index, &malformed,
+                &[0x31;32], &[0x72;32], &mut sender).is_err());
+            let mut malformed = request.clone();
+            malformed.pok.z_s0[0][0] = RLWE_ZKPOK_Z_BOUND;
+            assert!(try_rlwe_ot_transfer(&sid, 0, 1, index, &malformed,
+                &[0x31;32], &[0x72;32], &mut sender).is_err());
+            let response = try_rlwe_ot_transfer(&sid, 0, 1, index, &request,
+                &[0x31;32], &[0x72;32], &mut sender).unwrap();
+            assert_eq!(rlwe_ot_decrypt(&secret, &response).unwrap(), if index == 1 { [0x72;32] } else { [0x31;32] });
+        }
+    }
+
+    #[test]
+    fn opening_tables_reconstruct_and_reject_off_polynomial() {
+        let points: Vec<_> = (1..=5).map(Goldilocks::from_u64_reduced).collect();
+        let tables = GoldilocksOpeningTables::new(3, &points).unwrap();
+        let mut shares: Vec<_> = points.iter().map(|&x| Goldilocks::from_u64_reduced(17) + x + x*x).collect();
+        assert_eq!(tables.open(&shares, "table").unwrap(), Goldilocks::from_u64_reduced(17));
+        shares[4] += Goldilocks::ONE;
+        assert!(tables.open(&shares, "table").is_err());
+        let points: Vec<_> = (1..=5).map(TowerGf256).collect();
+        let tables = Gf256OpeningTables::new(3, &points).unwrap();
+        let mut shares: Vec<_> = points.iter().map(|&x| TowerGf256(17).add(x).add(x.mul(x))).collect();
+        assert_eq!(tables.open(&shares, "table").unwrap(), TowerGf256(17));
+        shares[4] = shares[4].add(TowerGf256::ONE);
+        assert!(tables.open(&shares, "table").is_err());
+    }
+
+    use super::*;
+    #[test]
+    fn kos_transpose_orientation_and_tail() {
+        let cols: Vec<Vec<u64>> = (0..128).map(|i| vec![1u64 << (i % 64), !0u64]).collect();
+        let rows = transpose_cols128_to_rows(&cols, 2);
+        for b in 0..64 {
+            let expected = (1u128 << b) | (1u128 << (b + 64));
+            assert_eq!(rows[b], expected);
+            assert_eq!(rows[64 + b], u128::MAX);
+        }
+        for col in 0..128 {
+            for bit in 0..64 {
+                let mut cols = vec![vec![0]; 128];
+                cols[col][0] = 1u64 << bit;
+                let rows = transpose_cols128_to_rows(&cols, 1);
+                assert_eq!(rows[bit], 1u128 << col);
+                assert_eq!(rows.iter().filter(|&&x| x != 0).count(), 1);
+            }
+        }
+    }
+    #[test]
+    fn joint_challenge_binds_every_repetition() {
+        let zero = RlwePoly([0; RLWE_N]);
+        let mut commitments = vec![(zero, zero); RLWE_ZKPOK_REPS];
+        let base = hash_rlwe_zkpok_joint_challenges(&[0;32], &[1;32], 0, 1, 0, &zero, &zero, &commitments);
+        for rep in 0..RLWE_ZKPOK_REPS {
+            commitments[rep].0.0[0] ^= 1;
+            let changed = hash_rlwe_zkpok_joint_challenges(&[0;32], &[1;32], 0, 1, 0, &zero, &zero, &commitments);
+            assert!(base.iter().zip(changed).all(|(a,b)| *a != b));
+            commitments[rep].0.0[0] ^= 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod assurance_tests {
+    use super::*;
+    #[test]
+    fn hostile_counts_are_rejected_before_allocation() {
+        assert!(validate_frame_count(usize::MAX, 64, usize::MAX).is_err());
+        assert!(validate_frame_count(1, MAX_FRAME_BUDGET + 1, usize::MAX).is_err());
+        assert!(validate_frame_count(2, 64, 127).is_err());
+        assert!(validate_frame_count(2, 64, 128).is_ok());
+        let mut wire = vec![0u8; 111];
+        wire[..8].copy_from_slice(PCG_WIRE_MAGIC);
+        wire[42..44].copy_from_slice(&u16::MAX.to_le_bytes());
+        wire[44] = PCG_MIN_TREE_DEPTH as u8;
+        wire[109..111].copy_from_slice(&(u16::MAX - 1).to_le_bytes());
+        assert!(PcgPartySeed::from_wire_bytes(&wire).is_err());
+    }
+    #[test]
+    fn reservations_are_disjoint_and_fail_without_rewind() {
+        let mut cursor = 0;
+        assert_eq!(reserve_material(&mut cursor, 8, 3, false, "test").unwrap(), 0..3);
+        assert_eq!(reserve_material(&mut cursor, 8, 2, false, "test").unwrap(), 3..5);
+        assert!(reserve_material(&mut cursor, 8, usize::MAX, false, "test").is_err());
+        assert_eq!(cursor, 5);
+        assert!(reserve_material(&mut cursor, 8, 1, true, "test").is_err());
+        assert_eq!(cursor, 5);
+    }
+    #[test]
+    fn zero_entropy_randomizers_bind_messages() {
+        use crate::fips205::fips205_prf_msg;
+        let key = [0x51; 32];
+        let entropy = [0; 32];
+        let a = fips205_prf_msg(32, &key, &entropy, b"message one");
+        let b = fips205_prf_msg(32, &key, &entropy, b"message two");
+        assert_ne!(a.as_slice(), b.as_slice());
+    }
+    #[test]
+    fn subtraction_reducer_matches_remainder_oracle() {
+        let p = crate::field::goldilocks::GOLDILOCKS_PRIME as u128;
+        for x in [0, 1, p - 1, p, p + 1, u64::MAX as u128, u128::MAX] {
+            assert_eq!(Goldilocks::reduce128(x).to_canonical_u64(), (x % p) as u64);
+        }
+        let mut rng = PartyPrivateRng::from_seed([2; 32], b"reduction test");
+        for _ in 0..4096 {
+            let x = rng.next_u128();
+            assert_eq!(Goldilocks::reduce128(x).to_canonical_u64(), (x % p) as u64);
+        }
+    }
+    #[test]
+    fn restored_rng_new_message_changes_masks() {
+        let mut a = PartyPrivateRng::from_seed([19; 32], b"test");
+        let mut b = PartyPrivateRng::from_seed([19; 32], b"test");
+        a.hedge_transcript(b"session/message one");
+        b.hedge_transcript(b"session/message two");
+        assert_ne!(a.next_bytes32(), b.next_bytes32());
+        let mut a = HedgedTranscriptRng::new([7; 32], 0);
+        let mut b = HedgedTranscriptRng::new([7; 32], 0);
+        let (mut x, mut y) = ([0; 32], [0; 32]);
+        a.fill_bytes(&[0; 32], b"one", &mut x).unwrap();
+        b.fill_bytes(&[0; 32], b"two", &mut y).unwrap();
+        assert_ne!(x, y);
+        let mut exhausted = HedgedTranscriptRng::new([7; 32], u64::MAX);
+        assert!(exhausted.fill_bytes(&[], &[], &mut x).is_err());
+    }
+}

@@ -2451,3 +2451,913 @@ const fn n_requires_derand_preview(num_parties: usize) -> bool {
 }
 
 
+// ============================================================================
+// 7. Mandatory Statistical Uniformity, Exact Correlation & Adversarial Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn count_ones_words(words: &[u64]) -> usize {
+        words.iter().map(|w| w.count_ones() as usize).sum()
+    }
+
+    fn count_ones_tower128s(elems: &[Tower128]) -> usize {
+        elems.iter().map(|e| e.0.count_ones() as usize).sum()
+    }
+
+    fn assert_hamming_weight_uniform_64k(label: &str, words: &[u64]) {
+        assert_eq!(words.len(), DENSE_PCG_NUM_WORDS);
+        // Strict `[0.47, 0.53] * 64 * 1024 = [30_802, 34_734]` (`ceil(0.47*65536)..=floor(0.53*65536)`)
+        let min_wt = 30_802usize;
+        let max_wt = 34_734usize;
+        let wt = count_ones_words(words);
+        assert!(
+            (min_wt..=max_wt).contains(&wt),
+            "{} Hamming weight {} outside strict [0.47, 0.53] * 65536 = [{}..={}]",
+            label,
+            wt,
+            min_wt,
+            max_wt
+        );
+    }
+
+    fn make_party_rngs(n: usize, tag: u8) -> Vec<PartyPrivateRng> {
+        (0..n)
+            .map(|p| {
+                let mut seed = [0u8; 32];
+                seed[0] = tag;
+                seed[1] = p as u8;
+                seed[2] = 0xA5;
+                PartyPrivateRng::from_seed(seed, b"QSAG.DPCG.TEST.RNG/v1")
+            })
+            .collect()
+    }
+
+    /// The earlier punctured traversal, which skips the unknown node and indexes by the punctured
+    /// path. Kept as the reference the oblivious traversal must match bit for bit.
+    fn ggm_expand_punctured_reference(
+        dom: &GgmTreeDomain,
+        d: usize,
+        punctured_idx: usize,
+        copath: &[[u8; 32]],
+    ) -> PuncturedGgmExpansion {
+        let mut cur_level = vec![[0u8; 32]; 1];
+        let mut missing_prefix = 0usize;
+
+        for (lvl, sibling_msg) in copath.iter().enumerate().take(d) {
+            let bit = (punctured_idx >> (d - 1 - lvl)) & 1;
+            let mut next_level = vec![[0u8; 32]; cur_level.len() * 2];
+            let mut known_xor = [0u8; 32];
+
+            let mut batch = PuncturedNodeBatch4 {
+                indices: [0usize; 4],
+                seeds: [[0u8; 32]; 4],
+                len: 0,
+            };
+
+            for (idx, node) in cur_level.iter().enumerate() {
+                if idx == missing_prefix {
+                    continue;
+                }
+                batch.indices[batch.len] = idx;
+                batch.seeds[batch.len] = *node;
+                batch.len += 1;
+
+                if batch.len == 4 {
+                    flush_punctured_batch(dom, lvl as u8, bit, &batch, &mut next_level, &mut known_xor);
+                    batch.clear_and_wipe();
+                }
+            }
+            if batch.len > 0 {
+                flush_punctured_batch(dom, lvl as u8, bit, &batch, &mut next_level, &mut known_xor);
+                batch.clear_and_wipe();
+            }
+
+            let mut recovered_sibling = [0u8; 32];
+            for ((dst, &msg_b), &kn_b) in recovered_sibling
+                .iter_mut()
+                .zip(sibling_msg.iter())
+                .zip(known_xor.iter())
+            {
+                *dst = msg_b ^ kn_b;
+            }
+            let sibling_pos = (missing_prefix << 1) | (bit ^ 1);
+            next_level[sibling_pos] = recovered_sibling;
+            wipe_bytes32(&mut recovered_sibling);
+            wipe_bytes32(&mut known_xor);
+            missing_prefix = (missing_prefix << 1) | bit;
+
+            for node in &mut cur_level {
+                wipe_bytes32(node);
+            }
+            cur_level = next_level;
+        }
+
+        let num_leaves = 1usize << d;
+        let mut punc_leaves = vec![0u128; num_leaves];
+        let mut punc_xor = 0u128;
+        for ((idx, dst), node) in punc_leaves.iter_mut().enumerate().zip(cur_level.iter_mut()) {
+            if idx != punctured_idx {
+                let val = read_u128_le(node, 0);
+                *dst = val;
+                punc_xor ^= val;
+            }
+            wipe_bytes32(node);
+        }
+
+        PuncturedGgmExpansion {
+            punc_leaves,
+            punc_xor_sum: Tower128(punc_xor),
+        }
+    }
+
+    struct PuncturedNodeBatch4 {
+        indices: [usize; 4],
+        seeds: [[u8; 32]; 4],
+        len: usize,
+    }
+
+    impl PuncturedNodeBatch4 {
+        #[inline]
+        fn clear_and_wipe(&mut self) {
+            for s in &mut self.seeds {
+                wipe_bytes32(s);
+            }
+            self.len = 0;
+        }
+    }
+
+    fn flush_punctured_batch(
+        dom: &GgmTreeDomain,
+        lvl: u8,
+        bit: usize,
+        batch: &PuncturedNodeBatch4,
+        next_level: &mut [[u8; 32]],
+        known_xor: &mut [u8; 32],
+    ) {
+        let count = batch.len;
+        let mut states = [[0u64; 25]; 4];
+        for ((lane, &idx), seed) in states
+            .iter_mut()
+            .zip(batch.indices.iter())
+            .zip(batch.seeds.iter())
+            .take(count)
+        {
+            encode_ggm_node_state(dom, lvl, idx as u32, seed, lane);
+        }
+        qsag_asm::keccak_f1600_batch(&mut states[..count]);
+        for (&idx, state) in batch.indices.iter().zip(states.iter_mut()).take(count) {
+            let mut left = [0u8; 32];
+            let mut right = [0u8; 32];
+            for word in 0..4 {
+                    left[8 * word..8 * (word + 1)].copy_from_slice(&state[word].to_le_bytes());
+                    right[8 * word..8 * (word + 1)].copy_from_slice(&state[word + 4].to_le_bytes());
+                }
+            if bit == 0 {
+                for (kx, &rb) in known_xor.iter_mut().zip(right.iter()) {
+                    *kx ^= rb;
+                }
+            } else {
+                for (kx, &lb) in known_xor.iter_mut().zip(left.iter()) {
+                    *kx ^= lb;
+                }
+            }
+            next_level[2 * idx] = left;
+            next_level[2 * idx + 1] = right;
+            wipe_bytes32(&mut left);
+            wipe_bytes32(&mut right);
+            wipe_u64s(state);
+        }
+    }
+
+    /// Copath the sender's OT messages deliver for `punctured_idx`: per level, the XOR of the
+    /// children on the side opposite the punctured path.
+    fn copath_for(full: &FullGgmExpansion, d: usize, punctured_idx: usize) -> Vec<[u8; 32]> {
+        (0..d)
+            .map(|lvl| {
+                let (l_xor, r_xor) = full.level_lr_xors[lvl];
+                if (punctured_idx >> (d - 1 - lvl)) & 1 == 0 {
+                    r_xor
+                } else {
+                    l_xor
+                }
+            })
+            .collect()
+    }
+
+    fn assert_oblivious_matches_reference(
+        dom: &GgmTreeDomain,
+        d: usize,
+        full: &FullGgmExpansion,
+        punctured_idx: usize,
+    ) {
+        let copath = copath_for(full, d, punctured_idx);
+        let reference = ggm_expand_punctured_reference(dom, d, punctured_idx, &copath);
+        let oblivious = ggm_expand_punctured_oblivious(dom, d, punctured_idx, &copath);
+        assert_eq!(
+            oblivious.punc_leaves, reference.punc_leaves,
+            "leaves differ at depth {} index {}",
+            d, punctured_idx
+        );
+        assert_eq!(oblivious.punc_xor_sum, reference.punc_xor_sum);
+        // Independent of the reference: every leaf but the punctured one equals the sender's.
+        assert_eq!(oblivious.punc_leaves.len(), 1usize << d);
+        for (u, (&got, &want)) in oblivious.punc_leaves.iter().zip(full.leaves.iter()).enumerate() {
+            if u == punctured_idx {
+                assert_eq!(got, 0);
+            } else {
+                assert_eq!(got, want, "leaf {} at depth {} index {}", u, d, punctured_idx);
+            }
+        }
+    }
+
+    #[test]
+    fn all_256_ggm_seed_bits_affect_expansion() {
+        let dom = GgmTreeDomain { session_id: [1; 32], sender_id: 0, receiver_id: 1, tree_idx: 0 };
+        let baseline = ggm_expand_full_depth(&dom, 2, &[0; 32]);
+        for bit in 0..256 {
+            let mut root = [0; 32]; root[bit / 8] = 1 << (bit % 8);
+            let changed = ggm_expand_full_depth(&dom, 2, &root);
+            assert_ne!(baseline.leaves, changed.leaves);
+        }
+    }
+
+    #[test]
+    fn real_ot_parity_masks_bind_the_checked_correlation() {
+        let sid = [0x72; 32];
+        let mut rngs = make_party_rngs(2, 0x71);
+        let mut mesh = OtMesh::establish(sid, &mut rngs);
+        let alpha = Tower128(0x123456789abcdef1);
+        let mask = run_lhl_vole128_mask(&sid, 0, 1, 0, alpha, &mut mesh, &mut rngs).unwrap();
+        assert_eq!(mask.mac_receiver.add(mask.key_sender), mask.x_receiver.mul(alpha));
+        assert!(run_lhl_vole128_mask(&sid, 0, 1, 1, Tower128(alpha.0 ^ 1), &mut mesh, &mut rngs).is_err());
+    }
+
+    #[test]
+    fn receiver_refuses_even_spcot_correlation_despite_matching_tags() {
+        let pads = [[0x42; 48]; 256];
+        let mut msg = SpcotParityMessage { corrections: [Tower128(1); 256], key_parities: [0; 4] };
+        assert!(msg.verify_receiver(&[u64::MAX; 4], &pads).is_ok());
+        assert!(msg.verify_receiver(&[0; 4], &pads).is_ok());
+        // An even correlation cannot satisfy both branches for any key parity.
+        msg.corrections.fill(Tower128(0));
+        assert!(msg.verify_receiver(&[u64::MAX; 4], &pads).is_err());
+        msg.key_parities.fill(u64::MAX);
+        assert!(msg.verify_receiver(&[0; 4], &pads).is_err());
+        assert!(verify_spcot_receiver_tag(&[7; 32], &[7; 32], 0).is_ok());
+        assert!(verify_spcot_receiver_tag(&[7; 32], &[8; 32], 0).is_err());
+    }
+
+    #[test]
+    fn multiparty_wire_seed_cannot_bypass_size_cap() {
+        let mut bytes = vec![0u8; DENSE_PCG_MAX_SEED_BYTES + 1];
+        bytes[..8].copy_from_slice(DENSE_PCG_WIRE_MAGIC);
+        bytes[42..44].copy_from_slice(&3u16.to_le_bytes());
+        bytes[44] = 14; bytes[45] = 1;
+        bytes[61..63].copy_from_slice(&2u16.to_le_bytes());
+        assert!(DensePcgPartySeed::from_wire_bytes(&bytes).is_err());
+    }
+
+    #[test]
+    fn oblivious_punctured_ggm_matches_reference_all_indices_small_depths() {
+        for d in 1..=8usize {
+            let dom = GgmTreeDomain {
+                session_id: [0xC0 + d as u8; 32],
+                sender_id: 1,
+                receiver_id: 0,
+                tree_idx: d as u8,
+            };
+            let root = [0x11 * d as u8; 32];
+            let full = ggm_expand_full_depth(&dom, d, &root);
+            for punctured_idx in 0..(1usize << d) {
+                assert_oblivious_matches_reference(&dom, d, &full, punctured_idx);
+            }
+        }
+    }
+
+    #[test]
+    fn oblivious_punctured_ggm_matches_reference_depth14_and_depth15() {
+        let mut rng = PartyPrivateRng::from_seed([0x5Au8; 32], b"QSAG.DPCG.TEST.GGM/v1");
+        for depth in [PcgTreeDepth::Depth14, PcgTreeDepth::Depth15] {
+            let d = depth.depth();
+            let dom = GgmTreeDomain {
+                session_id: [0xD0 + d as u8; 32],
+                sender_id: 0,
+                receiver_id: 1,
+                tree_idx: 7,
+            };
+            let mut root = [0u8; 32];
+            root.copy_from_slice(&rng.next_bytes32());
+            let full = ggm_expand_full_4x(&dom, depth, &root);
+            let last = depth.num_leaves() - 1;
+            let mut indices = vec![0usize, 1, last - 1, last, depth.num_leaves() / 2];
+            for _ in 0..8 {
+                indices.push((rng.next_u64() as usize) & last);
+            }
+            for punctured_idx in indices {
+                assert_oblivious_matches_reference(&dom, d, &full, punctured_idx);
+            }
+        }
+    }
+
+    /// The two repetitions of the SPCOT check use different weights, and a discrepancy built to
+    /// cancel under the first repetition's weights is rejected because of the second.
+    #[test]
+    fn spcot_discrepancy_cancelling_first_challenge_is_rejected_by_second() {
+        let session_id = [0x91u8; 32];
+        let depth = PcgTreeDepth::TestDepth8;
+        let mut rngs = make_party_rngs(2, 0x92);
+        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let mut seeds = setup_dense_pcg_seeds(session_id, depth, &mut ot_mesh, &mut rngs)
+            .expect("honest setup");
+        let _seed1 = seeds.pop().expect("party 1");
+        let mut seed0 = seeds.pop().expect("party 0");
+        let me = seed0.party_id;
+        let q = seed0.peers[0].peer_id as usize;
+
+        let check_values = |seed: &DensePcgPartySeed| {
+            let mut macs = vec![0u128; TOTAL_LPN_ROWS];
+            let mut choices = vec![0u64; TOTAL_LPN_WORDS];
+            receiver_spcot_check_values(
+                &seed.session_id,
+                me,
+                depth,
+                &seed.peers[0],
+                &mut macs,
+                &mut choices,
+            )
+        };
+        let honest = check_values(&seed0);
+
+        // Errors `f_a`, `f_b` on the correlation offsets of two trees move the reconstructed
+        // punctured leaves of those trees by `f_a`, `f_b`. Under repetition 0 the check value
+        // moves by `g0[a] * chi0^(pa+1) * f_a + g0[b] * chi0^(pb+1) * f_b`, which is zero for
+        // `f_a = g0[b] * chi0^(pb+1)` and `f_b = g0[a] * chi0^(pa+1)`.
+        let (tree_a, tree_b) = (3usize, 40usize);
+        let w0 = derive_spcot_challenge_weights(
+            &session_id,
+            q,
+            me,
+            &seed0.peers[0].spcot_chal_coin,
+            depth,
+            0,
+        );
+        let pa = seed0.peers[0].punctured_indices[tree_a] as usize;
+        let pb = seed0.peers[0].punctured_indices[tree_b] as usize;
+        let weight_a = w0.tree_gammas[tree_a].mul(w0.leaf_powers[pa]);
+        let weight_b = w0.tree_gammas[tree_b].mul(w0.leaf_powers[pb]);
+        assert_ne!(weight_a, Tower128::ZERO);
+        assert_ne!(weight_b, Tower128::ZERO);
+        seed0.corrupt_corr_offset_for_audit(0, tree_a, weight_b.0);
+        seed0.corrupt_corr_offset_for_audit(0, tree_b, weight_a.0);
+
+        let tampered = check_values(&seed0);
+        assert_eq!(
+            tampered[0], honest[0],
+            "the crafted discrepancy must be invisible to the first repetition"
+        );
+        assert_ne!(
+            tampered[1], honest[1],
+            "the second repetition must see the discrepancy"
+        );
+        // A tag over the first repetition alone would therefore still match.
+        let first_only = |w: &[Tower128; SPCOT_CHECK_REPS]| {
+            compute_spcot_check_tag(
+                &session_id,
+                q,
+                me,
+                &seed0.peers[0].spcot_chal_coin,
+                &[w[0], Tower128::ZERO],
+            )
+        };
+        assert_eq!(first_only(&tampered), first_only(&honest));
+
+        let mut burns = MemorySeedBurnTracker::new();
+        assert!(matches!(
+            seed0.expand_local(&mut burns),
+            Err(PreprocessError::MacCheckFailed {
+                phase: "pcg_dense_spcot_consistency",
+                accused_party: Some(1)
+            })
+        ));
+    }
+
+    #[test]
+    fn spcot_repetitions_use_distinct_weights() {
+        let coin = [0x33u8; 32];
+        let sid = [0x44u8; 32];
+        let w = derive_all_spcot_challenge_weights(&sid, 0, 1, &coin, PcgTreeDepth::TestDepth8);
+        assert_ne!(w[0].leaf_powers[0], w[1].leaf_powers[0]);
+        for j in 0..DENSE_PCG_NUM_TREES {
+            assert_ne!(w[0].tree_gammas[j], w[1].tree_gammas[j]);
+        }
+    }
+
+    /// A tracker that can never record a burn.
+    struct BrokenBurnTracker;
+
+    impl SeedBurnTracker for BrokenBurnTracker {
+        fn burn(&mut self, _seed_id: &[u8; 32]) -> Result<(), SeedBurnError> {
+            Err(SeedBurnError::Io)
+        }
+
+        fn is_burned(&self, _seed_id: &[u8; 32]) -> Result<bool, SeedBurnError> {
+            Err(SeedBurnError::Io)
+        }
+    }
+
+    #[test]
+    fn serialized_seed_expands_once_and_burn_failure_blocks_expansion() {
+        let session_id = [0xA7u8; 32];
+        let mut rngs = make_party_rngs(2, 0xA8);
+        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let seeds =
+            setup_dense_pcg_seeds(session_id, PcgTreeDepth::TestDepth8, &mut ot_mesh, &mut rngs)
+                .expect("honest setup");
+        let wire0 = seeds[0].to_wire_bytes();
+        let wire1 = seeds[1].to_wire_bytes();
+        drop(seeds);
+
+        let first = DensePcgPartySeed::from_wire_bytes(&wire0).expect("first decode");
+        let second = DensePcgPartySeed::from_wire_bytes(&wire0).expect("second decode");
+        let other_party = DensePcgPartySeed::from_wire_bytes(&wire1).expect("party 1 decode");
+        let id0 = first.seed_id();
+        assert_eq!(id0, second.seed_id());
+        assert_ne!(id0, other_party.seed_id());
+
+        // A tracker that cannot record the burn blocks expansion and leaves no burn behind.
+        let mut burns = MemorySeedBurnTracker::new();
+        burns.fail_next_burn();
+        let blocked = DensePcgPartySeed::from_wire_bytes(&wire0).expect("decode");
+        assert!(matches!(
+            blocked.expand_local(&mut burns),
+            Err(PreprocessError::PcgSeedBurnNotRecorded)
+        ));
+        assert_eq!(burns.burn_count(), 0);
+        assert_eq!(burns.is_burned(&id0), Ok(false));
+        let blocked = DensePcgPartySeed::from_wire_bytes(&wire0).expect("decode");
+        assert!(matches!(
+            blocked.expand_local(&mut BrokenBurnTracker),
+            Err(PreprocessError::PcgSeedBurnNotRecorded)
+        ));
+
+        // First expansion of the decoded seed succeeds and records the burn.
+        let vault = first.expand_local(&mut burns).expect("first expansion");
+        assert_eq!(vault.num_boolean_triples(), DENSE_PCG_NUM_BOOL_TRIPLES);
+        assert_eq!(burns.is_burned(&id0), Ok(true));
+        assert_eq!(burns.burn_count(), 1);
+
+        // The second decoding of the same bytes is refused and yields no vault.
+        assert!(matches!(
+            second.expand_local(&mut burns),
+            Err(PreprocessError::PcgSeedAlreadyBurned)
+        ));
+        assert_eq!(burns.burn_count(), 1);
+
+        // A different party's seed of the same session is a different id.
+        other_party
+            .expand_local(&mut burns)
+            .expect("party 1 expansion");
+        assert_eq!(burns.burn_count(), 2);
+    }
+
+    /// An edited copy of a burned seed is refused as already burned: the burn id does not
+    /// depend on any field an edit can change without changing the session or party.
+    #[test]
+    fn edited_copy_of_burned_seed_fails_closed_as_already_burned() {
+        let session_id = [0xB3u8; 32];
+        let mut rngs = make_party_rngs(2, 0xB4);
+        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let seeds =
+            setup_dense_pcg_seeds(session_id, PcgTreeDepth::TestDepth8, &mut ot_mesh, &mut rngs)
+                .expect("2-party setup");
+        let wire0 = seeds[0].to_wire_bytes();
+        drop(seeds);
+
+        let mut burns = MemorySeedBurnTracker::new();
+        let original = DensePcgPartySeed::from_wire_bytes(&wire0).expect("decode");
+        let id = original.seed_id();
+        original.expand_local(&mut burns).expect("first expansion");
+        assert_eq!(burns.burn_count(), 1);
+
+        // An edited receiver offset must not bypass the original material burn.
+        let mut edited_fix = DensePcgPartySeed::from_wire_bytes(&wire0).expect("decode");
+        edited_fix.peers[0].corr_offsets[5].0 ^= 1 << 9;
+        // The local MAC key and the sender master seed leave the received trees untouched.
+        let mut edited_alpha = DensePcgPartySeed::from_wire_bytes(&wire0).expect("decode");
+        edited_alpha.mac_alpha.0 ^= 1 << 77;
+        let mut edited_master = DensePcgPartySeed::from_wire_bytes(&wire0).expect("decode");
+        edited_master.peers[0].sender_master_seed[3] ^= 0x10;
+        // Check fields: the burn must come before the SPCOT check gets to reject them.
+        let mut edited_check = DensePcgPartySeed::from_wire_bytes(&wire0).expect("decode");
+        edited_check.peers[0].spcot_expected_tag[0] ^= 1;
+
+        for edited in [edited_fix, edited_alpha, edited_master, edited_check] {
+            assert_ne!(edited.to_wire_bytes(), wire0, "the copy must differ from the original");
+            assert_eq!(edited.seed_id(), id);
+            // Re-encoding the edited copy does not launder it either.
+            let reencoded = DensePcgPartySeed::from_wire_bytes(&edited.to_wire_bytes())
+                .expect("edited copy still decodes");
+            assert!(matches!(
+                edited.expand_local(&mut burns),
+                Err(PreprocessError::PcgSeedAlreadyBurned)
+            ));
+            assert!(matches!(
+                reencoded.expand_local(&mut burns),
+                Err(PreprocessError::PcgSeedAlreadyBurned)
+            ));
+        }
+        assert_eq!(burns.burn_count(), 1);
+    }
+
+    #[test]
+    fn obsolete_wire_magic_is_refused_by_name() {
+        let session_id = [0xB5u8; 32];
+        let mut rngs = make_party_rngs(2, 0xB6);
+        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let seeds =
+            setup_dense_pcg_seeds(session_id, PcgTreeDepth::TestDepth8, &mut ot_mesh, &mut rngs)
+                .expect("setup");
+        let mut wire = seeds[0].to_wire_bytes();
+        assert_eq!(&wire[0..8], b"QSAGDPC3");
+        wire[0..8].copy_from_slice(b"QSAGDPC1");
+        assert!(matches!(
+            DensePcgPartySeed::from_wire_bytes(&wire),
+            Err(PreprocessError::PcgObsoleteWireSeedFormat)
+        ));
+        // Also for an input too short to be parsed at all.
+        assert!(matches!(
+            DensePcgPartySeed::from_wire_bytes(b"QSAGDPC1"),
+            Err(PreprocessError::PcgObsoleteWireSeedFormat)
+        ));
+        wire[0..8].copy_from_slice(b"QSAGDPC4");
+        assert!(matches!(
+            DensePcgPartySeed::from_wire_bytes(&wire),
+            Err(PreprocessError::PcgInvalidWireSeed)
+        ));
+    }
+
+    #[test]
+    fn tree_depth_validation_strict() {
+        assert_eq!(PcgTreeDepth::try_from(14), Ok(PcgTreeDepth::Depth14));
+        assert_eq!(PcgTreeDepth::try_from(15), Ok(PcgTreeDepth::Depth15));
+        assert_eq!(
+            PcgTreeDepth::try_from(0),
+            Err(PreprocessError::PcgDepthOutOfRange { depth: 0 })
+        );
+        assert_eq!(
+            PcgTreeDepth::try_from(13),
+            Err(PreprocessError::PcgDepthOutOfRange { depth: 13 })
+        );
+        assert_eq!(
+            PcgTreeDepth::try_from(16),
+            Err(PreprocessError::PcgDepthOutOfRange { depth: 16 })
+        );
+    }
+
+    #[test]
+    #[ignore = "Production-depth 65,536-triple distribution soak; GGM full-depth and compact SPCOT regressions run by default"]
+    fn dense_pcg_depth14_and_depth15_uniformity_beaver_and_bdoz_vole() {
+        for (idx, depth) in [PcgTreeDepth::Depth14, PcgTreeDepth::Depth15]
+            .into_iter()
+            .enumerate()
+        {
+            let mut session_id = [0u8; 32];
+            session_id[0] = 0x10 + (idx as u8);
+            let mut rngs = make_party_rngs(2, 0x20 + (idx as u8));
+            let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+
+            let seeds = setup_dense_pcg_seeds(session_id, depth, &mut ot_mesh, &mut rngs)
+                .expect("honest dense PCG setup must succeed");
+            assert_eq!(seeds.len(), 2);
+
+            let wire0 = seeds[0].to_wire_bytes();
+            let wire1 = seeds[1].to_wire_bytes();
+            assert!(
+                wire0.len() < DENSE_PCG_MAX_SEED_BYTES,
+                "party 0 wire seed {} >= 36 KiB at {:?}",
+                wire0.len(),
+                depth
+            );
+            assert!(
+                wire1.len() < DENSE_PCG_MAX_SEED_BYTES,
+                "party 1 wire seed {} >= 36 KiB at {:?}",
+                wire1.len(),
+                depth
+            );
+
+            let decoded0 =
+                DensePcgPartySeed::from_wire_bytes(&wire0).expect("valid party 0 wire seed");
+            let decoded1 =
+                DensePcgPartySeed::from_wire_bytes(&wire1).expect("valid party 1 wire seed");
+
+            let mut burns = MemorySeedBurnTracker::new();
+            let mut v0 = decoded0
+                .expand_local(&mut burns)
+                .expect("honest party 0 seed expansion");
+            let mut v1 = decoded1
+                .expand_local(&mut burns)
+                .expect("honest party 1 seed expansion");
+            assert_eq!(burns.burn_count(), 2);
+
+            assert_eq!(v0.num_boolean_triples(), 65_536);
+            assert_eq!(v1.num_boolean_triples(), 65_536);
+
+            // 1. Mandatory Hamming-weight test on ALL individual shares AND reconstructed `a, b`!
+            assert_hamming_weight_uniform_64k("a_0", &v0.a_words);
+            assert_hamming_weight_uniform_64k("a_1", &v1.a_words);
+            assert_hamming_weight_uniform_64k("b_0", &v0.b_words);
+            assert_hamming_weight_uniform_64k("b_1", &v1.b_words);
+            assert_hamming_weight_uniform_64k("c_0", &v0.c_words);
+            assert_hamming_weight_uniform_64k("c_1", &v1.c_words);
+
+            let a_rec: Vec<u64> = v0
+                .a_words
+                .iter()
+                .zip(v1.a_words.iter())
+                .map(|(&x, &y)| x ^ y)
+                .collect();
+            let b_rec: Vec<u64> = v0
+                .b_words
+                .iter()
+                .zip(v1.b_words.iter())
+                .map(|(&x, &y)| x ^ y)
+                .collect();
+            let c_rec: Vec<u64> = v0
+                .c_words
+                .iter()
+                .zip(v1.c_words.iter())
+                .map(|(&x, &y)| x ^ y)
+                .collect();
+
+            assert_hamming_weight_uniform_64k("reconstructed a = a_0 ^ a_1", &a_rec);
+            assert_hamming_weight_uniform_64k("reconstructed b = b_0 ^ b_1", &b_rec);
+
+            // 2. Exact `a & b == c` across all `65,536` triples!
+            for ((&aw, &bw), &cw) in a_rec.iter().zip(b_rec.iter()).zip(c_rec.iter()) {
+                assert_eq!(aw & bw, cw, "Beaver triple mismatch at {:?}", depth);
+            }
+
+            // 3. Exact BDOZ Subfield-VOLE equations across all `65,536` correlations in BOTH directions!
+            let pv0 = &v0.peer_voles[0];
+            let pv1 = &v1.peer_voles[0];
+            assert_hamming_weight_uniform_64k("x_{1->0}", &pv0.subfield_choice_words);
+            assert_hamming_weight_uniform_64k("x_{0->1}", &pv1.subfield_choice_words);
+
+            let alpha0 = v0.mac_alpha();
+            let alpha1 = v1.mac_alpha();
+            for row in 0..DENSE_PCG_NUM_BOOL_TRIPLES {
+                let x0_bit = ((pv0.subfield_choice_words[row >> 6] >> (row & 63)) & 1) == 1;
+                let lhs_1to0 = pv0.subfield_macs[row].add(pv1.subfield_keys[row]);
+                let rhs_1to0 = if x0_bit { alpha1 } else { Tower128::ZERO };
+                assert_eq!(lhs_1to0, rhs_1to0, "BDOZ VOLE 1->0 failed at row {}", row);
+
+                let x1_bit = ((pv1.subfield_choice_words[row >> 6] >> (row & 63)) & 1) == 1;
+                let lhs_0to1 = pv1.subfield_macs[row].add(pv0.subfield_keys[row]);
+                let rhs_0to1 = if x1_bit { alpha0 } else { Tower128::ZERO };
+                assert_eq!(lhs_0to1, rhs_0to1, "BDOZ VOLE 0->1 failed at row {}", row);
+            }
+
+            // 4. Exact `GF(2^128)` VOLE companion equations AND dense share uniformity across all `64` companions!
+            let gf_min = 3_750usize;
+            let gf_max = 4_442usize;
+            assert!((gf_min..=gf_max).contains(&count_ones_tower128s(&pv0.gf128_u_vals)));
+            assert!((gf_min..=gf_max).contains(&count_ones_tower128s(
+                &pv0.gf128_sender_dense_shares
+            )));
+            assert!((gf_min..=gf_max).contains(&count_ones_tower128s(
+                &pv0.gf128_receiver_dense_shares
+            )));
+
+            for m in 0..DENSE_PCG_NUM_VOLE128 {
+                assert_eq!(
+                    pv0.gf128_macs[m].add(pv1.gf128_keys[m]),
+                    pv0.gf128_u_vals[m].mul(alpha1)
+                );
+                assert_eq!(
+                    pv1.gf128_macs[m].add(pv0.gf128_keys[m]),
+                    pv1.gf128_u_vals[m].mul(alpha0)
+                );
+                assert_eq!(
+                    pv1.gf128_sender_dense_shares[m].add(pv0.gf128_receiver_dense_shares[m]),
+                    pv0.gf128_u_vals[m]
+                );
+                assert_eq!(
+                    pv0.gf128_sender_dense_shares[m].add(pv1.gf128_receiver_dense_shares[m]),
+                    pv1.gf128_u_vals[m]
+                );
+            }
+
+            // 5. Streaming consumption & deterministic exhaustion check.
+            for _ in 0..DENSE_PCG_NUM_WORDS {
+                let _ = v0.next_bool_triple_word64().expect("word available");
+                let _ = v1.next_bool_triple_word64().expect("word available");
+            }
+            assert_eq!(
+                v0.next_bool_triple_word64(),
+                Err(PreprocessError::VaultExhausted {
+                    kind: "pcg_dense_boolean_triples"
+                })
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "Production 65,536-triple three-party MASCOT soak; compact active product and SPCOT regressions run by default"]
+    fn dense_pcg_three_party_beaver_and_vole_exactness() {
+        let session_id = [0x33u8; 32];
+        let mut rngs = make_party_rngs(3, 0x44);
+        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+
+        let seeds =
+            setup_dense_pcg_seeds(session_id, PcgTreeDepth::Depth14, &mut ot_mesh, &mut rngs)
+                .expect("3-party dense PCG setup");
+        let mut burns = MemorySeedBurnTracker::new();
+        let vaults: Vec<DensePcgExpandedVault> = seeds
+            .into_iter()
+            .map(|s| {
+                let bytes = s.to_wire_bytes();
+                assert!(bytes.len() > DENSE_PCG_MAX_SEED_BYTES);
+                assert!(DensePcgPartySeed::from_wire_bytes(&bytes).is_err());
+                s.expand_local(&mut burns).expect("3-party local expand")
+            })
+            .collect();
+
+        for w in 0..DENSE_PCG_NUM_WORDS {
+            let a = vaults[0].a_words[w] ^ vaults[1].a_words[w] ^ vaults[2].a_words[w];
+            let b = vaults[0].b_words[w] ^ vaults[1].b_words[w] ^ vaults[2].b_words[w];
+            let c = vaults[0].c_words[w] ^ vaults[1].c_words[w] ^ vaults[2].c_words[w];
+            assert_eq!(a & b, c, "3-party Beaver mismatch at word {}", w);
+        }
+    }
+
+    #[test]
+    fn malicious_spcot_rejects_corrupted_ggm_sibling_and_corr_offset() {
+        let session_id = [0x55u8; 32];
+
+        // 1. Interactive fault injection: corrupted Sender GGM copath sibling at internal level 5.
+        {
+            let mut rngs = make_party_rngs(2, 0x61);
+            let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+            let mut mask = [0u8; 16];
+            mask[7] = 0x80;
+            let res = setup_dense_pcg_seeds_with_fault_hook(
+                session_id,
+                PcgTreeDepth::TestDepth8,
+                &mut ot_mesh,
+                &mut rngs,
+                Some(SpcotFaultTarget::GgmLevelSibling {
+                    sender_id: 0,
+                    receiver_id: 1,
+                    tree_idx: 19,
+                    level: 5,
+                    xor_mask: mask,
+                }),
+            );
+            assert!(matches!(
+                res,
+                Err(PreprocessError::MacCheckFailed {
+                    phase: "pcg_dense_spcot_consistency",
+                    accused_party: Some(0)
+                })
+            ));
+        }
+
+        // 2. Interactive fault injection: corrupted Sender SPCOT correlation offset `c_corr`.
+        {
+            let mut rngs = make_party_rngs(2, 0x62);
+            let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+            let res = setup_dense_pcg_seeds_with_fault_hook(
+                session_id,
+                PcgTreeDepth::TestDepth8,
+                &mut ot_mesh,
+                &mut rngs,
+                Some(SpcotFaultTarget::CorrelationOffset {
+                    sender_id: 1,
+                    receiver_id: 0,
+                    tree_idx: 42,
+                    xor_mask: 1u128 << 99,
+                }),
+            );
+            assert!(matches!(
+                res,
+                Err(PreprocessError::MacCheckFailed {
+                    phase: "pcg_dense_spcot_consistency",
+                    accused_party: Some(1)
+                })
+            ));
+        }
+
+        // 3. Post-serialization / local-expansion tamper rejection on BOTH copath sibling AND `c_corr`.
+        let mut rngs = make_party_rngs(2, 0x63);
+        let mut ot_mesh = OtMesh::establish(session_id, &mut rngs);
+        let mut seeds =
+            setup_dense_pcg_seeds(session_id, PcgTreeDepth::TestDepth8, &mut ot_mesh, &mut rngs)
+                .expect("honest setup");
+        let seed1 = seeds.pop().expect("party 1");
+        let mut seed0 = seeds.pop().expect("party 0");
+
+        let clean_wire1 = seed1.to_wire_bytes();
+        seed0.corrupt_copath_byte_for_audit(0, 31, 7, 0, 0x01);
+        let mut burns = MemorySeedBurnTracker::new();
+        assert!(matches!(
+            seed0.expand_local(&mut burns),
+            Err(PreprocessError::MacCheckFailed {
+                phase: "pcg_dense_spcot_consistency",
+                accused_party: Some(1)
+            })
+        ));
+
+        let mut tampered_seed1 =
+            DensePcgPartySeed::from_wire_bytes(&clean_wire1).expect("decode clean wire");
+        tampered_seed1.corrupt_corr_offset_for_audit(0, 7, 1);
+        assert!(matches!(
+            tampered_seed1.expand_local(&mut burns),
+            Err(PreprocessError::MacCheckFailed {
+                phase: "pcg_dense_spcot_consistency",
+                accused_party: Some(0)
+            })
+        ));
+    }
+
+    #[test]
+    fn wire_seed_peer_id_and_punctured_bounds_validation_p1_06() {
+        let mut seed = DensePcgPartySeed {
+            session_id: [0x77; 32], party_id: 0, num_parties: 2,
+            tree_depth: PcgTreeDepth::Depth14, mac_alpha: Tower128(1),
+            peers: (1..2).map(|peer_id| DensePcgPeerSeed {
+                peer_id, sender_master_seed: [0; 32], punctured_indices: [0; DENSE_PCG_NUM_TREES],
+                copaths: vec![vec![[0; 32]; 14]; DENSE_PCG_NUM_TREES],
+                corr_offsets: [Tower128::ZERO; DENSE_PCG_NUM_TREES], spcot_chal_coin: [0; 32],
+                spcot_mask_macs: [Tower128::ZERO; SPCOT_CHECK_REPS], spcot_expected_tag: [0; 32],
+            }).collect(), multi_party_c_fix: Vec::new(),
+        };
+        assert!(seed.validate_invariants().is_ok());
+        let base_wire = seed.to_wire_bytes();
+        assert_eq!(DensePcgPartySeed::from_wire_bytes(&base_wire).unwrap().to_wire_bytes(), base_wire);
+        // The deepest production profile also fits the versioned cap.
+        seed.tree_depth = PcgTreeDepth::Depth15;
+        for path in &mut seed.peers[0].copaths { path.push([0; 32]); }
+        let depth15_wire = seed.to_wire_bytes();
+        assert!(depth15_wire.len() <= DENSE_PCG_MAX_SEED_BYTES);
+        assert_eq!(DensePcgPartySeed::from_wire_bytes(&depth15_wire).unwrap().to_wire_bytes(), depth15_wire);
+
+        // 1. Out-of-bounds `peer_id >= num_parties` (`bytes[63..65]` is first `peer_id`).
+        let mut bad_peer_oob = base_wire.clone();
+        bad_peer_oob[63..65].copy_from_slice(&3u16.to_le_bytes());
+        assert!(matches!(
+            DensePcgPartySeed::from_wire_bytes(&bad_peer_oob),
+            Err(PreprocessError::PcgInvalidWireSeed)
+        ));
+
+        // 2. Self-inclusion `peer_id == party_id` (`party_id == 0`).
+        let mut bad_peer_self = base_wire.clone();
+        bad_peer_self[63..65].copy_from_slice(&0u16.to_le_bytes());
+        assert!(matches!(
+            DensePcgPartySeed::from_wire_bytes(&bad_peer_self),
+            Err(PreprocessError::PcgInvalidWireSeed)
+        ));
+
+        // Duplicate peers fail structural validation independently of the wire cap.
+        let duplicate = DensePcgPartySeed::from_wire_bytes(&depth15_wire).unwrap().peers.remove(0);
+        seed.num_parties = 3;
+        seed.multi_party_c_fix = vec![0; DENSE_PCG_NUM_WORDS];
+        seed.peers.push(duplicate);
+        assert!(seed.validate_invariants().is_err());
+
+        // 4. Out-of-range `punctured_idx >= (1 << 14)` (`bytes[97..99]` is `punctured_indices[0]`).
+        let mut bad_punc = base_wire.clone();
+        bad_punc[97..99].copy_from_slice(&(1u16 << 14).to_le_bytes());
+        assert!(matches!(
+            DensePcgPartySeed::from_wire_bytes(&bad_punc),
+            Err(PreprocessError::PcgInvalidWireSeed)
+        ));
+
+        // 5. Invalid tree depth (`depth = 16` at `bytes[44]`).
+        let mut bad_depth = base_wire;
+        bad_depth[44] = 16;
+        assert!(matches!(
+            DensePcgPartySeed::from_wire_bytes(&bad_depth),
+            Err(PreprocessError::PcgInvalidWireSeed)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod frame_budget_tests {
+    use super::*;
+    #[test]
+    fn truncated_peer_count_is_rejected() {
+        let mut wire = [0u8; 64];
+        wire[..8].copy_from_slice(DENSE_PCG_WIRE_MAGIC);
+        wire[42..44].copy_from_slice(&u16::MAX.to_le_bytes());
+        wire[44] = 14;
+        wire[45] = 1;
+        wire[61..63].copy_from_slice(&(u16::MAX - 1).to_le_bytes());
+        for len in 0..=wire.len() {
+            assert!(DensePcgPartySeed::from_wire_bytes(&wire[..len]).is_err());
+        }
+    }
+}
