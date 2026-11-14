@@ -769,3 +769,668 @@ impl<const MAX_PROFILES: usize> VerifiedKernelDigestRegistry<MAX_PROFILES> {
 
 /// Wrapper checking approved metadata and, for external hardware, loader measurements.
 /// It provides no mathematical proof of backend correctness.
+pub struct CertifiedBackend<B: AcceleratorBackend> {
+    inner: B,
+}
+
+impl<B: AcceleratorBackend> CertifiedBackend<B> {
+    pub fn try_new<const M: usize>(
+        backend: B,
+        registry: &VerifiedKernelDigestRegistry<M>,
+    ) -> Result<Self, KernelRegistryError> {
+        if backend.target_arch() != KernelTargetArch::CpuReference {
+            return Err(KernelRegistryError::LoaderMeasurementRequired);
+        }
+        registry.verify_backend(&backend)?;
+        Ok(Self { inner: backend })
+    }
+
+    /// The caller supplies measurements from its trusted loader, independently of B.
+    pub fn try_new_measured<const M: usize>(
+        backend: B,
+        registry: &VerifiedKernelDigestRegistry<M>,
+        measured: &[CertifiedKernelPin; KernelSlot::COUNT],
+    ) -> Result<Self, KernelRegistryError> {
+        registry.verify_loaded_profile(backend.target_arch(), measured)?;
+        registry.verify_backend(&backend)?;
+        Ok(Self { inner: backend })
+    }
+
+    pub const fn inner(&self) -> &B {
+        &self.inner
+    }
+}
+
+impl<B: AcceleratorBackend> AcceleratorBackend for CertifiedBackend<B> {
+    fn target_arch(&self) -> KernelTargetArch {
+        self.inner.target_arch()
+    }
+    fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
+        self.inner.kernel_pin(slot)
+    }
+    fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]) {
+        self.inner.batch_keccak_f1600(states);
+    }
+    fn batch_poseidon2_perm12(&self, states: &mut [[u64; 12]]) {
+        self.inner.batch_poseidon2_perm12(states);
+    }
+    fn goldilocks_ntt_inplace(
+        &self,
+        buf: &mut [u64],
+        twiddles: &[u64],
+        inverse: bool,
+    ) -> Result<(), AccelError> {
+        self.inner.goldilocks_ntt_inplace(buf, twiddles, inverse)
+    }
+    fn coset_lde_ext2(
+        &self,
+        evals: &[[u64; 2]],
+        blowup: usize,
+        shift: u64,
+        out: &mut [[u64; 2]],
+    ) -> Result<(), AccelError> {
+        self.inner.coset_lde_ext2(evals, blowup, shift, out)
+    }
+    fn try_merkle_layer_poseidon2_at(
+        &self,
+        children: &[[u64; 4]],
+        pk_seed: &[u64; 4],
+        layer: u32,
+        start_parent_idx: u64,
+        out_parents: &mut [[u64; 4]],
+    ) -> Result<(), AccelError> {
+        self.inner.try_merkle_layer_poseidon2_at(
+            children,
+            pk_seed,
+            layer,
+            start_parent_idx,
+            out_parents,
+        )
+    }
+    fn bdoz_gf2_128_batch_dot(
+        &self,
+        shares: &[(u128, u128)],
+        weights: &[(u128, u128)],
+    ) -> Result<(u128, u128), AccelError> {
+        self.inner.bdoz_gf2_128_batch_dot(shares, weights)
+    }
+}
+
+/// Convenience helper checking SHA-256 digest equality in constant time.
+pub fn verify_sha256_pin(artifact: &[u8], expected: &[u8; 32]) -> bool {
+    let actual = sha256(artifact);
+    ct_eq_bytes_mask(&actual, expected) == u64::MAX
+}
+
+impl core::fmt::Display for KernelRegistryError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::RegistryFull => f.write_str("kernel digest registry is full"),
+            Self::LoaderMeasurementRequired => {
+                f.write_str("non-CPU backends require independent loader measurements")
+            }
+            Self::UnsupportedTargetArch(arch) => {
+                write!(
+                    f,
+                    "no approved kernel pins for target architecture {arch:?}"
+                )
+            }
+            Self::PinMismatch { slot } => write!(f, "kernel pin mismatch for slot {slot:?}"),
+            Self::ReceiptAuthenticationFailed => {
+                f.write_str("execution receipt failed keyed authentication")
+            }
+        }
+    }
+}
+
+impl core::error::Error for KernelRegistryError {}
+
+/// Deterministically recompute sampled Merkle parents on the CPU.
+/// Choose the challenge after the device fixes its output. Known-ahead samples can
+/// be evaded; checking all parents gives full equality for this operation only.
+pub fn spot_check_merkle_layer(
+    children: &[[u64; 4]],
+    pk_seed: &[u64; 4],
+    layer: u32,
+    start_parent_idx: u64,
+    parents: &[[u64; 4]],
+    challenge: &[u8; 32],
+    checks: usize,
+) -> bool {
+    if parents.is_empty()
+        || children.len() != parents.len().saturating_mul(2)
+        || checks == 0
+        || start_parent_idx.checked_add(parents.len() as u64).is_none()
+    {
+        return false;
+    }
+    for sample in 0..checks.min(parents.len()) {
+        let idx = if checks >= parents.len() {
+            sample
+        } else {
+            let digest = cshake256_framed_32(
+                b"QSAG.ACCEL.MERKLE_SAMPLE.V1",
+                &[challenge, &(sample as u64).to_be_bytes()],
+            );
+            let mut word = [0u8; 8];
+            word.copy_from_slice(&digest[..8]);
+            (u64::from_le_bytes(word) % parents.len() as u64) as usize
+        };
+        let mut expected = [[0; 4]; 1];
+        if merkle_layer_poseidon2_at_cpu(
+            &children[2 * idx..2 * idx + 2],
+            pk_seed,
+            layer,
+            start_parent_idx + idx as u64,
+            &mut expected,
+        )
+        .is_err()
+            || expected[0] != parents[idx]
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use crate::gf2_128::{gf2_128_inv_or_zero, gf2_128_mul};
+    use crate::goldilocks::{
+        GOLDILOCKS_PRIME, ext2_add, ext2_inv_or_zero, ext2_mul, gl_add, gl_inv_or_zero, gl_mul,
+        gl_reduce128, goldilocks_primitive_root, pack_bytes32_to_limbs56,
+        unpack_limbs56_to_bytes32,
+    };
+
+    #[test]
+    fn test_goldilocks_corner_cases_and_inversion() {
+        let p = GOLDILOCKS_PRIME;
+        assert_eq!(gl_add(p - 1, 1), 0);
+        assert_eq!(gl_add(p - 1, p - 1), p - 2);
+        assert_eq!(gl_mul(p - 1, p - 1), 1);
+        assert_eq!(
+            gl_reduce128(u128::MAX),
+            gl_reduce128(u128::MAX % (p as u128))
+        );
+
+        for x in [1u64, 2, 7, 123456789, p - 2, p - 1] {
+            let inv = gl_inv_or_zero(x);
+            assert_eq!(gl_mul(x, inv), 1);
+        }
+        assert_eq!(gl_inv_or_zero(0), 0);
+
+        let a = [123_456_789u64, p - 42];
+        let a_inv = ext2_inv_or_zero(a);
+        assert_eq!(ext2_mul(a, a_inv), [1, 0]);
+        assert_eq!(ext2_inv_or_zero([0, 0]), [0, 0]);
+    }
+
+    #[test]
+    fn test_canonical_5limb_56bit_digest_roundtrip_and_non_aliasing() {
+        let mut digest = [0xFFu8; 32];
+        let limbs = pack_bytes32_to_limbs56(&digest);
+        for &l in &limbs {
+            assert!(l < (1u64 << 56));
+            assert!(l < GOLDILOCKS_PRIME);
+        }
+        assert_eq!(unpack_limbs56_to_bytes32(&limbs), Some(digest));
+
+        // Mutating byte 0 from p-alias values produces distinct 56-bit limbs (zero mod-p collision).
+        let mut digest2 = digest;
+        digest2[0] ^= 0x01;
+        assert_ne!(limbs, pack_bytes32_to_limbs56(&digest2));
+
+        // Non-canonical >= 2^56 limb or corrupted delimiter must be rejected.
+        let mut bad = limbs;
+        bad[0] = 1u64 << 56;
+        assert_eq!(unpack_limbs56_to_bytes32(&bad), None);
+        let mut bad_delim = limbs;
+        bad_delim[4] ^= 1;
+        assert_eq!(unpack_limbs56_to_bytes32(&bad_delim), None);
+        digest.fill(0);
+        assert_eq!(
+            unpack_limbs56_to_bytes32(&pack_bytes32_to_limbs56(&digest)),
+            Some([0u8; 32])
+        );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn test_ntt_roundtrip_and_coset_lde_horner_identity() {
+        let backend = CpuReferenceBackend::new();
+        let n = 16usize;
+        let tw = goldilocks::precompute_goldilocks_twiddles(n).unwrap();
+        let coeffs: [u64; 16] = core::array::from_fn(|i| (i as u64 * 97 + 13) % GOLDILOCKS_PRIME);
+        let mut buf = coeffs;
+
+        backend
+            .goldilocks_ntt_inplace(&mut buf, &tw, false)
+            .unwrap();
+        // Check against direct polynomial evaluation at omega^k
+        let omega_n = goldilocks_primitive_root(4).unwrap();
+        let mut wk = 1u64;
+        for &ev in &buf {
+            let mut expected = 0u64;
+            let mut x_pow = 1u64;
+            for &c in &coeffs {
+                expected = gl_add(expected, gl_mul(c, x_pow));
+                x_pow = gl_mul(x_pow, wk);
+            }
+            assert_eq!(ev, expected);
+            wk = gl_mul(wk, omega_n);
+        }
+
+        backend.goldilocks_ntt_inplace(&mut buf, &tw, true).unwrap();
+        assert_eq!(buf, coeffs);
+
+        // Verify coset_lde_ext2 against direct Horner evaluation over F_{p^2}!
+        let coeffs_ext2: [[u64; 2]; 8] =
+            core::array::from_fn(|i| [(i as u64 + 3) * 19, (i as u64 + 1) * 41]);
+        let omega_8 = goldilocks_primitive_root(3).unwrap();
+        let mut evals_h = [[0u64; 2]; 8];
+        let mut x = 1u64;
+        for slot in &mut evals_h {
+            let mut acc = [0u64, 0u64];
+            for &c in coeffs_ext2.iter().rev() {
+                acc = ext2_add(goldilocks::ext2_scale_base(acc, x), c);
+            }
+            *slot = acc;
+            x = gl_mul(x, omega_8);
+        }
+
+        let blowup = 4usize;
+        let shift = 7u64;
+        let mut lde_out = [[0u64; 2]; 32];
+        backend
+            .coset_lde_ext2(&evals_h, blowup, shift, &mut lde_out)
+            .unwrap();
+
+        let omega_32 = goldilocks_primitive_root(5).unwrap();
+        let mut w_i = 1u64;
+        for &lde_val in &lde_out {
+            let pt = gl_mul(shift, w_i);
+            let mut expected = [0u64, 0u64];
+            for &c in coeffs_ext2.iter().rev() {
+                expected = ext2_add(goldilocks::ext2_scale_base(expected, pt), c);
+            }
+            assert_eq!(lde_val, expected);
+            w_i = gl_mul(w_i, omega_32);
+        }
+    }
+
+    #[test]
+    fn test_merkle_poseidon2_binds_all_four_pk_seed_limbs_and_receipt() {
+        let registry: VerifiedKernelDigestRegistry<4> = VerifiedKernelDigestRegistry::default();
+        let backend = CertifiedBackend::try_new(CpuReferenceBackend::new(), &registry).unwrap();
+
+        let children = [
+            [11u64, 22, 33, 44],
+            [55u64, 66, 77, 88],
+            [99u64, 111, 222, 333],
+            [444u64, 555, 666, 777],
+        ];
+        let base_seed = [1001u64, 2002, 3003, 4004];
+        let anchor = [0x42u8; 32];
+        let mut base_out = [[0u64; 4]; 2];
+        let key = BackendAttestationKey::derive(&[0x17; 32], b"cpu-reference-0");
+        let receipt = CpuReferenceBackend::merkle_layer_poseidon2_with_receipt(
+            &backend,
+            &key,
+            &children,
+            &base_seed,
+            3,
+            anchor,
+            &mut base_out,
+        )
+        .unwrap();
+        assert_eq!(registry.verify_keyed_receipt(&receipt, &key), Ok(()));
+        assert_eq!(receipt.input_digest, merkle_layer_input_digest(&children));
+        assert_eq!(receipt.output_digest, merkle_layer_output_digest(&base_out));
+
+        // Mutating ANY of pk_seed[0], pk_seed[1], pk_seed[2], or pk_seed[3] MUST change parent digests!
+        for limb_idx in 0..4 {
+            let mut alt_seed = base_seed;
+            alt_seed[limb_idx] += 1;
+            let mut alt_out = [[0u64; 4]; 2];
+            backend
+                .try_merkle_layer_poseidon2(&children, &alt_seed, 3, &mut alt_out)
+                .unwrap();
+            assert_ne!(base_out, alt_out, "pk_seed[{limb_idx}] was ignored!");
+        }
+    }
+
+    #[test]
+    fn test_gf2_128_inversion_and_bdoz_dot() {
+        let a = 0x0123_4567_89AB_CDEF_FEDC_BA98_7654_3210u128;
+        let inv = gf2_128_inv_or_zero(a);
+        assert_eq!(gf2_128_mul(a, inv), 1u128);
+        assert_eq!(gf2_128_inv_or_zero(0), 0);
+
+        let backend = CpuReferenceBackend::new();
+        let s_a = [(11u128, 22u128), (33u128, 44u128)];
+        let s_b = [(55u128, 66u128), (77u128, 88u128)];
+        let s_xor = [(11u128 ^ 55, 22u128 ^ 66), (33u128 ^ 77, 44u128 ^ 88)];
+        let w = [
+            (0xAA55_1234u128, 0x9988_7766u128),
+            (0xDEAD_BEEFu128, 0xCAFE_BABEu128),
+        ];
+        let d_a = backend.bdoz_gf2_128_batch_dot(&s_a, &w).unwrap();
+        let d_b = backend.bdoz_gf2_128_batch_dot(&s_b, &w).unwrap();
+        let d_xor = backend.bdoz_gf2_128_batch_dot(&s_xor, &w).unwrap();
+        assert_eq!((d_a.0 ^ d_b.0, d_a.1 ^ d_b.1), d_xor);
+    }
+
+    #[test]
+    fn test_standard_hash_vectors_sha256_sha512_ripemd160_sha3_keccak() {
+        // NIST SHA-256("abc")
+        let s256 = sha2::sha256(b"abc");
+        assert_eq!(
+            s256,
+            [
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+                0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+                0xf2, 0x00, 0x15, 0xad,
+            ]
+        );
+        // RIPEMD-160("abc") = 8eb208f7e05d987a9b044a8e98c6b087f15a0bfc
+        let r160 = sha2::ripemd160(b"abc");
+        assert_eq!(
+            r160,
+            [
+                0x8e, 0xb2, 0x08, 0xf7, 0xe0, 0x5d, 0x98, 0x7a, 0x9b, 0x04, 0x4a, 0x8e, 0x98, 0xc6,
+                0xb0, 0x87, 0xf1, 0x5a, 0x0b, 0xfc,
+            ]
+        );
+        // SHA3-256("") = a7ffc6f8bf1ed76651c14756a061d662f580ff4de43b49fa82d80a4b80f8434a
+        let s3 = keccak::sha3_256(b"");
+        assert_eq!(
+            s3,
+            [
+                0xa7, 0xff, 0xc6, 0xf8, 0xbf, 0x1e, 0xd7, 0x66, 0x51, 0xc1, 0x47, 0x56, 0xa0, 0x61,
+                0xd6, 0x62, 0xf5, 0x80, 0xff, 0x4d, 0xe4, 0x3b, 0x49, 0xfa, 0x82, 0xd8, 0x0a, 0x4b,
+                0x80, 0xf8, 0x43, 0x4a,
+            ]
+        );
+        // Keccak-256("") = c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
+        let k256 = keccak::keccak256(b"");
+        assert_eq!(
+            k256,
+            [
+                0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c, 0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7,
+                0x03, 0xc0, 0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b, 0x7b, 0xfa, 0xd8, 0x04,
+                0x5d, 0x85, 0xa4, 0x70,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_uncertified_backend_rejected_by_registry() {
+        struct RogueGpuBackend;
+        impl AcceleratorBackend for RogueGpuBackend {
+            fn target_arch(&self) -> KernelTargetArch {
+                KernelTargetArch::Rdna2Wave32
+            }
+            fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
+                CertifiedKernelPin::from_kernel_artifact(
+                    slot,
+                    KernelTargetArch::Rdna2Wave32,
+                    b"TAMPERED_SHADER",
+                )
+            }
+            fn batch_keccak_f1600(&self, s: &mut [[u64; 25]]) {
+                CpuReferenceBackend.batch_keccak_f1600(s);
+            }
+            fn batch_poseidon2_perm12(&self, s: &mut [[u64; 12]]) {
+                CpuReferenceBackend.batch_poseidon2_perm12(s);
+            }
+            fn goldilocks_ntt_inplace(
+                &self,
+                b: &mut [u64],
+                t: &[u64],
+                i: bool,
+            ) -> Result<(), AccelError> {
+                CpuReferenceBackend.goldilocks_ntt_inplace(b, t, i)
+            }
+            fn coset_lde_ext2(
+                &self,
+                e: &[[u64; 2]],
+                b: usize,
+                s: u64,
+                o: &mut [[u64; 2]],
+            ) -> Result<(), AccelError> {
+                CpuReferenceBackend.coset_lde_ext2(e, b, s, o)
+            }
+            fn try_merkle_layer_poseidon2_at(
+                &self,
+                c: &[[u64; 4]],
+                p: &[u64; 4],
+                l: u32,
+                s: u64,
+                o: &mut [[u64; 4]],
+            ) -> Result<(), AccelError> {
+                CpuReferenceBackend.try_merkle_layer_poseidon2_at(c, p, l, s, o)
+            }
+            fn bdoz_gf2_128_batch_dot(
+                &self,
+                s: &[(u128, u128)],
+                w: &[(u128, u128)],
+            ) -> Result<(u128, u128), AccelError> {
+                CpuReferenceBackend.bdoz_gf2_128_batch_dot(s, w)
+            }
+        }
+
+        let reg: VerifiedKernelDigestRegistry<4> = VerifiedKernelDigestRegistry::default();
+        let res = CertifiedBackend::try_new(RogueGpuBackend, &reg);
+        assert!(matches!(
+            res,
+            Err(KernelRegistryError::LoaderMeasurementRequired)
+        ));
+    }
+
+    fn sample_receipt(key: &BackendAttestationKey) -> ExecutionReceipt {
+        let pin = CpuReferenceBackend::canonical_pin(KernelSlot::BatchKeccakF1600);
+        let job = BatchJobDescriptor::KeccakF1600 { num_states: 1 };
+        ExecutionReceipt::compute_keyed(key, &pin, job, [1; 32], [2; 32], [3; 32]).unwrap()
+    }
+
+    #[test]
+    fn keyed_receipt_verifies_only_under_its_own_key_and_backend() {
+        let reg = VerifiedKernelDigestRegistry::<4>::default();
+        let key = BackendAttestationKey::derive(&[29; 32], b"backend-a");
+        let receipt = sample_receipt(&key);
+        assert_eq!(reg.verify_keyed_receipt(&receipt, &key), Ok(()));
+
+        let failed = Err(KernelRegistryError::ReceiptAuthenticationFailed);
+        // Same master secret, different backend label: different ID and different key.
+        let sibling = BackendAttestationKey::derive(&[29; 32], b"backend-b");
+        assert_eq!(reg.verify_keyed_receipt(&receipt, &sibling), failed);
+        // Different master secret, same label.
+        let stranger = BackendAttestationKey::derive(&[30; 32], b"backend-a");
+        assert_eq!(reg.verify_keyed_receipt(&receipt, &stranger), failed);
+        // Same key bytes presented under another backend ID.
+        let relabeled = BackendAttestationKey::new([0xEE; 32], *key.key.expose());
+        assert_eq!(reg.verify_keyed_receipt(&receipt, &relabeled), failed);
+        // A receipt self-issued by a party that knows the backend ID but not the key.
+        let forger = BackendAttestationKey::new(*key.backend_id(), [0u8; 32]);
+        assert_eq!(
+            reg.verify_keyed_receipt(&sample_receipt(&forger), &key),
+            failed
+        );
+    }
+
+    #[test]
+    fn keyed_receipt_rejects_tampering_of_every_bound_field() {
+        let reg = VerifiedKernelDigestRegistry::<4>::default();
+        let key = BackendAttestationKey::derive(&[29; 32], b"backend-a");
+        let good = sample_receipt(&key);
+        let failed = Err(KernelRegistryError::ReceiptAuthenticationFailed);
+        let tamper: [fn(&mut ExecutionReceipt); 9] = [
+            |r| r.backend_id[31] ^= 1,
+            |r| r.descriptor = BatchJobDescriptor::KeccakF1600 { num_states: 2 },
+            |r| r.descriptor = BatchJobDescriptor::Poseidon2Perm12 { num_states: 1 },
+            |r| r.kernel_sha256[0] ^= 1,
+            |r| r.kernel_poseidon2[3] ^= 1,
+            |r| r.transcript_anchor[7] ^= 0x80,
+            |r| r.input_digest[0] ^= 1,
+            |r| r.output_digest[0] ^= 1,
+            |r| r.mac[15] ^= 1,
+        ];
+        for (i, f) in tamper.iter().enumerate() {
+            let mut bad = good;
+            f(&mut bad);
+            assert_eq!(
+                reg.verify_keyed_receipt(&bad, &key),
+                failed,
+                "tamper case {i}"
+            );
+        }
+        let mut wrong_arch = good;
+        wrong_arch.arch = KernelTargetArch::SpirV16;
+        assert_eq!(
+            reg.verify_keyed_receipt(&wrong_arch, &key),
+            Err(KernelRegistryError::UnsupportedTargetArch(
+                KernelTargetArch::SpirV16
+            ))
+        );
+    }
+
+    #[test]
+    fn receipt_macs_are_domain_separated_by_algorithm_slot() {
+        let key = BackendAttestationKey::derive(&[29; 32], b"backend-a");
+        for (i, a) in KernelSlot::ALL.iter().enumerate() {
+            for b in &KernelSlot::ALL[i + 1..] {
+                assert_ne!(a.algorithm_domain(), b.algorithm_domain());
+            }
+        }
+        let pin = CpuReferenceBackend::canonical_pin(KernelSlot::BatchKeccakF1600);
+        assert_eq!(
+            ExecutionReceipt::compute_keyed(
+                &key,
+                &pin,
+                BatchJobDescriptor::GoldilocksNtt {
+                    length: 8,
+                    inverse: false
+                },
+                [0; 32],
+                [0; 32],
+                [0; 32],
+            ),
+            Err(AccelError::KernelSlotMismatch {
+                pin: KernelSlot::BatchKeccakF1600,
+                descriptor: KernelSlot::GoldilocksNtt,
+            })
+        );
+        assert_eq!(
+            std::format!("{key:?}").matches("REDACTED").count(),
+            1,
+            "attestation key bytes must not be printed"
+        );
+    }
+
+    #[test]
+    fn kernels_return_typed_errors_for_malformed_shapes() {
+        let backend = CpuReferenceBackend::new();
+        let seed = [1u64, 2, 3, 4];
+        let mut parents = [[0u64; 4]; 2];
+        assert_eq!(
+            backend.try_merkle_layer_poseidon2(&[[0u64; 4]; 3], &seed, 0, &mut parents),
+            Err(AccelError::LengthMismatch {
+                what: "Merkle layer children",
+                expected: 4,
+                actual: 3,
+            })
+        );
+        assert_eq!(
+            backend.merkle_layer_poseidon2(&[[0u64; 4]; 3], &seed, 0, &mut parents),
+            Err(AccelError::LengthMismatch {
+                what: "Merkle layer children",
+                expected: 4,
+                actual: 3,
+            })
+        );
+        assert_eq!(
+            backend.merkle_layer_poseidon2_at(&[[0u64; 4]; 3], &seed, 0, 0, &mut parents),
+            Err(AccelError::LengthMismatch {
+                what: "Merkle layer children",
+                expected: 4,
+                actual: 3,
+            })
+        );
+        assert_eq!(parents, [[0u64; 4]; 2]);
+
+        let mut buf = [5u64, 6, 7];
+        assert_eq!(
+            backend.goldilocks_ntt_inplace(&mut buf, &[1], false),
+            Err(AccelError::NotPowerOfTwo {
+                what: "NTT buffer",
+                len: 3,
+            })
+        );
+        let mut buf4 = [5u64, 6, 7, 8];
+        assert_eq!(
+            backend.goldilocks_ntt_inplace(&mut buf4, &[1], true),
+            Err(AccelError::LengthMismatch {
+                what: "NTT twiddles",
+                expected: 2,
+                actual: 1,
+            })
+        );
+        assert_eq!(buf4, [5, 6, 7, 8]);
+        assert_eq!(
+            goldilocks::goldilocks_ntt_alloc_free(&mut [], false),
+            Err(AccelError::NotPowerOfTwo {
+                what: "NTT buffer",
+                len: 0,
+            })
+        );
+        assert_eq!(
+            goldilocks_primitive_root(33),
+            Err(AccelError::DomainTooLarge { log2_len: 33 })
+        );
+
+        let evals = [[1u64, 0]; 4];
+        let mut out = [[0u64; 2]; 8];
+        assert_eq!(
+            backend.coset_lde_ext2(&evals, 3, 7, &mut out),
+            Err(AccelError::NotPowerOfTwo {
+                what: "LDE blowup",
+                len: 3,
+            })
+        );
+        assert_eq!(
+            backend.coset_lde_ext2(&evals, 4, 7, &mut out),
+            Err(AccelError::LengthMismatch {
+                what: "LDE output",
+                expected: 16,
+                actual: 8,
+            })
+        );
+        assert_eq!(
+            backend.coset_lde_ext2(&evals[..3], 2, 7, &mut out),
+            Err(AccelError::NotPowerOfTwo {
+                what: "LDE evaluation domain",
+                len: 3,
+            })
+        );
+        assert_eq!(
+            backend.bdoz_gf2_128_batch_dot(&[(1, 2)], &[]),
+            Err(AccelError::LengthMismatch {
+                what: "BDOZ batch dot weights",
+                expected: 1,
+                actual: 0,
+            })
+        );
+        assert!(!spot_check_merkle_layer(
+            &[[0; 4]; 3],
+            &seed,
+            0,
+            0,
+            &parents,
+            &[0; 32],
+            2
+        ));
+    }
+}
