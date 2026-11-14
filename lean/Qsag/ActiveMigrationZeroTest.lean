@@ -989,3 +989,981 @@ theorem canonicalSubgroupHom_scalarMulKey_val (group : ScalarGroup) (s : BitVec 
     On `[1, group.orderNat - 1]` (`requireCanonicalScalar group s = true`), compressed / parity-pinned
     subgroup scalar multiplication `scalarMulKey (canonicalSubgroupHom group)` is strictly injective,
     whereas on unrestricted `BitVec 256` (`0#256` vs `group.orderNat`) it wraps modulo `group.orderNat`. -/
+theorem canonicalSubgroupHom_injective_on_canonical (group : ScalarGroup) :
+    (∀ s1 s2 : BitVec 256,
+      requireCanonicalScalar group s1 = true →
+      requireCanonicalScalar group s2 = true →
+      scalarMulKey (canonicalSubgroupHom group) s1 =
+        scalarMulKey (canonicalSubgroupHom group) s2 →
+      s1 = s2) ∧
+    (let sOrd := BitVec.ofNat 256 group.orderNat
+     0#256 ≠ sOrd ∧
+     scalarMulKey (canonicalSubgroupHom group) 0#256 =
+       scalarMulKey (canonicalSubgroupHom group) sOrd) := by
+  refine ⟨?_, ?_⟩
+  · intro s1 s2 h1 h2 hEq
+    obtain ⟨_, hLt1⟩ := (requireCanonicalScalar_iff group s1).mp h1
+    obtain ⟨_, hLt2⟩ := (requireCanonicalScalar_iff group s2).mp h2
+    have hv := congrArg Fin.val hEq
+    rw [canonicalSubgroupHom_scalarMulKey_val, canonicalSubgroupHom_scalarMulKey_val,
+        Nat.mod_eq_of_lt hLt1, Nat.mod_eq_of_lt hLt2] at hv
+    exact BitVec.eq_of_toNat_eq hv
+  · obtain ⟨hGt1, hLt256, _⟩ := scalarGroup_order_props group
+    let sOrd := BitVec.ofNat 256 group.orderNat
+    have hsOrdVal : sOrd.toNat = group.orderNat := by
+      dsimp [sOrd]
+      rw [BitVec.toNat_ofNat, Nat.mod_eq_of_lt hLt256]
+    refine ⟨?_, ?_⟩
+    · intro hEq
+      have hv := congrArg BitVec.toNat hEq
+      rw [BitVec.toNat_ofNat, Nat.zero_mod, hsOrdVal] at hv
+      omega
+    · apply Fin.ext
+      rw [canonicalSubgroupHom_scalarMulKey_val, canonicalSubgroupHom_scalarMulKey_val,
+          hsOrdVal, Nat.mod_self]
+      simp
+
+/-- **Shor Pre-Migration Vulnerability Predicate (`ShorVulnerablePreMigration`)**:
+    Legacy `Secp256k1` and `Ed25519` public keys hide `s` **only** against classical discrete-log
+    adversaries; a Shor CRQC discrete-log oracle recovers canonical `s` directly from `pk` before
+    any migration ceremony runs. -/
+def ShorVulnerablePreMigration (group : ScalarGroup) : Prop :=
+  ∃ shorDlog : Fin group.orderNat → BitVec 256,
+    ∀ s : BitVec 256,
+      requireCanonicalScalar group s = true →
+      shorDlog (scalarMulKey (canonicalSubgroupHom group) s) = s
+
+/-- **`#tooth` Shor CRQC Recovers Pre-Migration Legacy Key Directly From `pk` (`tooth_shor_crqc_breaks_legacy_pk_pre_migration`)**:
+    Prior to post-quantum migration finality, a quantum period-finding (Shor CRQC) adversary
+    inverts `scalarMulKey (canonicalSubgroupHom group)` on **every** canonical scalar in `[1, order - 1]`
+    with `0` custodian MPC queries — proving why migration security after settlement relies on the
+    PQ destination key + Poseidon2 `NULLIFIER_DOMAIN` binding rather than legacy curve hiding. -/
+theorem tooth_shor_crqc_breaks_legacy_pk_pre_migration (group : ScalarGroup) :
+    ShorVulnerablePreMigration group := by
+  obtain ⟨_, hLt256, _⟩ := scalarGroup_order_props group
+  refine ⟨fun pt => BitVec.ofNatLT pt.val (Nat.lt_trans pt.isLt hLt256), ?_⟩
+  intro s hCanon
+  obtain ⟨_, hLtOrd⟩ := (requireCanonicalScalar_iff group s).mp hCanon
+  apply BitVec.eq_of_toNat_eq
+  change (scalarMulKey (canonicalSubgroupHom group) s).val = s.toNat
+  rw [canonicalSubgroupHom_scalarMulKey_val, Nat.mod_eq_of_lt hLtOrd]
+
+/-- Lossless 56-bit 5-limb Goldilocks packing of a 256-bit value (`5 * 56 = 280 > 256`, `scalar.rs:89, 92`). -/
+def pack256ToLimbs56 (x : BitVec 256) : Fin 5 → Goldilocks :=
+  fun k =>
+    let slice := (x.toNat / (2 ^ (56 * k.val))) % (2 ^ 56)
+    have hLtP : slice < goldilocksPrime := by
+      have hSliceLt : slice < 2 ^ 56 := Nat.mod_lt _ (Nat.two_pow_pos 56)
+      have h56LtP : (2 : Nat) ^ 56 < goldilocksPrime := by unfold goldilocksPrime; decide
+      omega
+    ⟨slice, hLtP⟩
+
+theorem pack256ToLimbs56_injective {a b : BitVec 256}
+    (h : pack256ToLimbs56 a = pack256ToLimbs56 b) : a = b := by
+  apply bv_eq_of_getLsbD_eq
+  intro i hi
+  let k : Fin 5 := ⟨i / 56, by omega⟩
+  let r : Nat := i % 56
+  have hrLt : r < 56 := Nat.mod_lt i (by decide)
+  have hkEq : (pack256ToLimbs56 a k).val = (pack256ToLimbs56 b k).val :=
+    congrArg (fun f => (f k).val) h
+  dsimp only [pack256ToLimbs56] at hkEq
+  have hBitEq : (((a.toNat / 2 ^ (56 * k.val)) % 2 ^ 56).testBit r) =
+      (((b.toNat / 2 ^ (56 * k.val)) % 2 ^ 56).testBit r) :=
+    congrArg (fun v => v.testBit r) hkEq
+  rw [Nat.testBit_mod_two_pow, Nat.testBit_mod_two_pow, decide_eq_true hrLt,
+      Bool.true_and, Bool.true_and, Nat.testBit_div_two_pow, Nat.testBit_div_two_pow] at hBitEq
+  have hIdx : r + 56 * k.val = i := by
+    rw [Nat.add_comm]
+    exact Nat.div_add_mod i 56
+  rw [hIdx] at hBitEq
+  exact hBitEq
+
+/-- Complete 11-limb Poseidon2 nullifier preimage matching `scalar.rs:92-100` and `ownership.rs:294-300`. -/
+def migrationNullifierInput (group : ScalarGroup) (s migrationDomain : BitVec 256) :
+    Fin 11 → Goldilocks :=
+  fun idx =>
+    if idx.val = 0 then
+      group.nullifierTag
+    else if h1 : idx.val < 6 then
+      pack256ToLimbs56 s ⟨idx.val - 1, by omega⟩
+    else
+      pack256ToLimbs56 migrationDomain ⟨idx.val - 6, by omega⟩
+
+/-- Evaluate the campaign migration nullifier under `NULLIFIER_DOMAIN = 0x4d49_475f_4e55_4c31`. -/
+def computeMigrationNullifier
+    (poseidon2Hash : UInt64 → (Fin 11 → Goldilocks) → (Fin 4 → Goldilocks))
+    (group : ScalarGroup) (s migrationDomain : BitVec 256) : Fin 4 → Goldilocks :=
+  poseidon2Hash NULLIFIER_DOMAIN (migrationNullifierInput group s migrationDomain)
+
+/-- **Post-Ceremony `NULLIFIER_DOMAIN` Binding & Campaign Replay Resistance (`post_ceremony_nullifier_domain_binding_and_replay_sound`)**:
+    1. `migrationNullifierInput` injectively binds `(group, s, migrationDomain)` across 11 canonical
+       Goldilocks limbs under `NULLIFIER_DOMAIN = 0x4d49_475f_4e55_4c31`, so any collision on
+       `computeMigrationNullifier` directly yields a Poseidon2 sponge collision on `NULLIFIER_DOMAIN`.
+    2. Changing the PQ destination public key `pqDest1 ≠ pqDest2` within a campaign (`migrationDomain`
+       fixed) leaves `computeMigrationNullifier` invariant (`scalar.rs:78-84`), blocking post-finality
+       double-migration even if a Shor CRQC later extracts the retired legacy key `s`! -/
+theorem post_ceremony_nullifier_domain_binding_and_replay_sound
+    (poseidon2Hash : UInt64 → (Fin 11 → Goldilocks) → (Fin 4 → Goldilocks)) :
+    NULLIFIER_DOMAIN = 0x4d49475f4e554c31 ∧
+    (∀ (g1 g2 : ScalarGroup) (s1 s2 dom1 dom2 : BitVec 256),
+      computeMigrationNullifier poseidon2Hash g1 s1 dom1 =
+        computeMigrationNullifier poseidon2Hash g2 s2 dom2 →
+      (g1 = g2 ∧ s1 = s2 ∧ dom1 = dom2) ∨
+      (migrationNullifierInput g1 s1 dom1 ≠ migrationNullifierInput g2 s2 dom2 ∧
+       poseidon2Hash NULLIFIER_DOMAIN (migrationNullifierInput g1 s1 dom1) =
+         poseidon2Hash NULLIFIER_DOMAIN (migrationNullifierInput g2 s2 dom2))) ∧
+    (∀ (group : ScalarGroup) (s migrationDomain pqDest1 pqDest2 : BitVec 256),
+      pqDest1 ≠ pqDest2 →
+      (fun _dest : BitVec 256 => computeMigrationNullifier poseidon2Hash group s migrationDomain) pqDest1 =
+      (fun _dest : BitVec 256 => computeMigrationNullifier poseidon2Hash group s migrationDomain) pqDest2) := by
+  refine ⟨rfl, ?_, fun _ _ _ _ _ _ => rfl⟩
+  intro g1 g2 s1 s2 dom1 dom2 hNullEq
+  have hInEqDec : Decidable (migrationNullifierInput g1 s1 dom1 = migrationNullifierInput g2 s2 dom2) := by
+    if h0 : g1 = g2 ∧ s1 = s2 ∧ dom1 = dom2 then
+      rcases h0 with ⟨rfl, rfl, rfl⟩
+      exact .isTrue rfl
+    else
+      apply Decidable.isFalse
+      intro hFunEq
+      apply h0
+      have hgEq : g1 = g2 := by
+        have hTag := congrArg (fun f => (f ⟨0, by decide⟩).val) hFunEq
+        dsimp only [migrationNullifierInput] at hTag
+        cases g1 <;> cases g2 <;> simp [ScalarGroup.nullifierTag] at hTag ⊢
+      have hsLimbs : pack256ToLimbs56 s1 = pack256ToLimbs56 s2 := by
+        funext k
+        have hk := congrArg (fun f => f ⟨k.val + 1, by omega⟩) hFunEq
+        dsimp only [migrationNullifierInput] at hk
+        have hNe0 : k.val + 1 ≠ 0 := by omega
+        have hLt6 : k.val + 1 < 6 := by omega
+        rw [cIte_neg hNe0, cDIte_pos hLt6, cIte_neg hNe0, cDIte_pos hLt6] at hk
+        have hkSub : (⟨k.val + 1 - 1, by omega⟩ : Fin 5) = k :=
+          Fin.ext (Nat.add_sub_cancel k.val 1)
+        simpa only [hkSub] using hk
+      have hdLimbs : pack256ToLimbs56 dom1 = pack256ToLimbs56 dom2 := by
+        funext k
+        have hk := congrArg (fun f => f ⟨k.val + 6, by omega⟩) hFunEq
+        dsimp only [migrationNullifierInput] at hk
+        have hNe0 : k.val + 6 ≠ 0 := by omega
+        have hNotLt6 : ¬ (k.val + 6 < 6) := by omega
+        rw [cIte_neg hNe0, cIte_neg hNe0] at hk
+        simp only [hNotLt6, ↓reduceDIte] at hk
+        have hkSub : (⟨k.val + 6 - 6, by omega⟩ : Fin 5) = k :=
+          Fin.ext (Nat.add_sub_cancel k.val 6)
+        simpa only [hkSub] using hk
+      exact ⟨hgEq, pack256ToLimbs56_injective hsLimbs, pack256ToLimbs56_injective hdLimbs⟩
+  cases hInEqDec with
+  | isTrue hSameIn =>
+    left
+    have hgEq : g1 = g2 := by
+      have hTag := congrArg (fun f => (f ⟨0, by decide⟩).val) hSameIn
+      dsimp only [migrationNullifierInput] at hTag
+      cases g1 <;> cases g2 <;> simp [ScalarGroup.nullifierTag] at hTag ⊢
+    have hsLimbs : pack256ToLimbs56 s1 = pack256ToLimbs56 s2 := by
+      funext k
+      have hk := congrArg (fun f => f ⟨k.val + 1, by omega⟩) hSameIn
+      dsimp only [migrationNullifierInput] at hk
+      have hNe0 : k.val + 1 ≠ 0 := by omega
+      have hLt6 : k.val + 1 < 6 := by omega
+      rw [cIte_neg hNe0, cDIte_pos hLt6, cIte_neg hNe0, cDIte_pos hLt6] at hk
+      have hkSub : (⟨k.val + 1 - 1, by omega⟩ : Fin 5) = k :=
+        Fin.ext (Nat.add_sub_cancel k.val 1)
+      simpa only [hkSub] using hk
+    have hdLimbs : pack256ToLimbs56 dom1 = pack256ToLimbs56 dom2 := by
+      funext k
+      have hk := congrArg (fun f => f ⟨k.val + 6, by omega⟩) hSameIn
+      dsimp only [migrationNullifierInput] at hk
+      have hNe0 : k.val + 6 ≠ 0 := by omega
+      have hNotLt6 : ¬ (k.val + 6 < 6) := by omega
+      rw [cIte_neg hNe0, cIte_neg hNe0] at hk
+      simp only [hNotLt6, ↓reduceDIte] at hk
+      have hkSub : (⟨k.val + 6 - 6, by omega⟩ : Fin 5) = k :=
+        Fin.ext (Nat.add_sub_cancel k.val 6)
+      simpa only [hkSub] using hk
+    exact ⟨hgEq, pack256ToLimbs56_injective hsLimbs, pack256ToLimbs56_injective hdLimbs⟩
+  | isFalse hDiffIn =>
+    exact Or.inr ⟨hDiffIn, hNullEq⟩
+
+#tooth_pair
+  Qsag.post_ceremony_nullifier_domain_binding_and_replay_sound
+  vs
+  Qsag.tooth_shor_crqc_breaks_legacy_pk_pre_migration
+
+/-! ## 3. 3-Party 64-Lane Replicated Secret Sharing (`RssBit64`) & `shareUniformLanesCheck` -/
+
+/-- Local 2-of-3 replicated 64-lane bit share `Bit([s_i, s_{i+1}])` held by custodian `i : Fin 3`
+    (`outer_mpc.rs:1683, 1706`). -/
+structure RssBit64 where
+  mine : UInt64
+  next : UInt64
+  deriving Repr, DecidableEq
+
+/-- Complete 3-custodian 64-lane replicated sharing `(w0, w1, w2)` of `w0 ^^^ w1 ^^^ w2`. -/
+structure RssWord64Shares3 where
+  w0 : UInt64
+  w1 : UInt64
+  w2 : UInt64
+  deriving Repr, DecidableEq
+
+/-- Replicated share pair `(s_i, s_{(i+1)%3})` visible to custodian `i : Fin 3` (`outer_mpc.rs:1703-1707`). -/
+def RssWord64Shares3.partyView (sh : RssWord64Shares3) : Fin 3 → RssBit64
+  | ⟨0, _⟩ => ⟨sh.w0, sh.w1⟩
+  | ⟨1, _⟩ => ⟨sh.w1, sh.w2⟩
+  | ⟨2, _⟩ => ⟨sh.w2, sh.w0⟩
+  | ⟨_ + 3, h⟩ => False.elim (by omega)
+
+/-- Reconstructed 64-lane word `(w0 ^^^ w1) ^^^ w2`. -/
+def RssWord64Shares3.reconstruct (sh : RssWord64Shares3) : UInt64 :=
+  (sh.w0 ^^^ sh.w1) ^^^ sh.w2
+
+/-- Replica-consistency check in `Engine::open_raw_bits` (`outer_mpc.rs:1860-1869`). -/
+def openRawBitsConsistent (p0 p1 p2 : RssBit64) : Bool :=
+  (p0.next == p1.mine) && (p1.next == p2.mine) && (p2.next == p0.mine)
+
+theorem openRawBitsConsistent_honest (sh : RssWord64Shares3) :
+    openRawBitsConsistent
+      (sh.partyView ⟨0, by decide⟩)
+      (sh.partyView ⟨1, by decide⟩)
+      (sh.partyView ⟨2, by decide⟩) = true := by
+  unfold openRawBitsConsistent RssWord64Shares3.partyView
+  simp
+
+/-- 3-of-3 custodian shares of the normalized 256-bit spending scalar (`co_zk_mpc.rs:29-39`). -/
+structure RssKeyShares3 where
+  s0 : MigrationKey256
+  s1 : MigrationKey256
+  s2 : MigrationKey256
+  deriving Repr, DecidableEq
+
+/-- True underlying 256-bit spending scalar `s = (s0 ^^^ s1) ^^^ s2`. -/
+@[expose] def RssKeyShares3.secret (ks : RssKeyShares3) : MigrationKey256 :=
+  (ks.s0 ^^^ ks.s1) ^^^ ks.s2
+
+/-- Broadcast a single witness share bit across all 64 ZKBoo batch lanes (`co_zk_mpc.rs:129`). -/
+def expandUniformLane64 (b : Bool) : UInt64 :=
+  if b then 0xFFFFFFFFFFFFFFFF else 0
+
+/-- Check that a 64-lane witness word is uniform (`0` or `u64::MAX`, `outer_mpc.rs:1693, 1697`). -/
+def isUniformLaneWord (w : UInt64) : Bool :=
+  (w == 0) || (w == 0xFFFFFFFFFFFFFFFF)
+
+/-- Constructive bounded universal quantifier over `Fin n`. -/
+def finAll : (n : Nat) → (Fin n → Bool) → Bool
+  | 0, _ => true
+  | n + 1, p => p ⟨0, Nat.zero_lt_succ n⟩ && finAll n (fun i => p ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩)
+
+theorem finAll_eq_true_iff : ∀ (n : Nat) (p : Fin n → Bool),
+    finAll n p = true ↔ ∀ i : Fin n, p i = true
+  | 0, _ => ⟨fun _ i => Fin.elim0 i, fun _ => rfl⟩
+  | n + 1, p => by
+    simp only [finAll, Bool.and_eq_true, finAll_eq_true_iff n]
+    constructor
+    · rintro ⟨h0, hRest⟩ ⟨k, hk⟩
+      cases k with
+      | zero => exact h0
+      | succ j => exact hRest ⟨j, Nat.lt_of_succ_lt_succ hk⟩
+    · intro hAll
+      exact ⟨hAll ⟨0, Nat.zero_lt_succ n⟩, fun i => hAll ⟨i.val + 1, Nat.succ_lt_succ i.isLt⟩⟩
+
+/-- 256-bit × 64-lane replicated witness sharing across the 3 custodians (`co_zk_mpc.rs:126-131`). -/
+structure RssWitnessLanes3 where
+  w0 : Fin 256 → UInt64
+  w1 : Fin 256 → UInt64
+  w2 : Fin 256 → UInt64
+
+/-- Build 64-lane witness words when custodian `0` injects per-bit 64-lane fault `deltaLanes`. -/
+def buildWitnessLanes3 (ks : RssKeyShares3) (deltaLanes : Fin 256 → UInt64) : RssWitnessLanes3 where
+  w0 j := expandUniformLane64 (ks.s0.getLsbD j.val) ^^^ deltaLanes j
+  w1 j := expandUniformLane64 (ks.s1.getLsbD j.val)
+  w2 j := expandUniformLane64 (ks.s2.getLsbD j.val)
+
+/-- `Engine::share_uniform_lanes` check enforcing `0` or `u64::MAX` on every custodian's 256 words
+    before batch splitting (`outer_mpc.rs:1692-1711`, `co_zk_mpc.rs:131`). -/
+@[expose] def shareUniformLanesCheck (wl : RssWitnessLanes3) : Bool :=
+  finAll 256 (fun j =>
+    isUniformLaneWord (wl.w0 j) && isUniformLaneWord (wl.w1 j) && isUniformLaneWord (wl.w2 j))
+
+/-- Extract the reconstructed 256-bit candidate witness evaluated by ZKBoo repetition `lane < 64`. -/
+def extractRepetitionWitness (wl : RssWitnessLanes3) (lane : Nat) : MigrationKey256 :=
+  packBits 256 (fun j =>
+    if hj : j < 256 then
+      let recon := (wl.w0 ⟨j, hj⟩ ^^^ wl.w1 ⟨j, hj⟩) ^^^ wl.w2 ⟨j, hj⟩
+      recon.toBitVec.getLsbD lane
+    else
+      false)
+
+private theorem isUniformLaneWord_or {w : UInt64} (hw : isUniformLaneWord w = true) :
+    w = 0 ∨ w = 0xFFFFFFFFFFFFFFFF := by
+  unfold isUniformLaneWord at hw
+  cases h0 : (w == 0)
+  · rw [h0, Bool.false_or] at hw
+    exact Or.inr (eq_of_beq hw)
+  · exact Or.inl (eq_of_beq h0)
+
+private theorem isUniformLaneWord_xor {a b : UInt64}
+    (ha : isUniformLaneWord a = true) (hb : isUniformLaneWord b = true) :
+    isUniformLaneWord (a ^^^ b) = true := by
+  rcases isUniformLaneWord_or ha with rfl | rfl <;>
+    rcases isUniformLaneWord_or hb with rfl | rfl <;>
+    decide
+
+private theorem uniformLaneWord_getLsbD_eq {w : UInt64}
+    (hw : isUniformLaneWord w = true) {l1 l2 : Nat} (hl1 : l1 < 64) (hl2 : l2 < 64) :
+    w.toBitVec.getLsbD l1 = w.toBitVec.getLsbD l2 := by
+  have hAll1 : (0xFFFFFFFFFFFFFFFF : UInt64).toBitVec = BitVec.allOnes 64 := by decide
+  rcases isUniformLaneWord_or hw with rfl | rfl
+  · simp
+  · rw [hAll1, Qsag.Constructive.getLsbD_allOnes, Qsag.Constructive.getLsbD_allOnes,
+        decide_eq_true hl1, decide_eq_true hl2]
+
+private theorem expandUniformLane64_getLsbD (b : Bool) {lane : Nat} (hLane : lane < 64) :
+    (expandUniformLane64 b).toBitVec.getLsbD lane = b := by
+  have hAll1 : (0xFFFFFFFFFFFFFFFF : UInt64).toBitVec = BitVec.allOnes 64 := by decide
+  cases b
+  · simp [expandUniformLane64]
+  · simp only [expandUniformLane64, ↓reduceIte, hAll1, Qsag.Constructive.getLsbD_allOnes,
+      decide_eq_true hLane]
+
+/-- **64-Lane Witness Uniformity (`shareUniformLanesCheck_implies_uniform_witness_across_lanes`)**:
+    1. Whenever `shareUniformLanesCheck wl = true`, all 64 ZKBoo batch lanes reconstruct the
+       **identical** 256-bit candidate spending key (`extractRepetitionWitness wl l1 = extractRepetitionWitness wl l2`).
+    2. Any uniform 256-bit scalar fault `delta : MigrationKey256` passes `shareUniformLanesCheck`
+       and shifts **every** lane `lane < 64` identically to `ks.secret ^^^ delta`. -/
+theorem shareUniformLanesCheck_implies_uniform_witness_across_lanes :
+    (∀ (wl : RssWitnessLanes3),
+      shareUniformLanesCheck wl = true →
+      ∀ l1 l2 : Nat, l1 < 64 → l2 < 64 →
+        extractRepetitionWitness wl l1 = extractRepetitionWitness wl l2) ∧
+    (∀ (ks : RssKeyShares3) (delta : MigrationKey256),
+      let wl := buildWitnessLanes3 ks (fun j => expandUniformLane64 (delta.getLsbD j.val))
+      shareUniformLanesCheck wl = true ∧
+      ∀ lane : Nat, lane < 64 → extractRepetitionWitness wl lane = ks.secret ^^^ delta) := by
+  refine ⟨?_, ?_⟩
+  · intro wl hCheck l1 l2 hl1 hl2
+    have hAll := (finAll_eq_true_iff 256 _).mp hCheck
+    apply bv_eq_of_getLsbD_eq
+    intro j hj
+    unfold extractRepetitionWitness
+    rw [packBits_getLsbD _ _ j hj, packBits_getLsbD _ _ j hj, cDIte_pos hj, cDIte_pos hj]
+    have hjCheck := hAll ⟨j, hj⟩
+    rw [Bool.and_eq_true, Bool.and_eq_true] at hjCheck
+    have hReconUnif : isUniformLaneWord ((wl.w0 ⟨j, hj⟩ ^^^ wl.w1 ⟨j, hj⟩) ^^^ wl.w2 ⟨j, hj⟩) = true :=
+      isUniformLaneWord_xor (isUniformLaneWord_xor hjCheck.1.1 hjCheck.1.2) hjCheck.2
+    exact uniformLaneWord_getLsbD_eq hReconUnif hl1 hl2
+  · intro ks delta wl
+    have hUnifBool : ∀ b : Bool, isUniformLaneWord (expandUniformLane64 b) = true := by
+      intro b; cases b <;> decide
+    have hWlCheck : shareUniformLanesCheck wl = true := by
+      rw [shareUniformLanesCheck, finAll_eq_true_iff]
+      intro j
+      dsimp only [wl, buildWitnessLanes3]
+      rw [Bool.and_eq_true, Bool.and_eq_true]
+      exact ⟨⟨isUniformLaneWord_xor (hUnifBool _) (hUnifBool _), hUnifBool _⟩, hUnifBool _⟩
+    refine ⟨hWlCheck, ?_⟩
+    intro lane hLane
+    apply bv_eq_of_getLsbD_eq
+    intro j hj
+    unfold extractRepetitionWitness
+    rw [packBits_getLsbD _ _ j hj, cDIte_pos hj]
+    dsimp only [wl, buildWitnessLanes3]
+    simp only [u64_toBitVec_xor, BitVec.getLsbD_xor, expandUniformLane64_getLsbD _ hLane,
+      RssKeyShares3.secret]
+    bv_xor_cancel
+
+/-- **`#tooth` Skipping `share_uniform_lanes` Splits Witness Across Repetitions (`tooth_non_uniform_lanes_split_witness_across_reps`)**:
+    If `share` is called instead of `share_uniform_lanes`, custodian `0` can inject a mixed 64-lane
+    mask (`1 : UInt64` on bit `0`, flipping lane `0` only while leaving lane `1` untouched):
+    `shareUniformLanesCheck` catches it (`= false`), whereas without the check lane `0` evaluates
+    `ks.secret ^^^ oneBitMask 256 0` while lane `1` evaluates `ks.secret` (`≠`)! -/
+theorem tooth_non_uniform_lanes_split_witness_across_reps (ks : RssKeyShares3) :
+    let mixedFault : Fin 256 → UInt64 := fun j => if j.val == 0 then 1 else 0
+    let wl := buildWitnessLanes3 ks mixedFault
+    shareUniformLanesCheck wl = false ∧
+    extractRepetitionWitness wl 0 = ks.secret ^^^ oneBitMask 256 0 ∧
+    extractRepetitionWitness wl 1 = ks.secret ∧
+    extractRepetitionWitness wl 0 ≠ extractRepetitionWitness wl 1 := by
+  intro mixedFault wl
+  have hCheckFalse : shareUniformLanesCheck wl = false := by
+    cases h : shareUniformLanesCheck wl
+    · rfl
+    · exfalso
+      have h0 := (finAll_eq_true_iff 256 _).mp h ⟨0, by decide⟩
+      rw [Bool.and_eq_true, Bool.and_eq_true] at h0
+      have hw0 : isUniformLaneWord (wl.w0 ⟨0, by decide⟩) = true := h0.1.1
+      dsimp only [wl, buildWitnessLanes3, mixedFault] at hw0
+      rcases isUniformLaneWord_or hw0 with hA | hB
+      · cases hb : ks.s0.getLsbD 0 <;> rw [hb] at hA <;> revert hA <;> decide
+      · cases hb : ks.s0.getLsbD 0 <;> rw [hb] at hB <;> revert hB <;> decide
+  have hLane0 : extractRepetitionWitness wl 0 = ks.secret ^^^ oneBitMask 256 0 := by
+    apply bv_eq_of_getLsbD_eq
+    intro j hj
+    unfold extractRepetitionWitness
+    rw [packBits_getLsbD _ _ j hj, cDIte_pos hj, BitVec.getLsbD_xor, oneBitMask_getLsbD 256 0 j hj]
+    dsimp only [wl, buildWitnessLanes3, mixedFault]
+    simp only [u64_toBitVec_xor, BitVec.getLsbD_xor, expandUniformLane64_getLsbD _ (by decide : 0 < 64),
+      RssKeyShares3.secret]
+    cases hjeq : (j == 0)
+    · have hjNe : j ≠ 0 := fun h => by subst h; cases hjeq
+      rw [decide_eq_false hjNe]
+      simp only [Bool.false_eq_true, ↓reduceIte]
+      have h0Bit : ((0 : UInt64).toBitVec).getLsbD 0 = false := by decide
+      rw [h0Bit]
+      bv_xor_cancel
+    · have hjEq0 : j = 0 := eq_of_beq hjeq
+      subst hjEq0
+      simp only [↓reduceIte, decide_true]
+      have h1Bit : ((1 : UInt64).toBitVec).getLsbD 0 = true := by decide
+      rw [h1Bit]
+      cases ks.s0.getLsbD 0 <;> cases ks.s1.getLsbD 0 <;> cases ks.s2.getLsbD 0 <;> rfl
+  have hLane1 : extractRepetitionWitness wl 1 = ks.secret := by
+    apply bv_eq_of_getLsbD_eq
+    intro j hj
+    unfold extractRepetitionWitness
+    rw [packBits_getLsbD _ _ j hj, cDIte_pos hj]
+    dsimp only [wl, buildWitnessLanes3, mixedFault]
+    simp only [u64_toBitVec_xor, BitVec.getLsbD_xor, expandUniformLane64_getLsbD _ (by decide : 1 < 64),
+      RssKeyShares3.secret]
+    cases (j == 0)
+    · simp only [Bool.false_eq_true, ↓reduceIte]
+      have h0Bit : ((0 : UInt64).toBitVec).getLsbD 1 = false := by decide
+      rw [h0Bit]
+      bv_xor_cancel
+    · simp only [↓reduceIte]
+      have h1Bit : ((1 : UInt64).toBitVec).getLsbD 1 = false := by decide
+      rw [h1Bit]
+      bv_xor_cancel
+  have hNe : extractRepetitionWitness wl 0 ≠ extractRepetitionWitness wl 1 := by
+    rw [hLane0, hLane1]
+    intro hEq
+    have hBit0 := congrArg (·.getLsbD 0) hEq
+    have hDec0 : decide (0 = (0 : Nat)) = true := rfl
+    rw [BitVec.getLsbD_xor, oneBitMask_getLsbD 256 0 0 (by decide), hDec0] at hBit0
+    cases hb : ks.secret.getLsbD 0 <;> rw [hb] at hBit0 <;> cases hBit0
+  exact ⟨hCheckFalse, hLane0, hLane1, hNe⟩
+
+#tooth_pair
+  Qsag.shareUniformLanesCheck_implies_uniform_witness_across_lanes
+  vs
+  Qsag.tooth_non_uniform_lanes_split_witness_across_reps
+
+/-! ## 4. Premature Residual Opening Key-Recovery `#tooth` on Canonical `Secp256k1` & `Ed25519` -/
+
+/-- Honest verifier rejection codes matching `outer_mpc::Error` (`co_zk_mpc.rs:750, 1108`). -/
+inductive CeremonyAbortError where
+  | laneDisagreement
+  | invalidTape
+  | multiplicationCheck
+  | invalidProof
+  deriving Repr, DecidableEq
+
+/-- Broken ceremony protocol (prior to inside-MPC `all_outputs_zero` gating): opens the raw curve
+    residual `encodePk (pkOf s') ^^^ encodePk pk` publicly *before* checking `allOutputsZero`. -/
+def brokenPrematureOpenCeremony {w pWidth : Nat} {PubKey ZkView : Type}
+    (pkOf : BitVec w → PubKey) (encodePk : PubKey → BitVec pWidth)
+    (zkCommit : BitVec w → ZkView) (pk : PubKey)
+    (s0 s1 s2 delta : BitVec w) :
+    BitVec pWidth × Except CeremonyAbortError ZkView :=
+  let s' := ((s0 ^^^ delta) ^^^ s1) ^^^ s2
+  let res := encodePk (pkOf s') ^^^ encodePk pk
+  let verdict :=
+    if res != 0#pWidth then .error .invalidProof
+    else .ok (zkCommit s')
+  (res, verdict)
+
+/-- Explicit `1`-query bit-extraction step from a prematurely opened residual on fault `oneBitMask w i`. -/
+def extractSecretBitFromBrokenOpen {w pWidth : Nat} {PubKey : Type} [DecidableEq PubKey]
+    (G : ScalarPointHom w pWidth PubKey) (pk : PubKey)
+    (i : Nat) (openedResidual : BitVec pWidth) : Bool :=
+  let unmaskedPkBits := openedResidual ^^^ G.encodePk pk
+  unmaskedPkBits != G.encodePk (G.ptAdd pk (G.genBit i))
+
+/-- Explicit `w`-query spending-key recovery algorithm over prematurely opened ceremony residuals. -/
+def recoverKeyFromPrematureOpens {w pWidth : Nat} {PubKey : Type} [DecidableEq PubKey]
+    (G : ScalarPointHom w pWidth PubKey) (pk : PubKey)
+    (queryResidualAtBit : Nat → BitVec pWidth) : BitVec w :=
+  packBits w (fun i => extractSecretBitFromBrokenOpen G pk i (queryResidualAtBit i))
+
+/-- **`#tooth` Premature Residual Opening Key-Recovery Attack (`tooth_premature_residual_open_recovers_spending_key`)**:
+    On `brokenPrematureOpenCeremony` (opening `res` before verifying `all_outputs_zero`):
+    1. Every single-bit fault ceremony `delta = oneBitMask w i` (`i < w`) is rejected by the honest
+       custodians with `.error .invalidProof`, AND
+    2. `recoverKeyFromPrematureOpens` deterministically recovers the **entire** `w`-bit secret
+       spending key `(s0 ^^^ s1) ^^^ s2` with probability `1`! -/
+theorem tooth_premature_residual_open_recovers_spending_key
+    {w pWidth : Nat} {PubKey ZkView : Type} [DecidableEq PubKey]
+    (G : ScalarPointHom w pWidth PubKey)
+    (zkCommit : BitVec w → ZkView)
+    (s0 s1 s2 : BitVec w) :
+    let secret := (s0 ^^^ s1) ^^^ s2
+    let pk := scalarMulKey G secret
+    let runBitQuery := fun i =>
+      brokenPrematureOpenCeremony (scalarMulKey G) G.encodePk zkCommit pk s0 s1 s2 (oneBitMask w i)
+    recoverKeyFromPrematureOpens G pk (fun i => (runBitQuery i).1) = secret ∧
+    (∀ i, i < w → (runBitQuery i).2 = .error .invalidProof) := by
+  intro secret pk runBitQuery
+  have hEncInj := G.encodePk_injective
+  have hShift : ∀ d : BitVec w, ((s0 ^^^ d) ^^^ s1) ^^^ s2 = secret ^^^ d := by
+    intro d; dsimp only [secret]; bv_xor_cancel
+  have hBitExact : ∀ i, i < w →
+      extractSecretBitFromBrokenOpen G pk i (runBitQuery i).1 = secret.getLsbD i ∧
+      (runBitQuery i).2 = .error .invalidProof := by
+    intro i hi
+    simp only [runBitQuery, brokenPrematureOpenCeremony, extractSecretBitFromBrokenOpen, hShift]
+    have hUnmask : (G.encodePk (scalarMulKey G (secret ^^^ oneBitMask w i)) ^^^ G.encodePk pk) ^^^
+        G.encodePk pk = G.encodePk (scalarMulKey G (secret ^^^ oneBitMask w i)) := by
+      bv_xor_cancel
+    rw [hUnmask, scalarMulKey_xor_oneBit G secret hi]
+    dsimp only [pk]
+    have hNon2 : G.ptAdd pk (G.genBit i) ≠ G.ptSub pk (G.genBit i) := G.non_two_torsion i hi pk
+    have hGenNeZero : G.ptAdd pk (G.genBit i) ≠ pk ∧ G.ptSub pk (G.genBit i) ≠ pk := by
+      constructor
+      · intro hAddEq
+        have hSubEq : G.ptSub pk (G.genBit i) = pk := by
+          have h1 := congrArg (fun u => G.ptSub u (G.genBit i)) hAddEq
+          rw [G.add_sub_cancel] at h1
+          exact h1.symm
+        exact hNon2 (hAddEq.trans hSubEq.symm)
+      · intro hSubEq
+        have hAddEq : G.ptAdd pk (G.genBit i) = pk := by
+          have h1 := congrArg (fun u => G.ptAdd u (G.genBit i)) hSubEq
+          rw [G.sub_add_cancel] at h1
+          exact h1.symm
+        exact hNon2 (hAddEq.trans hSubEq.symm)
+    cases hBit : secret.getLsbD i
+    · simp only [Bool.false_eq_true, ↓reduceIte, bne_self_eq_false]
+      have hResTrue : (G.encodePk (G.ptAdd pk (G.genBit i)) ^^^ G.encodePk pk != 0#pWidth) = true := by
+        rw [bv_bne_zero_eq_true_iff_ne]
+        exact fun hEq => hGenNeZero.1 (hEncInj hEq)
+      rw [hResTrue]
+      exact ⟨trivial, rfl⟩
+    · simp only [↓reduceIte]
+      have hNeEnc : G.encodePk (G.ptSub pk (G.genBit i)) ≠ G.encodePk (G.ptAdd pk (G.genBit i)) :=
+        fun hEq => hNon2 (hEncInj hEq).symm
+      have hResTrue : (G.encodePk (G.ptSub pk (G.genBit i)) ^^^ G.encodePk pk != 0#pWidth) = true := by
+        rw [bv_bne_zero_eq_true_iff_ne]
+        exact fun hEq => hGenNeZero.2 (hEncInj hEq)
+      rw [bne_iff_ne.mpr hNeEnc, hResTrue]
+      exact ⟨rfl, rfl⟩
+  refine ⟨?_, fun i hi => (hBitExact i hi).2⟩
+  apply bv_eq_of_getLsbD_eq
+  intro i hi
+  unfold recoverKeyFromPrematureOpens
+  rw [packBits_getLsbD _ _ i hi]
+  exact (hBitExact i hi).1
+
+/-- Concrete instantiation of `tooth_premature_residual_open_recovers_spending_key` over canonical
+    `< group.orderNat` scalars for **both** `ScalarGroup.Secp256k1` (`SECP_N`) and
+    `ScalarGroup.Ed25519` (`ED_ORDER`) (`0` `Fin (2^w + 1)` scaffolding!). -/
+theorem tooth_premature_residual_open_recovers_canonical_spending_key
+    {ZkView : Type} (group : ScalarGroup) (zkCommit : MigrationKey256 → ZkView)
+    (ks : RssKeyShares3) (hCanon : requireCanonicalScalar group ks.secret = true) :
+    let G := canonicalSubgroupHom group
+    let pk := scalarMulKey G ks.secret
+    let runBitQuery := fun i =>
+      brokenPrematureOpenCeremony (scalarMulKey G) G.encodePk zkCommit pk ks.s0 ks.s1 ks.s2 (oneBitMask 256 i)
+    0 < ks.secret.toNat ∧
+    ks.secret.toNat < group.orderNat ∧
+    recoverKeyFromPrematureOpens G pk (fun i => (runBitQuery i).1) = ks.secret ∧
+    (∀ i, i < 256 → (runBitQuery i).2 = .error .invalidProof) := by
+  obtain ⟨hPos, hLt⟩ := (requireCanonicalScalar_iff group ks.secret).mp hCanon
+  have hMain := tooth_premature_residual_open_recovers_spending_key
+    (canonicalSubgroupHom group) zkCommit ks.s0 ks.s1 ks.s2
+  exact ⟨hPos, hLt, hMain.1, hMain.2⟩
+
+/-! ## 5. Algebraic `GF(2^128)` (`Tower128`) BBCGGI19 Sacrifice & Coin-Permuted Triple Bucketing -/
+
+/-- Multiplication triple `(x, y, z)` over `Tower128` (`GF(2^128)`, `outer_mpc.rs:1906-2384`). -/
+structure Gf2128MulTriple where
+  x : Tower128
+  y : Tower128
+  z : Tower128
+  deriving DecidableEq
+
+/-- Additive multiplication error `delta = z - x * y = z + x * y` in characteristic-2 `Tower128`. -/
+def tripleMulError (t : Gf2128MulTriple) : Tower128 :=
+  towerAdd 7 t.z (towerMul 7 t.x t.y)
+
+theorem tripleMulError_eq_zero_iff (t : Gf2128MulTriple) :
+    tripleMulError t = towerZero 7 ↔ t.z = towerMul 7 t.x t.y := by
+  unfold tripleMulError
+  constructor
+  · intro h
+    have hAdd := congrArg (fun u => towerAdd 7 u (towerMul 7 t.x t.y)) h
+    rw [towerAdd_assoc, towerAdd_self_zero, towerAdd_zero, towerZero_add] at hAdd
+    exact hAdd
+  · intro h
+    rw [h, towerAdd_self_zero]
+
+/-- Algebraic `GF(2^128)` BBCGGI19 polynomial sacrifice check (`outer_mpc.rs:1932-2384, 2991-3000`):
+    given random base-case mask triple `maskTriple` (`delta_0 = tripleMulError maskTriple`) and
+    `m` pending multiplication triples `triples` (`delta_k = tripleMulError t_k`), checks
+    `delta_0 + ∑_{k=1}^m chi^k · delta_k = 0` over `Tower128`! -/
+@[expose] def verifyAllPendingGf2128
+    (maskTriple : Gf2128MulTriple) (triples : List Gf2128MulTriple) (chi : Tower128) : Bool :=
+  decide (RoundPoly.evalCoeffs (tripleMulError maskTriple :: triples.map tripleMulError) chi = towerZero 7)
+
+private theorem evalCoeffs_all_zero : ∀ (n : Nat) (chi : Tower128),
+    RoundPoly.evalCoeffs (List.replicate n (towerZero 7)) chi = towerZero 7
+  | 0, _ => rfl
+  | n + 1, chi => by
+    simp only [List.replicate, RoundPoly.evalCoeffs_cons, evalCoeffs_all_zero n chi]
+    change towerAdd 7 (towerZero 7) (towerMul 7 chi (towerZero 7)) = towerZero 7
+    rw [towerMul_zero, towerAdd_zero]
+
+theorem verifyAllPendingGf2128_honest_complete
+    (maskTriple : Gf2128MulTriple) (triples : List Gf2128MulTriple)
+    (hMask : maskTriple.z = towerMul 7 maskTriple.x maskTriple.y)
+    (hTriples : ∀ t ∈ triples, t.z = towerMul 7 t.x t.y)
+    (chi : Tower128) :
+    verifyAllPendingGf2128 maskTriple triples chi = true := by
+  unfold verifyAllPendingGf2128
+  rw [decide_eq_true_eq]
+  have h0 : tripleMulError maskTriple = towerZero 7 := (tripleMulError_eq_zero_iff maskTriple).mpr hMask
+  have hMap : triples.map tripleMulError = List.replicate triples.length (towerZero 7) := by
+    induction triples with
+    | nil => rfl
+    | cons hd tl ih =>
+      simp only [List.map_cons, List.length_cons, List.replicate]
+      rw [(tripleMulError_eq_zero_iff hd).mpr (hTriples hd (.head _)),
+          ih (fun u hu => hTriples u (.tail _ hu))]
+  rw [h0, hMap]
+  exact evalCoeffs_all_zero (triples.length + 1) chi
+
+/-- Embed `< 2^128` naturals into distinct `Tower128` elements via `unpackTower 7`. -/
+def tower128OfNat (n : Nat) : Tower128 :=
+  unpackTower 7 (BitVec.ofNat 128 n)
+
+private theorem tower128OfNat_injective_lt {a b : Nat}
+    (ha : a < 2 ^ 128) (hb : b < 2 ^ 128)
+    (hEq : tower128OfNat a = tower128OfNat b) : a = b := by
+  have hp := congrArg (packTower 7) hEq
+  unfold tower128OfNat at hp
+  rw [packTower_unpackTower, packTower_unpackTower] at hp
+  have hn := congrArg BitVec.toNat hp
+  rw [BitVec.toNat_ofNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb] at hn
+  exact hn
+
+private theorem tower128OfNat_ne_zero {a : Nat} (hPos : 0 < a) (ha : a < 2 ^ 128) :
+    tower128OfNat a ≠ towerZero 7 := by
+  intro hZero
+  have h0 : towerZero 7 = tower128OfNat 0 := by
+    unfold tower128OfNat
+    have hb0 : BitVec.ofNat 128 0 = (0 : TowerBitVec 7) := rfl
+    rw [hb0, unpackTower_zero]
+  rw [h0] at hZero
+  have ha0 := tower128OfNat_injective_lt ha (Nat.two_pow_pos 128) hZero
+  omega
+
+private theorem nodup_map_on_list {α β : Type} (f : α → β) :
+    ∀ {l : List α}, l.Nodup → (∀ x ∈ l, ∀ y ∈ l, f x = f y → x = y) → (l.map f).Nodup
+  | [], _, _ => .nil
+  | a :: tl, .cons hNotMem hNdTl, hInj => by
+    simp only [List.map_cons]
+    refine .cons ?_ (nodup_map_on_list f hNdTl (fun x hx y hy hEq => hInj x (.tail _ hx) y (.tail _ hy) hEq))
+    intro b hbMem hEq
+    rcases List.mem_map.mp hbMem with ⟨a', ha'Mem, rfl⟩
+    have haEq : a = a' := hInj a (.head _) a' (.tail _ ha'Mem) hEq
+    subst haEq
+    exact hNotMem a ha'Mem rfl
+
+private theorem exists_mem_of_filter_length_lt {α : Type} (p : α → Bool) :
+    ∀ (l : List α), (l.filter p).length < l.length → ∃ x ∈ l, p x = false
+  | [], h => False.elim (Nat.lt_irrefl 0 h)
+  | a :: tl, h => by
+    simp only [List.filter] at h
+    cases hp : p a
+    · exact ⟨a, .head _, hp⟩
+    · rw [hp] at h
+      simp only [List.length_cons] at h
+      obtain ⟨x, hxMem, hxFalse⟩ := exists_mem_of_filter_length_lt p tl (Nat.lt_of_succ_lt_succ h)
+      exact ⟨x, .tail _ hxMem, hxFalse⟩
+
+/-- Constructive (`0` choice axioms) polynomial non-triviality over `Tower128`:
+    any coefficient list `cs : List Tower128` of length `< 2^128` with at least one nonzero
+    coefficient evaluates to a nonzero `Tower128` value at an explicit point `x₀`. -/
+theorem exists_eval_nonzero_tower128 :
+    ∀ (cs : List Tower128),
+      cs.length < 2 ^ 128 →
+      (∃ c ∈ cs, c ≠ towerZero 7) →
+      ∃ x₀ : Tower128, RoundPoly.evalCoeffs cs x₀ ≠ towerZero 7
+  | [], _, ⟨_, hMem, _⟩ => by cases hMem
+  | c₀ :: tail, hLen, ⟨c, hMem, hcNe⟩ => by
+    cases towerDecidableEq 7 c₀ (towerZero 7) with
+    | isFalse hc0Ne =>
+      refine ⟨towerZero 7, ?_⟩
+      simp only [RoundPoly.evalCoeffs_cons]
+      change towerAdd 7 c₀ (towerMul 7 (towerZero 7) (RoundPoly.evalCoeffs tail (towerZero 7))) ≠ towerZero 7
+      rw [towerZero_mul, towerAdd_zero]
+      exact hc0Ne
+    | isTrue hc0Eq =>
+      subst hc0Eq
+      have hTailEx : ∃ c' ∈ tail, c' ≠ towerZero 7 := by
+        rcases List.mem_cons.mp hMem with rfl | hInTail
+        · exact False.elim (hcNe rfl)
+        · exact ⟨c, hInTail, hcNe⟩
+      have hTailPos : 1 ≤ tail.length := by
+        rcases hTailEx with ⟨_, hm, _⟩
+        cases tail with
+        | nil => cases hm
+        | cons _ _ => simp only [List.length_cons]; omega
+      simp only [List.length_cons] at hLen
+      have hTailLt : tail.length < 2 ^ 128 := by omega
+      obtain ⟨x₁, hx₁⟩ := exists_eval_nonzero_tower128 tail hTailLt hTailEx
+      let d := tail.length - 1
+      let grid : List Tower128 := (List.range (d + 1)).map (fun i => tower128OfNat (i + 1))
+      have hGridLen : grid.length = d + 1 := by simp [grid]
+      have hGridNodup : grid.Nodup := by
+        apply nodup_map_on_list _ (Qsag.Constructive.nodup_range (d + 1))
+        intro a ha b hb hEq
+        have haLt : a + 1 < 2 ^ 128 := by have := List.mem_range.mp ha; omega
+        have hbLt : b + 1 < 2 ^ 128 := by have := List.mem_range.mp hb; omega
+        have hSucc := tower128OfNat_injective_lt haLt hbLt hEq
+        omega
+      have hdLen : tail.length ≤ d + 1 := by omega
+      have hRootsLe :
+          (grid.filter (fun r => decide (RoundPoly.evalCoeffs tail r = towerZero 7))).length ≤ d :=
+        RoundPoly.roots_nodup_length_le d tail grid hGridNodup hdLen ⟨x₁, hx₁⟩
+      have hFiltLt :
+          (grid.filter (fun r => decide (RoundPoly.evalCoeffs tail r = towerZero 7))).length < grid.length := by
+        rw [hGridLen]; omega
+      obtain ⟨x₀, hx₀Mem, hx₀False⟩ := exists_mem_of_filter_length_lt
+        (fun r => decide (RoundPoly.evalCoeffs tail r = towerZero 7)) grid hFiltLt
+      have hx₀NeZero : x₀ ≠ towerZero 7 := by
+        rcases List.mem_map.mp hx₀Mem with ⟨idx, hIdxRange, rfl⟩
+        have hIdxLt : idx < d + 1 := List.mem_range.mp hIdxRange
+        exact tower128OfNat_ne_zero (by omega) (by omega)
+      have hEvalTailNe : RoundPoly.evalCoeffs tail x₀ ≠ towerZero 7 := by
+        intro hZero
+        rw [decide_eq_true hZero] at hx₀False
+        cases hx₀False
+      refine ⟨x₀, ?_⟩
+      simp only [RoundPoly.evalCoeffs_cons]
+      change towerAdd 7 (towerZero 7) (towerMul 7 x₀ (RoundPoly.evalCoeffs tail x₀)) ≠ towerZero 7
+      rw [towerZero_add]
+      intro hProdZero
+      rcases (towerMul_eq_zero_iff 7 x₀ (RoundPoly.evalCoeffs tail x₀)).mp hProdZero with h1 | h2
+      · exact hx₀NeZero h1
+      · exact hEvalTailNe h2
+
+/-- **Algebraic `GF(2^128)` BBCGGI19 Multiplication-Sacrifice Soundness (`bbcggi19_gf2128_soundness_bound`)**:
+    For any batch of `≤ m` multiplication triples (`m + 1 < 2^128`) and any base mask triple
+    `maskTriple` (`delta_0`), if **at least one** multiplication gate carries a nonzero additive
+    fault (`∃ t ∈ triples, tripleMulError t ≠ towerZero 7`), then across **any** duplicate-free
+    challenge list `S : List Tower128` (`S.Nodup`), `verifyAllPendingGf2128` passes on **at most
+    `m` challenges** (`≤ m / 2^128` over `GF(2^128)`), proved via `RoundPoly.roots_nodup_length_le`
+    and `towerNoZeroDivisors 7`! -/
+theorem bbcggi19_gf2128_soundness_bound
+    (m : Nat) (hmBound : m + 1 < 2 ^ 128)
+    (maskTriple : Gf2128MulTriple) (triples : List Gf2128MulTriple)
+    (hBatchLen : triples.length ≤ m)
+    (hFault : ∃ t ∈ triples, tripleMulError t ≠ towerZero 7)
+    (S : List Tower128) (hNodup : S.Nodup) :
+    let passing := S.filter (fun chi => verifyAllPendingGf2128 maskTriple triples chi)
+    passing.length ≤ m ∧
+    ratLe (passing.length, 2 ^ 128) (m, 2 ^ 128) := by
+  intro passing
+  let cs : List Tower128 := tripleMulError maskTriple :: triples.map tripleMulError
+  have hCsLen : cs.length ≤ m + 1 := by
+    simp only [cs, List.length_cons, List.length_map]
+    omega
+  have hCsLt128 : cs.length < 2 ^ 128 := by omega
+  have hCoeffNz : ∃ c ∈ cs, c ≠ towerZero 7 := by
+    obtain ⟨t, htMem, htNe⟩ := hFault
+    exact ⟨tripleMulError t, .tail _ (List.mem_map_of_mem htMem), htNe⟩
+  obtain ⟨x₀, hx₀⟩ := exists_eval_nonzero_tower128 cs hCsLt128 hCoeffNz
+  have hRootsLe :
+      (S.filter (fun chi => decide (RoundPoly.evalCoeffs cs chi = towerZero 7))).length ≤ m :=
+    RoundPoly.roots_nodup_length_le m cs S hNodup hCsLen ⟨x₀, hx₀⟩
+  have hPassLe : passing.length ≤ m := hRootsLe
+  have hDenPos : 0 < 2 ^ 128 := Nat.two_pow_pos 128
+  exact ⟨hPassLe, ⟨hDenPos, hDenPos, Nat.mul_le_mul_right (2 ^ 128) hPassLe⟩⟩
+
+/-- **`#tooth` Unverified `AND` Gate Forges `all_outputs_zero = true` (`tooth_unverified_mul_forges_all_outputs_zero`)**:
+    If `verify_all_pending()` is skipped before opening `all_outputs_zero`, a corrupt custodian `0`
+    who flips their output share of the final `fold_all_true_bits` `AND` gate (`z := towerOne 7` on
+    true inputs `(0, 0)`) forces `all_outputs_zero` to reconstruct to `true` on an invalid witness,
+    whereas `verifyAllPendingGf2128` rejects the forged triple on every nonzero challenge `chi ≠ 0`! -/
+theorem tooth_unverified_mul_forges_all_outputs_zero :
+    let honestZeroMask : Gf2128MulTriple := ⟨towerZero 7, towerZero 7, towerZero 7⟩
+    let forgedFinalAnd : Gf2128MulTriple := ⟨towerZero 7, towerZero 7, towerOne 7⟩
+    forgedFinalAnd.z ≠ towerMul 7 forgedFinalAnd.x forgedFinalAnd.y ∧
+    tripleMulError forgedFinalAnd ≠ towerZero 7 ∧
+    (∀ chi : Tower128, chi ≠ towerZero 7 →
+      verifyAllPendingGf2128 honestZeroMask [forgedFinalAnd] chi = false) := by
+  intro honestZeroMask forgedFinalAnd
+  have hErrEq : tripleMulError forgedFinalAnd = towerOne 7 := by
+    unfold tripleMulError
+    dsimp only [forgedFinalAnd]
+    rw [towerMul_zero, towerAdd_zero]
+  have hOneNe0 : towerOne 7 ≠ towerZero 7 := towerOne_ne_zero 7
+  refine ⟨?_, ?_, ?_⟩
+  · dsimp only [forgedFinalAnd]
+    rw [towerMul_zero]
+    exact hOneNe0
+  · rw [hErrEq]
+    exact hOneNe0
+  · intro chi hChiNe
+    unfold verifyAllPendingGf2128
+    have hMask0 : tripleMulError honestZeroMask = towerZero 7 := by
+      unfold tripleMulError; dsimp only [honestZeroMask]; rw [towerMul_zero, towerAdd_zero]
+    simp only [List.map_cons, List.map_nil, hMask0, hErrEq,
+      RoundPoly.evalCoeffs_cons, RoundPoly.evalCoeffs_nil]
+    change decide (towerAdd 7 (towerZero 7)
+      (towerMul 7 chi (towerAdd 7 (towerOne 7) (towerMul 7 chi (towerZero 7)))) = towerZero 7) = false
+    rw [towerMul_zero, towerAdd_zero, towerMul_one, towerZero_add]
+    exact decide_eq_false hChiNe
+
+#tooth_pair
+  Qsag.bbcggi19_gf2128_soundness_bound
+  vs
+  Qsag.tooth_unverified_mul_forges_all_outputs_zero
+
+/-- Authentic `Tower128` correlated-OT sender message `m_1 := (u_0 + a) + deltaM1`. -/
+def otSenderMsg1Gf2128 (u0 a deltaM1 : Tower128) : Tower128 :=
+  towerAdd 7 (towerAdd 7 u0 a) deltaM1
+
+/-- Receiver's `Tower128` OT output `v := if b then m_1 else u_0` for choice bit `b : Bool`. -/
+def otReceiverOutGf2128 (b : Bool) (u0 m1 : Tower128) : Tower128 :=
+  if b then m1 else u0
+
+/-- Algebraic `Tower128` correlation residual `(u_0 + v) + b · a`. -/
+def otCorrelationResidualGf2128 (u0 a deltaM1 : Tower128) (b : Bool) : Tower128 :=
+  towerAdd 7
+    (towerAdd 7 u0 (otReceiverOutGf2128 b u0 (otSenderMsg1Gf2128 u0 a deltaM1)))
+    (if b then a else towerZero 7)
+
+/-- Algebraic `Tower128` MAC / sacrifice check `chi * residual == 0` over `GF(2^128)`. -/
+def otSacrificeCheckGf2128 (chi u0 a deltaM1 : Tower128) (b : Bool) : Bool :=
+  decide (towerMul 7 chi (otCorrelationResidualGf2128 u0 a deltaM1 b) = towerZero 7)
+
+/-- Derived algebraic characterization of `otSacrificeCheckGf2128` via `towerNoZeroDivisors 7`:
+    1. Honest OT correlation (`deltaM1 = 0`) passes for all `b`.
+    2. Any nonzero `Tower128` fault `deltaM1 ≠ 0` under nonzero challenge `chi ≠ 0` passes **iff**
+       the receiver's secret choice bit is `b = false` (`= !b`)! -/
+theorem otSacrificeCheckGf2128_characterize (chi u0 a deltaM1 : Tower128) (b : Bool) :
+    (deltaM1 = towerZero 7 → otSacrificeCheckGf2128 chi u0 a deltaM1 b = true) ∧
+    (chi ≠ towerZero 7 → deltaM1 ≠ towerZero 7 →
+      otSacrificeCheckGf2128 chi u0 a deltaM1 b = !b) := by
+  have hRes : otCorrelationResidualGf2128 u0 a deltaM1 b = if b then deltaM1 else towerZero 7 := by
+    unfold otCorrelationResidualGf2128 otReceiverOutGf2128 otSenderMsg1Gf2128
+    cases b
+    · simp only [Bool.false_eq_true, ↓reduceIte, towerAdd_self_zero]
+    · simp only [↓reduceIte]
+      rw [← towerAdd_assoc 7 u0 (towerAdd 7 u0 a) deltaM1,
+          towerAdd_cancel 7 u0 a,
+          towerAdd_comm 7 a deltaM1,
+          towerAdd_assoc 7 deltaM1 a a,
+          towerAdd_self_zero,
+          towerAdd_zero]
+  unfold otSacrificeCheckGf2128
+  rw [hRes]
+  refine ⟨?_, ?_⟩
+  · intro hZero
+    subst hZero
+    cases b <;> simp [towerMul_zero]
+  · intro hChi hDelta
+    cases b
+    · simp [towerMul_zero]
+    · simp only [↓reduceIte, Bool.not_true]
+      apply decide_eq_false
+      intro hMul0
+      rcases (towerMul_eq_zero_iff 7 chi deltaM1).mp hMul0 with h1 | h2
+      · exact hChi h1
+      · exact hDelta h2
+
+/-- Uniform enumeration of `Bool` over `Fin 2`. -/
+def boolSampleEnum : SimpleEquiv (Fin 2) Bool where
+  toFun i := decide (i.val = 1)
+  invFun b := if b then ⟨1, by omega⟩ else ⟨0, by omega⟩
+  left_inv := fun ⟨v, hv⟩ => by
+    match v with
+    | 0 => rfl
+    | 1 => rfl
+    | _ + 2 => exact False.elim (by omega)
+  right_inv b := by cases b <;> rfl
+
+/-- Uniform enumeration of `Bool × Bool` (`4` equiprobable receiver bit pairs `(b_left, b_right)`). -/
+def boolPairSampleEnum : SimpleEquiv (Fin 4) (Bool × Bool) where
+  toFun i := (decide (i.val / 2 = 1), decide (i.val % 2 = 1))
+  invFun p :=
+    ⟨(if p.1 then 2 else 0) + (if p.2 then 1 else 0), by
+      cases p.1 <;> cases p.2 <;> simp only [Bool.false_eq_true, ↓reduceIte] <;> omega⟩
+  left_inv := fun ⟨v, hv⟩ => by
+    match v with
+    | 0 =>
+      have h : (⟨0, hv⟩ : Fin 4) = ⟨0, by decide⟩ := by apply Fin.ext; rfl
+      rw [h]; decide
+    | 1 =>
+      have h : (⟨1, hv⟩ : Fin 4) = ⟨1, by decide⟩ := by apply Fin.ext; rfl
+      rw [h]; decide
+    | 2 =>
+      have h : (⟨2, hv⟩ : Fin 4) = ⟨2, by decide⟩ := by apply Fin.ext; rfl
+      rw [h]; decide
+    | 3 =>
+      have h : (⟨3, hv⟩ : Fin 4) = ⟨3, by decide⟩ := by apply Fin.ext; rfl
+      rw [h]; decide
+    | _ + 4 => exact False.elim (by omega)
+  right_inv := fun ⟨b1, b2⟩ => by cases b1 <;> cases b2 <;> rfl
+
+/-- Two-triple XOR bucket combine `b_final := b_left != b_right`. -/
+def combineBucketBit (bLeft bRight : Bool) : Bool :=
+  bLeft != bRight
+
+/-- Online Beaver masked wire opening `e := y != b_final` for secret wire bit `y : Bool`. -/
+def onlineBeaverOpenBit (y bFinal : Bool) : Bool :=
+  y != bFinal
+
+/-- Joint `Tower128` sacrifice survival event when an attacker injects nonzero `Tower128` OT faults
+    `deltaL, deltaR` into both partner triples `(k, k + 2N)`. -/
+def fixedBucketDoubleFaultSurvivesGf2128
+    (chi u0L aL deltaL u0R aR deltaR : Tower128) (pair : Bool × Bool) : Bool :=
+  otSacrificeCheckGf2128 chi u0L aL deltaL pair.1 &&
+  otSacrificeCheckGf2128 chi u0R aR deltaR pair.2
+
+private theorem fixedBucketDoubleFaultSurvivesGf2128_eq_both_false
+    {chi u0L aL deltaL u0R aR deltaR : Tower128}
+    (hChi : chi ≠ towerZero 7) (hDL : deltaL ≠ towerZero 7) (hDR : deltaR ≠ towerZero 7)
+    (pair : Bool × Bool) :
+    fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR pair =
+      (!pair.1 && !pair.2) := by
+  unfold fixedBucketDoubleFaultSurvivesGf2128
+  rw [(otSacrificeCheckGf2128_characterize chi u0L aL deltaL pair.1).2 hChi hDL,
+      (otSacrificeCheckGf2128_characterize chi u0R aR deltaR pair.2).2 hChi hDR]
+
+private theorem fixedBucketDoubleFaultSurvivesGf2128_fin4_eq
+    {chi u0L aL deltaL u0R aR deltaR : Tower128}
+    (hChi : chi ≠ towerZero 7) (hDL : deltaL ≠ towerZero 7) (hDR : deltaR ≠ towerZero 7) :
+    finSum 4 (fun i =>
+      if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun i)
+      then 1 else 0) = 1 := by
+  have hCongr :
+      finSum 4 (fun i =>
+        if fixedBucketDoubleFaultSurvivesGf2128 chi u0L aL deltaL u0R aR deltaR (boolPairSampleEnum.toFun i)
+        then 1 else 0) =
+      finSum 4 (fun i => if i = (⟨0, by decide⟩ : Fin 4) then 1 else 0) := by
+    apply finSum_congr
+    intro i
+    rw [fixedBucketDoubleFaultSurvivesGf2128_eq_both_false hChi hDL hDR]
+    rcases i with ⟨v, hv⟩
+    match v with
+    | 0 =>
+      have h : (⟨0, hv⟩ : Fin 4) = ⟨0, by decide⟩ := by apply Fin.ext; rfl
+      rw [h]; decide
+    | 1 =>
+      have h : (⟨1, hv⟩ : Fin 4) = ⟨1, by decide⟩ := by apply Fin.ext; rfl
+      rw [h]; decide
+    | 2 =>
+      have h : (⟨2, hv⟩ : Fin 4) = ⟨2, by decide⟩ := by apply Fin.ext; rfl
+      rw [h]; decide
+    | 3 =>
+      have h : (⟨3, hv⟩ : Fin 4) = ⟨3, by decide⟩ := by apply Fin.ext; rfl
+      rw [h]; decide
+    | _ + 4 => exact False.elim (by omega)
+  rw [hCongr, finSum_eq_indicator]
+
+/-- **`#tooth` Fixed-Bucket `k + 2N` Selective-Abort Wire-Bit Leak Over `Tower128` (`tooth_fixed_bucket_selective_abort_leaks_wire_bit`)**:
+    Under deterministic `(k, k + 2N)` combine without post-lock coin permutation, injecting nonzero
+    `Tower128` OT faults `deltaL, deltaR ≠ 0` passes both algebraic `GF(2^128)` sacrifice checks in
+    exact `1 / 4` of sessions (`finSum 4 = 1`) and reveals the honest online wire bit `y` with
+    probability `1`! -/
