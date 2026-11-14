@@ -77,6 +77,7 @@ pub enum BlindVcError {
     DisclosedAttributeValueMismatch { index: usize },
     BlindIssuanceProofInvalid,
     InvalidOprfEvaluation,
+    ReplayedVerifierChallenge,
     AccumulatorFull,
     InvalidAccumulatorLeafIndex,
     CredentialBindingMismatch,
@@ -226,14 +227,22 @@ fn merkle_hash_pair(left: &[u64; 6], right: &[u64; 6], epoch: u64, layer: u32) -
     [st[0], st[1], st[2], st[3], st[4], st[5]]
 }
 
-fn encode_issuance_message(issuer_epoch: u64, schema_id: u64, attr_commit: &[u64; 6]) -> [u8; 72] {
-    let mut out = [0u8; 72];
-    out[0..8].copy_from_slice(b"VCISSUE1");
+fn encode_issuance_message(
+    issuer_epoch: u64,
+    schema_id: u64,
+    attr_commit: &[u64; 6],
+    issuer_pk_digest: &[u8; 32],
+    session_id: &[u8; 32],
+) -> [u8; 136] {
+    let mut out = [0u8; 136];
+    out[0..8].copy_from_slice(b"VCISSUE2");
     out[8..16].copy_from_slice(&issuer_epoch.to_le_bytes());
     out[16..24].copy_from_slice(&schema_id.to_le_bytes());
     for (i, &limb) in attr_commit.iter().enumerate() {
         out[24 + i * 8..32 + i * 8].copy_from_slice(&limb.to_le_bytes());
     }
+    out[72..104].copy_from_slice(issuer_pk_digest);
+    out[104..136].copy_from_slice(session_id);
     out
 }
 
@@ -583,11 +592,15 @@ pub struct OpenedZkBooRepetition {
 // ============================================================================
 
 /// Holder secret state with redacted `Debug` and zeroizing `Drop`.
+/// Challenge history is retained for this credential's lifetime, independently
+/// of caller entropy. Persist it with the credential when adding backup support;
+/// rolling back the entire holder state cannot preserve replay protection.
 pub struct HolderCredentialSecret {
     pub schema_id: u64,
     arity: usize,
     attrs: [u64; MAX_VC_ATTRS],
     holder_blind: [u64; 4],
+    seen_challenges: core::cell::RefCell<Vec<[u8; 32]>>,
 }
 
 impl fmt::Debug for HolderCredentialSecret {
@@ -903,6 +916,7 @@ pub fn holder_prepare_blind_issuance_with_profile(
             arity: issuer_attested_attrs.len(),
             attrs,
             holder_blind,
+            seen_challenges: core::cell::RefCell::new(Vec::new()),
         },
     ))
 }
@@ -1216,6 +1230,7 @@ pub struct IssuerCredentialAccumulator {
     pub issuer_epoch: u64,
     leaves: Vec<[u64; 6]>,
     enrolled_tokens: Vec<Option<[u8; 32]>>,
+    consumed_sessions: Vec<[u8; 32]>,
     empty_leaf: [u64; 6],
 }
 
@@ -1236,6 +1251,7 @@ impl IssuerCredentialAccumulator {
             issuer_epoch,
             leaves: Vec::new(),
             enrolled_tokens: Vec::new(),
+            consumed_sessions: Vec::new(),
             empty_leaf,
         }
     }
@@ -1253,15 +1269,29 @@ impl IssuerCredentialAccumulator {
 
     fn enroll_issued(
         &mut self,
+        session_id: [u8; 32],
         attr_commit: [u64; 6],
         issuance_token: [u8; 32],
     ) -> Result<usize, BlindVcError> {
+        let mut duplicate = false;
+        for prior_session in &self.consumed_sessions {
+            duplicate |= ct_eq_bytes(prior_session, &session_id);
+        }
+        for (prior_leaf, prior_tok) in self.leaves.iter().zip(&self.enrolled_tokens) {
+            if let Some(tok) = prior_tok {
+                duplicate |= (*prior_leaf == attr_commit) & ct_eq_bytes(tok, &issuance_token);
+            }
+        }
+        if duplicate {
+            return Err(BlindVcError::InvalidOprfEvaluation);
+        }
         if self.leaves.len() >= Self::CAPACITY {
             return Err(BlindVcError::AccumulatorFull);
         }
         let idx = self.leaves.len();
         self.leaves.push(attr_commit);
         self.enrolled_tokens.push(Some(issuance_token));
+        self.consumed_sessions.push(session_id);
         Ok(idx)
     }
 
@@ -1385,18 +1415,25 @@ impl IssuerCredentialAccumulator {
     }
 }
 
-/// Canonical input to the TOPRF, binding epoch, schema and the blinded leaf.
-pub fn issuance_input(req: &BlindIssuanceRequest) -> [u8; 72] {
-    encode_issuance_message(req.issuer_epoch, req.schema_id, &req.attr_commit)
+/// Canonical input to the TOPRF, binding epoch, schema, blinded leaf, issuer key digest, and session.
+pub fn issuance_input(req: &BlindIssuanceRequest) -> [u8; 136] {
+    encode_issuance_message(
+        req.issuer_epoch,
+        req.schema_id,
+        &req.attr_commit,
+        &req.issuer_pk_digest,
+        &req.session_id,
+    )
 }
 /// Enroll an issuer-authorized request after obtaining its OPRF evaluation over
-/// authenticated server channels. `evaluation` must be finalized by the issuer's
-/// channel adapter, never accepted as a holder-supplied deserialized object.
+/// authenticated server channels. The issuer's independently provisioned receipt
+/// key authenticates the evaluation before any accumulator mutation.
 pub fn threshold_issue_blind_vc(
     accumulator: &mut IssuerCredentialAccumulator,
     req: &BlindIssuanceRequest,
     issuer_attested_attrs: &[u64],
     evaluation: &Evaluation,
+    receipt_key: &crate::voprf::IssuanceReceiptKey,
     expected_schema_id: u64,
 ) -> Result<BlindVerifiableCredential, BlindVcError> {
     threshold_issue_blind_vc_with_profile(
@@ -1404,6 +1441,7 @@ pub fn threshold_issue_blind_vc(
         req,
         issuer_attested_attrs,
         evaluation,
+        receipt_key,
         expected_schema_id,
         ZkSoundnessProfile::Quantum128,
     )
@@ -1416,11 +1454,12 @@ pub fn threshold_issue_blind_vc_with_profile(
     req: &BlindIssuanceRequest,
     issuer_attested_attrs: &[u64],
     evaluation: &Evaluation,
+    receipt_key: &crate::voprf::IssuanceReceiptKey,
     expected_schema_id: u64,
     profile: ZkSoundnessProfile,
 ) -> Result<BlindVerifiableCredential, BlindVcError> {
     if req.issuer_epoch != accumulator.issuer_epoch
-        || req.issuer_pk_digest != accumulator.oprf_key.commitment()
+        || !ct_eq_bytes(&req.issuer_pk_digest, &accumulator.oprf_key.commitment())
         || !verify_blind_issuance_request_with_profile(
             req,
             issuer_attested_attrs,
@@ -1431,12 +1470,13 @@ pub fn threshold_issue_blind_vc_with_profile(
         return Err(BlindVcError::BlindIssuanceProofInvalid);
     }
     let issuance_token = evaluation
-        .value_for(&accumulator.oprf_key, &issuance_input(req))
+        .authenticated_value_for(&accumulator.oprf_key, &issuance_input(req), receipt_key)
         .ok_or(BlindVcError::InvalidOprfEvaluation)?;
     if ct_eq_bytes(&issuance_token, &[0u8; 32]) {
         return Err(BlindVcError::InvalidOprfEvaluation);
     }
-    let accumulator_leaf_index = accumulator.enroll_issued(req.attr_commit, issuance_token)?;
+    let accumulator_leaf_index =
+        accumulator.enroll_issued(req.session_id, req.attr_commit, issuance_token)?;
     Ok(BlindVerifiableCredential {
         issuer_epoch: accumulator.issuer_epoch,
         schema_id: req.schema_id,
@@ -1650,6 +1690,15 @@ pub fn prove_selective_disclosure_with_profile(
         cred.issuer_epoch,
         &accumulator_root,
     );
+
+    // Burn before producing a proof, including failed attempts. Scope changes
+    // must not let a verifier bypass the per-credential challenge history.
+    let mut seen = holder_secret.seen_challenges.borrow_mut();
+    if seen.contains(verifier_challenge) {
+        return Err(BlindVcError::ReplayedVerifierChallenge);
+    }
+    seen.push(*verifier_challenge);
+    drop(seen);
 
     let mut ent = presentation_entropy;
     let mut nonce_bind = Vec::with_capacity(64 + sorted_idx.len() * 12);
@@ -2514,6 +2563,7 @@ mod tests {
             arity: 5,
             attrs: [840, 1994, 3, 9910, 2030, 0],
             holder_blind: [17, 18, 19, 20],
+            seen_challenges: core::cell::RefCell::new(Vec::new()),
         };
         let commitment = compute_vc_poseidon2_commit(
             holder.schema_id,
@@ -2652,6 +2702,7 @@ mod tests {
             arity: 6,
             attrs: [840, 1994, 3, 9910, 2030, 777],
             holder_blind: [17, 18, 19, 20],
+            seen_challenges: core::cell::RefCell::new(Vec::new()),
         };
         let commitment = compute_vc_poseidon2_commit(
             holder.schema_id,
@@ -2685,6 +2736,24 @@ mod tests {
             reused_entropy,
         )
         .unwrap();
+        // Restoring caller entropy must not allow an identical challenge to
+        // produce a second, byte-identical presentation commitment.
+        assert_eq!(
+            prove_selective_disclosure(
+                &cred,
+                &holder,
+                &accumulator.membership_witness(index).unwrap(),
+                &[0],
+                PresentationRequest {
+                    verifier_scope: b"scope-alpha",
+                    verifier_challenge: &[0x11; 32],
+                    mode: PresentationMode::UnlinkableFresh
+                },
+                reused_entropy,
+            )
+            .unwrap_err(),
+            BlindVcError::ReplayedVerifierChallenge
+        );
         let pres2 = prove_selective_disclosure(
             &cred,
             &holder,
