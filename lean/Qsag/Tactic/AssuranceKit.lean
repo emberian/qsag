@@ -817,7 +817,7 @@ private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
     throwError "inhabitedness audit: expected an existential reachable-state witness"
   let proof ← instantiateMVars (mkAppN (w.value! (allowOpaque := true)) wx)
   withWitnessFacts conclusion proof #[] fun facts => do
-    let (sx, _, _) ← forallMetaTelescope s.type
+    let (sx, _, sConclusion) ← forallMetaTelescope s.type
     let mut matchedWitnessPremise := false
     for x in sx do
       let ty ← instantiateMVars (← inferType x)
@@ -831,6 +831,15 @@ private meta def checkInhabited (s w : ConstantInfo) : MetaM Unit := do
             matchedWitnessPremise := true
             break
         if !found then pure ()
+    -- A premise-free characterization `A ↔ B` is exercised when the witness establishes a side.
+    unless matchedWitnessPremise do
+      let c ← instantiateMVars sConclusion
+      if c.getAppFn.isConstOf ``Iff then
+        for side in c.getAppArgs do
+          for fact in facts do
+            unless matchedWitnessPremise do
+              if ← matchWitnessType side (← inferType fact) then
+                matchedWitnessPremise := true
     unless matchedWitnessPremise do
       throwError "inhabitedness audit: no security premise supplied by the witness"
     for x in sx do

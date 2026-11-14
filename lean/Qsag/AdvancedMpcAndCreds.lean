@@ -7,9 +7,10 @@ The finite wire boundary authenticates the supplied issuer context. `Presentatio
 proves that one repetition's opened view (both opened parties' wires and tapes, and the
 third output shares) is perfectly simulated from the public outputs when tapes are uniform
 and every multiplication has its own mask index. The seed-to-tape PRG step, hiding of the
-unopened view's commitment, Fiat-Shamir challenge derivation, composition across
-repetitions, hiding of the public outputs themselves (fresh-mode unlinkability), and
+unopened view's commitment, Fiat-Shamir challenge derivation, adaptive Fiat–Shamir composition, hiding of the public outputs themselves (fresh-mode unlinkability), and
 ROM/QROM reductions remain separate obligations; repetition counts do not establish them.
+`repeated_presentation_privacy` composes the fixed-challenge opened-view hybrid with a
+joint input-and-gate coin bijection for any finite number of repetitions.
 LAW-M1: public statements with a bounded exposed interface (`<= 12` `@[expose]`).
 -/
 
@@ -3272,7 +3273,7 @@ theorem tooth_negated_twiddle_not_inverse_ntt :
   revert hv1'
   decide
 
-#tooth_pair nttInverse_nttForward_roundtrip vs tooth_negated_twiddle_not_inverse_ntt
+#tooth_pair goldilocksNttButterflyExec_refines_spec vs tooth_negated_twiddle_not_inverse_ntt
 
 /-- Genuine multiplicative-coset Low-Degree Extension (`Spec` vs Cooley-Tukey pre-scaled `Exec`):
     interpolates `evals : Fin n → Goldilocks` via `nttInverse srcDom`, requires non-zero `shift ≠ 0`,
@@ -4148,6 +4149,182 @@ theorem tooth_adaptive_challenge_oracle (rounds : Nat) :
     ¬ (∀ c : Fin 3, c.val < 2) := by
   exact ⟨fun _ => by decide, fun h => by have := h 2; omega⟩
 
+
+/-- All raw 64-bit preimages of reduction modulo Goldilocks. The low
+`2^32 - 1` residues have two preimages; all other residues have one. -/
+def reducedWordPreimages (x : Goldilocks) : List Nat :=
+  if x.val < 2 ^ 32 - 1 then [x.val, x.val + goldilocksPrime] else [x.val]
+
+theorem reducedWordPreimages_complete (x : Goldilocks) (w : Nat) :
+    w ∈ reducedWordPreimages x ↔ w < 2 ^ 64 ∧ w % goldilocksPrime = x.val := by
+  have hx := x.isLt
+  have quotient (hw : w < 2 ^ 64) (hn : ¬ w < goldilocksPrime) : w / goldilocksPrime = 1 := by
+    change w < 18446744073709551616 at hw
+    change ¬ w < 18446744069414584321 at hn
+    change w / 18446744069414584321 = 1
+    omega
+  unfold reducedWordPreimages
+  split
+  next hs =>
+    simp only [List.mem_cons, List.not_mem_nil, or_false]
+    constructor
+    · intro h
+      rcases h with rfl | rfl
+      · exact ⟨by change x.val < 18446744069414584321 at hx; omega, Nat.mod_eq_of_lt hx⟩
+      · refine ⟨?_, ?_⟩
+        · change x.val + 18446744069414584321 < 18446744073709551616
+          change x.val < 4294967295 at hs
+          omega
+        · rw [Nat.add_mod, Nat.mod_self, Nat.add_zero, Nat.mod_mod, Nat.mod_eq_of_lt hx]
+    · intro ⟨hw, hm⟩
+      if hn : w < goldilocksPrime then
+        exact .inl ((Nat.mod_eq_of_lt hn).symm.trans hm)
+      else
+        have he := Nat.mod_add_div w goldilocksPrime
+        rw [hm, quotient hw hn, Nat.mul_one] at he
+        exact .inr he.symm
+  next hs =>
+    simp only [List.mem_cons, List.not_mem_nil, or_false]
+    constructor
+    · intro h
+      subst w
+      exact ⟨by change x.val < 18446744069414584321 at hx; omega, Nat.mod_eq_of_lt hx⟩
+    · intro ⟨hw, hm⟩
+      if hn : w < goldilocksPrime then
+        exact (Nat.mod_eq_of_lt hn).symm.trans hm
+      else
+        have he := Nat.mod_add_div w goldilocksPrime
+        rw [hm, quotient hw hn, Nat.mul_one] at he
+        change x.val + 18446744069414584321 = w at he
+        change ¬ x.val < 4294967295 at hs
+        change w < 18446744073709551616 at hw
+        omega
+
+theorem reducedWordPreimages_nodup (x : Goldilocks) :
+    (reducedWordPreimages x).Nodup := by
+  unfold reducedWordPreimages
+  split
+  · refine .cons ?_ (.cons ?_ .nil)
+    · intro y hy he
+      cases hy with
+      | head =>
+        have hp : 0 < goldilocksPrime := by decide
+        omega
+      | tail _ h => cases h
+    · intro y hy
+      cases hy
+  · exact .cons (fun _ h => nomatch h) .nil
+
+/-- Twice the total-variation distance, multiplied by `2^64 * p`.
+The two terms are the low and high residue classes from the exact fiber theorem:
+low residues have mass `2/2^64`, high residues have mass `1/2^64`. -/
+def reducedWordTwiceTvNumerator : Nat :=
+  (2 ^ 32 - 1) * (2 * goldilocksPrime - 2 ^ 64) +
+    (goldilocksPrime - (2 ^ 32 - 1)) * (2 ^ 64 - goldilocksPrime)
+
+/-- The modulo sampler has distance strictly below `2^-32` from uniform;
+this is cross-multiplied integer arithmetic, with no floating-point estimate. -/
+theorem reducedWord_statistical_distance_bound :
+    reducedWordTwiceTvNumerator * 2 ^ 32 <
+      2 * (2 ^ 64 * goldilocksPrime) := by decide
+
+/-- The rejection sampler's failure probability per word is exactly
+`(2^32 - 1)/2^64`, below `2^-32`. Conditional on acceptance it is exactly
+uniform, by `fieldAcceptedBijection`, rather than merely close to uniform. -/
+theorem canonicalWord_rejection_bound :
+    2 ^ 64 - goldilocksPrime = 2 ^ 32 - 1 ∧
+    (2 ^ 64 - goldilocksPrime) * 2 ^ 32 < 2 ^ 64 := by decide
+
+
+/-- Exact counts for the legacy 64-bit modulo-three challenge sampler. -/
+def tritWordCount (t : Fin 3) : Nat := 2 ^ 64 / 3 + if t.val = 0 then 1 else 0
+
+/-- Enumerating one trit's fiber requires no enumeration of the 64-bit space. -/
+def tritWordFiber (t : Fin 3) :
+    CredBijection { w : Nat // w < 2 ^ 64 ∧ w % 3 = t.val } (Fin (tritWordCount t)) where
+  toFun w := ⟨w.val / 3, by
+    have hw := w.property
+    have ht := t.isLt
+    unfold tritWordCount
+    split <;> omega⟩
+  invFun j := ⟨3 * j.val + t.val, by
+    have hj := j.isLt
+    have ht := t.isLt
+    unfold tritWordCount at hj
+    split at hj <;> constructor <;> omega⟩
+  left_inv w := by
+    apply Subtype.ext
+    have hw := w.property
+    dsimp only
+    omega
+  right_inv j := by
+    apply Fin.ext
+    have ht := t.isLt
+    dsimp only
+    omega
+
+/-- The worst two accepted trits have mass `(2*floor(2^64/3)+1)/2^64`,
+not exactly `2/3`. Repetition arithmetic must charge this term when the
+challenge source is modulo reduction rather than unbiased rejection. -/
+theorem tritWord_two_accepting_bound (a b : Fin 3) (hne : a ≠ b) :
+    tritWordCount a + tritWordCount b ≤ 2 * (2 ^ 64 / 3) + 1 := by
+  have hab : a.val ≠ b.val := fun h => hne (Fin.ext h)
+  unfold tritWordCount
+  split <;> split <;> omega
+
+
+/-- Finite sum, retaining a symbolic upper bound for large field alphabets. -/
+def samplerSum : Nat → (Nat → Nat) → Nat
+  | 0, _ => 0
+  | n + 1, f => samplerSum n f + f n
+
+theorem samplerSum_split (r a b : Nat) : ∀ n,
+    samplerSum n (fun x => if x < r then a else b) = min n r * a + (n - r) * b := by
+  intro n
+  induction n with
+  | zero => simp [samplerSum]
+  | succ n ih =>
+    rw [samplerSum, ih]
+    by_cases h : n < r
+    · have hn : n ≤ r := by omega
+      have hs : n + 1 ≤ r := by omega
+      simp only [h, ↓reduceIte]
+      rw [Nat.min_eq_left hn, Nat.min_eq_left hs,
+        Nat.sub_eq_zero_of_le hn, Nat.sub_eq_zero_of_le hs]
+      simp [Nat.add_mul]
+    · have hn : r ≤ n := by omega
+      have hs : r ≤ n + 1 := by omega
+      have hd : n + 1 - r = (n - r) + 1 := by omega
+      simp only [h, ↓reduceIte]
+      rw [Nat.min_eq_right hn, Nat.min_eq_right hs, hd]
+      simp [Nat.add_mul, Nat.add_assoc]
+
+/-- The defining finite sum for twice TV, scaled by `2^64 * p`. Each term
+uses the exact fiber multiplicity established by `reducedWordPreimages_complete`. -/
+def reducedWordTvSum : Nat :=
+  samplerSum goldilocksPrime (fun x =>
+    let count := if x < 2 ^ 32 - 1 then 2 else 1
+    (goldilocksPrime * count - 2 ^ 64) + (2 ^ 64 - goldilocksPrime * count))
+
+theorem reducedWordTvSum_exact : reducedWordTvSum = reducedWordTwiceTvNumerator := by
+  have hterms : (fun x : Nat =>
+      let count := if x < 2 ^ 32 - 1 then 2 else 1
+      (goldilocksPrime * count - 2 ^ 64) + (2 ^ 64 - goldilocksPrime * count)) =
+      (fun x => if x < 2 ^ 32 - 1 then 2 * goldilocksPrime - 2 ^ 64
+        else 2 ^ 64 - goldilocksPrime) := by
+    funext x
+    by_cases h : x < 2 ^ 32 - 1
+    · simp only [h, ↓reduceIte] <;> decide
+    · simp only [h, ↓reduceIte] <;> decide
+  unfold reducedWordTvSum
+  rw [hterms, samplerSum_split]
+  rfl
+
+theorem reducedWordTvSum_bound :
+    reducedWordTvSum * 2 ^ 32 < 2 * (2 ^ 64 * goldilocksPrime) := by
+  rw [reducedWordTvSum_exact]
+  exact reducedWord_statistical_distance_bound
+
 end BlindVcWire
 
 /-! ## Opened-view simulation for one presentation repetition
@@ -4842,6 +5019,111 @@ theorem tooth_aliased_mask_index_leaks_hidden_share :
 
 #tooth_pair Qsag.PresentationView.opened_view_perfectly_simulated vs
   Qsag.PresentationView.tooth_aliased_mask_index_leaks_hidden_share
+
+
+/-- Joint input and gate coins. Gate translation depends on the input coins;
+this dependence is retained in the inverse, rather than treating marginals as independent. -/
+abbrev JointCoins := List (Goldilocks × Goldilocks) × List GateCoin
+
+def jointCoinBijection (e : Fin 3) (gates : List Gate) (xs ys : List Goldilocks) :
+    CredBijection JointCoins JointCoins where
+  toFun c :=
+    let r := (inputCoinBijection e xs ys).toFun c.1
+    (r, (viewCoinBijection e gates (shareInputs xs c.1) (shareInputs ys r)).toFun c.2)
+  invFun c :=
+    let r := (inputCoinBijection e xs ys).invFun c.1
+    (r, (viewCoinBijection e gates (shareInputs xs r) (shareInputs ys c.1)).invFun c.2)
+  left_inv c := by
+    rcases c with ⟨r, t⟩
+    dsimp only
+    rw [(inputCoinBijection e xs ys).left_inv,
+      (viewCoinBijection e gates _ _).left_inv]
+  right_inv c := by
+    rcases c with ⟨r, t⟩
+    dsimp only
+    rw [(inputCoinBijection e xs ys).right_inv,
+      (viewCoinBijection e gates _ _).right_inv]
+
+/-- Any number of independently coined repetitions, with a separate challenge
+at each position. This is the fixed-challenge hybrid, not a claim that hashing
+commitments gives an independent challenge. -/
+def repeatedCoinBijection {n : Nat} (es : Fin n → Fin 3)
+    (gates : List Gate) (xs ys : List Goldilocks) :
+    CredBijection (Fin n → JointCoins) (Fin n → JointCoins) where
+  toFun c i := (jointCoinBijection (es i) gates xs ys).toFun (c i)
+  invFun c i := (jointCoinBijection (es i) gates xs ys).invFun (c i)
+  left_inv c := by funext i; exact (jointCoinBijection (es i) gates xs ys).left_inv (c i)
+  right_inv c := by funext i; exact (jointCoinBijection (es i) gates xs ys).right_inv (c i)
+
+def repeatedView {n : Nat} (es : Fin n → Fin 3) (gates : List Gate)
+    (outs : List Nat) (xs : List Goldilocks) (c : Fin n → JointCoins) :=
+  fun i => realView (es i) gates outs (shareInputs xs (c i).1) (c i).2
+
+theorem repeated_presentation_privacy {n : Nat} (es : Fin n → Fin 3)
+    (gates : List Gate) (outs : List Nat) (xs ys : List Goldilocks)
+    (hlen : xs.length = ys.length)
+    (hpub : publicOutputs gates outs xs = publicOutputs gates outs ys)
+    (c : Fin n → JointCoins)
+    (hr : ∀ i, (c i).1.length = xs.length)
+    (ht : ∀ i, gates.length ≤ (c i).2.length) :
+    repeatedView es gates outs xs c =
+      repeatedView es gates outs ys ((repeatedCoinBijection es gates xs ys).toFun c) := by
+  funext i
+  exact presentation_view_depends_only_on_public_outputs (es i) gates outs xs ys
+    hlen hpub (c i).1 (c i).2 (hr i) (ht i)
+
+/-- Deterministic postprocessing preserves the joint view equality. For example,
+this covers hashing the simulated opened views together; it does not supply
+hiding of the unopened commitment or justify an adaptive FS challenge. -/
+theorem repeated_privacy_postprocess {n : Nat} {Output : Type}
+    (es : Fin n → Fin 3) (gates : List Gate) (outs : List Nat)
+    (xs ys : List Goldilocks) (hlen : xs.length = ys.length)
+    (hpub : publicOutputs gates outs xs = publicOutputs gates outs ys)
+    (c : Fin n → JointCoins) (hr : ∀ i, (c i).1.length = xs.length)
+    (ht : ∀ i, gates.length ≤ (c i).2.length)
+    (observe : (Fin n → List OpenPair × List OpenPair × List Goldilocks) → Output) :
+    observe (repeatedView es gates outs xs c) =
+      observe (repeatedView es gates outs ys
+        ((repeatedCoinBijection es gates xs ys).toFun c)) :=
+  congrArg observe (repeated_presentation_privacy es gates outs xs ys hlen hpub c hr ht)
+
+
+/-- Fresh-mode output hiding composes with opened-view hiding. The outer
+bijection is the explicit output-hiding hypothesis: fresh randomness alone
+cannot supply it for an arbitrary commitment function. -/
+def freshCoinBijection {R : Type} {n : Nat} (outputCoins : CredBijection R R)
+    (es : Fin n → Fin 3) (gates : List Gate) (xs ys : R → List Goldilocks) :
+    CredBijection (R × (Fin n → JointCoins)) (R × (Fin n → JointCoins)) where
+  toFun c := (outputCoins.toFun c.1,
+    (repeatedCoinBijection es gates (xs c.1) (ys (outputCoins.toFun c.1))).toFun c.2)
+  invFun c := (outputCoins.invFun c.1,
+    (repeatedCoinBijection es gates (xs (outputCoins.invFun c.1)) (ys c.1)).invFun c.2)
+  left_inv c := by
+    rcases c with ⟨r, t⟩
+    dsimp only
+    rw [outputCoins.left_inv, (repeatedCoinBijection es gates _ _).left_inv]
+  right_inv c := by
+    rcases c with ⟨r, t⟩
+    dsimp only
+    rw [outputCoins.right_inv, (repeatedCoinBijection es gates _ _).right_inv]
+
+/-- The observer receives public outputs together with every opened repetition.
+A coupling of the fresh public outputs lifts to this complete hybrid observation. -/
+theorem fresh_public_output_unlinkability {R : Type} {n : Nat}
+    (outputCoins : CredBijection R R) (es : Fin n → Fin 3)
+    (gates : List Gate) (outs : List Nat) (xs ys : R → List Goldilocks)
+    (hlen : ∀ r, (xs r).length = (ys (outputCoins.toFun r)).length)
+    (hhide : ∀ r, publicOutputs gates outs (xs r) =
+      publicOutputs gates outs (ys (outputCoins.toFun r)))
+    (c : R × (Fin n → JointCoins))
+    (hr : ∀ i, (c.2 i).1.length = (xs c.1).length)
+    (ht : ∀ i, gates.length ≤ (c.2 i).2.length) :
+    (publicOutputs gates outs (xs c.1), repeatedView es gates outs (xs c.1) c.2) =
+      let d := (freshCoinBijection outputCoins es gates xs ys).toFun c
+      (publicOutputs gates outs (ys d.1), repeatedView es gates outs (ys d.1) d.2) := by
+  apply Prod.ext
+  · exact hhide c.1
+  · exact repeated_presentation_privacy es gates outs _ _ (hlen c.1) (hhide c.1) c.2 hr ht
 
 end PresentationView
 
