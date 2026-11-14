@@ -56,7 +56,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::sponge::keccak::{Cshake256Xof, cshake256_32, encode_multi_frame};
+use crate::sponge::keccak::{Cshake256Xof, cshake256_32, cshake256_32_multi_frame};
 use crate::wipe::{ct_eq_bytes32, wipe_bytes32};
 
 /// Largest distance above the high-water mark at which a fresh epoch may be bound.
@@ -65,7 +65,7 @@ pub const MAX_EPOCH_JUMP: u64 = 64;
 const TAG_ECHO_KEY: &[u8] = b"QSAG.BELT.ECHO.KEY/v1";
 const TAG_ECHO_MAC: &[u8] = b"QSAG.BELT.ECHO.MAC/v1";
 #[cfg(feature = "std")]
-const TAG_WAL_MAC: &[u8] = b"QSAG.BELT.LATCH.WAL.MAC/v1";
+const TAG_WAL_MAC: &[u8] = b"QSAG.BELT.LATCH.WAL.MAC/v2";
 
 /// The durable binding of one epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,14 +80,14 @@ pub struct BeltLatchRecord {
 impl BeltLatchRecord {
     /// Digest binding every field; this is what signers echo and what a permit carries.
     pub fn binding(&self) -> [u8; 32] {
-        cshake256_32(
+        cshake256_32_multi_frame(
             b"QSAG.BELT.LATCH.BINDING/v1",
-            &encode_multi_frame(&[
+            &[
                 &self.epoch.to_be_bytes(),
                 &self.msg_digest,
                 &self.retry_salt,
                 &self.target_sum_digits,
-            ]),
+            ],
         )
     }
 }
@@ -192,11 +192,25 @@ pub trait DurableWal {
 
 /// Volatile [`DurableWal`] for tests and for hosts that supply their own durability one level
 /// up. It is *not* durable: a process restart loses it.
-#[derive(Clone, Debug, Default)]
+///
+/// Only a fresh, unpersisted `MemoryWal` may be cloned (e.g. `vec![MemoryWal::new(); n]`);
+/// attempting to clone an active `MemoryWal` panics so tests and callers cannot accidentally
+/// fork a live epoch-latch authority into two rollback views.
+#[derive(Debug, Default)]
 pub struct MemoryWal {
     stored: Option<Vec<u8>>,
     persists: u64,
     fail_next: bool,
+}
+
+impl Clone for MemoryWal {
+    fn clone(&self) -> Self {
+        assert!(
+            self.stored.is_none() && self.persists == 0 && !self.fail_next,
+            "MemoryWal: cloning an active volatile WAL authority is forbidden"
+        );
+        Self::new()
+    }
 }
 
 impl MemoryWal {
@@ -240,21 +254,25 @@ impl DurableWal for MemoryWal {
 /// File-backed [`DurableWal`]: exclusive process lock, write to a temporary file, `fsync`,
 /// atomic rename, directory `fsync`.
 ///
-/// The stored record is `BeltLatchState::to_bytes() || tag`, where `tag` is a `cSHAKE256` MAC
-/// under a secret `wal_key` the signer keeps apart from the log. Genesis and recovery are
-/// separate entry points:
+/// The stored record is `generation.to_be_bytes() || BeltLatchState::to_bytes() || tag`, where
+/// `tag` is a `cSHAKE256` MAC over `(wal_key, lock_seal, generation, state_bytes)` under a
+/// secret `wal_key` the signer keeps apart from the log. Genesis and recovery are separate
+/// entry points:
 ///
 /// * [`FsBeltWal::provision_genesis`] is for a newly enrolled key. It refuses a path whose
 ///   log or lock sidecar already exists, and durably writes an authenticated epoch-0 record
-///   before it returns.
-/// * [`FsBeltWal::open_existing`] is for every later start. A missing log, a missing lock
+///   (`generation = 1`) before it returns.
+/// * [`FsBeltWal::open_existing_at_least`] enforces an externally retained monotonic
+///   [`crate::durable_ledger::LedgerCheckpoint`] so full disk-snapshot rollback is refused.
+/// * [`FsBeltWal::open_existing`] is for unanchored recovery. A missing log, a missing lock
 ///   sidecar, or a record that fails the MAC is an error; nothing here ever falls back to
 ///   epoch 0, so [`DurableWal::load`] never returns `Ok(None)` for this type.
 #[cfg(feature = "std")]
 pub struct FsBeltWal {
     record: qsag_asm::durable::LockedRecord,
     wal_key: [u8; 32],
-    release: core::cell::RefCell<Option<crate::ceremony_journal::CeremonyReservation>>,
+    checkpoint: crate::durable_ledger::LedgerCheckpoint,
+    release: core::cell::RefCell<Option<(crate::ceremony_journal::CeremonyReservation, u64)>>,
 }
 
 #[cfg(feature = "std")]
@@ -273,32 +291,82 @@ impl Drop for FsBeltWal {
 
 #[cfg(feature = "std")]
 impl FsBeltWal {
-    /// Bind epoch_or_codeword to BeltLatchRecord::binding(). A permit authorizes
-    /// only one opening attempt; recovery requires a fresh committed reservation.
-    pub fn authorize_release(&mut self, journal: &crate::ceremony_journal::FsCeremonyJournal,
-        permit: crate::ceremony_journal::CeremonyReleasePermit) -> std::io::Result<()> {
+    /// Current authenticated checkpoint; persist in an external monotonic anchor before
+    /// releasing chain openings to defend against full disk-snapshot rollback.
+    pub const fn checkpoint(&self) -> crate::durable_ledger::LedgerCheckpoint {
+        self.checkpoint
+    }
+
+    /// Bind both numeric `epoch` and `epoch_or_codeword == BeltLatchRecord::binding()`.
+    /// A permit authorizes only one opening attempt; crash recovery requires a fresh
+    /// retry-attempt permit via [`crate::ceremony_journal::FsCeremonyJournal::commit_epoch_retry_attempt`].
+    pub fn authorize_release(
+        &mut self,
+        journal: &crate::ceremony_journal::FsCeremonyJournal,
+        permit: crate::ceremony_journal::CeremonyReleasePermit,
+    ) -> std::io::Result<()> {
         *self.release.get_mut() = None;
-        *self.release.get_mut() = Some(journal.consume_release(permit)?);
+        *self.release.get_mut() = Some(journal.consume_belt_release(permit)?);
         Ok(())
     }
 
-    fn tag(wal_key: &[u8; 32], body: &[u8]) -> [u8; 32] {
-        cshake256_32(TAG_WAL_MAC, &encode_multi_frame(&[wal_key, body]))
+    fn tag(wal_key: &[u8; 32], lock_seal: &[u8; 8], generation: u64, state_bytes: &[u8]) -> [u8; 32] {
+        cshake256_32_multi_frame(
+            TAG_WAL_MAC,
+            &[wal_key, lock_seal, &generation.to_be_bytes(), state_bytes],
+        )
     }
 
-    fn seal(&self, state: &BeltLatchState) -> Vec<u8> {
-        let mut out = state.to_bytes();
-        let tag = Self::tag(&self.wal_key, &out);
+    fn seal(
+        &self,
+        generation: u64,
+        state: &BeltLatchState,
+    ) -> (Vec<u8>, crate::durable_ledger::LedgerCheckpoint) {
+        let state_bytes = state.to_bytes();
+        let tag = Self::tag(
+            &self.wal_key,
+            &self.record.lock_seal(),
+            generation,
+            &state_bytes,
+        );
+        let mut out = Vec::with_capacity(8 + state_bytes.len() + 32);
+        out.extend_from_slice(&generation.to_be_bytes());
+        out.extend_from_slice(&state_bytes);
         out.extend_from_slice(&tag);
-        out
+        (
+            out,
+            crate::durable_ledger::LedgerCheckpoint { generation, tag },
+        )
     }
 
-    fn unseal(&self, raw: &[u8]) -> Option<BeltLatchState> {
-        let (body, tag) = raw.split_at_checked(raw.len().checked_sub(32)?)?;
-        if !ct_eq_bytes32(&Self::tag(&self.wal_key, body), tag.try_into().ok()?) {
+    fn unseal(
+        &self,
+        raw: &[u8],
+    ) -> Option<(crate::durable_ledger::LedgerCheckpoint, BeltLatchState)> {
+        if raw.len() < 8 + 32 {
             return None;
         }
-        BeltLatchState::from_bytes(body)
+        let (body, tag_slice) = raw.split_at_checked(raw.len().checked_sub(32)?)?;
+        let tag: [u8; 32] = tag_slice.try_into().ok()?;
+        let generation = u64::from_be_bytes(body[..8].try_into().ok()?);
+        if generation == 0 {
+            return None;
+        }
+        let state_bytes = &body[8..];
+        let want = Self::tag(
+            &self.wal_key,
+            &self.record.lock_seal(),
+            generation,
+            state_bytes,
+        );
+        if !ct_eq_bytes32(&want, &tag) {
+            return None;
+        }
+        let state = BeltLatchState::from_bytes(state_bytes)?;
+        Some((
+            crate::durable_ledger::LedgerCheckpoint { generation, tag },
+            state,
+        ))
     }
 
     /// Provision the log of a newly enrolled key at `path` and write its authenticated
@@ -307,55 +375,128 @@ impl FsBeltWal {
         path: impl Into<std::path::PathBuf>,
         wal_key: [u8; 32],
     ) -> std::io::Result<Self> {
-        let wal = Self {
+        let mut wal = Self {
             record: qsag_asm::durable::LockedRecord::create_new(path)?,
             wal_key,
+            checkpoint: crate::durable_ledger::LedgerCheckpoint {
+                generation: 0,
+                tag: [0; 32],
+            },
             release: core::cell::RefCell::new(None),
         };
-        wal.record.replace(&wal.seal(&BeltLatchState::default()))?;
+        let (encoded, ckpt) = wal.seal(1, &BeltLatchState::default());
+        wal.record.replace(&encoded)?;
+        wal.checkpoint = ckpt;
+        Ok(wal)
+    }
+
+    /// Open (and lock) a log that [`Self::provision_genesis`] created while enforcing an
+    /// externally retained minimum checkpoint. Rejects any record older than
+    /// `min_checkpoint.generation` or carrying a mismatched tag at `min_checkpoint.generation`.
+    pub fn open_existing_at_least(
+        path: impl Into<std::path::PathBuf>,
+        wal_key: [u8; 32],
+        min_checkpoint: crate::durable_ledger::LedgerCheckpoint,
+    ) -> std::io::Result<Self> {
+        let mut wal = Self {
+            record: qsag_asm::durable::LockedRecord::open_existing(path)?,
+            wal_key,
+            checkpoint: crate::durable_ledger::LedgerCheckpoint {
+                generation: 0,
+                tag: [0; 32],
+            },
+            release: core::cell::RefCell::new(None),
+        };
+        let raw = wal.record.read()?;
+        let Some((ckpt, _)) = wal.unseal(&raw) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "belt latch log failed authentication",
+            ));
+        };
+        if ckpt.generation < min_checkpoint.generation
+            || (ckpt.generation == min_checkpoint.generation
+                && !ct_eq_bytes32(&ckpt.tag, &min_checkpoint.tag))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "belt latch log rolled back below checkpoint",
+            ));
+        }
+        wal.checkpoint = ckpt;
         Ok(wal)
     }
 
     /// Open (and lock) a log that [`Self::provision_genesis`] created. Fails if the log or its
     /// lock sidecar is missing, or if the record does not verify under `wal_key`.
+    /// Callers defending against full disk-snapshot rollback should use
+    /// [`Self::open_existing_at_least`].
     pub fn open_existing(
         path: impl Into<std::path::PathBuf>,
         wal_key: [u8; 32],
     ) -> std::io::Result<Self> {
-        let wal = Self {
-            record: qsag_asm::durable::LockedRecord::open_existing(path)?,
+        Self::open_existing_at_least(
+            path,
             wal_key,
-            release: core::cell::RefCell::new(None),
-        };
-        match wal.load() {
-            Ok(Some(_)) => Ok(wal),
-            Ok(None) | Err(WalError::Corrupt) => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "belt latch log failed authentication",
-            )),
-            Err(WalError::Io) => Err(std::io::Error::other("belt latch log unreadable")),
-        }
+            crate::durable_ledger::LedgerCheckpoint {
+                generation: 0,
+                tag: [0; 32],
+            },
+        )
     }
 }
 
 #[cfg(feature = "std")]
 impl DurableWal for FsBeltWal {
     fn authorize_open(&self, record: &BeltLatchRecord) -> Result<(), WalError> {
-        let reservation = self.release.borrow_mut().take().ok_or(WalError::Io)?;
-        if reservation.epoch_or_codeword != record.binding() { return Err(WalError::Corrupt); }
+        let (reservation, bound_epoch) = self.release.borrow_mut().take().ok_or(WalError::Io)?;
+        if bound_epoch != record.epoch
+            || !ct_eq_bytes32(&reservation.epoch_or_codeword, &record.binding())
+        {
+            return Err(WalError::Corrupt);
+        }
         Ok(())
     }
 
     fn sync_persist(&mut self, state: &BeltLatchState) -> Result<(), WalError> {
-        self.record
-            .replace(&self.seal(state))
-            .map_err(|_| WalError::Io)
+        let current_raw = self.record.read().map_err(|_| WalError::Io)?;
+        let (on_disk_ckpt, _) = self.unseal(&current_raw).ok_or(WalError::Corrupt)?;
+        if on_disk_ckpt.generation != self.checkpoint.generation
+            || !ct_eq_bytes32(&on_disk_ckpt.tag, &self.checkpoint.tag)
+        {
+            return Err(WalError::Corrupt);
+        }
+        let next_gen = self
+            .checkpoint
+            .generation
+            .checked_add(1)
+            .ok_or(WalError::Corrupt)?;
+        let (encoded, next_ckpt) = self.seal(next_gen, state);
+        self.record.replace(&encoded).map_err(|_| WalError::Io)?;
+        self.checkpoint = next_ckpt;
+        Ok(())
     }
 
     fn load(&self) -> Result<Option<BeltLatchState>, WalError> {
         match self.record.read() {
-            Ok(raw) => self.unseal(&raw).map(Some).ok_or(WalError::Corrupt),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData) => Err(WalError::Corrupt),
+            Ok(raw) => {
+                let (ckpt, state) = self.unseal(&raw).ok_or(WalError::Corrupt)?;
+                if ckpt.generation < self.checkpoint.generation
+                    || (ckpt.generation == self.checkpoint.generation
+                        && !ct_eq_bytes32(&ckpt.tag, &self.checkpoint.tag))
+                {
+                    return Err(WalError::Corrupt);
+                }
+                Ok(Some(state))
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidData
+                ) =>
+            {
+                Err(WalError::Corrupt)
+            }
             Err(_) => Err(WalError::Io),
         }
     }
@@ -1296,6 +1437,29 @@ mod tests {
             Err(BeltLatchError::EpochAlreadyBound)
         );
     }
+
+    #[test]
+    fn empty_memory_wal_clones_for_batch_init_while_active_memory_wal_clone_panics() {
+        let fresh = alloc::vec![MemoryWal::new(); 3];
+        assert_eq!(fresh.len(), 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "MemoryWal: cloning an active volatile WAL authority is forbidden")]
+    fn cloning_persisted_memory_wal_panics() {
+        let mut l = latch();
+        l.bind(0, &[1; 32], &[9; 32], &DIGITS_A).unwrap();
+        let wal = l.into_wal();
+        let _forked = wal.clone();
+    }
+
+    #[test]
+    #[should_panic(expected = "MemoryWal: cloning an active volatile WAL authority is forbidden")]
+    fn cloning_armed_fail_next_memory_wal_panics() {
+        let mut wal = MemoryWal::new();
+        wal.fail_next_persist();
+        let _forked = wal.clone();
+    }
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -1403,12 +1567,43 @@ mod fs_tests {
         );
         // A well-formed epoch-0 state with a valid public digest but no MAC under the key:
         // what an attacker with file access but not the key can write.
-        let mut forged = BeltLatchState::default().to_bytes();
+        let mut forged = 1u64.to_be_bytes().to_vec();
+        forged.extend_from_slice(&BeltLatchState::default().to_bytes());
         forged.extend_from_slice(&[0u8; 32]);
         std::fs::write(dir.wal(), &forged).unwrap();
         assert_eq!(
             FsBeltWal::open_existing(dir.wal(), KEY).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn open_existing_at_least_rejects_snapshot_rollback() {
+        let dir = Scratch::new("rollback");
+        let wal0 = FsBeltWal::provision_genesis(dir.wal(), KEY).unwrap();
+        let ckpt0 = wal0.checkpoint();
+        let saved_genesis_bytes = std::fs::read(dir.wal()).unwrap();
+
+        let wal1 = bind_one(wal0, 5);
+        let ckpt1 = wal1.checkpoint();
+        assert!(ckpt1.generation > ckpt0.generation);
+        let saved_epoch5_bytes = std::fs::read(dir.wal()).unwrap();
+        drop(wal1);
+
+        // Restoring the pre-signing genesis snapshot while retaining ckpt1 is refused.
+        std::fs::write(dir.wal(), &saved_genesis_bytes).unwrap();
+        assert_eq!(
+            FsBeltWal::open_existing_at_least(dir.wal(), KEY, ckpt1)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        // Restoring the genuine epoch-5 snapshot recovers cleanly at ckpt1 (and >= ckpt0).
+        std::fs::write(dir.wal(), &saved_epoch5_bytes).unwrap();
+        let recovered = FsBeltWal::open_existing_at_least(dir.wal(), KEY, ckpt1).unwrap();
+        let latch = BeltLatch::recover(recovered, 10).unwrap();
+        assert_eq!(latch.next_epoch(), 6);
+        assert_eq!(latch.in_flight().unwrap().epoch, 5);
     }
 }
