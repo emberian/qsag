@@ -51,6 +51,8 @@ public import Qsag.CustodySuiteFull
 import all Qsag.UcGames
 import all Qsag.BaggyAndRss256Security
 
+import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -5884,6 +5886,23 @@ theorem inhabited_committee_partitioned_jorts_2of3_and_3of5 :
     xorFin256 3 (dealAdditiveShares 3 0xBEEF#256 tape3) = 0xBEEF#256 := by
   decide
 
+private theorem preSteppedDigest256_accepted_component {L : Nat}
+    (F : Nat → Nat → Digest256 → Digest256) (pk : Fin L → Digest256)
+    (lambdas : List (TowerElem 7)) (digits : Fin L → Fin 4)
+    (sub : SubmittedDigest256ShamirShares L) (cand : Fin L → Digest256)
+    (i : Fin L) (hd : (digits i).val < 3)
+    (accepted : preSteppedDigest256ReconstructAndSelfVerify F pk lambdas digits sub = some cand) :
+    cand i = joinTower128Digest256 (ringDot lambdas (sub i).1, ringDot lambdas (sub i).2) := by
+  unfold preSteppedDigest256ReconstructAndSelfVerify at accepted
+  dsimp only at accepted
+  split at accepted
+  next =>
+    have same := Option.some.inj accepted
+    rw [← same]
+    simp only [hd, ↓reduceIte]
+  next => cases accepted
+
+set_option maxHeartbeats 800000 in
 /-- Inhabitedness witness 3 (`inhabited_preStepped_shamir_wots_self_verify`):
     Full 128-bit `TowerElem 7` (`GF(2^128)`) `(t = 2, n = 3)` pre-stepped Shamir `WOTS+C` table over
     256-bit `Digest256` chains across `v = 128` base-4 chains (`WOTS_TARGET_SUM = 192`, evaluation
@@ -6014,21 +6033,7 @@ theorem inhabited_preStepped_shamir_wots_self_verify :
       preSteppedDigest256ReconstructAndSelfVerify F pk lambdas digits sub = some cand →
       cand i0 = joinTower128Digest256 (ringDot lambdas (sub i0).1, ringDot lambdas (sub i0).2) := by
     intro F pk sub cand hSome
-    unfold preSteppedDigest256ReconstructAndSelfVerify at hSome
-    dsimp only at hSome
-    by_cases hAll :
-        ((List.finRange 128).all (fun i =>
-          decide (wotsChainIter F i.val (digits i).val (3 - (digits i).val)
-            (if (digits i).val < 3 then
-               joinTower128Digest256 (ringDot lambdas (sub i).1, ringDot lambdas (sub i).2)
-             else pk i) = pk i))) = true
-    · simp only [hAll, ↓reduceIte] at hSome
-      injection hSome with hCandEq
-      rw [← hCandEq]
-      have hd0 : (digits i0).val < 3 := by decide
-      simp only [hd0, ↓reduceIte]
-    · simp only [hAll] at hSome
-      cases hSome
+    exact preSteppedDigest256_accepted_component F pk lambdas digits sub cand i0 (by decide) hSome
   refine ⟨towerX7_not_in_gf2_64, hCodeword, hHonShake, ?_, hHonPerm, ?_⟩
   · cases hRes : preSteppedDigest256ReconstructAndSelfVerify F_shake pkShake lambdas digits corruptSubShake with
     | none => exact .inl rfl
@@ -6672,6 +6677,26 @@ theorem qsAPartitionedSign_success_bounds {n : Nat}
       exact ⟨good.1, good.2.1, idx, hi, good.2.2,
         uint64_toNat_ofNat_of_lt good.2.2⟩
     next bad => cases h
+
+
+/-- Empty enrollment reaches the ledger invariant before the first signing attempt. -/
+theorem inhabited_signing_ledger : ∃ st : QuorumSigningLedger, st.Safe :=
+  ⟨{}, emptyQuorumSigningLedger_safe⟩
+
+theorem tooth_used_quorum_permit_cannot_release {n : Nat} (H : List UInt8 → Digest256)
+    (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
+    (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n))
+    (permit : QuorumWirePermit H keys t h net Q v echoes)
+    (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
+    (st : QuorumSigningLedger) (used : permit.val.leaf ∈ st.reserved)
+    (out : QuorumSteppedOpening) :
+    (signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path st).2 ≠ some out := by
+  rw [signQuorumWirePermit_replay_rejected H keys t h net Q v echoes permit seed pk msg path st used]
+  intro bad
+  cases bad
+
+#verify_inhabited signingLedger_burn_safe inhabited_signing_ledger
+#tooth_pair runQuorumWireTrace_signature_safety vs tooth_used_quorum_permit_cannot_release
 
 end Qsag
 end

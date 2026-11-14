@@ -52,6 +52,8 @@ import all Qsag.InteractiveUcEngine
 import all Qsag.RssSlhFullSecurity
 import Lean
 
+import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -4711,6 +4713,16 @@ run_cmd do
     let forbidden := dependencies.filter fun ax => ax != ``propext && ax != ``Quot.sound
     unless forbidden.isEmpty do
       throwError "Forbidden axioms in {name}: {forbidden}"
+
+
+/-- The adaptive error is nonzero yet passes the challenge it was chosen after. -/
+theorem tooth_pre_wave_adaptive_error_exists (chi : Tower128) :
+    ∃ errors : List Tower128,
+      (∃ e ∈ errors, e ≠ towerZero 7) ∧ batchDeviationPoly errors chi = towerZero 7 :=
+  ⟨preWaveKernelFaultPair chi, tooth_pre_wave_challenge_kernel_bypass.1 chi⟩
+
+#verify_inhabited rss256_one_corrupt_perfect_view_privacy inhabited_rss256_privacy_soundness_and_poison
+#tooth_pair rss256_polynomial_gate_weight_soundness vs tooth_pre_wave_adaptive_error_exists
 
 end Qsag
 end
