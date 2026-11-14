@@ -13,3 +13,4 @@ std = ["alloc", "qsag-accel/std"]
 
 [dependencies]
 qsag-accel = { path = "../qsag-accel", default-features = false }
+qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }

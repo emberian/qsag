@@ -25,6 +25,9 @@ export qsag_verified.proofs (
   shake256_32_refines
   cshake256_32_empty_refines
   cshake256_32_refines_of_prefix
+  sponge_new_cshake256_short_nonempty_absorbed
+  cshake256_32_short_nonempty_refines
+  cshake256_short_nonempty_xof_from_extracted_state
   GoldilocksP
   bdoz_authenticate_open_total
   bdoz_authenticate_open_spec
