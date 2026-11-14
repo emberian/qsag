@@ -414,6 +414,12 @@ impl Fips205Params {
         if self.h != dhp || self.k == 0 || self.a == 0 || self.a > 20 {
             return false;
         }
+        let Some(total_fors_leaves) = (self.k as u64).checked_shl(self.a as u32) else {
+            return false;
+        };
+        if total_fors_leaves > (u32::MAX as u64) + 1 {
+            return false;
+        }
         let Some(ka_bits) = self.k.checked_mul(self.a) else {
             return false;
         };
@@ -2644,5 +2650,14 @@ mod tests {
             bad[params.sig_bytes() / 2] ^= 0x80;
             assert!(!slh_verify(&params, msg, &bad, b"ctx-192-256", &pk_hi));
         }
+
+        // Flattened FORS address space must fit in 32-bit `f6` (`k * 2^a <= 2^32`).
+        let mut overflow_fors = Fips205Params::SLH_DSA_SHAKE_128S;
+        overflow_fors.a = 20;
+        overflow_fors.k = 4097;
+        overflow_fors.m = (4097 * 20usize).div_ceil(8)
+            + (overflow_fors.h - overflow_fors.hp).div_ceil(8)
+            + overflow_fors.hp.div_ceil(8);
+        assert!(!overflow_fors.is_valid());
     }
 }

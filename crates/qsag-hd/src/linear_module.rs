@@ -43,10 +43,32 @@ pub const DEFAULT_MAX_DERIVATION_DEPTH: u16 = 8;
 pub const MAX_NON_HARDENED_DERIVATION_DEPTH: u16 = 16;
 
 /// Worst-case $\ell_\infty$ coefficient bound $2 \cdot (d + 1)$ after `depth` non-hardened
-/// $\text{CBD}_2$ derivation steps from a $\text{CBD}_2$ root secret.
+/// $\text{CBD}_2$ derivation steps from a single $\text{CBD}_2$ root secret.
 #[inline]
 pub const fn max_cbd2_linf_norm_after_depth(depth: u16) -> u32 {
     (depth as u32 + 1) * 2
+}
+
+/// Conservative worst-case $\ell_\infty$ coefficient bound $2 \cdot [S \cdot (1 + h) + u]$
+/// for a dealerless root summing $S = \binom{n}{t - 1}$ $\text{CBD}_2$ subset secrets after
+/// `hardened_steps` ($h$) hardened re-randomizations and `unhardened_steps` ($u$) public
+/// $\text{CBD}_2$ shifts.
+#[inline]
+pub const fn max_dealerless_cbd2_linf_norm(
+    num_subsets_s: u32,
+    hardened_steps: u32,
+    unhardened_steps: u32,
+) -> Option<u32> {
+    let Some(h_plus_1) = hardened_steps.checked_add(1) else {
+        return None;
+    };
+    let Some(scaled) = num_subsets_s.checked_mul(h_plus_1) else {
+        return None;
+    };
+    let Some(total) = scaled.checked_add(unhardened_steps) else {
+        return None;
+    };
+    total.checked_mul(2)
 }
 
 /// Barrett reduction for every u64 input. With mu=floor(2^64/q), the

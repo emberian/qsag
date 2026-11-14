@@ -1,46 +1,23 @@
 module
 /-
-# Qsag.CustodySuiteFull — End-to-End Custody, Policy, Addressing & Co-ZK Migration Proofs
+# Custody, policy, addressing and migration
 
-Self-contained Lean 4.35 formalization of the five custody and migration subsystems
-(`Init` + `Qsag` constructive foundations, `0` proof gaps, `0` custom axioms, `0 Classical.choice`):
+Operational party-machine exports at the end of this file use public wire events,
+enrolled MAC authority, actual masked HD observations, authenticated policy rotation,
+and a commit-before-verifier-challenge Co-ZK circuit transcript. The FTS circuit uses
+Rust's two polynomial-basis lanes, round-constant encoding, MDS and feed-forward.
 
-1. **Few-Time Signatures (`qsag-fts`)**:
-   - Constant-sum Winternitz (`WOTS+CS`, `L = 68, base = 5, S = 136` and `w = 5`) strict
-     codeword incomparability (`wotsCs_single_use_incomparable`) and constructive 1-CMA
-     hash-chain preimage / claw extraction (`wotsCs_euf_1cma_extract_chain_preimage`).
-   - `#tooth` 2-signature forward-only forgery witness (`tooth_wotsCs_two_signatures_enable_forward_only_forgery`).
-   - Multi-turn 48-round $x^7$ SPN deferred-MAC session guard (`fts_spn_deferred_mac_blocks_dfa_across_epochs`)
-     with durable 1-use epoch burn and MAC-context quarantine, paired with `#tooth` degree-6
-     key-canceling differential polynomial (`tooth_value_open_before_mac_yields_deg6_key_eq`).
-2. **Hierarchical Lattice Custody (`qsag-hd`)**:
-   - Per-party committed MAC zero-test (`hd_committed_zero_test_sound`), anti-rushing commitment
-     binding, quarantine-before-release, dealerless child-MAC key rotation independence, and
-     7-repetition mod-`8380417` sacrifice soundness (`< 2^-157`), paired with `#tooth` rushing
-     residual adaptation (`tooth_uncommitted_zero_test_rushing_forgery`).
-   - `AuthorizedHdProjection` Module-LWE secret-fiber uniformity, single-use `OpeningMask`, and
-     bounded `DurableQueryBudget` subspace entropy (`hd_authorized_budget_blocks_full_rank_reconstruction`),
-     paired with `#tooth` full-rank basis reconstruction (`tooth_unrestricted_linear_forms_reconstruct_secret`).
-3. **Stateful Policy Guard & Hybrid Addressing (`qsag-policy`, `qsag-addr`)**:
-   - Multi-turn `StatefulPolicyGuard` spend cap, nonce replay prevention, and bijective length-framed
-     `TransactionIntent` codec (`policy_multiturn_velocity_and_intent_binding`), paired with `#tooth`
-     stateless caller-supplied spend bypass (`tooth_stateless_velocity_caller_spent_bypass`).
-   - Universal `GF(2)`-linear `Bech32m` (`0x2bc830a3`) roundtrip, legacy BIP-173 rejection, and
-     6-symbol burst detection (`bech32m_encode_verify_roundtrip`), plus `HybridPinnedEnvelope`
-     non-strippability and conjunctive EUF-CMA reduction
-     (`hybrid_pinned_non_strippable_and_combined_euf_cma`, `tooth_unpinned_concatenation_allows_pq_key_stripping`).
-4. **Co-ZK Migration Ceremony (`qsag-migrate`)**:
-   - 219-repetition ZKBoo soundness `< 2^-128` under frozen ceremony root commitments
-     (`zkboo_219_soundness_lt_two_pow_neg128`).
-   - Constructive 3-of-3 outer-MPC physical custodian key-privacy bijection
-     (`cozk_outer_mpc_one_custodian_perfect_key_privacy`) proving exact view uniformity and
-     witness independence across all 219 repetitions, paired with `#tooth` single-repetition
-     direct-head key recovery (`tooth_direct_head_assignment_leaks_key_in_one_rep`).
-   - Pre-open batch Beaver/BBCGGI19 multiplication & conversion sacrifice gate
-     (`cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release`) with 2-of-3 replicated
-     cross-check and 2-coin $\mathbb{F}_{2^{128}}$ soundness (`< 2^-130`), paired with `#tooth`
-     input-inconsistent AND selective-failure key-bit leak
-     (`tooth_unverified_outer_mul_selective_fault_leaks_key_bit`).
+Earlier algebraic/evidence machines are retained under explicit Evidence names for
+compatibility and negative tests. They are not exported as network machines. Named
+compatibility theorems retain their evidence claims and add operational guarantees.
+
+Model boundaries: the new FTS interpreter records round-power openings and final
+MAC barriers; it is not a proof of Rust's per-party power-tuple preprocessing or a
+bytecode refinement. HD privacy assumes independently uniform one-time masks and
+is conditional on the enrolled public-key fiber. Co-ZK uses independent private
+verifier coins, not an unproved Fiat-Shamir random-oracle reduction. Policy MAC
+verification is concrete; computational unforgeability remains a primitive security
+assumption. No computational-security assumption is replaced by nonempty bytes.
 -/
 
 public import Qsag.Constructive
@@ -219,7 +196,7 @@ private def extractStrictDecreaseAux :
       let ⟨idx, hIdxLt⟩ := extractStrictDecreaseAux xs ys hLen' hTailNe hTailSum
       ⟨⟨idx.val + 1, Nat.succ_lt_succ idx.isLt⟩, hIdxLt⟩
 
-/-- Constructive index extractor (`0 Classical.choice`) witnessing strict coordinate decrease
+/-- Constructive index extractor (no choice operator) witnessing strict coordinate decrease
     between any two distinct constant-sum codewords. -/
 def extractWotsCsDecrease {L base S : Nat} (dStar d : List Nat)
     (hStar : validWotsCsCodeword L base S dStar)
@@ -304,7 +281,7 @@ private def extractChainClaw {Node : Type} [DecidableEq Node]
     Given public endpoints `pk i = F^(base - 1)(sk i)`, one honest signature
     `honestSig i = F^(d[i])(sk i)` on valid codeword `d`, and any valid forged signature
     `forgedSig` on distinct codeword `dStar ≠ d` (`F^(base - 1 - dStar[i])(forgedSig i) = pk i`),
-    constructively (`0 Classical.choice`) extracts EITHER a direct 1-step backward chain preimage
+    constructively (no choice operator) extracts EITHER a direct 1-step backward chain preimage
     of `honestSig i` at an index with `dStar[i] < d[i]`, OR an explicit step collision in `F`. -/
 def wotsCs_euf_1cma_extract_chain_preimage {Node : Type} [DecidableEq Node]
     {L base S : Nat} (F : Nat → Nat → Node → Node)
@@ -1106,7 +1083,7 @@ private theorem fts_no_release_if_burned_inactive {H : Hash}
     3. **Permanent Quarantine Latch**: Once `macContextPoisoned = true` (triggered immediately on
        any failed MAC or commitment opening), `stFinal.macContextPoisoned = true` and zero events
        are ever emitted again. -/
-theorem fts_spn_deferred_mac_blocks_dfa_across_epochs
+theorem fts_spn_deferred_mac_blocks_dfa_across_epochs_evidence
     (H : Hash) {st₀ stFinal : FtsEpochGuardState}
     {trace : List (FtsSpnInput × Option FtsSpnPrivateEvidence)}
     (hInv₀ : FtsStateInv st₀)
@@ -2087,7 +2064,7 @@ theorem tooth_hd_hardened_parent_blocks_public_chaincode_downgrade
   · unfold hdZeroTestEvidenceStep
     simp [hClean, hIdle]
 
-/-- Constructive anti-rushing commitment binding extractor (`0 Classical.choice`): any party `c`
+/-- Constructive anti-rushing commitment binding extractor (no choice operator): any party `c`
     opening an adapted residual `zAdapt ≠ zOrig` or flipped `hardened` flag against its frozen
     commitment yields a hash collision. -/
 def extractHdRushingCollision (H : Hash) (sessionTag : List UInt8) (partyIdx : Nat)
@@ -2492,7 +2469,7 @@ private theorem hd_no_freeze_if_consumed {H : Hash} {n dim : Nat}
     3. Whenever `budgetCap < dim`, even unmasked prefix openings of a short secret (`‖opened‖_∞ ≤ hdCbdEta`)
        admit distinct **short** secrets `sA ≠ sB` (`‖sA‖_∞ ≤ hdCbdEta ∧ ‖sB‖_∞ ≤ hdCbdEta`) matching all
        `budgetCap` opened coordinates! -/
-theorem hd_authorized_budget_blocks_full_rank_reconstruction
+theorem hd_authorized_budget_blocks_full_rank_reconstruction_evidence
     (H : Hash) (n dim : Nat) :
     (∀ {st₀ stFinal : HdFamilyState n dim}
        {trace : List (HdZeroTestInput n dim × Option HdZeroTestPrivateEvidence)},
@@ -2817,7 +2794,7 @@ theorem encodeFramedU64Le_injective {xs ys : List (List UInt8)}
       decodeFramedU64Le_encodeFramedU64Le hCy hAy] at hDec
   injection hDec
 
-/-- Module-local structural unsigned LEB128 encoder for unbounded-`Nat` mathematical fallback (`0 Classical.choice`). -/
+/-- Module-local structural unsigned LEB128 encoder for unbounded-`Nat` mathematical fallback (no choice operator). -/
 def txLeb128Aux : Nat → Nat → List UInt8
   | 0, _ => [0]
   | f + 1, n =>
@@ -2832,7 +2809,7 @@ def txLeb128 (n : Nat) : List UInt8 :=
 def txEncodeField (bs : List UInt8) : List UInt8 :=
   txLeb128 bs.length ++ bs
 
-/-- Constructive structural unsigned LEB128 stream decoder (`0 Classical.choice`). -/
+/-- Constructive structural unsigned LEB128 stream decoder (no choice operator). -/
 def decodeLeb128 : List UInt8 → Option (Nat × List UInt8)
   | [] => none
   | b :: bs =>
@@ -3245,7 +3222,7 @@ theorem encodeTransactionIntent_injective {tx₁ tx₂ : TransactionIntent}
       decodeTransactionIntent_encodeTransactionIntent] at hDec
   injection hDec
 
-/-- Constructive (`0 Classical.choice`) binding theorem for `toCanonicalSigningBytes`:
+/-- Constructive (no choice operator) binding theorem for `toCanonicalSigningBytes`:
     any collision in `toCanonicalSigningBytes` between two fixed-width intents with 32-byte
     `policy_digest`s either agrees on `policy_digest` and every non-`message_digest` field of
     `TransactionIntent` OR yields an explicit `HashCollisionWitness` on
@@ -3407,7 +3384,7 @@ private theorem policy_no_nonce_if_burned
        `g₀.pinned_policy_digest`, `g₀.pinned_authority_digest`, `g₀.allowed_recipients`, and `≤ g₀.per_tx_cap`.
     4. **Bijective Canonical V2 Intent Codec**: `decodeTransactionIntent (encodeTransactionIntent tx) = some tx`
        and `encodeTransactionIntent` is strictly injective across all 25 fields! -/
-theorem policy_multiturn_velocity_and_intent_binding
+theorem policy_multiturn_velocity_and_intent_binding_evidence
     {g₀ gFinal : StatefulPolicyGuard}
     {trace : List (TransactionIntent × Option ApprovedIntentEnvelope)}
     (hInitLe : g₀.accumulated_spend ≤ g₀.velocity_window_cap)
@@ -3526,7 +3503,7 @@ theorem policy_multiturn_velocity_and_intent_binding
 def slidingWindowTest (bm : List Bool) (k : Nat) : Bool :=
   bm.getD k false
 
-/-- Construct a fixed-width `w`-slot sliding-window bitmap structurally (`0 Classical.choice`). -/
+/-- Construct a fixed-width `w`-slot sliding-window bitmap structurally (no choice operator). -/
 def buildSlidingWindow : Nat → (Nat → Bool) → List Bool
   | 0, _ => []
   | w + 1, f => f 0 :: buildSlidingWindow w (fun i => f (i + 1))
@@ -3907,7 +3884,7 @@ private theorem watermark_no_approved_if_consumed
     3. Every approved nonce satisfies `g₀.minNonceWatermark ≤ tx.nonce` and `!nonceConsumedByWatermark g₀ tx.nonce`,
     4. Every approved envelope emits `toCanonicalSigningBytes tx` (`QSAG.POLICY.SIGNED_INTENT.V2`)
        and carries non-empty `init_mac_bytes` whenever `g₀.requireAuthenticatedInitiator = true`. -/
-theorem policy_watermark_sliding_window_multiturn_sound
+theorem policy_watermark_sliding_window_multiturn_sound_evidence
     {g₀ gFinal : PolicyWatermarkGuard}
     {trace : List (PolicyWatermarkInput × Option PolicyWatermarkEvent)}
     (hTrace : ValidCustodyTrace policyBitmapEvidenceStep g₀ trace gFinal) :
@@ -4706,7 +4683,7 @@ private theorem hybridSuite_u16_bounds {s c p : Nat}
     (with `pkCD = hashHybridClassicalPk H_dom suite cAlg pkC`, `pkPD = hashHybridPqPk H_dom suite pqAlg pkPq`,
     `0x0501` or `0x0502`), and honest signers have only signed messages `m ∈ signedMsgs` under `(pkC, pkPq)`.
     Any accepted `HybridPinnedEnvelope` on a fresh message `msg ∉ signedMsgs` (or with substituted keys)
-    constructively (`0 Classical.choice`) yields EITHER:
+    constructively (no choice operator) yields EITHER:
     1. A same-domain `DomainHashCollisionWitness H_dom` on `"QSAG.HYBRID.ID_COMMIT.V2"`,
        `"QSAG.HYBRID.PK_CLASSICAL.V2"`, or `"QSAG.HYBRID.PK_PQ.V2"` (blocking PQ/classical key stripping!), OR
     2. A **simultaneous** `HybridCombinedForgeryWitness` breaking **BOTH** `verifyClassical` on `pkC`
@@ -5176,7 +5153,7 @@ private theorem fin3_trichotomy : ∀ u p : Fin 3,
   | ⟨_ + 3, h⟩, _ => absurd h (by omega)
   | _, ⟨_ + 3, h⟩ => absurd h (by omega)
 
-/-- Constructive `SimpleEquiv` (`0 Classical.choice`) proving that for ANY witness `w`, ANY corrupted
+/-- Constructive `SimpleEquiv` (no choice operator) proving that for ANY witness `w`, ANY corrupted
     physical custodian `c ∈ Fin 3`, ANY challenge vector `e : Fin R → Fin 3`, and ANY target joint view
     `V : CustodianJointView wBits R`, the fiber of valid configurations producing `V` is bijective to
     the constant `HonestOuterMaskSpace wBits R`! -/
@@ -5300,7 +5277,7 @@ def outerMpcViewFiberEquiv (wBits R : Nat) (w : BitVec wBits)
     dsimp only
     rw [hS, hV, hM]
 
-/-- Direct constructive `SimpleEquiv` (`0 Classical.choice`) mapping valid configurations for witness
+/-- Direct constructive `SimpleEquiv` (no choice operator) mapping valid configurations for witness
     `w₁` bijectively to valid configurations for witness `w₂` with **identical** `custodianJointView c e`! -/
 def outerMpcWitnessShiftEquiv (wBits R : Nat) (w₁ w₂ : BitVec wBits)
     (c : Fin 3) (e : Fin R → Fin 3) (V : CustodianJointView wBits R) :
@@ -5323,7 +5300,7 @@ def outerMpcWitnessShiftEquiv (wBits R : Nat) (w₁ w₂ : BitVec wBits)
     1. Both witness fibers `{ cfg | ValidOuterMpcConfig 256 219 w cfg ∧ custodianJointView 256 219 c e cfg = V }`
        are constructively bijective to the constant `HonestOuterMaskSpace 256 219` (proving uniform
        view distribution across ALL `V` and complete independence of `w`!).
-    2. `outerMpcWitnessShiftEquiv` gives an explicit constructive bijection (`0 Classical.choice`)
+    2. `outerMpcWitnessShiftEquiv` gives an explicit constructive bijection (no choice operator)
        between the `w₁`-fiber and the `w₂`-fiber preserving `custodianJointView` identically! -/
 def cozk_outer_mpc_one_custodian_perfect_key_privacy
     (c : Fin 3) (e : Fin 219 → Fin 3)
@@ -5639,7 +5616,7 @@ private theorem cozk_trace_ordering_and_single_release {H : Hash}
        gate (`∃ d ∈ gateDeltas, d ≠ towerZero 7`), at most `L` single-coin challenges in any `Nodup`
        `Tower128` domain accept, and the 2-coin cheating bound satisfies
        `ratLe (L * L, 2 ^ 128 * 2 ^ 128) (1, 2 ^ 130)` (`< 2^-128`). -/
-theorem cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release (H : Hash) :
+theorem cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release_evidence (H : Hash) :
     (∀ (tag : List UInt8) (stFinal : CoZkCeremonyState)
        (trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)),
       let st₀ : CoZkCeremonyState := { sessionTag := tag, phase := .awaitingRootFreeze, aborted := false }
@@ -5915,7 +5892,8 @@ theorem policyBurn_persistent (cap : Nat) (s : PolicyBurnSet) (v x : Nat)
       · have hm := (policyInsertSorted_mem v x s.values).2 (Or.inr hx)
         rw [he] at hm
         rcases List.mem_cons.mp hm with hxy | htail
-        · exact Or.inl ⟨_, rfl, hxy ▸ Nat.le_max_right _ _⟩
+        · subst x
+          exact Or.inl ⟨_, rfl, Nat.le_max_right _ _⟩
         · exact Or.inr htail
 
 structure InitiatorPeerTag where
@@ -5965,8 +5943,24 @@ def policyWindowTag (g : AuthenticatedPolicyState) (next : Nat) : List UInt8 :=
   cshake256Bytes (custodyDomain "QSAG.POLICY.WINDOW_ADVANCE/v1")
     (encodeFramedU64Le [g.windowKey, g.policyId, be 8 g.rules.window_id, be 8 next])
 
+def policyInsertTag (t : InitiatorPeerTag) : List InitiatorPeerTag → List InitiatorPeerTag
+  | [] => [t]
+  | x :: xs => if t.approver ≤ x.approver then t :: x :: xs else x :: policyInsertTag t xs
+
+/-- Rust sorts tags by approver before hashing; duplicates are retained so the
+    per-approver authentication check can reject them. -/
 def encodeInitiatorTags (tags : List InitiatorPeerTag) : List UInt8 :=
-  tags.flatMap (fun t => be 2 t.approver ++ t.tag)
+  (tags.foldr policyInsertTag []).flatMap (fun t => be 2 t.approver ++ t.tag)
+
+/-- `approver_bytes` is a sorted sequence of big-endian u16 identifiers, exactly
+    the representation consumed by Rust's initiator-authentication preimage. -/
+def policyCanonicalApprovers : List UInt8 → Bool
+  | [] => true
+  | a :: b :: rest => match rest with
+    | [] => true
+    | c :: d :: _ => decide (ofLE [b, a] ≤ ofLE [d, c]) && policyCanonicalApprovers rest
+    | _ => false
+  | _ => false
 
 /-- One tag for THIS approver; duplicate entries fail even when one tag is correct. -/
 def policyAuthenticatedInitiator (g : AuthenticatedPolicyState) (tx : TransactionIntent)
@@ -6006,7 +6000,9 @@ def PolicyAdmission (g : AuthenticatedPolicyState) (tx : TransactionIntent)
   ¬ policyBurned g.nonceBurns tx.nonce ∧
   ¬ policyBurned g.sessionBurns (ofLE tx.session_id.reverse) ∧
   encodeInitiatorTags tags = tx.init_mac_bytes ∧
-  policyAuthenticatedInitiator g tx tags = true
+  policyAuthenticatedInitiator g tx tags = true ∧
+  policyCanonicalApprovers tx.approver_bytes = true ∧
+  tags.all (fun t => decide (t.approver < 256 ^ 2 ∧ t.tag.length = 32)) = true
 
 instance (g : AuthenticatedPolicyState) (tx : TransactionIntent) (tags : List InitiatorPeerTag) :
     Decidable (PolicyAdmission g tx tags) := by unfold PolicyAdmission; infer_instance
@@ -6294,26 +6290,49 @@ def evalSpn48Rounds (tweak input : FtsLanes) : FtsLanes :=
 /-- Arbitrary faults at each of the two power openings of each round. The tag
     deviation is adversarial; the MAC key is enrolled state and never outbound. -/
 structure FtsRecordedOpening where
-  powers : FtsLanes
-  tagDeviation : FtsLanes
+  maskedOpenings : FtsLanes
+  tagDeviationLeft : FtsLanes
+  tagDeviationRight : FtsLanes
   deriving DecidableEq
 
-def ftsOpeningResidual (alpha expected opened deltaTag : FtsLanes) : FtsLanes :=
-  (deltaTag.1 ^^^ ftsRustMul alpha.1 (opened.1 ^^^ expected.1),
-   deltaTag.2 ^^^ ftsRustMul alpha.2 (opened.2 ^^^ expected.2))
+/-- Both independent MAC lanes authenticate each scalar opening. -/
+def ftsScalarResidual (alpha : FtsLanes) (expected opened : BitVec 128)
+    (deltaTag : FtsLanes) : FtsLanes :=
+  (deltaTag.1 ^^^ ftsRustMul alpha.1 (opened ^^^ expected),
+   deltaTag.2 ^^^ ftsRustMul alpha.2 (opened ^^^ expected))
+
+def ftsOpeningResidual (alpha expected opened : FtsLanes)
+    (deltaTag : FtsLanes × FtsLanes) : FtsLanes × FtsLanes :=
+  (ftsScalarResidual alpha expected.1 opened.1 deltaTag.1,
+   ftsScalarResidual alpha expected.2 opened.2 deltaTag.2)
+
+def ftsZeroResidual : FtsLanes × FtsLanes := ((0#128, 0#128), (0#128, 0#128))
+
+def ftsFinalResidualBytes (r : FtsLanes × FtsLanes) : List UInt8 :=
+  ftsEncodeLanes r.1 ++ ftsEncodeLanes r.2
 
 structure FtsRecordedExecution where
   output : FtsLanes
   residuals : List FtsLanes
   deriving DecidableEq
 
-def ftsRecordPowers (alpha tweak input : FtsLanes) :
+/-- The actual opened scalar is d=x+a, not x^7. A fault in ANY round's
+    d propagates through (d+a)^7 and the MDS into subsequent rounds. Aggregate
+    authenticated powers of a implement this polynomial in Rust's `apply_power`.
+    Each consumed mask comes from the enrolled preprocessing tape. -/
+def ftsRecordPowers (alpha tweak input : FtsLanes) (masks : List FtsLanes) :
     Nat → FtsLanes → List FtsRecordedOpening → FtsRecordedExecution
   | _, st, [] => ⟨(st.1 ^^^ input.1, st.2 ^^^ input.2), []⟩
   | r, st, op :: ops =>
-    let rest := ftsRecordPowers alpha tweak input (r + 1) (ftsRustMix op.powers) ops
+    let a := masks.getD r (0#128, 0#128)
+    let rc := ftsRustRoundConstants tweak r
+    let expectedD := (st.1 ^^^ rc.1 ^^^ a.1, st.2 ^^^ rc.2 ^^^ a.2)
+    let powers := (ftsRustPow7 (op.maskedOpenings.1 ^^^ a.1),
+                   ftsRustPow7 (op.maskedOpenings.2 ^^^ a.2))
+    let rest := ftsRecordPowers alpha tweak input masks (r + 1) (ftsRustMix powers) ops
     { rest with residuals :=
-        ftsOpeningResidual alpha (ftsRustRoundPowers tweak st r) op.powers op.tagDeviation :: rest.residuals }
+        ftsScalarResidual alpha expectedD.1 op.maskedOpenings.1 op.tagDeviationLeft ::
+        ftsScalarResidual alpha expectedD.2 op.maskedOpenings.2 op.tagDeviationRight :: rest.residuals }
 
 inductive FtsWirePhase where
   | powerOpen
@@ -6332,11 +6351,12 @@ structure FtsWireState where
   alpha : FtsLanes
   tweak : FtsLanes
   input : FtsLanes
+  powerMasks : List FtsLanes
   phase : FtsWirePhase := .powerOpen
   execution : FtsRecordedExecution := ⟨(0#128, 0#128), []⟩
   commitment : List UInt8 := []
   candidate : FtsLanes := (0#128, 0#128)
-  finalResidual : FtsLanes := (0#128, 0#128)
+  finalResidual : FtsLanes × FtsLanes := ftsZeroResidual
   deriving DecidableEq
 
 inductive FtsWireInput where
@@ -6344,7 +6364,7 @@ inductive FtsWireInput where
   | intermediateMacCommit (digest : List UInt8)
   | intermediateMacOpen (salt : List UInt8)
   | valueCommit (digest : List UInt8)
-  | valueOpen (candidate tagDeviation : FtsLanes) (salt : List UInt8)
+  | valueOpen (candidate : FtsLanes) (tagDeviation : FtsLanes × FtsLanes) (salt : List UInt8)
   | macCommit (digest : List UInt8)
   | macOpen (salt : List UInt8)
   deriving DecidableEq
@@ -6369,8 +6389,8 @@ def ftsSpnStep (H : Hash) (s : FtsWireState) (i : FtsWireInput) :
   let reject := CustodyStepOutcome.rejected { s with phase := .quarantined } FtsSpnErr.intermediateMacOrCommitFailed
   match s.phase, i with
   | .powerOpen, .powerOpen ops =>
-    if ops.length = 48 then
-      .accepted { s with execution := ftsRecordPowers s.alpha s.tweak s.input 0 s.input ops
+    if ops.length = 48 ∧ s.powerMasks.length = 48 then
+      .accepted { s with execution := ftsRecordPowers s.alpha s.tweak s.input s.powerMasks 0 s.input ops
                           phase := .intermediateMacCommit }
         (.phaseAdvanced s.epoch .intermediateMacCommit)
     else reject
@@ -6393,8 +6413,8 @@ def ftsSpnStep (H : Hash) (s : FtsWireState) (i : FtsWireInput) :
   | .macCommit, .macCommit digest =>
     .accepted { s with commitment := digest, phase := .macOpen } (.phaseAdvanced s.epoch .macOpen)
   | .macOpen, .macOpen salt =>
-    if s.finalResidual = (0#128, 0#128) ∧
-       ftsWireCommit H s.epoch 3 (ftsEncodeLanes s.finalResidual) salt = s.commitment then
+    if s.finalResidual = ftsZeroResidual ∧
+       ftsWireCommit H s.epoch 3 (ftsFinalResidualBytes s.finalResidual) salt = s.commitment then
       .accepted { s with phase := .completed }
         (.releasedRound48Signature s.epoch (ftsEncodeLanes s.candidate))
     else reject
@@ -6402,7 +6422,7 @@ def ftsSpnStep (H : Hash) (s : FtsWireState) (i : FtsWireInput) :
 
 /-- #tooth: ValueOpen is never a signature-release transition. -/
 theorem tooth_fts_value_open_not_release (H : Hash) (s s' : FtsWireState)
-    (v d : FtsLanes) (salt sig : List UInt8) (ep : Nat) :
+    (v : FtsLanes) (d : FtsLanes × FtsLanes) (salt sig : List UInt8) (ep : Nat) :
     ftsSpnStep H s (.valueOpen v d salt) ≠ .accepted s' (.releasedRound48Signature ep sig) := by
   intro h
   cases hp : s.phase <;> simp only [ftsSpnStep, hp] at h
@@ -6413,7 +6433,7 @@ theorem tooth_fts_value_open_not_release (H : Hash) (s s' : FtsWireState)
 theorem fts_wire_release_requires_final_mac (H : Hash) (s s' : FtsWireState)
     (i : FtsWireInput) (ep : Nat) (sig : List UInt8)
     (h : ftsSpnStep H s i = .accepted s' (.releasedRound48Signature ep sig)) :
-    s.phase = .macOpen ∧ s.finalResidual = (0#128, 0#128) ∧ sig = ftsEncodeLanes s.candidate := by
+    s.phase = .macOpen ∧ s.finalResidual = ftsZeroResidual ∧ sig = ftsEncodeLanes s.candidate := by
   cases hp : s.phase <;> cases i <;> simp only [ftsSpnStep, hp] at h
   all_goals first
     | cases h
@@ -6437,11 +6457,9 @@ structure HdMaskedPending (n : Nat) where
     query consumes its index even on subsequent failure. Authorized forms are also
     enrolled; the network request cannot choose a balanced-base encoding query. -/
 structure HdMaskedState (n d1 d2 Q : Nat) where
-  publicMatrix : Fin d2 → Fin d1 → HdFq204
-  publicKey : Fin d2 → HdFq204
-  secret : ShortMlweWitness hdCbdEta d1 d2 publicMatrix publicKey
-  authorizedForms : Fin Q → Fin d1 → HdFq204
-  masks : Fin Q → HdFq204
+  /-- Preprocessed one-time masked projection tape, produced by `hdMaskedEnroll`.
+      Neither the short secret nor its unmasked projections are retained here. -/
+  observations : Fin Q → HdFq204
   alpha : HdFq204
   alphaNonzero : alpha ≠ HdFq204.zero
   hardened : Bool
@@ -6459,6 +6477,14 @@ def hdMaskedObservation (d1 Q : Nat) (forms : Fin Q → Fin d1 → HdFq204)
     (secret : Fin d1 → HdFq204) (masks : Fin Q → HdFq204) : Fin Q → HdFq204 :=
   fun q => HdFq204.add (evalLinearForm d1 (forms q) secret) (masks q)
 
+def hdMaskedEnroll (n d1 d2 Q : Nat)
+    (A : Fin d2 → Fin d1 → HdFq204) (t : Fin d2 → HdFq204)
+    (secret : ShortMlweWitness hdCbdEta d1 d2 A t)
+    (forms : Fin Q → Fin d1 → HdFq204) (masks : Fin Q → HdFq204)
+    (alpha : HdFq204) (ha : alpha ≠ HdFq204.zero) (hard : Bool) : HdMaskedState n d1 d2 Q :=
+  { observations := hdMaskedObservation d1 Q forms secret.val.1 masks
+    alpha := alpha, alphaNonzero := ha, hardened := hard }
+
 def hdZeroTestStep (H : Hash) (n d1 d2 Q : Nat)
     (s : HdMaskedState n d1 d2 Q) (i : HdMaskedInput n) :
     CustodyStepOutcome (HdMaskedState n d1 d2 Q) HdZeroTestEvent HdErr :=
@@ -6467,7 +6493,7 @@ def hdZeroTestStep (H : Hash) (n d1 d2 Q : Nat)
   | none, .freeze tag candidate commits =>
     if h : s.used < Q then
       let q : Fin Q := ⟨s.used, h⟩
-      let expected := hdMaskedObservation d1 Q s.authorizedForms s.secret.val.1 s.masks q
+      let expected := s.observations q
       .accepted { s with used := s.used + 1
                           pending := some ⟨s.used, tag, expected, candidate, commits⟩ }
         (.commitsFrozen s.used s.hardened)
@@ -6535,7 +6561,7 @@ theorem hdFiveShortWitness_injective (x y : Fin 5)
   apply Fin.ext
   rcases cx with hx | hx | hx | hx | hx <;>
     rcases cy with hy | hy | hy | hy | hy <;>
-    simp [hdFiveShortWitness, hx, hy, HdFq204.ofInt] at hv ⊢
+    simp [hdFiveShortWitness, hx, hy, HdFq204.ofInt, hdModuleQ] at hv ⊢
 
 /-- #tooth / positive entropy witness: EVERY actual masked transcript has at
     least five distinct VALID SHORT secret preimages with the same public key.
@@ -6568,3 +6594,457 @@ theorem hd_masked_observation_secret_independence (d1 Q : Nat)
   funext q
   exact (LawfulCommRing.add_sub_cancel_left (R := HdFq204)
     (evalLinearForm d1 (forms q) s₂) (hdMaskedObservation d1 Q forms s₁ m₁ q)).symm
+/-- Run the real transition, retaining rejection observations but never private
+    input/state evidence in the public trace. -/
+def custodyWireTrace {S In Out Err : Type} (step : S → In → CustodyStepOutcome S Out Err) :
+    S → List In → List (Option Out)
+  | _, [] => []
+  | s, i :: rest => match step s i with
+    | .accepted s' out => some out :: custodyWireTrace step s' rest
+    | .rejected s' _ => none :: custodyWireTrace step s' rest
+
+/-- Full-trace coupling, including failed requests and selective aborts. Enrolling
+    a different valid short secret with the bijectively shifted private mask tape
+    produces the SAME operational state, hence the same actual wire trace for
+    every request sequence. This preserves the public MLWE key and MAC authority. -/
+theorem hd_actual_wire_trace_secret_independence (H : Hash) (n d1 d2 Q : Nat)
+    (A : Fin d2 → Fin d1 → HdFq204) (t : Fin d2 → HdFq204)
+    (s₁ s₂ : ShortMlweWitness hdCbdEta d1 d2 A t)
+    (forms : Fin Q → Fin d1 → HdFq204) (m₁ : Fin Q → HdFq204)
+    (alpha : HdFq204) (ha : alpha ≠ HdFq204.zero) (hard : Bool) :
+    ∃ m₂ : Fin Q → HdFq204, ∀ inputs : List (HdMaskedInput n),
+      custodyWireTrace (hdZeroTestStep H n d1 d2 Q)
+        (hdMaskedEnroll n d1 d2 Q A t s₁ forms m₁ alpha ha hard) inputs =
+      custodyWireTrace (hdZeroTestStep H n d1 d2 Q)
+        (hdMaskedEnroll n d1 d2 Q A t s₂ forms m₂ alpha ha hard) inputs := by
+  obtain ⟨m₂, hm⟩ := hd_masked_observation_secret_independence d1 Q forms s₁.val.1 s₂.val.1 m₁
+  refine ⟨m₂, ?_⟩
+  intro inputs
+  have hs : hdMaskedEnroll n d1 d2 Q A t s₁ forms m₁ alpha ha hard =
+      hdMaskedEnroll n d1 d2 Q A t s₂ forms m₂ alpha ha hard := by
+    unfold hdMaskedEnroll
+    rw [hm]
+  rw [hs]
+
+/-- Exact five-element posterior, on the actual observation used by enrollment. -/
+def hdFivePosteriorEquiv (Q : Nat) (forms : Fin Q → Fin 1 → HdFq204)
+    (obs : Fin Q → HdFq204) :
+    SimpleEquiv (Fin 5)
+      { state : Fin 5 × (Fin Q → HdFq204) //
+        ∀ q, hdMaskedObservation 1 Q forms (hdFiveShortWitness state.1).val.1 state.2 q = obs q } where
+  toFun := fun x =>
+    ⟨(x, fun q => HdFq204.sub (obs q)
+      (evalLinearForm 1 (forms q) (hdFiveShortWitness x).val.1)),
+     fun q => LawfulCommRing.add_sub_cancel_left (R := HdFq204)
+      (evalLinearForm 1 (forms q) (hdFiveShortWitness x).val.1) (obs q)⟩
+  invFun := fun s => s.val.1
+  left_inv := fun _ => rfl
+  right_inv := fun ⟨⟨x, masks⟩, h⟩ => by
+    apply Subtype.ext
+    apply Prod.ext
+    · rfl
+    · funext q
+      have hq := h q
+      dsimp only [hdMaskedObservation] at hq ⊢
+      rw [← hq]
+      exact hdFq204_add_sub_self_left _ _
+
+/-- Conditional min-entropy ≥ 2 bits for the explicit uniform five-secret prior:
+    every posterior guess has mass 1/5 ≤ 1/4. `hdFivePosteriorEquiv` establishes
+    that these are the complete posterior fibers for every observed transcript. -/
+theorem hd_five_posterior_min_entropy_two_bits (guess : Fin 5) :
+    (([0, 1, 2, 3, 4] : List (Fin 5)).filter (fun x => x == guess)).length = 1 ∧
+    ratLe (1, 5) (1, 2 ^ 2) := by
+  constructor
+  · have hg := guess.isLt
+    have hc : guess.val = 0 ∨ guess.val = 1 ∨ guess.val = 2 ∨ guess.val = 3 ∨ guess.val = 4 := by omega
+    rcases hc with h | h | h | h | h
+    all_goals simp [List.filter, Fin.ext_iff, h]
+  · decide
+
+/-- An explicitly declassified signature plus public phase metadata is the full
+    FTS observation. Private proof evidence has no encoding in this wire type. -/
+def ftsPublicObservation : FtsSpnEvent → Nat × Sum FtsWirePhase (List UInt8)
+  | .phaseAdvanced ep phase => (ep, .inl phase)
+  | .releasedRound48Signature ep signature => (ep, .inr signature)
+
+def ftsPublicObservationInverse : Nat × Sum FtsWirePhase (List UInt8) → FtsSpnEvent
+  | (ep, .inl phase) => .phaseAdvanced ep phase
+  | (ep, .inr signature) => .releasedRound48Signature ep signature
+
+/-- Trace-level noninterference modulo the authorized signature/phase disclosure:
+    there is no additional secret-bearing event annotation. This intentionally
+    does not assert information-theoretic independence of a signature from its key. -/
+theorem fts_wire_trace_no_extra_secret_fields (xs ys : List FtsSpnEvent)
+    (h : xs.map ftsPublicObservation = ys.map ftsPublicObservation) : xs = ys := by
+  have hx : (xs.map ftsPublicObservation).map ftsPublicObservationInverse = xs := by
+    induction xs with
+    | nil => rfl
+    | cons x xs ih => cases x <;> simp [ftsPublicObservation, ftsPublicObservationInverse, ih]
+  have hy : (ys.map ftsPublicObservation).map ftsPublicObservationInverse = ys := by
+    induction ys with
+    | nil => rfl
+    | cons y ys ih => cases y <;> simp [ftsPublicObservation, ftsPublicObservationInverse, ih]
+  rw [← hx, ← hy, h]
+structure FtsOperationalGuard where
+  enrolledAlpha : FtsLanes
+  alphaLeftNonzero : enrolledAlpha.1 ≠ 0#128
+  alphaRightNonzero : enrolledAlpha.2 ≠ 0#128
+  enrolledInput : FtsLanes
+  powerMaskTape : List FtsLanes
+  burnedEpochs : List Nat := []
+  active : Option FtsWireState := none
+  quarantined : Bool := false
+  deriving DecidableEq
+
+inductive FtsOperationalInput where
+  | beginEpoch (epoch : Nat) (publicTweak : FtsLanes)
+  | session (input : FtsWireInput)
+  deriving DecidableEq
+
+/-- Epoch burn precedes every opening; keys and private input come from enrollment.
+    Every session rejection quarantines the entire enrolled MAC context. -/
+def ftsSpnEpochStep (H : Hash) (s : FtsOperationalGuard) (i : FtsOperationalInput) :
+    CustodyStepOutcome FtsOperationalGuard FtsSpnEvent FtsSpnErr :=
+  if s.quarantined then .rejected s .macContextQuarantined
+  else match s.active, i with
+  | none, .beginEpoch ep tweak =>
+    if ep ∈ s.burnedEpochs ∨ 2 ^ 32 ≤ ep ∨ s.powerMaskTape.length < 48 then .rejected s .epochAlreadyBurned
+    else
+      .accepted { s with burnedEpochs := ep :: s.burnedEpochs
+                          powerMaskTape := s.powerMaskTape.drop 48
+                          active := some { epoch := ep, alpha := s.enrolledAlpha,
+                            tweak := tweak, input := s.enrolledInput,
+                            powerMasks := s.powerMaskTape.take 48 } }
+        (.phaseAdvanced ep .powerOpen)
+  | some active, .session inp =>
+    match ftsSpnStep H active inp with
+    | .rejected _ err => .rejected { s with active := none, quarantined := true } err
+    | .accepted next event =>
+      .accepted { s with active := if next.phase == .completed then none else some next } event
+  | _, _ => .rejected s .sessionBusyOrWrongPhase
+
+/-- #tooth: an already consumed epoch cannot restart, regardless of public tweak. -/
+theorem tooth_fts_epoch_burn_survives_sessions (H : Hash) (s : FtsOperationalGuard)
+    (ep : Nat) (tweak : FtsLanes) (hq : s.quarantined = false)
+    (ha : s.active = none) (hb : ep ∈ s.burnedEpochs) :
+    ftsSpnEpochStep H s (.beginEpoch ep tweak) = .rejected s .epochAlreadyBurned := by
+  simp [ftsSpnEpochStep, hq, ha, hb]
+
+theorem fts_epoch_quarantine_wire_silence (H : Hash) (s : FtsOperationalGuard)
+    (hq : s.quarantined = true) (inputs : List FtsOperationalInput) :
+    custodyWireTrace (ftsSpnEpochStep H) s inputs = List.replicate inputs.length none := by
+  induction inputs with
+  | nil => rfl
+  | cons i rest ih => simp [custodyWireTrace, ftsSpnEpochStep, hq, ih]
+
+/-- Every policy step preserves both kinds of previously burned identifiers. -/
+theorem policy_operational_replay_persistent (s s' : AuthenticatedPolicyState)
+    (inp : AuthenticatedPolicyInput) (ev : PolicyWatermarkEvent)
+    (h : policyWatermarkGuardStep s inp = .accepted s' ev) (x : Nat) :
+    (policyBurned s.nonceBurns x → policyBurned s'.nonceBurns x) ∧
+    (policyBurned s.sessionBurns x → policyBurned s'.sessionBurns x) := by
+  cases inp with
+  | advance auth =>
+    have hs := policy_authorized_rotation_preserves_replay s s' auth ev h
+    rw [hs.2.2.1, hs.2.2.2]
+    exact ⟨id, id⟩
+  | evaluate tx tags =>
+    change policyGuardStep s tx tags = .accepted s' ev at h
+    unfold policyGuardStep at h
+    split at h
+    · cases h
+      exact ⟨policyBurn_persistent _ _ _ x, policyBurn_persistent _ _ _ x⟩
+    · cases h
+
+/-- Rejected authenticated-policy requests leave durable state unchanged. -/
+theorem policy_operational_rejection_state (s s' : AuthenticatedPolicyState)
+    (inp : AuthenticatedPolicyInput) (err : PolicyWatermarkReject)
+    (h : policyWatermarkGuardStep s inp = .rejected s' err) : s' = s := by
+  cases inp with
+  | advance auth =>
+    unfold policyWatermarkGuardStep at h
+    split at h <;> cases h
+    rfl
+  | evaluate tx tags =>
+    change policyGuardStep s tx tags = .rejected s' err at h
+    unfold policyGuardStep at h
+    split at h <;> cases h
+    rfl
+
+/-- Burn persistence holds over arbitrary accepted, rejected and rotation traces. -/
+theorem policy_operational_trace_replay_persistent
+    {s sf : AuthenticatedPolicyState}
+    {tr : List (AuthenticatedPolicyInput × Option PolicyWatermarkEvent)}
+    (h : ValidCustodyTrace policyWatermarkGuardStep s tr sf) (x : Nat) :
+    (policyBurned s.nonceBurns x → policyBurned sf.nonceBurns x) ∧
+    (policyBurned s.sessionBurns x → policyBurned sf.sessionBurns x) := by
+  induction h with
+  | nil => exact ⟨id, id⟩
+  | consAccepted hs _ ih =>
+    have hp := policy_operational_replay_persistent _ _ _ _ hs x
+    exact ⟨fun hx => ih.1 (hp.1 hx), fun hx => ih.2 (hp.2 hx)⟩
+  | consRejected hs _ ih =>
+    have he := policy_operational_rejection_state _ _ _ _ hs
+    subst he
+    exact ih
+
+/-- Compatibility theorem strengthened with the operational boundary guarantee.
+    The first conjunct retains the legacy algebraic evidence; the second concerns
+    the exported machine, whose events contain no private proof annotations. -/
+theorem fts_spn_deferred_mac_blocks_dfa_across_epochs
+    (H : Hash) {st₀ stFinal : FtsEpochGuardState}
+    {trace : List (FtsSpnInput × Option FtsSpnPrivateEvidence)}
+    (hInv₀ : FtsStateInv st₀)
+    (hTrace : ValidCustodyTrace (ftsSpnEvidenceStep H) st₀ trace stFinal) :
+    ((ftsReleasedEpochs (traceApprovedOutputs trace)).Nodup ∧
+    (∀ ep out48 ks xIn dX dG alpha,
+      FtsSpnPrivateEvidence.releasedRound48Signature ep out48 ks xIn dX dG alpha ∈ traceApprovedOutputs trace →
+        (dX = towerZero 7 ∧ out48 = evalScalarSpn48Evidence ks.keyAt xIn) ∨
+        MacKeyRecoveryWitness 7 alpha dX dG) ∧
+    (st₀.macContextPoisoned = true →
+      stFinal.macContextPoisoned = true ∧ traceApprovedOutputs trace = [])) ∧
+    (∀ (s s' : FtsWireState) (i : FtsWireInput) (ep : Nat) (sig : List UInt8),
+      ftsSpnStep H s i = .accepted s' (.releasedRound48Signature ep sig) →
+      s.phase = .macOpen ∧ s.finalResidual = ftsZeroResidual ∧ sig = ftsEncodeLanes s.candidate) := by
+  exact ⟨fts_spn_deferred_mac_blocks_dfa_across_epochs_evidence H hInv₀ hTrace, fts_wire_release_requires_final_mac H⟩
+
+/-- Compatibility theorem strengthened with the operational boundary guarantee.
+    The first conjunct retains the legacy algebraic evidence; the second concerns
+    the exported machine, whose events contain no private proof annotations. -/
+theorem policy_multiturn_velocity_and_intent_binding
+    {g₀ gFinal : StatefulPolicyGuard}
+    {trace : List (TransactionIntent × Option ApprovedIntentEnvelope)}
+    (hInitLe : g₀.accumulated_spend ≤ g₀.velocity_window_cap)
+    (hTrace : ValidCustodyTrace policyCodecEvidenceStep g₀ trace gFinal) :
+    (let approved := traceApprovedOutputs trace
+    let approvedSum := (approved.map (fun e => e.intent.amount_units)).foldr (· + ·) 0
+    g₀.accumulated_spend + approvedSum = gFinal.accumulated_spend ∧
+    gFinal.accumulated_spend ≤ g₀.velocity_window_cap ∧
+    approvedSum ≤ g₀.velocity_window_cap ∧
+    (approved.map (fun e => e.intent.nonce)).Nodup ∧
+    (∀ e ∈ approved,
+      e.intent.nonce ∉ g₀.burned_intent_nonces ∧
+      e.intent.window_id = g₀.window_id ∧
+      e.intent.policy_digest = g₀.pinned_policy_digest ∧
+      e.intent.authority_digest = g₀.pinned_authority_digest ∧
+      e.intent.recipient ∈ g₀.allowed_recipients ∧
+      e.intent.amount_units ≤ g₀.per_tx_cap ∧
+      e.canonicalBytes = encodeTransactionIntent e.intent) ∧
+    (∀ tx : TransactionIntent, decodeTransactionIntent (encodeTransactionIntent tx) = some tx) ∧
+    (∀ tx₁ tx₂ : TransactionIntent, encodeTransactionIntent tx₁ = encodeTransactionIntent tx₂ → tx₁ = tx₂)) ∧
+    (∀ (g g' : AuthenticatedPolicyState) (tx : TransactionIntent)
+      (tags : List InitiatorPeerTag) (ev : PolicyWatermarkEvent),
+      policyGuardStep g tx tags = .accepted g' ev →
+      PolicyAdmission g tx tags ∧ ev = .intentApproved tx (toCanonicalSigningBytes tx)) := by
+  exact ⟨policy_multiturn_velocity_and_intent_binding_evidence hInitLe hTrace, policy_approval_requires_authentication⟩
+
+/-- Compatibility theorem strengthened with the operational boundary guarantee.
+    The first conjunct retains the legacy algebraic evidence; the second concerns
+    the exported machine, whose events contain no private proof annotations. -/
+theorem policy_watermark_sliding_window_multiturn_sound
+    {g₀ gFinal : PolicyWatermarkGuard}
+    {trace : List (PolicyWatermarkInput × Option PolicyWatermarkEvent)}
+    (hTrace : ValidCustodyTrace policyBitmapEvidenceStep g₀ trace gFinal) :
+    (let approved := watermarkApprovedIntents (traceApprovedOutputs trace)
+    g₀.minNonceWatermark ≤ gFinal.minNonceWatermark ∧
+    (approved.map (fun p => p.1.nonce)).Nodup ∧
+    (∀ p ∈ approved,
+      g₀.minNonceWatermark ≤ p.1.nonce ∧
+      ¬ nonceConsumedByWatermark g₀ p.1.nonce ∧
+      p.2 = toCanonicalSigningBytes p.1 ∧
+      (g₀.requireAuthenticatedInitiator = true → p.1.init_mac_bytes ≠ []))) ∧
+    (∀ (g g' : AuthenticatedPolicyState) (a : PolicyWindowAuthorization) (ev : PolicyWatermarkEvent),
+      policyWatermarkGuardStep g (.advance a) = .accepted g' ev →
+      g.rules.window_id < g'.rules.window_id ∧ a.mac = policyWindowTag g a.newWindow ∧
+      g'.nonceBurns = g.nonceBurns ∧ g'.sessionBurns = g.sessionBurns) := by
+  exact ⟨policy_watermark_sliding_window_multiturn_sound_evidence hTrace, policy_authorized_rotation_preserves_replay⟩
+
+/-- Compatibility theorem strengthened with the operational boundary guarantee.
+    The first conjunct retains the legacy algebraic evidence; the second concerns
+    the exported machine, whose events contain no private proof annotations. -/
+theorem cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release (H : Hash) :
+    ((∀ (tag : List UInt8) (stFinal : CoZkCeremonyState)
+       (trace : List (CoZkCeremonyInput × Option CoZkCeremonyEvent)),
+      let st₀ : CoZkCeremonyState := { sessionTag := tag, phase := .awaitingRootFreeze, aborted := false }
+      ValidCustodyTrace (cozkOrderingEvidenceStep H) st₀ trace stFinal →
+      cozkCountHeadReleases (traceApprovedOutputs trace) ≤ 1 ∧
+      (∀ rOut dig,
+        .challengedHeadsReleased rOut dig ∈ traceApprovedOutputs trace →
+        ∃ nGates, .preOpenSacrificePassed rOut nGates ∈ traceApprovedOutputs trace)) ∧
+    (∀ (st st' : CoZkCeremonyState) (rssMsg : RssActiveOpenMsg)
+       (gateDeltas : List Tower128) (ev : CoZkCeremonyEvent)
+       (trueCheckShares : RssWord64) (corruptIdx : Nat),
+      (corruptIdx ≠ 0 → rssMsg.p0_x0 = trueCheckShares.x0 ∧ rssMsg.p0_x1 = trueCheckShares.x1) →
+      (corruptIdx ≠ 1 → rssMsg.p1_x1 = trueCheckShares.x1 ∧ rssMsg.p1_x2 = trueCheckShares.x2) →
+      (corruptIdx ≠ 2 → rssMsg.p2_x2 = trueCheckShares.x2 ∧ rssMsg.p2_x0 = trueCheckShares.x0) →
+      cozkOrderingEvidenceStep H st (.verifyPreOpenSacrifice rssMsg gateDeltas) = .accepted st' ev →
+      reconstructRssWord trueCheckShares = 0 ∧
+      ∃ root coin1 coin2,
+        st.phase = .rootFrozen root coin1 coin2 ∧
+        batchDeviationPoly gateDeltas coin1 = towerZero 7 ∧
+        batchDeviationPoly gateDeltas coin2 = towerZero 7) ∧
+    (∀ (L : Nat) (gateDeltas S : List Tower128),
+      L ≤ 2 ^ 63 →
+      S.Nodup →
+      gateDeltas.length ≤ L →
+      L + 1 ≤ S.length →
+      (∃ d ∈ gateDeltas, d ≠ towerZero 7) →
+      (S.filter (fun r => decide (batchDeviationPoly gateDeltas r = towerZero 7))).length ≤ L ∧
+      ratLe (L * L, 2 ^ 128 * 2 ^ 128) (1, 2 ^ 130))) ∧
+    (∀ (s s' : CoZkCommittedState) (root digest : List UInt8),
+      cozkPreOpenCeremonyStep H s .release = .accepted s' (.released root digest) →
+      ∃ f, s.phase = .verified f ∧ root = f.root ∧ digest = f.headsDigest) := by
+  exact ⟨cozk_pre_open_mul_sacrifice_blocks_corrupted_head_release_evidence H, cozk_release_bound_to_checked_wires H⟩
+
+/-- Compatibility theorem strengthened with the operational boundary guarantee.
+    The first conjunct retains the legacy algebraic evidence; the second concerns
+    the exported machine, whose events contain no private proof annotations. -/
+theorem hd_authorized_budget_blocks_full_rank_reconstruction
+    (H : Hash) (n dim : Nat) :
+    ((∀ {st₀ stFinal : HdFamilyState n dim}
+       {trace : List (HdZeroTestInput n dim × Option HdZeroTestPrivateEvidence)},
+      st₀.usedQueries ≤ st₀.budgetCap →
+      ValidCustodyTrace (hdZeroTestEvidenceStep H n dim) st₀ trace stFinal →
+      stFinal.usedQueries ≤ st₀.budgetCap ∧
+      (hdFrozenMaskIds (traceApprovedOutputs trace)).Nodup) ∧
+    (∀ (d1 d2 Q : Nat) (A : Fin d2 → Fin d1 → HdFq204) (tPub : Fin d2 → HdFq204)
+       (wForms : Fin Q → Fin d1 → HdFq204) (tr : Fin Q → HdFq204)
+       (wA wB : ShortMlweWitness hdCbdEta d1 d2 A tPub),
+      wA ≠ wB →
+      ∃ masksA masksB : Fin Q → HdFq204,
+        isShortHdVec hdCbdEta d1 wA.val.1 ∧ isShortHdVec hdCbdEta d2 wA.val.2 ∧
+        isShortHdVec hdCbdEta d1 wB.val.1 ∧ isShortHdVec hdCbdEta d2 wB.val.2 ∧
+        mlwePublicRelation d1 d2 A wA.val.1 wA.val.2 = tPub ∧
+        mlwePublicRelation d1 d2 A wB.val.1 wB.val.2 = tPub ∧
+        (∀ q : Fin Q,
+          HdFq204.add (evalLinearForm d1 (wForms q) wA.val.1) (masksA q) = tr q ∧
+          HdFq204.add (evalLinearForm d1 (wForms q) wB.val.1) (masksB q) = tr q)) ∧
+    (∀ (dimC budgetCap : Nat) (hCapLt : budgetCap < dimC)
+       (opened : Fin budgetCap → HdFq204) (_hShortOpen : isShortHdVec hdCbdEta budgetCap opened),
+      ∃ sA sB : Fin dimC → HdFq204,
+        sA ≠ sB ∧
+        isShortHdVec hdCbdEta dimC sA ∧
+        isShortHdVec hdCbdEta dimC sB ∧
+        (∀ i : Fin budgetCap, sA ⟨i.val, Nat.lt_trans i.isLt hCapLt⟩ = opened i) ∧
+        (∀ i : Fin budgetCap, sB ⟨i.val, Nat.lt_trans i.isLt hCapLt⟩ = opened i))) ∧
+    (∀ (d1 d2 Q : Nat) (A : Fin d2 → Fin d1 → HdFq204) (t : Fin d2 → HdFq204)
+      (s₁ s₂ : ShortMlweWitness hdCbdEta d1 d2 A t)
+      (forms : Fin Q → Fin d1 → HdFq204) (m₁ : Fin Q → HdFq204)
+      (alpha : HdFq204) (ha : alpha ≠ HdFq204.zero) (hard : Bool),
+      ∃ m₂ : Fin Q → HdFq204, ∀ inputs : List (HdMaskedInput n),
+        custodyWireTrace (hdZeroTestStep H n d1 d2 Q)
+          (hdMaskedEnroll n d1 d2 Q A t s₁ forms m₁ alpha ha hard) inputs =
+        custodyWireTrace (hdZeroTestStep H n d1 d2 Q)
+          (hdMaskedEnroll n d1 d2 Q A t s₂ forms m₂ alpha ha hard) inputs) := by
+  exact ⟨hd_authorized_budget_blocks_full_rank_reconstruction_evidence H n dim, hd_actual_wire_trace_secret_independence H n⟩
+
+/-- The actual attacker-submitted tag and context, relative to the initiator's
+    signing-oracle history. This is not global existence of an unsigned valid MAC. -/
+structure PolicyProducedForgery (g : AuthenticatedPolicyState) (tx : TransactionIntent)
+    (submitted : List InitiatorPeerTag) (oracleHistory : List (List UInt8)) where
+  peerKey : List UInt8
+  actualTag : InitiatorPeerTag
+  enrolled : g.pairwiseKeys.find? (fun p => p.1 == tx.initiator_party) =
+    some (tx.initiator_party, peerKey)
+  uniqueSubmitted : submitted.filter (fun t => t.approver == g.party) = [actualTag]
+  verifies : actualTag.tag = policyInitiatorTag peerKey g.party tx
+  freshContext : policyInitiatorAuthDigest tx ∉ oracleHistory
+
+/-- Remote acceptance checks a unique actual tag under an enrolled pairwise key.
+    Its context is either previously authorized or is the extracted MAC forgery.
+    Turning this event into a numerical bound requires the keyed-hash MAC assumption. -/
+def policy_authentication_or_produced_forgery (g : AuthenticatedPolicyState)
+    (tx : TransactionIntent) (tags : List InitiatorPeerTag) (history : List (List UInt8))
+    (remote : tx.initiator_party ≠ g.party)
+    (accepted : policyAuthenticatedInitiator g tx tags = true) :
+    PSum (policyInitiatorAuthDigest tx ∈ history)
+      (PolicyProducedForgery g tx tags history) := by
+  by_cases old : policyInitiatorAuthDigest tx ∈ history
+  · exact .inl old
+  · apply PSum.inr
+    unfold policyAuthenticatedInitiator at accepted
+    simp only [beq_iff_eq, remote, ↓reduceIte] at accepted
+    cases hk : g.pairwiseKeys.find? (fun p => p.1 == tx.initiator_party) with
+    | none => simp [hk] at accepted
+    | some pair =>
+      rcases pair with ⟨party, key⟩
+      have hp : party = tx.initiator_party := by
+        have ht := List.find?_some hk
+        exact eq_of_beq ht
+      subst party
+      simp only [hk] at accepted
+      cases ht : tags.filter (fun t => t.approver == g.party) with
+      | nil => simp [ht] at accepted
+      | cons tag rest =>
+        cases rest with
+        | nil =>
+          simp only [ht] at accepted
+          exact ⟨key, tag, hk, ht, eq_of_beq accepted, old⟩
+        | cons other rest => simp [ht] at accepted
+
+/-- An approving step burns the new identifier as well as preserving older ones. -/
+theorem policyBurn_marks (cap : Nat) (s : PolicyBurnSet) (v : Nat) :
+    policyBurned (policyBurn cap s v) v := by
+  have hm := (policyInsertSorted_mem v v s.values).2 (Or.inl rfl)
+  unfold policyBurn
+  split
+  · exact Or.inr hm
+  · cases he : policyInsertSorted v s.values with
+    | nil => rw [he] at hm; cases hm
+    | cons x xs =>
+      rw [he] at hm
+      rcases List.mem_cons.mp hm with hv | hv
+      · subst v
+        exact Or.inl ⟨_, rfl, Nat.le_max_right _ _⟩
+      · exact Or.inr hv
+
+/-- #tooth: either a burned nonce OR a burned session blocks the production path. -/
+theorem tooth_policy_session_replay_rejected (s : AuthenticatedPolicyState)
+    (tx : TransactionIntent) (tags : List InitiatorPeerTag)
+    (h : policyBurned s.sessionBurns (ofLE tx.session_id.reverse)) :
+    policyGuardStep s tx tags = .rejected s .unauthenticatedInitiator := by
+  have hn : ¬ PolicyAdmission s tx tags := by
+    intro ha
+    rcases ha with ⟨_, _, _, _, _, _, _, _, _, _, _, _, hn, _⟩
+    exact hn h
+  simp [policyGuardStep, hn]
+
+/-- #tooth: the 0 versus 2^256 nonce encoding collision is outside the
+    accepted signing domain, even when all authentication fields are supplied. -/
+theorem tooth_policy_overwide_nonce_rejected (g : AuthenticatedPolicyState)
+    (tx : TransactionIntent) (tags : List InitiatorPeerTag) (hn : 256 ^ 32 ≤ tx.nonce) :
+    policyGuardStep g tx tags = .rejected g .unauthenticatedInitiator := by
+  have hfit : txFitsWireWidths { tx with message_digest := List.replicate 32 0 } = false := by
+    simp [txFitsWireWidths, txScalarsFitWire, Nat.not_lt.mpr hn]
+  have hnot : ¬ PolicyAdmission g tx tags := by
+    intro h
+    have hf := h.1.1
+    rw [hfit] at hf
+    cases hf
+  simp [policyGuardStep, hnot]
+
+/-! ### Compositional exports: operational machines only -/
+
+def ftsSpnPartyMachine (H : Hash) :
+    PartyMachine FtsOperationalGuard FtsOperationalInput FtsSpnEvent :=
+  PartyMachine.ofCustodyStep (ftsSpnEpochStep H)
+
+def hdZeroTestPartyMachine (H : Hash) (n d1 d2 Q : Nat) :
+    PartyMachine (HdMaskedState n d1 d2 Q) (HdMaskedInput n) HdZeroTestEvent :=
+  PartyMachine.ofCustodyStep (hdZeroTestStep H n d1 d2 Q)
+
+def policyGuardPartyMachine :
+    PartyMachine AuthenticatedPolicyState AuthenticatedPolicyInput PolicyWatermarkEvent :=
+  PartyMachine.ofCustodyStep policyWatermarkGuardStep
+
+def policyWatermarkGuardPartyMachine :
+    PartyMachine AuthenticatedPolicyState AuthenticatedPolicyInput PolicyWatermarkEvent :=
+  PartyMachine.ofCustodyStep policyWatermarkGuardStep
+
+def cozkCeremonyPartyMachine (H : Hash) :
+    PartyMachine CoZkCommittedState CoZkCommittedInput CoZkPublicEvent :=
+  PartyMachine.ofCustodyStep (cozkPreOpenCeremonyStep H)
+
+end Qsag
+end

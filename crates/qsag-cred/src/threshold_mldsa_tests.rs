@@ -1266,15 +1266,18 @@ fn durable_nonce_restart_recovers_epoch_and_rejects_both_replay_keys() {
         t: Vec::new(),
     };
     let key_id = pack.policy_signing_key_id();
+    let mac_key = [0x5E; 32];
     {
-        let mut store = FsNonceBurnStore::create(&path, key_id).unwrap();
+        let mut store = FsNonceBurnStore::create(&path, key_id, mac_key).unwrap();
         assert!(store.reserve(1, 7, &[3; 32], 2));
         assert!(!store.reserve(1, 7, &[4; 32], 3));
         assert!(!store.reserve(1, 8, &[3; 32], 2));
     }
-    assert!(FsNonceBurnStore::open(&path, [0; 32]).is_err());
+    assert!(FsNonceBurnStore::open(&path, [0; 32], mac_key).is_err());
+    assert!(FsNonceBurnStore::open(&path, key_id, [0x99; 32]).is_err());
+    let snap_gen1 = std::fs::read(&path).unwrap();
     {
-        let mut store = FsNonceBurnStore::open(&path, key_id).unwrap();
+        let mut store = FsNonceBurnStore::open(&path, key_id, mac_key).unwrap();
         let mut restarted = ThresholdMlDsaSignerShare {
             party_id: 1,
             pack,
@@ -1290,8 +1293,22 @@ fn durable_nonce_restart_recovers_epoch_and_rejects_both_replay_keys() {
         restarted.recover_epoch_from_store(&store).unwrap();
         assert_eq!(restarted.next_epoch, 9);
     }
-    let store = FsNonceBurnStore::open(&path, key_id).unwrap();
+    let store = FsNonceBurnStore::open_at_least(&path, key_id, mac_key, 3).unwrap();
+    let latest_gen = store.generation();
+    assert_eq!(latest_gen, 3);
     assert_eq!(store.next_epoch(&key_id, 1).unwrap(), 9);
     drop(store);
+
+    // Offline attacker truncates rows and zeroes `count` without the MAC key -> rejected!
+    let mut raw = std::fs::read(&path).unwrap();
+    let mut tampered = raw[..96].to_vec();
+    tampered[56..64].copy_from_slice(&0u64.to_le_bytes());
+    std::fs::write(&path, &tampered).unwrap();
+    assert!(FsNonceBurnStore::open(&path, key_id, mac_key).is_err());
+
+    // Offline attacker replays valid authenticated historical snapshot -> rejected by floor!
+    std::fs::write(&path, &snap_gen1).unwrap();
+    assert!(FsNonceBurnStore::open_at_least(&path, key_id, mac_key, latest_gen).is_err());
+    raw.clear();
     std::fs::remove_dir_all(dir).unwrap();
 }

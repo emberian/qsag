@@ -59,8 +59,25 @@ Constructive (`0 Classical.choice`) Lean 4.35 formalization closing:
      `w₁ = HighBits(A·y) = HighBits(A·z - c·t)`. Paired with `#tooth`
      `tooth_mldsa44_low_bits_margin_omitted_leaks_s2` (a bare `γ₂` bound lets `c·s₂` flip
      `HighBits`).
-   - Scope: accepted attempts for a fixed challenge. What a REJECTED attempt's published `w₁`
-     reveals, and the dependence of the challenge on `w₁` through the hash, are outside this file.
+   - §3b works in the ring `ℤ_q[X]/(X^n + 1)` (`polyMul`, proved commutative and associative
+     with unit): `mldsa44_challenge_times_secret_le_beta` derives `‖c·s‖∞ ≤ 78` from
+     `c ∈ B_39`, `‖s‖∞ ≤ 2`; `mldsa44_ring_key_relation` derives the key relation from
+     `t ≡ A·s₁ + s₂`; `mldsa44_ring_joint_transcript_simulation` is the simulation statement for
+     ring vectors.
+   - Rejected attempts: `lin_rejected_commitment_count_secret_independent` (the `w₁` published
+     by an abort has the same count under any two secrets consistent with the public data).
+   - `c = H(μ, w₁)` in the lazily sampled random-oracle model: `roAttempt_reprogramming_bound`
+     (`|log| · M` per attempt, `M` the largest commitment fibre) and
+     `multiAttempt_reprogramming_bound` (union bound over attempts and interleaved adversary
+     queries).
+4. **Welds and random-oracle hiding added to §1 and §2**:
+   - §1 is welded onto `Qsag.PosixCrashWal`: `posix_crash_during_slot_write_refines`,
+     `posix_media_damage_refines`, `posix_device_restore_below_anchor_fails_closed`. The crash
+     modes gain `idleSlotDamaged`; `AdvancePolicyWindow` stages and `FlushPolicyWindowWal`
+     flushes, with crashes permitted in between.
+   - §2b: `cutTheHash_rom_commit_hiding_sd_bound` gives statistical distance
+     `q_RO / 2^256` for `commit = RO(domain ‖ y ‖ mac ‖ blind)` against a rushing oracle
+     adversary, paired with `tooth_rom_commit_without_framed_blind_exceeds_bound`.
 -/
 
 public import Qsag.Constructive
@@ -877,6 +894,235 @@ theorem whole_device_rollback_below_anchor_fails_closed {S : Type} (wal : TwoSlo
   refine ⟨?_, ?_⟩
   · simp [recoverTwoSlotWal, h0, h1]
   · simp [walRecoverable, h0, h1]
+
+/-! ### Weld Onto `PosixCrashWal`: the Two Slot Files on the Page-Cache / Drive-Cache / NAND Machine
+
+The crash behaviors above are not postulated: they are the images, under the abstraction below,
+of `CrashStep` (kernel panic, power loss with per-sector tears of in-flight writes) and of
+`MediaDamageInode` (bit-rot of settled blocks) on the two slot inodes of `PosixFsState`. -/
+
+/-- Where one ledger lives on the device. `slotView bytes` is `read_slot` of `durable_ledger.rs`:
+    MAC check, parse and generation-parity check, returning the authenticated
+    `(generation, payload)` or nothing. -/
+structure PosixTwoSlotLayout (S : Type) where
+  evenIno : InodeId
+  oddIno : InodeId
+  slotView : List UInt8 → Option (Nat × S)
+
+/-- The abstract slot a recovery reads out of on-media bytes. -/
+def slotBytesView {S : Type} (view : List UInt8 → Option (Nat × S)) :
+    Option (List UInt8) → Option (WalSlot S)
+  | none => none
+  | some bs =>
+    match view bs with
+    | none => none
+    | some (g, p) => some { generation := g, payload := p, macValid := true }
+
+/-- Two slots that no recovery can tell apart (an unauthenticated slot equals a missing one). -/
+def SlotEquiv {S : Type} (s t : Option (WalSlot S)) : Prop :=
+  ∀ a par, walSlotUsable a par s = walSlotUsable a par t
+
+/-- The abstract ledger `wal` describes the NAND contents of the two slot inodes of `fs`. -/
+structure PosixRefinesWal {S : Type} (L : PosixTwoSlotLayout S) (fs : PosixFsState)
+    (wal : TwoSlotWal S) : Prop where
+  even_ok : SlotEquiv wal.slotEven
+    (slotBytesView L.slotView (assocLookup fs.nand.fileBlocks L.evenIno))
+  odd_ok : SlotEquiv wal.slotOdd
+    (slotBytesView L.slotView (assocLookup fs.nand.fileBlocks L.oddIno))
+
+/-- Recovery of the abstract ledger is recovery from the device bytes. -/
+theorem posixRefines_recover {S : Type} {L : PosixTwoSlotLayout S} {fs : PosixFsState}
+    {wal : TwoSlotWal S} (hRef : PosixRefinesWal L fs wal) :
+    recoverTwoSlotWal wal =
+      recoverTwoSlotWal
+        { wal with
+          slotEven := slotBytesView L.slotView (assocLookup fs.nand.fileBlocks L.evenIno)
+          slotOdd := slotBytesView L.slotView (assocLookup fs.nand.fileBlocks L.oddIno) } := by
+  simp only [recoverTwoSlotWal, hRef.even_ok _ _, hRef.odd_ok _ _]
+
+private theorem slotEquiv_invalid_none {S : Type} (g : Nat) (p : S) :
+    SlotEquiv (some { generation := g, payload := p, macValid := false })
+      (none : Option (WalSlot S)) := by
+  intro a par
+  simp [walSlotUsable]
+
+/-- A slot inode ends up holding `bytes` whose view is the slot `(g, p, macOk)`; the other slot
+    inode is untouched. Then the device refines the abstract slot write. -/
+theorem posixRefines_slot_write {S : Type} {L : PosixTwoSlotLayout S} {fs crashed : PosixFsState}
+    {wal : TwoSlotWal S} (hRef : PosixRefinesWal L fs wal)
+    (g : Nat) (p : S) (macOk : Bool) (bytes : List UInt8)
+    (hSlot : SlotEquiv (some { generation := g, payload := p, macValid := macOk })
+      (slotBytesView L.slotView (some bytes)))
+    (hEven : assocLookup crashed.nand.fileBlocks L.evenIno =
+      if g % 2 = 0 then some bytes else assocLookup fs.nand.fileBlocks L.evenIno)
+    (hOdd : assocLookup crashed.nand.fileBlocks L.oddIno =
+      if g % 2 = 0 then assocLookup fs.nand.fileBlocks L.oddIno else some bytes) :
+    PosixRefinesWal L crashed (writeDurableWalSlot wal g p macOk) := by
+  by_cases hPar : g % 2 = 0
+  · simp only [hPar, ↓reduceIte] at hEven hOdd
+    simp only [writeDurableWalSlot, hPar, ↓reduceIte]
+    exact ⟨by rw [hEven]; exact hSlot, by rw [hOdd]; exact hRef.odd_ok⟩
+  · simp only [hPar, ↓reduceIte] at hEven hOdd
+    simp only [writeDurableWalSlot, hPar, ↓reduceIte]
+    exact ⟨by rw [hEven]; exact hRef.even_ok, by rw [hOdd]; exact hSlot⟩
+
+/-- **A crash during a slot write is one of the abstract crash behaviors
+    (`posix_crash_during_slot_write_refines`)**: the ledger has staged `(g, p)`; on the device the
+    slot inode of parity `g` holds settled bytes `old` and has an in-flight write of `new`
+    (in the page cache or the drive cache) with `slotView new = (g, p)`; the other slot inode
+    has nothing pending. After ANY `CrashStep` (kernel panic, or power loss under any sector tear
+    mask), the device refines `crashRecoverWal mode` for `mode` one of `dropVolatile`,
+    `tornInactiveWrite`, `flushedBeforePowerLoss`. The only escape is the stated physical event:
+    the torn sectors form bytes different from both `old` and `new` that nevertheless pass the
+    slot MAC and parity check. -/
+theorem posix_crash_during_slot_write_refines {S : Type} (L : PosixTwoSlotLayout S)
+    {fs crashed : PosixFsState} {wal : TwoSlotWal S} (hRef : PosixRefinesWal L fs wal)
+    {g : Nat} {p : S} (hStage : wal.volatileStage = some (g, p))
+    {target other : InodeId} {old new : List UInt8}
+    (hLayout : (g % 2 = 0 ∧ target = L.evenIno ∧ other = L.oddIno) ∨
+      (¬ g % 2 = 0 ∧ target = L.oddIno ∧ other = L.evenIno))
+    (hOld : assocLookup fs.nand.fileBlocks target = some old)
+    (hNewView : L.slotView new = some (g, p))
+    (hOtherPage : assocLookup fs.kernel.pageCache.dirtyFiles other = none)
+    (hOtherDrive : assocLookup fs.driveCache.cachedFiles other = none)
+    (hCrash : CrashStep fs crashed) :
+    (∃ mode, (mode = WalCrashBehavior.dropVolatile ∨ mode = WalCrashBehavior.tornInactiveWrite ∨
+        mode = WalCrashBehavior.flushedBeforePowerLoss) ∧
+      PosixRefinesWal L crashed (crashRecoverWal mode wal)) ∨
+    (∃ torn, torn ≠ old ∧ torn ≠ new ∧
+      assocLookup crashed.nand.fileBlocks target = some torn ∧
+      (L.slotView torn).isSome = true) := by
+  have hOtherSame := (syncedInode_immune_to_crashStep hOtherPage hOtherDrive hCrash).1
+  have hClass : ∀ bytes, assocLookup crashed.nand.fileBlocks target = some bytes →
+      (∃ mode, (mode = WalCrashBehavior.dropVolatile ∨
+          mode = WalCrashBehavior.tornInactiveWrite ∨
+          mode = WalCrashBehavior.flushedBeforePowerLoss) ∧
+        PosixRefinesWal L crashed (crashRecoverWal mode wal)) ∨
+      (∃ torn, torn ≠ old ∧ torn ≠ new ∧
+        assocLookup crashed.nand.fileBlocks target = some torn ∧
+        (L.slotView torn).isSome = true) := by
+    intro bytes hT
+    have hEvenOdd :
+        (assocLookup crashed.nand.fileBlocks L.evenIno =
+          if g % 2 = 0 then some bytes else assocLookup fs.nand.fileBlocks L.evenIno) ∧
+        (assocLookup crashed.nand.fileBlocks L.oddIno =
+          if g % 2 = 0 then assocLookup fs.nand.fileBlocks L.oddIno else some bytes) := by
+      rcases hLayout with ⟨hPar, rfl, rfl⟩ | ⟨hPar, rfl, rfl⟩
+      · simp only [hPar, ↓reduceIte]
+        exact ⟨hT, hOtherSame⟩
+      · simp only [hPar, ↓reduceIte]
+        exact ⟨hOtherSame, hT⟩
+    by_cases hNew : bytes = new
+    · left
+      refine ⟨.flushedBeforePowerLoss, Or.inr (Or.inr rfl), ?_⟩
+      have hSlot : SlotEquiv (some { generation := g, payload := p, macValid := true })
+          (slotBytesView L.slotView (some bytes)) := by
+        intro a par
+        simp only [slotBytesView, hNew, hNewView]
+      simp only [crashRecoverWal, hStage]
+      exact posixRefines_slot_write hRef g p true bytes hSlot hEvenOdd.1 hEvenOdd.2
+    · cases hV : L.slotView bytes with
+      | none =>
+        left
+        refine ⟨.tornInactiveWrite, Or.inr (Or.inl rfl), ?_⟩
+        have hSlot : SlotEquiv (some { generation := g, payload := p, macValid := false })
+            (slotBytesView L.slotView (some bytes)) := by
+          intro a par
+          simp only [slotBytesView, hV]
+          exact slotEquiv_invalid_none g p a par
+        simp only [crashRecoverWal, hStage]
+        exact posixRefines_slot_write hRef g p false bytes hSlot hEvenOdd.1 hEvenOdd.2
+      | some v =>
+        by_cases hOldEq : bytes = old
+        · left
+          refine ⟨.dropVolatile, Or.inl rfl, ?_⟩
+          show PosixRefinesWal L crashed { wal with volatileStage := none }
+          rcases hLayout with ⟨_, rfl, rfl⟩ | ⟨_, rfl, rfl⟩
+          · exact ⟨by rw [hT, hOldEq, ← hOld]; exact hRef.even_ok,
+              by rw [hOtherSame]; exact hRef.odd_ok⟩
+          · exact ⟨by rw [hOtherSame]; exact hRef.even_ok,
+              by rw [hT, hOldEq, ← hOld]; exact hRef.odd_ok⟩
+        · right
+          exact ⟨bytes, hOldEq, hNew, hT, by rw [hV]; rfl⟩
+  rcases crashStep_inode_outcome hOld hCrash with h1 | ⟨dc, _, h2⟩ | ⟨pending, mask, _, h3⟩
+  · exact hClass old h1
+  · exact hClass dc h2
+  · exact hClass _ h3
+
+/-- **Bit-rot of a settled slot is `idleSlotDamaged` or `tornActiveSlot`
+    (`posix_media_damage_refines`)**: replacing the NAND bytes of the idle (non-active) slot
+    inode by bytes that do not authenticate refines `idleSlotDamaged`, which never fails the
+    ledger; doing so to the active slot inode refines `tornActiveSlot`. -/
+theorem posix_media_damage_refines {S : Type} (L : PosixTwoSlotLayout S) {fs : PosixFsState}
+    {wal : TwoSlotWal S} (hRef : PosixRefinesWal L fs wal) (hDistinct : L.evenIno ≠ L.oddIno)
+    (garbage : List UInt8) (hView : L.slotView garbage = none) :
+    PosixRefinesWal L
+      (MediaDamageInode fs (if activeWalGen wal % 2 = 0 then L.oddIno else L.evenIno) garbage)
+      (crashRecoverWal .idleSlotDamaged wal) ∧
+    PosixRefinesWal L
+      (MediaDamageInode fs (if activeWalGen wal % 2 = 0 then L.evenIno else L.oddIno) garbage)
+      (crashRecoverWal .tornActiveSlot wal) := by
+  have hInvalid : ∀ s : Option (WalSlot S),
+      SlotEquiv (invalidateWalSlot s) (slotBytesView L.slotView (some garbage)) := by
+    intro s a par
+    rw [walSlotUsable_invalidate]
+    simp only [slotBytesView, hView]
+    rfl
+  have hNe' : L.oddIno ≠ L.evenIno := fun h => hDistinct h.symm
+  by_cases hPar : activeWalGen wal % 2 = 0
+  · simp only [crashRecoverWal, damageIdleWalSlot, tearActiveWalSlot, hPar, ↓reduceIte]
+    refine ⟨⟨?_, ?_⟩, ⟨?_, ?_⟩⟩
+    · simp only [mediaDamageInode_lookup, hDistinct, ↓reduceIte]; exact hRef.even_ok
+    · simp only [mediaDamageInode_lookup, ↓reduceIte]; exact hInvalid _
+    · simp only [mediaDamageInode_lookup, ↓reduceIte]; exact hInvalid _
+    · simp only [mediaDamageInode_lookup, hNe', ↓reduceIte]; exact hRef.odd_ok
+  · simp only [crashRecoverWal, damageIdleWalSlot, tearActiveWalSlot, hPar, ↓reduceIte]
+    refine ⟨⟨?_, ?_⟩, ⟨?_, ?_⟩⟩
+    · simp only [mediaDamageInode_lookup, ↓reduceIte]; exact hInvalid _
+    · simp only [mediaDamageInode_lookup, hNe', ↓reduceIte]; exact hRef.odd_ok
+    · simp only [mediaDamageInode_lookup, hDistinct, ↓reduceIte]; exact hRef.even_ok
+    · simp only [mediaDamageInode_lookup, ↓reduceIte]; exact hInvalid _
+
+/-- **Whole-device snapshot restore below the anchor (`posix_device_restore_below_anchor_fails_closed`)**:
+    replace the ENTIRE filesystem state by an image whose two slot files authenticate only to
+    generations below the externally held `anchorGen`. The ledger read from that image does not
+    open. (A restore to a generation at or above the anchor is the lagging-checkpoint case and
+    is not excluded by the anchor; see the limits in the summary.) -/
+theorem posix_device_restore_below_anchor_fails_closed {S : Type} (L : PosixTwoSlotLayout S)
+    (image : PosixFsState) (wal : TwoSlotWal S)
+    (hEven : ∀ bs g p, assocLookup image.nand.fileBlocks L.evenIno = some bs →
+      L.slotView bs = some (g, p) → g < wal.anchorGen)
+    (hOdd : ∀ bs g p, assocLookup image.nand.fileBlocks L.oddIno = some bs →
+      L.slotView bs = some (g, p) → g < wal.anchorGen) :
+    PosixRefinesWal L image
+      { wal with
+        slotEven := slotBytesView L.slotView (assocLookup image.nand.fileBlocks L.evenIno)
+        slotOdd := slotBytesView L.slotView (assocLookup image.nand.fileBlocks L.oddIno)
+        volatileStage := none } ∧
+    walRecoverable
+      { wal with
+        slotEven := slotBytesView L.slotView (assocLookup image.nand.fileBlocks L.evenIno)
+        slotOdd := slotBytesView L.slotView (assocLookup image.nand.fileBlocks L.oddIno)
+        volatileStage := none } = false := by
+  have hGen : ∀ (ino : InodeId),
+      (∀ bs g p, assocLookup image.nand.fileBlocks ino = some bs →
+        L.slotView bs = some (g, p) → g < wal.anchorGen) →
+      ∀ s, slotBytesView L.slotView (assocLookup image.nand.fileBlocks ino) = some s →
+        s.generation < wal.anchorGen := by
+    intro ino h s hs
+    cases hLk : assocLookup image.nand.fileBlocks ino with
+    | none => rw [hLk] at hs; cases hs
+    | some bs =>
+      rw [hLk] at hs
+      cases hV : L.slotView bs with
+      | none => simp only [slotBytesView, hV] at hs; cases hs
+      | some gp =>
+        obtain ⟨g, p⟩ := gp
+        simp only [slotBytesView, hV, Option.some.injEq] at hs
+        rw [← hs]
+        exact h bs g p hLk hV
+  exact ⟨⟨fun _ _ => rfl, fun _ _ => rfl⟩,
+    (whole_device_rollback_below_anchor_fails_closed wal _ _ (hGen _ hEven) (hGen _ hOdd)).2⟩
 
 /-! ### Durable Payloads of the Five Host Ledgers -/
 
@@ -2394,6 +2640,60 @@ theorem witness_torn_checkpointed_leaf_fails_closed :
       none := by decide
   exact ⟨sampleFailClosedTrace, sampleFailClosedFinalState,
     validMultiLedgerTrace_of_runTraceWith _ _ _ hRun, hDead, hLen, hRefuse⟩
+
+private def sampleWindowRotationCrashTrace : List MultiLedgerEvent := [
+  .AdvancePolicyWindow 1,
+  .PowerLossCrash .dropVolatile .tornInactiveWrite .dropVolatile .idleSlotDamaged,
+  .AdvancePolicyWindow 1,
+  .FlushPolicyWindowWal
+]
+
+private def sampleWindowRotationMidState : MultiLedgerHostState :=
+  (runTraceWith stepMultiLedgerHost (initMultiLedgerHostState 100)
+    (sampleWindowRotationCrashTrace.take 2)).getD (initMultiLedgerHostState 100)
+
+private def sampleWindowRotationFinalState : MultiLedgerHostState :=
+  (runTraceWith stepMultiLedgerHost (initMultiLedgerHostState 100)
+    sampleWindowRotationCrashTrace).getD (initMultiLedgerHostState 100)
+
+/-- **Crash inside a policy-window rotation.** `AdvancePolicyWindow` only stages the new window;
+    `FlushPolicyWindowWal` makes it durable. A power loss between the two that tears the staged
+    write (while bit-rot hits the idle slot of the leaf ledger) leaves the host operational in
+    the OLD window; repeating the rotation completes it. -/
+theorem witness_policy_window_rotation_crash_mid_step :
+    ∃ (trace : List MultiLedgerEvent) (midState finalState : MultiLedgerHostState),
+      ValidMultiLedgerTrace (initMultiLedgerHostState 100) (trace.take 2) midState ∧
+      hostOperational midState = true ∧
+      (activeWalPayload midState.policyWindowLedger).currentWindow = 0 ∧
+      ValidMultiLedgerTrace (initMultiLedgerHostState 100) trace finalState ∧
+      hostOperational finalState = true ∧
+      (activeWalPayload finalState.policyWindowLedger).currentWindow = 1 := by
+  have hMid : runTraceWith stepMultiLedgerHost (initMultiLedgerHostState 100)
+      (sampleWindowRotationCrashTrace.take 2) = some sampleWindowRotationMidState := by decide
+  have hRun : runTraceWith stepMultiLedgerHost (initMultiLedgerHostState 100)
+      sampleWindowRotationCrashTrace = some sampleWindowRotationFinalState := by decide
+  exact ⟨sampleWindowRotationCrashTrace, sampleWindowRotationMidState,
+    sampleWindowRotationFinalState,
+    validMultiLedgerTrace_of_runTraceWith _ _ _ hMid, by decide, by decide,
+    validMultiLedgerTrace_of_runTraceWith _ _ _ hRun, by decide, by decide⟩
+
+/-- The premises of `posix_crash_during_slot_write_refines` are jointly satisfiable: a device
+    whose odd slot inode has an in-flight write of an authenticating generation-`1` snapshot,
+    and a power loss that tears it. -/
+theorem witness_posix_slot_write_crash_inhabited :
+    ∃ (L : PosixTwoSlotLayout Unit) (fs crashed : PosixFsState) (wal : TwoSlotWal Unit),
+      PosixRefinesWal L fs wal ∧ wal.volatileStage = some (1, ()) ∧
+      assocLookup fs.nand.fileBlocks L.oddIno = some [] ∧
+      assocLookup fs.kernel.pageCache.dirtyFiles L.oddIno = some [0x01] ∧
+      L.slotView [0x01] = some (1, ()) ∧ CrashStep fs crashed :=
+  ⟨{ evenIno := 1, oddIno := 2, slotView := fun bs => if bs = [0x01] then some (1, ()) else none },
+   { kernel := { pageCache := { dirtyFiles := [(2, [0x01])] } }
+     nand := { fileBlocks := [(1, []), (2, [])], nextInode := 3 } },
+   _,
+   { slotEven := none, slotOdd := none, anchorGen := 0, genesisPayload := (),
+     volatileStage := some (1, ()) },
+   ⟨fun _ _ => rfl, fun _ _ => rfl⟩, rfl, rfl, rfl, rfl,
+   CrashStep.powerLoss .revertToNand (fun _ => SectorTearMask.dropAllVolatile) _⟩
 
 /-! ## §2. Cut-the-Hash 2-Phase Transcript & Selective-Abort Statistical Independence -/
 
@@ -4888,8 +5188,7 @@ theorem intDot_delta : ∀ (n : Nat) (c : Fin n → Int) (k : Fin n),
     show c ⟨0, Nat.zero_lt_succ n⟩ * (if (0 : Nat) = 0 then 1 else 0) +
       intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
         (fun j => if (0 : Nat) = j.1 + 1 then (1 : Int) else 0) = c ⟨0, hk⟩
-    rw [hz]
-    simp
+    rw [hz, ite_eq_left rfl, Int.mul_one, Int.add_zero]
   | n + 1, c, ⟨k + 1, hk⟩ => by
     have ih : intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
         (fun j => if k = j.1 then (1 : Int) else 0) = c ⟨k + 1, hk⟩ :=
@@ -4898,12 +5197,14 @@ theorem intDot_delta : ∀ (n : Nat) (c : Fin n → Int) (k : Fin n),
         (fun j => if k + 1 = j.1 + 1 then (1 : Int) else 0) =
         intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
         (fun j => if k = j.1 then (1 : Int) else 0) :=
-      intDot_congr _ (fun j => by simp)
+      intDot_congr _ (fun j => by
+        by_cases h : k = j.1
+        · rw [ite_eq_left h, ite_eq_left (congrArg (· + 1) h)]
+        · rw [ite_eq_right h, ite_eq_right (fun e => h (Nat.succ.inj e))])
     show c ⟨0, Nat.zero_lt_succ n⟩ * (if k + 1 = 0 then 1 else 0) +
       intDot n (fun j => c ⟨j.1 + 1, Nat.succ_lt_succ j.2⟩)
         (fun j => if k + 1 = j.1 + 1 then (1 : Int) else 0) = c ⟨k + 1, hk⟩
-    rw [hc, ih]
-    simp
+    rw [hc, ih, ite_eq_right (Nat.succ_ne_zero k), Int.mul_zero, Int.zero_add]
 
 theorem shiftPow_one_apply {n : Nat} : ∀ (i : Nat), i < n → ∀ k : Fin n,
     shiftPow i (polyOne : Fin n → Int) k = if k.val = i then 1 else 0
@@ -4915,14 +5216,16 @@ theorem shiftPow_one_apply {n : Nat} : ∀ (i : Nat), i < n → ∀ k : Fin n,
     · simp only [negShift, hk, ↓reduceIte]
       rw [ih]
       have h1 : ¬ (n - 1 = i) := by omega
-      simp [h1]
+      have h2 : ¬ (0 = i + 1) := by omega
+      simp only [h1, h2, ↓reduceIte, Int.neg_zero]
     · simp only [negShift, hk, ↓reduceIte]
       rw [ih]
       by_cases h : k.val = i + 1
       · have h2 : k.val - 1 = i := by omega
-        simp [h]
+        simp only [h2, ↓reduceIte]
+        rw [ite_eq_left h]
       · have h2 : ¬ (k.val - 1 = i) := by omega
-        simp [h, h2]
+        simp only [h2, h, ↓reduceIte]
 
 /-- `c · 1 = c`. -/
 theorem polyMul_one {n : Nat} (c : Fin n → Int) : polyMul c polyOne = c := by
@@ -5376,10 +5679,15 @@ theorem roLookup_none_of_not_mem {X T : Type} [DecidableEq X] :
     simp only [roLookup, hx, ↓reduceIte]
     exact roLookup_none_of_not_mem rest x hr
 
-/-- Masks whose commitment point lies in a given key set, when every commitment value has at
-    most `M` preimages (commitment min-entropy `log₂(N / M)`). -/
+/-- Commitment min-entropy as a count: every commitment value has at most `M` of the `N` masks
+    as preimages (min-entropy `log₂(N / M)`). For ML-DSA this is a property of the public matrix
+    `A` (the fibres of `y ↦ HighBits(A·y)`); it is a hypothesis here, not derived. -/
+def CommitFiberBound {N : Nat} {X : Type} [DecidableEq X] (cp : Fin N → X) (M : Nat) : Prop :=
+  ∀ x, finSum N (fun i => if cp i = x then 1 else 0) ≤ M
+
+/-- Masks whose commitment point lies in a given key set. -/
 theorem finSum_fiber_mem_le {N : Nat} {X : Type} [DecidableEq X] (cp : Fin N → X) (M : Nat)
-    (hFib : ∀ x, finSum N (fun i => if cp i = x then 1 else 0) ≤ M) :
+    (hFib : CommitFiberBound cp M) :
     ∀ keys : List X, finSum N (fun i => if cp i ∈ keys then 1 else 0) ≤ keys.length * M
   | [] => by
     have h0 : finSum N (fun i => if cp i ∈ ([] : List X) then 1 else 0) = finSum N (fun _ => 0) :=
@@ -5434,7 +5742,7 @@ theorem roAttempt_real_eq_prog_of_fresh {N : Nat} {X Ch Out : Type} [DecidableEq
     `N`: statistical distance at most `|log| · 2^(-α)` for commitment min-entropy `α`. -/
 theorem roAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableEq X]
     (cp : Fin N → X) (outcome : Fin N → Ch → Out) (M : Nat)
-    (hFib : ∀ x, finSum N (fun i => if cp i = x then 1 else 0) ≤ M)
+    (hFib : CommitFiberBound cp M)
     (log : List (X × Ch)) (c : Ch) (D : Out × List (X × Ch) → Bool) :
     natAbsDiff
       (finSum N (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
@@ -5519,7 +5827,7 @@ private theorem natAbsDiff_self (a : Nat) : natAbsDiff a a = 0 := by
     `(Σ_a |log_a|) · M / N`, the sum over attempts of the per-attempt collision probability. -/
 theorem multiAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableEq X]
     (cp : Fin N → X) (outcome : Fin N → Ch → Out) (M : Nat)
-    (hFib : ∀ x, finSum N (fun i => if cp i = x then 1 else 0) ≤ M)
+    (hFib : CommitFiberBound cp M)
     (advStep : List Out → List (X × Ch) → List (X × Ch)) (qH : Nat)
     (hAdv : ∀ ts log, (advStep ts log).length ≤ log.length + qH) (D : List Out → Bool) :
     ∀ (k : Nat) (cs : List Ch) (log : List (X × Ch)) (acc : List Out) (ℓ : Nat),
@@ -5620,6 +5928,154 @@ theorem multiAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableE
     rw [Nat.pow_succ]
     omega
 
+/-! ### `#tooth` and Inhabitedness Witnesses for §2b and §3b -/
+
+/-- The hypotheses of the hiding bound are inhabited: a framed 256-bit blind and a one-query
+    adversary. -/
+theorem witness_rom_commit_hiding_inhabited :
+    ∃ (spec : CutTheHashRomSpec Unit Unit Unit Unit (BitVec 8 × BitVec 8 × BitVec 256) 2 8 256)
+      (adv : RushingRoAdversary Unit (BitVec 8 × BitVec 8 × BitVec 256) (BitVec 256)
+        Unit Unit Bool 2 8),
+      spec.BlindFramed ∧ adv.QueryBound 0 0 1 :=
+  ⟨{ wireRingSecret := fun _ _ _ => ⟨0, Nat.zero_lt_succ 1⟩
+     wireXorSecret := fun _ _ _ _ => 0
+     yShareHonest := fun _ _ _ _ => 0
+     macShareHonest := fun _ _ _ _ => 0
+     commitPoint := fun y mac b => (y, mac, b)
+     blindOf := fun x => x.2.2 },
+   { reactToRingOpen := fun _ => .done ((), ())
+     reactToAllOpens := fun _ _ => .done ((), ())
+     decideAbort := fun _ t => .ask (0, 0, 0) (fun a => .done (a == t)) },
+   fun _ _ _ => rfl, fun _ => True.intro, fun _ _ => True.intro, fun _ _ _ => True.intro⟩
+
+private def toothRomSpec : CutTheHashRomSpec Unit Unit Unit Unit (BitVec 1 × BitVec 1) 1 1 1 where
+  wireRingSecret := fun _ _ _ => ⟨0, Nat.zero_lt_succ 0⟩
+  wireXorSecret := fun _ _ _ _ => 0
+  yShareHonest := fun _ _ _ _ => 1
+  macShareHonest := fun _ _ _ _ => 0
+  commitPoint := fun y mac _ => (y, mac)
+  blindOf := fun _ => 0
+
+private def toothRomAdv :
+    RushingRoAdversary Unit (BitVec 1 × BitVec 1) Bool Unit Unit Bool 1 1 where
+  reactToRingOpen := fun _ => .done ((), ())
+  reactToAllOpens := fun _ _ => .done ((), ())
+  decideAbort := fun _ t => .ask (1, 0) (fun a => .done (a == t))
+
+/-- **`#tooth` (`tooth_rom_commit_without_framed_blind_exceeds_bound`)**: hash only `y ‖ mac`,
+    leaving the blind out of the oracle input. One query at the guessed `(y, mac)` then equals
+    the tag in EVERY real execution and in no simulated one: the gap is the whole sample space
+    (`4`), above the `Q · 2^w · q_RO = 2` allowed by the bound. -/
+theorem tooth_rom_commit_without_framed_blind_exceeds_bound :
+    ∃ (spec : CutTheHashRomSpec Unit Unit Unit Unit (BitVec 1 × BitVec 1) 1 1 1)
+      (adv : RushingRoAdversary Unit (BitVec 1 × BitVec 1) Bool Unit Unit Bool 1 1)
+      (tape : Nat → Bool) (tagFresh : Bool),
+      adv.QueryBound 0 0 1 ∧
+      1 * (2 ^ 1 * (0 + 0 + 1)) <
+        natAbsDiff
+          (romRealCount spec adv () () () (Nat.zero_lt_succ 0) tape (fun out => out) tagFresh)
+          (2 ^ 1 * romIdealCount adv tape (fun out => out) tagFresh) :=
+  ⟨toothRomSpec, toothRomAdv, fun _ => true, false,
+   ⟨fun _ => True.intro, fun _ _ => True.intro, fun _ _ _ => True.intro⟩, by decide⟩
+
+theorem l1Norm_prefix_ones : ∀ (n t : Nat), t ≤ n →
+    l1Norm n (fun i : Fin n => if i.val < t then (1 : Int) else 0) = t
+  | 0, t, h => by
+    have ht : t = 0 := by omega
+    subst ht
+    rfl
+  | n + 1, 0, _ => by
+    show finSum (n + 1) (fun j : Fin (n + 1) => ((if j.val < 0 then (1 : Int) else 0)).natAbs) = 0
+    have hz : finSum (n + 1)
+        (fun j : Fin (n + 1) => ((if j.val < 0 then (1 : Int) else 0)).natAbs) =
+        finSum (n + 1) (fun _ => 0) := finSum_congr (fun j => by simp)
+    rw [hz, finSum_const, Nat.mul_zero]
+  | n + 1, t + 1, h => by
+    have ih : finSum n (fun j : Fin n => ((if j.val < t then (1 : Int) else 0)).natAbs) = t :=
+      l1Norm_prefix_ones n t (by omega)
+    have hc : finSum n (fun j : Fin n => ((if j.val + 1 < t + 1 then (1 : Int) else 0)).natAbs) =
+        finSum n (fun j : Fin n => ((if j.val < t then (1 : Int) else 0)).natAbs) :=
+      finSum_congr (fun j => by simp)
+    have h0 : ((if (0 : Nat) < t + 1 then (1 : Int) else 0)).natAbs = 1 := by simp
+    show ((if (0 : Nat) < t + 1 then (1 : Int) else 0)).natAbs +
+      finSum n (fun j : Fin n => ((if j.val + 1 < t + 1 then (1 : Int) else 0)).natAbs) = t + 1
+    rw [h0, hc, ih]
+    omega
+
+/-- `B_39` is inhabited in degree `256`. -/
+theorem witness_mldsa44_challenge_ball_inhabited :
+    ∃ c : Fin 256 → Int, InChallengeBall 39 c :=
+  ⟨fun i => if i.val < 39 then 1 else 0,
+   fun i => by by_cases h : i.val < 39 <;> simp [h],
+   l1Norm_prefix_ones 256 39 (by decide)⟩
+
+/-- **`#tooth` (`tooth_challenge_bound_is_attained`)**: `‖c‖₁ · ‖s‖∞` cannot be lowered. A
+    ternary challenge of weight `2` times a secret with `‖s‖∞ = η = 2` has a coefficient of
+    absolute value exactly `4 = ‖c‖₁ · η`, so a bound one below it fails; a challenge heavier
+    than `τ` therefore breaks `β = τ · η`. -/
+theorem tooth_challenge_bound_is_attained :
+    ∃ (c s : Fin 2 → Int),
+      (∀ i, c i = -1 ∨ c i = 0 ∨ c i = 1) ∧ PolyBound 2 s ∧
+      ¬ PolyBound (l1Norm 2 c * 2 - 1) (polyMul c s) :=
+  ⟨fun _ => 1, fun _ => 2, fun _ => Or.inr (Or.inr rfl),
+   fun _ => by show (2 : Int).natAbs ≤ 2; decide,
+   fun h => absurd (h ⟨1, by decide⟩) (by decide)⟩
+
+/-- A key relation exists (so the simulation theorems are not vacuous). -/
+theorem witness_lin_key_relation_inhabited :
+    ∃ (pub : LinCommitInstance Unit Unit) (sec : LinSecretShift Unit Unit),
+      LinKeyRelation pub sec :=
+  ⟨{ W := fun _ _ => 0, W_add := fun _ _ _ => rfl, ct := fun _ => 0 },
+   { cs1 := fun _ => 0, cs2 := fun _ => 0 },
+   fun _ => (inMldsaSecretBound_iff_natAbs_le mldsa44Beta 0).mpr (Nat.zero_le _),
+   fun _ => (inMldsaSecretBound_iff_natAbs_le mldsa44Beta 0).mpr (Nat.zero_le _),
+   fun _ => rfl⟩
+
+/-- A commitment map with one mask per commitment value satisfies `CommitFiberBound _ 1`. -/
+theorem witness_commit_fiber_bound_inhabited :
+    ∃ (cp : Fin 2 → Fin 2), CommitFiberBound cp 1 :=
+  ⟨fun i => i, fun x => Nat.le_of_eq (finSum_eq_indicator 2 x)⟩
+
+/-- **`#tooth` (`tooth_reprogramming_needs_commitment_entropy`)**: if every mask yields the same
+    commitment (zero min-entropy) and the adversary has queried it, the real and reprogrammed
+    attempts differ on EVERY mask: the gap `2` exceeds `|log| · 1`, so the per-attempt bound is
+    false with `M` understated. -/
+theorem tooth_reprogramming_needs_commitment_entropy :
+    ∃ (cp : Fin 2 → Unit) (outcome : Fin 2 → Bool → Bool) (log : List (Unit × Bool)) (c : Bool)
+      (D : Bool × List (Unit × Bool) → Bool),
+      log.length * 1 <
+        natAbsDiff
+          (finSum 2 (fun i => if D (roAttemptReal cp outcome log i c) then 1 else 0))
+          (finSum 2 (fun i => if D (roAttemptProg cp outcome log i c) then 1 else 0)) :=
+  ⟨fun _ => (), fun _ c => c, [((), true)], false, fun r => r.1, by decide⟩
+
+/-- The ML-DSA transcript of one attempt under challenge `c`: the published `w₁`, and `z` when
+    both rejection checks pass. A rejected attempt publishes `w₁` alone. -/
+def linAttemptOutcome {Ch J I : Type} (pubOf : Ch → LinCommitInstance J I)
+    (secOf : Ch → LinSecretShift J I)
+    [∀ c y, Decidable (linRealAccept (pubOf c) (secOf c) y)]
+    (y : J → Int) (c : Ch) : (I → Int) × Option (J → Int) :=
+  (linRealW1 (pubOf c) y,
+   if linRealAccept (pubOf c) (secOf c) y then some (linRealZ (secOf c) y) else none)
+
+/-- **ML-DSA attempt with `c = H(μ, w₁)` (`mldsa_attempt_rom_reprogramming_bound`)**: the
+    per-attempt reprogramming bound instantiated at the ML-DSA transcript. `encPoint` encodes
+    `(μ, w₁)` as an oracle input; `M` bounds the number of masks sharing a `w₁`. -/
+theorem mldsa_attempt_rom_reprogramming_bound {Ch J I X : Type} {N : Nat} [DecidableEq X]
+    (pubOf : Ch → LinCommitInstance J I) (secOf : Ch → LinSecretShift J I)
+    [∀ c y, Decidable (linRealAccept (pubOf c) (secOf c) y)]
+    (enumY : SimpleEquiv (Fin N) (LinMaskBox J)) (encPoint : Fin N → X) (M : Nat)
+    (hFib : CommitFiberBound encPoint M)
+    (log : List (X × Ch)) (c : Ch)
+    (D : ((I → Int) × Option (J → Int)) × List (X × Ch) → Bool) :
+    natAbsDiff
+      (finSum N (fun i => if D (roAttemptReal encPoint
+        (fun i c => linAttemptOutcome pubOf secOf (enumY.toFun i).1 c) log i c) then 1 else 0))
+      (finSum N (fun i => if D (roAttemptProg encPoint
+        (fun i c => linAttemptOutcome pubOf secOf (enumY.toFun i).1 c) log i c) then 1 else 0)) ≤
+      log.length * M :=
+  roAttempt_reprogramming_bound encPoint _ M hFib log c D
+
 /-! ## §4. Mechanical Constructive, `#tooth_pair` & `#verify_inhabited` Gates -/
 
 #verify_constructive
@@ -5655,6 +6111,56 @@ theorem multiAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableE
   tooth_mldsa44_low_bits_margin_omitted_leaks_s2
   witness_mldsa44_joint_accept_inhabited
 
+#verify_constructive whole_device_rollback_below_anchor_fails_closed
+#verify_constructive posixRefines_recover
+#verify_constructive posixRefines_slot_write
+#verify_constructive posix_crash_during_slot_write_refines
+#verify_constructive posix_media_damage_refines
+#verify_constructive posix_device_restore_below_anchor_fails_closed
+#verify_constructive witness_policy_window_rotation_crash_mid_step
+#verify_constructive witness_posix_slot_write_crash_inhabited
+#verify_constructive askedRo_length_le
+#verify_constructive runRo_lookup_none
+#verify_constructive runRo_agree_off
+#verify_constructive romReal_eq_ideal_of_blind_unqueried
+#verify_constructive romCommit_blind_count_bound
+#verify_constructive cutTheHash_rom_commit_hiding_sd_bound
+#verify_constructive cutTheHash_rom_view_secret_independent
+#verify_constructive cutTheHash_rom_commit_hiding_sd_bound_256
+#verify_constructive witness_rom_commit_hiding_inhabited
+#verify_constructive tooth_rom_commit_without_framed_blind_exceeds_bound
+#verify_constructive intDot_swap
+#verify_constructive intDot_natAbs_le
+#verify_constructive polyMul_comm_action
+#verify_constructive polyMul_one
+#verify_constructive polyMul_comm
+#verify_constructive polyMul_assoc
+#verify_constructive polyMul_bound
+#verify_constructive polyMul_sub_dvd
+#verify_constructive mldsa44_challenge_times_secret_le_beta
+#verify_constructive ringMatVec_challenge_comm
+#verify_constructive lin_joint_transcript_simulation
+#verify_constructive lin_joint_transcript_secret_independent
+#verify_constructive mldsa44_ring_key_relation
+#verify_constructive mldsa44_ring_joint_transcript_simulation
+#verify_constructive finSum_subset_bij
+#verify_constructive lin_accepted_transcript_count_secret_independent
+#verify_constructive lin_rejected_commitment_count_secret_independent
+#verify_constructive roAttempt_reprogramming_bound
+#verify_constructive multiAttempt_reprogramming_bound
+#verify_constructive mldsa_attempt_rom_reprogramming_bound
+#verify_constructive witness_mldsa44_challenge_ball_inhabited
+#verify_constructive tooth_challenge_bound_is_attained
+#verify_constructive witness_lin_key_relation_inhabited
+#verify_constructive witness_commit_fiber_bound_inhabited
+#verify_constructive tooth_reprogramming_needs_commitment_entropy
+
+#tooth_pair cutTheHash_rom_commit_hiding_sd_bound vs tooth_rom_commit_without_framed_blind_exceeds_bound
+#tooth_pair cutTheHash_rom_commit_hiding_sd_bound_256 vs tooth_rom_commit_without_framed_blind_exceeds_bound
+#tooth_pair polyMul_bound vs tooth_challenge_bound_is_attained
+#tooth_pair mldsa44_challenge_times_secret_le_beta vs tooth_challenge_bound_is_attained
+#tooth_pair roAttempt_reprogramming_bound vs tooth_reprogramming_needs_commitment_entropy
+#tooth_pair multiAttempt_reprogramming_bound vs tooth_reprogramming_needs_commitment_entropy
 #tooth_pair no_leaf_double_sign_on_wire vs tooth_release_before_durable_burn_reuses_leaf
 #tooth_pair no_leaf_double_sign_on_wire vs tooth_release_before_checkpoint_rolls_back_leaf
 #tooth_pair ceremony_multi_ledger_crash_interleaving_safe vs tooth_release_before_durable_burn_reuses_leaf
@@ -5667,6 +6173,14 @@ theorem multiAttempt_reprogramming_bound {N : Nat} {X Ch Out : Type} [DecidableE
 #tooth_pair mldsa44_joint_transcript_secret_independent vs tooth_mldsa44_low_bits_margin_omitted_leaks_s2
 
 #verify_inhabited ceremony_multi_ledger_crash_interleaving_safe witness_multi_ledger_crash_trace_inhabited
+#verify_inhabited posix_crash_during_slot_write_refines witness_posix_slot_write_crash_inhabited
+#verify_inhabited cutTheHash_rom_commit_hiding_sd_bound witness_rom_commit_hiding_inhabited
+#verify_inhabited mldsa44_ring_key_relation witness_mldsa44_challenge_ball_inhabited
+#verify_inhabited mldsa44_ring_joint_transcript_simulation witness_mldsa44_challenge_ball_inhabited
+#verify_inhabited lin_joint_transcript_simulation witness_lin_key_relation_inhabited
+#verify_inhabited lin_rejected_commitment_count_secret_independent witness_lin_key_relation_inhabited
+#verify_inhabited roAttempt_reprogramming_bound witness_commit_fiber_bound_inhabited
+#verify_inhabited multiAttempt_reprogramming_bound witness_commit_fiber_bound_inhabited
 #verify_inhabited failed_closed_host_stays_closed witness_torn_checkpointed_leaf_fails_closed
 #verify_inhabited cutTheHash_abort_conditioned_sd_zero witness_cutTheHash_selective_abort_inhabited
 #verify_inhabited mldsa_rejection_valid_output_uniform_in_box witness_mldsa44_secret_bound_inhabited

@@ -18,7 +18,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 use core::hint::black_box;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use crate::dkg::ShamirSeedShare256;
 use crate::field::tower::{
@@ -37,7 +37,7 @@ use crate::preprocessing::{
 };
 use crate::sponge::keccak::{
     Cshake256WordStream4, Cshake256Xof, KECCAK_ROTATION_OFFSETS, KECCAK_ROUND_CONSTANTS,
-    SHAKE256_RATE_BYTES, cshake256_32, encode_multi_frame,
+    SHAKE256_RATE_BYTES, cshake256_32, cshake256_32_multi_frame, encode_multi_frame,
 };
 use crate::tsw_baggy::{
     AdrsKind, Cshake256Suite, ForsTreeOpening, HashAdrs, LayerXmssSig, PQ_CSHAKE_SUITE_CUSTOM,
@@ -48,8 +48,10 @@ use crate::tsw_baggy::{
     th_hash_internal_node,
     th_pre_hash, th_tweak_tl, verify_pq_hash_sig, walk_merkle_auth_path,
 };
-use crate::wipe::SecretBuffer;
-use crate::wipe::{ct_eq_bytes, ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_u64s};
+use crate::wipe::{
+    SecretBuffer, ct_eq_bytes, ct_eq_bytes32, ct_eq_u64, secret_vec_extend_from_slice,
+    secret_vec_push, wipe_bytes, wipe_bytes32, wipe_u64s,
+};
 
 /// Overflow-safe active-lane bitmask for 64-way bitsliced batches (`batch_len == 64 -> u64::MAX`,
 /// `batch_len == 0 -> 0`, never executing `1u64 << 64`).
@@ -1706,10 +1708,10 @@ fn eval_rss_keccak_f1600_batch64_record(
                 let row = 5 * (lane / 5);
                 let l1 = (row + (lane + 1) % 5) * 64;
                 let l2 = (row + (lane + 2) % 5) * 64;
-                pending_dzk.a[s].extend_from_slice(&b[s][l1..l1 + 64]);
-                pending_dzk.b[s].extend_from_slice(&b[s][l2..l2 + 64]);
+                secret_vec_extend_from_slice(&mut pending_dzk.a[s], &b[s][l1..l1 + 64]);
+                secret_vec_extend_from_slice(&mut pending_dzk.b[s], &b[s][l2..l2 + 64]);
             }
-            pending_dzk.c[s].extend_from_slice(&prod[s]);
+            secret_vec_extend_from_slice(&mut pending_dzk.c[s], &prod[s]);
         }
         // Iota: the public round constant enters slot 0.
         for (z, word) in st[0][..64].iter_mut().enumerate() {
@@ -1799,6 +1801,12 @@ impl RssCutBuffer {
             prim: [Vec::new(), Vec::new(), Vec::new()],
             sec: [Vec::new(), Vec::new(), Vec::new()],
         }
+    }
+
+    #[inline]
+    fn push_party_slices(&mut self, party: usize, prim_slice: &[u64], sec_slice: &[u64]) {
+        secret_vec_extend_from_slice(&mut self.prim[party], prim_slice);
+        secret_vec_extend_from_slice(&mut self.sec[party], sec_slice);
     }
 }
 
@@ -2255,8 +2263,7 @@ impl RssSlhMpcCluster {
         let n_bits = 8 * n;
         let mut cut = RssCutBuffer::new();
         for p in 0..3 {
-            cut.prim[p].extend_from_slice(&blocks_p[p][..n_bits]);
-            cut.sec[p].extend_from_slice(&blocks_s[p][..n_bits]);
+            cut.push_party_slices(p, &blocks_p[p][..n_bits], &blocks_s[p][..n_bits]);
         }
         let (opened_bits, tok) = self.flush_verify_and_open_cut(phase, &cut)?;
         let mut out = Vec::with_capacity(batch_len);
@@ -2391,30 +2398,35 @@ impl SlhMpcOracles for RssSlhMpcCluster {
 
         // Collect all cut-boundary shares across chunks and verify/open in 1 atomic barrier!
         let mut cut = RssCutBuffer::new();
+        let mut rev_chunks = Vec::new();
         let mut chunk_sizes = Vec::new();
 
-        // First evaluate the `k` revealed FORS `sk` values (`1` batch of `<= 64` since `k <= 35`!)
-        let mut rev_prf_adrs = Vec::with_capacity(params.k);
-        let mut i = 0;
-        while i < params.k {
-            let idx_i = fors_indices[i] as usize;
-            if idx_i >= t_leaves {
-                return Err(Fips205Error::MpcActiveTamperDetected);
+        // Evaluate the `k` revealed FORS `sk` values in 64-wide batches (`<= 64` per batch).
+        let mut rev_cursor = 0usize;
+        while rev_cursor < params.k {
+            let rev_len = (params.k - rev_cursor).min(64);
+            let mut rev_prf_adrs = Vec::with_capacity(rev_len);
+            for off in 0..rev_len {
+                let i = rev_cursor + off;
+                let idx_i = fors_indices[i] as usize;
+                if idx_i >= t_leaves {
+                    return Err(Fips205Error::MpcActiveTamperDetected);
+                }
+                let mut prf_adrs = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
+                prf_adrs.key_pair = base_adrs.key_pair;
+                prf_adrs.f6 = (i * t_leaves + idx_i) as u32;
+                rev_prf_adrs.push(prf_adrs);
             }
-            let mut prf_adrs = base_adrs.with_type_and_clear(Fips205AdrsType::ForsPrf);
-            prf_adrs.key_pair = base_adrs.key_pair;
-            prf_adrs.f6 = (i * t_leaves + idx_i) as u32;
-            rev_prf_adrs.push(prf_adrs);
-            i += 1;
+            let (mut rev_p, mut rev_s) = self
+                .eval_prf_batch64_secret_deferred(pk_seed, &rev_prf_adrs)
+                .map_err(rss_oracle_abort)?;
+            for p in 0..3 {
+                cut.push_party_slices(p, &rev_p[p][..8 * n], &rev_s[p][..8 * n]);
+            }
+            wipe_rss_states(&mut rev_p, &mut rev_s);
+            rev_chunks.push(rev_len);
+            rev_cursor += rev_len;
         }
-        let (mut rev_p, mut rev_s) = self
-            .eval_prf_batch64_secret_deferred(pk_seed, &rev_prf_adrs)
-            .map_err(rss_oracle_abort)?;
-        for p in 0..3 {
-            cut.prim[p].extend_from_slice(&rev_p[p][..8 * n]);
-            cut.sec[p].extend_from_slice(&rev_s[p][..8 * n]);
-        }
-        wipe_rss_states(&mut rev_p, &mut rev_s);
 
         // Now evaluate all `total_leaves = k * 2^a` leaf hashes `F(PK.seed, leaf_adrs, PRF(PK.seed, SK.seed, prf_adrs))`
         // in 64-wide bitsliced batches (unrevealed `sk` values NEVER leave secret shares!)
@@ -2445,8 +2457,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
             self.eval_f_step_masked_batch64(pk_seed, &leaf_batch, mask, &mut cur_p, &mut cur_s)
                 .map_err(rss_oracle_abort)?;
             for p in 0..3 {
-                cut.prim[p].extend_from_slice(&cur_p[p][..8 * n]);
-                cut.sec[p].extend_from_slice(&cur_s[p][..8 * n]);
+                cut.push_party_slices(p, &cur_p[p][..8 * n], &cur_s[p][..8 * n]);
                 wipe_u64s(&mut cur_p[p]);
                 wipe_u64s(&mut cur_s[p]);
             }
@@ -2460,20 +2471,24 @@ impl SlhMpcOracles for RssSlhMpcCluster {
 
         let n_bits = 8 * n;
         let mut revealed_sks = Vec::with_capacity(params.k);
-        for b in 0..params.k {
-            let mut blk = SlhBlock::zero(n);
-            for byte_idx in 0..n {
-                let mut v = 0u8;
-                for bit in 0..8 {
-                    v |= (((opened_words[8 * byte_idx + bit] >> b) & 1) as u8) << bit;
+        let mut word_off = 0usize;
+        for &r_len in &rev_chunks {
+            let slice = &opened_words[word_off..word_off + n_bits];
+            for b in 0..r_len {
+                let mut blk = SlhBlock::zero(n);
+                for byte_idx in 0..n {
+                    let mut v = 0u8;
+                    for bit in 0..8 {
+                        v |= (((slice[8 * byte_idx + bit] >> b) & 1) as u8) << bit;
+                    }
+                    blk.bytes[byte_idx] = v;
                 }
-                blk.bytes[byte_idx] = v;
+                revealed_sks.push(blk);
             }
-            revealed_sks.push(blk);
+            word_off += n_bits;
         }
 
         let mut flat_leaves = Vec::with_capacity(total_leaves);
-        let mut word_off = n_bits;
         for &c_len in &chunk_sizes {
             let slice = &opened_words[word_off..word_off + n_bits];
             for b in 0..c_len {
@@ -2567,8 +2582,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
                 .map_err(rss_oracle_abort)?;
             }
             for p in 0..3 {
-                cut.prim[p].extend_from_slice(&cur_p[p][..n_bits]);
-                cut.sec[p].extend_from_slice(&cur_s[p][..n_bits]);
+                cut.push_party_slices(p, &cur_p[p][..n_bits], &cur_s[p][..n_bits]);
                 wipe_u64s(&mut cur_p[p]);
                 wipe_u64s(&mut cur_s[p]);
             }
@@ -2696,8 +2710,7 @@ impl SlhMpcOracles for RssSlhMpcCluster {
             }
 
             for p in 0..3 {
-                cut.prim[p].extend_from_slice(&cur_p[p][..n_bits]);
-                cut.sec[p].extend_from_slice(&cur_s[p][..n_bits]);
+                cut.push_party_slices(p, &cur_p[p][..n_bits], &cur_s[p][..n_bits]);
                 wipe_u64s(&mut cur_p[p]);
                 wipe_u64s(&mut cur_s[p]);
             }
@@ -2858,7 +2871,7 @@ fn commit_and_open_beaver_de_batch(
     for w in 0..batch_len {
         for p in 0..m {
             single_sh[p] = de_shares[p][w];
-            pending_macs[p].push(de_macs[p][w]);
+            secret_vec_push(&mut pending_macs[p], de_macs[p][w]);
         }
         let val = opening_tables.open_bitsliced(&single_sh, "spdz_keccak_chi_de")?;
         pending_opened.push(val);
@@ -4642,8 +4655,7 @@ fn eval_tsw_wots_subtree_rss(
         }
 
         for p in 0..3 {
-            cut.prim[p].extend_from_slice(&cur_p[p]);
-            cut.sec[p].extend_from_slice(&cur_s[p]);
+            cut.push_party_slices(p, &cur_p[p], &cur_s[p]);
             wipe_u64s(&mut cur_p[p]);
             wipe_u64s(&mut cur_s[p]);
         }
@@ -4795,8 +4807,7 @@ pub fn sign_stateless_tsw_rss_mpc(
         }
         cluster.permute_batch64_deferred(params.fors_trees, &mut st_p, &mut st_s)?;
         for p in 0..3 {
-            cut.prim[p].extend_from_slice(&st_p[p][..256]);
-            cut.sec[p].extend_from_slice(&st_s[p][..256]);
+            cut.push_party_slices(p, &st_p[p][..256], &st_s[p][..256]);
             wipe_u64s(&mut st_p[p]);
             wipe_u64s(&mut st_s[p]);
         }
@@ -4885,8 +4896,7 @@ pub fn sign_stateless_tsw_rss_mpc(
         }
         cluster.permute_batch64_deferred(c_len, &mut sp, &mut ss)?;
         for p in 0..3 {
-            cut.prim[p].extend_from_slice(&sp[p][..256]);
-            cut.sec[p].extend_from_slice(&ss[p][..256]);
+            cut.push_party_slices(p, &sp[p][..256], &ss[p][..256]);
             wipe_u64s(&mut sp[p]);
             wipe_u64s(&mut ss[p]);
         }

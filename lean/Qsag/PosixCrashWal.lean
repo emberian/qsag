@@ -46,7 +46,25 @@ unified `CeremonyJournalRecord` crash-prefix atomicity, and reserve-before-sign 
    - `ceremony_journal_released_implies_all_reservations_durable_and_no_reuse`
    - `externalAnchor_rejects_whole_disk_rollback`
 
-4. **Hardware/POSIX `#tooth` Mutation Witnesses & Concrete Multi-Crash Trace Witness**:
+4. **Per-Inode Crash Outcomes, Media Damage, Whole-Device Rollback & the External Anchor (§7)**:
+   - `crashStep_inode_outcome`: every `CrashStep` leaves an inode holding its old bytes, the
+     drive-cache copy, or a sector mix of old and in-flight bytes; `MediaDamageInode` models
+     bit-rot of settled blocks.
+   - `ExternalMonotoneAnchor` is the `LedgerCheckpoint` of `durable_ledger.rs`: a minimum
+     generation plus tag (`externalAnchor_rejects_whole_disk_rollback`,
+     `externalAnchor_accepts_durable_successor`, `externalAnchor_rejects_same_generation_fork`).
+   - `anchored_custody_epoch_unique_under_device_rollback`: with the anchor checked before
+     release, NO sequence of whole-device replacements (snapshot restore, bit-rot, forged image)
+     reuses an epoch, for any MAC; `tooth_unanchored_device_restore_reuses_epoch` and
+     `witness_unanchored_device_restore_reuses_epoch` show the unanchored machine does.
+   - `qsag-fts/src/wal.rs`: `verifyBurnChain` / `openBurnJournal` (tag chained through
+     `last_tag`, whole-record length, no duplicates), `burnJournal_append_crash_outcomes`,
+     `verifyBurnChain_prefix`, `tooth_burnJournal_truncation_is_undetectable_without_anchor`,
+     `burnJournal_anchor_rejects_truncation`.
+   - `qsag-cli/src/vault.rs`: `vault_reserve_crash_old_new_or_fail_closed` (companion MAC
+     overwritten in place, then atomic rename) and `vault_state_file_rollback_rejected`.
+
+5. **Hardware/POSIX `#tooth` Mutation Witnesses & Concrete Multi-Crash Trace Witness**:
    - `tooth_split_subordinate_wals_crash_between_commits_causes_resource_desync`
    - `tooth_rename_without_tmp_sync_exposes_torn_or_garbage_file`
    - `tooth_darwin_fsync_without_fullfsync_loses_committed_epoch_on_power_loss`
@@ -7228,29 +7246,53 @@ theorem ceremony_journal_released_implies_all_reservations_durable_and_no_reuse
     ⟨fsRecovered, curRec, curJ, deriveSubordinateViews curJ,
      hRecOk, rfl, hPolLe, hSigAll, hR1All⟩⟩
 
-/-- **Explicit Whole-Disk / VM Clone Rollback Boundary (`ExternalMonotoneAnchor`, `G1-H`)**:
-    No purely local filesystem WAL (`NandBlocks` alone) can prevent state replay if a hypervisor
-    snapshots `PosixFsState` (`nandSnapshot := sPre.fs`) before a ceremony and later restores that
-    entire disk image (`sCloned := { sPost with fs := nandSnapshot }`). Preventing whole-disk
-    clone replay requires an external monotone hardware/quorum anchor (`ExternalMonotoneAnchor`)
-    verifying `onDiskWalEpoch == anchor.attestedEpoch`! -/
+/-- **External Monotone Anchor (`LedgerCheckpoint` of `durable_ledger.rs`)**: a generation and a
+    MAC tag held OUTSIDE the device's rollback domain. No local WAL can detect a hypervisor or
+    operator restoring a whole earlier device image; the anchor can. It is a MINIMUM generation,
+    not an exact snapshot: a durable successor whose checkpoint was not yet saved is accepted. -/
 structure ExternalMonotoneAnchor where
   attestedEpoch : Nat
+  attestedTag   : List UInt8
   deriving Repr, DecidableEq
 
-/-- Verify local WAL epoch freshness against an `ExternalMonotoneAnchor`. -/
-def verifyAgainstExternalAnchor (anchor : ExternalMonotoneAnchor) (onDiskWalEpoch : Nat) : Bool :=
-  onDiskWalEpoch == anchor.attestedEpoch
+/-- The `Ledger::open` filter: accept a strictly newer generation, or the anchored generation
+    with exactly the anchored tag. An older generation, or a different snapshot at the anchored
+    generation (a fork written after a rollback), is refused. -/
+def verifyAgainstExternalAnchor (anchor : ExternalMonotoneAnchor) (onDiskWalEpoch : Nat)
+    (onDiskTag : List UInt8) : Bool :=
+  decide (anchor.attestedEpoch < onDiskWalEpoch) ||
+    (onDiskWalEpoch == anchor.attestedEpoch && onDiskTag == anchor.attestedTag)
 
 theorem externalAnchor_rejects_whole_disk_rollback
-    {anchor : ExternalMonotoneAnchor} {snapshotWalEpoch : Nat}
+    {anchor : ExternalMonotoneAnchor} {snapshotWalEpoch : Nat} (snapshotTag : List UInt8)
     (hAdvanced : snapshotWalEpoch < anchor.attestedEpoch) :
-    verifyAgainstExternalAnchor anchor snapshotWalEpoch = false := by
-  unfold verifyAgainstExternalAnchor
-  cases hBeq : (snapshotWalEpoch == anchor.attestedEpoch)
-  · rfl
-  · exfalso
-    exact Nat.ne_of_lt hAdvanced (Nat.eq_of_beq_eq_true hBeq)
+    verifyAgainstExternalAnchor anchor snapshotWalEpoch snapshotTag = false := by
+  have h1 : ¬ anchor.attestedEpoch < snapshotWalEpoch := by omega
+  have h2 : (snapshotWalEpoch == anchor.attestedEpoch) = false :=
+    beq_eq_false_iff_ne.mpr (Nat.ne_of_lt hAdvanced)
+  simp only [verifyAgainstExternalAnchor, h1, decide_false, h2, Bool.false_and, Bool.or_self]
+
+/-- Whatever the anchor admits is at or above the anchored generation. -/
+theorem externalAnchor_admits_only_min_generation
+    {anchor : ExternalMonotoneAnchor} {epoch : Nat} {tag : List UInt8}
+    (h : verifyAgainstExternalAnchor anchor epoch tag = true) : anchor.attestedEpoch ≤ epoch := by
+  simp only [verifyAgainstExternalAnchor, Bool.or_eq_true, decide_eq_true_eq, Bool.and_eq_true,
+    beq_iff_eq] at h
+  rcases h with h | ⟨h, _⟩ <;> omega
+
+/-- A durable successor of the anchored snapshot opens even though its checkpoint is unsaved. -/
+theorem externalAnchor_accepts_durable_successor
+    {anchor : ExternalMonotoneAnchor} {epoch : Nat} (tag : List UInt8)
+    (h : anchor.attestedEpoch < epoch) : verifyAgainstExternalAnchor anchor epoch tag = true := by
+  simp only [verifyAgainstExternalAnchor, h, decide_true, Bool.true_or]
+
+/-- A different snapshot at the anchored generation is refused. -/
+theorem externalAnchor_rejects_same_generation_fork
+    {anchor : ExternalMonotoneAnchor} {tag : List UInt8} (hFork : tag ≠ anchor.attestedTag) :
+    verifyAgainstExternalAnchor anchor anchor.attestedEpoch tag = false := by
+  have h2 : (tag == anchor.attestedTag) = false := beq_eq_false_iff_ne.mpr hFork
+  simp only [verifyAgainstExternalAnchor, Nat.lt_irrefl, decide_false, h2, Bool.and_false,
+    Bool.or_self]
 
 /-- Helper reading a durable 64-bit counter file via `O_NOFOLLOW` + `pread` + `decodeU64BeNat`. -/
 def readDurableU64Counter (st : PosixFsState) (pid : Pid) (path : DirName) : Option Nat :=
@@ -8263,5 +8305,467 @@ theorem inhabited_posix_crash_wal_trace :
   · rw [hSMidEq]; exact ⟨rcpt₀, by simp, rfl, rfl⟩
   · rw [hSMidEq]; exact ⟨rcpt₁, by simp, rfl, rfl⟩
   · exact Nat.le_trans (by rw [hSMidEq]; exact Nat.le_refl 2) hWmLeFin
+
+/-! ## 7. Per-Inode Crash Outcomes, Media Damage, Whole-Device Rollback & the External Anchor -/
+
+/-- **Every crash outcome of one inode (`crashStep_inode_outcome`)**: after any `CrashStep`, the
+    NAND bytes of an inode whose settled contents were `old` are one of
+    1. `old` (nothing pending, or the pending write was dropped);
+    2. the drive-cache copy (a kernel panic drains the drive cache; dirty page-cache data is lost);
+    3. a sector mix of `old` and the pending write under some tear mask (power loss: any sector
+       may keep the old bytes, take the new bytes, or hold garbage).
+    An inode with no pending write is in case 1 (`syncedInode_immune_to_crashStep`). -/
+theorem crashStep_inode_outcome {st crashed : PosixFsState} {ino : InodeId} {old : List UInt8}
+    (hNand : assocLookup st.nand.fileBlocks ino = some old) (hCrash : CrashStep st crashed) :
+    assocLookup crashed.nand.fileBlocks ino = some old ∨
+    (∃ dc, assocLookup st.driveCache.cachedFiles ino = some dc ∧
+      assocLookup crashed.nand.fileBlocks ino = some dc) ∨
+    (∃ (pending : List UInt8) (mask : SectorTearMask), pendingVolatileWrite st ino = some pending ∧
+      assocLookup crashed.nand.fileBlocks ino =
+        some (mixSectors mask.geometry.byteWidth mask.sectorChoices old pending)) := by
+  cases hCrash with
+  | kernelPanic _ =>
+    dsimp only [KernelPanicCrash]
+    rw [assocLookup_mapAssocValues, hNand]
+    cases hDc : assocLookup st.driveCache.cachedFiles ino with
+    | none => exact Or.inl rfl
+    | some dc => exact Or.inr (Or.inl ⟨dc, rfl, rfl⟩)
+  | powerLoss dirPick tearFn _ =>
+    dsimp only [PowerLossCrash]
+    rw [assocLookup_mapAssocValues, hNand]
+    cases hP : pendingVolatileWrite st ino with
+    | none => exact Or.inl rfl
+    | some pending => exact Or.inr (Or.inr ⟨pending, tearFn ino, rfl, rfl⟩)
+
+/-- Offline media fault on one inode: its settled NAND bytes are replaced by ARBITRARY bytes
+    (bit-rot, a failed block, or tampering with the powered-off device). Not a `CrashStep`: it
+    can hit an inode that has nothing pending. -/
+def MediaDamageInode (st : PosixFsState) (ino : InodeId) (garbage : List UInt8) : PosixFsState :=
+  { st with nand := { st.nand with fileBlocks := assocInsert ino garbage st.nand.fileBlocks } }
+
+theorem mediaDamageInode_lookup (st : PosixFsState) (ino q : InodeId) (garbage : List UInt8) :
+    assocLookup (MediaDamageInode st ino garbage).nand.fileBlocks q =
+      if q = ino then some garbage else assocLookup st.nand.fileBlocks q := by
+  unfold MediaDamageInode
+  exact assocLookup_insert ino garbage st.nand.fileBlocks q
+
+/-- **Reserve-before-sign with the anchor outside the rollback domain.** The disk is fully
+    adversarial between steps: `replaceDevice image` installs ANY filesystem state (an old
+    whole-device snapshot, a bit-rotted image, a forged image). The signer releases an epoch only
+    if the epoch it read under the lock is at or above the external anchor, and it advances the
+    anchor before the release permit exists. -/
+structure AnchoredCustodyState where
+  fs          : PosixFsState
+  anchorEpoch : Nat
+  pending     : Option SignedEpochReceipt
+  emitted     : List SignedEpochReceipt
+
+inductive AnchoredCustodyEvent where
+  | reserve (pid : Pid) (msg : List UInt8) (faults : IoFaultSchedule)
+  | release
+  | processCrash
+  | replaceDevice (image : PosixFsState)
+
+/-- One step. `checkAnchor = false` is the unanchored machine used by the `#tooth`. -/
+def stepAnchoredCustody (checkAnchor : Bool) (basePath : DirName) (keyKind : StatefulKeyKind)
+    (vaultKeyId : List UInt8) (maxEpochCap : Nat) (macFn : KeyedMacFn) (macKey : List UInt8)
+    (s : AnchoredCustodyState) (ev : AnchoredCustodyEvent) : AnchoredCustodyState :=
+  match ev with
+  | .reserve pid msg faults =>
+    match s.pending with
+    | some _ => s
+    | none =>
+      match execReserveBeforeSignAtomic s.fs pid basePath keyKind vaultKeyId maxEpochCap msg
+              macFn macKey faults with
+      | (fs', none) => { s with fs := fs' }
+      | (fs', some r) =>
+        if checkAnchor && !(decide (s.anchorEpoch ≤ r.epoch)) then
+          { s with fs := fs' }
+        else
+          { s with fs := fs', anchorEpoch := r.epoch + 1, pending := some r }
+  | .release =>
+    match s.pending with
+    | none => s
+    | some r => { s with pending := none, emitted := s.emitted ++ [r] }
+  | .processCrash => { s with pending := none }
+  | .replaceDevice image => { s with fs := image }
+
+def runAnchoredCustody (checkAnchor : Bool) (basePath : DirName) (keyKind : StatefulKeyKind)
+    (vaultKeyId : List UInt8) (maxEpochCap : Nat) (macFn : KeyedMacFn) (macKey : List UInt8) :
+    AnchoredCustodyState → List AnchoredCustodyEvent → AnchoredCustodyState
+  | s, [] => s
+  | s, ev :: rest =>
+    runAnchoredCustody checkAnchor basePath keyKind vaultKeyId maxEpochCap macFn macKey
+      (stepAnchoredCustody checkAnchor basePath keyKind vaultKeyId maxEpochCap macFn macKey s ev)
+      rest
+
+def AnchoredCustodyInv (s : AnchoredCustodyState) : Prop :=
+  (s.emitted.map (·.epoch)).Nodup ∧
+  (∀ r ∈ s.emitted, r.epoch < s.anchorEpoch) ∧
+  (∀ r, s.pending = some r → r.epoch < s.anchorEpoch ∧ ∀ r' ∈ s.emitted, r'.epoch ≠ r.epoch)
+
+theorem stepAnchoredCustody_preserves_inv (basePath : DirName) (keyKind : StatefulKeyKind)
+    (vaultKeyId : List UInt8) (maxEpochCap : Nat) (macFn : KeyedMacFn) (macKey : List UInt8)
+    (s : AnchoredCustodyState) (ev : AnchoredCustodyEvent) (hInv : AnchoredCustodyInv s) :
+    AnchoredCustodyInv
+      (stepAnchoredCustody true basePath keyKind vaultKeyId maxEpochCap macFn macKey s ev) := by
+  obtain ⟨hNd, hLt, hPend⟩ := hInv
+  cases ev with
+  | reserve pid msg faults =>
+    unfold stepAnchoredCustody
+    cases hP : s.pending with
+    | some r0 => exact ⟨hNd, hLt, hPend⟩
+    | none =>
+      dsimp only
+      rcases hExec : execReserveBeforeSignAtomic s.fs pid basePath keyKind vaultKeyId maxEpochCap
+        msg macFn macKey faults with ⟨fs', ro⟩
+      cases ro with
+      | none => exact ⟨hNd, hLt, fun r h => by simp at h⟩
+      | some r =>
+        dsimp only
+        by_cases hGe : s.anchorEpoch ≤ r.epoch
+        · simp only [hGe, decide_true, Bool.not_true, Bool.and_false, Bool.false_eq_true,
+            ↓reduceIte]
+          refine ⟨hNd, fun r' hr' => ?_, fun r1 h1 => ?_⟩
+          · have := hLt r' hr'
+            show r'.epoch < r.epoch + 1
+            omega
+          · have hEq : r = r1 := Option.some.inj h1
+            subst hEq
+            refine ⟨Nat.lt_succ_self _, fun r' hr' => ?_⟩
+            have := hLt r' hr'
+            omega
+        · simp only [hGe, decide_false, Bool.not_false, Bool.and_true, ↓reduceIte]
+          exact ⟨hNd, hLt, fun r h => by simp at h⟩
+  | release =>
+    unfold stepAnchoredCustody
+    cases hP : s.pending with
+    | none => exact ⟨hNd, hLt, hPend⟩
+    | some r =>
+      dsimp only
+      obtain ⟨hrLt, hrFresh⟩ := hPend r hP
+      refine ⟨?_, ?_, fun r1 h1 => by simp at h1⟩
+      · rw [List.map_append]
+        refine nodup_snoc hNd (fun y hy => ?_)
+        rcases List.mem_map.mp hy with ⟨r', hr', rfl⟩
+        exact hrFresh r' hr'
+      · intro r' hr'
+        rcases List.mem_append.mp hr' with h | h
+        · exact hLt r' h
+        · rcases List.mem_singleton.mp h with rfl
+          exact hrLt
+  | processCrash =>
+    exact ⟨hNd, hLt, fun r1 h1 => by simp [stepAnchoredCustody] at h1⟩
+  | replaceDevice image =>
+    exact ⟨hNd, hLt, hPend⟩
+
+/-- **Whole-device rollback cannot reuse an epoch
+    (`anchored_custody_epoch_unique_under_device_rollback`)**: for EVERY trace of reservations,
+    releases, process crashes and arbitrary device replacements (snapshot restore, bit-rot,
+    forged images), with ANY MAC function, the released epochs are pairwise distinct. The proof
+    uses nothing about the disk: the anchor alone carries the invariant. -/
+theorem anchored_custody_epoch_unique_under_device_rollback (basePath : DirName)
+    (keyKind : StatefulKeyKind) (vaultKeyId : List UInt8) (maxEpochCap : Nat)
+    (macFn : KeyedMacFn) (macKey : List UInt8) (trace : List AnchoredCustodyEvent) :
+    ∀ s : AnchoredCustodyState, AnchoredCustodyInv s →
+      AnchoredCustodyInv
+        (runAnchoredCustody true basePath keyKind vaultKeyId maxEpochCap macFn macKey s trace) ∧
+      ((runAnchoredCustody true basePath keyKind vaultKeyId maxEpochCap macFn macKey s
+        trace).emitted.map (·.epoch)).Nodup := by
+  induction trace with
+  | nil => intro s hInv; exact ⟨hInv, hInv.1⟩
+  | cons ev rest ih =>
+    intro s hInv
+    exact ih _ (stepAnchoredCustody_preserves_inv basePath keyKind vaultKeyId maxEpochCap macFn
+      macKey s ev hInv)
+
+/-- **`#tooth` (`tooth_unanchored_device_restore_reuses_epoch`)**: the same machine WITHOUT the
+    anchor check. From any state in which one reservation succeeds, restoring the device image
+    taken before that reservation makes the machine release the same epoch a second time. -/
+theorem tooth_unanchored_device_restore_reuses_epoch (basePath : DirName)
+    (keyKind : StatefulKeyKind) (vaultKeyId : List UInt8) (maxEpochCap : Nat)
+    (macFn : KeyedMacFn) (macKey : List UInt8) (s : AnchoredCustodyState)
+    (pid : Pid) (msg : List UInt8) (faults : IoFaultSchedule)
+    {fs' : PosixFsState} {r : SignedEpochReceipt}
+    (hIdle : s.pending = none)
+    (hExec : execReserveBeforeSignAtomic s.fs pid basePath keyKind vaultKeyId maxEpochCap msg
+      macFn macKey faults = (fs', some r)) :
+    (runAnchoredCustody false basePath keyKind vaultKeyId maxEpochCap macFn macKey s
+      [.reserve pid msg faults, .release, .replaceDevice s.fs,
+       .reserve pid msg faults, .release]).emitted = s.emitted ++ [r] ++ [r] := by
+  simp only [runAnchoredCustody, stepAnchoredCustody, hIdle, hExec, Bool.false_and,
+    Bool.false_eq_true, ↓reduceIte]
+
+/-- The `#tooth` is inhabited: a freshly provisioned, rebooted vault admits a reservation, so the
+    unanchored machine really does release epoch `0` twice. -/
+theorem witness_unanchored_device_restore_reuses_epoch :
+    ∃ (s : AnchoredCustodyState) (trace : List AnchoredCustodyEvent),
+      s.emitted = [] ∧
+      ¬ ((runAnchoredCustody false concreteBasePath .beltLatch concreteVaultKeyId 1024
+        concreteKeyedMac256 concreteVaultMacKey s trace).emitted.map (·.epoch)).Nodup := by
+  have h1Lt64 : (1 : InodeId) < 2 ^ 64 :=
+    Nat.lt_trans (lt_two_pow_32_of_le_8192 (by decide : 1 ≤ 8192)) two_pow_32_lt_two_pow_64
+  have hPay32 : (encodeCustodyWalPayload .beltLatch 1024 []).length < 2 ^ 32 :=
+    encodeCustodyWalPayload_lt_two_pow_32 .beltLatch 1024 []
+  obtain ⟨fs0, _, _, hDur0⟩ :=
+    provisionGenesis_rebooted_succeeds PosixFsState.empty 1 concreteBasePath
+      concreteVaultKeyId concreteGenesisNonce (encodeCustodyWalPayload .beltLatch 1024 [])
+      concreteKeyedMac256 concreteKeyedMac256_wellFormed concreteVaultMacKey
+      rfl rfl rfl rfl rfl rfl h1Lt64 (by decide) (by decide) hPay32
+  have hDurBoot := vaultDurableAt_after_crash hDur0 (CrashStep.kernelPanic fs0)
+  obtain ⟨fs1, hSign⟩ := honest_sign_complete_when_healthy (st := KernelPanicCrash fs0) 1
+    .beltLatch 1024 [0xAA] rfl rfl hDurBoot (by decide) (by decide)
+  refine ⟨{ fs := KernelPanicCrash fs0, anchorEpoch := 0, pending := none, emitted := [] },
+    [.reserve 1 [0xAA] {}, .release, .replaceDevice (KernelPanicCrash fs0),
+     .reserve 1 [0xAA] {}, .release], rfl, ?_⟩
+  rw [tooth_unanchored_device_restore_reuses_epoch concreteBasePath .beltLatch concreteVaultKeyId
+    1024 concreteKeyedMac256 concreteVaultMacKey _ 1 [0xAA] {} rfl hSign]
+  intro hNd
+  simp at hNd
+
+/-! ### Append-Only MAC-Chained Burn Journal (`qsag-fts/src/wal.rs`) -/
+
+/-- The journal file after chunking into `RECORD_LEN = 42`-byte records: each full chunk is a
+    10-byte body `(party_be16 ‖ epoch_be64)` and a 32-byte tag; `tornTail` is whatever follows the
+    last full chunk (`len % 42` bytes). -/
+structure BurnJournalFile where
+  records  : List (List UInt8 × List UInt8)
+  tornTail : List UInt8
+  deriving Repr, DecidableEq
+
+/-- `record_tag` chained through `last_tag`: each tag authenticates its body AND the previous
+    tag. Returns the bodies and the final tag, or `none` at the first tag that does not chain. -/
+def verifyBurnChain (tagFn : List UInt8 → List UInt8 → List UInt8) :
+    List UInt8 → List (List UInt8 × List UInt8) → Option (List (List UInt8) × List UInt8)
+  | prev, [] => some ([], prev)
+  | prev, (body, tag) :: rest =>
+    if tag = tagFn prev body then
+      match verifyBurnChain tagFn tag rest with
+      | some (bodies, last) => some (body :: bodies, last)
+      | none => none
+    else none
+
+/-- `DurableBurnJournal::load` (recovery path): the length must be a whole number of records,
+    every tag must chain from the genesis tag, and no entry may repeat. Fails closed otherwise;
+    there is no truncate-and-continue path. -/
+def openBurnJournal (tagFn : List UInt8 → List UInt8 → List UInt8) (genesisTag : List UInt8)
+    (f : BurnJournalFile) : Option (List (List UInt8) × List UInt8) :=
+  if f.tornTail = [] then
+    match verifyBurnChain tagFn genesisTag f.records with
+    | some (bodies, last) => if bodies.Nodup then some (bodies, last) else none
+    | none => none
+  else none
+
+/-- `reserve`: one appended, synced record tagged against the current `last_tag`. -/
+def appendBurnRecord (tagFn : List UInt8 → List UInt8 → List UInt8) (last body : List UInt8)
+    (f : BurnJournalFile) : BurnJournalFile :=
+  { f with records := f.records ++ [(body, tagFn last body)] }
+
+theorem verifyBurnChain_append (tagFn : List UInt8 → List UInt8 → List UInt8) :
+    ∀ (rs : List (List UInt8 × List UInt8)) (prev : List UInt8)
+      (bodies : List (List UInt8)) (last body tag : List UInt8),
+      verifyBurnChain tagFn prev rs = some (bodies, last) →
+      verifyBurnChain tagFn prev (rs ++ [(body, tag)]) =
+        if tag = tagFn last body then some (bodies ++ [body], tag) else none
+  | [], prev, bodies, last, body, tag, h => by
+    simp only [verifyBurnChain, Option.some.injEq, Prod.mk.injEq] at h
+    obtain ⟨rfl, rfl⟩ := h
+    simp only [List.nil_append, verifyBurnChain]
+  | (b0, t0) :: rs, prev, bodies, last, body, tag, h => by
+    simp only [verifyBurnChain] at h
+    split at h
+    · rename_i hTag
+      cases hRest : verifyBurnChain tagFn t0 rs with
+      | none => rw [hRest] at h; cases h
+      | some bl =>
+        obtain ⟨bs, l⟩ := bl
+        rw [hRest] at h
+        simp only [Option.some.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        subst hTag
+        have ih := verifyBurnChain_append tagFn rs _ bs l body tag hRest
+        simp only [List.cons_append, verifyBurnChain, ↓reduceIte, ih]
+        by_cases hT : tag = tagFn l body <;> simp [hT]
+    · cases h
+
+/-- **Authenticated history is append-only**: whatever verifies after more records were written
+    still starts with exactly the bodies that verified before. A reservation that was durable
+    and verified is in every later successful recovery of the extended file. -/
+theorem verifyBurnChain_prefix (tagFn : List UInt8 → List UInt8 → List UInt8) :
+    ∀ (rs rs' : List (List UInt8 × List UInt8)) (prev : List UInt8)
+      (bodies' : List (List UInt8)) (last' : List UInt8),
+      verifyBurnChain tagFn prev (rs ++ rs') = some (bodies', last') →
+      ∃ bodies last tail, verifyBurnChain tagFn prev rs = some (bodies, last) ∧
+        verifyBurnChain tagFn last rs' = some (tail, last') ∧ bodies' = bodies ++ tail
+  | [], rs', prev, bodies', last', h => ⟨[], prev, bodies', rfl, h, rfl⟩
+  | (b0, t0) :: rs, rs', prev, bodies', last', h => by
+    simp only [List.cons_append, verifyBurnChain] at h
+    split at h
+    · rename_i hTag
+      cases hRest : verifyBurnChain tagFn t0 (rs ++ rs') with
+      | none => rw [hRest] at h; cases h
+      | some bl =>
+        obtain ⟨bs, l⟩ := bl
+        rw [hRest] at h
+        simp only [Option.some.injEq, Prod.mk.injEq] at h
+        obtain ⟨rfl, rfl⟩ := h
+        obtain ⟨bodies, last, tail, h1, h2, h3⟩ :=
+          verifyBurnChain_prefix tagFn rs rs' t0 bs l hRest
+        subst hTag
+        refine ⟨b0 :: bodies, last, tail, ?_, h2, by rw [h3]; rfl⟩
+        simp only [verifyBurnChain, ↓reduceIte, h1]
+    · cases h
+
+/-- A crash inside `reserve` leaves the appended region in one of three shapes; recovery of each:
+    nothing reached the medium (old journal), the whole record did (old entries plus the new
+    one), or a partial/garbled record did. A short tail always FAILS CLOSED; a full-length
+    garbled record fails closed unless its tag chains (`tag = tagFn last body'`), which for a
+    body other than the reserved one is a forgery of the chain MAC. -/
+theorem burnJournal_append_crash_outcomes (tagFn : List UInt8 → List UInt8 → List UInt8)
+    (genesisTag : List UInt8) (f : BurnJournalFile) (bodies : List (List UInt8))
+    (last body : List UInt8)
+    (hOpen : openBurnJournal tagFn genesisTag f = some (bodies, last))
+    (hFresh : body ∉ bodies) :
+    openBurnJournal tagFn genesisTag (appendBurnRecord tagFn last body f) =
+      some (bodies ++ [body], tagFn last body) ∧
+    (∀ tail : List UInt8, tail ≠ [] →
+      openBurnJournal tagFn genesisTag { f with tornTail := tail } = none) ∧
+    (∀ body' tag' : List UInt8, tag' ≠ tagFn last body' →
+      openBurnJournal tagFn genesisTag { f with records := f.records ++ [(body', tag')] } =
+        none) := by
+  unfold openBurnJournal at hOpen
+  split at hOpen
+  · rename_i hTail
+    cases hV : verifyBurnChain tagFn genesisTag f.records with
+    | none => rw [hV] at hOpen; cases hOpen
+    | some bl =>
+      obtain ⟨bs, l⟩ := bl
+      rw [hV] at hOpen
+      dsimp only at hOpen
+      split at hOpen
+      · rename_i hNd
+        simp only [Option.some.injEq, Prod.mk.injEq] at hOpen
+        obtain ⟨rfl, rfl⟩ := hOpen
+        refine ⟨?_, ?_, ?_⟩
+        · have hApp := verifyBurnChain_append tagFn f.records genesisTag bs l body
+            (tagFn l body) hV
+          simp only [↓reduceIte] at hApp
+          have hNd' : (bs ++ [body]).Nodup := nodup_snoc hNd (fun y hy hEq => hFresh (hEq ▸ hy))
+          simp only [openBurnJournal, appendBurnRecord, hTail, ↓reduceIte, hApp, hNd']
+        · intro tail hNe
+          simp only [openBurnJournal, hNe, ↓reduceIte]
+        · intro body' tag' hBad
+          have hApp := verifyBurnChain_append tagFn f.records genesisTag bs l body' tag' hV
+          simp only [hBad, ↓reduceIte] at hApp
+          simp only [openBurnJournal, hTail, ↓reduceIte, hApp]
+      · cases hOpen
+  · cases hOpen
+
+/-- **`#tooth` (`tooth_burnJournal_truncation_is_undetectable_without_anchor`)**: dropping the
+    last authenticated record leaves a journal that still opens, with one burn fewer. The chain
+    authenticates prefixes; only an external count (or the last tag) pins the newest record. -/
+theorem tooth_burnJournal_truncation_is_undetectable_without_anchor
+    (tagFn : List UInt8 → List UInt8 → List UInt8) (genesisTag : List UInt8)
+    (f : BurnJournalFile) (bodies : List (List UInt8)) (last body : List UInt8)
+    (hOpen : openBurnJournal tagFn genesisTag f = some (bodies, last))
+    (hFresh : body ∉ bodies) :
+    ∃ g : BurnJournalFile,
+      openBurnJournal tagFn genesisTag g = some (bodies ++ [body], tagFn last body) ∧
+      openBurnJournal tagFn genesisTag { g with records := g.records.dropLast } =
+        some (bodies, last) := by
+  refine ⟨appendBurnRecord tagFn last body f,
+    (burnJournal_append_crash_outcomes tagFn genesisTag f bodies last body hOpen hFresh).1, ?_⟩
+  have hEq : ({ appendBurnRecord tagFn last body f with
+      records := (appendBurnRecord tagFn last body f).records.dropLast } : BurnJournalFile) = f := by
+    cases f with
+    | mk rs t => simp [appendBurnRecord]
+  rw [hEq]
+  exact hOpen
+
+/-- Recovery pinned by an external burn count. -/
+def openBurnJournalAnchored (tagFn : List UInt8 → List UInt8 → List UInt8)
+    (genesisTag : List UInt8) (anchoredCount : Nat) (f : BurnJournalFile) :
+    Option (List (List UInt8) × List UInt8) :=
+  match openBurnJournal tagFn genesisTag f with
+  | some (bodies, last) => if anchoredCount ≤ bodies.length then some (bodies, last) else none
+  | none => none
+
+/-- With the external count the truncated journal is refused. -/
+theorem burnJournal_anchor_rejects_truncation
+    (tagFn : List UInt8 → List UInt8 → List UInt8) (genesisTag : List UInt8)
+    (f : BurnJournalFile) (bodies : List (List UInt8)) (last : List UInt8) (anchoredCount : Nat)
+    (hOpen : openBurnJournal tagFn genesisTag f = some (bodies, last))
+    (hShort : bodies.length < anchoredCount) :
+    openBurnJournalAnchored tagFn genesisTag anchoredCount f = none := by
+  have hNot : ¬ anchoredCount ≤ bodies.length := by omega
+  simp only [openBurnJournalAnchored, hOpen, hNot, ↓reduceIte]
+
+/-! ### Two-File Vault Update: Companion MAC Then Atomic Rename (`qsag-cli/src/vault.rs`) -/
+
+/-- What `Vault::authenticate` reads: the 32-byte companion MAC held in the locked
+    `.vault.lock` inode, and the secret-state file (its recorded `state_mac` and its contents). -/
+structure VaultTwoFileState (Secret : Type) where
+  companionMac : List UInt8
+  recordedMac  : List UInt8
+  secret       : Secret
+
+/-- `authenticate`: the recorded MAC and the companion MAC must both equal the MAC recomputed
+    over the state. -/
+def vaultAuthenticate {Secret : Type} (tag : Secret → List UInt8) (v : VaultTwoFileState Secret) :
+    Bool :=
+  v.recordedMac == tag v.secret && v.companionMac == tag v.secret
+
+/-- Every state a crash can leave during `Vault::reserve`, which first overwrites the companion
+    MAC in place (`seal`: `write_all` + `sync_all`) and then replaces the state file by
+    temp-file + rename (`replace_secret`). `companionTorn g`: the in-place 32-byte overwrite was
+    torn into arbitrary bytes `g`. -/
+inductive VaultReserveCrashPoint where
+  | beforeSeal
+  | companionTorn (g : List UInt8)
+  | sealedNotReplaced
+  | replaced
+
+def vaultReserveCrashState {Secret : Type} (tag : Secret → List UInt8) (old new : Secret) :
+    VaultReserveCrashPoint → VaultTwoFileState Secret
+  | .beforeSeal => { companionMac := tag old, recordedMac := tag old, secret := old }
+  | .companionTorn g => { companionMac := g, recordedMac := tag old, secret := old }
+  | .sealedNotReplaced => { companionMac := tag new, recordedMac := tag old, secret := old }
+  | .replaced => { companionMac := tag new, recordedMac := tag new, secret := new }
+
+/-- **Interrupted two-file update is old, new, or fail-closed
+    (`vault_reserve_crash_old_new_or_fail_closed`)**: at every crash point, `authenticate`
+    succeeds only on the complete old state or the complete new state. In particular the window
+    between `seal` and the rename fails closed whenever the two states have different MACs. -/
+theorem vault_reserve_crash_old_new_or_fail_closed {Secret : Type} (tag : Secret → List UInt8)
+    (old new : Secret) (pt : VaultReserveCrashPoint)
+    (hAuth : vaultAuthenticate tag (vaultReserveCrashState tag old new pt) = true) :
+    (vaultReserveCrashState tag old new pt).secret = old ∧
+      (vaultReserveCrashState tag old new pt).companionMac = tag old ∨
+    (vaultReserveCrashState tag old new pt).secret = new ∧
+      (vaultReserveCrashState tag old new pt).companionMac = tag new ∧ pt = .replaced := by
+  cases pt with
+  | beforeSeal => exact Or.inl ⟨rfl, rfl⟩
+  | companionTorn g =>
+    simp only [vaultAuthenticate, vaultReserveCrashState, Bool.and_eq_true, beq_iff_eq] at hAuth
+    exact Or.inl ⟨rfl, hAuth.2⟩
+  | sealedNotReplaced =>
+    simp only [vaultAuthenticate, vaultReserveCrashState, Bool.and_eq_true, beq_iff_eq] at hAuth
+    exact Or.inl ⟨rfl, hAuth.2⟩
+  | replaced => exact Or.inr ⟨rfl, rfl, rfl⟩
+
+/-- **State-file rollback is caught by the companion MAC**: after a completed `reserve`, putting
+    the OLD state file back (without rolling back the locked companion inode) fails
+    authentication unless the two states collide under the MAC. Rolling back BOTH files is a
+    whole-vault restore and needs the external anchor. -/
+theorem vault_state_file_rollback_rejected {Secret : Type} (tag : Secret → List UInt8)
+    (old new : Secret) (hDistinct : tag old ≠ tag new) :
+    vaultAuthenticate tag
+      { companionMac := tag new, recordedMac := tag old, secret := old } = false := by
+  have h : (tag new == tag old) = false := by
+    cases hb : (tag new == tag old) with
+    | false => rfl
+    | true => exact absurd (eq_of_beq hb).symm hDistinct
+  show ((tag old == tag old) && (tag new == tag old)) = false
+  rw [h, Bool.and_false]
 
 end Qsag

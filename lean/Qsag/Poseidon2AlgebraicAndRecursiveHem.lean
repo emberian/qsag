@@ -20,16 +20,19 @@ module
    with `n + 1` coefficients vanishing on all of them (`univariate_interpolation_underdetermined`).
    These are statements about the parameter set and about polynomials of a given degree. The
    degree of the permutation's actual interpolation polynomial is not computed here.
-4. **§4 Two-layer hierarchical `Hem`.** A root verifier (`verifyHierarchicalHem`) over `M` shard
-   certificates, each a `verifySuccinctAggregate` proof on the shard-scoped message
-   `shardBoundMessage shardId epochFloor msg`, with pairwise-distinct shard ids, pairwise-disjoint
-   committees, and a hash commitment to the shard registry. `extractHierarchicalHemQuorums`
-   returns one valid signature per active signer of every shard, or a registry hash collision, or
-   a shard index with a single-layer break witness. `hierarchical_hem_soundness_error_bound` is
-   the resulting union bound over a finite coin space, and
-   `tooth_unscoped_shard_id_allows_quorum_replay_multiplication` replays one shard `M` times
-   against a verifier without the namespace checks. The root verifies shard certificates
-   directly; no verifier is arithmetized inside another proof.
+4. **§4 Two-layer hierarchical `Hem`.** Root verifiers (`verifyHierarchicalHem`, `verifyHemHierarchy`,
+   and direct policy check `verifyHemHierarchyAgainstRegistry`) over `M` shard certificates, each a
+   `verifySuccinctAggregate` proof on `shardBoundMessage shardId epochFloor msg`, with
+   pairwise-distinct shard ids, pairwise-disjoint committees, and an injective commitment to the
+   shard policy registry (`ShardRegistration` binding `shardId`, `threshold`, `suiteId`, `params`,
+   and `committee`, with `1 ≤ threshold ≤ |committee|`). `extractShardEnvFromTranscript` grounds
+   `StagesBound` in prover commitment-opening transcripts with exact opening-cost accounting
+   (`hierarchyTranscriptQueryCost`) and composes with `extractHierarchicalHemQuorums`
+   (`extractHierarchicalHemFromTranscripts`). `hierarchical_hem_soundness_error_bound` establishes
+   the finite-coin union bound under authenticated registry digests (`HashCollisionWitness H` on
+   root mismatch), paired with `#tooth` theorems `tooth_forged_lower_shard_threshold_rejected` and
+   `tooth_unscoped_shard_id_allows_quorum_replay_multiplication`. The root verifies shard
+   certificates directly; no verifier is arithmetized inside another proof.
 5. **§5 Deployed width-12 inverses and exact M4 branch number.** Both actual linear layers and
    both round types have two-sided inverses. The deployed permutation is injective. Cofactor
    certificates for all 69 square minors establish the universal M4 branch bound, with a unit
@@ -39,10 +42,12 @@ module
    eight such rounds have at least twenty. A polynomial-expression circuit evaluates to the
    actual four-lane round and has degree at most `7^r` after `r` rounds. These are component
    bounds, not a differential probability or interpolation-degree lower bound for width 12.
-7. **§7 Concrete hierarchical certificates.** Two distinct singleton committees with threshold
-   one use the honest two-stage WHIR prover and a Poseidon2 registry commitment. The concrete
-   replay theorem has no accepting-certificate hypothesis. The example uses the field-based
-   signature suite from `Aggregation`, not a claimed secure instantiation of that suite.
+7. **§7 Concrete hierarchical certificates & prover transcripts.** Two distinct singleton committees
+   with threshold one use the honest two-stage WHIR prover, verified commitment-opening transcripts,
+   and a Poseidon2 registry commitment, alongside concrete Poseidon2 forged-threshold rejection
+   witnesses (`1 → 0` and `2 → 1` on a two-key committee) and unconditional replay rejection. The
+   example uses the field-based signature suite from `Aggregation`, not a claimed secure
+   instantiation of that suite.
 -/
 
 public import Qsag.Goldilocks
@@ -536,21 +541,52 @@ structure HemShardProof where
   proof : SuccinctAggregateProof
   fs : List UInt8
 
-/-- Registry row: a shard id together with its custodian cluster's committee. -/
+/-- Registry row: a shard id together with its authorized quorum threshold, hash suite id,
+    signature parameter profile, and custodian cluster's committee. -/
 structure ShardRegistration where
   shardId : List UInt8
+  threshold : Nat
+  suiteId : List UInt8
+  params : PqHashParams
   committee : List PqPublicKey
   deriving DecidableEq
 
-def HemShardProof.registration (s : HemShardProof) : ShardRegistration :=
-  ⟨s.shardId, s.inst.committee⟩
+/-- A shard policy row is well-formed when its required quorum threshold satisfies
+    `1 ≤ threshold ≤ |committee|`. -/
+def ShardRegistration.WellFormed (r : ShardRegistration) : Bool :=
+  decide (1 ≤ r.threshold) && decide (r.threshold ≤ r.committee.length)
 
+def HemShardProof.registration (s : HemShardProof) : ShardRegistration :=
+  ⟨s.shardId, s.threshold, s.inst.suite.suiteId, s.inst.params, s.inst.committee⟩
+
+/-- Canonical length-framed serialization of all 8 fields of `PqHashParams`. -/
+def encodePqHashParams (p : PqHashParams) : List UInt8 :=
+  encodeMultiFrame [
+    leb128 p.w,
+    leb128 p.ell1,
+    leb128 p.subtreeHeight,
+    leb128 p.numLayers,
+    leb128 p.forsTrees,
+    leb128 p.forsHeight,
+    leb128 p.maxSigsLog2,
+    [if p.statefulJorts then 1 else 0]
+  ]
+
+/-- Canonical length-framed serialization of all 5 fields of `ShardRegistration`. -/
 def encodeRegistration (r : ShardRegistration) : List UInt8 :=
-  encodeMultiFrame [r.shardId,
-    encodeMultiFrame (r.committee.map fun pk => encodeMultiFrame [pk.pkSeed, pk.pkRoot])]
+  encodeMultiFrame [
+    r.shardId,
+    leb128 r.threshold,
+    r.suiteId,
+    encodePqHashParams r.params,
+    encodeMultiFrame (r.committee.map fun pk => encodeMultiFrame [pk.pkSeed, pk.pkRoot])
+  ]
 
 def encodeRegistry (rs : List ShardRegistration) : List UInt8 :=
   encodeMultiFrame (rs.map encodeRegistration)
+
+private theorem leb128_injective {a b : Nat} (h : leb128 a = leb128 b) : a = b :=
+  (leb128_prefix_inj (r₁ := []) (r₂ := []) (by simpa using h)).1
 
 private theorem map_inj_of_inj {α β : Type} {f : α → β} (hf : ∀ a b, f a = f b → a = b) :
     ∀ {l l' : List α}, l.map f = l'.map f → l = l'
@@ -564,24 +600,51 @@ private theorem map_inj_of_inj {α β : Type} {f : α → β} (hf : ∀ a b, f a
 private theorem encodePk_injective (a b : PqPublicKey)
     (h : encodeMultiFrame [a.pkSeed, a.pkRoot] = encodeMultiFrame [b.pkSeed, b.pkRoot]) :
     a = b := by
-  have hList := encodeMultiFrame_injective h
-  simp only [List.cons.injEq, and_true] at hList
+  have h0 := encodeMultiFrame_injective h
+  obtain ⟨hSeed, h1⟩ := List.cons.inj h0
+  obtain ⟨hRoot, _⟩ := List.cons.inj h1
   cases a; cases b
-  simp only at hList
-  rw [hList.1, hList.2]
+  simp only at hSeed hRoot
+  rw [hSeed, hRoot]
 
-private theorem encodeRegistration_injective (a b : ShardRegistration)
-    (h : encodeRegistration a = encodeRegistration b) : a = b := by
-  have hList := encodeMultiFrame_injective h
-  simp only [List.cons.injEq, and_true] at hList
-  have hCom := map_inj_of_inj encodePk_injective (encodeMultiFrame_injective hList.2)
+theorem encodePqHashParams_injective {a b : PqHashParams}
+    (h : encodePqHashParams a = encodePqHashParams b) : a = b := by
+  have h0 := encodeMultiFrame_injective h
+  obtain ⟨hw, h1⟩ := List.cons.inj h0
+  obtain ⟨hell, h2⟩ := List.cons.inj h1
+  obtain ⟨hsub, h3⟩ := List.cons.inj h2
+  obtain ⟨hlay, h4⟩ := List.cons.inj h3
+  obtain ⟨hft, h5⟩ := List.cons.inj h4
+  obtain ⟨hfh, h6⟩ := List.cons.inj h5
+  obtain ⟨hmax, h7⟩ := List.cons.inj h6
+  obtain ⟨hst, _⟩ := List.cons.inj h7
+  have hb : a.statefulJorts = b.statefulJorts := by
+    cases ha : a.statefulJorts <;> cases hb' : b.statefulJorts <;>
+      simp [ha, hb'] at hst <;> rfl
   cases a; cases b
-  simp only at hList hCom
-  rw [hList.1, hCom]
+  simp only at hw hell hsub hlay hft hfh hmax hb
+  rw [leb128_injective hw, leb128_injective hell, leb128_injective hsub,
+      leb128_injective hlay, leb128_injective hft, leb128_injective hfh,
+      leb128_injective hmax, hb]
+
+theorem encodeRegistration_injective {a b : ShardRegistration}
+    (h : encodeRegistration a = encodeRegistration b) : a = b := by
+  have h0 := encodeMultiFrame_injective h
+  obtain ⟨hSid, h1⟩ := List.cons.inj h0
+  obtain ⟨hThr, h2⟩ := List.cons.inj h1
+  obtain ⟨hSuite, h3⟩ := List.cons.inj h2
+  obtain ⟨hParams, h4⟩ := List.cons.inj h3
+  obtain ⟨hComRaw, _⟩ := List.cons.inj h4
+  have hThrEq := leb128_injective hThr
+  have hParamsEq := encodePqHashParams_injective hParams
+  have hCom := map_inj_of_inj encodePk_injective (encodeMultiFrame_injective hComRaw)
+  cases a; cases b
+  simp only at hSid hThrEq hSuite hParamsEq hCom
+  rw [hSid, hThrEq, hSuite, hParamsEq, hCom]
 
 theorem encodeRegistry_injective {rs₁ rs₂ : List ShardRegistration}
     (h : encodeRegistry rs₁ = encodeRegistry rs₂) : rs₁ = rs₂ :=
-  map_inj_of_inj encodeRegistration_injective (encodeMultiFrame_injective h)
+  map_inj_of_inj (fun _ _ => encodeRegistration_injective) (encodeMultiFrame_injective h)
 
 /-- Two distinct registries under one digest are a concrete collision of `H`. -/
 def registryCollision (H : Hash) {digest : List UInt8} {claimed registry : List ShardRegistration}
@@ -590,10 +653,13 @@ def registryCollision (H : Hash) {digest : List UInt8} {claimed registry : List 
   ⟨encodeRegistry claimed, encodeRegistry registry,
     fun h => hNe (encodeRegistry_injective h), hClaimed.trans hReg.symm⟩
 
-/-- Per-shard check: shard-scoped message, threshold met by the bitmap, accepting certificate. -/
+/-- Per-shard check: shard-scoped message, well-formed threshold (`1 ≤ threshold ≤ |committee|`),
+    threshold met by the bitmap, and accepting succinct aggregate certificate. -/
 def verifyHemShard (arith : RowArithmetization) (dom : WhirDomain)
     (epochFloor msg : List UInt8) (s : HemShardProof) : Bool :=
   decide (s.inst.message = shardBoundMessage s.shardId epochFloor msg) &&
+  decide (1 ≤ s.threshold) &&
+  decide (s.threshold ≤ s.inst.committee.length) &&
   decide (s.threshold ≤ bitmapPopcountSpec s.proof.agg.bitmap) &&
   verifySuccinctAggregate arith dom s.inst s.proof s.fs
 
@@ -613,6 +679,19 @@ def hierarchicalThresholdSum : List HemShardProof → Nat
   | [] => 0
   | s :: rest => s.threshold + hierarchicalThresholdSum rest
 
+def registryThresholdSum : List ShardRegistration → Nat
+  | [] => 0
+  | r :: rest => r.threshold + registryThresholdSum rest
+
+theorem hierarchicalThresholdSum_eq_registryThresholdSum :
+    ∀ shards : List HemShardProof,
+      hierarchicalThresholdSum shards =
+        registryThresholdSum (shards.map HemShardProof.registration)
+  | [] => rfl
+  | s :: rest => by
+    simp only [List.map_cons, hierarchicalThresholdSum, registryThresholdSum,
+      HemShardProof.registration, hierarchicalThresholdSum_eq_registryThresholdSum rest]
+
 /-- Root verifier of the two-layer hierarchy: registry commitment, pairwise-distinct shard ids,
     pairwise-disjoint duplicate-free committees, and every shard certificate. -/
 def verifyHierarchicalHem (H : Hash) (arith : RowArithmetization) (dom : WhirDomain)
@@ -622,15 +701,39 @@ def verifyHierarchicalHem (H : Hash) (arith : RowArithmetization) (dom : WhirDom
   decide ((hierarchicalCommittee shards).Nodup) &&
   shards.all (verifyHemShard arith dom epochFloor msg)
 
+abbrev verifyHemHierarchy := verifyHierarchicalHem
+
+/-- Direct registered-policy root verifier: enforces `ShardRegistration.WellFormed` on every row
+    and exact structural equality between `shards.map HemShardProof.registration` and `registry`. -/
+def verifyHemHierarchyAgainstRegistry (arith : RowArithmetization) (dom : WhirDomain)
+    (registry : List ShardRegistration) (epochFloor msg : List UInt8)
+    (shards : List HemShardProof) : Bool :=
+  registry.all ShardRegistration.WellFormed &&
+  decide (shards.map HemShardProof.registration = registry) &&
+  decide ((hierarchicalShardIds shards).Nodup) &&
+  decide ((hierarchicalCommittee shards).Nodup) &&
+  shards.all (verifyHemShard arith dom epochFloor msg)
+
 theorem verifyHemShard_facts {arith : RowArithmetization} {dom : WhirDomain}
     {epochFloor msg : List UInt8} {s : HemShardProof}
     (h : verifyHemShard arith dom epochFloor msg s = true) :
     s.inst.message = shardBoundMessage s.shardId epochFloor msg ∧
+    1 ≤ s.threshold ∧
+    s.threshold ≤ s.inst.committee.length ∧
     s.threshold ≤ bitmapPopcountSpec s.proof.agg.bitmap ∧
     verifySuccinctAggregate arith dom s.inst s.proof s.fs = true := by
   unfold verifyHemShard at h
   simp only [Bool.and_eq_true, decide_eq_true_eq] at h
-  exact ⟨h.1.1, h.1.2, h.2⟩
+  exact ⟨h.1.1.1.1, h.1.1.1.2, h.1.1.2, h.1.2, h.2⟩
+
+theorem verifyHemShard_wellFormed {arith : RowArithmetization} {dom : WhirDomain}
+    {epochFloor msg : List UInt8} {s : HemShardProof}
+    (h : verifyHemShard arith dom epochFloor msg s = true) :
+    s.registration.WellFormed = true := by
+  have hF := verifyHemShard_facts h
+  simp only [ShardRegistration.WellFormed, HemShardProof.registration,
+    Bool.and_eq_true, decide_eq_true_eq]
+  exact ⟨hF.2.1, hF.2.2.1⟩
 
 theorem verifyHierarchicalHem_facts {H : Hash} {arith : RowArithmetization} {dom : WhirDomain}
     {registryDigest epochFloor msg : List UInt8} {shards : List HemShardProof}
@@ -642,6 +745,32 @@ theorem verifyHierarchicalHem_facts {H : Hash} {arith : RowArithmetization} {dom
   unfold verifyHierarchicalHem at h
   simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at h
   exact ⟨h.1.1.1, h.1.1.2, h.1.2, h.2⟩
+
+theorem verifyHemHierarchyAgainstRegistry_facts {arith : RowArithmetization} {dom : WhirDomain}
+    {registry : List ShardRegistration} {epochFloor msg : List UInt8}
+    {shards : List HemShardProof}
+    (h : verifyHemHierarchyAgainstRegistry arith dom registry epochFloor msg shards = true) :
+    (∀ r ∈ registry, r.WellFormed = true) ∧
+    shards.map HemShardProof.registration = registry ∧
+    (hierarchicalShardIds shards).Nodup ∧
+    (hierarchicalCommittee shards).Nodup ∧
+    ∀ s ∈ shards, verifyHemShard arith dom epochFloor msg s = true := by
+  unfold verifyHemHierarchyAgainstRegistry at h
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at h
+  exact ⟨h.1.1.1.1, h.1.1.1.2, h.1.1.2, h.1.2, h.2⟩
+
+theorem verifyHemHierarchyAgainstRegistry_implies_verifyHierarchicalHem (H : Hash)
+    {arith : RowArithmetization} {dom : WhirDomain}
+    {registry : List ShardRegistration} {registryDigest epochFloor msg : List UInt8}
+    {shards : List HemShardProof}
+    (hReg : H (encodeRegistry registry) = registryDigest)
+    (h : verifyHemHierarchyAgainstRegistry arith dom registry epochFloor msg shards = true) :
+    verifyHierarchicalHem H arith dom registryDigest epochFloor msg shards = true := by
+  have hF := verifyHemHierarchyAgainstRegistry_facts h
+  unfold verifyHierarchicalHem
+  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true]
+  rw [hF.2.1]
+  exact ⟨⟨⟨hReg, hF.2.2.1⟩, hF.2.2.2.1⟩, hF.2.2.2.2⟩
 
 /-- Signing slot of the hierarchy: one committee key of one shard. -/
 structure HemSlot where

@@ -406,8 +406,30 @@ pub trait AcceleratorBackend: Send + Sync {
     /// Parallel 24-round `Keccak-f[1600]` across `states` (accelerating WOTS+/FORS/FTS chains & OT).
     fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]);
 
+    /// Fallible `Keccak-f[1600]` batch execution returning the exact [`CertifiedKernelPin`] of the
+    /// kernel that actually executed (`Err` if hardware execution failed instead of misattributing
+    /// a CPU fallback to a hardware kernel pin).
+    fn try_batch_keccak_f1600_pinned(
+        &self,
+        states: &mut [[u64; 25]],
+    ) -> Result<CertifiedKernelPin, AccelError> {
+        self.batch_keccak_f1600(states);
+        Ok(self.kernel_pin(KernelSlot::BatchKeccakF1600))
+    }
+
     /// Parallel Width-12 canonical Goldilocks `Poseidon2` (`p = 2^64 - 2^32 + 1`) across `states`.
     fn batch_poseidon2_perm12(&self, states: &mut [[u64; 12]]);
+
+    /// Fallible Width-12 `Poseidon2` batch execution returning the exact [`CertifiedKernelPin`] of
+    /// the kernel that actually executed (`Err` if hardware execution failed instead of
+    /// misattributing a CPU fallback to a hardware kernel pin).
+    fn try_batch_poseidon2_perm12_pinned(
+        &self,
+        states: &mut [[u64; 12]],
+    ) -> Result<CertifiedKernelPin, AccelError> {
+        self.batch_poseidon2_perm12(states);
+        Ok(self.kernel_pin(KernelSlot::BatchPoseidon2Perm12))
+    }
 
     /// In-place radix-2 Goldilocks NTT (`inverse == false`) and inverse NTT (`inverse == true`).
     ///
@@ -443,7 +465,7 @@ pub trait AcceleratorBackend: Send + Sync {
 
     /// Position-tweaked batch Poseidon2 Merkle compression binding **all 4 limbs `pk_seed[0..4]`**,
     /// `layer`, and global parent index `start_parent_idx + parent_idx`
-    /// (`children.len() == 2 * out_parents.len()`).
+    /// (`children.len() == 2 * out_parents.len()`; supported parent indices lie in `0..=u32::MAX`).
     fn try_merkle_layer_poseidon2_at(
         &self,
         children: &[[u64; 4]],
@@ -840,8 +862,20 @@ impl<B: AcceleratorBackend> AcceleratorBackend for CertifiedBackend<B> {
     fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]) {
         self.inner.batch_keccak_f1600(states);
     }
+    fn try_batch_keccak_f1600_pinned(
+        &self,
+        states: &mut [[u64; 25]],
+    ) -> Result<CertifiedKernelPin, AccelError> {
+        self.inner.try_batch_keccak_f1600_pinned(states)
+    }
     fn batch_poseidon2_perm12(&self, states: &mut [[u64; 12]]) {
         self.inner.batch_poseidon2_perm12(states);
+    }
+    fn try_batch_poseidon2_perm12_pinned(
+        &self,
+        states: &mut [[u64; 12]],
+    ) -> Result<CertifiedKernelPin, AccelError> {
+        self.inner.try_batch_poseidon2_perm12_pinned(states)
     }
     fn goldilocks_ntt_inplace(
         &self,

@@ -75,14 +75,18 @@ pub struct ParallelSeededSignSession<'a> {
     grind_counter: u32,
     result: Option<ParallelSeededSignResult>,
     complete: bool,
+    mac_opening_exposed: bool,
 }
 impl Drop for ParallelSeededSignSession<'_> {
     fn drop(&mut self) {
         ct_zeroize_u128s(&mut self.payload);
-        // Once MAC differences can have been sent, an interrupted check may have
-        // exposed the authentication key. Retain custody bytes but quarantine
-        // this authentication context until freshly authenticated preprocessing.
-        if !self.complete && matches!(self.phase, Phase::IntermediateMacOpen | Phase::MacOpen) {
+        // Once MAC differences can have been sent, an interrupted or rushing-aborted
+        // check may have exposed the authentication key. Retain custody bytes but
+        // quarantine this authentication context until freshly authenticated preprocessing.
+        if !self.complete
+            && (self.mac_opening_exposed
+                || matches!(self.phase, Phase::IntermediateMacOpen | Phase::MacOpen))
+        {
             self.share.poison();
         }
         self.share.pending_openings.clear();
@@ -288,6 +292,7 @@ impl<'a> ParallelSeededSignSession<'a> {
             grind_counter: 0,
             result: None,
             complete: false,
+            mac_opening_exposed: false,
         }
     }
     fn salt(&self) -> [u8; 32] {
@@ -348,9 +353,13 @@ impl<'a> ParallelSeededSignSession<'a> {
         if self.share.poisoned || self.phase == Phase::Aborted {
             return Err(ParallelSeededError::Poisoned);
         }
+        let pre_phase = self.phase;
         let result = self.advance_inner(messages);
         if result.is_err() {
-            if matches!(result, Err(ParallelSeededError::BdozMacCheckFailed)) {
+            if self.mac_opening_exposed
+                || matches!(pre_phase, Phase::IntermediateMacOpen | Phase::MacOpen)
+                || matches!(result, Err(ParallelSeededError::BdozMacCheckFailed))
+            {
                 self.share.poison();
             }
             self.phase = Phase::Aborted;
@@ -402,8 +411,14 @@ impl<'a> ParallelSeededSignSession<'a> {
             self.phase = match self.phase {
                 Phase::PowerCommit => Phase::PowerOpen,
                 Phase::ValueCommit => Phase::ValueOpen,
-                Phase::IntermediateMacCommit => Phase::IntermediateMacOpen,
-                _ => Phase::MacOpen,
+                Phase::IntermediateMacCommit => {
+                    self.mac_opening_exposed = true;
+                    Phase::IntermediateMacOpen
+                }
+                _ => {
+                    self.mac_opening_exposed = true;
+                    Phase::MacOpen
+                }
             };
             return Ok(());
         }
@@ -461,6 +476,7 @@ impl<'a> ParallelSeededSignSession<'a> {
                 if values.iter().any(|&v| v != 0) {
                     return Err(ParallelSeededError::BdozMacCheckFailed);
                 }
+                self.mac_opening_exposed = false;
                 self.share.pending_openings.clear();
                 ct_zeroize_u128s(&mut self.payload);
                 self.payload = self
@@ -475,6 +491,7 @@ impl<'a> ParallelSeededSignSession<'a> {
                 if values != [0, 0] {
                     return Err(ParallelSeededError::BdozMacCheckFailed);
                 }
+                self.mac_opening_exposed = false;
                 self.share.pending_openings.clear();
                 self.after_mac()
             }
@@ -854,5 +871,77 @@ mod release_barrier_tests {
         assert!(injected && rejected);
         drop(sessions);
         assert!(setup.shares.iter().all(|s| s.sk_seed_lanes != [0; 2]));
+    }
+
+    #[test]
+    fn rushing_commitment_mismatch_during_mac_open_poisons_share() {
+        let accel = CpuReferenceBackend::new();
+        let params = ParallelSeededParams {
+            tree_height: 1,
+            winternitz_w: 4,
+            num_chains: 4,
+            target_sum: 6,
+            seed_bytes: 32,
+            node_bytes: 32,
+            randomizer_bytes: 32,
+            max_grind_counter: 1 << 14,
+            bdoz_mac_lanes: 2,
+        };
+        let mut setup = trusted_dealer_setup_for_testing(
+            params,
+            &[1, 2],
+            [0x4A; 32],
+            [0x5B; 32],
+            [0x6C; 32],
+            &accel,
+        )
+        .unwrap();
+        let mut burn = InMemoryBurnLog::default();
+        let siblings = [setup.public_tree_layers[0][1]];
+        let roster: Vec<_> = setup.shares.iter().map(|s| s.party_id).collect();
+        let mut sessions: Vec<_> = setup
+            .shares
+            .iter_mut()
+            .map(|s| {
+                ParallelSeededSignSession::begin(
+                    s,
+                    &ParallelSeededSignRequest {
+                        pk: &setup.pk,
+                        epoch: 0,
+                        msg: b"rushing-mac-abort",
+                        session_id: [0x21; 32],
+                        roster: &roster,
+                        siblings: &siblings,
+                    },
+                    &mut burn,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // Advance until `IntermediateMacOpen`, where honest party 2 has already released its
+        // MAC differences; corrupt party 1 then supplies an invalid salt to trigger
+        // `CommitmentMismatch` instead of `BdozMacCheckFailed`.
+        for _ in 0..200 {
+            if sessions[0].phase == Phase::IntermediateMacOpen {
+                let mut messages: Vec<_> = sessions.iter().map(|s| s.outbound().unwrap()).collect();
+                if let ParallelSeededSignMessage::Opening { salt, .. } = &mut messages[0] {
+                    salt[0] ^= 1;
+                }
+                assert!(matches!(
+                    sessions[1].advance(&messages),
+                    Err(ParallelSeededError::CommitmentMismatch { party_id: 1 })
+                ));
+                break;
+            }
+            let messages: Vec<_> = sessions.iter().map(|s| s.outbound().unwrap()).collect();
+            for s in &mut sessions {
+                s.advance(&messages).unwrap();
+            }
+        }
+        drop(sessions);
+        // Honest party 2 MUST be poisoned immediately so compromised authentication keys
+        // cannot be reused on a subsequent signing session!
+        assert!(setup.shares[1].is_poisoned());
     }
 }

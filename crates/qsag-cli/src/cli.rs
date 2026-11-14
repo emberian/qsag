@@ -175,20 +175,93 @@ impl Drop for Secret32 {
     }
 }
 
-fn read_limited(reader: impl Read, max: u64) -> Result<ZeroizingBuf, CliError> {
-    let mut data = ZeroizingBuf(Vec::new());
-    reader
-        .take(max.saturating_add(1))
-        .read_to_end(&mut data.0)
-        .map_err(|e| CliError::io("reading bounded input", e))?;
-    if data.0.len() as u64 > max {
-        return Err(CliError::input("input exceeds size limit"));
+fn append_zeroizing(buf: &mut Vec<u8>, chunk: &[u8]) {
+    if buf.len() + chunk.len() > buf.capacity() {
+        let next_cap = buf
+            .capacity()
+            .max(64)
+            .saturating_mul(2)
+            .max(buf.len().saturating_add(chunk.len()));
+        let mut next = Vec::with_capacity(next_cap);
+        next.extend_from_slice(buf);
+        let old_len = buf.capacity();
+        buf.resize(old_len, 0);
+        qsag_accel::ct::ct_zeroize_bytes(buf);
+        *buf = next;
     }
+    buf.extend_from_slice(chunk);
+}
+
+fn read_limited_with_hint(
+    mut reader: impl Read,
+    max: u64,
+    cap_hint: usize,
+) -> Result<ZeroizingBuf, CliError> {
+    let bounded_hint = cap_hint.min(usize::try_from(max).unwrap_or(usize::MAX).saturating_add(1));
+    let mut data = ZeroizingBuf(Vec::with_capacity(bounded_hint));
+    let mut chunk = [0u8; 4096];
+    let limit = max.saturating_add(1);
+    let mut total = 0u64;
+    loop {
+        let to_read = chunk.len().min((limit - total) as usize);
+        if to_read == 0 {
+            break;
+        }
+        let n = match reader.read(&mut chunk[..to_read]) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                qsag_accel::ct::ct_zeroize_bytes(&mut chunk);
+                return Err(CliError::io("reading bounded input", e));
+            }
+        };
+        append_zeroizing(&mut data.0, &chunk[..n]);
+        total += n as u64;
+        if total > max {
+            qsag_accel::ct::ct_zeroize_bytes(&mut chunk);
+            return Err(CliError::input("input exceeds size limit"));
+        }
+    }
+    qsag_accel::ct::ct_zeroize_bytes(&mut chunk);
     Ok(data)
 }
 
+fn read_limited(reader: impl Read, max: u64) -> Result<ZeroizingBuf, CliError> {
+    read_limited_with_hint(reader, max, 256)
+}
+
+fn open_nonblocking_regular(path: &str) -> Result<std::fs::File, CliError> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(0x8000 | 0x800);
+    }
+    #[cfg(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "x86",
+            target_arch = "riscv64",
+            target_arch = "riscv32"
+        )
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(0x20000 | 0x800);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(0x100 | 0x4);
+    }
+    opts.open(path).map_err(|e| CliError::io("opening input", e))
+}
+
 pub fn read_bounded_file(path: &str, max_bytes: u64) -> Result<ZeroizingBuf, CliError> {
-    let file = std::fs::File::open(path).map_err(|e| CliError::io("opening input", e))?;
+    let file = open_nonblocking_regular(path)?;
     let meta = file
         .metadata()
         .map_err(|e| CliError::io("inspecting input", e))?;
@@ -197,7 +270,8 @@ pub fn read_bounded_file(path: &str, max_bytes: u64) -> Result<ZeroizingBuf, Cli
             "input is not a regular file within size limit",
         ));
     }
-    read_limited(file, max_bytes)
+    let hint = usize::try_from(meta.len()).unwrap_or(0).saturating_add(1);
+    read_limited_with_hint(file, max_bytes, hint)
 }
 
 /// Read a bounded message, including standard input.

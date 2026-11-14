@@ -2,7 +2,7 @@ module
 /-
 # Qsag.MaliciousSecurity — Dishonest-Majority MACs, Anti-DFA Cut Gate, Resharing & Simplex Safety
 
-Self-contained Lean 4.35 active-security formalization closing `[P0-05..10]`
+Lean 4.35 algebraic active-security models and explicit reduction boundaries
 (`0` Mathlib, `0` sorry, `0` custom axioms, `0 Classical.choice`):
 
 1. **MAC-Authenticated & Share-Level Frobenius Booleanity (`towerFrobenius_eq_zero_iff_bit`,
@@ -16,12 +16,12 @@ Self-contained Lean 4.35 active-security formalization closing `[P0-05..10]`
    Beaver triple, or recover the secret MAC key $\alpha$.
 2. **Pre-Opening Pairwise-PRF Zero-Mask & `SPDZ`/`BDOZ` Batch MAC Soundness (`[P0-08]`,
    `pairwiseZeroMasks_sum_eq_zero`, `spdz_batch_mac_soundness`, `bdoz_2lane_mac_soundness`,
-   `extractBdozCheaterOrValid`, `honest_bdoz_opening_verifies`)**:
+   `extractBdozInvalidOpeningOrValid`, `honest_bdoz_opening_verifies`)**:
    Verifies linear MAC combinations over pre-existing shares masked by pairwise-PRF zero-sum masks
    (zero cleartext wire broadcast prior to MAC verification), proves from coefficient non-vanishing
    (`poly_coeffs_zero_of_vanish_nodup`) that any non-zero wire deviation batch has $\le L$ challenge
    roots over `GoldilocksExt2` and 2-lane `Tower128`, and constructively (`PSum`, `0 Classical.choice`)
-   pinpoints a `LocalMacRejection` on deviating parties while guaranteeing honest parties are never slashed.
+   extracts a local MAC rejection. Signed equivocation and signature-forgery alternatives are modeled separately below.
 3. **Active 3-Party `FLNW17` Replicated View Cross-Check (`rss_flnw_active_open_sound`,
    `#tooth` `rss_passive_open_vulnerable_to_additive_fault`)**:
    Exploits 2-of-3 share replication so every share $s_k$ is cross-checked between the two parties
@@ -32,8 +32,7 @@ Self-contained Lean 4.35 active-security formalization closing `[P0-05..10]`
    `mac_before_open_canonical_bytes_sound`, `canonical_mac_before_open_blocks_faulted_cut_leakage`,
    `#tooth` `corrupted_cut_mac_rejection_witness`, `#tooth` `tooth_canonical_cut_rejects_mismatched_bytes`)**:
    Proves across arbitrary-length signing traces that gating cut-boundary openings strictly behind
-   batch MAC verification and injective 16-byte `Tower128` encoding prevents any faulted WOTS+ /
-   `TSW` / `PRF_msg` value from ever reaching the adversary.
+   batch MAC verification and injective 16-byte `Tower128` encoding yields correct bytes or a MAC-key recovery witness. Context-bound operational openings and replay rejection are defined below.
 5. **Cleartext-Free Dynamic `(t, n) → (t', n')` Quorum Resharing `Π_reshare` & `(t' - 1)` View Bijection
    (`reshare_preserves_public_key_and_refreshes_degree`,
    `reshare_from_shares_without_cleartext_recombines_secret`, `reshare_corrupt_view_bijection`)**:
@@ -689,10 +688,10 @@ structure LocalMacRejection (vk : BdozVerifierKeys) where
   cheater : BdozPairOpening
   invalid : verifyBdozPairMac vk cheater = false
 
-/-- Constructive `0 Classical.choice` BDOZ cheater extractor (`extractBdozCheaterOrValid`):
+/-- Constructive `0 Classical.choice` BDOZ cheater extractor (`extractBdozInvalidOpeningOrValid`):
     walks submitted `BdozPairOpening`s and returns EITHER a `LocalMacRejection` on an invalid
     submitted opening OR a proof that every party's 2-lane BDOZ MAC verified cleanly! -/
-def extractBdozCheaterOrValid (vk : BdozVerifierKeys) :
+def extractBdozInvalidOpeningOrValid (vk : BdozVerifierKeys) :
     (ops : List BdozPairOpening) →
     PSum (PSigma (fun op => op ∈ ops ∧ verifyBdozPairMac vk op = false))
          (∀ op ∈ ops, verifyBdozPairMac vk op = true)
@@ -701,7 +700,7 @@ def extractBdozCheaterOrValid (vk : BdozVerifierKeys) :
     match hVer : verifyBdozPairMac vk op with
     | false => .inl ⟨op, .head _, hVer⟩
     | true =>
-      match extractBdozCheaterOrValid vk rest with
+      match extractBdozInvalidOpeningOrValid vk rest with
       | .inl ⟨bad, hMem, hBad⟩ => .inl ⟨bad, .tail _ hMem, hBad⟩
       | .inr hAll => .inr (fun y hy => by
           rcases List.mem_cons.mp hy with rfl | hTl
@@ -2296,6 +2295,43 @@ def evalGeneratedDkgFrobenius_sound (k d : Nat)
       hs.2.1 hs.2.2.1 hs.2.2.2.1 hs.2.2.2.2.1
       (generatedFrobeniusSigmas_sum _ _ _ alphaShares deltas hs.2.2.2.2.2.2) hAccept
   next => cases hAccept
+
+/-- A context-MAC game records full context/sender/share messages, rather than
+only shares. An accepted relabeling on a fresh context is a concrete forgery. -/
+def ContextCutForgery (keys : ContextBdozKeys)
+    (history : List (CutMacContext × Nat × Tower128)) (t : ContextCutOpening) : Prop :=
+  verifyContextCut keys t.context t = true ∧
+    (t.context, t.opening.partyId, t.opening.shareX) ∉ history
+
+theorem relabeled_context_acceptance_is_forgery (keys : ContextBdozKeys)
+    (history : List (CutMacContext × Nat × Tower128))
+    (oldContext newContext : CutMacContext) (op : BdozPairOpening)
+    (hHistory : ∀ m ∈ history, m.1 = oldContext)
+    (hFresh : newContext ≠ oldContext)
+    (hAccepted : verifyContextCut keys newContext ⟨newContext, op⟩ = true) :
+    ContextCutForgery keys history ⟨newContext, op⟩ := by
+  refine ⟨hAccepted, ?_⟩
+  intro hm
+  exact hFresh (hHistory _ hm)
+
+/-- `#tooth`: canonical encoding alone allows relabeling the same valid opening
+at successive epochs. This is why the legacy entry point is explicitly unbound. -/
+theorem tooth_unbound_canonical_epoch_relabel (vk : BdozVerifierKeys)
+    (hon : Tower128) (op : BdozPairOpening) (hm : verifyBdozPairMac vk op = true) :
+    (stepUnboundCanonicalMacBeforeOpenSignTurn vk ⟨0, [], 0, false⟩
+      (mkCanonicalCutCandidateOpening 0 hon op)).releasedHistory = [(0, encodeCutShareBytes op.shareX)] ∧
+    (stepUnboundCanonicalMacBeforeOpenSignTurn vk ⟨1, [], 0, false⟩
+      (mkCanonicalCutCandidateOpening 1 hon op)).releasedHistory = [(1, encodeCutShareBytes op.shareX)] := by
+  constructor
+  · rw [stepCanonical_accepts_canonical vk 0 hon op hm]
+  · rw [stepCanonical_accepts_canonical vk 1 hon op hm]
+
+def runCanonicalMacBeforeOpenTrace (keys : ContextBdozKeys)
+    (nonce digest : BitVec 256) (cutIndex : Nat) :
+    MaliciousSignerState → List ContextCutOpening → MaliciousSignerState
+  | st, [] => st
+  | st, t :: ts => runCanonicalMacBeforeOpenTrace keys nonce digest cutIndex
+      (stepCanonicalMacBeforeOpenSignTurn keys nonce digest cutIndex st t) ts
 
 end Qsag
 end

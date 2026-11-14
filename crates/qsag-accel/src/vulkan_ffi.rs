@@ -697,6 +697,16 @@ impl Default for GpuBuffer {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EngineExecState {
+    Ready,
+    /// A queue submission was issued (or returned an indeterminate error / failed fence wait)
+    /// and full device completion has not yet been established.
+    InFlightQuarantined,
+    /// Unrecoverable `VK_ERROR_DEVICE_LOST` (`-4`).
+    DeviceLostQuarantined,
+}
+
 pub(crate) struct RawVulkanEngine {
     lib_handle: *mut c_void,
     destroy_instance: PfnVkDestroyInstance,
@@ -707,6 +717,9 @@ pub(crate) struct RawVulkanEngine {
     mem_props: VkPhysicalDeviceMemoryProperties,
     max_wg_x: u32,
     max_storage_range: u64,
+    exec_state: EngineExecState,
+    #[cfg(test)]
+    fail_alloc_countdown: core::cell::Cell<Option<u32>>,
     dsl_1buf: VkDescriptorSetLayout,
     dsl_2buf: VkDescriptorSetLayout,
     dsl_3buf: VkDescriptorSetLayout,
@@ -898,22 +911,30 @@ impl RawVulkanEngine {
             }
         };
 
-        let init_res = unsafe { Self::init_with_instance(lib_handle, gipa, instance, destroy_instance) };
+        let mut lib_slot = lib_handle;
+        let init_res = unsafe {
+            Self::init_with_instance(&mut lib_slot, gipa, &mut instance, destroy_instance)
+        };
         if init_res.is_err() {
             unsafe {
-                destroy_instance(instance, null());
-                let _ = dlclose(lib_handle);
+                if !instance.is_null() {
+                    destroy_instance(instance, null());
+                }
+                if !lib_slot.is_null() {
+                    let _ = dlclose(lib_slot);
+                }
             }
         }
         init_res
     }
 
     unsafe fn init_with_instance(
-        lib_handle: *mut c_void,
+        lib_handle: &mut *mut c_void,
         gipa: PfnVkGetInstanceProcAddr,
-        instance: VkInstance,
+        instance_slot: &mut VkInstance,
         destroy_instance: PfnVkDestroyInstance,
     ) -> Result<(Self, VulkanDeviceInfo), VulkanError> {
+        let instance = *instance_slot;
         let enum_devs: PfnVkEnumeratePhysicalDevices = unsafe {
             load_inst_fn(
                 gipa,
@@ -965,25 +986,43 @@ impl RawVulkanEngine {
             )?
         };
 
-        let mut dev_count = 0u32;
-        let enum_rc = unsafe { enum_devs(instance, &mut dev_count, null_mut()) };
-        if enum_rc == -3 || enum_rc == -9 {
+        const VK_INCOMPLETE: i32 = 5;
+        let mut phys_devs = std::vec::Vec::new();
+        let mut enumerated = false;
+        for _ in 0..4 {
+            let mut dev_count = 0u32;
+            let enum_rc = unsafe { enum_devs(instance, &mut dev_count, null_mut()) };
+            if enum_rc == -3 || enum_rc == -9 {
+                return Err(VulkanError::NoDiscreteGpuFound);
+            }
+            check_vk("vkEnumeratePhysicalDevices(count)", enum_rc)?;
+            if dev_count == 0 {
+                return Err(VulkanError::NoDiscreteGpuFound);
+            }
+            phys_devs.clear();
+            phys_devs.resize(dev_count as usize, null_mut());
+            let list_rc =
+                unsafe { enum_devs(instance, &mut dev_count, phys_devs.as_mut_ptr()) };
+            if list_rc == VK_INCOMPLETE {
+                continue;
+            }
+            check_vk("vkEnumeratePhysicalDevices(list)", list_rc)?;
+            phys_devs.truncate(dev_count as usize);
+            enumerated = true;
+            break;
+        }
+        if !enumerated || phys_devs.is_empty() {
             return Err(VulkanError::NoDiscreteGpuFound);
         }
-        check_vk("vkEnumeratePhysicalDevices(count)", enum_rc)?;
-        if dev_count == 0 {
-            return Err(VulkanError::NoDiscreteGpuFound);
-        }
-        let mut phys_devs = std::vec![null_mut(); dev_count as usize];
-        check_vk("vkEnumeratePhysicalDevices(list)", unsafe {
-            enum_devs(instance, &mut dev_count, phys_devs.as_mut_ptr())
-        })?;
 
         // Select discrete GPU (`VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU`), preferring AMD (`0x1002`).
         let mut chosen: Option<(VkPhysicalDevice, VkPhysicalDevicePropertiesRaw, VkPhysicalDeviceFeatures)> =
             None;
         let mut saw_discrete_without_int64 = false;
         for &pd in &phys_devs {
+            if pd.is_null() {
+                continue;
+            }
             let mut props = unsafe { MaybeUninit::<VkPhysicalDevicePropertiesRaw>::zeroed().assume_init() };
             let mut feats = unsafe { MaybeUninit::<VkPhysicalDeviceFeatures>::zeroed().assume_init() };
             unsafe {
@@ -1135,15 +1174,18 @@ impl RawVulkanEngine {
         };
 
         let mut engine = Self {
-            lib_handle,
+            lib_handle: core::mem::replace(lib_handle, null_mut()),
             destroy_instance,
-            instance,
+            instance: core::mem::replace(instance_slot, null_mut()),
             device,
             fns,
             queue,
             mem_props,
             max_wg_x: props.max_compute_work_group_count_x().max(1),
             max_storage_range: props.max_storage_buffer_range() as u64,
+            exec_state: EngineExecState::Ready,
+            #[cfg(test)]
+            fail_alloc_countdown: core::cell::Cell::new(None),
             dsl_1buf: 0,
             dsl_2buf: 0,
             dsl_3buf: 0,
@@ -1166,23 +1208,8 @@ impl RawVulkanEngine {
             vram_c: GpuBuffer::default(),
         };
 
-        // Note: if any setup step below returns `Err`, `engine` drops here and cleans up
-        // `device` (`Drop` also destroys `instance` + `dlclose`, so guard against double-cleanup
-        // by returning cleanly without letting caller also destroy `instance`).
-        // To avoid double-destroy on `Err`, `init_with_instance` handles cleanup via `Drop`
-        // and we nullify `instance` only if needed; even simpler, let `build_pipelines_and_pools`
-        // run and on `Err` prevent `init_with_instance`'s caller from double-freeing by doing
-        // top-level cleanup solely inside `Drop`!
-        if let Err(e) = unsafe { engine.build_pipelines_and_pools(qf_idx) } {
-            // `engine` Drop will destroy `device`, `instance`, and `dlclose(lib_handle)`.
-            // Prevent caller of `init_with_instance` from destroying `instance` a second time
-            // by handling full teardown right here and forgetting `engine`? No: let `try_new`
-            // delegate teardown once `engine` exists. See below!
-            unsafe {
-                engine.teardown_device_only();
-            }
-            core::mem::forget(engine);
-            return Err(e);
+        unsafe {
+            engine.build_pipelines_and_pools(qf_idx)?;
         }
 
         Ok((engine, dev_info))
@@ -1604,6 +1631,17 @@ impl RawVulkanEngine {
     }
 
     unsafe fn alloc_gpu_buffer(&self, byte_size: u64, host_staging: bool) -> Result<GpuBuffer, VulkanError> {
+        #[cfg(test)]
+        if let Some(rem) = self.fail_alloc_countdown.get() {
+            if rem == 0 {
+                self.fail_alloc_countdown.set(None);
+                return Err(VulkanError::VkResult {
+                    op: "vkAllocateMemory",
+                    code: -2,
+                });
+            }
+            self.fail_alloc_countdown.set(Some(rem - 1));
+        }
         let cap = byte_size.max(MIN_BUFFER_ALLOC_BYTES);
         let usage = if host_staging {
             VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
@@ -1720,7 +1758,34 @@ impl RawVulkanEngine {
         })
     }
 
+    /// Verify that no prior submission remains potentially in flight before mutating staging
+    /// memory, reallocating buffers, updating descriptors, or resetting the command pool.
+    /// If a previous fence wait failed transiently, recovery is permitted ONLY after
+    /// `vkDeviceWaitIdle` succeeds (`VK_SUCCESS`).
+    unsafe fn ensure_ready(&mut self) -> Result<(), VulkanError> {
+        const VK_ERROR_DEVICE_LOST: i32 = -4;
+        match self.exec_state {
+            EngineExecState::Ready => Ok(()),
+            EngineExecState::DeviceLostQuarantined => Err(VulkanError::WorkspacePoisoned),
+            EngineExecState::InFlightQuarantined => {
+                let rc = unsafe { (self.fns.device_wait_idle)(self.device) };
+                if rc == VK_SUCCESS {
+                    self.exec_state = EngineExecState::Ready;
+                    Ok(())
+                } else {
+                    if rc == VK_ERROR_DEVICE_LOST {
+                        self.exec_state = EngineExecState::DeviceLostQuarantined;
+                    }
+                    Err(VulkanError::WorkspacePoisoned)
+                }
+            }
+        }
+    }
+
     unsafe fn ensure_staging(&mut self, required: u64) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
         if self.staging.capacity >= required && self.staging.buffer != 0 {
             return Ok(());
         }
@@ -1736,29 +1801,15 @@ impl RawVulkanEngine {
         Ok(())
     }
 
-    unsafe fn ensure_single_vram(
-        &mut self,
-        slot: u8,
-        required: u64,
-    ) -> Result<bool, VulkanError> {
-        let cur_cap = match slot {
-            0 => self.vram_a.capacity,
-            1 => self.vram_b.capacity,
-            _ => self.vram_c.capacity,
-        };
-        let cur_buf = match slot {
-            0 => self.vram_a.buffer,
-            1 => self.vram_b.buffer,
-            _ => self.vram_c.buffer,
-        };
+    fn plan_vram_growth(&self, cur: &GpuBuffer, required: u64) -> Result<Option<u64>, VulkanError> {
         if required > self.max_storage_range {
             return Err(VulkanError::BufferExceedsMaxStorageRange {
                 requested: required,
                 limit: self.max_storage_range,
             });
         }
-        if cur_cap >= required && cur_buf != 0 {
-            return Ok(false);
+        if required == 0 || (cur.capacity >= required && cur.buffer != 0) {
+            return Ok(None);
         }
         let target = required
             .checked_next_power_of_two()
@@ -1766,37 +1817,82 @@ impl RawVulkanEngine {
             .min(self.max_storage_range)
             .max(required)
             .max(MIN_BUFFER_ALLOC_BYTES);
-        let new_buf = unsafe { self.alloc_gpu_buffer(target, false)? };
-        let mut old = match slot {
-            0 => core::mem::replace(&mut self.vram_a, new_buf),
-            1 => core::mem::replace(&mut self.vram_b, new_buf),
-            _ => core::mem::replace(&mut self.vram_c, new_buf),
-        };
-        unsafe {
-            self.destroy_gpu_buffer(&mut old);
-        }
-        Ok(true)
+        Ok(Some(target))
     }
 
-    unsafe fn ensure_vram_buffers(
+    /// Transactionally grow `vram_a`, `vram_b`, and `vram_c`:
+    /// 1. Allocate all required replacements into temporary owners.
+    /// 2. On any allocation failure, destroy ONLY the newly allocated temporaries, preserving
+    ///    all existing buffers and bound descriptor sets untouched.
+    /// 3. Commit all replacements, refresh all descriptor sets, and finally destroy displaced buffers.
+    pub(crate) unsafe fn ensure_vram_buffers(
         &mut self,
         req_a: u64,
         req_b: u64,
         req_c: u64,
     ) -> Result<(), VulkanError> {
-        let mut changed = false;
-        if req_a > 0 {
-            changed |= unsafe { self.ensure_single_vram(0, req_a)? };
+        unsafe {
+            self.ensure_ready()?;
         }
-        if req_b > 0 {
-            changed |= unsafe { self.ensure_single_vram(1, req_b)? };
+        let tgt_a = self.plan_vram_growth(&self.vram_a, req_a)?;
+        let tgt_b = self.plan_vram_growth(&self.vram_b, req_b)?;
+        let tgt_c = self.plan_vram_growth(&self.vram_c, req_c)?;
+        if tgt_a.is_none() && tgt_b.is_none() && tgt_c.is_none() {
+            return Ok(());
         }
-        if req_c > 0 {
-            changed |= unsafe { self.ensure_single_vram(2, req_c)? };
-        }
-        if changed {
-            unsafe {
-                self.refresh_descriptor_sets();
+
+        let mut new_a = match tgt_a {
+            Some(sz) => Some(unsafe { self.alloc_gpu_buffer(sz, false)? }),
+            None => None,
+        };
+        let mut new_b = match tgt_b {
+            Some(sz) => match unsafe { self.alloc_gpu_buffer(sz, false) } {
+                Ok(buf) => Some(buf),
+                Err(e) => {
+                    if let Some(ref mut a) = new_a {
+                        unsafe {
+                            self.destroy_gpu_buffer(a);
+                        }
+                    }
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let new_c = match tgt_c {
+            Some(sz) => match unsafe { self.alloc_gpu_buffer(sz, false) } {
+                Ok(buf) => Some(buf),
+                Err(e) => {
+                    if let Some(ref mut b) = new_b {
+                        unsafe {
+                            self.destroy_gpu_buffer(b);
+                        }
+                    }
+                    if let Some(ref mut a) = new_a {
+                        unsafe {
+                            self.destroy_gpu_buffer(a);
+                        }
+                    }
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+
+        let mut old_a = new_a.map(|nb| core::mem::replace(&mut self.vram_a, nb));
+        let mut old_b = new_b.map(|nb| core::mem::replace(&mut self.vram_b, nb));
+        let mut old_c = new_c.map(|nb| core::mem::replace(&mut self.vram_c, nb));
+
+        unsafe {
+            self.refresh_descriptor_sets();
+            if let Some(ref mut oa) = old_a {
+                self.destroy_gpu_buffer(oa);
+            }
+            if let Some(ref mut ob) = old_b {
+                self.destroy_gpu_buffer(ob);
+            }
+            if let Some(ref mut oc) = old_c {
+                self.destroy_gpu_buffer(oc);
             }
         }
         Ok(())
@@ -1891,7 +1987,8 @@ impl RawVulkanEngine {
         }
     }
 
-    unsafe fn submit_and_wait(&self) -> Result<(), VulkanError> {
+    unsafe fn submit_and_wait(&mut self) -> Result<(), VulkanError> {
+        const VK_ERROR_DEVICE_LOST: i32 = -4;
         check_vk("vkEndCommandBuffer", unsafe {
             (self.fns.end_command_buffer)(self.cmd_buf)
         })?;
@@ -1909,12 +2006,33 @@ impl RawVulkanEngine {
             signal_semaphore_count: 0,
             p_signal_semaphores: null(),
         };
-        check_vk("vkQueueSubmit", unsafe {
-            (self.fns.queue_submit)(self.queue, 1, &submit, self.fence)
-        })?;
-        check_vk("vkWaitForFences", unsafe {
+        // Mark submission in flight BEFORE calling `vkQueueSubmit`; restore `Ready` ONLY after
+        // both `vkQueueSubmit` and `vkWaitForFences` return `VK_SUCCESS`.
+        self.exec_state = EngineExecState::InFlightQuarantined;
+        let submit_rc = unsafe { (self.fns.queue_submit)(self.queue, 1, &submit, self.fence) };
+        if submit_rc != VK_SUCCESS {
+            if submit_rc == VK_ERROR_DEVICE_LOST {
+                self.exec_state = EngineExecState::DeviceLostQuarantined;
+            }
+            return Err(VulkanError::VkResult {
+                op: "vkQueueSubmit",
+                code: submit_rc,
+            });
+        }
+        let wait_rc = unsafe {
             (self.fns.wait_for_fences)(self.device, 1, &self.fence, VK_TRUE, u64::MAX)
-        })
+        };
+        if wait_rc != VK_SUCCESS {
+            if wait_rc == VK_ERROR_DEVICE_LOST {
+                self.exec_state = EngineExecState::DeviceLostQuarantined;
+            }
+            return Err(VulkanError::VkResult {
+                op: "vkWaitForFences",
+                code: wait_rc,
+            });
+        }
+        self.exec_state = EngineExecState::Ready;
+        Ok(())
     }
 
     unsafe fn write_staging_u64s(&mut self, offset_bytes: usize, src: &[u64]) {
@@ -1937,6 +2055,9 @@ impl RawVulkanEngine {
         slot: KernelSlot,
         states: &mut [[u64; LANES]],
     ) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
         let num_states = states.len();
         if num_states == 0 {
             return Ok(());
@@ -2077,6 +2198,9 @@ impl RawVulkanEngine {
         twiddles: &[u64],
         inverse: bool,
     ) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
         let n = buf.len();
         let log2_n = n.trailing_zeros();
         let byte_len = (n as u64) * 8;
@@ -2363,6 +2487,9 @@ impl RawVulkanEngine {
         shift: u64,
         out: &mut [[u64; 2]],
     ) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
         let n = evals.len();
         let m = n * blowup;
         let in_bytes = (n as u64) * 16;
@@ -2535,7 +2662,20 @@ impl RawVulkanEngine {
         start_parent_idx: u64,
         out_parents: &mut [[u64; 4]],
     ) -> Result<(), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
         let num_parents = out_parents.len();
+        let max_parent_idx = if num_parents == 0 {
+            start_parent_idx
+        } else {
+            start_parent_idx
+                .checked_add((num_parents - 1) as u64)
+                .ok_or(VulkanError::Accel(crate::AccelError::LengthOverflow))?
+        };
+        if max_parent_idx > u32::MAX as u64 {
+            return Err(VulkanError::Accel(crate::AccelError::LengthOverflow));
+        }
         if num_parents == 0 {
             return Ok(());
         }
@@ -2620,6 +2760,9 @@ impl RawVulkanEngine {
         pk_seed: &[u64; 4],
         base_layer: u32,
     ) -> Result<[u64; 4], VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
         let num_leaves = leaves.len();
         if num_leaves == 1 {
             return Ok([
@@ -2725,6 +2868,9 @@ impl RawVulkanEngine {
         shares: &[(u128, u128)],
         weights: &[(u128, u128)],
     ) -> Result<(u128, u128), VulkanError> {
+        unsafe {
+            self.ensure_ready()?;
+        }
         let n = shares.len();
         if n == 0 {
             return Ok((0, 0));
@@ -2889,7 +3035,15 @@ impl RawVulkanEngine {
     unsafe fn teardown_device_only(&mut self) {
         if !self.device.is_null() {
             unsafe {
-                let _ = (self.fns.device_wait_idle)(self.device);
+                let idle_rc = (self.fns.device_wait_idle)(self.device);
+                if idle_rc != VK_SUCCESS {
+                    // `vkDeviceWaitIdle` failed to establish device idle; detach handles rather
+                    // than freeing buffers/command pools that may still be accessed by GPU work.
+                    self.device = null_mut();
+                    self.instance = null_mut();
+                    self.lib_handle = null_mut();
+                    return;
+                }
                 let mut st = core::mem::take(&mut self.staging);
                 let mut va = core::mem::take(&mut self.vram_a);
                 let mut vb = core::mem::take(&mut self.vram_b);
@@ -2951,5 +3105,74 @@ impl Drop for RawVulkanEngine {
                 self.lib_handle = null_mut();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AcceleratorBackend, CpuReferenceBackend};
+
+    #[test]
+    fn transactional_vram_growth_and_quarantine_state_machine() {
+        let (mut engine, _info) = match RawVulkanEngine::try_new() {
+            Ok(v) => v,
+            Err(
+                VulkanError::LibraryLoadFailed | VulkanError::NoDiscreteGpuFound,
+            ) => return,
+            Err(other) => panic!("unexpected engine init error: {other}"),
+        };
+
+        let orig_a = engine.vram_a.buffer;
+        let orig_b = engine.vram_b.buffer;
+        let orig_cap_a = engine.vram_a.capacity;
+        let orig_cap_b = engine.vram_b.capacity;
+
+        // 1. Partial VRAM allocation failure: `new_a` succeeds (alloc #0), `new_b` fails (alloc #1).
+        //    `ensure_vram_buffers` must destroy `new_a`, preserve `vram_a` / `vram_b` and bound
+        //    descriptors untouched, and allow subsequent small dispatches to run cleanly!
+        engine.fail_alloc_countdown.set(Some(1));
+        let res = unsafe { engine.ensure_vram_buffers(orig_cap_a * 2, orig_cap_b * 2, 0) };
+        assert!(matches!(
+            res,
+            Err(VulkanError::VkResult {
+                op: "vkAllocateMemory",
+                code: -2
+            })
+        ));
+        assert_eq!(engine.vram_a.buffer, orig_a);
+        assert_eq!(engine.vram_b.buffer, orig_b);
+        assert_eq!(engine.vram_a.capacity, orig_cap_a);
+        assert_eq!(engine.vram_b.capacity, orig_cap_b);
+
+        let mut gpu_states = [[0x1234_5678_9ABC_DEF0u64; 25]; 4];
+        let mut cpu_states = gpu_states;
+        engine.exec_batch_keccak(&mut gpu_states).expect("keccak after rollback");
+        CpuReferenceBackend.batch_keccak_f1600(&mut cpu_states);
+        assert_eq!(gpu_states, cpu_states);
+
+        // 2. `InFlightQuarantined` recovers cleanly once `vkDeviceWaitIdle` returns `VK_SUCCESS`.
+        engine.exec_state = EngineExecState::InFlightQuarantined;
+        engine.exec_batch_keccak(&mut gpu_states).expect("keccak after idle drain");
+        CpuReferenceBackend.batch_keccak_f1600(&mut cpu_states);
+        assert_eq!(gpu_states, cpu_states);
+        assert_eq!(engine.exec_state, EngineExecState::Ready);
+
+        // 3. `DeviceLostQuarantined` rejects every execution & resize entry point before touching
+        //    staging or VRAM buffers.
+        let cap_before = engine.vram_a.capacity;
+        engine.exec_state = EngineExecState::DeviceLostQuarantined;
+        assert!(matches!(
+            engine.exec_batch_keccak(&mut gpu_states),
+            Err(VulkanError::WorkspacePoisoned)
+        ));
+        assert!(matches!(
+            unsafe { engine.ensure_vram_buffers(cap_before * 4, 0, 0) },
+            Err(VulkanError::WorkspacePoisoned)
+        ));
+        assert_eq!(engine.vram_a.capacity, cap_before);
+
+        // Restore `Ready` so test teardown frees the live test device cleanly.
+        engine.exec_state = EngineExecState::Ready;
     }
 }

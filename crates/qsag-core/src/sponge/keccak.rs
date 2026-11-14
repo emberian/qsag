@@ -552,6 +552,55 @@ pub fn encode_multi_frame(fields: &[&[u8]]) -> Vec<u8> {
     out
 }
 
+#[inline]
+fn absorb_leb128_stack(xof: &mut Cshake256Xof, mut n: usize) {
+    let mut buf = [0u8; 10];
+    let mut len = 0usize;
+    loop {
+        if n < 128 {
+            buf[len] = n as u8;
+            len += 1;
+            break;
+        }
+        buf[len] = 0x80 | ((n & 0x7F) as u8);
+        len += 1;
+        n >>= 7;
+    }
+    xof.absorb(&buf[..len]);
+}
+
+/// Stream `encode_multi_frame(fields)` directly into `xof` without heap allocations or
+/// secret-bearing intermediate `Vec<u8>` copies (`Drop` on [`Cshake256Xof`] volatile-wipes state).
+pub fn absorb_multi_frame(xof: &mut Cshake256Xof, fields: &[&[u8]]) {
+    absorb_leb128_stack(xof, fields.len());
+    for f in fields {
+        absorb_leb128_stack(xof, f.len());
+        xof.absorb(f);
+    }
+}
+
+/// Zero-heap-copy 32-byte `cSHAKE256` over `encode_multi_frame(fields)` for secret-bearing frames.
+pub fn cshake256_32_multi_frame(customization: &[u8], fields: &[&[u8]]) -> [u8; 32] {
+    let mut xof = Cshake256Xof::new(customization);
+    absorb_multi_frame(&mut xof, fields);
+    let mut out = [0u8; 32];
+    xof.squeeze(&mut out);
+    out
+}
+
+/// Zero-heap-copy `out_len`-byte `cSHAKE256` XOF over `encode_multi_frame(fields)` for secret-bearing frames.
+pub fn cshake256_xof_multi_frame(
+    out_len: usize,
+    customization: &[u8],
+    fields: &[&[u8]],
+) -> Vec<u8> {
+    let mut xof = Cshake256Xof::new(customization);
+    absorb_multi_frame(&mut xof, fields);
+    let mut out = vec![0u8; out_len];
+    xof.squeeze(&mut out);
+    out
+}
+
 /// Injectively framed 3-field payload `encode_list_field(a) || encode_list_field(b) || encode_list_field(c)`.
 pub fn encode_frame(a: &[u8], b: &[u8], c: &[u8]) -> Vec<u8> {
     let mut out = encode_list_field(a);
@@ -905,5 +954,31 @@ mod tests {
         let f1 = encode_multi_frame(&[b"ab", b"c"]);
         let f2 = encode_multi_frame(&[b"a", b"bc"]);
         assert_ne!(f1, f2);
+    }
+
+    #[test]
+    fn test_streaming_multi_frame_matches_encode_multi_frame() {
+        let big = [0x5Au8; 409];
+        let cases: &[&[&[u8]]] = &[
+            &[],
+            &[b""],
+            &[b"seed32_material", b"ctx", &big],
+            &[&big, b"short", &[0xFFu8; 136], b""],
+        ];
+        for &fields in cases {
+            let framed = encode_multi_frame(fields);
+            assert_eq!(
+                cshake256_32_multi_frame(b"QSAG.TEST.STREAM", fields),
+                cshake256_32(b"QSAG.TEST.STREAM", &framed)
+            );
+            assert_eq!(
+                cshake256_32_multi_frame(&[], fields),
+                cshake256_32(&[], &framed)
+            );
+            assert_eq!(
+                cshake256_xof_multi_frame(200, b"QSAG.TEST.STREAM", fields),
+                cshake256_xof(200, b"QSAG.TEST.STREAM", &framed)
+            );
+        }
     }
 }

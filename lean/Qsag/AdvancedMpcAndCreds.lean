@@ -918,9 +918,9 @@ def evalCommit6 {n : Nat} (attrs : List Goldilocks) (blind : VcBlind4) (cs : Cre
     d4 := evalCommit attrs blind cs.c4
     d5 := evalCommit attrs blind cs.c5 }
 
-/-- Complete single-party view committed in Round 1 before Fiat-Shamir challenge derivation:
-    binds attribute shares, 4-limb blind share, PRG `tapeSeed`, commitment `salt`, gate wire trace,
-    6-limb commitment share, 6-limb scope-tag share, and public-slot output shares. -/
+/-- Legacy arithmetic oracle view. The function-valued wires are NOT a finite
+    serializable transcript. Use `BlindVcWire.PartyView` for wire-format reasoning;
+    no privacy/computational binding claim follows for this legacy carrier. -/
 structure PartyCredView (n : Nat) where
   attrShares : List Goldilocks
   blindShare : VcBlind4
@@ -2202,7 +2202,8 @@ private theorem hornerEvalExt2Schoolbook_cosetShift
 def cosetDomainPoints (blowup : Nat) : List GoldilocksExt2 :=
   (List.range blowup).map (fun i => ext2OfBaseSpec (Goldilocks.ofNat (i + 1)))
 
-/-- `Spec` Coset LDE: schoolbook 4-mul `GoldilocksExt2` Horner evaluation at shifted points `shift * x`. -/
+/-- Legacy Horner evaluation at consecutive shifted points. The input is treated
+    as coefficients and `blowup` is the output count; this is not a coset LDE. -/
 def cosetLdeExt2Spec (evals : List (Goldilocks × Goldilocks)) (blowup : Nat) (shift : Goldilocks) :
     List (Goldilocks × Goldilocks) :=
   let coeffs := evals.map (fun p => (⟨p.1, p.2⟩ : GoldilocksExt2))
@@ -2574,6 +2575,76 @@ def commit (sid : Bytes32) (round : UInt32) (party : Fin 3)
     (v : PartyView) (salt : Bytes32) : Bytes32 :=
   hashFrames "QSAG.COMMIT.V1" (commitmentFrames sid round party (viewDigest v) salt)
 
+theorem le_injective {width a b : Nat} (ha : a < 256^width) (hb : b < 256^width)
+    (h : le width a = le width b) : a = b := by
+  apply be_injective ha hb
+  have hr := congrArg List.reverse h
+  simpa [le] using hr
+
+theorem words_length (xs : List Goldilocks) : (words xs).length = 8 * xs.length := by
+  induction xs with
+  | nil => rfl
+  | cons x xs ih =>
+    change (le 8 x.val ++ words xs).length = 8 * (xs.length + 1)
+    rw [List.length_append, ih]
+    simp [le, Nat.mul_add, Nat.add_comm]
+
+theorem words_injective (xs ys : List Goldilocks) (h : words xs = words ys) : xs = ys := by
+  have hl : xs.length = ys.length := by
+    have := congrArg List.length h
+    rw [words_length, words_length] at this
+    omega
+  induction xs generalizing ys with
+  | nil => cases ys <;> simp_all
+  | cons x xs ih =>
+    cases ys with
+    | nil => simp at hl
+    | cons y ys =>
+      change le 8 x.val ++ words xs = le 8 y.val ++ words ys at h
+      have hp := List.append_inj h (by simp [le])
+      have hx : x = y := Goldilocks.ext (le_injective
+        (by simpa using Goldilocks.val_lt_two_pow_64 x)
+        (by simpa using Goldilocks.val_lt_two_pow_64 y) hp.1)
+      subst y
+      congr 1
+      apply ih ys hp.2
+      omega
+
+/-- Fixed chunk lengths make concatenation injective. -/
+theorem chunks_injective (xs ys : List Bytes)
+    (hl : xs.map List.length = ys.map List.length)
+    (h : xs.flatten = ys.flatten) : xs = ys := by
+  induction xs generalizing ys with
+  | nil => cases ys <;> simp_all
+  | cons x xs ih =>
+    cases ys with
+    | nil => simp at hl
+    | cons y ys =>
+      simp only [List.map_cons, List.cons.injEq] at hl
+      change x ++ xs.flatten = y ++ ys.flatten at h
+      have hp := List.append_inj h hl.1
+      exact congrArg₂ List.cons hp.1 (ih ys hl.2 hp.2)
+
+/-- Flat serialization retains every wire, with no missing-tail/zero-padding alias.
+The hypothesis fixes the validated circuit shape, not the secret values. -/
+theorem viewBytes_injective_of_shape (a b : PartyView)
+    (hi : a.inputs.length = b.inputs.length)
+    (hg : a.gates.length = b.gates.length)
+    (ho : a.outputs.length = b.outputs.length)
+    (h : viewBytes a = viewBytes b) :
+    a.seed.val = b.seed.val ∧ a.inputs = b.inputs ∧ a.gates = b.gates ∧ a.outputs = b.outputs := by
+  let parts := fun v : PartyView =>
+    [ascii "QSAG.VC.VIEW_COM.V1", v.seed.val, le 4 v.inputs.length, words v.inputs,
+      le 4 v.gates.length, words v.gates, le 4 v.outputs.length, words v.outputs]
+  have hlen : (parts a).map List.length = (parts b).map List.length := by
+    simp [parts, le, words_length, a.seed.property, b.seed.property, hi, hg, ho]
+  have hflat : (parts a).flatten = (parts b).flatten := by
+    simpa [parts, viewBytes, List.append_assoc] using h
+  have he := chunks_injective (parts a) (parts b) hlen hflat
+  simp only [parts, List.cons.injEq] at he
+  exact ⟨he.2.1, words_injective _ _ he.2.2.2.1,
+    words_injective _ _ he.2.2.2.2.2.1, words_injective _ _ he.2.2.2.2.2.2.2.1⟩
+
 /-- Bounded, flat DAG: every operand refers to an earlier wire. Multiplication
 mask IDs are the gate positions themselves, so separate gates cannot alias. -/
 inductive Gate (available : Nat) where
@@ -2694,16 +2765,16 @@ def fieldAcceptedBijection :
     CredBijection { w : UInt64 // w.toNat < goldilocksPrime } Goldilocks where
   toFun := fun w => ⟨w.val.toNat, w.property⟩
   invFun := fun x => ⟨UInt64.ofNat x.val, by
-    simpa [UInt64.toNat_ofNat, Nat.mod_eq_of_lt (Goldilocks.val_lt_two_pow_64 x)] using x.isLt⟩
+    simpa [UInt64.toNat_ofNat', Nat.mod_eq_of_lt (Goldilocks.val_lt_two_pow_64 x)] using x.isLt⟩
   left_inv := by
     intro w
     apply Subtype.ext
     apply UInt64.toNat_inj.mp
-    simp [UInt64.toNat_ofNat, Nat.mod_eq_of_lt w.val.toNat_lt]
+    simp [UInt64.toNat_ofNat', Nat.mod_eq_of_lt w.val.toNat_lt_size]
   right_inv := by
     intro x
     apply Goldilocks.ext
-    simp [UInt64.toNat_ofNat, Nat.mod_eq_of_lt (Goldilocks.val_lt_two_pow_64 x)]
+    simp [UInt64.toNat_ofNat', Nat.mod_eq_of_lt (Goldilocks.val_lt_two_pow_64 x)]
 
 structure IssuerContext where
   oprfKeyDigest : Bytes32
@@ -2887,6 +2958,22 @@ def presentationChallenges (fuel : Nat) (s : SdInstance) (challenge : Bytes32)
   challenges fuel (absorbMessage (sdTranscript s challenge profile) "VC_SD_R1_COMMITS"
     ((List.ofFn rounds).flatMap roundOneBytes)) profile.repetitions
 
+/-- A nonempty, nonzero flat view fixture for cross-language serialization tests. -/
+def viewFixture : PartyView :=
+  { seed := ⟨List.replicate 32 1, by simp⟩
+    inputs := [Goldilocks.ofNat 2]
+    gates := [Goldilocks.ofNat 3]
+    outputs := [Goldilocks.ofNat 4]
+    inputsBound := by decide
+    gatesBound := by decide
+    outputsBound := by decide }
+
+theorem view_wire_known_answer :
+    viewBytes viewFixture = ascii "QSAG.VC.VIEW_COM.V1" ++ List.replicate 32 1 ++
+      [1,0,0,0, 2,0,0,0,0,0,0,0,
+       1,0,0,0, 3,0,0,0,0,0,0,0,
+       1,0,0,0, 4,0,0,0,0,0,0,0] := by decide
+
 /-- Width mutation witnesses exercise the actual commitment frame constructor. -/
 theorem commitment_widths (sid digest salt : Bytes32) (r : UInt32) (p : Fin 3) :
     (commitmentFrames sid r p digest salt).map List.length = [32, 4, 2, 32, 32] := by
@@ -2900,28 +2987,28 @@ theorem tooth_modulo_trits_biased :
     ((List.range 256).filter (fun b => b % 3 == 0)).length = 86 ∧
     ((List.range 256).filter (fun b => b % 3 == 1)).length = 85 := by decide
 
-#tooth_pair accepted_trit_fibers vs tooth_modulo_trits_biased
 
-/-- Collision extraction retains the actual complete, domain-framed preimages.
-It never promotes equality of arbitrary permutation output halves to a sponge collision. -/
-structure FramedCollision (H : Bytes → Bytes) (domain : Bytes) where
-  left : Bytes
-  right : Bytes
-  distinct : left ≠ right
-  sameDigest : H (domain ++ left) = H (domain ++ right)
+/-- A collision between precisely the two submitted, reachable framed inputs.
+The candidate frames remain parameters of the proposition: they cannot be replaced
+by arbitrary invertible-permutation states or unrelated sponge preimages. -/
+def FramedCollision (H : Bytes → Bytes) (domain : Bytes) (x y : List Bytes) : Prop :=
+  framed x ≠ framed y ∧ H (domain ++ framed x) = H (domain ++ framed y)
 
-theorem committed_openings_equal_or_collision (H : Bytes → Bytes) (domain x y : Bytes)
-    (h : H (domain ++ x) = H (domain ++ y)) :
-    x = y ∨ Nonempty (FramedCollision H domain) := by
-  by_cases he : x = y
+theorem committed_openings_equal_or_collision
+    (H : Bytes → Bytes) (domain : Bytes) (x y : List Bytes)
+    (h : H (domain ++ framed x) = H (domain ++ framed y)) :
+    framed x = framed y ∨ FramedCollision H domain x y := by
+  by_cases he : framed x = framed y
   · exact Or.inl he
-  · exact Or.inr ⟨⟨x, y, he, h⟩⟩
+  · exact Or.inr ⟨he, h⟩
 
-/-- Two independent openings of one commitment: either their serialized views
-agree, or those precise views give a collision. No assumed global hash injectivity. -/
-theorem rewound_openings_bound (H : Bytes → Bytes) (domain digest x y : Bytes)
-    (hx : H (domain ++ x) = digest) (hy : H (domain ++ y) = digest) :
-    x = y ∨ Nonempty (FramedCollision H domain) :=
+/-- Two independent openings of one commitment either have the same framed
+preimage, or those exact openings exhibit a collision. This is a reduction step,
+not a hardness assumption or the circuit's special-soundness theorem. -/
+theorem rewound_openings_bound (H : Bytes → Bytes) (domain digest : Bytes)
+    (x y : List Bytes)
+    (hx : H (domain ++ framed x) = digest) (hy : H (domain ++ framed y) = digest) :
+    framed x = framed y ∨ FramedCollision H domain x y :=
   committed_openings_equal_or_collision H domain x y (hx.trans hy.symm)
 
 /-- Scoped mode's equality distinguisher: fresh coins do not remove a stable tag. -/

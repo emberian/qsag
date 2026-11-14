@@ -730,6 +730,9 @@ pub fn verify(raw: &[String]) -> Result<(), CliError> {
         ));
     }
     let ctx = crate::codec::from_hex(args.get("ctx-hex").unwrap_or(""))?;
+    if !ctx.is_empty() && !matches!(scheme, Scheme::Slh(_)) {
+        return Err(CliError::usage("--ctx-hex applies only to SLH-DSA schemes"));
+    }
     let signature = sig_file.field_hex("signature")?;
 
     let valid = match scheme {

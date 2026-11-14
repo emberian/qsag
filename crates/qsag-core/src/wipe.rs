@@ -146,14 +146,73 @@ pub fn ct_select_bytes32(choice: bool, if_true: &[u8; 32], if_false: &[u8; 32]) 
 /// Recursive wiping for owned temporary share buffers.
 pub(crate) trait SecretWipe { fn secret_wipe(&mut self); }
 impl SecretWipe for u8 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }
+impl SecretWipe for u16 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }
+impl SecretWipe for u32 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }
+impl SecretWipe for i16 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }
 impl SecretWipe for u128 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }
 impl SecretWipe for u64 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }
+impl SecretWipe for TowerGf256 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0); } }
 impl SecretWipe for Tower128 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0); } }
+impl SecretWipe for Goldilocks { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(&mut self.0), 0); } }
+impl SecretWipe for GoldilocksExt2 {
+    fn secret_wipe(&mut self) {
+        self.c0.secret_wipe();
+        self.c1.secret_wipe();
+    }
+}
+impl<A: SecretWipe, B: SecretWipe> SecretWipe for (A, B) {
+    fn secret_wipe(&mut self) {
+        self.0.secret_wipe();
+        self.1.secret_wipe();
+    }
+}
+impl<A: SecretWipe, B: SecretWipe, C: SecretWipe> SecretWipe for (A, B, C) {
+    fn secret_wipe(&mut self) {
+        self.0.secret_wipe();
+        self.1.secret_wipe();
+        self.2.secret_wipe();
+    }
+}
 impl<T: SecretWipe, const N: usize> SecretWipe for [T; N] {
     fn secret_wipe(&mut self) { for x in self { x.secret_wipe(); } }
 }
+impl<T: SecretWipe> SecretWipe for alloc::boxed::Box<T> {
+    fn secret_wipe(&mut self) { (**self).secret_wipe(); }
+}
 impl<T: SecretWipe> SecretWipe for alloc::vec::Vec<T> {
     fn secret_wipe(&mut self) { for x in self { x.secret_wipe(); } }
+}
+/// Wipe-aware vector growth: if `v` lacks capacity for `additional` items, allocates replacement
+/// storage, copies live elements, volatile-wipes the old allocation's live elements, and replaces `v`.
+#[inline]
+pub(crate) fn secret_vec_reserve<T: Copy + SecretWipe>(
+    v: &mut alloc::vec::Vec<T>,
+    additional: usize,
+) {
+    let needed = v.len().checked_add(additional).expect("secret_vec_reserve overflow");
+    if needed > v.capacity() {
+        let new_cap = needed.max(v.capacity().saturating_mul(2)).max(8);
+        let mut next = alloc::vec::Vec::with_capacity(new_cap);
+        next.extend_from_slice(v.as_slice());
+        v.secret_wipe();
+        black_box(v.as_mut_slice());
+        *v = next;
+    }
+}
+/// Wipe-aware `Vec::push` that never abandons an unwiped old secret buffer on reallocation.
+#[inline]
+pub(crate) fn secret_vec_push<T: Copy + SecretWipe>(v: &mut alloc::vec::Vec<T>, item: T) {
+    secret_vec_reserve(v, 1);
+    v.push(item);
+}
+/// Wipe-aware `Vec::extend_from_slice` that never abandons an unwiped old secret buffer on reallocation.
+#[inline]
+pub(crate) fn secret_vec_extend_from_slice<T: Copy + SecretWipe>(
+    v: &mut alloc::vec::Vec<T>,
+    slice: &[T],
+) {
+    secret_vec_reserve(v, slice.len());
+    v.extend_from_slice(slice);
 }
 /// Wipes the owned buffer on normal and error exits, including unwinding.
 pub(crate) struct SecretBuffer<T: SecretWipe>(pub T);
@@ -188,5 +247,13 @@ mod raii_tests {
         let mut words = alloc::vec![[u64::MAX; 8]; 3];
         words.secret_wipe();
         assert_eq!(words, alloc::vec![[0; 8]; 3]);
+
+        let mut grow = alloc::vec::Vec::with_capacity(2);
+        secret_vec_push(&mut grow, 0xDEAD_BEEFu64);
+        secret_vec_push(&mut grow, 0xCAFE_BABEu64);
+        secret_vec_extend_from_slice(&mut grow, &[1u64, 2, 3, 4]);
+        assert_eq!(grow, alloc::vec![0xDEAD_BEEFu64, 0xCAFE_BABEu64, 1, 2, 3, 4]);
+        grow.secret_wipe();
+        assert_eq!(grow, alloc::vec![0u64; 6]);
     }
 }

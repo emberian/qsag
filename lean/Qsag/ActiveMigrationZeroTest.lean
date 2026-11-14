@@ -2955,6 +2955,487 @@ theorem inhabited_coin_permuted_bucketing_witness :
   have hv : a.val + 1 = b.val + 1 := congrArg Fin.val hEq
   exact Fin.ext (by omega)
 
+/-! ## Executable refinement boundaries and persistent settlement -/
+
+namespace MigrationExecution
+
+/-- Rust's little-endian polynomial coefficients, not `packTower 7`. -/
+abbrev RustGf128 := BitVec 128
+
+/-- Multiplication by x modulo x^128 + x^7 + x^2 + x + 1. -/
+def rustGf128MulX (a : RustGf128) : RustGf128 :=
+  (a <<< 1) ^^^ (if a.getLsbD 127 then 0x87#128 else 0#128)
+
+/-- The 128 iterations of `qsag_asm::gf2_128_mul_portable`, with its accumulator
+    explicit. The branch denotes Rust's all-zero/all-one selection mask. -/
+def rustGf128MulLoop : Nat → RustGf128 → RustGf128 → RustGf128 → RustGf128
+  | 0, _, _, acc => acc
+  | n + 1, x, y, acc =>
+    rustGf128MulLoop n (rustGf128MulX x) (y >>> 1)
+      (acc ^^^ (if y.getLsbD 0 then x else 0#128))
+
+def rustGf128Mul (a b : RustGf128) : RustGf128 :=
+  rustGf128MulLoop 128 a b 0#128
+
+/-- `[low, high]` in Rust has exactly this coefficient order. -/
+def rustGf128OfLimbs (lo hi : UInt64) : RustGf128 :=
+  BitVec.ofNat 128 (lo.toNat + 2^64 * hi.toNat)
+
+set_option maxRecDepth 4096 in
+ theorem rust_gf128_basis_kats :
+    rustGf128Mul 2#128 2#128 = 4#128 ∧
+    rustGf128Mul (BitVec.ofNat 128 (2^127)) 2#128 = 0x87#128 ∧
+    rustGf128OfLimbs 0 1 = BitVec.ofNat 128 (2^64) := by
+  decide
+
+/-- Regression against treating tower packing as the Rust basis. -/
+set_option maxRecDepth 4096 in
+ theorem tooth_identity_basis_conversion_wrong :
+    rustGf128Mul 2#128 2#128 ≠ mulExec 7 2#128 2#128 := by
+  decide
+
+#tooth_pair Qsag.MigrationExecution.rust_gf128_basis_kats vs
+  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
+
+/-- One base-case opening. Gamma is a received claim, never assigned alpha*beta
+    by the verifier. All 2 × 64 openings must pass. This is the final base-case
+    check only; the recursive folding-to-gates refinement remains separate. -/
+structure BaseOpening where
+  alpha : RustGf128
+  beta : RustGf128
+  gamma : RustGf128
+  deriving DecidableEq
+
+def BaseOpening.check (o : BaseOpening) : Bool :=
+  o.gamma == rustGf128Mul o.alpha o.beta
+
+def checkBaseOpenings (openings : Fin 2 → Fin 64 → BaseOpening) : Bool :=
+  finAll 2 (fun t => finAll 64 (fun lane => (openings t lane).check))
+
+theorem checkBaseOpenings_sound (openings : Fin 2 → Fin 64 → BaseOpening)
+    (h : checkBaseOpenings openings = true) :
+    ∀ t lane, (openings t lane).gamma =
+      rustGf128Mul (openings t lane).alpha (openings t lane).beta := by
+  intro t lane
+  exact eq_of_beq ((finAll_eq_true_iff 64 _).mp
+    ((finAll_eq_true_iff 2 _).mp h t) lane)
+
+/-- The base-case polynomial evaluated by Rust from the folded claim and
+    reshared d1/d2, including the actual received gamma. No correctness of the
+    supplied d1/d2 or randomness of rb is assumed by this definition. -/
+def baseOpening (a b c u v d1 d2 rb : RustGf128) : BaseOpening where
+  alpha := a ^^^ rustGf128Mul u rb
+  beta := b ^^^ rustGf128Mul v rb
+  gamma := c ^^^ rustGf128Mul d1 rb ^^^ rustGf128Mul d2 (rustGf128Mul rb rb)
+
+/-- Public statement fields stay separate; epoch is bounded rather than an
+    unbounded natural silently truncated by a serializer. Authorization must bind
+    this entire statement, including the destination. -/
+structure Statement where
+  legacyCommitment : List UInt8
+  migrationDomain : BitVec 256
+  nullifier : BitVec 256
+  destination : BitVec 256
+  epoch : UInt64
+  deriving DecidableEq
+
+/-- Collision-aware ownership relation. `derivePoint` must be instantiated with
+    a verified curve implementation, and `address` with the selected legacy
+    commitment (HASH160, Keccak20, or parity-checked x-only encoding).
+    Unlike the transparent scalar zero test, this relation includes BOTH the
+    address commitment and the campaign nullifier. -/
+def Ownership {Point Address : Type}
+    (derivePoint : MigrationKey256 → Point) (address : Point → Address)
+    (nullifier : MigrationKey256 → BitVec 256 → BitVec 256)
+    (group : ScalarGroup) (expected : Address) (statement : Statement)
+    (secret : MigrationKey256) : Prop :=
+  requireCanonicalScalar group secret = true ∧
+  address (derivePoint secret) = expected ∧
+  nullifier secret statement.migrationDomain = statement.nullifier
+
+/-- Hash-address acceptance cannot imply unconditional zero fault. This theorem
+    retains the collision alternative for the *joint* address/nullifier map,
+    without asserting that an address collision alone is a migration forgery. -/
+theorem ownership_same_witness_or_joint_collision {Point Address : Type}
+    (derivePoint : MigrationKey256 → Point) (address : Point → Address)
+    (nullifier : MigrationKey256 → BitVec 256 → BitVec 256)
+    (group : ScalarGroup) (expected : Address) (statement : Statement)
+    (s t : MigrationKey256)
+    (hs : Ownership derivePoint address nullifier group expected statement s)
+    (ht : Ownership derivePoint address nullifier group expected statement t) :
+    s = t ∨ (s ≠ t ∧
+      (address (derivePoint s), nullifier s statement.migrationDomain) =
+      (address (derivePoint t), nullifier t statement.migrationDomain)) := by
+  by_cases h : s = t
+  · exact Or.inl h
+  · exact Or.inr ⟨h, Prod.ext (hs.2.1.trans ht.2.1.symm)
+      (hs.2.2.trans ht.2.2.symm)⟩
+
+/-- A small-range hash counterexample. The two witnesses are canonical but
+    neither address nor nullifier binding follows for arbitrary hash functions. -/
+theorem tooth_constant_hashes_do_not_bind_witness :
+    ∃ statement : Statement,
+      Ownership id (fun _ : MigrationKey256 => false) (fun _ _ => 0#256)
+        .Secp256k1 false statement 1#256 ∧
+      Ownership id (fun _ : MigrationKey256 => false) (fun _ _ => 0#256)
+        .Secp256k1 false statement 2#256 ∧
+      (1#256 : MigrationKey256) ≠ 2#256 := by
+  refine ⟨⟨[], 0#256, 0#256, 1#256, 0⟩, ?_, ?_, by decide⟩ <;>
+    constructor
+  · decide
+  · exact ⟨rfl, rfl⟩
+  · decide
+  · exact ⟨rfl, rfl⟩
+
+#tooth_pair Qsag.MigrationExecution.ownership_same_witness_or_joint_collision vs
+  Qsag.MigrationExecution.tooth_constant_hashes_do_not_bind_witness
+
+/-- A pending multiplication contains the same shares consumed and emitted by
+    the gate evaluator. There is no independently supplied triple list. -/
+structure PendingAnd where
+  lhs : RssWord64Shares3
+  rhs : RssWord64Shares3
+  output : RssWord64Shares3
+  deriving DecidableEq
+
+/-- Exact reference check, over all 64 Boolean lanes. This is intentionally NOT
+    advertised as the private or batched BBCGGI19 implementation. -/
+def PendingAnd.check (t : PendingAnd) : Bool :=
+  t.output.reconstruct == (t.lhs.reconstruct &&& t.rhs.reconstruct)
+
+/-- Indices refer to existing wires; outputs are prepended. An AND consumes the
+    adversarially supplied result, so corrupting it affects all following gates. -/
+inductive Gate where
+  | xor (lhs rhs : Nat)
+  | and (lhs rhs : Nat) (output : RssWord64Shares3)
+  deriving DecidableEq
+
+structure GateState where
+  wires : List RssWord64Shares3
+  pending : List PendingAnd
+  deriving DecidableEq
+
+def xorShares (a b : RssWord64Shares3) : RssWord64Shares3 :=
+  ⟨a.w0 ^^^ b.w0, a.w1 ^^^ b.w1, a.w2 ^^^ b.w2⟩
+
+def evalGate (st : GateState) (gate : Gate) : Option GateState := do
+  match gate with
+  | .xor l r =>
+    let a ← st.wires[l]?
+    let b ← st.wires[r]?
+    return { st with wires := xorShares a b :: st.wires }
+  | .and l r output =>
+    let a ← st.wires[l]?
+    let b ← st.wires[r]?
+    return { wires := output :: st.wires
+             pending := ⟨a, b, output⟩ :: st.pending }
+
+def evalGates : GateState → List Gate → Option GateState
+  | st, [] => some st
+  | st, g :: gs => (evalGate st g).bind (fun next => evalGates next gs)
+
+def witnessWires (witness : RssWitnessLanes3) : List RssWord64Shares3 :=
+  List.ofFn (fun i : Fin 256 => ⟨witness.w0 i, witness.w1 i, witness.w2 i⟩)
+
+inductive ExecutionResult where
+  | invalidLanes
+  | invalidWire
+  | multiplicationCheck
+  | invalidProof
+  | accepted
+  deriving Repr, DecidableEq
+
+/-- Open the evaluated final gate only AFTER checking every pending AND. -/
+def finish (st : GateState) : ExecutionResult :=
+  if st.pending.all PendingAnd.check then
+    match st.wires with
+    | [] => .invalidWire
+    | out :: _ => if out.reconstruct == 0xFFFFFFFFFFFFFFFF then .accepted else .invalidProof
+  else .multiplicationCheck
+
+/-- This trace evaluator is the executable reference boundary. It checks all
+    256 × 3 input lane words and uses those exact words as circuit inputs. The
+    trusted circuit compiler must supply the ownership/zero-test circuit; an
+    arbitrary circuit alone does not establish ownership. -/
+def run (witness : RssWitnessLanes3) (gates : List Gate) : ExecutionResult :=
+  if shareUniformLanesCheck witness then
+    match evalGates ⟨witnessWires witness, []⟩ gates with
+    | none => .invalidWire
+    | some st => finish st
+  else .invalidLanes
+
+theorem finish_checks_consumed_outputs (st : GateState)
+    (h : finish st = .accepted) :
+    ∀ t ∈ st.pending,
+      t.output.reconstruct = (t.lhs.reconstruct &&& t.rhs.reconstruct) := by
+  unfold finish at h
+  cases hp : st.pending.all PendingAnd.check
+  · rw [hp] at h
+    cases h
+  · intro t ht
+    exact eq_of_beq (List.all_eq_true.mp hp t ht)
+
+/-- Every accepted run checked the ACTUAL witness lane words, not a free mask. -/
+theorem run_checks_actual_lanes (witness : RssWitnessLanes3) (gates : List Gate)
+    (h : run witness gates = .accepted) : shareUniformLanesCheck witness = true := by
+  cases hl : shareUniformLanesCheck witness
+  · simp only [run, hl, Bool.false_eq_true, ↓reduceIte] at h
+    cases h
+  · rfl
+
+/-- Acceptance connects lane validation, the concrete evaluator result, and
+    every pending multiplication to one execution. -/
+theorem run_has_checked_execution (witness : RssWitnessLanes3) (gates : List Gate)
+    (h : run witness gates = .accepted) :
+    shareUniformLanesCheck witness = true ∧
+    ∃ st : GateState,
+      evalGates ⟨witnessWires witness, []⟩ gates = some st ∧
+      finish st = .accepted ∧
+      ∀ t ∈ st.pending,
+        t.output.reconstruct = (t.lhs.reconstruct &&& t.rhs.reconstruct) := by
+  have hl := run_checks_actual_lanes witness gates h
+  refine ⟨hl, ?_⟩
+  unfold run at h
+  rw [hl] at h
+  cases he : evalGates ⟨witnessWires witness, []⟩ gates with
+  | none =>
+    rw [he] at h
+    cases h
+  | some st =>
+    rw [he] at h
+    exact ⟨st, rfl, h, finish_checks_consumed_outputs st h⟩
+
+theorem accepted_execution_same_witness_in_every_lane
+    (witness : RssWitnessLanes3) (gates : List Gate)
+    (h : run witness gates = .accepted) (a b : Fin 64) :
+    extractRepetitionWitness witness a.val = extractRepetitionWitness witness b.val :=
+  shareUniformLanesCheck_implies_uniform_witness_across_lanes.1 witness
+    (run_checks_actual_lanes witness gates h) a.val b.val a.isLt b.isLt
+
+/-- Removing precisely the linked multiplication barrier accepts the corrupted
+    final AND output. This is a whole evaluator path, not an unrelated triple. -/
+def finishWithoutCheck (st : GateState) : ExecutionResult :=
+  match st.wires with
+  | [] => .invalidWire
+  | out :: _ => if out.reconstruct == 0xFFFFFFFFFFFFFFFF then .accepted else .invalidProof
+
+theorem tooth_corrupt_final_and_guard_removal :
+    ∃ initial : GateState, ∃ gates : List Gate, ∃ evaluated : GateState,
+      evalGates initial gates = some evaluated ∧
+      finish evaluated = .multiplicationCheck ∧
+      finishWithoutCheck evaluated = .accepted ∧
+      ∃ t ∈ evaluated.pending,
+        t.output.reconstruct ≠ (t.lhs.reconstruct &&& t.rhs.reconstruct) := by
+  let zero : RssWord64Shares3 := ⟨0, 0, 0⟩
+  let forged : RssWord64Shares3 := ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩
+  refine ⟨⟨[zero], []⟩, [.and 0 0 forged],
+    ⟨[forged, zero], [⟨zero, zero, forged⟩]⟩, rfl, ?_, ?_,
+    ⟨zero, zero, forged⟩, .head _, ?_⟩ <;> decide
+
+#tooth_pair Qsag.MigrationExecution.finish_checks_consumed_outputs vs
+  Qsag.MigrationExecution.tooth_corrupt_final_and_guard_removal
+
+/-- Persistent spent set (represented as a duplicate-free list when started
+    empty). Settlement never removes an entry, including on rejection. -/
+structure Ledger where
+  spent : List (BitVec 256)
+  deriving DecidableEq
+
+structure Submission (Authorization : Type) where
+  statement : Statement
+  authorization : Authorization
+  witness : RssWitnessLanes3
+
+inductive SettlementResult where
+  | accepted
+  | replay
+  | unauthorized
+  | executionRejected (reason : ExecutionResult)
+  deriving Repr, DecidableEq
+
+/-- The circuit comes from the verifier's compiler, not the submission. The
+    authorization verifier receives every statement field. Replay checking and
+    insertion are one transition; invalid authorization/execution burns nothing.
+    This models logical persistence, not a filesystem crash-consistency proof. -/
+def settle {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization) : Ledger × SettlementResult :=
+  if submission.statement.nullifier ∈ ledger.spent then (ledger, .replay)
+  else if verifyAuthorization submission.statement submission.authorization then
+    match run submission.witness (compile submission.statement) with
+    | .accepted => (⟨submission.statement.nullifier :: ledger.spent⟩, .accepted)
+    | reason => (ledger, .executionRejected reason)
+  else (ledger, .unauthorized)
+
+/-- Replay rejects deterministically, independent of the new destination,
+    authorization, circuit, witness, or errors it would have produced. -/
+theorem settle_replay_rejected {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization)
+    (h : submission.statement.nullifier ∈ ledger.spent) :
+    settle verifyAuthorization compile ledger submission = (ledger, .replay) := by
+  unfold settle
+  rw [cIte_pos h]
+
+/-- An accepted transition inserts exactly the checked nullifier. -/
+theorem settle_accept_inserts {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization)
+    (h : (settle verifyAuthorization compile ledger submission).2 = .accepted) :
+    (settle verifyAuthorization compile ledger submission).1.spent =
+      submission.statement.nullifier :: ledger.spent := by
+  unfold settle at h ⊢
+  split
+  · cases h
+  · split
+    · cases hr : run submission.witness (compile submission.statement) <;>
+        simp only [hr] at h ⊢ <;> first | rfl | cases h
+    · cases h
+
+theorem settle_spent_monotone {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (submission : Submission Authorization)
+    (n : BitVec 256) (hn : n ∈ ledger.spent) :
+    n ∈ (settle verifyAuthorization compile ledger submission).1.spent := by
+  unfold settle
+  split
+  · exact hn
+  · split
+    · cases run submission.witness (compile submission.statement) <;>
+        first | exact hn | exact List.mem_cons_of_mem _ hn
+    · exact hn
+
+/-- The complete settlement history, including rejection outcomes. Unlike a
+    successful-turn-only trace this retains repeated and aborted submissions. -/
+def settleMany {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate) :
+    Ledger → List (Submission Authorization) → Ledger × List SettlementResult
+  | ledger, [] => (ledger, [])
+  | ledger, submission :: rest =>
+    let next := settle verifyAuthorization compile ledger submission
+    let tail := settleMany verifyAuthorization compile next.1 rest
+    (tail.1, next.2 :: tail.2)
+
+theorem settleMany_spent_monotone {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (submissions : List (Submission Authorization))
+    (ledger : Ledger) (n : BitVec 256) (hn : n ∈ ledger.spent) :
+    n ∈ (settleMany verifyAuthorization compile ledger submissions).1.spent := by
+  induction submissions generalizing ledger with
+  | nil => exact hn
+  | cons submission rest ih =>
+    exact ih _ (settle_spent_monotone verifyAuthorization compile ledger submission n hn)
+
+/-- Acceptance followed by any number of successful or rejected turns still
+    rejects the same nullifier. Destination changes do not evade the spent set. -/
+theorem accepted_nullifier_rejected_after_any_history {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (ledger : Ledger) (first again : Submission Authorization)
+    (rest : List (Submission Authorization))
+    (hAccepted : (settle verifyAuthorization compile ledger first).2 = .accepted)
+    (hSame : again.statement.nullifier = first.statement.nullifier) :
+    let afterFirst := (settle verifyAuthorization compile ledger first).1
+    let afterRest := (settleMany verifyAuthorization compile afterFirst rest).1
+    settle verifyAuthorization compile afterRest again = (afterRest, .replay) := by
+  intro afterFirst afterRest
+  apply settle_replay_rejected
+  rw [hSame]
+  apply settleMany_spent_monotone
+  have hInserted := settle_accept_inserts verifyAuthorization compile ledger first hAccepted
+  change first.statement.nullifier ∈ (settle verifyAuthorization compile ledger first).1.spent
+  rw [hInserted]
+  exact .head _
+
+/-- Guard-removal mutant: clearing the ledger before each attempt. -/
+def settleWithoutReplayGuard {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate)
+    (_ledger : Ledger) (submission : Submission Authorization) : Ledger × SettlementResult :=
+  settle verifyAuthorization compile ⟨[]⟩ submission
+
+/-- Nonvacuity: a concrete nonempty, linked AND execution settles once. -/
+def honestSubmission : Submission Unit where
+  statement := ⟨[], 0#256, 7#256, 11#256, 0⟩
+  authorization := ()
+  witness := ⟨fun _ => 0xFFFFFFFFFFFFFFFF, fun _ => 0, fun _ => 0⟩
+
+def honestCircuit (_ : Statement) : List Gate :=
+  [.and 0 0 ⟨0xFFFFFFFFFFFFFFFF, 0, 0⟩]
+
+set_option maxRecDepth 4096 in
+ theorem settlement_acceptance_witness :
+    (settle (fun (_ : Statement) (_ : Unit) => true) honestCircuit ⟨[]⟩ honestSubmission).2 =
+      .accepted := by
+  decide
+
+/-- Named reachability premise for structural nonvacuity registration. -/
+def AcceptedSettlement {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate) (ledger : Ledger)
+    (submission : Submission Authorization) : Prop :=
+  (settle verifyAuthorization compile ledger submission).2 = .accepted
+
+theorem accepted_settlement_spends {Authorization : Type}
+    (verifyAuthorization : Statement → Authorization → Bool)
+    (compile : Statement → List Gate) (ledger : Ledger)
+    (submission : Submission Authorization)
+    (h : AcceptedSettlement verifyAuthorization compile ledger submission) :
+    submission.statement.nullifier ∈
+      (settle verifyAuthorization compile ledger submission).1.spent := by
+  rw [settle_accept_inserts verifyAuthorization compile ledger submission h]
+  exact .head _
+
+theorem inhabited_accepted_settlement :
+    ∃ ledger : Ledger, ∃ submission : Submission Unit,
+      AcceptedSettlement (fun (_ : Statement) (_ : Unit) => true)
+        honestCircuit ledger submission :=
+  ⟨⟨[]⟩, honestSubmission, settlement_acceptance_witness⟩
+
+#verify_inhabited Qsag.MigrationExecution.accepted_settlement_spends
+  Qsag.MigrationExecution.inhabited_accepted_settlement
+
+/-- The same request is accepted twice only in the replay-guard mutant. -/
+set_option maxRecDepth 4096 in
+ theorem tooth_replay_guard_removal :
+    ∃ afterFirst : Ledger,
+      afterFirst = (settle (fun _ _ => true) honestCircuit ⟨[]⟩ honestSubmission).1 ∧
+      settle (fun _ _ => true) honestCircuit afterFirst honestSubmission = (afterFirst, .replay) ∧
+      (settleWithoutReplayGuard (fun _ _ => true) honestCircuit afterFirst honestSubmission).2 =
+        .accepted ∧
+      SettlementResult.replay ≠ SettlementResult.accepted := by
+  refine ⟨⟨[7#256]⟩, ?_⟩
+  decide
+
+#tooth_pair Qsag.MigrationExecution.settle_replay_rejected vs
+  Qsag.MigrationExecution.tooth_replay_guard_removal
+
+#verify_constructive
+  Qsag.MigrationExecution.rust_gf128_basis_kats
+  Qsag.MigrationExecution.tooth_identity_basis_conversion_wrong
+  Qsag.MigrationExecution.checkBaseOpenings_sound
+  Qsag.MigrationExecution.ownership_same_witness_or_joint_collision
+  Qsag.MigrationExecution.finish_checks_consumed_outputs
+  Qsag.MigrationExecution.run_checks_actual_lanes
+  Qsag.MigrationExecution.run_has_checked_execution
+  Qsag.MigrationExecution.accepted_execution_same_witness_in_every_lane
+  Qsag.MigrationExecution.tooth_corrupt_final_and_guard_removal
+  Qsag.MigrationExecution.settle_replay_rejected
+  Qsag.MigrationExecution.settle_accept_inserts
+  Qsag.MigrationExecution.settle_spent_monotone
+  Qsag.MigrationExecution.settleMany_spent_monotone
+  Qsag.MigrationExecution.accepted_nullifier_rejected_after_any_history
+  Qsag.MigrationExecution.settlement_acceptance_witness
+  Qsag.MigrationExecution.tooth_replay_guard_removal
+
+end MigrationExecution
+
 /-! ## 9. Module-Wide `#verify_constructive` Gate -/
 
 #verify_constructive
