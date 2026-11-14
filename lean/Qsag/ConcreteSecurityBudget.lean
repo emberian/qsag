@@ -1,0 +1,1089 @@
+module
+/-
+# Qsag.ConcreteSecurityBudget — Mechanized Unitary QROM, Adaptive Query Trees, Polynomial Root Bounds & Concrete PQ128 Security Roster
+
+Self-contained constructive (`0` classical choice axioms, `0` external math libraries, `0` unproved goals)
+Lean 4.35 formalization of QSAG's classical and quantum concrete security foundations:
+
+1. **§1. Exact Constructive `RatBound` & Kernel-Checked Bit-Margin Algebra**:
+   - Positive-denominator rational bounds `RatBound` (`num / den`, `0 < den`), integer-cross-multiplied
+     ordering, exact bit-security predicates (`atLeastBits b r ↔ r.num * 2^b ≤ r.den`,
+     `exceedsBitBudget b r ↔ r.den < r.num * 2^b`), and `2`-way / `N`-way union-bound bit-loss laws.
+
+2. **§2. Unitary Quantum Query Mechanics (`GaussInt`), `[BBBV97]` / `[AHU19]` One-Way-to-Hiding (`O2H`),
+   Born-Rule TVD, Lazy-RO Adaptive Query Trees & QROM Fiat–Shamir / BHT Regimes**:
+   - Exact Gaussian-integer amplitudes `GaussInt` (`a + b i`), scaled unitary operators (`oracleXor`
+     at scale `1`, `hadamardQuery2` at scale `2`), and arbitrary `q`-query unitary circuits `QuantumAdv`.
+   - Square-root-free `q`-way Cauchy–Schwarz sum-of-squares identity
+     `q * ∑ ‖v_t‖² = ‖∑ v_t‖² + ∑_{s < t} ‖v_s - v_t‖²`, hybrid telescoping O2H state-disturbance
+     theorem (`qrom_o2h_telescoping_disturbance_le`), uniform hidden-target disturbance `≤ 4 q^2 / M`
+     (`qrom_o2h_average_point_disturbance`), and Born-rule probability difference bound
+     `(P(ψ) - P(φ))^2 ≤ 4 ‖ψ‖² ‖ψ - φ‖²` (`born_prob_diff_sq_le_four_state_dist_sq`).
+   - **Protocol-Coupled Fiber Search (`qrom_fiber_search_bound` & `classical_lazy_ro_fiber_search_bound`)**:
+     Unitary QROM adversary success is bounded by `8 (q + 1)^2 |Fiber(encode, target)| / 2^n` and
+     classical height-`q` adaptive `OracleComp` success over a lazy random oracle is bounded by
+     `(q + 1) |Fiber(encode, target)| / 2^n` — coupling concrete denominators directly to proved
+     protocol encoding injectivity rather than detached numeric literals.
+   - BHT / CNS quantum collision ceiling (`tooth_bht_256bit_unrestricted_collision_ceiling_85bits` vs
+     384-bit collision & `ADRS` `M = 1` single-target domain separation) and QROM Fiat–Shamir grinding /
+     Don–Fehr–Majenz `[DFM20]` Measure-and-Reprogram bounds.
+
+3. **§3. Hash-Based & Threshold Custody Protocol Encodings (`Baggy`, `Corduroy`, `FrontierSumFts`, `Jorts`, `QuorumJorts`)**:
+   - Bit-exact MSB-first `wotsCDibits128Bv` (`V128`) injectivity (`fiberCard ≤ 1` → `≥ 128` quantum bits)
+     contrasted with `#tooth` `tooth_wots_v58_128bit_digest_grover_64bit` (`V58` `2^128`-sized fiber!).
+   - `FrontierSumFts` `Full256Bit` (`rankBits = 256`) injectivity (`≥ 128` quantum bits) contrasted
+     with `#tooth` `tooth_frontier_122bit_rank_grover_61bit` (`2^134`-sized fiber → `61`-bit Grover ceiling!).
+   - Composed `Jorts` & `QuorumJorts` (`QS-A` & `QS-B`) multi-component rational sum (`WOTS+C V128` +
+     `BeltLatch` 256-bit pairwise MAC + `Rss256` 2-pass `GF(2^128)` BGIN19 product barrier).
+
+4. **§4. `GoldilocksExt4` Quartic Extension Field, Root-Counting Schwartz–Zippel & `Hem` WHIR Regimes**:
+   - Complete `GoldilocksExt4` (`𝔽_{p^2}[v]/(v^2 - u)`, `p^4 > 2^255`) `LawfulCommRing` + `NoZeroDivisors`
+     proof via `uBasis_not_square`, deriving Schwartz–Zippel `d / |S|` from `RoundPoly.roots_nodup_length_le`.
+   - Exact `Hem` `Ext4` sumcheck (`249` bits), `[BCIKS20]` folding (`175+` bits vs `#tooth`
+     `tooth_hem_ext2_folding_under_100bits`), OOD list-pinning (`> 225` bits), and explicit separation
+     between conditional `[HABR24]` Conjecture-1 classical bits (`128 / 136 / 142`), unconditional
+     Johnson proximity bits (`≥ 72`), `#tooth` default-schedule quantum Grover scale, and upgraded
+     unconditional `hemWhirPq128Stages` (`≥ 128` quantum bits).
+
+5. **§5–§6. Fast-Factored ZKBoo (`BlindVc` `219` vs `438`), `ThresholdMlDsa`, `Poseidon2Toprf`,
+   `DensePcg`, `HdRekey` (Exact 96-Bit Modular Bias), `ActiveMigration` & Master `PQ128` Portfolio**:
+   - Cube/6th-power `3^73` bounds proving `(2/3)^219 < 2^-128`, `#tooth`
+     `tooth_zkboo_219_quantum_grind_64bit` (`(2/3)^219 > 2^-129`), and `(2/3)^438 < 2^-256` (`≥ 128`
+     quantum FS bits), composed into `qsag_pq128_portfolio_soundness_budget` and
+     `inhabited_concrete_security_budget_roster`.
+-/
+
+public import Qsag.Constructive
+public import Qsag.Goldilocks
+import all Qsag.Goldilocks
+public import Qsag.UcGames
+import all Qsag.UcGames
+
+public section
+namespace Qsag
+
+attribute [-instance] UInt8.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
+
+set_option autoImplicit false
+set_option exponentiation.threshold 2048
+
+/-! ## §1. Exact Constructive `RatBound`, Log2 Bit-Margin Predicates & Union Calculus -/
+
+/-- Non-negative rational probability / advantage upper bound `num / den` with certified positive
+    denominator (`0 < den`), eliminating division-by-zero vacuity and floating-point rounding. -/
+structure RatBound where
+  num : Nat
+  den : Nat
+  h_pos : 0 < den
+  deriving DecidableEq, Repr
+
+@[ext] theorem RatBound.ext {a b : RatBound} (hn : a.num = b.num) (hd : a.den = b.den) : a = b := by
+  cases a; cases b; cases hn; cases hd; rfl
+
+/-- Exact cross-multiplied rational inequality `a.num / a.den ≤ b.num / b.den`. -/
+@[expose] def RatBound.le (a b : RatBound) : Prop :=
+  a.num * b.den ≤ b.num * a.den
+
+/-- Strict cross-multiplied rational inequality `a.num / a.den < b.num / b.den`. -/
+@[expose] def RatBound.lt (a b : RatBound) : Prop :=
+  a.num * b.den < b.num * a.den
+
+/-- Constructive `b`-bit concrete security predicate: `bound ≤ 2^{-b}`, expressed as the exact
+    integer inequality `bound.num * 2 ^ b ≤ bound.den`. -/
+@[expose] def atLeastBits (b : Nat) (bound : RatBound) : Prop :=
+  bound.num * 2 ^ b ≤ bound.den
+
+/-- Strict `b`-bit margin predicate: `bound < 2^{-b}` (`bound.num * 2 ^ b < bound.den`). -/
+@[expose] def strictlyMoreThanBits (b : Nat) (bound : RatBound) : Prop :=
+  bound.num * 2 ^ b < bound.den
+
+/-- Negative concrete security witness predicate: `bound > 2^{-b}` (`bound.den < bound.num * 2 ^ b`),
+    certifying that a bound fails to meet a `b`-bit budget (at `b = 0`, `bound > 1`). -/
+@[expose] def exceedsBitBudget (b : Nat) (bound : RatBound) : Prop :=
+  bound.den < bound.num * 2 ^ b
+
+instance (a b : RatBound) : Decidable (RatBound.le a b) :=
+  Nat.decLe (a.num * b.den) (b.num * a.den)
+
+instance (a b : RatBound) : Decidable (RatBound.lt a b) :=
+  Nat.decLt (a.num * b.den) (b.num * a.den)
+
+instance (b : Nat) (bound : RatBound) : Decidable (atLeastBits b bound) :=
+  Nat.decLe (bound.num * 2 ^ b) bound.den
+
+instance (b : Nat) (bound : RatBound) : Decidable (strictlyMoreThanBits b bound) :=
+  Nat.decLt (bound.num * 2 ^ b) bound.den
+
+instance (b : Nat) (bound : RatBound) : Decidable (exceedsBitBudget b bound) :=
+  Nat.decLt bound.den (bound.num * 2 ^ b)
+
+/-- Exact zero error bound `0 / 1`. -/
+def RatBound.zero : RatBound := ⟨0, 1, Nat.zero_lt_one⟩
+
+/-- Unit probability bound `1 / 1`. -/
+def RatBound.one : RatBound := ⟨1, 1, Nat.zero_lt_one⟩
+
+/-- Canonical `b`-bit target threshold `1 / 2 ^ b`. -/
+def RatBound.invPow2 (b : Nat) : RatBound := ⟨1, 2 ^ b, Nat.two_pow_pos b⟩
+
+/-- Exact rational sum `(a.num * b.den + b.num * a.den) / (a.den * b.den)`. -/
+@[expose] def RatBound.add (a b : RatBound) : RatBound :=
+  ⟨a.num * b.den + b.num * a.den, a.den * b.den, Nat.mul_pos a.h_pos b.h_pos⟩
+
+/-- Exact rational product `(a.num * b.num) / (a.den * b.den)`. -/
+@[expose] def RatBound.mul (a b : RatBound) : RatBound :=
+  ⟨a.num * b.num, a.den * b.den, Nat.mul_pos a.h_pos b.h_pos⟩
+
+/-- Exact integer scaling `(k * a.num) / a.den`. -/
+@[expose] def RatBound.scale (k : Nat) (a : RatBound) : RatBound :=
+  ⟨k * a.num, a.den, a.h_pos⟩
+
+/-- Exact `k`-fold independent repetition power `a.num ^ k / a.den ^ k`. -/
+@[expose] def RatBound.pow (a : RatBound) (k : Nat) : RatBound :=
+  ⟨a.num ^ k, a.den ^ k, Nat.pow_pos a.h_pos⟩
+
+/-- Sum a list of component error bounds into a single composed `RatBound`. -/
+def RatBound.sumList : List RatBound → RatBound
+  | [] => RatBound.zero
+  | r :: rs => r.add (RatBound.sumList rs)
+
+theorem RatBound.to_ratLe_iff (a b : RatBound) :
+    RatBound.le a b ↔ ratLe (a.num, a.den) (b.num, b.den) := by
+  unfold RatBound.le ratLe
+  exact ⟨fun h => ⟨a.h_pos, b.h_pos, h⟩, fun h => h.2.2⟩
+
+theorem atLeastBits_iff_le_invPow2 (b : Nat) (r : RatBound) :
+    atLeastBits b r ↔ RatBound.le r (RatBound.invPow2 b) := by
+  unfold atLeastBits RatBound.le RatBound.invPow2
+  dsimp only
+  rw [Nat.one_mul]
+
+theorem atLeastBits_of_strictlyMoreThanBits {b : Nat} {r : RatBound}
+    (h : strictlyMoreThanBits b r) : atLeastBits b r :=
+  Nat.le_of_lt h
+
+theorem exceedsBitBudget_not_atLeastBits {b : Nat} {r : RatBound}
+    (h : exceedsBitBudget b r) : ¬ atLeastBits b r := by
+  unfold exceedsBitBudget atLeastBits at *
+  omega
+
+theorem RatBound.le_refl (a : RatBound) : RatBound.le a a :=
+  Nat.le_refl _
+
+theorem RatBound.le_trans {a b c : RatBound}
+    (hab : RatBound.le a b) (hbc : RatBound.le b c) : RatBound.le a c := by
+  unfold RatBound.le at *
+  have h1 : a.num * b.den * c.den ≤ b.num * a.den * c.den :=
+    Nat.mul_le_mul_right c.den hab
+  have h2 : b.num * c.den * a.den ≤ c.num * b.den * a.den :=
+    Nat.mul_le_mul_right a.den hbc
+  have hL : a.num * c.den * b.den = a.num * b.den * c.den := by
+    rw [Nat.mul_right_comm]
+  have hM : b.num * a.den * c.den = b.num * c.den * a.den := by
+    rw [Nat.mul_right_comm]
+  have hR : c.num * b.den * a.den = c.num * a.den * b.den := by
+    rw [Nat.mul_right_comm]
+  have hChain : a.num * c.den * b.den ≤ c.num * a.den * b.den := by
+    rw [hL, ← hR]
+    exact Nat.le_trans h1 (hM ▸ h2)
+  exact Nat.le_of_mul_le_mul_right hChain b.h_pos
+
+theorem atLeastBits_of_le {a b : RatBound} {bits : Nat}
+    (hab : RatBound.le a b) (hb : atLeastBits bits b) : atLeastBits bits a :=
+  (atLeastBits_iff_le_invPow2 bits a).mpr
+    (RatBound.le_trans hab ((atLeastBits_iff_le_invPow2 bits b).mp hb))
+
+theorem atLeastBits_antitone_bits {b₁ b₂ : Nat} {r : RatBound}
+    (hBits : b₁ ≤ b₂) (h : atLeastBits b₂ r) : atLeastBits b₁ r := by
+  unfold atLeastBits at *
+  have hPow : 2 ^ b₁ ≤ 2 ^ b₂ := Nat.pow_le_pow_right (by decide) hBits
+  exact Nat.le_trans (Nat.mul_le_mul_left r.num hPow) h
+
+theorem RatBound.add_le_add {a₁ b₁ a₂ b₂ : RatBound}
+    (h1 : RatBound.le a₁ b₁) (h2 : RatBound.le a₂ b₂) :
+    RatBound.le (a₁.add a₂) (b₁.add b₂) := by
+  unfold RatBound.le RatBound.add at *
+  dsimp only
+  have t1 : a₁.num * a₂.den * (b₁.den * b₂.den) ≤ b₁.num * b₂.den * (a₁.den * a₂.den) := by
+    have p1 : a₁.num * b₁.den * (a₂.den * b₂.den) ≤ b₁.num * a₁.den * (a₂.den * b₂.den) :=
+      Nat.mul_le_mul_right _ h1
+    have eqL : a₁.num * a₂.den * (b₁.den * b₂.den) = a₁.num * b₁.den * (a₂.den * b₂.den) := by
+      rw [← Nat.mul_assoc, ← Nat.mul_assoc, Nat.mul_right_comm a₁.num a₂.den b₁.den]
+    have eqR : b₁.num * b₂.den * (a₁.den * a₂.den) = b₁.num * a₁.den * (a₂.den * b₂.den) := by
+      rw [Nat.mul_comm a₂.den b₂.den, ← Nat.mul_assoc, ← Nat.mul_assoc,
+          Nat.mul_right_comm b₁.num b₂.den a₁.den]
+    rw [eqL, eqR]; exact p1
+  have t2 : a₂.num * a₁.den * (b₁.den * b₂.den) ≤ b₂.num * b₁.den * (a₁.den * a₂.den) := by
+    have p2 : a₂.num * b₂.den * (a₁.den * b₁.den) ≤ b₂.num * a₂.den * (a₁.den * b₁.den) :=
+      Nat.mul_le_mul_right _ h2
+    have eqL : a₂.num * a₁.den * (b₁.den * b₂.den) = a₂.num * b₂.den * (a₁.den * b₁.den) := by
+      rw [Nat.mul_comm b₁.den b₂.den, ← Nat.mul_assoc, ← Nat.mul_assoc,
+          Nat.mul_right_comm a₂.num a₁.den b₂.den]
+    have eqR : b₂.num * b₁.den * (a₁.den * a₂.den) = b₂.num * a₂.den * (a₁.den * b₁.den) := by
+      rw [Nat.mul_comm a₁.den b₁.den, Nat.mul_comm a₁.den a₂.den, ← Nat.mul_assoc, ← Nat.mul_assoc,
+          Nat.mul_right_comm b₂.num b₁.den a₂.den]
+    rw [eqL, eqR]; exact p2
+  rw [Nat.right_distrib, Nat.right_distrib]
+  exact Nat.add_le_add t1 t2
+
+theorem RatBound.mul_le_mul {a₁ b₁ a₂ b₂ : RatBound}
+    (h1 : RatBound.le a₁ b₁) (h2 : RatBound.le a₂ b₂) :
+    RatBound.le (a₁.mul a₂) (b₁.mul b₂) := by
+  unfold RatBound.le RatBound.mul at *
+  dsimp only
+  have hProd := Nat.mul_le_mul h1 h2
+  have eqL : a₁.num * a₂.num * (b₁.den * b₂.den) = (a₁.num * b₁.den) * (a₂.num * b₂.den) := by
+    rw [← Nat.mul_assoc, ← Nat.mul_assoc, Nat.mul_right_comm a₁.num a₂.num b₁.den]
+  have eqR : b₁.num * b₂.num * (a₁.den * a₂.den) = (b₁.num * a₁.den) * (b₂.num * a₂.den) := by
+    rw [← Nat.mul_assoc, ← Nat.mul_assoc, Nat.mul_right_comm b₁.num b₂.num a₁.den]
+  rw [eqL, eqR]
+  exact hProd
+
+theorem RatBound.pow_le_pow {a b : RatBound} (h : RatBound.le a b) :
+    ∀ k : Nat, RatBound.le (a.pow k) (b.pow k)
+  | 0 => by simp [RatBound.pow, RatBound.le]
+  | k + 1 => by
+    have ih := RatBound.pow_le_pow h k
+    have hEqA : a.pow (k + 1) = (a.pow k).mul a := by
+      ext <;> simp [RatBound.pow, RatBound.mul, Nat.pow_succ]
+    have hEqB : b.pow (k + 1) = (b.pow k).mul b := by
+      ext <;> simp [RatBound.pow, RatBound.mul, Nat.pow_succ]
+    rw [hEqA, hEqB]
+    exact RatBound.mul_le_mul ih h
+
+/-- **2-Way Union-Bound Bit Loss**: summing two `(b + 1)`-bit bounds preserves `b` bits. -/
+theorem atLeastBits_add_union_loss {b : Nat} {r₁ r₂ : RatBound}
+    (h₁ : atLeastBits (b + 1) r₁) (h₂ : atLeastBits (b + 1) r₂) :
+    atLeastBits b (r₁.add r₂) := by
+  unfold atLeastBits RatBound.add at *
+  dsimp only
+  rw [Nat.pow_succ] at h₁ h₂
+  have m₁ : r₁.num * (2 ^ b * 2) * r₂.den ≤ r₁.den * r₂.den :=
+    Nat.mul_le_mul_right r₂.den h₁
+  have m₂ : r₂.num * (2 ^ b * 2) * r₁.den ≤ r₂.den * r₁.den :=
+    Nat.mul_le_mul_right r₁.den h₂
+  have sum2 : (r₁.num * r₂.den + r₂.num * r₁.den) * 2 ^ b * 2 ≤ (r₁.den * r₂.den) * 2 := by
+    have lhsEq : (r₁.num * r₂.den + r₂.num * r₁.den) * 2 ^ b * 2 =
+        r₁.num * (2 ^ b * 2) * r₂.den + r₂.num * (2 ^ b * 2) * r₁.den := by
+      rw [Nat.right_distrib, Nat.right_distrib]
+      have e1 : r₁.num * r₂.den * 2 ^ b * 2 = r₁.num * (2 ^ b * 2) * r₂.den := by
+        rw [Nat.mul_right_comm r₁.num r₂.den (2 ^ b),
+            Nat.mul_right_comm (r₁.num * 2 ^ b) r₂.den 2,
+            Nat.mul_assoc r₁.num (2 ^ b) 2]
+      have e2 : r₂.num * r₁.den * 2 ^ b * 2 = r₂.num * (2 ^ b * 2) * r₁.den := by
+        rw [Nat.mul_right_comm r₂.num r₁.den (2 ^ b),
+            Nat.mul_right_comm (r₂.num * 2 ^ b) r₁.den 2,
+            Nat.mul_assoc r₂.num (2 ^ b) 2]
+      rw [e1, e2]
+    have m₂' : r₂.num * (2 ^ b * 2) * r₁.den ≤ r₁.den * r₂.den := by
+      rw [Nat.mul_comm r₁.den r₂.den]
+      exact m₂
+    rw [lhsEq, Nat.mul_two (r₁.den * r₂.den)]
+    exact Nat.add_le_add m₁ m₂'
+  exact Nat.le_of_mul_le_mul_right sum2 (by decide)
+
+private theorem sumList_le_length_mul {bound : RatBound} :
+    ∀ (xs : List RatBound), (∀ r ∈ xs, RatBound.le r bound) →
+      RatBound.le (RatBound.sumList xs) (RatBound.scale xs.length bound)
+  | [], _ => by simp [RatBound.sumList, RatBound.zero, RatBound.scale, RatBound.le]
+  | x :: xs, hAll => by
+    have hx := hAll x (.head _)
+    have hxs := sumList_le_length_mul xs (fun r hr => hAll r (.tail _ hr))
+    have hAdd := RatBound.add_le_add hx hxs
+    apply RatBound.le_trans hAdd
+    unfold RatBound.add RatBound.scale RatBound.le
+    dsimp only [List.length_cons]
+    have hEq : (bound.num * bound.den + xs.length * bound.num * bound.den) * bound.den =
+        (xs.length + 1) * bound.num * (bound.den * bound.den) := by
+      calc (bound.num * bound.den + xs.length * bound.num * bound.den) * bound.den
+        _ = bound.num * (bound.den * bound.den) + xs.length * (bound.num * (bound.den * bound.den)) := by
+          rw [Nat.add_mul, Nat.mul_assoc bound.num, Nat.mul_assoc (xs.length * bound.num),
+              Nat.mul_assoc xs.length bound.num]
+        _ = (1 + xs.length) * (bound.num * (bound.den * bound.den)) := by
+          rw [Nat.add_mul, Nat.one_mul]
+        _ = (xs.length + 1) * bound.num * (bound.den * bound.den) := by
+          rw [Nat.add_comm 1 xs.length, Nat.mul_assoc]
+    exact Nat.le_of_eq hEq
+
+/-- **`N`-Way Compositional Union-Bound Bit Loss**: summing up to `2 ^ loss` component bounds,
+    each achieving `b + loss` bits, guarantees `atLeastBits b` on their exact rational sum. -/
+theorem atLeastBits_sumList_union_loss {b loss : Nat} {xs : List RatBound}
+    (hLen : xs.length ≤ 2 ^ loss)
+    (hEach : ∀ r ∈ xs, atLeastBits (b + loss) r) :
+    atLeastBits b (RatBound.sumList xs) := by
+  have hLeInv : ∀ r ∈ xs, RatBound.le r (RatBound.invPow2 (b + loss)) :=
+    fun r hr => (atLeastBits_iff_le_invPow2 (b + loss) r).mp (hEach r hr)
+  have hSumLe := sumList_le_length_mul xs hLeInv
+  apply atLeastBits_of_le hSumLe
+  unfold atLeastBits RatBound.scale RatBound.invPow2
+  dsimp only
+  rw [Nat.mul_one, Nat.pow_add, Nat.mul_comm (2 ^ b) (2 ^ loss)]
+  exact Nat.mul_le_mul_right (2 ^ b) hLen
+
+/-- **Multi-Session Scaling Bit Loss**: scaling a `(b + sLog)`-bit bound across up to `2 ^ sLog`
+    concurrent or sequential protocol sessions preserves `atLeastBits b` on `RatBound.scale S r`. -/
+theorem atLeastBits_scale_session_loss {b sLog S : Nat} {r : RatBound}
+    (hS : S ≤ 2 ^ sLog) (hBits : atLeastBits (b + sLog) r) :
+    atLeastBits b (RatBound.scale S r) := by
+  unfold atLeastBits RatBound.scale at *
+  dsimp only
+  have h1 : S * r.num * 2 ^ b = r.num * (S * 2 ^ b) := by
+    rw [Nat.mul_comm S r.num, Nat.mul_assoc]
+  have h2 : S * 2 ^ b ≤ 2 ^ (b + sLog) := by
+    rw [Nat.pow_add, Nat.mul_comm (2 ^ b) (2 ^ sLog)]
+    exact Nat.mul_le_mul_right (2 ^ b) hS
+  rw [h1]
+  exact Nat.le_trans (Nat.mul_le_mul_left r.num h2) hBits
+
+/-- Adversarial query resource budget across random-oracle / permutation calls, signing
+    invocations, and concurrent or sequential interactive protocol sessions. -/
+structure QueryBudget where
+  qHash : Nat
+  qSign : Nat
+  qOnlineSessions : Nat
+  deriving DecidableEq, Repr
+
+/-- Standard `PQ128` QROM evaluation budget (`qHash = 2^60`, `qSign = 2^16`, `qOnlineSessions = 2^20`),
+    accounting for the explicit `8 (q + 1)^2` Zhandry/BBBV constant factor inside 256-bit targets. -/
+def standardPq128Budget : QueryBudget where
+  qHash := 2 ^ 60
+  qSign := 2 ^ 16
+  qOnlineSessions := 2 ^ 20
+
+
+/-! ## §2. Unitary Quantum Query Mechanics (`GaussInt`), `[BBBV97]` / `[AHU19]` One-Way-to-Hiding,
+           Born Rule & Adaptive Query Trees -/
+
+private theorem ofNat_add_eq (a b : Nat) : Int.ofNat (a + b) = Int.ofNat a + Int.ofNat b := rfl
+private theorem ofNat_mul_eq (a b : Nat) : Int.ofNat (a * b) = Int.ofNat a * Int.ofNat b := rfl
+
+private theorem int_sq_eq_natAbs_sq (a : Int) : a * a = Int.ofNat (a.natAbs * a.natAbs) := by
+  cases a with
+  | ofNat _ => rfl
+  | negSucc _ => rfl
+
+private theorem int_sq_nonneg (a : Int) : 0 ≤ a * a := by
+  rw [int_sq_eq_natAbs_sq]
+  exact Int.ofNat_le.mpr (Nat.zero_le _)
+
+/-! ### §2.1 Constructive Finite Sum Combinatorics & Bijection Invariance -/
+
+/-- Module-local constructive finite sum `∑_{i : Fin n} f i`, keeping full definitional reduction
+    available inside proofs and decidable evaluations without exposing internal `UcGames` bodies. -/
+def qsum : (n : Nat) → (Fin n → Nat) → Nat
+  | 0, _ => 0
+  | n + 1, f => f ⟨0, Nat.zero_lt_succ n⟩ + qsum n (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+
+theorem qsum_const : ∀ (n c : Nat), qsum n (fun _ => c) = n * c
+  | 0, _ => by simp [qsum]
+  | n + 1, c => by
+    simp only [qsum, qsum_const n c, Nat.succ_mul]
+    omega
+
+theorem qsum_congr {n : Nat} {f g : Fin n → Nat} (h : ∀ i, f i = g i) :
+    qsum n f = qsum n g := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    simp only [qsum, h ⟨0, Nat.zero_lt_succ n⟩]
+    rw [ih (fun i => h ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)]
+
+theorem qsum_le_qsum {n : Nat} {f g : Fin n → Nat} (h : ∀ i, f i ≤ g i) :
+    qsum n f ≤ qsum n g := by
+  induction n with
+  | zero => exact Nat.le_refl 0
+  | succ n ih =>
+    simp only [qsum]
+    have h0 := h ⟨0, Nat.zero_lt_succ n⟩
+    have hRest := ih (fun i => h ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+    omega
+
+theorem qsum_add {n : Nat} (f g : Fin n → Nat) :
+    qsum n (fun i => f i + g i) = qsum n f + qsum n g := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    simp only [qsum, ih]
+    omega
+
+theorem qsum_eq_indicator : ∀ (n : Nat) (a : Fin n),
+    qsum n (fun i => if i = a then 1 else 0) = 1
+  | 0, a => Fin.elim0 a
+  | n + 1, ⟨0, _⟩ => by
+    simp only [qsum, ↓reduceIte]
+    have hZero : qsum n (fun i => if (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (n + 1)) = ⟨0, Nat.zero_lt_succ n⟩ then 1 else 0) =
+        qsum n (fun _ => 0) := by
+      apply qsum_congr
+      intro i
+      have hNe : (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (n + 1)) ≠ ⟨0, Nat.zero_lt_succ n⟩ :=
+        fun he => Nat.noConfusion (congrArg Fin.val he)
+      simp only [hNe, ↓reduceIte]
+    rw [hZero, qsum_const]
+    omega
+  | n + 1, ⟨k + 1, hk⟩ => by
+    simp only [qsum]
+    have h0 : (⟨0, Nat.zero_lt_succ n⟩ : Fin (n + 1)) ≠ ⟨k + 1, hk⟩ :=
+      fun heq => Nat.noConfusion (congrArg Fin.val heq)
+    simp only [h0, ↓reduceIte, Nat.zero_add]
+    have hShift :
+        qsum n (fun i => if (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (n + 1)) = ⟨k + 1, hk⟩ then 1 else 0) =
+        qsum n (fun i => if i = ⟨k, Nat.lt_of_succ_lt_succ hk⟩ then 1 else 0) := by
+      apply qsum_congr
+      intro i
+      by_cases hik : i.1 = k
+      · have h2 : i = ⟨k, Nat.lt_of_succ_lt_succ hk⟩ := Fin.ext hik
+        have h1 : (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (n + 1)) = ⟨k + 1, hk⟩ :=
+          Fin.ext (congrArg Nat.succ hik)
+        simp only [h1, ↓reduceIte]
+        simp only [h2, ↓reduceIte]
+      · have h2 : i ≠ ⟨k, Nat.lt_of_succ_lt_succ hk⟩ := fun heq => hik (congrArg Fin.val heq)
+        have h1 : (⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ : Fin (n + 1)) ≠ ⟨k + 1, hk⟩ :=
+          fun heq => hik (Nat.succ.inj (congrArg Fin.val heq))
+        simp only [h1, ↓reduceIte]
+        simp only [h2, ↓reduceIte]
+    rw [hShift]
+    exact qsum_eq_indicator n ⟨k, Nat.lt_of_succ_lt_succ hk⟩
+
+theorem qsum_mul_left (c : Nat) :
+    ∀ {n : Nat} (f : Fin n → Nat), qsum n (fun i => c * f i) = c * qsum n f
+  | 0, _ => by simp [qsum]
+  | n + 1, f => by
+    simp only [qsum, Nat.left_distrib]
+    rw [qsum_mul_left c (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)]
+
+theorem qsum_mul_right (c : Nat) :
+    ∀ {n : Nat} (f : Fin n → Nat), qsum n (fun i => f i * c) = qsum n f * c
+  | 0, _ => by simp [qsum]
+  | n + 1, f => by
+    simp only [qsum, Nat.right_distrib]
+    rw [qsum_mul_right c (fun i => f ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)]
+
+theorem qsum_comm :
+    ∀ (A B : Nat) (f : Fin A → Fin B → Nat),
+      qsum A (fun a => qsum B (fun b => f a b)) =
+        qsum B (fun b => qsum A (fun a => f a b))
+  | 0, B, _ => by
+    simp only [qsum]
+    exact (qsum_const B 0).symm
+  | A + 1, B, f => by
+    simp only [qsum]
+    rw [qsum_comm A B (fun a b => f ⟨a.1 + 1, Nat.succ_lt_succ a.2⟩ b), ← qsum_add]
+
+theorem qsum_ite_eq (n : Nat) (a : Fin n) (v : Nat) :
+    qsum n (fun i => if i = a then v else 0) = v := by
+  have hFactor : qsum n (fun i => if i = a then v else 0) =
+      qsum n (fun i => v * (if i = a then 1 else 0)) := by
+    apply qsum_congr
+    intro i
+    by_cases h : i = a <;> simp [h]
+  rw [hFactor, qsum_mul_left, qsum_eq_indicator, Nat.mul_one]
+
+/-- Constructive bijection-invariance of `qsum` proved via `qsum_comm` + `qsum_ite_eq`
+    with zero list-permutation or pigeonhole machinery. -/
+theorem qsum_bijection {n : Nat} (π ρ : Fin n → Fin n)
+    (hLeft : ∀ i, ρ (π i) = i) (hRight : ∀ k, π (ρ k) = k) (g : Fin n → Nat) :
+    qsum n (fun i => g (π i)) = qsum n g := by
+  have hExpand : qsum n (fun i => g (π i)) =
+      qsum n (fun i => qsum n (fun k => if k = π i then g k else 0)) := by
+    apply qsum_congr
+    intro i
+    have hCongrK : qsum n (fun k => if k = π i then g k else 0) =
+        qsum n (fun k => if k = π i then g (π i) else 0) := by
+      apply qsum_congr; intro k
+      by_cases hk : k = π i
+      · rw [hk]
+      · simp only [hk, ↓reduceIte]
+    rw [hCongrK, qsum_ite_eq]
+  rw [hExpand, qsum_comm]
+  apply qsum_congr
+  intro k
+  have hSwap : qsum n (fun i => if k = π i then g k else 0) =
+      qsum n (fun i => if i = ρ k then g k else 0) := by
+    apply qsum_congr
+    intro i
+    by_cases h : i = ρ k
+    · have hk : k = π i := by rw [h, hRight]
+      have s1 : (if k = π i then g k else 0) = g k := by simp only [hk, ↓reduceIte]
+      have s2 : (if i = ρ k then g k else 0) = g k := by simp only [h, ↓reduceIte]
+      rw [s1, s2]
+    · have hk : k ≠ π i := fun heq => h (by rw [heq, hLeft])
+      have s1 : (if k = π i then g k else 0) = 0 := by simp only [hk, ↓reduceIte]
+      have s2 : (if i = ρ k then g k else 0) = 0 := by simp only [h, ↓reduceIte]
+      rw [s1, s2]
+  rw [hSwap, qsum_ite_eq]
+
+theorem qsum_involutive {n : Nat} (π : Fin n → Fin n)
+    (hInv : ∀ i, π (π i) = i) (g : Fin n → Nat) :
+    qsum n (fun i => g (π i)) = qsum n g :=
+  qsum_bijection π π hInv hInv g
+
+/-- Constructive uniqueness-to-`≤ 1` sum bound without existential case splitting. -/
+theorem qsum_le_one_of_subsingleton :
+    ∀ {n : Nat} (p : Fin n → Bool),
+      (∀ i j : Fin n, p i = true → p j = true → i = j) →
+      qsum n (fun i => if p i = true then 1 else 0) ≤ 1
+  | 0, _, _ => Nat.zero_le 1
+  | n + 1, p, hUnique => by
+    simp only [qsum]
+    cases hp0 : p ⟨0, Nat.zero_lt_succ n⟩
+    · simp only [Bool.false_eq_true, ↓reduceIte, Nat.zero_add]
+      exact qsum_le_one_of_subsingleton (fun i => p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩)
+        (fun i j hi hj => Fin.ext (Nat.succ.inj (congrArg Fin.val (hUnique _ _ hi hj))))
+    · simp only [↓reduceIte]
+      have hTailZero : qsum n (fun i => if p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ = true then 1 else 0) =
+          qsum n (fun _ => 0) := by
+        apply qsum_congr
+        intro i
+        cases hpi : p ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩
+        · rfl
+        · exfalso
+          have hEq := congrArg Fin.val (hUnique ⟨0, Nat.zero_lt_succ n⟩ ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩ hp0 hpi)
+          exact Nat.noConfusion hEq
+      rw [hTailZero, qsum_const]
+      omega
+
+private def finIntSum : (q : Nat) → (Fin q → Int) → Int
+  | 0, _ => 0
+  | q + 1, f => f ⟨0, Nat.zero_lt_succ q⟩ +
+      finIntSum q (fun t => f ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩)
+
+/-- Exact Gaussian integer `re + i * im` (`ℤ[i]`), enabling constructive unitary quantum mechanics
+    with zero `ℝ`/`ℂ` axioms, zero square roots, and syntactic equality. -/
+structure GaussInt where
+  re : Int
+  im : Int
+  deriving DecidableEq, Repr
+
+@[ext] theorem GaussInt.ext {z w : GaussInt} (hre : z.re = w.re) (him : z.im = w.im) : z = w := by
+  cases z; cases w; cases hre; cases him; rfl
+
+namespace GaussInt
+
+def zero : GaussInt := ⟨0, 0⟩
+def one : GaussInt := ⟨1, 0⟩
+def neg (z : GaussInt) : GaussInt := ⟨-z.re, -z.im⟩
+def conj (z : GaussInt) : GaussInt := ⟨z.re, -z.im⟩
+def add (z w : GaussInt) : GaussInt := ⟨z.re + w.re, z.im + w.im⟩
+def sub (z w : GaussInt) : GaussInt := ⟨z.re - w.re, z.im - w.im⟩
+def scaleInt (c : Int) (z : GaussInt) : GaussInt := ⟨c * z.re, c * z.im⟩
+def mul (z w : GaussInt) : GaussInt :=
+  ⟨z.re * w.re - z.im * w.im, z.re * w.im + z.im * w.re⟩
+
+/-- Exact squared modulus `|z|² = re² + im²` as an `Int` (`≥ 0`) and as a `Nat`. -/
+def normSqInt (z : GaussInt) : Int := z.re * z.re + z.im * z.im
+def normSq (z : GaussInt) : Nat := z.re.natAbs * z.re.natAbs + z.im.natAbs * z.im.natAbs
+
+/-- Real inner product `Re(z · conj w) = z.re * w.re + z.im * w.im`. -/
+def reInner (z w : GaussInt) : Int := z.re * w.re + z.im * w.im
+
+theorem normSqInt_eq_ofNat_normSq (z : GaussInt) :
+    normSqInt z = Int.ofNat (normSq z) := by
+  unfold normSqInt normSq
+  rw [int_sq_eq_natAbs_sq z.re, int_sq_eq_natAbs_sq z.im, ← ofNat_add_eq]
+
+theorem normSq_zero : normSq zero = 0 := by rfl
+
+theorem normSq_neg (z : GaussInt) : normSq (neg z) = normSq z := by
+  unfold normSq neg
+  rw [Int.natAbs_neg, Int.natAbs_neg]
+
+theorem normSq_add_int (z w : GaussInt) :
+    normSqInt (add z w) = normSqInt z + normSqInt w + 2 * reInner z w := by
+  unfold normSqInt add reInner
+  have hRe : (z.re + w.re) * (z.re + w.re) = z.re * z.re + w.re * w.re + 2 * (z.re * w.re) := by
+    rw [Int.add_mul, Int.mul_add, Int.mul_add, Int.mul_comm w.re z.re]
+    omega
+  have hIm : (z.im + w.im) * (z.im + w.im) = z.im * z.im + w.im * w.im + 2 * (z.im * w.im) := by
+    rw [Int.add_mul, Int.mul_add, Int.mul_add, Int.mul_comm w.im z.im]
+    omega
+  rw [hRe, hIm]
+  omega
+
+theorem normSq_sub_int (z w : GaussInt) :
+    normSqInt (sub z w) = normSqInt z + normSqInt w - 2 * reInner z w := by
+  unfold normSqInt sub reInner
+  have hNegSq : ∀ x : Int, (-x) * (-x) = x * x := fun x => by
+    rw [Int.neg_mul, Int.mul_neg, Int.neg_neg]
+  have hRe : (z.re - w.re) * (z.re - w.re) = z.re * z.re + w.re * w.re - 2 * (z.re * w.re) := by
+    rw [Int.sub_eq_add_neg, Int.add_mul, Int.mul_add, Int.mul_add,
+        Int.mul_neg, Int.neg_mul, hNegSq, Int.mul_comm w.re z.re]
+    omega
+  have hIm : (z.im - w.im) * (z.im - w.im) = z.im * z.im + w.im * w.im - 2 * (z.im * w.im) := by
+    rw [Int.sub_eq_add_neg, Int.add_mul, Int.mul_add, Int.mul_add,
+        Int.mul_neg, Int.neg_mul, hNegSq, Int.mul_comm w.im z.im]
+    omega
+  rw [hRe, hIm]
+  omega
+
+/-- **Parallelogram Identity**: `|z - w|² + |z + w|² = 2 |z|² + 2 |w|²`. -/
+theorem normSq_parallelogram (z w : GaussInt) :
+    normSq (sub z w) + normSq (add z w) = 2 * normSq z + 2 * normSq w := by
+  have hInt : Int.ofNat (normSq (sub z w) + normSq (add z w)) =
+      Int.ofNat (2 * normSq z + 2 * normSq w) := by
+    rw [ofNat_add_eq, ofNat_add_eq, ofNat_mul_eq, ofNat_mul_eq,
+        ← normSqInt_eq_ofNat_normSq, ← normSqInt_eq_ofNat_normSq,
+        ← normSqInt_eq_ofNat_normSq, ← normSqInt_eq_ofNat_normSq,
+        normSq_sub_int, normSq_add_int]
+    change normSqInt z + normSqInt w - 2 * reInner z w +
+           (normSqInt z + normSqInt w + 2 * reInner z w) =
+           2 * normSqInt z + 2 * normSqInt w
+    omega
+  exact Int.ofNat.inj hInt
+
+theorem normSq_sub_le (z w : GaussInt) :
+    normSq (sub z w) ≤ 2 * normSq z + 2 * normSq w := by
+  have h := normSq_parallelogram z w
+  omega
+
+theorem normSq_add_le (z w : GaussInt) :
+    normSq (add z w) ≤ 2 * normSq z + 2 * normSq w := by
+  have h := normSq_parallelogram z w
+  omega
+
+end GaussInt
+
+/-- Finite sum of Gaussian-integer amplitudes over `Fin q`. -/
+def finGaussSum : (q : Nat) → (Fin q → GaussInt) → GaussInt
+  | 0, _ => GaussInt.zero
+  | q + 1, v =>
+    GaussInt.add (v ⟨0, Nat.zero_lt_succ q⟩)
+      (finGaussSum q (fun t => v ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩))
+
+/-- Sum of pairwise squared differences `∑_{0 ≤ s < t < q} |v_s - v_t|²`. -/
+def pairDiffNormSq : (q : Nat) → (Fin q → GaussInt) → Nat
+  | 0, _ => 0
+  | q + 1, v =>
+    let v0 := v ⟨0, Nat.zero_lt_succ q⟩
+    let tail : Fin q → GaussInt := fun t => v ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    qsum q (fun t => GaussInt.normSq (GaussInt.sub v0 (tail t))) + pairDiffNormSq q tail
+
+private theorem finSum_sub_with_head :
+    ∀ (q : Nat) (v0 : GaussInt) (tail : Fin q → GaussInt),
+      Int.ofNat (qsum q (fun t => GaussInt.normSq (GaussInt.sub v0 (tail t)))) =
+        Int.ofNat q * GaussInt.normSqInt v0 +
+        Int.ofNat (qsum q (fun t => GaussInt.normSq (tail t))) -
+        2 * GaussInt.reInner v0 (finGaussSum q tail)
+  | 0, v0, _ => by
+    simp [qsum, finGaussSum, GaussInt.zero, GaussInt.reInner]
+  | q + 1, v0, tail => by
+    let t0 := tail ⟨0, Nat.zero_lt_succ q⟩
+    let rest : Fin q → GaussInt := fun i => tail ⟨i.1 + 1, Nat.succ_lt_succ i.2⟩
+    have ih := finSum_sub_with_head q v0 rest
+    change Int.ofNat (GaussInt.normSq (GaussInt.sub v0 t0) +
+             qsum q (fun t => GaussInt.normSq (GaussInt.sub v0 (rest t)))) =
+           Int.ofNat (q + 1) * GaussInt.normSqInt v0 +
+             Int.ofNat (GaussInt.normSq t0 + qsum q (fun t => GaussInt.normSq (rest t))) -
+             2 * GaussInt.reInner v0 (GaussInt.add t0 (finGaussSum q rest))
+    rw [ofNat_add_eq (GaussInt.normSq (GaussInt.sub v0 t0)),
+        ofNat_add_eq (GaussInt.normSq t0),
+        ← GaussInt.normSqInt_eq_ofNat_normSq (GaussInt.sub v0 t0),
+        ← GaussInt.normSqInt_eq_ofNat_normSq t0,
+        GaussInt.normSq_sub_int v0 t0, ih]
+    have hRe : GaussInt.reInner v0 (GaussInt.add t0 (finGaussSum q rest)) =
+        GaussInt.reInner v0 t0 + GaussInt.reInner v0 (finGaussSum q rest) := by
+      unfold GaussInt.reInner GaussInt.add
+      rw [Int.mul_add, Int.mul_add]
+      omega
+    have hQ : Int.ofNat (q + 1) * GaussInt.normSqInt v0 =
+        GaussInt.normSqInt v0 + Int.ofNat q * GaussInt.normSqInt v0 := by
+      rw [ofNat_add_eq q 1, Int.add_mul]
+      change Int.ofNat q * GaussInt.normSqInt v0 + 1 * GaussInt.normSqInt v0 = _
+      rw [Int.one_mul, Int.add_comm]
+    rw [hRe, hQ]
+    omega
+
+/-- **Square-Root-Free `q`-Way Cauchy–Schwarz Identity (`gauss_sum_of_squares_identity`)**:
+    `q * (∑_{t < q} |v_t|²) = |∑_{t < q} v_t|² + ∑_{s < t} |v_s - v_t|²`. -/
+theorem gauss_sum_of_squares_identity :
+    ∀ (q : Nat) (v : Fin q → GaussInt),
+      q * qsum q (fun t => GaussInt.normSq (v t)) =
+        GaussInt.normSq (finGaussSum q v) + pairDiffNormSq q v
+  | 0, _ => by rfl
+  | q + 1, v => by
+    let v0 := v ⟨0, Nat.zero_lt_succ q⟩
+    let tail : Fin q → GaussInt := fun t => v ⟨t.1 + 1, Nat.succ_lt_succ t.2⟩
+    have ih := gauss_sum_of_squares_identity q tail
+    apply Int.ofNat.inj
+    change Int.ofNat ((q + 1) * (GaussInt.normSq v0 + qsum q (fun t => GaussInt.normSq (tail t)))) =
+      Int.ofNat (GaussInt.normSq (GaussInt.add v0 (finGaussSum q tail)) +
+        (qsum q (fun t => GaussInt.normSq (GaussInt.sub v0 (tail t))) + pairDiffNormSq q tail))
+    have ihInt : Int.ofNat q * Int.ofNat (qsum q (fun t => GaussInt.normSq (tail t))) =
+        GaussInt.normSqInt (finGaussSum q tail) + Int.ofNat (pairDiffNormSq q tail) := by
+      rw [GaussInt.normSqInt_eq_ofNat_normSq, ← ofNat_add_eq, ← ofNat_mul_eq, ih]
+    rw [ofNat_mul_eq (q + 1),
+        ofNat_add_eq (GaussInt.normSq v0),
+        ofNat_add_eq (GaussInt.normSq (GaussInt.add v0 (finGaussSum q tail))),
+        ofNat_add_eq (qsum q (fun t => GaussInt.normSq (GaussInt.sub v0 (tail t)))),
+        ← GaussInt.normSqInt_eq_ofNat_normSq (GaussInt.add v0 (finGaussSum q tail)),
+        GaussInt.normSq_add_int v0 (finGaussSum q tail),
+        finSum_sub_with_head q v0 tail,
+        ← GaussInt.normSqInt_eq_ofNat_normSq v0]
+    have hQ1 : Int.ofNat (q + 1) * GaussInt.normSqInt v0 =
+        GaussInt.normSqInt v0 + Int.ofNat q * GaussInt.normSqInt v0 := by
+      rw [ofNat_add_eq q 1, Int.add_mul]
+      change Int.ofNat q * GaussInt.normSqInt v0 + 1 * GaussInt.normSqInt v0 = _
+      rw [Int.one_mul, Int.add_comm]
+    have hS1 : Int.ofNat (q + 1) * Int.ofNat (qsum q (fun t => GaussInt.normSq (tail t))) =
+        Int.ofNat (qsum q (fun t => GaussInt.normSq (tail t))) +
+        Int.ofNat q * Int.ofNat (qsum q (fun t => GaussInt.normSq (tail t))) := by
+      rw [ofNat_add_eq q 1, Int.add_mul]
+      change Int.ofNat q * Int.ofNat (qsum q (fun t => GaussInt.normSq (tail t))) +
+        1 * Int.ofNat (qsum q (fun t => GaussInt.normSq (tail t))) = _
+      rw [Int.one_mul, Int.add_comm]
+    rw [Int.mul_add, hQ1, hS1, ihInt]
+    omega
+
+/-- Immediate Cauchy–Schwarz norm inequality `|∑_{t < q} v_t|² ≤ q * ∑_{t < q} |v_t|²`. -/
+theorem normSq_finGaussSum_le (q : Nat) (v : Fin q → GaussInt) :
+    GaussInt.normSq (finGaussSum q v) ≤ q * qsum q (fun t => GaussInt.normSq (v t)) := by
+  have h := gauss_sum_of_squares_identity q v
+  omega
+
+/-! ### §2.2 Quantum State Vectors `QVec`, `oracleXor` Isometry, Scaled Unitaries & `QuantumAdv` -/
+
+/-- Tripartite quantum state vector over query register `Fin cardX`, `w`-bit response register
+    `Fin (2 ^ w)`, and `cardAnc`-dimensional ancilla workspace. -/
+abbrev QVec (cardX w cardAnc : Nat) : Type :=
+  Fin cardX → Fin (2 ^ w) → Fin cardAnc → GaussInt
+
+namespace QVec
+
+def zero (cardX w cardAnc : Nat) : QVec cardX w cardAnc :=
+  fun _ _ _ => GaussInt.zero
+
+def add {cardX w cardAnc : Nat} (ψ φ : QVec cardX w cardAnc) : QVec cardX w cardAnc :=
+  fun x y a => GaussInt.add (ψ x y a) (φ x y a)
+
+def sub {cardX w cardAnc : Nat} (ψ φ : QVec cardX w cardAnc) : QVec cardX w cardAnc :=
+  fun x y a => GaussInt.sub (ψ x y a) (φ x y a)
+
+/-- Squared amplitude mass on a single query coordinate `x : Fin cardX`. -/
+def queryWeight {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) (x : Fin cardX) : Nat :=
+  qsum (2 ^ w) (fun y => qsum cardAnc (fun a => GaussInt.normSq (ψ x y a)))
+
+/-- Squared amplitude mass on a marked subset `S : Fin cardX → Bool` of queries. -/
+def queryMassOn {cardX w cardAnc : Nat} (S : Fin cardX → Bool) (ψ : QVec cardX w cardAnc) : Nat :=
+  qsum cardX (fun x => if S x = true then queryWeight ψ x else 0)
+
+/-- Total squared Hilbert-space norm `‖ψ‖² = ∑_{x, y, a} |ψ(x, y, a)|²`. -/
+def stateNormSq {cardX w cardAnc : Nat} (ψ : QVec cardX w cardAnc) : Nat :=
+  qsum cardX (fun x => queryWeight ψ x)
+
+/-- Unnormalized Born numerator `∑_{x : E x = true} queryWeight ψ x` for projective measurement `E`
+    on the query/output register `Fin cardX`. -/
+def measureNormSq {cardX w cardAnc : Nat} (E : Fin cardX → Bool) (ψ : QVec cardX w cardAnc) : Nat :=
+  queryMassOn E ψ
+
+/-- Exact Born-rule measurement probability `measureNormSq E ψ / stateNormSq ψ` as a `RatBound`. -/
+def bornProb {cardX w cardAnc : Nat} (E : Fin cardX → Bool)
+    (ψ : QVec cardX w cardAnc) (hPos : 0 < stateNormSq ψ) : RatBound :=
+  ⟨measureNormSq E ψ, stateNormSq ψ, hPos⟩
+
+theorem queryMassOn_le_stateNormSq {cardX w cardAnc : Nat}
+    (S : Fin cardX → Bool) (ψ : QVec cardX w cardAnc) :
+    queryMassOn S ψ ≤ stateNormSq ψ := by
+  unfold queryMassOn stateNormSq
+  apply qsum_le_qsum
+  intro x
+  cases S x <;> simp
+
+theorem sumQVec_normSq_le {cardX w cardAnc : Nat} (q : Nat)
+    (V : Fin q → QVec cardX w cardAnc) :
+    stateNormSq (fun x y a => finGaussSum q (fun t => V t x y a)) ≤
+      q * qsum q (fun t => stateNormSq (V t)) := by
+  unfold stateNormSq queryWeight
+  have hPoint :
+      qsum cardX (fun x => qsum (2 ^ w) (fun y => qsum cardAnc (fun a =>
+        GaussInt.normSq (finGaussSum q (fun t => V t x y a))))) ≤
+      qsum cardX (fun x => qsum (2 ^ w) (fun y => qsum cardAnc (fun a =>
+        q * qsum q (fun t => GaussInt.normSq (V t x y a))))) := by
+    apply qsum_le_qsum; intro x
+    apply qsum_le_qsum; intro y
+    apply qsum_le_qsum; intro a
+    exact normSq_finGaussSum_le q (fun t => V t x y a)
+  apply Nat.le_trans hPoint
+  have hSwap :
+      qsum cardX (fun x => qsum (2 ^ w) (fun y => qsum cardAnc (fun a =>
+        q * qsum q (fun t => GaussInt.normSq (V t x y a))))) =
+      q * qsum q (fun t => qsum cardX (fun x => qsum (2 ^ w) (fun y =>
+        qsum cardAnc (fun a => GaussInt.normSq (V t x y a))))) := by
+    have p1 : ∀ x y, qsum cardAnc (fun a => q * qsum q (fun t => GaussInt.normSq (V t x y a))) =
+        q * qsum q (fun t => qsum cardAnc (fun a => GaussInt.normSq (V t x y a))) := by
+      intro x y
+      rw [qsum_mul_left, qsum_comm]
+    have p2 : ∀ x, qsum (2 ^ w) (fun y =>
+        qsum cardAnc (fun a => q * qsum q (fun t => GaussInt.normSq (V t x y a)))) =
+        q * qsum q (fun t => qsum (2 ^ w) (fun y =>
+          qsum cardAnc (fun a => GaussInt.normSq (V t x y a)))) := by
+      intro x
+      rw [qsum_congr (fun y => p1 x y), qsum_mul_left, qsum_comm]
+    rw [qsum_congr p2, qsum_mul_left, qsum_comm]
+  exact Nat.le_of_eq hSwap
+
+end QVec
+
+/-- Bitwise XOR permutation on `Fin (2 ^ w)` induced by `v : BitVec w`. -/
+def xorFin {w : Nat} (y : Fin (2 ^ w)) (v : BitVec w) : Fin (2 ^ w) :=
+  (BitVec.ofFin y ^^^ v).toFin
+
+theorem xorFin_involutive {w : Nat} (v : BitVec w) (y : Fin (2 ^ w)) :
+    xorFin (xorFin y v) v = y := by
+  unfold xorFin
+  have hXor : (BitVec.ofFin y ^^^ v) ^^^ v = BitVec.ofFin y := by
+    apply BitVec.eq_of_getLsbD_eq
+    intro i _
+    simp only [BitVec.getLsbD_xor]
+    cases (BitVec.ofFin y).getLsbD i <;> cases v.getLsbD i <;> rfl
+  rw [BitVec.ofFin_toFin, hXor, BitVec.toFin_ofFin]
+
+/-- Reversible QROM bit-XOR oracle `O_H : |x, y, a⟩ ↦ |x, y ⊕ H(x), a⟩`. -/
+def oracleXor {cardX w cardAnc : Nat} (H : Fin cardX → BitVec w)
+    (ψ : QVec cardX w cardAnc) : QVec cardX w cardAnc :=
+  fun x y a => ψ x (xorFin y (H x)) a
+
+theorem oracleXor_involutive {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w) (ψ : QVec cardX w cardAnc) :
+    oracleXor H (oracleXor H ψ) = ψ := by
+  funext x y a
+  simp [oracleXor, xorFin_involutive]
+
+theorem oracleXor_sub {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w) (ψ φ : QVec cardX w cardAnc) :
+    oracleXor H (ψ.sub φ) = (oracleXor H ψ).sub (oracleXor H φ) := by rfl
+
+theorem oracleXor_queryWeight {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w) (ψ : QVec cardX w cardAnc) (x : Fin cardX) :
+    QVec.queryWeight (oracleXor H ψ) x = QVec.queryWeight ψ x := by
+  unfold QVec.queryWeight oracleXor
+  exact qsum_involutive (fun y => xorFin y (H x)) (xorFin_involutive (H x))
+    (fun y => qsum cardAnc (fun a => GaussInt.normSq (ψ x y a)))
+
+/-- **`oracleXor` Isometry Theorem**: `O_H` preserves squared Hilbert-space norm with exact scale `1`. -/
+theorem oracleXor_isometry {cardX w cardAnc : Nat}
+    (H : Fin cardX → BitVec w) (ψ : QVec cardX w cardAnc) :
+    QVec.stateNormSq (oracleXor H ψ) = QVec.stateNormSq ψ := by
+  unfold QVec.stateNormSq
+  exact qsum_congr (oracleXor_queryWeight H ψ)
+
+/-- Pointwise oracle-difference bound: if `H` and `H'` agree outside `S`, then
+    `‖(O_H - O_{H'}) ψ‖² ≤ 4 * queryMassOn S ψ`. -/
+theorem oracleXor_diff_normSq_le {cardX w cardAnc : Nat}
+    (H H' : Fin cardX → BitVec w) (S : Fin cardX → Bool)
+    (hAgree : ∀ x : Fin cardX, S x = false → H x = H' x)
+    (ψ : QVec cardX w cardAnc) :
+    QVec.stateNormSq ((oracleXor H ψ).sub (oracleXor H' ψ)) ≤
+      4 * QVec.queryMassOn S ψ := by
+  unfold QVec.stateNormSq QVec.queryMassOn
+  rw [← qsum_mul_left 4]
+  apply qsum_le_qsum
+  intro x
+  cases hSx : S x
+  · have hEq := hAgree x hSx
+    simp only [Bool.false_eq_true, ↓reduceIte, Nat.mul_zero, QVec.queryWeight,
+      QVec.sub, oracleXor, hEq]
+    have h0 : qsum (2 ^ w) (fun y => qsum cardAnc (fun a =>
+        GaussInt.normSq (GaussInt.sub (ψ x (xorFin y (H' x)) a) (ψ x (xorFin y (H' x)) a)))) =
+        qsum (2 ^ w) (fun _ => 0) := by
+      apply qsum_congr; intro y
+      have ha0 : qsum cardAnc (fun a =>
+          GaussInt.normSq (GaussInt.sub (ψ x (xorFin y (H' x)) a) (ψ x (xorFin y (H' x)) a))) =
+          qsum cardAnc (fun _ => 0) := by
+        apply qsum_congr; intro a
+        unfold GaussInt.sub GaussInt.normSq
+        simp
+      rw [ha0, qsum_const]; omega
+    rw [h0, qsum_const]; omega
+  · simp only [↓reduceIte]
+    have hPt : QVec.queryWeight ((oracleXor H ψ).sub (oracleXor H' ψ)) x ≤
+        2 * QVec.queryWeight (oracleXor H ψ) x + 2 * QVec.queryWeight (oracleXor H' ψ) x := by
+      unfold QVec.queryWeight QVec.sub
+      rw [← qsum_mul_left 2, ← qsum_mul_left 2, ← qsum_add]
+      apply qsum_le_qsum; intro y
+      rw [← qsum_mul_left 2, ← qsum_mul_left 2, ← qsum_add]
+      apply qsum_le_qsum; intro a
+      exact GaussInt.normSq_sub_le _ _
+    rw [oracleXor_queryWeight H ψ x, oracleXor_queryWeight H' ψ x] at hPt
+    omega
+
+/-- Linear scaled unitary operator `U` on `QVec cardX w cardAnc` with positive integer squared-norm
+    factor `scaleSq > 0` (`‖U ψ‖² = scaleSq * ‖ψ‖²`). Supports strict norm-`1` unitaries, exact
+    Hadamards (`scaleSq = 2`), and exact `M`-item Grover reflections (`scaleSq = M^2`) without `√2`. -/
+structure ScaledUnitary (cardX w cardAnc : Nat) where
+  apply : QVec cardX w cardAnc → QVec cardX w cardAnc
+  scaleSq : Nat
+  h_scale_pos : 0 < scaleSq
+  map_sub : ∀ ψ φ, apply (ψ.sub φ) = (apply ψ).sub (apply φ)
+  normSq_eq : ∀ ψ, QVec.stateNormSq (apply ψ) = scaleSq * QVec.stateNormSq ψ
+
+/-- Identity unitary (`scaleSq = 1`). -/
+def ScaledUnitary.id (cardX w cardAnc : Nat) : ScaledUnitary cardX w cardAnc where
+  apply ψ := ψ
+  scaleSq := 1
+  h_scale_pos := Nat.zero_lt_one
+  map_sub _ _ := rfl
+  normSq_eq _ := (Nat.one_mul _).symm
+
+private theorem qsum_two (f : Fin 2 → Nat) :
+    qsum 2 f = f ⟨0, by decide⟩ + f ⟨1, by decide⟩ := by
+  simp [qsum]
+
+/-- Concrete 1-qubit Hadamard gate `[[1, 1], [1, -1]]` on query register `Fin 2` (`scaleSq = 2`),
+    certifying that `ScaledUnitary` natively encompasses Clifford superposition creation. -/
+def hadamardQuery2 (w cardAnc : Nat) : ScaledUnitary 2 w cardAnc where
+  apply ψ x y a :=
+    if x.val == 0 then
+      GaussInt.add (ψ ⟨0, by decide⟩ y a) (ψ ⟨1, by decide⟩ y a)
+    else
+      GaussInt.sub (ψ ⟨0, by decide⟩ y a) (ψ ⟨1, by decide⟩ y a)
+  scaleSq := 2
+  h_scale_pos := by decide
+  map_sub ψ φ := by
+    funext x y a
+    cases h0 : (x.val == 0)
+    · simp only [h0, Bool.false_eq_true, ↓reduceIte, QVec.sub, GaussInt.sub]
+      ext <;> dsimp only <;> omega
+    · simp only [h0, ↓reduceIte, QVec.sub, GaussInt.add, GaussInt.sub]
+      ext <;> dsimp only <;> omega
+  normSq_eq ψ := by
+    unfold QVec.stateNormSq QVec.queryWeight
+    rw [qsum_two, qsum_two]
+    dsimp only
+    have h00 : ((0 : Nat) == 0) = true := rfl
+    have h10 : ((1 : Nat) == 0) = false := rfl
+    simp only [h00, h10, Bool.false_eq_true, ↓reduceIte]
+    rw [← qsum_add, Nat.left_distrib, ← qsum_mul_left 2, ← qsum_mul_left 2, ← qsum_add]
+    apply qsum_congr; intro y
+    rw [← qsum_add, ← qsum_mul_left 2, ← qsum_mul_left 2, ← qsum_add]
+    apply qsum_congr; intro a
+    have hp := GaussInt.normSq_parallelogram (ψ ⟨0, by decide⟩ y a) (ψ ⟨1, by decide⟩ y a)
+    omega
+
+/-- Arbitrary `q`-query unitary quantum adversary interleaving `q` oracle calls `O_H` with
+    arbitrary scaled unitary circuits `U_0, ..., U_{q-1}`. -/
+structure QuantumAdv (cardX w cardAnc q : Nat) where
+  init : QVec cardX w cardAnc
+  h_init_pos : 0 < QVec.stateNormSq init
+  steps : Fin q → ScaledUnitary cardX w cardAnc
+
+/-- State of `A` immediately before query `t` (`0 ≤ t ≤ q`) when interacting with oracle `H`. -/
+def advStateAt {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) : (t : Nat) → t ≤ q → QVec cardX w cardAnc
+  | 0, _ => A.init
+  | t + 1, ht =>
+    let prev := advStateAt A H t (Nat.le_of_succ_le ht)
+    (A.steps ⟨t, ht⟩).apply (oracleXor H prev)
+
+/-- Final `q`-query quantum state `ψ_q^H` of adversary `A` under oracle `H`. -/
+def runQuantumAdv {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) : QVec cardX w cardAnc :=
+  advStateAt A H q (Nat.le_refl q)
+
+/-- Cumulative squared-norm scale of the first `t` unitary layers. -/
+def prefixScale {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q) :
+    (t : Nat) → t ≤ q → Nat
+  | 0, _ => 1
+  | t + 1, ht => (A.steps ⟨t, ht⟩).scaleSq * prefixScale A t (Nat.le_of_succ_le ht)
+
+/-- Cumulative squared-norm scale of the remaining unitary layers `t .. q - 1`. -/
+def suffixScale {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q) :
+    (t : Nat) → t ≤ q → Nat
+  | t, _ =>
+    if hlt : t < q then
+      (A.steps ⟨t, hlt⟩).scaleSq * suffixScale A (t + 1) hlt
+    else
+      1
+termination_by t => q - t
+
+/-- Apply layers `t .. q - 1` using oracle `H` after query `t` has already been applied. -/
+def applySuffixFrom {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) : (t : Nat) → t < q → QVec cardX w cardAnc → QVec cardX w cardAnc
+  | t, hlt, ψ =>
+    let ψ1 := (A.steps ⟨t, hlt⟩).apply ψ
+    if hNext : t + 1 < q then
+      applySuffixFrom A H (t + 1) hNext (oracleXor H ψ1)
+    else
+      ψ1
+termination_by t => q - t
+
+theorem prefixScale_pos {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q) :
+    ∀ (t : Nat) (ht : t ≤ q), 0 < prefixScale A t ht
+  | 0, _ => Nat.zero_lt_one
+  | t + 1, ht => Nat.mul_pos (A.steps ⟨t, ht⟩).h_scale_pos (prefixScale_pos A t (Nat.le_of_succ_le ht))
+
+theorem advStateAt_normSq {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) :
+    ∀ (t : Nat) (ht : t ≤ q),
+      QVec.stateNormSq (advStateAt A H t ht) = prefixScale A t ht * QVec.stateNormSq A.init
+  | 0, _ => (Nat.one_mul _).symm
+  | t + 1, ht => by
+    simp only [advStateAt, prefixScale]
+    rw [(A.steps ⟨t, ht⟩).normSq_eq, oracleXor_isometry,
+        advStateAt_normSq A H t (Nat.le_of_succ_le ht), Nat.mul_assoc]
+
+theorem runQuantumAdv_normSq {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) :
+    QVec.stateNormSq (runQuantumAdv A H) = prefixScale A q (Nat.le_refl q) * QVec.stateNormSq A.init :=
+  advStateAt_normSq A H q (Nat.le_refl q)
+
+theorem runQuantumAdv_normSq_pos {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) :
+    0 < QVec.stateNormSq (runQuantumAdv A H) := by
+  rw [runQuantumAdv_normSq]
+  exact Nat.mul_pos (prefixScale_pos A q (Nat.le_refl q)) A.h_init_pos
+
+theorem applySuffixFrom_sub {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) :
+    ∀ (t : Nat) (hlt : t < q) (ψ φ : QVec cardX w cardAnc),
+      applySuffixFrom A H t hlt (ψ.sub φ) =
+        (applySuffixFrom A H t hlt ψ).sub (applySuffixFrom A H t hlt φ)
+  | t, hlt, ψ, φ => by
+    unfold applySuffixFrom
+    dsimp only
+    rw [(A.steps ⟨t, hlt⟩).map_sub]
+    split
+    · rename_i hNext
+      rw [oracleXor_sub, applySuffixFrom_sub A H (t + 1) hNext]
+    · rfl
+termination_by t => q - t
+
+theorem applySuffixFrom_normSq {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q)
+    (H : Fin cardX → BitVec w) :
+    ∀ (t : Nat) (hlt : t < q) (ψ : QVec cardX w cardAnc),
+      QVec.stateNormSq (applySuffixFrom A H t hlt ψ) =
+        suffixScale A t (Nat.le_of_lt hlt) * QVec.stateNormSq ψ
+  | t, hlt, ψ => by
+    unfold applySuffixFrom
+    rw [suffixScale]
+    simp only [hlt, ↓reduceDIte]
+    split
+    · rename_i hNext
+      rw [applySuffixFrom_normSq A H (t + 1) hNext, oracleXor_isometry,
+          (A.steps ⟨t, hlt⟩).normSq_eq, ← Nat.mul_assoc, Nat.mul_comm _ ((A.steps ⟨t, hlt⟩).scaleSq),
+          Nat.mul_assoc]
+    · rename_i hNotNext
+      rw [suffixScale]
+      simp only [hNotNext, ↓reduceDIte, Nat.mul_one, (A.steps ⟨t, hlt⟩).normSq_eq]
+termination_by t => q - t
+
+theorem prefix_mul_suffix_eq_total {cardX w cardAnc q : Nat} (A : QuantumAdv cardX w cardAnc q) :
+    ∀ (t : Nat) (ht : t ≤ q),
+      prefixScale A t ht * suffixScale A t ht = prefixScale A q (Nat.le_refl q)
+  | t, ht => by
+    if hlt : t < q then
+      have ih := prefix_mul_suffix_eq_total A (t + 1) hlt
+      rw [suffixScale]
+      simp only [hlt, ↓reduceDIte]
+      have hPref : prefixScale A (t + 1) hlt = (A.steps ⟨t, hlt⟩).scaleSq * prefixScale A t ht := rfl
+      rw [← ih, hPref, ← Nat.mul_assoc, Nat.mul_comm (prefixScale A t ht), Nat.mul_assoc]
+    else
+      have hEq : t = q := by omega
+      subst hEq
+      rw [suffixScale]
+      simp
+termination_by t => q - t
+
+/-! ### §2.3 Mechanized `[BBBV97]` / `[AHU19]` One-Way-to-Hiding (`O2H`) & Born-Rule Theorems -/
+
+/-- Hybrid quantum state executing `H'` for the first `k` oracle calls and `H` for the remaining
+    `q - k` oracle calls (`hybridAdv A H H' 0 = runQuantumAdv A H` and
+    `hybridAdv A H H' q = runQuantumAdv A H'`). -/

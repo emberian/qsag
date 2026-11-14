@@ -950,3 +950,958 @@ theorem reconstructRssBytes_length {sh : RssByteShares} (hWf : sh.WellFormed) :
     zipXor_length_eq hWf.2
   exact zipXor_length_eq (hWf.1.trans h12.symm)
 
+theorem rssAppendShares_wellFormed {x y : RssByteShares}
+    (hx : x.WellFormed) (hy : y.WellFormed) : (rssAppendShares x y).WellFormed := by
+  refine ⟨?_, ?_⟩
+  · simp [rssAppendShares, hx.1, hy.1]
+  · simp [rssAppendShares, hx.2, hy.2]
+
+theorem reconstructRssBytes_append {x y : RssByteShares}
+    (hx : x.WellFormed) :
+    reconstructRssBytes (rssAppendShares x y) = reconstructRssBytes x ++ reconstructRssBytes y := by
+  unfold reconstructRssBytes rssAppendShares
+  dsimp only
+  rw [zipXor_append hx.2, zipXor_append (hx.1.trans (zipXor_length_eq hx.2).symm)]
+
+/-- Pad a 3-way shared byte stream in MPC without reconstructing `sh` (`padTail` depends ONLY on
+    public length `sh.b0.length`). -/
+def rssPadForRate (sh : RssByteShares) (suffix : UInt8) : RssByteShares :=
+  let count := shake256RateBytes - sh.b0.length % shake256RateBytes
+  let tail : List UInt8 :=
+    if count = 1 then [suffix ^^^ (0x80 : UInt8)]
+    else [suffix] ++ List.replicate (count - 2) 0 ++ [0x80]
+  rssAppendShares sh (rssPublicBytes tail)
+
+theorem rssPadForRate_wellFormed {sh : RssByteShares} (hWf : sh.WellFormed) (suffix : UInt8) :
+    (rssPadForRate sh suffix).WellFormed :=
+  rssAppendShares_wellFormed hWf (rssPublicBytes_wellFormed _)
+
+theorem reconstructRssBytes_rssPadForRate {sh : RssByteShares} (hWf : sh.WellFormed) (suffix : UInt8) :
+    reconstructRssBytes (rssPadForRate sh suffix) = padForRate (reconstructRssBytes sh) suffix := by
+  unfold rssPadForRate
+  rw [reconstructRssBytes_append hWf, reconstructRssBytes_rssPublicBytes,
+      padForRate_eq, reconstructRssBytes_length hWf]
+  dsimp only
+  split <;> simp [List.append_assoc]
+
+def mpcXorRate136Rss (st : RssKState) (blk : RssByteShares) : RssKState :=
+  ⟨xorRate136 st.s0 blk.b0, xorRate136 st.s1 blk.b1, xorRate136 st.s2 blk.b2⟩
+
+private theorem reconstructRssKState_mpcXorRate136Rss (st : RssKState) {blk : RssByteShares}
+    (hWf : blk.WellFormed) :
+    reconstructRssKState (mpcXorRate136Rss st blk) =
+      xorRate136 (reconstructRssKState st) (reconstructRssBytes blk) := by
+  have h12Len : (List.zipWith (· ^^^ ·) blk.b1 blk.b2).length = blk.b1.length := zipXor_length_eq hWf.2
+  have hLoad : ∀ lane : Nat,
+      loadLe64 (reconstructRssBytes blk) lane =
+        (loadLe64 blk.b0 lane ^^^ (loadLe64 blk.b1 lane ^^^ loadLe64 blk.b2 lane)) := by
+    intro lane
+    unfold reconstructRssBytes
+    rw [loadLe64_zipXor _ _ (hWf.1.trans h12Len.symm), loadLe64_zipXor _ _ hWf.2]
+  have hLane6 : ∀ (s0 s1 s2 l0 l1 l2 : UInt64),
+      ((s0 ^^^ l0) ^^^ ((s1 ^^^ l1) ^^^ (s2 ^^^ l2))) =
+      ((s0 ^^^ (s1 ^^^ s2)) ^^^ (l0 ^^^ (l1 ^^^ l2))) := by
+    intros s0 s1 s2 l0 l1 l2
+    apply UInt64.eq_of_toBitVec_eq; apply BitVec.eq_of_getLsbD_eq; intro i _
+    simp only [UInt64.toBitVec_xor, BitVec.getLsbD_xor]
+    cases s0.toBitVec.getLsbD i <;> cases s1.toBitVec.getLsbD i <;> cases s2.toBitVec.getLsbD i <;>
+      cases l0.toBitVec.getLsbD i <;> cases l1.toBitVec.getLsbD i <;> cases l2.toBitVec.getLsbD i <;> rfl
+  unfold reconstructRssKState mpcXorRate136Rss
+  rw [xorRate136_eq, xorRate136_eq, xorRate136_eq, xorRate136_eq,
+      xorKState_eq, xorKState_eq, xorKState_eq, xorKState_eq]
+  dsimp only
+  simp only [hLoad, hLane6]
+
+def mpcAbsorbBlocksRss : Nat → Nat → RssKState → RssByteShares → (Nat → Nat → Nat → RssPrfZeroSeeds) → RssKState
+  | 0, _, st, _, _ => st
+  | k + 1, blkIdx, st, rest, blkTape =>
+    let absorbed := mpcXorRate136Rss st (rssTakeShares shake256RateBytes rest)
+    let permuted := mpcKeccakF1600Rss absorbed (blkTape blkIdx)
+    mpcAbsorbBlocksRss k (blkIdx + 1) permuted (rssDropShares shake256RateBytes rest) blkTape
+
+def mpcAbsorbPaddedRss (padded : RssByteShares) (blkTape : Nat → Nat → Nat → RssPrfZeroSeeds) : RssKState :=
+  mpcAbsorbBlocksRss (padded.b0.length / shake256RateBytes) 0 zeroRssKState padded blkTape
+
+/-- Squeeze multi-block XOF output **directly into `RssByteShares` without opening a single byte**! -/
+def mpcSqueezeFuelSharedRss : Nat → Nat → Nat → RssKState → (Nat → Nat → Nat → RssPrfZeroSeeds) → RssByteShares
+  | 0, _, _, _, _ => ⟨[], [], []⟩
+  | _ + 1, 0, _, _, _ => ⟨[], [], []⟩
+  | fuel + 1, outLen + 1, sqIdx, st, sqTape =>
+    let blk : RssByteShares := ⟨rateBlockBytes st.s0, rateBlockBytes st.s1, rateBlockBytes st.s2⟩
+    if outLen + 1 ≤ 136 then
+      rssTakeShares (outLen + 1) blk
+    else
+      rssAppendShares blk
+        (mpcSqueezeFuelSharedRss fuel (outLen + 1 - 136) (sqIdx + 1)
+          (mpcKeccakF1600Rss st (sqTape sqIdx)) sqTape)
+
+/-- **Secret-Shared `SHAKE256` (`mpcShake256SharedRss`)**: maps `RssByteShares` to `RssByteShares`
+    (`0` bytes reconstructed during sponge absorption, permutation, or squeeze!). -/
+def mpcShake256SharedRss (outLen : Nat) (sh : RssByteShares)
+    (tape : Nat → Nat → Nat → RssPrfZeroSeeds) : RssByteShares :=
+  let padded := rssPadForRate sh 0x1f
+  let absorbed := mpcAbsorbPaddedRss padded (fun b => tape (2 * b))
+  mpcSqueezeFuelSharedRss outLen outLen 0 absorbed (fun q => tape (2 * q + 1))
+
+/-- **Secret-Shared `cSHAKE256` (`mpcCshake256SharedRss`)**: maps `RssByteShares` to `RssByteShares`
+    (`0` bytes reconstructed!). -/
+def mpcCshake256SharedRss (outLen : Nat) (customization : List UInt8) (sh : RssByteShares)
+    (tape : Nat → Nat → Nat → RssPrfZeroSeeds) : RssByteShares :=
+  let shakeCompatible := customization = []
+  let framed := if shakeCompatible then sh else rssAppendShares (rssPublicBytes (customizationPrefix customization)) sh
+  let suffix : UInt8 := if shakeCompatible then 0x1f else 0x04
+  let padded := rssPadForRate framed suffix
+  let absorbed := mpcAbsorbPaddedRss padded (fun b => tape (2 * b))
+  mpcSqueezeFuelSharedRss outLen outLen 0 absorbed (fun q => tape (2 * q + 1))
+
+private theorem mpcSqueezeFuelSharedRss_simulates :
+    ∀ (fuel outLen sqIdx : Nat) (st : RssKState) (sqTape : Nat → Nat → Nat → RssPrfZeroSeeds),
+      (mpcSqueezeFuelSharedRss fuel outLen sqIdx st sqTape).WellFormed ∧
+      reconstructRssBytes (mpcSqueezeFuelSharedRss fuel outLen sqIdx st sqTape) =
+        squeezeXofFuel fuel outLen (reconstructRssKState st)
+  | 0, outLen, _, st, _ => ⟨⟨rfl, rfl⟩, by rw [squeezeXofFuel_zero]; rfl⟩
+  | fuel + 1, 0, _, st, _ => ⟨⟨rfl, rfl⟩, by rw [squeezeXofFuel_succ_zero]; rfl⟩
+  | fuel + 1, outLen + 1, sqIdx, st, sqTape => by
+    simp only [mpcSqueezeFuelSharedRss]
+    rw [squeezeXofFuel_succ_succ]
+    let blk : RssByteShares := ⟨rateBlockBytes st.s0, rateBlockBytes st.s1, rateBlockBytes st.s2⟩
+    have hBlkWf : blk.WellFormed :=
+      ⟨(rateBlockBytes_length st.s0).trans (rateBlockBytes_length st.s1).symm,
+       (rateBlockBytes_length st.s1).trans (rateBlockBytes_length st.s2).symm⟩
+    have hBlkRec : reconstructRssBytes blk = rateBlockBytes (reconstructRssKState st) := by
+      unfold reconstructRssKState reconstructRssBytes
+      rw [rateBlockBytes_xor, rateBlockBytes_xor]
+    if hle : outLen + 1 ≤ 136 then
+      simp only [hle, ↓reduceIte]
+      refine ⟨⟨by simp [rssTakeShares, rateBlockBytes_length],
+               by simp [rssTakeShares, rateBlockBytes_length]⟩, ?_⟩
+      unfold reconstructRssBytes rssTakeShares
+      dsimp only
+      rw [zipXor_take, zipXor_take, ← hBlkRec]; rfl
+    else
+      simp only [hle, ↓reduceIte]
+      obtain ⟨ihWf, ihRec⟩ := mpcSqueezeFuelSharedRss_simulates fuel (outLen + 1 - 136) (sqIdx + 1)
+        (mpcKeccakF1600Rss st (sqTape sqIdx)) sqTape
+      rw [reconstructRssKState_mpcKeccakF1600Rss] at ihRec
+      exact ⟨rssAppendShares_wellFormed hBlkWf ihWf,
+             by rw [reconstructRssBytes_append hBlkWf, hBlkRec, ihRec]⟩
+
+private theorem mpcAbsorbBlocksRss_simulates :
+    ∀ (k blkIdx : Nat) (st : RssKState) (rest : RssByteShares)
+      (blkTape : Nat → Nat → Nat → RssPrfZeroSeeds),
+      rest.WellFormed →
+      reconstructRssKState (mpcAbsorbBlocksRss k blkIdx st rest blkTape) =
+        absorbBlocks k (reconstructRssKState st) (reconstructRssBytes rest)
+  | 0, _, st, rest, _, _ => by rw [absorbBlocks_zero]; rfl
+  | k + 1, blkIdx, st, rest, blkTape, hWf => by
+    simp only [mpcAbsorbBlocksRss]
+    rw [absorbBlocks_succ]
+    have hTakeWf : (rssTakeShares shake256RateBytes rest).WellFormed :=
+      ⟨by simp [rssTakeShares, hWf.1], by simp [rssTakeShares, hWf.2]⟩
+    have hDropWf : (rssDropShares shake256RateBytes rest).WellFormed :=
+      ⟨by simp [rssDropShares, hWf.1], by simp [rssDropShares, hWf.2]⟩
+    have hTakeRec : reconstructRssBytes (rssTakeShares shake256RateBytes rest) =
+        (reconstructRssBytes rest).take shake256RateBytes := by
+      unfold reconstructRssBytes rssTakeShares; dsimp only; rw [zipXor_take, zipXor_take]
+    have hDropRec : reconstructRssBytes (rssDropShares shake256RateBytes rest) =
+        (reconstructRssBytes rest).drop shake256RateBytes := by
+      unfold reconstructRssBytes rssDropShares; dsimp only; rw [zipXor_drop, zipXor_drop]
+    rw [mpcAbsorbBlocksRss_simulates k (blkIdx + 1) _ _ blkTape hDropWf,
+        reconstructRssKState_mpcKeccakF1600Rss,
+        reconstructRssKState_mpcXorRate136Rss st hTakeWf,
+        hTakeRec, hDropRec]
+
+private theorem reconstructRssKState_zero : reconstructRssKState zeroRssKState = zeroKState := by
+  unfold reconstructRssKState zeroRssKState
+  rw [zeroKState_eq, xorKState_eq, xorKState_eq]
+  rfl
+
+/-- **`reconstructRssBytes_mpcShake256SharedRss`**: shared 2-of-3 RSS `SHAKE256` output shares are
+    well-formed and reconstruct bit-for-bit to `shake256Xof outLen (reconstructRssBytes sh)`. -/
+theorem reconstructRssBytes_mpcShake256SharedRss (outLen : Nat) {sh : RssByteShares}
+    (hWf : sh.WellFormed) (tape : Nat → Nat → Nat → RssPrfZeroSeeds) :
+    (mpcShake256SharedRss outLen sh tape).WellFormed ∧
+    reconstructRssBytes (mpcShake256SharedRss outLen sh tape) =
+      shake256Xof outLen (reconstructRssBytes sh) := by
+  unfold mpcShake256SharedRss shake256Xof
+  have hPadWf := rssPadForRate_wellFormed hWf 0x1f
+  have hPadRec := reconstructRssBytes_rssPadForRate hWf 0x1f
+  obtain ⟨hSqWf, hSqRec⟩ := mpcSqueezeFuelSharedRss_simulates outLen outLen 0
+    (mpcAbsorbPaddedRss (rssPadForRate sh 0x1f) (fun b => tape (2 * b))) (fun q => tape (2 * q + 1))
+  refine ⟨hSqWf, ?_⟩
+  rw [hSqRec, squeezeXofAux_eq, absorbPadded_eq]
+  unfold mpcAbsorbPaddedRss
+  have hLenEq : (rssPadForRate sh 0x1f).b0.length = (padForRate (reconstructRssBytes sh) 0x1f).length := by
+    rw [← hPadRec, reconstructRssBytes_length hPadWf]
+  rw [hLenEq, mpcAbsorbBlocksRss_simulates _ 0 zeroRssKState _ _ hPadWf,
+      reconstructRssKState_zero, hPadRec]
+
+/-- **`reconstructRssBytes_mpcCshake256SharedRss`**: shared 2-of-3 RSS `cSHAKE256` output shares are
+    well-formed and reconstruct bit-for-bit to `cshake256Xof outLen customization (reconstructRssBytes sh)`. -/
+theorem reconstructRssBytes_mpcCshake256SharedRss (outLen : Nat) (customization : List UInt8)
+    {sh : RssByteShares} (hWf : sh.WellFormed) (tape : Nat → Nat → Nat → RssPrfZeroSeeds) :
+    (mpcCshake256SharedRss outLen customization sh tape).WellFormed ∧
+    reconstructRssBytes (mpcCshake256SharedRss outLen customization sh tape) =
+      cshake256Xof outLen customization (reconstructRssBytes sh) := by
+  unfold mpcCshake256SharedRss cshake256Xof
+  dsimp only
+  let framed := if customization = [] then sh else rssAppendShares (rssPublicBytes (customizationPrefix customization)) sh
+  let suffix : UInt8 := if customization = [] then 0x1f else 0x04
+  have hFramedWf : framed.WellFormed := by
+    dsimp only [framed]; split
+    · exact hWf
+    · exact rssAppendShares_wellFormed (rssPublicBytes_wellFormed _) hWf
+  have hFramedRec : reconstructRssBytes framed =
+      (if customization = [] then reconstructRssBytes sh
+       else customizationPrefix customization ++ reconstructRssBytes sh) := by
+    dsimp only [framed]; split
+    · rfl
+    · rw [reconstructRssBytes_append (rssPublicBytes_wellFormed _), reconstructRssBytes_rssPublicBytes]
+  have hPadWf := rssPadForRate_wellFormed hFramedWf suffix
+  have hPadRec := reconstructRssBytes_rssPadForRate hFramedWf suffix
+  obtain ⟨hSqWf, hSqRec⟩ := mpcSqueezeFuelSharedRss_simulates outLen outLen 0
+    (mpcAbsorbPaddedRss (rssPadForRate framed suffix) (fun b => tape (2 * b))) (fun q => tape (2 * q + 1))
+  refine ⟨hSqWf, ?_⟩
+  rw [hSqRec, squeezeXofAux_eq, absorbPadded_eq]
+  unfold mpcAbsorbPaddedRss
+  have hLenEq : (rssPadForRate framed suffix).b0.length = (padForRate (reconstructRssBytes framed) suffix).length := by
+    rw [← hPadRec, reconstructRssBytes_length hPadWf]
+  rw [hLenEq, mpcAbsorbBlocksRss_simulates _ 0 zeroRssKState _ _ hPadWf,
+      reconstructRssKState_zero, hPadRec, hFramedRec]
+
+/-! ### Cleartext-Free 2-of-3 RSS Oracles for NIST FIPS 205 (`SLH-DSA`) & `Corduroy` -/
+
+def mpcFipsPrfSharedRss (n : Nat) (pkSeed : List UInt8) (skSeedSh : RssByteShares)
+    (adrs : Fips205Adrs) (tape : Nat → Nat → Nat → RssPrfZeroSeeds) : RssByteShares :=
+  let pre := rssAppendShares (rssPublicBytes (pkSeed ++ encodeFips205Adrs adrs)) skSeedSh
+  mpcShake256SharedRss n pre tape
+
+def mpcFipsFSharedRss (n : Nat) (pkSeed : List UInt8) (adrs : Fips205Adrs)
+    (m1Sh : RssByteShares) (tape : Nat → Nat → Nat → RssPrfZeroSeeds) : RssByteShares :=
+  let pre := rssAppendShares (rssPublicBytes (pkSeed ++ encodeFips205Adrs adrs)) m1Sh
+  mpcShake256SharedRss n pre tape
+
+/-- Iterates `mpcFipsFSharedRss` `steps` times on secret-shared `curSh` (`0` intermediate bytes opened!). -/
+def mpcFipsChainSharedRss (n : Nat) (pkSeed : List UInt8) (layer tree kp chainIdx : Nat) :
+    Nat → Nat → RssByteShares → (Nat → Nat → Nat → Nat → RssPrfZeroSeeds) → RssByteShares
+  | _, 0, curSh, _ => curSh
+  | startIdx, steps + 1, curSh, stepTape =>
+    let adrs := mkFipsAdrs layer tree .wotsHash kp chainIdx startIdx
+    let nextSh := mpcFipsFSharedRss n pkSeed adrs curSh (stepTape startIdx)
+    mpcFipsChainSharedRss n pkSeed layer tree kp chainIdx (startIdx + 1) steps nextSh stepTape
+
+/-- **Cleartext-Free 2-of-3 RSS Oracle Instance for NIST FIPS 205 (`mkRssSlhMpcOracles`)**:
+    `skSeedSh` and `skPrfSh` are NEVER reconstructed; intermediate WOTS+ chain values and unqueried
+    FORS secret leaves remain inside `RssByteShares` throughout! -/
+@[expose] def mkRssSlhMpcOracles (p : Fips205Params) (skSeedSh skPrfSh : RssByteShares)
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) : SlhMpcOracles where
+  evalPrfMsg optRand msgPrime :=
+    let pre := rssAppendShares skPrfSh (rssPublicBytes (optRand ++ msgPrime))
+    reconstructRssBytes (mpcShake256SharedRss p.n pre (tape 0))
+  evalWotsChainEnd layer tree kp chainIdx steps :=
+    let baseSh := mpcFipsPrfSharedRss p.n pkSeed skSeedSh (mkFipsAdrs layer tree .wotsPrf kp chainIdx 0) (tape 0)
+    let endSh := mpcFipsChainSharedRss p.n pkSeed layer tree kp chainIdx 0 steps baseSh (fun s => tape (s + 1))
+    reconstructRssBytes endSh
+  evalForsReveal tree idxLeaf globalLeaf :=
+    let leafSh := mpcFipsPrfSharedRss p.n pkSeed skSeedSh (mkFipsAdrs 0 tree .forsPrf idxLeaf 0 globalLeaf) (tape 0)
+    reconstructRssBytes leafSh
+  evalForsLeafHash tree idxLeaf nodeIdx :=
+    let secSh := mpcFipsPrfSharedRss p.n pkSeed skSeedSh (mkFipsAdrs 0 tree .forsPrf idxLeaf 0 nodeIdx) (tape 0)
+    let hashSh := mpcFipsFSharedRss p.n pkSeed (mkFipsAdrs 0 tree .forsTree idxLeaf 0 nodeIdx) secSh (tape 1)
+    reconstructRssBytes hashSh
+
+private theorem mpcFipsChainSharedRss_simulates (n : Nat) (pkSeed : List UInt8)
+    (layer tree kp chainIdx : Nat) (stepTape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    ∀ (steps startIdx : Nat) {curSh : RssByteShares},
+      curSh.WellFormed →
+      (mpcFipsChainSharedRss n pkSeed layer tree kp chainIdx startIdx steps curSh stepTape).WellFormed ∧
+      reconstructRssBytes (mpcFipsChainSharedRss n pkSeed layer tree kp chainIdx startIdx steps curSh stepTape) =
+        fipsChain n pkSeed layer tree kp chainIdx startIdx steps (reconstructRssBytes curSh)
+  | 0, startIdx, curSh, hWf => ⟨hWf, by simp only [mpcFipsChainSharedRss]; rw [fipsChain_zero]⟩
+  | steps + 1, startIdx, curSh, hWf => by
+    simp only [mpcFipsChainSharedRss]
+    rw [fipsChain_succ]
+    dsimp only
+    unfold mpcFipsFSharedRss
+    let pub := pkSeed ++ encodeFips205Adrs (mkFipsAdrs layer tree .wotsHash kp chainIdx startIdx)
+    have hPreWf := rssAppendShares_wellFormed (rssPublicBytes_wellFormed pub) hWf
+    obtain ⟨hNextWf, hNextRec⟩ := reconstructRssBytes_mpcShake256SharedRss n hPreWf (stepTape startIdx)
+    rw [reconstructRssBytes_append (rssPublicBytes_wellFormed pub), reconstructRssBytes_rssPublicBytes,
+        List.append_assoc] at hNextRec
+    obtain ⟨ihWf, ihRec⟩ := mpcFipsChainSharedRss_simulates n pkSeed layer tree kp chainIdx stepTape steps (startIdx + 1) hNextWf
+    refine ⟨ihWf, ?_⟩
+    dsimp only [pub] at hNextRec
+    rw [ihRec, hNextRec, fipsF_eq, List.append_assoc]
+
+/-- **`mkRssSlhMpcOracles_matchesKey`**: proves `mkRssSlhMpcOracles` faithfully satisfies
+    `SlhMpcOracles.MatchesKey` without ever reconstructing `skSeed` or `skPrf`! -/
+theorem mkRssSlhMpcOracles_matchesKey (p : Fips205Params)
+    {skSeedSh skPrfSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (hPrfWf : skPrfSh.WellFormed)
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    (mkRssSlhMpcOracles p skSeedSh skPrfSh pkSeed tape).MatchesKey p
+      (reconstructRssBytes skSeedSh) (reconstructRssBytes skPrfSh) pkSeed := by
+  rw [SlhMpcOracles.MatchesKey_eq]
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro optRand msgPrime
+    dsimp only [mkRssSlhMpcOracles]
+    have hPreWf := rssAppendShares_wellFormed hPrfWf (rssPublicBytes_wellFormed (optRand ++ msgPrime))
+    rw [(reconstructRssBytes_mpcShake256SharedRss p.n hPreWf (tape 0)).2,
+        reconstructRssBytes_append hPrfWf, reconstructRssBytes_rssPublicBytes,
+        fipsPrfMsg_eq, List.append_assoc]
+  · intro layer tree kp chainIdx steps
+    dsimp only [mkRssSlhMpcOracles, mpcFipsPrfSharedRss]
+    let pub := pkSeed ++ encodeFips205Adrs (mkFipsAdrs layer tree .wotsPrf kp chainIdx 0)
+    have hPreWf := rssAppendShares_wellFormed (rssPublicBytes_wellFormed pub) hSeedWf
+    obtain ⟨hBaseWf, hBaseRec⟩ := reconstructRssBytes_mpcShake256SharedRss p.n hPreWf (tape 0)
+    rw [(mpcFipsChainSharedRss_simulates p.n pkSeed layer tree kp chainIdx (fun s => tape (s + 1)) steps 0 hBaseWf).2,
+        hBaseRec, reconstructRssBytes_append (rssPublicBytes_wellFormed pub),
+        reconstructRssBytes_rssPublicBytes, fipsPrf_eq]
+  · intro tree idxLeaf globalLeaf
+    dsimp only [mkRssSlhMpcOracles, mpcFipsPrfSharedRss]
+    let pub := pkSeed ++ encodeFips205Adrs (mkFipsAdrs 0 tree .forsPrf idxLeaf 0 globalLeaf)
+    have hPreWf := rssAppendShares_wellFormed (rssPublicBytes_wellFormed pub) hSeedWf
+    rw [(reconstructRssBytes_mpcShake256SharedRss p.n hPreWf (tape 0)).2,
+        reconstructRssBytes_append (rssPublicBytes_wellFormed pub),
+        reconstructRssBytes_rssPublicBytes, fipsPrf_eq]
+  · intro tree idxLeaf nodeIdx
+    dsimp only [mkRssSlhMpcOracles, mpcFipsPrfSharedRss, mpcFipsFSharedRss]
+    let pub1 := pkSeed ++ encodeFips205Adrs (mkFipsAdrs 0 tree .forsPrf idxLeaf 0 nodeIdx)
+    let pub2 := pkSeed ++ encodeFips205Adrs (mkFipsAdrs 0 tree .forsTree idxLeaf 0 nodeIdx)
+    have hPre1 := rssAppendShares_wellFormed (rssPublicBytes_wellFormed pub1) hSeedWf
+    obtain ⟨hSecWf, hSecRec⟩ := reconstructRssBytes_mpcShake256SharedRss p.n hPre1 (tape 0)
+    have hPre2 := rssAppendShares_wellFormed (rssPublicBytes_wellFormed pub2) hSecWf
+    rw [(reconstructRssBytes_mpcShake256SharedRss p.n hPre2 (tape 1)).2,
+        reconstructRssBytes_append (rssPublicBytes_wellFormed pub2), reconstructRssBytes_rssPublicBytes,
+        hSecRec, reconstructRssBytes_append (rssPublicBytes_wellFormed pub1),
+        reconstructRssBytes_rssPublicBytes, fipsF_eq, fipsPrf_eq]
+
+/-- **End-to-End 2-of-3 RSS Threshold NIST FIPS 205 Bit-Identity (`rss_thresholdSlhSign_eq_slhSignInternal`)**:
+    For both `SLH-DSA-SHAKE-128f` (`17,088`B) and `SLH-DSA-SHAKE-128s` (`7,856`B), 3-party RSS
+    signing over secret-shared `skSeedSh, skPrfSh` outputs the **bit-identical** public key and
+    signature bytes as single-party NIST FIPS 205 `slhSignInternal`! -/
+theorem rss_thresholdSlhSign_eq_slhSignInternal (p : Fips205Params) (hWf : p.wellFormed = true)
+    {skSeedSh skPrfSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (hPrfWf : skPrfSh.WellFormed)
+    (pkSeed msgPrime optRand : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    let o := mkRssSlhMpcOracles p skSeedSh skPrfSh pkSeed tape
+    let (sk, pk) := slhKeygenInternal p (reconstructRssBytes skSeedSh) (reconstructRssBytes skPrfSh) pkSeed
+    slhKeygenMpc p o pkSeed = pk ∧
+    thresholdSlhSignBytes p o msgPrime pk optRand = encodeSlhSig (slhSignInternal p msgPrime sk optRand) ∧
+    (thresholdSlhSignBytes p o msgPrime pk optRand).length = p.sigBytes ∧
+    slhVerifyInternal p msgPrime (slhSignMpc p o msgPrime pk optRand) pk = true := by
+  have hM := mkRssSlhMpcOracles_matchesKey p hSeedWf hPrfWf pkSeed tape
+  obtain ⟨h1, _, h3, h4, h5⟩ := thresholdSlhSign_eq_slhSignInternal p hWf _ _ _ pkSeed msgPrime optRand hM
+  exact ⟨h1, h3, h4, h5⟩
+
+/-- Frame `thPreimage roleTag pkSeed adrs [secretSh]` as `RssByteShares` without opening `secretSh`. -/
+def rssFrameSingleSecretCall (roleTag pkSeed : List UInt8) (adrs : HashAdrs)
+    (secretSh : RssByteShares) : RssByteShares :=
+  let pubPrefix :=
+    leb128 4 ++ encodeListField roleTag ++ encodeListField pkSeed ++
+    encodeListField (encodeAdrs adrs) ++ leb128 secretSh.b0.length
+  rssAppendShares (rssPublicBytes pubPrefix) secretSh
+
+private theorem reconstructRssBytes_rssFrameSingleSecretCall (roleTag pkSeed : List UInt8)
+    (adrs : HashAdrs) {secretSh : RssByteShares} (hWf : secretSh.WellFormed) :
+    (rssFrameSingleSecretCall roleTag pkSeed adrs secretSh).WellFormed ∧
+    reconstructRssBytes (rssFrameSingleSecretCall roleTag pkSeed adrs secretSh) =
+      thPreimage roleTag pkSeed adrs [reconstructRssBytes secretSh] := by
+  unfold rssFrameSingleSecretCall
+  refine ⟨rssAppendShares_wellFormed (rssPublicBytes_wellFormed _) hWf, ?_⟩
+  rw [reconstructRssBytes_append (rssPublicBytes_wellFormed _), reconstructRssBytes_rssPublicBytes,
+      thPreimage_eq]
+  simp only [List.cons_append, List.nil_append, encodeMultiFrame, List.length_cons, List.length_nil,
+    encodeByteFields_cons, encodeByteFields_nil, List.append_nil,
+    encodeListField_eq (reconstructRssBytes secretSh), reconstructRssBytes_length hWf,
+    List.append_assoc]
+
+def mpcCshakeThChainSharedRss (pkSeed : List UInt8) (layer : UInt32) (tree : UInt64) (kp chain : Nat) :
+    Nat → Nat → RssByteShares → (Nat → Nat → Nat → Nat → RssPrfZeroSeeds) → RssByteShares
+  | _, 0, curSh, _ => curSh
+  | startStep, rem + 1, curSh, stepTape =>
+    let adrs : HashAdrs := ⟨layer, tree, .wotsHash, UInt32.ofNat kp, UInt32.ofNat chain, UInt32.ofNat startStep⟩
+    let preSh := rssFrameSingleSecretCall tagThF pkSeed adrs curSh
+    let nextSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom preSh (stepTape startStep)
+    mpcCshakeThChainSharedRss pkSeed layer tree kp chain (startStep + 1) rem nextSh stepTape
+
+/-- **Cleartext-Free 2-of-3 RSS Oracle Instance for `cshake256Suite` (`Corduroy` & `SLH-DSA`)**. -/
+@[expose] def mkRssCshakePqHashMpcOracles (skSeedSh skPrfSh : RssByteShares)
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) : PqHashMpcOracles where
+  evalPrfMsg optRand mu :=
+    let pubPrefix :=
+      leb128 6 ++ encodeListField tagPrfMsg ++ encodeListField [] ++
+      encodeListField (encodeAdrs zeroAdrs) ++ leb128 skPrfSh.b0.length
+    let pubSuffix := encodeListField optRand ++ encodeListField mu
+    let preSh := rssAppendShares (rssPublicBytes pubPrefix)
+                   (rssAppendShares skPrfSh (rssPublicBytes pubSuffix))
+    reconstructRssBytes (mpcCshake256SharedRss 32 pqCshakeSuiteCustom preSh (tape 0))
+  evalWotsChainEnd layer tree kp chain steps :=
+    let baseAdrs : HashAdrs := ⟨layer, tree, .wotsPrf, UInt32.ofNat kp, UInt32.ofNat chain, 0⟩
+    let baseSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                    (rssFrameSingleSecretCall tagPrf pkSeed baseAdrs skSeedSh) (tape 0)
+    let endSh := mpcCshakeThChainSharedRss pkSeed layer tree kp chain 0 steps baseSh (fun s => tape (s + 1))
+    reconstructRssBytes endSh
+  evalForsReveal tree0 kp0 globalU :=
+    let adrs : HashAdrs := ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, 0, UInt32.ofNat globalU⟩
+    let secSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                   (rssFrameSingleSecretCall tagPrf pkSeed adrs skSeedSh) (tape 0)
+    reconstructRssBytes secSh
+  evalForsLeafHash tree0 kp0 globalU :=
+    let prfAdrs : HashAdrs := ⟨0, tree0, .forsPrf, UInt32.ofNat kp0, 0, UInt32.ofNat globalU⟩
+    let secSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                   (rssFrameSingleSecretCall tagPrf pkSeed prfAdrs skSeedSh) (tape 0)
+    let treeAdrs : HashAdrs := ⟨0, tree0, .forsTree, UInt32.ofNat kp0, 0, UInt32.ofNat globalU⟩
+    let hashSh := mpcCshake256SharedRss 32 pqCshakeSuiteCustom
+                    (rssFrameSingleSecretCall tagThF pkSeed treeAdrs secSh) (tape 1)
+    reconstructRssBytes hashSh
+
+private theorem mpcCshakeThChainSharedRss_simulates (pkSeed : List UInt8)
+    (layer : UInt32) (tree : UInt64) (kp chain : Nat)
+    (stepTape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    ∀ (rem startStep : Nat) {curSh : RssByteShares},
+      curSh.WellFormed →
+      (mpcCshakeThChainSharedRss pkSeed layer tree kp chain startStep rem curSh stepTape).WellFormed ∧
+      reconstructRssBytes (mpcCshakeThChainSharedRss pkSeed layer tree kp chain startStep rem curSh stepTape) =
+        wotsChainSteps cshake256Suite pkSeed layer tree kp chain startStep rem (reconstructRssBytes curSh)
+  | 0, startStep, curSh, hWf => ⟨hWf, by simp only [mpcCshakeThChainSharedRss]; rw [wotsChainSteps_zero]⟩
+  | rem + 1, startStep, curSh, hWf => by
+    simp only [mpcCshakeThChainSharedRss]
+    rw [wotsChainSteps_succ]
+    dsimp only
+    obtain ⟨hFrameWf, hFrameRec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagThF pkSeed _ hWf
+    obtain ⟨hNextWf, hNextRec⟩ := reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hFrameWf (stepTape startStep)
+    obtain ⟨ihWf, ihRec⟩ := mpcCshakeThChainSharedRss_simulates pkSeed layer tree kp chain stepTape rem (startStep + 1) hNextWf
+    refine ⟨ihWf, ?_⟩
+    rw [ihRec, hNextRec, hFrameRec, thChainF_eq, thCall_eq]; rfl
+
+theorem mkRssCshakePqHashMpcOracles_matchesKey
+    {skSeedSh skPrfSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (hPrfWf : skPrfSh.WellFormed)
+    (pkSeed : List UInt8) (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    (mkRssCshakePqHashMpcOracles skSeedSh skPrfSh pkSeed tape).MatchesKey cshake256Suite
+      { skSeed := reconstructRssBytes skSeedSh
+        skPrf  := reconstructRssBytes skPrfSh
+        pkSeed := pkSeed } := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro optRand mu
+    dsimp only [mkRssCshakePqHashMpcOracles]
+    let pubPrefix :=
+      leb128 6 ++ encodeListField tagPrfMsg ++ encodeListField [] ++
+      encodeListField (encodeAdrs zeroAdrs) ++ leb128 skPrfSh.b0.length
+    let pubSuffix := encodeListField optRand ++ encodeListField mu
+    have hMidWf := rssAppendShares_wellFormed hPrfWf (rssPublicBytes_wellFormed pubSuffix)
+    have hPreWf := rssAppendShares_wellFormed (rssPublicBytes_wellFormed pubPrefix) hMidWf
+    rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hPreWf (tape 0)).2,
+        reconstructRssBytes_append (rssPublicBytes_wellFormed pubPrefix), reconstructRssBytes_rssPublicBytes,
+        reconstructRssBytes_append hPrfWf, reconstructRssBytes_rssPublicBytes,
+        thPrfMsg_eq, thCall_eq, thPreimage_eq]
+    dsimp only [pubPrefix, pubSuffix]
+    simp only [cshake256Suite, cshake256Bytes, List.cons_append, List.nil_append,
+      encodeMultiFrame, List.length_cons, List.length_nil, encodeByteFields_cons, encodeByteFields_nil,
+      List.append_nil, encodeListField_eq (reconstructRssBytes skPrfSh), reconstructRssBytes_length hPrfWf,
+      List.append_assoc]
+  · intro layer tree kp chain steps
+    dsimp only [mkRssCshakePqHashMpcOracles]
+    obtain ⟨hFWf, hFRec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagPrf pkSeed _ hSeedWf
+    obtain ⟨hBaseWf, hBaseRec⟩ := reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hFWf (tape 0)
+    rw [(mpcCshakeThChainSharedRss_simulates pkSeed layer tree kp chain (fun s => tape (s + 1)) steps 0 hBaseWf).2,
+        hBaseRec, hFRec, wotsSecretBase_eq, thSecretPrf_eq, thCall_eq]; rfl
+  · intro tree0 kp0 globalU
+    dsimp only [mkRssCshakePqHashMpcOracles]
+    obtain ⟨hFWf, hFRec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagPrf pkSeed _ hSeedWf
+    rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hFWf (tape 0)).2,
+        hFRec, forsSecretLeaf_eq, thSecretPrf_eq, thCall_eq]; rfl
+  · intro tree0 kp0 globalU
+    dsimp only [mkRssCshakePqHashMpcOracles]
+    obtain ⟨hF1Wf, hF1Rec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagPrf pkSeed _ hSeedWf
+    obtain ⟨hSecWf, hSecRec⟩ := reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF1Wf (tape 0)
+    obtain ⟨hF2Wf, hF2Rec⟩ := reconstructRssBytes_rssFrameSingleSecretCall tagThF pkSeed _ hSecWf
+    rw [(reconstructRssBytes_mpcCshake256SharedRss 32 pqCshakeSuiteCustom hF2Wf (tape 1)).2,
+        hF2Rec, hSecRec, hF1Rec, forsLeafFn_eq, forsSecretLeaf_eq, thChainF_eq, thSecretPrf_eq,
+        thCall_eq, thCall_eq]; rfl
+
+theorem rss_thresholdPqHashSign_eq_evalSingleSign (params : PqHashParams)
+    {skSeedSh skPrfSh : RssByteShares} (hSeedWf : skSeedSh.WellFormed) (hPrfWf : skPrfSh.WellFormed)
+    (pkSeed msg optRand : List UInt8) (leafGlobalIdx maxGrind : Nat)
+    (tape : Nat → Nat → Nat → Nat → RssPrfZeroSeeds) :
+    let o := mkRssCshakePqHashMpcOracles skSeedSh skPrfSh pkSeed tape
+    let sk : PqSecretKey := ⟨reconstructRssBytes skSeedSh, reconstructRssBytes skPrfSh, pkSeed⟩
+    derivePublicKeyMpc cshake256Suite params o pkSeed = derivePublicKey cshake256Suite params sk ∧
+    evalCutBatchSignMpc cshake256Suite params o (derivePublicKeyMpc cshake256Suite params o pkSeed)
+      msg optRand leafGlobalIdx maxGrind =
+      evalSingleSign cshake256Suite params sk msg optRand leafGlobalIdx maxGrind := by
+  have hM := mkRssCshakePqHashMpcOracles_matchesKey hSeedWf hPrfWf pkSeed tape
+  obtain ⟨h1, h2, _⟩ := evalCutBatchSignMpc_eq_evalSingleSign cshake256Suite params _ _ msg optRand leafGlobalIdx maxGrind hM
+  exact ⟨h1, h2⟩
+
+/-! ## 3. Arbitrary $t$-of-$n$ `BinaryTower` ($\mathcal{T}_3$) & `Goldilocks` Shamir `Poseidon2` -/
+
+/-- Polymorphic Lagrange-at-zero linear combiner $\sum_{p} \lambda_p \cdot s_p$. -/
+@[expose] def lagrangeCombine {R : Type} [CommRingOps R] (lambdas shares : List R) : R :=
+  ringDot lambdas shares
+
+theorem lagrangeCombine_zipAdd {R : Type} [LawfulCommRing R] :
+    ∀ (ls xs ys : List R),
+      xs.length = ys.length →
+      lagrangeCombine ls (List.zipWith CommRingOps.add xs ys) =
+        CommRingOps.add (lagrangeCombine ls xs) (lagrangeCombine ls ys)
+  | [], _, _, _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.add_zero]
+  | _ :: _, [], [], _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.add_zero]
+  | l :: ls, x :: xs, y :: ys, h => by
+    have ih := lagrangeCombine_zipAdd ls xs ys (Nat.succ.inj h)
+    simp only [lagrangeCombine] at ih
+    simp only [List.zipWith_cons_cons, lagrangeCombine, ringDot]
+    rw [LawfulCommRing.left_distrib, ih, LawfulCommRing.add_add_add_comm]
+
+theorem lagrangeCombine_zipSub {R : Type} [LawfulCommRing R] :
+    ∀ (ls xs ys : List R),
+      xs.length = ys.length →
+      lagrangeCombine ls (List.zipWith CommRingOps.sub xs ys) =
+        CommRingOps.sub (lagrangeCombine ls xs) (lagrangeCombine ls ys)
+  | [], _, _, _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.sub_self]
+  | _ :: _, [], [], _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.sub_self]
+  | l :: ls, x :: xs, y :: ys, h => by
+    have hNegAdd : ∀ (a b : R), CommRingOps.neg (CommRingOps.add a b) =
+        CommRingOps.add (CommRingOps.neg a) (CommRingOps.neg b) := fun a b => by
+      apply LawfulCommRing.add_left_cancel (a := CommRingOps.add a b)
+      rw [LawfulCommRing.add_right_neg, LawfulCommRing.add_add_add_comm,
+          LawfulCommRing.add_right_neg, LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+    have ih := lagrangeCombine_zipSub ls xs ys (Nat.succ.inj h)
+    simp only [lagrangeCombine] at ih
+    simp only [List.zipWith_cons_cons, lagrangeCombine, ringDot]
+    rw [LawfulCommRing.mul_sub, ih]
+    simp only [LawfulCommRing.sub_eq_add_neg, hNegAdd, LawfulCommRing.add_add_add_comm]
+
+theorem lagrangeCombine_scale {R : Type} [LawfulCommRing R] (c : R) :
+    ∀ (ls xs : List R),
+      lagrangeCombine ls (xs.map (CommRingOps.mul c)) =
+        CommRingOps.mul c (lagrangeCombine ls xs)
+  | [], _ => by simp [lagrangeCombine, ringDot, LawfulCommRing.mul_zero]
+  | _ :: _, [] => by simp [lagrangeCombine, ringDot, LawfulCommRing.mul_zero]
+  | l :: ls, x :: xs => by
+    have ih := lagrangeCombine_scale c ls xs
+    simp only [lagrangeCombine] at ih
+    simp only [List.map_cons, lagrangeCombine, ringDot]
+    rw [ih, LawfulCommRing.left_distrib,
+        ← LawfulCommRing.mul_assoc, ← LawfulCommRing.mul_assoc, LawfulCommRing.mul_comm l c]
+
+/-- Valid Shamir evaluation points: pairwise distinct and strictly nonzero (`x ≠ 0`). -/
+def validShamirEvalPoints {R : Type} [CommRingOps R] [DecidableEq R] (pts : List R) : Prop :=
+  pts.Nodup ∧ ∀ x ∈ pts, x ≠ CommRingOps.zero
+
+/-- **`#tooth` Shamir Nonzero Evaluation Point Guard (`zero_eval_point_leaks_secret_term`)**:
+    Evaluating any polynomial `c₀ :: cs` at `0` directly outputs `c₀` (the secret constant term!),
+    proving why `validShamirEvalPoints` must forbid `CommRingOps.zero`. -/
+theorem zero_eval_point_leaks_secret_term {R : Type} [LawfulCommRing R] (c₀ : R) (cs : List R) :
+    RoundPoly.evalCoeffs (c₀ :: cs) CommRingOps.zero = c₀ := by
+  simp [RoundPoly.evalCoeffs, LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
+
+/-- Validity invariant for a dealerless `(t, n)` Shamir `Π_pow7` tuple: all 7 share lists have
+    length `lambdas.length` and recombine to `(r, r^2, r^3, r^4, r^5, r^6, r^7)` at `0`. -/
+def SharedPow7Tuple.validAt (lambdas : List Goldilocks) (tup : SharedPow7Tuple) : Prop :=
+  let r  := lagrangeCombine lambdas tup.rSh
+  let r2 := Goldilocks.mul r r
+  let r3 := Goldilocks.mul r2 r
+  let r4 := Goldilocks.mul r3 r
+  let r5 := Goldilocks.mul r4 r
+  let r6 := Goldilocks.mul r5 r
+  let r7 := Goldilocks.mul r6 r
+  tup.rSh.length = lambdas.length ∧
+  tup.r2Sh.length = lambdas.length ∧
+  tup.r3Sh.length = lambdas.length ∧
+  tup.r4Sh.length = lambdas.length ∧
+  tup.r5Sh.length = lambdas.length ∧
+  tup.r6Sh.length = lambdas.length ∧
+  tup.r7Sh.length = lambdas.length ∧
+  lagrangeCombine lambdas tup.r2Sh = r2 ∧
+  lagrangeCombine lambdas tup.r3Sh = r3 ∧
+  lagrangeCombine lambdas tup.r4Sh = r4 ∧
+  lagrangeCombine lambdas tup.r5Sh = r5 ∧
+  lagrangeCombine lambdas tup.r6Sh = r6 ∧
+  lagrangeCombine lambdas tup.r7Sh = r7
+
+/-- **Weld from `Preprocessing.evalSharedPow7Tree` to `SharedPow7Tuple.validAt`**:
+    The 3-round dealerless Beaver tree `evalSharedPow7Tree` over `(t, n)` Shamir shares produces a
+    `SharedPow7Tuple` satisfying `validAt lambdas` with zero cleartext secret reconstruction. -/
+theorem evalSharedPow7Tree_validAt
+    (lambdas rSh : List Goldilocks)
+    (t2 t3 t4 t5 t6 t7 : SharedBeaverTriple Goldilocks)
+    (hSumOne : ringListSum lambdas = Goldilocks.one)
+    (hRLen : rSh.length = lambdas.length)
+    (h2 : t2.validAt lambdas) (h3 : t3.validAt lambdas) (h4 : t4.validAt lambdas)
+    (h5 : t5.validAt lambdas) (h6 : t6.validAt lambdas) (h7 : t7.validAt lambdas) :
+    (evalSharedPow7Tree lambdas rSh t2 t3 t4 t5 t6 t7).validAt lambdas := by
+  have hTree := evalSharedPow7Tree_correct lambdas rSh t2 t3 t4 t5 t6 t7
+    hSumOne hRLen h2 h3 h4 h5 h6 h7
+  dsimp only at hTree
+  obtain ⟨hRSh, ⟨hL2, hL3, hL4, hL5, hL6, hL7⟩, hE2, hE3, hE4, hE5, hE6, hE7⟩ := hTree
+  unfold SharedPow7Tuple.validAt lagrangeCombine
+  dsimp only
+  rw [hRSh]
+  have hR4 : ringDot lambdas (evalSharedPow7Tree lambdas rSh t2 t3 t4 t5 t6 t7).r4Sh =
+      Goldilocks.mul (Goldilocks.mul (Goldilocks.mul (ringDot lambdas rSh) (ringDot lambdas rSh)) (ringDot lambdas rSh))
+        (ringDot lambdas rSh) := by
+    rw [hE4]
+    apply Goldilocks.ext
+    simp only [Goldilocks.mul_val, Nat.mul_mod_mod, Nat.mod_mul_mod]
+    congr 1; ac_rfl
+  refine ⟨hRLen, hL2, hL3, hL4, hL5, hL6, hL7, hE2, hE3, hR4, ?_, ?_, ?_⟩
+  · rw [hE5, hR4]
+  · rw [hE6, hR4, hE2]
+    apply Goldilocks.ext
+    simp only [Goldilocks.mul_val, Nat.mul_mod_mod, Nat.mod_mul_mod]
+    congr 1; ac_rfl
+  · rw [hE7]
+    unfold sbox7
+    apply Goldilocks.ext
+    simp only [Goldilocks.mul_val, Nat.mul_mod_mod, Nat.mod_mul_mod]
+    congr 1; ac_rfl
+
+/-- Degree-7 binomial expansion $(\delta + r)^7 = \delta^7 + 7\delta^6 r + 21\delta^5 r^2 + 35\delta^4 r^3 + 35\delta^3 r^4 + 21\delta^2 r^5 + 7\delta r^6 + r^7$,
+    evaluated as an affine linear combination of `(1, r, r2, r3, r4, r5, r6, r7)`. -/
+def power7BinomialEval (d r r2 r3 r4 r5 r6 r7 : Goldilocks) : Goldilocks :=
+  let d2 := Goldilocks.mul d d
+  let d3 := Goldilocks.mul d2 d
+  let d4 := Goldilocks.mul d2 d2
+  let d5 := Goldilocks.mul d4 d
+  let d6 := Goldilocks.mul d4 d2
+  let d7 := Goldilocks.mul d4 d3
+  Goldilocks.add
+    (Goldilocks.add
+      (Goldilocks.add d7 (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 7) d6) r))
+      (Goldilocks.add
+        (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 21) d5) r2)
+        (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 35) d4) r3)))
+    (Goldilocks.add
+      (Goldilocks.add
+        (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 35) d3) r4)
+        (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 21) d2) r5))
+      (Goldilocks.add
+        (Goldilocks.mul (Goldilocks.mul (Goldilocks.ofNat 7) d) r6)
+        r7))
+
+private theorem nat_binom7_expand (a b : Nat) :
+    (a + b) ^ 7 =
+      (((a * a * a * a) * (a * a * a) + ((7 * ((a * a * a * a) * (a * a))) * b)) +
+       (((21 * ((a * a * a * a) * a)) * (b * b)) + ((35 * (a * a * a * a)) * (b * b * b)))) +
+      ((((35 * (a * a * a)) * (b * b * b * b)) + ((21 * (a * a)) * (b * b * b * b * b))) +
+       (((7 * a) * (b * b * b * b * b * b)) + (b * b * b * b * b * b * b))) := by
+  have h2 : (a + b) * (a + b) = a * a + 2 * a * b + b * b := by
+    simp only [Nat.mul_add, Nat.add_mul, Nat.succ_mul, Nat.zero_mul, Nat.zero_add]; ac_rfl
+  have h3 : (a + b) * (a * a + 2 * a * b + b * b) =
+      a * a * a + 3 * (a * a) * b + 3 * a * (b * b) + b * b * b := by
+    simp only [Nat.mul_add, Nat.add_mul, Nat.succ_mul, Nat.zero_mul, Nat.zero_add]; ac_rfl
+  have h4 : (a + b) * (a * a * a + 3 * (a * a) * b + 3 * a * (b * b) + b * b * b) =
+      a * a * a * a + 4 * (a * a * a) * b + 6 * (a * a) * (b * b) + 4 * a * (b * b * b) + b * b * b * b := by
+    simp only [Nat.mul_add, Nat.add_mul, Nat.succ_mul, Nat.zero_mul, Nat.zero_add]; ac_rfl
+  have h5 : (a + b) * (a * a * a * a + 4 * (a * a * a) * b + 6 * (a * a) * (b * b) + 4 * a * (b * b * b) + b * b * b * b) =
+      a * a * a * a * a + 5 * (a * a * a * a) * b + 10 * (a * a * a) * (b * b) + 10 * (a * a) * (b * b * b) +
+      5 * a * (b * b * b * b) + b * b * b * b * b := by
+    simp only [Nat.mul_add, Nat.add_mul, Nat.succ_mul, Nat.zero_mul, Nat.zero_add]; ac_rfl
+  have h6 : (a + b) * (a * a * a * a * a + 5 * (a * a * a * a) * b + 10 * (a * a * a) * (b * b) + 10 * (a * a) * (b * b * b) +
+      5 * a * (b * b * b * b) + b * b * b * b * b) =
+      a * a * a * a * a * a + 6 * (a * a * a * a * a) * b + 15 * (a * a * a * a) * (b * b) + 20 * (a * a * a) * (b * b * b) +
+      15 * (a * a) * (b * b * b * b) + 6 * a * (b * b * b * b * b) + b * b * b * b * b * b := by
+    simp only [Nat.mul_add, Nat.add_mul, Nat.succ_mul, Nat.zero_mul, Nat.zero_add]; ac_rfl
+  have h7 : (a + b) * (a * a * a * a * a * a + 6 * (a * a * a * a * a) * b + 15 * (a * a * a * a) * (b * b) + 20 * (a * a * a) * (b * b * b) +
+      15 * (a * a) * (b * b * b * b) + 6 * a * (b * b * b * b * b) + b * b * b * b * b * b) =
+      (((a * a * a * a) * (a * a * a) + ((7 * ((a * a * a * a) * (a * a))) * b)) +
+       (((21 * ((a * a * a * a) * a)) * (b * b)) + ((35 * (a * a * a * a)) * (b * b * b)))) +
+      ((((35 * (a * a * a)) * (b * b * b * b)) + ((21 * (a * a)) * (b * b * b * b * b))) +
+       (((7 * a) * (b * b * b * b * b * b)) + (b * b * b * b * b * b * b))) := by
+    simp only [Nat.mul_add, Nat.add_mul, Nat.succ_mul, Nat.zero_mul, Nat.zero_add]; ac_rfl
+  calc (a + b) ^ 7
+    _ = (a + b) * ((a + b) * ((a + b) * ((a + b) * ((a + b) * ((a + b) * (a + b)))))) := by
+      simp only [Nat.pow_succ, Nat.pow_zero, Nat.one_mul]; ac_rfl
+    _ = _ := by rw [h2, h3, h4, h5, h6, h7]
+
+/-- **1-Round `Π_pow7` Degree-7 S-Box Identity (`power7BinomialEval_eq_sbox7`)**:
+    Opening only $\delta = x - r$ and evaluating `power7BinomialEval` linearly over `(r, r^2, ..., r^7)`
+    recovers `sbox7 x = x^7` over `Goldilocks` with zero cleartext secret leakage! -/
+theorem power7BinomialEval_eq_sbox7 (x r : Goldilocks) :
+    let d  := Goldilocks.sub x r
+    let r2 := Goldilocks.mul r r
+    let r3 := Goldilocks.mul r2 r
+    let r4 := Goldilocks.mul r3 r
+    let r5 := Goldilocks.mul r4 r
+    let r6 := Goldilocks.mul r5 r
+    let r7 := Goldilocks.mul r6 r
+    power7BinomialEval d r r2 r3 r4 r5 r6 r7 = sbox7 x := by
+  intro d r2 r3 r4 r5 r6 r7
+  have hAddDR : Goldilocks.add d r = x := by
+    change CommRingOps.add (CommRingOps.sub x r) r = x
+    rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+        LawfulCommRing.add_left_neg, LawfulCommRing.add_zero]
+  rw [← hAddDR]
+  apply Goldilocks.ext
+  rw [sbox7_val]
+  have hPowMod : ((Goldilocks.add d r).val ^ 7) % goldilocksPrime = ((d.val + r.val) ^ 7) % goldilocksPrime := by
+    rw [Goldilocks.add_val]
+    have hStep : ∀ k : Nat, (((d.val + r.val) % goldilocksPrime) ^ k) % goldilocksPrime = ((d.val + r.val) ^ k) % goldilocksPrime := by
+      intro k
+      induction k with
+      | zero => rfl
+      | succ k ih => rw [Nat.pow_succ, Nat.pow_succ, Nat.mul_mod, ih, ← Nat.mul_mod, Nat.mul_mod_mod]
+    exact hStep 7
+  rw [hPowMod, nat_binom7_expand d.val r.val]
+  unfold power7BinomialEval
+  dsimp only [r2, r3, r4, r5, r6, r7]
+  have hc7  : (Goldilocks.ofNat 7).val = 7 := rfl
+  have hc21 : (Goldilocks.ofNat 21).val = 21 := rfl
+  have hc35 : (Goldilocks.ofNat 35).val = 35 := rfl
+  simp only [Goldilocks.add_val, Goldilocks.mul_val, hc7, hc21, hc35,
+    Nat.add_mod_mod, Nat.mod_add_mod, Nat.mul_mod_mod, Nat.mod_mul_mod, Nat.mul_assoc]
+
+/-! ### Share-Level `(t, n)` Shamir `Π_pow7` Evaluation & SPDZ `GoldilocksExt2` MAC Verification -/
+
+/-- Party-local linear combination of `SharedPow7Tuple` shares at opened masked scalar `d = x - r`,
+    producing `(t, n)` Shamir shares of `x^7` with zero communication and zero secret reconstruction. -/
+def mpcPow7Shares (d : Goldilocks) (tup : SharedPow7Tuple) : List Goldilocks :=
+  let d2 := Goldilocks.mul d d
+  let d3 := Goldilocks.mul d2 d
+  let d4 := Goldilocks.mul d2 d2
+  let d5 := Goldilocks.mul d4 d
+  let d6 := Goldilocks.mul d4 d2
+  let d7 := Goldilocks.mul d4 d3
+  let c1 := Goldilocks.mul (Goldilocks.ofNat 7) d6
+  let c2 := Goldilocks.mul (Goldilocks.ofNat 21) d5
+  let c3 := Goldilocks.mul (Goldilocks.ofNat 35) d4
+  let c4 := Goldilocks.mul (Goldilocks.ofNat 35) d3
+  let c5 := Goldilocks.mul (Goldilocks.ofNat 21) d2
+  let c6 := Goldilocks.mul (Goldilocks.ofNat 7) d
+  ringListZipAdd
+    (ringListZipAdd
+      (shareAddConst d7 (shareScale c1 tup.rSh))
+      (ringListZipAdd (shareScale c2 tup.r2Sh) (shareScale c3 tup.r3Sh)))
+    (ringListZipAdd
+      (ringListZipAdd (shareScale c4 tup.r4Sh) (shareScale c5 tup.r5Sh))
+      (ringListZipAdd (shareScale c6 tup.r6Sh) tup.r7Sh))
+
+/-- **Share-Level `Π_pow7` Correctness (`lagrangeCombine_mpcPow7Shares_eq_sbox7`)**:
+    When `∑ λ_i = 1` and `tup` satisfies `tup.validAt lambdas`, opening ONLY `d = x - r` and locally
+    evaluating `mpcPow7Shares d tup` produces `lambdas.length` Shamir shares recombining to
+    `sbox7 (lagrangeCombine lambdas xSh)` without reconstructing `x` or `r`. -/
+theorem lagrangeCombine_mpcPow7Shares_eq_sbox7
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (hSumOne : ringListSum lambdas = Goldilocks.one)
+    (hXLen : xSh.length = lambdas.length)
+    (hTup : tup.validAt lambdas) :
+    let dOpened := lagrangeCombine lambdas (shareZipSub xSh tup.rSh)
+    (mpcPow7Shares dOpened tup).length = lambdas.length ∧
+    lagrangeCombine lambdas (mpcPow7Shares dOpened tup) =
+      sbox7 (lagrangeCombine lambdas xSh) := by
+  obtain ⟨hL1, hL2, hL3, hL4, hL5, hL6, hL7, hE2, hE3, hE4, hE5, hE6, hE7⟩ := hTup
+  let d := lagrangeCombine lambdas (shareZipSub xSh tup.rSh)
+  change (mpcPow7Shares d tup).length = lambdas.length ∧
+    lagrangeCombine lambdas (mpcPow7Shares d tup) = sbox7 (lagrangeCombine lambdas xSh)
+  unfold mpcPow7Shares
+  dsimp only
+  let d2 := Goldilocks.mul d d
+  let d3 := Goldilocks.mul d2 d
+  let d4 := Goldilocks.mul d2 d2
+  let d5 := Goldilocks.mul d4 d
+  let d6 := Goldilocks.mul d4 d2
+  let d7 := Goldilocks.mul d4 d3
+  let c1 := Goldilocks.mul (Goldilocks.ofNat 7) d6
+  let c2 := Goldilocks.mul (Goldilocks.ofNat 21) d5
+  let c3 := Goldilocks.mul (Goldilocks.ofNat 35) d4
+  let c4 := Goldilocks.mul (Goldilocks.ofNat 35) d3
+  let c5 := Goldilocks.mul (Goldilocks.ofNat 21) d2
+  let c6 := Goldilocks.mul (Goldilocks.ofNat 7) d
+  have hLenA1 : (shareAddConst d7 (shareScale c1 tup.rSh)).length = lambdas.length := by
+    simp [hL1]
+  have hLenA2 : (ringListZipAdd (shareScale c2 tup.r2Sh) (shareScale c3 tup.r3Sh)).length = lambdas.length := by
+    rw [ringListZipAdd_length_of_eq (by simp [hL2, hL3])]; simp [hL2]
+  have hLenL : (ringListZipAdd (shareAddConst d7 (shareScale c1 tup.rSh))
+      (ringListZipAdd (shareScale c2 tup.r2Sh) (shareScale c3 tup.r3Sh))).length = lambdas.length := by
+    rw [ringListZipAdd_length_of_eq (hLenA1.trans hLenA2.symm), hLenA1]
+  have hLenB1 : (ringListZipAdd (shareScale c4 tup.r4Sh) (shareScale c5 tup.r5Sh)).length = lambdas.length := by
+    rw [ringListZipAdd_length_of_eq (by simp [hL4, hL5])]; simp [hL4]
+  have hLenB2 : (ringListZipAdd (shareScale c6 tup.r6Sh) tup.r7Sh).length = lambdas.length := by
+    rw [ringListZipAdd_length_of_eq (by simp [hL6, hL7])]; simp [hL6]
+  have hLenR : (ringListZipAdd
+      (ringListZipAdd (shareScale c4 tup.r4Sh) (shareScale c5 tup.r5Sh))
+      (ringListZipAdd (shareScale c6 tup.r6Sh) tup.r7Sh)).length = lambdas.length := by
+    rw [ringListZipAdd_length_of_eq (hLenB1.trans hLenB2.symm), hLenB1]
+  have hTotalLen : (ringListZipAdd
+      (ringListZipAdd (shareAddConst d7 (shareScale c1 tup.rSh))
+        (ringListZipAdd (shareScale c2 tup.r2Sh) (shareScale c3 tup.r3Sh)))
+      (ringListZipAdd
+        (ringListZipAdd (shareScale c4 tup.r4Sh) (shareScale c5 tup.r5Sh))
+        (ringListZipAdd (shareScale c6 tup.r6Sh) tup.r7Sh))).length = lambdas.length := by
+    rw [ringListZipAdd_length_of_eq (hLenL.trans hLenR.symm), hLenL]
+  refine ⟨hTotalLen, ?_⟩
+  unfold lagrangeCombine at hE2 hE3 hE4 hE5 hE6 hE7 ⊢
+  have hOneMulD7 : CommRingOps.mul Goldilocks.one d7 = d7 := LawfulCommRing.one_mul d7
+  rw [ringDot_zipAdd (hLenL.trans hLenR.symm),
+      ringDot_zipAdd (hLenA1.trans hLenA2.symm),
+      ringDot_zipAdd (hLenB1.trans hLenB2.symm),
+      ringDot_addConst d7 (by simp [hL1]),
+      hSumOne, hOneMulD7,
+      ringDot_zipAdd (by simp [hL2, hL3]),
+      ringDot_zipAdd (by simp [hL4, hL5]),
+      ringDot_zipAdd (by simp [hL6, hL7]),
+      ringDot_scale, ringDot_scale, ringDot_scale, ringDot_scale, ringDot_scale, ringDot_scale,
+      hE2, hE3, hE4, hE5, hE6, hE7]
+  have hd : d = Goldilocks.sub (ringDot lambdas xSh) (ringDot lambdas tup.rSh) := by
+    dsimp only [d]; unfold lagrangeCombine
+    exact ringDot_zipSub (hXLen.trans hL1.symm)
+  dsimp only [c1, c2, c3, c4, c5, c6, d7, d6, d5, d4, d3, d2]
+  rw [hd]
+  exact power7BinomialEval_eq_sbox7 (ringDot lambdas xSh) (ringDot lambdas tup.rSh)
+
+/-- Honest 1-round `Π_pow7` opening & zero-sum SPDZ `GoldilocksExt2` `MacCheck` broadcast generator. -/
+def openSharedPow7Input
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2) :
+    Goldilocks × List GoldilocksExt2 :=
+  let dOpened := lagrangeCombine lambdas (shareZipSub xSh tup.rSh)
+  let macD := shareZipSub macX macR
+  let sigmas := spdzComputeSigmas (GoldilocksExt2.ofBase dOpened) macD alphaShares zeroMasks
+  (dOpened, sigmas)
+
+/-- **Maliciously Authenticated Share-Level `Π_pow7` S-Box (`evalSharedPow7Binomial`)**:
+    Verifies the distributed `GoldilocksExt2` zero-sum SPDZ MAC over `dOpened = x - r`
+    (`verifySpdzZeroSumMac sigmas`); aborts with `none` on any MAC failure and otherwise outputs
+    the party-local Shamir shares `mpcPow7Shares dOpened tup`. -/
+def evalSharedPow7Binomial
+    (dOpened : Goldilocks) (tup : SharedPow7Tuple)
+    (sigmas : List GoldilocksExt2) : Option (List Goldilocks) :=
+  if verifySpdzZeroSumMac sigmas then
+    some (mpcPow7Shares dOpened tup)
+  else
+    none
+
+/-- **Authenticated Share-Level `Π_pow7` Completeness (`evalSharedPow7Binomial_complete`)**:
+    Under valid `(t, n)` Shamir shares and additive `GoldilocksExt2` SPDZ MAC shares, honest
+    `openSharedPow7Input` passes `evalSharedPow7Binomial` (`= some ySh`) with
+    `lagrangeCombine lambdas ySh = sbox7 (lagrangeCombine lambdas xSh)`. -/
+theorem evalSharedPow7Binomial_complete
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (macX macR alphaShares zeroMasks : List GoldilocksExt2)
+    (hSumOne : ringListSum lambdas = Goldilocks.one)
+    (hXLen : xSh.length = lambdas.length)
+    (hTup : tup.validAt lambdas)
+    (hMacXLen : macX.length = alphaShares.length)
+    (hMacRLen : macR.length = alphaShares.length)
+    (hMaskLen : zeroMasks.length = alphaShares.length)
+    (hMacXSum : ringListSum macX = CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas xSh)))
+    (hMacRSum : ringListSum macR = CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase (lagrangeCombine lambdas tup.rSh)))
+    (hZeroMask : ringListSum zeroMasks = CommRingOps.zero) :
+    let (dOpened, sigmas) := openSharedPow7Input lambdas xSh tup macX macR alphaShares zeroMasks
+    ∃ ySh : List Goldilocks,
+      evalSharedPow7Binomial dOpened tup sigmas = some ySh ∧
+      ySh.length = lambdas.length ∧
+      lagrangeCombine lambdas ySh = sbox7 (lagrangeCombine lambdas xSh) := by
+  dsimp only [openSharedPow7Input]
+  let dOpened := lagrangeCombine lambdas (shareZipSub xSh tup.rSh)
+  have hRLen : tup.rSh.length = lambdas.length := hTup.1
+  have hdEq : dOpened = Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh) := by
+    dsimp only [dOpened]; unfold lagrangeCombine
+    exact ringDot_zipSub (hXLen.trans hRLen.symm)
+  have hMacDLen : (shareZipSub macX macR).length = alphaShares.length := by
+    rw [shareZipSub_length_of_eq (hMacXLen.trans hMacRLen.symm), hMacXLen]
+  have hMacDSum : ringListSum (shareZipSub macX macR) =
+      CommRingOps.mul (ringListSum alphaShares) (GoldilocksExt2.ofBase dOpened) := by
+    rw [ringListSum_zipSub (hMacXLen.trans hMacRLen.symm), hMacXSum, hMacRSum,
+        ← LawfulCommRing.mul_sub, hdEq]
+    congr 1
+  have hVer := verifySpdzZeroSumMac_complete
+    (GoldilocksExt2.ofBase dOpened) (GoldilocksExt2.ofBase dOpened)
+    (shareZipSub macX macR) alphaShares zeroMasks hMacDLen hMaskLen hMacDSum hZeroMask rfl
+  obtain ⟨hYLen, hYComb⟩ := lagrangeCombine_mpcPow7Shares_eq_sbox7 lambdas xSh tup hSumOne hXLen hTup
+  refine ⟨mpcPow7Shares dOpened tup, ?_, hYLen, hYComb⟩
+  unfold evalSharedPow7Binomial
+  rw [hVer]
+  rfl
+
+/-- **Authenticated Share-Level `Π_pow7` Malicious Soundness (`evalSharedPow7Binomial_forged_pins_key`)**:
+    Any tampered masked opening `dOpened ≠ x - r` accepted by `evalSharedPow7Binomial` under
+    arbitrary adversary broadcast shift `deltaSigma` uniquely pins the global MAC key
+    `α ∈ GoldilocksExt2` (`≤ 1` key out of `goldilocksPrime ^ 2 > 2 ^ 127`, soundness `< 2^{-127}`). -/
+theorem evalSharedPow7Binomial_forged_pins_key
+    (lambdas xSh : List Goldilocks) (tup : SharedPow7Tuple)
+    (dOpened : Goldilocks) (alpha deltaSigma : GoldilocksExt2)
+    (sigmas : List GoldilocksExt2) (ySh : List Goldilocks)
+    (hTamper : dOpened ≠ Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh))
+    (hSum : ringListSum sigmas = CommRingOps.sub
+      (CommRingOps.add (CommRingOps.mul alpha (GoldilocksExt2.ofBase
+        (Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh)))) deltaSigma)
+      (CommRingOps.mul alpha (GoldilocksExt2.ofBase dOpened)))
+    (hAccept : evalSharedPow7Binomial dOpened tup sigmas = some ySh) :
+    alpha = CommRingOps.mul deltaSigma (GoldilocksExt2.inv (CommRingOps.sub
+      (GoldilocksExt2.ofBase dOpened)
+      (GoldilocksExt2.ofBase (Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh))))) := by
+  unfold evalSharedPow7Binomial at hAccept
+  cases hVer : verifySpdzZeroSumMac sigmas with
+  | false => rw [hVer] at hAccept; cases hAccept
+  | true =>
+    have hNeK : GoldilocksExt2.ofBase dOpened ≠
+        GoldilocksExt2.ofBase (Goldilocks.sub (lagrangeCombine lambdas xSh) (lagrangeCombine lambdas tup.rSh)) :=
+      fun hEq => hTamper (GoldilocksExt2.ofBase_injective hEq)
+    exact verifySpdzZeroSumMac_forged_pins_key alpha _ _ deltaSigma sigmas hNeK hSum hVer
+
+def demoPow7TupleFor4 : SharedPow7Tuple :=
+  -- Genuine non-constant degree-1 2-of-3 Shamir shares at x = [1, 2, 3] for r = 4:
+  -- r^1 = 4, r^2 = 16, r^3 = 64, r^4 = 256, r^5 = 1024, r^6 = 4096, r^7 = 16384
+  -- Polynomials: r^k + k * X
+  { rSh  := [Goldilocks.ofNat 5,     Goldilocks.ofNat 6,     Goldilocks.ofNat 7]
+    r2Sh := [Goldilocks.ofNat 18,    Goldilocks.ofNat 20,    Goldilocks.ofNat 22]
+    r3Sh := [Goldilocks.ofNat 67,    Goldilocks.ofNat 70,    Goldilocks.ofNat 73]
+    r4Sh := [Goldilocks.ofNat 260,   Goldilocks.ofNat 264,   Goldilocks.ofNat 268]
+    r5Sh := [Goldilocks.ofNat 1029,  Goldilocks.ofNat 1034,  Goldilocks.ofNat 1039]
+    r6Sh := [Goldilocks.ofNat 4102,  Goldilocks.ofNat 4108,  Goldilocks.ofNat 4114]
+    r7Sh := [Goldilocks.ofNat 16391, Goldilocks.ofNat 16398, Goldilocks.ofNat 16405] }
+
+/-- **Inhabitedness Witness (`evalSharedPow7Binomial_inhabited`)**:
+    Evaluating `evalSharedPow7Binomial` on degree-1 2-of-3 Shamir shares of `x = 9` (`9 + 2X -> [11, 13, 15]`)
+    and `demoPow7TupleFor4` (`r = 4`) returns `some ySh` recombining to `sbox7 9 = 4782969`. -/
+theorem evalSharedPow7Binomial_inhabited :
+    let xSh := [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15]
+    let (dOpened, sigmas) := openSharedPow7Input demoLambdas2of3 xSh demoPow7TupleFor4
+      (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
+    dOpened = Goldilocks.ofNat 5 ∧
+    (match evalSharedPow7Binomial dOpened demoPow7TupleFor4 sigmas with
+     | some ySh => lagrangeCombine demoLambdas2of3 ySh == sbox7 (Goldilocks.ofNat 9)
+     | none => false) = true := by
+  refine ⟨by decide +kernel, by decide +kernel⟩
+
+/-- **`#tooth` Tampered `Π_pow7` Masked Opening & MAC Refusal (`tooth_evalSharedPow7Binomial_rejects_mac_tamper`)**:
+    Corrupting the opened masked scalar from `d = 5` (`9 - 4`) to `d_bad = 6` causes the committee's
+    `spdzComputeSigmas` broadcast to fail `verifySpdzZeroSumMac`, so `evalSharedPow7Binomial` aborts (`= none`),
+    and corrupting a single party's `σ_0` share likewise aborts (`= none`)! -/
+theorem tooth_evalSharedPow7Binomial_rejects_mac_tamper :
+    let dBad := Goldilocks.ofNat 6
+    let macD := shareZipSub (mkDemoMacShares 9) (mkDemoMacShares 4)
+    let sigmasOnBad := spdzComputeSigmas (GoldilocksExt2.ofBase dBad) macD demoAlphaShares3 demoZeroMasks3
+    let (_, honestSigmas) := openSharedPow7Input demoLambdas2of3
+      [Goldilocks.ofNat 11, Goldilocks.ofNat 13, Goldilocks.ofNat 15] demoPow7TupleFor4
+      (mkDemoMacShares 9) (mkDemoMacShares 4) demoAlphaShares3 demoZeroMasks3
+    let corruptedSigmas := match honestSigmas with
+      | s0 :: rest => CommRingOps.add s0 CommRingOps.one :: rest
+      | [] => []
+    evalSharedPow7Binomial dBad demoPow7TupleFor4 sigmasOnBad = none ∧
+    evalSharedPow7Binomial (Goldilocks.ofNat 5) demoPow7TupleFor4 corruptedSigmas = none := by
+  refine ⟨by decide +kernel, by decide +kernel⟩
+
+/-! ### Share-Level `(t, n)` Shamir `Poseidon2` Permutation & Sponge Oracles (`mkShamirPoseidon2MpcOracles`) -/
+
+/-- Recombine 4-lane `Goldilocks` share vectors across a Shamir quorum. -/
+def lagrangeCombineLane4 : List Goldilocks → List Lane4 → Lane4
+  | [], _ => lane4Zero
+  | _, [] => lane4Zero
+  | l :: ls, b :: bs => lane4Add (lane4Scale l b) (lagrangeCombineLane4 ls bs)
+
+/-- Recombine width-12 `Poseidon2State12` shares across a Shamir quorum. -/
+def lagrangeCombineState12 : List Goldilocks → List Poseidon2State12 → Poseidon2State12
+  | [], _ => state12Zero
+  | _, [] => state12Zero
+  | l :: ls, s :: ss => state12Add (state12Scale l s) (lagrangeCombineState12 ls ss)
+
+theorem lagrangeCombineState12_map_applyME :
+    ∀ (ls : List Goldilocks) (ss : List Poseidon2State12),
+      lagrangeCombineState12 ls (ss.map applyME) = applyME (lagrangeCombineState12 ls ss)
+  | [], _ => by simp [lagrangeCombineState12, applyME_zero]
+  | _ :: _, [] => by simp [lagrangeCombineState12, applyME_zero]
+  | l :: ls, s :: ss => by
+    simp only [List.map_cons, lagrangeCombineState12,
+      lagrangeCombineState12_map_applyME ls ss, applyME_add, applyME_scale]
+

@@ -1159,3 +1159,1220 @@ theorem verifySharedSpdzSacrifice_complete
        `verifySharedSpdzSacrifice op = true` (even under arbitrary adversary MAC shifts
        `deltaU, deltaV, deltaW`) constructively (`0 Classical.choice`) pins the secret global
        MAC key `α ∈ GoldilocksExt2` uniquely! -/
+theorem verifySharedSpdzSacrifice_sound
+    (lambdas : List Goldilocks) (rho : GoldilocksExt2)
+    (alpha deltaU deltaV deltaW : GoldilocksExt2)
+    (tr trTilde : AuthenticatedSharedTriple)
+    (op : SharedSpdzSacrificeOpening)
+    (S : List GoldilocksExt2) (hNodup : S.Nodup)
+    (hCheated : ringDot lambdas tr.triple.cShares ≠
+      Goldilocks.mul (ringDot lambdas tr.triple.aShares) (ringDot lambdas tr.triple.bShares)) :
+    let aK  := GoldilocksExt2.ofBase (ringDot lambdas tr.triple.aShares)
+    let bK  := GoldilocksExt2.ofBase (ringDot lambdas tr.triple.bShares)
+    let cK  := GoldilocksExt2.ofBase (ringDot lambdas tr.triple.cShares)
+    let aTK := GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.aShares)
+    let bTK := GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.bShares)
+    let cTK := GoldilocksExt2.ofBase (ringDot lambdas trTilde.triple.cShares)
+    let uTrue := sub (mul rho aK) aTK
+    let vTrue := sub bK bTK
+    let wTrue := spdzSacrificeResidual rho aK bK cK aTK bTK cTK
+    let bad := (S.filter (fun r => decide (spdzSacrificeResidual r aK bK cK aTK bTK cTK = zero))).length
+    bad ≤ 1 ∧
+    ratLe (bad, goldilocksPrime ^ 2) (1, 2 ^ 127) ∧
+    (verifySharedSpdzSacrifice op = true →
+      ringListSum op.sigmaU = sub (add (mul alpha uTrue) deltaU) (mul alpha op.uOpened) →
+      ringListSum op.sigmaV = sub (add (mul alpha vTrue) deltaV) (mul alpha op.vOpened) →
+      (op.uOpened = uTrue → op.vOpened = vTrue →
+        ringListSum op.sigmaW = sub (add (mul alpha wTrue) deltaW) (mul alpha op.wOpened)) →
+      wTrue = zero ∨
+      alpha = mul deltaU (GoldilocksExt2.inv (sub op.uOpened uTrue)) ∨
+      alpha = mul deltaV (GoldilocksExt2.inv (sub op.vOpened vTrue)) ∨
+      alpha = mul deltaW (GoldilocksExt2.inv (sub zero wTrue))) := by
+  intro aK bK cK aTK bTK cTK uTrue vTrue wTrue bad
+  have hCheatedK : cK ≠ mul aK bK := by
+    intro hEqK
+    rw [← GoldilocksExt2.ofBase_mul] at hEqK
+    exact hCheated (GoldilocksExt2.ofBase_injective hEqK)
+  obtain ⟨hBadLe1, hRat1, _⟩ := pow7_sacrifice_sound aK bK cK aTK bTK cTK S hNodup hCheatedK
+  refine ⟨hBadLe1, hRat1, ?_⟩
+  intro hVer hSumU hSumV hSumW
+  unfold verifySharedSpdzSacrifice at hVer
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hVer
+  obtain ⟨⟨⟨hw0, hMacU⟩, hMacV⟩, hMacW⟩ := hVer
+  if hu : op.uOpened = uTrue then
+    if hv : op.vOpened = vTrue then
+      if hw : wTrue = zero then
+        exact Or.inl hw
+      else
+        have hZeroNe : zero ≠ wTrue := fun h => hw h.symm
+        have hSumW0 := hSumW hu hv
+        rw [hw0] at hSumW0
+        exact Or.inr (Or.inr (Or.inr
+          (verifySpdzZeroSumMac_forged_pins_key alpha wTrue zero deltaW op.sigmaW hZeroNe hSumW0 hMacW)))
+    else
+      exact Or.inr (Or.inr (Or.inl
+        (verifySpdzZeroSumMac_forged_pins_key alpha vTrue op.vOpened deltaV op.sigmaV hv hSumV hMacV)))
+  else
+    exact Or.inr (Or.inl
+      (verifySpdzZeroSumMac_forged_pins_key alpha uTrue op.uOpened deltaU op.sigmaU hu hSumU hMacU))
+
+def demoLambdas2of3 : List Goldilocks :=
+  [Goldilocks.ofNat 2, Goldilocks.neg Goldilocks.one, Goldilocks.zero]
+
+def demoAlphaShares3 : List GoldilocksExt2 :=
+  [⟨Goldilocks.ofNat 3, Goldilocks.ofNat 1⟩,
+   ⟨Goldilocks.ofNat 2, Goldilocks.ofNat 2⟩,
+   ⟨Goldilocks.ofNat 4, Goldilocks.ofNat 1⟩]
+
+def demoZeroMasks3 : List GoldilocksExt2 :=
+  [⟨Goldilocks.ofNat 5, Goldilocks.ofNat 2⟩,
+   ⟨Goldilocks.neg (Goldilocks.ofNat 3), Goldilocks.neg Goldilocks.one⟩,
+   ⟨Goldilocks.neg (Goldilocks.ofNat 2), Goldilocks.neg Goldilocks.one⟩]
+
+def mkDemoMacShares (secret : Nat) : List GoldilocksExt2 :=
+  let sK := GoldilocksExt2.ofBase (Goldilocks.ofNat secret)
+  demoAlphaShares3.map (fun a_i => mul a_i sK)
+
+def demoHonestAuthTriple : AuthenticatedSharedTriple :=
+  -- Degree-1 2-of-3 Shamir shares at x = [1, 2, 3]:
+  -- A(X) = 3 + 5X -> [8, 13, 18]; B(X) = 4 + 2X -> [6, 8, 10]; C(X) = 12 + 7X -> [19, 26, 33]
+  { triple := { aShares := [Goldilocks.ofNat 8, Goldilocks.ofNat 13, Goldilocks.ofNat 18]
+                bShares := [Goldilocks.ofNat 6, Goldilocks.ofNat 8, Goldilocks.ofNat 10]
+                cShares := [Goldilocks.ofNat 19, Goldilocks.ofNat 26, Goldilocks.ofNat 33] }
+    macA := mkDemoMacShares 3
+    macB := mkDemoMacShares 4
+    macC := mkDemoMacShares 12 }
+
+def demoCompanionAuthTriple : AuthenticatedSharedTriple :=
+  -- Companion degree-1 Shamir shares at x = [1, 2, 3]:
+  -- A~(X) = 5 + 3X -> [8, 11, 14]; B~(X) = 2 + 6X -> [8, 14, 20]; C~(X) = 10 + 9X -> [19, 28, 37]
+  { triple := { aShares := [Goldilocks.ofNat 8, Goldilocks.ofNat 11, Goldilocks.ofNat 14]
+                bShares := [Goldilocks.ofNat 8, Goldilocks.ofNat 14, Goldilocks.ofNat 20]
+                cShares := [Goldilocks.ofNat 19, Goldilocks.ofNat 28, Goldilocks.ofNat 37] }
+    macA := mkDemoMacShares 5
+    macB := mkDemoMacShares 2
+    macC := mkDemoMacShares 10 }
+
+/-- **Inhabitedness Witness (`shared_spdz_sacrifice_inhabited`)**:
+    Genuine non-constant degree-1 2-of-3 Shamir Beaver triples (`A(X) = 3 + 5X`, `B(X) = 4 + 2X`,
+    `C(X) = 12 + 7X`) authenticated under `α = ⟨9, 4⟩ ∈ GoldilocksExt2` satisfy `validAt` and
+    pass `verifySharedSpdzSacrifice = true`! -/
+theorem shared_spdz_sacrifice_inhabited :
+    demoHonestAuthTriple.triple.aShares ≠ [Goldilocks.ofNat 3, Goldilocks.ofNat 3, Goldilocks.ofNat 3] ∧
+    ringDot demoLambdas2of3 demoHonestAuthTriple.triple.cShares =
+      Goldilocks.mul (ringDot demoLambdas2of3 demoHonestAuthTriple.triple.aShares)
+        (ringDot demoLambdas2of3 demoHonestAuthTriple.triple.bShares) ∧
+    verifySharedSpdzSacrifice
+      (honestSharedSpdzSacrificeOpening demoLambdas2of3 ⟨Goldilocks.ofNat 2, Goldilocks.one⟩
+        demoAlphaShares3 demoHonestAuthTriple demoCompanionAuthTriple
+        demoZeroMasks3 demoZeroMasks3 demoZeroMasks3) = true := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+/-- **`#tooth` Corrupted Shared Shamir Beaver Triple Refusal (`tooth_shared_spdz_sacrifice_rejects_corrupted_triple`)**:
+    Corrupting the 2-of-3 Shamir product polynomial from `C(X) = 12 + 7X` to `C_bad(X) = 13 + 7X`
+    (`c_bad = 13 ≠ 12 = a · b`) causes `verifySharedSpdzSacrifice` to reject (`= false`) both when
+    `wOpened` is opened honestly AND when a cheating prover announces `wOpened := 0` while the
+    committee runs `spdzComputeSigmas` on the announced `0` (caught by `verifySpdzZeroSumMac sigmaW = false`)! -/
+theorem tooth_shared_spdz_sacrifice_rejects_corrupted_triple :
+    let rho : GoldilocksExt2 := ⟨Goldilocks.ofNat 2, Goldilocks.one⟩
+    let badTr : AuthenticatedSharedTriple :=
+      { demoHonestAuthTriple with
+        triple := { demoHonestAuthTriple.triple with
+                    cShares := [Goldilocks.ofNat 20, Goldilocks.ofNat 27, Goldilocks.ofNat 34] }
+        macC := mkDemoMacShares 13 }
+    let op := honestSharedSpdzSacrificeOpening demoLambdas2of3 rho
+      demoAlphaShares3 badTr demoCompanionAuthTriple demoZeroMasks3 demoZeroMasks3 demoZeroMasks3
+    let macW := shareZipSub
+      (shareZipSub (shareScale rho badTr.macC) demoCompanionAuthTriple.macC)
+      (ringListZipAdd (shareScale op.uOpened badTr.macB) (shareScale op.vOpened demoCompanionAuthTriple.macA))
+    let forgedZeroOp : SharedSpdzSacrificeOpening :=
+      { op with wOpened := zero, sigmaW := spdzComputeSigmas zero macW demoAlphaShares3 demoZeroMasks3 }
+    ringDot demoLambdas2of3 badTr.triple.cShares ≠
+      Goldilocks.mul (ringDot demoLambdas2of3 badTr.triple.aShares)
+        (ringDot demoLambdas2of3 badTr.triple.bShares) ∧
+    verifySharedSpdzSacrifice op = false ∧
+    verifySharedSpdzSacrifice forgedZeroOp = false := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+end SharedSpdzSacrifice
+
+/-! ## 6. FO Cut-and-Choose, Universal LHL Combiner, Interactive KOS & Silent-OT PCG (`[P1-07]`) -/
+
+/-- Recursive FO cut-and-choose branch-check survival test across `k` corrupted Base-OT branches:
+    the malicious sender survives iff every branch-check challenge bit `(mask >>> j) & 1` equals `0`. -/
+def foSurvivesBranchChecks : Nat → Nat → Bool
+  | 0, _ => true
+  | k + 1, mask => (mask % 2 == 0) && foSurvivesBranchChecks k (mask / 2)
+
+theorem foSurvivesBranchChecks_iff_zero :
+    ∀ (k mask : Nat), mask < 2 ^ k → (foSurvivesBranchChecks k mask = true ↔ mask = 0)
+  | 0, mask, hlt => by
+    have hm0 : mask = 0 := by simp at hlt; omega
+    subst hm0
+    simp [foSurvivesBranchChecks]
+  | k + 1, mask, hlt => by
+    simp only [foSurvivesBranchChecks, Bool.and_eq_true, beq_iff_eq]
+    have hDivLt : mask / 2 < 2 ^ k := by
+      rw [Nat.pow_succ] at hlt
+      omega
+    rw [foSurvivesBranchChecks_iff_zero k (mask / 2) hDivLt]
+    constructor
+    · rintro ⟨hMod, hDiv⟩; omega
+    · intro hZero; subst hZero; exact ⟨rfl, rfl⟩
+
+/-- **FO Branch-Check Cut-and-Choose Selective-Failure Bound (`fo_cut_and_choose_selective_failure_bound`)**:
+    If a malicious Base-OT sender corrupts `k ≥ 1` Ring-LWE ciphertexts, then over the `2 ^ k`
+    uniform challenge sub-assignments `cTilde : Fin (2 ^ k)` on those `k` branches, **exact count `1`**
+    (`cTilde = 0`) misses all `k` corrupted branches (`2 ^ k - 1` challenges catch the sender!),
+    yielding selective-failure survival probability `1 / 2^k` (and `2^{-128}` at `k = 128`). -/
+theorem fo_cut_and_choose_selective_failure_bound (k : Nat) :
+    let surviveCount := finSum (2 ^ k) (fun c => if foSurvivesBranchChecks k c.1 then 1 else 0)
+    let caughtCount := finSum (2 ^ k) (fun c => if !foSurvivesBranchChecks k c.1 then 1 else 0)
+    surviveCount = 1 ∧
+    caughtCount = 2 ^ k - 1 ∧
+    ratLe (surviveCount, 2 ^ k) (1, 2 ^ k) := by
+  intro surviveCount caughtCount
+  have hPos : 0 < 2 ^ k := Nat.two_pow_pos k
+  have hSurvEq : surviveCount = finSum (2 ^ k) (fun c => if c = ⟨0, hPos⟩ then 1 else 0) := by
+    apply finSum_congr
+    intro c
+    have hIff := foSurvivesBranchChecks_iff_zero k c.1 c.2
+    by_cases hc0 : c.1 = 0
+    · have hce : c = ⟨0, hPos⟩ := Fin.ext hc0
+      have hs0 : foSurvivesBranchChecks k 0 = true := (foSurvivesBranchChecks_iff_zero k 0 hPos).mpr rfl
+      simp [hce, hs0]
+    · have hcne : c ≠ ⟨0, hPos⟩ := fun heq => hc0 (congrArg Fin.val heq)
+      cases hs : foSurvivesBranchChecks k c.1
+      · simp [hcne]
+      · exact False.elim (hc0 (hIff.mp hs))
+  have hSurv1 : surviveCount = 1 := hSurvEq.trans (finSum_eq_indicator (2 ^ k) ⟨0, hPos⟩)
+  have hSumTotal : surviveCount + caughtCount = 2 ^ k := by
+    dsimp only [surviveCount, caughtCount]
+    rw [← finSum_add]
+    have hConst1 : finSum (2 ^ k) (fun c : Fin (2 ^ k) =>
+        (if foSurvivesBranchChecks k c.1 then 1 else 0) +
+        (if !foSurvivesBranchChecks k c.1 then 1 else 0)) =
+        finSum (2 ^ k) (fun _ => 1) := by
+      apply finSum_congr
+      intro c
+      cases foSurvivesBranchChecks k c.1 <;> rfl
+    rw [hConst1, finSum_const]
+    omega
+  refine ⟨hSurv1, by omega, ?_⟩
+  unfold ratLe
+  rw [hSurv1]
+  exact ⟨hPos, hPos, Nat.le_refl _⟩
+
+/-- Committed Ring-LWE Base-OT branch sample `(bit, eSign, eMag, claimedCt)` at production
+    dimension `N = 1024, q = 12289`. -/
+structure RlweOtBranchSample where
+  bit       : Bool
+  eSign     : Bool
+  eMag      : Nat
+  claimedCt : Nat
+  deriving DecidableEq, Repr
+
+/-- FO cut-and-choose branch verifier: checks worst-case noise bound `eMag ≤ 2N + 1 = 2049`
+    and deterministic ciphertext consistency `claimedCt = rlweNoisyEncode bit eSign eMag`. -/
+def verifyRlweOtBranch (br : RlweOtBranchSample) : Bool :=
+  decide (br.eMag ≤ 2 * rlwe1024DimN + 1) &&
+  decide (br.claimedCt = rlweNoisyEncode br.bit br.eSign br.eMag)
+
+/-- Verify a batch of RLWE Base-OT branches under cut-and-choose challenge bitmask `mask`
+    (bit `1` opens and audits the branch; bit `0` retains it for OT correlation extraction). -/
+def verifyRlweFoBatch : List RlweOtBranchSample → Nat → Bool
+  | [], _ => true
+  | br :: brs, mask =>
+    (if mask % 2 == 1 then verifyRlweOtBranch br else true) && verifyRlweFoBatch brs (mask / 2)
+
+theorem verifyRlweFoBatch_corrupted_eq_survives :
+    ∀ (branches : List RlweOtBranchSample) (mask : Nat),
+      (∀ br ∈ branches, verifyRlweOtBranch br = false) →
+      verifyRlweFoBatch branches mask = foSurvivesBranchChecks branches.length mask
+  | [], _, _ => rfl
+  | br :: brs, mask, hAllBad => by
+    have hBad0 : verifyRlweOtBranch br = false := hAllBad br (.head _)
+    have hTail := verifyRlweFoBatch_corrupted_eq_survives brs (mask / 2)
+      (fun b hb => hAllBad b (.tail _ hb))
+    simp only [verifyRlweFoBatch, foSurvivesBranchChecks, List.length_cons, hBad0, hTail]
+    have hMod : mask % 2 = 0 ∨ mask % 2 = 1 := by omega
+    rcases hMod with hm0 | hm1
+    · simp [hm0]
+    · simp [hm1]
+
+/-- **Ring-LWE FO Ciphertext Cut-and-Choose Soundness (`rlwe_fo_cut_and_choose_sound`)**:
+    1. Every valid RLWE branch (`verifyRlweOtBranch br = true`) decrypts with **zero** bit error
+       (`rlweDecodeBit br.claimedCt = br.bit`).
+    2. Across any `k` malformed RLWE ciphertexts (`verifyRlweOtBranch br = false`), `verifyRlweFoBatch`
+       accepts on exact count `1` out of `2 ^ k` challenge masks (`ratLe (survive, 2^k) (1, 2^k)`). -/
+theorem rlwe_fo_cut_and_choose_sound
+    (branches : List RlweOtBranchSample)
+    (hAllCorrupted : ∀ br ∈ branches, verifyRlweOtBranch br = false) :
+    let k := branches.length
+    let surviveCount := finSum (2 ^ k) (fun c => if verifyRlweFoBatch branches c.1 then 1 else 0)
+    (∀ br : RlweOtBranchSample, verifyRlweOtBranch br = true → rlweDecodeBit br.claimedCt = br.bit) ∧
+    surviveCount = 1 ∧
+    ratLe (surviveCount, 2 ^ k) (1, 2 ^ k) := by
+  intro k surviveCount
+  have hDec : ∀ br : RlweOtBranchSample, verifyRlweOtBranch br = true → rlweDecodeBit br.claimedCt = br.bit := by
+    intro br hOk
+    unfold verifyRlweOtBranch at hOk
+    simp only [Bool.and_eq_true, decide_eq_true_eq] at hOk
+    rw [hOk.2]
+    exact rlwe1024_ot_decrypt_exact br.bit br.eSign br.eMag hOk.1
+  have hEqSurv : surviveCount = finSum (2 ^ k) (fun c => if foSurvivesBranchChecks k c.1 then 1 else 0) := by
+    apply finSum_congr
+    intro c
+    rw [verifyRlweFoBatch_corrupted_eq_survives branches c.1 hAllCorrupted]
+  obtain ⟨hS1, _, hRat⟩ := fo_cut_and_choose_selective_failure_bound k
+  rw [hEqSurv]
+  exact ⟨hDec, hS1, hRat⟩
+
+/-- **`#tooth` Out-of-Bound RLWE Noise Flip Refusal (`tooth_rlwe_fo_corrupted_ciphertext_caught`)**:
+    Injecting excessive RLWE noise `eMag = 4000 > 2049` flips `rlweDecodeBit` from `false` to `true`,
+    and `verifyRlweOtBranch` / `verifyRlweFoBatch` rejects (`= false`) whenever audited! -/
+theorem tooth_rlwe_fo_corrupted_ciphertext_caught :
+    let badBr : RlweOtBranchSample := ⟨false, true, 4000, rlweNoisyEncode false true 4000⟩
+    rlweDecodeBit badBr.claimedCt ≠ badBr.bit ∧
+    verifyRlweOtBranch badBr = false ∧
+    verifyRlweFoBatch [badBr] 1 = false := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+section UniversalCombinerAndKos
+variable {R : Type} [LawfulCommRing R]
+open CommRingOps
+
+/-- 3-to-1 full-rank universal linear combiner `(x₀, x₁, x₂) ↦ x₀ + c₁·x₁ + c₂·x₂`
+    mapping 384 bits (`Tower128 × Tower128 × Tower128`) to 128 bits (`Tower128`). -/
+def linearCombiner3to1 (c1 c2 x0 x1 x2 : R) : R :=
+  add x0 (add (mul c1 x1) (mul c2 x2))
+
+/-- **Exact Fiber Bijection of the 3-to-1 Combiner (`linearCombiner3to1Equiv`)**:
+    Conditioned on any `(c₁, c₂, x₁, x₂)`, `x₀ ↦ linearCombiner3to1 c₁ c₂ x₀ x₁ x₂` is a 1-to-1
+    bijection on `R`, so any single uncorrupted block makes the combined seed 100% uniform. -/
+def linearCombiner3to1Equiv (c1 c2 x1 x2 : R) : SimpleEquiv R R where
+  toFun := fun x0 => linearCombiner3to1 c1 c2 x0 x1 x2
+  invFun := fun y => sub y (add (mul c1 x1) (mul c2 x2))
+  left_inv := by
+    intro x0
+    dsimp only [linearCombiner3to1]
+    rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+        LawfulCommRing.add_right_neg, LawfulCommRing.add_zero]
+  right_inv := by
+    intro y
+    dsimp only [linearCombiner3to1]
+    rw [LawfulCommRing.add_comm _ (add (mul c1 x1) (mul c2 x2)),
+        LawfulCommRing.add_sub_cancel_left]
+
+/-- **2-Universal Collision Bound for `linearCombiner3to1` (`linearCombiner3to1_universal_c1`)**:
+    Over any integral domain `R` (`Tower128`), for any distinct triples with `x₁ ≠ x₁'` and any
+    fixed `c₂`, at most **1** seed `c₁ ∈ S` causes a combiner collision! -/
+theorem linearCombiner3to1_universal_c1 [DecidableEq R] [NoZeroDivisors R]
+    (c2 x0 x1 x2 x0' x1' x2' : R) (S : List R) (hNodup : S.Nodup) (hDiff1 : x1 ≠ x1') :
+    (S.filter (fun c1 => decide (linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c1 c2 x0' x1' x2'))).length ≤ 1 := by
+  let dx1 := sub x1 x1'
+  let constTerm := add (sub x0 x0') (mul c2 (sub x2 x2'))
+  have hDx1Nz : dx1 ≠ zero := fun h0 => hDiff1 (LawfulCommRing.sub_eq_zero_iff.mp h0)
+  have hAddDiff : ∀ c1 : R,
+      add (RoundPoly.evalCoeffs [constTerm, dx1] c1) (linearCombiner3to1 c1 c2 x0' x1' x2') =
+      linearCombiner3to1 c1 c2 x0 x1 x2 := by
+    intro c1
+    dsimp only [RoundPoly.evalCoeffs, constTerm, dx1, linearCombiner3to1]
+    rw [LawfulCommRing.mul_zero, LawfulCommRing.add_zero]
+    -- Rearrange: ((x0 - x0') + c2*(x2 - x2')) + c1*(x1 - x1') + (x0' + (c1*x1' + c2*x2'))
+    rw [LawfulCommRing.add_comm (mul c1 x1') (mul c2 x2'),
+        ← LawfulCommRing.add_assoc x0' (mul c2 x2') (mul c1 x1'),
+        LawfulCommRing.add_add_add_comm (add (sub x0 x0') (mul c2 (sub x2 x2'))) (mul c1 (sub x1 x1'))
+          (add x0' (mul c2 x2')) (mul c1 x1'),
+        LawfulCommRing.add_add_add_comm (sub x0 x0') (mul c2 (sub x2 x2')) x0' (mul c2 x2')]
+    have hSubAdd : ∀ (a b : R), add (sub a b) b = a := by
+      intro a b
+      rw [LawfulCommRing.sub_eq_add_neg, LawfulCommRing.add_assoc,
+          LawfulCommRing.add_left_neg, LawfulCommRing.add_zero]
+    have hMulSubAdd : ∀ (k a b : R), add (mul k (sub a b)) (mul k b) = mul k a := by
+      intro k a b
+      rw [← LawfulCommRing.left_distrib, hSubAdd]
+    rw [hSubAdd x0 x0', hMulSubAdd c2 x2 x2', hMulSubAdd c1 x1 x1',
+        LawfulCommRing.add_assoc x0 (mul c2 x2) (mul c1 x1),
+        LawfulCommRing.add_comm (mul c2 x2) (mul c1 x1)]
+  have hEqPoly : ∀ c1 : R,
+      (linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c1 c2 x0' x1' x2') ↔
+      RoundPoly.evalCoeffs [constTerm, dx1] c1 = zero := by
+    intro c1
+    constructor
+    · intro hEq
+      apply LawfulCommRing.add_left_cancel (a := linearCombiner3to1 c1 c2 x0' x1' x2')
+      rw [LawfulCommRing.add_zero, LawfulCommRing.add_comm, hAddDiff c1, hEq]
+    · intro h0
+      rw [← hAddDiff c1, h0, LawfulCommRing.zero_add]
+  have hWitnessNz : ∃ z : R, RoundPoly.evalCoeffs [constTerm, dx1] z ≠ zero := by
+    have hNe01 : RoundPoly.evalCoeffs [constTerm, dx1] one ≠ RoundPoly.evalCoeffs [constTerm, dx1] zero := by
+      intro hEq
+      simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+                 LawfulCommRing.one_mul, LawfulCommRing.zero_mul] at hEq
+      exact hDx1Nz (LawfulCommRing.add_left_cancel (a := constTerm) (hEq.trans (LawfulCommRing.add_zero _).symm))
+    by_cases h0 : RoundPoly.evalCoeffs [constTerm, dx1] zero = zero
+    · exact ⟨one, fun h1 => hNe01 (h1.trans h0.symm)⟩
+    · exact ⟨zero, h0⟩
+  have hFilt :
+      S.filter (fun c1 => decide (linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c1 c2 x0' x1' x2')) =
+      S.filter (fun c1 => decide (RoundPoly.evalCoeffs [constTerm, dx1] c1 = zero)) := by
+    apply List.filter_congr
+    intro c1 _
+    simp only [decide_eq_decide]
+    exact hEqPoly c1
+  rw [hFilt]
+  exact RoundPoly.roots_nodup_length_le 1 [constTerm, dx1] S hNodup (by simp) hWitnessNz
+
+/-- **Leftover Hash Lemma Collision-Excess Bound (`lhl_combiner_384_to_128_stat_dist`)**:
+    Combining `linearCombiner3to1_universal_c1` over `Tower128` (`|𝔽_{2^128}| = 2^128`) with a
+    384-bit source of min-entropy `H_∞ ≥ 256` bits mapped to `ℓ = 128` bits yields universal
+    collision probability `≤ 1 / 2^128` and LHL collision excess `2^ℓ / 2^{H_∞} ≤ 1 / 2^128`. -/
+theorem lhl_combiner_384_to_128_stat_dist
+    (c2 x0 x1 x2 x0' x1' x2' : Tower128) (S : List Tower128)
+    (hNodup : S.Nodup) (hDiff1 : x1 ≠ x1') :
+    let bad := (S.filter (fun c1 => decide (linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c1 c2 x0' x1' x2'))).length
+    bad ≤ 1 ∧
+    ratLe (bad, 2 ^ 128) (1, 2 ^ 128) ∧
+    ratLe (2 ^ 128, 2 ^ 256) (1, 2 ^ 128) := by
+  intro bad
+  have hBad : bad ≤ 1 := linearCombiner3to1_universal_c1 c2 x0 x1 x2 x0' x1' x2' S hNodup hDiff1
+  refine ⟨hBad, ?_, ?_⟩
+  · unfold ratLe; dsimp only
+    exact ⟨Nat.two_pow_pos 128, Nat.two_pow_pos 128, Nat.mul_le_mul_right _ hBad⟩
+  · unfold ratLe; dsimp only
+    exact ⟨Nat.two_pow_pos 256, Nat.two_pow_pos 128, by decide⟩
+
+def fieldProductResidual (deltaU_ell secretDelta senderOffset chi_ell : R) : R :=
+  sub (mul (mul chi_ell deltaU_ell) secretDelta) senderOffset
+
+/-- A field-product residual pins at most one key. This is not the bitwise KOS residual. -/
+theorem field_product_key_uniqueness [DecidableEq R] [NoZeroDivisors R]
+    (deltaU_ell senderOffset chi_ell : R) (S : List R) (hNodup : S.Nodup)
+    (hCheated : deltaU_ell ≠ zero) (hChiNz : chi_ell ≠ zero) :
+    (S.filter (fun secretDelta => decide (fieldProductResidual deltaU_ell secretDelta senderOffset chi_ell = zero))).length ≤ 1 := by
+  let coeff := mul chi_ell deltaU_ell
+  have hCoeffNz : coeff ≠ zero := fun h0 => by
+    rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero h0 with hc | hd
+    · exact hChiNz hc
+    · exact hCheated hd
+  have hWitnessNz : ∃ z : R, RoundPoly.evalCoeffs [neg senderOffset, coeff] z ≠ zero := by
+    have hNe01 : RoundPoly.evalCoeffs [neg senderOffset, coeff] one ≠
+                 RoundPoly.evalCoeffs [neg senderOffset, coeff] zero := by
+      intro hEq
+      simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+                 LawfulCommRing.one_mul, LawfulCommRing.zero_mul] at hEq
+      exact hCoeffNz (LawfulCommRing.add_left_cancel (a := neg senderOffset) (hEq.trans (LawfulCommRing.add_zero _).symm))
+    by_cases h0 : RoundPoly.evalCoeffs [neg senderOffset, coeff] zero = zero
+    · exact ⟨one, fun h1 => hNe01 (h1.trans h0.symm)⟩
+    · exact ⟨zero, h0⟩
+  have hFilt :
+      S.filter (fun secretDelta => decide (fieldProductResidual deltaU_ell secretDelta senderOffset chi_ell = zero)) =
+      S.filter (fun secretDelta => decide (RoundPoly.evalCoeffs [neg senderOffset, coeff] secretDelta = zero)) := by
+    apply List.filter_congr
+    intro d _
+    simp only [fieldProductResidual, coeff, RoundPoly.evalCoeffs,
+               LawfulCommRing.mul_zero, LawfulCommRing.add_zero,
+               LawfulCommRing.sub_eq_add_neg, LawfulCommRing.mul_comm (mul chi_ell deltaU_ell) d,
+               LawfulCommRing.add_comm]
+  rw [hFilt]
+  exact RoundPoly.roots_nodup_length_le 1 [neg senderOffset, coeff] S hNodup (by simp) hWitnessNz
+
+/-- Field cancellation when coefficients are chosen after challenges. -/
+theorem field_product_prechallenge_cancellation (chi0 chi1 secretDelta : R) (hChi1Nz : chi1 ≠ zero) :
+    let deltaU0 := chi1
+    let deltaU1 := neg chi0
+    deltaU0 ≠ zero ∧
+    mul (add (mul chi0 deltaU0) (mul chi1 deltaU1)) secretDelta = zero := by
+  refine ⟨hChi1Nz, ?_⟩
+  rw [LawfulCommRing.mul_neg, LawfulCommRing.mul_comm chi1 chi0,
+      LawfulCommRing.add_right_neg, LawfulCommRing.zero_mul]
+
+/-- Linear primal-LPN parity compression `H · v` over `R`: each output coordinate is a sparse parity
+    sum over selected noisy correlation indices. -/
+def applyLpnParityRow (v : Nat → R) (support : List Nat) : R :=
+  ringListSum (support.map v)
+
+/-- **Primal-LPN Linear Compression Preserves Additive OLE Shares (`pcg_lpn_ole_expansion_sound`)**:
+    Applying any public primal-LPN parity check row `support` locally to two parties' additive
+    noisy correlation shares `u_A, u_B` (`u_A(i) + u_B(i) = z(i)`) preserves exact additive sharing
+    `applyLpnParityRow u_A support + applyLpnParityRow u_B support = applyLpnParityRow z support`. -/
+theorem pcg_lpn_ole_expansion_sound (uA uB : Nat → R) :
+    ∀ (support : List Nat),
+      add (applyLpnParityRow uA support) (applyLpnParityRow uB support) =
+      applyLpnParityRow (fun i => add (uA i) (uB i)) support
+  | [] => by simp [applyLpnParityRow, ringListSum, LawfulCommRing.add_zero]
+  | idx :: rest => by
+    simp only [applyLpnParityRow, List.map_cons, ringListSum]
+    rw [LawfulCommRing.add_add_add_comm]
+    exact congrArg (add (add (uA idx) (uB idx))) (pcg_lpn_ole_expansion_sound uA uB rest)
+
+end UniversalCombinerAndKos
+
+/-- Single corrupted row's KOS residual: correlation is bitwise AND before
+multiplication by the field challenge. -/
+def kosColumnResidual (k : Nat) (deltaU secretDelta : TowerBitVec k)
+    (senderOffset chi : TowerElem k) : TowerElem k :=
+  towerAdd k (towerMul k chi (unpackTower k (deltaU &&& secretDelta))) senderOffset
+
+/-- For zero sender offset and a nonzero challenge, acceptance means the masked
+bitwise error is zero. It does not pin the full correlation key. -/
+theorem kos_interactive_check_sound (k : Nat) (deltaU secretDelta : TowerBitVec k)
+    (chi : TowerElem k) (hChi : chi ≠ towerZero k) :
+    kosColumnResidual k deltaU secretDelta (towerZero k) chi = towerZero k ↔
+      unpackTower k (deltaU &&& secretDelta) = towerZero k := by
+  simp only [kosColumnResidual, towerAdd_zero, towerMul_eq_zero_iff]
+  exact ⟨fun h => h.elim (fun hc => False.elim (hChi hc)) id, Or.inr⟩
+
+/-- A one-bit corruption leaves other key bits unconstrained: two distinct
+128-bit keys already pass with the same nonzero challenge. -/
+theorem kos_single_bit_does_not_pin_key :
+    (0#128 : TowerBitVec 7) ≠ 2#128 ∧
+    kosColumnResidual 7 1#128 0#128 (towerZero 7) (towerOne 7) = towerZero 7 ∧
+    kosColumnResidual 7 1#128 2#128 (towerZero 7) (towerOne 7) = towerZero 7 := by
+  have hz : unpackTower 7 0#128 = towerZero 7 := unpackTower_zero 7
+  refine ⟨by decide +kernel, ?_, ?_⟩ <;>
+    simp [kosColumnResidual, show (1#128 &&& 2#128) = 0#128 by decide +kernel,
+      hz, towerMul_zero]
+
+/-- The production extractor shape is a binary 128-by-384 matrix. -/
+abbrev BinaryExtractorMatrix := Fin 128 → BitVec 384
+
+def binaryInnerProduct (a b : BitVec 384) : Bool :=
+  (List.range 384).foldl (fun acc i => xor acc (a.getLsbD i && b.getLsbD i)) false
+
+def extract384To128 (matrix : BinaryExtractorMatrix) (input : BitVec 384) : Fin 128 → Bool :=
+  fun row => binaryInnerProduct (matrix row) input
+
+section ExtractorAndBatchedKos
+
+private def foldXorAnd (n : Nat) (f g : Nat → Bool) (init : Bool) : Bool :=
+  (List.range n).foldl (fun acc i => xor acc (f i && g i)) init
+
+private theorem foldXorAnd_succ (n : Nat) (f g : Nat → Bool) (init : Bool) :
+    foldXorAnd (n + 1) f g init = xor (foldXorAnd n f g init) (f n && g n) := by
+  simp [foldXorAnd, List.range_succ, List.foldl_append]
+
+private theorem foldXorAnd_congr (n : Nat) {f₁ f₂ g₁ g₂ : Nat → Bool}
+    (hf : ∀ i, i < n → f₁ i = f₂ i) (hg : ∀ i, i < n → g₁ i = g₂ i) :
+    foldXorAnd n f₁ g₁ false = foldXorAnd n f₂ g₂ false := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [foldXorAnd_succ, foldXorAnd_succ,
+        ih (fun i hi => hf i (Nat.lt_succ_of_lt hi)) (fun i hi => hg i (Nat.lt_succ_of_lt hi)),
+        hf n (Nat.lt_succ_self n), hg n (Nat.lt_succ_self n)]
+
+private theorem foldXorAnd_zero_left (n : Nat) {f g : Nat → Bool}
+    (hf : ∀ i, i < n → f i = false) :
+    foldXorAnd n f g false = false := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [foldXorAnd_succ, ih (fun i hi => hf i (Nat.lt_succ_of_lt hi)), hf n (Nat.lt_succ_self n)]
+    rfl
+
+private theorem foldXorAnd_xor_right (n : Nat) (f g₁ g₂ : Nat → Bool) :
+    foldXorAnd n f (fun i => xor (g₁ i) (g₂ i)) false =
+      xor (foldXorAnd n f g₁ false) (foldXorAnd n f g₂ false) := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    rw [foldXorAnd_succ, foldXorAnd_succ, foldXorAnd_succ, ih]
+    cases foldXorAnd n f g₁ false <;> cases foldXorAnd n f g₂ false <;>
+      cases f n <;> cases g₁ n <;> cases g₂ n <;> rfl
+
+private theorem foldXorAnd_split (m k : Nat) (f g : Nat → Bool) :
+    foldXorAnd (m + k) f g false =
+      xor (foldXorAnd m f g false)
+          (foldXorAnd k (fun j => f (m + j)) (fun j => g (m + j)) false) := by
+  induction k with
+  | zero => simp [foldXorAnd]
+  | succ k ih =>
+    rw [Nat.add_succ, foldXorAnd_succ, foldXorAnd_succ, ih, Bool.xor_assoc]
+
+private theorem foldXorAnd_unit_left :
+    ∀ (n k : Nat) (f g : Nat → Bool),
+      k < n → (∀ i, i < n → f i = decide (i = k)) →
+      foldXorAnd n f g false = g k
+  | 0, _, _, _, hk, _ => by omega
+  | n + 1, k, f, g, hk, hf => by
+    rw [foldXorAnd_succ]
+    if hEq : k = n then
+      subst hEq
+      have hZero : foldXorAnd k f g false = false :=
+        foldXorAnd_zero_left k (fun i hi => by rw [hf i (Nat.lt_succ_of_lt hi)]; simp [Nat.ne_of_lt hi])
+      rw [hZero, hf k (Nat.lt_succ_self k)]
+      simp
+    else
+      have hkLt : k < n := by omega
+      rw [foldXorAnd_unit_left n k f g hkLt (fun i hi => hf i (Nat.lt_succ_of_lt hi)),
+          hf n (Nat.lt_succ_self n)]
+      have hNe : ¬ (n = k) := fun h => hEq h.symm
+      simp [hNe]
+
+/-- $\mathbb{F}_2$-linearity of `binaryInnerProduct` in its right operand. -/
+theorem binaryInnerProduct_xor_right (a b₁ b₂ : BitVec 384) :
+    binaryInnerProduct a (b₁ ^^^ b₂) = xor (binaryInnerProduct a b₁) (binaryInnerProduct a b₂) := by
+  change foldXorAnd 384 a.getLsbD (b₁ ^^^ b₂).getLsbD false =
+    xor (foldXorAnd 384 a.getLsbD b₁.getLsbD false) (foldXorAnd 384 a.getLsbD b₂.getLsbD false)
+  rw [foldXorAnd_congr 384 (fun _ _ => rfl) (fun _ _ => BitVec.getLsbD_xor)]
+  exact foldXorAnd_xor_right 384 a.getLsbD b₁.getLsbD b₂.getLsbD
+
+/-- $\mathbb{F}_2$-linearity of `extract384To128`: `M · (x ⊕ y) = (M · x) ⊕ (M · y)`. -/
+theorem extract384To128_xor (M : BinaryExtractorMatrix) (x y : BitVec 384) (row : Fin 128) :
+    extract384To128 M (x ^^^ y) row = xor (extract384To128 M x row) (extract384To128 M y row) :=
+  binaryInnerProduct_xor_right (M row) x y
+
+private def packBitsAux : (n : Nat) → (Nat → Bool) → BitVec n
+  | 0, _ => 0#0
+  | n + 1, f => (BitVec.ofBool (f n) ++ packBitsAux n f).cast (Nat.add_comm 1 n)
+
+private theorem packBitsAux_getLsbD :
+    ∀ (n : Nat) (f : Nat → Bool) (i : Nat), i < n → (packBitsAux n f).getLsbD i = f i
+  | 0, _, _, hi => by omega
+  | n + 1, f, i, hi => by
+    simp only [packBitsAux, BitVec.getLsbD_cast, BitVec.getLsbD_append]
+    if hLt : i < n then
+      simp only [hLt, ↓reduceIte]
+      exact packBitsAux_getLsbD n f i hLt
+    else
+      have hEq : i = n := by omega
+      subst hEq
+      simp
+
+/-- Pack a 128-bit boolean row vector `Fin 128 → Bool` into `BitVec 128`. -/
+def packBits128 (f : Fin 128 → Bool) : BitVec 128 :=
+  packBitsAux 128 (fun i => if h : i < 128 then f ⟨i, h⟩ else false)
+
+@[simp] theorem packBits128_getLsbD (f : Fin 128 → Bool) (row : Fin 128) :
+    (packBits128 f).getLsbD row.1 = f row := by
+  unfold packBits128
+  rw [packBitsAux_getLsbD 128 _ row.1 row.2]
+  simp [row.2]
+
+@[simp] theorem packBits128_eta (v : BitVec 128) :
+    packBits128 (fun row => v.getLsbD row.1) = v := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  exact packBits128_getLsbD (fun row => v.getLsbD row.1) ⟨i, hi⟩
+
+theorem packBits128_injective {f g : Fin 128 → Bool}
+    (h : packBits128 f = packBits128 g) : f = g := by
+  funext row
+  have hBit := congrArg (fun v => v.getLsbD row.1) h
+  simpa only [packBits128_getLsbD] using hBit
+
+/-- Split a 384-bit source into three 128-bit blocks `(b0, b1, b2)` (`LSB .. MSB`). -/
+def split384Blocks (x : BitVec 384) : BitVec 128 × BitVec 128 × BitVec 128 :=
+  (x.extractLsb' 0 128, x.extractLsb' 128 128, x.extractLsb' 256 128)
+
+/-- Join three 128-bit blocks `(b0, b1, b2)` into `BitVec 384`. -/
+def join384Blocks (b0 b1 b2 : BitVec 128) : BitVec 384 :=
+  ((b2 ++ b1) ++ b0).cast (by decide)
+
+@[simp] theorem join384Blocks_getLsbD (b0 b1 b2 : BitVec 128) (i : Nat) (hi : i < 384) :
+    (join384Blocks b0 b1 b2).getLsbD i =
+      if i < 128 then b0.getLsbD i
+      else if i < 256 then b1.getLsbD (i - 128)
+      else b2.getLsbD (i - 256) := by
+  unfold join384Blocks
+  simp only [BitVec.getLsbD_cast, BitVec.getLsbD_append]
+  if h0 : i < 128 then
+    simp [h0]
+  else if h1 : i < 256 then
+    have hSub : i - 128 < 128 := by omega
+    simp [h0, h1, hSub]
+  else
+    have hSub : ¬ (i - 128 < 128) := by omega
+    have hEq : i - 128 - 128 = i - 256 := by omega
+    simp [h0, h1, hSub, hEq]
+
+@[simp] theorem split384Blocks_join384Blocks (b0 b1 b2 : BitVec 128) :
+    split384Blocks (join384Blocks b0 b1 b2) = (b0, b1, b2) := by
+  unfold split384Blocks
+  refine Prod.ext ?_ (Prod.ext ?_ ?_) <;>
+    (apply BitVec.eq_of_getLsbD_eq; intro i hi;
+     simp only [BitVec.getLsbD_extractLsb', hi, decide_true, Bool.true_and];
+     rw [join384Blocks_getLsbD _ _ _ _ (by omega)];
+     split <;> simp_all <;> omega)
+
+@[simp] theorem join384Blocks_split384Blocks (x : BitVec 384) :
+    let (b0, b1, b2) := split384Blocks x
+    join384Blocks b0 b1 b2 = x := by
+  dsimp only [split384Blocks]
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  rw [join384Blocks_getLsbD _ _ _ i hi]
+  if h0 : i < 128 then
+    simp [h0]
+  else if h1 : i < 256 then
+    have hSub : i - 128 < 128 := by omega
+    have hAdd : 128 + (i - 128) = i := by omega
+    simp [h0, h1, hSub, hAdd]
+  else
+    have hSub : i - 256 < 128 := by omega
+    have hAdd : 256 + (i - 256) = i := by omega
+    simp [h0, h1, hSub, hAdd]
+
+/-- `col`-th standard basis vector `e_col ∈ {0, 1}^{128}`. -/
+def basisBit128 (col : Nat) : BitVec 128 :=
+  packBits128 (fun j => decide (j.1 = col))
+
+@[simp] theorem basisBit128_getLsbD (col i : Nat) (hi : i < 128) :
+    (basisBit128 col).getLsbD i = decide (i = col) :=
+  packBits128_getLsbD (fun j => decide (j.1 = col)) ⟨i, hi⟩
+
+/-- `row`-th $\mathbb{F}_2$-row of multiplication by `c ∈ Tower128` (`GF(2^{128})`). -/
+def towerMulRow128 (c : Tower128) (row : Fin 128) : BitVec 128 :=
+  packBits128 (fun col => (packTower 7 (towerMul 7 c (unpackTower 7 (basisBit128 col.1)))).getLsbD row.1)
+
+private def prefixMask128 : Nat → BitVec 128 → BitVec 128
+  | 0 => fun _ => (0 : TowerBitVec 7)
+  | k + 1 => fun v => prefixMask128 k v ^^^ (if v.getLsbD k then basisBit128 k else (0 : TowerBitVec 7))
+
+private theorem prefixMask128_getLsbD (n : Nat) (v : BitVec 128) (i : Nat)
+    (hk : n ≤ 128) (hi : i < 128) :
+    (prefixMask128 n v).getLsbD i = (decide (i < n) && v.getLsbD i) := by
+  induction n with
+  | zero =>
+    simp only [prefixMask128]
+    have hZ128 : (0 : TowerBitVec 7) = 0#128 := rfl
+    rw [hZ128, BitVec.getLsbD_zero, decide_eq_false (Nat.not_lt_zero i), Bool.false_and]
+  | succ k ih =>
+    have hZ128 : (0 : TowerBitVec 7) = 0#128 := rfl
+    simp only [prefixMask128, BitVec.getLsbD_xor, ih (by omega)]
+    if hEq : i = k then
+      subst hEq
+      rw [decide_eq_false (Nat.lt_irrefl i), decide_eq_true (Nat.lt_succ_self i),
+          Bool.false_and, Bool.true_and, Bool.false_xor]
+      cases hv : v.getLsbD i
+      · simp only [Bool.false_eq_true, ↓reduceIte, hZ128, BitVec.getLsbD_zero]
+      · simp only [↓reduceIte, basisBit128_getLsbD i i hi, decide_true]
+    else
+      have hdSame : decide (i < k + 1) = decide (i < k) := by
+        if hLt : i < k then
+          rw [decide_eq_true (by omega : i < k + 1), decide_eq_true hLt]
+        else
+          rw [decide_eq_false (by omega : ¬ (i < k + 1)), decide_eq_false hLt]
+      rw [hdSame]
+      cases hv : v.getLsbD k
+      · simp only [Bool.false_eq_true, ↓reduceIte, hZ128, BitVec.getLsbD_zero, Bool.xor_false]
+      · simp only [↓reduceIte, basisBit128_getLsbD k i hi, decide_eq_false hEq, Bool.xor_false]
+
+private theorem prefixMask128_full (v : BitVec 128) : prefixMask128 128 v = v := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  rw [prefixMask128_getLsbD 128 v i (Nat.le_refl 128) hi, decide_eq_true hi, Bool.true_and]
+
+private theorem unpackTower_xor (k : Nat) (a b : TowerBitVec k) :
+    unpackTower k (a ^^^ b) = towerAdd k (unpackTower k a) (unpackTower k b) := by
+  apply packTower_injective k
+  rw [packTower_unpackTower, packTower_add, packTower_unpackTower, packTower_unpackTower]
+
+private theorem foldXorAnd_towerMulRow128 (c : Tower128) (row : Fin 128) (v : BitVec 128) :
+    ∀ (n : Nat), n ≤ 128 →
+      foldXorAnd n (towerMulRow128 c row).getLsbD v.getLsbD false =
+        (packTower 7 (towerMul 7 c (unpackTower 7 (prefixMask128 n v)))).getLsbD row.1
+  | 0, _ => by
+    have hZ128 : (0 : TowerBitVec 7) = 0#128 := rfl
+    simp only [foldXorAnd, List.range_zero, List.foldl_nil, prefixMask128]
+    rw [unpackTower_zero, towerMul_zero, packTower_zero, hZ128, BitVec.getLsbD_zero]
+  | k + 1, hk => by
+    have hkLt : k < 128 := by omega
+    have hZ128 : (0 : TowerBitVec 7) = 0#128 := rfl
+    rw [foldXorAnd_succ, foldXorAnd_towerMulRow128 c row v k (by omega)]
+    have hCol : (towerMulRow128 c row).getLsbD k =
+        (packTower 7 (towerMul 7 c (unpackTower 7 (basisBit128 k)))).getLsbD row.1 :=
+      packBits128_getLsbD _ ⟨k, hkLt⟩
+    rw [hCol]
+    change xor ((packTower 7 (towerMul 7 c (unpackTower 7 (prefixMask128 k v)))).getLsbD row.1)
+      ((packTower 7 (towerMul 7 c (unpackTower 7 (basisBit128 k)))).getLsbD row.1 && v.getLsbD k) =
+      (packTower 7 (towerMul 7 c (unpackTower 7
+        (prefixMask128 k v ^^^ (if v.getLsbD k then basisBit128 k else (0 : TowerBitVec 7)))))).getLsbD row.1
+    cases hv : v.getLsbD k
+    · simp only [Bool.false_eq_true, ↓reduceIte, hZ128, BitVec.xor_zero, Bool.and_false, Bool.xor_false]
+    · simp only [↓reduceIte, Bool.and_true]
+      rw [unpackTower_xor, towerMul_add_distrib, packTower_add, BitVec.getLsbD_xor]
+
+/-- Full-rank systematic `[I_{128} | mul_{c_1} | mul_{c_2}]` `BinaryExtractorMatrix` realizing
+    `linearCombiner3to1 c1 c2` on `BitVec 384`. -/
+def towerCombinerMatrix (c1 c2 : Tower128) : BinaryExtractorMatrix :=
+  fun row => join384Blocks (basisBit128 row.1) (towerMulRow128 c1 row) (towerMulRow128 c2 row)
+
+theorem extract384To128_towerCombinerMatrix_join (c1 c2 : Tower128) (b0 b1 b2 : BitVec 128) :
+    packBits128 (extract384To128 (towerCombinerMatrix c1 c2) (join384Blocks b0 b1 b2)) =
+      packTower 7 (linearCombiner3to1 c1 c2 (unpackTower 7 b0) (unpackTower 7 b1) (unpackTower 7 b2)) := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro r hr
+  let row : Fin 128 := ⟨r, hr⟩
+  change (packBits128 (extract384To128 (towerCombinerMatrix c1 c2) (join384Blocks b0 b1 b2))).getLsbD row.1 = _
+  rw [packBits128_getLsbD]
+  unfold extract384To128 binaryInnerProduct towerCombinerMatrix
+  change foldXorAnd ((128 + 128) + 128)
+      (join384Blocks (basisBit128 row.1) (towerMulRow128 c1 row) (towerMulRow128 c2 row)).getLsbD
+      (join384Blocks b0 b1 b2).getLsbD false = _
+  rw [foldXorAnd_split (128 + 128) 128, foldXorAnd_split 128 128]
+  have hB0 : foldXorAnd 128
+      (join384Blocks (basisBit128 row.1) (towerMulRow128 c1 row) (towerMulRow128 c2 row)).getLsbD
+      (join384Blocks b0 b1 b2).getLsbD false = b0.getLsbD row.1 := by
+    rw [foldXorAnd_congr 128 (f₂ := (basisBit128 row.1).getLsbD) (g₂ := b0.getLsbD)
+      (fun i hi => by rw [join384Blocks_getLsbD _ _ _ i (by omega)]; simp [hi])
+      (fun i hi => by rw [join384Blocks_getLsbD _ _ _ i (by omega)]; simp [hi])]
+    exact foldXorAnd_unit_left 128 row.1 (basisBit128 row.1).getLsbD b0.getLsbD row.2
+      (fun i hi => basisBit128_getLsbD row.1 i hi)
+  have hB1 : foldXorAnd 128
+      (fun j => (join384Blocks (basisBit128 row.1) (towerMulRow128 c1 row) (towerMulRow128 c2 row)).getLsbD (128 + j))
+      (fun j => (join384Blocks b0 b1 b2).getLsbD (128 + j)) false =
+      (packTower 7 (towerMul 7 c1 (unpackTower 7 b1))).getLsbD row.1 := by
+    rw [foldXorAnd_congr 128 (f₂ := (towerMulRow128 c1 row).getLsbD) (g₂ := b1.getLsbD)
+      (fun j hj => by
+        rw [join384Blocks_getLsbD _ _ _ (128 + j) (by omega)]
+        have hNot0 : ¬ (128 + j < 128) := by omega
+        have hLt1 : 128 + j < 256 := by omega
+        simp [hNot0, hLt1])
+      (fun j hj => by
+        rw [join384Blocks_getLsbD _ _ _ (128 + j) (by omega)]
+        have hNot0 : ¬ (128 + j < 128) := by omega
+        have hLt1 : 128 + j < 256 := by omega
+        simp [hNot0, hLt1])]
+    rw [foldXorAnd_towerMulRow128 c1 row b1 128 (Nat.le_refl 128), prefixMask128_full]
+  have hB2 : foldXorAnd 128
+      (fun j => (join384Blocks (basisBit128 row.1) (towerMulRow128 c1 row) (towerMulRow128 c2 row)).getLsbD ((128 + 128) + j))
+      (fun j => (join384Blocks b0 b1 b2).getLsbD ((128 + 128) + j)) false =
+      (packTower 7 (towerMul 7 c2 (unpackTower 7 b2))).getLsbD row.1 := by
+    rw [foldXorAnd_congr 128 (f₂ := (towerMulRow128 c2 row).getLsbD) (g₂ := b2.getLsbD)
+      (fun j hj => by
+        rw [join384Blocks_getLsbD _ _ _ ((128 + 128) + j) (by omega)]
+        have hNot0 : ¬ ((128 + 128) + j < 128) := by omega
+        have hNot1 : ¬ ((128 + 128) + j < 256) := by omega
+        have hSub : (128 + 128) + j - 256 = j := by omega
+        simp [hNot0, hNot1, hSub])
+      (fun j hj => by
+        rw [join384Blocks_getLsbD _ _ _ ((128 + 128) + j) (by omega)]
+        have hNot0 : ¬ ((128 + 128) + j < 128) := by omega
+        have hNot1 : ¬ ((128 + 128) + j < 256) := by omega
+        have hSub : (128 + 128) + j - 256 = j := by omega
+        simp [hNot0, hNot1, hSub])]
+    rw [foldXorAnd_towerMulRow128 c2 row b2 128 (Nat.le_refl 128), prefixMask128_full]
+  rw [hB0, hB1, hB2, Bool.xor_assoc]
+  unfold linearCombiner3to1
+  change _ = (packTower 7 (towerAdd 7 (unpackTower 7 b0)
+    (towerAdd 7 (towerMul 7 c1 (unpackTower 7 b1)) (towerMul 7 c2 (unpackTower 7 b2))))).getLsbD row.1
+  rw [packTower_add, packTower_add, packTower_unpackTower, BitVec.getLsbD_xor, BitVec.getLsbD_xor]
+
+/-- **Exact Matrix-to-Field Refinement (`extract384To128_towerCombinerMatrix_eq`)**:
+    Evaluating the `128 × 384` GF(2) matrix `towerCombinerMatrix c1 c2` via `extract384To128`
+    is bit-for-bit identical to `linearCombiner3to1 c1 c2` over `Tower128`! -/
+theorem extract384To128_towerCombinerMatrix_eq (c1 c2 : Tower128) (x : BitVec 384) :
+    let (b0, b1, b2) := split384Blocks x
+    packBits128 (extract384To128 (towerCombinerMatrix c1 c2) x) =
+      packTower 7 (linearCombiner3to1 c1 c2 (unpackTower 7 b0) (unpackTower 7 b1) (unpackTower 7 b2)) := by
+  have hxEq := join384Blocks_split384Blocks x
+  rcases hSplit : split384Blocks x with ⟨b0, b1, b2⟩
+  rw [hSplit] at hxEq
+  dsimp only at hxEq ⊢
+  rw [← hxEq]
+  exact extract384To128_towerCombinerMatrix_join c1 c2 b0 b1 b2
+
+/-- **Exact Uniform Fiber Bijection of `extract384To128` (`extract384To128_block0_bijection`)**:
+    Conditioned on ANY `(c1, c2 : Tower128)` and ANY `(b1, b2 : BitVec 128)`, the map
+    `b0 ↦ packBits128 (extract384To128 (towerCombinerMatrix c1 c2) (join384Blocks b0 b1 b2))`
+    is an explicit bijection (`SimpleEquiv (BitVec 128) (BitVec 128)`). -/
+def extract384To128_block0_bijection (c1 c2 : Tower128) (b1 b2 : BitVec 128) :
+    SimpleEquiv (BitVec 128) (BitVec 128) where
+  toFun := fun b0 => packBits128 (extract384To128 (towerCombinerMatrix c1 c2) (join384Blocks b0 b1 b2))
+  invFun := fun y =>
+    let mask := packTower 7 (towerAdd 7 (towerMul 7 c1 (unpackTower 7 b1)) (towerMul 7 c2 (unpackTower 7 b2)))
+    y ^^^ mask
+  left_inv := fun b0 => by
+    dsimp only
+    rw [extract384To128_towerCombinerMatrix_join]
+    dsimp only [linearCombiner3to1]
+    change (packTower 7 (towerAdd 7 (unpackTower 7 b0)
+      (towerAdd 7 (towerMul 7 c1 (unpackTower 7 b1)) (towerMul 7 c2 (unpackTower 7 b2))))) ^^^ _ = b0
+    rw [packTower_add, packTower_unpackTower, BitVec.xor_assoc, BitVec.xor_self, BitVec.xor_zero]
+  right_inv := fun y => by
+    dsimp only
+    rw [extract384To128_towerCombinerMatrix_join]
+    dsimp only [linearCombiner3to1]
+    let m := towerAdd 7 (towerMul 7 c1 (unpackTower 7 b1)) (towerMul 7 c2 (unpackTower 7 b2))
+    change packTower 7 (towerAdd 7 (unpackTower 7 (y ^^^ packTower 7 m)) m) = y
+    rw [packTower_add, packTower_unpackTower, BitVec.xor_assoc, BitVec.xor_self, BitVec.xor_zero]
+
+/-- Cartesian product list `S1 × S2` for finite seed-pair counting. -/
+def cartesianPairs {α β : Type} : List α → List β → List (α × β)
+  | [], _ => []
+  | a :: as, bs => bs.map (fun b => (a, b)) ++ cartesianPairs as bs
+
+theorem cartesianPairs_length {α β : Type} :
+    ∀ (S1 : List α) (S2 : List β), (cartesianPairs S1 S2).length = S1.length * S2.length
+  | [], _ => by simp [cartesianPairs]
+  | _ :: as, bs => by
+    simp [cartesianPairs, cartesianPairs_length as bs, Nat.succ_mul, Nat.add_comm]
+
+private theorem filter_map_pair_length {α β : Type} (a : α) (p : α × β → Bool) :
+    ∀ (bs : List β), ((bs.map (fun b => (a, b))).filter p).length =
+      (bs.filter (fun b => p (a, b))).length
+  | [] => rfl
+  | b :: bs => by
+    simp only [List.map_cons, List.filter]
+    cases p (a, b) <;> simp [filter_map_pair_length a p bs]
+
+private theorem cartesianPairs_filter_row_le {α β : Type} (p : α × β → Bool) (k : Nat) :
+    ∀ (S1 : List α) (S2 : List β),
+      (∀ a ∈ S1, (S2.filter (fun b => p (a, b))).length ≤ k) →
+      ((cartesianPairs S1 S2).filter p).length ≤ S1.length * k
+  | [], _, _ => by simp [cartesianPairs]
+  | a :: as, bs, hRow => by
+    simp only [cartesianPairs, List.filter_append, List.length_append, List.length_cons, Nat.succ_mul]
+    rw [filter_map_pair_length]
+    have hHead := hRow a (.head _)
+    have hTail := cartesianPairs_filter_row_le p k as bs (fun a' ha' => hRow a' (.tail _ ha'))
+    omega
+
+private theorem cartesianPairs_filter_cons_col {α β : Type} (p : α × β → Bool) (b : β) (bs : List β) :
+    ∀ (S1 : List α),
+      ((cartesianPairs S1 (b :: bs)).filter p).length =
+        (S1.filter (fun a => p (a, b))).length + ((cartesianPairs S1 bs).filter p).length
+  | [] => rfl
+  | a :: as => by
+    have ih := cartesianPairs_filter_cons_col p b bs as
+    simp only [cartesianPairs, List.map_cons, List.cons_append, List.filter]
+    cases p (a, b) <;> simp only [List.filter_append, List.length_append, List.length_cons] <;> omega
+
+private theorem cartesianPairs_filter_col_le {α β : Type} (p : α × β → Bool) (k : Nat) :
+    ∀ (S1 : List α) (S2 : List β),
+      (∀ b ∈ S2, (S1.filter (fun a => p (a, b))).length ≤ k) →
+      ((cartesianPairs S1 S2).filter p).length ≤ k * S2.length
+  | _, [], _ => by
+    have hNil : ∀ (xs : List α), cartesianPairs xs ([] : List β) = [] := by
+      intro xs; induction xs with
+      | nil => rfl
+      | cons _ tl ih => simp [cartesianPairs, ih]
+    simp [hNil]
+  | S1, b :: bs, hCol => by
+    rw [cartesianPairs_filter_cons_col]
+    simp only [List.length_cons, Nat.mul_succ]
+    have hHead := hCol b (.head _)
+    have hTail := cartesianPairs_filter_col_le p k S1 bs (fun b' hb' => hCol b' (.tail _ hb'))
+    omega
+
+/-- **Unconditional 2-Universal Collision Bound for `extract384To128` (`extract384To128_two_universal`)**:
+    For **EVERY** distinct pair `x ≠ x' : BitVec 384` (with **zero** restriction on which 128-bit
+    block differs!) and ANY duplicate-free seed pools `S1 S2 : List Tower128` (`|S1|, |S2| ≤ 2^128`),
+    at most `max |S1| |S2| ≤ 2^128` seed pairs `(c1, c2) ∈ S1 × S2` collide under
+    `extract384To128 (towerCombinerMatrix c1 c2)`, yielding collision probability `≤ 2^{-128}`! -/
+theorem extract384To128_two_universal
+    (x x' : BitVec 384) (hDiff : x ≠ x')
+    (S1 S2 : List Tower128) (hNodup1 : S1.Nodup) (hNodup2 : S2.Nodup)
+    (hLen1 : S1.length ≤ 2 ^ 128) (hLen2 : S2.length ≤ 2 ^ 128) :
+    let colliding := (cartesianPairs S1 S2).filter (fun (c1, c2) =>
+      decide (packBits128 (extract384To128 (towerCombinerMatrix c1 c2) x) =
+              packBits128 (extract384To128 (towerCombinerMatrix c1 c2) x')))
+    colliding.length ≤ Nat.max S1.length S2.length ∧
+    colliding.length ≤ 2 ^ 128 ∧
+    ratLe (colliding.length, 2 ^ 256) (1, 2 ^ 128) := by
+  intro colliding
+  have hxJoin := join384Blocks_split384Blocks x
+  have hxJoin' := join384Blocks_split384Blocks x'
+  rcases hSp : split384Blocks x with ⟨b0, b1, b2⟩
+  rcases hSp' : split384Blocks x' with ⟨b0', b1', b2'⟩
+  rw [hSp] at hxJoin; rw [hSp'] at hxJoin'
+  dsimp only at hxJoin hxJoin'
+  let x0 := unpackTower 7 b0
+  let x1 := unpackTower 7 b1
+  let x2 := unpackTower 7 b2
+  let x0' := unpackTower 7 b0'
+  let x1' := unpackTower 7 b1'
+  let x2' := unpackTower 7 b2'
+  let p : Tower128 × Tower128 → Bool := fun (c1, c2) =>
+    decide (linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c1 c2 x0' x1' x2')
+  have hFiltEq : colliding = (cartesianPairs S1 S2).filter p := by
+    apply List.filter_congr
+    intro ⟨c1, c2⟩ _
+    dsimp only [p]
+    rw [← hxJoin, ← hxJoin', extract384To128_towerCombinerMatrix_join, extract384To128_towerCombinerMatrix_join]
+    simp only [decide_eq_decide]
+    exact ⟨packTower_injective 7 _ _, congrArg (packTower 7)⟩
+  have hCountLe : ((cartesianPairs S1 S2).filter p).length ≤ Nat.max S1.length S2.length := by
+    if hx1 : x1 ≠ x1' then
+      have hCol : ((cartesianPairs S1 S2).filter p).length ≤ 1 * S2.length :=
+        cartesianPairs_filter_col_le p 1 S1 S2 (fun c2 _ =>
+          linearCombiner3to1_universal_c1 c2 x0 x1 x2 x0' x1' x2' S1 hNodup1 hx1)
+      exact Nat.le_trans (by omega) (Nat.le_max_right _ _)
+    else if hx2 : x2 ≠ x2' then
+      have hSwap : ∀ (c1 c2 : Tower128),
+          linearCombiner3to1 c1 c2 x0 x1 x2 = linearCombiner3to1 c2 c1 x0 x2 x1 ∧
+          linearCombiner3to1 c1 c2 x0' x1' x2' = linearCombiner3to1 c2 c1 x0' x2' x1' := by
+        intro c1 c2
+        unfold linearCombiner3to1
+        exact ⟨congrArg (CommRingOps.add x0) (LawfulCommRing.add_comm _ _),
+               congrArg (CommRingOps.add x0') (LawfulCommRing.add_comm _ _)⟩
+      have hRow : ((cartesianPairs S1 S2).filter p).length ≤ S1.length * 1 := by
+        refine cartesianPairs_filter_row_le p 1 S1 S2 (fun c1 _ => ?_)
+        have hF2 : S2.filter (fun c2 => p (c1, c2)) =
+            S2.filter (fun c2 => decide (linearCombiner3to1 c2 c1 x0 x2 x1 = linearCombiner3to1 c2 c1 x0' x2' x1')) := by
+          apply List.filter_congr
+          intro c2 _
+          obtain ⟨hs1, hs2⟩ := hSwap c1 c2
+          simp only [p, hs1, hs2]
+        rw [hF2]
+        exact linearCombiner3to1_universal_c1 c1 x0 x2 x1 x0' x2' x1' S2 hNodup2 hx2
+      exact Nat.le_trans (by omega) (Nat.le_max_left _ _)
+    else
+      have he1 : x1 = x1' := Decidable.of_not_not hx1
+      have he2 : x2 = x2' := Decidable.of_not_not hx2
+      have hx0 : x0 ≠ x0' := by
+        intro he0
+        have hb0 : b0 = b0' := by
+          have := congrArg (packTower 7) he0; simpa [x0, x0'] using this
+        have hb1 : b1 = b1' := by
+          have := congrArg (packTower 7) he1; simpa [x1, x1'] using this
+        have hb2 : b2 = b2' := by
+          have := congrArg (packTower 7) he2; simpa [x2, x2'] using this
+        rw [← hxJoin, ← hxJoin', hb0, hb1, hb2] at hDiff
+        exact hDiff rfl
+      have hRow0 : ((cartesianPairs S1 S2).filter p).length ≤ S1.length * 0 := by
+        refine cartesianPairs_filter_row_le p 0 S1 S2 (fun c1 _ => ?_)
+        have hEmpty : S2.filter (fun c2 => p (c1, c2)) = [] := by
+          apply List.filter_eq_nil_iff.mpr
+          intro c2 _
+          simp only [p, decide_eq_true_eq, linearCombiner3to1, he1, he2]
+          intro hEqAdd
+          rw [LawfulCommRing.add_comm x0 _, LawfulCommRing.add_comm x0' _] at hEqAdd
+          exact hx0 (LawfulCommRing.add_left_cancel hEqAdd)
+        simp [hEmpty]
+      exact Nat.le_trans (by omega) (Nat.zero_le _)
+  rw [hFiltEq]
+  have hMaxLe : Nat.max S1.length S2.length ≤ 2 ^ 128 := Nat.max_le.mpr ⟨hLen1, hLen2⟩
+  have hLe128 : ((cartesianPairs S1 S2).filter p).length ≤ 2 ^ 128 := Nat.le_trans hCountLe hMaxLe
+  refine ⟨hCountLe, hLe128, ?_⟩
+  unfold ratLe; dsimp only
+  refine ⟨Nat.two_pow_pos 256, Nat.two_pow_pos 128, ?_⟩
+  have hPow : (2 ^ 128) * (2 ^ 128) = 2 ^ 256 := by decide
+  calc
+    ((cartesianPairs S1 S2).filter p).length * 2 ^ 128
+      ≤ (2 ^ 128) * (2 ^ 128) := Nat.mul_le_mul_right _ hLe128
+    _ = 1 * 2 ^ 256 := by rw [hPow]
+
+/-- **`#tooth` Rank-Deficient Zero-Row Extractor Collides (`tooth_zero_row_extractor_collides`)**:
+    Replacing `towerCombinerMatrix` with a zero-row `BinaryExtractorMatrix` destroys surjectivity
+    and causes distinct 384-bit inputs `0#384 ≠ 1#384` to collide with probability `1`! -/
+theorem tooth_zero_row_extractor_collides :
+    let badMatrix : BinaryExtractorMatrix := fun _ => 0#384
+    (0#384 : BitVec 384) ≠ 1#384 ∧
+    extract384To128 badMatrix 0#384 = extract384To128 badMatrix 1#384 := by
+  refine ⟨by decide +kernel, ?_⟩
+  funext row
+  unfold extract384To128 binaryInnerProduct
+  change foldXorAnd 384 (0#384).getLsbD (0#384).getLsbD false =
+         foldXorAnd 384 (0#384).getLsbD (1#384).getLsbD false
+  rw [foldXorAnd_zero_left 384 (fun _ _ => BitVec.getLsbD_zero),
+      foldXorAnd_zero_left 384 (fun _ _ => BitVec.getLsbD_zero)]
+
+/-! ### Multi-Column Batched KOS Correlation Check (`kosBatchedPolyResidual`) -/
+
+private theorem coeffs_zero_of_eval_and_quotLinear_local {R : Type} [LawfulCommRing R] :
+    ∀ (cs : List R) (r : R),
+      RoundPoly.evalCoeffs cs r = CommRingOps.zero →
+      (∀ q ∈ RoundPoly.quotLinear cs r, q = CommRingOps.zero) →
+      ∀ c ∈ cs, c = CommRingOps.zero
+  | [], _, _, _, _, h => by cases h
+  | [c₀], _, hEv, _, c, hc => by
+    simp only [RoundPoly.evalCoeffs, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hEv
+    rcases List.mem_singleton.mp hc with rfl
+    exact hEv
+  | c₀ :: c₁ :: tl, r, hEv, hQ, c, hc => by
+    have hEvTl : RoundPoly.evalCoeffs (c₁ :: tl) r = CommRingOps.zero :=
+      hQ (RoundPoly.evalCoeffs (c₁ :: tl) r) (by simp [RoundPoly.quotLinear])
+    have hQTl : ∀ q ∈ RoundPoly.quotLinear (c₁ :: tl) r, q = CommRingOps.zero :=
+      fun q hq => hQ q (by simp [RoundPoly.quotLinear, hq])
+    have ihTl := coeffs_zero_of_eval_and_quotLinear_local (c₁ :: tl) r hEvTl hQTl
+    have hc0 : c₀ = CommRingOps.zero := by
+      change CommRingOps.add c₀ (CommRingOps.mul r (RoundPoly.evalCoeffs (c₁ :: tl) r)) = CommRingOps.zero at hEv
+      rw [hEvTl, LawfulCommRing.mul_zero, LawfulCommRing.add_zero] at hEv
+      exact hEv
+    rcases List.mem_cons.mp hc with rfl | hMemTl
+    · exact hc0
+    · exact ihTl c hMemTl
+
+private theorem poly_coeffs_zero_of_vanish_nodup_local
+    {R : Type} [LawfulCommRing R] [DecidableEq R] [NoZeroDivisors R] :
+    ∀ (S : List R) (cs : List R),
+      S.Nodup → cs.length ≤ S.length →
+      (∀ r ∈ S, RoundPoly.evalCoeffs cs r = CommRingOps.zero) →
+      ∀ c ∈ cs, c = CommRingOps.zero
+  | [], cs, _, hLen, _, c, hc => by
+    cases cs with
+    | nil => cases hc
+    | cons _ _ => simp at hLen
+  | s0 :: sRest, cs, .cons hs0Not hNdRest, hLen, hZero, c, hc => by
+    have hs0Ev : RoundPoly.evalCoeffs cs s0 = CommRingOps.zero := hZero s0 (.head _)
+    let q := RoundPoly.quotLinear cs s0
+    have hqLen : q.length ≤ sRest.length := by
+      dsimp only [q]; rw [RoundPoly.quotLinear_length]; simp only [List.length_cons] at hLen; omega
+    have hqZero : ∀ r ∈ sRest, RoundPoly.evalCoeffs q r = CommRingOps.zero := by
+      intro r hr
+      have hrEv := hZero r (.tail _ hr)
+      have hFac := RoundPoly.evalCoeffs_eq_mul_quotLinear_add cs s0 r
+      rw [hrEv, hs0Ev, LawfulCommRing.add_zero] at hFac
+      have hrNe : r ≠ s0 := fun hEq => hs0Not r hr hEq.symm
+      have hSubNe : CommRingOps.sub r s0 ≠ CommRingOps.zero :=
+        fun hSub => hrNe (LawfulCommRing.sub_eq_zero_iff.mp hSub)
+      rcases NoZeroDivisors.eq_zero_or_eq_zero_of_mul_eq_zero hFac.symm with hBad | hOk
+      · exact False.elim (hSubNe hBad)
+      · exact hOk
+    have hqCoeffs := poly_coeffs_zero_of_vanish_nodup_local sRest q hNdRest hqLen hqZero
+    exact coeffs_zero_of_eval_and_quotLinear_local cs s0 hs0Ev hqCoeffs c hc
+
+private def findNonzeroEvalLocal {R : Type} [CommRingOps R] [DecidableEq R] (cs : List R) :
+    (xs : List R) →
+    PSum { r : R // RoundPoly.evalCoeffs cs r ≠ CommRingOps.zero }
+         (∀ r ∈ xs, RoundPoly.evalCoeffs cs r = CommRingOps.zero)
+  | [] => .inr (fun _ hm => by cases hm)
+  | x :: xs =>
+    if hx : RoundPoly.evalCoeffs cs x = CommRingOps.zero then
+      match findNonzeroEvalLocal cs xs with
+      | .inl w => .inl w
+      | .inr hRest => .inr (fun r hr => by
+          rcases List.mem_cons.mp hr with rfl | hTl
+          · exact hx
+          · exact hRest r hTl)
+    else
+      .inl ⟨x, hx⟩
+
+/-- Multi-column batched KOS correlation residual over `deltaUs.length` OT extension columns:
+    `senderOffset ⊕ ∑_{j=0}^{m-1} χ^{j+1} · unpackTower k (Δu_j &&& Δ_secret)`. -/
+def kosBatchedPolyResidual (k : Nat) (deltaUs : List (TowerBitVec k))
+    (secretDelta : TowerBitVec k) (senderOffset chi : TowerElem k) : TowerElem k :=
+  RoundPoly.evalCoeffs (senderOffset :: deltaUs.map (fun du => unpackTower k (du &&& secretDelta))) chi
+
+/-- Single-column specialization: `kosBatchedPolyResidual` on `[deltaU]` equals `kosColumnResidual`. -/
+theorem kosBatchedPolyResidual_singleton_eq (k : Nat) (deltaU secretDelta : TowerBitVec k)
+    (senderOffset chi : TowerElem k) :
+    kosBatchedPolyResidual k [deltaU] secretDelta senderOffset chi =
+      kosColumnResidual k deltaU secretDelta senderOffset chi := by
+  unfold kosBatchedPolyResidual kosColumnResidual
+  simp only [List.map_cons, List.map_nil, RoundPoly.evalCoeffs]
+  change towerAdd k senderOffset (towerMul k chi (towerAdd k (unpackTower k (deltaU &&& secretDelta))
+      (towerMul k chi (towerZero k)))) = _
+  rw [towerMul_zero, towerAdd_zero, towerAdd_comm]
+
+/-- **KOS Opening Pad-Blinding Bijection (`kosBatchedMaskEquiv`)**:
+    Blinding the batched KOS receiver correlation sum with an independent pad `uMask ∈ TowerElem k`
+    (such as `unpackTower 7 (packBits128 (extract384To128 ...))`) induces an exact involution
+    `SimpleEquiv (TowerElem k) (TowerElem k)` hiding honest receiver choice bits. -/
+def kosBatchedMaskEquiv (k : Nat) (batchSum : TowerElem k) : SimpleEquiv (TowerElem k) (TowerElem k) where
+  toFun := fun uMask => towerAdd k batchSum uMask
+  invFun := fun opened => towerAdd k batchSum opened
+  left_inv := fun uMask => by rw [← towerAdd_assoc, towerAdd_self_zero, towerZero_add]
+  right_inv := fun opened => by rw [← towerAdd_assoc, towerAdd_self_zero, towerZero_add]
+
+/-- **Multi-Column Batched KOS Correlation Check Soundness (`kos_batched_poly_check_sound`)**:
+    Across ANY `m`-column extended OT batch `deltaUs` (`deltaUs.length ≤ m`) committed prior to
+    sampling `χ` from a duplicate-free challenge pool `S : List (TowerElem k)` (`m + 1 ≤ S.length`),
+    if ANY column `du ∈ deltaUs` has a non-zero bitwise correlation error against `secretDelta`,
+    then AT MOST `m` challenges `χ ∈ S` satisfy `kosBatchedPolyResidual = 0`
+    (and at `k = 7` / `Tower128`, `ratLe (bad, 2^128) (m, 2^128)`). -/
+theorem kos_batched_poly_check_sound (k m : Nat)
+    (deltaUs : List (TowerBitVec k)) (secretDelta : TowerBitVec k)
+    (senderOffset : TowerElem k) (S : List (TowerElem k))
+    (hNodup : S.Nodup) (hLen : deltaUs.length ≤ m) (hDom : m + 1 ≤ S.length)
+    (hFault : ∃ du ∈ deltaUs, unpackTower k (du &&& secretDelta) ≠ towerZero k) :
+    let bad := (S.filter (fun chi =>
+      decide (kosBatchedPolyResidual k deltaUs secretDelta senderOffset chi = towerZero k))).length
+    bad ≤ m ∧ ratLe (bad, 2 ^ 128) (m, 2 ^ 128) := by
+  intro bad
+  let cs := senderOffset :: deltaUs.map (fun du => unpackTower k (du &&& secretDelta))
+  have hCsLen : cs.length ≤ m + 1 := by simp [cs]; omega
+  have hWitnessNz : ∃ z : TowerElem k, RoundPoly.evalCoeffs cs z ≠ towerZero k := by
+    match findNonzeroEvalLocal cs (S.take (m + 1)) with
+    | .inl ⟨z, hz⟩ => exact ⟨z, hz⟩
+    | .inr hAll =>
+      exfalso
+      obtain ⟨du, hMem, hNe⟩ := hFault
+      have hTakeLen : (S.take (m + 1)).length = m + 1 := List.length_take_of_le hDom
+      have hNdTake : (S.take (m + 1)).Nodup := (List.take_sublist (m + 1) S).nodup hNodup
+      have hZeroAll := poly_coeffs_zero_of_vanish_nodup_local (S.take (m + 1)) cs hNdTake
+        (by rw [hTakeLen]; exact hCsLen) hAll
+      exact hNe (hZeroAll (unpackTower k (du &&& secretDelta)) (List.mem_cons_of_mem _ (List.mem_map_of_mem hMem)))
+  have hBadLe : bad ≤ m :=
+    RoundPoly.roots_nodup_length_le m cs S hNodup hCsLen hWitnessNz
+  refine ⟨hBadLe, ?_⟩
+  unfold ratLe; dsimp only
+  exact ⟨Nat.two_pow_pos 128, Nat.two_pow_pos 128, Nat.mul_le_mul_right _ hBadLe⟩
+
+/-- **`#tooth` Pre-Challenge 2-Column KOS Cancellation (`tooth_kos_prechallenge_two_column_cancellation`)**:
+    If `deltaUs` is chosen AFTER seeing `χ ∈ Tower128` as `[packTower 7 χ, packTower 7 1]`, then
+    column 1 has non-zero correlation fault (`1 ≠ 0`) under `allOnes`, YET `χ · χ ⊕ χ² · 1 = 0`
+    cancels `kosBatchedPolyResidual` to `0` — proving `χ` must be sampled strictly after commitment! -/
+theorem tooth_kos_prechallenge_two_column_cancellation (chi : Tower128) :
+    let allOnes : TowerBitVec 7 := BitVec.allOnes 128
+    let deltaUs : List (TowerBitVec 7) := [packTower 7 chi, packTower 7 (towerOne 7)]
+    unpackTower 7 (packTower 7 (towerOne 7) &&& allOnes) ≠ towerZero 7 ∧
+    kosBatchedPolyResidual 7 deltaUs allOnes (towerZero 7) chi = towerZero 7 := by
+  intro allOnes deltaUs
+  have hAndOne : ∀ v : TowerBitVec 7, v &&& allOnes = v := fun v => BitVec.and_allOnes
+  refine ⟨?_, ?_⟩
+  · rw [hAndOne, unpackTower_packTower]
+    exact towerOne_ne_zero 7
+  · unfold kosBatchedPolyResidual
+    simp only [deltaUs, List.map_cons, List.map_nil, hAndOne, unpackTower_packTower,
+      RoundPoly.evalCoeffs]
+    change towerAdd 7 (towerZero 7)
+      (towerMul 7 chi (towerAdd 7 chi
+        (towerMul 7 chi (towerAdd 7 (towerOne 7) (towerMul 7 chi (towerZero 7)))))) = towerZero 7
+    rw [towerMul_zero, towerAdd_zero, towerMul_one, towerAdd_self_zero, towerMul_zero, towerAdd_zero]
+
+/-- **Inhabitedness Witness (`kos_batched_poly_check_inhabited`)**:
+    Honest 2-column extended OT correlation (`deltaUs = [0#128, 0#128]`) passes `kosBatchedPolyResidual = 0`,
+    while a 2-column batch with bit-0 fault in column 2 (`deltaUs = [0#128, 1#128]`, `secretDelta = 1#128`)
+    yields non-zero residual at `χ = 1`! -/
+theorem kos_batched_poly_check_inhabited :
+    kosBatchedPolyResidual 7 [0#128, 0#128] 1#128 (towerZero 7) (towerOne 7) = towerZero 7 ∧
+    kosBatchedPolyResidual 7 [0#128, 1#128] 1#128 (towerZero 7) (towerOne 7) ≠ towerZero 7 := by
+  have hz : unpackTower 7 0#128 = towerZero 7 := unpackTower_zero 7
+  have h1Ne0 : unpackTower 7 1#128 ≠ towerZero 7 := by
+    intro h0
+    have hp := congrArg (packTower 7) h0
+    rw [packTower_unpackTower, packTower_zero] at hp
+    revert hp; decide +kernel
+  refine ⟨?_, ?_⟩
+  · unfold kosBatchedPolyResidual
+    simp only [List.map_cons, List.map_nil, show (0#128 &&& 1#128) = 0#128 by decide +kernel,
+      hz, RoundPoly.evalCoeffs]
+    change towerAdd 7 (towerZero 7) (towerMul 7 (towerOne 7)
+      (towerAdd 7 (towerZero 7) (towerMul 7 (towerOne 7)
+        (towerAdd 7 (towerZero 7) (towerMul 7 (towerOne 7) (towerZero 7)))))) = towerZero 7
+    simp
+  · unfold kosBatchedPolyResidual
+    simp only [List.map_cons, List.map_nil,
+      show (0#128 &&& 1#128) = 0#128 by decide +kernel,
+      show (1#128 &&& 1#128) = 1#128 by decide +kernel,
+      hz, RoundPoly.evalCoeffs]
+    change towerAdd 7 (towerZero 7) (towerMul 7 (towerOne 7)
+      (towerAdd 7 (towerZero 7) (towerMul 7 (towerOne 7)
+        (towerAdd 7 (unpackTower 7 1#128) (towerMul 7 (towerOne 7) (towerZero 7)))))) ≠ towerZero 7
+    simp [h1Ne0]
+
+end ExtractorAndBatchedKos
+
+/-- **Silent-OT GGM Punctured-Tree Leaf Hiding (`ggm_punctured_tree_hiding`)**:
+    In Silent-OT PCG (`preprocessing.rs`), revealing all sibling GGM node seeds off the punctured
+    path leaves the unrevealed leaf key `kStar ∈ Fin cardSeeds` unqueried outside `Q` random-oracle
+    calls, bounding the distinguishing advantage between real punctured GGM expansion (`secretLeafFn`)
+    and uniform random leaf correlation (`baseGgm`) by `Q / cardSeeds` (`≤ 2Q / 2^256` at 256-bit seeds). -/
+theorem ggm_punctured_tree_hiding {TagDom Cod : Type}
+    (cardSeeds Q : Nat) (hPos : 0 < cardSeeds)
+    (baseGgm : Fin cardSeeds × TagDom → Cod)
+    (secretLeafFn : TagDom → Cod)
+    (A : OracleComp (Fin cardSeeds × TagDom) Cod Bool)
+    (hQb : QueryBounded Q A) :
+    let diff := natAbsDiff (keyedPrfRealAccept cardSeeds baseGgm secretLeafFn A)
+                           (keyedPrfIdealAccept cardSeeds baseGgm A)
+    diff ≤ Q ∧ ratLe (diff, cardSeeds) (2 * Q, cardSeeds) :=
+  hidingAdv_le cardSeeds Q hPos baseGgm secretLeafFn A hQb
+
+end Qsag
+end
