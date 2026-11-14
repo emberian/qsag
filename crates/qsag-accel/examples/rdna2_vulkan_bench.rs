@@ -38,16 +38,18 @@ fn main() {
         s
     }
 
-    let gpu_raw = match VulkanRdna2Backend::try_new() {
+    let gpu_raw = match VulkanRdna2Backend::try_new_audited() {
         Ok(b) => b,
         Err(err) => {
-            eprintln!("Discrete Vulkan SPIR-V GPU unavailable ({err}); exiting cleanly.");
-            return;
+            panic!("Discrete Vulkan SPIR-V GPU unavailable: {err}");
         }
     };
 
     let info = *gpu_raw.device_info();
-    println!("LDS limit: {} bytes; Wave32 required: {}", info.max_compute_shared_memory_size, info.wave32_required);
+    println!(
+        "LDS limit: {} bytes; Wave32 required: {}",
+        info.max_compute_shared_memory_size, info.wave32_required
+    );
     for (slot, stats) in info.pipelines.iter().enumerate() {
         println!("Pipeline {slot}: {stats:?}");
     }
@@ -168,16 +170,19 @@ fn main() {
     let tw = precompute_goldilocks_twiddles(ntt_n).unwrap();
     let ntt_init: Vec<u64> = (0..ntt_n).map(|_| splitmix64(&mut rng)).collect();
     let mut ntt_gpu = ntt_init.clone();
-    gpu.goldilocks_ntt_inplace(&mut ntt_gpu, &tw, false).unwrap();
+    gpu.goldilocks_ntt_inplace(&mut ntt_gpu, &tw, false)
+        .unwrap();
 
     ntt_gpu.copy_from_slice(&ntt_init);
     let t0 = Instant::now();
-    gpu.goldilocks_ntt_inplace(&mut ntt_gpu, &tw, false).unwrap();
+    gpu.goldilocks_ntt_inplace(&mut ntt_gpu, &tw, false)
+        .unwrap();
     let dt_ntt_gpu = t0.elapsed().as_secs_f64();
 
     let mut ntt_cpu = ntt_init;
     let t0 = Instant::now();
-    cpu.goldilocks_ntt_inplace(&mut ntt_cpu, &tw, false).unwrap();
+    cpu.goldilocks_ntt_inplace(&mut ntt_cpu, &tw, false)
+        .unwrap();
     let dt_ntt_cpu = t0.elapsed().as_secs_f64();
     assert_eq!(ntt_gpu, ntt_cpu);
     println!(
@@ -197,15 +202,18 @@ fn main() {
         .map(|_| [splitmix64(&mut rng), splitmix64(&mut rng)])
         .collect();
     let mut lde_gpu = vec![[0u64; 2]; lde_m];
-    gpu.coset_lde_ext2(&lde_in, blowup, 7, &mut lde_gpu).unwrap();
+    gpu.coset_lde_ext2(&lde_in, blowup, 7, &mut lde_gpu)
+        .unwrap();
 
     let t0 = Instant::now();
-    gpu.coset_lde_ext2(&lde_in, blowup, 7, &mut lde_gpu).unwrap();
+    gpu.coset_lde_ext2(&lde_in, blowup, 7, &mut lde_gpu)
+        .unwrap();
     let dt_lde_gpu = t0.elapsed().as_secs_f64();
 
     let mut lde_cpu = vec![[0u64; 2]; lde_m];
     let t0 = Instant::now();
-    cpu.coset_lde_ext2(&lde_in, blowup, 7, &mut lde_cpu).unwrap();
+    cpu.coset_lde_ext2(&lde_in, blowup, 7, &mut lde_cpu)
+        .unwrap();
     let dt_lde_cpu = t0.elapsed().as_secs_f64();
     assert_eq!(lde_gpu, lde_cpu);
     println!(

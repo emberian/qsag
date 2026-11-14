@@ -6,9 +6,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use qsag_accel::goldilocks::{
-    GOLDILOCKS_PRIME, gl_reduce_u64, precompute_goldilocks_twiddles,
-};
+use qsag_accel::goldilocks::{GOLDILOCKS_PRIME, gl_reduce_u64, precompute_goldilocks_twiddles};
 use qsag_accel::spirv_kernels::{shader_source_filename, spirv_kernel_bytes};
 use qsag_accel::vulkan::{
     batch_keccak_f1600_with_receipt, batch_poseidon2_perm12_with_receipt,
@@ -86,6 +84,10 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
             | VulkanError::LibraryLoadFailed
             | VulkanError::NoDiscreteGpuFound,
         ) => {
+            assert!(
+                std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_none(),
+                "required hardware unavailable"
+            );
             return;
         }
         Err(other) => panic!("unexpected Vulkan initialization error: {other}"),
@@ -94,7 +96,10 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
     // 1. Hardware metadata & discrete GPU checks.
     let info = gpu.device_info();
     assert!(!gpu.device_name().is_empty());
-    assert_eq!(info.device_type, 2, "expected VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU");
+    assert_eq!(
+        info.device_type, 2,
+        "expected VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU"
+    );
     assert!(gpu.vendor_id() != 0);
     assert!(gpu.driver_version() != 0);
     assert_eq!(gpu.target_arch(), KernelTargetArch::SpirV16);
@@ -105,6 +110,22 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
         info.device_id,
         gpu.driver_version()
     );
+
+    for (slot, stats) in KernelSlot::ALL.iter().zip(info.pipelines.iter()) {
+        println!("{slot:?}: {stats:?}");
+        if info.wave32_required && stats.subgroup_size.is_some() {
+            assert_eq!(stats.subgroup_size, Some(32));
+        }
+        if stats.scratch_bytes.is_some() {
+            assert_eq!(stats.scratch_bytes, Some(0));
+        }
+        // CI opt-in prevents an unavailable driver/statistic from becoming a green skip.
+        if std::env::var_os("QSAG_REQUIRE_GPU_AUDIT").is_some() {
+            assert!(info.wave32_required);
+            assert_eq!(stats.subgroup_size, Some(32));
+            assert_eq!(stats.scratch_bytes, Some(0));
+        }
+    }
 
     // 2. Registry pinning & negative loader-measurement checks.
     let mut registry = VerifiedKernelDigestRegistry::<4>::with_cpu_reference_pins();
@@ -198,8 +219,14 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
     assert_eq!(keccak_gpu, keccak_cpu, "BatchKeccakF1600 GPU != CPU");
     assert_eq!(r_keccak_gpu.input_digest, r_keccak_cpu.input_digest);
     assert_eq!(r_keccak_gpu.output_digest, r_keccak_cpu.output_digest);
-    assert_eq!(registry.verify_keyed_receipt(&r_keccak_gpu, &gpu_key), Ok(()));
-    assert_eq!(registry.verify_keyed_receipt(&r_keccak_cpu, &cpu_key), Ok(()));
+    assert_eq!(
+        registry.verify_keyed_receipt(&r_keccak_gpu, &gpu_key),
+        Ok(())
+    );
+    assert_eq!(
+        registry.verify_keyed_receipt(&r_keccak_cpu, &cpu_key),
+        Ok(())
+    );
 
     // -------------------------------------------------------------------------
     // Kernel 2: BatchPoseidon2Perm12 (`65,536` states incl. non-canonical >= p)
@@ -220,9 +247,13 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
     let subs1 = certified_gpu.inner().gpu_submission_count();
     let r_p2_gpu =
         batch_poseidon2_perm12_with_receipt(&certified_gpu, &gpu_key, &mut p2_gpu, anchor).unwrap();
-    let r_p2_cpu = batch_poseidon2_perm12_with_receipt(&cpu, &cpu_key, &mut p2_cpu, anchor).unwrap();
+    let r_p2_cpu =
+        batch_poseidon2_perm12_with_receipt(&cpu, &cpu_key, &mut p2_cpu, anchor).unwrap();
     assert_eq!(certified_gpu.inner().gpu_submission_count(), subs1 + 1);
-    assert_eq!(p2_gpu, p2_cpu, "BatchPoseidon2Perm12 (65,536 states) GPU != CPU");
+    assert_eq!(
+        p2_gpu, p2_cpu,
+        "BatchPoseidon2Perm12 (65,536 states) GPU != CPU"
+    );
     assert_eq!(r_p2_gpu.output_digest, r_p2_cpu.output_digest);
     assert_eq!(registry.verify_keyed_receipt(&r_p2_gpu, &gpu_key), Ok(()));
 
@@ -244,38 +275,39 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
         let mut cpu_buf = orig.clone();
 
         let subs_before = certified_gpu.inner().gpu_submission_count();
-        let r_ntt_gpu = goldilocks_ntt_with_receipt(
-            &certified_gpu,
-            &gpu_key,
-            &mut gpu_buf,
-            &tw,
-            false,
-            anchor,
-        )
-        .unwrap();
+        let r_ntt_gpu =
+            goldilocks_ntt_with_receipt(&certified_gpu, &gpu_key, &mut gpu_buf, &tw, false, anchor)
+                .unwrap();
         let r_ntt_cpu =
             goldilocks_ntt_with_receipt(&cpu, &cpu_key, &mut cpu_buf, &tw, false, anchor).unwrap();
-        assert_eq!(certified_gpu.inner().gpu_submission_count(), subs_before + 1);
-        assert_eq!(gpu_buf, cpu_buf, "Forward GoldilocksNtt mismatch at N = 2^{log2_n}");
+        assert_eq!(
+            certified_gpu.inner().gpu_submission_count(),
+            subs_before + 1
+        );
+        assert_eq!(
+            gpu_buf, cpu_buf,
+            "Forward GoldilocksNtt mismatch at N = 2^{log2_n}"
+        );
         assert_eq!(r_ntt_gpu.output_digest, r_ntt_cpu.output_digest);
         assert_eq!(registry.verify_keyed_receipt(&r_ntt_gpu, &gpu_key), Ok(()));
 
-        let r_intt_gpu = goldilocks_ntt_with_receipt(
-            &certified_gpu,
-            &gpu_key,
-            &mut gpu_buf,
-            &tw,
-            true,
-            anchor,
-        )
-        .unwrap();
+        let r_intt_gpu =
+            goldilocks_ntt_with_receipt(&certified_gpu, &gpu_key, &mut gpu_buf, &tw, true, anchor)
+                .unwrap();
         let r_intt_cpu =
             goldilocks_ntt_with_receipt(&cpu, &cpu_key, &mut cpu_buf, &tw, true, anchor).unwrap();
-        assert_eq!(gpu_buf, cpu_buf, "Inverse GoldilocksNtt mismatch at N = 2^{log2_n}");
+        assert_eq!(
+            gpu_buf, cpu_buf,
+            "Inverse GoldilocksNtt mismatch at N = 2^{log2_n}"
+        );
         assert_eq!(r_intt_gpu.output_digest, r_intt_cpu.output_digest);
         assert_eq!(registry.verify_keyed_receipt(&r_intt_gpu, &gpu_key), Ok(()));
         for (idx, (&got, &raw)) in gpu_buf.iter().zip(&orig).enumerate() {
-            assert_eq!(got, gl_reduce_u64(raw), "NTT roundtrip mismatch at N=2^{log2_n} idx={idx}");
+            assert_eq!(
+                got,
+                gl_reduce_u64(raw),
+                "NTT roundtrip mismatch at N=2^{log2_n} idx={idx}"
+            );
         }
     }
 
@@ -302,10 +334,20 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
             &mut gpu_out,
         )
         .unwrap();
-        let r_lde_cpu =
-            coset_lde_ext2_with_receipt(&cpu, &cpu_key, &evals, blowup, shift, anchor, &mut cpu_out)
-                .unwrap();
-        assert_eq!(certified_gpu.inner().gpu_submission_count(), subs_before + 1);
+        let r_lde_cpu = coset_lde_ext2_with_receipt(
+            &cpu,
+            &cpu_key,
+            &evals,
+            blowup,
+            shift,
+            anchor,
+            &mut cpu_out,
+        )
+        .unwrap();
+        assert_eq!(
+            certified_gpu.inner().gpu_submission_count(),
+            subs_before + 1
+        );
         assert_eq!(
             gpu_out, cpu_out,
             "CosetLdeExt2 mismatch at N=2^{log2_n}, blowup={blowup}"
@@ -351,7 +393,10 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
     .unwrap();
     assert_eq!(gpu_parents, cpu_parents, "MerkleLayerPoseidon2 GPU != CPU");
     assert_eq!(r_merkle_gpu.output_digest, r_merkle_cpu.output_digest);
-    assert_eq!(registry.verify_keyed_receipt(&r_merkle_gpu, &gpu_key), Ok(()));
+    assert_eq!(
+        registry.verify_keyed_receipt(&r_merkle_gpu, &gpu_key),
+        Ok(())
+    );
     assert!(spot_check_merkle_layer(
         &children,
         &pk_seed,
@@ -370,7 +415,10 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
         .unwrap();
     cpu.try_merkle_layer_poseidon2_at(&children[..514], &pk_seed, 13, 0x9988_7766, &mut cpu_at)
         .unwrap();
-    assert_eq!(gpu_at, cpu_at, "MerkleLayerPoseidon2 (`start_parent_idx != 0`) GPU != CPU");
+    assert_eq!(
+        gpu_at, cpu_at,
+        "MerkleLayerPoseidon2 (`start_parent_idx != 0`) GPU != CPU"
+    );
 
     // Full 14-layer (`16,384` leaves) VRAM-resident tree vs CPU layer-by-layer reference.
     let tree_leaves = &children[..16_384];
@@ -387,7 +435,10 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
         cur_layer = next;
         lvl += 1;
     }
-    assert_eq!(gpu_root, cur_layer[0], "VRAM-resident Merkle tree root GPU != CPU");
+    assert_eq!(
+        gpu_root, cur_layer[0],
+        "VRAM-resident Merkle tree root GPU != CPU"
+    );
 
     // -------------------------------------------------------------------------
     // Kernel 6: BdozGf2128BatchDot (`65,536` 2-lane GF(2^128) elements)
@@ -422,7 +473,10 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
         .unwrap();
         let (cpu_dot, r_bdoz_cpu) =
             bdoz_gf2_128_batch_dot_with_receipt(&cpu, &cpu_key, &shares, &weights, anchor).unwrap();
-        assert_eq!(gpu_dot, cpu_dot, "BdozGf2128BatchDot mismatch at count={count}");
+        assert_eq!(
+            gpu_dot, cpu_dot,
+            "BdozGf2128BatchDot mismatch at count={count}"
+        );
         assert_eq!(r_bdoz_gpu.output_digest, r_bdoz_cpu.output_digest);
         assert_eq!(registry.verify_keyed_receipt(&r_bdoz_gpu, &gpu_key), Ok(()));
     }
@@ -448,10 +502,19 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
             .unwrap();
     assert_eq!(g_buf_a, [1, omega, GOLDILOCKS_PRIME - 1, omega_inv]);
     assert_eq!(g_buf_b, [1, omega_inv, GOLDILOCKS_PRIME - 1, omega]);
-    assert_eq!(r_ntt_a.input_digest, goldilocks_ntt_input_digest(&orig4, &tw_a));
-    assert_eq!(r_ntt_b.input_digest, goldilocks_ntt_input_digest(&orig4, &tw_b));
+    assert_eq!(
+        r_ntt_a.input_digest,
+        goldilocks_ntt_input_digest(&orig4, &tw_a)
+    );
+    assert_eq!(
+        r_ntt_b.input_digest,
+        goldilocks_ntt_input_digest(&orig4, &tw_b)
+    );
     assert_ne!(r_ntt_a.input_digest, r_ntt_b.input_digest);
-    assert_eq!(r_ntt_a.output_digest, goldilocks_ntt_output_digest(&g_buf_a));
+    assert_eq!(
+        r_ntt_a.output_digest,
+        goldilocks_ntt_output_digest(&g_buf_a)
+    );
 
     let pair_children = [[11u64, 22, 33, 44], [55u64, 66, 77, 88]];
     let mut g_parent = [[0u64; 4]; 1];
@@ -473,21 +536,39 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
         );
     }
     certified_gpu
-        .try_merkle_layer_poseidon2_at(
-            &pair_children,
-            &pk_seed,
-            0,
-            u32::MAX as u64,
-            &mut g_parent,
-        )
+        .try_merkle_layer_poseidon2_at(&pair_children, &pk_seed, 0, u32::MAX as u64, &mut g_parent)
         .unwrap();
-    cpu.try_merkle_layer_poseidon2_at(
-        &pair_children,
-        &pk_seed,
-        0,
-        u32::MAX as u64,
-        &mut c_parent,
-    )
-    .unwrap();
+    cpu.try_merkle_layer_poseidon2_at(&pair_children, &pk_seed, 0, u32::MAX as u64, &mut c_parent)
+        .unwrap();
     assert_eq!(g_parent, c_parent);
+}
+
+// Exhaustively enumerate every scalar LDS access of every Wave32 butterfly stage.
+// Plane bases are multiples of 32 words. This tests a bank model, not driver ISA.
+#[test]
+fn butterfly_lds_bank_model() {
+    let physical = |i: usize| i ^ (((i >> 5) & 1) * 31);
+    let mut addresses: Vec<_> = (0..512).map(physical).collect();
+    addresses.sort_unstable();
+    assert_eq!(addresses, (0..512).collect::<Vec<_>>());
+    for stage in 1..=9 {
+        let half = 1 << (stage - 1);
+        for wave in 0..8 {
+            for side in 0..2 {
+                let mut banks = 0u32;
+                for lane in 0..32 {
+                    let lid = wave * 32 + lane;
+                    let index = ((lid >> (stage - 1)) << stage) + (lid & (half - 1)) + side * half;
+                    let bank = physical(index) % 32;
+                    assert_eq!(
+                        banks & (1 << bank),
+                        0,
+                        "stage={stage}, wave={wave}, side={side}"
+                    );
+                    banks |= 1 << bank;
+                }
+                assert_eq!(banks, u32::MAX);
+            }
+        }
+    }
 }
