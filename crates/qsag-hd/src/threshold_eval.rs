@@ -44,6 +44,7 @@ struct EvalState<'a> {
     expected_value: Option<u32>,
     opened_value: Option<u32>,
     complete: bool,
+    disclosure_started: core::cell::Cell<bool>,
 }
 impl Drop for EvalState<'_> {
     fn drop(&mut self) {
@@ -226,6 +227,7 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
     ) -> Result<Self, HdError> {
         let entropy = RedactedSecret::new(private_entropy);
         ct_zeroize_bytes(&mut private_entropy);
+        share.require_poison_journal()?;
         let (threshold, own_x) = match share.scheme {
             ShareScheme::Shamir {
                 threshold,
@@ -310,6 +312,7 @@ impl<'a> HdThresholdEvalRound1Commit<'a> {
             expected_value,
             opened_value: None,
             complete: false,
+            disclosure_started: core::cell::Cell::new(false),
         }))
     }
     pub fn commitment(&self) -> HdEvalCommitment {
@@ -433,6 +436,13 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
         {
             return Err(HdError::MacCheckFailed);
         }
+        if !self.0.disclosure_started.get() {
+            #[cfg(feature = "std")]
+            if let Some(journal) = &self.0.share.poison_journal {
+                journal.begin_disclosure(self.0.session).map_err(|_| HdError::MacCheckFailed)?;
+            }
+            self.0.disclosure_started.set(true);
+        }
         Ok(HdEvalMacOpening {
             party_id: self.0.share.party_id,
             tags: self.0.tags,
@@ -472,6 +482,10 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
             return Err(HdError::MacCheckFailed);
         }
         let value = self.0.opened_value.ok_or(HdError::MacCheckFailed)?;
+        #[cfg(feature = "std")]
+        if self.0.disclosure_started.get() && let Some(journal) = &self.0.share.poison_journal {
+            journal.complete_disclosure(self.0.session).map_err(|_| HdError::MacCheckFailed)?;
+        }
         self.0.complete = true;
         Ok(value)
     }
@@ -640,6 +654,35 @@ pub(crate) fn trusted_dealer_opening_masks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn production_share_requires_poison_journal() {
+        let (_, mut shares) = setup_shamir_linear_module([4; 32], 2, &[1, 2, 3], 4).unwrap();
+        shares[0].testing_poison_journal = false;
+        assert_eq!(shares[0].require_poison_journal(), Err(HdError::MacCheckFailed));
+    }
+    #[cfg(feature = "std")]
+    #[test]
+    fn mac_disclosing_abort_quarantines_recovered_family() {
+        use crate::poison::{FsHdPoisonJournal, HdPoisonJournal};
+        let dir = std::env::temp_dir().join(alloc::format!("hd-eval-journal-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&dir).unwrap();
+        let (pk, mut shares) = setup_shamir_linear_module([4; 32], 2, &[1, 2, 3], 4).unwrap();
+        let family = shares[0].family_id();
+        for (i, share) in shares.iter_mut().enumerate() {
+            share.testing_poison_journal = false;
+            share.attach_poison_journal(Arc::new(FsHdPoisonJournal::create_new(dir.join(alloc::format!("{i}")), family, [9; 32]).unwrap())).unwrap();
+        }
+        assert!(verify_all(states(&mut shares, &pk, false)).is_ok());
+        let rounds = states(&mut shares, &pk, false);
+        for round in &rounds { round.mac_opening().unwrap(); }
+        drop(rounds);
+        drop(shares);
+        for i in 0..3 {
+            let journal = FsHdPoisonJournal::open_existing(dir.join(alloc::format!("{i}")), family, [9; 32]).unwrap();
+            assert!(journal.is_poisoned().unwrap());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     fn form() -> [RingPoly; MODULE_SECRET_L] {
         core::array::from_fn(|j| RingPoly {
             coeffs: core::array::from_fn(|i| ((j * 256 + i + 1) % 37) as u32),
