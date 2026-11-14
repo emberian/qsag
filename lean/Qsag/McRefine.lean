@@ -11,6 +11,7 @@ public import Qsag.ElfBinaryVerify
 import all Qsag.ElfBinaryVerify
 import all Qsag.ElfParse
 import Qsag.Constructive
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -3032,5 +3033,657 @@ theorem current_arm_ushr64_semantics (s : Arm64State) :
 theorem current_pcmap_high_address :
     (PcMap.empty.set 4260 (1 : Nat)).get 4260 = some 1 ∧
     (PcMap.empty.set 8192 (1 : Nat)).get 8192 = none := by decide +kernel
+
+
+/-- Schoolbook polynomial multiplication over F₂.  Each set bit of `b` contributes
+`a * z^k`; XOR is coefficient addition.  The output width is the width of `a`,
+so callers use a zero extension when they require an untruncated product. -/
+def gf128PolyMulAux {w v : Nat} (a : BitVec w) (b : BitVec v) : Nat → BitVec w
+  | 0 => 0
+  | k + 1 => gf128PolyMulAux a b k ^^^ (if b.getLsbD k then a <<< k else 0)
+
+def gf128PolyMul {w v : Nat} (a : BitVec w) (b : BitVec v) : BitVec w :=
+  gf128PolyMulAux a b v
+
+private theorem gf128XorLeftComm {w : Nat} (a b c : BitVec w) :
+    a ^^^ (b ^^^ c) = b ^^^ (a ^^^ c) := by
+  rw [← BitVec.xor_assoc, BitVec.xor_comm a b, BitVec.xor_assoc]
+
+private theorem gf128XorCancel {w : Nat} (a b : BitVec w) :
+    a ^^^ (a ^^^ b) = b := by
+  rw [← BitVec.xor_assoc, BitVec.xor_self, BitVec.zero_xor]
+
+private theorem gf128XorShuffle {w : Nat} (a b c d : BitVec w) :
+    (a ^^^ b) ^^^ (c ^^^ d) = (a ^^^ c) ^^^ (b ^^^ d) := by
+  simp only [BitVec.xor_assoc]
+  rw [← BitVec.xor_assoc b c d, BitVec.xor_comm b c, BitVec.xor_assoc]
+
+theorem gf128PolyMulAux_xor_left {w v : Nat} (a a' : BitVec w) (b : BitVec v)
+    (n : Nat) :
+    gf128PolyMulAux (a ^^^ a') b n =
+      gf128PolyMulAux a b n ^^^ gf128PolyMulAux a' b n := by
+  induction n with
+  | zero => simp [gf128PolyMulAux]
+  | succ n ih =>
+    simp only [gf128PolyMulAux, ih, BitVec.shiftLeft_xor_distrib]
+    cases h : b.getLsbD n <;> simp [gf128XorShuffle]
+
+theorem gf128PolyMulAux_xor_right {w v : Nat} (a : BitVec w) (b b' : BitVec v)
+    (n : Nat) :
+    gf128PolyMulAux a (b ^^^ b') n =
+      gf128PolyMulAux a b n ^^^ gf128PolyMulAux a b' n := by
+  induction n with
+  | zero => simp [gf128PolyMulAux]
+  | succ n ih =>
+    simp only [gf128PolyMulAux, ih, BitVec.getLsbD_xor]
+    cases h : b.getLsbD n <;> cases h' : b'.getLsbD n <;>
+      simp [BitVec.xor_assoc, BitVec.xor_comm, gf128XorLeftComm, gf128XorCancel]
+
+theorem gf128PolyMul_xor_left {w v : Nat} (a a' : BitVec w) (b : BitVec v) :
+    gf128PolyMul (a ^^^ a') b = gf128PolyMul a b ^^^ gf128PolyMul a' b :=
+  gf128PolyMulAux_xor_left a a' b v
+
+theorem gf128PolyMul_xor_right {w v : Nat} (a : BitVec w) (b b' : BitVec v) :
+    gf128PolyMul a (b ^^^ b') = gf128PolyMul a b ^^^ gf128PolyMul a b' :=
+  gf128PolyMulAux_xor_right a b b' v
+
+/-- The monic GCM modulus, including its leading z^128 term, in plain
+little-endian polynomial coefficient order. -/
+def gf128Modulus : BitVec 256 := 0x100000000000000000000000000000087
+
+/-- One polynomial long-division step cancels coefficient 128+k by adding
+z^k times the monic modulus.  No integer multiplication or subtraction occurs. -/
+def gf128ReduceStep (k : Nat) (p : BitVec 256) : BitVec 256 :=
+  if p.getLsbD (128 + k) then p ^^^ (gf128Modulus <<< k) else p
+
+/-- Descending schoolbook polynomial long division. -/
+def gf128ReduceAux : Nat → BitVec 256 → BitVec 256
+  | 0, p => p
+  | k + 1, p => gf128ReduceAux k (gf128ReduceStep k p)
+
+def gf128Reduce (p : BitVec 256) : BitVec 128 :=
+  (gf128ReduceAux 128 p).setWidth 128
+
+/-- Multiplication in F₂[z]/(z^128+z^7+z²+z+1). -/
+def gf128FieldMul (a b : BitVec 128) : BitVec 128 :=
+  gf128Reduce (gf128PolyMul (a.setWidth 256) b)
+
+theorem gf128ReduceStep_xor (k : Nat) (p q : BitVec 256) :
+    gf128ReduceStep k (p ^^^ q) = gf128ReduceStep k p ^^^ gf128ReduceStep k q := by
+  unfold gf128ReduceStep
+  simp only [BitVec.getLsbD_xor]
+  cases hp : p.getLsbD (128 + k) <;> cases hq : q.getLsbD (128 + k) <;>
+    simp [BitVec.xor_comm, gf128XorLeftComm]
+
+theorem gf128ReduceAux_xor (n : Nat) (p q : BitVec 256) :
+    gf128ReduceAux n (p ^^^ q) = gf128ReduceAux n p ^^^ gf128ReduceAux n q := by
+  induction n generalizing p q with
+  | zero => rfl
+  | succ n ih => simp only [gf128ReduceAux, gf128ReduceStep_xor, ih]
+
+theorem gf128Reduce_xor (p q : BitVec 256) :
+    gf128Reduce (p ^^^ q) = gf128Reduce p ^^^ gf128Reduce q := by
+  simp only [gf128Reduce, gf128ReduceAux_xor, BitVec.setWidth_xor]
+
+theorem gf128FieldMul_xor_left (a a' b : BitVec 128) :
+    gf128FieldMul (a ^^^ a') b = gf128FieldMul a b ^^^ gf128FieldMul a' b := by
+  simp only [gf128FieldMul, BitVec.setWidth_xor, gf128PolyMul_xor_left, gf128Reduce_xor]
+
+theorem gf128FieldMul_xor_right (a b b' : BitVec 128) :
+    gf128FieldMul a (b ^^^ b') = gf128FieldMul a b ^^^ gf128FieldMul a b' := by
+  simp only [gf128FieldMul, gf128PolyMul_xor_right, gf128Reduce_xor]
+
+/-- Interpret a low/high pair in plain little-endian coefficient order. -/
+def gf128Words (lo hi : UInt64) : BitVec 128 := hi.toBitVec ++ lo.toBitVec
+
+theorem gf128Words_xor (a b c d : UInt64) :
+    gf128Words (a ^^^ c) (b ^^^ d) = gf128Words a b ^^^ gf128Words c d := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hbound
+  simp only [gf128Words, BitVec.getLsbD_append, UInt64.toBitVec_xor, BitVec.getLsbD_xor]
+  split <;> rfl
+
+private theorem gf128ShiftAmount (i : Nat) (hi : i < 64) :
+    ((UInt64.ofNat i).toBitVec % (64 : BitVec 64)).toNat = i := by
+  simp [Nat.mod_eq_of_lt hi, Nat.mod_eq_of_lt (show i < 2^64 by omega)]
+
+private theorem gf128ClmulBit (b : UInt64) (i : Nat) (hi : i < 64) :
+    (((b >>> UInt64.ofNat i) &&& 1) != 0) = b.toBitVec.getLsbD i := by
+  have hm := gf128ShiftAmount i hi
+  have he : ((b >>> UInt64.ofNat i) &&& 1).toBitVec =
+      if b.toBitVec.getLsbD i then 1 else 0 := by
+    apply BitVec.eq_of_getLsbD_eq
+    intro j hbound
+    simp only [UInt64.toBitVec_and, UInt64.toBitVec_shiftRight, UInt64.toBitVec_one,
+      BitVec.ushiftRight_eq', hm, BitVec.getLsbD_and, BitVec.getLsbD_ushiftRight,
+      BitVec.getLsbD_one]
+    by_cases hj : j = 0
+    · subst j; cases b.toBitVec.getLsbD i <;> simp
+    · cases b.toBitVec.getLsbD i <;> simp [hj]
+  cases h : b.toBitVec.getLsbD i
+  · have hz : ((b >>> UInt64.ofNat i) &&& 1) = 0 :=
+      UInt64.eq_of_toBitVec_eq (by simpa [h] using he)
+    simp [hz]
+  · have hz : ((b >>> UInt64.ofNat i) &&& 1) = 1 :=
+      UInt64.eq_of_toBitVec_eq (by simpa [h] using he)
+    simp [hz]
+
+private theorem gf128ClmulShift (a : UInt64) (i : Nat) (hi : i < 64) :
+    gf128Words (if i == 0 then a else a <<< UInt64.ofNat i)
+      (if i > 0 then a >>> UInt64.ofNat (64-i) else 0) =
+      a.toBitVec.setWidth 128 <<< i := by
+  by_cases hz : i = 0
+  · subst i
+    apply BitVec.eq_of_getLsbD_eq
+    intro j hbound
+    simp only [gf128Words, BitVec.shiftLeft_zero,
+      BitVec.getLsbD_append, BitVec.getLsbD_setWidth, hbound, decide_true, Bool.true_and]
+    by_cases hj : j < 64
+    · simp [hj]
+    · simp [hj, show 64 ≤ j by omega]
+  · have hp : i > 0 := by omega
+    have hm := gf128ShiftAmount i hi
+    have hn := gf128ShiftAmount (64-i) (by omega)
+    apply BitVec.eq_of_getLsbD_eq
+    intro j hbound
+    simp only [gf128Words, beq_iff_eq, hz, ↓reduceIte, hp,
+      UInt64.toBitVec_shiftLeft, UInt64.toBitVec_shiftRight,
+      BitVec.shiftLeft_eq', BitVec.ushiftRight_eq', hm, hn,
+      BitVec.getLsbD_append, BitVec.getLsbD_shiftLeft, BitVec.getLsbD_ushiftRight,
+      BitVec.getLsbD_setWidth]
+    by_cases hj : j < 64
+    · simp [hj, show j < 128 by omega, show j-i < 128 by omega]
+    · have he : 64-i + (j - 64) = j-i := by omega
+      simp only [hj, ↓reduceIte, he]
+      simp [hbound, show ¬j < i by omega, show j-i < 128 by omega]
+
+/-- Ascending schoolbook sum over an interval of multiplier coefficients. -/
+def gf128PolyRange (a : BitVec 128) (b : BitVec 64) (start : Nat) : Nat → BitVec 128
+  | 0 => 0
+  | n+1 => (if b.getLsbD start then a <<< start else 0) ^^^
+      gf128PolyRange a b (start+1) n
+
+theorem gf128ClmulLoop_spec (n : Nat) (hn : n ≤ 64)
+    (a b lo hi : UInt64) :
+    gf128Words (clmul64Loop n a b lo hi).w0 (clmul64Loop n a b lo hi).w1 =
+      gf128Words lo hi ^^^ gf128PolyRange (a.toBitVec.setWidth 128) b.toBitVec (64-n) n := by
+  induction n generalizing lo hi with
+  | zero => simp [clmul64Loop, gf128PolyRange]
+  | succ n ih =>
+    have hn' : n ≤ 64 := by omega
+    have hi' : 63-n < 64 := by omega
+    have he : 64-(n+1) = 63-n := by omega
+    have hf : 64-n = 63-n+1 := by omega
+    simp only [clmul64Loop]
+    rw [ih hn', gf128Words_xor]
+    have ht : gf128Words
+        (if ((b >>> UInt64.ofNat (63-n)) &&& 1) != 0 then
+          (if 63-n == 0 then a else a <<< UInt64.ofNat (63-n)) else 0)
+        (if (((b >>> UInt64.ofNat (63-n)) &&& 1) != 0) && (63-n > 0) then
+          a >>> UInt64.ofNat (64-(63-n)) else 0) =
+        if b.toBitVec.getLsbD (63-n) then a.toBitVec.setWidth 128 <<< (63-n) else 0 := by
+      rw [gf128ClmulBit b _ hi']
+      cases h : b.toBitVec.getLsbD (63-n)
+      · simp [gf128Words]
+      · simpa using gf128ClmulShift a (63-n) hi'
+    rw [ht]
+    simp only [gf128PolyRange, he, hf, BitVec.xor_assoc]
+
+private theorem gf128PolyRange_succ (a : BitVec 128) (b : BitVec 64) (n start : Nat) :
+    gf128PolyRange a b start (n+1) = gf128PolyRange a b start n ^^^
+      (if b.getLsbD (start+n) then a <<< (start+n) else 0) := by
+  induction n generalizing start with
+  | zero => simp [gf128PolyRange]
+  | succ n ih =>
+    change _ ^^^ gf128PolyRange a b (start+1) (n+1) =
+      (_ ^^^ gf128PolyRange a b (start+1) n) ^^^ _
+    rw [ih]
+    simp only [Nat.add_assoc, Nat.add_comm 1 n, BitVec.xor_assoc]
+
+private theorem gf128PolyRange_eq_aux (a : BitVec 128) (b : BitVec 64) (n : Nat) :
+    gf128PolyRange a b 0 n = gf128PolyMulAux a b n := by
+  induction n with
+  | zero => rfl
+  | succ n ih => simp only [gf128PolyRange_succ, ih, gf128PolyMulAux, Nat.zero_add]
+
+/-- The machine primitive is exactly the 64-by-64 polynomial product over F₂,
+with coefficient i represented by bit i (no reflected GCM convention). -/
+theorem gf128_clmul64_polynomial (a b : UInt64) :
+    gf128Words (clmul64 a b).w0 (clmul64 a b).w1 =
+      gf128PolyMul (a.toBitVec.setWidth 128) b.toBitVec := by
+  have h := gf128ClmulLoop_spec 64 (by omega) a b 0 0
+  simpa [clmul64, gf128Words, gf128PolyRange_eq_aux, gf128PolyMul] using h
+
+/-- Coefficients of the monomial z^n. -/
+theorem gf128Basis_bit {w : Nat} (i n : Nat) (hi : i < w) :
+    ((1 : BitVec w) <<< n).getLsbD i = decide (i = n) := by
+  by_cases heq : i = n
+  · subst n
+    simp [hi]
+  · by_cases hlt : i < n
+    · simp [hi, hlt, heq]
+    · have hsub : i - n ≠ 0 := by omega
+      simp [hi, hlt, hsub, heq]
+
+theorem gf128PolyMulAux_one_bit {w : Nat} (p : BitVec w) (n i : Nat) (hi : i < w) :
+    (gf128PolyMulAux (1 : BitVec w) p n).getLsbD i =
+      (p.getLsbD i && decide (i < n)) := by
+  induction n with
+  | zero => simp [gf128PolyMulAux]
+  | succ n ih =>
+    simp only [gf128PolyMulAux, BitVec.getLsbD_xor, ih]
+    by_cases heq : i = n
+    · subst n
+      cases hp : p.getLsbD i
+      · simp
+      · simp only [ite_true]
+        rw [gf128Basis_bit i i hi]
+        simp
+    · have hlt : (i < n + 1) = (i < n) := propext ⟨fun h => by omega, fun h => by omega⟩
+      cases hp : p.getLsbD n
+      · simp [hlt]
+      · simp only [ite_true]
+        rw [gf128Basis_bit i n hi]
+        simp [heq, hlt]
+
+/-- Expansion into the coefficient basis, proved by induction on the number of
+coefficients rather than enumeration of the 2^w possible words. -/
+theorem gf128PolyMul_one {w : Nat} (p : BitVec w) :
+    gf128PolyMul (1 : BitVec w) p = p := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  change (gf128PolyMulAux (1 : BitVec w) p w).getLsbD i = _
+  rw [gf128PolyMulAux_one_bit p w i hi]
+  simp [hi]
+
+/-- Two XOR-linear maps agree if they agree on the w monomials. -/
+theorem gf128Linear_ext {w v : Nat} (f g : BitVec w → BitVec v)
+    (hf0 : f 0 = 0) (hg0 : g 0 = 0)
+    (hf : ∀ a b, f (a ^^^ b) = f a ^^^ f b)
+    (hg : ∀ a b, g (a ^^^ b) = g a ^^^ g b)
+    (hbasis : ∀ i, i < w → f ((1 : BitVec w) <<< i) = g ((1 : BitVec w) <<< i))
+    (p : BitVec w) : f p = g p := by
+  have haux : ∀ n, n ≤ w →
+      f (gf128PolyMulAux (1 : BitVec w) p n) =
+      g (gf128PolyMulAux (1 : BitVec w) p n) := by
+    intro n
+    induction n with
+    | zero => intro _; simp only [gf128PolyMulAux, hf0, hg0]
+    | succ n ih =>
+      intro hn
+      simp only [gf128PolyMulAux, hf, hg, ih (by omega)]
+      cases hp : p.getLsbD n
+      · exact congrArg (fun x : BitVec v => g (gf128PolyMulAux 1 p n) ^^^ x)
+          (hf0.trans hg0.symm)
+      · exact congrArg (fun x : BitVec v => g (gf128PolyMulAux 1 p n) ^^^ x)
+          (hbasis n (by omega))
+  have h := haux w (Nat.le_refl w)
+  change f (gf128PolyMul 1 p) = g (gf128PolyMul 1 p) at h
+  simpa only [gf128PolyMul_one] using h
+
+/-- Replace the upper polynomial half h*z^128 by h*(z^7+z²+z+1).
+This is a congruence modulo the monic GCM polynomial. -/
+def gf128Fold256 (p : BitVec 256) : BitVec 256 :=
+  (p.setWidth 128).setWidth 256 ^^^ gf128PolyMul (p >>> 128) (0x87 : BitVec 8)
+
+/-- Degree drops from at most 255 to at most 134 after the first fold, and
+below 128 after the second. -/
+def gf128TwoFold (p : BitVec 256) : BitVec 128 :=
+  (gf128Fold256 (gf128Fold256 p)).setWidth 128
+
+theorem gf128Fold256_xor (p q : BitVec 256) :
+    gf128Fold256 (p ^^^ q) = gf128Fold256 p ^^^ gf128Fold256 q := by
+  simp only [gf128Fold256, BitVec.setWidth_xor, BitVec.ushiftRight_xor_distrib,
+    gf128PolyMul_xor_left]
+  exact gf128XorShuffle _ _ _ _
+
+theorem gf128TwoFold_xor (p q : BitVec 256) :
+    gf128TwoFold (p ^^^ q) = gf128TwoFold p ^^^ gf128TwoFold q := by
+  simp only [gf128TwoFold, gf128Fold256_xor, BitVec.setWidth_xor]
+
+private theorem gf128Reduce_twoFold_basis :
+    ∀ i : Fin 256, gf128Reduce ((1 : BitVec 256) <<< i.val) =
+      gf128TwoFold ((1 : BitVec 256) <<< i.val) := by
+  decide +kernel
+
+/-- Polynomial long division equals the two-fold reduction by 0x87.
+The only finite check is the 256 monomials; arbitrary inputs follow from
+linearity and the coefficient expansion theorem. -/
+theorem gf128Reduce_eq_twoFold (p : BitVec 256) :
+    gf128Reduce p = gf128TwoFold p := by
+  apply gf128Linear_ext gf128Reduce gf128TwoFold
+  · decide +kernel
+  · decide +kernel
+  · exact gf128Reduce_xor
+  · exact gf128TwoFold_xor
+  · intro i hi
+    exact gf128Reduce_twoFold_basis ⟨i, hi⟩
+
+/-- The word-oriented 0x87 reduction used by the carry-less multiply kernels. -/
+def gf128WordReduce (lo0 lo1 hi0 hi1 : UInt64) : BitVec 128 :=
+  let r1 := clmul64 hi1 0x87
+  let r0 := clmul64 (hi0 ^^^ r1.w1) 0x87
+  gf128Words (lo0 ^^^ r0.w0) (lo1 ^^^ r1.w0 ^^^ r0.w1)
+
+private def gf128WordReducePoly (lo hi : BitVec 128) : BitVec 128 :=
+  let r1 := gf128PolyMul ((hi.extractLsb' 64 64).setWidth 128) (0x87 : BitVec 64)
+  let r0 := gf128PolyMul
+    (((hi.extractLsb' 0 64) ^^^ (r1.extractLsb' 64 64)).setWidth 128) (0x87 : BitVec 64)
+  lo ^^^ (r1 <<< 64) ^^^ r0
+
+private def gf128WordReduceMap (p : BitVec 256) : BitVec 128 :=
+  gf128WordReducePoly (p.extractLsb' 0 128) (p.extractLsb' 128 128)
+
+private theorem gf128WordReduceShuffle (a b c d e f g h : BitVec 128) :
+    ((a ^^^ b) ^^^ (c ^^^ d)) ^^^ ((e ^^^ f) ^^^ (g ^^^ h)) =
+      ((a ^^^ c) ^^^ (e ^^^ g)) ^^^ ((b ^^^ d) ^^^ (f ^^^ h)) := by
+  simp only [BitVec.xor_comm, gf128XorLeftComm]
+
+private theorem gf128WordReduceMap_xor (p q : BitVec 256) :
+    gf128WordReduceMap (p ^^^ q) = gf128WordReduceMap p ^^^ gf128WordReduceMap q := by
+  simp only [gf128WordReduceMap, gf128WordReducePoly, BitVec.extractLsb'_xor,
+    BitVec.setWidth_xor, gf128PolyMul_xor_left, BitVec.shiftLeft_xor_distrib]
+  exact gf128WordReduceShuffle _ _ _ _ _ _ _ _
+
+private theorem gf128WordReduceMap_basis :
+    ∀ i : Fin 256, gf128WordReduceMap ((1 : BitVec 256) <<< i.val) =
+      gf128Reduce ((1 : BitVec 256) <<< i.val) := by
+  decide +kernel
+
+private theorem gf128WordReduceMap_eq (p : BitVec 256) :
+    gf128WordReduceMap p = gf128Reduce p := by
+  apply gf128Linear_ext gf128WordReduceMap gf128Reduce
+  · decide +kernel
+  · decide +kernel
+  · exact gf128WordReduceMap_xor
+  · exact gf128Reduce_xor
+  · intro i hi
+    exact gf128WordReduceMap_basis ⟨i, hi⟩
+
+private theorem gf128Words_extract_lo (lo hi : UInt64) :
+    (gf128Words lo hi).extractLsb' 0 64 = lo.toBitVec :=
+  BitVec.extractLsb'_append_eq_right
+
+private theorem gf128Words_extract_hi (lo hi : UInt64) :
+    (gf128Words lo hi).extractLsb' 64 64 = hi.toBitVec :=
+  BitVec.extractLsb'_append_eq_left
+
+private theorem gf128Words_shift64_xor (a b c d e f : UInt64) :
+    gf128Words (a ^^^ e) (b ^^^ c ^^^ f) =
+      gf128Words a b ^^^ (gf128Words c d <<< 64) ^^^ gf128Words e f := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro i hi
+  simp only [gf128Words, UInt64.toBitVec_xor, BitVec.getLsbD_xor,
+    BitVec.getLsbD_append, BitVec.getLsbD_shiftLeft]
+  by_cases h : i < 64
+  · simp [h, hi]
+  · simp [h, hi, show i - 64 < 64 by omega]
+
+private theorem gf128WordReduce_eq_poly (lo0 lo1 hi0 hi1 : UInt64) :
+    gf128WordReduce lo0 lo1 hi0 hi1 =
+      gf128WordReducePoly (gf128Words lo0 lo1) (gf128Words hi0 hi1) := by
+  unfold gf128WordReducePoly
+  rw [gf128Words_extract_hi, gf128Words_extract_lo]
+  change _ = gf128Words lo0 lo1 ^^^
+    (gf128PolyMul (hi1.toBitVec.setWidth 128) (0x87 : UInt64).toBitVec <<< 64) ^^^
+    gf128PolyMul
+      ((hi0.toBitVec ^^^ (gf128PolyMul (hi1.toBitVec.setWidth 128)
+        (0x87 : UInt64).toBitVec).extractLsb' 64 64).setWidth 128) (0x87 : UInt64).toBitVec
+  rw [← gf128_clmul64_polynomial hi1 0x87, gf128Words_extract_hi,
+    ← UInt64.toBitVec_xor, ← gf128_clmul64_polynomial]
+  exact gf128Words_shift64_xor _ _ _ _ _ _
+
+/-- The machine word-level two-fold 0x87 reduction is exactly schoolbook
+polynomial long division by z^128+z^7+z²+z+1. -/
+theorem gf128WordReduce_eq_reduce (lo0 lo1 hi0 hi1 : UInt64) :
+    gf128WordReduce lo0 lo1 hi0 hi1 =
+      gf128Reduce (gf128Words hi0 hi1 ++ gf128Words lo0 lo1) := by
+  rw [gf128WordReduce_eq_poly]
+  have h := gf128WordReduceMap_eq (gf128Words hi0 hi1 ++ gf128Words lo0 lo1)
+  simpa only [gf128WordReduceMap, BitVec.extractLsb'_append_eq_left,
+    BitVec.extractLsb'_append_eq_right] using h
+
+/-- Multiplication commutes with multiplying the multiplicand by a monomial. -/
+theorem gf128PolyMulAux_shift_left {w v : Nat} (a : BitVec w) (b : BitVec v)
+    (s n : Nat) :
+    gf128PolyMulAux (a <<< s) b n = gf128PolyMulAux a b n <<< s := by
+  induction n with
+  | zero => simp [gf128PolyMulAux]
+  | succ n ih =>
+    simp only [gf128PolyMulAux, ih, BitVec.shiftLeft_xor_distrib]
+    cases hb : b.getLsbD n <;>
+      simp [← BitVec.shiftLeft_add, Nat.add_comm s n]
+
+theorem gf128PolyMul_shift_left {w v : Nat} (a : BitVec w) (b : BitVec v)
+    (s : Nat) :
+    gf128PolyMul (a <<< s) b = gf128PolyMul a b <<< s :=
+  gf128PolyMulAux_shift_left a b s v
+
+private theorem gf128PolyMulAux_append_low {w : Nat} (a : BitVec w)
+    (lo hi : BitVec 64) (n : Nat) (hn : n ≤ 64) :
+    gf128PolyMulAux a (hi ++ lo) n = gf128PolyMulAux a lo n := by
+  induction n with
+  | zero => rfl
+  | succ n ih =>
+    simp only [gf128PolyMulAux, ih (by omega), BitVec.getLsbD_append,
+      show n < 64 by omega, ↓reduceIte]
+
+private theorem gf128PolyMulAux_append_high {w : Nat} (a : BitVec w)
+    (lo hi : BitVec 64) (n : Nat) :
+    gf128PolyMulAux a (hi ++ lo) (64+n) =
+      gf128PolyMul a lo ^^^ (gf128PolyMulAux a hi n <<< 64) := by
+  induction n with
+  | zero =>
+    change gf128PolyMulAux a (hi ++ lo) 64 =
+      gf128PolyMulAux a lo 64 ^^^ ((0 : BitVec w) <<< (64 : Nat))
+    rw [gf128PolyMulAux_append_low a lo hi 64 (by omega)]
+    apply BitVec.eq_of_getLsbD_eq
+    intro j hj
+    simp only [BitVec.getLsbD_xor, BitVec.getLsbD_shiftLeft, BitVec.ofNat_eq_ofNat,
+      BitVec.getLsbD_zero, Bool.and_false, Bool.xor_false]
+  | succ n ih =>
+    rw [show 64+(n+1) = (64+n)+1 by omega, gf128PolyMulAux, ih]
+    simp only [gf128PolyMulAux, BitVec.getLsbD_append, show ¬64+n < 64 by omega,
+      ↓reduceIte, Nat.add_sub_cancel_left, BitVec.shiftLeft_xor_distrib]
+    cases hb : hi.getLsbD n <;>
+      simp [← BitVec.shiftLeft_add, Nat.add_comm 64 n, BitVec.xor_assoc]
+
+theorem gf128PolyMul_append_right {w : Nat} (a : BitVec w) (lo hi : BitVec 64) :
+    gf128PolyMul a (hi ++ lo) =
+      gf128PolyMul a lo ^^^ (gf128PolyMul a hi <<< 64) :=
+  gf128PolyMulAux_append_high a lo hi 64
+
+/-- Split the coefficient vector at z^64, with disjoint supports. -/
+theorem gf128Words_split (lo hi : UInt64) :
+    (gf128Words lo hi).setWidth 256 =
+      lo.toBitVec.setWidth 256 ^^^ (hi.toBitVec.setWidth 256 <<< 64) := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro j hj
+  simp only [gf128Words, BitVec.getLsbD_setWidth, BitVec.getLsbD_append,
+    BitVec.getLsbD_xor, BitVec.getLsbD_shiftLeft, hj, decide_true, Bool.true_and]
+  by_cases hlow : j < 64
+  · simp [hlow]
+  · simp [hlow, show 64 ≤ j by omega, show j-64 < 256 by omega]
+
+/-- Four schoolbook limb products, assembled at degrees 0,64,128. -/
+theorem gf128_four_product_polynomial (a0 a1 b0 b1 : UInt64) :
+    gf128PolyMul ((gf128Words a0 a1).setWidth 256) (gf128Words b0 b1) =
+      gf128PolyMul (a0.toBitVec.setWidth 256) b0.toBitVec ^^^
+      ((gf128PolyMul (a0.toBitVec.setWidth 256) b1.toBitVec ^^^
+        gf128PolyMul (a1.toBitVec.setWidth 256) b0.toBitVec) <<< 64) ^^^
+      (gf128PolyMul (a1.toBitVec.setWidth 256) b1.toBitVec <<< 128) := by
+  rw [gf128Words_split]
+  simp only [gf128Words, gf128PolyMul_append_right, gf128PolyMul_xor_left,
+    gf128PolyMul_shift_left, BitVec.shiftLeft_xor_distrib, ← BitVec.shiftLeft_add]
+  simp only [BitVec.xor_assoc]
+  rw [gf128XorLeftComm
+    (gf128PolyMul (a1.toBitVec.setWidth 256) b0.toBitVec <<< 64)
+    (gf128PolyMul (a0.toBitVec.setWidth 256) b1.toBitVec <<< 64)]
+
+private theorem gf128LimbShift_widen (a : BitVec 64) (n : Nat) (hn : n < 64) :
+    ((a.setWidth 128 <<< n).setWidth 256) = a.setWidth 256 <<< n := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro j hj
+  simp only [BitVec.getLsbD_setWidth, BitVec.getLsbD_shiftLeft, hj, decide_true, Bool.true_and]
+  by_cases hjn : j < n
+  · simp [hjn]
+  · by_cases h : j < 128
+    · simp [hjn, h, show j-n < 128 by omega, show j-n < 256 by omega]
+    · simp [hjn, h, show 64 ≤ j-n by omega]
+
+private theorem gf128PolyMulAux_widen64 (a b : BitVec 64) (n : Nat) (hn : n ≤ 64) :
+    (gf128PolyMulAux (a.setWidth 128) b n).setWidth 256 =
+      gf128PolyMulAux (a.setWidth 256) b n := by
+  induction n with
+  | zero => simp [gf128PolyMulAux]
+  | succ n ih =>
+    simp only [gf128PolyMulAux, BitVec.setWidth_xor, ih (by omega)]
+    cases hb : b.getLsbD n <;> simp [gf128LimbShift_widen a n (by omega)]
+
+/-- Widening the primitive's complete 128-bit output loses no coefficients. -/
+theorem gf128_clmul64_widen (a b : UInt64) :
+    (gf128Words (clmul64 a b).w0 (clmul64 a b).w1).setWidth 256 =
+      gf128PolyMul (a.toBitVec.setWidth 256) b.toBitVec := by
+  rw [gf128_clmul64_polynomial]
+  exact gf128PolyMulAux_widen64 a.toBitVec b.toBitVec 64 (by omega)
+
+/-- Four machine carry-less products recombine into the complete 128-by-128
+polynomial product. No quotient/reduction is hidden in this statement. -/
+theorem gf128_clmul_four_product (a0 a1 b0 b1 : UInt64) :
+    (gf128Words (clmul64 a0 b0).w0 (clmul64 a0 b0).w1).setWidth 256 ^^^
+    (((gf128Words (clmul64 a0 b1).w0 (clmul64 a0 b1).w1).setWidth 256 ^^^
+      (gf128Words (clmul64 a1 b0).w0 (clmul64 a1 b0).w1).setWidth 256) <<< 64) ^^^
+    ((gf128Words (clmul64 a1 b1).w0 (clmul64 a1 b1).w1).setWidth 256 <<< 128) =
+      gf128PolyMul ((gf128Words a0 a1).setWidth 256) (gf128Words b0 b1) := by
+  simp only [gf128_clmul64_widen]
+  exact (gf128_four_product_polynomial a0 a1 b0 b1).symm
+
+/-- Karatsuba's third multiplication recovers the two cross terms. -/
+theorem gf128_clmul_karatsuba_cross (a0 a1 b0 b1 : UInt64) :
+    gf128Words (clmul64 (a0 ^^^ a1) (b0 ^^^ b1)).w0
+      (clmul64 (a0 ^^^ a1) (b0 ^^^ b1)).w1 ^^^
+      gf128Words (clmul64 a0 b0).w0 (clmul64 a0 b0).w1 ^^^
+      gf128Words (clmul64 a1 b1).w0 (clmul64 a1 b1).w1 =
+    gf128Words (clmul64 a0 b1).w0 (clmul64 a0 b1).w1 ^^^
+      gf128Words (clmul64 a1 b0).w0 (clmul64 a1 b0).w1 := by
+  simp only [gf128_clmul64_polynomial, UInt64.toBitVec_xor, BitVec.setWidth_xor,
+    gf128PolyMul_xor_left, gf128PolyMul_xor_right]
+  simp [BitVec.xor_assoc, BitVec.xor_comm, gf128XorLeftComm, gf128XorCancel]
+
+private theorem gf128FourWords_shift (p00 p01 p10 p11 : Vec128) :
+    gf128Words (p11.w0 ^^^ p01.w1 ^^^ p10.w1) p11.w1 ++
+      gf128Words p00.w0 (p00.w1 ^^^ p01.w0 ^^^ p10.w0) =
+    (gf128Words p00.w0 p00.w1).setWidth 256 ^^^
+      (((gf128Words p01.w0 p01.w1).setWidth 256 ^^^
+        (gf128Words p10.w0 p10.w1).setWidth 256) <<< 64) ^^^
+      ((gf128Words p11.w0 p11.w1).setWidth 256 <<< 128) := by
+  apply BitVec.eq_of_getLsbD_eq
+  intro j hj
+  simp only [gf128Words, BitVec.getLsbD_append, UInt64.toBitVec_xor,
+    BitVec.getLsbD_setWidth, BitVec.getLsbD_shiftLeft, BitVec.getLsbD_xor,
+    hj, decide_true, Bool.true_and]
+  by_cases h0 : j < 64
+  · simp [h0, show j < 128 by omega]
+  · by_cases h1 : j < 128
+    · simp [h0, h1, show j-64 < 64 by omega, show j-64 < 256 by omega]
+    · by_cases h2 : j < 192
+      · have he : j-64-64 = j-128 := by omega
+        simp [h0, h1, he, show j-128 < 64 by omega,
+          show j-64 < 256 by omega, show j-128 < 256 by omega,
+          show 64 ≤ j-64 by omega, show ¬j-64 < 64 by omega, Bool.xor_comm]
+      · have he : j-64-64 = j-128 := by omega
+        have hf : j-128-64 = j-192 := by omega
+        simp [h0, h1, he, hf, show 64 ≤ j-64 by omega, show 64 ≤ j-128 by omega,
+          show j-128 < 256 by omega, show ¬ j-128 < 64 by omega,
+          show ¬ j-64 < 64 by omega]
+
+/-- The exact four-limb recombination performed by the SIMD schoolbook kernels. -/
+theorem gf128_clmul_four_words (a0 a1 b0 b1 : UInt64) :
+    let p00 := clmul64 a0 b0
+    let p01 := clmul64 a0 b1
+    let p10 := clmul64 a1 b0
+    let p11 := clmul64 a1 b1
+    gf128Words (p11.w0 ^^^ p01.w1 ^^^ p10.w1) p11.w1 ++
+      gf128Words p00.w0 (p00.w1 ^^^ p01.w0 ^^^ p10.w0) =
+      gf128PolyMul ((gf128Words a0 a1).setWidth 256) (gf128Words b0 b1) := by
+  dsimp only
+  rw [gf128FourWords_shift]
+  exact gf128_clmul_four_product a0 a1 b0 b1
+
+/-- Equality of coefficient vectors determines both machine limbs. -/
+theorem gf128Words_inj {a0 a1 b0 b1 : UInt64}
+    (h : gf128Words a0 a1 = gf128Words b0 b1) : a0 = b0 ∧ a1 = b1 := by
+  constructor
+  · apply UInt64.eq_of_toBitVec_eq
+    have h0 := congrArg (fun x : BitVec 128 => x.extractLsb' 0 64) h
+    simpa only [gf128Words, BitVec.extractLsb'_append_eq_right] using h0
+  · apply UInt64.eq_of_toBitVec_eq
+    have h1 := congrArg (fun x : BitVec 128 => x.extractLsb' 64 64) h
+    simpa only [gf128Words, BitVec.extractLsb'_append_eq_left] using h1
+
+/-- Three-product Karatsuba recombination at the exact machine-word boundary. -/
+theorem gf128_clmul_karatsuba_words (a0 a1 b0 b1 : UInt64) :
+    let p00 := clmul64 a0 b0
+    let p11 := clmul64 a1 b1
+    let pm := clmul64 (a0 ^^^ a1) (b0 ^^^ b1)
+    let m0 := pm.w0 ^^^ p00.w0 ^^^ p11.w0
+    let m1 := pm.w1 ^^^ p00.w1 ^^^ p11.w1
+    gf128Words (p11.w0 ^^^ m1) p11.w1 ++ gf128Words p00.w0 (p00.w1 ^^^ m0) =
+      gf128PolyMul ((gf128Words a0 a1).setWidth 256) (gf128Words b0 b1) := by
+  have hc := gf128_clmul_karatsuba_cross a0 a1 b0 b1
+  rw [← gf128Words_xor, ← gf128Words_xor, ← gf128Words_xor] at hc
+  obtain ⟨h0, h1⟩ := gf128Words_inj hc
+  dsimp only
+  rw [h0, h1]
+  simpa only [UInt64.xor_assoc] using gf128_clmul_four_words a0 a1 b0 b1
+
+/-- Mutation tooth: a polynomial multiplier that drops coefficient zero is wrong. -/
+theorem gf128_clmul64_polynomial_tooth :
+    gf128Words (clmul64 1 1).w0 (clmul64 1 1).w1 ≠
+      gf128PolyRange ((1 : BitVec 64).setWidth 128) 1 1 63 := by
+  decide +kernel
+
+/-- The bounded primitive loop theorem has reachable, nonzero inputs. -/
+theorem gf128_clmul64_loop_inhabited :
+    ∃ n : Nat, ∃ a b lo hi : UInt64, n ≤ 64 ∧
+      gf128Words (clmul64Loop n a b lo hi).w0 (clmul64Loop n a b lo hi).w1 = 1 := by
+  exact ⟨64, 1, 1, 0, 0, by decide, by decide +kernel⟩
+
+/-- Reject a wrong modulus with the z term removed. -/
+theorem gf128_reduce_modulus_tooth :
+    gf128Reduce ((1 : BitVec 256) <<< 128) ≠ 0x85 := by
+  decide +kernel
+
+#tooth_pair gf128_clmul64_polynomial vs gf128_clmul64_polynomial_tooth
+#tooth_pair gf128ClmulLoop_spec vs gf128_clmul64_polynomial_tooth
+#verify_inhabited gf128ClmulLoop_spec gf128_clmul64_loop_inhabited
+set_option maxRecDepth 4096 in
+#tooth_pair gf128Reduce_eq_twoFold vs gf128_reduce_modulus_tooth
+
+
+/-- Omitting the high-by-high term loses z^128. -/
+theorem gf128_four_product_high_tooth :
+    gf128PolyMul ((gf128Words 0 1).setWidth 256) (gf128Words 0 1) ≠
+      gf128PolyMul ((gf128Words 0 0).setWidth 256) (gf128Words 0 1) := by
+  decide +kernel
+
+theorem gf128_four_product_witness :
+    ∃ a0 a1 b0 b1 : UInt64,
+      gf128Words a0 a1 ≠ 0 ∧ gf128Words b0 b1 ≠ 0 ∧
+      gf128PolyMul ((gf128Words a0 a1).setWidth 256) (gf128Words b0 b1) =
+        (1 : BitVec 256) <<< 128 := by
+  exact ⟨0, 1, 0, 1, by decide +kernel⟩
+
+/-- Treating Karatsuba's third product itself as the cross term is wrong. -/
+theorem gf128_karatsuba_cross_tooth :
+    gf128Words (clmul64 1 1).w0 (clmul64 1 1).w1 ≠
+      gf128Words (clmul64 1 0).w0 (clmul64 1 0).w1 ^^^
+        gf128Words (clmul64 0 1).w0 (clmul64 0 1).w1 := by
+  decide +kernel
+
+set_option maxRecDepth 4096 in
+#tooth_pair gf128_clmul_four_words vs gf128_four_product_high_tooth
+set_option maxRecDepth 4096 in
+#tooth_pair gf128_clmul_karatsuba_words vs gf128_karatsuba_cross_tooth
 
 end Qsag
