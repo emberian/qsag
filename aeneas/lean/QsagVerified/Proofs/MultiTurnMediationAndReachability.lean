@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.Common
 public import QsagVerified.Proofs.MirRefinementKit
@@ -40,12 +41,8 @@ relations whose every step is a call of the extracted function itself.
   `tooth_belt_ack_without_signer_dedup_forges_quorum` are the witness and the
   mutation counterexample.
 
-One statement in the usual wording of this property is false for the extracted code and
-is not claimed: certificate epochs are not strictly increasing. `authorize_shares` has
-no phase test, so a second authorization request for the bound epoch returns a second
-grant for the same epoch and message (possibly with more signers). What holds, and what
-`belt_trace_certs_monotone` states, is that a later certificate has a strictly larger
-epoch or the same epoch and the same message.
+Authorization consumes the bound epoch's grant state. Repeated requests are refused;
+the existing monotonicity theorem remains valid for this stricter transition.
 -/
 
 namespace qsag_verified.proofs
@@ -1034,12 +1031,16 @@ theorem belt_mealy_authorize_inv
       · by_cases ht : s.bound_msg_tag = reqTag
         · by_cases hq : s.ack_count.val < s.q.val
           · simp [hb, he, ht, hq] at h2
-          · have hf : beltQuorumMealy.step s (.AuthorizeShares reqEp reqTag) =
+          · have hphase : s.phase ≠ .SharesAuthorized := by
+              intro hp
+              simp [hb, he, ht, hq, hp] at h2
+            have hf : beltQuorumMealy.step s (.AuthorizeShares reqEp reqTag) =
                 some ({ s with phase := .SharesAuthorized },
                       .SharesAuthorized { authorized_epoch := s.bound_epoch,
                                           msg_tag := s.bound_msg_tag,
                                           certified_acks := s.ack_count }) := by
-              dsimp only [beltQuorumMealy]; rw [hc]; simp [hb, he, ht, hq]
+              dsimp only [beltQuorumMealy]; rw [hc]
+              cases hp : s.phase <;> simp_all
             rw [hf] at h
             injection h with h
             injection h with h1 h2
@@ -2523,7 +2524,7 @@ theorem belt_mealy_ack_fresh {s : pants_and_quorum_guards.BeltQuorumCore}
 
 theorem belt_mealy_authorize_granted {s : pants_and_quorum_guards.BeltQuorumCore}
     (hc : beltGuardCorrupt s = false) (hb : s.has_bound_epoch = true)
-    (hq : s.q.val ≤ s.ack_count.val) :
+    (hq : s.q.val ≤ s.ack_count.val) (hphase : s.phase ≠ .SharesAuthorized) :
     beltQuorumMealy.step s (.AuthorizeShares s.bound_epoch s.bound_msg_tag) =
       some ({ s with phase := .SharesAuthorized },
             .SharesAuthorized { authorized_epoch := s.bound_epoch,
@@ -2532,7 +2533,7 @@ theorem belt_mealy_authorize_granted {s : pants_and_quorum_guards.BeltQuorumCore
   have hnq : ¬ s.ack_count.val < s.q.val := Nat.not_lt.mpr hq
   dsimp only [beltQuorumMealy]
   rw [hc]
-  simp [hb, hnq]
+  cases hp : s.phase <;> simp_all
 
 /-- Every accepting step of the pure belt specification is realised by the extracted
     `propose_or_retry_epoch` (the converse of the simulation, obtained from totality). -/
@@ -2812,14 +2813,15 @@ theorem belt_step_ack_fresh (st : authenticated_belt.VerifiedBeltQuorumGuard)
     granted for exactly that epoch and message. -/
 theorem belt_step_authorize_granted (st : authenticated_belt.VerifiedBeltQuorumGuard)
     (hc : beltGuardCorrupt st.inner = false) (hb : st.inner.has_bound_epoch = true)
-    (hq : st.inner.q.val ≤ st.inner.ack_count.val) :
+    (hq : st.inner.q.val ≤ st.inner.ack_count.val)
+    (hphase : st.inner.phase ≠ .SharesAuthorized) :
     authenticated_belt.VerifiedBeltQuorumGuard.step st
         (.AuthorizeShares st.inner.bound_epoch st.inner.bound_msg_tag) =
       .ok (beltAfterGrant st,
            .Ok (.SharesAuthorized { authorized_epoch := st.inner.bound_epoch,
                                     msg_tag := st.inner.bound_msg_tag,
                                     certified_acks := st.inner.ack_count })) := by
-  have hcore := belt_core_authorize_of_mealy (belt_mealy_authorize_granted hc hb hq)
+  have hcore := belt_core_authorize_of_mealy (belt_mealy_authorize_granted hc hb hq hphase)
   have hp := (belt_not_corrupt_facts hc).1
   unfold authenticated_belt.VerifiedBeltQuorumGuard.step
   dsimp only
@@ -2889,7 +2891,7 @@ theorem belt_two_custodian_round_certifies
   refine .acked (belt_step_ack_fresh (beltAfterAck (beltAfterPropose st e msg) a) e msg b
     tagB keyB hb hb64 hkB htB hc2 rfl rfl rfl hbitB hcnt1) ?_
   refine .certified (belt_step_authorize_granted
-    (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) a) b) hc3 rfl hq3) ?_
+    (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) a) b) hc3 rfl hq3 (by intro h; cases h)) ?_
   exact .nil _
 
 /-- State after one certified two-custodian round. -/
@@ -3063,7 +3065,7 @@ theorem tooth_belt_ack_without_signer_dedup_forges_quorum :
       0#u8 (by decide) rfl (by decide)
   · exact belt_step_authorize_granted
       (beltAfterAck (beltAfterAck (beltAfterAck beltToothState 0#u8) 0#u8) 0#u8)
-      (by decide) rfl (by decide)
+      (by decide) rfl (by decide) (by intro h; cases h)
   · decide
   · intro h
     exact absurd h.2.2.1 (by decide)

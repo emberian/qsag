@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 public import QsagVerified.Proofs.Common
 
 /-!
@@ -189,7 +190,8 @@ def OpeningFolded (sid : Array Std.U8 32#usize) (round : Std.U64)
     s.expected_openings = n ∧
     s.sum_lanes.val.getD 0 0#u128 = openingLaneSum xs 0 ∧
     s.sum_lanes.val.getD 1 0#u128 = openingLaneSum xs 1 ∧
-    s.absorbed.val = min xs.length (2 ^ 64 - 1) ∧
+    ((xs.length ≤ 2 ^ 64 - 1 ∧ s.absorbed.val = xs.length) ∨
+      (2 ^ 64 - 1 ≤ xs.length ∧ s.absorbed.val = 2 ^ 64 - 1)) ∧
     (s.all_committed = true ↔ (xs.length < 2 ^ 64 ∧ ∀ x ∈ xs, x.1 = x.2.1))
 
 private theorem opening_folded_step (sid : Array Std.U8 32#usize) (round : Std.U64)
@@ -204,11 +206,17 @@ private theorem opening_folded_step (sid : Array Std.U8 32#usize) (round : Std.U
   by_cases hm : s.absorbed = core.num.U64.MAX
   · rw [ite_eq_left hm]
     have hmax : s.absorbed.val = 2 ^ 64 - 1 := by rw [hm]; exact u64_max_val
+    have hge : 2 ^ 64 - 1 ≤ xs.length := by
+      rcases hcount with ⟨_, ha⟩ | ⟨hg, _⟩
+      · omega
+      · exact hg
     refine ⟨hc, hs, hr, hb, he, ?_, ?_, ?_, ?_⟩
     · rw [openingLaneSum_snoc, ← h0]; rfl
     · rw [openingLaneSum_snoc, ← h1]; rfl
-    · change s.absorbed.val = min (xs ++ [x]).length (2 ^ 64 - 1)
-      rw [hlen]; omega
+    · change ((xs ++ [x]).length ≤ 2 ^ 64 - 1 ∧ s.absorbed.val = (xs ++ [x]).length) ∨
+        (2 ^ 64 - 1 ≤ (xs ++ [x]).length ∧ s.absorbed.val = 2 ^ 64 - 1)
+      rw [hlen]
+      exact Or.inr ⟨by omega, hmax⟩
     · change false = true ↔ ((xs ++ [x]).length < 2 ^ 64 ∧ ∀ y ∈ xs ++ [x], y.1 = y.2.1)
       rw [hlen]
       constructor
@@ -219,6 +227,10 @@ private theorem opening_folded_step (sid : Array Std.U8 32#usize) (round : Std.U
     have hne : s.absorbed.val ≠ 2 ^ 64 - 1 := fun e =>
       hm (UScalar.eq_of_val_eq (e.trans u64_max_val.symm))
     have hbound : s.absorbed.val < 2 ^ 64 := s.absorbed.bv.isLt
+    have hsmall : xs.length < 2 ^ 64 - 1 ∧ s.absorbed.val = xs.length := by
+      rcases hcount with ⟨hle, ha⟩ | ⟨_, ha⟩
+      · exact ⟨by omega, ha⟩
+      · exact absurd ha hne
     have hval : (⟨s.absorbed.bv + (1#u64).bv⟩ : Std.U64).val = s.absorbed.val + 1 := by
       change (s.absorbed.bv + (1#u64).bv).toNat = s.absorbed.val + 1
       rw [BitVec.toNat_add]
@@ -227,8 +239,12 @@ private theorem opening_folded_step (sid : Array Std.U8 32#usize) (round : Std.U
     refine ⟨hc, hs, hr, hb, he, ?_, ?_, ?_, ?_⟩
     · rw [openingLaneSum_snoc, ← h0]; rfl
     · rw [openingLaneSum_snoc, ← h1]; rfl
-    · change (⟨s.absorbed.bv + (1#u64).bv⟩ : Std.U64).val = min (xs ++ [x]).length (2 ^ 64 - 1)
-      rw [hval, hlen]; omega
+    · change ((xs ++ [x]).length ≤ 2 ^ 64 - 1 ∧
+          (⟨s.absorbed.bv + (1#u64).bv⟩ : Std.U64).val = (xs ++ [x]).length) ∨
+        (2 ^ 64 - 1 ≤ (xs ++ [x]).length ∧
+          (⟨s.absorbed.bv + (1#u64).bv⟩ : Std.U64).val = 2 ^ 64 - 1)
+      rw [hval, hlen]
+      exact Or.inl ⟨by omega, by omega⟩
     · change (s.all_committed && decide (x.1 = x.2.1)) = true ↔
         ((xs ++ [x]).length < 2 ^ 64 ∧ ∀ y ∈ xs ++ [x], y.1 = y.2.1)
       rw [hlen, Bool.and_eq_true, decide_eq_true_eq, hall]
@@ -268,7 +284,7 @@ theorem opening_new_folded (sid : Array Std.U8 32#usize) (round : Std.U64)
     (binding : Array Std.U8 32#usize) (n : Std.U64) :
     ∃ s, opening_guard.ConsumingOpeningGuard2Lane.new sid round binding n = .ok s ∧
       OpeningFolded sid round binding n [] s := by
-  refine ⟨_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, ?_⟩
+  refine ⟨_, rfl, rfl, rfl, rfl, rfl, rfl, rfl, rfl, Or.inl ⟨by decide, rfl⟩, ?_⟩
   constructor
   · intro _
     exact ⟨by decide, fun _ hx => absurd hx List.not_mem_nil⟩
@@ -320,8 +336,16 @@ private theorem opening_accepts_iff (sid : Array Std.U8 32#usize) (round : Std.U
   · rintro ⟨_, hs', hr', hb', hn, ha, hcm, hz⟩
     obtain ⟨hlt, hmem⟩ := hall.mp hcm
     have hav : s.absorbed.val = n.val := by rw [ha]
+    have hcnt : s.absorbed.val = xs.length := by
+      rcases hcount with ⟨_, h⟩ | ⟨hg, h⟩
+      · exact h
+      · omega
     exact ⟨hs'.symm, hr'.symm, hb'.symm, hn, by omega, hmem, hz⟩
   · rintro ⟨hs', hr', hb', hn, hlen, hmem, hz⟩
+    have hcnt : s.absorbed.val = xs.length := by
+      rcases hcount with ⟨_, h⟩ | ⟨hg, h⟩
+      · exact h
+      · omega
     exact ⟨hc, hs'.symm, hr'.symm, hb'.symm, hn, UScalar.eq_of_val_eq (by omega),
       hall.mpr ⟨by omega, hmem⟩, hz⟩
 
@@ -372,5 +396,22 @@ theorem opening_round_refused (sid : Array Std.U8 32#usize) (round : Std.U64)
   have hacc : ¬ openingAccepts s1 sid' round' binding' := fun ha =>
     h ((opening_accepts_iff sid round binding n xs s1 hf sid' round' binding').mp ha)
   exact ⟨_, by rw [hrun, ite_eq_right hacc], rfl⟩
+
+/-- A whole round releases at most once: whatever it returned, every later attempt on the
+returned guard refuses. -/
+theorem opening_round_single_release (sid : Array Std.U8 32#usize) (round : Std.U64)
+    (binding : Array Std.U8 32#usize) (n : Std.U64) (xs : List OpeningInput)
+    (sid' : Array Std.U8 32#usize) (round' : Std.U64) (binding' : Array Std.U8 32#usize)
+    (t : OpeningGuard) (p : Option OpeningPermit)
+    (h : openingRound sid round binding n xs sid' round' binding' = .ok (t, p))
+    (sid'' : Array Std.U8 32#usize) (round'' : Std.U64) (binding'' : Array Std.U8 32#usize) :
+    opening_guard.ConsumingOpeningGuard2Lane.verify_once t sid'' round'' binding'' =
+      .ok (openingSpent t, none) := by
+  obtain ⟨s1, _, hrun⟩ := opening_round_run sid round binding n xs sid' round' binding'
+  rw [hrun] at h
+  have ht : t = openingSpent s1 := (Prod.mk.inj (Result.ok.inj h)).1.symm
+  apply opening_verify_once_replay
+  rw [ht]
+  rfl
 
 end qsag_verified.proofs

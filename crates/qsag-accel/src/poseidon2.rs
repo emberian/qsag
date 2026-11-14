@@ -28,9 +28,6 @@ pub const POSEIDON2_INTERNAL_ROUNDS: u64 = 22;
 ///   irreducible. The characteristic polynomial of $M_I$ has three roots in $\mathbb{F}_p$ and an
 ///   irreducible degree-9 cofactor, so three one-dimensional invariant subspaces exist (each
 ///   spanned by a vector with every coordinate nonzero).
-///
-/// [`POSEIDON2_INTERNAL_DIAG_IRREDUCIBLE_CANDIDATE`] is a diagonal with the same multiplication
-/// cost that does meet the irreducibility criterion; it is not used by the permutation.
 pub const POSEIDON2_INTERNAL_DIAG: [u64; 12] = [
     crate::goldilocks::GOLDILOCKS_PRIME - 2,
     1,
@@ -39,25 +36,6 @@ pub const POSEIDON2_INTERNAL_DIAG: [u64; 12] = [
     1 << 3,
     1 << 4,
     1 << 5,
-    1 << 6,
-    1 << 7,
-    1 << 8,
-    1 << 9,
-    1 << 10,
-];
-
-/// Sign-flipped variant $(-2, 1, 2, 4, -8, -16, -32, 64, \dots, 2^{10})$ of
-/// [`POSEIDON2_INTERNAL_DIAG`] whose matrix $J + \operatorname{diag}(V)$ has an irreducible
-/// degree-12 characteristic polynomial for every power $k \in 1..=36$ (checked by unit test).
-/// Reference data for a future parameter revision; adopting it changes every digest.
-pub const POSEIDON2_INTERNAL_DIAG_IRREDUCIBLE_CANDIDATE: [u64; 12] = [
-    crate::goldilocks::GOLDILOCKS_PRIME - 2,
-    1,
-    1 << 1,
-    1 << 2,
-    crate::goldilocks::GOLDILOCKS_PRIME - (1 << 3),
-    crate::goldilocks::GOLDILOCKS_PRIME - (1 << 4),
-    crate::goldilocks::GOLDILOCKS_PRIME - (1 << 5),
     1 << 6,
     1 << 7,
     1 << 8,
@@ -647,18 +625,6 @@ mod internal_matrix_tests {
         let (cofactor, cofactor_degree) = poly_div_exact(&f, &linear_part[..=linear_degree]);
         assert_eq!(cofactor_degree, 9);
         assert!(is_irreducible(&cofactor[..=cofactor_degree]));
-    }
-
-    #[test]
-    fn candidate_diagonal_has_irreducible_characteristic_polynomial_for_matrix_powers() {
-        let m = matrix_from_diag(&POSEIDON2_INTERNAL_DIAG_IRREDUCIBLE_CANDIDATE);
-        assert_ne!(rank_and_det(m).1, 0);
-        let mut power = m;
-        for k in 1..=36 {
-            assert!(is_irreducible(&char_poly(&power)), "candidate M^{k}");
-            assert_eq!(krylov_ranks(&power), (T, T), "candidate M^{k}");
-            power = mat_mul(&power, &m);
-        }
     }
 
     #[test]

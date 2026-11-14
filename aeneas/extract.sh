@@ -88,9 +88,15 @@ for name in ("Types.lean", "Funs.lean"):
             raise SystemExit(f"Unexpected generated header in {path}: {stripped}")
     if not imports:
         raise SystemExit(f"Missing generated imports in {path}")
+    # Scalar aliases must be transparent to Lean's compiler across module boundaries.
+    # Expose only these aliases, never an entire generated section.
+    body_text = "".join(body)
+    if name == "Types.lean":
+        for alias in ("goldilocks.Goldilocks", "tower.Gf256", "tower.Tower128", "tower.Gf16"):
+            body_text = body_text.replace(f"@[reducible]\ndef {alias} :=", f"@[reducible, expose]\ndef {alias} :=")
     path.write_text("".join(comments) + "module\n"
                     + "".join(f"public import {module}\n" for module in imports)
-                    + "@[expose] public section\n" + "".join(body))
+                    + "public section\n" + body_text)
 PY_HEADERS
 
 echo "[4/4] Verifying Aeneas prelude, extracted MIR functions, and 0-sorry refinement theorems via Lake..."

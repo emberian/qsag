@@ -3568,7 +3568,7 @@ pub static BDOZ_GF2_128_DOT_SPV_WORDS: [u32; 2978] = [
     0x000000ca, 0x000200f8, 0x000000cc, 0x0004003d, 0x00000014, 0x000000fd, 0x00000088, 0x000200fe,
     0x000000fd, 0x00010038,
 ];
-/// Little-endian byte encoding of [`BDOZ_GF2_128_DOT_SPV_WORDS`] (9612 bytes).
+/// Little-endian byte encoding of [`BDOZ_GF2_128_DOT_SPV_WORDS`].
 pub static BDOZ_GF2_128_DOT_SPV_BYTES: [u8; 11912] = words_to_le_bytes(&BDOZ_GF2_128_DOT_SPV_WORDS);
 
 /// Source `.comp` filename under `crates/qsag-accel/shaders/` for `slot`.

@@ -39,12 +39,12 @@
 //! 2. `w = A*y` is computed on shares; `HighBits(w)` is computed by a shared
 //!    circuit on `w + r` and only `w1` is opened. The challenge is
 //!    `c = SampleInBall(H(mu || w1))`.
-//! 3. `z = y + c*s1` and `w - c*s2` exist only as shares. One shared bit
+//! 3. `z = y + c*s1` and `w - c*s2` exist only as shares. One joint bit
 //!    decides both `||z|| < gamma1 - beta` and
 //!    `||LowBits(w - c*s2)|| < gamma2 - beta` with `HighBits(w - c*s2) = w1`
 //!    (tested as `(w - c*s2 - w1*2*gamma2) mod+- q` lying in the open
 //!    interval, which is equivalent). Every multiplication behind that bit
-//!    is verified before it is opened; the number of failing coefficients is
+//!    is verified before it is opened; each number of failing coefficients is
 //!    multiplied by a random extension-field element, so only "zero or not"
 //!    is revealed.
 //! 4. Only if the bit is "accept" do the holders open `z`. Each component of
@@ -866,18 +866,18 @@ fn high_bits_circuit<T: MpcTransport>(
     Ok(value)
 }
 
-/// The single acceptance bit of an attempt: every coefficient of `z` lies in
-/// `(-z_bound, z_bound)` and every coefficient of `low` lies in
-/// `(-low_bound, low_bound)`, centred modulo `q`. `masks` are uniform shared
-/// values below `q` with bit planes `planes`, one per coefficient (`z`
-/// first). Opens the uniformly masked inputs, then only "all inside or not".
+/// First opens only the joint acceptance bit. After acceptance, checks the
+/// three predicates independently before releasing their witnesses. A rejected
+/// attempt never reveals which predicate failed. The masked coefficient openings
+/// are shared by the circuits; no unmasked coefficient is released.
 fn rejection_verdict<T: MpcTransport>(
     engine: &mut Engine<'_, T>,
     (z, z_bound): (&Sh, u32),
     (low, low_bound): (&Sh, u32),
     masks: &Sh,
     planes: &[Sh],
-) -> Result<bool, MpcError> {
+    high_bound: u32,
+) -> Result<Option<(bool, bool, bool)>, MpcError> {
     let z_len = z.len();
     let low_len = low.len();
     let shifted = Sh::concat(&[
@@ -888,11 +888,31 @@ fn rejection_verdict<T: MpcTransport>(
     let mut widths = vec![2 * z_bound - 1; z_len];
     widths.extend_from_slice(&vec![2 * low_bound - 1; low_len]);
     let inside = masked_range_test(engine, &opened, &widths, planes)?;
-    let failures = engine.public_const(1, z_len + low_len)?.sub(&inside).sum();
-    let blind = engine.rand(EXT_DEGREE)?;
-    let verdict = engine.mul(&blind, &failures.repeat(EXT_DEGREE))?;
-    let verdict = engine.open(&[&verdict])?;
-    Ok(verdict[0].iter().all(|&v| v == 0))
+    let outside = engine.public_const(1, z_len + low_len)?.sub(&inside);
+    let z_failures = outside.slice(0, z_len).sum();
+    let low_failures = outside.slice(z_len, low_len).sum();
+    // A wider residual interval checks the HighBits relation separately from
+    // the stricter rejection norm. Shifting a masked public value by a public
+    // constant preserves its mask and does not disclose the residual.
+    let high_opened: Vec<u32> = opened[z_len..].iter()
+        .map(|&v| fq_add(v, high_bound - low_bound)).collect();
+    let high_planes: Vec<Sh> = planes.iter().map(|p| p.slice(z_len, low_len)).collect();
+    let high_inside = masked_range_test(engine, &high_opened, &vec![2 * high_bound - 1; low_len], &high_planes)?;
+    let high_failures = engine.public_const(1, low_len)?.sub(&high_inside).sum();
+    let joint_failures = z_failures.add(&low_failures).add(&high_failures);
+    let joint_blind = engine.rand(EXT_DEGREE)?;
+    let joint = engine.mul(&joint_blind, &joint_failures.repeat(EXT_DEGREE))?;
+    if engine.open(&[&joint])?[0].iter().any(|&v| v != 0) {
+        return Ok(None);
+    }
+    let mut bits = [false; 3];
+    for (index, failures) in [z_failures, low_failures, high_failures].iter().enumerate() {
+        let blind = engine.rand(EXT_DEGREE)?;
+        let verdict = engine.mul(&blind, &failures.repeat(EXT_DEGREE))?;
+        let verdict = engine.open(&[&verdict])?;
+        bits[index] = verdict[0].iter().all(|&v| v == 0);
+    }
+    Ok(Some((bits[0], bits[1], bits[2])))
 }
 
 /// Owns the entire pending response while the verified affine gate holds its
@@ -905,15 +925,38 @@ struct PendingResponse {
 
 impl PendingResponse {
     fn new(response: Sh, context: [u8; 32], attempt: u32) -> Self {
+        let digest = Self::digest(&response, &context, attempt);
         Self {
             response,
-            gate: MlDsaReleaseGate::new_sealed(context, attempt, context),
+            gate: MlDsaReleaseGate::new_sealed(context, attempt, digest),
         }
+    }
+
+    fn digest(response: &Sh, context: &[u8; 32], attempt: u32) -> [u8; 32] {
+        let mut sponge = Shake256::new();
+        sponge.absorb(b"QSAG.MLDSA.PENDING_RESPONSE.V1");
+        sponge.absorb(context);
+        sponge.absorb(&attempt.to_be_bytes());
+        sponge.absorb(&(response.c.len() as u64).to_be_bytes());
+        for component in &response.c {
+            sponge.absorb(&(component.len() as u64).to_be_bytes());
+            for coefficient in component {
+                sponge.absorb(&coefficient.to_le_bytes());
+            }
+        }
+        sponge.finalize(0x1f);
+        let mut digest = [0; 32];
+        sponge.squeeze(&mut digest);
+        digest
     }
 
     fn release(self, checks: MlDsaBarrierChecks) -> Result<Sh, ThresholdMlDsaError> {
         let (_, released) = self.gate.try_release_z_share(checks);
-        released.map_err(|_| ThresholdMlDsaError::ProtocolInvariantViolated)?;
+        let released = released.map_err(|_| ThresholdMlDsaError::ProtocolInvariantViolated)?;
+        let expected = Self::digest(&self.response, &checks.req_session_id, checks.req_attempt);
+        if !ct_eq_bytes(&released, &expected) {
+            return Err(ThresholdMlDsaError::ProtocolInvariantViolated);
+        }
         Ok(self.response)
     }
 }
@@ -1127,16 +1170,16 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
         let mut z = engine.zeros(z_len)?;
         let mut low = engine.zeros(w_len)?;
         for i in 0..comps {
-            let cs1 = challenge_times(&c_hat, &key.s1_hat[i]);
-            let cs2 = challenge_times(&c_hat, &key.s2_hat[i]);
+            let cs1 = crate::secret_buffer::SecretBuffer(challenge_times(&c_hat, &key.s1_hat[i]));
+            let cs2 = crate::secret_buffer::SecretBuffer(challenge_times(&c_hat, &key.s2_hat[i]));
             z.c[i] = y.c[i]
                 .iter()
-                .zip(&cs1)
+                .zip(cs1.iter())
                 .map(|(&a, &b)| fq_add(a, b))
                 .collect();
             low.c[i] = w.c[i]
                 .iter()
-                .zip(&cs2)
+                .zip(cs2.iter())
                 .map(|(&a, &b)| fq_sub(a, b))
                 .collect();
         }
@@ -1147,23 +1190,27 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
         let test_idx: Vec<usize> = z_idx.iter().chain(low_idx).copied().collect();
         let test_planes: Vec<Sh> = planes.iter().map(|plane| plane.gather(&test_idx)).collect();
         let pending = PendingResponse::new(z, context, attempt);
-        let accepted = rejection_verdict(
+        let checks = rejection_verdict(
             &mut engine,
             (&pending.response, z_bound),
             (&low, low_bound),
             &mask_values.gather(&test_idx),
             &test_planes,
+            gamma2,
         )?;
-        // rejection_verdict opens only after Engine::verify has checked the
-        // actual multiplication trace and holder commitments. Its single bit
-        // jointly establishes both norms and the HighBits relation to w1.
+        let Some((z_norm_ok, r0_norm_ok, w1_match)) = checks else {
+            // Dropping the sealed response wipes it before the next attempt.
+            continue;
+        };
+        let u_com_bound = engine.verify().is_ok();
+        let accepted = z_norm_ok && r0_norm_ok && w1_match && u_com_bound;
         let released = pending.release(MlDsaBarrierChecks {
             req_session_id: context,
             req_attempt: attempt,
-            z_norm_ok: accepted,
-            r0_norm_ok: accepted,
-            w1_match: accepted,
-            u_com_bound: true, // established by the successful checked open above
+            z_norm_ok,
+            r0_norm_ok,
+            w1_match,
+            u_com_bound,
         });
         if !accepted {
             // Consume the rejecting gate as well; no response survives retry.

@@ -76,6 +76,13 @@ pub enum Error {
 /// must deliver each envelope only to its recipient; broadcasting is unsafe.
 /// Returned entries are ordered [previous custodian, next custodian].
 pub trait Transport: Send {
+    /// Maximum concurrently evaluated repetition batches on this custodian.
+    /// A zero limit is treated as one. Batches are scheduled in ascending order;
+    /// the limit affects resource use only, never repetitions or verification.
+    fn max_parallel_batches(&self) -> usize {
+        usize::MAX
+    }
+
     /// Optional independent authenticated streams, requested in batch order.
     /// Every custodian must provide all `MIT_REPETITIONS.div_ceil(64)` streams
     /// or none. With the `std` feature these streams allow the independent
@@ -781,6 +788,7 @@ impl BitCheckScratch {
             }
         }
         self.hwm_bs = 0;
+
         for arr in self.step2_lanes.iter_mut() {
             for lane_slice in arr.iter_mut() {
                 zeroize_gf128_slice(lane_slice);
@@ -1068,6 +1076,27 @@ impl<T: Transport> Engine<T> {
             fault,
             transport,
         })
+    }
+
+    /// Release evaluation scratch after a repetition batch has passed all
+    /// checks. Its engine remains live for authenticated opening rounds.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn release_verified_scratch(&mut self) {
+        debug_assert!(self.pending_bits_raw.is_empty());
+        debug_assert!(
+            self.pending_secp.is_empty()
+                && self.pending_ed.is_empty()
+                && self.pending_gold.is_empty()
+        );
+        self.bit_scratch = None;
+        for scratch in [
+            &mut self.scratch_r,
+            &mut self.scratch_s,
+            &mut self.pending_bits_raw,
+        ] {
+            ct_zeroize_u64s(scratch);
+            *scratch = Vec::new();
+        }
     }
 
     /// Hedge local coin-flipping randomness with custodian-private ceremony entropy.
@@ -1697,6 +1726,8 @@ impl<T: Transport> Engine<T> {
         // (`cur_quads -> ceil(cur_quads / 2) -> ... -> 1`), streaming cross-terms in L2-sized
         // chunks into contiguous `PCLMULQDQ` dot products and folding vectors via 4-bit nibble
         // public matrix evaluation (`0` `a_next`/`b_next` buffers).
+        let mut a4 = Secret([[[[[0u64; 2]; 64]; 4]; 2]; 2]);
+        let mut b4 = Secret([[[[[0u64; 2]; 64]; 4]; 2]; 2]);
         let mut cur_quads = num_quads;
 
         while cur_quads > 1 {
@@ -1863,8 +1894,6 @@ impl<T: Transport> Engine<T> {
 
         // Transpose the single remaining `Bs256` quad (`4` blocks x `64` lanes) and complete
         // the final `4 -> 2 -> 1` Arity-2 steps when `m > 1`.
-        let mut a4 = [[[[[0u64; 2]; 64]; 4]; 2]; 2];
-        let mut b4 = [[[[[0u64; 2]; 64]; 4]; 2]; 2];
         for t in 0..2 {
             for side in 0..2 {
                 transpose_bs256_to_quad_lanes(
@@ -1911,36 +1940,9 @@ impl<T: Transport> Engine<T> {
                         }
                     }
                 }
-                let reshared = match self.reshare_gf128_lanes_many(&scratch.h_fold[..]) {
-                    Ok(v) => ZeroizeRepGf128LanesVec(v),
-                    Err(e) => {
-                        for arr in [&mut a4, &mut b4] {
-                            for t_arr in arr {
-                                for s_arr in t_arr {
-                                    for sub_arr in s_arr {
-                                        zeroize_gf128_slice(sub_arr);
-                                    }
-                                }
-                            }
-                        }
-                        return Err(e);
-                    }
-                };
-                let seed_rk = match self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.FOLD.V1") {
-                    Ok(s) => s,
-                    Err(e) => {
-                        for arr in [&mut a4, &mut b4] {
-                            for t_arr in arr {
-                                for s_arr in t_arr {
-                                    for sub_arr in s_arr {
-                                        zeroize_gf128_slice(sub_arr);
-                                    }
-                                }
-                            }
-                        }
-                        return Err(e);
-                    }
-                };
+                let reshared =
+                    ZeroizeRepGf128LanesVec(self.reshare_gf128_lanes_many(&scratch.h_fold[..])?);
+                let seed_rk = self.coin_flip(b"QSAG.OUTER.MULCHECK.BITS.FOLD.V1")?;
                 let mut xof_rk = WordSponge136::from_shake_seed(&seed_rk);
                 let rk = [
                     u128_to_gf128(xof_rk.squeeze_u128()),
@@ -3821,6 +3823,7 @@ impl<T: Transport> Engine<T> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+
     extern crate std;
     use super::*;
     use qsag_asm::gf2_128_mul_portable;
@@ -3907,6 +3910,15 @@ pub(crate) mod tests {
         }
     }
     impl Transport for Network {
+        // Two test ceremonies may run together, each with three custodians.
+        fn max_parallel_batches(&self) -> usize {
+            if std::env::var("RUST_TEST_THREADS").as_deref() == Ok("1") {
+                7
+            } else {
+                4
+            }
+        }
+
         fn audit_transcript(&self) -> Option<(u64, u64)> {
             self.trace.as_ref().map(|t| t.stats())
         }

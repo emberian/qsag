@@ -33,3 +33,8 @@ pub use durable_custody::{
     AnchoredSeedBurnTracker, FsLedgerCheckpointAnchor,
 };
 pub use wire_channel::{ConfidentialWireChannel, MacSealedWireChannel};
+
+#[cfg(feature = "std")]
+mod directory_anchor;
+#[cfg(feature = "std")]
+pub use directory_anchor::FsDirectoryMonotoneAnchor;

@@ -185,19 +185,19 @@ fn xor_rate_block(state: &mut [u64; 25], block: &[u8; SHAKE256_RATE_BYTES]) {
 }
 
 /// Encode `value` via NIST SP 800-185 `left_encode` into a fixed stack buffer `(buf, len)`.
-fn sp800_185_left_encode_u64(value: u64) -> ([u8; 9], usize) {
+fn sp800_185_left_encode_u128(value: u128) -> ([u8; 17], usize) {
     if value == 0 {
-        return ([1, 0, 0, 0, 0, 0, 0, 0, 0], 2);
+        return ([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 2);
     }
-    let mut tmp = [0u8; 8];
+    let mut tmp = [0u8; 16];
     let mut n: usize = 0;
     let mut v = value;
-    while v > 0 && n < 8 {
+    while v > 0 && n < 16 {
         tmp[n] = (v & 0xFF) as u8;
         v >>= 8;
         n += 1;
     }
-    let mut out = [0u8; 9];
+    let mut out = [0u8; 17];
     out[0] = n as u8;
     let mut i: usize = 0;
     while i < n {
@@ -232,8 +232,8 @@ impl Shake256Sponge {
     }
 
     /// Initialize NIST SP 800-185 `cSHAKE256` (`N = ""`, caller customization `S`) in `O(1)` stack memory.
-    /// Requires `customization.len() <= usize::MAX / 8` for exact bit-length encoding.
-    /// Saturating multiplication keeps oversized inputs panic-free for extraction.
+    /// The bit length is widened to `u128`, preserving every 64-bit slice length.
+    /// Its SP 800-185 encoding uses a bounded stack buffer.
     pub fn new_cshake256(customization: &[u8]) -> Self {
         if customization.is_empty() {
             return Self::new_shake256();
@@ -250,13 +250,9 @@ impl Shake256Sponge {
         // left_encode(136) = [1, 136], encode_string("") = [1, 0]
         let header = [1u8, 136u8, 1u8, 0u8];
         s.absorb(&header);
-        let custom_len_u64 = customization.len() as u64;
-        let bit_len = if custom_len_u64 <= u64::MAX / 8 {
-            custom_len_u64 * 8
-        } else {
-            u64::MAX
-        };
-        let (len_enc, len_enc_bytes) = sp800_185_left_encode_u64(bit_len);
+        // A 64-bit slice length needs up to 67 bits when expressed in bits.
+        let bit_len = (customization.len() as u128) * 8;
+        let (len_enc, len_enc_bytes) = sp800_185_left_encode_u128(bit_len);
         let mut j: usize = 0;
         while j < len_enc_bytes {
             let single = [len_enc[j]];
@@ -355,4 +351,17 @@ pub fn cshake256_32(customization: &[u8], input: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     sp.squeeze(&mut out);
     out
+}
+
+#[cfg(test)]
+mod framing_tests {
+    #[test]
+    fn left_encode_does_not_saturate_large_bit_lengths() {
+        for value in [0u128, 1, 255, 256, u64::MAX as u128, (u64::MAX as u128) * 8] {
+            let (bytes, len) = super::sp800_185_left_encode_u128(value);
+            assert_eq!(bytes[0] as usize + 1, len);
+            assert_eq!(bytes[1..len].iter().fold(0u128, |v, b| (v << 8) | u128::from(*b)), value);
+            assert!(len == 2 || bytes[1] != 0);
+        }
+    }
 }

@@ -1,21 +1,37 @@
-//! `policy-demo`: evaluate a fixed custody policy against named transaction scenarios and run
-//! the committed MAC barrier that mints signing release tokens for an approved one.
+//! `policy`: the persistent custody policy ledger subcommands (see [`crate::policy_ledger`]),
+//! and, when no ledger is named, a stateless evaluation of a fixed custody policy against
+//! named transaction scenarios that runs the committed MAC barrier for the approved one.
 
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_addr::{KeyIdentityKind, QsagAddress, WitnessSuiteTag};
 use qsag_policy::{
-    FsPolicyDurableLedger, FsPolicyGenerationFence, PolicyViolation, QuorumTierRule,
-    SigningPayloadBinding, TransactionIntent, TransactionPolicy, trusted_dealer_setup_for_testing,
+    PolicyViolation, QuorumTierRule, SigningPayloadBinding, TransactionIntent, TransactionPolicy,
+    trusted_dealer_setup_for_testing,
 };
 
 use crate::cli::{Args, CliError, exit};
 use crate::codec::Json;
 
 const POLICY_HELP: &str = "\
-qsag policy-demo [--scenario <name>] [--json]
+qsag policy <init|propose|approve|status> --ledger-dir <dir> [options]
+qsag policy [--ephemeral] [--scenario <name>] [--json]
 
-Evaluate a fixed custody policy (allowlisted recipient, 1,000,000-unit single-transfer cap,
-5,000,000-unit rolling cap, two quorum tiers, a hardware guardian for large transfers, and no
+Persistent custody policy ledger (every subcommand accepts --help):
+
+  init      create a ledger directory from a policy document
+  propose   evaluate and record a transfer intent; writes the exact message to sign
+  approve   record one approver's approval of a proposed intent
+  status    authenticate the ledger and report its window spend and intents
+
+A proposed and fully approved intent is released by signing its message with
+`qsag sign` or `qsag quorum sign` under --policy-ledger-dir and --policy-intent. Signing
+refuses an unapproved, over-cap, expired or already released intent before any key state
+moves, and the spend, the intent nonce and the session stay burned across invocations.
+
+Without a subcommand nothing is read from or written to disk (--ephemeral says so
+explicitly; `qsag policy-demo` is the same evaluation). The command evaluates a fixed
+custody policy (allowlisted recipient, 1,000,000-unit single-transfer cap, 5,000,000-unit
+rolling cap, two quorum tiers, a hardware guardian for large transfers, and no
 self-approval) against named scenarios.
 
 Without --scenario, every scenario is evaluated and compared with its expected outcome; the
@@ -239,115 +255,46 @@ fn mint_release_tokens(
         states4.push(state);
         sigma_opens.push(open);
     }
-    let work_dir = std::env::temp_dir().join(format!(
-        "qsag-policy-demo-ledger-{}-{}",
-        std::process::id(),
-        crate::codec::to_hex(&crate::cli::os_random_32()?)
-    ));
-    for state in ["ledgers", "fences"] {
-        let dir = work_dir.join(state);
-        let dir = dir
-            .to_str()
-            .ok_or_else(|| CliError::state("temporary directory path is not UTF-8"))?;
-        crate::cli::private_dir(dir, true)?;
+    let mut minted = 0;
+    for (state, guard) in states4.into_iter().zip(&mut guards) {
+        let token = state.finalize(guard, &sigma_opens).map_err(barrier)?;
+        let bound = token.matches_signing(&key_id(), signing_bytes, CONTEXT, &intent.quorum_ids)
+            && !token.matches_signing(&key_id(), b"another message", CONTEXT, &intent.quorum_ids);
+        if !bound {
+            return Err(CliError::verify(
+                "release token is not bound to the approved signing request",
+            ));
+        }
+        minted += 1;
     }
 
-    let persist_result = (|| -> Result<usize, CliError> {
-        let mut ledgers = Vec::with_capacity(guards.len());
-        let mut fences = Vec::with_capacity(guards.len());
-        for guard in &guards {
-            let ledger_key = cshake256_framed_32(
-                b"QSAG.CLI.POLICY.LEDGER.KEY.V1",
-                &[&key_id(), &guard.party_id.to_be_bytes()],
-            );
-            let fence_key = cshake256_framed_32(
-                b"QSAG.CLI.POLICY.FENCE.KEY.V1",
-                &[&key_id(), &guard.party_id.to_be_bytes()],
-            );
-            let ledger = FsPolicyDurableLedger::create_new(
-                work_dir
-                    .join("ledgers")
-                    .join(format!("party-{}", guard.party_id)),
-                ledger_key,
-                guard,
-            )
-            .map_err(|e| CliError::io("creating policy ledger", e))?;
-            let fence = FsPolicyGenerationFence::create_new(
-                work_dir
-                    .join("fences")
-                    .join(format!("party-{}", guard.party_id)),
-                fence_key,
-                ledger.generation(),
-            )
-            .map_err(|e| CliError::io("creating policy generation fence", e))?;
-            ledgers.push(ledger);
-            fences.push(fence);
-        }
-
-        let mut minted = 0;
-        for (((state, guard), ledger), fence) in states4
+    // This evaluation is stateless: nothing is written. What a persistent ledger would store
+    // is still exercised, by exporting each guard's checkpoint and restoring it into a freshly
+    // provisioned share, which must come back with the intent nonce and the session burned.
+    let fresh = trusted_dealer_setup_for_testing([0x99; 32], &[10, 20, 30, 40, 50]);
+    for (guard, mut restored) in guards.iter().zip(
+        fresh
             .into_iter()
-            .zip(&mut guards)
-            .zip(&mut ledgers)
-            .zip(&mut fences)
-        {
-            let token = state.finalize(guard, &sigma_opens).map_err(barrier)?;
-            // Persist the updated policy ledger AND ratchet the independent generation fence
-            // BEFORE releasing or accepting the minted release token.
-            ledger
-                .sync_persist(guard)
-                .map_err(|e| CliError::io("persisting policy checkpoint", e))?;
-            fence
-                .ratchet_to(ledger.generation())
-                .map_err(|e| CliError::io("ratcheting policy generation fence", e))?;
-            let bound =
-                token.matches_signing(&key_id(), signing_bytes, CONTEXT, &intent.quorum_ids)
-                    && !token.matches_signing(
-                        &key_id(),
-                        b"another message",
-                        CONTEXT,
-                        &intent.quorum_ids,
-                    );
-            if !bound {
-                return Err(CliError::verify(
-                    "release token is not bound to the approved signing request",
-                ));
-            }
-            minted += 1;
+            .filter(|g| intent.quorum_ids.contains(&g.party_id)),
+    ) {
+        let key = cshake256_framed_32(
+            b"QSAG.CLI.POLICY.EPHEMERAL.KEY.V1",
+            &[&key_id(), &guard.party_id.to_be_bytes()],
+        );
+        let checkpoint = guard.export_durable_checkpoint(&key, 1);
+        let kept = restored
+            .restore_from_durable_checkpoint(&checkpoint, &key, 1)
+            .is_ok()
+            && restored.is_nonce_burned(&intent.nonce)
+            && restored.is_session_burned(&SESSION)
+            && restored.accumulated_window_spend() == guard.accumulated_window_spend();
+        if !kept {
+            return Err(CliError::verify(
+                "restored policy checkpoint lost burned state",
+            ));
         }
-        drop(ledgers);
-
-        // Verify reload from the retained generation fence reproduces all burned nonces/sessions.
-        let mut reloaded_guards: Vec<_> =
-            trusted_dealer_setup_for_testing([0x99; 32], &[10, 20, 30, 40, 50])
-                .into_iter()
-                .filter(|g| intent.quorum_ids.contains(&g.party_id))
-                .collect();
-        for (guard, fence) in reloaded_guards.iter_mut().zip(&fences) {
-            let ledger_key = cshake256_framed_32(
-                b"QSAG.CLI.POLICY.LEDGER.KEY.V1",
-                &[&key_id(), &guard.party_id.to_be_bytes()],
-            );
-            let _recovered = FsPolicyDurableLedger::open_existing(
-                work_dir
-                    .join("ledgers")
-                    .join(format!("party-{}", guard.party_id)),
-                ledger_key,
-                guard,
-                fence.generation(),
-            )
-            .map_err(|e| CliError::io("verifying fenced policy checkpoint", e))?;
-            if !guard.is_nonce_burned(&intent.nonce) || !guard.is_session_burned(&SESSION) {
-                return Err(CliError::verify(
-                    "fenced policy checkpoint lost burned state",
-                ));
-            }
-        }
-        Ok(minted)
-    })();
-
-    let _ = std::fs::remove_dir_all(&work_dir);
-    persist_result
+    }
+    Ok(minted)
 }
 
 fn outcome(violation: &Option<PolicyViolation>) -> String {
@@ -386,7 +333,17 @@ pub fn evaluate_all() -> Result<([u8; 32], Vec<Json>, bool), CliError> {
 }
 
 pub fn run(raw: &[String]) -> Result<(), CliError> {
-    let args = Args::parse(raw, &["scenario"], &["json", "help"])?;
+    if let Some((verb, rest)) = raw.split_first()
+        && let Some(result) = crate::policy_ledger::run(verb, rest)
+    {
+        return result;
+    }
+    if raw.iter().any(|arg| arg.starts_with("--ledger-dir")) {
+        return Err(CliError::usage(
+            "--ledger-dir needs a subcommand: qsag policy <init|propose|approve|status> (try --help)",
+        ));
+    }
+    let args = Args::parse(raw, &["scenario"], &["json", "help", "ephemeral"])?;
     if args.flag("help") {
         print!("{POLICY_HELP}");
         return Ok(());

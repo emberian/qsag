@@ -2,7 +2,7 @@
 -- [qsag_verified]: type definitions
 module
 public import Aeneas
-@[expose] public section
+public section
 open Aeneas Aeneas.Std Result ControlFlow Error
 set_option linter.dupNamespace false
 set_option linter.hashCommand false
@@ -21,7 +21,7 @@ set_option maxRecDepth 2048
 namespace qsag_verified
 
 /-- [qsag_verified::pants_and_quorum_guards::PantsGuardError]
-    Source: 'src/pants_and_quorum_guards.rs', lines 36:0-60:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 36:0-61:1
     Visibility: public -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.PantsGuardError where
@@ -36,6 +36,7 @@ inductive pants_and_quorum_guards.PantsGuardError where
 | EpochMismatch : pants_and_quorum_guards.PantsGuardError
 | AckCountExceedsCommittee : pants_and_quorum_guards.PantsGuardError
 | InsufficientQuorumAcks : pants_and_quorum_guards.PantsGuardError
+| SharesAlreadyAuthorized : pants_and_quorum_guards.PantsGuardError
 | InvalidWotsC256TargetSum : pants_and_quorum_guards.PantsGuardError
 | RssEnginePoisoned : pants_and_quorum_guards.PantsGuardError
 | ZeroRelationBatch : pants_and_quorum_guards.PantsGuardError
@@ -95,7 +96,7 @@ inductive authenticated_belt.BeltQuorumStepInput where
   authenticated_belt.BeltQuorumStepInput
 
 /-- [qsag_verified::pants_and_quorum_guards::BeltAuthorizationGrant]
-    Source: 'src/pants_and_quorum_guards.rs', lines 77:0-81:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 78:0-82:1
     Visibility: public -/
 structure pants_and_quorum_guards.BeltAuthorizationGrant where
   authorized_epoch : Std.U64
@@ -114,7 +115,7 @@ inductive authenticated_belt.BeltQuorumStepOutput where
   authenticated_belt.BeltQuorumStepOutput
 
 /-- [qsag_verified::pants_and_quorum_guards::BeltQuorumPhase]
-    Source: 'src/pants_and_quorum_guards.rs', lines 68:0-73:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 69:0-74:1
     Visibility: public -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.BeltQuorumPhase where
@@ -124,7 +125,7 @@ inductive pants_and_quorum_guards.BeltQuorumPhase where
 | Poisoned : pants_and_quorum_guards.BeltQuorumPhase
 
 /-- [qsag_verified::pants_and_quorum_guards::BeltQuorumCore]
-    Source: 'src/pants_and_quorum_guards.rs', lines 147:0-161:1 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 148:0-162:1 -/
 structure pants_and_quorum_guards.BeltQuorumCore where
   n : Std.U32
   t : Std.U32
@@ -315,7 +316,7 @@ inductive fts_spn_guard.FtsGuardError where
 | InvalidWotsConstantSum : fts_spn_guard.FtsGuardError
 
 /-- [qsag_verified::fts_spn_guard::FtsEpochPermit]
-    Source: 'src/fts_spn_guard.rs', lines 44:0-48:1
+    Source: 'src/fts_spn_guard.rs', lines 43:0-47:1
     Visibility: public -/
 structure fts_spn_guard.FtsEpochPermit where
   key_id : Array Std.U8 32#usize
@@ -323,7 +324,7 @@ structure fts_spn_guard.FtsEpochPermit where
   msg_digest : Array Std.U8 32#usize
 
 /-- [qsag_verified::fts_spn_guard::FtsEpochGuard]
-    Source: 'src/fts_spn_guard.rs', lines 58:0-64:1
+    Source: 'src/fts_spn_guard.rs', lines 64:0-70:1
     Visibility: public -/
 structure fts_spn_guard.FtsEpochGuard where
   key_id : Array Std.U8 32#usize
@@ -333,7 +334,7 @@ structure fts_spn_guard.FtsEpochGuard where
   poisoned : Bool
 
 /-- [qsag_verified::fts_spn_guard::FtsDeferredMacSession]
-    Source: 'src/fts_spn_guard.rs', lines 197:0-205:1
+    Source: 'src/fts_spn_guard.rs', lines 203:0-211:1
     Visibility: public -/
 structure fts_spn_guard.FtsDeferredMacSession where
   session_id : Array Std.U8 32#usize
@@ -353,7 +354,7 @@ structure goldilocks.CanonicalLiftError where
 /-- [qsag_verified::goldilocks::Goldilocks]
     Source: 'src/goldilocks.rs', lines 27:0-27:31
     Visibility: public -/
-@[reducible]
+@[reducible, expose]
 def goldilocks.Goldilocks := Std.U64
 
 /-- [qsag_verified::goldilocks::GoldilocksExt2]
@@ -385,7 +386,7 @@ structure opening_guard.ConsumingOpeningGuard2Lane where
   consumed : Bool
 
 /-- [qsag_verified::pants_and_quorum_guards::BeltQuorumCoreInput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 86:0-100:1 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 87:0-101:1 -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.BeltQuorumCoreInput where
 | ProposeOrRetryEpoch :
@@ -403,7 +404,7 @@ inductive pants_and_quorum_guards.BeltQuorumCoreInput where
   pants_and_quorum_guards.BeltQuorumCoreInput
 
 /-- [qsag_verified::pants_and_quorum_guards::BeltQuorumCoreOutput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 105:0-109:1 -/
+    Source: 'src/pants_and_quorum_guards.rs', lines 106:0-110:1 -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.BeltQuorumCoreOutput where
 | EpochBound : pants_and_quorum_guards.BeltQuorumCoreOutput
@@ -413,7 +414,7 @@ inductive pants_and_quorum_guards.BeltQuorumCoreOutput where
   pants_and_quorum_guards.BeltQuorumCoreOutput
 
 /-- [qsag_verified::pants_and_quorum_guards::VerifiedWotsC256Guard]
-    Source: 'src/pants_and_quorum_guards.rs', lines 563:0-567:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 567:0-571:1
     Visibility: public -/
 structure pants_and_quorum_guards.VerifiedWotsC256Guard where
   validated_digest : Array Std.U8 32#usize
@@ -421,13 +422,13 @@ structure pants_and_quorum_guards.VerifiedWotsC256Guard where
   verified_sum : Std.U32
 
 /-- [qsag_verified::pants_and_quorum_guards::RssOpenPermit]
-    Source: 'src/pants_and_quorum_guards.rs', lines 616:0-618:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 620:0-622:1
     Visibility: public -/
 structure pants_and_quorum_guards.RssOpenPermit where
   verified_clean : Bool
 
 /-- [qsag_verified::pants_and_quorum_guards::RssLatchStepInput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 622:0-626:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 626:0-630:1
     Visibility: public -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.RssLatchStepInput where
@@ -436,7 +437,7 @@ inductive pants_and_quorum_guards.RssLatchStepInput where
 | AuthorizeOpen : pants_and_quorum_guards.RssLatchStepInput
 
 /-- [qsag_verified::pants_and_quorum_guards::RssLatchStepOutput]
-    Source: 'src/pants_and_quorum_guards.rs', lines 630:0-634:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 634:0-638:1
     Visibility: public -/
 @[discriminant isize]
 inductive pants_and_quorum_guards.RssLatchStepOutput where
@@ -447,7 +448,7 @@ inductive pants_and_quorum_guards.RssLatchStepOutput where
   pants_and_quorum_guards.RssLatchStepOutput
 
 /-- [qsag_verified::pants_and_quorum_guards::VerifiedRssPoisonLatch]
-    Source: 'src/pants_and_quorum_guards.rs', lines 639:0-643:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 643:0-647:1
     Visibility: public -/
 structure pants_and_quorum_guards.VerifiedRssPoisonLatch where
   pending_relations : Std.U64
@@ -455,7 +456,7 @@ structure pants_and_quorum_guards.VerifiedRssPoisonLatch where
   poisoned : Bool
 
 /-- [qsag_verified::pants_and_quorum_guards::WaistbandDerivationRequest]
-    Source: 'src/pants_and_quorum_guards.rs', lines 794:0-802:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 798:0-806:1
     Visibility: public -/
 structure pants_and_quorum_guards.WaistbandDerivationRequest where
   req_layer : Std.U32
@@ -467,7 +468,7 @@ structure pants_and_quorum_guards.WaistbandDerivationRequest where
   candidate_ancestor_codeword_tag : Array Std.U8 32#usize
 
 /-- [qsag_verified::pants_and_quorum_guards::WaistbandAncestorPermit]
-    Source: 'src/pants_and_quorum_guards.rs', lines 807:0-813:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 811:0-817:1
     Visibility: public -/
 structure pants_and_quorum_guards.WaistbandAncestorPermit where
   layer : Std.U32
@@ -477,7 +478,7 @@ structure pants_and_quorum_guards.WaistbandAncestorPermit where
   authorized_codeword_tag : Array Std.U8 32#usize
 
 /-- [qsag_verified::pants_and_quorum_guards::VerifiedWaistbandRootGuard]
-    Source: 'src/pants_and_quorum_guards.rs', lines 816:0-826:1
+    Source: 'src/pants_and_quorum_guards.rs', lines 820:0-830:1
     Visibility: public -/
 structure pants_and_quorum_guards.VerifiedWaistbandRootGuard where
   key_pk_tag : Array Std.U8 32#usize
@@ -648,13 +649,13 @@ structure rss_cut_session.RssCutGateSession where
 /-- [qsag_verified::tower::Gf256]
     Source: 'src/tower.rs', lines 14:0-14:25
     Visibility: public -/
-@[reducible]
+@[reducible, expose]
 def tower.Gf256 := Std.U8
 
 /-- [qsag_verified::tower::Tower128]
     Source: 'src/tower.rs', lines 18:0-18:30
     Visibility: public -/
-@[reducible]
+@[reducible, expose]
 def tower.Tower128 := Std.U128
 
 /-- [qsag_verified::tower::BdozCommittedBatchOpening2Lane]
@@ -758,7 +759,7 @@ inductive threshold.EpochLatchError where
 /-- [qsag_verified::tower::Gf16]
     Source: 'src/tower.rs', lines 10:0-10:24
     Visibility: public -/
-@[reducible]
+@[reducible, expose]
 def tower.Gf16 := Std.U8
 
 /-- [qsag_verified::tower::Tower256]

@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 public import QsagVerified.Proofs.SpongeConformance
 import all Qsag.Keccak
 import all QsagVerified.Proofs.RealSpecKeccakWeld
@@ -775,6 +776,221 @@ theorem shake256_absorb_pad_refines (chunks : List (Slice Std.U8)) :
   refine ⟨sp0, sp1, sp2, h0, h1, h2, ?_, hsq, hoff⟩
   rw [hstate, hs1, hs0, List.nil_append]
   rfl
+
+/-- `Qsag.shake256Xof` squeezes from exactly the state the extracted sponge holds after
+absorbing `chunks` and finalizing. -/
+theorem shake256_xof_from_extracted_state (chunks : List (Slice Std.U8)) :
+    ∃ sp0 sp1 sp2,
+      keccak.Shake256Sponge.new_shake256 = .ok sp0 ∧
+      spongeAbsorbAll sp0 chunks = .ok sp1 ∧
+      keccak.Shake256Sponge.finalize sp1 = .ok sp2 ∧
+      ∀ outLen, Qsag.shake256Xof outLen (chunks.map fun d => u8Bytes d.val).flatten =
+        Qsag.squeezeXofAux outLen (keccakStateOfArray sp2.state) := by
+  obtain ⟨sp0, sp1, sp2, h0, h1, h2, hstate, _, _⟩ := shake256_absorb_pad_refines chunks
+  refine ⟨sp0, sp1, sp2, h0, h1, h2, fun outLen => ?_⟩
+  unfold Qsag.shake256Xof
+  rw [hstate]
+
+/-- cSHAKE256 absorb and pad for a sponge that has absorbed the SP 800-185 customization
+prefix and carries suffix `0x04`: any split of the input, then `finalize`, leaves exactly the
+state `Qsag.cshake256Xof` squeezes from. That `new_cshake256` establishes the hypothesis
+(`left_encode`, `bytepad` and the prefix flush) is not proved here. -/
+theorem cshake256_absorb_pad_refines (cust : List UInt8) (hc : cust ≠ [])
+    (sp0 : keccak.Shake256Sponge)
+    (hpre : SpongeAbsorbed sp0 (Qsag.customizationPrefix cust)) (hsfx : sp0.suffix = 4#u8)
+    (chunks : List (Slice Std.U8)) :
+    ∃ sp1 sp2,
+      spongeAbsorbAll sp0 chunks = .ok sp1 ∧
+      keccak.Shake256Sponge.finalize sp1 = .ok sp2 ∧
+      (∀ outLen, Qsag.cshake256Xof outLen cust (chunks.map fun d => u8Bytes d.val).flatten =
+        Qsag.squeezeXofAux outLen (keccakStateOfArray sp2.state)) ∧
+      sp2.squeezing = true ∧ sp2.squeeze_offset = 0#usize := by
+  obtain ⟨sp1, h1, habs1, hs1⟩ := sponge_absorb_all_refines chunks sp0 _ hpre
+  obtain ⟨sp2, h2, hstate, hsq, hoff, _⟩ := sponge_finalize_refines sp1 _ habs1
+  refine ⟨sp1, sp2, h1, h2, fun outLen => ?_, hsq, hoff⟩
+  unfold Qsag.cshake256Xof
+  simp only [hc, ↓reduceIte]
+  rw [hstate, hs1, hsfx]
+  rfl
+
+/-- A whole short squeeze writes every byte of the initial rate block, rather than
+merely terminating. The result is independent of the destination's initial contents. -/
+theorem sponge_squeeze_prefix (sp : keccak.Shake256Sponge) (out : Slice Std.U8)
+    (hsq : sp.squeezing = true) (hoff : sp.squeeze_offset = 0#usize)
+    (hsize : out.val.length ≤ 136) :
+    ∃ sp' dst, keccak.Shake256Sponge.squeeze sp out = .ok (sp', dst) ∧
+      dst.val.length = out.val.length ∧
+      ∀ j, j < out.val.length →
+        dst.val.getD j 0#u8 = spongeRateByte sp.state j := by
+  let size := out.val.length
+  let body := fun (st, dst, i) => keccak.Shake256Sponge.squeeze_loop.body st dst i
+  let P := fun (n : Nat) (x : keccak.Shake256Sponge × Slice Std.U8 × Std.Usize) =>
+    x.2.2.val + n = size ∧ x.2.1.val.length = size ∧
+    x.1.squeeze_offset.val = x.2.2.val ∧ x.1.state = sp.state ∧
+    ∀ j, j < x.2.2.val → x.2.1.val.getD j 0#u8 = spongeRateByte sp.state j
+  let Q := fun (x : keccak.Shake256Sponge × Slice Std.U8) =>
+    x.2.val.length = size ∧ ∀ j, j < size →
+      x.2.val.getD j 0#u8 = spongeRateByte sp.state j
+  have hz : ∀ x, P 0 x → ∃ y, body x = .ok (.done y) ∧ Q y := by
+    rintro ⟨st, dst, i⟩ ⟨hi, hd, _, _, hx⟩
+    have hiv : i.val = size := by simpa using hi
+    have he : ¬ i < Slice.len dst := by
+      change ¬ i.val < (Slice.len dst).val
+      rw [Slice.len_val, hd, hiv]
+      exact Nat.lt_irrefl _
+    refine ⟨(st, dst), ?_, hd, ?_⟩
+    · simp only [body, keccak.Shake256Sponge.squeeze_loop.body, he, ite_false]
+    · intro j hj; exact hx j (hiv ▸ hj)
+  have step : ∀ n x, P (n + 1) x → ∃ x', body x = .ok (.cont x') ∧ P n x' := by
+    rintro n ⟨st, dst, i⟩ ⟨hi, hd, ho, ha, hx⟩
+    dsimp only at hi hd ho ha hx
+    have hil : i.val < dst.val.length := by change i.val + (n + 1) = size at hi; omega
+    have hol : st.squeeze_offset.val < 136 := by
+      change st.squeeze_offset.val = i.val at ho
+      change dst.val.length = out.val.length at hd
+      omega
+    obtain ⟨dst', i', off', hbody, hdst, hi', hoff'⟩ := sponge_squeeze_byte st dst i hil hol
+    refine ⟨({st with squeeze_offset := off'}, dst', i'), hbody, ?_, ?_, ?_, ha, ?_⟩
+    · change i'.val + n = size
+      change i.val + (n + 1) = size at hi
+      omega
+    · change dst'.val.length = size
+      rw [hdst, List.length_set]; exact hd
+    · change off'.val = i'.val; omega
+    · intro j hj
+      change j < i'.val at hj
+      change dst'.val.getD j 0#u8 = _
+      rw [hdst, getD_set dst.val i.val j _ _ hil]
+      by_cases he : j = i.val
+      · subst j
+        simp only [↓reduceIte]
+        rw [ha, ho]
+      · rw [ite_eq_right he]
+        exact hx j (by omega)
+  obtain ⟨⟨sp', dst⟩, hloop, hd, hx⟩ := loopFuel_total_rank body P Q hz step size
+    (sp, out, 0#usize) ⟨Nat.zero_add _, rfl, by rw [hoff], rfl, by intro j hj; exact (Nat.not_lt_zero j hj).elim⟩
+  have hactual : keccak.Shake256Sponge.squeeze_loop sp out 0#usize = .ok (sp', dst) := by
+    unfold keccak.Shake256Sponge.squeeze_loop
+    apply loop_ok_of_loopFuel (fuel := size + 1)
+    · exact Nat.le_trans (Nat.add_le_add_right hsize 1) (by decide)
+    · exact hloop
+  refine ⟨sp', dst, ?_, hd, hx⟩
+  simp only [keccak.Shake256Sponge.squeeze, keccak.Shake256Sponge.finalize,
+    hsq, ite_true, bind_eq_result_bind, result_bind_ok, hactual]
+
+private theorem spongeRateByte_nat (a : Array Std.U64 25#usize) (j : Nat) :
+    (UInt8.ofBitVec (spongeRateByte a j).bv).toNat =
+      (a.val.getD (j / 8) 0#u64).val / 2 ^ (8 * (j % 8)) % 256 := by
+  simp only [spongeRateByte, UScalar.cast, UScalar.bv_and, BitVec.setWidth_and]
+  change (UInt8.ofBitVec (((a.val.getD (j / 8) 0#u64).bv >>> (8 * (j % 8))).setWidth 8
+    &&& BitVec.allOnes 8)).toNat = _
+  rw [BitVec.and_allOnes]
+  simp [UInt8.toNat_ofBitVec, BitVec.toNat_setWidth, BitVec.toNat_ushiftRight,
+    Nat.shiftRight_eq_div_pow, UScalar.val]
+
+set_option maxHeartbeats 2000000 in
+private theorem spongeRateByte_spec32 (a : Array Std.U64 25#usize) (j : Nat)
+    (hj : j < 32) :
+    UInt8.ofBitVec (spongeRateByte a j).bv =
+      (Qsag.rateBlockBytes (keccakStateOfArray a)).getD j 0 := by
+  apply UInt8.toNat_inj.mp
+  rw [spongeRateByte_nat]
+  have hcases : j = 0 ∨ j = 1 ∨ j = 2 ∨ j = 3 ∨ j = 4 ∨ j = 5 ∨ j = 6 ∨ j = 7 ∨ j = 8 ∨ j = 9 ∨ j = 10 ∨ j = 11 ∨ j = 12 ∨ j = 13 ∨ j = 14 ∨ j = 15 ∨ j = 16 ∨ j = 17 ∨ j = 18 ∨ j = 19 ∨ j = 20 ∨ j = 21 ∨ j = 22 ∨ j = 23 ∨ j = 24 ∨ j = 25 ∨ j = 26 ∨ j = 27 ∨ j = 28 ∨ j = 29 ∨ j = 30 ∨ j = 31 := by omega
+  rcases hcases with rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl | rfl
+  all_goals simp [Qsag.rateBlockBytes, Qsag.laneBytesLE, keccakStateOfArray,
+    UInt64.toNat_ofBitVec, UScalar.val]
+
+private theorem list_eq_of_getD {α : Type} (d : α) (xs ys : List α)
+    (hlen : xs.length = ys.length)
+    (h : ∀ i, i < xs.length → xs.getD i d = ys.getD i d) : xs = ys := by
+  induction xs generalizing ys with
+  | nil =>
+    cases ys with
+    | nil => rfl
+    | cons y ys => cases hlen
+  | cons x xs ih =>
+    cases ys with
+    | nil => cases hlen
+    | cons y ys =>
+      have hxy : x = y := h 0 (Nat.zero_lt_succ _)
+      have ht : xs = ys := ih ys (Nat.succ.inj hlen)
+        (fun i hi => h (i + 1) (Nat.succ_lt_succ hi))
+      rw [hxy, ht]
+
+/-- The complete 32-byte squeeze agrees with the canonical XOF byte stream. -/
+theorem sponge_squeeze32_refines (sp : keccak.Shake256Sponge) (out : Slice Std.U8)
+    (hsq : sp.squeezing = true) (hoff : sp.squeeze_offset = 0#usize)
+    (hlen : out.val.length = 32) :
+    ∃ sp' dst, keccak.Shake256Sponge.squeeze sp out = .ok (sp', dst) ∧
+      u8Bytes dst.val = Qsag.squeezeXofAux 32 (keccakStateOfArray sp.state) := by
+  obtain ⟨sp', dst, hr, hd, hx⟩ := sponge_squeeze_prefix sp out hsq hoff (by omega)
+  refine ⟨sp', dst, hr, ?_⟩
+  apply list_eq_of_getD 0
+  · rw [u8Bytes_length, hd, hlen, Qsag.squeezeXofAux_length]
+  · intro j hj
+    have hj32 : j < 32 := by rw [u8Bytes_length, hd, hlen] at hj; exact hj
+    rw [u8Bytes_getD, hx j (by omega), spongeRateByte_spec32 sp.state j hj32]
+    simp [Qsag.squeezeXofAux, Qsag.squeezeXofFuel, List.getD_eq_getElem?_getD, hj32]
+
+/-- End-to-end SHAKE256 equality: the extracted Rust entry point returns exactly the
+canonical 32 bytes, for arbitrary input length. -/
+theorem shake256_32_refines (input : Slice Std.U8) :
+    ∃ out, keccak.shake256_32 input = .ok out ∧
+      u8Bytes out.val = Qsag.shake256Xof 32 (u8Bytes input.val) := by
+  obtain ⟨sp0, hnew, habs0, hsfx0⟩ := sponge_new_shake256_absorbed
+  obtain ⟨sp1, habs, habs1, hsfx1⟩ := sponge_absorb_refines sp0 input [] habs0
+  obtain ⟨sp2, hfinal, hstate, hsq, hoff, _⟩ := sponge_finalize_refines sp1 _ habs1
+  let dst0 := Array.repeat 32#usize 0#u8
+  obtain ⟨sp3, dst, hsqueeze, hbytes⟩ :=
+    sponge_squeeze32_refines sp2 (Array.to_slice_mut dst0).1 hsq hoff rfl
+  have hd : dst.val.length = (32#usize).val := by
+    have hl := congrArg List.length hbytes
+    rw [u8Bytes_length, Qsag.squeezeXofAux_length] at hl
+    exact hl
+  have hloop : keccak.Shake256Sponge.squeeze_loop sp2 (Array.to_slice_mut dst0).1 0#usize =
+      .ok (sp3, dst) := by
+    simpa only [keccak.Shake256Sponge.squeeze, keccak.Shake256Sponge.finalize,
+      hsq, ite_true, bind_eq_result_bind, result_bind_ok] using hsqueeze
+  dsimp only [dst0] at hloop
+  refine ⟨Array.from_slice dst0 dst, ?_, ?_⟩
+  · simp only [keccak.shake256_32, hnew, habs, keccak.Shake256Sponge.squeeze,
+      hfinal, bind_eq_result_bind, result_bind_ok, lift_eq_ok, hloop]
+    rfl
+  · simp only [Array.from_slice, hd, dite_true]
+    rw [hbytes, hstate, hsfx1, hsfx0, List.nil_append]
+    rfl
+
+/-- cSHAKE's byte-output weld, conditional only on the constructor establishing the
+SP 800-185 prefix. The constructor's encoding and bytepad proof remains separate. -/
+theorem cshake256_32_refines_of_prefix (customization input : Slice Std.U8)
+    (hc : u8Bytes customization.val ≠ []) (sp0 : keccak.Shake256Sponge)
+    (hnew : keccak.Shake256Sponge.new_cshake256 customization = .ok sp0)
+    (hpre : SpongeAbsorbed sp0 (Qsag.customizationPrefix (u8Bytes customization.val)))
+    (hsfx : sp0.suffix = 4#u8) :
+    ∃ out, keccak.cshake256_32 customization input = .ok out ∧
+      u8Bytes out.val = Qsag.cshake256Xof 32 (u8Bytes customization.val) (u8Bytes input.val) := by
+  obtain ⟨sp1, habs, habs1, hsfx1⟩ := sponge_absorb_refines sp0 input _ hpre
+  obtain ⟨sp2, hfinal, hstate, hsq, hoff, _⟩ := sponge_finalize_refines sp1 _ habs1
+  let dst0 := Array.repeat 32#usize 0#u8
+  obtain ⟨sp3, dst, hsqueeze, hbytes⟩ :=
+    sponge_squeeze32_refines sp2 (Array.to_slice_mut dst0).1 hsq hoff rfl
+  have hd : dst.val.length = (32#usize).val := by
+    have hl := congrArg List.length hbytes
+    rw [u8Bytes_length, Qsag.squeezeXofAux_length] at hl
+    exact hl
+  have hloop : keccak.Shake256Sponge.squeeze_loop sp2 (Array.to_slice_mut dst0).1 0#usize =
+      .ok (sp3, dst) := by
+    simpa only [keccak.Shake256Sponge.squeeze, keccak.Shake256Sponge.finalize,
+      hsq, ite_true, bind_eq_result_bind, result_bind_ok] using hsqueeze
+  dsimp only [dst0] at hloop
+  refine ⟨Array.from_slice dst0 dst, ?_, ?_⟩
+  · simp only [keccak.cshake256_32, hnew, habs, keccak.Shake256Sponge.squeeze,
+      hfinal, bind_eq_result_bind, result_bind_ok, lift_eq_ok, hloop]
+    rfl
+  · simp only [Array.from_slice, hd, dite_true]
+    rw [hbytes, hstate, hsfx1, hsfx]
+    simp only [Qsag.cshake256Xof, hc, ↓reduceIte]
+    rfl
 
 /-- The pad is sensitive to the domain suffix: SHAKE and cSHAKE final blocks differ. -/
 theorem tooth_last_block_suffix_sensitive :

@@ -127,6 +127,26 @@ theorem verify_affine_duet_fold_step_coset_sound
       claimed = extAdd odd (extMul alpha even) := by
   rw [verify_affine_duet_fold_step_sound, duet_fold_algebraic_sound alpha he ho hit hiy]
 
+theorem duet_fold_coset_sound
+    {even odd : Ext4} {y0 iy it : U64} (alpha : Ext4)
+    (he : IsCanonicalExt4 even) (ho : IsCanonicalExt4 odd)
+    (hit : fieldMul 2#u64 it = 1#u64)
+    (hiy : fieldMul (fieldMul 2#u64 y0) iy = 1#u64) :
+    duet_fold (extAdd even (extScale odd y0)) (extSub even (extScale odd y0)) iy it alpha =
+      .ok (extAdd odd (extMul alpha even)) := by
+  rw [duet_refines, duet_fold_algebraic_sound alpha he ho hit hiy]
+
+theorem cwyz_duet_fold_coset_sound
+    {even odd : Ext4} {y0 iy it : U64} (theta alpha beta : Ext4)
+    (he : IsCanonicalExt4 even) (ho : IsCanonicalExt4 odd)
+    (hit : fieldMul 2#u64 it = 1#u64)
+    (hiy : fieldMul (fieldMul 2#u64 y0) iy = 1#u64) :
+    cwyz_duet_fold (extAdd even (extScale odd y0)) (extSub even (extScale odd y0))
+        iy it (fieldMul y0 y0) theta alpha beta =
+      .ok (extAdd odd (extMul (extAdd alpha (extScale beta (fieldMul y0 y0)))
+        (extAdd even (extMul theta odd)))) := by
+  rw [cwyz_duet_refines, cwyz_duet_fold_algebraic_sound theta alpha beta he ho hit hiy]
+
 /-- The production-named fold computes the exact asymmetric affine expression. -/
 theorem fold_duet_affine_ext4_spec
     (v0 v1 : Ext4) (iy it yy : U64) (theta alpha beta : Ext4) :
@@ -197,6 +217,34 @@ theorem verify_cwyz_bridge_claim_step_dual_sound
         (extMul (extAdd a1 (extMul alpha (extAdd a0 (extMul theta a1)))) (extAdd b0 (extMul phi b1)))
         (extMul (extMul beta (extAdd a0 (extMul theta a1))) kn) := by
   rw [verify_cwyz_bridge_claim_step_sound, cwyz_bridge_claim_step_dual_sound]
+
+theorem cwyz_bridge_claim_step_dual_spec
+    (a0 a1 b0 b1 kn phi theta alpha beta : Ext4) :
+    cwyz_bridge_claim_step
+        (extMul a0 b0) (extMul a0 b1) (extMul a1 b0) (extMul a0 kn) (extMul a1 kn)
+        (extAdd (extMul a0 b0) (extMul a1 b1)) phi theta alpha beta =
+      .ok (extAdd
+        (extMul (extAdd a1 (extMul alpha (extAdd a0 (extMul theta a1)))) (extAdd b0 (extMul phi b1)))
+        (extMul (extMul beta (extAdd a0 (extMul theta a1))) kn)) := by
+  rw [cwyz_bridge_claim_step_refines, cwyz_bridge_claim_step_dual_sound]
+
+theorem eval_quadratic_sumcheck_wire_hypercube_spec
+    (c0 c2 sum_claim : Ext4) (hs : IsCanonicalExt4 sum_claim) :
+    ∃ y0 y1,
+      eval_quadratic_sumcheck_wire c0 c2 sum_claim extZero = .ok y0 ∧
+      eval_quadratic_sumcheck_wire c0 c2 sum_claim extOne = .ok y1 ∧
+      extAdd y0 y1 = sum_claim :=
+  ⟨quadraticWireValue c0 c2 sum_claim extZero,
+   quadraticWireValue c0 c2 sum_claim extOne,
+   eval_quadratic_sumcheck_wire_refines c0 c2 sum_claim extZero,
+   eval_quadratic_sumcheck_wire_refines c0 c2 sum_claim extOne,
+   eval_quadratic_sumcheck_wire_hypercube_sum c0 c2 sum_claim hs⟩
+
+theorem affine_cascade_claim_step_spec
+    (acc w0 w1 eval_at_point shifted_eval : Ext4) :
+    affine_cascade_claim_step acc w0 w1 eval_at_point shifted_eval =
+      .ok (extAdd (extAdd acc (extMul w0 eval_at_point)) (extMul w1 shifted_eval)) :=
+  affine_cascade_claim_step_refines acc w0 w1 eval_at_point shifted_eval
 
 /-! ## 3. Arbitrary-Slice Horner Evaluation & Polynomial Pin Verification -/
 
@@ -273,6 +321,11 @@ theorem eval_ext4_univariate_at_base_spec (coeffs : Slice Ext4) (z : U64) :
     extZero (Slice.len coeffs) (Slice.len_val coeffs)
   rw [List.take_length] at hloop
   exact loop_ok_of_loopFuel hfuel hloop
+
+theorem eval_ext4_univariate_at_base_ascending_sound (coeffs : Slice Ext4) (z : U64)
+    (hcan : ∀ c ∈ coeffs.val, IsCanonicalExt4 c) :
+    eval_ext4_univariate_at_base coeffs z = .ok (evalPolyAscending coeffs.val z) := by
+  rw [eval_ext4_univariate_at_base_spec, hornerSpec_eq_evalPolyAscending coeffs.val z hcan]
 
 /-- The production-named entry point returns the complete ascending-degree polynomial. -/
 theorem eval_univariate_ext4_at_base_spec (coeffs : Slice Ext4) (z : U64) :
@@ -675,10 +728,10 @@ theorem step_merkle_pair_order_none_iff
 
 /-! ## 7. Overflow-Free Quorum Weight Summation (`checked_quorum_sum`) -/
 
-def natSumU64 (xs : List U64) : Nat :=
+@[expose] def natSumU64 (xs : List U64) : Nat :=
   xs.foldl (fun acc x => acc + x.val) 0
 
-def QuorumSumSpec
+@[expose] def QuorumSumSpec
     (counts minimums : List U64) (minimum_global : U64) (sum : Nat) : Prop :=
   counts ≠ [] ∧
   counts.length = minimums.length ∧
@@ -1138,13 +1191,13 @@ theorem tooth_merkle_pair_swaps_on_direction_bit_and_rejects_shift64 :
 /-- `#tooth`: `checked_quorum_sum` rejects `u64` wraparound forgery (`u64::MAX + 5`) while accepting
     valid multi-shard quorum sums. -/
 theorem tooth_checked_quorum_sum_rejects_u64_wraparound_forgery :
-    let overflow_counts : Slice U64 := ⟨[MAX_U64_WORD, 5#u64], by decide⟩
-    let overflow_mins : Slice U64 := ⟨[1#u64, 1#u64], by decide⟩
-    let honest_counts : Slice U64 := ⟨[10#u64, 15#u64], by decide⟩
-    let honest_mins : Slice U64 := ⟨[8#u64, 12#u64], by decide⟩
+    let overflow_counts : Slice U64 := Array.to_slice (Array.make 2#usize [MAX_U64_WORD, 5#u64])
+    let overflow_mins : Slice U64 := Array.to_slice (Array.make 2#usize [1#u64, 1#u64])
+    let honest_counts : Slice U64 := Array.to_slice (Array.make 2#usize [10#u64, 15#u64])
+    let honest_mins : Slice U64 := Array.to_slice (Array.make 2#usize [8#u64, 12#u64])
     checked_quorum_sum overflow_counts overflow_mins 4#u64 = .ok none ∧
     checked_quorum_sum honest_counts honest_mins 20#u64 = .ok (some 25#u64) := by
-  dsimp only
+  dsimp only [Array.to_slice, Array.make]
   constructor
   · rw [checked_quorum_sum_none_iff]
     rintro ⟨s, _, _, _, _, hsum, hmax, _⟩
@@ -1162,14 +1215,182 @@ theorem tooth_checked_quorum_sum_rejects_u64_wraparound_forgery :
 /-- `#tooth`: `verify_ood_pin_eq` rejects single-limb perturbations and length mismatches while accepting
     exact slice matches. -/
 theorem tooth_ood_pin_rejects_perturbation_and_length_mismatch :
-    let s1 : Slice U64 := ⟨[1#u64, 2#u64, 3#u64, 4#u64], by decide⟩
-    let s2 : Slice U64 := ⟨[1#u64, 2#u64, 3#u64, 5#u64], by decide⟩
-    let s3 : Slice U64 := ⟨[1#u64, 2#u64, 3#u64], by decide⟩
+    let s1 : Slice U64 := Array.to_slice (Array.make 4#usize [1#u64, 2#u64, 3#u64, 4#u64])
+    let s2 : Slice U64 := Array.to_slice (Array.make 4#usize [1#u64, 2#u64, 3#u64, 5#u64])
+    let s3 : Slice U64 := Array.to_slice (Array.make 3#usize [1#u64, 2#u64, 3#u64])
     verify_ood_pin_eq s1 s2 = .ok false ∧
     verify_ood_pin_eq s1 s3 = .ok false ∧
     verify_ood_pin_eq s1 s1 = .ok true := by
   dsimp only
   simp only [verify_ood_pin_eq_spec]
   decide
+
+private theorem eval_fieldMul (a b c : U64)
+    (h : (a.val * b.val) % 18446744069414584321 = c.val) : fieldMul a b = c :=
+  UScalar.eq_of_val_eq ((fieldMul_val a b).trans h)
+
+private theorem eval_ext4_concrete (lhs rhs : Ext4)
+    (ha : lhs.a.val = rhs.a.val) (hb : lhs.b.val = rhs.b.val)
+    (hc : lhs.c.val = rhs.c.val) (hd : lhs.d.val = rhs.d.val) : lhs = rhs :=
+  Ext4.ext (UScalar.eq_of_val_eq ha) (UScalar.eq_of_val_eq hb)
+    (UScalar.eq_of_val_eq hc) (UScalar.eq_of_val_eq hd)
+
+/-- `#tooth` & premise-inhabitedness witness: exhibits concrete Goldilocks inverses `it` and `iy`
+    inhabiting `hit` and `hiy`, verifies exact coset recovery for `fold_duet_affine_ext4` and
+    `cwyz_duet_fold`, and proves `verify_affine_duet_fold_step` and `verify_cwyz_duet_fold_step`
+    accept honest claims while rejecting single-limb perturbations. -/
+theorem tooth_coset_inverse_premises_inhabited_and_fold_rejects_perturbation :
+    let it := 9223372034707292161#u64
+    let y0 := 2#u64
+    let iy := 13835058052060938241#u64
+    let yy := 4#u64
+    let v0 : Ext4 := ⟨29#u64, 39#u64, 45#u64, 57#u64⟩
+    let v1 : Ext4 := ⟨18446744069414584298#u64, 18446744069414584292#u64,
+                      18446744069414584290#u64, 18446744069414584286#u64⟩
+    let theta : Ext4 := ⟨2#u64, 0#u64, 0#u64, 0#u64⟩
+    let alpha : Ext4 := ⟨5#u64, 0#u64, 0#u64, 0#u64⟩
+    let beta : Ext4 := ⟨7#u64, 0#u64, 0#u64, 0#u64⟩
+    let duet_honest : Ext4 := ⟨28#u64, 42#u64, 54#u64, 78#u64⟩
+    let duet_forged : Ext4 := ⟨28#u64, 42#u64, 54#u64, 79#u64⟩
+    let cwyz_honest : Ext4 := ⟨970#u64, 1304#u64, 1504#u64, 1904#u64⟩
+    let cwyz_forged : Ext4 := ⟨970#u64, 1304#u64, 1504#u64, 1905#u64⟩
+    fieldMul 2#u64 it = 1#u64 ∧
+    fieldMul (fieldMul 2#u64 y0) iy = 1#u64 ∧
+    fold_duet_affine_ext4 v0 v1 iy it yy theta alpha beta = .ok cwyz_honest ∧
+    cwyz_duet_fold v0 v1 iy it yy theta alpha beta = .ok cwyz_honest ∧
+    verify_affine_duet_fold_step v0 v1 iy it alpha duet_honest = .ok true ∧
+    verify_affine_duet_fold_step v0 v1 iy it alpha duet_forged = .ok false ∧
+    verify_cwyz_duet_fold_step v0 v1 iy it yy theta alpha beta cwyz_honest = .ok true ∧
+    verify_cwyz_duet_fold_step v0 v1 iy it yy theta alpha beta cwyz_forged = .ok false := by
+  dsimp only
+  have hit : fieldMul 2#u64 9223372034707292161#u64 = 1#u64 := eval_fieldMul _ _ _ (by decide)
+  have h2y : fieldMul 2#u64 2#u64 = 4#u64 := eval_fieldMul _ _ _ (by decide)
+  have hiy : fieldMul (fieldMul 2#u64 2#u64) 13835058052060938241#u64 = 1#u64 := by
+    rw [h2y]
+    exact eval_fieldMul _ _ _ (by decide)
+  have hduet : duetValue ⟨29#u64, 39#u64, 45#u64, 57#u64⟩
+      ⟨18446744069414584298#u64, 18446744069414584292#u64,
+       18446744069414584290#u64, 18446744069414584286#u64⟩
+      13835058052060938241#u64 9223372034707292161#u64 ⟨5#u64, 0#u64, 0#u64, 0#u64⟩ =
+      ⟨28#u64, 42#u64, 54#u64, 78#u64⟩ := by
+    unfold duetValue extAdd extSub extScale extMul
+    apply eval_ext4_concrete <;>
+      simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
+      decide
+  have hcwyz : cwyzValue ⟨29#u64, 39#u64, 45#u64, 57#u64⟩
+      ⟨18446744069414584298#u64, 18446744069414584292#u64,
+       18446744069414584290#u64, 18446744069414584286#u64⟩
+      13835058052060938241#u64 9223372034707292161#u64 4#u64
+      ⟨2#u64, 0#u64, 0#u64, 0#u64⟩ ⟨5#u64, 0#u64, 0#u64, 0#u64⟩ ⟨7#u64, 0#u64, 0#u64, 0#u64⟩ =
+      ⟨970#u64, 1304#u64, 1504#u64, 1904#u64⟩ := by
+    unfold cwyzValue extAdd extSub extScale extMul
+    apply eval_ext4_concrete <;>
+      simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
+      decide
+  refine ⟨hit, hiy, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  · rw [fold_duet_affine_ext4_spec, hcwyz]
+  · rw [cwyz_duet_refines, hcwyz]
+  · rw [verify_affine_duet_fold_step_spec, hduet]; decide
+  · rw [verify_affine_duet_fold_step_spec, hduet]; decide
+  · rw [verify_cwyz_duet_fold_step_spec, hcwyz]; decide
+  · rw [verify_cwyz_duet_fold_step_spec, hcwyz]; decide
+
+/-- `#tooth`: `cwyz_bridge_claim_step` and `verify_cwyz_bridge_claim_step` accept honest dual
+    cross-term claims and reject single-limb perturbations. -/
+theorem tooth_cwyz_bridge_accepts_dual_and_rejects_perturbation :
+    let w0 : Ext4 := ⟨10#u64, 0#u64, 0#u64, 0#u64⟩
+    let w1 : Ext4 := ⟨14#u64, 0#u64, 0#u64, 0#u64⟩
+    let w2 : Ext4 := ⟨0#u64, 15#u64, 0#u64, 0#u64⟩
+    let w3 : Ext4 := ⟨22#u64, 0#u64, 0#u64, 0#u64⟩
+    let w4 : Ext4 := ⟨0#u64, 33#u64, 0#u64, 0#u64⟩
+    let claim : Ext4 := ⟨10#u64, 21#u64, 0#u64, 0#u64⟩
+    let phi : Ext4 := ⟨2#u64, 0#u64, 0#u64, 0#u64⟩
+    let theta : Ext4 := ⟨2#u64, 0#u64, 0#u64, 0#u64⟩
+    let alpha : Ext4 := ⟨5#u64, 0#u64, 0#u64, 0#u64⟩
+    let beta : Ext4 := ⟨7#u64, 0#u64, 0#u64, 0#u64⟩
+    let honest : Ext4 := ⟨344#u64, 1089#u64, 0#u64, 0#u64⟩
+    let forged : Ext4 := ⟨344#u64, 1090#u64, 0#u64, 0#u64⟩
+    cwyz_bridge_claim_step w0 w1 w2 w3 w4 claim phi theta alpha beta = .ok honest ∧
+    verify_cwyz_bridge_claim_step w0 w1 w2 w3 w4 claim phi theta alpha beta honest = .ok true ∧
+    verify_cwyz_bridge_claim_step w0 w1 w2 w3 w4 claim phi theta alpha beta forged = .ok false := by
+  dsimp only
+  have hval : cwyzBridgeValue
+      ⟨10#u64, 0#u64, 0#u64, 0#u64⟩ ⟨14#u64, 0#u64, 0#u64, 0#u64⟩
+      ⟨0#u64, 15#u64, 0#u64, 0#u64⟩ ⟨22#u64, 0#u64, 0#u64, 0#u64⟩
+      ⟨0#u64, 33#u64, 0#u64, 0#u64⟩ ⟨10#u64, 21#u64, 0#u64, 0#u64⟩
+      ⟨2#u64, 0#u64, 0#u64, 0#u64⟩ ⟨2#u64, 0#u64, 0#u64, 0#u64⟩
+      ⟨5#u64, 0#u64, 0#u64, 0#u64⟩ ⟨7#u64, 0#u64, 0#u64, 0#u64⟩ =
+      ⟨344#u64, 1089#u64, 0#u64, 0#u64⟩ := by
+    unfold cwyzBridgeValue extAdd extSub extMul
+    apply eval_ext4_concrete <;>
+      simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
+      decide
+  refine ⟨?_, ?_, ?_⟩
+  · rw [cwyz_bridge_claim_step_refines, hval]
+  · rw [verify_cwyz_bridge_claim_step_spec, hval]; decide
+  · rw [verify_cwyz_bridge_claim_step_spec, hval]; decide
+
+/-- `#tooth`: `eval_ext4_univariate_at_base`, `eval_univariate_ext4_at_base`, and
+    `verify_ext4_univariate_at_base_pin` evaluate ascending-degree polynomials (`1 + 2z + 3z^2`
+    at `z = 2` equals `17`) and reject perturbed evaluation pins. -/
+theorem tooth_horner_and_pin_accepts_ascending_and_rejects_perturbation :
+    let coeffs : Slice Ext4 :=
+      Array.to_slice (Array.make 3#usize
+        [⟨1#u64, 0#u64, 0#u64, 0#u64⟩,
+         ⟨2#u64, 0#u64, 0#u64, 0#u64⟩,
+         ⟨3#u64, 0#u64, 0#u64, 0#u64⟩])
+    let honest : Ext4 := ⟨17#u64, 0#u64, 0#u64, 0#u64⟩
+    let forged : Ext4 := ⟨18#u64, 0#u64, 0#u64, 0#u64⟩
+    eval_ext4_univariate_at_base coeffs 2#u64 = .ok honest ∧
+    eval_univariate_ext4_at_base coeffs 2#u64 = .ok honest ∧
+    verify_ext4_univariate_at_base_pin coeffs 2#u64 honest = .ok true ∧
+    verify_ext4_univariate_at_base_pin coeffs 2#u64 forged = .ok false := by
+  dsimp only
+  have hval : hornerSpec
+      [⟨1#u64, 0#u64, 0#u64, 0#u64⟩,
+       ⟨2#u64, 0#u64, 0#u64, 0#u64⟩,
+       ⟨3#u64, 0#u64, 0#u64, 0#u64⟩] 2#u64 extZero =
+      ⟨17#u64, 0#u64, 0#u64, 0#u64⟩ := by
+    simp only [hornerSpec_cons, hornerSpec_nil]
+    unfold extAdd extScale extZero
+    apply eval_ext4_concrete <;>
+      simp only [fieldAdd_val, fieldMul_val] <;>
+      decide
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · rw [eval_ext4_univariate_at_base_spec]; dsimp only [Array.to_slice, Array.make]; rw [hval]
+  · rw [eval_univariate_ext4_at_base_spec]; dsimp only [Array.to_slice, Array.make]; rw [hval]
+  · simp only [verify_ext4_univariate_at_base_pin_spec, Array.to_slice, Array.make, hval]; decide
+  · simp only [verify_ext4_univariate_at_base_pin_spec, Array.to_slice, Array.make, hval]; decide
+
+/-- `#tooth`: `eval_quadratic_sumcheck_wire` reconstructs the linear term from `(c0, c2, sum_claim)`
+    so `P(0) = 3`, `P(1) = 17` (`P(0) + P(1) = 20`), and `P(2) = 41`. -/
+theorem tooth_quadratic_sumcheck_wire_nontrivial_eval :
+    let c0 : Ext4 := ⟨3#u64, 0#u64, 0#u64, 0#u64⟩
+    let c2 : Ext4 := ⟨5#u64, 0#u64, 0#u64, 0#u64⟩
+    let sum_claim : Ext4 := ⟨20#u64, 0#u64, 0#u64, 0#u64⟩
+    eval_quadratic_sumcheck_wire c0 c2 sum_claim extZero = .ok ⟨3#u64, 0#u64, 0#u64, 0#u64⟩ ∧
+    eval_quadratic_sumcheck_wire c0 c2 sum_claim extOne = .ok ⟨17#u64, 0#u64, 0#u64, 0#u64⟩ ∧
+    eval_quadratic_sumcheck_wire c0 c2 sum_claim ⟨2#u64, 0#u64, 0#u64, 0#u64⟩ =
+      .ok ⟨41#u64, 0#u64, 0#u64, 0#u64⟩ := by
+  dsimp only
+  refine ⟨?_, ?_, ?_⟩
+  · rw [eval_quadratic_sumcheck_wire_refines]
+    congr 1
+    unfold quadraticWireValue extAdd extSub extMul extZero
+    apply eval_ext4_concrete <;>
+      simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
+      decide
+  · rw [eval_quadratic_sumcheck_wire_refines]
+    congr 1
+    unfold quadraticWireValue extAdd extSub extMul extOne
+    apply eval_ext4_concrete <;>
+      simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
+      decide
+  · rw [eval_quadratic_sumcheck_wire_refines]
+    congr 1
+    unfold quadraticWireValue extAdd extSub extMul
+    apply eval_ext4_concrete <;>
+      simp only [fieldAdd_val, fieldSub_val, fieldMul_val] <;>
+      decide
 
 end qsag_whir_verified.proofs

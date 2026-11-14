@@ -12,7 +12,7 @@ testing-ephemeral = ["qsag-core/testing-ephemeral"]
 test-params = []
 default = ["alloc"]
 alloc = ["qsag-accel/alloc"]
-std = ["alloc", "qsag-accel/std"]
+std = ["qsag-core/std", "alloc", "qsag-accel/std"]
 
 [dependencies]
 qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }

@@ -49,6 +49,18 @@ struct EvalState<'a> {
     complete: bool,
     disclosure_started: core::cell::Cell<bool>,
 }
+impl EvalState<'_> {
+    fn disclosure_authorized(&self) -> bool {
+        if self.share.poisoned.load(Ordering::Acquire) { return false; }
+        if let Some(journal) = &self.share.poison_journal {
+            if self.disclosure_started.get() {
+                journal.disclosure_active(self.session).unwrap_or(false)
+            } else {
+                !journal.is_poisoned().unwrap_or(true)
+            }
+        } else { self.share.testing_poison_journal }
+    }
+}
 impl Drop for EvalState<'_> {
     fn drop(&mut self) {
         ct_zeroize_u32s(core::slice::from_mut(&mut self.value));
@@ -447,7 +459,7 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
     /// This message may leak alpha on failure; no further family operations may
     /// proceed until every participating custodian has accepted the zero-test.
     pub fn mac_opening(&mut self) -> Result<HdEvalMacOpening, HdError> {
-        if self.0.share.is_poisoned()
+        if !self.0.disclosure_authorized()
             || self
                 .0
                 .expected_value
@@ -456,7 +468,6 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
             return Err(HdError::MacCheckFailed);
         }
         if !self.0.disclosure_started.get() {
-            #[cfg(feature = "std")]
             if let Some(journal) = &self.0.share.poison_journal {
                 journal
                     .begin_disclosure(self.0.session)
@@ -479,7 +490,7 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
     /// Only this transition releases an authenticated scalar result. Failure or
     /// abandoning any phase wipes and poisons this custodian's key material.
     pub fn verify(mut self, openings: &[HdEvalMacOpening]) -> Result<u32, HdError> {
-        if self.0.share.is_poisoned() || openings.len() != self.0.roster.len() {
+        if !self.0.disclosure_authorized() || openings.len() != self.0.roster.len() {
             return Err(HdError::MacCheckFailed);
         }
         let own = self.0.share.party_id;
@@ -520,7 +531,6 @@ impl HdThresholdEvalRound3VerifyMac<'_> {
         ct_zeroize_u32s(&mut peer_sums);
         accepted?;
         let value = self.0.opened_value.ok_or(HdError::MacCheckFailed)?;
-        #[cfg(feature = "std")]
         if self.0.disclosure_started.get()
             && let Some(journal) = &self.0.share.poison_journal
         {

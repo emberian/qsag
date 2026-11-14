@@ -210,34 +210,13 @@ pub fn compute_framed_message_digest(message: &[u8]) -> [u8; 32] {
     poseidon2_hash32(&encode_multi_frame(&[b"QSAG.HEM.MSG/v2", message]))
 }
 
-/// Exact length-framed regional statement signed by each quorum under `policy`.
-/// Every variable-length and fixed-width slice is length-prefixed via [`encode_multi_frame`].
+/// Exact length-framed regional statement signed by each quorum under `policy`. Every
+/// variable-length and fixed-width slice is length-prefixed via [`encode_multi_frame`].
+///
+/// The statement binds `policy_registry_root` directly into the quorum signature, so a regional
+/// batch cannot be spliced into any other global policy registry, even one that contains an
+/// identical `ShardHemPolicy` and even if a verifier is handed the altered registry.
 pub fn hierarchical_hem_message(
-    policy: &ShardHemPolicy,
-    epoch_floor: u64,
-    message: impl AsRef<[u8]>,
-) -> Vec<u8> {
-    let profile_tag = [policy.profile().map_or(0u8, |p| p as u8)];
-    let shard_id_bytes = policy.shard_id.to_le_bytes();
-    let min_q_bytes = (policy.minimum_quorums as u64).to_le_bytes();
-    let committee_root = compute_committee_root(&policy.quorum_keys);
-    let epoch_bytes = epoch_floor.to_le_bytes();
-    encode_multi_frame(&[
-        b"QSAG.HEM.REGION/v2",
-        &shard_id_bytes,
-        &policy.custodian_cluster,
-        &profile_tag,
-        &min_q_bytes,
-        &committee_root,
-        &epoch_bytes,
-        message.as_ref(),
-    ])
-}
-
-/// Registry-pinned regional statement signed by each quorum: binds `policy_registry_root`
-/// directly into the quorum signature so a regional batch cannot be spliced into any modified
-/// global policy registry even if a verifier is handed the altered registry.
-pub fn hierarchical_hem_registry_bound_message(
     policy_registry_root: &[u8; 32],
     policy: &ShardHemPolicy,
     epoch_floor: u64,
@@ -308,32 +287,29 @@ fn valid_policies(policies: &[ShardHemPolicy]) -> bool {
     usize::try_from(total_cap).is_ok()
 }
 
-fn root_commitment(policy_registry_root: &[u8; 32], shards: &[ShardHemBatch]) -> [u8; 32] {
-    let _phase = crate::profile::span("hierarchy_root_commitment");
-    // A byte-hash tree avoids a serial algebraic sponge over the entire aggregate.
-    // Each child binds every prior field, including its full canonical proof bytes.
-    let hash_shard = |s: &ShardHemBatch| {
-        let frame = encode_multi_frame(&[
-            b"QSAG.HEM.HIERARCHY.SHARD/v3",
-            &s.shard_id.to_le_bytes(),
-            &s.custodian_cluster,
-            &s.shard_quorum_set_root,
-            &s.minimum_quorums.to_le_bytes(),
-            &s.epoch_floor.to_le_bytes(),
-            &s.message_digest,
-            &s.proof.to_bytes(),
-        ]);
-        cshake256_32(b"QSAG.HEM.HIERARCHY.SHARD/v3", &frame)
-    };
-    #[cfg(feature = "std")]
-    let digests: Vec<[u8; 32]> = crate::map_chunks_bounded(shards, |chunk| {
-        chunk.iter().map(&hash_shard).collect::<Vec<_>>()
-    })
-    .into_iter()
-    .flatten()
-    .collect();
-    #[cfg(not(feature = "std"))]
-    let digests: Vec<[u8; 32]> = shards.iter().map(hash_shard).collect();
+/// Digest of one child of the hierarchy byte-hash tree. A byte-hash tree avoids a serial
+/// algebraic sponge over the entire aggregate; each child binds every field of its shard,
+/// including the full canonical proof bytes.
+fn shard_commitment_digest(s: &ShardHemBatch) -> [u8; 32] {
+    let _phase = crate::profile::span("hierarchy_shard_digest");
+    let frame = encode_multi_frame(&[
+        b"QSAG.HEM.HIERARCHY.SHARD/v3",
+        &s.shard_id.to_le_bytes(),
+        &s.custodian_cluster,
+        &s.shard_quorum_set_root,
+        &s.minimum_quorums.to_le_bytes(),
+        &s.epoch_floor.to_le_bytes(),
+        &s.message_digest,
+        &s.proof.to_bytes(),
+    ]);
+    cshake256_32(b"QSAG.HEM.HIERARCHY.SHARD/v3", &frame)
+}
+
+/// A proven shard with its child digest of the hierarchy commitment.
+type CommittedShard = (ShardHemBatch, [u8; 32]);
+
+/// Root of the hierarchy byte-hash tree over the ordered child digests.
+fn root_commitment_from_digests(policy_registry_root: &[u8; 32], digests: &[[u8; 32]]) -> [u8; 32] {
     let mut fields: Vec<&[u8]> = Vec::with_capacity(2 + digests.len());
     fields.push(b"QSAG.HEM.HIERARCHY.ROOT/v3");
     fields.push(policy_registry_root);
@@ -348,7 +324,6 @@ fn prove_hierarchical_hem_inner(
     message: &[u8],
     minimum_global_quorums: usize,
     config: &HemAggConfig,
-    bind_registry_in_sig: bool,
 ) -> Result<HierarchicalHemAggregate, HemAggError> {
     if !valid_policies(policies) || witnesses.len() != policies.len() || minimum_global_quorums == 0
     {
@@ -390,18 +365,10 @@ fn prove_hierarchical_hem_inner(
     }
 
     let prove_shard =
-        |(p, w): (&ShardHemPolicy, &ShardHemWitness<'_>)| -> Result<ShardHemBatch, HemAggError> {
+        |(p, w): (&ShardHemPolicy, &ShardHemWitness<'_>)| -> Result<CommittedShard, HemAggError> {
             let shard_profile = p.profile().ok_or(HemAggError::InvalidShardConfig)?;
-            let region_msg = if bind_registry_in_sig {
-                hierarchical_hem_registry_bound_message(
-                    &policy_registry_root,
-                    p,
-                    epoch_floor,
-                    message,
-                )
-            } else {
-                hierarchical_hem_message(p, epoch_floor, message)
-            };
+            let region_msg =
+                hierarchical_hem_message(&policy_registry_root, p, epoch_floor, message);
             let mut cfg = config.clone();
             cfg.max_signers_per_shard = cfg
                 .max_signers_per_shard
@@ -421,7 +388,7 @@ fn prove_hierarchical_hem_inner(
                 w.signatures,
                 &cfg,
             )?;
-            Ok(ShardHemBatch {
+            let shard = ShardHemBatch {
                 shard_id: p.shard_id,
                 custodian_cluster: p.custodian_cluster,
                 shard_quorum_set_root: compute_committee_root(&p.quorum_keys),
@@ -429,13 +396,15 @@ fn prove_hierarchical_hem_inner(
                 epoch_floor,
                 message_digest,
                 proof,
-            })
+            };
+            let digest = shard_commitment_digest(&shard);
+            Ok((shard, digest))
         };
 
     #[cfg(feature = "std")]
-    let shards: Vec<ShardHemBatch> = if policies.len() > 1 && crate::parallel_workers() > 1 {
+    let proved: Vec<CommittedShard> = if policies.len() > 1 && crate::parallel_workers() > 1 {
         let pairs: Vec<_> = policies.iter().zip(witnesses).collect();
-        let groups: Vec<Result<Vec<ShardHemBatch>, HemAggError>> =
+        let groups: Vec<Result<Vec<CommittedShard>, HemAggError>> =
             crate::map_chunks_bounded(&pairs, |sub| {
                 sub.iter().copied().map(&prove_shard).collect()
             });
@@ -453,15 +422,16 @@ fn prove_hierarchical_hem_inner(
     };
 
     #[cfg(not(feature = "std"))]
-    let shards: Vec<ShardHemBatch> = policies
+    let proved: Vec<CommittedShard> = policies
         .iter()
         .zip(witnesses)
         .map(prove_shard)
         .collect::<Result<Vec<_>, _>>()?;
 
+    let (shards, digests): (Vec<ShardHemBatch>, Vec<[u8; 32]>) = proved.into_iter().unzip();
     Ok(HierarchicalHemAggregate {
         policy_registry_root,
-        root_commitment: root_commitment(&policy_registry_root, &shards),
+        root_commitment: root_commitment_from_digests(&policy_registry_root, &digests),
         shards,
     })
 }
@@ -473,8 +443,8 @@ fn verify_hierarchical_hem_inner(
     minimum_global_quorums: usize,
     regime: WhirSecurityRegime,
     aggregate: &HierarchicalHemAggregate,
-    bind_registry_in_sig: bool,
 ) -> bool {
+    let _phase = crate::profile::span("verify_hierarchical_hem");
     if !valid_policies(policies)
         || aggregate.shards.len() != policies.len()
         || minimum_global_quorums == 0
@@ -526,47 +496,72 @@ fn verify_hierarchical_hem_inner(
         return false;
     }
 
-    let verify_shard = |(p, s): (&ShardHemPolicy, &ShardHemBatch)| -> bool {
-        let region_msg = if bind_registry_in_sig {
-            hierarchical_hem_registry_bound_message(
-                &expected_registry_root,
-                p,
-                epoch_floor,
-                message,
+    // Hash each child concurrently with verification; both must succeed before acceptance.
+    let verify_shard = |(p, s): (&ShardHemPolicy, &ShardHemBatch)| -> Option<[u8; 32]> {
+        let region_msg = hierarchical_hem_message(&expected_registry_root, p, epoch_floor, message);
+        // Reject unsafe framing/depth before hashing a directly constructed proof.
+        if s.proof.root.homogeneous_regime(crate::MAX_MERGE_TREE_DEPTH) != Some(regime) {
+            return None;
+        }
+        let verify = || {
+            verify_aggregate_with_regime(
+                &p.quorum_keys,
+                &SigningMode::SharedMessage(&region_msg),
+                &s.proof,
+                regime,
             )
-        } else {
-            hierarchical_hem_message(p, epoch_floor, message)
         };
-        verify_aggregate_with_regime(
-            &p.quorum_keys,
-            &SigningMode::SharedMessage(&region_msg),
-            &s.proof,
-            regime,
-        )
+        #[cfg(feature = "std")]
+        {
+            std::thread::scope(|scope| {
+                let digest = crate::spawn_bounded(scope, || shard_commitment_digest(s));
+                let valid = verify();
+                let digest = crate::join_worker(digest);
+                valid.then_some(digest)
+            })
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            verify().then(|| shard_commitment_digest(s))
+        }
     };
 
     #[cfg(feature = "std")]
-    let all_shards_valid = if policies.len() > 1 && crate::parallel_workers() > 1 {
+    let digests: Option<Vec<[u8; 32]>> = if policies.len() > 1 && crate::parallel_workers() > 1 {
         let pairs: Vec<_> = policies.iter().zip(&aggregate.shards).collect();
-        let verdicts =
-            crate::map_chunks_bounded(&pairs, |sub| sub.iter().copied().all(&verify_shard));
-        verdicts.into_iter().all(|v| v)
+        crate::map_chunks_bounded(&pairs, |sub| {
+            sub.iter()
+                .copied()
+                .map(&verify_shard)
+                .collect::<Option<Vec<_>>>()
+        })
+        .into_iter()
+        .collect::<Option<Vec<Vec<_>>>>()
+        .map(|groups| groups.into_iter().flatten().collect())
     } else {
-        policies.iter().zip(&aggregate.shards).all(verify_shard)
+        policies
+            .iter()
+            .zip(&aggregate.shards)
+            .map(verify_shard)
+            .collect()
     };
 
     #[cfg(not(feature = "std"))]
-    let all_shards_valid = policies.iter().zip(&aggregate.shards).all(verify_shard);
+    let digests: Option<Vec<[u8; 32]>> = policies
+        .iter()
+        .zip(&aggregate.shards)
+        .map(verify_shard)
+        .collect();
 
-    if !all_shards_valid {
+    let Some(digests) = digests else {
         return false;
-    }
-
-    root_commitment(&expected_registry_root, &aggregate.shards) == aggregate.root_commitment
+    };
+    root_commitment_from_digests(&expected_registry_root, &digests) == aggregate.root_commitment
 }
 
 /// Prove a two-layer hierarchical `Hem` aggregate across `policies` (`JortsPoseidon2`,
-/// `CorduroyPoseidon2`, or mixed regional profiles).
+/// `CorduroyPoseidon2`, or mixed regional profiles). Every quorum signature must be over the
+/// registry-pinned [`hierarchical_hem_message`].
 pub fn prove_hierarchical_hem(
     policies: &[ShardHemPolicy],
     witnesses: &[ShardHemWitness<'_>],
@@ -582,12 +577,12 @@ pub fn prove_hierarchical_hem(
         message.as_ref(),
         minimum_global_quorums,
         config,
-        false,
     )
 }
 
 /// Verify a two-layer hierarchical `Hem` aggregate against `policies`, exact `epoch_floor` and
-/// `message`, global quorum threshold, and `regime`.
+/// `message`, global quorum threshold, and `regime`. Child signatures are checked against the
+/// registry-pinned [`hierarchical_hem_message`] of exactly this `policies` registry.
 pub fn verify_hierarchical_hem(
     policies: &[ShardHemPolicy],
     epoch_floor: u64,
@@ -603,49 +598,6 @@ pub fn verify_hierarchical_hem(
         minimum_global_quorums,
         regime,
         aggregate,
-        false,
-    )
-}
-
-/// Prove a registry-pinned two-layer hierarchical `Hem` aggregate whose individual quorum
-/// signatures sign [`hierarchical_hem_registry_bound_message`].
-pub fn prove_hierarchical_hem_registry_bound(
-    policies: &[ShardHemPolicy],
-    witnesses: &[ShardHemWitness<'_>],
-    epoch_floor: u64,
-    message: impl AsRef<[u8]>,
-    minimum_global_quorums: usize,
-    config: &HemAggConfig,
-) -> Result<HierarchicalHemAggregate, HemAggError> {
-    prove_hierarchical_hem_inner(
-        policies,
-        witnesses,
-        epoch_floor,
-        message.as_ref(),
-        minimum_global_quorums,
-        config,
-        true,
-    )
-}
-
-/// Verify a registry-pinned two-layer hierarchical `Hem` aggregate produced by
-/// [`prove_hierarchical_hem_registry_bound`].
-pub fn verify_hierarchical_hem_registry_bound(
-    policies: &[ShardHemPolicy],
-    epoch_floor: u64,
-    message: impl AsRef<[u8]>,
-    minimum_global_quorums: usize,
-    regime: WhirSecurityRegime,
-    aggregate: &HierarchicalHemAggregate,
-) -> bool {
-    verify_hierarchical_hem_inner(
-        policies,
-        epoch_floor,
-        message.as_ref(),
-        minimum_global_quorums,
-        regime,
-        aggregate,
-        true,
     )
 }
 
@@ -654,14 +606,19 @@ mod tests {
     use super::*;
     use crate::ValidatorKeypair;
 
+    fn root_commitment(policy_registry_root: &[u8; 32], shards: &[ShardHemBatch]) -> [u8; 32] {
+        let digests: Vec<_> = shards.iter().map(shard_commitment_digest).collect();
+        root_commitment_from_digests(policy_registry_root, &digests)
+    }
+
     #[test]
     fn hierarchical_three_regions_twelve_quorums() {
         let mut policies = Vec::new();
-        let mut signatures = Vec::new();
+        let mut region_keys = Vec::new();
         let epoch = 17;
         let digest = [42u8; 32];
         for region in 0..3u64 {
-            let mut keys: Vec<_> = (0..4)
+            let keys: Vec<_> = (0..4)
                 .map(|i| {
                     ValidatorKeypair::keygen_deterministic(
                         AggSigProfile::JortsPoseidon2,
@@ -670,20 +627,25 @@ mod tests {
                     )
                 })
                 .collect();
-            let policy = ShardHemPolicy {
+            policies.push(ShardHemPolicy {
                 shard_id: region,
                 custodian_cluster: [region as u8; 32],
                 quorum_keys: keys.iter().map(|k| k.pk).collect(),
                 minimum_quorums: 4,
-            };
-            let message = hierarchical_hem_message(&policy, epoch, digest);
-            signatures.push(
+            });
+            region_keys.push(keys);
+        }
+        let registry_root = compute_policy_registry_root(&policies);
+        let signatures: Vec<Vec<_>> = policies
+            .iter()
+            .zip(region_keys.iter_mut())
+            .map(|(policy, keys)| {
+                let message = hierarchical_hem_message(&registry_root, policy, epoch, digest);
                 keys.iter_mut()
                     .map(|k| k.sign_stateful_for_unit_test(&message, 0).unwrap())
-                    .collect::<Vec<_>>(),
-            );
-            policies.push(policy);
-        }
+                    .collect()
+            })
+            .collect();
         let bitmap = SignerBitmap::from_active_indices(4, &[0, 1, 2, 3]).unwrap();
         let witnesses: Vec<_> = signatures
             .iter()
@@ -824,9 +786,9 @@ mod tests {
         let epoch = 91u64;
         let payload = b"consensus-checkpoint:height=9100:variable-length-payload";
         let mut corduroy_policies = Vec::new();
-        let mut corduroy_sigs = Vec::new();
+        let mut corduroy_keys = Vec::new();
         for region in 0..2u64 {
-            let mut keys: Vec<_> = (0..2)
+            let keys: Vec<_> = (0..2)
                 .map(|i| {
                     ValidatorKeypair::keygen_deterministic(
                         AggSigProfile::CorduroyPoseidon2,
@@ -835,20 +797,25 @@ mod tests {
                     )
                 })
                 .collect();
-            let policy = ShardHemPolicy {
+            corduroy_policies.push(ShardHemPolicy {
                 shard_id: 10 + region,
                 custodian_cluster: [0xC0 + region as u8; 32],
                 quorum_keys: keys.iter().map(|k| k.pk).collect(),
                 minimum_quorums: 2,
-            };
-            let msg = hierarchical_hem_message(&policy, epoch, payload);
-            corduroy_sigs.push(
+            });
+            corduroy_keys.push(keys);
+        }
+        let corduroy_root = compute_policy_registry_root(&corduroy_policies);
+        let corduroy_sigs: Vec<Vec<_>> = corduroy_policies
+            .iter()
+            .zip(corduroy_keys.iter_mut())
+            .map(|(policy, keys)| {
+                let msg = hierarchical_hem_message(&corduroy_root, policy, epoch, payload);
                 keys.iter_mut()
                     .map(|k| k.sign_stateless_for_unit_test(&msg).unwrap())
-                    .collect::<Vec<_>>(),
-            );
-            corduroy_policies.push(policy);
-        }
+                    .collect()
+            })
+            .collect();
         let bm2 = SignerBitmap::from_active_indices(2, &[0, 1]).unwrap();
         let corduroy_witnesses: Vec<_> = corduroy_sigs
             .iter()
@@ -931,10 +898,8 @@ mod tests {
 
         let registry_ab = alloc::vec![p_jorts.clone(), p_cord_a.clone()];
         let root_ab = compute_policy_registry_root(&registry_ab);
-        let msg_jorts_ab =
-            hierarchical_hem_registry_bound_message(&root_ab, &p_jorts, epoch, payload);
-        let msg_cord_a =
-            hierarchical_hem_registry_bound_message(&root_ab, &p_cord_a, epoch, payload);
+        let msg_jorts_ab = hierarchical_hem_message(&root_ab, &p_jorts, epoch, payload);
+        let msg_cord_a = hierarchical_hem_message(&root_ab, &p_cord_a, epoch, payload);
         let bm_jorts = SignerBitmap::from_active_indices(4, &[0, 2, 3]).unwrap();
         let sigs_jorts_ab: Vec<_> = [0usize, 2, 3]
             .into_iter()
@@ -949,7 +914,7 @@ mod tests {
             .map(|k| k.sign_stateless_for_unit_test(&msg_cord_a).unwrap())
             .collect();
 
-        let mixed_agg = prove_hierarchical_hem_registry_bound(
+        let mixed_agg = prove_hierarchical_hem(
             &registry_ab,
             &[
                 ShardHemWitness {
@@ -967,7 +932,7 @@ mod tests {
             &cfg,
         )
         .unwrap();
-        assert!(verify_hierarchical_hem_registry_bound(
+        assert!(verify_hierarchical_hem(
             &registry_ab,
             epoch,
             payload,
@@ -980,8 +945,7 @@ mod tests {
         // even when Shard 2 (`p_cord_b`) genuinely signed for `registry_ac`!
         let registry_ac = alloc::vec![p_jorts.clone(), p_cord_b.clone()];
         let root_ac = compute_policy_registry_root(&registry_ac);
-        let msg_cord_b =
-            hierarchical_hem_registry_bound_message(&root_ac, &p_cord_b, epoch, payload);
+        let msg_cord_b = hierarchical_hem_message(&root_ac, &p_cord_b, epoch, payload);
         let sigs_cord_b: Vec<_> = cord_keys_b
             .iter_mut()
             .map(|k| k.sign_stateless_for_unit_test(&msg_cord_b).unwrap())
@@ -1012,7 +976,7 @@ mod tests {
             root_commitment: root_commitment(&root_ac, &spliced_shards),
             shards: core::mem::take(&mut spliced_shards),
         };
-        assert!(!verify_hierarchical_hem_registry_bound(
+        assert!(!verify_hierarchical_hem(
             &registry_ac,
             epoch,
             payload,
@@ -1076,13 +1040,24 @@ mod tests {
         // Changing `minimum_quorums` changes both the registry root and the signed regional frame.
         let mut p_min2 = reg_left[0].clone();
         p_min2.minimum_quorums = 2;
+        let root_left = compute_policy_registry_root(&reg_left);
         assert_ne!(
-            hierarchical_hem_message(&reg_left[0], 7, b"abc"),
-            hierarchical_hem_message(&p_min2, 7, b"abc")
+            hierarchical_hem_message(&root_left, &reg_left[0], 7, b"abc"),
+            hierarchical_hem_message(&root_left, &p_min2, 7, b"abc")
         );
         assert_ne!(
-            hierarchical_hem_message(&reg_left[0], 7, b""),
-            hierarchical_hem_message(&reg_left[0], 7, b"\x00")
+            hierarchical_hem_message(&root_left, &reg_left[0], 7, b""),
+            hierarchical_hem_message(&root_left, &reg_left[0], 7, b"\x00")
+        );
+        // The same policy under a different registry signs a different statement.
+        assert_ne!(
+            hierarchical_hem_message(&root_left, &reg_left[0], 7, b"abc"),
+            hierarchical_hem_message(
+                &compute_policy_registry_root(&reg_right),
+                &reg_left[0],
+                7,
+                b"abc"
+            )
         );
 
         // Cross-profile reuse of the same `(pk_seed, pk_root)` across shards must be rejected.

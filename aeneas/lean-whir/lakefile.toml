@@ -7,6 +7,10 @@ autoImplicit = false
 name = "Aeneas"
 [[lean_lib]]
 name = "QsagWhirVerified"
+[[lean_lib]]
+name = "QsagWhirVerifiedChallengeDefs"
+[[lean_lib]]
+name = "QsagWhirVerifiedChallenge"
 [[lean_exe]]
 name = "audit-whir-mir-axioms"
 root = "AuditWhirMirAxioms"

@@ -9,7 +9,7 @@
 //!    pairwise MAC echo barrier + zero-secret-hash additive WOTS+C share opening).
 //! 3. **`Hem` Succinct Finality Checkpoint Proof (`JortsPoseidon2`)**:
 //!    Compresses stateful validator checkpoint signatures into a succinct `GoldilocksExt4` WHIR
-//!    proof (`Habr24Classical128` + `Habr24Qrom128` comparison) with millisecond verification.
+//!    proof (`Habr24Qrom128` + `BciksJohnsonQrom128` comparison) with millisecond verification.
 
 use std::time::Instant;
 
@@ -357,7 +357,6 @@ fn bench_alpenglow_hem_checkpoint(num_signers: usize, workers: usize) {
         SignerBitmap::from_active_indices(num_signers as u32, &active_indices).expect("bitmap");
 
     for regime in [
-        WhirSecurityRegime::Habr24Classical128,
         WhirSecurityRegime::Habr24Qrom128,
         WhirSecurityRegime::BciksJohnsonQrom128,
     ] {
@@ -405,7 +404,7 @@ fn main() {
     #[cfg(feature = "vulkan")]
     if let Some((submissions, receipts, fallbacks)) = qsag_agg::vulkan_execution_counts() {
         println!(
-            "Vulkan totals: submissions={submissions} accepted_v4_receipts={receipts} cpu_fallbacks={fallbacks}"
+            "Vulkan totals: submissions={submissions} accepted_v5_receipts={receipts} cpu_fallbacks={fallbacks}"
         );
     }
 }

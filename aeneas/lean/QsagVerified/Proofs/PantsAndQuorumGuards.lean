@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.Common
 public import QsagVerified.Proofs.MirRefinementKit
@@ -280,6 +281,7 @@ def beltQuorumMealy :
         else if decide (reqEp ≠ st.bound_epoch) then none
         else if !decide (st.bound_msg_tag = reqTag) then none
         else if decide (st.ack_count.val < st.q.val) then none
+        else if (match st.phase with | .SharesAuthorized => true | _ => false) then none
         else
           some ({ st with phase := .SharesAuthorized },
             .SharesAuthorized {
@@ -855,19 +857,18 @@ private theorem belt_step_ok_properties
             · simp [hlt_q] at hStep
             · have hge_q : q.val ≤ s.ack_count.val := by
                 rw [← hq]; exact Nat.le_of_not_gt hlt_q
-              simp only [hlt_q, decide_false, Bool.false_eq_true, ↓reduceIte,
-                Option.some.injEq, Prod.mk.injEq] at hStep
-              rcases hStep with ⟨hs', hout⟩
-              have hs_eq := hs'.symm; have ho_eq := hout.symm
-              subst hs_eq; subst ho_eq
-              refine ⟨hp, rfl, ?_, ?_, (fun _ _ _ hinp => nomatch hinp),
-                (fun _ => Or.inl ⟨rfl, rfl, rfl, rfl⟩)⟩
-              · exact ⟨hn, ht, hf, hq, hgl, hcfg, hfl_next, hack_le,
-                  (fun _ => hbound_inv hhb), (fun _ => rfl)⟩
-              · intro g hg
-                injection hg with hg_eq
-                subst hg_eq
-                exact ⟨hhb, rfl, rfl, rfl, rfl, rfl, rfl, hge_q, hack_le, (hbound_inv hhb).1⟩
+              simp only [hlt_q, decide_false, Bool.false_eq_true, ↓reduceIte] at hStep
+              split at hStep
+              · contradiction
+              · cases hStep
+                refine ⟨hp, rfl, ?_, ?_, (fun _ _ _ hinp => nomatch hinp),
+                  (fun _ => Or.inl ⟨rfl, rfl, rfl, rfl⟩)⟩
+                · exact ⟨hn, ht, hf, hq, hgl, hcfg, hfl_next, hack_le,
+                    (fun _ => hbound_inv hhb), (fun _ => rfl)⟩
+                · intro g hg
+                  injection hg with hg_eq
+                  subst hg_eq
+                  exact ⟨hhb, rfl, rfl, rfl, rfl, rfl, rfl, hge_q, hack_le, (hbound_inv hhb).1⟩
           · simp [htag] at hStep
         · simp [hep] at hStep
   · rw [hp] at hStep; simp at hStep

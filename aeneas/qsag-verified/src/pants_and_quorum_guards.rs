@@ -45,6 +45,7 @@ pub enum PantsGuardError {
     EpochMismatch,
     AckCountExceedsCommittee,
     InsufficientQuorumAcks,
+    SharesAlreadyAuthorized,
     InvalidWotsC256TargetSum,
     RssEnginePoisoned,
     ZeroRelationBatch,
@@ -450,6 +451,9 @@ impl BeltQuorumCore {
         if self.ack_count < self.q {
             return (self, Err(PantsGuardError::InsufficientQuorumAcks));
         }
+        if matches!(self.phase, BeltQuorumPhase::SharesAuthorized) {
+            return (self, Err(PantsGuardError::SharesAlreadyAuthorized));
+        }
         let grant = BeltAuthorizationGrant {
             authorized_epoch: self.bound_epoch,
             msg_tag: self.bound_msg_tag,
@@ -612,9 +616,9 @@ impl VerifiedWotsC256Guard {
 // ============================================================================
 
 /// Capability token returned ONLY when `VerifiedRssPoisonLatch::authorize_open` succeeds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct RssOpenPermit {
-    pub verified_clean: bool,
+    verified_clean: bool,
 }
 
 /// Observable input event for multi-turn stepping of `VerifiedRssPoisonLatch`.
@@ -626,7 +630,7 @@ pub enum RssLatchStepInput {
 }
 
 /// Observable output emitted by a successful `VerifiedRssPoisonLatch` transition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum RssLatchStepOutput {
     RelationsStaged(u64),
     CheckVerified,
@@ -1075,6 +1079,12 @@ mod core_tests {
             other => panic!("expected SharesAuthorized grant, got {:?}", other.err()),
         }
         assert_eq!(g_auth.phase(), BeltQuorumPhase::SharesAuthorized);
+        let (g_auth, repeated) = g_auth.authorize_shares(12, msg_a);
+        assert_eq!(repeated.err(), Some(PantsGuardError::SharesAlreadyAuthorized));
+        let (g_auth, retry) = g_auth.propose_or_retry_epoch(12, msg_a, true);
+        assert!(retry.is_ok());
+        let (g_auth, repeated) = g_auth.authorize_shares(12, msg_a);
+        assert_eq!(repeated.err(), Some(PantsGuardError::SharesAlreadyAuthorized));
 
         // Conflicting msg_tag on bound epoch 12 permanently poisons the guard!
         let (g_eqv, eqv_err) = g_auth.propose_or_retry_epoch(12, msg_b, true);

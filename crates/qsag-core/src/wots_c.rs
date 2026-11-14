@@ -1,11 +1,10 @@
 //! `WOTS+C` (`w = 4`) and the chain sweep shared by `Baggy` and `Jorts`.
 //!
 //! * **Encoding.** The signed value is a 256-bit digest read as 128 base-4 digits. A digest
-//!   is valid when its last `zero_digits` digits are zero and its first `chains` digits sum
-//!   to `target_sum`; the signer finds a valid digest by counting a public grind counter up
-//!   from zero. Only the first `chains` digits have chains. Because the sum is fixed, no
-//!   other valid digest dominates a signed one digit by digit, so no checksum chains are
-//!   needed. The preset [`WotsCParams::V128`] signs all 128 digits and forces none to zero:
+//!   is valid when its 128 digits sum to `target_sum`; the signer finds a valid digest by
+//!   counting a public grind counter up from zero. Because the sum is fixed, no other valid
+//!   digest dominates a signed one digit by digit, so no checksum chains are needed. The one
+//!   accepted shape, [`WotsCParams::V128`], signs all 128 digits and forces none to zero:
 //!   a forgery on a signed leaf needs a second preimage of the full 256-bit digest (about
 //!   `2^128` quantum work), as in the [`crate::tsw_baggy::PqHashParams`] presets, and the
 //!   grind only has to hit the sum.
@@ -61,12 +60,13 @@ impl WotsCParams {
         target_sum: 192,
     };
 
+    /// Only [`Self::V128`] is accepted: it is the one shape whose digit extraction and sum
+    /// check `qsag-verified` proves, so every other shape is refused here rather than
+    /// decoded by an unverified path.
     pub const fn is_well_formed(&self) -> bool {
-        self.chains >= 1
-            && self.chains <= WOTS_DIGEST_DIGITS
-            && self.zero_digits <= WOTS_DIGEST_DIGITS
-            && self.chains + self.zero_digits == WOTS_DIGEST_DIGITS
-            && self.target_sum <= WOTS_STEPS * self.chains
+        self.chains == Self::V128.chains
+            && self.zero_digits == Self::V128.zero_digits
+            && self.target_sum == Self::V128.target_sum
     }
 
     /// Digits of `hash` if it is a valid `WOTS+C` digest for these parameters. Digit `i` is
@@ -76,19 +76,8 @@ impl WotsCParams {
         if !self.is_well_formed() {
             return None;
         }
-        if *self == Self::V128 {
-            return qsag_verified::verified_wotsc256_verify_sum(hash)
-                .then(|| qsag_verified::verified_wotsc256_extract_digits(hash).to_vec());
-        }
-        let digit = |i: usize| qsag_verified::wotsc256_extract_digit(hash, i);
-        if (self.chains..WOTS_DIGEST_DIGITS).any(|i| digit(i) != 0) {
-            return None;
-        }
-        let sum: usize = (0..self.chains).map(|i| usize::from(digit(i))).sum();
-        if sum != self.target_sum {
-            return None;
-        }
-        Some((0..self.chains).map(digit).collect())
+        qsag_verified::verified_wotsc256_verify_sum(hash)
+            .then(|| qsag_verified::verified_wotsc256_extract_digits(hash).to_vec())
     }
 }
 
@@ -542,6 +531,41 @@ mod tests {
         ] {
             assert!(!params.is_well_formed());
             assert!(params.digits(&[0; 32]).is_none());
+        }
+    }
+
+    #[test]
+    fn only_the_verified_v128_shape_decodes_digits() {
+        // Digit pattern 1,1,2,2 per byte: 128 digits summing to 192.
+        let v128_valid = [0x5A; 32];
+        assert_eq!(
+            WotsCParams::V128.digits(&v128_valid),
+            Some([1u8, 1, 2, 2].repeat(32))
+        );
+        // Every digit 1 (sum 128), and the same with the last digit forced to zero: valid
+        // under these off-profile shapes, which no verified decoder covers.
+        let mut last_zero = [0x55; 32];
+        last_zero[31] = 0x54;
+        for (params, hash) in [
+            (
+                WotsCParams {
+                    target_sum: 128,
+                    ..WotsCParams::V128
+                },
+                [0x55; 32],
+            ),
+            (
+                WotsCParams {
+                    chains: 127,
+                    zero_digits: 1,
+                    target_sum: 127,
+                },
+                last_zero,
+            ),
+        ] {
+            assert!(!params.is_well_formed());
+            assert_eq!(params.digits(&hash), None);
+            assert_eq!(WotsCParams::V128.digits(&hash), None);
         }
     }
 

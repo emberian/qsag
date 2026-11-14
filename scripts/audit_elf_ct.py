@@ -206,6 +206,7 @@ def audit_x86_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
 
     # Seed value-tainted GPRs for scalar value-argument kernels
     val_tainted: set[str] = set()
+    vector_tainted: set[int] = set(range(32))
     base_sym = sym.lstrip("_")
     if "goldilocks_" in base_sym:
         val_tainted.update({"rdi", "rsi", "rdx", "rcx"})
@@ -269,6 +270,31 @@ def audit_x86_symbol(sym: str, instrs: list[tuple[str, str]]) -> list[str]:
                     errors.append(
                         f"{sym}[{idx}]: forbidden secret-tainted base/offset LUT dereference `[{mem}]` via `{cr}`"
                     )
+
+        # Transfers through XMM/YMM must preserve secrecy in both directions.
+        if parts and "[" not in parts[0]:
+            vd = canon_x86_simd(parts[0])
+            sources = parts[1:]
+            secret_source = any("[" in p or canon_x86_gpr(p) in val_tainted
+                                or canon_x86_simd(p) in vector_tainted for p in sources)
+            if vd is not None:
+                zero = (mnem in ("pxor", "xorps", "xorpd") and len(parts) == 2
+                        and parts[0] == parts[1]) or (
+                        mnem in ("vpxor", "vxorps", "vxorpd") and len(parts) == 3
+                        and parts[1] == parts[2])
+                if zero:
+                    vector_tainted.discard(vd)
+                elif secret_source:
+                    vector_tainted.add(vd)
+            elif any(canon_x86_simd(p) is not None for p in sources):
+                gd = canon_x86_gpr(parts[0])
+                if gd:
+                    if secret_source:
+                        val_tainted.add(gd)
+                    elif mnem in ('movd', 'movq', 'vmovd', 'vmovq', 'pmovmskb',
+                                  'vpmovmskb', 'pextrw', 'pextrd', 'pextrq',
+                                  'vpextrw', 'vpextrd', 'vpextrq'):
+                        val_tainted.discard(gd)
 
         # 3. Update `reg_sum_tainted` and `val_tainted` across GPR writes
         if mnem == "mulx" and len(parts) == 3:
@@ -444,6 +470,8 @@ def audit_compiled_rust_x86_symbol(sym: str, instrs: list[tuple[str, str]]) -> l
         sh_err = check_x86_variable_shift(sym, idx, mnem, ops_l)
         if sh_err:
             errors.append(f"compiled Rust {sh_err}")
+        if mnem.startswith("cmov"):
+            errors.append(f"{sym}[{idx}]: compiled Rust conditional move requires a hardware timing contract `{mnem} {ops}`")
         if must_be_straight_line:
             if mnem.startswith("j") and mnem != "jmp":
                 errors.append(
@@ -1127,6 +1155,16 @@ def rust_errors(symbol, instructions, strict=False):
     for i, (mnemonic, operands) in enumerate(instructions):
         if mnemonic in kernel_audit.X86_DIV_MNEMONICS | kernel_audit.AARCH64_DIV_MNEMONICS or mnemonic.startswith(('fdiv', 'vdiv')):
             errors.append(f'{symbol}[{i}]: forbidden divider {mnemonic} {operands}')
+        if mnemonic.startswith('cmov'):
+            errors.append(f'{symbol}[{i}]: conditional move lacks a hardware timing contract {mnemonic} {operands}')
+        shift = check_x86_variable_shift(symbol, i, mnemonic, operands.lower())
+        parts = split_top_operands(operands.lower())
+        if shift:
+            errors.append(shift)
+        if mnemonic in AARCH64_VAR_SHIFT_MNEMONICS or (
+                mnemonic in ('lsl', 'lsr', 'asr', 'ror') and len(parts) == 3
+                and canon_a64_gpr(parts[-1]) is not None):
+            errors.append(f'{symbol}[{i}]: forbidden register-variable shift {mnemonic} {operands}')
         if straight and conditional(mnemonic):
             errors.append(f'{symbol}[{i}]: forbidden conditional branch {mnemonic} {operands}')
     return errors
@@ -1147,6 +1185,19 @@ def self_tests():
             data = b'\x7fELF\x02\x01' + bytes(10) + kind.to_bytes(2, 'little') + machine.to_bytes(2, 'little')
             assert elf_header(data) == (kind, machine)
             count += 1
+    for mnemonic, operands in [('cmovne', 'rax, rbx'), ('shl', 'rax, cl'),
+                               ('shlx', 'rax, rbx, rcx'), ('lslv', 'x0, x1, x2')]:
+        assert rust_errors('qsag_asm::bitslice::probe', [(mnemonic, operands)])
+        count += 1
+    # Scalar secret -> vector -> scalar -> address must not launder taint.
+    bridge = [('movq', 'xmm0, rdi'), ('movq', 'rax, xmm0'),
+              ('mov', 'rdx, [rax]'), ('pxor', 'xmm0, xmm0'), ('ret', '')]
+    assert any('secret-tainted' in e for e in audit_x86_symbol('goldilocks_bridge', bridge))
+    # Wiping a vector before exporting it to a scalar removes that dependency.
+    wiped = [('movq', 'xmm0, rdi'), ('pxor', 'xmm0, xmm0'),
+             ('movq', 'rax, xmm0'), ('mov', 'rbx, [rax]'), ('ret', '')]
+    assert not audit_x86_symbol('goldilocks_bridge', wiped)
+    count += 2
     return count
 
 
@@ -1168,7 +1219,14 @@ def audit(path, objdump, strict, require_bitslice, require_namespaces=()):
         kind = 1
     else:
         kind, machine = elf_header(data)
-    executable = objdump or shutil.which('llvm-objdump') or ('objdump' if machine == 62 else 'aarch64-linux-gnu-objdump')
+    executable = objdump or shutil.which('llvm-objdump')
+    if not executable and shutil.which('rustc'):
+        # rustup's llvm-tools component supplies a matching cross-architecture decoder.
+        sysroot = Path(subprocess.check_output(['rustc', '--print', 'sysroot'], text=True).strip())
+        candidates = sorted((sysroot / 'lib/rustlib').glob('*/bin/llvm-objdump'))
+        if candidates:
+            executable = str(candidates[0])
+    executable = executable or ('objdump' if machine == 62 else 'aarch64-linux-gnu-objdump')
     command = [executable, '-d', '-C']
     if machine == 62:
         command += ['-M', 'intel']
@@ -1253,7 +1311,7 @@ def cross_aarch64_bitslice(objdump):
         return audit(output, objdump, False, True)
 
 
-def check_fixtures(fixture, x86_rlib, aarch64_rlib, binding="object", generation="historical"):
+def check_fixtures(fixture, x86_rlib, aarch64_rlib, binding="object", generation="current"):
     """Bind the literal certified archive, its SHA-256, and a fresh source build.
 
     Two bindings are available. `object` (the default) requires the fresh ELF member to be
@@ -1345,7 +1403,7 @@ def main():
     parser.add_argument('--fixture-x86-rlib', type=Path)
     parser.add_argument('--fixture-aarch64-rlib', type=Path)
     parser.add_argument('--fixture-generation', choices=('historical', 'current'),
-                        default='historical', help='select the explicitly named archive generation; '
+                        default='current', help='select the explicitly named archive generation; '
                         'freshness alone does not establish a Lean certificate')
     parser.add_argument('--fixture-binding', choices=('object', 'kernel-bytes'), default='object',
                         help='object: fresh ELF member byte-identical to the certified one; '
@@ -1358,7 +1416,11 @@ def main():
     print(f'{self_tests()} auditor self-tests passed')
     paths = args.elf_bin + args.rlib
     if not paths and not args.self_test and not args.cross_aarch64_bitslice and not args.check_fixtures:
-        parser.error('supply --elf-bin or --rlib (or --self-test)')
+        root = Path(__file__).resolve().parents[1]
+        generation = 'wave4b-elf' if args.fixture_generation == 'current' else 'wave4-elf'
+        paths = [str(root / 'lean/fixtures' / generation / f'{arch}.rlib')
+                 for arch in ('x86_64', 'aarch64')]
+        print(f'Default inventory: {generation}; retained archives, not a live rebuild')
     success = True
     if args.check_fixtures:
         if not args.fixture_x86_rlib or not args.fixture_aarch64_rlib:

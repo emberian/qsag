@@ -36,7 +36,8 @@ use crate::field::{
 };
 use crate::pcs::{
     CanopyCommitment, HemWhirBatchOpeningProof, MAX_BATCH_POLYS, MAX_PCS_NUM_VARS, WhirSchedule,
-    whir_commit_batch_owned_with_schedule, whir_open_batch, whir_verify_batch_with_schedule,
+    WhirSecurityRegime, whir_commit_batch_owned_with_schedule, whir_open_batch,
+    whir_verify_batch_with_schedule,
 };
 use crate::sig::{
     AggSigProfile, Digest5, SignerBitmap, SigningMode, ValidatorPublicKey, ValidatorSignature,
@@ -563,6 +564,7 @@ struct ShardCircuit {
 
 impl ShardCircuit {
     fn new(profile: AggSigProfile, num_signer_slots: usize) -> Self {
+        let _phase = crate::profile::span("shard_circuit_new");
         let program = build_signer_program(profile);
         let (unique_ops, step_to_uid, step_c0_base) = index_unique_program_ops(&program);
         Self {
@@ -606,6 +608,7 @@ fn resolve_batch_statement(
     shard_signer_counts: &[u32],
     mode: &SigningMode<'_>,
 ) -> Option<BatchStatement> {
+    let _phase = crate::profile::span("resolve_batch_statement");
     if !validate_unique_active_committee(pks, bitmap, profile) {
         return None;
     }
@@ -1472,11 +1475,9 @@ pub fn prove_shard_batch_with_config(
     // 1. Build every shard's witness table and commit them under ONE Merkle-Canopy tree.
     let circuit = ShardCircuit::new(profile, statement.shape.num_signer_slots);
     let num_vars = LOG_TRACE_COLS + circuit.log_rows();
-    let schedule = cfg
-        .whir_schedule
-        .clone()
-        .unwrap_or_else(|| cfg.regime.schedule(num_vars));
-    if schedule.regime != cfg.regime || !schedule.validate(num_vars) {
+    // Only the canonical schedule of the configured regime is ever proven or accepted.
+    let schedule = cfg.regime.schedule(num_vars);
+    if !schedule.validate(num_vars) {
         return None;
     }
     let mut shard_ranges = Vec::with_capacity(shard_signer_counts.len());
@@ -1669,6 +1670,9 @@ fn verify_shard_rows(
 /// the single batched `Hem` WHIR opening of all shard claims against the joint commitment.
 ///
 /// `mode` covers exactly the signers of `proof.bitmap`, in ascending index order.
+///
+/// The proof must use the default Johnson QROM schedule. Use
+/// [`verify_shard_batch_with_regime`] to select another QROM-128 regime explicitly.
 pub fn verify_shard_batch(
     pks: &[ValidatorPublicKey],
     committee_root: &[u8; 32],
@@ -1676,6 +1680,29 @@ pub fn verify_shard_batch(
     mode: &SigningMode<'_>,
     proof: &ShardBatchProof,
 ) -> bool {
+    verify_shard_batch_with_regime(
+        pks,
+        committee_root,
+        profile,
+        mode,
+        proof,
+        WhirSecurityRegime::default(),
+    )
+}
+
+/// [`verify_shard_batch`] under exactly `expected_regime`: the proof's schedule must equal
+/// `expected_regime.schedule(num_vars)`, the canonical stage geometry and query budget that
+/// the finite Theorem 4.8 witnesses cover. No other validated schedule is accepted, so a
+/// weaker regime or a hand-tuned blowup/fold ladder cannot be substituted.
+pub fn verify_shard_batch_with_regime(
+    pks: &[ValidatorPublicKey],
+    committee_root: &[u8; 32],
+    profile: AggSigProfile,
+    mode: &SigningMode<'_>,
+    proof: &ShardBatchProof,
+    expected_regime: WhirSecurityRegime,
+) -> bool {
+    let _phase = crate::profile::span("verify_shard_batch");
     let Some(statement) = resolve_batch_statement(
         pks,
         profile,
@@ -1691,7 +1718,12 @@ pub fn verify_shard_batch(
     let circuit = ShardCircuit::new(profile, statement.shape.num_signer_slots);
 
     let schedule = &proof.schedule;
-    if !schedule.validate(LOG_TRACE_COLS + circuit.log_rows()) {
+    let num_vars = LOG_TRACE_COLS + circuit.log_rows();
+    if !expected_regime.meets_qrom_128_floor()
+        || schedule.regime != expected_regime
+        || !schedule.validate(num_vars)
+        || !schedule.is_canonical(num_vars)
+    {
         return false;
     }
     let mut transcript = init_shard_batch_transcript(
@@ -1731,7 +1763,7 @@ pub fn verify_shard_batch(
     let point_refs: Vec<&[GoldilocksExt4]> = points.iter().map(Vec::as_slice).collect();
     whir_verify_batch_with_schedule(
         &proof.witness_comm,
-        LOG_TRACE_COLS + circuit.log_rows(),
+        num_vars,
         &point_refs,
         &claims,
         &proof.pcs_opening,

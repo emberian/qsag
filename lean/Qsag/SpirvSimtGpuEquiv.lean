@@ -2,8 +2,7 @@ module
 /-
 # Qsag.SpirvSimtGpuEquiv — Binary SPIR-V 1.5/1.6 Compute, Multi-Wave Wave32 SIMT, Faial DRF & SIMT-CT
 
-Machine-checked Lean 4.35 GPU verification foundation (`0 sorry`, `0 bv_decide`, `0 native_decide`,
-`0 Classical.choice`, axioms strictly within `{propext, Quot.sound}`):
+Machine-checked Lean 4.35 GPU verification foundation (constructive proofs, axioms strictly within `{propext, Quot.sound}`):
 
 1. **§1 Structured `SPIR-V 1.5/1.6` Compute Module AST & Binary `Array UInt32` Word Codec:**
    Khronos 5-word binary headers (`magic = 0x07230203`), with explicit 1.5 (`0x00010500`)
@@ -35,6 +34,7 @@ The codec supports both 1.5 and 1.6; version tags describe encoded words, not th
 runtime backend's architecture-enum name.
 -/
 
+import Qsag.Tactic.AssuranceKit
 public import Qsag.Constructive
 import all Qsag.Constructive
 public import Qsag.Goldilocks
@@ -326,6 +326,8 @@ theorem SpirvStorageClass.ofWord?_toWord (sc : SpirvStorageClass) :
 
 /-- Built-in compute invocation identifiers (`OpDecorate BuiltIn`). -/
 inductive SpirvBuiltIn where
+  | numWorkgroups
+  | workgroupSize
   | workgroupId
   | localInvocationId
   | globalInvocationId
@@ -336,6 +338,8 @@ inductive SpirvBuiltIn where
   deriving DecidableEq, Repr
 
 def SpirvBuiltIn.toWord : SpirvBuiltIn → UInt32
+  | .numWorkgroups => 24
+  | .workgroupSize => 25
   | .workgroupId => 26
   | .localInvocationId => 27
   | .globalInvocationId => 28
@@ -345,7 +349,9 @@ def SpirvBuiltIn.toWord : SpirvBuiltIn → UInt32
   | .subgroupLocalInvocationId => 41
 
 def SpirvBuiltIn.ofWord? (w : UInt32) : Option SpirvBuiltIn :=
-  if w == 26 then some .workgroupId
+  if w == 24 then some .numWorkgroups
+  else if w == 25 then some .workgroupSize
+  else if w == 26 then some .workgroupId
   else if w == 27 then some .localInvocationId
   else if w == 28 then some .globalInvocationId
   else if w == 29 then some .localInvocationIndex
@@ -358,19 +364,25 @@ theorem SpirvBuiltIn.ofWord?_toWord (b : SpirvBuiltIn) :
     SpirvBuiltIn.ofWord? b.toWord = some b := by
   cases b <;> decide
 
-/-- Decorations (`OpDecorate = 71`). -/
+/-- Decorations carried by `OpDecorate = 71` and `OpMemberDecorate = 72`
+    (`Block = 2`, `ArrayStride = 6`, `BuiltIn = 11`, `NonWritable = 24`, `NonReadable = 25`,
+    `Binding = 33`, `DescriptorSet = 34`, `Offset = 35`). -/
 inductive SpirvDecoration where
   | block
   | arrayStride (byteStride : UInt32)
   | builtIn (b : SpirvBuiltIn)
+  | nonWritable
+  | nonReadable
   | binding (slot : UInt32)
   | descriptorSet (setIdx : UInt32)
+  | offset (byteOffset : UInt32)
   deriving DecidableEq, Repr
 
 structure SpirvDecorateDecl where
   targetId : UInt32
   dec : SpirvDecoration
   deriving DecidableEq, Repr
+
 
 /-- SPIR-V execution/memory scopes (`Device = 1`, `Workgroup = 2`, `Subgroup = 3`, `Invocation = 4`). -/
 inductive SpirvScope where
@@ -422,85 +434,123 @@ inductive SpirvTypeDecl where
   | typeVoid (resId : UInt32)
   | typeBool (resId : UInt32)
   | typeInt (resId : UInt32) (width : SpirvIntWidth) (signed : Bool)
+  | typeVector (resId compTyId count : UInt32)
   | typeArray (resId elemTyId lenConstId : UInt32)
   | typeRuntimeArray (resId elemTyId : UInt32)
   | typeStruct (resId : UInt32) (fieldTyIds : List UInt32)
   | typePointer (resId : UInt32) (sc : SpirvStorageClass) (pointeeTyId : UInt32)
-  | typeFunctionVoid (resId voidTyId : UInt32)
+  | typeFunction (resId retTyId : UInt32) (paramTyIds : List UInt32)
   deriving DecidableEq, Repr
 
 /-- Constants & module-scope variables (`OpConstantTrue = 41`, `OpConstantFalse = 42`,
-    `OpConstant = 43`, `OpVariable = 59`). -/
+    `OpConstant = 43`, `OpConstantComposite = 44`, `OpVariable = 59`). -/
 inductive SpirvGlobalDecl where
   | constTrue (tyId resId : UInt32)
   | constFalse (tyId resId : UInt32)
   | const32 (tyId resId val : UInt32)
   | const64 (tyId resId : UInt32) (val : UInt64)
+  | constComposite (tyId resId : UInt32) (partIds : List UInt32)
   | variable (tyId resId : UInt32) (sc : SpirvStorageClass)
   deriving DecidableEq, Repr
 
-/-- Compute function body SSA instructions with exact Khronos `SPIR-V 1.6` opcodes. -/
+/-- The type/constant/global-variable section interleaves all three kinds of declaration. -/
+inductive SpirvTyGlobal where
+  | ty (t : SpirvTypeDecl)
+  | glob (g : SpirvGlobalDecl)
+  deriving DecidableEq, Repr
+
+/-- Function-body instructions with exact Khronos `SPIR-V 1.5/1.6` opcodes. -/
 inductive SpirvInst where
+  | opVariable (tyId resId : UInt32) (sc : SpirvStorageClass)
+  | opFunctionCall (tyId resId fnId : UInt32) (argIds : List UInt32)
   | opLoad (tyId resId ptrId : UInt32)
   | opStore (ptrId valId : UInt32)
   | opAccessChain (tyId resId baseId : UInt32) (indices : List UInt32)
+  | opCompositeConstruct (tyId resId : UInt32) (partIds : List UInt32)
   | opCompositeExtract (tyId resId compId fieldIdx : UInt32)
   | opUConvert (tyId resId valId : UInt32)
   | opIAdd (tyId resId aId bId : UInt32)
   | opISub (tyId resId aId bId : UInt32)
   | opIMul (tyId resId aId bId : UInt32)
+  | opUMod (tyId resId aId bId : UInt32)
   | opUMulExtended (tyId resId aId bId : UInt32)
   | opSelect (tyId resId condId trueId falseId : UInt32)
   | opIEqual (tyId resId aId bId : UInt32)
+  | opINotEqual (tyId resId aId bId : UInt32)
+  | opUGreaterThan (tyId resId aId bId : UInt32)
   | opUGreaterThanEqual (tyId resId aId bId : UInt32)
+  | opSGreaterThanEqual (tyId resId aId bId : UInt32)
   | opULessThan (tyId resId aId bId : UInt32)
+  | opULessThanEqual (tyId resId aId bId : UInt32)
   | opShiftRightLogical (tyId resId baseId shiftId : UInt32)
   | opShiftLeftLogical (tyId resId baseId shiftId : UInt32)
   | opBitwiseXor (tyId resId aId bId : UInt32)
   | opBitwiseOr (tyId resId aId bId : UInt32)
   | opBitwiseAnd (tyId resId aId bId : UInt32)
+  | opNot (tyId resId aId : UInt32)
+  | opBitReverse (tyId resId aId : UInt32)
   | opControlBarrier (execScope memScope : SpirvScope) (semanticsMask : UInt32)
   | opLoopMerge (mergeLabelId contLabelId loopCtrl : UInt32)
   | opSelectionMerge (mergeLabelId selectionCtrl : UInt32)
   | opLabel (labelId : UInt32)
   | opBranch (targetLabelId : UInt32)
   | opBranchConditional (condId trueLabelId falseLabelId : UInt32)
+  | opReturn
+  | opReturnValue (valId : UInt32)
   deriving DecidableEq, Repr
 
-/-- Complete structured `SPIR-V 1.5 / 1.6` compute module. -/
+/-- Debug-section instructions (`OpSource = 3`, `OpSourceExtension = 4`, `OpName = 5`,
+    `OpMemberName = 6`). Operand words (including packed UTF-8 literals) are kept verbatim. -/
+inductive SpirvDebugDecl where
+  | source (ops : List UInt32)
+  | sourceExtension (ops : List UInt32)
+  | name (ops : List UInt32)
+  | memberName (ops : List UInt32)
+  deriving DecidableEq, Repr
+
+/-- Annotation-section instructions. -/
+inductive SpirvAnnotation where
+  | decorate (d : SpirvDecorateDecl)
+  | memberDecorate (structId member : UInt32) (dec : SpirvDecoration)
+  deriving DecidableEq, Repr
+
+/-- `OpExtInstImport = 11` with its packed literal name. -/
+structure SpirvExtInstImport where
+  resId : UInt32
+  name : List UInt32
+  deriving DecidableEq, Repr
+
+/-- One `OpFunction … OpFunctionEnd` definition: header, `OpFunctionParameter`s, and every
+    block instruction in binary order. -/
+structure SpirvFunction where
+  resultTyId : UInt32
+  funcId : UInt32
+  control : UInt32
+  funcTyId : UInt32
+  params : List (UInt32 × UInt32)
+  body : List SpirvInst
+  deriving DecidableEq, Repr
+
+/-- Complete `SPIR-V 1.5 / 1.6` compute module in the logical layout of the specification
+    (§2.4): capabilities, extended-instruction imports, memory model, the `GLCompute` entry
+    point, execution modes, debug, annotations, types/constants/globals, function definitions. -/
 structure SpirvModule where
   version : SpirvVersion := .v1_6
   generator : UInt32
   idBound : UInt32
   capabilities : List SpirvCapability
+  extInstImports : List SpirvExtInstImport
   addrModel : SpirvAddressingModel
   memModel : SpirvMemoryModelKind
   entryFuncId : UInt32
   interfaceIds : List UInt32
   execModes : List SpirvExecutionMode
-  decorations : List SpirvDecorateDecl
-  types : List SpirvTypeDecl
-  globals : List SpirvGlobalDecl
-  voidTypeId : UInt32
-  funcTypeId : UInt32
-  entryLabelId : UInt32
-  body : List SpirvInst
+  debug : List SpirvDebugDecl
+  annotations : List SpirvAnnotation
+  tyGlobals : List SpirvTyGlobal
+  functions : List SpirvFunction
   deriving DecidableEq, Repr
 
-/-- Decidable well-formedness of a `SpirvModule` for lossless 16-bit word-count framing. -/
-def SpirvTypeDecl.wf : SpirvTypeDecl → Bool
-  | .typeStruct _ fields => decide (fields.length + 2 < 65536)
-  | _ => true
-
-def SpirvInst.wf : SpirvInst → Bool
-  | .opAccessChain _ _ _ indices => decide (indices.length + 4 < 65536)
-  | _ => true
-
-def WellFormedSpirvModule (m : SpirvModule) : Bool :=
-  decide (0 < m.idBound.toNat) &&
-  decide (m.interfaceIds.length + 5 < 65536) &&
-  m.types.all SpirvTypeDecl.wf &&
-  m.body.all SpirvInst.wf
 
 /-- Raw framed SPIR-V instruction (`opcode < 65536` and `operands`). -/
 structure RawSpirvInst where
@@ -647,47 +697,127 @@ theorem decodeExecModeRaw_encode (entryId : UInt32) (em : SpirvExecutionMode) :
     decodeExecModeRaw entryId (encodeExecModeRaw entryId em) = .ok em := by
   cases em <;> simp [encodeExecModeRaw, decodeExecModeRaw]
 
+def encodeDecorationWords : SpirvDecoration → List UInt32
+  | .block => [2]
+  | .arrayStride s => [6, s]
+  | .builtIn b => [11, b.toWord]
+  | .nonWritable => [24]
+  | .nonReadable => [25]
+  | .binding slot => [33, slot]
+  | .descriptorSet setIdx => [34, setIdx]
+  | .offset o => [35, o]
+
+def decodeDecorationWords : List UInt32 → Option SpirvDecoration
+  | [dtag] =>
+    if dtag == 2 then some .block
+    else if dtag == 24 then some .nonWritable
+    else if dtag == 25 then some .nonReadable
+    else none
+  | [dtag, arg] =>
+    if dtag == 6 then some (.arrayStride arg)
+    else if dtag == 11 then (SpirvBuiltIn.ofWord? arg).map .builtIn
+    else if dtag == 33 then some (.binding arg)
+    else if dtag == 34 then some (.descriptorSet arg)
+    else if dtag == 35 then some (.offset arg)
+    else none
+  | _ => none
+
+theorem decodeDecorationWords_encode (d : SpirvDecoration) :
+    decodeDecorationWords (encodeDecorationWords d) = some d := by
+  cases d <;> simp [encodeDecorationWords, decodeDecorationWords, SpirvBuiltIn.ofWord?_toWord]
+
 def encodeDecorateRaw (d : SpirvDecorateDecl) : RawSpirvInst :=
-  match d.dec with
-  | .block => ⟨71, [d.targetId, 2]⟩
-  | .arrayStride s => ⟨71, [d.targetId, 6, s]⟩
-  | .builtIn b => ⟨71, [d.targetId, 11, b.toWord]⟩
-  | .binding slot => ⟨71, [d.targetId, 33, slot]⟩
-  | .descriptorSet setIdx => ⟨71, [d.targetId, 34, setIdx]⟩
+  ⟨71, d.targetId :: encodeDecorationWords d.dec⟩
 
 def decodeDecorateRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvDecorateDecl :=
   match r.opcode, r.operands with
-  | 71, [tgt, dtag] =>
-    if dtag == 2 then .ok ⟨tgt, .block⟩
-    else .error (.malformedSection "bad flag decoration")
-  | 71, [tgt, dtag, arg] =>
-    if dtag == 6 then .ok ⟨tgt, .arrayStride arg⟩
-    else if dtag == 11 then
-      match SpirvBuiltIn.ofWord? arg with
-      | some b => .ok ⟨tgt, .builtIn b⟩
-      | none => .error (.malformedSection "bad BuiltIn")
-    else if dtag == 33 then .ok ⟨tgt, .binding arg⟩
-    else if dtag == 34 then .ok ⟨tgt, .descriptorSet arg⟩
-    else .error (.malformedSection "unknown decoration")
+  | 71, tgt :: ws =>
+    match decodeDecorationWords ws with
+    | some dec => .ok ⟨tgt, dec⟩
+    | none => .error (.malformedSection "unknown decoration")
   | _, _ => .error (.malformedSection "expected OpDecorate")
 
 theorem decodeDecorateRaw_encode (d : SpirvDecorateDecl) :
     decodeDecorateRaw (encodeDecorateRaw d) = .ok d := by
   rcases d with ⟨tgt, dec⟩
-  cases dec <;> simp [encodeDecorateRaw, decodeDecorateRaw, SpirvBuiltIn.ofWord?_toWord]
+  simp [encodeDecorateRaw, decodeDecorateRaw, decodeDecorationWords_encode]
+
+def encodeAnnotationRaw : SpirvAnnotation → RawSpirvInst
+  | .decorate d => encodeDecorateRaw d
+  | .memberDecorate sId mem dec => ⟨72, sId :: mem :: encodeDecorationWords dec⟩
+
+def isAnnotationOpcode (op : Nat) : Bool := op == 71 || op == 72
+
+def decodeAnnotationRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvAnnotation :=
+  match r.opcode, r.operands with
+  | 72, sId :: mem :: ws =>
+    match decodeDecorationWords ws with
+    | some dec => .ok (.memberDecorate sId mem dec)
+    | none => .error (.malformedSection "unknown member decoration")
+  | _, _ =>
+    match decodeDecorateRaw r with
+    | .ok d => .ok (.decorate d)
+    | .error e => .error e
+
+theorem decodeAnnotationRaw_encode (a : SpirvAnnotation) :
+    decodeAnnotationRaw (encodeAnnotationRaw a) = .ok a := by
+  cases a with
+  | decorate d =>
+    have h := decodeDecorateRaw_encode d
+    simp only [encodeAnnotationRaw]
+    unfold decodeAnnotationRaw
+    simp [encodeDecorateRaw, h] at h ⊢
+    simp [encodeDecorateRaw] at h
+    rw [h]
+  | memberDecorate sId mem dec =>
+    simp [encodeAnnotationRaw, decodeAnnotationRaw, decodeDecorationWords_encode]
+
+def encodeDebugRaw : SpirvDebugDecl → RawSpirvInst
+  | .source ops => ⟨3, ops⟩
+  | .sourceExtension ops => ⟨4, ops⟩
+  | .name ops => ⟨5, ops⟩
+  | .memberName ops => ⟨6, ops⟩
+
+def isDebugOpcode (op : Nat) : Bool := op == 3 || op == 4 || op == 5 || op == 6
+
+def decodeDebugRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvDebugDecl :=
+  match r.opcode with
+  | 3 => .ok (.source r.operands)
+  | 4 => .ok (.sourceExtension r.operands)
+  | 5 => .ok (.name r.operands)
+  | 6 => .ok (.memberName r.operands)
+  | _ => .error (.malformedSection "expected debug instruction")
+
+theorem decodeDebugRaw_encode (d : SpirvDebugDecl) :
+    decodeDebugRaw (encodeDebugRaw d) = .ok d := by
+  cases d <;> rfl
+
+def encodeExtInstImportRaw (e : SpirvExtInstImport) : RawSpirvInst :=
+  ⟨11, e.resId :: e.name⟩
+
+def decodeExtInstImportRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvExtInstImport :=
+  match r.opcode, r.operands with
+  | 11, res :: name => .ok ⟨res, name⟩
+  | _, _ => .error (.malformedSection "expected OpExtInstImport")
+
+theorem decodeExtInstImportRaw_encode (e : SpirvExtInstImport) :
+    decodeExtInstImportRaw (encodeExtInstImportRaw e) = .ok e := by
+  cases e; rfl
 
 def encodeTypeRaw : SpirvTypeDecl → RawSpirvInst
   | .typeVoid res => ⟨19, [res]⟩
   | .typeBool res => ⟨20, [res]⟩
   | .typeInt res w signed => ⟨21, [res, w.toWord, if signed then 1 else 0]⟩
+  | .typeVector res comp count => ⟨23, [res, comp, count]⟩
   | .typeArray res elem lenId => ⟨28, [res, elem, lenId]⟩
   | .typeRuntimeArray res elem => ⟨29, [res, elem]⟩
   | .typeStruct res fields => ⟨30, res :: fields⟩
   | .typePointer res sc pointee => ⟨32, [res, sc.toWord, pointee]⟩
-  | .typeFunctionVoid res voidTy => ⟨33, [res, voidTy]⟩
+  | .typeFunction res retTy params => ⟨33, res :: retTy :: params⟩
 
 def isTypeOpcode (op : Nat) : Bool :=
-  op == 19 || op == 20 || op == 21 || op == 28 || op == 29 || op == 30 || op == 32 || op == 33
+  op == 19 || op == 20 || op == 21 || op == 23 || op == 28 || op == 29 || op == 30 ||
+  op == 32 || op == 33
 
 def decodeTypeRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvTypeDecl :=
   match r.opcode, r.operands with
@@ -700,6 +830,7 @@ def decodeTypeRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvTypeDecl :=
       else if sWord == 1 then .ok (.typeInt res w true)
       else .error (.malformedSection "bad OpTypeInt signedness")
     | none => .error (.malformedSection "bad OpTypeInt width")
+  | 23, [res, comp, count] => .ok (.typeVector res comp count)
   | 28, [res, elem, lenId] => .ok (.typeArray res elem lenId)
   | 29, [res, elem] => .ok (.typeRuntimeArray res elem)
   | 30, res :: fields => .ok (.typeStruct res fields)
@@ -707,7 +838,7 @@ def decodeTypeRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvTypeDecl :=
     match SpirvStorageClass.ofWord? scWord with
     | some sc => .ok (.typePointer res sc pointee)
     | none => .error (.malformedSection "bad OpTypePointer storage class")
-  | 33, [res, voidTy] => .ok (.typeFunctionVoid res voidTy)
+  | 33, res :: retTy :: params => .ok (.typeFunction res retTy params)
   | _, _ => .error (.malformedSection "malformed type declaration")
 
 theorem decodeTypeRaw_encode (t : SpirvTypeDecl) :
@@ -724,10 +855,11 @@ def encodeGlobalRaw : SpirvGlobalDecl → RawSpirvInst
   | .constFalse ty res => ⟨42, [ty, res]⟩
   | .const32 ty res val => ⟨43, [ty, res, val]⟩
   | .const64 ty res val => ⟨43, [ty, res, u64Lo32 val, u64Hi32 val]⟩
+  | .constComposite ty res parts => ⟨44, ty :: res :: parts⟩
   | .variable ty res sc => ⟨59, [ty, res, sc.toWord]⟩
 
 def isGlobalOpcode (op : Nat) : Bool :=
-  op == 41 || op == 42 || op == 43 || op == 59
+  op == 41 || op == 42 || op == 43 || op == 44 || op == 59
 
 def decodeGlobalRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvGlobalDecl :=
   match r.opcode, r.operands with
@@ -735,6 +867,7 @@ def decodeGlobalRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvGlobalDecl
   | 42, [ty, res] => .ok (.constFalse ty res)
   | 43, [ty, res, val] => .ok (.const32 ty res val)
   | 43, [ty, res, lo, hi] => .ok (.const64 ty res (u64OfLoHi32 lo hi))
+  | 44, ty :: res :: parts => .ok (.constComposite ty res parts)
   | 59, [ty, res, scWord] =>
     match SpirvStorageClass.ofWord? scWord with
     | some sc => .ok (.variable ty res sc)
@@ -750,59 +883,111 @@ theorem decodeGlobalRaw_encode (g : SpirvGlobalDecl) :
     simp [encodeGlobalRaw, decodeGlobalRaw, SpirvStorageClass.ofWord?_toWord]
   | _ => simp [encodeGlobalRaw, decodeGlobalRaw]
 
+def encodeTyGlobalRaw : SpirvTyGlobal → RawSpirvInst
+  | .ty t => encodeTypeRaw t
+  | .glob g => encodeGlobalRaw g
+
+def isTyGlobalOpcode (op : Nat) : Bool := isTypeOpcode op || isGlobalOpcode op
+
+def decodeTyGlobalRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvTyGlobal :=
+  if isTypeOpcode r.opcode then
+    match decodeTypeRaw r with
+    | .ok t => .ok (.ty t)
+    | .error e => .error e
+  else
+    match decodeGlobalRaw r with
+    | .ok g => .ok (.glob g)
+    | .error e => .error e
+
+theorem decodeTyGlobalRaw_encode (x : SpirvTyGlobal) :
+    decodeTyGlobalRaw (encodeTyGlobalRaw x) = .ok x := by
+  cases x with
+  | ty t =>
+    have hop : isTypeOpcode (encodeTypeRaw t).opcode = true := by cases t <;> rfl
+    simp [encodeTyGlobalRaw, decodeTyGlobalRaw, hop, decodeTypeRaw_encode]
+  | glob g =>
+    have hop : isTypeOpcode (encodeGlobalRaw g).opcode = false := by cases g <;> rfl
+    simp [encodeTyGlobalRaw, decodeTyGlobalRaw, hop, decodeGlobalRaw_encode]
+
 def encodeInstRaw : SpirvInst → RawSpirvInst
+  | .opVariable ty res sc => ⟨59, [ty, res, sc.toWord]⟩
+  | .opFunctionCall ty res fn args => ⟨57, ty :: res :: fn :: args⟩
   | .opLoad ty res ptr => ⟨61, [ty, res, ptr]⟩
   | .opStore ptr val => ⟨62, [ptr, val]⟩
   | .opAccessChain ty res base indices => ⟨65, ty :: res :: base :: indices⟩
+  | .opCompositeConstruct ty res parts => ⟨80, ty :: res :: parts⟩
   | .opCompositeExtract ty res comp idx => ⟨81, [ty, res, comp, idx]⟩
   | .opUConvert ty res val => ⟨113, [ty, res, val]⟩
   | .opIAdd ty res a b => ⟨128, [ty, res, a, b]⟩
   | .opISub ty res a b => ⟨130, [ty, res, a, b]⟩
   | .opIMul ty res a b => ⟨132, [ty, res, a, b]⟩
+  | .opUMod ty res a b => ⟨137, [ty, res, a, b]⟩
   | .opUMulExtended ty res a b => ⟨151, [ty, res, a, b]⟩
   | .opSelect ty res cond t f => ⟨169, [ty, res, cond, t, f]⟩
   | .opIEqual ty res a b => ⟨170, [ty, res, a, b]⟩
-  | .opUGreaterThanEqual ty res a b => ⟨173, [ty, res, a, b]⟩
-  | .opULessThan ty res a b => ⟨177, [ty, res, a, b]⟩
+  | .opINotEqual ty res a b => ⟨171, [ty, res, a, b]⟩
+  | .opUGreaterThan ty res a b => ⟨172, [ty, res, a, b]⟩
+  | .opUGreaterThanEqual ty res a b => ⟨174, [ty, res, a, b]⟩
+  | .opSGreaterThanEqual ty res a b => ⟨175, [ty, res, a, b]⟩
+  | .opULessThan ty res a b => ⟨176, [ty, res, a, b]⟩
+  | .opULessThanEqual ty res a b => ⟨178, [ty, res, a, b]⟩
   | .opShiftRightLogical ty res base sh => ⟨194, [ty, res, base, sh]⟩
   | .opShiftLeftLogical ty res base sh => ⟨196, [ty, res, base, sh]⟩
-  | .opBitwiseXor ty res a b => ⟨197, [ty, res, a, b]⟩
-  | .opBitwiseOr ty res a b => ⟨198, [ty, res, a, b]⟩
+  | .opBitwiseXor ty res a b => ⟨198, [ty, res, a, b]⟩
+  | .opBitwiseOr ty res a b => ⟨197, [ty, res, a, b]⟩
   | .opBitwiseAnd ty res a b => ⟨199, [ty, res, a, b]⟩
+  | .opNot ty res a => ⟨200, [ty, res, a]⟩
+  | .opBitReverse ty res a => ⟨204, [ty, res, a]⟩
   | .opControlBarrier execS memS sem => ⟨224, [execS.toWord, memS.toWord, sem]⟩
   | .opLoopMerge mergeL contL ctrl => ⟨246, [mergeL, contL, ctrl]⟩
   | .opSelectionMerge mergeL ctrl => ⟨247, [mergeL, ctrl]⟩
   | .opLabel lbl => ⟨248, [lbl]⟩
   | .opBranch tgt => ⟨249, [tgt]⟩
   | .opBranchConditional cond tL fL => ⟨250, [cond, tL, fL]⟩
+  | .opReturn => ⟨253, []⟩
+  | .opReturnValue v => ⟨254, [v]⟩
 
 def isBodyOpcode (op : Nat) : Bool :=
-  op == 61 || op == 62 || op == 65 || op == 81 || op == 113 ||
-  op == 128 || op == 130 || op == 132 || op == 151 || op == 169 ||
-  op == 170 || op == 173 || op == 177 || op == 194 || op == 196 ||
-  op == 197 || op == 198 || op == 199 || op == 224 || op == 246 ||
-  op == 247 || op == 248 || op == 249 || op == 250
+  op == 57 || op == 59 || op == 61 || op == 62 || op == 65 || op == 80 || op == 81 ||
+  op == 113 || op == 128 || op == 130 || op == 132 || op == 137 || op == 151 || op == 169 ||
+  op == 170 || op == 171 || op == 172 || op == 174 || op == 175 || op == 176 || op == 178 ||
+  op == 194 || op == 196 || op == 197 || op == 198 || op == 199 || op == 200 || op == 204 ||
+  op == 224 || op == 246 || op == 247 || op == 248 || op == 249 || op == 250 || op == 253 ||
+  op == 254
 
 def decodeInstRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvInst :=
   match r.opcode, r.operands with
+  | 59, [ty, res, scWord] =>
+    match SpirvStorageClass.ofWord? scWord with
+    | some sc => .ok (.opVariable ty res sc)
+    | none => .error (.malformedSection "bad function OpVariable storage class")
+  | 57, ty :: res :: fn :: args => .ok (.opFunctionCall ty res fn args)
   | 61, [ty, res, ptr] => .ok (.opLoad ty res ptr)
   | 62, [ptr, val] => .ok (.opStore ptr val)
   | 65, ty :: res :: base :: indices => .ok (.opAccessChain ty res base indices)
+  | 80, ty :: res :: parts => .ok (.opCompositeConstruct ty res parts)
   | 81, [ty, res, comp, idx] => .ok (.opCompositeExtract ty res comp idx)
   | 113, [ty, res, val] => .ok (.opUConvert ty res val)
   | 128, [ty, res, a, b] => .ok (.opIAdd ty res a b)
   | 130, [ty, res, a, b] => .ok (.opISub ty res a b)
   | 132, [ty, res, a, b] => .ok (.opIMul ty res a b)
+  | 137, [ty, res, a, b] => .ok (.opUMod ty res a b)
   | 151, [ty, res, a, b] => .ok (.opUMulExtended ty res a b)
   | 169, [ty, res, cond, t, f] => .ok (.opSelect ty res cond t f)
   | 170, [ty, res, a, b] => .ok (.opIEqual ty res a b)
-  | 173, [ty, res, a, b] => .ok (.opUGreaterThanEqual ty res a b)
-  | 177, [ty, res, a, b] => .ok (.opULessThan ty res a b)
+  | 171, [ty, res, a, b] => .ok (.opINotEqual ty res a b)
+  | 172, [ty, res, a, b] => .ok (.opUGreaterThan ty res a b)
+  | 174, [ty, res, a, b] => .ok (.opUGreaterThanEqual ty res a b)
+  | 175, [ty, res, a, b] => .ok (.opSGreaterThanEqual ty res a b)
+  | 176, [ty, res, a, b] => .ok (.opULessThan ty res a b)
+  | 178, [ty, res, a, b] => .ok (.opULessThanEqual ty res a b)
   | 194, [ty, res, base, sh] => .ok (.opShiftRightLogical ty res base sh)
   | 196, [ty, res, base, sh] => .ok (.opShiftLeftLogical ty res base sh)
-  | 197, [ty, res, a, b] => .ok (.opBitwiseXor ty res a b)
-  | 198, [ty, res, a, b] => .ok (.opBitwiseOr ty res a b)
+  | 198, [ty, res, a, b] => .ok (.opBitwiseXor ty res a b)
+  | 197, [ty, res, a, b] => .ok (.opBitwiseOr ty res a b)
   | 199, [ty, res, a, b] => .ok (.opBitwiseAnd ty res a b)
+  | 200, [ty, res, a] => .ok (.opNot ty res a)
+  | 204, [ty, res, a] => .ok (.opBitReverse ty res a)
   | 224, [es, ms, sem] =>
     match SpirvScope.ofWord? es, SpirvScope.ofWord? ms with
     | some eScope, some mScope => .ok (.opControlBarrier eScope mScope sem)
@@ -812,6 +997,8 @@ def decodeInstRaw (r : RawSpirvInst) : Except SpirvDecodeError SpirvInst :=
   | 248, [lbl] => .ok (.opLabel lbl)
   | 249, [tgt] => .ok (.opBranch tgt)
   | 250, [cond, tL, fL] => .ok (.opBranchConditional cond tL fL)
+  | 253, [] => .ok .opReturn
+  | 254, [v] => .ok (.opReturnValue v)
   | _, _ => .error (.malformedSection "unknown body instruction")
 
 theorem decodeInstRaw_encode (i : SpirvInst) :
@@ -819,22 +1006,46 @@ theorem decodeInstRaw_encode (i : SpirvInst) :
   cases i with
   | opControlBarrier es ms sem =>
     simp [encodeInstRaw, decodeInstRaw, SpirvScope.ofWord?_toWord]
+  | opVariable ty res sc =>
+    simp [encodeInstRaw, decodeInstRaw, SpirvStorageClass.ofWord?_toWord]
   | _ => simp [encodeInstRaw, decodeInstRaw]
+
+def encodeParamRaw (p : UInt32 × UInt32) : RawSpirvInst := ⟨55, [p.1, p.2]⟩
+
+def decodeParamRaw (r : RawSpirvInst) : Except SpirvDecodeError (UInt32 × UInt32) :=
+  match r.opcode, r.operands with
+  | 55, [ty, res] => .ok (ty, res)
+  | _, _ => .error (.malformedSection "expected OpFunctionParameter")
+
+theorem decodeParamRaw_encode (p : UInt32 × UInt32) :
+    decodeParamRaw (encodeParamRaw p) = .ok p := by
+  cases p; rfl
+
+/-- Lower function definitions into raw instructions in binary order. -/
+def encodeFunctionsRaw : List SpirvFunction → List RawSpirvInst
+  | [] => []
+  | f :: fs =>
+    ⟨54, [f.resultTyId, f.funcId, f.control, f.funcTyId]⟩ ::
+      (f.params.map encodeParamRaw ++
+        (f.body.map encodeInstRaw ++ (⟨56, []⟩ :: encodeFunctionsRaw fs)))
 
 /-- Lower a `SpirvModule` into its sequence of `RawSpirvInst`s following the 5-word header. -/
 def moduleToRawInsts (m : SpirvModule) : List RawSpirvInst :=
-  (m.capabilities.map encodeCapabilityRaw) ++
-  [⟨14, [m.addrModel.toWord, m.memModel.toWord]⟩,
-   ⟨15, [spirvExecModelGLCompute, m.entryFuncId, spirvMainWord0, spirvMainWord1] ++ m.interfaceIds⟩] ++
-  (m.execModes.map (encodeExecModeRaw m.entryFuncId)) ++
-  (m.decorations.map encodeDecorateRaw) ++
-  (m.types.map encodeTypeRaw) ++
-  (m.globals.map encodeGlobalRaw) ++
-  [⟨54, [m.voidTypeId, m.entryFuncId, 0, m.funcTypeId]⟩,
-   ⟨248, [m.entryLabelId]⟩] ++
-  (m.body.map encodeInstRaw) ++
-  [⟨253, []⟩,
-   ⟨56, []⟩]
+  m.capabilities.map encodeCapabilityRaw ++
+  (m.extInstImports.map encodeExtInstImportRaw ++
+  (⟨14, [m.addrModel.toWord, m.memModel.toWord]⟩ ::
+   ⟨15, spirvExecModelGLCompute :: m.entryFuncId :: spirvMainWord0 :: spirvMainWord1 ::
+     m.interfaceIds⟩ ::
+  (m.execModes.map (encodeExecModeRaw m.entryFuncId) ++
+  (m.debug.map encodeDebugRaw ++
+  (m.annotations.map encodeAnnotationRaw ++
+  (m.tyGlobals.map encodeTyGlobalRaw ++
+   encodeFunctionsRaw m.functions))))))
+
+/-- Decidable well-formedness of a `SpirvModule`: non-zero id bound and every instruction
+    fits lossless 16-bit word-count framing. -/
+def WellFormedSpirvModule (m : SpirvModule) : Bool :=
+  decide (0 < m.idBound.toNat) && (moduleToRawInsts m).all RawSpirvInst.wf
 
 /-- Encode a `SpirvModule` into its exact binary `Array UInt32` SPIR-V 1.5/1.6 word stream. -/
 def encodeSpirvModuleWords (m : SpirvModule) : List UInt32 :=
@@ -885,6 +1096,86 @@ private theorem mapExcept_map_ok {α β : Type} (enc : β → α)
   | b :: bs => by
     simp [mapExcept, hRound b, mapExcept_map_ok enc dec hRound bs]
 
+/-- Split the maximal `pred`-prefix off a raw instruction list and decode every member. -/
+private def takeSection {β : Type} (pred : Nat → Bool)
+    (dec : RawSpirvInst → Except SpirvDecodeError β) (raws : List RawSpirvInst) :
+    Except SpirvDecodeError (List β × List RawSpirvInst) :=
+  match mapExcept dec (splitByOp pred raws).1 with
+  | .ok ys => .ok (ys, (splitByOp pred raws).2)
+  | .error e => .error e
+
+/-- The head (if any) of a raw instruction list fails `pred`. -/
+private def HeadFails (pred : Nat → Bool) : List RawSpirvInst → Prop
+  | [] => True
+  | y :: _ => pred y.opcode = false
+
+private theorem headFails_append {pred : Nat → Bool} {xs ys : List RawSpirvInst}
+    (hxs : ∀ x ∈ xs, pred x.opcode = false) (hys : HeadFails pred ys) :
+    HeadFails pred (xs ++ ys) := by
+  cases xs with
+  | nil => exact hys
+  | cons x xs => exact hxs x (.head _)
+
+private theorem headFails_map {β : Type} {pred : Nat → Bool} (enc : β → RawSpirvInst)
+    (h : ∀ b, pred (enc b).opcode = false) (bs : List β) {ys : List RawSpirvInst}
+    (hys : HeadFails pred ys) : HeadFails pred (bs.map enc ++ ys) :=
+  headFails_append (by intro x hx; obtain ⟨b, _, rfl⟩ := List.mem_map.mp hx; exact h b) hys
+
+private theorem takeSection_encode {β : Type} {pred : Nat → Bool}
+    {dec : RawSpirvInst → Except SpirvDecodeError β} (enc : β → RawSpirvInst)
+    (hPred : ∀ b, pred (enc b).opcode = true) (hRound : ∀ b, dec (enc b) = .ok b)
+    (bs : List β) {ys : List RawSpirvInst} (hys : HeadFails pred ys) :
+    takeSection pred dec (bs.map enc ++ ys) = .ok (bs, ys) := by
+  have hSplit : splitByOp pred (bs.map enc ++ ys) = (bs.map enc, ys) :=
+    splitByOp_append
+      (by intro x hx; obtain ⟨b, _, rfl⟩ := List.mem_map.mp hx; exact hPred b)
+      (by cases ys <;> first | trivial | exact hys)
+  simp [takeSection, hSplit, mapExcept_map_ok enc dec hRound bs]
+
+/-- Fuel-totalized parser for the function-definition section. -/
+def parseFunctionsAux : Nat → List RawSpirvInst → Except SpirvDecodeError (List SpirvFunction)
+  | _, [] => .ok []
+  | 0, _ :: _ => .error (.malformedSection "function section fuel exhausted")
+  | fuel + 1, hd :: rest =>
+    match hd.opcode, hd.operands with
+    | 54, [retTy, fnId, ctrl, fnTy] =>
+      match takeSection (· == 55) decodeParamRaw rest with
+      | .error e => .error e
+      | .ok (params, r1) =>
+        match takeSection isBodyOpcode decodeInstRaw r1 with
+        | .error e => .error e
+        | .ok (body, r2) =>
+          match r2 with
+          | ⟨56, []⟩ :: r3 =>
+            match parseFunctionsAux fuel r3 with
+            | .ok fs => .ok (⟨retTy, fnId, ctrl, fnTy, params, body⟩ :: fs)
+            | .error e => .error e
+          | _ => .error (.malformedSection "expected OpFunctionEnd")
+    | _, _ => .error (.malformedSection "expected OpFunction")
+
+private theorem parseFunctionsAux_encode :
+    ∀ (fs : List SpirvFunction) (fuel : Nat), (encodeFunctionsRaw fs).length ≤ fuel →
+      parseFunctionsAux fuel (encodeFunctionsRaw fs) = .ok fs
+  | [], fuel, _ => by cases fuel <;> rfl
+  | f :: fs, fuel, hFuel => by
+    cases fuel with
+    | zero => simp [encodeFunctionsRaw] at hFuel
+    | succ fuel =>
+      have hLen : (encodeFunctionsRaw fs).length ≤ fuel := by
+        simp only [encodeFunctionsRaw, List.length_cons, List.length_append,
+          List.length_map] at hFuel
+        omega
+      have hParams := takeSection_encode (pred := (· == 55)) (dec := decodeParamRaw)
+        encodeParamRaw (fun _ => rfl) decodeParamRaw_encode f.params
+        (ys := f.body.map encodeInstRaw ++ (⟨56, []⟩ :: encodeFunctionsRaw fs))
+        (headFails_map encodeInstRaw (by intro i; cases i <;> rfl) f.body
+          (ys := ⟨56, []⟩ :: encodeFunctionsRaw fs) rfl)
+      have hBody := takeSection_encode (pred := isBodyOpcode) (dec := decodeInstRaw)
+        encodeInstRaw (by intro i; cases i <;> rfl) decodeInstRaw_encode f.body
+        (ys := ⟨56, []⟩ :: encodeFunctionsRaw fs) rfl
+      simp only [encodeFunctionsRaw, parseFunctionsAux, hParams, hBody,
+        parseFunctionsAux_encode fs fuel hLen]
+
 /-- Decode a `SpirvModule` from its binary `Array UInt32` SPIR-V 1.5/1.6 word stream. -/
 def decodeSpirvModuleWords (words : List UInt32) : Except SpirvDecodeError SpirvModule :=
   match words with
@@ -903,7 +1194,12 @@ def decodeSpirvModuleWords (words : List UInt32) : Except SpirvDecodeError Spirv
           match parseRawInstStream instWords with
           | .error e => .error e
           | .ok raws =>
-            let (capRaws, r1) := splitByOp (· == 17) raws
+            match takeSection (· == 17) decodeCapabilityRaw raws with
+            | .error e => .error e
+            | .ok (caps, r0) =>
+            match takeSection (· == 11) decodeExtInstImportRaw r0 with
+            | .error e => .error e
+            | .ok (exts, r1) =>
             match r1 with
             | ⟨14, [addrW, memW]⟩ :: ⟨15, epModel :: entryFuncId :: m0 :: m1 :: ifaceIds⟩ :: r2 =>
               if epModel != spirvExecModelGLCompute || m0 != spirvMainWord0 || m1 != spirvMainWord1 then
@@ -911,51 +1207,37 @@ def decodeSpirvModuleWords (words : List UInt32) : Except SpirvDecodeError Spirv
               else
                 match SpirvAddressingModel.ofWord? addrW, SpirvMemoryModelKind.ofWord? memW with
                 | some addrM, some memM =>
-                  let (emRaws, r3) := splitByOp (· == 16) r2
-                  let (decRaws, r4) := splitByOp (· == 71) r3
-                  let (tyRaws, r5) := splitByOp isTypeOpcode r4
-                  let (globRaws, r6) := splitByOp isGlobalOpcode r5
-                  match r6 with
-                  | ⟨54, [voidTyId, fnId, fnCtrl, fnTyId]⟩ :: ⟨248, [entryLbl]⟩ :: r7 =>
-                    if fnId != entryFuncId || fnCtrl != 0 then
-                      .error (.malformedSection "bad OpFunction header")
-                    else
-                      let (bodyRaws, r8) := splitByOp isBodyOpcode r7
-                      match r8 with
-                      | [⟨253, []⟩, ⟨56, []⟩] =>
-                        match mapExcept decodeCapabilityRaw capRaws,
-                              mapExcept (decodeExecModeRaw entryFuncId) emRaws,
-                              mapExcept decodeDecorateRaw decRaws,
-                              mapExcept decodeTypeRaw tyRaws,
-                              mapExcept decodeGlobalRaw globRaws,
-                              mapExcept decodeInstRaw bodyRaws with
-                        | .ok caps, .ok ems, .ok decs, .ok tys, .ok globs, .ok body =>
-                          .ok {
-                            version := parsedVer
-                            generator := gen
-                            idBound := bound
-                            capabilities := caps
-                            addrModel := addrM
-                            memModel := memM
-                            entryFuncId := entryFuncId
-                            interfaceIds := ifaceIds
-                            execModes := ems
-                            decorations := decs
-                            types := tys
-                            globals := globs
-                            voidTypeId := voidTyId
-                            funcTypeId := fnTyId
-                            entryLabelId := entryLbl
-                            body := body
-                          }
-                        | .error e, _, _, _, _, _ => .error e
-                        | _, .error e, _, _, _, _ => .error e
-                        | _, _, .error e, _, _, _ => .error e
-                        | _, _, _, .error e, _, _ => .error e
-                        | _, _, _, _, .error e, _ => .error e
-                        | _, _, _, _, _, .error e => .error e
-                      | _ => .error (.malformedSection "expected OpReturn; OpFunctionEnd")
-                  | _ => .error (.malformedSection "expected OpFunction; OpLabel")
+                  match takeSection (· == 16) (decodeExecModeRaw entryFuncId) r2 with
+                  | .error e => .error e
+                  | .ok (ems, r3) =>
+                  match takeSection isDebugOpcode decodeDebugRaw r3 with
+                  | .error e => .error e
+                  | .ok (dbg, r4) =>
+                  match takeSection isAnnotationOpcode decodeAnnotationRaw r4 with
+                  | .error e => .error e
+                  | .ok (anns, r5) =>
+                  match takeSection isTyGlobalOpcode decodeTyGlobalRaw r5 with
+                  | .error e => .error e
+                  | .ok (tgs, r6) =>
+                  match parseFunctionsAux r6.length r6 with
+                  | .error e => .error e
+                  | .ok fns =>
+                    .ok {
+                      version := parsedVer
+                      generator := gen
+                      idBound := bound
+                      capabilities := caps
+                      extInstImports := exts
+                      addrModel := addrM
+                      memModel := memM
+                      entryFuncId := entryFuncId
+                      interfaceIds := ifaceIds
+                      execModes := ems
+                      debug := dbg
+                      annotations := anns
+                      tyGlobals := tgs
+                      functions := fns
+                    }
                 | _, _ => .error (.malformedSection "bad OpMemoryModel operands")
             | _ => .error (.malformedSection "expected OpMemoryModel; OpEntryPoint")
   | _ => .error .truncatedHeader
@@ -963,187 +1245,81 @@ def decodeSpirvModuleWords (words : List UInt32) : Except SpirvDecodeError Spirv
 def decodeSpirvModule (words : Array UInt32) : Except SpirvDecodeError SpirvModule :=
   decodeSpirvModuleWords words.toList
 
-private theorem moduleToRawInsts_wf {m : SpirvModule} (hm : WellFormedSpirvModule m = true) :
-    (moduleToRawInsts m).all RawSpirvInst.wf = true := by
-  unfold WellFormedSpirvModule at hm
-  simp only [Bool.and_eq_true, decide_eq_true_eq, List.all_eq_true] at hm
-  rcases hm with ⟨⟨⟨_, hIface⟩, hTys⟩, hBody⟩
-  rw [List.all_eq_true]
-  intro r hr
-  unfold moduleToRawInsts at hr
-  simp only [List.mem_append, List.mem_map, List.mem_cons, List.not_mem_nil, or_false] at hr
-  rcases hr with (((((((⟨c, _, rfl⟩ | (rfl | rfl)) | ⟨em, _, rfl⟩) | ⟨d, _, rfl⟩) |
-      ⟨t, ht, rfl⟩) | ⟨g, _, rfl⟩) | (rfl | rfl)) | ⟨i, hi, rfl⟩) | (rfl | rfl)
-  · cases c <;> rfl
-  · rfl
-  · simp [RawSpirvInst.wf]; omega
-  · cases em <;> rfl
-  · rcases d with ⟨_, dec⟩; cases dec <;> rfl
-  · specialize hTys t ht
-    cases t with
-    | typeStruct res fields =>
-      simp only [SpirvTypeDecl.wf, decide_eq_true_eq] at hTys
-      unfold encodeTypeRaw RawSpirvInst.wf
-      apply Bool.and_eq_true_iff.mpr
-      refine ⟨rfl, decide_eq_true ?_⟩
-      simp only [List.length_cons]
-      omega
-    | _ => rfl
-  · cases g <;> rfl
-  · rfl
-  · rfl
-  · specialize hBody i hi
-    cases i with
-    | opAccessChain ty res base indices =>
-      simp only [SpirvInst.wf, decide_eq_true_eq] at hBody
-      unfold encodeInstRaw RawSpirvInst.wf
-      apply Bool.and_eq_true_iff.mpr
-      refine ⟨rfl, decide_eq_true ?_⟩
-      simp only [List.length_cons]
-      omega
-    | _ => rfl
-  · rfl
-  · rfl
+private theorem headFails_functions {pred : Nat → Bool} (h54 : pred 54 = false)
+    (fs : List SpirvFunction) : HeadFails pred (encodeFunctionsRaw fs) := by
+  cases fs with
+  | nil => trivial
+  | cons f fs => exact h54
 
-private theorem head_not_op_16 (decs : List SpirvDecorateDecl) (tys : List SpirvTypeDecl)
-    (globs : List SpirvGlobalDecl) (tail : List RawSpirvInst)
-    (fnRaw : RawSpirvInst) (hfn : fnRaw.opcode = 54) :
-    match (decs.map encodeDecorateRaw) ++ (tys.map encodeTypeRaw) ++
-          (globs.map encodeGlobalRaw) ++ (fnRaw :: tail) with
-    | [] => True
-    | y :: _ => (y.opcode == 16) = false := by
-  cases decs with
-  | cons d _ => rcases d with ⟨_, dec⟩; cases dec <;> rfl
-  | nil =>
-    cases tys with
-    | cons t _ => cases t <;> rfl
-    | nil =>
-      cases globs with
-      | cons g _ => cases g <;> rfl
-      | nil => simp [hfn]
-
-private theorem head_not_op_71 (tys : List SpirvTypeDecl)
-    (globs : List SpirvGlobalDecl) (tail : List RawSpirvInst)
-    (fnRaw : RawSpirvInst) (hfn : fnRaw.opcode = 54) :
-    match (tys.map encodeTypeRaw) ++ (globs.map encodeGlobalRaw) ++ (fnRaw :: tail) with
-    | [] => True
-    | y :: _ => (y.opcode == 71) = false := by
-  cases tys with
-  | cons t _ => cases t <;> rfl
-  | nil =>
-    cases globs with
-    | cons g _ => cases g <;> rfl
-    | nil => simp [hfn]
-
-private theorem head_not_typeOp (globs : List SpirvGlobalDecl) (tail : List RawSpirvInst)
-    (fnRaw : RawSpirvInst) (hfn : fnRaw.opcode = 54) :
-    match (globs.map encodeGlobalRaw) ++ (fnRaw :: tail) with
-    | [] => True
-    | y :: _ => isTypeOpcode y.opcode = false := by
-  cases globs with
-  | cons g _ => cases g <;> rfl
-  | nil => simp [hfn, isTypeOpcode]
-
-/-- **Binary `SPIR-V 1.5/1.6` Encoder/Decoder Roundtrip Theorem (`decodeSpirvModule_encodeSpirvModule`)**:
-    Every well-formed `SpirvModule` encodes to a valid `Array UInt32` binary word stream and decodes
-    back to the exact AST `m`. -/
+/-- Lossless roundtrip of binary SPIR-V 1.5/1.6 encoding for well-formed compute modules. -/
 theorem decodeSpirvModule_encodeSpirvModule {m : SpirvModule}
     (hm : WellFormedSpirvModule m = true) :
     decodeSpirvModule (encodeSpirvModule m) = .ok m := by
-  have hRawWf := moduleToRawInsts_wf hm
   unfold WellFormedSpirvModule at hm
   simp only [Bool.and_eq_true, decide_eq_true_eq] at hm
   have hBoundNe0 : (m.idBound.toNat == 0) = false := by
-    have := hm.1.1.1; simp; omega
+    have := hm.1; simp; omega
   change decodeSpirvModuleWords (encodeSpirvModuleWords m) = .ok m
   unfold encodeSpirvModuleWords decodeSpirvModuleWords
   simp only [List.cons_append, List.nil_append, bne_self_eq_false, Bool.false_eq_true,
     ↓reduceIte, SpirvVersion.ofWord?_toWord, hBoundNe0]
-  rw [parseRawInstStream_encodeRawInstList hRawWf]
+  rw [parseRawInstStream_encodeRawInstList hm.2]
   dsimp only
   unfold moduleToRawInsts
-  simp only [List.append_assoc, List.cons_append, List.nil_append]
-  have hSplitCap : splitByOp (· == 17)
-      ((m.capabilities.map encodeCapabilityRaw) ++
-       (⟨14, [m.addrModel.toWord, m.memModel.toWord]⟩ ::
-        ⟨15, spirvExecModelGLCompute :: m.entryFuncId :: spirvMainWord0 :: spirvMainWord1 :: m.interfaceIds⟩ ::
-        ((m.execModes.map (encodeExecModeRaw m.entryFuncId)) ++
-         ((m.decorations.map encodeDecorateRaw) ++
-          ((m.types.map encodeTypeRaw) ++
-           ((m.globals.map encodeGlobalRaw) ++
-            (⟨54, [m.voidTypeId, m.entryFuncId, 0, m.funcTypeId]⟩ ::
-             ⟨248, [m.entryLabelId]⟩ ::
-             ((m.body.map encodeInstRaw) ++ [⟨253, []⟩, ⟨56, []⟩])))))))) =
-      (m.capabilities.map encodeCapabilityRaw,
-       ⟨14, [m.addrModel.toWord, m.memModel.toWord]⟩ ::
-        ⟨15, spirvExecModelGLCompute :: m.entryFuncId :: spirvMainWord0 :: spirvMainWord1 :: m.interfaceIds⟩ ::
-        ((m.execModes.map (encodeExecModeRaw m.entryFuncId)) ++
-         ((m.decorations.map encodeDecorateRaw) ++
-          ((m.types.map encodeTypeRaw) ++
-           ((m.globals.map encodeGlobalRaw) ++
-            (⟨54, [m.voidTypeId, m.entryFuncId, 0, m.funcTypeId]⟩ ::
-             ⟨248, [m.entryLabelId]⟩ ::
-             ((m.body.map encodeInstRaw) ++ [⟨253, []⟩, ⟨56, []⟩]))))))) := by
-    apply splitByOp_append
-    · intro x hx; obtain ⟨c, _, rfl⟩ := List.mem_map.mp hx; rfl
-    · rfl
-  rw [hSplitCap]
+  have hFn : ∀ pred : Nat → Bool, pred 54 = false →
+      HeadFails pred (encodeFunctionsRaw m.functions) :=
+    fun pred h => headFails_functions h m.functions
+  have hTg : ∀ pred : Nat → Bool, pred 54 = false →
+      (∀ x : SpirvTyGlobal, pred (encodeTyGlobalRaw x).opcode = false) →
+      HeadFails pred (m.tyGlobals.map encodeTyGlobalRaw ++ encodeFunctionsRaw m.functions) :=
+    fun pred h54 h => headFails_map encodeTyGlobalRaw h m.tyGlobals (hFn pred h54)
+  have hTgOp : ∀ (pred : Nat → Bool), (∀ op, isTyGlobalOpcode op = true → pred op = false) →
+      ∀ x : SpirvTyGlobal, pred (encodeTyGlobalRaw x).opcode = false := by
+    intro pred h x
+    apply h
+    cases x with
+    | ty t => cases t <;> rfl
+    | glob g => cases g <;> rfl
+  have hAnnOp : ∀ a : SpirvAnnotation, (encodeAnnotationRaw a).opcode = 71 ∨
+      (encodeAnnotationRaw a).opcode = 72 := by
+    intro a; cases a with
+    | decorate d => exact .inl rfl
+    | memberDecorate _ _ _ => exact .inr rfl
+  have hDbgOp : ∀ d : SpirvDebugDecl, isDebugOpcode (encodeDebugRaw d).opcode = true := by
+    intro d; cases d <;> rfl
+  rw [takeSection_encode encodeCapabilityRaw (fun _ => rfl) decodeCapabilityRaw_encode
+    m.capabilities
+    (headFails_map encodeExtInstImportRaw (fun _ => rfl) m.extInstImports (ys := _ :: _) rfl)]
+  dsimp only
+  rw [takeSection_encode encodeExtInstImportRaw (fun _ => rfl) decodeExtInstImportRaw_encode
+    m.extInstImports (ys := _ :: _) rfl]
   simp only [bne_self_eq_false, Bool.or_self, Bool.false_eq_true, ↓reduceIte,
     SpirvAddressingModel.ofWord?_toWord, SpirvMemoryModelKind.ofWord?_toWord]
-  have hSplitEm := splitByOp_append (pred := (· == 16))
-    (xs := m.execModes.map (encodeExecModeRaw m.entryFuncId))
-    (ys := (m.decorations.map encodeDecorateRaw) ++ (m.types.map encodeTypeRaw) ++
-           (m.globals.map encodeGlobalRaw) ++
-           (⟨54, [m.voidTypeId, m.entryFuncId, 0, m.funcTypeId]⟩ ::
-            ⟨248, [m.entryLabelId]⟩ :: ((m.body.map encodeInstRaw) ++ [⟨253, []⟩, ⟨56, []⟩])))
-    (by intro x hx; obtain ⟨em, _, rfl⟩ := List.mem_map.mp hx; cases em <;> rfl)
-    (head_not_op_16 m.decorations m.types m.globals _ _ rfl)
-  simp only [List.append_assoc] at hSplitEm
-  rw [hSplitEm]
+  rw [takeSection_encode (encodeExecModeRaw m.entryFuncId)
+    (by intro em; cases em <;> rfl) (decodeExecModeRaw_encode m.entryFuncId) m.execModes
+    (headFails_map encodeDebugRaw (by intro d; cases d <;> rfl) m.debug
+      (headFails_map encodeAnnotationRaw
+        (by intro a; rcases hAnnOp a with h | h <;> simp [h]) m.annotations
+        (hTg _ rfl (hTgOp _ (by decide)))))]
   dsimp only
-  have hSplitDec := splitByOp_append (pred := (· == 71))
-    (xs := m.decorations.map encodeDecorateRaw)
-    (ys := (m.types.map encodeTypeRaw) ++ (m.globals.map encodeGlobalRaw) ++
-           (⟨54, [m.voidTypeId, m.entryFuncId, 0, m.funcTypeId]⟩ ::
-            ⟨248, [m.entryLabelId]⟩ :: ((m.body.map encodeInstRaw) ++ [⟨253, []⟩, ⟨56, []⟩])))
-    (by intro x hx; obtain ⟨d, _, rfl⟩ := List.mem_map.mp hx; rcases d with ⟨_, dec⟩; cases dec <;> rfl)
-    (head_not_op_71 m.types m.globals _ _ rfl)
-  simp only [List.append_assoc] at hSplitDec
-  rw [hSplitDec]
+  rw [takeSection_encode encodeDebugRaw hDbgOp decodeDebugRaw_encode m.debug
+    (headFails_map encodeAnnotationRaw
+      (by intro a; rcases hAnnOp a with h | h <;> simp [h, isDebugOpcode]) m.annotations
+      (hTg _ rfl (hTgOp _ (by decide))))]
   dsimp only
-  have hSplitTy := splitByOp_append (pred := isTypeOpcode)
-    (xs := m.types.map encodeTypeRaw)
-    (ys := (m.globals.map encodeGlobalRaw) ++
-           (⟨54, [m.voidTypeId, m.entryFuncId, 0, m.funcTypeId]⟩ ::
-            ⟨248, [m.entryLabelId]⟩ :: ((m.body.map encodeInstRaw) ++ [⟨253, []⟩, ⟨56, []⟩])))
-    (by intro x hx; obtain ⟨t, _, rfl⟩ := List.mem_map.mp hx; cases t <;> rfl)
-    (head_not_typeOp m.globals _ _ rfl)
-  rw [hSplitTy]
+  rw [takeSection_encode encodeAnnotationRaw
+    (by intro a; rcases hAnnOp a with h | h <;> simp [h, isAnnotationOpcode])
+    decodeAnnotationRaw_encode m.annotations (hTg _ rfl (hTgOp _ (by decide)))]
   dsimp only
-  have hSplitGlob := splitByOp_append (pred := isGlobalOpcode)
-    (xs := m.globals.map encodeGlobalRaw)
-    (ys := ⟨54, [m.voidTypeId, m.entryFuncId, 0, m.funcTypeId]⟩ ::
-           ⟨248, [m.entryLabelId]⟩ :: ((m.body.map encodeInstRaw) ++ [⟨253, []⟩, ⟨56, []⟩]))
-    (by intro x hx; obtain ⟨g, _, rfl⟩ := List.mem_map.mp hx; cases g <;> rfl)
-    rfl
-  rw [hSplitGlob]
-  simp only [bne_self_eq_false, Bool.or_self, Bool.false_eq_true, ↓reduceIte]
-  have hSplitBody := splitByOp_append (pred := isBodyOpcode)
-    (xs := m.body.map encodeInstRaw)
-    (ys := [⟨253, []⟩, ⟨56, []⟩])
-    (by intro x hx; obtain ⟨i, _, rfl⟩ := List.mem_map.mp hx; cases i <;> rfl)
-    rfl
-  rw [hSplitBody]
+  rw [takeSection_encode encodeTyGlobalRaw
+    (by intro x; cases x with
+        | ty t => cases t <;> rfl
+        | glob g => cases g <;> rfl)
+    decodeTyGlobalRaw_encode m.tyGlobals (hFn _ rfl)]
   dsimp only
-  rw [mapExcept_map_ok _ _ decodeCapabilityRaw_encode,
-      mapExcept_map_ok _ _ (decodeExecModeRaw_encode m.entryFuncId),
-      mapExcept_map_ok _ _ decodeDecorateRaw_encode,
-      mapExcept_map_ok _ _ decodeTypeRaw_encode,
-      mapExcept_map_ok _ _ decodeGlobalRaw_encode,
-      mapExcept_map_ok _ _ decodeInstRaw_encode]
-  cases m; rfl
+  rw [parseFunctionsAux_encode m.functions _ (Nat.le_refl _)]
 
-/-- Injectivity of `encodeSpirvModule` on well-formed SPIR-V 1.6 compute modules. -/
+/-- Injectivity of `encodeSpirvModule` on well-formed SPIR-V compute modules. -/
 theorem encodeSpirvModule_injective {m₁ m₂ : SpirvModule}
     (h₁ : WellFormedSpirvModule m₁ = true) (h₂ : WellFormedSpirvModule m₂ = true)
     (hEq : encodeSpirvModule m₁ = encodeSpirvModule m₂) : m₁ = m₂ := by
@@ -1153,6 +1329,7 @@ theorem encodeSpirvModule_injective {m₁ m₂ : SpirvModule}
   have hOk : Except.ok m₁ = (Except.ok m₂ : Except SpirvDecodeError SpirvModule) :=
     d₁.symm.trans d₂
   injection hOk
+
 
 /-- `#tooth` Corrupting the `0x07230203` SPIR-V magic header word is rejected by `decodeSpirvModule`. -/
 theorem tooth_corrupted_spirv_magic_rejected (ver gen bound : UInt32) (rest : List UInt32) :
@@ -1185,6 +1362,7 @@ structure WorkgroupConfig where
   workgroupId : Nat
   numWaves : Nat
   wavesPos : 0 < numWaves
+  workgroupCount : Nat := 1
 
 def WorkgroupConfig.totalThreads (cfg : WorkgroupConfig) : Nat :=
   cfg.numWaves * wave32Lanes
@@ -1303,6 +1481,8 @@ def initLaneRegs (env : SpirvModuleEnv) (cfg : WorkgroupConfig) (wave lane : Nat
     Nat → SpirvVal :=
   fun ssaId =>
     match env.builtIns ssaId with
+    | some .numWorkgroups => .vU32 (UInt32.ofNat cfg.workgroupCount)
+    | some .workgroupSize => .vU32 (UInt32.ofNat cfg.totalThreads)
     | some .workgroupId => .vU32 (UInt32.ofNat cfg.workgroupId)
     | some .localInvocationId => .vU32 (UInt32.ofNat (cfg.localTid wave lane))
     | some .globalInvocationId => .vU32 (UInt32.ofNat (cfg.globalTid wave lane))
@@ -2165,7 +2345,8 @@ def twoWavePhase1CrossWaveRead : List SpirvInst :=
     .opStore 19 18
   ]
 
-def twoWaveCfg : WorkgroupConfig := ⟨0, 2, by decide⟩
+def twoWaveCfg : WorkgroupConfig :=
+  { workgroupId := 0, numWaves := 2, wavesPos := by decide, workgroupCount := 1 }
 
 /-- Project a single `StorageBuffer` dword out of an execution result (`Option UInt32` has `DecidableEq`). -/
 def peekSsboDword (binding addr : Nat) (res : Except SimtExecError WorkgroupExecState) : Option UInt32 :=
@@ -3501,6 +3682,79 @@ theorem tooth_secret_index_leaks_lds_bank_trace :
   by_cases hb0 : b = 0
   · subst hb0; simp at hb
   · funext i; simp [hb0]
+
+/-- The exact scalar-plane swizzle used by goldilocks_ntt.comp and coset_lde_ext2.comp.
+The argument and result are dword offsets; a plane occupies 512 dwords. -/
+def productionLdsIndex (i : Nat) : Nat := i ^^^ (((i >>> 5) &&& 1) * 31)
+
+/-- Stage is zero-based (shader s = stage+1); side chooses idx0/idx1. -/
+def productionButterflyIndex (stage wave side lane : Nat) : Nat :=
+  let lid := 32 * wave + lane
+  ((lid >>> stage) <<< (stage+1)) + (lid &&& (2^stage-1)) + side * 2^stage
+
+/-- A left inverse for the bank permutation, computed from the actual address formula. -/
+def productionBankInverse (stage wave side bank : Nat) : Nat :=
+  ((List.range 32).find? fun lane =>
+    productionLdsIndex (productionButterflyIndex stage wave side lane) % 32 == bank).getD 32
+
+set_option maxRecDepth 8192 in
+set_option maxHeartbeats 8000000 in
+private theorem production_bank_inverse_checked :
+    ∀ stage : Fin 9, ∀ wave : Fin 8, ∀ side : Fin 2, ∀ lane : Fin 32,
+      productionBankInverse stage wave side
+        (productionLdsIndex (productionButterflyIndex stage wave side lane) % 32) = lane.val := by
+  decide
+
+/-- Each separately issued scalar-plane butterfly access is conflict-free for all
+nine fused NTT stages, eight waves, and both butterfly operands. This does not
+claim that a fused hardware instruction touching two planes makes only 32 accesses. -/
+theorem production_butterfly_lds_bank_conflict_free (stage : Fin 9) (wave : Fin 8)
+    (side : Fin 2) :
+    LdsBankConflictFree32 (fun lane =>
+      4 * productionLdsIndex (productionButterflyIndex stage wave side lane)) := by
+  intro a b ha hb h
+  have ha' : a < 32 := ha
+  have hb' : b < 32 := hb
+  have hbank : productionLdsIndex (productionButterflyIndex stage wave side a) % 32 =
+      productionLdsIndex (productionButterflyIndex stage wave side b) % 32 := by
+    simpa [ldsBank] using h
+  have hi := congrArg (productionBankInverse stage wave side) hbank
+  rw [production_bank_inverse_checked stage wave side ⟨a, ha'⟩,
+      production_bank_inverse_checked stage wave side ⟨b, hb'⟩] at hi
+  exact hi
+
+def ProductionButterflyShape (stage wave side : Nat) : Prop :=
+  stage < 9 ∧ wave < 8 ∧ side < 2
+
+theorem production_butterfly_address_inhabited :
+    ∃ stage wave side : Nat, ProductionButterflyShape stage wave side :=
+  ⟨0, 0, 0, by exact ⟨by decide, by decide, by decide⟩⟩
+
+/-- Omitting the XOR duplicates banks already in the first butterfly stage. -/
+theorem tooth_omitted_production_swizzle :
+    ¬ LdsBankConflictFree32 (fun lane => 4 * productionButterflyIndex 0 0 0 lane) := by
+  intro h
+  have he := h 0 16 (by decide) (by decide) (by decide)
+  omega
+
+#tooth_pair production_butterfly_lds_bank_conflict_free vs tooth_omitted_production_swizzle
+
+theorem production_butterfly_lds_bank_conflict_free_bounded (stage wave side : Nat)
+    (h : ProductionButterflyShape stage wave side) :
+    LdsBankConflictFree32 (fun lane =>
+      4 * productionLdsIndex (productionButterflyIndex stage wave side lane)) :=
+  production_butterfly_lds_bank_conflict_free ⟨stage, h.1⟩ ⟨wave, h.2.1⟩ ⟨side, h.2.2⟩
+
+#verify_inhabited production_butterfly_lds_bank_conflict_free_bounded production_butterfly_address_inhabited
+
+/-- Normative opcode regressions, independent of encoder/decoder roundtripping. -/
+theorem spirv_normative_bitwise_and_comparison_decode :
+    decodeInstRaw ⟨197, [1, 2, 3, 4]⟩ = .ok (.opBitwiseOr 1 2 3 4) ∧
+    decodeInstRaw ⟨198, [1, 2, 3, 4]⟩ = .ok (.opBitwiseXor 1 2 3 4) ∧
+    decodeInstRaw ⟨170, [1, 2, 3, 4]⟩ = .ok (.opIEqual 1 2 3 4) ∧
+    decodeInstRaw ⟨174, [1, 2, 3, 4]⟩ = .ok (.opUGreaterThanEqual 1 2 3 4) ∧
+    decodeInstRaw ⟨176, [1, 2, 3, 4]⟩ = .ok (.opULessThan 1 2 3 4) := by
+  simp [decodeInstRaw]
 
 end Qsag
 end

@@ -1,9 +1,11 @@
 module
+import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.Common
 public import QsagVerified.Proofs.Adrs
 public import QsagVerified.Proofs.MirRefinementKit
 public import QsagVerified.Proofs.Sponge
+import all QsagVerified.Proofs.SpongeFraming
 
 public section
 
@@ -1500,95 +1502,63 @@ theorem hybrid_domain_framing_role_disjoint_mir
   rw [hrole] at hrole_pq
   cases hrole_pq
 
+private theorem hybrid_hash_total (d0 d1 d2 d3 d4 d5 d6 : Slice Std.U8) :
+    ∃ digest, (do
+      let sp ← keccak.Shake256Sponge.new_shake256
+      let sp ← keccak.Shake256Sponge.absorb sp d0
+      let sp ← keccak.Shake256Sponge.absorb sp d1
+      let sp ← keccak.Shake256Sponge.absorb sp d2
+      let sp ← keccak.Shake256Sponge.absorb sp d3
+      let sp ← keccak.Shake256Sponge.absorb sp d4
+      let sp ← keccak.Shake256Sponge.absorb sp d5
+      let sp ← keccak.Shake256Sponge.absorb sp d6
+      let out := Array.repeat 32#usize 0#u8
+      let (dst, back) ← lift (Array.to_slice_mut out)
+      let (_, dst) ← keccak.Shake256Sponge.squeeze sp dst
+      ok (some (back dst))) = .ok (some digest) := by
+  obtain ⟨s0, h0, inv0, _⟩ := sponge_new_shake256_absorbed
+  obtain ⟨s1, h1, inv1, _⟩ := sponge_absorb_refines s0 d0 _ inv0
+  obtain ⟨s2, h2, inv2, _⟩ := sponge_absorb_refines s1 d1 _ inv1
+  obtain ⟨s3, h3, inv3, _⟩ := sponge_absorb_refines s2 d2 _ inv2
+  obtain ⟨s4, h4, inv4, _⟩ := sponge_absorb_refines s3 d3 _ inv3
+  obtain ⟨s5, h5, inv5, _⟩ := sponge_absorb_refines s4 d4 _ inv4
+  obtain ⟨s6, h6, inv6, _⟩ := sponge_absorb_refines s5 d5 _ inv5
+  obtain ⟨s7, h7, inv7, _⟩ := sponge_absorb_refines s6 d6 _ inv6
+  have hc := inv7.canonical
+  obtain ⟨result, hr⟩ := sponge_squeeze_short s7
+    (Array.to_slice_mut (Array.repeat 32#usize 0#u8)).1 32 (by decide) hc.1
+    (by rw [hc.2.1]; exact Nat.mod_lt _ (by decide)) rfl
+  refine ⟨(Array.to_slice_mut (Array.repeat 32#usize 0#u8)).2 result.2, ?_⟩
+  simp only [h0, h1, h2, h3, h4, h5, h6, h7, hr,
+    bind_eq_result_bind, result_bind_ok, lift_eq_ok]
+
 theorem derive_hybrid_transcript_digest_total
     (role : policy_and_addr.HybridRoleTag) (suite_code : Std.U16)
-    (id_commit message_digest : Array Std.U8 32#usize) :
+    (id_commit pk_classical_digest pk_pq_digest : Array Std.U8 32#usize)
+    (message : Slice Std.U8) :
     (suite_code = 1281#u16 ∨ suite_code = 1282#u16 →
       ∃ digest, policy_and_addr.derive_hybrid_transcript_digest
-        role suite_code id_commit message_digest = .ok (some digest)) ∧
+        role suite_code id_commit pk_classical_digest pk_pq_digest message = .ok (some digest)) ∧
     (suite_code ≠ 1281#u16 ∧ suite_code ≠ 1282#u16 →
       policy_and_addr.derive_hybrid_transcript_digest
-        role suite_code id_commit message_digest = .ok none) := by
-  have hSpongeBranch :
-      ∃ digest : Array Std.U8 32#usize,
-        (do
-          let rb ← policy_and_addr.HybridRoleTag.to_u8 role
-          let i1 ← suite_code >>> 8#i32
-          let i2 ← lift (i1 &&& 255#u16)
-          let i3 ← lift (UScalar.cast .U8 i2)
-          let i4 ← lift (suite_code &&& 255#u16)
-          let i5 ← lift (UScalar.cast .U8 i4)
-          let sp ← keccak.Shake256Sponge.new_shake256
-          let s ← lift (Array.to_slice (Array.make 14#usize [
-            81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 72#u8, 89#u8, 66#u8,
-            82#u8, 73#u8, 68#u8, 46#u8, 86#u8, 50#u8]))
-          let sp1 ← keccak.Shake256Sponge.absorb sp s
-          let s1 ← lift (Array.to_slice (Array.make 3#usize [rb, i3, i5]))
-          let sp2 ← keccak.Shake256Sponge.absorb sp1 s1
-          let s2 ← lift (Array.to_slice id_commit)
-          let sp3 ← keccak.Shake256Sponge.absorb sp2 s2
-          let s3 ← lift (Array.to_slice message_digest)
-          let sp4 ← keccak.Shake256Sponge.absorb sp3 s3
-          let out := Array.repeat 32#usize 0#u8
-          let (s4, to_slice_mut_back) ← lift (Array.to_slice_mut out)
-          let (_, s5) ← keccak.Shake256Sponge.squeeze sp4 s4
-          ok (some (to_slice_mut_back s5))) = .ok (some digest) := by
-    let sp0 : keccak.Shake256Sponge :=
-      ⟨Std.Array.repeat 25#usize 0#u64, Std.Array.repeat 136#usize 0#u8,
-        0#usize, 31#u8, false, 0#usize⟩
-    have hnew : keccak.Shake256Sponge.new_shake256 = .ok sp0 := rfl
-    have hshr : (suite_code >>> 8#i32 : Result Std.U16) = .ok ⟨suite_code.bv >>> 8⟩ := rfl
-    let dom14 : Std.Array Std.U8 14#usize := Array.make 14#usize [
-      81#u8, 83#u8, 65#u8, 71#u8, 46#u8, 72#u8, 89#u8, 66#u8,
-      82#u8, 73#u8, 68#u8, 46#u8, 86#u8, 50#u8]
-    let hdr3 : Std.Array Std.U8 3#usize := Array.make 3#usize [
-      hybridRoleByte role,
-      UScalar.cast .U8 ((⟨suite_code.bv >>> 8⟩ : Std.U16) &&& 255#u16),
-      UScalar.cast .U8 (suite_code &&& 255#u16)]
-    have hd : (Std.Array.to_slice dom14).val.length = 14 := dom14.property
-    have hh : (Std.Array.to_slice hdr3).val.length = 3 := hdr3.property
-    have hi_len : (Std.Array.to_slice id_commit).val.length = 32 := id_commit.property
-    have hm_len : (Std.Array.to_slice message_digest).val.length = 32 := message_digest.property
-    obtain ⟨sp1, hsp1, hn1, hv1⟩ := sponge_absorb_short sp0 (Std.Array.to_slice dom14) rfl
-      (by change 0 + _ < 136; rw [hd]; decide)
-    have hv1' : sp1.buf_len.val = 14 := by
-      simpa only [hd, show sp0.buf_len.val = 0 from rfl, Nat.zero_add] using hv1
-    obtain ⟨sp2, hsp2, hn2, hv2⟩ := sponge_absorb_short sp1 (Std.Array.to_slice hdr3) hn1
-      (by rw [hv1', hh]; decide)
-    have hv2' : sp2.buf_len.val = 17 := by simpa only [hv1', hh] using hv2
-    obtain ⟨sp3, hsp3, hn3, hv3⟩ := sponge_absorb_short sp2 (Std.Array.to_slice id_commit) hn2
-      (by rw [hv2', hi_len]; decide)
-    have hv3' : sp3.buf_len.val = 49 := by simpa only [hv2', hi_len] using hv3
-    obtain ⟨sp4, hsp4, hn4, hv4⟩ := sponge_absorb_short sp3 (Std.Array.to_slice message_digest) hn3
-      (by rw [hv3', hm_len]; decide)
-    have hv4' : sp4.buf_len.val = 81 := by simpa only [hv3', hm_len] using hv4
-    let out : Std.Array Std.U8 32#usize := Std.Array.repeat 32#usize 0#u8
-    obtain ⟨res_s, hres_s⟩ := sponge_squeeze_short sp4 (Std.Array.to_slice_mut out).1 32
-      (by decide) hn4 (by rw [hv4']; decide) rfl
-    rw [hybridRole_to_u8_eq]
-    simp only [hshr, hnew, bind_eq_result_bind, result_bind_ok, lift_eq_ok]
-    rw [hsp1, result_bind_ok, hsp2, result_bind_ok, hsp3, result_bind_ok,
-        hsp4, result_bind_ok, hres_s, result_bind_ok]
-    exact ⟨_, rfl⟩
-  unfold policy_and_addr.derive_hybrid_transcript_digest
-    policy_and_addr.SUITE_HYBRID_ED25519_MLDSA65
-    policy_and_addr.SUITE_HYBRID_SECP256K1_SLHDSA
+        role suite_code id_commit pk_classical_digest pk_pq_digest message = .ok none) := by
+  have headerShift (x : Std.U16) : (x >>> 8#i32 : Result Std.U16) = .ok ⟨x.bv >>> 8⟩ := rfl
+  have sh56 (x : Std.U64) : (x >>> 56#i32 : Result Std.U64) = .ok ⟨x.bv >>> 56⟩ := rfl
+  have sh48 (x : Std.U64) : (x >>> 48#i32 : Result Std.U64) = .ok ⟨x.bv >>> 48⟩ := rfl
+  have sh40 (x : Std.U64) : (x >>> 40#i32 : Result Std.U64) = .ok ⟨x.bv >>> 40⟩ := rfl
+  have sh32 (x : Std.U64) : (x >>> 32#i32 : Result Std.U64) = .ok ⟨x.bv >>> 32⟩ := rfl
+  have sh24 (x : Std.U64) : (x >>> 24#i32 : Result Std.U64) = .ok ⟨x.bv >>> 24⟩ := rfl
+  have sh16 (x : Std.U64) : (x >>> 16#i32 : Result Std.U64) = .ok ⟨x.bv >>> 16⟩ := rfl
+  have sh8 (x : Std.U64) : (x >>> 8#i32 : Result Std.U64) = .ok ⟨x.bv >>> 8⟩ := rfl
   constructor
-  · intro hValid
-    by_cases hs1 : suite_code = 1281#u16
-    · rw [hs1] at hSpongeBranch ⊢
-      simpa only [bne_self_eq_false, Bool.false_eq_true, ↓reduceIte] using hSpongeBranch
-    · rcases hValid with h1 | h2
-      · exact False.elim (hs1 h1)
-      · have hne1 : (suite_code != 1281#u16) = true := bne_iff_ne.mpr hs1
-        rw [hne1]
-        dsimp only [↓reduceIte]
-        rw [h2] at hSpongeBranch ⊢
-        simpa only [bne_self_eq_false, Bool.false_eq_true, ↓reduceIte] using hSpongeBranch
-  · rintro ⟨hne1, hne2⟩
-    have hb1 : (suite_code != 1281#u16) = true := bne_iff_ne.mpr hne1
-    have hb2 : (suite_code != 1282#u16) = true := bne_iff_ne.mpr hne2
-    simp [hb1, hb2]
+  · intro valid
+    rcases valid with h | h <;> subst suite_code <;>
+      simp only [policy_and_addr.derive_hybrid_transcript_digest, ↓reduceIte,
+        hybridRole_to_u8_eq, headerShift, sh16, sh56, sh48, sh40, sh32, sh24, sh8,
+        bind_eq_result_bind, result_bind_ok, lift_eq_ok] <;>
+      exact hybrid_hash_total _ _ _ _ _ _ _
+  · rintro ⟨h1, h2⟩
+    simp only [policy_and_addr.derive_hybrid_transcript_digest, h1, h2, ↓reduceIte]
 
 /-! ## 4. Concrete `#tooth` Refusal Witnesses -/
 

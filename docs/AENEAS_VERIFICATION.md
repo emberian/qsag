@@ -1,19 +1,51 @@
 # Aeneas Rust MIR verification
 
-This reference describes the generated Rust MIR model and the Lean 4.35.0 interface
-`QsagMirProofs`. The inventory below describes the earlier primitive export surface;
-the live export files are authoritative as protocol guards are added.
+This reference describes the two generated Rust MIR verification workspaces in this
+repository and their Lean 4.35.0 interfaces:
 
-## Pants guards and production linkage
+1. **`aeneas/qsag-verified` → `aeneas/lean`** (`QsagVerified`, `QsagMirProofs`,
+   `QsagSpecWeld`, `QsagCustodyWeld`, `AuditMirAxioms`, `QsagVerifiedChallenge`)
+2. **`aeneas/qsag-whir-verified` → `aeneas/lean-whir`** (`QsagWhirVerified`,
+   `AuditWhirMirAxioms`, `QsagWhirVerifiedChallenge`)
 
-The project now comprises 13 crates: 12 root workspace packages plus this separate
-extraction workspace. Its guard surface includes WOTS+C, BDOZ, BeltLatch,
-Waistband and poison-latch transitions in addition to arithmetic and sponges.
-The extraction policy is **0 FunsExternal / 0 Classical.choice / 0 sorry**.
-Claims attach to the generated functions and theorem premises, not every similarly
-named production implementation. Fresh Charon/Aeneas extraction, comparison of
-generated bodies, direct production dependencies and bridges over `QsagVerified.Funs`
-remain active integration work.
+## Workspace layout, custody welds, and production linkage
+
+The repository comprises **14 Rust packages**: **12** root Cargo workspace packages
+under `crates/` (`11` `#![no_std]` library crates plus the `qsag-cli` binary crate)
+and **2** standalone `#![no_std]` + `#![forbid(unsafe_code)]` Aeneas MIR extraction
+packages (`aeneas/qsag-verified` and `aeneas/qsag-whir-verified`).
+
+Both extraction workspaces enforce **0 `FunsExternal` / 0 `Classical.choice` / 0 `sorry`**
+across all library and proof modules, with SHA-256 source/prelude/output provenance
+checked by `scripts/check_extraction_provenance.py`:
+
+- **Core primitives, protocol guards, and custody weld (`aeneas/qsag-verified` → `aeneas/lean`):**
+  Covers Goldilocks (`p = 2^64 - 2^32 + 1`) and `GoldilocksExt2`, Wiedemann binary
+  towers (`Gf16`, `Gf256`, `Tower128`, `Tower256`), Shamir sharing and degree
+  reduction, Keccak-f[1600] / SHAKE256 / cSHAKE256, FIPS 205 ADRS / WOTS+ / TSW,
+  two-lane BDOZ MAC sessions (`BdozVerifierSession2Lane`, `BdozOpeningGuard2Lane`),
+  `EpochLatch`, `VerifiedBeltQuorumGuard` (`authenticated_belt`), and `RssShare64`.
+  `QsagSpecWeld.lean` bridges extracted Keccak-f[1600] and `Tower128` multiplication
+  directly to the canonical `lean/Qsag` specifications (`Qsag.keccakF1600`,
+  `Qsag.towerMul`), while `QsagCustodyWeld.lean` welds extracted
+  `VerifiedBeltQuorumGuard` MIR transitions to canonical `Qsag.BeltCustody`
+  invariants (`RealSpecBeltWeld`, `RealSpecGuardBoundary`, and
+  `AuthenticatedBeltAndRealSpecWeld`).
+- **Hem WHIR verifier kernels (`aeneas/qsag-whir-verified` → `aeneas/lean-whir`):**
+  Linked directly by `crates/qsag-agg`. Active production call sites in
+  `crates/qsag-agg` invoke `decode_canonical_u64`, `decode_canonical_ext4`,
+  `cwyz_bridge_claim_step`, `eval_quadratic_sumcheck_wire`,
+  `affine_cascade_claim_step`, `verify_ood_pin_eq`, `verify_stage_pow_mask`,
+  `canonical_query_group_idx`, `step_merkle_pair_order`, and `checked_quorum_sum`.
+  The extracted crate and `Proofs.lean` also verify the production-named folding and
+  Horner entrypoints `fold_duet_affine_ext4` (`cwyz_duet_fold`),
+  `eval_univariate_ext4_at_base` (`eval_ext4_univariate_at_base`), and the four
+  acceptance wrappers `verify_affine_duet_fold_step`, `verify_cwyz_duet_fold_step`,
+  `verify_cwyz_bridge_claim_step`, and `verify_ext4_univariate_at_base_pin`;
+  switching the remaining local `pcs.rs` fold and `field.rs` Horner call sites via
+  the `[0, 2, 1, 3]` Karatsuba-tower-to-polynomial basis adapter (`towerToPoly_mul_hom`)
+  remains an explicit integration step, so theorems attach strictly to the extracted
+  functions and their stated premises.
 
 A verified authorization check does not establish complete mediation while callers
 can own raw shares, construct outputs independently or reuse unrelated permits.
@@ -23,22 +55,23 @@ Safe Rust can forget an affine value; resource burn must precede release capabil
 creation and must not rely solely on `Drop`.
 
 **Verify your code, test your specs:** native `lake exe spec-oracle`, Rust↔Lean
-differential/metamorphic cases and clause-drop mutations complement these proofs.
-They must consume freshly generated artifacts and exercise nonempty domains;
-finite parity tests do not establish universal refinement. Six-kernel
-`comparator --paranoid` CI challenges replay selected exports; full generated-module
-axiom coverage and exact-source release gating remain explicit obligations.
+differential/metamorphic cases and `#tooth` mutation-sensitivity witnesses complement
+these proofs. Six-kernel `comparator --paranoid` CI challenges replay both
+`QsagVerifiedChallenge` (`aeneas/lean`) and `QsagWhirVerifiedChallenge`
+(`aeneas/lean-whir`), paired with private-environment (`setExporting false`) axiom
+audits (`AuditMirAxioms` and `AuditWhirMirAxioms`).
 See [ASSURANCE.md](../ASSURANCE.md) for the protocol/POSIX/QROM and ISA/ELF pillars.
 
 ## Source correspondence and scope
 
-The extraction input, `aeneas/qsag-verified`, is a self-contained `#![no_std]` crate
-with `#![forbid(unsafe_code)]`.
+Both `aeneas/qsag-verified` and `aeneas/qsag-whir-verified` are zero-dependency
+`#![no_std]` crates with `#![forbid(unsafe_code)]`.
 
-| Category | Surface | Evidence and boundary |
+| Package | Surface | Evidence and boundary |
 | --- | --- | --- |
-| Differential-parity primitives | Goldilocks and GoldilocksExt2; Wiedemann Gf16, Gf256, Tower128; Shamir evaluation and Lagrange reconstruction; Keccak-f[1600], SHAKE256, cSHAKE256; FIPS 205 ADRS, WOTS+, F, and TSW | `tests/parity_qsag_core.rs` compares executed cases bit-for-bit with `crates/qsag-core`. `tests/unit_kat.rs` includes NIST FIPS 202 and SP 800-185 known-answer tests. Testing complements the MIR proofs; it does not prove universal correspondence between the crates. |
-| Standalone reference models | Affine EpochLatch with randomizer binding; affine BdozVerifierSession2Lane two-lane MAC verifier; two-of-three RssShare64 gates; Tower256 | The extracted crate defines these models independently. Their Lean theorems apply to those definitions. Crash-safe EpochLatch durability requires the caller to persist its write-ahead log before releasing a grant. |
+| `aeneas/qsag-verified` (differential-parity primitives) | Goldilocks and GoldilocksExt2; Wiedemann Gf16, Gf256, Tower128; Shamir evaluation and Lagrange reconstruction; Keccak-f[1600], SHAKE256, cSHAKE256; FIPS 205 ADRS, WOTS+, F, and TSW | `tests/parity_qsag_core.rs` compares executed cases bit-for-bit with `crates/qsag-core`. `tests/unit_kat.rs` includes NIST FIPS 202 and SP 800-185 known-answer tests. `QsagSpecWeld` proves universal equivalence of extracted Keccak-f[1600] and `Tower128` against `lean/Qsag`. |
+| `aeneas/qsag-verified` (protocol guards & custody weld) | `EpochLatch` with randomizer binding; `BdozVerifierSession2Lane` & `BdozOpeningGuard2Lane`; `VerifiedBeltQuorumGuard` (`authenticated_belt`); two-of-three `RssShare64` gates; `Tower256` | `QsagCustodyWeld` proves `RealSpecBeltWeld`, `RealSpecGuardBoundary`, and `AuthenticatedBeltAndRealSpecWeld` against `Qsag.BeltCustody`. Crash-safe `EpochLatch` durability requires the caller to persist its write-ahead log before releasing a grant. |
+| `aeneas/qsag-whir-verified` (WHIR verifier & quorum kernels) | Canonical Goldilocks/`Ext4` decoding; `duet_fold`, `cwyz_duet_fold`, `fold_duet_affine_ext4`, `cwyz_bridge_claim_step`, `eval_quadratic_sumcheck_wire`, `affine_cascade_claim_step`; arbitrary-slice Horner `eval_ext4_univariate_at_base` & `eval_univariate_ext4_at_base`; `verify_*` acceptance checks; `verify_ood_pin_eq`, `verify_stage_pow_mask`, `canonical_query_group_idx`, `step_merkle_pair_order`, `checked_quorum_sum` | Directly linked by `crates/qsag-agg` for canonical decoding, bridge/sumcheck/cascade steps, OOD equality, PoW mask, query reduction, Merkle sibling ordering, and overflow-free quorum summation; `fold_duet_affine_ext4`, `eval_univariate_ext4_at_base`, and the four `verify_*` wrappers are proved in `aeneas/lean-whir` and exercised in `tests/production_entrypoints.rs`. |
 
 Goldilocks inversion has an exact modular-exponent specification and canonical output
 bound. The seven-input witness checks one multiplicative inverse; these statements do
@@ -47,33 +80,39 @@ witness excludes a constant-zero implementation, without excluding every constan
 function or establishing cryptographic security.
 
 The BDOZ exports prove totality for arbitrary opening slices, exact single-opening
-acceptance, rejection of incorrect MAC lanes, and irreversible burn with zeroed key
-lanes after rejection. Every subsequent request on a burned session rejects.
-The extracted session stores `alpha_lanes`, and each opening has one `chal_weight`;
-the acceptance specification uses that weight's exact nonzero check.
+and arbitrary-batch acceptance, rejection of incorrect MAC lanes, one-shot handle
+consumption (`BdozOpeningGuard2Lane.verify_once`), and irreversible burn with zeroed
+key lanes after rejection.
 
 ## Extraction and proof architecture
 
-`extract.sh` invokes Rust checking, Charon MIR extraction, and Aeneas with
-`-backend lean -split-files`. `QsagVerified/Types.lean` and `QsagVerified/Funs.lean`
-are machine-generated artifacts. Rust changes require regeneration. Guarded
-customization-length arithmetic uses primitive unsigned operations without an
-external-function axiom module.
+`aeneas/extract.sh` and `aeneas/extract_whir.sh` invoke Rust checking, Charon MIR
+extraction, and Aeneas with `-backend lean -split-files`, then record SHA-256
+manifests in `extraction-provenance.json`. `Types.lean` and `Funs.lean` in both
+workspaces are machine-generated artifacts; Rust changes require regeneration.
 
-The hand-written `QsagVerified/Proofs.lean` imports Common, Goldilocks, Gf256,
-TowerBdoz, ShamirDkg, HashEpoch, and Bdoz. Binary-field algebra and wide-tower
-operations compile independently. HashEpoch groups separately compiled WOTS, ADRS,
-sponge, TSW, epoch, and Keccak witness modules. The sponge proofs have no ADRS
-dependency, so authentication and address proofs can proceed in parallel. Keccak's concrete witness uses kernel-checked
-primitive-operation certificates for each round. Library precompilation is disabled.
-Each long hand-written Lean file has at most twelve exposure attributes. Public
-specification definitions are exposed where downstream reduction requires them.
-`QsagMirProofs.lean` includes reduction examples and a one-step trace check.
+- In `aeneas/lean`, `QsagVerified/Proofs.lean` aggregates modular proof libraries
+  (`Common`, `Goldilocks`, `Gf256`, `TowerBdoz`, `ShamirDkg`, `HashEpoch`, `Bdoz`,
+  and belt custody modules), re-exported through `QsagMirProofs.lean` and welded to
+  `lean/Qsag` in `QsagSpecWeld.lean` and `QsagCustodyWeld.lean`.
+- In `aeneas/lean-whir`, `QsagWhirVerified/Arithmetic.lean` establishes constructive
+  Goldilocks and quartic extension (`Ext4 = F_p[u]/(u^4 - 7)`) commutative ring laws
+  via a structural Horner normalizer (`0 Classical.choice`), the `[0, 2, 1, 3]`
+  Karatsuba-tower isomorphism (`towerToPoly_mul_hom`), coset folding, dual bridge,
+  quadratic sumcheck hypercube sum, cascade, and ascending Horner equivalence;
+  `QsagWhirVerified/Proofs.lean` discharges all `loopFuel` slice invariants,
+  bidirectional `Result.ok ... ↔ spec` theorems, and 10 `#tooth` mutation-sensitivity
+  and premise-inhabitedness witnesses.
+
+Every hand-written Lean file over 80 lines avoids file-wide `@[expose] public section`
+and stays within at most 12 `@[expose]` attributes (`scripts/check_lean_policy.py`).
 
 ## Trusted computing base and prelude semantics
 
 The semantic chain includes Rust source and MIR generation, Charon, Aeneas, the
-hand-written Lean 4.35 prelude, and Lean's kernel. The functional claims do not verify
+hand-written Lean 4.35 prelude, and Lean's kernel (plus the five independent replay
+kernels in `lake comparator --paranoid`: `leanchecker-paranoid`, `lean4lean`,
+`nanoda_bin`, `con-leche`, and `con-ron`). The functional claims do not verify
 LLVM compilation, hardware timing, physical randomness, or storage durability.
 
 The prelude fixes `usize` to 64 bits. Checked arithmetic, shifts, and indexing return
@@ -83,46 +122,50 @@ use `loopMaxFuel = 2^65`, returning `.div` on exhaustion. Successful loop proofs
 bounded evaluations and transfer them through `loop_ok_of_loopFuel`. Rust domain
 errors are values: `.ok (.Err e)` differs from prelude execution failure `.fail e`.
 
-`@[discriminant]` maps discriminantless enum constructors to constructor indices.
-`core::fmt::Debug` formatting strings are excluded from cryptographic functional
-specifications. Array cloning applies the provided element clone operation and
-preserves length.
-
-The complete exported axiom census contains only `propext` and `Quot.sound`, the
-standard propositional-extensionality and quotient-soundness axioms. Every exported
-theorem has zero transitive `Classical.choice` dependencies. There are zero
-`sorryAx`, custom axioms, `Lean.ofReduceBool`, and `Lean.trustCompiler` dependencies.
-The proofs use neither admitted obligations nor native evaluation as proof evidence.
-The census checks dependency closure; a source scan alone would not establish it.
+The complete dependency-closure axiom audits (`AuditMirAxioms` and
+`AuditWhirMirAxioms`, run with `setExporting false` so private proof lemmas are
+included) permit only `propext` and `Quot.sound`. Every declaration has zero
+transitive `Classical.choice`, `sorryAx`, custom `axiom`, `Lean.ofReduceBool`,
+`Lean.ofReduceNat`, and `Lean.trustCompiler` dependencies.
 
 ## Reproducible checks
 
-Run tests and extraction on the designated Linux toolchains. From the repository root:
+Run tests and builds on the designated Linux toolchains. From the repository root:
 
 ```sh
-cargo test --manifest-path aeneas/qsag-verified/Cargo.toml
+cargo test --manifest-path aeneas/qsag-verified/Cargo.toml --release
+cargo test --manifest-path aeneas/qsag-whir-verified/Cargo.toml --release
+python3 scripts/check_lean_policy.py
+python3 aeneas/lean/check_audit_coverage.py
+python3 scripts/check_extraction_provenance.py
 ```
 
-After refreshing the extraction, run the clean check from `aeneas/lean`:
+Build and audit `aeneas/lean`:
 
 ```sh
-LEAN_NUM_THREADS=4 lake build
+cd aeneas/lean
+LEAN_NUM_THREADS=4 lake build --wfail QsagVerified QsagSpecWeld QsagCustodyWeld AuditMirAxioms QsagMirProofs audit-mir-axioms
+.lake/build/bin/audit-mir-axioms
+python3 ../../scripts/run_mir_comparator.py
 ```
 
-The measured clean build completed all 37 jobs in **17.91 seconds** with zero errors
-and warnings, using Lean 4.35.0 and 20 threads on Linux. This is a historical measurement, not a current build-time guarantee. Build concurrency and available CPU resources affect the measurement.
-
-This one-line census, also run from `aeneas/lean`, prints the transitive axioms of every
-exported declaration, including every theorem:
+Build, audit, and replay `aeneas/lean-whir`:
 
 ```sh
-python3 -c 'from pathlib import Path; s=Path("QsagMirProofs.lean").read_text().split("export qsag_verified.proofs (",1)[1].split(")",1)[0]; print("import QsagMirProofs"); print("\n".join("#print axioms qsag_verified.proofs."+n for n in s.split()))' | lake env lean --stdin
+cd aeneas/lean-whir
+LEAN_NUM_THREADS=4 lake build --wfail QsagWhirVerified AuditWhirMirAxioms audit-whir-mir-axioms
+lake build QsagWhirVerifiedChallenge
+.lake/build/bin/audit-whir-mir-axioms
+lake comparator --paranoid
 ```
 
-## Export inventory
+## Export inventory (`QsagMirProofs`)
 
-Targets are relative to `qsag_verified` unless identified as model components.
-Statements apply with the premises in their corresponding Lean declarations.
+Targets below are relative to `qsag_verified` unless identified as model components;
+see `aeneas/lean/QsagCustodyWeld.lean` for the belt custody weld theorems and
+`aeneas/lean-whir/README.md` (`QsagWhirVerified/Proofs.lean`) for the full WHIR MIR
+theorem inventory. Statements apply with the premises in their corresponding Lean
+declarations.
 
 | Export | MIR target or model | Statement |
 | --- | --- | --- |

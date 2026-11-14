@@ -676,4 +676,39 @@ theorem bdoz_verify_once_total (s : tower.BdozOpeningGuard2Lane)
     (b : tower.BdozCommittedBatchOpening2Lane) (xs : Slice tower.BdozWireOpening2Lane) :
     ∃ ok, tower.BdozOpeningGuard2Lane.verify_once s b xs = .ok (bdozSpent s, ok) := sorry
 
+
+theorem sigma_release_iff (sid : Array Std.U8 32#usize) (round : Std.U64)
+    (binding : Array Std.U8 32#usize) (n : Std.U64) (xs : List OpeningInput) :
+    (∃ t p, openingRound sid round binding n xs sid round binding = .ok (t, some p)) ↔
+      (n ≠ 0#u64 ∧ xs.length = n.val ∧ (∀ x ∈ xs, x.1 = x.2.1) ∧
+        openingLaneSum xs 0 = 0#u128 ∧ openingLaneSum xs 1 = 0#u128) := sorry
+
+theorem sigma_release_permit (sid : Array Std.U8 32#usize) (round : Std.U64)
+    (binding : Array Std.U8 32#usize) (n : Std.U64) (xs : List OpeningInput)
+    (t : OpeningGuard) (p : OpeningPermit)
+    (h : openingRound sid round binding n xs sid round binding = .ok (t, some p)) :
+    p.session_id = sid ∧ p.round_id = round ∧ p.openings = n ∧ t.consumed = true := sorry
+
+theorem plane_open_release_iff (sid : Array Std.U8 32#usize) (round : Std.U64)
+    (binding copyPred copySucc : Array Std.U8 32#usize) :
+    (∃ t p, openingRound sid round binding 1#u64
+        [(copyPred, copySucc, Array.repeat 2#usize 0#u128)] sid round binding =
+          .ok (t, some p)) ↔ copyPred = copySucc := sorry
+
+theorem tooth_opening_wrong_context_refused (sid : Array Std.U8 32#usize) (round : Std.U64)
+    (binding : Array Std.U8 32#usize) (n : Std.U64) (xs : List OpeningInput)
+    (sid' : Array Std.U8 32#usize) (round' : Std.U64) (binding' : Array Std.U8 32#usize)
+    (hctx : sid' ≠ sid ∨ round' ≠ round ∨ binding' ≠ binding) :
+    ∃ t, openingRound sid round binding n xs sid' round' binding' = .ok (t, none) ∧
+      t.consumed = true := sorry
+
+theorem tooth_sigma_nonzero_lane_refused (sid : Array Std.U8 32#usize) (round : Std.U64)
+    (binding c : Array Std.U8 32#usize) :
+    ∃ t, openingRound sid round binding 1#u64
+        [(c, c, Array.make 2#usize [1#u128, 0#u128])] sid round binding = .ok (t, none) := sorry
+
+theorem shake256_32_refines (input : Slice Std.U8) :
+    ∃ out, keccak.shake256_32 input = .ok out ∧
+      u8Bytes out.val = Qsag.shake256Xof 32 (u8Bytes input.val) := sorry
+
 end qsag_verified.proofs

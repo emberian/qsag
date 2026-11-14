@@ -7,6 +7,7 @@ public import Qsag.ConstantTimeIsa
 public import Qsag.ElfBinaryVerify
 public import Qsag.ElfFixtureSlices
 import Lean
+import Qsag.Tactic.AssuranceKit
 import all Qsag.HashSigs
 import all Qsag.MaliciousSecurity
 import all Qsag.ConstantTimeIsa
@@ -112,11 +113,13 @@ ends a transient window.
 Section 6 adds `pcSpecRun` with absolute backward branches and architectural fuel. Its
 relational invariant must hold on transient paths as well as architectural paths. The
 `compilePubLoop` lowering and public-pointer loop instance permit early predicted exits and
-extra transient iterations. The compiled `ct_eq_32` and Goldilocks multiplication corollaries
-use actual `ElfFixtureSlices` bytes and the binary decoder's semantics. The fixture inventory
-has no `ct_select` symbol, so no such compiled-symbol claim is made. Nested mispredictions follow the predictor without a nested
-rollback. Indirect-branch, return-address and store-bypass speculation are not modeled; `ret`
-ends execution.
+extra transient iterations. `binary_loop_fuel_bounded_speculative_ni` lifts the same discipline
+to decoded x86 conditional back-edges. Named semantic schemas cover `ct_select_u64`,
+`sbox_bitslice`, and `gf2_128_mul_acc`; these schemas do not assert the presence of a compiled
+`ct_select` or `sbox` fixture. The compiled `ct_eq_32` and Goldilocks multiplication corollaries
+use actual `ElfFixtureSlices` bytes and the binary decoder's semantics. Nested mispredictions
+follow the predictor without a nested rollback. Indirect-branch, return-address and store-bypass
+speculation are not modeled; `ret` ends execution.
 -/
 
 set_option autoImplicit false
@@ -2534,6 +2537,100 @@ def binarySpecRun (prog : List (DecodedInstr Qsag.X86Instr)) (pred : PredictorOr
           binarySpecRun prog pred W fuel (evalX86Cond cc st :: hist) (stepX86 d st).1)
       | _ => .arch (stepX86 d st).2 :: binarySpecRun prog pred W fuel hist (stepX86 d st).1
 
+/-- Relational proof obligation for decoded programs with arbitrary forward and backward
+    conditional branches. The invariant includes PC and halt agreement, every instruction's
+    public observation, and equality of every branch condition. -/
+structure BinaryPublicInvariant (prog : List (DecodedInstr Qsag.X86Instr))
+    (R : Qsag.X86State → Qsag.X86State → Prop) : Prop where
+  pc : ∀ a b, R a b → a.pc = b.pc
+  halted : ∀ a b, R a b → a.halted = b.halted
+  step : ∀ d a b, findInstrAtPc a.pc prog = some d → R a b →
+    (stepX86 d a).2 = (stepX86 d b).2 ∧ R (stepX86 d a).1 (stepX86 d b).1
+  branch : ∀ d cc target a b, findInstrAtPc a.pc prog = some d →
+    d.instr = .jcc cc target → R a b → evalX86Cond cc a = evalX86Cond cc b
+
+theorem binaryTransient_public_ni (prog : List (DecodedInstr Qsag.X86Instr))
+    (R : Qsag.X86State → Qsag.X86State → Prop) (inv : BinaryPublicInvariant prog R)
+    (pred : PredictorOracle) (fuel : Nat) :
+    ∀ hist a b, R a b → binaryTransient prog pred fuel hist a =
+      binaryTransient prog pred fuel hist b := by
+  induction fuel with
+  | zero => intros; rfl
+  | succ fuel ih =>
+    intro hist a b hab
+    have hHalt := inv.halted a b hab
+    have hPc := inv.pc a b hab
+    cases hd : findInstrAtPc a.pc prog with
+    | none => simp [binaryTransient, hHalt, hPc, hd]
+    | some d =>
+      obtain ⟨hObs, hNext⟩ := inv.step d a b hd hab
+      match hInstr : d.instr with
+      | .jcc cc target =>
+        simp only [binaryTransient, hHalt, hPc, hd, hInstr, hObs]
+        exact congrArg ((stepX86 d a).2 :: ·) (ih (pred a.pc hist :: hist) a b hab)
+      | _ =>
+        simp only [binaryTransient, hHalt, hPc, hd, hInstr, hObs]
+        exact congrArg ((stepX86 d a).2 :: ·) (ih hist _ _ hNext)
+
+/-- Decoded-byte speculative NI for loops, not only straight-line code. Wrong-path execution
+    uses the original state and the architectural path uses the stepped state, exactly as in
+    `binarySpecRun`; both are covered by the same relational invariant. -/
+theorem binary_loop_fuel_bounded_speculative_ni (prog : List (DecodedInstr Qsag.X86Instr))
+    (R : Qsag.X86State → Qsag.X86State → Prop) (inv : BinaryPublicInvariant prog R)
+    (pred : PredictorOracle) (W fuel : Nat) :
+    ∀ hist a b, R a b → binarySpecRun prog pred W fuel hist a =
+      binarySpecRun prog pred W fuel hist b := by
+  induction fuel with
+  | zero => intros; rfl
+  | succ fuel ih =>
+    intro hist a b hab
+    have hHalt := inv.halted a b hab
+    have hPc := inv.pc a b hab
+    cases hd : findInstrAtPc a.pc prog with
+    | none => simp [binarySpecRun, hHalt, hPc, hd]
+    | some d =>
+      obtain ⟨hObs, hNext⟩ := inv.step d a b hd hab
+      match hInstr : d.instr with
+      | .jcc cc target =>
+        have hCond := inv.branch d cc target a b hd hInstr hab
+        simp only [binarySpecRun, hHalt, hPc, hd, hInstr, hObs, hCond]
+        rw [ih (evalX86Cond cc a :: hist) _ _ hNext]
+        split <;>
+          simp only [binaryTransient_public_ni prog R inv pred W _ a b hab, List.map_inj_left]
+      | _ =>
+        simp only [binarySpecRun, hHalt, hPc, hd, hInstr, hObs]
+        exact congrArg (BinarySpecObs.arch (stepX86 d a).2 :: ·) (ih hist _ _ hNext)
+
+/-- Named loop-kernel families covered by the relational model. These are semantic program
+    schemas; compiled-symbol claims still require a decoded fixture and its own invariant. -/
+inductive NamedCtKernel where
+  | ct_select_u64
+  | sbox_bitslice
+  | gf2_128_mul_acc
+  deriving DecidableEq, Repr
+
+def namedCtKernelBody : NamedCtKernel → List ConstantTimeIsa.X86Instr
+  | .ct_select_u64 => [.cmovnz64 .rax .rsi]
+  | .sbox_bitslice => [.vgf2p8affineqb0 .ymm0 .ymm0 .ymm14]
+  | .gf2_128_mul_acc => [.vpclmulqdq .ymm0 .ymm1 .ymm2 0x00#8]
+
+def namedCtKernelLoop (kernel : NamedCtKernel) (trips : Nat) : PcCode :=
+  compilePubLoop trips (namedCtKernelBody kernel) [.ret]
+
+theorem namedCtKernelLoop_spectre_v1_immunity (kernel : NamedCtKernel) (trips : Nat)
+    (R : ConstantTimeIsa.X86State → ConstantTimeIsa.X86State → Prop)
+    (inv : PcPublicInvariant (namedCtKernelLoop kernel trips) R)
+    (a b : ConstantTimeIsa.X86State) (h : R a b) (pred : PredictorOracle) (W fuel : Nat) :
+    pcSpecRun (namedCtKernelLoop kernel trips) pred W fuel 0 [] a =
+      pcSpecRun (namedCtKernelLoop kernel trips) pred W fuel 0 [] b :=
+  pubLoop_speculative_ni trips (namedCtKernelBody kernel) [.ret] R inv a b h pred W fuel
+
+/-- Every named schema has an actual predictor-visible back-edge at its final branch. -/
+theorem namedCtKernelLoop_has_back_edge (kernel : NamedCtKernel) (trips : Nat) :
+    (namedCtKernelLoop kernel trips)[namedCtKernelBody kernel |>.length + 4]? =
+      some (.branch (.nz .rcx) 3) := by
+  cases kernel <;> simp [namedCtKernelLoop, compilePubLoop, namedCtKernelBody]
+
 def binaryNoConditionalBranches (prog : List (DecodedInstr Qsag.X86Instr)) : Bool :=
   prog.all fun d => match d.instr with | .jcc _ _ => false | _ => true
 
@@ -4004,6 +4101,10 @@ theorem authenticated_upper_recovery_checks_anchor (st next : AuthenticatedUpper
     · rename_i good
       simp only [not_or, Decidable.not_not] at good
       exact ⟨good.2.2, good.1, good.2.1⟩
+
+#verify_inhabited pubLoop_speculative_ni publicPointerLoop_invariant
+#tooth_pair recoverable_production_journal_prevents_upper_wots_reuse_across_crashes vs
+  tooth_volatile_only_cache_forgets_across_crash_allows_reuse
 
 end Qsag.FaultAndSpeculativeSafety
 

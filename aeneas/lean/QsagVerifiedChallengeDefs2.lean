@@ -93,4 +93,29 @@ def pureHornerGoldilocksPrefix (coeffs : List goldilocks.Goldilocks) (x : Nat) :
 def pureHornerGoldilocks (coeffs : List goldilocks.Goldilocks) (x : Nat) : Nat :=
   pureHornerGoldilocksPrefix coeffs x coeffs.length 0
 
+
+abbrev OpeningGuard := opening_guard.ConsumingOpeningGuard2Lane
+abbrev OpeningPermit := opening_guard.OpeningReleasePermit
+
+abbrev OpeningInput := Array Std.U8 32#usize × Array Std.U8 32#usize × Array Std.U128 2#usize
+
+def openingLaneSum (xs : List OpeningInput) (k : Nat) : Std.U128 :=
+  xs.foldl (fun acc x => acc ^^^ x.2.2.val.getD k 0#u128) 0#u128
+
+def openingAbsorbAll (s : OpeningGuard) : List OpeningInput → Result OpeningGuard
+  | [] => .ok s
+  | x :: xs =>
+    Result.bind (opening_guard.ConsumingOpeningGuard2Lane.absorb_opening s x.1 x.2.1 x.2.2)
+      fun s' => openingAbsorbAll s' xs
+
+def openingRound (sid : Array Std.U8 32#usize) (round : Std.U64)
+    (binding : Array Std.U8 32#usize) (n : Std.U64) (xs : List OpeningInput)
+    (sid' : Array Std.U8 32#usize) (round' : Std.U64) (binding' : Array Std.U8 32#usize) :
+    Result (OpeningGuard × Option OpeningPermit) :=
+  Result.bind (opening_guard.ConsumingOpeningGuard2Lane.new sid round binding n) fun s0 =>
+    Result.bind (openingAbsorbAll s0 xs) fun s1 =>
+      opening_guard.ConsumingOpeningGuard2Lane.verify_once s1 sid' round' binding'
+
+def u8Bytes (xs : List Std.U8) : List UInt8 := xs.map (fun b => UInt8.ofBitVec b.bv)
+
 end qsag_verified.proofs

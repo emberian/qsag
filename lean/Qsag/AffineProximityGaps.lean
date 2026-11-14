@@ -66,6 +66,8 @@ public import Qsag.Constructive
 public import Qsag.Goldilocks
 import all Qsag.Goldilocks
 
+public import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -5604,11 +5606,11 @@ theorem tooth_guruswami_sudan_m2_beyond_sudan_and_sharp_threshold :
     -- Part 1: `m = 1` Sudan fails (`≤ 6` monomials for all `D`), `2` distinct close polys at `A = 4`, `m = 2` bounds `≤ 3`
     (∀ D : Nat, gsMonomialCount 4 2 D ≤ 6) ∧
     dom.length * (2 * (2 + 1) / 2) < gsMonomialCount (2 * 4) 2 3 ∧
-    (∃ (w4 : Goldilocks → Goldilocks) (twoPolys : List (GsUniPoly Goldilocks)),
+    (∃ (wordAtFour : Goldilocks → Goldilocks) (twoPolys : List (GsUniPoly Goldilocks)),
       twoPolys.Nodup ∧ twoPolys.length = 2 ∧
       (∀ P ∈ twoPolys, P.val.length ≤ 2 + 1 ∧
         ∃ xs : List Goldilocks, xs.Nodup ∧ 4 ≤ xs.length ∧
-          ∀ x ∈ xs, x ∈ dom ∧ evalCoeffs P.val x = w4 x) ∧
+          ∀ x ∈ xs, x ∈ dom ∧ evalCoeffs P.val x = wordAtFour x) ∧
       twoPolys.length ≤ 3) ∧
     -- Part 2 (`#tooth`): at `A = 3` (`A - 1`), `4 > 3` distinct degree-`≤ 2` polys agree on `3` points!
     (∃ (w3 : Goldilocks → Goldilocks) (fourPolys : List (GsUniPoly Goldilocks)),
@@ -5653,7 +5655,7 @@ theorem tooth_guruswami_sudan_m2_beyond_sudan_and_sharp_threshold :
         rw [heq]
       rw [htail, hZeroTail (D' + 1) 2 (Nat.le_refl 2)]
       decide
-  · let w4 : Goldilocks → Goldilocks := fun x =>
+  · let wordAtFour : Goldilocks → Goldilocks := fun x =>
       if x = g 4 then g 12 else if x = g 5 then g 20 else g 0
     let p0 : GsUniPoly Goldilocks := GsUniPoly.ofCoeffs []
     let p1 : GsUniPoly Goldilocks := GsUniPoly.ofCoeffs [g 0, CommRingOps.neg (g 1), g 1]
@@ -5661,7 +5663,7 @@ theorem tooth_guruswami_sudan_m2_beyond_sudan_and_sharp_threshold :
     have hClose : ∀ P ∈ ([p0, p1] : List (GsUniPoly Goldilocks)),
         P.val.length ≤ 2 + 1 ∧
         ∃ xs : List Goldilocks, xs.Nodup ∧ 4 ≤ xs.length ∧
-          ∀ x ∈ xs, x ∈ dom ∧ evalCoeffs P.val x = w4 x := by
+          ∀ x ∈ xs, x ∈ dom ∧ evalCoeffs P.val x = wordAtFour x := by
       intro P hP
       simp only [List.mem_cons, List.not_mem_nil, or_false] at hP
       rcases hP with rfl | rfl
@@ -5671,8 +5673,8 @@ theorem tooth_guruswami_sudan_m2_beyond_sudan_and_sharp_threshold :
       · refine ⟨by decide, [g 0, g 1, g 4, g 5], by decide, by decide, ?_⟩
         intro x hx; simp only [List.mem_cons, List.not_mem_nil, or_false] at hx
         rcases hx with rfl | rfl | rfl | rfl <;> decide
-    exact ⟨w4, [p0, p1], hnd, rfl, hClose,
-      guruswami_sudan_unconditional_list_bound dom w4 2 4 3 2 (by decide)
+    exact ⟨wordAtFour, [p0, p1], hnd, rfl, hClose,
+      guruswami_sudan_unconditional_list_bound dom wordAtFour 2 4 3 2 (by decide)
         [p0, p1] hnd hClose⟩
   · let w3 : Goldilocks → Goldilocks := fun x =>
       if x = g 3 then g 6 else if x = g 4 ∨ x = g 5 then g 12 else g 0
@@ -6000,5 +6002,74 @@ theorem gsDecodeList_length_le {F : Type} [LawfulField F] [DecidableEq F]
     (gsDecodeList d A domain word) (gsDecodeList_nodup d A domain word) ?_
   intro P hP
   exact (mem_gsDecodeList_iff word hDom hdA P).mp hP
+
+/-- The deployed Johnson agreement thresholds permit complete interpolation-based decoding. -/
+theorem hem_gs_deployed_degree_lt_agreement :
+    ∀ nv : Nat, 2 ≤ nv → nv ≤ 24 → ∀ w ∈ whirAffineStageWitnesses nv true,
+      w.d + 1 ≤ w.A := by
+  have hAll : ((List.range 23).all (fun i =>
+      (whirAffineStageWitnesses (i + 2) true).all (fun w => decide (w.d + 1 ≤ w.A)))) = true := by
+    decide +kernel
+  intro nv h2 h24 w hw
+  have h := List.all_eq_true.mp hAll (nv - 2) (List.mem_range.mpr (by omega))
+  have he : nv - 2 + 2 = nv := by omega
+  rw [he] at h
+  exact of_decide_eq_true (List.all_eq_true.mp h w hw)
+
+/-- Complete, bounded candidate enumeration at the deployed Johnson radius. Neither the
+    candidate list nor Hasse multiplicity is supplied by the prover. -/
+theorem hem_gs_deployed_decoder {F : Type} [LawfulField F] [DecidableEq F]
+    (nv : Nat) (h2 : 2 ≤ nv) (h24 : nv ≤ 24)
+    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses nv true)
+    (domain : List F) (hDom : domain.Nodup) (hLen : domain.length = w.n)
+    (word : F → F) :
+    (gsDecodeList w.d w.A domain word).length ≤ w.D ∧
+    ∀ P : GsUniPoly F, P ∈ gsDecodeList w.d w.A domain word ↔
+      P.val.length ≤ w.d + 1 ∧
+      w.A ≤ (domain.filter (fun x => decide (RoundPoly.evalCoeffs P.val x = word x))).length := by
+  have hdA := hem_gs_deployed_degree_lt_agreement nv h2 h24 w hw
+  refine ⟨?_, fun P => mem_gsDecodeList_iff word hDom hdA P⟩
+  exact Nat.le_trans
+    (gsDecodeList_length_le domain word w.d w.A (gsDeployedYDegree w) w.m hDom hdA
+      (by rw [hLen]; exact hem_gs_interpolation_dimensions nv h2 h24 w hw))
+    (Nat.min_le_left _ _)
+
+/-- Actual distinct-query counts at all four `nv = 24` deployed stages. The hypothesis
+    states the agreement bound on the committed oracle; the conclusion counts accepting
+    tuples, with no replacement and no floating-point approximation. This does not assert
+    the separate affine-fold proximity-gap theorem. -/
+theorem hemJohnson_deployed_query_count {α : Type} [DecidableEq α]
+    (w : WhirAffineWitness) (hw : w ∈ whirAffineStageWitnesses 24 true)
+    (U : List α) (good : α → Bool) (hU : U.Nodup) (hLen : U.length = w.n)
+    (hGood : (U.filter good).length ≤ w.A + w.sFolds) :
+    ((affineDistinctTuples w.queries U).filter (fun t => t.all good)).length * 2 ^ 256 <
+      (affineDistinctTuples w.queries U).length := by
+  have hCount := affineDistinctTuples_all_good_le w.queries (w.A + w.sFolds) U good hU hGood
+  have hRows : ∀ v ∈ whirAffineStageWitnesses 24 true,
+      affineFallingFactorial (v.A + v.sFolds) v.queries * 2 ^ 256 <
+        affineFallingFactorial v.n v.queries := by decide +kernel
+  rw [affineDistinctTuples_length _ hU, hLen]
+  exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_right (2 ^ 256) hCount) (hRows w hw)
+
+theorem tooth_deployed_agreement_threshold_increased :
+    ∃ w : WhirAffineWitness, w.A = 527171 ∧ w.queries = 258 ∧
+      checkWhirAffineWitness w (goldilocksPrime ^ 4) = false := by
+  let w : WhirAffineWitness :=
+    { n := 1048576, d := 262146, sFolds := 6, A := 527171, B := 527170,
+      m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
+  exact ⟨w, rfl, rfl, tooth_checkWhirAffineWitness_rejects_perturbed_rows.1⟩
+
+#tooth_pair cwyz26_whir_nv20_and_nv24_all_stages_valid vs tooth_deployed_agreement_threshold_increased
+theorem inhabited_deployed_gs_dimensions :
+    ∃ (nv : Nat) (w : WhirAffineWitness), nv = 24 ∧ 2 ≤ nv ∧ nv ≤ 24 ∧
+      w ∈ whirAffineStageWitnesses nv true ∧ w.n = 1048576 ∧ w.queries = 258 := by
+  let w : WhirAffineWitness :=
+    { n := 1048576, d := 262146, sFolds := 6, A := 527170, B := 527169,
+      m := 64, D := 27164, queries := 258, queryTargetBits := 256 }
+  refine ⟨24, w, rfl, by decide, by decide, ?_, rfl, rfl⟩
+  decide +kernel
+
+#verify_inhabited hem_gs_interpolation_dimensions inhabited_deployed_gs_dimensions
+
 
 end Qsag

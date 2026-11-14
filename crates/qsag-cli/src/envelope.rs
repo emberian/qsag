@@ -10,7 +10,16 @@ const FORMAT: &str = "cshake256-iterated-v1";
 pub const KDF_ROUNDS: u32 = 100_000;
 
 pub fn passphrase(args: &Args) -> Result<Option<ZeroizingBuf>, CliError> {
-    let pass = match (args.get("passphrase-env"), args.get("passphrase-file")) {
+    passphrase_named(args, "passphrase-env", "passphrase-file")
+}
+
+/// A passphrase taken from the named environment-variable or file option.
+pub fn passphrase_named(
+    args: &Args,
+    env_option: &str,
+    file_option: &str,
+) -> Result<Option<ZeroizingBuf>, CliError> {
+    let pass = match (args.get(env_option), args.get(file_option)) {
         (Some(_), Some(_)) => return Err(CliError::usage("choose one passphrase source")),
         (Some(name), None) => Some(ZeroizingBuf(
             std::env::var_os(name)
@@ -51,6 +60,10 @@ fn immutable_header_bytes(json: &Json, secret_field: &str) -> ZeroizingBuf {
                     | "uses_completed"
                     | "ledger_checkpoint_gen"
                     | "ledger_checkpoint_tag"
+                    | "ceremony_checkpoint_gen"
+                    | "ceremony_checkpoint_tag"
+                    | "belt_checkpoint_gen"
+                    | "belt_checkpoint_tag"
                     | "state_mac"
             ) && name != secret_field
         });
@@ -159,7 +172,48 @@ pub fn seal(json: &mut Json, pass: &[u8]) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn open(json: &Json, pass: Option<&[u8]>) -> Result<Json, CliError> {
+/// The secret material of a key file, decrypted or, for an unsealed file, decoded. The bytes
+/// live only in wiping buffers: they are never written back into a JSON tree as hex text,
+/// and the type is neither `Clone` nor `Debug`.
+pub struct OpenedSecret {
+    field: &'static str,
+    bytes: ZeroizingBuf,
+}
+
+impl OpenedSecret {
+    fn of(&self, field: &str) -> Result<&[u8], CliError> {
+        if self.field == field {
+            Ok(&self.bytes)
+        } else {
+            Err(CliError::input(format!(
+                "missing or non-string field \"{field}\""
+            )))
+        }
+    }
+
+    /// The raw secret key of a scheme whose key file stores one.
+    pub fn secret_key(&self) -> Result<&[u8], CliError> {
+        self.of("secret_key")
+    }
+
+    /// The 32-byte master seed of a scheme whose key file stores one.
+    pub fn seed(&self) -> Result<Secret32, CliError> {
+        let bytes = self.of("seed")?;
+        let mut seed = Secret32([0u8; 32]);
+        if bytes.len() != seed.0.len() {
+            return Err(CliError::input("seed must be exactly 32 bytes of hex"));
+        }
+        seed.0.copy_from_slice(bytes);
+        Ok(seed)
+    }
+
+    /// The vault MAC key material: the canonical lowercase hex of the secret, as bytes.
+    pub fn vault_key_material(&self) -> ZeroizingBuf {
+        crate::codec::to_hex_zeroizing(&self.bytes)
+    }
+}
+
+pub fn open(json: &Json, pass: Option<&[u8]>) -> Result<OpenedSecret, CliError> {
     if json.get("envelope").is_none() {
         if json.get("salt").is_some() || json.get("envelope_tag").is_some() {
             return Err(CliError::input("damaged sealed envelope header"));
@@ -169,8 +223,11 @@ pub fn open(json: &Json, pass: Option<&[u8]>) -> Result<Json, CliError> {
                 "passphrase supplied for unencrypted key file",
             ));
         }
-        let _ = secret_field_name(json)?;
-        return Ok(json.clone());
+        let field = secret_field_name(json)?;
+        return Ok(OpenedSecret {
+            field,
+            bytes: json.field_hex(field)?,
+        });
     }
     if json.field_str("envelope")? != FORMAT {
         return Err(CliError::input("unsupported sealed envelope"));
@@ -192,9 +249,7 @@ pub fn open(json: &Json, pass: Option<&[u8]>) -> Result<Json, CliError> {
         return Err(CliError::input("wrong passphrase or damaged sealed key"));
     }
     crypt(&mut bytes.0, &enc, &salt, scheme, field);
-    let mut opened = json.clone();
-    set(&mut opened, field, Json::hex(&bytes));
-    Ok(opened)
+    Ok(OpenedSecret { field, bytes })
 }
 
 #[cfg(test)]
@@ -221,14 +276,19 @@ mod tests {
             ]);
             seal(&mut key, b"correct horse").unwrap();
             assert_ne!(key.field_hex(field).unwrap().0, vec![42; 32]);
-            assert_eq!(
-                open(&key, Some(b"correct horse"))
-                    .unwrap()
-                    .field_hex(field)
-                    .unwrap()
-                    .0,
-                vec![42; 32]
-            );
+            let other = if field == "seed" {
+                "secret_key"
+            } else {
+                "seed"
+            };
+            let opened = open(&key, Some(b"correct horse")).unwrap();
+            assert_eq!(opened.of(field).unwrap(), &[42u8; 32][..]);
+            assert!(opened.of(other).is_err());
+            assert_eq!(opened.seed().is_ok(), field == "seed");
+            assert_eq!(opened.secret_key().is_ok(), field == "secret_key");
+            // The vault key material is the hex text an unsealed file would have carried.
+            assert_eq!(opened.vault_key_material().0, "2a".repeat(32).into_bytes());
+            drop(opened);
             assert!(open(&key, Some(b"wrong")).is_err());
             assert!(open(&key, Some(b"")).is_err());
             assert!(open(&key, None).is_err());
@@ -240,10 +300,9 @@ mod tests {
             assert_eq!(
                 open(&progressed, Some(b"correct horse"))
                     .unwrap()
-                    .field_hex(field)
-                    .unwrap()
-                    .0,
-                vec![42; 32]
+                    .of(field)
+                    .unwrap(),
+                &[42u8; 32][..]
             );
 
             // Tampering immutable header metadata fails MAC before decryption.
@@ -284,6 +343,17 @@ mod tests {
             ("seed", Json::hex(&[1u8; 32])),
         ]);
         assert!(open(&unsealed, Some(b"unexpected")).is_err());
-        assert!(open(&unsealed, None).is_ok());
+        let opened = open(&unsealed, None).unwrap();
+        assert_eq!(opened.seed().unwrap().0, [1u8; 32]);
+        assert_eq!(opened.vault_key_material().0, "01".repeat(32).into_bytes());
+
+        // A seed of the wrong length is refused where it is used, never truncated or padded.
+        let short = Json::object(vec![
+            ("scheme", Json::str("test")),
+            ("seed", Json::hex(&[1u8; 31])),
+        ]);
+        assert!(open(&short, None).unwrap().seed().is_err());
+        // The opened secret is a wiping buffer and can not be copied or printed.
+        assert!(std::mem::needs_drop::<OpenedSecret>());
     }
 }

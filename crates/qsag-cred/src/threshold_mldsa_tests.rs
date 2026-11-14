@@ -525,10 +525,12 @@ fn rejection_verdict_is_the_exact_fips_predicate() {
                 (&deal(&st, me, &low, 200), low_bound),
                 &mask_values,
                 &planes,
+                low_bound + 1,
             )
         });
         for result in results {
-            assert_eq!(result.unwrap(), *expected, "case {index}");
+            let accepted = result.unwrap().is_some_and(|(z, low, high)| z && low && high);
+            assert_eq!(accepted, *expected, "case {index}");
         }
     }
 }

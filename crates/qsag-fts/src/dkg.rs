@@ -237,12 +237,6 @@ impl ParallelSeededDkgRound1State {
 fn coin_digest(context: &[u8; 32], id: u16, coin: &[u8; 32]) -> [u8; 32] {
     cshake256_framed_32(b"QSAG.DKG.COMMIT.V1", &[context, &id.to_be_bytes(), coin])
 }
-struct SecretValues(Vec<u128>);
-impl Drop for SecretValues {
-    fn drop(&mut self) {
-        ct_zeroize_u128s(&mut self.0);
-    }
-}
 
 /// Pairwise oblivious product functionality. Every roster member invokes each
 /// operation in the same public order. Only sender/receiver get private operands
@@ -432,11 +426,33 @@ impl<T: ParallelSeededDkgProducts> Products<'_, T> {
     }
 }
 
-/// A genuine Beaver triple, separate from the historical power-pool alias.
-/// Only this party's additive value shares and two MAC shares are exposed.
+/// A genuine Beaver triple, separate from the historical power-pool alias: this
+/// party's additive value shares and two MAC shares. Single use, so not `Clone`;
+/// the shares stay inside the crate, wiped on drop.
+/// ```compile_fail
+/// fn leak(triple: &qsag_fts::ParallelSeededDkgBeaverShare) -> [u128; 3] { triple.values }
+/// ```
+/// ```compile_fail
+/// fn leak(triple: &qsag_fts::ParallelSeededDkgBeaverShare) -> [[u128; 2]; 3] { triple.macs }
+/// ```
+/// ```compile_fail
+/// fn forge() -> qsag_fts::ParallelSeededDkgBeaverShare {
+///     qsag_fts::ParallelSeededDkgBeaverShare { values: [0; 3], macs: [[0; 2]; 3] }
+/// }
+/// ```
+/// ```compile_fail
+/// fn dup(t: &qsag_fts::ParallelSeededDkgBeaverShare) -> qsag_fts::ParallelSeededDkgBeaverShare {
+///     t.clone()
+/// }
+/// ```
 pub struct ParallelSeededDkgBeaverShare {
-    pub values: [u128; 3],
-    pub macs: [[u128; 2]; 3],
+    values: [u128; 3],
+    macs: [[u128; 2]; 3],
+}
+impl fmt::Debug for ParallelSeededDkgBeaverShare {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ParallelSeededDkgBeaverShare(<REDACTED>)")
+    }
 }
 impl Drop for ParallelSeededDkgBeaverShare {
     fn drop(&mut self) {
@@ -446,10 +462,43 @@ impl Drop for ParallelSeededDkgBeaverShare {
         }
     }
 }
+/// The key share and preprocessing released by
+/// [`ParallelSeededDkgUnverifiedOutput::activate`], and only by it: the share is not a
+/// public field, so a caller cannot assemble an "activated" output around a share that
+/// never passed the consistency check.
+/// ```compile_fail
+/// fn forge(share: qsag_fts::ParallelSeededPartyShare) -> qsag_fts::ParallelSeededDkgOutput {
+///     qsag_fts::ParallelSeededDkgOutput {
+///         pk_seed_bytes: [0; 32],
+///         share,
+///         beaver_triples: Vec::new(),
+///     }
+/// }
+/// ```
+/// ```compile_fail
+/// fn take(output: qsag_fts::ParallelSeededDkgOutput) -> qsag_fts::ParallelSeededPartyShare {
+///     output.share
+/// }
+/// ```
+/// Positive control: the public seed, the preprocessing count and the share for a
+/// signing session remain reachable.
+/// ```
+/// fn inspect(output: &mut qsag_fts::ParallelSeededDkgOutput) -> ([u8; 32], usize, bool) {
+///     let poisoned = output.share_mut().is_poisoned();
+///     (output.pk_seed_bytes, output.beaver_triples.len(), poisoned)
+/// }
+/// ```
 pub struct ParallelSeededDkgOutput {
     pub pk_seed_bytes: [u8; 32],
-    pub share: ParallelSeededPartyShare,
+    pub(crate) share: ParallelSeededPartyShare,
     pub beaver_triples: Vec<ParallelSeededDkgBeaverShare>,
+}
+impl ParallelSeededDkgOutput {
+    /// The activated key share, for [`ParallelSeededSignSession::begin`] and
+    /// [`ParallelSeededSignSession::begin_leaf_preparation`].
+    pub fn share_mut(&mut self) -> &mut ParallelSeededPartyShare {
+        &mut self.share
+    }
 }
 
 /// The six products that define a power tuple `(a, a^2, ..., a^7)`, as indices

@@ -843,18 +843,21 @@ fn verified_path(
     (nodes[params.num_layers] == pk.pk_root).then_some(nodes)
 }
 
-/// Single-party reference: public key from the top subtree.
-pub fn baggy_reference_keygen(params: &BaggyParams, sk: &PqSecretKey) -> BaggyPublicKey {
-    assert!(params.is_well_formed(), "BaggyParams must be well-formed");
+/// Single-party reference: public key from the top subtree, or `None` for malformed
+/// parameters.
+pub fn baggy_reference_keygen(params: &BaggyParams, sk: &PqSecretKey) -> Option<BaggyPublicKey> {
+    if !params.is_well_formed() {
+        return None;
+    }
     let top = (params.num_layers - 1) as u32;
     let leaves: Vec<[u8; 32]> = (0..params.subtree_leaves() as u32)
         .map(|kp| wots_c_reference_leaf(&params.wots, sk, top, 0, kp))
         .collect();
     let levels = merkle_levels(&sk.pk_seed, top, 0, AdrsKind::Tree, 0, &leaves, 0);
-    BaggyPublicKey {
+    Some(BaggyPublicKey {
         pk_seed: sk.pk_seed,
         pk_root: levels[params.subtree_height][0],
-    }
+    })
 }
 
 /// Single-party reference signature (tests and known-answer comparisons).
@@ -1707,7 +1710,7 @@ mod tests {
         params: &BaggyParams,
         sk: &PqSecretKey,
     ) -> (BaggyPublicKey, BaggyKeyBinding) {
-        let pk = baggy_reference_keygen(params, sk);
+        let pk = baggy_reference_keygen(params, sk).unwrap();
         let binding = BaggyKeyBinding::new(params, &pk);
         engine.bind_key_identity(&binding.identity()).unwrap();
         (pk, binding)
@@ -1758,7 +1761,7 @@ mod tests {
         let mut cache = WaistbandCache::disabled();
         let mut ledger = MemoryFirstSigned::new();
         let (pk, binding) = baggy_keygen_mpc(&mut engine, &params, &mut cache).unwrap();
-        assert_eq!(pk, baggy_reference_keygen(&params, &sk));
+        assert_eq!(Some(pk), baggy_reference_keygen(&params, &sk));
         assert_eq!(binding, BaggyKeyBinding::new(&params, &pk));
         assert!(cache.binding().is_none() && ledger.is_empty());
 
@@ -1912,7 +1915,7 @@ mod tests {
         assert!(lazy.hits() >= 1 && lazy.sig_entries() >= 2);
         // A cache built for another key is caught by the root check.
         let (mut other_engine, other_sk) = test_engine(0xC4, 1);
-        let other_pk = baggy_reference_keygen(&params, &other_sk);
+        let other_pk = baggy_reference_keygen(&params, &other_sk).unwrap();
         let mut wrong = WaistbandCache::new(1, 64);
         let bogus = BaggyPublicKey {
             pk_seed: other_pk.pk_seed,
@@ -2180,9 +2183,25 @@ mod tests {
             .unwrap();
         let recorded = ledger.len();
 
-        // Same key, target sum off by one.
+        // A WOTS+C shape outside the verified profile is refused as malformed.
+        let mut off_wots = params;
+        off_wots.wots.target_sum -= 1;
+        assert!(!off_wots.is_well_formed());
+        assert_eq!(
+            baggy_sign_mpc(
+                &mut engine,
+                &off_wots,
+                &pk,
+                &binding,
+                &mut cache,
+                &mut ledger,
+                b"m"
+            ),
+            Err(BaggyError::InvalidParameters)
+        );
+        // Same key, grind bound off by one.
         let mut off = params;
-        off.wots.target_sum -= 1;
+        off.max_grind -= 1;
         assert!(off.is_well_formed());
         let off_binding = BaggyKeyBinding::new(&off, &pk);
         // Same parameters, another root.
@@ -2518,6 +2537,35 @@ mod tests {
         bad_fors.fors_height = 2;
         assert!(!bad_fors.is_well_formed());
         assert_eq!(bad_fors.sig_bytes_checked(), None);
+
+        let mut no_fors = BaggyParams::TEST_SMALL;
+        no_fors.fors_trees = 0;
+        assert!(!no_fors.is_well_formed());
+        assert_eq!(no_fors.signed_fors_trees_checked(), None);
+        let sk = PqSecretKey {
+            sk_seed: [1; 32],
+            sk_prf: [2; 32],
+            pk_seed: [3; 32],
+        };
+        let pk = BaggyPublicKey {
+            pk_seed: [3; 32],
+            pk_root: [0; 32],
+        };
+        for malformed in [bad, bad_fors, no_fors] {
+            assert_eq!(baggy_reference_keygen(&malformed, &sk), None);
+            assert_eq!(baggy_reference_sign(&malformed, &sk, &pk, b"m"), None);
+            assert!(!baggy_verify(
+                &malformed,
+                &pk,
+                b"m",
+                &BaggySig {
+                    r: [0; 32],
+                    msg_ctr: 0,
+                    fors: Vec::new(),
+                    layers: Vec::new(),
+                }
+            ));
+        }
 
         let mut ledger = MemoryFirstSigned::new();
         let key = StaticKeyId {

@@ -866,7 +866,7 @@ fn test_fts_spn_deferred_mac_and_single_use_wots_cs_guard() {
     assert!(!g0.poisoned());
     let (g1, p1) = g0.consume_epoch_once(key_id, 3, msg_a);
     let permit = p1.expect("first epoch burn must succeed");
-    assert_eq!(permit.authorized_epoch, 3);
+    assert_eq!(permit.into_binding().1, 3);
     assert_eq!(g1.used(), 1);
     let (g2, p2) = g1.consume_epoch_once(key_id, 3, msg_b);
     assert_eq!(p2.err(), Some(FtsGuardError::EpochAlreadyUsed));
@@ -1069,6 +1069,8 @@ fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
         HybridRoleTag::Classical,
         SUITE_HYBRID_ED25519_MLDSA65,
         &id_c,
+        &[3; 32],
+        &[4; 32],
         &msg_d,
     )
     .unwrap();
@@ -1076,6 +1078,8 @@ fn test_policy_velocity_guard_intent128_codec_and_hybrid_framing() {
         HybridRoleTag::PostQuantum,
         SUITE_HYBRID_ED25519_MLDSA65,
         &id_c,
+        &[3; 32],
+        &[4; 32],
         &msg_d,
     )
     .unwrap();
@@ -1231,7 +1235,7 @@ fn test_mldsa_release_gate_toprf_majority_and_hd_zero_test() {
 #[test]
 fn test_pants_and_quorum_guards_kat_and_adversarial() {
     use qsag_verified::{
-        PantsGuardError, RssLatchStepInput, RssLatchStepOutput, RssOpenPermit,
+        PantsGuardError, RssLatchStepInput, RssLatchStepOutput,
         VerifiedRssPoisonLatch, VerifiedWaistbandRootGuard, VerifiedWotsC256Guard, WOTSC256_BASE_W,
         WOTSC256_CHAINS, WOTSC256_TARGET_SUM, WaistbandDerivationRequest,
         verified_wotsc256_extract_digits, verified_wotsc256_verify_sum, wotsc256_extract_digit,
@@ -1315,19 +1319,9 @@ fn test_pants_and_quorum_guards_kat_and_adversarial() {
     let (h2, hchk) = h1.record_check_result(true);
     assert_eq!(hchk, Ok(()));
     let (h3, hopen) = h2.authorize_open();
-    assert_eq!(
-        hopen,
-        Ok(RssOpenPermit {
-            verified_clean: true
-        })
-    );
+    assert!(hopen.is_ok());
     let (_h4, hstep_open) = h3.step(RssLatchStepInput::AuthorizeOpen);
-    assert_eq!(
-        hstep_open,
-        Ok(RssLatchStepOutput::OpenAuthorized(RssOpenPermit {
-            verified_clean: true
-        }))
-    );
+    assert!(matches!(hstep_open, Ok(RssLatchStepOutput::OpenAuthorized(_))));
 
     // =========================================================================
     // 4. VerifiedWaistbandRootGuard: pk/params/child_root + first-signed lock

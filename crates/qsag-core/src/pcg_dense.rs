@@ -535,6 +535,34 @@ impl BatchedTapGenerator {
     }
 }
 
+/// Evaluate independent tree ranges and reduce their outputs in deterministic tree order.
+/// Each worker owns its temporary secret buffers; protocol coins and OT messages stay serial.
+fn tree_partials<T: Send>(f: impl Fn(core::ops::Range<usize>) -> T + Sync) -> Vec<T> {
+    #[cfg(feature = "std")]
+    {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(16);
+        let chunk = DENSE_PCG_NUM_TREES.div_ceil(workers);
+        std::thread::scope(|scope| {
+            let f = &f;
+            let jobs: Vec<_> = (0..DENSE_PCG_NUM_TREES)
+                .step_by(chunk)
+                .map(|start| {
+                    scope.spawn(move || f(start..(start + chunk).min(DENSE_PCG_NUM_TREES)))
+                })
+                .collect();
+            jobs.into_iter()
+                .map(|job| job.join().expect("tree worker panicked"))
+                .collect()
+        })
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        vec![f(0..DENSE_PCG_NUM_TREES)]
+    }
+}
+
 /// Sender dense dual-LPN accumulation: `out_keys += H_lpn^{(tree)} * full_leaves`.
 fn accumulate_sender_lpn_tree(ctx: LpnTapStreamCtx, full_leaves: &[u128], out_keys: &mut [u128]) {
     let mut acc = SecretBuffer(Vec::with_capacity(full_leaves.len()));
@@ -666,11 +694,7 @@ fn eval_tree_spcot_linear_combo(
     leaf_powers: &[Tower128],
     leaves: &[u128],
 ) -> Tower128 {
-    let mut sum = Tower128::ZERO;
-    for (&pow, &leaf) in leaf_powers.iter().zip(leaves.iter()) {
-        sum = sum.add(pow.mul(Tower128(leaf)));
-    }
-    gamma_j.mul(sum)
+    gamma_j.mul(spcot_weighted_sum(leaf_powers, leaves, None).0)
 }
 
 /// Receiver side of one tree in one repetition.
@@ -692,18 +716,49 @@ fn eval_punctured_tree_spcot_term(
     punctured_idx: usize,
     delta_corr: Tower128,
 ) -> ReceiverTreeSpcotTerm {
-    let mut sum = Tower128::ZERO;
-    let mut punctured_pow = 0u128;
-    for (u, (&pow, &leaf)) in leaf_powers.iter().zip(punc_leaves.iter()).enumerate() {
-        let at_puncture = ct_eq_mask_u128(u, punctured_idx);
-        let effective = leaf ^ (at_puncture & (leaf ^ delta_corr.0));
-        sum = sum.add(pow.mul(Tower128(effective)));
-        punctured_pow ^= at_puncture & pow.0;
-    }
+    let (sum, punctured_pow) = spcot_weighted_sum(
+        leaf_powers,
+        punc_leaves,
+        Some((punctured_idx, delta_corr.0)),
+    );
     ReceiverTreeSpcotTerm {
         combo: gamma_j.mul(sum),
         punctured_weight: gamma_j.mul(Tower128(punctured_pow)),
     }
+}
+
+/// Batch the two parity lanes through the exact tower-to-polynomial isomorphism.
+/// Puncture selection remains a full constant-address scan, including tail elements.
+fn spcot_weighted_sum(
+    powers: &[Tower128],
+    leaves: &[u128],
+    puncture: Option<(usize, u128)>,
+) -> (Tower128, u128) {
+    let mut lhs = SecretBuffer([[0u128; 2]; 128]);
+    let mut rhs = SecretBuffer([[0u128; 2]; 128]);
+    let mut sum = 0u128;
+    let mut punctured_pow = 0u128;
+    for (block, (powers, leaves)) in powers.chunks(256).zip(leaves.chunks(256)).enumerate() {
+        lhs.fill([0; 2]);
+        rhs.fill([0; 2]);
+        for (i, (pow, leaf)) in powers.iter().zip(leaves).enumerate() {
+            let mut effective = *leaf;
+            if let Some((index, correction)) = puncture {
+                let mask = ct_eq_mask_u128(256 * block + i, index);
+                effective ^= mask & (effective ^ correction);
+                punctured_pow ^= mask & pow.0;
+            }
+            lhs[i / 2][i % 2] = pow.0;
+            rhs[i / 2][i % 2] = effective;
+        }
+        let mut product = qsag_asm::tower128_bdoz_2lane_mac(
+            &lhs[..powers.len().div_ceil(2)],
+            &rhs[..powers.len().div_ceil(2)],
+        );
+        sum ^= product[0] ^ product[1];
+        wipe_u128s(&mut product);
+    }
+    (Tower128(sum), punctured_pow)
 }
 
 /// Tag binding the check values of all repetitions; two tags are equal only if every
@@ -1277,6 +1332,12 @@ impl Drop for DensePcgPeerVoleMaterial {
     }
 }
 
+/// Raw words cannot be borrowed or cloned around the consuming cursor.
+/// ```compile_fail,E0616
+/// fn bypass(vault: &qsag_core::pcg_dense::DensePcgExpandedVault) {
+///     let _ = &vault.a_words;
+/// }
+/// ```
 /// Locally expanded vault holding `65,536` Boolean Beaver triples `(a, b, c = a & b)`,
 /// `65,536` flat BDOZ Subfield-VOLEs, and `64` $\mathbb{F}_{2^{128}}$ VOLE companions per peer.
 pub struct DensePcgExpandedVault {
@@ -1286,11 +1347,11 @@ pub struct DensePcgExpandedVault {
     pub num_parties: usize,
     mac_alpha: Tower128,
     /// `1024` words (`65,536` bits) of additive Boolean share `a_i`.
-    pub a_words: Vec<u64>,
+    a_words: Vec<u64>,
     /// `1024` words (`65,536` bits) of additive Boolean share `b_i`.
-    pub b_words: Vec<u64>,
+    b_words: Vec<u64>,
     /// `1024` words (`65,536` bits) of additive Boolean product share `c_i` (`(\bigoplus a_i) & (\bigoplus b_i) == \bigoplus c_i`).
-    pub c_words: Vec<u64>,
+    c_words: Vec<u64>,
     /// Flat per-peer Subfield-VOLE and $\mathbb{F}_{2^{128}}$ VOLE companion storage.
     pub peer_voles: Vec<DensePcgPeerVoleMaterial>,
     word_cursor: usize,
@@ -1708,22 +1769,31 @@ impl DensePcgPartySeed {
                 &peer.sender_master_seed,
             ));
             let mut me_to_q_keys = vec![0u128; TOTAL_LPN_ROWS];
-            for (tree_idx, root_seed) in roots.iter().enumerate() {
-                let dom = GgmTreeDomain {
-                    session_id: self.session_id,
-                    sender_id: me as u16,
-                    receiver_id: q as u16,
-                    tree_idx: tree_idx as u8,
-                };
-                let full = ggm_expand_full_4x(&dom, depth, root_seed);
-                let tap_ctx = LpnTapStreamCtx {
-                    session_id: self.session_id,
-                    sender_id: me as u16,
-                    receiver_id: q as u16,
-                    tree_idx: tree_idx as u8,
-                    depth: d_u8,
-                };
-                accumulate_sender_lpn_tree(tap_ctx, &full.leaves, &mut me_to_q_keys);
+            for mut partial in tree_partials(|range| {
+                let mut me_to_q_keys = SecretBuffer(vec![0u128; TOTAL_LPN_ROWS]);
+                for tree_idx in range {
+                    let root_seed = &roots[tree_idx];
+                    let dom = GgmTreeDomain {
+                        session_id: self.session_id,
+                        sender_id: me as u16,
+                        receiver_id: q as u16,
+                        tree_idx: tree_idx as u8,
+                    };
+                    let full = ggm_expand_full_4x(&dom, depth, root_seed);
+                    let tap_ctx = LpnTapStreamCtx {
+                        session_id: self.session_id,
+                        sender_id: me as u16,
+                        receiver_id: q as u16,
+                        tree_idx: tree_idx as u8,
+                        depth: d_u8,
+                    };
+                    accumulate_sender_lpn_tree(tap_ctx, &full.leaves, &mut me_to_q_keys);
+                }
+                me_to_q_keys
+            }) {
+                for (dst, src) in me_to_q_keys.iter_mut().zip(partial.iter_mut()) {
+                    *dst ^= *src;
+                }
             }
 
             // Step 3: Slice 0 (`0..65,536`) -> Flat BDOZ Subfield-VOLEs.
@@ -1881,43 +1951,59 @@ fn receiver_spcot_check_values(
     );
     let mut w_recv = peer.spcot_mask_macs;
 
-    for tree_idx in 0..DENSE_PCG_NUM_TREES {
-        let p_star = peer.punctured_indices[tree_idx] as usize;
-        let dom = GgmTreeDomain {
-            session_id: *session_id,
-            sender_id: sender_id as u16,
-            receiver_id: receiver_id as u16,
-            tree_idx: tree_idx as u8,
-        };
-        let punc = ggm_expand_punctured_4x(&dom, depth, p_star, &peer.copaths[tree_idx]);
-        let delta_corr = punc.punc_xor_sum.add(peer.corr_offsets[tree_idx]);
+    for (partial, macs, choices) in tree_partials(|range| {
+        let mut w_recv = [Tower128::ZERO; SPCOT_CHECK_REPS];
+        let mut macs = SecretBuffer(vec![0u128; out_macs.len()]);
+        let mut choices = SecretBuffer(vec![0u64; out_choice_words.len()]);
+        for tree_idx in range {
+            let p_star = peer.punctured_indices[tree_idx] as usize;
+            let dom = GgmTreeDomain {
+                session_id: *session_id,
+                sender_id: sender_id as u16,
+                receiver_id: receiver_id as u16,
+                tree_idx: tree_idx as u8,
+            };
+            let punc = ggm_expand_punctured_4x(&dom, depth, p_star, &peer.copaths[tree_idx]);
+            let delta_corr = punc.punc_xor_sum.add(peer.corr_offsets[tree_idx]);
 
-        for (w, rep_weights) in w_recv.iter_mut().zip(weights.iter()) {
-            let term = eval_punctured_tree_spcot_term(
-                rep_weights.tree_gammas[tree_idx],
-                &rep_weights.leaf_powers,
+            for (w, rep_weights) in w_recv.iter_mut().zip(weights.iter()) {
+                let term = eval_punctured_tree_spcot_term(
+                    rep_weights.tree_gammas[tree_idx],
+                    &rep_weights.leaf_powers,
+                    &punc.punc_leaves,
+                    p_star,
+                    delta_corr,
+                );
+                *w = w.add(term.combo);
+            }
+
+            let tap_ctx = LpnTapStreamCtx {
+                session_id: *session_id,
+                sender_id: sender_id as u16,
+                receiver_id: receiver_id as u16,
+                tree_idx: tree_idx as u8,
+                depth: depth.depth() as u8,
+            };
+            accumulate_receiver_lpn_tree(
+                tap_ctx,
                 &punc.punc_leaves,
                 p_star,
-                delta_corr,
+                delta_corr.0,
+                &mut macs,
+                &mut choices,
             );
-            *w = w.add(term.combo);
         }
-
-        let tap_ctx = LpnTapStreamCtx {
-            session_id: *session_id,
-            sender_id: sender_id as u16,
-            receiver_id: receiver_id as u16,
-            tree_idx: tree_idx as u8,
-            depth: depth.depth() as u8,
-        };
-        accumulate_receiver_lpn_tree(
-            tap_ctx,
-            &punc.punc_leaves,
-            p_star,
-            delta_corr.0,
-            out_macs,
-            out_choice_words,
-        );
+        (w_recv, macs, choices)
+    }) {
+        for (dst, src) in w_recv.iter_mut().zip(partial) {
+            *dst = dst.add(src);
+        }
+        for (dst, src) in out_macs.iter_mut().zip(macs.iter()) {
+            *dst ^= src;
+        }
+        for (dst, src) in out_choice_words.iter_mut().zip(choices.iter()) {
+            *dst ^= src;
+        }
     }
     w_recv
 }
@@ -2216,18 +2302,26 @@ fn run_directed_spcot_setup(
         &sender_master_seed,
     ));
 
-    let mut full_trees = Vec::with_capacity(DENSE_PCG_NUM_TREES);
+    let mut full_trees: Vec<_> = tree_partials(|range| {
+        range
+            .map(|tree_idx| {
+                let dom = GgmTreeDomain {
+                    session_id: *session_id,
+                    sender_id: sender_id as u16,
+                    receiver_id: receiver_id as u16,
+                    tree_idx: tree_idx as u8,
+                };
+                ggm_expand_full_4x(&dom, tree_depth, &roots[tree_idx])
+            })
+            .collect::<Vec<_>>()
+    })
+    .into_iter()
+    .flatten()
+    .collect();
     let mut corr_offsets = [Tower128::ZERO; DENSE_PCG_NUM_TREES];
     let mut ot_cts: Vec<([u8; 32], [u8; 32])> = Vec::with_capacity(total_ot_bits);
 
-    for (tree_idx, root) in roots.iter().enumerate() {
-        let dom = GgmTreeDomain {
-            session_id: *session_id,
-            sender_id: sender_id as u16,
-            receiver_id: receiver_id as u16,
-            tree_idx: tree_idx as u8,
-        };
-        let mut full = ggm_expand_full_4x(&dom, tree_depth, root);
+    for (tree_idx, full) in full_trees.iter_mut().enumerate() {
         let mut c_off = full.leaf_xor_sum.add(alpha_sender);
 
         match fault {
@@ -2274,7 +2368,6 @@ fn run_directed_spcot_setup(
             }
             ot_cts.push((ct0, ct1));
         }
-        full_trees.push(full);
     }
 
     // 3. Receiver decrypts its `64` GGM copaths from `ot_cts` and `recv_pads`.
@@ -2388,47 +2481,68 @@ fn run_directed_spcot_setup(
         core::array::from_fn(|rep| vole_masks[rep].x_receiver);
     let mut w_recv: [Tower128; SPCOT_CHECK_REPS] =
         core::array::from_fn(|rep| vole_masks[rep].mac_receiver);
-    for (tree_idx, &p_star_u16) in punctured_indices.iter().enumerate() {
-        let p_star = p_star_u16 as usize;
+    for (x_part, w_part, mac_part, choice_part) in tree_partials(|range| {
+        let mut x_chk = [Tower128::ZERO; SPCOT_CHECK_REPS];
+        let mut w_recv = [Tower128::ZERO; SPCOT_CHECK_REPS];
+        let mut recv_mac_preview = SecretBuffer(vec![0u128; recv_mac_preview.len()]);
+        let mut recv_choice_preview = SecretBuffer(vec![0u64; recv_choice_preview.len()]);
+        for tree_idx in range {
+            let p_star_u16 = punctured_indices[tree_idx];
+            let p_star = p_star_u16 as usize;
 
-        let dom = GgmTreeDomain {
-            session_id: *session_id,
-            sender_id: sender_id as u16,
-            receiver_id: receiver_id as u16,
-            tree_idx: tree_idx as u8,
-        };
-        let punc = ggm_expand_punctured_4x(&dom, tree_depth, p_star, &copaths[tree_idx]);
-        let delta_corr = punc.punc_xor_sum.add(corr_offsets[tree_idx]);
-        for (rep, rep_weights) in chal_weights.iter().enumerate() {
-            let term = eval_punctured_tree_spcot_term(
-                rep_weights.tree_gammas[tree_idx],
-                &rep_weights.leaf_powers,
-                &punc.punc_leaves,
-                p_star,
-                delta_corr,
-            );
-            // The receiver's message of repetition `rep` is its punctured-leaf weights masked
-            // by that repetition's own VOLE input `x_receiver`.
-            x_chk[rep] = x_chk[rep].add(term.punctured_weight);
-            w_recv[rep] = w_recv[rep].add(term.combo);
-        }
-
-        if need_preview {
-            let tap_ctx = LpnTapStreamCtx {
+            let dom = GgmTreeDomain {
                 session_id: *session_id,
                 sender_id: sender_id as u16,
                 receiver_id: receiver_id as u16,
                 tree_idx: tree_idx as u8,
-                depth: d_u8,
             };
-            accumulate_receiver_lpn_tree(
-                tap_ctx,
-                &punc.punc_leaves,
-                p_star,
-                delta_corr.0,
-                &mut recv_mac_preview,
-                &mut recv_choice_preview,
-            );
+            let punc = ggm_expand_punctured_4x(&dom, tree_depth, p_star, &copaths[tree_idx]);
+            let delta_corr = punc.punc_xor_sum.add(corr_offsets[tree_idx]);
+            for (rep, rep_weights) in chal_weights.iter().enumerate() {
+                let term = eval_punctured_tree_spcot_term(
+                    rep_weights.tree_gammas[tree_idx],
+                    &rep_weights.leaf_powers,
+                    &punc.punc_leaves,
+                    p_star,
+                    delta_corr,
+                );
+                // The receiver's message of repetition `rep` is its punctured-leaf weights masked
+                // by that repetition's own VOLE input `x_receiver`.
+                x_chk[rep] = x_chk[rep].add(term.punctured_weight);
+                w_recv[rep] = w_recv[rep].add(term.combo);
+            }
+
+            if need_preview {
+                let tap_ctx = LpnTapStreamCtx {
+                    session_id: *session_id,
+                    sender_id: sender_id as u16,
+                    receiver_id: receiver_id as u16,
+                    tree_idx: tree_idx as u8,
+                    depth: d_u8,
+                };
+                accumulate_receiver_lpn_tree(
+                    tap_ctx,
+                    &punc.punc_leaves,
+                    p_star,
+                    delta_corr.0,
+                    &mut recv_mac_preview,
+                    &mut recv_choice_preview,
+                );
+            }
+        }
+        (x_chk, w_recv, recv_mac_preview, recv_choice_preview)
+    }) {
+        for (dst, src) in x_chk.iter_mut().zip(x_part) {
+            *dst = dst.add(src);
+        }
+        for (dst, src) in w_recv.iter_mut().zip(w_part) {
+            *dst = dst.add(src);
+        }
+        for (dst, src) in recv_mac_preview.iter_mut().zip(mac_part.iter()) {
+            *dst ^= src;
+        }
+        for (dst, src) in recv_choice_preview.iter_mut().zip(choice_part.iter()) {
+            *dst ^= src;
         }
     }
 
@@ -2439,25 +2553,38 @@ fn run_directed_spcot_setup(
     } else {
         Vec::new()
     };
-    for (tree_idx, full) in full_trees.iter().enumerate() {
-        for (w, rep_weights) in w_send.iter_mut().zip(chal_weights.iter()) {
-            let combo_s = eval_tree_spcot_linear_combo(
-                rep_weights.tree_gammas[tree_idx],
-                &rep_weights.leaf_powers,
-                &full.leaves,
-            );
-            *w = w.add(combo_s);
-        }
+    for (w_part, key_part) in tree_partials(|range| {
+        let mut w_send = [Tower128::ZERO; SPCOT_CHECK_REPS];
+        let mut sender_keys = SecretBuffer(vec![0u128; sender_keys.len()]);
+        for tree_idx in range {
+            let full = &full_trees[tree_idx];
+            for (w, rep_weights) in w_send.iter_mut().zip(chal_weights.iter()) {
+                let combo_s = eval_tree_spcot_linear_combo(
+                    rep_weights.tree_gammas[tree_idx],
+                    &rep_weights.leaf_powers,
+                    &full.leaves,
+                );
+                *w = w.add(combo_s);
+            }
 
-        if need_preview {
-            let tap_ctx = LpnTapStreamCtx {
-                session_id: *session_id,
-                sender_id: sender_id as u16,
-                receiver_id: receiver_id as u16,
-                tree_idx: tree_idx as u8,
-                depth: d_u8,
-            };
-            accumulate_sender_lpn_tree(tap_ctx, &full.leaves, &mut sender_keys);
+            if need_preview {
+                let tap_ctx = LpnTapStreamCtx {
+                    session_id: *session_id,
+                    sender_id: sender_id as u16,
+                    receiver_id: receiver_id as u16,
+                    tree_idx: tree_idx as u8,
+                    depth: d_u8,
+                };
+                accumulate_sender_lpn_tree(tap_ctx, &full.leaves, &mut sender_keys);
+            }
+        }
+        (w_send, sender_keys)
+    }) {
+        for (dst, src) in w_send.iter_mut().zip(w_part) {
+            *dst = dst.add(src);
+        }
+        for (dst, src) in sender_keys.iter_mut().zip(key_part.iter()) {
+            *dst ^= src;
         }
     }
 
@@ -2557,6 +2684,33 @@ const fn n_requires_derand_preview(num_parties: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batched_spcot_sum_matches_scalar_field_with_punctures_and_tails() {
+        let mut rng = PartyPrivateRng::from_seed([0x53; 32], b"spcot-dot-reference");
+        for len in [0usize, 1, 2, 63, 64, 255, 256, 257, 1024] {
+            let powers: Vec<_> = (0..len).map(|_| rng.next_tower128()).collect();
+            let leaves: Vec<_> = (0..len).map(|_| rng.next_u128()).collect();
+            for puncture in [None, Some((0, 7)), Some((len.saturating_sub(1), u128::MAX))] {
+                let mut expected = Tower128::ZERO;
+                let mut weight = 0;
+                for (i, (power, leaf)) in powers.iter().zip(&leaves).enumerate() {
+                    let effective = match puncture {
+                        Some((index, correction)) if i == index => {
+                            weight = power.0;
+                            correction
+                        }
+                        _ => *leaf,
+                    };
+                    expected = expected.add(power.mul(Tower128(effective)));
+                }
+                assert_eq!(
+                    spcot_weighted_sum(&powers, &leaves, puncture),
+                    (expected, weight)
+                );
+            }
+        }
+    }
 
     fn count_ones_words(words: &[u64]) -> usize {
         words.iter().map(|w| w.count_ones() as usize).sum()

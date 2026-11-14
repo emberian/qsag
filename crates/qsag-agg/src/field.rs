@@ -499,7 +499,7 @@ fn butterfly_block_goldilocks(
     debug_assert_eq!(m, hi.len());
     if m >= 4 {
         let w2 = w_len * w_len;
-        let w4 = w2 * w2;
+        let fourth_power = w2 * w2;
         let mut wk0 = w_init;
         let mut wk1 = wk0 * w_len;
         let mut wk2 = wk0 * w2;
@@ -522,10 +522,10 @@ fn butterfly_block_goldilocks(
             hi[j + 2] = u2 - v2;
             lo[j + 3] = u3 + v3;
             hi[j + 3] = u3 - v3;
-            wk0 *= w4;
-            wk1 *= w4;
-            wk2 *= w4;
-            wk3 *= w4;
+            wk0 *= fourth_power;
+            wk1 *= fourth_power;
+            wk2 *= fourth_power;
+            wk3 *= fourth_power;
             j += 4;
         }
         while j < m {
@@ -1151,7 +1151,7 @@ fn butterfly_block_ext4(
     debug_assert_eq!(m, hi.len());
     if m >= 4 {
         let w2 = w_len * w_len;
-        let w4 = w2 * w2;
+        let fourth_power = w2 * w2;
         let mut wk0 = w_init;
         let mut wk1 = wk0 * w_len;
         let mut wk2 = wk0 * w2;
@@ -1174,10 +1174,10 @@ fn butterfly_block_ext4(
             hi[j + 2] = u2 - v2;
             lo[j + 3] = u3 + v3;
             hi[j + 3] = u3 - v3;
-            wk0 *= w4;
-            wk1 *= w4;
-            wk2 *= w4;
-            wk3 *= w4;
+            wk0 *= fourth_power;
+            wk1 *= fourth_power;
+            wk2 *= fourth_power;
+            wk3 *= fourth_power;
             j += 4;
         }
         while j < m {

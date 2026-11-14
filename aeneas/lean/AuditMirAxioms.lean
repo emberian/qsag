@@ -48,6 +48,7 @@ import all QsagVerified.Proofs.RealSpecHashWeld
 import all QsagVerified.Proofs.RealSpecKeccakWeld
 import all QsagVerified.Proofs.RealSpecTowerWeld
 import all QsagSpecWeld
+import all QsagCustodyWeld
 
 /-!
 This gate audits dependency closures of definitions AND theorems. Auditing an extracted
@@ -92,7 +93,19 @@ run_cmd do
     ``qsag_verified.proofs.belt_latch_poison_absorbing,
     ``qsag_verified.proofs.belt_latch_recover_then_replay,
     ``qsag_verified.proofs.checked_velocity_spend_spec,
-    ``qsag_verified.proofs.inhabited_belt_one_fault_multi_epoch]
+    ``qsag_verified.proofs.inhabited_belt_one_fault_multi_epoch,
+    ``qsag_verified.proofs.xor_rate_block_refines,
+    ``qsag_verified.proofs.sponge_absorb_refines,
+    ``qsag_verified.proofs.sponge_absorb_all_refines,
+    ``qsag_verified.proofs.sponge_finalize_refines,
+    ``qsag_verified.proofs.shake256_absorb_pad_refines,
+    ``qsag_verified.proofs.shake256_xof_from_extracted_state,
+    ``qsag_verified.proofs.sponge_squeeze32_refines,
+    ``qsag_verified.proofs.shake256_32_refines,
+    ``qsag_verified.proofs.opening_verify_once_eq,
+    ``qsag_verified.proofs.opening_verify_once_single_consumption,
+    ``qsag_verified.proofs.opening_round_permit_sound,
+    ``qsag_verified.proofs.opening_round_permit_complete]
   for name in requiredTheorems do
     match env.find? name with
     | some (.thmInfo _) => pure ()
@@ -102,7 +115,8 @@ run_cmd do
   for (name, _) in env.constants.toList do
     if let some idx := env.getModuleIdxFor? name then
       let owner := env.header.moduleNames[idx.toNat]!.toString
-      if owner == "QsagSpecWeld" || owner == "QsagMirProofs" || owner == "QsagVerified" ||
+      if owner == "Aeneas" || owner.startsWith "Aeneas." || owner == "QsagCustodyWeld" ||
+          owner == "QsagSpecWeld" || owner == "QsagMirProofs" || owner == "QsagVerified" ||
           owner.startsWith "QsagVerified." then
         checked := checked + 1
         let axioms ← withEnv env <| Lean.collectAxioms name

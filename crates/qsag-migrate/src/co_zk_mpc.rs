@@ -395,56 +395,69 @@ fn compute_batches<T: Transport>(
         let entropy = ctx.entropy;
         let keys = ctx.keys;
         let cancelled = alloc::sync::Arc::new(core::sync::atomic::AtomicBool::new(false));
-        return std::thread::scope(|scope| {
-            let handles: Vec<_> = children
-                .into_iter()
-                .enumerate()
-                .map(|(batch, transport)| {
-                    let cancelled = cancelled.clone();
-                    scope.spawn(move || {
-                        let result = (|| {
-                            let batch_session = cshake256_framed_32(
-                                b"QSAG.OUTER.BATCH.V1",
-                                &[&session, &(batch as u64).to_le_bytes()],
-                            );
-                            let mut batch_entropy = cshake256_framed_32(
-                                b"QSAG.OUTER.BATCH.ENTROPY.V1",
-                                &[&entropy, &session, &(batch as u64).to_le_bytes()],
-                            );
-                            let mut engine = Engine::new(party, batch_session, keys, transport)?;
-                            engine.batch_cancelled = Some(cancelled.clone());
-                            engine.mix_entropy(&batch_entropy);
-                            ct_zeroize_bytes(&mut batch_entropy);
-                            let mut result =
-                                compute_batch(&mut engine, c, witness, &seeds[batch], batch)?;
-                            engine.batch_cancelled = None;
-                            result.engine = Some(engine);
-                            Ok(result)
-                        })();
-                        if result.is_err() {
-                            // Cancellation can only abort. Every successful batch still
-                            // passes its multiplication checks and the global barrier.
-                            cancelled.store(true, core::sync::atomic::Ordering::Relaxed);
-                        }
-                        result
+        let width = e
+            .transport
+            .max_parallel_batches()
+            .max(1)
+            .min(children.len());
+        let mut jobs = children.into_iter().enumerate();
+        let mut completed = Vec::with_capacity(seeds.len());
+        while jobs.len() != 0 {
+            let wave: Result<Vec<_>, Error> = std::thread::scope(|scope| {
+                let handles: Vec<_> = jobs
+                    .by_ref()
+                    .take(width)
+                    .map(|(batch, transport)| {
+                        let cancelled = cancelled.clone();
+                        scope.spawn(move || {
+                            let result = (|| {
+                                let batch_session = cshake256_framed_32(
+                                    b"QSAG.OUTER.BATCH.V1",
+                                    &[&session, &(batch as u64).to_le_bytes()],
+                                );
+                                let mut batch_entropy = cshake256_framed_32(
+                                    b"QSAG.OUTER.BATCH.ENTROPY.V1",
+                                    &[&entropy, &session, &(batch as u64).to_le_bytes()],
+                                );
+                                let mut engine =
+                                    Engine::new(party, batch_session, keys, transport)?;
+                                engine.batch_cancelled = Some(cancelled.clone());
+                                engine.mix_entropy(&batch_entropy);
+                                ct_zeroize_bytes(&mut batch_entropy);
+                                let mut result =
+                                    compute_batch(&mut engine, c, witness, &seeds[batch], batch)?;
+                                engine.release_verified_scratch();
+                                engine.batch_cancelled = None;
+                                result.engine = Some(engine);
+                                Ok(result)
+                            })();
+                            if result.is_err() {
+                                // Cancellation can only abort. Every successful batch still
+                                // passes its multiplication checks and the global barrier.
+                                cancelled.store(true, core::sync::atomic::Ordering::Relaxed);
+                            }
+                            result
+                        })
                     })
-                })
-                .collect();
-            let results: Vec<Result<_, Error>> = handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or(Err(Error::Transport)))
-                .collect();
-            // A sibling cancelled at an exchange reports Transport. Preserve the
-            // actual rejection (especially InvalidTape, which callers may retry).
-            if let Some(error) = results
-                .iter()
-                .filter_map(|r| r.as_ref().err())
-                .find(|&&error| error != Error::Transport)
-            {
-                return Err(*error);
-            }
-            results.into_iter().collect()
-        });
+                    .collect();
+                let results: Vec<Result<_, Error>> = handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or(Err(Error::Transport)))
+                    .collect();
+                // A sibling cancelled at an exchange reports Transport. Preserve the
+                // actual rejection (especially InvalidTape, which callers may retry).
+                if let Some(error) = results
+                    .iter()
+                    .filter_map(|r| r.as_ref().err())
+                    .find(|&&error| error != Error::Transport)
+                {
+                    return Err(*error);
+                }
+                results.into_iter().collect()
+            });
+            completed.extend(wave?);
+        }
+        return Ok(completed);
     }
     #[cfg(not(any(feature = "std", test)))]
     let _ = (children, ctx.session, ctx.entropy, ctx.keys);
@@ -1609,7 +1622,29 @@ mod tests {
         });
     }
 
-    static HEAVY_CEREMONY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Bound both ceremonies and per-custodian batches, keeping the suite within
+    // the 12 GiB builder budget while overlapping network synchronization.
+    static HEAVY_CEREMONIES: (std::sync::Mutex<usize>, std::sync::Condvar) =
+        (std::sync::Mutex::new(0), std::sync::Condvar::new());
+    struct CeremonySlot;
+    impl CeremonySlot {
+        fn acquire() -> Self {
+            let (active, ready) = &HEAVY_CEREMONIES;
+            let mut count = active.lock().unwrap_or_else(|e| e.into_inner());
+            while *count >= 2 {
+                count = ready.wait(count).unwrap_or_else(|e| e.into_inner());
+            }
+            *count += 1;
+            Self
+        }
+    }
+    impl Drop for CeremonySlot {
+        fn drop(&mut self) {
+            let (active, ready) = &HEAVY_CEREMONIES;
+            *active.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+            ready.notify_one();
+        }
+    }
 
     #[test]
     fn complete_distributed_bitcoin_proof_verifies() {
@@ -1623,9 +1658,7 @@ mod tests {
 
     fn complete_proof(ed: bool) {
         use std::io::Read;
-        let _ceremony_guard = HEAVY_CEREMONY_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _ceremony_guard = CeremonySlot::acquire();
         let mut completed = false;
         for _attempt in 0..4 {
             let mut master = [0u8; 32];
@@ -1799,6 +1832,10 @@ mod tests {
         precommit_or_view_opened: Arc<AtomicBool>,
     }
     impl Transport for ZkbooFaultSpy {
+        fn max_parallel_batches(&self) -> usize {
+            3
+        }
+
         fn test_fault_raw(&self) -> Option<[usize; 4]> {
             self.fault.map(FaultInjection::to_raw)
         }
@@ -1825,9 +1862,7 @@ mod tests {
     }
 
     fn assert_zkboo_fault_aborts_cleanly(ed: bool, fault: FaultInjection, session_tag: u8) {
-        let _ceremony_guard = HEAVY_CEREMONY_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _ceremony_guard = CeremonySlot::acquire();
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x31 + seed_try; 32]);
             let kind = if ed {
@@ -1953,9 +1988,7 @@ mod tests {
     }
 
     fn assert_input_substitution_aborts(ed: bool, delta_64bit: bool, session_tag: u8) {
-        let _ceremony_guard = HEAVY_CEREMONY_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _ceremony_guard = CeremonySlot::acquire();
         let mut verified = false;
         for seed_try in 0..8u8 {
             let witness = LegacyOwnershipWitness::from_raw_secret([0x41 + seed_try; 32]);

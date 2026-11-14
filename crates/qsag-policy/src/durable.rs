@@ -1,14 +1,14 @@
-//! Canonical authenticated V4 ledger codec. This is a snapshot, not a storage
+//! Canonical authenticated V5 ledger codec. This is a snapshot, not a storage
 //! transaction: callers must atomically persist it and fence its generation in
 //! trusted monotonic storage before releasing a signature. A MAC alone cannot
 //! detect rollback of both the checkpoint and its external generation fence.
 //!
 //! All integers are big endian. The MAC covers, in order: the 29-byte domain
-//! `QSAG.POLICY.DURABLE_LEDGER.V4`, key ID (32), enrolled party (u16), generation
+//! `QSAG.POLICY.DURABLE_LEDGER.V5`, key ID (32), enrolled party (u16), generation
 //! (u64), window (u64), spend (u128), next local slot (u16), poisoned and
 //! authenticated-initiator flags (one canonical 0/1 byte each), then nonce and
 //! session windows (each: u16 count, zero u16 cursor, count * 32 bytes), then
-//! two optional eviction watermarks (flag + 32 bytes each), then peer slots
+//! two reserved zero watermark fields (flag + 32 bytes each), then peer slots
 //! (u16 count, strictly ascending (u16 party, u64 mask) pairs), then the verified
 //! velocity state: request nonce (u64), pinned-cap flag and cap (u128, zero when
 //! unpinned). A 32-byte keyed cSHAKE256 framed tag follows. On restore the extracted
@@ -19,7 +19,7 @@
 
 use super::*;
 
-const DOMAIN: &[u8] = b"QSAG.POLICY.DURABLE_LEDGER.V4";
+const DOMAIN: &[u8] = b"QSAG.POLICY.DURABLE_LEDGER.V5";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyGuardError {
@@ -174,7 +174,7 @@ impl PolicySignerGuardShare {
             }
             None
         };
-        if nonce_cursor != 0
+        if nonce_floor.is_some() || session_floor.is_some() || nonce_cursor != 0
             || session_cursor != 0
             || nonces.windows(2).any(|w| w[0] >= w[1])
             || sessions.windows(2).any(|w| w[0] >= w[1])
@@ -228,7 +228,7 @@ impl PolicySignerGuardShare {
             || velocity_generation < self.velocity_generation
             || window < self.current_window_id
             || (window == self.current_window_id && spend < self.accumulated_window_spend)
-            || self
+            || (window == self.current_window_id && self
                 .burned_intent_nonces
                 .iter()
                 .any(|n| !nonces.contains(n) && !nonce_floor.is_some_and(|f| *n <= f))
@@ -237,7 +237,7 @@ impl PolicySignerGuardShare {
             || self
                 .burned_sessions
                 .iter()
-                .any(|s| !sessions.contains(s) && !session_floor.is_some_and(|f| *s <= f))
+                .any(|s| !sessions.contains(s) && !session_floor.is_some_and(|f| *s <= f)))
             || next < self.next_slot.get()
             || (self.poisoned && !poisoned)
             || (self.require_authenticated_initiator && !authenticated)
@@ -405,6 +405,7 @@ pub struct FsPolicyGenerationFence {
     record: qsag_asm::durable::LockedRecord,
     key: qsag_accel::ct::RedactedSecret<32>,
     generation: u64,
+    failed: bool,
 }
 
 #[cfg(feature = "std")]
@@ -427,6 +428,7 @@ impl FsPolicyGenerationFence {
             record,
             key: qsag_accel::ct::RedactedSecret::new(derived),
             generation: initial_generation,
+            failed: false,
         };
         fence.record.replace(&fence.encode(initial_generation))?;
         Ok(fence)
@@ -450,7 +452,7 @@ impl FsPolicyGenerationFence {
             record,
             key,
             generation,
-        })
+            failed: false,        })
     }
 
     pub const fn generation(&self) -> u64 {
@@ -458,6 +460,18 @@ impl FsPolicyGenerationFence {
     }
 
     pub fn ratchet_to(&mut self, next_generation: u64) -> std::io::Result<()> {
+        if self.failed {
+            return Err(std::io::Error::other("policy generation fence failed"));
+        }
+        self.failed = true;
+        let result = self.ratchet_inner(next_generation);
+        if result.is_ok() {
+            self.failed = false;
+        }
+        result
+    }
+
+    fn ratchet_inner(&mut self, next_generation: u64) -> std::io::Result<()> {
         if policy_lock_inode(&self.path)? != self.lock_id {
             return Err(std::io::Error::other("policy fence lock sidecar replaced"));
         }
@@ -608,7 +622,7 @@ impl SharedWindowSpendLedger {
                 return Err(PolicyGuardError::InvalidCheckpoint);
             }
             let floor = present.then_some(raw);
-            if values.windows(2).any(|w| w[0] >= w[1])
+            if floor.is_some() || values.windows(2).any(|w| w[0] >= w[1])
                 || values.iter().any(|v| floor.is_some_and(|f| *v <= f))
             {
                 return Err(PolicyGuardError::InvalidCheckpoint);
@@ -632,10 +646,10 @@ impl SharedWindowSpendLedger {
         .into_iter()
         .zip(&sets)
         {
-            if *floor < old_floor
+            if window == self.current_window_id && (*floor < old_floor
                 || old
                     .iter()
-                    .any(|v| !new.contains(v) && !floor.is_some_and(|f| *v <= f))
+                    .any(|v| !new.contains(v) && !floor.is_some_and(|f| *v <= f)))
             {
                 return Err(PolicyGuardError::Rollback);
             }

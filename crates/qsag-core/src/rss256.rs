@@ -2647,8 +2647,27 @@ impl Rss256Engine {
         if shares[1].len() != n || shares[2].len() != n {
             return Err(Rss256Error::InvalidParameters);
         }
+        let session_id = self.cluster.session_id;
+        let salt = self.prev_digest;
+        let mut out = vec![[0u64; 4]; n];
         for (slot, share) in shares.iter().enumerate() {
-            // The copy sent by the second holder of this slot.
+            // Commit each cut share before receiving its holder's echo. Only a gate's
+            // released bytes enter reconstruction. `unverified == false` above is the
+            // successful product-proof barrier; no pending chi relation may bypass it.
+            let gates: Vec<_> = share
+                .iter()
+                .map(|plane| {
+                    let bytes =
+                        core::array::from_fn::<_, 32, _>(|i| plane[i / 8].to_le_bytes()[i % 8]);
+                    let commitment = qsag_verified::compute_rss_mask_commitment(
+                        &session_id,
+                        slot as u8,
+                        &bytes,
+                        &salt,
+                    );
+                    qsag_verified::RssCutGateSession::new_round1_committed(session_id, commitment)
+                })
+                .collect();
             let mut echo: Vec<Plane> = share.to_vec();
             #[cfg(test)]
             for f in &self.faults {
@@ -2665,24 +2684,39 @@ impl Rss256Engine {
                     }
                 }
             }
-            let mut diff = 0u64;
-            for (x, y) in share.iter().zip(&echo) {
-                for (a, b) in x.iter().zip(y) {
-                    diff |= a ^ b;
+            for ((gate, plane), output) in gates.into_iter().zip(&echo).zip(&mut out) {
+                let bytes = core::array::from_fn::<_, 32, _>(|i| plane[i / 8].to_le_bytes()[i % 8]);
+                let commitment = qsag_verified::compute_rss_mask_commitment(
+                    &session_id,
+                    slot as u8,
+                    &bytes,
+                    &salt,
+                );
+                let (gate, bound) = gate.advance_round2_chi(session_id, commitment, bytes);
+                if bound.is_err() {
+                    qsag_asm::volatile_fill(&mut echo, [0; 4]);
+                    qsag_asm::volatile_fill(&mut out, [0; 4]);
+                    return self.poison(Rss256Error::OpenShareMismatch { slot });
                 }
+                // The product proof and both holder comparisons have accepted. This
+                // engine uses replicated product proofs, with no SPDZ MAC residual.
+                let (gate, checked) = gate.advance_round3_verify_consistency(session_id, 0, 0, 0);
+                let (_, released) = gate.open_verified_cut(session_id);
+                let Ok(mut released) = released else {
+                    qsag_asm::volatile_fill(&mut echo, [0; 4]);
+                    qsag_asm::volatile_fill(&mut out, [0; 4]);
+                    return self.poison(Rss256Error::OpenShareMismatch { slot });
+                };
+                if checked.is_err() {
+                    qsag_asm::volatile_fill(&mut released, 0);
+                    return self.poison(Rss256Error::OpenShareMismatch { slot });
+                }
+                for (word, bytes) in output.iter_mut().zip(released.as_chunks::<8>().0.iter()) {
+                    *word ^= u64::from_le_bytes(*bytes);
+                }
+                qsag_asm::volatile_fill(&mut released, 0);
             }
             qsag_asm::volatile_fill(&mut echo, [0; 4]);
-            if diff != 0 {
-                return self.poison(Rss256Error::OpenShareMismatch { slot });
-            }
-        }
-        let mut out = vec![[0u64; 4]; n];
-        for share in shares {
-            for (o, s) in out.iter_mut().zip(share) {
-                for (x, y) in o.iter_mut().zip(s) {
-                    *x ^= *y;
-                }
-            }
         }
         // One slot share per party plus a digest of the copy it holds as second holder.
         self.stats.open_bytes += (n * 32) as u64 + 32;

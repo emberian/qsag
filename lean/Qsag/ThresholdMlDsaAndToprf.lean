@@ -28,10 +28,11 @@ Proved here, constructively:
   gates together.
 
 Not proved here: irreducibility of the extension modulus (the sacrifice soundness above
-does not use it; the engine's folded check does); per-party share views and MACs of the
-distributed engine; the replacement of independent uniform masks by a seed expansion,
-which is a pseudorandomness assumption; whole-execution collision extraction for the
-digest transport (it is per gate). The credential theorems concern the Lean relation and
+does not use it; the engine's folded check does); refinement of the distributed engine into the authenticated per-party
+share model below; the replacement of independent uniform masks by a seed expansion,
+which is a pseudorandomness assumption; the polynomial factor criterion turning `ext6RabinCertificate204` into
+a general no-zero-divisors instance. `toprfDigestClient204_extract` returns concrete
+collision bytes for the whole digest execution. The credential theorems concern the Lean relation and
 a fixed-challenge hybrid. `verifyBlindVcPresentationTrusted` compares the presentation with
 a verifier-supplied issuer context; how that context is itself authenticated, production
 transcript equivalence, and QROM security are outside this module.
@@ -44,8 +45,11 @@ public import Qsag.Goldilocks
 public import Qsag.Poseidon2
 public import Qsag.UcGames
 public import Qsag.AdvancedMpcAndCreds
+public import Qsag.AffineProximityGaps
 public import Qsag.Tactic.AssuranceKit
 import all Qsag.AdvancedMpcAndCreds
+import all Qsag.AffineProximityGaps
+import all Qsag.Goldilocks
 
 public section
 namespace Qsag
@@ -518,6 +522,11 @@ theorem inv_mul_cancel {a : Fq204} (ha : a ≠ zero) : mul (inv a) a = one := by
   rw [mul_comm, mul_inv_cancel ha]
 
 end Fq204
+
+instance : LawfulField Fq204 where
+  inv := Fq204.inv
+  zero_ne_one := by decide
+  mul_inv_cancel := Fq204.mul_inv_cancel
 
 /-! ### §1.3 256-Point Negacyclic Ring $R_q = \mathbb{Z}_q[X]/(X^{256} + 1)$ & 8-Stage NTT Isomorphism -/
 
@@ -2127,7 +2136,7 @@ private theorem natMemBool_eraseFirstNat_of_ne {z x : Nat} (hne : z ≠ x) :
       · simp [hzy]
       · simp [natMemBool_eraseFirstNat_of_ne hne hTail]
 
-private theorem nodup_length_le_of_subset :
+private theorem natNodup_length_le_of_subset :
     ∀ {T : List Nat} (C : List Nat),
       T.Nodup →
       (∀ x ∈ T, natMemBool x C = true) →
@@ -2141,7 +2150,7 @@ private theorem nodup_length_le_of_subset :
       intro z hz
       have hzx : z ≠ x := fun hEq => hxNotMem (hEq ▸ hz)
       exact natMemBool_eraseFirstNat_of_ne hzx (hSub z (.tail x hz))
-    have ih := nodup_length_le_of_subset (eraseFirstNat x C) hxsNodup hSubTail
+    have ih := natNodup_length_le_of_subset (eraseFirstNat x C) hxsNodup hSubTail
     simp only [List.length_cons]
     omega
 
@@ -2248,7 +2257,7 @@ theorem subset_honest_holder_exists
       exact ⟨h, rfl, hInT, hNotC⟩
     | none =>
       have hAll := findHonestHolder_none_spec hOpt
-      have hLe := nodup_length_le_of_subset C hTNodup hAll
+      have hLe := natNodup_length_le_of_subset C hTNodup hAll
       omega
   refine ⟨hEx, ?_⟩
   intro hHonestCheck
@@ -2318,7 +2327,7 @@ theorem replicated_subsets_intersect
       rcases List.mem_append.mp hz with hz1 | hz2
       · exact h1Bounds z hz1
       · exact h2Bounds z hz2
-    have hLe := nodup_length_le_of_subset (List.range n) hAppNodup hInRange
+    have hLe := natNodup_length_le_of_subset (List.range n) hAppNodup hInRange
     rw [List.length_append, List.length_range] at hLe
     omega
 
@@ -3776,6 +3785,19 @@ theorem threshold_mldsa_rss_abort_leakage_and_completeness
       have hSpec := (rssThresholdSignStep_ok_meta hOut).2.2.2.2.2 sig rfl
       exact ⟨hSpec.1, hSpec.2.2⟩
 
+private def natTreeList204 : {d : Nat} → NatTree d → List Nat
+  | 0, .leaf n => [n]
+  | _ + 1, .branch l r => natTreeList204 l ++ natTreeList204 r
+
+private def packSix204 : List Nat → List UInt8
+  | a :: b :: c :: d :: rest =>
+    UInt8.ofNat (a + 64 * b) :: UInt8.ofNat (b / 4 + 16 * c) ::
+      UInt8.ofNat (c / 16 + 4 * d) :: packSix204 rest
+  | _ => []
+
+def mldsa44ChallengeHash (mu : List UInt8) (w1 : Fin 4 → NatTree 8) : List UInt8 :=
+  shake256Xof 32 (mu ++ ((List.finRange 4).flatMap (fun i => packSix204 (natTreeList204 (w1 i)))))
+
 /-- Non-vacuous inhabitedness witness for `rssThresholdSignMachine` exercising BOTH:
     (i) an accepted RSS attempt emitting `some sig` with `mldsaVerify = true` and `rejectBit = false`, AND
     (ii) a boundary-rejected RSS attempt emitting `(pubViewRej, none)` with `rejectBit = true`! -/
@@ -3796,7 +3818,7 @@ theorem threshold_mldsa_rss_inhabited :
       st.epoch = 0 ∧ st.nextAttempt = 0 ∧
       inpAcc.products = rssComputeProducts chalHash sampleInBall st inpAcc.mu inpAcc.ySubsets ∧
       rssSumVec4List st.s1Subsets ≠ rssZeroVec4 := by
-  let chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8 := fun mu _ => mu
+  let chalHash : List UInt8 → (Fin 4 → NatTree 8) → List UInt8 := mldsa44ChallengeHash
   let sampleInBall : List UInt8 → Poly256 := fun _ => PolyTree.constUnit 8
   let p1 : Poly256 := polyTreeConstLeaf 8 Fq204.one
   let v1 : PolyVec4 := fun _ => p1
@@ -3805,7 +3827,7 @@ theorem threshold_mldsa_rss_inhabited :
     { epoch := 0, nextAttempt := 0, A := idMat4, s1Subsets := [v1], s2Subsets := [v1] }
   let inpAcc : RssMlDsaAttemptInput :=
     { epoch := 0, sessionId := [0x01], attempt := 0, mu := [0x42],
-      ySubsets := [v1], maskW := rssZeroVec4, maskZ := rssZeroVec4, maskLow := rssZeroVec4,
+      ySubsets := [v1], maskW := v1, maskZ := v1, maskLow := v1,
       products := rssComputeProducts chalHash sampleInBall st [0x42] [v1] }
   let inpRej : RssMlDsaAttemptInput :=
     { epoch := 0, sessionId := [0x01], attempt := 0, mu := [0x42],
@@ -5288,12 +5310,9 @@ def vcZkBooReps : Nat := ZkSoundnessProfile.quantum128.repetitions
 def vcClassicalZkBooReps : Nat := ZkSoundnessProfile.classical128.repetitions
 
 set_option exponentiation.threshold 1024 in
-/-- **Explicit Classical-ROM (`219`) vs Post-Quantum QROM (`438`) Soundness Separation
-    (`zkSoundnessProfile_rom_vs_qrom_bounds`, fixing `C1-2`)**:
-    1. `Classical128 = 219` achieves `< 2^{-128}` soundness in the classical ROM, **but** satisfies
-       `2^{-130} ≤ (2/3)^219` (`< 65` bits under QROM Grover square-root challenge grinding);
-    2. `Quantum128 = 438` (`vcZkBooReps`) achieves `(2/3)^438 ≤ 2^{-256}`, sustaining `≥ 128`-bit
-       post-quantum QROM soundness `((2/3)^438)^{1/2} ≤ 2^{-128}`. -/
+/-- Parameter arithmetic for 219 and 438 repetitions. These inequalities
+alone are neither a ROM nor a QROM adversary theorem: they contain no oracle
+query budget, commitment failure term, or adaptive Fiat–Shamir simulation. -/
 theorem zkSoundnessProfile_rom_vs_qrom_bounds :
     ZkSoundnessProfile.classical128.repetitions = 219 ∧
     ZkSoundnessProfile.quantum128.repetitions = 438 ∧
@@ -5407,7 +5426,8 @@ private theorem lane6Add_left_cancel {a b c : Lane6}
     (gold_add_left_cancel_vc (congrArg Lane6.x4 h))
     (gold_add_left_cancel_vc (congrArg Lane6.x5 h))
 
-/-- Authentic 6-limb rate or 6-limb capacity collision on `poseidon2Perm12`. -/
+/-- Equal output halves of a public permutation. This unrestricted relation
+is not a hardness assumption; use `blindVcReachableBinding204` to retain sponge reachability. -/
 def Poseidon2Perm12Sponge6Collision (stA stB : Poseidon2State12) : Prop :=
   stA ≠ stB ∧
   (state12Rate6 (poseidon2Perm12 stA) = state12Rate6 (poseidon2Perm12 stB) ∨
@@ -6208,10 +6228,34 @@ def vcZkBooPrgTag : List UInt8 :=
   [0x51, 0x53, 0x41, 0x47, 0x2E, 0x56, 0x43, 0x2E, 0x5A,
    0x4B, 0x42, 0x4F, 0x4F, 0x5F, 0x52, 0x2E, 0x56, 0x31]
 
+/-- Generic context indices are injective even beyond the u64 range. -/
+theorem contextIndex204_injective {a b : Nat} (h : leb128 a = leb128 b) : a = b :=
+  (leb128_prefix_inj (r₁ := []) (r₂ := []) (by simpa using h)).1
+
+/-- Unbounded counters in the Lean credential tape domain. -/
+def vcPrgContext204 (seed : Vec UInt8 32) (rep : Nat) (party : Fin 3) (word : Nat) :
+    List (List UInt8) :=
+  [seed.toList, leb128 rep, [UInt8.ofNat party.val], leb128 word]
+
+theorem vcPrgContext204_indices {seed : Vec UInt8 32} {party : Fin 3}
+    {rep rep' word word' : Nat}
+    (h : vcPrgContext204 seed rep party word = vcPrgContext204 seed rep' party word') :
+    rep = rep' ∧ word = word' := by
+  simp only [vcPrgContext204, List.cons.injEq] at h
+  exact ⟨contextIndex204_injective h.2.1, contextIndex204_injective h.2.2.2.1⟩
+
+def vcChallengeContext204 (digest : List UInt8) (rep : Nat) : List (List UInt8) :=
+  [digest, leb128 rep]
+
+theorem vcChallengeContext204_index {digest : List UInt8} {a b : Nat}
+    (h : vcChallengeContext204 digest a = vcChallengeContext204 digest b) : a = b := by
+  simp only [vcChallengeContext204, List.cons.injEq] at h
+  exact contextIndex204_injective h.2.1
+
 /-- Counter-mode Goldilocks PRG word stream under `"QSAG.VC.ZKBOO_R.V1"` (`blind_vc.rs:336-350`). -/
 def vcPrgStreamAt (repIdx : Nat) (partyIdx : Fin 3) (tapeSeed : Vec UInt8 32) (wordIdx : Nat) : Goldilocks :=
   let blk := cshake256FramedBytes vcZkBooPrgTag
-    [tapeSeed.toList, leb128 repIdx, [UInt8.ofNat partyIdx.val], leb128 wordIdx]
+    (vcPrgContext204 tapeSeed repIdx partyIdx wordIdx)
   Goldilocks.ofNat (decodeNatLeBytes (blk.take 8))
 
 private def sampleSboxCoins (st : Nat → Goldilocks) (pos : Nat) : SboxCoins × Nat :=
@@ -8633,7 +8677,7 @@ def deriveBlindVcTranscriptDigest (H : List UInt8 → List UInt8)
 
 def deriveBlindVcChallengeAt (H : List UInt8 → List UInt8)
     (trDigest : List UInt8) (repIdx : Nat) : Fin 3 :=
-  let sq := H (cshake256FramedPreimage vcFsSqueezeTag [trDigest, leb128 repIdx])
+  let sq := H (cshake256FramedPreimage vcFsSqueezeTag (vcChallengeContext204 trDigest repIdx))
   ⟨decodeNatLeBytes (sq.take 8) % 3, Nat.mod_lt _ (by decide)⟩
 
 /-- Check all boolean-gate output wire shares: each `(z_0, z_1, z_2)` sums to `0` and matches `(z_e, z_{e+1})`. -/
@@ -11418,25 +11462,11 @@ theorem verifyBlindVcPresentation_enforces_guards
     exact ⟨hG.1.1, hG.2, hBounds, hNodup⟩
 
 set_option exponentiation.threshold 1024 in
-/-- **Flagship §4 Theorem (`blind_vc_zkboo_selective_disclosure_sound_and_hiding`, fixing `C0-3` & `C1-2`)**:
-    Jointly certifies:
-    1. **Verifier-Internal `Nodup`, Arity & Repetition-Profile Enforcement (`C0-3`, `C1-2`)**:
-       `verifyBlindVcPresentation` internally enforces `pres.schemaId = expectedSchema.schemaId`,
-       `pres.openedReps.length = profile.repetitions`, `< expectedSchema.arity`, and `(disclosedAttrs.map Prod.fst).Nodup`;
-    2. **2-Phase Fiat-Shamir Completeness**:
-       `proveBlindVcPresentation` produces an accepting `profile.repetitions`-round presentation for every valid witness;
-    3. **Constructive Round-1 Commitment-Bound 3-Challenge Special Soundness (`C0-3`, `0 Classical.choice`)**:
-       3 accepting openings `(o0, o1, o2)` on the same Round-1 `(commits, finalOuts)` constructively yield either
-       an `H`-collision or a complete valid `(attrs, holderBlind, presBlind, leafCommit, boolSteps)` witness
-       (with ZERO external `Nodup` hypothesis!);
-    4. **Per-Repetition `2/3` Cheating Bound & Explicit ROM (`219`) vs QROM (`438`) Separation (`C1-2`)**:
-       any fixed faulty party `bad : Fin 3` survives at most `2` of `3` challenges; `.classical128` (`219` reps)
-       bounds classical ROM cheating by `≤ 2^{-128}` while satisfying `2^{-130} ≤ (2/3)^219` (`< 65`-bit QROM Grover security),
-       whereas `.quantum128` (`438` reps = `vcZkBooReps`) achieves `(2/3)^438 ≤ 2^{-256}` (`≥ 128`-bit QROM soundness);
-    5. **Full `OpenedBlindVcRep` Zero-Knowledge Simulation & 2-Witness Indistinguishability (`C0-3`)**:
-       `zkMultiRepViewEquiv` bijectively maps randomness between ANY two valid witnesses `wit₁, wit₂` so that
-       every full `OpenedBlindVcRep` (`viewE`, `viewE1`, `unopenedCommit`, `finalOuts`) matches both the
-       witness-free simulator `simulateOpenedBlindVcRep` AND `wit₂`'s opening identically! -/
+/-- Verifier checks, prover completeness, commitment-bound special soundness,
+repetition parameter arithmetic, and hybrid-1 fixed-challenge simulation.
+The hiding component uses independent hidden tapes and an independently masked
+unopened commitment. This theorem does not prove the real-to-hybrid PRG and
+commitment-hiding hops, or adaptive ROM/QROM security. -/
 theorem blind_vc_zkboo_selective_disclosure_sound_and_hiding
     {H : List UInt8 → List UInt8}
     (hHLen : ∀ m, (H m).length < 256 ^ 8)
@@ -11481,7 +11511,7 @@ theorem blind_vc_zkboo_selective_disclosure_sound_and_hiding
           evalVcMerklePathBool issuerEpoch 0 leafCommit boolSteps = accRoot ∧
           computeVcPoseidon2Commit schema attrs presBlind vcPresCommitTag = some presCommit ∧
           computeVcScopeTag schema.schemaId holderBlind verifierScopeLimbs = scopeTag) ∧
-    -- (4) Per-rep 2/3 survival + explicit Classical128 (219) vs Quantum128 (438) ROM/QROM bounds
+    -- (4) Fixed-challenge survival count and repetition parameter arithmetic
     ((∀ bad : Fin 3, ((List.finRange 3).filter (fun e => vcUnopenedParty3 e == bad)).length = 1 ∧
        ((List.finRange 3).filter (fun e => vcUnopenedParty3 e != bad)).length = 2) ∧
      ZkSoundnessProfile.classical128.repetitions = 219 ∧
@@ -11876,19 +11906,6 @@ def shake128Xof204 (count : Nat) (msg : List UInt8) : List UInt8 :=
 private def readBits204 (bs : List UInt8) (offset width : Nat) : Nat :=
   ((List.range width).map (fun j =>
     (((bs.getD ((offset + j) / 8) 0).toNat / 2 ^ ((offset + j) % 8)) % 2) * 2 ^ j)).sum
-
-private def natTreeList204 : {d : Nat} → NatTree d → List Nat
-  | 0, .leaf n => [n]
-  | _ + 1, .branch l r => natTreeList204 l ++ natTreeList204 r
-
-private def packSix204 : List Nat → List UInt8
-  | a :: b :: c :: d :: rest =>
-    UInt8.ofNat (a + 64 * b) :: UInt8.ofNat (b / 4 + 16 * c) ::
-      UInt8.ofNat (c / 16 + 4 * d) :: packSix204 rest
-  | _ => []
-
-def mldsa44ChallengeHash (mu : List UInt8) (w1 : Fin 4 → NatTree 8) : List UInt8 :=
-  shake256Xof 32 (mu ++ ((List.finRange 4).flatMap (fun i => packSix204 (natTreeList204 (w1 i)))))
 
 private def sampleBall204Aux (signs : Nat) (i : Nat) (cs : List Fq204) :
     List UInt8 → Option Poly256
@@ -13004,12 +13021,12 @@ theorem rssDurableSign204_inhabited :
   obtain ⟨hInpEp, hInpAtt, _⟩ := rssThresholdSignStep_ok_meta hOk
   have he0 : inpAcc.epoch = 0 := hInpEp.trans hEp
   have ha0 : inpAcc.attempt = 0 := hInpAtt.trans hAtt
-  refine ⟨chalHash, sampleInBall, ⟨st, ⟨⟨[], [], false⟩, []⟩⟩, inpAcc, ext6Zero,
-    rssHonestSacrifice204 chalHash sampleInBall st inpAcc (ext6EmbedFq Fq204.one) Fq204.one,
+  refine ⟨chalHash, sampleInBall, ⟨st, ⟨⟨[], [], false⟩, []⟩⟩, inpAcc, ext6EmbedFq Fq204.one,
+    rssHonestSacrifice204 chalHash sampleInBall st inpAcc (ext6EmbedFq (Fq204.ofNat 2)) Fq204.one,
     sig, ?_, hNz⟩
   have hValid := rssSacrificedProductsValid_complete chalHash sampleInBall st inpAcc
-    ext6Zero (ext6EmbedFq Fq204.one) Fq204.one hProd
-  have hEq := rssSacrificedSignStep_eq_of_valid chalHash sampleInBall st inpAcc ext6Zero _ hValid
+    (ext6EmbedFq Fq204.one) (ext6EmbedFq (Fq204.ofNat 2)) Fq204.one hProd
+  have hEq := rssSacrificedSignStep_eq_of_valid chalHash sampleInBall st inpAcc (ext6EmbedFq Fq204.one) _ hValid
     ((rssProductsValid_eq_true_iff chalHash sampleInBall st inpAcc).mpr hProd)
   have hRes : (rssDurableReserve204 0 .committed
       (⟨st, ⟨⟨[], [], false⟩, []⟩⟩ : RssDurableSigner204) inpAcc).1 = true := by
@@ -13793,9 +13810,6 @@ theorem tooth_toprf_unchecked_cross_message :
   exact gold_one_ne_zero204 (Option.some.inj h)
 
 
-/-- Generic context indices are injective even beyond the u64 range. -/
-theorem contextIndex204_injective {a b : Nat} (h : leb128 a = leb128 b) : a = b :=
-  (leb128_prefix_inj (r₁ := []) (r₂ := []) (by simpa using h)).1
 
 theorem tooth_contextIndex204_no_u64_wrap : leb128 0 ≠ leb128 (2 ^ 64) := by
   intro h
@@ -13871,6 +13885,592 @@ theorem mldsaVerifyBytes204_bounds (budget : Nat) (pk msg ctx sig : List UInt8)
           rw [hc] at h
           simp only [mldsaVerify, Bool.and_eq_true, decide_eq_true_eq] at h
           exact ⟨decoded, rfl, h.1.1, h.1.2⟩
+
+
+/-! ## Constructive transport certificates and production group scheduling -/
+
+structure ToprfCollisionWitness204 (H : List UInt8 → List UInt8) where
+  left : List UInt8
+  right : List UInt8
+  distinct : left ≠ right
+  sameDigest : H left = H right
+
+/-- The bad first vector is already present in the received message. No witness
+is chosen from a propositional existential. -/
+def toprfDecodeExtract204
+    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (i j : Fin 5) (honest : List Goldilocks)
+    (m0 m1 : Option (List Goldilocks)) (md : Option (List UInt8))
+    (cert : decodeGroupLarge H ctx layer i j m0 m1 md = some honest ∨
+      ∃ forged, m0 = some forged ∧ forged ≠ honest ∧
+        toprfGroupDigestPreimage ctx layer i j forged ≠
+          toprfGroupDigestPreimage ctx layer i j honest ∧
+        H (toprfGroupDigestPreimage ctx layer i j forged) =
+          H (toprfGroupDigestPreimage ctx layer i j honest)) :
+    PSum (decodeGroupLarge H ctx layer i j m0 m1 md = some honest)
+      (ToprfCollisionWitness204 H) :=
+  if h : decodeGroupLarge H ctx layer i j m0 m1 md = some honest then .inl h
+  else .inr {
+    left := toprfGroupDigestPreimage ctx layer i j (m0.getD [])
+    right := toprfGroupDigestPreimage ctx layer i j honest
+    distinct := by
+      rcases cert with ok | ⟨v, hv, _, hn, _⟩
+      · exact False.elim (h ok)
+      · simpa only [hv, Option.getD_some] using hn
+    sameDigest := by
+      rcases cert with ok | ⟨v, hv, _, _, he⟩
+      · exact False.elim (h ok)
+      · simpa only [hv, Option.getD_some] using he }
+
+/-- Sorted value senders after removing the rotating digest sender. -/
+def toprfGroupRoles204 (i j : Fin 5) : Fin 5 × Fin 5 × Fin 5 :=
+  let hs := toprfHolders i j
+  match (i.val + j.val) % 3 with
+  | 0 => (hs.getD 1 0, hs.getD 2 0, hs.getD 0 0)
+  | 1 => (hs.getD 0 0, hs.getD 2 0, hs.getD 1 0)
+  | _ => (hs.getD 0 0, hs.getD 1 0, hs.getD 2 0)
+
+theorem toprfGroupRoles204_distinct (i j : Fin 5) :
+    (toprfGroupRoles204 i j).1 ≠ (toprfGroupRoles204 i j).2.1 ∧
+    (toprfGroupRoles204 i j).1 ≠ (toprfGroupRoles204 i j).2.2 ∧
+    (toprfGroupRoles204 i j).2.1 ≠ (toprfGroupRoles204 i j).2.2 := by
+  revert i j
+  decide
+
+theorem toprfGroupRoles204_digest (i j : Fin 5) :
+    (toprfGroupRoles204 i j).2.2 =
+      (toprfHolders i j).getD ((i.val + j.val) % 3) 0 := by
+  revert i j
+  decide
+
+/-- Rust's four-gate threshold and rotating digest holder, for a vector of
+arbitrary length (not a single-term surrogate). -/
+def toprfGroupTransport204 (H : List UInt8 → List UInt8) (ctx : List UInt8)
+    (layer : UInt64) (i j bad : Fin 5) (honest : List Goldilocks)
+    (fault : Option (List Goldilocks)) (faultDigest : Option (List UInt8)) :
+    Option (List Goldilocks) :=
+  let roles := toprfGroupRoles204 i j
+  let message p := if p = bad then toprfBoundedVec204 fault else some honest
+  if honest.length ≤ 4 then
+    decodeGroupSmall (message roles.1) (message roles.2.1) (message roles.2.2)
+  else
+    decodeGroupLarge H ctx layer i j (message roles.1) (message roles.2.1)
+      (if roles.2.2 = bad then faultDigest
+       else some (toprfGroupDigest H ctx layer i j honest))
+
+def toprfGroupTransport204_extract (H : List UInt8 → List UInt8) (ctx : List UInt8)
+    (layer : UInt64) (i j bad : Fin 5) (honest : List Goldilocks)
+    (fault : Option (List Goldilocks)) (faultDigest : Option (List UInt8))
+    (hctx : ctx.length < 2 ^ 20) (hlen : honest.length < 2 ^ 20) :
+    PSum (toprfGroupTransport204 H ctx layer i j bad honest fault faultDigest = some honest)
+      (ToprfCollisionWitness204 H) := by
+  obtain ⟨h01, h02, h12⟩ := toprfGroupRoles204_distinct i j
+  let roles := toprfGroupRoles204 i j
+  let message (p : Fin 5) := if p = bad then toprfBoundedVec204 fault else some honest
+  have hm : ∀ p, p ≠ bad → message p = some honest :=
+    fun p hp => ite_false_of hp _ _
+  have hb : ∀ v, message roles.1 = some v → v.length < 2 ^ 20 := by
+    intro v hv
+    if h : roles.1 = bad then
+      have hv' : toprfBoundedVec204 fault = some v := by simpa [message, h] using hv
+      exact toprfBoundedVec204_bound hv'
+    else
+      rw [hm _ h] at hv
+      cases hv
+      exact hlen
+  unfold toprfGroupTransport204
+  split
+  · exact .inl ((toprf_2of5_corrects_one_malicious_server H ctx layer i j hctx bad).1
+      roles.1 roles.2.1 roles.2.2 honest _ _ _ h01 h02 h12
+      (hm _) (hm _) (hm _))
+  · exact toprfDecodeExtract204 H ctx layer i j honest _ _ _
+      ((toprf_2of5_corrects_one_malicious_server H ctx layer i j hctx bad).2.1
+        roles.1 roles.2.1 roles.2.2 honest _ _ _ h01 h02 h12 hlen hb
+        (hm _) (hm _) (fun hp => ite_false_of hp _ _))
+
+/-- The legacy single-term transport also has a data-valued extractor. -/
+def toprfDigestCross204_extract
+    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (hCtx : ctx.length < 2 ^ 20) (bad : Fin 5)
+    (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204)
+    (gate : List Nat) (i j : Fin 5) (term : Goldilocks) :
+    PSum (toprfDigestCross204 H ctx layer bad fault faultDigest gate i j term = some term)
+      (ToprfCollisionWitness204 H) := by
+  obtain ⟨h01, h02, h12⟩ := toprfThreeHoldersDistinct204 i j
+  let message (p : Fin 5) :=
+    if p = bad then toprfBoundedVec204 (fault gate i j term) else some [term]
+  have hm : ∀ p, p ≠ bad → message p = some [term] := fun p hp => ite_false_of hp _ _
+  have hb : ∀ v, message ((toprfHolders i j).getD 0 0) = some v → v.length < 2 ^ 20 := by
+    intro v hv
+    if h : (toprfHolders i j).getD 0 0 = bad then
+      have hv' : toprfBoundedVec204 (fault gate i j term) = some v := by
+        change (if (toprfHolders i j).getD 0 0 = bad then _ else _) = _ at hv
+        rw [ite_true_of h] at hv
+        exact hv
+      exact toprfBoundedVec204_bound hv'
+    else
+      rw [hm _ h] at hv
+      cases hv
+      exact (by decide : (1 : Nat) < 2 ^ 20)
+  have cert := (toprf_2of5_corrects_one_malicious_server H ctx layer i j hCtx bad).2.1
+    ((toprfHolders i j).getD 0 0) ((toprfHolders i j).getD 1 0) ((toprfHolders i j).getD 2 0)
+    [term] _ _
+    (if (toprfHolders i j).getD 2 0 = bad then faultDigest gate i j term
+      else some (toprfGroupDigest H ctx layer i j [term]))
+    h01 h02 h12 (by decide : (1 : Nat) < 2 ^ 20) hb (hm _) (hm _) (fun hp => ite_false_of hp _ _)
+  match toprfDecodeExtract204 H ctx layer i j [term] _ _ _ cert with
+  | .inl h => exact .inl (by unfold toprfDigestCross204; rw [h])
+  | .inr c => exact .inr c
+
+/-- Sequence finitely many proof-producing checks; failure contains actual data. -/
+def finiteChecks204 {E : Type} : {n : Nat} → {P : Fin n → Prop} →
+    (∀ i, PSum (P i) E) → PSum (∀ i, P i) E
+  | 0, _, _ => .inl (fun i => Fin.elim0 i)
+  | n + 1, P, check =>
+    match check 0 with
+    | .inr e => .inr e
+    | .inl h0 =>
+      match finiteChecks204 (P := fun i : Fin n => P i.succ) (fun i => check i.succ) with
+      | .inr e => .inr e
+      | .inl hs => .inl (fun i => Fin.cases h0 hs i)
+
+
+/-- Lift the data-valued cross-term certificate through every consumed term. -/
+def toprfMulExtract204 {E : Type} (cross : ToprfCross204)
+    (check : ∀ gate i j term, PSum (cross gate i j term = some term) E)
+    (gate : List Nat) (x y : ToprfWire) (mask : Fin 5 → Fin 5 → Goldilocks) :
+    PSum (toprfActiveMul204 cross gate x y mask = toprfMulWire x y mask) E := by
+  match finiteChecks204 (fun c => check gate c c (Goldilocks.mul (x c) (y c))) with
+  | .inr e => exact .inr e
+  | .inl hd =>
+    let incoming (c i : Fin 5) :
+        PSum (i ≠ c → cross gate i c
+          (Goldilocks.sub (Goldilocks.mul (x i) (y c)) (mask i c)) =
+            some (Goldilocks.sub (Goldilocks.mul (x i) (y c)) (mask i c))) E :=
+      if h : i = c then .inl (fun hn => False.elim (hn h))
+      else match check gate i c (Goldilocks.sub (Goldilocks.mul (x i) (y c)) (mask i c)) with
+        | .inr e => .inr e
+        | .inl he => .inl (fun _ => he)
+    match finiteChecks204 (fun c => finiteChecks204 (incoming c)) with
+    | .inr e => exact .inr e
+    | .inl hi =>
+      exact .inl (by
+        funext c
+        have hm : (fin5Others c).map (fun i =>
+            (cross gate i c (Goldilocks.sub (Goldilocks.mul (x i) (y c)) (mask i c))).getD
+              Goldilocks.zero) =
+            (fin5Others c).map (fun i => Goldilocks.sub (Goldilocks.mul (x i) (y c)) (mask i c)) := by
+          apply List.map_congr_left
+          intro i hmem
+          have hn : i ≠ c := of_decide_eq_true (List.mem_filter.mp hmem).2
+          rw [hi c i hn]
+          rfl
+        simp only [toprfActiveMul204, toprfMulWire, hd, hm, Option.getD_some])
+
+def toprfSboxExtract204 {E : Type} (cross : ToprfCross204)
+    (check : ∀ gate i j term, PSum (cross gate i j term = some term) E)
+    (gate : List Nat) (w : ToprfWire) (m1 m2 m3 m4 : Fin 5 → Fin 5 → Goldilocks) :
+    PSum (toprfActiveSbox204 cross gate w m1 m2 m3 m4 = toprfSboxWire w m1 m2 m3 m4) E := by
+  let x2 := toprfMulWire w w m1
+  let x3 := toprfMulWire x2 w m2
+  let x4 := toprfMulWire x2 x2 m3
+  match toprfMulExtract204 cross check (gate ++ [0]) w w m1 with
+  | .inr e => exact .inr e
+  | .inl h1 =>
+    match toprfMulExtract204 cross check (gate ++ [1]) x2 w m2 with
+    | .inr e => exact .inr e
+    | .inl h2 =>
+      match toprfMulExtract204 cross check (gate ++ [2]) x2 x2 m3 with
+      | .inr e => exact .inr e
+      | .inl h3 =>
+        match toprfMulExtract204 cross check (gate ++ [3]) x3 x4 m4 with
+        | .inr e => exact .inr e
+        | .inl h4 =>
+          exact .inl (by dsimp only [toprfActiveSbox204, toprfSboxWire]; rw [h1, h2, h3, h4])
+
+def toprfCoord204 (i : Fin 12) (s : Poseidon2State12) : Goldilocks :=
+  match i.val with
+  | 0 => s.b0.x0 | 1 => s.b0.x1 | 2 => s.b0.x2 | 3 => s.b0.x3
+  | 4 => s.b1.x0 | 5 => s.b1.x1 | 6 => s.b1.x2 | 7 => s.b1.x3
+  | 8 => s.b2.x0 | 9 => s.b2.x1 | 10 => s.b2.x2 | _ => s.b2.x3
+
+def toprfExtExtract204 {E : Type} (cross : ToprfCross204)
+    (check : ∀ gate i j term, PSum (cross gate i j term = some term) E)
+    (gate : List Nat) (m : Fin 12 → SboxMask4) (rc : Poseidon2State12) (st : ToprfState12) :
+    PSum (toprfActiveExtRound204 cross gate m rc st = toprfExtRound m rc st) E := by
+  match finiteChecks204 (fun i : Fin 12 => toprfSboxExtract204 cross check
+    (gate ++ [i.val]) (fun c => toprfCoord204 i (toprfAddPublicState12 rc st c))
+    (m i).m1 (m i).m2 (m i).m3 (m i).m4) with
+  | .inr e => exact .inr e
+  | .inl h =>
+    exact .inl (by
+      have h0 := h ⟨0, by decide⟩
+      simp only [toprfCoord204] at h0
+      have h1 := h ⟨1, by decide⟩
+      simp only [toprfCoord204] at h1
+      have h2 := h ⟨2, by decide⟩
+      simp only [toprfCoord204] at h2
+      have h3 := h ⟨3, by decide⟩
+      simp only [toprfCoord204] at h3
+      have h4 := h ⟨4, by decide⟩
+      simp only [toprfCoord204] at h4
+      have h5 := h ⟨5, by decide⟩
+      simp only [toprfCoord204] at h5
+      have h6 := h ⟨6, by decide⟩
+      simp only [toprfCoord204] at h6
+      have h7 := h ⟨7, by decide⟩
+      simp only [toprfCoord204] at h7
+      have h8 := h ⟨8, by decide⟩
+      simp only [toprfCoord204] at h8
+      have h9 := h ⟨9, by decide⟩
+      simp only [toprfCoord204] at h9
+      have h10 := h ⟨10, by decide⟩
+      simp only [toprfCoord204] at h10
+      have h11 := h ⟨11, by decide⟩
+      simp only [toprfCoord204] at h11
+      dsimp only [toprfActiveExtRound204, toprfExtRound]
+      rw [h0, h1, h2, h3, h4, h5, h6, h7, h8, h9, h10, h11])
+
+def toprfIntExtract204 {E : Type} (cross : ToprfCross204)
+    (check : ∀ gate i j term, PSum (cross gate i j term = some term) E)
+    (gate : List Nat) (m : SboxMask4) (rc : Goldilocks) (st : ToprfState12) :
+    PSum (toprfActiveIntRound204 cross gate m rc st = toprfIntRound m rc st) E := by
+  match toprfSboxExtract204 cross check (gate ++ [0])
+    (fun c => if c = 0 then Goldilocks.add (st 0).b0.x0 rc else (st c).b0.x0)
+    m.m1 m.m2 m.m3 m.m4 with
+  | .inr e => exact .inr e
+  | .inl h => exact .inl (by dsimp only [toprfActiveIntRound204, toprfIntRound]; rw [h])
+
+def toprfRoundsExtract204 {E A : Type}
+    (actual ideal : Nat → A → ToprfState12 → ToprfState12)
+    (check : ∀ r a st, PSum (actual r a st = ideal r a st) E) :
+    ∀ (r : Nat) (rounds : List A) (st : ToprfState12),
+      PSum (runToprfRoundsIdx actual r rounds st = runToprfRoundsIdx ideal r rounds st) E
+  | _, [], _ => .inl rfl
+  | r, a :: rest, st =>
+    match check r a st with
+    | .inr e => .inr e
+    | .inl h =>
+      match toprfRoundsExtract204 actual ideal check (r + 1) rest (ideal r a st) with
+      | .inr e => .inr e
+      | .inl hs => .inl (by simp only [runToprfRoundsIdx, h, hs])
+
+/-- All 30 Poseidon rounds, with no global collision-freeness premise. -/
+def toprfPermExtract204 {E : Type} (cross : ToprfCross204)
+    (check : ∀ gate i j term, PSum (cross gate i j term = some term) E)
+    (masks : ToprfPerm12Masks) (init : ToprfState12) :
+    PSum (toprfActivePerm204 cross masks init = toprfEvalPerm12 masks init) E := by
+  let s0 : ToprfState12 := fun c => applyME (init c)
+  let s1 := runToprfRoundsIdx (fun r rc s => toprfExtRound (masks.initExt r) rc s)
+    0 poseidon2InitialExtConsts s0
+  let s2 := runToprfRoundsIdx (fun r rc s => toprfIntRound (masks.internal r) rc s)
+    0 poseidon2InternalConsts s1
+  match toprfRoundsExtract204 _ _
+    (fun r rc st => toprfExtExtract204 cross check [0, r] (masks.initExt r) rc st)
+    0 poseidon2InitialExtConsts s0 with
+  | .inr e => exact .inr e
+  | .inl h1 =>
+    match toprfRoundsExtract204 _ _
+      (fun r rc st => toprfIntExtract204 cross check [1, r] (masks.internal r) rc st)
+      0 poseidon2InternalConsts s1 with
+    | .inr e => exact .inr e
+    | .inl h2 =>
+      match toprfRoundsExtract204 _ _
+        (fun r rc st => toprfExtExtract204 cross check [2, r] (masks.termExt r) rc st)
+        0 poseidon2TerminalExtConsts s2 with
+      | .inr e => exact .inr e
+      | .inl h3 => exact .inl (by dsimp only [toprfActivePerm204, toprfEvalPerm12]; rw [h1, h2, h3])
+
+def toprfDigestClient204_extract
+    (H : List UInt8 → List UInt8) (ctx : List UInt8) (layer : UInt64)
+    (hctx : ctx.length < 2 ^ 20) (bad : Fin 5)
+    (fault : ToprfVecFault204) (faultDigest : ToprfDigestFault204)
+    (masks : ToprfPerm12Masks) (keys inputs : Fin 5 → Lane4)
+    (forgedFinal : Option (Fin 5 → Lane4)) :
+    PSum (toprfActiveClient204 bad (toprfDigestCross204 H ctx layer bad fault faultDigest)
+        masks keys inputs forgedFinal =
+      some (toprfPlaintext (sumLane4Shares5 keys) (sumLane4Shares5 inputs)))
+      (ToprfCollisionWitness204 H) := by
+  match toprfPermExtract204 _ (toprfDigestCross204_extract H ctx layer hctx bad fault faultDigest)
+    masks (toprfInitPrfState keys inputs) with
+  | .inr collision => exact .inr collision
+  | .inl h =>
+    exact .inl (by
+      unfold toprfActiveClient204
+      rw [h]
+      exact (toprf_2of5_corrects_one_malicious_server id [] 0 0 1 (by decide) bad).2.2
+        masks keys inputs _ (fun p hp => ite_false_of hp _ _))
+
+
+/-! ## Authenticated replicated shares and a masked rejection observation
+
+This local view model includes both held components and their MAC shares.
+It describes a uniform sharing experiment; seed expansion and a distributed
+implementation refinement remain separate obligations.
+-/
+
+structure RssAuthShare204 where
+  value : Fq204
+  mac : Fq204
+  deriving DecidableEq
+
+abbrev RssAuthCoins204 := RssAuthShare204 × RssAuthShare204
+
+def rssNextParty204 (p : Fin 3) : Fin 3 := ⟨(p.val + 1) % 3, Nat.mod_lt _ (by decide)⟩
+def rssLastParty204 (p : Fin 3) : Fin 3 := ⟨(p.val + 2) % 3, Nat.mod_lt _ (by decide)⟩
+
+private theorem rssPartyIndices204 (p : Fin 3) :
+    rssNextParty204 p ≠ p ∧ rssLastParty204 p ≠ p ∧ rssLastParty204 p ≠ rssNextParty204 p := by
+  revert p
+  decide
+
+/-- Party `p` holds the two components other than `p`. Both the value and MAC
+sum are completed at the missing component. -/
+def rssAuthSharing204 (p : Fin 3) (key secret : Fq204) (r : RssAuthCoins204) :
+    Fin 3 → RssAuthShare204 := fun i =>
+  if i = p then
+    ⟨Fq204.sub (Fq204.sub secret r.1.value) r.2.value,
+     Fq204.sub (Fq204.sub (Fq204.mul key secret) r.1.mac) r.2.mac⟩
+  else if i = rssNextParty204 p then r.1 else r.2
+
+def rssAuthPartyView204 (p : Fin 3) (shares : Fin 3 → RssAuthShare204) : RssAuthCoins204 :=
+  (shares (rssNextParty204 p), shares (rssLastParty204 p))
+
+theorem rssAuthPartyView204_simulated (p : Fin 3) (key secret : Fq204) (r : RssAuthCoins204) :
+    rssAuthPartyView204 p (rssAuthSharing204 p key secret r) = r := by
+  obtain ⟨h1, h2, h3⟩ := rssPartyIndices204 p
+  simp only [rssAuthPartyView204, rssAuthSharing204, ite_false_of h1, ite_false_of h2,
+    ite_false_of h3, ite_true]
+
+private theorem fq_sub_sub_add_add204 (s a b : Fq204) :
+    Fq204.add (Fq204.add (Fq204.sub (Fq204.sub s a) b) a) b = s := by
+  rw [← Fq204.ofInt_nat s, ← Fq204.ofInt_nat a, ← Fq204.ofInt_nat b]
+  simp only [Fq204.ofInt_sub, Fq204.ofInt_add]
+  congr 1
+  omega
+
+/-- Reconstruction of both channels establishes the global MAC invariant. -/
+theorem rssAuthSharing204_reconstruct (p : Fin 3) (key secret : Fq204) (r : RssAuthCoins204) :
+    let sh := rssAuthSharing204 p key secret r
+    Fq204.add (Fq204.add (sh p).value (sh (rssNextParty204 p)).value)
+      (sh (rssLastParty204 p)).value = secret ∧
+    Fq204.add (Fq204.add (sh p).mac (sh (rssNextParty204 p)).mac)
+      (sh (rssLastParty204 p)).mac = Fq204.mul key secret := by
+  obtain ⟨h1, h2, h3⟩ := rssPartyIndices204 p
+  simp only [rssAuthSharing204, ite_false_of h1, ite_false_of h2, ite_false_of h3,
+    ite_true, fq_sub_sub_add_add204, and_self]
+
+/-- The observation before unmasking the rejection bit. Revealing the bit
+itself is deliberately not claimed private. -/
+def rssMaskedRejectView204 (p : Fin 3) (key secret : Fq204) (reject : Bool)
+    (coins : RssAuthCoins204 × Bool) : RssAuthCoins204 × Bool :=
+  (rssAuthPartyView204 p (rssAuthSharing204 p key secret coins.1), reject.xor coins.2)
+
+def rssRejectCoinBijection204 (a b : Bool) :
+    SimpleEquiv (RssAuthCoins204 × Bool) (RssAuthCoins204 × Bool) where
+  toFun c := (c.1, b.xor (a.xor c.2))
+  invFun c := (c.1, a.xor (b.xor c.2))
+  left_inv c := by rcases c with ⟨r, m⟩; cases a <;> cases b <;> cases m <;> rfl
+  right_inv c := by rcases c with ⟨r, m⟩; cases a <;> cases b <;> cases m <;> rfl
+
+/-- One coin bijection preserves the joint per-party share/MAC view and the
+masked rejection bit, even when rejection depends arbitrarily on the secret. -/
+theorem rssMaskedRejectView204_private (p : Fin 3) (key s t : Fq204)
+    (reject : Fq204 → Bool) (c : RssAuthCoins204 × Bool) :
+    rssMaskedRejectView204 p key s (reject s) c =
+      rssMaskedRejectView204 p key t (reject t)
+        ((rssRejectCoinBijection204 (reject s) (reject t)).toFun c) := by
+  simp only [rssMaskedRejectView204, rssAuthPartyView204_simulated, rssRejectCoinBijection204]
+  rcases c with ⟨r, m⟩
+  cases reject s <;> cases reject t <;> cases m <;> rfl
+
+
+/-! ## Binary modular powers and Rabin unit certificates for the extension
+
+The normal form of `X^n` modulo `X^6 - 7` is `7^(n/6) X^(n%6)`.
+The certificates below provide quotient-ring inverses of `X^(q^2)-X` and
+`X^(q^3)-X`, and the sixth Frobenius identity. Turning these into a general
+no-zero-divisors instance still requires the polynomial factor criterion.
+-/
+
+def ext6Monomial204 (degree : Nat) (coefficient : Fq204) : Ext6Fq204 :=
+  match degree with
+  | 0 => ⟨coefficient, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero⟩
+  | 1 => ⟨Fq204.zero, coefficient, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero⟩
+  | 2 => ⟨Fq204.zero, Fq204.zero, coefficient, Fq204.zero, Fq204.zero, Fq204.zero⟩
+  | 3 => ⟨Fq204.zero, Fq204.zero, Fq204.zero, coefficient, Fq204.zero, Fq204.zero⟩
+  | 4 => ⟨Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, coefficient, Fq204.zero⟩
+  | _ => ⟨Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, Fq204.zero, coefficient⟩
+
+def ext6XPower204 (n : Nat) : Ext6Fq204 :=
+  ext6Monomial204 (n % 6) (Fq204.pow (Fq204.ofNat 7) (n / 6))
+
+/-- Logarithmic coefficient exponentiation for the binomial normal form. -/
+def ext6XPowerFast204 (fuel n : Nat) : Ext6Fq204 :=
+  ext6Monomial204 (n % 6) (Fq204.ofNat (modPowFuel fuel 7 (n / 6) mldsaQ))
+
+theorem ext6XPowerFast204_correct (fuel n : Nat) (h : n / 6 < 2 ^ fuel) :
+    ext6XPowerFast204 fuel n = ext6XPower204 n := by
+  unfold ext6XPowerFast204 ext6XPower204
+  congr 1
+  apply Fq204.ext
+  rw [Fq204.ofNat_val, modPowFuel_eq_pow_mod fuel 7 (n / 6) mldsaQ h,
+    Nat.mod_mod, Fq204.pow_val]
+  rfl
+
+theorem ext6XPower204_succ (n : Nat) :
+    ext6Mul (ext6XPower204 n) (ext6Monomial204 1 Fq204.one) = ext6XPower204 (n + 1) := by
+  have hr : n % 6 = 0 ∨ n % 6 = 1 ∨ n % 6 = 2 ∨ n % 6 = 3 ∨ n % 6 = 4 ∨ n % 6 = 5 := by omega
+  rcases hr with h | h | h | h | h | h
+  · have hd : (n + 1) / 6 = n / 6 := by omega
+    have hm : (n + 1) % 6 = 1 := by omega
+    simp only [ext6XPower204, h, hd, hm, ext6Monomial204, ext6Mul,
+      Fq204.mul_zero, Fq204.mul_one, Fq204.add_zero]
+  · have hd : (n + 1) / 6 = n / 6 := by omega
+    have hm : (n + 1) % 6 = 2 := by omega
+    simp only [ext6XPower204, h, hd, hm, ext6Monomial204, ext6Mul,
+      Fq204.mul_zero, Fq204.mul_one, Fq204.add_zero, Fq204.zero_add]
+  · have hd : (n + 1) / 6 = n / 6 := by omega
+    have hm : (n + 1) % 6 = 3 := by omega
+    simp only [ext6XPower204, h, hd, hm, ext6Monomial204, ext6Mul,
+      Fq204.mul_zero, Fq204.mul_one, Fq204.add_zero, Fq204.zero_add]
+  · have hd : (n + 1) / 6 = n / 6 := by omega
+    have hm : (n + 1) % 6 = 4 := by omega
+    simp only [ext6XPower204, h, hd, hm, ext6Monomial204, ext6Mul,
+      Fq204.mul_zero, Fq204.mul_one, Fq204.add_zero, Fq204.zero_add]
+  · have hd : (n + 1) / 6 = n / 6 := by omega
+    have hm : (n + 1) % 6 = 5 := by omega
+    simp only [ext6XPower204, h, hd, hm, ext6Monomial204, ext6Mul,
+      Fq204.mul_zero, Fq204.mul_one, Fq204.add_zero, Fq204.zero_add]
+  · have hd : (n + 1) / 6 = n / 6 + 1 := by omega
+    have hm : (n + 1) % 6 = 0 := by omega
+    simp only [ext6XPower204, h, hd, hm, ext6Monomial204, ext6Mul,
+      Fq204.mul_zero, Fq204.mul_one, Fq204.add_zero, Fq204.zero_add]
+    rw [Fq204.pow, Fq204.mul_comm]
+    rfl
+
+set_option maxRecDepth 8192 in
+set_option maxHeartbeats 2000000 in
+/-- Explicit units modulo the actual multiplication law; these are the two
+coprimality certificates required for degree six. -/
+theorem ext6RabinUnits204 :
+    ext6Mul (ext6Sub (ext6XPowerFast204 160 (mldsaQ ^ 2)) (ext6Monomial204 1 Fq204.one))
+      (ext6Monomial204 5 (Fq204.ofNat 2748270)) = ext6EmbedFq Fq204.one ∧
+    ext6Mul (ext6Sub (ext6XPowerFast204 160 (mldsaQ ^ 3)) (ext6Monomial204 1 Fq204.one))
+      (ext6Monomial204 5 (Fq204.ofNat 2993006)) = ext6EmbedFq Fq204.one ∧
+    ext6XPowerFast204 160 (mldsaQ ^ 6) = ext6Monomial204 1 Fq204.one := by
+  have h2 : ext6XPowerFast204 160 (mldsaQ ^ 2) = ext6Monomial204 1 (Fq204.ofNat 949247) := by decide
+  have h3 : ext6XPowerFast204 160 (mldsaQ ^ 3) = ext6Monomial204 1 (Fq204.ofNat 8380416) := by decide
+  have h6 : ext6XPowerFast204 160 (mldsaQ ^ 6) = ext6Monomial204 1 Fq204.one := by decide
+  rw [h2, h3, h6]
+  decide
+
+
+/-- The same certificates for powers characterized by the multiplication
+recurrence, rather than just for the fast evaluator. -/
+theorem ext6RabinCertificate204 :
+    ext6Mul (ext6Sub (ext6XPower204 (mldsaQ ^ 2)) (ext6Monomial204 1 Fq204.one))
+      (ext6Monomial204 5 (Fq204.ofNat 2748270)) = ext6EmbedFq Fq204.one ∧
+    ext6Mul (ext6Sub (ext6XPower204 (mldsaQ ^ 3)) (ext6Monomial204 1 Fq204.one))
+      (ext6Monomial204 5 (Fq204.ofNat 2993006)) = ext6EmbedFq Fq204.one ∧
+    ext6XPower204 (mldsaQ ^ 6) = ext6Monomial204 1 Fq204.one := by
+  rw [← ext6XPowerFast204_correct 160 (mldsaQ ^ 2) (by decide),
+    ← ext6XPowerFast204_correct 160 (mldsaQ ^ 3) (by decide),
+    ← ext6XPowerFast204_correct 160 (mldsaQ ^ 6) (by decide)]
+  exact ext6RabinUnits204
+
+
+/-- Actual permutation inputs on the three-chunk, zero-capacity sponge path. -/
+def spongeTrace204 (chunks : Lane6 × Lane6 × Lane6) (r : Fin 3) : Poseidon2State12 :=
+  let s1 := mkState12Of6 chunks.1 lane6Zero
+  let p1 := poseidon2Perm12 s1
+  let s2 := mkState12Of6 (lane6Add (state12Rate6 p1) chunks.2.1) (state12Cap6 p1)
+  let p2 := poseidon2Perm12 s2
+  let s3 := mkState12Of6 (lane6Add (state12Rate6 p2) chunks.2.2) (state12Cap6 p2)
+  match r.val with | 0 => s1 | 1 => s2 | _ => s3
+
+/-- Collision extraction retaining reachability from the supplied sponge
+messages. Unrestricted rate/capacity collisions are not assumed hard. -/
+def absorbRate6Sponge3_reachable_collision204
+    {c0₁ c1₁ c2₁ c0₂ c1₂ c2₂ : Lane6}
+    (hNe : (c0₁, c1₁, c2₁) ≠ (c0₂, c1₂, c2₂))
+    (hDig : state12Rate6 (absorbRate6Sponge3 c0₁ c1₁ c2₁) =
+            state12Rate6 (absorbRate6Sponge3 c0₂ c1₂ c2₂)) :
+    { r : Fin 3 // Poseidon2Perm12Sponge6Collision
+      (spongeTrace204 (c0₁, c1₁, c2₁) r) (spongeTrace204 (c0₂, c1₂, c2₂) r) } := by
+  let s1₁ := mkState12Of6 c0₁ lane6Zero
+  let s1₂ := mkState12Of6 c0₂ lane6Zero
+  let p1₁ := poseidon2Perm12 s1₁
+  let p1₂ := poseidon2Perm12 s1₂
+  let s2₁ := mkState12Of6 (lane6Add (state12Rate6 p1₁) c1₁) (state12Cap6 p1₁)
+  let s2₂ := mkState12Of6 (lane6Add (state12Rate6 p1₂) c1₂) (state12Cap6 p1₂)
+  let p2₁ := poseidon2Perm12 s2₁
+  let p2₂ := poseidon2Perm12 s2₂
+  let s3₁ := mkState12Of6 (lane6Add (state12Rate6 p2₁) c2₁) (state12Cap6 p2₁)
+  let s3₂ := mkState12Of6 (lane6Add (state12Rate6 p2₂) c2₂) (state12Cap6 p2₂)
+  if h3 : s3₁ = s3₂ then
+    if h2 : s2₁ = s2₂ then
+      have hp2 : p2₁ = p2₂ := congrArg poseidon2Perm12 h2
+      have hRate3 : lane6Add (state12Rate6 p2₁) c2₁ = lane6Add (state12Rate6 p2₂) c2₂ := by
+        have hr := congrArg state12Rate6 h3
+        rwa [state12Rate6_mk, state12Rate6_mk] at hr
+      rw [hp2] at hRate3
+      have hc2 : c2₁ = c2₂ := lane6Add_left_cancel hRate3
+      if h1 : s1₁ = s1₂ then
+        have hp1 : p1₁ = p1₂ := congrArg poseidon2Perm12 h1
+        have hRate2 : lane6Add (state12Rate6 p1₁) c1₁ = lane6Add (state12Rate6 p1₂) c1₂ := by
+          have hr := congrArg state12Rate6 h2
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        rw [hp1] at hRate2
+        have hc1 : c1₁ = c1₂ := lane6Add_left_cancel hRate2
+        have hc0 : c0₁ = c0₂ := by
+          have hr := congrArg state12Rate6 h1
+          rwa [state12Rate6_mk, state12Rate6_mk] at hr
+        exact False.elim (hNe (by rw [hc0, hc1, hc2]))
+      else
+        have hCap1 : state12Cap6 p1₁ = state12Cap6 p1₂ := by
+          have hc := congrArg state12Cap6 h2
+          rwa [state12Cap6_mk, state12Cap6_mk] at hc
+        refine ⟨⟨0, by decide⟩, ?_⟩
+        simpa only [spongeTrace204] using
+          (show Poseidon2Perm12Sponge6Collision s1₁ s1₂ from ⟨h1, Or.inr hCap1⟩)
+    else
+      have hCap2 : state12Cap6 p2₁ = state12Cap6 p2₂ := by
+        have hc := congrArg state12Cap6 h3
+        rwa [state12Cap6_mk, state12Cap6_mk] at hc
+      refine ⟨⟨1, by decide⟩, ?_⟩
+      simpa only [spongeTrace204] using
+        (show Poseidon2Perm12Sponge6Collision s2₁ s2₂ from ⟨h2, Or.inr hCap2⟩)
+  else
+    refine ⟨⟨2, by decide⟩, ?_⟩
+    simpa only [spongeTrace204] using
+      (show Poseidon2Perm12Sponge6Collision s3₁ s3₂ from ⟨h3, Or.inl hDig⟩)
+
+
+/-- Binding failure reduces to two reachable states on the paths of the actual
+well-formed credential openings. This is a reduction, not an assertion of
+collision resistance for arbitrary halves of a public permutation. -/
+def blindVcReachableBinding204
+    (schema₁ schema₂ : VcSchema) (attrs₁ attrs₂ : List Goldilocks)
+    (blind₁ blind₂ : Lane4) (tag : UInt64) (c : Lane6)
+    (h1 : computeVcPoseidon2Commit schema₁ attrs₁ blind₁ tag = some c)
+    (h2 : computeVcPoseidon2Commit schema₂ attrs₂ blind₂ tag = some c)
+    (hne : (schema₁, attrs₁, blind₁) ≠ (schema₂, attrs₂, blind₂)) :
+    { r : Fin 3 // Poseidon2Perm12Sponge6Collision
+      (spongeTrace204 (vcCommitChunks schema₁ attrs₁ blind₁ tag) r)
+      (spongeTrace204 (vcCommitChunks schema₂ attrs₂ blind₂ tag) r) } := by
+  have hl1 := (blind_vc_commit_binding_reduces_to_sponge12_collision.1
+    schema₁ attrs₁ blind₁ tag c h1).2.1
+  have hl2 := (blind_vc_commit_binding_reduces_to_sponge12_collision.1
+    schema₂ attrs₂ blind₂ tag c h2).2.1
+  apply absorbRate6Sponge3_reachable_collision204
+  · intro he
+    obtain ⟨hs, ha, hb⟩ := vcCommitChunks_injective hl1 hl2 he
+    exact hne (by rw [hs, ha, hb])
+  · unfold computeVcPoseidon2Commit at h1 h2
+    rw [ite_true_of hl1] at h1
+    rw [ite_true_of hl2] at h2
+    exact (Option.some.inj h1).trans (Option.some.inj h2).symm
 
 -- Structural registrations. These are not claims that source mutants have been executed.
 #tooth_pair mldsaVerifyBytes204_bounds vs tooth_mldsaVerifyBytes204_bad_key_length

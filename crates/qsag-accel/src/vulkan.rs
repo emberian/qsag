@@ -12,12 +12,9 @@
 //!
 //! # Secret inputs
 //!
-//! * `bdoz_gf2_128_batch_dot` carries MAC shares. A backend whose driver did not report the
-//!   evidence in [`VulkanDeviceInfo::secret_slot_audit`] refuses it with
-//!   [`AccelError::SecretSlotUnaudited`] before anything reaches the device, whichever
-//!   constructor built it. The other five slots accept whatever the caller passes; a caller
-//!   with secret Keccak, Poseidon2, NTT, LDE or Merkle inputs must construct with
-//!   [`VulkanSpirvBackend::try_new_audited`].
+//! * Every kernel requires the evidence in [`VulkanDeviceInfo::secret_slot_audit`].
+//!   Both constructors reject missing Wave32, scratch, or spill telemetry; dispatch gates
+//!   reject an unaudited slot before any input reaches the device.
 //! * The infallible `batch_keccak_f1600` / `batch_poseidon2_perm12` answer from the CPU
 //!   reference when the device fails. Each such call increments
 //!   [`VulkanSpirvBackend::cpu_fallback_count`].
@@ -205,9 +202,7 @@ impl VulkanDeviceInfo {
                     "a pipeline did not report zero scratch bytes",
                 ));
             }
-            if stats.spilled_vgprs.is_some_and(|n| n != 0)
-                || stats.spilled_sgprs.is_some_and(|n| n != 0)
-            {
+            if stats.spilled_vgprs != Some(0) || stats.spilled_sgprs != Some(0) {
                 return Err(VulkanError::PipelineAuditFailed(
                     "a pipeline reported spilled registers",
                 ));
@@ -385,13 +380,12 @@ impl VulkanSpirvBackend {
     /// Discover a discrete Vulkan GPU with `shaderInt64`, compile all 6 embedded SPIR-V compute
     /// pipelines, and allocate persistent host-cached staging + `DEVICE_LOCAL` VRAM buffers.
     ///
-    /// This constructor accepts a driver that reports no executable telemetry or does not
-    /// honour a required subgroup size. Such a backend is for public inputs: it refuses
-    /// `bdoz_gf2_128_batch_dot` (see [`Self::secret_slots_audited`]).
+    /// Requires audited Wave32 and explicit zero scratch and spill statistics for all slots.
     pub fn try_new() -> Result<Self, VulkanError> {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
             let (engine, info) = RawVulkanEngine::try_new()?;
+            info.secret_slot_audit()?;
             let pins = canonical_spirv_pins();
             Ok(Self {
                 info,
@@ -409,7 +403,7 @@ impl VulkanSpirvBackend {
     }
 
     /// Require driver-confirmed Wave32 and zero scratch for every executable
-    /// ([`VulkanDeviceInfo::secret_slot_audit`]). Unlike `try_new`, unavailable telemetry is an
+    /// ([`VulkanDeviceInfo::secret_slot_audit`]). As with `try_new`, unavailable telemetry is an
     /// error. This checks compiler reports, not a formal constant-time or physical
     /// side-channel proof.
     pub fn try_new_audited() -> Result<Self, VulkanError> {
@@ -419,7 +413,7 @@ impl VulkanSpirvBackend {
     }
 
     /// Whether this backend holds the evidence of [`VulkanDeviceInfo::secret_slot_audit`].
-    /// Always true for [`Self::try_new_audited`]. When false, `bdoz_gf2_128_batch_dot` returns
+    /// Always true for either successful constructor. Unaudited dispatch returns
     /// [`AccelError::SecretSlotUnaudited`].
     pub fn secret_slots_audited(&self) -> bool {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
@@ -509,6 +503,8 @@ impl VulkanSpirvBackend {
     pub fn try_batch_keccak_f1600(&self, states: &mut [[u64; 25]]) -> Result<(), VulkanError> {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
+            secret_slot_gate(self.secret_slots_audited, KernelSlot::BatchKeccakF1600)
+                .map_err(VulkanError::from)?;
             if states.is_empty() {
                 return Ok(());
             }
@@ -531,6 +527,8 @@ impl VulkanSpirvBackend {
     pub fn try_batch_poseidon2_perm12(&self, states: &mut [[u64; 12]]) -> Result<(), VulkanError> {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
+            secret_slot_gate(self.secret_slots_audited, KernelSlot::BatchPoseidon2Perm12)
+                .map_err(VulkanError::from)?;
             if states.is_empty() {
                 return Ok(());
             }
@@ -568,6 +566,8 @@ impl VulkanSpirvBackend {
         }
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
+            secret_slot_gate(self.secret_slots_audited, KernelSlot::MerkleLayerPoseidon2)
+                .map_err(VulkanError::from)?;
             let mut guard = self
                 .engine
                 .lock()
@@ -587,6 +587,10 @@ impl VulkanSpirvBackend {
 }
 
 impl AcceleratorBackend for VulkanSpirvBackend {
+    fn hardware_audit_digest(&self) -> [u8; 32] {
+        self.device_info().audit_evidence_digest()
+    }
+
     fn target_arch(&self) -> KernelTargetArch {
         KernelTargetArch::SpirV15
     }
@@ -687,6 +691,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         check_goldilocks_twiddles(n, twiddles)?;
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
+            secret_slot_gate(self.secret_slots_audited, KernelSlot::GoldilocksNtt)?;
             let mut guard = self.engine.lock().map_err(|_| AccelError::BackendFailure)?;
             guard
                 .exec_goldilocks_ntt(buf, twiddles, inverse)
@@ -727,6 +732,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         }
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
+            secret_slot_gate(self.secret_slots_audited, KernelSlot::CosetLdeExt2)?;
             let mut guard = self.engine.lock().map_err(|_| AccelError::BackendFailure)?;
             guard
                 .exec_coset_lde_ext2(evals, blowup, shift, out)
@@ -772,6 +778,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         }
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
+            secret_slot_gate(self.secret_slots_audited, KernelSlot::MerkleLayerPoseidon2)?;
             if out_parents.is_empty() {
                 return Ok(());
             }
@@ -903,13 +910,14 @@ pub fn batch_keccak_f1600_with_receipt<B: AcceleratorBackend>(
     let desc = BatchJobDescriptor::KeccakF1600 {
         num_states: states.len(),
     };
-    ExecutionReceipt::compute_keyed(
+    ExecutionReceipt::compute_audited(
         key,
         &pin,
         desc,
         transcript_anchor,
         input_digest,
         output_digest,
+        backend.hardware_audit_digest(),
     )
 }
 
@@ -929,13 +937,14 @@ pub fn batch_poseidon2_perm12_with_receipt<B: AcceleratorBackend>(
     let desc = BatchJobDescriptor::Poseidon2Perm12 {
         num_states: states.len(),
     };
-    ExecutionReceipt::compute_keyed(
+    ExecutionReceipt::compute_audited(
         key,
         &pin,
         desc,
         transcript_anchor,
         input_digest,
         output_digest,
+        backend.hardware_audit_digest(),
     )
 }
 
@@ -973,13 +982,14 @@ pub fn goldilocks_ntt_with_receipt<B: AcceleratorBackend>(
         length: buf.len(),
         inverse,
     };
-    ExecutionReceipt::compute_keyed(
+    ExecutionReceipt::compute_audited(
         key,
         &pin,
         desc,
         transcript_anchor,
         input_digest,
         output_digest,
+        backend.hardware_audit_digest(),
     )
 }
 
@@ -1002,13 +1012,14 @@ pub fn coset_lde_ext2_with_receipt<B: AcceleratorBackend>(
         blowup,
         shift,
     };
-    ExecutionReceipt::compute_keyed(
+    ExecutionReceipt::compute_audited(
         key,
         &pin,
         desc,
         transcript_anchor,
         input_digest,
         output_digest,
+        backend.hardware_audit_digest(),
     )
 }
 
@@ -1031,13 +1042,14 @@ pub fn merkle_layer_poseidon2_with_receipt<B: AcceleratorBackend>(
         pk_seed: *pk_seed,
         layer,
     };
-    ExecutionReceipt::compute_keyed(
+    ExecutionReceipt::compute_audited(
         key,
         &pin,
         desc,
         transcript_anchor,
         input_digest,
         output_digest,
+        backend.hardware_audit_digest(),
     )
 }
 
@@ -1059,13 +1071,14 @@ pub fn bdoz_gf2_128_batch_dot_with_receipt<B: AcceleratorBackend>(
     let desc = BatchJobDescriptor::BdozGf2128BatchDot {
         num_elements: shares.len(),
     };
-    let receipt = ExecutionReceipt::compute_keyed(
+    let receipt = ExecutionReceipt::compute_audited(
         key,
         &pin,
         desc,
         transcript_anchor,
         input_digest,
         output_digest,
+        backend.hardware_audit_digest(),
     )?;
     Ok(((lane0, lane1), receipt))
 }
@@ -1182,14 +1195,19 @@ mod tests {
             check_goldilocks_twiddles(8, &[1, 1, 1, 1]),
             Err(AccelError::InvalidTwiddles)
         );
-        let w4 = goldilocks_primitive_root(2).expect("4th root");
-        let half_order = [1, w4, gl_mul(w4, w4), gl_mul(gl_mul(w4, w4), w4)];
+        let fourth_power = goldilocks_primitive_root(2).expect("4th root");
+        let half_order = [
+            1,
+            fourth_power,
+            gl_mul(fourth_power, fourth_power),
+            gl_mul(gl_mul(fourth_power, fourth_power), fourth_power),
+        ];
         assert_eq!(
             check_goldilocks_twiddles(8, &half_order),
             Err(AccelError::InvalidTwiddles)
         );
         assert_eq!(
-            check_goldilocks_twiddles(8, &[1, w4]),
+            check_goldilocks_twiddles(8, &[1, fourth_power]),
             Err(AccelError::LengthMismatch {
                 what: "NTT twiddles",
                 expected: 4,
@@ -1226,7 +1244,7 @@ mod tests {
             v.pipelines[slot].scratch_bytes = Some(8);
             variants.push(v);
             let mut v = base;
-            v.pipelines[slot].spilled_vgprs = Some(0);
+            v.pipelines[slot].spilled_vgprs = None;
             variants.push(v);
         }
         let mut digests: std::vec::Vec<[u8; 32]> = variants
@@ -1249,6 +1267,8 @@ mod tests {
             pipelines: [PipelineTelemetry {
                 subgroup_size: Some(32),
                 scratch_bytes: Some(0),
+                spilled_vgprs: Some(0),
+                spilled_sgprs: Some(0),
                 ..PipelineTelemetry::default()
             }; KernelSlot::COUNT],
             vendor_id: 0x1002,
@@ -1267,7 +1287,7 @@ mod tests {
         let good = audited_device_info();
         assert_eq!(good.secret_slot_audit(), Ok(()));
 
-        // Spill counters are optional, but a reported zero is fine.
+        // Both spill counters must explicitly report zero.
         let mut reported_zero_spills = good;
         for stats in &mut reported_zero_spills.pipelines {
             stats.spilled_vgprs = Some(0);
@@ -1287,11 +1307,13 @@ mod tests {
         no_telemetry.pipelines = [PipelineTelemetry::default(); KernelSlot::COUNT];
         assert!(no_telemetry.secret_slot_audit().is_err());
 
-        let defects: [fn(&mut PipelineTelemetry); 6] = [
+        let defects: [fn(&mut PipelineTelemetry); 8] = [
             |t| t.subgroup_size = None,
             |t| t.subgroup_size = Some(64),
             |t| t.scratch_bytes = None,
             |t| t.scratch_bytes = Some(8),
+            |t| t.spilled_vgprs = None,
+            |t| t.spilled_sgprs = None,
             |t| t.spilled_vgprs = Some(1),
             |t| t.spilled_sgprs = Some(1),
         ];
@@ -1313,12 +1335,13 @@ mod tests {
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     #[test]
     fn secret_slot_gate_refuses_exactly_the_unaudited_backend() {
-        let slot = KernelSlot::BdozGf2128BatchDot;
-        assert_eq!(secret_slot_gate(true, slot), Ok(()));
-        assert_eq!(
-            secret_slot_gate(false, slot),
-            Err(AccelError::SecretSlotUnaudited { slot })
-        );
+        for slot in KernelSlot::ALL {
+            assert_eq!(secret_slot_gate(true, slot), Ok(()));
+            assert_eq!(
+                secret_slot_gate(false, slot),
+                Err(AccelError::SecretSlotUnaudited { slot })
+            );
+        }
     }
 
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
@@ -1374,7 +1397,7 @@ mod tests {
         let weights = [(3u128, 5u128); 4];
         let slot = KernelSlot::BdozGf2128BatchDot;
 
-        // The state `try_new` produces on a driver without Wave32 control or telemetry.
+        // Inject missing audit status to exercise dispatch gates independently of construction.
         gpu.secret_slots_audited = false;
         assert_eq!(
             gpu.bdoz_gf2_128_batch_dot(&shares, &weights),
@@ -1404,8 +1427,8 @@ mod tests {
         CpuReferenceBackend.batch_keccak_f1600(&mut expected);
         gpu.batch_keccak_f1600(&mut states);
         assert_eq!(states, expected);
-        assert_eq!(gpu.cpu_fallback_count(), 0);
-        assert_eq!(gpu.gpu_submission_count(), 1);
+        assert_eq!(gpu.cpu_fallback_count(), 1);
+        assert_eq!(gpu.gpu_submission_count(), 0);
     }
 
     #[test]

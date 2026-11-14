@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.KeccakWitness.Group0
 public import QsagVerified.Proofs.KeccakWitness.Group1

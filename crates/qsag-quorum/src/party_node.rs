@@ -615,8 +615,8 @@ fn reconstruct_opened(
 /// slot `party + 1`. The state is the xor of the three slots.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SharePair {
-    pub mine: [u64; 25],
-    pub next: [u64; 25],
+    mine: [u64; 25],
+    next: [u64; 25],
 }
 
 /// The secrets of one party of the replicated engine.

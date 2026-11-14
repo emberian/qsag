@@ -165,7 +165,7 @@ def slhDsaShake256f : Fips205Params :=
 def slhDsaShake256s : Fips205Params :=
   { n := 32, h := 64, d := 8, hp := 8, a := 14, k := 22, m := 47 }
 
-/-- Compact structural test profile (`n = 16, d = 2, hp = 2, h = 4, a = 2, k = 4, m = 4`). -/
+/-- Compact structural test profile (`n = 16, d = 2, hp = 2, h = 4, a = 2, k = 4, m = 3`). -/
 def slhDsaShakeCompactTest : Fips205Params :=
   { n := 16, h := 4, d := 2, hp := 2, a := 2, k := 4, m := 3 }
 

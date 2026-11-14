@@ -40,11 +40,17 @@ pub enum FtsGuardError {
 }
 
 /// Single-use authorization token emitted when an `FtsEpochGuard` transitions `used: 0 -> 1`.
-#[derive(Clone, Copy)]
 pub struct FtsEpochPermit {
-    pub key_id: [u8; 32],
-    pub authorized_epoch: u32,
-    pub msg_digest: [u8; 32],
+    key_id: [u8; 32],
+    authorized_epoch: u32,
+    msg_digest: [u8; 32],
+}
+
+impl FtsEpochPermit {
+    /// Consume the authorization and recover its bound public identity.
+    pub fn into_binding(self) -> ([u8; 32], u32, [u8; 32]) {
+        (self.key_id, self.authorized_epoch, self.msg_digest)
+    }
 }
 
 /// Non-`Clone` affine per-epoch WOTS+CS leaf guard enforcing at-most-one signature per epoch (`P0-04`).

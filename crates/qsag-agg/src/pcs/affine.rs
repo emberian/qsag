@@ -354,6 +354,7 @@ pub(super) fn combine_claims(weights: &[[E; 2]], evals: &[E], shifts: &[E]) -> E
 }
 
 /// Deferred tensor kernel, including the two explicit overflow weights.
+#[derive(Clone)]
 pub(super) struct KernelClaim {
     pub offset: usize,
     pub weight: E,
@@ -373,16 +374,23 @@ impl KernelClaim {
     }
 }
 
+/// Claims contracted per pool work item in [`terminal_sum`].
+#[cfg(feature = "std")]
+const TERMINAL_CLAIM_CHUNK: usize = 16;
+
 pub(super) fn terminal_sum(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]) -> E {
     let _phase = crate::profile::span("verify_terminal_sum");
     #[cfg(feature = "std")]
-    if claims.len() >= 128 {
-        let chunk = claims.len().div_ceil(4);
-        let ranges: Vec<_> = claims.chunks(chunk).collect();
-        return crate::map_chunks_bounded(&ranges, |ranges| {
-            ranges.iter().fold(E::ZERO, |acc, sub| {
-                acc + terminal_sum_serial(phis, early, sub, c)
-            })
+    if claims.len() >= 4 * TERMINAL_CLAIM_CHUNK {
+        // The contraction is linear in the claims, so chunks are summed independently.
+        let phis: alloc::sync::Arc<[E]> = phis.into();
+        let claims: alloc::sync::Arc<[KernelClaim]> = claims.into();
+        let c: alloc::sync::Arc<[E]> = c.into();
+        let chunks = claims.len().div_ceil(TERMINAL_CLAIM_CHUNK);
+        return crate::pool::map_indices(chunks, 1, move |i| {
+            let start = i * TERMINAL_CLAIM_CHUNK;
+            let end = (start + TERMINAL_CLAIM_CHUNK).min(claims.len());
+            terminal_sum_serial(&phis, early, &claims[start..end], &c)
         })
         .into_iter()
         .fold(E::ZERO, |a, b| a + b);
@@ -390,13 +398,21 @@ pub(super) fn terminal_sum(phis: &[E], early: usize, claims: &[KernelClaim], c: 
     terminal_sum_serial(phis, early, claims, c)
 }
 
+/// `sum_i c[i] * k[i]` for the deferred kernel `k` of `claims`, one claim at a time.
+///
+/// A claim's kernel restricted to the `2^early` core coefficients is
+/// `scale * prod_{bit in i} tail[bit]`, so its contribution is `scale` times the multilinear
+/// monomial evaluation of `c` at `tail`, computed by halving folds from the top variable.
 fn terminal_sum_serial(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]) -> E {
     let n = 1usize << early;
-    let mut k = vec![E::ZERO; n + 2];
-    let mut suffix = vec![E::ZERO; n];
-    let mut base_suffix = vec![Goldilocks::ZERO; n];
+    assert!(c.len() == n + 2);
+    let half_n = n / 2;
+    let mut buf = vec![E::ZERO; half_n.max(1)];
+    let mut total = E::ZERO;
     for claim in claims {
         let prefix = phis.len() - claim.offset;
+        assert!(claim.point.len() == prefix + early);
+        let (head, tail) = claim.point.split_at(prefix);
         let mut scale = claim.weight;
         // Shift queries lie in the base field. Preserve that representation through
         // contraction rather than paying for general quartic multiplication by zero limbs.
@@ -404,43 +420,59 @@ fn terminal_sum_serial(phis: &[E], early: usize, claims: &[KernelClaim], c: &[E]
             .point
             .iter()
             .all(|r| r.c0.c1 == Goldilocks::ZERO && r.c1 == crate::field::GoldilocksExt2::ZERO);
-        if base_point {
-            for (&r, &phi) in claim.point.iter().zip(&phis[claim.offset..]) {
+        let core = if base_point {
+            for (&r, &phi) in head.iter().zip(&phis[claim.offset..]) {
                 scale *= E::ONE + phi.mul_base(r.c0.c0);
             }
-            base_suffix[0] = Goldilocks::ONE;
-            for (bit, r) in claim.point[prefix..].iter().enumerate() {
-                let width = 1usize << bit;
-                for i in 0..width {
-                    base_suffix[width + i] = base_suffix[i] * r.c0.c0;
+            if early == 0 {
+                c[0]
+            } else {
+                let top = tail[early - 1].c0.c0;
+                for (i, slot) in buf[..half_n].iter_mut().enumerate() {
+                    *slot = c[i] + c[i + half_n].mul_base(top);
                 }
-            }
-            for (v, &w) in k[..n].iter_mut().zip(&base_suffix) {
-                *v += scale.mul_base(w);
+                let mut width = half_n;
+                for r in tail[..early - 1].iter().rev() {
+                    width /= 2;
+                    let r = r.c0.c0;
+                    let (lo, hi) = buf[..2 * width].split_at_mut(width);
+                    for (l, &h) in lo.iter_mut().zip(hi.iter()) {
+                        *l += h.mul_base(r);
+                    }
+                }
+                buf[0]
             }
         } else {
-            for (&r, &phi) in claim.point.iter().zip(&phis[claim.offset..]) {
+            for (&r, &phi) in head.iter().zip(&phis[claim.offset..]) {
                 scale *= E::ONE + phi * r;
             }
-            suffix[0] = E::ONE;
-            for (bit, &r) in claim.point[prefix..].iter().enumerate() {
-                let width = 1usize << bit;
-                for i in 0..width {
-                    suffix[width + i] = suffix[i] * r;
+            if early == 0 {
+                c[0]
+            } else {
+                let top = tail[early - 1];
+                for (i, slot) in buf[..half_n].iter_mut().enumerate() {
+                    *slot = c[i] + c[i + half_n] * top;
                 }
+                let mut width = half_n;
+                for &r in tail[..early - 1].iter().rev() {
+                    width /= 2;
+                    let (lo, hi) = buf[..2 * width].split_at_mut(width);
+                    for (l, &h) in lo.iter_mut().zip(hi.iter()) {
+                        *l += h * r;
+                    }
+                }
+                buf[0]
             }
-            for (v, &w) in k[..n].iter_mut().zip(&suffix) {
-                *v += scale * w;
-            }
-        }
+        };
+        total += scale * core;
         if prefix == 0 {
-            k[n] += claim.weight * claim.overflow[0];
-            k[n + 1] += claim.weight * claim.overflow[1];
+            total += claim.weight * (claim.overflow[0] * c[n] + claim.overflow[1] * c[n + 1]);
         } else {
-            k[n] += claim.weight * (claim.overflow[0] + phis[claim.offset] * claim.overflow[1]);
+            total +=
+                claim.weight * (claim.overflow[0] + phis[claim.offset] * claim.overflow[1]) * c[n];
         }
     }
-    dot_ext4_fast(c, &k)
+    total
 }
 
 #[cfg(test)]

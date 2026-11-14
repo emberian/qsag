@@ -13,6 +13,17 @@ pub fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Lowercase hex of secret bytes, as ASCII in a wiping buffer allocated once at its final size.
+pub fn to_hex_zeroizing(bytes: &[u8]) -> crate::cli::ZeroizingBuf {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = crate::cli::ZeroizingBuf(Vec::with_capacity(bytes.len() * 2));
+    for &b in bytes {
+        out.0.push(HEX[(b >> 4) as usize]);
+        out.0.push(HEX[(b & 0x0F) as usize]);
+    }
+    out
+}
+
 /// Strict hex: even length, `[0-9a-fA-F]` only. Surrounding ASCII whitespace is ignored.
 pub fn from_hex(text: &str) -> Result<crate::cli::ZeroizingBuf, CliError> {
     let text = text.trim();
@@ -49,7 +60,7 @@ pub fn from_hex_secret32(text: &str, what: &str) -> Result<crate::cli::Secret32,
     Ok(secret)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum Json {
     Null,
     Bool(bool),
@@ -58,6 +69,30 @@ pub enum Json {
     Str(String),
     Array(Vec<Json>),
     Object(Vec<(String, Json)>),
+}
+
+/// Key files are parsed into this type, so its debug form never prints a secret member.
+impl std::fmt::Debug for Json {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Json::Null => f.write_str("null"),
+            Json::Bool(b) => write!(f, "{b}"),
+            Json::Number(n) => f.write_str(n),
+            Json::Str(s) => write!(f, "{s:?}"),
+            Json::Array(items) => f.debug_list().entries(items).finish(),
+            Json::Object(members) => {
+                let mut map = f.debug_map();
+                for (key, value) in members {
+                    if matches!(key.as_str(), "seed" | "secret_key") {
+                        map.entry(key, &format_args!("<redacted>"));
+                    } else {
+                        map.entry(key, value);
+                    }
+                }
+                map.finish()
+            }
+        }
+    }
 }
 
 // Wipe owned strings recursively, including partially parsed secret containers.
@@ -113,6 +148,13 @@ impl Json {
         }
     }
 
+    pub fn as_u128(&self) -> Option<u128> {
+        match self {
+            Json::Number(n) => n.parse().ok(),
+            _ => None,
+        }
+    }
+
     /// Required string member of an object.
     pub fn field_str(&self, key: &str) -> Result<&str, CliError> {
         self.get(key)
@@ -122,6 +164,11 @@ impl Json {
     pub fn field_u64(&self, key: &str) -> Result<u64, CliError> {
         self.get(key)
             .and_then(Json::as_u64)
+            .ok_or_else(|| CliError::input(format!("missing or non-integer field \"{key}\"")))
+    }
+    pub fn field_u128(&self, key: &str) -> Result<u128, CliError> {
+        self.get(key)
+            .and_then(Json::as_u128)
             .ok_or_else(|| CliError::input(format!("missing or non-integer field \"{key}\"")))
     }
     pub fn field_hex(&self, key: &str) -> Result<crate::cli::ZeroizingBuf, CliError> {
@@ -474,6 +521,31 @@ mod tests {
         assert!(from_hex("abc").is_err());
         assert!(from_hex("zz").is_err());
         assert!(from_hex_exact::<2>("00", "x").is_err());
+        let hex = to_hex_zeroizing(&[0, 255, 0xA5]);
+        assert_eq!(&hex[..], b"00ffa5");
+        assert_eq!(hex.0.capacity(), 6);
+    }
+
+    #[test]
+    fn debug_form_redacts_secret_members() {
+        let key = Json::object(vec![
+            ("scheme", Json::str("test")),
+            ("seed", Json::hex(&[0xAB; 32])),
+            (
+                "nested",
+                Json::Array(vec![Json::object(vec![(
+                    "secret_key",
+                    Json::hex(&[0xCD; 4]),
+                )])]),
+            ),
+        ]);
+        let shown = format!("{key:?}");
+        assert!(shown.contains("\"scheme\": \"test\""), "{shown}");
+        assert_eq!(shown.matches("<redacted>").count(), 2, "{shown}");
+        assert!(
+            !shown.contains("abab") && !shown.contains("cdcd"),
+            "{shown}"
+        );
     }
 
     #[test]

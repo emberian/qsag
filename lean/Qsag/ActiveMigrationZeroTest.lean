@@ -21,11 +21,22 @@ sacrifice is modelled from its first inner-product claim: for a false claim and
 any adaptive prover, at most `sacrificeBadCoinBound` of the `|S|^r * |Sb|` coin
 vectors accept (`recursive_sacrifice_false_claim_accepting_coins_bound`).
 
-Outstanding production refinements: secp256k1/Ed25519 group laws and scalar
-multiplication, concrete address hashes and nullifier sponge, the batching of
-AND gates into the first inner-product claim together with the two-lane,
-64-packed layout and the coin-flip/PRSS transport of the sacrifice, and
-simulation of the entire adversarial execution. These are proof obligations,
+`Weierstrass` gives affine short-Weierstrass arithmetic over `ℤ/p` and derives the
+Taproot x-only / y-parity laws for the points `[s]G` from the group facts
+`Curve.PrimeOrderGroup`. Those facts are proved for `y² = x³ + 7` over `ℤ/43`
+and are the hypothesis `Weierstrass.Secp256k1GroupLaws` for secp256k1.
+
+The two lockstep instances and 64 lanes of one flush, and the seven engine
+forks covering 438 repetitions, are composed in
+`flush_false_lane_accepting_coins_bound` and
+`migration_ceremony_false_repetition_below_2_pow_neg_246`.
+
+Outstanding production refinements: the secp256k1 group facts above and all of
+Ed25519, the circuit's windowed scalar multiplication, concrete address hashes
+and nullifier sponge, the batching of AND gates into the first inner-product
+claims (the `γ` combiner and round 0), the prime-field checks of the same flush,
+the coin-flip/PRSS transport of the sacrifice, and simulation of the entire
+adversarial execution. These are proof obligations,
 not assumptions silently discharged by test models.
 -/
 
@@ -201,182 +212,172 @@ theorem secpNegScalar_props {s : BitVec 256}
     omega
   exact ⟨hNegToNat, hNegCanon, hInv, hNe, ⟨hCanon, hNegCanon, Or.inr hNegToNat⟩⟩
 
-/-- Abstract curve `x`-only & `y`-LSB parity projection on `secp256k1` (`ownership.rs:281-284`):
-    `[s]G` and `[SECP_N - s]G` share the exact same `x`-coordinate (`sameX_iff`) and have
-    opposite `y[0]` parity over the odd base prime `SECP_P` (`yParity_neg`). -/
-structure TaprootCurveProjection (XCoord : Type) where
-  xOf         : BitVec 256 → XCoord
-  yParity     : BitVec 256 → Bool
-  sameX_iff   : ∀ s1 s2,
-    requireCanonicalScalar .Secp256k1 s1 = true →
-    requireCanonicalScalar .Secp256k1 s2 = true →
-    (xOf s1 = xOf s2 ↔ taprootXOnlySameX s1 s2)
-  yParity_neg : ∀ s,
-    requireCanonicalScalar .Secp256k1 s = true →
-    yParity (secpNegScalar s) = !(yParity s)
+/-- `x`-only & `y`-parity projection of the multiples `[s]G`, `0 < s < n`, of a generator of
+    order `n` (BIP-340 x-only public keys; `ownership.rs:281-284`): `[s]G` and `[n - s]G` are
+    the only multiples sharing an `x`-coordinate (`sameX_iff`), and their `y` parities are
+    opposite (`yParity_neg`). The interface does not say where `xOf`/`yParity` come from.
+    `Weierstrass.Curve.PrimeOrderGroup.projection` builds it from the affine coordinates of
+    curve points; `scalarModelTaprootProjection` builds it from scalars alone. -/
+structure TaprootCurveProjection (n : Nat) (XCoord : Type) where
+  xOf         : Nat → XCoord
+  yParity     : Nat → Bool
+  sameX_iff   : ∀ s1 s2, 0 < s1 → s1 < n → 0 < s2 → s2 < n →
+    (xOf s1 = xOf s2 ↔ (s1 = s2 ∨ s2 = n - s1))
+  yParity_neg : ∀ s, 0 < s → s < n → yParity (n - s) = !(yParity s)
 
-/-- Synthetic scalar consistency witness for the projection interface. Its x and
-    parity functions are not secp256k1 coordinates. No curve refinement is proved. -/
-def canonicalTaprootProjection : TaprootCurveProjection (BitVec 256) where
-  xOf s :=
-    if requireCanonicalScalar .Secp256k1 s then
-      BitVec.ofNat 256 (if s.toNat ≤ SECP256K1_ORDER_N - s.toNat then s.toNat else SECP256K1_ORDER_N - s.toNat)
-    else
-      0#256
-  yParity s := decide (SECP256K1_ORDER_N < 2 * s.toNat)
-  sameX_iff s1 s2 h1 h2 := by
-    have hb := curve_orders_match_le_limbs_and_bounds
-    obtain ⟨hp1, hl1⟩ := (requireCanonicalScalar_iff .Secp256k1 s1).mp h1
-    obtain ⟨hp2, hl2⟩ := (requireCanonicalScalar_iff .Secp256k1 s2).mp h2
-    dsimp only [ScalarGroup.orderNat] at hl1 hl2
-    rw [h1, h2]
-    simp only [↓reduceIte]
-    let m1 := if s1.toNat ≤ SECP256K1_ORDER_N - s1.toNat then s1.toNat else SECP256K1_ORDER_N - s1.toNat
-    let m2 := if s2.toNat ≤ SECP256K1_ORDER_N - s2.toNat then s2.toNat else SECP256K1_ORDER_N - s2.toNat
-    have hm1Lt : m1 < 2 ^ 256 := by dsimp [m1]; split <;> omega
-    have hm2Lt : m2 < 2 ^ 256 := by dsimp [m2]; split <;> omega
-    constructor
-    · intro hEq
-      have hv := congrArg BitVec.toNat hEq
-      rw [BitVec.toNat_ofNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hm1Lt, Nat.mod_eq_of_lt hm2Lt] at hv
-      refine ⟨h1, h2, ?_⟩
-      dsimp [m1, m2] at hv
-      cases (inferInstance : Decidable (s1.toNat ≤ SECP256K1_ORDER_N - s1.toNat)) with
-      | isTrue ha =>
-        rw [cIte_pos ha] at hv
-        cases (inferInstance : Decidable (s2.toNat ≤ SECP256K1_ORDER_N - s2.toNat)) with
-        | isTrue hc =>
-          rw [cIte_pos hc] at hv
-          exact Or.inl (BitVec.eq_of_toNat_eq hv)
-        | isFalse hc =>
-          rw [cIte_neg hc] at hv
-          exact Or.inr (by omega)
-      | isFalse ha =>
-        rw [cIte_neg ha] at hv
-        cases (inferInstance : Decidable (s2.toNat ≤ SECP256K1_ORDER_N - s2.toNat)) with
-        | isTrue hc =>
-          rw [cIte_pos hc] at hv
-          exact Or.inr (by omega)
-        | isFalse hc =>
-          rw [cIte_neg hc] at hv
-          exact Or.inl (BitVec.eq_of_toNat_eq (by omega))
-    · rintro ⟨_, _, hOr⟩
-      apply BitVec.eq_of_toNat_eq
-      rw [BitVec.toNat_ofNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt hm1Lt, Nat.mod_eq_of_lt hm2Lt]
-      dsimp [m1, m2]
-      rcases hOr with rfl | hNeg
-      · rfl
-      · cases (inferInstance : Decidable (s1.toNat ≤ SECP256K1_ORDER_N - s1.toNat)) with
-        | isTrue ha =>
-          rw [cIte_pos ha]
-          cases (inferInstance : Decidable (s2.toNat ≤ SECP256K1_ORDER_N - s2.toNat)) with
-          | isTrue hc => rw [cIte_pos hc]; omega
-          | isFalse hc => rw [cIte_neg hc]; omega
-        | isFalse ha =>
-          rw [cIte_neg ha]
-          cases (inferInstance : Decidable (s2.toNat ≤ SECP256K1_ORDER_N - s2.toNat)) with
-          | isTrue hc => rw [cIte_pos hc]; omega
-          | isFalse hc => rw [cIte_neg hc]; omega
-  yParity_neg s hCanon := by
-    have hb := curve_orders_match_le_limbs_and_bounds
-    have hOdd : SECP256K1_ORDER_N % 2 = 1 := hb.2.2.2.2.1
-    obtain ⟨hNegToNat, _, _, _, _⟩ := secpNegScalar_props hCanon
-    obtain ⟨hPos, hLtN⟩ := (requireCanonicalScalar_iff .Secp256k1 s).mp hCanon
-    dsimp only [ScalarGroup.orderNat] at hLtN
-    rw [hNegToNat]
-    cases (inferInstance : Decidable (SECP256K1_ORDER_N < 2 * s.toNat)) with
-    | isTrue hGt =>
-      have hNot : ¬ (SECP256K1_ORDER_N < 2 * (SECP256K1_ORDER_N - s.toNat)) := by omega
-      rw [decide_eq_true hGt, decide_eq_false hNot]
+/-- Scalar-level model of the interface at any odd order: `xOf s = min(s, n - s)` and
+    `yParity s = (n < 2s)`. It contains no curve. Its only use is to show that the two
+    interface laws are jointly consistent at every odd `n`, `SECP256K1_ORDER_N` included;
+    the curve-point instance is `Weierstrass.Curve.PrimeOrderGroup.projection`. -/
+def scalarModelTaprootProjection (n : Nat) (hOdd : n % 2 = 1) : TaprootCurveProjection n Nat where
+  xOf s := if s ≤ n - s then s else n - s
+  yParity s := decide (n < 2 * s)
+  sameX_iff s1 s2 _ l1 _ l2 := by
+    by_cases a : s1 ≤ n - s1 <;> by_cases c : s2 ≤ n - s2 <;>
+      simp only [a, c, ↓reduceIte] <;>
+      (constructor
+       · intro h
+         by_cases e : s1 = s2
+         · exact .inl e
+         · exact .inr (by omega)
+       · intro h
+         rcases h with h | h <;> omega)
+  yParity_neg s _ l := by
+    by_cases h : n < 2 * s
+    · rw [decide_eq_true h, decide_eq_false (by omega : ¬ n < 2 * (n - s))]
       rfl
-    | isFalse hLe =>
-      have hYes : SECP256K1_ORDER_N < 2 * (SECP256K1_ORDER_N - s.toNat) := by omega
-      rw [decide_eq_false hLe, decide_eq_true hYes]
+    · rw [decide_eq_false h, decide_eq_true (by omega : n < 2 * (n - s))]
       rfl
 
-/-- **`#tooth` Taproot `x`-Only Non-Injectivity Without `y[0]` Parity (`tooth_taproot_xonly_not_injective_without_y_parity`)**:
-    Without `ownership.rs:282` (`c.output(y[0])`), `proj.xOf` is **never** injective — not even on
-    canonical nonzero scalars `[1, SECP_N - 1]`, because `1#256` and `secpNegScalar 1#256` are
-    distinct canonical scalars sharing the identical `x`-coordinate! -/
+/-- The compressed `(x, y-parity)` encoding is injective on `[1, n)` (SEC 1 §2.3.3 point
+    compression; `BitcoinHash160` at `ownership.rs:265-267`). -/
+theorem TaprootCurveProjection.compressed_injective {n : Nat} {XCoord : Type}
+    (proj : TaprootCurveProjection n XCoord) :
+    (∀ s1 s2, 0 < s1 → s1 < n → 0 < s2 → s2 < n →
+      proj.xOf s1 = proj.xOf s2 → proj.yParity s1 = proj.yParity s2 → s1 = s2) ∧
+    (∀ s, 0 < s → s < n → proj.xOf (n - s) = proj.xOf s) := by
+  refine ⟨?_, fun s p l => ((proj.sameX_iff s (n - s) p l (by omega) (by omega)).mpr (Or.inr rfl)).symm⟩
+  intro s1 s2 p1 l1 p2 l2 hX hY
+  rcases (proj.sameX_iff s1 s2 p1 l1 p2 l2).mp hX with h | h
+  · exact h
+  · subst h
+    rw [proj.yParity_neg s1 p1 l1] at hY
+    cases hb : proj.yParity s1 <;> rw [hb] at hY <;> cases hY
+
+/-- Dropping the parity bit loses injectivity at every order above two: `[1]G` and
+    `[n - 1]G` are distinct multiples with one `x`-coordinate. -/
+theorem TaprootCurveProjection.tooth_xonly_not_injective {n : Nat} {XCoord : Type}
+    (proj : TaprootCurveProjection n XCoord) (hn : 2 < n) :
+    ∃ s1 s2, 0 < s1 ∧ s1 < n ∧ 0 < s2 ∧ s2 < n ∧ s1 ≠ s2 ∧ proj.xOf s1 = proj.xOf s2 :=
+  ⟨1, n - 1, by omega, by omega, by omega, by omega, by omega,
+    (proj.sameX_iff 1 (n - 1) (by omega) (by omega) (by omega) (by omega)).mpr (Or.inr rfl)⟩
+
+#tooth_pair
+  Qsag.TaprootCurveProjection.compressed_injective
+  vs
+  Qsag.TaprootCurveProjection.tooth_xonly_not_injective
+
+private theorem TaprootCurveProjection.sameX_iff_canonical {XCoord : Type}
+    (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) (s1 s2 : BitVec 256)
+    (h1 : requireCanonicalScalar .Secp256k1 s1 = true)
+    (h2 : requireCanonicalScalar .Secp256k1 s2 = true) :
+    proj.xOf s1.toNat = proj.xOf s2.toNat ↔ taprootXOnlySameX s1 s2 := by
+  obtain ⟨p1, l1⟩ := (requireCanonicalScalar_iff .Secp256k1 s1).mp h1
+  obtain ⟨p2, l2⟩ := (requireCanonicalScalar_iff .Secp256k1 s2).mp h2
+  rw [proj.sameX_iff _ _ p1 l1 p2 l2]
+  constructor
+  · rintro (h | h)
+    · exact ⟨h1, h2, Or.inl (BitVec.eq_of_toNat_eq h)⟩
+    · exact ⟨h1, h2, Or.inr h⟩
+  · rintro ⟨_, _, h | h⟩
+    · exact Or.inl (congrArg BitVec.toNat h)
+    · exact Or.inr h
+
+private theorem TaprootCurveProjection.yParity_neg_canonical {XCoord : Type}
+    (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) (s : BitVec 256)
+    (h : requireCanonicalScalar .Secp256k1 s = true) :
+    proj.yParity (secpNegScalar s).toNat = !(proj.yParity s.toNat) := by
+  obtain ⟨p, l⟩ := (requireCanonicalScalar_iff .Secp256k1 s).mp h
+  rw [(secpNegScalar_props h).1]
+  exact proj.yParity_neg _ p l
+
+/-- **`#tooth` Taproot `x`-Only Non-Injectivity Without `y[0]` Parity**: without
+    `ownership.rs:282` (`c.output(y[0])`), `proj.xOf` is not injective on the canonical
+    `secp256k1` scalars `[1, SECP_N - 1]`: `1#256` and `secpNegScalar 1#256` are distinct
+    canonical scalars sharing one `x`-coordinate. -/
 theorem tooth_taproot_xonly_not_injective_without_y_parity
-    {XCoord : Type} (proj : TaprootCurveProjection XCoord) :
+    {XCoord : Type} (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) :
     ∃ s1 s2 : BitVec 256,
       requireCanonicalScalar .Secp256k1 s1 = true ∧
       requireCanonicalScalar .Secp256k1 s2 = true ∧
       s1 ≠ s2 ∧
       taprootXOnlySameX s1 s2 ∧
-      proj.xOf s1 = proj.xOf s2 ∧
-      ¬ Function.Injective proj.xOf := by
+      proj.xOf s1.toNat = proj.xOf s2.toNat := by
   have h1Canon : requireCanonicalScalar .Secp256k1 1#256 = true := by
     unfold requireCanonicalScalar ScalarGroup.orderNat SECP256K1_ORDER_N
     decide
   obtain ⟨_, h2Canon, _, hNe, hSameX⟩ := secpNegScalar_props h1Canon
-  have hXEq : proj.xOf 1#256 = proj.xOf (secpNegScalar 1#256) :=
-    (proj.sameX_iff 1#256 (secpNegScalar 1#256) h1Canon h2Canon).mpr hSameX
-  exact ⟨1#256, secpNegScalar 1#256, h1Canon, h2Canon, hNe, hSameX, hXEq, fun hInj => hNe (hInj hXEq)⟩
+  exact ⟨1#256, secpNegScalar 1#256, h1Canon, h2Canon, hNe, hSameX,
+    (proj.sameX_iff_canonical 1#256 (secpNegScalar 1#256) h1Canon h2Canon).mpr hSameX⟩
 
 /-- Normalize any canonical `secp256k1` scalar to its even-`y` Taproot representative (`legacy.rs:299-301, 319-321`). -/
-def normalizeTaprootEvenY {XCoord : Type} (proj : TaprootCurveProjection XCoord)
+def normalizeTaprootEvenY {XCoord : Type} (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord)
     (s : BitVec 256) : BitVec 256 :=
-  if proj.yParity s then secpNegScalar s else s
+  if proj.yParity s.toNat then secpNegScalar s else s
 
-/-- **Taproot Even-`y` Parity Constraint Restores Canonical Injectivity (`taproot_even_y_parity_restores_canonical_injectivity`)**:
+/-- **Taproot Even-`y` Parity Constraint Restores Canonical Injectivity**, for any projection
+    at the `secp256k1` order (in particular `secp256k1TaprootProjection`, whose `xOf` and
+    `yParity` are affine coordinates of `[s]G`):
     1. Enforcing `proj.yParity s = false` (`c.output(y[0])` at `ownership.rs:282`) makes `proj.xOf`
-       strictly injective across all canonical `secp256k1` scalars.
+       injective across all canonical `secp256k1` scalars.
     2. Compressed `(proj.xOf s, proj.yParity s)` (`BitcoinHash160` at `ownership.rs:265-267`) is
-       strictly injective across **all** canonical scalars `1 ≤ s < SECP_N`.
+       injective across all canonical scalars `1 ≤ s < SECP_N`.
     3. `normalizeTaprootEvenY` produces a canonical scalar sharing the same `x`-coordinate with
-       guaranteed even `y[0]` parity (`false`). -/
+       even `y[0]` parity (`false`). -/
 theorem taproot_even_y_parity_restores_canonical_injectivity
-    {XCoord : Type} (proj : TaprootCurveProjection XCoord) :
+    {XCoord : Type} (proj : TaprootCurveProjection SECP256K1_ORDER_N XCoord) :
     (∀ s1 s2 : BitVec 256,
       requireCanonicalScalar .Secp256k1 s1 = true →
       requireCanonicalScalar .Secp256k1 s2 = true →
-      proj.yParity s1 = false →
-      proj.yParity s2 = false →
-      proj.xOf s1 = proj.xOf s2 →
+      proj.yParity s1.toNat = false →
+      proj.yParity s2.toNat = false →
+      proj.xOf s1.toNat = proj.xOf s2.toNat →
       s1 = s2) ∧
     (∀ s1 s2 : BitVec 256,
       requireCanonicalScalar .Secp256k1 s1 = true →
       requireCanonicalScalar .Secp256k1 s2 = true →
-      proj.xOf s1 = proj.xOf s2 →
-      proj.yParity s1 = proj.yParity s2 →
+      proj.xOf s1.toNat = proj.xOf s2.toNat →
+      proj.yParity s1.toNat = proj.yParity s2.toNat →
       s1 = s2) ∧
     (∀ s : BitVec 256,
       requireCanonicalScalar .Secp256k1 s = true →
       requireCanonicalScalar .Secp256k1 (normalizeTaprootEvenY proj s) = true ∧
-      proj.xOf (normalizeTaprootEvenY proj s) = proj.xOf s ∧
-      proj.yParity (normalizeTaprootEvenY proj s) = false) := by
+      proj.xOf (normalizeTaprootEvenY proj s).toNat = proj.xOf s.toNat ∧
+      proj.yParity (normalizeTaprootEvenY proj s).toNat = false) := by
   have hPairInj : ∀ s1 s2 : BitVec 256,
       requireCanonicalScalar .Secp256k1 s1 = true →
       requireCanonicalScalar .Secp256k1 s2 = true →
-      proj.xOf s1 = proj.xOf s2 →
-      proj.yParity s1 = proj.yParity s2 →
+      proj.xOf s1.toNat = proj.xOf s2.toNat →
+      proj.yParity s1.toNat = proj.yParity s2.toNat →
       s1 = s2 := by
     intro s1 s2 h1 h2 hX hY
-    have hSame := (proj.sameX_iff s1 s2 h1 h2).mp hX
-    rcases hSame.2.2 with hEq | hNegNat
-    · exact hEq
-    · obtain ⟨hNegToNat, _, _, _, _⟩ := secpNegScalar_props h1
-      have hs2EqNeg : s2 = secpNegScalar s1 :=
-        BitVec.eq_of_toNat_eq (hNegNat.trans hNegToNat.symm)
-      subst hs2EqNeg
-      have hFlip := proj.yParity_neg s1 h1
-      rw [hFlip] at hY
-      cases hb : proj.yParity s1 <;> rw [hb] at hY <;> cases hY
+    obtain ⟨p1, l1⟩ := (requireCanonicalScalar_iff .Secp256k1 s1).mp h1
+    obtain ⟨p2, l2⟩ := (requireCanonicalScalar_iff .Secp256k1 s2).mp h2
+    exact BitVec.eq_of_toNat_eq (proj.compressed_injective.1 _ _ p1 l1 p2 l2 hX hY)
   refine ⟨fun s1 s2 h1 h2 hy1 hy2 hX => hPairInj s1 s2 h1 h2 hX (hy1.trans hy2.symm), hPairInj, ?_⟩
   intro s hCanon
   unfold normalizeTaprootEvenY
-  cases hy : proj.yParity s
-  · change requireCanonicalScalar .Secp256k1 s = true ∧ proj.xOf s = proj.xOf s ∧ proj.yParity s = false
+  cases hy : proj.yParity s.toNat
+  · change requireCanonicalScalar .Secp256k1 s = true ∧
+      proj.xOf s.toNat = proj.xOf s.toNat ∧ proj.yParity s.toNat = false
     exact ⟨hCanon, rfl, hy⟩
   · change requireCanonicalScalar .Secp256k1 (secpNegScalar s) = true ∧
-      proj.xOf (secpNegScalar s) = proj.xOf s ∧
-      proj.yParity (secpNegScalar s) = false
+      proj.xOf (secpNegScalar s).toNat = proj.xOf s.toNat ∧
+      proj.yParity (secpNegScalar s).toNat = false
     obtain ⟨_, hNegCanon, _, _, hSame⟩ := secpNegScalar_props hCanon
-    have hXEq : proj.xOf s = proj.xOf (secpNegScalar s) :=
-      (proj.sameX_iff s (secpNegScalar s) hCanon hNegCanon).mpr hSame
-    have hNegPar := proj.yParity_neg s hCanon
+    have hXEq : proj.xOf s.toNat = proj.xOf (secpNegScalar s).toNat :=
+      (proj.sameX_iff_canonical s (secpNegScalar s) hCanon hNegCanon).mpr hSame
+    have hNegPar := proj.yParity_neg_canonical s hCanon
     rw [hy] at hNegPar
     exact ⟨hNegCanon, hXEq.symm, hNegPar⟩
 
@@ -384,6 +385,526 @@ theorem taproot_even_y_parity_restores_canonical_injectivity
   Qsag.taproot_even_y_parity_restores_canonical_injectivity
   vs
   Qsag.tooth_taproot_xonly_not_injective_without_y_parity
+
+/-! ### Short-Weierstrass affine arithmetic over `ℤ/p` and the curve-point projection
+
+Affine chord-tangent arithmetic on `y² = x³ + a·x + b` over the residues mod `p`
+(Silverman, *The Arithmetic of Elliptic Curves*, III.2.3; SEC 1 v2.0 §2.2.1), with
+the point at infinity as `none`. What is proved for every curve and every odd prime
+`p`: negation stays on the curve and keeps `x`; `y` and `p - y` have opposite parity
+when `0 < y < p`; two curve points with one `x` are equal or negatives; and
+`P + Q = O` exactly when `Q = -P`. Associativity and closure of the addition are not
+proved in general. A generator's group facts are collected in `PrimeOrderGroup`,
+which is proved outright for `y² = x³ + 7` over `ℤ/43` (`secp7Mod43_group`) and is
+a named hypothesis for `secp256k1` (`Secp256k1GroupLaws`). -/
+
+namespace Weierstrass
+
+/-- Primality as a divisor statement (Euclid, *Elements* VII, Def. 11). -/
+def IsPrime (p : Nat) : Prop := 2 ≤ p ∧ ∀ d, d ∣ p → d = 1 ∨ d = p
+
+/-- Euclid's lemma (*Elements* VII.30). -/
+theorem IsPrime.dvd_mul {p a b : Nat} (hp : IsPrime p) (h : p ∣ a * b) : p ∣ a ∨ p ∣ b := by
+  rcases hp.2 (Nat.gcd p a) (Nat.gcd_dvd_left p a) with h1 | hpg
+  · exact Or.inr (Nat.Coprime.dvd_of_dvd_mul_left h1 h)
+  · have hd := Nat.gcd_dvd_right p a
+    rw [hpg] at hd
+    exact Or.inl hd
+
+private theorem mod_zero_cases {p z : Nat} (hz : z < 2 * p) (h : z % p = 0) : z = 0 ∨ z = p := by
+  by_cases hlt : z < p
+  · rw [Nat.mod_eq_of_lt hlt] at h
+    exact Or.inl h
+  · have hge : p ≤ z := Nat.le_of_not_lt hlt
+    rw [Nat.mod_eq_sub_mod hge, Nat.mod_eq_of_lt (by omega)] at h
+    exact Or.inr (by omega)
+
+/-- `(p - y)² ≡ y² (mod p)`. -/
+private theorem neg_sq_mod {p y : Nat} (hy : y < p) :
+    ((p - y) % p * ((p - y) % p)) % p = (y * y) % p := by
+  by_cases h0 : y = 0
+  · subst h0
+    rw [Nat.sub_zero, Nat.mod_self]
+  · obtain ⟨d, rfl⟩ : ∃ d, p = d + y := ⟨p - y, by omega⟩
+    rw [Nat.add_sub_cancel, Nat.mod_eq_of_lt (by omega : d < d + y)]
+    have hId : d * d + y * (d + y) = (d + y) * d + y * y := by
+      rw [Nat.mul_add, Nat.add_mul]
+      omega
+    calc (d * d) % (d + y) = (d * d + y * (d + y)) % (d + y) :=
+          (Nat.add_mul_mod_self_right _ _ _).symm
+      _ = ((d + y) * d + y * y) % (d + y) := by rw [hId]
+      _ = (y * y) % (d + y) := Nat.mul_add_mod_self_left _ _ _
+
+/-- In `ℤ/p` with `p` prime, `u² = v²` forces `v = u` or `v = -u`. -/
+private theorem sq_mod_eq_cases {p u v : Nat} (hp : IsPrime p) (huv : u ≤ v) (hv : v < p)
+    (h : (u * u) % p = (v * v) % p) : v = u ∨ u + v = p := by
+  have hDvd : p ∣ (v + u) * (v - u) := by
+    rw [← Nat.mul_self_sub_mul_self_eq]
+    exact Nat.dvd_of_mod_eq_zero (Nat.sub_mod_eq_zero_of_mod_eq h.symm)
+  rcases hp.dvd_mul hDvd with hs | hd
+  · rcases mod_zero_cases (by omega : v + u < 2 * p) (Nat.mod_eq_zero_of_dvd hs) with h0 | hpEq
+    · exact Or.inl (by omega)
+    · exact Or.inr (by omega)
+  · exact Or.inl (by
+      have := Nat.eq_zero_of_dvd_of_lt hd (by omega : v - u < p)
+      omega)
+
+/-- A short-Weierstrass curve `y² = x³ + a·x + b` over the residues mod `p`. -/
+structure Curve where
+  p : Nat
+  a : Nat
+  b : Nat
+
+/-- Affine points with reduced coordinates; `none` is the point at infinity. -/
+abbrev Point := Option (Nat × Nat)
+
+/-- The affine `x`-coordinate; the point at infinity has none. -/
+def Point.x : Point → Option Nat
+  | none => none
+  | some (x, _) => some x
+
+/-- The least significant bit of the affine `y`-coordinate (`y[0]` at `ownership.rs:282`). -/
+def Point.yOdd : Point → Bool
+  | none => false
+  | some (_, y) => y % 2 == 1
+
+/-- Reduced coordinates satisfying the curve equation. -/
+def Curve.OnCurve (C : Curve) : Point → Prop
+  | none => True
+  | some (x, y) => x < C.p ∧ y < C.p ∧ (y * y) % C.p = (x * x * x + C.a * x + C.b) % C.p
+
+private instance Curve.decOnCurve (C : Curve) : (P : Point) → Decidable (C.OnCurve P)
+  | none => isTrue trivial
+  | some (x, y) => inferInstanceAs (Decidable
+      (x < C.p ∧ y < C.p ∧ (y * y) % C.p = (x * x * x + C.a * x + C.b) % C.p))
+
+/-- `-(x, y) = (x, -y)`. -/
+def Curve.neg (C : Curve) : Point → Point
+  | none => none
+  | some (x, y) => some (x, (C.p - y) % C.p)
+
+/-- Field inverse by Fermat's little theorem, `z⁻¹ = z^(p-2)`. -/
+def Curve.inv (C : Curve) (z : Nat) : Nat := z ^ (C.p - 2) % C.p
+
+/-- Chord-tangent addition (Silverman III.2.3): `λ = (y₂ - y₁)/(x₂ - x₁)` on a chord,
+    `λ = (3x₁² + a)/(2y₁)` on a tangent, `x₃ = λ² - x₁ - x₂`, `y₃ = λ(x₁ - x₃) - y₁`. -/
+def Curve.add (C : Curve) : Point → Point → Point
+  | none, Q => Q
+  | some P, none => some P
+  | some (x1, y1), some (x2, y2) =>
+    if x1 = x2 ∧ (y1 + y2) % C.p = 0 then none
+    else
+      let lam :=
+        if x1 = x2 then ((3 * x1 * x1 + C.a) * C.inv (2 * y1)) % C.p
+        else (((y2 + C.p - y1) % C.p) * C.inv ((x2 + C.p - x1) % C.p)) % C.p
+      let x3 := (lam * lam + (C.p - x1) + (C.p - x2)) % C.p
+      some (x3, (lam * ((x1 + C.p - x3) % C.p) + (C.p - y1)) % C.p)
+
+/-- `[k]P` by repeated addition. -/
+def Curve.smul (C : Curve) : Nat → Point → Point
+  | 0, _ => none
+  | k + 1, P => C.add (C.smul k P) P
+
+theorem Curve.neg_x (C : Curve) (P : Point) : Point.x (C.neg P) = Point.x P := by
+  match P with
+  | none => rfl
+  | some (_, _) => rfl
+
+/-- Negation maps the curve to itself. -/
+theorem Curve.neg_onCurve (C : Curve) (P : Point) (h : C.OnCurve P) : C.OnCurve (C.neg P) := by
+  match P, h with
+  | none, _ => trivial
+  | some (x, y), ⟨hx, hy, hEq⟩ =>
+    exact ⟨hx, Nat.mod_lt _ (by omega), (neg_sq_mod hy).trans hEq⟩
+
+/-- Over an odd modulus a nonzero `y` and its negative `p - y` have opposite parity. -/
+theorem neg_y_parity {p y : Nat} (hp : p % 2 = 1) (h0 : 0 < y) (hy : y < p) :
+    ((p - y) % p % 2 == 1) = !(y % 2 == 1) := by
+  rw [Nat.mod_eq_of_lt (by omega : p - y < p)]
+  rcases Nat.mod_two_eq_zero_or_one y with h | h
+  · rw [h, (by omega : (p - y) % 2 = 1)]
+    rfl
+  · rw [h, (by omega : (p - y) % 2 = 0)]
+    rfl
+
+/-- Two affine curve points with one `x`-coordinate are equal or negatives of each other.
+    This is where primality of `p` enters. -/
+theorem Curve.eq_or_eq_neg_of_same_x (C : Curve) (hp : IsPrime C.p) {x y1 y2 : Nat}
+    (h1 : C.OnCurve (some (x, y1))) (h2 : C.OnCurve (some (x, y2))) :
+    (some (x, y2) : Point) = some (x, y1) ∨ (some (x, y2) : Point) = C.neg (some (x, y1)) := by
+  obtain ⟨_, hy1, e1⟩ := h1
+  obtain ⟨_, hy2, e2⟩ := h2
+  have hsq : (y1 * y1) % C.p = (y2 * y2) % C.p := e1.trans e2.symm
+  have hNeg : y1 + y2 = C.p → (some (x, y2) : Point) = C.neg (some (x, y1)) := by
+    intro hs
+    show (some (x, y2) : Point) = some (x, (C.p - y1) % C.p)
+    rw [Nat.mod_eq_of_lt (by omega : C.p - y1 < C.p), (by omega : C.p - y1 = y2)]
+  rcases Nat.le_total y1 y2 with hle | hle
+  · rcases sq_mod_eq_cases hp hle hy2 hsq with h | h
+    · exact Or.inl (by rw [h])
+    · exact Or.inr (hNeg h)
+  · rcases sq_mod_eq_cases hp hle hy1 hsq.symm with h | h
+    · exact Or.inl (by rw [h])
+    · exact Or.inr (hNeg (by omega))
+
+/-- `P + Q = O` exactly when `Q = -P`, for affine curve points. -/
+theorem Curve.add_eq_none_iff_neg (C : Curve) {P Q : Nat × Nat}
+    (hP : C.OnCurve (some P)) (hQ : C.OnCurve (some Q)) :
+    C.add (some P) (some Q) = none ↔ (some Q : Point) = C.neg (some P) := by
+  obtain ⟨x1, y1⟩ := P
+  obtain ⟨x2, y2⟩ := Q
+  obtain ⟨_, hy1, _⟩ := hP
+  obtain ⟨_, hy2, _⟩ := hQ
+  have hY : (y1 + y2) % C.p = 0 ↔ y2 = (C.p - y1) % C.p := by
+    constructor
+    · intro h
+      rcases mod_zero_cases (by omega : y1 + y2 < 2 * C.p) h with h0 | hpEq
+      · rw [(by omega : y1 = 0), (by omega : y2 = 0), Nat.sub_zero, Nat.mod_self]
+      · rw [Nat.mod_eq_of_lt (by omega : C.p - y1 < C.p)]
+        omega
+    · intro h
+      by_cases h0 : y1 = 0
+      · subst h0
+        rw [Nat.sub_zero, Nat.mod_self] at h
+        subst h
+        exact Nat.zero_mod _
+      · rw [Nat.mod_eq_of_lt (by omega : C.p - y1 < C.p)] at h
+        rw [(by omega : y1 + y2 = C.p), Nat.mod_self]
+  show (if x1 = x2 ∧ (y1 + y2) % C.p = 0 then none else _) = none ↔
+    (some (x2, y2) : Point) = some (x1, (C.p - y1) % C.p)
+  by_cases hc : x1 = x2 ∧ (y1 + y2) % C.p = 0
+  · rw [cIte_pos hc]
+    obtain ⟨hx, hy⟩ := hc
+    exact ⟨fun _ => by rw [hx, hY.mp hy], fun _ => rfl⟩
+  · rw [cIte_neg hc]
+    refine ⟨fun h => (by cases h), fun h => absurd ?_ hc⟩
+    have hx : x2 = x1 := congrArg Prod.fst (Option.some.inj h)
+    have hy : y2 = (C.p - y1) % C.p := congrArg Prod.snd (Option.some.inj h)
+    exact ⟨hx.symm, hY.mpr hy⟩
+
+/-- The facts about a generator `G` that make `s ↦ [s]G` a faithful copy of `ℤ/n` on the
+    curve, with `n` and `p` odd. `smul_add` is the homomorphism law of the cyclic subgroup;
+    with `order` and `exact` it gives `[n - s]G = -[s]G` and injectivity on `[0, n)`.
+    None of the five group fields is derived here from the addition formulas. -/
+structure Curve.PrimeOrderGroup (C : Curve) (G : Point) (n : Nat) : Prop where
+  p_prime  : IsPrime C.p
+  p_odd    : C.p % 2 = 1
+  n_odd    : n % 2 = 1
+  onCurve  : ∀ k, C.OnCurve (C.smul k G)
+  smul_add : ∀ a b, C.smul (a + b) G = C.add (C.smul a G) (C.smul b G)
+  order    : C.smul n G = none
+  exact    : ∀ k, 0 < k → k < n → C.smul k G ≠ none
+
+namespace Curve.PrimeOrderGroup
+
+variable {C : Curve} {G : Point} {n : Nat}
+
+/-- `[n - s]G = -[s]G`. -/
+theorem smul_neg (h : C.PrimeOrderGroup G n) {s : Nat} (h0 : 0 < s) (hs : s < n) :
+    C.smul (n - s) G = C.neg (C.smul s G) := by
+  have hSum : C.add (C.smul s G) (C.smul (n - s) G) = none := by
+    rw [← h.smul_add, (by omega : s + (n - s) = n), h.order]
+  have hP := h.onCurve s
+  have hQ := h.onCurve (n - s)
+  cases hPe : C.smul s G with
+  | none => exact absurd hPe (h.exact s h0 hs)
+  | some P =>
+    cases hQe : C.smul (n - s) G with
+    | none => exact absurd hQe (h.exact (n - s) (by omega) (by omega))
+    | some Q =>
+      rw [hPe] at hP hSum
+      rw [hQe] at hQ hSum
+      exact (C.add_eq_none_iff_neg hP hQ).mp hSum
+
+private theorem smul_ne_of_lt (h : C.PrimeOrderGroup G n) {a b : Nat} (hab : a < b) (hb : b < n) :
+    C.smul a G ≠ C.smul b G := by
+  intro hEq
+  have h1 : C.smul (n - a + b) G = none := by
+    rw [h.smul_add, ← hEq, ← h.smul_add, (by omega : n - a + a = n), h.order]
+  have h2 : C.smul (n - a + b) G = C.smul (b - a) G := by
+    rw [(by omega : n - a + b = n + (b - a)), h.smul_add, h.order]
+    rfl
+  exact h.exact (b - a) (by omega) (by omega) (h2.symm.trans h1)
+
+/-- `s ↦ [s]G` is injective on `[0, n)`. -/
+theorem smul_injective (h : C.PrimeOrderGroup G n) {a b : Nat} (ha : a < n) (hb : b < n)
+    (hEq : C.smul a G = C.smul b G) : a = b := by
+  rcases Nat.lt_trichotomy a b with hlt | heq | hgt
+  · exact absurd hEq (h.smul_ne_of_lt hlt hb)
+  · exact heq
+  · exact absurd hEq.symm (h.smul_ne_of_lt hgt ha)
+
+/-- No multiple `[s]G`, `0 < s < n`, has `y = 0`: such a point is its own negative, and
+    `[n - s]G = [s]G` contradicts injectivity because `n` is odd. -/
+theorem smul_y_ne_zero (h : C.PrimeOrderGroup G n) {s x y : Nat} (h0 : 0 < s) (hs : s < n)
+    (hP : C.smul s G = some (x, y)) : y ≠ 0 := by
+  intro hy
+  subst hy
+  have hNeg := h.smul_neg h0 hs
+  rw [hP] at hNeg
+  have hSelf : C.neg (some (x, 0)) = some (x, 0) := by
+    show (some (x, (C.p - 0) % C.p) : Point) = some (x, 0)
+    rw [Nat.sub_zero, Nat.mod_self]
+  rw [hSelf, ← hP] at hNeg
+  have := h.smul_injective (by omega) hs hNeg
+  have := h.n_odd
+  omega
+
+/-- **Curve-point x-only and parity laws.** For a generator `G` of odd order `n` on a
+    short-Weierstrass curve over an odd prime field:
+    1. `[s₁]G` and `[s₂]G` (`0 < sᵢ < n`) have one affine `x`-coordinate exactly when
+       `s₂ = s₁` or `s₂ = n - s₁`;
+    2. `[n - s]G = -[s]G`, and the least significant bits of the two affine
+       `y`-coordinates differ. -/
+theorem xonly_parity_laws (h : C.PrimeOrderGroup G n) :
+    (∀ s1 s2, 0 < s1 → s1 < n → 0 < s2 → s2 < n →
+      (Point.x (C.smul s1 G) = Point.x (C.smul s2 G) ↔ (s1 = s2 ∨ s2 = n - s1))) ∧
+    (∀ s, 0 < s → s < n →
+      C.smul (n - s) G = C.neg (C.smul s G) ∧
+      Point.yOdd (C.smul (n - s) G) = !(Point.yOdd (C.smul s G))) := by
+  constructor
+  · intro s1 s2 p1 l1 p2 l2
+    constructor
+    · intro hx
+      have hC1 := h.onCurve s1
+      have hC2 := h.onCurve s2
+      have hNeg := h.smul_neg p1 l1
+      cases hP : C.smul s1 G with
+      | none => exact absurd hP (h.exact s1 p1 l1)
+      | some P =>
+        cases hQ : C.smul s2 G with
+        | none => exact absurd hQ (h.exact s2 p2 l2)
+        | some Q =>
+          obtain ⟨x1, y1⟩ := P
+          obtain ⟨x2, y2⟩ := Q
+          rw [hP, hQ] at hx
+          have hxe : x1 = x2 := Option.some.inj hx
+          subst hxe
+          rw [hP] at hC1 hNeg
+          rw [hQ] at hC2
+          rcases C.eq_or_eq_neg_of_same_x h.p_prime hC1 hC2 with hEq | hEq
+          · exact Or.inl (h.smul_injective l1 l2 (hP.trans (hEq.symm.trans hQ.symm)))
+          · exact Or.inr (h.smul_injective l2 (by omega) (hQ.trans (hEq.trans hNeg.symm)))
+    · rintro (hEq | hEq)
+      · rw [hEq]
+      · rw [hEq, h.smul_neg p1 l1, C.neg_x]
+  · intro s p l
+    have hNeg := h.smul_neg p l
+    refine ⟨hNeg, ?_⟩
+    have hC := h.onCurve s
+    cases hP : C.smul s G with
+    | none => exact absurd hP (h.exact s p l)
+    | some P =>
+      obtain ⟨x, y⟩ := P
+      rw [hP] at hC
+      rw [hNeg, hP]
+      exact neg_y_parity h.p_odd (Nat.pos_of_ne_zero (h.smul_y_ne_zero p l hP)) hC.2.1
+
+/-- The projection whose `xOf` and `yParity` are the affine `x`-coordinate and the
+    `y`-coordinate's least significant bit of the curve point `[s]G`. -/
+def projection (h : C.PrimeOrderGroup G n) : TaprootCurveProjection n (Option Nat) where
+  xOf s := Point.x (C.smul s G)
+  yParity s := Point.yOdd (C.smul s G)
+  sameX_iff := h.xonly_parity_laws.1
+  yParity_neg s p l := (h.xonly_parity_laws.2 s p l).2
+
+end Curve.PrimeOrderGroup
+
+/-- A point of order two keeps its parity under negation: on `y² = x³ + 7` over `ℤ/7`
+    the point `(0, 0)` is its own negative. `PrimeOrderGroup.n_odd` excludes this. -/
+theorem tooth_two_torsion_point_is_its_own_negative :
+    ∃ (C : Curve) (P : Point), C.OnCurve P ∧ P ≠ none ∧ C.p % 2 = 1 ∧
+      Point.yOdd (C.neg P) = Point.yOdd P ∧ C.smul 2 P = none := by
+  refine ⟨⟨7, 0, 7⟩, some (0, 0), ?_, ?_, ?_, ?_, ?_⟩ <;> decide
+
+#tooth_pair
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
+  vs
+  Qsag.Weierstrass.tooth_two_torsion_point_is_its_own_negative
+
+/-! #### A complete instance: `y² = x³ + 7` over `ℤ/43`, generator `(2, 12)`, order `31`
+
+The same equation as `secp256k1` (`a = 0`, `b = 7`, `p ≡ 3 mod 4`, `p ≡ 1 mod 3`) over a
+field small enough for the kernel to check the whole group table. -/
+
+def secp7Mod43 : Curve := ⟨43, 0, 7⟩
+
+def secp7Mod43G : Point := some (2, 12)
+
+private theorem prime43 : IsPrime 43 := by
+  refine ⟨by decide, fun d hd => ?_⟩
+  have key : ∀ d, d < 44 → d ∣ 43 → d = 1 ∨ d = 43 := by decide
+  exact key d (Nat.lt_succ_of_le (Nat.le_of_dvd (by decide) hd)) hd
+
+private theorem secp7Mod43_table :
+    ∀ i, i < 31 → ∀ j, j < 31 →
+      secp7Mod43.add (secp7Mod43.smul i secp7Mod43G) (secp7Mod43.smul j secp7Mod43G) =
+        secp7Mod43.smul ((i + j) % 31) secp7Mod43G := by
+  decide +kernel
+
+private theorem secp7Mod43_periodic : ∀ k,
+    secp7Mod43.smul k secp7Mod43G = secp7Mod43.smul (k % 31) secp7Mod43G := by
+  intro k
+  induction k with
+  | zero => rfl
+  | succ k ih =>
+    have hStep := secp7Mod43_table (k % 31) (Nat.mod_lt _ (by decide)) 1 (by decide)
+    have hOne : secp7Mod43.smul 1 secp7Mod43G = secp7Mod43G := rfl
+    rw [hOne] at hStep
+    show secp7Mod43.add (secp7Mod43.smul k secp7Mod43G) secp7Mod43G = _
+    rw [ih, hStep, (by omega : (k % 31 + 1) % 31 = (k + 1) % 31)]
+
+/-- The generator `(2, 12)` of `y² = x³ + 7` over `ℤ/43` has exact order `31`, and
+    all seven `PrimeOrderGroup` facts hold; the group table is checked by the kernel. -/
+theorem secp7Mod43_group : secp7Mod43.PrimeOrderGroup secp7Mod43G 31 where
+  p_prime := prime43
+  p_odd := by decide
+  n_odd := by decide
+  onCurve k := by
+    have key : ∀ i, i < 31 → secp7Mod43.OnCurve (secp7Mod43.smul i secp7Mod43G) := by
+      decide +kernel
+    rw [secp7Mod43_periodic]
+    exact key _ (Nat.mod_lt _ (by decide))
+  smul_add a b := by
+    calc secp7Mod43.smul (a + b) secp7Mod43G
+        = secp7Mod43.smul ((a + b) % 31) secp7Mod43G := secp7Mod43_periodic _
+      _ = secp7Mod43.smul ((a % 31 + b % 31) % 31) secp7Mod43G := by
+          rw [(by omega : (a + b) % 31 = (a % 31 + b % 31) % 31)]
+      _ = secp7Mod43.add (secp7Mod43.smul (a % 31) secp7Mod43G)
+            (secp7Mod43.smul (b % 31) secp7Mod43G) :=
+          (secp7Mod43_table _ (Nat.mod_lt _ (by decide)) _ (Nat.mod_lt _ (by decide))).symm
+      _ = secp7Mod43.add (secp7Mod43.smul a secp7Mod43G) (secp7Mod43.smul b secp7Mod43G) := by
+          rw [← secp7Mod43_periodic a, ← secp7Mod43_periodic b]
+  order := by decide +kernel
+  exact k h0 hk := by
+    have key : ∀ i, i < 31 → 0 < i → secp7Mod43.smul i secp7Mod43G ≠ none := by
+      decide +kernel
+    exact key k hk h0
+
+theorem inhabited_prime_order_curve_group :
+    ∃ (C : Curve) (G : Point) (n : Nat), C.PrimeOrderGroup G n :=
+  ⟨secp7Mod43, secp7Mod43G, 31, secp7Mod43_group⟩
+
+#verify_inhabited
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
+  Qsag.Weierstrass.inhabited_prime_order_curve_group
+
+/-- The curve-point projection on `y² = x³ + 7` over `ℤ/43`. -/
+def secp7Mod43Projection : TaprootCurveProjection 31 (Option Nat) :=
+  secp7Mod43_group.projection
+
+/-- Concrete coordinates behind the projection: `[1]G = (2, 12)` and `[30]G = (2, 31)`
+    share `x = 2` with opposite parity, `[2]G = (7, 7)` has another `x`, and the
+    compressed encoding separates all thirty nonzero multiples. -/
+theorem secp7Mod43_projection_coordinates :
+    secp7Mod43.smul 1 secp7Mod43G = some (2, 12) ∧
+    secp7Mod43.smul 30 secp7Mod43G = some (2, 31) ∧
+    secp7Mod43.smul 2 secp7Mod43G = some (7, 7) ∧
+    secp7Mod43Projection.xOf 1 = secp7Mod43Projection.xOf 30 ∧
+    secp7Mod43Projection.yParity 1 = false ∧
+    secp7Mod43Projection.yParity 30 = true ∧
+    (∀ s1 s2, 0 < s1 → s1 < 31 → 0 < s2 → s2 < 31 →
+      secp7Mod43Projection.xOf s1 = secp7Mod43Projection.xOf s2 →
+      secp7Mod43Projection.yParity s1 = secp7Mod43Projection.yParity s2 → s1 = s2) :=
+  ⟨by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, by decide +kernel, secp7Mod43Projection.compressed_injective.1⟩
+
+/-! #### `secp256k1`
+
+Checked by the kernel: the field prime and generator limbs of `secp256k1_ct.rs:8-40`,
+`p` and `n` odd, `p ≡ 3 (mod 4)`, `a = 0`, `b = 7`, and `G` on the curve. Not checked:
+primality of `p` and the four group facts of `PrimeOrderGroup` for `G` (closure of its
+multiples, the homomorphism law, `[n]G = O`, exact order). They are the hypothesis
+`Secp256k1GroupLaws`; SEC 2 v2.0 §2.4.1 states them for these parameters. -/
+
+/-- `secp256k1` field prime `p = 2^256 - 2^32 - 977` (`secp256k1_ct.rs:8-13`). -/
+def SECP256K1_FIELD_P : Nat :=
+  0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+
+def secp256k1FieldLimbsLe : Fin 4 → UInt64
+  | ⟨0, _⟩ => 0xFFFFFFFEFFFFFC2F
+  | ⟨1, _⟩ => 0xFFFFFFFFFFFFFFFF
+  | ⟨2, _⟩ => 0xFFFFFFFFFFFFFFFF
+  | ⟨3, _⟩ => 0xFFFFFFFFFFFFFFFF
+
+/-- `SECP_GX` (`secp256k1_ct.rs:27-32`). -/
+def secp256k1GxLimbsLe : Fin 4 → UInt64
+  | ⟨0, _⟩ => 0x59F2815B16F81798
+  | ⟨1, _⟩ => 0x029BFCDB2DCE28D9
+  | ⟨2, _⟩ => 0x55A06295CE870B07
+  | ⟨3, _⟩ => 0x79BE667EF9DCBBAC
+
+/-- `SECP_GY` (`secp256k1_ct.rs:35-40`). -/
+def secp256k1GyLimbsLe : Fin 4 → UInt64
+  | ⟨0, _⟩ => 0x9C47D08FFB10D4B8
+  | ⟨1, _⟩ => 0xFD17B448A6855419
+  | ⟨2, _⟩ => 0x5DA4FBFC0E1108A8
+  | ⟨3, _⟩ => 0x483ADA7726A3C465
+
+/-- `y² = x³ + 7` over `ℤ/p` (`secp256k1_ct.rs:1-2`). -/
+def secp256k1Curve : Curve := ⟨SECP256K1_FIELD_P, 0, 7⟩
+
+/-- The standard generator (SEC 2 v2.0 §2.4.1). -/
+def secp256k1G : Point :=
+  some (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,
+        0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)
+
+theorem secp256k1_checked_parameters :
+    SECP256K1_FIELD_P = 2 ^ 256 - 2 ^ 32 - 977 ∧
+    limbs4LeToNat secp256k1FieldLimbsLe = SECP256K1_FIELD_P ∧
+    secp256k1G = some (limbs4LeToNat secp256k1GxLimbsLe, limbs4LeToNat secp256k1GyLimbsLe) ∧
+    secp256k1Curve.p % 2 = 1 ∧ secp256k1Curve.p % 4 = 3 ∧
+    secp256k1Curve.a = 0 ∧ secp256k1Curve.b = 7 ∧
+    SECP256K1_ORDER_N % 2 = 1 ∧ 2 < SECP256K1_ORDER_N ∧
+    secp256k1Curve.OnCurve secp256k1G ∧
+    secp256k1Curve.smul 1 secp256k1G = secp256k1G := by
+  refine ⟨by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel,
+    by decide +kernel, rfl, rfl, by decide +kernel, by decide +kernel, by decide +kernel, rfl⟩
+
+/-- The unproved group facts for the `secp256k1` generator: `p` prime, every multiple
+    of `G` on the curve, `[a + b]G = [a]G + [b]G`, `[n]G = O`, and `[k]G ≠ O` for
+    `0 < k < n`. The two parity fields are proved in `secp256k1_checked_parameters`. -/
+abbrev Secp256k1GroupLaws : Prop :=
+  secp256k1Curve.PrimeOrderGroup secp256k1G SECP256K1_ORDER_N
+
+end Weierstrass
+
+/-- The `secp256k1` projection: `xOf s` and `yParity s` are the affine `x`-coordinate
+    and the parity of the affine `y`-coordinate of the curve point `[s]G`. It exists
+    under `Weierstrass.Secp256k1GroupLaws`, which this file does not prove. -/
+def secp256k1TaprootProjection (h : Weierstrass.Secp256k1GroupLaws) :
+    TaprootCurveProjection SECP256K1_ORDER_N (Option Nat) :=
+  h.projection
+
+/-- The Taproot statement about `secp256k1` curve points, conditional on
+    `Weierstrass.Secp256k1GroupLaws`: among canonical scalars, `[s₁]G` and `[s₂]G` have
+    one affine `x`-coordinate exactly when `s₂ = s₁` or `s₂ = n - s₁`, negating the
+    scalar flips the parity of the affine `y`-coordinate, and `x` together with that
+    parity determines the scalar. -/
+theorem secp256k1_xonly_parity_on_curve_points (h : Weierstrass.Secp256k1GroupLaws) :
+    (∀ s1 s2 : BitVec 256,
+      requireCanonicalScalar .Secp256k1 s1 = true →
+      requireCanonicalScalar .Secp256k1 s2 = true →
+      (Weierstrass.Point.x (Weierstrass.secp256k1Curve.smul s1.toNat Weierstrass.secp256k1G) =
+        Weierstrass.Point.x (Weierstrass.secp256k1Curve.smul s2.toNat Weierstrass.secp256k1G) ↔
+        taprootXOnlySameX s1 s2)) ∧
+    (∀ s : BitVec 256,
+      requireCanonicalScalar .Secp256k1 s = true →
+      Weierstrass.Point.yOdd
+          (Weierstrass.secp256k1Curve.smul (secpNegScalar s).toNat Weierstrass.secp256k1G) =
+        !(Weierstrass.Point.yOdd
+          (Weierstrass.secp256k1Curve.smul s.toNat Weierstrass.secp256k1G))) ∧
+    (∀ s1 s2 : BitVec 256,
+      requireCanonicalScalar .Secp256k1 s1 = true →
+      requireCanonicalScalar .Secp256k1 s2 = true →
+      Weierstrass.Point.x (Weierstrass.secp256k1Curve.smul s1.toNat Weierstrass.secp256k1G) =
+        Weierstrass.Point.x (Weierstrass.secp256k1Curve.smul s2.toNat Weierstrass.secp256k1G) →
+      Weierstrass.Point.yOdd (Weierstrass.secp256k1Curve.smul s1.toNat Weierstrass.secp256k1G) =
+        Weierstrass.Point.yOdd (Weierstrass.secp256k1Curve.smul s2.toNat Weierstrass.secp256k1G) →
+      s1 = s2) :=
+  ⟨(secp256k1TaprootProjection h).sameX_iff_canonical,
+    (secp256k1TaprootProjection h).yParity_neg_canonical,
+    (taproot_even_y_parity_restores_canonical_injectivity (secp256k1TaprootProjection h)).2.1⟩
 
 /-- RFC 8032 / SLIP-0010 Ed25519 scalar clamping on 32 little-endian digest bytes (`legacy.rs:260-262, 283-285`):
     clears low 3 bits (`h[0] &= 248`), clears bit 255 (`h[31] &= 127`), and sets bit 254 (`h[31] |= 64`). -/
@@ -2998,7 +3519,7 @@ def rustGf128Mul (a b : RustGf128) : RustGf128 :=
 def rustGf128OfLimbs (lo hi : UInt64) : RustGf128 :=
   BitVec.ofNat 128 (lo.toNat + 2^64 * hi.toNat)
 
-set_option maxRecDepth 65536 in
+set_option maxRecDepth 4096 in
 theorem rust_gf128_basis_kats :
     rustGf128Mul 2#128 2#128 = 4#128 ∧
     rustGf128Mul (BitVec.ofNat 128 (2^127)) 2#128 = 0x87#128 ∧
@@ -4124,6 +4645,414 @@ theorem inhabited_sacrifice_accepted :
 #verify_inhabited Qsag.MigrationExecution.sacrifice_accepted_coins_have_round_count
   Qsag.MigrationExecution.inhabited_sacrifice_accepted
 
+/-! ### The production flush: two lockstep instances over 64 lanes
+
+`verify_pending_bits_slice` (`outer_mpc.rs:1461-2108`) runs two instances `t ∈ {0, 1}`
+of the recursive sacrifice in lockstep on each of the 64 bitsliced lanes. One coin
+flip per round yields a coin pair `(r[0], r[1])`; instance `t` of every lane uses
+`r[t]` (`outer_mpc.rs:1818-1823`, `2039-2044`). Every reshared message of a round,
+for both instances and all lanes, precedes that round's coin flip, and the flush
+accepts only if all `2 × 64` base openings pass (`outer_mpc.rs:2091-2105`). The
+prover below is one strategy tree for the whole flush, so a message of either
+instance may depend on the earlier coins of both. -/
+
+/-- The coins `(r[0], r[1])` drawn by one coin flip. -/
+abbrev CoinPair := RustGf128 × RustGf128
+
+def coinAt (rk : CoinPair) (t : Fin 2) : RustGf128 := if t.val = 0 then rk.1 else rk.2
+
+/-- One inner-product claim per instance and lane. -/
+abbrev FlushClaims := Fin 2 → Fin 64 → IpClaim
+
+/-- An adaptive prover for the whole flush: all `2 × 64` messages of a round are
+    fixed before that round's coin pair. -/
+@[expose] def FlushProver : Nat → Type
+  | 0 => Fin 2 → Fin 64 → BaseMessage
+  | r + 1 => (Fin 2 → Fin 64 → FoldMessage) × (CoinPair → FlushProver r)
+
+def flushFold (cl : FlushClaims) (m : Fin 2 → Fin 64 → FoldMessage) (rk : CoinPair) :
+    FlushClaims :=
+  fun t lane => foldRound (cl t lane) (m t lane) (coinAt rk t)
+
+/-- All `2 × 64` base cases must pass (`diff_acc`, `outer_mpc.rs:2091-2105`). -/
+def flushBaseAccepts (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage) (rb : CoinPair) :
+    Bool :=
+  finAll 2 (fun t => finAll 64 (fun lane =>
+    decide ((cl t lane).len = 1) && baseAccepts (cl t lane) (bm t lane) (coinAt rb t)))
+
+/-- The flush base case is the `2 × 64` opening check `checkBaseOpenings`. -/
+theorem flushBaseAccepts_checks_all_openings (cl : FlushClaims)
+    (bm : Fin 2 → Fin 64 → BaseMessage) (rb : CoinPair)
+    (h : flushBaseAccepts cl bm rb = true) :
+    checkBaseOpenings (fun t lane =>
+      baseOpening ((cl t lane).a 0) ((cl t lane).b 0) (cl t lane).c
+        (bm t lane).u (bm t lane).v (bm t lane).d1 (bm t lane).d2 (coinAt rb t)) = true := by
+  unfold checkBaseOpenings
+  apply (finAll_eq_true_iff 2 _).mpr
+  intro t
+  apply (finAll_eq_true_iff 64 _).mpr
+  intro lane
+  have hl : (decide ((cl t lane).len = 1) &&
+      baseAccepts (cl t lane) (bm t lane) (coinAt rb t)) = true :=
+    (finAll_eq_true_iff 64 _).mp ((finAll_eq_true_iff 2 _).mp h t) lane
+  rw [Bool.and_eq_true] at hl
+  exact hl.2
+
+private theorem flushBaseAccepts_lane (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage)
+    (a b : RustGf128) (lane : Fin 64) (h : flushBaseAccepts cl bm (a, b) = true) :
+    (decide ((cl 0 lane).len = 1) && baseAccepts (cl 0 lane) (bm 0 lane) a) = true ∧
+    (decide ((cl 1 lane).len = 1) && baseAccepts (cl 1 lane) (bm 1 lane) b) = true :=
+  ⟨(finAll_eq_true_iff 64 _).mp ((finAll_eq_true_iff 2 _).mp h 0) lane,
+    (finAll_eq_true_iff 64 _).mp ((finAll_eq_true_iff 2 _).mp h 1) lane⟩
+
+/-- The flush verifier's decision on one vector of coin pairs. -/
+def flushAccepts : (r : Nat) → FlushProver r → FlushClaims → List CoinPair → Bool
+  | 0, bm, cl, [rb] => flushBaseAccepts cl bm rb
+  | 0, _, _, _ => false
+  | _ + 1, _, _, [] => false
+  | r + 1, p, cl, rk :: rest => flushAccepts r (p.2 rk) (flushFold cl p.1 rk) rest
+
+def coinPairs (L : List RustGf128) : List CoinPair :=
+  L.flatMap (fun a => L.map (fun b => (a, b)))
+
+/-- All coin-pair vectors: fold pairs from `S × S`, the base pair from `Sb × Sb`. -/
+def flushCoinVectors (S Sb : List RustGf128) : Nat → List (List CoinPair)
+  | 0 => (coinPairs Sb).map (fun rb => [rb])
+  | r + 1 => (coinPairs S).flatMap (fun rk => (flushCoinVectors S Sb r).map (fun rest => rk :: rest))
+
+/-- Number of accepting coin-pair vectors, computed along the strategy tree. -/
+def flushAccepting (S Sb : List RustGf128) : (r : Nat) → FlushProver r → FlushClaims → Nat
+  | 0, bm, cl => ((coinPairs Sb).filter (fun rb => flushBaseAccepts cl bm rb)).length
+  | r + 1, p, cl =>
+    ((coinPairs S).map (fun rk => flushAccepting S Sb r (p.2 rk) (flushFold cl p.1 rk))).sum
+
+/-- `flushAccepting` counts exactly the coin-pair vectors the flush verifier accepts. -/
+theorem flushAccepting_eq_filter (S Sb : List RustGf128) : ∀ (r : Nat) (p : FlushProver r)
+    (cl : FlushClaims),
+    flushAccepting S Sb r p cl =
+      ((flushCoinVectors S Sb r).filter (flushAccepts r p cl)).length := by
+  intro r
+  induction r with
+  | zero =>
+    intro p cl
+    show ((coinPairs Sb).filter (fun rb => flushBaseAccepts cl p rb)).length =
+      (((coinPairs Sb).map (fun rb => [rb])).filter (flushAccepts 0 p cl)).length
+    rw [filter_map_length]
+    rfl
+  | succ r ih =>
+    intro p cl
+    show ((coinPairs S).map (fun rk => flushAccepting S Sb r (p.2 rk) (flushFold cl p.1 rk))).sum =
+      (((coinPairs S).flatMap (fun rk => (flushCoinVectors S Sb r).map (fun rest => rk :: rest))).filter
+        (flushAccepts (r + 1) p cl)).length
+    rw [filter_flatMap_length]
+    congr 1
+    apply List.map_congr_left
+    intro rk _
+    rw [filter_map_length, ih]
+    rfl
+
+private theorem flatMap_map_length {α β γ : Type} (V : List β) (f : α → β → γ) : ∀ L : List α,
+    (L.flatMap (fun x => V.map (f x))).length = L.length * V.length
+  | [] => by
+    show (0 : Nat) = 0 * V.length
+    rw [Nat.zero_mul]
+  | x :: xs => by
+    rw [List.flatMap_cons, List.length_append, List.length_map, flatMap_map_length V f xs,
+      List.length_cons, Nat.succ_mul, Nat.add_comm]
+
+theorem coinPairs_length (L : List RustGf128) : (coinPairs L).length = L.length * L.length :=
+  flatMap_map_length L (fun a b => (a, b)) L
+
+/-- The coin space of one flush has `(|S|^r · |Sb|)²` points. -/
+theorem flushCoinVectors_length (S Sb : List RustGf128) : ∀ r,
+    (flushCoinVectors S Sb r).length =
+      (S.length ^ r * Sb.length) * (S.length ^ r * Sb.length) := by
+  intro r
+  induction r with
+  | zero =>
+    show ((coinPairs Sb).map (fun rb => [rb])).length = _
+    rw [List.length_map, coinPairs_length, Nat.pow_zero, Nat.one_mul]
+  | succ r ih =>
+    show ((coinPairs S).flatMap
+      (fun rk => (flushCoinVectors S Sb r).map (fun rest => rk :: rest))).length = _
+    rw [flatMap_map_length (flushCoinVectors S Sb r) (fun rk rest => rk :: rest), coinPairs_length,
+      ih, Nat.pow_succ]
+    generalize S.length ^ r = q
+    generalize S.length = n
+    generalize Sb.length = nb
+    simp only [Nat.mul_comm, Nat.mul_left_comm]
+
+private theorem filter_length_le_of_imp {α : Type} (p q : α → Bool)
+    (h : ∀ x, p x = true → q x = true) : ∀ L : List α,
+    (L.filter p).length ≤ (L.filter q).length
+  | [] => Nat.le_refl _
+  | x :: xs => by
+    have ih := filter_length_le_of_imp p q h xs
+    cases hp : p x
+    · cases hq : q x
+      · simpa only [List.filter, hp, hq] using ih
+      · simp only [List.filter, hp, hq, List.length_cons]
+        omega
+    · simp only [List.filter, hp, h x hp, List.length_cons]
+      omega
+
+private theorem filter_false_length {α : Type} : ∀ L : List α,
+    (L.filter (fun _ => false)).length = 0
+  | [] => rfl
+  | _ :: xs => by simpa only [List.filter] using filter_false_length xs
+
+private theorem sum_map_le_sum_map {α : Type} (f g : α → Nat) (h : ∀ x, f x ≤ g x) :
+    ∀ L : List α, (L.map f).sum ≤ (L.map g).sum
+  | [] => Nat.le_refl _
+  | x :: xs => by
+    have ih := sum_map_le_sum_map f g h xs
+    have hx := h x
+    show f x + (xs.map f).sum ≤ g x + (xs.map g).sum
+    omega
+
+private theorem sum_map_le_cases {α : Type} (bad : α → Bool) (X : α → Nat) (T B : Nat)
+    (hT : ∀ x, bad x = true → X x ≤ T) (hB : ∀ x, bad x = false → X x ≤ B) : ∀ L : List α,
+    (L.map X).sum ≤ (L.filter bad).length * T + L.length * B
+  | [] => by
+    show (0 : Nat) ≤ 0 * T + 0 * B
+    omega
+  | x :: xs => by
+    have ih := sum_map_le_cases bad X T B hT hB xs
+    cases hb : bad x
+    · have hx := hB x hb
+      simp only [List.map_cons, List.sum_cons, List.filter, hb, List.length_cons, Nat.succ_mul]
+      omega
+    · have hx := hT x hb
+      simp only [List.map_cons, List.sum_cons, List.filter, hb, List.length_cons, Nat.succ_mul]
+      omega
+
+private theorem sum_map_const_mul {β : Type} (c : Nat) (g : β → Nat) : ∀ M : List β,
+    (M.map (fun b => c * g b)).sum = c * (M.map g).sum
+  | [] => by
+    show (0 : Nat) = c * 0
+    rw [Nat.mul_zero]
+  | y :: ys => by
+    show c * g y + (ys.map (fun b => c * g b)).sum = c * (g y + (ys.map g).sum)
+    rw [sum_map_const_mul c g ys, Nat.mul_add]
+
+private theorem sum_sum_mul {α β : Type} (f : α → Nat) (g : β → Nat) (M : List β) :
+    ∀ L : List α,
+      (L.map (fun a => (M.map (fun b => f a * g b)).sum)).sum = (L.map f).sum * (M.map g).sum
+  | [] => by
+    show (0 : Nat) = 0 * (M.map g).sum
+    rw [Nat.zero_mul]
+  | x :: xs => by
+    show (M.map (fun b => f x * g b)).sum +
+        (xs.map (fun a => (M.map (fun b => f a * g b)).sum)).sum =
+      (f x + (xs.map f).sum) * (M.map g).sum
+    rw [sum_sum_mul f g M xs, sum_map_const_mul (f x) g M, Nat.add_mul]
+
+private theorem sum_map_append {α : Type} (f : α → Nat) : ∀ A B : List α,
+    ((A ++ B).map f).sum = (A.map f).sum + (B.map f).sum
+  | [], B => by
+    show (B.map f).sum = 0 + (B.map f).sum
+    rw [Nat.zero_add]
+  | x :: xs, B => by
+    show f x + ((xs ++ B).map f).sum = f x + (xs.map f).sum + (B.map f).sum
+    rw [sum_map_append f xs B, Nat.add_assoc]
+
+private theorem sum_map_pairs (f : CoinPair → Nat) (M : List RustGf128) :
+    ∀ L : List RustGf128,
+      ((L.flatMap (fun a => M.map (fun b => (a, b)))).map f).sum =
+        (L.map (fun a => (M.map (fun b => f (a, b))).sum)).sum
+  | [] => rfl
+  | a :: as => by
+    rw [List.flatMap_cons, sum_map_append, sum_map_pairs f M as, List.map_map]
+    rfl
+
+private theorem filter_pairs_length (q : CoinPair → Bool) (M : List RustGf128) :
+    ∀ L : List RustGf128,
+      ((L.flatMap (fun a => M.map (fun b => (a, b)))).filter q).length =
+        (L.map (fun a => (M.filter (fun b => q (a, b))).length)).sum := by
+  intro L
+  rw [filter_flatMap_length]
+  congr 1
+  apply List.map_congr_left
+  intro a _
+  exact filter_map_length _ q M
+
+/-- Per-instance budget: the single-instance bad-coin bound when the claim is known
+    false, the whole coin space otherwise. -/
+private def laneWeight (n nb : Nat) (known : Bool) (r : Nat) : Nat :=
+  cond known (sacrificeBadCoinBound n nb r) (n ^ r * nb)
+
+private def foldedWeight (S Sb : List RustGf128) (s : IpClaim) (m : FoldMessage) (k : Bool)
+    (r : Nat) (rk : RustGf128) : Nat :=
+  laneWeight S.length Sb.length (k && decide ((foldRound s m rk).err ≠ 0#128)) r
+
+private theorem foldedWeight_sum_le (S Sb : List RustGf128) (hS : S.Nodup) (s : IpClaim)
+    (m : FoldMessage) (k : Bool) (hk : k = true → s.err ≠ 0#128) (r : Nat) :
+    (S.map (foldedWeight S Sb s m k r)).sum ≤ laneWeight S.length Sb.length k (r + 1) := by
+  cases k with
+  | true =>
+    have hErr := hk rfl
+    have hT : ∀ rk, decide ((foldRound s m rk).err = 0#128) = true →
+        foldedWeight S Sb s m true r rk ≤ S.length ^ r * Sb.length := by
+      intro rk hb
+      have hd : decide ((foldRound s m rk).err ≠ 0#128) = false :=
+        decide_eq_false (fun hne => hne (of_decide_eq_true hb))
+      show laneWeight S.length Sb.length (true && decide ((foldRound s m rk).err ≠ 0#128)) r ≤ _
+      rw [hd]
+      exact Nat.le_refl _
+    have hB : ∀ rk, decide ((foldRound s m rk).err = 0#128) = false →
+        foldedWeight S Sb s m true r rk ≤ sacrificeBadCoinBound S.length Sb.length r := by
+      intro rk hg
+      have hd : decide ((foldRound s m rk).err ≠ 0#128) = true :=
+        decide_eq_true (of_decide_eq_false hg)
+      show laneWeight S.length Sb.length (true && decide ((foldRound s m rk).err ≠ 0#128)) r ≤ _
+      rw [hd]
+      exact Nat.le_refl _
+    have hSplit := sum_map_le_cases (fun rk => decide ((foldRound s m rk).err = 0#128))
+      (foldedWeight S Sb s m true r) (S.length ^ r * Sb.length)
+      (sacrificeBadCoinBound S.length Sb.length r) hT hB S
+    have hBad := foldRound_false_claim_survives_at_most_two_coins s m hErr S hS
+    have hMul := Nat.mul_le_mul_right (S.length ^ r * Sb.length) hBad
+    show (S.map (foldedWeight S Sb s m true r)).sum ≤
+      2 * (S.length ^ r * Sb.length) + S.length * sacrificeBadCoinBound S.length Sb.length r
+    omega
+  | false =>
+    have hSplit := sum_map_le_cases (fun _ : RustGf128 => false)
+      (foldedWeight S Sb s m false r) 0 (S.length ^ r * Sb.length)
+      (fun _ hb => nomatch hb) (fun _ _ => Nat.le_refl _) S
+    show (S.map (foldedWeight S Sb s m false r)).sum ≤ S.length ^ (r + 1) * Sb.length
+    rw [Nat.pow_succ, Nat.mul_comm (S.length ^ r) S.length, Nat.mul_assoc]
+    omega
+
+private theorem flushAccepting_le_weights (S Sb : List RustGf128) (hS : S.Nodup)
+    (hSb : Sb.Nodup) (lane : Fin 64) :
+    ∀ (r : Nat) (p : FlushProver r) (cl : FlushClaims) (k0 k1 : Bool),
+      (k0 = true → (cl 0 lane).err ≠ 0#128) → (k1 = true → (cl 1 lane).err ≠ 0#128) →
+      flushAccepting S Sb r p cl ≤
+        laneWeight S.length Sb.length k0 r * laneWeight S.length Sb.length k1 r := by
+  intro r
+  induction r with
+  | zero =>
+    intro p cl k0 k1 h0 h1
+    have hCount : flushAccepting S Sb 0 p cl =
+        (Sb.map (fun a => (Sb.filter (fun b => flushBaseAccepts cl p (a, b))).length)).sum :=
+      filter_pairs_length (fun rb => flushBaseAccepts cl p rb) Sb Sb
+    have hInner : ∀ a, (Sb.filter (fun b => flushBaseAccepts cl p (a, b))).length ≤
+        (Sb.filter (fun b =>
+          decide ((cl 1 lane).len = 1) && baseAccepts (cl 1 lane) (p 1 lane) b)).length :=
+      fun a => filter_length_le_of_imp _ _
+        (fun b hb => (flushBaseAccepts_lane cl p a b lane hb).2) Sb
+    have hZero : ∀ a,
+        (decide ((cl 0 lane).len = 1) && baseAccepts (cl 0 lane) (p 0 lane) a) = false →
+        (Sb.filter (fun b => flushBaseAccepts cl p (a, b))).length ≤ 0 := by
+      intro a ha
+      have hle := filter_length_le_of_imp (fun b => flushBaseAccepts cl p (a, b))
+        (fun _ => false)
+        (fun b hb => nomatch (flushBaseAccepts_lane cl p a b lane hb).1.symm.trans ha) Sb
+      rw [filter_false_length] at hle
+      exact hle
+    have hSplit := sum_map_le_cases
+      (fun a => decide ((cl 0 lane).len = 1) && baseAccepts (cl 0 lane) (p 0 lane) a)
+      (fun a => (Sb.filter (fun b => flushBaseAccepts cl p (a, b))).length)
+      (Sb.filter (fun b =>
+        decide ((cl 1 lane).len = 1) && baseAccepts (cl 1 lane) (p 1 lane) b)).length 0
+      (fun a _ => hInner a) hZero Sb
+    have hC0 : (Sb.filter (fun a =>
+        decide ((cl 0 lane).len = 1) && baseAccepts (cl 0 lane) (p 0 lane) a)).length ≤
+        laneWeight S.length Sb.length k0 0 := by
+      cases k0 with
+      | true => exact baseAccepts_false_claim_at_most_two_coins (cl 0 lane) (p 0 lane) (h0 rfl) Sb hSb
+      | false =>
+        show _ ≤ S.length ^ 0 * Sb.length
+        rw [Nat.pow_zero, Nat.one_mul]
+        exact List.length_filter_le _ _
+    have hC1 : (Sb.filter (fun b =>
+        decide ((cl 1 lane).len = 1) && baseAccepts (cl 1 lane) (p 1 lane) b)).length ≤
+        laneWeight S.length Sb.length k1 0 := by
+      cases k1 with
+      | true => exact baseAccepts_false_claim_at_most_two_coins (cl 1 lane) (p 1 lane) (h1 rfl) Sb hSb
+      | false =>
+        show _ ≤ S.length ^ 0 * Sb.length
+        rw [Nat.pow_zero, Nat.one_mul]
+        exact List.length_filter_le _ _
+    rw [hCount]
+    exact Nat.le_trans hSplit (by
+      rw [Nat.mul_zero, Nat.add_zero]
+      exact Nat.mul_le_mul hC0 hC1)
+  | succ r ih =>
+    intro p cl k0 k1 h0 h1
+    have hCount : flushAccepting S Sb (r + 1) p cl =
+        (S.map (fun a => (S.map (fun b =>
+          flushAccepting S Sb r (p.2 (a, b)) (flushFold cl p.1 (a, b)))).sum)).sum :=
+      sum_map_pairs (fun rk => flushAccepting S Sb r (p.2 rk) (flushFold cl p.1 rk)) S S
+    have hIH : ∀ a b, flushAccepting S Sb r (p.2 (a, b)) (flushFold cl p.1 (a, b)) ≤
+        foldedWeight S Sb (cl 0 lane) (p.1 0 lane) k0 r a *
+          foldedWeight S Sb (cl 1 lane) (p.1 1 lane) k1 r b := by
+      intro a b
+      refine ih (p.2 (a, b)) (flushFold cl p.1 (a, b))
+        (k0 && decide ((foldRound (cl 0 lane) (p.1 0 lane) a).err ≠ 0#128))
+        (k1 && decide ((foldRound (cl 1 lane) (p.1 1 lane) b).err ≠ 0#128)) ?_ ?_
+      · intro hk
+        rw [Bool.and_eq_true] at hk
+        exact of_decide_eq_true hk.2
+      · intro hk
+        rw [Bool.and_eq_true] at hk
+        exact of_decide_eq_true hk.2
+    rw [hCount]
+    calc (S.map (fun a => (S.map (fun b =>
+            flushAccepting S Sb r (p.2 (a, b)) (flushFold cl p.1 (a, b)))).sum)).sum
+        ≤ (S.map (fun a => (S.map (fun b =>
+            foldedWeight S Sb (cl 0 lane) (p.1 0 lane) k0 r a *
+              foldedWeight S Sb (cl 1 lane) (p.1 1 lane) k1 r b)).sum)).sum :=
+          sum_map_le_sum_map _ _ (fun a => sum_map_le_sum_map _ _ (fun b => hIH a b) S) S
+      _ = (S.map (foldedWeight S Sb (cl 0 lane) (p.1 0 lane) k0 r)).sum *
+            (S.map (foldedWeight S Sb (cl 1 lane) (p.1 1 lane) k1 r)).sum :=
+          sum_sum_mul _ _ S S
+      _ ≤ laneWeight S.length Sb.length k0 (r + 1) * laneWeight S.length Sb.length k1 (r + 1) :=
+          Nat.mul_le_mul (foldedWeight_sum_le S Sb hS _ _ k0 h0 r)
+            (foldedWeight_sum_le S Sb hS _ _ k1 h1 r)
+
+/-- **Two-instance, 64-lane flush soundness, fresh coin pairs, adaptive prover.** If
+    both instances' inner-product claims of one lane are false, then for any flush
+    strategy tree the accepting coin-pair vectors number at most
+    `sacrificeBadCoinBound²`: out of `(|S|^r · |Sb|)²` vectors, a fraction of at most
+    `(2r/|S| + 2/|Sb|)²`. The other 63 lanes and the cross-instance adaptivity do not
+    help the prover. -/
+theorem flush_false_lane_accepting_coins_bound
+    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) (r : Nat) (p : FlushProver r)
+    (cl : FlushClaims) (lane : Fin 64)
+    (h0 : (cl 0 lane).err ≠ 0#128) (h1 : (cl 1 lane).err ≠ 0#128) :
+    flushAccepting S Sb r p cl ≤
+      sacrificeBadCoinBound S.length Sb.length r * sacrificeBadCoinBound S.length Sb.length r :=
+  flushAccepting_le_weights S Sb hS hSb lane r p cl true true (fun _ => h0) (fun _ => h1)
+
+/-- With only instance `0` of the lane false, the bound is the single-instance one
+    times the whole coin space of the other instance. -/
+theorem flush_one_false_instance_accepting_coins_bound
+    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) (r : Nat) (p : FlushProver r)
+    (cl : FlushClaims) (lane : Fin 64) (h0 : (cl 0 lane).err ≠ 0#128) :
+    flushAccepting S Sb r p cl ≤
+      sacrificeBadCoinBound S.length Sb.length r * (S.length ^ r * Sb.length) :=
+  flushAccepting_le_weights S Sb hS hSb lane r p cl true false (fun _ => h0) (fun h => nomatch h)
+
+/-- The mutant base case that checks lane `0` only. -/
+def flushBaseAcceptsLaneZeroOnly (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage)
+    (rb : CoinPair) : Bool :=
+  finAll 2 (fun t => decide ((cl t 0).len = 1) && baseAccepts (cl t 0) (bm t 0) (coinAt rb t))
+
+/-- Checking one lane lets a false claim in another lane through; the real base
+    case rejects it. -/
+theorem tooth_flush_single_lane_check_accepts_false_lane :
+    ∃ (cl : FlushClaims) (bm : Fin 2 → Fin 64 → BaseMessage) (lane : Fin 64) (rb : CoinPair),
+      (cl 0 lane).err ≠ 0#128 ∧ (cl 1 lane).err ≠ 0#128 ∧
+      flushBaseAcceptsLaneZeroOnly cl bm rb = true ∧
+      flushBaseAccepts cl bm rb = false := by
+  refine ⟨fun _ lane => ⟨1, fun _ => 1#128, fun _ => 1#128, if lane.val = 0 then 1#128 else 0#128⟩,
+    fun _ _ => ⟨0#128, 0#128, 0#128, 0#128⟩, 1, (1#128, 1#128),
+    by decide +kernel, by decide +kernel, by decide +kernel, by decide +kernel⟩
+
+#tooth_pair Qsag.MigrationExecution.flush_false_lane_accepting_coins_bound vs
+  Qsag.MigrationExecution.tooth_flush_single_lane_check_accepts_false_lane
+
 /-- Public statement fields stay separate; epoch is bounded rather than an
     unbounded natural silently truncated by a serializer. Authorization must bind
     this entire statement, including the destination. -/
@@ -4647,6 +5576,22 @@ end MigrationExecution
   Qsag.multi_turn_hardened_ceremony_trace_safe
   Qsag.inhabited_migration_256_zero_test_and_tooth
   Qsag.inhabited_coin_permuted_bucketing_witness
+  Qsag.TaprootCurveProjection.compressed_injective
+  Qsag.TaprootCurveProjection.tooth_xonly_not_injective
+  Qsag.Weierstrass.IsPrime.dvd_mul
+  Qsag.Weierstrass.Curve.neg_onCurve
+  Qsag.Weierstrass.neg_y_parity
+  Qsag.Weierstrass.Curve.eq_or_eq_neg_of_same_x
+  Qsag.Weierstrass.Curve.add_eq_none_iff_neg
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_neg
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_injective
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.smul_y_ne_zero
+  Qsag.Weierstrass.Curve.PrimeOrderGroup.xonly_parity_laws
+  Qsag.Weierstrass.tooth_two_torsion_point_is_its_own_negative
+  Qsag.Weierstrass.secp7Mod43_group
+  Qsag.Weierstrass.secp7Mod43_projection_coordinates
+  Qsag.Weierstrass.secp256k1_checked_parameters
+  Qsag.secp256k1_xonly_parity_on_curve_points
 
 /-- Rust runs seven independent 64-lane engines, using 438 of their 448 lanes. -/
 def migrationMitRepetitions : Nat := 438
@@ -4681,6 +5626,308 @@ theorem witness_migration_batch_consistent :
 
 #verify_inhabited Qsag.migration_all_438_repetitions_same_witness
   Qsag.witness_migration_batch_consistent
+
+/-! ## 10. Seven engine forks × 64 lanes × two instances: the ceremony-level sacrifice bound
+
+`co_zk_mpc.rs:150-155, 232-239` evaluates `MIT_REPETITIONS.div_ceil(64) = 7` batches.
+Repetition `rep` is lane `rep % 64` of batch `rep / 64` (`co_zk_mpc.rs:237-246`,
+`279-282`). Each batch runs `compute_batch`, which ends in its own
+`verify_all_pending` (`co_zk_mpc.rs:320-325`), so every batch has its own flush with
+its own coin flips: a forked batch has a separate engine on the session
+`QSAG.OUTER.BATCH.V1 ‖ session ‖ batch` (`co_zk_mpc.rs:411-424`), and the unforked
+path flips fresh coins per flush on one engine (`outer_mpc.rs:1253-1259`). Any
+failing batch aborts the ceremony (`co_zk_mpc.rs:446-456`), before the
+`QSAG.OUTER.PRECOMMIT.V1` barrier and every opening (`co_zk_mpc.rs:193-198`).
+All 64 lanes of every batch are checked, the ten spare lanes of batch 6 included.
+
+The model here is the one of `flush_false_lane_accepting_coins_bound`, per fork:
+it starts at the first inner-product claims. That a wrong `AND` output in a lane
+makes both of the lane's first claims false, except on the `γ`-combiner and round-0
+coins (`2^-128` and `62 / 2^128` per instance in `outer_mpc.rs:29-33`), is not
+proved; it is the hypothesis `FalseRepetitionGivesFalseClaims` of
+`migration_false_statement_faces_sacrifice_in_every_repetition`. The prime-field
+checks of the same flush (`outer_mpc.rs:2196, 2474`) are not modelled. -/
+
+namespace MigrationExecution
+
+/-- The engine fork of a repetition, `rep / 64` (`co_zk_mpc.rs:237-246`). -/
+def repetitionFork (rep : Fin 438) : Fin 7 := ⟨rep.val / 64, by omega⟩
+
+/-- The bitsliced lane of a repetition inside its fork, `rep % 64`. -/
+def repetitionLane (rep : Fin 438) : Fin 64 := ⟨rep.val % 64, by omega⟩
+
+/-- Distinct repetitions occupy distinct `(fork, lane)` slots, the last fork uses
+    lanes `0..53` only, and the slot is the one `migrationRepetitionWitness` reads. -/
+theorem repetition_slot_geometry :
+    (∀ a b : Fin 438, repetitionFork a = repetitionFork b →
+      repetitionLane a = repetitionLane b → a = b) ∧
+    (∀ rep : Fin 438, repetitionFork rep = 6 → (repetitionLane rep).val < 54) ∧
+    (∀ (batches : MigrationWitnessBatches) (rep : Fin 438),
+      migrationRepetitionWitness batches rep =
+        extractRepetitionWitness (batches (repetitionFork rep)) (repetitionLane rep).val) := by
+  refine ⟨fun a b hf hl => ?_, fun rep hf => ?_, fun _ _ => rfl⟩
+  · have h1 : a.val / 64 = b.val / 64 := congrArg Fin.val hf
+    have h2 : a.val % 64 = b.val % 64 := congrArg Fin.val hl
+    exact Fin.ext (by omega)
+  · have h1 : rep.val / 64 = 6 := congrArg Fin.val hf
+    show rep.val % 64 < 54
+    omega
+
+/-- One flush coin vector per engine fork. -/
+abbrev CeremonyCoins := Fin 7 → List CoinPair
+
+/-- The ceremony prover: one flush strategy tree per fork. A fork's tree may be
+    chosen from the coins of all forks; `FalseRepetition.ownCoins` then removes the
+    dependence on the fork's own vector, whose coins reach the prover only through
+    its tree. Letting the tree see every other fork's whole vector covers every
+    interleaving of the concurrent forks. -/
+abbrev CeremonyProver (r : Nat) := Fin 7 → CeremonyCoins → FlushProver r
+
+def setForkCoins (coins : CeremonyCoins) (b : Fin 7) (v : List CoinPair) : CeremonyCoins :=
+  fun b' => if b' = b then v else coins b'
+
+/-- The ceremony proceeds only if the flush of every one of the seven forks accepts. -/
+def ceremonyAccepts (r : Nat) (p : CeremonyProver r) (cl : Fin 7 → FlushClaims)
+    (coins : CeremonyCoins) : Bool :=
+  finAll 7 (fun b => flushAccepts r (p b coins) (cl b) (coins b))
+
+/-- Repetition `rep` carries false first claims in both instances of its lane, and
+    its fork's strategy tree is fixed before that fork's coins. -/
+structure FalseRepetition (r : Nat) (p : CeremonyProver r) (cl : Fin 7 → FlushClaims)
+    (rep : Fin 438) : Prop where
+  ownCoins : ∀ (c : CeremonyCoins) (v : List CoinPair),
+    p (repetitionFork rep) (setForkCoins c (repetitionFork rep) v) = p (repetitionFork rep) c
+  false0 : (cl (repetitionFork rep) 0 (repetitionLane rep)).err ≠ 0#128
+  false1 : (cl (repetitionFork rep) 1 (repetitionLane rep)).err ≠ 0#128
+
+/-- **Ceremony weld, any coin supports.** For any repetition with false claims and any
+    coins of the other six forks, the coin vectors of the repetition's own fork on
+    which the seven-fork ceremony accepts number at most `sacrificeBadCoinBound²`. -/
+theorem ceremony_false_repetition_accepting_coins_bound
+    (S Sb : List RustGf128) (hS : S.Nodup) (hSb : Sb.Nodup) (r : Nat)
+    (p : CeremonyProver r) (cl : Fin 7 → FlushClaims) (rep : Fin 438)
+    (h : FalseRepetition r p cl rep) (others : CeremonyCoins) :
+    ((flushCoinVectors S Sb r).filter (fun v =>
+      ceremonyAccepts r p cl (setForkCoins others (repetitionFork rep) v))).length ≤
+      sacrificeBadCoinBound S.length Sb.length r * sacrificeBadCoinBound S.length Sb.length r := by
+  have hImp : ∀ v, ceremonyAccepts r p cl (setForkCoins others (repetitionFork rep) v) = true →
+      flushAccepts r (p (repetitionFork rep) others) (cl (repetitionFork rep)) v = true := by
+    intro v hv
+    have hb : flushAccepts r
+        (p (repetitionFork rep) (setForkCoins others (repetitionFork rep) v))
+        (cl (repetitionFork rep))
+        (setForkCoins others (repetitionFork rep) v (repetitionFork rep)) = true :=
+      (finAll_eq_true_iff 7 _).mp hv (repetitionFork rep)
+    have hSelf : setForkCoins others (repetitionFork rep) v (repetitionFork rep) = v :=
+      cIte_pos rfl _ _
+    rw [h.ownCoins, hSelf] at hb
+    exact hb
+  have hLe := filter_length_le_of_imp
+    (fun v => ceremonyAccepts r p cl (setForkCoins others (repetitionFork rep) v))
+    (flushAccepts r (p (repetitionFork rep) others) (cl (repetitionFork rep))) hImp
+    (flushCoinVectors S Sb r)
+  have hB := flush_false_lane_accepting_coins_bound S Sb hS hSb r
+    (p (repetitionFork rep) others) (cl (repetitionFork rep)) (repetitionLane rep)
+    h.false0 h.false1
+  rw [flushAccepting_eq_filter] at hB
+  exact Nat.le_trans hLe hB
+
+/-- Fold coins: all of `GF(2^128)` (`squeeze_u128`, `outer_mpc.rs:236-240, 1818-1823`). -/
+def productionFoldCoins : List RustGf128 := (List.finRange (2 ^ 128)).map BitVec.ofFin
+
+/-- Base coins: the nonzero elements (`squeeze_nonzero_u128`, `outer_mpc.rs:242-249,
+    2039-2044`). -/
+def productionBaseCoins : List RustGf128 :=
+  (List.finRange (2 ^ 128 - 1)).map (fun i => BitVec.ofNat 128 (i.val + 1))
+
+theorem productionFoldCoins_card : productionFoldCoins.length = 2 ^ 128 := by
+  simp only [productionFoldCoins, List.length_map, List.length_finRange]
+
+theorem productionBaseCoins_card : productionBaseCoins.length = 2 ^ 128 - 1 := by
+  simp only [productionBaseCoins, List.length_map, List.length_finRange]
+
+theorem productionFoldCoins_nodup : productionFoldCoins.Nodup := by
+  apply List.pairwise_map.mpr
+  exact (List.nodup_finRange (2 ^ 128)).imp (fun hne heq => hne (BitVec.ofFin.inj heq))
+
+theorem productionBaseCoins_nodup : productionBaseCoins.Nodup := by
+  apply List.pairwise_map.mpr
+  refine (List.nodup_finRange (2 ^ 128 - 1)).imp (fun {a b} hne heq => hne ?_)
+  have hv := congrArg BitVec.toNat heq
+  have ha : a.val + 1 < 2 ^ 128 := by omega
+  have hb : b.val + 1 < 2 ^ 128 := by omega
+  rw [BitVec.toNat_ofNat, BitVec.toNat_ofNat, Nat.mod_eq_of_lt ha, Nat.mod_eq_of_lt hb] at hv
+  exact Fin.ext (by omega)
+
+/-- At the production supports and up to the thirteen binary folds of a full flush
+    (`MAX_PENDING_BITS / D0_BITS = 8192` blocks, `outer_mpc.rs:16-33`), the squared
+    bad-coin bound is below `2^-246` of the coin space, and the single-instance bound
+    is at most `28 / (2^128 - 1)`: the `2 · 13 + 2` fold and base terms of
+    `BIT_CHECK_DEGREE = 90`, whose other `62` belong to the unmodelled round 0. -/
+theorem production_sacrifice_bound : ∀ r, r ≤ 13 →
+    sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) r *
+        sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) r * 2 ^ 246 ≤
+      ((2 ^ 128) ^ r * (2 ^ 128 - 1)) * ((2 ^ 128) ^ r * (2 ^ 128 - 1)) ∧
+    sacrificeBadCoinBound (2 ^ 128) (2 ^ 128 - 1) r * (2 ^ 128 - 1) ≤
+      28 * ((2 ^ 128) ^ r * (2 ^ 128 - 1)) := by
+  decide +kernel
+
+/-- **Ceremony weld at the production geometry.** Seven forks, 64 lanes each, 438
+    repetitions, two lockstep instances, fold coins over `GF(2^128)`, nonzero base
+    coins, at most thirteen folds: a repetition with false claims survives on fewer
+    than `2^-246` of its fork's coin vectors, whatever the other forks' coins are. -/
+theorem migration_ceremony_false_repetition_below_2_pow_neg_246
+    (r : Nat) (hr : r ≤ 13) (p : CeremonyProver r) (cl : Fin 7 → FlushClaims) (rep : Fin 438)
+    (h : FalseRepetition r p cl rep) (others : CeremonyCoins) :
+    ((flushCoinVectors productionFoldCoins productionBaseCoins r).filter (fun v =>
+      ceremonyAccepts r p cl (setForkCoins others (repetitionFork rep) v))).length * 2 ^ 246 ≤
+      (flushCoinVectors productionFoldCoins productionBaseCoins r).length := by
+  have hB := ceremony_false_repetition_accepting_coins_bound productionFoldCoins
+    productionBaseCoins productionFoldCoins_nodup productionBaseCoins_nodup r p cl rep h others
+  rw [productionFoldCoins_card, productionBaseCoins_card] at hB
+  rw [flushCoinVectors_length, productionFoldCoins_card, productionBaseCoins_card]
+  exact Nat.le_trans (Nat.mul_le_mul_right _ hB) (production_sacrifice_bound r hr).1
+
+/-- Every fork's strategy tree is fixed before that fork's own coins. -/
+def ForkStrategiesPrecedeOwnCoins {r : Nat} (p : CeremonyProver r) : Prop :=
+  ∀ (b : Fin 7) (c : CeremonyCoins) (v : List CoinPair), p b (setForkCoins c b v) = p b c
+
+/-- The unproved link from the circuit to the sacrifice: a repetition whose witness
+    fails `rel` has false first inner-product claims in both instances of its lane.
+    In Rust this holds except on the `γ`-combiner and round-0 coins
+    (`outer_mpc.rs:1472-1476, 1583-1588`). -/
+def FalseRepetitionGivesFalseClaims (batches : MigrationWitnessBatches)
+    (rel : MigrationKey256 → Prop) (cl : Fin 7 → FlushClaims) : Prop :=
+  ∀ rep : Fin 438, ¬ rel (migrationRepetitionWitness batches rep) →
+    (cl (repetitionFork rep) 0 (repetitionLane rep)).err ≠ 0#128 ∧
+    (cl (repetitionFork rep) 1 (repetitionLane rep)).err ≠ 0#128
+
+/-- **Same witness, every repetition, every fork.** All 438 repetitions evaluate the
+    one shared witness (`migration_all_438_repetitions_same_witness`), so a statement
+    that is false for it is false in every repetition. Given the link from a false
+    repetition to false first claims in its lane (`hLink`, not proved here), every
+    repetition then faces the production bound in its own fork. -/
+theorem migration_false_statement_faces_sacrifice_in_every_repetition
+    (batches : MigrationWitnessBatches) (hB : MigrationBatchConsistent batches)
+    (rel : MigrationKey256 → Prop) (hFalse : ¬ rel (extractRepetitionWitness (batches 0) 0))
+    (r : Nat) (hr : r ≤ 13) (p : CeremonyProver r) (cl : Fin 7 → FlushClaims)
+    (hOwn : ForkStrategiesPrecedeOwnCoins p)
+    (hLink : FalseRepetitionGivesFalseClaims batches rel cl) :
+    ∀ (rep : Fin 438) (others : CeremonyCoins),
+      ¬ rel (migrationRepetitionWitness batches rep) ∧
+      ((flushCoinVectors productionFoldCoins productionBaseCoins r).filter (fun v =>
+        ceremonyAccepts r p cl (setForkCoins others (repetitionFork rep) v))).length * 2 ^ 246 ≤
+        (flushCoinVectors productionFoldCoins productionBaseCoins r).length := by
+  intro rep others
+  have hRep : ¬ rel (migrationRepetitionWitness batches rep) := by
+    rw [migration_all_438_repetitions_same_witness batches hB rep]
+    exact hFalse
+  obtain ⟨h0, h1⟩ := hLink rep hRep
+  exact ⟨hRep, migration_ceremony_false_repetition_below_2_pow_neg_246 r hr p cl rep
+    ⟨hOwn _, h0, h1⟩ others⟩
+
+/-- The strategy that sends one fixed message everywhere. -/
+def constFlushProver (fm : FoldMessage) (bm : BaseMessage) : (r : Nat) → FlushProver r
+  | 0 => fun _ _ => bm
+  | r + 1 => (fun _ _ => fm, fun _ => constFlushProver fm bm r)
+
+private theorem rustDot_zero_right (a : Nat → RustGf128) : ∀ n,
+    rustDot n a (fun _ => 0#128) = 0#128
+  | 0 => rfl
+  | n + 1 => by
+    show rustDot n a (fun _ => 0#128) ^^^ rustGf128Mul (a n) 0#128 = 0#128
+    rw [rustDot_zero_right a n, rustGf128Mul_zero_right, BitVec.xor_zero]
+
+/-- A false repetition at the production geometry: thirteen folds over `8192`
+    blocks, the last repetition `437` (fork 6, lane 53). -/
+theorem inhabited_false_repetition :
+    ∃ (p : CeremonyProver 13) (cl : Fin 7 → FlushClaims) (rep : Fin 438),
+      FalseRepetition 13 p cl rep := by
+  have hErr : (⟨8192, fun _ => 1#128, fun _ => 0#128, 1#128⟩ : IpClaim).err ≠ 0#128 := by
+    show rustDot 8192 (fun _ => 1#128) (fun _ => 0#128) ^^^ 1#128 ≠ 0#128
+    rw [rustDot_zero_right]
+    decide
+  exact ⟨fun _ _ => constFlushProver ⟨0#128, 0#128⟩ ⟨0#128, 0#128, 0#128, 0#128⟩ 13,
+    fun _ _ _ => ⟨8192, fun _ => 1#128, fun _ => 0#128, 1#128⟩, ⟨437, by decide⟩,
+    ⟨fun _ _ => rfl, hErr, hErr⟩⟩
+
+#verify_inhabited Qsag.MigrationExecution.migration_ceremony_false_repetition_below_2_pow_neg_246
+  Qsag.MigrationExecution.inhabited_false_repetition
+
+/-- The relation "the key is the scalar one" used by the witness below. -/
+def KeyIsScalarOne (k : MigrationKey256) : Prop := k = 1#256
+
+/-- The hypotheses of `migration_false_statement_faces_sacrifice_in_every_repetition`
+    hold together: seven consistent forks sharing the key `7`, the relation
+    `KeyIsScalarOne` it fails, coin-oblivious fork strategies, and claims that are
+    false in every lane. -/
+theorem inhabited_false_statement_ceremony :
+    ∃ (batches : MigrationWitnessBatches) (p : CeremonyProver 13) (cl : Fin 7 → FlushClaims),
+      MigrationBatchConsistent batches ∧
+      ¬ KeyIsScalarOne (extractRepetitionWitness (batches 0) 0) ∧
+      ForkStrategiesPrecedeOwnCoins p ∧
+      FalseRepetitionGivesFalseClaims batches KeyIsScalarOne cl := by
+  have hErr : (⟨8192, fun _ => 1#128, fun _ => 0#128, 1#128⟩ : IpClaim).err ≠ 0#128 := by
+    show rustDot 8192 (fun _ => 1#128) (fun _ => 0#128) ^^^ 1#128 ≠ 0#128
+    rw [rustDot_zero_right]
+    decide
+  have hW := shareUniformLanesCheck_implies_uniform_witness_across_lanes.2
+    ⟨1#256, 2#256, 4#256⟩ 0#256
+  have hKey : ¬ KeyIsScalarOne (extractRepetitionWitness
+      (buildWitnessLanes3 ⟨1#256, 2#256, 4#256⟩
+        (fun j => expandUniformLane64 ((0#256).getLsbD j.val))) 0) := by
+    intro h
+    have h7 := (hW.2 0 (by decide)).symm.trans h
+    revert h7
+    decide
+  exact ⟨fun _ => buildWitnessLanes3 ⟨1#256, 2#256, 4#256⟩
+      (fun j => expandUniformLane64 ((0#256).getLsbD j.val)),
+    fun _ _ => constFlushProver ⟨0#128, 0#128⟩ ⟨0#128, 0#128, 0#128, 0#128⟩ 13,
+    fun _ _ _ => ⟨8192, fun _ => 1#128, fun _ => 0#128, 1#128⟩,
+    ⟨fun _ => hW.1, fun _ => rfl⟩, hKey, fun _ _ _ => rfl, fun _ _ => ⟨hErr, hErr⟩⟩
+
+#verify_inhabited
+  Qsag.MigrationExecution.migration_false_statement_faces_sacrifice_in_every_repetition
+  Qsag.MigrationExecution.inhabited_false_statement_ceremony
+
+/-- The mutant ceremony gate that checks the flush of fork `0` only. -/
+def ceremonyAcceptsForkZeroOnly (r : Nat) (p : CeremonyProver r) (cl : Fin 7 → FlushClaims)
+    (coins : CeremonyCoins) : Bool :=
+  flushAccepts r (p 0 coins) (cl 0) (coins 0)
+
+/-- Checking one of the seven forks accepts a false repetition of another fork
+    (repetition `64`, fork 1, lane 0); the seven-fork gate rejects it. -/
+theorem tooth_ceremony_single_fork_check_accepts_false_repetition :
+    ∃ (p : CeremonyProver 0) (cl : Fin 7 → FlushClaims) (rep : Fin 438) (coins : CeremonyCoins),
+      FalseRepetition 0 p cl rep ∧
+      ceremonyAcceptsForkZeroOnly 0 p cl coins = true ∧
+      ceremonyAccepts 0 p cl coins = false := by
+  refine ⟨fun _ _ => constFlushProver ⟨0#128, 0#128⟩ ⟨0#128, 0#128, 0#128, 0#128⟩ 0,
+    fun b _ _ => ⟨1, fun _ => 1#128, fun _ => 1#128, if b.val = 0 then 1#128 else 0#128⟩,
+    ⟨64, by decide⟩, fun _ => [(1#128, 1#128)],
+    ⟨fun _ _ => rfl, by decide +kernel, by decide +kernel⟩, by decide +kernel, by decide +kernel⟩
+
+#tooth_pair Qsag.MigrationExecution.ceremony_false_repetition_accepting_coins_bound vs
+  Qsag.MigrationExecution.tooth_ceremony_single_fork_check_accepts_false_repetition
+
+#verify_constructive
+  Qsag.MigrationExecution.flushBaseAccepts_checks_all_openings
+  Qsag.MigrationExecution.flushAccepting_eq_filter
+  Qsag.MigrationExecution.flushCoinVectors_length
+  Qsag.MigrationExecution.flush_false_lane_accepting_coins_bound
+  Qsag.MigrationExecution.flush_one_false_instance_accepting_coins_bound
+  Qsag.MigrationExecution.tooth_flush_single_lane_check_accepts_false_lane
+  Qsag.MigrationExecution.repetition_slot_geometry
+  Qsag.MigrationExecution.ceremony_false_repetition_accepting_coins_bound
+  Qsag.MigrationExecution.productionFoldCoins_nodup
+  Qsag.MigrationExecution.productionBaseCoins_nodup
+  Qsag.MigrationExecution.production_sacrifice_bound
+  Qsag.MigrationExecution.migration_ceremony_false_repetition_below_2_pow_neg_246
+  Qsag.MigrationExecution.migration_false_statement_faces_sacrifice_in_every_repetition
+  Qsag.MigrationExecution.inhabited_false_repetition
+  Qsag.MigrationExecution.tooth_ceremony_single_fork_check_accepts_false_repetition
+
+end MigrationExecution
 
 end Qsag
 end

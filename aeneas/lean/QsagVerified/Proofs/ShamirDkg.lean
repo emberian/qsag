@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.Common
 public import QsagVerified.Proofs.Gf256

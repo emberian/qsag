@@ -6,7 +6,7 @@
 //! the codeword is a valid constant-sum word, and only then yields the endpoints.
 //! Every other opening (the randomizer, public-leaf endpoints, other parameter
 //! shapes) has no codeword at release time and uses the same hold, verify, release
-//! order with a local zero check.
+//! order with a consuming verified opening guard.
 //!
 //! [`OpenedCandidates`] owns the candidates from the moment they are reconstructed
 //! and wipes every encoding of them when it is dropped, so an error before the gate
@@ -14,6 +14,8 @@
 //! one [`OutputGate`] per party; nothing is released until every party's residual
 //! has been accepted.
 use alloc::vec::Vec;
+use alloc::boxed::Box;
+use qsag_verified::{ConsumingOpeningGuard2Lane, OpeningReleasePermit};
 use qsag_accel::ct::{ct_zeroize_bytes, ct_zeroize_u128s};
 use qsag_verified::fts_spn_guard::{
     FtsDeferredMacSession, WOTS_CS_BASE_W, WOTS_CS_CHAINS, WOTS_CS_TARGET_SUM,
@@ -137,9 +139,11 @@ impl Drop for OpenedCandidates {
 
 enum Held {
     Verified(Vec<FtsDeferredMacSession>),
-    Local {
+    Bound {
         values: Vec<u128>,
-        mac_verified: bool,
+        binding: [u8; 32],
+        guard: Option<Box<ConsumingOpeningGuard2Lane>>,
+        permit: Option<OpeningReleasePermit>,
     },
 }
 
@@ -152,6 +156,17 @@ fn verified_shape(params: &ParallelSeededParams) -> bool {
     params.winternitz_w == usize::from(WOTS_CS_BASE_W)
         && params.num_chains == WOTS_CS_CHAINS
         && params.target_sum as u64 == WOTS_CS_TARGET_SUM
+}
+
+fn candidate_binding(values: &[u128]) -> [u8; 32] {
+    let mut sponge = qsag_accel::keccak::Shake256::new();
+    sponge.absorb(b"QSAG.FTS.CANDIDATE_BINDING.V1");
+    sponge.absorb(&(values.len() as u64).to_be_bytes());
+    for value in values { sponge.absorb(&value.to_le_bytes()); }
+    sponge.finalize(0x1f);
+    let mut digest = [0; 32];
+    sponge.squeeze(&mut digest);
+    digest
 }
 
 impl OutputGate {
@@ -180,9 +195,11 @@ impl OutputGate {
             ct_zeroize_u128s(&mut values);
             Held::Verified(sessions)
         } else {
-            Held::Local {
-                values,
-                mac_verified: false,
+            let binding = candidate_binding(&values);
+            Held::Bound {
+                guard: Some(Box::new(ConsumingOpeningGuard2Lane::new(session, 0, binding,
+                    u64::from(spn_rounds == 48 && !values.is_empty())))),
+                values, binding, permit: None,
             }
         };
         Self { session, held }
@@ -200,13 +217,11 @@ impl OutputGate {
                 }
                 core::hint::black_box(sessions);
             }
-            Held::Local {
-                values,
-                mac_verified,
-            } => {
+            Held::Bound { values, guard, permit, .. } => {
                 ct_zeroize_u128s(values);
                 values.clear();
-                *mac_verified = false;
+                *guard = None;
+                *permit = None;
             }
         }
     }
@@ -225,12 +240,13 @@ impl OutputGate {
                 }
                 accepted
             }
-            Held::Local {
-                values,
-                mac_verified,
-            } => {
-                *mac_verified = !*mac_verified && !values.is_empty() && residual == [0, 0];
-                *mac_verified
+            Held::Bound { values, binding, guard, permit } => {
+                if let Some(gate) = guard.take() {
+                    let gate = (*gate).absorb_opening(binding, &candidate_binding(values), residual);
+                    let (_, granted) = gate.verify_once(&request, 0, binding);
+                    *permit = granted;
+                    permit.is_some()
+                } else { false }
             }
         };
         if !accepted {
@@ -263,15 +279,12 @@ impl OutputGate {
                     None
                 }
             }
-            Held::Local {
-                values,
-                mac_verified,
-            } => {
-                if *mac_verified {
-                    *mac_verified = false;
-                    Some(core::mem::take(values))
-                } else {
-                    None
+            Held::Bound { values, binding, permit, .. } => {
+                match permit.take() {
+                    Some(grant) if grant.session_id() == request && grant.round_id() == 0
+                        && grant.openings() == 1 && candidate_binding(values) == *binding =>
+                        Some(core::mem::take(values)),
+                    _ => None,
                 }
             }
         };
@@ -303,10 +316,7 @@ impl OutputGate {
     fn is_destroyed(&self) -> bool {
         match &self.held {
             Held::Verified(sessions) => sessions.iter().all(|s| s.is_quarantined()),
-            Held::Local {
-                values,
-                mac_verified,
-            } => values.is_empty() && !*mac_verified,
+            Held::Bound { values, permit, .. } => values.is_empty() && permit.is_none(),
         }
     }
 }
@@ -484,7 +494,7 @@ mod tests {
         ] {
             let hold = || {
                 let gate = OutputGate::hold(&params, chains, [7; 32], 48, values.clone());
-                assert!(matches!(gate.held, Held::Local { .. }));
+                assert!(matches!(gate.held, Held::Bound { .. }));
                 gate
             };
             assert!(hold().release(&[]).is_err());

@@ -1,6 +1,7 @@
 module
 
 public import QsagVerified.Funs
+import all QsagVerified.Funs
 public import QsagVerified.Proofs.Gf256
 
 public section
@@ -607,7 +608,8 @@ theorem tower128_mul_small_vectors :
 theorem verify_mac_2lane_rejects_empty
     (alpha_lanes : Array tower.Tower128 2#usize)
     (batch : tower.BdozCommittedBatchOpening2Lane) :
-    tower.verify_mac_2lane alpha_lanes batch ⟨[], by decide⟩ = .ok false := rfl
+    tower.verify_mac_2lane alpha_lanes batch ⟨[], by decide⟩ = .ok false := by
+  simp [tower.verify_mac_2lane, core.slice.Slice.is_empty]
 
 /--  Stateful BDOZ 2-Lane Verifier Session Burn & Secret Key Zeroization Theorem:
     1. Once `session.burned = true`, `verify_mac_2lane_with_burn` unconditionally rejects and

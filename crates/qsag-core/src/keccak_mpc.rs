@@ -655,6 +655,8 @@ pub(crate) struct RssPendingDzkTriples {
     pub(crate) c: [Vec<u64>; 3],
     /// Lane-permutations recorded over the lifetime of this accumulator (never reset).
     lane_perms: u64,
+    /// Halving-round tables, kept between verifications and all zero outside a proof pass.
+    fold_tables: RssDzkTables,
     /// Set when a verification of this accumulator failed. A poisoned accumulator records
     /// nothing and never verifies again, so an emptied relation set cannot pass for a
     /// verified one.
@@ -668,6 +670,7 @@ impl RssPendingDzkTriples {
             b: [Vec::new(), Vec::new(), Vec::new()],
             c: [Vec::new(), Vec::new(), Vec::new()],
             lane_perms: 0,
+            fold_tables: RssDzkTables::default(),
             poison: RssPoisonLatch::new(),
         }
     }
@@ -835,35 +838,27 @@ fn rss_ternary_expand(src: &[u64], out: &mut [u64; RSS_DZK_TERNARY]) {
     }
 }
 
-/// For the secret words `w_u` of a group and public coefficients `beta_u`, compute the 64 field elements
-/// `out[i] = sum_u beta_u * bit_i(w_u)`. `pattern[bit][g]` is the public nibble of coefficient
-/// bit `bit` over words `4g..4g+4`; only public values index memory.
-fn rss_bind_group(
-    words: &[u64],
-    pattern: &[[u8; RSS_DZK_NIBBLES]; 128],
-    planes: &mut [[u64; 4]; 64],
-    out: &mut [u128],
+/// For each of four columns of 64 secret words `rows[u][c]` and public coefficients `beta_u`,
+/// compute the 64 field elements `out[i][c] = sum_u beta_u * bit_i(rows[u][c])`.
+/// `pattern[bit][g]` is the public nibble of coefficient bit `bit` over words `4g..4g+4`;
+/// only public values index memory. `planes` is caller scratch holding secret bit planes.
+fn rss_bind_columns(
+    rows: &[[u64; 4]; RSS_DZK_GROUP_WORDS],
+    pattern: &qsag_asm::XorCombinePattern,
+    planes: &mut [[[u64; 4]; 64]; 2],
+    out: &mut [[u128; 4]; RSS_DZK_LANES],
 ) {
-    let mut tables = [[0u64; 16]; RSS_DZK_NIBBLES];
-    for g in 0..RSS_DZK_NIBBLES {
-        for n in 1..16usize {
-            tables[g][n] = tables[g][n & (n - 1)] ^ words[4 * g + n.trailing_zeros() as usize];
+    // Plane `k` of half `h` holds coefficient bit `64 h + k` of all 64 lanes of every column.
+    qsag_asm::gf2_xor_combine_planes(rows, pattern, planes);
+    // Transposed, row `i` of half `h` holds limb `h` of lane `i` of every column.
+    let [low, high] = planes;
+    qsag_asm::transpose64x256(low);
+    qsag_asm::transpose64x256(high);
+    for ((out, low), high) in out.iter_mut().zip(low.iter()).zip(high.iter()) {
+        for ((value, lo), hi) in out.iter_mut().zip(low).zip(high) {
+            *value = u128::from(*lo) | (u128::from(*hi) << 64);
         }
     }
-    for (bit, nibbles) in pattern.iter().enumerate() {
-        let mut acc = 0u64;
-        for g in 0..RSS_DZK_NIBBLES {
-            acc ^= tables[g][nibbles[g] as usize];
-        }
-        planes[bit % 64][bit / 64] = acc;
-    }
-    // Two active columns share the existing four-column SIMD transpose.
-    // The unused columns start at zero and remain zero under transposition.
-    qsag_asm::transpose64x256(planes);
-    for i in 0..64 {
-        out[i] = u128::from(planes[i][0]) | (u128::from(planes[i][1]) << 64);
-    }
-    qsag_asm::volatile_fill(&mut tables, [0; 16]);
 }
 
 /// Public per-pass weights. Relation word `k = 64 * g + u` has weight
@@ -901,27 +896,40 @@ impl RssDzkCtx<'_> {
     }
 }
 
-/// Party `p`'s additive share of `sum x * y` over replicated sharings, as carryless
-/// dot-product operands: `x_p * (y_p + y_q) + x_q * y_p` with `q = p + 1`.
-/// Each tuple is `(lane 0, lane 1)`; index 0 is slot `p`, index 1 is slot `q`.
-#[inline]
-fn rss_cross_pairs(
-    lhs: &mut [[u128; 2]],
-    rhs: &mut [[u128; 2]],
-    x: [(u128, u128); 2],
-    y: [(u128, u128); 2],
-) {
-    lhs[0] = [x[0].0, x[0].1];
-    rhs[0] = [y[0].0 ^ y[1].0, y[0].1 ^ y[1].1];
-    lhs[1] = [x[1].0, x[1].1];
-    rhs[1] = [y[0].0, y[0].1];
-}
-
 /// Proof tables of one pass: slot shares of the bound `a` (weighted by `t^lane`) and `b`
 /// vectors. Wiped on `Drop`.
+///
+/// The buffers outlive a pass and are reused by the next one. A pass needs about 10 MiB per
+/// table at the deferred flush size; allocated fresh, that memory comes back from the kernel
+/// unmapped every time and the binding workers fault it in page by page, which costs more
+/// than the field arithmetic.
+#[derive(Default)]
 struct RssDzkTables {
     x: [Vec<u128>; 3],
     y: [Vec<u128>; 3],
+    /// Leading elements of every table that may be nonzero. All elements behind are zero.
+    live: usize,
+}
+
+impl RssDzkTables {
+    /// Size every table to `len` zero elements and mark them all live for the pass that is
+    /// about to fill them. The previous pass must have ended with [`Self::wipe_live`].
+    fn begin_pass(&mut self, len: usize) {
+        self.wipe_live();
+        for table in self.x.iter_mut().chain(&mut self.y) {
+            table.resize(len, 0);
+        }
+        self.live = len;
+    }
+
+    /// Zero the live prefix, restoring the all-zero state between passes.
+    fn wipe_live(&mut self) {
+        for table in self.x.iter_mut().chain(&mut self.y) {
+            let live = self.live.min(table.len());
+            qsag_asm::volatile_fill(&mut table[..live], 0);
+        }
+        self.live = 0;
+    }
 }
 
 impl Drop for RssDzkTables {
@@ -933,56 +941,65 @@ impl Drop for RssDzkTables {
     }
 }
 
-/// Elements gathered per dot-product call in a halving round; bounds a worker's operand
-/// scratch at 128 KiB.
+/// Elements per dot-product call in a halving round; bounds a worker's operand scratch at
+/// 32 KiB.
 const RSS_DZK_FOLD_BLOCK: usize = 1024;
 /// Lower-half length from which a halving round is split across threads. Every partial
 /// result is combined by XOR, so the split changes no message and no challenge.
 #[cfg(feature = "std")]
 const RSS_DZK_FOLD_PAR_MIN: usize = 1 << 14;
 
+/// Worker budget of the proof. Queried once: `available_parallelism` reads the scheduler
+/// affinity and the cgroup quota files on every call.
 #[cfg(feature = "std")]
 fn rss_dzk_workers() -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, usize::from)
-        .min(16)
+    static WORKERS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WORKERS.get_or_init(|| {
+        std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(16)
+    })
 }
 
 /// `(lower half, upper half)` of one slot's table in a halving round, equal lengths.
 type RssFoldHalves<'a> = (&'a [u128], &'a [u128]);
 
-/// Party `p`'s additive shares of `L = <x_lo, y_hi>` (lane 0) and `R = <x_hi, y_lo>` (lane 1)
-/// over one index range, from the slot-`p` and slot-`q = p + 1` halves of that range.
+/// Party `p`'s additive shares of `L = <x_lo, y_hi>` and `R = <x_hi, y_lo>` over one index
+/// range, from the slot-`p` and slot-`q = p + 1` halves of that range. Its share of a product
+/// `sum x * y` of replicated sharings is `sum x_p * (y_p + y_q) + sum x_q * y_p`; the tables
+/// are read where they lie and only the sums `y_p + y_q` go through scratch.
 fn rss_fold_cross_dot(
     xp: RssFoldHalves<'_>,
     xq: RssFoldHalves<'_>,
     yp: RssFoldHalves<'_>,
     yq: RssFoldHalves<'_>,
 ) -> [u128; 2] {
-    let mut lhs = [[0u128; 2]; 2 * RSS_DZK_FOLD_BLOCK];
-    let mut rhs = [[0u128; 2]; 2 * RSS_DZK_FOLD_BLOCK];
+    let dot = qsag_asm::gf2_128_dot;
+    fn cut(h: RssFoldHalves<'_>, start: usize, end: usize) -> RssFoldHalves<'_> {
+        (&h.0[start..end], &h.1[start..end])
+    }
+    let mut y_lo = [0u128; RSS_DZK_FOLD_BLOCK];
+    let mut y_hi = [0u128; RSS_DZK_FOLD_BLOCK];
     let mut out = [0u128; 2];
     let n = xp.0.len();
-    let mut start = 0usize;
-    while start < n {
-        let len = (n - start).min(RSS_DZK_FOLD_BLOCK);
-        for j in 0..len {
-            let i = start + j;
-            rss_cross_pairs(
-                &mut lhs[2 * j..2 * j + 2],
-                &mut rhs[2 * j..2 * j + 2],
-                [(xp.0[i], xp.1[i]), (xq.0[i], xq.1[i])],
-                [(yp.1[i], yp.0[i]), (yq.1[i], yq.0[i])],
-            );
+    for start in (0..n).step_by(RSS_DZK_FOLD_BLOCK) {
+        let end = (start + RSS_DZK_FOLD_BLOCK).min(n);
+        let (xp, xq) = (cut(xp, start, end), cut(xq, start, end));
+        let (yp, yq) = (cut(yp, start, end), cut(yq, start, end));
+        let y_lo = &mut y_lo[..end - start];
+        let y_hi = &mut y_hi[..end - start];
+        for ((sum, p), q) in y_lo.iter_mut().zip(yp.0).zip(yq.0) {
+            *sum = p ^ q;
         }
-        let mut part = rss_poly_dot(&lhs[..2 * len], &rhs[..2 * len]);
-        out[0] ^= part[0];
-        out[1] ^= part[1];
-        wipe_u128s(&mut part);
-        start += len;
+        for ((sum, p), q) in y_hi.iter_mut().zip(yp.1).zip(yq.1) {
+            *sum = p ^ q;
+        }
+        out[0] ^= dot(xp.0, y_hi) ^ dot(xq.0, yp.1);
+        out[1] ^= dot(xp.1, y_lo) ^ dot(xq.1, yp.0);
     }
-    qsag_asm::volatile_fill(&mut lhs, [0; 2]);
-    qsag_asm::volatile_fill(&mut rhs, [0; 2]);
+    let used = n.min(RSS_DZK_FOLD_BLOCK);
+    wipe_u128s(&mut y_lo[..used]);
+    wipe_u128s(&mut y_hi[..used]);
     out
 }
 
@@ -1030,10 +1047,12 @@ fn rss_fold_halves(table: &[Vec<u128>; 3], upper: usize, len: usize) -> [RssFold
     })
 }
 
-/// `lo[i] ^= scale * hi[i]` for each `(lo, hi, scale)` job, with public scales.
-fn rss_fold_scale_xor(jobs: &mut [(&mut [u128], &[u128], RssProofField)]) {
-    let apply = |lo: &mut [u128], hi: &[u128], scale: RssProofField| {
+/// `lo[i] ^= scale * hi[i]` for each `(lo, hi, scale)` job, with public scales. The folded
+/// `hi` is dead afterwards and is wiped by the worker that just read it.
+fn rss_fold_scale_xor(jobs: &mut [(&mut [u128], &mut [u128], RssProofField)]) {
+    let apply = |lo: &mut [u128], hi: &mut [u128], scale: RssProofField| {
         qsag_asm::bitslice::gf2_128_scale_xor(lo, hi, scale.0);
+        qsag_asm::volatile_fill(hi, 0);
     };
     #[cfg(feature = "std")]
     if jobs
@@ -1046,7 +1065,7 @@ fn rss_fold_scale_xor(jobs: &mut [(&mut [u128], &[u128], RssProofField)]) {
             for (lo, hi, scale) in jobs.iter_mut() {
                 let chunk = lo.len().div_ceil(per_job);
                 let scale = *scale;
-                for (lo, hi) in lo.chunks_mut(chunk).zip(hi.chunks(chunk)) {
+                for (lo, hi) in lo.chunks_mut(chunk).zip(hi.chunks_mut(chunk)) {
                     scope.spawn(move || apply(lo, hi, scale));
                 }
             }
@@ -1082,7 +1101,7 @@ fn rss_dzk_fold_round(
 ) -> Result<(), KeccakMpcError> {
     let mut l_msg = SecretBuffer(streams.zero_share());
     let mut r_msg = SecretBuffer(streams.zero_share());
-    let RssDzkTables { x, y } = tables;
+    let RssDzkTables { x, y, live } = tables;
     let len = hi_groups * unit;
     let upper = half * unit;
     {
@@ -1107,40 +1126,29 @@ fn rss_dzk_fold_round(
             .add(gamma_inv.mul(l_msg[s]))
             .add(gamma.mul(r_msg[s]));
     }
-    let mut jobs: Vec<(&mut [u128], &[u128], RssProofField)> = Vec::with_capacity(6);
+    let mut jobs: Vec<(&mut [u128], &mut [u128], RssProofField)> = Vec::with_capacity(6);
     for (table, scale) in [(x, gamma), (y, gamma_inv)] {
         for slot in table.iter_mut() {
             let (lo, hi) = slot.split_at_mut(upper);
-            jobs.push((&mut lo[..len], &hi[..len], scale));
+            jobs.push((&mut lo[..len], &mut hi[..len], scale));
         }
     }
     rss_fold_scale_xor(&mut jobs);
+    // Everything from `upper` on was either folded and wiped just now or never written.
+    *live = (*live).min(upper);
     Ok(())
 }
 
-// Keep polynomial-field operands in the batch kernel's native word layout.
-// Chunking bounds scratch space and amortizes dispatch over 256 products.
-fn rss_poly_dot(lhs: &[[u128; 2]], rhs: &[[u128; 2]]) -> [u128; 2] {
-    assert_eq!(lhs.len(), rhs.len());
-    let used = lhs.len().min(256);
-    let mut a = [[0u64; 2]; 256];
-    let mut b = [[0u64; 2]; 256];
-    let mut out = [0u128; 2];
-    for (lane, value) in out.iter_mut().enumerate() {
-        let mut acc = [0u64; 2];
-        for (lc, rc) in lhs.chunks(256).zip(rhs.chunks(256)) {
-            for ((dst, src), (other, rsrc)) in a.iter_mut().zip(lc).zip(b.iter_mut().zip(rc)) {
-                *dst = [src[lane] as u64, (src[lane] >> 64) as u64];
-                *other = [rsrc[lane] as u64, (rsrc[lane] >> 64) as u64];
-            }
-            qsag_asm::gf2_128_mul_acc_batch(&mut acc, &a[..lc.len()], &b[..lc.len()]);
-        }
-        *value = u128::from(acc[0]) | (u128::from(acc[1]) << 64);
-        wipe_u64s(&mut acc);
-    }
-    qsag_asm::volatile_fill(&mut a[..used], [0; 2]);
-    qsag_asm::volatile_fill(&mut b[..used], [0; 2]);
-    out
+/// Unreduced sum of products of 64-bit words with 128-bit weights, as accumulated by
+/// [`qsag_asm::gf2_64x128_clmul_acc`]: the value is `acc[0] + t^64 * acc[1]`.
+type RssWideSum = [u128; 2];
+
+/// Reduce an [`RssWideSum`] (degree below 191) modulo `t^128 + t^7 + t^2 + t + 1`.
+fn rss_reduce_wide(sum: RssWideSum) -> u128 {
+    let low = sum[0] ^ (sum[1] << 64);
+    // Fewer than 64 overflow bits, so their reduction has degree below 71.
+    let high = sum[1] >> 64;
+    low ^ high ^ (high << 1) ^ (high << 2) ^ (high << 7)
 }
 
 /// Per-party additive shares of the packed sumcheck tables for both passes.
@@ -1158,10 +1166,7 @@ fn rss_dzk_tensor_tables(
 ) -> [Vec<[u128; 2]>; 3] {
     #[cfg(feature = "std")]
     if groups >= 128 {
-        let workers = std::thread::available_parallelism()
-            .map_or(1, usize::from)
-            .min(16);
-        let chunk = groups.div_ceil(workers);
+        let chunk = groups.div_ceil(rss_dzk_workers());
         return std::thread::scope(|scope| {
             let handles: Vec<_> = nu_pairs
                 .chunks(chunk)
@@ -1194,55 +1199,46 @@ fn rss_dzk_tensor_tables_range(
     first_group: usize,
     nu_pairs: &[[u128; 2]],
 ) -> [Vec<[u128; 2]>; 3] {
-    let groups = nu_pairs.len();
-    /// Points gathered per sweep over the group-major product table.
-    const POINT_BLOCK: usize = 27;
-    let mut tabs = [
-        vec![[0u128; 2]; RSS_DZK_TERNARY],
-        vec![[0u128; 2]; RSS_DZK_TERNARY],
-        vec![[0u128; 2]; RSS_DZK_TERNARY],
-    ];
-    // `prod[p][g * 729 + e]`: party `p`'s product-share word for point `e` of group `g`.
-    let mut prod: [Vec<u64>; 3] = core::array::from_fn(|_| vec![0u64; RSS_DZK_TERNARY * groups]);
+    // `sums[p][lane][e]`: party `p`'s product-share word of point `e`, times the lane's group
+    // weight, summed over the groups. A product word has degree below 64, so it enters by
+    // two carryless multiplications and the sum is reduced once per point at the end.
+    let mut sums: [[Vec<RssWideSum>; 2]; 3] =
+        core::array::from_fn(|_| core::array::from_fn(|_| vec![[0u128; 2]; RSS_DZK_TERNARY]));
     let mut ea = [[0u64; RSS_DZK_TERNARY]; 3];
     let mut eb = [[0u64; RSS_DZK_TERNARY]; 3];
-    for g in 0..groups {
+    let mut prod = [0u64; RSS_DZK_TERNARY];
+    for (g, nu) in nu_pairs.iter().enumerate() {
         let w0 = (first_group + g) * RSS_DZK_GROUP_WORDS;
         for s in 0..3 {
             rss_ternary_expand(&pending.a[s][w0..], &mut ea[s]);
             rss_ternary_expand(&pending.b[s][w0..], &mut eb[s]);
         }
-        for p in 0..3 {
+        for (p, sums) in sums.iter_mut().enumerate() {
             let q = (p + 1) % 3;
-            let dst = &mut prod[p][g * RSS_DZK_TERNARY..(g + 1) * RSS_DZK_TERNARY];
-            for e in 0..RSS_DZK_TERNARY {
-                dst[e] = (ea[p][e] & (eb[p][e] ^ eb[q][e])) ^ (ea[q][e] & eb[p][e]);
+            for (e, word) in prod.iter_mut().enumerate() {
+                *word = (ea[p][e] & (eb[p][e] ^ eb[q][e])) ^ (ea[q][e] & eb[p][e]);
+            }
+            for (sums, weight) in sums.iter_mut().zip(nu) {
+                qsag_asm::gf2_64x128_clmul_acc(sums, &prod, *weight);
             }
         }
     }
-    // One dot product per party and point: few large kernel calls. Points are gathered in
-    // blocks so that both the product table and the operand rows are read sequentially.
-    let mut lhs = vec![[0u128; 2]; POINT_BLOCK * groups];
-    for p in 0..3 {
-        for e0 in (0..RSS_DZK_TERNARY).step_by(POINT_BLOCK) {
-            for g in 0..groups {
-                let row =
-                    &prod[p][g * RSS_DZK_TERNARY + e0..g * RSS_DZK_TERNARY + e0 + POINT_BLOCK];
-                for (j, word) in row.iter().enumerate() {
-                    lhs[j * groups + g] = [u128::from(*word); 2];
-                }
-            }
-            for j in 0..POINT_BLOCK {
-                tabs[p][e0 + j] = rss_poly_dot(&lhs[j * groups..(j + 1) * groups], nu_pairs);
-            }
-        }
+    let tabs = core::array::from_fn(|p| {
+        let [lane0, lane1] = &sums[p];
+        lane0
+            .iter()
+            .zip(lane1)
+            .map(|(a, b)| [rss_reduce_wide(*a), rss_reduce_wide(*b)])
+            .collect()
+    });
+    for sums in sums.iter_mut().flatten() {
+        qsag_asm::volatile_fill(sums, [0; 2]);
     }
     for s in 0..3 {
-        wipe_u64s(&mut prod[s]);
         wipe_u64s(&mut ea[s]);
         wipe_u64s(&mut eb[s]);
     }
-    qsag_asm::volatile_fill(&mut lhs, [0; 2]);
+    wipe_u64s(&mut prod);
     tabs
 }
 
@@ -1260,21 +1256,24 @@ fn rss_dzk_initial_claims(
                 mu_tab[pass][u & (u - 1)].mul(weights[pass].mu[u.trailing_zeros() as usize]);
         }
     }
-    // Slot `s`'s share of both claims over the word offsets `offsets` of every group.
-    let slot_claims = |s: usize, offsets: core::ops::Range<usize>| -> [RssProofField; 2] {
-        let words = &pending.c[s];
-        let mut lhs = vec![[0u128; 2]; groups];
-        let mut part = [RssProofField::ZERO; 2];
-        for u in offsets {
-            for (g, pair) in lhs.iter_mut().enumerate() {
-                *pair = [u128::from(words[g * RSS_DZK_GROUP_WORDS + u]); 2];
-            }
-            let out = rss_poly_dot(&lhs, nu_pairs);
-            for pass in 0..2 {
-                part[pass] = part[pass].add(mu_tab[pass][u].mul(RssProofField(out[pass])));
+    // Slot `s`'s share of both claims: per word offset, the weighted sum over the groups
+    // (a 64-bit word times a 128-bit weight, reduced once), then the offset's `mu` weight.
+    let slot_claims = |s: usize| -> [RssProofField; 2] {
+        let mut sums = [[[0u128; 2]; RSS_DZK_GROUP_WORDS]; 2];
+        debug_assert_eq!(pending.c[s].len(), groups * RSS_DZK_GROUP_WORDS);
+        let (group_words, _) = pending.c[s].as_chunks::<RSS_DZK_GROUP_WORDS>();
+        for (words, nu) in group_words.iter().zip(nu_pairs) {
+            for (sums, weight) in sums.iter_mut().zip(nu) {
+                qsag_asm::gf2_64x128_clmul_acc(sums, words, *weight);
             }
         }
-        qsag_asm::volatile_fill(&mut lhs, [0; 2]);
+        let mut part = [RssProofField::ZERO; 2];
+        for ((part, sums), mu) in part.iter_mut().zip(&sums).zip(&mu_tab) {
+            for (sum, mu) in sums.iter().zip(mu) {
+                *part = part.add(mu.mul(RssProofField(rss_reduce_wide(*sum))));
+            }
+        }
+        qsag_asm::volatile_fill(sums.as_flattened_mut(), [0; 2]);
         part
     };
     let mut claims = [[RssProofField::ZERO; 3]; 2];
@@ -1286,24 +1285,19 @@ fn rss_dzk_initial_claims(
     };
     #[cfg(feature = "std")]
     if groups >= 128 {
-        let step = RSS_DZK_GROUP_WORDS.div_ceil(rss_dzk_workers().div_ceil(3));
         let slot_claims = &slot_claims;
         std::thread::scope(|scope| {
             let handles: Vec<_> = (0..3)
-                .flat_map(|s| (0..RSS_DZK_GROUP_WORDS).step_by(step).map(move |u| (s, u)))
-                .map(|(s, u)| {
-                    scope.spawn(move || (s, slot_claims(s, u..(u + step).min(RSS_DZK_GROUP_WORDS))))
-                })
+                .map(|s| scope.spawn(move || slot_claims(s)))
                 .collect();
-            for handle in handles {
-                let (s, part) = handle.join().expect("RSS claim worker failed");
-                add_part(s, part);
+            for (s, handle) in handles.into_iter().enumerate() {
+                add_part(s, handle.join().expect("RSS claim worker failed"));
             }
         });
         return claims;
     }
     for s in 0..3 {
-        add_part(s, slot_claims(s, 0..RSS_DZK_GROUP_WORDS));
+        add_part(s, slot_claims(s));
     }
     claims
 }
@@ -1320,6 +1314,7 @@ fn rss_dzk_pass(
     weights: &RssDzkWeights,
     tabs: &[Vec<[u128; 2]>; 3],
     mut claim: [RssProofField; 3],
+    tables: &mut RssDzkTables,
     streams: &mut RssProofStreams,
     party_rngs: &mut [PartyPrivateRng; 3],
 ) -> Result<(), KeccakMpcError> {
@@ -1398,61 +1393,88 @@ fn rss_dzk_pass(
     }
     let block_weights: Vec<RssProofField> =
         weights.nu.iter().map(|v| bound_weight.mul(*v)).collect();
-    let total = groups * RSS_DZK_LANES;
-    let mut tables = RssDzkTables {
-        x: [vec![0u128; total], vec![0u128; total], vec![0u128; total]],
-        y: [vec![0u128; total], vec![0u128; total], vec![0u128; total]],
-    };
+    tables.begin_pass(groups * RSS_DZK_LANES);
     // Groups are independent linear maps under public coefficients. Partition only
     // this arithmetic and absorb `block_weights[g]` directly into `x`; challenges,
     // proof messages and verification stay in exact sequential order.
-    for s in 0..3 {
-        let bind = |start: usize, x: &mut [u128], y: &mut [u128]| {
-            let mut planes = [[0u64; 4]; 64];
-            for (g, (x, y)) in x
+    let bind = |s: usize, start: usize, x: &mut [u128], y: &mut [u128]| {
+        // Two groups per kernel call: columns `(a, b)` of the first, `(a, b)` of the second.
+        let mut rows = [[0u64; 4]; RSS_DZK_GROUP_WORDS];
+        let mut planes = [[[0u64; 4]; 64]; 2];
+        let mut bound = [[0u128; 4]; RSS_DZK_LANES];
+        let mut weighted = [0u128; RSS_DZK_LANES];
+        for (pair, (x, y)) in x
+            .chunks_mut(2 * RSS_DZK_LANES)
+            .zip(y.chunks_mut(2 * RSS_DZK_LANES))
+            .enumerate()
+        {
+            let first = start + 2 * pair;
+            let in_pair = x.len() / RSS_DZK_LANES;
+            for k in 0..2 {
+                if k < in_pair {
+                    let offset = (first + k) * RSS_DZK_GROUP_WORDS;
+                    let a = &pending.a[s][offset..offset + RSS_DZK_GROUP_WORDS];
+                    let b = &pending.b[s][offset..offset + RSS_DZK_GROUP_WORDS];
+                    for (row, (a, b)) in rows.iter_mut().zip(a.iter().zip(b)) {
+                        row[2 * k] = *a;
+                        row[2 * k + 1] = *b;
+                    }
+                } else {
+                    for row in &mut rows {
+                        row[2 * k] = 0;
+                        row[2 * k + 1] = 0;
+                    }
+                }
+            }
+            rss_bind_columns(&rows, &pattern, &mut planes, &mut bound);
+            for (k, (x, y)) in x
                 .chunks_mut(RSS_DZK_LANES)
                 .zip(y.chunks_mut(RSS_DZK_LANES))
                 .enumerate()
             {
-                let offset = (start + g) * RSS_DZK_GROUP_WORDS;
-                let mut weighted = SecretBuffer([0u128; RSS_DZK_LANES]);
-                rss_bind_group(
-                    &pending.a[s][offset..],
-                    &pattern,
-                    &mut planes,
-                    &mut *weighted,
-                );
-                for (lane, value) in weighted.iter_mut().enumerate() {
-                    *value = RssProofField(*value).mul_t_pow(lane as u32).0;
-                }
-                // x is freshly allocated zero storage. Fuse the fixed public
-                // group weight over all lanes in one hardware dispatch.
-                qsag_asm::bitslice::gf2_128_scale_xor(x, &*weighted, block_weights[start + g].0);
-                rss_bind_group(&pending.b[s][offset..], &pattern, &mut planes, y);
-            }
-            qsag_asm::volatile_fill(&mut planes, [0; 4]);
-        };
-        #[cfg(feature = "std")]
-        {
-            let workers = std::thread::available_parallelism()
-                .map_or(1, usize::from)
-                .min(16)
-                .min(groups.div_ceil(64))
-                .max(1);
-            let chunk_groups = groups.div_ceil(workers);
-            std::thread::scope(|scope| {
-                for (chunk, (x, y)) in tables.x[s]
-                    .chunks_mut(chunk_groups * RSS_DZK_LANES)
-                    .zip(tables.y[s].chunks_mut(chunk_groups * RSS_DZK_LANES))
+                for (lane, ((w, y), bound)) in weighted
+                    .iter_mut()
+                    .zip(y.iter_mut())
+                    .zip(&bound)
                     .enumerate()
                 {
-                    let bind = &bind;
-                    scope.spawn(move || bind(chunk * chunk_groups, x, y));
+                    *w = RssProofField(bound[2 * k]).mul_t_pow(lane as u32).0;
+                    *y = bound[2 * k + 1];
                 }
-            });
+                // `x` is zero at the start of a pass. Fuse the fixed public
+                // group weight over all lanes in one hardware dispatch.
+                qsag_asm::bitslice::gf2_128_scale_xor(x, &weighted, block_weights[first + k].0);
+            }
         }
-        #[cfg(not(feature = "std"))]
-        bind(0, &mut tables.x[s], &mut tables.y[s]);
+        qsag_asm::volatile_fill(&mut rows, [0; 4]);
+        qsag_asm::volatile_fill(planes.as_flattened_mut(), [0; 4]);
+        qsag_asm::volatile_fill(&mut bound, [0; 4]);
+        wipe_u128s(&mut weighted);
+    };
+    #[cfg(feature = "std")]
+    {
+        // One scope for all three slots, the worker budget shared between them.
+        let workers = rss_dzk_workers()
+            .div_ceil(3)
+            .min(groups.div_ceil(64))
+            .max(1);
+        let chunk_groups = groups.div_ceil(workers);
+        let bind = &bind;
+        std::thread::scope(|scope| {
+            for (s, (x, y)) in tables.x.iter_mut().zip(&mut tables.y).enumerate() {
+                for (chunk, (x, y)) in x
+                    .chunks_mut(chunk_groups * RSS_DZK_LANES)
+                    .zip(y.chunks_mut(chunk_groups * RSS_DZK_LANES))
+                    .enumerate()
+                {
+                    scope.spawn(move || bind(s, chunk * chunk_groups, x, y));
+                }
+            }
+        });
+    }
+    #[cfg(not(feature = "std"))]
+    for (s, (x, y)) in tables.x.iter_mut().zip(&mut tables.y).enumerate() {
+        bind(s, 0, x, y);
     }
 
     // Halve the group index, then halve the 64 lanes (`block_weights` already absorbed in `x`).
@@ -1466,7 +1488,7 @@ fn rss_dzk_pass(
             ctx,
             pass,
             step,
-            &mut tables,
+            tables,
             RSS_DZK_LANES,
             hi_groups,
             half,
@@ -1481,16 +1503,7 @@ fn rss_dzk_pass(
     let mut half = RSS_DZK_LANES / 2;
     while half >= 1 {
         rss_dzk_fold_round(
-            ctx,
-            pass,
-            step,
-            &mut tables,
-            1,
-            half,
-            half,
-            &mut claim,
-            streams,
-            party_rngs,
+            ctx, pass, step, tables, 1, half, half, &mut claim, streams, party_rngs,
         )?;
         half /= 2;
         step += 1;
@@ -1634,14 +1647,17 @@ pub(crate) fn verify_rss_boolean_triples_seeded(
         return Ok(());
     }
     pending.pad_to_group();
+    let mut tables = core::mem::take(&mut pending.fold_tables);
     let result = rss_dzk_verify_padded(
         session_id,
         batch_ctr,
         pending,
+        &mut tables,
         mask,
         party_rngs,
         weight_seed,
     );
+    pending.fold_tables = tables;
     if result.is_err() {
         // Every failure site has already latched; this covers any error added later.
         pending.poison.set();
@@ -1654,6 +1670,7 @@ fn rss_dzk_verify_padded(
     session_id: &[u8; 32],
     batch_ctr: u64,
     pending: &RssPendingDzkTriples,
+    tables: &mut RssDzkTables,
     mask: &RssMaskSession,
     party_rngs: &mut [PartyPrivateRng; 3],
     weight_seed: Option<&[u8; 32]>,
@@ -1716,9 +1733,12 @@ fn rss_dzk_verify_padded(
             &weights[pass],
             &tabs,
             claims[pass],
+            tables,
             &mut streams,
             party_rngs,
         );
+        // Success leaves one element per table; an abort leaves whatever the pass reached.
+        tables.wipe_live();
         if result.is_err() {
             break;
         }
@@ -5769,20 +5789,75 @@ mod tests {
         assert_eq!(partitioned, reference);
     }
 
+    /// The packed tables against one field multiplication per group and point.
     #[test]
-    fn rss_batched_poly_dot_matches_two_lane_reference() {
-        let mut rng = PartyPrivateRng::from_seed([0x97; 32], b"rss-dot-parity");
-        for len in [0, 1, 15, 16, 17, 255, 256, 257, 1024] {
-            let lhs: Vec<_> = (0..len)
-                .map(|_| [rng.next_u128(), rng.next_u128()])
+    fn rss_tensor_tables_match_field_reference() {
+        let groups = 5;
+        let pending = random_relations(b"tensor-reference", groups * RSS_DZK_GROUP_WORDS, !0);
+        let mut rng = PartyPrivateRng::from_seed([0x96; 32], b"rss-tensor-reference");
+        let mut weights: Vec<_> = (0..groups)
+            .map(|_| [rng.next_u128(), rng.next_u128()])
+            .collect();
+        weights[0] = [u128::MAX, 1 << 127];
+        let tabs = rss_dzk_tensor_tables_range(&pending, 0, &weights);
+        let mut ea = [[0u64; RSS_DZK_TERNARY]; 3];
+        let mut eb = [[0u64; RSS_DZK_TERNARY]; 3];
+        let mut want = [[[RssProofField::ZERO; 2]; RSS_DZK_TERNARY]; 3];
+        for (g, nu) in weights.iter().enumerate() {
+            for s in 0..3 {
+                rss_ternary_expand(&pending.a[s][g * RSS_DZK_GROUP_WORDS..], &mut ea[s]);
+                rss_ternary_expand(&pending.b[s][g * RSS_DZK_GROUP_WORDS..], &mut eb[s]);
+            }
+            for p in 0..3 {
+                let q = (p + 1) % 3;
+                for e in 0..RSS_DZK_TERNARY {
+                    let word = (ea[p][e] & (eb[p][e] ^ eb[q][e])) ^ (ea[q][e] & eb[p][e]);
+                    for lane in 0..2 {
+                        want[p][e][lane] = want[p][e][lane]
+                            .add(RssProofField(u128::from(word)).mul(RssProofField(nu[lane])));
+                    }
+                }
+            }
+        }
+        for p in 0..3 {
+            for e in 0..RSS_DZK_TERNARY {
+                assert_eq!(tabs[p][e], want[p][e].map(|v| v.0), "party {p}, point {e}");
+            }
+        }
+    }
+
+    /// The weighted claims against one field multiplication per relation word, on both the
+    /// serial and (with `std`) the threaded path.
+    #[test]
+    fn rss_initial_claims_match_field_reference() {
+        let mut rng = PartyPrivateRng::from_seed([0x95; 32], b"rss-claims-reference");
+        for groups in [3usize, 131] {
+            let pending = random_relations(b"claims-reference", groups * RSS_DZK_GROUP_WORDS, !0);
+            let weights: [RssDzkWeights; 2] = core::array::from_fn(|_| RssDzkWeights {
+                mu: core::array::from_fn(|_| RssProofField(rng.next_u128())),
+                nu: (0..groups)
+                    .map(|_| RssProofField(rng.next_u128()))
+                    .collect(),
+            });
+            let nu_pairs: Vec<[u128; 2]> = (0..groups)
+                .map(|g| [weights[0].nu[g].0, weights[1].nu[g].0])
                 .collect();
-            let rhs: Vec<_> = (0..len)
-                .map(|_| [rng.next_u128(), rng.next_u128()])
-                .collect();
-            assert_eq!(
-                rss_poly_dot(&lhs, &rhs),
-                qsag_asm::tower128_bdoz_2lane_poly_mac(&lhs, &rhs)
-            );
+            let claims = rss_dzk_initial_claims(&pending, groups, &weights, &nu_pairs);
+            for (pass, (claims, weights)) in claims.iter().zip(&weights).enumerate() {
+                for (s, (claim, words)) in claims.iter().zip(&pending.c).enumerate() {
+                    let mut want = RssProofField::ZERO;
+                    for (k, word) in words.iter().enumerate() {
+                        let mut weight = weights.nu[k / RSS_DZK_GROUP_WORDS];
+                        for (l, mu) in weights.mu.iter().enumerate() {
+                            if (k >> l) & 1 == 1 {
+                                weight = weight.mul(*mu);
+                            }
+                        }
+                        want = want.add(weight.mul(RssProofField(u128::from(*word))));
+                    }
+                    assert_eq!(claim.0, want.0, "groups {groups}, pass {pass}, slot {s}");
+                }
+            }
         }
     }
 
@@ -5847,6 +5922,7 @@ mod tests {
             b: src.b.clone(),
             c: src.c.clone(),
             lane_perms: src.lane_perms,
+            fold_tables: RssDzkTables::default(),
             poison: RssPoisonLatch::new(),
         }
     }
@@ -5901,17 +5977,21 @@ mod tests {
                 }
             }
         }
-        let mut planes = [[0u64; 4]; 64];
-        let mut out = [0u128; 64];
-        rss_bind_group(&src, &pattern, &mut planes, &mut out);
+        let rows: [[u64; 4]; RSS_DZK_GROUP_WORDS] =
+            core::array::from_fn(|u| [src[u], word(), 0, word()]);
+        let mut planes = [[[0u64; 4]; 64]; 2];
+        let mut out = [[0u128; 4]; RSS_DZK_LANES];
+        rss_bind_columns(&rows, &pattern, &mut planes, &mut out);
         for (lane, got) in out.iter().enumerate() {
-            let mut expected = 0u128;
-            for (word, weight) in src.iter().zip(&beta) {
-                if (word >> lane) & 1 == 1 {
-                    expected ^= weight;
+            for (column, got) in got.iter().enumerate() {
+                let mut expected = 0u128;
+                for (row, weight) in rows.iter().zip(&beta) {
+                    if (row[column] >> lane) & 1 == 1 {
+                        expected ^= weight;
+                    }
                 }
+                assert_eq!(*got, expected, "lane {lane}, column {column}");
             }
-            assert_eq!(*got, expected);
         }
         // Monomial multiplication and public inversion.
         let v = RssProofField(u128::from(word()) | (u128::from(word()) << 64));
@@ -5963,10 +6043,10 @@ mod tests {
 
         let before = x.clone();
         let scales = [f(next()), f(next()), f(next())];
-        let mut jobs: Vec<(&mut [u128], &[u128], RssProofField)> = Vec::new();
+        let mut jobs: Vec<(&mut [u128], &mut [u128], RssProofField)> = Vec::new();
         for (slot, scale) in x.iter_mut().zip(scales) {
             let (lo, hi) = slot.split_at_mut(upper);
-            jobs.push((&mut lo[..n], &hi[..n], scale));
+            jobs.push((&mut lo[..n], &mut hi[..n], scale));
         }
         rss_fold_scale_xor(&mut jobs);
         for s in 0..3 {
@@ -5976,7 +6056,9 @@ mod tests {
                     before[s][i] ^ scales[s].mul(f(before[s][upper + i])).0
                 );
             }
-            assert_eq!(x[s][n..], before[s][n..]);
+            assert_eq!(x[s][n..upper], before[s][n..upper]);
+            assert!(x[s][upper..upper + n].iter().all(|v| *v == 0));
+            assert_eq!(x[s][upper + n..], before[s][upper + n..]);
         }
     }
 

@@ -3,7 +3,8 @@
 use qsag_accel::CpuReferenceBackend;
 use qsag_accel::keccak::{cshake256_framed_32, cshake256_framed_xof};
 use qsag_addr::{KeyIdentityKind, QsagAddress};
-use qsag_core::ceremony_journal::{CeremonyReservation, FsCeremonyJournal};
+use qsag_core::ExternalMonotoneAnchor;
+use qsag_core::ceremony_journal::{CeremonyContext, CeremonyReservation, FsCeremonyJournal};
 use qsag_core::fips205::{
     Fips205Params, SlhPublicKey, SlhSecretKey, slh_keygen_from_seed, slh_sign, slh_verify,
 };
@@ -19,7 +20,7 @@ use crate::cli::{
     Args, CliError, MAX_KEY_FILE_BYTES, MAX_SIG_PROOF_BYTES, Secret32, ZeroizingBuf, os_random_32,
     read_bounded_file, read_input, write_new,
 };
-use crate::codec::{Json, from_hex_exact, from_hex_secret32};
+use crate::codec::{Json, from_hex_exact};
 use crate::schemes::{Scheme, THRESHOLD_FTS_PARAMS};
 
 pub const SECRET_FORMAT: &str = "qsag-secret-key-v1";
@@ -29,6 +30,10 @@ pub const SIGNATURE_FORMAT: &str = "qsag-signature-v1";
 /// Domain-separated 32-byte subkey of a key file's master seed.
 pub fn derive(seed: &[u8; 32], label: &[u8]) -> [u8; 32] {
     cshake256_framed_32(b"QSAG.CLI.DERIVE.V1", &[seed, label])
+}
+
+pub fn derive_secret(seed: &[u8; 32], label: &[u8]) -> Secret32 {
+    Secret32(derive(seed, label))
 }
 
 pub fn load_json(path: &str, format: &str) -> Result<Json, CliError> {
@@ -112,19 +117,74 @@ fn provision_stateful_seed_burn_ledger(
     secret_path: &str,
     key_id: [u8; 32],
     seed: &[u8; 32],
-) -> Result<qsag_core::LedgerCheckpoint, CliError> {
-    FsCeremonyJournal::create_new(
-        ceremony_journal_path(secret_path),
-        key_id,
-        derive(seed, b"ceremony journal mac"),
-    )
-    .map_err(|e| CliError::io("creating ceremony reservation journal", e))?;
-    let seed_burns = FsSeedBurnTracker::provision_genesis(
-        seed_burn_ledger_path(secret_path),
-        derive(seed, b"seed burn ledger mac"),
-    )
-    .map_err(|_| CliError::state("creating seed burn ledger failed"))?;
-    Ok(seed_burns.checkpoint())
+    anchor_cfg: Option<&crate::anchor::AnchorConfig>,
+) -> Result<
+    (
+        qsag_core::LedgerCheckpoint,
+        qsag_core::LedgerCheckpoint,
+        Option<[u8; 24]>,
+    ),
+    CliError,
+> {
+    let ceremony_mac = derive_secret(seed, b"ceremony journal mac");
+    let seedburn_mac = derive_secret(seed, b"seed burn ledger mac");
+    let (ceremony_journal, ceremony_seal) = if let Some(cfg) = anchor_cfg {
+        let ceremony_anchor_mac = derive_secret(seed, b"external ceremony anchor mac");
+        let ceremony_anchor = crate::anchor::FsExternalMountAnchor::provision_fresh(
+            cfg,
+            &[secret_path],
+            &[],
+            "ceremony",
+            key_id,
+            ceremony_anchor_mac.0,
+        )?;
+        let seal = ceremony_anchor.lock_identity_seal();
+        let j = FsCeremonyJournal::create_new_anchored(
+            ceremony_journal_path(secret_path),
+            key_id,
+            ceremony_mac.0,
+            Box::new(ceremony_anchor),
+        )
+        .map_err(|e| CliError::io("creating anchored ceremony reservation journal", e))?;
+        (j, Some(seal))
+    } else {
+        let j = FsCeremonyJournal::create_new(
+            ceremony_journal_path(secret_path),
+            key_id,
+            ceremony_mac.0,
+        )
+        .map_err(|e| CliError::io("creating ceremony reservation journal", e))?;
+        (j, None)
+    };
+    let seed_burns =
+        FsSeedBurnTracker::provision_genesis(seed_burn_ledger_path(secret_path), seedburn_mac.0)
+            .map_err(|_| CliError::state("creating seed burn ledger failed"))?;
+    let ledger_ckpt = seed_burns.checkpoint();
+    if let Some(cfg) = anchor_cfg {
+        let seedburn_anchor_mac = derive_secret(seed, b"external seedburn anchor mac");
+        let seedburn_anchor = crate::anchor::FsExternalMountAnchor::provision_fresh(
+            cfg,
+            &[secret_path],
+            &[],
+            "seedburn",
+            key_id,
+            seedburn_anchor_mac.0,
+        )?;
+        seedburn_anchor
+            .advance(ledger_ckpt)
+            .map_err(|e| CliError::state(format!("advancing seedburn anchor failed: {e}")))?;
+        let fts_anchor_mac = derive_secret(seed, b"external fts burn anchor mac");
+        let fts_anchor = crate::anchor::FsExternalMountAnchor::provision_fresh(
+            cfg,
+            &[secret_path],
+            &[],
+            "fts_burn",
+            key_id,
+            fts_anchor_mac.0,
+        )?;
+        fts_anchor.advance_floor(b"fts_burn", 0)?;
+    }
+    Ok((ledger_ckpt, ceremony_journal.checkpoint(), ceremony_seal))
 }
 
 /// Outcome of reserving one use or epoch in the seed burn ledger.
@@ -136,6 +196,7 @@ enum SeedBurn {
     AlreadySpent,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn burn_stateful_ceremony_with_checkpoint(
     secret_path: &str,
     secret_json: &mut Json,
@@ -143,25 +204,116 @@ fn burn_stateful_ceremony_with_checkpoint(
     seed: &[u8; 32],
     ceremony_id: [u8; 32],
     seed_burn_id: [u8; 32],
+    base_context: CeremonyContext,
+    anchor_cfg: Option<&crate::anchor::AnchorConfig>,
+    observed_uses: u64,
 ) -> Result<SeedBurn, CliError> {
-    let retained_ckpt = crate::vault::read_ledger_checkpoint(secret_json)?;
-    let mut ceremony_journal = FsCeremonyJournal::open_existing(
-        ceremony_journal_path(secret_path),
-        key_id,
-        derive(seed, b"ceremony journal mac"),
-    )
-    .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
+    let retained_ledger_ckpt = crate::vault::read_ledger_checkpoint(secret_json)?;
+    let retained_ceremony_ckpt = crate::vault::read_ceremony_checkpoint(secret_json)?;
+    let ceremony_mac = derive_secret(seed, b"ceremony journal mac");
+    let seedburn_mac = derive_secret(seed, b"seed burn ledger mac");
+
+    let mut anchors = if let Some(cfg) = anchor_cfg {
+        let ceremony_anchor_mac = derive_secret(seed, b"external ceremony anchor mac");
+        let ceremony_anchor = crate::anchor::FsExternalMountAnchor::open_existing(
+            cfg,
+            &[secret_path],
+            &[],
+            "ceremony",
+            key_id,
+            ceremony_anchor_mac.0,
+        )?;
+        ceremony_anchor.verify_expected_seal(secret_json, "anchor_ceremony_seal")?;
+        let seedburn_anchor_mac = derive_secret(seed, b"external seedburn anchor mac");
+        let seedburn_anchor = crate::anchor::FsExternalMountAnchor::open_existing(
+            cfg,
+            &[secret_path],
+            &[],
+            "seedburn",
+            key_id,
+            seedburn_anchor_mac.0,
+        )?;
+        let fts_anchor_mac = derive_secret(seed, b"external fts burn anchor mac");
+        let fts_anchor = crate::anchor::FsExternalMountAnchor::open_existing(
+            cfg,
+            &[secret_path],
+            &[],
+            "fts_burn",
+            key_id,
+            fts_anchor_mac.0,
+        )?;
+        fts_anchor.verify_floor_at_least(b"fts_burn", observed_uses)?;
+        Some((ceremony_anchor, seedburn_anchor, fts_anchor))
+    } else {
+        None
+    };
+
+    let mut ceremony_journal = if let Some((ceremony_anchor, _, _)) = &anchors {
+        let j = FsCeremonyJournal::open_existing_anchored(
+            ceremony_journal_path(secret_path),
+            key_id,
+            ceremony_mac.0,
+            Box::new(ceremony_anchor.clone()),
+        )
+        .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
+        let j_ckpt = j.checkpoint();
+        if j_ckpt.generation < retained_ceremony_ckpt.generation
+            || (j_ckpt.generation == retained_ceremony_ckpt.generation
+                && !qsag_accel::ct::ct_eq_bytes(&j_ckpt.tag, &retained_ceremony_ckpt.tag))
+        {
+            return Err(CliError::state("CorruptOrRolledBackCeremonyJournal"));
+        }
+        j
+    } else {
+        FsCeremonyJournal::open_existing_at_least(
+            ceremony_journal_path(secret_path),
+            key_id,
+            ceremony_mac.0,
+            retained_ceremony_ckpt,
+        )
+        .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?
+    };
+
+    let min_ledger_ckpt = if let Some((_, seedburn_anchor, _)) = &anchors {
+        let ext_ckpt = seedburn_anchor
+            .load()
+            .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?
+            .ok_or_else(|| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+        if ext_ckpt.generation == retained_ledger_ckpt.generation
+            && !qsag_accel::ct::ct_eq_bytes(&ext_ckpt.tag, &retained_ledger_ckpt.tag)
+        {
+            return Err(CliError::state("CorruptOrRolledBackLedgerCheckpoint"));
+        }
+        if ext_ckpt.generation >= retained_ledger_ckpt.generation {
+            ext_ckpt
+        } else {
+            retained_ledger_ckpt
+        }
+    } else {
+        retained_ledger_ckpt
+    };
+
     let mut seed_burns = FsSeedBurnTracker::open_existing(
         seed_burn_ledger_path(secret_path),
-        derive(seed, b"seed burn ledger mac"),
-        retained_ckpt,
+        seedburn_mac.0,
+        min_ledger_ckpt,
     )
     .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+    if let Some((_, seedburn_anchor, _)) = &anchors {
+        seedburn_anchor
+            .advance(seed_burns.checkpoint())
+            .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+    }
+
     if seed_burns
         .is_burned(&seed_burn_id)
         .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?
     {
+        if let Some((_, _, fts_anchor)) = &mut anchors {
+            fts_anchor.advance_floor(b"fts_burn", observed_uses.saturating_add(1))?;
+        }
         crate::vault::record_ledger_checkpoint(secret_json, seed_burns.checkpoint());
+        crate::vault::record_ceremony_checkpoint(secret_json, ceremony_journal.checkpoint());
         return Ok(SeedBurn::AlreadySpent);
     }
     // Burn first: a crash may waste this slot, but must never leave a ceremony
@@ -169,25 +321,47 @@ fn burn_stateful_ceremony_with_checkpoint(
     seed_burns
         .burn(&seed_burn_id)
         .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+    if let Some((_, seedburn_anchor, _)) = &anchors {
+        seedburn_anchor
+            .advance(seed_burns.checkpoint())
+            .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+    }
     let cursor = seed_burns.checkpoint().generation;
     custody_crash_point("after_seed_burn")?;
+    let context = CeremonyContext {
+        policy_id: base_context.policy_id,
+        spend_amount: base_context.spend_amount,
+        mpc_nonce_epoch: cursor,
+    };
     let permit = ceremony_journal
-        .persist_before_release(CeremonyReservation {
-            ceremony_id,
-            key_id,
-            epoch_or_codeword: seed_burn_id,
-            seed_burn_cursor: cursor,
-            hedge_generation: cursor,
-        })
+        .persist_with_context(
+            CeremonyReservation {
+                ceremony_id,
+                key_id,
+                epoch_or_codeword: seed_burn_id,
+                seed_burn_cursor: cursor,
+                hedge_generation: cursor,
+            },
+            None,
+            false,
+            context,
+        )
         .map_err(|_| CliError::state("CorruptOrRolledBackCeremonyJournal"))?;
     custody_crash_point("after_ceremony")?;
     seed_burns
         .authorize_release(&ceremony_journal, permit)
         .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
+    if let Some((ceremony_anchor, _, fts_anchor)) = &mut anchors {
+        ceremony_anchor
+            .consume_ceremony_ticket(ceremony_journal.checkpoint(), &ceremony_id)
+            .map_err(|_| CliError::state("CeremonyTicketAlreadyConsumedOrCorrupt"))?;
+        fts_anchor.advance_floor(b"fts_burn", observed_uses.saturating_add(1))?;
+    }
     seed_burns
         .begin_expansion(&ceremony_id, &seed_burn_id)
         .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
     crate::vault::record_ledger_checkpoint(secret_json, seed_burns.checkpoint());
+    crate::vault::record_ceremony_checkpoint(secret_json, ceremony_journal.checkpoint());
     Ok(SeedBurn::Fresh)
 }
 
@@ -225,6 +399,12 @@ The secret file is created with owner-only permissions.
   --validators <k>      agg-jorts-poseidon2: committee size, 1..=64 (default: 8)
   --wal-dir <dir>       agg-jorts-poseidon2: directory in which each validator's epoch
                         write-ahead log is created (required for that scheme)
+  --anchor-dir <dir>    stateful schemes: owner-only 0700 external monotone anchor directory
+  --vault-dir <dir>     explicit local custody directory verified disjoint from --anchor-dir
+  --allow-single-disk-anchor  permit --anchor-dir on the same filesystem device (distinct inode)
+  --policy-ledger-dir <dir>  enroll the key against this custody policy ledger: it will then
+                        sign only an intent that ledger releases (not for agg-jorts-poseidon2);
+                        with --policy-anchor-dir / --policy-passphrase-* as the ledger requires
   --json                print the public key file contents to standard output as well
 ";
 
@@ -242,6 +422,12 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             "wal-dir",
             "passphrase-env",
             "passphrase-file",
+            "anchor-dir",
+            "vault-dir",
+            "policy-ledger-dir",
+            "policy-anchor-dir",
+            "policy-passphrase-env",
+            "policy-passphrase-file",
         ],
         &[
             "json",
@@ -250,6 +436,8 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             "force-overwrite",
             "fast-demo",
             "accept-trusted-dealer-demo",
+            "allow-single-disk-anchor",
+            "policy-allow-single-disk-anchor",
         ],
     )?;
     if args.flag("help") {
@@ -259,12 +447,27 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     args.no_positionals()?;
     let scheme = Scheme::by_name(args.require("scheme")?)?;
     require_dealer_acceptance(scheme, &args)?;
+    let policy_pin = crate::policy_ledger::key_pin_from_args(&args)?;
+    if policy_pin.is_some() && matches!(scheme, Scheme::AggCommittee) {
+        return Err(CliError::usage(
+            "--policy-ledger-dir does not apply to committee keys: `qsag aggregate` has no policy gate",
+        ));
+    }
+    let anchor_cfg = crate::anchor::AnchorConfig::from_args(&args)?;
+    if matches!(scheme, Scheme::Slh(_)) && anchor_cfg.is_some() {
+        return Err(CliError::usage(
+            "--anchor-dir applies only to stateful schemes",
+        ));
+    }
     let passphrase = crate::envelope::passphrase(&args)?;
     if matches!(scheme, Scheme::AggCommittee) && passphrase.is_some() {
         return Err(CliError::usage("committee envelope support is unavailable"));
     }
     let secret_out = args.require("secret-out")?;
     let public_out = args.require("public-out")?;
+    if let Some(cfg) = &anchor_cfg {
+        cfg.validate_isolation(&[secret_out], &[], true)?;
+    }
     let force = args.flag("force-overwrite");
     // Stateful identities cannot safely be reset in place, even with --force-overwrite.
     if force && !matches!(scheme, Scheme::Slh(_)) {
@@ -277,7 +480,7 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     if force && existing {
         let old = load_json(secret_out, SECRET_FORMAT)?;
         let opened = crate::envelope::open(&old, passphrase.as_deref())?;
-        vault.set_key_material(&opened)?;
+        vault.set_key_material(&opened);
         vault.authenticate(&old)?;
         if !matches!(scheme_of(&old)?, Scheme::Slh(_)) {
             return Err(CliError::state("stateful vault overwrite refused"));
@@ -311,6 +514,9 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         ("enrollment_nonce", Json::hex(nonce)),
         ("uses_completed", Json::num(0)),
     ];
+    if let Some(ledger) = &policy_pin {
+        secret.push((crate::policy_ledger::KEY_PIN_FIELD, Json::hex(ledger)));
+    }
     let mut public = vec![
         ("format", Json::str(PUBLIC_FORMAT)),
         ("scheme", Json::str(scheme_name)),
@@ -333,15 +539,26 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
         }
         Scheme::Frontier(profile) => {
             let key = frontier_key(profile, &seed);
-            FsWalFtsEpochLatch::create(
-                burn_journal_path(secret_out),
+            let burn_mac = derive_secret(&seed, b"burn journal mac");
+            FsWalFtsEpochLatch::create(burn_journal_path(secret_out), key.wal_key(), burn_mac.0)
+                .map_err(|e| CliError::io("creating frontier use journal", e))?;
+            let (ledger_ckpt, ceremony_ckpt, ceremony_seal) = provision_stateful_seed_burn_ledger(
+                secret_out,
                 key.wal_key(),
-                derive(&seed, b"burn journal mac"),
-            )
-            .map_err(|e| CliError::io("creating frontier use journal", e))?;
-            let ckpt = provision_stateful_seed_burn_ledger(secret_out, key.wal_key(), &seed)?;
-            secret.push(("ledger_checkpoint_gen", Json::num(ckpt.generation)));
-            secret.push(("ledger_checkpoint_tag", Json::hex(&ckpt.tag)));
+                &seed,
+                anchor_cfg.as_ref(),
+            )?;
+            if let Some(seal) = ceremony_seal {
+                secret.push(("anchor_required", Json::Bool(true)));
+                secret.push(("anchor_ceremony_seal", Json::hex(&seal)));
+            }
+            secret.push(("ledger_checkpoint_gen", Json::num(ledger_ckpt.generation)));
+            secret.push(("ledger_checkpoint_tag", Json::hex(&ledger_ckpt.tag)));
+            secret.push((
+                "ceremony_checkpoint_gen",
+                Json::num(ceremony_ckpt.generation),
+            ));
+            secret.push(("ceremony_checkpoint_tag", Json::hex(&ceremony_ckpt.tag)));
             secret.push(("seed", Json::hex(&seed[..])));
             [&key.pk.pk_seed[..], &key.pk.root].concat()
         }
@@ -365,16 +582,30 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             secret.push(("tree_height", Json::num(params.tree_height)));
             public.push(("tree_height", Json::num(params.tree_height)));
             let setup = threshold_setup(&seed, parties, params)?;
+            let burn_mac = derive_secret(&seed, b"burn journal mac");
             FsWalFtsEpochLatch::create(
                 burn_journal_path(secret_out),
                 setup.pk.pk_seed_bytes,
-                derive(&seed, b"burn journal mac"),
+                burn_mac.0,
             )
             .map_err(|e| CliError::io("creating the epoch burn journal", e))?;
-            let ckpt =
-                provision_stateful_seed_burn_ledger(secret_out, setup.pk.pk_seed_bytes, &seed)?;
-            secret.push(("ledger_checkpoint_gen", Json::num(ckpt.generation)));
-            secret.push(("ledger_checkpoint_tag", Json::hex(&ckpt.tag)));
+            let (ledger_ckpt, ceremony_ckpt, ceremony_seal) = provision_stateful_seed_burn_ledger(
+                secret_out,
+                setup.pk.pk_seed_bytes,
+                &seed,
+                anchor_cfg.as_ref(),
+            )?;
+            if let Some(seal) = ceremony_seal {
+                secret.push(("anchor_required", Json::Bool(true)));
+                secret.push(("anchor_ceremony_seal", Json::hex(&seal)));
+            }
+            secret.push(("ledger_checkpoint_gen", Json::num(ledger_ckpt.generation)));
+            secret.push(("ledger_checkpoint_tag", Json::hex(&ledger_ckpt.tag)));
+            secret.push((
+                "ceremony_checkpoint_gen",
+                Json::num(ceremony_ckpt.generation),
+            ));
+            secret.push(("ceremony_checkpoint_tag", Json::hex(&ceremony_ckpt.tag)));
             secret.push(("seed", Json::hex(&seed[..])));
             secret.push(("parties", Json::num(parties)));
             public.push(("parties", Json::num(parties)));
@@ -393,9 +624,26 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
             let keys: Vec<Json> = (0..validators as u32)
                 .map(|i| Json::hex(&crate::agg::validator(&seed, i).pk.to_bytes()))
                 .collect();
+            let root = qsag_agg::compute_committee_root(&crate::agg::committee_from_json(&keys)?);
+            let (ceremony_ckpt, ceremony_seal) = crate::agg::enroll_committee_ceremony(
+                secret_out,
+                &seed,
+                validators as u32,
+                wal_dir,
+                root,
+                anchor_cfg.as_ref(),
+            )?;
+            if let Some(seal) = ceremony_seal {
+                secret.push(("anchor_required", Json::Bool(true)));
+                secret.push(("anchor_ceremony_seal", Json::hex(&seal)));
+            }
+            secret.push((
+                "ceremony_checkpoint_gen",
+                Json::num(ceremony_ckpt.generation),
+            ));
+            secret.push(("ceremony_checkpoint_tag", Json::hex(&ceremony_ckpt.tag)));
             secret.push(("seed", Json::hex(&seed[..])));
             secret.push(("validators", Json::num(validators)));
-            let root = qsag_agg::compute_committee_root(&crate::agg::committee_from_json(&keys)?);
             public.push(("committee_root", Json::hex(&root)));
             public.push(("validators", Json::Array(keys)));
             Vec::new()
@@ -415,7 +663,7 @@ pub fn keygen(raw: &[String]) -> Result<(), CliError> {
     }
     let public = Json::object(public);
     let mut secret = Json::object(secret);
-    vault.set_key_material(&secret)?;
+    vault.set_key_material(&crate::envelope::open(&secret, None)?);
     if let Some(pass) = &passphrase {
         crate::envelope::seal(&mut secret, pass)?;
     }
@@ -450,7 +698,21 @@ Stateful schemes persist their advanced state before the signature is written.
   --deterministic     use no fresh randomness: the same inputs give the same signature
   --passphrase-env <VAR> / --passphrase-file <PATH>  unlock sealed secret material
   --accept-trusted-dealer-demo  acknowledge local single-seed threshold demo custody
+  --anchor-dir <dir>  verify and advance external monotone anchor before releasing signature
+  --vault-dir <dir>   explicit local custody directory verified disjoint from --anchor-dir
+  --allow-single-disk-anchor  permit --anchor-dir on the same filesystem device (distinct inode)
+  --policy-id-hex <hex>  32-byte policy identifier committed into CeremonyContext
+  --spend-amount <n>  spend amount committed into CeremonyContext (default: 0)
   --json              print the signature file contents to standard output as well
+
+Custody policy gate. The message must be the file `qsag policy propose` wrote. An intent
+that is unapproved, over a cap, expired, bound to another key or message, or already
+released is refused with exit code 3 before any key state moves. A key enrolled with
+--policy-ledger-dir signs only this way. With the gate, a stateful ceremony commits the
+ledger's policy digest and the intent amount, so --policy-id-hex and --spend-amount are
+not accepted.
+
+{GATE}  --policy-retry      sign an already released intent again: same key, same message, no new spend
 ";
 
 fn verify_slh_before_release(
@@ -524,30 +786,104 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             "epoch",
             "passphrase-env",
             "passphrase-file",
+            "anchor-dir",
+            "vault-dir",
+            "policy-id-hex",
+            "spend-amount",
+            "policy-ledger-dir",
+            "policy-intent",
+            "policy-anchor-dir",
+            "policy-passphrase-env",
+            "policy-passphrase-file",
         ],
         &[
             "deterministic",
             "json",
             "help",
             "accept-trusted-dealer-demo",
+            "allow-single-disk-anchor",
+            "policy-allow-single-disk-anchor",
+            "policy-retry",
         ],
     )?;
     if args.flag("help") {
-        print!("{SIGN_HELP}");
+        print!(
+            "{}",
+            SIGN_HELP.replace("{GATE}", crate::policy_ledger::GATE_HELP)
+        );
         return Ok(());
     }
     args.no_positionals()?;
+    let anchor_cfg = crate::anchor::AnchorConfig::from_args(&args)?;
+    let mut base_context = crate::anchor::parse_ceremony_context(&args, 0)?;
+    let has_context_flags =
+        args.get("policy-id-hex").is_some() || args.get("spend-amount").is_some();
     let secret_path = args.require("secret")?;
     let out_path = args.require("out")?;
     let message = read_input(args.require("in")?)?;
+    // The ledger lock is taken before the key's and held until the signature is written.
+    let mut gate = crate::policy_ledger::Gate::from_args(&args, true)?;
+    let policy_retry = args.flag("policy-retry");
+    if gate.is_none() && policy_retry {
+        return Err(CliError::usage(
+            "--policy-retry requires --policy-ledger-dir",
+        ));
+    }
+    if gate.is_some() && has_context_flags {
+        return Err(CliError::usage(
+            "--policy-id-hex and --spend-amount are taken from the released intent under --policy-ledger-dir",
+        ));
+    }
     let mut vault = crate::vault::Vault::acquire(secret_path, false)?;
     let mut secret = load_json(secret_path, SECRET_FORMAT)?;
     let scheme = scheme_of(&secret)?;
     require_dealer_acceptance(scheme, &args)?;
+    if matches!(scheme, Scheme::Slh(_)) && (anchor_cfg.is_some() || has_context_flags) {
+        return Err(CliError::usage(
+            "stateful ceremony options (--anchor-dir, --policy-id-hex, --spend-amount) apply only to stateful schemes",
+        ));
+    }
     let passphrase = crate::envelope::passphrase(&args)?;
     let opened = crate::envelope::open(&secret, passphrase.as_deref())?;
-    vault.set_key_material(&opened)?;
+    vault.set_key_material(&opened);
     vault.authenticate(&secret)?;
+    crate::policy_ledger::enforce_key_pin(&secret, gate.as_ref())?;
+    if !matches!(scheme, Scheme::Slh(_) | Scheme::AggCommittee) {
+        crate::anchor::enforce_anchor_requirement(&secret, anchor_cfg.as_ref())?;
+        // A stateful ceremony journal records a 64-bit spend; refuse a wider one up front.
+        if let Some(gate) = &gate {
+            crate::policy_ledger::ceremony_spend(gate.intent_amount()?)?;
+        }
+    }
+    // Release the intent for exactly this key, message and context. Called by each scheme
+    // once the key is known to be able to sign and before any of its durable state moves.
+    let scheme_label = scheme.name();
+    // A stateful scheme passes its ceremony context, which then commits the ledger's policy
+    // digest and the intent amount (checked above to fit the journal's 64-bit spend).
+    let mut release = |public_key: &[u8],
+                       ctx: &[u8],
+                       context: Option<&mut CeremonyContext>,
+                       extra: &mut Vec<(&'static str, Json)>|
+     -> Result<(), CliError> {
+        let Some(gate) = gate.as_mut() else {
+            return Ok(());
+        };
+        let granted = gate.authorize(
+            &crate::policy_ledger::signing_key_id(&scheme_label, public_key),
+            &message,
+            ctx,
+            policy_retry,
+        )?;
+        if let Some(context) = context {
+            context.policy_id = granted.policy_digest;
+            context.spend_amount = crate::policy_ledger::ceremony_spend(granted.amount_units)?;
+        }
+        extra.push(("policy_ledger_id", Json::hex(gate.ledger_id())));
+        extra.push(("policy_digest", Json::hex(&granted.policy_digest)));
+        extra.push(("policy_intent", Json::hex(&granted.intent_id)));
+        extra.push(("spend_amount", Json::num(granted.amount_units)));
+        Ok(())
+    };
     let ctx = crate::codec::from_hex(args.get("ctx-hex").unwrap_or(""))?;
     if !matches!(scheme, Scheme::Slh(_)) && !ctx.is_empty() {
         return Err(CliError::usage("--ctx-hex applies only to SLH-DSA schemes"));
@@ -558,11 +894,14 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
         Some(Secret32(os_random_32()?))
     };
     let mut extra: Vec<(&str, Json)> = Vec::new();
+    if has_context_flags {
+        extra.push(("policy_id", Json::hex(&base_context.policy_id)));
+        extra.push(("spend_amount", Json::num(base_context.spend_amount)));
+    }
 
-    let signature: Vec<u8> = match scheme {
+    let signature: ZeroizingBuf = match scheme {
         Scheme::Slh(params) => {
-            let raw_key = opened.field_hex("secret_key")?;
-            let sk = SlhSecretKey::from_bytes_for_params(&params, &raw_key.0)
+            let sk = SlhSecretKey::from_bytes_for_params(&params, opened.secret_key()?)
                 .map_err(|e| CliError::input(format!("secret key: {e}")))?;
             let hedged = fresh.as_ref().map(|entropy| {
                 let mut out = Secret32([0u8; 32]);
@@ -580,21 +919,27 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 out
             });
             let opt_rand = hedged.as_ref().map(|h| &h.0[..params.n]);
-            let mut candidate = slh_sign(&params, &message, &ctx, &sk, opt_rand)
-                .map_err(|e| CliError::usage(format!("signing failed: {e}")))?;
+            release(&sk.public_key().to_bytes(), &ctx, None, &mut extra)?;
+            let mut candidate = ZeroizingBuf(
+                slh_sign(&params, &message, &ctx, &sk, opt_rand)
+                    .map_err(|e| CliError::usage(format!("signing failed: {e}")))?,
+            );
             if let Some((idx, mask)) = fault_byte
-                && let Some(slot) = candidate.get_mut(idx)
+                && let Some(slot) = candidate.0.get_mut(idx)
             {
                 *slot ^= mask;
             }
-            let reference = slh_sign(&params, &message, &ctx, &sk, opt_rand)
-                .map_err(|e| CliError::usage(format!("signing failed: {e}")))?;
+            let reference = ZeroizingBuf(
+                slh_sign(&params, &message, &ctx, &sk, opt_rand)
+                    .map_err(|e| CliError::usage(format!("signing failed: {e}")))?,
+            );
             verify_slh_before_release(&params, &sk, &message, &ctx, &candidate, &reference)?;
             candidate
         }
         Scheme::Frontier(profile) => {
-            let seed = from_hex_secret32(opened.field_str("seed")?, "seed")?;
-            let used = u8::try_from(secret.field_u64("uses_completed")?)
+            let seed = opened.seed()?;
+            let used_u64 = secret.field_u64("uses_completed")?;
+            let used = u8::try_from(used_u64)
                 .map_err(|_| CliError::input("uses_completed out of range"))?;
             let exhausted =
                 |e: FrontierFtsError| CliError::state(format!("key can not sign again: {e:?}"));
@@ -623,17 +968,21 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             // Recover the use journal before any durable state moves: a journal that
             // can not be opened or does not belong to this key must leave the seed
             // burn ledger and the vault counter exactly as they were.
-            let wal = FsWalFtsEpochLatch::open(
-                burn_journal_path(secret_path),
-                key.wal_key(),
-                derive(&seed, b"burn journal mac"),
-            )
-            .map_err(|e| CliError::io("recovering frontier use journal", e))?;
+            let burn_mac = derive_secret(&seed, b"burn journal mac");
+            let wal =
+                FsWalFtsEpochLatch::open(burn_journal_path(secret_path), key.wal_key(), burn_mac.0)
+                    .map_err(|e| CliError::io("recovering frontier use journal", e))?;
             let wal_key = key.wal_key();
             key = key.attach_wal(Box::new(wal)).map_err(exhausted)?;
             if key.uses_remaining() == 0 {
                 return Err(exhausted(FrontierFtsError::UseBudgetExhausted));
             }
+            release(
+                &[&key.pk.pk_seed[..], &key.pk.root].concat(),
+                &[],
+                Some(&mut base_context),
+                &mut extra,
+            )?;
             // Verify retained LedgerCheckpoint against durable_ledger, burn this use's seed,
             // and seal the new LedgerCheckpoint + advanced counter into the vault BEFORE signing.
             let burn = burn_stateful_ceremony_with_checkpoint(
@@ -643,6 +992,9 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 &seed.0,
                 ceremony_id,
                 use_seed_id,
+                base_context,
+                anchor_cfg.as_ref(),
+                used_u64,
             )?;
             vault.reserve(secret_path, &mut secret)?;
             if matches!(burn, SeedBurn::AlreadySpent) {
@@ -659,9 +1011,9 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             let dp = FrontierDpTable::build(profile);
             let sig = key.sign(&dp, &message, &hedged.0).map_err(exhausted)?;
             extra.push(("uses_remaining", Json::num(key.uses_remaining())));
-            let mut bytes = sig.to_bytes(profile);
+            let mut bytes = ZeroizingBuf(sig.to_bytes(profile));
             if let Some((idx, mask)) = fault_byte
-                && let Some(slot) = bytes.get_mut(idx)
+                && let Some(slot) = bytes.0.get_mut(idx)
             {
                 *slot ^= mask;
             }
@@ -669,7 +1021,8 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             bytes
         }
         Scheme::ThresholdFts => {
-            let seed = from_hex_secret32(opened.field_str("seed")?, "seed")?;
+            let seed = opened.seed()?;
+            let used_u64 = secret.field_u64("uses_completed")?;
             let epoch = args
                 .get_u64("epoch")?
                 .ok_or_else(|| CliError::usage("fts-threshold requires --epoch"))?;
@@ -681,10 +1034,11 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 )));
             }
             let mut setup = threshold_setup(&seed, secret.field_u64("parties")?, params)?;
+            let burn_mac = derive_secret(&seed, b"burn journal mac");
             let mut journal = FsWalFtsEpochLatch::open(
                 burn_journal_path(secret_path),
                 setup.pk.pk_seed_bytes,
-                derive(&seed, b"burn journal mac"),
+                burn_mac.0,
             )
             .map_err(|e| CliError::state(format!("epoch burn journal unavailable: {e}")))?;
             let mut session = Secret32([0u8; 32]);
@@ -715,6 +1069,12 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 b"QSAG.CLI.THRESHOLD.EPOCH_SEED.V1",
                 &[&seed.0, &setup.pk.pk_seed_bytes, &epoch.to_be_bytes()],
             );
+            release(
+                &threshold_public_bytes(&setup.pk),
+                &[],
+                Some(&mut base_context),
+                &mut extra,
+            )?;
             // Verify retained LedgerCheckpoint against durable_ledger, burn the epoch seed,
             // and seal the ratcheted LedgerCheckpoint into the vault BEFORE threshold signing.
             let burned = burn_stateful_ceremony_with_checkpoint(
@@ -724,6 +1084,9 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 &seed.0,
                 ceremony_id,
                 epoch_seed_id,
+                base_context,
+                anchor_cfg.as_ref(),
+                used_u64,
             )?;
             // Retain the recovered checkpoint even when this epoch cannot sign.
             vault.reserve(secret_path, &mut secret)?;
@@ -746,9 +1109,9 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                     other => CliError::usage(format!("threshold signing failed: {other:?}")),
                 })?;
             extra.push(("epoch", Json::num(epoch)));
-            let mut bytes = sig.to_bytes();
+            let mut bytes = ZeroizingBuf(sig.to_bytes());
             if let Some((idx, mask)) = fault_byte
-                && let Some(slot) = bytes.get_mut(idx)
+                && let Some(slot) = bytes.0.get_mut(idx)
             {
                 *slot ^= mask;
             }
@@ -1587,6 +1950,187 @@ mod custody_tests {
             "{rollback_err}"
         );
         assert!(!dir.join("sig2").exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cli_retains_ceremony_checkpoint_and_rejects_ceremony_journal_rollback() {
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-cli-ceremony-rollback-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = |name: &str| dir.join(name).to_str().unwrap().to_owned();
+        std::fs::write(path("msg"), b"ceremony journal anti-rollback").unwrap();
+
+        keygen(&[
+            "--scheme".into(),
+            "fts-threshold".into(),
+            "--accept-trusted-dealer-demo".into(),
+            "--fast-demo".into(),
+            "--secret-out".into(),
+            path("th.sk"),
+            "--public-out".into(),
+            path("th.pk"),
+        ])
+        .unwrap();
+
+        let genesis_ceremony = std::fs::read(path("th.sk.ceremony")).unwrap();
+        sign(&[
+            "--secret".into(),
+            path("th.sk"),
+            "--in".into(),
+            path("msg"),
+            "--out".into(),
+            path("sig1"),
+            "--epoch".into(),
+            "1".into(),
+            "--accept-trusted-dealer-demo".into(),
+        ])
+        .unwrap();
+
+        // Overwrite `th.sk.ceremony` in-place (preserving inode) with pre-spend genesis bytes.
+        std::fs::write(path("th.sk.ceremony"), &genesis_ceremony).unwrap();
+
+        let err = sign(&[
+            "--secret".into(),
+            path("th.sk"),
+            "--in".into(),
+            path("msg"),
+            "--out".into(),
+            path("sig2"),
+            "--epoch".into(),
+            "2".into(),
+            "--accept-trusted-dealer-demo".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(err.code, 4);
+        assert!(
+            err.message.contains("CorruptOrRolledBackCeremonyJournal"),
+            "{err}"
+        );
+        assert!(!dir.join("sig2").exists());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anchored_cli_rejects_in_place_full_vault_snapshot_rollback() {
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-cli-anchored-rollback-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let vault = dir.join("vault");
+        let anchor = dir.join("anchor");
+        crate::cli::private_dir(vault.to_str().unwrap(), true).unwrap();
+        crate::cli::private_dir(anchor.to_str().unwrap(), true).unwrap();
+        let msg = dir.join("msg");
+        std::fs::write(&msg, b"external anchor snapshot test").unwrap();
+        let sk = vault.join("th.sk");
+        let pk = dir.join("th.pk");
+
+        keygen(&[
+            "--scheme".into(),
+            "fts-threshold".into(),
+            "--accept-trusted-dealer-demo".into(),
+            "--fast-demo".into(),
+            "--secret-out".into(),
+            sk.to_str().unwrap().into(),
+            "--public-out".into(),
+            pk.to_str().unwrap().into(),
+            "--anchor-dir".into(),
+            anchor.to_str().unwrap().into(),
+            "--vault-dir".into(),
+            vault.to_str().unwrap().into(),
+            "--allow-single-disk-anchor".into(),
+        ])
+        .unwrap();
+
+        // Capture a complete pre-sign snapshot of every file inside `vault` (preserving paths).
+        let snapshot: Vec<(std::path::PathBuf, Vec<u8>)> = std::fs::read_dir(&vault)
+            .unwrap()
+            .map(|e| {
+                let p = e.unwrap().path();
+                let bytes = std::fs::read(&p).unwrap();
+                (p, bytes)
+            })
+            .collect();
+
+        // Signing without `--anchor-dir` on an enrolled key is refused.
+        let missing_anchor = sign(&[
+            "--secret".into(),
+            sk.to_str().unwrap().into(),
+            "--in".into(),
+            msg.to_str().unwrap().into(),
+            "--out".into(),
+            dir.join("unanchored.sig").to_str().unwrap().into(),
+            "--epoch".into(),
+            "1".into(),
+            "--accept-trusted-dealer-demo".into(),
+        ])
+        .unwrap_err();
+        assert_eq!(missing_anchor.code, 4);
+
+        // Legitimate anchored sign with CeremonyContext options succeeds.
+        sign(&[
+            "--secret".into(),
+            sk.to_str().unwrap().into(),
+            "--in".into(),
+            msg.to_str().unwrap().into(),
+            "--out".into(),
+            dir.join("sig1").to_str().unwrap().into(),
+            "--epoch".into(),
+            "1".into(),
+            "--accept-trusted-dealer-demo".into(),
+            "--anchor-dir".into(),
+            anchor.to_str().unwrap().into(),
+            "--vault-dir".into(),
+            vault.to_str().unwrap().into(),
+            "--allow-single-disk-anchor".into(),
+            "--policy-id-hex".into(),
+            "aa".repeat(32),
+            "--spend-amount".into(),
+            "9000".into(),
+        ])
+        .unwrap();
+
+        // Simulate a block-level VM/filesystem snapshot rollback of `vault` in-place (exact same inodes!).
+        for (p, bytes) in &snapshot {
+            use std::io::Write;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(p)
+                .unwrap();
+            f.write_all(bytes).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        // Re-signing epoch 1 (or even fresh epoch 2) after full vault rollback is refused by `--anchor-dir`!
+        for (ep, out_name) in [("1", "replay1.sig"), ("2", "replay2.sig")] {
+            let err = sign(&[
+                "--secret".into(),
+                sk.to_str().unwrap().into(),
+                "--in".into(),
+                msg.to_str().unwrap().into(),
+                "--out".into(),
+                dir.join(out_name).to_str().unwrap().into(),
+                "--epoch".into(),
+                ep.into(),
+                "--accept-trusted-dealer-demo".into(),
+                "--anchor-dir".into(),
+                anchor.to_str().unwrap().into(),
+                "--vault-dir".into(),
+                vault.to_str().unwrap().into(),
+                "--allow-single-disk-anchor".into(),
+            ])
+            .unwrap_err();
+            assert_eq!(err.code, 4, "epoch {ep} must refuse rolled-back vault");
+            assert!(!dir.join(out_name).exists());
+        }
 
         std::fs::remove_dir_all(dir).unwrap();
     }

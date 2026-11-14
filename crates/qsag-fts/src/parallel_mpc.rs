@@ -124,7 +124,11 @@ pub struct ParallelSeededPublicKey {
 
 /// Single-use authenticated powers a^1 through a^7 of one hidden uniform mask.
 /// All seven MACs use the original shared key; no MAC is squared locally.
-#[derive(Clone)]
+/// Single use, so not `Clone`: a copy would let one mask open twice.
+/// ```compile_fail
+/// use qsag_fts::parallel_mpc::AuthenticatedPowerShare;
+/// fn dup(power: &AuthenticatedPowerShare) -> AuthenticatedPowerShare { power.clone() }
+/// ```
 pub struct AuthenticatedPowerShare {
     powers: [AuthWire128; 7],
 }
@@ -138,6 +142,15 @@ impl AuthenticatedPowerShare {
 }
 /// Historical name retained for callers that store preprocessing allocations.
 pub type AuthenticatedBeaverTriple = AuthenticatedPowerShare;
+
+/// Secret field elements wiped when dropped: DKG samples and products, and reconstructed
+/// openings that no MAC check has accepted yet.
+struct SecretValues(Vec<u128>);
+impl Drop for SecretValues {
+    fn drop(&mut self) {
+        ct_zeroize_u128s(&mut self.0);
+    }
+}
 
 /// Authenticated share of an $\mathbb{F}_{2^{128}}$ wire (`val_sh`) + 2-lane BDOZ MAC (`mac[0..2]`).
 #[derive(Clone)]
@@ -787,9 +800,23 @@ impl Drop for MacSharePairs {
 }
 
 /// Complete public tree cache + threshold shares for `ParallelSeededFts`.
+///
+/// The party shares are driven only through [`Self::threshold_sign`]; a caller cannot
+/// take, replace or reorder them.
+/// ```compile_fail
+/// fn take(setup: &mut qsag_fts::ParallelSeededThresholdSetup) -> Vec<qsag_fts::ParallelSeededPartyShare> {
+///     core::mem::take(&mut setup.shares)
+/// }
+/// ```
+/// Positive control: the public key and tree stay public.
+/// ```
+/// fn public(setup: &qsag_fts::ParallelSeededThresholdSetup) -> (&qsag_fts::ParallelSeededPublicKey, usize) {
+///     (&setup.pk, setup.public_tree_layers.len())
+/// }
+/// ```
 pub struct ParallelSeededThresholdSetup {
     pub pk: ParallelSeededPublicKey,
-    pub shares: Vec<ParallelSeededPartyShare>,
+    pub(crate) shares: Vec<ParallelSeededPartyShare>,
     /// Public Merkle tree layers (`layers[0]` has `2^h` leaves, `layers[h][0]` is `merkle_root`)
     /// built in **plaintext** (`Depth = 0` secret rounds!) once leaf endpoints open.
     pub public_tree_layers: Vec<Vec<[u64; 4]>>,
@@ -1139,6 +1166,15 @@ impl ParallelSeededThresholdSetup {
                 count,
             )?;
             sh.epoch_uses[ep_usize] = count;
+            let (_, permit) = qsag_verified::FtsEpochGuard::new_unused(
+                self.pk.pk_seed_bytes, epoch, num_leaves as u32,
+            ).consume_epoch_once(self.pk.pk_seed_bytes, epoch,
+                cshake256_framed_32(b"QSAG.FTS.EPOCH.MESSAGE.V1", &[msg]));
+            let (key, authorized_epoch, _) = permit
+                .map_err(|_| ParallelSeededError::EpochUseBudgetExhausted)?.into_binding();
+            if key != self.pk.pk_seed_bytes || authorized_epoch != epoch {
+                return Err(ParallelSeededError::PersistenceFailed);
+            }
         }
         let use_cnt = self.shares[0].epoch_uses[ep_usize];
         if self
@@ -1570,6 +1606,8 @@ pub fn verify_parallel_seeded_fts<B: AcceleratorBackend>(
         sig.grind_counter,
     )
     .ok_or(ParallelSeededError::SignatureVerificationFailed)?;
+
+    verify_canonical_minimal_grind_counter(pk, msg, sig)?;
 
     let mut endpoints = Vec::with_capacity(params.num_chains);
     for (ch, (&start_node, &a_pos)) in sig.chain_nodes.iter().zip(offsets.iter()).enumerate() {

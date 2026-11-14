@@ -39,6 +39,12 @@ const ANCHOR_MAGIC: &[u8; 8] = b"QSAGCKP1";
 const ANCHOR_MAC_DOMAIN: &[u8] = b"QSAG.QUORUM.CHECKPOINT.ANCHOR.V1";
 const KEY_DERIVE_DOMAIN: &[u8] = b"QSAG.QUORUM.ANCHORED_CUSTODY.KEY.V1";
 
+fn journal_anchor_path(anchor: &Path) -> PathBuf {
+    let mut path = anchor.as_os_str().to_os_string();
+    path.push(".ceremony");
+    path.into()
+}
+
 fn invalid_anchor(msg: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
@@ -308,7 +314,13 @@ impl AnchoredSeedBurnTracker {
         let anchor_key = derive_subkey(&master_key, &key_id, b"seedburn.anchor");
         wipe_bytes32(&mut master_key);
 
-        let journal = FsCeremonyJournal::create_new(journal_path.as_ref(), key_id, journal_key)?;
+        let journal_anchor = crate::FsDirectoryMonotoneAnchor::create_new(
+            journal_anchor_path(anchor_path.as_ref()),
+            derive_subkey(&anchor_key, &key_id, b"ceremony.anchor"),
+        )?;
+        let journal = FsCeremonyJournal::create_new_anchored(
+            journal_path.as_ref(), key_id, journal_key, Box::new(journal_anchor),
+        )?;
         let burns = FsSeedBurnTracker::provision_genesis(ledger_path.as_ref(), ledger_key)
             .map_err(|_| io::Error::other("failed to provision FsSeedBurnTracker"))?;
         let initial = burns.checkpoint();
@@ -347,7 +359,13 @@ impl AnchoredSeedBurnTracker {
             b"QSAG.SEED_BURN.V1",
         )?;
         let retained = anchor.checkpoint();
-        let journal = FsCeremonyJournal::open_existing(journal_path.as_ref(), key_id, journal_key)?;
+        let journal_anchor = crate::FsDirectoryMonotoneAnchor::open_existing(
+            journal_anchor_path(anchor_path.as_ref()),
+            derive_subkey(&anchor_key, &key_id, b"ceremony.anchor"),
+        )?;
+        let journal = FsCeremonyJournal::open_existing_anchored(
+            journal_path.as_ref(), key_id, journal_key, Box::new(journal_anchor),
+        )?;
         let burns = FsSeedBurnTracker::open_existing(ledger_path.as_ref(), ledger_key, retained)
             .map_err(|_| {
                 invalid_anchor("seed burn ledger failed retained checkpoint verification")
@@ -358,6 +376,7 @@ impl AnchoredSeedBurnTracker {
         anchor.ratchet_to(recovered)?;
         let next_cursor = recovered
             .generation
+            .max(journal.last_committed().map_or(0, |r| r.seed_burn_cursor))
             .checked_add(1)
             .ok_or_else(|| invalid_anchor("seed burn cursor overflow"))?;
         Ok(Self {
@@ -513,7 +532,13 @@ impl AnchoredFirstSignedCustody {
         let anchor_key = derive_subkey(&master_key, &key_id, b"firstsigned.anchor");
         wipe_bytes32(&mut master_key);
 
-        let journal = FsCeremonyJournal::create_new(journal_path.as_ref(), key_id, journal_key)?;
+        let journal_anchor = crate::FsDirectoryMonotoneAnchor::create_new(
+            journal_anchor_path(anchor_path.as_ref()),
+            derive_subkey(&anchor_key, &key_id, b"ceremony.anchor"),
+        )?;
+        let journal = FsCeremonyJournal::create_new_anchored(
+            journal_path.as_ref(), key_id, journal_key, Box::new(journal_anchor),
+        )?;
         let first_signed = FsFirstSignedLedger::provision_genesis(ledger_path.as_ref(), ledger_key)
             .map_err(|_| io::Error::other("failed to provision FsFirstSignedLedger"))?;
         let initial = first_signed.checkpoint();
@@ -552,7 +577,13 @@ impl AnchoredFirstSignedCustody {
             b"QSAG.FIRST_SIGNED.V1",
         )?;
         let retained = anchor.checkpoint();
-        let journal = FsCeremonyJournal::open_existing(journal_path.as_ref(), key_id, journal_key)?;
+        let journal_anchor = crate::FsDirectoryMonotoneAnchor::open_existing(
+            journal_anchor_path(anchor_path.as_ref()),
+            derive_subkey(&anchor_key, &key_id, b"ceremony.anchor"),
+        )?;
+        let journal = FsCeremonyJournal::open_existing_anchored(
+            journal_path.as_ref(), key_id, journal_key, Box::new(journal_anchor),
+        )?;
         let first_signed =
             FsFirstSignedLedger::open_existing(ledger_path.as_ref(), ledger_key, retained)
                 .map_err(|_| {
@@ -562,6 +593,7 @@ impl AnchoredFirstSignedCustody {
         anchor.ratchet_to(recovered)?;
         let next_cursor = recovered
             .generation
+            .max(journal.last_committed().map_or(0, |r| r.seed_burn_cursor))
             .checked_add(1)
             .ok_or_else(|| invalid_anchor("first-signed cursor overflow"))?;
         Ok(Self {
@@ -705,6 +737,25 @@ mod tests {
         std::fs::create_dir_all(dir.join("ledger")).unwrap();
         std::fs::create_dir_all(dir.join("anchor")).unwrap();
         dir
+    }
+
+    #[test]
+    fn recovers_after_reservation_persisted_before_seed_burn() {
+        let dir = test_dir("reservation-crash");
+        let ledger = dir.join("ledger/burns");
+        let journal = dir.join("ledger/ceremony");
+        let anchor = dir.join("anchor/burns");
+        let mut tracker = AnchoredSeedBurnTracker::provision_genesis(&ledger, &journal, &anchor, [1; 32], [2; 32]).unwrap();
+        tracker.journal.persist_before_release(CeremonyReservation {
+            ceremony_id: [3; 32], key_id: [1; 32], epoch_or_codeword: [4; 32],
+            seed_burn_cursor: 1, hedge_generation: 1,
+        }).unwrap();
+        drop(tracker); // Crash before the burn ledger commits.
+        let mut tracker = AnchoredSeedBurnTracker::open_existing(&ledger, &journal, &anchor, [1; 32], [2; 32]).unwrap();
+        assert_eq!(tracker.next_cursor, 2);
+        tracker.burn_seed_anchored([5; 32], [6; 32], 2).unwrap();
+        drop(tracker);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

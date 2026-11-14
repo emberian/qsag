@@ -66,7 +66,13 @@
     "qsag_verified.proofs.bdoz_verify_once_consumes",
     "qsag_verified.proofs.bdoz_verify_once_single_consumption",
     "qsag_verified.proofs.bdoz_verify_once_accepted",
-    "qsag_verified.proofs.bdoz_verify_once_total"
+    "qsag_verified.proofs.bdoz_verify_once_total",
+    "qsag_verified.proofs.sigma_release_iff",
+    "qsag_verified.proofs.sigma_release_permit",
+    "qsag_verified.proofs.plane_open_release_iff",
+    "qsag_verified.proofs.tooth_opening_wrong_context_refused",
+    "qsag_verified.proofs.tooth_sigma_nonzero_lane_refused",
+    "qsag_verified.proofs.shake256_32_refines"
   ],
   "definition_names": [
     "qsag_verified.proofs.keccakZeroExpected",
@@ -85,7 +91,15 @@
     "qsag_verified.proofs.bdozSpent",
     "Qsag.keccakF1600",
     "Qsag.towerMul",
-    "qsag_verified.fips205.fips205_f"
+    "qsag_verified.fips205.fips205_f",
+    "qsag_verified.proofs.openingLaneSum",
+    "qsag_verified.proofs.openingAbsorbAll",
+    "qsag_verified.proofs.openingRound",
+    "qsag_verified.proofs.u8Bytes",
+    "Qsag.shake256Xof",
+    "Qsag.squeezeXofAux",
+    "Qsag.padForRate",
+    "Qsag.absorbPadded"
   ],
   "permitted_axioms": [
     "propext",

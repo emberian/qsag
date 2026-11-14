@@ -257,7 +257,13 @@ impl SecretRingPoly {
         Self(poly)
     }
 
-    pub const fn expose(&self) -> &RingPoly {
+    /// Crate-internal: the coefficients never leave the protocol modules.
+    /// ```compile_fail
+    /// fn leak(secret: &qsag_hd::SecretRingPoly) -> qsag_hd::RingPoly {
+    ///     secret.expose().clone()
+    /// }
+    /// ```
+    pub(crate) const fn expose(&self) -> &RingPoly {
         &self.0
     }
 }
@@ -345,11 +351,45 @@ pub struct LinearModuleXPub {
 }
 
 /// Secret threshold share for `PiHdLinearModule` (`Redacted` `Debug`, `write_volatile` `Drop`).
+///
+/// The secret coordinates, MAC shares and MAC key shares have no public accessor; they
+/// are read only by the rekey and committed-evaluation protocol steps.
+/// ```compile_fail
+/// fn leak(share: &qsag_hd::LinearModulePartyShare) -> u32 { share.spdz_alpha_share() }
+/// ```
+/// ```compile_fail
+/// fn leak(share: &qsag_hd::LinearModulePartyShare) -> qsag_hd::RingPoly {
+///     share.s_share_coord(0).clone()
+/// }
+/// ```
+/// ```compile_fail
+/// fn leak(share: &qsag_hd::LinearModulePartyShare) -> qsag_hd::RingPoly {
+///     share.spdz_mac_s1().clone()
+/// }
+/// ```
+/// The lineage metadata is read-only outside the crate, so a holder cannot widen its
+/// own derivation budget or rebind the share to another public key.
+/// ```compile_fail
+/// fn widen(share: &mut qsag_hd::LinearModulePartyShare) { share.max_depth = u16::MAX; }
+/// ```
+/// ```compile_fail
+/// fn rewind(share: &mut qsag_hd::LinearModulePartyShare) { share.depth_used = 0; }
+/// ```
+/// ```compile_fail
+/// fn rebind(share: &mut qsag_hd::LinearModulePartyShare) { share.seed_a = [0; 32]; }
+/// ```
+/// Positive control: the public metadata stays readable.
+/// ```
+/// fn lineage(share: &qsag_hd::LinearModulePartyShare) -> (u16, u16, u16, [u8; 32]) {
+///     let _ = (share.scheme(), share.t_vec());
+///     (share.party_id(), share.depth_used(), share.max_depth(), *share.seed_a())
+/// }
+/// ```
 pub struct LinearModulePartyShare {
-    pub party_id: u16,
-    pub scheme: ShareScheme,
-    pub seed_a: [u8; 32],
-    pub t_vec: [RingPoly; MODULE_K],
+    pub(crate) party_id: u16,
+    pub(crate) scheme: ShareScheme,
+    pub(crate) seed_a: [u8; 32],
+    pub(crate) t_vec: [RingPoly; MODULE_K],
     chain_code: RedactedSecret<32>,
     chain_code_key: RedactedSecret<32>,
     hardened: bool,
@@ -362,13 +402,12 @@ pub struct LinearModulePartyShare {
     family_id: [u8; 32],
     #[cfg(feature = "std")]
     budget: Option<Arc<std::sync::Mutex<crate::budget::DurableQueryBudget>>>,
-    #[cfg(feature = "std")]
     poison_journal: Option<Arc<dyn crate::poison::HdPoisonJournal>>,
     testing_poison_journal: bool,
     poisoned: Arc<AtomicBool>,
     evaluation_queries: Arc<AtomicUsize>,
-    pub depth_used: u16,
-    pub max_depth: u16,
+    pub(crate) depth_used: u16,
+    pub(crate) max_depth: u16,
 }
 
 impl fmt::Debug for LinearModulePartyShare {
@@ -391,7 +430,10 @@ impl Drop for LinearModulePartyShare {
     }
 }
 impl LinearModulePartyShare {
-    /// Explicit opt-in for isolated tests without persistent custody.
+    /// Explicit opt-in for isolated tests without persistent custody. Absent from
+    /// builds without `cfg(test)` or the `testing-ephemeral` feature (regression on
+    /// [`DEALER_FREE_PUBLIC_API`]).
+    #[cfg(any(test, feature = "testing-ephemeral"))]
     pub fn in_memory_poison_journal_for_testing(mut self) -> Self {
         self.testing_poison_journal = true;
         self
@@ -400,13 +442,11 @@ impl LinearModulePartyShare {
         if self.testing_poison_journal {
             return Ok(());
         }
-        #[cfg(feature = "std")]
         if self.poison_journal.is_some() && !self.is_poisoned() {
             return Ok(());
         }
         Err(HdError::MacCheckFailed)
     }
-    #[cfg(feature = "std")]
     pub fn attach_poison_journal(
         &mut self,
         journal: Arc<dyn crate::poison::HdPoisonJournal>,
@@ -422,7 +462,6 @@ impl LinearModulePartyShare {
         Ok(())
     }
     pub fn is_poisoned(&self) -> bool {
-        #[cfg(feature = "std")]
         if self
             .poison_journal
             .as_ref()
@@ -435,7 +474,6 @@ impl LinearModulePartyShare {
     }
     fn poison(&mut self) {
         self.poisoned.store(true, Ordering::Release);
-        #[cfg(feature = "std")]
         if let Some(journal) = &self.poison_journal {
             let _ = journal.poison();
         }
@@ -601,16 +639,29 @@ impl LinearModulePartyShare {
         Err(HdError::DurableBudgetRequired)
     }
 
-    pub const fn s_share_coord(&self, coord: usize) -> &RingPoly {
-        self.s_shares[coord].expose()
+    pub const fn party_id(&self) -> u16 {
+        self.party_id
     }
 
-    pub const fn spdz_mac_s1(&self) -> &RingPoly {
-        self.spdz_macs[0][0].expose()
+    pub const fn scheme(&self) -> ShareScheme {
+        self.scheme
     }
 
-    pub const fn spdz_alpha_share(&self) -> u32 {
-        self.spdz_alpha_shares[0]
+    pub const fn seed_a(&self) -> &[u8; 32] {
+        &self.seed_a
+    }
+
+    /// Public relation image `t = A s1 + s2` of the shared secret.
+    pub const fn t_vec(&self) -> &[RingPoly; MODULE_K] {
+        &self.t_vec
+    }
+
+    pub const fn depth_used(&self) -> u16 {
+        self.depth_used
+    }
+
+    pub const fn max_depth(&self) -> u16 {
+        self.max_depth
     }
 }
 
@@ -753,7 +804,6 @@ pub(crate) fn setup_shamir_linear_module(
                     .enumerate()
                     .map(|(i, &x)| (i as u16, x))
                     .collect(),
-                #[cfg(feature = "std")]
                 poison_journal: None,
                 testing_poison_journal: false,
                 poisoned: Arc::new(AtomicBool::new(false)),
@@ -1206,13 +1256,13 @@ pub(crate) fn trusted_dealer_rekey_child(
         child.depth_used = pk.depth_used;
         child.matrix = Arc::clone(&parent.matrix);
         child.family_id = parent.family_id;
+        child.poison_journal = parent.poison_journal.clone();
         child.testing_poison_journal = parent.testing_poison_journal;
         child.poisoned = Arc::clone(&parent.poisoned);
         child.evaluation_queries = Arc::clone(&parent.evaluation_queries);
         #[cfg(feature = "std")]
         {
             child.budget = parent.budget.clone();
-            child.poison_journal = parent.poison_journal.clone();
         }
     }
     let checked = reconstruct_for_recovery_or_test(&children, &pk)?;

@@ -110,8 +110,17 @@ pub struct InventoryChildProof {
 /// so every child seed stays pseudorandom to it under the PRF security of
 /// cSHAKE256; a reconstructed child seed reveals nothing about siblings or the
 /// subset seeds under the same assumption.
+///
+/// The custodian identity is fixed at derivation: duplicate detection during
+/// reconstruction and enrollment corroboration relies on it.
+/// ```compile_fail
+/// fn relabel(vault: &mut qsag_hd::InventoryPartyShareVault) { vault.party_id = 9; }
+/// ```
+/// ```
+/// fn custodian(vault: &qsag_hd::InventoryPartyShareVault) -> u16 { vault.party_id() }
+/// ```
 pub struct InventoryPartyShareVault {
-    pub party_id: u16,
+    party_id: u16,
     config_digest: [u8; 32],
     children: Vec<Vec<(u16, RedactedSecret<32>)>>,
 }
@@ -123,6 +132,12 @@ impl Drop for InventoryPartyShareVault {
                 crate::erase::ct_zeroize_bytes(seed.expose_mut());
             }
         }
+    }
+}
+
+impl InventoryPartyShareVault {
+    pub const fn party_id(&self) -> u16 {
+        self.party_id
     }
 }
 
@@ -273,7 +288,7 @@ fn reconstruct_child_seed_with_min_holders(
 /// requiring `expected_child_pk = Some(&pk)` (`None` is rejected with
 /// [`HdError::InvalidSignatureKey`] so uncorroborated single-holder subsets can never bias an
 /// enrollment key). Use [`enroll_child_signing_seed_quorum`] for corroborated initial
-/// enrollment before `expected_child_pk` exists, or [`recover_child_signing_seed_unchecked`]
+/// enrollment before `expected_child_pk` exists, or `recover_child_signing_seed_unchecked` (test builds)
 /// only in explicit unchecked diagnostic views.
 pub fn recover_child_signing_seed(
     config: &CommitteeConfig,
@@ -311,7 +326,10 @@ pub fn enroll_child_signing_seed_quorum(
 /// Unchecked reconstruction of ONE child signing seed without verifying against an enrolled
 /// `expected_child_pk`. Callers in production signing/recovery MUST use
 /// [`recover_child_signing_seed`] with `Some(&expected_child_pk)` or
-/// [`enroll_child_signing_seed_quorum`].
+/// [`enroll_child_signing_seed_quorum`]. Absent from builds without `cfg(test)` or the
+/// `testing-ephemeral` feature (regression on
+/// [`crate::linear_module::DEALER_FREE_PUBLIC_API`]).
+#[cfg(any(test, feature = "testing-ephemeral"))]
 pub fn recover_child_signing_seed_unchecked(
     config: &CommitteeConfig,
     vaults: &[&InventoryPartyShareVault],

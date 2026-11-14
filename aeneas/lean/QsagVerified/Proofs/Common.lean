@@ -3,6 +3,7 @@ module
 public import Aeneas
 public import QsagVerified.Types
 public import QsagVerified.Funs
+import all QsagVerified.Funs
 
 public section
 

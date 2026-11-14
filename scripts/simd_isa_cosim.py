@@ -82,7 +82,7 @@ def extract(target: str) -> dict:
                     for i in range(shnum)]
         for symbol in obj.qsag_symbols:
             short = symbol.name.removeprefix('qsag_asm_')
-            if short not in NAMES + ('gf2_128_mul_acc_pmull',):
+            if short not in NAMES + ('gf2_128_mul_acc_pmull', 'transpose64x256_neon'):
                 continue
             for sh in sections:
                 if sh[1] in (4, 9) and sh[7] == symbol.shndx and sh[5]:
@@ -93,7 +93,7 @@ def extract(target: str) -> dict:
                 raise RuntimeError(f'duplicate symbol {short}')
             result[short] = dict(code=symbol.code, sha256=hashlib.sha256(symbol.code).hexdigest(),
                                  object_sha256=obj.sha256, offset=symbol.value)
-    required = NAMES if target.startswith('x86_64') else ('gf2_128_mul_acc_pmull',)
+    required = NAMES if target.startswith('x86_64') else ('gf2_128_mul_acc_pmull', 'transpose64x256_neon')
     if set(result) != set(required):
         raise RuntimeError(f'missing or extra symbols: {set(result)}')
     return result
@@ -240,7 +240,7 @@ def test_multiply(name: str, code: bytes, cases: int):
         native.call(ctypes.addressof(acc)+16, ctypes.addressof(aa)+16, ctypes.addressof(bb)+16, count)
         assert bytes(acc) == ac[:16] + expected.to_bytes(16, 'little') + ac[-16:], (name, case)
         assert bytes(aa) == ar and bytes(bb) == br, (name, case, 'input corruption')
-    print(f'{name}: {cases} native batches, zero discrepancies', flush=True)
+    print(f'{name}: {cases} native positive-count batches, zero discrepancies', flush=True)
 
 
 def test_transpose(code: bytes, cases: int):
@@ -282,6 +282,12 @@ def main():
         parser.error('required AArch64 target is not installed')
     fixtures.update(extract('aarch64-unknown-linux-gnu'))
     pin_or_check(fixtures, args.pin)
+    # This production Rust test calls the actual public wrapper for every backend
+    # at lengths 0, 1, 2, 3, 16, 17, 40, 41. Raw assembly requires positive counts.
+    subprocess.run(['cargo', 'test', '--release', '-p', 'qsag-asm', '--lib',
+                    'bitslice::tests::gf2_128_mul_acc_batch_matches_schoolbook_reference_on_every_backend',
+                    '--', '--exact'], cwd=ROOT, check=True)
+    print('production Rust wrapper: n=0 and boundary counts passed', flush=True)
     for name in NAMES[:2]:
         isolated(name, lambda name=name: test_multiply(name, fixtures[name]['code'], args.cases))
     isolated(NAMES[2], lambda: test_transpose(fixtures[NAMES[2]]['code'], args.cases))

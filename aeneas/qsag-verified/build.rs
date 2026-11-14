@@ -1,17 +1,11 @@
-use std::{env, fs, path::PathBuf, process::Command};
+use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rustc-check-cfg=cfg(qsag_nightly_const_option)");
+    // The parity mirror retains this production-only feature guard without enabling it.
+    println!("cargo:rustc-check-cfg=cfg(feature, values(\"testing-ephemeral\"))");
     let rustc_bin = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
     let rustc_str = rustc_bin.to_string_lossy();
-    let compiler = Command::new(&rustc_bin)
-        .arg("-vV")
-        .output()
-        .expect("query compiler version");
-    if String::from_utf8_lossy(&compiler.stdout).contains("-nightly") {
-        println!("cargo:rustc-cfg=qsag_nightly_const_option");
-    }
     let manifest_dir =
         PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));

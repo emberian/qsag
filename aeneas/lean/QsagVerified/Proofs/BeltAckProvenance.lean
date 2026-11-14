@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 public import QsagVerified.Proofs.MultiTurnMediationAndReachability
 
 public section
@@ -456,7 +457,7 @@ theorem belt_three_custodian_round_exists
     hk2 ht2 hc2 rfl rfl rfl hbit2 (by change 2 < st.inner.n.val; omega)) ?_
   refine .certified (belt_step_authorize_granted
     (beltAfterAck (beltAfterAck (beltAfterAck (beltAfterPropose st e msg) 0#u8) 1#u8) 2#u8)
-    hc3 rfl hq) (.nil _)
+    hc3 rfl hq (by intro h; cases h)) (.nil _)
 
 abbrev beltThreeRoundEnd (st : authenticated_belt.VerifiedBeltQuorumGuard)
     (e : Std.U64) (msg : Array Std.U8 32#usize) :=

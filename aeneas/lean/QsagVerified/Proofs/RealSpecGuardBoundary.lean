@@ -1,4 +1,5 @@
 module
+import all QsagVerified.Funs
 public import QsagVerified.Proofs.PolicyAndAddr
 public import Qsag.MirSpecBridge
 import all Qsag.MirSpecBridgeCore

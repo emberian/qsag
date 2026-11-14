@@ -1,24 +1,42 @@
-//! Persistent family quarantine. Provision once and recover the same journal.
-//! MAC disclosure first persists quarantine. Only a successful complete check may
-//! clear it; process loss leaves the disk record quarantined. Each custodian owns
-//! its own journal, shared by its parent and descendant shares.
+//! Caller-provided durable family quarantine for standard and embedded custody.
+#[cfg(feature = "std")]
+pub type PoisonJournalError = std::io::Error;
+#[cfg(not(feature = "std"))]
+pub type PoisonJournalError = crate::HdError;
+pub type JournalResult<T> = Result<T, PoisonJournalError>;
+fn unsupported() -> PoisonJournalError {
+    #[cfg(feature = "std")]
+    { std::io::Error::other("disclosure transactions unsupported") }
+    #[cfg(not(feature = "std"))]
+    { crate::HdError::MacCheckFailed }
+}
+pub trait HdPoisonJournal: Send + Sync {
+    fn is_poisoned(&self) -> JournalResult<bool>;
+    fn poison(&self) -> JournalResult<()>;
+    fn family_id(&self) -> [u8; 32];
+    /// Persist quarantine before releasing MAC material. Unsupported journals fail closed.
+    fn begin_disclosure(&self, _session: [u8; 32]) -> JournalResult<()> {
+        Err(unsupported())
+    }
+    fn disclosure_active(&self, _session: [u8; 32]) -> JournalResult<bool> {
+        Ok(false)
+    }
+    fn complete_disclosure(&self, _session: [u8; 32]) -> JournalResult<()> {
+        Err(unsupported())
+    }
+}
+
+pub use HdPoisonJournal as PoisonJournal;
+#[cfg(feature = "std")]
+pub use filesystem::FsHdPoisonJournal;
+
+#[cfg(feature = "std")]
+mod filesystem {
+use super::HdPoisonJournal;
 use qsag_accel::ct::{RedactedSecret, ct_eq_bytes};
 use qsag_accel::keccak::cshake256_framed_32;
 use qsag_asm::durable::LockedRecord;
 use std::io;
-
-pub trait HdPoisonJournal: Send + Sync {
-    fn is_poisoned(&self) -> io::Result<bool>;
-    fn poison(&self) -> io::Result<()>;
-    fn family_id(&self) -> [u8; 32];
-    /// Persist quarantine before releasing MAC material. Unsupported journals fail closed.
-    fn begin_disclosure(&self, _session: [u8; 32]) -> io::Result<()> {
-        Err(io::Error::other("disclosure transactions unsupported"))
-    }
-    fn complete_disclosure(&self, _session: [u8; 32]) -> io::Result<()> {
-        Err(io::Error::other("disclosure transactions unsupported"))
-    }
-}
 
 pub struct FsHdPoisonJournal {
     path: std::path::PathBuf,
@@ -26,6 +44,7 @@ pub struct FsHdPoisonJournal {
     record: LockedRecord,
     family: [u8; 32],
     key: RedactedSecret<32>,
+    failed: std::sync::atomic::AtomicBool,
     active: std::sync::Mutex<Option<[u8; 32]>>,
 }
 fn lock_inode_seal(path: &std::path::Path) -> io::Result<[u8; 16]> {
@@ -59,6 +78,7 @@ impl FsHdPoisonJournal {
             record,
             family,
             key: RedactedSecret::new(key),
+            failed: std::sync::atomic::AtomicBool::new(false),
             active: std::sync::Mutex::new(None),
         };
         this.persist(false)?;
@@ -78,6 +98,7 @@ impl FsHdPoisonJournal {
             record,
             family,
             key: RedactedSecret::new(key),
+            failed: std::sync::atomic::AtomicBool::new(false),
             active: std::sync::Mutex::new(None),
         };
         this.is_poisoned()?;
@@ -95,7 +116,33 @@ impl FsHdPoisonJournal {
             ],
         )
     }
+    fn read_authenticated(&self) -> io::Result<alloc::vec::Vec<u8>> {
+        let result = (|| {
+            if self.failed.load(std::sync::atomic::Ordering::Acquire)
+                || lock_inode_seal(&self.path)? != self.lock_id {
+                return Err(io::Error::other("HD poison journal failed"));
+            }
+            let bytes = self.record.read()?;
+            if bytes.len() != 33 || bytes[0] > 1 || !ct_eq_bytes(&bytes[1..], &self.tag(bytes[0])) {
+                return Err(io::Error::other("invalid HD poison journal"));
+            }
+            Ok(bytes)
+        })();
+        if result.is_err() { self.failed.store(true, std::sync::atomic::Ordering::Release); }
+        result
+    }
     fn persist(&self, poisoned: bool) -> io::Result<()> {
+        use std::sync::atomic::Ordering;
+        if self.failed.load(Ordering::Acquire) {
+            return Err(io::Error::other("HD poison journal failed"));
+        }
+        let result = self.persist_inner(poisoned);
+        if result.is_err() {
+            self.failed.store(true, Ordering::Release);
+        }
+        result
+    }
+    fn persist_inner(&self, poisoned: bool) -> io::Result<()> {
         if lock_inode_seal(&self.path)? != self.lock_id {
             return Err(io::Error::other("HD poison lock sidecar replaced"));
         }
@@ -111,24 +158,35 @@ impl HdPoisonJournal for FsHdPoisonJournal {
         self.family
     }
     fn is_poisoned(&self) -> io::Result<bool> {
-        let bytes = self.record.read()?;
+        if self.failed.load(std::sync::atomic::Ordering::Acquire)
+            || self.active.lock().map_err(|_| io::Error::other("poison journal mutex"))?.is_some()
+        {
+            return Ok(true);
+        }
+        let bytes = self.read_authenticated()?;
         if bytes.len() != 33 || bytes[0] > 1 || !ct_eq_bytes(&bytes[1..], &self.tag(bytes[0])) {
+            self.failed.store(true, std::sync::atomic::Ordering::Release);
             return Err(io::Error::other("invalid HD poison journal"));
         }
-        Ok(bytes[0] != 0
-            && self
-                .active
-                .lock()
-                .map_err(|_| io::Error::other("poison journal mutex"))?
-                .is_none())
+        Ok(bytes[0] != 0)
+    }
+    fn disclosure_active(&self, session: [u8; 32]) -> io::Result<bool> {
+        if self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(false);
+        }
+        let active = self.active.lock().map_err(|_| io::Error::other("poison journal mutex"))?;
+        let bytes = self.read_authenticated()?;
+        Ok(*active == Some(session) && bytes.len() == 33 && bytes[0] == 1
+            && ct_eq_bytes(&bytes[1..], &self.tag(1)))
     }
     fn poison(&self) -> io::Result<()> {
         let mut active = self
             .active
             .lock()
             .map_err(|_| io::Error::other("poison journal mutex"))?;
+        self.persist(true)?;
         *active = None;
-        self.persist(true)
+        Ok(())
     }
     fn begin_disclosure(&self, session: [u8; 32]) -> io::Result<()> {
         let mut active = self
@@ -138,7 +196,7 @@ impl HdPoisonJournal for FsHdPoisonJournal {
         if active.is_some() {
             return Err(io::Error::other("disclosure already active"));
         }
-        let bytes = self.record.read()?;
+        let bytes = self.read_authenticated()?;
         if bytes.len() != 33 || bytes[0] != 0 || !ct_eq_bytes(&bytes[1..], &self.tag(0)) {
             return Err(io::Error::other("family quarantined"));
         }
@@ -177,6 +235,8 @@ mod tests {
         let path = dir.join("journal");
         let journal = FsHdPoisonJournal::create_new(&path, [1; 32], [2; 32]).unwrap();
         journal.begin_disclosure([3; 32]).unwrap();
+        assert!(journal.is_poisoned().unwrap());
+        assert!(journal.disclosure_active([3; 32]).unwrap());
         assert!(journal.begin_disclosure([4; 32]).is_err());
         assert!(journal.complete_disclosure([4; 32]).is_err());
         journal.complete_disclosure([3; 32]).unwrap();
@@ -212,4 +272,6 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(std::format!("{}.lock", path.display())).unwrap();
     }
+}
+
 }

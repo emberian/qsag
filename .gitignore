@@ -7,10 +7,22 @@
 /lean/.lake/
 **/.lake/
 
+# Verification / profiler / binary dump scratch artifacts
+/-o
+**/*.log
+**/*.disasm
+**/*.o
+**/*.rlib
+**/*.prof
+**/perf.data*
+**/benchmarks/
+aeneas/lean/*-evidence/
+
 # OS / Editor files
 .DS_Store
 *.swp
 *~
 
 paper/*.pdf
-__pycache__
+__pycache__/
+**/__pycache__/

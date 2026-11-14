@@ -351,6 +351,8 @@ pub struct ExecutionReceipt {
     pub kernel_sha256: [u8; 32],
     pub kernel_poseidon2: [u64; 4],
     pub transcript_anchor: [u8; 32],
+    /// Hardware telemetry digest; zero denotes a software-only receipt.
+    pub hardware_audit_digest: [u8; 32],
     pub input_digest: [u8; 32],
     pub output_digest: [u8; 32],
     pub mac: [u8; 32],
@@ -364,7 +366,7 @@ impl ExecutionReceipt {
             chunk.copy_from_slice(&limb.to_le_bytes());
         }
         cshake256_framed_32(
-            b"QSAG.ACCEL.KEYED_RECEIPT.V4",
+            b"QSAG.ACCEL.KEYED_RECEIPT.V5",
             &[
                 key.key.expose(),
                 &self.backend_id,
@@ -374,6 +376,7 @@ impl ExecutionReceipt {
                 &self.kernel_sha256,
                 &p2_bytes,
                 &self.transcript_anchor,
+                &self.hardware_audit_digest,
                 &self.input_digest,
                 &self.output_digest,
             ],
@@ -389,6 +392,31 @@ impl ExecutionReceipt {
         input_digest: [u8; 32],
         output_digest: [u8; 32],
     ) -> Result<Self, AccelError> {
+        Self::compute_audited(
+            key,
+            pin,
+            descriptor,
+            transcript_anchor,
+            input_digest,
+            output_digest,
+            [0; 32],
+        )
+    }
+
+    /// Issue a receipt binding the executing backend's hardware audit evidence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn compute_audited(
+        key: &BackendAttestationKey,
+        pin: &CertifiedKernelPin,
+        descriptor: BatchJobDescriptor,
+        transcript_anchor: [u8; 32],
+        input_digest: [u8; 32],
+        output_digest: [u8; 32],
+        hardware_audit_digest: [u8; 32],
+    ) -> Result<Self, AccelError> {
+        if pin.target_arch == KernelTargetArch::SpirV15 && hardware_audit_digest == [0; 32] {
+            return Err(AccelError::SecretSlotUnaudited { slot: pin.slot });
+        }
         if pin.slot != descriptor.slot() {
             return Err(AccelError::KernelSlotMismatch {
                 pin: pin.slot,
@@ -402,6 +430,7 @@ impl ExecutionReceipt {
             kernel_sha256: pin.sha256_digest,
             kernel_poseidon2: pin.poseidon2_digest,
             transcript_anchor,
+            hardware_audit_digest,
             input_digest,
             output_digest,
             mac: [0u8; 32],
@@ -429,6 +458,11 @@ impl ExecutionReceipt {
 /// External certified RDNA2 / SPIR-V / FPGA host crates implement this trait without forcing
 /// `wgpu`, `ash`, or OS GPU driver dependencies into core post-quantum cryptography crates.
 pub trait AcceleratorBackend: Send + Sync {
+    /// Hardware audit evidence bound by receipt helpers. Software backends use zero.
+    fn hardware_audit_digest(&self) -> [u8; 32] {
+        [0; 32]
+    }
+
     /// Target architecture reported by this backend.
     fn target_arch(&self) -> KernelTargetArch;
 
@@ -591,13 +625,14 @@ impl CpuReferenceBackend {
             pk_seed: *pk_seed,
             layer,
         };
-        ExecutionReceipt::compute_keyed(
+        ExecutionReceipt::compute_audited(
             key,
             &pin,
             desc,
             transcript_anchor,
             input_digest,
             output_digest,
+            backend.hardware_audit_digest(),
         )
     }
 }
@@ -895,6 +930,10 @@ impl<B: AcceleratorBackend> CertifiedBackend<B> {
 }
 
 impl<B: AcceleratorBackend> AcceleratorBackend for CertifiedBackend<B> {
+    fn hardware_audit_digest(&self) -> [u8; 32] {
+        self.inner.hardware_audit_digest()
+    }
+
     fn target_arch(&self) -> KernelTargetArch {
         self.inner.target_arch()
     }
@@ -1343,6 +1382,23 @@ mod tests {
     }
 
     #[test]
+    fn hardware_receipt_requires_and_authenticates_audit_evidence() {
+        let key = BackendAttestationKey::derive(&[29; 32], b"audited-device");
+        let pin = spirv_kernels::canonical_spirv_pin(KernelSlot::BatchKeccakF1600);
+        let job = BatchJobDescriptor::KeccakF1600 { num_states: 1 };
+        assert_eq!(
+            ExecutionReceipt::compute_keyed(&key, &pin, job, [1; 32], [2; 32], [3; 32]),
+            Err(AccelError::SecretSlotUnaudited { slot: pin.slot })
+        );
+        let mut receipt =
+            ExecutionReceipt::compute_audited(&key, &pin, job, [1; 32], [2; 32], [3; 32], [4; 32])
+                .unwrap();
+        assert_eq!(receipt.verification_mask(&key, &pin), u64::MAX);
+        receipt.hardware_audit_digest[0] ^= 1;
+        assert_eq!(receipt.verification_mask(&key, &pin), 0);
+    }
+
+    #[test]
     fn keyed_receipt_verifies_only_under_its_own_key_and_backend() {
         let reg = VerifiedKernelDigestRegistry::<4>::default();
         let key = BackendAttestationKey::derive(&[29; 32], b"backend-a");
@@ -1373,13 +1429,14 @@ mod tests {
         let key = BackendAttestationKey::derive(&[29; 32], b"backend-a");
         let good = sample_receipt(&key);
         let failed = Err(KernelRegistryError::ReceiptAuthenticationFailed);
-        let tamper: [fn(&mut ExecutionReceipt); 9] = [
+        let tamper: [fn(&mut ExecutionReceipt); 10] = [
             |r| r.backend_id[31] ^= 1,
             |r| r.descriptor = BatchJobDescriptor::KeccakF1600 { num_states: 2 },
             |r| r.descriptor = BatchJobDescriptor::Poseidon2Perm12 { num_states: 1 },
             |r| r.kernel_sha256[0] ^= 1,
             |r| r.kernel_poseidon2[3] ^= 1,
             |r| r.transcript_anchor[7] ^= 0x80,
+            |r| r.hardware_audit_digest[7] ^= 0x80,
             |r| r.input_digest[0] ^= 1,
             |r| r.output_digest[0] ^= 1,
             |r| r.mac[15] ^= 1,
@@ -1454,13 +1511,14 @@ mod tests {
                     &good.kernel_sha256,
                     &p2_bytes,
                     &good.transcript_anchor,
+                    &good.hardware_audit_digest,
                     &good.input_digest,
                     &good.output_digest,
                 ],
             )
         };
         // The field layout below is the live one, so only the domain differs from a V3 receipt.
-        assert_eq!(mac_under(b"QSAG.ACCEL.KEYED_RECEIPT.V4"), good.mac);
+        assert_eq!(mac_under(b"QSAG.ACCEL.KEYED_RECEIPT.V5"), good.mac);
         let mut old = good;
         old.mac = mac_under(b"QSAG.ACCEL.KEYED_RECEIPT.V3");
         assert_eq!(

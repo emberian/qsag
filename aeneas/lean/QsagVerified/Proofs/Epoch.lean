@@ -1,6 +1,8 @@
 module
+import all QsagVerified.Funs
 
 public import QsagVerified.Proofs.Common
+import all QsagVerified.Proofs.Adrs
 
 public section
 
@@ -570,7 +572,8 @@ theorem tooth_adrs_invalid_type_rejected :
         0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8,
         0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8,
         0#u8, 0#u8, 0#u8, 7#u8, 0#u8, 0#u8, 0#u8, 0#u8,
-        0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8]) = .ok none := rfl
+        0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8, 0#u8]) = .ok none := by
+  exact fips205_adrs_decode_invalid_type_none _ (by decide)
 
 theorem tooth_tsw_wrong_sum_rejected :
     fips205.tsw_check_target_sum 16#u32 1#usize 8#u64

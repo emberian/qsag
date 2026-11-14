@@ -249,7 +249,7 @@ fn linux_open_flags(arch: &str) -> Option<i32> {
         "aarch64" | "arm" => 0x8000,
         "powerpc" | "powerpc64" => 0x10000,
         "m68k" => 0x4000,
-        "x86_64" | "x86" | "riscv64" | "riscv32" => 0x20000,
+        "x86_64" | "x86" | "riscv64" | "riscv32" | "s390x" | "loongarch64" => 0x20000,
         _ => return None,
     };
     Some(nofollow | 0x800)
@@ -369,6 +369,7 @@ pub fn private_dir(path: &str, create: bool) -> Result<(), CliError> {
 pub fn write_new(path: &str, contents: &[u8], secret: bool) -> Result<(), CliError> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
+    set_nofollow_nonblocking(&mut options)?;
     #[cfg(unix)]
     if secret {
         use std::os::unix::fs::OpenOptionsExt;
@@ -533,7 +534,14 @@ mod custody_buffer_tests {
             assert_eq!(linux_open_flags(arch), Some(0x10800));
         }
         assert_eq!(linux_open_flags("m68k"), Some(0x4800));
-        for arch in ["x86", "x86_64", "riscv32", "riscv64"] {
+        for arch in [
+            "x86",
+            "x86_64",
+            "riscv32",
+            "riscv64",
+            "s390x",
+            "loongarch64",
+        ] {
             assert_eq!(linux_open_flags(arch), Some(0x20800));
         }
         assert_eq!(linux_open_flags("unknown"), None);
@@ -548,14 +556,14 @@ mod custody_buffer_tests {
         assert_eq!(&bytes[..17], &[0xAB; 17]);
         assert_eq!(&bytes[17..], &[0xCD; 256]);
         drop(bytes);
-        // Exercise decrypted JSON ownership, its clone used by vault MACs, and
-        // early-return unwinding while the plaintext strings are still live.
+        // Exercise the key file's hex string, the opened plaintext, the vault MAC key
+        // material derived from it, and early-return unwinding while all three are live.
         fn fail_with_plaintext() -> Result<(), CliError> {
             let key =
                 crate::codec::Json::object(vec![("seed", crate::codec::Json::hex(&[0x42; 32]))]);
             let opened = crate::envelope::open(&key, None)?;
-            let _unsigned = opened.clone();
-            let _encoded = ZeroizingBuf(opened.to_pretty().into_bytes());
+            let _material = opened.vault_key_material();
+            let _encoded = ZeroizingBuf(key.to_pretty().into_bytes());
             Err(CliError::input("injected error"))?;
             Ok(())
         }
@@ -563,8 +571,27 @@ mod custody_buffer_tests {
         let events = WIPED_BUFFERS.with(|events| events.borrow_mut().take().unwrap());
         assert_eq!(events[0], (old_capacity, true));
         assert!(events.iter().all(|(_, wiped)| *wiped));
-        // Original, decrypted, and cloned hex strings each reach the drop guard.
-        assert_eq!(events.iter().filter(|(cap, _)| *cap == 64).count(), 3);
+        // The key file's hex string and the vault key material are 64 bytes each; the
+        // opened plaintext is the 32 decoded bytes and is never hex text in a `String`.
+        assert_eq!(events.iter().filter(|(cap, _)| *cap == 64).count(), 2);
+        assert_eq!(events.iter().filter(|(cap, _)| *cap == 32).count(), 1);
+    }
+
+    #[test]
+    fn opened_envelope_plaintext_is_wiped_when_dropped() {
+        let mut key = crate::codec::Json::object(vec![
+            ("scheme", crate::codec::Json::str("test")),
+            ("secret_key", crate::codec::Json::hex(&[0x42; 48])),
+        ]);
+        crate::envelope::seal(&mut key, b"correct horse").unwrap();
+        let opened = crate::envelope::open(&key, Some(b"correct horse")).unwrap();
+        assert_eq!(opened.secret_key().unwrap(), &[0x42u8; 48][..]);
+        // Record only the drop of the opened secret: exactly one buffer, its 48 plaintext
+        // bytes, reaches the wipe; no other copy of the plaintext was made by opening.
+        WIPED_BUFFERS.with(|events| *events.borrow_mut() = Some(Vec::new()));
+        drop(opened);
+        let events = WIPED_BUFFERS.with(|events| events.borrow_mut().take().unwrap());
+        assert_eq!(events, vec![(48, true)]);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 // Charon + Aeneas `0-FunsExternal` MIR extraction intentionally uses explicit `match`/branch/scalar
 // forms instead of `Try::branch` (`?`), closure `Option::map`, or `core::num::is_multiple_of`.
 #![allow(
+    clippy::collapsible_if,
     clippy::if_same_then_else,
     clippy::manual_is_multiple_of,
     clippy::manual_map,

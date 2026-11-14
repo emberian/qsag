@@ -184,13 +184,13 @@ theorem sub_modular_spec (a b : U64) :
 
 /-! ## Pure Goldilocks Field Operations & `Int`-Modular Commutative Ring Laws -/
 
-def fieldAdd (a b : U64) : U64 :=
+@[expose] def fieldAdd (a b : U64) : U64 :=
   UScalar.ofNat .U64 ((a.val + b.val) % 18446744069414584321)
 
-def fieldSub (a b : U64) : U64 :=
+@[expose] def fieldSub (a b : U64) : U64 :=
   UScalar.ofNat .U64 ((a.val + (18446744069414584321 - b.val % 18446744069414584321)) % 18446744069414584321)
 
-def fieldMul (a b : U64) : U64 :=
+@[expose] def fieldMul (a b : U64) : U64 :=
   UScalar.ofNat .U64 ((a.val * b.val) % 18446744069414584321)
 
 private theorem canonical_ofNat (x : Nat) :
@@ -735,22 +735,22 @@ attribute [irreducible] fieldAdd fieldSub fieldMul
 
 /-! ## Quartic Extension Ring `Ext4 = F_p[u] / (u^4 - 7)` -/
 
-def extZero : Ext4 := ⟨0#u64, 0#u64, 0#u64, 0#u64⟩
-def extOne : Ext4 := ⟨1#u64, 0#u64, 0#u64, 0#u64⟩
+@[expose] def extZero : Ext4 := ⟨0#u64, 0#u64, 0#u64, 0#u64⟩
+@[expose] def extOne : Ext4 := ⟨1#u64, 0#u64, 0#u64, 0#u64⟩
 def extU : Ext4 := ⟨0#u64, 1#u64, 0#u64, 0#u64⟩
 def extSeven : Ext4 := ⟨7#u64, 0#u64, 0#u64, 0#u64⟩
 
-def extAdd (x y : Ext4) : Ext4 :=
+@[expose] def extAdd (x y : Ext4) : Ext4 :=
   ⟨fieldAdd x.a y.a, fieldAdd x.b y.b, fieldAdd x.c y.c, fieldAdd x.d y.d⟩
 
-def extSub (x y : Ext4) : Ext4 :=
+@[expose] def extSub (x y : Ext4) : Ext4 :=
   ⟨fieldSub x.a y.a, fieldSub x.b y.b, fieldSub x.c y.c, fieldSub x.d y.d⟩
 
-def extScale (x : Ext4) (s : U64) : Ext4 :=
+@[expose] def extScale (x : Ext4) (s : U64) : Ext4 :=
   ⟨fieldMul x.a s, fieldMul x.b s, fieldMul x.c s, fieldMul x.d s⟩
 
 /-- Multiplication in polynomial basis `[1, u, u^2, u^3]` modulo `u^4 - 7`. -/
-def extMul (x y : Ext4) : Ext4 :=
+@[expose] def extMul (x y : Ext4) : Ext4 :=
   ⟨fieldAdd (fieldMul x.a y.a) (fieldMul 7#u64 (fieldAdd (fieldAdd (fieldMul x.b y.d) (fieldMul x.c y.c)) (fieldMul x.d y.b))),
    fieldAdd (fieldAdd (fieldMul x.a y.b) (fieldMul x.b y.a)) (fieldMul 7#u64 (fieldAdd (fieldMul x.c y.d) (fieldMul x.d y.c))),
    fieldAdd (fieldAdd (fieldAdd (fieldMul x.a y.c) (fieldMul x.b y.b)) (fieldMul x.c y.a)) (fieldMul 7#u64 (fieldMul x.d y.d)),
@@ -1233,7 +1233,7 @@ attribute [irreducible] extAdd extSub extScale extMul
   coeffs.foldr (fun c acc => extAdd (extScale acc z) c) init
 
 /-- Textbook ascending-degree polynomial evaluation `c_0 + z * (c_1 + z * ...)`. -/
-def evalPolyAscending : List Ext4 → U64 → Ext4
+@[expose] def evalPolyAscending : List Ext4 → U64 → Ext4
   | [], _ => extZero
   | c :: rest, z => extAdd c (extScale (evalPolyAscending rest z) z)
 
