@@ -142,7 +142,9 @@ fn curve(c: &Builder, bits: &[Wire], ed: bool) -> (Vec<Wire>, Vec<Wire>) {
                     debug_assert!(table.iter().all(|p| p[2] == [1, 0, 0, 0]));
                     return one;
                 }
-                debug_assert!(table[0][2] == ZERO && table[1..].iter().all(|p| p[2] == [1, 0, 0, 0]));
+                debug_assert!(
+                    table[0][2] == ZERO && table[1..].iter().all(|p| p[2] == [1, 0, 0, 0])
+                );
                 return c.sub(one, sel[0]);
             }
             if !ed && i == 3 {

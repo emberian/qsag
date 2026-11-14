@@ -189,7 +189,8 @@ impl CoZkCustodianShare {
         let mut public = Vec::with_capacity(MIT_REPETITIONS);
         for (batch, item) in computed_batches.iter_mut().enumerate() {
             let opening_engine = item.engine.as_mut().unwrap_or(&mut e);
-            let rounds = open_batch_public_rounds(opening_engine, batch, &item.commit_bits, &item.views)?;
+            let rounds =
+                open_batch_public_rounds(opening_engine, batch, &item.commit_bits, &item.views)?;
             public.extend(rounds);
         }
 
@@ -335,11 +336,7 @@ fn open_batch_public_rounds<T: Transport>(
     }
     let opened = e.open(&flat)?;
     let count = core::cmp::min(64, MIT_REPETITIONS - batch * 64);
-    let commits_clear: [&[u64]; 3] = [
-        &opened[0..256],
-        &opened[256..512],
-        &opened[512..768],
-    ];
+    let commits_clear: [&[u64]; 3] = [&opened[0..256], &opened[256..512], &opened[512..768]];
     let outputs_clear: [&[u64]; 3] = [
         &opened[768..768 + out_len],
         &opened[768 + out_len..768 + 2 * out_len],
@@ -554,7 +551,10 @@ struct FieldTapeDraw {
     domain: Domain,
 }
 
-fn fold_valid_bits<T: Transport>(e: &mut Engine<T>, mut groups: [Vec<Bit>; 3]) -> Result<[Bit; 3], Error> {
+fn fold_valid_bits<T: Transport>(
+    e: &mut Engine<T>,
+    mut groups: [Vec<Bit>; 3],
+) -> Result<[Bit; 3], Error> {
     for g in &mut groups {
         if g.is_empty() {
             g.push(e.constant(u64::MAX));
@@ -660,7 +660,13 @@ fn evaluate_inner<T: Transport>(
                         start: cursors[1].next_field(d),
                         domain: d,
                     });
-                    (NodeTape::InputField { target, draws: [d0, d1] }, waves[target] + 1)
+                    (
+                        NodeTape::InputField {
+                            target,
+                            draws: [d0, d1],
+                        },
+                        waves[target] + 1,
+                    )
                 }
             }
             Op::Lift(a, _) | Op::Digit(a, _, _) => (NodeTape::None, waves[a] + 1),
@@ -772,7 +778,9 @@ fn evaluate_inner<T: Transport>(
                 if keep_raw_draw[idx] {
                     dom_words.0.push(raw_draw_words.0[idx].clone());
                 } else {
-                    dom_words.0.push(core::mem::take(&mut raw_draw_words.0[idx]));
+                    dom_words
+                        .0
+                        .push(core::mem::take(&mut raw_draw_words.0[idx]));
                 }
             }
         }
@@ -1196,10 +1204,7 @@ fn evaluate_inner<T: Transport>(
                     };
                     outer_mpc::encode(&mut views[0].inputs, &raw_draw_words.0[draws[0]]);
                     outer_mpc::encode(&mut views[1].inputs, &raw_draw_words.0[draws[1]]);
-                    outer_mpc::encode(
-                        &mut views[2].inputs,
-                        encodings[idx][2].as_ref().unwrap(),
-                    );
+                    outer_mpc::encode(&mut views[2].inputs, encodings[idx][2].as_ref().unwrap());
                 }
             }
             Op::Mul(_, _) => {
@@ -1258,8 +1263,10 @@ fn compute_view_commit_bits<T: Transport>(
         })
         .collect();
     let count6 = outer_mpc::public_bytes(e, &6u64.to_le_bytes());
-    let head_bits: [Word; 3] = core::array::from_fn(|head| outer_mpc::public_bytes(e, &[head as u8]));
-    let len_words = |bit_len: usize| outer_mpc::public_bytes(e, &((bit_len / 8) as u64).to_le_bytes());
+    let head_bits: [Word; 3] =
+        core::array::from_fn(|head| outer_mpc::public_bytes(e, &[head as u8]));
+    let len_words =
+        |bit_len: usize| outer_mpc::public_bytes(e, &((bit_len / 8) as u64).to_le_bytes());
     let len_rep = len_words(rep.len());
     let len_head = len_words(head_bits[0].len());
     let len_seed = len_words(views[0].seed.len());
@@ -1651,8 +1658,7 @@ mod tests {
             let session = derive(b"OUTER.FULL.SESSION", 0);
             let pair_keys: [_; 3] =
                 core::array::from_fn(|p| derive(b"OUTER.FULL.PAIR.KEY", p as u8));
-            let entropy: [_; 3] =
-                core::array::from_fn(|p| derive(b"OUTER.FULL.ENTROPY", p as u8));
+            let entropy: [_; 3] = core::array::from_fn(|p| derive(b"OUTER.FULL.ENTROPY", p as u8));
             ct_zeroize_bytes(&mut master);
             let states: [_; 3] = core::array::from_fn(|p| {
                 CoZkCustodianShare::new(
@@ -1876,7 +1882,10 @@ mod tests {
             });
 
             // If a random seed hit upfront `InvalidTape` before reaching the injected gate, retry next seed.
-            if outcomes.iter().any(|r| matches!(r, Err(Error::InvalidTape))) {
+            if outcomes
+                .iter()
+                .any(|r| matches!(r, Err(Error::InvalidTape)))
+            {
                 continue;
             }
             for (p, res) in outcomes.into_iter().enumerate() {
@@ -2009,7 +2018,10 @@ mod tests {
                     .collect::<Vec<_>>()
             });
 
-            if outcomes.iter().any(|r| matches!(r, Err(Error::InvalidTape))) {
+            if outcomes
+                .iter()
+                .any(|r| matches!(r, Err(Error::InvalidTape)))
+            {
                 continue;
             }
             for (p, res) in outcomes.into_iter().enumerate() {
