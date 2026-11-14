@@ -587,14 +587,31 @@ def encodeBeltLatchRecord (rec : BeltLatchRecord) : List UInt8 :=
       encodeDigest256 rec.retrySalt,
       rec.targetSumDigits ]
 
+private theorem list4_eq_iff {α : Type} {a₁ b₁ c₁ d₁ a₂ b₂ c₂ d₂ : α}
+    (h : [a₁, b₁, c₁, d₁] = [a₂, b₂, c₂, d₂]) :
+    a₁ = a₂ ∧ b₁ = b₂ ∧ c₁ = c₂ ∧ d₁ = d₂ := by
+  have h1 := List.cons.inj h
+  have h2 := List.cons.inj h1.2
+  have h3 := List.cons.inj h2.2
+  have h4 := List.cons.inj h3.2
+  exact ⟨h1.1, h2.1, h3.1, h4.1⟩
+
+private theorem forall_mem_list4 {α : Type} {P : α → Prop} {a b c d : α}
+    (ha : P a) (hb : P b) (hc : P c) (hd : P d) :
+    ∀ x ∈ [a, b, c, d], P x := by
+  intro x hx
+  rcases List.mem_cons.mp hx with rfl | hx1
+  · exact ha
+  · rcases List.mem_cons.mp hx1 with rfl | hx2
+    · exact hb
+    · rcases List.mem_cons.mp hx2 with rfl | hx3
+      · exact hc
+      · rcases List.mem_singleton.mp hx3 with rfl; exact hd
+
 /-- Unconditional constructive injectivity of `encodeBeltLatchRecord` (`0 Classical.choice`). -/
 theorem encodeBeltLatchRecord_injective {r₁ r₂ : BeltLatchRecord}
     (hEq : encodeBeltLatchRecord r₁ = encodeBeltLatchRecord r₂) : r₁ = r₂ := by
-  have hListEq := encodeMultiFrame_injective hEq
-  injection hListEq with hEp hRest1
-  injection hRest1 with hMd hRest2
-  injection hRest2 with hSalt hRest3
-  injection hRest3 with hDig _
+  obtain ⟨hEp, hMd, hSalt, hDig⟩ := list4_eq_iff (encodeMultiFrame_injective hEq)
   have hEpNat : r₁.epoch.toNat = r₂.epoch.toNat :=
     encodeNatBeBytes_injective
       (Nat.lt_of_lt_of_eq r₁.epoch.toBitVec.isLt pow2_64_eq_256_8)
@@ -876,13 +893,61 @@ def quorumCounterDigest (H : List UInt8 → Digest256)
   H (quorumEncodeFramed quorumDigestTag
       [encodeDigest256 msgHash, encodeNatBeBytes 4 counter.toNat])
 
+private theorem quorumLeafRecord_ext {r₁ r₂ : QuorumLeafRecord}
+    (h1 : r₁.leaf = r₂.leaf) (h2 : r₁.msgHash = r₂.msgHash)
+    (h3 : r₁.counter = r₂.counter) (h4 : r₁.digits = r₂.digits) : r₁ = r₂ := by
+  cases r₁; cases r₂
+  dsimp only at h1 h2 h3 h4
+  subst h1 h2 h3 h4
+  rfl
+
+/-- Canonical framed byte preimage of `QuorumLeafRecord` under `"QSAG.QUORUM.BINDING/v1"` (`quorum_jorts.rs:333-343`). -/
+def encodeQuorumLeafRecord (rec : QuorumLeafRecord) : List UInt8 :=
+  quorumEncodeFramed quorumBindingTag
+    [ encodeNatBeBytes 8 rec.leaf.toNat,
+      encodeDigest256 rec.msgHash,
+      encodeNatBeBytes 4 rec.counter.toNat,
+      rec.digits ]
+
+theorem encodeQuorumLeafRecord_injective {r₁ r₂ : QuorumLeafRecord}
+    (hDig₁ : r₁.digits.length < 256 ^ 8) (hDig₂ : r₂.digits.length < 256 ^ 8)
+    (hEq : encodeQuorumLeafRecord r₁ = encodeQuorumLeafRecord r₂) : r₁ = r₂ := by
+  have hTagLt : quorumBindingTag.data.toList.length < 256 ^ 8 :=
+    Nat.lt_trans (by decide : quorumBindingTag.data.toList.length < 64) pow256_8_gt_64
+  have hLen8 : ∀ n, (encodeNatBeBytes 8 n).length < 256 ^ 8 := fun n => by
+    rw [encodeNatBeBytes_length]
+    exact Nat.lt_trans (by decide : 8 < 64) pow256_8_gt_64
+  have hLen4 : ∀ n, (encodeNatBeBytes 4 n).length < 256 ^ 8 := fun n => by
+    rw [encodeNatBeBytes_length]
+    exact Nat.lt_trans (by decide : 4 < 64) pow256_8_gt_64
+  have hLen32 : ∀ d, (encodeDigest256 d).length < 256 ^ 8 := fun d => by
+    rw [encodeDigest256_length]
+    exact Nat.lt_trans (by decide : 32 < 64) pow256_8_gt_64
+  have hBx := forall_mem_list4 (hLen8 r₁.leaf.toNat) (hLen32 r₁.msgHash) (hLen4 r₁.counter.toNat) hDig₁
+  have hBy := forall_mem_list4 (hLen8 r₂.leaf.toNat) (hLen32 r₂.msgHash) (hLen4 r₂.counter.toNat) hDig₂
+  have hParts := @quorumEncodeFramed_same_arity_injective quorumBindingTag hTagLt
+    [encodeNatBeBytes 8 r₁.leaf.toNat, encodeDigest256 r₁.msgHash,
+     encodeNatBeBytes 4 r₁.counter.toNat, r₁.digits]
+    [encodeNatBeBytes 8 r₂.leaf.toNat, encodeDigest256 r₂.msgHash,
+     encodeNatBeBytes 4 r₂.counter.toNat, r₂.digits]
+    rfl hBx hBy hEq
+  obtain ⟨hLeaf, hMh, hCtr, hDig⟩ := list4_eq_iff hParts
+  have hLeafEq : r₁.leaf = r₂.leaf :=
+    UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
+      (encodeNatBeBytes_injective
+        (Nat.lt_of_lt_of_eq r₁.leaf.toBitVec.isLt pow2_64_eq_256_8)
+        (Nat.lt_of_lt_of_eq r₂.leaf.toBitVec.isLt pow2_64_eq_256_8) hLeaf))
+  have hMhEq := encodeDigest256_injective hMh
+  have hCtrEq : r₁.counter = r₂.counter :=
+    UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
+      (encodeNatBeBytes_injective
+        (Nat.lt_of_lt_of_eq r₁.counter.toBitVec.isLt pow2_32_eq_256_4)
+        (Nat.lt_of_lt_of_eq r₂.counter.toBitVec.isLt pow2_32_eq_256_4) hCtr))
+  exact quorumLeafRecord_ext hLeafEq hMhEq hCtrEq hDig
+
 /-- Leaf commitment binding under `"QSAG.QUORUM.BINDING/v1"` (`LeafRecord::binding`, `quorum_jorts.rs:333-343`). -/
 def quorumLeafRecordBinding (H : List UInt8 → Digest256) (rec : QuorumLeafRecord) : Digest256 :=
-  H (quorumEncodeFramed quorumBindingTag
-      [ encodeNatBeBytes 8 rec.leaf.toNat,
-        encodeDigest256 rec.msgHash,
-        encodeNatBeBytes 4 rec.counter.toNat,
-        rec.digits ])
+  H (encodeQuorumLeafRecord rec)
 
 /-- Constructive binding theorem for `quorumLeafRecordBinding` (`0 Classical.choice`). -/
 theorem quorumLeafRecordBinding_binding (H : List UInt8 → Digest256)
@@ -890,54 +955,10 @@ theorem quorumLeafRecordBinding_binding (H : List UInt8 → Digest256)
     (hDig₁ : r₁.digits.length < 256 ^ 8) (hDig₂ : r₂.digits.length < 256 ^ 8)
     (hBind : quorumLeafRecordBinding H r₁ = quorumLeafRecordBinding H r₂) :
     r₁ = r₂ ∨ Nonempty (HashCollision256 H) := by
-  let xs := [encodeNatBeBytes 8 r₁.leaf.toNat, encodeDigest256 r₁.msgHash,
-             encodeNatBeBytes 4 r₁.counter.toNat, r₁.digits]
-  let ys := [encodeNatBeBytes 8 r₂.leaf.toNat, encodeDigest256 r₂.msgHash,
-             encodeNatBeBytes 4 r₂.counter.toNat, r₂.digits]
-  let pre₁ := quorumEncodeFramed quorumBindingTag xs
-  let pre₂ := quorumEncodeFramed quorumBindingTag ys
-  if hPre : pre₁ = pre₂ then
-    have hBx : ∀ x ∈ xs, x.length < 256 ^ 8 := by
-      intro x hx
-      rcases List.mem_cons.mp hx with rfl | hx1
-      · rw [encodeNatBeBytes_length]; exact Nat.lt_trans (by decide) pow256_8_gt_64
-      · rcases List.mem_cons.mp hx1 with rfl | hx2
-        · rw [encodeDigest256_length]; exact Nat.lt_trans (by decide) pow256_8_gt_64
-        · rcases List.mem_cons.mp hx2 with rfl | hx3
-          · rw [encodeNatBeBytes_length]; exact Nat.lt_trans (by decide) pow256_8_gt_64
-          · rcases List.mem_singleton.mp hx3 with rfl; exact hDig₁
-    have hBy : ∀ y ∈ ys, y.length < 256 ^ 8 := by
-      intro y hy
-      rcases List.mem_cons.mp hy with rfl | hy1
-      · rw [encodeNatBeBytes_length]; exact Nat.lt_trans (by decide) pow256_8_gt_64
-      · rcases List.mem_cons.mp hy1 with rfl | hy2
-        · rw [encodeDigest256_length]; exact Nat.lt_trans (by decide) pow256_8_gt_64
-        · rcases List.mem_cons.mp hy2 with rfl | hy3
-          · rw [encodeNatBeBytes_length]; exact Nat.lt_trans (by decide) pow256_8_gt_64
-          · rcases List.mem_singleton.mp hy3 with rfl; exact hDig₂
-    have hParts := quorumEncodeFramed_same_arity_injective quorumBindingTag
-      (Nat.lt_trans (by decide) pow256_8_gt_64) rfl hBx hBy hPre
-    injection hParts with hLeaf hR1
-    injection hR1 with hMh hR2
-    injection hR2 with hCtr hR3
-    injection hR3 with hDig _
-    have hLeafEq : r₁.leaf = r₂.leaf :=
-      UInt64.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
-        (encodeNatBeBytes_injective
-          (Nat.lt_of_lt_of_eq r₁.leaf.toBitVec.isLt pow2_64_eq_256_8)
-          (Nat.lt_of_lt_of_eq r₂.leaf.toBitVec.isLt pow2_64_eq_256_8) hLeaf))
-    have hMhEq := encodeDigest256_injective hMh
-    have hCtrEq : r₁.counter = r₂.counter :=
-      UInt32.eq_of_toBitVec_eq (BitVec.eq_of_toNat_eq
-        (encodeNatBeBytes_injective
-          (Nat.lt_of_lt_of_eq r₁.counter.toBitVec.isLt pow2_32_eq_256_4)
-          (Nat.lt_of_lt_of_eq r₂.counter.toBitVec.isLt pow2_32_eq_256_4) hCtr))
-    cases r₁; cases r₂
-    dsimp only at hLeafEq hMhEq hCtrEq hDig
-    subst hLeafEq hMhEq hCtrEq hDig
-    exact .inl rfl
+  if hPre : encodeQuorumLeafRecord r₁ = encodeQuorumLeafRecord r₂ then
+    exact .inl (encodeQuorumLeafRecord_injective hDig₁ hDig₂ hPre)
   else
-    exact .inr ⟨⟨pre₁, pre₂, hPre, hBind⟩⟩
+    exact .inr ⟨⟨encodeQuorumLeafRecord r₁, encodeQuorumLeafRecord r₂, hPre, hBind⟩⟩
 
 /-- Committee echo MAC under `"QSAG.QUORUM.ECHO.MAC/v1"` (`CommitteeCustodian::echo_for`, `quorum_jorts.rs:768-775, 954-959`). -/
 def computeQuorumEchoMac
@@ -3021,8 +3042,8 @@ def fullCustodiansMask (n : Nat) : CustodiansMask n := ⟨fun _ => true⟩
 
 theorem maskCard_fullCustodiansMask (n : Nat) : maskCard (fullCustodiansMask n) = n := by
   have hEq : fullCustodiansMask n = prefixQuorumMask n n := by
+    unfold fullCustodiansMask prefixQuorumMask
     apply congrArg CustodiansMask.mk; funext i
-    dsimp only [fullCustodiansMask, prefixQuorumMask]
     exact (decide_eq_true i.isLt).symm
   rw [hEq]
   exact maskCard_prefix n n (Nat.le_refl n)
@@ -3534,8 +3555,8 @@ private def findMatchingCommitteeEcho {n : Nat}
 private theorem mask_eq_of_sub_and_card_ge {n : Nat} {A B : CustodiansMask n}
     (hSub : maskSub A B) (hGe : maskCard B ≤ maskCard A) : A = B := by
   have hInterEq : maskInter B A = A := by
+    unfold maskInter
     apply congrArg CustodiansMask.mk; funext i
-    dsimp only [maskInter]
     cases ha : A.mem i
     · exact Bool.and_false _
     · rw [hSub i ha]; rfl
@@ -3582,9 +3603,12 @@ theorem slotReadyForFreshBind_init (subtreeHeight maxWindow : Nat) (rec : BeltLa
   have hEpNat : rec.epoch.toNat = 0 := by rw [hEp0]; rfl
   unfold SlotReadyForFreshBind BeltLatchNodeState.init
   dsimp only
-  rw [hEpNat]
-  exact ⟨rfl, rfl, rfl, fun h => by cases h, fun _ h => by cases h,
-         Nat.le_refl 0, hPowPos, Nat.zero_le maxWindow⟩
+  refine ⟨rfl, rfl, rfl, ?_, ?_, ?_, ?_, ?_⟩
+  · intro h; cases h
+  · intro _ h; cases h
+  · rw [hEpNat]; exact Nat.le_refl 0
+  · rw [hEpNat]; exact hPowPos
+  · rw [hEpNat]; exact Nat.zero_le (0 + maxWindow)
 
 private theorem beltLatchBindStep_of_slotReady {subtreeHeight : Nat}
     {st : BeltLatchNodeState} {rec : BeltLatchRecord}
@@ -4162,8 +4186,8 @@ theorem committee_partitioned_jorts_safe_and_live_for_2f_plus_1
       (hSlotsReady verifier hvInLive).2.2.2.2.2.2.1
     have hValidSendersEq :
         validCommitteeEchoSenders H MAC macKeys cIdx verifier live.1 rec echoes = live.1 := by
+      unfold validCommitteeEchoSenders
       apply congrArg CustodiansMask.mk; funext s
-      dsimp only [validCommitteeEchoSenders]
       cases hsQ : live.1.mem s
       · exact Bool.false_and _
       · simp only [Bool.true_and]
@@ -4199,7 +4223,7 @@ theorem committee_partitioned_jorts_safe_and_live_for_2f_plus_1
             decide ((net₂.slots verifier cIdx).inFlight = some rec) &&
             verifyCommitteeEchoPermit H MAC macKeys t subtreeHeight echoQuorum cIdx verifier live.1 rec echoes) = true := by
         rw [hvPois, hvInf, hPermOk]
-        rfl
+        simp
       rw [hGuardOk]
       rfl
     change (∀ p : Fin n, live.1.mem p = true →
@@ -4611,7 +4635,7 @@ theorem qs_a_leaf_index_identifies_committee
           have hD₁ : D (some sig₁) = true := by
             dsimp only [D]
             exact decide_eq_true hOfSig₁
-          exact if_pos hD₁
+          simp only [hD₁, ↓reduceIte]
         rw [finSum_congr hEach₁, finSum_const, Nat.mul_one]
       · have hEach₂ : ∀ r : Fin Card,
             (if D (qsAPartitionedSign H masterSeed t subtreeHeight Q₂ ep₂ cnt₂ digits₂ ap₂ (enum₂.toFun r))
@@ -4626,9 +4650,7 @@ theorem qs_a_leaf_index_identifies_committee
             dsimp only [D]
             rw [hOfSig₂]
             exact decide_eq_false hSomeNe
-          have hNotD₂ : ¬ (D (some sig₂) = true) := by
-            rw [hD₂]; decide
-          exact if_neg hNotD₂
+          simp only [hD₂, Bool.false_eq_true, ↓reduceIte]
         rw [finSum_congr hEach₂, finSum_const, Nat.mul_zero]
   · intro d gLeaf counter digits authPath polyTape pts₁ lambdas₁ pts₂ lambdas₂ hZ₁ hH₁ hZ₂ hH₂
     have hRefEq : ∀ (pts lambdas : List (TowerElem 7)),
@@ -4642,9 +4664,8 @@ theorem qs_a_leaf_index_identifies_committee
       congr 1
       apply List.map_congr_left
       intro idx _
-      dsimp only
-      by_cases hd : (digits[idx.1]'(idx.2)).val < 3
-      · simp only [hd, ↓reduceIte]
+      if hd : (digits[idx.1]'(idx.2)).val < 3 then
+        simp only [hd, ↓reduceIte]
         let sk₀ := quorumStageChainSk H masterSeed gLeaf (UInt32.ofNat idx.1)
         let pkSeed := quorumStagePkSeed H masterSeed
         let trueNode := wotsChainIter (quorumChainStep H pkSeed gLeaf) idx.1 0 (digits[idx.1]'(idx.2)).val sk₀
@@ -4670,7 +4691,8 @@ theorem qs_a_leaf_index_identifies_committee
           simp [LawfulCommRing.zero_mul, LawfulCommRing.add_zero]
         rw [hLo, hHi, ← hUnp]
         exact packTower_unpackTower 8 trueNode
-      · simp only [hd, ↓reduceIte]
+      else
+        simp only [hd, ↓reduceIte]
     have h1 := hRefEq pts₁ lambdas₁ hZ₁ hH₁
     have h2 := hRefEq pts₂ lambdas₂ hZ₂ hH₂
     exact ⟨h1, h1.trans h2.symm⟩
@@ -4750,7 +4772,7 @@ private theorem foldr_add_replicate_acc : ∀ (n val acc : Nat),
     (List.replicate n val).foldr (· + ·) acc = n * val + acc
   | 0, _, acc => by simp
   | n + 1, val, acc => by
-    simp only [List.replicate_succ, List.foldr_cons, foldr_add_replicate_acc n val acc]
+    simp only [List.replicate_succ, List.foldr_cons, foldr_add_replicate_acc n val acc, Nat.add_one_mul]
     omega
 
 private theorem map_finRange_threshold :
@@ -4804,13 +4826,13 @@ theorem tooth_impossible_wots128_target_sum_385_vs_valid_192 :
     rw [hLen, hSum] at hMax
     omega
   · unfold validWotsCsCodeword
-    refine ⟨by simp, ?_, by rw [List.foldr_append, foldr_add_replicate_acc, foldr_add_replicate_acc]; omega⟩
+    refine ⟨by simp, ?_, by rw [List.foldr_append, foldr_add_replicate_acc, foldr_add_replicate_acc]⟩
     intro x hx
     rcases List.mem_append.mp hx with h3 | h0
     · rw [List.eq_of_mem_replicate h3]; decide
     · rw [List.eq_of_mem_replicate h0]; decide
   · unfold validWotsCsCodeword
-    refine ⟨by simp, ?_, by rw [List.foldr_append, foldr_add_replicate_acc, foldr_add_replicate_acc]; omega⟩
+    refine ⟨by simp, ?_, by rw [List.foldr_append, foldr_add_replicate_acc, foldr_add_replicate_acc]⟩
     intro x hx
     rcases List.mem_append.mp hx with h2 | h1
     · rw [List.eq_of_mem_replicate h2]; decide
@@ -5299,7 +5321,7 @@ theorem lagrange2WeightsTower_eval (k : Nat) {x₀ x₁ : TowerElem k} (hNe : x�
       have hSlopeCancel :
           towerMul k (towerMul k x₁ denom) (towerMul k x₀ c₁) =
           towerMul k (towerMul k x₀ denom) (towerMul k x₁ c₁) := by
-        simp only [towerMul_assoc, towerMul_comm, towerMul_left_comm_of_assoc k (towerMul_assoc k)]
+        simp only [towerMul_comm, towerMul_left_comm_of_assoc k (towerMul_assoc k)]
       have hRearr :
           towerAdd k
             (towerAdd k (towerMul k (towerMul k x₁ denom) c₀)
@@ -5783,7 +5805,6 @@ theorem inhabited_preStepped_shamir_wots_self_verify :
       by_cases h : i.val < 64 <;> simp [h]
     dsimp only [digitsNat]
     rw [hFn, map_finRange_threshold 128 64 2 1 (by omega)]
-    rfl
   have hCodeword : validWotsCsCodeword 128 4 192 digitsNat := by
     rw [hDigitsNatEq]
     exact tooth_impossible_wots128_target_sum_385_vs_valid_192.2.2
@@ -5857,7 +5878,6 @@ theorem inhabited_preStepped_shamir_wots_self_verify :
         dsimp only [F_perm] at hStepEq
         let mask := BitVec.ofNat 256 (0x9E3779B97F4A7C15 + w.chainIdx * 257 + w.stepPos)
         have hXor := congrArg (fun z => z ^^^ mask) hStepEq
-        dsimp only at hXor
         rw [BitVec.xor_assoc, BitVec.xor_self, BitVec.xor_zero,
             BitVec.xor_assoc, BitVec.xor_self, BitVec.xor_zero] at hXor
         exact w.nodes_ne hXor
