@@ -523,8 +523,13 @@ impl<T: WireTransport, W: DurableWal> IsolatedQuorumParty<T, W> {
 // Three-party replicated Keccak engine, one party per value
 // ---------------------------------------------------------------------------------------------
 
-/// Durable record of poisoned sessions.
+/// Durable record of reserved and poisoned sessions.
 pub trait PoisonJournal {
+    /// Atomically and durably reserve `session_id` before any protocol masks, coins,
+    /// or transport frames are derived. Reusing a previously reserved or poisoned
+    /// `session_id` must fail closed so crash recovery never repeats pads or coins.
+    fn reserve_session(&mut self, session_id: &[u8; 32]) -> Result<(), NodeError>;
+
     /// Record that `session_id` is poisoned; return only once it would survive a restart.
     fn mark_poisoned(&mut self, session_id: &[u8; 32]) -> Result<(), NodeError>;
 
@@ -534,6 +539,7 @@ pub trait PoisonJournal {
 /// Volatile [`PoisonJournal`] for tests and for hosts that persist one level up.
 #[derive(Clone, Debug, Default)]
 pub struct MemoryPoisonJournal {
+    reserved_sessions: Vec<[u8; 32]>,
     sessions: Vec<[u8; 32]>,
     fail_next: bool,
 }
@@ -543,13 +549,21 @@ impl MemoryPoisonJournal {
         Self::default()
     }
 
-    /// Make the next write fail.
+    /// Make the next poison write fail.
     pub fn fail_next_write(&mut self) {
         self.fail_next = true;
     }
 }
 
 impl PoisonJournal for MemoryPoisonJournal {
+    fn reserve_session(&mut self, session_id: &[u8; 32]) -> Result<(), NodeError> {
+        if self.sessions.contains(session_id) || self.reserved_sessions.contains(session_id) {
+            return Err(NodeError::Journal);
+        }
+        self.reserved_sessions.push(*session_id);
+        Ok(())
+    }
+
     fn mark_poisoned(&mut self, session_id: &[u8; 32]) -> Result<(), NodeError> {
         if self.fail_next {
             self.fail_next = false;
@@ -767,17 +781,21 @@ impl<T: WireTransport, J: PoisonJournal> Drop for IsolatedRss256Party<T, J> {
 
 impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
     /// A party of session `session_id`. If the journal already lists the session as
-    /// poisoned, the party starts poisoned.
+    /// poisoned, the party starts poisoned; otherwise construction atomically and durably
+    /// reserves `session_id` before any protocol mask or coin can be derived.
     pub fn new(
         session_id: [u8; 32],
         keys: Rss256PartyKeys,
         transport: T,
-        journal: J,
+        mut journal: J,
     ) -> Result<Self, NodeError> {
         if keys.party >= 3 || transport.party() != keys.party || transport.parties() != 3 {
             return Err(NodeError::InvalidParameters);
         }
         let poisoned = journal.is_poisoned(&session_id);
+        if !poisoned {
+            journal.reserve_session(&session_id)?;
+        }
         let verified_latch = if poisoned {
             qsag_verified::VerifiedRssPoisonLatch::new_clean()
                 .record_check_result(false)
@@ -922,23 +940,40 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
         let mut pad_next = Shake256Prg256::new(&self.slot_keys[1], &self.session_id, domain);
         let (succ, pred) = (self.succ(), self.pred());
         self.unverified = true;
-        let mut lin_mine = vec![[0u64; 25]; n];
-        let mut lin_next = vec![[0u64; 25]; n];
-        let mut pads_mine = vec![0u64; 25 * n];
-        let mut pads_next = vec![0u64; 25 * n];
-        let mut message = vec![0u64; 25 * n];
+        struct ZeroizingWords(Vec<u64>);
+        impl Drop for ZeroizingWords {
+            fn drop(&mut self) {
+                self.0.fill(0);
+                core::hint::black_box(self.0.as_mut_slice());
+            }
+        }
+        struct ZeroizingStateBuf(Vec<[u64; 25]>);
+        impl Drop for ZeroizingStateBuf {
+            fn drop(&mut self) {
+                for st in &mut self.0 {
+                    st.fill(0);
+                    core::hint::black_box(st);
+                }
+            }
+        }
+
+        let mut lin_mine = ZeroizingStateBuf(vec![[0u64; 25]; n]);
+        let mut lin_next = ZeroizingStateBuf(vec![[0u64; 25]; n]);
+        let mut pads_mine = ZeroizingWords(vec![0u64; 25 * n]);
+        let mut pads_next = ZeroizingWords(vec![0u64; 25 * n]);
+        let mut message = ZeroizingWords(vec![0u64; 25 * n]);
         for (round, &rc) in KECCAK_ROUND_CONSTANTS.iter().enumerate() {
-            pad_mine.fill_words(&mut pads_mine);
-            pad_next.fill_words(&mut pads_next);
+            pad_mine.fill_words(&mut pads_mine.0);
+            pad_next.fill_words(&mut pads_next.0);
             for (s, state) in self.states.iter().enumerate() {
-                lin_mine[s] = keccak_linear(&state.mine);
-                lin_next[s] = keccak_linear(&state.next);
+                lin_mine.0[s] = keccak_linear(&state.mine);
+                lin_next.0[s] = keccak_linear(&state.next);
                 for lane in 0..25 {
                     let (l1, l2) = chi_operands(lane);
-                    let (am, an) = (lin_mine[s][l1], lin_next[s][l1]);
-                    let (bm, bn) = (lin_mine[s][l2], lin_next[s][l2]);
-                    let (pm, pn) = (pads_mine[25 * s + lane], pads_next[25 * s + lane]);
-                    message[25 * s + lane] = (am & (bm ^ bn)) ^ (an & bm) ^ pm ^ pn;
+                    let (am, an) = (lin_mine.0[s][l1], lin_next.0[s][l1]);
+                    let (bm, bn) = (lin_mine.0[s][l2], lin_next.0[s][l2]);
+                    let (pm, pn) = (pads_mine.0[25 * s + lane], pads_next.0[25 * s + lane]);
+                    message.0[25 * s + lane] = (am & (bm ^ bn)) ^ (an & bm) ^ pm ^ pn;
                     self.record.a_mine.push(am);
                     self.record.b_mine.push(bm);
                     self.record.a_next.push(an);
@@ -958,24 +993,33 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
             {
                 // The cheater keeps the wrong product share itself, so the sharing stays
                 // consistent and exactly this one gate is wrong.
-                message[lane] ^= 1 << bit;
+                message.0[lane] ^= 1 << bit;
             }
-            self.transport.send_frame(
-                pred,
-                ROUND_GATE | round as u32,
-                &words_to_bytes(&message),
-            )?;
-            let raw = recv_from(&mut self.transport, succ, ROUND_GATE | round as u32)?;
-            let received = bytes_to_words(&raw, 25 * n).ok_or(NodeError::MalformedMessage {
-                from: succ,
-                round: ROUND_GATE | round as u32,
-            })?;
+            let mut wire_bytes = words_to_bytes(&message.0);
+            let send_res = self
+                .transport
+                .send_frame(pred, ROUND_GATE | round as u32, &wire_bytes);
+            wire_bytes.fill(0);
+            core::hint::black_box(wire_bytes.as_mut_slice());
+            send_res?;
+            let mut raw = recv_from(&mut self.transport, succ, ROUND_GATE | round as u32)?;
+            let mut received = ZeroizingWords(bytes_to_words(&raw, 25 * n).ok_or_else(|| {
+                raw.fill(0);
+                core::hint::black_box(raw.as_mut_slice());
+                NodeError::MalformedMessage {
+                    from: succ,
+                    round: ROUND_GATE | round as u32,
+                }
+            })?);
+            raw.fill(0);
+            core::hint::black_box(raw.as_mut_slice());
             for (s, state) in self.states.iter_mut().enumerate() {
                 for lane in 0..25 {
                     let (_, l2) = chi_operands(lane);
-                    state.mine[lane] = lin_mine[s][lane] ^ lin_mine[s][l2] ^ message[25 * s + lane];
+                    state.mine[lane] =
+                        lin_mine.0[s][lane] ^ lin_mine.0[s][l2] ^ message.0[25 * s + lane];
                     state.next[lane] =
-                        lin_next[s][lane] ^ lin_next[s][l2] ^ received[25 * s + lane];
+                        lin_next.0[s][lane] ^ lin_next.0[s][l2] ^ received.0[25 * s + lane];
                 }
                 // Iota is a public constant: it goes into share slot 0 only.
                 match self.party {
@@ -984,14 +1028,9 @@ impl<T: WireTransport, J: PoisonJournal> IsolatedRss256Party<T, J> {
                     _ => {}
                 }
             }
-            self.record.received.extend_from_slice(&received);
+            self.record.received.extend_from_slice(&received.0);
+            let _ = &mut received;
         }
-        for buf in [&mut pads_mine, &mut pads_next, &mut message] {
-            buf.fill(0);
-            core::hint::black_box(buf.as_mut_slice());
-        }
-        lin_mine.fill([0; 25]);
-        lin_next.fill([0; 25]);
         Ok(())
     }
 

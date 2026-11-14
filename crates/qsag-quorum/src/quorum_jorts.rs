@@ -1142,15 +1142,31 @@ pub struct CommitteePartitionedJorts<W: DurableWal> {
     ots_release_cache: BTreeMap<u64, (Node, u32)>,
 }
 
+#[cfg(any(test, feature = "testing-ephemeral"))]
 impl CommitteePartitionedJorts<MemoryWal> {
-    /// Stage a key with volatile logs.
+    /// Stage a key with volatile logs (restricted to tests and `testing-ephemeral`).
     pub fn stage(t: usize, n: usize, height: u8, seed: &Node) -> Result<Self, QuorumError> {
+        Self::stage_durable(t, n, height, seed, |_party, store_count| {
+            vec![MemoryWal::new(); store_count]
+        })
+    }
+}
+
+impl<W: DurableWal> CommitteePartitionedJorts<W> {
+    /// Stage a key with caller-provisioned durable logs (one per committee slot per party).
+    pub fn stage_durable(
+        t: usize,
+        n: usize,
+        height: u8,
+        seed: &Node,
+        mut make_wals: impl FnMut(usize, usize) -> Vec<W>,
+    ) -> Result<Self, QuorumError> {
         let staged = stage_committee_partitioned(t, n, height, seed)?;
         let custodians = staged
             .parties
             .into_iter()
             .map(|material| {
-                let wals = vec![MemoryWal::new(); material.stores.len()];
+                let wals = make_wals(material.party, material.stores.len());
                 CommitteeCustodian::new(staged.layout.clone(), staged.tree.clone(), material, wals)
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -1161,9 +1177,6 @@ impl CommitteePartitionedJorts<MemoryWal> {
             ots_release_cache: BTreeMap::new(),
         })
     }
-}
-
-impl<W: DurableWal> CommitteePartitionedJorts<W> {
     pub fn public_key(&self) -> &QuorumPublicKey {
         self.tree.public_key()
     }
@@ -1716,15 +1729,29 @@ pub struct BftShamirJorts<W: DurableWal> {
     ots_release_cache: BTreeMap<u64, (Node, u32)>,
 }
 
+#[cfg(any(test, feature = "testing-ephemeral"))]
 impl BftShamirJorts<MemoryWal> {
-    /// Stage a key with volatile logs.
+    /// Stage a key with volatile logs (restricted to tests and `testing-ephemeral`).
     pub fn stage(cfg: QuorumConfig, height: u8, seed: &Node) -> Result<Self, QuorumError> {
+        Self::stage_durable(cfg, height, seed, |_party| MemoryWal::new())
+    }
+}
+
+impl<W: DurableWal> BftShamirJorts<W> {
+    /// Stage a key with caller-provisioned durable logs (one per custodian).
+    pub fn stage_durable(
+        cfg: QuorumConfig,
+        height: u8,
+        seed: &Node,
+        mut make_wal: impl FnMut(usize) -> W,
+    ) -> Result<Self, QuorumError> {
         let staged = stage_bft_shamir(cfg, height, seed)?;
         let custodians = staged
             .parties
             .into_iter()
             .map(|material| {
-                ShamirCustodian::new(cfg, staged.tree.clone(), material, MemoryWal::new())
+                let wal = make_wal(material.party);
+                ShamirCustodian::new(cfg, staged.tree.clone(), material, wal)
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
@@ -1734,9 +1761,6 @@ impl BftShamirJorts<MemoryWal> {
             ots_release_cache: BTreeMap::new(),
         })
     }
-}
-
-impl<W: DurableWal> BftShamirJorts<W> {
     pub fn public_key(&self) -> &QuorumPublicKey {
         self.tree.public_key()
     }
