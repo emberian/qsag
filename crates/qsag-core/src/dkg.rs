@@ -1056,3 +1056,975 @@ fn derive_gf256_vector_challenges(
 
 /// Round 1 of 256-bit `TowerGf256` seed dealing: commits to `pk_seed_contrib` and all recipient
 /// packets without revealing `pk_seed_contrib` or `masked_polys`.
+pub fn deal_gf256_seed_round1(
+    session_id: &[u8; 32],
+    dealer_idx: usize,
+    t: usize,
+    pts: &[TowerGf256],
+    mode_constants: Option<[TowerGf256; 256]>,
+    zero_constant_mask: bool,
+    rng: &mut PartyPrivateRng,
+) -> Result<
+    (
+        Gf256SeedDealerRound1Commit,
+        Gf256SeedDealerPendingSecret,
+        Vec<Gf256SeedPrivatePacket>,
+    ),
+    DkgError,
+> {
+    let n = pts.len();
+    if t == 0 || t > n {
+        return Err(DkgError::InvalidQuorum { t, n });
+    }
+    validate_all_eval_points_gf256(pts)?;
+
+    let pk_seed_contrib = rng.next_bytes32();
+    let pk_seed_salt = rng.next_bytes32();
+    let pk_seed_commitment =
+        dkg_commit_pk_seed(session_id, dealer_idx, &pk_seed_salt, &pk_seed_contrib);
+
+    let mut f_polys = vec![vec![TowerGf256::ZERO; t]; 256];
+    let mut m_polys = vec![vec![Tower128::ZERO; t]; 256];
+
+    for b in 0..256 {
+        f_polys[b][0] = match mode_constants {
+            Some(ref arr) => arr[b],
+            None => TowerGf256((rng.next_u64() & 1) as u8),
+        };
+        m_polys[b][0] = if zero_constant_mask {
+            Tower128::ZERO
+        } else {
+            rng.next_tower128()
+        };
+        for k in 1..t {
+            f_polys[b][k] = TowerGf256((rng.next_u64() & 0xFF) as u8);
+            m_polys[b][k] = rng.next_tower128();
+        }
+    }
+
+    let mut share_commitments = Vec::with_capacity(n);
+    let mut packets = Vec::with_capacity(n);
+    for (j, pts_j_item) in pts[..n].iter().enumerate() {
+        let mut f_shares = [TowerGf256::ZERO; 256];
+        let mut m_shares = [Tower128::ZERO; 256];
+        for b in 0..256 {
+            f_shares[b] = eval_poly_gf256(&f_polys[b], *pts_j_item);
+            m_shares[b] = eval_poly_tower128_at_gf256(&m_polys[b], *pts_j_item);
+        }
+        let salt = rng.next_bytes32();
+        let pkt = Gf256SeedPrivatePacket {
+            recv_idx: j,
+            f_shares,
+            m_shares,
+            salt,
+        };
+        let mut raw = pkt.encode_bytes();
+        let comm = dkg_commit_share(dealer_idx as u32, j as u32, &salt, &raw);
+        wipe_bytes(&mut raw);
+        share_commitments.push(comm);
+        packets.push(pkt);
+    }
+
+    Ok((
+        Gf256SeedDealerRound1Commit {
+            dealer_idx,
+            pk_seed_commitment,
+            share_commitments,
+        },
+        Gf256SeedDealerPendingSecret {
+            dealer_idx,
+            t,
+            f_polys,
+            m_polys,
+            pk_seed_contrib,
+            pk_seed_salt,
+        },
+        packets,
+    ))
+}
+
+impl Gf256SeedDealerPendingSecret {
+    /// Round 2 of 256-bit `TowerGf256` seed dealing: opens `(masked_polys, pk_seed_contrib, pk_seed_salt)`
+    /// against the locked `joint_round1_digest`.
+    pub fn open_round2(
+        self,
+        session_id: &[u8; 32],
+        pts: &[TowerGf256],
+        joint_round1_digest: &[u8; 32],
+    ) -> Gf256SeedDealerRound2Open {
+        let chals = derive_gf256_vector_challenges(
+            session_id,
+            self.t,
+            pts,
+            joint_round1_digest,
+            self.dealer_idx,
+        );
+        let mut masked_polys = Vec::with_capacity(256);
+        for (b, chals_b_item) in chals[..256].iter().enumerate() {
+            let mut mp = Vec::with_capacity(self.t);
+            for k in 0..self.t {
+                mp.push(
+                    (*chals_b_item)
+                        .mul(Tower128::embed_gf256(self.f_polys[b][k]))
+                        .add(self.m_polys[b][k]),
+                );
+            }
+            masked_polys.push(mp);
+        }
+        Gf256SeedDealerRound2Open {
+            dealer_idx: self.dealer_idx,
+            masked_polys,
+            pk_seed_contrib: self.pk_seed_contrib,
+            pk_seed_salt: self.pk_seed_salt,
+        }
+    }
+}
+
+/// Verify both the public `(Gf256SeedDealerRound1Commit, Gf256SeedDealerRound2Open)` pair and
+/// recipient `recv_idx`'s own private `Gf256SeedPrivatePacket`.
+#[expect(clippy::too_many_arguments, reason = "Keep commitment, opening, private packet and session/quorum bindings explicit")]
+pub fn verify_gf256_seed_dealing(
+    session_id: &[u8; 32],
+    t: usize,
+    pts: &[TowerGf256],
+    joint_round1_digest: &[u8; 32],
+    r1: &Gf256SeedDealerRound1Commit,
+    r2: &Gf256SeedDealerRound2Open,
+    packet: &Gf256SeedPrivatePacket,
+    require_zero_constant: bool,
+) -> Result<(), DkgError> {
+    let n = pts.len();
+    if t == 0 || t > n {
+        return Err(DkgError::InvalidQuorum { t, n });
+    }
+    validate_all_eval_points_gf256(pts)?;
+
+    if r1.dealer_idx != r2.dealer_idx
+        || r1.share_commitments.len() != n
+        || r2.masked_polys.len() != 256
+    {
+        return Err(DkgError::DealerDisqualified {
+            dealer_idx: r1.dealer_idx,
+        });
+    }
+    let pk_comm =
+        dkg_commit_pk_seed(session_id, r1.dealer_idx, &r2.pk_seed_salt, &r2.pk_seed_contrib);
+    if !ct_eq_bytes32(&pk_comm, &r1.pk_seed_commitment) {
+        return Err(DkgError::DealerDisqualified {
+            dealer_idx: r1.dealer_idx,
+        });
+    }
+    for poly in r2.masked_polys.iter().take(256) {
+        if poly.len() > t {
+            return Err(DkgError::DealerDisqualified {
+                dealer_idx: r1.dealer_idx,
+            });
+        }
+        if require_zero_constant
+            && !poly
+                .first()
+                .copied()
+                .unwrap_or(Tower128::ZERO)
+                .ct_eq(Tower128::ZERO)
+        {
+            return Err(DkgError::ZeroConstantCheckFailed {
+                dealer_idx: r1.dealer_idx,
+            });
+        }
+    }
+
+    if packet.recv_idx >= n {
+        return Err(DkgError::PrivatePacketVerificationFailed {
+            dealer_idx: r1.dealer_idx,
+            recv_idx: packet.recv_idx,
+        });
+    }
+    let mut raw = packet.encode_bytes();
+    let comm = dkg_commit_share(
+        r1.dealer_idx as u32,
+        packet.recv_idx as u32,
+        &packet.salt,
+        &raw,
+    );
+    wipe_bytes(&mut raw);
+    if !ct_eq_bytes32(&comm, &r1.share_commitments[packet.recv_idx]) {
+        return Err(DkgError::PrivatePacketVerificationFailed {
+            dealer_idx: r1.dealer_idx,
+            recv_idx: packet.recv_idx,
+        });
+    }
+
+    let chals =
+        derive_gf256_vector_challenges(session_id, t, pts, joint_round1_digest, r1.dealer_idx);
+    let x = pts[packet.recv_idx];
+    for (b, chals_b_item) in chals[..256].iter().enumerate() {
+        let lhs = (*chals_b_item)
+            .mul(Tower128::embed_gf256(packet.f_shares[b]))
+            .add(packet.m_shares[b]);
+        let rhs = eval_poly_tower128_at_gf256(&r2.masked_polys[b], x);
+        if !lhs.ct_eq(rhs) {
+            return Err(DkgError::PrivatePacketVerificationFailed {
+                dealer_idx: r1.dealer_idx,
+                recv_idx: packet.recv_idx,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// SPDZ-MAC-authenticated Booleanity + global `0..n` degree-`< t` verification for 256-bit
+/// `TowerGf256` seed shares (`1 - 2^{-255}` soundness even under dishonest majority $2t - 1 > n$,
+/// `0` central-RAM masks, `0` Frobenius linearity bypass, `0` secret leakage).
+pub fn spdz_verify_seed256_boolean_gf256(
+    session_id: &[u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    ot_mesh: &mut OtMesh,
+    bit_shares_per_party: &[[TowerGf256; 256]],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), DkgError> {
+    let n = eval_points.len();
+    if t == 0
+        || t > n
+        || n < 2
+        || ot_mesh.n != n
+        || bit_shares_per_party.len() != n
+        || party_rngs.len() != n
+    {
+        return Err(DkgError::InvalidQuorum { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+
+    // 1. Pack `256` `TowerGf256` shares per party into `4` `BitslicedGf256x64` words
+    let mut s_words = vec![vec![[0u64; 8]; 4]; n];
+    for p in 0..n {
+        for w in 0..4 {
+            for lane in 0..64 {
+                bs_gf256_insert_lane(
+                    &mut s_words[p][w],
+                    lane,
+                    bit_shares_per_party[p][64 * w + lane],
+                );
+            }
+        }
+    }
+
+    // 2. Generate `4` 2-lane-BDOZ + SPDZ-Booleanity-verified Boolean mask words `m_k \in F_2^{64}`
+    let mask_sid = cshake256_hash32(b"QSAG.DKG.GF256.BOOL.MASK/v1", session_id);
+    let mut mask_vaults =
+        run_dealerless_pi_triple_f2(mask_sid, t, eval_points, 4, ot_mesh, party_rngs)?;
+
+    // 3. Authenticate `[s_0..s_3, m_0..m_3]` under a unified 2-lane `Tower128` SPDZ MAC key across `0..n`
+    // (`spdz_authenticate_bs_gf256_words` also enforces global degree `< t` across ALL `0..n` parties!)
+    let auth_sid = cshake256_hash32(b"QSAG.DKG.GF256.BOOL.AUTH/v1", session_id);
+    let (mut alpha_contribs, mut alpha_shamir) =
+        spdz_setup_alpha_gf256(&auth_sid, t, eval_points, party_rngs)?;
+
+    let mut flat_words = vec![Vec::with_capacity(8); n];
+    for p in 0..n {
+        flat_words[p].extend_from_slice(&s_words[p]);
+        for _ in 0..4 {
+            let tr = mask_vaults[p].pop_triple()?;
+            flat_words[p].push(tr.a);
+        }
+        for w in &mut s_words[p] {
+            wipe_u64s(w);
+        }
+    }
+    let mut flat_macs = spdz_authenticate_bs_gf256_words(
+        &auth_sid,
+        t,
+        eval_points,
+        ot_mesh,
+        &alpha_contribs,
+        &alpha_shamir,
+        &flat_words,
+        party_rngs,
+    )?;
+    for ac in &mut alpha_contribs {
+        wipe_tower128_slice(ac);
+    }
+
+    // 4. Commit-before-open `[u_w] = [s_w \oplus m_w]` (`w = 0..4`) with SPDZ `MacCheck`:
+    // - Plane `0` is masked by uniform `m_w[0] \in {0,1}^{64}` -> `0` bits of `s_w` leaked!
+    // - Planes `1..8` of `m_w` are `0` -> ANY `s_{64w+bit} \notin F_2` sets `(u_w[pl] >> bit) & 1 == 1`
+    //   and CANNOT be cancelled by corrupt signers without breaking the 2-lane `Tower128` SPDZ MAC!
+    let mut u_shares = vec![[0u64; 8]; n];
+    let mut u_macs = vec![[[Tower128::ZERO; 64]; 2]; n];
+    for w in 0..4 {
+        for p in 0..n {
+            u_shares[p] = bs_gf256_xor(&flat_words[p][w], &flat_words[p][4 + w]);
+            for lane in 0..2 {
+                for bit in 0..64 {
+                    u_macs[p][lane][bit] =
+                        flat_macs[p][w][lane][bit].add(flat_macs[p][4 + w][lane][bit]);
+                }
+            }
+        }
+        let u_open = commit_and_open_spdz_bs_gf256_quorum(
+            &auth_sid,
+            "dkg_gf256_seed_bool_check",
+            t,
+            eval_points,
+            &u_shares,
+            &u_macs,
+            &alpha_shamir,
+            party_rngs,
+        )?;
+        for bit in 0..64 {
+            let mut upper_nonzero = 0u64;
+            for u_open_pl_item in u_open[..8].iter().skip(1) {
+                upper_nonzero |= (*u_open_pl_item >> bit) & 1;
+            }
+            if upper_nonzero != 0 {
+                for p in 0..n {
+                    for fw in &mut flat_words[p] {
+                        wipe_u64s(fw);
+                    }
+                    for fm in &mut flat_macs[p] {
+                        wipe_tower128_slice(&mut fm[0]);
+                        wipe_tower128_slice(&mut fm[1]);
+                    }
+                    wipe_tower128_slice(&mut alpha_shamir[p]);
+                }
+                return Err(DkgError::NonBooleanSeedBitDetected {
+                    bit_idx: 64 * w + bit,
+                });
+            }
+        }
+    }
+
+    for p in 0..n {
+        for fw in &mut flat_words[p] {
+            wipe_u64s(fw);
+        }
+        for fm in &mut flat_macs[p] {
+            wipe_tower128_slice(&mut fm[0]);
+            wipe_tower128_slice(&mut fm[1]);
+        }
+        wipe_tower128_slice(&mut alpha_shamir[p]);
+    }
+    Ok(())
+}
+
+/// Run full 2-round commit-then-open dealerless `Π_dkg` over `TowerGf256` generating `([sk_seed], pk_seed)`:
+/// - Round 1: all parties broadcast `Gf256SeedDealerRound1Commit` (`pk_seed_commitment` + `share_commitments`)
+///   and deliver private packets; `joint_round1_digest` is locked before any Round-2 opening is computed;
+/// - Round 2: all parties broadcast `Gf256SeedDealerRound2Open`, each recipient verifies its own inbox,
+///   and the committee runs `spdz_verify_seed256_boolean_gf256` (`2^{-256}` SPDZ Booleanity + global `0..n` degree `< t`)!
+pub fn run_dealerless_dkg_seed32_gf256(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    ot_mesh: &mut OtMesh,
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(Vec<ShamirSeedShare256>, [u8; 32]), DkgError> {
+    let n = eval_points.len();
+    if t == 0 || t > n || n < 2 || party_rngs.len() != n || ot_mesh.n != n {
+        return Err(DkgError::InvalidQuorum { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+
+    // Round 1: Commit
+    let mut r1_commits = Vec::with_capacity(n);
+    let mut pending_dealers = Vec::with_capacity(n);
+    let mut inboxes: Vec<Vec<Option<Gf256SeedPrivatePacket>>> =
+        (0..n).map(|_| (0..n).map(|_| None).collect()).collect();
+
+    for i in 0..n {
+        let (r1, pend, pkts) = deal_gf256_seed_round1(
+            &session_id,
+            i,
+            t,
+            eval_points,
+            None,
+            false,
+            &mut party_rngs[i],
+        )?;
+        r1_commits.push(r1);
+        pending_dealers.push(pend);
+        for pkt in pkts {
+            let j = pkt.recv_idx;
+            inboxes[j][i] = Some(pkt);
+        }
+    }
+
+    let joint_r1_digest =
+        compute_gf256_round1_transcript(&session_id, t, eval_points, &r1_commits);
+
+    // Round 2: Open against `joint_r1_digest`
+    let r2_opens: Vec<Gf256SeedDealerRound2Open> = pending_dealers
+        .into_iter()
+        .map(|pend| pend.open_round2(&session_id, eval_points, &joint_r1_digest))
+        .collect();
+
+    // Each recipient `j` verifies ONLY its own inbox `inboxes[j][0..n]`
+    let mut agg_bits = vec![[TowerGf256::ZERO; 256]; n];
+    for j in 0..n {
+        for i in 0..n {
+            let pkt = inboxes[j][i]
+                .as_ref()
+                .ok_or(DkgError::DealerDisqualified { dealer_idx: i })?;
+            verify_gf256_seed_dealing(
+                &session_id,
+                t,
+                eval_points,
+                &joint_r1_digest,
+                &r1_commits[i],
+                &r2_opens[i],
+                pkt,
+                false,
+            )?;
+            for b in 0..256 {
+                agg_bits[j][b] = agg_bits[j][b].add(pkt.f_shares[b]);
+            }
+        }
+    }
+
+    let mut pk_seed = [0u8; 32];
+    for r2_opens_i_item in r2_opens[..n].iter() {
+        for (k, pk_seed_k_item) in pk_seed[..32].iter_mut().enumerate() {
+            *pk_seed_k_item ^= r2_opens_i_item.pk_seed_contrib[k];
+        }
+    }
+
+    // Interactive SPDZ-MAC-authenticated Booleanity & global `0..n` degree-`< t` verification
+    spdz_verify_seed256_boolean_gf256(
+        &session_id,
+        t,
+        eval_points,
+        ot_mesh,
+        &agg_bits,
+        party_rngs,
+    )?;
+
+    let mut shares = Vec::with_capacity(n);
+    for p in 0..n {
+        let bits = agg_bits[p];
+        wipe_gf256_slice(&mut agg_bits[p]);
+        shares.push(ShamirSeedShare256::new(p, 0, eval_points[p], bits));
+    }
+    Ok((shares, pk_seed))
+}
+
+/// Multi-party 2-round dealerless `Π_refresh` (`Π_deg0`) over `TowerGf256` with global `0..n`
+/// `Tower128` mask-polynomial degree-`< t` verification (`2t - 1 > n` dishonest-majority safe).
+pub fn run_dealerless_refresh_seed32_gf256(
+    session_id: [u8; 32],
+    t: usize,
+    eval_points: &[TowerGf256],
+    shares: &mut [ShamirSeedShare256],
+    party_rngs: &mut [PartyPrivateRng],
+) -> Result<(), DkgError> {
+    let n = eval_points.len();
+    if t < 2 || t > n || shares.len() != n || party_rngs.len() != n {
+        return Err(DkgError::InvalidQuorum { t, n });
+    }
+    validate_all_eval_points_gf256(eval_points)?;
+    for (p, s) in shares.iter().enumerate() {
+        if !s.is_valid() || s.eval_point != eval_points[p] {
+            return Err(DkgError::ShareAlreadyInvalidated { party_id: p });
+        }
+    }
+
+    let zeros = [TowerGf256::ZERO; 256];
+    let mut r1_commits = Vec::with_capacity(n);
+    let mut pending = Vec::with_capacity(n);
+    let mut inboxes: Vec<Vec<Option<Gf256SeedPrivatePacket>>> =
+        (0..n).map(|_| (0..n).map(|_| None).collect()).collect();
+
+    for i in 0..n {
+        let (r1, pend, pkts) = deal_gf256_seed_round1(
+            &session_id,
+            i,
+            t,
+            eval_points,
+            Some(zeros),
+            true,
+            &mut party_rngs[i],
+        )?;
+        r1_commits.push(r1);
+        pending.push(pend);
+        for pkt in pkts {
+            let j = pkt.recv_idx;
+            inboxes[j][i] = Some(pkt);
+        }
+    }
+
+    let joint_r1_digest =
+        compute_gf256_round1_transcript(&session_id, t, eval_points, &r1_commits);
+    let r2_opens: Vec<Gf256SeedDealerRound2Open> = pending
+        .into_iter()
+        .map(|pend| pend.open_round2(&session_id, eval_points, &joint_r1_digest))
+        .collect();
+
+    let mut delta_bits = vec![[TowerGf256::ZERO; 256]; n];
+    for j in 0..n {
+        for i in 0..n {
+            let pkt = inboxes[j][i]
+                .as_ref()
+                .ok_or(DkgError::DealerDisqualified { dealer_idx: i })?;
+            verify_gf256_seed_dealing(
+                &session_id,
+                t,
+                eval_points,
+                &joint_r1_digest,
+                &r1_commits[i],
+                &r2_opens[i],
+                pkt,
+                true,
+            )?;
+            for b in 0..256 {
+                delta_bits[j][b] = delta_bits[j][b].add(pkt.f_shares[b]);
+            }
+        }
+    }
+
+    // Global `0..n` degree-`< t` + zero-constant verification on `delta_bits` via random `Tower128`
+    // zero-constant mask polynomial (`P_mask(0) == 0`, `2^{-128}` soundness even when `2t - 1 > n`!)
+    let mut mask_shares = vec![Tower128::ZERO; n];
+    for party_rngs_i_item in party_rngs[..n].iter_mut() {
+        let mut m_coeffs = vec![Tower128::ZERO; t];
+        for m_coeffs_k_item in m_coeffs[..t].iter_mut().skip(1) {
+            *m_coeffs_k_item = (*party_rngs_i_item).next_tower128();
+        }
+        for p in 0..n {
+            mask_shares[p] = mask_shares[p].add(eval_poly_tower128_at_gf256(&m_coeffs, eval_points[p]));
+        }
+        wipe_tower128_slice(&mut m_coeffs);
+    }
+    let coin = run_commit_and_open_coin(
+        &session_id,
+        b"GF256_REFRESH_DEG0_CHECK",
+        &joint_r1_digest,
+        party_rngs,
+    )?;
+    let mut ch_rng = PartyPrivateRng::from_seed(coin, b"GF256_REF_CHIS");
+    let mut comb = vec![Tower128::ZERO; n];
+    comb[..n].copy_from_slice(&mask_shares[..n]);
+    wipe_tower128_slice(&mut mask_shares);
+    #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
+    for b in 0..256 {
+        let chi = Tower128(ch_rng.next_u128() | 1);
+        for p in 0..n {
+            comb[p] = comb[p].add(chi.mul(Tower128::embed_gf256(delta_bits[p][b])));
+        }
+    }
+    let zero_opened = commit_and_open_degree_tower128(
+        &session_id,
+        "gf256_refresh_deg0_check",
+        t,
+        eval_points,
+        &comb,
+        party_rngs,
+    )?;
+    wipe_tower128_slice(&mut comb);
+    if !zero_opened.ct_eq(Tower128::ZERO) {
+        return Err(DkgError::ZeroConstantCheckFailed { dealer_idx: 0 });
+    }
+
+    for j in 0..n {
+        for b in 0..256 {
+            shares[j].bit_shares[b] = shares[j].bit_shares[b].add(delta_bits[j][b]);
+        }
+        wipe_gf256_slice(&mut delta_bits[j]);
+        shares[j].generation = shares[j].generation.saturating_add(1);
+    }
+    Ok(())
+}
+
+// A single retirement boundary for both sharing fields. On any verification
+// error the new custody is dropped and wiped; old custody remains usable.
+fn finish_reshare<T>(
+    old: &mut [T],
+    new: Vec<T>,
+    enrolled_root: &[u8; 32],
+    recompute: impl FnOnce(&[T]) -> Result<[u8; 32], DkgError>,
+    retire: impl Fn(&mut T),
+) -> Result<Vec<T>, DkgError> {
+    let root = recompute(&new)?;
+    if !ct_eq_bytes32(&root, enrolled_root) {
+        return Err(DkgError::PublicRootMismatch);
+    }
+    for share in old {
+        retire(share);
+    }
+    Ok(new)
+}
+
+/// Dynamic Quorum Redistribution `Π_reshare` (`(t, n) -> (t', n')`, e.g. `3-of-5 -> 5-of-9`) over `TowerGf256`:
+/// - Authorized old quorum `old_quorum_indices` (`len == old_t`) runs 2-round commit-then-open sub-dealing
+///   to all `new_n` new committee members;
+/// - New committee runs `spdz_verify_seed256_boolean_gf256` (`2^{-256}` SPDZ Booleanity + global `0..new_n`
+///   degree-`< new_t` verification, `0` central RAM, `0` unmasked Frobenius leak);
+/// - Recomputes the enrolled public root before retiring old shares. The caller
+///   supplies its suite-specific MPC root computation, bound to the enrolled
+///   public parameters; it must not reconstruct the secret in production.
+///   A constant or unverified callback defeats this check and is forbidden.
+#[expect(clippy::too_many_arguments, reason = "Old/new committees and the enrolled-root verifier are separate trust-boundary inputs")]
+pub fn run_dealerless_reshare_seed32_gf256(
+    session_id: [u8; 32],
+    old_t: usize,
+    old_quorum_indices: &[usize],
+    old_shares: &mut [ShamirSeedShare256],
+    new_t: usize,
+    new_eval_points: &[TowerGf256],
+    new_ot_mesh: &mut OtMesh,
+    old_quorum_rngs: &mut [PartyPrivateRng],
+    new_party_rngs: &mut [PartyPrivateRng],
+    enrolled_root: &[u8; 32],
+    recompute_public_root: impl FnOnce(&[ShamirSeedShare256]) -> Result<[u8; 32], DkgError>,
+) -> Result<Vec<ShamirSeedShare256>, DkgError> {
+    let new_n = new_eval_points.len();
+    if old_t == 0
+        || old_quorum_indices.len() != old_t
+        || old_quorum_rngs.len() != old_t
+        || new_t == 0
+        || new_t > new_n
+        || new_n < 2
+        || new_ot_mesh.n != new_n
+        || new_party_rngs.len() != new_n
+    {
+        return Err(DkgError::InvalidQuorum { t: new_t, n: new_n });
+    }
+    validate_all_eval_points_gf256(new_eval_points)?;
+
+    let mut seen = vec![false; old_shares.len()];
+    let mut quorum_pts = Vec::with_capacity(old_t);
+    let mut next_gen = 1u64;
+    for &idx in old_quorum_indices {
+        if idx >= old_shares.len() || seen[idx] {
+            return Err(DkgError::DuplicateOrInvalidOldSigner { party_id: idx });
+        }
+        if !old_shares[idx].is_valid() {
+            return Err(DkgError::ShareAlreadyInvalidated { party_id: idx });
+        }
+        seen[idx] = true;
+        quorum_pts.push(old_shares[idx].eval_point);
+        next_gen = next_gen.max(old_shares[idx].generation.saturating_add(1));
+    }
+    validate_all_eval_points_gf256(&quorum_pts)?;
+    let lambdas =
+        lagrange_weights_zero_gf256(&quorum_pts).ok_or(DkgError::InvalidEvaluationPoints)?;
+
+    let mut r1_commits = Vec::with_capacity(old_t);
+    let mut pending = Vec::with_capacity(old_t);
+    let mut inboxes: Vec<Vec<Option<Gf256SeedPrivatePacket>>> = (0..new_n)
+        .map(|_| (0..old_t).map(|_| None).collect())
+        .collect();
+
+    for (slot, &old_idx) in old_quorum_indices.iter().enumerate() {
+        let lam_mat = PublicGf256Matrix::from_mul_const(lambdas[slot]);
+        let mut weighted = [TowerGf256::ZERO; 256];
+        for (b, weighted_b_item) in weighted[..256].iter_mut().enumerate() {
+            *weighted_b_item = lam_mat.mul_elem(old_shares[old_idx].bit_shares[b]);
+        }
+        let (r1, pend, pkts) = deal_gf256_seed_round1(
+            &session_id,
+            old_idx,
+            new_t,
+            new_eval_points,
+            Some(weighted),
+            false,
+            &mut old_quorum_rngs[slot],
+        )?;
+        wipe_gf256_slice(&mut weighted);
+        r1_commits.push(r1);
+        pending.push(pend);
+        for pkt in pkts {
+            let j = pkt.recv_idx;
+            inboxes[j][slot] = Some(pkt);
+        }
+    }
+
+    let joint_r1_digest =
+        compute_gf256_round1_transcript(&session_id, new_t, new_eval_points, &r1_commits);
+    let r2_opens: Vec<Gf256SeedDealerRound2Open> = pending
+        .into_iter()
+        .map(|pend| pend.open_round2(&session_id, new_eval_points, &joint_r1_digest))
+        .collect();
+
+    let mut new_bits = vec![[TowerGf256::ZERO; 256]; new_n];
+    for j in 0..new_n {
+        for slot in 0..old_t {
+            let pkt = inboxes[j][slot].as_ref().ok_or(DkgError::DealerDisqualified {
+                dealer_idx: old_quorum_indices[slot],
+            })?;
+            verify_gf256_seed_dealing(
+                &session_id,
+                new_t,
+                new_eval_points,
+                &joint_r1_digest,
+                &r1_commits[slot],
+                &r2_opens[slot],
+                pkt,
+                false,
+            )?;
+            for b in 0..256 {
+                new_bits[j][b] = new_bits[j][b].add(pkt.f_shares[b]);
+            }
+        }
+    }
+
+    // SPDZ-MAC-authenticated Booleanity + global `0..new_n` degree `< new_t` verification!
+    spdz_verify_seed256_boolean_gf256(
+        &session_id,
+        new_t,
+        new_eval_points,
+        new_ot_mesh,
+        &new_bits,
+        new_party_rngs,
+    )?;
+
+    let mut out = Vec::with_capacity(new_n);
+    for j in 0..new_n {
+        let bits = new_bits[j];
+        wipe_gf256_slice(&mut new_bits[j]);
+        out.push(ShamirSeedShare256::new(j, next_gen, new_eval_points[j], bits));
+    }
+    finish_reshare(old_shares, out, enrolled_root, recompute_public_root,
+        ShamirSeedShare256::wipe_and_invalidate)
+}
+
+// ============================================================================
+// 5. Strict 2-Round Vector `Π_dkg`, `Π_refresh` & `Π_reshare` over `Goldilocks`
+// ============================================================================
+
+/// Private share packet for 256-bit `Goldilocks` seed dealing (`!Clone`, redacted `Debug`, `Drop` wipe).
+pub struct GoldilocksSeedPrivatePacket {
+    pub recv_idx: usize,
+    pub f_shares: [Goldilocks; 256],
+    pub m_shares: [GoldilocksExt2; 256],
+    pub salt: [u8; 32],
+}
+
+impl fmt::Debug for GoldilocksSeedPrivatePacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GoldilocksSeedPrivatePacket([REDACTED])")
+    }
+}
+
+impl Drop for GoldilocksSeedPrivatePacket {
+    fn drop(&mut self) {
+        wipe_goldilocks(&mut self.f_shares);
+        wipe_ext2(&mut self.m_shares);
+        wipe_bytes32(&mut self.salt);
+    }
+}
+
+impl GoldilocksSeedPrivatePacket {
+    pub fn encode_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(256 * 24);
+        for b in 0..256 {
+            out.extend_from_slice(&self.f_shares[b].to_be_bytes());
+            out.extend_from_slice(&self.m_shares[b].c0.to_be_bytes());
+            out.extend_from_slice(&self.m_shares[b].c1.to_be_bytes());
+        }
+        out
+    }
+}
+
+/// Round-1 commitment wire message for 256-bit `Goldilocks` seed dealing (`Π_refresh` / `Π_reshare`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoldilocksSeedDealerRound1Commit {
+    pub dealer_idx: usize,
+    pub share_commitments: Vec<[u8; 32]>,
+}
+
+/// Round-2 opening wire message for 256-bit `Goldilocks` seed dealing (`Π_refresh` / `Π_reshare`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GoldilocksSeedDealerRound2Open {
+    pub dealer_idx: usize,
+    pub masked_polys: Vec<Vec<GoldilocksExt2>>,
+}
+
+/// Ephemeral dealer secret state held between Round 1 and Round 2 (`!Clone`, wiped on `Drop`).
+pub struct GoldilocksSeedDealerPendingSecret {
+    dealer_idx: usize,
+    t: usize,
+    f_polys: Vec<Vec<Goldilocks>>,
+    m_polys: Vec<Vec<GoldilocksExt2>>,
+}
+
+impl fmt::Debug for GoldilocksSeedDealerPendingSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("GoldilocksSeedDealerPendingSecret([REDACTED])")
+    }
+}
+
+impl Drop for GoldilocksSeedDealerPendingSecret {
+    fn drop(&mut self) {
+        for fp in &mut self.f_polys {
+            wipe_goldilocks(fp);
+        }
+        for mp in &mut self.m_polys {
+            wipe_ext2(mp);
+        }
+    }
+}
+
+pub fn compute_goldilocks_vec_round1_transcript(
+    session_id: &[u8; 32],
+    t: usize,
+    pts: &[Goldilocks],
+    r1_commits: &[GoldilocksSeedDealerRound1Commit],
+) -> [u8; 32] {
+    let mut xof = Cshake256Xof::new(TAG_DKG_ROUND1_TRANSCRIPT);
+    xof.absorb(b"GL_VEC256");
+    xof.absorb(session_id);
+    xof.absorb(&(t as u64).to_be_bytes());
+    xof.absorb(&(pts.len() as u64).to_be_bytes());
+    for pt in pts {
+        xof.absorb(&pt.to_be_bytes());
+    }
+    xof.absorb(&(r1_commits.len() as u64).to_be_bytes());
+    for c in r1_commits {
+        xof.absorb(&(c.dealer_idx as u64).to_be_bytes());
+        xof.absorb(&(c.share_commitments.len() as u64).to_be_bytes());
+        for sc in &c.share_commitments {
+            xof.absorb(sc);
+        }
+    }
+    let mut out = [0u8; 32];
+    xof.squeeze(&mut out);
+    out
+}
+
+fn derive_goldilocks_vector_challenges(
+    session_id: &[u8; 32],
+    t: usize,
+    pts: &[Goldilocks],
+    joint_round1_digest: &[u8; 32],
+    dealer_idx: usize,
+) -> [GoldilocksExt2; 256] {
+    let mut xof = Cshake256Xof::new(TAG_DKG_CHALLENGE);
+    xof.absorb(b"GL_VEC256_CHAL");
+    xof.absorb(session_id);
+    xof.absorb(&(t as u64).to_be_bytes());
+    xof.absorb(&(pts.len() as u64).to_be_bytes());
+    for pt in pts {
+        xof.absorb(&pt.to_be_bytes());
+    }
+    xof.absorb(joint_round1_digest);
+    xof.absorb(&(dealer_idx as u64).to_be_bytes());
+    let mut root = [0u8; 32];
+    xof.squeeze(&mut root);
+
+    let mut prg = PartyPrivateRng::from_seed(root, b"GL_VEC256_CHAL_EXPAND");
+    wipe_bytes32(&mut root);
+    let mut out = [GoldilocksExt2::ZERO; 256];
+    for ch in &mut out {
+        let mut v = prg.next_ext2();
+        if v.ct_eq(GoldilocksExt2::ZERO) {
+            v = GoldilocksExt2::ONE;
+        }
+        *ch = v;
+    }
+    out
+}
+
+pub fn deal_goldilocks_seed_round1(
+    dealer_idx: usize,
+    t: usize,
+    pts: &[Goldilocks],
+    constants: [Goldilocks; 256],
+    zero_constant_mask: bool,
+    rng: &mut PartyPrivateRng,
+) -> Result<
+    (
+        GoldilocksSeedDealerRound1Commit,
+        GoldilocksSeedDealerPendingSecret,
+        Vec<GoldilocksSeedPrivatePacket>,
+    ),
+    DkgError,
+> {
+    let n = pts.len();
+    if t == 0 || t > n {
+        return Err(DkgError::InvalidQuorum { t, n });
+    }
+    validate_all_eval_points_goldilocks(pts)?;
+
+    let mut f_polys = vec![vec![Goldilocks::ZERO; t]; 256];
+    let mut m_polys = vec![vec![GoldilocksExt2::ZERO; t]; 256];
+
+    for b in 0..256 {
+        f_polys[b][0] = constants[b];
+        m_polys[b][0] = if zero_constant_mask {
+            GoldilocksExt2::ZERO
+        } else {
+            rng.next_ext2()
+        };
+        for k in 1..t {
+            f_polys[b][k] = rng.next_goldilocks();
+            m_polys[b][k] = rng.next_ext2();
+        }
+    }
+
+    let mut share_commitments = Vec::with_capacity(n);
+    let mut packets = Vec::with_capacity(n);
+    for (j, pts_j_item) in pts[..n].iter().enumerate() {
+        let mut f_shares = [Goldilocks::ZERO; 256];
+        let mut m_shares = [GoldilocksExt2::ZERO; 256];
+        for b in 0..256 {
+            f_shares[b] = eval_poly_goldilocks(&f_polys[b], *pts_j_item);
+            m_shares[b] = eval_poly_ext2_at_base(&m_polys[b], *pts_j_item);
+        }
+        let salt = rng.next_bytes32();
+        let pkt = GoldilocksSeedPrivatePacket {
+            recv_idx: j,
+            f_shares,
+            m_shares,
+            salt,
+        };
+        let mut raw = pkt.encode_bytes();
+        let comm = dkg_commit_share(dealer_idx as u32, j as u32, &salt, &raw);
+        wipe_bytes(&mut raw);
+        share_commitments.push(comm);
+        packets.push(pkt);
+    }
+
+    Ok((
+        GoldilocksSeedDealerRound1Commit {
+            dealer_idx,
+            share_commitments,
+        },
+        GoldilocksSeedDealerPendingSecret {
+            dealer_idx,
+            t,
+            f_polys,
+            m_polys,
+        },
+        packets,
+    ))
+}
+
+impl GoldilocksSeedDealerPendingSecret {
+    pub fn open_round2(
+        self,
+        session_id: &[u8; 32],
+        pts: &[Goldilocks],
+        joint_round1_digest: &[u8; 32],
+    ) -> GoldilocksSeedDealerRound2Open {
+        let chals = derive_goldilocks_vector_challenges(
+            session_id,
+            self.t,
+            pts,
+            joint_round1_digest,
+            self.dealer_idx,
+        );
+        let mut masked_polys = Vec::with_capacity(256);
+        for (b, chals_b_item) in chals[..256].iter().enumerate() {
+            let mut mp = Vec::with_capacity(self.t);
+            for k in 0..self.t {
+                mp.push((*chals_b_item).mul_base(self.f_polys[b][k]) + self.m_polys[b][k]);
+            }
+            masked_polys.push(mp);
+        }
+        GoldilocksSeedDealerRound2Open {
+            dealer_idx: self.dealer_idx,
+            masked_polys,
+        }
+    }
+}
+
+#[expect(clippy::too_many_arguments, reason = "Keep commitment, opening, private packet and session/quorum bindings explicit")]
