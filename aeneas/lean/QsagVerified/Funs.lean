@@ -1857,13 +1857,13 @@ def belt_latch_kernel.BELT_LATCH_MAX_CAPACITY_LIMIT : Result Std.U64 :=
   1#u64 <<< 62#i32
 
 /-- [qsag_verified::belt_latch_kernel::BELT_LATCH_MAX_DIGITS]
-    Source: 'src/belt_latch_kernel.rs', lines 30:0-30:42
+    Source: 'src/belt_latch_kernel.rs', lines 31:0-31:42
     Visibility: public -/
 @[global_simps, irreducible]
 def belt_latch_kernel.BELT_LATCH_MAX_DIGITS : Std.U8 := 128#u8
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchDigits}::clone]:
-    Source: 'src/belt_latch_kernel.rs', lines 34:9-34:14
+    Source: 'src/belt_latch_kernel.rs', lines 35:9-35:14
     Visibility: public -/
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreCloneClone.clone
   (self : belt_latch_kernel.BeltLatchDigits) :
@@ -1872,7 +1872,7 @@ def belt_latch_kernel.BeltLatchDigits.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchDigits}]
-    Source: 'src/belt_latch_kernel.rs', lines 34:9-34:14 -/
+    Source: 'src/belt_latch_kernel.rs', lines 35:9-35:14 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreCloneClone : core.clone.Clone
   belt_latch_kernel.BeltLatchDigits := {
@@ -1880,7 +1880,7 @@ def belt_latch_kernel.BeltLatchDigits.Insts.CoreCloneClone : core.clone.Clone
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::marker::Copy for qsag_verified::belt_latch_kernel::BeltLatchDigits}]
-    Source: 'src/belt_latch_kernel.rs', lines 34:16-34:20 -/
+    Source: 'src/belt_latch_kernel.rs', lines 35:16-35:20 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreMarkerCopy : core.marker.Copy
   belt_latch_kernel.BeltLatchDigits := {
@@ -1888,7 +1888,7 @@ def belt_latch_kernel.BeltLatchDigits.Insts.CoreMarkerCopy : core.marker.Copy
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::fmt::Debug for qsag_verified::belt_latch_kernel::BeltLatchDigits}::fmt]:
-    Source: 'src/belt_latch_kernel.rs', lines 34:22-34:27
+    Source: 'src/belt_latch_kernel.rs', lines 35:22-35:27
     Visibility: public -/
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreFmtDebug.fmt
   (self : belt_latch_kernel.BeltLatchDigits) (f : core.fmt.Formatter) :
@@ -1909,7 +1909,7 @@ def belt_latch_kernel.BeltLatchDigits.Insts.CoreFmtDebug.fmt
     dyn3 (toStr "row3") dyn4
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::fmt::Debug for qsag_verified::belt_latch_kernel::BeltLatchDigits}]
-    Source: 'src/belt_latch_kernel.rs', lines 34:22-34:27 -/
+    Source: 'src/belt_latch_kernel.rs', lines 35:22-35:27 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreFmtDebug : core.fmt.Debug
   belt_latch_kernel.BeltLatchDigits := {
@@ -1917,14 +1917,14 @@ def belt_latch_kernel.BeltLatchDigits.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::marker::StructuralPartialEq for qsag_verified::belt_latch_kernel::BeltLatchDigits}]
-    Source: 'src/belt_latch_kernel.rs', lines 34:29-34:38 -/
+    Source: 'src/belt_latch_kernel.rs', lines 35:29-35:38 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreMarkerStructuralPartialEq :
   core.marker.StructuralPartialEq belt_latch_kernel.BeltLatchDigits := {
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::cmp::PartialEq<qsag_verified::belt_latch_kernel::BeltLatchDigits> for qsag_verified::belt_latch_kernel::BeltLatchDigits}::eq]:
-    Source: 'src/belt_latch_kernel.rs', lines 34:29-34:38
+    Source: 'src/belt_latch_kernel.rs', lines 35:29-35:38
     Visibility: public -/
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreCmpPartialEqBeltLatchDigits.eq
   (self : belt_latch_kernel.BeltLatchDigits)
@@ -1956,7 +1956,7 @@ def belt_latch_kernel.BeltLatchDigits.Insts.CoreCmpPartialEqBeltLatchDigits.eq
   else ok false
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::cmp::PartialEq<qsag_verified::belt_latch_kernel::BeltLatchDigits> for qsag_verified::belt_latch_kernel::BeltLatchDigits}]
-    Source: 'src/belt_latch_kernel.rs', lines 34:29-34:38 -/
+    Source: 'src/belt_latch_kernel.rs', lines 35:29-35:38 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreCmpPartialEqBeltLatchDigits :
   core.cmp.PartialEq belt_latch_kernel.BeltLatchDigits
@@ -1966,14 +1966,14 @@ def belt_latch_kernel.BeltLatchDigits.Insts.CoreCmpPartialEqBeltLatchDigits :
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::cmp::Eq for qsag_verified::belt_latch_kernel::BeltLatchDigits}::assert_fields_are_eq]:
-    Source: 'src/belt_latch_kernel.rs', lines 34:40-34:42
+    Source: 'src/belt_latch_kernel.rs', lines 35:40-35:42
     Visibility: public -/
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreCmpEq.assert_fields_are_eq
   (self : belt_latch_kernel.BeltLatchDigits) : Result Unit := do
   ok ()
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::cmp::Eq for qsag_verified::belt_latch_kernel::BeltLatchDigits}]
-    Source: 'src/belt_latch_kernel.rs', lines 34:40-34:42 -/
+    Source: 'src/belt_latch_kernel.rs', lines 35:40-35:42 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchDigits.Insts.CoreCmpEq : core.cmp.Eq
   belt_latch_kernel.BeltLatchDigits := {
@@ -1984,7 +1984,7 @@ def belt_latch_kernel.BeltLatchDigits.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::belt_latch_kernel::belt_latch_digits_eq]:
-    Source: 'src/belt_latch_kernel.rs', lines 45:0-59:1
+    Source: 'src/belt_latch_kernel.rs', lines 46:0-60:1
     Visibility: public -/
 def belt_latch_kernel.belt_latch_digits_eq
   (a : belt_latch_kernel.BeltLatchDigits)
@@ -2008,7 +2008,7 @@ def belt_latch_kernel.belt_latch_digits_eq
     else ok false
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}::clone]:
-    Source: 'src/belt_latch_kernel.rs', lines 62:9-62:14
+    Source: 'src/belt_latch_kernel.rs', lines 63:9-63:14
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreCloneClone.clone
   (self : belt_latch_kernel.BeltLatchKernelRecord) :
@@ -2017,7 +2017,7 @@ def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}]
-    Source: 'src/belt_latch_kernel.rs', lines 62:9-62:14 -/
+    Source: 'src/belt_latch_kernel.rs', lines 63:9-63:14 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreCloneClone :
   core.clone.Clone belt_latch_kernel.BeltLatchKernelRecord := {
@@ -2025,7 +2025,7 @@ def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreCloneClone :
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::marker::Copy for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}]
-    Source: 'src/belt_latch_kernel.rs', lines 62:16-62:20 -/
+    Source: 'src/belt_latch_kernel.rs', lines 63:16-63:20 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreMarkerCopy :
   core.marker.Copy belt_latch_kernel.BeltLatchKernelRecord := {
@@ -2033,7 +2033,7 @@ def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreMarkerCopy :
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::fmt::Debug for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}::fmt]:
-    Source: 'src/belt_latch_kernel.rs', lines 62:22-62:27
+    Source: 'src/belt_latch_kernel.rs', lines 63:22-63:27
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreFmtDebug.fmt
   (self : belt_latch_kernel.BeltLatchKernelRecord) (f : core.fmt.Formatter) :
@@ -2054,7 +2054,7 @@ def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreFmtDebug.fmt
     (toStr "retry_salt") dyn2 (toStr "digits") dyn3
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::fmt::Debug for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}]
-    Source: 'src/belt_latch_kernel.rs', lines 62:22-62:27 -/
+    Source: 'src/belt_latch_kernel.rs', lines 63:22-63:27 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreFmtDebug : core.fmt.Debug
   belt_latch_kernel.BeltLatchKernelRecord := {
@@ -2062,7 +2062,7 @@ def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::marker::StructuralPartialEq for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}]
-    Source: 'src/belt_latch_kernel.rs', lines 62:29-62:38 -/
+    Source: 'src/belt_latch_kernel.rs', lines 63:29-63:38 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreMarkerStructuralPartialEq
   : core.marker.StructuralPartialEq belt_latch_kernel.BeltLatchKernelRecord
@@ -2070,7 +2070,7 @@ def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreMarkerStructuralPartialEq
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::cmp::PartialEq<qsag_verified::belt_latch_kernel::BeltLatchKernelRecord> for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}::eq]:
-    Source: 'src/belt_latch_kernel.rs', lines 62:29-62:38
+    Source: 'src/belt_latch_kernel.rs', lines 63:29-63:38
     Visibility: public -/
 def
   belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreCmpPartialEqBeltLatchKernelRecord.eq
@@ -2097,7 +2097,7 @@ def
   else ok false
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::cmp::PartialEq<qsag_verified::belt_latch_kernel::BeltLatchKernelRecord> for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}]
-    Source: 'src/belt_latch_kernel.rs', lines 62:29-62:38 -/
+    Source: 'src/belt_latch_kernel.rs', lines 63:29-63:38 -/
 @[reducible]
 def
   belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreCmpPartialEqBeltLatchKernelRecord
@@ -2108,7 +2108,7 @@ def
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::cmp::Eq for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}::assert_fields_are_eq]:
-    Source: 'src/belt_latch_kernel.rs', lines 62:40-62:42
+    Source: 'src/belt_latch_kernel.rs', lines 63:40-63:42
     Visibility: public -/
 def
   belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreCmpEq.assert_fields_are_eq
@@ -2116,7 +2116,7 @@ def
   ok ()
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::cmp::Eq for qsag_verified::belt_latch_kernel::BeltLatchKernelRecord}]
-    Source: 'src/belt_latch_kernel.rs', lines 62:40-62:42 -/
+    Source: 'src/belt_latch_kernel.rs', lines 63:40-63:42 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreCmpEq : core.cmp.Eq
   belt_latch_kernel.BeltLatchKernelRecord := {
@@ -2127,7 +2127,7 @@ def belt_latch_kernel.BeltLatchKernelRecord.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchKernelError}::clone]:
-    Source: 'src/belt_latch_kernel.rs', lines 71:9-71:14
+    Source: 'src/belt_latch_kernel.rs', lines 72:9-72:14
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernelError.Insts.CoreCloneClone.clone
   (self : belt_latch_kernel.BeltLatchKernelError) :
@@ -2136,7 +2136,7 @@ def belt_latch_kernel.BeltLatchKernelError.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchKernelError}]
-    Source: 'src/belt_latch_kernel.rs', lines 71:9-71:14 -/
+    Source: 'src/belt_latch_kernel.rs', lines 72:9-72:14 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchKernelError.Insts.CoreCloneClone :
   core.clone.Clone belt_latch_kernel.BeltLatchKernelError := {
@@ -2144,7 +2144,7 @@ def belt_latch_kernel.BeltLatchKernelError.Insts.CoreCloneClone :
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::marker::Copy for qsag_verified::belt_latch_kernel::BeltLatchKernelError}]
-    Source: 'src/belt_latch_kernel.rs', lines 71:16-71:20 -/
+    Source: 'src/belt_latch_kernel.rs', lines 72:16-72:20 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchKernelError.Insts.CoreMarkerCopy :
   core.marker.Copy belt_latch_kernel.BeltLatchKernelError := {
@@ -2152,7 +2152,7 @@ def belt_latch_kernel.BeltLatchKernelError.Insts.CoreMarkerCopy :
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::fmt::Debug for qsag_verified::belt_latch_kernel::BeltLatchKernelError}::fmt]:
-    Source: 'src/belt_latch_kernel.rs', lines 71:22-71:27
+    Source: 'src/belt_latch_kernel.rs', lines 72:22-72:27
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernelError.Insts.CoreFmtDebug.fmt
   (self : belt_latch_kernel.BeltLatchKernelError) (f : core.fmt.Formatter) :
@@ -2179,7 +2179,7 @@ def belt_latch_kernel.BeltLatchKernelError.Insts.CoreFmtDebug.fmt
     core.fmt.Formatter.write_str f (toStr "WalPersistFailed")
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::fmt::Debug for qsag_verified::belt_latch_kernel::BeltLatchKernelError}]
-    Source: 'src/belt_latch_kernel.rs', lines 71:22-71:27 -/
+    Source: 'src/belt_latch_kernel.rs', lines 72:22-72:27 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchKernelError.Insts.CoreFmtDebug : core.fmt.Debug
   belt_latch_kernel.BeltLatchKernelError := {
@@ -2187,14 +2187,14 @@ def belt_latch_kernel.BeltLatchKernelError.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::marker::StructuralPartialEq for qsag_verified::belt_latch_kernel::BeltLatchKernelError}]
-    Source: 'src/belt_latch_kernel.rs', lines 71:29-71:38 -/
+    Source: 'src/belt_latch_kernel.rs', lines 72:29-72:38 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchKernelError.Insts.CoreMarkerStructuralPartialEq
   : core.marker.StructuralPartialEq belt_latch_kernel.BeltLatchKernelError := {
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::cmp::PartialEq<qsag_verified::belt_latch_kernel::BeltLatchKernelError> for qsag_verified::belt_latch_kernel::BeltLatchKernelError}::eq]:
-    Source: 'src/belt_latch_kernel.rs', lines 71:29-71:38
+    Source: 'src/belt_latch_kernel.rs', lines 72:29-72:38
     Visibility: public -/
 def
   belt_latch_kernel.BeltLatchKernelError.Insts.CoreCmpPartialEqBeltLatchKernelError.eq
@@ -2207,7 +2207,7 @@ def
   ok (self1 = other1)
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::cmp::PartialEq<qsag_verified::belt_latch_kernel::BeltLatchKernelError> for qsag_verified::belt_latch_kernel::BeltLatchKernelError}]
-    Source: 'src/belt_latch_kernel.rs', lines 71:29-71:38 -/
+    Source: 'src/belt_latch_kernel.rs', lines 72:29-72:38 -/
 @[reducible]
 def
   belt_latch_kernel.BeltLatchKernelError.Insts.CoreCmpPartialEqBeltLatchKernelError
@@ -2218,7 +2218,7 @@ def
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::cmp::Eq for qsag_verified::belt_latch_kernel::BeltLatchKernelError}]
-    Source: 'src/belt_latch_kernel.rs', lines 71:40-71:42 -/
+    Source: 'src/belt_latch_kernel.rs', lines 72:40-72:42 -/
 @[reducible]
 impl_def belt_latch_kernel.BeltLatchKernelError.Insts.CoreCmpEq : core.cmp.Eq
   belt_latch_kernel.BeltLatchKernelError := {
@@ -2229,7 +2229,7 @@ impl_def belt_latch_kernel.BeltLatchKernelError.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchBindOutcome}::clone]:
-    Source: 'src/belt_latch_kernel.rs', lines 95:9-95:14
+    Source: 'src/belt_latch_kernel.rs', lines 96:9-96:14
     Visibility: public -/
 def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreCloneClone.clone
   (self : belt_latch_kernel.BeltLatchBindOutcome) :
@@ -2238,7 +2238,7 @@ def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchBindOutcome}]
-    Source: 'src/belt_latch_kernel.rs', lines 95:9-95:14 -/
+    Source: 'src/belt_latch_kernel.rs', lines 96:9-96:14 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreCloneClone :
   core.clone.Clone belt_latch_kernel.BeltLatchBindOutcome := {
@@ -2246,7 +2246,7 @@ def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreCloneClone :
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::marker::Copy for qsag_verified::belt_latch_kernel::BeltLatchBindOutcome}]
-    Source: 'src/belt_latch_kernel.rs', lines 95:16-95:20 -/
+    Source: 'src/belt_latch_kernel.rs', lines 96:16-96:20 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreMarkerCopy :
   core.marker.Copy belt_latch_kernel.BeltLatchBindOutcome := {
@@ -2254,7 +2254,7 @@ def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreMarkerCopy :
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::fmt::Debug for qsag_verified::belt_latch_kernel::BeltLatchBindOutcome}::fmt]:
-    Source: 'src/belt_latch_kernel.rs', lines 95:22-95:27
+    Source: 'src/belt_latch_kernel.rs', lines 96:22-96:27
     Visibility: public -/
 def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreFmtDebug.fmt
   (self : belt_latch_kernel.BeltLatchBindOutcome) (f : core.fmt.Formatter) :
@@ -2267,7 +2267,7 @@ def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreFmtDebug.fmt
     core.fmt.Formatter.write_str f (toStr "Replay")
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::fmt::Debug for qsag_verified::belt_latch_kernel::BeltLatchBindOutcome}]
-    Source: 'src/belt_latch_kernel.rs', lines 95:22-95:27 -/
+    Source: 'src/belt_latch_kernel.rs', lines 96:22-96:27 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreFmtDebug : core.fmt.Debug
   belt_latch_kernel.BeltLatchBindOutcome := {
@@ -2275,14 +2275,14 @@ def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreFmtDebug : core.fmt.Debug
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::marker::StructuralPartialEq for qsag_verified::belt_latch_kernel::BeltLatchBindOutcome}]
-    Source: 'src/belt_latch_kernel.rs', lines 95:29-95:38 -/
+    Source: 'src/belt_latch_kernel.rs', lines 96:29-96:38 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreMarkerStructuralPartialEq
   : core.marker.StructuralPartialEq belt_latch_kernel.BeltLatchBindOutcome := {
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::cmp::PartialEq<qsag_verified::belt_latch_kernel::BeltLatchBindOutcome> for qsag_verified::belt_latch_kernel::BeltLatchBindOutcome}::eq]:
-    Source: 'src/belt_latch_kernel.rs', lines 95:29-95:38
+    Source: 'src/belt_latch_kernel.rs', lines 96:29-96:38
     Visibility: public -/
 def
   belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreCmpPartialEqBeltLatchBindOutcome.eq
@@ -2295,7 +2295,7 @@ def
   ok (self1 = other1)
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::cmp::PartialEq<qsag_verified::belt_latch_kernel::BeltLatchBindOutcome> for qsag_verified::belt_latch_kernel::BeltLatchBindOutcome}]
-    Source: 'src/belt_latch_kernel.rs', lines 95:29-95:38 -/
+    Source: 'src/belt_latch_kernel.rs', lines 96:29-96:38 -/
 @[reducible]
 def
   belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreCmpPartialEqBeltLatchBindOutcome
@@ -2306,7 +2306,7 @@ def
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::cmp::Eq for qsag_verified::belt_latch_kernel::BeltLatchBindOutcome}]
-    Source: 'src/belt_latch_kernel.rs', lines 95:40-95:42 -/
+    Source: 'src/belt_latch_kernel.rs', lines 96:40-96:42 -/
 @[reducible]
 impl_def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreCmpEq : core.cmp.Eq
   belt_latch_kernel.BeltLatchBindOutcome := {
@@ -2317,7 +2317,7 @@ impl_def belt_latch_kernel.BeltLatchBindOutcome.Insts.CoreCmpEq : core.cmp.Eq
 }
 
 /-- [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchBindRequest}::clone]:
-    Source: 'src/belt_latch_kernel.rs', lines 104:9-104:14
+    Source: 'src/belt_latch_kernel.rs', lines 105:9-105:14
     Visibility: public -/
 def belt_latch_kernel.BeltLatchBindRequest.Insts.CoreCloneClone.clone
   (self : belt_latch_kernel.BeltLatchBindRequest) :
@@ -2326,7 +2326,7 @@ def belt_latch_kernel.BeltLatchBindRequest.Insts.CoreCloneClone.clone
   ok self
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::clone::Clone for qsag_verified::belt_latch_kernel::BeltLatchBindRequest}]
-    Source: 'src/belt_latch_kernel.rs', lines 104:9-104:14 -/
+    Source: 'src/belt_latch_kernel.rs', lines 105:9-105:14 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchBindRequest.Insts.CoreCloneClone :
   core.clone.Clone belt_latch_kernel.BeltLatchBindRequest := {
@@ -2334,7 +2334,7 @@ def belt_latch_kernel.BeltLatchBindRequest.Insts.CoreCloneClone :
 }
 
 /-- Trait implementation: [qsag_verified::belt_latch_kernel::{impl core::marker::Copy for qsag_verified::belt_latch_kernel::BeltLatchBindRequest}]
-    Source: 'src/belt_latch_kernel.rs', lines 104:16-104:20 -/
+    Source: 'src/belt_latch_kernel.rs', lines 105:16-105:20 -/
 @[reducible]
 def belt_latch_kernel.BeltLatchBindRequest.Insts.CoreMarkerCopy :
   core.marker.Copy belt_latch_kernel.BeltLatchBindRequest := {
@@ -2342,7 +2342,7 @@ def belt_latch_kernel.BeltLatchBindRequest.Insts.CoreMarkerCopy :
 }
 
 /-- [qsag_verified::belt_latch_kernel::belt_latch_empty_record]:
-    Source: 'src/belt_latch_kernel.rs', lines 124:0-137:1 -/
+    Source: 'src/belt_latch_kernel.rs', lines 125:0-138:1 -/
 def belt_latch_kernel.belt_latch_empty_record
   : Result belt_latch_kernel.BeltLatchKernelRecord := do
   let a := Array.repeat 32#usize 0#u8
@@ -2360,7 +2360,7 @@ def belt_latch_kernel.belt_latch_empty_record
     }
 
 /-- [qsag_verified::belt_latch_kernel::{qsag_verified::belt_latch_kernel::BeltLatchKernel}::new_empty]:
-    Source: 'src/belt_latch_kernel.rs', lines 141:4-155:5
+    Source: 'src/belt_latch_kernel.rs', lines 142:4-156:5
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernel.new_empty
   (capacity_limit : Std.U64) :
@@ -2389,7 +2389,7 @@ def belt_latch_kernel.BeltLatchKernel.new_empty
         })
 
 /-- [qsag_verified::belt_latch_kernel::{qsag_verified::belt_latch_kernel::BeltLatchKernel}::recover]:
-    Source: 'src/belt_latch_kernel.rs', lines 161:4-191:5
+    Source: 'src/belt_latch_kernel.rs', lines 162:4-189:5
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernel.recover
   (capacity_limit : Std.U64) (next_epoch : Std.U64) (has_in_flight : Bool)
@@ -2420,19 +2420,14 @@ def belt_latch_kernel.BeltLatchKernel.recover
             ok (core.result.Result.Err
               belt_latch_kernel.BeltLatchKernelError.InvalidCapacity)
           else
-            if in_flight.digits.len > belt_latch_kernel.BELT_LATCH_MAX_DIGITS
-            then
-              ok (core.result.Result.Err
-                belt_latch_kernel.BeltLatchKernelError.InvalidCapacity)
-            else
-              ok (core.result.Result.Ok
-                {
-                  capacity_limit,
-                  next_epoch,
-                  has_in_flight,
-                  in_flight,
-                  wal_poisoned := false
-                })
+            ok (core.result.Result.Ok
+              {
+                capacity_limit,
+                next_epoch,
+                has_in_flight,
+                in_flight,
+                wal_poisoned := false
+              })
         else
           ok (core.result.Result.Ok
             {
@@ -2444,28 +2439,28 @@ def belt_latch_kernel.BeltLatchKernel.recover
             })
 
 /-- [qsag_verified::belt_latch_kernel::{qsag_verified::belt_latch_kernel::BeltLatchKernel}::next_epoch]:
-    Source: 'src/belt_latch_kernel.rs', lines 193:4-195:5
+    Source: 'src/belt_latch_kernel.rs', lines 191:4-193:5
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernel.impl.next_epoch
   (self : belt_latch_kernel.BeltLatchKernel) : Result Std.U64 := do
   ok self.next_epoch
 
 /-- [qsag_verified::belt_latch_kernel::{qsag_verified::belt_latch_kernel::BeltLatchKernel}::capacity_limit]:
-    Source: 'src/belt_latch_kernel.rs', lines 197:4-199:5
+    Source: 'src/belt_latch_kernel.rs', lines 195:4-197:5
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernel.impl.capacity_limit
   (self : belt_latch_kernel.BeltLatchKernel) : Result Std.U64 := do
   ok self.capacity_limit
 
 /-- [qsag_verified::belt_latch_kernel::{qsag_verified::belt_latch_kernel::BeltLatchKernel}::has_in_flight]:
-    Source: 'src/belt_latch_kernel.rs', lines 201:4-203:5
+    Source: 'src/belt_latch_kernel.rs', lines 199:4-201:5
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernel.impl.has_in_flight
   (self : belt_latch_kernel.BeltLatchKernel) : Result Bool := do
   ok self.has_in_flight
 
 /-- [qsag_verified::belt_latch_kernel::{qsag_verified::belt_latch_kernel::BeltLatchKernel}::in_flight]:
-    Source: 'src/belt_latch_kernel.rs', lines 205:4-207:5
+    Source: 'src/belt_latch_kernel.rs', lines 203:4-205:5
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernel.impl.in_flight
   (self : belt_latch_kernel.BeltLatchKernel) :
@@ -2474,14 +2469,14 @@ def belt_latch_kernel.BeltLatchKernel.impl.in_flight
   ok self.in_flight
 
 /-- [qsag_verified::belt_latch_kernel::{qsag_verified::belt_latch_kernel::BeltLatchKernel}::is_wal_poisoned]:
-    Source: 'src/belt_latch_kernel.rs', lines 209:4-211:5
+    Source: 'src/belt_latch_kernel.rs', lines 207:4-209:5
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernel.is_wal_poisoned
   (self : belt_latch_kernel.BeltLatchKernel) : Result Bool := do
   ok self.wal_poisoned
 
 /-- [qsag_verified::belt_latch_kernel::{qsag_verified::belt_latch_kernel::BeltLatchKernel}::bind]:
-    Source: 'src/belt_latch_kernel.rs', lines 215:4-268:5
+    Source: 'src/belt_latch_kernel.rs', lines 213:4-266:5
     Visibility: public -/
 def belt_latch_kernel.BeltLatchKernel.bind
   (self : belt_latch_kernel.BeltLatchKernel)
@@ -11611,6 +11606,67 @@ def tower.verify_mac_2lane_with_burn
         ({
            alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]),
            burned := true
+         }, false)
+
+/-- [qsag_verified::tower::{qsag_verified::tower::BdozOpeningGuard2Lane}::new]:
+    Source: 'src/tower.rs', lines 511:4-513:5
+    Visibility: public -/
+def tower.BdozOpeningGuard2Lane.new
+  (alpha_lanes : Array tower.Tower128 2#usize)
+  (session_id : Array Std.U8 32#usize) (round_id : Std.U64) :
+  Result tower.BdozOpeningGuard2Lane
+  := do
+  ok { alpha_lanes, session_id, round_id, consumed := false }
+
+/-- [qsag_verified::tower::{qsag_verified::tower::BdozOpeningGuard2Lane}::is_consumed]:
+    Source: 'src/tower.rs', lines 515:4-515:61
+    Visibility: public -/
+def tower.BdozOpeningGuard2Lane.is_consumed
+  (self : tower.BdozOpeningGuard2Lane) : Result Bool := do
+  ok self.consumed
+
+/-- [qsag_verified::tower::{qsag_verified::tower::BdozOpeningGuard2Lane}::verify_once]:
+    Source: 'src/tower.rs', lines 519:4-536:5
+    Visibility: public -/
+def tower.BdozOpeningGuard2Lane.verify_once
+  (self : tower.BdozOpeningGuard2Lane)
+  (batch : tower.BdozCommittedBatchOpening2Lane)
+  (openings : Slice tower.BdozWireOpening2Lane) :
+  Result (tower.BdozOpeningGuard2Lane × Bool)
+  := do
+  if self.consumed
+  then
+    ok ({ self with alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]) },
+      false)
+  else
+    let b ← tower.ct_eq_bytes32 self.session_id batch.session_id
+    if b
+    then
+      if self.round_id != batch.round_id
+      then
+        ok
+          ({
+             self
+               with
+               alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]),
+               consumed := true
+           }, false)
+      else
+        let accepted ← tower.verify_mac_2lane self.alpha_lanes batch openings
+        ok
+          ({
+             self
+               with
+               alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]),
+               consumed := true
+           }, accepted)
+    else
+      ok
+        ({
+           self
+             with
+             alpha_lanes := (Array.make 2#usize [ 0#u128, 0#u128 ]),
+             consumed := true
          }, false)
 
 end qsag_verified

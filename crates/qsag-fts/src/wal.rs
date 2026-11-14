@@ -1,4 +1,5 @@
 //! Authenticated append-only burn journal with descriptor-lifetime locking.
+//! V3 binds the genesis MAC to the data inode; copied or legacy V2 journals fail closed.
 //! Recovery fails closed on missing files and incomplete records. Keep the directory
 //! private and use rollback-resistant storage: a complete old authenticated snapshot
 //! cannot be distinguished from current state without an external monotonic anchor.
@@ -9,7 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAGIC: &[u8; 8] = b"QSBURN02";
+const MAGIC: &[u8; 8] = b"QSBURN03";
 const HEADER_LEN: usize = 104;
 const RECORD_LEN: usize = 42;
 
@@ -37,12 +38,27 @@ fn private_file(path: &Path) -> io::Result<OpenOptions> {
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600);
         #[cfg(target_os = "linux")]
-        opts.custom_flags(0x20000); // O_NOFOLLOW
+        opts.custom_flags(if cfg!(any(target_arch = "aarch64", target_arch = "arm")) { 0x8000 } else { 0x20000 } | 0x800); // O_NOFOLLOW | O_NONBLOCK
         #[cfg(target_os = "macos")]
-        opts.custom_flags(0x0100); // O_NOFOLLOW
+        opts.custom_flags(0x0100 | 0x4); // O_NOFOLLOW | O_NONBLOCK
     }
     Ok(opts)
 }
+fn file_identity(file: &File) -> io::Result<[u8; 16]> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() { return Err(invalid()); }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mut identity = [0; 16];
+        identity[..8].copy_from_slice(&metadata.dev().to_be_bytes());
+        identity[8..].copy_from_slice(&metadata.ino().to_be_bytes());
+        Ok(identity)
+    }
+    #[cfg(not(unix))]
+    Err(invalid())
+}
+
 impl DurableBurnJournal {
     /// Explicit epoch-zero provisioning. Never use this to recover an active key.
     /// Existing files, including incomplete provisioning attempts, are rejected.
@@ -67,6 +83,7 @@ impl DurableBurnJournal {
             options.create_new(true);
         }
         let file = options.open(path)?;
+        let identity = file_identity(&file)?;
         file.try_lock().map_err(|_| invalid())?;
         let mut journal = Self {
             path: path.to_path_buf(),
@@ -98,8 +115,8 @@ impl DurableBurnJournal {
             header.extend_from_slice(&key);
             header.extend_from_slice(&journal.genesis);
             journal.last_tag = cshake256_framed_32(
-                b"QSAG.BURN.GENESIS.V2",
-                &[journal.mac_key.expose(), &header],
+                b"QSAG.BURN.GENESIS.V3",
+                &[journal.mac_key.expose(), &identity, &header],
             );
             header.extend_from_slice(&journal.last_tag);
             journal.file.write_all(&header)?;
@@ -123,8 +140,8 @@ impl DurableBurnJournal {
             }
             journal.genesis.copy_from_slice(&bytes[40..72]);
             journal.last_tag = cshake256_framed_32(
-                b"QSAG.BURN.GENESIS.V2",
-                &[journal.mac_key.expose(), &bytes[..72]],
+                b"QSAG.BURN.GENESIS.V3",
+                &[journal.mac_key.expose(), &identity, &bytes[..72]],
             );
             if !ct_eq_bytes(&journal.last_tag, &bytes[72..104]) {
                 return Err(invalid());
@@ -190,6 +207,7 @@ impl DurableBurnJournal {
         self.file.sync_all()?;
         self.entries.insert((party, epoch));
         self.last_tag = tag;
+        self.check_identity()?;
         self.failed = false;
         Ok(())
     }
@@ -242,6 +260,21 @@ impl super::frontier::FtsEpochWal for FsWalFtsEpochLatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn copied_journal_cannot_create_second_authority() {
+        let path = std::env::temp_dir().join(std::format!("burn-copy-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let copy = path.with_extension("copy");
+        let mut original = DurableBurnJournal::create(&path, [1; 32], [2; 32]).unwrap();
+        original.reserve(&[1; 32], 1, 0).unwrap();
+        fs::copy(&path, &copy).unwrap();
+        assert!(DurableBurnJournal::open_existing(&copy, [1; 32], [2; 32]).is_err());
+        drop(original);
+        assert!(DurableBurnJournal::open_existing(&path, [1; 32], [2; 32]).is_ok());
+        fs::remove_file(path).unwrap();
+        fs::remove_file(copy).unwrap();
+    }
+
     #[test]
     fn frontier_use_is_burned_across_regeneration() {
         let path = std::env::temp_dir().join(std::format!("frontier-restart-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));

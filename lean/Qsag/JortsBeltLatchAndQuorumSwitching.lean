@@ -48,6 +48,7 @@ public import Qsag.BinaryTower
 public import Qsag.UcGames
 public import Qsag.BaggyAndRss256Security
 public import Qsag.CustodySuiteFull
+import all Qsag.UcGames
 import all Qsag.BaggyAndRss256Security
 
 public section
@@ -4606,7 +4607,6 @@ theorem qs_a_leaf_index_identifies_committee
     unfold qsAPartitionedSign
     rw [hIdx]
     simp only [hTPos, hEpLt, hFit, and_self, ↓reduceIte]
-    dsimp only
     refine ⟨_, rfl, ?_, ?_, ?_⟩
     · exact uint64_toNat_ofNat_of_lt hFit
     · rw [uint64_toNat_ofNat_of_lt hFit]
@@ -4747,7 +4747,6 @@ theorem qs_a_single_signer_equiv_given_same_leaf_schedule
     unfold qsAPartitionedSign
     rw [hIdx]
     simp only [hTPos, hEpoch, hFit, and_self, ↓reduceIte]
-    dsimp only
     congr 1
     unfold refSig quorumJortsReferenceSign
     congr 1
@@ -4795,7 +4794,8 @@ private theorem be_getElem_toNat (w n i : Nat) (hi : i < w) :
   | zero => omega
   | succ w ih =>
     by_cases h : i < w
-    · simp only [be, List.getElem_append_left (l₁ := be w (n / 256)) (by simpa only [length_be] using h)]
+    · have hl : i < (be w (n / 256)).length := by rw [length_be]; exact h
+      simp only [be, List.getElem_append_left hl]
       rw [ih (n / 256) i h, Nat.div_div_eq_div_mul]
       have he : w + 1 - 1 - i = (w - 1 - i) + 1 := by omega
       rw [he, Nat.pow_succ, Nat.mul_comm 256]
@@ -4887,6 +4887,7 @@ theorem quorumDigitAt_eq_wotsCDibits128 (dig : Digest256) (i : Fin 128) :
   have hmod : (quorumWotsIndex i).val % 4 = i.val % 4 := by
     dsimp [quorumWotsIndex]; omega
   rw [hdiv, hmod]
+  rfl
 
 /-- The list passed to the quorum signer uses the WOTS+C chain order. -/
 theorem quorumDigitsFromDigest_get (dig : Digest256) (i : Fin 128) :
@@ -6100,20 +6101,28 @@ def BeltWireCrypto.echoTag (ops : BeltWireCrypto) (key : Digest256)
 def rustBeltWireCrypto : BeltWireCrypto := ⟨cshake256Digest256⟩
 
 theorem rustBeltWireCrypto_binding (rec : BeltLatchRecord) :
-    rustBeltWireCrypto.recordBinding rec = beltRecordBindingCshake256 rec := rfl
+    rustBeltWireCrypto.recordBinding rec = beltRecordBindingCshake256 rec := by
+  unfold rustBeltWireCrypto BeltWireCrypto.recordBinding beltRecordBindingCshake256
+  rfl
 
 theorem rustBeltWireCrypto_echo (key : Digest256) (s r : Nat) (rec : BeltLatchRecord) :
     rustBeltWireCrypto.echoTag key s r rec =
       cshake256Digest256 beltEchoMacTag.data.toList
-        (beltEchoPreimage key s r rec (beltRecordBindingCshake256 rec)) := rfl
+        (beltEchoPreimage key s r rec (beltRecordBindingCshake256 rec)) := by
+  unfold rustBeltWireCrypto BeltWireCrypto.echoTag BeltWireCrypto.recordBinding beltRecordBindingCshake256
+  rfl
 
 /-- Echo emission from a healthy persisted latch, parameterized by domain-specific operations. -/
 def emitBeltWireEcho {n : Nat} (ops : BeltWireCrypto) (key : Digest256)
     (sender receiver : Fin n) (st : BeltLatchNodeState) : Option (AuthenticatedBeltEcho n) := do
   if st.walPoisoned then none else
-    let rec ← st.inFlight
-    pure { sender := sender, receiver := receiver, record := rec,
-      binding := ops.recordBinding rec, macTag := ops.echoTag key sender.val receiver.val rec }
+    let r ← st.inFlight
+    pure
+      { sender := sender
+        receiver := receiver
+        record := r
+        binding := ops.recordBinding r
+        macTag := ops.echoTag key sender.val receiver.val r }
 
 def verifyBeltWireEcho {n : Nat} (ops : BeltWireCrypto) (key : Digest256)
     (sender receiver : Fin n) (rec : BeltLatchRecord) (echo : AuthenticatedBeltEcho n) : Bool :=
@@ -6125,10 +6134,13 @@ theorem emitBeltWireEcho_concrete {n : Nat} (key : Digest256)
     (sender receiver : Fin n) (st : BeltLatchNodeState) (rec : BeltLatchRecord)
     (healthy : st.walPoisoned = false) (bound : st.inFlight = some rec) :
     emitBeltWireEcho rustBeltWireCrypto key sender receiver st =
-      some { sender := sender, receiver := receiver, record := rec,
-        binding := beltRecordBindingCshake256 rec,
-        macTag := cshake256Digest256 beltEchoMacTag.data.toList
-          (beltEchoPreimage key sender.val receiver.val rec (beltRecordBindingCshake256 rec)) } := by
+      some
+        { sender := sender
+          receiver := receiver
+          record := rec
+          binding := beltRecordBindingCshake256 rec
+          macTag := cshake256Digest256 beltEchoMacTag.data.toList
+            (beltEchoPreimage key sender.val receiver.val rec (beltRecordBindingCshake256 rec)) } := by
   simp only [emitBeltWireEcho, healthy, Bool.false_eq_true, ↓reduceIte, bound]
   rfl
 
@@ -6143,8 +6155,11 @@ def quorumLeafRecordFromLatch (subtreeHeight cIdx : Nat)
   let counter := UInt32.ofNat (rec.retrySalt.toNat / 2 ^ 224)
   if rec.epoch.toNat < 2 ^ subtreeHeight ∧ leaf < 2 ^ 64 ∧
       rec.retrySalt = quorumCounterSalt counter then
-    some { leaf := UInt64.ofNat leaf, msgHash := rec.msgDigest,
-      counter := counter, digits := rec.targetSumDigits }
+    some
+      { leaf := UInt64.ofNat leaf
+        msgHash := rec.msgDigest
+        counter := counter
+        digits := rec.targetSumDigits }
   else none
 
 /-- `hash.rs::mac32`: domain frame, then key frame, then message frames. -/
@@ -6163,12 +6178,16 @@ def emitQuorumWireEcho {n : Nat} (H : List UInt8 → Digest256)
     (key : Digest256) (subtreeHeight cIdx : Nat) (sender receiver : Fin n)
     (st : BeltLatchNodeState) : Option (QuorumCommitteeEcho n) := do
   if st.walPoisoned then none else
-    let rec ← st.inFlight
-    let leafRec ← quorumLeafRecordFromLatch subtreeHeight cIdx rec
+    let r ← st.inFlight
+    let leafRec ← quorumLeafRecordFromLatch subtreeHeight cIdx r
     let binding := quorumLeafRecordBinding H leafRec
-    pure { fromParty := sender, toParty := receiver, committeeIdx := cIdx,
-      epoch := rec.epoch, binding := binding,
-      mac := quorumWireEchoMac H key sender.val receiver.val cIdx rec.epoch binding }
+    pure
+      { fromParty := sender
+        toParty := receiver
+        committeeIdx := cIdx
+        epoch := r.epoch
+        binding := binding
+        mac := quorumWireEchoMac H key sender.val receiver.val cIdx r.epoch binding }
 
 /-- Rust counts every echo from the required peer before authenticating it, so a valid
     echo plus an invalid duplicate still rejects. Extraneous non-peer entries are ignored,
@@ -6227,14 +6246,14 @@ def checkQuorumWireRelease {n : Nat} (H : List UInt8 → Digest256)
     let cIdx ← committeeIndexOf t Q
     let st := net.slots verifier cIdx
     if st.walPoisoned then none else
-      let rec ← st.inFlight
-      let leafRec ← quorumLeafRecordFromLatch subtreeHeight cIdx rec
-      if verifyQuorumWirePeers H keys Q verifier cIdx rec.epoch leafRec echoes then
+      let r ← st.inFlight
+      let leafRec ← quorumLeafRecordFromLatch subtreeHeight cIdx r
+      if verifyQuorumWirePeers H keys Q verifier cIdx r.epoch leafRec echoes then
         some leafRec
       else none
 
 /-- Proof-carrying permit is tied to this actual network snapshot and exact checker. -/
-def QuorumWirePermit {n : Nat} (H : List UInt8 → Digest256)
+abbrev QuorumWirePermit {n : Nat} (H : List UInt8 → Digest256)
     (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
     (Q : CustodiansMask n) (v : Fin n) (echoes : List (QuorumCommitteeEcho n)) :=
   { rec : QuorumLeafRecord // checkQuorumWireRelease H keys t h net Q v echoes = some rec }
@@ -6245,7 +6264,7 @@ def issueQuorumWirePermit {n : Nat} (H : List UInt8 → Digest256)
     Option (QuorumWirePermit H keys t h net Q v echoes) :=
   match he : checkQuorumWireRelease H keys t h net Q v echoes with
   | none => none
-  | some rec => some ⟨rec, he⟩
+  | some leafRec => some ⟨leafRec, he⟩
 
 /-- Signing inputs are checked against the exact message-bound record carried by the permit. -/
 def quorumRecordMatchesMessage (H : List UInt8 → Digest256) (pk : QuorumPublicKey)
@@ -6280,12 +6299,12 @@ def signQuorumWirePermit {n : Nat} (H : List UInt8 → Digest256)
     (masterSeed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8)
     (authPath : List Digest256) (st : QuorumSigningLedger) :
     QuorumSigningLedger × Option QuorumSteppedOpening :=
-  let rec := permit.val
-  if rec.leaf ∈ st.reserved then (st, none) else
-    let burned := { st with reserved := rec.leaf :: st.reserved }
-    if quorumRecordMatchesMessage H pk msg rec && decide (pk.pkSeed = quorumStagePkSeed H masterSeed) then
-      let digits := quorumDigitsFromDigest (quorumCounterDigest H rec.msgHash rec.counter)
-      let sig := quorumJortsReferenceSign H masterSeed rec.leaf rec.counter digits authPath
+  let leafRec := permit.val
+  if leafRec.leaf ∈ st.reserved then (st, none) else
+    let burned := { st with reserved := leafRec.leaf :: st.reserved }
+    if quorumRecordMatchesMessage H pk msg leafRec && decide (pk.pkSeed = quorumStagePkSeed H masterSeed) then
+      let digits := quorumDigitsFromDigest (quorumCounterDigest H leafRec.msgHash leafRec.counter)
+      let sig := quorumJortsReferenceSign H masterSeed leafRec.leaf leafRec.counter digits authPath
       ({ burned with signatures := sig :: st.signatures },
         some { leaf := sig.leaf, counter := sig.counter, nodes := sig.nodes })
     else (burned, none)
@@ -6297,7 +6316,8 @@ theorem signQuorumWirePermit_replay_rejected {n : Nat} (H : List UInt8 → Diges
     (seed : Digest256) (pk : QuorumPublicKey) (msg : List UInt8) (path : List Digest256)
     (st : QuorumSigningLedger) (used : permit.val.leaf ∈ st.reserved) :
     signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path st = (st, none) := by
-  simp only [signQuorumWirePermit, used, ↓reduceIte]
+  unfold signQuorumWirePermit
+  simp only [used, ↓reduceIte]
 
 /-- Every attempted use is durably consumed, including a later failed message check. -/
 theorem signQuorumWirePermit_burns {n : Nat} (H : List UInt8 → Digest256)
@@ -6309,10 +6329,10 @@ theorem signQuorumWirePermit_burns {n : Nat} (H : List UInt8 → Digest256)
     permit.val.leaf ∈
       (signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path st).1.reserved := by
   unfold signQuorumWirePermit
+  dsimp only
   split
   next used => exact used
   next fresh =>
-    dsimp only
     split <;> exact List.Mem.head _
 
 /-- A produced opening is exactly the stepped chain vector for the authenticated record. -/
@@ -6330,10 +6350,10 @@ theorem signQuorumWirePermit_output {n : Nat} (H : List UInt8 → Digest256)
       (quorumDigitsFromDigest (quorumCounterDigest H permit.val.msgHash permit.val.counter)) path).nodes := by
   refine ⟨permit.property, ?_⟩
   unfold signQuorumWirePermit at produced
+  dsimp only at produced
   split at produced
   next used => cases produced
   next fresh =>
-    dsimp only at produced
     split at produced
     next accepted =>
       cases Option.some.inj produced
@@ -6366,24 +6386,27 @@ private theorem signingLedger_burn_safe (st : QuorumSigningLedger) (leaf : UInt6
 
 private theorem signingLedger_cons_safe (st : QuorumSigningLedger) (sig : QuorumJortsSig)
     (safe : st.Safe) (fresh : sig.leaf ∉ st.reserved) :
-    (⟨sig.leaf :: st.reserved, sig :: st.signatures⟩ : QuorumSigningLedger).Safe := by
+    ({ reserved := sig.leaf :: st.reserved, signatures := sig :: st.signatures } :
+      QuorumSigningLedger).Safe := by
   constructor
   · intro a ha
-    rcases List.mem_cons.mp ha with rfl | ha
+    dsimp only at ha
+    rcases List.mem_cons.mp ha with rfl | haTail
     · exact List.Mem.head _
-    · exact List.Mem.tail _ (safe.1 a ha)
+    · exact List.Mem.tail _ (safe.1 a haTail)
   · intro a ha b hb heq
-    rcases List.mem_cons.mp ha with rfl | ha
-    · rcases List.mem_cons.mp hb with rfl | hb
+    dsimp only at ha hb
+    rcases List.mem_cons.mp ha with rfl | haTail
+    · rcases List.mem_cons.mp hb with rfl | hbTail
       · rfl
-      · have used := safe.1 b hb
+      · have used := safe.1 b hbTail
         rw [← heq] at used
         exact False.elim (fresh used)
-    · rcases List.mem_cons.mp hb with rfl | hb
-      · have used := safe.1 a ha
+    · rcases List.mem_cons.mp hb with rfl | hbTail
+      · have used := safe.1 a haTail
         rw [heq] at used
         exact False.elim (fresh used)
-      · exact safe.2 a ha b hb heq
+      · exact safe.2 a haTail b hbTail heq
 
 theorem signQuorumWirePermit_preserves_safety {n : Nat} (H : List UInt8 → Digest256)
     (keys : Fin n → Fin n → Digest256) (t h : Nat) (net : QuorumJortsNetworkState n)
@@ -6393,10 +6416,10 @@ theorem signQuorumWirePermit_preserves_safety {n : Nat} (H : List UInt8 → Dige
     (st : QuorumSigningLedger) (safe : st.Safe) :
     (signQuorumWirePermit H keys t h net Q v echoes permit seed pk msg path st).1.Safe := by
   unfold signQuorumWirePermit
+  dsimp only
   split
   next used => exact safe
   next fresh =>
-    dsimp only
     split
     next accepted => exact signingLedger_cons_safe st _ safe fresh
     next rejected => exact signingLedger_burn_safe st _ safe
@@ -6421,7 +6444,8 @@ def stepQuorumWireNetwork {n : Nat} (H : List UInt8 → Digest256)
     (st : QuorumWireNetworkState n) (turn : QuorumWireTurn n) : QuorumWireNetworkState n :=
   match turn with
   | .latch action =>
-    { st with latches := stepQuorumJorts H (fun k bs => H (encodeDigest256 k ++ bs))
+    { st with
+      latches := stepQuorumJorts H (fun k bs => H (encodeDigest256 k ++ bs))
         keys Corrupt t height t st.latches action }
   | .echo sender receiver Q =>
     if Corrupt.mem sender || !Q.mem sender then st else
@@ -6437,7 +6461,8 @@ def stepQuorumWireNetwork {n : Nat} (H : List UInt8 → Digest256)
       match issueQuorumWirePermit H keys t height st.latches Q verifier echoes with
       | none => st
       | some permit =>
-        { st with signing := (signQuorumWirePermit H keys t height st.latches Q verifier
+        { st with
+          signing := (signQuorumWirePermit H keys t height st.latches Q verifier
             echoes permit seed pk msg path st.signing).1 }
 
 def runQuorumWireTrace {n : Nat} (H : List UInt8 → Digest256)
@@ -6456,22 +6481,29 @@ theorem stepQuorumWireNetwork_preserves_safety {n : Nat} (H : List UInt8 → Dig
   cases turn with
   | latch action => exact safe
   | echo sender receiver Q =>
-    simp only [stepQuorumWireNetwork]
-    split
-    next denied => exact safe
-    next allowed =>
-      split
-      next missing => exact safe
-      next idx present =>
-        split <;> exact safe
+    unfold stepQuorumWireNetwork
+    dsimp only
+    by_cases hDenied : (Corrupt.mem sender || !Q.mem sender) = true
+    · simp only [hDenied, ↓reduceIte]; exact safe
+    · simp only [Bool.not_eq_true] at hDenied
+      simp only [hDenied, Bool.false_eq_true, ↓reduceIte]
+      cases committeeIndexOf t Q with
+      | none => dsimp only; exact safe
+      | some idx =>
+        dsimp only
+        cases emitQuorumWireEcho H (keys sender receiver) height idx sender receiver
+            (st.latches.slots sender idx) <;> dsimp only <;> exact safe
   | sign verifier Q msg path echoes =>
-    simp only [stepQuorumWireNetwork]
-    split
-    next corrupt => exact safe
-    next honest =>
-      split
-      next missing => exact safe
-      next permit issued =>
+    unfold stepQuorumWireNetwork
+    dsimp only
+    by_cases hCorrupt : Corrupt.mem verifier = true
+    · simp only [hCorrupt, ↓reduceIte]; exact safe
+    · simp only [Bool.not_eq_true] at hCorrupt
+      simp only [hCorrupt, Bool.false_eq_true, ↓reduceIte]
+      cases issueQuorumWirePermit H keys t height st.latches Q verifier echoes with
+      | none => dsimp only; exact safe
+      | some permit =>
+        dsimp only
         exact signQuorumWirePermit_preserves_safety H keys t height st.latches Q verifier
           echoes permit seed pk msg path st.signing safe
 
@@ -6490,7 +6522,7 @@ theorem runQuorumWireTrace_signature_safety {n : Nat} (H : List UInt8 → Digest
     exact ih _ (stepQuorumWireNetwork_preserves_safety H keys Corrupt seed pk t height st turn safe)
 
 theorem emptyQuorumSigningLedger_safe : ({} : QuorumSigningLedger).Safe := by
-  constructor <;> simp [QuorumSigningLedger.Safe]
+  constructor <;> intro _ h <;> cases h
 
 /-- Single durable allocator shared by all QS-B responding committees. Natural-number
     cursor arithmetic cannot wrap; conversion occurs only after the range check. -/
@@ -6511,10 +6543,7 @@ theorem QsBGlobalAllocator.reserve_bounds {height : Nat} {st next : QsBGlobalAll
   unfold QsBGlobalAllocator.reserve at h
   split at h
   next good =>
-    have hp := Option.some.inj h
-    have hl := congrArg Prod.fst hp
-    have hn := congrArg Prod.snd hp
-    rw [← hl, ← hn]
+    rcases Prod.mk.inj (Option.some.inj h) with ⟨rfl, rfl⟩
     exact ⟨uint64_toNat_ofNat_of_lt good.2, good.1, good.2, rfl⟩
   next bad => cases h
 
@@ -6600,10 +6629,9 @@ theorem qsBAllocateAndSign_allocated {d : Nat} (H : List UInt8 → Digest256) (s
   | some result =>
     rcases result with ⟨leaf, after⟩
     simp only [qsBAllocateAndSign, allocated] at h
-    have hNext := congrArg Prod.fst h
-    have hSig := Option.some.inj (congrArg Prod.snd h)
+    rcases Prod.mk.inj h with ⟨rfl, hS⟩
+    cases Option.some.inj hS
     obtain ⟨hl, _, hFit, hn⟩ := QsBGlobalAllocator.reserve_bounds allocated
-    rw [← hNext, ← hSig]
     exact ⟨hl, hn, hFit⟩
 
 /-- Quorum switching cannot make consecutive signature outputs overlap. This statement

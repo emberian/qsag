@@ -598,7 +598,7 @@ fn ntt_goldilocks_parallel_stages(a: &mut [Goldilocks], threads: usize, inverse:
     let chunk_stages = chunk_n.trailing_zeros() as usize;
     std::thread::scope(|scope| {
         for sub in a.chunks_mut(chunk_n) {
-            scope.spawn(move || {
+            crate::spawn_bounded(scope, move || {
                 let mut len = 2;
                 let mut stage = 1;
                 while stage <= chunk_stages {
@@ -630,7 +630,7 @@ fn ntt_goldilocks_parallel_stages(a: &mut [Goldilocks], threads: usize, inverse:
                     lo.chunks_mut(sub_j).zip(hi.chunks_mut(sub_j)).enumerate()
                 {
                     let w_init = w_len.pow((t_idx * sub_j) as u64);
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         butterfly_block_goldilocks(lo_c, hi_c, w_init, w_len);
                     });
                 }
@@ -656,7 +656,7 @@ pub fn intt_goldilocks(a: &mut [Goldilocks]) {
             let chunk = (n / threads).max(1);
             std::thread::scope(|scope| {
                 for sub in a.chunks_mut(chunk) {
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         for x in sub.iter_mut() {
                             *x *= n_inv;
                         }
@@ -713,7 +713,7 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
             std::thread::scope(|scope| {
                 for (t_idx, coset_chunk) in cosets.chunks_mut(r_per_thread * n_c).enumerate() {
                     let base_r = t_idx * r_per_thread;
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         for (off_r, row) in coset_chunk.chunks_exact_mut(n_c).enumerate() {
                             let r = base_r + off_r;
                             let s_r = Goldilocks::NON_RESIDUE * omega_d.pow(r as u64);
@@ -744,14 +744,14 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
             std::thread::scope(|scope| {
                 for (r, row) in cosets.chunks_exact_mut(n_c).enumerate() {
                     let s_r = Goldilocks::NON_RESIDUE * omega_d.pow(r as u64);
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         let sub_c = n_c / inner_threads;
                         let mut shifted = vec![Goldilocks::ZERO; n_c];
                         std::thread::scope(|inner| {
                             for (ti, dst_s) in shifted.chunks_mut(sub_c).enumerate() {
                                 let src_s = &coeffs[ti * sub_c..(ti + 1) * sub_c];
                                 let mut sp = s_r.pow((ti * sub_c) as u64);
-                                inner.spawn(move || {
+                                crate::spawn_bounded(inner, move || {
                                     for (d, &c) in dst_s.iter_mut().zip(src_s.iter()) {
                                         *d = c * sp;
                                         sp *= s_r;
@@ -763,7 +763,7 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
                         std::thread::scope(|inner| {
                             for (ti, dst_s) in row.chunks_mut(sub_c).enumerate() {
                                 let base_i = ti * sub_c;
-                                inner.spawn(move || {
+                                crate::spawn_bounded(inner, move || {
                                     for (off, slot) in dst_s.iter_mut().enumerate() {
                                         let rev = (base_i + off).reverse_bits() >> rev_shift_c;
                                         *slot = shifted_ref[rev];
@@ -800,7 +800,7 @@ pub fn encode_rs_coset_goldilocks(coeffs: &[Goldilocks], blowup: usize) -> Vec<G
         std::thread::scope(|scope| {
             for (ti, out_sub) in out.chunks_mut(q_chunk * blowup).enumerate() {
                 let base_q = ti * q_chunk;
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     for (off_q, dst_row) in out_sub.chunks_exact_mut(blowup).enumerate() {
                         let q = base_q + off_q;
                         for (r, slot) in dst_row.iter_mut().enumerate() {
@@ -1229,7 +1229,7 @@ fn ntt_ext4_parallel_stages(a: &mut [GoldilocksExt4], threads: usize) {
     let chunk_stages = chunk_n.trailing_zeros() as usize;
     std::thread::scope(|scope| {
         for sub in a.chunks_mut(chunk_n) {
-            scope.spawn(move || {
+            crate::spawn_bounded(scope, move || {
                 let mut len = 2;
                 let mut stage = 1;
                 while stage <= chunk_stages {
@@ -1259,7 +1259,7 @@ fn ntt_ext4_parallel_stages(a: &mut [GoldilocksExt4], threads: usize) {
                     lo.chunks_mut(sub_j).zip(hi.chunks_mut(sub_j)).enumerate()
                 {
                     let w_init = w_len.pow((t_idx * sub_j) as u64);
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         butterfly_block_ext4(lo_c, hi_c, w_init, w_len);
                     });
                 }
@@ -1295,7 +1295,7 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
             std::thread::scope(|scope| {
                 for (t_idx, coset_chunk) in cosets.chunks_mut(r_per_thread * n_c).enumerate() {
                     let base_r = t_idx * r_per_thread;
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         for (off_r, row) in coset_chunk.chunks_exact_mut(n_c).enumerate() {
                             let r = base_r + off_r;
                             let s_r = Goldilocks::NON_RESIDUE * omega_d.pow(r as u64);
@@ -1326,14 +1326,14 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
             std::thread::scope(|scope| {
                 for (r, row) in cosets.chunks_exact_mut(n_c).enumerate() {
                     let s_r = Goldilocks::NON_RESIDUE * omega_d.pow(r as u64);
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         let sub_c = n_c / inner_threads;
                         let mut shifted = vec![GoldilocksExt4::ZERO; n_c];
                         std::thread::scope(|inner| {
                             for (ti, dst_s) in shifted.chunks_mut(sub_c).enumerate() {
                                 let src_s = &coeffs[ti * sub_c..(ti + 1) * sub_c];
                                 let mut sp = s_r.pow((ti * sub_c) as u64);
-                                inner.spawn(move || {
+                                crate::spawn_bounded(inner, move || {
                                     for (d, &c) in dst_s.iter_mut().zip(src_s.iter()) {
                                         *d = c.mul_base(sp);
                                         sp *= s_r;
@@ -1345,7 +1345,7 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
                         std::thread::scope(|inner| {
                             for (ti, dst_s) in row.chunks_mut(sub_c).enumerate() {
                                 let base_i = ti * sub_c;
-                                inner.spawn(move || {
+                                crate::spawn_bounded(inner, move || {
                                     for (off, slot) in dst_s.iter_mut().enumerate() {
                                         let rev = (base_i + off).reverse_bits() >> rev_shift_c;
                                         *slot = shifted_ref[rev];
@@ -1382,7 +1382,7 @@ pub fn encode_rs_coset_ext4(coeffs: &[GoldilocksExt4], blowup: usize) -> Vec<Gol
         std::thread::scope(|scope| {
             for (ti, out_sub) in out.chunks_mut(q_chunk * blowup).enumerate() {
                 let base_q = ti * q_chunk;
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     for (off_q, dst_row) in out_sub.chunks_exact_mut(blowup).enumerate() {
                         let q = base_q + off_q;
                         for (r, slot) in dst_row.iter_mut().enumerate() {

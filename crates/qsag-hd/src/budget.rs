@@ -159,7 +159,7 @@ impl DurableQueryBudget {
         let record = storage(LockedRecord::create_new(&path_buf))?;
         let key_secret = RedactedSecret::new(key);
         let mut file = storage(
-            no_follow_options()?
+            storage(no_follow_options())?
                 .read(true)
                 .write(true)
                 .create_new(true)
@@ -222,7 +222,7 @@ impl DurableQueryBudget {
             return Err(HdError::BudgetStorageFailed);
         }
         let mut file = storage(
-            no_follow_options()?
+            storage(no_follow_options())?
                 .read(true)
                 .write(true)
                 .create(false)
@@ -349,6 +349,7 @@ impl DurableQueryBudget {
 
         self.last_mac = next_mac;
         self.used = next_count;
+        self.verify_live_journal_integrity()?;
         self.failed = false;
         Ok(())
     }

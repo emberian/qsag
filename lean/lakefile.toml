@@ -8,7 +8,7 @@ globs = ["Qsag", "Qsag.+"]
 
 [[lean_exe]]
 name = "qsag-kat"
-root = "KatGen"
+root = "Main"
 
 [[lean_exe]]
 name = "isa-cosim"

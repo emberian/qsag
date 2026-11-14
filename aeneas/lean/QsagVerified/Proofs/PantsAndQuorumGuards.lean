@@ -172,22 +172,42 @@ theorem validate_belt_quorum_config_eq
                 simp only [hSub_uscalar_eq, hfn, ite_true]; rfl
               have hv_nmf : nmf.val = n.val - f.val :=
                 BitVec.toNat_sub_of_le (BitVec.le_def.mpr hfn)
-              simp only [ite_true, hsub_nf, result_bind_ok]
-              by_cases hq_gt : q > nmf
-              · have hgt_val : n.val - f.val < q.val := by
-                  rw [← hv_nmf]; exact (UScalar.lt_iff_val _ _).mp hq_gt
-                have hnle_gl : ¬ (q.val + f.val ≤ n.val) := by
-                  intro hle_gl
-                  have h1 : q.val ≤ n.val - f.val := Nat.le_sub_of_add_le hle_gl
-                  exact Nat.not_lt_of_ge h1 hgt_val
-                simp [hq_gt, validBeltQuorumConfigBool, hn_pos, hlt_ft, hle_tq, hle_qn, hlt_2q, hnle_gl]
-              · have hle_sub : q.val ≤ n.val - f.val := by
-                  rw [← hv_nmf]
-                  exact Nat.le_of_not_gt fun h => hq_gt ((UScalar.lt_iff_val _ _).mpr h)
-                have hle_gl : q.val + f.val ≤ n.val := by
-                  have h1 := Nat.add_le_add_right hle_sub f.val
-                  rwa [Nat.sub_add_cancel hfn] at h1
-                simp [hq_gt, validBeltQuorumConfigBool, hn_pos, hlt_ft, hle_tq, hle_qn, hlt_2q, hle_gl]
+              -- The liveness arm also checks `3 f + 1 ≤ n`, which the quorum conditions imply.
+              have h3 : (3#u64 : Std.U64).val = 3 := rfl
+              have h1 : (1#u64 : Std.U64).val = 1 := rfl
+              obtain ⟨tf, htf, hv_tf⟩ := checked_mul_val 3#u64 f64 (by
+                show (3#u64 : Std.U64).val * f64.val < 2 ^ 64
+                rw [h3, hf64]; omega)
+              obtain ⟨tf1, htf1, hv_tf1⟩ := checked_add_val tf 1#u64 (by
+                show tf.val + (1#u64 : Std.U64).val < 2 ^ 64
+                rw [hv_tf, h3, h1, hf64]; omega)
+              rw [hv_tf, h3, hf64, h1] at hv_tf1
+              simp only [ite_true]
+              rw [htf, result_bind_ok, htf1, result_bind_ok]
+              by_cases hlt3 : (UScalar.cast .U64 n : Std.U64) < tf1
+              · have hv : n64.val < tf1.val := (UScalar.lt_iff_val _ _).mp hlt3
+                rw [hn64, hv_tf1] at hv
+                have hnle_gl : ¬ (q.val + f.val ≤ n.val) := by omega
+                simp [hlt3, validBeltQuorumConfigBool, hn_pos, hlt_ft, hle_tq, hle_qn, hlt_2q,
+                  hnle_gl]
+              · simp only [hlt3, ite_false, hsub_nf, result_bind_ok]
+                by_cases hq_gt : q > nmf
+                · have hgt_val : n.val - f.val < q.val := by
+                    rw [← hv_nmf]; exact (UScalar.lt_iff_val _ _).mp hq_gt
+                  have hnle_gl : ¬ (q.val + f.val ≤ n.val) := by
+                    intro hle_gl
+                    have h1 : q.val ≤ n.val - f.val := Nat.le_sub_of_add_le hle_gl
+                    exact Nat.not_lt_of_ge h1 hgt_val
+                  simp [hq_gt, validBeltQuorumConfigBool, hn_pos, hlt_ft, hle_tq, hle_qn, hlt_2q,
+                    hnle_gl]
+                · have hle_sub : q.val ≤ n.val - f.val := by
+                    rw [← hv_nmf]
+                    exact Nat.le_of_not_gt fun h => hq_gt ((UScalar.lt_iff_val _ _).mpr h)
+                  have hle_gl : q.val + f.val ≤ n.val := by
+                    have h1 := Nat.add_le_add_right hle_sub f.val
+                    rwa [Nat.sub_add_cancel hfn] at h1
+                  simp [hq_gt, validBeltQuorumConfigBool, hn_pos, hlt_ft, hle_tq, hle_qn, hlt_2q,
+                    hle_gl]
 
 theorem validate_belt_quorum_config_spec
     (n t f q : Std.U32) (require_global_liveness : Bool) :

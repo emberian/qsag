@@ -26,6 +26,8 @@ import all Qsag.Keccak
 public import Qsag.Poseidon2
 public import Qsag.UcGames
 
+import Qsag.Tactic.AssuranceKit
+
 public section
 namespace Qsag
 
@@ -3863,7 +3865,6 @@ theorem decodeProductionSigWire_encodeProductionSigWire
                   rw [hTakeMagic]; decide
                 simp only [hWf, Bool.not_true, hWireLen, hNotLt5, decide_false, hMagicBne, Bool.or_self,
                   Bool.false_eq_true, ↓reduceIte, ne_eq, not_true_eq_false]
-                dsimp only
                 have hDrop5 : (pqWireMagic ++ (sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
                     (encodeForsOpeningsWire sig.forsOpenings ++ encodeLayerSigsWire sig.layerSigs))))).drop 5 =
                     sig.rRand ++ (be 4 0 ++ (be 8 sig.leafGlobalIdx ++
@@ -3886,11 +3887,9 @@ theorem decodeProductionSigWire_encodeProductionSigWire
                 rw [hDrop37, List.take_left' hBe4]
                 have hOfBe0 : ofBE (be 4 0) = 0 := ofBE_be (by decide)
                 rw [hOfBe0]
-                simp only [ne_eq, not_true_eq_false, ↓reduceIte]
-                dsimp only
+                simp only [not_true_eq_false, ↓reduceIte]
                 rw [hDrop41, List.take_left' hBe8, ofBE_be hLeafLt64]
                 simp only [hRange, Bool.not_true, Bool.false_eq_true, ↓reduceIte]
-                dsimp only
                 rw [hDrop49, ← hForsProps.1, hForsParse]
                 dsimp only
                 rw [← hLsLen, hLayerParse]
@@ -3901,5 +3900,27 @@ theorem decodeProductionSigWire_encodeProductionSigWire
         · simp [hRLen] at hEnc
       · simp [hLsLen] at hEnc
 
+/-- Production parameter acceptance, separate from the permissive toy geometry. -/
+def ProductionParameterProfile (p : PqHashParams) : Prop := p.productionWellFormed = true
+
+theorem production_profile_covers_full_digest (p : PqHashParams)
+    (h : ProductionParameterProfile p) : p.ell1 * Nat.log2 p.w = 256 := by
+  simp only [ProductionParameterProfile, PqHashParams.productionWellFormed,
+    Bool.and_eq_true, decide_eq_true_eq] at h
+  omega
+
+theorem witness_production_parameter_profile : ∃ p, ProductionParameterProfile p :=
+  ⟨corduroyCustody128Params, corduroyCustody128_productionWellFormed⟩
+
+theorem tooth_short_model_is_not_production : ¬ ProductionParameterProfile compactTestParams := by
+  intro h
+  have hf := tooth_productionWellFormed_rejects_short_wots.2
+  unfold ProductionParameterProfile at h
+  rw [hf] at h
+  cases h
+
 end Qsag
 end
+
+#tooth_pair Qsag.production_profile_covers_full_digest vs Qsag.tooth_short_model_is_not_production
+#verify_inhabited Qsag.production_profile_covers_full_digest Qsag.witness_production_parameter_profile

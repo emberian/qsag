@@ -82,6 +82,7 @@ use core::fmt;
 use qsag_accel::ct::ct_eq_bytes;
 use qsag_accel::keccak::{Shake256, cshake256_framed_32};
 use qsag_policy::AuthorizedSignReleaseToken;
+use qsag_verified::{MlDsaBarrierChecks, MlDsaReleaseGate};
 
 /// Maximum custodians.
 pub const MAX_THRESHOLD_MLDSA_PARTIES: usize = 5;
@@ -357,10 +358,9 @@ impl NonceBurnPersistence for FsNonceBurnStore {
         if self.poisoned
             || !qsag_accel::ct::ct_eq_bytes(key_id, &self.key_id)
             || mldsa_burn_lock_inode(&self.path).ok() != Some(self.lock_id)
-            || self
-                .record
-                .read()
-                .map_or(true, |bytes| !qsag_accel::ct::ct_eq_bytes(&bytes, &expected))
+            || self.record.read().map_or(true, |bytes| {
+                !qsag_accel::ct::ct_eq_bytes(&bytes, &expected)
+            })
         {
             return Err(ThresholdMlDsaError::NoncePersistenceFailed);
         }
@@ -895,6 +895,29 @@ fn rejection_verdict<T: MpcTransport>(
     Ok(verdict[0].iter().all(|&v| v == 0))
 }
 
+/// Owns the entire pending response while the verified affine gate holds its
+/// session capability. A rejected gate drops (and zeroizes) the response; only
+/// successful consumption returns shares that the caller can open.
+struct PendingResponse {
+    response: Sh,
+    gate: MlDsaReleaseGate,
+}
+
+impl PendingResponse {
+    fn new(response: Sh, context: [u8; 32], attempt: u32) -> Self {
+        Self {
+            response,
+            gate: MlDsaReleaseGate::new_sealed(context, attempt, context),
+        }
+    }
+
+    fn release(self, checks: MlDsaBarrierChecks) -> Result<Sh, ThresholdMlDsaError> {
+        let (_, released) = self.gate.try_release_z_share(checks);
+        released.map_err(|_| ThresholdMlDsaError::ProtocolInvariantViolated)?;
+        Ok(self.response)
+    }
+}
+
 struct SessionKey {
     s1_hat: Vec<Vec<Poly256>>,
     s2_hat: Vec<Vec<Poly256>>,
@@ -1123,16 +1146,31 @@ pub fn threshold_sign_mldsa_party<T: MpcTransport>(
         let low_bound = gamma2 - params.beta;
         let test_idx: Vec<usize> = z_idx.iter().chain(low_idx).copied().collect();
         let test_planes: Vec<Sh> = planes.iter().map(|plane| plane.gather(&test_idx)).collect();
+        let pending = PendingResponse::new(z, context, attempt);
         let accepted = rejection_verdict(
             &mut engine,
-            (&z, z_bound),
+            (&pending.response, z_bound),
             (&low, low_bound),
             &mask_values.gather(&test_idx),
             &test_planes,
         )?;
+        // rejection_verdict opens only after Engine::verify has checked the
+        // actual multiplication trace and holder commitments. Its single bit
+        // jointly establishes both norms and the HighBits relation to w1.
+        let released = pending.release(MlDsaBarrierChecks {
+            req_session_id: context,
+            req_attempt: attempt,
+            z_norm_ok: accepted,
+            r0_norm_ok: accepted,
+            w1_match: accepted,
+            u_com_bound: true, // established by the successful checked open above
+        });
         if !accepted {
+            // Consume the rejecting gate as well; no response survives retry.
+            debug_assert!(released.is_err());
             continue;
         }
+        let z = released?;
 
         // Phase 4: release z.
         engine.set_phase(PHASE_SIGN_RELEASE);

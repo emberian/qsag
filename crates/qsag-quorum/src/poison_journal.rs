@@ -154,6 +154,7 @@ pub struct FsDurablePoisonAndSessionJournal {
     state: u8,
     tag: [u8; 32],
     failed: bool,
+    records: u64,
 }
 
 impl core::fmt::Debug for FsDurablePoisonAndSessionJournal {
@@ -267,8 +268,11 @@ impl FsDurablePoisonAndSessionJournal {
             state: STATE_ALLOCATED,
             tag: [0; 32],
             failed: false,
+            records: 0,
         };
-        journal.verify_live_files()?;
+        if mode == JournalOpenMode::CreateNew {
+            journal.verify_live_files()?;
+        }
 
         match mode {
             JournalOpenMode::CreateNew => journal.persist(0, session, STATE_ALLOCATED)?,
@@ -331,11 +335,13 @@ impl FsDurablePoisonAndSessionJournal {
                     journal.state = state;
                     journal.tag = tag;
                 }
+                journal.records = length / RECORD_BYTES as u64;
                 if journal.session != session {
                     return Err(NodeError::Journal);
                 }
             }
         }
+        journal.verify_live_files()?;
         journal.file.sync_all().map_err(|_| NodeError::Journal)?;
         journal.parent.sync_all().map_err(|_| NodeError::Journal)?;
         Ok(journal)
@@ -359,7 +365,31 @@ impl FsDurablePoisonAndSessionJournal {
         if regular_dev_ino(&live_data)? != self.data_id
             || regular_dev_ino(&held_data)? != self.data_id
             || live_data.len() != held_data.len()
+            || held_data.len() != self.records.checked_mul(RECORD_BYTES as u64).ok_or(NodeError::Journal)?
         {
+            return Err(NodeError::Journal);
+        }
+        // Inode equality alone says nothing about in-place truncation or rewriting.
+        // Authenticate the complete held history against the cached head before release.
+        let mut previous = [0u8; 32];
+        for index in 0..self.records {
+            let mut record = [0u8; RECORD_BYTES];
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::FileExt;
+                self.file.read_exact_at(&mut record, index * RECORD_BYTES as u64)
+                    .map_err(|_| NodeError::Journal)?;
+            }
+            #[cfg(not(unix))]
+            return Err(NodeError::Journal);
+            let tag = core::array::from_fn(|i| record[41 + i]);
+            if !mac32_verify(&self.key, DOMAIN,
+                &[&self.lock_seal, &self.data_seal, &previous, &record[..41]], &tag) {
+                return Err(NodeError::Journal);
+            }
+            previous = tag;
+        }
+        if !qsag_core::wipe::ct_eq_bytes(&previous, &self.tag) {
             return Err(NodeError::Journal);
         }
         let live_lock = fs::symlink_metadata(&self.lock_path).map_err(|_| NodeError::Journal)?;
@@ -460,6 +490,8 @@ impl FsDurablePoisonAndSessionJournal {
             .map_err(|_| NodeError::Journal)?;
         self.file.sync_all().map_err(|_| NodeError::Journal)?;
         self.parent.sync_all().map_err(|_| NodeError::Journal)?;
+        self.records = self.records.checked_add(1).ok_or(NodeError::Journal)?;
+        self.tag = tag;
         self.verify_live_files()?;
         self.generation = generation;
         self.session = session;
@@ -516,6 +548,29 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn live_in_place_history_changes_fail_closed() {
+        for truncate in [false, true] {
+            let dir = unique_dir("in-place");
+            let path = dir.join("journal");
+            let session = [23; 32];
+            let mut journal = FsDurablePoisonAndSessionJournal::open(
+                &path, [17; 32], session, JournalOpenMode::CreateNew).unwrap();
+            journal.reserve_session(&session).unwrap();
+            let mut attacker = OpenOptions::new().write(true).open(&path).unwrap();
+            if truncate {
+                attacker.set_len(RECORD_BYTES as u64).unwrap();
+            } else {
+                attacker.write_all(&[255]).unwrap();
+            }
+            attacker.sync_all().unwrap();
+            assert!(journal.is_poisoned(&session));
+            assert_eq!(journal.advance_session([24; 32]), Err(NodeError::Journal));
+            drop(journal);
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

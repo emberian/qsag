@@ -78,6 +78,8 @@ fn main() {
         info.max_push_constants_size,
         info.max_compute_work_group_invocations
     );
+    let audit_anchor = info.audit_evidence_digest();
+    println!("  Audit digest  : {}..", hex_short(&audit_anchor));
     println!("--------------------------------------------------------------------------");
 
     let measured_pins = VulkanSpirvBackend::measure_embedded_spirv_pins();
@@ -252,7 +254,7 @@ fn main() {
         &leaves,
         &pk_seed,
         0,
-        [0x77; 32],
+        audit_anchor,
         &mut layer0_parents,
     )
     .unwrap();

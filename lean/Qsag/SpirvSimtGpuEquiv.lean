@@ -1,12 +1,13 @@
 module
 /-
-# Qsag.SpirvSimtGpuEquiv — Binary SPIR-V 1.6 Compute, Multi-Wave Wave32 SIMT, Faial DRF & SIMT-CT
+# Qsag.SpirvSimtGpuEquiv — Binary SPIR-V 1.5/1.6 Compute, Multi-Wave Wave32 SIMT, Faial DRF & SIMT-CT
 
 Machine-checked Lean 4.35 GPU verification foundation (`0 sorry`, `0 bv_decide`, `0 native_decide`,
 `0 Classical.choice`, axioms strictly within `{propext, Quot.sound}`):
 
-1. **§1 Structured `SPIR-V 1.6` Compute Module AST & Binary `Array UInt32` Word Codec:**
-   Exact Khronos `SPIR-V 1.6` 5-word binary header (`magic = 0x07230203`, `version = 0x00010600`),
+1. **§1 Structured `SPIR-V 1.5/1.6` Compute Module AST & Binary `Array UInt32` Word Codec:**
+   Khronos 5-word binary headers (`magic = 0x07230203`), with explicit 1.5 (`0x00010500`)
+   and 1.6 (`0x00010600`) version tags,
    capabilities (`Shader`, `Int64`, `SubgroupDispatch`, `GroupNonUniform`, `VulkanMemoryModel`),
    execution modes (`LocalSize`, `SubgroupSize 32`), decorations, SSA type/global declarations,
    64-bit & 32-bit `OpUMulExtended` / `OpSelect` / `OpAccessChain` / `OpLoad` / `OpStore` /
@@ -25,13 +26,13 @@ Machine-checked Lean 4.35 GPU verification foundation (`0 sorry`, `0 bv_decide`,
    public-affine coalesced global addressing, and 32-bank conflict-free LDS addressing
    (`odd_stride_lds_bank_conflict_free`, `merkle_skewed_lds_bank_conflict_free_both_epochs`, and
    `tooth_stride32_lds_causes_32way_bank_conflict`).
-4. **§4 Parametric Functional Equivalence (`∀ numBlocks`, Scaling to $N = 2^{22}$ in $O(1)$ Proof Size):**
-   - Branchless 32-bit KoalaBear (`p = 2^31 - 2^24 + 1 = 2130706433`) Montgomery & 64-bit
-     Goldilocks (`p = 2^64 - 2^32 + 1`) Solinas `OpUMulExtended` + `OpSelect` compute kernels;
-   - Batched Width-12 `Poseidon2` (`x^7` S-box, zero-mul `M_4` / `M_E`, internal diagonal `M_I`,
-     full 30-round `poseidon2Perm12`) and multi-wave shared-LDS 2-layer Merkle tree compute kernel;
-   - Batched quartic `KoalaBearExt4` and `GoldilocksExt4` WHIR coset duet fold (`foldDuet`) kernels
-     with `Faial` DRF and `SIMT-CT` proved simultaneously.
+Scope: this module proves codec, scheduling, race-freedom and leakage-model results.
+It does not yet prove functional equivalence of the runtime field-arithmetic,
+Poseidon2, Merkle-tree or WHIR shaders. Such a theorem must connect the actual
+shader words, their decoded program and execution to the independent field or
+protocol specification. Importing those specifications does not supply that link.
+The codec supports both 1.5 and 1.6; version tags describe encoded words, not the
+runtime backend's architecture-enum name.
 -/
 
 public import Qsag.Constructive
@@ -48,17 +49,45 @@ namespace Qsag
 
 open Aggregation
 
-attribute [-instance] UInt8.instLawfulEqOrd UInt32.instLawfulEqOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
+attribute [-instance] UInt8.instLawfulEqOrd UInt32.instLawfulEqOrd UInt32.instLawfulOrderOrd UInt64.instLawfulEqOrd BitVec.instLawfulEqOrd
+
+instance (priority := 1200) : LawfulBEq UInt32 where
+  eq_of_beq {a b} h := UInt32.eq_of_toBitVec_eq (eq_of_beq h)
+  rfl {a} := by
+    change (a.toBitVec == a.toBitVec) = true
+    exact BEq.rfl
 
 set_option autoImplicit false
 
-/-! ## §1. Binary `SPIR-V 1.6` Compute Module AST & Verified `Array UInt32` Encoder/Decoder -/
+/-! ## §1. Binary `SPIR-V 1.5/1.6` Compute Module AST & Verified `Array UInt32` Encoder/Decoder -/
 
 /-- Khronos SPIR-V magic number (`0x07230203`). -/
 def spirvMagic : UInt32 := 0x07230203
 
-/-- Khronos SPIR-V 1.6 version word (`major = 1, minor = 6 -> 0x00010600`). -/
+/-- Khronos SPIR-V 1.5 version word (`major = 1, minor = 5 -> 0x00010500`, Vulkan 1.2). -/
+def spirvVersion15 : UInt32 := 0x00010500
+
+/-- Khronos SPIR-V 1.6 version word (`major = 1, minor = 6 -> 0x00010600`, Vulkan 1.3+). -/
 def spirvVersion16 : UInt32 := 0x00010600
+
+/-- Supported Khronos SPIR-V binary versions (`1.5` for Vulkan 1.2, `1.6` for Vulkan 1.3+). -/
+inductive SpirvVersion where
+  | v1_5
+  | v1_6
+  deriving DecidableEq, Repr
+
+def SpirvVersion.toWord : SpirvVersion → UInt32
+  | .v1_5 => spirvVersion15
+  | .v1_6 => spirvVersion16
+
+def SpirvVersion.ofWord? (w : UInt32) : Option SpirvVersion :=
+  if w == spirvVersion15 then some .v1_5
+  else if w == spirvVersion16 then some .v1_6
+  else none
+
+theorem SpirvVersion.ofWord?_toWord (v : SpirvVersion) :
+    SpirvVersion.ofWord? v.toWord = some v := by
+  cases v <;> decide
 
 /-- Little-endian UTF-8 word 0 of entry-point literal `"main\0"`. -/
 def spirvMainWord0 : UInt32 := 0x6E69616D
@@ -438,8 +467,9 @@ inductive SpirvInst where
   | opBranchConditional (condId trueLabelId falseLabelId : UInt32)
   deriving DecidableEq, Repr
 
-/-- Complete structured `SPIR-V 1.6` compute module. -/
+/-- Complete structured `SPIR-V 1.5 / 1.6` compute module. -/
 structure SpirvModule where
+  version : SpirvVersion := .v1_6
   generator : UInt32
   idBound : UInt32
   capabilities : List SpirvCapability
@@ -806,9 +836,9 @@ def moduleToRawInsts (m : SpirvModule) : List RawSpirvInst :=
   [⟨253, []⟩,
    ⟨56, []⟩]
 
-/-- Encode a `SpirvModule` into its exact binary `Array UInt32` SPIR-V 1.6 word stream. -/
+/-- Encode a `SpirvModule` into its exact binary `Array UInt32` SPIR-V 1.5/1.6 word stream. -/
 def encodeSpirvModuleWords (m : SpirvModule) : List UInt32 :=
-  [spirvMagic, spirvVersion16, m.generator, m.idBound, 0] ++
+  [spirvMagic, m.version.toWord, m.generator, m.idBound, 0] ++
   encodeRawInstList (moduleToRawInsts m)
 
 def encodeSpirvModule (m : SpirvModule) : Array UInt32 :=
@@ -855,76 +885,79 @@ private theorem mapExcept_map_ok {α β : Type} (enc : β → α)
   | b :: bs => by
     simp [mapExcept, hRound b, mapExcept_map_ok enc dec hRound bs]
 
-/-- Decode a `SpirvModule` from its binary `Array UInt32` SPIR-V 1.6 word stream. -/
+/-- Decode a `SpirvModule` from its binary `Array UInt32` SPIR-V 1.5/1.6 word stream. -/
 def decodeSpirvModuleWords (words : List UInt32) : Except SpirvDecodeError SpirvModule :=
   match words with
   | magic :: ver :: gen :: bound :: schema :: instWords =>
     if magic != spirvMagic then
       .error (.badMagic magic)
-    else if ver != spirvVersion16 then
-      .error (.badVersion ver)
-    else if schema != 0 then
-      .error (.badSchema schema)
-    else if bound.toNat == 0 then
-      .error .zeroIdBound
     else
-      match parseRawInstStream instWords with
-      | .error e => .error e
-      | .ok raws =>
-        let (capRaws, r1) := splitByOp (· == 17) raws
-        match r1 with
-        | ⟨14, [addrW, memW]⟩ :: ⟨15, epModel :: entryFuncId :: m0 :: m1 :: ifaceIds⟩ :: r2 =>
-          if epModel != spirvExecModelGLCompute || m0 != spirvMainWord0 || m1 != spirvMainWord1 then
-            .error (.malformedSection "bad OpEntryPoint header")
-          else
-            match SpirvAddressingModel.ofWord? addrW, SpirvMemoryModelKind.ofWord? memW with
-            | some addrM, some memM =>
-              let (emRaws, r3) := splitByOp (· == 16) r2
-              let (decRaws, r4) := splitByOp (· == 71) r3
-              let (tyRaws, r5) := splitByOp isTypeOpcode r4
-              let (globRaws, r6) := splitByOp isGlobalOpcode r5
-              match r6 with
-              | ⟨54, [voidTyId, fnId, fnCtrl, fnTyId]⟩ :: ⟨248, [entryLbl]⟩ :: r7 =>
-                if fnId != entryFuncId || fnCtrl != 0 then
-                  .error (.malformedSection "bad OpFunction header")
-                else
-                  let (bodyRaws, r8) := splitByOp isBodyOpcode r7
-                  match r8 with
-                  | [⟨253, []⟩, ⟨56, []⟩] =>
-                    match mapExcept decodeCapabilityRaw capRaws,
-                          mapExcept (decodeExecModeRaw entryFuncId) emRaws,
-                          mapExcept decodeDecorateRaw decRaws,
-                          mapExcept decodeTypeRaw tyRaws,
-                          mapExcept decodeGlobalRaw globRaws,
-                          mapExcept decodeInstRaw bodyRaws with
-                    | .ok caps, .ok ems, .ok decs, .ok tys, .ok globs, .ok body =>
-                      .ok {
-                        generator := gen
-                        idBound := bound
-                        capabilities := caps
-                        addrModel := addrM
-                        memModel := memM
-                        entryFuncId := entryFuncId
-                        interfaceIds := ifaceIds
-                        execModes := ems
-                        decorations := decs
-                        types := tys
-                        globals := globs
-                        voidTypeId := voidTyId
-                        funcTypeId := fnTyId
-                        entryLabelId := entryLbl
-                        body := body
-                      }
-                    | .error e, _, _, _, _, _ => .error e
-                    | _, .error e, _, _, _, _ => .error e
-                    | _, _, .error e, _, _, _ => .error e
-                    | _, _, _, .error e, _, _ => .error e
-                    | _, _, _, _, .error e, _ => .error e
-                    | _, _, _, _, _, .error e => .error e
-                  | _ => .error (.malformedSection "expected OpReturn; OpFunctionEnd")
-              | _ => .error (.malformedSection "expected OpFunction; OpLabel")
-            | _, _ => .error (.malformedSection "bad OpMemoryModel operands")
-        | _ => .error (.malformedSection "expected OpMemoryModel; OpEntryPoint")
+      match SpirvVersion.ofWord? ver with
+      | none => .error (.badVersion ver)
+      | some parsedVer =>
+        if schema != 0 then
+          .error (.badSchema schema)
+        else if bound.toNat == 0 then
+          .error .zeroIdBound
+        else
+          match parseRawInstStream instWords with
+          | .error e => .error e
+          | .ok raws =>
+            let (capRaws, r1) := splitByOp (· == 17) raws
+            match r1 with
+            | ⟨14, [addrW, memW]⟩ :: ⟨15, epModel :: entryFuncId :: m0 :: m1 :: ifaceIds⟩ :: r2 =>
+              if epModel != spirvExecModelGLCompute || m0 != spirvMainWord0 || m1 != spirvMainWord1 then
+                .error (.malformedSection "bad OpEntryPoint header")
+              else
+                match SpirvAddressingModel.ofWord? addrW, SpirvMemoryModelKind.ofWord? memW with
+                | some addrM, some memM =>
+                  let (emRaws, r3) := splitByOp (· == 16) r2
+                  let (decRaws, r4) := splitByOp (· == 71) r3
+                  let (tyRaws, r5) := splitByOp isTypeOpcode r4
+                  let (globRaws, r6) := splitByOp isGlobalOpcode r5
+                  match r6 with
+                  | ⟨54, [voidTyId, fnId, fnCtrl, fnTyId]⟩ :: ⟨248, [entryLbl]⟩ :: r7 =>
+                    if fnId != entryFuncId || fnCtrl != 0 then
+                      .error (.malformedSection "bad OpFunction header")
+                    else
+                      let (bodyRaws, r8) := splitByOp isBodyOpcode r7
+                      match r8 with
+                      | [⟨253, []⟩, ⟨56, []⟩] =>
+                        match mapExcept decodeCapabilityRaw capRaws,
+                              mapExcept (decodeExecModeRaw entryFuncId) emRaws,
+                              mapExcept decodeDecorateRaw decRaws,
+                              mapExcept decodeTypeRaw tyRaws,
+                              mapExcept decodeGlobalRaw globRaws,
+                              mapExcept decodeInstRaw bodyRaws with
+                        | .ok caps, .ok ems, .ok decs, .ok tys, .ok globs, .ok body =>
+                          .ok {
+                            version := parsedVer
+                            generator := gen
+                            idBound := bound
+                            capabilities := caps
+                            addrModel := addrM
+                            memModel := memM
+                            entryFuncId := entryFuncId
+                            interfaceIds := ifaceIds
+                            execModes := ems
+                            decorations := decs
+                            types := tys
+                            globals := globs
+                            voidTypeId := voidTyId
+                            funcTypeId := fnTyId
+                            entryLabelId := entryLbl
+                            body := body
+                          }
+                        | .error e, _, _, _, _, _ => .error e
+                        | _, .error e, _, _, _, _ => .error e
+                        | _, _, .error e, _, _, _ => .error e
+                        | _, _, _, .error e, _, _ => .error e
+                        | _, _, _, _, .error e, _ => .error e
+                        | _, _, _, _, _, .error e => .error e
+                      | _ => .error (.malformedSection "expected OpReturn; OpFunctionEnd")
+                  | _ => .error (.malformedSection "expected OpFunction; OpLabel")
+                | _, _ => .error (.malformedSection "bad OpMemoryModel operands")
+            | _ => .error (.malformedSection "expected OpMemoryModel; OpEntryPoint")
   | _ => .error .truncatedHeader
 
 def decodeSpirvModule (words : Array UInt32) : Except SpirvDecodeError SpirvModule :=
@@ -950,7 +983,10 @@ private theorem moduleToRawInsts_wf {m : SpirvModule} (hm : WellFormedSpirvModul
     cases t with
     | typeStruct res fields =>
       simp only [SpirvTypeDecl.wf, decide_eq_true_eq] at hTys
-      simp only [encodeTypeRaw, RawSpirvInst.wf, List.length_cons, Bool.and_eq_true, decide_eq_true_eq]
+      unfold encodeTypeRaw RawSpirvInst.wf
+      apply Bool.and_eq_true_iff.mpr
+      refine ⟨rfl, decide_eq_true ?_⟩
+      simp only [List.length_cons]
       omega
     | _ => rfl
   · cases g <;> rfl
@@ -960,7 +996,10 @@ private theorem moduleToRawInsts_wf {m : SpirvModule} (hm : WellFormedSpirvModul
     cases i with
     | opAccessChain ty res base indices =>
       simp only [SpirvInst.wf, decide_eq_true_eq] at hBody
-      simp only [encodeInstRaw, RawSpirvInst.wf, List.length_cons, Bool.and_eq_true, decide_eq_true_eq]
+      unfold encodeInstRaw RawSpirvInst.wf
+      apply Bool.and_eq_true_iff.mpr
+      refine ⟨rfl, decide_eq_true ?_⟩
+      simp only [List.length_cons]
       omega
     | _ => rfl
   · rfl
@@ -1005,7 +1044,7 @@ private theorem head_not_typeOp (globs : List SpirvGlobalDecl) (tail : List RawS
   | cons g _ => cases g <;> rfl
   | nil => simp [hfn, isTypeOpcode]
 
-/-- **Binary `SPIR-V 1.6` Encoder/Decoder Roundtrip Theorem (`decodeSpirvModule_encodeSpirvModule`)**:
+/-- **Binary `SPIR-V 1.5/1.6` Encoder/Decoder Roundtrip Theorem (`decodeSpirvModule_encodeSpirvModule`)**:
     Every well-formed `SpirvModule` encodes to a valid `Array UInt32` binary word stream and decodes
     back to the exact AST `m`. -/
 theorem decodeSpirvModule_encodeSpirvModule {m : SpirvModule}
@@ -1019,7 +1058,7 @@ theorem decodeSpirvModule_encodeSpirvModule {m : SpirvModule}
   change decodeSpirvModuleWords (encodeSpirvModuleWords m) = .ok m
   unfold encodeSpirvModuleWords decodeSpirvModuleWords
   simp only [List.cons_append, List.nil_append, bne_self_eq_false, Bool.false_eq_true,
-    ↓reduceIte, hBoundNe0]
+    ↓reduceIte, SpirvVersion.ofWord?_toWord, hBoundNe0]
   rw [parseRawInstStream_encodeRawInstList hRawWf]
   dsimp only
   unfold moduleToRawInsts
@@ -1122,12 +1161,13 @@ theorem tooth_corrupted_spirv_magic_rejected (ver gen bound : UInt32) (rest : Li
   unfold decodeSpirvModule
   simp [decodeSpirvModuleWords, spirvMagic]
 
-/-- `#tooth` Downgrading or corrupting the `0x00010600` SPIR-V 1.6 version header is rejected. -/
+/-- `#tooth` Downgrading or corrupting the SPIR-V 1.5/1.6 version header (`0x00010500` / `0x00010600`)
+    to `0x00010000` is rejected by `decodeSpirvModule`. -/
 theorem tooth_corrupted_spirv_version_rejected (gen bound : UInt32) (rest : List UInt32) :
     decodeSpirvModule (#[spirvMagic, 0x00010000, gen, bound, 0] ++ rest.toArray) =
       .error (.badVersion 0x00010000) := by
   unfold decodeSpirvModule
-  simp [decodeSpirvModuleWords, spirvMagic, spirvVersion16]
+  simp [decodeSpirvModuleWords, spirvMagic, SpirvVersion.ofWord?, spirvVersion15, spirvVersion16]
 
 /-! ## §2. Genuine Multi-Wave Wave32 Workgroup Operational Semantics (`64 KiB` Shared LDS) -/
 
@@ -1206,13 +1246,12 @@ theorem writeSsboDword_comm (ssbo : Nat → Nat → UInt32) {b₁ a₁ b₂ a₂
       writeSsboDword (writeSsboDword ssbo b₂ a₂ v₂) b₁ a₁ v₁ := by
   funext b k
   unfold writeSsboDword
-  by_cases h2 : b = b₂ ∧ k = a₂
-  · by_cases h1 : b = b₁ ∧ k = a₁
-    · exact False.elim (hne (Prod.ext (h1.1.symm.trans h2.1) (h1.2.symm.trans h2.2)))
-    · rw [if_pos h2, if_neg h1, if_pos h2]
-  · by_cases h1 : b = b₁ ∧ k = a₁
-    · rw [if_neg h2, if_pos h1, if_pos h1]
-    · rw [if_neg h2, if_neg h1, if_neg h2]
+  split
+  · split
+    · rename_i h2 h1
+      exact False.elim (hne (Prod.ext (h1.1.symm.trans h2.1) (h1.2.symm.trans h2.2)))
+    · rfl
+  · split <;> rfl
 
 def readU64Dwords (f : Nat → UInt32) (elemIdx : Nat) : UInt64 :=
   u64OfLoHi32 (f (2 * elemIdx)) (f (2 * elemIdx + 1))
@@ -1240,7 +1279,8 @@ def writeSsboU64 (ssbo : Nat → Nat → UInt32) (binding elemIdx : Nat) (v : UI
 theorem readSsboU64_writeSsboU64_same (ssbo : Nat → Nat → UInt32) (b idx : Nat) (v : UInt64) :
     readU64Dwords (writeSsboU64 ssbo b idx v b) idx = v := by
   unfold readU64Dwords writeSsboU64 writeSsboDword
-  simp [u64OfLoHi32_lo_hi]
+  have h : ¬ (2 * idx = 2 * idx + 1) := by omega
+  simp only [h, true_and, ite_false, ite_true, u64OfLoHi32_lo_hi]
 
 theorem readSsboU64_writeSsboU64_other_idx (ssbo : Nat → Nat → UInt32) (b : Nat) {idx k : Nat}
     (v : UInt64) (hne : k ≠ idx) :
@@ -1441,22 +1481,38 @@ def execWaveStoreLanes (execMask : Nat → Bool) (laneRegs : Nat → Nat → Spi
     | .ok mem' =>
       if execMask k then applyLaneStore mem' (laneRegs k) ptrId valId else .ok mem'
 
-/-- Evaluate a pure instruction across lanes `0 .. k - 1` of a Wave32 subgroup. -/
-def evalWavePureLanes (env : SpirvModuleEnv) (mem : GpuMemState) (execMask : Nat → Bool)
-    (laneRegs : Nat → Nat → SpirvVal) (inst : SpirvInst) :
-    Nat → Except SimtExecError (Nat → Nat → SpirvVal)
-  | 0 => .ok laneRegs
+/-- Check that all active lanes `0 .. k - 1` evaluate a pure instruction without runtime error. -/
+def checkWavePureLanesErr (env : SpirvModuleEnv) (mem : GpuMemState) (execMask : Nat → Bool)
+    (laneRegs : Nat → Nat → SpirvVal) (inst : SpirvInst) : Nat → Option SimtExecError
+  | 0 => none
   | k + 1 =>
-    match evalWavePureLanes env mem execMask laneRegs inst k with
-    | .error e => .error e
-    | .ok regs' =>
+    match checkWavePureLanesErr env mem execMask laneRegs inst k with
+    | some e => some e
+    | none =>
       if execMask k then
         match evalLanePureInst env mem (laneRegs k) inst with
-        | .error e => .error e
-        | .ok (dst, v) =>
-          .ok (fun l => if l = k then writeFn (regs' k) dst v else regs' l)
+        | .error e => some e
+        | .ok _ => none
       else
-        .ok regs'
+        none
+
+/-- Parallel SIMT per-lane pure register update (`O(1)` lookup depth per lane, zero cross-lane wrapper chain). -/
+def stepLanePureRegs (env : SpirvModuleEnv) (mem : GpuMemState) (execMask : Nat → Bool)
+    (laneRegs : Nat → Nat → SpirvVal) (inst : SpirvInst) (lane : Nat) : Nat → SpirvVal :=
+  if lane < wave32Lanes ∧ execMask lane = true then
+    match evalLanePureInst env mem (laneRegs lane) inst with
+    | .ok (dst, v) => writeFn (laneRegs lane) dst v
+    | .error _ => laneRegs lane
+  else
+    laneRegs lane
+
+/-- Evaluate a pure instruction across all active lanes `0 .. k - 1` of a Wave32 subgroup. -/
+def evalWavePureLanes (env : SpirvModuleEnv) (mem : GpuMemState) (execMask : Nat → Bool)
+    (laneRegs : Nat → Nat → SpirvVal) (inst : SpirvInst) (k : Nat) :
+    Except SimtExecError (Nat → Nat → SpirvVal) :=
+  match checkWavePureLanesErr env mem execMask laneRegs inst k with
+  | some e => .error e
+  | none => .ok (stepLanePureRegs env mem execMask laneRegs inst)
 
 /-- Step one Wave32 subgroup by one instruction inside a `SpirvInst` sequence.
     When a wave reaches `OpControlBarrier(.workgroup, .workgroup, spirvSemWorkgroupAcqRel)`,
@@ -1597,42 +1653,63 @@ def FaialMapRaceFree (numThreads : Nat) (proto : EpochAccessProtocol) : Prop :=
     (∀ b a : Nat, proto.ssboWrite t₁ b a = true →
       proto.ssboWrite t₂ b a = false ∧ proto.ssboRead t₂ b a = false)
 
-/-- Two `GpuMemState`s agree on all locations read by wave `w` under `proto`. -/
-def MemAgreesOnWaveReads (w : Nat) (proto : EpochAccessProtocol) (m₁ m₂ : GpuMemState) : Prop :=
+/-- Two `GpuMemState`s agree on all locations in wave `w`'s read/write footprint under `proto`. -/
+def MemAgreesOnWaveFootprint (w : Nat) (proto : EpochAccessProtocol) (m₁ m₂ : GpuMemState) : Prop :=
   m₁.pushConsts = m₂.pushConsts ∧
-  (∀ lane a : Nat, lane < wave32Lanes → proto.ldsRead (w * wave32Lanes + lane) a = true →
+  (∀ lane a : Nat, lane < wave32Lanes →
+    (proto.ldsRead (w * wave32Lanes + lane) a = true ∨
+     proto.ldsWrite (w * wave32Lanes + lane) a = true) →
     m₁.lds a = m₂.lds a) ∧
-  (∀ lane b a : Nat, lane < wave32Lanes → proto.ssboRead (w * wave32Lanes + lane) b a = true →
+  (∀ lane b a : Nat, lane < wave32Lanes →
+    (proto.ssboRead (w * wave32Lanes + lane) b a = true ∨
+     proto.ssboWrite (w * wave32Lanes + lane) b a = true) →
     m₁.ssbo b a = m₂.ssbo b a)
 
-/-- Semantic soundness of an `EpochAccessProtocol` on a program `prog`:
-    1. Wave `w`'s step outcome (`wSt'`) and write footprint depend ONLY on `w`'s read set;
-    2. Wave `w` modifies ONLY addresses inside `w`'s write set (`ldsWrite`, `ssboWrite`), and
-       never modifies `pushConsts`. -/
+/-- Per-wave state invariant lifted across all `numWaves` Wave32 subgroups of a workgroup. -/
+def AllWavesInv (cfg : WorkgroupConfig) (waveInv : Nat → Wave32State → Prop)
+    (st : WorkgroupExecState) : Prop :=
+  ∀ w : Nat, w < cfg.numWaves → waveInv w (st.waves w)
+
+/-- Semantic soundness of an `EpochAccessProtocol` on a program `prog` under wave invariant `waveInv`:
+    1. `inv_preserved` & `step_total`: reachable wave states step cleanly and preserve `waveInv`;
+    2. `read_locality`: wave `w`'s step outcome (`wSt'`) and write footprint depend ONLY on `w`'s
+       footprint, and wave `w` modifies ONLY addresses inside `w`'s write set (`ldsWrite`, `ssboWrite`). -/
 structure WaveRespectsProtocol (env : SpirvModuleEnv) (cfg : WorkgroupConfig)
-    (prog : List SpirvInst) (proto : EpochAccessProtocol) : Prop where
+    (prog : List SpirvInst) (waveInv : Nat → Wave32State → Prop)
+    (proto : EpochAccessProtocol) : Prop where
+  inv_preserved :
+    ∀ (w : Nat) (_hw : w < cfg.numWaves) (wSt wSt' : Wave32State) (m m' : GpuMemState),
+      waveInv w wSt →
+      stepWave32One env prog wSt m = .ok (wSt', m') →
+      waveInv w wSt'
+  step_total :
+    ∀ (w : Nat) (_hw : w < cfg.numWaves) (wSt : Wave32State) (m : GpuMemState),
+      waveInv w wSt →
+      ∃ wSt' m', stepWave32One env prog wSt m = .ok (wSt', m')
   read_locality :
-    ∀ (w : Nat) (_hw : w < cfg.numWaves) (wSt : Wave32State) (m₁ m₂ : GpuMemState),
-      MemAgreesOnWaveReads w proto m₁ m₂ →
-      (match stepWave32One env prog wSt m₁, stepWave32One env prog wSt m₂ with
-       | .error e₁, .error e₂ => e₁ = e₂
-       | .ok (wSt₁, m₁'), .ok (wSt₂, m₂') =>
-         wSt₁ = wSt₂ ∧
-         m₁'.pushConsts = m₁.pushConsts ∧
-         m₂'.pushConsts = m₂.pushConsts ∧
-         (∀ a : Nat,
-           (∃ lane < wave32Lanes, proto.ldsWrite (w * wave32Lanes + lane) a = true) →
-             m₁'.lds a = m₂'.lds a) ∧
-         (∀ a : Nat,
-           (∀ lane < wave32Lanes, proto.ldsWrite (w * wave32Lanes + lane) a = false) →
-             m₁'.lds a = m₁.lds a ∧ m₂'.lds a = m₂.lds a) ∧
-         (∀ b a : Nat,
-           (∃ lane < wave32Lanes, proto.ssboWrite (w * wave32Lanes + lane) b a = true) →
-             m₁'.ssbo b a = m₂'.ssbo b a) ∧
-         (∀ b a : Nat,
-           (∀ lane < wave32Lanes, proto.ssboWrite (w * wave32Lanes + lane) b a = false) →
-             m₁'.ssbo b a = m₁.ssbo b a ∧ m₂'.ssbo b a = m₂.ssbo b a)
-       | _, _ => False)
+    ∀ (w : Nat) (_hw : w < cfg.numWaves) (wSt : Wave32State),
+      waveInv w wSt →
+      ∀ (m₁ m₂ : GpuMemState),
+        MemAgreesOnWaveFootprint w proto m₁ m₂ →
+        (match stepWave32One env prog wSt m₁, stepWave32One env prog wSt m₂ with
+         | .error e₁, .error e₂ => e₁ = e₂
+         | .ok (wSt₁, m₁'), .ok (wSt₂, m₂') =>
+           wSt₁ = wSt₂ ∧
+           m₁'.pushConsts = m₁.pushConsts ∧
+           m₂'.pushConsts = m₂.pushConsts ∧
+           (∀ a : Nat,
+             (∃ lane < wave32Lanes, proto.ldsWrite (w * wave32Lanes + lane) a = true) →
+               m₁'.lds a = m₂'.lds a) ∧
+           (∀ a : Nat,
+             (∀ lane < wave32Lanes, proto.ldsWrite (w * wave32Lanes + lane) a = false) →
+               m₁'.lds a = m₁.lds a ∧ m₂'.lds a = m₂.lds a) ∧
+           (∀ b a : Nat,
+             (∃ lane < wave32Lanes, proto.ssboWrite (w * wave32Lanes + lane) b a = true) →
+               m₁'.ssbo b a = m₂'.ssbo b a) ∧
+           (∀ b a : Nat,
+             (∀ lane < wave32Lanes, proto.ssboWrite (w * wave32Lanes + lane) b a = false) →
+               m₁'.ssbo b a = m₁.ssbo b a ∧ m₂'.ssbo b a = m₂.ssbo b a)
+         | _, _ => False)
 
 private theorem wave_threads_ne {w₁ w₂ l₁ l₂ : Nat} (hw : w₁ ≠ w₂)
     (hl₁ : l₁ < wave32Lanes) (hl₂ : l₂ < wave32Lanes) :
@@ -1640,26 +1717,42 @@ private theorem wave_threads_ne {w₁ w₂ l₁ l₂ : Nat} (hw : w₁ ≠ w₂)
   unfold wave32Lanes at *
   omega
 
+theorem stepWorkgroupWave_total_and_inv {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
+    {prog : List SpirvInst} {waveInv : Nat → Wave32State → Prop} {proto : EpochAccessProtocol}
+    (hResp : WaveRespectsProtocol env cfg prog waveInv proto)
+    (w : Nat) {st : WorkgroupExecState} (hInv : AllWavesInv cfg waveInv st) :
+    ∃ st', stepWorkgroupWave env cfg prog w st = .ok st' ∧ AllWavesInv cfg waveInv st' := by
+  unfold stepWorkgroupWave
+  by_cases hw : w < cfg.numWaves
+  · simp only [hw, ↓reduceIte]
+    obtain ⟨wSt', m', hStep⟩ := hResp.step_total w hw (st.waves w) st.mem (hInv w hw)
+    refine ⟨{ waves := writeFn st.waves w wSt', mem := m' }, by simp [hStep], ?_⟩
+    intro w' hw'
+    unfold writeFn
+    by_cases hww : w' = w
+    · subst hww; simp [hResp.inv_preserved w' hw' _ _ _ _ (hInv w' hw') hStep]
+    · simp [hww, hInv w' hw']
+  · simp [hw]; exact hInv
+
 /-- **Cross-Wave Diamond Commutativity Lemma (`stepWorkgroupWave_comm`)**:
     Under `FaialMapRaceFree`, stepping two distinct Wave32 subgroups `w₁ ≠ w₂` strictly commutes! -/
 theorem stepWorkgroupWave_comm {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
-    {prog : List SpirvInst} {proto : EpochAccessProtocol}
-    (hResp : WaveRespectsProtocol env cfg prog proto)
+    {prog : List SpirvInst} {waveInv : Nat → Wave32State → Prop} {proto : EpochAccessProtocol}
+    (hResp : WaveRespectsProtocol env cfg prog waveInv proto)
     (hDrf : FaialMapRaceFree cfg.totalThreads proto)
     {w₁ w₂ : Nat} (hne : w₁ ≠ w₂) (st : WorkgroupExecState)
-    (hOk₁ : ∃ s₁, stepWorkgroupWave env cfg prog w₁ st = .ok s₁)
-    (hOk₂ : ∃ s₂, stepWorkgroupWave env cfg prog w₂ st = .ok s₂) :
+    (hInv : AllWavesInv cfg waveInv st) :
     (stepWorkgroupWave env cfg prog w₁ st >>= stepWorkgroupWave env cfg prog w₂) =
     (stepWorkgroupWave env cfg prog w₂ st >>= stepWorkgroupWave env cfg prog w₁) := by
   by_cases hw₁ : w₁ < cfg.numWaves
   · by_cases hw₂ : w₂ < cfg.numWaves
-    · obtain ⟨s₁, hs₁⟩ := hOk₁
-      obtain ⟨s₂, hs₂⟩ := hOk₂
+    · obtain ⟨s₁, hs₁, _⟩ := stepWorkgroupWave_total_and_inv hResp w₁ hInv
+      obtain ⟨s₂, hs₂, _⟩ := stepWorkgroupWave_total_and_inv hResp w₂ hInv
       unfold stepWorkgroupWave at hs₁ hs₂ ⊢
       simp only [hw₁, hw₂, ↓reduceIte] at hs₁ hs₂ ⊢
-      have hSelf₁ := hResp.read_locality w₁ hw₁ (st.waves w₁) st.mem st.mem
+      have hSelf₁ := hResp.read_locality w₁ hw₁ (st.waves w₁) (hInv w₁ hw₁) st.mem st.mem
         ⟨rfl, fun _ _ _ _ => rfl, fun _ _ _ _ _ => rfl⟩
-      have hSelf₂ := hResp.read_locality w₂ hw₂ (st.waves w₂) st.mem st.mem
+      have hSelf₂ := hResp.read_locality w₂ hw₂ (st.waves w₂) (hInv w₂ hw₂) st.mem st.mem
         ⟨rfl, fun _ _ _ _ => rfl, fun _ _ _ _ _ => rfl⟩
       cases hStep1 : stepWave32One env prog (st.waves w₁) st.mem with
       | error e => rw [hStep1] at hs₁; cases hs₁
@@ -1673,9 +1766,9 @@ theorem stepWorkgroupWave_comm {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
           rw [hStep2] at hSelf₂
           rcases hSelf₁ with ⟨_, hpc₁, _, _, hNoLds₁, _, hNoSsbo₁⟩
           rcases hSelf₂ with ⟨_, hpc₂, _, _, hNoLds₂, _, hNoSsbo₂⟩
-          have hAgree2After1 : MemAgreesOnWaveReads w₂ proto st.mem m₁ := by
+          have hAgree2After1 : MemAgreesOnWaveFootprint w₂ proto st.mem m₁ := by
             refine ⟨hpc₁.symm, ?_, ?_⟩
-            · intro l₂ a hl₂ hRead₂
+            · intro l₂ a hl₂ hFoot₂
               have hNoW₁ : ∀ l₁ < wave32Lanes, proto.ldsWrite (w₁ * wave32Lanes + l₁) a = false := by
                 intro l₁ hl₁
                 cases hW : proto.ldsWrite (w₁ * wave32Lanes + l₁) a with
@@ -1686,9 +1779,11 @@ theorem stepWorkgroupWave_comm {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
                   have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
                     unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
                   have hDisj := (hDrf _ _ ht₁ ht₂ (wave_threads_ne hne hl₁ hl₂)).1 a hW
-                  rw [hDisj.2] at hRead₂; cases hRead₂
+                  rcases hFoot₂ with hR | hWr
+                  · rw [hDisj.2] at hR; cases hR
+                  · rw [hDisj.1] at hWr; cases hWr
               exact (hNoLds₁ a hNoW₁).1.symm
-            · intro l₂ b a hl₂ hRead₂
+            · intro l₂ b a hl₂ hFoot₂
               have hNoW₁ : ∀ l₁ < wave32Lanes, proto.ssboWrite (w₁ * wave32Lanes + l₁) b a = false := by
                 intro l₁ hl₁
                 cases hW : proto.ssboWrite (w₁ * wave32Lanes + l₁) b a with
@@ -1699,11 +1794,13 @@ theorem stepWorkgroupWave_comm {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
                   have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
                     unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
                   have hDisj := (hDrf _ _ ht₁ ht₂ (wave_threads_ne hne hl₁ hl₂)).2 b a hW
-                  rw [hDisj.2] at hRead₂; cases hRead₂
+                  rcases hFoot₂ with hR | hWr
+                  · rw [hDisj.2] at hR; cases hR
+                  · rw [hDisj.1] at hWr; cases hWr
               exact (hNoSsbo₁ b a hNoW₁).1.symm
-          have hAgree1After2 : MemAgreesOnWaveReads w₁ proto st.mem m₂ := by
+          have hAgree1After2 : MemAgreesOnWaveFootprint w₁ proto st.mem m₂ := by
             refine ⟨hpc₂.symm, ?_, ?_⟩
-            · intro l₁ a hl₁ hRead₁
+            · intro l₁ a hl₁ hFoot₁
               have hNoW₂ : ∀ l₂ < wave32Lanes, proto.ldsWrite (w₂ * wave32Lanes + l₂) a = false := by
                 intro l₂ hl₂
                 cases hW : proto.ldsWrite (w₂ * wave32Lanes + l₂) a with
@@ -1714,9 +1811,11 @@ theorem stepWorkgroupWave_comm {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
                   have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
                     unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
                   have hDisj := (hDrf _ _ ht₂ ht₁ (wave_threads_ne hne.symm hl₂ hl₁)).1 a hW
-                  rw [hDisj.2] at hRead₁; cases hRead₁
+                  rcases hFoot₁ with hR | hWr
+                  · rw [hDisj.2] at hR; cases hR
+                  · rw [hDisj.1] at hWr; cases hWr
               exact (hNoLds₂ a hNoW₂).1.symm
-            · intro l₁ b a hl₁ hRead₁
+            · intro l₁ b a hl₁ hFoot₁
               have hNoW₂ : ∀ l₂ < wave32Lanes, proto.ssboWrite (w₂ * wave32Lanes + l₂) b a = false := by
                 intro l₂ hl₂
                 cases hW : proto.ssboWrite (w₂ * wave32Lanes + l₂) b a with
@@ -1727,10 +1826,12 @@ theorem stepWorkgroupWave_comm {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
                   have ht₂ : w₂ * wave32Lanes + l₂ < cfg.totalThreads := by
                     unfold WorkgroupConfig.totalThreads wave32Lanes at *; omega
                   have hDisj := (hDrf _ _ ht₂ ht₁ (wave_threads_ne hne.symm hl₂ hl₁)).2 b a hW
-                  rw [hDisj.2] at hRead₁; cases hRead₁
+                  rcases hFoot₁ with hR | hWr
+                  · rw [hDisj.2] at hR; cases hR
+                  · rw [hDisj.1] at hWr; cases hWr
               exact (hNoSsbo₂ b a hNoW₂).1.symm
-          have hLoc2 := hResp.read_locality w₂ hw₂ (st.waves w₂) st.mem m₁ hAgree2After1
-          have hLoc1 := hResp.read_locality w₁ hw₁ (st.waves w₁) st.mem m₂ hAgree1After2
+          have hLoc2 := hResp.read_locality w₂ hw₂ (st.waves w₂) (hInv w₂ hw₂) st.mem m₁ hAgree2After1
+          have hLoc1 := hResp.read_locality w₁ hw₁ (st.waves w₁) (hInv w₁ hw₁) st.mem m₂ hAgree1After2
           rw [hStep2] at hLoc2
           rw [hStep1] at hLoc1
           simp only [Bind.bind, Except.bind,
@@ -1833,28 +1934,28 @@ inductive SchedPerm : List Nat → List Nat → Prop where
   | trans {s₁ s₂ s₃ : List Nat} : SchedPerm s₁ s₂ → SchedPerm s₂ s₃ → SchedPerm s₁ s₃
 
 /-- **Multi-Wave Schedule Confluence Theorem (`multiWave_schedule_confluence`)**:
-    Under `FaialMapRaceFree`, ANY two valid cross-wave instruction schedules related by
-    arbitrary non-interfering wave reorderings (`SchedPerm`) produce the **exact same**
-    multi-wave workgroup state (shared `64 KiB` LDS + global `StorageBuffer` + all Wave32 registers)! -/
+    Under `FaialMapRaceFree` and `WaveRespectsProtocol`, ANY two valid cross-wave instruction
+    schedules related by arbitrary non-interfering wave reorderings (`SchedPerm`) produce the
+    **exact same** multi-wave workgroup state (shared `64 KiB` LDS + global `StorageBuffer` +
+    all Wave32 registers)! -/
 theorem multiWave_schedule_confluence {env : SpirvModuleEnv} {cfg : WorkgroupConfig}
-    {prog : List SpirvInst} {proto : EpochAccessProtocol}
-    (hResp : WaveRespectsProtocol env cfg prog proto)
+    {prog : List SpirvInst} {waveInv : Nat → Wave32State → Prop} {proto : EpochAccessProtocol}
+    (hResp : WaveRespectsProtocol env cfg prog waveInv proto)
     (hDrf : FaialMapRaceFree cfg.totalThreads proto)
-    (hTotal : ∀ (w : Nat) (st : WorkgroupExecState),
-      ∃ st', stepWorkgroupWave env cfg prog w st = .ok st')
     {sched₁ sched₂ : List Nat} (hPerm : SchedPerm sched₁ sched₂) :
     ∀ st : WorkgroupExecState,
+      AllWavesInv cfg waveInv st →
       runInterleavedSchedule env cfg prog sched₁ st =
       runInterleavedSchedule env cfg prog sched₂ st := by
   induction hPerm with
-  | refl _ => intro _; rfl
+  | refl _ => intro _ _; rfl
   | @swap w₁ w₂ hne rest =>
-    intro st
-    have hComm := stepWorkgroupWave_comm hResp hDrf hne st (hTotal w₁ st) (hTotal w₂ st)
-    obtain ⟨s₁, hs₁⟩ := hTotal w₁ st
-    obtain ⟨s₂, hs₂⟩ := hTotal w₂ st
-    obtain ⟨s₁₂, hs₁₂⟩ := hTotal w₂ s₁
-    obtain ⟨s₂₁, hs₂₁⟩ := hTotal w₁ s₂
+    intro st hInv
+    have hComm := stepWorkgroupWave_comm hResp hDrf hne st hInv
+    obtain ⟨s₁, hs₁, hInv₁⟩ := stepWorkgroupWave_total_and_inv hResp w₁ hInv
+    obtain ⟨s₂, hs₂, hInv₂⟩ := stepWorkgroupWave_total_and_inv hResp w₂ hInv
+    obtain ⟨s₁₂, hs₁₂, _⟩ := stepWorkgroupWave_total_and_inv hResp w₂ hInv₁
+    obtain ⟨s₂₁, hs₂₁, _⟩ := stepWorkgroupWave_total_and_inv hResp w₁ hInv₂
     dsimp only [runInterleavedSchedule]
     rw [hs₁, hs₂]
     dsimp only [runInterleavedSchedule]
@@ -1864,14 +1965,14 @@ theorem multiWave_schedule_confluence {env : SpirvModuleEnv} {cfg : WorkgroupCon
     injection hEq12 with hStateEq
     rw [hStateEq]
   | cons w _ ih =>
-    intro st
+    intro st hInv
     dsimp only [runInterleavedSchedule]
-    obtain ⟨st', hst'⟩ := hTotal w st
+    obtain ⟨st', hst', hInv'⟩ := stepWorkgroupWave_total_and_inv hResp w hInv
     rw [hst']
-    exact ih st'
+    exact ih st' hInv'
   | trans _ _ ih₁ ih₂ =>
-    intro st
-    exact (ih₁ st).trans (ih₂ st)
+    intro st hInv
+    exact (ih₁ st hInv).trans (ih₂ st hInv)
 
 /-- Any schedule `sched` with identical per-wave step counts (`∀ w, sched.count w = ...`) reduces
     by `SchedPerm` to grouping waves in canonical order `0, 1, ..., numWaves - 1`! -/
@@ -2752,7 +2853,7 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
           dsimp only
           by_cases hB : elemIdx < ldsCapacityDwords
           · simp only [hB, ↓reduceIte]
-            refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+            refine ⟨trivial, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
             rw [hPub, hInfo] at hDstChk
             simp only [beq_iff_eq] at hDstChk
             rw [hMem.2.1 hDstChk]
@@ -2761,7 +2862,7 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
           dsimp only
           by_cases hB : 2 * elemIdx + 1 < ldsCapacityDwords
           · simp only [hB, ↓reduceIte]
-            refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
+            refine ⟨trivial, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
             rw [hPub, hInfo] at hDstChk
             simp only [beq_iff_eq] at hDstChk
             rw [hMem.2.1 hDstChk]
@@ -2769,11 +2870,13 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       | storageBuffer =>
         cases width with
         | w32 =>
+          dsimp only
           refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
           rw [hPub, hInfo] at hDstChk
           simp only [beq_iff_eq] at hDstChk
           rw [hMem.2.2 binding hDstChk]
         | w64 =>
+          dsimp only
           refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
           rw [hPub, hInfo] at hDstChk
           simp only [beq_iff_eq] at hDstChk
@@ -2781,9 +2884,11 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       | pushConstant =>
         cases width with
         | w32 =>
+          dsimp only
           refine ⟨rfl, trivial, fun _ => ?_, fun _ _ _ _ h => by cases h⟩
           rw [hMem.1]
         | w64 =>
+          dsimp only
           refine ⟨rfl, trivial, fun _ => ?_, fun _ _ _ _ h => by cases h⟩
           rw [hMem.1]
       | input | function =>
@@ -2797,7 +2902,6 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       (rw [h1, h2] at hSh; try cases hSh)
     · cases hF : fieldIdx.toNat with
       | zero =>
-        dsimp only
         refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
         rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
         rcases hCt with hBad | hCompPub
@@ -2806,7 +2910,6 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       | succ n =>
         cases n with
         | zero =>
-          dsimp only
           refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
           rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
           rcases hCt with hBad | hCompPub
@@ -2815,7 +2918,6 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
         | succ _ => rfl
     · cases hF : fieldIdx.toNat with
       | zero =>
-        dsimp only
         refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
         rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
         rcases hCt with hBad | hCompPub
@@ -2824,7 +2926,6 @@ private theorem evalLanePureInst_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolic
       | succ n =>
         cases n with
         | zero =>
-          dsimp only
           refine ⟨rfl, trivial, fun hPub => ?_, fun _ _ _ _ h => by cases h⟩
           rw [hPub] at hCt; simp only [Bool.or_eq_true, beq_iff_eq] at hCt
           rcases hCt with hBad | hCompPub
@@ -3056,8 +3157,8 @@ private theorem execWaveStoreLanes_lowEq {env : SpirvModuleEnv} {pol : SimtCtPol
           exact applyLaneStore_lowEq ih (hRegs k (by omega)) hCt
         · simp [hAct]; exact ih
 
-private theorem evalWavePureLanes_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
-    {m₁ m₂ : GpuMemState} {execMask : Nat → Bool} {lr₁ lr₂ : Nat → Nat → SpirvVal} {inst : SpirvInst}
+private theorem checkWavePureLanesErr_eq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
+    {m₁ m₂ : GpuMemState} (execMask : Nat → Bool) {lr₁ lr₂ : Nat → Nat → SpirvVal} {inst : SpirvInst}
     (hMem : MemLowEq pol m₁ m₂)
     (hRegs : ∀ lane < wave32Lanes, LaneRegsLowEq env pol (lr₁ lane) (lr₂ lane))
     (hCt : checkInstSimtCtStrict env pol inst = true)
@@ -3065,49 +3166,83 @@ private theorem evalWavePureLanes_lowEq {env : SpirvModuleEnv} {pol : SimtCtPoli
     (hNotBarrier : ∀ es ms sem, inst ≠ .opControlBarrier es ms sem)
     (hNotLabel : ∀ l, inst ≠ .opLabel l) :
     ∀ (k : Nat) (_hk : k ≤ wave32Lanes),
-      match evalWavePureLanes env m₁ execMask lr₁ inst k,
-            evalWavePureLanes env m₂ execMask lr₂ inst k with
-      | .error e₁, .error e₂ => e₁ = e₂
-      | .ok r₁', .ok r₂' => ∀ lane < wave32Lanes, LaneRegsLowEq env pol (r₁' lane) (r₂' lane)
-      | _, _ => False
-  | 0, _ => hRegs
+      checkWavePureLanesErr env m₁ execMask lr₁ inst k =
+      checkWavePureLanesErr env m₂ execMask lr₂ inst k ∧
+      (checkWavePureLanesErr env m₁ execMask lr₁ inst k = none →
+        ∀ l < k, execMask l = true →
+          ∃ d₁ v₁ d₂ v₂,
+            evalLanePureInst env m₁ (lr₁ l) inst = .ok (d₁, v₁) ∧
+            evalLanePureInst env m₂ (lr₂ l) inst = .ok (d₂, v₂))
+  | 0, _ => ⟨rfl, fun _ _ hl => absurd hl (by omega)⟩
   | k + 1, hk => by
-    have ih := evalWavePureLanes_lowEq (execMask := execMask) hMem hRegs hCt hNotStore hNotBarrier hNotLabel k (by omega)
-    dsimp only [evalWavePureLanes]
-    cases h1 : evalWavePureLanes env m₁ execMask lr₁ inst k with
-    | error e₁ =>
-      cases h2 : evalWavePureLanes env m₂ execMask lr₂ inst k with
-      | error e₂ => rw [h1, h2] at ih; exact ih
-      | ok _ => rw [h1, h2] at ih; cases ih
-    | ok r₁' =>
-      cases h2 : evalWavePureLanes env m₂ execMask lr₂ inst k with
-      | error _ => rw [h1, h2] at ih; cases ih
-      | ok r₂' =>
-        rw [h1, h2] at ih
-        by_cases hAct : execMask k = true
-        · simp only [hAct, ↓reduceIte]
-          have hLane := evalLanePureInst_lowEq hMem (hRegs k (by omega)) hCt hNotStore hNotBarrier hNotLabel
-          cases e1 : evalLanePureInst env m₁ (lr₁ k) inst with
-          | error err₁ =>
-            cases e2 : evalLanePureInst env m₂ (lr₂ k) inst with
-            | error err₂ => rw [e1, e2] at hLane; exact hLane
-            | ok _ => rw [e1, e2] at hLane; cases hLane
-          | ok dv₁ =>
-            cases e2 : evalLanePureInst env m₂ (lr₂ k) inst with
-            | error _ => rw [e1, e2] at hLane; cases hLane
-            | ok dv₂ =>
-              rw [e1, e2] at hLane
+    obtain ⟨ihEq, ihOk⟩ := checkWavePureLanesErr_eq execMask hMem hRegs hCt hNotStore hNotBarrier hNotLabel k (by omega)
+    dsimp only [checkWavePureLanesErr]
+    rw [ihEq]
+    cases hPrev : checkWavePureLanesErr env m₂ execMask lr₂ inst k with
+    | some e => exact ⟨rfl, fun h => by cases h⟩
+    | none =>
+      dsimp only
+      by_cases hAct : execMask k = true
+      · simp only [hAct, ↓reduceIte]
+        have hLane := evalLanePureInst_lowEq hMem (hRegs k (by omega)) hCt hNotStore hNotBarrier hNotLabel
+        cases e1 : evalLanePureInst env m₁ (lr₁ k) inst with
+        | error err₁ =>
+          cases e2 : evalLanePureInst env m₂ (lr₂ k) inst with
+          | error err₂ =>
+            rw [e1, e2] at hLane
+            exact ⟨congrArg some hLane, fun h => by cases h⟩
+          | ok _ => rw [e1, e2] at hLane; cases hLane
+        | ok dv₁ =>
+          cases e2 : evalLanePureInst env m₂ (lr₂ k) inst with
+          | error _ => rw [e1, e2] at hLane; cases hLane
+          | ok dv₂ =>
+            refine ⟨rfl, fun _ l hl hActL => ?_⟩
+            by_cases hlk : l = k
+            · subst hlk
               rcases dv₁ with ⟨d₁, v₁⟩
               rcases dv₂ with ⟨d₂, v₂⟩
-              rcases hLane with ⟨rfl, hShape, hPubEq, hPtr⟩
-              intro lane hlt
-              by_cases hlk : lane = k
-              · subst hlk
-                simp only [↓reduceIte]
-                exact writeFn_laneRegsLowEq (ih lane hlt) d₁ hShape hPubEq hPtr
-              · simp only [hlk, ↓reduceIte]
-                exact ih lane hlt
-        · simp [hAct]; exact ih
+              exact ⟨d₁, v₁, d₂, v₂, e1, e2⟩
+            · exact ihOk (ihEq.trans hPrev) l (by omega) hActL
+      · simp only [hAct, Bool.false_eq_true, ↓reduceIte]
+        refine ⟨trivial, fun _ l hl hActL => ?_⟩
+        have hlk : l ≠ k := fun h => hAct (h ▸ hActL)
+        exact ihOk (ihEq.trans hPrev) l (by omega) hActL
+
+private theorem evalWavePureLanes_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
+    {m₁ m₂ : GpuMemState} (execMask : Nat → Bool) {lr₁ lr₂ : Nat → Nat → SpirvVal} {inst : SpirvInst}
+    (hMem : MemLowEq pol m₁ m₂)
+    (hRegs : ∀ lane < wave32Lanes, LaneRegsLowEq env pol (lr₁ lane) (lr₂ lane))
+    (hCt : checkInstSimtCtStrict env pol inst = true)
+    (hNotStore : ∀ p v, inst ≠ .opStore p v)
+    (hNotBarrier : ∀ es ms sem, inst ≠ .opControlBarrier es ms sem)
+    (hNotLabel : ∀ l, inst ≠ .opLabel l) :
+    match evalWavePureLanes env m₁ execMask lr₁ inst wave32Lanes,
+          evalWavePureLanes env m₂ execMask lr₂ inst wave32Lanes with
+    | .error e₁, .error e₂ => e₁ = e₂
+    | .ok r₁', .ok r₂' => ∀ lane < wave32Lanes, LaneRegsLowEq env pol (r₁' lane) (r₂' lane)
+    | _, _ => False := by
+  obtain ⟨hErrEq, hAllOk⟩ := checkWavePureLanesErr_eq execMask hMem hRegs hCt
+    hNotStore hNotBarrier hNotLabel wave32Lanes (Nat.le_refl _)
+  unfold evalWavePureLanes
+  cases hErr1 : checkWavePureLanesErr env m₁ execMask lr₁ inst wave32Lanes with
+  | some e₁ =>
+    rw [hErr1] at hErrEq
+    rw [← hErrEq]
+  | none =>
+    have hErr2 : checkWavePureLanesErr env m₂ execMask lr₂ inst wave32Lanes = none :=
+      hErrEq.symm.trans hErr1
+    rw [hErr2]
+    dsimp only
+    intro lane hlt
+    unfold stepLanePureRegs
+    by_cases hAct : execMask lane = true
+    · simp only [hlt, hAct, and_self, ↓reduceIte]
+      obtain ⟨d₁, v₁, d₂, v₂, e1, e2⟩ := hAllOk hErr1 lane hlt hAct
+      have hLane := evalLanePureInst_lowEq hMem (hRegs lane hlt) hCt hNotStore hNotBarrier hNotLabel
+      rw [e1, e2] at hLane ⊢
+      rcases hLane with ⟨rfl, hShape, hPubEq, hPtr⟩
+      exact writeFn_laneRegsLowEq (hRegs lane hlt) d₁ hShape hPubEq hPtr
+    · simp [hAct]; exact hRegs lane hlt
 
 private theorem stepWaveObs_eq_of_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
     {w₁ w₂ : Wave32State} {inst : SpirvInst}
@@ -3175,7 +3310,7 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
       | opStore ptrId valId =>
         dsimp only
         rw [hMask]
-        have hSt := execWaveStoreLanes_lowEq hLanes hInstCt wave32Lanes (Nat.le_refl _) hMem
+        have hSt := execWaveStoreLanes_lowEq (execMask := w₂.execMask) hLanes hInstCt wave32Lanes (Nat.le_refl _) hMem
         cases s1 : execWaveStoreLanes w₂.execMask w₁.laneRegs ptrId valId wave32Lanes m₁ with
         | error e₁ =>
           cases s2 : execWaveStoreLanes w₂.execMask w₂.laneRegs ptrId valId wave32Lanes m₂ with
@@ -3187,7 +3322,7 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
           | ok m₂' =>
             rw [s1, s2] at hSt
             dsimp only
-            exact ⟨⟨rfl, rfl, hMask, hLanes⟩, hSt⟩
+            exact ⟨⟨rfl, rfl, rfl, hLanes⟩, hSt⟩
       | opLabel lbl =>
         dsimp only
         exact ⟨⟨rfl, rfl, hMask, hLanes⟩, hMem⟩
@@ -3199,9 +3334,8 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
       | opLoopMerge _ _ _ | opSelectionMerge _ _ | opBranch _ | opBranchConditional _ _ _ =>
         dsimp only
         rw [hMask]
-        have hPure := evalWavePureLanes_lowEq hMem hLanes hInstCt
+        have hPure := evalWavePureLanes_lowEq w₂.execMask hMem hLanes hInstCt
           (by intro _ _ h; cases h) (by intro _ _ _ h; cases h) (by intro _ h; cases h)
-          wave32Lanes (Nat.le_refl _)
         cases p1 : evalWavePureLanes env m₁ w₂.execMask w₁.laneRegs _ wave32Lanes with
         | error e₁ =>
           cases p2 : evalWavePureLanes env m₂ w₂.execMask w₂.laneRegs _ wave32Lanes with
@@ -3213,7 +3347,7 @@ private theorem stepWave32One_lowEq {env : SpirvModuleEnv} {pol : SimtCtPolicy}
           | ok r₂' =>
             rw [p1, p2] at hPure
             dsimp only
-            exact ⟨⟨rfl, rfl, hMask, hPure⟩, hMem⟩
+            exact ⟨⟨rfl, rfl, rfl, hPure⟩, hMem⟩
 
 /-- **`SIMT-CT` Hardware Leakage-Trace Noninterference Theorem (`simt_ct_noninterference`)**:
     For every SPIR-V compute epoch `prog` passing `checkProgSimtCt env pol prog = true`,

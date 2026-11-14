@@ -43,9 +43,11 @@ use alloc::collections::BTreeSet;
 use alloc::vec;
 use alloc::vec::Vec;
 
+#[cfg(any(test, debug_assertions))]
+use crate::field::eval_univariate_ext4_at_base;
 use crate::field::{
     Goldilocks, GoldilocksExt4, build_eq_table_ext4, encode_rs_coset_ext4,
-    encode_rs_coset_goldilocks, eq_poly_ext4, eval_univariate_ext4, eval_univariate_ext4_at_base,
+    encode_rs_coset_goldilocks, eq_poly_ext4, eval_univariate_ext4,
     fold_first_var_in_place_ext4, pow2_point_ext4,
 };
 use crate::sponge::{
@@ -606,7 +608,7 @@ impl MerkleCanopyTree {
                     std::thread::scope(|scope| {
                         for (t_idx, sub) in quarter_slice.chunks_mut(4 * m_chunk).enumerate() {
                             let base_m = t_idx * m_chunk;
-                            scope.spawn(move || {
+                            crate::spawn_bounded(scope, move || {
                                 for (off, dst4) in sub.chunks_exact_mut(4).enumerate() {
                                     dst4.copy_from_slice(&fold_ref(base_m + off));
                                 }
@@ -628,7 +630,7 @@ impl MerkleCanopyTree {
                                 .enumerate()
                             {
                                 let base_node = half + t_idx * p_chunk;
-                                scope.spawn(move || {
+                                crate::spawn_bounded(scope, move || {
                                     for (g, dst4) in p_sub.chunks_exact_mut(4).enumerate() {
                                         let c = 8 * g;
                                         let out4 = hash_merkle_internal_x4(
@@ -1475,7 +1477,7 @@ pub fn hypercube_to_monomial_coeffs(evals: &[Goldilocks]) -> Vec<Goldilocks> {
         let chunk_bits = chunk_n.trailing_zeros() as usize;
         std::thread::scope(|scope| {
             for sub in coeffs.chunks_mut(chunk_n) {
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     for bit in 0..chunk_bits {
                         let stride = 1usize << bit;
                         for base in (0..sub.len()).step_by(stride * 2) {
@@ -1495,7 +1497,7 @@ pub fn hypercube_to_monomial_coeffs(evals: &[Goldilocks]) -> Vec<Goldilocks> {
                 let sub_len = (stride / threads).max(1);
                 std::thread::scope(|scope| {
                     for (lo_c, hi_c) in lo.chunks(sub_len).zip(hi.chunks_mut(sub_len)) {
-                        scope.spawn(move || {
+                        crate::spawn_bounded(scope, move || {
                             for (h, &l) in hi_c.iter_mut().zip(lo_c.iter()) {
                                 *h -= l;
                             }
@@ -1532,7 +1534,7 @@ pub fn hypercube_to_monomial_coeffs_ext4(evals: &[GoldilocksExt4]) -> Vec<Goldil
         let chunk_bits = chunk_n.trailing_zeros() as usize;
         std::thread::scope(|scope| {
             for sub in coeffs.chunks_mut(chunk_n) {
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     for bit in 0..chunk_bits {
                         let stride = 1usize << bit;
                         for base in (0..sub.len()).step_by(stride * 2) {
@@ -1552,7 +1554,7 @@ pub fn hypercube_to_monomial_coeffs_ext4(evals: &[GoldilocksExt4]) -> Vec<Goldil
                 let sub_len = (stride / threads).max(1);
                 std::thread::scope(|scope| {
                     for (lo_c, hi_c) in lo.chunks(sub_len).zip(hi.chunks_mut(sub_len)) {
-                        scope.spawn(move || {
+                        crate::spawn_bounded(scope, move || {
                             for (h, &l) in hi_c.iter_mut().zip(lo_c.iter()) {
                                 *h -= l;
                             }
@@ -1589,7 +1591,7 @@ fn build_eq_table_ext4_fast(r: &[GoldilocksExt4]) -> Vec<GoldilocksExt4> {
         std::thread::scope(|scope| {
             for (t_idx, sub) in out.chunks_mut(sub_len).enumerate() {
                 let init = top_weights[t_idx];
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     sub[0] = init;
                     let mut cur_len = 1usize;
                     for &ri in bot.iter().rev() {
@@ -1753,7 +1755,7 @@ where
         let f_ref = &f;
         std::thread::scope(|scope| {
             for (t_idx, sub) in out.chunks_mut(chunk).enumerate() {
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     for (off, dst) in sub.iter_mut().enumerate() {
                         *dst = f_ref(t_idx * chunk + off);
                     }
@@ -1815,7 +1817,7 @@ fn dot_base_ext4_fast(base_tbl: &[Goldilocks], ext_tbl: &[GoldilocksExt4]) -> Go
                         let end = (start + chunk).min(base_tbl.len());
                         let b_sub = &base_tbl[start..end];
                         let e_sub = &ext_tbl[start..end];
-                        scope.spawn(move || {
+                        crate::spawn_bounded(scope, move || {
                             let mut acc = GoldilocksExt4::ZERO;
                             for (&b, &e) in b_sub.iter().zip(e_sub.iter()) {
                                 acc += e.mul_base(b);
@@ -1853,7 +1855,7 @@ fn dot_ext4_fast(a: &[GoldilocksExt4], b: &[GoldilocksExt4]) -> GoldilocksExt4 {
                         let end = (start + chunk).min(a.len());
                         let a_sub = &a[start..end];
                         let b_sub = &b[start..end];
-                        scope.spawn(move || {
+                        crate::spawn_bounded(scope, move || {
                             let mut acc = GoldilocksExt4::ZERO;
                             for (&x, &y) in a_sub.iter().zip(b_sub.iter()) {
                                 acc += x * y;
@@ -1886,7 +1888,7 @@ fn axpy_ext4_fast(dst: &mut [GoldilocksExt4], scale: GoldilocksExt4, src: &[Gold
         let chunk = dst.len().div_ceil(threads);
         std::thread::scope(|scope| {
             for (d_sub, s_sub) in dst.chunks_mut(chunk).zip(src.chunks(chunk)) {
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     for (d, &s) in d_sub.iter_mut().zip(s_sub.iter()) {
                         *d += scale * s;
                     }
@@ -2010,7 +2012,7 @@ pub fn whir_commit_batch_owned_with_schedule(
             let handles: Vec<_> = polys
                 .iter()
                 .map(|evals| {
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         let coeffs = hypercube_to_monomial_coeffs(evals);
                         encode_rs_coset_goldilocks(&coeffs, blowup)
                     })
@@ -2204,7 +2206,7 @@ pub fn whir_open_batch(
                 let handles: Vec<_> = state
                     .hypercube_evals
                     .iter()
-                    .map(|w| scope.spawn(move || hypercube_to_monomial_coeffs(w)))
+                    .map(|w| crate::spawn_bounded(scope, move || hypercube_to_monomial_coeffs(w)))
                     .collect();
                 handles.into_iter().map(crate::join_worker).collect()
             })
@@ -2285,7 +2287,7 @@ where
                     let j0 = t_idx * chunk;
                     (j0 < half).then(|| {
                         let j1 = (j0 + chunk).min(half);
-                        scope.spawn(move || run_ref(j0, j1))
+                        crate::spawn_bounded(scope, move || run_ref(j0, j1))
                     })
                 })
                 .collect();
@@ -2339,7 +2341,7 @@ fn whir_open_core(
             std::thread::scope(|scope| {
                 for (t_idx, sub) in cur_coeffs[1..core_len].chunks_mut(chunk).enumerate() {
                     let base_i = 1 + t_idx * chunk;
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         for (off, dst) in sub.iter_mut().enumerate() {
                             let i = base_i + off;
                             *dst = (*dst + w1.mul_base(c_ref[i - 1])) + w0.mul_base(c_ref[i]);
@@ -2719,7 +2721,7 @@ fn accumulate_shift_claims_into_kernel(
         std::thread::scope(|scope| {
             for (t_idx, sub) in cur_k.chunks_mut(chunk).enumerate() {
                 let start = (t_idx * chunk) as u64;
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     for &(z, weight) in weighted_ref {
                         let mut power = z.pow(start);
                         for slot in sub.iter_mut() {
@@ -3332,7 +3334,7 @@ fn grind_pcs_pow(transcript: &FiatShamirTranscript<InstanceBound>) -> u64 {
                 for t in 0..threads {
                     let start = win_base + t * PER_THREAD;
 
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         for offset in (0..PER_THREAD).step_by(4) {
                             let n = start + offset;
                             if n >= best_ref.load(Ordering::Relaxed) {

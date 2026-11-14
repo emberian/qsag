@@ -10,6 +10,7 @@ extern crate std;
 pub mod frontier;
 pub mod ot;
 pub mod parallel_mpc;
+mod release_gate;
 pub mod u384;
 
 pub use frontier::{
@@ -809,6 +810,89 @@ mod distributed_tests {
         verify_parallel_seeded_fts(&pk, message, &signature, &CpuReferenceBackend).unwrap();
         drop(sessions);
         assert!(outputs.iter().all(|o| !o.share.is_poisoned()));
+    }
+    #[test]
+    fn custody_shape_chain_endpoints_pass_through_the_verified_release_gate() {
+        let params = ParallelSeededParams {
+            tree_height: 1,
+            ..ParallelSeededParams::CUSTODY_H10_W5
+        };
+        for fault in [false, true] {
+            let mut setup = ParallelSeededThresholdSetup::trusted_dealer_setup_for_testing(
+                params,
+                2,
+                [41; 32],
+                [42; 32],
+                &CpuReferenceBackend,
+            )
+            .unwrap();
+            let pk = setup.pk.clone();
+            let siblings = [setup.public_tree_layers[0][1]];
+            let msg = b"custody shape";
+            let mut burns = InMemoryBurnLog::default();
+            let mut sessions: Vec<_> = setup
+                .shares
+                .iter_mut()
+                .map(|share| {
+                    ParallelSeededSignSession::begin(
+                        share,
+                        &ParallelSeededSignRequest {
+                            pk: &pk,
+                            epoch: 0,
+                            msg,
+                            session_id: [75; 32],
+                            roster: &[0, 1],
+                            siblings: &siblings,
+                        },
+                        &mut burns,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            // Kinds of custody the opened candidates passed through, in order.
+            let mut custody = Vec::new();
+            let mut altered = false;
+            let mut rejected = 0;
+            let mut signature = None;
+            for _ in 0..1024 {
+                if let Some(ParallelSeededSignResult::Signature(sig)) = sessions[0].result() {
+                    signature = Some(sig.clone());
+                    break;
+                }
+                if fault && !altered {
+                    altered = sessions[0].alter_chain_value_share_for_test();
+                }
+                let messages: Vec<_> = sessions.iter().map(|s| s.outbound().unwrap()).collect();
+                for session in &mut sessions {
+                    if let Err(error) = session.advance(&messages) {
+                        assert!(altered);
+                        assert_eq!(error, ParallelSeededError::BdozMacCheckFailed);
+                        assert!(session.result().is_none());
+                        rejected += 1;
+                    }
+                    if let Some(verified) = session.held_in_verified_sessions()
+                        && custody.last() != Some(&verified)
+                    {
+                        custody.push(verified);
+                    }
+                }
+                if rejected != 0 {
+                    break;
+                }
+            }
+            drop(sessions);
+            // The randomizer has no codeword yet; the 68 chain endpoints do.
+            assert_eq!(custody, [false, true]);
+            if fault {
+                assert_eq!(rejected, 2);
+                assert!(signature.is_none());
+                assert!(setup.shares.iter().all(|s| s.is_poisoned()));
+            } else {
+                let sig = signature.unwrap();
+                assert_eq!(sig.chain_nodes.len(), 68);
+                verify_parallel_seeded_fts(&pk, msg, &sig, &CpuReferenceBackend).unwrap();
+            }
+        }
     }
     #[test]
     fn value_open_bit_error_fails_mac_open_and_poisons_honest_party() {

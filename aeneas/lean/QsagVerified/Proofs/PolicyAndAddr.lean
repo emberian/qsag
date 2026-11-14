@@ -1739,5 +1739,78 @@ theorem tooth_hybrid_role_confusion_rejected :
   intro ⟨_, _, hrole, _⟩
   cases hrole
 
+/-! ## Shared checked velocity helper -/
+
+/-- `checked_velocity_spend` never panics and returns the exact cumulative total precisely
+when it fits under the cap; otherwise it returns `none`. The total is the integer sum, with
+no wrap-around. Production admission (`qsag-policy`) calls this function. -/
+theorem checked_velocity_spend_spec (prior amount cap : Std.U128) :
+    policy_and_addr.checked_velocity_spend prior amount cap =
+        .ok (if prior.val + amount.val ≤ cap.val then
+          some (⟨prior.bv + amount.bv⟩ : Std.U128) else none) ∧
+      (prior.val + amount.val ≤ cap.val →
+        (⟨prior.bv + amount.bv⟩ : Std.U128).val = prior.val + amount.val) := by
+  have hmax : core.num.U128.MAX.val = 2 ^ 128 - 1 := BitVec.toNat_allOnes
+  have hp : prior.val < 2 ^ 128 := prior.bv.isLt
+  have hc : cap.val < 2 ^ 128 := cap.bv.isLt
+  have hle : prior.val ≤ core.num.U128.MAX.val := by rw [hmax]; omega
+  have hsubv : (⟨core.num.U128.MAX.bv - prior.bv⟩ : Std.U128).val = 2 ^ 128 - 1 - prior.val := by
+    rw [← hmax]
+    exact BitVec.toNat_sub_of_le (BitVec.le_def.mpr hle)
+  have hsum : prior.val + amount.val < 2 ^ 128 →
+      (⟨prior.bv + amount.bv⟩ : Std.U128).val = prior.val + amount.val := fun h =>
+    (BitVec.toNat_add _ _).trans (Nat.mod_eq_of_lt h)
+  have hfit : prior.val + amount.val ≤ cap.val → prior.val + amount.val < 2 ^ 128 :=
+    fun h => Nat.lt_of_le_of_lt h hc
+  refine ⟨?_, fun h => hsum (hfit h)⟩
+  clear hfit
+  have hsub : (core.num.U128.MAX - prior : Result Std.U128) =
+      .ok ⟨core.num.U128.MAX.bv - prior.bv⟩ := by
+    rw [hSub_uscalar_eq, ite_eq_left_of_eq_true _ _ (eq_true hle)]
+  unfold policy_and_addr.checked_velocity_spend
+  refine bind_ok_step hsub ?_
+  change (if amount > (⟨core.num.U128.MAX.bv - prior.bv⟩ : Std.U128) then _ else _) = _
+  by_cases hov : amount > (⟨core.num.U128.MAX.bv - prior.bv⟩ : Std.U128)
+  · have hv := (UScalar.lt_iff_val _ _).mp hov
+    rw [hsubv] at hv
+    have hnle : ¬ prior.val + amount.val ≤ cap.val := by clear hsum; omega
+    rw [ite_eq_left_of_eq_true _ _ (eq_true hov), ite_eq_right_of_eq_false _ _ (eq_false hnle)]
+  · have hv : ¬ 2 ^ 128 - 1 - prior.val < amount.val := by
+      rw [← hsubv]
+      exact fun h => hov ((UScalar.lt_iff_val _ _).mpr h)
+    have hlt : prior.val + amount.val < 2 ^ 128 := by clear hsum; omega
+    have hadd : (prior + amount : Result Std.U128) = .ok ⟨prior.bv + amount.bv⟩ := by
+      rw [hAdd_uscalar_eq]
+      exact ite_eq_left_of_eq_true _ _ (eq_true hlt)
+    rw [ite_eq_right_of_eq_false _ _ (eq_false hov)]
+    refine bind_ok_step hadd ?_
+    change (if (⟨prior.bv + amount.bv⟩ : Std.U128) > cap then _ else _) = _
+    by_cases hcap : prior.val + amount.val ≤ cap.val
+    · have hng : ¬ (⟨prior.bv + amount.bv⟩ : Std.U128) > cap := by
+        intro h
+        have h := (UScalar.lt_iff_val _ _).mp h
+        rw [hsum hlt] at h
+        exact Nat.not_lt_of_le hcap h
+      rw [ite_eq_right_of_eq_false _ _ (eq_false hng), ite_eq_left_of_eq_true _ _ (eq_true hcap)]
+    · have hg : (⟨prior.bv + amount.bv⟩ : Std.U128) > cap := by
+        apply (UScalar.lt_iff_val _ _).mpr
+        rw [hsum hlt]
+        exact Nat.lt_of_not_le hcap
+      rw [ite_eq_left_of_eq_true _ _ (eq_true hg), ite_eq_right_of_eq_false _ _ (eq_false hcap)]
+
+/-- `#tooth`: the cap is enforced exactly. Spending nothing is allowed at the cap and
+refused above it, and a spend that would exceed the cap by one unit is refused. -/
+theorem tooth_checked_velocity_spend_cap (prior amount cap : Std.U128) :
+    (prior.val + amount.val = cap.val →
+        policy_and_addr.checked_velocity_spend prior amount cap =
+          .ok (some ⟨prior.bv + amount.bv⟩)) ∧
+      (prior.val + amount.val = cap.val + 1 →
+        policy_and_addr.checked_velocity_spend prior amount cap = .ok none) := by
+  refine ⟨fun h => ?_, fun h => ?_⟩
+  · rw [(checked_velocity_spend_spec prior amount cap).1,
+      ite_eq_left_of_eq_true _ _ (eq_true (Nat.le_of_eq h))]
+  · rw [(checked_velocity_spend_spec prior amount cap).1,
+      ite_eq_right_of_eq_false _ _ (eq_false (by omega))]
+
 end qsag_verified.proofs
 

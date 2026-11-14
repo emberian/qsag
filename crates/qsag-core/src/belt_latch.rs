@@ -272,6 +272,7 @@ pub struct FsBeltWal {
     record: qsag_asm::durable::LockedRecord,
     wal_key: [u8; 32],
     checkpoint: crate::durable_ledger::LedgerCheckpoint,
+    anchor: Option<alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>>,
     release: core::cell::RefCell<Option<(crate::ceremony_journal::CeremonyReservation, u64)>>,
 }
 
@@ -295,6 +296,26 @@ impl FsBeltWal {
     /// releasing chain openings to defend against full disk-snapshot rollback.
     pub const fn checkpoint(&self) -> crate::durable_ledger::LedgerCheckpoint {
         self.checkpoint
+    }
+
+    /// Open under an independently durable anchor, catching up a committed successor
+    /// before returning. An unenrolled anchor is not accepted for recovery.
+    pub fn open_existing_anchored(path: impl Into<std::path::PathBuf>, wal_key: [u8; 32],
+        anchor: alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>) -> std::io::Result<Self> {
+        let minimum = anchor.load()?.ok_or_else(|| std::io::Error::other("missing belt anchor"))?;
+        let mut wal = Self::open_existing_at_least(path, wal_key, minimum)?;
+        crate::durable_ledger::advance_anchor(&*anchor, wal.checkpoint)?;
+        wal.anchor = Some(anchor);
+        Ok(wal)
+    }
+
+    pub fn provision_genesis_anchored(path: impl Into<std::path::PathBuf>, wal_key: [u8; 32],
+        anchor: alloc::boxed::Box<dyn crate::ExternalMonotoneAnchor>) -> std::io::Result<Self> {
+        if anchor.load()?.is_some() { return Err(std::io::Error::other("belt anchor already enrolled")); }
+        let mut wal = Self::provision_genesis(path, wal_key)?;
+        crate::durable_ledger::advance_anchor(&*anchor, wal.checkpoint)?;
+        wal.anchor = Some(anchor);
+        Ok(wal)
     }
 
     /// Bind both numeric `epoch` and `epoch_or_codeword == BeltLatchRecord::binding()`.
@@ -382,6 +403,7 @@ impl FsBeltWal {
                 generation: 0,
                 tag: [0; 32],
             },
+            anchor: None,
             release: core::cell::RefCell::new(None),
         };
         let (encoded, ckpt) = wal.seal(1, &BeltLatchState::default());
@@ -405,6 +427,7 @@ impl FsBeltWal {
                 generation: 0,
                 tag: [0; 32],
             },
+            anchor: None,
             release: core::cell::RefCell::new(None),
         };
         let raw = wal.record.read()?;
@@ -449,6 +472,9 @@ impl FsBeltWal {
 #[cfg(feature = "std")]
 impl DurableWal for FsBeltWal {
     fn authorize_open(&self, record: &BeltLatchRecord) -> Result<(), WalError> {
+        if let Some(anchor) = &self.anchor {
+            crate::durable_ledger::advance_anchor(&**anchor, self.checkpoint).map_err(|_| WalError::Io)?;
+        }
         let (reservation, bound_epoch) = self.release.borrow_mut().take().ok_or(WalError::Io)?;
         if bound_epoch != record.epoch
             || !ct_eq_bytes32(&reservation.epoch_or_codeword, &record.binding())
@@ -474,6 +500,9 @@ impl DurableWal for FsBeltWal {
         let (encoded, next_ckpt) = self.seal(next_gen, state);
         self.record.replace(&encoded).map_err(|_| WalError::Io)?;
         self.checkpoint = next_ckpt;
+        if let Some(anchor) = &self.anchor {
+            crate::durable_ledger::advance_anchor(&**anchor, next_ckpt).map_err(|_| WalError::Io)?;
+        }
         Ok(())
     }
 

@@ -129,6 +129,7 @@ pub enum PolicyViolation {
     IntentBindingMismatch,
     GuardPoisoned,
     BarrierPreprocExhausted,
+    LedgerPersistenceFailed,
     BarrierCommitmentMismatch { party_id: u16 },
     BarrierBdozMacFailed,
 }
@@ -1136,6 +1137,8 @@ impl PolicySignerGuardShare {
 /// every quorum switch.
 pub struct SharedWindowSpendLedger {
     policy_digest: [u8; 32],
+    generation: u64,
+    failed: bool,
     current_window_id: u64,
     accumulated_window_spend: u128,
     burned_intent_nonces: Vec<[u8; 32]>,
@@ -1149,6 +1152,8 @@ impl SharedWindowSpendLedger {
     pub fn new(policy: &TransactionPolicy, initial_window_id: u64) -> Self {
         Self {
             policy_digest: policy.canonical_digest(),
+            generation: 0,
+            failed: false,
             current_window_id: initial_window_id,
             accumulated_window_spend: 0,
             burned_intent_nonces: Vec::new(),
@@ -1201,6 +1206,9 @@ impl SharedWindowSpendLedger {
         &mut self,
         authorization: &WindowAdvanceAuthorization,
     ) -> Result<(), PolicyViolation> {
+        if self.failed {
+            return Err(PolicyViolation::LedgerPersistenceFailed);
+        }
         let next_window_id = authorization.new_window_epoch;
         if next_window_id <= self.current_window_id {
             return Err(PolicyViolation::WindowIdMismatch);
@@ -1218,6 +1226,8 @@ impl SharedWindowSpendLedger {
         if !ct_eq_bytes(&expected.mac, &authorization.mac) {
             return Err(PolicyViolation::IntentBindingMismatch);
         }
+        self.generation = self.generation.checked_add(1)
+            .ok_or(PolicyViolation::LedgerPersistenceFailed)?;
         self.current_window_id = next_window_id;
         self.accumulated_window_spend = 0;
         Ok(())
@@ -1229,6 +1239,9 @@ impl SharedWindowSpendLedger {
         intent: &TransactionIntent,
         session_id: &[u8; 32],
     ) -> Result<u128, PolicyViolation> {
+        if self.failed || self.generation == u64::MAX {
+            return Err(PolicyViolation::LedgerPersistenceFailed);
+        }
         if !ct_eq_bytes(&policy.canonical_digest(), &self.policy_digest) {
             return Err(PolicyViolation::IntentBindingMismatch);
         }
@@ -1276,6 +1289,8 @@ impl SharedWindowSpendLedger {
         nonce: [u8; 32],
         session_id: [u8; 32],
     ) {
+        // Capacity was checked before the barrier consumed preprocessing.
+        self.generation += 1;
         self.accumulated_window_spend = projected_spend;
         for (values, floor, value) in [
             (
@@ -1632,6 +1647,12 @@ pub fn evaluate_policy_committed_barrier<B: AcceleratorBackend>(
 /// Evaluate `policy` on `intent` across `quorum_guards` using a committee-wide
 /// [`SharedWindowSpendLedger`] so non-intersecting quorums in guardian-less multi-quorum setups
 /// enforce cumulative window velocity caps without quorum-switching bypass.
+/// `persist` must atomically persist the shared and participating guard checkpoints, and
+/// fence the shared generation in independent monotonic storage before returning success.
+/// Hold exclusive ownership of that storage across recovery and this call. Never provision
+/// another ledger for an existing policy: recover the checkpoint instead. Persistence errors
+/// disable the live ledger and withhold the token; already consumed slots remain spent.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_policy_committed_barrier_with_ledger<B: AcceleratorBackend>(
     policy: &TransactionPolicy,
     intent: &TransactionIntent,
@@ -1639,6 +1660,7 @@ pub fn evaluate_policy_committed_barrier_with_ledger<B: AcceleratorBackend>(
     current_timestamp: u64,
     quorum_guards: &mut [PolicySignerGuardShare],
     shared_ledger: &mut SharedWindowSpendLedger,
+    persist: impl FnOnce(&SharedWindowSpendLedger, &[PolicySignerGuardShare]) -> Result<(), PolicyViolation>,
     accel: &B,
 ) -> Result<AuthorizedSignReleaseToken, PolicyViolation> {
     if quorum_guards.len() < 2 {
@@ -1646,18 +1668,24 @@ pub fn evaluate_policy_committed_barrier_with_ledger<B: AcceleratorBackend>(
     }
     let intents: Vec<TransactionIntent> =
         (0..quorum_guards.len()).map(|_| intent.clone()).collect();
-    evaluate_per_party_intents_barrier_inner(
+    let token = evaluate_per_party_intents_barrier_inner(
         policy,
         &intents,
         session_id,
         current_timestamp,
         quorum_guards,
-        Some(shared_ledger),
+        Some(&mut *shared_ledger),
         false,
         #[cfg(test)]
         None,
         accel,
-    )
+    )?;
+    // No token escapes until the common ledger and participating guard snapshots are durable.
+    // Keep the handle disabled across errors and unwinding; recovery requires its checkpoint.
+    shared_ledger.failed = true;
+    persist(shared_ledger, quorum_guards)?;
+    shared_ledger.failed = false;
+    Ok(token)
 }
 
 /// Evaluate `policy` on `intent` across `quorum_guards` while mandating pairwise cryptographic
@@ -4013,6 +4041,8 @@ mod tests {
         // 2. With `SharedWindowSpendLedger`, `{1, 2}` approves `60`, and switching to disjoint
         //    quorum `{3, 4}` for a second `60` (even lying `rolling_window_spent = 0`) is rejected!
         let mut shared_ledger = SharedWindowSpendLedger::new(&policy, 0);
+        let old_checkpoint = shared_ledger.export_durable_checkpoint(&[77; 32]);
+        let mut saved = Vec::new();
         evaluate_policy_committed_barrier_with_ledger(
             &policy,
             &q1_intent,
@@ -4020,10 +4050,29 @@ mod tests {
             q1_intent.timestamp_secs,
             &mut committee[0..2],
             &mut shared_ledger,
+            |ledger, _| {
+                saved = ledger.export_durable_checkpoint(&[77; 32]);
+                Ok(())
+            },
             &accel,
         )
         .unwrap();
         assert_eq!(shared_ledger.accumulated_window_spend(), 60);
+
+        let generation = shared_ledger.generation();
+        assert_eq!(shared_ledger.restore_from_durable_checkpoint(&old_checkpoint, &[77; 32], 0),
+            Err(PolicyGuardError::Rollback));
+        let mut recovered = SharedWindowSpendLedger::new(&policy, 0);
+        assert_eq!(recovered.restore_from_durable_checkpoint(&old_checkpoint, &[77; 32], generation),
+            Err(PolicyGuardError::Rollback));
+        let mut tampered = saved.clone();
+        tampered[40] ^= 1;
+        assert_eq!(recovered.restore_from_durable_checkpoint(&tampered, &[77; 32], generation),
+            Err(PolicyGuardError::AuthenticationFailed));
+        recovered.restore_from_durable_checkpoint(&saved, &[77; 32], generation).unwrap();
+        assert_eq!(recovered.accumulated_window_spend(), 60);
+        assert!(recovered.is_nonce_burned(&q1_intent.nonce));
+        shared_ledger = recovered;
 
         let mut q2_intent = q1_intent.clone();
         q2_intent.nonce = [0xE2; 32];
@@ -4038,6 +4087,7 @@ mod tests {
                 q2_intent.timestamp_secs,
                 &mut committee[2..4],
                 &mut shared_ledger,
+                |_, _| Ok(()),
                 &accel,
             )
             .unwrap_err(),
@@ -4045,6 +4095,21 @@ mod tests {
         );
         assert_eq!(committee[2].next_slot.get(), 0);
         assert_eq!(committee[3].next_slot.get(), 0);
+
+        // A failed persistence callback withholds release and disables all later approvals.
+        q2_intent.amount_units = 10;
+        assert_eq!(evaluate_policy_committed_barrier_with_ledger(
+            &policy, &q2_intent, q2_intent.session_id, q2_intent.timestamp_secs,
+            &mut committee[2..4], &mut shared_ledger,
+            |_, _| Err(PolicyViolation::LedgerPersistenceFailed), &accel).unwrap_err(),
+            PolicyViolation::LedgerPersistenceFailed);
+        assert!(shared_ledger.failed);
+        q2_intent.nonce = [0xE5; 32];
+        q2_intent.session_id = [0xF5; 32];
+        assert_eq!(evaluate_policy_committed_barrier_with_ledger(
+            &policy, &q2_intent, q2_intent.session_id, q2_intent.timestamp_secs,
+            &mut committee[2..4], &mut shared_ledger, |_, _| Ok(()), &accel).unwrap_err(),
+            PolicyViolation::LedgerPersistenceFailed);
 
         // 3. With a fixed accounting guardian `Some(4)`, switching `{1, 4}` (`60`) then `{2, 4}` (`60`)
         //    intersects at party `4` and rejects the second `60` even with dishonest `rolling_window_spent = 0`!

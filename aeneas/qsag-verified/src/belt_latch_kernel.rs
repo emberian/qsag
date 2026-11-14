@@ -26,7 +26,8 @@ pub const BELT_LATCH_MAX_EPOCH_JUMP: u64 = 64;
 /// Largest exclusive epoch limit (`2^62`).
 pub const BELT_LATCH_MAX_CAPACITY_LIMIT: u64 = 1u64 << 62;
 
-/// Largest digit vector the kernel represents.
+/// Largest digit vector the four rows can hold. The kernel compares digit vectors and never
+/// interprets them, so it does not enforce this bound; callers embedding a `Vec<u8>` must.
 pub const BELT_LATCH_MAX_DIGITS: u8 = 128;
 
 /// Base-`w` digits whose chain nodes an epoch may reveal: `len` digits in row-major order,
@@ -175,9 +176,6 @@ impl BeltLatchKernel {
         }
         if has_in_flight {
             if in_flight.epoch >= next_epoch {
-                return Err(BeltLatchKernelError::InvalidCapacity);
-            }
-            if in_flight.digits.len > BELT_LATCH_MAX_DIGITS {
                 return Err(BeltLatchKernelError::InvalidCapacity);
             }
         }

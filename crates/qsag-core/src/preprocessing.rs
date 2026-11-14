@@ -1475,10 +1475,11 @@ fn rlwe_fo_encrypt_branch(
     label[80..84].copy_from_slice(&ot_idx.to_be_bytes());
     label[84] = branch;
     label[88..120].copy_from_slice(seed);
-    let fo_seed = cshake256_32(b"QSAG.OT.RLWE.FO/v2", &encode_multi_frame(&[&label, rho]));
+    let mut fo_seed = cshake256_32_multi_frame(b"QSAG.OT.RLWE.FO/v2", &[&label, rho]);
     wipe_bytes(&mut label);
 
     let mut fo_rng = PartyPrivateRng::from_seed(fo_seed, b"QSAG.OT.RLWE.FO.STREAM/v2");
+    wipe_bytes32(&mut fo_seed);
     let mut r_b = RlwePoly::sample_ternary_eta1(&mut fo_rng);
     let mut e2_b = RlwePoly::sample_ternary_eta1(&mut fo_rng);
     let mut e3_b = RlwePoly::sample_ternary_eta1(&mut fo_rng);
@@ -1548,11 +1549,17 @@ fn rlwe_ot_choose_with_crs(
 
 /// Transparent CRS for the standalone base-OT API, bound to its protocol and roles.
 fn rlwe_session_crs(session_id: &[u8; 32], sender_id: usize, receiver_id: usize) -> [u8; 32] {
-    cshake256_32(b"QSAG.OT.RLWE.CRS/v2", &encode_multi_frame(&[
-        session_id, &(sender_id as u64).to_be_bytes(), &(receiver_id as u64).to_be_bytes(),
-        &(RLWE_N as u64).to_be_bytes(), &RLWE_Q.to_be_bytes(),
-        &(RLWE_ZKPOK_REPS as u64).to_be_bytes(),
-    ]))
+    cshake256_32_multi_frame(
+        b"QSAG.OT.RLWE.CRS/v2",
+        &[
+            session_id,
+            &(sender_id as u64).to_be_bytes(),
+            &(receiver_id as u64).to_be_bytes(),
+            &(RLWE_N as u64).to_be_bytes(),
+            &RLWE_Q.to_be_bytes(),
+            &(RLWE_ZKPOK_REPS as u64).to_be_bytes(),
+        ],
+    )
 }
 
 /// Receiver Round-1: encode secret `choice_bit` into `pk0 = (a * s_R + e_1) - choice_bit * t_crs`
@@ -1695,12 +1702,23 @@ pub fn rlwe_ot_transfer(
     try_rlwe_ot_transfer(session_id, sender_id, receiver_id, ot_idx, req, seed0, seed1, rng)
 }
 
-fn rlwe_ot_decrypt_with_crs(
+fn rlwe_ot_decrypt_ct_mask(
     sec: &RlweOtReceiverSecret,
     a_ntt: &RlwePolyNtt,
     t_crs: &RlwePoly,
     resp: &RlweOtSenderMsg,
-) -> Result<[u8; 32], PreprocessError> {
+) -> Result<([u8; 32], u8), PreprocessError> {
+    if !resp.u0.is_canonical()
+        || !resp.v0.is_canonical()
+        || !resp.u1.is_canonical()
+        || !resp.v1.is_canonical()
+    {
+        return Err(PreprocessError::BaseOtFoCheckFailed {
+            sender_id: sec.sender_id,
+            receiver_id: sec.receiver_id,
+            ot_idx: sec.ot_idx,
+        });
+    }
     let u_c = RlwePoly::ct_select(sec.choice_bit, &resp.u1, &resp.u0);
     let v_c = RlwePoly::ct_select(sec.choice_bit, &resp.v1, &resp.v0);
     let mut prod = u_c.mul_negacyclic(&sec.s_r);
@@ -1725,7 +1743,24 @@ fn rlwe_ot_decrypt_with_crs(
         &rho_c,
     );
     wipe_bytes32(&mut rho_c);
-    if !(u_exp.ct_eq(&u_c) && v_exp.ct_eq(&v_c)) {
+    let ok_u = u_exp.ct_eq(&u_c) as u8;
+    let ok_v = v_exp.ct_eq(&v_c) as u8;
+    let ok = black_box(ok_u & ok_v);
+    let keep_mask = 0u8.wrapping_sub(ok);
+    for b in &mut seed_c {
+        *b &= keep_mask;
+    }
+    Ok((seed_c, ok))
+}
+
+fn rlwe_ot_decrypt_with_crs(
+    sec: &RlweOtReceiverSecret,
+    a_ntt: &RlwePolyNtt,
+    t_crs: &RlwePoly,
+    resp: &RlweOtSenderMsg,
+) -> Result<[u8; 32], PreprocessError> {
+    let (mut seed_c, ok) = rlwe_ot_decrypt_ct_mask(sec, a_ntt, t_crs, resp)?;
+    if black_box(ok) == 0 {
         wipe_bytes32(&mut seed_c);
         return Err(PreprocessError::BaseOtFoCheckFailed {
             sender_id: sec.sender_id,
@@ -2088,9 +2123,9 @@ fn commit_crs_coin_share(
     let s_be = (ext_sender_id as u64).to_be_bytes();
     let r_be = (ext_receiver_id as u64).to_be_bytes();
     let p_be = (party_id as u64).to_be_bytes();
-    cshake256_32(
+    cshake256_32_multi_frame(
         b"QSAG.OT.CRS.COMMIT/v1",
-        &encode_multi_frame(&[session_id, &s_be, &r_be, &p_be, share]),
+        &[session_id, &s_be, &r_be, &p_be, share],
     )
 }
 
@@ -2104,9 +2139,9 @@ fn commit_combiner_coin_share(
     let s_be = (ext_sender_id as u64).to_be_bytes();
     let r_be = (ext_receiver_id as u64).to_be_bytes();
     let p_be = (party_id as u64).to_be_bytes();
-    cshake256_32(
+    cshake256_32_multi_frame(
         b"QSAG.OT.COMBINER.COMMIT/v1",
-        &encode_multi_frame(&[session_id, &s_be, &r_be, &p_be, share]),
+        &[session_id, &s_be, &r_be, &p_be, share],
     )
 }
 
@@ -2365,14 +2400,21 @@ impl BaseOtExtSenderRound1 {
         msg2: &BaseOtRound2Msg,
         sender_rng: &mut PartyPrivateRng,
     ) -> Result<(BaseOtExtSenderRound3, BaseOtRound3Msg), PreprocessError> {
-        if msg2.reqs_len_mismatch(RLWE_BASE_OT_COUNT) {
+        if msg2.reqs_len_mismatch(RLWE_BASE_OT_COUNT)
+            || msg2.resps.iter().any(|r| {
+                !r.u0.is_canonical()
+                    || !r.v0.is_canonical()
+                    || !r.u1.is_canonical()
+                    || !r.v1.is_canonical()
+            })
+        {
             return Err(PreprocessError::BaseOtFoCheckFailed {
                 sender_id: self.ext_receiver_id,
                 receiver_id: self.ext_sender_id,
                 ot_idx: 0,
             });
         }
-        let mut base_seeds = vec![[0u8; 32]; RLWE_BASE_OT_COUNT];
+        let mut base_seeds = SecretBuffer(vec![[0u8; 32]; RLWE_BASE_OT_COUNT]);
         let mut all_ok = 1u8;
         for (m, base_seeds_m_item) in base_seeds[..RLWE_BASE_OT_COUNT].iter_mut().enumerate() {
             let a_ntt = RlwePoly::from_crs_xof_with_coin(
@@ -2392,19 +2434,12 @@ impl BaseOtExtSenderRound1 {
                 m as u32,
                 1,
             );
-            match rlwe_ot_decrypt_with_crs(&self.sec_states[m], &a_ntt, &t_crs, &msg2.resps[m]) {
-                Ok(seed_m) => {
-                    *base_seeds_m_item = seed_m;
-                }
-                Err(_) => {
-                    all_ok = 0;
-                }
-            }
+            let (seed_m, ok_m) =
+                rlwe_ot_decrypt_ct_mask(&self.sec_states[m], &a_ntt, &t_crs, &msg2.resps[m])?;
+            *base_seeds_m_item = seed_m;
+            all_ok &= ok_m;
         }
         if black_box(all_ok) == 0 {
-            for s in &mut base_seeds {
-                wipe_bytes32(s);
-            }
             return Err(PreprocessError::BaseOtFoCheckFailed {
                 sender_id: self.ext_receiver_id,
                 receiver_id: self.ext_sender_id,
@@ -2414,13 +2449,14 @@ impl BaseOtExtSenderRound1 {
         let my_coin_share = sender_rng.next_bytes32();
         let c_tilde_words = self.c_tilde_words;
         wipe_u64s(&mut self.c_tilde_words);
+        let verified_base_seeds = core::mem::take(&mut base_seeds.0);
         Ok((
             BaseOtExtSenderRound3 {
                 session_id: self.session_id,
                 ext_sender_id: self.ext_sender_id,
                 ext_receiver_id: self.ext_receiver_id,
                 c_tilde_words,
-                base_seeds,
+                base_seeds: verified_base_seeds,
                 peer_coin_commit: msg2.receiver_coin_commit,
                 my_coin_share,
             },
@@ -2465,6 +2501,12 @@ impl BaseOtExtReceiverRound2 {
                 sender_id: ext_receiver_id,
                 receiver_id: ext_sender_id,
                 ot_idx: 0,
+            });
+        }
+        if msg1.pk0s.iter().any(|p| !p.is_canonical()) {
+            return Err(PreprocessError::BaseOtReceiverProofFailed {
+                sender_id: ext_receiver_id,
+                receiver_id: ext_sender_id,
             });
         }
         for blk in 0..RLWE_BASE_OT_BLOCKS {
@@ -3060,47 +3102,174 @@ fn compute_kos_transcript_bind(
 ) -> [u8; 32] {
     let x_bytes = proof.x_kos.0.to_le_bytes();
     let t_bytes = proof.t_kos.0.to_le_bytes();
-    cshake256_32(
+    cshake256_32_multi_frame(
         b"QSAG.OT.KOS.BIND/v2",
-        &encode_multi_frame(&[u_cols_digest, chi_seed, &x_bytes, &t_bytes]),
+        &[u_cols_digest, chi_seed, &x_bytes, &t_bytes],
     )
 }
 
-/// Fast single-block `SHAKE256` transcript-bound correlation-robust hash
-/// `H(session_id, transcript_bind, sender, receiver, batch, ell, row128) -> [u8; 48]`
-/// (`128` bytes absorbed < `136` rate => `1` `keccak_f1600` call, `0` heap allocations!).
-#[inline]
-fn crh_ot_row_hash48(
+/// Fast 4-way SIMD (`keccak_f1600_x4`) single-block `SHAKE256` transcript-bound correlation-robust
+/// hash batch for receiver rows `t_rows[0..payload_rows]`.
+fn crh_ot_receiver_pads_batch(
     session_id: &[u8; 32],
     transcript_bind: &[u8; 32],
     sender_id: usize,
     receiver_id: usize,
     batch_ctr: u64,
-    ell: u64,
-    row: u128,
-) -> [u8; 48] {
-    let mut st = [0u64; 25];
-    st[0] = u64::from_le_bytes(*b"QSAG.CRH");
-    st[1] = u64::from_le_bytes(*b".OT.V002");
-    for i in 0..4 {
+    t_rows: &[u128],
+) -> Vec<[u8; 48]> {
+    let payload_rows = t_rows.len();
+    let mut pads = vec![[0u8; 48]; payload_rows];
+    if payload_rows == 0 {
+        return pads;
+    }
+    let sid_words: [u64; 4] = core::array::from_fn(|i| {
         let o = 8 * i;
-        st[2 + i] = u64::from_le_bytes(core::array::from_fn(|array_index| (session_id[o..o + 8])[array_index]));
-        st[6 + i] = u64::from_le_bytes(core::array::from_fn(|array_index| (transcript_bind[o..o + 8])[array_index]));
+        u64::from_le_bytes(core::array::from_fn(|b| session_id[o + b]))
+    });
+    let bind_words: [u64; 4] = core::array::from_fn(|i| {
+        let o = 8 * i;
+        u64::from_le_bytes(core::array::from_fn(|b| transcript_bind[o + b]))
+    });
+    let backend = qsag_asm::detect_backend();
+
+    let eval_range = |base_ell: usize, rows_slice: &[u128], out_slice: &mut [[u8; 48]]| {
+        let w0 = [u64::from_le_bytes(*b"QSAG.CRH"); 4];
+        let w1 = [u64::from_le_bytes(*b".OT.V002"); 4];
+        let mut st = qsag_asm::KeccakState4x::default();
+        for (chunk_idx, (r_chunk, o_chunk)) in
+            rows_slice.chunks(4).zip(out_slice.chunks_mut(4)).enumerate()
+        {
+            st.0 = [[0u64; 4]; 25];
+            st.0[0] = w0;
+            st.0[1] = w1;
+            for i in 0..4 {
+                st.0[2 + i] = [sid_words[i]; 4];
+                st.0[6 + i] = [bind_words[i]; 4];
+            }
+            st.0[10] = [sender_id as u64; 4];
+            st.0[11] = [receiver_id as u64; 4];
+            st.0[12] = [batch_ctr; 4];
+            for (slot, &row) in r_chunk.iter().enumerate() {
+                st.0[13][slot] = (base_ell + 4 * chunk_idx + slot) as u64;
+                st.0[14][slot] = row as u64;
+                st.0[15][slot] = (row >> 64) as u64;
+            }
+            st.0[16] = [0x8000_0000_0000_001f; 4];
+            qsag_asm::keccak_f1600_x4_with_backend(&mut st, backend);
+            for (slot, dst) in o_chunk.iter_mut().enumerate() {
+                for w in 0..6 {
+                    dst[8 * w..8 * w + 8].copy_from_slice(&st.0[w][slot].to_le_bytes());
+                }
+            }
+        }
+        qsag_asm::volatile_fill(&mut st.0, [0u64; 4]);
+    };
+
+    #[cfg(any(test, feature = "std"))]
+    if payload_rows >= 2048 {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(16);
+        let chunk_len = payload_rows.div_ceil(workers).max(64);
+        std::thread::scope(|scope| {
+            for (c_idx, (r_sub, o_sub)) in
+                t_rows.chunks(chunk_len).zip(pads.chunks_mut(chunk_len)).enumerate()
+            {
+                let base_ell = c_idx * chunk_len;
+                scope.spawn(move || eval_range(base_ell, r_sub, o_sub));
+            }
+        });
+        return pads;
     }
-    st[10] = sender_id as u64;
-    st[11] = receiver_id as u64;
-    st[12] = batch_ctr;
-    st[13] = ell;
-    st[14] = row as u64;
-    st[15] = (row >> 64) as u64;
-    st[16] = 0x8000_0000_0000_001f;
-    keccak_f1600(&mut st);
-    let mut out = [0u8; 48];
-    for i in 0..6 {
-        out[8 * i..8 * i + 8].copy_from_slice(&st[i].to_le_bytes());
+    eval_range(0, t_rows, &mut pads);
+    pads
+}
+
+/// Fast 4-way SIMD (`keccak_f1600_x4`) single-block `SHAKE256` transcript-bound correlation-robust
+/// hash batch for sender row pairs `(q_rows[ell], q_rows[ell] ^ delta)`.
+fn crh_ot_sender_pad_pairs_batch(
+    session_id: &[u8; 32],
+    transcript_bind: &[u8; 32],
+    sender_id: usize,
+    receiver_id: usize,
+    batch_ctr: u64,
+    delta: u128,
+    q_rows: &[u128],
+) -> Vec<OtPadPair> {
+    let payload_rows = q_rows.len();
+    let mut pad_pairs = vec![([0u8; 48], [0u8; 48]); payload_rows];
+    if payload_rows == 0 {
+        return pad_pairs;
     }
-    wipe_u64s(&mut st);
-    out
+    let sid_words: [u64; 4] = core::array::from_fn(|i| {
+        let o = 8 * i;
+        u64::from_le_bytes(core::array::from_fn(|b| session_id[o + b]))
+    });
+    let bind_words: [u64; 4] = core::array::from_fn(|i| {
+        let o = 8 * i;
+        u64::from_le_bytes(core::array::from_fn(|b| transcript_bind[o + b]))
+    });
+    let backend = qsag_asm::detect_backend();
+
+    let eval_range = |base_ell: usize, rows_slice: &[u128], out_slice: &mut [OtPadPair]| {
+        let w0 = [u64::from_le_bytes(*b"QSAG.CRH"); 4];
+        let w1 = [u64::from_le_bytes(*b".OT.V002"); 4];
+        let mut st = qsag_asm::KeccakState4x::default();
+        // 2 rows (`(q0, q0^delta)` and `(q1, q1^delta)`) = 4 parallel Keccak states!
+        for (pair_idx, (r_chunk, o_chunk)) in
+            rows_slice.chunks(2).zip(out_slice.chunks_mut(2)).enumerate()
+        {
+            st.0 = [[0u64; 4]; 25];
+            st.0[0] = w0;
+            st.0[1] = w1;
+            for i in 0..4 {
+                st.0[2 + i] = [sid_words[i]; 4];
+                st.0[6 + i] = [bind_words[i]; 4];
+            }
+            st.0[10] = [sender_id as u64; 4];
+            st.0[11] = [receiver_id as u64; 4];
+            st.0[12] = [batch_ctr; 4];
+            for (sub, &q) in r_chunk.iter().enumerate() {
+                let ell = (base_ell + 2 * pair_idx + sub) as u64;
+                let q1 = q ^ delta;
+                st.0[13][2 * sub] = ell;
+                st.0[14][2 * sub] = q as u64;
+                st.0[15][2 * sub] = (q >> 64) as u64;
+                st.0[13][2 * sub + 1] = ell;
+                st.0[14][2 * sub + 1] = q1 as u64;
+                st.0[15][2 * sub + 1] = (q1 >> 64) as u64;
+            }
+            st.0[16] = [0x8000_0000_0000_001f; 4];
+            qsag_asm::keccak_f1600_x4_with_backend(&mut st, backend);
+            for (sub, (p0, p1)) in o_chunk.iter_mut().enumerate() {
+                for w in 0..6 {
+                    p0[8 * w..8 * w + 8].copy_from_slice(&st.0[w][2 * sub].to_le_bytes());
+                    p1[8 * w..8 * w + 8].copy_from_slice(&st.0[w][2 * sub + 1].to_le_bytes());
+                }
+            }
+        }
+        qsag_asm::volatile_fill(&mut st.0, [0u64; 4]);
+    };
+
+    #[cfg(any(test, feature = "std"))]
+    if payload_rows >= 1024 {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(16);
+        let chunk_len = payload_rows.div_ceil(workers).max(64);
+        std::thread::scope(|scope| {
+            for (c_idx, (r_sub, o_sub)) in
+                q_rows.chunks(chunk_len).zip(pad_pairs.chunks_mut(chunk_len)).enumerate()
+            {
+                let base_ell = c_idx * chunk_len;
+                scope.spawn(move || eval_range(base_ell, r_sub, o_sub));
+            }
+        });
+        return pad_pairs;
+    }
+    eval_range(0, q_rows, &mut pad_pairs);
+    pad_pairs
 }
 
 fn derive_interactive_kos_challenges(
@@ -3162,10 +3331,11 @@ impl OtExtReceiverChannel {
         choice_words: &[u64],
         rng: &mut PartyPrivateRng,
     ) -> (KosOtReceiverPending, KosOtUColsMsg) {
+        assert!(self.batch_ctr < u64::MAX, "OtExtReceiverChannel batch counter exhausted");
         let payload_words = choice_words.len();
         let padded_words = payload_words + 4; // +256 sacrificial OTs masking x_kos & t_kos
         let batch_ctr = self.batch_ctr;
-        self.batch_ctr = self.batch_ctr.wrapping_add(1);
+        self.batch_ctr += 1;
 
         let mut full_choices = Vec::with_capacity(padded_words);
         full_choices.extend_from_slice(choice_words);
@@ -3173,8 +3343,74 @@ impl OtExtReceiverChannel {
             full_choices.push(rng.next_u64());
         }
 
-        let mut t0_cols = Vec::with_capacity(128);
-        let mut u_cols = Vec::with_capacity(128);
+        let mut t0_cols = vec![Vec::new(); 128];
+        let mut u_cols = vec![Vec::new(); 128];
+        #[cfg(any(test, feature = "std"))]
+        if padded_words >= 64 {
+            let sid = &self.session_id;
+            let pairs = &self.combined_seed_pairs;
+            let choices_ref = &full_choices;
+            std::thread::scope(|scope| {
+                for (c_idx, (t0_sub, u_sub)) in
+                    t0_cols.chunks_mut(16).zip(u_cols.chunks_mut(16)).enumerate()
+                {
+                    let base_i = 16 * c_idx;
+                    scope.spawn(move || {
+                        for (off, (t0_dst, u_dst)) in
+                            t0_sub.iter_mut().zip(u_sub.iter_mut()).enumerate()
+                        {
+                            let i = base_i + off;
+                            let t0 = expand_prg_column_u64s(
+                                sid,
+                                batch_ctr,
+                                i,
+                                &pairs[i].0,
+                                padded_words,
+                            );
+                            let mut t1 = expand_prg_column_u64s(
+                                sid,
+                                batch_ctr,
+                                i,
+                                &pairs[i].1,
+                                padded_words,
+                            );
+                            let mut u = Vec::with_capacity(padded_words);
+                            for w in 0..padded_words {
+                                u.push(t0[w] ^ t1[w] ^ choices_ref[w]);
+                            }
+                            wipe_u64s(&mut t1);
+                            *t0_dst = t0;
+                            *u_dst = u;
+                        }
+                    });
+                }
+            });
+        } else {
+            for i in 0..128 {
+                let t0 = expand_prg_column_u64s(
+                    &self.session_id,
+                    batch_ctr,
+                    i,
+                    &self.combined_seed_pairs[i].0,
+                    padded_words,
+                );
+                let mut t1 = expand_prg_column_u64s(
+                    &self.session_id,
+                    batch_ctr,
+                    i,
+                    &self.combined_seed_pairs[i].1,
+                    padded_words,
+                );
+                let mut u = Vec::with_capacity(padded_words);
+                for w in 0..padded_words {
+                    u.push(t0[w] ^ t1[w] ^ full_choices[w]);
+                }
+                wipe_u64s(&mut t1);
+                t0_cols[i] = t0;
+                u_cols[i] = u;
+            }
+        }
+        #[cfg(not(any(test, feature = "std")))]
         for i in 0..128 {
             let t0 = expand_prg_column_u64s(
                 &self.session_id,
@@ -3195,8 +3431,8 @@ impl OtExtReceiverChannel {
                 u.push(t0[w] ^ t1[w] ^ full_choices[w]);
             }
             wipe_u64s(&mut t1);
-            t0_cols.push(t0);
-            u_cols.push(u);
+            t0_cols[i] = t0;
+            u_cols[i] = u;
         }
 
         let t_rows = transpose_cols128_to_rows(&t0_cols, padded_words);
@@ -3251,18 +3487,14 @@ impl OtExtReceiverChannel {
         let proof = KosOtProofMsg { x_kos, t_kos };
         let bind = compute_kos_transcript_bind(&pending.u_cols_digest, &chal.chi_seed, &proof);
         let payload_rows = 64 * pending.payload_words;
-        let mut pads = Vec::with_capacity(payload_rows);
-        for ell in 0..payload_rows {
-            pads.push(crh_ot_row_hash48(
-                &self.session_id,
-                &bind,
-                self.sender_id,
-                self.receiver_id,
-                pending.batch_ctr,
-                ell as u64,
-                pending.t_rows[ell],
-            ));
-        }
+        let pads = crh_ot_receiver_pads_batch(
+            &self.session_id,
+            &bind,
+            self.sender_id,
+            self.receiver_id,
+            pending.batch_ctr,
+            &pending.t_rows[..payload_rows],
+        );
         (proof, pads)
     }
 }
@@ -3276,6 +3508,13 @@ impl OtExtSenderChannel {
         sender_rng: &mut PartyPrivateRng,
     ) -> Result<(KosOtSenderPending, KosOtChallengeMsg), PreprocessError> {
         if self.poisoned {
+            return Err(PreprocessError::ChannelPoisoned {
+                sender_id: self.sender_id,
+                receiver_id: self.receiver_id,
+            });
+        }
+        if self.batch_ctr == u64::MAX {
+            self.poison_and_wipe();
             return Err(PreprocessError::ChannelPoisoned {
                 sender_id: self.sender_id,
                 receiver_id: self.receiver_id,
@@ -3300,10 +3539,57 @@ impl OtExtSenderChannel {
         }
         let payload_words = padded_words - 4;
         let batch_ctr = self.batch_ctr;
-        self.batch_ctr = self.batch_ctr.wrapping_add(1);
+        self.batch_ctr += 1;
 
-        let mut q_cols = Vec::with_capacity(128);
-        for i in 0..128 {
+        let mut q_cols = vec![Vec::new(); 128];
+        #[cfg(any(test, feature = "std"))]
+        if padded_words >= 64 {
+            let sid = &self.session_id;
+            let seeds = &self.combined_seeds;
+            let delta = self.delta;
+            let u_cols_ref = &u_msg.u_cols;
+            std::thread::scope(|scope| {
+                for (c_idx, q_sub) in q_cols.chunks_mut(16).enumerate() {
+                    let base_i = 16 * c_idx;
+                    scope.spawn(move || {
+                        for (off, q_dst) in q_sub.iter_mut().enumerate() {
+                            let i = base_i + off;
+                            let mut ti = expand_prg_column_u64s(
+                                sid,
+                                batch_ctr,
+                                i,
+                                &seeds[i],
+                                padded_words,
+                            );
+                            let di_bit = ((delta >> i) & 1) as u64;
+                            let di_mask = 0u64.wrapping_sub(black_box(di_bit));
+                            for (w, ti_w_item) in ti[..padded_words].iter_mut().enumerate() {
+                                *ti_w_item ^= di_mask & u_cols_ref[i][w];
+                            }
+                            *q_dst = ti;
+                        }
+                    });
+                }
+            });
+        } else {
+            for (i, q_col) in q_cols.iter_mut().enumerate() {
+                let mut ti = expand_prg_column_u64s(
+                    &self.session_id,
+                    batch_ctr,
+                    i,
+                    &self.combined_seeds[i],
+                    padded_words,
+                );
+                let di_bit = ((self.delta >> i) & 1) as u64;
+                let di_mask = 0u64.wrapping_sub(black_box(di_bit));
+                for (w, ti_w_item) in ti[..padded_words].iter_mut().enumerate() {
+                    *ti_w_item ^= di_mask & u_msg.u_cols[i][w];
+                }
+                *q_col = ti;
+            }
+        }
+        #[cfg(not(any(test, feature = "std")))]
+        for (i, q_col) in q_cols.iter_mut().enumerate() {
             let mut ti = expand_prg_column_u64s(
                 &self.session_id,
                 batch_ctr,
@@ -3316,7 +3602,7 @@ impl OtExtSenderChannel {
             for (w, ti_w_item) in ti[..padded_words].iter_mut().enumerate() {
                 *ti_w_item ^= di_mask & u_msg.u_cols[i][w];
             }
-            q_cols.push(ti);
+            *q_col = ti;
         }
 
         let q_rows = transpose_cols128_to_rows(&q_cols, padded_words);
@@ -3380,29 +3666,15 @@ impl OtExtSenderChannel {
 
         let bind = compute_kos_transcript_bind(&pending.u_cols_digest, &pending.chi_seed, proof);
         let payload_rows = 64 * pending.payload_words;
-        let mut pad_pairs = Vec::with_capacity(payload_rows);
-        for ell in 0..payload_rows {
-            let q = pending.q_rows[ell];
-            let p0 = crh_ot_row_hash48(
-                &self.session_id,
-                &bind,
-                self.sender_id,
-                self.receiver_id,
-                pending.batch_ctr,
-                ell as u64,
-                q,
-            );
-            let p1 = crh_ot_row_hash48(
-                &self.session_id,
-                &bind,
-                self.sender_id,
-                self.receiver_id,
-                pending.batch_ctr,
-                ell as u64,
-                q ^ self.delta,
-            );
-            pad_pairs.push((p0, p1));
-        }
+        let pad_pairs = crh_ot_sender_pad_pairs_batch(
+            &self.session_id,
+            &bind,
+            self.sender_id,
+            self.receiver_id,
+            pending.batch_ctr,
+            self.delta,
+            &pending.q_rows[..payload_rows],
+        );
         Ok(pad_pairs)
     }
 }
@@ -3434,6 +3706,9 @@ impl OtMesh {
         setup: OtChannelSetup,
     ) -> Result<Self, PreprocessError> {
         let n = party_rngs.len();
+        if n < 2 {
+            return Err(PreprocessError::InvalidThreshold { t: 2, n });
+        }
         let mut senders: Vec<Vec<Option<OtExtSenderChannel>>> =
             (0..n).map(|_| (0..n).map(|_| None).collect()).collect();
         let mut receivers: Vec<Vec<Option<OtExtReceiverChannel>>> =
@@ -3526,11 +3801,12 @@ impl OtMesh {
         // The peer-facing receiver keeps a strict budget even when a vault needs more OTs.
         const WORDS_PER_FRAME: usize = MAX_FRAME_BUDGET / (128 * 8) - 4;
         if choice_words.len() > WORDS_PER_FRAME {
-            let (mut send, mut recv) = (Vec::new(), Vec::new());
+            let (mut send, mut recv) = (OtSendPads(Vec::new()), OtRecvPads(Vec::new()));
             for choices in choice_words.chunks(WORDS_PER_FRAME) {
-                let (mut s, mut r) = self.run_correlated_ot_words(sender_id, receiver_id, choices, party_rngs)?;
-                send.append(&mut s);
-                recv.append(&mut r);
+                let (s, r) =
+                    self.run_correlated_ot_words(sender_id, receiver_id, choices, party_rngs)?;
+                secret_vec_extend_from_slice(&mut send.0, &s.0);
+                secret_vec_extend_from_slice(&mut recv.0, &r.0);
             }
             return Ok((send, recv));
         }
@@ -3552,7 +3828,8 @@ impl OtMesh {
         let (r_pending, u_msg) = r_chan.round1_send_u_cols(choice_words, receiver_rng);
         let (s_pending, chal_msg) = s_chan.round2_sample_challenge(&u_msg, sender_rng)?;
         let (proof_msg, recv_pads) = r_chan.round3_prove_and_finish(r_pending, &chal_msg);
-        let send_pads = s_chan.round4_verify_and_finish(s_pending, &proof_msg)?;
+        let recv_pads = OtRecvPads(recv_pads);
+        let send_pads = OtSendPads(s_chan.round4_verify_and_finish(s_pending, &proof_msg)?);
         Ok((send_pads, recv_pads))
     }
 }
@@ -3596,9 +3873,9 @@ where
     for (p, rng) in party_rngs.iter_mut().enumerate() {
         let r_p = rng.next_bytes32();
         let pid = (p as u64).to_be_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.COIN.COMMIT/v1",
-            &encode_multi_frame(&[session_id, phase_label, transcript_digest, &pid, &r_p]),
+            &[session_id, phase_label, transcript_digest, &pid, &r_p],
         );
         shares.push(r_p);
         commits.push(com);
@@ -3610,27 +3887,31 @@ where
         let mut opened = shares[p];
         corrupt_opening(p, &mut opened);
         let pid = (p as u64).to_be_bytes();
-        let recomputed = cshake256_32(
+        let recomputed = cshake256_32_multi_frame(
             b"QSAG.COIN.COMMIT/v1",
-            &encode_multi_frame(&[session_id, phase_label, transcript_digest, &pid, &opened]),
+            &[session_id, phase_label, transcript_digest, &pid, &opened],
         );
+        wipe_bytes32(&mut opened);
         if !ct_eq_bytes32(&recomputed, &commits[p]) {
             for s in &mut shares {
                 wipe_bytes32(s);
             }
+            wipe_bytes32(&mut combined);
             return Err(PreprocessError::CoinCommitMismatch { party_id: p });
         }
         for b in 0..32 {
-            combined[b] ^= opened[b];
+            combined[b] ^= shares[p][b];
         }
     }
     for s in &mut shares {
         wipe_bytes32(s);
     }
-    Ok(cshake256_32(
+    let out = cshake256_32_multi_frame(
         b"QSAG.COIN.DERIVE/v1",
-        &encode_multi_frame(&[session_id, phase_label, transcript_digest, &combined]),
-    ))
+        &[session_id, phase_label, transcript_digest, &combined],
+    );
+    wipe_bytes32(&mut combined);
+    Ok(out)
 }
 
 // ============================================================================
@@ -3955,9 +4236,9 @@ pub fn commit_and_open_spdz_gf256_quorum(
         let salt = party_rngs[p].next_bytes32();
         let pid = (p as u64).to_be_bytes();
         let val_b = [shares[p].0];
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GF256.OPEN.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &val_b, &salt]),
+            &[session_id, phase.as_bytes(), &pid, &val_b, &salt],
         );
         salts.push(salt);
         coms.push(com);
@@ -3965,9 +4246,9 @@ pub fn commit_and_open_spdz_gf256_quorum(
     for p in 0..m {
         let pid = (p as u64).to_be_bytes();
         let val_b = [shares[p].0];
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GF256.OPEN.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &val_b, &salts[p]]),
+            &[session_id, phase.as_bytes(), &pid, &val_b, &salts[p]],
         );
         wipe_bytes32(&mut salts[p]);
         if !ct_eq_bytes32(&exp, &coms[p]) {
@@ -4019,9 +4300,9 @@ pub fn commit_and_open_spdz_gf256_quorum(
         let q_be = (q as u64).to_be_bytes();
         let s0_b = s0.0.to_le_bytes();
         let s1_b = s1.0.to_le_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GF256.MAC.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &q_be, &s0_b, &s1_b, &salt]),
+            &[session_id, phase.as_bytes(), &q_be, &s0_b, &s1_b, &salt],
         );
         sigmas.push([s0, s1]);
         sig_salts.push(salt);
@@ -4034,16 +4315,16 @@ pub fn commit_and_open_spdz_gf256_quorum(
         let q_be = (q as u64).to_be_bytes();
         let s0_b = sigmas[q][0].0.to_le_bytes();
         let s1_b = sigmas[q][1].0.to_le_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GF256.MAC.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &q_be,
                 &s0_b,
                 &s1_b,
                 &sig_salts[q],
-            ]),
+            ],
         );
         wipe_bytes32(&mut sig_salts[q]);
         if !ct_eq_bytes32(&exp, &sig_coms[q]) {
@@ -4096,9 +4377,9 @@ pub fn commit_and_open_spdz_bs_gf256_quorum(
             raw[8 * pl..8 * pl + 8].copy_from_slice(&shares[p][pl].to_le_bytes());
         }
         let pid = (p as u64).to_be_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.BS64.OPEN.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &raw, &salt]),
+            &[session_id, phase.as_bytes(), &pid, &raw, &salt],
         );
         wipe_bytes(&mut raw);
         salts.push(salt);
@@ -4110,9 +4391,9 @@ pub fn commit_and_open_spdz_bs_gf256_quorum(
             raw[8 * pl..8 * pl + 8].copy_from_slice(&shares[p][pl].to_le_bytes());
         }
         let pid = (p as u64).to_be_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.BS64.OPEN.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &raw, &salts[p]]),
+            &[session_id, phase.as_bytes(), &pid, &raw, &salts[p]],
         );
         wipe_bytes(&mut raw);
         wipe_bytes32(&mut salts[p]);
@@ -4134,21 +4415,23 @@ pub fn commit_and_open_spdz_bs_gf256_quorum(
         run_commit_and_open_coin(session_id, phase.as_bytes(), &open_digest, party_rngs)?;
     let mut xof = Cshake256Xof::new(b"QSAG.SPDZ.BS64.CHIS/v1");
     xof.absorb(&fold_coin);
-    let mut chi_raw = [0u8; 64 * 16];
+    let mut chi_raw = [0u8; 2 * 64 * 16];
     xof.squeeze(&mut chi_raw);
-    let mut chis = [Tower128::ZERO; 64];
-    for bit in 0..64 {
-        chis[bit] = Tower128(
-            u128::from_le_bytes(core::array::from_fn(|array_index| (chi_raw[16 * bit..16 * (bit + 1)])[array_index])) | 1,
-        );
-    }
+    let chis: [[Tower128; 64]; 2] = core::array::from_fn(|lane| {
+        core::array::from_fn(|bit| {
+            let off = (2 * bit + lane) * 16;
+            Tower128(u128::from_le_bytes(core::array::from_fn(|b| chi_raw[off + b])))
+        })
+    });
+    wipe_bytes(&mut chi_raw);
 
     let lambdas_0 = lagrange_weights_zero_gf256(&quorum_eval_points[..t])
         .ok_or(PreprocessError::DuplicateOrZeroEvalPoint)?;
-    let mut x_folded = Tower128::ZERO;
-    for (bit, chis_bit_item) in chis[..64].iter().enumerate() {
+    let mut x_folded = [Tower128::ZERO; 2];
+    for (bit, (&chi0, &chi1)) in chis[0].iter().zip(&chis[1]).enumerate() {
         let xb = bs_gf256_extract_lane(&x_cand, bit);
-        x_folded = x_folded.add((*chis_bit_item).mul_gf256(xb));
+        x_folded[0] = x_folded[0].add(chi0.mul_gf256(xb));
+        x_folded[1] = x_folded[1].add(chi1.mul_gf256(xb));
     }
 
     let mut z_masks = vec![[Tower128::ZERO; 2]; t];
@@ -4169,36 +4452,38 @@ pub fn commit_and_open_spdz_bs_gf256_quorum(
         }
     }
 
+    let lhs: [[u128; 2]; 64] = core::array::from_fn(|bit| [chis[0][bit].0, chis[1][bit].0]);
     let mut sigmas = Vec::with_capacity(t);
     let mut sig_salts = Vec::with_capacity(t);
     let mut sig_coms = Vec::with_capacity(t);
     for q in 0..t {
         let lam_emb = Tower128::embed_gf256(lambdas_0[q]);
-        let mut m0 = Tower128::ZERO;
-        let mut m1 = Tower128::ZERO;
-        for bit in 0..64 {
-            m0 = m0.add(chis[bit].mul(mac_shares[q][0][bit]));
-            m1 = m1.add(chis[bit].mul(mac_shares[q][1][bit]));
-        }
+        let mut rhs: [[u128; 2]; 64] =
+            core::array::from_fn(|bit| [mac_shares[q][0][bit].0, mac_shares[q][1][bit].0]);
+        let mut fold = qsag_asm::tower128_bdoz_2lane_mac(&lhs, &rhs);
+        let m0 = Tower128(fold[0]);
+        let m1 = Tower128(fold[1]);
+        wipe_u128s(rhs.as_flattened_mut());
+        wipe_u128s(&mut fold);
         let s0 = lam_emb
-            .mul(m0.add(x_folded.mul(alpha_shares[q][0])))
+            .mul(m0.add(x_folded[0].mul(alpha_shares[q][0])))
             .add(z_masks[q][0]);
         let s1 = lam_emb
-            .mul(m1.add(x_folded.mul(alpha_shares[q][1])))
+            .mul(m1.add(x_folded[1].mul(alpha_shares[q][1])))
             .add(z_masks[q][1]);
         wipe_tower128(&mut z_masks[q]);
         let salt = party_rngs[q].next_bytes32();
         let q_be = (q as u64).to_be_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.BS64.MAC.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &q_be,
                 &s0.0.to_le_bytes(),
                 &s1.0.to_le_bytes(),
                 &salt,
-            ]),
+            ],
         );
         sigmas.push([s0, s1]);
         sig_salts.push(salt);
@@ -4209,16 +4494,16 @@ pub fn commit_and_open_spdz_bs_gf256_quorum(
     let mut sum1 = Tower128::ZERO;
     for q in 0..t {
         let q_be = (q as u64).to_be_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.BS64.MAC.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &q_be,
                 &sigmas[q][0].0.to_le_bytes(),
                 &sigmas[q][1].0.to_le_bytes(),
                 &sig_salts[q],
-            ]),
+            ],
         );
         wipe_bytes32(&mut sig_salts[q]);
         if !ct_eq_bytes32(&exp, &sig_coms[q]) {
@@ -4268,9 +4553,9 @@ pub fn commit_and_open_spdz_goldilocks_quorum(
         let salt = party_rngs[p].next_bytes32();
         let pid = (p as u64).to_be_bytes();
         let vb = shares[p].to_canonical_u64().to_le_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GL.OPEN.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &vb, &salt]),
+            &[session_id, phase.as_bytes(), &pid, &vb, &salt],
         );
         salts.push(salt);
         coms.push(com);
@@ -4278,9 +4563,9 @@ pub fn commit_and_open_spdz_goldilocks_quorum(
     for p in 0..m {
         let pid = (p as u64).to_be_bytes();
         let vb = shares[p].to_canonical_u64().to_le_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GL.OPEN.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &vb, &salts[p]]),
+            &[session_id, phase.as_bytes(), &pid, &vb, &salts[p]],
         );
         wipe_bytes32(&mut salts[p]);
         if !ct_eq_bytes32(&exp, &coms[p]) {
@@ -4318,9 +4603,9 @@ pub fn commit_and_open_spdz_goldilocks_quorum(
         let q_be = (q as u64).to_be_bytes();
         let c0_b = sig_q.c0.to_canonical_u64().to_le_bytes();
         let c1_b = sig_q.c1.to_canonical_u64().to_le_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GL.MAC.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &q_be, &c0_b, &c1_b, &salt]),
+            &[session_id, phase.as_bytes(), &q_be, &c0_b, &c1_b, &salt],
         );
         sigmas.push(sig_q);
         sig_salts.push(salt);
@@ -4333,16 +4618,16 @@ pub fn commit_and_open_spdz_goldilocks_quorum(
         let q_be = (q as u64).to_be_bytes();
         let c0_b = sigmas[q].c0.to_canonical_u64().to_le_bytes();
         let c1_b = sigmas[q].c1.to_canonical_u64().to_le_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GL.MAC.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &q_be,
                 &c0_b,
                 &c1_b,
                 &sig_salts[q],
-            ]),
+            ],
         );
         wipe_bytes32(&mut sig_salts[q]);
         if !ct_eq_bytes32(&exp, &sig_coms[q]) {
@@ -4393,9 +4678,9 @@ pub fn commit_and_open_spdz_ext2_quorum(
         let pid = (p as u64).to_be_bytes();
         let c0_b = shares[p].c0.to_canonical_u64().to_le_bytes();
         let c1_b = shares[p].c1.to_canonical_u64().to_le_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.EXT2.OPEN.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &c0_b, &c1_b, &salt]),
+            &[session_id, phase.as_bytes(), &pid, &c0_b, &c1_b, &salt],
         );
         salts.push(salt);
         coms.push(com);
@@ -4404,16 +4689,16 @@ pub fn commit_and_open_spdz_ext2_quorum(
         let pid = (p as u64).to_be_bytes();
         let c0_b = shares[p].c0.to_canonical_u64().to_le_bytes();
         let c1_b = shares[p].c1.to_canonical_u64().to_le_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.EXT2.OPEN.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &pid,
                 &c0_b,
                 &c1_b,
                 &salts[p],
-            ]),
+            ],
         );
         wipe_bytes32(&mut salts[p]);
         if !ct_eq_bytes32(&exp, &coms[p]) {
@@ -4451,9 +4736,9 @@ pub fn commit_and_open_spdz_ext2_quorum(
         let q_be = (q as u64).to_be_bytes();
         let c0_b = sig_q.c0.to_canonical_u64().to_le_bytes();
         let c1_b = sig_q.c1.to_canonical_u64().to_le_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.EXT2.MAC.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &q_be, &c0_b, &c1_b, &salt]),
+            &[session_id, phase.as_bytes(), &q_be, &c0_b, &c1_b, &salt],
         );
         sigmas.push(sig_q);
         sig_salts.push(salt);
@@ -4466,16 +4751,16 @@ pub fn commit_and_open_spdz_ext2_quorum(
         let q_be = (q as u64).to_be_bytes();
         let c0_b = sigmas[q].c0.to_canonical_u64().to_le_bytes();
         let c1_b = sigmas[q].c1.to_canonical_u64().to_le_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.EXT2.MAC.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &q_be,
                 &c0_b,
                 &c1_b,
                 &sig_salts[q],
-            ]),
+            ],
         );
         wipe_bytes32(&mut sig_salts[q]);
         if !ct_eq_bytes32(&exp, &sig_coms[q]) {
@@ -4629,7 +4914,10 @@ fn checked_boolean_product_with_hook<F: FnMut(&mut [Vec<BitslicedGf256x64>])>(
         let mut out = crate::wipe::SecretBuffer(vec![vec![0; a[0].len()]; n]);
         for start in (0..a[0].len()).step_by(8) {
             let count = (a[0].len() - start).min(8);
-            let sid = cshake256_32(b"QSAG.DPCG.ACTIVE.PRODUCT/v1", &encode_multi_frame(&[session_id, &(start as u64).to_be_bytes()]));
+            let sid = cshake256_32_multi_frame(
+                b"QSAG.DPCG.ACTIVE.PRODUCT/v1",
+                &[session_id, &(start as u64).to_be_bytes()],
+            );
             let vaults = run_dealerless_pi_triple_f2_with_alpha(sid, n, &points, count,
                 &contributions, &alpha, mesh, rngs)?;
             let mut inputs = vec![vec![[0u64; 8]; 2 * count]; n];
@@ -4855,9 +5143,9 @@ pub fn commit_and_open_degree_tower128(
         let salt = party_rngs[p].next_bytes32();
         let pid = (p as u64).to_be_bytes();
         let vb = shares[p].0.to_le_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.T128.OPEN.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &vb, &salt]),
+            &[session_id, phase.as_bytes(), &pid, &vb, &salt],
         );
         salts.push(salt);
         coms.push(com);
@@ -4865,9 +5153,9 @@ pub fn commit_and_open_degree_tower128(
     for p in 0..n {
         let pid = (p as u64).to_be_bytes();
         let vb = shares[p].0.to_le_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.T128.OPEN.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &vb, &salts[p]]),
+            &[session_id, phase.as_bytes(), &pid, &vb, &salts[p]],
         );
         wipe_bytes32(&mut salts[p]);
         if !ct_eq_bytes32(&exp, &coms[p]) {
@@ -4925,15 +5213,17 @@ pub fn spdz_setup_alpha_gf256(
 
     let mut alpha_contribs = vec![[Tower128::ZERO; 2]; n];
     let mut alpha_shamir = vec![[Tower128::ZERO; 2]; n];
-    let mut beta_shamir = vec![[Tower128::ZERO; 2]; n];
+    let mut beta_shamir = SecretBuffer(vec![[Tower128::ZERO; 2]; n]);
 
     for i in 0..n {
         for lane in 0..2 {
-            let a_i = party_rngs[i].next_tower128();
-            let b_i = party_rngs[i].next_tower128();
+            let mut a_i = party_rngs[i].next_tower128();
+            let mut b_i = party_rngs[i].next_tower128();
             alpha_contribs[i][lane] = a_i;
-            let a_sh = shamir_share_tower128(t, eval_points, a_i, &mut party_rngs[i]);
-            let b_sh = shamir_share_tower128(t, eval_points, b_i, &mut party_rngs[i]);
+            let a_sh = SecretBuffer(shamir_share_tower128(t, eval_points, a_i, &mut party_rngs[i]));
+            let b_sh = SecretBuffer(shamir_share_tower128(t, eval_points, b_i, &mut party_rngs[i]));
+            wipe_u128s(core::slice::from_mut(&mut a_i.0));
+            wipe_u128s(core::slice::from_mut(&mut b_i.0));
             for p in 0..n {
                 alpha_shamir[p][lane] = alpha_shamir[p][lane].add(a_sh[p]);
                 beta_shamir[p][lane] = beta_shamir[p][lane].add(b_sh[p]);
@@ -4947,9 +5237,11 @@ pub fn spdz_setup_alpha_gf256(
         Tower128(u128::from_le_bytes(core::array::from_fn(|array_index| (coin[16..32])[array_index])) | 1),
     ];
     for lane in 0..2 {
-        let comb: Vec<Tower128> = (0..n)
-            .map(|p| beta_shamir[p][lane].add(etas[lane].mul(alpha_shamir[p][lane])))
-            .collect();
+        let comb: SecretBuffer<Vec<Tower128>> = SecretBuffer(
+            (0..n)
+                .map(|p| beta_shamir[p][lane].add(etas[lane].mul(alpha_shamir[p][lane])))
+                .collect(),
+        );
         let _ = commit_and_open_degree_tower128(
             session_id,
             "spdz_setup_alpha_gf256",
@@ -4958,9 +5250,6 @@ pub fn spdz_setup_alpha_gf256(
             &comb,
             party_rngs,
         )?;
-    }
-    for b in &mut beta_shamir {
-        wipe_tower128(b);
     }
     Ok((alpha_contribs, alpha_shamir))
 }
@@ -4978,7 +5267,7 @@ pub fn authenticate_gf256_batch_two_lane(
 ) -> Result<(PairwiseTowerMacs, PairwiseTowerMacs), PreprocessError> {
     let n = ot_mesh.n;
     let count = x_batch.len();
-    if alpha_per_party.len() != n || party_rngs.len() != n {
+    if n == 0 || alpha_per_party.len() != n || party_rngs.len() != n {
         return Err(PreprocessError::InvalidThreshold { t: 1, n });
     }
     for row in x_batch {
@@ -5285,7 +5574,7 @@ pub fn spdz_authenticate_bs_gf256_words(
         }
     }
 
-    // Post-OT systematic universal hash `[I | H]`
+    // Post-OT systematic Toeplitz 2-universal hash `[I | T]` (`256^{-total_elems}` collision bound!)
     let lhl_coin = run_commit_and_open_coin(
         session_id,
         b"SPDZ_BS64_LHL_COMBINE",
@@ -5294,69 +5583,188 @@ pub fn spdz_authenticate_bs_gf256_words(
     )?;
     let mut h_xof = Cshake256Xof::new(b"QSAG.SPDZ.BS64.LHL_H/v1");
     h_xof.absorb(&lhl_coin);
-    let mut h_rows = vec![[0u8; 32]; total_elems];
-    for row in &mut h_rows {
-        h_xof.squeeze(row);
-    }
+    let mut toeplitz_h = vec![0u8; total_elems + 32];
+    h_xof.squeeze(&mut toeplitz_h);
 
-    let mut diff_sum = vec![TowerGf256::ZERO; total_elems];
+    let mut diff_sum = SecretBuffer(vec![TowerGf256::ZERO; total_elems]);
     for j in 0..t {
-        for idx in 0..total_elems {
-            let mut u_comb = TowerGf256(r_bytes[j][idx]);
-            for tl in 0..32 {
-                let g = TowerGf256(h_rows[idx][tl]);
-                u_comb = u_comb.add(g.mul(TowerGf256(r_bytes[j][total_elems + tl])));
+        let mut r_lut = [[0u8; 16]; 64];
+        for tl in 0..32 {
+            let rt = TowerGf256(r_bytes[j][total_elems + tl]);
+            #[expect(clippy::needless_range_loop, reason = "Each public nibble updates two adjacent lookup rows")]
+            for nib in 0..16usize {
+                r_lut[2 * tl][nib] = TowerGf256(nib as u8).mul(rt).0;
+                r_lut[2 * tl + 1][nib] = TowerGf256((nib as u8) << 4).mul(rt).0;
             }
-            diff_sum[idx] = diff_sum[idx].add(u_target[j][idx].add(u_comb));
+        }
+        for idx in 0..total_elems {
+            let mut u_comb = r_bytes[j][idx];
+            for tl in 0..32 {
+                let hb = toeplitz_h[idx + tl];
+                u_comb ^= r_lut[2 * tl][(hb & 0x0F) as usize]
+                    ^ r_lut[2 * tl + 1][(hb >> 4) as usize];
+            }
+            diff_sum[idx] = diff_sum[idx].add(u_target[j][idx].add(TowerGf256(u_comb)));
             u_target[j][idx] = TowerGf256::ZERO;
+        }
+        for row in &mut r_lut {
+            wipe_bytes(row);
         }
         wipe_bytes(&mut r_bytes[j]);
         wipe_u64s(&mut choice_words[j]);
     }
 
+    // Precompute Four-Russians nibble LUTs for `sum_raw[p][total_elems..+32][lane]` (indexed only by public `toeplitz_h`)
+    let sum_luts: SecretBuffer<Vec<[[[u128; 16]; 64]; 2]>> = SecretBuffer(
+        (0..n)
+            .map(|p| {
+                core::array::from_fn(|lane| {
+                    core::array::from_fn(|slot| {
+                        let tl = slot / 2;
+                        let hi = (slot % 2) == 1;
+                        let base = sum_raw[p][total_elems + tl][lane];
+                        core::array::from_fn(|nib| {
+                            let sc = if hi { (nib as u8) << 4 } else { nib as u8 };
+                            base.mul_gf256(TowerGf256(sc)).0
+                        })
+                    })
+                })
+            })
+            .collect(),
+    );
+
+    let party_work_seeds: SecretBuffer<Vec<[u8; 32]>> =
+        SecretBuffer((0..n).map(|p| party_rngs[p].next_bytes32()).collect());
+
     // Sum additive shares `tau_p[idx][lane]` at each party `p in 0..n` and Shamir-share at degree `< t`
     let mut all_macs = vec![vec![[[Tower128::ZERO; 64]; 2]; total_w]; n];
-    for p in 0..n {
-        #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
-        for k in 0..total_w {
-            for lane in 0..2 {
-                let ap = alpha_contribs[p][lane];
-                let mut tau_word = [0u128; 64];
-                for (bit, tau_word_bit_item) in tau_word[..64].iter_mut().enumerate() {
-                    let idx = 64 * k + bit;
-                    let mut tau = sum_raw[p][idx][lane].add(ap.mul_gf256(diff_sum[idx]));
-                    for tl in 0..32 {
-                        tau = tau.add(
-                            sum_raw[p][total_elems + tl][lane]
-                                .mul_gf256(TowerGf256(h_rows[idx][tl])),
-                        );
-                    }
-                    *tau_word_bit_item = tau.0;
-                }
-                let sh_blocks = shamir_share_tower128x64_mats(t, &eval_mats, &tau_word, &mut party_rngs[p]);
-                tau_word.fill(0);
-                for q in 0..n {
-                    #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
-                    for bit in 0..64 {
-                        let mut v_bytes = [0u8; 16];
-                        for byte_idx in 0..16 {
-                            v_bytes[byte_idx] = bs_gf256_extract_lane(&sh_blocks[q][byte_idx], bit).0;
+    const SH_BLK_WORDS: usize = 256;
+    let eval_sh_block = |blk_idx: usize, dst_per_party: &mut [&mut [[[Tower128; 64]; 2]]]| {
+        let k_start = blk_idx * SH_BLK_WORDS;
+        let blk_len = dst_per_party[0].len();
+        let blk_le = (blk_idx as u64).to_le_bytes();
+        for p in 0..n {
+            let mut sub_rng = PartyPrivateRng::from_seed(party_work_seeds[p], &blk_le);
+            for k_off in 0..blk_len {
+                let k = k_start + k_off;
+                for lane in 0..2 {
+                    let ap = alpha_contribs[p][lane];
+                    let lut = &sum_luts[p][lane];
+                    let mut tau_word = [0u128; 64];
+                    for (bit, tau_dst) in tau_word.iter_mut().enumerate() {
+                        let idx = 64 * k + bit;
+                        let mut acc = sum_raw[p][idx][lane].add(ap.mul_gf256(diff_sum[idx])).0;
+                        for tl in 0..32 {
+                            let hb = toeplitz_h[idx + tl];
+                            acc ^= lut[2 * tl][(hb & 0x0F) as usize]
+                                ^ lut[2 * tl + 1][(hb >> 4) as usize];
                         }
-                        let v_t128 = Tower128(u128::from_le_bytes(v_bytes));
-                        all_macs[q][k][lane][bit] = all_macs[q][k][lane][bit].add(v_t128);
+                        *tau_dst = acc;
+                    }
+                    let sh_blocks = SecretBuffer(shamir_share_tower128x64_mats(
+                        t,
+                        &eval_mats,
+                        &tau_word,
+                        &mut sub_rng,
+                    ));
+                    wipe_u128s(&mut tau_word);
+                    for (q, dst_q) in dst_per_party.iter_mut().enumerate() {
+                        let mut unpacked = unpack_bs_gf256x16_to_u128x64(&sh_blocks[q]);
+                        for bit in 0..64 {
+                            dst_q[k_off][lane][bit] =
+                                dst_q[k_off][lane][bit].add(Tower128(unpacked[bit]));
+                        }
+                        wipe_u128s(&mut unpacked);
                     }
                 }
             }
         }
-        #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
-        for s in 0..m_raw {
-            wipe_tower128(&mut sum_raw[p][s]);
+    };
+
+    #[cfg(any(test, feature = "std"))]
+    if total_w > SH_BLK_WORDS {
+        let mut party_iters: Vec<_> = all_macs
+            .iter_mut()
+            .map(|v| v.chunks_mut(SH_BLK_WORDS))
+            .collect();
+        let mut blk_groups: Vec<Vec<&mut [[[Tower128; 64]; 2]]>> = Vec::new();
+        loop {
+            let mut grp = Vec::with_capacity(n);
+            for it in &mut party_iters {
+                if let Some(sl) = it.next() {
+                    grp.push(sl);
+                }
+            }
+            if grp.is_empty() {
+                break;
+            }
+            blk_groups.push(grp);
+        }
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(16);
+        let grp_per_worker = blk_groups.len().div_ceil(workers).max(1);
+        std::thread::scope(|scope| {
+            for (w_idx, worker_grps) in blk_groups.chunks_mut(grp_per_worker).enumerate() {
+                let base_blk = w_idx * grp_per_worker;
+                scope.spawn(move || {
+                    for (off, grp) in worker_grps.iter_mut().enumerate() {
+                        eval_sh_block(base_blk + off, grp.as_mut_slice());
+                    }
+                });
+            }
+        });
+    } else {
+        let mut party_iters: Vec<_> = all_macs
+            .iter_mut()
+            .map(|v| v.chunks_mut(SH_BLK_WORDS))
+            .collect();
+        let mut blk_idx = 0usize;
+        loop {
+            let mut grp = Vec::with_capacity(n);
+            for it in &mut party_iters {
+                if let Some(sl) = it.next() {
+                    grp.push(sl);
+                }
+            }
+            if grp.is_empty() {
+                break;
+            }
+            eval_sh_block(blk_idx, grp.as_mut_slice());
+            blk_idx += 1;
         }
     }
-    crate::wipe::wipe_gf256_slice(&mut diff_sum);
+    #[cfg(not(any(test, feature = "std")))]
+    {
+        let mut party_iters: Vec<_> = all_macs
+            .iter_mut()
+            .map(|v| v.chunks_mut(SH_BLK_WORDS))
+            .collect();
+        let mut blk_idx = 0usize;
+        loop {
+            let mut grp = Vec::with_capacity(n);
+            for it in &mut party_iters {
+                if let Some(sl) = it.next() {
+                    grp.push(sl);
+                }
+            }
+            if grp.is_empty() {
+                break;
+            }
+            eval_sh_block(blk_idx, grp.as_mut_slice());
+            blk_idx += 1;
+        }
+    }
+
+    for row in sum_raw.iter_mut() {
+        for share in row { wipe_tower128(share); }
+    }
+    drop(sum_luts);
+    drop(party_work_seeds);
+    drop(diff_sum);
 
     // Batch `Π_MAC` consistency + full `0..n` degree check on `words_per_party` and `all_macs`:
-    // 1) Check degree `< t` of `words_per_party` across `0..n` masked by `r_chk_sh` (`2^{-512}` soundness!)
+    // 1) Check degree `< t` of `words_per_party` across `0..n` masked by `r_chk_sh` (`2^{-256}` soundness!)
     let chk_coin = run_commit_and_open_coin(
         session_id,
         b"SPDZ_BS64_PIMAC_CHK",
@@ -5366,7 +5774,7 @@ pub fn spdz_authenticate_bs_gf256_words(
     let mut chk_xof = Cshake256Xof::new(b"QSAG.SPDZ.BS64.PIMAC_W/v1");
     chk_xof.absorb(&chk_coin);
 
-    let mut deg_fold_sh = r_chk_sh.clone();
+    let mut deg_fold_sh = SecretBuffer(r_chk_sh.clone());
     #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
     for k in 0..num_words {
         let mut s_byte = [0u8; 1];
@@ -5376,15 +5784,15 @@ pub fn spdz_authenticate_bs_gf256_words(
             mat.scale_xor_into(&mut deg_fold_sh[p], &words_per_party[p][k]);
         }
     }
-    // Note: `deg_fold_sh` cannot leak `r_chk_sh[0..16]` if we use `r_chk_sh` twice, so only check
-    // lanes `32..64` here while reserving lanes `0..16` strictly as the one-time pad for `Z` below!
+    // Check lanes `32..64` here while reserving lanes `0..16` and `16..32` strictly as two
+    // independent 128-bit one-time pads `(R_0, R_1)` for `(Z_0, Z_1)` below (`0` pad reuse!).
     let mut deg_half_sh = vec![[0u64; 8]; n];
     for p in 0..n {
         for pl in 0..8 {
             deg_half_sh[p][pl] = deg_fold_sh[p][pl] & 0xFFFF_FFFF_0000_0000u64;
         }
-        wipe_u64s(&mut deg_fold_sh[p]);
     }
+    drop(deg_fold_sh);
     let _ = open_and_check_degree_bs_gf256(
         t,
         eval_points,
@@ -5392,68 +5800,170 @@ pub fn spdz_authenticate_bs_gf256_words(
         "spdz_bs_gf256_words_deg",
     )?;
 
-    // 2) Pack lanes `0..16` of `r_chk_sh` into a uniform `Tower128` mask `R_0` and fold all
-    //    `64 * num_words` elements with random `Tower128` weights `chi_{k, bit}`:
-    let mut z_sh = vec![Tower128::ZERO; n];
-    let mut z_mac = vec![[Tower128::ZERO; 2]; n];
-    #[expect(clippy::needless_range_loop, reason = "Coordinate order binds the same lane across all party MAC matrices")]
+    // 2) Independent 2-lane `Tower128` folding (`2^{-256}` soundness, zero pad reuse across lanes!):
+    //    - `R_0` (lanes `0..16` of `r_chk_sh`) masks `Z_0` with identity basis `[I, *; 0, I]`;
+    //    - `R_1` (lanes `16..32` of `r_chk_sh`) masks `Z_1` independently;
+    //    - Lanes `32..64` of `r_chk_sh` and all `64 * num_words` wires use independent uniform
+    //      `GF(2^128)` challenges `(chi_0, chi_1)` (no `| 1` bias!).
+    let mut z_sh_lanes = SecretBuffer(vec![vec![Tower128::ZERO; n]; 2]);
+    let mut z_mac = SecretBuffer(vec![[Tower128::ZERO; 2]; n]);
     for b_idx in 0..16 {
         let basis = Tower128(1u128 << (8 * b_idx));
+        let mut cb0 = [0u8; 16];
+        chk_xof.squeeze(&mut cb0);
+        let chi0_hi = Tower128(u128::from_le_bytes(cb0));
         for p in 0..n {
-            let r_byte = bs_gf256_extract_lane(&r_chk_sh[p], b_idx);
-            z_sh[p] = z_sh[p].add(basis.mul_gf256(r_byte));
-            z_mac[p][0] = z_mac[p][0].add(basis.mul(all_macs[p][num_words][0][b_idx]));
-            z_mac[p][1] = z_mac[p][1].add(basis.mul(all_macs[p][num_words][1][b_idx]));
+            let r_lo = bs_gf256_extract_lane(&r_chk_sh[p], b_idx);
+            let r_hi = bs_gf256_extract_lane(&r_chk_sh[p], 16 + b_idx);
+            z_sh_lanes[0][p] = z_sh_lanes[0][p]
+                .add(basis.mul_gf256(r_lo))
+                .add(chi0_hi.mul_gf256(r_hi));
+            z_sh_lanes[1][p] = z_sh_lanes[1][p].add(basis.mul_gf256(r_hi));
+            z_mac[p][0] = z_mac[p][0]
+                .add(basis.mul(all_macs[p][num_words][0][b_idx]))
+                .add(chi0_hi.mul(all_macs[p][num_words][0][16 + b_idx]));
+            z_mac[p][1] = z_mac[p][1].add(basis.mul(all_macs[p][num_words][1][16 + b_idx]));
         }
     }
-    // Also fold lanes `16..64` of `r_chk_sh` so all 64 lanes of `r_chk_sh` are bound
     #[expect(clippy::needless_range_loop, reason = "Coordinate order binds the same lane across all party MAC matrices")]
-    for bit in 16..64 {
-        let mut cb = [0u8; 16];
+    for bit in 32..64 {
+        let mut cb = [0u8; 32];
         chk_xof.squeeze(&mut cb);
-        let chi = Tower128(u128::from_le_bytes(cb) | 1);
+        let chi0 = Tower128(u128::from_le_bytes(core::array::from_fn(|i| cb[i])));
+        let chi1 = Tower128(u128::from_le_bytes(core::array::from_fn(|i| cb[16 + i])));
         for p in 0..n {
             let r_byte = bs_gf256_extract_lane(&r_chk_sh[p], bit);
-            z_sh[p] = z_sh[p].add(chi.mul_gf256(r_byte));
-            z_mac[p][0] = z_mac[p][0].add(chi.mul(all_macs[p][num_words][0][bit]));
-            z_mac[p][1] = z_mac[p][1].add(chi.mul(all_macs[p][num_words][1][bit]));
-        }
-    }
-    for k in 0..num_words {
-        #[expect(clippy::needless_range_loop, reason = "Coordinate order binds the same lane across all party MAC matrices")]
-        for bit in 0..64 {
-            let mut cb = [0u8; 16];
-            chk_xof.squeeze(&mut cb);
-            let chi = Tower128(u128::from_le_bytes(cb) | 1);
-            for p in 0..n {
-                let x_byte = bs_gf256_extract_lane(&words_per_party[p][k], bit);
-                z_sh[p] = z_sh[p].add(chi.mul_gf256(x_byte));
-                z_mac[p][0] = z_mac[p][0].add(chi.mul(all_macs[p][k][0][bit]));
-                z_mac[p][1] = z_mac[p][1].add(chi.mul(all_macs[p][k][1][bit]));
-            }
+            z_sh_lanes[0][p] = z_sh_lanes[0][p].add(chi0.mul_gf256(r_byte));
+            z_sh_lanes[1][p] = z_sh_lanes[1][p].add(chi1.mul_gf256(r_byte));
+            z_mac[p][0] = z_mac[p][0].add(chi0.mul(all_macs[p][num_words][0][bit]));
+            z_mac[p][1] = z_mac[p][1].add(chi1.mul(all_macs[p][num_words][1][bit]));
         }
     }
     for r_chk_sh_p_item in r_chk_sh[..n].iter_mut() {
         wipe_u64s(&mut *r_chk_sh_p_item);
     }
 
-    let z_open = commit_and_open_degree_tower128(
-        session_id,
-        "spdz_bs_gf256_pimac_z",
-        t,
-        eval_points,
-        &z_sh,
-        party_rngs,
-    )?;
-    wipe_tower128(&mut z_sh);
+    let fold_word_range = |blk_start: usize, blk_count: usize| -> (Vec<[Tower128; 2]>, Vec<[Tower128; 2]>) {
+        let mut local_zsh = vec![[Tower128::ZERO; 2]; n];
+        let mut local_zmac = vec![[Tower128::ZERO; 2]; n];
+        let mut chi_buf = [0u8; 64 * 32];
+        for blk_idx in blk_start..(blk_start + blk_count) {
+            let k_start = blk_idx * SH_BLK_WORDS;
+            let k_end = (k_start + SH_BLK_WORDS).min(num_words);
+            let mut blk_xof = Cshake256Xof::new(b"QSAG.SPDZ.BS64.PIMAC_W_BLK/v1");
+            blk_xof.absorb(&chk_coin);
+            blk_xof.absorb(&(blk_idx as u64).to_le_bytes());
+            for k in k_start..k_end {
+                blk_xof.squeeze(&mut chi_buf);
+                let lhs: [[u128; 2]; 64] = core::array::from_fn(|bit| {
+                    let off = 32 * bit;
+                    [
+                        u128::from_le_bytes(core::array::from_fn(|b| chi_buf[off + b])),
+                        u128::from_le_bytes(core::array::from_fn(|b| chi_buf[off + 16 + b])),
+                    ]
+                });
+                for p in 0..n {
+                    for (bit, pair) in lhs.iter().enumerate() {
+                        let x_byte = bs_gf256_extract_lane(&words_per_party[p][k], bit);
+                        local_zsh[p][0] = local_zsh[p][0].add(Tower128(pair[0]).mul_gf256(x_byte));
+                        local_zsh[p][1] = local_zsh[p][1].add(Tower128(pair[1]).mul_gf256(x_byte));
+                    }
+                    let mut rhs: [[u128; 2]; 64] = core::array::from_fn(|bit| {
+                        [all_macs[p][k][0][bit].0, all_macs[p][k][1][bit].0]
+                    });
+                    let mut folded = qsag_asm::tower128_bdoz_2lane_mac(&lhs, &rhs);
+                    local_zmac[p][0] = local_zmac[p][0].add(Tower128(folded[0]));
+                    local_zmac[p][1] = local_zmac[p][1].add(Tower128(folded[1]));
+                    wipe_u128s(rhs.as_flattened_mut());
+                    wipe_u128s(&mut folded);
+                }
+            }
+        }
+        wipe_bytes(&mut chi_buf);
+        (local_zsh, local_zmac)
+    };
 
-    // Open `D_lane(x_p) = [gamma_lane(Z)]_p ^ (Z * [alpha_lane]_p)` across ALL `0..n` parties!
-    // Because `all_macs[..][num_words]` was shared with fresh independent degree-`1..(t-1)` random
-    // polynomials, `D_lane(X)` is a uniform random degree-`< t` polynomial subject ONLY to `D_lane(0) == 0`!
-    for lane in 0..2 {
-        let mut d_sh: Vec<Tower128> = (0..n)
-            .map(|p| z_mac[p][lane].add(z_open.mul(alpha_shamir_shares[p][lane])))
-            .collect();
+    let num_blks = num_words.div_ceil(SH_BLK_WORDS);
+    #[cfg(any(test, feature = "std"))]
+    if num_blks > 1 {
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(16);
+        let blks_per_worker = num_blks.div_ceil(workers).max(1);
+        let partials = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            let mut b0 = 0usize;
+            while b0 < num_blks {
+                let cnt = (num_blks - b0).min(blks_per_worker);
+                handles.push(scope.spawn(move || fold_word_range(b0, cnt)));
+                b0 += cnt;
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("spdz pimac fold worker"))
+                .collect::<Vec<_>>()
+        });
+        for (mut l_zsh, mut l_zmac) in partials {
+            for p in 0..n {
+                z_sh_lanes[0][p] = z_sh_lanes[0][p].add(l_zsh[p][0]);
+                z_sh_lanes[1][p] = z_sh_lanes[1][p].add(l_zsh[p][1]);
+                z_mac[p][0] = z_mac[p][0].add(l_zmac[p][0]);
+                z_mac[p][1] = z_mac[p][1].add(l_zmac[p][1]);
+                wipe_tower128(&mut l_zsh[p]);
+                wipe_tower128(&mut l_zmac[p]);
+            }
+        }
+    } else if num_blks == 1 {
+        let (mut l_zsh, mut l_zmac) = fold_word_range(0, 1);
+        for p in 0..n {
+            z_sh_lanes[0][p] = z_sh_lanes[0][p].add(l_zsh[p][0]);
+            z_sh_lanes[1][p] = z_sh_lanes[1][p].add(l_zsh[p][1]);
+            z_mac[p][0] = z_mac[p][0].add(l_zmac[p][0]);
+            z_mac[p][1] = z_mac[p][1].add(l_zmac[p][1]);
+            wipe_tower128(&mut l_zsh[p]);
+            wipe_tower128(&mut l_zmac[p]);
+        }
+    }
+    #[cfg(not(any(test, feature = "std")))]
+    if num_blks > 0 {
+        let (mut l_zsh, mut l_zmac) = fold_word_range(0, num_blks);
+        for p in 0..n {
+            z_sh_lanes[0][p] = z_sh_lanes[0][p].add(l_zsh[p][0]);
+            z_sh_lanes[1][p] = z_sh_lanes[1][p].add(l_zsh[p][1]);
+            z_mac[p][0] = z_mac[p][0].add(l_zmac[p][0]);
+            z_mac[p][1] = z_mac[p][1].add(l_zmac[p][1]);
+            wipe_tower128(&mut l_zsh[p]);
+            wipe_tower128(&mut l_zmac[p]);
+        }
+    }
+
+    let z_open = [
+        commit_and_open_degree_tower128(
+            session_id,
+            "spdz_bs_gf256_pimac_z0",
+            t,
+            eval_points,
+            &z_sh_lanes[0],
+            party_rngs,
+        )?,
+        commit_and_open_degree_tower128(
+            session_id,
+            "spdz_bs_gf256_pimac_z1",
+            t,
+            eval_points,
+            &z_sh_lanes[1],
+            party_rngs,
+        )?,
+    ];
+    drop(z_sh_lanes);
+
+    // Open `D_lane(x_p) = [gamma_lane(Z_lane)]_p ^ (Z_lane * [alpha_lane]_p)` across ALL `0..n` parties!
+    for (lane, &z_op_l) in z_open.iter().enumerate() {
+        let d_sh: SecretBuffer<Vec<Tower128>> = SecretBuffer(
+            (0..n)
+                .map(|p| z_mac[p][lane].add(z_op_l.mul(alpha_shamir_shares[p][lane])))
+                .collect(),
+        );
         let d_zero = commit_and_open_degree_tower128(
             session_id,
             "spdz_bs_gf256_pimac_d",
@@ -5462,7 +5972,6 @@ pub fn spdz_authenticate_bs_gf256_words(
             &d_sh,
             party_rngs,
         )?;
-        wipe_tower128(&mut d_sh);
         if !d_zero.ct_eq(Tower128::ZERO) {
             return Err(PreprocessError::MacCheckFailed {
                 phase: "spdz_bs_gf256_pimac",
@@ -5470,9 +5979,7 @@ pub fn spdz_authenticate_bs_gf256_words(
             });
         }
     }
-    for zm in &mut z_mac {
-        wipe_tower128(zm);
-    }
+    drop(z_mac);
 
     // Pop the disposable `r_chk` MAC slot and return the verified `num_words` SPDZ MAC shares
     for all_macs_p_item in all_macs[..n].iter_mut() {
@@ -5532,6 +6039,42 @@ fn shamir_share_bits64_gf256(
     shamir_share_bits64_gf256_mats(t, &mats, word, rng)
 }
 
+#[inline]
+fn transpose_64x64_in_place(tile: &mut [u64; 64]) {
+    for stage in 0..6 {
+        let shift = 1usize << stage;
+        let mask = u64::MAX / ((1u64 << shift) + 1);
+        for base in (0..64).step_by(2 * shift) {
+            for offset in 0..shift {
+                let a = base + offset;
+                let b = a + shift;
+                let delta = ((tile[a] >> shift) ^ tile[b]) & mask;
+                tile[a] ^= delta << shift;
+                tile[b] ^= delta;
+            }
+        }
+    }
+}
+
+#[inline]
+fn unpack_bs_gf256x16_to_u128x64(blocks: &[BitslicedGf256x64; 16]) -> [u128; 64] {
+    let mut lo = [0u64; 64];
+    let mut hi = [0u64; 64];
+    for byte_idx in 0..8 {
+        for pl in 0..8 {
+            lo[8 * byte_idx + pl] = blocks[byte_idx][pl];
+            hi[8 * byte_idx + pl] = blocks[8 + byte_idx][pl];
+        }
+    }
+    transpose_64x64_in_place(&mut lo);
+    transpose_64x64_in_place(&mut hi);
+    let out: [u128; 64] =
+        core::array::from_fn(|bit| (lo[bit] as u128) | ((hi[bit] as u128) << 64));
+    wipe_u64s(&mut lo);
+    wipe_u64s(&mut hi);
+    out
+}
+
 /// Pack 64 `Tower128` elements (`[u128; 64]`) into 16 bitsliced `TowerGf256` byte blocks
 /// (`[BitslicedGf256x64; 16]`) and Shamir-share at degree `< t` over `eval_mats`.
 fn shamir_share_tower128x64_mats(
@@ -5541,18 +6084,19 @@ fn shamir_share_tower128x64_mats(
     rng: &mut PartyPrivateRng,
 ) -> Vec<[BitslicedGf256x64; 16]> {
     let n = eval_mats.len();
+    let mut lo: [u64; 64] = core::array::from_fn(|bit| vals[bit] as u64);
+    let mut hi: [u64; 64] = core::array::from_fn(|bit| (vals[bit] >> 64) as u64);
+    transpose_64x64_in_place(&mut lo);
+    transpose_64x64_in_place(&mut hi);
     let mut const_blocks = [[0u64; 8]; 16];
-    for (bit, vals_bit_item) in vals[..64].iter().enumerate() {
-        let v = *vals_bit_item;
-        let bit_u64 = 1u64 << bit;
-        for (byte_idx, const_blocks_byte_idx_item) in const_blocks[..16].iter_mut().enumerate() {
-            let b = ((v >> (8 * byte_idx)) & 0xFF) as u8;
-            for pl in 0..8 {
-                let m = 0u64.wrapping_sub(((b >> pl) & 1) as u64);
-                (*const_blocks_byte_idx_item)[pl] |= m & bit_u64;
-            }
+    for byte_idx in 0..8 {
+        for pl in 0..8 {
+            const_blocks[byte_idx][pl] = lo[8 * byte_idx + pl];
+            const_blocks[8 + byte_idx][pl] = hi[8 * byte_idx + pl];
         }
     }
+    wipe_u64s(&mut lo);
+    wipe_u64s(&mut hi);
 
     let mut out = vec![[[0u64; 8]; 16]; n];
     for byte_idx in 0..16 {
@@ -5721,21 +6265,27 @@ pub fn commit_and_open_spdz_bs_gf256_batch_quorum(
     let mut chi_xof = Cshake256Xof::new(b"QSAG.SPDZ.BS64.BATCH.CHIS/v1");
     chi_xof.absorb(&fold_coin);
 
-    let mut x_folded = Tower128::ZERO;
-    let mut m_folded = vec![[Tower128::ZERO; 2]; t];
+    let mut x_folded = [Tower128::ZERO; 2];
+    let mut m_folded = SecretBuffer(vec![[Tower128::ZERO; 2]; t]);
+    let mut chi_raw = [0u8; 2 * 64 * 16];
     for w in 0..batch_len {
-        let mut chi_raw = [0u8; 64 * 16];
         chi_xof.squeeze(&mut chi_raw);
-        let chis: [Tower128; 64] = core::array::from_fn(|bit| {
-            let mut bytes = [0; 16]; bytes.copy_from_slice(&chi_raw[16 * bit..16 * (bit + 1)]);
-            Tower128(u128::from_le_bytes(bytes) | 1)
+        let lhs: [[u128; 2]; 64] = core::array::from_fn(|bit| {
+            let off = 32 * bit;
+            [
+                u128::from_le_bytes(core::array::from_fn(|b| chi_raw[off + b])),
+                u128::from_le_bytes(core::array::from_fn(|b| chi_raw[off + 16 + b])),
+            ]
         });
-        let lhs: [[u128; 2]; 64] = core::array::from_fn(|bit| [chis[bit].0; 2]);
-        for (bit, chi) in chis.iter().enumerate() {
-            x_folded = x_folded.add(chi.mul_gf256(bs_gf256_extract_lane(&opened[w], bit)));
+        for (bit, pair) in lhs.iter().enumerate() {
+            let xb = bs_gf256_extract_lane(&opened[w], bit);
+            x_folded[0] = x_folded[0].add(Tower128(pair[0]).mul_gf256(xb));
+            x_folded[1] = x_folded[1].add(Tower128(pair[1]).mul_gf256(xb));
         }
         for q in 0..t {
-            let mut rhs: [[u128; 2]; 64] = core::array::from_fn(|bit| [batch_macs[q][w][0][bit].0, batch_macs[q][w][1][bit].0]);
+            let mut rhs: [[u128; 2]; 64] = core::array::from_fn(|bit| {
+                [batch_macs[q][w][0][bit].0, batch_macs[q][w][1][bit].0]
+            });
             let mut fold = qsag_asm::tower128_bdoz_2lane_mac(&lhs, &rhs);
             m_folded[q][0] = m_folded[q][0].add(Tower128(fold[0]));
             m_folded[q][1] = m_folded[q][1].add(Tower128(fold[1]));
@@ -5743,8 +6293,9 @@ pub fn commit_and_open_spdz_bs_gf256_batch_quorum(
             crate::wipe::wipe_u128s(&mut fold);
         }
     }
+    wipe_bytes(&mut chi_raw);
 
-    let mut z_masks = vec![[Tower128::ZERO; 2]; t];
+    let mut z_masks = SecretBuffer(vec![[Tower128::ZERO; 2]; t]);
     if t > 1 {
         for party_rngs_r_item in party_rngs[..t].iter_mut() {
             let mut sum0 = Tower128::ZERO;
@@ -5762,31 +6313,31 @@ pub fn commit_and_open_spdz_bs_gf256_batch_quorum(
         }
     }
 
-    let mut sigmas = Vec::with_capacity(t);
-    let mut sig_salts = Vec::with_capacity(t);
+    let mut sigmas = SecretBuffer(Vec::with_capacity(t));
+    let mut sig_salts = SecretBuffer(Vec::with_capacity(t));
     let mut sig_coms = Vec::with_capacity(t);
     for q in 0..t {
         let lam_emb = Tower128::embed_gf256(lambdas_0[q]);
         let s0 = lam_emb
-            .mul(m_folded[q][0].add(x_folded.mul(alpha_shares[q][0])))
+            .mul(m_folded[q][0].add(x_folded[0].mul(alpha_shares[q][0])))
             .add(z_masks[q][0]);
         let s1 = lam_emb
-            .mul(m_folded[q][1].add(x_folded.mul(alpha_shares[q][1])))
+            .mul(m_folded[q][1].add(x_folded[1].mul(alpha_shares[q][1])))
             .add(z_masks[q][1]);
         wipe_tower128(&mut z_masks[q]);
         wipe_tower128(&mut m_folded[q]);
         let salt = party_rngs[q].next_bytes32();
         let q_be = (q as u64).to_be_bytes();
-        let com = cshake256_32(
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.BS64.BATCH.MAC.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &q_be,
                 &s0.0.to_le_bytes(),
                 &s1.0.to_le_bytes(),
                 &salt,
-            ]),
+            ],
         );
         sigmas.push([s0, s1]);
         sig_salts.push(salt);
@@ -5797,16 +6348,16 @@ pub fn commit_and_open_spdz_bs_gf256_batch_quorum(
     let mut sum1 = Tower128::ZERO;
     for q in 0..t {
         let q_be = (q as u64).to_be_bytes();
-        let exp = cshake256_32(
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.BS64.BATCH.MAC.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &q_be,
                 &sigmas[q][0].0.to_le_bytes(),
                 &sigmas[q][1].0.to_le_bytes(),
                 &sig_salts[q],
-            ]),
+            ],
         );
         wipe_bytes32(&mut sig_salts[q]);
         if !ct_eq_bytes32(&exp, &sig_coms[q]) {
@@ -6069,10 +6620,10 @@ where
     // plus `8` self-squared Frobenius mask words (`4` for `a`, `4` for `b` = exact 256-bit Booleanity check).
     let raw_triples = 3 * num_triples;
     let total_words = raw_triples + 8;
-    let mut u_words = vec![vec![0u64; total_words]; n];
-    let mut v_words = vec![vec![0u64; total_words]; n];
-    let mut at0_raw = vec![vec![[0u128; 64]; total_words]; n];
-    let mut at1_raw = vec![vec![[0u128; 64]; total_words]; n];
+    let mut u_words = SecretBuffer(vec![vec![0u64; total_words]; n]);
+    let mut v_words = SecretBuffer(vec![vec![0u64; total_words]; n]);
+    let mut at0_raw = SecretBuffer(vec![vec![[0u128; 64]; total_words]; n]);
+    let mut at1_raw = SecretBuffer(vec![vec![[0u128; 64]; total_words]; n]);
 
     for i in 0..n {
         for k in 0..raw_triples {
@@ -6092,41 +6643,68 @@ where
         }
     }
 
-    let (mut w_words, mut ct0_raw, mut ct1_raw) = pairwise_boolean_and_mascot_companions(
+    let (w_words_raw, ct0_raw_inner, ct1_raw_inner) = pairwise_boolean_and_mascot_companions(
         ot_mesh,
-        &u_words,
-        &v_words,
-        &at0_raw,
-        &at1_raw,
+        u_words.as_slice(),
+        v_words.as_slice(),
+        at0_raw.as_slice(),
+        at1_raw.as_slice(),
         party_rngs,
     )?;
+    let mut w_words = SecretBuffer(w_words_raw);
+    let mut ct0_raw = SecretBuffer(ct0_raw_inner);
+    let mut ct1_raw = SecretBuffer(ct1_raw_inner);
 
-    let mut a_sh = vec![vec![[0u64; 8]; total_words]; n];
-    let mut b_sh = vec![vec![[0u64; 8]; total_words]; n];
-    let mut c_sh = vec![vec![[0u64; 8]; total_words]; n];
-    let mut at_bs_sh = vec![vec![vec![[[0u64; 8]; 16]; total_words]; n]; 2];
-    let mut ct_bs_sh = vec![vec![vec![[[0u64; 8]; 16]; total_words]; n]; 2];
+    let mut a_sh = SecretBuffer(vec![vec![[0u64; 8]; total_words]; n]);
+    let mut b_sh = SecretBuffer(vec![vec![[0u64; 8]; total_words]; n]);
+    let mut c_sh = SecretBuffer(vec![vec![[0u64; 8]; total_words]; n]);
+    let mut at_bs_sh = SecretBuffer(vec![vec![vec![[[0u64; 8]; 16]; total_words]; n]; 2]);
+    let mut ct_bs_sh = SecretBuffer(vec![vec![vec![[[0u64; 8]; 16]; total_words]; n]; 2]);
 
     for i in 0..n {
         for k in 0..total_words {
-            let s_ua =
-                shamir_share_bits64_gf256_mats(t, &eval_mats, u_words[i][k], &mut party_rngs[i]);
-            let s_vb = if k < raw_triples {
+            let s_ua = SecretBuffer(shamir_share_bits64_gf256_mats(
+                t,
+                &eval_mats,
+                u_words[i][k],
+                &mut party_rngs[i],
+            ));
+            let s_vb = SecretBuffer(if k < raw_triples {
                 shamir_share_bits64_gf256_mats(t, &eval_mats, v_words[i][k], &mut party_rngs[i])
             } else {
-                s_ua.clone()
-            };
-            let s_wc =
-                shamir_share_bits64_gf256_mats(t, &eval_mats, w_words[i][k], &mut party_rngs[i]);
+                s_ua.0.clone()
+            });
+            let s_wc = SecretBuffer(shamir_share_bits64_gf256_mats(
+                t,
+                &eval_mats,
+                w_words[i][k],
+                &mut party_rngs[i],
+            ));
 
-            let s_at0 =
-                shamir_share_tower128x64_mats(t, &eval_mats, &at0_raw[i][k], &mut party_rngs[i]);
-            let s_ct0 =
-                shamir_share_tower128x64_mats(t, &eval_mats, &ct0_raw[i][k], &mut party_rngs[i]);
-            let s_at1 =
-                shamir_share_tower128x64_mats(t, &eval_mats, &at1_raw[i][k], &mut party_rngs[i]);
-            let s_ct1 =
-                shamir_share_tower128x64_mats(t, &eval_mats, &ct1_raw[i][k], &mut party_rngs[i]);
+            let s_at0 = SecretBuffer(shamir_share_tower128x64_mats(
+                t,
+                &eval_mats,
+                &at0_raw[i][k],
+                &mut party_rngs[i],
+            ));
+            let s_ct0 = SecretBuffer(shamir_share_tower128x64_mats(
+                t,
+                &eval_mats,
+                &ct0_raw[i][k],
+                &mut party_rngs[i],
+            ));
+            let s_at1 = SecretBuffer(shamir_share_tower128x64_mats(
+                t,
+                &eval_mats,
+                &at1_raw[i][k],
+                &mut party_rngs[i],
+            ));
+            let s_ct1 = SecretBuffer(shamir_share_tower128x64_mats(
+                t,
+                &eval_mats,
+                &ct1_raw[i][k],
+                &mut party_rngs[i],
+            ));
 
             for p in 0..n {
                 bs_gf256_xor_assign(&mut a_sh[p][k], &s_ua[p]);
@@ -6139,15 +6717,16 @@ where
                     bs_gf256_xor_assign(&mut ct_bs_sh[1][p][k][m], &s_ct1[p][m]);
                 }
             }
-            at0_raw[i][k].fill(0);
-            at1_raw[i][k].fill(0);
-            ct0_raw[i][k].fill(0);
-            ct1_raw[i][k].fill(0);
+            wipe_u128s(&mut at0_raw[i][k]);
+            wipe_u128s(&mut at1_raw[i][k]);
+            wipe_u128s(&mut ct0_raw[i][k]);
+            wipe_u128s(&mut ct1_raw[i][k]);
         }
         wipe_u64s(&mut u_words[i]);
         wipe_u64s(&mut v_words[i]);
         wipe_u64s(&mut w_words[i]);
     }
+    drop((u_words, v_words, w_words, at0_raw, at1_raw, ct0_raw, ct1_raw));
 
     for p in 0..n {
         fault_hook(p, &mut a_sh[p][..raw_triples], &mut c_sh[p][..raw_triples]);
@@ -6157,37 +6736,40 @@ where
     // under the global 2-lane `Tower128` SPDZ MAC key BEFORE any sacrifice or Booleanity opening!
     let base_count = 2 * total_words + raw_triples;
     let comp_count = 64 * total_words; // 2 lanes * 2 (at, ct) * 16 byte blocks * total_words
-    let packed_words_per_party: Vec<Vec<BitslicedGf256x64>> = (0..n)
-        .map(|p| {
-            let mut v = Vec::with_capacity(base_count + comp_count);
-            v.extend_from_slice(&a_sh[p]);
-            v.extend_from_slice(&b_sh[p][..raw_triples]);
-            v.extend_from_slice(&c_sh[p]);
-            for lane in 0..2 {
-                for k in 0..total_words {
-                    v.extend_from_slice(&at_bs_sh[lane][p][k]);
-                    v.extend_from_slice(&ct_bs_sh[lane][p][k]);
+    let packed_words_per_party: SecretBuffer<Vec<Vec<BitslicedGf256x64>>> = SecretBuffer(
+        (0..n)
+            .map(|p| {
+                let mut v = Vec::with_capacity(base_count + comp_count);
+                v.extend_from_slice(&a_sh[p]);
+                v.extend_from_slice(&b_sh[p][..raw_triples]);
+                v.extend_from_slice(&c_sh[p]);
+                for lane in 0..2 {
+                    for k in 0..total_words {
+                        v.extend_from_slice(&at_bs_sh[lane][p][k]);
+                        v.extend_from_slice(&ct_bs_sh[lane][p][k]);
+                    }
                 }
-            }
-            v
-        })
-        .collect();
-    let all_word_macs = spdz_authenticate_bs_gf256_words(
+                v
+            })
+            .collect(),
+    );
+    let all_word_macs = SecretBuffer(spdz_authenticate_bs_gf256_words(
         &session_id,
         t,
         eval_points,
         ot_mesh,
         alpha_contribs,
         alpha_shamir,
-        &packed_words_per_party,
+        packed_words_per_party.as_slice(),
         party_rngs,
-    )?;
+    )?);
+    drop(packed_words_per_party);
 
-    let mut a_mac = vec![vec![[[Tower128::ZERO; 64]; 2]; total_words]; n];
-    let mut b_mac = vec![vec![[[Tower128::ZERO; 64]; 2]; total_words]; n];
-    let mut c_mac = vec![vec![[[Tower128::ZERO; 64]; 2]; total_words]; n];
-    let mut at_bs_mac = vec![vec![vec![[[[Tower128::ZERO; 64]; 2]; 16]; total_words]; n]; 2];
-    let mut ct_bs_mac = vec![vec![vec![[[[Tower128::ZERO; 64]; 2]; 16]; total_words]; n]; 2];
+    let mut a_mac = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; total_words]; n]);
+    let mut b_mac = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; total_words]; n]);
+    let mut c_mac = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; total_words]; n]);
+    let mut at_bs_mac = SecretBuffer(vec![vec![vec![[[[Tower128::ZERO; 64]; 2]; 16]; total_words]; n]; 2]);
+    let mut ct_bs_mac = SecretBuffer(vec![vec![vec![[[[Tower128::ZERO; 64]; 2]; 16]; total_words]; n]; 2]);
     for p in 0..n {
         for k in 0..total_words {
             a_mac[p][k] = all_word_macs[p][k];
@@ -6209,6 +6791,7 @@ where
             }
         }
     }
+    drop(all_word_macs);
 
     // Bucket assignment for the `3 -> 1` combine. All raw shares are SPDZ-authenticated at this
     // point, so no party can change a raw triple any more. Only now is a joint coin drawn, bound
@@ -6218,12 +6801,12 @@ where
     let lock_digest = pi_triple_f2_lock_digest(
         &session_id,
         raw_triples,
-        &a_sh,
-        &b_sh,
-        &c_sh,
-        &a_mac,
-        &b_mac,
-        &c_mac,
+        a_sh.as_slice(),
+        b_sh.as_slice(),
+        c_sh.as_slice(),
+        a_mac.as_slice(),
+        b_mac.as_slice(),
+        c_mac.as_slice(),
         party_rngs,
     );
     let bucket_coin = run_commit_and_open_coin(
@@ -6257,8 +6840,8 @@ where
     // Check 1: SPDZ-MAC-authenticated 2-lane `Tower128` MASCOT companion sacrifice across ALL `total_words`
     // (`0` unauthenticated openings — active dishonest majority cannot forge `u_open` or `w_res`!)
     let sac_batch_len = 32 * total_words;
-    let mut u_batch_sh = vec![Vec::with_capacity(sac_batch_len); n];
-    let mut u_batch_mac = vec![Vec::with_capacity(sac_batch_len); n];
+    let mut u_batch_sh = SecretBuffer(vec![Vec::with_capacity(sac_batch_len); n]);
+    let mut u_batch_mac = SecretBuffer(vec![Vec::with_capacity(sac_batch_len); n]);
     for k in 0..total_words {
         for lane in 0..2 {
             for m in 0..16 {
@@ -6284,14 +6867,15 @@ where
         "pi_triple_f2_u_open",
         t,
         eval_points,
-        &u_batch_sh,
-        &u_batch_mac,
+        u_batch_sh.as_slice(),
+        u_batch_mac.as_slice(),
         alpha_shamir,
         party_rngs,
     )?;
+    drop((u_batch_sh, u_batch_mac, at_bs_sh, at_bs_mac));
 
-    let mut w_batch_sh = vec![Vec::with_capacity(sac_batch_len); n];
-    let mut w_batch_mac = vec![Vec::with_capacity(sac_batch_len); n];
+    let mut w_batch_sh = SecretBuffer(vec![Vec::with_capacity(sac_batch_len); n]);
+    let mut w_batch_mac = SecretBuffer(vec![Vec::with_capacity(sac_batch_len); n]);
     let mut idx_sac = 0usize;
     for k in 0..total_words {
         for lane in 0..2 {
@@ -6325,11 +6909,12 @@ where
         "pi_triple_f2_w_res",
         t,
         eval_points,
-        &w_batch_sh,
-        &w_batch_mac,
+        w_batch_sh.as_slice(),
+        w_batch_mac.as_slice(),
         alpha_shamir,
         party_rngs,
     )?;
+    drop((w_batch_sh, w_batch_mac, ct_bs_sh, ct_bs_mac));
     for residual_m in &w_opened_all {
         if *residual_m != [0u64; 8] {
             return Err(PreprocessError::SacrificeResidualNonZero {
@@ -6338,10 +6923,10 @@ where
         }
     }
 
-    let mut u_share_buf = vec![[0u64; 8]; n];
+    let mut u_share_buf = SecretBuffer(vec![[0u64; 8]; n]);
 
     // Check 2: SPDZ-MAC-verified self-squared mask words `m_0..m_7` (`m_r^2 ^ m_r == 0` -> `m_r ∈ F_2^64`)
-    let mut mac_buf = vec![[[Tower128::ZERO; 64]; 2]; n];
+    let mut mac_buf = SecretBuffer(vec![[[Tower128::ZERO; 64]; 2]; n]);
     for r in 0..8 {
         let idx = raw_triples + r;
         for p in 0..n {
@@ -6357,8 +6942,8 @@ where
             "pi_triple_f2_mask_bool",
             t,
             eval_points,
-            &u_share_buf,
-            &mac_buf,
+            u_share_buf.as_slice(),
+            mac_buf.as_slice(),
             alpha_shamir,
             party_rngs,
         )?;
@@ -6375,10 +6960,10 @@ where
     let mut weight_xof = Cshake256Xof::new(b"QSAG.TRIPLE.F2.FROB_MAT/v2");
     weight_xof.absorb(&coin_seed);
 
-    let mut bool_comb_a = vec![[[0u64; 8]; 4]; n];
-    let mut bool_comb_b = vec![[[0u64; 8]; 4]; n];
-    let mut bool_mac_a = vec![[[[Tower128::ZERO; 64]; 2]; 4]; n];
-    let mut bool_mac_b = vec![[[[Tower128::ZERO; 64]; 2]; 4]; n];
+    let mut bool_comb_a = SecretBuffer(vec![[[0u64; 8]; 4]; n]);
+    let mut bool_comb_b = SecretBuffer(vec![[[0u64; 8]; 4]; n]);
+    let mut bool_mac_a = SecretBuffer(vec![[[[Tower128::ZERO; 64]; 2]; 4]; n]);
+    let mut bool_mac_b = SecretBuffer(vec![[[[Tower128::ZERO; 64]; 2]; 4]; n]);
     for p in 0..n {
         for blk in 0..4 {
             bool_comb_a[p][blk] = a_sh[p][raw_triples + blk];
@@ -6429,8 +7014,8 @@ where
             "pi_triple_f2_bool_a",
             t,
             eval_points,
-            &u_share_buf,
-            &mac_buf,
+            u_share_buf.as_slice(),
+            mac_buf.as_slice(),
             alpha_shamir,
             party_rngs,
         )?;
@@ -6448,8 +7033,8 @@ where
             "pi_triple_f2_bool_b",
             t,
             eval_points,
-            &u_share_buf,
-            &mac_buf,
+            u_share_buf.as_slice(),
+            mac_buf.as_slice(),
             alpha_shamir,
             party_rngs,
         )?;
@@ -6459,25 +7044,20 @@ where
             });
         }
     }
-
-    for p in 0..n {
-        wipe_u64s(&mut u_share_buf[p]);
-        wipe_tower128(&mut mac_buf[p][0]);
-        wipe_tower128(&mut mac_buf[p][1]);
-    }
+    drop((u_share_buf, mac_buf, bool_comb_a, bool_comb_b, bool_mac_a, bool_mac_b));
 
     // Step 4: `3 -> 1` SPDZ-authenticated Beaver privacy amplification (`[P1-05]`) on both `a` and `b`!
     // Batch all `num_triples` bucket openings for `d = b0 ^ b1` and `e = a0 ^ a1 ^ a2` into 2
     // committed SPDZ `MacCheck` ceremonies (`2` round-trips instead of `2 * num_triples`).
-    let mut final_a = vec![vec![[0u64; 8]; num_triples]; n];
-    let mut final_b = vec![vec![[0u64; 8]; num_triples]; n];
-    let mut final_c = vec![vec![[0u64; 8]; num_triples]; n];
-    let mut final_a_mac = vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n];
-    let mut final_b_mac = vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n];
-    let mut final_c_mac = vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n];
+    let mut final_a = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut final_b = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut final_c = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut final_a_mac = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
+    let mut final_b_mac = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
+    let mut final_c_mac = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
 
-    let mut d_sh_batch = vec![vec![[0u64; 8]; num_triples]; n];
-    let mut d_mac_batch = vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n];
+    let mut d_sh_batch = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut d_mac_batch = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
     for k in 0..num_triples {
         let k0 = bucket_perm[k] as usize;
         let k1 = bucket_perm[num_triples + k] as usize;
@@ -6491,27 +7071,20 @@ where
             }
         }
     }
-    let d_open_res = commit_and_open_spdz_bs_gf256_batch_quorum(
+    let d_opened = commit_and_open_spdz_bs_gf256_batch_quorum(
         &session_id,
         "pi_triple_f2_comb_d",
         t,
         eval_points,
-        &d_sh_batch,
-        &d_mac_batch,
+        d_sh_batch.as_slice(),
+        d_mac_batch.as_slice(),
         alpha_shamir,
         party_rngs,
-    );
-    for p in 0..n {
-        for k in 0..num_triples {
-            wipe_u64s(&mut d_sh_batch[p][k]);
-            wipe_tower128(&mut d_mac_batch[p][k][0]);
-            wipe_tower128(&mut d_mac_batch[p][k][1]);
-        }
-    }
-    let d_opened = d_open_res?;
+    )?;
+    drop((d_sh_batch, d_mac_batch));
 
-    let mut e_sh_batch = vec![vec![[0u64; 8]; num_triples]; n];
-    let mut e_mac_batch = vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n];
+    let mut e_sh_batch = SecretBuffer(vec![vec![[0u64; 8]; num_triples]; n]);
+    let mut e_mac_batch = SecretBuffer(vec![vec![[[Tower128::ZERO; 64]; 2]; num_triples]; n]);
     for k in 0..num_triples {
         let k0 = bucket_perm[k] as usize;
         let k1 = bucket_perm[num_triples + k] as usize;
@@ -6529,24 +7102,17 @@ where
             }
         }
     }
-    let e_open_res = commit_and_open_spdz_bs_gf256_batch_quorum(
+    let e_opened = commit_and_open_spdz_bs_gf256_batch_quorum(
         &session_id,
         "pi_triple_f2_comb_e",
         t,
         eval_points,
-        &e_sh_batch,
-        &e_mac_batch,
+        e_sh_batch.as_slice(),
+        e_mac_batch.as_slice(),
         alpha_shamir,
         party_rngs,
-    );
-    for p in 0..n {
-        for k in 0..num_triples {
-            wipe_u64s(&mut e_sh_batch[p][k]);
-            wipe_tower128(&mut e_mac_batch[p][k][0]);
-            wipe_tower128(&mut e_mac_batch[p][k][1]);
-        }
-    }
-    let e_opened = e_open_res?;
+    )?;
+    drop((e_sh_batch, e_mac_batch));
 
     for k in 0..num_triples {
         let k0 = bucket_perm[k] as usize;
@@ -6578,31 +7144,7 @@ where
             }
         }
     }
-
-    // Wipe all sacrificial companion shares, raw triples, and Booleanity masks
-    for lane in 0..2 {
-        for p in 0..n {
-            for k in 0..total_words {
-                for m in 0..16 {
-                    wipe_u64s(&mut at_bs_sh[lane][p][k][m]);
-                    wipe_u64s(&mut ct_bs_sh[lane][p][k][m]);
-                }
-            }
-        }
-    }
-    for p in 0..n {
-        for k in 0..total_words {
-            wipe_u64s(&mut a_sh[p][k]);
-            wipe_u64s(&mut b_sh[p][k]);
-            wipe_u64s(&mut c_sh[p][k]);
-            wipe_tower128(&mut a_mac[p][k][0]);
-            wipe_tower128(&mut a_mac[p][k][1]);
-            wipe_tower128(&mut b_mac[p][k][0]);
-            wipe_tower128(&mut b_mac[p][k][1]);
-            wipe_tower128(&mut c_mac[p][k][0]);
-            wipe_tower128(&mut c_mac[p][k][1]);
-        }
-    }
+    drop((a_sh, b_sh, c_sh, a_mac, b_mac, c_mac));
 
     let mut vaults = Vec::with_capacity(n);
     for p in 0..n {
@@ -6616,15 +7158,6 @@ where
                 b_mac: final_b_mac[p][k],
                 c_mac: final_c_mac[p][k],
             });
-            wipe_u64s(&mut final_a[p][k]);
-            wipe_u64s(&mut final_b[p][k]);
-            wipe_u64s(&mut final_c[p][k]);
-            wipe_tower128(&mut final_a_mac[p][k][0]);
-            wipe_tower128(&mut final_a_mac[p][k][1]);
-            wipe_tower128(&mut final_b_mac[p][k][0]);
-            wipe_tower128(&mut final_b_mac[p][k][1]);
-            wipe_tower128(&mut final_c_mac[p][k][0]);
-            wipe_tower128(&mut final_c_mac[p][k][1]);
         }
         let alpha = alpha_shamir[p];
         vaults.push(PreprocessedKeccakPartyVault {
@@ -6925,7 +7458,7 @@ pub fn pairwise_gilboa_ole_goldilocks(
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<Vec<Vec<Goldilocks>>, PreprocessError> {
     let n = ot_mesh.n;
-    if u_per_party.len() != n || v_per_party.len() != n || party_rngs.len() != n {
+    if n == 0 || u_per_party.len() != n || v_per_party.len() != n || party_rngs.len() != n {
         return Err(PreprocessError::InvalidThreshold { t: 1, n });
     }
     let count = u_per_party[0].len();
@@ -6949,9 +7482,8 @@ pub fn pairwise_gilboa_ole_goldilocks(
     // 5 random `u64` words (`320` disposable bits = `64` target + `256` LHL min-entropy buffer) per item!
     const WORDS_PER_ITEM: usize = 5;
     let total_words = WORDS_PER_ITEM * count;
-    let mut r_words = vec![vec![0u64; total_words]; n];
+    let mut r_words = SecretBuffer(vec![vec![0u64; total_words]; n]);
     for i in 0..n {
-        #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
         for w in 0..total_words {
             r_words[i][w] = party_rngs[i].next_u64();
         }
@@ -6959,8 +7491,8 @@ pub fn pairwise_gilboa_ole_goldilocks(
 
     // `raw_sender_sh[j][i][k][s]` (held by Sender `j`) + `raw_recv_sh[j][i][k][s]` (held by Receiver `i`)
     // == `bit_s(r_words[i][5*k..5*k+5]) * v_per_party[j][k]`!
-    let mut raw_sender_sh = vec![vec![vec![[Goldilocks::ZERO; 320]; count]; n]; n];
-    let mut raw_recv_sh = vec![vec![vec![[Goldilocks::ZERO; 320]; count]; n]; n];
+    let mut raw_sender_sh = SecretBuffer(vec![vec![vec![[Goldilocks::ZERO; 320]; count]; n]; n]);
+    let mut raw_recv_sh = SecretBuffer(vec![vec![vec![[Goldilocks::ZERO; 320]; count]; n]; n]);
 
     for i in 0..n {
         for j in 0..n {
@@ -7013,7 +7545,7 @@ pub fn pairwise_gilboa_ole_goldilocks(
         g_weights[s] = Goldilocks::from_bytes24_unbiased(&b24);
     }
 
-    let mut diffs = vec![vec![Goldilocks::ZERO; count]; n];
+    let mut diffs = SecretBuffer(vec![vec![Goldilocks::ZERO; count]; n]);
     for i in 0..n {
         for k in 0..count {
             let mut u_comb = Goldilocks::ZERO;
@@ -7107,35 +7639,35 @@ pub fn commit_and_open_degree_ext2(
         return Err(PreprocessError::InvalidThreshold { t, n });
     }
     validate_all_eval_points_goldilocks(eval_points)?;
-    let mut salts = Vec::with_capacity(n);
+    let mut salts = SecretBuffer(Vec::with_capacity(n));
     let mut coms = Vec::with_capacity(n);
     for p in 0..n {
-        let salt = party_rngs[p].next_bytes32();
-        let pid = (p as u64).to_be_bytes();
-        let c0_b = shares[p].c0.to_canonical_u64().to_le_bytes();
-        let c1_b = shares[p].c1.to_canonical_u64().to_le_bytes();
-        let com = cshake256_32(
+        let mut salt = party_rngs[p].next_bytes32();
+        let mut pid = (p as u64).to_be_bytes();
+        let mut c0_b = shares[p].c0.to_canonical_u64().to_le_bytes();
+        let mut c1_b = shares[p].c1.to_canonical_u64().to_le_bytes();
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.EXT2.DEG.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &pid, &c0_b, &c1_b, &salt]),
+            &[session_id, phase.as_bytes(), &pid, &c0_b, &c1_b, &salt],
         );
+        wipe_bytes(&mut pid);
+        wipe_bytes(&mut c0_b);
+        wipe_bytes(&mut c1_b);
         salts.push(salt);
+        wipe_bytes32(&mut salt);
         coms.push(com);
     }
     for p in 0..n {
-        let pid = (p as u64).to_be_bytes();
-        let c0_b = shares[p].c0.to_canonical_u64().to_le_bytes();
-        let c1_b = shares[p].c1.to_canonical_u64().to_le_bytes();
-        let exp = cshake256_32(
+        let mut pid = (p as u64).to_be_bytes();
+        let mut c0_b = shares[p].c0.to_canonical_u64().to_le_bytes();
+        let mut c1_b = shares[p].c1.to_canonical_u64().to_le_bytes();
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.EXT2.DEG.COM/v1",
-            &encode_multi_frame(&[
-                session_id,
-                phase.as_bytes(),
-                &pid,
-                &c0_b,
-                &c1_b,
-                &salts[p],
-            ]),
+            &[session_id, phase.as_bytes(), &pid, &c0_b, &c1_b, &salts[p]],
         );
+        wipe_bytes(&mut pid);
+        wipe_bytes(&mut c0_b);
+        wipe_bytes(&mut c1_b);
         wipe_bytes32(&mut salts[p]);
         if !ct_eq_bytes32(&exp, &coms[p]) {
             return Err(PreprocessError::ShareCommitMismatch {
@@ -7163,14 +7695,14 @@ pub fn spdz_setup_alpha_goldilocks(
 
     let mut alpha_contribs = vec![GoldilocksExt2::ZERO; n];
     let mut alpha_shamir = vec![GoldilocksExt2::ZERO; n];
-    let mut beta_shamir = vec![GoldilocksExt2::ZERO; n];
+    let mut beta_shamir = SecretBuffer(vec![GoldilocksExt2::ZERO; n]);
 
     for i in 0..n {
         let a_i = party_rngs[i].next_ext2();
         let b_i = party_rngs[i].next_ext2();
         alpha_contribs[i] = a_i;
-        let a_sh = shamir_share_ext2(t, eval_points, a_i, &mut party_rngs[i]);
-        let b_sh = shamir_share_ext2(t, eval_points, b_i, &mut party_rngs[i]);
+        let a_sh = SecretBuffer(shamir_share_ext2(t, eval_points, a_i, &mut party_rngs[i]));
+        let b_sh = SecretBuffer(shamir_share_ext2(t, eval_points, b_i, &mut party_rngs[i]));
         for p in 0..n {
             alpha_shamir[p] += a_sh[p];
             beta_shamir[p] += b_sh[p];
@@ -7182,26 +7714,29 @@ pub fn spdz_setup_alpha_goldilocks(
         Goldilocks::from_u128_reduced(u128::from_le_bytes(core::array::from_fn(|array_index| (coin[0..16])[array_index])) | 1),
         Goldilocks::from_u128_reduced(u128::from_le_bytes(core::array::from_fn(|array_index| (coin[16..32])[array_index]))),
     );
-    let comb: Vec<GoldilocksExt2> = (0..n)
-        .map(|p| beta_shamir[p] + eta * alpha_shamir[p])
-        .collect();
+    let comb: SecretBuffer<Vec<GoldilocksExt2>> = SecretBuffer(
+        (0..n)
+            .map(|p| beta_shamir[p] + eta * alpha_shamir[p])
+            .collect(),
+    );
     let _ = commit_and_open_degree_ext2(
         session_id,
         "spdz_setup_alpha_goldilocks",
         t,
         eval_points,
-        &comb,
+        comb.as_slice(),
         party_rngs,
     )?;
-    wipe_ext2(&mut beta_shamir);
     Ok((alpha_contribs, alpha_shamir))
 }
 
 /// Dealerless `Π_MAC` over `Goldilocks` Shamir shares: computes degree-`< t` `GoldilocksExt2` SPDZ
-/// MAC shares `macs[party][k]` using LHL-amplified OT (`[I | H]` with `4` tail `u64` words = `256`
-/// bits, `< 2^{-129}` selective-failure advantage; Sender `i` inputs ONLY private `alpha_contribs[i]`)
-/// AND verifies across ALL `0..n` parties that `x_shares_per_party` and `macs` lie on consistent
-/// degree-`< t` polynomials with $\gamma(x) = \alpha \cdot x$ (`< 2^{-127}` soundness).
+/// MAC shares `macs[party][k]` using LHL-amplified OT (full-vector 2-universal Toeplitz combiner
+/// over `total_items + 4` `u64` words = `64 * total_items + 256` bits, exact $p^{-\text{total\_items}}$
+/// collision probability across all $r \ne r' \in \{0, 1\}^{m\_\text{bits}}$, `< 2^{-129}` selective-failure
+/// advantage; Sender `i` inputs ONLY private `alpha_contribs[i]`) AND verifies across ALL `0..n`
+/// parties that `x_shares_per_party` and `macs` lie on consistent degree-`< t` polynomials with
+/// $\gamma(x) = \alpha \cdot x$ (`< 2^{-127}` soundness).
 #[expect(clippy::too_many_arguments, reason = "Quorum, value shares, MAC shares and private randomness are separate protocol inputs")]
 pub fn spdz_authenticate_goldilocks_batch_ext2(
     session_id: &[u8; 32],
@@ -7241,12 +7776,16 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
     // Sample 3 disposable degree-`< t` random Goldilocks wires:
     // - `r_deg`: one-time pad for full `0..n` degree check of `x_shares_per_party`
     // - `r_chk0, r_chk1`: `GoldilocksExt2` one-time pad for the `Π_MAC` linear check `Z`!
-    let mut r_extra_sh = vec![[Goldilocks::ZERO; 3]; n];
+    let mut r_extra_sh = SecretBuffer(vec![[Goldilocks::ZERO; 3]; n]);
     for party_rngs_i_item in party_rngs[..n].iter_mut() {
-        #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
         for slot in 0..3 {
             let ri = (*party_rngs_i_item).next_goldilocks();
-            let s_ri = shamir_share_goldilocks(t, eval_points, ri, &mut *party_rngs_i_item);
+            let s_ri = SecretBuffer(shamir_share_goldilocks(
+                t,
+                eval_points,
+                ri,
+                &mut *party_rngs_i_item,
+            ));
             for p in 0..n {
                 r_extra_sh[p][slot] += s_ri[p];
             }
@@ -7254,12 +7793,12 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
     }
 
     let total_items = count + 3;
-    // Systematic `[I | H]` LHL combiner: `total_items` `u64` words + `4` tail `u64` words (`256` bits)!
+    // Full-vector 2-universal Toeplitz LHL combiner over `total_items` `u64` words + `4` tail `u64` words (`256` bits)!
     let m_words = total_items + 4;
     let m_bits = 64 * m_words;
 
-    let mut u_target = vec![vec![Goldilocks::ZERO; total_items]; t];
-    let mut r_words = vec![vec![0u64; m_words]; t];
+    let mut u_target = SecretBuffer(vec![vec![Goldilocks::ZERO; total_items]; t]);
+    let mut r_words = SecretBuffer(vec![vec![0u64; m_words]; t]);
     for j in 0..t {
         let lj = lambdas_t[j];
         for k in 0..count {
@@ -7268,15 +7807,14 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
         for slot in 0..3 {
             u_target[j][count + slot] = lj * r_extra_sh[j][slot];
         }
-        #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
         for w in 0..m_words {
             r_words[j][w] = party_rngs[j].next_u64();
         }
     }
 
     // Sender `i in 0..n` inputs ONLY private `alpha_contribs[i]`; Receiver `j in 0..t` inputs random `r_words[j]`
-    let mut raw_keys = vec![vec![vec![GoldilocksExt2::ZERO; m_bits]; t]; n];
-    let mut raw_macs = vec![vec![vec![GoldilocksExt2::ZERO; m_bits]; t]; n];
+    let mut raw_keys = SecretBuffer(vec![vec![vec![GoldilocksExt2::ZERO; m_bits]; t]; n]);
+    let mut raw_macs = SecretBuffer(vec![vec![vec![GoldilocksExt2::ZERO; m_bits]; t]; n]);
 
     for i in 0..n {
         if i < t {
@@ -7331,73 +7869,56 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
         }
     }
 
-    // Post-OT systematic `[I | H]` 2-universal combiner over `F_p`:
-    // For item `idx in 0..total_items`, `u_comb = sum_{b=0}^{63} 2^b r_{idx, b} + sum_{tl=0}^{255} H[idx][tl] * r_tail[tl]`!
-    // Wait: is `r_main[idx] (mod p) + H[idx] * r_tail` 2-universal?
-    // Almost: `u64` mod `p` has collision `(r_main, 0) != (r'_main, 0)` if `r_main == r'_main (mod p)` (`2^{-32}`),
-    // which maps to the SAME `u_comb`! Even cleaner (`0` `mod p` wrap collision!): squeeze `64` random `F_p` weights
-    // `g_main[0..64]` PLUS `256` random `F_p` tail weights `h_rows[idx][0..256]`!
-    // Check 2-universality of `sum_{b=0}^{63} g_main[b] * r_{idx,b} + sum_{tl=0}^{255} H[idx][tl] * r_tail[tl]`:
-    // - If `Delta r_tail != 0` (has `+-1` at `tl*`), `H[idx][tl*]` is independent uniform across ALL `idx`, so `Pr = p^{-total_items}`!
-    // - If `Delta r_tail == 0`, there is some `idx*` and `b*` where `Delta r_{idx*, b*} = +-1`, so `g_main[b*]` makes `Pr <= 1/p`!
-    // Wait: to get `p^{-total_items}` even when `Delta r_tail == 0`, draw `g_main[idx][0..64]` per `idx`? No need:
-    // if `Delta r_tail == 0` on two distinct vectors `r != r'`, wait: LHL on `(r_main, r_tail)` only requires
-    // `Pr_H[f_H(r) == f_H(r')] <= p^{-total_items}`! Drawing `g_main[idx][0..64]` (`64` scalars) + `h_tail` (`256` scalars?
-    // Wait: `64 + 256 = 320` scalars per `idx`? For `total_items = 200`, `200 * 320 = 64,000` scalars = `< 2 ms`!)
-    // gives **EXACT `p^{-total_items}` 2-universality** with ZERO edge cases!
+    // Post-OT full-vector 2-universal Toeplitz combiner `H[idx, s] = toeplitz_all[idx + s]`
+    // over ALL `idx in 0..total_items` and ALL `s in 0..m_bits`:
+    // For ANY non-zero bit difference `\Delta r = r - r' \in \{-1, 0, 1\}^{m_bits} \setminus \{0\}`,
+    // let `s* = max { s : \Delta r_s != 0 }`. Conditioned on `toeplitz_all[0 .. idx + s*]`,
+    // `(H \cdot \Delta r)[idx]` adds `\pm toeplitz_all[idx + s*]`, which is freshly uniform in `F_p`.
+    // By the chain rule across `idx = 0 .. total_items - 1`, `Pr_H[H r == H r'] == p^{-total_items}`
+    // unconditionally across the entire `m_bits`-bit input vector (`0` block-diagonal blind spots).
     let lhl_coin = run_commit_and_open_coin(
         session_id,
         b"SPDZ_GL_PIMAC_LHL",
         &ot_mesh.session_id,
         party_rngs,
     )?;
-    let mut h_xof = Cshake256Xof::new(b"QSAG.SPDZ.GL.LHL_H/v1");
+    let mut h_xof = Cshake256Xof::new(b"QSAG.SPDZ.GL.LHL_H/v2");
     h_xof.absorb(&lhl_coin);
 
-    let tail_base = 64 * total_items;
-    let mut g_main = vec![[Goldilocks::ZERO; 64]; total_items];
-    let mut toeplitz_tail = vec![Goldilocks::ZERO; total_items + 256];
-    for g_main_idx_item in g_main[..total_items].iter_mut() {
-        for b in 0..64 {
-            let mut b24 = [0u8; 24];
-            h_xof.squeeze(&mut b24);
-            (*g_main_idx_item)[b] = Goldilocks::from_bytes24_unbiased(&b24);
-        }
-    }
-    for slot in &mut toeplitz_tail {
+    let mut toeplitz_u64 = vec![0u64; total_items + m_bits];
+    for slot in &mut toeplitz_u64 {
         let mut b24 = [0u8; 24];
         h_xof.squeeze(&mut b24);
-        *slot = Goldilocks::from_bytes24_unbiased(&b24);
+        *slot = Goldilocks::from_bytes24_unbiased(&b24).to_canonical_u64();
     }
 
-    let mut diff_sum = vec![Goldilocks::ZERO; total_items];
+    let mut diff_sum = SecretBuffer(vec![Goldilocks::ZERO; total_items]);
     for j in 0..t {
         for idx in 0..total_items {
-            let rw = black_box(r_words[j][idx]);
-            let mut u_comb = Goldilocks::ZERO;
-            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
-            for b in 0..64 {
-                let m = 0u64.wrapping_sub((rw >> b) & 1);
-                u_comb += Goldilocks::from_u64_reduced(m & g_main[idx][b].to_canonical_u64());
+            let h_row = &toeplitz_u64[idx..idx + m_bits];
+            let mut acc_u128 = 0u128;
+            for w in 0..m_words {
+                let rw = black_box(r_words[j][w]);
+                let h_word = &h_row[64 * w..64 * (w + 1)];
+                for (b, &h) in h_word.iter().enumerate() {
+                    let m = 0u64.wrapping_sub((rw >> b) & 1);
+                    acc_u128 += (m & h) as u128;
+                }
             }
-            for tl in 0..256 {
-                let tw = black_box(r_words[j][total_items + (tl / 64)]);
-                let m = 0u64.wrapping_sub((tw >> (tl % 64)) & 1);
-                u_comb +=
-                    Goldilocks::from_u64_reduced(m & toeplitz_tail[idx + tl].to_canonical_u64());
-            }
+            let u_comb = Goldilocks::reduce128(acc_u128);
             diff_sum[idx] += u_target[j][idx] - u_comb;
         }
         wipe_goldilocks(&mut u_target[j]);
         wipe_u64s(&mut r_words[j]);
     }
+    drop((u_target, r_words));
 
-    // Pre-sum additive OT shares across `j in 0..t` and `i in 0..n` BEFORE `g_main` / `toeplitz_tail` multiplies!
-    let mut sum_raw = vec![vec![GoldilocksExt2::ZERO; m_bits]; n];
+    // Pre-sum additive OT shares across `j in 0..t` and `i in 0..n` BEFORE `toeplitz_u64` multiplies!
+    let mut sum_raw_c0 = SecretBuffer(vec![vec![0u64; m_bits]; n]);
+    let mut sum_raw_c1 = SecretBuffer(vec![vec![0u64; m_bits]; n]);
     for p in 0..n {
         for s in 0..m_bits {
             let mut acc = GoldilocksExt2::ZERO;
-            #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
             for j in 0..t {
                 acc += raw_keys[p][j][s];
             }
@@ -7406,35 +7927,78 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
                     acc += (*raw_macs_i_item)[p][s];
                 }
             }
-            sum_raw[p][s] = acc;
+            sum_raw_c0[p][s] = acc.c0.to_canonical_u64();
+            sum_raw_c1[p][s] = acc.c1.to_canonical_u64();
         }
     }
-    for i in 0..n {
-        for j in 0..t {
-            wipe_ext2(&mut raw_keys[i][j]);
-            wipe_ext2(&mut raw_macs[i][j]);
-        }
-    }
+    drop((raw_keys, raw_macs));
 
-    let mut all_macs = vec![vec![GoldilocksExt2::ZERO; total_items]; n];
-    for p in 0..n {
+    // `2^64 == 2^32 - 1 (mod p)` => `2^128 == (2^32 - 1)^2 (mod p)`.
+    let two_pow_64_mod_p = Goldilocks::from_u64_reduced((1u64 << 32) - 1);
+    let two_pow_128_mod_p = two_pow_64_mod_p * two_pow_64_mod_p;
+
+    let compute_party_taus = |p: usize| -> Vec<GoldilocksExt2> {
         let ap = alpha_contribs[p];
+        let sr0 = &sum_raw_c0[p];
+        let sr1 = &sum_raw_c1[p];
+        let mut taus_p = vec![GoldilocksExt2::ZERO; total_items];
         for idx in 0..total_items {
-            let mut tau = ap.mul_base(diff_sum[idx]);
-            for b in 0..64 {
-                tau += sum_raw[p][64 * idx + b].mul_base(g_main[idx][b]);
+            let h_row = &toeplitz_u64[idx..idx + m_bits];
+            let mut acc0_lo = 0u128;
+            let mut acc0_hi = 0u64;
+            let mut acc1_lo = 0u128;
+            let mut acc1_hi = 0u64;
+            for s in 0..m_bits {
+                let h = h_row[s] as u128;
+                let (n0, ov0) = acc0_lo.overflowing_add((sr0[s] as u128) * h);
+                acc0_lo = n0;
+                acc0_hi += ov0 as u64;
+                let (n1, ov1) = acc1_lo.overflowing_add((sr1[s] as u128) * h);
+                acc1_lo = n1;
+                acc1_hi += ov1 as u64;
             }
-            for tl in 0..256 {
-                tau += sum_raw[p][tail_base + tl].mul_base(toeplitz_tail[idx + tl]);
-            }
-            let sh = shamir_share_ext2(t, eval_points, tau, &mut party_rngs[p]);
+            let comb_c0 = Goldilocks::reduce128(acc0_lo)
+                + Goldilocks::from_u64_reduced(acc0_hi) * two_pow_128_mod_p;
+            let comb_c1 = Goldilocks::reduce128(acc1_lo)
+                + Goldilocks::from_u64_reduced(acc1_hi) * two_pow_128_mod_p;
+            taus_p[idx] = ap.mul_base(diff_sum[idx]) + GoldilocksExt2::new(comb_c0, comb_c1);
+        }
+        taus_p
+    };
+
+    #[cfg(feature = "std")]
+    let taus_per_party: SecretBuffer<Vec<Vec<GoldilocksExt2>>> = if total_items >= 64 {
+        SecretBuffer(std::thread::scope(|s| {
+            let handles: Vec<_> = (0..n).map(|p| s.spawn(move || compute_party_taus(p))).collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        }))
+    } else {
+        SecretBuffer((0..n).map(compute_party_taus).collect())
+    };
+    #[cfg(not(feature = "std"))]
+    let taus_per_party: SecretBuffer<Vec<Vec<GoldilocksExt2>>> =
+        SecretBuffer((0..n).map(compute_party_taus).collect());
+
+    drop((sum_raw_c0, sum_raw_c1, diff_sum));
+
+    let mut all_macs = SecretBuffer(vec![vec![GoldilocksExt2::ZERO; total_items]; n]);
+    for p in 0..n {
+        for idx in 0..total_items {
+            let sh = SecretBuffer(shamir_share_ext2(
+                t,
+                eval_points,
+                taus_per_party[p][idx],
+                &mut party_rngs[p],
+            ));
             for q in 0..n {
                 all_macs[q][idx] += sh[q];
             }
         }
-        wipe_ext2(&mut sum_raw[p]);
     }
-    wipe_goldilocks(&mut diff_sum);
+    drop(taus_per_party);
 
     // Batch `Π_MAC` consistency + full `0..n` degree check:
     let chk_coin = run_commit_and_open_coin(
@@ -7447,7 +8011,8 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
     chk_xof.absorb(&chk_coin);
 
     // 1) Degree `< t` check on `x_shares_per_party` across `0..n` masked by `r_extra_sh[..][0]`
-    let mut deg_sh: Vec<Goldilocks> = (0..n).map(|p| r_extra_sh[p][0]).collect();
+    let mut deg_sh: SecretBuffer<Vec<Goldilocks>> =
+        SecretBuffer((0..n).map(|p| r_extra_sh[p][0]).collect());
     #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
     for k in 0..count {
         let mut b24 = [0u8; 24];
@@ -7457,13 +8022,13 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
             deg_sh[p] += w * x_shares_per_party[p][k];
         }
     }
-    let _ = open_and_check_degree_goldilocks(t, eval_points, &deg_sh, "spdz_gl_words_deg")?;
-    wipe_goldilocks(&mut deg_sh);
+    let _ = open_and_check_degree_goldilocks(t, eval_points, deg_sh.as_slice(), "spdz_gl_words_deg")?;
+    drop(deg_sh);
 
     // 2) Fold all wires (`0..count` + `r_extra_sh[0]`) with random `GoldilocksExt2` weights, masked
     //    over `F_{p^2}` by `R_pad = (r_extra_sh[1], r_extra_sh[2])` (`0` bits leaked!)
-    let mut z_sh = vec![GoldilocksExt2::ZERO; n];
-    let mut z_mac = vec![GoldilocksExt2::ZERO; n];
+    let mut z_sh = SecretBuffer(vec![GoldilocksExt2::ZERO; n]);
+    let mut z_mac = SecretBuffer(vec![GoldilocksExt2::ZERO; n]);
     let ext_u = GoldilocksExt2::new(Goldilocks::ZERO, Goldilocks::ONE);
     for p in 0..n {
         z_sh[p] = GoldilocksExt2::new(r_extra_sh[p][1], r_extra_sh[p][2]);
@@ -7482,6 +8047,7 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
             wipe_goldilocks(&mut r_extra_sh[p]);
         }
     }
+    drop(r_extra_sh);
     for k in 0..count {
         let mut b48 = [0u8; 48];
         chk_xof.squeeze(&mut b48);
@@ -7500,24 +8066,26 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
         "spdz_gl_pimac_z",
         t,
         eval_points,
-        &z_sh,
+        z_sh.as_slice(),
         party_rngs,
     )?;
-    wipe_ext2(&mut z_sh);
+    drop(z_sh);
 
-    let mut d_sh: Vec<GoldilocksExt2> = (0..n)
-        .map(|p| z_mac[p] - z_open * alpha_shamir_shares[p])
-        .collect();
-    wipe_ext2(&mut z_mac);
+    let d_sh: SecretBuffer<Vec<GoldilocksExt2>> = SecretBuffer(
+        (0..n)
+            .map(|p| z_mac[p] - z_open * alpha_shamir_shares[p])
+            .collect(),
+    );
+    drop(z_mac);
     let d_zero = commit_and_open_degree_ext2(
         session_id,
         "spdz_gl_pimac_d",
         t,
         eval_points,
-        &d_sh,
+        d_sh.as_slice(),
         party_rngs,
     )?;
-    wipe_ext2(&mut d_sh);
+    drop(d_sh);
     if !d_zero.ct_eq(GoldilocksExt2::ZERO) {
         return Err(PreprocessError::MacCheckFailed {
             phase: "spdz_gl_pimac",
@@ -7525,14 +8093,13 @@ pub fn spdz_authenticate_goldilocks_batch_ext2(
         });
     }
 
-    for all_macs_p_item in all_macs[..n].iter_mut() {
-        for _ in 0..3 {
-            if let Some(mut m_extra) = (*all_macs_p_item).pop() {
-                wipe_ext2(core::slice::from_mut(&mut m_extra));
-            }
-        }
+    let mut out_macs = Vec::with_capacity(n);
+    for p in 0..n {
+        let mut v = Vec::with_capacity(count);
+        v.extend_from_slice(&all_macs[p][..count]);
+        out_macs.push(v);
     }
-    Ok(all_macs)
+    Ok(out_macs)
 }
 
 /// Batched dishonest-majority commit-before-open + SPDZ `GoldilocksExt2` `MacCheck` over any quorum.
@@ -7568,10 +8135,10 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
     }
     validate_all_eval_points_goldilocks(quorum_eval_points)?;
 
-    let mut salts = Vec::with_capacity(m);
+    let mut salts = SecretBuffer(Vec::with_capacity(m));
     let mut coms = Vec::with_capacity(m);
     for p in 0..m {
-        let salt = party_rngs[p].next_bytes32();
+        let mut salt = party_rngs[p].next_bytes32();
         let mut xof = Cshake256Xof::new(b"QSAG.SPDZ.GL.BATCH.OPEN.COM/v1");
         xof.absorb(session_id);
         xof.absorb(&(phase.len() as u64).to_be_bytes());
@@ -7580,11 +8147,14 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
         xof.absorb(&salt);
         #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
         for w in 0..batch_len {
-            xof.absorb(&batch_shares[p][w].to_canonical_u64().to_le_bytes());
+            let mut b8 = batch_shares[p][w].to_canonical_u64().to_le_bytes();
+            xof.absorb(&b8);
+            wipe_bytes(&mut b8);
         }
         let mut com = [0u8; 32];
         xof.squeeze(&mut com);
         salts.push(salt);
+        wipe_bytes32(&mut salt);
         coms.push(com);
     }
     for p in 0..m {
@@ -7596,7 +8166,9 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
         xof.absorb(&salts[p]);
         #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
         for w in 0..batch_len {
-            xof.absorb(&batch_shares[p][w].to_canonical_u64().to_le_bytes());
+            let mut b8 = batch_shares[p][w].to_canonical_u64().to_le_bytes();
+            xof.absorb(&b8);
+            wipe_bytes(&mut b8);
         }
         let mut exp = [0u8; 32];
         xof.squeeze(&mut exp);
@@ -7608,21 +8180,22 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
             });
         }
     }
+    drop(salts);
 
     let mut opened = Vec::with_capacity(batch_len);
     let mut dig_xof = Cshake256Xof::new(b"QSAG.SPDZ.GL.BATCH.DIG/v1");
-    let mut single_sh = vec![Goldilocks::ZERO; m];
+    let mut single_sh = SecretBuffer(vec![Goldilocks::ZERO; m]);
     let opening_tables = GoldilocksOpeningTables::new(t, quorum_eval_points)?;
     #[expect(clippy::needless_range_loop, reason = "Indices address overlapping party matrices; retain explicit indexing instead of conflicting borrows")]
     for w in 0..batch_len {
         for p in 0..m {
             single_sh[p] = batch_shares[p][w];
         }
-        let sec = opening_tables.open(&single_sh, phase)?;
+        let sec = opening_tables.open(single_sh.as_slice(), phase)?;
         dig_xof.absorb(&sec.to_canonical_u64().to_le_bytes());
         opened.push(sec);
     }
-    wipe_goldilocks(&mut single_sh);
+    drop(single_sh);
     let mut open_digest = [0u8; 32];
     dig_xof.squeeze(&mut open_digest);
 
@@ -7632,7 +8205,7 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
     chi_xof.absorb(&fold_coin);
 
     let mut x_folded = GoldilocksExt2::ZERO;
-    let mut m_folded = vec![GoldilocksExt2::ZERO; t];
+    let mut m_folded = SecretBuffer(vec![GoldilocksExt2::ZERO; t]);
     for w in 0..batch_len {
         let mut b48 = [0u8; 48];
         chi_xof.squeeze(&mut b48);
@@ -7648,7 +8221,7 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
 
     let lambdas_0 = lagrange_weights_zero_goldilocks(&quorum_eval_points[..t])
         .ok_or(PreprocessError::DuplicateOrZeroEvalPoint)?;
-    let mut z_masks = vec![GoldilocksExt2::ZERO; t];
+    let mut z_masks = SecretBuffer(vec![GoldilocksExt2::ZERO; t]);
     if t > 1 {
         for party_rngs_r_item in party_rngs[..t].iter_mut() {
             let mut acc = GoldilocksExt2::ZERO;
@@ -7661,46 +8234,51 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
         }
     }
 
-    let mut sigmas = Vec::with_capacity(t);
-    let mut sig_salts = Vec::with_capacity(t);
+    let mut sigmas = SecretBuffer(Vec::with_capacity(t));
+    let mut sig_salts = SecretBuffer(Vec::with_capacity(t));
     let mut sig_coms = Vec::with_capacity(t);
     for q in 0..t {
         let diff_q = m_folded[q] - (alpha_shares[q] * x_folded);
         let sig_q = diff_q.mul_base(lambdas_0[q]) + z_masks[q];
-        let salt = party_rngs[q].next_bytes32();
-        let q_be = (q as u64).to_be_bytes();
-        let c0_b = sig_q.c0.to_canonical_u64().to_le_bytes();
-        let c1_b = sig_q.c1.to_canonical_u64().to_le_bytes();
-        let com = cshake256_32(
+        let mut salt = party_rngs[q].next_bytes32();
+        let mut q_be = (q as u64).to_be_bytes();
+        let mut c0_b = sig_q.c0.to_canonical_u64().to_le_bytes();
+        let mut c1_b = sig_q.c1.to_canonical_u64().to_le_bytes();
+        let com = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GL.BATCH.MAC.COM/v1",
-            &encode_multi_frame(&[session_id, phase.as_bytes(), &q_be, &c0_b, &c1_b, &salt]),
+            &[session_id, phase.as_bytes(), &q_be, &c0_b, &c1_b, &salt],
         );
+        wipe_bytes(&mut q_be);
+        wipe_bytes(&mut c0_b);
+        wipe_bytes(&mut c1_b);
         sigmas.push(sig_q);
         sig_salts.push(salt);
+        wipe_bytes32(&mut salt);
         sig_coms.push(com);
     }
-    wipe_ext2(&mut z_masks);
-    wipe_ext2(&mut m_folded);
+    drop((z_masks, m_folded));
 
     let mut sum = GoldilocksExt2::ZERO;
     for q in 0..t {
-        let q_be = (q as u64).to_be_bytes();
-        let c0_b = sigmas[q].c0.to_canonical_u64().to_le_bytes();
-        let c1_b = sigmas[q].c1.to_canonical_u64().to_le_bytes();
-        let exp = cshake256_32(
+        let mut q_be = (q as u64).to_be_bytes();
+        let mut c0_b = sigmas[q].c0.to_canonical_u64().to_le_bytes();
+        let mut c1_b = sigmas[q].c1.to_canonical_u64().to_le_bytes();
+        let exp = cshake256_32_multi_frame(
             b"QSAG.SPDZ.GL.BATCH.MAC.COM/v1",
-            &encode_multi_frame(&[
+            &[
                 session_id,
                 phase.as_bytes(),
                 &q_be,
                 &c0_b,
                 &c1_b,
                 &sig_salts[q],
-            ]),
+            ],
         );
+        wipe_bytes(&mut q_be);
+        wipe_bytes(&mut c0_b);
+        wipe_bytes(&mut c1_b);
         wipe_bytes32(&mut sig_salts[q]);
         if !ct_eq_bytes32(&exp, &sig_coms[q]) {
-            wipe_ext2(&mut sigmas);
             return Err(PreprocessError::ShareCommitMismatch {
                 phase,
                 party_id: q,
@@ -7708,7 +8286,7 @@ pub fn commit_and_open_spdz_goldilocks_batch_quorum(
         }
         sum += sigmas[q];
     }
-    wipe_ext2(&mut sigmas);
+    drop((sigmas, sig_salts));
     if !sum.ct_eq(GoldilocksExt2::ZERO) {
         return Err(PreprocessError::MacCheckFailed {
             phase,
@@ -8839,7 +9417,7 @@ impl fmt::Debug for PcgPeerSeedMaterial {
 /// Global invariant across parties $p \in \{0, \dots, n-1\}$:
 /// `macs_for_me[q][lane] \oplus Peer(q).keys_from_me[p][lane] == Peer(q).alpha[lane] * value` (`q != p`),
 /// and for `q == p`, `macs_for_me[p][lane] \oplus keys_from_me[p][lane] == alpha[lane] * value`.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct PcgAuthTower128Share {
     pub value: Tower128,
     /// `macs[verifier_q][lane]` authenticating `self.value` under party `q`'s MAC key.
@@ -8923,7 +9501,7 @@ impl PcgAuthTower128Share {
 }
 
 /// Authenticated 128-bit `Tower128` Beaver triple `([a], [b], [c])` with `c = a * b` in $\mathcal{T}_7$.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct PcgAuthTower128TripleShare {
     pub a: PcgAuthTower128Share,
     pub b: PcgAuthTower128Share,
@@ -9977,7 +10555,7 @@ impl PcgSeedExpansion {
             ct0[i].clear();
             ct1[i].clear();
         }
-        let auth_csums = authenticate_tower128_batch(
+        let mut auth_csums = authenticate_tower128_batch(
             &session_id,
             ot_mesh,
             &alphas,
@@ -10008,11 +10586,11 @@ impl PcgSeedExpansion {
             tb_dup.push(v);
         }
         let tc_raw = pairwise_ole_tower128(&session_id, ot_mesh, &ta_raw, &tb_dup, party_rngs)?;
-        let auth_ta =
+        let mut auth_ta =
             authenticate_tower128_batch(&session_id, ot_mesh, &alphas, &ta_raw, party_rngs)?;
-        let auth_tb =
+        let mut auth_tb =
             authenticate_tower128_batch(&session_id, ot_mesh, &alphas, &tb_raw, party_rngs)?;
-        let auth_tc =
+        let mut auth_tc =
             authenticate_tower128_batch(&session_id, ot_mesh, &alphas, &tc_raw, party_rngs)?;
 
         // Immediate committed sacrifice of the 8 companion `Tower128` triples `[tow_batch .. 2*tow_batch]`
@@ -10076,12 +10654,9 @@ impl PcgSeedExpansion {
                     tower_receiver_trees: core::mem::take(&mut tow_recv_trees[i][j]),
                 });
             }
-            let tower_triples: Vec<PcgAuthTower128TripleShare> = (0..tow_batch)
-                .map(|k| PcgAuthTower128TripleShare {
-                    a: auth_ta[i][k].clone(),
-                    b: auth_tb[i][k].clone(),
-                    c: auth_tc[i][k].clone(),
-                })
+            let tower_triples: Vec<PcgAuthTower128TripleShare> = auth_ta[i].drain(..)
+                .zip(auth_tb[i].drain(..)).zip(auth_tc[i].drain(..))
+                .map(|((a, b), c)| PcgAuthTower128TripleShare { a, b, c })
                 .collect();
             let seed = PcgPartySeed {
                 session_id,
@@ -10092,7 +10667,7 @@ impl PcgSeedExpansion {
                 diag_mask_seed: diag_seeds[i],
                 peers,
                 delta_words: delta_words.clone(),
-                tilde_c_sums: [auth_csums[i][0].clone(), auth_csums[i][1].clone()],
+                tilde_c_sums: core::array::from_fn(|_| auth_csums[i].remove(0)),
                 tower_triples,
             };
             seeds.push(seed);
@@ -10283,7 +10858,7 @@ impl PcgSeedExpansion {
             // `[W_{sac_lane}] = \bigoplus_\ell \rho_{sac_lane,\ell} [c_\ell] \oplus [\tilde{C}_{sac_lane,sum}] \oplus \bigoplus_\ell U_{sac_lane,\ell} [b_\ell]`
             // Commit-before-open `[W_{sac_lane}]` with full 2-lane BDOZ MAC verification and assert `W_{sac_lane} == 0`!
             let mut w_shares: Vec<PcgAuthTower128Share> =
-                (0..n).map(|p| vaults[p].companion_c_sums[sac_lane].clone()).collect();
+                (0..n).map(|p| vaults[p].companion_c_sums[sac_lane].scale(Tower128::ONE)).collect();
             for (k, _) in vaults[0].bool_triple_words.iter().enumerate() {
                 for bit in 0..64 {
                     let ell = 64 * k + bit;
@@ -10676,7 +11251,7 @@ impl PcgPartySeed {
     /// Expand this `< 24 KB` seed **locally with ZERO network I/O** (consuming the seed) into
     /// `65,600` (`> 65,536`) 2-lane `Tower128` BDOZ-authenticated Boolean Beaver triples +
     /// `8` authenticated 128-bit `Tower128` Beaver triples + sacrifice companion masks.
-    pub fn expand_local(self) -> PcgExpandedPartyVault {
+    pub fn expand_local(mut self) -> PcgExpandedPartyVault {
         let n = self.num_parties;
         let me = self.party_id;
         let tower_depth = PCG_MIN_TREE_DEPTH;
@@ -10905,9 +11480,9 @@ impl PcgPartySeed {
             num_parties: n,
             mac_alpha: self.mac_alpha,
             bool_triple_words,
-            tower_triples: self.tower_triples.clone(),
+            tower_triples: core::mem::take(&mut self.tower_triples),
             companion_a,
-            companion_c_sums: self.tilde_c_sums.clone(),
+            companion_c_sums: core::mem::replace(&mut self.tilde_c_sums, core::array::from_fn(|_| PcgAuthTower128Share::zero(0))),
         }
     }
 }
@@ -11041,7 +11616,7 @@ mod tests {
             }
             bytes
         }
-        for counter in [0, u64::MAX - 2] {
+        for counter in [0, u64::MAX - 16] {
             for chunk in [1, 8, 26, 135, 136, 137, 543, 544, 545, 1088] {
                 let mut rng = PartyPrivateRng::from_seed([0x93; 32], b"batch-stream-test");
                 rng.counter = counter;

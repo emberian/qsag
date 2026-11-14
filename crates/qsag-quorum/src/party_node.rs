@@ -536,7 +536,10 @@ pub trait PoisonJournal {
     fn is_poisoned(&self, session_id: &[u8; 32]) -> bool;
 }
 
-/// Volatile [`PoisonJournal`] for tests and for hosts that persist one level up.
+/// Volatile [`PoisonJournal`], restricted to tests and `testing-ephemeral`. It forgets
+/// every reservation at process exit, so a restarted party would reuse its session masks;
+/// production nodes take `poison_journal::FsDurablePoisonAndSessionJournal`.
+#[cfg(any(test, feature = "testing-ephemeral"))]
 #[derive(Clone, Debug, Default)]
 pub struct MemoryPoisonJournal {
     reserved_sessions: Vec<[u8; 32]>,
@@ -544,6 +547,7 @@ pub struct MemoryPoisonJournal {
     fail_next: bool,
 }
 
+#[cfg(any(test, feature = "testing-ephemeral"))]
 impl MemoryPoisonJournal {
     pub fn new() -> Self {
         Self::default()
@@ -555,6 +559,7 @@ impl MemoryPoisonJournal {
     }
 }
 
+#[cfg(any(test, feature = "testing-ephemeral"))]
 impl PoisonJournal for MemoryPoisonJournal {
     fn reserve_session(&mut self, session_id: &[u8; 32]) -> Result<(), NodeError> {
         if self.sessions.contains(session_id) || self.reserved_sessions.contains(session_id) {
@@ -2197,7 +2202,7 @@ mod tests {
                 ShamirCustodian::new(
                     staged.cfg,
                     staged.tree.clone(),
-                    staged.parties[p].clone(),
+                    staged.parties[p].duplicate_for_test(),
                     MemoryWal::new(),
                 )
                 .unwrap()

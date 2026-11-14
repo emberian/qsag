@@ -15,5 +15,6 @@ alloc = ["qsag-accel/alloc"]
 std = ["alloc", "qsag-accel/std"]
 
 [dependencies]
+qsag-verified = { path = "../../aeneas/qsag-verified", default-features = false }
 qsag-core = { path = "../qsag-core", default-features = false }
 qsag-accel = { path = "../qsag-accel", default-features = false }

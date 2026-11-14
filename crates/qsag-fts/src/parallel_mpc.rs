@@ -429,10 +429,13 @@ impl MacOpenRound<'_> {
     pub fn opening(&self) -> (u16, [u8; 32], [u8; 32]) {
         (self.0.share.party_id, self.0.payload, self.0.salt)
     }
-    pub fn finish(
+    /// Checks every opening against the frozen commitments and returns the summed
+    /// MAC residual lanes. The round counts as complete only when both are zero;
+    /// the caller's release gate takes the acceptance decision from the residual.
+    pub(crate) fn residual(
         mut self,
         openings: &[(u16, [u8; 32], [u8; 32])],
-    ) -> Result<(), ParallelSeededError> {
+    ) -> Result<[u128; 2], ParallelSeededError> {
         if openings.len() != self.0.commitments.len() {
             return Err(ParallelSeededError::BdozMacCheckFailed);
         }
@@ -453,11 +456,9 @@ impl MacOpenRound<'_> {
                 *acc ^= value;
             }
         }
-        if !ct_eq_bytes(&sum, &[0; 32]) {
-            return Err(ParallelSeededError::BdozMacCheckFailed);
-        }
-        self.0.complete = true;
-        Ok(())
+        self.0.complete = ct_eq_bytes(&sum, &[0; 32]);
+        let lanes = bytes32_to_lanes(&sum);
+        Ok([lanes.0, lanes.1])
     }
 }
 impl Drop for MacCommitRound<'_> {
@@ -1165,6 +1166,7 @@ impl ParallelSeededThresholdSetup {
             0x5241_4E44,
             &[rand_w0, rand_w1],
             None,
+            None,
             accel,
         )?;
         let randomizer = lanes_to_bytes32(rand_open[0], rand_open[1]);
@@ -1225,6 +1227,7 @@ impl ParallelSeededThresholdSetup {
             &session_id,
             0x4348_4E53,
             &all_auth_wires,
+            Some(&chosen_offsets),
             {
                 #[cfg(test)]
                 {
@@ -1281,10 +1284,10 @@ impl ParallelSeededThresholdSetup {
         session_id: &[u8; 32],
         round_tag: u32,
         wires: &[Vec<AuthWire128>],
+        signature_codeword: Option<&[u8]>,
         injected_fault: Option<(usize, usize, u128)>,
         accel: &B,
     ) -> Result<Vec<u128>, ParallelSeededError> {
-        let output_count = wires.len();
         let mut combined = Vec::new();
         let pending_count = self.shares[0].pending_openings.len();
         if self
@@ -1317,6 +1320,7 @@ impl ParallelSeededThresholdSetup {
                 session_id,
                 round_tag ^ 0x8000_0000,
                 &combined,
+                None,
                 None,
                 accel,
             )?;
@@ -1415,14 +1419,26 @@ impl ParallelSeededThresholdSetup {
             ready.push(barrier.freeze(&commitments)?);
         }
         let openings: Vec<_> = ready.iter().map(MacOpenRound::opening).collect();
+        // Each party holds the candidates in its own gate and releases them only on
+        // the residual it computed from the frozen transcript.
+        let mut released = None;
         for state in ready {
-            state.finish(&openings)?;
+            let residual = state.residual(&openings)?;
+            let mut gate = crate::release_gate::OutputGate::hold(
+                &self.pk.params,
+                signature_codeword.is_some(),
+                *session_id,
+                SPN_ROUNDS,
+                tilde_vals.clone(),
+            );
+            gate.verify_mac(residual)?;
+            released = Some(gate.release(signature_codeword.unwrap_or(&[]))?);
         }
+        ct_zeroize_u128s(&mut tilde_vals);
         for sh in &mut self.shares {
             sh.pending_openings.clear();
         }
-        tilde_vals.truncate(output_count);
-        Ok(tilde_vals)
+        released.ok_or(ParallelSeededError::BdozMacCheckFailed)
     }
 }
 
@@ -1611,7 +1627,7 @@ mod power_auth_tests {
         let plain = x.iter().fold(0, |acc, x| acc ^ x.val_sh);
         let power = mpc_pow7(&mut setup.shares, &x).unwrap();
         let opened = setup
-            .open_and_verify_bdoz_wires(&[5; 32], 1, &[power], None, &accel)
+            .open_and_verify_bdoz_wires(&[5; 32], 1, &[power], None, None, &accel)
             .unwrap();
         assert_eq!(opened[0], pow7_plain(plain));
     }

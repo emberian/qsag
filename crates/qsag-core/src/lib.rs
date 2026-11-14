@@ -68,7 +68,7 @@ pub mod corduroy;
 #[cfg(feature = "std")]
 mod durable_ledger;
 #[cfg(feature = "std")]
-pub use durable_ledger::LedgerCheckpoint;
+pub use durable_ledger::{ExternalMonotoneAnchor, LedgerCheckpoint};
 
 /// Atomic per-key ceremony resource journal.
 #[cfg(feature = "std")]

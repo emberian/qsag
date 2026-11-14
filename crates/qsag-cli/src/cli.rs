@@ -301,6 +301,38 @@ pub fn sync_parent(path: &str) -> Result<(), CliError> {
         .map_err(|e| CliError::io("syncing parent directory", e))
 }
 
+/// A directory holding custody state: owner-only, never a symlink. With `create`, missing
+/// components are made with mode 0700. A directory that already exists is accepted only if
+/// no other user can enter it; its permissions are never changed here.
+pub fn private_dir(path: &str, create: bool) -> Result<(), CliError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        if create {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(path)
+                .map_err(|e| CliError::io(format_args!("creating {path}"), e))?;
+        }
+        let meta = std::fs::symlink_metadata(path)
+            .map_err(|e| CliError::io(format_args!("inspecting {path}"), e))?;
+        if !meta.is_dir() || meta.permissions().mode() & 0o077 != 0 {
+            return Err(CliError::state(format!(
+                "{path} must be a directory only its owner can access (mode 0700), not a symlink"
+            )));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = create;
+        Err(CliError::state(format!(
+            "{path}: owner-only directories require Unix permissions"
+        )))
+    }
+}
+
 /// Create a new file and refuse to overwrite an existing one. Secret files are created with
 /// owner-only permissions.
 pub fn write_new(path: &str, contents: &[u8], secret: bool) -> Result<(), CliError> {
@@ -355,6 +387,48 @@ mod tests {
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_dir_is_owner_only_and_refuses_shared_or_linked_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "qsag-private-dir-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
+        let path = |name: &str| root.join(name).to_str().unwrap().to_owned();
+        let mode = |name: &str| {
+            std::fs::symlink_metadata(path(name)).unwrap().permissions().mode() & 0o777
+        };
+        // Missing ancestors are created private too.
+        private_dir(&path("a/b"), true).unwrap();
+        assert_eq!(mode("a"), 0o700);
+        assert_eq!(mode("a/b"), 0o700);
+        assert_eq!(
+            std::fs::symlink_metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // Idempotent on a directory that is already private.
+        private_dir(&path("a/b"), true).unwrap();
+        private_dir(&path("a/b"), false).unwrap();
+        // Absent without `create`.
+        assert!(private_dir(&path("absent"), false).is_err());
+        // An existing shared directory is refused and left as it was.
+        std::fs::create_dir(path("shared")).unwrap();
+        for shared in [0o755, 0o750, 0o701] {
+            std::fs::set_permissions(path("shared"), std::fs::Permissions::from_mode(shared))
+                .unwrap();
+            assert!(private_dir(&path("shared"), true).is_err());
+            assert!(private_dir(&path("shared"), false).is_err());
+            assert_eq!(mode("shared"), shared);
+        }
+        // A symlink to a private directory, and a regular file.
+        std::os::unix::fs::symlink(path("a"), path("link")).unwrap();
+        assert!(private_dir(&path("link"), true).is_err());
+        std::fs::write(path("file"), b"").unwrap();
+        assert!(private_dir(&path("file"), true).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

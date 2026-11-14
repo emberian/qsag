@@ -1,6 +1,7 @@
 //! Transport-facing signing and public leaf preparation. Each state exclusively
 //! borrows one custodian. Transport supplies authenticated, consistent broadcasts.
 use super::*;
+use crate::release_gate::OutputGate;
 use qsag_accel::CpuReferenceBackend;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,12 +66,17 @@ pub struct ParallelSeededSignSession<'a> {
     phase: Phase,
     sequence: u32,
     spn_round: usize,
+    /// Rounds the most recently finished chain step ran.
+    step_rounds: usize,
     jobs: Vec<Job>,
     powers: Vec<AuthenticatedPowerShare>,
     masked: Vec<AuthWire128>,
     payload: Vec<u128>,
     commitments: Vec<(u16, [u8; 32])>,
-    opened: Vec<u128>,
+    /// Opened candidates, withheld until the MAC check accepts.
+    gate: Option<OutputGate>,
+    /// Codeword answered by the signature chains.
+    digits: Vec<u8>,
     randomizer: [u8; 32],
     grind_counter: u32,
     result: Option<ParallelSeededSignResult>,
@@ -90,7 +96,6 @@ impl Drop for ParallelSeededSignSession<'_> {
             self.share.poison();
         }
         self.share.pending_openings.clear();
-        ct_zeroize_u128s(&mut self.opened);
     }
 }
 fn encode_values(values: &[u128]) -> Vec<u8> {
@@ -282,12 +287,14 @@ impl<'a> ParallelSeededSignSession<'a> {
             phase: Phase::PowerCommit,
             sequence: 0,
             spn_round: 0,
+            step_rounds: 0,
             jobs: Vec::new(),
             powers: Vec::new(),
             masked: Vec::new(),
             payload: Vec::new(),
             commitments: Vec::new(),
-            opened: Vec::new(),
+            gate: None,
+            digits: Vec::new(),
             randomizer: [0; 32],
             grind_counter: 0,
             result: None,
@@ -488,9 +495,14 @@ impl<'a> ParallelSeededSignSession<'a> {
                 Ok(())
             }
             Phase::MacOpen => {
-                if values != [0, 0] {
-                    return Err(ParallelSeededError::BdozMacCheckFailed);
-                }
+                let residual: [u128; 2] = values
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| ParallelSeededError::BdozMacCheckFailed)?;
+                self.gate
+                    .as_mut()
+                    .ok_or(ParallelSeededError::BdozMacCheckFailed)?
+                    .verify_mac(residual)?;
                 self.mac_opening_exposed = false;
                 self.share.pending_openings.clear();
                 self.after_mac()
@@ -519,6 +531,7 @@ impl<'a> ParallelSeededSignSession<'a> {
             })
             .collect();
         self.spn_round = 0;
+        self.step_rounds = 0;
     }
     fn prepare_power(&mut self) -> Result<(), ParallelSeededError> {
         self.masked.clear();
@@ -587,6 +600,7 @@ impl<'a> ParallelSeededSignSession<'a> {
         }
         self.spn_round += 1;
         if self.spn_round == SPN_ROUNDS {
+            self.step_rounds = self.spn_round;
             self.spn_round = 0;
             for job in self.jobs.iter_mut().filter(|j| !j.done) {
                 for (wire, original) in job.state.iter_mut().zip(&job.original) {
@@ -690,13 +704,27 @@ impl<'a> ParallelSeededSignSession<'a> {
         ct_zeroize_u128s(&mut self.payload);
         self.payload = sigma.to_vec();
         ct_zeroize_u128s(&mut sigma);
-        self.opened = opened;
+        self.gate = Some(OutputGate::hold(
+            &self.pk.params,
+            self.mode == Mode::Chains,
+            self.session,
+            self.step_rounds,
+            opened,
+        ));
         self.phase = Phase::MacCommit;
         Ok(())
     }
     fn after_mac(&mut self) -> Result<(), ParallelSeededError> {
+        let mut opened = self
+            .gate
+            .take()
+            .ok_or(ParallelSeededError::BdozMacCheckFailed)?
+            .release(&self.digits)?;
         if self.mode == Mode::Randomizer {
-            self.randomizer = lanes_to_bytes32(self.opened[0], self.opened[1]);
+            if opened.len() != 2 {
+                return Err(ParallelSeededError::BdozMacCheckFailed);
+            }
+            self.randomizer = lanes_to_bytes32(opened[0], opened[1]);
             let mut chosen = None;
             for counter in 0..1_000_000 {
                 if let Some(offsets) = derive_sum_constrained_offsets(
@@ -716,15 +744,16 @@ impl<'a> ParallelSeededSignSession<'a> {
             self.grind_counter = counter;
             self.mode = Mode::Chains;
             self.seed_jobs(&offsets);
+            self.digits = offsets;
             self.prepare_power()
         } else {
-            let nodes: Vec<_> = self
-                .opened
+            let nodes: Vec<_> = opened
                 .as_chunks::<2>()
                 .0
                 .iter()
                 .map(|pair| lanes_to_bytes32(pair[0], pair[1]))
                 .collect();
+            ct_zeroize_u128s(&mut opened);
             self.result = Some(if self.mode == Mode::Leaf {
                 ParallelSeededSignResult::Leaf {
                     epoch: self.epoch,
@@ -762,6 +791,15 @@ impl<'a> ParallelSeededSignSession<'a> {
         }
         self.payload[0] ^= 1;
         true
+    }
+    #[cfg(test)]
+    pub(crate) fn alter_chain_value_share_for_test(&mut self) -> bool {
+        self.mode == Mode::Chains && self.alter_value_share_for_test()
+    }
+    /// Whether the candidates currently awaiting the MAC check sit in verified sessions.
+    #[cfg(test)]
+    pub(crate) fn held_in_verified_sessions(&self) -> Option<bool> {
+        self.gate.as_ref().map(OutputGate::is_verified)
     }
     pub fn result(&self) -> Option<&ParallelSeededSignResult> {
         self.result.as_ref()

@@ -11,7 +11,7 @@
 //!    - Both full-tree Sender expansion and punctured-tree Receiver expansion batch 4 parallel
 //!      `Keccak-f[1600]` states via [`qsag_asm::keccak_f1600_batch`].
 //! 2. **Dense Expand-Accumulate Parity-Check Matrix ($H_{\mathrm{lpn}} = E \circ \mathrm{Acc}$):**
-//!    - Sender expands full 128-bit leaf seeds $s[\mathrm{col}]$ and computes its dense baseline
+//!    - Sender expands 256-bit GGM seeds into 128-bit field leaves $s[\mathrm{col}]$ and computes its dense baseline
 //!      via $H_{\mathrm{lpn}} \cdot s$.
 //!    - Receiver expands punctured leaf seeds $s_{\neq p^*_r}$ (`0` at $p^*_r$) and computes
 //!      $H_{\mathrm{lpn}} \cdot s_{\neq p^*_r} \oplus H_{\mathrm{lpn}}[:, p^*_r] \cdot \Delta_{\mathrm{corr}}$,
@@ -45,10 +45,10 @@ use crate::field::tower::Tower128;
 use crate::preprocessing::{
     OtMesh, PartyPrivateRng, PreprocessError, run_commit_and_open_coin,
 };
-use crate::sponge::keccak::{Cshake256Xof, cshake256_32, encode_multi_frame};
+use crate::sponge::keccak::{Cshake256Xof, cshake256_32_multi_frame};
 use crate::wipe::{
-    ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_tower128_slice, wipe_u16s,
-    wipe_u64s, wipe_u128s,
+    ct_eq_bytes32, wipe_bytes, wipe_bytes32, wipe_tower128_slice, wipe_u16s, wipe_u64s, wipe_u128s,
+    SecretBuffer,
 };
 
 /// Number of regular-noise GGM trees per ordered peer pair (`t = 64`).
@@ -267,15 +267,13 @@ fn derive_sender_tree_roots(
     xof.absorb(&(sender_id as u64).to_le_bytes());
     xof.absorb(&(receiver_id as u64).to_le_bytes());
     xof.absorb(sender_master_seed);
-    let mut raw = [0u8; DENSE_PCG_NUM_TREES * 32];
-    xof.squeeze(&mut raw);
-    let roots = core::array::from_fn(|j| {
+    let mut raw = SecretBuffer([0u8; DENSE_PCG_NUM_TREES * 32]);
+    xof.squeeze(&mut *raw);
+    core::array::from_fn(|j| {
         let mut r = [0u8; 32];
         r.copy_from_slice(&raw[32 * j..32 * (j + 1)]);
         r
-    });
-    wipe_bytes(&mut raw);
-    roots
+    })
 }
 
 /// Expand a full GGM tree of `depth ∈ {14, 15}` using 4-way batched `Keccak-f[1600]`.
@@ -289,25 +287,25 @@ fn ggm_expand_full_4x(
 
 /// [`ggm_expand_full_4x`] for an arbitrary depth `d` (`2^d` leaves).
 fn ggm_expand_full_depth(dom: &GgmTreeDomain, d: usize, root_seed: &[u8; 32]) -> FullGgmExpansion {
-    let mut cur_level = vec![*root_seed];
+    let mut cur_level = SecretBuffer(vec![*root_seed]);
     let mut level_lr_xors = Vec::with_capacity(d);
 
     for lvl in 0..d {
-        let mut next_level = Vec::with_capacity(cur_level.len() * 2);
+        let mut next_level = SecretBuffer(Vec::with_capacity(cur_level.len() * 2));
         let mut l_xor = [0u8; 32];
         let mut r_xor = [0u8; 32];
 
         let mut base_idx = 0usize;
         for chunk in cur_level.chunks(4) {
-            let mut states = [[0u64; 25]; 4];
+            let mut states = SecretBuffer([[0u64; 25]; 4]);
             for (lane, node) in states.iter_mut().zip(chunk.iter()) {
                 encode_ggm_node_state(dom, lvl as u8, (base_idx) as u32, node, lane);
                 base_idx += 1;
             }
             qsag_asm::keccak_f1600_batch(&mut states[..chunk.len()]);
             for state in states.iter_mut().take(chunk.len()) {
-                let mut left = [0u8; 32];
-                let mut right = [0u8; 32];
+                let mut left = SecretBuffer([0u8; 32]);
+                let mut right = SecretBuffer([0u8; 32]);
                 for word in 0..4 {
                     left[8 * word..8 * (word + 1)].copy_from_slice(&state[word].to_le_bytes());
                     right[8 * word..8 * (word + 1)].copy_from_slice(&state[word + 4].to_le_bytes());
@@ -318,28 +316,21 @@ fn ggm_expand_full_depth(dom: &GgmTreeDomain, d: usize, root_seed: &[u8; 32]) ->
                 for (rx, &rb) in r_xor.iter_mut().zip(right.iter()) {
                     *rx ^= rb;
                 }
-                next_level.push(left);
-                next_level.push(right);
-                wipe_bytes32(&mut left);
-                wipe_bytes32(&mut right);
-                wipe_u64s(state);
+                next_level.push(*left);
+                next_level.push(*right);
             }
         }
 
-        for node in &mut cur_level {
-            wipe_bytes32(node);
-        }
         cur_level = next_level;
         level_lr_xors.push((l_xor, r_xor));
     }
 
     let mut leaves = Vec::with_capacity(cur_level.len());
     let mut xor_acc = 0u128;
-    for node in &mut cur_level {
+    for node in cur_level.iter() {
         let val = read_u128_le(node, 0);
         xor_acc ^= val;
         leaves.push(val);
-        wipe_bytes32(node);
     }
 
     FullGgmExpansion {
@@ -402,21 +393,21 @@ fn ggm_expand_punctured_4x(
 fn ggm_expand_punctured_oblivious(
     dom: &GgmTreeDomain, d: usize, punctured_idx: usize, copath: &[[u8; 32]],
 ) -> PuncturedGgmExpansion {
-    let mut cur_level = vec![[0u8; 32]; 1];
+    let mut cur_level = SecretBuffer(vec![[0u8; 32]; 1]);
     let mut missing_prefix = 0usize;
     for (lvl, sibling_msg) in copath.iter().enumerate().take(d) {
         let bit = ((punctured_idx >> (d - 1 - lvl)) & 1) as u64;
         let path_right = ct_bit_mask_u128(bit) as u8;
-        let mut next_level = vec![[0u8; 32]; cur_level.len() * 2];
-        let mut known_xor = [0u8; 32];
+        let mut next_level = SecretBuffer(vec![[0u8; 32]; cur_level.len() * 2]);
+        let mut known_xor = SecretBuffer([0u8; 32]);
         for (batch, (chunk, out)) in cur_level.chunks(4).zip(next_level.chunks_mut(8)).enumerate() {
             let base = batch * 4;
-            let mut states = [[0u64; 25]; 4];
+            let mut states = SecretBuffer([[0u64; 25]; 4]);
             for (off, (state, seed)) in states.iter_mut().zip(chunk).enumerate() {
                 encode_ggm_node_state(dom, lvl as u8, (base + off) as u32, seed, state);
             }
             qsag_asm::keccak_f1600_batch(&mut states[..chunk.len()]);
-            for (off, (state, pair)) in states.iter_mut().zip(out.chunks_mut(2)).enumerate() {
+            for (off, (state, pair)) in states.iter().zip(out.chunks_mut(2)).enumerate() {
                 let known = !ct_eq_mask_u64((base + off) as u64, missing_prefix as u64) as u8;
                 for byte in 0..32 {
                     let left = (state[byte / 8] >> (8 * (byte % 8))) as u8;
@@ -425,7 +416,6 @@ fn ggm_expand_punctured_oblivious(
                     pair[0][byte] = left & known;
                     pair[1][byte] = right & known;
                 }
-                wipe_u64s(state);
             }
         }
         for (idx, pair) in next_level.chunks_mut(2).enumerate() {
@@ -436,18 +426,17 @@ fn ggm_expand_punctured_oblivious(
                 pair[1][byte] ^= below & !path_right & recovered;
             }
         }
-        wipe_bytes32(&mut known_xor);
         missing_prefix = (missing_prefix << 1) | bit as usize;
-        for node in &mut cur_level { wipe_bytes32(node); }
         cur_level = next_level;
     }
     // Leaves are field elements, not further PRF keys. Internal and copath seeds
     // retain all 256 bits; projecting the final output to GF(2^128) is intentional.
     let mut punc_leaves = Vec::with_capacity(cur_level.len());
     let mut punc_xor = 0u128;
-    for (idx, node) in cur_level.iter_mut().enumerate() {
+    for (idx, node) in cur_level.iter().enumerate() {
         let leaf = read_u128_le(node, 0) & !ct_eq_mask_u128(idx, punctured_idx);
-        punc_xor ^= leaf; punc_leaves.push(leaf); wipe_bytes32(node);
+        punc_xor ^= leaf;
+        punc_leaves.push(leaf);
     }
     PuncturedGgmExpansion { punc_leaves, punc_xor_sum: Tower128(punc_xor) }
 }
@@ -543,11 +532,11 @@ fn accumulate_sender_lpn_tree(
     full_leaves: &[u128],
     out_keys: &mut [u128],
 ) {
-    let mut acc = Vec::with_capacity(full_leaves.len());
-    let mut running = 0u128;
+    let mut acc = SecretBuffer(Vec::with_capacity(full_leaves.len()));
+    let mut running = SecretBuffer(0u128);
     for &leaf in full_leaves {
-        running ^= leaf;
-        acc.push(running);
+        *running ^= leaf;
+        acc.push(*running);
     }
 
     let mut tap_gen = BatchedTapGenerator::new(ctx);
@@ -555,8 +544,6 @@ fn accumulate_sender_lpn_tree(
         let taps = tap_gen.next_three_taps();
         *key_row ^= acc[taps[0]] ^ acc[taps[1]] ^ acc[taps[2]];
     }
-
-    wipe_u128s(&mut acc);
 }
 
 /// Receiver dense dual-LPN accumulation:
@@ -570,11 +557,11 @@ fn accumulate_receiver_lpn_tree(
     out_macs: &mut [u128],
     out_choice_words: &mut [u64],
 ) {
-    let mut acc = Vec::with_capacity(punc_leaves.len());
-    let mut running = 0u128;
+    let mut acc = SecretBuffer(Vec::with_capacity(punc_leaves.len()));
+    let mut running = SecretBuffer(0u128);
     for &leaf in punc_leaves {
-        running ^= leaf;
-        acc.push(running);
+        *running ^= leaf;
+        acc.push(*running);
     }
 
     let mut tap_gen = BatchedTapGenerator::new(ctx);
@@ -591,8 +578,6 @@ fn accumulate_receiver_lpn_tree(
         *mac_row ^= punc_term ^ (corr_mask & delta_corr);
         out_choice_words[row_idx >> 6] ^= h_bit << (row_idx & 63);
     }
-
-    wipe_u128s(&mut acc);
 }
 
 // ============================================================================
@@ -727,16 +712,14 @@ fn compute_spcot_check_tag(
 ) -> [u8; 32] {
     let s_bytes = (sender_id as u64).to_le_bytes();
     let r_bytes = (receiver_id as u64).to_le_bytes();
-    let mut w_bytes = [0u8; 16 * SPCOT_CHECK_REPS];
+    let mut w_bytes = SecretBuffer([0u8; 16 * SPCOT_CHECK_REPS]);
     for (chunk, w) in w_bytes.as_chunks_mut::<16>().0.iter_mut().zip(w_vals.iter()) {
         *chunk = w.0.to_le_bytes();
     }
-    let tag = cshake256_32(
+    cshake256_32_multi_frame(
         b"QSAG.DPCG.SPCOT.TAG/v1",
-        &encode_multi_frame(&[session_id, &s_bytes, &r_bytes, chal_coin, &w_bytes]),
-    );
-    wipe_bytes(&mut w_bytes);
-    tag
+        &[session_id, &s_bytes, &r_bytes, chal_coin, &*w_bytes],
+    )
 }
 
 /// Final receiver tag comparison after OT-branch parity verification.
@@ -766,7 +749,7 @@ impl SpcotParityMessage {
     /// combiner. No sender scalar or unselected OT pad is available to this verifier.
     pub fn verify_receiver(&self, choices: &[u64; 4], selected_pads: &[[u8; 48]]) -> Result<Vec<Tower128>, PreprocessError> {
         if selected_pads.len() != 256 { return Err(PreprocessError::PcgInvalidWireSeed); }
-        let mut macs = Vec::with_capacity(256);
+        let mut macs = SecretBuffer(Vec::with_capacity(256));
         let mut bad = 0u128;
         for (i, pad) in selected_pads.iter().enumerate() {
             let bit = (choices[i / 64] >> (i % 64)) & 1;
@@ -776,10 +759,9 @@ impl SpcotParityMessage {
             macs.push(Tower128(mac));
         }
         if bad != 0 {
-            wipe_tower128_slice(&mut macs);
             return Err(PreprocessError::MacCheckFailed { phase: "pcg_dense_spcot_parity", accused_party: None });
         }
-        Ok(macs)
+        Ok(core::mem::take(&mut macs.0))
     }
 
     fn bind(&self, xof: &mut Cshake256Xof) {
@@ -815,20 +797,21 @@ fn run_lhl_vole128_mask(
     ot_mesh: &mut OtMesh,
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<OneTimeVole128Mask, PreprocessError> {
-    let mut choice_words = [0u64; 4];
-    for slot in &mut choice_words {
+    let mut choice_words = SecretBuffer([0u64; 4]);
+    for slot in choice_words.iter_mut() {
         *slot = party_rngs[receiver_id].next_u64();
     }
     let (send_pads, recv_pads) =
-        ot_mesh.run_correlated_ot_words(sender_id, receiver_id, &choice_words, party_rngs)?;
+        ot_mesh.run_correlated_ot_words(sender_id, receiver_id, &*choice_words, party_rngs)?;
 
     let mut parity = SpcotParityMessage { corrections: [Tower128::ZERO; 256], key_parities: [0; 4] };
     for (i, (p0, p1)) in send_pads.iter().take(256).enumerate() {
-        let k0 = read_u128_le(p0, 0);
-        parity.corrections[i] = Tower128(k0 ^ read_u128_le(p1, 0) ^ alpha_sender.0);
-        parity.key_parities[i / 64] |= ((k0 & 1) as u64) << (i % 64);
+        let k0 = SecretBuffer(read_u128_le(p0, 0));
+        let k1 = SecretBuffer(read_u128_le(p1, 0));
+        parity.corrections[i] = Tower128(*k0 ^ *k1 ^ alpha_sender.0);
+        parity.key_parities[i / 64] |= ((*k0 & 1) as u64) << (i % 64);
     }
-    let mut receiver_macs = parity.verify_receiver(&choice_words, &recv_pads)?;
+    let receiver_macs = SecretBuffer(parity.verify_receiver(&choice_words, &recv_pads)?);
     let mut bind_xof = Cshake256Xof::new(b"QSAG.DPCG.SPCOT.LHL.BIND/v2");
     parity.bind(&mut bind_xof);
     bind_xof.absorb(session_id);
@@ -858,9 +841,9 @@ fn run_lhl_vole128_mask(
         weights.push(Tower128(read_u128_le(&buf, 0)));
     }
 
-    let mut key_sender = Tower128::ZERO;
-    let mut x_receiver = Tower128::ZERO;
-    let mut mac_receiver = Tower128::ZERO;
+    let mut key_sender = SecretBuffer(Tower128::ZERO);
+    let mut x_receiver = SecretBuffer(Tower128::ZERO);
+    let mut mac_receiver = SecretBuffer(Tower128::ZERO);
 
     for (t, ((pads, _recv_pad), &w_t)) in send_pads
         .iter()
@@ -868,27 +851,20 @@ fn run_lhl_vole128_mask(
         .zip(weights.iter())
         .enumerate()
     {
-        let mut k0 = Tower128(read_u128_le(&pads.0, 0));
+        let k0 = SecretBuffer(Tower128(read_u128_le(&pads.0, 0)));
 
-        key_sender = key_sender.add(w_t.mul(k0));
+        *key_sender = key_sender.add(w_t.mul(*k0));
 
-        let r_bit = ((choice_words[t >> 6] >> (t & 63)) & 1) == 1;
+        let r_bit = (choice_words[t >> 6] >> (t & 63)) & 1;
         let m_t = receiver_macs[t];
-        if r_bit {
-            x_receiver = x_receiver.add(w_t);
-        }
-        mac_receiver = mac_receiver.add(w_t.mul(m_t));
-
-        wipe_tower128_elem(&mut k0);
-
+        *x_receiver = x_receiver.add(Tower128(w_t.0 & ct_bit_mask_u128(r_bit)));
+        *mac_receiver = mac_receiver.add(w_t.mul(m_t));
     }
 
-    wipe_u64s(&mut choice_words);
-    wipe_tower128_slice(&mut receiver_macs);
     Ok(OneTimeVole128Mask {
-        key_sender,
-        x_receiver,
-        mac_receiver,
+        key_sender: *key_sender,
+        x_receiver: *x_receiver,
+        mac_receiver: *mac_receiver,
         transcript_digest,
     })
 }
@@ -1417,12 +1393,12 @@ impl DensePcgPartySeed {
         let num_parties = u16::from_le_bytes([bytes[42], bytes[43]]) as usize;
         let tree_depth = PcgTreeDepth::try_from(bytes[44] as usize)
             .map_err(|_| PreprocessError::PcgInvalidWireSeed)?;
-        let mac_alpha = Tower128(read_u128_le(bytes, 45));
+        let mac_alpha = SecretBuffer(Tower128(read_u128_le(bytes, 45)));
         let num_peers = u16::from_le_bytes([bytes[61], bytes[62]]) as usize;
 
         if num_parties < 2
             || party_id >= num_parties
-            || (mac_alpha.0 & 1) == 0
+            || ((*mac_alpha).0 & 1) == 0
             || num_peers != num_parties - 1
         {
             return Err(PreprocessError::PcgInvalidWireSeed);
@@ -1471,6 +1447,7 @@ impl DensePcgPartySeed {
                     node.copy_from_slice(&bytes[cur..cur + 32]);
                     cur += 32;
                     cp.push(node);
+                    wipe_bytes32(&mut node);
                 }
                 copaths.push(cp);
             }
@@ -1538,7 +1515,7 @@ impl DensePcgPartySeed {
             party_id,
             num_parties,
             tree_depth,
-            mac_alpha,
+            mac_alpha: *mac_alpha,
             peers,
             multi_party_c_fix,
         };
@@ -1562,9 +1539,9 @@ impl DensePcgPartySeed {
     /// setup.
     pub fn seed_id(&self) -> [u8; 32] {
         let party = (self.party_id as u64).to_le_bytes();
-        cshake256_32(
+        cshake256_32_multi_frame(
             b"QSAG.DPCG.SEED.ID/v2",
-            &encode_multi_frame(&[&self.session_id, &party]),
+            &[&self.session_id, &party],
         )
     }
 
@@ -1643,12 +1620,12 @@ impl DensePcgPartySeed {
             }
 
             // Step 2: Expand `me -> q` full GGM trees (`H_lpn * s`).
-            let roots = derive_sender_tree_roots(
+            let roots = SecretBuffer(derive_sender_tree_roots(
                 &self.session_id,
                 me,
                 q,
                 &peer.sender_master_seed,
-            );
+            ));
             let mut me_to_q_keys = vec![0u128; TOTAL_LPN_ROWS];
             for (tree_idx, root_seed) in roots.iter().enumerate() {
                 let dom = GgmTreeDomain {
@@ -1948,7 +1925,7 @@ fn setup_dense_pcg_seeds_inner(
         return Err(PreprocessError::InvalidThreshold { t: 2, n });
     }
 
-    let mut alphas = Vec::with_capacity(n);
+    let mut alphas = SecretBuffer(Vec::with_capacity(n));
     for rng in party_rngs.iter_mut() {
         let mut a = rng.next_tower128();
         a.0 |= 1; // Enforce LSB(alpha_i) == 1 (`127`-bit entropy, exact dense bit projection)
@@ -2031,13 +2008,13 @@ fn compute_multiparty_beaver_c_fixes(
     party_rngs: &mut [PartyPrivateRng],
 ) -> Result<Vec<Vec<u64>>, PreprocessError> {
     let n = directed.len();
-    let mut a_party = vec![vec![0u64; DENSE_PCG_NUM_WORDS]; n];
-    let mut b_party = vec![vec![0u64; DENSE_PCG_NUM_WORDS]; n];
-    let mut c_ggm = vec![vec![0u64; DENSE_PCG_NUM_WORDS]; n];
+    let mut a_party = SecretBuffer(vec![vec![0u64; DENSE_PCG_NUM_WORDS]; n]);
+    let mut b_party = SecretBuffer(vec![vec![0u64; DENSE_PCG_NUM_WORDS]; n]);
+    let mut c_ggm = SecretBuffer(vec![vec![0u64; DENSE_PCG_NUM_WORDS]; n]);
 
     for me in 0..n {
-        let mut x_sum = vec![0u64; DENSE_PCG_NUM_WORDS];
-        let mut cross_xor = vec![0u64; DENSE_PCG_NUM_WORDS];
+        let mut x_sum = SecretBuffer(vec![0u64; DENSE_PCG_NUM_WORDS]);
+        let mut cross_xor = SecretBuffer(vec![0u64; DENSE_PCG_NUM_WORDS]);
         let mut slot = 0usize;
         for (q, (me_slot, row_q)) in directed[me].iter().zip(directed.iter()).enumerate() {
             if q == me {
@@ -2094,12 +2071,7 @@ fn compute_multiparty_beaver_c_fixes(
         wipe_u64s(ct);
         wipe_u64s(cg);
     }
-    for mut av in a_party {
-        wipe_u64s(&mut av);
-    }
-    for mut bv in b_party {
-        wipe_u64s(&mut bv);
-    }
+
     Ok(fixes)
 }
 
@@ -2118,14 +2090,14 @@ fn run_directed_spcot_setup(
     let leaf_mask = (tree_depth.num_leaves() - 1) as u16;
 
     // 1. Receiver samples 64 regular-noise punctured leaf positions `p*[0..64]`.
-    let mut punctured_indices = [0u16; DENSE_PCG_NUM_TREES];
-    for slot in &mut punctured_indices {
+    let mut punctured_indices = SecretBuffer([0u16; DENSE_PCG_NUM_TREES]);
+    for slot in punctured_indices.iter_mut() {
         *slot = (party_rngs[receiver_id].next_u64() as u16) & leaf_mask;
     }
 
     let total_ot_bits = DENSE_PCG_NUM_TREES * d;
     let num_ot_words = total_ot_bits.div_ceil(64);
-    let mut choice_words = vec![0u64; num_ot_words];
+    let mut choice_words = SecretBuffer(vec![0u64; num_ot_words]);
     for (tree_idx, &p_star) in punctured_indices.iter().enumerate() {
         for lvl in 0..d {
             let bit = ((p_star as usize) >> (d - 1 - lvl)) & 1;
@@ -2140,8 +2112,8 @@ fn run_directed_spcot_setup(
 
     // 2. Sender expands its 64 full GGM trees (`4-way Keccak`), encrypts `(R_xor, L_xor)` under
     // KOS OT pads, and forms `corr_offsets[j] = leaf_xor_sum[j] ^ alpha_sender`.
-    let sender_master_seed = party_rngs[sender_id].next_bytes32();
-    let roots = derive_sender_tree_roots(session_id, sender_id, receiver_id, &sender_master_seed);
+    let sender_master_seed = SecretBuffer(party_rngs[sender_id].next_bytes32());
+    let roots = SecretBuffer(derive_sender_tree_roots(session_id, sender_id, receiver_id, &sender_master_seed));
 
     let mut full_trees = Vec::with_capacity(DENSE_PCG_NUM_TREES);
     let mut corr_offsets = [Tower128::ZERO; DENSE_PCG_NUM_TREES];
@@ -2205,7 +2177,7 @@ fn run_directed_spcot_setup(
     }
 
     // 3. Receiver decrypts its `64` GGM copaths from `ot_cts` and `recv_pads`.
-    let mut copaths = Vec::with_capacity(DENSE_PCG_NUM_TREES);
+    let mut copaths = SecretBuffer(Vec::with_capacity(DENSE_PCG_NUM_TREES));
     for (tree_idx, &p_star) in punctured_indices.iter().enumerate() {
         let mut cp = Vec::with_capacity(d);
         for lvl in 0..d {
@@ -2214,7 +2186,7 @@ fn run_directed_spcot_setup(
             let ot_pos = tree_idx * d + lvl;
             let (ct0, ct1) = &ot_cts[ot_pos];
             let rpad = &recv_pads[ot_pos];
-            let mut node = [0u8; 32];
+            let mut node = SecretBuffer([0u8; 32]);
             for (((dst, &c0), &c1), &p) in node
                 .iter_mut()
                 .zip(ct0.iter())
@@ -2223,7 +2195,7 @@ fn run_directed_spcot_setup(
             {
                 *dst = (c0 ^ (take_ct1 & (c0 ^ c1))) ^ p;
             }
-            cp.push(node);
+            cp.push(*node);
         }
         copaths.push(cp);
     }
@@ -2429,9 +2401,9 @@ fn run_directed_spcot_setup(
     wipe_u64s(&mut recv_choice_preview);
 
     Ok(DirectedSpcotTranscript {
-        sender_master_seed,
-        punctured_indices,
-        copaths,
+        sender_master_seed: *sender_master_seed,
+        punctured_indices: *punctured_indices,
+        copaths: core::mem::take(&mut copaths.0),
         corr_offsets,
         spcot_chal_coin,
         spcot_mask_macs: core::array::from_fn(|rep| vole_masks[rep].mac_receiver),

@@ -34,8 +34,11 @@ Security boundary.
   stateless transcripts (`checked_stateful_hypertree_euf_cma_extract`,
   `checked_stateful_hypertree_euf_cma_advantage_bound`, `checked_stateless_hypertree_euf_cma_extract`)
   for `(w, ℓ₁) ∈ {(4, 128), (16, 64)}`.
-* Extracted break events and `hitCount` union bounds are explicit witness and finite-coin reductions,
-  not concrete hash-suite probability bounds.
+* Extracted break events and `hitCount` union bounds classify witnesses over finite coins.
+  Their factor-one coefficients do not establish resource-bounded primitive adversaries,
+  challenge embedding, simulation cost, or a computational multi-target reduction.
+* These extractors consume the legacy compatibility core. The separate production core in
+  HashSigs is not yet the target of these EUF-CMA theorems.
 -/
 
 public import Qsag.Goldilocks
@@ -45,6 +48,8 @@ public import Qsag.UcGames
 public import Qsag.HashSigs
 import all Qsag.Keccak
 import all Qsag.HashSigs
+
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag
@@ -6088,5 +6093,27 @@ theorem inhabited_checked_stateful_multi_sign_log :
     | inl col => exact .inl ⟨col⟩
     | inr wots => exact .inr ⟨wots⟩
 
+/-- The latch invariant has a concrete occupied state, not just an empty log. -/
+theorem witness_occupied_epoch_latch : ∃ st : EpochLatchState, st.WellFormed := by
+  refine ⟨⟨1, some (0, [], ⟨[], 0, 0, [], []⟩)⟩, ?_⟩
+  intro ep msg sig h
+  change some (0, [], (⟨[], 0, 0, [], []⟩ : PqHashSig)) = some (ep, msg, sig) at h
+  have he := congrArg (fun x => x.1) (Option.some.inj h)
+  change 0 = ep at he
+  change ep < 1
+  omega
+
+/-- Equivocation rejection with the occupied latch explicit in the theorem statement. -/
+theorem tooth_occupied_latch_rejects_equivocation
+    (suite : TweakableHashSuite) (params : PqHashParams)
+    (sk : PqSecretKey) (optRand : List UInt8) (maxGrind ep : Nat)
+    (msg msg' : List UInt8) (sig : PqHashSig) (hDiff : msg' ≠ msg) :
+    epochLatchSign suite params sk optRand maxGrind
+      ⟨ep + 1, some (ep, msg, sig)⟩ ep msg' = none :=
+  stateful_jorts_equivocation_rejected suite params sk optRand maxGrind ep msg msg' sig hDiff
+
 end Qsag
 end
+
+#tooth_pair Qsag.stateful_jorts_crash_retry_idempotent vs Qsag.tooth_occupied_latch_rejects_equivocation
+#verify_inhabited Qsag.epochLatchSign_preserves_wellFormed Qsag.witness_occupied_epoch_latch

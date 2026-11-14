@@ -615,6 +615,7 @@ impl<W: DurableWal> JortsSigner<W> {
         Ok(sig)
     }
 
+    #[cfg(test)]
     fn sign_mode3a_views(
         &mut self,
         engine: &mut Rss256Engine,

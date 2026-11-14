@@ -30,7 +30,7 @@ pub(super) fn monomial_table(point: &[E]) -> Vec<E> {
             std::thread::scope(|scope| {
                 for (t_idx, sub) in out[..total].chunks_mut(sub_len).enumerate() {
                     let init = top[t_idx];
-                    scope.spawn(move || {
+                    crate::spawn_bounded(scope, move || {
                         sub[0] = init;
                         for (bit, &r) in bot.iter().enumerate() {
                             let n = 1usize << bit;
@@ -66,7 +66,7 @@ pub(super) fn add_geometric_scaled_in_place(dst: &mut [E], xi: E, z: E) {
         std::thread::scope(|scope| {
             for (t_idx, sub) in dst.chunks_mut(chunk).enumerate() {
                 let mut cur = xi * z.pow((t_idx * chunk) as u64);
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     for slot in sub.iter_mut() {
                         *slot += cur;
                         cur *= z;
@@ -89,13 +89,6 @@ pub(super) fn fold_kernel_into(k: &[E], phi: E, out: &mut Vec<E>) {
     out.resize(pairs + 1, E::ZERO);
     fill_indexed(&mut out[..pairs], |i| k[2 * i] + phi * k[2 * i + 1]);
     out[pairs] = E::ZERO;
-}
-
-#[cfg(test)]
-pub(super) fn fold_kernel(k: &[E], phi: E) -> Vec<E> {
-    let mut out = Vec::with_capacity(k.len() / 2 + 1);
-    fold_kernel_into(k, phi, &mut out);
-    out
 }
 
 /// Reusable-buffer primal monomial affine fold (`c.len() / 2 + 1` slots, zero per-round alloc).
@@ -198,7 +191,7 @@ pub(super) fn prove_fold_in_place(
                     let i0 = t_idx * chunk;
                     (i0 < pairs_ck).then(|| {
                         let i1 = (i0 + chunk).min(pairs_ck);
-                        scope.spawn(move || cross_fn(c_ref, k_ref, i0, i1))
+                        crate::spawn_bounded(scope, move || cross_fn(c_ref, k_ref, i0, i1))
                     })
                 })
                 .collect();
@@ -250,7 +243,7 @@ pub(super) fn prove_fold_in_place(
                     let i0 = t_idx * chunk;
                     (i0 < pairs_c).then(|| {
                         let i1 = (i0 + chunk).min(pairs_c);
-                        scope.spawn(move || shift_fn(c_ref, k_ref, i0, i1))
+                        crate::spawn_bounded(scope, move || shift_fn(c_ref, k_ref, i0, i1))
                     })
                 })
                 .collect();
@@ -316,7 +309,7 @@ pub(super) fn encode_overflow(c: &[E], blowup: usize) -> Vec<E> {
         std::thread::scope(|scope| {
             for (i, part) in cw.chunks_mut(chunk).enumerate() {
                 let add = &add;
-                scope.spawn(move || add(i * chunk, part));
+                crate::spawn_bounded(scope, move || add(i * chunk, part));
             }
         });
         return cw;

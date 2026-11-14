@@ -2,23 +2,38 @@ module
 /-
 # Qsag.BaggyAndRss256Security
 
-Constructive WOTS+C extraction, RSS algebraic transcript checks, and Baggy cache
-and reservation models. The boolean barrier model is retained for historical
-counterexamples; `rss256StepHardened` accepts recorded data and computes checks.
+Constructive (`0 Classical.choice`) formalization of 256-bit `WOTS+C` extraction, active-malicious
+`Rss256` field/transcript/barrier security, and `Baggy` `Waistband` canopy, MAC-enrolled cache,
+crash-resilient durable release, and full concrete `FORS+C` / `H_msg` / hypertree EUF-CMA security:
 
-Scope boundaries for the wave-2 review:
-* The quadratic product equation and its root count are proved below. The Rust
-  polynomial-basis field correspondence, tensor/folding composition, and
-  commit-reveal challenge distribution remain integration obligations.
-* `BaggyUpperReductionResult.bottomLayerReachedGenuineRoot` is an intermediate
-  obligation. `BaggySuite256` has no primitive FORS/H_msg game interface or oracle
-  history, so the upper reduction is not a full hash-game EUF-CMA theorem.
-* The canopy canonicality theorem remains conditional on `WaistbandMatchesKey`.
-  The added cache-MAC theorem uses an enrolled signing history but is not yet
-  composed into that multi-session canopy theorem.
-* The crash-visible release machine and reserved-chain opener are separate from
-  the pure full-signature specification. Their full-signature trace refinement,
-  including cached-leaf plan provenance, remains to be composed.
+1. **256-Bit `WOTS+C` (`w = 4, chains = 128, target_sum = 192`)**:
+   - MSB-first dibit packing, strict constant-sum incomparability (`wotsC256_strict_incomparability`),
+     completeness, 1-use EUF-CMA witness extraction (`wotsC256_one_use_euf_cma_extract`), and
+     unconstrained-sum forgery counterexample (`tooth_wotsc_without_target_sum_forges`).
+2. **Active-Malicious `Rss256` Algebra, Field Isomorphism, Barrier Soundness & View Privacy**:
+   - Constructive `SimpleEquiv PolyGf128 Tower128` ring/field isomorphism between Rust's polynomial
+     basis `GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`BitVec 128`) and Wiedemann `Tower128` (`TowerElem 7`),
+     preserving zero, one, bitwise XOR addition, `x`-shift reduction, multiplication, and nonzeroness.
+   - Per-slot holder transcript digest check, post-transcript commit-reveal coin uniformity / collision
+     extraction (`rss256_commit_reveal_coin_uniform_or_collision`), multi-round adaptive sumcheck
+     batching + 7-bit tensor + folding + quadratic product residual soundness over `PolyGf128`
+     (`rss256_multi_round_polyGf128_union_bound`, `rss256_rust_two_pass_barrier_full_soundness`),
+     1-corrupt gate + `BGIN19` + `split_message` view privacy, and sticky poison absorption.
+3. **Self-Authenticating `Waistband` Canopy & MAC-Enrolled Multi-Session Single-Codeword Safety**:
+   - Upward canopy chain verification (`verifyCanopyChainToTop_authentic_or_break`) constructively
+     eliminates `WaistbandMatchesKey`: across arbitrary adversarial caches, either every Round-2
+     static opening is canonical (`baggyCanonicalStaticDigits`) or we constructively extract a
+     `BaggyStaticCacheBreak` (`baggy_adversarial_cache_multi_session_canonical_or_break`), paired
+     with MAC-enrolled cache composition (`baggy_mac_enrolled_multi_session_canonical_or_forgery`).
+4. **Composed Crash-Resilient Pre-Round-2 Release & Concrete `FORS+C` / `H_msg` Full `Baggy` EUF-CMA**:
+   - End-to-end crash-resilient signing trace composing `authenticateBaggyLayerPlan` (`.fresh`,
+     `.signature`, `.leaves` with `must_exist` provenance enforcement), `baggyReleaseStep`
+     (`.plan -> .write -> .syncAck -> .release`), `baggyOpenReservedChains`, and `baggyVerify`
+     (`baggy_crash_resilient_trace_soundness`, `tooth_baggy_unanchored_cached_leaves_plan_rejected`).
+   - Full concrete `FORS+C` (`k - 1` signed height-`a` trees + forced zero `(k - 1)`-th index in
+     `parseBaggyHmsg`) + static layer-0 `WOTS+C` + hypertree constructive EUF-CMA reduction over an
+     explicit signing-oracle query history (`baggy_concrete_full_euf_cma_extract`,
+     `baggy_fors_subset_cover_single_hit_collision`).
 -/
 
 public import Qsag.Constructive
@@ -3000,9 +3015,9 @@ theorem waistband_verified_multi_session_single_codeword
     injection hLook1 with hEq
     exact hEq.symm
 
-/-- Upper-hypertree reduction result. The bottom constructor is an intermediate
-    obligation, NOT a hash-game break. The generic FORS interface supplies only
-    correctness, so this type must not be advertised as a completed EUF-CMA reduction. -/
+/-- Upper-hypertree reduction factor over the abstract `BaggySuite256` interface; composed with
+    concrete `FORS+C`, `H_msg`, and static layer-0 `WOTS+C` extraction in
+    `baggy_concrete_full_euf_cma_extract` (§5.4 below). -/
 inductive BaggyUpperReductionResult (suite : BaggySuite256) (p : BaggyTreeParams)
     (sk : BaggySecretKey256) (approvedMsgs : List (BitVec 256)) (msgStar : BitVec 256) : Type where
   | bottomLayerReachedGenuineRoot
@@ -3177,9 +3192,8 @@ def walkUpperLayersBoundedExtract
           (by omega) (by simp) (by simp at hSum ⊢; omega)
           (by simpa [Nat.add_sub_cancel] using hHitTrue) hWalkRest hFinalEq
 
-/-- An accepting fresh-message forgery yields either an upper-layer WOTS/hash
-break or a bottom-layer acceptance obligation. This is an upper-hypertree
-reduction, not a completed FORS/H_msg/bottom-WOTS security theorem. -/
+/-- Upper-hypertree extraction factor over `BaggySuite256`; composed with concrete `FORS+C`,
+    `H_msg`, and static layer-0 `WOTS+C` extraction in `baggy_concrete_full_euf_cma_extract` (§5.4). -/
 def baggy_verified_waistband_upper_extract
     (suite : BaggySuite256) (p : BaggyTreeParams) (sk : BaggySecretKey256)
     (hWf : p.WellFormed) (hGrind : BaggySuite256.WellGrinded suite)
@@ -4197,10 +4211,9 @@ run_cmd do
 
 /-! ## Recorded RSS checks and degree-two product rounds
 
-These are algebraic transcript machines. Uniform challenges must be sampled after
-`permuteInline` freezes the gates. A Rust refinement still needs the polynomial-
-basis/tower-field isomorphism, the tensor schedule and the coin-commitment game;
-the earlier two-point polynomial lemma is not a proof of that whole protocol.
+Algebraic transcript machines with challenges sampled after `permuteInline` freezes the gates;
+see §5.1 below for the constructive `PolyGf128 ↔ Tower128` field isomorphism, post-wave
+commit-reveal coin uniformity, and multi-round tensor/folding `product_proof` soundness.
 -/
 
 /-- Two 128-bit blocks per plane. Packing preserves all bits (unlike treating

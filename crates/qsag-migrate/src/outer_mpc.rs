@@ -13,8 +13,10 @@ use qsag_asm::{
 };
 
 const MAX_PENDING_BITS: usize = 262_144;
-const D0_BITS: usize = 16;
-const SUPER_BLOCKS: usize = 8;
+const D0_BITS: usize = 32;
+const SUPER_BLOCKS: usize = 128 / D0_BITS;
+const D0_CHUNKS: usize = D0_BITS / 16;
+const QUADS_PER_SUPER: usize = SUPER_BLOCKS / QUAD_BLOCKS;
 const SUPER_BITS: usize = D0_BITS * SUPER_BLOCKS;
 const QUAD_BLOCKS: usize = 4;
 const QUAD_BITS: usize = D0_BITS * QUAD_BLOCKS;
@@ -23,6 +25,25 @@ const STEP0_SLOTS: usize = STEP0_PLANES - 2;
 const STEP0_CHUNK: usize = 64;
 const STEP2_QUAD_CHUNK: usize = 16;
 const MAX_PENDING_FIELD_WORDS: usize = 1_024;
+/// Schwartz-Zippel numerator of one Boolean check instance per flush: the
+/// round-0 polynomial has degree `2 * D0_BITS - 2`, each binary fold over at most
+/// `MAX_PENDING_BITS / D0_BITS` blocks adds 2, and the base sacrifice adds 2.
+const BIT_CHECK_DEGREE: usize =
+    (2 * D0_BITS - 2) + 2 * (MAX_PENDING_BITS / D0_BITS).ilog2() as usize + 2;
+/// Numerator of the prime-field check per flush: 1 for the random linear
+/// combination, 2 per binary fold over at most `MAX_PENDING_FIELD_WORDS * 64`
+/// lane products, and 2 for the base sacrifice.
+const FIELD_CHECK_NUMERATOR: usize =
+    1 + 2 * (MAX_PENDING_FIELD_WORDS * 64).ilog2() as usize + 2;
+const _: () = assert!(
+    BIT_CHECK_DEGREE == 90
+        && FIELD_CHECK_NUMERATOR == 35
+        && (MAX_PENDING_BITS / D0_BITS).is_power_of_two()
+        && (MAX_PENDING_FIELD_WORDS * 64).is_power_of_two()
+        && D0_BITS == 16 * D0_CHUNKS
+        && SUPER_BITS == 128
+        && SUPER_BLOCKS == QUAD_BLOCKS * QUADS_PER_SUPER
+);
 const CONVERT_CHUNK_WORDS: usize = 512;
 
 #[derive(Clone, Copy, Default)]
@@ -348,9 +369,9 @@ const fn xor_plane256(a: BitPlane256, b: BitPlane256) -> BitPlane256 {
     [a[0] ^ b[0], a[1] ^ b[1], a[2] ^ b[2], a[3] ^ b[3]]
 }
 
-/// (`11` `BitPlane256` XORs, zero branches, zero secret-dependent indices).
-/// Build subset sums in public order. Table entries contain shares, but every
-/// lookup index used by evaluation is derived exclusively from a public challenge.
+/// Build both 256-entry subset-sum tables in a fixed public order (no branches,
+/// no data-dependent indices). Table entries contain shares; every lookup index
+/// used by evaluation is derived exclusively from a public challenge.
 #[inline]
 fn build_byte_tabs_bs256(words16: &[BitPlane256; 16], tabs: &mut [[BitPlane256; 256]; 2]) {
     for (byte, tab) in tabs.iter_mut().enumerate() {
@@ -366,6 +387,7 @@ fn build_byte_tabs_bs256(words16: &[BitPlane256; 16], tabs: &mut [[BitPlane256; 
 }
 
 /// Evaluate a public `128 x 16` bit-matrix across four groups of 64 lanes.
+#[cfg(test)]
 #[inline(always)]
 fn eval_public_matrix_128x16_bs256(
     row_masks: &[u16; 128],
@@ -377,6 +399,21 @@ fn eval_public_matrix_128x16_bs256(
             tabs[0][(mask & 0xff) as usize],
             tabs[1][(mask >> 8) as usize],
         );
+    }
+}
+
+#[inline(always)]
+fn xor_public_matrix_128x16_bs256(
+    row_masks: &[u16; 128],
+    tabs: &[[BitPlane256; 256]; 2],
+    out: &mut Bs256,
+) {
+    for (dst, &mask) in out.iter_mut().zip(row_masks) {
+        let prod = xor_plane256(
+            tabs[0][(mask & 0xff) as usize],
+            tabs[1][(mask >> 8) as usize],
+        );
+        *dst = xor_plane256(*dst, prod);
     }
 }
 
@@ -589,6 +626,33 @@ fn zeroize_gf128_slice(slice: &mut [Gf128]) {
     }
 }
 
+/// Set `v` to `len` words without ever leaving secret words in freed or
+/// truncated storage: a shrink wipes the dropped tail and a growth wipes the old
+/// allocation before it is released. Growth past the capacity does not keep the
+/// old contents; callers overwrite the whole buffer.
+#[inline]
+fn resize_wiped(v: &mut Vec<u64>, len: usize) {
+    if len < v.len() {
+        ct_zeroize_u64s(&mut v[len..]);
+    } else if len > v.capacity() {
+        ct_zeroize_u64s(v);
+        *v = Vec::with_capacity(len);
+    }
+    v.resize(len, 0);
+}
+
+/// `Vec::reserve` that wipes the old allocation when it has to move.
+#[inline]
+fn reserve_wiped(v: &mut Vec<u64>, additional: usize) {
+    let need = v.len() + additional;
+    if need > v.capacity() {
+        let mut grown = Vec::with_capacity(need.max(2 * v.capacity()));
+        grown.extend_from_slice(v);
+        ct_zeroize_u64s(v);
+        *v = grown;
+    }
+}
+
 #[inline]
 fn zeroize_bs256_vec_hwm(vec_buf: &mut Vec<Bs256>, hwm: usize) {
     let target = hwm.min(vec_buf.capacity());
@@ -635,6 +699,7 @@ struct BitCheckScratch {
     step2_lanes: Box<[[[Gf128; STEP2_QUAD_CHUNK * 4]; 64]; 8]>,
     tabs8: Box<[[BitPlane256; 256]; 2]>,
     tabs4: Box<[[BitPlane256; 16]; 4]>,
+    quad_tmp: Box<[Gf128Lanes; 4]>,
     bs256_buf: Box<Bs256>,
     h_fold: Box<[Gf128Lanes; 4]>,
     c_claim: [RepGf128Lanes; 2],
@@ -660,6 +725,7 @@ impl BitCheckScratch {
             step2_lanes: Box::new([[[[0u64; 2]; STEP2_QUAD_CHUNK * 4]; 64]; 8]),
             tabs8: Box::new([[[0u64; 4]; 256]; 2]),
             tabs4: Box::new([[[0u64; 4]; 16]; 4]),
+            quad_tmp: Box::new([z_lanes; 4]),
             bs256_buf: Box::new([[0u64; 4]; 128]),
             h_fold: Box::new([z_lanes; 4]),
             c_claim: [[z_lanes; 2]; 2],
@@ -672,17 +738,23 @@ impl BitCheckScratch {
     }
 
     fn prepare(&mut self, num_quads: usize) {
+        // Folding pads an odd quad count once per level; `reserve_quads` bounds
+        // every later length, so these vectors never reallocate mid-check. A
+        // larger flush wipes the previous allocation before replacing it.
         let reserve_quads = num_quads + (num_quads & 1);
+        let old_hwm = self.hwm_bs;
+        for per_challenge in self.a_bs.iter_mut().chain(self.b_bs.iter_mut()) {
+            for quads in per_challenge {
+                if quads.capacity() < reserve_quads {
+                    zeroize_bs256_vec_hwm(quads, old_hwm);
+                    *quads = Vec::with_capacity(reserve_quads);
+                }
+                quads.clear();
+                quads.resize(num_quads, [[0u64; 4]; 128]);
+            }
+        }
         if reserve_quads > self.hwm_bs {
             self.hwm_bs = reserve_quads;
-        }
-        for t in 0..2 {
-            for side in 0..2 {
-                self.a_bs[t][side].clear();
-                self.a_bs[t][side].resize(num_quads, [[0u64; 4]; 128]);
-                self.b_bs[t][side].clear();
-                self.b_bs[t][side].resize(num_quads, [[0u64; 4]; 128]);
-            }
         }
         let z_lanes = [[0u64; 2]; 64];
         self.step0_acc.fill(z_lanes);
@@ -727,6 +799,9 @@ impl BitCheckScratch {
             for entry in tab.iter_mut() {
                 ct_zeroize_u64s(entry);
             }
+        }
+        for lanes in self.quad_tmp.iter_mut() {
+            zeroize_gf128_slice(lanes);
         }
         for row in self.bs256_buf.iter_mut() {
             ct_zeroize_u64s(row);
@@ -900,6 +975,8 @@ impl FaultInjection {
 
 pub(crate) struct Engine<T> {
     pub party: usize,
+    #[cfg(any(feature = "std", test))]
+    pub(crate) batch_cancelled: Option<alloc::sync::Arc<core::sync::atomic::AtomicBool>>,
     session: [u8; 32],
     keys: [[u8; 32]; 2],
     mac_prefix: [[u64; 25]; 2],
@@ -996,6 +1073,8 @@ impl<T: Transport> Engine<T> {
             coin_rng,
             sequence: 0,
             poisoned: false,
+            #[cfg(any(feature = "std", test))]
+            batch_cancelled: None,
             pending_bits_raw: Vec::new(),
             pending_secp: Vec::new(),
             pending_ed: Vec::new(),
@@ -1065,9 +1144,23 @@ impl<T: Transport> Engine<T> {
         out
     }
 
-    fn raw_exchange(&mut self, payloads: [Vec<u64>; 2]) -> Result<[Vec<u64>; 2], Error> {
+    fn raw_exchange(&mut self, mut payloads: [Vec<u64>; 2]) -> Result<[Vec<u64>; 2], Error> {
         if self.poisoned {
+            for payload in &mut payloads {
+                ct_zeroize_u64s(payload);
+            }
             return Err(Error::MultiplicationCheck);
+        }
+        #[cfg(any(feature = "std", test))]
+        if self
+            .batch_cancelled
+            .as_ref()
+            .is_some_and(|flag| flag.load(core::sync::atomic::Ordering::Relaxed))
+        {
+            for payload in &mut payloads {
+                ct_zeroize_u64s(payload);
+            }
+            return Err(Error::Transport);
         }
         let peers = [(self.party + 2) % 3, (self.party + 1) % 3];
         let seq = self.sequence;
@@ -1118,7 +1211,13 @@ impl<T: Transport> Engine<T> {
         let len = own.len();
         let mut own_copy = Vec::with_capacity(len);
         own_copy.extend_from_slice(&own);
-        let incoming = self.raw_exchange([own, Vec::new()])?;
+        let incoming = match self.raw_exchange([own, Vec::new()]) {
+            Ok(incoming) => incoming,
+            Err(error) => {
+                ct_zeroize_u64s(&mut own_copy);
+                return Err(error);
+            }
+        };
         if incoming[1].len() != len || !incoming[0].is_empty() {
             ct_zeroize_u64s(&mut own_copy);
             self.poisoned = true;
@@ -1320,8 +1419,8 @@ impl<T: Transport> Engine<T> {
         locals: &[Gf128Lanes],
     ) -> Result<Vec<RepGf128Lanes>, Error> {
         let total_u64 = locals.len() * 128;
-        self.scratch_r.resize(total_u64, 0);
-        self.scratch_s.resize(total_u64, 0);
+        resize_wiped(&mut self.scratch_r, total_u64);
+        resize_wiped(&mut self.scratch_s, total_u64);
         self.pads[0].squeeze_u64s(&mut self.scratch_r);
         self.pads[1].squeeze_u64s(&mut self.scratch_s);
         let mut own = Vec::with_capacity(total_u64);
@@ -1363,7 +1462,8 @@ impl<T: Transport> Engine<T> {
     /// Batch-verify up to `MAX_PENDING_BITS` (`262,144`) 64-lane Boolean `AND` triples over
     /// `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` via a uniform `GF(2^128)` super-block
     /// combiner + two independent lockstep Arity-2 BBCGGI19 inner-product instances +
-    /// randomized base-case sacrifice (`< 2^-128 + (60 / (2^128 - 1))^2 < 2^-127.99 << 2^-126`).
+    /// randomized base-case sacrifice. Per-flush false acceptance is
+    /// `< 2^-128 + (BIT_CHECK_DEGREE / (2^128 - 1))^2 = 2^-128 + (90 / (2^128 - 1))^2 < 2^-127.99`.
     fn verify_pending_bits_slice(&mut self, triples_raw: &[u64]) -> Result<(), Error> {
         debug_assert_eq!(triples_raw.len() % 6, 0);
         let n = triples_raw.len() / 6;
@@ -1389,8 +1489,8 @@ impl<T: Transport> Engine<T> {
             .unwrap_or_else(BitCheckScratch::new_boxed);
         scratch.prepare(num_quads);
 
-        // Step 0 + Round 0: pack eight 16-gate blocks (`128` gates) per super-block
-        // into 32 bit-planes (`z_s0`, `z_s1`, and 30 off-diagonal `R^s` slots), transpose via
+        // Step 0 + Round 0: pack four 32-gate blocks (`128` gates) per super-block
+        // into 64 bit-planes (`z_s0`, `z_s1`, and 62 off-diagonal `R^s` slots), transpose via
         // hardware AVX2 butterfly, and accumulate against `gammas` via `PCLMULQDQ`.
         let mut x0_blk = [0u64; D0_BITS];
         let mut x1_blk = [0u64; D0_BITS];
@@ -1494,11 +1594,11 @@ impl<T: Transport> Engine<T> {
         ];
 
         // Evaluate `H_0(r_0^(t))` at both independent challenges and precompute
-        // one `128 x 16` public projection matrix per challenge for `A`.
+        // the `128 x 16` public projection matrices per challenge for `A`.
         const DEG_R0: usize = 2 * D0_BITS - 1;
         const HALF_R0: usize = D0_BITS - 1;
         let mut pows_r0 = [[[0u64; 2]; DEG_R0]; 2];
-        let mut masks_a = [[0u16; 128]; 2];
+        let mut masks_a = [[[0u16; 128]; D0_CHUNKS]; 2];
         let mut eval_r0 = [[0u64; 2]; DEG_R0];
 
         for t in 0..2 {
@@ -1523,66 +1623,85 @@ impl<T: Transport> Engine<T> {
 
             let xr0 = u128_to_gf128(poly128_mul_x(gf128_to_u128(r0[t])));
             let mut cur_xr = [1u64, 0u64];
-            let mut cols = [0u128; 16];
-            for col in &mut cols {
-                *col = gf128_to_u128(cur_xr);
-                cur_xr = gf128_mul_hw(cur_xr, xr0, backend);
+            for mask in &mut masks_a[t] {
+                let mut cols = [0u128; 16];
+                for col in &mut cols {
+                    *col = gf128_to_u128(cur_xr);
+                    cur_xr = gf128_mul_hw(cur_xr, xr0, backend);
+                }
+                *mask = transpose_cols16_to_u16(&cols);
             }
-            masks_a[t] = transpose_cols16_to_u16(&cols);
         }
         zeroize_gf128_slice(&mut eval_r0);
         drop(reshared_h0);
 
-        // Step 1: each quad holds four 16-gate blocks. Two quads share a
-        // super-block challenge; block b contributes the public factor x^(16*b).
-        let mut x_rows = [[[0u64; 4]; 16]; 2];
-        let mut y_rows = [[[0u64; 4]; 16]; 2];
-        let mut masks_b = [[0u16; 128]; 2];
+        // Step 1: pack four blocks per quad. Projection matrices cover 16
+        // gates each; a block's offset in its super-block supplies x^(D0_BITS*b).
+        let mut x_rows = [[[[0u64; 4]; 16]; D0_CHUNKS]; 2];
+        let mut y_rows = [[[[0u64; 4]; 16]; D0_CHUNKS]; 2];
+        let mut masks_b = [[[0u16; 128]; D0_CHUNKS]; 2];
         for (q_quad, quad_chunk) in triples_raw.chunks(QUAD_BITS * 6).enumerate() {
             let b_count = quad_chunk.len().div_ceil(D0_BITS * 6);
-            x_rows.fill([[0; 4]; 16]);
-            y_rows.fill([[0; 4]; 16]);
+            x_rows.fill([[[0; 4]; 16]; D0_CHUNKS]);
+            y_rows.fill([[[0; 4]; 16]; D0_CHUNKS]);
             for (sub, block) in quad_chunk.chunks(D0_BITS * 6).enumerate() {
                 for (u, g) in block.chunks_exact(6).enumerate() {
-                    x_rows[0][u][sub] = g[0];
-                    x_rows[1][u][sub] = g[1];
-                    y_rows[0][u][sub] = g[2];
-                    y_rows[1][u][sub] = g[3];
+                    x_rows[0][u / 16][u % 16][sub] = g[0];
+                    x_rows[1][u / 16][u % 16][sub] = g[1];
+                    y_rows[0][u / 16][u % 16][sub] = g[2];
+                    y_rows[1][u / 16][u % 16][sub] = g[3];
                 }
             }
-            // Reuse the projection masks for both halves of a super-block.
-            if q_quad % 2 == 0 {
-                for (t, mask) in masks_b.iter_mut().enumerate() {
-                    let cols = core::array::from_fn(|v| {
-                        gf128_to_u128(gf128_mul_hw(
-                            gammas[q_quad / 2],
-                            pows_r0[t][HALF_R0 - v],
-                            backend,
-                        ))
-                    });
-                    *mask = transpose_cols16_to_u16(&cols);
+            if q_quad.rem_euclid(QUADS_PER_SUPER) == 0 {
+                for (t, masks) in masks_b.iter_mut().enumerate() {
+                    for (chunk, mask) in masks.iter_mut().enumerate() {
+                        let cols = core::array::from_fn(|v| {
+                            gf128_to_u128(gf128_mul_hw(
+                                gammas[q_quad / QUADS_PER_SUPER],
+                                pows_r0[t][HALF_R0 - chunk * 16 - v],
+                                backend,
+                            ))
+                        });
+                        *mask = transpose_cols16_to_u16(&cols);
+                    }
                 }
             }
             let sp = &mut *scratch;
             for side in 0..2 {
-                build_byte_tabs_bs256(&x_rows[side], &mut sp.tabs8);
-                for (t, mask) in masks_a.iter().enumerate() {
-                    eval_public_matrix_128x16_bs256(mask, &sp.tabs8, &mut sp.a_bs[t][side][q_quad]);
+                for (chunk, rows) in x_rows[side].iter().enumerate() {
+                    build_byte_tabs_bs256(rows, &mut sp.tabs8);
+                    for (t, masks) in masks_a.iter().enumerate() {
+                        xor_public_matrix_128x16_bs256(
+                            &masks[chunk],
+                            &sp.tabs8,
+                            &mut sp.a_bs[t][side][q_quad],
+                        );
+                    }
                 }
-                build_byte_tabs_bs256(&y_rows[side], &mut sp.tabs8);
-                for (t, mask) in masks_b.iter().enumerate() {
-                    let dst = &mut sp.b_bs[t][side][q_quad];
-                    eval_public_matrix_128x16_bs256(mask, &sp.tabs8, dst);
+                for (chunk, rows) in y_rows[side].iter().enumerate() {
+                    build_byte_tabs_bs256(rows, &mut sp.tabs8);
+                    for (t, masks) in masks_b.iter().enumerate() {
+                        xor_public_matrix_128x16_bs256(
+                            &masks[chunk],
+                            &sp.tabs8,
+                            &mut sp.b_bs[t][side][q_quad],
+                        );
+                    }
+                }
+                for b in &mut sp.b_bs {
                     for sub in 0..b_count {
-                        bs256_col_mul_x_pow16(dst, sub, 4 * (q_quad % 2) + sub);
+                        let block = QUAD_BLOCKS * (q_quad.rem_euclid(QUADS_PER_SUPER)) + sub;
+                        bs256_col_mul_x_pow16(&mut b[side][q_quad], sub, D0_CHUNKS * block);
                     }
                 }
             }
         }
         for planes in [&mut x_rows, &mut y_rows] {
             for side in planes {
-                for row in side {
-                    ct_zeroize_u64s(row);
+                for chunk in side {
+                    for row in chunk {
+                        ct_zeroize_u64s(row);
+                    }
                 }
             }
         }
@@ -1592,7 +1711,6 @@ impl<T: Transport> Engine<T> {
         // chunks into contiguous `PCLMULQDQ` dot products and folding vectors via 4-bit nibble
         // public matrix evaluation (`0` `a_next`/`b_next` buffers).
         let mut cur_quads = num_quads;
-        let mut quad_tmp = [[[0u64; 2]; 64]; 4];
 
         while cur_quads > 1 {
             if cur_quads % 2 == 1 {
@@ -1634,16 +1752,16 @@ impl<T: Transport> Engine<T> {
                         for (src_bs, slot_idx) in direct {
                             transpose_bs256_to_quad_lanes(
                                 src_bs,
-                                &mut quad_tmp,
+                                &mut sp.quad_tmp,
                                 &mut sp.tr_rows,
                                 backend,
                             );
                             for (lane, lane_dst) in sp.step2_lanes[slot_idx].iter_mut().enumerate()
                             {
-                                lane_dst[dst_off] = quad_tmp[0][lane];
-                                lane_dst[dst_off + 1] = quad_tmp[1][lane];
-                                lane_dst[dst_off + 2] = quad_tmp[2][lane];
-                                lane_dst[dst_off + 3] = quad_tmp[3][lane];
+                                lane_dst[dst_off] = sp.quad_tmp[0][lane];
+                                lane_dst[dst_off + 1] = sp.quad_tmp[1][lane];
+                                lane_dst[dst_off + 2] = sp.quad_tmp[2][lane];
+                                lane_dst[dst_off + 3] = sp.quad_tmp[3][lane];
                             }
                         }
 
@@ -1658,16 +1776,16 @@ impl<T: Transport> Engine<T> {
                             }
                             transpose_bs256_to_quad_lanes(
                                 &sp.bs256_buf,
-                                &mut quad_tmp,
+                                &mut sp.quad_tmp,
                                 &mut sp.tr_rows,
                                 backend,
                             );
                             for (lane, lane_dst) in sp.step2_lanes[slot_idx].iter_mut().enumerate()
                             {
-                                lane_dst[dst_off] = quad_tmp[0][lane];
-                                lane_dst[dst_off + 1] = quad_tmp[1][lane];
-                                lane_dst[dst_off + 2] = quad_tmp[2][lane];
-                                lane_dst[dst_off + 3] = quad_tmp[3][lane];
+                                lane_dst[dst_off] = sp.quad_tmp[0][lane];
+                                lane_dst[dst_off + 1] = sp.quad_tmp[1][lane];
+                                lane_dst[dst_off + 2] = sp.quad_tmp[2][lane];
+                                lane_dst[dst_off + 3] = sp.quad_tmp[3][lane];
                             }
                         }
                     }
@@ -1752,8 +1870,8 @@ impl<T: Transport> Engine<T> {
             drop(reshared);
             cur_quads = half_q;
         }
-        for ql in &mut quad_tmp {
-            zeroize_gf128_slice(ql);
+        for lanes in scratch.quad_tmp.iter_mut() {
+            zeroize_gf128_slice(lanes);
         }
 
         // Transpose the single remaining `Bs256` quad (`4` blocks x `64` lanes) and complete
@@ -2078,8 +2196,9 @@ impl<T: Transport> Engine<T> {
     }
 
     /// Batch-verify large-prime (`Secp256k1` / `Ed25519`, `p > 2^254.99`) multiplications
-    /// via replicated BBCGGI19 inner-product folding + zero-knowledge base-case sacrifice
-    /// (cheating probability `< 30 / p < 2^-249 << 2^-128`).
+    /// via replicated BBCGGI19 inner-product folding + zero-knowledge base-case sacrifice.
+    /// Per-flush cheating probability is `<= FIELD_CHECK_NUMERATOR / (p - 1) = 35 / (p - 1)`:
+    /// `< 2^-250.87` for `Secp` and `< 2^-249.87` for `Ed`, hence `< 2^-249` for both.
     fn verify_pending_large_prime_slice(
         &mut self,
         triples: &[PendingFieldTriple],
@@ -2355,8 +2474,9 @@ impl<T: Transport> Engine<T> {
     }
 
     /// Batch-verify Goldilocks (`p = 2^64 - 2^32 + 1`) multiplications lifted into the
-    /// irreducible cubic extension `GF(p)[u] / (u^3 - 7)` (`p^3 > 2^191.99`,
-    /// cheating probability `< 30 / p^3 < 2^-186 << 2^-128`).
+    /// irreducible cubic extension `GF(p)[u] / (u^3 - 7)` (`p^3 > 2^191.99`). Per-flush
+    /// cheating probability is `<= FIELD_CHECK_NUMERATOR / (p^3 - 1) = 35 / (p^3 - 1)
+    /// < 2^-186.87 < 2^-186`.
     fn verify_pending_gold_slice(&mut self, triples: &[PendingFieldTriple]) -> Result<(), Error> {
         if triples.is_empty() {
             return Ok(());
@@ -2611,8 +2731,8 @@ impl<T: Transport> Engine<T> {
         if pairs.is_empty() {
             return Ok(Vec::new());
         }
-        self.scratch_r.resize(pairs.len(), 0);
-        self.scratch_s.resize(pairs.len(), 0);
+        resize_wiped(&mut self.scratch_r, pairs.len());
+        resize_wiped(&mut self.scratch_s, pairs.len());
         self.pads[0].squeeze_u64s(&mut self.scratch_r);
         self.pads[1].squeeze_u64s(&mut self.scratch_s);
         let mut own = Vec::with_capacity(pairs.len());
@@ -2638,7 +2758,7 @@ impl<T: Transport> Engine<T> {
         let out: Word = mine.iter().zip(&next).map(|(&a, &b)| Bit([a, b])).collect();
         ct_zeroize_u64s(&mut mine);
         ct_zeroize_u64s(&mut next);
-        self.pending_bits_raw.reserve(pairs.len() * 6);
+        reserve_wiped(&mut self.pending_bits_raw, pairs.len() * 6);
         for (&(a, b), &z) in pairs.iter().zip(&out) {
             self.pending_bits_raw
                 .extend_from_slice(&[a.0[0], a.0[1], b.0[0], b.0[1], z.0[0], z.0[1]]);
@@ -3930,6 +4050,64 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn cancelled_batch_sends_no_messages() {
+        struct NoExchange;
+        impl Transport for NoExchange {
+            fn exchange(&mut self, _: [Envelope; 2]) -> Result<[Envelope; 2], Error> {
+                panic!("cancelled batch sent a message");
+            }
+        }
+        let mut engine = Engine::new(0, [0x61; 32], keys(0), NoExchange).unwrap();
+        engine.batch_cancelled = Some(Arc::new(AtomicBool::new(true)));
+        assert!(matches!(engine.share(&[0x1234]), Err(Error::Transport)));
+        let wire = engine.constant(1);
+        assert_eq!(engine.open(&[wire]), Err(Error::Transport));
+        assert_eq!(engine.sequence, 0);
+    }
+
+    #[test]
+    fn bit_check_vectors_never_reallocate_while_folding() {
+        let mut scratch = BitCheckScratch::new_boxed();
+        // Growing, shrinking and odd quad counts, in one scratch as across flushes.
+        for num_quads in [1usize, 3, 2, 7, 33, 5, 2048] {
+            scratch.prepare(num_quads);
+            let sc = &mut *scratch;
+            for quads in sc.a_bs.iter_mut().chain(sc.b_bs.iter_mut()).flatten() {
+                assert_eq!(quads.len(), num_quads);
+                let storage = quads.as_ptr();
+                let mut cur = num_quads;
+                while cur > 1 {
+                    if cur % 2 == 1 {
+                        quads.push([[0u64; 4]; 128]);
+                        cur += 1;
+                    }
+                    cur /= 2;
+                    quads.truncate(cur);
+                }
+                assert_eq!(storage, quads.as_ptr());
+            }
+        }
+    }
+
+    #[test]
+    fn wiped_growth_keeps_pending_words_and_clears_scratch() {
+        let mut pending = vec![1u64, 2, 3];
+        reserve_wiped(&mut pending, 1_000);
+        assert_eq!(pending, [1, 2, 3]);
+        assert!(pending.capacity() >= 1_003);
+
+        let mut scratch = vec![7u64; 8];
+        resize_wiped(&mut scratch, 2);
+        assert_eq!(scratch, [7, 7]);
+        resize_wiped(&mut scratch, 4);
+        assert_eq!(scratch, [7, 7, 0, 0]);
+        let len = scratch.capacity() + 1;
+        resize_wiped(&mut scratch, len);
+        assert_eq!(scratch.len(), len);
+        assert!(scratch.iter().all(|&w| w == 0));
+    }
+
+    #[test]
     fn zero_alloc_mac_tag_and_word_sponge_match_reference_across_all_alignments() {
         let session = [0x42u8; 32];
         run(|p, n| {
@@ -4157,6 +4335,9 @@ pub(crate) mod tests {
                 15,
                 16,
                 17,
+                31,
+                32,
+                33,
                 63,
                 64,
                 65,

@@ -82,6 +82,7 @@ fn eval(a: &[&str]) -> String {
         "extdecode" => { let v=bytes(a[1]); match <[u8;32]>::try_from(v).ok().and_then(E::from_le_bytes_canonical) {Some(x)=>hex(&x.to_le_bytes()),None=>"reject".into()} },
         "ext" => { let x=ext(a[2]); let y=ext(a[3]); hex(&(match a[1] {"add"=>x+y,"sub"=>x-y,"mul"=>x*y,"inv"=>x.inv(),"square"=>x.square(),"frobenius"=>x.frobenius(),_=>panic!("extension op")}).to_le_bytes()) },
         "tower" => qsag_core::field::tower::tower_mul_t7(a[1].parse().unwrap(),a[2].parse().unwrap()).to_string(),
+        "wotsgeneric" => qsag_core::wots_c::WotsCParams {chains:127,zero_digits:1,target_sum:192}.digits(&arr(a[1])).is_some().to_string(),
         "wots" => {let m=bytes(a[1]); let d=extract_base_w_digits_checked(4,128,&m).unwrap();
             format!("{};{}", d.iter().map(|x|x.to_string()).collect::<Vec<_>>().join(","), qsag_core::wots_c::WotsCParams::V128.digits(&m.try_into().unwrap()).is_some())},
         "hybrid" => {let q=bytes(a[3]); let pk=PqPublicKey{pk_seed:q[..32].try_into().unwrap(),pk_root:q[32..].try_into().unwrap()}; hex(&build_hybrid_bound_message(&arr(a[1]),&bytes(a[2]),&pk,&bytes(a[4])))},
@@ -304,9 +305,9 @@ LATCH_MUTANTS = [
 LATCH_MUTANTS[3] = (*LATCH_MUTANTS[3][:3], ",".join(f"{i}:0:0:1" for i in range(0, 4097, 64)))
 QUORUM_MUTANTS = [
     ("privacy_threshold", "f >= t", [1,4,1,3]),
-    ("honest_reconstruction", "t > n - f", [4,4,1,3]),
-    ("honest_intersection", "2 * q <= n + f", [2,4,1,2]),
-    ("honest_availability", "q > n - f", [2,4,1,4]),
+    ("honest_reconstruction", "t > q", [4,4,1,3]),
+    ("honest_intersection", "two_q <= n_plus_f", [2,4,1,2]),
+    ("honest_availability", "require_global_liveness && ((n as u64) < 3 * (f as u64) + 1 || q > n - f)", [2,4,1,4]),
 ]
 
 
@@ -332,21 +333,40 @@ def driver_source(root):
     config = rust_function(quorum, "pub fn with_quorum(")
     config = config.replace("Result<Self, QuorumError>", "Result<(), QuorumError>")
     config = config.replace("Ok(Self { t, n, f, q })", "Ok(())")
+    kernel = rust_function((root / "aeneas/qsag-verified/src/pants_and_quorum_guards.rs").read_text(),
+                           "pub const fn validate_belt_quorum_config(")
     for i, (name, guard, _) in enumerate(QUORUM_MUTANTS):
-        assert config.count("if " + guard + " {") == 1, name
-        fn = config.replace("with_quorum", f"quorum_mutant_{i}").replace("if " + guard + " {", "if false {")
+        assert kernel.count("if " + guard + " {") == 1, name
+        mutant = kernel.replace("validate_belt_quorum_config", f"quorum_kernel_{i}").replace("if " + guard + " {", "if false {")
+        source += "\n" + mutant
+        fn = config.replace("with_quorum", f"quorum_mutant_{i}").replace(
+            "qsag_verified::validate_belt_quorum_config", f"quorum_kernel_{i}")
         source += "\n" + fn
         arms.append(f'"{name}" => quorum_mutant_{i}(a[2].parse().unwrap(),a[3].parse().unwrap(),a[4].parse().unwrap(),a[5].parse().unwrap()).is_ok().to_string(),')
     source += "\nuse qsag_quorum::quorum_jorts::QuorumError;\nconst MAX_QUORUM_PARTIES:usize=255;\n"
     source += "fn mutation_args(a:&[&str])->String {match a[1] {" + "".join(arms) + '_=>panic!("mutant")}}'
     source = source.replace('"mutation" => mutation(a[1]),', '"mutation" => mutation_args(a),')
+    guards = (root / "aeneas/qsag-verified/src/pants_and_quorum_guards.rs").read_text()
+    verify = rust_function(guards, "pub fn verified_wotsc256_verify_sum(")
+    assert verify.count("sum == WOTSC256_TARGET_SUM") == 1
+    verify = verify.replace("verified_wotsc256_verify_sum", "mutant_verify_sum").replace(
+        "sum == WOTSC256_TARGET_SUM", "true")
+    source += "\nuse qsag_verified::{wotsc256_extract_digit, WOTSC256_CHAINS};\n" + verify
     digits = rust_function((root / "crates/qsag-core/src/wots_c.rs").read_text(), "pub fn digits(")
     assert digits.count("if sum != self.target_sum {") == 1
     digits = digits.replace("pub fn digits(&self,", "fn mutant_digits(params: &qsag_core::wots_c::WotsCParams,")
-    digits = digits.replace("self.", "params.").replace("if sum != params.target_sum {", "if false {")
-    source += "\n#[allow(unused_variables)]\n" + digits
+    digits = digits.replace("self.", "params.").replace("*self", "*params").replace(
+        "Self::V128", "qsag_core::wots_c::WotsCParams::V128")
+    digits = digits.replace("qsag_verified::verified_wotsc256_verify_sum(hash)", "mutant_verify_sum(hash)")
+    source += "\n" + digits
+    generic = digits.replace("mutant_digits", "mutant_generic_digits").replace(
+        "mutant_verify_sum(hash)", "qsag_verified::verified_wotsc256_verify_sum(hash)").replace(
+        "if sum != params.target_sum {", "if false {")
+    source += "\n#[allow(unused_variables)]\n" + generic
     source = source.replace('fn mutation_args(a:&[&str])->String {match a[1] {',
         'fn mutation_args(a:&[&str])->String {match a[1] {"target_sum"=>mutant_digits(&qsag_core::wots_c::WotsCParams::V128,&arr(a[2])).is_some().to_string(),')
+    source = source.replace('fn mutation_args(a:&[&str])->String {match a[1] {',
+        'fn mutation_args(a:&[&str])->String {match a[1] {"generic_target_sum"=>mutant_generic_digits(&qsag_core::wots_c::WotsCParams {chains:127,zero_digits:1,target_sum:192},&arr(a[2])).is_some().to_string(),')
     source += "\nuse qsag_core::wots_c::WOTS_DIGEST_DIGITS;\n"
     return source
 
@@ -358,11 +378,12 @@ def build_driver(root, directory):
     (directory / "src").mkdir()
     deps = "\n".join(f'{name} = {{ path = {json.dumps(str(root / "crates" / name))} }}'
                      for name in ["qsag-core", "qsag-agg", "qsag-cred", "qsag-policy", "qsag-quorum"])
+    deps += '\nqsag-verified = { path = ' + json.dumps(str(root / "aeneas/qsag-verified")) + ' }'
     (directory / "Cargo.toml").write_text('[workspace]\n[package]\nname="spec-driver"\nversion="0.0.0"\nedition="2024"\n[dependencies]\n' + deps.replace('qsag-core = {', 'qsag-core = { features = ["std"],') + '\n[profile.release]\nopt-level=2\n')
     (directory / "src/main.rs").write_text(driver_source(root))
     command = ["timeout", "--kill-after=10s", "600s", "swarm-build", "cargo", "build",
                "--release", "--manifest-path", str(directory / "Cargo.toml"), "-j", "2"]
-    subprocess.run(command, check=True, env={**os.environ, "SWARM_MEM_MAX": "12G",
+    subprocess.run(command, check=True, env={**os.environ, "SWARM_MEM_MAX": "8G",
                                                   "CARGO_TARGET_DIR": str((directory / "target").resolve())})
     return directory / "target/release/spec-driver"
 
@@ -540,9 +561,15 @@ def mutation_search(rust, lean=None):
     mutant = rust.ask(["mutation", "target_sum", digest])
     assert mutant == "true"
     found["target_sum"] = {"request": ["wots", digest], "baseline": baseline, "mutant": mutant}
+    generic_baseline = rust.ask(["wotsgeneric", digest])
+    generic_mutant = rust.ask(["mutation", "generic_target_sum", digest])
+    assert generic_baseline == "false" and generic_mutant == "true"
+    found["generic_target_sum"] = {"request": ["wotsgeneric", digest],
+                                   "baseline": generic_baseline, "mutant": generic_mutant,
+                                   "lean_crosschecked": False}
     elapsed = time.perf_counter() - start
-    assert len(found) == 12 and elapsed < 5, (len(found), elapsed)
-    return {"caught": len(found), "total": 12, "elapsed_ms": elapsed*1000,
+    assert len(found) == 13 and elapsed < 5, (len(found), elapsed)
+    return {"caught": len(found), "total": 13, "elapsed_ms": elapsed*1000,
             "kind": "compiled production-source clause drops", "lean_crosschecked": lean is not None, "witnesses": found}
 
 

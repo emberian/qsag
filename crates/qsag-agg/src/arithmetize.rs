@@ -665,7 +665,7 @@ fn build_shard_witness(
         let fill_ref = &fill_slot;
         std::thread::scope(|scope| {
             for (t_idx, sub_rows) in rows.chunks_mut(chunk_slots * r_rows).enumerate() {
-                scope.spawn(move || {
+                crate::spawn_bounded(scope, move || {
                     for (off, slot_rows) in sub_rows.chunks_mut(r_rows).enumerate() {
                         fill_ref(t_idx * chunk_slots + off, slot_rows);
                     }
@@ -1188,7 +1188,7 @@ fn prove_shard_rows(
                         } else {
                             (t_idx + 1) * chunk
                         };
-                        handles.push(scope.spawn(move || eval_ref(s_idx, e_idx)));
+                        handles.push(crate::spawn_bounded(scope, move || eval_ref(s_idx, e_idx)));
                     }
                     handles
                         .into_iter()
@@ -1232,7 +1232,7 @@ fn prove_shard_rows(
                 std::thread::scope(|scope| {
                     for (t_idx, sub_dst) in cols_ext4.chunks_mut(chunk).enumerate() {
                         let base_idx = t_idx * chunk;
-                        scope.spawn(move || {
+                        crate::spawn_bounded(scope, move || {
                             for (off, dst_row) in sub_dst.iter_mut().enumerate() {
                                 let idx = base_idx + off;
                                 let r0 = &flat[idx * NUM_TRACE_COLS..(idx + 1) * NUM_TRACE_COLS];
@@ -1277,7 +1277,7 @@ fn prove_shard_rows(
                     for (lo_sub, hi_sub) in
                         lo_half.chunks_mut(chunk).zip(hi_half[..half].chunks(chunk))
                     {
-                        scope.spawn(move || {
+                        crate::spawn_bounded(scope, move || {
                             for (lo, hi) in lo_sub.iter_mut().zip(hi_sub.iter()) {
                                 for c in 0..NUM_TRACE_COLS {
                                     lo[c] += chal * (hi[c] - lo[c]);
@@ -1499,7 +1499,7 @@ pub fn prove_shard_batch_with_config(
     let witnesses: Vec<Vec<Goldilocks>> = std::thread::scope(|scope| {
         let build_ref = &build_witness;
         let handles: Vec<_> = (0..shard_ranges.len())
-            .map(|shard_idx| scope.spawn(move || build_ref(shard_idx)))
+            .map(|shard_idx| crate::spawn_bounded(scope, move || build_ref(shard_idx)))
             .collect();
         handles
             .into_iter()

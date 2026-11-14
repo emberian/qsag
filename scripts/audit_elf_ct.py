@@ -1247,6 +1247,43 @@ def cross_aarch64_bitslice(objdump):
         return audit(output, objdump, False, True)
 
 
+def check_fixtures(fixture, x86_rlib, aarch64_rlib):
+    """Bind the literal certified archive, its SHA-256, and a fresh source build.
+
+    Exact object identity intentionally fails on source or toolchain drift. Updating
+    a digest alone cannot bless stale bytes: the embedded archive is also checked.
+    """
+    import hashlib
+    import extract_rlib_elf as elf
+
+    source = Path(fixture).read_text()
+    success = True
+    for prefix, machine, path in [("x86", 62, x86_rlib), ("aarch64", 183, aarch64_rlib)]:
+        def literal(suffix, pattern):
+            matches = re.findall(r"def " + prefix + suffix + r"\s*:\s*\w+\s*:=\s*" + pattern, source)
+            if len(matches) != 1:
+                raise ValueError(f"missing or ambiguous {prefix}{suffix}")
+            return matches[0]
+        digest = literal("RcguElfSha256", r'"([0-9a-f]{64})"')
+        size = int(literal("RlibArchiveLen", r"([0-9]+)"))
+        packed = int(literal("RlibArchiveNat", r"(0x[0-9a-fA-F]+)"), 16)
+        archive = packed.to_bytes(size, "little")
+        members = [m for m in elf.parse_ar_archive(archive) if m.payload.startswith(elf.ELF_MAGIC)]
+        if len(members) != 1 or hashlib.sha256(members[0].payload).hexdigest() != digest:
+            raise ValueError(f"{prefix}: fixture literal does not match its SHA-256 provenance")
+        pinned = elf.parse_elf64_object(members[0].name, members[0].payload)
+        _, _, fresh = elf.extract_qsag_elf_from_rlib(Path(path))
+        if pinned.machine != machine or fresh.machine != machine:
+            raise ValueError(f"{prefix}: incorrect ELF architecture")
+        if fresh.sha256 != digest:
+            print(f"{prefix}: FAIL: stale certified fixture: pinned={digest}, fresh={fresh.sha256}; "
+                  "regenerate fixtures and their certificates with the CI toolchain", file=sys.stderr)
+            success = False
+        else:
+            print(f"{prefix}: fixture literal, SHA-256 and fresh source artifact match: {digest}")
+    return success
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--elf-bin', action='append', default=[], help='final linked ELF, repeatable')
@@ -1256,6 +1293,9 @@ def main():
                         help='require every bitslice assembly kernel for the input architecture (default: enabled)')
     parser.add_argument('--strict-rust-branches', action='store_true')
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--check-fixtures', type=Path)
+    parser.add_argument('--fixture-x86-rlib', type=Path)
+    parser.add_argument('--fixture-aarch64-rlib', type=Path)
     parser.add_argument('--cross-aarch64-bitslice', action='store_true', help='cross-assemble and audit both AArch64 bitslice kernels')
     if any(arg in sys.argv for arg in ('--x86-asm-rs', '--aarch64-asm', '--extra-x86-obj',
                                       '--extra-rlib', '--aarch64-apple-rs', '--llvm-mc')):
@@ -1263,13 +1303,23 @@ def main():
     args = parser.parse_args()
     print(f'{self_tests()} auditor self-tests passed')
     paths = args.elf_bin + args.rlib
-    if not paths and not args.self_test and not args.cross_aarch64_bitslice:
+    if not paths and not args.self_test and not args.cross_aarch64_bitslice and not args.check_fixtures:
         parser.error('supply --elf-bin or --rlib (or --self-test)')
     success = True
+    if args.check_fixtures:
+        if not args.fixture_x86_rlib or not args.fixture_aarch64_rlib:
+            parser.error('--check-fixtures requires both fixture rlib paths')
+        try:
+            success = check_fixtures(args.check_fixtures, args.fixture_x86_rlib, args.fixture_aarch64_rlib)
+        except (ValueError, OSError, OverflowError) as error:
+            print(f'fixture provenance: FAIL: {error}', file=sys.stderr)
+            success = False
     if args.cross_aarch64_bitslice:
-        success = cross_aarch64_bitslice(args.llvm_objdump)
+        success = cross_aarch64_bitslice(args.llvm_objdump) and success
     for name in paths:
         try:
+            if name in args.elf_bin and elf_header(Path(name).read_bytes())[0] not in (2, 3):
+                raise ValueError('--elf-bin requires a linked ET_EXEC or ET_DYN image')
             success = audit(Path(name).resolve(), args.llvm_objdump, args.strict_rust_branches, args.require_bitslice) and success
         except (ValueError, OSError, subprocess.CalledProcessError) as error:
             print(f'{name}: FAIL: {error}', file=sys.stderr)

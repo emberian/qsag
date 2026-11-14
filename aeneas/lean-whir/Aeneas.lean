@@ -169,7 +169,6 @@ theorem UScalar.lt_irrefl {ty : UScalarTy} (x : UScalar ty) : ¬ (x < x) :=
 @[simp] theorem UScalar.bv_not {ty : UScalarTy} (a : UScalar ty) : (~~~ a).bv = ~~~ a.bv := rfl
 
 /-- Rust `as` integer cast (`setWidth`: zero-extends when widening, truncates low bits when narrowing). -/
-@[expose]
 def UScalar.cast (dst : UScalarTy) {src : UScalarTy} (x : UScalar src) : UScalar dst :=
   ⟨x.bv.setWidth dst.numBits⟩
 
@@ -232,7 +231,6 @@ def loopFuel {α : Type u} {β : Type v} (fuel : Nat)
       | .done y => .ok y
 termination_by structural fuel
 
-@[expose]
 def loopMaxFuel : Nat := Nat.pow 2 65
 
 @[simp]
@@ -338,11 +336,8 @@ namespace default
 structure Default (T : Type) where
   default : Result T
 
-@[expose]
 def DefaultU8.default : U8 := 0#u8
-@[expose]
 def DefaultU64.default : U64 := 0#u64
-@[expose]
 def DefaultU128.default : U128 := 0#u128
 end default
 
@@ -377,9 +372,7 @@ structure Eq (T : Type) where
 def Eq.assert_fields_are_eq.default {I T : Type} (_ : I) (_ : T) : Aeneas.Std.Result Unit :=
   .ok ()
 
-@[expose]
 def impls.PartialEqU8.eq (a b : U8) : Bool := a = b
-@[expose]
 def impls.PartialEqU64.eq (a b : U64) : Bool := a = b
 
 def PartialEqU8 : PartialEq U8 U8 :=
@@ -404,16 +397,13 @@ def PartialEqArray.eq {T : Type} {n : Usize}
 end array.equality
 
 namespace slice
-@[expose]
 def Slice.is_empty {T : Type} (s : Aeneas.Std.Slice T) : Aeneas.Std.Result Bool :=
   .ok s.val.isEmpty
 end slice
 
 namespace num
-@[expose]
 def U64.MAX : U64 := ⟨BitVec.allOnes 64⟩
 
-@[expose]
 def U64.rotate_left (x : U64) (n : U32) : U64 :=
   ⟨x.bv.rotateLeft (n.val % 64)⟩
 end num

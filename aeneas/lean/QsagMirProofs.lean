@@ -2,6 +2,7 @@ module
 
 public import QsagVerified.Proofs
 public import QsagSpecWeld
+public import QsagVerified.Proofs.SpongeConformance
 
 public section
 
@@ -526,6 +527,48 @@ export qsag_verified.proofs (
   keccakStateOfArray
   keccakArrayOfState_roundtrip
   keccak_f1600_array_refines_qsag
+)
+end QsagMirProofs
+
+namespace QsagMirProofs
+export qsag_verified.proofs (
+  beltLatchDigitsEqB
+  beltLatchDigitsEqB_iff
+  belt_latch_digits_eq_spec
+  beltLatchRecordOf
+  beltLatchFreshPure
+  beltLatchBindPure
+  belt_latch_bind_eq
+  BeltLatchInv
+  belt_latch_fresh_step
+  belt_latch_replay_step
+  belt_latch_rejected_step
+  belt_latch_poisoned_step
+  belt_latch_replay_accepts
+  belt_latch_step_monotone
+  belt_latch_step_preserves_inv
+  BeltLatchCall
+  BeltLatchRun
+  belt_latch_run_exists
+  belt_latch_run_append
+  belt_latch_run_preserves_inv
+  belt_latch_run_monotone
+  belt_latch_poison_absorbing
+  belt_latch_failed_persist_binds_nothing
+  belt_latch_epoch_binding_unique
+  belt_latch_fresh_epochs_increase
+  belt_latch_new_empty_spec
+  belt_latch_recover_of_inv
+  belt_latch_recover_then_replay
+  belt_latch_fresh_accepts
+  belt_latch_persist_failure
+  belt_latch_jump_refused
+  belt_latch_salt_mismatch_refused
+  inhabited_belt_latch_fresh_replay_mismatch
+  tooth_belt_latch_persist_failure_poisons
+  tooth_belt_latch_epoch_window
+  checked_velocity_spend_spec
+  tooth_checked_velocity_spend_cap
 )
 end QsagMirProofs
 

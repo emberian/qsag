@@ -13,7 +13,7 @@
 #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::goldilocks::GOLDILOCKS_TWO_ADICITY;
+use crate::goldilocks::{GOLDILOCKS_TWO_ADICITY, check_goldilocks_twiddles};
 use crate::keccak::{cshake256_framed_32, finalize_cshake256, init_cshake256};
 use crate::spirv_kernels::{canonical_spirv_pin, canonical_spirv_pins, spirv_kernel_bytes};
 use crate::{
@@ -122,6 +122,9 @@ pub struct PipelineTelemetry {
     pub vgprs: Option<u64>,
     pub sgprs: Option<u64>,
     pub lds_bytes: Option<u64>,
+    /// RADV reports these for its LLVM backend; ACO spills surface as `scratch_bytes`.
+    pub spilled_vgprs: Option<u64>,
+    pub spilled_sgprs: Option<u64>,
 }
 
 /// Hardware identity and compute limits reported by `vkGetPhysicalDeviceProperties`.
@@ -162,6 +165,42 @@ impl VulkanDeviceInfo {
     /// UTF-8 physical device name reported by the Vulkan driver (e.g. `"AMD Radeon RX 6750 XT"`).
     pub fn device_name(&self) -> &str {
         core::str::from_utf8(&self.name_bytes[..self.name_len]).unwrap_or("Unknown Vulkan GPU")
+    }
+
+    /// Digest of the driver identity and per-pipeline executable telemetry this backend was
+    /// built on. A host that folds it into a receipt's `transcript_anchor` makes the receipt
+    /// name the driver state (Wave32, scratch, spill, LDS figures) it reports having run on.
+    /// Like the receipt itself this is a report by the key holder, not a proof.
+    pub fn audit_evidence_digest(&self) -> [u8; 32] {
+        const PER_PIPELINE: usize = 7 * 9;
+        let mut body = [0u8; 17 + KernelSlot::COUNT * PER_PIPELINE];
+        body[0..4].copy_from_slice(&self.vendor_id.to_le_bytes());
+        body[4..8].copy_from_slice(&self.device_id.to_le_bytes());
+        body[8..12].copy_from_slice(&self.driver_version.to_le_bytes());
+        body[12..16].copy_from_slice(&self.api_version.to_le_bytes());
+        body[16] = self.wave32_required as u8;
+        for (chunk, stats) in body[17..]
+            .chunks_exact_mut(PER_PIPELINE)
+            .zip(&self.pipelines)
+        {
+            let fields = [
+                stats.subgroup_size.map(u64::from),
+                stats.scratch_bytes,
+                stats.vgprs,
+                stats.sgprs,
+                stats.lds_bytes,
+                stats.spilled_vgprs,
+                stats.spilled_sgprs,
+            ];
+            for (slot, field) in chunk.chunks_exact_mut(9).zip(fields) {
+                slot[0] = field.is_some() as u8;
+                slot[1..].copy_from_slice(&field.unwrap_or(0).to_le_bytes());
+            }
+        }
+        cshake256_framed_32(
+            b"QSAG.ACCEL.VULKAN_AUDIT_EVIDENCE.V1",
+            &[&self.name_bytes[..self.name_len], &body],
+        )
     }
 
     /// Decoded `(major, minor, patch)` Vulkan API version tuple.
@@ -240,6 +279,15 @@ impl core::fmt::Debug for VulkanSpirvBackend {
     }
 }
 
+/// Shape errors pass through; every device, driver, or lock failure is a backend failure.
+#[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+fn accel_error(err: VulkanError) -> AccelError {
+    match err {
+        VulkanError::Accel(shape) => shape,
+        _ => AccelError::BackendFailure,
+    }
+}
+
 #[inline]
 const fn check_ntt_log2(what: &'static str, len: usize) -> Result<u32, AccelError> {
     if !len.is_power_of_two() {
@@ -283,7 +331,12 @@ impl VulkanSpirvBackend {
             || info
                 .pipelines
                 .iter()
-                .any(|stats| stats.subgroup_size != Some(32) || stats.scratch_bytes != Some(0))
+                .any(|stats| {
+                    stats.subgroup_size != Some(32)
+                        || stats.scratch_bytes != Some(0)
+                        || stats.spilled_vgprs.is_some_and(|n| n != 0)
+                        || stats.spilled_sgprs.is_some_and(|n| n != 0)
+                })
         {
             return Err(VulkanError::PipelineAuditFailed(
                 "Wave32/zero-scratch evidence unavailable",
@@ -406,6 +459,13 @@ impl VulkanSpirvBackend {
         base_layer: u32,
     ) -> Result<[u64; 4], VulkanError> {
         check_ntt_log2("Merkle tree leaves", leaves.len())?;
+        // Level `l` is tweaked with `base_layer + l`; a wrapped tweak would alias another layer.
+        if base_layer
+            .checked_add(leaves.len().trailing_zeros())
+            .is_none()
+        {
+            return Err(AccelError::LengthOverflow.into());
+        }
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
             let mut guard = self
@@ -463,10 +523,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
     ) -> Result<CertifiedKernelPin, AccelError> {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
-            self.try_batch_keccak_f1600(states).map_err(|e| match e {
-                VulkanError::Accel(ae) => ae,
-                _ => AccelError::LengthOverflow,
-            })?;
+            self.try_batch_keccak_f1600(states).map_err(accel_error)?;
             Ok(self.pins[KernelSlot::BatchKeccakF1600 as usize])
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
@@ -497,10 +554,7 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
             self.try_batch_poseidon2_perm12(states)
-                .map_err(|e| match e {
-                    VulkanError::Accel(ae) => ae,
-                    _ => AccelError::LengthOverflow,
-                })?;
+                .map_err(accel_error)?;
             Ok(self.pins[KernelSlot::BatchPoseidon2Perm12 as usize])
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
@@ -517,23 +571,16 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         inverse: bool,
     ) -> Result<(), AccelError> {
         let n = buf.len();
-        check_ntt_log2("NTT buffer", n)?;
-        if n > 1 && twiddles.len() != n / 2 {
-            return Err(AccelError::LengthMismatch {
-                what: "NTT twiddles",
-                expected: n / 2,
-                actual: twiddles.len(),
-            });
-        }
+        // The kernels read only `twiddles[n >> s]` and take powers of those stage roots, so a
+        // table that is not a primitive-root power table is refused instead of transformed
+        // differently from the CPU reference (and then bound into a receipt).
+        check_goldilocks_twiddles(n, twiddles)?;
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
-            let mut guard = self.engine.lock().map_err(|_| AccelError::LengthOverflow)?;
+            let mut guard = self.engine.lock().map_err(|_| AccelError::BackendFailure)?;
             guard
                 .exec_goldilocks_ntt(buf, twiddles, inverse)
-                .map_err(|e| match e {
-                    VulkanError::Accel(ae) => ae,
-                    _ => AccelError::LengthOverflow,
-                })?;
+                .map_err(accel_error)?;
             self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -570,13 +617,10 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         }
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
-            let mut guard = self.engine.lock().map_err(|_| AccelError::LengthOverflow)?;
+            let mut guard = self.engine.lock().map_err(|_| AccelError::BackendFailure)?;
             guard
                 .exec_coset_lde_ext2(evals, blowup, shift, out)
-                .map_err(|e| match e {
-                    VulkanError::Accel(ae) => ae,
-                    _ => AccelError::LengthOverflow,
-                })?;
+                .map_err(accel_error)?;
             self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -621,13 +665,10 @@ impl AcceleratorBackend for VulkanSpirvBackend {
             if out_parents.is_empty() {
                 return Ok(());
             }
-            let mut guard = self.engine.lock().map_err(|_| AccelError::LengthOverflow)?;
+            let mut guard = self.engine.lock().map_err(|_| AccelError::BackendFailure)?;
             guard
                 .exec_merkle_layer(children, pk_seed, layer, start_parent_idx, out_parents)
-                .map_err(|e| match e {
-                    VulkanError::Accel(ae) => ae,
-                    _ => AccelError::LengthOverflow,
-                })?;
+                .map_err(accel_error)?;
             self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -655,13 +696,10 @@ impl AcceleratorBackend for VulkanSpirvBackend {
             if shares.is_empty() {
                 return Ok((0, 0));
             }
-            let mut guard = self.engine.lock().map_err(|_| AccelError::LengthOverflow)?;
+            let mut guard = self.engine.lock().map_err(|_| AccelError::BackendFailure)?;
             let res = guard
                 .exec_bdoz_gf2_128_dot(shares, weights)
-                .map_err(|e| match e {
-                    VulkanError::Accel(ae) => ae,
-                    _ => AccelError::LengthOverflow,
-                })?;
+                .map_err(accel_error)?;
             self.gpu_submissions.fetch_add(1, Ordering::Relaxed);
             Ok(res)
         }
@@ -972,6 +1010,116 @@ mod tests {
         // Cross-verifying rec2 against tw1's input digest must fail.
         assert_eq!(rec2.input_digest, goldilocks_ntt_input_digest(&orig, &tw2));
         assert_ne!(rec2.input_digest, goldilocks_ntt_input_digest(&orig, &tw1));
+    }
+
+    #[test]
+    fn twiddle_check_accepts_exactly_primitive_root_power_tables() {
+        use crate::goldilocks::{
+            check_goldilocks_twiddles, gl_mul, goldilocks_primitive_root,
+            precompute_goldilocks_twiddles,
+        };
+
+        for log2_n in 0..=11u32 {
+            let n = 1usize << log2_n;
+            let table = precompute_goldilocks_twiddles(n).expect("twiddles");
+            assert_eq!(check_goldilocks_twiddles(n, &table), Ok(()));
+            // The inverse-root table is an equally valid primitive-root power table.
+            if n >= 4 {
+                let inv: std::vec::Vec<u64> = core::iter::once(1)
+                    .chain(table[1..].iter().rev().map(|&w| crate::goldilocks::gl_neg(w)))
+                    .collect();
+                assert_eq!(check_goldilocks_twiddles(n, &inv), Ok(()));
+            }
+            // Any single perturbed entry is refused.
+            for idx in 0..table.len() {
+                let mut bad = table.clone();
+                bad[idx] = gl_mul(bad[idx], 7);
+                assert_eq!(
+                    check_goldilocks_twiddles(n, &bad),
+                    Err(AccelError::InvalidTwiddles),
+                    "n={n}, idx={idx}"
+                );
+            }
+        }
+
+        // Geometric tables whose ratio is not a primitive n-th root are refused: ratio 1, and a
+        // root of half the order.
+        assert_eq!(
+            check_goldilocks_twiddles(8, &[1, 1, 1, 1]),
+            Err(AccelError::InvalidTwiddles)
+        );
+        let w4 = goldilocks_primitive_root(2).expect("4th root");
+        let half_order = [1, w4, gl_mul(w4, w4), gl_mul(gl_mul(w4, w4), w4)];
+        assert_eq!(
+            check_goldilocks_twiddles(8, &half_order),
+            Err(AccelError::InvalidTwiddles)
+        );
+        assert_eq!(
+            check_goldilocks_twiddles(8, &[1, w4]),
+            Err(AccelError::LengthMismatch {
+                what: "NTT twiddles",
+                expected: 4,
+                actual: 2
+            })
+        );
+    }
+
+    #[test]
+    fn audit_evidence_digest_separates_driver_and_telemetry_states() {
+        let base = VulkanDeviceInfo {
+            name_bytes: [0; 256],
+            name_len: 0,
+            max_compute_shared_memory_size: 65536,
+            wave32_required: true,
+            pipelines: [PipelineTelemetry {
+                subgroup_size: Some(32),
+                scratch_bytes: Some(0),
+                ..PipelineTelemetry::default()
+            }; KernelSlot::COUNT],
+            vendor_id: 0x1002,
+            device_id: 0x73df,
+            driver_version: 1,
+            api_version: 1,
+            device_type: 2,
+            max_push_constants_size: 128,
+            max_storage_buffer_range: u32::MAX,
+            max_compute_work_group_invocations: 1024,
+        };
+        let reference = base.audit_evidence_digest();
+        assert_eq!(reference, base.audit_evidence_digest());
+
+        let mut variants = std::vec::Vec::new();
+        let mut v = base;
+        v.wave32_required = false;
+        variants.push(v);
+        let mut v = base;
+        v.driver_version = 2;
+        variants.push(v);
+        let mut v = base;
+        v.name_bytes[0] = b'R';
+        v.name_len = 1;
+        variants.push(v);
+        for slot in 0..KernelSlot::COUNT {
+            let mut v = base;
+            v.pipelines[slot].subgroup_size = Some(64);
+            variants.push(v);
+            let mut v = base;
+            v.pipelines[slot].scratch_bytes = None;
+            variants.push(v);
+            let mut v = base;
+            v.pipelines[slot].scratch_bytes = Some(8);
+            variants.push(v);
+            let mut v = base;
+            v.pipelines[slot].spilled_vgprs = Some(0);
+            variants.push(v);
+        }
+        let mut digests: std::vec::Vec<[u8; 32]> =
+            variants.iter().map(VulkanDeviceInfo::audit_evidence_digest).collect();
+        digests.push(reference);
+        let total = digests.len();
+        digests.sort_unstable();
+        digests.dedup();
+        assert_eq!(digests.len(), total);
     }
 
     #[test]

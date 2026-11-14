@@ -106,7 +106,7 @@ jobs:
           done
 
   lean-6-kernel-paranoid:
-    name: Lean 4.35 build, axiom audit, 6-kernel comparator (${{ matrix.workdir }})
+    name: Lean 4.35 verification (${{ matrix.workdir }})
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     strategy:
@@ -115,8 +115,16 @@ jobs:
         include:
           - workdir: lean
             audit_axioms: true
+            audit_module: AuditAxioms
+            comparator: true
           - workdir: aeneas/lean
-            audit_axioms: false
+            audit_axioms: true
+            audit_module: AuditMirAxioms
+            comparator: true
+          - workdir: aeneas/lean-whir
+            audit_axioms: true
+            audit_module: AuditWhirMirAxioms
+            comparator: false
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -155,6 +163,7 @@ jobs:
           done
 
       - name: Comparator configuration permits only propext and Quot.sound
+        if: matrix.comparator
         working-directory: ${{ matrix.workdir }}
         run: |
           set -euo pipefail
@@ -169,20 +178,25 @@ jobs:
         working-directory: ${{ matrix.workdir }}
         run: lake build
 
-      - name: lake build AuditAxioms (no forbidden axioms)
+      - name: Audit dependency closures (only propext and Quot.sound)
         if: matrix.audit_axioms
         working-directory: ${{ matrix.workdir }}
+        # Execute elaboration even if Lake has cached the module. Each audit throws
+        # on every axiom outside its allowlist and on empty coverage.
+        run: lake env lean -DwarningAsError=true ${{ matrix.audit_module }}.lean
+
+      - name: Lean and Rust cross-KATs
+        if: matrix.workdir == 'lean'
+        env:
+          CARGO_BUILD_JOBS: "4"
+          SWARM_MEM_MAX: 8G
         run: |
-          set -euo pipefail
-          lake build AuditAxioms 2>&1 | tee /tmp/audit-axioms.log
-          # The audit prints the axioms each audited theorem depends on. Anything other than
-          # propext and Quot.sound fails the job.
-          if grep -nE 'sorryAx|Lean\.ofReduceBool|Lean\.trustCompiler|Classical\.choice|native_decide' /tmp/audit-axioms.log; then
-            echo "::error::a forbidden axiom appears in the axiom audit"
-            exit 1
-          fi
+          python3 scripts/cross_kat_runner.py --build
+          timeout --kill-after=10s 600s lean/.lake/build/bin/qsag-kat > /tmp/qsag-kat.json
+          python3 -m json.tool /tmp/qsag-kat.json > /dev/null
 
       - name: lake comparator --paranoid (bubblewrap sandbox, six kernels)
+        if: matrix.comparator
         working-directory: ${{ matrix.workdir }}
         run: lake comparator --paranoid
 
@@ -212,7 +226,7 @@ jobs:
         run: |
           set -euo pipefail
           # Thin LTO would leave only bitcode in the archive; the audit disassembles the
-          # machine code that actually ships, so it is switched off for this build.
+          # native archive members; the separate linked-image gate below retains ThinLTO.
           CARGO_PROFILE_RELEASE_LTO=false cargo build -p qsag-asm --release --target-dir target/ct-audit
           python3 crates/qsag-asm/scripts/audit_elf_ct.py \
             --rlib target/ct-audit/release/libqsag_asm.rlib \
@@ -236,3 +250,18 @@ jobs:
           done
           test "$missing" -eq 0
           test -s /tmp/aarch64-symbols.txt
+
+      - name: Audit the release ThinLTO linked CLI
+        run: |
+          set -euo pipefail
+          CARGO_PROFILE_RELEASE_LTO=thin CARGO_PROFILE_RELEASE_STRIP=none \
+            cargo build --release --offline -p qsag-cli --target-dir target/ct-linked
+          python3 scripts/audit_elf_ct.py --elf-bin target/ct-linked/release/qsag
+
+      - name: Bind certified fixture bytes to freshly built source artifacts
+        run: |
+          set -euo pipefail
+          python3 scripts/audit_elf_ct.py \
+            --check-fixtures lean/Qsag/CompiledRlibFixtures.lean \
+            --fixture-x86-rlib target/ct-audit/release/libqsag_asm.rlib \
+            --fixture-aarch64-rlib target/ct-audit/aarch64-unknown-linux-gnu/release/libqsag_asm.rlib

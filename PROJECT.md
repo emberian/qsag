@@ -2,29 +2,31 @@
 
 **qsag — Quorum-Switching AGgregation / Quantum Succinct AGgregation**
 
-This ledger distinguishes implemented mechanisms from integrated assurance. The project has 13 crates with zero external crates.io dependencies: 12 root workspace packages plus the separate `aeneas/qsag-verified` extraction workspace. Libraries support `no_std`; the CLI and host adapters require `std`. See the [README crate map](README.md#workspace-crate-map) for paths and public entrypoints.
+This ledger distinguishes implemented mechanisms from integrated assurance. The project has 14 Rust packages with zero external crates.io dependencies: 12 root workspace packages plus `aeneas/qsag-verified` and `aeneas/qsag-whir-verified` extraction workspaces. Libraries support `no_std`; the CLI and host adapters require `std`. See the [README crate map](README.md#workspace-crate-map) for paths and public entrypoints.
 
 ## Implemented capabilities
 
 | Surface | Present implementation | Boundary |
 | --- | --- | --- |
 | `qsag-core` FIPS 205 | All six SLH-DSA-SHAKE parameter sets, RSS/SPDZ threshold evaluation, DKG, refresh and reshare | Matched-input signature equality and standard verification do not establish abort-conditioned distribution equality or full production UC refinement. |
-| Baggy / Waistband | Stateless hypertree + TSW, static Top-L child-root WOTS cache, 256-lane Keccak, carryless BGIN19 DZK, full 256-bit WOTS+C (`w=4`, 128 chains, target sum 192) | No message-binding leaf cache. Stateless signing does not make MPC preprocessing or custody resource accounting rollback-free. Concrete security has finite query budgets. |
-| Jorts / BeltLatch | Stateful 2-of-3 signing, staged Mode 3B, crash-WAL and certified latch machinery | Reported ~1.0 ms local / ~81 ms simulated WAN excludes a complete durable authenticated deployment. Global latch safety requires `2q > n+f`; BFT availability requires `n >= 3f+1`. |
+| Baggy / Waistband | Stateless hypertree + TSW, static Top-L child-root WOTS cache, 256-lane Keccak, carryless BGIN19 DZK, 256-bit digest WOTS+C (`w=4`, 128 chains, target sum 192) | No message-binding leaf cache. Stateless signing does not make MPC preprocessing or custody resource accounting rollback-free. Concrete security has finite query budgets. |
+| Jorts / BeltLatch | Stateful 2-of-3 signing, staged Mode 3B, crash-WAL and certified latch machinery | Reported ~1.0 ms local / ~81 ms simulated WAN excludes a complete durable authenticated deployment. Global latch safety requires `2q > n+f`; BFT availability requires `q <= n-f` (feasible together when `n >= 3f+1`). |
 | `qsag-quorum` QS-A | `CommitteePartitionedJorts`: disjoint committee subtrees, t-of-t online signing; reported 3-of-5 ~0.56 ms loopback TCP with two offline | Committee-revealing partitioned custody. Up to f=2 corruptions is a safety-with-abort claim; corrupt online parties may prevent completion. |
 | `qsag-quorum` QS-B | `BftShamirJorts`: global tree, certified BeltLatch, self-verifying pre-stepped Shamir WOTS+C | Quorum-independent leaf allocation; signing t and latch q are distinct. MAC-free WOTS checks do not remove authenticated latch/channel requirements. |
 | Corduroy | Algebraic Poseidon2 stateless threshold custody hypertree | Custom construction; full production/proof composition remains under review. |
-| `qsag-agg` Hem | GoldilocksExt4 WHIR, CanopyMultiProof Steiner deduplication, K-to-1 aggregation and binary-tree merging | Default `Habr24Qrom128` q=(128,64,43,32); `BciksJohnsonQrom128` q=(257,129,87,65). Mandatory QROM Grover query floor is implemented; total QROM reduction and exact-profile proof linkage remain separate. |
+| `qsag-agg` Hem | GoldilocksExt4 WHIR, CanopyMultiProof Steiner deduplication, K-to-1 aggregation and binary-tree merging | Default `Habr24Qrom128` q=(128,64,43,32); `BciksJohnsonQrom128` q=(258,130,88,66). Mandatory QROM Grover query floor is implemented; total QROM reduction and exact-profile proof linkage remain separate. |
 | `qsag-asm` | x86_64 AVX2/GFNI/PCLMULQDQ/VPCLMULQDQ and aarch64 SHA3/PMULL, runtime dispatch, timing harness | Kernel-scoped ISA and fixture evidence; no whole-process constant-time claim. |
 | `qsag-fts` | FrontierSumFts and ParallelSeededFts, active DKG/sacrifice and durable burn guards | Respect per-profile use limits; the Full256Bit profile permits one safe use. OT setup and complete workflows need their own runtime checks. |
 | `qsag-hd` | Secret-keyed dealerless HD custody, watch-only inventories, authorized module projections and child-MAC rekey | Honest-majority setup and authenticated confidential channels; inventory enrollment can reconstruct selected batch child seeds, not parent/subset seeds. |
 | `qsag-addr` | Bech32m QsagAddress and canonical HybridPinnedEnvelope | Bind suite, identity role, HRP and pinned key; address parsing alone is not ownership proof. |
 | `qsag-policy` | Authenticated rolling-window BDOZ custody guard, nonce/spend state and durable checkpoints | Real-time caps require a trusted clock/epoch authority and durable reservation before release. |
 | `qsag-cred` | Threshold ML-DSA-44, 2-of-5 Poseidon2 TOPRF, six-limb BlindVC with 438-repetition Quantum128 default | ML-DSA active quorum is 2t-1; rejection transcript privacy remains heuristic. Quantum128 is a profile, not an unconditional end-to-end security theorem. |
-| `qsag-migrate` | Three-custodian co-ZK ownership migration for secp256k1/Taproot/Ed25519; mandatory active pre-open Boolean and prime-field multiplication checks | Live ZKBoo default remains 219 repetitions. Active multiplication checks are implemented; full FS/QROM extraction, stronger profile integration and conditional privacy bridges remain open. |
-| `qsag-accel` | AcceleratorBackend, CPU reference execution, keyed cSHAKE256 receipts | A keyed receipt authenticates a computation report; it is not hardware remote attestation. |
+| `qsag-migrate` | Three-custodian co-ZK ownership migration for secp256k1/Taproot/Ed25519; mandatory active pre-open Boolean and prime-field multiplication checks | Live ZKBoo default is 438 repetitions. Large-prime / cubic-Goldilocks active checks have bounds <2^-249 / <2^-186 respectively; full FS/QROM extraction and production privacy refinement remain open. |
+| `qsag-accel` | AcceleratorBackend, CPU reference and six Linux/std Vulkan kernels, keyed cSHAKE256 receipts | A keyed receipt authenticates a computation report; it is not hardware remote attestation. |
 | `qsag-cli` | File-based keygen/sign/verify, addresses, aggregation, policy demo, KATs and seven examples | Local demos are not distributed deployment; README commands are checked separately from formal assurance. |
-| `qsag-verified` | Charon/Aeneas MIR extraction and QsagMirProofs over arithmetic, sponges and custody guards | Separate workspace. Direct production linkage, fresh extraction and complete secret-release mediation are active work. |
+| `qsag-verified` | Charon/Aeneas MIR extraction and QsagMirProofs over arithmetic, sponges and custody guards | Separate workspace; live core/policy/quorum dependency. Fresh extraction and complete release mediation remain obligations. |
+
+| `qsag-whir-verified` | Extracted WHIR arithmetic called by aggregation | Fresh extraction and protocol-level composition remain release checks. |
 
 ## Assurance architecture and remaining integration
 
@@ -41,9 +43,9 @@ The constructive proof discipline is **0 sorry / 0 Classical.choice**, permitted
 | --- | --- |
 | Per-scheme output laws | Production refinement of reference signers with matched coins, first-valid-counter selection, exhaustion/retry behavior and explicit adversarial abort. QS-A anonymity is excluded by construction. |
 | Hem total security | One profile consumed by the concrete verifier and proof, with list/field/hash/union terms and an applicable multi-round QROM reduction; no squaring errors without corresponding independent checks. |
-| RLWE preprocessing | Extraction for the actual signed-monomial ring challenges, including exceptional differences and norm bounds; widening challenge entropy alone is insufficient. |
+| RLWE preprocessing | Pairwise unit differences and short relaxed extraction are proved. Resolve the 143-bit challenge budget and instantiate quantum-active OT/FS security; current rejection parameter is approximately 24. |
 | Complete mediation | Secret ownership, bound output objects, non-reusable leases, poison propagation and durable release receipts across every useful network output. |
-| Crash/concurrency composition | One ceremony resource authority or sound monotone multi-ledger protocol; no reuse under every crash prefix and interleaving. Per-file atomicity does not prove ceremony atomicity. |
+| Crash/concurrency composition | Instantiate the existing multi-ledger crash/interleaving theorem against all runtime event paths, persistence contracts and rollback anchors. |
 | Transport and policy | Authenticated confidential channels, consistent broadcast, reconnect replay protection and authoritative policy epoch advancement. RAM/loopback timings do not establish these. |
 | Artifact linkage | Fresh extraction, both proof-workspace audits, complete theorem/import coverage, linked binary and dispatch closure, native hardware checks and required CI dependencies. |
 
@@ -65,3 +67,29 @@ rejection, and the custom accelerator backend. Overall: **12 of 13 Cargo command
 passed**, plus all three shell setup commands; the full threshold example was
 the sole timeout. No Rust or Lean source was changed for this check. The isolated
 build output was removed after validation.
+
+
+## C-06 publication evidence and follow-up
+
+Documentation owner: Astra. Reconciled 2026-11-14 against the live source and the claims blueprint. Parameter truth is centralized in [the security proof guide](docs/SECURITY_AND_CT_PROOFS.md#current-parameter-and-theorem-map). Production Cargo linkage is present for both extraction crates. Named advances include signed-monomial extraction, GS interpolation/factor/list algebra, adaptive unitary query bounds, multi-ledger crash/interleaving safety, multi-turn guard reachability, real-spec field/Keccak bridges, arbitrary BDOZ batches, five SydTV looping kernels and decoded SIMD fixtures. Fresh proof closure and exact release artifacts remain integration checks.
+
+The inspected RX 6750 XT / RADV NAVI22 raw run uses Vulkan 1.3.289, RADV 24.2.8, PCI 1002:73df, one warmed sample per workload and `CpuReferenceBackend`. Timed GPU calls include submission and host transfers. All six output comparisons passed; the receipt verified; 13 submissions were recorded. All six pipelines reported Wave32 and zero scratch. Raw-log SHA-256: `c33c8856ef15dea3b8667e75fdcafee5e173721911e87b29cb13ab8594e5e777`. This identifies the inspected audit artifact, not the current source revision.
+
+| Workload | Raw audit GPU ms | Raw audit CPU ms | Recorded ratio | Later hardening report GPU / CPU ms |
+| --- | ---: | ---: | ---: | ---: |
+| Poseidon2-12, 262,144 permutations | 22.11 | 3027.45 | 136.9× | 21.35 / 1822 |
+| Keccak-f[1600], 262,144 permutations | 21.49 | 76.14 | 3.5× | 20.04 / 67 |
+| Goldilocks NTT, 2^20 | 10.02 | 183.41 | 18.3× | 12.29 / 161 |
+| CosetLdeExt2, 2^18 → 2^20 | 11.97 | 581.34 | 48.6× | 10.95 / 476 |
+| Poseidon2 Merkle, 2^20 leaves | 39.45 | 14184.10 | 359.5× | 35.38 / 7185 |
+| BDOZ GF(2^128) dot, 262,144 pairs | 8.65 | 746.83 | 86.3× | 6.30 / 71 |
+
+The later 2026-11-14 GPU deputy report includes twiddle validation, staging/VRAM scrubbing and spill telemetry, and reports 29 unit + 3 integration tests passing on RADV. Its single shared-host timing sample is a separate run. No timing ratio here establishes full Hem GPU acceleration. The default AMDVLK loader reported Wave64 and was rejected; the tested audited path selects RADV.
+
+The requested earlier figures—Merkle 19.03 ms / 432.1×; Poseidon2 12.50 ms / 173.0×; Ext2 LDE 8.32 ms / 65.9×; NTT 6.94 ms / 26.6×; BDOZ 4.34 ms / 17.5×; Keccak 19.27 ms / 4.1×—have no original raw record in the inspected evidence. Preserve them as reported historical figures pending recovery of source revision, comparator, timing boundaries and driver record; do not substitute them for the raw run above.
+
+`quorum_threaded_bench.rs` implements `ConfidentialWireChannel<TcpEndpoint>` Encrypt-then-MAC AEAD with real filesystem WAL/poison/seed-ledger fsync paths. The requested ext4 figures (QS-A 2-of-3 **4.37 ms**, QS-B 3-of-7 **5.21 ms**) are reported measurements whose raw execution record was not recovered here. Existing ~1.0 ms Jorts / ~0.56 ms QS-A RAM/loopback measurements remain separately scoped; offline staging, WAN latency and durable operations cannot be inferred from them.
+
+The [consensus scaling analysis](docs/QUORUM_AND_CONSENSUS_SCALING.md) distinguishes the Alpenglow and Beam mock workloads from live integrations. Hierarchical Hem retains child evidence and binds registry, epoch, quorum and disjointness. The mocks establish neither 150 ms finality nor a measured <8 ms Beam verifier or million-validator recursive proof.
+
+Remaining C-06 publication inputs: recover the historical GPU and durable-quorum raw records; bind source-changing proof claims to the final integrated build/axiom/import/replay artifacts; remeasure end-to-end Hem on GPU. These are evidence tasks, not permission barriers. The requested bimodal M≈1.08 claim is superseded by the inspected live Gaussian rejection parameter M≈24; the two migration active-field errors must remain separate from generic Grover accounting.

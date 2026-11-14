@@ -171,7 +171,8 @@ impl Vault {
             .seek(SeekFrom::Start(0))
             .and_then(|_| self.file.write_all(&mac))
             .and_then(|_| self.file.sync_all())
-            .map_err(|e| CliError::io("syncing vault state", e))
+            .map_err(|e| CliError::io("syncing vault state", e))?;
+        self.check_path()
     }
 
     pub fn reserve(&mut self, path: &str, secret: &mut Json) -> Result<(), CliError> {

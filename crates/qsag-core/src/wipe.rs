@@ -145,6 +145,7 @@ pub fn ct_select_bytes32(choice: bool, if_true: &[u8; 32], if_false: &[u8; 32]) 
 
 /// Recursive wiping for owned temporary share buffers.
 pub(crate) trait SecretWipe { fn secret_wipe(&mut self); }
+impl SecretWipe for usize { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }
 impl SecretWipe for u8 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }
 impl SecretWipe for u16 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }
 impl SecretWipe for u32 { fn secret_wipe(&mut self) { qsag_asm::volatile_fill(core::slice::from_mut(self), 0); } }

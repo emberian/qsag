@@ -71,9 +71,10 @@ def elf_functions(data):
                 if reloc[1] in (4, 9) and reloc[7] == idx:
                     width = 24 if reloc[1] == 4 else 16
                     require(reloc[9] == width and reloc[5] % width == 0, 'bad relocations')
-                    for r in range(reloc[4], reloc[4]+reloc[5], width):
-                        address = struct.unpack('<Q', region(data, r, 8))[0]
-                        has_relocation |= value <= address < value+size
+                    # Conservatively reject all symbols in a relocated section:
+                    # relocation writes can overlap a symbol from before its start.
+                    region(data, reloc[4], reloc[5])
+                    has_relocation |= reloc[5] != 0
             if has_relocation:
                 continue  # Relocated functions are outside this closed-byte validator.
             symbol = cstring(strings, name)

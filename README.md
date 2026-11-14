@@ -6,20 +6,24 @@
 
 `qsag` is a post-quantum threshold signing, aggregation, and custody stack: NIST **FIPS 205 SLH-DSA-SHAKE** and **FIPS 204 ML-DSA-44** alongside the custom **Pants** pure-hash and algebraic suite. It combines Rust implementations with Lean protocol proofs, compiler-extracted MIR proofs, scoped machine-code verification, and executable specification tests.
 
-The **13-crate Rust project** has **0 external crates.io dependencies** and `#![no_std]` library support with `alloc`. Precisely, the root Cargo workspace contains 12 packages (including the `std` CLI); `aeneas/qsag-verified` is the thirteenth crate and currently has its own workspace. Protocol crates forbid unsafe code; platform intrinsics and assembly are isolated in `qsag-asm`. Rust 1.85+ / Edition 2024; Lean 4.35.
+The **14-package Rust project** has **0 external crates.io dependencies**: 12 root workspace packages and two separately rooted extraction crates, `aeneas/qsag-verified` and `aeneas/qsag-whir-verified`. Libraries support `no_std` with `alloc`; host adapters and the CLI require `std`. Production core, policy and quorum use `qsag-verified`; aggregation uses `qsag-whir-verified`. Platform unsafe code lives in `qsag-asm` and the Linux/std raw Vulkan FFI in `qsag-accel`. Rust 1.85+ / Edition 2024; Lean 4.35.
 
-**Research preview:** implementations and proof coverage are evolving. A proved model, a passing benchmark, and an integrated deployment guarantee are different results. See [PROJECT.md](PROJECT.md) for status and [ASSURANCE.md](ASSURANCE.md) for assumptions and remaining integration work.
+**Research preview:** implementations and proof coverage are evolving. A proved model, a passing benchmark, and an integrated deployment guarantee are different results. See [the exact theorem map](docs/SECURITY_AND_CT_PROOFS.md#current-parameter-and-theorem-map) and [PROJECT.md](PROJECT.md) for status and [ASSURANCE.md](ASSURANCE.md) for assumptions and remaining integration work.
 
 ## The Pants suite
 
-- **Baggy** (`BaggySha3` / `BaggyPoseidon2`): a true stateless, zero-rollback signing construction with an unlimited-lifetime hypertree design, TSW, and **Waistband**, a static Top-$L$ internal child-root WOTS cache. It never caches message-binding leaves. The pure-hash path uses 256-lane bitsliced Keccak and `PCLMULQDQ` / `VPCLMULQDQ` / `PMULL` $GF(2^{128})$ BGIN19 DZK, with full 256-bit `WOTS+C` (`w=4, chains=128, target_sum=192`). “Unlimited lifetime” means no stateful leaf-exhaustion counter; concrete security still depends on a finite query/signature budget and the chosen parameters. MPC preprocessing and custody resources retain their own persistence requirements.
-- **Jorts** and **QuorumJorts**: explicitly stateful threshold signing guarded by crash-WAL and **BeltLatch**. Certified global allocation requires $2q > n+f$ and, for the BFT availability regime, $n \ge 3f+1$. Reported Mode 3B 2-of-3 measurements are approximately **1.0 ms local compute / 81 ms simulated WAN**, not durable deployment latency. `qsag-quorum` exposes two distinct generalized $(t,n)$ modes:
+- **Baggy** (`BaggySha3` / `BaggyPoseidon2`): a stateless signing construction with a hypertree design, TSW, and **Waistband**, a static Top-$L$ internal child-root WOTS cache. It never caches message-binding leaves. The pure-hash path uses 256-lane bitsliced Keccak and `PCLMULQDQ` / `VPCLMULQDQ` / `PMULL` $GF(2^{128})$ BGIN19 DZK, with 256-bit digest `WOTS+C` (`w=4, chains=128, target_sum=192`). “Unlimited lifetime” means no stateful leaf-exhaustion counter; concrete security still depends on a finite query/signature budget and the chosen parameters. MPC preprocessing and custody resources retain their own persistence requirements.
+- **Jorts** and **QuorumJorts**: explicitly stateful threshold signing guarded by crash-WAL and **BeltLatch**. Certified global allocation requires $2q > n+f$ and, for the BFT availability regime, $q \le n-f$ (feasible with safety when $n \ge 3f+1$). Reported Mode 3B 2-of-3 measurements are approximately **1.0 ms local compute / 81 ms simulated WAN**, not durable deployment latency. `qsag-quorum` exposes two distinct generalized $(t,n)$ modes:
   - **QS-A — `CommitteePartitionedJorts`**: $\binom{n}{t}$ disjoint committee subtrees. A 3-of-5 committee can sign with two parties offline; the reported loopback TCP measurement is approximately **0.56 ms**. Safety with abort permits $f=2$ corruptions, but malicious online signers can withhold their shares. This is **committee-revealing partitioned custody**: public leaf ranges identify the committee. It trades committee anonymity for $t$-of-$t$ online signing when $2f>t$.
   - **QS-B — `BftShamirJorts`**: one global tree, certified BeltLatch, and MAC-free self-verifying pre-stepped Shamir `WOTS+C`. Leaf allocation is quorum-independent; signing threshold $t$ and latch quorum $q$ are separate requirements. For example, $n=7,f=2,q=5$ satisfies the latch condition. “MAC-free” describes the WOTS share verification, not the latch/channel layer.
 - **Corduroy**: the algebraic `Poseidon2` stateless threshold custody hypertree.
-- **Hem** (`qsag-agg`): non-interactive $K$-to-$1$ succinct signature aggregation and binary-tree proof merging over **GoldilocksExt4**, $\mathbb{F}_p[v]/(v^4-7)$, where $p=2^{64}-2^{32}+1$ and $p^4>2^{255.99}$. It uses EUROCRYPT 2025 rate-escalating **WHIR** and Steiner-deduplicated **CanopyMultiProof** Merkle-Canopy commitments. The default `Habr24Qrom128` query schedule is $q=(128,64,43,32)$; `BciksJohnsonQrom128` uses $q=(257,129,87,65)$ with unconditional Johnson coding-theoretic bounds. The former uses a conjectural agreement bound. The aggregate verifier enforces a mandatory **128-bit QROM Grover search floor for query accounting**. This is not a total Fiat–Shamir/QROM security proof: field errors, commitment binding, list sizes, adaptive reduction losses, and composition still matter. Merge trees verify constituent proofs and signer disjointness; they are not recursive SNARK verification.
+- **Hem** (`qsag-agg`): non-interactive $K$-to-$1$ succinct signature aggregation and binary-tree proof merging over **GoldilocksExt4**, $\mathbb{F}_p[v]/(v^4-7)$, where $p=2^{64}-2^{32}+1$ and $p^4>2^{255.99}$. It uses EUROCRYPT 2025 rate-escalating **WHIR** and Steiner-deduplicated **CanopyMultiProof** Merkle-Canopy commitments. The default `Habr24Qrom128` query schedule is $q=(128,64,43,32)$; `BciksJohnsonQrom128` uses $q=(258,130,88,66)$ with unconditional Johnson coding-theoretic bounds. The former uses a conjectural agreement bound. The aggregate verifier enforces a mandatory **128-bit QROM Grover search floor for query accounting**. This is not a total Fiat–Shamir/QROM security proof: field errors, commitment binding, list sizes, adaptive reduction losses, and composition still matter. Merge trees verify constituent proofs and signer disjointness; they are not recursive SNARK verification.
 
 The surrounding stack covers `FrontierSumFts` / `ParallelSeededFts`, secret-keyed dealerless PQ HD wallets, `Bech32m` addresses and `HybridPinnedEnvelope`, authenticated rolling-window BDOZ custody guards, threshold `ML-DSA-44`, 2-of-5 `Poseidon2` TOPRF, six-limb `Quantum128` BlindVC, three-party co-ZK migration from `secp256k1` / `Taproot` / `Ed25519`, and accelerator backends.
+
+The exact parameter and theorem map is in [the security proof guide](docs/SECURITY_AND_CT_PROOFS.md#current-parameter-and-theorem-map). RLWE uses **13 × 11-bit signed monomials** (143 joint bits; nominal generic-search exponents 143 classical / 71.5 quantum). Migration uses **438 repetitions**. Johnson queries are **(258,130,88,66)** with +2 slack, 16-bit `QSAG.PCS.POW2/v1` work and `maxQueryCap = 512`.
+
+The RX 6750 XT backend executes six Vulkan kernels. A 2026-11-14 raw RADV run measured **39.45 ms** for a 2^20-leaf Poseidon2 Merkle tree (**359.5×** its CPU reference) and **22.11 ms** for 262,144 Poseidon2-12 permutations (**136.9×**). Later hardening changed these timings; see [the measurement ledger](PROJECT.md#c-06-publication-evidence-and-follow-up). Kernel speedups do not measure full Hem proving.
 
 ## Signature bytes and deployment boundaries
 
@@ -43,7 +47,7 @@ RAM and loopback benchmarks exercise protocol computation; simulated WAN adds a 
 | Custody authorization | `qsag-policy` | `TransactionPolicy`, `PolicySignerGuardShare`, `AuthorizedSignReleaseToken` |
 | Legacy ownership migration | `qsag-migrate` | `LegacyOwnershipWitness`, `CoZkCustodianShare`, `co_zk_mpc`, `verify_migration_proof` |
 | Credentials and threshold ML-DSA | `qsag-cred` | `threshold_mldsa`, `voprf`, `blind_vc` |
-| Batch execution and keyed receipts | `qsag-accel` | `AcceleratorBackend`, `CpuReferenceBackend`, `BackendAttestationKey`, `VerifiedKernelDigestRegistry::verify_keyed_receipt` |
+| Batch execution and keyed receipts | `qsag-accel` | `AcceleratorBackend`, `VulkanSpirvBackend`, `CpuReferenceBackend`, `BackendAttestationKey`, `VerifiedKernelDigestRegistry::verify_keyed_receipt` |
 | Command-line workflows | `qsag-cli` | `info`, `kat`, `keygen`, `sign`, `verify`, `addr`, `aggregate`, `verify-agg`, `policy-demo` |
 | Extracted safe-Rust specifications | `qsag-verified` | `aeneas/qsag-verified` → `QsagVerified.Funs` → `QsagMirProofs` |
 
@@ -61,11 +65,13 @@ RAM and loopback benchmarks exercise protocol computation; simulated WAN adds a 
 | `qsag-policy` | `crates/qsag-policy` | Authenticated BDOZ policy release; `no_std` |
 | `qsag-migrate` | `crates/qsag-migrate` | Active three-party co-ZK ownership migration; `no_std` |
 | `qsag-cred` | `crates/qsag-cred` | ML-DSA-44, TOPRF, six-limb BlindVC; `no_std` |
-| `qsag-accel` | `crates/qsag-accel` | Backend abstraction and keyed receipts; `no_std` |
+| `qsag-accel` | `crates/qsag-accel` | CPU reference, Linux/std Vulkan and keyed receipts; portable `no_std` core |
 | `qsag-cli` | `crates/qsag-cli` | CLI and examples; `std` binary |
 | `qsag-verified` | `aeneas/qsag-verified` | Separate extraction workspace; `no_std` |
 
-Optional `std` features provide host services such as WAL storage. Direct production linkage to the extracted crate remains an integration obligation; counting it as the thirteenth project crate does not imply that the root workspace already executes it.
+| `qsag-whir-verified` | `aeneas/qsag-whir-verified` | Separate extraction workspace, called by Hem |
+
+Optional `std` features provide WAL storage and Linux Vulkan execution. Fresh extraction and complete release-path mediation are tracked separately from the existing Cargo linkage.
 
 ## Quickstart: CLI & Runnable Examples
 
@@ -105,9 +111,9 @@ All six examples other than `threshold_slh_dsa_quickstart` exited 0 in the bound
 
 | Pillar | Machine-checked surface | Integration boundary |
 | --- | --- | --- |
-| Protocol, UC, storage and QROM spine | `lean/Qsag/*.lean`: Goldilocks / GoldilocksExt4, binary towers, Keccak / Poseidon2, hypertrees, Baggy / Waistband / Jorts / BeltLatch, UC simulation, Hem / Canopy; `PosixCrashWal.lean` models POSIX crash/NVMe and `OpenDescriptionId` flock ownership; `ConcreteSecurityBudget.lean` supplies square-root-free unitary BBBV97/O2H and fiber-cardinality reductions | Theorems hold for their definitions and premises. Concrete profile instantiation, concurrent ceremony composition and runtime refinement require separate bridges. |
+| Protocol, UC, storage and QROM spine | `lean/Qsag/*.lean`: Goldilocks / GoldilocksExt4, binary towers, Keccak / Poseidon2, hypertrees, Baggy / Waistband / Jorts / BeltLatch, UC simulation, Hem / Canopy; `PosixCrashWal.lean` models POSIX crash/NVMe and `OpenDescriptionId` flock ownership; `ConcreteSecurityBudget.lean` supplies square-root-free unitary BBBV97/O2H and fiber-cardinality reductions | Theorems hold for their definitions and premises. Concrete profile instantiation, runtime event refinement must instantiate the multi-ledger crash/interleaving theorem in `CeremonyAtomicityAndAbort.lean`. |
 | Compiler-extracted Rust MIR | Charon + Aeneas, `aeneas/qsag-verified` → `QsagMirProofs`: field/tower arithmetic, sponges, WOTS+C, BDOZ, BeltLatch, Waistband and poison-latch guards; extraction discipline: `0 FunsExternal`, `0 Classical.choice` | Fresh extraction and proof coverage must match the exact source. Guard proofs do not mediate every production release unless secret ownership and caller paths enforce that boundary. |
-| Grounded ISA and compiled ELF64 | `ConstantTimeIsa.lean`, `ElfBinaryVerify.lean`: decoded x86_64 AVX2/PCLMULQDQ/VPCLMULQDQ and aarch64 SHA3/PMULL, taint noninterference, scratch zero-on-exit, mutation `#tooth` witnesses | LNSym / x86lean / ELFSage grounding, linked ThinLTO coverage and physical semantics validation are active integration work. DOIT / PSTATE.DIT assumptions and caller/compiler leakage remain explicit. |
+| CPU bytes and GPU models | `ConstantTimeIsa.lean`, `ElfBinaryVerify.lean`: decoded x86_64 AVX2/PCLMULQDQ/VPCLMULQDQ and aarch64 SHA3/PMULL, taint noninterference, scratch zero-on-exit and mutation witnesses; five SydTV loop refinements, decoded SIMD fixtures, and SPIR-V codec/race/leakage models | LNSym / x86lean / ELFSage grounding, linked ThinLTO coverage and physical semantics validation are active integration work. DOIT / PSTATE.DIT assumptions and caller/compiler leakage remain explicit. |
 | Executable ground-truth gates | Native `lake exe spec-oracle` Rust ↔ Lean differential and clause-drop mutation fuzzing; physical x86_64 `lake exe isa-cosim`; `ct_dudect`; six-kernel `comparator --paranoid` CI challenge replay | Executables and CI challenge configuration exist; complete required-gate linkage to fresh extraction and exact release bytes is still being integrated. Finite tests can refute a spec; they do not prove it universally correct. |
 
 The constructive proof policy is **0 sorry, 0 Classical.choice**, with permitted axioms `{propext, Quot.sound}`. Reported checked proofs and configured six-kernel challenges are scoped evidence, not a claim that every concurrent source edit has passed every gate. This documentation quickstart check does not rerun the formal assurance suite.
@@ -121,6 +127,7 @@ The constructive proof policy is **0 sorry, 0 Classical.choice**, with permitted
 - [Binary verification](docs/BINARY_RLIB_VERIFICATION.md): ELF fixtures and artifact binding.
 - [Security and CT proofs](docs/SECURITY_AND_CT_PROOFS.md): protocol invariants and specification tests.
 - [Migration threat model](crates/qsag-migrate/SECURITY.md): crate-specific assumptions; consult live source for profile changes.
+- [Consensus scaling](docs/QUORUM_AND_CONSENSUS_SCALING.md): measured small batches, mock applications and conditional capacity models.
 - [Technical paper](paper/qsag.pdf) ([source](paper/qsag.typ)): construction details; the status documents govern current integration claims.
 
 ## License

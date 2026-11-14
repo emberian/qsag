@@ -717,13 +717,10 @@ pub fn holder_prepare_blind_issuance_with_profile(
     for value in issuer_attested_attrs {
         blind_ctx.extend_from_slice(&value.to_le_bytes());
     }
-    let blind_vec = sample_canonical_gl_vec(b"QSAG.VC.HOLDER_BLIND.V1", ent.expose(), &blind_ctx, 4);
-    let mut holder_blind = ZeroizingU64Vec(vec![
-        blind_vec[0],
-        blind_vec[1],
-        blind_vec[2],
-        blind_vec[3],
-    ]);
+    let blind_vec =
+        sample_canonical_gl_vec(b"QSAG.VC.HOLDER_BLIND.V1", ent.expose(), &blind_ctx, 4);
+    let mut holder_blind =
+        ZeroizingU64Vec(vec![blind_vec[0], blind_vec[1], blind_vec[2], blind_vec[3]]);
     drop(blind_vec);
     let holder_blind_arr = [
         holder_blind[0],
@@ -1811,8 +1808,9 @@ pub fn prove_selective_disclosure_with_profile(
     // - `pres_blind[0..4]` (`4`)
     // - One Boolean leaf-index bit per Merkle level.
     // - Six sibling limbs per Merkle level.
-    let mut secret_vals =
-        ZeroizingU64Vec(Vec::with_capacity(MAX_VC_ATTRS + 8 + 7 * VC_ACCUMULATOR_DEPTH));
+    let mut secret_vals = ZeroizingU64Vec(Vec::with_capacity(
+        MAX_VC_ATTRS + 8 + 7 * VC_ACCUMULATOR_DEPTH,
+    ));
     for (attr_i, &attr_val) in holder_secret.attrs[..holder_secret.arity]
         .iter()
         .enumerate()
@@ -2848,5 +2846,17 @@ mod tests {
             found_cross_trit,
             "Repetitions must exercise cross-trit (e=0, e=1) openings"
         );
+    }
+    // Same nonempty fixture as BlindVcWire.view_wire_known_answer. Pin the
+    // digest as well as field ordering so count-width changes are observable.
+    #[test]
+    fn flat_view_wire_known_answer() {
+        let expected = [
+            61, 135, 171, 82, 130, 136, 55, 10, 124, 33, 88, 220, 132, 3, 153, 201, 11, 135, 206,
+            216, 80, 196, 219, 81, 24, 19, 238, 51, 219, 46, 207, 21,
+        ];
+        assert_eq!(digest_party_view(&[2], &[1; 32], &[3], &[4]), expected);
+        assert_ne!(digest_party_view(&[2, 3], &[1; 32], &[], &[4]), expected);
+        assert_ne!(digest_party_view(&[2], &[1; 32], &[3, 0], &[4]), expected);
     }
 }

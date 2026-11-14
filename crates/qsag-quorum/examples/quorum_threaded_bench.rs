@@ -11,7 +11,7 @@
 //! the parties put on the wire, headers and AEAD MAC tags included.
 //!
 //! Run with:
-//! `cargo run -p qsag-quorum --release --features std --example quorum_threaded_bench [--durable-dir <path>]`
+//! `cargo run -p qsag-quorum --release --features std,testing-ephemeral --example quorum_threaded_bench [--durable-dir <path>]`
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};

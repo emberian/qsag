@@ -1308,14 +1308,36 @@ impl QuorumConfig {
     }
 }
 
-/// What staging hands to one custodian of Mode QS-B.
-#[derive(Clone)]
+/// What staging hands to one custodian of Mode QS-B. Like [`CommitteeShareStore`], the
+/// shares and MAC keys can only be moved into a [`ShamirCustodian`]: they are neither
+/// readable nor duplicable from outside this module.
+///
+/// ```compile_fail
+/// use qsag_quorum::quorum_jorts::ShamirPartyMaterial;
+/// fn duplicate(material: &ShamirPartyMaterial) -> ShamirPartyMaterial {
+///     material.clone()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use qsag_quorum::quorum_jorts::ShamirPartyMaterial;
+/// fn expose(material: ShamirPartyMaterial) {
+///     let _ = &material.leaves;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use qsag_quorum::quorum_jorts::ShamirPartyMaterial;
+/// fn expose(material: ShamirPartyMaterial) {
+///     let _ = &material.mac_keys;
+/// }
+/// ```
 pub struct ShamirPartyMaterial {
     pub party: usize,
     /// Pairwise MAC keys indexed by peer; the custodian's own index holds a private key.
-    pub mac_keys: Vec<Node>,
+    mac_keys: Vec<Node>,
     /// `leaves[leaf][3 * chain + step]`: this custodian's Shamir share of each chain state.
-    pub leaves: Vec<Vec<Node>>,
+    leaves: Vec<Vec<Node>>,
 }
 
 /// Output of [`stage_bft_shamir`].
@@ -1851,6 +1873,17 @@ impl Drop for CommitteeShareStore {
 impl Drop for CommitteePartyMaterial {
     fn drop(&mut self) {
         wipe_nodes(&mut self.mac_keys);
+    }
+}
+#[cfg(test)]
+impl ShamirPartyMaterial {
+    /// A second copy of one custodian's shares, as a corrupted custodian would hold.
+    pub(crate) fn duplicate_for_test(&self) -> Self {
+        Self {
+            party: self.party,
+            mac_keys: self.mac_keys.clone(),
+            leaves: self.leaves.clone(),
+        }
     }
 }
 impl Drop for ShamirPartyMaterial {
@@ -2411,7 +2444,7 @@ mod tests {
         let mut rogue = ShamirCustodian::new(
             staged.cfg,
             staged.tree.clone(),
-            staged.parties[p].clone(),
+            staged.parties[p].duplicate_for_test(),
             MemoryWal::new(),
         )
         .unwrap();
@@ -2704,11 +2737,16 @@ mod tests {
     #[test]
     fn shamir_window_and_restart_behave_like_the_committee_latch() {
         let cfg = QuorumConfig::new(2, 4, 1).unwrap();
-        let staged = stage_bft_shamir(cfg, 6, &SEED).unwrap();
-        let material = staged.parties[0].clone();
-        let mut custodian =
-            ShamirCustodian::new(cfg, staged.tree.clone(), material.clone(), MemoryWal::new())
-                .unwrap();
+        let mut staged = stage_bft_shamir(cfg, 6, &SEED).unwrap();
+        // Staging is deterministic in the seed: a restart is handed the same material again.
+        let material = stage_bft_shamir(cfg, 6, &SEED).unwrap().parties.remove(0);
+        let mut custodian = ShamirCustodian::new(
+            cfg,
+            staged.tree.clone(),
+            staged.parties.remove(0),
+            MemoryWal::new(),
+        )
+        .unwrap();
         let (record, _) = custodian.ack(2, b"m").unwrap();
         assert_eq!(
             custodian.ack(3 + MAX_WINDOW + 1, b"far").unwrap_err(),

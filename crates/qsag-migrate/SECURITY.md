@@ -8,6 +8,12 @@ Four-bit window selection feeds complete projective secp256k1 addition or
 complete extended Edwards addition. The inverse check rejects infinity. Both
 coordinate encodings are canonical.
 
+Window tables are public and affine. The sixteen selector wires of a window sum
+to one as a polynomial identity in the four lifted bits, so the selected Edwards
+point has `Z = 1` as a public constant and the selected secp256k1 point has
+`Z = 1 - sel_0` (only entry 0, the identity, has `Z = 0`). Neither shortcut
+depends on the bits being Boolean or on any private wire value.
+
 The four statements are:
 
 * Bitcoin: RIPEMD-160(SHA-256(compressed secp256k1 public key)).
@@ -75,11 +81,11 @@ head index are authenticated by the root committed before challenge selection.
 The verifier authenticates the complete root before gate replay and checks every
 recomputable multiplication residual and output share **exactly** across all
 opened `(e, (e+1) mod 3)` views; all public output constraints reconstruct to
-zero. Redundant residual-sumcheck scaffolding has been removed so proof
-verification relies solely on exact deterministic gate replay and `cSHAKE256`
-root binding.
+zero. Proof verification consists of exact deterministic gate replay and
+`cSHAKE256` root binding. Every length, challenge index and field encoding in a
+proof is checked before use; a malformed proof returns an error.
 
-## Soundness, QROM Grover guarantee, and privacy assumptions
+## Soundness, Grover search cost, and privacy assumptions
 
 For independently sampled interactive ternary challenges across
 `MIT_REPETITIONS = 438` repetitions, three-view consistency and commitment
@@ -91,15 +97,12 @@ binding give classical soundness error
           < 2^-256.
 ```
 
-* **Classical soundness (interactive & ROM):** In the classical random-oracle
-  model (ROM), Fiat-Shamir challenge derivation over `QSAG.MIGRATE.ROOT.V3`
-  achieves `< 2^-256` classical soundness (well above 128-bit security after
-  standard `Q_RO` query accounting) composed with 256-bit `cSHAKE256`
-  commitment binding.
-* **Post-quantum 128-bit QROM Grover soundness & pre-Shor witness boundary:**
-  Against a quantum adversary querying the random oracle in superposition,
-  Grover amplitude amplification takes the square root of the 438-repetition
-  soundness error, yielding
+* **Classical random-oracle model:** Fiat-Shamir challenge derivation over
+  `QSAG.MIGRATE.ROOT.V3` gives a cheating prover success probability of at most
+  `(2/3)^438 < 2^-256` per challenge-oracle query, composed with 256-bit
+  `cSHAKE256` commitment binding.
+* **Generic quantum search:** Grover search for a root whose challenge string a
+  cheating prover can answer succeeds with amplitude `(2/3)^219` per iteration,
 
   ```
   sqrt((2/3)^438) = (2/3)^219
@@ -107,12 +110,13 @@ binding give classical soundness error
                   < 2^-128,
   ```
 
-  providing **full 128-bit post-quantum QROM soundness** for the proof system
-  itself. Note the orthogonal source-chain witness boundary: the proved witness
-  is a legacy `secp256k1` or `Ed25519` discrete-logarithm spending scalar whose
-  public commitment on the source chain is recoverable in polynomial time by a
-  Shor-capable quantum computer, so legacy asset migrations must still settle
-  on-chain prior to cryptanalytically relevant quantum computers.
+  so it needs more than `2^128` oracle iterations. This is the cost of generic
+  search. It is not a quantum random-oracle Fiat-Shamir theorem for this proof
+  system, and this crate does not claim one.
+* **Source-chain witness boundary:** the proved witness is a legacy `secp256k1`
+  or `Ed25519` discrete-logarithm spending scalar. A Shor-capable quantum
+  computer recovers it from the source-chain public key in polynomial time, so
+  legacy assets must settle on-chain before such computers exist.
 
 The privacy target is computational zero knowledge, conditioned on the public
 legacy commitment, deterministic nullifier and remaining public statement.
@@ -130,8 +134,7 @@ This document records the concrete security model, bounds, and assumptions.
 
 ## Distributed execution: active 1-of-3 outer replicated prover
 
-The previous replicated-*virtual-head* implementation and its feature flag have
-been removed. `CoZkCustodianShare::new` takes one physical custodian's XOR share
+`CoZkCustodianShare::new` takes one physical custodian's XOR share
 of the normalized little-endian spending scalar, independent private entropy,
 a unique session identifier, and two pairwise channel keys. `prove` consumes
 this state by value. There is no dealer API accepting the complete witness.
@@ -189,26 +192,37 @@ is transmitted:
    transcript agreement and commitment openings in constant time, and derives
    public coins via `QSAG.OUTER.COIN.DERIVE.V1`. No single rushing custodian can
    bias challenges after sending multiplication shares.
-2. **64-lane Boolean `AND` verification (`< 2^-126` soundness):** Up to `262,144`
+2. **64-lane Boolean `AND` verification (`< 2^-127.99` per flush):** Up to `262,144`
    bitsliced 64-lane `AND` triples per flush are embedded into
-   `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`16`-gate blocks, `128`
+   `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`32`-gate blocks, `128`
    gates per super-block via constant-time butterfly transpose and
    `VPCLMULQDQ`/`PCLMULQDQ` accumulation under a uniform `GF(2^128)` super-block
-   combiner, packed `64` gates per `Bs256` quad) and checked by **two independent
+   combiner, packed `128` gates per `Bs256` quad) and checked by **two independent
    lockstep** Arity-2 BBCGGI19 inner-product instances plus PRSS-masked non-zero
    base-case sacrifice (`r_b in GF(2^128)^*`). Per-flush false-acceptance
-   probability is `< 2^-128 + (60 / (2^128 - 1))^2 < 2^-127.99 << 2^-126`.
-   The degree budget is `30 + 2*14 + 2 = 60`: the initial polynomial,
-   fourteen binary folds over at most `16,384` blocks, and base sacrifice.
+   probability is `< 2^-128 + (90 / (2^128 - 1))^2 < 2^-127.99`: `2^-128` for
+   the super-block combiner, and `90 / (2^128 - 1)` for each of the two
+   instances. The degree budget is `62 + 2*13 + 2 = 90`: the initial polynomial,
+   thirteen binary folds over at most `8,192` blocks, and base sacrifice
+   (`BIT_CHECK_DEGREE`, asserted at compile time).
    Byte tables contain shares but are indexed only by public challenge masks;
    their storage is wiped with the rest of the verification scratch.
-3. **Prime-field multiplication verification (`< 2^-128` soundness):**
-   * `Secp` and `Ed` (`|F_p| > 2^252`): Arity-2 logarithmic BBCGGI19 inner-product
-     reduction plus PRSS-masked base-case sacrifice directly over `F_p`, with
-     per-flush cheating probability `< (M + 2 log2 M + 2) / (p - 1) < 2^-240 << 2^-128`.
-   * `Gold` (`p = 2^64 - 2^32 + 1`): Lifted into the irreducible cubic extension
-     `F_p[u]/(u^3 - 7)` (`3 | (p - 1)`, `7^((p-1)/3) != 1`, `|F_{p^3}| > 2^191.99`),
-     giving per-flush cheating probability `< 2^-179 << 2^-128`.
+3. **Prime-field multiplication verification (`< 2^-186` per flush):** Up to
+   `1,024` field words (`65,536 = 2^16` lane products) per flush are combined
+   with independent uniform challenges and reduced by an Arity-2 logarithmic
+   BBCGGI19 inner product plus a PRSS-masked base-case sacrifice with a non-zero
+   challenge. The error numerator is `1 + 2*16 + 2 = 35`: the random linear
+   combination, sixteen binary folds, and base sacrifice
+   (`FIELD_CHECK_NUMERATOR`, asserted at compile time).
+   * `Secp` and `Ed`, directly over `F_p`: per-flush cheating probability
+     `<= 35 / (p - 1)`, which is `< 2^-250.87` for `Secp` and `< 2^-249.87` for
+     `Ed`, hence `< 2^-249` for both.
+   * `Gold` (`p = 2^64 - 2^32 + 1`), lifted into the irreducible cubic extension
+     `F_p[u]/(u^3 - 7)` (`3 | (p - 1)`, `7^((p-1)/3) != 1`, `|F_{p^3}| > 2^191.99`):
+     per-flush cheating probability `<= 35 / (p^3 - 1) < 2^-186.87 < 2^-186`.
+
+A failed check aborts the ceremony, so a cheating custodian gets one attempt:
+the ceremony-level bound is the largest per-flush bound, `< 2^-127.99`.
 
 ### Input-substitution closure (`P0-1`, `all_outputs_zero`)
 
@@ -216,10 +230,11 @@ To prevent a malicious custodian from substituting a modified witness share and
 learning linear/differential information about honest custodians' shares from
 opened public-key or nullifier output residuals, `evaluate_inner` verifies inside
 MPC that **every** Boolean and prime-field circuit output reconstructs to zero
-across all 64 active lanes (`all_outputs_zero`, using Fermat exponentiation
-`s^(p - 2)` on prime-field outputs and Boolean NOR reduction), runs
-`verify_all_pending()`, and opens **only** that single 1-bit predicate. If any
-lane fails (`!= active_mask`), the ceremony aborts immediately with
+across all 64 lanes of every batch (`all_outputs_zero`: each prime-field output
+sum is converted to its canonical bits by the masked A2B conversion, and all
+residual bits are NOR-reduced), runs `verify_all_pending()`, and opens **only**
+that single 1-bit predicate. If any lane fails (`!= u64::MAX`), the ceremony
+aborts immediately with
 `Err(Error::InvalidProof)` before any output share, view commitment, or view
 opens.
 
@@ -227,11 +242,11 @@ opens.
 
 Tape expansion uses a fixed, data-oblivious schedule (`QSAG.MIGRATE.TAPE.V3`)
 followed by an upfront batched range check (`less_than_modulus_many` and
-`fold_valid_bits` at `co_zk_mpc.rs:720-751`). Opening the resulting `valid` mask
+`fold_valid_bits` in `evaluate_inner`). Opening the resulting `valid` mask
 has **identically zero mutual information with the witness scalar**:
 
 1. Every custodian's seed contribution is derived via `QSAG.OUTER.SEED.V1`
-   (`co_zk_mpc.rs:141-150`) exclusively from `(self.entropy, self.session,
+   exclusively from `(self.entropy, self.session,
    statement_bytes, batch * 64 + lane, head)` — `self.witness_share` is never an
    input to seed derivation.
 2. In `evaluate_inner`, `tape_sponges` absorb only `"QSAG.MIGRATE.TAPE.V3"` and
@@ -242,15 +257,36 @@ has **identically zero mutual information with the witness scalar**:
    is statistically independent of `witness` (`I(InvalidTape; witness) = 0`).
    On `Err(Error::InvalidTape)`, `raw_draw_words` is wiped and no proof or wire
    opening occurs. Any retry **must** allocate a fresh `session` and fresh
-   `entropy` because `CoZkCustodianShare` is single-use and pairwise PRSS/MAC
-   streams (`QSAG.OUTER.PAD.V1`) forbid session reuse.
+   `entropy` because `CoZkCustodianShare` is single-use and the pairwise PRSS
+   streams (`QSAG.OUTER.PADS.V1`) and MAC keys (`QSAG.OUTER.MESSAGE.V1`) forbid
+   session reuse.
 
 ### Deterministic zeroization (`P3`) and ceremony freeze
 
-All secret-bearing scratch structures (`Engine`, `BitCheckScratch`,
-`ZeroizeRepGf128LanesVec`, `ZeroizeBitVec`, `ZeroizeFieldScratch`, and
-`raw_draw_words`) implement `Drop` wiping memory via volatile `ct_zeroize_u64s` /
-`ct_zeroize_bytes` on both `Ok` completion and `Err` early-return paths.
+The following are wiped with volatile `ct_zeroize_u64s` / `ct_zeroize_bytes` on
+both `Ok` completion and every `Err` early return:
+
+* the custodian's witness share, its expanded 64-lane planes, both replicated
+  witness components, its seed contributions and its shares of every
+  virtual-head tape seed (`CoZkCustodianShare`, `prove`);
+* channel keys, MAC prefixes, PRSS and coin sponges, PRSS scratch, and the
+  pending Boolean and prime-field triple queues (`Engine`);
+* all Boolean-check scratch, including byte and nibble tables, transpose rows
+  and folded vectors up to their high-water mark (`BitCheckScratch`), and the
+  prime-field check vectors (`FpScratch`, `GoldScratch`);
+* shared views, circuit wire values, squeezed tapes and raw tape draws
+  (`SharedView`, `SharedValue`, `ZeroizeWordVec`), and outbound message payloads
+  (`Envelope`).
+
+The Boolean-check vectors, PRSS scratch and pending Boolean queue wipe their
+old allocation before growing, so no reallocation frees secret words.
+
+Not wiped: short-lived `Word` / `FieldWord` temporaries inside the arithmetic
+gadgets (adders, conversions, `fmul_many` products). Each holds two of three
+replicated components of an intermediate wire and is released to the allocator
+unwiped. A custodian that needs protection against later disclosure of its own
+freed heap must run the ceremony in a process whose memory is discarded as a
+whole.
 
 All 438 repetitions' view commitments and verified-zero output shares feed the
 ceremony-wide `QSAG.MIGRATE.ROOT.V3` Merkle/transcript root. Custodians execute
@@ -280,3 +316,10 @@ Unit and adversarial integration tests verify:
   438-repetition distributed Bitcoin `HASH160` and `Ed25519` ceremonies under
   online transcript observers and legacy XOR-reconstruction attack regressions,
   and compile-fail linear consumption of `CoZkCustodianShare`.
+
+Parallel repetition batches stop at their next exchange after a sibling rejects.
+Cancellation only returns an error: it cannot bypass multiplication verification
+or the ceremony-wide precommit barrier. The initiating rejection is retained
+in preference to cancellation's transport error, and outbound share buffers are
+wiped on cancellation. Public byte tables are reused for both initial challenge
+projections; single-use fold multiplications retain smaller nibble tables.

@@ -122,6 +122,15 @@ fn provision_stateful_seed_burn_ledger(
     Ok(seed_burns.checkpoint())
 }
 
+/// Outcome of reserving one use or epoch in the seed burn ledger.
+enum SeedBurn {
+    /// Burned by this call; the caller may sign once the vault retains the checkpoint.
+    Fresh,
+    /// Burned by an earlier attempt. `secret_json` now carries the ledger's current
+    /// checkpoint; nothing may be signed under this identifier.
+    AlreadySpent,
+}
+
 fn burn_stateful_ceremony_with_checkpoint(
     secret_path: &str,
     secret_json: &mut Json,
@@ -129,8 +138,7 @@ fn burn_stateful_ceremony_with_checkpoint(
     seed: &[u8; 32],
     ceremony_id: [u8; 32],
     seed_burn_id: [u8; 32],
-    already_burned_msg: impl FnOnce() -> String,
-) -> Result<(), CliError> {
+) -> Result<SeedBurn, CliError> {
     let retained_ckpt = crate::vault::read_ledger_checkpoint(secret_json)?;
     let mut ceremony_journal = FsCeremonyJournal::open_existing(
         ceremony_journal_path(secret_path),
@@ -148,7 +156,8 @@ fn burn_stateful_ceremony_with_checkpoint(
         .is_burned(&seed_burn_id)
         .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?
     {
-        return Err(CliError::state(already_burned_msg()));
+        crate::vault::record_ledger_checkpoint(secret_json, seed_burns.checkpoint());
+        return Ok(SeedBurn::AlreadySpent);
     }
     let cursor = seed_burns
         .checkpoint()
@@ -170,12 +179,15 @@ fn burn_stateful_ceremony_with_checkpoint(
     seed_burns
         .begin_expansion(&ceremony_id, &seed_burn_id)
         .map_err(|_| CliError::state("CorruptOrRolledBackLedgerCheckpoint"))?;
-    seed_burns.burn(&seed_burn_id).map_err(|e| match e {
-        SeedBurnError::AlreadyBurned => CliError::state(already_burned_msg()),
-        SeedBurnError::Io => CliError::state("CorruptOrRolledBackLedgerCheckpoint"),
-    })?;
+    let burned = seed_burns.burn(&seed_burn_id);
+    if matches!(burned, Err(SeedBurnError::Io)) {
+        return Err(CliError::state("CorruptOrRolledBackLedgerCheckpoint"));
+    }
     crate::vault::record_ledger_checkpoint(secret_json, seed_burns.checkpoint());
-    Ok(())
+    Ok(match burned {
+        Ok(()) => SeedBurn::Fresh,
+        Err(_) => SeedBurn::AlreadySpent,
+    })
 }
 
 const KEYGEN_HELP: &str = "\
@@ -565,25 +577,42 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
                 b"QSAG.CLI.FRONTIER.USE_SEED.V1",
                 &[&seed.0, &key.wal_key(), &[used]],
             );
-            // Verify retained LedgerCheckpoint against durable_ledger, burn this use's seed,
-            // and seal the new LedgerCheckpoint + advanced counter into the vault BEFORE signing.
-            burn_stateful_ceremony_with_checkpoint(
-                secret_path,
-                &mut secret,
-                key.wal_key(),
-                &seed.0,
-                ceremony_id,
-                use_seed_id,
-                || format!("key can not sign again: {:?}", FrontierFtsError::UseBudgetExhausted),
-            )?;
-            vault.reserve(secret_path, &mut secret)?;
+            // Recover the use journal before any durable state moves: a journal that
+            // can not be opened or does not belong to this key must leave the seed
+            // burn ledger and the vault counter exactly as they were.
             let wal = FsWalFtsEpochLatch::open(
                 burn_journal_path(secret_path),
                 key.wal_key(),
                 derive(&seed, b"burn journal mac"),
             )
             .map_err(|e| CliError::io("recovering frontier use journal", e))?;
+            let wal_key = key.wal_key();
             key = key.attach_wal(Box::new(wal)).map_err(exhausted)?;
+            if key.uses_remaining() == 0 {
+                return Err(exhausted(FrontierFtsError::UseBudgetExhausted));
+            }
+            // Verify retained LedgerCheckpoint against durable_ledger, burn this use's seed,
+            // and seal the new LedgerCheckpoint + advanced counter into the vault BEFORE signing.
+            let burn = burn_stateful_ceremony_with_checkpoint(
+                secret_path,
+                &mut secret,
+                wal_key,
+                &seed.0,
+                ceremony_id,
+                use_seed_id,
+            )?;
+            vault.reserve(secret_path, &mut secret)?;
+            if matches!(burn, SeedBurn::AlreadySpent) {
+                // An earlier attempt burned this use's seed and stopped before the vault
+                // counter moved. The use stays spent; the counter has now caught up, so
+                // the uses after it are reachable again.
+                let budget = profile.params().max_safe_uses;
+                let spent = used.saturating_add(1).max(key.uses_completed());
+                return Err(CliError::state(format!(
+                    "use {used} was spent by an interrupted signing attempt; {} of {budget} uses remain",
+                    budget.saturating_sub(spent),
+                )));
+            }
             let dp = FrontierDpTable::build(profile);
             let sig = key.sign(&dp, &message, &hedged.0).map_err(exhausted)?;
             extra.push(("uses_remaining", Json::num(key.uses_remaining())));
@@ -645,15 +674,19 @@ fn sign_inner(raw: &[String], fault_byte: Option<(usize, u8)>) -> Result<(), Cli
             );
             // Verify retained LedgerCheckpoint against durable_ledger, burn the epoch seed,
             // and seal the ratcheted LedgerCheckpoint into the vault BEFORE threshold signing.
-            burn_stateful_ceremony_with_checkpoint(
-                secret_path,
-                &mut secret,
-                setup.pk.pk_seed_bytes,
-                &seed.0,
-                ceremony_id,
-                epoch_seed_id,
-                || format!("epoch {epoch} was already spent"),
-            )?;
+            if matches!(
+                burn_stateful_ceremony_with_checkpoint(
+                    secret_path,
+                    &mut secret,
+                    setup.pk.pk_seed_bytes,
+                    &seed.0,
+                    ceremony_id,
+                    epoch_seed_id,
+                )?,
+                SeedBurn::AlreadySpent
+            ) {
+                return Err(CliError::state(format!("epoch {epoch} was already spent")));
+            }
             vault.reserve(secret_path, &mut secret)?;
             let sig = setup
                 .threshold_sign(
@@ -863,6 +896,137 @@ mod vault_tests {
         .unwrap_err();
         assert_eq!(error.message, "CorruptOrMissingVaultState");
         assert!(!dir.join("sig").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The use journal is recovered before the seed burn ledger and the vault counter
+    /// move, so a journal that can not be opened costs nothing: every durable file is
+    /// byte-identical afterwards and the key signs once the journal is reachable again.
+    #[test]
+    fn failed_use_journal_recovery_leaves_frontier_key_usable() {
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-journal-outage-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = |s: &str| dir.join(s).to_str().unwrap().to_owned();
+        std::fs::write(path("msg"), b"signed after the outage").unwrap();
+        keygen(&[
+            "--scheme".into(),
+            "fts-frontier-514".into(),
+            "--secret-out".into(),
+            path("sk"),
+            "--public-out".into(),
+            path("pk"),
+        ])
+        .unwrap();
+        let command = [
+            "--secret".into(),
+            path("sk"),
+            "--in".into(),
+            path("msg"),
+            "--out".into(),
+            path("sig"),
+        ];
+        let durable = ["sk", "sk.vault.lock", "sk.seedburn", "sk.ceremony", "sk.burn.away"];
+        let snapshot = || -> Vec<Vec<u8>> {
+            durable.iter().map(|name| std::fs::read(path(name)).unwrap()).collect()
+        };
+        std::fs::rename(path("sk.burn"), path("sk.burn.away")).unwrap();
+        let before = snapshot();
+        for _ in 0..3 {
+            let error = sign(&command).unwrap_err();
+            assert!(error.message.contains("recovering frontier use journal"), "{error}");
+            assert!(!dir.join("sig").exists());
+            assert!(!dir.join("sk.burn").exists());
+            assert_eq!(snapshot(), before);
+        }
+        let uses = |name: &str| {
+            load_json(&path("sk"), SECRET_FORMAT).unwrap().field_u64(name).unwrap()
+        };
+        assert_eq!(uses("uses_completed"), 0);
+        std::fs::rename(path("sk.burn.away"), path("sk.burn")).unwrap();
+        sign(&command).unwrap();
+        assert_eq!(uses("uses_completed"), 1);
+        verify(&[
+            "--public".into(),
+            path("pk"),
+            "--in".into(),
+            path("msg"),
+            "--sig".into(),
+            path("sig"),
+        ])
+        .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A crash after the seed burn and before the vault counter moved leaves the ledger one
+    /// use ahead of the vault. That use is spent without a signature; the next one is not lost.
+    #[test]
+    fn interrupted_seed_burn_costs_one_use_and_keeps_the_rest() {
+        let dir = std::env::temp_dir().join(format!(
+            "qsag-interrupted-burn-{}",
+            crate::codec::to_hex(&os_random_32().unwrap())
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = |s: &str| dir.join(s).to_str().unwrap().to_owned();
+        std::fs::write(path("msg"), b"second use").unwrap();
+        keygen(&[
+            "--scheme".into(),
+            "fts-frontier-770".into(),
+            "--secret-out".into(),
+            path("sk"),
+            "--public-out".into(),
+            path("pk"),
+        ])
+        .unwrap();
+        let command = |out: &str| -> Vec<String> {
+            vec![
+                "--secret".into(),
+                path("sk"),
+                "--in".into(),
+                path("msg"),
+                "--out".into(),
+                path(out),
+                "--deterministic".into(),
+            ]
+        };
+        let uses = || {
+            load_json(&path("sk"), SECRET_FORMAT)
+                .unwrap()
+                .field_u64("uses_completed")
+                .unwrap()
+        };
+        // The vault files as they were before the first use's seed burn.
+        let vault_before = [std::fs::read(path("sk")).unwrap(), std::fs::read(path("sk.vault.lock")).unwrap()];
+        sign(&command("sig0")).unwrap();
+        assert_eq!(uses(), 1);
+        std::fs::write(path("sk"), &vault_before[0]).unwrap();
+        std::fs::write(path("sk.vault.lock"), &vault_before[1]).unwrap();
+        assert_eq!(uses(), 0);
+
+        // Use 0 can not be signed again: its seed is burned. The counter catches up instead.
+        let error = sign(&command("sig0-again")).unwrap_err();
+        assert!(error.message.contains("use 0 was spent by an interrupted signing attempt"), "{error}");
+        assert!(error.message.contains("1 of 2 uses remain"), "{error}");
+        assert!(!dir.join("sig0-again").exists());
+        assert_eq!(uses(), 1);
+
+        // The second use signs, verifies, and exhausts the key.
+        sign(&command("sig1")).unwrap();
+        assert_eq!(uses(), 2);
+        assert_ne!(std::fs::read(path("sig0")).unwrap(), std::fs::read(path("sig1")).unwrap());
+        verify(&[
+            "--public".into(),
+            path("pk"),
+            "--in".into(),
+            path("msg"),
+            "--sig".into(),
+            path("sig1"),
+        ])
+        .unwrap();
+        let error = sign(&command("sig2")).unwrap_err();
+        assert!(error.message.contains("UseBudgetExhausted"), "{error}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

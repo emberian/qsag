@@ -49,7 +49,6 @@ def Array.index_usize {α : Type u} {n : Usize} (a : Array α n) (i : Usize) : R
   else
     .fail .arrayOutOfBounds
 
-@[expose]
 def Array.update {α : Type u} {n : Usize} (a : Array α n) (i : Usize) (v : α) :
     Result (Array α n) :=
   if _h : i.val < a.val.length then
@@ -100,11 +99,9 @@ def Slice.update {α : Type u} (s : Slice α) (i : Usize) (v : α) : Result (Sli
 def Array.to_slice {α : Type u} {n : Usize} (a : Array α n) : Slice α :=
   ⟨a.val, by rw [a.property]; exact Usize.val_le_max n⟩
 
-@[expose]
 def Array.from_slice {α : Type u} {n : Usize} (a : Array α n) (s : Slice α) : Array α n :=
   if h : s.val.length = n.val then ⟨s.val, h⟩ else a
 
-@[expose]
 def Array.to_slice_mut {α : Type u} {n : Usize} (a : Array α n) :
     Slice α × (Slice α → Array α n) :=
   (Array.to_slice a, Array.from_slice a)

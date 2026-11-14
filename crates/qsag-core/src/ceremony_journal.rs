@@ -9,13 +9,23 @@ use crate::wipe::{ct_eq_bytes32, wipe_bytes32};
 use qsag_asm::durable::LockedRecord;
 use std::{io, path::PathBuf};
 
-const JOURNAL_MAGIC: &[u8; 8] = b"QSAGCRJ2";
+const JOURNAL_MAGIC: &[u8; 8] = b"QSAGCRJ3";
 const HEADER_LEN: usize = 8 + 32 + 8;
-const ENTRY_LEN: usize = 32 + 32 + 8 + 8 + 1 + 8;
+const ENTRY_LEN: usize = 32 + 32 + 8 + 8 + 1 + 8 + 32 + 8 + 8;
 const TAG_LEN: usize = 32;
 
 const FLAG_HAS_EPOCH: u8 = 0x01;
 const FLAG_IS_RETRY: u8 = 0x02;
+
+/// Policy and MPC resources committed atomically with a reservation.
+/// Legacy entry points use the all-zero context; policy-aware callers must use
+/// `persist_with_context` and `consume_release_with_context`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CeremonyContext {
+    pub policy_id: [u8; 32],
+    pub spend_amount: u64,
+    pub mpc_nonce_epoch: u64,
+}
 
 /// All resources committed together before release authority is issued.
 #[derive(Debug, PartialEq, Eq)]
@@ -35,10 +45,11 @@ struct JournalEntry {
     hedge_generation: u64,
     bound_epoch: Option<u64>,
     is_retry: bool,
+    context: CeremonyContext,
 }
 
 impl JournalEntry {
-    fn from_reservation(r: &CeremonyReservation, bound_epoch: Option<u64>, is_retry: bool) -> Self {
+    fn from_reservation(r: &CeremonyReservation, bound_epoch: Option<u64>, is_retry: bool, context: CeremonyContext) -> Self {
         Self {
             ceremony_id: r.ceremony_id,
             epoch_or_codeword: r.epoch_or_codeword,
@@ -46,6 +57,7 @@ impl JournalEntry {
             hedge_generation: r.hedge_generation,
             bound_epoch,
             is_retry,
+            context,
         }
     }
 
@@ -66,6 +78,7 @@ pub struct CeremonyReleasePermit {
     bound_epoch: Option<u64>,
     is_retry: bool,
     generation: u64,
+    context: CeremonyContext,
     seal: [u8; 8],
 }
 
@@ -76,6 +89,7 @@ pub struct FsCeremonyJournal {
     mac_key: [u8; 32],
     checkpoint: LedgerCheckpoint,
     entries: Vec<JournalEntry>,
+    anchor: Option<Box<dyn crate::ExternalMonotoneAnchor>>,
 }
 
 fn invalid() -> io::Error {
@@ -95,6 +109,24 @@ impl FsCeremonyJournal {
         self.checkpoint
     }
 
+    pub fn create_new_anchored(path: impl Into<PathBuf>, key_id: [u8; 32], mac_key: [u8; 32],
+        anchor: Box<dyn crate::ExternalMonotoneAnchor>) -> io::Result<Self> {
+        if anchor.load()?.is_some() { return Err(invalid()); }
+        let mut journal = Self::create_new(path, key_id, mac_key)?;
+        crate::durable_ledger::advance_anchor(&*anchor, journal.checkpoint)?;
+        journal.anchor = Some(anchor);
+        Ok(journal)
+    }
+
+    pub fn open_existing_anchored(path: impl Into<PathBuf>, key_id: [u8; 32], mac_key: [u8; 32],
+        anchor: Box<dyn crate::ExternalMonotoneAnchor>) -> io::Result<Self> {
+        let minimum = anchor.load()?.ok_or_else(invalid)?;
+        let mut journal = Self::open_existing_at_least(path, key_id, mac_key, minimum)?;
+        crate::durable_ledger::advance_anchor(&*anchor, journal.checkpoint)?;
+        journal.anchor = Some(anchor);
+        Ok(journal)
+    }
+
     pub fn create_new(path: impl Into<PathBuf>, key_id: [u8; 32], mac_key: [u8; 32]) -> io::Result<Self> {
         let mut this = Self {
             record: LockedRecord::create_new(path)?,
@@ -105,6 +137,7 @@ impl FsCeremonyJournal {
                 tag: [0; 32],
             },
             entries: Vec::new(),
+            anchor: None,
         };
         let (encoded, checkpoint) = this.encode(1, None);
         this.record.replace(&encoded)?;
@@ -130,6 +163,7 @@ impl FsCeremonyJournal {
                 tag: [0; 32],
             },
             entries: Vec::new(),
+            anchor: None,
         };
         let bytes = this.record.read()?;
         if bytes.len() < HEADER_LEN + TAG_LEN
@@ -157,7 +191,7 @@ impl FsCeremonyJournal {
         if generation == min_checkpoint.generation && !ct_eq_bytes32(&stored_tag, &min_checkpoint.tag) {
             return Err(invalid());
         }
-        for chunk in bytes[HEADER_LEN..end].chunks_exact(ENTRY_LEN) {
+        for chunk in bytes[HEADER_LEN..end].as_chunks::<ENTRY_LEN>().0 {
             let flags = chunk[80];
             if flags & !(FLAG_HAS_EPOCH | FLAG_IS_RETRY) != 0 {
                 return Err(invalid());
@@ -179,9 +213,14 @@ impl FsCeremonyJournal {
                 seed_burn_cursor: u64::from_be_bytes(chunk[64..72].try_into().map_err(|_| invalid())?),
                 hedge_generation: u64::from_be_bytes(chunk[72..80].try_into().map_err(|_| invalid())?),
             };
-            this.validate(&reservation, bound_epoch, is_retry)?;
+            let context = CeremonyContext {
+                policy_id: chunk[89..121].try_into().map_err(|_| invalid())?,
+                spend_amount: u64::from_be_bytes(chunk[121..129].try_into().map_err(|_| invalid())?),
+                mpc_nonce_epoch: u64::from_be_bytes(chunk[129..137].try_into().map_err(|_| invalid())?),
+            };
+            this.validate(&reservation, bound_epoch, is_retry, context)?;
             this.entries
-                .push(JournalEntry::from_reservation(&reservation, bound_epoch, is_retry));
+                .push(JournalEntry::from_reservation(&reservation, bound_epoch, is_retry, context));
         }
         this.checkpoint = LedgerCheckpoint {
             generation,
@@ -209,7 +248,7 @@ impl FsCeremonyJournal {
     }
 
     fn tag(&self, bytes: &[u8]) -> [u8; 32] {
-        let mut xof = Cshake256Xof::new(b"QSAG.CEREMONY.JOURNAL.MAC/v2");
+        let mut xof = Cshake256Xof::new(b"QSAG.CEREMONY.JOURNAL.MAC/v3");
         xof.absorb(&self.mac_key);
         xof.absorb(&self.record.lock_seal());
         xof.absorb(bytes);
@@ -239,6 +278,9 @@ impl FsCeremonyJournal {
             }
             bytes.push(flags);
             bytes.extend_from_slice(&e.bound_epoch.unwrap_or(0).to_be_bytes());
+            bytes.extend_from_slice(&e.context.policy_id);
+            bytes.extend_from_slice(&e.context.spend_amount.to_be_bytes());
+            bytes.extend_from_slice(&e.context.mpc_nonce_epoch.to_be_bytes());
         }
         let tag = self.tag(&bytes);
         bytes.extend_from_slice(&tag);
@@ -250,6 +292,7 @@ impl FsCeremonyJournal {
         r: &CeremonyReservation,
         bound_epoch: Option<u64>,
         is_retry: bool,
+        context: CeremonyContext,
     ) -> io::Result<()> {
         if !ct_eq_bytes32(&r.key_id, &self.key_id) {
             return Err(invalid());
@@ -267,11 +310,19 @@ impl FsCeremonyJournal {
         {
             return Err(invalid());
         }
+        if let Some(last) = self.entries.last()
+            && (context != CeremonyContext::default() || last.context != CeremonyContext::default())
+            && context.mpc_nonce_epoch <= last.context.mpc_nonce_epoch
+        {
+            return Err(invalid());
+        }
         if is_retry {
             let Some(last) = self.entries.last() else {
                 return Err(invalid());
             };
-            if last.bound_epoch != bound_epoch
+            if last.context.policy_id != context.policy_id
+                || last.context.spend_amount != context.spend_amount
+                || last.bound_epoch != bound_epoch
                 || !ct_eq_bytes32(&last.epoch_or_codeword, &r.epoch_or_codeword)
             {
                 return Err(invalid());
@@ -302,23 +353,28 @@ impl FsCeremonyJournal {
         r: CeremonyReservation,
         bound_epoch: Option<u64>,
         is_retry: bool,
+        context: CeremonyContext,
     ) -> io::Result<CeremonyReleasePermit> {
-        self.validate(&r, bound_epoch, is_retry)?;
+        self.validate(&r, bound_epoch, is_retry, context)?;
         let (expected_on_disk, expected_ckpt) = self.encode(self.checkpoint.generation, None);
         if expected_ckpt != self.checkpoint || self.record.read()? != expected_on_disk {
             return Err(invalid());
         }
         let next_gen = self.checkpoint.generation.checked_add(1).ok_or_else(invalid)?;
-        let entry = JournalEntry::from_reservation(&r, bound_epoch, is_retry);
+        let entry = JournalEntry::from_reservation(&r, bound_epoch, is_retry, context);
         let (next_bytes, next_ckpt) = self.encode(next_gen, Some(&entry));
         self.record.replace(&next_bytes)?;
         self.checkpoint = next_ckpt;
         self.entries.push(entry);
+        if let Some(anchor) = &self.anchor {
+            crate::durable_ledger::advance_anchor(&**anchor, self.checkpoint)?;
+        }
         Ok(CeremonyReleasePermit {
             reservation: r,
             bound_epoch,
             is_retry,
             generation: next_gen,
+            context,
             seal: self.record.lock_seal(),
         })
     }
@@ -329,7 +385,7 @@ impl FsCeremonyJournal {
         &mut self,
         r: CeremonyReservation,
     ) -> io::Result<CeremonyReleasePermit> {
-        self.commit_internal(r, None, false)
+        self.commit_internal(r, None, false, CeremonyContext::default())
     }
 
     /// Commit a fresh stateful epoch reservation binding both the numeric `epoch` (which must
@@ -339,7 +395,7 @@ impl FsCeremonyJournal {
         epoch: u64,
         r: CeremonyReservation,
     ) -> io::Result<CeremonyReleasePermit> {
-        self.commit_internal(r, Some(epoch), false)
+        self.commit_internal(r, Some(epoch), false, CeremonyContext::default())
     }
 
     /// Authorize a crash-recovery retry attempt for the currently in-flight unbound reservation.
@@ -349,7 +405,7 @@ impl FsCeremonyJournal {
         &mut self,
         r: CeremonyReservation,
     ) -> io::Result<CeremonyReleasePermit> {
-        self.commit_internal(r, None, true)
+        self.commit_internal(r, None, true, CeremonyContext::default())
     }
 
     /// Authorize a crash-recovery retry attempt for the currently in-flight stateful `epoch`.
@@ -360,10 +416,30 @@ impl FsCeremonyJournal {
         epoch: u64,
         r: CeremonyReservation,
     ) -> io::Result<CeremonyReleasePermit> {
-        self.commit_internal(r, Some(epoch), true)
+        self.commit_internal(r, Some(epoch), true, CeremonyContext::default())
+    }
+
+    /// Commit policy, spend and fresh MPC nonce atomically with the key reservation.
+    /// A retry retains policy/spend and binding but advances the nonce and burn cursors.
+    pub fn persist_with_context(
+        &mut self, r: CeremonyReservation, epoch: Option<u64>, retry: bool,
+        context: CeremonyContext,
+    ) -> io::Result<CeremonyReleasePermit> {
+        self.commit_internal(r, epoch, retry, context)
+    }
+
+    /// Check the caller's expected policy resources before consuming release authority.
+    pub fn consume_release_with_context(
+        &self, permit: CeremonyReleasePermit, expected: CeremonyContext,
+    ) -> io::Result<CeremonyReservation> {
+        if permit.context != expected { return Err(invalid()); }
+        self.consume_release(permit)
     }
 
     fn verify_current_permit(&self, permit: &CeremonyReleasePermit) -> io::Result<()> {
+        if let Some(anchor) = &self.anchor {
+            crate::durable_ledger::advance_anchor(&**anchor, self.checkpoint)?;
+        }
         if permit.seal != self.record.lock_seal()
             || permit.generation != self.checkpoint.generation
             || !ct_eq_bytes32(&permit.reservation.key_id, &self.key_id)
@@ -373,7 +449,7 @@ impl FsCeremonyJournal {
         let Some(last) = self.entries.last() else {
             return Err(invalid());
         };
-        if !last.matches_permit(&permit.reservation, permit.bound_epoch, permit.is_retry) {
+        if last.context != permit.context || !last.matches_permit(&permit.reservation, permit.bound_epoch, permit.is_retry) {
             return Err(invalid());
         }
         let (expected_on_disk, expected_ckpt) = self.encode(self.checkpoint.generation, None);
@@ -407,6 +483,87 @@ impl FsCeremonyJournal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[derive(Clone, Default)]
+    struct TestAnchor(std::sync::Arc<std::sync::Mutex<(Option<LedgerCheckpoint>, bool)>>);
+    impl crate::ExternalMonotoneAnchor for TestAnchor {
+        fn load(&self) -> io::Result<Option<LedgerCheckpoint>> { Ok(self.0.lock().unwrap().0) }
+        fn advance(&self, next: LedgerCheckpoint) -> io::Result<()> {
+            let mut state = self.0.lock().unwrap();
+            if state.1 || state.0.is_some_and(|old| old.generation > next.generation ||
+                (old.generation == next.generation && old.tag != next.tag)) { return Err(invalid()); }
+            state.0 = Some(next);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn belt_anchor_blocks_rollback_and_failed_advancement() {
+        use crate::belt_latch::{BeltLatchState, DurableWal, FsBeltWal};
+        fn assert_send<T: Send>() {}
+        assert_send::<FsBeltWal>();
+        assert_send::<FsCeremonyJournal>();
+        let dir = std::env::temp_dir().join(format!("qsag-belt-anchor-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("belt");
+        let anchor = TestAnchor::default();
+        let mut wal = FsBeltWal::provision_genesis_anchored(&path, [3; 32], Box::new(anchor.clone())).unwrap();
+        let snapshot = std::fs::read(&path).unwrap();
+        wal.sync_persist(&BeltLatchState::default()).unwrap();
+        assert_eq!(anchor.0.lock().unwrap().0, Some(wal.checkpoint()));
+        anchor.0.lock().unwrap().1 = true;
+        assert!(wal.sync_persist(&BeltLatchState::default()).is_err());
+        drop(wal);
+        anchor.0.lock().unwrap().1 = false;
+        let wal = FsBeltWal::open_existing_anchored(&path, [3; 32], Box::new(anchor.clone())).unwrap();
+        assert_eq!(anchor.0.lock().unwrap().0, Some(wal.checkpoint()));
+        drop(wal);
+        std::fs::write(&path, snapshot).unwrap();
+        assert!(FsBeltWal::open_existing_anchored(&path, [3; 32], Box::new(anchor)).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn policy_context_and_external_anchor_survive_restart_and_fail_closed() {
+        let dir = std::env::temp_dir().join(format!("qsag-context-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("journal");
+        let anchor = TestAnchor::default();
+        let mut journal = FsCeremonyJournal::create_new_anchored(&path, [1; 32], [2; 32], Box::new(anchor.clone())).unwrap();
+        let snapshot = std::fs::read(&path).unwrap();
+        let reservation = |n| CeremonyReservation { ceremony_id: [n; 32], key_id: [1; 32],
+            epoch_or_codeword: [3; 32], seed_burn_cursor: u64::from(n), hedge_generation: u64::from(n) };
+        let context = CeremonyContext { policy_id: [4; 32], spend_amount: 50, mpc_nonce_epoch: 1 };
+        let permit = journal.persist_with_context(reservation(1), Some(7), false, context).unwrap();
+        let changed = CeremonyContext { spend_amount: 51, ..context };
+        assert!(journal.consume_release_with_context(permit, changed).is_err());
+        drop(journal);
+        let mut journal = FsCeremonyJournal::open_existing_anchored(&path, [1; 32], [2; 32], Box::new(anchor.clone())).unwrap();
+        assert!(journal.persist_with_context(reservation(2), Some(7), true, context).is_err());
+        assert!(journal.persist_with_context(reservation(2), Some(7), true,
+            CeremonyContext { mpc_nonce_epoch: 2, ..changed }).is_err());
+        let next = CeremonyContext { mpc_nonce_epoch: 2, ..context };
+        let permit = journal.persist_with_context(reservation(2), Some(7), true, next).unwrap();
+        assert_eq!(journal.consume_release_with_context(permit, next).unwrap().seed_burn_cursor, 2);
+        anchor.0.lock().unwrap().1 = true;
+        assert!(journal.persist_with_context(reservation(3), Some(7), true,
+            CeremonyContext { mpc_nonce_epoch: 3, ..context }).is_err());
+        drop(journal);
+        anchor.0.lock().unwrap().1 = false;
+        // The durable successor is recoverable after anchor failure, but the old snapshot is not.
+        let journal = FsCeremonyJournal::open_existing_anchored(&path, [1; 32], [2; 32], Box::new(anchor.clone())).unwrap();
+        drop(journal);
+        let latest = std::fs::read(&path).unwrap();
+        std::fs::write(&path, snapshot).unwrap();
+        assert!(FsCeremonyJournal::open_existing_anchored(&path, [1; 32], [2; 32], Box::new(anchor)).is_err());
+        let mut tampered = latest;
+        tampered[HEADER_LEN + 121] ^= 1; // spend amount is MAC-covered
+        std::fs::write(&path, tampered).unwrap();
+        assert!(FsCeremonyJournal::open_existing(&path, [1; 32], [2; 32]).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn durable_release_paths_require_bound_single_use_permits() {
         use crate::baggy::{FirstSignedLedger, FsFirstSignedLedger};
@@ -515,7 +672,7 @@ mod tests {
         let bpath = dir.join("belt");
 
         let mut journal = FsCeremonyJournal::create_new(&jpath, [4; 32], [5; 32]).unwrap();
-        let mut belt = FsBeltWal::provision_genesis(&bpath, [8; 32]).unwrap();
+        let belt = FsBeltWal::provision_genesis(&bpath, [8; 32]).unwrap();
         let snapshot_genesis = std::fs::read(&jpath).unwrap();
 
         let rec_a = BeltLatchRecord {

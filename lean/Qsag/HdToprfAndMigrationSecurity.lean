@@ -1779,9 +1779,10 @@ def hdGameHits {X : Type} {N : Nat} (sample : Fin N → X) (test : X → Bool) :
 
 def hdGameGap (a b : Nat) : Nat := (a - b) + (b - a)
 
-/-- Exact reduction: the distinguisher for reconstructed child tables is the PRF
+/-- Generic postprocessing identity: the distinguisher for reconstructed child tables is the PRF
 adversary that XORs the known components before invoking its caller. Same coins,
-same number of queries, same advantage numerator; divide by `N > 0` for probabilities. -/
+same advantage numerator; divide by `N > 0` for probabilities. No adaptive custody query
+history, child leakage policy, or production subset-seed experiment is instantiated here. -/
 theorem inventory_prf_game_hop {I : Type} {N : Nat}
     (real ideal : Fin N → I → BitVec 256) (known : I → BitVec 256)
     (test : (I → BitVec 256) → Bool) (epsilon : Nat)
@@ -1842,7 +1843,7 @@ def hdMlweSample {N : Nat} (A : Fin N → HdModuleMatrix)
   fun r => (A r, hdModuleImage (A r) (hdShortHalf (s r)) (hdShortHalf (e r)))
 
 set_option maxHeartbeats 2000000 in
-/-- Public-image reduction with any fixed known public offset. A CBD2-to-uniform
+/-- Generic public-image postprocessing identity with a fixed known public offset. A CBD2-to-uniform
 *secret* hop is deliberately absent: `tooth_cbd2_is_not_uniform_secret` refutes it. -/
 theorem hd_mlwe_public_offset_hop {N : Nat}
     (A : Fin N → HdModuleMatrix)

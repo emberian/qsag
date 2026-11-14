@@ -37,7 +37,7 @@ merge trees over the quartic Goldilocks extension field `Aggregation.GoldilocksE
    `qsag_aggregate_unforgeability_reduction_of_statelessLog` and
    `qsag_aggregate_unforgeability_reduction_of_checkedStatefulLog`.
 5. **Transcript-Bound Challenge & Query Soundness Counting (§9–§10):**
-   Adaptive `challengeVectors` union bounds and `distinctTuples` falling-factorial query bounds over
+   Adaptive `challengeVectors` union bounds and `aggDistinctTuples` falling-factorial query bounds over
    concrete `Nodup` `List Aggregation.GoldilocksExt4` domains across all 5 `WhirSecurityRegime`s.
 6. **Genuine Reed–Solomon + Degree-7 S-Box Trace-Decoding `RowArithmetization.Lawful` (§11–§12):**
    Concrete blowup-4 -> blowup-16 2-stage WHIR arithmetization (`rsSbox7TraceArith_lawful`) where
@@ -45,6 +45,11 @@ merge trees over the quartic Goldilocks extension field `Aggregation.GoldilocksE
    unity (`#tooth` `tooth_corrupted_round0_symbol_rejected`), `decodeSigs` extracts `List PqHashSig`
    directly from the committed trace polynomial (`decodeSbox7Sigs_nonconstant`), and an explicit
    end-to-end 2-stage WHIR proof passes `verifySuccinctAggregate` and `verifyMergeTree`.
+7. **Full multi-round algebraic traces and succinct composition (§14):**
+   `checkSbox7Trace_sound` checks every RS-encoded transition and inter-round link.
+   `sbox7WhirChain_sound` composes accepted instance-bound proofs through the actual extractor,
+   yielding the iterated output or an identified round break; nine-round soundness and
+   constructive arbitrary-round completeness are included. The deployed StepOp AIR is separate.
 -/
 
 public import Qsag.Goldilocks
@@ -1445,34 +1450,35 @@ private theorem list_map_inj {α β : Type} {f : α → β}
   | _ :: _, [], h => by cases h
   | x :: xs, y :: ys, h => by
     obtain ⟨hxy, hrest⟩ := List.cons.inj h
-    exact congrArg₂ List.cons (hf hxy) (list_map_inj hf hrest)
+    rw [hf hxy, list_map_inj hf hrest]
 
-def encodePqPublicKey (pk : PqPublicKey) : List UInt8 :=
+def encodeAggPqPublicKey (pk : PqPublicKey) : List UInt8 :=
   encodeMultiFrame [pk.pkSeed, pk.pkRoot]
 
-theorem encodePqPublicKey_injective {p1 p2 : PqPublicKey}
-    (h : encodePqPublicKey p1 = encodePqPublicKey p2) : p1 = p2 := by
+theorem encodeAggPqPublicKey_injective {p1 p2 : PqPublicKey}
+    (h : encodeAggPqPublicKey p1 = encodeAggPqPublicKey p2) : p1 = p2 := by
   cases p1; cases p2
   have hf := encodeMultiFrame_injective h
   obtain ⟨hs, hf⟩ := List.cons.inj hf
   obtain ⟨hr, _⟩ := List.cons.inj hf
-  exact congrArg₂ PqPublicKey.mk hs hr
+  simp only [PqPublicKey.mk.injEq]
+  exact ⟨hs, hr⟩
 
-def encodeCommittee (committee : List PqPublicKey) : List UInt8 :=
-  encodeMultiFrame (committee.map encodePqPublicKey)
+def encodeAggCommittee (committee : List PqPublicKey) : List UInt8 :=
+  encodeMultiFrame (committee.map encodeAggPqPublicKey)
 
-theorem encodeCommittee_injective {c1 c2 : List PqPublicKey}
-    (h : encodeCommittee c1 = encodeCommittee c2) : c1 = c2 :=
-  list_map_inj encodePqPublicKey_injective (encodeMultiFrame_injective h)
+theorem encodeAggCommittee_injective {c1 c2 : List PqPublicKey}
+    (h : encodeAggCommittee c1 = encodeAggCommittee c2) : c1 = c2 :=
+  list_map_inj encodeAggPqPublicKey_injective (encodeMultiFrame_injective h)
 
-def encodePqHashParams (p : PqHashParams) : List UInt8 :=
+def encodeAggPqHashParams (p : PqHashParams) : List UInt8 :=
   encodeMultiFrame [encodeNatBytes p.w, encodeNatBytes p.ell1,
     encodeNatBytes p.subtreeHeight, encodeNatBytes p.numLayers,
     encodeNatBytes p.forsTrees, encodeNatBytes p.forsHeight,
     encodeNatBytes p.maxSigsLog2, [encodeBoolByte p.statefulJorts]]
 
-theorem encodePqHashParams_injective {p1 p2 : PqHashParams}
-    (h : encodePqHashParams p1 = encodePqHashParams p2) : p1 = p2 := by
+theorem encodeAggPqHashParams_injective {p1 p2 : PqHashParams}
+    (h : encodeAggPqHashParams p1 = encodeAggPqHashParams p2) : p1 = p2 := by
   cases p1; cases p2
   have hf := encodeMultiFrame_injective h
   obtain ⟨e1, hf⟩ := List.cons.inj hf
@@ -1502,15 +1508,15 @@ theorem encodeChildrenCommitment_injective {c1 c2 : Option (List UInt8 × List U
     | none => rfl
     | some p => cases p; cases h
   | some p1 =>
-    cases p1
+    rcases p1 with ⟨l1, r1⟩
     cases c2 with
     | none => cases h
     | some p2 =>
-      cases p2
+      rcases p2 with ⟨l2, r2⟩
       have hf := encodeMultiFrame_injective (List.cons.inj h).2
       obtain ⟨hl, hf⟩ := List.cons.inj hf
       obtain ⟨hr, _⟩ := List.cons.inj hf
-      exact congrArg Option.some (congrArg₂ Prod.mk hl hr)
+      rw [hl, hr]
 
 /-- Canonical injective instance framing binding `message`, `signingModeDigest`, `regime`,
     `suite.suiteId`, `committee`, `params`, `bitmap`, `traceCommitment`, and
@@ -1518,8 +1524,8 @@ theorem encodeChildrenCommitment_injective {c1 c2 : Option (List UInt8 × List U
 def aggregateInstanceFrame (inst : AggPublicInstance) (agg : AggregatedSignature) : List UInt8 :=
   encodeMultiFrame [inst.message, inst.signingModeDigest, [inst.regime.tagByte],
     inst.suite.suiteId,
-    encodeCommittee inst.committee,
-    encodePqHashParams inst.params,
+    encodeAggCommittee inst.committee,
+    encodeAggPqHashParams inst.params,
     agg.bitmap.map encodeBoolByte,
     agg.traceCommitment,
     encodeChildrenCommitment agg.childrenCommitment]
@@ -1551,7 +1557,7 @@ theorem aggregateInstanceFrame_injective (first second : AggPublicInstance)
   obtain ⟨hTr, hf⟩ := List.cons.inj hf
   obtain ⟨hCh, _⟩ := List.cons.inj hf
   exact ⟨hMsg, hMode, WhirSecurityRegime.tagByte_injective (List.cons.inj hReg).1,
-    hSuite, encodeCommittee_injective hComm, encodePqHashParams_injective hParams,
+    hSuite, encodeAggCommittee_injective hComm, encodeAggPqHashParams_injective hParams,
     list_map_inj encodeBoolByte_injective hBm, hTr, encodeChildrenCommitment_injective hCh⟩
 
 theorem aggregate_frame_message_binding (first second : AggPublicInstance)
@@ -3714,7 +3720,7 @@ theorem succinct_merge_tree_knowledge_soundness_thm (arith : RowArithmetization)
           bitmapPopcountSpec right.certificate.bitmap := by
       rw [hU.2.2.2.2.1]
       exact popcount_union_disjoint_eq_add left.certificate.bitmap right.certificate.bitmap
-        hU.2.2.2.1 (hLenL.trans hLenR.symm)
+        (hLenL.trans hLenR.symm) hU.2.2.2.1
     exact ⟨succinctOutcome_to_prop hTree.1, hU.2.2.1, hU.2.2.2.1, hU.2.2.2.2.1, hPop,
       succinct_merge_tree_knowledge_soundness_thm arith dom inst law budget left vl hU.1 hB.2.1,
       succinct_merge_tree_knowledge_soundness_thm arith dom inst law budget right vr hU.2.1 hB.2.2⟩
@@ -3884,13 +3890,13 @@ theorem countGood_eraseFirstAt_good {α : Type} (p : α → Bool) :
       omega
 
 /-- Ordered `q`-tuples drawn without replacement from `dom`. -/
-def distinctTuples {α : Type} : Nat → List α → List (List α)
+def aggDistinctTuples {α : Type} : Nat → List α → List (List α)
   | 0, _ => [[]]
   | q + 1, dom =>
     (List.range dom.length).flatMap (fun i =>
       match dom[i]? with
       | none => []
-      | some x => (distinctTuples q (eraseFirstAt i dom)).map (fun rest => x :: rest))
+      | some x => (aggDistinctTuples q (eraseFirstAt i dom)).map (fun rest => x :: rest))
 
 def fallingFactorial : Nat → Nat → Nat
   | _, 0 => 1
@@ -3909,20 +3915,20 @@ theorem fallingFactorial_of_lt : ∀ (n q : Nat), n < q → fallingFactorial n q
     show (k + 1) * fallingFactorial k q = 0
     rw [fallingFactorial_of_lt k q (Nat.lt_of_succ_lt_succ h), Nat.mul_zero]
 
-theorem distinctTuples_length {α : Type} :
+theorem aggDistinctTuples_length {α : Type} :
     ∀ (q : Nat) (dom : List α),
-      (distinctTuples q dom).length = fallingFactorial dom.length q
+      (aggDistinctTuples q dom).length = fallingFactorial dom.length q
   | 0, _ => rfl
   | q + 1, dom => by
     show ((List.range dom.length).flatMap _).length = dom.length * fallingFactorial (dom.length - 1) q
     have hEach : ∀ i ∈ List.range dom.length,
         (match dom[i]? with
           | none => []
-          | some x => (distinctTuples q (eraseFirstAt i dom)).map (fun rest => x :: rest)).length =
+          | some x => (aggDistinctTuples q (eraseFirstAt i dom)).map (fun rest => x :: rest)).length =
           fallingFactorial (dom.length - 1) q := by
       intro i hi
       have hlt : i < dom.length := List.mem_range.mp hi
-      rw [List.getElem?_eq_getElem hlt, List.length_map, distinctTuples_length q,
+      rw [List.getElem?_eq_getElem hlt, List.length_map, aggDistinctTuples_length q,
         eraseFirstAt_length i dom hlt]
     rw [length_flatMap_const _ _ (List.range dom.length) hEach, List.length_range]
 
@@ -3946,9 +3952,9 @@ private theorem range_filter_getElem_length {α : Type} (p : α → Bool) (dom :
     · simp only [hp, ↓reduceIte, List.length_cons, countGood, List.filter]
       exact congrArg Nat.succ (hm.trans ih)
 
-theorem distinctTuples_all_good_length {α : Type} (p : α → Bool) :
+theorem aggDistinctTuples_all_good_length {α : Type} (p : α → Bool) :
     ∀ (q : Nat) (dom : List α),
-      ((distinctTuples q dom).filter (fun t => t.all p)).length =
+      ((aggDistinctTuples q dom).filter (fun t => t.all p)).length =
         fallingFactorial (countGood p dom) q
   | 0, _ => rfl
   | q + 1, dom => by
@@ -3959,7 +3965,7 @@ theorem distinctTuples_all_good_length {α : Type} (p : α → Bool) :
     let F : Nat → List (List α) := fun i =>
       (match dom[i]? with
         | none => []
-        | some x => (distinctTuples q (eraseFirstAt i dom)).map (fun rest => x :: rest)).filter
+        | some x => (aggDistinctTuples q (eraseFirstAt i dom)).map (fun rest => x :: rest)).filter
           (fun t => t.all p)
     have hBadZero : ∀ i ∈ List.range dom.length, isGoodIdx i = false → (F i).length = 0 := by
       intro i hi hfg
@@ -3981,7 +3987,7 @@ theorem distinctTuples_all_good_length {α : Type} (p : α → Bool) :
       rw [List.getElem?_eq_getElem hlt, filter_map_length]
       have hfun : (fun rest : List α => (dom[i] :: rest).all p) = fun rest => rest.all p := by
         funext rest; show (p dom[i] && rest.all p) = rest.all p; rw [hpx, Bool.true_and]
-      rw [hfun, distinctTuples_all_good_length p q (eraseFirstAt i dom)]
+      rw [hfun, aggDistinctTuples_all_good_length p q (eraseFirstAt i dom)]
       have hcnt := countGood_eraseFirstAt_good p i dom hlt hpx
       have hsub : countGood p (eraseFirstAt i dom) = countGood p dom - 1 := by omega
       rw [hsub]
@@ -4053,9 +4059,9 @@ private theorem fallingFactorial_mul_pow_le (a b : Nat) (hab : a ≤ b) :
     `bad` entirely satisfies `missCount * dd ^ q ≤ (dd - dn) ^ q * totalTuples`. -/
 theorem whir_query_miss_bound {α : Type} (bad : α → Bool) (dom : List α) (q dn dd : Nat)
     (hfar : dn * dom.length ≤ dd * countGood bad dom) :
-    ((distinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * dd ^ q ≤
-      (dd - dn) ^ q * (distinctTuples q dom).length := by
-  rw [distinctTuples_all_good_length, distinctTuples_length]
+    ((aggDistinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * dd ^ q ≤
+      (dd - dn) ^ q * (aggDistinctTuples q dom).length := by
+  rw [aggDistinctTuples_all_good_length, aggDistinctTuples_length]
   have hsum := countGood_add_complement bad dom
   have hGN : countGood (fun x => !bad x) dom ≤ dom.length := by omega
   apply fallingFactorial_mul_pow_le (dd - dn) dd (Nat.sub_le dd dn) q _ _ hGN
@@ -4178,20 +4184,20 @@ private theorem strict_query_miss_from_slack {α : Type} (bad : α → Bool) (do
     (hle : alphaNum ≤ den)
     (hfar : (den - alphaNum) * dom.length ≤ den * countGood bad dom)
     (hSlack : alphaNum ^ q * 2 ^ b < den ^ q) :
-    ((distinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * 2 ^ b <
-      (distinctTuples q dom).length := by
+    ((aggDistinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * 2 ^ b <
+      (aggDistinctTuples q dom).length := by
   have hb := whir_query_miss_bound bad dom q (den - alphaNum) den hfar
   have hSub : den - (den - alphaNum) = alphaNum := by omega
   rw [hSub] at hb
-  have hT : 0 < (distinctTuples q dom).length := by
-    rw [distinctTuples_length]; exact fallingFactorial_pos _ _ hdom
+  have hT : 0 < (aggDistinctTuples q dom).length := by
+    rw [aggDistinctTuples_length]; exact fallingFactorial_pos _ _ hdom
   rcases Nat.lt_or_ge
-    (((distinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * 2 ^ b)
-    (distinctTuples q dom).length with hlt | hge
+    (((aggDistinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length * 2 ^ b)
+    (aggDistinctTuples q dom).length with hlt | hge
   · exact hlt
   · exfalso
-    generalize ((distinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length = X at hb hge
-    generalize (distinctTuples q dom).length = T at hb hge hT
+    generalize ((aggDistinctTuples q dom).filter (fun t => t.all (fun x => !bad x))).length = X at hb hge
+    generalize (aggDistinctTuples q dom).length = T at hb hge hT
     generalize alphaNum ^ q = M at hb hSlack
     generalize den ^ q = K at hb hSlack
     have hX : 0 < X := by
@@ -4215,8 +4221,8 @@ theorem whir_bciksJohnsonClassical128_query_miss_lt {α : Type}
     (bad : α → Bool) (dom : List α)
     (hdom : s.numQueries ≤ dom.length)
     (hfar : (512 - (512 / s.johnsonSqrtBlowup + 1)) * dom.length ≤ 512 * countGood bad dom) :
-    ((distinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
-      2 ^ 128 < (distinctTuples s.numQueries dom).length := by
+    ((aggDistinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
+      2 ^ 128 < (aggDistinctTuples s.numQueries dom).length := by
   have hSlack := (bciksJohnsonClassical128_positive_slack s hs).2
   have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonClassical128,
       512 / st.johnsonSqrtBlowup + 1 ≤ 512 := by decide
@@ -4234,8 +4240,8 @@ theorem whir_bciksJohnsonQrom128_query_miss_lt {α : Type}
     (bad : α → Bool) (dom : List α)
     (hdom : s.numQueries ≤ dom.length)
     (hfar : (1024 - (1024 / s.johnsonSqrtBlowup + 1)) * dom.length ≤ 1024 * countGood bad dom) :
-    ((distinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
-      2 ^ 256 < (distinctTuples s.numQueries dom).length := by
+    ((aggDistinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
+      2 ^ 256 < (aggDistinctTuples s.numQueries dom).length := by
   have hSlack := (bciksJohnsonQrom128_positive_slack s hs).2
   have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128,
       1024 / st.johnsonSqrtBlowup + 1 ≤ 1024 := by decide
@@ -4249,8 +4255,8 @@ theorem whir_habr24Qrom128_query_miss_le {α : Type}
     (s : WhirStageSpec) (hs : s ∈ whirSchedule4Stage .habr24Qrom128)
     (bad : α → Bool) (dom : List α)
     (hfar : (s.blowup - 1) * dom.length ≤ s.blowup * countGood bad dom) :
-    ((distinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
-      2 ^ 256 ≤ (distinctTuples s.numQueries dom).length := by
+    ((aggDistinctTuples s.numQueries dom).filter (fun t => t.all (fun x => !bad x))).length *
+      2 ^ 256 ≤ (aggDistinctTuples s.numQueries dom).length := by
   have hb := whir_query_miss_bound bad dom s.numQueries (s.blowup - 1) s.blowup hfar
   have hAllPos : ∀ st ∈ whirSchedule4Stage .habr24Qrom128, 1 ≤ st.blowup := by decide
   have hPos : 1 ≤ s.blowup := hAllPos s hs
@@ -4278,7 +4284,7 @@ private theorem length_flatMap_scaled_le {α β : Type} (b : α → Bool) (K U V
 def badTranscriptPairs {α β : Type} (S : List α) (n : Nat) (E : List α → α → Bool)
     (dom : List β) (q : Nat) (bad : List α → β → Bool) : List (List α × List β) :=
   (challengeVectors S n).flatMap (fun cs =>
-    ((distinctTuples q dom).filter
+    ((aggDistinctTuples q dom).filter
       (fun t => anyRoundEvent E cs || t.all (fun x => !bad cs x))).map (fun t => (cs, t)))
 
 theorem transcript_bad_pairs_le {α β : Type} (S : List α) (n : Nat)
@@ -4289,21 +4295,21 @@ theorem transcript_bad_pairs_le {α β : Type} (S : List α) (n : Nat)
       dn * dom.length ≤ dd * countGood (bad cs) dom) :
     (badTranscriptPairs S n E dom q bad).length * dd ^ q ≤
       (roundBoundSum d n * S.length ^ (n - 1) * dd ^ q + S.length ^ n * (dd - dn) ^ q) *
-        (distinctTuples q dom).length := by
+        (aggDistinctTuples q dom).length := by
   have hEach : ∀ cs ∈ challengeVectors S n,
-      (((distinctTuples q dom).filter
+      (((aggDistinctTuples q dom).filter
         (fun t => anyRoundEvent E cs || t.all (fun x => !bad cs x))).map
           (fun t => (cs, t))).length * dd ^ q ≤
-        if anyRoundEvent E cs = true then (distinctTuples q dom).length * dd ^ q
-        else (dd - dn) ^ q * (distinctTuples q dom).length := by
+        if anyRoundEvent E cs = true then (aggDistinctTuples q dom).length * dd ^ q
+        else (dd - dn) ^ q * (aggDistinctTuples q dom).length := by
     intro cs hcs
     rw [List.length_map]
     cases hEv : anyRoundEvent E cs
     · exact whir_query_miss_bound (bad cs) dom q dn dd (hfar cs hcs hEv)
     · exact Nat.mul_le_mul_right _ (filter_length_le_self _ _)
   have hSplit := length_flatMap_scaled_le (anyRoundEvent E) (dd ^ q)
-    ((distinctTuples q dom).length * dd ^ q) ((dd - dn) ^ q * (distinctTuples q dom).length)
-    (fun cs => ((distinctTuples q dom).filter
+    ((aggDistinctTuples q dom).length * dd ^ q) ((dd - dn) ^ q * (aggDistinctTuples q dom).length)
+    (fun cs => ((aggDistinctTuples q dom).filter
       (fun t => anyRoundEvent E cs || t.all (fun x => !bad cs x))).map (fun t => (cs, t)))
     (challengeVectors S n) hEach
   have hCnt := anyRoundEvent_count_le S n E d hE
@@ -4311,9 +4317,9 @@ theorem transcript_bad_pairs_le {α β : Type} (S : List α) (n : Nat)
   refine Nat.le_trans hSplit ?_
   rw [Nat.add_mul]
   apply Nat.add_le_add
-  · have h1 := Nat.mul_le_mul_right ((distinctTuples q dom).length * dd ^ q) hCnt
-    have e : roundBoundSum d n * S.length ^ (n - 1) * ((distinctTuples q dom).length * dd ^ q) =
-        roundBoundSum d n * S.length ^ (n - 1) * dd ^ q * (distinctTuples q dom).length := by
+  · have h1 := Nat.mul_le_mul_right ((aggDistinctTuples q dom).length * dd ^ q) hCnt
+    have e : roundBoundSum d n * S.length ^ (n - 1) * ((aggDistinctTuples q dom).length * dd ^ q) =
+        roundBoundSum d n * S.length ^ (n - 1) * dd ^ q * (aggDistinctTuples q dom).length := by
       simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
     rw [e] at h1; exact h1
   · exact Nat.le_of_eq (Nat.mul_assoc _ _ _).symm
@@ -4373,12 +4379,12 @@ theorem whir_bciksJohnsonClassical128_total_error_bound {β : Type}
     (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
       (512 - 257) * dom.length ≤ 512 * countGood (bad cs) dom) :
     (badTranscriptPairs S n E dom 129 bad).length * 2 ^ 127 <
-      S.length ^ n * (distinctTuples 129 dom).length := by
+      S.length ^ n * (aggDistinctTuples 129 dom).length := by
   have hJoint := transcript_bad_pairs_le S n E d hE dom 129 (512 - 257) 512 bad hfar
   have hSub : 512 - (512 - 257) = 257 := rfl
   rw [hSub] at hJoint
-  have hT : 0 < (distinctTuples 129 dom).length := by
-    rw [distinctTuples_length]; exact fallingFactorial_pos _ _ hdom
+  have hT : 0 < (aggDistinctTuples 129 dom).length := by
+    rw [aggDistinctTuples_length]; exact fallingFactorial_pos _ _ hdom
   have hField' : goldilocksPrime ^ 4 ≤ S.length := hField
   have hs : 0 < S.length := Nat.lt_of_lt_of_le (by decide : 0 < goldilocksPrime ^ 4) hField'
   have hC : 2 * (productionExt4RoundEventBudget * 2 ^ 127) ≤ goldilocksPrime ^ 4 := by decide
@@ -4415,17 +4421,17 @@ theorem whir_bciksJohnsonQrom128_total_error_bound {β : Type}
     (hfar : ∀ cs ∈ challengeVectors S n, anyRoundEvent E cs = false →
       (1024 - (1024 / s.johnsonSqrtBlowup + 1)) * dom.length ≤ 1024 * countGood (bad cs) dom) :
     (badTranscriptPairs S n E dom s.numQueries bad).length * 2 ^ 210 <
-      S.length ^ n * (distinctTuples s.numQueries dom).length := by
+      S.length ^ n * (aggDistinctTuples s.numQueries dom).length := by
   have hAllLe : ∀ st ∈ whirSchedule4Stage .bciksJohnsonQrom128,
       1024 / st.johnsonSqrtBlowup + 1 ≤ 1024 := by decide
   have hLe : 1024 / s.johnsonSqrtBlowup + 1 ≤ 1024 := hAllLe s hs
   have hSub : 1024 - (1024 - (1024 / s.johnsonSqrtBlowup + 1)) =
-      1024 / s.johnsonSqrtBlowup + 1 := by omega
+      1024 / s.johnsonSqrtBlowup + 1 := Nat.sub_sub_self hLe
   have hJoint := transcript_bad_pairs_le S n E d hE dom s.numQueries
     (1024 - (1024 / s.johnsonSqrtBlowup + 1)) 1024 bad hfar
   rw [hSub] at hJoint
-  have hT : 0 < (distinctTuples s.numQueries dom).length := by
-    rw [distinctTuples_length]; exact fallingFactorial_pos _ _ hdom
+  have hT : 0 < (aggDistinctTuples s.numQueries dom).length := by
+    rw [aggDistinctTuples_length]; exact fallingFactorial_pos _ _ hdom
   have hField' : goldilocksPrime ^ 4 ≤ S.length := hField
   have hsPos : 0 < S.length := Nat.lt_of_lt_of_le (by decide : 0 < goldilocksPrime ^ 4) hField'
   have hC : 2 * (productionExt4RoundEventBudget * 2 ^ 210) ≤ goldilocksPrime ^ 4 := by decide
@@ -4435,7 +4441,7 @@ theorem whir_bciksJohnsonQrom128_total_error_bound {β : Type}
     have hPowLe : 2 * 2 ^ 210 ≤ 2 ^ 256 := by decide
     have hRewrite : 2 * ((1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * 2 ^ 210) =
         (1024 / s.johnsonSqrtBlowup + 1) ^ s.numQueries * (2 * 2 ^ 210) := by
-      simp only [Nat.mul_assoc, Nat.mul_comm, Nat.mul_left_comm]
+      simp only [Nat.mul_assoc, Nat.mul_comm]
     rw [hRewrite]
     exact Nat.lt_of_le_of_lt (Nat.mul_le_mul_left _ hPowLe) hSlack
   have hD : 2 * (roundBoundSum d n * 2 ^ 210) ≤ S.length :=
@@ -6322,6 +6328,215 @@ theorem aggregate_params_substitution_rejected (arith : RowArithmetization) (dom
   refine aggregate_wrong_instance_rejected arith dom inst2 proof fs (fun hFs2 => hPar ?_)
   exact (aggregateInstanceFrame_injective inst1 inst2 proof.agg proof.agg
     (hFs1.symm.trans hFs2)).2.2.2.2.2.1
+
+/-! ## 14. Multi-round algebraic S-box traces
+
+Each round commits an eight-symbol Reed–Solomon word whose two coefficients are the input
+and output states. The degree-seven constraint and adjacent-state equality are checked for
+EVERY round; the final state is bound to the public root. Nine rounds is a specialization,
+not a truncation to the first transition. This scalar algebraic trace is not the deployed
+256-column StepOp machine or a proof of Poseidon2's linear layers.
+-/
+
+def evalSbox7Rounds : List Goldilocks → Goldilocks → Goldilocks
+  | [], x => x
+  | seed :: seeds, x => evalSbox7Rounds seeds (CommRingOps.add (pow7Goldilocks x) seed)
+
+/-- Decode both boundary states from the committed polynomial, not an external witness. -/
+def sbox7TraceStates (word : List GoldilocksExt4) : Goldilocks × Goldilocks :=
+  let c := recoverLinearCoeffs8 word
+  (c.1.c0.c0, c.2.c0.c0)
+
+def checkSbox7Trace : List Goldilocks → Goldilocks → Goldilocks →
+    List (List GoldilocksExt4) → Bool
+  | [], x, root, [] => decide (x = root)
+  | seed :: seeds, x, root, word :: words =>
+    let states := sbox7TraceStates word
+    isLinearBaseRs8 word && decide (states.1 = x) &&
+      decide (states.2 = CommRingOps.add (pow7Goldilocks states.1) seed) &&
+      checkSbox7Trace seeds states.2 root words
+  | _, _, _, _ => false
+
+/-- All rounds, all RS symbols, all links and the terminal root are constrained. -/
+theorem checkSbox7Trace_sound (seeds : List Goldilocks) (x root : Goldilocks)
+    (words : List (List GoldilocksExt4))
+    (h : checkSbox7Trace seeds x root words = true) :
+    words.length = seeds.length ∧ evalSbox7Rounds seeds x = root := by
+  induction seeds generalizing x words with
+  | nil =>
+    cases words with
+    | nil => exact ⟨rfl, of_decide_eq_true h⟩
+    | cons w ws => simp [checkSbox7Trace] at h
+  | cons seed seeds ih =>
+    cases words with
+    | nil => simp [checkSbox7Trace] at h
+    | cons word words =>
+      simp only [checkSbox7Trace, Bool.and_eq_true, decide_eq_true_eq] at h
+      obtain ⟨⟨⟨_, hx⟩, hy⟩, ht⟩ := h
+      obtain ⟨hlen, hout⟩ := ih _ words ht
+      refine ⟨congrArg Nat.succ hlen, ?_⟩
+      simpa only [evalSbox7Rounds, hy, hx] using hout
+
+def buildSbox7Trace : List Goldilocks → Goldilocks → List (List GoldilocksExt4)
+  | [], _ => []
+  | seed :: seeds, x =>
+    let y := CommRingOps.add (pow7Goldilocks x) seed
+    encodeLinearRs8 x y :: buildSbox7Trace seeds y
+
+theorem sbox7TraceStates_encode (x y : Goldilocks) :
+    sbox7TraceStates (encodeLinearRs8 x y) = (x, y) := by
+  unfold sbox7TraceStates
+  rw [(isLinearBaseRs8_encodeLinearRs8 x y).2]
+  rfl
+
+/-- Constructive completeness for arbitrary input, constants and number of rounds. -/
+theorem checkSbox7Trace_complete (seeds : List Goldilocks) (x : Goldilocks) :
+    checkSbox7Trace seeds x (evalSbox7Rounds seeds x) (buildSbox7Trace seeds x) = true := by
+  induction seeds generalizing x with
+  | nil => simp [buildSbox7Trace, checkSbox7Trace, evalSbox7Rounds]
+  | cons seed seeds ih =>
+    simp only [buildSbox7Trace, checkSbox7Trace, evalSbox7Rounds,
+      sbox7TraceStates_encode, (isLinearBaseRs8_encodeLinearRs8 _ _).1,
+      decide_true, Bool.true_and]
+    exact ih _
+
+/-- Nine algebraic rounds: rejects both missing/extra words and a substituted final root. -/
+def checkNineRoundSbox7Trace (seeds : List Goldilocks) (x root : Goldilocks)
+    (words : List (List GoldilocksExt4)) : Bool :=
+  decide (seeds.length = 9) && checkSbox7Trace seeds x root words
+
+theorem nineRoundSbox7Trace_sound (seeds : List Goldilocks) (x root : Goldilocks)
+    (words : List (List GoldilocksExt4))
+    (h : checkNineRoundSbox7Trace seeds x root words = true) :
+    seeds.length = 9 ∧ words.length = 9 ∧ evalSbox7Rounds seeds x = root := by
+  obtain ⟨hn, ht⟩ := Bool.and_eq_true_iff.mp h
+  have hn := of_decide_eq_true hn
+  obtain ⟨hlen, hout⟩ := checkSbox7Trace_sound seeds x root words ht
+  exact ⟨hn, hlen.trans hn, hout⟩
+
+theorem nineRoundSbox7Trace_complete (seeds : List Goldilocks) (x : Goldilocks)
+    (hn : seeds.length = 9) :
+    checkNineRoundSbox7Trace seeds x (evalSbox7Rounds seeds x)
+      (buildSbox7Trace seeds x) = true := by
+  exact Bool.and_eq_true_iff.mpr ⟨decide_eq_true hn, checkSbox7Trace_complete seeds x⟩
+
+theorem sbox7Trace_wrong_root_rejected (seeds : List Goldilocks) (x root : Goldilocks)
+    (words : List (List GoldilocksExt4)) (hroot : evalSbox7Rounds seeds x ≠ root) :
+    checkSbox7Trace seeds x root words = false := by
+  apply Bool.eq_false_iff.mpr
+  intro h
+  exact hroot (checkSbox7Trace_sound seeds x root words h).2
+
+/-- The same decoded transition also verifies under the algebraic signature suite used by
+`rsSbox7TraceArith_lawful`; this connects trace constraints to its signature relation. -/
+theorem sbox7Trace_head_signature (seed : Goldilocks) (seeds : List Goldilocks)
+    (x root : Goldilocks) (word : List GoldilocksExt4) (words : List (List GoldilocksExt4))
+    (msg : List UInt8) (h : checkSbox7Trace (seed :: seeds) x root (word :: words) = true) :
+    verifyPqHashSig sbox7FieldSuite sbox7Params
+      (mkSbox7Pk seed (sbox7TraceStates word).2) msg (mkSbox7Sig x) = true := by
+  simp only [checkSbox7Trace, Bool.and_eq_true, decide_eq_true_eq] at h
+  obtain ⟨⟨⟨_, hx⟩, hy⟩, _⟩ := h
+  rw [verifyPqHashSig_sbox7_iff]
+  exact decide_eq_true (by simpa only [hx] using hy.symm)
+
+/-! ### Composition through the succinct extractor
+
+A chain carries a separate, instance-bound WHIR proof for each nonlinear round. Its extraction
+views bind the recovered input to the preceding public output. This is a composition theorem
+for arbitrarily many proofs (nine included), not a claim that one two-stage proof represents
+nine S-box rounds, nor a deployed StepOp AIR completeness result.
+-/
+
+structure Sbox7WhirRound where
+  seed : Goldilocks
+  root : Goldilocks
+  proof : SuccinctAggregateProof
+  fs : List UInt8
+  view : SuccinctExtractionView
+
+def Sbox7WhirRoundBreak (r : Sbox7WhirRound) : Prop :=
+  Nonempty (SumcheckSchwartzZippelHit 8 r.proof.agg.roundPolys
+    (adaptivePolys ((rsSbox7TraceArith r.seed r.root).honestRound
+      ((r.view.allTables.headD []).headD [])) r.proof.agg.challenges)
+    r.proof.agg.challenges) ∨
+  Nonempty (HashCollisionWitness pcsMerkleHash) ∨
+  Nonempty (WhirStageQueryMiss r.proof.finalWord rsSbox7WhirDomain r.view.allTables r.proof) ∨
+  Nonempty (WhirProximityHit (rsSbox7TraceArith r.seed r.root) rsSbox7WhirDomain
+    r.proof.finalWord r.view.allTables r.proof)
+
+/-- Every proof is accepted and every extraction input is linked. No soundness conclusion is
+assumed: false rounds are exposed by the extractor as concrete break witnesses. -/
+def Sbox7WhirChainAccepted (msg : List UInt8) :
+    Goldilocks → Goldilocks → List Sbox7WhirRound → Prop
+  | x, root, [] => x = root
+  | x, root, r :: rs =>
+    verifySuccinctAggregate (rsSbox7TraceArith r.seed r.root) rsSbox7WhirDomain
+      (rsSbox7Inst r.seed r.root msg) r.proof r.fs = true ∧
+    StagesBound r.view.authPath rsSbox7WhirDomain.stages r.view.allTables r.proof.stages ∧
+    r.proof.agg.bitmap = [true] ∧
+    (recoverLinearCoeffs8 ((r.view.allTables.headD []).headD [])).1.c0.c0 = x ∧
+    Sbox7WhirChainAccepted msg r.root root rs
+
+/-- Full multi-round WHIR composition: correct iterated S-box evaluation, or an identified
+round with a sumcheck, Merkle, query-miss or proximity break. -/
+theorem sbox7WhirChain_sound (msg : List UInt8) (x root : Goldilocks)
+    (rounds : List Sbox7WhirRound) (h : Sbox7WhirChainAccepted msg x root rounds) :
+    evalSbox7Rounds (rounds.map (·.seed)) x = root ∨
+      ∃ r ∈ rounds, Sbox7WhirRoundBreak r := by
+  induction rounds generalizing x with
+  | nil => exact Or.inl h
+  | cons r rs ih =>
+    obtain ⟨ha, hb, hbitmap, hx, ht⟩ := h
+    have hs := succinct_aggregation_knowledge_soundness_thm
+      (rsSbox7TraceArith r.seed r.root) rsSbox7WhirDomain (rsSbox7Inst r.seed r.root msg)
+      (rsSbox7TraceArith_lawful r.seed r.root msg) r.proof r.fs r.view ha hb
+    change _ ∨ Sbox7WhirRoundBreak r at hs
+    rcases hs with hv | hbad
+    · simp only [rsSbox7Inst, rsSbox7TraceArith, rsSbox7TraceArithDelta,
+        decodeSbox7Sigs, hbitmap, checkAllActiveSigners, Bool.and_true,
+        ↓reduceIte, verifyPqHashSig_sbox7_iff, decide_eq_true_eq, hx] at hv
+      rcases ih r.root ht with hout | htail
+      · exact Or.inl (by simpa only [List.map_cons, evalSbox7Rounds, hv] using hout)
+      · obtain ⟨bad, hmem, hbad⟩ := htail
+        exact Or.inr ⟨bad, List.mem_cons_of_mem r hmem, hbad⟩
+    · exact Or.inr ⟨r, List.mem_cons_self, hbad⟩
+
+def buildSbox7WhirChain (msg : List UInt8) : List Goldilocks → Goldilocks → List Sbox7WhirRound
+  | [], _ => []
+  | seed :: seeds, x =>
+    let y := CommRingOps.add (pow7Goldilocks x) seed
+    let bundle := buildHonestSbox7WhirBundle seed x y msg
+    { seed := seed, root := y, proof := bundle.1, fs := bundle.2.1, view := bundle.2.2 } ::
+      buildSbox7WhirChain msg seeds y
+
+/-- Inhabited multi-round acceptance for arbitrary round constants and initial state. -/
+theorem sbox7WhirChain_complete (msg : List UInt8) (seeds : List Goldilocks) (x : Goldilocks) :
+    Sbox7WhirChainAccepted msg x (evalSbox7Rounds seeds x) (buildSbox7WhirChain msg seeds x) := by
+  induction seeds generalizing x with
+  | nil => rfl
+  | cons seed seeds ih =>
+    have h := honestSbox7WhirProof_accepts seed x (CommRingOps.add (pow7Goldilocks x) seed) msg
+    refine ⟨h.1, h.2, rfl, ?_, ih _⟩
+    change (recoverLinearCoeffs8 (encodeLinearRs8 x _)).1.c0.c0 = x
+    rw [(isLinearBaseRs8_encodeLinearRs8 x _).2]
+    rfl
+
+theorem buildSbox7WhirChain_seeds (msg : List UInt8) (seeds : List Goldilocks) (x : Goldilocks) :
+    (buildSbox7WhirChain msg seeds x).map (·.seed) = seeds := by
+  induction seeds generalizing x with
+  | nil => rfl
+  | cons seed seeds ih =>
+    change seed :: (buildSbox7WhirChain msg seeds _).map (·.seed) = seed :: seeds
+    rw [ih]
+
+/-- Exactly nine accepted nonlinear rounds, with the same concrete break alternatives. -/
+theorem nineRoundSbox7Whir_sound (msg : List UInt8) (x root : Goldilocks)
+    (rounds : List Sbox7WhirRound) (hn : rounds.length = 9)
+    (h : Sbox7WhirChainAccepted msg x root rounds) :
+    (rounds.map (·.seed)).length = 9 ∧
+      (evalSbox7Rounds (rounds.map (·.seed)) x = root ∨
+        ∃ r ∈ rounds, Sbox7WhirRoundBreak r) :=
+  ⟨(List.length_map ..).trans hn, sbox7WhirChain_sound msg x root rounds h⟩
 
 end Aggregation
 

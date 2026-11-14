@@ -260,6 +260,31 @@ fn test_vulkan_rdna2_bit_exact_differential_and_receipts() {
     // -------------------------------------------------------------------------
     // Kernel 3: GoldilocksNtt (`N = 1, 2, 16, 2^10, 2^16, 2^20` forward & inverse)
     // -------------------------------------------------------------------------
+    // A table that is not a primitive-root power table is refused before any dispatch: no
+    // receipt, no submission, buffer untouched. (The CPU reference would transform with it.)
+    for (n, bad_idx) in [(16usize, 0usize), (1024, 300), (1024, 511)] {
+        let mut tw = precompute_goldilocks_twiddles(n).unwrap();
+        tw[bad_idx] = tw[bad_idx].wrapping_add(1);
+        let orig: Vec<u64> = (0..n).map(|_| splitmix64(&mut rng)).collect();
+        let mut buf = orig.clone();
+        let subs_before = certified_gpu.inner().gpu_submission_count();
+        for inverse in [false, true] {
+            assert_eq!(
+                goldilocks_ntt_with_receipt(
+                    &certified_gpu,
+                    &gpu_key,
+                    &mut buf,
+                    &tw,
+                    inverse,
+                    anchor
+                ),
+                Err(AccelError::InvalidTwiddles)
+            );
+        }
+        assert_eq!(buf, orig);
+        assert_eq!(certified_gpu.inner().gpu_submission_count(), subs_before);
+    }
+
     for &log2_n in &[0u32, 1, 4, 10, 16, 20] {
         let n = 1usize << log2_n;
         let tw = precompute_goldilocks_twiddles(n).unwrap();
