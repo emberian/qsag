@@ -1,5 +1,5 @@
 //! Certified zero-dependency Vulkan / SPIR-V discrete GPU backend (`VulkanSpirvBackend`,
-//! aliased as `VulkanRdna2Backend`) implementing [`AcceleratorBackend`] (`KernelTargetArch::SpirV16`).
+//! aliased as `VulkanRdna2Backend`) implementing [`AcceleratorBackend`] (`KernelTargetArch::SpirV15`).
 //!
 //! On 64-bit Linux with `feature = "std"`, `VulkanSpirvBackend::try_new()` dynamically loads
 //! `libvulkan.so.1`, selects a discrete GPU (`VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU`) supporting
@@ -9,6 +9,21 @@
 //!
 //! On non-Linux targets, 32-bit targets, or `#![no_std]` builds without `std`, `try_new()` cleanly
 //! returns `Err(VulkanError::UnsupportedPlatform)` with zero external crate dependencies.
+//!
+//! # Secret inputs
+//!
+//! * `bdoz_gf2_128_batch_dot` carries MAC shares. A backend whose driver did not report the
+//!   evidence in [`VulkanDeviceInfo::secret_slot_audit`] refuses it with
+//!   [`AccelError::SecretSlotUnaudited`] before anything reaches the device, whichever
+//!   constructor built it. The other five slots accept whatever the caller passes; a caller
+//!   with secret Keccak, Poseidon2, NTT, LDE or Merkle inputs must construct with
+//!   [`VulkanSpirvBackend::try_new_audited`].
+//! * The infallible `batch_keccak_f1600` / `batch_poseidon2_perm12` answer from the CPU
+//!   reference when the device fails. Each such call increments
+//!   [`VulkanSpirvBackend::cpu_fallback_count`].
+//! * A job's inputs are wiped from host staging memory on every exit once the device is known
+//!   idle. After `VK_ERROR_DEVICE_LOST` that cannot be known: the backend refuses all further
+//!   jobs and the failed job's inputs stay in staging memory and VRAM until the process exits.
 
 #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -167,6 +182,40 @@ impl VulkanDeviceInfo {
         core::str::from_utf8(&self.name_bytes[..self.name_len]).unwrap_or("Unknown Vulkan GPU")
     }
 
+    /// The evidence a secret-bearing kernel slot requires: the driver was made to compile every
+    /// pipeline at subgroup size 32 and reported, for each one, subgroup size 32, zero scratch
+    /// bytes and no spilled registers. A statistic the driver did not report counts as missing
+    /// evidence, except the two spill counters, which only some compilers emit.
+    ///
+    /// These are compiler reports, not a constant-time or physical side-channel proof.
+    pub fn secret_slot_audit(&self) -> Result<(), VulkanError> {
+        if !self.wave32_required {
+            return Err(VulkanError::PipelineAuditFailed(
+                "subgroup size 32 was not required at pipeline creation",
+            ));
+        }
+        for stats in &self.pipelines {
+            if stats.subgroup_size != Some(32) {
+                return Err(VulkanError::PipelineAuditFailed(
+                    "a pipeline did not report subgroup size 32",
+                ));
+            }
+            if stats.scratch_bytes != Some(0) {
+                return Err(VulkanError::PipelineAuditFailed(
+                    "a pipeline did not report zero scratch bytes",
+                ));
+            }
+            if stats.spilled_vgprs.is_some_and(|n| n != 0)
+                || stats.spilled_sgprs.is_some_and(|n| n != 0)
+            {
+                return Err(VulkanError::PipelineAuditFailed(
+                    "a pipeline reported spilled registers",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Digest of the driver identity and per-pipeline executable telemetry this backend was
     /// built on. A host that folds it into a receipt's `transcript_anchor` makes the receipt
     /// name the driver state (Wave32, scratch, spill, LDS figures) it reports having run on.
@@ -242,7 +291,7 @@ impl core::fmt::Debug for VulkanDeviceInfo {
 }
 
 /// Hardware discrete GPU compute backend executing certified 64-bit SPIR-V shaders in `DEVICE_LOCAL`
-/// GDDR6 / Infinity Cache VRAM (`KernelTargetArch::SpirV16`).
+/// GDDR6 / Infinity Cache VRAM (`KernelTargetArch::SpirV15`).
 pub struct VulkanSpirvBackend {
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     info: VulkanDeviceInfo,
@@ -252,6 +301,11 @@ pub struct VulkanSpirvBackend {
     engine: std::sync::Mutex<RawVulkanEngine>,
     #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
     gpu_submissions: AtomicU64,
+    #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+    cpu_fallbacks: AtomicU64,
+    /// `info.secret_slot_audit().is_ok()`, fixed at construction.
+    #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+    secret_slots_audited: bool,
     #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
     _uninhabited: core::convert::Infallible,
 }
@@ -269,6 +323,8 @@ impl core::fmt::Debug for VulkanSpirvBackend {
                     "gpu_submissions",
                     &self.gpu_submissions.load(Ordering::Relaxed),
                 )
+                .field("cpu_fallbacks", &self.cpu_fallbacks.load(Ordering::Relaxed))
+                .field("secret_slots_audited", &self.secret_slots_audited)
                 .finish()
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
@@ -288,6 +344,31 @@ fn accel_error(err: VulkanError) -> AccelError {
     }
 }
 
+/// Refuse a secret-bearing slot on a backend without pipeline audit evidence.
+#[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+const fn secret_slot_gate(audited: bool, slot: KernelSlot) -> Result<(), AccelError> {
+    if audited {
+        Ok(())
+    } else {
+        Err(AccelError::SecretSlotUnaudited { slot })
+    }
+}
+
+/// Run `gpu` on `states`; if it fails, count the fallback and run `cpu` instead.
+/// A failed GPU job has not written `states` (results are copied back only on success).
+#[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+fn gpu_or_counted_cpu_fallback<S: ?Sized>(
+    fallbacks: &AtomicU64,
+    states: &mut S,
+    gpu: impl FnOnce(&mut S) -> Result<(), VulkanError>,
+    cpu: impl FnOnce(&mut S),
+) {
+    if gpu(states).is_err() {
+        fallbacks.fetch_add(1, Ordering::Relaxed);
+        cpu(states);
+    }
+}
+
 #[inline]
 const fn check_ntt_log2(what: &'static str, len: usize) -> Result<u32, AccelError> {
     if !len.is_power_of_two() {
@@ -303,6 +384,10 @@ const fn check_ntt_log2(what: &'static str, len: usize) -> Result<u32, AccelErro
 impl VulkanSpirvBackend {
     /// Discover a discrete Vulkan GPU with `shaderInt64`, compile all 6 embedded SPIR-V compute
     /// pipelines, and allocate persistent host-cached staging + `DEVICE_LOCAL` VRAM buffers.
+    ///
+    /// This constructor accepts a driver that reports no executable telemetry or does not
+    /// honour a required subgroup size. Such a backend is for public inputs: it refuses
+    /// `bdoz_gf2_128_batch_dot` (see [`Self::secret_slots_audited`]).
     pub fn try_new() -> Result<Self, VulkanError> {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
@@ -313,6 +398,8 @@ impl VulkanSpirvBackend {
                 pins,
                 engine: std::sync::Mutex::new(engine),
                 gpu_submissions: AtomicU64::new(0),
+                cpu_fallbacks: AtomicU64::new(0),
+                secret_slots_audited: info.secret_slot_audit().is_ok(),
             })
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
@@ -321,36 +408,49 @@ impl VulkanSpirvBackend {
         }
     }
 
-    /// Require driver-confirmed Wave32 and zero scratch for every executable.
-    /// Unlike `try_new`, unavailable telemetry is an error. This checks compiler
-    /// reports, not a formal constant-time or physical side-channel proof.
+    /// Require driver-confirmed Wave32 and zero scratch for every executable
+    /// ([`VulkanDeviceInfo::secret_slot_audit`]). Unlike `try_new`, unavailable telemetry is an
+    /// error. This checks compiler reports, not a formal constant-time or physical
+    /// side-channel proof.
     pub fn try_new_audited() -> Result<Self, VulkanError> {
         let backend = Self::try_new()?;
-        let info = backend.device_info();
-        if !info.wave32_required
-            || info
-                .pipelines
-                .iter()
-                .any(|stats| {
-                    stats.subgroup_size != Some(32)
-                        || stats.scratch_bytes != Some(0)
-                        || stats.spilled_vgprs.is_some_and(|n| n != 0)
-                        || stats.spilled_sgprs.is_some_and(|n| n != 0)
-                })
-        {
-            return Err(VulkanError::PipelineAuditFailed(
-                "Wave32/zero-scratch evidence unavailable",
-            ));
-        }
+        backend.device_info().secret_slot_audit()?;
         Ok(backend)
     }
 
-    /// Canonical `KernelTargetArch::SpirV16` pin for `slot` computed from its embedded SPIR-V binary.
+    /// Whether this backend holds the evidence of [`VulkanDeviceInfo::secret_slot_audit`].
+    /// Always true for [`Self::try_new_audited`]. When false, `bdoz_gf2_128_batch_dot` returns
+    /// [`AccelError::SecretSlotUnaudited`].
+    pub fn secret_slots_audited(&self) -> bool {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.secret_slots_audited
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            match self._uninhabited {}
+        }
+    }
+
+    /// Number of infallible `batch_keccak_f1600` / `batch_poseidon2_perm12` calls that the
+    /// device failed and the CPU reference answered instead.
+    pub fn cpu_fallback_count(&self) -> u64 {
+        #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+        {
+            self.cpu_fallbacks.load(Ordering::Relaxed)
+        }
+        #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
+        {
+            match self._uninhabited {}
+        }
+    }
+
+    /// Canonical `KernelTargetArch::SpirV15` pin for `slot` computed from its embedded SPIR-V binary.
     pub fn canonical_pin(slot: KernelSlot) -> CertifiedKernelPin {
         canonical_spirv_pin(slot)
     }
 
-    /// Canonical `KernelTargetArch::SpirV16` pins for all 6 [`KernelSlot`]s.
+    /// Canonical `KernelTargetArch::SpirV15` pins for all 6 [`KernelSlot`]s.
     pub fn canonical_pins() -> [CertifiedKernelPin; KernelSlot::COUNT] {
         canonical_spirv_pins()
     }
@@ -360,7 +460,7 @@ impl VulkanSpirvBackend {
         KernelSlot::ALL.map(|slot| {
             CertifiedKernelPin::from_kernel_artifact(
                 slot,
-                KernelTargetArch::SpirV16,
+                KernelTargetArch::SpirV15,
                 spirv_kernel_bytes(slot),
             )
         })
@@ -488,7 +588,11 @@ impl VulkanSpirvBackend {
 
 impl AcceleratorBackend for VulkanSpirvBackend {
     fn target_arch(&self) -> KernelTargetArch {
-        KernelTargetArch::SpirV16
+        KernelTargetArch::SpirV15
+    }
+
+    fn cpu_fallback_count(&self) -> u64 {
+        VulkanSpirvBackend::cpu_fallback_count(self)
     }
 
     fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
@@ -506,9 +610,12 @@ impl AcceleratorBackend for VulkanSpirvBackend {
     fn batch_keccak_f1600(&self, states: &mut [[u64; 25]]) {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
-            if self.try_batch_keccak_f1600(states).is_err() {
-                CpuReferenceBackend.batch_keccak_f1600(states);
-            }
+            gpu_or_counted_cpu_fallback(
+                &self.cpu_fallbacks,
+                states,
+                |s| self.try_batch_keccak_f1600(s),
+                |s| CpuReferenceBackend.batch_keccak_f1600(s),
+            );
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
         {
@@ -536,9 +643,12 @@ impl AcceleratorBackend for VulkanSpirvBackend {
     fn batch_poseidon2_perm12(&self, states: &mut [[u64; 12]]) {
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
-            if self.try_batch_poseidon2_perm12(states).is_err() {
-                CpuReferenceBackend.batch_poseidon2_perm12(states);
-            }
+            gpu_or_counted_cpu_fallback(
+                &self.cpu_fallbacks,
+                states,
+                |s| self.try_batch_poseidon2_perm12(s),
+                |s| CpuReferenceBackend.batch_poseidon2_perm12(s),
+            );
         }
         #[cfg(not(all(feature = "std", target_os = "linux", target_pointer_width = "64")))]
         {
@@ -693,6 +803,9 @@ impl AcceleratorBackend for VulkanSpirvBackend {
         }
         #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
         {
+            // Shares are MAC key material: no unaudited pipeline sees them, and there is no
+            // CPU fallback behind the caller's back.
+            secret_slot_gate(self.secret_slots_audited, KernelSlot::BdozGf2128BatchDot)?;
             if shares.is_empty() {
                 return Ok((0, 0));
             }
@@ -956,7 +1069,7 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            reg.verify_loaded_profile(KernelTargetArch::SpirV16, &spirv_pins),
+            reg.verify_loaded_profile(KernelTargetArch::SpirV15, &spirv_pins),
             Ok(())
         );
 
@@ -968,12 +1081,12 @@ mod tests {
 
             let pin = VulkanSpirvBackend::canonical_pin(slot);
             assert_eq!(pin.slot, slot);
-            assert_eq!(pin.target_arch, KernelTargetArch::SpirV16);
+            assert_eq!(pin.target_arch, KernelTargetArch::SpirV15);
 
             let mut tampered = spirv_pins;
             tampered[slot as usize].poseidon2_digest[0] ^= 1;
             assert_eq!(
-                reg.verify_loaded_profile(KernelTargetArch::SpirV16, &tampered),
+                reg.verify_loaded_profile(KernelTargetArch::SpirV15, &tampered),
                 Err(KernelRegistryError::PinMismatch { slot })
             );
         }
@@ -1026,7 +1139,12 @@ mod tests {
             // The inverse-root table is an equally valid primitive-root power table.
             if n >= 4 {
                 let inv: std::vec::Vec<u64> = core::iter::once(1)
-                    .chain(table[1..].iter().rev().map(|&w| crate::goldilocks::gl_neg(w)))
+                    .chain(
+                        table[1..]
+                            .iter()
+                            .rev()
+                            .map(|&w| crate::goldilocks::gl_neg(w)),
+                    )
                     .collect();
                 assert_eq!(check_goldilocks_twiddles(n, &inv), Ok(()));
             }
@@ -1066,25 +1184,7 @@ mod tests {
 
     #[test]
     fn audit_evidence_digest_separates_driver_and_telemetry_states() {
-        let base = VulkanDeviceInfo {
-            name_bytes: [0; 256],
-            name_len: 0,
-            max_compute_shared_memory_size: 65536,
-            wave32_required: true,
-            pipelines: [PipelineTelemetry {
-                subgroup_size: Some(32),
-                scratch_bytes: Some(0),
-                ..PipelineTelemetry::default()
-            }; KernelSlot::COUNT],
-            vendor_id: 0x1002,
-            device_id: 0x73df,
-            driver_version: 1,
-            api_version: 1,
-            device_type: 2,
-            max_push_constants_size: 128,
-            max_storage_buffer_range: u32::MAX,
-            max_compute_work_group_invocations: 1024,
-        };
+        let base = audited_device_info();
         let reference = base.audit_evidence_digest();
         assert_eq!(reference, base.audit_evidence_digest());
 
@@ -1113,13 +1213,183 @@ mod tests {
             v.pipelines[slot].spilled_vgprs = Some(0);
             variants.push(v);
         }
-        let mut digests: std::vec::Vec<[u8; 32]> =
-            variants.iter().map(VulkanDeviceInfo::audit_evidence_digest).collect();
+        let mut digests: std::vec::Vec<[u8; 32]> = variants
+            .iter()
+            .map(VulkanDeviceInfo::audit_evidence_digest)
+            .collect();
         digests.push(reference);
         let total = digests.len();
         digests.sort_unstable();
         digests.dedup();
         assert_eq!(digests.len(), total);
+    }
+
+    fn audited_device_info() -> VulkanDeviceInfo {
+        VulkanDeviceInfo {
+            name_bytes: [0; 256],
+            name_len: 0,
+            max_compute_shared_memory_size: 65536,
+            wave32_required: true,
+            pipelines: [PipelineTelemetry {
+                subgroup_size: Some(32),
+                scratch_bytes: Some(0),
+                ..PipelineTelemetry::default()
+            }; KernelSlot::COUNT],
+            vendor_id: 0x1002,
+            device_id: 0x73df,
+            driver_version: 1,
+            api_version: 1,
+            device_type: 2,
+            max_push_constants_size: 128,
+            max_storage_buffer_range: u32::MAX,
+            max_compute_work_group_invocations: 1024,
+        }
+    }
+
+    #[test]
+    fn secret_slot_audit_requires_wave32_zero_scratch_and_no_spills_on_every_pipeline() {
+        let good = audited_device_info();
+        assert_eq!(good.secret_slot_audit(), Ok(()));
+
+        // Spill counters are optional, but a reported zero is fine.
+        let mut reported_zero_spills = good;
+        for stats in &mut reported_zero_spills.pipelines {
+            stats.spilled_vgprs = Some(0);
+            stats.spilled_sgprs = Some(0);
+        }
+        assert_eq!(reported_zero_spills.secret_slot_audit(), Ok(()));
+
+        let mut not_required = good;
+        not_required.wave32_required = false;
+        assert!(matches!(
+            not_required.secret_slot_audit(),
+            Err(VulkanError::PipelineAuditFailed(_))
+        ));
+
+        // What `try_new` yields on a driver without executable statistics: nothing reported.
+        let mut no_telemetry = good;
+        no_telemetry.pipelines = [PipelineTelemetry::default(); KernelSlot::COUNT];
+        assert!(no_telemetry.secret_slot_audit().is_err());
+
+        let defects: [fn(&mut PipelineTelemetry); 6] = [
+            |t| t.subgroup_size = None,
+            |t| t.subgroup_size = Some(64),
+            |t| t.scratch_bytes = None,
+            |t| t.scratch_bytes = Some(8),
+            |t| t.spilled_vgprs = Some(1),
+            |t| t.spilled_sgprs = Some(1),
+        ];
+        for slot in 0..KernelSlot::COUNT {
+            for (case, defect) in defects.iter().enumerate() {
+                let mut bad = good;
+                defect(&mut bad.pipelines[slot]);
+                assert!(
+                    matches!(
+                        bad.secret_slot_audit(),
+                        Err(VulkanError::PipelineAuditFailed(_))
+                    ),
+                    "slot {slot}, defect {case} passed the audit"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+    #[test]
+    fn secret_slot_gate_refuses_exactly_the_unaudited_backend() {
+        let slot = KernelSlot::BdozGf2128BatchDot;
+        assert_eq!(secret_slot_gate(true, slot), Ok(()));
+        assert_eq!(
+            secret_slot_gate(false, slot),
+            Err(AccelError::SecretSlotUnaudited { slot })
+        );
+    }
+
+    #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+    #[test]
+    fn device_failure_on_the_infallible_path_is_counted_and_answered_by_the_cpu() {
+        let fallbacks = AtomicU64::new(0);
+        let input = [[0x0123_4567_89AB_CDEFu64; 25]; 3];
+        let mut expected = input;
+        CpuReferenceBackend.batch_keccak_f1600(&mut expected);
+
+        // Device succeeds: the CPU closure never runs and nothing is counted.
+        let mut states = input;
+        gpu_or_counted_cpu_fallback(
+            &fallbacks,
+            &mut states[..],
+            |s| {
+                CpuReferenceBackend.batch_keccak_f1600(s);
+                Ok(())
+            },
+            |_| panic!("fallback ran after a successful device job"),
+        );
+        assert_eq!(states, expected);
+        assert_eq!(fallbacks.load(Ordering::Relaxed), 0);
+
+        // Device fails: one count per call, CPU result returned.
+        for calls in 1..=3u64 {
+            let mut states = input;
+            gpu_or_counted_cpu_fallback(
+                &fallbacks,
+                &mut states[..],
+                |_| Err(VulkanError::WorkspacePoisoned),
+                |s| CpuReferenceBackend.batch_keccak_f1600(s),
+            );
+            assert_eq!(states, expected);
+            assert_eq!(fallbacks.load(Ordering::Relaxed), calls);
+        }
+    }
+
+    /// Needs a discrete GPU; returns early without one.
+    #[cfg(all(feature = "std", target_os = "linux", target_pointer_width = "64"))]
+    #[test]
+    fn live_backend_refuses_bdoz_without_audit_evidence_and_counts_fallbacks() {
+        let mut gpu = match VulkanSpirvBackend::try_new() {
+            Ok(gpu) => gpu,
+            Err(VulkanError::LibraryLoadFailed | VulkanError::NoDiscreteGpuFound) => return,
+            Err(other) => panic!("unexpected Vulkan initialization error: {other}"),
+        };
+        assert_eq!(
+            gpu.secret_slots_audited(),
+            gpu.device_info().secret_slot_audit().is_ok()
+        );
+        let shares = [(0xAAu128, 0xBBu128); 4];
+        let weights = [(3u128, 5u128); 4];
+        let slot = KernelSlot::BdozGf2128BatchDot;
+
+        // The state `try_new` produces on a driver without Wave32 control or telemetry.
+        gpu.secret_slots_audited = false;
+        assert_eq!(
+            gpu.bdoz_gf2_128_batch_dot(&shares, &weights),
+            Err(AccelError::SecretSlotUnaudited { slot })
+        );
+        let key = BackendAttestationKey::derive(&[0x44u8; 32], b"unaudited-gpu");
+        assert_eq!(
+            bdoz_gf2_128_batch_dot_with_receipt(&gpu, &key, &shares, &weights, [0u8; 32])
+                .map(|_| ()),
+            Err(AccelError::SecretSlotUnaudited { slot })
+        );
+        assert_eq!(
+            gpu.gpu_submission_count(),
+            0,
+            "refused shares reached the GPU"
+        );
+        // Shape errors still come first, as on every backend.
+        assert!(matches!(
+            gpu.bdoz_gf2_128_batch_dot(&shares, &weights[..1]),
+            Err(AccelError::LengthMismatch { .. })
+        ));
+
+        // A device failure on the infallible path is visible through the trait.
+        assert_eq!(AcceleratorBackend::cpu_fallback_count(&gpu), 0);
+        let mut states = [[9u64; 25]; 2];
+        let mut expected = states;
+        CpuReferenceBackend.batch_keccak_f1600(&mut expected);
+        gpu.batch_keccak_f1600(&mut states);
+        assert_eq!(states, expected);
+        assert_eq!(gpu.cpu_fallback_count(), 0);
+        assert_eq!(gpu.gpu_submission_count(), 1);
     }
 
     #[test]
@@ -1171,7 +1441,7 @@ mod tests {
         struct FailingGpuMock;
         impl AcceleratorBackend for FailingGpuMock {
             fn target_arch(&self) -> KernelTargetArch {
-                KernelTargetArch::SpirV16
+                KernelTargetArch::SpirV15
             }
             fn kernel_pin(&self, slot: KernelSlot) -> CertifiedKernelPin {
                 VulkanSpirvBackend::canonical_pin(slot)

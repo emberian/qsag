@@ -3189,7 +3189,8 @@ pub static MERKLE_LAYER_POSEIDON2_SPV_WORDS: [u32; 6960] = [
     0x000002d0, 0x0000032b, 0x000200f9, 0x000002d1, 0x000200f8, 0x000002d3, 0x000100fd, 0x00010038,
 ];
 /// Little-endian byte encoding of [`MERKLE_LAYER_POSEIDON2_SPV_WORDS`] (27900 bytes).
-pub static MERKLE_LAYER_POSEIDON2_SPV_BYTES: [u8; 27840] = words_to_le_bytes(&MERKLE_LAYER_POSEIDON2_SPV_WORDS);
+pub static MERKLE_LAYER_POSEIDON2_SPV_BYTES: [u8; 27840] =
+    words_to_le_bytes(&MERKLE_LAYER_POSEIDON2_SPV_WORDS);
 
 /// Deterministic SPIR-V word stream compiled from `shaders/bdoz_gf2_128_dot.comp` (2978 words).
 pub static BDOZ_GF2_128_DOT_SPV_WORDS: [u32; 2978] = [
@@ -3606,16 +3607,16 @@ pub const fn spirv_kernel_bytes(slot: KernelSlot) -> &'static [u8] {
     }
 }
 
-/// Compute the canonical [`CertifiedKernelPin`] (`KernelTargetArch::SpirV16`) for `slot`.
+/// Compute the canonical [`CertifiedKernelPin`] (`KernelTargetArch::SpirV15`) for `slot`.
 pub fn canonical_spirv_pin(slot: KernelSlot) -> CertifiedKernelPin {
     CertifiedKernelPin::from_kernel_artifact(
         slot,
-        KernelTargetArch::SpirV16,
+        KernelTargetArch::SpirV15,
         spirv_kernel_bytes(slot),
     )
 }
 
-/// Compute all 6 canonical [`CertifiedKernelPin`]s (`KernelTargetArch::SpirV16`).
+/// Compute all 6 canonical [`CertifiedKernelPin`]s (`KernelTargetArch::SpirV15`).
 pub fn canonical_spirv_pins() -> [CertifiedKernelPin; KernelSlot::COUNT] {
     KernelSlot::ALL.map(canonical_spirv_pin)
 }
