@@ -791,32 +791,37 @@ pub fn bdoz_gf2_128_batch_dot_with_receipt<B: AcceleratorBackend>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{KernelRegistryError, VerifiedKernelDigestRegistry};
+    use crate::{CpuReferenceBackend, KernelRegistryError, VerifiedKernelDigestRegistry};
 
     #[test]
     fn spirv_kernel_pins_and_dual_registry_verify_in_no_std() {
-        let reg = VerifiedKernelDigestRegistry::with_cpu_and_spirv_pins();
-        assert_eq!(reg.len(), KernelSlot::COUNT * 2);
+        let reg = VerifiedKernelDigestRegistry::<4>::with_cpu_and_spirv_pins();
+        let cpu_pins = KernelSlot::ALL.map(CpuReferenceBackend::canonical_pin);
+        let spirv_pins = VulkanSpirvBackend::canonical_pins();
+        assert_eq!(
+            reg.verify_loaded_profile(KernelTargetArch::CpuReference, &cpu_pins),
+            Ok(())
+        );
+        assert_eq!(
+            reg.verify_loaded_profile(KernelTargetArch::SpirV16, &spirv_pins),
+            Ok(())
+        );
 
         for slot in KernelSlot::ALL {
             let spv_bytes = spirv_kernel_bytes(slot);
-            assert!(spv_bytes.len() >= 1024 && spv_bytes.len() % 4 == 0);
+            assert!(spv_bytes.len() >= 1024 && spv_bytes.len().is_multiple_of(4));
             // Valid SPIR-V magic word 0x07230203 in little-endian.
             assert_eq!(&spv_bytes[0..4], &0x0723_0203u32.to_le_bytes());
 
             let pin = VulkanSpirvBackend::canonical_pin(slot);
             assert_eq!(pin.slot, slot);
-            assert_eq!(pin.arch, KernelTargetArch::SpirV16);
-            assert_eq!(reg.verify_pin(&pin), Ok(()));
+            assert_eq!(pin.target_arch, KernelTargetArch::SpirV16);
 
-            let mut tampered = pin;
-            tampered.poseidon2_digest[0] ^= 1;
+            let mut tampered = spirv_pins;
+            tampered[slot as usize].poseidon2_digest[0] ^= 1;
             assert_eq!(
-                reg.verify_pin(&tampered),
-                Err(KernelRegistryError::PinNotCertified {
-                    slot,
-                    arch: KernelTargetArch::SpirV16,
-                })
+                reg.verify_loaded_profile(KernelTargetArch::SpirV16, &tampered),
+                Err(KernelRegistryError::PinMismatch { slot })
             );
         }
     }
