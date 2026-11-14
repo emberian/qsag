@@ -57,12 +57,32 @@ turn (`faultedAssemble`, which is `signHypertreeLayers` when there is no fault:
    contains a release, whatever predicates it checks.
 
 Section 5 generalizes the message-uniqueness guarantee to every upper layer of an arbitrary-depth
-hypertree (`verifyBeforeReleaseAll`, `all_depth_gate_complete`). The two-layer API above is kept
+hypertree (`verifyBeforeReleaseAll`, `all_depth_gate_complete`), enforcing canonical 32-byte
+`HashAdrs` coordinate bounds (`OtsPosition.ValidCoords`, `AdrsGateValid`) and encoded-address
+cache consistency (`AdrsCacheConsistent`) so mathematical `Nat` coordinates never alias truncated
+`UInt32`/`UInt64` hash addresses (`otsPosition_toEncodedAdrs_injective`,
+`tooth_unbounded_nat_position_aliases_u64_adrs`). The two-layer API above is kept
 for its fault-circuit examples. The all-layer theorem also proves identical openings or a hash
 collision, using the next cached input root to anchor every intermediate subtree. The full gate
-uses the same `HashSigs` verifier and its parameter validity rules; a layer count of 22 is not a
+uses the `HashSigs` verifier and its parameter validity rules; a layer count of 22 is not a
 claim of equivalence to the separate FIPS 205 signature format. The layer-only
-`verifyHypertreeBeforeRelease` gate has no total-height cap, with a 22-layer, height-3 witness.
+`verifyHypertreeBeforeRelease` gate enforces per-coordinate `HashAdrs` bounds without a 62-bit
+total-height cap, admitting height-66 (`22 × 3`) profiles across all `globalIdx < 2^66`.
+
+**Rust Architecture Boundary & Section 9 Production Crash-Recoverable Journal:**
+In Rust, `crates/qsag-core/src/tsw_baggy.rs::sign_hypertree_core` runs stateless self-verification
+(`verify_pq_hash_sig`) before returning `Some(sig)` (`verify-only` in the pure core, whose exact
+sibling-fault grafting boundary is proved in `tooth_verify_only_gate_releases_consistent_graft`),
+whereas stateful/quorum write-once release caches and durable ceremony journals reside in
+`crates/qsag-quorum/src/quorum_jorts.rs` (`ots_release_cache`),
+`crates/qsag-fts/src/frontier.rs` (`released_uses`), `crates/qsag-cli/src/keys.rs`, and
+`crates/qsag-core/src/ceremony_journal.rs` (`FsCeremonyJournal`). Section 9 formalizes both the
+production shared-core release gate (`verifyProductionBeforeReleaseAll` over
+`verifyProductionPqHashSig` and `verifyProductionHypertreeLayers` with `TAG_H_INTERNAL` upper
+layers, XOF-derived FORS indices, `(j, u)` FORS ADRS, and `kp0` `.forsTree` Merkle `keyPair`) and
+its key-scoped crash-recoverable persistent upper-layer journal (`DurableUpperJournalState`,
+`stepRecoverableProductionGate`, `recoverable_production_journal_prevents_upper_wots_reuse_across_crashes`),
+distinguishing uninterrupted in-memory trace guarantees from multi-crash durable journal recovery.
 The explicit counter-grinding
 tooth exhibits two valid codewords for one root and key. Faults on the gate itself and on the
 cache are the physical side of item 5. The collision alternatives are witnesses for `suite.rawHash`,
@@ -1824,12 +1844,15 @@ theorem tooth_slh_mask_leaks_on_empty_array :
     decide
 
 
-/-! ## 5. All-layer release cache
+/-! ## 5. All-layer release cache with canonical `HashAdrs` non-aliasing
 
-The cache below stores the message at every upper position. Its list representation is an
-append-only journal: repeated positions must agree on both root and counter. No secret key or
-honest-computation premise is required of a candidate. The two-layer circuit above remains a
-small fault example; this gate handles any number of layers.
+The cache below stores the message at every upper position, keyed by canonical 32-byte encoded
+`HashAdrs` (`AdrsCacheConsistent`) and gated by per-coordinate range bounds (`AdrsGateValid` /
+`OtsPosition.ValidCoords`) so `Nat` positions never alias truncated `UInt32`/`UInt64` hash
+addresses. Its list representation is an append-only journal: repeated encoded addresses must
+agree on both root and counter. No secret key or honest-computation premise is required of a
+candidate. Uninterrupted single-session traces use `guardedSignTraceAll`; multi-crash persistent
+recovery over the production `H_INTERNAL` core is proved in Section 9.
 -/
 
 structure OtsPosition where
@@ -1837,6 +1860,74 @@ structure OtsPosition where
   treeIdx : Nat
   leafIdx : Nat
   deriving DecidableEq, Repr
+
+/-- Canonical WOTS+C public-key `HashAdrs` corresponding to an `OtsPosition`. -/
+def OtsPosition.toWotsPkAdrs (pos : OtsPosition) : HashAdrs :=
+  ⟨UInt32.ofNat pos.layer, UInt64.ofNat pos.treeIdx, .wotsPk, UInt32.ofNat pos.leafIdx, 0, 0⟩
+
+/-- Canonical 32-byte big-endian encoded OTS address (`encodeAdrs`) fed into `thPreimage`. -/
+def OtsPosition.toEncodedAdrs (pos : OtsPosition) : List UInt8 :=
+  encodeAdrs pos.toWotsPkAdrs
+
+/-- Exact non-aliasing coordinate range for `(UInt32, UInt64, UInt32)` `HashAdrs` framing. -/
+def OtsPosition.ValidCoords (pos : OtsPosition) : Bool :=
+  decide (pos.layer < 2 ^ 32) && decide (pos.treeIdx < 2 ^ 64) && decide (pos.leafIdx < 2 ^ 32)
+
+/-- Per-coordinate hypertree shape and index bounds preventing `Nat → UInt32/UInt64` modular
+    aliasing at every layer `0 .. params.numLayers - 1` while admitting height-66 (`22 × 3`)
+    hypertrees across their full `globalIdx < 2^66` leaf space. -/
+def AdrsGateValid (params : PqHashParams) (globalIdx : Nat) : Bool :=
+  decide (0 < params.subtreeHeight) &&
+  decide (params.subtreeHeight ≤ 31) &&
+  decide (params.numLayers ≤ 2 ^ 32) &&
+  decide (globalIdx / 2 ^ params.subtreeHeight < 2 ^ 64)
+
+/-- **Canonical `HashAdrs` Injectivity (`otsPosition_toEncodedAdrs_injective`)**:
+    On range-validated `OtsPosition` coordinates, equality of the 32-byte encoded `HashAdrs`
+    is equivalent to exact equality of the mathematical `(layer, treeIdx, leafIdx)` triple. -/
+theorem otsPosition_toEncodedAdrs_injective {a b : OtsPosition}
+    (ha : a.ValidCoords = true) (hb : b.ValidCoords = true) :
+    a.toEncodedAdrs = b.toEncodedAdrs ↔ a = b := by
+  constructor
+  · intro hEnc
+    have hAdrs : a.toWotsPkAdrs = b.toWotsPkAdrs := encodeAdrs_injective hEnc
+    simp only [OtsPosition.ValidCoords, Bool.and_eq_true, decide_eq_true_eq] at ha hb
+    rcases ha with ⟨⟨haL, haT⟩, haK⟩
+    rcases hb with ⟨⟨hbL, hbT⟩, hbK⟩
+    simp only [OtsPosition.toWotsPkAdrs, HashAdrs.mk.injEq] at hAdrs
+    rcases hAdrs with ⟨hL, hT, _, hK, _, _⟩
+    have hLayerEq : a.layer = b.layer := by
+      have hNat := congrArg UInt32.toNat hL
+      simp only [UInt32.toNat_ofNat', Nat.mod_eq_of_lt haL, Nat.mod_eq_of_lt hbL] at hNat
+      exact hNat
+    have hTreeEq : a.treeIdx = b.treeIdx := by
+      have hNat := congrArg UInt64.toNat hT
+      simp only [UInt64.toNat_ofNat', Nat.mod_eq_of_lt haT, Nat.mod_eq_of_lt hbT] at hNat
+      exact hNat
+    have hLeafEq : a.leafIdx = b.leafIdx := by
+      have hNat := congrArg UInt32.toNat hK
+      simp only [UInt32.toNat_ofNat', Nat.mod_eq_of_lt haK, Nat.mod_eq_of_lt hbK] at hNat
+      exact hNat
+    cases a; cases b; simp_all
+  · intro hEq; rw [hEq]
+
+/-- **`#tooth` Witness (`tooth_unbounded_nat_position_aliases_u64_adrs`)**:
+    Without coordinate range validation (`ValidCoords` / `AdrsGateValid`), distinct mathematical
+    `OtsPosition` keys (e.g. `subtreeHeight = 0` at `globalIdx = 0` vs `globalIdx = 2^64`, or
+    `subtreeHeight = 3` at `globalIdx = 0` vs `globalIdx = 2^67`) produce **distinct `Nat` keys**
+    that truncate to the **exact same 32-byte `HashAdrs`**! -/
+theorem tooth_unbounded_nat_position_aliases_u64_adrs :
+    let pos0 : OtsPosition := ⟨1, 0 / 2 ^ 0, 0 % 2 ^ 0⟩
+    let posAlias : OtsPosition := ⟨1, (2 ^ 64) / 2 ^ 0, (2 ^ 64) % 2 ^ 0⟩
+    pos0 ≠ posAlias ∧
+    pos0.toEncodedAdrs = posAlias.toEncodedAdrs ∧
+    posAlias.ValidCoords = false := by
+  refine ⟨?_, ?_, ?_⟩
+  · intro h
+    have hT := congrArg OtsPosition.treeIdx h
+    simp at hT
+  · decide
+  · decide
 
 structure LayerRelease where
   key : OtsPosition
@@ -1876,7 +1967,39 @@ theorem verifiedLayerMessages_complete (suite : TweakableHashSuite) (params : Pq
     · simp [verifiedLayerMessages, hm, he]
     · simp [List.range', hl]
 
-/-- Pairwise agreement, including repeated uses in the same batch. -/
+/-- Every entry extracted by `verifiedLayerMessages` under bounded subtree height, layer budget,
+    and initial tree index satisfies `OtsPosition.ValidCoords = true`. -/
+theorem verifiedLayerMessages_validCoords (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (sigs : List LayerXmssSig) :
+    ∀ layer g rand root entries,
+      params.subtreeHeight ≤ 31 →
+      layer + sigs.length ≤ 2 ^ 32 →
+      g / 2 ^ params.subtreeHeight < 2 ^ 64 →
+      verifiedLayerMessages suite params pk layer g rand root sigs = some entries →
+      ∀ e ∈ entries, e.key.ValidCoords = true := by
+  induction sigs with
+  | nil =>
+    intro layer g rand root entries _ _ _ h e hm
+    simp [verifiedLayerMessages] at h
+    subst entries; cases hm
+  | cons sig rest ih =>
+    intro layer g rand root entries hSub hLay hTree h e hm
+    simp only [verifiedLayerMessages, Option.bind_eq_bind, Option.bind_eq_some_iff,
+      Option.pure_def, Option.some.injEq] at h
+    obtain ⟨next, _, tail, hTail, rfl⟩ := h
+    rcases List.mem_cons.mp hm with rfl | hMem
+    · simp only [OtsPosition.ValidCoords, Bool.and_eq_true, decide_eq_true_eq]
+      have hLayerLt : layer < 2 ^ 32 := by simp at hLay; omega
+      have hPowLe : 2 ^ params.subtreeHeight ≤ 2 ^ 31 := Nat.pow_le_pow_right (by decide) hSub
+      have hModLt : g % 2 ^ params.subtreeHeight < 2 ^ params.subtreeHeight :=
+        Nat.mod_lt _ (Nat.two_pow_pos _)
+      have h31Lt32 : (2 : Nat) ^ 31 < 2 ^ 32 := by decide
+      exact ⟨⟨hLayerLt, hTree⟩, by omega⟩
+    · exact ih (layer + 1) (g / 2 ^ params.subtreeHeight) [] next tail hSub
+        (by simp at hLay; omega)
+        (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) hTree) hTail e hMem
+
+/-- Pairwise agreement on `Nat` positions. -/
 def CacheConsistent (entries : List LayerRelease) : Prop :=
   ∀ a ∈ entries, ∀ b ∈ entries, a.key = b.key → a.signed = b.signed
 
@@ -1884,16 +2007,31 @@ instance (entries : List LayerRelease) : Decidable (CacheConsistent entries) :=
   inferInstanceAs (Decidable (∀ a ∈ entries, ∀ b ∈ entries,
     a.key = b.key → a.signed = b.signed))
 
-/-- Full verification followed by a transactional cache check. Layer zero is omitted from the
-    upper-layer journal. Returning `none` commits neither a signature nor a partial cache. -/
+/-- Canonical encoded-`HashAdrs` pairwise agreement: any two entries whose 32-byte encoded
+    OTS addresses match must agree on both `(root, tswCtr)`. -/
+def AdrsCacheConsistent (entries : List LayerRelease) : Prop :=
+  ∀ a ∈ entries, ∀ b ∈ entries, a.key.toEncodedAdrs = b.key.toEncodedAdrs → a.signed = b.signed
+
+instance (entries : List LayerRelease) : Decidable (AdrsCacheConsistent entries) :=
+  inferInstanceAs (Decidable (∀ a ∈ entries, ∀ b ∈ entries,
+    a.key.toEncodedAdrs = b.key.toEncodedAdrs → a.signed = b.signed))
+
+theorem adrsCacheConsistent_implies_cacheConsistent {entries : List LayerRelease}
+    (h : AdrsCacheConsistent entries) : CacheConsistent entries :=
+  fun a ha b hb hk => h a ha b hb (congrArg OtsPosition.toEncodedAdrs hk)
+
+/-- Full verification preceded by `AdrsGateValid` coordinate validation and followed by a
+    transactional encoded-`HashAdrs` cache check. Layer zero is omitted from the upper-layer
+    journal. Returning `none` commits neither a signature nor a partial cache. -/
 def verifyBeforeReleaseAll (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (cache : List LayerRelease) (turn : FaultedSignTurn) :
     Option (List LayerRelease) := do
-  if !verifyPqHashSig suite params pk turn.msg turn.candidate then none else do
+  if !AdrsGateValid params turn.candidate.leafGlobalIdx then none
+  else if !verifyPqHashSig suite params pk turn.msg turn.candidate then none else do
     let (rand, root) ← hypertreeStart suite params pk turn.msg turn.candidate
     let entries ← verifiedLayerMessages suite params pk 0 turn.candidate.leafGlobalIdx
       rand root turn.candidate.layerSigs
-    if CacheConsistent (cache ++ entries.drop 1) then some (entries.drop 1) else none
+    if AdrsCacheConsistent (cache ++ entries.drop 1) then some (entries.drop 1) else none
 
 /-- The returned journal contains precisely the upper entries of successfully released
     candidates. Rejecting a turn leaves the journal unchanged. -/
@@ -1905,24 +2043,62 @@ def guardedSignTraceAll (suite : TweakableHashSuite) (params : PqHashParams)
     | none => guardedSignTraceAll suite params pk cache rest
     | some entries => guardedSignTraceAll suite params pk (cache ++ entries) rest
 
-theorem verifyBeforeReleaseAll_consistent (suite : TweakableHashSuite) (params : PqHashParams)
+theorem verifyBeforeReleaseAll_adrsConsistent (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (cache entries : List LayerRelease) (turn : FaultedSignTurn)
     (h : verifyBeforeReleaseAll suite params pk cache turn = some entries) :
-    CacheConsistent (cache ++ entries) := by
+    AdrsCacheConsistent (cache ++ entries) := by
   unfold verifyBeforeReleaseAll at h
   simp only [Option.bind_eq_bind] at h
   split at h
   · cases h
-  · simp only [Option.bind_eq_some_iff] at h
-    obtain ⟨⟨rand, root⟩, _, es, _, h⟩ := h
-    split at h
-    · next hc => cases h; exact hc
+  · split at h
     · cases h
+    · simp only [Option.bind_eq_some_iff] at h
+      obtain ⟨⟨rand, root⟩, _, es, _, h⟩ := h
+      split at h
+      · next hc => cases h; exact hc
+      · cases h
 
-theorem guardedSignTraceAll_consistent (suite : TweakableHashSuite) (params : PqHashParams)
+theorem verifyBeforeReleaseAll_consistent (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (cache entries : List LayerRelease) (turn : FaultedSignTurn)
+    (h : verifyBeforeReleaseAll suite params pk cache turn = some entries) :
+    CacheConsistent (cache ++ entries) :=
+  adrsCacheConsistent_implies_cacheConsistent
+    (verifyBeforeReleaseAll_adrsConsistent suite params pk cache entries turn h)
+
+theorem verifyBeforeReleaseAll_validCoords (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (cache entries : List LayerRelease) (turn : FaultedSignTurn)
+    (h : verifyBeforeReleaseAll suite params pk cache turn = some entries) :
+    ∀ e ∈ entries, e.key.ValidCoords = true := by
+  unfold verifyBeforeReleaseAll at h
+  simp only [Option.bind_eq_bind] at h
+  split at h
+  · cases h
+  · next hGateNeg =>
+    have hGate : AdrsGateValid params turn.candidate.leafGlobalIdx = true := by
+      cases hx : AdrsGateValid params turn.candidate.leafGlobalIdx <;> simp_all
+    split at h
+    · cases h
+    · next hvNeg =>
+      have hv : verifyPqHashSig suite params pk turn.msg turn.candidate = true := by
+        cases hx : verifyPqHashSig suite params pk turn.msg turn.candidate <;> simp_all
+      obtain ⟨_, _, _, _, hlen⟩ := verifyPqHashSig_layers suite params pk _ _ hv
+      simp only [Option.bind_eq_some_iff] at h
+      obtain ⟨⟨rand, root⟩, _, es, he, h⟩ := h
+      split at h
+      · cases h
+        simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+        rcases hGate with ⟨⟨⟨_, hSub⟩, hNum⟩, hTree⟩
+        have hAll := verifiedLayerMessages_validCoords suite params pk turn.candidate.layerSigs
+          0 turn.candidate.leafGlobalIdx rand root es hSub (by omega) hTree he
+        intro e hMem
+        exact hAll e (List.mem_of_mem_drop hMem)
+      · cases h
+
+theorem guardedSignTraceAll_adrsConsistent (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (turns : List FaultedSignTurn) :
-    ∀ cache, CacheConsistent cache →
-      CacheConsistent (guardedSignTraceAll suite params pk cache turns) := by
+    ∀ cache, AdrsCacheConsistent cache →
+      AdrsCacheConsistent (guardedSignTraceAll suite params pk cache turns) := by
   induction turns with
   | nil => intro cache h; exact h
   | cons turn rest ih =>
@@ -1930,33 +2106,73 @@ theorem guardedSignTraceAll_consistent (suite : TweakableHashSuite) (params : Pq
     simp only [guardedSignTraceAll]
     split
     · exact ih cache hc
-    · next entries he => exact ih _ (verifyBeforeReleaseAll_consistent suite params pk _ _ turn he)
+    · next entries he =>
+      exact ih _ (verifyBeforeReleaseAll_adrsConsistent suite params pk _ _ turn he)
 
-/-- Arbitrary depth, including seven and twenty-two layers: at every upper key the released
-    root AND grinding counter are unique over the entire fault-adversarial trace. -/
+theorem guardedSignTraceAll_consistent (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List FaultedSignTurn) :
+    ∀ cache, AdrsCacheConsistent cache →
+      CacheConsistent (guardedSignTraceAll suite params pk cache turns) :=
+  fun cache hc =>
+    adrsCacheConsistent_implies_cacheConsistent
+      (guardedSignTraceAll_adrsConsistent suite params pk turns cache hc)
+
+theorem guardedSignTraceAll_validCoords (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List FaultedSignTurn) :
+    ∀ cache, (∀ e ∈ cache, e.key.ValidCoords = true) →
+      ∀ e ∈ guardedSignTraceAll suite params pk cache turns, e.key.ValidCoords = true := by
+  induction turns with
+  | nil => intro cache h; exact h
+  | cons turn rest ih =>
+    intro cache hc
+    simp only [guardedSignTraceAll]
+    split
+    · exact ih cache hc
+    · next entries he =>
+      apply ih
+      intro e hm
+      rcases List.mem_append.mp hm with hOld | hNew
+      · exact hc e hOld
+      · exact verifyBeforeReleaseAll_validCoords suite params pk cache entries turn he e hNew
+
+/-- Arbitrary depth, including seven and twenty-two layers: at every encoded `HashAdrs` the
+    released root AND grinding counter are unique over the entire fault-adversarial trace. -/
+theorem all_depth_released_adrs_message_unique (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turns : List FaultedSignTurn)
+    (a b : LayerRelease)
+    (ha : a ∈ guardedSignTraceAll suite params pk [] turns)
+    (hb : b ∈ guardedSignTraceAll suite params pk [] turns)
+    (hk : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
+    a.key = b.key ∧ a.signed = b.signed := by
+  have hVa := guardedSignTraceAll_validCoords suite params pk turns [] (by simp) a ha
+  have hVb := guardedSignTraceAll_validCoords suite params pk turns [] (by simp) b hb
+  exact ⟨(otsPosition_toEncodedAdrs_injective hVa hVb).mp hk,
+    guardedSignTraceAll_adrsConsistent suite params pk turns [] (by simp [AdrsCacheConsistent]) a ha b hb hk⟩
+
 theorem all_depth_released_message_unique (suite : TweakableHashSuite)
     (params : PqHashParams) (pk : PqPublicKey) (turns : List FaultedSignTurn)
     (a b : LayerRelease)
     (ha : a ∈ guardedSignTraceAll suite params pk [] turns)
     (hb : b ∈ guardedSignTraceAll suite params pk [] turns)
     (hk : a.key = b.key) : a.signed = b.signed :=
-  guardedSignTraceAll_consistent suite params pk turns [] (by simp [CacheConsistent]) a ha b hb hk
+  (all_depth_released_adrs_message_unique suite params pk turns a b ha hb
+    (congrArg OtsPosition.toEncodedAdrs hk)).2
 
-/-- An empty cache accepts every verified candidate with a consistent upper-layer view;
-    there is no two-layer shape test. The consistency premise is discharged by the distinct
-    layer indices of a complete traversal. -/
+/-- An empty cache accepts every verified candidate with valid coordinates and a consistent
+    upper-layer view; there is no two-layer shape test. -/
 theorem gate_releases_accepted_arbitrary_depth (suite : TweakableHashSuite)
     (params : PqHashParams) (pk : PqPublicKey) (turn : FaultedSignTurn)
     (rand root : List UInt8) (entries : List LayerRelease)
+    (hGate : AdrsGateValid params turn.candidate.leafGlobalIdx = true)
     (hv : verifyPqHashSig suite params pk turn.msg turn.candidate = true)
     (hs : hypertreeStart suite params pk turn.msg turn.candidate = some (rand, root))
     (he : verifiedLayerMessages suite params pk 0 turn.candidate.leafGlobalIdx rand root
       turn.candidate.layerSigs = some entries)
-    (hc : CacheConsistent (entries.drop 1)) :
+    (hc : AdrsCacheConsistent (entries.drop 1)) :
     verifyBeforeReleaseAll suite params pk [] turn = some (entries.drop 1) := by
-  simpa [verifyBeforeReleaseAll, hv, hs, he] using hc
+  simpa [verifyBeforeReleaseAll, hGate, hv, hs, he] using hc
 
-/-- Distinct layer indices imply consistency without any cryptographic assumption. -/
+/-- Distinct layer indices imply `Nat`-key consistency without any cryptographic assumption. -/
 theorem cacheConsistent_of_distinct_layers (es : List LayerRelease)
     (h : (es.map (fun e => e.key.layer)).Nodup) : CacheConsistent es := by
   induction es with
@@ -1971,6 +2187,14 @@ theorem cacheConsistent_of_distinct_layers (es : List LayerRelease)
     · rcases List.mem_cons.mp hb with rfl | hB
       · exact False.elim (hne (List.mem_map.mpr ⟨a, hA, congrArg OtsPosition.layer hk⟩))
       · exact ih ht a hA b hB hk
+
+/-- Distinct range-valid entries imply encoded-`HashAdrs` consistency. -/
+theorem adrsCacheConsistent_of_distinct_valid_layers (es : List LayerRelease)
+    (hVal : ∀ e ∈ es, e.key.ValidCoords = true)
+    (h : (es.map (fun e => e.key.layer)).Nodup) : AdrsCacheConsistent es := by
+  have hNat := cacheConsistent_of_distinct_layers es h
+  intro a ha b hb hEnc
+  exact hNat a ha b hb ((otsPosition_toEncodedAdrs_injective (hVal a ha) (hVal b hb)).mp hEnc)
 
 /-- Constructive range facts used by the cache coverage audit. -/
 theorem layer_range_lower (n start : Nat) : ∀ x ∈ List.range' start n, start ≤ x := by
@@ -2003,21 +2227,63 @@ theorem layer_range_member (n start x : Nat) (hlo : start ≤ x) (hhi : x < star
     · exact List.mem_cons.mpr (Or.inl hx)
     · exact List.mem_cons.mpr (Or.inr (ih (start + 1) (by omega) (by omega)))
 
-/-- Non-vacuity and coverage: for every depth d, a verified signature is released from the empty
-    cache with exactly the upper layer indices 1 through d-1. In particular d=7 and d=22 need
-    no special case and every upper layer is represented. -/
+theorem adrsGateValid_of_verifyPqHashSig (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig)
+    (hSubPos : 0 < params.subtreeHeight)
+    (hv : verifyPqHashSig suite params pk msg sig = true) :
+    AdrsGateValid params sig.leafGlobalIdx = true := by
+  unfold verifyPqHashSig at hv
+  have hWf : params.wellFormed = true := by
+    cases hx : params.wellFormed <;> simp_all
+  have hLeaf : sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight) := by
+    split at hv
+    · cases hv
+    · split at hv
+      · cases hv
+      · next hNeg =>
+        have hDec : decide (sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight)) = true := by
+          cases hx : decide (sig.leafGlobalIdx < 2 ^ (params.numLayers * params.subtreeHeight)) <;> simp_all
+        exact of_decide_eq_true hDec
+  unfold PqHashParams.wellFormed at hWf
+  simp only [Bool.and_eq_true, decide_eq_true_eq] at hWf
+  have hSubLe30 : params.subtreeHeight ≤ 30 := hWf.1.1.1.1.2
+  have hProdLe62 : params.numLayers * params.subtreeHeight ≤ 62 := hWf.1.2
+  have hNumLe62 : params.numLayers ≤ 62 := by
+    have h1 : params.numLayers * 1 ≤ params.numLayers * params.subtreeHeight :=
+      Nat.mul_le_mul_left _ hSubPos
+    omega
+  have hPowLe : 2 ^ (params.numLayers * params.subtreeHeight) ≤ 2 ^ 62 :=
+    Nat.pow_le_pow_right (by decide) hProdLe62
+  have hDivLe : sig.leafGlobalIdx / 2 ^ params.subtreeHeight ≤ sig.leafGlobalIdx :=
+    Nat.div_le_self _ _
+  have h62Lt64 : (2 : Nat) ^ 62 < 2 ^ 64 := by decide
+  simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq]
+  exact ⟨⟨⟨hSubPos, by omega⟩, by omega⟩, by omega⟩
+
+/-- Non-vacuity and coverage: for every depth d with positive subtree height, a verified signature
+    is released from the empty cache with exactly the upper layer indices 1 through d-1. -/
 theorem all_depth_gate_complete (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (turn : FaultedSignTurn)
+    (hSubPos : 0 < params.subtreeHeight)
     (hv : verifyPqHashSig suite params pk turn.msg turn.candidate = true) :
     ∃ es, verifyBeforeReleaseAll suite params pk [] turn = some es ∧
       es.map (fun e => e.key.layer) = List.range' 1 (params.numLayers - 1) := by
+  have hGate := adrsGateValid_of_verifyPqHashSig suite params pk turn.msg turn.candidate hSubPos hv
   obtain ⟨rand, root, hs, ht, hlen⟩ := verifyPqHashSig_layers suite params pk _ _ hv
   obtain ⟨es, he, hl⟩ := verifiedLayerMessages_complete suite params pk _ _ _ _ _ _ ht
   have hd : (es.drop 1).map (fun e => e.key.layer) =
       List.range' 1 (params.numLayers - 1) := by
     rw [List.map_drop, hl, hlen, List.drop_range']
+  have hGateFacts : params.subtreeHeight ≤ 31 ∧ params.numLayers ≤ 2 ^ 32 ∧
+      turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight < 2 ^ 64 := by
+    simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+    exact ⟨hGate.1.1.2, hGate.1.2, hGate.2⟩
+  have hValAll := verifiedLayerMessages_validCoords suite params pk turn.candidate.layerSigs
+    0 turn.candidate.leafGlobalIdx rand root es hGateFacts.1
+    (by omega) hGateFacts.2.2 he
   refine ⟨es.drop 1, gate_releases_accepted_arbitrary_depth suite params pk turn rand root es
-    hv hs he (cacheConsistent_of_distinct_layers _ ?_), hd⟩
+    hGate hv hs he (adrsCacheConsistent_of_distinct_valid_layers _
+      (fun e hm => hValAll e (List.mem_of_mem_drop hm)) ?_), hd⟩
   rw [hd]
   exact layer_range_nodup _ _
 
@@ -2443,11 +2709,12 @@ theorem public_pointer_pubLoop_spectre_v1_immunity (trips : Nat)
 /-- Every requested upper index occurs in an accepted empty-cache release, for all d >= 2. -/
 theorem all_depth_gate_covers_every_upper_layer (suite : TweakableHashSuite)
     (params : PqHashParams) (pk : PqPublicKey) (turn : FaultedSignTurn)
+    (hSubPos : 0 < params.subtreeHeight)
     (hv : verifyPqHashSig suite params pk turn.msg turn.candidate = true)
     (l : Nat) (hl : 1 ≤ l) (hd : l < params.numLayers) :
     ∃ es, verifyBeforeReleaseAll suite params pk [] turn = some es ∧
       ∃ e ∈ es, e.key.layer = l := by
-  obtain ⟨es, he, hm⟩ := all_depth_gate_complete suite params pk turn hv
+  obtain ⟨es, he, hm⟩ := all_depth_gate_complete suite params pk turn hSubPos hv
   refine ⟨es, he, ?_⟩
   have hmem : l ∈ es.map (fun e => e.key.layer) := by
     rw [hm]
@@ -2511,32 +2778,73 @@ structure HypertreeGateTurn where
   root : List UInt8
   sigs : List LayerXmssSig
 
-/-- Layer-level gate for any d-layer hypertree. Both the requested layer count and the actual
-    verified top root are checked before the entire cache transaction is committed. -/
+/-- Layer-level gate for any d-layer hypertree. Enforces `AdrsGateValid` per-coordinate bounds
+    (admitting height-66 `22 × 3` trees without `UInt32`/`UInt64` address aliasing), layer count,
+    verified top root, and encoded-`HashAdrs` cache consistency before committing. -/
 def verifyHypertreeBeforeRelease (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (cache : List LayerRelease) (turn : HypertreeGateTurn) :
     Option (List LayerRelease) := do
-  if turn.sigs.length ≠ params.numLayers then none else do
+  if !AdrsGateValid params turn.globalIdx then none
+  else if turn.sigs.length ≠ params.numLayers then none else do
     if verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot turn.rand 0 turn.globalIdx
         turn.root turn.sigs ≠ some pk.pkRoot then none else do
       let es ← verifiedLayerMessages suite params pk 0 turn.globalIdx turn.rand turn.root turn.sigs
-      if CacheConsistent (cache ++ es.drop 1) then some (es.drop 1) else none
+      if AdrsCacheConsistent (cache ++ es.drop 1) then some (es.drop 1) else none
 
-theorem verifyHypertreeBeforeRelease_consistent (suite : TweakableHashSuite)
+theorem verifyHypertreeBeforeRelease_adrsConsistent (suite : TweakableHashSuite)
     (params : PqHashParams) (pk : PqPublicKey) (cache es : List LayerRelease)
     (turn : HypertreeGateTurn)
     (h : verifyHypertreeBeforeRelease suite params pk cache turn = some es) :
-    CacheConsistent (cache ++ es) := by
+    AdrsCacheConsistent (cache ++ es) := by
   unfold verifyHypertreeBeforeRelease at h
   split at h
   · cases h
   · split at h
     · cases h
-    · simp only [Option.bind_eq_bind, Option.bind_eq_some_iff] at h
-      obtain ⟨entries, _, h⟩ := h
-      split at h
-      · next hc => cases h; exact hc
+    · split at h
       · cases h
+      · simp only [Option.bind_eq_bind, Option.bind_eq_some_iff] at h
+        obtain ⟨entries, _, h⟩ := h
+        split at h
+        · next hc => cases h; exact hc
+        · cases h
+
+theorem verifyHypertreeBeforeRelease_consistent (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (cache es : List LayerRelease)
+    (turn : HypertreeGateTurn)
+    (h : verifyHypertreeBeforeRelease suite params pk cache turn = some es) :
+    CacheConsistent (cache ++ es) :=
+  adrsCacheConsistent_implies_cacheConsistent
+    (verifyHypertreeBeforeRelease_adrsConsistent suite params pk cache es turn h)
+
+theorem verifyHypertreeBeforeRelease_validCoords (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (cache es : List LayerRelease)
+    (turn : HypertreeGateTurn)
+    (h : verifyHypertreeBeforeRelease suite params pk cache turn = some es) :
+    ∀ e ∈ es, e.key.ValidCoords = true := by
+  unfold verifyHypertreeBeforeRelease at h
+  split at h
+  · cases h
+  · next hGateNeg =>
+    have hGate : AdrsGateValid params turn.globalIdx = true := by
+      cases hx : AdrsGateValid params turn.globalIdx <;> simp_all
+    split at h
+    · cases h
+    · next hn =>
+      have hlen := Decidable.not_not.mp hn
+      split at h
+      · cases h
+      · simp only [Option.bind_eq_bind, Option.bind_eq_some_iff] at h
+        obtain ⟨entries, he, h⟩ := h
+        split at h
+        · cases h
+          simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+          rcases hGate with ⟨⟨⟨_, hSub⟩, hNum⟩, hTree⟩
+          have hAll := verifiedLayerMessages_validCoords suite params pk turn.sigs
+            0 turn.globalIdx turn.rand turn.root entries hSub (by omega) hTree he
+          intro e hm
+          exact hAll e (List.mem_of_mem_drop hm)
+        · cases h
 
 def guardedHypertreeTrace (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) : List LayerRelease → List HypertreeGateTurn → List LayerRelease
@@ -2546,10 +2854,10 @@ def guardedHypertreeTrace (suite : TweakableHashSuite) (params : PqHashParams)
     | none => guardedHypertreeTrace suite params pk cache rest
     | some es => guardedHypertreeTrace suite params pk (cache ++ es) rest
 
-theorem guardedHypertreeTrace_consistent (suite : TweakableHashSuite) (params : PqHashParams)
+theorem guardedHypertreeTrace_adrsConsistent (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (turns : List HypertreeGateTurn) :
-    ∀ cache, CacheConsistent cache →
-      CacheConsistent (guardedHypertreeTrace suite params pk cache turns) := by
+    ∀ cache, AdrsCacheConsistent cache →
+      AdrsCacheConsistent (guardedHypertreeTrace suite params pk cache turns) := by
   induction turns with
   | nil => intro cache h; exact h
   | cons turn rest ih =>
@@ -2557,21 +2865,63 @@ theorem guardedHypertreeTrace_consistent (suite : TweakableHashSuite) (params : 
     simp only [guardedHypertreeTrace]
     split
     · exact ih cache hc
-    · next es he => exact ih _ (verifyHypertreeBeforeRelease_consistent suite params pk _ _ turn he)
+    · next es he =>
+      exact ih _ (verifyHypertreeBeforeRelease_adrsConsistent suite params pk _ _ turn he)
+
+theorem guardedHypertreeTrace_consistent (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List HypertreeGateTurn) :
+    ∀ cache, AdrsCacheConsistent cache →
+      CacheConsistent (guardedHypertreeTrace suite params pk cache turns) :=
+  fun cache hc =>
+    adrsCacheConsistent_implies_cacheConsistent
+      (guardedHypertreeTrace_adrsConsistent suite params pk turns cache hc)
+
+theorem guardedHypertreeTrace_validCoords (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turns : List HypertreeGateTurn) :
+    ∀ cache, (∀ e ∈ cache, e.key.ValidCoords = true) →
+      ∀ e ∈ guardedHypertreeTrace suite params pk cache turns, e.key.ValidCoords = true := by
+  induction turns with
+  | nil => intro cache h; exact h
+  | cons turn rest ih =>
+    intro cache hc
+    simp only [guardedHypertreeTrace]
+    split
+    · exact ih cache hc
+    · next es he =>
+      apply ih
+      intro e hm
+      rcases List.mem_append.mp hm with hOld | hNew
+      · exact hc e hOld
+      · exact verifyHypertreeBeforeRelease_validCoords suite params pk cache es turn he e hNew
 
 /-- Any depth and total height: the layer-level verifier/cache gate excludes a second WOTS+C
-    message at every upper `(layer,tree,leaf)` throughout an arbitrary adversarial trace. -/
+    message at every encoded 32-byte `HashAdrs` throughout an arbitrary adversarial trace. -/
+theorem arbitrary_hypertree_gate_prevents_adrs_wots_reuse (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turns : List HypertreeGateTurn)
+    (a b : LayerRelease)
+    (ha : a ∈ guardedHypertreeTrace suite params pk [] turns)
+    (hb : b ∈ guardedHypertreeTrace suite params pk [] turns)
+    (hk : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
+    a.key = b.key ∧ a.signed = b.signed := by
+  have hVa := guardedHypertreeTrace_validCoords suite params pk turns [] (by simp) a ha
+  have hVb := guardedHypertreeTrace_validCoords suite params pk turns [] (by simp) b hb
+  exact ⟨(otsPosition_toEncodedAdrs_injective hVa hVb).mp hk,
+    guardedHypertreeTrace_adrsConsistent suite params pk turns [] (by simp [AdrsCacheConsistent]) a ha b hb hk⟩
+
 theorem arbitrary_hypertree_gate_prevents_fault_wots_reuse (suite : TweakableHashSuite)
     (params : PqHashParams) (pk : PqPublicKey) (turns : List HypertreeGateTurn)
     (a b : LayerRelease)
     (ha : a ∈ guardedHypertreeTrace suite params pk [] turns)
     (hb : b ∈ guardedHypertreeTrace suite params pk [] turns)
     (hk : a.key = b.key) : a.signed = b.signed :=
-  guardedHypertreeTrace_consistent suite params pk turns [] (by simp [CacheConsistent]) a ha b hb hk
+  (arbitrary_hypertree_gate_prevents_adrs_wots_reuse suite params pk turns a b ha hb
+    (congrArg OtsPosition.toEncodedAdrs hk)).2
 
-/-- Complete coverage has no total-height premise: each upper layer 1,...,d-1 is cached. -/
+/-- Complete coverage under coordinate bounds (no 62-bit total-height premise): each upper layer
+    1,...,d-1 is cached. -/
 theorem hypertree_gate_complete (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (turn : HypertreeGateTurn)
+    (hGate : AdrsGateValid params turn.globalIdx = true)
     (hlen : turn.sigs.length = params.numLayers)
     (hv : verifyHypertreeLayers suite params pk.pkSeed pk.pkRoot turn.rand 0 turn.globalIdx
       turn.root turn.sigs = some pk.pkRoot) :
@@ -2581,10 +2931,28 @@ theorem hypertree_gate_complete (suite : TweakableHashSuite) (params : PqHashPar
   have hd : (es.drop 1).map (fun e => e.key.layer) =
       List.range' 1 (params.numLayers - 1) := by
     rw [List.map_drop, hl, hlen, List.drop_range']
-  have hc := cacheConsistent_of_distinct_layers (es.drop 1)
+  have hGateFacts : params.subtreeHeight ≤ 31 ∧ params.numLayers ≤ 2 ^ 32 ∧
+      turn.globalIdx / 2 ^ params.subtreeHeight < 2 ^ 64 := by
+    simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+    exact ⟨hGate.1.1.2, hGate.1.2, hGate.2⟩
+  have hValAll := verifiedLayerMessages_validCoords suite params pk turn.sigs
+    0 turn.globalIdx turn.rand turn.root es hGateFacts.1 (by omega) hGateFacts.2.2 he
+  have hc := adrsCacheConsistent_of_distinct_valid_layers (es.drop 1)
+    (fun e hm => hValAll e (List.mem_of_mem_drop hm))
     (by rw [hd]; exact layer_range_nodup _ _)
   refine ⟨es.drop 1, ?_, hd⟩
-  simpa [verifyHypertreeBeforeRelease, hlen, hv, he] using hc
+  simpa [verifyHypertreeBeforeRelease, hGate, hlen, hv, he] using hc
+
+/-- **`#tooth` Witness (`tooth_adrs_gate_rejects_aliasing_inputs`)**:
+    `verifyHypertreeBeforeRelease` rejects `subtreeHeight = 0` and rejects oversized `globalIdx = 2^67`
+    at `22 × 3`, while admitting the entire height-66 leaf domain (`globalIdx = 2^66 - 1`). -/
+theorem tooth_adrs_gate_rejects_aliasing_inputs :
+    verifyHypertreeBeforeRelease zeroToySuite { deepToyParams 2 with subtreeHeight := 0 }
+      ⟨[], List.replicate 32 0⟩ [] ⟨2 ^ 64, [], [], []⟩ = none ∧
+    verifyHypertreeBeforeRelease zeroToySuite { deepToyParams 22 with subtreeHeight := 3 }
+      ⟨[], List.replicate 32 0⟩ [] ⟨2 ^ 67, [], [], []⟩ = none ∧
+    AdrsGateValid { deepToyParams 22 with subtreeHeight := 3 } (2 ^ 66 - 1) = true := by
+  exact ⟨by decide, by decide, by decide⟩
 
 /- The 22-layer, height-3 shape (66 total levels) is not rejected by the layer gate. This is
     an executable model witness for the shape, not an identification of WOTS+C with FIPS WOTS+. -/
@@ -2682,30 +3050,32 @@ theorem verifyBeforeReleaseAll_openingBound (suite : TweakableHashSuite) (params
   unfold verifyBeforeReleaseAll at h
   split at h
   · cases h
-  · next hv =>
-    have hv' : verifyPqHashSig suite params pk turn.msg turn.candidate = true := by
-      cases hx : verifyPqHashSig suite params pk turn.msg turn.candidate <;> simp_all
-    obtain ⟨rand, root, hs, ht, hlen⟩ := verifyPqHashSig_layers suite params pk _ _ hv'
-    simp only [hs] at h
-    cases hsig : turn.candidate.layerSigs with
-    | nil =>
-      simp [hsig, verifiedLayerMessages] at h
-      rw [h.2]; intro e he; cases he
-    | cons sig rest =>
-      rw [hsig] at ht hlen h
-      obtain ⟨mid, hm, hu⟩ := (verifyHypertreeLayers_split suite params pk.pkSeed pk.pkRoot
-        rand 0 turn.candidate.leafGlobalIdx root sig rest pk.pkRoot).mp ht
-      simp only [verifiedLayerMessages, hm, Option.bind_some, Option.bind_eq_bind,
-        Option.bind_eq_some_iff, Option.pure_def, Option.some.injEq] at h
-      obtain ⟨all, ⟨tail, he, rfl⟩, h⟩ := h
-      simp only [List.drop_succ_cons, List.drop_zero] at h
-      split at h
-      · cases h
-        exact verifiedLayerMessages_openingBound suite params pk rest 1
-          (turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight) mid es (cache ++ es)
-          (by simpa [Nat.add_comm] using hlen) he hu
-          (fun x hx => List.mem_append.mpr (Or.inr hx))
-      · cases h
+  · split at h
+    · cases h
+    · next hv =>
+      have hv' : verifyPqHashSig suite params pk turn.msg turn.candidate = true := by
+        cases hx : verifyPqHashSig suite params pk turn.msg turn.candidate <;> simp_all
+      obtain ⟨rand, root, hs, ht, hlen⟩ := verifyPqHashSig_layers suite params pk _ _ hv'
+      simp only [hs] at h
+      cases hsig : turn.candidate.layerSigs with
+      | nil =>
+        simp [hsig, verifiedLayerMessages] at h
+        rw [h.2]; intro e he; cases he
+      | cons sig rest =>
+        rw [hsig] at ht hlen h
+        obtain ⟨mid, hm, hu⟩ := (verifyHypertreeLayers_split suite params pk.pkSeed pk.pkRoot
+          rand 0 turn.candidate.leafGlobalIdx root sig rest pk.pkRoot).mp ht
+        simp only [verifiedLayerMessages, hm, Option.bind_some, Option.bind_eq_bind,
+          Option.bind_eq_some_iff, Option.pure_def, Option.some.injEq] at h
+        obtain ⟨all, ⟨tail, he, rfl⟩, h⟩ := h
+        simp only [List.drop_succ_cons, List.drop_zero] at h
+        split at h
+        · cases h
+          exact verifiedLayerMessages_openingBound suite params pk rest 1
+            (turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight) mid es (cache ++ es)
+            (by simpa [Nat.add_comm] using hlen) he hu
+            (fun x hx => List.mem_append.mpr (Or.inr hx))
+        · cases h
 
 theorem guardedSignTraceAll_openingBound (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (turns : List FaultedSignTurn) :
@@ -2765,6 +3135,21 @@ theorem bound_cached_openings_unique_or_collision (suite : TweakableHashSuite)
     rw [hctr, hchains, hpath]
   · exact Or.inr hcol
 
+/-- Encoded-`HashAdrs`-level opening uniqueness on `guardedSignTraceAll`: any two entries whose
+    32-byte WOTS+C addresses agree have identical `Nat` positions, identical `(root, tswCtr)`,
+    and identical openings unless a `suite.rawHash` collision is exhibited. -/
+theorem verify_before_release_adrs_openings_unique_or_collision (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turns : List FaultedSignTurn)
+    (a b : LayerRelease)
+    (ha : a ∈ guardedSignTraceAll suite params pk [] turns)
+    (hb : b ∈ guardedSignTraceAll suite params pk [] turns)
+    (hk : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
+    a.key = b.key ∧ a.signed = b.signed ∧ (a.opening = b.opening ∨ Collision suite.rawHash) := by
+  have hkEq := (all_depth_released_adrs_message_unique suite params pk turns a b ha hb hk).1
+  exact ⟨hkEq, bound_cached_openings_unique_or_collision suite params pk _
+    (guardedSignTraceAll_consistent suite params pk turns [] (by simp [AdrsCacheConsistent]))
+    (guardedSignTraceAll_openingBound suite params pk turns [] (by simp)) a b ha hb hkEq⟩
+
 /-- Full-signature gate, all depths: one message and one opening per upper key, or collision. -/
 theorem verify_before_release_prevents_fault_wots_reuse (suite : TweakableHashSuite)
     (params : PqHashParams) (pk : PqPublicKey) (turns : List FaultedSignTurn)
@@ -2773,9 +3158,8 @@ theorem verify_before_release_prevents_fault_wots_reuse (suite : TweakableHashSu
     (hb : b ∈ guardedSignTraceAll suite params pk [] turns)
     (hk : a.key = b.key) :
     a.signed = b.signed ∧ (a.opening = b.opening ∨ Collision suite.rawHash) :=
-  bound_cached_openings_unique_or_collision suite params pk _
-    (guardedSignTraceAll_consistent suite params pk turns [] (by simp [CacheConsistent]))
-    (guardedSignTraceAll_openingBound suite params pk turns [] (by simp)) a b ha hb hk
+  (verify_before_release_adrs_openings_unique_or_collision suite params pk turns a b ha hb
+    (congrArg OtsPosition.toEncodedAdrs hk)).2
 
 theorem verifyHypertreeBeforeRelease_openingBound (suite : TweakableHashSuite)
     (params : PqHashParams) (pk : PqPublicKey) (cache es : List LayerRelease)
@@ -2785,31 +3169,33 @@ theorem verifyHypertreeBeforeRelease_openingBound (suite : TweakableHashSuite)
   unfold verifyHypertreeBeforeRelease at h
   split at h
   · cases h
-  · next hn =>
-    have hlen := Decidable.not_not.mp hn
-    split at h
+  · split at h
     · cases h
-    · next hv =>
-      have ht := Decidable.not_not.mp hv
-      cases hsig : turn.sigs with
-      | nil =>
-        simp [hsig, verifiedLayerMessages] at h
-        rw [h.2]; intro e he; cases he
-      | cons sig rest =>
-        rw [hsig] at ht hlen h
-        obtain ⟨mid, hm, hu⟩ := (verifyHypertreeLayers_split suite params pk.pkSeed pk.pkRoot
-          turn.rand 0 turn.globalIdx turn.root sig rest pk.pkRoot).mp ht
-        simp only [verifiedLayerMessages, hm, Option.bind_some, Option.bind_eq_bind,
-          Option.bind_eq_some_iff, Option.pure_def, Option.some.injEq] at h
-        obtain ⟨all, ⟨tail, he, rfl⟩, h⟩ := h
-        simp only [List.drop_succ_cons, List.drop_zero] at h
-        split at h
-        · cases h
-          exact verifiedLayerMessages_openingBound suite params pk rest 1
-            (turn.globalIdx / 2 ^ params.subtreeHeight) mid es (cache ++ es)
-            (by simpa [Nat.add_comm] using hlen) he hu
-            (fun x hx => List.mem_append.mpr (Or.inr hx))
-        · cases h
+    · next hn =>
+      have hlen := Decidable.not_not.mp hn
+      split at h
+      · cases h
+      · next hv =>
+        have ht := Decidable.not_not.mp hv
+        cases hsig : turn.sigs with
+        | nil =>
+          simp [hsig, verifiedLayerMessages] at h
+          rw [h.2]; intro e he; cases he
+        | cons sig rest =>
+          rw [hsig] at ht hlen h
+          obtain ⟨mid, hm, hu⟩ := (verifyHypertreeLayers_split suite params pk.pkSeed pk.pkRoot
+            turn.rand 0 turn.globalIdx turn.root sig rest pk.pkRoot).mp ht
+          simp only [verifiedLayerMessages, hm, Option.bind_some, Option.bind_eq_bind,
+            Option.bind_eq_some_iff, Option.pure_def, Option.some.injEq] at h
+          obtain ⟨all, ⟨tail, he, rfl⟩, h⟩ := h
+          simp only [List.drop_succ_cons, List.drop_zero] at h
+          split at h
+          · cases h
+            exact verifiedLayerMessages_openingBound suite params pk rest 1
+              (turn.globalIdx / 2 ^ params.subtreeHeight) mid es (cache ++ es)
+              (by simpa [Nat.add_comm] using hlen) he hu
+              (fun x hx => List.mem_append.mpr (Or.inr hx))
+          · cases h
 
 theorem guardedHypertreeTrace_openingBound (suite : TweakableHashSuite) (params : PqHashParams)
     (pk : PqPublicKey) (turns : List HypertreeGateTurn) :
@@ -2831,6 +3217,19 @@ theorem guardedHypertreeTrace_openingBound (suite : TweakableHashSuite) (params 
           (fun x hx => List.mem_append.mpr (Or.inl hx)) (hc e hOld)
       · exact verifyHypertreeBeforeRelease_openingBound suite params pk cache es turn he e hNew
 
+/-- Encoded-`HashAdrs`-level opening uniqueness on `guardedHypertreeTrace` (including `22 × 3`). -/
+theorem arbitrary_depth_adrs_openings_unique_or_collision (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (turns : List HypertreeGateTurn)
+    (a b : LayerRelease)
+    (ha : a ∈ guardedHypertreeTrace suite params pk [] turns)
+    (hb : b ∈ guardedHypertreeTrace suite params pk [] turns)
+    (hk : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
+    a.key = b.key ∧ a.signed = b.signed ∧ (a.opening = b.opening ∨ Collision suite.rawHash) := by
+  have hkEq := (arbitrary_hypertree_gate_prevents_adrs_wots_reuse suite params pk turns a b ha hb hk).1
+  exact ⟨hkEq, bound_cached_openings_unique_or_collision suite params pk _
+    (guardedHypertreeTrace_consistent suite params pk turns [] (by simp [AdrsCacheConsistent]))
+    (guardedHypertreeTrace_openingBound suite params pk turns [] (by simp)) a b ha hb hkEq⟩
+
 /-- The layer-level gate retains the full opening-uniqueness conclusion, without a total-height
     bound, including the 22-by-3 shape demonstrated above. -/
 theorem arbitrary_depth_openings_unique_or_collision (suite : TweakableHashSuite)
@@ -2840,9 +3239,657 @@ theorem arbitrary_depth_openings_unique_or_collision (suite : TweakableHashSuite
     (hb : b ∈ guardedHypertreeTrace suite params pk [] turns)
     (hk : a.key = b.key) :
     a.signed = b.signed ∧ (a.opening = b.opening ∨ Collision suite.rawHash) :=
-  bound_cached_openings_unique_or_collision suite params pk _
-    (guardedHypertreeTrace_consistent suite params pk turns [] (by simp [CacheConsistent]))
-    (guardedHypertreeTrace_openingBound suite params pk turns [] (by simp)) a b ha hb hk
+  (arbitrary_depth_adrs_openings_unique_or_collision suite params pk turns a b ha hb
+    (congrArg OtsPosition.toEncodedAdrs hk)).2
+
+/-! ## 9. Production Shared-Core (`TAG_H_INTERNAL`) Gate & Crash-Recoverable Persistent Journal
+
+This section lifts the all-layer fault-injection gate directly onto the Rust-exact production
+verifier (`verifyProductionPqHashSig` and `verifyProductionHypertreeLayers` in `Qsag.HashSigs`),
+where upper layers hash via `TAG_H_INTERNAL` (`productionLayerDigest`), stateless FORS indices are
+threaded from `deriveProductionStatelessInputs`, FORS leaves use `(j, u)` addressing, and `.forsTree`
+Merkle nodes bind `keyPair = kp0`.
+
+It then models a crash-recoverable signer (`DurableUpperJournalState`) whose upper-layer journal
+is persisted to durable storage *before* signature emission (`stepRecoverableProductionGate`),
+proving multi-crash WOTS+C non-reuse alongside a `#tooth` witness showing volatile-only caches fail
+across reboots.
+-/
+
+theorem verifyProductionHypertreeLayers_split (suite : TweakableHashSuite) (params : PqHashParams)
+    (pkSeed pkRoot rand : List UInt8) (layer g : Nat) (cur : List UInt8) (l : LayerXmssSig)
+    (rest : List LayerXmssSig) (top : List UInt8) :
+    verifyProductionHypertreeLayers suite params pkSeed pkRoot rand layer g cur (l :: rest) = some top ↔
+      ∃ mid, verifyProductionHypertreeLayers suite params pkSeed pkRoot rand layer g cur [l] = some mid ∧
+        verifyProductionHypertreeLayers suite params pkSeed pkRoot rand (layer + 1)
+          (g / 2 ^ params.subtreeHeight) mid rest = some top := by
+  rw [verifyProductionHypertreeLayers_cons, verifyProductionHypertreeLayers_cons]
+  dsimp only
+  split
+  · simp
+  · split
+    · simp
+    · split
+      · simp
+      · split
+        · simp
+        · split
+          · simp
+          · simp [verifyProductionHypertreeLayers_nil]
+
+theorem verifyProductionHypertreeLayers_upper_rand_irrel (suite : TweakableHashSuite)
+    (params : PqHashParams) (pkSeed pkRoot rand : List UInt8) (sigs : List LayerXmssSig) :
+    ∀ layer g cur,
+      1 ≤ layer →
+      verifyProductionHypertreeLayers suite params pkSeed pkRoot rand layer g cur sigs =
+        verifyProductionHypertreeLayers suite params pkSeed pkRoot [] layer g cur sigs := by
+  induction sigs with
+  | nil => intro layer g cur _; rfl
+  | cons l rest ih =>
+    intro layer g cur hLay
+    have hNe0 : decide (layer = 0) = false := decide_eq_false (by omega)
+    have hDig : productionLayerDigest suite params rand pkSeed pkRoot cur layer
+        (UInt64.ofNat (g / 2 ^ params.subtreeHeight)) (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) l.tswCtr =
+        productionLayerDigest suite params [] pkSeed pkRoot cur layer
+        (UInt64.ofNat (g / 2 ^ params.subtreeHeight)) (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) l.tswCtr := by
+      simp only [productionLayerDigest_eq, hNe0, Bool.and_false]
+    rw [verifyProductionHypertreeLayers_cons, verifyProductionHypertreeLayers_cons]
+    dsimp only
+    rw [hDig]
+    split
+    · rfl
+    · split
+      · rfl
+      · split
+        · rfl
+        · split
+          · rfl
+          · split
+            · rfl
+            · exact ih (layer + 1) (g / 2 ^ params.subtreeHeight) _ (by omega)
+
+theorem verifyProductionHypertreeLayers_single (suite : TweakableHashSuite) (params : PqHashParams)
+    (pkSeed pkRoot rand : List UInt8) (layer g : Nat) (cur : List UInt8) (l : LayerXmssSig)
+    (top : List UInt8)
+    (h : verifyProductionHypertreeLayers suite params pkSeed pkRoot rand layer g cur [l] = some top) :
+    ∃ digits,
+      extractBaseWDigitsChecked params.w params.ell1
+        (productionLayerDigest suite params rand pkSeed pkRoot cur layer
+          (UInt64.ofNat (g / 2 ^ params.subtreeHeight))
+          (UInt32.ofNat (g % 2 ^ params.subtreeHeight)) l.tswCtr) = some digits ∧
+      l.wotsChains.length = params.ell1 ∧
+      walkMerkleAuthPath suite pkSeed (UInt32.ofNat layer)
+        (UInt64.ofNat (g / 2 ^ params.subtreeHeight)) .tree params.subtreeHeight 0
+        (g % 2 ^ params.subtreeHeight)
+        (recoverWotsPkFromSig suite params pkSeed (UInt32.ofNat layer)
+          (UInt64.ofNat (g / 2 ^ params.subtreeHeight)) (g % 2 ^ params.subtreeHeight)
+          digits l.wotsChains) l.authPath = some top := by
+  rw [verifyProductionHypertreeLayers_cons] at h
+  dsimp only at h
+  split at h
+  · cases h
+  · split at h
+    · cases h
+    · next digits hDig =>
+      split at h
+      · cases h
+      · split at h
+        · cases h
+        · next hLen =>
+          split at h
+          · cases h
+          · next mid hWalk =>
+            rw [verifyProductionHypertreeLayers_nil] at h
+            injection h with hEq; subst hEq
+            rw [walkMerkleAuthPathKp_zero_eq] at hWalk
+            exact ⟨digits, hDig, Decidable.not_not.mp hLen, hWalk⟩
+
+/-- Production hypertree layer-0 start root (`thPreHash` in stateful mode, `recoverProductionForsPk`
+    over XOF-derived FORS indices in stateless mode). -/
+def productionHypertreeStart (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig) : Option (List UInt8 × List UInt8) :=
+  let mu := thPreHash suite pk.pkSeed pk.pkRoot msg
+  if params.statefulJorts then
+    if !sig.forsOpenings.isEmpty then none
+    else some (sig.rRand, mu)
+  else
+    if sig.forsOpenings.length ≠ params.forsTrees then none
+    else
+      match deriveProductionStatelessInputs suite params sig.rRand pk.pkSeed pk.pkRoot mu with
+      | none => none
+      | some (derivedLeafIdx, idxs) =>
+        if sig.leafGlobalIdx ≠ derivedLeafIdx then none
+        else
+          let subLeaves := 2 ^ params.subtreeHeight
+          let kp0 := sig.leafGlobalIdx % subLeaves
+          let tree0 := UInt64.ofNat (sig.leafGlobalIdx / subLeaves)
+          (recoverProductionForsPk suite params pk.pkSeed tree0 kp0 idxs sig.forsOpenings).map
+            fun forsPk => (sig.rRand, forsPk)
+
+theorem adrsGateValid_of_productionWellFormed (params : PqHashParams) (leafIdx : Nat)
+    (hWf : params.productionWellFormed = true)
+    (hRange : params.productionLeafIdxInRange leafIdx = true) :
+    AdrsGateValid params leafIdx = true := by
+  obtain ⟨_, _, _, _, _, hSubPos, hSubLe30, _, _, hTot62, _, _, _, _⟩ :=
+    params.productionWellFormed_facts hWf
+  rw [PqHashParams.productionLeafIdxInRange_eq] at hRange
+  dsimp only at hRange
+  have hLtCap := of_decide_eq_true hRange
+  have hCapLe62 : (if params.statefulJorts && decide (params.maxSigsLog2 < params.numLayers * params.subtreeHeight)
+      then params.maxSigsLog2 else params.numLayers * params.subtreeHeight) ≤ 62 := by
+    split
+    · rename_i hC; simp only [Bool.and_eq_true, decide_eq_true_eq] at hC; omega
+    · exact hTot62
+  have hPowLe : 2 ^ (if params.statefulJorts && decide (params.maxSigsLog2 < params.numLayers * params.subtreeHeight)
+      then params.maxSigsLog2 else params.numLayers * params.subtreeHeight) ≤ 2 ^ 62 :=
+    Nat.pow_le_pow_right (by decide) hCapLe62
+  have hNumLe62 : params.numLayers ≤ 62 := by
+    have h1 : params.numLayers * 1 ≤ params.numLayers * params.subtreeHeight :=
+      Nat.mul_le_mul_left _ hSubPos
+    omega
+  have hDivLe : leafIdx / 2 ^ params.subtreeHeight ≤ leafIdx := Nat.div_le_self _ _
+  have h62Lt64 : (2 : Nat) ^ 62 < 2 ^ 64 := by decide
+  simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq]
+  exact ⟨⟨⟨hSubPos, by omega⟩, by omega⟩, by omega⟩
+
+theorem verifyProductionPqHashSig_layers (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (msg : List UInt8) (sig : PqHashSig)
+    (h : verifyProductionPqHashSig suite params pk msg sig = true) :
+    AdrsGateValid params sig.leafGlobalIdx = true ∧
+    sig.layerSigs.length = params.numLayers ∧
+    ∃ rand start,
+      productionHypertreeStart suite params pk msg sig = some (rand, start) ∧
+      verifyProductionHypertreeLayers suite params pk.pkSeed pk.pkRoot rand 0
+        sig.leafGlobalIdx start sig.layerSigs = some pk.pkRoot := by
+  rw [verifyProductionPqHashSig_eq] at h
+  cases hWf : params.productionWellFormed
+  · simp [hWf] at h
+  · cases hRange : params.productionLeafIdxInRange sig.leafGlobalIdx
+    · simp [hWf, hRange] at h
+    · have hGate := adrsGateValid_of_productionWellFormed params sig.leafGlobalIdx hWf hRange
+      simp only [hWf, hRange, Bool.not_true, Bool.or_self, Bool.false_eq_true, ↓reduceIte] at h
+      by_cases hLen : sig.layerSigs.length = params.numLayers
+      · by_cases hCtr0 : sig.msgTswCtr = 0
+        · simp only [hLen, hCtr0, ne_eq, not_true_eq_false, Bool.or_self, ↓reduceIte] at h
+          refine ⟨hGate, hLen, ?_⟩
+          unfold productionHypertreeStart
+          dsimp only at h ⊢
+          split at h
+          · next hSt =>
+            simp only [hSt, ↓reduceIte]
+            split at h
+            · cases h
+            · next hEmpty =>
+              simp only [hEmpty, ↓reduceIte]
+              split at h
+              · next top hVer =>
+                exact ⟨sig.rRand, thPreHash suite pk.pkSeed pk.pkRoot msg, rfl,
+                  by rw [hVer, of_decide_eq_true h]⟩
+              · cases h
+          · next hSt =>
+            simp only [hSt, ↓reduceIte]
+            split at h
+            · cases h
+            · next hFLen =>
+              simp only [hFLen, ↓reduceIte]
+              split at h
+              · cases h
+              · next derivedLeaf idxs hDer =>
+                simp only [hDer]
+                split at h
+                · cases h
+                · next hLeafEq =>
+                  simp only [hLeafEq, ↓reduceIte]
+                  split at h
+                  · cases h
+                  · next forsPk hFors =>
+                    split at h
+                    · next top hVer =>
+                      exact ⟨sig.rRand, forsPk, by simp [hFors],
+                        by rw [hVer, of_decide_eq_true h]⟩
+                    · cases h
+        · simp [hLen, hCtr0] at h
+      · simp [hLen] at h
+
+/-- Extract per-layer `(OtsPosition, OtsMessage, LayerXmssSig)` entries via the production
+    `verifyProductionHypertreeLayers` verifier (`TAG_H_INTERNAL` on all upper layers). -/
+def verifiedProductionLayerMessages (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) : Nat → Nat → List UInt8 → List UInt8 →
+      List LayerXmssSig → Option (List LayerRelease)
+  | _, _, _, _, [] => some []
+  | layer, g, rand, root, sig :: rest => do
+    let next ← verifyProductionHypertreeLayers suite params pk.pkSeed pk.pkRoot rand layer g root [sig]
+    let tail ← verifiedProductionLayerMessages suite params pk (layer + 1)
+      (g / 2 ^ params.subtreeHeight) [] next rest
+    pure (⟨⟨layer, g / 2 ^ params.subtreeHeight, g % 2 ^ params.subtreeHeight⟩,
+      ⟨root, sig.tswCtr⟩, sig⟩ :: tail)
+
+theorem verifiedProductionLayerMessages_complete (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (sigs : List LayerXmssSig) :
+    ∀ layer g rand root top,
+      verifyProductionHypertreeLayers suite params pk.pkSeed pk.pkRoot rand layer g root sigs = some top →
+      ∃ entries, verifiedProductionLayerMessages suite params pk layer g rand root sigs = some entries ∧
+        entries.map (fun e => e.key.layer) = List.range' layer sigs.length := by
+  induction sigs with
+  | nil => intro layer g rand root top _; exact ⟨[], rfl, rfl⟩
+  | cons sig rest ih =>
+    intro layer g rand root top h
+    obtain ⟨mid, hm, ht⟩ := (verifyProductionHypertreeLayers_split suite params pk.pkSeed pk.pkRoot
+      rand layer g root sig rest top).mp h
+    rw [verifyProductionHypertreeLayers_upper_rand_irrel suite params pk.pkSeed pk.pkRoot rand rest
+      (layer + 1) (g / 2 ^ params.subtreeHeight) mid (by omega)] at ht
+    obtain ⟨entries, he, hl⟩ := ih _ _ _ _ _ ht
+    refine ⟨⟨⟨layer, g / 2 ^ params.subtreeHeight, g % 2 ^ params.subtreeHeight⟩,
+      ⟨root, sig.tswCtr⟩, sig⟩ :: entries, ?_, ?_⟩
+    · simp [verifiedProductionLayerMessages, hm, he]
+    · simp [List.range', hl]
+
+theorem verifiedProductionLayerMessages_validCoords (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (sigs : List LayerXmssSig) :
+    ∀ layer g rand root entries,
+      params.subtreeHeight ≤ 31 →
+      layer + sigs.length ≤ 2 ^ 32 →
+      g / 2 ^ params.subtreeHeight < 2 ^ 64 →
+      verifiedProductionLayerMessages suite params pk layer g rand root sigs = some entries →
+      ∀ e ∈ entries, e.key.ValidCoords = true := by
+  induction sigs with
+  | nil =>
+    intro layer g rand root entries _ _ _ h e hm
+    simp [verifiedProductionLayerMessages] at h
+    subst entries; cases hm
+  | cons sig rest ih =>
+    intro layer g rand root entries hSub hLay hTree h e hm
+    simp only [verifiedProductionLayerMessages, Option.bind_eq_bind, Option.bind_eq_some_iff,
+      Option.pure_def, Option.some.injEq] at h
+    obtain ⟨next, _, tail, hTail, rfl⟩ := h
+    rcases List.mem_cons.mp hm with rfl | hMem
+    · simp only [OtsPosition.ValidCoords, Bool.and_eq_true, decide_eq_true_eq]
+      have hLayerLt : layer < 2 ^ 32 := by simp at hLay; omega
+      have hPowLe : 2 ^ params.subtreeHeight ≤ 2 ^ 31 := Nat.pow_le_pow_right (by decide) hSub
+      have hModLt : g % 2 ^ params.subtreeHeight < 2 ^ params.subtreeHeight :=
+        Nat.mod_lt _ (Nat.two_pow_pos _)
+      have h31Lt32 : (2 : Nat) ^ 31 < 2 ^ 32 := by decide
+      exact ⟨⟨hLayerLt, hTree⟩, by omega⟩
+    · exact ih (layer + 1) (g / 2 ^ params.subtreeHeight) [] next tail hSub
+        (by simp at hLay; omega)
+        (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) hTree) hTail e hMem
+
+/-- Production transactional upper-layer release gate built directly on `verifyProductionPqHashSig`
+    and `verifiedProductionLayerMessages`. -/
+def verifyProductionBeforeReleaseAll (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (cache : List LayerRelease) (turn : FaultedSignTurn) :
+    Option (List LayerRelease) := do
+  if !verifyProductionPqHashSig suite params pk turn.msg turn.candidate then none else do
+    let (rand, root) ← productionHypertreeStart suite params pk turn.msg turn.candidate
+    let entries ← verifiedProductionLayerMessages suite params pk 0 turn.candidate.leafGlobalIdx
+      rand root turn.candidate.layerSigs
+    if AdrsCacheConsistent (cache ++ entries.drop 1) then some (entries.drop 1) else none
+
+def guardedProductionSignTraceAll (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) : List LayerRelease → List FaultedSignTurn → List LayerRelease
+  | cache, [] => cache
+  | cache, turn :: rest =>
+    match verifyProductionBeforeReleaseAll suite params pk cache turn with
+    | none => guardedProductionSignTraceAll suite params pk cache rest
+    | some entries => guardedProductionSignTraceAll suite params pk (cache ++ entries) rest
+
+/-- Unconditional completeness on the empty journal for every production-valid signature. -/
+theorem production_gate_complete (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (turn : FaultedSignTurn)
+    (hv : verifyProductionPqHashSig suite params pk turn.msg turn.candidate = true) :
+    ∃ es, verifyProductionBeforeReleaseAll suite params pk [] turn = some es ∧
+      es.map (fun e => e.key.layer) = List.range' 1 (params.numLayers - 1) := by
+  obtain ⟨hGate, hlen, rand, root, hs, ht⟩ :=
+    verifyProductionPqHashSig_layers suite params pk turn.msg turn.candidate hv
+  obtain ⟨es, he, hl⟩ := verifiedProductionLayerMessages_complete suite params pk _ _ _ _ _ _ ht
+  have hd : (es.drop 1).map (fun e => e.key.layer) =
+      List.range' 1 (params.numLayers - 1) := by
+    rw [List.map_drop, hl, hlen, List.drop_range']
+  have hGateFacts : params.subtreeHeight ≤ 31 ∧ params.numLayers ≤ 2 ^ 32 ∧
+      turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight < 2 ^ 64 := by
+    simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+    exact ⟨hGate.1.1.2, hGate.1.2, hGate.2⟩
+  have hValAll := verifiedProductionLayerMessages_validCoords suite params pk turn.candidate.layerSigs
+    0 turn.candidate.leafGlobalIdx rand root es hGateFacts.1 (by omega) hGateFacts.2.2 he
+  have hc := adrsCacheConsistent_of_distinct_valid_layers (es.drop 1)
+    (fun e hm => hValAll e (List.mem_of_mem_drop hm))
+    (by rw [hd]; exact layer_range_nodup _ _)
+  refine ⟨es.drop 1, ?_, hd⟩
+  simpa [verifyProductionBeforeReleaseAll, hv, hs, he] using hc
+
+/-- Production opening anchor using `verifyProductionHypertreeLayers` (`TAG_H_INTERNAL` upper layers). -/
+def ProductionOpeningBound (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
+    (journal : List LayerRelease) (e : LayerRelease) : Prop :=
+  e.signed.tswCtr = e.opening.tswCtr ∧
+  ∃ top, verifyProductionHypertreeLayers suite params pk.pkSeed pk.pkRoot [] e.key.layer
+    (openingGlobalIdx params e.key) e.signed.root [e.opening] = some top ∧
+    (if e.key.layer + 1 = params.numLayers then top = pk.pkRoot
+     else ∃ next ∈ journal, next.key = nextOtsPosition params e.key ∧ top = next.signed.root)
+
+theorem productionOpeningBound_mono (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (xs ys : List LayerRelease) (e : LayerRelease)
+    (hsub : ∀ x ∈ xs, x ∈ ys) (h : ProductionOpeningBound suite params pk xs e) :
+    ProductionOpeningBound suite params pk ys e := by
+  obtain ⟨hc, top, hv, ht⟩ := h
+  refine ⟨hc, top, hv, ?_⟩
+  by_cases hl : e.key.layer + 1 = params.numLayers
+  · simpa only [hl, ↓reduceIte] using ht
+  · simp only [hl, ↓reduceIte] at ht ⊢
+    obtain ⟨n, hn, hk, hr⟩ := ht
+    exact ⟨n, hsub n hn, hk, hr⟩
+
+theorem verifiedProductionLayerMessages_openingBound (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (sigs : List LayerXmssSig) :
+    ∀ layer g root es journal,
+      layer + sigs.length = params.numLayers →
+      verifiedProductionLayerMessages suite params pk layer g [] root sigs = some es →
+      verifyProductionHypertreeLayers suite params pk.pkSeed pk.pkRoot [] layer g root sigs = some pk.pkRoot →
+      (∀ e ∈ es, e ∈ journal) →
+      ∀ e ∈ es, ProductionOpeningBound suite params pk journal e := by
+  induction sigs with
+  | nil =>
+    intro layer g root es journal _ he _ _ e hm
+    simp only [verifiedProductionLayerMessages, Option.some.injEq] at he
+    subst es; cases hm
+  | cons sig rest ih =>
+    intro layer g root es journal hlen he hv hsub e hm
+    obtain ⟨mid, hs, ht⟩ := (verifyProductionHypertreeLayers_split suite params pk.pkSeed pk.pkRoot
+      [] layer g root sig rest pk.pkRoot).mp hv
+    simp only [verifiedProductionLayerMessages, hs, Option.bind_some, Option.bind_eq_bind,
+      Option.bind_eq_some_iff, Option.pure_def, Option.some.injEq] at he
+    obtain ⟨tail, htail, rfl⟩ := he
+    rcases List.mem_cons.mp hm with rfl | hm
+    · refine ⟨rfl, mid, ?_, ?_⟩
+      · change verifyProductionHypertreeLayers suite params pk.pkSeed pk.pkRoot [] layer
+          (g / 2 ^ params.subtreeHeight * 2 ^ params.subtreeHeight + g % 2 ^ params.subtreeHeight)
+          root [sig] = some mid
+        rw [Nat.div_add_mod']
+        exact hs
+      · dsimp only
+        by_cases hlast : layer + 1 = params.numLayers
+        · rw [ite_eq_left hlast]
+          have hn : rest.length = 0 := by simp only [List.length_cons] at hlen; omega
+          have hr : rest = [] := List.length_eq_zero_iff.mp hn
+          subst rest
+          simpa only [verifyProductionHypertreeLayers_nil, Option.some.injEq] using ht
+        · rw [ite_eq_right hlast]
+          cases rest with
+          | nil => simp at hlen; exact False.elim (hlast hlen)
+          | cons next rest =>
+            simp only [verifiedProductionLayerMessages, Option.bind_eq_bind, Option.bind_eq_some_iff,
+              Option.pure_def, Option.some.injEq] at htail
+            obtain ⟨mid', _, tail', _, rfl⟩ := htail
+            exact ⟨_, hsub _ (List.mem_cons_of_mem _ List.mem_cons_self), rfl, rfl⟩
+    · exact ih (layer + 1) (g / 2 ^ params.subtreeHeight) mid tail journal
+        (by simp only [List.length_cons] at hlen; omega) htail ht
+        (fun x hx => hsub x (List.mem_cons_of_mem _ hx)) e hm
+
+theorem verifyProductionBeforeReleaseAll_props (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (cache es : List LayerRelease) (turn : FaultedSignTurn)
+    (h : verifyProductionBeforeReleaseAll suite params pk cache turn = some es) :
+    AdrsCacheConsistent (cache ++ es) ∧
+    (∀ e ∈ es, e.key.ValidCoords = true) ∧
+    (∀ e ∈ es, ProductionOpeningBound suite params pk (cache ++ es) e) := by
+  unfold verifyProductionBeforeReleaseAll at h
+  split at h
+  · cases h
+  · next hvNeg =>
+    have hv : verifyProductionPqHashSig suite params pk turn.msg turn.candidate = true := by
+      cases hx : verifyProductionPqHashSig suite params pk turn.msg turn.candidate <;> simp_all
+    obtain ⟨hGate, hlen, rand, root, hs, ht⟩ :=
+      verifyProductionPqHashSig_layers suite params pk turn.msg turn.candidate hv
+    simp only [hs, Option.bind_eq_bind, Option.bind_some] at h
+    have hGateFacts : params.subtreeHeight ≤ 31 ∧ params.numLayers ≤ 2 ^ 32 ∧
+        turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight < 2 ^ 64 := by
+      simp only [AdrsGateValid, Bool.and_eq_true, decide_eq_true_eq] at hGate
+      exact ⟨hGate.1.1.2, hGate.1.2, hGate.2⟩
+    cases hsig : turn.candidate.layerSigs with
+    | nil =>
+      simp only [hsig, verifiedProductionLayerMessages, Option.bind_some, List.drop_nil] at h
+      split at h
+      · next hc =>
+        cases h
+        simp only [List.append_nil] at hc
+        exact ⟨by simpa using hc, fun _ hm => by cases hm, fun _ hm => by cases hm⟩
+      · cases h
+    | cons sig rest =>
+      rw [hsig] at ht hlen h
+      obtain ⟨mid, hm, hu⟩ := (verifyProductionHypertreeLayers_split suite params pk.pkSeed pk.pkRoot
+        rand 0 turn.candidate.leafGlobalIdx root sig rest pk.pkRoot).mp ht
+      rw [verifyProductionHypertreeLayers_upper_rand_irrel suite params pk.pkSeed pk.pkRoot rand rest
+        1 (turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight) mid (by decide)] at hu
+      simp only [verifiedProductionLayerMessages, hm, Option.bind_some, Option.bind_eq_some_iff,
+        Option.pure_def, Option.some.injEq] at h
+      obtain ⟨all, ⟨tail, he, rfl⟩, h⟩ := h
+      simp only [List.drop_succ_cons, List.drop_zero] at h
+      split at h
+      · next hc =>
+        cases h
+        have hValTail := verifiedProductionLayerMessages_validCoords suite params pk rest
+          1 (turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight) [] mid es
+          hGateFacts.1 (by simp only [List.length_cons] at hlen; omega)
+          (Nat.lt_of_le_of_lt (Nat.div_le_self _ _) hGateFacts.2.2) he
+        have hBoundTail := verifiedProductionLayerMessages_openingBound suite params pk rest
+          1 (turn.candidate.leafGlobalIdx / 2 ^ params.subtreeHeight) mid es (cache ++ es)
+          (by simpa [Nat.add_comm] using hlen) he hu
+          (fun x hx => List.mem_append.mpr (Or.inr hx))
+        exact ⟨hc, hValTail, hBoundTail⟩
+      · cases h
+
+theorem production_bound_cached_openings_unique_or_collision (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (journal : List LayerRelease)
+    (hc : AdrsCacheConsistent journal)
+    (hVal : ∀ e ∈ journal, e.key.ValidCoords = true)
+    (valid : ∀ e ∈ journal, ProductionOpeningBound suite params pk journal e)
+    (a b : LayerRelease) (ha : a ∈ journal) (hb : b ∈ journal)
+    (hkEnc : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
+    a.key = b.key ∧ a.signed = b.signed ∧ (a.opening = b.opening ∨ Collision suite.rawHash) := by
+  have hk : a.key = b.key := (otsPosition_toEncodedAdrs_injective (hVal a ha) (hVal b hb)).mp hkEnc
+  have hm := hc a ha b hb hkEnc
+  refine ⟨hk, hm, ?_⟩
+  have hcNat := adrsCacheConsistent_implies_cacheConsistent hc
+  obtain ⟨hca, topa, hva, hta⟩ := valid a ha
+  obtain ⟨hcb, topb, hvb, htb⟩ := valid b hb
+  have ht : topa = topb := by
+    rw [← hk] at htb
+    by_cases hl : a.key.layer + 1 = params.numLayers
+    · simp only [hl, ↓reduceIte] at hta htb
+      exact hta.trans htb.symm
+    · simp only [hl, ↓reduceIte] at hta htb
+      obtain ⟨na, hna, hka, hra⟩ := hta
+      obtain ⟨nb, hnb, hkb, hrb⟩ := htb
+      have hn := hcNat na hna nb hnb (hka.trans hkb.symm)
+      exact hra.trans ((congrArg OtsMessage.root hn).trans hrb.symm)
+  have hctr : a.opening.tswCtr = b.opening.tswCtr := by rw [← hca, ← hcb, hm]
+  obtain ⟨digitsA, hDigA, hla, hwa⟩ := verifyProductionHypertreeLayers_single suite params
+    pk.pkSeed pk.pkRoot [] a.key.layer (openingGlobalIdx params a.key) a.signed.root a.opening topa hva
+  obtain ⟨digitsB, hDigB, hlb, hwb⟩ := verifyProductionHypertreeLayers_single suite params
+    pk.pkSeed pk.pkRoot [] b.key.layer (openingGlobalIdx params b.key) b.signed.root b.opening topb hvb
+  rw [← hk, ← hm, ← hctr, ← ht] at hDigB hwb
+  have hDigEq : digitsA = digitsB := Option.some.inj (hDigA.symm.trans hDigB)
+  rw [← hDigEq] at hwb
+  rcases wots_openings_unique_or_collision suite params pk.pkSeed _ _ _ _ _ _ _ _ _
+    hla hlb hwa hwb with ⟨hchains, hpath⟩ | hcol
+  · left
+    cases ha' : a.opening
+    cases hb' : b.opening
+    rw [ha', hb'] at hctr hchains hpath
+    simp only at hctr hchains hpath
+    rw [hctr, hchains, hpath]
+  · exact Or.inr hcol
+
+/-! ### 9B. Key-Scoped Crash-Recoverable Persistent Upper-Layer Journal -/
+
+/-- Persistent signer state separating durable `fsync`ed journal storage (`diskJournal`) from
+    in-memory `volatileCache`, plus the audit trace `emittedEntries` of all upper-layer openings
+    ever released to the network. -/
+structure DurableUpperJournalState where
+  diskJournal : List LayerRelease
+  volatileCache : List LayerRelease
+  emittedEntries : List LayerRelease
+
+def DurableUpperJournalState.init : DurableUpperJournalState :=
+  { diskJournal := [], volatileCache := [], emittedEntries := [] }
+
+/-- Multi-crash operational event schedule: normal persisted signing, disk-commit failure before
+    signature emission, and mid-session power loss + reboot recovery from `diskJournal`. -/
+inductive RecoverableGateEvent where
+  | signAndPersistOk (turn : FaultedSignTurn)
+  | signDiskWriteFail (turn : FaultedSignTurn)
+  | powerLossAndRecover
+
+/-- Transactional step: a candidate signature is emitted (`some sig`) **only** when
+    `verifyProductionBeforeReleaseAll` succeeds AND its upper-layer entries commit to `diskJournal`.
+    If disk persistence fails, `none` is returned and `volatileCache` remains synced to `diskJournal`.
+    On crash/reboot, `volatileCache` is reloaded from `diskJournal`. -/
+def stepRecoverableProductionGate (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (st : DurableUpperJournalState) (ev : RecoverableGateEvent) :
+    DurableUpperJournalState × Option PqHashSig :=
+  match ev with
+  | .signAndPersistOk turn =>
+    match verifyProductionBeforeReleaseAll suite params pk st.volatileCache turn with
+    | none => (st, none)
+    | some es =>
+      let committed := st.diskJournal ++ es
+      ({ diskJournal := committed
+         volatileCache := committed
+         emittedEntries := st.emittedEntries ++ es },
+       some turn.candidate)
+  | .signDiskWriteFail _ =>
+    ({ st with volatileCache := st.diskJournal }, none)
+  | .powerLossAndRecover =>
+    ({ st with volatileCache := st.diskJournal }, none)
+
+def runRecoverableProductionSchedule (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) : DurableUpperJournalState → List RecoverableGateEvent → DurableUpperJournalState
+  | st, [] => st
+  | st, ev :: rest =>
+    runRecoverableProductionSchedule suite params pk
+      (stepRecoverableProductionGate suite params pk st ev).1 rest
+
+def DurableJournalInv (suite : TweakableHashSuite) (params : PqHashParams)
+    (pk : PqPublicKey) (st : DurableUpperJournalState) : Prop :=
+  st.volatileCache = st.diskJournal ∧
+  st.emittedEntries = st.diskJournal ∧
+  AdrsCacheConsistent st.diskJournal ∧
+  (∀ e ∈ st.diskJournal, e.key.ValidCoords = true) ∧
+  (∀ e ∈ st.diskJournal, ProductionOpeningBound suite params pk st.diskJournal e)
+
+theorem stepRecoverableProductionGate_preserves_inv (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (st : DurableUpperJournalState)
+    (ev : RecoverableGateEvent) (hInv : DurableJournalInv suite params pk st) :
+    DurableJournalInv suite params pk (stepRecoverableProductionGate suite params pk st ev).1 := by
+  obtain ⟨hVol, hEmit, hCons, hVal, hBound⟩ := hInv
+  cases ev with
+  | signAndPersistOk turn =>
+    unfold stepRecoverableProductionGate
+    cases hVer : verifyProductionBeforeReleaseAll suite params pk st.volatileCache turn with
+    | none => exact ⟨hVol, hEmit, hCons, hVal, hBound⟩
+    | some es =>
+      dsimp only
+      rw [hVol] at hVer
+      obtain ⟨hCons', hValEs, hBoundEs⟩ :=
+        verifyProductionBeforeReleaseAll_props suite params pk st.diskJournal es turn hVer
+      refine ⟨rfl, by rw [hEmit], hCons', ?_, ?_⟩
+      · intro e hm
+        rcases List.mem_append.mp hm with hOld | hNew
+        · exact hVal e hOld
+        · exact hValEs e hNew
+      · intro e hm
+        rcases List.mem_append.mp hm with hOld | hNew
+        · exact productionOpeningBound_mono suite params pk st.diskJournal (st.diskJournal ++ es) e
+            (fun x hx => List.mem_append.mpr (Or.inl hx)) (hBound e hOld)
+        · exact hBoundEs e hNew
+  | signDiskWriteFail _ =>
+    exact ⟨rfl, hEmit, hCons, hVal, hBound⟩
+  | powerLossAndRecover =>
+    exact ⟨rfl, hEmit, hCons, hVal, hBound⟩
+
+theorem runRecoverableProductionSchedule_preserves_inv (suite : TweakableHashSuite)
+    (params : PqHashParams) (pk : PqPublicKey) (evs : List RecoverableGateEvent) :
+    ∀ st, DurableJournalInv suite params pk st →
+      DurableJournalInv suite params pk (runRecoverableProductionSchedule suite params pk st evs) := by
+  induction evs with
+  | nil => intro st h; exact h
+  | cons ev rest ih =>
+    intro st h
+    exact ih _ (stepRecoverableProductionGate_preserves_inv suite params pk st ev h)
+
+/-- **Multi-Crash Production Upper-Layer Non-Reuse (`recoverable_production_journal_prevents_upper_wots_reuse_across_crashes`)**:
+    Across arbitrary interleavings of faulted signing attempts, failed disk writes, and power-loss
+    crashes/reboots, any two upper-layer openings ever emitted by `stepRecoverableProductionGate`
+    at the same 32-byte encoded `HashAdrs` have identical `(layer, treeIdx, leafIdx)`, identical
+    signed `(root, tswCtr)`, and identical openings unless a `suite.rawHash` collision is exhibited. -/
+theorem recoverable_production_journal_prevents_upper_wots_reuse_across_crashes
+    (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
+    (evs : List RecoverableGateEvent) (a b : LayerRelease)
+    (ha : a ∈ (runRecoverableProductionSchedule suite params pk .init evs).emittedEntries)
+    (hb : b ∈ (runRecoverableProductionSchedule suite params pk .init evs).emittedEntries)
+    (hk : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
+    a.key = b.key ∧ a.signed = b.signed ∧ (a.opening = b.opening ∨ Collision suite.rawHash) := by
+  have hInit : DurableJournalInv suite params pk .init :=
+    ⟨rfl, rfl, by simp [AdrsCacheConsistent, DurableUpperJournalState.init],
+     by simp [DurableUpperJournalState.init], by simp [DurableUpperJournalState.init]⟩
+  obtain ⟨_, hEmit, hCons, hVal, hBound⟩ :=
+    runRecoverableProductionSchedule_preserves_inv suite params pk evs .init hInit
+  rw [hEmit] at ha hb
+  exact production_bound_cached_openings_unique_or_collision suite params pk _
+    hCons hVal hBound a b ha hb hk
+
+/-- Uninterrupted single-session corollary on `guardedProductionSignTraceAll`. -/
+theorem production_verify_before_release_adrs_unique_or_collision
+    (suite : TweakableHashSuite) (params : PqHashParams) (pk : PqPublicKey)
+    (turns : List FaultedSignTurn) (a b : LayerRelease)
+    (ha : a ∈ guardedProductionSignTraceAll suite params pk [] turns)
+    (hb : b ∈ guardedProductionSignTraceAll suite params pk [] turns)
+    (hk : a.key.toEncodedAdrs = b.key.toEncodedAdrs) :
+    a.key = b.key ∧ a.signed = b.signed ∧ (a.opening = b.opening ∨ Collision suite.rawHash) := by
+  have hEquiv : ∀ (turns' : List FaultedSignTurn) (st : DurableUpperJournalState),
+      st.volatileCache = st.diskJournal →
+      guardedProductionSignTraceAll suite params pk st.diskJournal turns' =
+        (runRecoverableProductionSchedule suite params pk st
+          (turns'.map RecoverableGateEvent.signAndPersistOk)).diskJournal := by
+    intro turns'
+    induction turns' with
+    | nil => intro st _; rfl
+    | cons t rest ih =>
+      intro st hVol
+      simp only [List.map_cons, guardedProductionSignTraceAll, runRecoverableProductionSchedule,
+        stepRecoverableProductionGate, hVol]
+      cases verifyProductionBeforeReleaseAll suite params pk st.diskJournal t with
+      | none => exact ih st hVol
+      | some es => exact ih _ rfl
+  have hInit := hEquiv turns .init rfl
+  simp only [DurableUpperJournalState.init] at hInit
+  rw [hInit] at ha hb
+  have hInv := runRecoverableProductionSchedule_preserves_inv suite params pk
+    (turns.map RecoverableGateEvent.signAndPersistOk) .init
+    ⟨rfl, rfl, by simp [AdrsCacheConsistent, DurableUpperJournalState.init],
+     by simp [DurableUpperJournalState.init], by simp [DurableUpperJournalState.init]⟩
+  rw [← hInv.2.1] at ha hb
+  exact recoverable_production_journal_prevents_upper_wots_reuse_across_crashes
+    suite params pk (turns.map RecoverableGateEvent.signAndPersistOk) a b ha hb hk
+
+/-- **`#tooth` Witness (`tooth_volatile_only_cache_forgets_across_crash_allows_reuse`)**:
+    A broken crash model that wipes `volatileCache` to `[]` on reboot instead of reloading a
+    durable `diskJournal` permits two distinct `(root, tswCtr)` releases (`⟨[], 0⟩ ≠ ⟨[], 1⟩`)
+    at the identical encoded `HashAdrs` `⟨1, 0, 0⟩.toEncodedAdrs` across a reboot. -/
+theorem tooth_volatile_only_cache_forgets_across_crash_allows_reuse :
+    let e0 : LayerRelease := ⟨⟨1, 0, 0⟩, ⟨[], 0⟩, counterToothOpening 0⟩
+    let e1 : LayerRelease := ⟨⟨1, 0, 0⟩, ⟨[], 1⟩, counterToothOpening 1⟩
+    AdrsCacheConsistent ([] ++ [e0]) ∧
+    ¬ AdrsCacheConsistent ([e0] ++ [e1]) ∧
+    AdrsCacheConsistent ([] ++ [e1]) ∧
+    e0.key.toEncodedAdrs = e1.key.toEncodedAdrs ∧
+    e0.signed ≠ e1.signed := by
+  refine ⟨?_, ?_, ?_, rfl, ?_⟩
+  · simp [AdrsCacheConsistent]
+  · intro h
+    have he := h ⟨⟨1, 0, 0⟩, ⟨[], 0⟩, counterToothOpening 0⟩ (by simp)
+      ⟨⟨1, 0, 0⟩, ⟨[], 1⟩, counterToothOpening 1⟩ (by simp) rfl
+    cases congrArg OtsMessage.tswCtr he
+  · simp [AdrsCacheConsistent]
+  · intro h; cases congrArg OtsMessage.tswCtr h
 
 end Qsag.FaultAndSpeculativeSafety
 
