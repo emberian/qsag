@@ -9,7 +9,7 @@ use core::ptr::{null, null_mut};
 
 use crate::KernelSlot;
 use crate::goldilocks::{
-    GOLDILOCKS_PRIME, gl_inv_or_zero, gl_neg, gl_pow_pub, gl_reduce_u64, goldilocks_primitive_root,
+    gl_inv_or_zero, gl_neg, gl_reduce_u64, goldilocks_primitive_root,
 };
 use crate::spirv_kernels::spirv_kernel_words;
 use crate::vulkan::{VulkanDeviceInfo, VulkanError};
@@ -727,6 +727,7 @@ struct DeviceFns {
     end_command_buffer: unsafe extern "C" fn(VkCommandBuffer) -> i32,
     cmd_copy_buffer:
         unsafe extern "C" fn(VkCommandBuffer, VkBuffer, VkBuffer, u32, *const VkBufferCopy),
+    cmd_fill_buffer: unsafe extern "C" fn(VkCommandBuffer, VkBuffer, u64, u64, u32),
     cmd_bind_pipeline: unsafe extern "C" fn(VkCommandBuffer, u32, VkPipeline),
     cmd_bind_descriptor_sets: unsafe extern "C" fn(
         VkCommandBuffer,
@@ -1615,6 +1616,7 @@ impl RawVulkanEngine {
                     "vkEndCommandBuffer",
                 )?,
                 cmd_copy_buffer: load_dev_fn(gdpa, device, c"vkCmdCopyBuffer", "vkCmdCopyBuffer")?,
+                cmd_fill_buffer: load_dev_fn(gdpa, device, c"vkCmdFillBuffer", "vkCmdFillBuffer")?,
                 cmd_bind_pipeline: load_dev_fn(
                     gdpa,
                     device,
@@ -1711,6 +1713,8 @@ impl RawVulkanEngine {
         let mut vgprs = None;
         let mut sgprs = None;
         let mut lds = None;
+        let mut spilled_vgprs = None;
+        let mut spilled_sgprs = None;
         for stat in stats {
             let end = stat.name.iter().position(|b| *b == 0).unwrap_or(256);
             let name = core::str::from_utf8(&stat.name[..end]).unwrap_or("");
@@ -1723,6 +1727,8 @@ impl RawVulkanEngine {
                 "VGPRs" | "num_vgprs" => vgprs = Some(stat.value),
                 "SGPRs" | "num_sgprs" => sgprs = Some(stat.value),
                 "LDS size" | "lds_size" => lds = Some(stat.value),
+                "Spilled VGPRs" => spilled_vgprs = Some(stat.value),
+                "Spilled SGPRs" => spilled_sgprs = Some(stat.value),
                 _ => {}
             }
         }
@@ -1732,11 +1738,16 @@ impl RawVulkanEngine {
             vgprs,
             sgprs,
             lds_bytes: lds,
+            spilled_vgprs,
+            spilled_sgprs,
         };
         if scratch.is_some_and(|bytes| bytes != 0) {
             return Err(VulkanError::PipelineAuditFailed(
                 "nonzero private scratch memory",
             ));
+        }
+        if spilled_vgprs.is_some_and(|n| n != 0) || spilled_sgprs.is_some_and(|n| n != 0) {
+            return Err(VulkanError::PipelineAuditFailed("spilled registers"));
         }
         Ok(())
     }
@@ -2347,6 +2358,39 @@ impl RawVulkanEngine {
         }
     }
 
+    /// Record zero fills over the VRAM ranges a job used, after its result was copied to
+    /// staging. Inputs, intermediates, and outputs may be secret (shares, witness columns,
+    /// hash-chain states); none of them stays resident in device memory past the job.
+    /// Every `bytes` is a multiple of 8 and at most the buffer's capacity.
+    unsafe fn cmd_scrub_vram(&self, ranges: &[(VkBuffer, u64)]) {
+        unsafe {
+            self.cmd_barrier(
+                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+            );
+            for &(buffer, bytes) in ranges {
+                if bytes != 0 {
+                    (self.fns.cmd_fill_buffer)(self.cmd_buf, buffer, 0, bytes, 0);
+                }
+            }
+        }
+    }
+
+    /// Zero the first `bytes` of the host-mapped staging buffer once a job's result has been
+    /// read back (or before the mapping is released).
+    unsafe fn scrub_staging(&mut self, bytes: u64) {
+        if self.staging.mapped.is_null() {
+            return;
+        }
+        let len = bytes.min(self.staging.capacity) as usize;
+        unsafe {
+            core::ptr::write_bytes(self.staging.mapped, 0, len);
+        }
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+    }
+
     unsafe fn submit_and_wait(&mut self) -> Result<(), VulkanError> {
         const VK_ERROR_DEVICE_LOST: i32 = -4;
         check_vk("vkEndCommandBuffer", unsafe {
@@ -2530,6 +2574,7 @@ impl RawVulkanEngine {
                 1,
                 &copy,
             );
+            self.cmd_scrub_vram(&[(self.vram_a.buffer, byte_len)]);
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -2541,6 +2586,7 @@ impl RawVulkanEngine {
             let flat_out =
                 core::slice::from_raw_parts_mut(states.as_mut_ptr().cast::<u64>(), total_words);
             self.read_staging_u64s(0, flat_out);
+            self.scrub_staging(byte_len);
         }
         Ok(())
     }
@@ -2668,12 +2714,9 @@ impl RawVulkanEngine {
                     }
                 };
 
-                let can_fuse_9 = log2_n >= 9 && {
-                    let w9 = stage_root(9);
-                    gl_reduce_u64(twiddles[0]) == 1 && gl_pow_pub(w9, 256) == GOLDILOCKS_PRIME - 1
-                };
-
-                let start_stage = if can_fuse_9 {
+                // The caller has checked the table with `check_goldilocks_twiddles`, so the
+                // stage-9 root has order 512 and the fused LDS pass applies whenever it fits.
+                let start_stage = if log2_n >= 9 {
                     self.cmd_barrier(
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -2758,6 +2801,7 @@ impl RawVulkanEngine {
                 1,
                 &copy,
             );
+            self.cmd_scrub_vram(&[(self.vram_a.buffer, byte_len)]);
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -2766,6 +2810,7 @@ impl RawVulkanEngine {
             );
             self.submit_and_wait()?;
             self.read_staging_u64s(0, buf);
+            self.scrub_staging(byte_len);
         }
         Ok(())
     }
@@ -2997,6 +3042,7 @@ impl RawVulkanEngine {
                 1,
                 &copy_out,
             );
+            self.cmd_scrub_vram(&[(self.vram_a.buffer, out_bytes)]);
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -3007,6 +3053,7 @@ impl RawVulkanEngine {
 
             let flat_out = core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u64>(), m * 2);
             self.read_staging_u64s(0, flat_out);
+            self.scrub_staging(out_bytes);
         }
         Ok(())
     }
@@ -3152,6 +3199,7 @@ impl RawVulkanEngine {
                 1,
                 &copy_out,
             );
+            self.cmd_scrub_vram(&[(self.vram_a.buffer, in_bytes), (self.vram_b.buffer, out_bytes)]);
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -3165,6 +3213,7 @@ impl RawVulkanEngine {
                 num_parents * 4,
             );
             self.read_staging_u64s(0, flat_out);
+            self.scrub_staging(in_bytes);
         }
         Ok(())
     }
@@ -3245,7 +3294,7 @@ impl RawVulkanEngine {
                     kp.pipeline_layout,
                     ds,
                     pk_seed,
-                    base_layer.wrapping_add(lvl),
+                    base_layer + lvl,
                     0,
                     cur_parents,
                 );
@@ -3268,6 +3317,7 @@ impl RawVulkanEngine {
                 VK_ACCESS_TRANSFER_READ_BIT,
             );
             (self.fns.cmd_copy_buffer)(self.cmd_buf, root_buf, self.staging.buffer, 1, &copy_root);
+            self.cmd_scrub_vram(&[(self.vram_a.buffer, leaf_bytes), (self.vram_b.buffer, half_bytes)]);
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -3278,6 +3328,7 @@ impl RawVulkanEngine {
 
             let mut root = [0u64; 4];
             self.read_staging_u64s(0, &mut root);
+            self.scrub_staging(leaf_bytes);
             Ok(root)
         }
     }
@@ -3442,6 +3493,11 @@ impl RawVulkanEngine {
                 1,
                 &copy_out,
             );
+            self.cmd_scrub_vram(&[
+                (self.vram_a.buffer, vec_bytes),
+                (self.vram_b.buffer, vec_bytes),
+                (self.vram_c.buffer, partials_bytes),
+            ]);
             self.cmd_barrier(
                 VK_PIPELINE_STAGE_TRANSFER_BIT,
                 VK_PIPELINE_STAGE_HOST_BIT,
@@ -3452,6 +3508,7 @@ impl RawVulkanEngine {
 
             let mut res = [0u64; 4];
             self.read_staging_u64s(0, &mut res);
+            self.scrub_staging(staging_bytes);
             let lane0 = (res[0] as u128) | ((res[1] as u128) << 64);
             let lane1 = (res[2] as u128) | ((res[3] as u128) << 64);
             Ok((lane0, lane1))
@@ -3470,6 +3527,8 @@ impl RawVulkanEngine {
                     self.lib_handle = null_mut();
                     return;
                 }
+                // A job that failed before readback leaves its input in the mapping.
+                self.scrub_staging(self.staging.capacity);
                 let mut st = core::mem::take(&mut self.staging);
                 let mut va = core::mem::take(&mut self.vram_a);
                 let mut vb = core::mem::take(&mut self.vram_b);
@@ -3538,6 +3597,55 @@ impl Drop for RawVulkanEngine {
 mod tests {
     use super::*;
     use crate::{AcceleratorBackend, CpuReferenceBackend};
+
+    #[test]
+    fn finished_job_leaves_no_residue_in_staging_or_vram() {
+        let (mut engine, _info) = match RawVulkanEngine::try_new() {
+            Ok(v) => v,
+            Err(VulkanError::LibraryLoadFailed | VulkanError::NoDiscreteGpuFound) => return,
+            Err(other) => panic!("unexpected engine init error: {other}"),
+        };
+
+        let mut gpu_states = [[0xA5A5_5A5A_DEAD_BEEFu64; 25]; 70];
+        let mut cpu_states = gpu_states;
+        engine.exec_batch_keccak(&mut gpu_states).expect("keccak");
+        CpuReferenceBackend.batch_keccak_f1600(&mut cpu_states);
+        assert_eq!(gpu_states, cpu_states);
+
+        let words = 70 * 25;
+        let mut seen = std::vec![u64::MAX; words];
+        unsafe {
+            engine.read_staging_u64s(0, &mut seen);
+        }
+        assert!(seen.iter().all(|&w| w == 0), "staging keeps job data");
+
+        // Read the device-local buffer back through a fresh transfer.
+        seen.fill(u64::MAX);
+        unsafe {
+            engine.begin_cmd().expect("begin");
+            let copy = VkBufferCopy {
+                src_offset: 0,
+                dst_offset: 0,
+                size: (words * 8) as u64,
+            };
+            (engine.fns.cmd_copy_buffer)(
+                engine.cmd_buf,
+                engine.vram_a.buffer,
+                engine.staging.buffer,
+                1,
+                &copy,
+            );
+            engine.cmd_barrier(
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_HOST_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_HOST_READ_BIT,
+            );
+            engine.submit_and_wait().expect("readback");
+            engine.read_staging_u64s(0, &mut seen);
+        }
+        assert!(seen.iter().all(|&w| w == 0), "VRAM keeps job data");
+    }
 
     #[test]
     fn transactional_vram_growth_and_quarantine_state_machine() {

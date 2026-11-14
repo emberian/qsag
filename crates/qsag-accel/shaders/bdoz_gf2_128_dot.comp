@@ -28,8 +28,9 @@ layout(push_constant) uniform PushConsts {
     uint _pad;
 } pc;
 
-// Eight scalar word planes avoid the original 32-byte lane stride.
-// Each scalar access visits all 32 banks once; reduction partner offsets are public.
+// Eight scalar word planes avoid a 32-byte lane stride; within one plane the 32 lanes of a
+// wave touch 32 consecutive words, and reduction partner offsets are public.
+// RADV/ACO fuses plane pairs into `ds_read2st64_b32`/`ds_write2st64_b32`.
 shared uint s_red[8][256];
 u64vec4 red_load(uint i) {
     return u64vec4(uint64_t(s_red[0][i]) | (uint64_t(s_red[1][i]) << 32u),

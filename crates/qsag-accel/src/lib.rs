@@ -56,6 +56,11 @@ pub enum AccelError {
     DomainTooLarge { log2_len: u32 },
     /// A derived length overflowed `usize`.
     LengthOverflow,
+    /// Public NTT twiddles are not successive powers of a primitive root of the transform length.
+    InvalidTwiddles,
+    /// The accelerator failed to execute the job (device, driver, or lock failure). No output
+    /// was produced and no CPU fallback ran.
+    BackendFailure,
     /// A receipt was requested for a job descriptor that does not belong to the pinned kernel slot.
     KernelSlotMismatch {
         pin: KernelSlot,
@@ -81,6 +86,10 @@ impl core::fmt::Display for AccelError {
                 )
             }
             Self::LengthOverflow => f.write_str("derived length overflows usize"),
+            Self::InvalidTwiddles => {
+                f.write_str("NTT twiddles are not successive powers of a primitive root")
+            }
+            Self::BackendFailure => f.write_str("accelerator backend failed to execute the job"),
             Self::KernelSlotMismatch { pin, descriptor } => write!(
                 f,
                 "kernel pin is for slot {pin:?} but the job descriptor is for slot {descriptor:?}"

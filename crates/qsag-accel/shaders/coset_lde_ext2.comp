@@ -28,10 +28,13 @@ layout(push_constant) uniform PushConsts {
 const uint64_t GL_P   = 0xFFFFFFFF00000001ul;
 const uint64_t GL_EPS = 0xFFFFFFFFul;
 
-// Scalar 32-bit planes: each LDS instruction addresses one word per lane.
+// Scalar 32-bit planes; every LDS address is a function of the lane index and stage only.
 // XOR the low five bits with bit 5 replicated. For a butterfly's first five
 // stages, its omitted bank bit is supplied by bit 5; later stages are contiguous.
-// This is a bijection within each 32-word row (no padding or extra LDS required).
+// This is a bijection within each 32-word row (no padding or extra LDS required), so
+// within one plane the 32 lanes of a wave touch 32 distinct words mod 32.
+// RADV/ACO fuses the two planes of a limb pair into `ds_read2st64_b32`/`ds_write2st64_b32`
+// (second offset 512 words), so one instruction touches each of those words twice over.
 shared uint s_lds[4][512];
 uint lds_index(uint i) { return i ^ (((i >> 5u) & 1u) * 31u); }
 u64vec2 lds_load(uint i) {

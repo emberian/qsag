@@ -335,6 +335,39 @@ pub fn precompute_goldilocks_twiddles(n: usize) -> Result<Vec<u64>, AccelError> 
     Ok(twiddles)
 }
 
+/// Check that public `twiddles` is `[1, omega, ..., omega^{n/2 - 1}]` for a primitive `n`-th root
+/// of unity `omega` (the table [`precompute_goldilocks_twiddles`] produces for some root).
+///
+/// Backends that derive stage roots from a few table entries (the Vulkan kernels read only
+/// `twiddles[n >> s]`) agree with [`goldilocks_ntt_cpu`] exactly on tables that pass this check.
+/// The table is public, so the scan is variable-time.
+pub fn check_goldilocks_twiddles(n: usize, twiddles: &[u64]) -> Result<(), AccelError> {
+    ntt_log2_len("NTT buffer", n)?;
+    if n == 1 {
+        return Ok(());
+    }
+    if twiddles.len() != n / 2 {
+        return Err(AccelError::LengthMismatch {
+            what: "NTT twiddles",
+            expected: n / 2,
+            actual: twiddles.len(),
+        });
+    }
+    let mut bad = gl_reduce_u64(twiddles[0]) ^ 1;
+    if n >= 4 {
+        let omega = twiddles[1];
+        for pair in twiddles.windows(2) {
+            bad |= gl_reduce_u64(pair[1]) ^ gl_mul(pair[0], omega);
+        }
+        // omega^{n/2} == -1 makes the order of omega exactly n.
+        bad |= gl_mul(twiddles[n / 2 - 1], omega) ^ (GOLDILOCKS_PRIME - 1);
+    }
+    if bad != 0 {
+        return Err(AccelError::InvalidTwiddles);
+    }
+    Ok(())
+}
+
 #[inline]
 fn bit_reverse_permute(buf: &mut [u64]) {
     let n = buf.len();
