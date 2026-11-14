@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+**/target/
+**/*.rs.bk
+
+# Lean 4 / Lake build artifacts
+/lean/.lake/
+**/.lake/
+
+# OS / Editor files
+.DS_Store
+*.swp
+*~
+
+paper/*.pdf

@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/qsag-core",
+    "crates/qsag-asm",
+    "crates/qsag-agg",
+    "crates/qsag-cli",
+    "crates/qsag-accel",
+    "crates/qsag-fts",
+    "crates/qsag-hd",
+    "crates/qsag-addr",
+    "crates/qsag-migrate",
+    "crates/qsag-cred",
+    "crates/qsag-policy",
+    "crates/qsag-quorum",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+rust-version = "1.85"
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
