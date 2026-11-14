@@ -3665,14 +3665,18 @@ private theorem evalX86Shift_fst_congr (sk : X86ShiftKind) (is64 : Bool) {v₁ v
     (cf₁ of₁ zf₁ cf₂ of₂ zf₂ : Bool) (hv : v₁ = v₂) :
     (evalX86Shift sk is64 v₁ cnt cf₁ of₁ zf₁).1 = (evalX86Shift sk is64 v₂ cnt cf₂ of₂ zf₂).1 := by
   subst hv
-  cases is64 <;> cases sk <;> (dsimp only [evalX86Shift]; split <;> rfl)
+  cases is64
+  · cases hc : (cnt % 32 == 0) <;> cases sk <;> simp [evalX86Shift, hc]
+  · cases hc : (cnt % 64 == 0) <;> cases sk <;> simp [evalX86Shift, hc]
 
 private theorem evalX86Shift_zf (sk : X86ShiftKind) (is64 : Bool) (v : UInt64) (cnt : Nat)
     (cf of_ zf : Bool) :
     (evalX86Shift sk is64 v cnt cf of_ zf).2.2.2 =
       if x86ShiftPreservesZf sk is64 cnt then zf
       else (evalX86Shift sk is64 v cnt cf of_ zf).1 == 0 := by
-  cases is64 <;> cases sk <;> (dsimp only [evalX86Shift, x86ShiftPreservesZf]; split <;> rename_i hc0 <;> simp [hc0])
+  cases is64
+  · cases hc : (cnt % 32 == 0) <;> cases sk <;> simp [evalX86Shift, x86ShiftPreservesZf, hc]
+  · cases hc : (cnt % 64 == 0) <;> cases sk <;> simp [evalX86Shift, x86ShiftPreservesZf, hc]
 
 private theorem evalX86Addr_public_eq {s₁₀ s₂₀ s₁ s₂ : X86State} {st : X86AbsState}
     {addr : X86MemAddr} (nextPc : Nat)

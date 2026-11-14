@@ -3260,11 +3260,11 @@ theorem short_monomial_witness_same_deg_eq_two {R nu q : Nat} [NeZero q]
       cycIntToZq_scale, cycIntToZq_toNatInt]
 
 /-- Short RLWE key relation $A \cdot s^* + e^* = u$ in $R_q$ with $\|s^*\|_\infty, \|e^*\|_\infty \le B^*$. -/
-def ShortRlweKeyRelation {nu q : Nat} [NeZero q]
-    (A u : CycPolyZq nu q) (Bsec : Nat) (sTrue eTrue : CycPolyInt nu) : Prop :=
-  cycIntInfNorm sTrue ≤ Bsec ∧
-  cycIntInfNorm eTrue ≤ Bsec ∧
-  cycZqAdd (cycZqMul A (cycIntToZq q sTrue)) (cycIntToZq q eTrue) = u
+structure ShortRlweKeyRelation {nu q : Nat} [NeZero q]
+    (A u : CycPolyZq nu q) (Bsec : Nat) (sTrue eTrue : CycPolyInt nu) : Prop where
+  s_short : cycIntInfNorm sTrue ≤ Bsec
+  e_short : cycIntInfNorm eTrue ≤ Bsec
+  key_eq : cycZqAdd (cycZqMul A (cycIntToZq q sTrue)) (cycIntToZq q eTrue) = u
 
 private theorem modZq_ofInt_eq_zero_iff_of_lt {q : Nat} [NeZero q] {z : Int}
     (hz : z.natAbs < q) : ModZq.ofInt q z = ModZq.zero q ↔ z = 0 := by
@@ -3354,7 +3354,8 @@ theorem short_monomial_witness_recovers_secret_or_breaks_short_sis {R nu q : Nat
       have hy1 : Y1 k = ModZq.ofInt q y1 := (ModZq.ofInt_natVal (Y1 k)).symm
       have hy2 : Y2 k = ModZq.ofInt q y2 := (ModZq.ofInt_natVal (Y2 k)).symm
       have hIntEq : (x1 - y1) + (x2 - y2) = (x1 + x2) - (y1 + y2) := by omega
-      unfold cycZqAdd cycZqSub
+      show ModZq.add (ModZq.sub (X1 k) (Y1 k)) (ModZq.sub (X2 k) (Y2 k)) =
+           ModZq.sub (ModZq.add (X1 k) (X2 k)) (ModZq.add (Y1 k) (Y2 k))
       rw [hx1, hx2, hy1, hy2]
       simp only [← ModZq.ofInt_add, ← ModZq.ofInt_sub]
       exact congrArg (ModZq.ofInt q) hIntEq
@@ -4238,27 +4239,40 @@ theorem tooth_short_extractor_refuses_identical_challenges {nu q : Nat} [NeZero 
   have hcEq : cycAllFin 13 (fun i => decide (c i = c i)) = true := by
     rw [cycAllFin_eq_true_iff]; intro i; exact decide_eq_true rfl
   unfold tryExtractShortMonomialOr13Witness
-  by_cases ht0 : cycAllFin 13 (fun i => cycZqEq (tr.t0 i) (tr'.t0 i)) = true
-  · by_cases ht1 : cycAllFin 13 (fun i => cycZqEq (tr.t1 i) (tr'.t1 i)) = true
-    · by_cases hAcc : verifyRlweOrSigma 13 nu q stmt c tr = true
-      · by_cases hAcc' : verifyRlweOrSigma 13 nu q stmt c tr' = true
-        · simp only [ht0, ht1, hAcc, hAcc', hcEq, ↓reduceDIte]; intro h; cases h
-        · simp only [ht0, ht1, hAcc, hAcc', ↓reduceDIte]; intro h; cases h
-      · simp only [ht0, ht1, hAcc, ↓reduceDIte]; intro h; cases h
-    · simp only [ht0, ht1, ↓reduceDIte]; intro h; cases h
-  · simp only [ht0, ↓reduceDIte]; intro h; cases h
+  split
+  · split
+    · split
+      · split
+        · split
+          · intro h; cases h
+          · rename_i hNot; exact False.elim (hNot hcEq)
+        · intro h; cases h
+      · intro h; cases h
+    · intro h; cases h
+  · intro h; cases h
 
 theorem witness_short_rlwe_key_relation_inhabited :
-    ∃ (A u : CycPolyZq 10 12289) (sTrue eTrue : CycPolyInt 10),
-      ShortRlweKeyRelation A u 1 sTrue eTrue := by
-  refine ⟨sampleRlweOrSigmaStmt1024.A, sampleRlweOrSigmaStmt1024.u0,
-          sampleCyc1024SecretS, sampleCyc1024SecretE, ?_, ?_, rfl⟩
-  · rw [cycIntInfNorm_le_iff]; intro k
-    unfold sampleCyc1024SecretS signedMonomial negacyclicSignedMonomial signBitToInt
-    split <;> decide
-  · rw [cycIntInfNorm_le_iff]; intro k
-    unfold sampleCyc1024SecretE signedMonomial negacyclicSignedMonomial signBitToInt
-    split <;> decide
+    ∃ (stmt : RlweOrSigmaStatement 0 12289)
+      (w : ShortMonomialRelaxedRlweWitness 1 0 12289 stmt)
+      (sTrue eTrue : CycPolyInt 0),
+      ShortRlweKeyRelation stmt.A (stmt.branchU w.branch) 1 sTrue eTrue := by
+  let stmt : RlweOrSigmaStatement 0 12289 :=
+    { A := cycZqOne
+      u0 := ModZq.ofInt 12289 ∘ (fun _ => 2)
+      u1 := ModZq.ofInt 12289 ∘ (fun _ => 2)
+      Bz := 3070 }
+  let c0 : SignedMonomialChal 0 := ⟨false, ⟨0, by decide⟩⟩
+  let c1 : SignedMonomialChal 0 := ⟨true, ⟨0, by decide⟩⟩
+  let dzs : CycPolyInt 0 := fun _ => 2
+  let dze : CycPolyInt 0 := fun _ => 2
+  have hDiff : cycZqAdd (cycZqMul stmt.A (cycIntToZq 12289 dzs)) (cycIntToZq 12289 dze) =
+      cycZqMul (cycIntToZq 12289 (cycIntSub c0.toIntPoly c1.toIntPoly)) (stmt.branchU false) := by
+    funext k; fin_cases k; decide +kernel
+  let w : ShortMonomialRelaxedRlweWitness 1 0 12289 stmt :=
+    ShortMonomialRelaxedRlweWitness.ofForkDifference stmt ⟨0, by decide⟩ false c0 c1
+      (by decide) dzs dze (by decide +kernel) (by decide +kernel) hDiff
+  refine ⟨stmt, w, (fun _ => 1), (fun _ => 1), by decide +kernel, by decide +kernel, ?_⟩
+  funext k; fin_cases k; decide +kernel
 
 theorem witness_valid_rlwe_or_sigma_fork_inhabited :
     ∃ (stmt : RlweOrSigmaStatement 10 12289)

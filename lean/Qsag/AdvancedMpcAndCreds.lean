@@ -2728,38 +2728,107 @@ def challenges (fuel : Nat) (tr : Transcript) (count : Nat) :
   let (raw, next) ← squeeze tr "VC_ZKBOO_OPEN_TRITS" 64
   extendTrits fuel next 0 count (raw.flatMap fiveTrits)
 
-private def countRangeAux (p : Nat → Bool) : Nat → Nat → Nat
-  | 0, acc => acc
-  | n + 1, acc => countRangeAux p n (if p n then acc + 1 else acc)
+private theorem block_trit_eq {s q r : Nat} (hs : 0 < s) :
+    ((q * (3 * s) + r) / s) % 3 = (r / s) % 3 := by
+  have hMul : q * (3 * s) = s * (3 * q) := by
+    rw [← Nat.mul_assoc q 3 s, Nat.mul_comm q 3, ← Nat.mul_assoc 3 q s, Nat.mul_comm (3 * q) s]
+  rw [hMul, Nat.add_comm (s * (3 * q)) r, Nat.add_mul_div_left r (3 * q) hs,
+      Nat.add_mul_mod_self_left]
 
-private theorem countRangeAux_add (p : Nat → Bool) :
-    ∀ (n acc : Nat), countRangeAux p n acc = acc + countRangeAux p n 0
-  | 0, acc => by simp [countRangeAux]
-  | n + 1, acc => by
-    unfold countRangeAux
-    rw [countRangeAux_add p n _, countRangeAux_add p n (if p n then 1 else 0)]
-    cases p n <;> omega
+private theorem filter_range_three_mul {s t : Nat} (hs : 0 < s) (ht : t < 3) :
+    ((List.range (3 * s)).filter (fun r => (r / s) % 3 == t)).length = s := by
+  have hSplit : 3 * s = s + s + s := by omega
+  rw [hSplit, List.range_add, List.range_add, List.filter_append, List.filter_append,
+      List.length_append, List.length_append, List.filter_map, List.filter_map,
+      List.length_map, List.length_map]
+  have h0 : (List.range s).filter (fun r => (r / s) % 3 == t) =
+      if 0 == t then List.range s else [] := by
+    split
+    · next h0t =>
+      rw [List.filter_eq_self]
+      intro r hr
+      rw [List.mem_range] at hr
+      rw [Nat.div_eq_of_lt hr, Nat.zero_mod]
+      exact h0t
+    · next h0t =>
+      rw [List.filter_eq_nil_iff]
+      intro r hr
+      rw [List.mem_range] at hr
+      rw [Nat.div_eq_of_lt hr, Nat.zero_mod]
+      exact h0t
+  have h1 : (List.range s).filter ((fun r => (r / s) % 3 == t) ∘ (s + ·)) =
+      if 1 == t then List.range s else [] := by
+    have hDiv1 : ∀ r < s, ((s + r) / s) % 3 = 1 := by
+      intro r hr
+      have hs1 : s + r = r + s * 1 := by omega
+      rw [hs1, Nat.add_mul_div_left r 1 hs, Nat.div_eq_of_lt hr]
+    split
+    · next h1t =>
+      rw [List.filter_eq_self]
+      intro r hr
+      rw [List.mem_range] at hr
+      simpa [Function.comp, hDiv1 r hr] using h1t
+    · next h1t =>
+      rw [List.filter_eq_nil_iff]
+      intro r hr
+      rw [List.mem_range] at hr
+      simpa [Function.comp, hDiv1 r hr] using h1t
+  have h2 : (List.range s).filter ((fun r => (r / s) % 3 == t) ∘ (s + s + ·)) =
+      if 2 == t then List.range s else [] := by
+    have hDiv2 : ∀ r < s, ((s + s + r) / s) % 3 = 2 := by
+      intro r hr
+      have hs2 : s + s + r = r + s * 2 := by omega
+      rw [hs2, Nat.add_mul_div_left r 2 hs, Nat.div_eq_of_lt hr]
+    split
+    · next h2t =>
+      rw [List.filter_eq_self]
+      intro r hr
+      rw [List.mem_range] at hr
+      simpa [Function.comp, hDiv2 r hr] using h2t
+    · next h2t =>
+      rw [List.filter_eq_nil_iff]
+      intro r hr
+      rw [List.mem_range] at hr
+      simpa [Function.comp, hDiv2 r hr] using h2t
+  rw [h0, h1, h2]
+  rcases t with _ | _ | _ | t
+  · simp
+  · simp
+  · simp
+  · omega
 
-private theorem filter_range_length_eq_countRangeAux (p : Nat → Bool) :
-    ∀ (n : Nat), ((List.range n).filter p).length = countRangeAux p n 0
-  | 0 => rfl
-  | n + 1 => by
-    rw [List.range_succ, List.filter_append, List.length_append,
-        filter_range_length_eq_countRangeAux p n]
-    unfold countRangeAux
-    rw [countRangeAux_add p n (if p n then 1 else 0)]
-    cases p n <;> simp [List.filter] <;> omega
+private theorem filter_range_blocks (m : Nat) {s t : Nat} (hs : 0 < s) (ht : t < 3) :
+    ((List.range (m * (3 * s))).filter (fun b => (b / s) % 3 == t)).length = m * s := by
+  induction m with
+  | zero => simp
+  | succ m ih =>
+    have hMul : (m + 1) * (3 * s) = m * (3 * s) + 3 * s := Nat.succ_mul m (3 * s)
+    rw [hMul, List.range_add, List.filter_append, List.length_append, ih, List.filter_map,
+        List.length_map]
+    have hCongr :
+        (List.range (3 * s)).filter ((fun b => (b / s) % 3 == t) ∘ (m * (3 * s) + ·)) =
+          (List.range (3 * s)).filter (fun r => (r / s) % 3 == t) := by
+      apply List.filter_congr
+      intro r _
+      simp only [Function.comp, block_trit_eq hs]
+    rw [hCongr, filter_range_three_mul hs ht, Nat.succ_mul]
 
 /-- Each position of the accepted 243-byte alphabet has exactly 81 preimages
-for each trit. This is a finite counting fact, not a randomness claim about SHAKE. -/
+for each trit. -/
 theorem accepted_trit_fibers :
     ∀ i ∈ List.range 5, ∀ t ∈ List.range 3,
       ((List.range 243).filter (fun b => (b / 3^i) % 3 == t)).length = 81 := by
   intro i hi t ht
-  rw [filter_range_length_eq_countRangeAux]
-  revert t
-  revert i
-  decide
+  rw [List.mem_range] at hi ht
+  have h1 := filter_range_blocks (3 ^ (4 - i)) (s := 3 ^ i) (t := t)
+    (Nat.pow_pos (by decide)) ht
+  rcases i with _ | _ | _ | _ | _ | i
+  · exact h1
+  · exact h1
+  · exact h1
+  · exact h1
+  · exact h1
+  · omega
 
 /-- Accepted bytes have unique five-digit ternary expansions. -/
 theorem accepted_five_trits_injective (a b : Nat) (ha : a < 243) (hb : b < 243)
@@ -3002,7 +3071,6 @@ theorem view_wire_known_answer :
   simp only [viewBytes, viewFixture, words, List.flatMap_cons, List.flatMap_nil,
     Goldilocks.ofNat_val, List.append_assoc]
   congr 1
-  decide
 
 /-- Width mutation witnesses exercise the actual commitment frame constructor. -/
 theorem commitment_widths (sid digest salt : Bytes32) (r : UInt32) (p : Fin 3) :

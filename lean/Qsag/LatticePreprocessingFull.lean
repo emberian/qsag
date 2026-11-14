@@ -9,27 +9,35 @@ Complete `0 Classical.choice` formalization of the active-secure lattice/OT/PCG 
    - Exact $\ell_1$-$\ell_\infty$ negacyclic convolution norm bound `‖a * s + e‖_∞ ≤ ‖a‖_1 * ‖s‖_∞ + ‖e‖_∞`,
      proving worst-case ternary RLWE OT decryption noise `≤ 2049 < 3072 = ⌊12289/4⌋` (`0` decryption error),
      2-bit rounding margin `< 1536`, and `#tooth` showing overflowing noise flips the decoded OT bit.
-2. **Joint Fiat-Shamir Signed-Monomial OR-Sigma (`13×20 = 260`-bit QROM) + Discrete-Gaussian HVZK + FO Check**:
-   - Exact 20-bit signed-monomial challenge map $d(u) = \pm X^{p_0} \pm X^{512 + p_1} \in R_q$
-     (`polyIntFromChal20`, `polyRqFromChal20`) with proved injectivity (`polyRqFromChal20_injective`),
-     $\|d(u)\|_\infty = 1$, $\|d(u)\|_1 = 2$, and non-zero difference $\|d(u) - d(u')\|_1 \le 4$ for $u \ne u'$.
-   - **Weld to `Qsag.RlweCyclotomicExtraction`**: `polyRqToCyc` identifies `PolyRq1024` with
-     `CycPolyZq 10 12289`; `jointOrSigma_fork_difference_cyclotomic` transports the fork difference
-     (`A * sWit + eWit = (d(u) - d(u')) * Y_b`, wraparound-free since `6140 < 6144`);
-     `ExtractedJointOrWitnessGen.cofactorLift` applies the cyclotomic cofactor step when the two forked
-     challenges share a signed monomial (`A * s2 + e2 = 2 * Y_b`, `‖·‖_∞ ≤ 6287360`), and
-     `tooth_chal20_difference_not_invertible` exhibits two production challenges whose difference is a
-     zero divisor, so no such step exists in general. The response box is the exact half-open
-     `[-3070, 3070)` of the Rust verifier (`polyIntInZkpokBox`).
+2. **Joint Fiat-Shamir 11-Bit Signed-Monomial OR-Sigma (`13×11 = 143`-bit v3 Weld) + Short Isometric Extraction + Unconditional HVZK + FO Check**:
+   - Production v3 11-bit single signed-monomial challenge map $d(u) = \pm X^{k} \in R_q$
+     (`chal11ToSignedMonomial`, `polyIntFromChal11`, `polyRqFromChal11`, matching `poly_from_chal11` in
+     `preprocessing.rs:804-815`) with proved injectivity (`polyRqFromChal11_injective`),
+     $\|d(u)\|_\infty = 1$, $\|d(u)\|_1 = 1$, negacyclic $\ell_\infty$ isometry
+     (`polyIntInfNorm_mul_chal11_eq`), and **universal** pairwise difference invertibility
+     (`chal11_diff_nonzero_short_and_invertible`: $\|d(u) - d(u')\|_1 \le 2$ and $d(u) - d(u') \in R_{12289}^\times$
+     for **100%** of distinct 11-bit challenges, contrasted with legacy 20-bit two-monomial zero divisors in
+     `tooth_chal20_difference_not_invertible`).
+   - **Short Isometric Witness Weld (`H2`)**: `ExtractedJointOrWitnessGen.toShortMonomialWitness` applies
+     $( \pm X^k )^{-1}$ to $(\Delta z_s, \Delta z_e)$ for **every** forked transcript pair (zero failure branch!),
+     producing $(s_{\mathrm{iso}}, e_{\mathrm{iso}})$ with $\|s_{\mathrm{iso}}\|_\infty, \|e_{\mathrm{iso}}\|_\infty \le 6140 < 6144 = \lfloor 12289/2 \rfloor$
+     (strictly wraparound-free!), invertible relaxation $r_{\mathrm{rel}} = 1 - (\pm X^k)^{-1}(\pm X^{k'})$
+     ($\|r_{\mathrm{rel}}\|_1 \le 2$), and exact Search-RLWE recovery OR Short-Ring-SIS dichotomy
+     (`jointOrSigma_recovers_secret_or_breaks_short_sis`, $\|s_{\mathrm{sis}}\|_\infty \le 6142 < 6144$ for ternary secrets).
    - Domain-separated Fiat-Shamir challenge derivation (`hashRlweZkpokJointChallenges`) via `cSHAKE256`
-     (`"QSAG.OT.RLWE.ZKPOK/v2"`), active commitment recomputation and statement framing checks in
-     `verifyJointOrSigma` (`rlweZkpokReps = 13`, `13 × 20 = 260`-bit, $\ge 2^{130}$ Grover QROM grinding),
-     masked honest prover `buildHonestJointOrTranscript`, constructive `0 Classical.choice` 2-Special
-     Soundness Relaxed Knowledge Extractor (`jointOrSigma_extract_witness`), and `#tooth` witnesses for
-     tampered `pk0`/`comms`/`chal0 ^^^ chal1`/`z = 3070` and independent-challenge grinding.
-   - Discrete-Gaussian rejection-sampling statistical HVZK bound (`discrete_gaussian_rejection_hvzk_bound`)
-     proving exact conditional witness-independence inside the safe box and exact rational tail-clipping
-     distance `tailMass / totalMass` (`13 * tailMass / totalMass` across all `rlweZkpokReps = 13` repetitions), plus `#tooth`.
+     (`"QSAG.OT.RLWE.ZKPOK/v3"`, absorbing `be 4 11` challenge-bit-width framing matching `preprocessing.rs:1087-1088`
+     with proved tuple injectivity `encodeRlweZkpokFsInput_injective`), active commitment recomputation and
+     statement framing checks in `verifyJointOrSigma` (`rlweZkpokReps = 13`, `13 × 11 = 143`-bit classical,
+     paired with `rlweZkpokPq256Reps = 24`, `24 × 11 = 264`-bit `≥ 2^132` Grover QROM), masked honest prover
+     `buildHonestJointOrTranscript`, and `#tooth` witnesses for tampered `pk0`/`comms`/`chal0 ^^^ chal1`/`z = 3070`
+     and independent-challenge grinding.
+   - **Unconditional Bounded-Uniform & Gaussian Shift-Cancellation HVZK (`H3`)**:
+     `bounded_uniform_rejection_hvzk_exact` proves unconditionally (without assuming `safe_box_cancel`)
+     that uniform proposal in $[-B, B]$ shifted by secret $v$ (`|v| ≤ β`) and accepted on `[-(B - β), B - β]`
+     has exact point preimage count `1` inside the safe box and `0` outside (`0` conditional TV distance
+     and exact acceptance rate `(2(B - β) + 1) / (2B + 1)`), discharging `GaussianRejWitnessInstance`
+     constructively (`BoundedUniformRejParams.toGaussianRejInstance`), paired with exact integer Gaussian
+     quadratic-exponent cancellation `(z - d)^2 + (2 z d - d^2) = z^2` (`gaussian_log_ratio_shift_cancel`).
    - Active Fujisaki-Okamoto (`FO`) re-encryption check `PartyMachine` (`rlweFoReceiverMachine`) proving
      malicious-sender ciphertext canonicality (`fo_reencryption_soundness`), a public accept set with no
      key-dependent abort (`fo_accept_iff_canonical`, `fo_accept_key_independent`), the exact one-bit
@@ -56,14 +64,22 @@ Complete `0 Classical.choice` formalization of the active-secure lattice/OT/PCG 
 -/
 
 public import Qsag.Constructive
+import all Qsag.Constructive
 public import Qsag.Goldilocks
+import all Qsag.Goldilocks
 public import Qsag.BinaryTower
+import all Qsag.BinaryTower
 public import Qsag.UcGames
+import all Qsag.UcGames
 public import Qsag.SimulationSpine
+import all Qsag.SimulationSpine
+import all Qsag.Keccak
+import all Qsag.Poseidon2
 public import Qsag.RlweCyclotomicExtraction
 import all Qsag.RlweCyclotomicExtraction
 public import Qsag.Preprocessing
 import all Qsag.Preprocessing
+import Qsag.Tactic.AssuranceKit
 
 public section
 namespace Qsag

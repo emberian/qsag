@@ -2444,7 +2444,9 @@ def demoForgedZeroSacrificeOpening : SharedSpdzSacrificeOpening :=
     Atomic MAC-rejection refutation witness for `verifySharedSpdzSacrifice`. -/
 theorem tooth_shared_spdz_forged_zero_rejected :
     verifySharedSpdzSacrifice demoForgedZeroSacrificeOpening ≠ true := by
-  rw [tooth_shared_spdz_sacrifice_rejects_corrupted_triple.2.2]
+  have hFalse : verifySharedSpdzSacrifice demoForgedZeroSacrificeOpening = false :=
+    tooth_shared_spdz_sacrifice_rejects_corrupted_triple.2.2
+  rw [hFalse]
   decide
 
 /-- **`#tooth` Rank-Deficient Zero-Row Extractor Collides (`tooth_zero_row_extractor_collides_pair`)**:
