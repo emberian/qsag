@@ -13,7 +13,7 @@ use qsag_asm::{
     transpose64x256_with_backend,
 };
 
-const MAX_PENDING_BITS: usize = 65_536;
+const MAX_PENDING_BITS: usize = 32_768;
 const D0_BITS: usize = 16;
 const SUPER_BLOCKS: usize = 128 / D0_BITS;
 const D0_CHUNKS: usize = D0_BITS / 16;
@@ -35,7 +35,7 @@ const BIT_CHECK_DEGREE: usize =
 /// lane products, and 2 for the base sacrifice.
 const FIELD_CHECK_NUMERATOR: usize = 1 + 2 * (MAX_PENDING_FIELD_WORDS * 64).ilog2() as usize + 2;
 const _: () = assert!(
-    BIT_CHECK_DEGREE == 56
+    BIT_CHECK_DEGREE == 54
         && FIELD_CHECK_NUMERATOR == 35
         && (MAX_PENDING_BITS / D0_BITS).is_power_of_two()
         && (MAX_PENDING_FIELD_WORDS * 64).is_power_of_two()
@@ -56,6 +56,9 @@ impl core::ops::BitXor for Bit {
 impl Wipe for Bit {
     fn wipe(&mut self) {
         ct_zeroize_u64s(&mut self.0);
+    }
+    fn wipe_slice(values: &mut [Self]) {
+        qsag_asm::volatile_fill(values, Self::default());
     }
 }
 pub(crate) type Word = SecretVec<Bit>;
@@ -695,9 +698,7 @@ fn transpose_pair_lanes_to_bs128(
 
 #[inline]
 fn zeroize_gf128_slice(slice: &mut [Gf128]) {
-    for item in slice {
-        ct_zeroize_u64s(item);
-    }
+    ct_zeroize_u64s(slice.as_flattened_mut());
 }
 
 /// Set `v` to `len` words without ever leaving secret words in freed or
@@ -761,6 +762,8 @@ struct BitCheckScratch {
     a_bs: [[Vec<Bs256>; 2]; 2],
     b_bs: [[Vec<Bs256>; 2]; 2],
     hwm_bs: usize,
+    native_a: [[SecretVec<u128>; 2]; 2],
+    native_b: [[SecretVec<u128>; 2]; 2],
     tabs8: Box<[[BitPlane256; 256]; 2]>,
     tabs4: Box<[[BitPlane256; 16]; 4]>,
     quad_tmp: Box<[Gf128Lanes; 4]>,
@@ -786,6 +789,8 @@ impl BitCheckScratch {
             a_bs: [[Vec::new(), Vec::new()], [Vec::new(), Vec::new()]],
             b_bs: [[Vec::new(), Vec::new()], [Vec::new(), Vec::new()]],
             hwm_bs: 0,
+            native_a: core::array::from_fn(|_| core::array::from_fn(|_| SecretVec::new())),
+            native_b: core::array::from_fn(|_| core::array::from_fn(|_| SecretVec::new())),
             tabs8: Box::new([[[0u64; 4]; 256]; 2]),
             tabs4: Box::new([[[0u64; 4]; 16]; 4]),
             quad_tmp: Box::new([z_lanes; 4]),
@@ -825,6 +830,9 @@ impl BitCheckScratch {
     }
 
     fn wipe_all(&mut self) {
+        for native in self.native_a.iter_mut().chain(&mut self.native_b).flatten() {
+            native.clear();
+        }
         for plane in self.planes.iter_mut() {
             ct_zeroize_u64s(plane);
         }
@@ -1530,11 +1538,11 @@ impl<T: Transport> Engine<T> {
         [s0, s1]
     }
 
-    /// Batch-verify up to `MAX_PENDING_BITS` (`65,536`) 64-lane Boolean `AND` triples over
+    /// Batch-verify up to `MAX_PENDING_BITS` (`32,768`) 64-lane Boolean `AND` triples over
     /// `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` via a uniform `GF(2^128)` super-block
     /// combiner + two independent lockstep Arity-2 BBCGGI19 inner-product instances +
     /// randomized base-case sacrifice. Per-flush false acceptance is
-    /// `< 2^-128 + (BIT_CHECK_DEGREE / (2^128 - 1))^2 = 2^-128 + (56 / (2^128 - 1))^2 < 2^-127.99`.
+    /// `< 2^-128 + (BIT_CHECK_DEGREE / (2^128 - 1))^2 = 2^-128 + (54 / (2^128 - 1))^2 < 2^-127.99`.
     fn verify_pending_bits_slice(&mut self, triples_raw: &[u64]) -> Result<(), Error> {
         debug_assert_eq!(triples_raw.len() % 6, 0);
         let n = triples_raw.len() / 6;
@@ -1781,9 +1789,12 @@ impl<T: Transport> Engine<T> {
         // Padding to a power of two adds only zero inner-product terms and keeps
         // the same ceil(log2(m)) degree budget. Owned buffers wipe all old tails.
         let stride = num_quads.next_power_of_two() * 4;
-        let mut a_native: [[SecretVec<u128>; 2]; 2] =
-            core::array::from_fn(|_| core::array::from_fn(|_| vec![0; stride * 64].into()));
-        let mut b_native = a_native.clone();
+        let mut a_native = core::mem::take(&mut scratch.native_a);
+        let mut b_native = core::mem::take(&mut scratch.native_b);
+        for native in a_native.iter_mut().chain(&mut b_native).flatten() {
+            native.resize(stride * 64, 0);
+            native.fill(0);
+        }
         for t in 0..2 {
             for side in 0..2 {
                 let sp = &mut *scratch;
@@ -1804,12 +1815,9 @@ impl<T: Transport> Engine<T> {
                             }
                         }
                     }
-                    zeroize_bs256_vec_hwm(quads, sp.hwm_bs);
-                    *quads = Vec::new();
                 }
             }
         }
-        scratch.hwm_bs = 0;
         let mut b_sum: SecretVec<u128> = vec![0; stride / 2].into();
         let mut current = stride;
         while current > 4 {
@@ -1900,7 +1908,9 @@ impl<T: Transport> Engine<T> {
                 }
             }
         }
-        drop((a_native, b_native, b_sum));
+        scratch.native_a = a_native;
+        scratch.native_b = b_native;
+        drop(b_sum);
 
         if m > 1 {
             let mut len4 = 4usize;
@@ -2094,18 +2104,31 @@ impl<T: Transport> Engine<T> {
     }
 
     fn flush_pending_bits(&mut self) -> Result<(), Error> {
+        self.flush_bit_chunks(false)
+    }
+
+    // Automatic flushing checks only complete chunks. Openings and conversions
+    // always call `flush_pending_bits`, which also checks the retained tail.
+    fn flush_bit_chunks(&mut self, retain_tail: bool) -> Result<(), Error> {
         if self.pending_bits_raw.is_empty() {
             return Ok(());
         }
         let mut batch = core::mem::take(&mut self.pending_bits_raw);
-        for chunk in batch.chunks(MAX_PENDING_BITS * 6) {
+        let checked = if retain_tail {
+            batch.len() / (MAX_PENDING_BITS * 6) * (MAX_PENDING_BITS * 6)
+        } else {
+            batch.len()
+        };
+        for chunk in batch[..checked].chunks(MAX_PENDING_BITS * 6) {
             if let Err(err) = self.verify_pending_bits_slice(chunk) {
                 ct_zeroize_u64s(&mut batch);
                 return Err(err);
             }
         }
-        ct_zeroize_u64s(&mut batch);
-        batch.clear();
+        let remaining = batch.len() - checked;
+        batch.copy_within(checked.., 0);
+        ct_zeroize_u64s(&mut batch[remaining..]);
+        batch.truncate(remaining);
         self.pending_bits_raw = batch;
         Ok(())
     }
@@ -2737,7 +2760,7 @@ impl<T: Transport> Engine<T> {
                 .extend_from_slice(&[a.0[0], a.0[1], b.0[0], b.0[1], z.0[0], z.0[1]]);
         }
         if self.pending_bits_raw.len() >= MAX_PENDING_BITS * 6 {
-            self.flush_pending_bits()?;
+            self.flush_bit_chunks(true)?;
         }
         Ok(())
     }
@@ -3901,7 +3924,7 @@ pub(crate) mod tests {
         }
     }
     impl Transport for Network {
-        // Two test ceremonies may run together, each with three custodians.
+        // Large test hosts overlap ceremonies, each with three custodians.
         fn max_parallel_batches(&self) -> usize {
             if std::env::var("RUST_TEST_THREADS").as_deref() == Ok("1")
                 || std::thread::available_parallelism().is_ok_and(|n| n.get() >= 24)
@@ -4379,7 +4402,9 @@ pub(crate) mod tests {
                 let y = e.share(&ys).unwrap();
                 let pairs: Vec<_> = x.into_iter().zip(y).collect();
                 let z = e.and(&pairs).unwrap();
+                assert_eq!(e.pending_bits_raw.len(), (len % MAX_PENDING_BITS) * 6);
                 let opened = e.open(&z).unwrap();
+                assert!(e.pending_bits_raw.is_empty());
                 for (i, got) in opened.into_iter().enumerate() {
                     let mut clear_x = 0;
                     let mut clear_y = 0;

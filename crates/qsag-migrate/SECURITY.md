@@ -194,7 +194,7 @@ is transmitted:
    transcript agreement and commitment openings in constant time, and derives
    public coins via `QSAG.OUTER.COIN.DERIVE.V1`. No single rushing custodian can
    bias challenges after sending multiplication shares.
-2. **64-lane Boolean `AND` verification (`< 2^-127.99` per flush):** Up to `65,536`
+2. **64-lane Boolean `AND` verification (`< 2^-127.99` per flush):** Up to `32,768`
    bitsliced 64-lane `AND` triples per flush are embedded into
    `GF(2^128) = GF(2)[x]/(x^128 + x^7 + x^2 + x + 1)` (`16`-gate blocks, `128`
    gates per super-block via constant-time butterfly transpose and
@@ -202,15 +202,15 @@ is transmitted:
    combiner, packed `64` gates per `Bs256` quad) and checked by **two independent
    lockstep** Arity-2 BBCGGI19 inner-product instances plus PRSS-masked non-zero
    base-case sacrifice (`r_b in GF(2^128)^*`). Per-flush false-acceptance
-   probability is `< 2^-128 + (56 / (2^128 - 1))^2 < 2^-127.99`: `2^-128` for
-   the super-block combiner, and `56 / (2^128 - 1)` for each of the two
-   instances. The degree budget is `30 + 2*12 + 2 = 56`: the initial polynomial,
-   twelve binary folds over at most `4,096` blocks, and base sacrifice
+   probability is `< 2^-128 + (54 / (2^128 - 1))^2 < 2^-127.99`: `2^-128` for
+   the super-block combiner, and `54 / (2^128 - 1)` for each of the two
+   instances. The degree budget is `30 + 2*11 + 2 = 54`: the initial polynomial,
+   eleven binary folds over at most `2,048` blocks, and base sacrifice
    (`BIT_CHECK_DEGREE`, asserted at compile time).
    Byte tables contain shares but are indexed only by public challenge masks;
    their storage is wiped with the rest of the verification scratch.
 3. **Prime-field multiplication verification (`< 2^-186` per flush):** Up to
-   `1,024` field words (`65,536 = 2^16` lane products) per flush are combined
+   `1,024` field words (`32,768 = 2^16` lane products) per flush are combined
    with independent uniform challenges and reduced by an Arity-2 logarithmic
    BBCGGI19 inner product plus a PRSS-masked base-case sacrifice with a non-zero
    challenge. The error numerator is `1 + 2*16 + 2 = 35`: the random linear
@@ -377,6 +377,6 @@ projections. After projection, Boolean-check vectors are transposed once into
 field limbs and kept in that representation throughout binary folding. Batched
 hardware field scale-XOR replaces repeated public-matrix evaluation and bit
 transposes. The two independent instances, challenge domains, sacrifice, and pre-open
-verification barrier are retained. Sixteen-gate initial blocks and 65,536-gate
-flushes reduce the degree bound to 56 and bound per-engine scratch memory. Limb storage retains the same
-high-water-mark wiping; conversion scratch is owned and wiped on drop.
+verification barrier are retained. Sixteen-gate initial blocks and 32,768-gate
+flushes reduce the degree bound to 54 and bound per-engine scratch memory. Projection scratch retains high-water-mark wiping; contiguous limb buffers
+are reused across flushes and owned by the same wipe-on-drop engine scratch.
