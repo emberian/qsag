@@ -949,9 +949,25 @@ pub fn goldilocks_ntt_with_receipt<B: AcceleratorBackend>(
     inverse: bool,
     transcript_anchor: [u8; 32],
 ) -> Result<ExecutionReceipt, AccelError> {
+    #[cfg(feature = "std")]
+    let start = std::time::Instant::now();
     let input_digest = goldilocks_ntt_input_digest(buf, twiddles);
+    #[cfg(feature = "std")]
+    let input_elapsed = start.elapsed();
     backend.goldilocks_ntt_inplace(buf, twiddles, inverse)?;
+    #[cfg(feature = "std")]
+    let kernel_elapsed = start.elapsed() - input_elapsed;
     let output_digest = goldilocks_ntt_output_digest(buf);
+    #[cfg(feature = "std")]
+    if std::env::var_os("QSAG_PROFILE").is_some() {
+        std::eprintln!(
+            "qsag_ntt n={} input_digest={:.3} kernel={:.3} output_digest={:.3} ms",
+            buf.len(),
+            input_elapsed.as_secs_f64() * 1000.0,
+            kernel_elapsed.as_secs_f64() * 1000.0,
+            (start.elapsed() - input_elapsed - kernel_elapsed).as_secs_f64() * 1000.0
+        );
+    }
     let pin = backend.kernel_pin(KernelSlot::GoldilocksNtt);
     let desc = BatchJobDescriptor::GoldilocksNtt {
         length: buf.len(),

@@ -2624,3 +2624,11 @@ mod tests {
         bench_row(AggSigProfile::CorduroyPoseidon2, 32, None, None);
     }
 }
+
+mod profile;
+
+#[cfg(feature = "vulkan")]
+mod acceleration;
+
+#[cfg(feature = "vulkan")]
+pub use acceleration::vulkan_execution_counts;
